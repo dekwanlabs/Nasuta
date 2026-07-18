@@ -1,0 +1,635 @@
+package codegraph
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"unicode"
+
+	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/astris/platform"
+
+	_ "modernc.org/sqlite"
+)
+
+// DB wraps the codegraph SQLite database for function-level call chain queries.
+type DB struct {
+	mu     sync.RWMutex
+	db     *sql.DB
+	dbPath string
+}
+
+// Node is a single symbol in the codegraph.
+type Node struct {
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Kind          string  `json:"kind"`
+	QualifiedName string  `json:"qualifiedName"`
+	FilePath      string  `json:"filePath"`
+	Language      string  `json:"language"`
+	StartLine     int     `json:"startLine"`
+	EndLine       int     `json:"endLine"`
+	Signature     string  `json:"signature,omitempty"`
+	Confidence    float64 `json:"confidence,omitempty"` // call-edge parse confidence from codegraph metadata
+}
+
+// Edge is a relationship between two nodes.
+type Edge struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Kind   string `json:"kind"`
+	Line   int    `json:"line,omitempty"`
+}
+
+// CallChain is the result of a call chain query.
+type CallChain struct {
+	Node    Node   `json:"node"`
+	Callers []Node `json:"callers"`
+	Callees []Node `json:"callees"`
+}
+
+// SymbolQuery is one bounded full-text symbol lookup.
+type SymbolQuery struct {
+	Terms        []string
+	Kinds        []string
+	PathPrefixes []string
+	Limit        int
+}
+
+// Open opens the codegraph SQLite database for read-only use.
+// It returns nil with no error when the database file does not exist.
+// Callers can therefore degrade gracefully.
+func Open(workspaceRoot string) (*DB, error) {
+	dbPath := filepath.Join(workspaceRoot, ".codegraph", "codegraph.db")
+	d, err := openDatabase(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, nil
+	}
+	return &DB{db: d, dbPath: dbPath}, nil
+}
+
+func openDatabase(dbPath string) (*sql.DB, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("codegraph: stat %s: %w", dbPath, err)
+	}
+	d, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("codegraph: open %s: %w", dbPath, err)
+	}
+	d.SetMaxOpenConns(4)
+	if !schemaOK(d) {
+		_ = d.Close()
+		return nil, nil // file exists but tables missing — treat as not indexed
+	}
+	if err := validateNodePaths(d); err != nil {
+		_ = d.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+// schemaOK reports whether the expected tables exist, so callers don't get
+// "no such table" errors on a file that exists but was never initialised.
+const schemaCheckQuery = `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('nodes','edges')`
+
+func schemaOK(d *sql.DB) bool {
+	var n int
+	if err := d.QueryRow(schemaCheckQuery).Scan(&n); err != nil || n != 2 {
+		return false
+	}
+	return true
+}
+
+func validateNodePaths(d *sql.DB) error {
+	var invalid int
+	if err := d.QueryRow(`SELECT COUNT(*) FROM nodes WHERE file_path NOT LIKE 'repos/%'`).Scan(&invalid); err != nil {
+		return fmt.Errorf("codegraph: validate node paths: %w", err)
+	}
+	if invalid > 0 {
+		return fmt.Errorf("codegraph: index contains %d nodes outside canonical repos/ paths; run a full rebuild", invalid)
+	}
+	return nil
+}
+
+// Refresh switches future queries to the database produced by a full rebuild.
+func (d *DB) Refresh() error {
+	if d == nil {
+		return fmt.Errorf("codegraph: refresh unavailable database")
+	}
+	next, err := openDatabase(d.dbPath)
+	if err != nil {
+		return err
+	}
+	if next == nil {
+		return fmt.Errorf("codegraph: refresh %s: database unavailable", d.dbPath)
+	}
+
+	d.mu.Lock()
+	previous := d.db
+	d.db = next
+	d.mu.Unlock()
+
+	if previous != nil {
+		if err := previous.Close(); err != nil {
+			log.Warnf("[codegraph] close replaced database: %v", err)
+		}
+	}
+	return nil
+}
+
+// Close closes the database.
+func (d *DB) Close() error {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	current := d.db
+	d.db = nil
+	d.mu.Unlock()
+	if current == nil {
+		return nil
+	}
+	return current.Close()
+}
+
+func (d *DB) query(query string, args ...any) (*sql.Rows, error) {
+	if d == nil {
+		return nil, sql.ErrConnDone
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.db == nil {
+		return nil, sql.ErrConnDone
+	}
+	return d.db.Query(query, args...)
+}
+
+func (d *DB) scanRow(query string, args []any, dest ...any) error {
+	if d == nil {
+		return sql.ErrConnDone
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.db == nil {
+		return sql.ErrConnDone
+	}
+	return d.db.QueryRow(query, args...).Scan(dest...)
+}
+
+// GetCallers returns the callers (nodes that call the given node).
+func (d *DB) GetCallers(nodeID string, limit int) ([]Node, error) {
+	nodes, err := d.queryRelated(nodeID, "calls", "target", "source", limit)
+	log.Infof("[codegraph] GetCallers: node=%s found=%d err=%v", platform.TruncateForLog(nodeID, 8), len(nodes), err)
+	return nodes, err
+}
+
+// GetCallees returns the callees (nodes called by the given node).
+func (d *DB) GetCallees(nodeID string, limit int) ([]Node, error) {
+	nodes, err := d.queryRelated(nodeID, "calls", "source", "target", limit)
+	log.Infof("[codegraph] GetCallees: node=%s found=%d err=%v", platform.TruncateForLog(nodeID, 8), len(nodes), err)
+	return nodes, err
+}
+
+// ChainNode is a node reached during a multi-hop BFS, with its hop distance
+// from the root and the ID of the node it was reached from.
+type ChainNode struct {
+	Node
+	Depth  int
+	FromID string
+}
+
+// GetRelatedChain walks the call graph up to `depth` hops via BFS, deduped
+// and cycle-safe. direction is "callees" or "callers".
+func (d *DB) GetRelatedChain(nodeID, direction string, depth, limit int) ([]ChainNode, error) {
+	if depth <= 0 {
+		depth = 1
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	var fromCol, toCol string
+	if direction == "callees" {
+		fromCol, toCol = "source", "target"
+	} else {
+		fromCol, toCol = "target", "source"
+	}
+	const fanOut = 4
+	visited := map[string]int{nodeID: 0}
+	var out []ChainNode
+	frontier := []string{nodeID}
+	for hop := 1; hop <= depth && len(frontier) > 0; hop++ {
+		var nextFrontier []string
+		for _, id := range frontier {
+			if len(out) >= limit {
+				break
+			}
+			adj, err := d.queryRelated(id, "calls", fromCol, toCol, fanOut)
+			if err != nil {
+				continue
+			}
+			for _, n := range adj {
+				if _, seen := visited[n.ID]; seen {
+					continue
+				}
+				visited[n.ID] = hop
+				out = append(out, ChainNode{Node: n, Depth: hop, FromID: id})
+				nextFrontier = append(nextFrontier, n.ID)
+				if len(out) >= limit {
+					break
+				}
+			}
+		}
+		frontier = nextFrontier
+	}
+	log.Infof("[codegraph] GetRelatedChain: node=%s dir=%s depth=%d found=%d", platform.TruncateForLog(nodeID, 8), direction, depth, len(out))
+	return out, nil
+}
+
+func (d *DB) queryRelated(nodeID, edgeKind, fromCol, toCol string, limit int) ([]Node, error) {
+	// Also extract edge.metadata confidence from codegraph.
+	query := fmt.Sprintf(`
+		SELECT DISTINCT n.id, n.name, n.kind, n.qualified_name, n.file_path, n.language, n.start_line, n.end_line, COALESCE(n.signature,''), COALESCE(e.metadata,'')
+		FROM edges e JOIN nodes n ON n.id = e.%s
+		WHERE e.kind = ? AND e.%s = ?
+		LIMIT ?`, toCol, fromCol)
+	rows, err := d.query(query, edgeKind, nodeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var nodes []Node
+	for rows.Next() {
+		n := Node{}
+		var metadata string
+		if err := rows.Scan(&n.ID, &n.Name, &n.Kind, &n.QualifiedName, &n.FilePath, &n.Language, &n.StartLine, &n.EndLine, &n.Signature, &metadata); err != nil {
+			return nil, err
+		}
+		n.Confidence = parseConfidence(metadata)
+		nodes = append(nodes, n)
+	}
+	return nodes, nil
+}
+
+// parseConfidence extracts the "confidence" float from a codegraph edge metadata JSON blob.
+func parseConfidence(metadata string) float64 {
+	if metadata == "" {
+		return 0
+	}
+	var m struct {
+		Confidence float64 `json:"confidence"`
+	}
+	if err := json.Unmarshal([]byte(metadata), &m); err != nil {
+		return 0
+	}
+	return m.Confidence
+}
+
+// FindNodeByFile finds a symbol by file path and line number.
+// It prefers callable nodes over broader class or file matches.
+// Exact file_path match is fast; non-canonical paths fall back to a slower suffix LIKE.
+func (d *DB) FindNodeByFile(filePath string, line int) (*Node, error) {
+	log.Infof("[codegraph] FindNodeByFile: file=%s line=%d", filePath, line)
+	if n, err := d.findNodeByFile(filePath, line, "file_path = ?", filePath); err == nil {
+		log.Infof("[codegraph] FindNodeByFile: found kind=%s name=%s id=%s (exact)", n.Kind, n.Name, n.ID)
+		return n, nil
+	} else if err != sql.ErrNoRows {
+		return nil, err
+	}
+	n, err := d.findNodeByFile(filePath, line, "file_path LIKE ?", "%"+filePath)
+	if err != nil {
+		log.Infof("[codegraph] FindNodeByFile: not found: %v", err)
+		return nil, err
+	}
+	log.Infof("[codegraph] FindNodeByFile: found kind=%s name=%s id=%s (suffix)", n.Kind, n.Name, n.ID)
+	return n, nil
+}
+
+// findNodeByFile runs the ranked node lookup with the given file_path predicate.
+func (d *DB) findNodeByFile(filePath string, line int, pathPred, pathArg string) (*Node, error) {
+	n := &Node{}
+	err := d.scanRow(`
+		SELECT id, name, kind, qualified_name, file_path, language, start_line, end_line, COALESCE(signature,'')
+		FROM nodes WHERE `+pathPred+` AND start_line <= ? AND end_line >= ?
+		ORDER BY
+			CASE kind WHEN 'method' THEN 0 WHEN 'function' THEN 0 WHEN 'route' THEN 1 ELSE 2 END,
+			(end_line - start_line) ASC
+		LIMIT 1`,
+		[]any{pathArg, line, line},
+		&n.ID, &n.Name, &n.Kind, &n.QualifiedName, &n.FilePath, &n.Language, &n.StartLine, &n.EndLine, &n.Signature)
+	if err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+// FindFilesByName returns file paths whose base name matches name (LIKE match).
+// Used to resolve short LLM citations (e.g. "CustomerEventCollector.java:55")
+// to a full workspace path.
+func (d *DB) FindFilesByName(name string, limit int) ([]string, error) {
+	rows, err := d.query(
+		`SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? LIMIT ?`,
+		"%"+name, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var files []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err == nil {
+			files = append(files, p)
+		}
+	}
+	return files, rows.Err()
+}
+
+// GetCallChainByFile returns the call chain for a node at a specific file location.
+func (d *DB) GetCallChainByFile(filePath string, line int, limit int) (*CallChain, error) {
+	node, err := d.FindNodeByFile(filePath, line)
+	if err != nil {
+		return nil, fmt.Errorf("codegraph: no node at %s:%d: %w", filePath, line, err)
+	}
+	callers, _ := d.GetCallers(node.ID, limit)
+	callees, _ := d.GetCallees(node.ID, limit)
+	return &CallChain{Node: *node, Callers: callers, Callees: callees}, nil
+}
+
+// RouteAt finds the HTTP route declared at a file+line (e.g. "GET" "/room/device/list").
+func (d *DB) RouteAt(filePath string, line int) (httpMethod, path string, ok bool) {
+	var name string
+	err := d.scanRow(`
+		SELECT name FROM nodes
+		WHERE kind='route' AND file_path LIKE ? AND start_line = ?
+		LIMIT 1`, []any{"%" + filePath, line}, &name)
+	if err != nil {
+		return "", "", false
+	}
+	// name format: "GET /room/device/list"
+	parts := strings.SplitN(name, " ", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// ResolveDownstreamMethod finds the implementing controller method in the target
+// service for a Feign call (matched by HTTP method + path suffix).
+func (d *DB) ResolveDownstreamMethod(targetService, httpMethod, path string) (*Node, error) {
+	var file string
+	var line int
+	// Match target service routes: same HTTP method, path suffix matches
+	// the Feign path (handles controller context prefixes). Exact match preferred, then shortest path.
+	err := d.scanRow(`
+		SELECT file_path, start_line FROM nodes
+		WHERE kind='route' AND file_path LIKE ?
+		  AND (name = ? OR name LIKE ?)
+		ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, length(name) ASC
+		LIMIT 1`,
+		[]any{
+			"%" + targetService + "%",
+			httpMethod + " " + path,
+			httpMethod + " %" + path,
+			httpMethod + " " + path,
+		},
+		&file, &line)
+	if err != nil {
+		return nil, err
+	}
+	// Resolve the route's containing controller method node.
+	return d.FindNodeByFile(file, line)
+}
+
+// SearchSymbols bounds FTS work before applying deterministic in-process ranking.
+func (d *DB) SearchSymbols(ctx context.Context, query SymbolQuery) ([]Node, error) {
+	match := symbolMatch(query.Terms)
+	if match == "" {
+		return []Node{}, nil
+	}
+	if query.Limit <= 0 {
+		query.Limit = 10
+	}
+	candidateLimit := min(max(query.Limit*4, 40), 200)
+	var sqlText strings.Builder
+	sqlText.WriteString(`SELECT n.id,n.name,n.kind,n.qualified_name,n.file_path,n.language,n.start_line,n.end_line,COALESCE(n.signature,'')
+FROM nodes_fts JOIN nodes n ON n.rowid=nodes_fts.rowid WHERE nodes_fts MATCH ?`)
+	args := []any{match}
+	if len(query.Kinds) > 0 {
+		sqlText.WriteString(" AND n.kind IN (")
+		sqlText.WriteString(placeholders(len(query.Kinds)))
+		sqlText.WriteByte(')')
+		for _, kind := range query.Kinds {
+			args = append(args, kind)
+		}
+	}
+	if len(query.PathPrefixes) > 0 {
+		sqlText.WriteString(" AND (")
+		for i, prefix := range query.PathPrefixes {
+			if i > 0 {
+				sqlText.WriteString(" OR ")
+			}
+			sqlText.WriteString("n.file_path = ? OR (n.file_path >= ? AND n.file_path < ?)")
+			prefix = strings.Trim(strings.ReplaceAll(prefix, "\\", "/"), "/")
+			args = append(args, prefix, prefix+"/", prefix+"0")
+		}
+		sqlText.WriteByte(')')
+	}
+	sqlText.WriteString(" LIMIT ?")
+	args = append(args, candidateLimit)
+
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.db == nil {
+		return nil, sql.ErrConnDone
+	}
+	rows, err := d.db.QueryContext(ctx, sqlText.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("codegraph search symbols: %w", err)
+	}
+	defer rows.Close()
+	nodes, err := scanNodes(rows)
+	if err != nil {
+		return nil, fmt.Errorf("codegraph scan symbol results: %w", err)
+	}
+	rankSymbols(nodes, query.Terms)
+	if len(nodes) > query.Limit {
+		nodes = nodes[:query.Limit]
+	}
+	return nodes, nil
+}
+
+// FindNodeAt finds the narrowest callable symbol containing an exact location.
+func (d *DB) FindNodeAt(ctx context.Context, filePath string, line int) (*Node, error) {
+	filePath = strings.Trim(strings.ReplaceAll(filePath, "\\", "/"), "/")
+	node := &Node{}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.db == nil {
+		return nil, sql.ErrConnDone
+	}
+	err := d.db.QueryRowContext(ctx, `SELECT id,name,kind,qualified_name,file_path,language,start_line,end_line,COALESCE(signature,'')
+FROM nodes WHERE file_path=? AND start_line<=? AND end_line>=?
+ORDER BY CASE kind WHEN 'method' THEN 0 WHEN 'function' THEN 0 WHEN 'route' THEN 1 ELSE 2 END,
+(end_line-start_line) ASC LIMIT 1`, filePath, line, line).Scan(
+		&node.ID, &node.Name, &node.Kind, &node.QualifiedName, &node.FilePath,
+		&node.Language, &node.StartLine, &node.EndLine, &node.Signature)
+	if err != nil {
+		return nil, err
+	}
+	return node, nil
+}
+
+func symbolMatch(terms []string) string {
+	seen := make(map[string]struct{}, len(terms))
+	parts := make([]string, 0, len(terms))
+	for _, term := range terms {
+		for _, token := range strings.FieldsFunc(term, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+		}) {
+			token = strings.ToLower(token)
+			if len(token) < 2 {
+				continue
+			}
+			if _, ok := seen[token]; ok {
+				continue
+			}
+			seen[token] = struct{}{}
+			parts = append(parts, `"`+strings.ReplaceAll(token, `"`, `""`)+`"*`)
+		}
+	}
+	return strings.Join(parts, " OR ")
+}
+
+func placeholders(count int) string {
+	return strings.TrimRight(strings.Repeat("?,", count), ",")
+}
+
+func rankSymbols(nodes []Node, terms []string) {
+	tokens := symbolTokens(terms)
+	sort.SliceStable(nodes, func(i, j int) bool {
+		left := symbolRank(nodes[i], tokens)
+		right := symbolRank(nodes[j], tokens)
+		if left != right {
+			return left > right
+		}
+		if nodes[i].FilePath != nodes[j].FilePath {
+			return nodes[i].FilePath < nodes[j].FilePath
+		}
+		if nodes[i].StartLine != nodes[j].StartLine {
+			return nodes[i].StartLine < nodes[j].StartLine
+		}
+		return nodes[i].ID < nodes[j].ID
+	})
+}
+
+func symbolTokens(terms []string) []string {
+	seen := make(map[string]struct{}, len(terms))
+	tokens := make([]string, 0, len(terms))
+	for _, term := range terms {
+		for _, token := range strings.FieldsFunc(term, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+		}) {
+			token = strings.ToLower(token)
+			if len(token) < 2 {
+				continue
+			}
+			if _, ok := seen[token]; ok {
+				continue
+			}
+			seen[token] = struct{}{}
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
+}
+
+func symbolRank(node Node, terms []string) int {
+	name := strings.ToLower(node.Name)
+	qualified := strings.ToLower(node.QualifiedName)
+	score := callableKindRank(node.Kind)
+	for _, term := range terms {
+		switch {
+		case name == term:
+			score += 100
+		case strings.HasPrefix(name, term):
+			score += 60
+		case strings.Contains(name, term):
+			score += 35
+		case strings.Contains(qualified, term):
+			score += 15
+		}
+	}
+	return score
+}
+
+func callableKindRank(kind string) int {
+	switch kind {
+	case "method", "function":
+		return 6
+	case "class", "interface":
+		return 4
+	case "route":
+		return 2
+	default:
+		return 0
+	}
+}
+
+// ListChunkNodes returns method/function nodes with source line ranges for
+// semantic code chunking, ordered by file then start line.
+func (d *DB) ListChunkNodes() ([]Node, error) {
+	rows, err := d.query(`SELECT id, name, kind, qualified_name, file_path, language, start_line, end_line, COALESCE(signature,'')
+		FROM nodes WHERE kind IN ('method','function') AND end_line >= start_line
+		ORDER BY file_path, start_line`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
+func scanNodes(rows *sql.Rows) ([]Node, error) {
+	var nodes []Node
+	for rows.Next() {
+		var n Node
+		if err := rows.Scan(&n.ID, &n.Name, &n.Kind, &n.QualifiedName, &n.FilePath, &n.Language, &n.StartLine, &n.EndLine, &n.Signature); err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes, rows.Err()
+}
+
+// DistinctNodeFilePaths returns all distinct file paths under repos/ in one
+// query, so the caller can bucket them by repo client-side instead of running
+// one count query per repo. Returns nil when the DB is nil.
+func (d *DB) DistinctNodeFilePaths() ([]string, error) {
+	if d == nil {
+		return nil, nil
+	}
+	rows, err := d.query(`SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE 'repos/%'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}

@@ -1,0 +1,356 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/dekwanlabs/astris/config"
+	types "github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/astris/internal/platform/graph"
+	"github.com/dekwanlabs/astris/internal/retrieval"
+	"github.com/dekwanlabs/astris/llm"
+	toolruntime "github.com/dekwanlabs/astris/tool"
+)
+
+func TestOutcomeForRejectsEmptySuccess(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *RunResult
+		runErr error
+		status RunStatus
+		err    error
+	}{
+		{name: "done", result: &RunResult{Answer: "answer", Steps: 1}, status: RunStatusDone},
+		{name: "empty", result: &RunResult{Steps: 1}, status: RunStatusFailed, err: ErrEmptyAnswer},
+		{name: "aborted", result: &RunResult{Aborted: true}, status: RunStatusAborted},
+		{name: "run error", result: &RunResult{}, runErr: errors.New("provider failed"), status: RunStatusFailed},
+		{name: "result error", result: &RunResult{Err: errors.New("truncated")}, status: RunStatusFailed},
+		{name: "nil result", runErr: errors.New("missing"), status: RunStatusFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := outcomeFor(test.result, test.runErr)
+			if outcome.Status != test.status {
+				t.Fatalf("status = %s, want %s", outcome.Status, test.status)
+			}
+			if test.err != nil && !errors.Is(outcome.Err, test.err) {
+				t.Fatalf("error = %v, want %v", outcome.Err, test.err)
+			}
+		})
+	}
+}
+
+func TestRunStoreCompleteTransitionsOnlyActiveRun(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &RunStore{db: db}
+	outcome := RunOutcome{Status: RunStatusDone, StepCount: 2, TokenUsed: 12}
+	mock.ExpectExec("UPDATE agent_runs").
+		WithArgs(RunStatusDone, 2, 12, sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := store.Complete("run", outcome); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunStoreRejectsTerminalOverwrite(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &RunStore{db: db}
+	mock.ExpectExec("UPDATE agent_runs").
+		WithArgs(RunStatusFailed, 0, 0, sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	err = store.Complete("run", RunOutcome{Status: RunStatusFailed})
+	if !errors.Is(err, ErrRunNotActive) {
+		t.Fatalf("Complete error = %v, want ErrRunNotActive", err)
+	}
+}
+
+func TestRunStoreControlTransitionIsConditional(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &RunStore{db: db}
+	mock.ExpectExec("UPDATE agent_runs SET status=\\? WHERE id=\\? AND status=\\?").
+		WithArgs(RunStatusPaused, "run", RunStatusRunning).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := store.TransitionControl("run", RunStatusRunning, RunStatusPaused); err != nil {
+		t.Fatalf("TransitionControl: %v", err)
+	}
+	if err := store.TransitionControl("run", RunStatusDone, RunStatusPaused); err == nil {
+		t.Fatal("invalid terminal transition was accepted")
+	}
+}
+
+func TestRunStoreRecoversInterruptedRuns(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &RunStore{db: db}
+	mock.ExpectExec("UPDATE agent_runs SET status=\\?,ended_at=\\? WHERE status IN \\(\\?,\\?\\)").
+		WithArgs(RunStatusAborted, sqlmock.AnyArg(), RunStatusRunning, RunStatusPaused).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	recovered, err := store.RecoverInterrupted()
+	if err != nil {
+		t.Fatalf("RecoverInterrupted: %v", err)
+	}
+	if recovered != 2 {
+		t.Fatalf("recovered = %d, want 2", recovered)
+	}
+}
+
+type emptyRetrievalTools struct{}
+
+func (emptyRetrievalTools) AllServices(context.Context) ([]types.ServiceRecord, error) {
+	return nil, nil
+}
+func (emptyRetrievalTools) FindServices(context.Context, string, int) (types.SearchResult[types.ServiceRecord], error) {
+	return types.SearchResult[types.ServiceRecord]{}, nil
+}
+func (emptyRetrievalTools) FindCode(context.Context, string, string, int) (types.SearchResult[types.CodeSearchHit], error) {
+	return types.SearchResult[types.CodeSearchHit]{}, nil
+}
+func (emptyRetrievalTools) FindAPIs(context.Context, string, string, int) ([]types.EndpointRecord, error) {
+	return nil, nil
+}
+func (emptyRetrievalTools) FindRunbooks(context.Context, string, int, bool, string) (types.SearchResult[types.RunbookSearchHit], error) {
+	return types.SearchResult[types.RunbookSearchHit]{}, nil
+}
+func (emptyRetrievalTools) TraceDeps(string, string, int) graph.Result { return graph.Result{} }
+func (emptyRetrievalTools) ServiceModules(context.Context, []string) ([]types.ServiceRecord, error) {
+	return nil, nil
+}
+
+func TestRunAgentFinishesHubWhenLLMCallFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 100, server.Client())
+	registry := testRegistry(t)
+	hub := NewRunHub(nil)
+	qa := &QA{
+		llm:   client,
+		agent: NewAgent(client, NewToolExecutor(registry), AgentConfig{MaxSteps: 1, Timeout: time.Second, AnswerReserve: 100 * time.Millisecond, AnswerMaxTokens: 100}, hub, hub),
+		hub:   hub,
+	}
+
+	const runID = "run-llm-failure"
+	ch := hub.Subscribe(runID)
+	if _, err := qa.runAgentWithPlan(context.Background(), "question", ConversationContext{}, 0, nil, nil, "", runID, types.EvidencePlan{Sources: types.AllEvidence}); err != nil {
+		t.Fatalf("runAgentWithPlan: %v", err)
+	}
+
+	select {
+	case event := <-ch:
+		if event.Terminal == nil || event.Terminal.Status != RunStatusFailed {
+			t.Fatalf("first hub event = %+v, want failed terminal", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not emit Done after LLM failure")
+	}
+}
+
+func waitForTerminal(t *testing.T, ch chan SSEEvent) *RunTerminal {
+	t.Helper()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-ch:
+			if event.Terminal != nil {
+				return event.Terminal
+			}
+		case <-timer.C:
+			t.Fatal("run did not emit terminal event")
+		}
+	}
+}
+
+func TestAskAgentDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
+	var routerCalls, agentCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Stream bool  `json:"stream"`
+			Tools  []any `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		if !request.Stream {
+			routerCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99}}"}}]}`))
+			return
+		}
+		agentCalls++
+		if len(request.Tools) != 1 {
+			t.Errorf("direct request exposed %d tools, want 1 registered read tool", len(request.Tools))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"direct answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+	registry := testRegistry(t, testAgentTool("internal", ToolKindRead, noopTool))
+	hub := NewRunHub(nil)
+	qa := &QA{
+		llm: client, fastLLM: client,
+		agent: NewAgent(client, NewToolExecutor(registry), AgentConfig{
+			MaxSteps: 1, Timeout: 2 * time.Second, AnswerReserve: 200 * time.Millisecond, AnswerMaxTokens: 512,
+		}, hub, hub),
+		hub: hub, routerConfidence: 0.9, routerMaxTokens: 512,
+	}
+
+	terminalCh := hub.Subscribe("direct-run")
+	result, err := qa.AskAgent(context.Background(), "What causes a rainbow?", nil, 0, "", "direct-run")
+	if err != nil {
+		t.Fatalf("AskAgent: %v", err)
+	}
+	if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
+		t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
+	}
+	if routerCalls != 1 || agentCalls != 1 {
+		t.Fatalf("routerCalls=%d agentCalls=%d", routerCalls, agentCalls)
+	}
+	if result.Context == nil || result.Context.Text != "" {
+		t.Fatalf("context = %+v, want empty direct context", result.Context)
+	}
+}
+
+func TestAskAgentRouterInvalidOutputFallsBackInternal(t *testing.T) {
+	var routerCalls, agentCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Stream bool  `json:"stream"`
+			Tools  []any `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		if !request.Stream {
+			routerCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"preprocess\":{}}"}}]}`))
+			return
+		}
+		agentCalls++
+		if len(request.Tools) != 1 {
+			t.Errorf("internal fallback exposed %d tools, want 1", len(request.Tools))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"direct answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+	registry := testRegistry(t, testAgentTool("internal", ToolKindRead, noopTool))
+	hub := NewRunHub(nil)
+	qa := &QA{
+		llm: client, fastLLM: client,
+		retriever: retrieval.New(emptyRetrievalTools{}, config.Config{}),
+		agent: NewAgent(client, NewToolExecutor(registry), AgentConfig{
+			MaxSteps: 1, Timeout: 2 * time.Second, AnswerReserve: 200 * time.Millisecond, AnswerMaxTokens: 512,
+		}, hub, hub),
+		hub: hub, routerConfidence: 0.9, routerMaxTokens: 512,
+	}
+
+	terminalCh := hub.Subscribe("invalid-route-run")
+	result, err := qa.AskAgent(context.Background(), "What causes a rainbow?", nil, 0, "", "invalid-route-run")
+	if err != nil {
+		t.Fatalf("AskAgent: %v", err)
+	}
+	if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
+		t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
+	}
+	// One original router call plus one reprompt: the model omitted the route
+	// object, so ChatJSON re-prompts once before giving up and falling back.
+	if routerCalls != 2 || agentCalls != 1 {
+		t.Fatalf("routerCalls=%d agentCalls=%d", routerCalls, agentCalls)
+	}
+	if result.Context == nil {
+		t.Fatal("context is nil")
+	}
+}
+
+func TestCanonicalRetrievalQueryAugmentsWithContextTerms(t *testing.T) {
+	if got := canonicalRetrievalQuery(" current question ", ""); got != "current question" {
+		t.Fatalf("no context terms: got %q", got)
+	}
+	if got := canonicalRetrievalQuery("how does it work", "PaymentGateway"); got != "how does it work PaymentGateway" {
+		t.Fatalf("with context terms: got %q", got)
+	}
+}
+
+func TestMergePreloadedContextDedupesContentAndReferences(t *testing.T) {
+	context := &retrieval.RetrievedContext{
+		Text:       "## Workspace\ncode",
+		References: []retrieval.Reference{{Type: "code", Target: "svc/Foo.go"}},
+	}
+	block := ContextBlock{
+		Title:   "Runtime Evidence",
+		Content: "trace failed",
+		References: []retrieval.Reference{
+			{Type: "code", Target: "svc/Foo.go"},
+			{Type: "trace", Target: "trace-1"},
+		},
+	}
+	mergePreloadedContext(context, []ContextBlock{block, block}, 48000)
+	if strings.Count(context.Text, "trace failed") != 1 {
+		t.Fatalf("preloaded content was not deduped: %q", context.Text)
+	}
+	if len(context.References) != 2 || context.HitCount != 2 {
+		t.Fatalf("references = %#v hitCount=%d", context.References, context.HitCount)
+	}
+}
+
+func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
+	registry := testRegistry(t, Tool{
+		ID:          "prefetch",
+		Description: "runtime evidence",
+		Kind:        ToolKindRead,
+		InputSchema: objectSchema(map[string]any{}, nil),
+		Prefetch:    &toolruntime.PrefetchSpec{Description: "load runtime evidence"},
+		Handler: toolruntime.HandlerFunc(func(context.Context, toolruntime.Arguments) (toolruntime.Result, error) {
+			return toolruntime.Result{
+				Content:    "evidence",
+				References: []toolruntime.Reference{{Type: "trace", Target: "trace-1"}},
+			}, nil
+		}),
+	})
+	qa := &QA{executor: NewToolExecutor(registry)}
+	snapshot := qa.executor.Snapshot(ToolPolicy{AllowRead: true})
+	blocks, err := qa.executePrefetch(context.Background(), snapshot, ToolPlan{
+		Prefetch: []PlannedToolCall{{ToolID: "prefetch", Required: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0].Content != "evidence" || len(blocks[0].References) != 1 {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+}
