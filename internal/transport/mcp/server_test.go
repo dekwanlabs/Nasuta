@@ -1,15 +1,15 @@
-package mcptransport
+package mcp
 
 import (
 	"encoding/json"
 	"testing"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestAttachTracePreservesObjectResult(t *testing.T) {
-	result := attachTrace(`{"matches":[{"path":"a.go"}]}`, []types.EvaluationTrace{{Node: "vector_search", Status: "completed"}})
+	result := attachTrace(`{"matches":[{"path":"a.go"}]}`, []domain.EvaluationTrace{{Node: "vector_search", Status: "completed"}})
 	var object map[string]any
 	if err := json.Unmarshal([]byte(result), &object); err != nil {
 		t.Fatal(err)
@@ -24,7 +24,7 @@ func TestAttachTracePreservesObjectResult(t *testing.T) {
 }
 
 func TestSchemaWithTracePreservesNestedContract(t *testing.T) {
-	raw, err := schemaWithTrace(toolruntime.JSONSchema{
+	raw, err := schemaWithTrace(tool.JSONSchema{
 		"type": "object",
 		"properties": map[string]any{
 			"filters": map[string]any{
@@ -61,7 +61,7 @@ func TestSchemaWithTracePreservesNestedContract(t *testing.T) {
 
 func TestAttachTraceLeavesArrayContractUnchanged(t *testing.T) {
 	result := `[{"path":"a.go"}]`
-	if got := attachTrace(result, []types.EvaluationTrace{{Node: "search"}}); got != result {
+	if got := attachTrace(result, []domain.EvaluationTrace{{Node: "search"}}); got != result {
 		t.Fatalf("array result changed: %s", got)
 	}
 }

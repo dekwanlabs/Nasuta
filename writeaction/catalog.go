@@ -4,37 +4,37 @@ import (
 	"context"
 	"fmt"
 
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 const (
-	proposeBranch toolruntime.ToolID = "propose_branch"
-	proposeCommit toolruntime.ToolID = "propose_commit"
+	proposeBranch tool.ToolID = "propose_branch"
+	proposeCommit tool.ToolID = "propose_commit"
 )
 
 // Proposer persists a request but cannot change the platform-owned catalog.
 type Proposer interface {
-	Propose(context.Context, Proposal) (toolruntime.Result, error)
+	Propose(context.Context, Proposal) (tool.Result, error)
 }
 
 // Proposal is the canonical request emitted by the closed catalog.
 type Proposal struct {
-	ToolID     toolruntime.ToolID
+	ToolID     tool.ToolID
 	IncidentID string
-	Arguments  toolruntime.Arguments
+	Arguments  tool.Arguments
 	Rationale  string
 	Impact     string
 }
 
 // RegisterBuiltins installs the closed set of approval-gated write actions.
-func RegisterBuiltins(registry *toolruntime.Registry, proposer Proposer) error {
+func RegisterBuiltins(registry *tool.Registry, proposer Proposer) error {
 	if registry == nil {
 		return fmt.Errorf("write action registry is required")
 	}
 	if proposer == nil {
 		return fmt.Errorf("write action proposer is required")
 	}
-	return registry.RegisterAll([]toolruntime.Tool{
+	return registry.RegisterAll([]tool.Tool{
 		writeTool(
 			proposeBranch,
 			"Propose creating a fix branch for services affected by an incident. This creates a pending request for human approval and never writes directly.",
@@ -46,7 +46,7 @@ func RegisterBuiltins(registry *toolruntime.Registry, proposer Proposer) error {
 			},
 			[]string{"incident_id"},
 			proposer,
-			func(args toolruntime.Arguments) string { return fmt.Sprintf("assignee=%s", args.String("assignee")) },
+			func(args tool.Arguments) string { return fmt.Sprintf("assignee=%s", args.String("assignee")) },
 		),
 		writeTool(
 			proposeCommit,
@@ -57,7 +57,7 @@ func RegisterBuiltins(registry *toolruntime.Registry, proposer Proposer) error {
 			},
 			[]string{"incident_id"},
 			proposer,
-			func(args toolruntime.Arguments) string {
+			func(args tool.Arguments) string {
 				return fmt.Sprintf("branch_name=%s", args.String("branch_name"))
 			},
 		),
@@ -65,20 +65,20 @@ func RegisterBuiltins(registry *toolruntime.Registry, proposer Proposer) error {
 }
 
 func writeTool(
-	id toolruntime.ToolID,
+	id tool.ToolID,
 	description string,
 	properties map[string]any,
 	required []string,
 	proposer Proposer,
-	impact func(toolruntime.Arguments) string,
-) toolruntime.Tool {
-	return toolruntime.Tool{
-		ID: id, Description: description, Kind: toolruntime.KindWrite,
-		InputSchema: toolruntime.JSONSchema{
+	impact func(tool.Arguments) string,
+) tool.Tool {
+	return tool.Tool{
+		ID: id, Description: description, Kind: tool.KindWrite,
+		InputSchema: tool.JSONSchema{
 			"type": "object", "properties": properties, "required": required,
 		},
 		MCPHidden: true,
-		Handler: toolruntime.HandlerFunc(func(ctx context.Context, args toolruntime.Arguments) (toolruntime.Result, error) {
+		Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
 			incidentID := args.String("incident_id")
 			return proposer.Propose(ctx, Proposal{
 				ToolID: id, IncidentID: incidentID, Arguments: args,

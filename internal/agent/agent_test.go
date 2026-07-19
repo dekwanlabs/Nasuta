@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/retrieval"
-	"github.com/dekwanlabs/astris/llm"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/llm"
 )
 
 func drainRequestBody(r *http.Request) {
@@ -451,7 +451,7 @@ func TestRun_LoopExhaustedFallsThroughToConclusion(t *testing.T) {
 		Timeout: 1200 * time.Millisecond, AnswerReserve: 1000 * time.Millisecond,
 	}, obs, nil)
 
-	res, err := agent.RunWithPlan(t.Context(), "run_reserve", "q", nil, &retrieval.RetrievedContext{}, types.EvidencePlan{Sources: types.AllEvidence}, true)
+	res, err := agent.RunWithPlan(t.Context(), "run_reserve", "q", nil, &retrieval.RetrievedContext{}, domain.EvidencePlan{Sources: domain.AllEvidence}, true)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

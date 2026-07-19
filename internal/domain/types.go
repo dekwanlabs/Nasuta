@@ -1,4 +1,4 @@
-package types
+package domain
 
 // SourceKind marks where a piece of evidence came from.
 type SourceKind string
@@ -94,7 +94,7 @@ type RepositoryRecord struct {
 }
 
 // RunbookRecord is a runbook document (persisted in the platform DocStore/MySQL,
-// body embedded into Qdrant for semantic recall).
+// body embedded into the configured semantic store for recall).
 type RunbookRecord struct {
 	ID         string   `json:"id"`
 	Repo       string   `json:"repo,omitempty"`

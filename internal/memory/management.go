@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 // ListOptions defines one bounded keyset page.
@@ -195,10 +197,10 @@ func (memory *MemoryStore) deleteWhere(ctx context.Context, where string, args .
 }
 
 func (memory *MemoryStore) deleteVectors(ctx context.Context, ids []string) error {
-	if memory.semantic == nil || !memory.semantic.Enabled() || len(ids) == 0 {
+	if memory.semantic == nil || !memory.semantic.Capabilities().Dense || len(ids) == 0 {
 		return nil
 	}
-	if err := memory.semantic.DeletePoints(ctx, ids); err != nil {
+	if err := memory.semantic.Delete(ctx, semantic.DeleteQuery{IDs: ids}); err != nil {
 		return fmt.Errorf("delete %d vector points: %w", len(ids), err)
 	}
 	return nil

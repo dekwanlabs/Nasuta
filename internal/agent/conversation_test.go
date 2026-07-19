@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/retrieval"
-	"github.com/dekwanlabs/astris/llm"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/llm"
 )
 
 func TestBuildAgentMessagesUsesCanonicalSummaryAndRecentTail(t *testing.T) {
@@ -21,7 +21,7 @@ func TestBuildAgentMessagesUsesCanonicalSummaryAndRecentTail(t *testing.T) {
 		},
 	}
 
-	got := agent.buildAgentMessages("current question", conversation, &retrieval.RetrievedContext{}, types.DirectPlan())
+	got := agent.buildAgentMessages("current question", conversation, &retrieval.RetrievedContext{}, domain.DirectPlan())
 	joined := ""
 	for _, message := range got {
 		joined += "\n" + message.Content
@@ -42,7 +42,7 @@ func TestBuildAgentMessagesTreatsReferenceCountAsCandidates(t *testing.T) {
 		"how does the complete flow work",
 		ConversationContext{},
 		&retrieval.RetrievedContext{Text: "seed evidence", HitCount: 22},
-		types.EvidencePlan{Sources: types.Internal},
+		domain.EvidencePlan{Sources: domain.Internal},
 	)
 	joined := ""
 	for _, message := range messages {
@@ -62,7 +62,7 @@ func TestAgentPromptRequiresLookupBeforeEndingIncompleteFlow(t *testing.T) {
 	for _, want := range []string{
 		"Complete requested chains before stopping",
 		"MUST make one targeted tool round",
-		"draw an unverified edge in a diagram",
+		"Keep distinct entry points and execution branches separate",
 		"same natural language as the user's current question",
 	} {
 		if !strings.Contains(agentSystemPrompt, want) {
@@ -75,15 +75,15 @@ func TestAgentPromptRequiresLookupBeforeEndingIncompleteFlow(t *testing.T) {
 }
 
 func TestAgentPromptForPlanUsesCompactWebPromptOnlyForWeb(t *testing.T) {
-	direct := agentPromptForPlan(types.DirectPlan())
+	direct := agentPromptForPlan(domain.DirectPlan())
 	if direct != directAgentSystemPrompt || strings.Contains(direct, "trace_calls") {
 		t.Fatalf("direct prompt was not compact: %q", direct)
 	}
-	web := agentPromptForPlan(types.EvidencePlan{Sources: types.Web})
+	web := agentPromptForPlan(domain.EvidencePlan{Sources: domain.Web})
 	if web != webAgentSystemPrompt || strings.Contains(web, "trace_calls") {
 		t.Fatalf("web prompt was not compact: %q", web)
 	}
-	mixed := agentPromptForPlan(types.EvidencePlan{Sources: types.Web | types.Internal})
+	mixed := agentPromptForPlan(domain.EvidencePlan{Sources: domain.Web | domain.Internal})
 	if mixed != agentSystemPrompt {
 		t.Fatal("mixed plan lost engineering prompt")
 	}

@@ -16,16 +16,18 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/indexing/docgen"
-	"github.com/dekwanlabs/astris/internal/indexing/indexer"
-	"github.com/dekwanlabs/astris/internal/platform/embed"
-	"github.com/dekwanlabs/astris/internal/platform/graph"
-	"github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/internal/retrieval"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/indexing/docgen"
+	"github.com/dekwanlabs/nasuta/internal/indexing/indexer"
+	"github.com/dekwanlabs/nasuta/internal/platform/embed"
+	"github.com/dekwanlabs/nasuta/internal/platform/graph"
+	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 // ToolsSink lets indexing refresh agent-side search helpers after rebuilds.
@@ -39,7 +41,7 @@ type Service struct {
 	Cfg      config.Config
 	Platform *config.PlatformSettings
 	DB       *store.SQLite
-	Semantic store.SemanticStore
+	Semantic semantic.Store
 	Embedder embed.Embedder
 	Graph    *graph.Graph
 	tools    ToolsSink
@@ -72,6 +74,11 @@ func (svc *Service) Close() {
 	if svc.docDB != nil {
 		_ = svc.docDB.Close()
 	}
+	if svc.Semantic != nil {
+		if err := svc.Semantic.Close(); err != nil {
+			log.Infof("[indexing] semantic close: %v", err)
+		}
+	}
 	if svc.DB != nil {
 		if err := svc.DB.Close(); err != nil {
 			log.Infof("[indexing] db close: %v", err)
@@ -85,10 +92,10 @@ func Build(cfg config.Config) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	semantic, err := store.NewSemantic(cfg)
+	semanticBackend, err := semanticstore.New(cfg.Semantic)
 	if err != nil {
-		log.Warnf("[build] semantic store disabled: %v", err)
-		semantic = store.NoopSemantic{}
+		db.Close()
+		return nil, fmt.Errorf("build semantic store: %w", err)
 	}
 	embedder := embed.New(cfg)
 	g := graph.New()
@@ -98,7 +105,7 @@ func Build(cfg config.Config) (*Service, error) {
 		docDB = nil
 	}
 
-	svc := &Service{Cfg: cfg, DB: db, Semantic: semantic, Embedder: embedder, Graph: g, docDB: docDB, Platform: &config.PlatformSettings{}}
+	svc := &Service{Cfg: cfg, DB: db, Semantic: semanticBackend, Embedder: embedder, Graph: g, docDB: docDB, Platform: &config.PlatformSettings{}}
 	svc.loadBM25()
 	svc.ScanDirs = svc.LoadScanDirs()
 	if err := svc.reloadDependencyGraph(context.Background()); err != nil {
@@ -115,7 +122,7 @@ func (svc *Service) SetPlatform(ps *config.PlatformSettings) {
 }
 
 func (svc *Service) loadBM25() {
-	vocabPath := filepath.Join(svc.Cfg.WorkspaceRoot, ".codeloom", "bm25_vocab.json")
+	vocabPath := filepath.Join(svc.Cfg.WorkspaceRoot, platform.WorkspaceMetadataDir, "bm25_vocab.json")
 	if fileExists(vocabPath) {
 		if builder, err := retrieval.LoadVocab(vocabPath); err == nil {
 			svc.setBM25(builder)
@@ -156,7 +163,7 @@ func (svc *Service) DiscoverScanDirs() []string {
 	}
 	out := dirs[:0]
 	for _, d := range dirs {
-		if d == "docs" || !indexer.IsExcluded(d, svc.Platform.VCSExcludeProjects) {
+		if !indexer.IsExcluded(d, svc.Platform.VCSExcludeProjects) {
 			out = append(out, d)
 		}
 	}
@@ -388,15 +395,14 @@ func (svc *Service) embedBatch(ctx context.Context, label string, docs []semDoc)
 				mu.Unlock()
 				return
 			}
-			points := make([]store.SemanticPoint, 0, len(group))
+			points := make([]semantic.Record, 0, len(group))
 			for i, d := range group {
 				if i >= len(vecs) {
 					break
 				}
-				points = append(points, store.SemanticPoint{
-					ID: d.id, Vector: vecs[i], Payload: d.payload,
-					SparseIndices: d.sparseIndices,
-					SparseValues:  d.sparseValues,
+				points = append(points, semantic.Record{
+					ID: d.id, DenseVector: vecs[i], Metadata: d.payload,
+					SparseVector: &semantic.SparseVector{Indices: d.sparseIndices, Values: d.sparseValues},
 				})
 			}
 			if len(points) == 0 {
@@ -452,7 +458,7 @@ func (svc *Service) embedWithRetry(ctx context.Context, texts []string) ([][]flo
 	return nil, lastErr
 }
 
-func (svc *Service) embedServices(ctx context.Context, services []types.ServiceRecord) error {
+func (svc *Service) embedServices(ctx context.Context, services []domain.ServiceRecord) error {
 	docs := make([]semDoc, 0, len(services))
 	for _, sv := range services {
 		docs = append(docs, serviceDoc(sv))
@@ -460,7 +466,7 @@ func (svc *Service) embedServices(ctx context.Context, services []types.ServiceR
 	return svc.embedBatch(ctx, "services", docs)
 }
 
-func (svc *Service) embedRunbooks(ctx context.Context, runbooks []types.RunbookRecord) error {
+func (svc *Service) embedRunbooks(ctx context.Context, runbooks []domain.RunbookRecord) error {
 	inputs := make([]indexer.EmbedDocInput, 0, len(runbooks))
 	for _, rb := range runbooks {
 		inputs = append(inputs, indexer.EmbedDocInput{
@@ -486,12 +492,12 @@ func (svc *Service) EmbedDocs(ctx context.Context) error {
 		log.Infof("[embed] document store unavailable; skip document embedding")
 		return nil
 	}
-	if err := svc.Semantic.Ensure(ctx, svc.Embedder.Dim()); err != nil {
+	if err := svc.Semantic.Ensure(ctx, semantic.Schema{Collection: svc.Cfg.Semantic.Collection, DenseDim: svc.Embedder.Dim()}); err != nil {
 		return fmt.Errorf("ensure semantic collection: %w", err)
 	}
 	docgen.New(svc.Cfg, svc.Platform, svc.docDB).GenerateDocs(ctx, []string{svc.Cfg.WorkspaceRoot})
 
-	if err := svc.Semantic.DeleteByRepo(ctx, "docs"); err != nil {
+	if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{Repository: "docs"}); err != nil {
 		log.Warnf("[embed] delete docs-repo vectors: %v", err)
 	}
 
@@ -594,16 +600,16 @@ func (svc *Service) EmbedDocuments(ctx context.Context) error {
 		log.Infof("[embed] document store unavailable; skip generated document embedding")
 		return nil
 	}
-	if err := svc.Semantic.Ensure(ctx, svc.Embedder.Dim()); err != nil {
+	if err := svc.Semantic.Ensure(ctx, semantic.Schema{Collection: svc.Cfg.Semantic.Collection, DenseDim: svc.Embedder.Dim()}); err != nil {
 		return fmt.Errorf("ensure semantic collection: %w", err)
 	}
 
-	docs, err := svc.docDB.ListDocsByKinds(types.GeneratedDocKinds)
+	docs, err := svc.docDB.ListDocsByKinds(domain.GeneratedDocKinds)
 	if err != nil {
 		return fmt.Errorf("list docs: %w", err)
 	}
 	for _, d := range docs {
-		if err := svc.Semantic.DeleteByDocID(ctx, d.ID); err != nil {
+		if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{DocumentID: d.ID}); err != nil {
 			log.Warnf("[embed] delete doc %s: %v", d.ID, err)
 		}
 	}
@@ -645,7 +651,7 @@ func (svc *Service) EmbedCodeChunks(ctx context.Context, dirs []string) error {
 	if len(dirs) == 0 {
 		return nil
 	}
-	if err := svc.Semantic.Ensure(ctx, svc.Embedder.Dim()); err != nil {
+	if err := svc.Semantic.Ensure(ctx, semantic.Schema{Collection: svc.Cfg.Semantic.Collection, DenseDim: svc.Embedder.Dim()}); err != nil {
 		return fmt.Errorf("ensure semantic collection: %w", err)
 	}
 
@@ -669,9 +675,10 @@ func (svc *Service) EmbedCodeChunks(ctx context.Context, dirs []string) error {
 	if err := svc.embedBatch(ctx, "code", docs); err != nil {
 		return err
 	}
-	if err := svc.Semantic.DeleteByFilterExcept(ctx,
-		map[string]string{"kind": "code_chunk"},
-		map[string]string{"index_generation": generation}); err != nil {
+	if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{
+		Filter: semantic.Filter{Keywords: map[string]string{"kind": "code_chunk"}},
+		Except: semantic.Filter{Keywords: map[string]string{"index_generation": generation}},
+	}); err != nil {
 		return fmt.Errorf("delete stale code vectors: %w", err)
 	}
 	if !preserveVocab {
@@ -685,7 +692,7 @@ func (svc *Service) EmbedCodeChunks(ctx context.Context, dirs []string) error {
 	return nil
 }
 
-func (svc *Service) buildCodeDocs(ctx context.Context, chunks []types.CodeChunk, builder *retrieval.BM25Builder, generation string) ([]semDoc, error) {
+func (svc *Service) buildCodeDocs(ctx context.Context, chunks []domain.CodeChunk, builder *retrieval.BM25Builder, generation string) ([]semDoc, error) {
 	services, err := svc.DB.AllServices(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load service modules: %w", err)
@@ -699,7 +706,7 @@ func (svc *Service) buildCodeDocs(ctx context.Context, chunks []types.CodeChunk,
 			tokens := builder.AddDoc(text)
 			indices, values = retrieval.SparseToSorted(builder.BuildSparse(tokens))
 		}
-		evidenceClass, trustTier := types.EvidenceForCodeChunk(ch.Lang, ch.Repo)
+		evidenceClass, trustTier := domain.EvidenceForCodeChunk(ch.Lang, ch.Repo)
 		docs = append(docs, semDoc{
 			id:   platform.UUIDFromString("code:" + ch.Path + ":" + strconv.Itoa(ch.StartLine) + ":" + strconv.Itoa(ch.EndLine)),
 			text: text,
@@ -724,7 +731,7 @@ func (svc *Service) buildCodeDocs(ctx context.Context, chunks []types.CodeChunk,
 	return docs, nil
 }
 
-func layerForCodePath(services []types.ServiceRecord, path string) string {
+func layerForCodePath(services []domain.ServiceRecord, path string) string {
 	path = filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(path), "./"))
 	bestPrefix := ""
 	layer := ""
@@ -745,7 +752,7 @@ func layerForCodePath(services []types.ServiceRecord, path string) string {
 }
 
 func (svc *Service) bm25VocabPath() string {
-	return filepath.Join(svc.Cfg.WorkspaceRoot, ".codeloom", "bm25_vocab.json")
+	return filepath.Join(svc.Cfg.WorkspaceRoot, platform.WorkspaceMetadataDir, "bm25_vocab.json")
 }
 
 func newIndexGeneration(scope string) string {
@@ -761,7 +768,7 @@ func trimText(s string) string {
 	return strings.TrimSpace(s[:8000])
 }
 
-func serviceDoc(sv types.ServiceRecord) semDoc {
+func serviceDoc(sv domain.ServiceRecord) semDoc {
 	text := sv.ServiceName
 	if sv.Summary != "" {
 		text += "\n" + sv.Summary
@@ -772,8 +779,8 @@ func serviceDoc(sv types.ServiceRecord) semDoc {
 		payload: map[string]any{
 			"kind": "service", "service_name": sv.ServiceName,
 			"repo": serviceRepoBucket, "layer": sv.Layer, "owner": sv.Owner,
-			"evidence_class": types.EvidenceClassServiceMeta,
-			"trust_tier":     types.TrustServiceMeta,
+			"evidence_class": domain.EvidenceClassServiceMeta,
+			"trust_tier":     domain.TrustServiceMeta,
 		},
 	}
 }
@@ -883,7 +890,7 @@ func (svc *Service) SyncProject(ctx context.Context, pathWithNamespace, gitURL, 
 	return svc.ReindexRepo(ctx, dirName, commit)
 }
 
-func (svc *Service) attachRepositorySnapshots(ctx context.Context, bundle *types.IndexBundle) error {
+func (svc *Service) attachRepositorySnapshots(ctx context.Context, bundle *domain.IndexBundle) error {
 	repos := make(map[string]struct{}, len(bundle.Services))
 	for _, service := range bundle.Services {
 		repos[service.Repo] = struct{}{}
@@ -894,13 +901,13 @@ func (svc *Service) attachRepositorySnapshots(ctx context.Context, bundle *types
 	}
 	sort.Strings(names)
 	indexedAt := time.Now().UnixMilli()
-	bundle.Repositories = make([]types.RepositoryRecord, 0, len(names))
+	bundle.Repositories = make([]domain.RepositoryRecord, 0, len(names))
 	for _, repo := range names {
 		sha, err := repoHeadSHA(ctx, svc.Cfg.WorkspaceRoot, repo)
 		if err != nil {
 			return fmt.Errorf("read repository revision %q: %w", repo, err)
 		}
-		bundle.Repositories = append(bundle.Repositories, types.RepositoryRecord{
+		bundle.Repositories = append(bundle.Repositories, domain.RepositoryRecord{
 			Repo: repo, HeadSHA: sha, IndexedAt: indexedAt,
 		})
 	}
@@ -946,17 +953,17 @@ func (svc *Service) Bootstrap(ctx context.Context) error {
 	log.Infof("[bootstrap] services=%d endpoints=%d dependencies=%d runbooks=%d",
 		len(bundle.Services), len(bundle.Endpoints), len(bundle.Dependencies), len(bundle.Runbooks))
 
-	if err := svc.Semantic.Ensure(ctx, svc.Embedder.Dim()); err != nil {
+	if err := svc.Semantic.Ensure(ctx, semantic.Schema{Collection: svc.Cfg.Semantic.Collection, DenseDim: svc.Embedder.Dim()}); err != nil {
 		return fmt.Errorf("ensure collection: %w", err)
 	}
-	if err := svc.Semantic.DeleteByRepo(ctx, serviceRepoBucket); err != nil {
+	if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{Repository: serviceRepoBucket}); err != nil {
 		return fmt.Errorf("delete service bucket: %w", err)
 	}
 	if err := svc.embedServices(ctx, bundle.Services); err != nil {
 		return fmt.Errorf("embed services: %w", err)
 	}
 	// Clear the shared docs bucket first so deleted or re-keyed doc chunks do not linger.
-	if err := svc.Semantic.DeleteByRepo(ctx, "docs"); err != nil {
+	if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{Repository: "docs"}); err != nil {
 		log.Warnf("[bootstrap] delete docs runbook vectors: %v", err)
 	}
 	if err := svc.embedRunbooks(ctx, bundle.Runbooks); err != nil {
@@ -990,7 +997,7 @@ func (svc *Service) EmbedRepoCode(ctx context.Context, repo string) error {
 	if svc.bm25MigrationRequired.Load() {
 		return retrieval.ErrLegacyVocabulary
 	}
-	if err := svc.Semantic.Ensure(ctx, svc.Embedder.Dim()); err != nil {
+	if err := svc.Semantic.Ensure(ctx, semantic.Schema{Collection: svc.Cfg.Semantic.Collection, DenseDim: svc.Embedder.Dim()}); err != nil {
 		return fmt.Errorf("ensure semantic collection: %w", err)
 	}
 	scanDir := filepath.Join("repos", repo)
@@ -1006,13 +1013,13 @@ func (svc *Service) EmbedRepoCode(ctx context.Context, repo string) error {
 	if err != nil {
 		return err
 	}
-	// Append-only IDs are persisted before Qdrant. A failed upsert can leave
+	// Append-only IDs are persisted before the semantic write. A failed upsert can leave
 	// unused IDs, but can never leave vectors with coordinates unknown on restart.
 	if err := builder.SaveVocab(svc.bm25VocabPath()); err != nil {
 		return fmt.Errorf("save bm25 vocab: %w", err)
 	}
 	if len(docs) == 0 {
-		if err := svc.Semantic.DeleteByRepo(ctx, repo); err != nil {
+		if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{Repository: repo}); err != nil {
 			return fmt.Errorf("delete empty repo vectors: %w", err)
 		}
 		svc.setBM25(builder)
@@ -1021,7 +1028,10 @@ func (svc *Service) EmbedRepoCode(ctx context.Context, repo string) error {
 	if err := svc.embedBatch(ctx, "code repo="+repo, docs); err != nil {
 		return fmt.Errorf("embed code: %w", err)
 	}
-	if err := svc.Semantic.DeleteRepoExceptGeneration(ctx, repo, generation); err != nil {
+	if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{
+		Repository: repo,
+		Except:     semantic.Filter{Keywords: map[string]string{"index_generation": generation}},
+	}); err != nil {
 		return fmt.Errorf("delete stale repo vectors: %w", err)
 	}
 	svc.setBM25(builder)
@@ -1031,7 +1041,7 @@ func (svc *Service) EmbedRepoCode(ctx context.Context, repo string) error {
 
 // ReindexAllServices refreshes service-level vectors after metadata-heavy rebuilds.
 func (svc *Service) ReindexAllServices(ctx context.Context) error {
-	if err := svc.Semantic.DeleteByRepo(ctx, serviceRepoBucket); err != nil {
+	if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{Repository: serviceRepoBucket}); err != nil {
 		return fmt.Errorf("delete service bucket: %w", err)
 	}
 	allSvcs, err := svc.DB.AllServices(ctx)
@@ -1109,10 +1119,10 @@ func (svc *Service) embedDocsForRepo(ctx context.Context, repo string) error {
 		log.Infof("[embed-docs] document store unavailable; skip repo=%q", repo)
 		return nil
 	}
-	if err := svc.Semantic.Ensure(ctx, svc.Embedder.Dim()); err != nil {
+	if err := svc.Semantic.Ensure(ctx, semantic.Schema{Collection: svc.Cfg.Semantic.Collection, DenseDim: svc.Embedder.Dim()}); err != nil {
 		return fmt.Errorf("ensure semantic collection: %w", err)
 	}
-	docs, err := svc.docDB.ListDocsByKinds(types.GeneratedDocKinds)
+	docs, err := svc.docDB.ListDocsByKinds(domain.GeneratedDocKinds)
 	if err != nil {
 		return fmt.Errorf("list docs: %w", err)
 	}
@@ -1122,7 +1132,7 @@ func (svc *Service) embedDocsForRepo(ctx context.Context, repo string) error {
 		if !strings.HasPrefix(d.Filename, prefix) {
 			continue
 		}
-		if err := svc.Semantic.DeleteByDocID(ctx, d.ID); err != nil {
+		if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{DocumentID: d.ID}); err != nil {
 			log.Warnf("[init-project] delete doc %s: %v", d.ID, err)
 		}
 		inputs = append(inputs, indexer.EmbedDocInput{

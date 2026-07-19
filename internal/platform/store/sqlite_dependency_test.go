@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
@@ -19,22 +19,22 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 
 	orders := testService("team/orders", ".", "orders")
 	payments := testService("team/payments", ".", "payments")
-	bundle := types.IndexBundle{
-		Repositories: []types.RepositoryRecord{
+	bundle := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{
 			{Repo: orders.Repo, HeadSHA: "orders-sha", IndexedAt: time.Now().UnixMilli()},
 			{Repo: payments.Repo, HeadSHA: "payments-sha", IndexedAt: time.Now().UnixMilli()},
 		},
-		Services: []types.ServiceRecord{orders, payments},
-		Dependencies: []types.DependencyEdge{{
+		Services: []domain.ServiceRecord{orders, payments},
+		Dependencies: []domain.DependencyEdge{{
 			CallerServiceKey: orders.ServiceKey,
-			TargetKind:       types.DependencyTargetService,
+			TargetKind:       domain.DependencyTargetService,
 			TargetServiceKey: payments.ServiceKey,
 			From:             orders.ServiceName,
 			To:               payments.ServiceName,
-			Type:             types.EdgeHTTP,
-			Evidence: []types.Evidence{
-				{Path: "repos/team/orders/src/client.go", Line: 10, Symbol: "CallPayments", Kind: types.SourceCodeScan},
-				{Path: "repos/team/orders/src/retry.go", Line: 20, Symbol: "RetryPayments", Kind: types.SourceCodeScan},
+			Type:             domain.EdgeHTTP,
+			Evidence: []domain.Evidence{
+				{Path: "repos/team/orders/src/client.go", Line: 10, Symbol: "CallPayments", Kind: domain.SourceCodeScan},
+				{Path: "repos/team/orders/src/retry.go", Line: 20, Symbol: "RetryPayments", Kind: domain.SourceCodeScan},
 			},
 			Confidence: 0.9,
 		}},
@@ -54,9 +54,9 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 		t.Fatalf("evidence = %+v, want two locations", edges[0].Evidence)
 	}
 
-	replacement := types.IndexBundle{
-		Repositories: []types.RepositoryRecord{{Repo: orders.Repo, HeadSHA: "orders-sha-2", IndexedAt: time.Now().UnixMilli()}},
-		Services:     []types.ServiceRecord{orders},
+	replacement := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{{Repo: orders.Repo, HeadSHA: "orders-sha-2", IndexedAt: time.Now().UnixMilli()}},
+		Services:     []domain.ServiceRecord{orders},
 	}
 	if err := db.ReplaceAll(context.Background(), replacement); err != nil {
 		t.Fatal(err)
@@ -74,8 +74,8 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 	}
 }
 
-func testService(repo, module, name string) types.ServiceRecord {
-	return types.ServiceRecord{
+func testService(repo, module, name string) domain.ServiceRecord {
+	return domain.ServiceRecord{
 		ServiceKey:    platform.UUIDFromString(repo + "\x00" + module),
 		ServiceName:   name,
 		Repo:          repo,
@@ -85,7 +85,7 @@ func testService(repo, module, name string) types.ServiceRecord {
 		Tags:          []string{},
 		Docs:          []string{},
 		SourceOfTruth: []string{},
-		Entrypoints:   []types.Evidence{},
+		Entrypoints:   []domain.Evidence{},
 		Ports:         []int{},
 		Confidence:    0.9,
 	}

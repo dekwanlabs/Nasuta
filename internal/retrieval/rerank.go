@@ -9,11 +9,11 @@ import (
 
 	"github.com/go-resty/resty/v2"
 
-	"github.com/dekwanlabs/astris/config"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
-	"github.com/dekwanlabs/astris/platform/httpclient"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/httpclient"
 )
 
 type codeDoc struct {
@@ -55,28 +55,28 @@ type Reranker interface {
 }
 
 func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeDoc, query string) []codeDoc {
-	traceEnabled := types.TraceEnabled(ctx)
+	traceEnabled := domain.TraceEnabled(ctx)
 	log.InfofCtx(ctx, "[qa] code pool input: %d docs\n%s", len(pool), poolSummary(pool, "input"))
 
 	before := len(pool)
 	pool = topByRecall(pool, retrieve.platform.RerankPool)
 	log.InfofCtx(ctx, "[qa] code pool coarse-truncate: → %d", len(pool))
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{Node: "candidate_truncate", Input: map[string]any{"candidates": before, "limit": retrieve.platform.RerankPool}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
+		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_truncate", Input: map[string]any{"candidates": before, "limit": retrieve.platform.RerankPool}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
 	}
 
 	before = len(pool)
 	pool = dedupBySource(pool)
 	log.InfofCtx(ctx, "[qa] code pool dedup: → %d\n%s", len(pool), poolSummary(pool, "dedup"))
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{Node: "candidate_dedup", Input: map[string]any{"candidates": before}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
+		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_dedup", Input: map[string]any{"candidates": before}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
 	}
 
 	poolBeforeRerank := append([]codeDoc(nil), pool...)
 	rerankStarted := time.Now()
 	pool = rerankPool(ctx, retrieve.reranker, query, pool, retrieve.platform.RerankMinDensePreflight)
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "candidate_rerank", DurationMS: time.Since(rerankStarted).Milliseconds(),
 			Input:  map[string]any{"candidates": len(poolBeforeRerank), "enabled": retrieve.reranker.Enabled()},
 			Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)},
@@ -103,14 +103,14 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 		log.WarnfCtx(ctx, "[qa] code pool threshold(%.2f) wiped all %d docs — keeping pre-threshold pool", retrieve.platform.RerankMinScore, before)
 	}
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{Node: "candidate_threshold", Input: map[string]any{"candidates": before, "min_score": retrieve.platform.RerankMinScore}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
+		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_threshold", Input: map[string]any{"candidates": before, "min_score": retrieve.platform.RerankMinScore}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
 	}
 
 	before = len(pool)
 	pool = selectDiverse(pool, retrieve.platform.RerankTopK, retrieve.platform.RerankMaxPerService, retrieve.platform.RerankMaxPerServiceLowBand, retrieve.platform.RerankStrictDiversity)
 	log.InfofCtx(ctx, "[qa] code pool diversity(topK=%d, max/svc=%d, lowband/svc=%d): → %d\n%s", retrieve.platform.RerankTopK, retrieve.platform.RerankMaxPerService, retrieve.platform.RerankMaxPerServiceLowBand, len(pool), poolSummary(pool, "final"))
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{Node: "candidate_diversity", Input: map[string]any{"candidates": before, "top_k": retrieve.platform.RerankTopK, "max_per_service": retrieve.platform.RerankMaxPerService}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
+		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_diversity", Input: map[string]any{"candidates": before, "top_k": retrieve.platform.RerankTopK, "max_per_service": retrieve.platform.RerankMaxPerService}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
 	}
 	return pool
 }
@@ -143,7 +143,7 @@ func poolSummary(pool []codeDoc, label string) string {
 			score = d.candidateScore()
 		}
 		fmt.Fprintf(&sb, "  [%d] %s trust=%d band=%d score=%.3f recall=%.3f dense=%.3f kind=%s\n",
-			i, shortLogPath(loc), d.trustTier, types.TrustBand(d.trustTier), score, d.candidateScore(), d.denseScore, d.scoreKind)
+			i, shortLogPath(loc), d.trustTier, domain.TrustBand(d.trustTier), score, d.candidateScore(), d.denseScore, d.scoreKind)
 	}
 	return sb.String()
 }
@@ -205,7 +205,7 @@ const rerankMaxWait = 8 * time.Second
 const bandBonusStep = 0.04
 
 func bandBonus(trustTier int) float64 {
-	return bandBonusStep * float64(types.TrustBand(trustTier))
+	return bandBonusStep * float64(domain.TrustBand(trustTier))
 }
 
 func (d codeDoc) rankScore() float64 { return d.rerankScore + bandBonus(d.trustTier) }
@@ -299,12 +299,12 @@ func selectDiverse(docs []codeDoc, topK, maxPerService, maxPerServiceLowBand int
 		if d.service == "" {
 			groupCap = topK
 		}
-		if count[key] >= groupCap || (maxPerServiceLowBand > 0 && types.TrustBand(d.trustTier) <= 2 && lowBandCount[key] >= maxPerServiceLowBand) {
+		if count[key] >= groupCap || (maxPerServiceLowBand > 0 && domain.TrustBand(d.trustTier) <= 2 && lowBandCount[key] >= maxPerServiceLowBand) {
 			continue
 		}
 		result = append(result, d)
 		count[key]++
-		if types.TrustBand(d.trustTier) <= 2 {
+		if domain.TrustBand(d.trustTier) <= 2 {
 			lowBandCount[key]++
 		}
 		if len(result) >= topK {

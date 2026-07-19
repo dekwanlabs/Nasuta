@@ -6,13 +6,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // scanPythonServices finds FastAPI main.py entrypoints.
-func scanPythonServices(root string, dirs []string) []types.ServiceRecord {
+func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 	files := walkFiles(root, dirs, func(name string) bool { return name == "main.py" })
-	var records []types.ServiceRecord
+	var records []domain.ServiceRecord
 	for _, file := range files {
 		rel := relativeTo(root, file)
 		moduleRoot := filepath.Dir(file)
@@ -22,7 +22,7 @@ func scanPythonServices(root string, dirs []string) []types.ServiceRecord {
 			serviceName = filepath.Base(moduleRoot)
 		}
 		layer := inferLayer(serviceName, modulePath)
-		records = append(records, types.ServiceRecord{
+		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
 			Layer:         "server",
@@ -33,7 +33,7 @@ func scanPythonServices(root string, dirs []string) []types.ServiceRecord {
 			Tags:          []string{"code-scan", "ai"},
 			Docs:          []string{},
 			SourceOfTruth: []string{rel},
-			Entrypoints:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 			Ports:         readPythonPorts(moduleRoot),
 			Confidence:    0.85,
 		})
@@ -44,9 +44,9 @@ func scanPythonServices(root string, dirs []string) []types.ServiceRecord {
 var pyRouteRe = regexp.MustCompile(`@router\.(get|post|put|delete|patch)\(([^)]*)\)`)
 
 // scanPythonEndpoints finds FastAPI router routes.
-func scanPythonEndpoints(root string, dirs []string) []types.EndpointRecord {
+func scanPythonEndpoints(root string, dirs []string) []domain.EndpointRecord {
 	files := walkFiles(root, dirs, hasSuffix(".py"))
-	var records []types.EndpointRecord
+	var records []domain.EndpointRecord
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "APIRouter") && !strings.Contains(text, "@router.") {
@@ -67,7 +67,7 @@ func scanPythonEndpoints(root string, dirs []string) []types.EndpointRecord {
 				continue
 			}
 			route := extractFirstString(m[2])
-			records = append(records, types.EndpointRecord{
+			records = append(records, domain.EndpointRecord{
 				ServiceName:   serviceName,
 				Repo:          topSegment(rel),
 				Method:        strings.ToUpper(m[1]),
@@ -76,7 +76,7 @@ func scanPythonEndpoints(root string, dirs []string) []types.EndpointRecord {
 				HandlerMethod: pythonHandlerName(lines, i), // ★ codegraph anchor
 				File:          rel,
 				Line:          i + 1,
-				Source:        types.SourceCodeScan,
+				Source:        domain.SourceCodeScan,
 				Confidence:    0.85,
 			})
 		}

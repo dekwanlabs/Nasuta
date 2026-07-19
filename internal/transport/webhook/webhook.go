@@ -3,13 +3,13 @@ package webhook
 import (
 	"context"
 	"encoding/json"
-	"github.com/dekwanlabs/astris/platform/httputil"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"net/http"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/indexing"
-	"github.com/dekwanlabs/astris/internal/indexing/indexer"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/internal/indexing"
+	"github.com/dekwanlabs/nasuta/internal/indexing/indexer"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 // VCSPush is the subset of a GitLab push-event payload we consume.

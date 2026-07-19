@@ -4,40 +4,40 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dekwanlabs/astris/config"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/graph"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 )
 
 type servicePathFakeTools struct {
-	services []types.ServiceRecord
+	services []domain.ServiceRecord
 }
 
-func (f servicePathFakeTools) AllServices(context.Context) ([]types.ServiceRecord, error) {
+func (f servicePathFakeTools) AllServices(context.Context) ([]domain.ServiceRecord, error) {
 	return f.services, nil
 }
 
-func (f servicePathFakeTools) FindServices(context.Context, string, int) (types.SearchResult[types.ServiceRecord], error) {
-	return types.SearchResult[types.ServiceRecord]{}, nil
+func (f servicePathFakeTools) FindServices(context.Context, string, int) (domain.SearchResult[domain.ServiceRecord], error) {
+	return domain.SearchResult[domain.ServiceRecord]{}, nil
 }
 
-func (f servicePathFakeTools) FindCode(context.Context, string, string, int) (types.SearchResult[types.CodeSearchHit], error) {
-	return types.SearchResult[types.CodeSearchHit]{}, nil
+func (f servicePathFakeTools) FindCode(context.Context, string, string, int) (domain.SearchResult[domain.CodeSearchHit], error) {
+	return domain.SearchResult[domain.CodeSearchHit]{}, nil
 }
 
-func (f servicePathFakeTools) FindAPIs(context.Context, string, string, int) ([]types.EndpointRecord, error) {
+func (f servicePathFakeTools) FindAPIs(context.Context, string, string, int) ([]domain.EndpointRecord, error) {
 	return nil, nil
 }
 
-func (f servicePathFakeTools) FindRunbooks(context.Context, string, int, bool, string) (types.SearchResult[types.RunbookSearchHit], error) {
-	return types.SearchResult[types.RunbookSearchHit]{}, nil
+func (f servicePathFakeTools) FindRunbooks(context.Context, string, int, bool, string) (domain.SearchResult[domain.RunbookSearchHit], error) {
+	return domain.SearchResult[domain.RunbookSearchHit]{}, nil
 }
 
 func (f servicePathFakeTools) TraceDeps(string, string, int) graph.Result {
 	return graph.Result{}
 }
 
-func (f servicePathFakeTools) ServiceModules(_ context.Context, repos []string) ([]types.ServiceRecord, error) {
+func (f servicePathFakeTools) ServiceModules(_ context.Context, repos []string) ([]domain.ServiceRecord, error) {
 	if len(repos) == 0 {
 		return f.services, nil
 	}
@@ -45,7 +45,7 @@ func (f servicePathFakeTools) ServiceModules(_ context.Context, repos []string) 
 	for _, repo := range repos {
 		wanted[repo] = struct{}{}
 	}
-	modules := make([]types.ServiceRecord, 0, len(f.services))
+	modules := make([]domain.ServiceRecord, 0, len(f.services))
 	for _, svc := range f.services {
 		if _, ok := wanted[svc.Repo]; ok {
 			modules = append(modules, svc)
@@ -55,7 +55,7 @@ func (f servicePathFakeTools) ServiceModules(_ context.Context, repos []string) 
 }
 
 func TestServiceForPathUsesModulePathBeforeRepo(t *testing.T) {
-	r := New(servicePathFakeTools{services: []types.ServiceRecord{
+	r := New(servicePathFakeTools{services: []domain.ServiceRecord{
 		{
 			ServiceName: "hsas-cookbook",
 			Repo:        "hsas/hsas-dreo-app",

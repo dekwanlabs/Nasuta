@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
+	"github.com/dekwanlabs/nasuta/config"
 )
 
 func TestDefaultSettingsIncludesRerankAndContext(t *testing.T) {

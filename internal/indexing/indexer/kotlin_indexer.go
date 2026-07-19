@@ -7,14 +7,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // scanKotlinServices finds Kotlin applications by scanning .kt files for
 // @SpringBootApplication, fun main(), or Ktor embeddedServer — no filename assumption.
-func scanKotlinServices(root string, dirs []string) []types.ServiceRecord {
+func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 	files := walkFiles(root, dirs, hasSuffix(".kt"))
-	var records []types.ServiceRecord
+	var records []domain.ServiceRecord
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "@SpringBootApplication") &&
@@ -32,7 +32,7 @@ func scanKotlinServices(root string, dirs []string) []types.ServiceRecord {
 			serviceName = readKotlinArtifactID(moduleRoot)
 		}
 		layer := inferLayer(serviceName, modulePath)
-		records = append(records, types.ServiceRecord{
+		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
 			Layer:         "server",
@@ -43,7 +43,7 @@ func scanKotlinServices(root string, dirs []string) []types.ServiceRecord {
 			Tags:          []string{"code-scan"},
 			Docs:          []string{},
 			SourceOfTruth: []string{rel},
-			Entrypoints:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 			Ports:         readKotlinPorts(moduleRoot),
 			Confidence:    0.9,
 		})
@@ -52,9 +52,9 @@ func scanKotlinServices(root string, dirs []string) []types.ServiceRecord {
 }
 
 // scanKotlinEndpoints finds Spring annotation routes + Ktor DSL + Javalin routes.
-func scanKotlinEndpoints(root string, dirs []string) []types.EndpointRecord {
+func scanKotlinEndpoints(root string, dirs []string) []domain.EndpointRecord {
 	files := walkFiles(root, dirs, hasSuffix(".kt"))
-	var records []types.EndpointRecord
+	var records []domain.EndpointRecord
 	for _, file := range files {
 		text := readFile(file)
 		rel := relativeTo(root, file)
@@ -79,11 +79,11 @@ func scanKotlinEndpoints(root string, dirs []string) []types.EndpointRecord {
 				if route == "" {
 					conf = 0.6
 				}
-				records = append(records, types.EndpointRecord{
+				records = append(records, domain.EndpointRecord{
 					ServiceName: serviceName, Repo: topSegment(rel),
 					Method: method, Path: joinPaths(classPrefix, route),
 					Handler: handler, HandlerMethod: kotlinMethodName(lines, i),
-					File: rel, Line: i + 1, Source: types.SourceCodeScan, Confidence: conf,
+					File: rel, Line: i + 1, Source: domain.SourceCodeScan, Confidence: conf,
 				})
 			}
 		}
@@ -99,10 +99,10 @@ func scanKotlinEndpoints(root string, dirs []string) []types.EndpointRecord {
 			for _, re := range javalinPatterns {
 				for _, m := range re.FindAllStringSubmatch(text, -1) {
 					if len(m) >= 3 {
-						records = append(records, types.EndpointRecord{
+						records = append(records, domain.EndpointRecord{
 							ServiceName: serviceName, Repo: topSegment(rel),
 							Method: strings.ToUpper(m[1]), Path: m[2],
-							Handler: handler, File: rel, Source: types.SourceCodeScan, Confidence: 0.8,
+							Handler: handler, File: rel, Source: domain.SourceCodeScan, Confidence: 0.8,
 						})
 					}
 				}
@@ -113,16 +113,16 @@ func scanKotlinEndpoints(root string, dirs []string) []types.EndpointRecord {
 }
 
 // scanKtorRouting extracts routes from Ktor's routing DSL.
-func scanKtorRouting(text, handler, rel, serviceName string) []types.EndpointRecord {
-	var records []types.EndpointRecord
+func scanKtorRouting(text, handler, rel, serviceName string) []domain.EndpointRecord {
+	var records []domain.EndpointRecord
 	// Top-level routes: get("/path") { ... }, post("/path") { ... }
 	for _, re := range ktorRoutePatterns {
 		for _, m := range re.FindAllStringSubmatch(text, -1) {
 			if len(m) >= 3 {
-				records = append(records, types.EndpointRecord{
+				records = append(records, domain.EndpointRecord{
 					ServiceName: serviceName, Repo: topSegment(rel),
 					Method: strings.ToUpper(m[1]), Path: m[2],
-					Handler: handler, File: rel, Source: types.SourceCodeScan, Confidence: 0.8,
+					Handler: handler, File: rel, Source: domain.SourceCodeScan, Confidence: 0.8,
 				})
 			}
 		}
@@ -143,9 +143,9 @@ var javalinPatterns = []*regexp.Regexp{
 }
 
 // scanKotlinFeigns finds @FeignClient declarations in Kotlin files.
-func scanKotlinFeigns(root string, dirs []string) []types.DependencyEdge {
+func scanKotlinFeigns(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, hasSuffix(".kt"))
-	var records []types.DependencyEdge
+	var records []domain.DependencyEdge
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "@FeignClient") {
@@ -171,12 +171,12 @@ func scanKotlinFeigns(root string, dirs []string) []types.DependencyEdge {
 			if caller == "unknown" {
 				conf = 0.65
 			}
-			records = append(records, types.DependencyEdge{
+			records = append(records, domain.DependencyEdge{
 				From: caller,
 				To:   target,
-				Type: types.EdgeFeign,
-				Evidence: []types.Evidence{{
-					Path: rel, Line: i + 1, Symbol: iface, Kind: types.SourceCodeScan,
+				Type: domain.EdgeFeign,
+				Evidence: []domain.Evidence{{
+					Path: rel, Line: i + 1, Symbol: iface, Kind: domain.SourceCodeScan,
 				}},
 				Confidence: conf,
 			})

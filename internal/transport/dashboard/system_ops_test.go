@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 )
 
 type rebuildIndexingOps struct {

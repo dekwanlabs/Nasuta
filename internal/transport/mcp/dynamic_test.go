@@ -1,23 +1,23 @@
-package mcptransport
+package mcp
 
 import (
 	"context"
 	"testing"
 
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestDynamicHandlerRebuildsAfterRegistryRevision(t *testing.T) {
-	registry := toolruntime.NewRegistry()
+	registry := tool.NewRegistry()
 	handler := NewDynamicHandler(nil, registry)
 	initial := handler.currentRevision()
-	if err := registry.Register(toolruntime.Tool{
+	if err := registry.Register(tool.Tool{
 		ID:          "dynamic",
 		Description: "dynamic test tool",
-		Kind:        toolruntime.KindRead,
-		InputSchema: toolruntime.JSONSchema{"type": "object", "properties": map[string]any{}},
-		Handler: toolruntime.HandlerFunc(func(context.Context, toolruntime.Arguments) (toolruntime.Result, error) {
-			return toolruntime.Result{Content: "ok"}, nil
+		Kind:        tool.KindRead,
+		InputSchema: tool.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
+			return tool.Result{Content: "ok"}, nil
 		}),
 	}); err != nil {
 		t.Fatal(err)

@@ -9,10 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/agent"
-	"github.com/dekwanlabs/astris/internal/platform/graph"
-	"github.com/dekwanlabs/astris/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/platform/graph"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/semantic/contract"
 )
 
 type fakeEmbedder struct{ dim int }
@@ -33,78 +35,65 @@ func (fakeEmbedder) Enabled() bool { return true }
 
 type recordingSemantic struct {
 	mu     sync.Mutex
-	points map[string]store.SemanticPoint
+	points map[string]semantic.Record
 }
 
 func newRecordingSemantic() *recordingSemantic {
-	return &recordingSemantic{points: map[string]store.SemanticPoint{}}
+	return &recordingSemantic{points: map[string]semantic.Record{}}
 }
 
-func (*recordingSemantic) Ensure(context.Context, int) error { return nil }
-func (*recordingSemantic) Search(context.Context, []float32, map[string]string, int, string) ([]store.SemanticHit, error) {
+func (*recordingSemantic) Ensure(context.Context, semantic.Schema) error { return nil }
+func (*recordingSemantic) Search(context.Context, semantic.Query) ([]semantic.Hit, error) {
 	return nil, nil
 }
-func (*recordingSemantic) SearchFiltered(context.Context, []float32, store.SemanticFilter, int, string) ([]store.SemanticHit, error) {
-	return nil, nil
-}
-func (*recordingSemantic) SearchHybrid(context.Context, []float32, []uint32, []float32, map[string]string, int, string) ([]store.SemanticHit, error) {
-	return nil, nil
-}
-func (s *recordingSemantic) Upsert(_ context.Context, points []store.SemanticPoint) error {
+func (s *recordingSemantic) Upsert(_ context.Context, points []semantic.Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, point := range points {
-		point.Payload = clonePayload(point.Payload)
-		point.Vector = append([]float32(nil), point.Vector...)
-		point.SparseIndices = append([]uint32(nil), point.SparseIndices...)
-		point.SparseValues = append([]float32(nil), point.SparseValues...)
+		point.Metadata = clonePayload(point.Metadata)
+		point.DenseVector = append([]float32(nil), point.DenseVector...)
+		if point.SparseVector != nil {
+			point.SparseVector = &semantic.SparseVector{Indices: append([]uint32(nil), point.SparseVector.Indices...), Values: append([]float32(nil), point.SparseVector.Values...)}
+		}
 		s.points[point.ID] = point
 	}
 	return nil
 }
-func (s *recordingSemantic) DeletePoints(_ context.Context, ids []string) error {
+func (s *recordingSemantic) Delete(_ context.Context, query semantic.DeleteQuery) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, id := range ids {
+	for _, id := range query.IDs {
 		delete(s.points, id)
 	}
-	return nil
-}
-func (s *recordingSemantic) DeleteByRepo(_ context.Context, repo string) error {
-	return s.deleteWhere(map[string]string{"repo": repo}, nil)
-}
-func (s *recordingSemantic) DeleteByFilterExcept(_ context.Context, filters, except map[string]string) error {
-	return s.deleteWhere(filters, except)
-}
-func (s *recordingSemantic) DeleteRepoExceptGeneration(_ context.Context, repo, generation string) error {
-	return s.deleteWhere(map[string]string{"repo": repo}, map[string]string{"index_generation": generation})
-}
-func (s *recordingSemantic) DeleteByDocID(_ context.Context, docID string) error {
-	return s.deleteWhere(map[string]string{"doc_id": docID}, nil)
-}
-func (s *recordingSemantic) CountByFilter(_ context.Context, filters map[string]string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n := 0
-	for _, point := range s.points {
-		if payloadMatches(point.Payload, filters) {
-			n++
-		}
+	filters := query.Filter.Keywords
+	if query.Repository != "" {
+		filters = map[string]string{"repo": query.Repository}
 	}
-	return n, nil
-}
-func (*recordingSemantic) Enabled() bool { return true }
-
-func (s *recordingSemantic) deleteWhere(filters, except map[string]string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if query.DocumentID != "" {
+		filters = map[string]string{"doc_id": query.DocumentID}
+	}
 	for id, point := range s.points {
-		if payloadMatches(point.Payload, filters) && !payloadMatches(point.Payload, except) {
+		if payloadMatches(point.Metadata, filters) && !payloadMatches(point.Metadata, query.Except.Keywords) {
 			delete(s.points, id)
 		}
 	}
 	return nil
 }
+func (s *recordingSemantic) Count(_ context.Context, filter semantic.Filter) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, point := range s.points {
+		if payloadMatches(point.Metadata, filter.Keywords) {
+			n++
+		}
+	}
+	return n, nil
+}
+func (*recordingSemantic) Capabilities() semantic.Capabilities {
+	return semantic.RequiredCapabilities()
+}
+func (*recordingSemantic) Close() error { return nil }
 
 func payloadMatches(payload map[string]any, filters map[string]string) bool {
 	if len(filters) == 0 {
@@ -126,12 +115,12 @@ func clonePayload(in map[string]any) map[string]any {
 	return out
 }
 
-func (s *recordingSemantic) repoPoints(repo string) map[string]store.SemanticPoint {
+func (s *recordingSemantic) repoPoints(repo string) map[string]semantic.Record {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := map[string]store.SemanticPoint{}
+	out := map[string]semantic.Record{}
 	for id, point := range s.points {
-		if point.Payload["repo"] == repo {
+		if point.Metadata["repo"] == repo {
 			out[id] = point
 		}
 	}
@@ -159,7 +148,6 @@ func newBM25TestService(t *testing.T) (*Service, *agent.Service, string) {
 	cfg := config.Config{
 		WorkspaceRoot:        root,
 		SQLitePath:           filepath.Join(root, "index.db"),
-		QdrantHost:           "noop",
 		EmbeddingAPIKey:      "test",
 		EmbeddingBatch:       4,
 		EmbeddingConcurrency: 1,
@@ -168,20 +156,20 @@ func newBM25TestService(t *testing.T) (*Service, *agent.Service, string) {
 	svc := &Service{
 		Cfg:      cfg,
 		DB:       db,
-		Semantic: store.NoopSemantic{},
+		Semantic: contract.NewMemory(),
 		Embedder: emb,
 		Graph:    g,
 		ScanDirs: []string{"demo-svc"},
 	}
-	tools := agent.NewTools(agent.Deps{DB: db, Graph: g, Semantic: store.NoopSemantic{}, Embedder: emb})
+	tools := agent.NewTools(agent.Deps{DB: db, Graph: g, Semantic: contract.NewMemory(), Embedder: emb})
 	svc.SetTools(tools)
 	return svc, tools, root
 }
 
 func TestService_BM25HandoffNoRace(t *testing.T) {
 	t.Parallel()
-	svc, tools, root := newBM25TestService(t)
-	defer os.RemoveAll(filepath.Join(root, ".codeloom"))
+	svc, tools, _ := newBM25TestService(t)
+	defer os.RemoveAll(filepath.Dir(svc.bm25VocabPath()))
 	defer svc.DB.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -286,18 +274,18 @@ func TestBootstrapClearsStaleServiceVectors(t *testing.T) {
 	}
 	defer db.Close()
 
-	semantic := newRecordingSemantic()
-	semantic.points["stale-service"] = store.SemanticPoint{
-		ID: "stale-service", Payload: map[string]any{"repo": serviceRepoBucket},
+	recorded := newRecordingSemantic()
+	recorded.points["stale-service"] = semantic.Record{
+		ID: "stale-service", Metadata: map[string]any{"repo": serviceRepoBucket},
 	}
 	svc := &Service{
 		Cfg: config.Config{WorkspaceRoot: root, SQLitePath: filepath.Join(root, "index.db")},
-		DB:  db, Semantic: semantic, Embedder: fakeEmbedder{dim: 8}, Graph: graph.New(),
+		DB:  db, Semantic: recorded, Embedder: fakeEmbedder{dim: 8}, Graph: graph.New(),
 	}
 	if err := svc.Bootstrap(context.Background()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	if got := semantic.repoPoints(serviceRepoBucket); len(got) != 0 {
+	if got := recorded.repoPoints(serviceRepoBucket); len(got) != 0 {
 		t.Fatalf("stale service vectors remain after bootstrap: %v", got)
 	}
 }

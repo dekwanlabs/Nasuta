@@ -34,7 +34,7 @@ func TestSystemPromptShape(t *testing.T) {
 	if strings.Contains(systemPrompt, "## Identity") {
 		t.Error("systemPrompt still contains ## Identity — persona must be per-role, not baked into the base")
 	}
-	for _, must := range []string{"## Core Mission", "## Core Rules", "Only retrieved context", "Match the user's language"} {
+	for _, must := range []string{"## Core Mission", "## Core Rules", "Ground every claim", "Match the user's language"} {
 		if !strings.Contains(systemPrompt, must) {
 			t.Errorf("systemPrompt missing role-neutral discipline %q", must)
 		}
@@ -46,11 +46,10 @@ func TestSystemPromptShape(t *testing.T) {
 
 func TestSystemPromptDoesNotAllowInferenceToCompleteRuntimeChains(t *testing.T) {
 	for _, must := range []string{
-		"must never fill a missing runtime hop",
-		"investigate that hop before the final answer",
-		"Keep client entry points and alternate execution branches separate",
-		"do not fan out over every weak service hit",
-		"runtime paths stop at the last verified hop",
+		"Inference must never create a missing execution hop",
+		"Keep distinct entry points and execution branches separate",
+		"investigate only the missing fact",
+		"verified nodes and edges only",
 	} {
 		if !strings.Contains(systemPrompt, must) {
 			t.Errorf("systemPrompt missing aligned chain rule %q", must)
@@ -61,9 +60,48 @@ func TestSystemPromptDoesNotAllowInferenceToCompleteRuntimeChains(t *testing.T) 
 	}
 }
 
+func TestSystemPromptUsesClaimSpecificEvidence(t *testing.T) {
+	for _, must := range []string{
+		"Match evidence to the claim",
+		"implementation evidence for executed behavior",
+		"runtime evidence for observed events",
+		"schema evidence for stored shape",
+		"Do not apply one fixed evidence hierarchy",
+		"Internal integration code",
+	} {
+		if !strings.Contains(systemPrompt, must) {
+			t.Errorf("systemPrompt missing general evidence rule %q", must)
+		}
+	}
+	if strings.Contains(systemPrompt, " > ") {
+		t.Fatal("systemPrompt contains a fixed global evidence ranking")
+	}
+}
+
+func TestSystemPromptStaysCompact(t *testing.T) {
+	const maxWords = 1500
+	if words := len(strings.Fields(systemPrompt)); words > maxWords {
+		t.Fatalf("systemPrompt has %d words, want at most %d", words, maxWords)
+	}
+}
+
+func TestSystemPromptKeepsDiagramsReadable(t *testing.T) {
+	for _, must := range []string{
+		"at most 8 nodes",
+		"Split larger or multi-layer views",
+		"node labels to one short phrase",
+		"explanations outside the nodes",
+		"inline text for simple linear chains",
+	} {
+		if !strings.Contains(systemPrompt, must) {
+			t.Errorf("systemPrompt missing diagram readability rule %q", must)
+		}
+	}
+}
+
 func TestAgentToolPromptDoesNotRepeatCoreRoleOrEvidenceRules(t *testing.T) {
 	for _, forbidden := range []string{
-		"You are **Astris**",
+		"You are **Nasuta**",
 		"## Core Rules",
 		"Distinguish client entry points",
 		"Propose the smallest fix",

@@ -3,8 +3,8 @@ package graph
 import (
 	"sync"
 
-	"github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 // Direction of a dependency walk.
@@ -21,22 +21,22 @@ const (
 // reads while being rebuilt after each incremental index pass.
 type Graph struct {
 	mu         sync.RWMutex
-	downstream map[string][]types.DependencyEdge // normalized(from) -> edges
-	upstream   map[string][]types.DependencyEdge // normalized(to)   -> edges
+	downstream map[string][]domain.DependencyEdge // normalized(from) -> edges
+	upstream   map[string][]domain.DependencyEdge // normalized(to)   -> edges
 }
 
 // New returns an empty graph.
 func New() *Graph {
 	return &Graph{
-		downstream: map[string][]types.DependencyEdge{},
-		upstream:   map[string][]types.DependencyEdge{},
+		downstream: map[string][]domain.DependencyEdge{},
+		upstream:   map[string][]domain.DependencyEdge{},
 	}
 }
 
 // Rebuild replaces the adjacency lists from the given edges.
-func (g *Graph) Rebuild(edges []types.DependencyEdge) {
-	down := map[string][]types.DependencyEdge{}
-	up := map[string][]types.DependencyEdge{}
+func (g *Graph) Rebuild(edges []domain.DependencyEdge) {
+	down := map[string][]domain.DependencyEdge{}
+	up := map[string][]domain.DependencyEdge{}
 	for _, e := range edges {
 		down[platform.Normalize(e.From)] = append(down[platform.Normalize(e.From)], e)
 		up[platform.Normalize(e.To)] = append(up[platform.Normalize(e.To)], e)
@@ -49,8 +49,8 @@ func (g *Graph) Rebuild(edges []types.DependencyEdge) {
 
 // Result is the upstream/downstream answer for trace_deps.
 type Result struct {
-	Upstream   []types.DependencyEdge `json:"upstream"`
-	Downstream []types.DependencyEdge `json:"downstream"`
+	Upstream   []domain.DependencyEdge `json:"upstream"`
+	Downstream []domain.DependencyEdge `json:"downstream"`
 }
 
 // Chain returns dependency edges up to depth hops in the requested direction.
@@ -58,7 +58,7 @@ func (g *Graph) Chain(service string, dir Direction, depth int) Result {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	norm := platform.Normalize(service)
-	res := Result{Upstream: []types.DependencyEdge{}, Downstream: []types.DependencyEdge{}}
+	res := Result{Upstream: []domain.DependencyEdge{}, Downstream: []domain.DependencyEdge{}}
 	if dir != Upstream {
 		res.Downstream = g.walk(norm, Downstream, depth)
 	}
@@ -69,8 +69,8 @@ func (g *Graph) Chain(service string, dir Direction, depth int) Result {
 }
 
 // walk performs a breadth-first traversal of edges (ports walkEdges from TS).
-func (g *Graph) walk(service string, dir Direction, depth int) []types.DependencyEdge {
-	results := []types.DependencyEdge{}
+func (g *Graph) walk(service string, dir Direction, depth int) []domain.DependencyEdge {
+	results := []domain.DependencyEdge{}
 	visited := map[string]struct{}{}
 	frontier := []string{service}
 

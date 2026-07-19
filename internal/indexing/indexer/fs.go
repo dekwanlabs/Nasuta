@@ -7,12 +7,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 var ignoredDirs = map[string]struct{}{
 	"target": {}, ".git": {}, "node_modules": {}, ".venv": {}, "venv": {},
-	"dist": {}, "build": {}, ".idea": {}, ".mcp-index": {}, "__pycache__": {},
+	"dist": {}, "build": {}, ".idea": {}, platform.WorkspaceMetadataDir: {}, "__pycache__": {},
 	"bin": {}, "obj": {}, // .NET/C# build output
 	".dart_tool":  {},               // Dart/Flutter tool cache
 	"DerivedData": {}, ".build": {}, // Swift/Xcode build output

@@ -5,8 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 // langByExt maps file extensions to a language label for semantic code chunks.
@@ -91,7 +92,7 @@ var noiseExts = map[string]bool{
 
 // isNoiseFile reports whether a repo-relative path should not be embedded.
 func isNoiseFile(rel string) bool {
-	if strings.HasPrefix(filepath.Base(rel), ".codeloom") {
+	if strings.HasPrefix(filepath.Base(rel), platform.WorkspaceMetadataDir) {
 		return true
 	}
 	if noiseExts[strings.ToLower(filepath.Ext(rel))] {
@@ -114,11 +115,11 @@ func isNoiseFile(rel string) bool {
 
 // ScanCodeChunks walks the scan dirs and splits eligible files for semantic
 // embedding.
-func ScanCodeChunks(root string, dirs []string) []types.CodeChunk {
+func ScanCodeChunks(root string, dirs []string) []domain.CodeChunk {
 	files := walkFiles(root, dirs, IsIndexableFile)
 	methodsByFile := loadCodegraphRanges(root)
 
-	var chunks []types.CodeChunk
+	var chunks []domain.CodeChunk
 	for _, file := range files {
 		rel := relativeTo(root, file)
 		if isNoiseFile(rel) {
@@ -164,10 +165,10 @@ func loadCodegraphRanges(root string) map[string][]codegraph.Node {
 
 // chunkByNodes emits one chunk per method/function and sub-windows oversized
 // methods.
-func chunkByNodes(path, repo, lang, text string, nodes []codegraph.Node) []types.CodeChunk {
+func chunkByNodes(path, repo, lang, text string, nodes []codegraph.Node) []domain.CodeChunk {
 	lines := strings.Split(text, "\n")
 	n := len(lines)
-	var out []types.CodeChunk
+	var out []domain.CodeChunk
 	for _, node := range nodes {
 		s, e := node.StartLine, node.EndLine
 		if s < 1 {
@@ -188,7 +189,7 @@ func chunkByNodes(path, repo, lang, text string, nodes []codegraph.Node) []types
 				}
 				body := strings.TrimSpace(strings.Join(lines[start-1:end], "\n"))
 				if body != "" {
-					out = append(out, types.CodeChunk{Path: path, Repo: repo, Lang: lang,
+					out = append(out, domain.CodeChunk{Path: path, Repo: repo, Lang: lang,
 						StartLine: start, EndLine: end, Text: header + body})
 				}
 				if end == e {
@@ -199,7 +200,7 @@ func chunkByNodes(path, repo, lang, text string, nodes []codegraph.Node) []types
 		}
 		body := strings.TrimSpace(strings.Join(lines[s-1:e], "\n"))
 		if body != "" {
-			out = append(out, types.CodeChunk{Path: path, Repo: repo, Lang: lang,
+			out = append(out, domain.CodeChunk{Path: path, Repo: repo, Lang: lang,
 				StartLine: s, EndLine: e, Text: header + body})
 		}
 	}
@@ -219,9 +220,9 @@ func codeHeader(lang string, node codegraph.Node, path string) string {
 	return h
 }
 
-func chunkFile(path, repo, lang, text string) []types.CodeChunk {
+func chunkFile(path, repo, lang, text string) []domain.CodeChunk {
 	lines := strings.Split(text, "\n")
-	var out []types.CodeChunk
+	var out []domain.CodeChunk
 	step := chunkLines - chunkOverlap
 
 	for start := 0; start < len(lines); start += step {
@@ -231,7 +232,7 @@ func chunkFile(path, repo, lang, text string) []types.CodeChunk {
 		}
 		body := strings.TrimSpace(strings.Join(lines[start:end], "\n"))
 		if body != "" {
-			out = append(out, types.CodeChunk{
+			out = append(out, domain.CodeChunk{
 				Path:      path,
 				Repo:      repo,
 				Lang:      lang,

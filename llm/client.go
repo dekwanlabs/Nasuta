@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform/httpclient"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform/httpclient"
 	"github.com/go-resty/resty/v2"
 )
 

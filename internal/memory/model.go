@@ -120,7 +120,7 @@ func validFactKey(key string) bool {
 	}
 }
 
-func canonicalizeRecord(rec MemoryRecord, workContextTTL time.Duration, now time.Time) (MemoryRecord, error) {
+func canonicalizeRecord(rec MemoryRecord) (MemoryRecord, error) {
 	rec.FactKey = strings.ToLower(strings.TrimSpace(rec.FactKey))
 	rec.Kind = MemoryKind(strings.ToLower(strings.TrimSpace(string(rec.Kind))))
 	rec.Content = strings.TrimSpace(rec.Content)
@@ -165,10 +165,6 @@ func canonicalizeRecord(rec MemoryRecord, workContextTTL time.Duration, now time
 	}
 	if rec.Confidence > 1 {
 		rec.Confidence = 1
-	}
-	if rec.Kind == KindWorkContext && rec.ExpiresAt == nil {
-		expiresAt := now.Add(workContextTTL)
-		rec.ExpiresAt = &expiresAt
 	}
 	return rec, nil
 }

@@ -1,7 +1,7 @@
-package types
+package domain
 
 import (
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 // MergeServices folds raw per-source records into one canonical service module.

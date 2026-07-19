@@ -1,4 +1,4 @@
-package types
+package domain
 
 // SearchResult is the typed result shared by internal search consumers.
 type SearchResult[T any] struct {

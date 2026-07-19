@@ -12,22 +12,23 @@ import (
 	"sync/atomic"
 	"time"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/embed"
-	"github.com/dekwanlabs/astris/internal/platform/graph"
-	"github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
-	"github.com/dekwanlabs/astris/internal/retrieval"
-	"github.com/dekwanlabs/astris/knowledge"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/embed"
+	"github.com/dekwanlabs/nasuta/internal/platform/graph"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/knowledge"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 // Deps bundles the stores and services used by tool handlers.
 type Deps struct {
 	DB            *store.SQLite
 	Graph         *graph.Graph
-	Semantic      store.SemanticStore
+	Semantic      semantic.Store
 	Embedder      embed.Embedder
 	WorkspaceRoot string
 	// DocStore is optional in deployments without MySQL.
@@ -36,8 +37,8 @@ type Deps struct {
 
 // docStore is the runbook-facing subset of the document store.
 type docStore interface {
-	RunbookMetas() ([]types.RunbookRecord, error)
-	RunbookByID(id string) (types.RunbookRecord, error)
+	RunbookMetas() ([]domain.RunbookRecord, error)
+	RunbookByID(id string) (domain.RunbookRecord, error)
 	CountRunbooks() (int, error)
 }
 
@@ -45,12 +46,12 @@ type docStore interface {
 type Service struct {
 	db              *store.SQLite
 	graph           *graph.Graph
-	semantic        store.SemanticStore
+	semantic        semantic.Store
 	embedder        embed.Embedder
 	workspaceRoot   string
 	docStore        docStore
 	bm25            atomic.Pointer[retrieval.BM25Builder]
-	mergedSvcCache  atomic.Pointer[[]types.ServiceRecord]
+	mergedSvcCache  atomic.Pointer[[]domain.ServiceRecord]
 	denseWarnOnce   sync.Once
 	webSearchEngine string // duckduckgo | brave | bing | searxng
 	webSearchAPIKey string // API key for brave / etc.
@@ -76,22 +77,22 @@ func (srv *Service) SetWebSearchEngine(v string) { srv.webSearchEngine = v }
 func (srv *Service) SetWebSearchAPIKey(v string) { srv.webSearchAPIKey = v }
 
 func (srv *Service) semanticEnabled() bool {
-	return srv.semantic != nil && srv.semantic.Enabled() &&
+	return srv.semantic != nil && srv.semantic.Capabilities().Dense &&
 		srv.embedder != nil && srv.embedder.Enabled()
 }
 
-func (srv *Service) AllServices(ctx context.Context) ([]types.ServiceRecord, error) {
+func (srv *Service) AllServices(ctx context.Context) ([]domain.ServiceRecord, error) {
 	return srv.db.AllServices(ctx)
 }
 
-func (srv *Service) ServiceModules(ctx context.Context, repos []string) ([]types.ServiceRecord, error) {
+func (srv *Service) ServiceModules(ctx context.Context, repos []string) ([]domain.ServiceRecord, error) {
 	if len(repos) == 0 {
 		return srv.db.AllServices(ctx)
 	}
 	return srv.db.ServicesByRepos(ctx, repos)
 }
 
-func (srv *Service) services(ctx context.Context) ([]types.ServiceRecord, error) {
+func (srv *Service) services(ctx context.Context) ([]domain.ServiceRecord, error) {
 	if cached := srv.mergedSvcCache.Load(); cached != nil {
 		return *cached, nil
 	}
@@ -112,9 +113,9 @@ func (srv *Service) ServiceLookup(ctx context.Context, query string, limit int) 
 }
 
 // FindServices returns typed service matches for internal consumers.
-func (srv *Service) FindServices(ctx context.Context, query string, limit int) (result types.SearchResult[types.ServiceRecord], resultErr error) {
+func (srv *Service) FindServices(ctx context.Context, query string, limit int) (result domain.SearchResult[domain.ServiceRecord], resultErr error) {
 	started := time.Now()
-	if types.TraceEnabled(ctx) {
+	if domain.TraceEnabled(ctx) {
 		defer func() {
 			status := "completed"
 			output := map[string]any{"matches": len(result.Matches), "semantic": result.Semantic, "services": traceServiceNames(result.Matches)}
@@ -122,7 +123,7 @@ func (srv *Service) FindServices(ctx context.Context, query string, limit int) (
 				status = "failed"
 				output["error"] = resultErr.Error()
 			}
-			types.RecordTrace(ctx, types.EvaluationTrace{
+			domain.RecordTrace(ctx, domain.EvaluationTrace{
 				Node: "service_search", Status: status, DurationMS: time.Since(started).Milliseconds(),
 				Input: map[string]any{"query": query, "limit": limit}, Output: output,
 			})
@@ -130,7 +131,7 @@ func (srv *Service) FindServices(ctx context.Context, query string, limit int) (
 	}
 	all, err := srv.services(ctx)
 	if err != nil {
-		return types.SearchResult[types.ServiceRecord]{}, err
+		return domain.SearchResult[domain.ServiceRecord]{}, err
 	}
 	matches := scoreServices(all, query, limit)
 
@@ -141,10 +142,10 @@ func (srv *Service) FindServices(ctx context.Context, query string, limit int) (
 			semantic = true
 		}
 	}
-	return types.SearchResult[types.ServiceRecord]{Matches: matches, Semantic: semantic}, nil
+	return domain.SearchResult[domain.ServiceRecord]{Matches: matches, Semantic: semantic}, nil
 }
 
-func traceServiceNames(matches []types.ServiceRecord) []string {
+func traceServiceNames(matches []domain.ServiceRecord) []string {
 	limit := min(len(matches), 10)
 	names := make([]string, 0, limit)
 	for _, match := range matches[:limit] {
@@ -158,13 +159,15 @@ func (srv *Service) semanticServiceNames(ctx context.Context, query string, limi
 	if err != nil || len(vecs) == 0 {
 		return nil, err
 	}
-	hits, err := srv.semantic.Search(ctx, vecs[0], map[string]string{"kind": "service"}, limit, "")
+	hits, err := srv.semantic.Search(ctx, semantic.Query{
+		DenseVector: vecs[0], Filter: semantic.Filter{Keywords: map[string]string{"kind": "service"}}, Limit: limit,
+	})
 	if err != nil {
 		return nil, err
 	}
 	var names []string
 	for _, h := range hits {
-		if n, ok := h.Payload["service_name"].(string); ok && n != "" {
+		if n, ok := h.Metadata["service_name"].(string); ok && n != "" {
 			names = append(names, n)
 		}
 	}
@@ -181,9 +184,9 @@ func (srv *Service) RunbookSearch(ctx context.Context, query string, limit int, 
 }
 
 // FindRunbooks returns typed runbook matches for internal consumers.
-func (srv *Service) FindRunbooks(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (result types.SearchResult[types.RunbookSearchHit], resultErr error) {
+func (srv *Service) FindRunbooks(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (result domain.SearchResult[domain.RunbookSearchHit], resultErr error) {
 	started := time.Now()
-	if types.TraceEnabled(ctx) {
+	if domain.TraceEnabled(ctx) {
 		defer func() {
 			status := "completed"
 			output := map[string]any{"matches": len(result.Matches), "semantic": result.Semantic, "runbooks": traceRunbookNames(result.Matches)}
@@ -191,18 +194,18 @@ func (srv *Service) FindRunbooks(ctx context.Context, query string, limit int, i
 				status = "failed"
 				output["error"] = resultErr.Error()
 			}
-			types.RecordTrace(ctx, types.EvaluationTrace{
+			domain.RecordTrace(ctx, domain.EvaluationTrace{
 				Node: "runbook_search", Status: status, DurationMS: time.Since(started).Milliseconds(),
 				Input: map[string]any{"query": query, "limit": limit, "scope": scopeFilter}, Output: output,
 			})
 		}()
 	}
 	if srv.docStore == nil {
-		return types.SearchResult[types.RunbookSearchHit]{Matches: []types.RunbookSearchHit{}}, nil
+		return domain.SearchResult[domain.RunbookSearchHit]{Matches: []domain.RunbookSearchHit{}}, nil
 	}
 	all, err := srv.docStore.RunbookMetas()
 	if err != nil {
-		return types.SearchResult[types.RunbookSearchHit]{}, err
+		return domain.SearchResult[domain.RunbookSearchHit]{}, err
 	}
 	if scopeFilter != "" {
 		all = filterRunbooksByScope(all, scopeFilter)
@@ -216,12 +219,14 @@ func (srv *Service) FindRunbooks(ctx context.Context, query string, limit int, i
 		} else {
 			// Over-fetch because chunk-level hits and dedupe shrink the final set.
 			fetchLimit := max(limit*4, 12)
-			hits, searchErr := srv.semantic.Search(ctx, vecs[0], map[string]string{"kind": "runbook"}, fetchLimit, "")
+			hits, searchErr := srv.semantic.Search(ctx, semantic.Query{
+				DenseVector: vecs[0], Filter: semantic.Filter{Keywords: map[string]string{"kind": "runbook"}}, Limit: fetchLimit,
+			})
 			if searchErr != nil {
-				log.InfofCtx(ctx, "[runbook_search] qdrant search error: %v query=%q → keyword fallback", searchErr, query)
+				log.InfofCtx(ctx, "[runbook_search] semantic search error: %v query=%q → keyword fallback", searchErr, query)
 			} else {
 				scored := runbooksFromHits(hits, all)
-				log.InfofCtx(ctx, "[runbook_search] qdrant hits=%d → joined=%d docs (metas=%d, scopeFilter=%q) query=%q", len(hits), len(scored), len(all), scopeFilter, query)
+				log.InfofCtx(ctx, "[runbook_search] semantic hits=%d → joined=%d docs (metas=%d, scopeFilter=%q) query=%q", len(hits), len(scored), len(all), scopeFilter, query)
 				if includeText {
 					// Bodies stay lazy so the common title-only path remains cheap.
 					for i := range scored {
@@ -238,7 +243,7 @@ func (srv *Service) FindRunbooks(ctx context.Context, query string, limit int, i
 					scored = scored[:limit]
 				}
 				if len(scored) > 0 {
-					return types.SearchResult[types.RunbookSearchHit]{Matches: runbookHitsToTyped(scored, strip), Semantic: true}, nil
+					return domain.SearchResult[domain.RunbookSearchHit]{Matches: runbookHitsToTyped(scored, strip), Semantic: true}, nil
 				}
 			}
 		}
@@ -248,7 +253,7 @@ func (srv *Service) FindRunbooks(ctx context.Context, query string, limit int, i
 	// Keyword fallback scores metas first, then backfills only the survivors.
 	seed := scoreRunbooks(all, query, limit*2) // meta-only scoring (body empty → 80-tier only)
 	if len(seed) == 0 {
-		return types.SearchResult[types.RunbookSearchHit]{Matches: []types.RunbookSearchHit{}}, nil
+		return domain.SearchResult[domain.RunbookSearchHit]{Matches: []domain.RunbookSearchHit{}}, nil
 	}
 	q := platform.Normalize(query)
 	scored := make([]scoredRunbook, 0, len(seed))
@@ -265,19 +270,19 @@ func (srv *Service) FindRunbooks(ctx context.Context, query string, limit int, i
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
 	n := min(len(scored), limit)
-	out := make([]types.RunbookSearchHit, n)
+	out := make([]domain.RunbookSearchHit, n)
 	for i := range n {
 		rb := scored[i].rec
 		if strip {
 			rb.Text = ""
 		}
-		evidenceClass, trustTier := types.EvidenceForRunbookScope(rb.Scope)
-		out[i] = types.RunbookSearchHit{Record: rb, Score: float64(scored[i].score), EvidenceClass: evidenceClass, TrustTier: trustTier}
+		evidenceClass, trustTier := domain.EvidenceForRunbookScope(rb.Scope)
+		out[i] = domain.RunbookSearchHit{Record: rb, Score: float64(scored[i].score), EvidenceClass: evidenceClass, TrustTier: trustTier}
 	}
-	return types.SearchResult[types.RunbookSearchHit]{Matches: out}, nil
+	return domain.SearchResult[domain.RunbookSearchHit]{Matches: out}, nil
 }
 
-func traceRunbookNames(matches []types.RunbookSearchHit) []string {
+func traceRunbookNames(matches []domain.RunbookSearchHit) []string {
 	limit := min(len(matches), 10)
 	names := make([]string, 0, limit)
 	for _, match := range matches[:limit] {
@@ -287,8 +292,8 @@ func traceRunbookNames(matches []types.RunbookSearchHit) []string {
 }
 
 // filterRunbooksByScope returns runbooks whose scope field equals scope.
-func filterRunbooksByScope(all []types.RunbookRecord, scope string) []types.RunbookRecord {
-	out := make([]types.RunbookRecord, 0, len(all))
+func filterRunbooksByScope(all []domain.RunbookRecord, scope string) []domain.RunbookRecord {
+	out := make([]domain.RunbookRecord, 0, len(all))
 	for _, rb := range all {
 		if rb.Scope == scope {
 			out = append(out, rb)
@@ -314,7 +319,7 @@ func (srv *Service) CodeSearch(ctx context.Context, query, lang string, limit in
 			"score": hit.Score, "scoreKind": hit.ScoreKind,
 			"evidenceClass": hit.EvidenceClass, "trustTier": hit.TrustTier,
 		}
-		if hit.ScoreKind == string(store.SemanticScoreFusion) {
+		if hit.ScoreKind == string(semantic.ScoreFusion) {
 			match["fusionScore"] = hit.FusionScore
 		} else {
 			match["semanticScore"] = hit.SemanticScore
@@ -327,7 +332,11 @@ func (srv *Service) CodeSearch(ctx context.Context, query, lang string, limit in
 // SearchCode exposes typed code search to built-in and scenario tools.
 func (srv *Service) SearchCode(ctx context.Context, query knowledge.CodeSearchQuery) (knowledge.CodeSearchResult, error) {
 	query.Limit = clampInt(query.Limit, 1, 100)
-	return srv.FindCode(ctx, query.Query, query.Lang, query.Limit)
+	found, err := srv.FindCode(ctx, query.Query, query.Lang, query.Limit)
+	if err != nil {
+		return knowledge.CodeSearchResult{}, err
+	}
+	return toCodeSearchResult(found), nil
 }
 
 // TraceDependencies exposes the dependency graph without tool JSON.
@@ -336,44 +345,133 @@ func (srv *Service) TraceDependencies(_ context.Context, query knowledge.Depende
 		query.Direction = "both"
 	}
 	depth := clampInt(query.Depth, 1, 5)
-	return srv.TraceDeps(query.Service, query.Direction, depth), nil
+	return toDependencyResult(srv.TraceDeps(query.Service, query.Direction, depth)), nil
 }
 
 // SearchRunbooks exposes typed runbook search to extensions.
 func (srv *Service) SearchRunbooks(ctx context.Context, query knowledge.RunbookQuery) (knowledge.RunbookSearchResult, error) {
 	query.Limit = clampInt(query.Limit, 1, 100)
-	return srv.FindRunbooks(ctx, query.Query, query.Limit, false, "")
+	found, err := srv.FindRunbooks(ctx, query.Query, query.Limit, false, "")
+	if err != nil {
+		return knowledge.RunbookSearchResult{}, err
+	}
+	return toRunbookSearchResult(found), nil
 }
 
 // SearchServices exposes typed service search to extensions.
 func (srv *Service) SearchServices(ctx context.Context, query knowledge.ServiceSearchQuery) (knowledge.ServiceSearchResult, error) {
 	query.Limit = clampInt(query.Limit, 1, 100)
-	return srv.FindServices(ctx, query.Query, query.Limit)
+	found, err := srv.FindServices(ctx, query.Query, query.Limit)
+	if err != nil {
+		return knowledge.ServiceSearchResult{}, err
+	}
+	return toServiceSearchResult(found), nil
+}
+
+// toCodeSearchResult maps the internal typed answer onto the stable public contract.
+func toCodeSearchResult(found domain.SearchResult[domain.CodeSearchHit]) knowledge.CodeSearchResult {
+	matches := make([]knowledge.CodeSearchHit, 0, len(found.Matches))
+	for _, hit := range found.Matches {
+		matches = append(matches, knowledge.CodeSearchHit{
+			Path:          hit.Path,
+			Lang:          hit.Lang,
+			Repo:          hit.Repo,
+			StartLine:     hit.StartLine,
+			EndLine:       hit.EndLine,
+			Preview:       hit.Preview,
+			Score:         hit.Score,
+			ScoreKind:     hit.ScoreKind,
+			EvidenceClass: hit.EvidenceClass,
+			TrustTier:     hit.TrustTier,
+		})
+	}
+	return knowledge.CodeSearchResult{Matches: matches, Semantic: found.Semantic}
+}
+
+// toRunbookSearchResult maps the internal typed answer onto the stable public contract.
+func toRunbookSearchResult(found domain.SearchResult[domain.RunbookSearchHit]) knowledge.RunbookSearchResult {
+	matches := make([]knowledge.RunbookSearchHit, 0, len(found.Matches))
+	for _, hit := range found.Matches {
+		matches = append(matches, knowledge.RunbookSearchHit{
+			Record: knowledge.RunbookRecord{
+				ID:    hit.Record.ID,
+				Repo:  hit.Record.Repo,
+				Title: hit.Record.Title,
+				Path:  hit.Record.Path,
+				Scope: hit.Record.Scope,
+				Tags:  hit.Record.Tags,
+			},
+			SectionHeader: hit.SectionHeader,
+			ChunkText:     hit.ChunkText,
+			Score:         hit.Score,
+			EvidenceClass: hit.EvidenceClass,
+			TrustTier:     hit.TrustTier,
+		})
+	}
+	return knowledge.RunbookSearchResult{Matches: matches, Semantic: found.Semantic}
+}
+
+// toServiceSearchResult maps the internal typed answer onto the stable public contract.
+func toServiceSearchResult(found domain.SearchResult[domain.ServiceRecord]) knowledge.ServiceSearchResult {
+	matches := make([]knowledge.ServiceRecord, 0, len(found.Matches))
+	for _, svc := range found.Matches {
+		matches = append(matches, knowledge.ServiceRecord{
+			ServiceName: svc.ServiceName,
+			Repo:        svc.Repo,
+			Layer:       svc.Layer,
+			Language:    svc.Language,
+			Owner:       svc.Owner,
+			Status:      svc.Status,
+			Summary:     svc.Summary,
+			Tags:        svc.Tags,
+			Docs:        svc.Docs,
+			Confidence:  svc.Confidence,
+		})
+	}
+	return knowledge.ServiceSearchResult{Matches: matches, Semantic: found.Semantic}
+}
+
+// toDependencyResult maps the internal graph answer onto the stable public contract.
+func toDependencyResult(found graph.Result) knowledge.DependencyResult {
+	conv := func(edges []domain.DependencyEdge) []knowledge.DependencyEdge {
+		out := make([]knowledge.DependencyEdge, 0, len(edges))
+		for _, edge := range edges {
+			out = append(out, knowledge.DependencyEdge{
+				From:           edge.From,
+				To:             edge.To,
+				Type:           string(edge.Type),
+				ExternalTarget: edge.ExternalTarget,
+				Confidence:     edge.Confidence,
+			})
+		}
+		return out
+	}
+	return knowledge.DependencyResult{Upstream: conv(found.Upstream), Downstream: conv(found.Downstream)}
 }
 
 // FindCode searches indexed code and returns typed hits for internal consumers.
-func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int) (types.SearchResult[types.CodeSearchHit], error) {
-	traceEnabled := types.TraceEnabled(ctx)
+func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int) (domain.SearchResult[domain.CodeSearchHit], error) {
+	traceEnabled := domain.TraceEnabled(ctx)
 	if limit <= 0 {
 		limit = 10
 	}
 	if !srv.semanticEnabled() {
-		return types.SearchResult[types.CodeSearchHit]{}, fmt.Errorf("search_code requires semantic search (set QDRANT_HOST + EMBEDDING_API_KEY)")
+		return domain.SearchResult[domain.CodeSearchHit]{}, fmt.Errorf("search_code requires semantic search and embedding configuration")
 	}
 	embedStarted := time.Now()
 	vecs, err := srv.embedder.Embed(ctx, []string{query})
 	if err != nil || len(vecs) == 0 {
 		if traceEnabled {
-			types.RecordTrace(ctx, types.EvaluationTrace{
+			domain.RecordTrace(ctx, domain.EvaluationTrace{
 				Node: "query_embedding", Status: "failed", DurationMS: time.Since(embedStarted).Milliseconds(),
 				Input: map[string]any{"query": query}, Output: map[string]any{"error": errString(err), "vectors": len(vecs)},
 			})
 		}
 		log.ErrorfCtx(ctx, "[search_code] embed failed: err=%v vecs=%d", err, len(vecs))
-		return types.SearchResult[types.CodeSearchHit]{}, fmt.Errorf("embed query: %s", errString(err))
+		return domain.SearchResult[domain.CodeSearchHit]{}, fmt.Errorf("embed query: %s", errString(err))
 	}
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "query_embedding", DurationMS: time.Since(embedStarted).Milliseconds(),
 			Input: map[string]any{"query": query}, Output: map[string]any{"vectors": len(vecs), "dimensions": len(vecs[0])},
 		})
@@ -383,7 +481,7 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 		filters["lang"] = lang
 	}
 	fetchLimit := max(limit*3, limit)
-	var hits []store.SemanticHit
+	var hits []semantic.Hit
 	mode := "dense"
 	sparseTerms := 0
 	searchStarted := time.Now()
@@ -393,25 +491,32 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 		indices, values := retrieval.SparseToSorted(sv)
 		sparseTerms = len(indices)
 		if traceEnabled {
-			types.RecordTrace(ctx, types.EvaluationTrace{
+			domain.RecordTrace(ctx, domain.EvaluationTrace{
 				Node: "sparse_query", DurationMS: time.Since(sparseStarted).Milliseconds(),
 				Input: map[string]any{"query": query}, Output: map[string]any{"terms": sparseTerms, "known_terms": sparseTerms > 0},
 			})
 		}
 		if len(indices) == 0 {
 			log.InfofCtx(ctx, "[search_code] dense fallback: query has no known BM25 terms, dim=%d", len(vecs[0]))
-			hits, err = srv.semantic.Search(ctx, vecs[0], filters, fetchLimit, "path")
+			hits, err = srv.semantic.Search(ctx, semantic.Query{
+				DenseVector: vecs[0], Filter: semantic.Filter{Keywords: filters}, Limit: fetchLimit, GroupBy: "path",
+			})
 		} else {
 			mode = "hybrid"
 			log.InfofCtx(ctx, "[search_code] hybrid: dim=%d sparseTerms=%d", len(vecs[0]), len(indices))
-			hits, err = srv.semantic.SearchHybrid(ctx, vecs[0], indices, values, filters, fetchLimit, "path")
+			hits, err = srv.semantic.Search(ctx, semantic.Query{
+				DenseVector: vecs[0], SparseVector: &semantic.SparseVector{Indices: indices, Values: values},
+				Filter: semantic.Filter{Keywords: filters}, Limit: fetchLimit, GroupBy: "path",
+			})
 		}
 	} else {
 		srv.denseWarnOnce.Do(func() {
 			log.WarnfCtx(ctx, "[search_code] hybrid search disabled (BM25 nil) — running dense-only; run the full code embedding operation to enable it")
 		})
 		log.InfofCtx(ctx, "[search_code] dense-only: dim=%d (BM25 nil)", len(vecs[0]))
-		hits, err = srv.semantic.Search(ctx, vecs[0], filters, fetchLimit, "path")
+		hits, err = srv.semantic.Search(ctx, semantic.Query{
+			DenseVector: vecs[0], Filter: semantic.Filter{Keywords: filters}, Limit: fetchLimit, GroupBy: "path",
+		})
 	}
 	if traceEnabled {
 		searchStatus := "completed"
@@ -420,33 +525,33 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 			searchStatus = "failed"
 			searchOutput["error"] = err.Error()
 		}
-		types.RecordTrace(ctx, types.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "vector_search", Status: searchStatus, DurationMS: time.Since(searchStarted).Milliseconds(),
 			Input:  map[string]any{"mode": mode, "fetch_limit": fetchLimit, "sparse_terms": sparseTerms, "filters": filters},
 			Output: searchOutput,
 		})
 	}
 	if err != nil {
-		log.ErrorfCtx(ctx, "[search_code] qdrant search failed: %v", err)
-		return types.SearchResult[types.CodeSearchHit]{}, err
+		log.ErrorfCtx(ctx, "[search_code] semantic search failed: %v", err)
+		return domain.SearchResult[domain.CodeSearchHit]{}, err
 	}
-	log.InfofCtx(ctx, "[search_code] qdrant returned %d hits before filtering", len(hits))
+	log.InfofCtx(ctx, "[search_code] semantic backend returned %d hits before filtering", len(hits))
 	// Rank by raw semantic similarity, not trust-adjusted score.
 	// Trust matters later during reranking, not at recall time.
 	// A high-trust low-relevance hit should not displace a relevant one here.
 	sort.SliceStable(hits, func(i, j int) bool {
 		return hits[i].Score > hits[j].Score
 	})
-	matches := make([]types.CodeSearchHit, 0, len(hits))
+	matches := make([]domain.CodeSearchHit, 0, len(hits))
 	// One chunk per file: hits are score-sorted so first-seen is the best match.
 	// Recalling multiple windows of one long doc floods the pool and starves
 	// unique sources; rerank's dedupBySource collapses them to one before
 	// scoring anyway, so dedup here keeps recall diverse from the start.
 	seenFile := make(map[string]struct{}, len(hits))
 	for _, h := range hits {
-		path, _ := h.Payload["path"].(string)
-		// Skip Astris-generated artifacts until they are filtered at index time.
-		if strings.Contains(path, "/.codeloom") || strings.HasPrefix(path, ".codeloom") {
+		path, _ := h.Metadata["path"].(string)
+		// Skip Nasuta-generated artifacts until they are filtered at index time.
+		if strings.Contains(path, "/"+platform.WorkspaceMetadataDir) || strings.HasPrefix(path, platform.WorkspaceMetadataDir) {
 			continue
 		}
 		if _, dup := seenFile[path]; dup {
@@ -454,14 +559,14 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 		}
 		seenFile[path] = struct{}{}
 		evidenceClass, trustTier := evidenceFromCodeHit(h)
-		adjusted := types.TrustAdjustedScore(float64(h.Score), trustTier)
-		match := types.CodeSearchHit{
-			Path: path, Lang: payloadString(h.Payload, "lang"), Repo: payloadString(h.Payload, "repo"), Layer: payloadString(h.Payload, "layer"),
-			StartLine: payloadInt(h.Payload["start_line"]), EndLine: payloadInt(h.Payload["end_line"]),
-			Text: payloadString(h.Payload, "text"), Preview: payloadString(h.Payload, "preview"),
+		adjusted := domain.TrustAdjustedScore(float64(h.Score), trustTier)
+		match := domain.CodeSearchHit{
+			Path: path, Lang: payloadString(h.Metadata, "lang"), Repo: payloadString(h.Metadata, "repo"), Layer: payloadString(h.Metadata, "layer"),
+			StartLine: payloadInt(h.Metadata["start_line"]), EndLine: payloadInt(h.Metadata["end_line"]),
+			Text: payloadString(h.Metadata, "text"), Preview: payloadString(h.Metadata, "preview"),
 			Score: adjusted, ScoreKind: string(h.ScoreKind), EvidenceClass: evidenceClass, TrustTier: trustTier,
 		}
-		if h.ScoreKind == store.SemanticScoreFusion {
+		if h.ScoreKind == semantic.ScoreFusion {
 			fusionScore := h.FusionScore
 			if fusionScore == 0 {
 				fusionScore = h.Score
@@ -481,27 +586,27 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 	}
 	log.InfofCtx(ctx, "[search_code] dedup by file: %d hits -> %d files", len(hits), len(matches))
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "file_dedup", Input: map[string]any{"hits": len(hits), "limit": limit},
 			Output: map[string]any{"files": len(matches), "top": traceCodeMatches(matches)},
 		})
 	}
-	return types.SearchResult[types.CodeSearchHit]{Matches: matches, Semantic: true}, nil
+	return domain.SearchResult[domain.CodeSearchHit]{Matches: matches, Semantic: true}, nil
 }
 
-func traceSemanticHits(hits []store.SemanticHit) []map[string]any {
+func traceSemanticHits(hits []semantic.Hit) []map[string]any {
 	limit := min(len(hits), 10)
 	items := make([]map[string]any, 0, limit)
 	for _, hit := range hits[:limit] {
 		items = append(items, map[string]any{
-			"path": payloadString(hit.Payload, "path"), "score": hit.Score,
+			"path": payloadString(hit.Metadata, "path"), "score": hit.Score,
 			"dense_score": hit.DenseScore, "fusion_score": hit.FusionScore, "score_kind": hit.ScoreKind,
 		})
 	}
 	return items
 }
 
-func traceCodeMatches(matches []types.CodeSearchHit) []map[string]any {
+func traceCodeMatches(matches []domain.CodeSearchHit) []map[string]any {
 	limit := min(len(matches), 10)
 	items := make([]map[string]any, 0, limit)
 	for _, match := range matches[:limit] {
@@ -520,15 +625,15 @@ func payloadString(payload map[string]any, key string) string {
 
 func payloadInt(value any) int { return trustTierFromPayload(value) }
 
-func evidenceFromCodeHit(h store.SemanticHit) (string, int) {
-	class, _ := h.Payload["evidence_class"].(string)
-	trust := trustTierFromPayload(h.Payload["trust_tier"])
+func evidenceFromCodeHit(h semantic.Hit) (string, int) {
+	class, _ := h.Metadata["evidence_class"].(string)
+	trust := trustTierFromPayload(h.Metadata["trust_tier"])
 	if class != "" && trust > 0 {
 		return class, trust
 	}
-	lang, _ := h.Payload["lang"].(string)
-	repo, _ := h.Payload["repo"].(string)
-	return types.EvidenceForCodeChunk(lang, repo)
+	lang, _ := h.Metadata["lang"].(string)
+	repo, _ := h.Metadata["repo"].(string)
+	return domain.EvidenceForCodeChunk(lang, repo)
 }
 
 func trustTierFromPayload(v any) int {
@@ -576,7 +681,7 @@ func (srv *Service) ListApis(ctx context.Context, service, pathKeyword string, l
 }
 
 // FindAPIs returns typed endpoint records for internal consumers.
-func (srv *Service) FindAPIs(ctx context.Context, service, pathKeyword string, limit int) ([]types.EndpointRecord, error) {
+func (srv *Service) FindAPIs(ctx context.Context, service, pathKeyword string, limit int) ([]domain.EndpointRecord, error) {
 	page, err := srv.db.ListApis(ctx, service, pathKeyword, 1, limit)
 	if err != nil || page == nil {
 		return nil, err
@@ -674,11 +779,11 @@ func (srv *Service) runbookCount() int {
 }
 
 type scoredService struct {
-	rec   types.ServiceRecord
+	rec   domain.ServiceRecord
 	score int
 }
 
-func scoreServices(all []types.ServiceRecord, query string, limit int) []types.ServiceRecord {
+func scoreServices(all []domain.ServiceRecord, query string, limit int) []domain.ServiceRecord {
 	q := platform.Normalize(query)
 	var scored []scoredService
 	for _, svc := range all {
@@ -688,14 +793,14 @@ func scoreServices(all []types.ServiceRecord, query string, limit int) []types.S
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
 	n := min(len(scored), limit)
-	out := make([]types.ServiceRecord, n)
+	out := make([]domain.ServiceRecord, n)
 	for i := range n {
 		out[i] = scored[i].rec
 	}
 	return out
 }
 
-func scoreService(svc types.ServiceRecord, q string) int {
+func scoreService(svc domain.ServiceRecord, q string) int {
 	// Exact service name match is the strongest signal — check it first
 	// before normalizing all other fields.
 	if platform.Normalize(svc.ServiceName) == q {
@@ -727,11 +832,11 @@ func scoreService(svc types.ServiceRecord, q string) int {
 }
 
 type scoredRunbook struct {
-	rec   types.RunbookRecord
+	rec   domain.RunbookRecord
 	score int
 }
 
-func scoreRunbooks(all []types.RunbookRecord, query string, limit int) []types.RunbookRecord {
+func scoreRunbooks(all []domain.RunbookRecord, query string, limit int) []domain.RunbookRecord {
 	q := platform.Normalize(query)
 	var scored []scoredRunbook
 	for _, rb := range all {
@@ -741,14 +846,14 @@ func scoreRunbooks(all []types.RunbookRecord, query string, limit int) []types.R
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
 	n := min(len(scored), limit)
-	out := make([]types.RunbookRecord, n)
+	out := make([]domain.RunbookRecord, n)
 	for i := range n {
 		out[i] = scored[i].rec
 	}
 	return out
 }
 
-func scoreRunbook(rb types.RunbookRecord, q string) int {
+func scoreRunbook(rb domain.RunbookRecord, q string) int {
 	fields := []string{rb.ID, rb.Title, rb.Path, rb.Scope}
 	fields = append(fields, rb.Tags...)
 	for _, f := range fields {
@@ -770,13 +875,13 @@ func scoreRunbook(rb types.RunbookRecord, q string) int {
 }
 
 // mergeServiceMatches appends semantic-only hits to keyword matches for extra recall.
-func mergeServiceMatches(semNames []string, all, base []types.ServiceRecord, limit int) []types.ServiceRecord {
-	byName := map[string]types.ServiceRecord{}
+func mergeServiceMatches(semNames []string, all, base []domain.ServiceRecord, limit int) []domain.ServiceRecord {
+	byName := map[string]domain.ServiceRecord{}
 	for _, s := range all {
 		byName[s.ServiceName] = s
 	}
 	seen := map[string]struct{}{}
-	out := []types.ServiceRecord{}
+	out := []domain.ServiceRecord{}
 	for _, svc := range base {
 		out = append(out, svc)
 		seen[svc.ServiceName] = struct{}{}
@@ -798,19 +903,19 @@ func mergeServiceMatches(semNames []string, all, base []types.ServiceRecord, lim
 
 // scoredRunbookHit pairs a runbook with its dense similarity score.
 type scoredRunbookHit struct {
-	rec           types.RunbookRecord
+	rec           domain.RunbookRecord
 	score         float32
 	semanticScore float32
 	evidenceClass string
 	trustTier     int
-	chunkText     string // the matched chunk's body (Qdrant payload), focused for rerank
+	chunkText     string // matched chunk body focused for reranking
 	sectionHeader string // the matched chunk's section heading
 }
 
-func runbooksFromHits(hits []store.SemanticHit, all []types.RunbookRecord) []scoredRunbookHit {
-	byID := map[string]types.RunbookRecord{}
-	byPath := map[string]types.RunbookRecord{}
-	byDocID := map[string]types.RunbookRecord{} // doc_id payload → record
+func runbooksFromHits(hits []semantic.Hit, all []domain.RunbookRecord) []scoredRunbookHit {
+	byID := map[string]domain.RunbookRecord{}
+	byPath := map[string]domain.RunbookRecord{}
+	byDocID := map[string]domain.RunbookRecord{} // doc_id payload → record
 	for _, rb := range all {
 		byID[rb.ID] = rb
 		byPath[rb.Path] = rb
@@ -820,11 +925,11 @@ func runbooksFromHits(hits []store.SemanticHit, all []types.RunbookRecord) []sco
 	}
 	best := map[string]scoredRunbookHit{}
 	for _, h := range hits {
-		chunkText, _ := h.Payload["text"].(string)
-		sectionHeader, _ := h.Payload["section_header"].(string)
-		add := func(rb types.RunbookRecord) {
+		chunkText, _ := h.Metadata["text"].(string)
+		sectionHeader, _ := h.Metadata["section_header"].(string)
+		add := func(rb domain.RunbookRecord) {
 			evidenceClass, trustTier := runbookEvidence(h, rb)
-			score := float32(types.TrustAdjustedScore(float64(h.Score), trustTier))
+			score := float32(domain.TrustAdjustedScore(float64(h.Score), trustTier))
 			item := scoredRunbookHit{
 				rec:           rb,
 				score:         score,
@@ -842,19 +947,19 @@ func runbooksFromHits(hits []store.SemanticHit, all []types.RunbookRecord) []sco
 				best[key] = item
 			}
 		}
-		if id, ok := h.Payload["id"].(string); ok {
+		if id, ok := h.Metadata["id"].(string); ok {
 			if rb, found := byID[id]; found {
 				add(rb)
 				continue
 			}
 		}
-		if docID, ok := h.Payload["doc_id"].(string); ok {
+		if docID, ok := h.Metadata["doc_id"].(string); ok {
 			if rb, found := byDocID[docID]; found {
 				add(rb)
 				continue
 			}
 		}
-		if p, ok := h.Payload["path"].(string); ok {
+		if p, ok := h.Metadata["path"].(string); ok {
 			if rb, found := byPath[p]; found {
 				add(rb)
 			}
@@ -868,27 +973,27 @@ func runbooksFromHits(hits []store.SemanticHit, all []types.RunbookRecord) []sco
 	return out
 }
 
-func runbookEvidence(h store.SemanticHit, rb types.RunbookRecord) (string, int) {
-	class, _ := h.Payload["evidence_class"].(string)
-	trust := trustTierFromPayload(h.Payload["trust_tier"])
+func runbookEvidence(h semantic.Hit, rb domain.RunbookRecord) (string, int) {
+	class, _ := h.Metadata["evidence_class"].(string)
+	trust := trustTierFromPayload(h.Metadata["trust_tier"])
 	if class != "" && trust > 0 {
 		return class, trust
 	}
 	scope := rb.Scope
 	if scope == "" {
-		scope, _ = h.Payload["scope"].(string)
+		scope, _ = h.Metadata["scope"].(string)
 	}
-	return types.EvidenceForRunbookScope(scope)
+	return domain.EvidenceForRunbookScope(scope)
 }
 
-func runbookHitsToTyped(hits []scoredRunbookHit, strip bool) []types.RunbookSearchHit {
-	out := make([]types.RunbookSearchHit, 0, len(hits))
+func runbookHitsToTyped(hits []scoredRunbookHit, strip bool) []domain.RunbookSearchHit {
+	out := make([]domain.RunbookSearchHit, 0, len(hits))
 	for _, h := range hits {
 		rb := h.rec
 		if strip {
 			rb.Text = ""
 		}
-		out = append(out, types.RunbookSearchHit{
+		out = append(out, domain.RunbookSearchHit{
 			Record: rb, ChunkText: h.chunkText, SectionHeader: h.sectionHeader,
 			Score: float64(h.score), SemanticScore: float64(h.semanticScore),
 			EvidenceClass: h.evidenceClass, TrustTier: h.trustTier,
@@ -897,7 +1002,7 @@ func runbookHitsToTyped(hits []scoredRunbookHit, strip bool) []types.RunbookSear
 	return out
 }
 
-func runbookSearchHitsToMaps(hits []types.RunbookSearchHit) []map[string]any {
+func runbookSearchHitsToMaps(hits []domain.RunbookSearchHit) []map[string]any {
 	out := make([]map[string]any, 0, len(hits))
 	for _, hit := range hits {
 		rb := hit.Record

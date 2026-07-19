@@ -3,17 +3,17 @@ package graph
 import (
 	"testing"
 
-	"github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
-func edge(from, to string) types.DependencyEdge {
-	return types.DependencyEdge{From: from, To: to, Type: types.EdgeFeign, Confidence: 0.9}
+func edge(from, to string) domain.DependencyEdge {
+	return domain.DependencyEdge{From: from, To: to, Type: domain.EdgeFeign, Confidence: 0.9}
 }
 
 func newTestGraph() *Graph {
 	g := New()
 	// a -> b -> c -> d ; e -> b
-	g.Rebuild([]types.DependencyEdge{
+	g.Rebuild([]domain.DependencyEdge{
 		edge("a", "b"), edge("b", "c"), edge("c", "d"), edge("e", "b"),
 	})
 	return g
@@ -53,7 +53,7 @@ func TestChainBoth(t *testing.T) {
 
 func TestChainNoCycleExplosion(t *testing.T) {
 	g := New()
-	g.Rebuild([]types.DependencyEdge{edge("a", "b"), edge("b", "a")})
+	g.Rebuild([]domain.DependencyEdge{edge("a", "b"), edge("b", "a")})
 	// depth 5 over a 2-cycle must terminate and not duplicate edges
 	got := g.Chain("a", Downstream, 5)
 	if len(got.Downstream) != 2 {
@@ -63,7 +63,7 @@ func TestChainNoCycleExplosion(t *testing.T) {
 
 func TestChainNormalization(t *testing.T) {
 	g := New()
-	g.Rebuild([]types.DependencyEdge{edge("Hsas_App_User", "hsds-user-provider")})
+	g.Rebuild([]domain.DependencyEdge{edge("Hsas_App_User", "hsds-user-provider")})
 	// query with different casing/separators should still resolve
 	got := g.Chain("hsas-app-user", Downstream, 1)
 	if len(got.Downstream) != 1 {

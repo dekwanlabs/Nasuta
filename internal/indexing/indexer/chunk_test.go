@@ -4,13 +4,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 )
 
 func TestIsNoiseFile(t *testing.T) {
 	noise := []string{
 		// dir-based
+		".nasuta/bm25_vocab.json",
 		"iot__cloud__hsas__hsas-openapi/hsas-openapi-device/src/test/java/product_v2/kcm/云端chefmode_generated.json",
 		"repo/src/test/java/com/foo/BarTest.java",
 		"repo/tests/conftest.py",
@@ -57,20 +58,20 @@ func TestIsNoiseFile(t *testing.T) {
 }
 
 func TestCanonicalDependenciesMergeEvidence(t *testing.T) {
-	services := []types.ServiceRecord{
+	services := []domain.ServiceRecord{
 		{ServiceName: "a", Repo: "team/a", ModulePath: ".", Layer: "server", Language: "go"},
 		{ServiceName: "b", Repo: "team/b", ModulePath: ".", Layer: "server", Language: "go"},
 	}
-	edges := []types.DependencyEdge{
-		{From: "a", To: "b", Type: types.EdgeHTTP, Confidence: 0.65, Evidence: []types.Evidence{{Path: "repos/team/a/a.go", Line: 1, Kind: types.SourceCodeScan}}},
-		{From: "a", To: "b", Type: types.EdgeHTTP, Confidence: 0.9, Evidence: []types.Evidence{{Path: "repos/team/a/b.go", Line: 2, Kind: types.SourceCodeScan}}},
+	edges := []domain.DependencyEdge{
+		{From: "a", To: "b", Type: domain.EdgeHTTP, Confidence: 0.65, Evidence: []domain.Evidence{{Path: "repos/team/a/a.go", Line: 1, Kind: domain.SourceCodeScan}}},
+		{From: "a", To: "b", Type: domain.EdgeHTTP, Confidence: 0.9, Evidence: []domain.Evidence{{Path: "repos/team/a/b.go", Line: 2, Kind: domain.SourceCodeScan}}},
 	}
-	bundle := CanonicalizeBundle(types.IndexBundle{Services: services, Dependencies: edges})
+	bundle := CanonicalizeBundle(domain.IndexBundle{Services: services, Dependencies: edges})
 	if len(bundle.Dependencies) != 1 {
 		t.Fatalf("dependencies = %d, want one logical edge", len(bundle.Dependencies))
 	}
 	edge := bundle.Dependencies[0]
-	if edge.TargetKind != types.DependencyTargetService || len(edge.Evidence) != 2 || edge.Confidence != 0.9 {
+	if edge.TargetKind != domain.DependencyTargetService || len(edge.Evidence) != 2 || edge.Confidence != 0.9 {
 		t.Fatalf("canonical dependency = %+v", edge)
 	}
 }

@@ -1,6 +1,6 @@
 package config
 
-import platformconfig "github.com/dekwanlabs/astris/platform/config"
+import platformconfig "github.com/dekwanlabs/nasuta/platform/config"
 
 // Duration preserves the env-friendly duration contract at the public config boundary.
 type Duration = platformconfig.Duration
@@ -10,6 +10,12 @@ type LogConfig = platformconfig.LogConfig
 
 // Config holds environment-backed runtime configuration.
 type Config = platformconfig.Config
+
+type SemanticConfig = platformconfig.SemanticConfig
+
+type SemanticAuth = platformconfig.SemanticAuth
+
+type SemanticTLS = platformconfig.SemanticTLS
 
 // PlatformSettings holds runtime settings managed by the platform UI.
 type PlatformSettings = platformconfig.PlatformSettings

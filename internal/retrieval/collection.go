@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 // collectServices formats the anchor's services with their endpoints.
@@ -63,7 +63,7 @@ func (retrieve *Retriever) collectCode(ctx context.Context, codeHits []codeHit, 
 		}
 		evidenceClass, trustTier := h.evidenceClass, h.trustTier
 		if evidenceClass == "" || trustTier <= 0 {
-			evidenceClass, trustTier = types.EvidenceForCodeChunk(h.lang, h.repo)
+			evidenceClass, trustTier = domain.EvidenceForCodeChunk(h.lang, h.repo)
 		}
 		addCode(codeDoc{
 			source:        "code",
@@ -92,7 +92,7 @@ func (retrieve *Retriever) collectCode(ctx context.Context, codeHits []codeHit, 
 //
 // Multiple matched chunks from the same document are merged within a hard
 // online-read bound. Full document bodies belong to explicit full-read flows.
-func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []types.RunbookSearchHit, addCode func(codeDoc)) {
+func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []domain.RunbookSearchHit, addCode func(codeDoc)) {
 	if len(runbookHits) == 0 {
 		return
 	}
@@ -258,11 +258,11 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 
 // collectCodeGraph performs one scoped FTS query, then fetches selected bodies.
 func (retrieve *Retriever) collectCodeGraph(ctx context.Context, keywords, services []string, terms QueryTerms, addCode func(codeDoc)) {
-	traceEnabled := types.TraceEnabled(ctx)
+	traceEnabled := domain.TraceEnabled(ctx)
 	started := time.Now()
 	allHits := retrieve.codeGraphQuery(ctx, keywords, services, 20)
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "codegraph_search", DurationMS: time.Since(started).Milliseconds(),
 			Input:  map[string]any{"keywords": keywords, "services": services},
 			Output: map[string]any{"hits": len(allHits)},
@@ -358,8 +358,8 @@ func (retrieve *Retriever) collectCodeGraph(ctx context.Context, keywords, servi
 			chars:         len(nodeOut),
 			refs:          countRefsFromNode(nodeOut),
 			denseScore:    synScore,
-			evidenceClass: types.EvidenceClassCodeRuntime,
-			trustTier:     types.TrustCodeRuntime,
+			evidenceClass: domain.EvidenceClassCodeRuntime,
+			trustTier:     domain.TrustCodeRuntime,
 		})
 		return true
 	}

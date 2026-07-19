@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/log"
 	"gopkg.in/yaml.v3"
 )
 
@@ -118,7 +118,7 @@ func (g *Generator) ReformatFlow(ctx context.Context, original string) (string, 
 	if g.llm == nil {
 		return original, fmt.Errorf("llm not configured")
 	}
-	prompt := fmt.Sprintf(`You are a technical documentation editor. Reformat the raw content below into the Astris flow template.
+	prompt := fmt.Sprintf(`You are a technical documentation editor. Reformat the raw content below into the Nasuta flow template.
 
 Rules:
 - Output ONLY the final markdown document, no commentary.

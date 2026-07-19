@@ -15,6 +15,8 @@ const (
 	GroupQASession MySQLGroup = "qa_session"
 	GroupQARun     MySQLGroup = "qa_run"
 	GroupQAMemory  MySQLGroup = "qa_memory"
+	GroupIncident  MySQLGroup = "incident"
+	GroupApproval  MySQLGroup = "approval"
 )
 
 // allMySQLGroups lists every schema group in dependency order. GroupRBAC follows
@@ -26,6 +28,8 @@ var allMySQLGroups = []MySQLGroup{
 	GroupQASession,
 	GroupQARun,
 	GroupQAMemory,
+	GroupIncident,
+	GroupApproval,
 }
 
 // AllGroups returns every known MySQL schema group.
@@ -194,6 +198,52 @@ var mysqlSchema = map[MySQLGroup][]string{
 				UNIQUE KEY uniq_user_factkey_active (user_id, active_fact_key),
 				KEY idx_user_status (user_id, status),
 				KEY idx_kind (kind)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	},
+	GroupIncident: {
+		`CREATE TABLE IF NOT EXISTS incident_records (
+				id                 VARCHAR(64)  NOT NULL PRIMARY KEY,
+				dedup_key          VARCHAR(512) NOT NULL DEFAULT '',
+				created_at         TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at         TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+				status             VARCHAR(32)  NOT NULL,
+				source             VARCHAR(64)  NOT NULL,
+				alert_title        VARCHAR(512) NOT NULL,
+				alert_payload_json LONGTEXT,
+				error_logs_json    LONGTEXT,
+				traces_json        LONGTEXT,
+				affected_svcs_json TEXT,
+				root_cause         TEXT,
+				solution           TEXT,
+				analysis_doc       LONGTEXT,
+				assigned_to        VARCHAR(128) NOT NULL DEFAULT '',
+				fix_branches_json  LONGTEXT,
+				fix_started_at     TIMESTAMP NULL DEFAULT NULL,
+				fixed_at           TIMESTAMP NULL DEFAULT NULL,
+				created_unix       BIGINT NOT NULL DEFAULT 0,
+				updated_unix       BIGINT NOT NULL DEFAULT 0,
+				KEY idx_dedup (dedup_key),
+				KEY idx_status (status),
+				KEY idx_created (created_unix)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	},
+	GroupApproval: {
+		`CREATE TABLE IF NOT EXISTS pending_actions (
+				id           VARCHAR(64) PRIMARY KEY,
+				tool         VARCHAR(64) NOT NULL,
+				incident_id  VARCHAR(64) NOT NULL DEFAULT '',
+				args_json    TEXT NOT NULL,
+				rationale    TEXT NOT NULL,
+				impact       TEXT NOT NULL,
+				status       VARCHAR(16) NOT NULL DEFAULT 'pending',
+				requested_by BIGINT NOT NULL DEFAULT 0,
+				approver     BIGINT NOT NULL DEFAULT 0,
+				result_json  TEXT,
+				created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				decided_at   TIMESTAMP NULL DEFAULT NULL,
+				expires_at   TIMESTAMP NOT NULL,
+				KEY idx_status (status),
+				KEY idx_incident (incident_id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	},
 }

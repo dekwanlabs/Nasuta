@@ -106,47 +106,104 @@ func TestSnapshotSchemaMutationDoesNotChangeRegistry(t *testing.T) {
 	}
 }
 
-func TestReadRegistryCannotReplaceOrRemoveWriteTools(t *testing.T) {
+func TestReadRegistryReconcilesOwnedToolSet(t *testing.T) {
+	registry := NewRegistry()
+	publisher := NewReadRegistry(registry)
+	if err := publisher.Reconcile(ReadToolSet{
+		Owner: "scenario.observe",
+		Tools: []ReadTool{
+			testReadTool("logs", "v1"),
+			testReadTool("traces", "v1"),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := registry.Snapshot(ReadPolicy())
+
+	if err := publisher.Reconcile(ReadToolSet{
+		Owner: "scenario.observe",
+		Tools: []ReadTool{testReadTool("logs", "v2")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current := registry.Snapshot(ReadPolicy())
+	if _, ok := current.Get("traces"); ok {
+		t.Fatal("reconcile retained an omitted owned tool")
+	}
+	result, err := NewExecutor(0).Execute(context.Background(), current, "logs", Arguments{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldResult, err := NewExecutor(0).Execute(context.Background(), old, "logs", Arguments{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "v2" || oldResult.Content != "v1" {
+		t.Fatalf("snapshot results = current %q old %q", result.Content, oldResult.Content)
+	}
+
+	if err := publisher.Reconcile(ReadToolSet{Owner: "scenario.observe"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := registry.Snapshot(ReadPolicy()).Tools(); len(got) != 0 {
+		t.Fatalf("empty desired set retained %d tools", len(got))
+	}
+}
+
+func TestReadRegistryReconcileRejectsForeignIDsAtomically(t *testing.T) {
+	registry := NewRegistry()
+	publisher := NewReadRegistry(registry)
+	if err := registry.Register(testTool("builtin", "platform")); err != nil {
+		t.Fatal(err)
+	}
+	err := publisher.Reconcile(ReadToolSet{
+		Owner: "scenario.observe",
+		Tools: []ReadTool{
+			testReadTool("new", "scenario"),
+			testReadTool("builtin", "replacement"),
+		},
+	})
+	if err == nil {
+		t.Fatal("reconcile replaced an unowned tool")
+	}
+	snapshot := registry.Snapshot(ReadPolicy())
+	if _, ok := snapshot.Get("new"); ok {
+		t.Fatal("reconcile partially published before the ownership conflict")
+	}
+	result, execErr := NewExecutor(0).Execute(context.Background(), snapshot, "builtin", Arguments{})
+	if execErr != nil {
+		t.Fatal(execErr)
+	}
+	if result.Content != "platform" {
+		t.Fatalf("builtin result = %q", result.Content)
+	}
+}
+
+func TestReadRegistryReconcileCannotReplaceWriteTool(t *testing.T) {
 	registry := NewRegistry()
 	write := testTool("write", "pending")
 	write.Kind = KindWrite
 	if err := registry.Register(write); err != nil {
 		t.Fatal(err)
 	}
-	publisher := NewReadRegistry(registry)
-	read := ReadTool{
-		ID: "write", Description: "read replacement",
-		InputSchema: JSONSchema{"type": "object", "properties": map[string]any{}},
-		Handler: HandlerFunc(func(context.Context, Arguments) (Result, error) {
-			return Result{Content: "read"}, nil
-		}),
+	err := NewReadRegistry(registry).Reconcile(ReadToolSet{
+		Owner: "scenario.observe",
+		Tools: []ReadTool{testReadTool("write", "read")},
+	})
+	if err == nil {
+		t.Fatal("reconcile replaced a write tool")
 	}
-	if err := publisher.Replace(read); err == nil {
-		t.Fatal("read publisher replaced a write tool")
-	}
-	if err := publisher.Unregister("write"); err == nil {
-		t.Fatal("read publisher removed a write tool")
-	}
-	if _, ok := registry.Snapshot(AllPolicy()).Get("write"); !ok {
-		t.Fatal("write tool disappeared after rejected read operations")
+	candidate, ok := registry.Snapshot(AllPolicy()).Get("write")
+	if !ok || candidate.Kind != KindWrite {
+		t.Fatalf("write tool = %#v, ok=%v", candidate, ok)
 	}
 }
 
-func TestReadRegistryPublishesReadTools(t *testing.T) {
-	registry := NewRegistry()
-	publisher := NewReadRegistry(registry)
-	if err := publisher.Register(ReadTool{
-		ID: "read", Description: "read tool",
-		InputSchema: JSONSchema{"type": "object", "properties": map[string]any{}},
-		Handler: HandlerFunc(func(context.Context, Arguments) (Result, error) {
-			return Result{Content: "ok"}, nil
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	candidate, ok := registry.Snapshot(ReadPolicy()).Get("read")
-	if !ok || candidate.Kind != KindRead {
-		t.Fatalf("published tool = %#v, ok=%v", candidate, ok)
+func testReadTool(id ToolID, content string) ReadTool {
+	candidate := testTool(id, content)
+	return ReadTool{
+		ID: candidate.ID, Description: candidate.Description, InputSchema: candidate.InputSchema,
+		Handler: candidate.Handler,
 	}
 }
 

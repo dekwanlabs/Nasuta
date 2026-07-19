@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dekwanlabs/astris/internal/platform/dbschema"
+	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 	_ "github.com/go-sql-driver/mysql"
 )
 

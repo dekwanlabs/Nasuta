@@ -4,15 +4,16 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dekwanlabs/astris/auth"
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/agent"
-	"github.com/dekwanlabs/astris/internal/memory"
-	"github.com/dekwanlabs/astris/internal/platform/embed"
-	"github.com/dekwanlabs/astris/internal/platform/graph"
-	"github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/memory"
+	"github.com/dekwanlabs/nasuta/internal/platform/embed"
+	"github.com/dekwanlabs/nasuta/internal/platform/graph"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 // IndexingOps is the port to the indexing service for system operations.
@@ -37,7 +38,7 @@ type Handler struct {
 	db             *store.SQLite
 	docDB          *store.DocStore
 	authDB         *auth.DB
-	semantic       store.SemanticStore
+	semantic       semantic.Store
 	embedder       embed.Embedder
 	graph          *graph.Graph
 	tools          *agent.Service
@@ -68,7 +69,7 @@ func (handler *Handler) rolePromptFor(userID int64) string {
 }
 
 // NewHandler builds the dashboard HTTP handler.
-func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem store.SemanticStore, emb embed.Embedder, g *graph.Graph, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool) *Handler {
+func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem semantic.Store, emb embed.Embedder, g *graph.Graph, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool) *Handler {
 	if ps == nil {
 		ps = &config.PlatformSettings{}
 	}

@@ -3,7 +3,7 @@ package dashboard
 import (
 	"context"
 	"fmt"
-	"github.com/dekwanlabs/astris/platform/httputil"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -11,10 +11,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/dekwanlabs/astris/auth"
-	"github.com/dekwanlabs/astris/config"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 type projectInfo struct {
@@ -31,7 +32,7 @@ type projectGroup struct {
 	Name     string        `json:"name"`
 	Projects []projectInfo `json:"projects"`
 	// syncedRepos is scratch state used during a detail pass to collect the
-	// repos needing a Qdrant count; never serialized.
+	// repos needing a semantic count; never serialized.
 	syncedRepos []string `json:"-"`
 }
 
@@ -168,7 +169,7 @@ func (handler *Handler) scanProjects(ctx context.Context, root string, detail bo
 	}
 
 	if detail {
-		// Collect all synced repos across groups for the parallel Qdrant pass.
+		// Collect synced repos once for the parallel semantic count pass.
 		var allRepos []string
 		for _, g := range groups {
 			allRepos = append(allRepos, g.syncedRepos...)
@@ -202,7 +203,7 @@ type projectStatusSets struct {
 }
 
 // buildProjectStatusSets queries the backing stores concurrently.
-// SQLite, CodeGraph, and DocStore are batched; Qdrant uses a bounded count pool.
+// SQLite, CodeGraph, and DocStore are batched; semantic counts use a bounded pool.
 // Unconfigured or failing stores are left nil and treated as "no data".
 func (handler *Handler) buildProjectStatusSets(ctx context.Context, repos []string) *projectStatusSets {
 	var (
@@ -248,7 +249,7 @@ func (handler *Handler) buildProjectStatusSets(ctx context.Context, repos []stri
 		if handler.docDB == nil {
 			return
 		}
-		metas, err := handler.docDB.ListDocsMetaByKind(types.DocKindModule)
+		metas, err := handler.docDB.ListDocsMetaByKind(domain.DocKindModule)
 		if err != nil {
 			log.Warnf("[projects] docs set: %v", err)
 			return
@@ -258,7 +259,7 @@ func (handler *Handler) buildProjectStatusSets(ctx context.Context, repos []stri
 
 	go func() {
 		defer wg.Done()
-		if handler.semantic == nil || !handler.semantic.Enabled() {
+		if handler.semantic == nil || !handler.semantic.Capabilities().Count {
 			return
 		}
 		embedded = handler.countEmbeddedByRepo(ctx, repos)
@@ -268,7 +269,7 @@ func (handler *Handler) buildProjectStatusSets(ctx context.Context, repos []stri
 	return &projectStatusSets{indexed: indexed, codegraph: codegraph, docs: docs, embedded: embedded}
 }
 
-// countEmbeddedByRepo runs Qdrant count queries for each repo concurrently
+// countEmbeddedByRepo runs semantic count queries for each repo concurrently
 // (capped at 8 in flight) and returns the set of repos that have ≥1 vector.
 func (handler *Handler) countEmbeddedByRepo(ctx context.Context, repos []string) map[string]bool {
 	out := map[string]bool{}
@@ -281,7 +282,7 @@ func (handler *Handler) countEmbeddedByRepo(ctx context.Context, repos []string)
 		go func(repo string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			n, err := handler.semantic.CountByFilter(ctx, map[string]string{"repo": repo})
+			n, err := handler.semantic.Count(ctx, semantic.Filter{Keywords: map[string]string{"repo": repo}})
 			if err != nil {
 				log.Warnf("[projects] embedded count %q: %v", repo, err)
 				return
@@ -315,7 +316,7 @@ func bucketCodegraphPaths(paths []string) map[string]bool {
 // bucketModuleDocs maps module-doc filenames to repo keys. docgen stores
 // module docs as "group/name.md" or "group/name__submodule.md"; the repo key
 // is "group/<name before __>".
-func bucketModuleDocs(metas []types.DocRecord) map[string]bool {
+func bucketModuleDocs(metas []domain.DocRecord) map[string]bool {
 	out := make(map[string]bool, len(metas))
 	for _, m := range metas {
 		fn := m.Filename

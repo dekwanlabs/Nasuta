@@ -1,4 +1,4 @@
-package mcptransport
+package mcp
 
 import (
 	"context"
@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/agent"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/log"
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/tool"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -89,8 +89,8 @@ func BuildMCP(tools *agent.Service, registry *agent.Registry) (*server.MCPServer
 	if registry == nil {
 		registry = agent.NewRegistry(tools, config.Config{})
 	}
-	snapshot := registry.Snapshot(toolruntime.ReadPolicy())
-	executor := toolruntime.NewExecutor(30 * time.Second)
+	snapshot := registry.Snapshot(tool.ReadPolicy())
+	executor := tool.NewExecutor(30 * time.Second)
 	for _, candidate := range snapshot.MCPTools() {
 		toolID := candidate.ID
 		schema, err := schemaWithTrace(candidate.InputSchema)
@@ -104,9 +104,9 @@ func BuildMCP(tools *agent.Service, registry *agent.Registry) (*server.MCPServer
 			var recorder *mcpTraceRecorder
 			if traceEnabled {
 				recorder = &mcpTraceRecorder{started: time.Now()}
-				ctx = types.WithTraceRecorder(ctx, recorder)
+				ctx = domain.WithTraceRecorder(ctx, recorder)
 			}
-			result, err := executor.Execute(ctx, snapshot, toolID, toolruntime.Arguments(args))
+			result, err := executor.Execute(ctx, snapshot, toolID, tool.Arguments(args))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -120,7 +120,7 @@ func BuildMCP(tools *agent.Service, registry *agent.Registry) (*server.MCPServer
 	return mcpServer, nil
 }
 
-func schemaWithTrace(schema toolruntime.JSONSchema) (json.RawMessage, error) {
+func schemaWithTrace(schema tool.JSONSchema) (json.RawMessage, error) {
 	cloned := cloneSchemaMap(map[string]any(schema))
 	properties, ok := cloned["properties"].(map[string]any)
 	if !ok {
@@ -166,10 +166,10 @@ type mcpTraceRecorder struct {
 	mu       sync.Mutex
 	started  time.Time
 	sequence int
-	events   []types.EvaluationTrace
+	events   []domain.EvaluationTrace
 }
 
-func (recorder *mcpTraceRecorder) RecordTrace(event types.EvaluationTrace) {
+func (recorder *mcpTraceRecorder) RecordTrace(event domain.EvaluationTrace) {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	recorder.sequence++
@@ -180,13 +180,13 @@ func (recorder *mcpTraceRecorder) RecordTrace(event types.EvaluationTrace) {
 	recorder.events = append(recorder.events, event)
 }
 
-func (recorder *mcpTraceRecorder) snapshot() []types.EvaluationTrace {
+func (recorder *mcpTraceRecorder) snapshot() []domain.EvaluationTrace {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
-	return append([]types.EvaluationTrace(nil), recorder.events...)
+	return append([]domain.EvaluationTrace(nil), recorder.events...)
 }
 
-func attachTrace(result string, events []types.EvaluationTrace) string {
+func attachTrace(result string, events []domain.EvaluationTrace) string {
 	if len(events) == 0 {
 		return result
 	}

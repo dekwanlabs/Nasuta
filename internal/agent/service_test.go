@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/dekwanlabs/astris/config"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/graph"
-	"github.com/dekwanlabs/astris/internal/retrieval"
-	"github.com/dekwanlabs/astris/llm"
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/graph"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestOutcomeForRejectsEmptySuccess(t *testing.T) {
@@ -121,23 +121,23 @@ func TestRunStoreRecoversInterruptedRuns(t *testing.T) {
 
 type emptyRetrievalTools struct{}
 
-func (emptyRetrievalTools) AllServices(context.Context) ([]types.ServiceRecord, error) {
+func (emptyRetrievalTools) AllServices(context.Context) ([]domain.ServiceRecord, error) {
 	return nil, nil
 }
-func (emptyRetrievalTools) FindServices(context.Context, string, int) (types.SearchResult[types.ServiceRecord], error) {
-	return types.SearchResult[types.ServiceRecord]{}, nil
+func (emptyRetrievalTools) FindServices(context.Context, string, int) (domain.SearchResult[domain.ServiceRecord], error) {
+	return domain.SearchResult[domain.ServiceRecord]{}, nil
 }
-func (emptyRetrievalTools) FindCode(context.Context, string, string, int) (types.SearchResult[types.CodeSearchHit], error) {
-	return types.SearchResult[types.CodeSearchHit]{}, nil
+func (emptyRetrievalTools) FindCode(context.Context, string, string, int) (domain.SearchResult[domain.CodeSearchHit], error) {
+	return domain.SearchResult[domain.CodeSearchHit]{}, nil
 }
-func (emptyRetrievalTools) FindAPIs(context.Context, string, string, int) ([]types.EndpointRecord, error) {
+func (emptyRetrievalTools) FindAPIs(context.Context, string, string, int) ([]domain.EndpointRecord, error) {
 	return nil, nil
 }
-func (emptyRetrievalTools) FindRunbooks(context.Context, string, int, bool, string) (types.SearchResult[types.RunbookSearchHit], error) {
-	return types.SearchResult[types.RunbookSearchHit]{}, nil
+func (emptyRetrievalTools) FindRunbooks(context.Context, string, int, bool, string) (domain.SearchResult[domain.RunbookSearchHit], error) {
+	return domain.SearchResult[domain.RunbookSearchHit]{}, nil
 }
 func (emptyRetrievalTools) TraceDeps(string, string, int) graph.Result { return graph.Result{} }
-func (emptyRetrievalTools) ServiceModules(context.Context, []string) ([]types.ServiceRecord, error) {
+func (emptyRetrievalTools) ServiceModules(context.Context, []string) ([]domain.ServiceRecord, error) {
 	return nil, nil
 }
 
@@ -158,7 +158,7 @@ func TestRunAgentFinishesHubWhenLLMCallFails(t *testing.T) {
 
 	const runID = "run-llm-failure"
 	ch := hub.Subscribe(runID)
-	if _, err := qa.runAgentWithPlan(context.Background(), "question", ConversationContext{}, 0, nil, nil, "", runID, types.EvidencePlan{Sources: types.AllEvidence}); err != nil {
+	if _, err := qa.runAgentWithPlan(context.Background(), "question", ConversationContext{}, 0, nil, nil, "", runID, domain.EvidencePlan{Sources: domain.AllEvidence}); err != nil {
 		t.Fatalf("runAgentWithPlan: %v", err)
 	}
 
@@ -334,11 +334,11 @@ func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 		Description: "runtime evidence",
 		Kind:        ToolKindRead,
 		InputSchema: objectSchema(map[string]any{}, nil),
-		Prefetch:    &toolruntime.PrefetchSpec{Description: "load runtime evidence"},
-		Handler: toolruntime.HandlerFunc(func(context.Context, toolruntime.Arguments) (toolruntime.Result, error) {
-			return toolruntime.Result{
+		Prefetch:    &tool.PrefetchSpec{Description: "load runtime evidence"},
+		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
+			return tool.Result{
 				Content:    "evidence",
-				References: []toolruntime.Reference{{Type: "trace", Target: "trace-1"}},
+				References: []tool.Reference{{Type: "trace", Target: "trace-1"}},
 			}, nil
 		}),
 	})

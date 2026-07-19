@@ -12,12 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/graph"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/graph"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 // Reference is one source surfaced with retrieved context.
@@ -90,7 +90,7 @@ type anchor struct {
 	services   []string
 	svcMatches map[string]serviceMatch
 	codeHits   []codeHit
-	runbooks   []types.RunbookSearchHit
+	runbooks   []domain.RunbookSearchHit
 }
 
 // Retriever orchestrates workspace code, docs, and codegraph retrieval.
@@ -105,13 +105,13 @@ type Retriever struct {
 }
 
 type toolset interface {
-	AllServices(ctx context.Context) ([]types.ServiceRecord, error)
-	FindServices(ctx context.Context, query string, limit int) (types.SearchResult[types.ServiceRecord], error)
-	FindCode(ctx context.Context, query, lang string, limit int) (types.SearchResult[types.CodeSearchHit], error)
-	FindAPIs(ctx context.Context, service, pathKeyword string, limit int) ([]types.EndpointRecord, error)
-	FindRunbooks(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (types.SearchResult[types.RunbookSearchHit], error)
+	AllServices(ctx context.Context) ([]domain.ServiceRecord, error)
+	FindServices(ctx context.Context, query string, limit int) (domain.SearchResult[domain.ServiceRecord], error)
+	FindCode(ctx context.Context, query, lang string, limit int) (domain.SearchResult[domain.CodeSearchHit], error)
+	FindAPIs(ctx context.Context, service, pathKeyword string, limit int) ([]domain.EndpointRecord, error)
+	FindRunbooks(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (domain.SearchResult[domain.RunbookSearchHit], error)
 	TraceDeps(service, direction string, depth int) graph.Result
-	ServiceModules(ctx context.Context, repos []string) ([]types.ServiceRecord, error)
+	ServiceModules(ctx context.Context, repos []string) ([]domain.ServiceRecord, error)
 }
 
 // New builds a Retriever with dense fallback reranking enabled.
@@ -152,8 +152,8 @@ func sortPartsByPriority(parts []partial) {
 }
 
 // RetrievePlan dispatches only the pre-retrieval backends selected for this run.
-func (retrieve *Retriever) RetrievePlan(ctx context.Context, searchQuery, rawQuestion string, terms QueryTerms, evidencePlan types.EvidencePlan) (*RetrievedContext, error) {
-	traceEnabled := types.TraceEnabled(ctx)
+func (retrieve *Retriever) RetrievePlan(ctx context.Context, searchQuery, rawQuestion string, terms QueryTerms, evidencePlan domain.EvidencePlan) (*RetrievedContext, error) {
+	traceEnabled := domain.TraceEnabled(ctx)
 	if !evidencePlan.Valid() {
 		return nil, fmt.Errorf("retrieval: invalid source bits %08b", evidencePlan.Sources)
 	}
@@ -161,11 +161,11 @@ func (retrieve *Retriever) RetrievePlan(ctx context.Context, searchQuery, rawQue
 		rawQuestion = searchQuery
 	}
 	var a anchor
-	if evidencePlan.Has(types.Internal) {
+	if evidencePlan.Has(domain.Internal) {
 		started := time.Now()
 		a = retrieve.discover(ctx, searchQuery, nil, false)
 		if traceEnabled {
-			types.RecordTrace(ctx, types.EvaluationTrace{
+			domain.RecordTrace(ctx, domain.EvaluationTrace{
 				Node: "retrieval_discover", DurationMS: time.Since(started).Milliseconds(),
 				Input:  map[string]any{"query": searchQuery, "service_scoped": false},
 				Output: map[string]any{"services": len(a.services), "code_hits": len(a.codeHits), "runbooks": len(a.runbooks)},
@@ -175,7 +175,7 @@ func (retrieve *Retriever) RetrievePlan(ctx context.Context, searchQuery, rawQue
 	expandStarted := time.Now()
 	parts, codePool := retrieve.expand(ctx, a, rawQuestion, terms, evidencePlan)
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "retrieval_expand", DurationMS: time.Since(expandStarted).Milliseconds(),
 			Output: map[string]any{"parts": len(parts), "code_pool": len(codePool), "sources": evidencePlan.SourceNames()},
 		})
@@ -183,7 +183,7 @@ func (retrieve *Retriever) RetrievePlan(ctx context.Context, searchQuery, rawQue
 	assembleStarted := time.Now()
 	result := retrieve.assemble(ctx, parts, codePool, searchQuery)
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "retrieval_assemble", DurationMS: time.Since(assembleStarted).Milliseconds(),
 			Output: map[string]any{
 				"hit_count": result.HitCount, "references": len(result.References), "context_chars": result.selection.Chars,
@@ -289,7 +289,7 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 
 	go func() {
 		defer wg.Done()
-		var matches []types.ServiceRecord
+		var matches []domain.ServiceRecord
 		if serviceScoped {
 			matches = retrieve.configuredServiceMatches(ctx, servicePatterns, 8)
 		} else {
@@ -352,7 +352,7 @@ func matchesConfiguredService(name string, patterns []string) bool {
 	return false
 }
 
-func (retrieve *Retriever) configuredServiceMatches(ctx context.Context, patterns []string, limit int) []types.ServiceRecord {
+func (retrieve *Retriever) configuredServiceMatches(ctx context.Context, patterns []string, limit int) []domain.ServiceRecord {
 	if retrieve.tools == nil {
 		return nil
 	}
@@ -361,7 +361,7 @@ func (retrieve *Retriever) configuredServiceMatches(ctx context.Context, pattern
 		log.WarnfCtx(ctx, "[qa] configured service lookup failed: %v", err)
 		return nil
 	}
-	matches := make([]types.ServiceRecord, 0)
+	matches := make([]domain.ServiceRecord, 0)
 	for _, service := range all {
 		if !matchesConfiguredService(service.ServiceName, patterns) {
 			continue
@@ -376,14 +376,14 @@ func (retrieve *Retriever) configuredServiceMatches(ctx context.Context, pattern
 
 // expand fans anchor hits into formatted parts plus the unified code pool.
 func (retrieve *Retriever) expand(
-	ctx context.Context, a anchor, rawQuestion string, terms QueryTerms, evidencePlan types.EvidencePlan,
+	ctx context.Context, a anchor, rawQuestion string, terms QueryTerms, evidencePlan domain.EvidencePlan,
 ) (parts []partial, codePool []codeDoc) {
 	var mu sync.Mutex
 	addPart := func(p partial) { mu.Lock(); parts = append(parts, p); mu.Unlock() }
 	addCode := func(d codeDoc) { mu.Lock(); codePool = append(codePool, d); mu.Unlock() }
 	var wg sync.WaitGroup
 
-	if evidencePlan.Has(types.Internal) {
+	if evidencePlan.Has(domain.Internal) {
 		wg.Add(1)
 		go func() { defer wg.Done(); retrieve.collectServices(ctx, a.services, a.svcMatches, addPart) }()
 		wg.Add(1)

@@ -10,24 +10,24 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dekwanlabs/astris/platform/httputil"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 
-	"github.com/dekwanlabs/astris/auth"
-	agentcap "github.com/dekwanlabs/astris/internal/agent"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/memory"
-	"github.com/dekwanlabs/astris/llm"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/memory"
+	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 type qaAskRequest struct {
-	Question     string              `json:"question"`
-	History      []llm.Message       `json:"history"`
-	SessionID    string              `json:"session_id"`
-	SourceMode   string              `json:"source_mode"`
-	Trace        bool                `json:"trace"`
-	EvidencePlan *types.EvidencePlan `json:"-"`
+	Question     string               `json:"question"`
+	History      []llm.Message        `json:"history"`
+	SessionID    string               `json:"session_id"`
+	SourceMode   string               `json:"source_mode"`
+	Trace        bool                 `json:"trace"`
+	EvidencePlan *domain.EvidencePlan `json:"-"`
 }
 
 type qaRunControlReq struct {
@@ -82,7 +82,7 @@ func parseQAAskRequest(r *http.Request) (qaAskRequest, error) {
 		req.SourceMode = "auto"
 	}
 	if req.SourceMode != "auto" {
-		plan, err := types.ParseEvidencePlan(req.SourceMode)
+		plan, err := domain.ParseEvidencePlan(req.SourceMode)
 		if err != nil {
 			return qaAskRequest{}, err
 		}
@@ -108,31 +108,31 @@ func (s *sseWriter) emit(event, data string) {
 	s.flusher.Flush()
 }
 
-func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string, userID int64, fallback []llm.Message) agentcap.ConversationContext {
+func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string, userID int64, fallback []llm.Message) agent.ConversationContext {
 	if sessionID == "" || handler.qaSessions == nil {
-		return agentcap.ConversationContext{Recent: fallback}
+		return agent.ConversationContext{Recent: fallback}
 	}
 	sess, err := handler.qaSessions.GetRecentSession(sessionID, userID, 6)
 	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] session load error: %v", err)
-		return agentcap.ConversationContext{Recent: fallback}
+		return agent.ConversationContext{Recent: fallback}
 	}
 	if sess == nil {
-		return agentcap.ConversationContext{Recent: fallback}
+		return agent.ConversationContext{Recent: fallback}
 	}
 	log.InfofCtx(ctx, "[qa] loaded session %s: recent=%d summary=%d chars", sessionID, len(sess.Messages), len([]rune(sess.Summary)))
-	return agentcap.ConversationContext{Summary: sess.Summary, Recent: sess.Messages}
+	return agent.ConversationContext{Summary: sess.Summary, Recent: sess.Messages}
 }
 
-func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agentcap.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *types.EvidencePlan, sseEvent func(string, string), r *http.Request) {
+func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, sseEvent func(string, string), r *http.Request) {
 	userID := currentUserID(r)
 	log.InfofCtx(ctx, "[qa] agent mode: question=%q userID=%d", platform.TruncateForLog(question, 12), userID)
 
 	// Subscribe before AskAgent starts.
 	// AskAgent emits phase hints during synchronous preprocessing and retrieval.
 	// Subscribing later would drop those early updates.
-	runID := agentcap.NewRunID()
-	var channel chan agentcap.SSEEvent
+	runID := agent.NewRunID()
+	var channel chan agent.SSEEvent
 	hub := handler.qa.Hub()
 	if hub != nil {
 		channel = hub.Subscribe(runID)
@@ -142,7 +142,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	var traceRecorder *qaTraceRecorder
 	if traceEnabled && hub != nil {
 		traceRecorder = &qaTraceRecorder{started: time.Now(), runID: runID, hub: hub}
-		ctx = types.WithTraceRecorder(ctx, traceRecorder)
+		ctx = domain.WithTraceRecorder(ctx, traceRecorder)
 	}
 
 	user := auth.UserFromContext(r.Context())
@@ -170,7 +170,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	if r.Context().Err() != nil {
 		return
 	}
-	if terminal != nil && terminal.Status == agentcap.RunStatusDone && answerText != "" {
+	if terminal != nil && terminal.Status == agent.RunStatusDone && answerText != "" {
 		handler.saveTurnToSession(ctx, sessionID, userID, question, answerText)
 	}
 }
@@ -367,7 +367,7 @@ func (handler *Handler) saveTurnToSession(ctx context.Context, sessionID string,
 			return
 		}
 		bgCtx := log.WithTraceID(context.Background(), log.GenerateTraceID())
-		summary, err := agentcap.GeneratePersistentSummary(bgCtx, handler.qa.LLM(), sess.Messages)
+		summary, err := agent.GeneratePersistentSummary(bgCtx, handler.qa.LLM(), sess.Messages)
 		if err != nil {
 			log.ErrorfCtx(bgCtx, "[qa] summary generation failed for session %s: %v", sessionID, err)
 			return
@@ -394,7 +394,7 @@ func (handler *Handler) APIQARuns(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	list, err := runs.ListPage(currentUserID(r), q.Str("session_id"), agentcap.RunStatus(q.Str("status")), page, pageSize)
+	list, err := runs.ListPage(currentUserID(r), q.Str("session_id"), agent.RunStatus(q.Str("status")), page, pageSize)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
@@ -440,13 +440,13 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 	}
 	switch req.Action {
 	case "pause":
-		if run.Status != agentcap.RunStatusRunning {
+		if run.Status != agent.RunStatusRunning {
 			httputil.WriteBadRequest(w, "only a running run can be paused")
 			return
 		}
-		hub.Send(runID, agentcap.ControlSignal{Kind: agentcap.CtrlPause})
+		hub.Send(runID, agent.ControlSignal{Kind: agent.CtrlPause})
 	case "resume":
-		if run.Status != agentcap.RunStatusRunning && run.Status != agentcap.RunStatusPaused {
+		if run.Status != agent.RunStatusRunning && run.Status != agent.RunStatusPaused {
 			httputil.WriteBadRequest(w, "only an active run can be resumed")
 			return
 		}
@@ -455,17 +455,17 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	case "abort":
-		if run.Status != agentcap.RunStatusRunning && run.Status != agentcap.RunStatusPaused {
+		if run.Status != agent.RunStatusRunning && run.Status != agent.RunStatusPaused {
 			httputil.WriteBadRequest(w, "only an active run can be aborted")
 			return
 		}
-		hub.Send(runID, agentcap.ControlSignal{Kind: agentcap.CtrlAbort})
+		hub.Send(runID, agent.ControlSignal{Kind: agent.CtrlAbort})
 	case "nudge":
-		if run.Status != agentcap.RunStatusRunning && run.Status != agentcap.RunStatusPaused {
+		if run.Status != agent.RunStatusRunning && run.Status != agent.RunStatusPaused {
 			httputil.WriteBadRequest(w, "only an active run can be nudged")
 			return
 		}
-		hub.Send(runID, agentcap.ControlSignal{Kind: agentcap.CtrlNudge, Message: req.Message})
+		hub.Send(runID, agent.ControlSignal{Kind: agent.CtrlNudge, Message: req.Message})
 	default:
 		httputil.WriteBadRequest(w, "unknown action: "+req.Action)
 		return
@@ -473,7 +473,7 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 	httputil.WriteJSON(w, map[string]string{"status": "sent"})
 }
 
-func (handler *Handler) streamAgentEvents(result *agentcap.AskResult, hubCh chan agentcap.SSEEvent, sseEvent func(string, string), r *http.Request) (string, *agentcap.RunTerminal) {
+func (handler *Handler) streamAgentEvents(result *agent.AskResult, hubCh chan agent.SSEEvent, sseEvent func(string, string), r *http.Request) (string, *agent.RunTerminal) {
 	var answerText string
 	for {
 		if hubCh == nil {
@@ -494,19 +494,19 @@ func (handler *Handler) streamAgentEvents(result *agentcap.AskResult, hubCh chan
 	}
 }
 
-func emitHubEvent(answerText string, ev agentcap.SSEEvent, runID string, sseEvent func(string, string)) string {
+func emitHubEvent(answerText string, ev agent.SSEEvent, runID string, sseEvent func(string, string)) string {
 	if ev.Trace != nil {
 		sseEvent("trace", jsonStr(ev.Trace))
 	}
 	if ev.Step != nil {
 		switch ev.Step.Kind {
-		case agentcap.StepKindThink:
+		case agent.StepKindThink:
 			sseEvent("progress", jsonStr(map[string]any{"step": ev.Step.StepNo, "text": ev.Step.Content}))
-		case agentcap.StepKindToolCall:
+		case agent.StepKindToolCall:
 			sseEvent("tool", jsonStr(map[string]any{"step": ev.Step.StepNo, "name": ev.Step.Tool, "args": ev.Step.Args}))
-		case agentcap.StepKindToolResult:
+		case agent.StepKindToolResult:
 			sseEvent("tool_result", jsonStr(map[string]any{"step": ev.Step.StepNo, "tool": ev.Step.Tool, "summary": ev.Step.ResultSummary}))
-		case agentcap.StepKindAnswer:
+		case agent.StepKindAnswer:
 		}
 	}
 	if ev.Token != "" {
@@ -521,7 +521,7 @@ func emitHubEvent(answerText string, ev agentcap.SSEEvent, runID string, sseEven
 	}
 	if ev.Terminal != nil {
 		sseEvent("run_end", jsonStr(map[string]any{"run_id": runID, "status": ev.Terminal.Status}))
-		if ev.Terminal.Status == agentcap.RunStatusDone {
+		if ev.Terminal.Status == agent.RunStatusDone {
 			sseEvent("done", "{}")
 		} else {
 			message := ev.Terminal.Error
@@ -539,12 +539,12 @@ type qaTraceRecorder struct {
 	started  time.Time
 	sequence int
 	runID    string
-	hub      *agentcap.RunHub
+	hub      *agent.RunHub
 	live     bool
-	buffered []types.EvaluationTrace
+	buffered []domain.EvaluationTrace
 }
 
-func (recorder *qaTraceRecorder) RecordTrace(event types.EvaluationTrace) {
+func (recorder *qaTraceRecorder) RecordTrace(event domain.EvaluationTrace) {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	recorder.sequence++
@@ -559,11 +559,11 @@ func (recorder *qaTraceRecorder) RecordTrace(event types.EvaluationTrace) {
 	recorder.hub.EmitTrace(recorder.runID, event)
 }
 
-func (recorder *qaTraceRecorder) Activate() []types.EvaluationTrace {
+func (recorder *qaTraceRecorder) Activate() []domain.EvaluationTrace {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	recorder.live = true
-	events := append([]types.EvaluationTrace(nil), recorder.buffered...)
+	events := append([]domain.EvaluationTrace(nil), recorder.buffered...)
 	recorder.buffered = nil
 	return events
 }
@@ -579,7 +579,7 @@ func (handler *Handler) ensureQASessions(w http.ResponseWriter) bool {
 	return handler.qaSessions != nil
 }
 
-func (handler *Handler) runStore() *agentcap.RunStore {
+func (handler *Handler) runStore() *agent.RunStore {
 	if handler.qa == nil {
 		return nil
 	}
@@ -593,7 +593,7 @@ func (handler *Handler) memoryStore() *memory.MemoryStore {
 	return handler.qa.Memory()
 }
 
-func (handler *Handler) qaHub() *agentcap.RunHub {
+func (handler *Handler) qaHub() *agent.RunHub {
 	if handler.qa == nil {
 		return nil
 	}

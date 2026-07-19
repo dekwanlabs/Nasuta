@@ -15,12 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/indexing/indexer"
-	"github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform/httpclient"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/indexing/indexer"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform/httpclient"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -199,11 +199,11 @@ func (g *Generator) generateModule(group, name, dir string) bool {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	chunkCount := len(indexer.ChunkMarkdown(id, name, stripDocHashLine(md), indexer.DefaultDocChunkConfig()))
-	if err := g.docDB.InsertDoc(types.DocRecord{
+	if err := g.docDB.InsertDoc(domain.DocRecord{
 		ID:         id,
 		Title:      name,
 		Filename:   group + "/" + name + ".md",
-		Kind:       types.DocKindModule,
+		Kind:       domain.DocKindModule,
 		Content:    md,
 		ChunkCount: chunkCount,
 		CreatedAt:  now,

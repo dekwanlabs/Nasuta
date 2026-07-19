@@ -6,20 +6,20 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // scanNodeJSServices finds Node.js service entrypoints (package.json + main file).
-func scanNodeJSServices(root string, dirs []string) []types.ServiceRecord {
+func scanNodeJSServices(root string, dirs []string) []domain.ServiceRecord {
 	files := walkFiles(root, dirs, func(name string) bool { return name == "package.json" })
-	var records []types.ServiceRecord
+	var records []domain.ServiceRecord
 	for _, file := range files {
 		rel := relativeTo(root, file)
 		moduleRoot := filepath.Dir(file)
 		modulePath := relativeTo(root, moduleRoot)
 		serviceName := readNodeJSPackageName(moduleRoot)
 		layer := inferLayer(serviceName, modulePath)
-		records = append(records, types.ServiceRecord{
+		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
 			Layer:         "front",
@@ -30,7 +30,7 @@ func scanNodeJSServices(root string, dirs []string) []types.ServiceRecord {
 			Tags:          []string{"code-scan"},
 			Docs:          []string{},
 			SourceOfTruth: []string{rel},
-			Entrypoints:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 			Ports:         readNodeJSPorts(moduleRoot),
 			Confidence:    0.85,
 		})
@@ -39,12 +39,12 @@ func scanNodeJSServices(root string, dirs []string) []types.ServiceRecord {
 }
 
 // scanNodeJSEndpoints finds Express/Fastify/Koa route registrations.
-func scanNodeJSEndpoints(root string, dirs []string) []types.EndpointRecord {
+func scanNodeJSEndpoints(root string, dirs []string) []domain.EndpointRecord {
 	files := walkFiles(root, dirs, func(name string) bool {
 		return strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".ts") ||
 			strings.HasSuffix(name, ".mjs") || strings.HasSuffix(name, ".cjs")
 	})
-	var records []types.EndpointRecord
+	var records []domain.EndpointRecord
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, ".get(") && !strings.Contains(text, ".post(") &&
@@ -79,7 +79,7 @@ func scanNodeJSEndpoints(root string, dirs []string) []types.EndpointRecord {
 				if path == "" {
 					continue
 				}
-				records = append(records, types.EndpointRecord{
+				records = append(records, domain.EndpointRecord{
 					ServiceName:   serviceName,
 					Repo:          topSegment(rel),
 					Method:        method,
@@ -88,7 +88,7 @@ func scanNodeJSEndpoints(root string, dirs []string) []types.EndpointRecord {
 					HandlerMethod: nodejsHandlerName(lines, i),
 					File:          rel,
 					Line:          i + 1,
-					Source:        types.SourceCodeScan,
+					Source:        domain.SourceCodeScan,
 					Confidence:    0.85,
 				})
 			}
@@ -98,11 +98,11 @@ func scanNodeJSEndpoints(root string, dirs []string) []types.EndpointRecord {
 }
 
 // scanNodeJSDependencies finds HTTP client calls (axios, fetch, node-fetch).
-func scanNodeJSDependencies(root string, dirs []string) []types.DependencyEdge {
+func scanNodeJSDependencies(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, func(name string) bool {
 		return strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".ts")
 	})
-	var edges []types.DependencyEdge
+	var edges []domain.DependencyEdge
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "axios") && !strings.Contains(text, "fetch(") &&
@@ -121,11 +121,11 @@ func scanNodeJSDependencies(root string, dirs []string) []types.DependencyEdge {
 				target = strings.TrimPrefix(target, "https://")
 				target, _, _ = strings.Cut(target, "/")
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
-					edges = append(edges, types.DependencyEdge{
+					edges = append(edges, domain.DependencyEdge{
 						From:       caller,
 						To:         target,
-						Type:       types.EdgeHTTP,
-						Evidence:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+						Type:       domain.EdgeHTTP,
+						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 						Confidence: 0.5,
 					})
 				}

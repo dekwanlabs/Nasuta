@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	qstore "github.com/dekwanlabs/astris/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 const recallCharacterBudget = 2400
@@ -79,14 +79,14 @@ func (memory *MemoryStore) RecallWithIntent(ctx context.Context, userID int64, q
 		return result, fmt.Errorf("memory: expected one recall vector, got %d", len(vecs))
 	}
 
-	filter := qstore.SemanticFilter{
+	filter := semantic.Filter{
 		Keywords:   map[string]string{"kind": "memory"},
 		AnyInteger: map[string][]int64{"user_id": memoryUserScope(userID)},
 	}
 	if intent == TemporalCurrent {
 		filter.Keywords["status"] = string(StatusActive)
 	}
-	hits, err := memory.semantic.SearchFiltered(ctx, vecs[0], filter, limit*6, "")
+	hits, err := memory.semantic.Search(ctx, semantic.Query{DenseVector: vecs[0], Filter: filter, Limit: limit * 6})
 	if err != nil {
 		return result, fmt.Errorf("memory: search candidates: %w", err)
 	}
@@ -95,12 +95,12 @@ func (memory *MemoryStore) RecallWithIntent(ctx context.Context, userID int64, q
 	ids := make([]string, 0, len(hits))
 	scores := make(map[string]float32, len(hits))
 	for _, hit := range hits {
-		payloadUserID, ok := memoryPayloadUserID(hit.Payload)
+		payloadUserID, ok := memoryPayloadUserID(hit.Metadata)
 		if !ok || !memoryUserAllowed(payloadUserID, userID) {
 			result.Stats.InvalidPayload++
 			continue
 		}
-		id, _ := hit.Payload["memory_id"].(string)
+		id, _ := hit.Metadata["memory_id"].(string)
 		if id == "" {
 			result.Stats.InvalidPayload++
 			continue

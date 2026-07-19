@@ -12,9 +12,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/dekwanlabs/astris/internal/platform/htmlconv"
-	"github.com/dekwanlabs/astris/internal/retrieval"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/internal/platform/htmlconv"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/log"
 	nethtml "golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 )
@@ -444,7 +444,7 @@ func extractBingSnippet(z *nethtml.Tokenizer) string {
 
 // ── HTML parsing helpers ──────────────────────────────────────────────────────
 
-const userAgent = "Mozilla/5.0 (compatible; Astris/1.0)"
+const userAgent = "Mozilla/5.0 (compatible; Nasuta/1.0)"
 
 func respOK(resp *http.Response) bool { return resp.StatusCode >= 200 && resp.StatusCode < 300 }
 

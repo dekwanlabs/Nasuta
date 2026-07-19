@@ -5,23 +5,23 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/dekwanlabs/astris/config"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/graph"
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/graph"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
-type Tool = toolruntime.Tool
-type Registry = toolruntime.Registry
-type ToolPolicy = toolruntime.Policy
+type Tool = tool.Tool
+type Registry = tool.Registry
+type ToolPolicy = tool.Policy
 
 const (
-	ToolKindRead  = toolruntime.KindRead
-	ToolKindWrite = toolruntime.KindWrite
+	ToolKindRead  = tool.KindRead
+	ToolKindWrite = tool.KindWrite
 )
 
 // ToolPolicyForPlan fixes the tool permission set for one run.
-func ToolPolicyForPlan(_ types.EvidencePlan, allowWrite bool) ToolPolicy {
+func ToolPolicyForPlan(_ domain.EvidencePlan, allowWrite bool) ToolPolicy {
 	return ToolPolicy{
 		AllowRead:  true,
 		AllowWrite: allowWrite,
@@ -30,7 +30,7 @@ func ToolPolicyForPlan(_ types.EvidencePlan, allowWrite bool) ToolPolicy {
 
 // NewRegistry registers every built-in tool through the public batch API.
 func NewRegistry(svc *Service, cfg config.Config) *Registry {
-	registry := toolruntime.NewRegistry()
+	registry := tool.NewRegistry()
 	if err := registry.RegisterAll(builtinTools(svc, cfg)); err != nil {
 		panic(fmt.Sprintf("register built-in tools: %v", err))
 	}
@@ -48,7 +48,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"query": propString("Service name, module path, owner, or keyword."),
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
-			Handler: stringHandler(func(ctx context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				return marshalResult(svc.ServiceLookup(ctx, argStr(args, "query", ""), argInt(args, "limit", 10)))
 			}),
 		},
@@ -62,7 +62,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"direction": propString("upstream | downstream | both (default both)."),
 				"depth":     propInt("Traversal depth 1-5 (default 2)."),
 			}, []string{"service"}),
-			Handler: stringHandler(func(_ context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(_ context.Context, args tool.Arguments) (string, error) {
 				depth := clampInt(argInt(args, "depth", 2), 1, 5)
 				result := svc.TraceDeps(argStr(args, "service", ""), argStr(args, "direction", "both"), depth)
 				return marshalResult(graphResultToMap(result))
@@ -78,7 +78,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"pathKeyword": propString("Optional endpoint path keyword."),
 				"limit":       propInt("Max results (default 20)."),
 			}, nil),
-			Handler: stringHandler(func(ctx context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				return marshalResult(svc.ListApis(ctx, argStr(args, "service", ""), argStr(args, "pathKeyword", ""), argInt(args, "limit", 20)))
 			}),
 		},
@@ -93,7 +93,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"lang":  propString("Optional language filter, e.g. java, python, go, sql, yaml."),
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
-			Handler: stringHandler(func(ctx context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				return marshalResult(svc.CodeSearch(ctx, argStr(args, "query", ""), argStr(args, "lang", ""), argInt(args, "limit", 10)))
 			}),
 		},
@@ -106,7 +106,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"query": propString("Function name, class name, or service keyword to look up."),
 				"limit": propInt("Max nodes to return (default 5, max 10)."),
 			}, []string{"query"}),
-			Handler: stringHandler(func(ctx context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				return marshalResult(svc.GetSymbol(ctx, argStr(args, "query", ""), argInt(args, "limit", 5)))
 			}),
 		},
@@ -120,7 +120,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"direction": propString("callers | callees (default callers)."),
 				"limit":     propInt("Max related nodes to return (default 5, max 10)."),
 			}, []string{"query", "direction"}),
-			Handler: stringHandler(func(ctx context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				return marshalResult(svc.TraceCalls(ctx,
 					argStr(args, "query", ""),
 					argStr(args, "direction", "callers"),
@@ -136,7 +136,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"query": propString("Symptom, task, or keyword to search."),
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
-			Handler: stringHandler(func(ctx context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				return marshalResult(svc.RunbookSearch(ctx, argStr(args, "query", ""), argInt(args, "limit", 10), false, ""))
 			}),
 		},
@@ -145,7 +145,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 			Description: "Check whether a service has enough documentation and code evidence.",
 			Kind:        ToolKindRead,
 			InputSchema: objectSchema(map[string]any{"service": propString("Service name to check.")}, []string{"service"}),
-			Handler: stringHandler(func(ctx context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				return marshalResult(svc.DocGapCheck(ctx, argStr(args, "service", "")))
 			}),
 		},
@@ -154,7 +154,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 			Description: "Return summary counts for the current backend knowledge index.",
 			Kind:        ToolKindRead,
 			InputSchema: objectSchema(map[string]any{}, nil),
-			Handler: stringHandler(func(ctx context.Context, _ toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, _ tool.Arguments) (string, error) {
 				return marshalResult(svc.IndexSummary(ctx))
 			}),
 		},
@@ -174,7 +174,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"query": propString("Search query string."),
 				"limit": propInt("Max results (default 5, max 10)."),
 			}, []string{"query"}),
-			Handler: stringHandler(func(ctx context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				results, err := svc.WebSearch(ctx, argStr(args, "query", ""), argInt(args, "limit", 5))
 				if err != nil {
 					return "", err
@@ -192,7 +192,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"url":   propString("Full HTTPS URL to fetch."),
 				"query": propString("Current question or evidence need used to rank passages locally."),
 			}, []string{"url"}),
-			Handler: stringHandler(func(ctx context.Context, args toolruntime.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				return svc.WebFetchRelevant(ctx, argStr(args, "url", ""), argStr(args, "query", ""))
 			}),
 		},
@@ -200,15 +200,15 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 	return tools
 }
 
-func stringHandler(run func(context.Context, toolruntime.Arguments) (string, error)) toolruntime.Handler {
-	return toolruntime.HandlerFunc(func(ctx context.Context, args toolruntime.Arguments) (toolruntime.Result, error) {
+func stringHandler(run func(context.Context, tool.Arguments) (string, error)) tool.Handler {
+	return tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
 		content, err := run(ctx, args)
-		return toolruntime.Result{Content: content}, err
+		return tool.Result{Content: content}, err
 	})
 }
 
-func objectSchema(props map[string]any, required []string) toolruntime.JSONSchema {
-	schema := toolruntime.JSONSchema{
+func objectSchema(props map[string]any, required []string) tool.JSONSchema {
+	schema := tool.JSONSchema{
 		"type":       "object",
 		"properties": props,
 	}
@@ -226,14 +226,14 @@ func propInt(desc string) map[string]any {
 	return map[string]any{"type": "integer", "description": desc}
 }
 
-func argStr(args toolruntime.Arguments, key, fallback string) string {
+func argStr(args tool.Arguments, key, fallback string) string {
 	if value := args.String(key); value != "" {
 		return value
 	}
 	return fallback
 }
 
-func argInt(args toolruntime.Arguments, key string, fallback int) int {
+func argInt(args tool.Arguments, key string, fallback int) int {
 	return args.Int(key, fallback)
 }
 

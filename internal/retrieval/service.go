@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 // Service is the outward-facing retrieval capability.
@@ -26,7 +26,7 @@ func truncateInline(s string, max int) string {
 	return platform.TruncateForLog(strings.Join(strings.Fields(s), " "), max)
 }
 
-func runbookTitles(matches []types.RunbookSearchHit) []string {
+func runbookTitles(matches []domain.RunbookSearchHit) []string {
 	titles := make([]string, 0, len(matches))
 	for _, match := range matches {
 		if match.Record.Title != "" {
@@ -36,7 +36,7 @@ func runbookTitles(matches []types.RunbookSearchHit) []string {
 	return titles
 }
 
-func uniqueRepoStrings(matches []types.CodeSearchHit) []string {
+func uniqueRepoStrings(matches []domain.CodeSearchHit) []string {
 	out := make([]string, 0, len(matches))
 	seen := make(map[string]struct{}, len(matches))
 	for _, match := range matches {
@@ -52,7 +52,7 @@ func uniqueRepoStrings(matches []types.CodeSearchHit) []string {
 	return out
 }
 
-func codeMatchSummary(matches []types.CodeSearchHit, label string) string {
+func codeMatchSummary(matches []domain.CodeSearchHit, label string) string {
 	if len(matches) == 0 {
 		return "  (" + label + ": empty)"
 	}
@@ -118,7 +118,7 @@ func (retrieve *Retriever) serviceForPath(ctx context.Context, path string) stri
 	return svc
 }
 
-func (retrieve *Retriever) resolveServiceModules(ctx context.Context, repos []string) []types.ServiceRecord {
+func (retrieve *Retriever) resolveServiceModules(ctx context.Context, repos []string) []domain.ServiceRecord {
 	if len(repos) == 0 || retrieve.tools == nil {
 		return nil
 	}
@@ -129,7 +129,7 @@ func (retrieve *Retriever) resolveServiceModules(ctx context.Context, repos []st
 	return modules
 }
 
-func (retrieve *Retriever) serviceForRepoMapped(ctx context.Context, modules []types.ServiceRecord, repo, path string) string {
+func (retrieve *Retriever) serviceForRepoMapped(ctx context.Context, modules []domain.ServiceRecord, repo, path string) string {
 	if service, _, ok := serviceForPathPrefix(modules, path); ok {
 		return service
 	}
@@ -148,8 +148,8 @@ func (retrieve *Retriever) serviceForRepo(ctx context.Context, repo, path string
 	return service
 }
 
-func (retrieve *Retriever) allServiceModules(ctx context.Context) []types.ServiceRecord {
-	if modules, ok := retrieve.serviceModules.Load().([]types.ServiceRecord); ok {
+func (retrieve *Retriever) allServiceModules(ctx context.Context) []domain.ServiceRecord {
+	if modules, ok := retrieve.serviceModules.Load().([]domain.ServiceRecord); ok {
 		return modules
 	}
 	if retrieve.tools == nil {
@@ -163,7 +163,7 @@ func (retrieve *Retriever) allServiceModules(ctx context.Context) []types.Servic
 	return modules
 }
 
-func modulePrefix(service types.ServiceRecord) string {
+func modulePrefix(service domain.ServiceRecord) string {
 	prefix := normalizeServicePath(service.Repo)
 	module := normalizeServicePath(service.ModulePath)
 	if module != "" && module != "." {
@@ -172,7 +172,7 @@ func modulePrefix(service types.ServiceRecord) string {
 	return prefix
 }
 
-func soleServiceForRepo(modules []types.ServiceRecord, repo string) (string, bool) {
+func soleServiceForRepo(modules []domain.ServiceRecord, repo string) (string, bool) {
 	repo = normalizeServicePath(repo)
 	service := ""
 	for _, module := range modules {
@@ -187,7 +187,7 @@ func soleServiceForRepo(modules []types.ServiceRecord, repo string) (string, boo
 	return service, service != ""
 }
 
-func serviceForPathPrefix(modules []types.ServiceRecord, path string) (string, string, bool) {
+func serviceForPathPrefix(modules []domain.ServiceRecord, path string) (string, string, bool) {
 	path = normalizeServicePath(path)
 	bestPrefix := ""
 	bestService := ""

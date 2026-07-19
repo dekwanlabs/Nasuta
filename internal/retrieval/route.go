@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/llm"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/llm"
 )
 
 type RoutingCapabilities struct {
@@ -17,7 +17,7 @@ type RoutingCapabilities struct {
 }
 
 type AnalysisResult struct {
-	Decision types.PlanDecision
+	Decision domain.PlanDecision
 	Question string
 	Terms    QueryTerms
 	ToolIDs  []string
@@ -68,7 +68,7 @@ func AnalyzeForPlan(
 	question, routeContext, termsQuestion string,
 	toolCandidates []ToolRouteCandidate,
 	maxTokens int,
-	plan types.EvidencePlan,
+	plan domain.EvidencePlan,
 ) (AnalysisResult, error) {
 	return analyzeQuestion(ctx, client, question, routeContext, termsQuestion, RoutingCapabilities{}, toolCandidates, maxTokens, &plan)
 }
@@ -80,7 +80,7 @@ func analyzeQuestion(
 	capabilities RoutingCapabilities,
 	toolCandidates []ToolRouteCandidate,
 	maxTokens int,
-	fixedPlan *types.EvidencePlan,
+	fixedPlan *domain.EvidencePlan,
 ) (AnalysisResult, error) {
 	clean := strings.TrimSpace(question)
 	terms := QueryTerms{DomainTerms: ExtractTechTerms(termsQuestion)}.normalize()
@@ -88,12 +88,12 @@ func analyzeQuestion(
 
 	var contracts []string
 	var properties []string
-	decision := types.PlanDecision{}
+	decision := domain.PlanDecision{}
 	if fixedPlan == nil {
 		contracts = append(contracts, fmt.Sprintf("Routing contract:\n%s\nRuntime capabilities: memory=%t internal=true web=%t", routingContract, capabilities.Memory, capabilities.Web))
 		properties = append(properties, "\"route\"")
 	} else {
-		decision = types.PlanDecision{Plan: *fixedPlan, Confidence: 1, Origin: types.Explicit}
+		decision = domain.PlanDecision{Plan: *fixedPlan, Confidence: 1, Origin: domain.Explicit}
 	}
 	if len(toolCandidates) > 0 {
 		encoded, _ := json.Marshal(toolCandidates)
@@ -194,37 +194,37 @@ func bindToolIDs(raw map[string]any, candidates []ToolRouteCandidate) ([]string,
 	return ids, nil
 }
 
-func bindPlanDecision(raw map[string]any) (types.PlanDecision, error) {
+func bindPlanDecision(raw map[string]any) (domain.PlanDecision, error) {
 	items, ok := raw["sources"].([]any)
 	if !ok {
-		return types.PlanDecision{}, fmt.Errorf("sources must be an array")
+		return domain.PlanDecision{}, fmt.Errorf("sources must be an array")
 	}
-	var sources types.EvidenceSources
+	var sources domain.EvidenceSources
 	for _, item := range items {
 		name, ok := item.(string)
 		if !ok {
-			return types.PlanDecision{}, fmt.Errorf("source must be a string")
+			return domain.PlanDecision{}, fmt.Errorf("source must be a string")
 		}
 		switch name {
 		case "memory":
-			sources |= types.Memory
+			sources |= domain.Memory
 		case "internal":
-			sources |= types.Internal
+			sources |= domain.Internal
 		case "web":
-			sources |= types.Web
+			sources |= domain.Web
 		default:
-			return types.PlanDecision{}, fmt.Errorf("unknown source %q", name)
+			return domain.PlanDecision{}, fmt.Errorf("unknown source %q", name)
 		}
 	}
 	confidence, ok := raw["confidence"].(float64)
 	if !ok || confidence < 0 || confidence > 1 {
-		return types.PlanDecision{}, fmt.Errorf("confidence must be between 0 and 1")
+		return domain.PlanDecision{}, fmt.Errorf("confidence must be between 0 and 1")
 	}
-	plan := types.EvidencePlan{Sources: sources}
+	plan := domain.EvidencePlan{Sources: sources}
 	if !plan.Valid() {
-		return types.PlanDecision{}, fmt.Errorf("invalid source bits")
+		return domain.PlanDecision{}, fmt.Errorf("invalid source bits")
 	}
-	return types.PlanDecision{
-		Plan: plan, Confidence: confidence, Origin: types.Model,
+	return domain.PlanDecision{
+		Plan: plan, Confidence: confidence, Origin: domain.Model,
 	}, nil
 }

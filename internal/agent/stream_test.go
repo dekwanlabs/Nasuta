@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/llm"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/llm"
 )
 
 func drainHub(ch chan SSEEvent, timeout time.Duration) []SSEEvent {
@@ -33,7 +33,7 @@ func drainHub(ch chan SSEEvent, timeout time.Duration) []SSEEvent {
 func TestHub_BroadcastsEvaluationTrace(t *testing.T) {
 	hub := NewRunHub(nil)
 	ch := hub.Subscribe("trace-run")
-	hub.EmitTrace("trace-run", types.EvaluationTrace{Sequence: 1, Node: "evidence_plan", Status: "completed"})
+	hub.EmitTrace("trace-run", domain.EvaluationTrace{Sequence: 1, Node: "evidence_plan", Status: "completed"})
 	select {
 	case event := <-ch:
 		if event.Trace == nil || event.Trace.Node != "evidence_plan" {

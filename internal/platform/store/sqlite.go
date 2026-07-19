@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
 	_ "modernc.org/sqlite"
 )
 
@@ -196,7 +196,7 @@ func (store *SQLite) Close() error {
 }
 
 // ReplaceAll validates and atomically publishes one complete snapshot.
-func (store *SQLite) ReplaceAll(ctx context.Context, bundle types.IndexBundle) error {
+func (store *SQLite) ReplaceAll(ctx context.Context, bundle domain.IndexBundle) error {
 	if err := validateBundle(bundle); err != nil {
 		return err
 	}
@@ -246,7 +246,7 @@ func (store *SQLite) ReplaceAll(ctx context.Context, bundle types.IndexBundle) e
 	return nil
 }
 
-func validateBundle(bundle types.IndexBundle) error {
+func validateBundle(bundle domain.IndexBundle) error {
 	repositories := make(map[string]struct{}, len(bundle.Repositories))
 	for _, repository := range bundle.Repositories {
 		if repository.Repo == "" || repository.HeadSHA == "" || repository.IndexedAt <= 0 {
@@ -276,18 +276,18 @@ func validateBundle(bundle types.IndexBundle) error {
 		if _, ok := services[dependency.CallerServiceKey]; !ok {
 			return fmt.Errorf("dependency %q -> %q references missing caller", dependency.From, dependency.To)
 		}
-		if dependency.TargetKind == types.DependencyTargetService {
+		if dependency.TargetKind == domain.DependencyTargetService {
 			if _, ok := services[dependency.TargetServiceKey]; !ok {
 				return fmt.Errorf("dependency %q -> %q references missing target", dependency.From, dependency.To)
 			}
-		} else if dependency.TargetKind != types.DependencyTargetExternal || dependency.ExternalTarget == "" {
+		} else if dependency.TargetKind != domain.DependencyTargetExternal || dependency.ExternalTarget == "" {
 			return fmt.Errorf("dependency %q -> %q has invalid target", dependency.From, dependency.To)
 		}
 	}
 	return nil
 }
 
-func writeSnapshot(ctx context.Context, db *sql.DB, bundle types.IndexBundle) error {
+func writeSnapshot(ctx context.Context, db *sql.DB, bundle domain.IndexBundle) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin sqlite snapshot: %w", err)
@@ -325,7 +325,7 @@ service_key,method,path,handler,handler_method,file_path,line,source_kind,confid
 	}
 	for _, dependency := range bundle.Dependencies {
 		var targetKey, external any
-		if dependency.TargetKind == types.DependencyTargetService {
+		if dependency.TargetKind == domain.DependencyTargetService {
 			targetKey = dependency.TargetServiceKey
 		} else {
 			external = dependency.ExternalTarget
@@ -374,7 +374,7 @@ func validateDatabase(ctx context.Context, db *sql.DB) error {
 	return rows.Err()
 }
 
-func marshalServiceArrays(service types.ServiceRecord) ([5]string, error) {
+func marshalServiceArrays(service domain.ServiceRecord) ([5]string, error) {
 	values := []any{service.Tags, service.Docs, service.SourceOfTruth, service.Entrypoints, service.Ports}
 	var out [5]string
 	for i, value := range values {
@@ -400,14 +400,14 @@ func (store *SQLite) GetIndexSHA(ctx context.Context, repo string) (string, erro
 }
 
 // AllServices returns the canonical service rows without read-time merging.
-func (store *SQLite) AllServices(ctx context.Context) ([]types.ServiceRecord, error) {
+func (store *SQLite) AllServices(ctx context.Context) ([]domain.ServiceRecord, error) {
 	return store.queryServices(ctx, "", nil)
 }
 
 // ServicesByRepos returns every service module for the selected repositories.
-func (store *SQLite) ServicesByRepos(ctx context.Context, repos []string) ([]types.ServiceRecord, error) {
+func (store *SQLite) ServicesByRepos(ctx context.Context, repos []string) ([]domain.ServiceRecord, error) {
 	if len(repos) == 0 {
-		return []types.ServiceRecord{}, nil
+		return []domain.ServiceRecord{}, nil
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(repos)), ",")
 	args := make([]any, len(repos))
@@ -417,7 +417,7 @@ func (store *SQLite) ServicesByRepos(ctx context.Context, repos []string) ([]typ
 	return store.queryServices(ctx, " WHERE repo IN ("+placeholders+")", args)
 }
 
-func (store *SQLite) queryServices(ctx context.Context, where string, args []any) ([]types.ServiceRecord, error) {
+func (store *SQLite) queryServices(ctx context.Context, where string, args []any) ([]domain.ServiceRecord, error) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	rows, err := store.db.QueryContext(ctx, `SELECT service_key,repo,module_path,service_name,layer,language,
@@ -427,7 +427,7 @@ FROM services`+where+` ORDER BY repo,module_path`, args...)
 		return nil, err
 	}
 	defer rows.Close()
-	services := make([]types.ServiceRecord, 0)
+	services := make([]domain.ServiceRecord, 0)
 	for rows.Next() {
 		service, err := scanService(rows)
 		if err != nil {
@@ -442,8 +442,8 @@ type rowScanner interface {
 	Scan(...any) error
 }
 
-func scanService(row rowScanner) (types.ServiceRecord, error) {
-	var service types.ServiceRecord
+func scanService(row rowScanner) (domain.ServiceRecord, error) {
+	var service domain.ServiceRecord
 	var tags, docs, sourceOfTruth, entrypoints, ports string
 	err := row.Scan(&service.ServiceKey, &service.Repo, &service.ModulePath, &service.ServiceName,
 		&service.Layer, &service.Language, &service.Runtime, &service.Scope, &service.Owner,
@@ -465,8 +465,8 @@ func scanService(row rowScanner) (types.ServiceRecord, error) {
 
 // EndpointPage is a paginated endpoint list.
 type EndpointPage struct {
-	Total int                    `json:"total"`
-	List  []types.EndpointRecord `json:"list"`
+	Total int                     `json:"total"`
+	List  []domain.EndpointRecord `json:"list"`
 }
 
 // ListApis lists APIs for an exact service name and optional path prefix.
@@ -502,23 +502,23 @@ FROM endpoints e JOIN services s ON s.service_key=e.service_key`+where+` ORDER B
 		return nil, err
 	}
 	defer rows.Close()
-	list := make([]types.EndpointRecord, 0, pageSize)
+	list := make([]domain.EndpointRecord, 0, pageSize)
 	for rows.Next() {
-		var endpoint types.EndpointRecord
+		var endpoint domain.EndpointRecord
 		var source string
 		if err := rows.Scan(&endpoint.ServiceKey, &endpoint.ServiceName, &endpoint.Repo, &endpoint.Method,
 			&endpoint.Path, &endpoint.Handler, &endpoint.HandlerMethod, &endpoint.File,
 			&endpoint.Line, &source, &endpoint.Confidence); err != nil {
 			return nil, err
 		}
-		endpoint.Source = types.SourceKind(source)
+		endpoint.Source = domain.SourceKind(source)
 		list = append(list, endpoint)
 	}
 	return &EndpointPage{Total: total, List: list}, rows.Err()
 }
 
 // Edges returns logical dependencies with all evidence locations.
-func (store *SQLite) Edges(ctx context.Context) ([]types.DependencyEdge, error) {
+func (store *SQLite) Edges(ctx context.Context) ([]domain.DependencyEdge, error) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	rows, err := store.db.QueryContext(ctx, `SELECT d.dependency_id,d.caller_service_key,caller.service_name,
@@ -533,11 +533,11 @@ ORDER BY d.dependency_id,e.evidence_id`)
 		return nil, err
 	}
 	defer rows.Close()
-	edges := make([]types.DependencyEdge, 0)
+	edges := make([]domain.DependencyEdge, 0)
 	byID := make(map[int64]int)
 	for rows.Next() {
 		var id int64
-		var edge types.DependencyEdge
+		var edge domain.DependencyEdge
 		var targetKind, protocol, targetName string
 		var evidencePath, symbol, source sql.NullString
 		var line sql.NullInt64
@@ -548,21 +548,21 @@ ORDER BY d.dependency_id,e.evidence_id`)
 		}
 		index, ok := byID[id]
 		if !ok {
-			edge.TargetKind = types.DependencyTargetKind(targetKind)
-			edge.Type = types.EdgeType(protocol)
-			if edge.TargetKind == types.DependencyTargetService {
+			edge.TargetKind = domain.DependencyTargetKind(targetKind)
+			edge.Type = domain.EdgeType(protocol)
+			if edge.TargetKind == domain.DependencyTargetService {
 				edge.To = targetName
 			} else {
 				edge.To = edge.ExternalTarget
 			}
-			edge.Evidence = []types.Evidence{}
+			edge.Evidence = []domain.Evidence{}
 			index = len(edges)
 			byID[id] = index
 			edges = append(edges, edge)
 		}
 		if evidencePath.Valid {
-			edges[index].Evidence = append(edges[index].Evidence, types.Evidence{
-				Path: evidencePath.String, Line: int(line.Int64), Symbol: symbol.String, Kind: types.SourceKind(source.String),
+			edges[index].Evidence = append(edges[index].Evidence, domain.Evidence{
+				Path: evidencePath.String, Line: int(line.Int64), Symbol: symbol.String, Kind: domain.SourceKind(source.String),
 			})
 		}
 	}

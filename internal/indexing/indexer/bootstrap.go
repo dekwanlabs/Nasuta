@@ -5,14 +5,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 // ScanCode runs every structural code scanner and publishes canonical records.
-func ScanCode(root string, dirs []string) types.IndexBundle {
+func ScanCode(root string, dirs []string) domain.IndexBundle {
 	services := append(scanJavaServices(root, dirs), scanPythonServices(root, dirs)...)
 	services = append(services, scanGoServices(root, dirs)...)
 	services = append(services, scanKotlinServices(root, dirs)...)
@@ -35,39 +35,28 @@ func ScanCode(root string, dirs []string) types.IndexBundle {
 	deps = append(deps, scanAndroidDependencies(root, dirs)...)
 	deps = append(deps, scanIOSDependencies(root, dirs)...)
 
-	return CanonicalizeBundle(types.IndexBundle{
+	return CanonicalizeBundle(domain.IndexBundle{
 		Services: services, Endpoints: endpoints, Dependencies: deps,
 	})
 }
 
 // BuildStructuralBundle builds only the SQLite structural snapshot.
-func BuildStructuralBundle(root string, dirs []string) types.IndexBundle {
-	code := ScanCode(root, dirs)
-	code.Services = append(IndexServiceDocs(root), code.Services...)
-	return CanonicalizeBundle(code)
+func BuildStructuralBundle(root string, dirs []string) domain.IndexBundle {
+	return ScanCode(root, dirs)
 }
 
 // BuildBundle builds structural records and separately sourced runbook records.
-func BuildBundle(root string, dirs []string, docStore *store.DocStore) types.IndexBundle {
+func BuildBundle(root string, dirs []string, docStore *store.DocStore) domain.IndexBundle {
 	runbooks := IndexKnowledgeBaseFromDocStore(docStore)
 	log.Infof("[indexer] loaded %d KB docs from DocStore", len(runbooks))
 	code := ScanCode(root, dirs)
-	code.Services = append(IndexServiceDocs(root), code.Services...)
 	code.Dependencies = append(code.Dependencies, RunbookEdgesFromDocStore(docStore)...)
 	code.Runbooks = runbooks
 	return CanonicalizeBundle(code)
 }
 
 // ScanRepo builds the structural snapshot for one repository.
-func ScanRepo(root, repo string, docStore *store.DocStore) types.IndexBundle {
-	if repo == "docs" {
-		return CanonicalizeBundle(types.IndexBundle{
-			Repo:         repo,
-			Services:     IndexServiceDocs(root),
-			Runbooks:     IndexKnowledgeBaseFromDocStore(docStore),
-			Dependencies: RunbookEdgesFromDocStore(docStore),
-		})
-	}
+func ScanRepo(root, repo string) domain.IndexBundle {
 	b := ScanCode(root, []string{repo})
 	b.Repo = repoKey(repo)
 	return CanonicalizeBundle(b)
@@ -86,8 +75,8 @@ func repoKey(path string) string {
 }
 
 // CanonicalizeBundle establishes the complete structural-store write invariant.
-func CanonicalizeBundle(bundle types.IndexBundle) types.IndexBundle {
-	services := make([]types.ServiceRecord, 0, len(bundle.Services))
+func CanonicalizeBundle(bundle domain.IndexBundle) domain.IndexBundle {
+	services := make([]domain.ServiceRecord, 0, len(bundle.Services))
 	for _, service := range bundle.Services {
 		service = canonicalService(service)
 		if service.ServiceName == "" {
@@ -95,33 +84,6 @@ func CanonicalizeBundle(bundle types.IndexBundle) types.IndexBundle {
 		}
 		services = append(services, service)
 	}
-
-	codeByName := make(map[string][]types.ServiceRecord, len(services))
-	for _, service := range services {
-		if service.Repo != "docs" {
-			name := platform.Normalize(service.ServiceName)
-			codeByName[name] = append(codeByName[name], service)
-		}
-	}
-	for i := range services {
-		if services[i].Repo != "docs" {
-			continue
-		}
-		matches := codeByName[platform.Normalize(services[i].ServiceName)]
-		if len(matches) == 1 {
-			services[i].Repo = matches[0].Repo
-			services[i].ModulePath = matches[0].ModulePath
-		}
-	}
-	owned := services[:0]
-	for _, service := range services {
-		if service.Repo == "docs" {
-			log.Warnf("[indexer] drop service document without workspace ownership: %s", service.ServiceName)
-			continue
-		}
-		owned = append(owned, service)
-	}
-	services = owned
 
 	for i := range services {
 		if services[i].ModulePath == "" {
@@ -134,7 +96,7 @@ func CanonicalizeBundle(bundle types.IndexBundle) types.IndexBundle {
 		services[i].Entrypoints = dedupeEvidence(services[i].Entrypoints)
 		services[i].Ports = nonNil(platform.Dedupe(services[i].Ports))
 	}
-	services = types.MergeServices(services)
+	services = domain.MergeServices(services)
 
 	lookup := newServiceLookup(services)
 	endpoints := canonicalEndpoints(bundle.Endpoints, lookup)
@@ -148,7 +110,7 @@ func CanonicalizeBundle(bundle types.IndexBundle) types.IndexBundle {
 	return bundle
 }
 
-func canonicalService(service types.ServiceRecord) types.ServiceRecord {
+func canonicalService(service domain.ServiceRecord) domain.ServiceRecord {
 	service.ServiceName = strings.TrimSpace(service.ServiceName)
 	service.Repo = canonicalRepo(service.Repo)
 	module := canonicalPath(service.ModulePath)
@@ -172,9 +134,9 @@ func canonicalService(service types.ServiceRecord) types.ServiceRecord {
 	return service
 }
 
-func canonicalEndpoints(records []types.EndpointRecord, lookup serviceLookup) []types.EndpointRecord {
+func canonicalEndpoints(records []domain.EndpointRecord, lookup serviceLookup) []domain.EndpointRecord {
 	byKey := make(map[string]int, len(records))
-	out := make([]types.EndpointRecord, 0, len(records))
+	out := make([]domain.EndpointRecord, 0, len(records))
 	for _, endpoint := range records {
 		endpoint.File = canonicalPath(endpoint.File)
 		service, ok := lookup.resolve(endpoint.ServiceName, endpoint.Repo, endpoint.File)
@@ -205,9 +167,9 @@ func canonicalEndpoints(records []types.EndpointRecord, lookup serviceLookup) []
 	return out
 }
 
-func canonicalDependencies(records []types.DependencyEdge, lookup serviceLookup) []types.DependencyEdge {
+func canonicalDependencies(records []domain.DependencyEdge, lookup serviceLookup) []domain.DependencyEdge {
 	byKey := make(map[string]int, len(records))
-	out := make([]types.DependencyEdge, 0, len(records))
+	out := make([]domain.DependencyEdge, 0, len(records))
 	for _, edge := range records {
 		edge.From = strings.TrimSpace(edge.From)
 		edge.To = strings.TrimSpace(edge.To)
@@ -224,17 +186,17 @@ func canonicalDependencies(records []types.DependencyEdge, lookup serviceLookup)
 		edge.CallerServiceKey = caller.ServiceKey
 		edge.From = caller.ServiceName
 		if target, found := lookup.resolve(edge.To, "", ""); found {
-			edge.TargetKind = types.DependencyTargetService
+			edge.TargetKind = domain.DependencyTargetService
 			edge.TargetServiceKey = target.ServiceKey
 			edge.ExternalTarget = ""
 			edge.To = target.ServiceName
 		} else {
-			edge.TargetKind = types.DependencyTargetExternal
+			edge.TargetKind = domain.DependencyTargetExternal
 			edge.TargetServiceKey = ""
 			edge.ExternalTarget = edge.To
 		}
 		targetRef := edge.TargetServiceKey
-		if edge.TargetKind == types.DependencyTargetExternal {
+		if edge.TargetKind == domain.DependencyTargetExternal {
 			targetRef = edge.ExternalTarget
 		}
 		key := edge.CallerServiceKey + "\x00" + string(edge.TargetKind) + "\x00" + targetRef + "\x00" + string(edge.Type)
@@ -250,11 +212,11 @@ func canonicalDependencies(records []types.DependencyEdge, lookup serviceLookup)
 }
 
 type serviceLookup struct {
-	byName map[string][]types.ServiceRecord
+	byName map[string][]domain.ServiceRecord
 }
 
-func newServiceLookup(services []types.ServiceRecord) serviceLookup {
-	byName := make(map[string][]types.ServiceRecord, len(services))
+func newServiceLookup(services []domain.ServiceRecord) serviceLookup {
+	byName := make(map[string][]domain.ServiceRecord, len(services))
 	for _, service := range services {
 		name := platform.Normalize(service.ServiceName)
 		byName[name] = append(byName[name], service)
@@ -262,7 +224,7 @@ func newServiceLookup(services []types.ServiceRecord) serviceLookup {
 	return serviceLookup{byName: byName}
 }
 
-func (lookup serviceLookup) resolve(name, repo, file string) (types.ServiceRecord, bool) {
+func (lookup serviceLookup) resolve(name, repo, file string) (domain.ServiceRecord, bool) {
 	candidates := lookup.byName[platform.Normalize(strings.TrimSpace(name))]
 	if len(candidates) == 1 {
 		return candidates[0], true
@@ -289,12 +251,12 @@ func (lookup serviceLookup) resolve(name, repo, file string) (types.ServiceRecor
 	if best >= 0 {
 		return candidates[best], true
 	}
-	return types.ServiceRecord{}, false
+	return domain.ServiceRecord{}, false
 }
 
-func canonicalRepositories(records []types.RepositoryRecord) []types.RepositoryRecord {
+func canonicalRepositories(records []domain.RepositoryRecord) []domain.RepositoryRecord {
 	seen := make(map[string]int, len(records))
-	out := make([]types.RepositoryRecord, 0, len(records))
+	out := make([]domain.RepositoryRecord, 0, len(records))
 	for _, record := range records {
 		record.Repo = canonicalRepo(record.Repo)
 		if record.Repo == "" {
@@ -310,19 +272,19 @@ func canonicalRepositories(records []types.RepositoryRecord) []types.RepositoryR
 	return out
 }
 
-func canonicalEvidence(evidence []types.Evidence) []types.Evidence {
+func canonicalEvidence(evidence []domain.Evidence) []domain.Evidence {
 	for i := range evidence {
 		evidence[i].Path = canonicalPath(evidence[i].Path)
 		evidence[i].Symbol = strings.TrimSpace(evidence[i].Symbol)
 		if evidence[i].Kind == "" {
-			evidence[i].Kind = types.SourceCodeScan
+			evidence[i].Kind = domain.SourceCodeScan
 		}
 	}
 	return evidence
 }
 
-func dedupeEvidence(evidence []types.Evidence) []types.Evidence {
-	out := make([]types.Evidence, 0, len(evidence))
+func dedupeEvidence(evidence []domain.Evidence) []domain.Evidence {
+	out := make([]domain.Evidence, 0, len(evidence))
 	seen := make(map[string]struct{}, len(evidence))
 	for _, item := range evidence {
 		key := item.Path + "\x00" + strconv.Itoa(item.Line) + "\x00" + item.Symbol + "\x00" + string(item.Kind)

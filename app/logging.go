@@ -1,8 +1,8 @@
-package application
+package app
 
 import (
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 // InitLogging installs the process-wide platform log sink before other capabilities start.

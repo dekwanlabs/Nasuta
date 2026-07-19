@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/astris/internal/platform/dbschema"
+	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 )
 
 type Store struct {

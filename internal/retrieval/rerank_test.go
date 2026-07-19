@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/platform/httpclient"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/platform/httpclient"
 )
 
 func doc(service, file, method, text string, score float64) codeDoc {
@@ -169,14 +169,14 @@ func TestDiversitySelect_LowBandCapPrunesMirrorDDL(t *testing.T) {
 	// maxPerServiceLowBand=1 should prune one while keeping the higher-band code doc.
 	// The input order matches rerankPool's production ordering.
 	docs := []codeDoc{
-		{source: "code", service: "hsds-backstage-cookbook-provider", filePath: "Ctrl.java", text: "code", trustTier: types.TrustCodeRuntime, rerankScore: 0.40},
-		{source: "code", service: "hsds-backstage-cookbook-provider", filePath: "db/pro.sql", text: "ddl1", trustTier: types.TrustRawDDL, rerankScore: 0.90},
-		{source: "code", service: "hsds-backstage-cookbook-provider", filePath: "db/fat.sql", text: "ddl2", trustTier: types.TrustRawDDL, rerankScore: 0.80},
+		{source: "code", service: "hsds-backstage-cookbook-provider", filePath: "Ctrl.java", text: "code", trustTier: domain.TrustCodeRuntime, rerankScore: 0.40},
+		{source: "code", service: "hsds-backstage-cookbook-provider", filePath: "db/pro.sql", text: "ddl1", trustTier: domain.TrustRawDDL, rerankScore: 0.90},
+		{source: "code", service: "hsds-backstage-cookbook-provider", filePath: "db/fat.sql", text: "ddl2", trustTier: domain.TrustRawDDL, rerankScore: 0.80},
 	}
 	out := selectDiverse(docs, 5, 3, 1, false)
 	ddlCount := 0
 	for _, d := range out {
-		if types.TrustBand(d.trustTier) <= 2 {
+		if domain.TrustBand(d.trustTier) <= 2 {
 			ddlCount++
 		}
 	}
@@ -191,13 +191,13 @@ func TestDiversitySelect_LowBandCapPrunesMirrorDDL(t *testing.T) {
 func TestDiversitySelect_LowBandCapDisabledWhenZero(t *testing.T) {
 	// maxPerServiceLowBand=0 disables the sub-cap: both DDLs survive.
 	docs := []codeDoc{
-		{source: "code", service: "svc", filePath: "db/pro.sql", text: "ddl1", trustTier: types.TrustRawDDL, rerankScore: 0.90},
-		{source: "code", service: "svc", filePath: "db/fat.sql", text: "ddl2", trustTier: types.TrustRawDDL, rerankScore: 0.80},
+		{source: "code", service: "svc", filePath: "db/pro.sql", text: "ddl1", trustTier: domain.TrustRawDDL, rerankScore: 0.90},
+		{source: "code", service: "svc", filePath: "db/fat.sql", text: "ddl2", trustTier: domain.TrustRawDDL, rerankScore: 0.80},
 	}
 	out := selectDiverse(docs, 5, 3, 0, false)
 	ddlCount := 0
 	for _, d := range out {
-		if types.TrustBand(d.trustTier) <= 2 {
+		if domain.TrustBand(d.trustTier) <= 2 {
 			ddlCount++
 		}
 	}
@@ -284,9 +284,9 @@ type strErr string
 
 func (e strErr) Error() string { return string(e) }
 
-type rerankTraceRecorder struct{ events []types.EvaluationTrace }
+type rerankTraceRecorder struct{ events []domain.EvaluationTrace }
 
-func (recorder *rerankTraceRecorder) RecordTrace(event types.EvaluationTrace) {
+func (recorder *rerankTraceRecorder) RecordTrace(event domain.EvaluationTrace) {
 	recorder.events = append(recorder.events, event)
 }
 
@@ -304,7 +304,7 @@ func TestPostProcessCodePipeline(t *testing.T) {
 		doc("svc-c", "c/1.java", "m", "dddd", 0.30), // dense 0.30/0.95=0.31 < 0.35 → dropped
 	}
 	recorder := &rerankTraceRecorder{}
-	ctx := types.WithTraceRecorder(context.Background(), recorder)
+	ctx := domain.WithTraceRecorder(context.Background(), recorder)
 	out := r.postProcessCodePool(ctx, docs, "q")
 	// Expect: 3 after dedup (a/1 once, b/1, c/1), c/1 dropped by threshold → 2.
 	if len(out) != 2 {
@@ -460,16 +460,16 @@ func (f fixedReranker) Enabled() bool { return true }
 
 func TestTrustBand_HigherTierIsHigherBand(t *testing.T) {
 	// Ordering property: code > schema/runbook/genDoc > ddl/userDoc/config > serviceMeta > repoDoc.
-	if types.TrustBand(types.TrustCodeRuntime) <= types.TrustBand(types.TrustCuratedSchema) {
+	if domain.TrustBand(domain.TrustCodeRuntime) <= domain.TrustBand(domain.TrustCuratedSchema) {
 		t.Fatal("code must band above curated schema")
 	}
-	if types.TrustBand(types.TrustCuratedSchema) <= types.TrustBand(types.TrustRawDDL) {
+	if domain.TrustBand(domain.TrustCuratedSchema) <= domain.TrustBand(domain.TrustRawDDL) {
 		t.Fatal("curated schema must band above raw DDL")
 	}
-	if types.TrustBand(types.TrustCuratedRunbook) <= types.TrustBand(types.TrustRawDDL) {
+	if domain.TrustBand(domain.TrustCuratedRunbook) <= domain.TrustBand(domain.TrustRawDDL) {
 		t.Fatal("curated runbook must band above raw DDL")
 	}
-	if types.TrustBand(types.TrustRawDDL) <= types.TrustBand(types.TrustRepoDoc) {
+	if domain.TrustBand(domain.TrustRawDDL) <= domain.TrustBand(domain.TrustRepoDoc) {
 		t.Fatal("raw DDL must band above repo doc")
 	}
 }
@@ -479,9 +479,9 @@ func TestTrustBand_HigherTierIsHigherBand(t *testing.T) {
 // Trust should only nudge close calls, not override relevance.
 func TestRerankPool_RelevanceNotVetoedByBand(t *testing.T) {
 	docs := []codeDoc{
-		{source: "code", filePath: "db/pro.sql", text: "ddl", trustTier: types.TrustRawDDL},                             // idx 0
-		{source: "code", filePath: "Ctrl.java", text: "code", trustTier: types.TrustCodeRuntime},                        // idx 1
-		{source: "runbook", filePath: "schema-x", funcName: "schema-x", text: "s", trustTier: types.TrustCuratedSchema}, // idx 2
+		{source: "code", filePath: "db/pro.sql", text: "ddl", trustTier: domain.TrustRawDDL},                             // idx 0
+		{source: "code", filePath: "Ctrl.java", text: "code", trustTier: domain.TrustCodeRuntime},                        // idx 1
+		{source: "runbook", filePath: "schema-x", funcName: "schema-x", text: "s", trustTier: domain.TrustCuratedSchema}, // idx 2
 	}
 	rr := fixedReranker{scores: []float64{0.99, 0.40, 0.60}}
 	out := rerankPool(context.Background(), rr, "q", docs, 0)
@@ -502,8 +502,8 @@ func TestRerankPool_RelevanceNotVetoedByBand(t *testing.T) {
 // higher-band doc wins despite being slightly less relevant.
 func TestRerankPool_TrustNudgesCloseCall(t *testing.T) {
 	docs := []codeDoc{
-		{source: "code", filePath: "repo.md", text: "r", trustTier: types.TrustRepoDoc},       // band 0, rel 0.55
-		{source: "code", filePath: "Ctrl.java", text: "c", trustTier: types.TrustCodeRuntime}, // band 4, rel 0.50
+		{source: "code", filePath: "repo.md", text: "r", trustTier: domain.TrustRepoDoc},       // band 0, rel 0.55
+		{source: "code", filePath: "Ctrl.java", text: "c", trustTier: domain.TrustCodeRuntime}, // band 4, rel 0.50
 	}
 	rr := fixedReranker{scores: []float64{0.55, 0.50}}
 	out := rerankPool(context.Background(), rr, "q", docs, 0)
@@ -515,8 +515,8 @@ func TestRerankPool_TrustNudgesCloseCall(t *testing.T) {
 func TestRerankPool_WithinBandOrdersByRelevance(t *testing.T) {
 	// Two docs in the same band must order by relevance.
 	docs := []codeDoc{
-		{source: "code", filePath: "a.sql", text: "a", trustTier: types.TrustRawDDL},
-		{source: "code", filePath: "b.sql", text: "b", trustTier: types.TrustUserDocument}, // same band as raw DDL
+		{source: "code", filePath: "a.sql", text: "a", trustTier: domain.TrustRawDDL},
+		{source: "code", filePath: "b.sql", text: "b", trustTier: domain.TrustUserDocument}, // same band as raw DDL
 	}
 	rr := fixedReranker{scores: []float64{0.30, 0.80}}
 	out := rerankPool(context.Background(), rr, "q", docs, 0)

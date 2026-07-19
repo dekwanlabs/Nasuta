@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 func TestParseQAAskRequestSourceMode(t *testing.T) {
@@ -13,12 +13,12 @@ func TestParseQAAskRequestSourceMode(t *testing.T) {
 		name        string
 		body        string
 		wantMode    string
-		wantSources types.EvidenceSources
+		wantSources domain.EvidenceSources
 		wantPlan    bool
 		wantErr     bool
 	}{
 		{name: "default auto", body: `{"question":" q "}`, wantMode: "auto"},
-		{name: "explicit web", body: `{"question":"q","source_mode":" WEB "}`, wantMode: "web", wantSources: types.Web, wantPlan: true},
+		{name: "explicit web", body: `{"question":"q","source_mode":" WEB "}`, wantMode: "web", wantSources: domain.Web, wantPlan: true},
 		{name: "explicit direct", body: `{"question":"q","source_mode":"direct"}`, wantMode: "direct", wantPlan: true},
 		{name: "invalid", body: `{"question":"q","source_mode":"database"}`, wantErr: true},
 	}

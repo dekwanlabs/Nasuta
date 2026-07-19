@@ -26,3 +26,20 @@ func TestNormalizeExtractedDedupesByFactKeyAndCapsResults(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeExtractedLeavesWorkContextExpiryForStore(t *testing.T) {
+	records := normalizeExtracted([]extractedEntry{{
+		FactKey:    "user:current-focus",
+		Kind:       string(KindWorkContext),
+		Content:    "Refactor user center",
+		SourceType: string(SourceUserStated),
+		Confidence: 1,
+	}})
+
+	if len(records) != 1 {
+		t.Fatalf("records = %#v", records)
+	}
+	if records[0].ExpiresAt != nil {
+		t.Fatalf("expires_at = %v, want nil", records[0].ExpiresAt)
+	}
+}

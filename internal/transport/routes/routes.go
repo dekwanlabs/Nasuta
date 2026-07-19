@@ -4,16 +4,13 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dekwanlabs/astris/auth"
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/rbac"
-	"github.com/dekwanlabs/astris/internal/transport/dashboard"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform/httputil"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/rbac"
+	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
-
-// APIRegistrar registers one authenticated dashboard route.
-type APIRegistrar func(string, http.HandlerFunc)
 
 // Config contains only common platform transports.
 type Config struct {
@@ -69,7 +66,7 @@ func Setup(mux *http.ServeMux, rc Config) {
 	api("GET /api/services", dash.APIServices)
 	api("GET /api/endpoints", dash.APIEndpoints)
 	api("GET /api/edges", dash.APIEdges)
-	api("GET /api/qdrant/stats", dash.APIQdrantStats)
+	api("GET /api/semantic/status", dash.APISemanticStatus)
 
 	api("POST /api/qa/ask", dash.APIQAAsk)
 	api("GET /api/qa/memories", dash.APIQAMemories)
@@ -156,7 +153,9 @@ func routeWithAuth(mux *http.ServeMux, rc Config) func(string, http.HandlerFunc)
 }
 
 // AuthenticatedAPI returns the common dashboard authentication boundary.
-func AuthenticatedAPI(mux *http.ServeMux, authService *auth.Service) APIRegistrar {
+// The returned registrar matches app.APIRegistrar so the public contract is the
+// single source of truth for the extension surface.
+func AuthenticatedAPI(mux *http.ServeMux, authService *auth.Service) func(string, http.HandlerFunc) {
 	return func(pattern string, fn http.HandlerFunc) {
 		if authService != nil {
 			mux.Handle(pattern, authService.RequireAuth(fn))

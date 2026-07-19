@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/dekwanlabs/astris/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 type memoryTestEmbedder struct{}
@@ -21,40 +21,44 @@ func (memoryTestEmbedder) Dim() int      { return 3 }
 func (memoryTestEmbedder) Enabled() bool { return true }
 
 type memoryTestSemantic struct {
-	store.NoopSemantic
-	hits    []store.SemanticHit
-	filter  store.SemanticFilter
-	points  []store.SemanticPoint
+	hits    []semantic.Hit
+	filter  semantic.Filter
+	points  []semantic.Record
 	deleted []string
 }
 
-func (semantic *memoryTestSemantic) Enabled() bool { return true }
+func (*memoryTestSemantic) Ensure(context.Context, semantic.Schema) error { return nil }
+func (*memoryTestSemantic) Capabilities() semantic.Capabilities {
+	return semantic.RequiredCapabilities()
+}
+func (*memoryTestSemantic) Count(context.Context, semantic.Filter) (int, error) { return 0, nil }
+func (*memoryTestSemantic) Close() error                                        { return nil }
 
-func (semantic *memoryTestSemantic) SearchFiltered(_ context.Context, _ []float32, filter store.SemanticFilter, _ int, _ string) ([]store.SemanticHit, error) {
-	semantic.filter = filter
-	return semantic.hits, nil
+func (s *memoryTestSemantic) Search(_ context.Context, query semantic.Query) ([]semantic.Hit, error) {
+	s.filter = query.Filter
+	return s.hits, nil
 }
 
-func (semantic *memoryTestSemantic) Upsert(_ context.Context, points []store.SemanticPoint) error {
-	semantic.points = append(semantic.points, points...)
+func (s *memoryTestSemantic) Upsert(_ context.Context, points []semantic.Record) error {
+	s.points = append(s.points, points...)
 	return nil
 }
 
-func (semantic *memoryTestSemantic) DeletePoints(_ context.Context, ids []string) error {
-	semantic.deleted = append(semantic.deleted, ids...)
+func (s *memoryTestSemantic) Delete(_ context.Context, query semantic.DeleteQuery) error {
+	s.deleted = append(s.deleted, query.IDs...)
 	return nil
 }
 
 func TestRecallBatchLoadsCandidatesAndRejectsInvalidPayloads(t *testing.T) {
-	memory, semantic, mock, closeDB := newMemoryTestStore(t)
+	memory, semanticStore, mock, closeDB := newMemoryTestStore(t)
 	defer closeDB()
-	semantic.hits = []store.SemanticHit{
-		{Payload: map[string]any{"memory_id": "other-payload", "user_id": int64(99)}},
-		{Payload: map[string]any{"memory_id": "missing-user"}},
-		{Payload: map[string]any{"memory_id": "malformed-user", "user_id": "42"}},
-		{Score: 0.9, Payload: map[string]any{"memory_id": "forged-owner", "user_id": int64(42)}},
-		{Score: 0.8, Payload: map[string]any{"memory_id": "current", "user_id": int64(42)}},
-		{Score: 0.7, Payload: map[string]any{"memory_id": "global", "user_id": int64(0)}},
+	semanticStore.hits = []semantic.Hit{
+		{Metadata: map[string]any{"memory_id": "other-payload", "user_id": int64(99)}},
+		{Metadata: map[string]any{"memory_id": "missing-user"}},
+		{Metadata: map[string]any{"memory_id": "malformed-user", "user_id": "42"}},
+		{Score: 0.9, Metadata: map[string]any{"memory_id": "forged-owner", "user_id": int64(42)}},
+		{Score: 0.8, Metadata: map[string]any{"memory_id": "current", "user_id": int64(42)}},
+		{Score: 0.7, Metadata: map[string]any{"memory_id": "global", "user_id": int64(0)}},
 	}
 
 	now := memory.now()
@@ -78,19 +82,19 @@ func TestRecallBatchLoadsCandidatesAndRejectsInvalidPayloads(t *testing.T) {
 	if result.Stats.InvalidPayload != 3 || result.Stats.MissingRecords != 1 {
 		t.Fatalf("stats = %#v", result.Stats)
 	}
-	if semantic.filter.Keywords["status"] != string(StatusActive) {
-		t.Fatalf("status filter = %#v", semantic.filter.Keywords)
+	if semanticStore.filter.Keywords["status"] != string(StatusActive) {
+		t.Fatalf("status filter = %#v", semanticStore.filter.Keywords)
 	}
-	assertUserScope(t, semantic.filter.AnyInteger["user_id"], []int64{42, 0})
+	assertUserScope(t, semanticStore.filter.AnyInteger["user_id"], []int64{42, 0})
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestCurrentRecallFiltersSupersededExpiredAndEpisodeRecords(t *testing.T) {
-	memory, semantic, mock, closeDB := newMemoryTestStore(t)
+	memory, semanticStore, mock, closeDB := newMemoryTestStore(t)
 	defer closeDB()
-	semantic.hits = memoryHits("superseded", "expired", "episode", "current")
+	semanticStore.hits = memoryHits("superseded", "expired", "episode", "current")
 	now := memory.now()
 	expired := now.Add(-time.Minute)
 	rows := sqlmock.NewRows(memoryColumns()).
@@ -121,9 +125,9 @@ func TestCurrentRecallFiltersSupersededExpiredAndEpisodeRecords(t *testing.T) {
 }
 
 func TestHistoricalRecallAllowsEpisodeAndSuperseded(t *testing.T) {
-	memory, semantic, mock, closeDB := newMemoryTestStore(t)
+	memory, semanticStore, mock, closeDB := newMemoryTestStore(t)
 	defer closeDB()
-	semantic.hits = memoryHits("episode", "superseded")
+	semanticStore.hits = memoryHits("episode", "superseded")
 	now := memory.now()
 	rows := sqlmock.NewRows(memoryColumns()).
 		AddRow(memoryRow("episode", 42, "workspace:user-center:owner", KindEpisode, "Used service A", SourceUserStated, StatusActive, nil, nil, now)...).
@@ -142,8 +146,8 @@ func TestHistoricalRecallAllowsEpisodeAndSuperseded(t *testing.T) {
 	if len(result.Records) != 2 {
 		t.Fatalf("records = %#v", result.Records)
 	}
-	if _, exists := semantic.filter.Keywords["status"]; exists {
-		t.Fatalf("historical recall unexpectedly filtered status: %#v", semantic.filter)
+	if _, exists := semanticStore.filter.Keywords["status"]; exists {
+		t.Fatalf("historical recall unexpectedly filtered status: %#v", semanticStore.filter)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -183,19 +187,19 @@ func newMemoryTestStore(t *testing.T) (*MemoryStore, *memoryTestSemantic, sqlmoc
 	if err != nil {
 		t.Fatal(err)
 	}
-	semantic := &memoryTestSemantic{}
-	memory := newMemoryStore(db, semantic, memoryTestEmbedder{}, 24*time.Hour)
+	semanticStore := &memoryTestSemantic{}
+	memory := newMemoryStore(db, semanticStore, memoryTestEmbedder{}, 24*time.Hour)
 	fixedNow := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	memory.now = func() time.Time { return fixedNow }
-	return memory, semantic, mock, func() { db.Close() }
+	return memory, semanticStore, mock, func() { db.Close() }
 }
 
-func memoryHits(ids ...string) []store.SemanticHit {
-	hits := make([]store.SemanticHit, 0, len(ids))
+func memoryHits(ids ...string) []semantic.Hit {
+	hits := make([]semantic.Hit, 0, len(ids))
 	for i, id := range ids {
-		hits = append(hits, store.SemanticHit{
-			Score:   1 - float32(i)/10,
-			Payload: map[string]any{"memory_id": id, "user_id": int64(42)},
+		hits = append(hits, semantic.Hit{
+			Score:    1 - float32(i)/10,
+			Metadata: map[string]any{"memory_id": id, "user_id": int64(42)},
 		})
 	}
 	return hits

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform/httputil"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
 type repoReq struct {

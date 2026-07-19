@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // writeFile creates path (with parents) under root and writes content.
@@ -50,17 +50,6 @@ public interface UserFeign {
     Object info();
 }`)
 
-	writeFile(t, root, ".docs/services/hsas-demo.md", "---\n"+
-		"id: service-hsas-demo\n"+
-		"owner: demo-team\n"+
-		"scope: hsas\n"+
-		"tags: [service-card, demo]\n"+
-		"source_of_truth:\n"+
-		"  - /x/hsas/hsas-demo/pom.xml\n"+
-		"---\n\n"+
-		"# 服务卡：hsas-demo\n\n"+
-		"## 1. TL;DR\ndemo 服务用于测试。\n\n"+
-		"## 2. 下游依赖\n调用 `hsds-user-provider`。\n")
 	return root
 }
 
@@ -73,17 +62,14 @@ func TestBuildBundleEndToEnd(t *testing.T) {
 	if svc == nil {
 		t.Fatalf("hsas-demo service not found; got %d services", len(b.Services))
 	}
-	if svc.Owner != "demo-team" {
-		t.Errorf("owner = %q, want demo-team (doc merge)", svc.Owner)
-	}
 	if svc.Language != "java" || svc.Runtime != "spring-boot" {
 		t.Errorf("lang/runtime = %q/%q", svc.Language, svc.Runtime)
 	}
 	if !containsInt(svc.Ports, 3009) {
 		t.Errorf("ports = %v, want contains 3009", svc.Ports)
 	}
-	if svc.Confidence < 0.95 {
-		t.Errorf("merged confidence = %v, want >= 0.95", svc.Confidence)
+	if svc.Confidence != 0.9 {
+		t.Errorf("confidence = %v, want 0.9", svc.Confidence)
 	}
 
 	// endpoints: class prefix joined, handler method captured
@@ -101,10 +87,10 @@ func TestBuildBundleEndToEnd(t *testing.T) {
 		t.Errorf("dependencies = %d, want 1", len(b.Dependencies))
 	} else {
 		dependency := b.Dependencies[0]
-		if dependency.From != "hsas-demo" || dependency.To != "hsds-user-provider" || dependency.Type != types.EdgeFeign {
+		if dependency.From != "hsas-demo" || dependency.To != "hsds-user-provider" || dependency.Type != domain.EdgeFeign {
 			t.Errorf("dependency = %+v", dependency)
 		}
-		if dependency.CallerServiceKey != svc.ServiceKey || dependency.TargetKind != types.DependencyTargetExternal {
+		if dependency.CallerServiceKey != svc.ServiceKey || dependency.TargetKind != domain.DependencyTargetExternal {
 			t.Errorf("dependency identity = %+v", dependency)
 		}
 		if len(dependency.Evidence) != 1 || dependency.Evidence[0].Symbol != "UserFeign" {
@@ -121,7 +107,7 @@ func TestBuildBundleEndToEnd(t *testing.T) {
 
 func TestScanRepoNormalizesRepositoryKey(t *testing.T) {
 	root := miniWorkspace(t)
-	b := ScanRepo(root, "repos/hsas/hsas-demo", nil)
+	b := ScanRepo(root, "repos/hsas/hsas-demo")
 	if b.Repo != "hsas/hsas-demo" {
 		t.Fatalf("repo = %q, want hsas/hsas-demo", b.Repo)
 	}
@@ -131,15 +117,15 @@ func TestScanRepoNormalizesRepositoryKey(t *testing.T) {
 }
 
 func TestMergeServicesOrderIndependent(t *testing.T) {
-	doc := types.ServiceRecord{ServiceName: "svc", Repo: "docs", Owner: "team-x",
+	metadata := domain.ServiceRecord{ServiceName: "svc", Repo: "hsas/svc", ModulePath: ".", Owner: "team-x",
 		Summary: "does things", Tags: []string{"card"}, Docs: []string{"d.md"},
 		Language: "unknown", Confidence: 0.85}
-	code := types.ServiceRecord{ServiceName: "svc", Repo: "hsas/svc", ModulePath: "repos/hsas/svc",
+	code := domain.ServiceRecord{ServiceName: "svc", Repo: "hsas/svc", ModulePath: ".",
 		Language: "java", Runtime: "spring-boot", Tags: []string{"code-scan"},
 		Ports: []int{3001}, Confidence: 0.9}
 
-	for _, order := range [][]types.ServiceRecord{{doc, code}, {code, doc}} {
-		m := CanonicalizeBundle(types.IndexBundle{Services: order}).Services
+	for _, order := range [][]domain.ServiceRecord{{metadata, code}, {code, metadata}} {
+		m := CanonicalizeBundle(domain.IndexBundle{Services: order}).Services
 		if len(m) != 1 {
 			t.Fatalf("merge -> %d records, want 1", len(m))
 		}
@@ -160,7 +146,7 @@ func TestMergeServicesOrderIndependent(t *testing.T) {
 }
 
 func TestCanonicalizeBundleKeepsNestedModuleOwnership(t *testing.T) {
-	bundle := types.IndexBundle{Services: []types.ServiceRecord{{
+	bundle := domain.IndexBundle{Services: []domain.ServiceRecord{{
 		ServiceName: "Siri",
 		Repo:        "airone/dreo",
 		ModulePath:  "repos/airone/dreo/ios/Siri",
@@ -195,7 +181,7 @@ func TestSensitiveFilesSkipped(t *testing.T) {
 	}
 }
 
-func findService(list []types.ServiceRecord, name string) *types.ServiceRecord {
+func findService(list []domain.ServiceRecord, name string) *domain.ServiceRecord {
 	for i := range list {
 		if list[i].ServiceName == name {
 			return &list[i]
@@ -204,7 +190,7 @@ func findService(list []types.ServiceRecord, name string) *types.ServiceRecord {
 	return nil
 }
 
-func findEndpoint(list []types.EndpointRecord, method, path string) *types.EndpointRecord {
+func findEndpoint(list []domain.EndpointRecord, method, path string) *domain.EndpointRecord {
 	for i := range list {
 		if list[i].Method == method && list[i].Path == path {
 			return &list[i]
@@ -213,7 +199,7 @@ func findEndpoint(list []types.EndpointRecord, method, path string) *types.Endpo
 	return nil
 }
 
-func endpointPaths(list []types.EndpointRecord) []string {
+func endpointPaths(list []domain.EndpointRecord) []string {
 	out := make([]string, 0, len(list))
 	for _, e := range list {
 		out = append(out, e.Method+" "+e.Path)

@@ -6,12 +6,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // scanIOSServices finds iOS/macOS app modules (via .xcodeproj / Info.plist).
-func scanIOSServices(root string, dirs []string) []types.ServiceRecord {
-	var records []types.ServiceRecord
+func scanIOSServices(root string, dirs []string) []domain.ServiceRecord {
+	var records []domain.ServiceRecord
 
 	// Find Info.plist files — the definitive iOS/macOS app marker
 	plists := walkFiles(root, dirs, func(name string) bool { return name == "Info.plist" })
@@ -55,7 +55,7 @@ func scanIOSServices(root string, dirs []string) []types.ServiceRecord {
 
 		lang := detectIOSLang(moduleRoot)
 		runtime := detectIOSPlatform(moduleRoot)
-		records = append(records, types.ServiceRecord{
+		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
 			Layer:         "app",
@@ -66,7 +66,7 @@ func scanIOSServices(root string, dirs []string) []types.ServiceRecord {
 			Tags:          []string{"code-scan", "mobile", "ios"},
 			Docs:          []string{},
 			SourceOfTruth: []string{rel},
-			Entrypoints:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 			Ports:         nil,
 			Confidence:    0.9,
 		})
@@ -75,11 +75,11 @@ func scanIOSServices(root string, dirs []string) []types.ServiceRecord {
 }
 
 // scanIOSDependencies finds URLSession/Alamofire/Combine API calls in iOS code.
-func scanIOSDependencies(root string, dirs []string) []types.DependencyEdge {
+func scanIOSDependencies(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, func(name string) bool {
 		return strings.HasSuffix(name, ".swift") || strings.HasSuffix(name, ".m") || strings.HasSuffix(name, ".mm")
 	})
-	var edges []types.DependencyEdge
+	var edges []domain.DependencyEdge
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "URLSession") && !strings.Contains(text, "Alamofire") &&
@@ -101,11 +101,11 @@ func scanIOSDependencies(root string, dirs []string) []types.DependencyEdge {
 			if len(m) > 1 {
 				target := extractIOSHost(m[1])
 				if target != "" {
-					edges = append(edges, types.DependencyEdge{
+					edges = append(edges, domain.DependencyEdge{
 						From:       caller,
 						To:         target,
-						Type:       types.EdgeHTTP,
-						Evidence:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+						Type:       domain.EdgeHTTP,
+						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 						Confidence: 0.6,
 					})
 				}
@@ -117,11 +117,11 @@ func scanIOSDependencies(root string, dirs []string) []types.DependencyEdge {
 			if len(m) > 1 {
 				target := extractIOSHost(m[1])
 				if target != "" {
-					edges = append(edges, types.DependencyEdge{
+					edges = append(edges, domain.DependencyEdge{
 						From:       caller,
 						To:         target,
-						Type:       types.EdgeHTTP,
-						Evidence:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+						Type:       domain.EdgeHTTP,
+						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 						Confidence: 0.5,
 					})
 				}

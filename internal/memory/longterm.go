@@ -8,11 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/astris/internal/platform/dbschema"
-	"github.com/dekwanlabs/astris/internal/platform/embed"
-	qstore "github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
+	"github.com/dekwanlabs/nasuta/internal/platform/embed"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/semantic"
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
@@ -21,18 +22,18 @@ type LongTermRecord = MemoryRecord
 const memorySelectColumns = `id,user_id,fact_key,kind,content,source_type,authority,status,
 	superseded_by,source_session,confidence,expires_at,created_at,updated_at,last_used,use_count`
 
-// MemoryStore keeps durable state in MySQL and semantic candidates in Qdrant.
+// MemoryStore keeps durable state in MySQL and candidates in the selected semantic store.
 type MemoryStore struct {
 	db             *sql.DB
-	semantic       qstore.SemanticStore
+	semantic       semantic.Store
 	embedder       embed.Embedder
 	workContextTTL time.Duration
 	now            func() time.Time
 }
 
 // OpenMemoryStore opens the long-term memory store.
-func OpenMemoryStore(dsn string, semantic qstore.SemanticStore, embedder embed.Embedder, workContextTTL time.Duration) (*MemoryStore, error) {
-	db, err := qstore.MySQL(dsn)
+func OpenMemoryStore(dsn string, semantic semantic.Store, embedder embed.Embedder, workContextTTL time.Duration) (*MemoryStore, error) {
+	db, err := store.MySQL(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("memory: open: %w", err)
 	}
@@ -43,7 +44,7 @@ func OpenMemoryStore(dsn string, semantic qstore.SemanticStore, embedder embed.E
 	return newMemoryStore(db, semantic, embedder, workContextTTL), nil
 }
 
-func newMemoryStore(db *sql.DB, semantic qstore.SemanticStore, embedder embed.Embedder, workContextTTL time.Duration) *MemoryStore {
+func newMemoryStore(db *sql.DB, semantic semantic.Store, embedder embed.Embedder, workContextTTL time.Duration) *MemoryStore {
 	return &MemoryStore{
 		db:             db,
 		semantic:       semantic,
@@ -56,16 +57,20 @@ func newMemoryStore(db *sql.DB, semantic qstore.SemanticStore, embedder embed.Em
 // Enabled reports whether semantic recall is available.
 func (memory *MemoryStore) Enabled() bool {
 	return memory != nil &&
-		memory.semantic != nil && memory.semantic.Enabled() &&
+		memory.semantic != nil && memory.semantic.Capabilities().Dense &&
 		memory.embedder != nil && memory.embedder.Enabled()
 }
 
 // Write applies authority-based replacement and then refreshes vector candidates.
 func (memory *MemoryStore) Write(ctx context.Context, incoming MemoryRecord) (WriteResult, error) {
 	now := memory.now().UTC()
-	rec, err := canonicalizeRecord(incoming, memory.workContextTTL, now)
+	rec, err := canonicalizeRecord(incoming)
 	if err != nil {
 		return WriteResult{}, err
+	}
+	if rec.Kind == KindWorkContext && rec.ExpiresAt == nil {
+		expiresAt := now.Add(memory.workContextTTL)
+		rec.ExpiresAt = &expiresAt
 	}
 	if rec.ID == "" {
 		seed := fmt.Sprintf("mem:%d:%s:%s:%d", rec.UserID, rec.FactKey, rec.Content, now.UnixNano())
@@ -255,8 +260,8 @@ func (memory *MemoryStore) vectorize(ctx context.Context, rec MemoryRecord) erro
 		"source_type": string(rec.SourceType),
 		"status":      string(rec.Status),
 	}
-	return memory.semantic.Upsert(ctx, []qstore.SemanticPoint{
-		{ID: rec.ID, Vector: vecs[0], Payload: payload},
+	return memory.semantic.Upsert(ctx, []semantic.Record{
+		{ID: rec.ID, DenseVector: vecs[0], Metadata: payload},
 	})
 }
 

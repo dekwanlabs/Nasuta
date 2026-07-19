@@ -1,12 +1,14 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/joho/godotenv"
 )
 
@@ -14,14 +16,35 @@ import (
 // ("30s", "2m"). Zero value means "use the default".
 type Duration time.Duration
 
-// LogConfig controls file logging + daily rotation, loaded from CODELOOM_LOG_*
-// env vars. See internal/log.Options for the sink behavior.
+// LogConfig controls file logging and daily rotation.
 type LogConfig struct {
 	File       string
 	Stdout     bool
 	MaxBackups int
 	MaxAge     int
 	Compress   bool
+}
+
+// SemanticConfig is the normalized connection contract shared by semantic providers.
+type SemanticConfig struct {
+	Provider   string
+	Endpoint   string
+	Collection string
+	Namespace  string
+	Auth       SemanticAuth
+	TLS        SemanticTLS
+}
+
+type SemanticAuth struct {
+	APIKey   string
+	Username string
+	Password string
+}
+
+type SemanticTLS struct {
+	Enabled    bool
+	CAFile     string
+	ServerName string
 }
 
 // Config holds runtime configuration sourced from environment variables.
@@ -35,8 +58,9 @@ type Config struct {
 
 	MemoryWorkContextTTL time.Duration
 
-	HTTPAddr  string
-	AuthToken string
+	HTTPAddr      string
+	AuthToken     string
+	DailySyncTime string
 
 	// WebSearchEnabled gates the web_search / web_fetch tools.
 	// When true (default), the QA agent can search the web.
@@ -45,10 +69,7 @@ type Config struct {
 	WebSearchEngine     string // duckduckgo (default) | brave | bing | searxng
 	WebSearchAPIKey     string // API key for brave / tavily / etc.
 
-	QdrantHost       string
-	QdrantPort       int
-	QdrantAPIKey     string
-	QdrantCollection string
+	Semantic SemanticConfig
 
 	EmbeddingProvider    string
 	EmbeddingAPIKey      string
@@ -65,6 +86,13 @@ type Config struct {
 	FeishuRedirectURI string
 	WebBaseURL        string
 
+	AlertWebhookSecret  string
+	NotifyFeishuWebhook string
+	NotifyWecomWebhook  string
+	NotifyHTTPWebhook   string
+	FixDefaultAssignee  string
+	FixBranchPrefix     string
+
 	Log LogConfig
 }
 
@@ -73,6 +101,19 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envFirst(def string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return def
+}
+
+func nasutaEnv(name, def string) string {
+	return envFirst(def, "NASUTA_"+name, "CODELOOM_"+name)
 }
 
 func envInt(key string, def int) int {
@@ -84,9 +125,21 @@ func envInt(key string, def int) int {
 	return def
 }
 
-func envBool(key string, def bool) bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	switch v {
+func nasutaEnvInt(name string, def int) int {
+	value := envFirst("", "NASUTA_"+name, "CODELOOM_"+name)
+	if value == "" {
+		return def
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil {
+		return def
+	}
+	return number
+}
+
+func nasutaEnvBool(name string, def bool) bool {
+	value := strings.ToLower(envFirst("", "NASUTA_"+name, "CODELOOM_"+name))
+	switch value {
 	case "":
 		return def
 	case "1", "true", "yes", "on":
@@ -96,8 +149,20 @@ func envBool(key string, def bool) bool {
 	}
 }
 
-func envDuration(key string, def time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(key))
+func envBool(key string, def bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch value {
+	case "":
+		return def
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func nasutaEnvDuration(name string, def time.Duration) time.Duration {
+	value := envFirst("", "NASUTA_"+name, "CODELOOM_"+name)
 	if value == "" {
 		return def
 	}
@@ -148,26 +213,24 @@ func Load() Config {
 		_ = godotenv.Load("../../.env")
 	}
 
-	root := env("CODELOOM_WORKSPACE_ROOT", cwdOrDot())
+	root := nasutaEnv("WORKSPACE_ROOT", cwdOrDot())
 	root, _ = filepath.Abs(root)
 
 	return Config{
 		WorkspaceRoot:        root,
-		ScanDirs:             splitList(env("CODELOOM_SCAN_DIRS", "")),
-		IndexCode:            envBool("CODELOOM_INDEX_CODE", true),
-		MemoryWorkContextTTL: envDuration("CODELOOM_MEMORY_WORK_CONTEXT_TTL", 30*24*time.Hour),
-		WebSearchEnabled:     envBool("CODELOOM_WEB_SEARCH_ENABLED", true),
-		WebSearchMCPEnabled:  envBool("CODELOOM_WEB_SEARCH_MCP_ENABLED", false),
-		WebSearchEngine:      env("CODELOOM_WEB_SEARCH_ENGINE", "duckduckgo"),
-		WebSearchAPIKey:      env("CODELOOM_WEB_SEARCH_API_KEY", ""),
-		SQLitePath:           env("CODELOOM_SQLITE_PATH", filepath.Join(root, ".mcp-index", "index.db")),
-		HTTPAddr:             env("CODELOOM_HTTP_ADDR", ":8201"),
-		AuthToken:            env("CODELOOM_AUTH_TOKEN", ""),
+		ScanDirs:             splitList(nasutaEnv("SCAN_DIRS", "")),
+		IndexCode:            nasutaEnvBool("INDEX_CODE", true),
+		MemoryWorkContextTTL: nasutaEnvDuration("MEMORY_WORK_CONTEXT_TTL", 30*24*time.Hour),
+		WebSearchEnabled:     nasutaEnvBool("WEB_SEARCH_ENABLED", true),
+		WebSearchMCPEnabled:  nasutaEnvBool("WEB_SEARCH_MCP_ENABLED", false),
+		WebSearchEngine:      nasutaEnv("WEB_SEARCH_ENGINE", "duckduckgo"),
+		WebSearchAPIKey:      nasutaEnv("WEB_SEARCH_API_KEY", ""),
+		SQLitePath:           nasutaEnv("SQLITE_PATH", filepath.Join(root, platform.WorkspaceMetadataDir, "index.db")),
+		HTTPAddr:             nasutaEnv("HTTP_ADDR", ":8201"),
+		AuthToken:            nasutaEnv("AUTH_TOKEN", ""),
+		DailySyncTime:        nasutaEnv("DAILY_SYNC_TIME", "02:07"),
 
-		QdrantHost:           env("QDRANT_HOST", ""),
-		QdrantPort:           envInt("QDRANT_PORT", 6334),
-		QdrantAPIKey:         env("QDRANT_API_KEY", ""),
-		QdrantCollection:     env("QDRANT_COLLECTION", "knowledge"),
+		Semantic:             loadSemanticConfig(),
 		EmbeddingProvider:    env("EMBEDDING_PROVIDER", "openai"),
 		EmbeddingAPIKey:      env("EMBEDDING_API_KEY", ""),
 		EmbeddingModel:       env("EMBEDDING_MODEL", "text-embedding-3-small"),
@@ -183,14 +246,83 @@ func Load() Config {
 		FeishuRedirectURI: env("FEISHU_REDIRECT_URI", ""),
 		WebBaseURL:        env("WEB_BASE_URL", "http://localhost:5173"),
 
+		AlertWebhookSecret:  env("ALERT_WEBHOOK_SECRET", ""),
+		NotifyFeishuWebhook: env("NOTIFY_FEISHU_WEBHOOK", ""),
+		NotifyWecomWebhook:  env("NOTIFY_WECOM_WEBHOOK", ""),
+		NotifyHTTPWebhook:   env("NOTIFY_HTTP_WEBHOOK", ""),
+		FixDefaultAssignee:  env("FIX_DEFAULT_ASSIGNEE", ""),
+		FixBranchPrefix:     env("FIX_BRANCH_PREFIX", "hotfix"),
+
 		Log: LogConfig{
-			File:       env("CODELOOM_LOG_FILE", filepath.Join(root, "logs", "all.log")),
-			Stdout:     envBool("CODELOOM_LOG_STDOUT", true),
-			MaxBackups: envInt("CODELOOM_LOG_MAX_BACKUPS", 7),
-			MaxAge:     envInt("CODELOOM_LOG_MAX_AGE", 30),
-			Compress:   envBool("CODELOOM_LOG_COMPRESS", false),
+			File:       nasutaEnv("LOG_FILE", filepath.Join(root, "logs", "all.log")),
+			Stdout:     nasutaEnvBool("LOG_STDOUT", true),
+			MaxBackups: nasutaEnvInt("LOG_MAX_BACKUPS", 7),
+			MaxAge:     nasutaEnvInt("LOG_MAX_AGE", 30),
+			Compress:   nasutaEnvBool("LOG_COMPRESS", false),
 		},
 	}
+}
+
+func loadSemanticConfig() SemanticConfig {
+	provider := strings.ToLower(semanticEnv("PROVIDER", ""))
+	endpoint := semanticEnv("ENDPOINT", "")
+	if endpoint == "" {
+		if host := envFirst("", "NASUTA_QDRANT_HOST", "CODELOOM_QDRANT_HOST", "QDRANT_HOST"); host != "" {
+			port := 6334
+			if raw := envFirst("", "NASUTA_QDRANT_PORT", "CODELOOM_QDRANT_PORT", "QDRANT_PORT"); raw != "" {
+				if parsed, err := strconv.Atoi(raw); err == nil {
+					port = parsed
+				}
+			}
+			endpoint = qdrantEndpoint(host, port)
+		}
+	}
+	if provider == "" && endpoint != "" {
+		provider = "qdrant"
+	}
+	return SemanticConfig{
+		Provider:   provider,
+		Endpoint:   endpoint,
+		Collection: semanticEnv("COLLECTION", envFirst("knowledge", "NASUTA_QDRANT_COLLECTION", "CODELOOM_QDRANT_COLLECTION", "QDRANT_COLLECTION")),
+		Namespace:  semanticEnv("NAMESPACE", "default"),
+		Auth: SemanticAuth{
+			APIKey:   semanticEnv("API_KEY", envFirst("", "NASUTA_QDRANT_API_KEY", "CODELOOM_QDRANT_API_KEY", "QDRANT_API_KEY")),
+			Username: semanticEnv("USERNAME", ""),
+			Password: semanticEnv("PASSWORD", ""),
+		},
+		TLS: SemanticTLS{
+			Enabled:    semanticEnvBool("TLS_ENABLED", false),
+			CAFile:     semanticEnv("TLS_CA_FILE", ""),
+			ServerName: semanticEnv("TLS_SERVER_NAME", ""),
+		},
+	}
+}
+
+func semanticEnv(name, def string) string {
+	return envFirst(def, "NASUTA_SEMANTIC_"+name, "CODELOOM_SEMANTIC_"+name, "SEMANTIC_"+name)
+}
+
+func semanticEnvBool(name string, def bool) bool {
+	value := strings.ToLower(semanticEnv(name, ""))
+	switch value {
+	case "":
+		return def
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func qdrantEndpoint(host string, port int) string {
+	host = strings.TrimSpace(strings.TrimSuffix(host, "/"))
+	if strings.Contains(host, "://") {
+		return host
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 func cwdOrDot() string {

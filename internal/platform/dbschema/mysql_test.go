@@ -36,6 +36,8 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages"}},
 		{group: GroupQARun, tables: []string{"agent_runs", "agent_steps"}},
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
+		{group: GroupIncident, tables: []string{"incident_records"}},
+		{group: GroupApproval, tables: []string{"pending_actions"}},
 	}
 	for _, tc := range cases {
 		stmts, ok := mysqlSchema[tc.group]
@@ -66,10 +68,10 @@ func TestManagedSchemaDoesNotStoreTimesAsStrings(t *testing.T) {
 	}
 }
 
-func TestPlatformSchemaExcludesScenarioTables(t *testing.T) {
+func TestPlatformSchemaExcludesObserveTables(t *testing.T) {
 	for group, statements := range mysqlSchema {
 		for _, statement := range statements {
-			for _, table := range []string{"observe_history", "observe_sources", "incident_records", "pending_actions"} {
+			for _, table := range []string{"observe_history", "observe_sources"} {
 				if strings.Contains(statement, "CREATE TABLE IF NOT EXISTS "+table) {
 					t.Fatalf("platform group %q owns scenario table %q", group, table)
 				}

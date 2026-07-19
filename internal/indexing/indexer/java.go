@@ -7,15 +7,15 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 // scanJavaServices finds Java applications by scanning .java files for
 // @SpringBootApplication or a main method — no filename assumption.
-func scanJavaServices(root string, dirs []string) []types.ServiceRecord {
+func scanJavaServices(root string, dirs []string) []domain.ServiceRecord {
 	files := walkFiles(root, dirs, hasSuffix(".java"))
-	var records []types.ServiceRecord
+	var records []domain.ServiceRecord
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "@SpringBootApplication") &&
@@ -42,7 +42,7 @@ func scanJavaServices(root string, dirs []string) []types.ServiceRecord {
 			}
 		}
 		layer := inferLayer(serviceName, modulePath)
-		records = append(records, types.ServiceRecord{
+		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
 			Layer:         "server",
@@ -53,7 +53,7 @@ func scanJavaServices(root string, dirs []string) []types.ServiceRecord {
 			Tags:          []string{"code-scan"},
 			Docs:          []string{},
 			SourceOfTruth: []string{rel},
-			Entrypoints:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 			Ports:         readPorts(moduleRoot),
 			Confidence:    0.9,
 		})
@@ -62,9 +62,9 @@ func scanJavaServices(root string, dirs []string) []types.ServiceRecord {
 }
 
 // scanFeignClients finds @FeignClient declarations -> caller/target edges.
-func scanFeignClients(root string, dirs []string) []types.DependencyEdge {
+func scanFeignClients(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, hasSuffix(".java"))
-	var records []types.DependencyEdge
+	var records []domain.DependencyEdge
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "@FeignClient") {
@@ -90,12 +90,12 @@ func scanFeignClients(root string, dirs []string) []types.DependencyEdge {
 			if caller == "unknown" {
 				conf = 0.65
 			}
-			records = append(records, types.DependencyEdge{
+			records = append(records, domain.DependencyEdge{
 				From: caller,
 				To:   target,
-				Type: types.EdgeFeign,
-				Evidence: []types.Evidence{{
-					Path: rel, Line: i + 1, Symbol: iface, Kind: types.SourceCodeScan,
+				Type: domain.EdgeFeign,
+				Evidence: []domain.Evidence{{
+					Path: rel, Line: i + 1, Symbol: iface, Kind: domain.SourceCodeScan,
 				}},
 				Confidence: conf,
 			})
@@ -105,9 +105,9 @@ func scanFeignClients(root string, dirs []string) []types.DependencyEdge {
 }
 
 // scanJavaEndpoints finds Controller mapping annotations -> endpoint records.
-func scanJavaEndpoints(root string, dirs []string) []types.EndpointRecord {
+func scanJavaEndpoints(root string, dirs []string) []domain.EndpointRecord {
 	files := walkFiles(root, dirs, hasSuffix(".java"))
-	var records []types.EndpointRecord
+	var records []domain.EndpointRecord
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "@RestController") && !strings.Contains(text, "@Controller") {
@@ -132,7 +132,7 @@ func scanJavaEndpoints(root string, dirs []string) []types.EndpointRecord {
 			if route == "" {
 				conf = 0.6
 			}
-			records = append(records, types.EndpointRecord{
+			records = append(records, domain.EndpointRecord{
 				ServiceName:   serviceName,
 				Repo:          topSegment(rel),
 				Method:        method,
@@ -141,7 +141,7 @@ func scanJavaEndpoints(root string, dirs []string) []types.EndpointRecord {
 				HandlerMethod: javaMethodName(lines, i), // ★ codegraph anchor
 				File:          rel,
 				Line:          i + 1,
-				Source:        types.SourceCodeScan,
+				Source:        domain.SourceCodeScan,
 				Confidence:    conf,
 			})
 		}

@@ -5,11 +5,11 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/transport/dashboard"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
 )
 
-func TestCommonRoutesExcludeScenarioEndpoints(t *testing.T) {
+func TestCommonRoutesExcludeApplicationObserveEndpoints(t *testing.T) {
 	mux := http.NewServeMux()
 	Setup(mux, Config{
 		Dashboard: &dashboard.Handler{},
@@ -17,11 +17,19 @@ func TestCommonRoutesExcludeScenarioEndpoints(t *testing.T) {
 		VCS:       func(http.ResponseWriter, *http.Request) {},
 		Cfg:       config.Config{},
 	})
-	for _, path := range []string{"/api/observe/status", "/api/incidents", "/api/alert/webhook", "/api/qa/actions"} {
+	for _, path := range []string{"/api/observe/status", "/api/observe/sources"} {
 		_, pattern := mux.Handler(&http.Request{Method: http.MethodGet, URL: mustURL(t, path)})
 		if pattern != "" {
 			t.Fatalf("common route table contains %q via pattern %q", path, pattern)
 		}
+	}
+	_, pattern := mux.Handler(&http.Request{Method: http.MethodGet, URL: mustURL(t, "/api/semantic/status")})
+	if pattern == "" {
+		t.Fatal("semantic status route is not registered")
+	}
+	_, pattern = mux.Handler(&http.Request{Method: http.MethodGet, URL: mustURL(t, "/api/qdrant/stats")})
+	if pattern != "" {
+		t.Fatalf("removed Qdrant status route is still registered via %q", pattern)
 	}
 }
 

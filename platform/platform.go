@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// WorkspaceMetadataDir contains Nasuta-generated workspace state.
+const WorkspaceMetadataDir = ".nasuta"
+
 var (
 	nonAlnum   = regexp.MustCompile(`[_\s]+`)
 	multiSlash = regexp.MustCompile(`/+`)

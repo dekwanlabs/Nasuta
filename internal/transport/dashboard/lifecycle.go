@@ -3,9 +3,9 @@ package dashboard
 import (
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/agent"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 func (handler *Handler) reloadQA() {

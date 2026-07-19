@@ -11,25 +11,27 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dekwanlabs/astris/config"
-	coretypes "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/memory"
-	"github.com/dekwanlabs/astris/internal/platform/dbschema"
-	"github.com/dekwanlabs/astris/internal/platform/embed"
-	"github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
-	"github.com/dekwanlabs/astris/internal/retrieval"
-	"github.com/dekwanlabs/astris/llm"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/memory"
+	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
+	"github.com/dekwanlabs/nasuta/internal/platform/embed"
+	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/tool"
 	_ "github.com/go-sql-driver/mysql"
 )
 
 // QADeps bundles the services needed to build the QA runtime.
 type QADeps struct {
 	Tools          *Service
-	Semantic       store.SemanticStore
+	Semantic       semantic.Store
 	Embedder       embed.Embedder
 	WriteAvailable bool
 	Cfg            config.Config
@@ -71,8 +73,8 @@ type ContextBlock struct {
 }
 
 type PlannedToolCall struct {
-	ToolID    toolruntime.ToolID
-	Arguments toolruntime.Arguments
+	ToolID    tool.ToolID
+	Arguments tool.Arguments
 	Required  bool
 }
 
@@ -89,7 +91,7 @@ type QARequest struct {
 	UserID           int64
 	RolePrompt       string
 	RunID            string
-	EvidencePlan     *coretypes.EvidencePlan
+	EvidencePlan     *domain.EvidencePlan
 	ToolPlan         ToolPlan
 	AllowWrite       bool
 }
@@ -163,21 +165,20 @@ func NewQA(d QADeps) *QA {
 		svc.emitStep(runID, "找到啦，我来把答案写出来 ✍️")
 	})
 
-	memSemantic, err := store.NewSemanticWithCollection(d.Cfg, "memory")
-	if err != nil {
-		log.Warnf("[qa] memory semantic store init failed: %v", err)
-	} else {
-		if err := memSemantic.Ensure(context.Background(), d.Embedder.Dim()); err != nil {
+	memoryDSN := config.LoadMySQLDSN()
+	if memoryDSN != "" && d.Embedder != nil && d.Embedder.Enabled() {
+		memorySemanticConfig := d.Cfg.Semantic
+		memorySemanticConfig.Collection = "memory"
+		memSemantic, err := semanticstore.New(memorySemanticConfig)
+		if err != nil {
+			log.Warnf("[qa] memory semantic store init failed: %v", err)
+		} else if err := memSemantic.Ensure(context.Background(), semantic.Schema{Collection: "memory", DenseDim: d.Embedder.Dim()}); err != nil {
+			_ = memSemantic.Close()
 			log.Warnf("[qa] memory collection ensure failed: %v", err)
-		}
-		if ms, err := memory.OpenMemoryStore(
-			config.LoadMySQLDSN(),
-			memSemantic,
-			d.Embedder,
-			d.Cfg.MemoryWorkContextTTL,
-		); err == nil {
+		} else if ms, err := memory.OpenMemoryStore(memoryDSN, memSemantic, d.Embedder, d.Cfg.MemoryWorkContextTTL); err == nil {
 			svc.memory = ms
 		} else {
+			_ = memSemantic.Close()
 			log.Warnf("[qa] memory store disabled: %v", err)
 		}
 	}
@@ -211,7 +212,7 @@ func (svc *QA) AskAgent(ctx context.Context, question string, history []llm.Mess
 }
 
 // AskAgentWithContext preserves the canonical session summary without recompressing it.
-func (svc *QA) AskAgentWithContext(ctx context.Context, question string, conversation ConversationContext, userID int64, rolePrompt, runID string, explicitPlan *coretypes.EvidencePlan, allowWrite bool) (*AskResult, error) {
+func (svc *QA) AskAgentWithContext(ctx context.Context, question string, conversation ConversationContext, userID int64, rolePrompt, runID string, explicitPlan *domain.EvidencePlan, allowWrite bool) (*AskResult, error) {
 	return svc.Ask(ctx, QARequest{
 		Question: question, Conversation: conversation, UserID: userID,
 		RolePrompt: rolePrompt, RunID: runID, EvidencePlan: explicitPlan, AllowWrite: allowWrite,
@@ -237,11 +238,11 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		runID = NewRunID()
 	}
 	explicitPlan := request.EvidencePlan
-	toolPolicy := ToolPolicyForPlan(coretypes.DirectPlan(), svc.writeAvailable && request.AllowWrite)
+	toolPolicy := ToolPolicyForPlan(domain.DirectPlan(), svc.writeAvailable && request.AllowWrite)
 	executor := svc.toolExecutor()
 	candidateSnapshot := executor.Snapshot(toolPolicy)
 	toolCandidates := routingCandidates(candidateSnapshot)
-	traceEnabled := coretypes.TraceEnabled(ctx)
+	traceEnabled := domain.TraceEnabled(ctx)
 	emit := func(text string) {
 		svc.emitStep(runID, text)
 	}
@@ -252,7 +253,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 
 	cleanQuestion := strings.TrimSpace(question)
 	var terms retrieval.QueryTerms
-	decision := coretypes.InternalFallbackDecision()
+	decision := domain.InternalFallbackDecision()
 	var planningErr error
 	var routedToolIDs []string
 	var preWg sync.WaitGroup
@@ -274,15 +275,15 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 			if err != nil {
 				planningErr = err
 				cleanQuestion = strings.TrimSpace(question)
-				decision = coretypes.PlanDecision{Plan: *explicitPlan, Confidence: 1, Origin: coretypes.Explicit}
+				decision = domain.PlanDecision{Plan: *explicitPlan, Confidence: 1, Origin: domain.Explicit}
 				return
 			}
 			cleanQuestion, terms, decision = analysis.Question, analysis.Terms, analysis.Decision
 			routedToolIDs = analysis.ToolIDs
 		} else if shouldShortCircuitMeta(question) {
 			cleanQuestion = strings.TrimSpace(question)
-			decision = coretypes.PlanDecision{
-				Plan: coretypes.DirectPlan(), Confidence: 1, Origin: coretypes.Rule,
+			decision = domain.PlanDecision{
+				Plan: domain.DirectPlan(), Confidence: 1, Origin: domain.Rule,
 			}
 		} else {
 			analysis, err := retrieval.AnalyzeEvidence(
@@ -297,7 +298,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 			if err != nil {
 				planningErr = err
 				cleanQuestion = strings.TrimSpace(question)
-				decision = coretypes.InternalFallbackDecision()
+				decision = domain.InternalFallbackDecision()
 				return
 			}
 			cleanQuestion, terms, decision = analysis.Question, analysis.Terms, analysis.Decision
@@ -306,7 +307,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	}()
 	preWg.Wait()
 	if traceEnabled {
-		coretypes.RecordTrace(ctx, coretypes.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "query_analysis", DurationMS: time.Since(analysisStarted).Milliseconds(),
 			Input: map[string]any{"question": question, "history_messages": len(conversation.Recent)},
 			Output: map[string]any{
@@ -318,10 +319,10 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	}
 
 	effectiveDecision := decision
-	if decision.Origin == coretypes.Model &&
+	if decision.Origin == domain.Model &&
 		decision.Plan.Direct() && decision.Confidence < svc.routerConfidence {
 		log.WarnfCtx(ctx, "[qa] evidence planner direct confidence %.2f below %.2f; using internal fallback", decision.Confidence, svc.routerConfidence)
-		effectiveDecision = coretypes.InternalFallbackDecision()
+		effectiveDecision = domain.InternalFallbackDecision()
 	}
 	if planningErr != nil {
 		log.WarnfCtx(ctx, "[qa] evidence planning degraded: %v", planningErr)
@@ -334,7 +335,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		effectiveDecision.Plan.String(), effectiveDecision.Plan.SourceNames(), effectiveDecision.Confidence, effectiveDecision.Origin)
 	if traceEnabled {
 		fallbackError := ""
-		if planningErr != nil && effectiveDecision.Origin == coretypes.Fallback {
+		if planningErr != nil && effectiveDecision.Origin == domain.Fallback {
 			fallbackError = planningErr.Error()
 		}
 		status := "completed"
@@ -343,7 +344,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 			status = "degraded"
 			planningError = planningErr.Error()
 		}
-		coretypes.RecordTrace(ctx, coretypes.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "evidence_plan", Status: status, DurationMS: planningDuration.Milliseconds(),
 			Output: map[string]any{
 				"response_mode": ClassifyResponseMode(question),
@@ -355,7 +356,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 			},
 		})
 	}
-	webUnavailable := effectiveDecision.Plan.Has(coretypes.Web) && !svc.cfg.WebSearchEnabled
+	webUnavailable := effectiveDecision.Plan.Has(domain.Web) && !svc.cfg.WebSearchEnabled
 	if webUnavailable {
 		log.WarnfCtx(ctx, "[qa] retrieval source unavailable: web")
 	}
@@ -369,7 +370,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	preloadedContext = append(preloadedContext, request.PreloadedContext...)
 
 	var recalled []memory.MemoryRecord
-	if evidencePlan.Has(coretypes.Memory) {
+	if evidencePlan.Has(domain.Memory) {
 		memoryStarted := time.Now()
 		memoryStatus := "completed"
 		memoryError := ""
@@ -380,7 +381,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		} else if recall, err := svc.memory.Recall(ctx, userID, question, 3); err == nil {
 			recalled = recall.Records
 			if traceEnabled {
-				coretypes.RecordTrace(ctx, coretypes.EvaluationTrace{
+				domain.RecordTrace(ctx, domain.EvaluationTrace{
 					Node: "memory_recall", Status: memoryStatus, DurationMS: time.Since(memoryStarted).Milliseconds(),
 					Input: map[string]any{"user_id": userID, "limit": 3, "temporal_intent": recall.Intent},
 					Output: map[string]any{
@@ -397,7 +398,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 			log.ErrorfCtx(ctx, "[qa] memory recall error: %v", err)
 		}
 		if traceEnabled && memoryStatus != "completed" {
-			coretypes.RecordTrace(ctx, coretypes.EvaluationTrace{
+			domain.RecordTrace(ctx, domain.EvaluationTrace{
 				Node: "memory_recall", Status: memoryStatus, DurationMS: time.Since(memoryStarted).Milliseconds(),
 				Input:  map[string]any{"user_id": userID, "limit": 3},
 				Output: map[string]any{"records": len(recalled), "error": memoryError},
@@ -413,15 +414,15 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		log.InfofCtx(ctx, "[qa] retrieval query: augmented with context terms (%d chars)", len(retrievalPrefix))
 	}
 	if traceEnabled {
-		coretypes.RecordTrace(ctx, coretypes.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "query_rewrite", Input: map[string]any{"clean_question": q},
 			Output: map[string]any{"retrieval_query": canonicalQuery, "context_augmented": canonicalQuery != q},
 		})
 	}
-	preRetrieve := evidencePlan.Has(coretypes.Internal)
+	preRetrieve := evidencePlan.Has(domain.Internal)
 	if !preRetrieve {
 		if traceEnabled {
-			coretypes.RecordTrace(ctx, coretypes.EvaluationTrace{Node: "retrieval_dispatch", Output: map[string]any{"skipped": true, "sources": evidencePlan.SourceNames()}})
+			domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "retrieval_dispatch", Output: map[string]any{"skipped": true, "sources": evidencePlan.SourceNames()}})
 		}
 		rc := &retrieval.RetrievedContext{OriginalQuestion: question}
 		mergePreloadedContext(rc, preloadedContext, svc.contextBudget())
@@ -453,11 +454,11 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot)
 }
 
-func routingCandidates(snapshot toolruntime.Snapshot) []retrieval.ToolRouteCandidate {
+func routingCandidates(snapshot tool.Snapshot) []retrieval.ToolRouteCandidate {
 	tools := snapshot.Tools()
 	candidates := make([]retrieval.ToolRouteCandidate, 0, len(tools))
 	for _, candidate := range tools {
-		if candidate.Kind != toolruntime.KindRead || candidate.Routing == nil {
+		if candidate.Kind != tool.KindRead || candidate.Routing == nil {
 			continue
 		}
 		candidates = append(candidates, retrieval.ToolRouteCandidate{
@@ -475,14 +476,14 @@ func allRoutedToolIDs(candidates []retrieval.ToolRouteCandidate) []string {
 	return ids
 }
 
-func selectRoutedTools(snapshot toolruntime.Snapshot, routedIDs []string) (toolruntime.Snapshot, map[toolruntime.ToolID]struct{}) {
-	routed := make(map[toolruntime.ToolID]struct{}, len(routedIDs))
+func selectRoutedTools(snapshot tool.Snapshot, routedIDs []string) (tool.Snapshot, map[tool.ToolID]struct{}) {
+	routed := make(map[tool.ToolID]struct{}, len(routedIDs))
 	for _, id := range routedIDs {
-		routed[toolruntime.ToolID(id)] = struct{}{}
+		routed[tool.ToolID(id)] = struct{}{}
 	}
-	allowed := make(map[toolruntime.ToolID]struct{})
+	allowed := make(map[tool.ToolID]struct{})
 	for _, candidate := range snapshot.Tools() {
-		if candidate.Kind == toolruntime.KindRead && candidate.Routing != nil {
+		if candidate.Kind == tool.KindRead && candidate.Routing != nil {
 			if _, selected := routed[candidate.ID]; !selected {
 				continue
 			}
@@ -492,7 +493,7 @@ func selectRoutedTools(snapshot toolruntime.Snapshot, routedIDs []string) (toolr
 	return snapshot.Select(allowed), allowed
 }
 
-func (svc *QA) executePrefetch(ctx context.Context, snapshot toolruntime.Snapshot, plan ToolPlan) ([]ContextBlock, error) {
+func (svc *QA) executePrefetch(ctx context.Context, snapshot tool.Snapshot, plan ToolPlan) ([]ContextBlock, error) {
 	if len(plan.Prefetch) == 0 {
 		return nil, nil
 	}
@@ -506,7 +507,7 @@ func (svc *QA) executePrefetch(ctx context.Context, snapshot toolruntime.Snapsho
 			blocks = append(blocks, unavailableToolBlock(call.ToolID, "tool is unavailable"))
 			continue
 		}
-		if candidate.Kind != toolruntime.KindRead || candidate.Prefetch == nil {
+		if candidate.Kind != tool.KindRead || candidate.Prefetch == nil {
 			return nil, fmt.Errorf("prefetch tool %q is not eligible", call.ToolID)
 		}
 		result, err := svc.toolExecutor().ExecuteArguments(ctx, snapshot, call.ToolID, call.Arguments)
@@ -541,7 +542,7 @@ func (svc *QA) toolExecutor() *ToolExecutor {
 	return NewToolExecutor(nil)
 }
 
-func unavailableToolBlock(id toolruntime.ToolID, reason string) ContextBlock {
+func unavailableToolBlock(id tool.ToolID, reason string) ContextBlock {
 	return ContextBlock{
 		Source:  string(id),
 		Title:   string(id) + " unavailable",
@@ -651,12 +652,12 @@ func appendUnavailableWeb(rc *retrieval.RetrievedContext, unavailable bool) {
 	rc.Text += "## Evidence Availability\n- Web source unavailable: web search is not configured.\n"
 }
 
-func (svc *QA) runAgentWithPlan(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan coretypes.EvidencePlan) (*AskResult, error) {
+func (svc *QA) runAgentWithPlan(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan) (*AskResult, error) {
 	policy := ToolPolicyForPlan(plan, false)
 	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, plan, policy, svc.toolExecutor().Snapshot(policy))
 }
 
-func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan coretypes.EvidencePlan, policy ToolPolicy, snapshot toolruntime.Snapshot) (*AskResult, error) {
+func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] runAgent runID=%s", runID)
 
 	runMode := "single"
@@ -679,7 +680,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 		memoryStarted := time.Now()
 		formatted := memory.FormatMemories(recalled)
 		instructions = append(instructions, llm.Message{Role: "system", Content: formatted})
-		coretypes.RecordTrace(ctx, coretypes.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "memory_inject", DurationMS: time.Since(memoryStarted).Milliseconds(),
 			Output: map[string]any{"records": len(recalled), "characters": len([]rune(formatted))},
 		})
@@ -699,7 +700,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 			memCtx, memCancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 			extractStarted := time.Now()
 			if mems, err := memory.ExtractMemories(memCtx, svc.llm, question, res.Answer); err == nil {
-				coretypes.RecordTrace(memCtx, coretypes.EvaluationTrace{
+				domain.RecordTrace(memCtx, domain.EvaluationTrace{
 					Node: "memory_extract", DurationMS: time.Since(extractStarted).Milliseconds(),
 					Output: map[string]any{"records": len(mems)},
 				})
@@ -719,7 +720,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 						vectorSynced++
 					}
 				}
-				coretypes.RecordTrace(memCtx, coretypes.EvaluationTrace{
+				domain.RecordTrace(memCtx, domain.EvaluationTrace{
 					Node: "memory_write", DurationMS: time.Since(writeStarted).Milliseconds(),
 					Output: map[string]any{
 						"records": len(mems), "inserted": outcomes[memory.WriteInserted],
@@ -732,7 +733,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 				}
 			} else {
 				log.ErrorfCtx(ctx, "[qa] memory extraction error: %v", err)
-				coretypes.RecordTrace(memCtx, coretypes.EvaluationTrace{
+				domain.RecordTrace(memCtx, domain.EvaluationTrace{
 					Node: "memory_extract", Status: "failed", DurationMS: time.Since(extractStarted).Milliseconds(),
 					Output: map[string]any{"error": err.Error()},
 				})
@@ -955,7 +956,7 @@ func (rs *RunStore) List(userID int64, sessionID string, status RunStatus, limit
 	return page.List, nil
 }
 
-func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, page, pageSize int) (*coretypes.Page[RunRecord], error) {
+func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, page, pageSize int) (*domain.Page[RunRecord], error) {
 	if page < 1 {
 		page = 1
 	}
@@ -1010,7 +1011,7 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return &coretypes.Page[RunRecord]{Total: total, Page: page, PageSize: pageSize, List: out}, nil
+	return &domain.Page[RunRecord]{Total: total, Page: page, PageSize: pageSize, List: out}, nil
 }
 
 func (rs *RunStore) Get(id string) (*RunDetail, error) {
@@ -1214,4 +1215,4 @@ type ControlSignal struct {
 	Message string
 }
 
-type RunPage = coretypes.Page[RunRecord]
+type RunPage = domain.Page[RunRecord]

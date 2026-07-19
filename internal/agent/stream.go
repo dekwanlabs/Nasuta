@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/llm"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 // StreamPipe streams tokens immediately. If a tool-call delta fires mid-turn
@@ -127,10 +127,10 @@ func (h *StreamPipe) OnToolCall(_ llm.ToolCall) { h.recordTiming("tool_call") }
 
 // SSEEvent is one event pushed to a connected SSE client during a live run.
 type SSEEvent struct {
-	Step      *StepRecord            `json:"step,omitempty"`
-	Token     string                 `json:"token,omitempty"`
-	Reasoning string                 `json:"reasoning,omitempty"`
-	Trace     *types.EvaluationTrace `json:"trace,omitempty"`
+	Step      *StepRecord             `json:"step,omitempty"`
+	Token     string                  `json:"token,omitempty"`
+	Reasoning string                  `json:"reasoning,omitempty"`
+	Trace     *domain.EvaluationTrace `json:"trace,omitempty"`
 	// Phase is a lightweight pre-loop status hint.
 	// Unlike Step, it is not persisted; unlike Reasoning, it is not model output.
 	// It covers preprocessing and retrieval before LLM streaming starts.
@@ -147,7 +147,7 @@ type RunTerminal struct {
 }
 
 // EmitTrace broadcasts opt-in evaluation telemetry without persisting business steps.
-func (hub *RunHub) EmitTrace(runID string, event types.EvaluationTrace) {
+func (hub *RunHub) EmitTrace(runID string, event domain.EvaluationTrace) {
 	hub.broadcastTrace(ctxWithRunID(runID), runID, SSEEvent{Trace: &event})
 }
 

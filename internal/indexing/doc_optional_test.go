@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/platform/graph"
-	"github.com/dekwanlabs/astris/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/platform/graph"
+	"github.com/dekwanlabs/nasuta/semantic/contract"
 )
 
 func TestOptionalDocStorePathsAreSafe(t *testing.T) {
@@ -18,7 +18,7 @@ func TestOptionalDocStorePathsAreSafe(t *testing.T) {
 	}
 	svc := &Service{
 		Cfg:      config.Config{WorkspaceRoot: root},
-		Semantic: store.NoopSemantic{},
+		Semantic: contract.NewMemory(),
 		Embedder: fakeEmbedder{dim: 4},
 		Graph:    graph.New(),
 	}

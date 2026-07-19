@@ -1,4 +1,4 @@
-package types
+package domain
 
 type Question struct {
 	Text      string `json:"text"`

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dekwanlabs/astris/llm"
+	"github.com/dekwanlabs/nasuta/llm"
 )
 
 // GeneratePersistentSummary produces a rolling summary of the full
@@ -18,7 +18,7 @@ func GeneratePersistentSummary(ctx context.Context, client *llm.LLMClient, messa
 	for _, m := range messages {
 		fmt.Fprintf(&sb, "%s: %s\n", m.Role, m.Content)
 	}
-	const sys = `You are the **Astris Persistent Summarizer**, responsible for generating rolling summaries for cross-session memory.
+	const sys = `You are the **Nasuta Persistent Summarizer**, responsible for generating rolling summaries for cross-session memory.
 
 ## Identity
 - **Role**: Session long-term memory archivist — the summary you produce will be injected as initial context when the user reopens the conversation, helping the Agent rapidly recover state.

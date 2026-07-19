@@ -2,18 +2,17 @@ package dashboard
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/dekwanlabs/astris/platform/httputil"
-	"io"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 type enrichedNode struct {
@@ -46,11 +45,11 @@ func (handler *Handler) APISummary(w http.ResponseWriter, r *http.Request) {
 		"moduleDocs":      handler.moduleDocsCount(),
 		"codeChunks":      handler.codeChunkCount(r.Context()),
 		"repos":           sm.Repos,
-		"semanticEnabled": handler.semantic.Enabled(),
+		"semanticEnabled": handler.semantic != nil && handler.semantic.Capabilities().Dense,
 	}
-	if handler.semantic.Enabled() {
-		if stats := handler.qdrantCollectionStats(); stats != nil {
-			result["vectorCount"] = stats["vectors_count"]
+	if handler.semantic != nil && handler.semantic.Capabilities().Count {
+		if count, err := handler.semantic.Count(r.Context(), semantic.Filter{}); err == nil {
+			result["vectorCount"] = count
 		}
 	}
 	httputil.WriteJSON(w, result)
@@ -62,21 +61,20 @@ func (handler *Handler) moduleDocsCount() int {
 	if handler.docDB == nil {
 		return 0
 	}
-	n, err := handler.docDB.CountByKind(types.DocKindModule)
+	n, err := handler.docDB.CountByKind(domain.DocKindModule)
 	if err != nil {
 		return 0
 	}
 	return n
 }
 
-// codeChunkCount returns the number of embedded code chunks (payload
-// kind=code_chunk) in Qdrant — the status source for the "Embed Code" op.
+// codeChunkCount returns the number of embedded code chunks.
 // 0 when semantic search is disabled or the count fails.
 func (handler *Handler) codeChunkCount(ctx context.Context) int {
-	if handler.semantic == nil || !handler.semantic.Enabled() {
+	if handler.semantic == nil || !handler.semantic.Capabilities().Count {
 		return 0
 	}
-	n, err := handler.semantic.CountByFilter(ctx, map[string]string{"kind": "code_chunk"})
+	n, err := handler.semantic.Count(ctx, semantic.Filter{Keywords: map[string]string{"kind": "code_chunk"}})
 	if err != nil {
 		log.Errorf("[dashboard] code chunk count error: %v", err)
 		return 0
@@ -147,43 +145,25 @@ func (handler *Handler) APIEdges(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, edges)
 }
 
-func (handler *Handler) APIQdrantStats(w http.ResponseWriter, r *http.Request) {
-	if !handler.semantic.Enabled() {
+func (handler *Handler) APISemanticStatus(w http.ResponseWriter, r *http.Request) {
+	if handler.semantic == nil {
 		httputil.WriteJSON(w, map[string]any{"enabled": false})
 		return
 	}
-	stats := handler.qdrantCollectionStats()
-	if stats == nil {
-		httputil.WriteJSON(w, map[string]any{"enabled": true, "error": "failed to fetch stats"})
+	count, err := handler.semantic.Count(r.Context(), semantic.Filter{})
+	if err != nil {
+		httputil.WriteJSON(w, map[string]any{
+			"enabled": true, "provider": handler.cfg.Semantic.Provider,
+			"collection": handler.cfg.Semantic.Collection, "capabilities": handler.semantic.Capabilities(),
+			"error": err.Error(),
+		})
 		return
 	}
-	stats["enabled"] = true
-	httputil.WriteJSON(w, stats)
-}
-
-func (handler *Handler) qdrantCollectionStats() map[string]any {
-	port := handler.cfg.QdrantPort
-	if port == 6334 {
-		port = 6333
-	}
-	url := fmt.Sprintf("http://%s:%d/collections/%s",
-		handler.cfg.QdrantHost,
-		port,
-		handler.cfg.QdrantCollection)
-	resp, err := http.Get(url)
-	if err != nil {
-		log.Errorf("[dashboard] qdrant stats error: %v", err)
-		return nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var data struct {
-		Result map[string]any `json:"result"`
-	}
-	if json.Unmarshal(body, &data) != nil {
-		return nil
-	}
-	return data.Result
+	httputil.WriteJSON(w, map[string]any{
+		"enabled": true, "provider": handler.cfg.Semantic.Provider,
+		"collection": handler.cfg.Semantic.Collection, "capabilities": handler.semantic.Capabilities(),
+		"vectorCount": count,
+	})
 }
 
 func (handler *Handler) ServiceLookup(w http.ResponseWriter, r *http.Request) {

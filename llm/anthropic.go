@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dekwanlabs/astris/platform/httpclient"
+	"github.com/dekwanlabs/nasuta/platform/httpclient"
 	"github.com/go-resty/resty/v2"
 )
 

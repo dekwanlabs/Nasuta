@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/llm"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/llm"
 )
 
 func TestBindPlanDecision(t *testing.T) {
@@ -18,12 +18,12 @@ func TestBindPlanDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bindPlanDecision: %v", err)
 	}
-	for _, source := range []types.EvidenceSources{types.Memory, types.Internal, types.Web} {
+	for _, source := range []domain.EvidenceSources{domain.Memory, domain.Internal, domain.Web} {
 		if !decision.Plan.Has(source) {
 			t.Fatalf("sources = %08b, missing %08b", decision.Plan.Sources, source)
 		}
 	}
-	if decision.Origin != types.Model {
+	if decision.Origin != domain.Model {
 		t.Fatalf("decision = %+v", decision)
 	}
 }
@@ -61,7 +61,7 @@ func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AnalyzeEvidence: %v", err)
 	}
-	if !result.Decision.Plan.Has(types.Web) || result.Decision.Origin != types.Model {
+	if !result.Decision.Plan.Has(domain.Web) || result.Decision.Origin != domain.Model {
 		t.Fatalf("decision = %+v", result.Decision)
 	}
 }
@@ -87,12 +87,12 @@ func TestAnalyzeEvidenceReturnsInvalidOutputError(t *testing.T) {
 }
 
 func TestAnalyzeForPlanSkipsRouterWhenNoHelpersConfigured(t *testing.T) {
-	plan := types.EvidencePlan{Sources: types.Web}
+	plan := domain.EvidencePlan{Sources: domain.Web}
 	result, err := AnalyzeForPlan(context.Background(), nil, "question", "", "question", nil, 128, plan)
 	if err != nil {
 		t.Fatalf("AnalyzeForPlan: %v", err)
 	}
-	if result.Decision.Plan.Sources != types.Web || result.Decision.Origin != types.Explicit {
+	if result.Decision.Plan.Sources != domain.Web || result.Decision.Origin != domain.Explicit {
 		t.Fatalf("decision = %+v", result.Decision)
 	}
 }

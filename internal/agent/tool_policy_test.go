@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/llm"
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestToolPolicyFiltersDefinitionsByKind(t *testing.T) {
@@ -17,10 +17,10 @@ func TestToolPolicyFiltersDefinitionsByKind(t *testing.T) {
 	)
 	executor := NewToolExecutor(registry)
 
-	if defs := executor.DefinitionsFor(ToolPolicyForPlan(types.DirectPlan(), false)); strings.Join(toolDefNames(defs), ",") != "read" {
+	if defs := executor.DefinitionsFor(ToolPolicyForPlan(domain.DirectPlan(), false)); strings.Join(toolDefNames(defs), ",") != "read" {
 		t.Fatalf("direct definitions = %v, want read", toolDefNames(defs))
 	}
-	plan := types.EvidencePlan{Sources: types.Internal}
+	plan := domain.EvidencePlan{Sources: domain.Internal}
 	defs := executor.DefinitionsFor(ToolPolicyForPlan(plan, false))
 	if got := strings.Join(toolDefNames(defs), ","); got != "read" {
 		t.Fatalf("definitions = %q, want read", got)
@@ -34,7 +34,7 @@ func TestToolPolicyFiltersDefinitionsByKind(t *testing.T) {
 func TestToolSnapshotBlocksToolRegisteredMidRun(t *testing.T) {
 	registry := testRegistry(t, testAgentTool("read", ToolKindRead, noopTool))
 	executor := NewToolExecutor(registry)
-	snapshot := executor.Snapshot(ToolPolicyForPlan(types.EvidencePlan{Sources: types.Internal}, false))
+	snapshot := executor.Snapshot(ToolPolicyForPlan(domain.EvidencePlan{Sources: domain.Internal}, false))
 	if err := registry.Register(testAgentTool("late", ToolKindRead, noopTool)); err != nil {
 		t.Fatal(err)
 	}
@@ -48,16 +48,16 @@ func TestToolSnapshotBlocksToolRegisteredMidRun(t *testing.T) {
 func TestSelectRoutedToolsHidesUnmatchedReadIntent(t *testing.T) {
 	always := testAgentTool("always", ToolKindRead, noopTool)
 	gated := testAgentTool("runtime", ToolKindRead, noopTool)
-	gated.Routing = &toolruntime.RoutingSpec{Intent: "current runtime evidence"}
+	gated.Routing = &tool.RoutingSpec{Intent: "current runtime evidence"}
 	write := testAgentTool("write", ToolKindWrite, noopTool)
 	registry := testRegistry(t, always, gated, write)
-	snapshot := registry.Snapshot(toolruntime.AllPolicy())
+	snapshot := registry.Snapshot(tool.AllPolicy())
 
 	filtered, _ := selectRoutedTools(snapshot, nil)
 	if _, ok := filtered.Get("runtime"); ok {
 		t.Fatal("unmatched routed read tool remained visible")
 	}
-	for _, id := range []toolruntime.ToolID{"always", "write"} {
+	for _, id := range []tool.ToolID{"always", "write"} {
 		if _, ok := filtered.Get(id); !ok {
 			t.Fatalf("tool %q was unexpectedly filtered", id)
 		}
@@ -69,18 +69,18 @@ func TestSelectRoutedToolsHidesUnmatchedReadIntent(t *testing.T) {
 	}
 }
 
-func noopTool(context.Context, toolruntime.Arguments) (string, error) { return "ok", nil }
+func noopTool(context.Context, tool.Arguments) (string, error) { return "ok", nil }
 
 func testRegistry(t *testing.T, tools ...Tool) *Registry {
 	t.Helper()
-	registry := toolruntime.NewRegistry()
+	registry := tool.NewRegistry()
 	if err := registry.RegisterAll(tools); err != nil {
 		t.Fatal(err)
 	}
 	return registry
 }
 
-func testAgentTool(id toolruntime.ToolID, kind toolruntime.Kind, run func(context.Context, toolruntime.Arguments) (string, error)) Tool {
+func testAgentTool(id tool.ToolID, kind tool.Kind, run func(context.Context, tool.Arguments) (string, error)) Tool {
 	return Tool{
 		ID:          id,
 		Description: "test tool",

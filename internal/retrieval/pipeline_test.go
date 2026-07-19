@@ -6,15 +6,15 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/dekwanlabs/astris/config"
-	types "github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 func TestRetrievePlanWebOnlySkipsInternalFanout(t *testing.T) {
 	r := New(nil, config.Config{})
 	rc, err := r.RetrievePlan(
 		context.Background(), "external docs", "external docs", QueryTerms{},
-		types.EvidencePlan{Sources: types.Web},
+		domain.EvidencePlan{Sources: domain.Web},
 	)
 	if err != nil {
 		t.Fatalf("RetrievePlan: %v", err)

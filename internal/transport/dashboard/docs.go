@@ -3,7 +3,7 @@ package dashboard
 import (
 	"context"
 	"fmt"
-	"github.com/dekwanlabs/astris/platform/httputil"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"io"
 	"net/http"
 	"os"
@@ -11,11 +11,12 @@ import (
 	"strings"
 	"time"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/indexing/docgen"
-	"github.com/dekwanlabs/astris/internal/indexing/indexer"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/indexing/docgen"
+	"github.com/dekwanlabs/nasuta/internal/indexing/indexer"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 type docUploadReq struct {
@@ -61,11 +62,11 @@ var allowedTextDocExt = map[string]struct{}{
 	".md": {}, ".markdown": {},
 }
 
-var allowedUploadDocKinds = types.UploadableDocKindSet
+var allowedUploadDocKinds = domain.UploadableDocKindSet
 
 func (handler *Handler) APIDocs(w http.ResponseWriter, r *http.Request) {
 	if handler.docDB == nil {
-		httputil.WriteJSON(w, &types.Page[types.DocRecord]{Total: 0, Page: 1, PageSize: 20, List: []types.DocRecord{}})
+		httputil.WriteJSON(w, &domain.Page[domain.DocRecord]{Total: 0, Page: 1, PageSize: 20, List: []domain.DocRecord{}})
 		return
 	}
 	q := httputil.Query(r)
@@ -87,7 +88,7 @@ func (handler *Handler) APIDocs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if docs == nil {
-		docs = &types.Page[types.DocRecord]{Total: 0, Page: page, PageSize: pageSize, List: []types.DocRecord{}}
+		docs = &domain.Page[domain.DocRecord]{Total: 0, Page: page, PageSize: pageSize, List: []domain.DocRecord{}}
 	}
 	httputil.WriteJSON(w, docs)
 }
@@ -103,7 +104,7 @@ func (handler *Handler) APIDocUpload(w http.ResponseWriter, r *http.Request) {
 	// Structural validation + LLM reformat for flow docs. The template is
 	// the reference shape; when content doesn't conform, the LLM rewrites it
 	// into the template structure before storage.
-	if draft.Kind == types.DocKindFlow {
+	if draft.Kind == domain.DocKindFlow {
 		res := docgen.ValidateFlow(draft.Content)
 		if !res.Valid {
 			log.Warnf("[docs] flow %q failed validation: %s — reformatting", draft.Title, strings.Join(res.Errors, "; "))
@@ -135,7 +136,7 @@ func (handler *Handler) APIDocTemplate(w http.ResponseWriter, r *http.Request) {
 	kind := httputil.Query(r).Str("kind")
 	var content, name string
 	switch kind {
-	case types.DocKindFlow:
+	case domain.DocKindFlow:
 		content = docgen.FlowTemplateEnglish
 		name = "Flow Template"
 	default:
@@ -264,7 +265,9 @@ func (handler *Handler) DocSearchTest(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteErr(w, fmt.Errorf("embed: %w", err))
 		return
 	}
-	hits, err := handler.semantic.Search(r.Context(), vecs[0], map[string]string{"kind": "runbook"}, 5, "")
+	hits, err := handler.semantic.Search(r.Context(), semantic.Query{
+		DenseVector: vecs[0], Filter: semantic.Filter{Keywords: map[string]string{"kind": "runbook"}}, Limit: 5,
+	})
 	if err != nil {
 		httputil.WriteErr(w, fmt.Errorf("search: %w", err))
 		return
@@ -272,31 +275,31 @@ func (handler *Handler) DocSearchTest(w http.ResponseWriter, r *http.Request) {
 	previews := make([]docSearchHitPreview, 0, len(hits))
 	for _, h := range hits {
 		p := docSearchHitPreview{Score: h.Score}
-		if v, _ := h.Payload["doc_id"].(string); v != "" {
+		if v, _ := h.Metadata["doc_id"].(string); v != "" {
 			p.DocID = v
 		}
 		if p.DocID == "" {
-			if v, _ := h.Payload["id"].(string); v != "" {
+			if v, _ := h.Metadata["id"].(string); v != "" {
 				p.DocID = v
 			}
 		}
-		if v, _ := h.Payload["title"].(string); v != "" {
+		if v, _ := h.Metadata["title"].(string); v != "" {
 			p.Title = v
 		}
-		if v, _ := h.Payload["section_header"].(string); v != "" {
+		if v, _ := h.Metadata["section_header"].(string); v != "" {
 			p.SectionHeader = v
 		}
-		switch v := h.Payload["chunk_index"].(type) {
+		switch v := h.Metadata["chunk_index"].(type) {
 		case float64:
 			p.ChunkIndex = int(v)
 		case int:
 			p.ChunkIndex = v
 		}
-		if v, _ := h.Payload["text"].(string); v != "" {
+		if v, _ := h.Metadata["text"].(string); v != "" {
 			p.Text = v
 		}
 		if p.Text == "" {
-			path, _ := h.Payload["path"].(string)
+			path, _ := h.Metadata["path"].(string)
 			handler.fillSearchHitPreview(&p, path)
 		}
 		previews = append(previews, p)
@@ -306,23 +309,23 @@ func (handler *Handler) DocSearchTest(w http.ResponseWriter, r *http.Request) {
 
 func (handler *Handler) APIKnowledgeList(w http.ResponseWriter, r *http.Request) {
 	if handler.docDB == nil {
-		httputil.WriteJSON(w, []types.DocRecord{})
+		httputil.WriteJSON(w, []domain.DocRecord{})
 		return
 	}
 	kind := httputil.Query(r).Str("kind")
-	var docs []types.DocRecord
+	var docs []domain.DocRecord
 	var err error
 	if kind != "" {
 		docs, err = handler.docDB.ListDocsMetaByKind(kind)
 	} else {
-		docs, err = handler.docDB.ListDocsMetaByKinds(types.KnowledgeDocKinds)
+		docs, err = handler.docDB.ListDocsMetaByKinds(domain.KnowledgeDocKinds)
 	}
 	if err != nil {
 		httputil.WriteErr(w, fmt.Errorf("list knowledge: %w", err))
 		return
 	}
 	if docs == nil {
-		docs = []types.DocRecord{}
+		docs = []domain.DocRecord{}
 	}
 	httputil.WriteJSON(w, docs)
 }
@@ -347,7 +350,7 @@ func (handler *Handler) APIKnowledgeCreate(w http.ResponseWriter, r *http.Reques
 		Filename: req.Title + ".md",
 		Kind:     req.Kind,
 		Content:  req.Content,
-	}, types.KnowledgeDocKindSet)
+	}, domain.KnowledgeDocKindSet)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
@@ -387,15 +390,15 @@ func (handler *Handler) APIKnowledgeReindex(w http.ResponseWriter, r *http.Reque
 	httputil.WriteJSON(w, doc)
 }
 
-func (handler *Handler) reindexDoc(ctx context.Context, id string) (types.DocRecord, error) {
+func (handler *Handler) reindexDoc(ctx context.Context, id string) (domain.DocRecord, error) {
 	doc, err := handler.loadDoc(id, "document")
 	if err != nil {
-		return types.DocRecord{}, err
+		return domain.DocRecord{}, err
 	}
 	return handler.reindexStoredDoc(ctx, "docs", doc)
 }
 
-func chunkDocument(doc types.DocRecord) []indexer.DocChunk {
+func chunkDocument(doc domain.DocRecord) []indexer.DocChunk {
 	return indexer.ChunkMarkdown(doc.ID, doc.Title, stripDocHashLine(doc.Content), indexer.DefaultDocChunkConfig())
 }
 
@@ -447,7 +450,7 @@ func stripDocHashLine(s string) string {
 func normalizeUploadDocKind(kind string) string {
 	kind = strings.TrimSpace(kind)
 	if kind == "" || kind == "all" {
-		return types.DocKindDocument
+		return domain.DocKindDocument
 	}
 	return kind
 }
@@ -531,25 +534,25 @@ func deriveTitleFromURL(rawURL string) string {
 	return "imported-doc"
 }
 
-func buildDocRecord(draft docDraft, allowedKinds map[string]struct{}) (types.DocRecord, []indexer.DocChunk, error) {
+func buildDocRecord(draft docDraft, allowedKinds map[string]struct{}) (domain.DocRecord, []indexer.DocChunk, error) {
 	if draft.Title == "" {
-		return types.DocRecord{}, nil, fmt.Errorf("title is required")
+		return domain.DocRecord{}, nil, fmt.Errorf("title is required")
 	}
 	if strings.TrimSpace(draft.Content) == "" {
-		return types.DocRecord{}, nil, fmt.Errorf("content is empty")
+		return domain.DocRecord{}, nil, fmt.Errorf("content is empty")
 	}
 	if _, ok := allowedKinds[draft.Kind]; !ok {
-		return types.DocRecord{}, nil, fmt.Errorf("unsupported kind %q", draft.Kind)
+		return domain.DocRecord{}, nil, fmt.Errorf("unsupported kind %q", draft.Kind)
 	}
 
 	docID := indexer.DocID(draft.Title, draft.Filename)
 	now := time.Now().UTC().Format(time.RFC3339)
 	chunks := indexer.ChunkMarkdown(docID, draft.Title, draft.Content, indexer.DefaultDocChunkConfig())
 	if len(chunks) == 0 {
-		return types.DocRecord{}, nil, fmt.Errorf("document produced no chunks")
+		return domain.DocRecord{}, nil, fmt.Errorf("document produced no chunks")
 	}
 
-	return types.DocRecord{
+	return domain.DocRecord{
 		ID:         docID,
 		Title:      draft.Title,
 		Filename:   draft.Filename,
@@ -561,56 +564,56 @@ func buildDocRecord(draft docDraft, allowedKinds map[string]struct{}) (types.Doc
 	}, chunks, nil
 }
 
-func (handler *Handler) saveDocRecord(ctx context.Context, scope string, doc types.DocRecord, chunks []indexer.DocChunk) (types.DocRecord, error) {
+func (handler *Handler) saveDocRecord(ctx context.Context, scope string, doc domain.DocRecord, chunks []indexer.DocChunk) (domain.DocRecord, error) {
 	log.Infof("[%s] save %q (%s): %d chunks", scope, doc.Title, doc.ID, len(chunks))
 	if handler.semantic != nil && handler.embedder != nil {
 		if _, err := handler.embedDocChunks(ctx, doc, chunks); err != nil {
 			log.Errorf("[%s] embed error for %q: %v", scope, doc.Title, err)
-			return types.DocRecord{}, fmt.Errorf("embed: %w", err)
+			return domain.DocRecord{}, fmt.Errorf("embed: %w", err)
 		}
 	}
 	if handler.docDB != nil {
 		if err := handler.docDB.InsertDoc(doc); err != nil {
 			log.Errorf("[%s] db insert error for %q: %v", scope, doc.Title, err)
-			return types.DocRecord{}, fmt.Errorf("save %s: %w", singularScope(scope), err)
+			return domain.DocRecord{}, fmt.Errorf("save %s: %w", singularScope(scope), err)
 		}
 	}
 	doc.Content = ""
 	return doc, nil
 }
 
-func (handler *Handler) loadDoc(id, label string) (types.DocRecord, error) {
+func (handler *Handler) loadDoc(id, label string) (domain.DocRecord, error) {
 	if id == "" {
-		return types.DocRecord{}, fmt.Errorf("missing %s id", label)
+		return domain.DocRecord{}, fmt.Errorf("missing %s id", label)
 	}
 	if handler.docDB == nil {
-		return types.DocRecord{}, fmt.Errorf("database not available")
+		return domain.DocRecord{}, fmt.Errorf("database not available")
 	}
 	doc, err := handler.docDB.GetDoc(id)
 	if err != nil {
-		return types.DocRecord{}, fmt.Errorf("%s not found: %w", label, err)
+		return domain.DocRecord{}, fmt.Errorf("%s not found: %w", label, err)
 	}
 	return doc, nil
 }
 
-func (handler *Handler) reindexStoredDoc(ctx context.Context, scope string, doc types.DocRecord) (types.DocRecord, error) {
+func (handler *Handler) reindexStoredDoc(ctx context.Context, scope string, doc domain.DocRecord) (domain.DocRecord, error) {
 	chunks := chunkDocument(doc)
 	if len(chunks) == 0 {
-		return types.DocRecord{}, fmt.Errorf("document produced no chunks")
+		return domain.DocRecord{}, fmt.Errorf("document produced no chunks")
 	}
 	if handler.semantic != nil {
 		_ = handler.deleteDocVectors(ctx, doc.ID)
 	}
 	if handler.semantic != nil && handler.embedder != nil {
 		if _, err := handler.embedDocChunks(ctx, doc, chunks); err != nil {
-			return types.DocRecord{}, fmt.Errorf("reindex embed: %w", err)
+			return domain.DocRecord{}, fmt.Errorf("reindex embed: %w", err)
 		}
 	}
 	doc.ChunkCount = len(chunks)
 	doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	if handler.docDB != nil {
 		if err := handler.docDB.InsertDoc(doc); err != nil {
-			return types.DocRecord{}, fmt.Errorf("save reindexed %s: %w", singularScope(scope), err)
+			return domain.DocRecord{}, fmt.Errorf("save reindexed %s: %w", singularScope(scope), err)
 		}
 	}
 	log.Infof("[%s] reindexed %q: %d chunks", scope, doc.Title, len(chunks))
@@ -629,7 +632,7 @@ func singularScope(scope string) string {
 	}
 }
 
-func (handler *Handler) embedDocChunks(ctx context.Context, doc types.DocRecord, chunks []indexer.DocChunk) (int, error) {
+func (handler *Handler) embedDocChunks(ctx context.Context, doc domain.DocRecord, chunks []indexer.DocChunk) (int, error) {
 	n, err := indexer.EmbedChunksCanonical(ctx, handler.embedder, handler.semantic,
 		indexer.EmbedDocMeta{
 			ID:    doc.ID,
@@ -647,7 +650,7 @@ func (handler *Handler) embedDocChunks(ctx context.Context, doc types.DocRecord,
 }
 
 func (handler *Handler) deleteDocVectors(ctx context.Context, docID string) error {
-	if err := handler.semantic.DeleteByDocID(ctx, docID); err != nil {
+	if err := handler.semantic.Delete(ctx, semantic.DeleteQuery{DocumentID: docID}); err != nil {
 		return fmt.Errorf("delete doc vectors %q: %w", docID, err)
 	}
 	return nil
@@ -656,7 +659,7 @@ func (handler *Handler) deleteDocVectors(ctx context.Context, docID string) erro
 func (handler *Handler) deleteDocAndVectors(ctx context.Context, id string) error {
 	if handler.semantic != nil {
 		if err := handler.deleteDocVectors(ctx, id); err != nil {
-			log.Errorf("[docs] qdrant delete error for %q: %v", id, err)
+			log.Errorf("[docs] semantic delete error for %q: %v", id, err)
 		}
 	}
 	if handler.docDB != nil {

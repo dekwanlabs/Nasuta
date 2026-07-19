@@ -7,14 +7,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // scanCSharpServices finds .NET applications by scanning .cs files for
 // WebApplication / Host builder patterns — no filename assumption.
-func scanCSharpServices(root string, dirs []string) []types.ServiceRecord {
+func scanCSharpServices(root string, dirs []string) []domain.ServiceRecord {
 	files := walkFiles(root, dirs, hasSuffix(".cs"))
-	var records []types.ServiceRecord
+	var records []domain.ServiceRecord
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "WebApplication") &&
@@ -31,7 +31,7 @@ func scanCSharpServices(root string, dirs []string) []types.ServiceRecord {
 			serviceName = readCSharpProjectName(moduleRoot)
 		}
 		layer := inferLayer(serviceName, modulePath)
-		records = append(records, types.ServiceRecord{
+		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
 			Layer:         "server",
@@ -42,7 +42,7 @@ func scanCSharpServices(root string, dirs []string) []types.ServiceRecord {
 			Tags:          []string{"code-scan"},
 			Docs:          []string{},
 			SourceOfTruth: []string{rel},
-			Entrypoints:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 			Ports:         readCSharpPorts(moduleRoot),
 			Confidence:    0.85,
 		})
@@ -51,9 +51,9 @@ func scanCSharpServices(root string, dirs []string) []types.ServiceRecord {
 }
 
 // scanCSharpEndpoints finds ASP.NET Core controller endpoints + ServiceStack routes.
-func scanCSharpEndpoints(root string, dirs []string) []types.EndpointRecord {
+func scanCSharpEndpoints(root string, dirs []string) []domain.EndpointRecord {
 	files := walkFiles(root, dirs, hasSuffix(".cs"))
-	var records []types.EndpointRecord
+	var records []domain.EndpointRecord
 	for _, file := range files {
 		base := strings.ToLower(filepath.Base(file))
 		if strings.Contains(base, ".designer.") || strings.Contains(base, ".generated.") || strings.Contains(base, ".g.cs") {
@@ -79,22 +79,22 @@ func scanCSharpEndpoints(root string, dirs []string) []types.EndpointRecord {
 					if m == nil {
 						continue
 					}
-					records = append(records, types.EndpointRecord{
+					records = append(records, domain.EndpointRecord{
 						ServiceName: serviceName, Repo: topSegment(rel),
 						Method: strings.ToUpper(m[1]), Path: joinPaths(classRoute, m[2]),
 						Handler: handler, HandlerMethod: csharpMethodName(lines, i),
-						File: rel, Line: i + 1, Source: types.SourceCodeScan, Confidence: 0.85,
+						File: rel, Line: i + 1, Source: domain.SourceCodeScan, Confidence: 0.85,
 					})
 				}
 			}
 			for _, re := range csharpMinimalAPIPatterns {
 				for _, m := range re.FindAllStringSubmatch(text, -1) {
 					if len(m) > 2 {
-						records = append(records, types.EndpointRecord{
+						records = append(records, domain.EndpointRecord{
 							ServiceName: serviceName, Repo: topSegment(rel),
 							Method: strings.ToUpper(m[1]), Path: m[2],
 							Handler: handler, File: rel,
-							Source: types.SourceCodeScan, Confidence: 0.8,
+							Source: domain.SourceCodeScan, Confidence: 0.8,
 						})
 					}
 				}
@@ -105,10 +105,10 @@ func scanCSharpEndpoints(root string, dirs []string) []types.EndpointRecord {
 		if strings.Contains(text, "[Route(") && strings.Contains(text, "ServiceStack") || strings.Contains(text, "IReturn") {
 			for _, m := range serviceStackRouteRe.FindAllStringSubmatch(text, -1) {
 				if len(m) > 2 {
-					records = append(records, types.EndpointRecord{
+					records = append(records, domain.EndpointRecord{
 						ServiceName: serviceName, Repo: topSegment(rel),
 						Method: strings.ToUpper(m[2]), Path: m[1],
-						Handler: handler, File: rel, Source: types.SourceCodeScan, Confidence: 0.8,
+						Handler: handler, File: rel, Source: domain.SourceCodeScan, Confidence: 0.8,
 					})
 				}
 			}
@@ -118,9 +118,9 @@ func scanCSharpEndpoints(root string, dirs []string) []types.EndpointRecord {
 }
 
 // scanCSharpRefits finds Refit interfaces (C# equivalent of @FeignClient).
-func scanCSharpRefits(root string, dirs []string) []types.DependencyEdge {
+func scanCSharpRefits(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, hasSuffix(".cs"))
-	var records []types.DependencyEdge
+	var records []domain.DependencyEdge
 	for _, file := range files {
 		text := readFile(file)
 		// Refit interfaces use [Get("/path")], [Post("/path")] on interface methods
@@ -138,12 +138,12 @@ func scanCSharpRefits(root string, dirs []string) []types.DependencyEdge {
 		if target == "" {
 			target = strings.TrimSuffix(filepath.Base(file), ".cs")
 		}
-		records = append(records, types.DependencyEdge{
+		records = append(records, domain.DependencyEdge{
 			From: caller,
 			To:   target,
-			Type: types.EdgeHTTP,
-			Evidence: []types.Evidence{{
-				Path: rel, Symbol: strings.TrimSuffix(filepath.Base(file), ".cs"), Kind: types.SourceCodeScan,
+			Type: domain.EdgeHTTP,
+			Evidence: []domain.Evidence{{
+				Path: rel, Symbol: strings.TrimSuffix(filepath.Base(file), ".cs"), Kind: domain.SourceCodeScan,
 			}},
 			Confidence: 0.7,
 		})
@@ -152,9 +152,9 @@ func scanCSharpRefits(root string, dirs []string) []types.DependencyEdge {
 }
 
 // scanCSharpDependencies finds HttpClient calls in C# code.
-func scanCSharpDependencies(root string, dirs []string) []types.DependencyEdge {
+func scanCSharpDependencies(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, hasSuffix(".cs"))
-	var edges []types.DependencyEdge
+	var edges []domain.DependencyEdge
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "HttpClient") && !strings.Contains(text, "RestClient") {
@@ -172,11 +172,11 @@ func scanCSharpDependencies(root string, dirs []string) []types.DependencyEdge {
 				target = strings.TrimPrefix(target, "https://")
 				target, _, _ = strings.Cut(target, "/")
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
-					edges = append(edges, types.DependencyEdge{
+					edges = append(edges, domain.DependencyEdge{
 						From:       caller,
 						To:         target,
-						Type:       types.EdgeHTTP,
-						Evidence:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+						Type:       domain.EdgeHTTP,
+						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 						Confidence: 0.5,
 					})
 				}

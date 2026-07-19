@@ -5,12 +5,12 @@ import (
 	"slices"
 	"strings"
 
-	coretypes "github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // ClassifyResponseMode selects answer structure without affecting evidence access.
-func ClassifyResponseMode(question string) coretypes.ResponseMode {
-	return coretypes.ClassifyResponseMode(question)
+func ClassifyResponseMode(question string) domain.ResponseMode {
+	return domain.ClassifyResponseMode(question)
 }
 
 var metaCapabilityPhrases = []string{

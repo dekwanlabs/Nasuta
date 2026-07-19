@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/retrieval"
-	"github.com/dekwanlabs/astris/llm"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 // AgentConfig tunes the agent loop and answer generation limits.
@@ -78,9 +78,9 @@ func (agent *Agent) MaxStepsFor(question string) int {
 		return configured
 	}
 	switch ClassifyResponseMode(question) {
-	case types.BugAnalysis, types.RequirementsAnalysis:
+	case domain.BugAnalysis, domain.RequirementsAnalysis:
 		return configured
-	case types.ArchitectureReview, types.CodeReview:
+	case domain.ArchitectureReview, domain.CodeReview:
 		return min(configured, 3)
 	default:
 		return min(configured, 2)
@@ -114,19 +114,19 @@ type RunResult struct {
 }
 
 // RunWithPlan enforces one immutable retrieval/tool policy for the whole run.
-func (agent *Agent) RunWithPlan(ctx context.Context, runID, question string, history []llm.Message, rc *retrieval.RetrievedContext, plan types.EvidencePlan, allowWrite bool) (*RunResult, error) {
+func (agent *Agent) RunWithPlan(ctx context.Context, runID, question string, history []llm.Message, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, allowWrite bool) (*RunResult, error) {
 	return agent.RunWithContext(ctx, runID, question, ConversationContext{Recent: history}, rc, plan, allowWrite)
 }
 
 // RunWithContext runs without synchronous history summarization on the request path.
-func (agent *Agent) RunWithContext(ctx context.Context, runID, question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan types.EvidencePlan, allowWrite bool) (*RunResult, error) {
+func (agent *Agent) RunWithContext(ctx context.Context, runID, question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, allowWrite bool) (*RunResult, error) {
 	policy := ToolPolicyForPlan(plan, allowWrite)
 	return agent.RunWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, agent.executor.Snapshot(policy))
 }
 
 // RunWithSnapshot keeps definitions and handlers fixed for the whole run.
-func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan types.EvidencePlan, policy ToolPolicy, toolSnapshot toolruntime.Snapshot) (*RunResult, error) {
-	traceEnabled := types.TraceEnabled(ctx)
+func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, policy ToolPolicy, toolSnapshot tool.Snapshot) (*RunResult, error) {
+	traceEnabled := domain.TraceEnabled(ctx)
 	runStarted := time.Now()
 	runCtx, runCancel := context.WithTimeout(ctx, agent.cfg.Timeout)
 	defer runCancel()
@@ -142,7 +142,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 	messages := agent.buildAgentMessages(question, conversation, rc, plan)
 	historyDuration := time.Since(historyStarted)
 	if traceEnabled {
-		types.RecordTrace(ctx, types.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "history_compile", DurationMS: historyDuration.Milliseconds(),
 			Input: map[string]any{
 				"recent_messages": len(conversation.Recent), "recent_chars": messageChars(conversation.Recent),
@@ -189,7 +189,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 		timing := h.Timings()
 		if err != nil {
 			if traceEnabled {
-				types.RecordTrace(ctx, types.EvaluationTrace{
+				domain.RecordTrace(ctx, domain.EvaluationTrace{
 					Node: "agent_model_turn", Status: "failed", DurationMS: duration.Milliseconds(),
 					Input:  map[string]any{"step": stepp, "messages": len(messages), "tools": len(tools)},
 					Output: map[string]any{"error": err.Error()},
@@ -206,7 +206,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 			for _, call := range chatResult.ToolCalls {
 				toolNames = append(toolNames, call.Function.Name)
 			}
-			types.RecordTrace(ctx, types.EvaluationTrace{
+			domain.RecordTrace(ctx, domain.EvaluationTrace{
 				Node: "agent_model_turn", DurationMS: duration.Milliseconds(),
 				Input: map[string]any{"step": stepp, "messages": len(messages), "tools": len(tools)},
 				Output: map[string]any{
@@ -235,7 +235,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 
 		if len(chatResult.ToolCalls) == 0 {
 			if traceEnabled && timing.FirstContent > 0 {
-				types.RecordTrace(ctx, types.EvaluationTrace{
+				domain.RecordTrace(ctx, domain.EvaluationTrace{
 					Node: "first_answer_token",
 					Output: map[string]any{
 						"step": stepp, "turn_ttft_ms": timing.FirstContent.Milliseconds(),
@@ -297,7 +297,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 			})
 			messages = append(messages, toolMsg)
 		}
-		if plan.Has(types.Web) {
+		if plan.Has(domain.Web) {
 			if hint := webEvidence.ConvergenceHint(); hint != "" {
 				messages = append(messages, llm.Message{Role: "system", Content: hint})
 			}
@@ -341,7 +341,7 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		stream = newStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
 		res, err = agent.generateWithContinue(ctx, messages, agent.cfg.ConclusionMaxTokens, stream)
 	}
-	if types.TraceEnabled(ctx) {
+	if domain.TraceEnabled(ctx) {
 		status := "completed"
 		timing := stream.Timings()
 		output := map[string]any{
@@ -357,7 +357,7 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 			output["content_chars"] = len([]rune(res.Content))
 			output["reasoning_tokens"] = res.ReasoningTokens
 		}
-		types.RecordTrace(ctx, types.EvaluationTrace{
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "force_conclusion", Status: status, DurationMS: time.Since(t0).Milliseconds(),
 			Input: map[string]any{"messages": len(messages)}, Output: output,
 		})
@@ -366,7 +366,7 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 			if !runStarted.IsZero() {
 				elapsed = t0.Sub(runStarted).Milliseconds() + timing.FirstContent.Milliseconds()
 			}
-			types.RecordTrace(ctx, types.EvaluationTrace{
+			domain.RecordTrace(ctx, domain.EvaluationTrace{
 				Node:   "first_answer_token",
 				Output: map[string]any{"step": "force_conclusion", "turn_ttft_ms": timing.FirstContent.Milliseconds(), "run_elapsed_ms": elapsed},
 			})
@@ -470,11 +470,11 @@ func (agent *Agent) handleControl(ctx context.Context, runID string, step int, m
 	}
 }
 
-func (agent *Agent) buildAgentMessages(question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan types.EvidencePlan) []llm.Message {
+func (agent *Agent) buildAgentMessages(question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan) []llm.Message {
 	mode := ClassifyResponseMode(question)
 	hint := "\n\n---\n[SUGGESTED_MODE: " + string(mode) + "] — Use this response structure unless it clearly contradicts the question. You may override with a brief justification."
 	sysPrompt := agentPromptForPlan(plan) + hint
-	if dk := strings.TrimSpace(agent.cfg.DomainKnowledge); dk != "" && plan.Has(types.Internal) {
+	if dk := strings.TrimSpace(agent.cfg.DomainKnowledge); dk != "" && plan.Has(domain.Internal) {
 		sysPrompt += "\n\n## Domain Knowledge\n" + dk
 	}
 	msgs := []llm.Message{{Role: "system", Content: sysPrompt}}
@@ -496,24 +496,24 @@ func (agent *Agent) buildAgentMessages(question string, conversation Conversatio
 	return msgs
 }
 
-func agentPromptForPlan(plan types.EvidencePlan) string {
-	if plan.Direct() || plan.Sources == types.Memory {
+func agentPromptForPlan(plan domain.EvidencePlan) string {
+	if plan.Direct() || plan.Sources == domain.Memory {
 		return directAgentSystemPrompt
 	}
-	if plan.Sources == types.Web {
+	if plan.Sources == domain.Web {
 		return webAgentSystemPrompt
 	}
 	return agentSystemPrompt
 }
 
-func evidencePlanInstruction(plan types.EvidencePlan) string {
+func evidencePlanInstruction(plan domain.EvidencePlan) string {
 	if plan.Direct() {
 		return "[EVIDENCE_PLAN: direct] No source was selected for automatic pre-retrieval. Use supplied material or stable general knowledge first, and call a registered read tool when a current workspace, runtime, or external fact is required."
 	}
 	return fmt.Sprintf("[EVIDENCE_PLAN: %s] Use only the selected evidence capabilities. A missing capability or empty result is an evidence gap, not permission to substitute another source.", plan.String())
 }
 
-const directAgentSystemPrompt = `You are Astris's conversational assistant. Answer the user's current question in the same natural language using only the current conversation, supplied material, injected long-term memory, and stable general knowledge.
+const directAgentSystemPrompt = `You are Nasuta's conversational assistant. Answer the user's current question in the same natural language using only the current conversation, supplied material, injected long-term memory, and stable general knowledge.
 
 Rules:
 - Do not claim facts about the current workspace, live runtime state, or current external documentation without supplied evidence or a registered read-tool result.
@@ -563,7 +563,7 @@ const agentToolPrompt = `
 Apply the role, evidence discipline, and answer rules from the core prompt. This section only controls tool use.
 
 - **Use seed evidence before tools.** The pre-retrieved block is a candidate set, not proof of completeness. Do not repeat evidence already present or treat its reference count as coverage.
-- **Complete requested chains before stopping.** Apply Core Rule #13. If any requested path still lacks a critical hop and the selected evidence plan allows internal tools, you MUST make one targeted tool round for that hop before answering. Then answer from the verified evidence and name any exact remaining break.
+- **Complete requested chains before stopping.** Apply the core verified-behavior rule. If any requested path still lacks a critical hop and the selected evidence plan allows internal tools, you MUST make one targeted tool round for that hop before answering. Then answer from the verified evidence and name any exact remaining break.
 - **Do not repeat the same retrieval intent.** Rewording a failed free-text query usually returns the same index results. Switch to an exact symbol, call edge, endpoint, dependency, or runbook lookup.
 - **Read search_code scores according to scoreKind.** A dense result carries semanticScore (0–1 cosine similarity), where >~0.5 is relevant and a top score below ~0.4 is weak. A hybrid result carries fusionScore, an RRF ranking-consensus score with no cosine threshold; use it only to compare results within that response. A low dense top score, high-overlap result, or empty result is a signal to stop rewording the same search and switch strategy. (get_symbol and trace_calls use exact names and have no relevance score.)
 - **Pick the tool that matches the intent.** Use each registered tool's description and input schema to choose the narrowest operation that can resolve the missing fact. Free-text search is a fallback after exact service, API, symbol, call-edge, dependency, or runbook lookups.
@@ -574,7 +574,7 @@ Apply the role, evidence discipline, and answer rules from the core prompt. This
 
 const agentSystemPrompt = systemPrompt + agentToolPrompt
 
-const webAgentSystemPrompt = `You are Astris's external-research assistant. Answer the user's current question in the same natural language, using only fetched web evidence and stable general knowledge.
+const webAgentSystemPrompt = `You are Nasuta's external-research assistant. Answer the user's current question in the same natural language, using only fetched web evidence and stable general knowledge.
 
 Rules:
 - Search only for a specific missing fact; after obtaining sufficient evidence, answer immediately.
@@ -599,24 +599,24 @@ func maxCharsForTool(name string) int {
 // ToolExecutor adapts tools.Registry to the agent loop.
 type ToolExecutor struct {
 	registry *Registry
-	runtime  *toolruntime.Executor
+	runtime  *tool.Executor
 }
 
 // NewToolExecutor wraps a registry with a default per-tool timeout.
 func NewToolExecutor(registry *Registry) *ToolExecutor {
-	return &ToolExecutor{registry: registry, runtime: toolruntime.NewExecutor(15 * time.Second)}
+	return &ToolExecutor{registry: registry, runtime: tool.NewExecutor(15 * time.Second)}
 }
 
 // Snapshot pins definitions and handlers before the model sees any tool.
-func (te *ToolExecutor) Snapshot(policy ToolPolicy) toolruntime.Snapshot {
+func (te *ToolExecutor) Snapshot(policy ToolPolicy) tool.Snapshot {
 	if te == nil || te.registry == nil {
-		return toolruntime.Snapshot{}
+		return tool.Snapshot{}
 	}
 	return te.registry.Snapshot(policy)
 }
 
 // Definitions returns model schemas from one immutable snapshot.
-func (te *ToolExecutor) Definitions(snapshot toolruntime.Snapshot) []llm.ToolDef {
+func (te *ToolExecutor) Definitions(snapshot tool.Snapshot) []llm.ToolDef {
 	all := snapshot.Tools()
 	defs := make([]llm.ToolDef, 0, len(all))
 	for _, candidate := range all {
@@ -638,7 +638,7 @@ func (te *ToolExecutor) DefinitionsFor(policy ToolPolicy) []llm.ToolDef {
 }
 
 // Execute runs against the same snapshot used to publish model definitions.
-func (te *ToolExecutor) Execute(ctx context.Context, snapshot toolruntime.Snapshot, call llm.ToolCall, seen map[string]bool, seenChunks map[string]bool) (fullResult string, msg llm.Message) {
+func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, call llm.ToolCall, seen map[string]bool, seenChunks map[string]bool) (fullResult string, msg llm.Message) {
 	name := call.Function.Name
 	if te == nil || te.runtime == nil {
 		result := "error: tool registry unavailable"
@@ -650,7 +650,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot toolruntime.Snapsh
 		return result, toolMessage(call.ID, name, result)
 	}
 
-	if _, ok := snapshot.Get(toolruntime.ToolID(name)); !ok {
+	if _, ok := snapshot.Get(tool.ToolID(name)); !ok {
 		result := fmt.Sprintf("error: unknown tool %q", name)
 		return result, toolMessage(call.ID, name, result)
 	}
@@ -666,7 +666,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot toolruntime.Snapsh
 	}
 
 	t0 := time.Now()
-	toolResult, err := te.runtime.Execute(ctx, snapshot, toolruntime.ToolID(name), toolruntime.Arguments(args))
+	toolResult, err := te.runtime.Execute(ctx, snapshot, tool.ToolID(name), tool.Arguments(args))
 	duration := time.Since(t0)
 	if err != nil {
 		result := fmt.Sprintf("error: %v", err)
@@ -692,9 +692,9 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot toolruntime.Snapsh
 }
 
 // ExecuteArguments is the non-LLM entry used by trusted prefetch plans.
-func (te *ToolExecutor) ExecuteArguments(ctx context.Context, snapshot toolruntime.Snapshot, id toolruntime.ToolID, args toolruntime.Arguments) (toolruntime.Result, error) {
+func (te *ToolExecutor) ExecuteArguments(ctx context.Context, snapshot tool.Snapshot, id tool.ToolID, args tool.Arguments) (tool.Result, error) {
 	if te == nil || te.runtime == nil {
-		return toolruntime.Result{}, fmt.Errorf("tool registry unavailable")
+		return tool.Result{}, fmt.Errorf("tool registry unavailable")
 	}
 	return te.runtime.Execute(ctx, snapshot, id, args)
 }

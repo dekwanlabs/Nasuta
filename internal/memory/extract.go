@@ -4,9 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
-	"github.com/dekwanlabs/astris/llm"
+	"github.com/dekwanlabs/nasuta/llm"
 )
 
 type extractedEntry struct {
@@ -79,7 +78,7 @@ func normalizeExtracted(entries []extractedEntry) []MemoryRecord {
 			Content:    entry.Content,
 			SourceType: SourceType(entry.SourceType),
 			Confidence: entry.Confidence,
-		}, 0, time.Time{})
+		})
 		if err != nil {
 			continue
 		}

@@ -6,14 +6,14 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // scanAndroidServices finds Android app modules (via AndroidManifest.xml / build.gradle.kts).
-func scanAndroidServices(root string, dirs []string) []types.ServiceRecord {
+func scanAndroidServices(root string, dirs []string) []domain.ServiceRecord {
 	// Find AndroidManifest.xml files — the definitive Android project marker
 	files := walkFiles(root, dirs, func(name string) bool { return name == "AndroidManifest.xml" })
-	var records []types.ServiceRecord
+	var records []domain.ServiceRecord
 	for _, file := range files {
 		rel := relativeTo(root, file)
 		// AndroidManifest is typically at src/main/AndroidManifest.xml — go up to module root
@@ -32,7 +32,7 @@ func scanAndroidServices(root string, dirs []string) []types.ServiceRecord {
 		if serviceName == "" {
 			serviceName = filepath.Base(moduleRoot)
 		}
-		records = append(records, types.ServiceRecord{
+		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
 			Layer:         "app",
@@ -43,7 +43,7 @@ func scanAndroidServices(root string, dirs []string) []types.ServiceRecord {
 			Tags:          []string{"code-scan", "mobile", "android"},
 			Docs:          []string{},
 			SourceOfTruth: []string{rel},
-			Entrypoints:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 			Ports:         nil,
 			Confidence:    0.9,
 		})
@@ -52,11 +52,11 @@ func scanAndroidServices(root string, dirs []string) []types.ServiceRecord {
 }
 
 // scanAndroidDependencies finds Retrofit/OkHttp API calls in Android code.
-func scanAndroidDependencies(root string, dirs []string) []types.DependencyEdge {
+func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, func(name string) bool {
 		return strings.HasSuffix(name, ".kt") || strings.HasSuffix(name, ".java")
 	})
-	var edges []types.DependencyEdge
+	var edges []domain.DependencyEdge
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "@GET") && !strings.Contains(text, "@POST") &&
@@ -79,11 +79,11 @@ func scanAndroidDependencies(root string, dirs []string) []types.DependencyEdge 
 				if len(m) >= 2 {
 					target := extractServiceFromPath(m[len(m)-1])
 					if target != "" {
-						edges = append(edges, types.DependencyEdge{
+						edges = append(edges, domain.DependencyEdge{
 							From:       caller,
 							To:         target,
-							Type:       types.EdgeHTTP,
-							Evidence:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+							Type:       domain.EdgeHTTP,
+							Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 							Confidence: 0.65,
 						})
 					}
@@ -97,11 +97,11 @@ func scanAndroidDependencies(root string, dirs []string) []types.DependencyEdge 
 				target = strings.TrimPrefix(target, "https://")
 				target, _, _ = strings.Cut(target, "/")
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
-					edges = append(edges, types.DependencyEdge{
+					edges = append(edges, domain.DependencyEdge{
 						From:       caller,
 						To:         target,
-						Type:       types.EdgeHTTP,
-						Evidence:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+						Type:       domain.EdgeHTTP,
+						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 						Confidence: 0.5,
 					})
 				}

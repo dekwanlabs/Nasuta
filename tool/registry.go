@@ -2,6 +2,8 @@ package tool
 
 import (
 	"fmt"
+	"maps"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -10,6 +12,7 @@ type registryState struct {
 	revision uint64
 	tools    map[ToolID]Tool
 	order    []ToolID
+	owners   map[ToolID]string
 }
 
 // Registry atomically publishes immutable tool catalogs.
@@ -28,66 +31,29 @@ func NewReadRegistry(registry *Registry) *ReadRegistry {
 	return &ReadRegistry{registry: registry}
 }
 
-// Register publishes one read tool.
-func (publisher *ReadRegistry) Register(candidate ReadTool) error {
-	return publisher.RegisterAll([]ReadTool{candidate})
-}
-
-// RegisterAll publishes one atomic batch of read tools.
-func (publisher *ReadRegistry) RegisterAll(candidates []ReadTool) error {
+// Reconcile atomically publishes one owner's complete desired tool set.
+func (publisher *ReadRegistry) Reconcile(set ReadToolSet) error {
 	if publisher == nil || publisher.registry == nil {
-		return fmt.Errorf("register read tools: registry is required")
+		return fmt.Errorf("reconcile read tools: registry is required")
 	}
-	tools := make([]Tool, 0, len(candidates))
-	for _, candidate := range candidates {
+	owner := strings.TrimSpace(set.Owner)
+	if owner == "" {
+		return fmt.Errorf("reconcile read tools: owner is required")
+	}
+	if owner != set.Owner {
+		return fmt.Errorf("reconcile read tools: owner %q must be canonical", set.Owner)
+	}
+	tools := make([]Tool, 0, len(set.Tools))
+	for _, candidate := range set.Tools {
 		tools = append(tools, candidate.tool())
 	}
-	return publisher.registry.RegisterAll(tools)
-}
-
-// Replace replaces one existing read tool without crossing the kind boundary.
-func (publisher *ReadRegistry) Replace(candidate ReadTool) error {
-	return publisher.ReplaceAll([]ReadTool{candidate})
-}
-
-// ReplaceAll atomically replaces one batch without crossing the kind boundary.
-func (publisher *ReadRegistry) ReplaceAll(candidates []ReadTool) error {
-	if publisher == nil || publisher.registry == nil {
-		return fmt.Errorf("replace read tools: registry is required")
-	}
-	tools := make([]Tool, 0, len(candidates))
-	for _, candidate := range candidates {
-		tools = append(tools, candidate.tool())
-	}
-	return publisher.registry.replaceReadAll(tools)
-}
-
-// Unregister removes one read tool without allowing access to write IDs.
-func (publisher *ReadRegistry) Unregister(id ToolID) error {
-	return publisher.UnregisterAll([]ToolID{id})
-}
-
-// UnregisterAll atomically removes read IDs without allowing access to writes.
-func (publisher *ReadRegistry) UnregisterAll(ids []ToolID) error {
-	if publisher == nil || publisher.registry == nil {
-		return fmt.Errorf("unregister read tools: registry is required")
-	}
-	return publisher.registry.unregisterReadAll(ids)
-}
-
-// Contains reports whether a read tool ID is currently published.
-func (publisher *ReadRegistry) Contains(id ToolID) bool {
-	if publisher == nil || publisher.registry == nil {
-		return false
-	}
-	_, ok := publisher.registry.Snapshot(ReadPolicy()).Get(id)
-	return ok
+	return publisher.registry.reconcileReadSet(owner, tools)
 }
 
 // NewRegistry starts with an empty catalog.
 func NewRegistry() *Registry {
 	registry := &Registry{}
-	registry.state.Store(&registryState{tools: map[ToolID]Tool{}})
+	registry.state.Store(&registryState{tools: map[ToolID]Tool{}, owners: map[ToolID]string{}})
 	return registry
 }
 
@@ -126,19 +92,17 @@ func (registry *Registry) Replace(candidate Tool) error {
 	return registry.ReplaceAll([]Tool{candidate})
 }
 
-func (registry *Registry) replaceReadAll(candidates []Tool) error {
-	if len(candidates) == 0 {
-		return nil
-	}
+func (registry *Registry) reconcileReadSet(owner string, candidates []Tool) error {
 	prepared, err := prepareBatch(candidates)
 	if err != nil {
 		return err
 	}
 	for _, candidate := range prepared {
 		if candidate.Kind != KindRead {
-			return fmt.Errorf("replace read tool %q: read kind is required", candidate.ID)
+			return fmt.Errorf("reconcile read tool %q: read kind is required", candidate.ID)
 		}
 	}
+
 	registry.writeMu.Lock()
 	defer registry.writeMu.Unlock()
 
@@ -146,15 +110,52 @@ func (registry *Registry) replaceReadAll(candidates []Tool) error {
 	for _, candidate := range prepared {
 		existing, exists := current.tools[candidate.ID]
 		if !exists {
-			return fmt.Errorf("replace read tool: id %q is not registered", candidate.ID)
+			continue
+		}
+		if current.owners[candidate.ID] != owner {
+			return fmt.Errorf("reconcile read tool %q: id is owned by another catalog", candidate.ID)
 		}
 		if existing.Kind != KindRead {
-			return fmt.Errorf("replace read tool: id %q is not a read tool", candidate.ID)
+			return fmt.Errorf("reconcile read tool %q: existing tool is not read-only", candidate.ID)
 		}
 	}
-	next := cloneState(current)
+
+	desired := make(map[ToolID]struct{}, len(prepared))
 	for _, candidate := range prepared {
+		desired[candidate.ID] = struct{}{}
+	}
+	changed := len(prepared) > 0
+	for id, currentOwner := range current.owners {
+		if currentOwner != owner {
+			continue
+		}
+		if _, keep := desired[id]; !keep {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return nil
+	}
+
+	next := cloneState(current)
+	next.order = next.order[:0]
+	for _, id := range current.order {
+		if current.owners[id] == owner {
+			if _, keep := desired[id]; !keep {
+				delete(next.tools, id)
+				delete(next.owners, id)
+				continue
+			}
+		}
+		next.order = append(next.order, id)
+	}
+	for _, candidate := range prepared {
+		if _, exists := current.tools[candidate.ID]; !exists {
+			next.order = append(next.order, candidate.ID)
+		}
 		next.tools[candidate.ID] = candidate
+		next.owners[candidate.ID] = owner
 	}
 	registry.publish(current, next)
 	return nil
@@ -189,47 +190,6 @@ func (registry *Registry) Unregister(id ToolID) error {
 	return registry.UnregisterAll([]ToolID{id})
 }
 
-func (registry *Registry) unregisterReadAll(ids []ToolID) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	seen := make(map[ToolID]struct{}, len(ids))
-	for _, id := range ids {
-		if id == "" {
-			return fmt.Errorf("unregister read tool: id is required")
-		}
-		if _, duplicate := seen[id]; duplicate {
-			return fmt.Errorf("unregister read tools: duplicate id %q", id)
-		}
-		seen[id] = struct{}{}
-	}
-	registry.writeMu.Lock()
-	defer registry.writeMu.Unlock()
-
-	current := registry.load()
-	for _, id := range ids {
-		candidate, exists := current.tools[id]
-		if !exists {
-			return fmt.Errorf("unregister read tool: id %q is not registered", id)
-		}
-		if candidate.Kind != KindRead {
-			return fmt.Errorf("unregister read tool: id %q is not a read tool", id)
-		}
-	}
-	next := cloneState(current)
-	for _, id := range ids {
-		delete(next.tools, id)
-	}
-	next.order = next.order[:0]
-	for _, currentID := range current.order {
-		if _, removed := seen[currentID]; !removed {
-			next.order = append(next.order, currentID)
-		}
-	}
-	registry.publish(current, next)
-	return nil
-}
-
 // UnregisterAll removes the whole batch atomically.
 func (registry *Registry) UnregisterAll(ids []ToolID) error {
 	if len(ids) == 0 {
@@ -257,6 +217,7 @@ func (registry *Registry) UnregisterAll(ids []ToolID) error {
 	next := cloneState(current)
 	for _, id := range ids {
 		delete(next.tools, id)
+		delete(next.owners, id)
 	}
 	next.order = next.order[:0]
 	for _, id := range current.order {
@@ -291,11 +252,11 @@ func (registry *Registry) Revision() uint64 {
 
 func (registry *Registry) load() *registryState {
 	if registry == nil {
-		return &registryState{tools: map[ToolID]Tool{}}
+		return &registryState{tools: map[ToolID]Tool{}, owners: map[ToolID]string{}}
 	}
 	current := registry.state.Load()
 	if current == nil {
-		return &registryState{tools: map[ToolID]Tool{}}
+		return &registryState{tools: map[ToolID]Tool{}, owners: map[ToolID]string{}}
 	}
 	return current
 }
@@ -310,10 +271,15 @@ func cloneState(current *registryState) *registryState {
 	for id, candidate := range current.tools {
 		tools[id] = candidate
 	}
+	owners := maps.Clone(current.owners)
+	if owners == nil {
+		owners = make(map[ToolID]string)
+	}
 	return &registryState{
 		revision: current.revision,
 		tools:    tools,
 		order:    append([]ToolID(nil), current.order...),
+		owners:   owners,
 	}
 }
 

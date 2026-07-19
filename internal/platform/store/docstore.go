@@ -6,12 +6,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/platform/dbschema"
+	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 	_ "github.com/go-sql-driver/mysql"
 	"gopkg.in/yaml.v3"
 
-	"github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 // DocStore persists uploaded and generated markdown documents in MySQL.
@@ -51,9 +51,9 @@ func safeAddColumn(db *sql.DB, table, column, def string) error {
 	return nil
 }
 
-func (s *DocStore) InsertDoc(doc types.DocRecord) error {
+func (s *DocStore) InsertDoc(doc domain.DocRecord) error {
 	if doc.Kind == "" {
-		doc.Kind = types.DocKindDocument
+		doc.Kind = domain.DocKindDocument
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO documents (id, title, filename, kind, content, chunk_count, created_at, updated_at)
@@ -68,8 +68,8 @@ func (s *DocStore) InsertDoc(doc types.DocRecord) error {
 	return nil
 }
 
-func (s *DocStore) GetDoc(id string) (types.DocRecord, error) {
-	var d types.DocRecord
+func (s *DocStore) GetDoc(id string) (domain.DocRecord, error) {
+	var d domain.DocRecord
 	var createdAt, updatedAt sql.NullTime
 	err := s.db.QueryRow(
 		`SELECT id, title, filename, COALESCE(kind,''), COALESCE(content,''), chunk_count, created_at, updated_at
@@ -82,7 +82,7 @@ func (s *DocStore) GetDoc(id string) (types.DocRecord, error) {
 	return d, nil
 }
 
-func (s *DocStore) ListDocs() ([]types.DocRecord, error) {
+func (s *DocStore) ListDocs() ([]domain.DocRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT id, title, filename, COALESCE(kind,''), COALESCE(content,''), chunk_count, created_at, updated_at
 		 FROM documents ORDER BY updated_at DESC`,
@@ -94,11 +94,11 @@ func (s *DocStore) ListDocs() ([]types.DocRecord, error) {
 	return scanDocRows(rows)
 }
 
-func (s *DocStore) ListDocsMetaPage(page, pageSize int) (*types.Page[types.DocRecord], error) {
+func (s *DocStore) ListDocsMetaPage(page, pageSize int) (*domain.Page[domain.DocRecord], error) {
 	return s.ListDocsMetaPageFiltered(page, pageSize, "", "", "", "")
 }
 
-func (s *DocStore) ListDocsMetaPageFiltered(page, pageSize int, kind, query, sortBy, sortOrder string) (*types.Page[types.DocRecord], error) {
+func (s *DocStore) ListDocsMetaPageFiltered(page, pageSize int, kind, query, sortBy, sortOrder string) (*domain.Page[domain.DocRecord], error) {
 	if page < 1 {
 		page = 1
 	}
@@ -146,7 +146,7 @@ func (s *DocStore) ListDocsMetaPageFiltered(page, pageSize int, kind, query, sor
 	if err != nil {
 		return nil, err
 	}
-	return &types.Page[types.DocRecord]{
+	return &domain.Page[domain.DocRecord]{
 		Total:    total,
 		Page:     page,
 		PageSize: pageSize,
@@ -185,7 +185,7 @@ func docListOrderBy(sortBy, sortOrder string) string {
 	}
 }
 
-func (s *DocStore) ListDocsMeta() ([]types.DocRecord, error) {
+func (s *DocStore) ListDocsMeta() ([]domain.DocRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT id, title, filename, COALESCE(kind,''), chunk_count, created_at, updated_at
 		 FROM documents ORDER BY updated_at DESC`,
@@ -206,7 +206,7 @@ func (s *DocStore) DeleteDoc(id string) (string, error) {
 	return id, nil
 }
 
-func (s *DocStore) ListDocsByKind(kind string) ([]types.DocRecord, error) {
+func (s *DocStore) ListDocsByKind(kind string) ([]domain.DocRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT id, title, filename, COALESCE(kind,''), COALESCE(content,''), chunk_count, created_at, updated_at
 		 FROM documents WHERE kind = ? ORDER BY updated_at DESC`, kind,
@@ -218,7 +218,7 @@ func (s *DocStore) ListDocsByKind(kind string) ([]types.DocRecord, error) {
 	return scanDocRows(rows)
 }
 
-func (s *DocStore) ListDocsMetaByKind(kind string) ([]types.DocRecord, error) {
+func (s *DocStore) ListDocsMetaByKind(kind string) ([]domain.DocRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT id, title, filename, COALESCE(kind,''), chunk_count, created_at, updated_at
 		 FROM documents WHERE kind = ? ORDER BY updated_at DESC`, kind,
@@ -230,7 +230,7 @@ func (s *DocStore) ListDocsMetaByKind(kind string) ([]types.DocRecord, error) {
 	return scanDocMetaRows(rows)
 }
 
-func (s *DocStore) ListDocsByKinds(kinds []string) ([]types.DocRecord, error) {
+func (s *DocStore) ListDocsByKinds(kinds []string) ([]domain.DocRecord, error) {
 	if len(kinds) == 0 {
 		return nil, nil
 	}
@@ -251,7 +251,7 @@ func (s *DocStore) ListDocsByKinds(kinds []string) ([]types.DocRecord, error) {
 	return scanDocRows(rows)
 }
 
-func (s *DocStore) ListDocsMetaByKinds(kinds []string) ([]types.DocRecord, error) {
+func (s *DocStore) ListDocsMetaByKinds(kinds []string) ([]domain.DocRecord, error) {
 	if len(kinds) == 0 {
 		return nil, nil
 	}
@@ -272,10 +272,10 @@ func (s *DocStore) ListDocsMetaByKinds(kinds []string) ([]types.DocRecord, error
 	return scanDocMetaRows(rows)
 }
 
-func scanDocRows(rows *sql.Rows) ([]types.DocRecord, error) {
-	var docs []types.DocRecord
+func scanDocRows(rows *sql.Rows) ([]domain.DocRecord, error) {
+	var docs []domain.DocRecord
 	for rows.Next() {
-		var d types.DocRecord
+		var d domain.DocRecord
 		var createdAt, updatedAt sql.NullTime
 		if err := rows.Scan(&d.ID, &d.Title, &d.Filename, &d.Kind, &d.Content, &d.ChunkCount, &createdAt, &updatedAt); err != nil {
 			return nil, err
@@ -286,10 +286,10 @@ func scanDocRows(rows *sql.Rows) ([]types.DocRecord, error) {
 	return docs, rows.Err()
 }
 
-func scanDocMetaRows(rows *sql.Rows) ([]types.DocRecord, error) {
-	var docs []types.DocRecord
+func scanDocMetaRows(rows *sql.Rows) ([]domain.DocRecord, error) {
+	var docs []domain.DocRecord
 	for rows.Next() {
-		var d types.DocRecord
+		var d domain.DocRecord
 		var createdAt, updatedAt sql.NullTime
 		if err := rows.Scan(&d.ID, &d.Title, &d.Filename, &d.Kind, &d.ChunkCount, &createdAt, &updatedAt); err != nil {
 			return nil, err
@@ -301,9 +301,9 @@ func scanDocMetaRows(rows *sql.Rows) ([]types.DocRecord, error) {
 }
 
 func (s *DocStore) CountRunbooks() (int, error) {
-	ph := strings.TrimRight(strings.Repeat("?,", len(types.RunbookKinds)), ",")
-	args := make([]any, len(types.RunbookKinds))
-	for i, k := range types.RunbookKinds {
+	ph := strings.TrimRight(strings.Repeat("?,", len(domain.RunbookKinds)), ",")
+	args := make([]any, len(domain.RunbookKinds))
+	for i, k := range domain.RunbookKinds {
 		args[i] = k
 	}
 	var n int
@@ -318,14 +318,14 @@ func (s *DocStore) CountByKind(kind string) (int, error) {
 }
 
 // RunbookMetas returns metadata-only runbook records for retrieval joins.
-func (s *DocStore) RunbookMetas() ([]types.RunbookRecord, error) {
-	metas, err := s.ListDocsMetaByKinds(types.RunbookKinds)
+func (s *DocStore) RunbookMetas() ([]domain.RunbookRecord, error) {
+	metas, err := s.ListDocsMetaByKinds(domain.RunbookKinds)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]types.RunbookRecord, 0, len(metas))
+	out := make([]domain.RunbookRecord, 0, len(metas))
 	for _, d := range metas {
-		out = append(out, types.RunbookRecord{
+		out = append(out, domain.RunbookRecord{
 			ID:         d.ID,
 			Repo:       "docs",
 			Title:      d.Title,
@@ -338,16 +338,16 @@ func (s *DocStore) RunbookMetas() ([]types.RunbookRecord, error) {
 }
 
 // RunbookByID loads one runbook body and frontmatter.
-func (s *DocStore) RunbookByID(id string) (types.RunbookRecord, error) {
+func (s *DocStore) RunbookByID(id string) (domain.RunbookRecord, error) {
 	d, err := s.GetDoc(id)
 	if err != nil {
-		return types.RunbookRecord{}, err
+		return domain.RunbookRecord{}, err
 	}
 	return docToRunbook(d), nil
 }
 
 // docToRunbook converts a stored markdown doc to a runbook record.
-func docToRunbook(d types.DocRecord) types.RunbookRecord {
+func docToRunbook(d domain.DocRecord) domain.RunbookRecord {
 	fm := parseDocFrontmatter(d.Content)
 	id := fmScalar(fm.data, "id")
 	if id == "" {
@@ -357,7 +357,7 @@ func docToRunbook(d types.DocRecord) types.RunbookRecord {
 	if title == "" {
 		title = d.Title
 	}
-	return types.RunbookRecord{
+	return domain.RunbookRecord{
 		ID:         id,
 		Repo:       "docs",
 		Title:      title,

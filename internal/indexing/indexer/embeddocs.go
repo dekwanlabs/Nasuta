@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/embed"
-	"github.com/dekwanlabs/astris/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/embed"
+	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 // EmbedDocMeta carries document fields that become the runbook payload.
@@ -35,7 +35,7 @@ type EmbedDocInput struct {
 // EmbedDocsCanonical chunks inputs and upserts them with one uniform runbook payload.
 // It does not delete prior vectors; callers must clear old state when needed.
 // It returns the total embedded chunk count.
-func EmbedDocsCanonical(ctx context.Context, emb embed.Embedder, sem store.SemanticStore, inputs []EmbedDocInput, batchSize int) (int, error) {
+func EmbedDocsCanonical(ctx context.Context, emb embed.Embedder, sem semantic.Store, inputs []EmbedDocInput, batchSize int) (int, error) {
 	if len(inputs) == 0 {
 		return 0, nil
 	}
@@ -56,7 +56,7 @@ func EmbedDocsCanonical(ctx context.Context, emb embed.Embedder, sem store.Seman
 // EmbedChunksCanonical embeds a pre-chunked document with the uniform runbook payload.
 // Point IDs use DocChunkID(docID, chunkIndex) so all embed paths replace the same points.
 // All document chunks use payload kind "runbook" and are separated by scope.
-func EmbedChunksCanonical(ctx context.Context, emb embed.Embedder, sem store.SemanticStore, meta EmbedDocMeta, chunks []DocChunk, batchSize int) (int, error) {
+func EmbedChunksCanonical(ctx context.Context, emb embed.Embedder, sem semantic.Store, meta EmbedDocMeta, chunks []DocChunk, batchSize int) (int, error) {
 	if len(chunks) == 0 {
 		return 0, nil
 	}
@@ -77,14 +77,14 @@ func EmbedChunksCanonical(ctx context.Context, emb embed.Embedder, sem store.Sem
 		if err != nil {
 			return 0, fmt.Errorf("embed batch [%d:%d]: %w", start, end, err)
 		}
-		points := make([]store.SemanticPoint, 0, len(vecs))
-		evidenceClass, trustTier := types.EvidenceForRunbookScope(meta.Scope)
+		points := make([]semantic.Record, 0, len(vecs))
+		evidenceClass, trustTier := domain.EvidenceForRunbookScope(meta.Scope)
 		for i, v := range vecs {
 			c := batch[i]
-			points = append(points, store.SemanticPoint{
-				ID:     DocChunkID(c.DocID, c.ChunkIndex),
-				Vector: v,
-				Payload: map[string]any{
+			points = append(points, semantic.Record{
+				ID:          DocChunkID(c.DocID, c.ChunkIndex),
+				DenseVector: v,
+				Metadata: map[string]any{
 					"kind":           "runbook",
 					"id":             c.DocID,
 					"doc_id":         c.DocID,

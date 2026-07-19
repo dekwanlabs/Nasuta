@@ -3,11 +3,11 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/dekwanlabs/astris/platform/httputil"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"net/http"
 	"strings"
 
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 // Service is the auth capability entry: OAuth flow, session lookup, and HTTP middleware.

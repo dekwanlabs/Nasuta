@@ -12,8 +12,8 @@ import (
 	"sync"
 	"unicode"
 
-	"github.com/dekwanlabs/astris/log"
-	"github.com/dekwanlabs/astris/platform"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
 
 	_ "modernc.org/sqlite"
 )

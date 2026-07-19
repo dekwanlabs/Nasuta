@@ -6,14 +6,14 @@ import (
 	"fmt"
 	"net/http"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // WriteJSON writes a success response wrapped in ApiResponse.
 func WriteJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(types.ApiResponse{Code: 0, Message: "", Data: v})
+	json.NewEncoder(w).Encode(domain.ApiResponse{Code: 0, Message: "", Data: v})
 }
 
 // WriteErr writes an error response (HTTP 500) wrapped in ApiResponse.
@@ -29,7 +29,7 @@ func WriteErrStatus(w http.ResponseWriter, status int, err error) {
 	if code < 400 {
 		code = 500
 	}
-	json.NewEncoder(w).Encode(types.ApiResponse{Code: code, Message: err.Error()})
+	json.NewEncoder(w).Encode(domain.ApiResponse{Code: code, Message: err.Error()})
 }
 
 // WriteBadRequest writes a 400 response.

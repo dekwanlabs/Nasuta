@@ -6,13 +6,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dekwanlabs/astris/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // scanGoServices finds Go applications by scanning .go files for package main + func main().
-func scanGoServices(root string, dirs []string) []types.ServiceRecord {
+func scanGoServices(root string, dirs []string) []domain.ServiceRecord {
 	files := walkFiles(root, dirs, hasSuffix(".go"))
-	var records []types.ServiceRecord
+	var records []domain.ServiceRecord
 	seenModules := map[string]bool{}
 	for _, file := range files {
 		text := readFile(file)
@@ -34,7 +34,7 @@ func scanGoServices(root string, dirs []string) []types.ServiceRecord {
 		seenModules[serviceName] = true
 		layer := inferLayer(serviceName, modulePath)
 		runtime := readGoVersion(moduleRoot)
-		records = append(records, types.ServiceRecord{
+		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
 			Layer:         "server",
@@ -45,7 +45,7 @@ func scanGoServices(root string, dirs []string) []types.ServiceRecord {
 			Tags:          []string{"code-scan"},
 			Docs:          []string{},
 			SourceOfTruth: []string{rel},
-			Entrypoints:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 			Ports:         readGoPorts(moduleRoot),
 			Confidence:    0.85,
 		})
@@ -54,9 +54,9 @@ func scanGoServices(root string, dirs []string) []types.ServiceRecord {
 }
 
 // scanGoEndpoints finds Go HTTP route registrations (Gin, Echo, net/http, Chi, Fiber).
-func scanGoEndpoints(root string, dirs []string) []types.EndpointRecord {
+func scanGoEndpoints(root string, dirs []string) []domain.EndpointRecord {
 	files := walkFiles(root, dirs, hasSuffix(".go"))
-	var records []types.EndpointRecord
+	var records []domain.EndpointRecord
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, ".GET") && !strings.Contains(text, ".POST") &&
@@ -90,7 +90,7 @@ func scanGoEndpoints(root string, dirs []string) []types.EndpointRecord {
 				if path == "" {
 					continue
 				}
-				records = append(records, types.EndpointRecord{
+				records = append(records, domain.EndpointRecord{
 					ServiceName:   serviceName,
 					Repo:          topSegment(rel),
 					Method:        method,
@@ -99,7 +99,7 @@ func scanGoEndpoints(root string, dirs []string) []types.EndpointRecord {
 					HandlerMethod: goHandlerName(lines, i),
 					File:          rel,
 					Line:          i + 1,
-					Source:        types.SourceCodeScan,
+					Source:        domain.SourceCodeScan,
 					Confidence:    0.85,
 				})
 			}
@@ -109,9 +109,9 @@ func scanGoEndpoints(root string, dirs []string) []types.EndpointRecord {
 }
 
 // scanGoDependencies finds HTTP client calls and gRPC client usage in Go code.
-func scanGoDependencies(root string, dirs []string) []types.DependencyEdge {
+func scanGoDependencies(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, hasSuffix(".go"))
-	var edges []types.DependencyEdge
+	var edges []domain.DependencyEdge
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "http.NewRequest") && !strings.Contains(text, "resty.") &&
@@ -133,11 +133,11 @@ func scanGoDependencies(root string, dirs []string) []types.DependencyEdge {
 				target, _, _ = strings.Cut(target, "/")
 				target = strings.TrimSuffix(target, ":8080")
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
-					edges = append(edges, types.DependencyEdge{
+					edges = append(edges, domain.DependencyEdge{
 						From:       caller,
 						To:         target,
-						Type:       types.EdgeHTTP,
-						Evidence:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+						Type:       domain.EdgeHTTP,
+						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 						Confidence: 0.5,
 					})
 				}
@@ -148,11 +148,11 @@ func scanGoDependencies(root string, dirs []string) []types.DependencyEdge {
 			if len(m) > 1 {
 				target := m[1]
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
-					edges = append(edges, types.DependencyEdge{
+					edges = append(edges, domain.DependencyEdge{
 						From:       caller,
 						To:         target,
-						Type:       types.EdgeGRPC,
-						Evidence:   []types.Evidence{{Path: rel, Kind: types.SourceCodeScan}},
+						Type:       domain.EdgeGRPC,
+						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
 						Confidence: 0.55,
 					})
 				}

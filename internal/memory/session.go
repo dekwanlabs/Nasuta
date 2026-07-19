@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/astris/internal/platform/dbschema"
-	platformStore "github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/llm"
+	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/llm"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -38,7 +38,7 @@ type MessagePage struct {
 var ErrSessionOwnership = errors.New("memory/session: session belongs to another user")
 
 func OpenSessionStore(dsn string) (*SessionStore, error) {
-	db, err := platformStore.MySQL(dsn)
+	db, err := store.MySQL(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("memory/session: open: %w", err)
 	}
@@ -66,8 +66,8 @@ func (ss *SessionStore) List(userID int64) ([]SessionRecord, error) {
 		if err := rows.Scan(&r.ID, &r.Title, &r.Summary, &r.UserID, &createdAt, &updatedAt, &r.MessageCount); err != nil {
 			return nil, err
 		}
-		r.CreatedAt = platformStore.FormatDatabaseTime(createdAt)
-		r.UpdatedAt = platformStore.FormatDatabaseTime(updatedAt)
+		r.CreatedAt = store.FormatDatabaseTime(createdAt)
+		r.UpdatedAt = store.FormatDatabaseTime(updatedAt)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -95,7 +95,7 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 	if exists {
 		if _, err := tx.Exec(
 			`UPDATE qa_sessions SET title=?,summary=?,updated_at=? WHERE id=? AND user_id=?`,
-			r.Title, r.Summary, platformStore.DatabaseTime(r.UpdatedAt), r.ID, r.UserID,
+			r.Title, r.Summary, store.DatabaseTime(r.UpdatedAt), r.ID, r.UserID,
 		); err != nil {
 			return err
 		}
@@ -103,7 +103,7 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 		if _, err := tx.Exec(
 			`INSERT INTO qa_sessions(id,user_id,title,summary,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
 			r.ID, r.UserID, r.Title, r.Summary,
-			platformStore.DatabaseTime(r.CreatedAt), platformStore.DatabaseTime(r.UpdatedAt),
+			store.DatabaseTime(r.CreatedAt), store.DatabaseTime(r.UpdatedAt),
 		); err != nil {
 			return err
 		}
@@ -116,7 +116,7 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 		args := make([]any, 0, len(r.Messages)*5)
 		for i, m := range r.Messages {
 			placeholders[i] = "(?,?,?,?,?)"
-			args = append(args, r.ID, i, m.Role, m.Content, platformStore.DatabaseTime(r.UpdatedAt))
+			args = append(args, r.ID, i, m.Role, m.Content, store.DatabaseTime(r.UpdatedAt))
 		}
 		query := "INSERT INTO qa_messages(session_id,seq,role,content,created_at) VALUES " + strings.Join(placeholders, ",")
 		if _, err := tx.Exec(query, args...); err != nil {
@@ -163,8 +163,8 @@ func (ss *SessionStore) getSession(id string, userID int64) (*SessionRecord, err
 		}
 		return nil, err
 	}
-	r.CreatedAt = platformStore.FormatDatabaseTime(createdAt)
-	r.UpdatedAt = platformStore.FormatDatabaseTime(updatedAt)
+	r.CreatedAt = store.FormatDatabaseTime(createdAt)
+	r.UpdatedAt = store.FormatDatabaseTime(updatedAt)
 	return &r, nil
 }
 
@@ -306,7 +306,7 @@ func (ss *SessionStore) AppendMessages(sessionID string, userID int64, msgs []ll
 	args := make([]any, 0, len(msgs)*5)
 	for i, m := range msgs {
 		placeholders[i] = "(?,?,?,?,?)"
-		args = append(args, sessionID, maxSeq+1+i, m.Role, m.Content, platformStore.DatabaseTime(now))
+		args = append(args, sessionID, maxSeq+1+i, m.Role, m.Content, store.DatabaseTime(now))
 	}
 	query := "INSERT INTO qa_messages(session_id,seq,role,content,created_at) VALUES " + strings.Join(placeholders, ",")
 	if _, err := tx.Exec(query, args...); err != nil {
@@ -314,7 +314,7 @@ func (ss *SessionStore) AppendMessages(sessionID string, userID int64, msgs []ll
 	}
 	if _, err := tx.Exec(
 		`UPDATE qa_sessions SET updated_at = ? WHERE id = ? AND user_id=?`,
-		platformStore.DatabaseTime(now), sessionID, userID,
+		store.DatabaseTime(now), sessionID, userID,
 	); err != nil {
 		return err
 	}
@@ -324,7 +324,7 @@ func (ss *SessionStore) AppendMessages(sessionID string, userID int64, msgs []ll
 func (ss *SessionStore) UpdateSummary(id string, userID int64, summary string) error {
 	result, err := ss.db.Exec(
 		`UPDATE qa_sessions SET summary = ?, updated_at = ? WHERE id = ? AND user_id=?`,
-		summary, platformStore.DatabaseTime(time.Now().UTC().Format(time.RFC3339)), id, userID)
+		summary, store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)), id, userID)
 	if err != nil {
 		return err
 	}
@@ -354,12 +354,12 @@ func (ss *SessionStore) EnsureSession(id string, userID int64, title string) err
 			`UPDATE qa_sessions
 			 SET updated_at=?,title=CASE WHEN title='' THEN ? ELSE title END
 			 WHERE id=? AND user_id=?`,
-			platformStore.DatabaseTime(now), title, id, userID,
+			store.DatabaseTime(now), title, id, userID,
 		)
 	} else {
 		_, err = tx.Exec(
 			`INSERT INTO qa_sessions(id,user_id,title,summary,created_at,updated_at) VALUES(?,?,?,'',?,?)`,
-			id, userID, title, platformStore.DatabaseTime(now), platformStore.DatabaseTime(now),
+			id, userID, title, store.DatabaseTime(now), store.DatabaseTime(now),
 		)
 	}
 	if err != nil {

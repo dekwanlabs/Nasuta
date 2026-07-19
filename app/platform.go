@@ -1,27 +1,30 @@
-package application
+package app
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/astris/auth"
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/internal/agent"
-	"github.com/dekwanlabs/astris/internal/indexing"
-	"github.com/dekwanlabs/astris/internal/rbac"
-	"github.com/dekwanlabs/astris/internal/transport/dashboard"
-	mcptransport "github.com/dekwanlabs/astris/internal/transport/mcp"
-	platformroutes "github.com/dekwanlabs/astris/internal/transport/routes"
-	"github.com/dekwanlabs/astris/internal/transport/webhook"
-	"github.com/dekwanlabs/astris/knowledge"
-	"github.com/dekwanlabs/astris/log"
-	toolruntime "github.com/dekwanlabs/astris/tool"
-	"github.com/dekwanlabs/astris/writeaction"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/incident"
+	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/approval"
+	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/indexing"
+	"github.com/dekwanlabs/nasuta/internal/rbac"
+	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
+	"github.com/dekwanlabs/nasuta/internal/transport/incidenthttp"
+	"github.com/dekwanlabs/nasuta/internal/transport/mcp"
+	"github.com/dekwanlabs/nasuta/internal/transport/routes"
+	"github.com/dekwanlabs/nasuta/internal/transport/webhook"
+	"github.com/dekwanlabs/nasuta/knowledge"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/tool"
+	"github.com/dekwanlabs/nasuta/writeaction"
 )
 
 // Platform owns reusable runtime state and exposes only stable composition ports.
@@ -30,13 +33,16 @@ type Platform struct {
 	settings    *config.PlatformSettings
 	index       *indexing.Service
 	knowledge   *agent.Service
-	registry    *toolruntime.Registry
-	readTools   *toolruntime.ReadRegistry
+	registry    *tool.Registry
+	readTools   *tool.ReadRegistry
 	writeReady  bool
 	authDB      *auth.DB
 	authService *auth.Service
 	rbacHandler *rbac.Handler
 	rolePrompt  func(int64) string
+	incidents   *incident.Manager
+	actions     *approval.Service
+	incidentAPI *incidenthttp.Handler
 }
 
 // New constructs the reusable platform without registering scenario routes.
@@ -63,7 +69,7 @@ func New() (*Platform, error) {
 
 	platform := &Platform{
 		cfg: cfg, settings: settings, index: index, knowledge: knowledgeService,
-		registry: registry, readTools: toolruntime.NewReadRegistry(registry),
+		registry: registry, readTools: tool.NewReadRegistry(registry),
 		authDB: authDB, authService: authService,
 	}
 	platform.initRBAC()
@@ -117,20 +123,53 @@ func (platform *Platform) initRBAC() {
 func (platform *Platform) Knowledge() knowledge.API { return platform.knowledge }
 
 // ReadTools returns the restricted publisher available to scenario code.
-func (platform *Platform) ReadTools() *toolruntime.ReadRegistry { return platform.readTools }
+func (platform *Platform) ReadTools() *tool.ReadRegistry { return platform.readTools }
 
-// ConfigureWriteActions connects persistence to the closed platform catalog.
-func (platform *Platform) ConfigureWriteActions(proposer writeaction.Proposer) error {
-	if proposer == nil {
+func (platform *Platform) configureIncidents(evidence incident.EvidenceProvider) error {
+	if platform.authDB == nil {
+		log.Warnf("[server] incident and approval disabled (MySQL unavailable)")
 		return nil
 	}
+	return platform.configureIncidentsWithDB(platform.authDB.RawDB(), evidence)
+}
+
+func (platform *Platform) configureIncidentsWithDB(db *sql.DB, evidence incident.EvidenceProvider) error {
 	if platform.writeReady {
-		return fmt.Errorf("write actions are already configured")
+		return fmt.Errorf("incident workflows are already configured")
 	}
-	if err := writeaction.RegisterBuiltins(platform.registry, proposer); err != nil {
+	cfg := incident.Config{
+		WebBaseURL:          platform.cfg.WebBaseURL,
+		NotifyFeishuWebhook: platform.cfg.NotifyFeishuWebhook,
+		NotifyWecomWebhook:  platform.cfg.NotifyWecomWebhook,
+		NotifyHTTPWebhook:   platform.cfg.NotifyHTTPWebhook,
+		FixDefaultAssignee:  platform.cfg.FixDefaultAssignee,
+		FixBranchPrefix:     platform.cfg.FixBranchPrefix,
+		LLMBaseURL:          platform.settings.LLMBaseURL,
+		LLMAPIKey:           platform.settings.LLMAPIKey,
+		LLMModel:            platform.settings.LLMModel,
+		LLMProvider:         platform.settings.LLMProvider,
+		LLMMaxTokens:        platform.settings.LLMMaxTokens,
+		VCSURL:              platform.settings.VCSURL,
+		VCSToken:            platform.settings.VCSToken,
+	}
+	manager, err := incident.NewManager(
+		cfg, db, platform.cfg.WorkspaceRoot, evidence, platform.knowledge,
+	)
+	if err != nil {
+		return fmt.Errorf("configure incident manager: %w", err)
+	}
+	actions, err := approval.NewService(db, manager)
+	if err != nil {
+		return fmt.Errorf("configure approval service: %w", err)
+	}
+	if err := writeaction.RegisterBuiltins(platform.registry, actions); err != nil {
 		return fmt.Errorf("configure write actions: %w", err)
 	}
+	platform.incidents = manager
+	platform.actions = actions
+	platform.incidentAPI = incidenthttp.New(manager, actions, platform.cfg.AlertWebhookSecret)
 	platform.writeReady = true
+	log.Infof("[server] incident and approval workflows enabled")
 	return nil
 }
 
@@ -156,17 +195,20 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	if platform.rolePrompt != nil {
 		dashboardHandler.SetRolePrompt(platform.rolePrompt)
 	}
-	platformroutes.Setup(mux, platformroutes.Config{
+	routes.Setup(mux, routes.Config{
 		Auth: platform.authService, Dashboard: dashboardHandler, RBAC: platform.rbacHandler,
-		MCP: mcptransport.NewDynamicHandler(platform.knowledge, platform.registry),
+		MCP: mcp.NewDynamicHandler(platform.knowledge, platform.registry),
 		VCS: webhook.VCSHandler(platform.index, platform.settings.VCSWebhookSecret),
 		Cfg: platform.cfg,
 	})
+	if platform.incidentAPI != nil {
+		platform.incidentAPI.RegisterRoutes(platform.AuthenticatedAPI(mux))
+	}
 }
 
 // AuthenticatedAPI gives the root composition the platform auth boundary without exposing its store.
-func (platform *Platform) AuthenticatedAPI(mux *http.ServeMux) platformroutes.APIRegistrar {
-	return platformroutes.AuthenticatedAPI(mux, platform.authService)
+func (platform *Platform) AuthenticatedAPI(mux *http.ServeMux) APIRegistrar {
+	return routes.AuthenticatedAPI(mux, platform.authService)
 }
 
 // Serve runs background platform work and serves the already-composed root mux.
@@ -174,9 +216,9 @@ func (platform *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 	go platform.startDailySyncTicker(ctx)
 	log.Infof("[server] listening on %s (MCP: /mcp, webhook: /internal/vcs-hook, api: /api)", platform.cfg.HTTPAddr)
 	if platform.cfg.AuthToken == "" {
-		log.Warnf("[server] WARNING: no CODELOOM_AUTH_TOKEN set, /mcp is unauthenticated")
+		log.Warnf("[server] WARNING: no NASUTA_AUTH_TOKEN set, /mcp is unauthenticated")
 	}
-	if err := http.ListenAndServe(platform.cfg.HTTPAddr, platformroutes.TraceMiddleware(mux)); err != nil {
+	if err := http.ListenAndServe(platform.cfg.HTTPAddr, routes.TraceMiddleware(mux)); err != nil {
 		return fmt.Errorf("http server: %w", err)
 	}
 	return nil
@@ -187,19 +229,19 @@ func (platform *Platform) Close() error {
 	if platform == nil || platform.index == nil {
 		return nil
 	}
+	if platform.incidents != nil {
+		_ = platform.incidents.Close()
+	}
 	platform.index.Close()
 	return nil
 }
 
 func (platform *Platform) startDailySyncTicker(ctx context.Context) {
-	atTime := strings.TrimSpace(os.Getenv("CODELOOM_DAILY_SYNC_TIME"))
-	if atTime == "" {
-		atTime = "02:07"
-	}
+	atTime := platform.cfg.DailySyncTime
 	for {
 		next, err := nextDailySyncAt(atTime)
 		if err != nil {
-			log.WarnfCtx(ctx, "[daily-sync] bad CODELOOM_DAILY_SYNC_TIME %q (%v), defaulting to 02:07", atTime, err)
+			log.WarnfCtx(ctx, "[daily-sync] bad NASUTA_DAILY_SYNC_TIME %q (%v), defaulting to 02:07", atTime, err)
 			next, _ = nextDailySyncAt("02:07")
 		}
 		select {

@@ -4,11 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/dekwanlabs/astris/platform/httputil"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"net/http"
 	"strconv"
 
-	"github.com/dekwanlabs/astris/auth"
+	"github.com/dekwanlabs/nasuta/internal/auth"
 )
 
 type Handler struct {

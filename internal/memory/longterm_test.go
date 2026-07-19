@@ -40,11 +40,11 @@ func TestWriteSupersedesLowerAuthorityFact(t *testing.T) {
 	if len(semantic.points) != 2 {
 		t.Fatalf("vector points = %#v", semantic.points)
 	}
-	if semantic.points[0].Payload["status"] != string(StatusSuperseded) {
-		t.Fatalf("old payload = %#v", semantic.points[0].Payload)
+	if semantic.points[0].Metadata["status"] != string(StatusSuperseded) {
+		t.Fatalf("old metadata = %#v", semantic.points[0].Metadata)
 	}
-	if semantic.points[1].Payload["source_type"] != string(SourceExplicitUser) {
-		t.Fatalf("new payload = %#v", semantic.points[1].Payload)
+	if semantic.points[1].Metadata["source_type"] != string(SourceExplicitUser) {
+		t.Fatalf("new metadata = %#v", semantic.points[1].Metadata)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestWriteRejectsLowerAuthorityReplacement(t *testing.T) {
 	if result.Outcome != WriteRejected || result.SupersededRecord != activeID {
 		t.Fatalf("result = %#v", result)
 	}
-	if len(semantic.points) != 1 || semantic.points[0].Payload["status"] != string(StatusSuperseded) {
+	if len(semantic.points) != 1 || semantic.points[0].Metadata["status"] != string(StatusSuperseded) {
 		t.Fatalf("points = %#v", semantic.points)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -113,7 +113,7 @@ func TestWriteRefreshPromotesConfirmedContent(t *testing.T) {
 	if result.Outcome != WriteRefreshed || result.ID != activeID {
 		t.Fatalf("result = %#v", result)
 	}
-	if len(semantic.points) != 1 || semantic.points[0].Payload["source_type"] != string(SourceExplicitUser) {
+	if len(semantic.points) != 1 || semantic.points[0].Metadata["source_type"] != string(SourceExplicitUser) {
 		t.Fatalf("points = %#v", semantic.points)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -151,7 +151,7 @@ func TestWriteRefreshKeepsHigherAuthorityMetadata(t *testing.T) {
 	if result.Outcome != WriteRefreshed {
 		t.Fatalf("result = %#v", result)
 	}
-	if len(semantic.points) != 1 || semantic.points[0].Payload["source_type"] != string(SourceExplicitUser) {
+	if len(semantic.points) != 1 || semantic.points[0].Metadata["source_type"] != string(SourceExplicitUser) {
 		t.Fatalf("points = %#v", semantic.points)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -159,22 +159,57 @@ func TestWriteRefreshKeepsHigherAuthorityMetadata(t *testing.T) {
 	}
 }
 
-func TestCanonicalizeRecordAppliesTTLAndRejectsSecrets(t *testing.T) {
-	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
-	rec, err := canonicalizeRecord(MemoryRecord{
-		UserID: 42, FactKey: "user:current-focus", Kind: KindWorkContext,
-		Content: "Refactor user center", SourceType: SourceUserStated,
-	}, 48*time.Hour, now)
+func TestWriteAppliesTTLToExtractedWorkContext(t *testing.T) {
+	memory, _, mock, closeDB := newMemoryTestStore(t)
+	defer closeDB()
+	now := memory.now()
+	id := "22222222-2222-2222-2222-222222222222"
+	records := normalizeExtracted([]extractedEntry{{
+		FactKey:    "user:current-focus",
+		Kind:       string(KindWorkContext),
+		Content:    "Refactor user center",
+		SourceType: string(SourceUserStated),
+		Confidence: 1,
+	}})
+	if len(records) != 1 {
+		t.Fatalf("records = %#v", records)
+	}
+	records[0].ID = id
+	records[0].UserID = 42
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND status='active'.*FOR UPDATE`).
+		WithArgs(int64(42), "user:current-focus").
+		WillReturnRows(sqlmock.NewRows(memoryColumns()))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO qa_memories(
+			id,user_id,fact_key,kind,content,source_type,authority,status,superseded_by,
+			source_session,confidence,expires_at,created_at,updated_at,last_used,use_count
+		 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
+		WithArgs(
+			id, int64(42), "user:current-focus", KindWorkContext, "Refactor user center",
+			SourceUserStated, AuthorityUserStated, StatusActive, nil, "", float32(1),
+			now.Add(24*time.Hour), now, now, nil, 0,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	result, err := memory.Write(context.Background(), records[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.ExpiresAt == nil || !rec.ExpiresAt.Equal(now.Add(48*time.Hour)) {
-		t.Fatalf("expires_at = %v", rec.ExpiresAt)
+	if result.Outcome != WriteInserted {
+		t.Fatalf("result = %#v", result)
 	}
-	_, err = canonicalizeRecord(MemoryRecord{
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCanonicalizeRecordRejectsSecrets(t *testing.T) {
+	_, err := canonicalizeRecord(MemoryRecord{
 		UserID: 42, FactKey: "user:current-focus", Kind: KindWorkContext,
 		Content: "access_token=secret-value", SourceType: SourceUserStated,
-	}, 48*time.Hour, now)
+	})
 	if err == nil {
 		t.Fatal("secret content was accepted")
 	}

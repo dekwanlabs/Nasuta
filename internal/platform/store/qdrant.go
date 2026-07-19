@@ -2,91 +2,24 @@ package store
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
 
-	"github.com/dekwanlabs/astris/config"
-	"github.com/dekwanlabs/astris/log"
-	"github.com/qdrant/go-client/qdrant"
+	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/semantic"
+	qdrantclient "github.com/qdrant/go-client/qdrant"
 )
-
-type SemanticHit struct {
-	ID          string
-	Score       float32
-	ScoreKind   SemanticScoreKind
-	DenseScore  float32
-	FusionScore float32
-	Payload     map[string]any
-}
-
-// SemanticScoreKind keeps cosine similarity separate from rank-fusion scores.
-type SemanticScoreKind string
-
-const (
-	SemanticScoreDense  SemanticScoreKind = "dense"
-	SemanticScoreFusion SemanticScoreKind = "rrf"
-)
-
-type SemanticPoint struct {
-	ID            string
-	Vector        []float32
-	SparseIndices []uint32  // BM25 sparse vector indices
-	SparseValues  []float32 // BM25 sparse vector values
-	Payload       map[string]any
-}
-
-// SemanticFilter preserves typed payload constraints that string filters cannot express.
-type SemanticFilter struct {
-	Keywords   map[string]string
-	AnyInteger map[string][]int64
-}
-
-type SemanticStore interface {
-	Ensure(ctx context.Context, dim int) error
-	// Search runs a dense query. groupKey, when non-empty, makes Qdrant return
-	// at most one point per distinct value of that payload field (e.g. "path")
-	// so a long doc cannot flood recall with its chunks.
-	Search(ctx context.Context, vector []float32, filters map[string]string, limit int, groupKey string) ([]SemanticHit, error)
-	SearchFiltered(ctx context.Context, vector []float32, filter SemanticFilter, limit int, groupKey string) ([]SemanticHit, error)
-	SearchHybrid(ctx context.Context, vector []float32, sparseIndices []uint32, sparseValues []float32, filters map[string]string, limit int, groupKey string) ([]SemanticHit, error)
-	Upsert(ctx context.Context, points []SemanticPoint) error
-	DeletePoints(ctx context.Context, ids []string) error
-	DeleteByRepo(ctx context.Context, repo string) error
-	DeleteByFilterExcept(ctx context.Context, filters, except map[string]string) error
-	DeleteRepoExceptGeneration(ctx context.Context, repo, generation string) error
-	DeleteByDocID(ctx context.Context, docID string) error
-	CountByFilter(ctx context.Context, filters map[string]string) (int, error)
-	Enabled() bool
-}
-
-type NoopSemantic struct{}
-
-func (NoopSemantic) Ensure(context.Context, int) error { return nil }
-func (NoopSemantic) Search(context.Context, []float32, map[string]string, int, string) ([]SemanticHit, error) {
-	return nil, fmt.Errorf("semantic search disabled: configure QDRANT_HOST + EMBEDDING_API_KEY")
-}
-func (NoopSemantic) SearchFiltered(context.Context, []float32, SemanticFilter, int, string) ([]SemanticHit, error) {
-	return nil, fmt.Errorf("semantic search disabled: configure QDRANT_HOST + EMBEDDING_API_KEY")
-}
-func (NoopSemantic) SearchHybrid(context.Context, []float32, []uint32, []float32, map[string]string, int, string) ([]SemanticHit, error) {
-	return nil, fmt.Errorf("semantic search disabled")
-}
-func (NoopSemantic) Upsert(context.Context, []SemanticPoint) error { return nil }
-func (NoopSemantic) DeletePoints(context.Context, []string) error  { return nil }
-func (NoopSemantic) DeleteByRepo(context.Context, string) error    { return nil }
-func (NoopSemantic) DeleteByFilterExcept(context.Context, map[string]string, map[string]string) error {
-	return nil
-}
-func (NoopSemantic) DeleteRepoExceptGeneration(context.Context, string, string) error {
-	return nil
-}
-func (NoopSemantic) DeleteByDocID(context.Context, string) error { return nil }
-func (NoopSemantic) CountByFilter(context.Context, map[string]string) (int, error) {
-	return 0, nil
-}
-func (NoopSemantic) Enabled() bool { return false }
 
 type Qdrant struct {
-	client     *qdrant.Client
+	client     *qdrantclient.Client
 	collection string
 }
 
@@ -94,75 +27,159 @@ type Qdrant struct {
 // migrated in place without dropping dense service/document embeddings.
 const codeSparseVector = "bm25"
 
-func NewSemantic(c config.Config) (SemanticStore, error) {
-	return NewSemanticWithCollection(c, c.QdrantCollection)
-}
+const maxSemanticSearchLimit = 1000
 
-func NewSemanticWithCollection(c config.Config, collection string) (SemanticStore, error) {
-	if c.QdrantHost == "" {
-		return NoopSemantic{}, nil
-	}
-	client, err := qdrant.NewClient(&qdrant.Config{
-		Host:                   c.QdrantHost,
-		Port:                   c.QdrantPort,
-		APIKey:                 c.QdrantAPIKey,
-		SkipCompatibilityCheck: true,
-	})
+func NewQdrant(ctx context.Context, cfg config.SemanticConfig) (*Qdrant, error) {
+	host, port, endpointTLS, err := qdrantAddress(cfg.Endpoint)
 	if err != nil {
 		return nil, err
 	}
-	return &Qdrant{client: client, collection: collection}, nil
+	tlsConfig, err := semanticTLSConfig(cfg.TLS)
+	if err != nil {
+		return nil, err
+	}
+	client, err := qdrantclient.NewClient(&qdrantclient.Config{
+		Host:                   host,
+		Port:                   port,
+		APIKey:                 cfg.Auth.APIKey,
+		UseTLS:                 cfg.TLS.Enabled || endpointTLS,
+		TLSConfig:              tlsConfig,
+		SkipCompatibilityCheck: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("qdrant: create client: %w", err)
+	}
+	if _, err := client.ListCollections(ctx); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("qdrant: connect %q: %w", cfg.Endpoint, err)
+	}
+	return &Qdrant{client: client, collection: cfg.Collection}, nil
 }
 
-func (q *Qdrant) Enabled() bool { return true }
+func qdrantAddress(endpoint string) (string, int, bool, error) {
+	if strings.Contains(endpoint, "://") {
+		parsed, err := url.Parse(endpoint)
+		if err != nil || parsed.Hostname() == "" {
+			return "", 0, false, fmt.Errorf("qdrant: invalid endpoint %q", endpoint)
+		}
+		port := 6334
+		if parsed.Port() != "" {
+			port, err = strconv.Atoi(parsed.Port())
+			if err != nil {
+				return "", 0, false, fmt.Errorf("qdrant: invalid endpoint port %q", parsed.Port())
+			}
+		}
+		return parsed.Hostname(), port, parsed.Scheme == "https", nil
+	}
+	host, portText, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("qdrant: endpoint must be host:port: %w", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("qdrant: invalid endpoint port %q", portText)
+	}
+	return host, port, false, nil
+}
 
-func (q *Qdrant) Ensure(ctx context.Context, dim int) error {
+func semanticTLSConfig(cfg config.SemanticTLS) (*tls.Config, error) {
+	if !cfg.Enabled && cfg.CAFile == "" && cfg.ServerName == "" {
+		return nil, nil
+	}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: cfg.ServerName}
+	if cfg.CAFile == "" {
+		return tlsConfig, nil
+	}
+	pem, err := os.ReadFile(cfg.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("semantic TLS CA file %q: %w", cfg.CAFile, err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("semantic TLS CA file %q contains no certificates", cfg.CAFile)
+	}
+	tlsConfig.RootCAs = pool
+	return tlsConfig, nil
+}
+
+func (q *Qdrant) Capabilities() semantic.Capabilities { return semantic.RequiredCapabilities() }
+
+func (q *Qdrant) Close() error { return q.client.Close() }
+
+func (q *Qdrant) Ensure(ctx context.Context, schema semantic.Schema) error {
+	if schema.Collection != "" && schema.Collection != q.collection {
+		return fmt.Errorf("qdrant: schema collection %q does not match configured %q", schema.Collection, q.collection)
+	}
+	dim := schema.DenseDim
+	if dim <= 0 {
+		return fmt.Errorf("qdrant: dense dimension must be positive")
+	}
 	bm25Params := codeSparseVectorParams()
 	exists, err := q.client.CollectionExists(ctx, q.collection)
 	if err != nil {
-		return err
+		return fmt.Errorf("qdrant: check collection %q: %w", q.collection, err)
 	}
 	if exists {
-		return q.client.UpdateCollection(ctx, &qdrant.UpdateCollection{
+		info, err := q.client.GetCollectionInfo(ctx, q.collection)
+		if err != nil {
+			return fmt.Errorf("qdrant: describe collection %q: %w", q.collection, err)
+		}
+		params := info.GetConfig().GetParams().GetVectorsConfig().GetParams()
+		if params == nil {
+			return fmt.Errorf("qdrant: collection %q does not use the compatible unnamed dense vector; rebuild into a new collection", q.collection)
+		}
+		if params.GetSize() != uint64(dim) || params.GetDistance() != qdrantclient.Distance_Cosine {
+			return fmt.Errorf("qdrant: collection %q dense schema is size=%d distance=%s, want size=%d distance=Cosine; rebuild into a new collection", q.collection, params.GetSize(), params.GetDistance(), dim)
+		}
+		if err := q.client.UpdateCollection(ctx, &qdrantclient.UpdateCollection{
 			CollectionName: q.collection,
-			SparseVectorsConfig: &qdrant.SparseVectorConfig{
-				Map: map[string]*qdrant.SparseVectorParams{
+			SparseVectorsConfig: &qdrantclient.SparseVectorConfig{
+				Map: map[string]*qdrantclient.SparseVectorParams{
 					codeSparseVector: bm25Params,
 				},
 			},
-		})
+		}); err != nil {
+			return fmt.Errorf("qdrant: ensure sparse vector on collection %q: %w", q.collection, err)
+		}
+		return nil
 	}
-	return q.client.CreateCollection(ctx, &qdrant.CreateCollection{
+	if err := q.client.CreateCollection(ctx, &qdrantclient.CreateCollection{
 		CollectionName: q.collection,
-		VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+		VectorsConfig: qdrantclient.NewVectorsConfig(&qdrantclient.VectorParams{
 			Size:     uint64(dim),
-			Distance: qdrant.Distance_Cosine,
+			Distance: qdrantclient.Distance_Cosine,
 		}),
-		SparseVectorsConfig: qdrant.NewSparseVectorsConfig(map[string]*qdrant.SparseVectorParams{
+		SparseVectorsConfig: qdrantclient.NewSparseVectorsConfig(map[string]*qdrantclient.SparseVectorParams{
 			codeSparseVector: bm25Params,
 		}),
-	})
+	}); err != nil {
+		return fmt.Errorf("qdrant: create collection %q: %w", q.collection, err)
+	}
+	return nil
 }
 
-func codeSparseVectorParams() *qdrant.SparseVectorParams {
-	return &qdrant.SparseVectorParams{Modifier: qdrant.Modifier_Idf.Enum()}
+func codeSparseVectorParams() *qdrantclient.SparseVectorParams {
+	return &qdrantclient.SparseVectorParams{Modifier: qdrantclient.Modifier_Idf.Enum()}
 }
 
-func buildFilter(filters map[string]string) *qdrant.Filter {
-	conds := make([]*qdrant.Condition, 0, len(filters))
+func buildFilter(filters map[string]string) *qdrantclient.Filter {
+	conds := make([]*qdrantclient.Condition, 0, len(filters))
 	hasPath := false
 	for k, v := range filters {
 		if v == "" {
 			continue
 		}
-		conds = append(conds, qdrant.NewMatch(k, v))
+		conds = append(conds, qdrantclient.NewMatch(k, v))
 		if k == "kind" && v == "code_chunk" {
 			hasPath = true
 		}
 	}
-	f := &qdrant.Filter{Must: conds}
+	f := &qdrantclient.Filter{Must: conds}
 	if hasPath {
-		f.MustNot = []*qdrant.Condition{qdrant.NewMatchText("path", ".codeloom")}
+		f.MustNot = []*qdrantclient.Condition{qdrantclient.NewMatchText("path", platform.WorkspaceMetadataDir)}
 	}
 	if len(f.Must) == 0 && len(f.MustNot) == 0 {
 		return nil
@@ -170,14 +187,14 @@ func buildFilter(filters map[string]string) *qdrant.Filter {
 	return f
 }
 
-func buildSemanticFilter(filter SemanticFilter) *qdrant.Filter {
+func buildSemanticFilter(filter semantic.Filter) *qdrantclient.Filter {
 	f := buildFilter(filter.Keywords)
 	if f == nil {
-		f = &qdrant.Filter{}
+		f = &qdrantclient.Filter{}
 	}
 	for field, values := range filter.AnyInteger {
 		if len(values) > 0 {
-			f.Must = append(f.Must, qdrant.NewMatchInts(field, values...))
+			f.Must = append(f.Must, qdrantclient.NewMatchInts(field, values...))
 		}
 	}
 	if len(f.Must) == 0 && len(f.MustNot) == 0 {
@@ -186,16 +203,16 @@ func buildSemanticFilter(filter SemanticFilter) *qdrant.Filter {
 	return f
 }
 
-func pointsToHits(res []*qdrant.ScoredPoint, kind SemanticScoreKind) []SemanticHit {
-	hits := make([]SemanticHit, 0, len(res))
+func pointsToHits(res []*qdrantclient.ScoredPoint, kind semantic.ScoreKind) []semantic.Hit {
+	hits := make([]semantic.Hit, 0, len(res))
 	for _, p := range res {
-		hit := SemanticHit{
+		hit := semantic.Hit{
 			ID:        p.GetId().GetUuid(),
 			Score:     p.GetScore(),
 			ScoreKind: kind,
-			Payload:   payloadToMap(p.GetPayload()),
+			Metadata:  payloadToMap(p.GetPayload()),
 		}
-		if kind == SemanticScoreFusion {
+		if kind == semantic.ScoreFusion {
 			hit.FusionScore = hit.Score
 		} else {
 			hit.DenseScore = hit.Score
@@ -208,17 +225,17 @@ func pointsToHits(res []*qdrant.ScoredPoint, kind SemanticScoreKind) []SemanticH
 // groupsToHits flattens grouped query results into a flat hit list. With
 // GroupSize=1 each group contributes its single best point; group order is
 // best-first so the caller's top-N stays correct.
-func groupsToHits(groups []*qdrant.PointGroup, kind SemanticScoreKind) []SemanticHit {
-	out := make([]SemanticHit, 0, len(groups))
+func groupsToHits(groups []*qdrantclient.PointGroup, kind semantic.ScoreKind) []semantic.Hit {
+	out := make([]semantic.Hit, 0, len(groups))
 	for _, g := range groups {
 		for _, p := range g.GetHits() {
-			hit := SemanticHit{
+			hit := semantic.Hit{
 				ID:        p.GetId().GetUuid(),
 				Score:     p.GetScore(),
 				ScoreKind: kind,
-				Payload:   payloadToMap(p.GetPayload()),
+				Metadata:  payloadToMap(p.GetPayload()),
 			}
-			if kind == SemanticScoreFusion {
+			if kind == semantic.ScoreFusion {
 				hit.FusionScore = hit.Score
 			} else {
 				hit.DenseScore = hit.Score
@@ -229,70 +246,86 @@ func groupsToHits(groups []*qdrant.PointGroup, kind SemanticScoreKind) []Semanti
 	return out
 }
 
-func (q *Qdrant) Search(ctx context.Context, vector []float32, filters map[string]string, limit int, groupKey string) ([]SemanticHit, error) {
-	return q.search(ctx, vector, buildFilter(filters), limit, groupKey)
+func (q *Qdrant) Search(ctx context.Context, query semantic.Query) ([]semantic.Hit, error) {
+	if query.Limit <= 0 || query.Limit > maxSemanticSearchLimit || len(query.DenseVector) == 0 {
+		return nil, fmt.Errorf("qdrant: search requires a dense vector and limit between 1 and %d", maxSemanticSearchLimit)
+	}
+	if query.SparseVector != nil {
+		return q.searchHybrid(ctx, query)
+	}
+	return q.search(ctx, query.DenseVector, buildSemanticFilter(query.Filter), query.Limit, query.GroupBy)
 }
 
-func (q *Qdrant) SearchFiltered(ctx context.Context, vector []float32, filter SemanticFilter, limit int, groupKey string) ([]SemanticHit, error) {
-	return q.search(ctx, vector, buildSemanticFilter(filter), limit, groupKey)
-}
-
-func (q *Qdrant) search(ctx context.Context, vector []float32, filter *qdrant.Filter, limit int, groupKey string) ([]SemanticHit, error) {
-	limU := uint64(limit)
+func (q *Qdrant) search(ctx context.Context, vector []float32, filter *qdrantclient.Filter, limit int, groupKey string) ([]semantic.Hit, error) {
+	fetchLimit := limit
+	groupFallback := false
 	if groupKey != "" {
+		limU := uint64(limit)
 		groupSize := uint64(1)
-		groups, err := q.client.QueryGroups(ctx, &qdrant.QueryPointGroups{
+		groups, err := q.client.QueryGroups(ctx, &qdrantclient.QueryPointGroups{
 			CollectionName: q.collection,
-			Query:          qdrant.NewQuery(vector...),
+			Query:          qdrantclient.NewQuery(vector...),
 			Filter:         filter,
 			Limit:          &limU,
 			GroupBy:        groupKey,
 			GroupSize:      &groupSize,
-			WithPayload:    qdrant.NewWithPayload(true),
+			WithPayload:    qdrantclient.NewWithPayload(true),
 		})
 		if err != nil {
-			log.WarnfCtx(ctx, "[qdrant] query groups (field=%q) failed, falling back to non-grouped: %v", groupKey, err)
+			log.WarnfCtx(ctx, "[qdrant] query groups (field=%q) failed, using bounded client grouping: %v", groupKey, err)
+			fetchLimit = min(limit*6, 1000)
+			groupFallback = true
 		} else {
-			return groupsToHits(groups, SemanticScoreDense), nil
+			return groupsToHits(groups, semantic.ScoreDense), nil
 		}
 	}
-	res, err := q.client.Query(ctx, &qdrant.QueryPoints{
+	limU := uint64(fetchLimit)
+	res, err := q.client.Query(ctx, &qdrantclient.QueryPoints{
 		CollectionName: q.collection,
-		Query:          qdrant.NewQuery(vector...),
+		Query:          qdrantclient.NewQuery(vector...),
 		Filter:         filter,
 		Limit:          &limU,
-		WithPayload:    qdrant.NewWithPayload(true),
+		WithPayload:    qdrantclient.NewWithPayload(true),
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("qdrant: search collection %q: %w", q.collection, err)
 	}
-	return pointsToHits(res, SemanticScoreDense), nil
+	hits := pointsToHits(res, semantic.ScoreDense)
+	if groupFallback {
+		hits = deduplicateHits(hits, groupKey, limit)
+	}
+	return hits, nil
 }
 
-func (q *Qdrant) CountByFilter(ctx context.Context, filters map[string]string) (int, error) {
+func (q *Qdrant) Count(ctx context.Context, filter semantic.Filter) (int, error) {
 	exact := true
-	n, err := q.client.Count(ctx, &qdrant.CountPoints{
+	n, err := q.client.Count(ctx, &qdrantclient.CountPoints{
 		CollectionName: q.collection,
-		Filter:         buildFilter(filters),
+		Filter:         buildSemanticFilter(filter),
 		Exact:          &exact,
 	})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("qdrant: count collection %q: %w", q.collection, err)
 	}
 	return int(n), nil
 }
 
-func (q *Qdrant) SearchHybrid(ctx context.Context, vector []float32, sparseIndices []uint32, sparseValues []float32, filters map[string]string, limit int, groupKey string) ([]SemanticHit, error) {
-	filter := buildFilter(filters)
-	limU := uint64(limit)
-	denseLim := uint64(limit * 3)
-	denseQuery := &qdrant.PrefetchQuery{
-		Query: qdrant.NewQueryDense(vector),
+func (q *Qdrant) searchHybrid(ctx context.Context, query semantic.Query) ([]semantic.Hit, error) {
+	sparse := query.SparseVector
+	if len(sparse.Indices) == 0 || len(sparse.Indices) != len(sparse.Values) {
+		return nil, fmt.Errorf("qdrant: invalid sparse vector")
+	}
+	filter := buildSemanticFilter(query.Filter)
+	limU := uint64(query.Limit)
+	denseLim := uint64(query.Limit * 3)
+	groupFallback := false
+	denseQuery := &qdrantclient.PrefetchQuery{
+		Query: qdrantclient.NewQueryDense(query.DenseVector),
 		Using: stringPtr(""),
 		Limit: &denseLim,
 	}
-	sparseQuery := &qdrant.PrefetchQuery{
-		Query: qdrant.NewQuerySparse(sparseIndices, sparseValues),
+	sparseQuery := &qdrantclient.PrefetchQuery{
+		Query: qdrantclient.NewQuerySparse(sparse.Indices, sparse.Values),
 		Using: stringPtr(codeSparseVector),
 		Limit: &denseLim,
 	}
@@ -300,27 +333,33 @@ func (q *Qdrant) SearchHybrid(ctx context.Context, vector []float32, sparseIndic
 		denseQuery.Filter = filter
 		sparseQuery.Filter = filter
 	}
-	prefetch := []*qdrant.PrefetchQuery{denseQuery, sparseQuery}
-	fusion := qdrant.NewQueryFusion(qdrant.Fusion_RRF)
-	withPayload := qdrant.NewWithPayload(true)
-	if groupKey != "" {
+	prefetch := []*qdrantclient.PrefetchQuery{denseQuery, sparseQuery}
+	fusion := qdrantclient.NewQueryFusion(qdrantclient.Fusion_RRF)
+	withPayload := qdrantclient.NewWithPayload(true)
+	if query.GroupBy != "" {
 		groupSize := uint64(1)
-		groups, err := q.client.QueryGroups(ctx, &qdrant.QueryPointGroups{
+		groups, err := q.client.QueryGroups(ctx, &qdrantclient.QueryPointGroups{
 			CollectionName: q.collection,
 			Prefetch:       prefetch,
 			Query:          fusion,
 			Limit:          &limU,
-			GroupBy:        groupKey,
+			GroupBy:        query.GroupBy,
 			GroupSize:      &groupSize,
 			WithPayload:    withPayload,
 		})
 		if err != nil {
-			log.WarnfCtx(ctx, "[qdrant] hybrid query groups (field=%q) failed, falling back to non-grouped: %v", groupKey, err)
+			log.WarnfCtx(ctx, "[qdrant] hybrid query groups (field=%q) failed, using bounded client grouping: %v", query.GroupBy, err)
+			fallbackLimit := min(query.Limit*6, 1000)
+			limU = uint64(fallbackLimit)
+			denseLim = uint64(min(fallbackLimit*3, 3000))
+			denseQuery.Limit = &denseLim
+			sparseQuery.Limit = &denseLim
+			groupFallback = true
 		} else {
-			return groupsToHits(groups, SemanticScoreFusion), nil
+			return groupsToHits(groups, semantic.ScoreFusion), nil
 		}
 	}
-	res, err := q.client.Query(ctx, &qdrant.QueryPoints{
+	res, err := q.client.Query(ctx, &qdrantclient.QueryPoints{
 		CollectionName: q.collection,
 		Prefetch:       prefetch,
 		Query:          fusion,
@@ -328,133 +367,176 @@ func (q *Qdrant) SearchHybrid(ctx context.Context, vector []float32, sparseIndic
 		WithPayload:    withPayload,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("qdrant: hybrid search collection %q: %w", q.collection, err)
 	}
-	return pointsToHits(res, SemanticScoreFusion), nil
+	hits := pointsToHits(res, semantic.ScoreFusion)
+	if groupFallback {
+		hits = deduplicateHits(hits, query.GroupBy, query.Limit)
+	}
+	return hits, nil
+}
+
+func deduplicateHits(hits []semantic.Hit, field string, limit int) []semantic.Hit {
+	seen := make(map[string]struct{}, min(len(hits), limit))
+	out := make([]semantic.Hit, 0, min(len(hits), limit))
+	for _, hit := range hits {
+		group := fmt.Sprint(hit.Metadata[field])
+		if _, exists := seen[group]; exists {
+			continue
+		}
+		seen[group] = struct{}{}
+		out = append(out, hit)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out
 }
 
 func stringPtr(s string) *string { return &s }
 
 // Upsert writes points into the collection.
-func (q *Qdrant) Upsert(ctx context.Context, points []SemanticPoint) error {
+func (q *Qdrant) Upsert(ctx context.Context, points []semantic.Record) error {
 	if len(points) == 0 {
 		return nil
 	}
-	qp := make([]*qdrant.PointStruct, 0, len(points))
+	qp := make([]*qdrantclient.PointStruct, 0, len(points))
+	denseDim := len(points[0].DenseVector)
 	for _, p := range points {
-		ps := &qdrant.PointStruct{
-			Id:      qdrant.NewID(p.ID),
-			Payload: qdrant.NewValueMap(p.Payload),
+		if p.ID == "" || len(p.DenseVector) == 0 {
+			return fmt.Errorf("qdrant: record requires ID and dense vector")
 		}
-		if len(p.SparseIndices) > 0 && len(p.SparseValues) > 0 {
-			ps.Vectors = qdrant.NewVectorsMap(map[string]*qdrant.Vector{
-				"":               qdrant.NewVector(p.Vector...),
-				codeSparseVector: qdrant.NewVectorSparse(p.SparseIndices, p.SparseValues),
+		if p.SparseVector != nil && len(p.SparseVector.Indices) != len(p.SparseVector.Values) {
+			return fmt.Errorf("qdrant: record %q has mismatched sparse vector indices and values", p.ID)
+		}
+		if len(p.DenseVector) != denseDim {
+			return fmt.Errorf("qdrant: record %q dense dimension is %d, want %d", p.ID, len(p.DenseVector), denseDim)
+		}
+		ps := &qdrantclient.PointStruct{
+			Id:      qdrantclient.NewID(p.ID),
+			Payload: qdrantclient.NewValueMap(p.Metadata),
+		}
+		if p.SparseVector != nil && len(p.SparseVector.Indices) > 0 && len(p.SparseVector.Values) > 0 {
+			ps.Vectors = qdrantclient.NewVectorsMap(map[string]*qdrantclient.Vector{
+				"":               qdrantclient.NewVector(p.DenseVector...),
+				codeSparseVector: qdrantclient.NewVectorSparse(p.SparseVector.Indices, p.SparseVector.Values),
 			})
 		} else {
-			ps.Vectors = qdrant.NewVectors(p.Vector...)
+			ps.Vectors = qdrantclient.NewVectors(p.DenseVector...)
 		}
 		qp = append(qp, ps)
 	}
-	_, err := q.client.Upsert(ctx, &qdrant.UpsertPoints{
+	_, err := q.client.Upsert(ctx, &qdrantclient.UpsertPoints{
 		CollectionName: q.collection,
+		Wait:           boolPtr(true),
 		Points:         qp,
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("qdrant: upsert %d records: %w", len(points), err)
+	}
+	return nil
 }
 
-// DeletePoints removes a bounded set of points by ID.
-func (q *Qdrant) DeletePoints(ctx context.Context, ids []string) error {
+func (q *Qdrant) Delete(ctx context.Context, query semantic.DeleteQuery) error {
+	if len(query.IDs) > 0 {
+		return q.deletePoints(ctx, query.IDs)
+	}
+	filters := cloneKeywords(query.Filter.Keywords)
+	if query.Repository != "" {
+		filters["repo"] = query.Repository
+	}
+	if query.DocumentID != "" {
+		filters["doc_id"] = query.DocumentID
+	}
+	query.Filter.Keywords = filters
+	return q.deleteByFilterExcept(ctx, query.Filter, query.Except)
+}
+
+func cloneKeywords(source map[string]string) map[string]string {
+	out := make(map[string]string, len(source)+2)
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+// deletePoints removes a bounded set of points by ID.
+func (q *Qdrant) deletePoints(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	pointIDs := make([]*qdrant.PointId, 0, len(ids))
+	pointIDs := make([]*qdrantclient.PointId, 0, len(ids))
 	for _, id := range ids {
 		if id != "" {
-			pointIDs = append(pointIDs, qdrant.NewID(id))
+			pointIDs = append(pointIDs, qdrantclient.NewID(id))
 		}
 	}
 	if len(pointIDs) == 0 {
 		return nil
 	}
-	_, err := q.client.Delete(ctx, &qdrant.DeletePoints{
+	_, err := q.client.Delete(ctx, &qdrantclient.DeletePoints{
 		CollectionName: q.collection,
-		Points:         qdrant.NewPointsSelector(pointIDs...),
+		Wait:           boolPtr(true),
+		Points:         qdrantclient.NewPointsSelector(pointIDs...),
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("qdrant: delete %d points from %q: %w", len(pointIDs), q.collection, err)
+	}
+	return nil
 }
 
-// DeleteByRepo removes all points whose payload repo matches.
-func (q *Qdrant) DeleteByRepo(ctx context.Context, repo string) error {
-	_, err := q.client.Delete(ctx, &qdrant.DeletePoints{
-		CollectionName: q.collection,
-		Points: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
-			Must: []*qdrant.Condition{qdrant.NewMatch("repo", repo)},
-		}),
-	})
-	return err
-}
-
-// DeleteByFilterExcept removes matching points except the active generation.
-func (q *Qdrant) DeleteByFilterExcept(ctx context.Context, filters, except map[string]string) error {
-	must := make([]*qdrant.Condition, 0, len(filters))
-	mustNot := make([]*qdrant.Condition, 0, len(except))
-	for key, value := range filters {
+// deleteByFilterExcept removes matching points except the active generation.
+func (q *Qdrant) deleteByFilterExcept(ctx context.Context, filter, except semantic.Filter) error {
+	must := make([]*qdrantclient.Condition, 0, len(filter.Keywords)+len(filter.AnyInteger))
+	mustNot := make([]*qdrantclient.Condition, 0, len(except.Keywords)+len(except.AnyInteger))
+	for key, value := range filter.Keywords {
 		if value != "" {
-			must = append(must, qdrant.NewMatch(key, value))
+			must = append(must, qdrantclient.NewMatch(key, value))
 		}
 	}
-	for key, value := range except {
+	for key, values := range filter.AnyInteger {
+		if len(values) > 0 {
+			must = append(must, qdrantclient.NewMatchInts(key, values...))
+		}
+	}
+	for key, value := range except.Keywords {
 		if value != "" {
-			mustNot = append(mustNot, qdrant.NewMatch(key, value))
+			mustNot = append(mustNot, qdrantclient.NewMatch(key, value))
+		}
+	}
+	for key, values := range except.AnyInteger {
+		if len(values) > 0 {
+			mustNot = append(mustNot, qdrantclient.NewMatchInts(key, values...))
 		}
 	}
 	if len(must) == 0 {
-		return nil
+		return fmt.Errorf("qdrant: refusing unbounded delete")
 	}
-	_, err := q.client.Delete(ctx, &qdrant.DeletePoints{
+	_, err := q.client.Delete(ctx, &qdrantclient.DeletePoints{
 		CollectionName: q.collection,
-		Points: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
+		Wait:           boolPtr(true),
+		Points: qdrantclient.NewPointsSelectorFilter(&qdrantclient.Filter{
 			Must:    must,
 			MustNot: mustNot,
 		}),
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("qdrant: filtered delete from %q: %w", q.collection, err)
+	}
+	return nil
 }
 
-// DeleteRepoExceptGeneration removes stale points only after a complete new
-// repository generation has been written.
-func (q *Qdrant) DeleteRepoExceptGeneration(ctx context.Context, repo, generation string) error {
-	_, err := q.client.Delete(ctx, &qdrant.DeletePoints{
-		CollectionName: q.collection,
-		Points: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
-			Must:    []*qdrant.Condition{qdrant.NewMatch("repo", repo)},
-			MustNot: []*qdrant.Condition{qdrant.NewMatch("index_generation", generation)},
-		}),
-	})
-	return err
-}
+func boolPtr(value bool) *bool { return &value }
 
-// DeleteByDocID removes all points whose payload doc_id matches.
-func (q *Qdrant) DeleteByDocID(ctx context.Context, docID string) error {
-	_, err := q.client.Delete(ctx, &qdrant.DeletePoints{
-		CollectionName: q.collection,
-		Points: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
-			Must: []*qdrant.Condition{qdrant.NewMatch("doc_id", docID)},
-		}),
-	})
-	return err
-}
-
-func payloadToMap(p map[string]*qdrant.Value) map[string]any {
+func payloadToMap(p map[string]*qdrantclient.Value) map[string]any {
 	out := make(map[string]any, len(p))
 	for k, v := range p {
 		switch v.GetKind().(type) {
-		case *qdrant.Value_IntegerValue:
+		case *qdrantclient.Value_IntegerValue:
 			out[k] = v.GetIntegerValue()
-		case *qdrant.Value_DoubleValue:
+		case *qdrantclient.Value_DoubleValue:
 			out[k] = v.GetDoubleValue()
-		case *qdrant.Value_BoolValue:
+		case *qdrantclient.Value_BoolValue:
 			out[k] = v.GetBoolValue()
 		default:
 			out[k] = v.GetStringValue()

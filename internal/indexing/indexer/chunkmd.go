@@ -297,7 +297,7 @@ func buildChunkText(title, sectionHeader, body string) string {
 	return prefix.String()
 }
 
-// DocChunkID generates a stable, deterministic Qdrant point ID for a document chunk.
+// DocChunkID generates a stable semantic record ID for a document chunk.
 // Format: UUID v5-like (8-4-4-4-12 hex chars).
 func DocChunkID(docID string, chunkIndex int) string {
 	hash := sha1.Sum([]byte(fmt.Sprintf("doc:%s:%d", docID, chunkIndex)))
@@ -306,7 +306,7 @@ func DocChunkID(docID string, chunkIndex int) string {
 }
 
 // DocID returns the stable ID for a (title, filename) pair.
-// It is used as the MySQL document primary key and the Qdrant doc_id payload.
+// It is used as the MySQL document primary key and semantic doc_id metadata.
 // All document ingest paths use the same formula.
 func DocID(title, filename string) string {
 	h := sha1.Sum([]byte(title + ":" + filename))

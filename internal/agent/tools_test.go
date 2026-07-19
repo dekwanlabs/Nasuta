@@ -8,20 +8,28 @@ import (
 	"strings"
 	"testing"
 
-	types "github.com/dekwanlabs/astris/internal/domain"
-	"github.com/dekwanlabs/astris/internal/platform/embed"
-	"github.com/dekwanlabs/astris/internal/platform/store"
-	"github.com/dekwanlabs/astris/internal/platform/store/codegraph"
-	"github.com/dekwanlabs/astris/internal/retrieval"
-	"github.com/dekwanlabs/astris/llm"
-	toolruntime "github.com/dekwanlabs/astris/tool"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/embed"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type testEmbedder struct{}
 
-type toolTraceRecorder struct{ events []types.EvaluationTrace }
+type semanticTestBase struct{}
 
-func (recorder *toolTraceRecorder) RecordTrace(event types.EvaluationTrace) {
+func (semanticTestBase) Ensure(context.Context, semantic.Schema) error       { return nil }
+func (semanticTestBase) Upsert(context.Context, []semantic.Record) error     { return nil }
+func (semanticTestBase) Delete(context.Context, semantic.DeleteQuery) error  { return nil }
+func (semanticTestBase) Count(context.Context, semantic.Filter) (int, error) { return 0, nil }
+func (semanticTestBase) Close() error                                        { return nil }
+
+type toolTraceRecorder struct{ events []domain.EvaluationTrace }
+
+func (recorder *toolTraceRecorder) RecordTrace(event domain.EvaluationTrace) {
 	recorder.events = append(recorder.events, event)
 }
 
@@ -32,24 +40,26 @@ func (testEmbedder) Dim() int      { return 2 }
 func (testEmbedder) Enabled() bool { return true }
 
 type searchFallbackSemantic struct {
-	store.NoopSemantic
+	semanticTestBase
 	searchCalls      int
 	hybridCalls      int
 	hybridShouldFail bool
 }
 
-func (s *searchFallbackSemantic) Enabled() bool { return true }
-func (s *searchFallbackSemantic) Search(context.Context, []float32, map[string]string, int, string) ([]store.SemanticHit, error) {
+func (s *searchFallbackSemantic) Capabilities() semantic.Capabilities {
+	return semantic.RequiredCapabilities()
+}
+func (s *searchFallbackSemantic) Search(ctx context.Context, query semantic.Query) ([]semantic.Hit, error) {
+	if query.SparseVector != nil {
+		return s.SearchHybrid(ctx, query)
+	}
 	s.searchCalls++
-	return []store.SemanticHit{{Score: 0.9, Payload: map[string]any{
+	return []semantic.Hit{{Score: 0.9, Metadata: map[string]any{
 		"path": "repos/team/orders/main.go", "lang": "go", "repo": "team/orders",
 		"start_line": 1, "end_line": 2, "text": "func order() {}", "preview": "func order() {}",
 	}}}, nil
 }
-func (s *searchFallbackSemantic) SearchFiltered(context.Context, []float32, store.SemanticFilter, int, string) ([]store.SemanticHit, error) {
-	return nil, nil
-}
-func (s *searchFallbackSemantic) SearchHybrid(context.Context, []float32, []uint32, []float32, map[string]string, int, string) ([]store.SemanticHit, error) {
+func (s *searchFallbackSemantic) SearchHybrid(_ context.Context, query semantic.Query) ([]semantic.Hit, error) {
 	s.hybridCalls++
 	if s.hybridShouldFail {
 		return nil, errors.New("hybrid should not be called for unknown terms")
@@ -65,7 +75,7 @@ func TestCodeSearchUsesDenseFallbackWhenBM25HasNoKnownTerms(t *testing.T) {
 	svc.SetBM25(retrieval.NewBM25Builder())
 
 	recorder := &toolTraceRecorder{}
-	ctx := types.WithTraceRecorder(context.Background(), recorder)
+	ctx := domain.WithTraceRecorder(context.Background(), recorder)
 	result := svc.CodeSearch(ctx, "token-not-in-vocabulary", "", 5)
 	if result["error"] != nil {
 		t.Fatalf("CodeSearch returned error: %v", result["error"])
@@ -97,7 +107,7 @@ func TestCodeSearchKeepsRRFSeparateFromCosine(t *testing.T) {
 	result := svc.CodeSearch(context.Background(), "checkout", "", 5)
 	matches := result["matches"].([]any)
 	match := matches[0].(map[string]any)
-	if match["scoreKind"] != string(store.SemanticScoreFusion) || match["fusionScore"] != float64(semanticHybrid) {
+	if match["scoreKind"] != string(semantic.ScoreFusion) || match["fusionScore"] != float64(semanticHybrid) {
 		t.Fatalf("hybrid score metadata = %#v", match)
 	}
 	if _, leaked := match["semanticScore"]; leaked {
@@ -106,20 +116,23 @@ func TestCodeSearchKeepsRRFSeparateFromCosine(t *testing.T) {
 }
 
 type fusionSemantic struct {
-	store.NoopSemantic
+	semanticTestBase
 	score float32
 }
 
-func (s *fusionSemantic) Enabled() bool { return true }
-func (s *fusionSemantic) SearchHybrid(context.Context, []float32, []uint32, []float32, map[string]string, int, string) ([]store.SemanticHit, error) {
-	return []store.SemanticHit{{Score: s.score, ScoreKind: store.SemanticScoreFusion, Payload: map[string]any{
+func (s *fusionSemantic) Capabilities() semantic.Capabilities { return semantic.RequiredCapabilities() }
+func (s *fusionSemantic) Search(ctx context.Context, query semantic.Query) ([]semantic.Hit, error) {
+	return s.SearchHybrid(ctx, query)
+}
+func (s *fusionSemantic) SearchHybrid(context.Context, semantic.Query) ([]semantic.Hit, error) {
+	return []semantic.Hit{{Score: s.score, ScoreKind: semantic.ScoreFusion, Metadata: map[string]any{
 		"path": "repos/team/orders/main.go", "lang": "go", "repo": "team/orders", "text": "checkout timeout",
 	}}}, nil
 }
 
 func TestToolExecutorAllowsRetryAfterFailure(t *testing.T) {
 	tries := 0
-	registry := testRegistry(t, testAgentTool("unstable", ToolKindRead, func(context.Context, toolruntime.Arguments) (string, error) {
+	registry := testRegistry(t, testAgentTool("unstable", ToolKindRead, func(context.Context, tool.Arguments) (string, error) {
 		tries++
 		if tries == 1 {
 			return "", errors.New("temporary failure")
@@ -129,7 +142,7 @@ func TestToolExecutorAllowsRetryAfterFailure(t *testing.T) {
 	executor := NewToolExecutor(registry)
 	seen := map[string]bool{}
 	call := llm.ToolCall{ID: "1", Function: llm.ToolFunction{Name: "unstable", Arguments: `{}`}}
-	policy := ToolPolicyForPlan(types.EvidencePlan{Sources: types.AllEvidence}, true)
+	policy := ToolPolicyForPlan(domain.EvidencePlan{Sources: domain.AllEvidence}, true)
 	first, _ := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
 	second, _ := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
 	if first != "error: temporary failure" || second != "ok" || tries != 2 {

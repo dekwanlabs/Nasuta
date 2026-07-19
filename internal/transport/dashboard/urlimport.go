@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/astris/internal/platform/htmlconv"
+	"github.com/dekwanlabs/nasuta/internal/platform/htmlconv"
 )
 
 // urlImportClient is the HTTP client used to fetch imported document URLs.
@@ -27,7 +27,7 @@ func fetchURLContent(ctx context.Context, rawURL string) (string, string, error)
 	if err != nil {
 		return "", "", fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Astris-DocImport/1.0")
+	req.Header.Set("User-Agent", "Nasuta-DocImport/1.0")
 	resp, err := urlImportClient.Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("fetch url: %w", err)

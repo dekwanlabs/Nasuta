@@ -97,6 +97,12 @@ type ReadTool struct {
 	MCPHidden   bool
 }
 
+// ReadToolSet is one owner's complete desired read-tool catalog.
+type ReadToolSet struct {
+	Owner string
+	Tools []ReadTool
+}
+
 func (candidate ReadTool) tool() Tool {
 	return Tool{
 		ID: candidate.ID, Description: candidate.Description, Kind: KindRead,

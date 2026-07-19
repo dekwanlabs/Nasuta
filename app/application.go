@@ -1,4 +1,4 @@
-package application
+package app
 
 import (
 	"context"
@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/dekwanlabs/astris/internal/agent"
-	"github.com/dekwanlabs/astris/log"
+	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
-// Main runs the standard Astris distribution.
+// Main runs the standard Nasuta distribution.
 func Main() {
 	platform, err := New()
 	if err != nil {
@@ -25,6 +25,9 @@ func Main() {
 	case "selftest":
 		runSelftest(ctx, platform.knowledge, options.service)
 	case "server":
+		if err := platform.configureIncidents(nil); err != nil {
+			log.Fatalf("configure incident workflows: %v", err)
+		}
 		mux := http.NewServeMux()
 		platform.RegisterCommonRoutes(mux)
 		if err := platform.Serve(ctx, mux); err != nil {

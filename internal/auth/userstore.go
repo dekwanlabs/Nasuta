@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/astris/internal/platform/dbschema"
-	platformStore "github.com/dekwanlabs/astris/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -26,7 +26,7 @@ type DB struct {
 
 // NewDB opens a MySQL connection and ensures the auth schema exists.
 func NewDB(dsn string) (*DB, error) {
-	db, err := platformStore.MySQL(dsn)
+	db, err := store.MySQL(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("auth: open: %w", err)
 	}
