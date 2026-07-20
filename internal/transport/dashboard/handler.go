@@ -7,6 +7,7 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
@@ -46,6 +47,7 @@ type Handler struct {
 	registry       *agent.Registry
 	writeAvailable bool
 	codegraphDB    *codegraph.DB
+	callChain      *callchain.Service
 	qaSessions     *memory.SessionStore
 	cfg            config.Config
 	platform       *config.PlatformSettings
@@ -69,11 +71,10 @@ func (handler *Handler) rolePromptFor(userID int64) string {
 }
 
 // NewHandler builds the dashboard HTTP handler.
-func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem semantic.Store, emb embed.Embedder, g *graph.Graph, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool) *Handler {
+func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem semantic.Store, emb embed.Embedder, g *graph.Graph, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool, cgDB *codegraph.DB, chain *callchain.Service) *Handler {
 	if ps == nil {
 		ps = &config.PlatformSettings{}
 	}
-	cgDB := openCodeGraph(cfg)
 	h := &Handler{
 		db:             db,
 		docDB:          docDB,
@@ -88,23 +89,11 @@ func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem se
 		cfg:            cfg,
 		platform:       ps,
 		idx:            idx,
+		callChain:      chain,
 	}
 	h.codegraphDB = cgDB
 	h.qaSessions = openQASessions(cfg)
 	return h
-}
-
-func openCodeGraph(cfg config.Config) *codegraph.DB {
-	cgDB, err := codegraph.Open(cfg.WorkspaceRoot)
-	if err != nil {
-		log.Warnf("[dashboard] codegraph call-chain disabled: %v", err)
-		return nil
-	}
-	if cgDB == nil {
-		return nil
-	}
-	log.Infof("[dashboard] codegraph call-chain enabled")
-	return cgDB
 }
 
 func (handler *Handler) refreshCodeGraph() error {
@@ -124,6 +113,9 @@ func (handler *Handler) refreshCodeGraph() error {
 		return fmt.Errorf("open rebuilt codegraph: database unavailable")
 	}
 	handler.codegraphDB = cgDB
+	if handler.callChain != nil {
+		handler.callChain.SetGraph(cgDB)
+	}
 	handler.rebuildQA(handler.platform)
 	log.Infof("[dashboard] codegraph connection enabled after rebuild")
 	return nil

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -15,18 +16,53 @@ type webEvidenceState struct {
 	lastHinted int
 }
 
-func (state *webEvidenceState) Observe(call llm.ToolCall, result string) {
-	if call.Function.Name != "web_fetch" || strings.HasPrefix(strings.TrimSpace(result), "error:") {
-		return
+func (state *webEvidenceState) Observe(call llm.ToolCall, result string) bool {
+	trimmed := strings.TrimSpace(result)
+	if call.Function.Name == "web_search" {
+		var response struct {
+			Fetched *struct {
+				URL     string `json:"url"`
+				Content string `json:"content"`
+			} `json:"fetched"`
+		}
+		if json.Unmarshal([]byte(trimmed), &response) == nil && response.Fetched != nil && usableWebContent(response.Fetched.Content) {
+			return state.observeURL(response.Fetched.URL)
+		}
+		return false
+	}
+	if call.Function.Name != "web_fetch" || strings.HasPrefix(trimmed, "error:") {
+		return false
+	}
+	if !usableWebContent(trimmed) {
+		return false
 	}
 	args, err := parseArgs(context.Background(), call.Function.Arguments)
 	if err != nil {
-		return
+		return false
 	}
 	rawURL, _ := args["url"].(string)
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Hostname() == "" {
-		return
+		return false
+	}
+	return state.observeURL(parsed.String())
+}
+
+func usableWebContent(content string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false
+	}
+	lower := strings.ToLower(content)
+	return !strings.HasPrefix(lower, "(empty body") &&
+		!strings.HasPrefix(lower, "status 401 unauthorized") &&
+		!strings.HasPrefix(lower, "status 403 forbidden")
+}
+
+func (state *webEvidenceState) observeURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Hostname() == "" {
+		return false
 	}
 	if state.domains == nil {
 		state.domains = make(map[string]struct{})
@@ -36,6 +72,7 @@ func (state *webEvidenceState) Observe(call llm.ToolCall, result string) {
 		host = registrable
 	}
 	state.domains[host] = struct{}{}
+	return true
 }
 
 func (state *webEvidenceState) ConvergenceHint() string {

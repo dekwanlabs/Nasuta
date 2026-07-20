@@ -74,6 +74,37 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 	}
 }
 
+func TestServiceForPathUsesLongestModulePrefix(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repo := "team/mono"
+	root := testService(repo, ".", "mono")
+	api := testService(repo, "apps/api", "api")
+	admin := testService(repo, "apps/api/admin", "admin")
+	bundle := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{{Repo: repo, HeadSHA: "sha", IndexedAt: time.Now().UnixMilli()}},
+		Services:     []domain.ServiceRecord{root, api, admin},
+	}
+	if err := db.ReplaceAll(context.Background(), bundle); err != nil {
+		t.Fatal(err)
+	}
+
+	service, err := db.ServiceForPath(context.Background(), "repos/team/mono/apps/api/admin/src/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.ServiceName != "admin" {
+		t.Fatalf("service=%q, want longest-prefix admin module", service.ServiceName)
+	}
+	service, err = db.ServiceForPath(context.Background(), "repos/team/mono/README.md")
+	if err != nil || service.ServiceName != "mono" {
+		t.Fatalf("root service=%q err=%v", service.ServiceName, err)
+	}
+}
+
 func testService(repo, module, name string) domain.ServiceRecord {
 	return domain.ServiceRecord{
 		ServiceKey:    platform.UUIDFromString(repo + "\x00" + module),

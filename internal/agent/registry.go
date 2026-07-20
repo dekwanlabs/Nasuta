@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -103,28 +104,38 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"Use this when you need the exact implementation of a function, method, class, or interface.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{
-				"query": propString("Function name, class name, or service keyword to look up."),
-				"limit": propInt("Max nodes to return (default 5, max 10)."),
+				"query":          propString("Function name, class name, or service keyword to look up."),
+				"file":           propString("Optional canonical repos/... path scope."),
+				"qualified_name": propString("Optional exact qualified name."),
+				"limit":          propInt("Max nodes to return (default 5, max 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return marshalResult(svc.GetSymbol(ctx, argStr(args, "query", ""), argInt(args, "limit", 5)))
+				return marshalResult(svc.GetSymbolFiltered(ctx, argStr(args, "query", ""),
+					argStr(args, "file", ""), argStr(args, "qualified_name", ""), argInt(args, "limit", 5)))
 			}),
 		},
 		{
 			ID: "trace_calls",
-			Description: "Trace callers or callees of a function using the codegraph index. " +
-				"Use this to follow a method-level call chain after locating a concrete symbol.",
+			Description: "Trace callers and callees from a symbol or exact code-hit location. " +
+				"Verified service_route hops close supported cross-service calls; truncated and unresolved fields identify incomplete evidence.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{
-				"query":     propString("Function or method name to trace."),
-				"direction": propString("callers | callees (default callers)."),
-				"limit":     propInt("Max related nodes to return (default 5, max 10)."),
-			}, []string{"query", "direction"}),
+				"query":          propString("Function or method name to trace when file+line is unavailable."),
+				"file":           propString("Optional canonical repos/... source path used for exact location or disambiguation."),
+				"line":           propInt("Optional source line; use with file for an exact semantic-hit start."),
+				"qualified_name": propString("Optional exact qualified name used to disambiguate overloaded names."),
+				"direction":      propString("callers | callees | both (default both)."),
+				"max_depth":      propInt("Traversal depth 1-8 (default 3)."),
+				"max_nodes":      propInt("Distinct node budget 1-200 (default 40)."),
+				"max_fanout":     propInt("Per-node call-edge budget 1-100 (default 20)."),
+			}, nil),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return marshalResult(svc.TraceCalls(ctx,
-					argStr(args, "query", ""),
-					argStr(args, "direction", "callers"),
-					argInt(args, "limit", 5)))
+				return marshalResult(svc.TraceCalls(ctx, callchain.Request{
+					Query: argStr(args, "query", ""), File: argStr(args, "file", ""),
+					Line: argInt(args, "line", 0), QualifiedName: argStr(args, "qualified_name", ""),
+					Direction: argStr(args, "direction", "both"), MaxDepth: argInt(args, "max_depth", 3),
+					MaxNodes: argInt(args, "max_nodes", 40), MaxFanout: argInt(args, "max_fanout", 20),
+				}))
 			}),
 		},
 		{
@@ -167,7 +178,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		Tool{
 			ID: "web_search",
 			Description: "Search the configured web backend for external documentation or current facts. " +
-				"After searching, fetch the most relevant primary source pages.",
+				"This call automatically fetches the highest-ranked result and returns bounded page evidence together with the candidates.",
 			Kind:      ToolKindRead,
 			MCPHidden: !cfg.WebSearchMCPEnabled,
 			InputSchema: objectSchema(map[string]any{
@@ -175,25 +186,11 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"limit": propInt("Max results (default 5, max 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				results, err := svc.WebSearch(ctx, argStr(args, "query", ""), argInt(args, "limit", 5))
+				results, err := svc.WebSearchWithFetch(ctx, argStr(args, "query", ""), argInt(args, "limit", 5))
 				if err != nil {
 					return "", err
 				}
 				return marshalResult(results)
-			}),
-		},
-		Tool{
-			ID: "web_fetch",
-			Description: "Fetch and extract relevant readable content from a web page. " +
-				"Pass the current research question so local ranking can select the most useful passages.",
-			Kind:      ToolKindRead,
-			MCPHidden: !cfg.WebSearchMCPEnabled,
-			InputSchema: objectSchema(map[string]any{
-				"url":   propString("Full HTTPS URL to fetch."),
-				"query": propString("Current question or evidence need used to rank passages locally."),
-			}, []string{"url"}),
-			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return svc.WebFetchRelevant(ctx, argStr(args, "url", ""), argStr(args, "query", ""))
 			}),
 		},
 	)

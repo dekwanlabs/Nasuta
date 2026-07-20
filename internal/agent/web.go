@@ -10,25 +10,35 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/platform/htmlconv"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/websearch"
 	nethtml "golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 )
 
 // ── Public API ──────────────────────────────────────────────────────────────────
 
-// WebSearchResult is one result from a web search.
-type WebSearchResult struct {
-	Title   string `json:"title"`
+type WebSearchResult = websearch.Result
+type WebSearchProvider = websearch.Provider
+
+type WebFetchedEvidence struct {
 	URL     string `json:"url"`
-	Snippet string `json:"snippet"`
+	Title   string `json:"title,omitempty"`
+	Content string `json:"content"`
 }
 
-// WebSearch dispatches to the configured search engine.
+type WebSearchResponse struct {
+	Results   []WebSearchResult   `json:"results"`
+	Fetched   *WebFetchedEvidence `json:"fetched,omitempty"`
+	FetchNote string              `json:"fetch_note,omitempty"`
+}
+
+// WebSearch dispatches to the configured provider.
 func (srv *Service) WebSearch(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
 	if limit <= 0 {
 		limit = 5
@@ -42,9 +52,118 @@ func (srv *Service) WebSearch(ctx context.Context, query string, limit int) ([]W
 		return nil, err
 	}
 
-	log.InfofCtx(ctx, "[web_search] engine=%s query=%q → %d results",
+	log.InfofCtx(ctx, "[web_search] provider=%s query=%q → %d results",
 		srv.webSearchEngine, truncateForLog(query, 60), len(results))
 	return results, nil
+}
+
+// WebSearchWithFetch fetches the first query-relevant candidate without hiding the candidate set.
+func (srv *Service) WebSearchWithFetch(ctx context.Context, query string, limit int) (WebSearchResponse, error) {
+	results, err := srv.WebSearch(ctx, query, limit)
+	if err != nil {
+		return WebSearchResponse{}, err
+	}
+	response := WebSearchResponse{Results: results}
+	if len(results) == 0 {
+		return response, nil
+	}
+	candidate, ok := relevantFetchCandidate(query, results)
+	if !ok {
+		response.FetchNote = "automatic fetch skipped: no search candidate was relevant to the query"
+		log.WarnfCtx(ctx, "[web_search] automatic fetch skipped: no relevant candidate for query=%q", truncateForLog(query, 60))
+		return response, nil
+	}
+	content, err := srv.WebFetchRelevant(ctx, candidate.URL, query)
+	if err != nil {
+		response.FetchNote = "automatic fetch failed: " + err.Error()
+		log.WarnfCtx(ctx, "[web_search] automatic fetch failed url=%q: %v", truncateForLog(candidate.URL, 100), err)
+		return response, nil
+	}
+	response.Fetched = &WebFetchedEvidence{URL: candidate.URL, Title: candidate.Title, Content: content}
+	return response, nil
+}
+
+func relevantFetchCandidate(query string, results []WebSearchResult) (WebSearchResult, bool) {
+	for _, result := range results {
+		if webResultRelevant(query, result) {
+			return result, true
+		}
+	}
+	return WebSearchResult{}, false
+}
+
+func webResultRelevant(query string, result WebSearchResult) bool {
+	queryLatin, queryCJK := webSearchSignals(query)
+	if len(queryLatin) == 0 && len(queryCJK) == 0 {
+		return false
+	}
+	candidateLatin, candidateCJK := webSearchSignals(result.Title + " " + result.Snippet)
+	for signal := range queryLatin {
+		if _, ok := candidateLatin[signal]; ok {
+			return true
+		}
+	}
+
+	required := min(3, len(queryCJK))
+	matched := 0
+	for signal := range queryCJK {
+		if _, ok := candidateCJK[signal]; !ok {
+			continue
+		}
+		matched++
+		if matched >= required {
+			return true
+		}
+	}
+	return false
+}
+
+var webSearchStopwords = map[string]struct{}{
+	"a": {}, "an": {}, "and": {}, "are": {}, "for": {}, "how": {}, "is": {}, "of": {}, "or": {},
+	"the": {}, "to": {}, "what": {}, "when": {}, "where": {}, "which": {}, "who": {}, "why": {},
+}
+
+func webSearchSignals(value string) (map[string]struct{}, map[string]struct{}) {
+	latin := make(map[string]struct{})
+	cjk := make(map[string]struct{})
+	var word, han []rune
+	flushWord := func() {
+		if len(word) < 2 {
+			word = word[:0]
+			return
+		}
+		token := strings.ToLower(string(word))
+		if _, skip := webSearchStopwords[token]; !skip {
+			latin[token] = struct{}{}
+		}
+		word = word[:0]
+	}
+	flushHan := func() {
+		if len(han) == 1 {
+			cjk[string(han)] = struct{}{}
+		} else {
+			for i := 1; i < len(han); i++ {
+				cjk[string(han[i-1:i+1])] = struct{}{}
+			}
+		}
+		han = han[:0]
+	}
+	for _, r := range value {
+		switch {
+		case unicode.Is(unicode.Han, r):
+			flushWord()
+			han = append(han, r)
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			flushHan()
+			word = append(word, unicode.ToLower(r))
+		default:
+			flushWord()
+			flushHan()
+		}
+	}
+	flushWord()
+	flushHan()
+	return latin, cjk
 }
 
 // WebFetch downloads a page and returns readable text.
@@ -76,6 +195,9 @@ func (srv *Service) WebFetchRelevant(ctx context.Context, rawURL, query string) 
 		return "", fmt.Errorf("fetch %s: %w", rawURL, err)
 	}
 	defer resp.Body.Close()
+	if !respOK(resp) {
+		return "", fmt.Errorf("fetch %s: HTTP %s", rawURL, resp.Status)
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchMaxBytes))
 	if err != nil {
@@ -93,7 +215,7 @@ func (srv *Service) WebFetchRelevant(ctx context.Context, rawURL, query string) 
 	}
 	out = strings.TrimSpace(out)
 	if out == "" {
-		return fmt.Sprintf("(empty body — status %s)", resp.Status), nil
+		return "", fmt.Errorf("fetch %s: empty response body", rawURL)
 	}
 
 	const modelBudget = 8000
@@ -167,14 +289,28 @@ func truncateRunes(value string, max int) string {
 // ── Engine dispatcher ──────────────────────────────────────────────────────────
 
 func (srv *Service) dispatchSearch(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
-	switch srv.webSearchEngine {
-	case "brave":
-		return srv.searchBrave(ctx, query, limit)
-	case "bing":
-		return srv.searchBing(ctx, query, limit)
-	default:
-		return srv.searchDuckDuckGo(ctx, query, limit)
+	name := srv.webSearchEngine
+	if name == "" {
+		name = "duckduckgo"
 	}
+	srv.ensureWebSearchProviders()
+	srv.webSearchProvidersMu.RLock()
+	provider, ok := srv.webSearchProviders[name]
+	srv.webSearchProvidersMu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("unsupported web search provider %q", name)
+	}
+	return provider.Search(ctx, query, limit)
+}
+
+func (srv *Service) ensureWebSearchProviders() {
+	srv.webSearchProviderOnce.Do(func() {
+		srv.webSearchProviders = map[string]WebSearchProvider{
+			"duckduckgo": websearch.ProviderFunc(srv.searchDuckDuckGo),
+			"brave":      websearch.ProviderFunc(srv.searchBrave),
+			"bing":       websearch.ProviderFunc(srv.searchBing),
+		}
+	})
 }
 
 // ── DuckDuckGo ─────────────────────────────────────────────────────────────────
@@ -269,7 +405,7 @@ const braveEndpoint = "https://api.search.brave.com/res/v1/web/search"
 
 func (srv *Service) searchBrave(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
 	if srv.webSearchAPIKey == "" {
-		return nil, fmt.Errorf("brave search requires CODELOOM_WEB_SEARCH_API_KEY")
+		return nil, fmt.Errorf("brave search requires NASUTA_WEB_SEARCH_API_KEY")
 	}
 
 	u := fmt.Sprintf("%s?q=%s&count=%d", braveEndpoint, url.QueryEscape(query), limit)
@@ -345,7 +481,12 @@ func (srv *Service) searchBing(ctx context.Context, query string, limit int) ([]
 		return nil, fmt.Errorf("bing: HTTP %d", resp.StatusCode)
 	}
 
-	return parseBingResults(resp.Body, limit), nil
+	detector := &bingChallengeReader{reader: resp.Body}
+	results := parseBingResults(detector, limit)
+	if detector.blocked {
+		return nil, fmt.Errorf("bing: automated search challenge returned instead of results")
+	}
+	return results, nil
 }
 
 // parseBingResults extracts results from cn.bing.com HTML.
@@ -406,6 +547,33 @@ func parseBingResults(r io.Reader, limit int) []WebSearchResult {
 	return results
 }
 
+type bingChallengeReader struct {
+	reader  io.Reader
+	tail    string
+	blocked bool
+}
+
+func (r *bingChallengeReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n == 0 || r.blocked {
+		return n, err
+	}
+	const tailSize = 80
+	text := strings.ToLower(r.tail + string(p[:n]))
+	for _, marker := range []string{`class="captcha`, `id="captcha`, "verify you are human", "unusual traffic", "请输入验证码", "完成以下验证"} {
+		if strings.Contains(text, marker) {
+			r.blocked = true
+			break
+		}
+	}
+	if len(text) > tailSize {
+		r.tail = text[len(text)-tailSize:]
+	} else {
+		r.tail = text
+	}
+	return n, err
+}
+
 // extractBingSnippet reads text from the first <p> inside a b_caption div.
 func extractBingSnippet(z *nethtml.Tokenizer) string {
 	var b strings.Builder
@@ -418,8 +586,7 @@ func extractBingSnippet(z *nethtml.Tokenizer) string {
 		tag, _ := z.TagName()
 		switch tt {
 		case nethtml.StartTagToken:
-			tagStr := strings.ToLower(string(tag))
-			if tagStr == "div" || tagStr == "p" {
+			if strings.EqualFold(string(tag), "div") {
 				depth++
 			}
 		case nethtml.EndTagToken:
@@ -451,7 +618,7 @@ func respOK(resp *http.Response) bool { return resp.StatusCode >= 200 && resp.St
 func fetchErrorHint(status int) string {
 	switch status {
 	case 401, 403:
-		return "API key rejected — check CODELOOM_WEB_SEARCH_API_KEY"
+		return "API key rejected — check NASUTA_WEB_SEARCH_API_KEY"
 	case 429:
 		return "rate limited — wait and retry"
 	default:

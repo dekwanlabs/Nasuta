@@ -113,6 +113,67 @@ func TestOpenRejectsNonCanonicalNodePaths(t *testing.T) {
 	}
 }
 
+func TestCallEdgesPreserveFanoutAndRepeatedCallSites(t *testing.T) {
+	workspace := t.TempDir()
+	dbPath := filepath.Join(workspace, ".codegraph", "codegraph.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+CREATE TABLE nodes (
+ id TEXT PRIMARY KEY,kind TEXT NOT NULL,name TEXT NOT NULL,qualified_name TEXT NOT NULL,
+ file_path TEXT NOT NULL,language TEXT NOT NULL,start_line INTEGER NOT NULL,end_line INTEGER NOT NULL,signature TEXT
+);
+CREATE TABLE edges (source TEXT,target TEXT,kind TEXT,metadata TEXT,line INTEGER,col INTEGER,provenance TEXT);
+INSERT INTO nodes VALUES ('root','method','Root','svc.Root','repos/team/svc/root.go','go',1,30,'func Root()');
+INSERT INTO nodes VALUES
+ ('n1','method','N1','svc.N1','repos/team/svc/n.go','go',40,45,''),
+ ('n2','method','N2','svc.N2','repos/team/svc/n.go','go',50,55,''),
+ ('n3','method','N3','svc.N3','repos/team/svc/n.go','go',60,65,''),
+ ('n4','method','N4','svc.N4','repos/team/svc/n.go','go',70,75,''),
+ ('n5','method','N5','svc.N5','repos/team/svc/n.go','go',80,85,''),
+ ('n6','method','N6','svc.N6','repos/team/svc/n.go','go',90,95,'');
+INSERT INTO edges VALUES
+ ('root','n1','calls','{"confidence":0.9}',10,2,'go/ast'),
+ ('root','n1','calls','{"confidence":0.8}',11,4,'go/ast'),
+ ('root','n2','calls','{}',12,1,'go/ast'),('root','n3','calls','{}',13,1,'go/ast'),
+ ('root','n4','calls','{}',14,1,'go/ast'),('root','n5','calls','{}',15,1,'go/ast'),
+ ('root','n6','calls','{}',16,1,'go/ast');`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	hops, more, err := db.CallEdges("root", "callees", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if more || len(hops) != 7 {
+		t.Fatalf("hops=%d more=%v, want all seven call sites", len(hops), more)
+	}
+	if hops[0].Target.ID != "n1" || hops[1].Target.ID != "n1" || hops[0].Edge.Line != 10 || hops[1].Edge.Line != 11 {
+		t.Fatalf("repeated call sites were folded: %+v", hops[:2])
+	}
+	if hops[0].Edge.Col != 2 || hops[0].Edge.Provenance != "go/ast" || hops[0].Edge.Confidence != 0.9 {
+		t.Fatalf("call-site evidence lost: %+v", hops[0].Edge)
+	}
+	_, more, err = db.CallEdges("root", "callees", 4)
+	if err != nil || !more {
+		t.Fatalf("bounded fanout more=%v err=%v, want explicit truncation", more, err)
+	}
+}
+
 func writeTestDatabase(t *testing.T, path, filePath string, withEdges bool) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

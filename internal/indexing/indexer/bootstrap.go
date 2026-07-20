@@ -34,6 +34,8 @@ func ScanCode(root string, dirs []string) domain.IndexBundle {
 	deps = append(deps, scanNodeJSDependencies(root, dirs)...)
 	deps = append(deps, scanAndroidDependencies(root, dirs)...)
 	deps = append(deps, scanIOSDependencies(root, dirs)...)
+	deps = append(deps, scanJVMAndPythonDependencies(root, dirs)...)
+	deps = append(deps, scanKafkaDependencies(root, dirs)...)
 
 	return CanonicalizeBundle(domain.IndexBundle{
 		Services: services, Endpoints: endpoints, Dependencies: deps,

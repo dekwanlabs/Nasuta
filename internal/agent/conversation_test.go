@@ -13,6 +13,7 @@ func TestBuildAgentMessagesUsesCanonicalSummaryAndRecentTail(t *testing.T) {
 	agent := &Agent{cfg: AgentConfig{HistoryLimit: 2}}
 	conversation := ConversationContext{
 		Summary:      "canonical session summary",
+		RolePrompt:   "## Identity\n- Role: SRE",
 		Instructions: []llm.Message{{Role: "system", Content: "role instruction"}},
 		Recent: []llm.Message{
 			{Role: "user", Content: "old turn"},
@@ -26,10 +27,16 @@ func TestBuildAgentMessagesUsesCanonicalSummaryAndRecentTail(t *testing.T) {
 	for _, message := range got {
 		joined += "\n" + message.Content
 	}
-	for _, want := range []string{"canonical session summary", "role instruction", "recent answer", "recent question", "current question"} {
+	for _, want := range []string{"canonical session summary", "## Identity\n- Role: SRE", "role instruction", "recent answer", "recent question", "current question"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("messages missing %q: %s", want, joined)
 		}
+	}
+	if got := got[0].Content; !strings.Contains(got, "## Identity\n- Role: SRE") {
+		t.Fatalf("role prompt was not composed into the primary system prompt: %s", got)
+	}
+	if len(got) > 1 && strings.Contains(got[1].Content, "## Identity\n- Role: SRE") {
+		t.Fatalf("role prompt was duplicated as a separate instruction: %+v", got)
 	}
 	if strings.Contains(joined, "old turn") {
 		t.Fatalf("messages retained old turn: %s", joined)

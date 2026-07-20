@@ -13,7 +13,6 @@ import (
 	"unicode"
 
 	"github.com/dekwanlabs/nasuta/log"
-	"github.com/dekwanlabs/nasuta/platform"
 
 	_ "modernc.org/sqlite"
 )
@@ -41,17 +40,21 @@ type Node struct {
 
 // Edge is a relationship between two nodes.
 type Edge struct {
-	Source string `json:"source"`
-	Target string `json:"target"`
-	Kind   string `json:"kind"`
-	Line   int    `json:"line,omitempty"`
+	Source     string  `json:"source"`
+	Target     string  `json:"target"`
+	Kind       string  `json:"kind"`
+	Line       int     `json:"line,omitempty"`
+	Col        int     `json:"col,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+	Provenance string  `json:"provenance,omitempty"`
 }
 
-// CallChain is the result of a call chain query.
-type CallChain struct {
-	Node    Node   `json:"node"`
-	Callers []Node `json:"callers"`
-	Callees []Node `json:"callees"`
+// CallHop preserves the concrete call site between two symbols.
+type CallHop struct {
+	Source Node `json:"source"`
+	Target Node `json:"target"`
+	Edge   Edge `json:"edge"`
+	Depth  int  `json:"depth"`
 }
 
 // SymbolQuery is one bounded full-text symbol lookup.
@@ -188,98 +191,65 @@ func (d *DB) scanRow(query string, args []any, dest ...any) error {
 	return d.db.QueryRow(query, args...).Scan(dest...)
 }
 
-// GetCallers returns the callers (nodes that call the given node).
-func (d *DB) GetCallers(nodeID string, limit int) ([]Node, error) {
-	nodes, err := d.queryRelated(nodeID, "calls", "target", "source", limit)
-	log.Infof("[codegraph] GetCallers: node=%s found=%d err=%v", platform.TruncateForLog(nodeID, 8), len(nodes), err)
-	return nodes, err
-}
-
-// GetCallees returns the callees (nodes called by the given node).
-func (d *DB) GetCallees(nodeID string, limit int) ([]Node, error) {
-	nodes, err := d.queryRelated(nodeID, "calls", "source", "target", limit)
-	log.Infof("[codegraph] GetCallees: node=%s found=%d err=%v", platform.TruncateForLog(nodeID, 8), len(nodes), err)
-	return nodes, err
-}
-
-// ChainNode is a node reached during a multi-hop BFS, with its hop distance
-// from the root and the ID of the node it was reached from.
-type ChainNode struct {
-	Node
-	Depth  int
-	FromID string
-}
-
-// GetRelatedChain walks the call graph up to `depth` hops via BFS, deduped
-// and cycle-safe. direction is "callees" or "callers".
-func (d *DB) GetRelatedChain(nodeID, direction string, depth, limit int) ([]ChainNode, error) {
-	if depth <= 0 {
-		depth = 1
+func (d *DB) callEdges(nodeID, direction string, limit int) ([]CallHop, bool, error) {
+	where := "e.source = ?"
+	if direction == "callers" {
+		where = "e.target = ?"
 	}
-	if limit <= 0 {
-		limit = 5
-	}
-	var fromCol, toCol string
-	if direction == "callees" {
-		fromCol, toCol = "source", "target"
-	} else {
-		fromCol, toCol = "target", "source"
-	}
-	const fanOut = 4
-	visited := map[string]int{nodeID: 0}
-	var out []ChainNode
-	frontier := []string{nodeID}
-	for hop := 1; hop <= depth && len(frontier) > 0; hop++ {
-		var nextFrontier []string
-		for _, id := range frontier {
-			if len(out) >= limit {
-				break
-			}
-			adj, err := d.queryRelated(id, "calls", fromCol, toCol, fanOut)
-			if err != nil {
-				continue
-			}
-			for _, n := range adj {
-				if _, seen := visited[n.ID]; seen {
-					continue
-				}
-				visited[n.ID] = hop
-				out = append(out, ChainNode{Node: n, Depth: hop, FromID: id})
-				nextFrontier = append(nextFrontier, n.ID)
-				if len(out) >= limit {
-					break
-				}
-			}
-		}
-		frontier = nextFrontier
-	}
-	log.Infof("[codegraph] GetRelatedChain: node=%s dir=%s depth=%d found=%d", platform.TruncateForLog(nodeID, 8), direction, depth, len(out))
-	return out, nil
-}
-
-func (d *DB) queryRelated(nodeID, edgeKind, fromCol, toCol string, limit int) ([]Node, error) {
-	// Also extract edge.metadata confidence from codegraph.
-	query := fmt.Sprintf(`
-		SELECT DISTINCT n.id, n.name, n.kind, n.qualified_name, n.file_path, n.language, n.start_line, n.end_line, COALESCE(n.signature,''), COALESCE(e.metadata,'')
-		FROM edges e JOIN nodes n ON n.id = e.%s
-		WHERE e.kind = ? AND e.%s = ?
-		LIMIT ?`, toCol, fromCol)
-	rows, err := d.query(query, edgeKind, nodeID, limit)
+	rows, err := d.query(`
+		SELECT
+			s.id,s.name,s.kind,s.qualified_name,s.file_path,s.language,s.start_line,s.end_line,COALESCE(s.signature,''),
+			t.id,t.name,t.kind,t.qualified_name,t.file_path,t.language,t.start_line,t.end_line,COALESCE(t.signature,''),
+			e.kind,COALESCE(e.line,0),COALESCE(e.col,0),COALESCE(e.provenance,''),COALESCE(e.metadata,'')
+		FROM edges e
+		JOIN nodes s ON s.id=e.source
+		JOIN nodes t ON t.id=e.target
+		WHERE e.kind='calls' AND `+where+`
+		ORDER BY e.line,e.col,s.file_path,s.start_line,t.file_path,t.start_line
+		LIMIT ?`, nodeID, limit+1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
-	var nodes []Node
+	hops := make([]CallHop, 0, limit)
 	for rows.Next() {
-		n := Node{}
+		var hop CallHop
 		var metadata string
-		if err := rows.Scan(&n.ID, &n.Name, &n.Kind, &n.QualifiedName, &n.FilePath, &n.Language, &n.StartLine, &n.EndLine, &n.Signature, &metadata); err != nil {
-			return nil, err
+		if err := rows.Scan(
+			&hop.Source.ID, &hop.Source.Name, &hop.Source.Kind, &hop.Source.QualifiedName,
+			&hop.Source.FilePath, &hop.Source.Language, &hop.Source.StartLine, &hop.Source.EndLine, &hop.Source.Signature,
+			&hop.Target.ID, &hop.Target.Name, &hop.Target.Kind, &hop.Target.QualifiedName,
+			&hop.Target.FilePath, &hop.Target.Language, &hop.Target.StartLine, &hop.Target.EndLine, &hop.Target.Signature,
+			&hop.Edge.Kind, &hop.Edge.Line, &hop.Edge.Col, &hop.Edge.Provenance, &metadata,
+		); err != nil {
+			return nil, false, err
 		}
-		n.Confidence = parseConfidence(metadata)
-		nodes = append(nodes, n)
+		hop.Edge.Source = hop.Source.ID
+		hop.Edge.Target = hop.Target.ID
+		hop.Edge.Confidence = parseConfidence(metadata)
+		hop.Source.Confidence = hop.Edge.Confidence
+		hop.Target.Confidence = hop.Edge.Confidence
+		hops = append(hops, hop)
 	}
-	return nodes, nil
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	more := len(hops) > limit
+	if more {
+		hops = hops[:limit]
+	}
+	return hops, more, nil
+}
+
+// CallEdges returns one bounded adjacency page and whether more edges exist.
+func (d *DB) CallEdges(nodeID, direction string, limit int) ([]CallHop, bool, error) {
+	if direction != "callers" && direction != "callees" {
+		return nil, false, fmt.Errorf("codegraph: invalid call direction %q", direction)
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	return d.callEdges(nodeID, direction, limit)
 }
 
 // parseConfidence extracts the "confidence" float from a codegraph edge metadata JSON blob.
@@ -355,17 +325,6 @@ func (d *DB) FindFilesByName(name string, limit int) ([]string, error) {
 	return files, rows.Err()
 }
 
-// GetCallChainByFile returns the call chain for a node at a specific file location.
-func (d *DB) GetCallChainByFile(filePath string, line int, limit int) (*CallChain, error) {
-	node, err := d.FindNodeByFile(filePath, line)
-	if err != nil {
-		return nil, fmt.Errorf("codegraph: no node at %s:%d: %w", filePath, line, err)
-	}
-	callers, _ := d.GetCallers(node.ID, limit)
-	callees, _ := d.GetCallees(node.ID, limit)
-	return &CallChain{Node: *node, Callers: callers, Callees: callees}, nil
-}
-
 // RouteAt finds the HTTP route declared at a file+line (e.g. "GET" "/room/device/list").
 func (d *DB) RouteAt(filePath string, line int) (httpMethod, path string, ok bool) {
 	var name string
@@ -376,7 +335,25 @@ func (d *DB) RouteAt(filePath string, line int) (httpMethod, path string, ok boo
 	if err != nil {
 		return "", "", false
 	}
-	// name format: "GET /room/device/list"
+	return parseRouteName(name)
+}
+
+// RouteForNode finds the closest route annotation owned by one callable symbol.
+func (d *DB) RouteForNode(node Node) (httpMethod, path string, ok bool) {
+	start := max(node.StartLine-8, 1)
+	var name string
+	err := d.scanRow(`SELECT r.name FROM nodes r JOIN nodes m ON m.id=? AND m.file_path=r.file_path
+WHERE r.kind='route' AND r.file_path=? AND r.start_line BETWEEN ? AND ?
+AND ((m.start_line<=r.start_line AND m.end_line>=r.start_line) OR
+     (m.start_line>r.start_line AND m.start_line<=r.start_line+8))
+ORDER BY abs(r.start_line-?) LIMIT 1`, []any{node.ID, node.FilePath, start, node.EndLine, node.StartLine}, &name)
+	if err != nil {
+		return "", "", false
+	}
+	return parseRouteName(name)
+}
+
+func parseRouteName(name string) (httpMethod, path string, ok bool) {
 	parts := strings.SplitN(name, " ", 2)
 	if len(parts) != 2 {
 		return "", "", false
@@ -384,31 +361,63 @@ func (d *DB) RouteAt(filePath string, line int) (httpMethod, path string, ok boo
 	return parts[0], parts[1], true
 }
 
+// ResolveRouteMethodInFile finds the client method for one route in an exact file.
+func (d *DB) ResolveRouteMethodInFile(filePath, httpMethod, path string) (*Node, error) {
+	var line int
+	err := d.scanRow(`SELECT start_line FROM nodes
+WHERE kind='route' AND file_path=? AND (name=? OR name LIKE ?)
+ORDER BY CASE WHEN name=? THEN 0 ELSE 1 END,length(name) ASC LIMIT 1`,
+		[]any{filePath, httpMethod + " " + path, httpMethod + " %" + path, httpMethod + " " + path}, &line)
+	if err != nil {
+		return nil, err
+	}
+	return d.findMethodForRoute(filePath, line)
+}
+
 // ResolveDownstreamMethod finds the implementing controller method in the target
 // service for a Feign call (matched by HTTP method + path suffix).
 func (d *DB) ResolveDownstreamMethod(targetService, httpMethod, path string) (*Node, error) {
+	return d.resolveDownstreamMethod("file_path LIKE ?", []any{"%" + targetService + "%"}, httpMethod, path)
+}
+
+// ResolveDownstreamMethodInPath restricts route resolution to one canonical module prefix.
+func (d *DB) ResolveDownstreamMethodInPath(pathPrefix, httpMethod, path string) (*Node, error) {
+	pathPrefix = strings.Trim(strings.ReplaceAll(pathPrefix, "\\", "/"), "/")
+	return d.resolveDownstreamMethod("(file_path=? OR (file_path>=? AND file_path<?))", []any{pathPrefix, pathPrefix + "/", pathPrefix + "0"}, httpMethod, path)
+}
+
+func (d *DB) resolveDownstreamMethod(pathPredicate string, pathArgs []any, httpMethod, path string) (*Node, error) {
 	var file string
 	var line int
-	// Match target service routes: same HTTP method, path suffix matches
-	// the Feign path (handles controller context prefixes). Exact match preferred, then shortest path.
+	args := make([]any, 0, len(pathArgs)+3)
+	args = append(args, pathArgs...)
+	args = append(args, httpMethod+" "+path, httpMethod+" %"+path, httpMethod+" "+path)
 	err := d.scanRow(`
 		SELECT file_path, start_line FROM nodes
-		WHERE kind='route' AND file_path LIKE ?
+		WHERE kind='route' AND `+pathPredicate+`
 		  AND (name = ? OR name LIKE ?)
 		ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, length(name) ASC
-		LIMIT 1`,
-		[]any{
-			"%" + targetService + "%",
-			httpMethod + " " + path,
-			httpMethod + " %" + path,
-			httpMethod + " " + path,
-		},
+		LIMIT 1`, args,
 		&file, &line)
 	if err != nil {
 		return nil, err
 	}
-	// Resolve the route's containing controller method node.
-	return d.FindNodeByFile(file, line)
+	return d.findMethodForRoute(file, line)
+}
+
+func (d *DB) findMethodForRoute(filePath string, line int) (*Node, error) {
+	node := &Node{}
+	err := d.scanRow(`SELECT id,name,kind,qualified_name,file_path,language,start_line,end_line,COALESCE(signature,'')
+FROM nodes WHERE file_path=? AND kind IN ('method','function')
+AND ((start_line<=? AND end_line>=?) OR (start_line>? AND start_line<=?))
+ORDER BY CASE WHEN start_line<=? AND end_line>=? THEN 0 ELSE 1 END,abs(start_line-?) LIMIT 1`,
+		[]any{filePath, line, line, line, line + 8, line, line, line},
+		&node.ID, &node.Name, &node.Kind, &node.QualifiedName, &node.FilePath,
+		&node.Language, &node.StartLine, &node.EndLine, &node.Signature)
+	if err != nil {
+		return nil, err
+	}
+	return node, nil
 }
 
 // SearchSymbols bounds FTS work before applying deterministic in-process ranking.

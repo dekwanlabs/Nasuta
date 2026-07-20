@@ -33,6 +33,30 @@ func TestWebEvidenceIgnoresFailuresAndRepeatedDomains(t *testing.T) {
 	}
 }
 
+func TestWebEvidenceIgnoresEmptyAndFailedAutomaticFetches(t *testing.T) {
+	var state webEvidenceState
+	if state.Observe(webSearchCall(), `{"fetched":{"url":"https://baidu.com/page","content":"(empty body — status 403 Forbidden)"}}`) {
+		t.Fatal("403 automatic fetch was accepted as evidence")
+	}
+	if state.Observe(webSearchCall(), `{"results":[],"fetch_note":"automatic fetch skipped"}`) {
+		t.Fatal("skipped automatic fetch was accepted as evidence")
+	}
+	if hint := state.ConvergenceHint(); hint != "" {
+		t.Fatalf("invalid automatic fetches produced hint %q", hint)
+	}
+}
+
+func TestWebEvidenceCountsValidAutomaticFetch(t *testing.T) {
+	var state webEvidenceState
+	if !state.Observe(webSearchCall(), `{"fetched":{"url":"https://example.com/page","content":"status 200 OK\n\nrelevant evidence"}}`) {
+		t.Fatal("valid automatic fetch was not accepted as evidence")
+	}
+}
+
 func webFetchCall(rawURL string) llm.ToolCall {
 	return llm.ToolCall{Function: llm.ToolFunction{Name: "web_fetch", Arguments: `{"url":"` + rawURL + `"}`}}
+}
+
+func webSearchCall() llm.ToolCall {
+	return llm.ToolCall{Function: llm.ToolFunction{Name: "web_search"}}
 }

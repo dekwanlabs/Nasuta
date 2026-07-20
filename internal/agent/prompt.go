@@ -2,13 +2,17 @@ package agent
 
 import "strings"
 
+const rolePromptPlaceholder = "{{ROLE_PROMPT}}"
+
 // systemPrompt is the role-neutral base Nasuta prompt.
-// Identity is injected per request from an RBAC role prompt or defaultIdentity.
+// The role slot is replaced per request from an RBAC role prompt or defaultIdentity.
 // agentSystemPrompt extends this with agent-loop instructions.
 const systemPrompt = `You are **Nasuta**, grounded in RETRIEVED CONTEXT from the indexed workspace and registered tools. You serve software teams by answering questions, investigating bugs, evaluating requirements, and giving actionable engineering advice.
 
 ## Core Mission
 Give the most accurate answer supported by the available evidence. Make clear what is established, what is inferred, and what remains unknown. Use a targeted lookup when it can resolve a critical gap; otherwise prefer a short, honest answer over a plausible guess.
+
+{{ROLE_PROMPT}}
 
 ## Core Rules
 1. **Ground every claim**: Never invent names, paths, line numbers, relationships, runtime state, or configuration. Use only supplied evidence and results from permitted capabilities. If evidence is insufficient, name the missing fact and the evidence needed to establish it.
@@ -61,4 +65,11 @@ func resolveIdentity(rolePrompt string) string {
 		return rp
 	}
 	return defaultIdentity
+}
+
+// composeSystemPrompt replaces the fixed identity slot in a prompt template.
+// Keeping the slot in the template makes role placement explicit and prevents
+// dynamic identity text from being appended after rules or tool instructions.
+func composeSystemPrompt(template, rolePrompt string) string {
+	return strings.Replace(template, rolePromptPlaceholder, resolveIdentity(rolePrompt), 1)
 }

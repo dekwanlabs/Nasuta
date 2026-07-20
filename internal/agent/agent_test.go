@@ -102,6 +102,36 @@ func TestMaxStepsForQuestion(t *testing.T) {
 	}
 }
 
+func TestMaxStepsForWebPlanAllowsFetchTurn(t *testing.T) {
+	agent := &Agent{cfg: AgentConfig{MaxSteps: 5}}
+	plan := domain.EvidencePlan{Sources: domain.Web}
+	if got := agent.MaxStepsForPlan("school information", plan); got != 3 {
+		t.Fatalf("MaxStepsForPlan() = %d, want 3", got)
+	}
+}
+
+func TestExtendWebStepLimitOnlyAfterUnusableEvidenceAtBoundary(t *testing.T) {
+	if got := extendWebStepLimit(3, 3, 5, true, false); got != 4 {
+		t.Fatalf("failed boundary attempt extended to %d, want 4", got)
+	}
+	for _, tc := range []struct {
+		name                 string
+		step, current, max   int
+		attempted, succeeded bool
+	}{
+		{name: "before boundary", step: 2, current: 3, max: 5, attempted: true},
+		{name: "usable evidence", step: 3, current: 3, max: 5, attempted: true, succeeded: true},
+		{name: "no web attempt", step: 3, current: 3, max: 5},
+		{name: "configured limit", step: 5, current: 5, max: 5, attempted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extendWebStepLimit(tc.step, tc.current, tc.max, tc.attempted, tc.succeeded); got != tc.current {
+				t.Fatalf("extendWebStepLimit() = %d, want %d", got, tc.current)
+			}
+		})
+	}
+}
+
 func TestContinueIfNeeded_NoTruncation(t *testing.T) {
 	srv := fakeStreamServer(t, []streamEvent{
 		{content: "完整回答", finish: "stop"},
@@ -375,7 +405,7 @@ func TestForceConclusion_StreamsLiveAndRecordsAnswer(t *testing.T) {
 	if res.Content != "答案" {
 		t.Fatalf("content = %q, want 答案", res.Content)
 	}
-	// The conclusion must stream token-by-token (not arrive as one blob).
+	// The validated conclusion is published to the observer after generation.
 	if got, want := strings.Join(obs.tokens, ""), "答案"; got != want {
 		t.Fatalf("observed tokens = %q, want %q", got, want)
 	}
@@ -388,6 +418,45 @@ func TestForceConclusion_StreamsLiveAndRecordsAnswer(t *testing.T) {
 	}
 	if !sawAnswer {
 		t.Fatalf("no answer step recorded; steps=%v", obs.steps)
+	}
+}
+
+func TestForceConclusion_RetriesToolProtocolWithoutStreamingIt(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		content := "最终答案"
+		if atomic.AddInt32(&calls, 1) == 1 {
+			content = `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="web_fetch"></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>`
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: content}, FinishReason: "stop"}}}
+		data, _ := json.Marshal(chunk)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, &http.Client{})
+	obs := &captureObserver{}
+	agent := NewAgent(client, nil, AgentConfig{
+		MaxSteps: 1, AnswerMaxTokens: 100, MaxContinueRounds: 0,
+		Timeout: 5 * time.Second, AnswerReserve: 4 * time.Second,
+	}, obs, nil)
+
+	seq := 0
+	res, err := agent.forceConclusion(t.Context(), "run_protocol", nil, &seq, time.Now())
+	if err != nil {
+		t.Fatalf("forceConclusion() error = %v", err)
+	}
+	if res.Content != "最终答案" {
+		t.Fatalf("content = %q, want 最终答案", res.Content)
+	}
+	if got := strings.Join(obs.tokens, ""); got != "最终答案" {
+		t.Fatalf("streamed tokens = %q, want only repaired answer", got)
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("LLM calls = %d, want 2", calls)
 	}
 }
 

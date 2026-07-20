@@ -42,6 +42,36 @@ func TestSystemPromptShape(t *testing.T) {
 	if !strings.Contains(defaultIdentity, "## Identity") {
 		t.Error("defaultIdentity must contain the ## Identity block")
 	}
+	if idx := strings.Index(systemPrompt, rolePromptPlaceholder); idx < 0 || idx > strings.Index(systemPrompt, "## Core Rules") {
+		t.Fatal("systemPrompt must place the role slot before Core Rules")
+	}
+}
+
+func TestComposeSystemPromptReplacesRoleSlotBeforeRules(t *testing.T) {
+	for name, template := range map[string]string{
+		"core":   systemPrompt,
+		"direct": directAgentSystemPrompt,
+		"web":    webAgentSystemPrompt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := composeSystemPrompt(template, "## Identity\n- Role: SRE")
+			if strings.Contains(got, rolePromptPlaceholder) {
+				t.Fatalf("role placeholder was not replaced: %s", got)
+			}
+			roleAt := strings.Index(got, "## Identity\n- Role: SRE")
+			rulesAt := strings.Index(got, "Rules:")
+			if rulesAt < 0 {
+				rulesAt = strings.Index(got, "## Core Rules")
+			}
+			if roleAt < 0 || rulesAt < 0 || roleAt > rulesAt {
+				t.Fatalf("role must precede rules: role=%d rules=%d", roleAt, rulesAt)
+			}
+		})
+	}
+	defaulted := composeSystemPrompt(webAgentSystemPrompt, "")
+	if !strings.Contains(defaulted, defaultIdentity) {
+		t.Fatal("empty role prompt must use default identity")
+	}
 }
 
 func TestSystemPromptDoesNotAllowInferenceToCompleteRuntimeChains(t *testing.T) {

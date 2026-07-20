@@ -66,7 +66,7 @@ type Config struct {
 	// When true (default), the QA agent can search the web.
 	WebSearchEnabled    bool
 	WebSearchMCPEnabled bool   // expose web tools to MCP clients when also enabled
-	WebSearchEngine     string // duckduckgo (default) | brave | bing | searxng
+	WebSearchEngine     string // duckduckgo (default) | brave | bing
 	WebSearchAPIKey     string // API key for brave / tavily / etc.
 
 	Semantic SemanticConfig
@@ -113,7 +113,7 @@ func envFirst(def string, keys ...string) string {
 }
 
 func nasutaEnv(name, def string) string {
-	return envFirst(def, "NASUTA_"+name, "CODELOOM_"+name)
+	return env("NASUTA_"+name, def)
 }
 
 func envInt(key string, def int) int {
@@ -126,7 +126,7 @@ func envInt(key string, def int) int {
 }
 
 func nasutaEnvInt(name string, def int) int {
-	value := envFirst("", "NASUTA_"+name, "CODELOOM_"+name)
+	value := strings.TrimSpace(os.Getenv("NASUTA_" + name))
 	if value == "" {
 		return def
 	}
@@ -138,7 +138,7 @@ func nasutaEnvInt(name string, def int) int {
 }
 
 func nasutaEnvBool(name string, def bool) bool {
-	value := strings.ToLower(envFirst("", "NASUTA_"+name, "CODELOOM_"+name))
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("NASUTA_" + name)))
 	switch value {
 	case "":
 		return def
@@ -162,7 +162,7 @@ func envBool(key string, def bool) bool {
 }
 
 func nasutaEnvDuration(name string, def time.Duration) time.Duration {
-	value := envFirst("", "NASUTA_"+name, "CODELOOM_"+name)
+	value := strings.TrimSpace(os.Getenv("NASUTA_" + name))
 	if value == "" {
 		return def
 	}
@@ -267,9 +267,9 @@ func loadSemanticConfig() SemanticConfig {
 	provider := strings.ToLower(semanticEnv("PROVIDER", ""))
 	endpoint := semanticEnv("ENDPOINT", "")
 	if endpoint == "" {
-		if host := envFirst("", "NASUTA_QDRANT_HOST", "CODELOOM_QDRANT_HOST", "QDRANT_HOST"); host != "" {
+		if host := envFirst("", "NASUTA_QDRANT_HOST", "QDRANT_HOST"); host != "" {
 			port := 6334
-			if raw := envFirst("", "NASUTA_QDRANT_PORT", "CODELOOM_QDRANT_PORT", "QDRANT_PORT"); raw != "" {
+			if raw := envFirst("", "NASUTA_QDRANT_PORT", "QDRANT_PORT"); raw != "" {
 				if parsed, err := strconv.Atoi(raw); err == nil {
 					port = parsed
 				}
@@ -283,10 +283,10 @@ func loadSemanticConfig() SemanticConfig {
 	return SemanticConfig{
 		Provider:   provider,
 		Endpoint:   endpoint,
-		Collection: semanticEnv("COLLECTION", envFirst("knowledge", "NASUTA_QDRANT_COLLECTION", "CODELOOM_QDRANT_COLLECTION", "QDRANT_COLLECTION")),
+		Collection: semanticEnv("COLLECTION", envFirst("knowledge", "NASUTA_QDRANT_COLLECTION", "QDRANT_COLLECTION")),
 		Namespace:  semanticEnv("NAMESPACE", "default"),
 		Auth: SemanticAuth{
-			APIKey:   semanticEnv("API_KEY", envFirst("", "NASUTA_QDRANT_API_KEY", "CODELOOM_QDRANT_API_KEY", "QDRANT_API_KEY")),
+			APIKey:   semanticEnv("API_KEY", envFirst("", "NASUTA_QDRANT_API_KEY", "QDRANT_API_KEY")),
 			Username: semanticEnv("USERNAME", ""),
 			Password: semanticEnv("PASSWORD", ""),
 		},
@@ -299,7 +299,7 @@ func loadSemanticConfig() SemanticConfig {
 }
 
 func semanticEnv(name, def string) string {
-	return envFirst(def, "NASUTA_SEMANTIC_"+name, "CODELOOM_SEMANTIC_"+name, "SEMANTIC_"+name)
+	return envFirst(def, "NASUTA_SEMANTIC_"+name, "SEMANTIC_"+name)
 }
 
 func semanticEnvBool(name string, def bool) bool {

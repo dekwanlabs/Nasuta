@@ -20,6 +20,7 @@ type StreamPipe struct {
 	runID      string
 	stepNo     int
 	discarding bool // set true when tool-call delta received; stop forwarding tokens
+	buffered   bool // hold answer tokens until the caller validates the complete response
 	started    time.Time
 	timingMu   sync.Mutex
 	timing     StreamTiming
@@ -40,6 +41,12 @@ type StreamTiming struct {
 
 func newStreamPipe(observer Observer, runID string, stepNo int, started time.Time, onFirstToken func(string)) *StreamPipe {
 	return &StreamPipe{observer: observer, runID: runID, stepNo: stepNo, started: started, onFirstToken: onFirstToken}
+}
+
+func newBufferedStreamPipe(observer Observer, runID string, stepNo int, started time.Time, onFirstToken func(string)) *StreamPipe {
+	h := newStreamPipe(observer, runID, stepNo, started, onFirstToken)
+	h.buffered = true
+	return h
 }
 
 func (h *StreamPipe) recordTiming(kind string) {
@@ -84,7 +91,7 @@ func (h *StreamPipe) Timings() StreamTiming {
 
 func (h *StreamPipe) OnToken(token string) {
 	h.recordTiming("content")
-	if h.discarding {
+	if h.discarding || h.buffered {
 		return
 	}
 	// The first visible token means the model has started the answer.
@@ -98,6 +105,22 @@ func (h *StreamPipe) OnToken(token string) {
 	}
 	if h.observer != nil {
 		h.observer.OnToken(context.Background(), h.runID, token)
+	}
+}
+
+// Publish forwards a validated buffered answer as one visible token.
+func (h *StreamPipe) Publish(content string) {
+	if h == nil || h.discarding || content == "" {
+		return
+	}
+	if !h.firedFirst {
+		h.firedFirst = true
+		if h.onFirstToken != nil {
+			h.onFirstToken(h.runID)
+		}
+	}
+	if h.observer != nil {
+		h.observer.OnToken(context.Background(), h.runID, content)
 	}
 }
 

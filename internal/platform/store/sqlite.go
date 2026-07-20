@@ -417,6 +417,143 @@ func (store *SQLite) ServicesByRepos(ctx context.Context, repos []string) ([]dom
 	return store.queryServices(ctx, " WHERE repo IN ("+placeholders+")", args)
 }
 
+// ServiceForPath resolves canonical repos/<group>/<project>/... ownership by longest module prefix.
+func (store *SQLite) ServiceForPath(ctx context.Context, filePath string) (domain.ServiceRecord, error) {
+	path := strings.Trim(strings.ReplaceAll(filePath, "\\", "/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 4 || parts[0] != "repos" {
+		return domain.ServiceRecord{}, fmt.Errorf("resolve service path %q: expected repos/<group>/<project>/...", filePath)
+	}
+	repo := parts[1] + "/" + parts[2]
+	relative := strings.Join(parts[3:], "/")
+
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	row := store.db.QueryRowContext(ctx, `SELECT service_key,repo,module_path,service_name,layer,language,
+runtime,scope,owner,status,summary,confidence,tags_json,docs_json,source_of_truth_json,entrypoints_json,ports_json
+FROM services
+WHERE repo=? AND (module_path='.' OR module_path=? OR ? LIKE module_path || '/%')
+ORDER BY CASE WHEN module_path='.' THEN 0 ELSE length(module_path) END DESC
+LIMIT 1`, repo, relative, relative)
+	service, err := scanService(row)
+	if err != nil {
+		return domain.ServiceRecord{}, fmt.Errorf("resolve service path %q: %w", filePath, err)
+	}
+	return service, nil
+}
+
+// ServiceByKey returns one canonical service record.
+func (store *SQLite) ServiceByKey(ctx context.Context, serviceKey string) (domain.ServiceRecord, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	row := store.db.QueryRowContext(ctx, `SELECT service_key,repo,module_path,service_name,layer,language,
+runtime,scope,owner,status,summary,confidence,tags_json,docs_json,source_of_truth_json,entrypoints_json,ports_json
+FROM services WHERE service_key=? LIMIT 1`, serviceKey)
+	service, err := scanService(row)
+	if err != nil {
+		return domain.ServiceRecord{}, fmt.Errorf("get service %q: %w", serviceKey, err)
+	}
+	return service, nil
+}
+
+// DependenciesByEvidencePath returns bounded dependencies declared by one source file.
+func (store *SQLite) DependenciesByEvidencePath(ctx context.Context, filePath string, limit int) ([]domain.DependencyEdge, bool, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	return store.queryDependencyEvidence(ctx, `WHERE e.file_path=?`, []any{filePath}, limit)
+}
+
+// IncomingDependencies returns bounded evidence for dependencies targeting one service.
+func (store *SQLite) IncomingDependencies(ctx context.Context, targetServiceKey string, limit int) ([]domain.DependencyEdge, bool, error) {
+	if limit <= 0 {
+		limit = 40
+	}
+	return store.queryDependencyEvidence(ctx, `WHERE d.target_service_key=?`, []any{targetServiceKey}, limit)
+}
+
+func (store *SQLite) queryDependencyEvidence(ctx context.Context, where string, args []any, limit int) ([]domain.DependencyEdge, bool, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	queryArgs := append(append([]any{}, args...), limit+1)
+	rows, err := store.db.QueryContext(ctx, `SELECT d.dependency_id,d.caller_service_key,caller.service_name,
+d.target_kind,COALESCE(d.target_service_key,''),COALESCE(target.service_name,''),COALESCE(d.external_target,''),
+d.protocol,d.confidence,e.file_path,e.line,e.symbol,e.source_kind
+FROM dependencies d
+JOIN services caller ON caller.service_key=d.caller_service_key
+LEFT JOIN services target ON target.service_key=d.target_service_key
+JOIN dependency_evidence e ON e.dependency_id=d.dependency_id
+`+where+` ORDER BY d.dependency_id,e.evidence_id LIMIT ?`, queryArgs...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	edges := make([]domain.DependencyEdge, 0)
+	byID := make(map[int64]int)
+	rowCount := 0
+	more := false
+	for rows.Next() {
+		rowCount++
+		if rowCount > limit {
+			more = true
+			break
+		}
+		var id int64
+		var edge domain.DependencyEdge
+		var targetKind, protocol, targetName string
+		var evidence domain.Evidence
+		if err := rows.Scan(&id, &edge.CallerServiceKey, &edge.From, &targetKind, &edge.TargetServiceKey,
+			&targetName, &edge.ExternalTarget, &protocol, &edge.Confidence,
+			&evidence.Path, &evidence.Line, &evidence.Symbol, &evidence.Kind); err != nil {
+			return nil, false, err
+		}
+		index, found := byID[id]
+		if !found {
+			edge.TargetKind = domain.DependencyTargetKind(targetKind)
+			edge.Type = domain.EdgeType(protocol)
+			if edge.TargetKind == domain.DependencyTargetService {
+				edge.To = targetName
+			} else {
+				edge.To = edge.ExternalTarget
+			}
+			edge.Evidence = []domain.Evidence{}
+			index = len(edges)
+			byID[id] = index
+			edges = append(edges, edge)
+		}
+		edges[index].Evidence = append(edges[index].Evidence, evidence)
+	}
+	return edges, more, rows.Err()
+}
+
+// EndpointNearNode resolves a route annotation inside or immediately before a symbol.
+func (store *SQLite) EndpointNearNode(ctx context.Context, serviceKey, filePath string, startLine, endLine int) (domain.EndpointRecord, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if startLine > 8 {
+		startLine -= 8
+	} else {
+		startLine = 1
+	}
+	if endLine < startLine {
+		endLine = startLine
+	}
+	row := store.db.QueryRowContext(ctx, `SELECT e.service_key,s.service_name,s.repo,e.method,e.path,
+e.handler,e.handler_method,e.file_path,e.line,e.source_kind,e.confidence
+FROM endpoints e JOIN services s ON s.service_key=e.service_key
+WHERE e.service_key=? AND e.file_path=? AND e.line BETWEEN ? AND ?
+ORDER BY abs(e.line-?) LIMIT 1`, serviceKey, filePath, startLine, endLine, startLine+8)
+	var endpoint domain.EndpointRecord
+	var source string
+	if err := row.Scan(&endpoint.ServiceKey, &endpoint.ServiceName, &endpoint.Repo, &endpoint.Method,
+		&endpoint.Path, &endpoint.Handler, &endpoint.HandlerMethod, &endpoint.File,
+		&endpoint.Line, &source, &endpoint.Confidence); err != nil {
+		return domain.EndpointRecord{}, err
+	}
+	endpoint.Source = domain.SourceKind(source)
+	return endpoint, nil
+}
+
 func (store *SQLite) queryServices(ctx context.Context, where string, args []any) ([]domain.ServiceRecord, error) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()

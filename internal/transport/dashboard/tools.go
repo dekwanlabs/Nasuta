@@ -3,15 +3,16 @@ package dashboard
 import (
 	"context"
 	"fmt"
-	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"github.com/dekwanlabs/nasuta/semantic"
 )
 
@@ -22,13 +23,21 @@ type enrichedNode struct {
 	DownstreamFile string         `json:"downstreamFile,omitempty"`
 	DownstreamLine int            `json:"downstreamLine,omitempty"`
 	Children       []enrichedNode `json:"children,omitempty"`
+	Depth          int            `json:"depth,omitempty"`
+	CallLine       int            `json:"callLine,omitempty"`
+	CallCol        int            `json:"callCol,omitempty"`
+	Provenance     string         `json:"provenance,omitempty"`
+	Bridge         bool           `json:"bridge,omitempty"`
 }
 
 type endpointChain struct {
-	Method  codegraph.Node `json:"method"`
-	Service string         `json:"service"`
-	Callers []enrichedNode `json:"callers"`
-	Callees []enrichedNode `json:"callees"`
+	Method       codegraph.Node      `json:"method"`
+	Service      string              `json:"service"`
+	Callers      []enrichedNode      `json:"callers"`
+	Callees      []enrichedNode      `json:"callees"`
+	Truncated    map[string]bool     `json:"truncated"`
+	NextFrontier map[string][]string `json:"nextFrontier,omitempty"`
+	Unresolved   map[string][]string `json:"unresolved,omitempty"`
 }
 
 func (handler *Handler) APISummary(w http.ResponseWriter, r *http.Request) {
@@ -241,28 +250,32 @@ func (handler *Handler) IndexSummary(w http.ResponseWriter, r *http.Request) {
 func (handler *Handler) GetSymbol(w http.ResponseWriter, r *http.Request) {
 	q := httputil.Query(r)
 	query := q.Str("query")
+	file := q.Str("file")
+	qualifiedName := q.Str("qualified_name")
 	limit := q.Int("limit", 5)
 	if q.Err() != nil {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	httputil.WriteJSON(w, handler.tools.GetSymbol(r.Context(), query, limit))
+	httputil.WriteJSON(w, handler.tools.GetSymbolFiltered(r.Context(), query, file, qualifiedName, limit))
 }
 
 func (handler *Handler) TraceCalls(w http.ResponseWriter, r *http.Request) {
 	q := httputil.Query(r)
-	query := q.Str("query")
-	direction := q.StrDefault("direction", "callers")
-	limit := q.Int("limit", 5)
+	request := callchain.Request{
+		Query: q.Str("query"), File: q.Str("file"), Line: q.Int("line", 0),
+		QualifiedName: q.Str("qualified_name"), Direction: q.StrDefault("direction", "both"),
+		MaxDepth: q.Int("max_depth", 3), MaxNodes: q.Int("max_nodes", 40), MaxFanout: q.Int("max_fanout", 20),
+	}
 	if q.Err() != nil {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	httputil.WriteJSON(w, handler.tools.TraceCalls(r.Context(), query, direction, limit))
+	httputil.WriteJSON(w, handler.tools.TraceCalls(r.Context(), request))
 }
 
 func (handler *Handler) APICodeGraphEndpoint(w http.ResponseWriter, r *http.Request) {
-	if handler.codegraphDB == nil {
+	if handler.callChain == nil || !handler.callChain.Available() {
 		httputil.WriteServiceUnavailable(w, "codegraph not available")
 		return
 	}
@@ -277,142 +290,51 @@ func (handler *Handler) APICodeGraphEndpoint(w http.ResponseWriter, r *http.Requ
 		httputil.WriteBadRequest(w, "?line required")
 		return
 	}
-	log.Infof("[codegraph] endpoint chain: %s:%d", file, line)
-	chain, err := handler.codegraphDB.GetCallChainByFile(file, line, 30)
+	depth := q.Int("depth", 3)
+	if q.Err() != nil {
+		httputil.WriteBadRequest(w, q.Err().Error())
+		return
+	}
+	chainResult, err := handler.callChain.Trace(r.Context(), callchain.Request{
+		File: file, Line: line, Direction: "both", MaxDepth: depth, MaxNodes: 80, MaxFanout: 30,
+	})
 	if err != nil {
-		log.Errorf("[codegraph] endpoint chain error: %v", err)
 		httputil.WriteErr(w, err)
 		return
 	}
-
-	edges, _ := handler.db.Edges(r.Context())
-	resolveTarget := func(filePath string) string {
-		if filePath == "" {
-			return ""
-		}
-		for _, e := range edges {
-			for _, ev := range e.Evidence {
-				if ev.Path != "" && strings.EqualFold(ev.Path, filePath) {
-					return e.To
-				}
-			}
-		}
-		return ""
-	}
-
-	ownService := serviceFromPath(chain.Node.FilePath)
-	const minCrossSvcConfidence = 0.8
-	dropped := 0
-	enrich := func(nodes []codegraph.Node) []enrichedNode {
-		out := []enrichedNode{}
-		for _, n := range nodes {
-			svc := serviceFromPath(n.FilePath)
-			target := resolveTarget(n.FilePath)
-			crossService := svc != ownService
-			if crossService && target == "" {
-				log.Infof("[codegraph] drop (cross-svc non-feign): %s (%s) conf=%.2f", n.Name, svc, n.Confidence)
-				dropped++
-				continue
-			}
-			if crossService && n.Confidence > 0 && n.Confidence < minCrossSvcConfidence {
-				log.Infof("[codegraph] drop (low-confidence cross-svc): %s (%s) conf=%.2f", n.Name, svc, n.Confidence)
-				dropped++
-				continue
-			}
-			en := enrichedNode{Node: n, Service: svc}
-			if target != "" {
-				if httpMethod, path, ok := handler.codegraphDB.RouteAt(n.FilePath, n.StartLine); ok {
-					en.TargetService = target
-					if impl, err := handler.codegraphDB.ResolveDownstreamMethod(target, httpMethod, path); err == nil && impl != nil {
-						en.DownstreamFile = impl.FilePath
-						en.DownstreamLine = impl.StartLine
-						log.Infof("[codegraph] feign %s %s -> %s %s:%d", httpMethod, path, target, impl.FilePath, impl.StartLine)
-					} else {
-						log.Infof("[codegraph] feign %s %s -> %s: impl not found", httpMethod, path, target)
-					}
-				} else {
-					log.Warnf("[codegraph] skip non-route feign method: %s @ %s:%d", n.Name, n.FilePath, n.StartLine)
-				}
-			}
-			out = append(out, en)
-		}
-		return out
-	}
-
-	callers := enrich(chain.Callers)
-	callees := enrich(chain.Callees)
-
-	depth := httputil.Query(r).Int("depth", 0)
-	if depth <= 0 {
-		depth = 3
-	}
-	if depth > 5 {
-		depth = 5
-	}
-	if depth > 1 {
-		for i := range callees {
-			if callees[i].DownstreamFile != "" {
-				expandDownstream(&callees[i], handler, depth-1, resolveTarget)
-			}
-		}
-	}
-
-	result := endpointChain{
-		Method:  chain.Node,
-		Service: ownService,
-		Callers: callers,
-		Callees: callees,
-	}
-	log.Infof("[codegraph] endpoint chain ok: method=%s callers=%d callees=%d dropped=%d", result.Method.Name, len(result.Callers), len(result.Callees), dropped)
-	httputil.WriteJSON(w, result)
-}
-
-func expandDownstream(en *enrichedNode, h *Handler, depth int, resolveTarget func(string) string) {
-	if depth <= 0 || en.DownstreamFile == "" || h.codegraphDB == nil {
+	if chainResult.Target == nil {
+		httputil.WriteErr(w, fmt.Errorf("codegraph: no callable node at %s:%d", file, line))
 		return
 	}
-	chain, err := h.codegraphDB.GetCallChainByFile(en.DownstreamFile, en.DownstreamLine, 20)
-	if err != nil {
-		return
+	response := endpointChain{
+		Method: chainResult.Target.Node, Service: chainResult.Target.ServiceName,
+		Callers: dashboardNodes(chainResult.Callers, true), Callees: dashboardNodes(chainResult.Callees, false),
+		Truncated:    map[string]bool{"callers": chainResult.Callers.Truncated, "callees": chainResult.Callees.Truncated},
+		NextFrontier: map[string][]string{"callers": chainResult.Callers.NextFrontier, "callees": chainResult.Callees.NextFrontier},
+		Unresolved:   map[string][]string{"callers": chainResult.Callers.Unresolved, "callees": chainResult.Callees.Unresolved},
 	}
-	own := serviceFromPath(chain.Node.FilePath)
-	for _, n := range chain.Callees {
-		svc := serviceFromPath(n.FilePath)
-		target := resolveTarget(n.FilePath)
-		if svc != own && target == "" {
-			continue
-		}
-		if svc != own && n.Confidence > 0 && n.Confidence < 0.8 {
-			continue
-		}
-		child := enrichedNode{Node: n, Service: svc}
-		if target != "" {
-			if m, p, ok := h.codegraphDB.RouteAt(n.FilePath, n.StartLine); ok {
-				child.TargetService = target
-				if impl, e := h.codegraphDB.ResolveDownstreamMethod(target, m, p); e == nil && impl != nil {
-					child.DownstreamFile = impl.FilePath
-					child.DownstreamLine = impl.StartLine
-				}
-			}
-		}
-		expandDownstream(&child, h, depth-1, resolveTarget)
-		en.Children = append(en.Children, child)
-	}
+	httputil.WriteJSON(w, response)
 }
 
-func serviceFromPath(filePath string) string {
-	if filePath == "" {
-		return ""
+func dashboardNodes(direction callchain.DirectionResult, callers bool) []enrichedNode {
+	nodes := make([]enrichedNode, 0, len(direction.Hops))
+	for _, hop := range direction.Hops {
+		node := hop.Target
+		if callers {
+			node = hop.Source
+		}
+		enriched := enrichedNode{
+			Node: node.Node, Service: node.ServiceName, Depth: hop.Depth,
+			CallLine: hop.Edge.Line, CallCol: hop.Edge.Col, Provenance: hop.Edge.Provenance, Bridge: hop.Bridge,
+		}
+		if hop.Bridge && !callers {
+			enriched.TargetService = hop.Target.ServiceName
+			enriched.DownstreamFile = hop.Target.FilePath
+			enriched.DownstreamLine = hop.Target.StartLine
+		}
+		nodes = append(nodes, enriched)
 	}
-	seg := filePath
-	if i := strings.Index(seg, "/"); i >= 0 {
-		seg = seg[:i]
-	}
-	parts := strings.Split(seg, "__")
-	if len(parts) > 0 {
-		return parts[len(parts)-1]
-	}
-	return seg
+	return nodes
 }
 
 func (handler *Handler) APICodeGraphSource(w http.ResponseWriter, r *http.Request) {

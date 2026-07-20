@@ -29,6 +29,16 @@ type ToolRouteCandidate struct {
 	Intent string `json:"intent"`
 }
 
+// routeExampleJSON and toolExampleJSON are the exact shapes the routing contract
+// tells the model to return. Kept as named consts so a regression test can assert
+// they validate against the schema enforced in analyzeQuestion (top-level
+// "route"/"tools" wrappers). A prior flat form silently failed validation
+// ("missing route object") and degraded every routed query to the internal fallback.
+const (
+	routeExampleJSON = `{"route":{"sources":["internal","web"],"confidence":0.0}}`
+	toolExampleJSON  = `{"tools":{"tool_ids":[]}}`
+)
+
 const routingContract = `You are the evidence router for a software knowledge agent.
 Decide which external evidence sources are required to answer the current user request reliably.
 
@@ -48,7 +58,7 @@ Rules:
 - confidence measures confidence in this routing decision, from 0 to 1.
 
 Return a JSON object with this exact shape, using zero or more individual source names:
-{"sources":["internal","web"],"confidence":0.0}`
+` + routeExampleJSON
 
 func AnalyzeEvidence(
 	ctx context.Context,
@@ -101,7 +111,7 @@ func analyzeQuestion(
 Select only registered read tools whose declared intent is required by the current request.
 Do not select a tool merely because its capability is available or topically related.
 Return a JSON object with this exact shape:
-{"tool_ids":[]}
+`+toolExampleJSON+`
 Available tools: `+string(encoded))
 		properties = append(properties, "\"tools\"")
 	}

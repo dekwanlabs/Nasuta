@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
@@ -32,7 +33,8 @@ type Deps struct {
 	Embedder      embed.Embedder
 	WorkspaceRoot string
 	// DocStore is optional in deployments without MySQL.
-	DocStore docStore
+	DocStore  docStore
+	CallChain *callchain.Service
 }
 
 // docStore is the runbook-facing subset of the document store.
@@ -44,17 +46,21 @@ type docStore interface {
 
 // Service exposes the retrieval and analysis tools used by the agent.
 type Service struct {
-	db              *store.SQLite
-	graph           *graph.Graph
-	semantic        semantic.Store
-	embedder        embed.Embedder
-	workspaceRoot   string
-	docStore        docStore
-	bm25            atomic.Pointer[retrieval.BM25Builder]
-	mergedSvcCache  atomic.Pointer[[]domain.ServiceRecord]
-	denseWarnOnce   sync.Once
-	webSearchEngine string // duckduckgo | brave | bing | searxng
-	webSearchAPIKey string // API key for brave / etc.
+	db                    *store.SQLite
+	graph                 *graph.Graph
+	semantic              semantic.Store
+	embedder              embed.Embedder
+	workspaceRoot         string
+	docStore              docStore
+	callChain             *callchain.Service
+	bm25                  atomic.Pointer[retrieval.BM25Builder]
+	mergedSvcCache        atomic.Pointer[[]domain.ServiceRecord]
+	denseWarnOnce         sync.Once
+	webSearchEngine       string // registered provider name
+	webSearchAPIKey       string // API key for built-in credentialed providers
+	webSearchProviderOnce sync.Once
+	webSearchProvidersMu  sync.RWMutex
+	webSearchProviders    map[string]WebSearchProvider
 }
 
 func NewTools(d Deps) *Service {
@@ -65,6 +71,7 @@ func NewTools(d Deps) *Service {
 		embedder:      d.Embedder,
 		workspaceRoot: d.WorkspaceRoot,
 		docStore:      d.DocStore,
+		callChain:     d.CallChain,
 	}
 }
 
@@ -72,9 +79,28 @@ func (srv *Service) SetBM25(b *retrieval.BM25Builder) { srv.bm25.Store(b) }
 
 func (srv *Service) BM25View() *retrieval.BM25Builder { return srv.bm25.Load() }
 
-func (srv *Service) InvalidateServices()         { srv.mergedSvcCache.Store(nil) }
-func (srv *Service) SetWebSearchEngine(v string) { srv.webSearchEngine = v }
+func (srv *Service) InvalidateServices() { srv.mergedSvcCache.Store(nil) }
+func (srv *Service) SetWebSearchEngine(v string) {
+	srv.webSearchEngine = strings.ToLower(strings.TrimSpace(v))
+}
 func (srv *Service) SetWebSearchAPIKey(v string) { srv.webSearchAPIKey = v }
+
+// RegisterWebSearchProvider adds or replaces a named search provider.
+// Registration is intended for application wiring before requests begin.
+func (srv *Service) RegisterWebSearchProvider(name string, provider WebSearchProvider) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return fmt.Errorf("web search provider name is empty")
+	}
+	if provider == nil {
+		return fmt.Errorf("web search provider %q is nil", name)
+	}
+	srv.ensureWebSearchProviders()
+	srv.webSearchProvidersMu.Lock()
+	srv.webSearchProviders[name] = provider
+	srv.webSearchProvidersMu.Unlock()
+	return nil
+}
 
 func (srv *Service) semanticEnabled() bool {
 	return srv.semantic != nil && srv.semantic.Capabilities().Dense &&
@@ -1017,10 +1043,13 @@ func runbookSearchHitsToMaps(hits []domain.RunbookSearchHit) []map[string]any {
 	return out
 }
 
-// GetSymbol queries the codegraph SQLite index for function-level nodes
-// matching the keyword and reads their source from disk.
 // GetSymbol searches codegraph symbols and loads their source snippets.
 func (srv *Service) GetSymbol(ctx context.Context, query string, limit int) map[string]any {
+	return srv.GetSymbolFiltered(ctx, query, "", "", limit)
+}
+
+// GetSymbolFiltered applies explicit file and qualified-name disambiguation.
+func (srv *Service) GetSymbolFiltered(ctx context.Context, query, file, qualifiedName string, limit int) map[string]any {
 	root := srv.workspaceRoot
 	if root == "" {
 		return map[string]any{"matches": nil, "error": "codegraph: no workspace root configured"}
@@ -1042,7 +1071,9 @@ func (srv *Service) GetSymbol(ctx context.Context, query string, limit int) map[
 	}
 	defer db.Close()
 
-	nodes, err := searchCgNodes(ctx, db, query, limit*3)
+	nodes, err := db.SearchSymbols(ctx, codegraph.SymbolQuery{
+		Terms: symbolQueryTokens(query), PathPrefixes: nonEmptyStrings(file), Limit: limit * 4,
+	})
 	if err != nil {
 		return map[string]any{"matches": []any{}, "error": err.Error()}
 	}
@@ -1062,102 +1093,77 @@ func (srv *Service) GetSymbol(ctx context.Context, query string, limit int) map[
 		case "field", "import", "namespace", "file", "constant":
 			continue
 		}
+		if qualifiedName != "" && !strings.EqualFold(n.QualifiedName, qualifiedName) {
+			continue
+		}
 		source := readNodeSource(root, n)
 		matches = append(matches, map[string]any{
-			"function": n.Name,
-			"kind":     n.Kind,
-			"file":     n.FilePath,
-			"line":     n.StartLine,
-			"source":   source,
+			"id": n.ID, "function": n.Name, "qualifiedName": n.QualifiedName,
+			"kind": n.Kind, "file": n.FilePath, "line": n.StartLine, "source": source,
 		})
 		added++
 	}
 	return map[string]any{"matches": matches}
 }
 
-// TraceCalls resolves query to a callable node, then returns its callers
-// or callees with source bodies read from disk.
+func nonEmptyStrings(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return []string{value}
+}
+
 // TraceCalls resolves a symbol and walks its callers or callees.
-func (srv *Service) TraceCalls(ctx context.Context, query, direction string, limit int) map[string]any {
-	root := srv.workspaceRoot
-	if root == "" {
-		return map[string]any{"nodes": nil, "error": "codegraph: no workspace root configured"}
+func (srv *Service) TraceCalls(ctx context.Context, request callchain.Request) map[string]any {
+	if srv.callChain == nil || !srv.callChain.Available() {
+		return map[string]any{"error": "call chain unavailable: codegraph or structure index is not ready"}
 	}
-	if direction != "callees" {
-		direction = "callers"
-	}
-	if limit <= 0 {
-		limit = 5
-	}
-	if limit > 10 {
-		limit = 10
-	}
-
-	db, err := codegraph.Open(root)
+	result, err := srv.callChain.Trace(ctx, request)
 	if err != nil {
-		return map[string]any{"nodes": nil, "error": err.Error()}
+		return map[string]any{"error": err.Error()}
 	}
-	if db == nil {
-		return map[string]any{"nodes": nil, "error": "codegraph not indexed"}
-	}
-	defer db.Close()
+	return callChainResult(srv.workspaceRoot, result)
+}
 
-	// Resolve query to the best matching callable node.
-	found, err := searchCgNodes(ctx, db, query, limit*3)
-	if err != nil {
-		return map[string]any{"nodes": []any{}, "error": err.Error()}
-	}
-	if len(found) == 0 {
-		return map[string]any{"nodes": []any{}}
-	}
-	var target *codegraph.Node
-	for i := range found {
-		switch found[i].Kind {
-		case "field", "import", "namespace", "file", "constant":
-			continue
+func callChainResult(root string, result callchain.Result) map[string]any {
+	const sourceCap = 1500
+	decorate := func(direction callchain.DirectionResult, callers bool) map[string]any {
+		nodes := make([]map[string]any, 0, len(direction.Hops))
+		for _, hop := range direction.Hops {
+			node := hop.Target
+			if callers {
+				node = hop.Source
+			}
+			source := readNodeSource(root, node.Node)
+			if len(source) > sourceCap {
+				source = source[:sourceCap] + "\n...(truncated)"
+			}
+			nodes = append(nodes, map[string]any{
+				"id": node.ID, "function": node.Name, "qualifiedName": node.QualifiedName,
+				"kind": node.Kind, "file": node.FilePath, "line": node.StartLine,
+				"service": node.ServiceName, "depth": hop.Depth, "source": source,
+				"callSite":   map[string]any{"line": hop.Edge.Line, "col": hop.Edge.Col},
+				"confidence": hop.Edge.Confidence, "provenance": hop.Edge.Provenance, "bridge": hop.Bridge,
+			})
 		}
-		target = &found[i]
-		break
-	}
-	if target == nil {
-		return map[string]any{"nodes": []any{}}
-	}
-
-	// Walk the call graph transitively with BFS up to 3 hops.
-	// This usually covers controller -> feign -> impl -> service in one call.
-	// GetRelatedChain still caps fan-out per hop to avoid graph explosion.
-	chainLimit := limit
-	if chainLimit > 8 {
-		chainLimit = 8
-	}
-	const chainDepth = 3
-	const chainSourceCap = 1500
-	chain, err := db.GetRelatedChain(target.ID, direction, chainDepth, chainLimit)
-	if err != nil {
-		return map[string]any{"target": map[string]any{"function": target.Name, "kind": target.Kind, "file": target.FilePath, "line": target.StartLine}, "direction": direction, "error": err.Error()}
-	}
-
-	nodes := make([]any, 0, len(chain))
-	for _, c := range chain {
-		src := readNodeSource(root, c.Node)
-		if len(src) > chainSourceCap {
-			src = src[:chainSourceCap] + "\n...(truncated)"
+		return map[string]any{
+			"nodes": nodes, "hops": direction.Hops, "truncated": direction.Truncated,
+			"nextFrontier": direction.NextFrontier, "unresolved": direction.Unresolved,
 		}
-		nodes = append(nodes, map[string]any{
-			"function": c.Name,
-			"kind":     c.Kind,
-			"file":     c.FilePath,
-			"line":     c.StartLine,
-			"depth":    c.Depth,
-			"source":   src,
-		})
 	}
-	return map[string]any{
-		"target":    map[string]any{"function": target.Name, "kind": target.Kind, "file": target.FilePath, "line": target.StartLine},
-		"direction": direction,
-		"depth":     chainDepth,
-		"nodes":     nodes,
+	response := map[string]any{
+		"direction": result.Direction, "maxDepth": result.MaxDepth,
+		"maxNodes": result.MaxNodes, "maxFanout": result.MaxFanout,
+		"callers": decorate(result.Callers, true), "callees": decorate(result.Callees, false),
 	}
+	if result.Target != nil {
+		response["target"] = result.Target
+	}
+	if len(result.Candidates) > 0 {
+		response["candidates"] = result.Candidates
+		response["error"] = "ambiguous symbol; provide file or qualified_name"
+	}
+	return response
 }
 
 func searchCgNodes(ctx context.Context, db *codegraph.DB, query string, limit int) ([]codegraph.Node, error) {

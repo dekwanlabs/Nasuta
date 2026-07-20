@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -125,4 +126,39 @@ func TestBindToolIDsRejectsUnregisteredTool(t *testing.T) {
 	if err == nil {
 		t.Fatal("unregistered routed tool was accepted")
 	}
+}
+
+// TestRoutingExamplesValidateAgainstSchema guards against the prompt/validator
+// schema drift that silently dropped web routing: the contract examples must
+// parse and validate under the same schema analyzeQuestion enforces (top-level
+// "route"/"tools" wrappers). A flat example such as {"sources":...} without the
+// "route" wrapper is rejected as "missing route object", degrading every routed
+// query to the internal fallback so web is never triggered.
+func TestRoutingExamplesValidateAgainstSchema(t *testing.T) {
+	routeTop := mustParseJSON(t, routeExampleJSON)
+	routeRaw, ok := routeTop["route"].(map[string]any)
+	if !ok {
+		t.Fatalf("routeExampleJSON missing top-level \"route\" object: %s", routeExampleJSON)
+	}
+	if _, err := bindPlanDecision(routeRaw); err != nil {
+		t.Fatalf("routeExampleJSON does not validate: %v", err)
+	}
+
+	toolTop := mustParseJSON(t, toolExampleJSON)
+	toolsRaw, ok := toolTop["tools"].(map[string]any)
+	if !ok {
+		t.Fatalf("toolExampleJSON missing top-level \"tools\" object: %s", toolExampleJSON)
+	}
+	if _, err := bindToolIDs(toolsRaw, nil); err != nil {
+		t.Fatalf("toolExampleJSON does not validate: %v", err)
+	}
+}
+
+func mustParseJSON(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("example is not valid JSON %q: %v", raw, err)
+	}
+	return m
 }

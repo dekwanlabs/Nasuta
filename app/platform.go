@@ -14,7 +14,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/approval"
 	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/indexing"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/rbac"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
 	"github.com/dekwanlabs/nasuta/internal/transport/incidenthttp"
@@ -24,6 +26,7 @@ import (
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
+	"github.com/dekwanlabs/nasuta/websearch"
 	"github.com/dekwanlabs/nasuta/writeaction"
 )
 
@@ -43,6 +46,8 @@ type Platform struct {
 	incidents   *incident.Manager
 	actions     *approval.Service
 	incidentAPI *incidenthttp.Handler
+	codegraph   *codegraph.DB
+	callChain   *callchain.Service
 }
 
 // New constructs the reusable platform without registering scenario routes.
@@ -54,9 +59,16 @@ func New() (*Platform, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build platform index: %w", err)
 	}
+	codeGraph, err := codegraph.Open(cfg.WorkspaceRoot)
+	if err != nil {
+		log.Warnf("[server] codegraph call-chain disabled: %v", err)
+		codeGraph = nil
+	}
+	callChainService := callchain.New(index.DB, codeGraph)
 	knowledgeService := agent.NewTools(agent.Deps{
 		DB: index.DB, Graph: index.Graph, Semantic: index.Semantic,
 		Embedder: index.Embedder, WorkspaceRoot: cfg.WorkspaceRoot, DocStore: index.DocDB(),
+		CallChain: callChainService,
 	})
 	index.SetTools(knowledgeService)
 	knowledgeService.SetWebSearchEngine(cfg.WebSearchEngine)
@@ -71,6 +83,7 @@ func New() (*Platform, error) {
 		cfg: cfg, settings: settings, index: index, knowledge: knowledgeService,
 		registry: registry, readTools: tool.NewReadRegistry(registry),
 		authDB: authDB, authService: authService,
+		codegraph: codeGraph, callChain: callChainService,
 	}
 	platform.initRBAC()
 	return platform, nil
@@ -124,6 +137,11 @@ func (platform *Platform) Knowledge() knowledge.API { return platform.knowledge 
 
 // ReadTools returns the restricted publisher available to scenario code.
 func (platform *Platform) ReadTools() *tool.ReadRegistry { return platform.readTools }
+
+// RegisterWebSearchProvider adds or replaces a search provider for this host.
+func (platform *Platform) RegisterWebSearchProvider(name string, provider websearch.Provider) error {
+	return platform.knowledge.RegisterWebSearchProvider(name, provider)
+}
 
 func (platform *Platform) configureIncidents(evidence incident.EvidenceProvider) error {
 	if platform.authDB == nil {
@@ -190,7 +208,7 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 		platform.index.DB, platform.index.DocDB(), platform.authDB,
 		platform.index.Semantic, platform.index.Embedder, platform.index.Graph,
 		platform.knowledge, platform.cfg, platform.settings, platform.index,
-		platform.registry, platform.writeReady,
+		platform.registry, platform.writeReady, platform.codegraph, platform.callChain,
 	)
 	if platform.rolePrompt != nil {
 		dashboardHandler.SetRolePrompt(platform.rolePrompt)
@@ -231,6 +249,9 @@ func (platform *Platform) Close() error {
 	}
 	if platform.incidents != nil {
 		_ = platform.incidents.Close()
+	}
+	if platform.callChain != nil {
+		_ = platform.callChain.Close()
 	}
 	platform.index.Close()
 	return nil

@@ -661,7 +661,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	log.InfofCtx(ctx, "[qa] runAgent runID=%s", runID)
 
 	runMode := "single"
-	maxSteps := svc.agent.MaxStepsFor(question)
+	maxSteps := svc.agent.MaxStepsForPlan(question, plan)
 	if svc.runStore != nil {
 		if err := svc.runStore.Create(RunRecord{
 			ID:        runID,
@@ -685,7 +685,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 			Output: map[string]any{"records": len(recalled), "characters": len([]rune(formatted))},
 		})
 	}
-	instructions = append(instructions, llm.Message{Role: "system", Content: resolveIdentity(rolePrompt)})
+	conversation.RolePrompt = rolePrompt
 	conversation.Instructions = instructions
 
 	go func() {

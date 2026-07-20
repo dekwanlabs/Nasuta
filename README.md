@@ -62,7 +62,7 @@ GOWORK=off go test ./...
 
 ## 独立启动
 
-直接运行时，使用 `NASUTA_*` 配置 Nasuta；已有上层应用的 `CODELOOM_*` 环境变量仍兼容：
+直接运行时，使用 `NASUTA_*` 配置 Nasuta：
 
 ```bash
 GOWORK=off go run ./cmd/nasuta

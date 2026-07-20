@@ -62,6 +62,7 @@ const (
 	EdgeHTTP    EdgeType = "http"    // RestTemplate/WebClient/raw HTTP URL
 	EdgeGRPC    EdgeType = "grpc"    // gRPC client
 	EdgeRPC     EdgeType = "rpc"     // Dubbo or other RPC
+	EdgeKafka   EdgeType = "kafka"   // Kafka producer-to-consumer topic flow
 	EdgeRunbook EdgeType = "runbook" // declared in runbook frontmatter
 )
 
