@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -66,6 +67,23 @@ func TestSelectRoutedToolsHidesUnmatchedReadIntent(t *testing.T) {
 	filtered, _ = selectRoutedTools(snapshot, []string{"runtime"})
 	if _, ok := filtered.Get("runtime"); !ok {
 		t.Fatal("matched routed read tool was not visible")
+	}
+}
+
+func TestContextualRoutedToolIDsRetainsCandidatesForInternalFollowUp(t *testing.T) {
+	candidates := []retrieval.ToolRouteCandidate{{ID: "runtime", Intent: "current runtime evidence"}}
+	internalPlan := domain.EvidencePlan{Sources: domain.Internal}
+	selected, retained := contextualRoutedToolIDs(nil, candidates, "prior runtime investigation", internalPlan)
+	if !retained || len(selected) != 1 || selected[0] != "runtime" {
+		t.Fatalf("selected=%v retained=%v", selected, retained)
+	}
+	selected, retained = contextualRoutedToolIDs(nil, candidates, "prior runtime investigation", domain.DirectPlan())
+	if retained || len(selected) != 0 {
+		t.Fatalf("direct selected=%v retained=%v", selected, retained)
+	}
+	selected, retained = contextualRoutedToolIDs([]string{"runtime"}, candidates, "context", internalPlan)
+	if retained || len(selected) != 1 {
+		t.Fatalf("existing selection=%v retained=%v", selected, retained)
 	}
 }
 

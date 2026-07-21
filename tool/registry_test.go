@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -78,6 +79,27 @@ func TestExecutorValidatesRequiredArguments(t *testing.T) {
 	_, err := NewExecutor(0).Execute(context.Background(), registry.Snapshot(ReadPolicy()), "required", Arguments{})
 	if err == nil {
 		t.Fatal("executor accepted missing required argument")
+	}
+}
+
+func TestExecutorRejectsUnknownArgumentsWhenSchemaIsClosed(t *testing.T) {
+	registry := NewRegistry()
+	candidate := testTool("closed", "ok")
+	candidate.InputSchema = JSONSchema{
+		"type": TypeObject,
+		"properties": map[string]any{
+			"query": map[string]any{"type": TypeString},
+		},
+		"additionalProperties": false,
+	}
+	if err := registry.Register(candidate); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewExecutor(0).Execute(context.Background(), registry.Snapshot(ReadPolicy()), "closed", Arguments{
+		"query": "device", "url": "/ignored",
+	})
+	if err == nil || !strings.Contains(err.Error(), "arguments.url is not allowed") {
+		t.Fatalf("unknown argument error = %v", err)
 	}
 }
 

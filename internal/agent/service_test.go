@@ -202,7 +202,7 @@ func TestAskAgentDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 		if !request.Stream {
 			routerCalls++
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99}}"}}]}`))
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]}}"}}]}`))
 			return
 		}
 		agentCalls++

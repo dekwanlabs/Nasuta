@@ -47,6 +47,14 @@ func TestSystemPromptShape(t *testing.T) {
 	}
 }
 
+func TestSystemPromptRequiresEvidenceForPhysicalResourceNames(t *testing.T) {
+	for _, required := range []string{"database tables", "search indices", "must appear verbatim", "does not prove where user data is stored"} {
+		if !strings.Contains(systemPrompt, required) {
+			t.Fatalf("systemPrompt missing physical-resource evidence rule %q", required)
+		}
+	}
+}
+
 func TestComposeSystemPromptReplacesRoleSlotBeforeRules(t *testing.T) {
 	for name, template := range map[string]string{
 		"core":   systemPrompt,

@@ -19,6 +19,19 @@ const (
 // JSONSchema is the input contract published to models and MCP clients.
 type JSONSchema map[string]any
 
+// SchemaType is the JSON Schema primitive vocabulary shared by tool owners.
+type SchemaType string
+
+// Supported JSON Schema primitive types.
+const (
+	TypeObject SchemaType = "object"
+	TypeArray  SchemaType = "array"
+	TypeString SchemaType = "string"
+	TypeInt    SchemaType = "integer"
+	TypeNumber SchemaType = "number"
+	TypeBool   SchemaType = "boolean"
+)
+
 // Arguments contains one validated tool invocation.
 type Arguments map[string]any
 

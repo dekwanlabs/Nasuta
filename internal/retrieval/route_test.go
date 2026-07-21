@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -53,7 +54,7 @@ func TestBindPlanDecisionAllowsDirect(t *testing.T) {
 func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"web\"],\"confidence\":0.96}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"web\"],\"confidence\":0.96},\"query_terms\":{\"domain_terms\":[\"设备删除\"],\"identifiers\":[\"question\"]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -64,6 +65,9 @@ func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	}
 	if !result.Decision.Plan.Has(domain.Web) || result.Decision.Origin != domain.Model {
 		t.Fatalf("decision = %+v", result.Decision)
+	}
+	if len(result.Terms.DomainTerms) != 1 || result.Terms.DomainTerms[0] != "设备删除" || len(result.Terms.Identifiers) != 1 {
+		t.Fatalf("terms = %+v", result.Terms)
 	}
 }
 
@@ -101,7 +105,7 @@ func TestAnalyzeForPlanSkipsRouterWhenNoHelpersConfigured(t *testing.T) {
 func TestAnalyzeEvidenceSelectsRegisteredToolIntent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[\"runtime failure\"],\"identifiers\":[]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -115,6 +119,14 @@ func TestAnalyzeEvidenceSelectsRegisteredToolIntent(t *testing.T) {
 	}
 	if len(result.ToolIDs) != 1 || result.ToolIDs[0] != "runtime_logs" {
 		t.Fatalf("tool ids = %v", result.ToolIDs)
+	}
+}
+
+func TestToolRoutingContractUsesConversationContextForFollowUps(t *testing.T) {
+	for _, required := range []string{"Resolve pronouns", "conversation_context", "actual state", "runtime evidence"} {
+		if !strings.Contains(toolRoutingContract, required) {
+			t.Fatalf("tool routing contract missing %q", required)
+		}
 	}
 }
 
@@ -151,6 +163,22 @@ func TestRoutingExamplesValidateAgainstSchema(t *testing.T) {
 	}
 	if _, err := bindToolIDs(toolsRaw, nil); err != nil {
 		t.Fatalf("toolExampleJSON does not validate: %v", err)
+	}
+
+	termsTop := mustParseJSON(t, queryTermsExampleJSON)
+	termsRaw, ok := termsTop["query_terms"].(map[string]any)
+	if !ok {
+		t.Fatalf("queryTermsExampleJSON missing top-level query_terms object: %s", queryTermsExampleJSON)
+	}
+	if _, err := bindQueryTerms(termsRaw); err != nil {
+		t.Fatalf("queryTermsExampleJSON does not validate: %v", err)
+	}
+}
+
+func TestGroundedIdentifiersDropsModelInventedValues(t *testing.T) {
+	got := groundedIdentifiers([]string{"literal-42", "invented"}, "inspect literal-42")
+	if len(got) != 1 || got[0] != "literal-42" {
+		t.Fatalf("grounded identifiers = %v", got)
 	}
 }
 

@@ -108,4 +108,19 @@ func TestShouldExpandCodeGraphRequiresSymbolOrTraceIntent(t *testing.T) {
 	if !shouldExpandCodeGraph("explain this", QueryTerms{Identifiers: []string{"PaymentHandler"}}) {
 		t.Fatal("explicit identifier should expand CodeGraph")
 	}
+	if shouldExpandCodeGraph("explain this", QueryTerms{Identifiers: []string{"user@example.com", "1838204847723180034-opaque"}}) {
+		t.Fatal("business identifiers should not expand CodeGraph")
+	}
+}
+
+func TestBuildCodeGraphKeywordsDropsBusinessIdentifiers(t *testing.T) {
+	r := &Retriever{}
+	terms := QueryTerms{
+		DomainTerms: []string{"设备删除"},
+		Identifiers: []string{"PaymentHandler", "user@example.com", "1838204847723180034-opaque"},
+	}
+	got := r.buildCodeGraphKeywords(nil, terms)
+	if len(got) != 2 || got[0] != "paymenthandler" || got[1] != "设备删除" {
+		t.Fatalf("codegraph keywords = %v", got)
+	}
 }

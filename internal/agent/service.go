@@ -328,6 +328,13 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		log.WarnfCtx(ctx, "[qa] evidence planning degraded: %v", planningErr)
 		routedToolIDs = allRoutedToolIDs(toolCandidates)
 	}
+	var retainedContextTools bool
+	routedToolIDs, retainedContextTools = contextualRoutedToolIDs(
+		routedToolIDs, toolCandidates, routeContext, effectiveDecision.Plan,
+	)
+	if retainedContextTools {
+		log.InfofCtx(ctx, "[qa] contextual follow-up retained routed read tools: %v", routedToolIDs)
+	}
 	toolSnapshot, allowedToolIDs := selectRoutedTools(candidateSnapshot, routedToolIDs)
 	toolPolicy.AllowedIDs = allowedToolIDs
 	log.InfofCtx(ctx, "[qa] evidence plan proposed=%s proposed_sources=%v confidence=%.2f origin=%s effective=%s effective_sources=%v effective_confidence=%.2f effective_origin=%s",
@@ -409,9 +416,13 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if q == "" {
 		q = question
 	}
-	canonicalQuery := canonicalRetrievalQuery(q, retrievalPrefix)
+	retrievalTerms := strings.TrimSpace(strings.Join(terms.DomainTerms, " "))
+	if retrievalPrefix != "" {
+		retrievalTerms = strings.TrimSpace(retrievalPrefix + " " + retrievalTerms)
+	}
+	canonicalQuery := canonicalRetrievalQuery(q, retrievalTerms)
 	if canonicalQuery != q {
-		log.InfofCtx(ctx, "[qa] retrieval query: augmented with context terms (%d chars)", len(retrievalPrefix))
+		log.InfofCtx(ctx, "[qa] retrieval query: augmented with grounded terms (%d chars)", len(retrievalTerms))
 	}
 	if traceEnabled {
 		domain.RecordTrace(ctx, domain.EvaluationTrace{
@@ -474,6 +485,19 @@ func allRoutedToolIDs(candidates []retrieval.ToolRouteCandidate) []string {
 		ids = append(ids, candidate.ID)
 	}
 	return ids
+}
+
+func contextualRoutedToolIDs(
+	selected []string,
+	candidates []retrieval.ToolRouteCandidate,
+	routeContext string,
+	plan domain.EvidencePlan,
+) ([]string, bool) {
+	if len(selected) > 0 || strings.TrimSpace(routeContext) == "" || !plan.Has(domain.Internal) {
+		return selected, false
+	}
+	ids := allRoutedToolIDs(candidates)
+	return ids, len(ids) > 0
 }
 
 func selectRoutedTools(snapshot tool.Snapshot, routedIDs []string) (tool.Snapshot, map[tool.ToolID]struct{}) {

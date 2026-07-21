@@ -52,12 +52,12 @@ func validateTool(candidate Tool) error {
 }
 
 func validateSchema(schema map[string]any, path string) error {
-	typ, _ := schema["type"].(string)
+	typ := schemaType(schema)
 	if typ == "" {
 		return validateSchemaAlternatives(schema, path)
 	}
 	switch typ {
-	case "object":
+	case TypeObject:
 		properties, ok := schema["properties"].(map[string]any)
 		if !ok {
 			return fmt.Errorf("%s properties must be an object", path)
@@ -93,13 +93,13 @@ func validateSchema(schema map[string]any, path string) error {
 				}
 			}
 		}
-	case "array":
+	case TypeArray:
 		items, ok := schema["items"].(map[string]any)
 		if !ok {
 			return fmt.Errorf("%s items must be a schema object", path)
 		}
 		return validateSchema(items, path+"[]")
-	case "string", "integer", "number", "boolean":
+	case TypeString, TypeInt, TypeNumber, TypeBool:
 	default:
 		return fmt.Errorf("%s has unsupported type %q", path, typ)
 	}
@@ -130,9 +130,9 @@ func validateSchemaAlternatives(schema map[string]any, path string) error {
 }
 
 func validateArguments(schema map[string]any, value any, path string) error {
-	typ, _ := schema["type"].(string)
+	typ := schemaType(schema)
 	switch typ {
-	case "object":
+	case TypeObject:
 		object, ok := value.(map[string]any)
 		if !ok {
 			if args, argsOK := value.(Arguments); argsOK {
@@ -152,6 +152,9 @@ func validateArguments(schema map[string]any, value any, path string) error {
 		for name, raw := range object {
 			property, exists := properties[name]
 			if !exists {
+				if additional, configured := schema["additionalProperties"].(bool); configured && !additional {
+					return fmt.Errorf("%s.%s is not allowed", path, name)
+				}
 				continue
 			}
 			child, _ := property.(map[string]any)
@@ -159,7 +162,7 @@ func validateArguments(schema map[string]any, value any, path string) error {
 				return err
 			}
 		}
-	case "array":
+	case TypeArray:
 		items, ok := value.([]any)
 		if !ok {
 			return fmt.Errorf("%s must be an array", path)
@@ -170,11 +173,11 @@ func validateArguments(schema map[string]any, value any, path string) error {
 				return err
 			}
 		}
-	case "string":
+	case TypeString:
 		if _, ok := value.(string); !ok {
 			return fmt.Errorf("%s must be a string", path)
 		}
-	case "integer":
+	case TypeInt:
 		switch number := value.(type) {
 		case int:
 		case float64:
@@ -184,13 +187,13 @@ func validateArguments(schema map[string]any, value any, path string) error {
 		default:
 			return fmt.Errorf("%s must be an integer", path)
 		}
-	case "number":
+	case TypeNumber:
 		switch value.(type) {
 		case int, float64:
 		default:
 			return fmt.Errorf("%s must be a number", path)
 		}
-	case "boolean":
+	case TypeBool:
 		if _, ok := value.(bool); !ok {
 			return fmt.Errorf("%s must be a boolean", path)
 		}
@@ -199,6 +202,17 @@ func validateArguments(schema map[string]any, value any, path string) error {
 		return fmt.Errorf("%s has an unsupported value", path)
 	}
 	return nil
+}
+
+func schemaType(schema map[string]any) SchemaType {
+	switch value := schema["type"].(type) {
+	case SchemaType:
+		return value
+	case string:
+		return SchemaType(value)
+	default:
+		return ""
+	}
 }
 
 func requiredNames(raw any) []string {

@@ -35,9 +35,21 @@ type ToolRouteCandidate struct {
 // "route"/"tools" wrappers). A prior flat form silently failed validation
 // ("missing route object") and degraded every routed query to the internal fallback.
 const (
-	routeExampleJSON = `{"route":{"sources":["internal","web"],"confidence":0.0}}`
-	toolExampleJSON  = `{"tools":{"tool_ids":[]}}`
+	routeExampleJSON      = `{"route":{"sources":["internal","web"],"confidence":0.0}}`
+	toolExampleJSON       = `{"tools":{"tool_ids":[]}}`
+	queryTermsExampleJSON = `{"query_terms":{"domain_terms":[],"identifiers":[]}}`
 )
+
+const queryTermsContract = `Extract compact retrieval terms from the current question.
+- domain_terms: at most 5 discriminative domain phrases, including useful non-English phrases.
+- identifiers: at most 5 literal symbol names or opaque identifiers copied exactly from the question.
+- Do not classify identifiers and do not return actions, resources, services, or inferred values.
+Return a JSON object with this exact shape:
+` + queryTermsExampleJSON
+
+const toolRoutingContract = `Select only registered read tools whose declared intent is required by the current request.
+Do not select a tool merely because its capability is available or topically related.
+Resolve pronouns and omitted entities from conversation_context. When a contextual follow-up asks for the actual state of an entity already investigated with runtime evidence, keep the runtime evidence tool selected even if the user does not repeat words such as logs or online.`
 
 const routingContract = `You are the evidence router for a software knowledge agent.
 Decide which external evidence sources are required to answer the current user request reliably.
@@ -107,13 +119,15 @@ func analyzeQuestion(
 	}
 	if len(toolCandidates) > 0 {
 		encoded, _ := json.Marshal(toolCandidates)
-		contracts = append(contracts, `Tool routing contract:
-Select only registered read tools whose declared intent is required by the current request.
-Do not select a tool merely because its capability is available or topically related.
+		contracts = append(contracts, "Tool routing contract:\n"+toolRoutingContract+`
 Return a JSON object with this exact shape:
 `+toolExampleJSON+`
 Available tools: `+string(encoded))
 		properties = append(properties, "\"tools\"")
+	}
+	if fixedPlan == nil || len(toolCandidates) > 0 {
+		contracts = append(contracts, "Query terms contract:\n"+queryTermsContract)
+		properties = append(properties, "\"query_terms\"")
 	}
 	if len(properties) == 0 {
 		empty.Decision = decision
@@ -163,6 +177,18 @@ Available tools: `+string(encoded))
 				}
 				toolIDs = ids
 			}
+			if fixedPlan == nil || len(toolCandidates) > 0 {
+				termsRaw, ok := (*m)["query_terms"].(map[string]any)
+				if !ok {
+					return fmt.Errorf("missing query_terms object")
+				}
+				extracted, err := bindQueryTerms(termsRaw)
+				if err != nil {
+					return err
+				}
+				extracted.Identifiers = groundedIdentifiers(extracted.Identifiers, termsQuestion)
+				terms = extracted.normalize()
+			}
 			return nil
 		},
 	}
@@ -174,6 +200,44 @@ Available tools: `+string(encoded))
 	}
 
 	return AnalysisResult{Decision: decision, Question: clean, Terms: terms, ToolIDs: toolIDs}, nil
+}
+
+func bindQueryTerms(raw map[string]any) (QueryTerms, error) {
+	read := func(key string) ([]string, error) {
+		items, ok := raw[key].([]any)
+		if !ok {
+			return nil, fmt.Errorf("query_terms.%s must be an array", key)
+		}
+		values := make([]string, 0, len(items))
+		for i, item := range items {
+			value, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("query_terms.%s[%d] must be a string", key, i)
+			}
+			values = append(values, value)
+		}
+		return values, nil
+	}
+	domainTerms, err := read("domain_terms")
+	if err != nil {
+		return QueryTerms{}, err
+	}
+	identifiers, err := read("identifiers")
+	if err != nil {
+		return QueryTerms{}, err
+	}
+	return QueryTerms{DomainTerms: domainTerms, Identifiers: identifiers}, nil
+}
+
+func groundedIdentifiers(identifiers []string, question string) []string {
+	out := identifiers[:0]
+	for _, identifier := range identifiers {
+		identifier = strings.TrimSpace(identifier)
+		if identifier != "" && strings.Contains(question, identifier) {
+			out = append(out, identifier)
+		}
+	}
+	return out
 }
 
 func bindToolIDs(raw map[string]any, candidates []ToolRouteCandidate) ([]string, error) {

@@ -69,7 +69,9 @@ func (qt QueryTerms) allTerms() []string {
 	out := make([]string, 0, len(qt.DomainTerms)+len(qt.Identifiers))
 	out = append(out, qt.DomainTerms...)
 	for _, id := range qt.Identifiers {
-		out = append(out, strings.ToLower(id))
+		if isCodeIdentifier(id) {
+			out = append(out, strings.ToLower(id))
+		}
 	}
 	return out
 }
@@ -108,8 +110,19 @@ func ExtractTechTerms(question string) []string {
 
 var codeGraphIntentRe = regexp.MustCompile(`(?i)(调用链|调用关系|谁调用|被谁调用|调用方|被调用方|方法实现|函数实现|类定义|符号定义|写入路径|落库路径|call[ _-]?chain|caller|callee|callers|callees|method[ _-]?body|function[ _-]?body|symbol|implementation|write[ _-]?path)`)
 
+var codeIdentifierRe = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*(?:[.#:][A-Za-z_$][A-Za-z0-9_$]*)*(?:\(\))?$`)
+
+func isCodeIdentifier(value string) bool {
+	return codeIdentifierRe.MatchString(strings.TrimSpace(value))
+}
+
 func shouldExpandCodeGraph(question string, terms QueryTerms) bool {
-	return len(terms.Identifiers) > 0 || codeGraphIntentRe.MatchString(strings.TrimSpace(question))
+	for _, identifier := range terms.Identifiers {
+		if isCodeIdentifier(identifier) {
+			return true
+		}
+	}
+	return codeGraphIntentRe.MatchString(strings.TrimSpace(question))
 }
 
 // codegraphStopwords filters noisy tokens out of codegraph queries.
@@ -147,7 +160,9 @@ func (retrieve *Retriever) buildCodeGraphKeywords(services []string, terms Query
 		out = add(out, seen, s)
 	}
 	for _, id := range terms.Identifiers {
-		out = add(out, seen, id)
+		if isCodeIdentifier(id) {
+			out = add(out, seen, id)
+		}
 	}
 	for _, d := range terms.DomainTerms {
 		out = add(out, seen, d)
