@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 )
 
 func TestDecodeWebBodyUsesHTMLMetaCharset(t *testing.T) {
@@ -194,20 +196,24 @@ func TestWebSearchWithFetchSkipsIrrelevantCandidate(t *testing.T) {
 func TestWebSearchToolPayloadKeepsCandidatesBeforeFetchedContent(t *testing.T) {
 	response := WebSearchResponse{
 		Results: []WebSearchResult{{Title: "relevant candidate", URL: "https://example.com/result", Snippet: "candidate summary"}},
-		Fetched: &WebFetchedEvidence{Title: "large page", URL: "https://example.com/page", Content: strings.Repeat("page content ", 1200)},
+		Fetched: &WebFetchedEvidence{Title: "large page", URL: "https://example.com/page", Content: strings.Repeat("page content ", 4000)},
 	}
 	raw, err := json.Marshal(response)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
 
-	got := toolResultForLLM("web_search", string(raw), maxCharsForTool("web_search"))
+	got := tooloutput.Compress(tooloutput.Request{
+		Question:  "relevant candidate",
+		Content:   formatToolResultForLLM("web_search", string(raw)),
+		MaxTokens: defaultToolOutputTokenLimit,
+	}).Content
 	candidateAt := strings.Index(got, "relevant candidate")
 	evidenceAt := strings.Index(got, "FETCHED EVIDENCE")
 	if candidateAt < 0 || evidenceAt < 0 || candidateAt > evidenceAt {
 		t.Fatalf("tool payload did not preserve candidate-first ordering: %q", got[:min(len(got), 600)])
 	}
-	if !strings.HasSuffix(got, "...(truncated)") {
+	if !strings.Contains(got, `"compressed":true`) {
 		t.Fatal("large fetched content was not bounded")
 	}
 }

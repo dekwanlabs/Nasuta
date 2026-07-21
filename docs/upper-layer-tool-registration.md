@@ -93,6 +93,113 @@ type ReadToolSet struct {
 > 实践中一个上层应用通常只有一个 owner。上面第 1 条的"只增删自己名下的工具",在单
 > owner 下的意义就是:你的 `Reconcile` 只动自己的工具,永远不会误删平台内置工具。
 
+### 2.1 快速注册自己的工具
+
+最短路径是三步:拿到 `deps.ReadTools`、声明一个 `ReadToolSet`、在启动或配置变更时调用
+`Reconcile`。
+
+#### 第一步:在你的上层模块里写一个 `ReadToolSet`
+
+```go
+package mytools
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "strings"
+
+    "github.com/dekwanlabs/nasuta/tool"
+)
+
+func ReadToolSet(client *Client) tool.ReadToolSet {
+    set := tool.ReadToolSet{Owner: "myapp.runtime"}
+    if client == nil || !client.Enabled() {
+        return set // 禁用态返回空集,Reconcile 会摘除旧工具。
+    }
+    set.Tools = []tool.ReadTool{{
+        ID:          "myapp_lookup_runtime",
+        Description: "Look up read-only runtime status for one service. Returns status, timestamp, and short evidence.",
+        InputSchema: tool.JSONSchema{
+            "type": "object",
+            "properties": map[string]any{
+                "service": map[string]any{
+                    "type":        "string",
+                    "description": "Service key, for example payment-api.",
+                },
+            },
+            "required": []string{"service"},
+        },
+        Routing: &tool.RoutingSpec{
+            Intent: "Use when the request needs current read-only runtime status for a named service.",
+        },
+        Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
+            service := strings.TrimSpace(args.String("service"))
+            if service == "" {
+                return tool.Result{}, fmt.Errorf("service is required")
+            }
+            status, err := client.LookupStatus(ctx, service)
+            if err != nil {
+                return tool.Result{}, fmt.Errorf("lookup runtime status for %q: %w", service, err)
+            }
+            data, err := json.MarshalIndent(status, "", "  ")
+            if err != nil {
+                return tool.Result{}, fmt.Errorf("encode runtime status: %w", err)
+            }
+            return tool.Result{Content: string(data)}, nil
+        }),
+    }}
+    return set
+}
+```
+
+如果返回值本来就是结构体,可以把 `HandlerFunc` 换成 `JSONHandler`:
+
+```go
+Handler: tool.JSONHandler(func(ctx context.Context, args tool.Arguments) (*Status, error) {
+    return client.LookupStatus(ctx, args.String("service"))
+}),
+```
+
+#### 第二步:把 `ReadTools` 传到你的模块
+
+```go
+func New(deps app.ExtensionDeps) (app.Extension, error) {
+    runtime := NewRuntime(deps.Settings, deps.ReadTools)
+    return app.Extension{
+        RegisterRoutes: runtime.RegisterRoutes,
+        Close:          runtime.Close,
+    }, nil
+}
+```
+
+#### 第三步:启动和配置变更时都调用 `Reconcile`
+
+```go
+func NewRuntime(settings config.PlatformSettings, readTools *tool.ReadRegistry) *Runtime {
+    rt := &Runtime{settings: settings, readTools: readTools}
+    rt.reloadTools()
+    return rt
+}
+
+func (rt *Runtime) reloadTools() {
+    if rt.readTools == nil {
+        return
+    }
+    if err := rt.readTools.Reconcile(mytools.ReadToolSet(rt.client)); err != nil {
+        log.Errorf("[myapp] publish read tools: %v", err)
+    }
+}
+```
+
+调试时按这条链路查问题:
+
+1. `ReadToolSet.Owner` 非空且无首尾空格;
+2. `Tools` 里每个 `ID`、`Description`、`InputSchema`、`Handler` 都非空;
+3. `Reconcile` 没有返回错误;
+4. Agent 场景下 `Routing` 是否匹配当前问题;
+5. MCP 场景下是否误设了 `MCPHidden: true`。
+
 ---
 
 ## 3. 入参:`InputSchema`(JSON Schema)
@@ -265,7 +372,72 @@ func main() { nasutaapp.MustRun(runtime.New) }
 
 ---
 
-## 6. 检查清单
+## 6. 预算、注意事项和清单
+
+### 6.1 每个工具的上下文预算
+
+注册工具时没有单独的 `ContextBudget` 字段。Nasuta 统一按**使用场景**分配预算,所以工具
+作者要控制 `Result.Content` 的大小,而不是依赖注册器替你做业务级分页。
+
+| 场景 | 单工具可进入模型/上下文的预算 | 说明 |
+|------|-------------------------------|------|
+| Agent 普通工具调用 | 约 `10_000` estimated token/次工具结果 | `Result.Content` 先完整写入运行记录。模型侧内容超预算时按 JSON、JSONL 或文本结构分块,根据当前问题和调用参数选择相关块,再生成带覆盖元数据的合法 JSON envelope。 |
+| Agent 可信预取(`Prefetch`) | 所有预取块合计最多 `16_000` rune | 预取结果先变成 `PreloadedContext`,再和检索上下文合并。这个 `16_000` 是所有预取工具共享,不是每个工具各有 `16_000`。 |
+| 检索+预取总上下文 | 默认 `48_000` rune,可由平台 `context_budget` 调整 | 预取内容会优先写入,剩余预算留给普通检索上下文。若 `context_budget < 16_000`,预取上限也会被压到该总预算。 |
+| MCP 调用 | Nasuta 不做模型上下文裁剪 | MCP 返回完整 `Result.Content`;真正能放进模型多少由 MCP 客户端决定。Nasuta 只负责执行超时和参数校验。 |
+| 工具 schema/description | 没有单工具硬上限 | 工具定义会进入模型的工具列表。描述和 schema 越长,越挤占模型输入窗口,也越影响工具选择稳定性。 |
+
+执行时间预算也按场景统一处理:
+
+- Agent 普通工具调用默认 `15s` 超时;
+- MCP 调用默认 `30s` 超时;
+- 如果工具设置了 `Prefetch.Timeout > 0`,该超时会覆盖默认执行超时;
+- 超时通过 `context.Context` 传给 Handler,Handler 必须把 `ctx` 传给下游 HTTP/DB/RPC 调用。
+
+工具结果大小建议:
+
+- 普通工具尽量返回 `2_000` 到 `5_000` token 以内的高信号摘要,必要时提供 `limit`、`cursor`、`since` 等参数;
+- 日志、搜索、链路类工具返回排序后的 Top N,并说明 `truncated`、`next_cursor`、`total` 等边界;
+- 工具仍应在查询边界限制读取规模并返回 `total`、`truncated`、`next_cursor` 等业务边界;Runtime 压缩不能替代分页或 Top N;
+- 大 JSON 超出统一预算时由 Nasuta Runtime 做通用结构化压缩,工具作者不应感知模型预算或构造 `_nasuta` envelope;
+- 证据链接放 `References`,正文只放模型回答需要阅读的内容;
+- 如果工具经常需要超过 `10_000` token 才有用,优先拆成“搜索/列表工具 + 精读工具”。
+
+### 6.2 注册工具要注意什么
+
+#### 命名与所有权
+
+- `Owner` 用稳定命名空间,建议 `"<app>.<module>"`,例如 `"codeloom.observe"`;
+- `ID` 是 Agent 和 MCP 共享的全局稳定标识,发布后不要随意改名;
+- 上层工具最好带应用前缀,例如 `"myapp_lookup_runtime"`,避免和内置工具或其他上层冲突;
+- 同一个 `Owner` 下反复 `Reconcile` 是覆盖式发布,不要把其他模块的工具漏掉;
+- 不能注册 `KindWrite`,写操作走平台 `writeaction` 体系。
+
+#### 描述、路由与暴露面
+
+- `Description` 要写清“什么时候用、输入是什么、返回什么”,不要写实现细节或营销文案;
+- `Routing.Intent` 适合窄领域工具,能减少 Agent 每轮看到的无关工具;
+- 没有 `Routing` 的 read 工具会更容易进入 Agent 工具列表,只适合通用工具;
+- `MCPHidden: true` 只影响 MCP 列表,不影响 Agent 使用;
+- 不要把密钥、内部 URL token、用户隐私放进 description、schema 或工具结果。
+
+#### Schema 与参数
+
+- 顶层通常使用 `type: object`,并明确 `properties` 和 `required`;
+- 为可枚举参数写 `enum`,例如日志级别、方向、模式;
+- 给大结果工具提供 `limit`、`max_lines`、`minutes`、`cursor` 等收敛参数;
+- Handler 里仍要做业务校验,例如空字符串、时间窗口过大、服务不存在;
+- 未声明的多余参数会被忽略,不要依赖它们做隐藏开关。
+
+#### Handler 行为
+
+- Handler 必须是只读、幂等、可重试的;
+- 显式配置的后端失败时返回 `error`,不要静默降级或返回空结果;
+- 所有网络、数据库、RPC 调用都要使用传入的 `ctx`;
+- 返回内容要有边界,不要把原始全量日志、全量表、全量文件直接塞进 `Content`;
+- 错误信息要便于定位,但不要泄露密钥、连接串或完整敏感请求体。
+
+### 6.3 最终检查清单
 
 注册一个上层工具时,确认:
 

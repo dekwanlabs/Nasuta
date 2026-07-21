@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func drainRequestBody(r *http.Request) {
@@ -381,6 +383,84 @@ func (c *captureObserver) OnToken(_ context.Context, _ string, tok string) {
 }
 func (c *captureObserver) OnReasoning(_ context.Context, _ string, tok string) {
 	c.reasoning = append(c.reasoning, tok)
+}
+
+func TestRunPersistsFullToolOutputBeforeSendingCompressedModelContent(t *testing.T) {
+	fullContent := `{"records":[` + strings.Repeat(`{"name":"other","payload":"`+strings.Repeat("x", 200)+`"},`, 180) +
+		`{"name":"target","payload":"needle"}]}`
+	var modelToolContent string
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var request struct {
+			Messages []llm.Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&calls, 1) == 1 {
+			data := `{"choices":[{"delta":{"content":"查找目标记录。","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"large_read","arguments":"{\"target\":\"needle\"}"}}]},"finish_reason":"tool_calls"}]}`
+			_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
+			return
+		}
+		for _, message := range request.Messages {
+			if message.Role == "tool" && message.ToolCallID == "call-1" {
+				modelToolContent = message.Content
+			}
+		}
+		data := `{"choices":[{"delta":{"content":"已找到目标记录。"},"finish_reason":"stop"}]}`
+		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
+	}))
+	defer srv.Close()
+
+	registry := testRegistry(t, testAgentTool("large_read", ToolKindRead, func(context.Context, tool.Arguments) (string, error) {
+		return fullContent, nil
+	}))
+	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, &http.Client{})
+	observer := &captureObserver{}
+	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+		MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0,
+		Timeout: 5 * time.Second, AnswerReserve: time.Second,
+	}, observer, nil)
+
+	result, err := agent.RunWithPlan(
+		t.Context(),
+		"run_tool_compression",
+		"needle 对应的记录是什么？",
+		nil,
+		nil,
+		domain.EvidencePlan{Sources: domain.Internal},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("RunWithPlan() error = %v", err)
+	}
+	if result.Err != nil || result.Answer != "已找到目标记录。" {
+		t.Fatalf("result = %+v", result)
+	}
+
+	var persisted string
+	for _, step := range observer.steps {
+		if step.Kind == StepKindToolResult {
+			persisted = step.Content
+			break
+		}
+	}
+	if persisted != fullContent {
+		t.Fatalf("persisted tool output changed: got %d chars, want %d", len(persisted), len(fullContent))
+	}
+	if modelToolContent == "" || modelToolContent == fullContent {
+		t.Fatalf("model tool content was not compressed")
+	}
+	if !strings.Contains(modelToolContent, `"_nasuta"`) ||
+		!strings.Contains(modelToolContent, `"compressed":true`) ||
+		!strings.Contains(modelToolContent, "needle") {
+		t.Fatalf("model tool content missing envelope or relevant evidence: %s", modelToolContent)
+	}
 }
 
 func TestForceConclusion_StreamsLiveAndRecordsAnswer(t *testing.T) {

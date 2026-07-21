@@ -25,6 +25,7 @@ is a pointer, not a second copy.
 - **No silent fallbacks**: an explicitly configured backend that errors must
   fail loudly. Capability-boundary degradation (disable when credentials are
   absent) is fine; switching providers under the hood is not.
+- **Simplicity must be justified**: keep code concise, direct, and easy to read. Do not add speculative fallbacks, legacy compatibility paths, defensive branches, or abstractions without a concrete supported requirement. Before introducing a state machine, mode, enum, type assertion/switch, or polymorphic wrapper, identify the distinct lifecycle or behavior it represents and why ordinary control flow or existing types are insufficient. Remove the mechanism if it only renames conditions, hides coupling, or handles states that cannot occur.
 
 For architecture, conventions, and the full command list, see
 [CLAUDE.md](./CLAUDE.md).

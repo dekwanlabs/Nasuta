@@ -143,10 +143,10 @@ func TestToolExecutorAllowsRetryAfterFailure(t *testing.T) {
 	seen := map[string]bool{}
 	call := llm.ToolCall{ID: "1", Function: llm.ToolFunction{Name: "unstable", Arguments: `{}`}}
 	policy := ToolPolicyForPlan(domain.EvidencePlan{Sources: domain.AllEvidence}, true)
-	first, _ := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
-	second, _ := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
-	if first != "error: temporary failure" || second != "ok" || tries != 2 {
-		t.Fatalf("retry behavior = first:%q second:%q tries:%d", first, second, tries)
+	first := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
+	second := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
+	if first.FullContent != "error: temporary failure" || second.FullContent != "ok" || tries != 2 {
+		t.Fatalf("retry behavior = first:%q second:%q tries:%d", first.FullContent, second.FullContent, tries)
 	}
 }
 

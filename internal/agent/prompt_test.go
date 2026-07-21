@@ -82,6 +82,22 @@ func TestComposeSystemPromptReplacesRoleSlotBeforeRules(t *testing.T) {
 	}
 }
 
+func TestAllAgentPromptsExplainCompressedToolCoverage(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"core":   systemPrompt,
+		"direct": directAgentSystemPrompt,
+		"web":    webAgentSystemPrompt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, required := range []string{`"_nasuta.compressed"`, "omitted", "unknown"} {
+				if !strings.Contains(prompt, required) {
+					t.Fatalf("prompt missing compressed-result rule %q", required)
+				}
+			}
+		})
+	}
+}
+
 func TestSystemPromptDoesNotAllowInferenceToCompleteRuntimeChains(t *testing.T) {
 	for _, must := range []string{
 		"Inference must never create a missing execution hop",
