@@ -44,28 +44,32 @@ func (db *DB) migrate() error {
 	return nil
 }
 
-// User represents a Feishu-authenticated user.
+// User represents an authenticated user (via Feishu OAuth or email/password).
 type User struct {
-	ID         int64
-	FeishuUID  string
-	OpenID     string
-	Name       string
-	Email      string
-	AvatarURL  string
-	Department string
-	IsAdmin    bool
+	ID           int64
+	FeishuUID    string
+	OpenID       string
+	Name         string
+	Email        string
+	AvatarURL    string
+	Department   string
+	IsAdmin      bool
+	PasswordHash string
 }
 
+// ErrEmailExists is returned by CreateUserWithPassword when the email is taken.
+var ErrEmailExists = fmt.Errorf("email already registered")
+
 func (db *DB) UpsertUser(u *User) error {
-	var hasUsers int
-	if err := db.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ` + tblUsers + ` LIMIT 1)`).Scan(&hasUsers); err != nil {
-		return fmt.Errorf("check existing users: %w", err)
+	first, err := db.firstUserIsAdmin()
+	if err != nil {
+		return err
 	}
 	isAdmin := 0
-	if hasUsers == 0 {
+	if first {
 		isAdmin = 1
 	}
-	_, err := db.db.Exec(`
+	_, err = db.db.Exec(`
 		INSERT INTO `+tblUsers+` (feishu_uid, open_id, name, email, avatar_url, department, is_admin)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
@@ -80,16 +84,85 @@ func (db *DB) UpsertUser(u *User) error {
 	}
 	u.IsAdmin = isAdmin == 1
 	if u.IsAdmin {
-		if _, err := db.db.Exec(`INSERT IGNORE INTO `+tblUserRoles+` (user_id, role_id) VALUES (?,?)`, u.ID, adminRoleID); err != nil {
-			return fmt.Errorf("assign admin role: %w", err)
+		if err := db.assignAdminRole(u.ID); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
+// assignAdminRole grants the admin RBAC role, ignoring duplicates.
+func (db *DB) assignAdminRole(userID int64) error {
+	if _, err := db.db.Exec(`INSERT IGNORE INTO `+tblUserRoles+` (user_id, role_id) VALUES (?,?)`, userID, adminRoleID); err != nil {
+		return fmt.Errorf("assign admin role: %w", err)
+	}
+	return nil
+}
+
+// firstUserIsAdmin reports whether the users table is empty, so the first
+// registered account becomes admin.
+func (db *DB) firstUserIsAdmin() (bool, error) {
+	var hasUsers int
+	if err := db.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ` + tblUsers + ` LIMIT 1)`).Scan(&hasUsers); err != nil {
+		return false, fmt.Errorf("check existing users: %w", err)
+	}
+	return hasUsers == 0, nil
+}
+
+// GetUserByEmail returns the user for an email (including password hash), or nil.
+func (db *DB) GetUserByEmail(email string) (*User, error) {
+	u := &User{}
+	row := db.db.QueryRow(`SELECT id,COALESCE(feishu_uid,''),open_id,name,email,avatar_url,department,is_admin,password_hash FROM `+tblUsers+` WHERE email=?`, email)
+	var isAdmin int
+	err := row.Scan(&u.ID, &u.FeishuUID, &u.OpenID, &u.Name, &u.Email, &u.AvatarURL, &u.Department, &isAdmin, &u.PasswordHash)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	u.IsAdmin = isAdmin == 1
+	return u, nil
+}
+
+// CreateUserWithPassword inserts an email/password user (no feishu_uid). The
+// first user in the table becomes admin, mirroring the Feishu path.
+func (db *DB) CreateUserWithPassword(email, name, passwordHash string) (*User, error) {
+	if existing, err := db.GetUserByEmail(email); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return nil, ErrEmailExists
+	}
+	isAdmin, err := db.firstUserIsAdmin()
+	if err != nil {
+		return nil, err
+	}
+	adminFlag := 0
+	if isAdmin {
+		adminFlag = 1
+	}
+	res, err := db.db.Exec(
+		`INSERT INTO `+tblUsers+` (name, email, password_hash, is_admin) VALUES (?,?,?,?)`,
+		name, email, passwordHash, adminFlag,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert user: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("last insert id: %w", err)
+	}
+	if isAdmin {
+		if err := db.assignAdminRole(id); err != nil {
+			return nil, err
+		}
+	}
+	return &User{ID: id, Name: name, Email: email, IsAdmin: isAdmin}, nil
+}
+
 func (db *DB) GetUserByID(id int64) (*User, error) {
 	u := &User{}
-	row := db.db.QueryRow(`SELECT id,feishu_uid,open_id,name,email,avatar_url,department,is_admin FROM `+tblUsers+` WHERE id=?`, id)
+	row := db.db.QueryRow(`SELECT id,COALESCE(feishu_uid,''),open_id,name,email,avatar_url,department,is_admin FROM `+tblUsers+` WHERE id=?`, id)
 	var isAdmin int
 	err := row.Scan(&u.ID, &u.FeishuUID, &u.OpenID, &u.Name, &u.Email, &u.AvatarURL, &u.Department, &isAdmin)
 	if err == sql.ErrNoRows {

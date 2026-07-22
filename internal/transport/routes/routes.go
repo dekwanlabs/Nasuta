@@ -52,6 +52,8 @@ func Setup(mux *http.ServeMux, rc Config) {
 		pub("/auth/login", rc.Auth.Login)
 		pub("/auth/callback", rc.Auth.Callback)
 		pub("/auth/logout", rc.Auth.Logout)
+		pub("POST /auth/register", rc.Auth.Register)
+		pub("POST /auth/login/password", rc.Auth.LoginWithPassword)
 		mux.Handle("/auth/me", rc.Auth.Middleware(http.HandlerFunc(rc.Auth.Me)))
 	} else {
 		pub("/auth/login", authDisabled("auth not configured (set MYSQL_DSN + FEISHU_APP_ID)"))

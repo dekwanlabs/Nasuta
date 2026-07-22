@@ -38,16 +38,19 @@ func AllGroups() []MySQLGroup { return allMySQLGroups }
 var mysqlSchema = map[MySQLGroup][]string{
 	GroupAuth: {
 		`CREATE TABLE IF NOT EXISTS users (
-				id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-				feishu_uid   VARCHAR(64)  NOT NULL UNIQUE,
-				open_id      VARCHAR(128) NOT NULL DEFAULT '',
-				name         VARCHAR(128) NOT NULL DEFAULT '',
-				email        VARCHAR(256) NOT NULL DEFAULT '',
-				avatar_url   VARCHAR(512) NOT NULL DEFAULT '',
-				department   VARCHAR(256) NOT NULL DEFAULT '',
-				is_admin     TINYINT(1)   NOT NULL DEFAULT 0,
-				created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				updated_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+				id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+				feishu_uid    VARCHAR(64)  NULL UNIQUE,
+				open_id       VARCHAR(128) NOT NULL DEFAULT '',
+				name          VARCHAR(128) NOT NULL DEFAULT '',
+				email         VARCHAR(256) NOT NULL DEFAULT '',
+				password_hash VARCHAR(255) NOT NULL DEFAULT '',
+				avatar_url    VARCHAR(512) NOT NULL DEFAULT '',
+				department    VARCHAR(256) NOT NULL DEFAULT '',
+				is_admin      TINYINT(1)   NOT NULL DEFAULT 0,
+				created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+				email_key     VARCHAR(256) AS (NULLIF(email, '')) STORED,
+				UNIQUE KEY uniq_email (email_key)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 				token        VARCHAR(64)  NOT NULL PRIMARY KEY,
