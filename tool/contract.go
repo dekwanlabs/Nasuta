@@ -51,6 +51,27 @@ func (args Arguments) Int(key string, fallback int) int {
 	}
 }
 
+// TimeRange is an authoritative server-resolved interval for time-aware tools.
+type TimeRange struct {
+	From        time.Time
+	To          time.Time
+	ToExclusive bool
+	Raw         string
+}
+
+type timeRangeKey struct{}
+
+// WithTimeRange pins one resolved interval to a tool execution context.
+func WithTimeRange(ctx context.Context, value TimeRange) context.Context {
+	return context.WithValue(ctx, timeRangeKey{}, value)
+}
+
+// TimeRangeFromContext returns the server-resolved interval, when present.
+func TimeRangeFromContext(ctx context.Context) (TimeRange, bool) {
+	value, ok := ctx.Value(timeRangeKey{}).(TimeRange)
+	return value, ok
+}
+
 // Reference identifies evidence returned by a tool.
 type Reference struct {
 	Type   string `json:"type"`
@@ -84,7 +105,8 @@ type PrefetchSpec struct {
 
 // RoutingSpec makes a read tool visible only when its declared intent matches.
 type RoutingSpec struct {
-	Intent string
+	Intent   string
+	Temporal bool
 }
 
 // Tool is the single contract consumed by Agent and MCP.

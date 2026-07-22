@@ -249,15 +249,27 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 
 	emit("嗯...让我先琢磨一下你在问什么 ✨")
 	retrievalPrefix := buildRagCtx(conversation.Recent)
+	continuityBasis := retrievalPrefix
+	if continuityBasis == "" {
+		continuityBasis = conversation.Summary
+	}
+	if hasConflictingConversationEntity(question, continuityBasis) {
+		log.InfofCtx(ctx, "[qa] conversation context omitted after explicit entity switch")
+		conversation.Summary = ""
+		conversation.Recent = nil
+		retrievalPrefix = ""
+	}
 	routeContext := buildRouteContext(conversation.Summary, retrievalPrefix)
 
 	cleanQuestion := strings.TrimSpace(question)
 	var terms retrieval.QueryTerms
+	var timeExpr retrieval.TimeExpr
 	decision := domain.InternalFallbackDecision()
 	var planningErr error
 	var routedToolIDs []string
 	var preWg sync.WaitGroup
-	analysisStarted := time.Now()
+	requestAnchor := time.Now()
+	analysisStarted := requestAnchor
 	var planningDuration time.Duration
 	preWg.Add(1)
 	go func() {
@@ -278,7 +290,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 				decision = domain.PlanDecision{Plan: *explicitPlan, Confidence: 1, Origin: domain.Explicit}
 				return
 			}
-			cleanQuestion, terms, decision = analysis.Question, analysis.Terms, analysis.Decision
+			cleanQuestion, terms, timeExpr, decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
 			routedToolIDs = analysis.ToolIDs
 		} else if shouldShortCircuitMeta(question) {
 			cleanQuestion = strings.TrimSpace(question)
@@ -301,11 +313,24 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 				decision = domain.InternalFallbackDecision()
 				return
 			}
-			cleanQuestion, terms, decision = analysis.Question, analysis.Terms, analysis.Decision
+			cleanQuestion, terms, timeExpr, decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
 			routedToolIDs = analysis.ToolIDs
 		}
 	}()
 	preWg.Wait()
+	resolvedTime, hasResolvedTime, timeErr := retrieval.ResolveTime(timeExpr, requestAnchor)
+	if timeErr != nil {
+		planningErr = errors.Join(planningErr, fmt.Errorf("resolve relative time: %w", timeErr))
+	} else if hasResolvedTime {
+		ctx = tool.WithTimeRange(ctx, resolvedTime)
+		log.InfofCtx(ctx, "[qa] relative time resolved raw=%q from=%s to=%s",
+			resolvedTime.Raw, resolvedTime.From.Format(time.RFC3339), resolvedTime.To.Format(time.RFC3339))
+	}
+	timeFrom, timeTo := "", ""
+	if hasResolvedTime {
+		timeFrom = resolvedTime.From.Format(time.RFC3339)
+		timeTo = resolvedTime.To.Format(time.RFC3339)
+	}
 	if traceEnabled {
 		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "query_analysis", DurationMS: time.Since(analysisStarted).Milliseconds(),
@@ -314,6 +339,8 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 				"clean_question": cleanQuestion, "domain_terms": terms.DomainTerms,
 				"identifiers":   terms.Identifiers,
 				"response_mode": ClassifyResponseMode(question),
+				"time_kind":     timeExpr.Kind, "time_raw": timeExpr.Raw,
+				"time_from": timeFrom, "time_to": timeTo,
 			},
 		})
 	}
@@ -473,7 +500,7 @@ func routingCandidates(snapshot tool.Snapshot) []retrieval.ToolRouteCandidate {
 			continue
 		}
 		candidates = append(candidates, retrieval.ToolRouteCandidate{
-			ID: string(candidate.ID), Intent: candidate.Routing.Intent,
+			ID: string(candidate.ID), Intent: candidate.Routing.Intent, Temporal: candidate.Routing.Temporal,
 		})
 	}
 	return candidates

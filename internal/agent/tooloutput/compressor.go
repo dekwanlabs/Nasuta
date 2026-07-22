@@ -3,8 +3,6 @@ package tooloutput
 import (
 	"strings"
 	"time"
-
-	"github.com/dekwanlabs/nasuta/tool"
 )
 
 const (
@@ -16,7 +14,6 @@ const (
 // Request contains only runtime-owned compression inputs.
 type Request struct {
 	Question  string
-	Arguments tool.Arguments
 	Content   string
 	Notices   []string
 	MaxTokens int

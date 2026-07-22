@@ -42,8 +42,8 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 	tools := []Tool{
 		{
 			ID: "get_service",
-			Description: "Look up backend services by name, module path, owner, tag, or keyword. " +
-				"Use this first when you need to locate a service or understand what a service is before changing it.",
+			Description: "Look up service metadata and location by name, module path, owner, tag, or keyword. " +
+				"It does not establish dependencies, endpoints, or implementation behavior.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{
 				"query": propString("Service name, module path, owner, or keyword."),
@@ -55,8 +55,8 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		},
 		{
 			ID: "trace_deps",
-			Description: "Return upstream/downstream dependency edges for a service. " +
-				"Use this to assess blast radius before changing an API, deprecating a service, or diagnosing cascading failures.",
+			Description: "Return indexed upstream/downstream service-level dependency edges for blast-radius analysis. " +
+				"It does not establish method-level callers, callees, or execution order.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{
 				"service":   propString("Service name to inspect."),
@@ -71,8 +71,8 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		},
 		{
 			ID: "list_apis",
-			Description: "Find Java Controller or Python FastAPI endpoints by service and/or path keyword. " +
-				"Use this to locate which handler serves a given route before editing it.",
+			Description: "Authoritatively look up indexed complete API routes and handlers by service and/or path keyword. " +
+				"Use this before claiming an endpoint; Java routes combine class-level and method-level mappings. Do not compose a route from partial code annotations.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{
 				"service":     propString("Optional service name filter."),
@@ -86,7 +86,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		{
 			ID: "search_code",
 			Description: "Semantic search over indexed source code, config, SQL and docs across all languages. " +
-				"Use this to find where something is implemented or configured when you do not know the exact file or symbol. " +
+				"Use it as a fallback to discover an unknown implementation or configuration, not as proof of an exact symbol, complete API route, or call chain. " +
 				"Returns file path, line range and a snippet preview. Requires semantic search to be enabled.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{
@@ -100,8 +100,8 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		},
 		{
 			ID: "get_symbol",
-			Description: "Query the codegraph index for function-level definitions and source bodies. " +
-				"Use this when you need the exact implementation of a function, method, class, or interface.",
+			Description: "Query the codegraph index for exact definitions and source bodies of functions, methods, classes, or interfaces. " +
+				"A definition does not establish its callers or callees; use call tracing for those edges.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{
 				"query":          propString("Function name, class name, or service keyword to look up."),
@@ -116,8 +116,8 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		},
 		{
 			ID: "trace_calls",
-			Description: "Trace callers and callees from a symbol or exact code-hit location. " +
-				"Verified service_route hops close supported cross-service calls; truncated and unresolved fields identify incomplete evidence.",
+			Description: "Trace method-level callers and callees from a symbol or exact code-hit location. " +
+				"Verified service_route hops support cross-service calls; truncated or unresolved frontiers are incomplete, and this is not proof of complete service dependencies.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{
 				"query":          propString("Function or method name to trace when file+line is unavailable."),
@@ -140,8 +140,8 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		},
 		{
 			ID: "search_runbooks",
-			Description: "Search runbooks by symptom, task type, or tag. " +
-				"Use this when investigating a failure or before a risky change to find the relevant playbook.",
+			Description: "Search operational runbooks by symptom, task type, or tag for procedures and recovery guidance. " +
+				"Runbooks describe intended operations and do not prove current runtime state or executed behavior.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{
 				"query": propString("Symptom, task, or keyword to search."),
@@ -153,7 +153,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		},
 		{
 			ID:          "check_docs",
-			Description: "Check whether a service has enough documentation and code evidence.",
+			Description: "Check documentation coverage and evidence gaps for a service. It does not establish runtime or business facts.",
 			Kind:        ToolKindRead,
 			InputSchema: objectSchema(map[string]any{"service": propString("Service name to check.")}, []string{"service"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
@@ -162,7 +162,7 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		},
 		{
 			ID:          "index_stats",
-			Description: "Return summary counts for the current backend knowledge index.",
+			Description: "Return health and summary counts for the current knowledge index. It does not establish business behavior or runtime state.",
 			Kind:        ToolKindRead,
 			InputSchema: objectSchema(map[string]any{}, nil),
 			Handler: stringHandler(func(ctx context.Context, _ tool.Arguments) (string, error) {

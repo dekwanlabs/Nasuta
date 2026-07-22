@@ -171,7 +171,7 @@ func TestAgentToolPromptDoesNotRepeatCoreRoleOrEvidenceRules(t *testing.T) {
 	if got := strings.Count(agentSystemPrompt, "## Core Rules"); got != 1 {
 		t.Fatalf("agentSystemPrompt contains %d Core Rules sections, want 1", got)
 	}
-	for _, must := range []string{"## Agent Tool Policy", "Pick the tool that matches the intent", "Converge after a targeted lookup"} {
+	for _, must := range []string{"## Agent Tool Policy", "Pick the tool that matches the intent", "Converge after a targeted lookup", "Name runtime result states precisely"} {
 		if !strings.Contains(agentToolPrompt, must) {
 			t.Errorf("agentToolPrompt missing tool policy %q", must)
 		}

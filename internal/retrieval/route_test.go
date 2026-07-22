@@ -122,6 +122,25 @@ func TestAnalyzeEvidenceSelectsRegisteredToolIntent(t *testing.T) {
 	}
 }
 
+func TestAnalyzeEvidenceExtractsGroundedMultilingualTime(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"time\":{\"kind\":\"last\",\"n\":0,\"unit\":\"day\",\"raw\":\"últimos días\"}}"}}]}`))
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+	result, err := AnalyzeEvidence(
+		context.Background(), client, "muestra los últimos días", "", "muestra los últimos días",
+		RoutingCapabilities{}, []ToolRouteCandidate{{ID: "runtime_logs", Intent: "runtime evidence", Temporal: true}}, 512,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Time.Kind != "last" || result.Time.N != 0 || result.Time.Unit != "day" || result.Time.Raw != "últimos días" {
+		t.Fatalf("time = %#v", result.Time)
+	}
+}
+
 func TestToolRoutingContractUsesConversationContextForFollowUps(t *testing.T) {
 	for _, required := range []string{"Resolve pronouns", "conversation_context", "actual state", "runtime evidence"} {
 		if !strings.Contains(toolRoutingContract, required) {
@@ -172,6 +191,15 @@ func TestRoutingExamplesValidateAgainstSchema(t *testing.T) {
 	}
 	if _, err := bindQueryTerms(termsRaw); err != nil {
 		t.Fatalf("queryTermsExampleJSON does not validate: %v", err)
+	}
+
+	timeTop := mustParseJSON(t, timeExampleJSON)
+	timeRaw, ok := timeTop["time"].(map[string]any)
+	if !ok {
+		t.Fatalf("timeExampleJSON missing top-level time object: %s", timeExampleJSON)
+	}
+	if _, err := bindTimeExpr(timeRaw, ""); err != nil {
+		t.Fatalf("timeExampleJSON does not validate: %v", err)
 	}
 }
 

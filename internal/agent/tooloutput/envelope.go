@@ -42,7 +42,7 @@ type envelopeChunk struct {
 }
 
 func pack(req Request, sourceFormat string, chunks []chunk, contexts []ancestorContext, originalTokens int) Result {
-	ranked := rankChunks(chunks, req.Question, map[string]any(req.Arguments))
+	ranked := rankChunks(chunks, req.Question)
 	contextByRef := make(map[string]ancestorContext, len(contexts))
 	for _, item := range contexts {
 		contextByRef[item.ref] = item

@@ -21,12 +21,14 @@ type AnalysisResult struct {
 	Question string
 	Terms    QueryTerms
 	ToolIDs  []string
+	Time     TimeExpr
 }
 
 // ToolRouteCandidate is trusted routing metadata from a registered read tool.
 type ToolRouteCandidate struct {
-	ID     string `json:"id"`
-	Intent string `json:"intent"`
+	ID       string `json:"id"`
+	Intent   string `json:"intent"`
+	Temporal bool   `json:"temporal,omitempty"`
 }
 
 // routeExampleJSON and toolExampleJSON are the exact shapes the routing contract
@@ -38,6 +40,7 @@ const (
 	routeExampleJSON      = `{"route":{"sources":["internal","web"],"confidence":0.0}}`
 	toolExampleJSON       = `{"tools":{"tool_ids":[]}}`
 	queryTermsExampleJSON = `{"query_terms":{"domain_terms":[],"identifiers":[]}}`
+	timeExampleJSON       = `{"time":{"kind":"none","n":0,"unit":"","raw":""}}`
 )
 
 const queryTermsContract = `Extract compact retrieval terms from the current question.
@@ -50,6 +53,17 @@ Return a JSON object with this exact shape:
 const toolRoutingContract = `Select only registered read tools whose declared intent is required by the current request.
 Do not select a tool merely because its capability is available or topically related.
 Resolve pronouns and omitted entities from conversation_context. When a contextual follow-up asks for the actual state of an entity already investigated with runtime evidence, keep the runtime evidence tool selected even if the user does not repeat words such as logs or online.`
+
+const timeContract = `Normalize relative time semantics without calculating dates or using your own current time.
+- kind=none when the current question has no relative time expression.
+- kind=recent for an unqualified equivalent of "recently"; n=0 and unit="".
+- kind=day for a calendar day relative to today; n=0 means today, -1 yesterday, -2 the day before yesterday; unit="".
+- kind=last for a rolling duration; n is positive and unit is minute, hour, day, or week.
+- For a vague equivalent of "recent days" with no number, use kind=last, n=0, unit=day. The server applies its configured default.
+- raw must be an exact non-empty substring copied from the current question for every kind except none.
+- Interpret any language, but never return absolute from/to timestamps for relative expressions.
+Return a JSON object with this exact shape:
+` + timeExampleJSON
 
 const routingContract = `You are the evidence router for a software knowledge agent.
 Decide which external evidence sources are required to answer the current user request reliably.
@@ -111,6 +125,7 @@ func analyzeQuestion(
 	var contracts []string
 	var properties []string
 	decision := domain.PlanDecision{}
+	temporal := hasTemporalCandidate(toolCandidates)
 	if fixedPlan == nil {
 		contracts = append(contracts, fmt.Sprintf("Routing contract:\n%s\nRuntime capabilities: memory=%t internal=true web=%t", routingContract, capabilities.Memory, capabilities.Web))
 		properties = append(properties, "\"route\"")
@@ -128,6 +143,10 @@ Available tools: `+string(encoded))
 	if fixedPlan == nil || len(toolCandidates) > 0 {
 		contracts = append(contracts, "Query terms contract:\n"+queryTermsContract)
 		properties = append(properties, "\"query_terms\"")
+	}
+	if temporal {
+		contracts = append(contracts, "Time contract:\n"+timeContract)
+		properties = append(properties, "\"time\"")
 	}
 	if len(properties) == 0 {
 		empty.Decision = decision
@@ -148,6 +167,7 @@ Available tools: `+string(encoded))
 	}
 	var raw map[string]any
 	var toolIDs []string
+	var timeExpr TimeExpr
 	opts := llm.CallOptions{
 		MaxTokens: maxTokens,
 		Validate: func(p any) error {
@@ -189,6 +209,17 @@ Available tools: `+string(encoded))
 				extracted.Identifiers = groundedIdentifiers(extracted.Identifiers, termsQuestion)
 				terms = extracted.normalize()
 			}
+			if temporal {
+				timeRaw, ok := (*m)["time"].(map[string]any)
+				if !ok {
+					return fmt.Errorf("missing time object")
+				}
+				extracted, err := bindTimeExpr(timeRaw, question)
+				if err != nil {
+					return err
+				}
+				timeExpr = extracted
+			}
 			return nil
 		},
 	}
@@ -199,7 +230,16 @@ Available tools: `+string(encoded))
 		return empty, fmt.Errorf("evidence router failed: %w", err)
 	}
 
-	return AnalysisResult{Decision: decision, Question: clean, Terms: terms, ToolIDs: toolIDs}, nil
+	return AnalysisResult{Decision: decision, Question: clean, Terms: terms, ToolIDs: toolIDs, Time: timeExpr}, nil
+}
+
+func hasTemporalCandidate(candidates []ToolRouteCandidate) bool {
+	for _, candidate := range candidates {
+		if candidate.Temporal {
+			return true
+		}
+	}
+	return false
 }
 
 func bindQueryTerms(raw map[string]any) (QueryTerms, error) {

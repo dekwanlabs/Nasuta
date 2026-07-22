@@ -177,6 +177,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 	seenTools := map[string]bool{}
 	seenChunks := map[string]bool{}
 	var webEvidence webEvidenceState
+	evidenceTurnExtended := false
 
 	if rc != nil && rc.Text != "" {
 		stepSeq++
@@ -293,6 +294,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 		})
 
 		webAttempted, webSucceeded := false, false
+		turnProducedEvidence := false
 		for _, call := range chatResult.ToolCalls {
 			stepSeq++
 			agent.observer.OnStep(runCtx, runID, StepRecord{
@@ -303,6 +305,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 				CreatedAt: time.Now(),
 			})
 			execution := agent.executor.Execute(loopCtx, toolSnapshot, call, seenTools, seenChunks)
+			turnProducedEvidence = turnProducedEvidence || execution.Evidence
 			acceptedWebEvidence := webEvidence.Observe(call, execution.FullContent)
 			if isWebEvidenceTool(call.Function.Name) {
 				webAttempted = true
@@ -318,11 +321,8 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 				CreatedAt:     time.Now(),
 			})
 			compressed := tooloutput.Compress(tooloutput.Request{
-				Question:  question,
-				Arguments: execution.Arguments,
-				Content:   execution.ModelContent,
-				Notices:   execution.Notices,
-				MaxTokens: defaultToolOutputTokenLimit,
+				Question: question, Content: execution.ModelContent,
+				Notices: execution.Notices, MaxTokens: defaultToolOutputTokenLimit,
 			})
 			log.InfofCtx(ctx,
 				"[agent] tool %s model output: strategy=%s format=%s tokens=%d->%d chunks=%d->%d duration=%s",
@@ -351,6 +351,11 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 				})
 			}
 			messages = append(messages, toolMessage(call.ID, call.Function.Name, compressed.Content))
+		}
+		if extended := extendEvidenceStepLimit(step, stepLimit, agent.cfg.MaxSteps, turnProducedEvidence, evidenceTurnExtended); extended > stepLimit {
+			stepLimit = extended
+			evidenceTurnExtended = true
+			log.InfofCtx(ctx, "[agent] run %s extending after boundary evidence (newLimit=%d configured=%d)", runID, stepLimit, agent.cfg.MaxSteps)
 		}
 		if plan.Has(domain.Web) {
 			if hint := webEvidence.ConvergenceHint(); hint != "" {
@@ -651,6 +656,10 @@ Apply the role, evidence discipline, and answer rules from the core prompt. This
 - **Use seed evidence before tools.** The pre-retrieved block is a candidate set, not proof of completeness. Do not repeat evidence already present or treat its reference count as coverage.
 - **Complete requested chains before stopping.** Apply the core verified-behavior rule. If any requested path still lacks a critical hop and the selected evidence plan allows internal tools, you MUST make one targeted tool round for that hop before answering. Then answer from the verified evidence and name any exact remaining break.
 - **Do not repeat the same retrieval intent.** Rewording a failed free-text query usually returns the same index results. Switch to an exact symbol, call edge, endpoint, dependency, or runbook lookup.
+- **Keep runtime concepts endpoint-scoped.** Do not treat similarly named endpoints as the same business concept. A count requires a complete list/count response or aggregation, not repeated samples containing one identifier. When a question names several runtime resources, query each relevant endpoint separately in the same tool round.
+- **Do not start with broad identity discovery when endpoints are known.** If seed evidence or the tool contract provides a relevant endpoint, include it in the first runtime query. Use identity-only discovery only for an explicitly broad activity request or when no endpoint can be established.
+- **Treat bounded and compressed results as samples.** Partial coverage never proves that another device, record, schedule, shortcut, error, or trace does not exist. State the exact scope and time of the retained evidence.
+- **Name runtime result states precisely.** If no relevant query ran, say it was not queried (Chinese: “尚未查询”). If a query ran with zero hits, say no log was matched (“未命中日志”). Say a current list is empty (“当前列表为空”) only when a matching list response explicitly contains an empty list. Report relevant non-zero business issues returned by runtime evidence. Never reconstruct a complete endpoint from partial annotations; use the authoritative complete route lookup.
 - **Read search_code scores according to scoreKind.** A dense result carries semanticScore (0–1 cosine similarity), where >~0.5 is relevant and a top score below ~0.4 is weak. A hybrid result carries fusionScore, an RRF ranking-consensus score with no cosine threshold; use it only to compare results within that response. A low dense top score, high-overlap result, or empty result is a signal to stop rewording the same search and switch strategy. (get_symbol and trace_calls use exact names and have no relevance score.)
 - **Pick the tool that matches the intent.** Use each registered tool's description and input schema to choose the narrowest operation that can resolve the missing fact. Free-text search is a fallback after exact service, API, symbol, call-edge, dependency, or runbook lookups.
 - **Join method and service evidence explicitly.** A code-search hit with file and startLine is an exact call-chain start. A calls edge verifies only a method hop; a service_route bridge verifies a supported cross-service hop. Use service dependencies for other protocols, and never present truncated or unresolved frontiers as a complete chain.
@@ -688,6 +697,7 @@ type ToolExecution struct {
 	ModelContent string
 	Arguments    tool.Arguments
 	Notices      []string
+	Evidence     bool
 }
 
 // NewToolExecutor wraps a registry with a default per-tool timeout.
@@ -774,6 +784,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 		FullContent:  result,
 		ModelContent: formatToolResultForLLM(name, result),
 		Arguments:    arguments,
+		Evidence:     true,
 	}
 	if seenChunks != nil && isSearchTool(name) {
 		if note := overlapNote(name, result, seenChunks); note != "" {
@@ -790,6 +801,13 @@ func isWebEvidenceTool(name string) bool {
 
 func extendWebStepLimit(step, current, configured int, attempted, succeeded bool) int {
 	if step != current || !attempted || succeeded || current >= configured {
+		return current
+	}
+	return current + 1
+}
+
+func extendEvidenceStepLimit(step, current, configured int, produced, alreadyExtended bool) int {
+	if step != current || !produced || alreadyExtended || current >= configured {
 		return current
 	}
 	return current + 1

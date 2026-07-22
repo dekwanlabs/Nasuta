@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
-
-	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestCompressPassesUnderBudgetContentThroughUnchanged(t *testing.T) {
@@ -25,10 +23,8 @@ func TestCompressPassesUnderBudgetContentThroughUnchanged(t *testing.T) {
 func TestCompressJSONPreservesLongIDsAndSelectsRelevantItem(t *testing.T) {
 	content := largeDeviceJSON(80, 57)
 	got := Compress(Request{
-		Question:  "雾化风扇的 deviceId 是什么？",
-		Arguments: tool.Arguments{"familyId": "2007830887593005058"},
-		Content:   content,
-		MaxTokens: 700,
+		Question: "雾化风扇的 deviceId 是什么？",
+		Content:  content, MaxTokens: 700,
 	})
 
 	var envelope struct {

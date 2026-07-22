@@ -1,19 +1,17 @@
 package tooloutput
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 	"unicode"
 )
 
 type relevanceSignals struct {
-	exact []string
 	terms map[string]struct{}
 }
 
-func rankChunks(chunks []chunk, question string, arguments map[string]any) []int {
-	signals := buildSignals(question, arguments)
+func rankChunks(chunks []chunk, question string) []int {
+	signals := buildSignals(question)
 	ranked := make([]int, len(chunks))
 	scores := make([]int, len(chunks))
 	hasMatch := false
@@ -38,47 +36,15 @@ func rankChunks(chunks []chunk, question string, arguments map[string]any) []int
 	return ranked
 }
 
-func buildSignals(question string, arguments map[string]any) relevanceSignals {
+func buildSignals(question string) relevanceSignals {
 	signals := relevanceSignals{terms: make(map[string]struct{})}
 	addTerms(signals.terms, question)
-	collectArgumentSignals(arguments, &signals)
 	return signals
-}
-
-func collectArgumentSignals(value any, signals *relevanceSignals) {
-	switch typed := value.(type) {
-	case map[string]any:
-		for _, item := range typed {
-			collectArgumentSignals(item, signals)
-		}
-	case []any:
-		for _, item := range typed {
-			collectArgumentSignals(item, signals)
-		}
-	case string:
-		addExactSignal(typed, signals)
-	case bool, float64, float32, int, int64, int32, uint, uint64:
-		addExactSignal(fmt.Sprint(typed), signals)
-	}
-}
-
-func addExactSignal(value string, signals *relevanceSignals) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" {
-		return
-	}
-	signals.exact = append(signals.exact, value)
-	addTerms(signals.terms, value)
 }
 
 func scoreChunk(candidate chunk, signals relevanceSignals) int {
 	haystack := strings.ToLower(candidate.searchableText())
 	score := 0
-	for _, exact := range signals.exact {
-		if strings.Contains(haystack, exact) {
-			score += 1000
-		}
-	}
 	chunkTerms := make(map[string]struct{})
 	addTerms(chunkTerms, haystack)
 	for term := range chunkTerms {

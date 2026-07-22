@@ -134,6 +134,62 @@ func TestExtendWebStepLimitOnlyAfterUnusableEvidenceAtBoundary(t *testing.T) {
 	}
 }
 
+func TestExtendEvidenceStepLimitOnceAtBoundary(t *testing.T) {
+	if got := extendEvidenceStepLimit(2, 2, 5, true, false); got != 3 {
+		t.Fatalf("boundary evidence extended to %d, want 3", got)
+	}
+	for _, tc := range []struct {
+		name                      string
+		step, current, configured int
+		produced, alreadyExtended bool
+	}{
+		{name: "before boundary", step: 1, current: 2, configured: 5, produced: true},
+		{name: "no evidence", step: 2, current: 2, configured: 5},
+		{name: "already extended", step: 2, current: 2, configured: 5, produced: true, alreadyExtended: true},
+		{name: "configured limit", step: 5, current: 5, configured: 5, produced: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extendEvidenceStepLimit(tc.step, tc.current, tc.configured, tc.produced, tc.alreadyExtended); got != tc.current {
+				t.Fatalf("extendEvidenceStepLimit() = %d, want %d", got, tc.current)
+			}
+		})
+	}
+}
+
+func TestRunExtendsOneToolCapableTurnAfterBoundaryEvidence(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		call := atomic.AddInt32(&calls, 1)
+		if call <= 2 {
+			data := fmt.Sprintf(`{"choices":[{"delta":{"content":"继续核实。","tool_calls":[{"index":0,"id":"call-%d","type":"function","function":{"name":"evidence","arguments":"{\"step\":%d}"}}]},"finish_reason":"tool_calls"}]}`, call, call)
+			_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
+			return
+		}
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"证据已补全。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	registry := testRegistry(t, Tool{
+		ID: "evidence", Description: "test evidence", Kind: ToolKindRead,
+		InputSchema: objectSchema(map[string]any{"step": propInt("step")}, []string{"step"}),
+		Handler:     stringHandler(func(context.Context, tool.Arguments) (string, error) { return `{"found":true}`, nil }),
+	})
+	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{})
+	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+		MaxSteps: 3, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
+	}, nil, nil)
+	result, err := agent.RunWithPlan(t.Context(), "run_evidence_extension", "这个服务做什么？", nil, nil,
+		domain.EvidencePlan{Sources: domain.Internal}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Err != nil || result.Steps != 3 || result.Answer != "证据已补全。" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestContinueIfNeeded_NoTruncation(t *testing.T) {
 	srv := fakeStreamServer(t, []streamEvent{
 		{content: "完整回答", finish: "stop"},
