@@ -13,6 +13,11 @@ type Store struct {
 	db *sql.DB
 }
 
+const (
+	adminRoleName = "admin"
+	userRoleName  = "user"
+)
+
 func NewStore(db *sql.DB) (*Store, error) {
 	s := &Store{db: db}
 	if err := dbschema.MigrateMySQL(db, dbschema.GroupRBAC); err != nil {
@@ -23,48 +28,75 @@ func NewStore(db *sql.DB) (*Store, error) {
 			return nil, fmt.Errorf("rbac: add prompt column: %w", err)
 		}
 	}
-	s.seed()
-	s.repair()
+	if err := s.seed(); err != nil {
+		return nil, fmt.Errorf("rbac: seed: %w", err)
+	}
+	if err := s.repair(); err != nil {
+		return nil, fmt.Errorf("rbac: repair: %w", err)
+	}
 	return s, nil
 }
 
-func (s *Store) repair() {
-	s.db.Exec(`INSERT IGNORE INTO rbac_user_roles (user_id, role_id) SELECT id, 1 FROM users WHERE is_admin=1`)
-	s.db.Exec(`DELETE FROM rbac_menus WHERE path IN ('/rbac/users','/rbac/roles','/rbac/menus','/rbac/keys')`)
+func (s *Store) repair() error {
+	if _, err := s.db.Exec(
+		`INSERT IGNORE INTO rbac_roles (name, description) VALUES (?, ?), (?, ?)`,
+		adminRoleName, "Administrator with full access",
+		userRoleName, "Standard user access",
+	); err != nil {
+		return fmt.Errorf("ensure system roles: %w", err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM rbac_menus WHERE path IN ('/rbac/users','/rbac/roles','/rbac/menus','/rbac/keys')`); err != nil {
+		return fmt.Errorf("remove legacy RBAC menus: %w", err)
+	}
 	var rbacCount int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rbac_menus WHERE path = '/rbac'`).Scan(&rbacCount); err == nil && rbacCount == 0 {
-		s.CreateMenu(&Menu{ParentID: 0, Name: "权限管理", Path: "/rbac", Icon: "Lock", SortOrder: 8})
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rbac_menus WHERE path = '/rbac'`).Scan(&rbacCount); err != nil {
+		return fmt.Errorf("check RBAC menu: %w", err)
 	}
-	rows, err := s.db.Query(`SELECT id FROM rbac_menus`)
-	if err != nil {
-		return
-	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return
+	if rbacCount == 0 {
+		if err := s.CreateMenu(&Menu{ParentID: 0, Name: "权限管理", Path: "/rbac", Icon: "Lock", SortOrder: 8}); err != nil {
+			return fmt.Errorf("create RBAC menu: %w", err)
 		}
-		ids = append(ids, id)
 	}
-	rows.Close()
-	if len(ids) > 0 {
-		ph := make([]string, len(ids))
-		args := make([]any, 0, len(ids)+1)
-		args = append(args, int64(1))
-		for i, mid := range ids {
-			ph[i] = "(?, ?)"
-			args = append(args, mid)
-		}
-		s.db.Exec(`INSERT IGNORE INTO rbac_role_menus (role_id, menu_id) VALUES `+strings.Join(ph, ","), args...)
+
+	if _, err := s.db.Exec(`
+		INSERT IGNORE INTO rbac_user_roles (user_id, role_id)
+		SELECT u.id, r.id FROM users u
+		JOIN rbac_roles r ON r.name = ?
+		WHERE u.is_admin = 1`, adminRoleName); err != nil {
+		return fmt.Errorf("repair administrator roles: %w", err)
 	}
+	if _, err := s.db.Exec(`
+		INSERT IGNORE INTO rbac_user_roles (user_id, role_id)
+		SELECT u.id, r.id FROM users u
+		JOIN rbac_roles r ON r.name = ?
+		LEFT JOIN rbac_user_roles ur ON ur.user_id = u.id
+		WHERE u.is_admin = 0 AND ur.user_id IS NULL`, userRoleName); err != nil {
+		return fmt.Errorf("repair standard user roles: %w", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT IGNORE INTO rbac_role_menus (role_id, menu_id)
+		SELECT r.id, m.id FROM rbac_roles r
+		CROSS JOIN rbac_menus m
+		WHERE r.name = ?`, adminRoleName); err != nil {
+		return fmt.Errorf("grant administrator menus: %w", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT IGNORE INTO rbac_role_menus (role_id, menu_id)
+		SELECT r.id, m.id FROM rbac_roles r
+		CROSS JOIN rbac_menus m
+		WHERE r.name = ? AND m.path NOT IN ('/settings', '/rbac')`, userRoleName); err != nil {
+		return fmt.Errorf("grant standard user menus: %w", err)
+	}
+	return nil
 }
 
-func (s *Store) seed() {
+func (s *Store) seed() error {
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rbac_menus`).Scan(&count); err != nil || count > 0 {
-		return
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rbac_menus`).Scan(&count); err != nil {
+		return fmt.Errorf("count menus: %w", err)
+	}
+	if count > 0 {
+		return nil
 	}
 	menus := []Menu{
 		{ParentID: 0, Name: "Dashboard", Path: "/dashboard", Icon: "Monitor", SortOrder: 1},
@@ -76,16 +108,10 @@ func (s *Store) seed() {
 	}
 	for i := range menus {
 		if err := s.CreateMenu(&menus[i]); err != nil {
-			return
+			return fmt.Errorf("create menu %q: %w", menus[i].Path, err)
 		}
 	}
-	s.db.Exec(`INSERT IGNORE INTO rbac_roles (id, name, description) VALUES (1, 'admin', 'Administrator with full access')`)
-	for _, m := range menus {
-		if err := s.GrantMenu(1, m.ID); err != nil {
-			return
-		}
-	}
-	s.db.Exec(`INSERT IGNORE INTO rbac_user_roles (user_id, role_id) SELECT id, 1 FROM users WHERE is_admin=1`)
+	return nil
 }
 
 type UserInfo struct {

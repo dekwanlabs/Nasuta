@@ -34,3 +34,42 @@ func TestListUsersBatchesRoleHydration(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRepairEnsuresDefaultRolesAndPermissions(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec(`INSERT IGNORE INTO rbac_roles`).
+		WithArgs(
+			adminRoleName, "Administrator with full access",
+			userRoleName, "Standard user access",
+		).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(`DELETE FROM rbac_menus`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM rbac_menus WHERE path = '/rbac'`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(`(?s)INSERT IGNORE INTO rbac_user_roles.*WHERE u\.is_admin = 1`).
+		WithArgs(adminRoleName).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`(?s)INSERT IGNORE INTO rbac_user_roles.*LEFT JOIN rbac_user_roles.*WHERE u\.is_admin = 0 AND ur\.user_id IS NULL`).
+		WithArgs(userRoleName).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`(?s)INSERT IGNORE INTO rbac_role_menus.*WHERE r\.name = \?`).
+		WithArgs(adminRoleName).
+		WillReturnResult(sqlmock.NewResult(0, 6))
+	mock.ExpectExec(`(?s)INSERT IGNORE INTO rbac_role_menus.*WHERE r\.name = \? AND m\.path NOT IN \('/settings', '/rbac'\)`).
+		WithArgs(userRoleName).
+		WillReturnResult(sqlmock.NewResult(0, 4))
+
+	store := &Store{db: db}
+	if err := store.repair(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

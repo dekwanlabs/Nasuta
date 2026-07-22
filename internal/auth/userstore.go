@@ -16,7 +16,8 @@ const (
 	tblSessions  = "sessions"
 	tblSettings  = "settings"
 	tblUserRoles = "rbac_user_roles"
-	adminRoleID  = 1
+	adminRole    = "admin"
+	defaultRole  = "user"
 )
 
 // DB owns MySQL-backed auth, session, history, and settings data.
@@ -60,8 +61,18 @@ type User struct {
 // ErrEmailExists is returned by CreateUserWithPassword when the email is taken.
 var ErrEmailExists = fmt.Errorf("email already registered")
 
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 func (db *DB) UpsertUser(u *User) error {
-	first, err := db.firstUserIsAdmin()
+	tx, err := db.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin user upsert: %w", err)
+	}
+	defer tx.Rollback()
+
+	first, err := firstUserIsAdmin(tx)
 	if err != nil {
 		return err
 	}
@@ -69,7 +80,7 @@ func (db *DB) UpsertUser(u *User) error {
 	if first {
 		isAdmin = 1
 	}
-	_, err = db.db.Exec(`
+	_, err = tx.Exec(`
 		INSERT INTO `+tblUsers+` (feishu_uid, open_id, name, email, avatar_url, department, is_admin)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
@@ -79,31 +90,50 @@ func (db *DB) UpsertUser(u *User) error {
 	if err != nil {
 		return fmt.Errorf("upsert user: %w", err)
 	}
-	if err := db.db.QueryRow(`SELECT id,is_admin FROM `+tblUsers+` WHERE feishu_uid=?`, u.FeishuUID).Scan(&u.ID, &isAdmin); err != nil {
+	if err := tx.QueryRow(`SELECT id,is_admin FROM `+tblUsers+` WHERE feishu_uid=?`, u.FeishuUID).Scan(&u.ID, &isAdmin); err != nil {
 		return fmt.Errorf("read upserted user: %w", err)
 	}
 	u.IsAdmin = isAdmin == 1
+	role := defaultRole
 	if u.IsAdmin {
-		if err := db.assignAdminRole(u.ID); err != nil {
+		role = adminRole
+		if err := assignRole(tx, u.ID, role); err != nil {
 			return err
 		}
+	} else if err := assignRoleIfNone(tx, u.ID, role); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit user upsert: %w", err)
 	}
 	return nil
 }
 
-// assignAdminRole grants the admin RBAC role, ignoring duplicates.
-func (db *DB) assignAdminRole(userID int64) error {
-	if _, err := db.db.Exec(`INSERT IGNORE INTO `+tblUserRoles+` (user_id, role_id) VALUES (?,?)`, userID, adminRoleID); err != nil {
-		return fmt.Errorf("assign admin role: %w", err)
+func assignRoleIfNone(tx *sql.Tx, userID int64, roleName string) error {
+	var hasRoles int
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM `+tblUserRoles+` WHERE user_id=? LIMIT 1)`, userID).Scan(&hasRoles); err != nil {
+		return fmt.Errorf("check user roles: %w", err)
+	}
+	if hasRoles == 1 {
+		return nil
+	}
+	return assignRole(tx, userID, roleName)
+}
+
+func assignRole(tx *sql.Tx, userID int64, roleName string) error {
+	var roleID int64
+	if err := tx.QueryRow(`SELECT id FROM rbac_roles WHERE name=?`, roleName).Scan(&roleID); err != nil {
+		return fmt.Errorf("find role %q: %w", roleName, err)
+	}
+	if _, err := tx.Exec(`INSERT IGNORE INTO `+tblUserRoles+` (user_id, role_id) VALUES (?,?)`, userID, roleID); err != nil {
+		return fmt.Errorf("assign role %q: %w", roleName, err)
 	}
 	return nil
 }
 
-// firstUserIsAdmin reports whether the users table is empty, so the first
-// registered account becomes admin.
-func (db *DB) firstUserIsAdmin() (bool, error) {
+func firstUserIsAdmin(tx *sql.Tx) (bool, error) {
 	var hasUsers int
-	if err := db.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ` + tblUsers + ` LIMIT 1)`).Scan(&hasUsers); err != nil {
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM ` + tblUsers + ` LIMIT 1)`).Scan(&hasUsers); err != nil {
 		return false, fmt.Errorf("check existing users: %w", err)
 	}
 	return hasUsers == 0, nil
@@ -111,8 +141,12 @@ func (db *DB) firstUserIsAdmin() (bool, error) {
 
 // GetUserByEmail returns the user for an email (including password hash), or nil.
 func (db *DB) GetUserByEmail(email string) (*User, error) {
+	return getUserByEmail(db.db, email)
+}
+
+func getUserByEmail(db rowQuerier, email string) (*User, error) {
 	u := &User{}
-	row := db.db.QueryRow(`SELECT id,COALESCE(feishu_uid,''),open_id,name,email,avatar_url,department,is_admin,password_hash FROM `+tblUsers+` WHERE email=?`, email)
+	row := db.QueryRow(`SELECT id,COALESCE(feishu_uid,''),open_id,name,email,avatar_url,department,is_admin,password_hash FROM `+tblUsers+` WHERE email=?`, email)
 	var isAdmin int
 	err := row.Scan(&u.ID, &u.FeishuUID, &u.OpenID, &u.Name, &u.Email, &u.AvatarURL, &u.Department, &isAdmin, &u.PasswordHash)
 	if err == sql.ErrNoRows {
@@ -128,12 +162,18 @@ func (db *DB) GetUserByEmail(email string) (*User, error) {
 // CreateUserWithPassword inserts an email/password user (no feishu_uid). The
 // first user in the table becomes admin, mirroring the Feishu path.
 func (db *DB) CreateUserWithPassword(email, name, passwordHash string) (*User, error) {
-	if existing, err := db.GetUserByEmail(email); err != nil {
+	tx, err := db.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin user registration: %w", err)
+	}
+	defer tx.Rollback()
+
+	if existing, err := getUserByEmail(tx, email); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return nil, ErrEmailExists
 	}
-	isAdmin, err := db.firstUserIsAdmin()
+	isAdmin, err := firstUserIsAdmin(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +181,7 @@ func (db *DB) CreateUserWithPassword(email, name, passwordHash string) (*User, e
 	if isAdmin {
 		adminFlag = 1
 	}
-	res, err := db.db.Exec(
+	res, err := tx.Exec(
 		`INSERT INTO `+tblUsers+` (name, email, password_hash, is_admin) VALUES (?,?,?,?)`,
 		name, email, passwordHash, adminFlag,
 	)
@@ -152,10 +192,15 @@ func (db *DB) CreateUserWithPassword(email, name, passwordHash string) (*User, e
 	if err != nil {
 		return nil, fmt.Errorf("last insert id: %w", err)
 	}
+	role := defaultRole
 	if isAdmin {
-		if err := db.assignAdminRole(id); err != nil {
-			return nil, err
-		}
+		role = adminRole
+	}
+	if err := assignRole(tx, id, role); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit user registration: %w", err)
 	}
 	return &User{ID: id, Name: name, Email: email, IsAdmin: isAdmin}, nil
 }
