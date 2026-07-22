@@ -4,10 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
-	_ "github.com/go-sql-driver/mysql"
+	platformmysql "github.com/dekwanlabs/nasuta/platform/mysql"
 )
 
 var (
@@ -21,23 +20,9 @@ var (
 // Callers must treat the returned pool as shared infrastructure and not close it.
 func MySQL(dsn string) (*sql.DB, error) {
 	mysqlOnce.Do(func() {
-		if dsn == "" {
-			mysqlErr = fmt.Errorf("MySQL DSN is empty")
-			return
-		}
-		db, err := sql.Open("mysql", dsn)
+		db, err := platformmysql.Open(dsn)
 		if err != nil {
-			mysqlErr = fmt.Errorf("mysql open: %w", err)
-			return
-		}
-		db.SetMaxOpenConns(20)
-		db.SetMaxIdleConns(5)
-		db.SetConnMaxLifetime(5 * time.Minute)
-		db.SetConnMaxIdleTime(2 * time.Minute)
-
-		if err := db.Ping(); err != nil {
-			db.Close()
-			mysqlErr = fmt.Errorf("mysql ping: %w", err)
+			mysqlErr = fmt.Errorf("mysql store: %w", err)
 			return
 		}
 		// Run all known schema migrations once.
