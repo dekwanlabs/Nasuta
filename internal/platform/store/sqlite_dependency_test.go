@@ -74,6 +74,37 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 	}
 }
 
+func TestReplaceAllFailureKeepsPublishedSnapshot(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	service := testService("team/orders", ".", "orders")
+	current := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{{Repo: service.Repo, HeadSHA: "current-sha", IndexedAt: time.Now().UnixMilli()}},
+		Services:     []domain.ServiceRecord{service},
+	}
+	if err := db.ReplaceAll(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := current
+	invalid.Repositories = []domain.RepositoryRecord{{Repo: service.Repo, HeadSHA: "", IndexedAt: time.Now().UnixMilli()}}
+	if err := db.ReplaceAll(context.Background(), invalid); err == nil {
+		t.Fatal("invalid replacement unexpectedly succeeded")
+	}
+
+	sha, err := db.GetIndexSHA(context.Background(), service.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha != "current-sha" {
+		t.Fatalf("published sha = %q, want current-sha", sha)
+	}
+}
+
 func TestServiceForPathUsesLongestModulePrefix(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
 	if err != nil {
