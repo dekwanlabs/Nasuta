@@ -591,11 +591,16 @@ func (svc *Service) DailySync(ctx context.Context, vcsURL, vcsToken, vcsGroups, 
 }
 
 func repoHeadSHA(ctx context.Context, workspaceRoot, repo string) (string, error) {
+	dir := filepath.Join(workspaceRoot, "repos", repo)
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-	cmd.Dir = filepath.Join(workspaceRoot, "repos", repo)
-	out, err := cmd.Output()
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", err
+		detail := strings.TrimSpace(string(out))
+		if detail == "" {
+			return "", fmt.Errorf("git revision for repository %q at %q: %w", repo, dir, err)
+		}
+		return "", fmt.Errorf("git revision for repository %q at %q: %w (%s)", repo, dir, err, detail)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -923,6 +928,7 @@ func (svc *Service) attachRepositorySnapshots(ctx context.Context, bundle *domai
 // RebuildSQLIndex refreshes the structural SQLite index without touching vectors.
 func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 	started := time.Now()
+	svc.ScanDirs = svc.LoadScanDirs()
 	log.Infof("[rebuild-sql] scanning %s (dirs: %v)", svc.Cfg.WorkspaceRoot, svc.ScanDirs)
 	bundle := indexer.BuildBundle(svc.Cfg.WorkspaceRoot, svc.ScanDirs, svc.docDB)
 	log.Infof("[rebuild-sql] scan complete after %s: services=%d endpoints=%d dependencies=%d",
