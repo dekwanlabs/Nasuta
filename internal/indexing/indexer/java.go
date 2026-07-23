@@ -11,12 +11,44 @@ import (
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
-// scanJavaServices finds Java applications by scanning .java files for
-// @SpringBootApplication or a main method — no filename assumption.
+// scanJavaServices registers every Maven module under root as a service. A
+// module is a directory with pom.xml, excluding <packaging>pom</packaging>
+// aggregators. Modules hosting a Spring Boot entrypoint (@SpringBootApplication
+// or a main method) are decorated with runtime=spring-boot plus entrypoint and
+// port evidence; library modules keep runtime="" so their controllers and Feign
+// clients resolve to them instead of being dropped during canonicalization.
 func scanJavaServices(root string, dirs []string) []domain.ServiceRecord {
-	files := walkFiles(root, dirs, hasSuffix(".java"))
-	var records []domain.ServiceRecord
-	for _, file := range files {
+	type module struct {
+		rec domain.ServiceRecord
+		dir string
+	}
+	var modules []module
+	byDir := make(map[string]int)
+	for _, pom := range walkFiles(root, dirs, isPom) {
+		text := readFile(pom)
+		if readPackaging(text) == "pom" {
+			continue
+		}
+		dir := filepath.Dir(pom)
+		name := readArtifactIDFromText(text, pom)
+		modulePath := relativeTo(root, dir)
+		modules = append(modules, module{
+			rec: domain.ServiceRecord{
+				ServiceName: name,
+				Repo:        topSegment(relativeTo(root, pom)),
+				Layer:       "server",
+				Scope:       inferLayer(name, modulePath),
+				ModulePath:  modulePath,
+				Language:    "java",
+				Tags:        []string{"code-scan"},
+				Confidence:  0.7,
+			},
+			dir: dir,
+		})
+		byDir[dir] = len(modules) - 1
+	}
+
+	for _, file := range walkFiles(root, dirs, hasSuffix(".java")) {
 		text := readFile(file)
 		if !strings.Contains(text, "@SpringBootApplication") &&
 			!strings.Contains(text, "SpringApplication.run") &&
@@ -25,40 +57,61 @@ func scanJavaServices(root string, dirs []string) []domain.ServiceRecord {
 		}
 		rel := relativeTo(root, file)
 		moduleRoot := findModuleRoot(root, file, "pom.xml")
-		// If no pom.xml found, also try Gradle
 		if moduleRoot == "" {
 			moduleRoot = findModuleRoot(root, file, "build.gradle")
 		}
 		if moduleRoot == "" {
 			moduleRoot = findModuleRoot(root, file, "build.gradle.kts")
 		}
-		modulePath := inferModulePathFromRel(rel)
-		serviceName := filepath.Base(modulePath)
-		if moduleRoot != "" {
-			modulePath = relativeTo(root, moduleRoot)
-			// Try Maven pom.xml first, then Gradle settings
-			if serviceName = readArtifactID(filepath.Join(moduleRoot, "pom.xml")); serviceName == filepath.Base(moduleRoot) {
-				serviceName = readKotlinArtifactID(moduleRoot) // handles both Kotlin & Java Gradle projects
+		if idx, ok := byDir[moduleRoot]; ok {
+			rec := &modules[idx].rec
+			rec.Runtime = "spring-boot"
+			rec.Entrypoints = append(rec.Entrypoints, domain.Evidence{Path: rel, Kind: domain.SourceCodeScan})
+			rec.Ports = append(rec.Ports, readPorts(moduleRoot)...)
+			rec.SourceOfTruth = append(rec.SourceOfTruth, rel)
+			if rec.Confidence < 0.9 {
+				rec.Confidence = 0.9
 			}
+			continue
 		}
-		layer := inferLayer(serviceName, modulePath)
-		records = append(records, domain.ServiceRecord{
-			ServiceName:   serviceName,
-			Repo:          topSegment(rel),
-			Layer:         "server",
-			Scope:         layer,
-			ModulePath:    modulePath,
-			Language:      "java",
-			Runtime:       "spring-boot",
-			Tags:          []string{"code-scan"},
-			Docs:          []string{},
-			SourceOfTruth: []string{rel},
-			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-			Ports:         readPorts(moduleRoot),
-			Confidence:    0.9,
-		})
+		// Entrypoint outside any pom module (Gradle or bare checkout): register
+		// it directly, mirroring the legacy entrypoint-only behavior.
+		modules = append(modules, module{rec: entrypointService(root, rel, moduleRoot), dir: moduleRoot})
 	}
-	return records
+
+	out := make([]domain.ServiceRecord, 0, len(modules))
+	for _, m := range modules {
+		out = append(out, m.rec)
+	}
+	return out
+}
+
+// entrypointService builds a record for a Spring Boot entrypoint that has no
+// pom.xml module (e.g. a Gradle project or a bare checkout).
+func entrypointService(root, rel, moduleRoot string) domain.ServiceRecord {
+	modulePath := inferModulePathFromRel(rel)
+	serviceName := filepath.Base(modulePath)
+	if moduleRoot != "" {
+		modulePath = relativeTo(root, moduleRoot)
+		if serviceName = readArtifactID(filepath.Join(moduleRoot, "pom.xml")); serviceName == filepath.Base(moduleRoot) {
+			serviceName = readKotlinArtifactID(moduleRoot)
+		}
+	}
+	return domain.ServiceRecord{
+		ServiceName:   serviceName,
+		Repo:          topSegment(rel),
+		Layer:         "server",
+		Scope:         inferLayer(serviceName, modulePath),
+		ModulePath:    modulePath,
+		Language:      "java",
+		Runtime:       "spring-boot",
+		Tags:          []string{"code-scan"},
+		Docs:          []string{},
+		SourceOfTruth: []string{rel},
+		Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+		Ports:         readPorts(moduleRoot),
+		Confidence:    0.9,
+	}
 }
 
 // scanFeignClients finds @FeignClient declarations -> caller/target edges.
@@ -165,14 +218,23 @@ func findModuleRoot(root, file, marker string) string {
 }
 
 var (
-	parentRe   = regexp.MustCompile(`(?s)<parent>.*?</parent>`)
-	artifactRe = regexp.MustCompile(`<artifactId>([^<]+)</artifactId>`)
-	depSplitRe = regexp.MustCompile(`<dependencies>|<dependencyManagement>|<build>`)
-	portRe     = regexp.MustCompile(`port:\s*(?:\$\{port:)?(\d{3,5})`)
+	parentRe    = regexp.MustCompile(`(?s)<parent>.*?</parent>`)
+	artifactRe  = regexp.MustCompile(`<artifactId>([^<]+)</artifactId>`)
+	depSplitRe  = regexp.MustCompile(`<dependencies>|<dependencyManagement>|<build>`)
+	portRe      = regexp.MustCompile(`port:\s*(?:\$\{port:)?(\d{3,5})`)
+	packagingRe = regexp.MustCompile(`<packaging>\s*([\w-]+)\s*</packaging>`)
 )
 
+func isPom(name string) bool { return name == "pom.xml" }
+
+// readArtifactID extracts the own artifactId from a pom.xml on disk.
 func readArtifactID(pomPath string) string {
-	text := readFile(pomPath)
+	return readArtifactIDFromText(readFile(pomPath), pomPath)
+}
+
+// readArtifactIDFromText extracts the own artifactId from already-read pom text,
+// avoiding a second read when the caller already has the text.
+func readArtifactIDFromText(text, pomPath string) string {
 	if text == "" {
 		return filepath.Base(filepath.Dir(pomPath))
 	}
@@ -182,6 +244,17 @@ func readArtifactID(pomPath string) string {
 		return strings.TrimSpace(m[1])
 	}
 	return filepath.Base(filepath.Dir(pomPath))
+}
+
+// readPackaging returns the module's own packaging (default jar). Aggregator
+// parents declare <packaging>pom</packaging> and are skipped by scanJavaServices.
+func readPackaging(text string) string {
+	withoutParent := parentRe.ReplaceAllString(text, "")
+	ownHeader := depSplitRe.Split(withoutParent, 2)[0]
+	if m := packagingRe.FindStringSubmatch(ownHeader); m != nil {
+		return strings.TrimSpace(m[1])
+	}
+	return "jar"
 }
 
 func inferJavaServiceName(root, file string) string {

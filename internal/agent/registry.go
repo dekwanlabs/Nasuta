@@ -50,7 +50,11 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return marshalResult(svc.ServiceLookup(ctx, argStr(args, "query", ""), argInt(args, "limit", 10)))
+				result, err := svc.ServiceLookupResult(ctx, argStr(args, "query", ""), argInt(args, "limit", 10))
+				if err != nil {
+					return "", err
+				}
+				return marshalResult(result)
 			}),
 		},
 		{
@@ -83,7 +87,11 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"limit":       propInt("Max results (default 20)."),
 			}, nil),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return marshalResult(svc.ListApis(ctx, argStr(args, "service", ""), argStr(args, "pathKeyword", ""), argInt(args, "limit", 20)))
+				result, err := svc.ListApisResult(ctx, argStr(args, "service", ""), argStr(args, "pathKeyword", ""), argInt(args, "limit", 20))
+				if err != nil {
+					return "", err
+				}
+				return marshalResult(result)
 			}),
 		},
 		{
@@ -98,7 +106,11 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return marshalResult(svc.CodeSearch(ctx, argStr(args, "query", ""), argStr(args, "lang", ""), argInt(args, "limit", 10)))
+				result, err := svc.CodeSearchResult(ctx, argStr(args, "query", ""), argStr(args, "lang", ""), argInt(args, "limit", 10))
+				if err != nil {
+					return "", err
+				}
+				return marshalResult(result)
 			}),
 		},
 		{
@@ -113,8 +125,12 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"limit":          propInt("Max nodes to return (default 5, max 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return marshalResult(svc.GetSymbolFiltered(ctx, argStr(args, "query", ""),
-					argStr(args, "file", ""), argStr(args, "qualified_name", ""), argInt(args, "limit", 5)))
+				result, err := svc.GetSymbolResult(ctx, argStr(args, "query", ""),
+					argStr(args, "file", ""), argStr(args, "qualified_name", ""), argInt(args, "limit", 5))
+				if err != nil {
+					return "", err
+				}
+				return marshalResult(result)
 			}),
 		},
 		{
@@ -133,12 +149,16 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"max_fanout":     propInt("Per-node call-edge budget 1-100 (default 20)."),
 			}, nil),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return marshalResult(svc.TraceCalls(ctx, callchain.Request{
+				result, err := svc.TraceCallsResult(ctx, callchain.Request{
 					Query: argStr(args, "query", ""), File: argStr(args, "file", ""),
 					Line: argInt(args, "line", 0), QualifiedName: argStr(args, "qualified_name", ""),
 					Direction: argStr(args, "direction", "both"), MaxDepth: argInt(args, "max_depth", 3),
 					MaxNodes: argInt(args, "max_nodes", 40), MaxFanout: argInt(args, "max_fanout", 20),
-				}))
+				})
+				if err != nil {
+					return "", err
+				}
+				return marshalResult(result)
 			}),
 		},
 		{
@@ -151,7 +171,11 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return marshalResult(svc.RunbookSearch(ctx, argStr(args, "query", ""), argInt(args, "limit", 10), false, ""))
+				result, err := svc.RunbookSearchResult(ctx, argStr(args, "query", ""), argInt(args, "limit", 10), false, "")
+				if err != nil {
+					return "", err
+				}
+				return marshalResult(result)
 			}),
 		},
 		{
@@ -160,7 +184,11 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 			Kind:        ToolKindRead,
 			InputSchema: objectSchema(map[string]any{"service": propString("Service name to check.")}, []string{"service"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				return marshalResult(svc.DocGapCheck(ctx, argStr(args, "service", "")))
+				result, err := svc.DocGapCheckResult(ctx, argStr(args, "service", ""))
+				if err != nil {
+					return "", err
+				}
+				return marshalResult(result)
 			}),
 		},
 		{
@@ -169,7 +197,11 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 			Kind:        ToolKindRead,
 			InputSchema: objectSchema(map[string]any{}, nil),
 			Handler: stringHandler(func(ctx context.Context, _ tool.Arguments) (string, error) {
-				return marshalResult(svc.IndexSummary(ctx))
+				result, err := svc.IndexSummaryResult(ctx)
+				if err != nil {
+					return "", err
+				}
+				return marshalResult(result)
 			}),
 		},
 	}

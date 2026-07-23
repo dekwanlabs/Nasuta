@@ -65,6 +65,27 @@ func TestRunStoreCompleteTransitionsOnlyActiveRun(t *testing.T) {
 	}
 }
 
+func TestAskStopsWhenRunCreationFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.ExpectExec("INSERT INTO agent_runs").WillReturnError(errors.New("database unavailable"))
+
+	qa := &QA{
+		runStore: &RunStore{db: db},
+		agent:    &Agent{cfg: AgentConfig{MaxSteps: 3}},
+	}
+	result, err := qa.Ask(context.Background(), QARequest{Question: "where is the endpoint?", RunID: "run-create-fail"})
+	if err == nil || !strings.Contains(err.Error(), "create agent run") {
+		t.Fatalf("result=%+v error=%v, want run creation failure", result, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunStoreRecordLLMCallUpdatesDetailAndAggregateAtomically(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

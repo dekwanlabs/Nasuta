@@ -94,20 +94,18 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 	}
 
 	before = len(pool)
+	var rankedPool []codeDoc
+	if traceEnabled {
+		rankedPool = append([]codeDoc(nil), pool...)
+	}
 	pool = filterByScore(pool, retrieve.platform.RerankMinScore)
 	log.InfofCtx(ctx, "[qa] code pool threshold(%.2f): %d → %d", retrieve.platform.RerankMinScore, before, len(pool))
-
-	// Keep the pre-threshold pool if score-scale mismatch would otherwise starve the answer.
-	if len(pool) == 0 && before > 0 {
-		pool = poolBeforeRerank
-		log.WarnfCtx(ctx, "[qa] code pool threshold(%.2f) wiped all %d docs — keeping pre-threshold pool", retrieve.platform.RerankMinScore, before)
-	}
 	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_threshold", Input: map[string]any{"candidates": before, "min_score": retrieve.platform.RerankMinScore}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
+		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_threshold", Input: map[string]any{"candidates": before, "min_score": retrieve.platform.RerankMinScore}, Output: map[string]any{"candidates": len(pool), "filtered": before - len(pool), "ranked_top": tracePool(rankedPool), "top": tracePool(pool)}})
 	}
 
 	before = len(pool)
-	pool = selectDiverse(pool, retrieve.platform.RerankTopK, retrieve.platform.RerankMaxPerService, retrieve.platform.RerankMaxPerServiceLowBand, retrieve.platform.RerankStrictDiversity)
+	pool = selectDiverse(pool, retrieve.platform.RerankTopK, retrieve.platform.RerankMaxPerService, retrieve.platform.RerankMaxPerServiceLowBand)
 	log.InfofCtx(ctx, "[qa] code pool diversity(topK=%d, max/svc=%d, lowband/svc=%d): → %d\n%s", retrieve.platform.RerankTopK, retrieve.platform.RerankMaxPerService, retrieve.platform.RerankMaxPerServiceLowBand, len(pool), poolSummary(pool, "final"))
 	if traceEnabled {
 		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_diversity", Input: map[string]any{"candidates": before, "top_k": retrieve.platform.RerankTopK, "max_per_service": retrieve.platform.RerankMaxPerService}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
@@ -282,7 +280,7 @@ func filterByScore(docs []codeDoc, min float64) []codeDoc {
 	return out
 }
 
-func selectDiverse(docs []codeDoc, topK, maxPerService, maxPerServiceLowBand int, _ bool) []codeDoc {
+func selectDiverse(docs []codeDoc, topK, maxPerService, maxPerServiceLowBand int) []codeDoc {
 	if topK <= 0 || len(docs) == 0 {
 		return docs
 	}

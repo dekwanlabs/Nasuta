@@ -245,10 +245,9 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 			Question: question, Mode: "single", MaxSteps: svc.agent.MaxStepsFor(question),
 			StartedAt: time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
-			log.ErrorfCtx(ctx, "[qa] create run error: %v", err)
-		} else {
-			ctx = llm.WithUsageRecorder(ctx, runID, svc.runStore)
+			return nil, fmt.Errorf("create agent run %q: %w", runID, err)
 		}
+		ctx = llm.WithUsageRecorder(ctx, runID, svc.runStore)
 	}
 	explicitPlan := request.EvidencePlan
 	toolPolicy := ToolPolicyForPlan(domain.DirectPlan(), svc.writeAvailable && request.AllowWrite)
@@ -366,12 +365,14 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	}
 	if planningErr != nil {
 		log.WarnfCtx(ctx, "[qa] evidence planning degraded: %v", planningErr)
-		routedToolIDs = allRoutedToolIDs(toolCandidates)
+		routedToolIDs = nil
 	}
 	var retainedContextTools bool
-	routedToolIDs, retainedContextTools = contextualRoutedToolIDs(
-		routedToolIDs, toolCandidates, routeContext, effectiveDecision.Plan,
-	)
+	if planningErr == nil {
+		routedToolIDs, retainedContextTools = contextualRoutedToolIDs(
+			routedToolIDs, toolCandidates, routeContext, effectiveDecision.Plan,
+		)
+	}
 	if retainedContextTools {
 		log.InfofCtx(ctx, "[qa] contextual follow-up retained routed read tools: %v", routedToolIDs)
 	}
@@ -420,6 +421,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	preloadedContext = append(preloadedContext, request.PreloadedContext...)
 
 	var recalled []memory.MemoryRecord
+	memoryUnavailable := ""
 	if evidencePlan.Has(domain.Memory) {
 		memoryStarted := time.Now()
 		memoryStatus := "completed"
@@ -427,6 +429,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		if svc.memory == nil || !svc.memory.Enabled() || userID == 0 {
 			memoryStatus = "unavailable"
 			memoryError = "memory capability not configured for this user"
+			memoryUnavailable = memoryError
 			log.WarnfCtx(ctx, "[qa] evidence source unavailable: memory")
 		} else if recall, err := svc.memory.Recall(ctx, userID, question, 3); err == nil {
 			recalled = recall.Records
@@ -445,6 +448,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		} else {
 			memoryStatus = "failed"
 			memoryError = err.Error()
+			memoryUnavailable = "memory recall failed: " + memoryError
 			log.ErrorfCtx(ctx, "[qa] memory recall error: %v", err)
 		}
 		if traceEnabled && memoryStatus != "completed" {
@@ -454,6 +458,9 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 				Output: map[string]any{"records": len(recalled), "error": memoryError},
 			})
 		}
+	}
+	if memoryUnavailable != "" {
+		preloadedContext = append(preloadedContext, unavailableToolBlock("memory", memoryUnavailable))
 	}
 	q := cleanQuestion
 	if q == "" {
@@ -489,11 +496,14 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		ctx, canonicalQuery, question, terms, evidencePlan,
 	)
 	if err != nil {
-		log.ErrorfCtx(ctx, "[qa] agent pre-retrieve error: %v", err)
-		rc = &retrieval.RetrievedContext{OriginalQuestion: question}
-	} else {
-		rc.OriginalQuestion = question
+		runErr := fmt.Errorf("retrieve internal evidence: %w", err)
+		log.ErrorfCtx(ctx, "[qa] agent pre-retrieve error: %v", runErr)
+		if svc.hub != nil {
+			svc.hub.Complete(runID, RunOutcome{Status: RunStatusFailed, Err: runErr})
+		}
+		return nil, runErr
 	}
+	rc.OriginalQuestion = question
 	mergePreloadedContext(rc, preloadedContext, svc.contextBudget())
 	appendUnavailableWeb(rc, webUnavailable)
 	log.InfofCtx(ctx, "[qa] agent pre-retrieve done: hitCount=%d contextLen=%d,question=%v", rc.HitCount, len(rc.Text), question)

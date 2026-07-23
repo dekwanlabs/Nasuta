@@ -62,28 +62,14 @@ func scanNodeJSEndpoints(root string, dirs []string) []domain.EndpointRecord {
 		}
 		handler := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
 		lines := strings.Split(text, "\n")
+		controllerPrefix := extractNestControllerPrefix(text)
 		for i, line := range lines {
-			for _, re := range nodejsRoutePatterns {
-				m := re.FindStringSubmatch(line)
-				if m == nil {
-					continue
-				}
-				method := "ANY"
-				path := ""
-				if len(m) >= 3 {
-					method = strings.ToUpper(m[1])
-					path = m[2]
-				} else if len(m) >= 2 {
-					path = m[1]
-				}
-				if path == "" {
-					continue
-				}
+			for _, route := range parseNodeJSRoutes(line, controllerPrefix) {
 				records = append(records, domain.EndpointRecord{
 					ServiceName:   serviceName,
 					Repo:          topSegment(rel),
-					Method:        method,
-					Path:          path,
+					Method:        route.method,
+					Path:          route.path,
 					Handler:       handler,
 					HandlerMethod: nodejsHandlerName(lines, i),
 					File:          rel,
@@ -188,23 +174,42 @@ func readNodeJSPorts(dir string) []int {
 	return nil
 }
 
-var nodejsRoutePatterns = []*regexp.Regexp{
-	// Express: app.get('/path', handler) or router.get('/path', handler)
-	regexp.MustCompile(`\.(get|post|put|delete|patch|head|options)\s*\(\s*["']([^"']+)["']`),
-	// Express: app.use('/path', router)
-	regexp.MustCompile(`\.use\s*\(\s*["']([^"']+)["']`),
-	// Fastify/Koa: fastify.get('/path') / router.get('/path')
-	regexp.MustCompile(`(?i)(?:fastify|router|server)\.(get|post|put|delete|patch|head|options)\s*\(\s*[']([^']+)[']`),
-	// NestJS decorators: @Get('/path'), @Post('/path')  [TypeScript]
-	regexp.MustCompile(`@(Get|Post|Put|Delete|Patch|Head|Options)\s*\(\s*[']([^']+)[']`),
-	// NestJS: @Controller('prefix')  — class-level prefix
-	regexp.MustCompile(`@Controller\s*\(\s*[']([^']+)[']`),
-	// Hapi: server.route({ method: 'GET', path: '/path' })
-	regexp.MustCompile(`method\s*:\s*['"]([A-Z]+)['"].*?path\s*:\s*['"]([^'"]+)['"]`),
-	// Hapi: path first variant
-	regexp.MustCompile(`path\s*:\s*['"]([^'"]+)['"].*?method\s*:\s*['"]([A-Z]+)['"]`),
-	// AdonisJS: Route.get('/path', 'Controller.method') or Route.group(() => { Route.get('/path') })
-	regexp.MustCompile(`Route\.(get|post|put|delete|patch)\s*\(\s*['"]([^'"]+)['"]`),
+type nodeJSRoute struct {
+	method string
+	path   string
+}
+
+var (
+	nodeMethodRouteRe = regexp.MustCompile(`(?i)\.(get|post|put|delete|patch|head|options)\s*\(\s*["']([^"']+)["']`)
+	nestRouteRe       = regexp.MustCompile(`@(Get|Post|Put|Delete|Patch|Head|Options)\s*\(\s*(?:["']([^"']*)["'])?\s*\)`)
+	nestControllerRe  = regexp.MustCompile(`@Controller\s*\(\s*(?:["']([^"']*)["'])?\s*\)`)
+	hapiMethodFirstRe = regexp.MustCompile(`(?i)method\s*:\s*['"]([A-Z]+)['"].*?path\s*:\s*['"]([^'"]+)['"]`)
+	hapiPathFirstRe   = regexp.MustCompile(`(?i)path\s*:\s*['"]([^'"]+)['"].*?method\s*:\s*['"]([A-Z]+)['"]`)
+)
+
+func parseNodeJSRoutes(line, controllerPrefix string) []nodeJSRoute {
+	if m := nestRouteRe.FindStringSubmatch(line); m != nil {
+		return []nodeJSRoute{{method: strings.ToUpper(m[1]), path: joinPaths(controllerPrefix, m[2])}}
+	}
+	if m := hapiMethodFirstRe.FindStringSubmatch(line); m != nil {
+		return []nodeJSRoute{{method: strings.ToUpper(m[1]), path: m[2]}}
+	}
+	if m := hapiPathFirstRe.FindStringSubmatch(line); m != nil {
+		return []nodeJSRoute{{method: strings.ToUpper(m[2]), path: m[1]}}
+	}
+	if m := nodeMethodRouteRe.FindStringSubmatch(line); m != nil {
+		return []nodeJSRoute{{method: strings.ToUpper(m[1]), path: m[2]}}
+	}
+	return nil
+}
+
+func extractNestControllerPrefix(text string) string {
+	beforeClass := regexp.MustCompile(`(?:export\s+)?class\s+`).Split(text, 2)[0]
+	matches := nestControllerRe.FindAllStringSubmatch(beforeClass, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[len(matches)-1][1]
 }
 
 var nodejsFuncRe = regexp.MustCompile(`(?:async\s+)?(?:function\s+)?(\w+)\s*\(`)
@@ -215,6 +220,9 @@ func nodejsHandlerName(lines []string, index int) string {
 		end = len(lines)
 	}
 	for i := index; i < end; i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "@") {
+			continue
+		}
 		if m := nodejsFuncRe.FindStringSubmatch(lines[i]); m != nil {
 			return m[1]
 		}

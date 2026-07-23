@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -9,19 +10,43 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
-// scanPythonServices finds FastAPI main.py entrypoints.
+// scanPythonServices registers Python project roots so routes in package
+// subdirectories retain stable service ownership.
 func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
-	files := walkFiles(root, dirs, func(name string) bool { return name == "main.py" })
+	files := walkFiles(root, dirs, func(name string) bool {
+		return name == "pyproject.toml" || name == "setup.py" || name == "setup.cfg" || name == "main.py"
+	})
 	var records []domain.ServiceRecord
+	seen := make(map[string]struct{}, len(files))
 	for _, file := range files {
-		rel := relativeTo(root, file)
 		moduleRoot := filepath.Dir(file)
+		if filepath.Base(file) == "main.py" {
+			if found := findPythonModuleRoot(root, file); found != "" {
+				moduleRoot = found
+			}
+		}
 		modulePath := relativeTo(root, moduleRoot)
+		key := canonicalPath(modulePath)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		rel := relativeTo(root, file)
 		serviceName := readPythonAppName(moduleRoot)
 		if serviceName == "" {
-			serviceName = filepath.Base(moduleRoot)
+			serviceName = readPythonProjectName(moduleRoot)
 		}
 		layer := inferLayer(serviceName, modulePath)
+		runtime, confidence := "", 0.7
+		entrypoints := []domain.Evidence{}
+		sourceOfTruth := []string{rel}
+		if entrypoint := findPythonEntrypoint(moduleRoot); entrypoint != "" {
+			runtime = "fastapi"
+			confidence = 0.85
+			entryRel := relativeTo(root, entrypoint)
+			entrypoints = append(entrypoints, domain.Evidence{Path: entryRel, Kind: domain.SourceCodeScan})
+			sourceOfTruth = append(sourceOfTruth, entryRel)
+		}
 		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
@@ -29,19 +54,19 @@ func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 			Scope:         layer,
 			ModulePath:    modulePath,
 			Language:      "python",
-			Runtime:       "fastapi",
+			Runtime:       runtime,
 			Tags:          []string{"code-scan", "ai"},
 			Docs:          []string{},
-			SourceOfTruth: []string{rel},
-			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+			SourceOfTruth: sourceOfTruth,
+			Entrypoints:   entrypoints,
 			Ports:         readPythonPorts(moduleRoot),
-			Confidence:    0.85,
+			Confidence:    confidence,
 		})
 	}
 	return records
 }
 
-var pyRouteRe = regexp.MustCompile(`@router\.(get|post|put|delete|patch)\(([^)]*)\)`)
+var pyRouteRe = regexp.MustCompile(`@\w+\.(get|post|put|delete|patch|head|options)\(([^)]*)\)`)
 
 // scanPythonEndpoints finds FastAPI router routes.
 func scanPythonEndpoints(root string, dirs []string) []domain.EndpointRecord {
@@ -49,14 +74,15 @@ func scanPythonEndpoints(root string, dirs []string) []domain.EndpointRecord {
 	var records []domain.EndpointRecord
 	for _, file := range files {
 		text := readFile(file)
-		if !strings.Contains(text, "APIRouter") && !strings.Contains(text, "@router.") {
+		if !strings.Contains(text, "APIRouter") && !strings.Contains(text, "@router.") &&
+			!strings.Contains(text, "@app.") {
 			continue
 		}
 		rel := relativeTo(root, file)
-		moduleRoot := inferPythonModuleRoot(file)
+		moduleRoot := findPythonModuleRoot(root, file)
 		serviceName := readPythonAppName(moduleRoot)
 		if serviceName == "" {
-			serviceName = filepath.Base(moduleRoot)
+			serviceName = readPythonProjectName(moduleRoot)
 		}
 		routerPrefix := extractPythonRouterPrefix(text)
 		handler := strings.TrimSuffix(filepath.Base(file), ".py")
@@ -107,9 +133,27 @@ func readPythonPorts(moduleRoot string) []int {
 	return []int{}
 }
 
-func inferPythonModuleRoot(file string) string {
+func findPythonModuleRoot(root, file string) string {
 	current := filepath.Dir(file)
-	for filepath.Base(current) == "router" || strings.Contains(toPosix(current), "/router/") {
+	for strings.HasPrefix(current, root) {
+		for _, marker := range []string{"pyproject.toml", "setup.py", "setup.cfg"} {
+			if _, err := os.Stat(filepath.Join(current, marker)); err == nil {
+				return current
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	current = filepath.Dir(file)
+	for {
+		base := filepath.Base(current)
+		if base != "router" && base != "routers" && base != "route" && base != "routes" &&
+			base != "api" {
+			break
+		}
 		parent := filepath.Dir(current)
 		if parent == current {
 			break
@@ -119,7 +163,7 @@ func inferPythonModuleRoot(file string) string {
 	return current
 }
 
-var pyRouterPrefixRe = regexp.MustCompile(`APIRouter\([^)]*prefix\s*=\s*"([^"]+)"`)
+var pyRouterPrefixRe = regexp.MustCompile(`APIRouter\([^)]*prefix\s*=\s*["']([^"']+)["']`)
 
 func extractPythonRouterPrefix(text string) string {
 	if m := pyRouterPrefixRe.FindStringSubmatch(text); m != nil {
@@ -138,6 +182,36 @@ func pythonHandlerName(lines []string, index int) string {
 	for i := index; i < end; i++ {
 		if m := pyDefRe.FindStringSubmatch(lines[i]); m != nil {
 			return m[1]
+		}
+	}
+	return ""
+}
+
+var (
+	pyProjectNameRe = regexp.MustCompile(`(?m)^name\s*=\s*["']([^"']+)["']`)
+	pySetupNameRe   = regexp.MustCompile(`(?s)\bname\s*=\s*["']([^"']+)["']`)
+)
+
+func readPythonProjectName(moduleRoot string) string {
+	if text := readFile(filepath.Join(moduleRoot, "pyproject.toml")); text != "" {
+		if m := pyProjectNameRe.FindStringSubmatch(text); m != nil {
+			return m[1]
+		}
+	}
+	if text := readFile(filepath.Join(moduleRoot, "setup.py")); text != "" {
+		if m := pySetupNameRe.FindStringSubmatch(text); m != nil {
+			return m[1]
+		}
+	}
+	return filepath.Base(moduleRoot)
+}
+
+func findPythonEntrypoint(moduleRoot string) string {
+	for _, candidate := range []string{"main.py", "app/main.py", "src/main.py"} {
+		path := filepath.Join(moduleRoot, candidate)
+		text := readFile(path)
+		if strings.Contains(text, "FastAPI(") || strings.Contains(text, "uvicorn.run(") {
+			return path
 		}
 	}
 	return ""

@@ -66,7 +66,7 @@ func TestDiversitySelect_PerServiceCap(t *testing.T) {
 	for i := range docs {
 		docs[i].rerankScore = docs[i].denseScore
 	}
-	out := selectDiverse(docs, 5, 3, 0, true)
+	out := selectDiverse(docs, 5, 3, 0)
 	aCount := 0
 	for _, d := range out {
 		if d.service == "svc-a" {
@@ -96,7 +96,7 @@ func TestDiversitySelect_BackfillRespectsCap(t *testing.T) {
 	// In non-strict mode, backfill must not re-feed a service that already hit its cap.
 	// svc-a stays capped at 3 even with a 4th high-score doc.
 	// svc-b still contributes because it has unused capacity.
-	out := selectDiverse(docs, 5, 3, 0, false)
+	out := selectDiverse(docs, 5, 3, 0)
 	if len(out) != 4 {
 		t.Fatalf("backfill must respect per-service cap: expected 4, got %d", len(out))
 	}
@@ -125,7 +125,7 @@ func TestDiversitySelect_EmptyServiceBucketUncapped(t *testing.T) {
 	for i := range docs {
 		docs[i].rerankScore = docs[i].denseScore
 	}
-	out := selectDiverse(docs, 5, 3, 0, false)
+	out := selectDiverse(docs, 5, 3, 0)
 	if len(out) != 5 {
 		t.Fatalf("empty-service bucket must be uncapped: expected 5, got %d", len(out))
 	}
@@ -141,7 +141,7 @@ func TestDiversitySelect_PreservesGlobalRankAcrossServices(t *testing.T) {
 	for i := range docs {
 		docs[i].rerankScore = docs[i].denseScore
 	}
-	out := selectDiverse(docs, 4, 2, 0, true)
+	out := selectDiverse(docs, 4, 2, 0)
 	if len(out) != 4 {
 		t.Fatalf("expected 4, got %d", len(out))
 	}
@@ -173,7 +173,7 @@ func TestDiversitySelect_LowBandCapPrunesMirrorDDL(t *testing.T) {
 		{source: "code", service: "hsds-backstage-cookbook-provider", filePath: "db/pro.sql", text: "ddl1", trustTier: domain.TrustRawDDL, rerankScore: 0.90},
 		{source: "code", service: "hsds-backstage-cookbook-provider", filePath: "db/fat.sql", text: "ddl2", trustTier: domain.TrustRawDDL, rerankScore: 0.80},
 	}
-	out := selectDiverse(docs, 5, 3, 1, false)
+	out := selectDiverse(docs, 5, 3, 1)
 	ddlCount := 0
 	for _, d := range out {
 		if domain.TrustBand(d.trustTier) <= 2 {
@@ -194,7 +194,7 @@ func TestDiversitySelect_LowBandCapDisabledWhenZero(t *testing.T) {
 		{source: "code", service: "svc", filePath: "db/pro.sql", text: "ddl1", trustTier: domain.TrustRawDDL, rerankScore: 0.90},
 		{source: "code", service: "svc", filePath: "db/fat.sql", text: "ddl2", trustTier: domain.TrustRawDDL, rerankScore: 0.80},
 	}
-	out := selectDiverse(docs, 5, 3, 0, false)
+	out := selectDiverse(docs, 5, 3, 0)
 	ddlCount := 0
 	for _, d := range out {
 		if domain.TrustBand(d.trustTier) <= 2 {
@@ -326,6 +326,19 @@ func TestPostProcessCodePipeline(t *testing.T) {
 	}
 }
 
+func TestPostProcessCodePipelineHonorsThresholdWhenAllCandidatesFail(t *testing.T) {
+	cfg := rerankTestCfg()
+	cfg.RerankMinScore = 1.1
+	r := &Retriever{reranker: denseReranker{}, platform: cfg}
+	out := r.postProcessCodePool(context.Background(), []codeDoc{
+		doc("svc-a", "a/1.java", "m", "aaaa", 0.95),
+		doc("svc-b", "b/1.java", "m", "bbbb", 0.80),
+	}, "q")
+	if len(out) != 0 {
+		t.Fatalf("threshold returned %d candidates, want none", len(out))
+	}
+}
+
 // newTestDashScopeReranker points a dashscopeReranker at a fake server.
 func newTestDashScopeReranker(url string, srv *httptest.Server) dashscopeReranker {
 	return dashscopeReranker{
@@ -440,12 +453,11 @@ func TestRerankPoolDoesNotApplyDensePreflightToRRF(t *testing.T) {
 
 func rerankTestCfg() *config.PlatformSettings {
 	return &config.PlatformSettings{
-		RerankEnabled:         true,
-		RerankPool:            50,
-		RerankTopK:            10,
-		RerankMinScore:        0.35,
-		RerankMaxPerService:   3,
-		RerankStrictDiversity: false,
+		RerankEnabled:       true,
+		RerankPool:          50,
+		RerankTopK:          10,
+		RerankMinScore:      0.35,
+		RerankMaxPerService: 3,
 	}
 }
 

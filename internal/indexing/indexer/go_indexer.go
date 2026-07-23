@@ -13,7 +13,7 @@ import (
 func scanGoServices(root string, dirs []string) []domain.ServiceRecord {
 	files := walkFiles(root, dirs, hasSuffix(".go"))
 	var records []domain.ServiceRecord
-	seenModules := map[string]bool{}
+	seenModules := map[string]struct{}{}
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "package main") || !strings.Contains(text, "func main()") {
@@ -28,10 +28,11 @@ func scanGoServices(root string, dirs []string) []domain.ServiceRecord {
 			serviceName = readGoModuleName(moduleRoot)
 		}
 		// One service per module (may have multiple main packages in cmd/ subdirs)
-		if seenModules[serviceName] {
+		moduleKey := canonicalRepo(topSegment(rel)) + "\x00" + canonicalPath(modulePath)
+		if _, ok := seenModules[moduleKey]; ok {
 			continue
 		}
-		seenModules[serviceName] = true
+		seenModules[moduleKey] = struct{}{}
 		layer := inferLayer(serviceName, modulePath)
 		runtime := readGoVersion(moduleRoot)
 		records = append(records, domain.ServiceRecord{

@@ -10,43 +10,60 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
-// scanKotlinServices finds Kotlin applications by scanning .kt files for
-// @SpringBootApplication, fun main(), or Ktor embeddedServer — no filename assumption.
+// scanKotlinServices registers each build module containing Kotlin source so
+// controllers and clients in library modules keep service ownership.
 func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 	files := walkFiles(root, dirs, hasSuffix(".kt"))
 	var records []domain.ServiceRecord
+	byModule := make(map[string]int)
 	for _, file := range files {
 		text := readFile(file)
+		rel := relativeTo(root, file)
+		moduleRoot := findKotlinModuleRoot(root, file)
+		modulePath := inferModulePathFromRel(rel)
+		serviceName := filepath.Base(modulePath)
+		if moduleRoot != "" {
+			if readPackaging(readFile(filepath.Join(moduleRoot, "pom.xml"))) == "pom" {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(moduleRoot, "src", "main", "AndroidManifest.xml")); err == nil {
+				continue
+			}
+			modulePath = relativeTo(root, moduleRoot)
+			serviceName = readKotlinArtifactID(moduleRoot)
+		}
+		moduleKey := canonicalPath(modulePath)
+		idx, exists := byModule[moduleKey]
+		if !exists {
+			records = append(records, domain.ServiceRecord{
+				ServiceName: serviceName,
+				Repo:        topSegment(rel),
+				Layer:       "server",
+				Scope:       inferLayer(serviceName, modulePath),
+				ModulePath:  modulePath,
+				Language:    "kotlin",
+				Tags:        []string{"code-scan"},
+				Docs:        []string{},
+				Confidence:  0.7,
+			})
+			idx = len(records) - 1
+			byModule[moduleKey] = idx
+		}
 		if !strings.Contains(text, "@SpringBootApplication") &&
 			!strings.Contains(text, "SpringApplication.run") &&
 			!strings.Contains(text, "fun main") &&
 			!strings.Contains(text, "embeddedServer") {
 			continue
 		}
-		rel := relativeTo(root, file)
-		moduleRoot := findKotlinModuleRoot(root, file)
-		modulePath := inferModulePathFromRel(rel)
-		serviceName := filepath.Base(modulePath)
-		if moduleRoot != "" {
-			modulePath = relativeTo(root, moduleRoot)
-			serviceName = readKotlinArtifactID(moduleRoot)
-		}
 		layer := inferLayer(serviceName, modulePath)
-		records = append(records, domain.ServiceRecord{
-			ServiceName:   serviceName,
-			Repo:          topSegment(rel),
-			Layer:         "server",
-			Scope:         layer,
-			ModulePath:    modulePath,
-			Language:      "kotlin",
-			Runtime:       "spring-boot",
-			Tags:          []string{"code-scan"},
-			Docs:          []string{},
-			SourceOfTruth: []string{rel},
-			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-			Ports:         readKotlinPorts(moduleRoot),
-			Confidence:    0.9,
-		})
+		rec := &records[idx]
+		rec.Layer = "server"
+		rec.Scope = layer
+		rec.Runtime = "spring-boot"
+		rec.SourceOfTruth = append(rec.SourceOfTruth, rel)
+		rec.Entrypoints = append(rec.Entrypoints, domain.Evidence{Path: rel, Kind: domain.SourceCodeScan})
+		rec.Ports = append(rec.Ports, readKotlinPorts(moduleRoot)...)
+		rec.Confidence = 0.9
 	}
 	return records
 }

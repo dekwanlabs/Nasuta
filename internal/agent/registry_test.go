@@ -95,6 +95,26 @@ func TestTraceDepsUsesOntologyFacts(t *testing.T) {
 	}
 }
 
+func TestBuiltinToolReturnsExecutionErrorWhenBackendIsUnavailable(t *testing.T) {
+	var symbol *Tool
+	for _, candidate := range builtinTools(&Service{}, config.Config{}) {
+		if candidate.ID == "get_symbol" {
+			symbol = &candidate
+			break
+		}
+	}
+	if symbol == nil {
+		t.Fatal("get_symbol was not registered")
+	}
+	result, err := symbol.Handler.Execute(context.Background(), map[string]any{"query": "OrderService"})
+	if err == nil {
+		t.Fatalf("expected backend error, got result %q", result.Content)
+	}
+	if !strings.Contains(err.Error(), "workspace root") {
+		t.Fatalf("error = %v, want workspace root failure", err)
+	}
+}
+
 type staticOntologyRepository struct{}
 
 func (staticOntologyRepository) Resolve(context.Context, ontology.ResolveQuery) (ontology.ResolveResult, error) {

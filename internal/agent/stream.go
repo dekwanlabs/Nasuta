@@ -181,6 +181,7 @@ type RunHub struct {
 	signals   map[string][]ControlSignal
 	paused    map[string]chan struct{}
 	completed map[string]struct{}
+	stepErrs  map[string]error
 	runStore  *RunStore
 }
 
@@ -190,6 +191,7 @@ func NewRunHub(runStore *RunStore) *RunHub {
 		signals:   map[string][]ControlSignal{},
 		paused:    map[string]chan struct{}{},
 		completed: map[string]struct{}{},
+		stepErrs:  map[string]error{},
 		runStore:  runStore,
 	}
 }
@@ -235,6 +237,11 @@ func (hub *RunHub) OnStep(ctx context.Context, runID string, step StepRecord) {
 			CreatedAt:       step.CreatedAt.UTC().Format(time.RFC3339),
 		}); err != nil {
 			log.ErrorfCtx(ctx, "[hub] persist step error: %v", err)
+			hub.mu.Lock()
+			if _, exists := hub.stepErrs[runID]; !exists {
+				hub.stepErrs[runID] = err
+			}
+			hub.mu.Unlock()
 		}
 	}
 	hub.broadcast(ctxWithRunID(runID), runID, SSEEvent{Step: &step})
@@ -270,11 +277,17 @@ func (hub *RunHub) Complete(runID string, outcome RunOutcome) {
 	delete(hub.signals, runID)
 	paused := hub.paused[runID]
 	delete(hub.paused, runID)
+	stepErr := hub.stepErrs[runID]
+	delete(hub.stepErrs, runID)
 	hub.mu.Unlock()
 	if paused != nil {
 		close(paused)
 	}
 
+	if stepErr != nil {
+		outcome.Status = RunStatusFailed
+		outcome.Err = fmt.Errorf("persist agent step: %w", stepErr)
+	}
 	if hub.runStore != nil {
 		if err := hub.runStore.Complete(runID, outcome); err != nil {
 			if errors.Is(err, ErrRunNotActive) {

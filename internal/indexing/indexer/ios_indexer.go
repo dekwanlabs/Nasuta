@@ -26,16 +26,17 @@ func scanIOSServices(root string, dirs []string) []domain.ServiceRecord {
 				if _, skip := ignoredDirs[d.Name()]; skip {
 					return filepath.SkipDir
 				}
+				if strings.HasSuffix(d.Name(), ".xcodeproj") || strings.HasSuffix(d.Name(), ".xcworkspace") {
+					plists = append(plists, path)
+					return filepath.SkipDir
+				}
 				return nil
-			}
-			if strings.HasSuffix(d.Name(), ".xcodeproj") || strings.HasSuffix(d.Name(), ".xcworkspace") {
-				plists = append(plists, path)
 			}
 			return nil
 		})
 	}
 
-	seen := map[string]bool{}
+	seen := map[string]struct{}{}
 	for _, file := range plists {
 		rel := relativeTo(root, file)
 		moduleRoot := filepath.Dir(file)
@@ -48,10 +49,11 @@ func scanIOSServices(root string, dirs []string) []domain.ServiceRecord {
 		if serviceName == "" {
 			serviceName = filepath.Base(moduleRoot)
 		}
-		if seen[serviceName] {
+		key := canonicalRepo(topSegment(rel)) + "\x00" + canonicalPath(relativeTo(root, moduleRoot))
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		seen[serviceName] = true
+		seen[key] = struct{}{}
 
 		lang := detectIOSLang(moduleRoot)
 		runtime := detectIOSPlatform(moduleRoot)
@@ -137,7 +139,7 @@ func readIOSAppName(dir string) string {
 	// Try project.pbxproj for PRODUCT_NAME or INFOPLIST_FILE
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".xcodeproj") {
+		if e.IsDir() && strings.HasSuffix(e.Name(), ".xcodeproj") {
 			pbx := filepath.Join(dir, e.Name(), "project.pbxproj")
 			text := readFile(pbx)
 			if m := regexp.MustCompile(`PRODUCT_NAME\s*=\s*(\w+)`).FindStringSubmatch(text); m != nil {

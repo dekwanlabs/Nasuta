@@ -115,10 +115,9 @@ func readFile(path string) string {
 // isClassLevelMapping, javaMethodName and their regexps are Java-specific and
 // live in java.go next to their only callers.
 
-var firstStringRe = regexp.MustCompile(`"([^"]*)"`)
+var firstStringRe = regexp.MustCompile(`["']([^"']*)["']`)
 
-// extractFirstString returns the first double-quoted substring, shared by the
-// Java and Python scanners for pulling route values out of annotations/expressions.
+// extractFirstString returns the first quoted substring from an annotation or expression.
 func extractFirstString(text string) string {
 	m := firstStringRe.FindStringSubmatch(text)
 	if m == nil {

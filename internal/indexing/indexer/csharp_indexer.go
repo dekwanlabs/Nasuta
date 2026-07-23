@@ -10,42 +10,44 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
-// scanCSharpServices finds .NET applications by scanning .cs files for
-// WebApplication / Host builder patterns — no filename assumption.
+// scanCSharpServices registers each .NET project so controller libraries keep
+// stable ownership even when they do not host the process entrypoint.
 func scanCSharpServices(root string, dirs []string) []domain.ServiceRecord {
-	files := walkFiles(root, dirs, hasSuffix(".cs"))
+	projects := walkFiles(root, dirs, hasSuffix(".csproj"))
 	var records []domain.ServiceRecord
-	for _, file := range files {
+	byModule := make(map[string]int, len(projects))
+	for _, project := range projects {
+		moduleRoot := filepath.Dir(project)
+		modulePath := relativeTo(root, moduleRoot)
+		serviceName := readCSharpProjectName(moduleRoot)
+		rel := relativeTo(root, project)
+		records = append(records, domain.ServiceRecord{
+			ServiceName: serviceName, Repo: topSegment(rel), Layer: "server",
+			Scope: inferLayer(serviceName, modulePath), ModulePath: modulePath,
+			Language: "csharp", Tags: []string{"code-scan"}, Docs: []string{},
+			SourceOfTruth: []string{rel}, Confidence: 0.7,
+		})
+		byModule[canonicalPath(modulePath)] = len(records) - 1
+	}
+	for _, file := range walkFiles(root, dirs, hasSuffix(".cs")) {
 		text := readFile(file)
 		if !strings.Contains(text, "WebApplication") &&
 			!strings.Contains(text, "CreateHostBuilder") &&
 			!strings.Contains(text, "CreateDefaultBuilder") {
 			continue
 		}
-		rel := relativeTo(root, file)
 		moduleRoot := findCSharpModuleRoot(root, file)
-		modulePath := inferModulePathFromRel(rel)
-		serviceName := filepath.Base(modulePath)
-		if moduleRoot != "" {
-			modulePath = relativeTo(root, moduleRoot)
-			serviceName = readCSharpProjectName(moduleRoot)
+		idx, ok := byModule[canonicalPath(relativeTo(root, moduleRoot))]
+		if !ok {
+			continue
 		}
-		layer := inferLayer(serviceName, modulePath)
-		records = append(records, domain.ServiceRecord{
-			ServiceName:   serviceName,
-			Repo:          topSegment(rel),
-			Layer:         "server",
-			Scope:         layer,
-			ModulePath:    modulePath,
-			Language:      "csharp",
-			Runtime:       "dotnet",
-			Tags:          []string{"code-scan"},
-			Docs:          []string{},
-			SourceOfTruth: []string{rel},
-			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-			Ports:         readCSharpPorts(moduleRoot),
-			Confidence:    0.85,
-		})
+		rel := relativeTo(root, file)
+		rec := &records[idx]
+		rec.Runtime = "dotnet"
+		rec.Entrypoints = append(rec.Entrypoints, domain.Evidence{Path: rel, Kind: domain.SourceCodeScan})
+		rec.SourceOfTruth = append(rec.SourceOfTruth, rel)
+		rec.Ports = append(rec.Ports, readCSharpPorts(moduleRoot)...)
+		rec.Confidence = 0.85
 	}
 	return records
 }

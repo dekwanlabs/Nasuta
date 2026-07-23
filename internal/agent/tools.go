@@ -131,11 +131,21 @@ func (srv *Service) services(ctx context.Context) ([]domain.ServiceRecord, error
 }
 
 func (srv *Service) ServiceLookup(ctx context.Context, query string, limit int) map[string]any {
-	result, err := srv.FindServices(ctx, query, limit)
+	result, err := srv.ServiceLookupResult(ctx, query, limit)
 	if err != nil {
 		return map[string]any{"matches": nil, "semantic": false, "error": err.Error()}
 	}
-	return map[string]any{"matches": result.Matches, "semantic": result.Semantic}
+	return result
+}
+
+// ServiceLookupResult returns the service lookup payload without hiding backend failures.
+func (srv *Service) ServiceLookupResult(ctx context.Context, query string, limit int) (map[string]any, error) {
+	limit = clampInt(limit, 1, 100)
+	result, err := srv.FindServices(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"matches": result.Matches, "semantic": result.Semantic}, nil
 }
 
 // FindServices returns typed service matches for internal consumers.
@@ -202,11 +212,21 @@ func (srv *Service) semanticServiceNames(ctx context.Context, query string, limi
 
 // RunbookSearch searches the runbook corpus with semantic and keyword fallback.
 func (srv *Service) RunbookSearch(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) map[string]any {
-	result, err := srv.FindRunbooks(ctx, query, limit, includeText, scopeFilter)
+	result, err := srv.RunbookSearchResult(ctx, query, limit, includeText, scopeFilter)
 	if err != nil {
 		return map[string]any{"matches": nil, "semantic": false, "error": err.Error()}
 	}
-	return map[string]any{"matches": runbookSearchHitsToMaps(result.Matches), "semantic": result.Semantic}
+	return result
+}
+
+// RunbookSearchResult returns the runbook payload without hiding store failures.
+func (srv *Service) RunbookSearchResult(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (map[string]any, error) {
+	limit = clampInt(limit, 1, 100)
+	result, err := srv.FindRunbooks(ctx, query, limit, includeText, scopeFilter)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"matches": runbookSearchHitsToMaps(result.Matches), "semantic": result.Semantic}, nil
 }
 
 // FindRunbooks returns typed runbook matches for internal consumers.
@@ -333,9 +353,19 @@ func filterRunbooksByScope(all []domain.RunbookRecord, scope string) []domain.Ru
 // See collectRunbooks.
 
 func (srv *Service) CodeSearch(ctx context.Context, query, lang string, limit int) map[string]any {
-	result, err := srv.FindCode(ctx, query, lang, limit)
+	result, err := srv.CodeSearchResult(ctx, query, lang, limit)
 	if err != nil {
 		return map[string]any{"matches": []any{}, "error": err.Error()}
+	}
+	return result
+}
+
+// CodeSearchResult returns the code search payload without hiding backend failures.
+func (srv *Service) CodeSearchResult(ctx context.Context, query, lang string, limit int) (map[string]any, error) {
+	limit = clampInt(limit, 1, 100)
+	result, err := srv.FindCode(ctx, query, lang, limit)
+	if err != nil {
+		return nil, err
 	}
 	matches := make([]any, 0, len(result.Matches))
 	for _, hit := range result.Matches {
@@ -352,7 +382,7 @@ func (srv *Service) CodeSearch(ctx context.Context, query, lang string, limit in
 		}
 		matches = append(matches, match)
 	}
-	return map[string]any{"matches": matches, "semantic": result.Semantic}
+	return map[string]any{"matches": matches, "semantic": result.Semantic}, nil
 }
 
 // SearchCode exposes typed code search to built-in and scenario tools.
@@ -756,11 +786,21 @@ func dependencyTrace(result ontology.DependencyResult) domain.DependencyTrace {
 }
 
 func (srv *Service) ListApis(ctx context.Context, service, pathKeyword string, limit int) map[string]any {
-	matches, err := srv.FindAPIs(ctx, service, pathKeyword, limit)
+	result, err := srv.ListApisResult(ctx, service, pathKeyword, limit)
 	if err != nil {
 		return map[string]any{"matches": nil, "error": err.Error()}
 	}
-	return map[string]any{"matches": matches}
+	return result
+}
+
+// ListApisResult returns indexed APIs without hiding storage failures.
+func (srv *Service) ListApisResult(ctx context.Context, service, pathKeyword string, limit int) (map[string]any, error) {
+	limit = clampInt(limit, 1, 100)
+	matches, err := srv.FindAPIs(ctx, service, pathKeyword, limit)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"matches": matches}, nil
 }
 
 // FindAPIs returns typed endpoint records for internal consumers.
@@ -773,23 +813,31 @@ func (srv *Service) FindAPIs(ctx context.Context, service, pathKeyword string, l
 }
 
 func (srv *Service) DocGapCheck(ctx context.Context, serviceName string) map[string]any {
-	all, err := srv.services(ctx)
+	result, err := srv.DocGapCheckResult(ctx, serviceName)
 	if err != nil {
 		return map[string]any{"service": serviceName, "found": false, "error": err.Error()}
 	}
+	return result
+}
+
+// DocGapCheckResult reports documentation gaps without folding store failures into data.
+func (srv *Service) DocGapCheckResult(ctx context.Context, serviceName string) (map[string]any, error) {
+	all, err := srv.services(ctx)
+	if err != nil {
+		return nil, err
+	}
 	hit := scoreServices(all, serviceName, 1)
 	if len(hit) == 0 {
-		return map[string]any{"service": serviceName, "found": false, "missing": []string{"service-card"}}
+		return map[string]any{"service": serviceName, "found": false, "missing": []string{"service-card"}}, nil
 	}
 	svc := hit[0]
-	var dbErrors []string
 	endpoints, err := srv.db.EndpointCountFor(ctx, svc.ServiceName)
 	if err != nil {
-		dbErrors = append(dbErrors, fmt.Sprintf("endpoint_count: %v", err))
+		return nil, fmt.Errorf("endpoint count for %q: %w", svc.ServiceName, err)
 	}
 	outgoing, err := srv.db.OutgoingCountFor(ctx, svc.ServiceName)
 	if err != nil {
-		dbErrors = append(dbErrors, fmt.Sprintf("outgoing_count: %v", err))
+		return nil, fmt.Errorf("outgoing dependency count for %q: %w", svc.ServiceName, err)
 	}
 
 	missing := []string{}
@@ -819,60 +867,62 @@ func (srv *Service) DocGapCheck(ctx context.Context, serviceName string) map[str
 			"outgoingDependencies": outgoing,
 		},
 	}
-	if len(dbErrors) > 0 {
-		res["error"] = strings.Join(dbErrors, "; ")
-	}
-	return res
+	return res, nil
 }
 
 func (srv *Service) IndexSummary(ctx context.Context) map[string]any {
-	sm, err := srv.db.Summary(ctx)
+	result, err := srv.IndexSummaryResult(ctx)
 	if err != nil {
 		return map[string]any{
-			"services":        0,
-			"endpoints":       0,
-			"dependencies":    0,
-			"runbooks":        0,
-			"repos":           0,
-			"semanticEnabled": srv.semanticEnabled(),
-			"error":           err.Error(),
+			"services": 0, "endpoints": 0, "dependencies": 0, "runbooks": 0, "repos": 0,
+			"semanticEnabled": srv.semanticEnabled(), "error": err.Error(),
 		}
+	}
+	return result
+}
+
+// IndexSummaryResult returns index health without hiding configured backend failures.
+func (srv *Service) IndexSummaryResult(ctx context.Context) (map[string]any, error) {
+	sm, err := srv.db.Summary(ctx)
+	if err != nil {
+		return nil, err
+	}
+	runbooks, err := srv.runbookCount()
+	if err != nil {
+		return nil, fmt.Errorf("count runbooks: %w", err)
 	}
 	result := map[string]any{
 		"services":        sm.Services,
 		"endpoints":       sm.Endpoints,
 		"dependencies":    sm.Dependencies,
-		"runbooks":        srv.runbookCount(),
+		"runbooks":        runbooks,
 		"repos":           sm.Repos,
 		"semanticEnabled": srv.semanticEnabled(),
 	}
 	if srv.ontology == nil {
 		result["ontology"] = map[string]any{"enabled": false, "status": "unavailable"}
-		return result
+		return result, nil
 	}
 	stats, ontologyErr := srv.ontology.Stats(ctx)
 	if ontologyErr != nil {
-		result["ontology"] = map[string]any{"enabled": false, "status": "unavailable", "error": ontologyErr.Error()}
-		return result
+		return nil, fmt.Errorf("ontology stats: %w", ontologyErr)
 	}
 	result["ontology"] = map[string]any{
 		"enabled": true, "status": "available", "generation": stats.Generation,
 		"entities": stats.Entities, "facts": stats.Facts, "evidence": stats.Evidence,
 	}
-	return result
+	return result, nil
 }
 
-// runbookCount returns the number of runbooks in the DocStore, or 0 when
-// MySQL is unconfigured or the count fails.
-func (srv *Service) runbookCount() int {
+func (srv *Service) runbookCount() (int, error) {
 	if srv.docStore == nil {
-		return 0
+		return 0, nil
 	}
 	n, err := srv.docStore.CountRunbooks()
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return n
+	return n, nil
 }
 
 type scoredService struct {
@@ -1121,9 +1171,18 @@ func (srv *Service) GetSymbol(ctx context.Context, query string, limit int) map[
 
 // GetSymbolFiltered applies explicit file and qualified-name disambiguation.
 func (srv *Service) GetSymbolFiltered(ctx context.Context, query, file, qualifiedName string, limit int) map[string]any {
+	result, err := srv.GetSymbolResult(ctx, query, file, qualifiedName, limit)
+	if err != nil {
+		return map[string]any{"matches": nil, "error": err.Error()}
+	}
+	return result
+}
+
+// GetSymbolResult queries codegraph without hiding availability or query failures.
+func (srv *Service) GetSymbolResult(ctx context.Context, query, file, qualifiedName string, limit int) (map[string]any, error) {
 	root := srv.workspaceRoot
 	if root == "" {
-		return map[string]any{"matches": nil, "error": "codegraph: no workspace root configured"}
+		return nil, fmt.Errorf("codegraph: no workspace root configured")
 	}
 	if limit <= 0 {
 		limit = 5
@@ -1135,10 +1194,10 @@ func (srv *Service) GetSymbolFiltered(ctx context.Context, query, file, qualifie
 	// Open codegraph SQLite (read-only). Graceful nil when DB not yet built.
 	db, err := codegraph.Open(root)
 	if err != nil {
-		return map[string]any{"matches": nil, "error": err.Error()}
+		return nil, err
 	}
 	if db == nil {
-		return map[string]any{"matches": nil, "error": "codegraph not indexed"}
+		return nil, fmt.Errorf("codegraph not indexed")
 	}
 	defer db.Close()
 
@@ -1146,10 +1205,10 @@ func (srv *Service) GetSymbolFiltered(ctx context.Context, query, file, qualifie
 		Terms: symbolQueryTokens(query), PathPrefixes: nonEmptyStrings(file), Limit: limit * 4,
 	})
 	if err != nil {
-		return map[string]any{"matches": []any{}, "error": err.Error()}
+		return nil, err
 	}
 	if len(nodes) == 0 {
-		return map[string]any{"matches": []any{}}
+		return map[string]any{"matches": []any{}}, nil
 	}
 
 	// Build results with source from file system.
@@ -1174,7 +1233,7 @@ func (srv *Service) GetSymbolFiltered(ctx context.Context, query, file, qualifie
 		})
 		added++
 	}
-	return map[string]any{"matches": matches}
+	return map[string]any{"matches": matches}, nil
 }
 
 func nonEmptyStrings(value string) []string {
@@ -1186,19 +1245,28 @@ func nonEmptyStrings(value string) []string {
 
 // TraceCalls resolves a symbol and walks its callers or callees.
 func (srv *Service) TraceCalls(ctx context.Context, request callchain.Request) map[string]any {
+	result, err := srv.TraceCallsResult(ctx, request)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	return result
+}
+
+// TraceCallsResult walks codegraph call edges without hiding broken prerequisites.
+func (srv *Service) TraceCallsResult(ctx context.Context, request callchain.Request) (map[string]any, error) {
 	if srv.callChain == nil || !srv.callChain.Available() {
-		return map[string]any{"error": "call chain unavailable: codegraph or structure index is not ready"}
+		return nil, fmt.Errorf("call chain unavailable: codegraph or structure index is not ready")
 	}
 	var err error
 	request, err = srv.resolveAPICallTarget(ctx, request)
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		return nil, err
 	}
 	result, err := srv.callChain.Trace(ctx, request)
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		return nil, err
 	}
-	return callChainResult(srv.workspaceRoot, result)
+	return callChainResult(srv.workspaceRoot, result), nil
 }
 
 func (srv *Service) resolveAPICallTarget(ctx context.Context, request callchain.Request) (callchain.Request, error) {

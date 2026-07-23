@@ -42,7 +42,6 @@ type PlatformSettings struct {
 	ContextBudget              int
 	RerankMaxPerService        int
 	RerankMaxPerServiceLowBand int
-	RerankStrictDiversity      bool
 	RerankProvider             string
 	RerankAPIKey               string
 	RerankModel                string
@@ -67,8 +66,8 @@ var platformSettingKeys = map[string]bool{
 	"rerank_min_score": false, "rerank_min_dense_preflight": false,
 	"runbook_min_score": false, "code_min_score": false,
 	"rerank_max_per_service": false, "rerank_max_per_service_low_band": false,
-	"rerank_strict_diversity": false, "rerank_provider": false,
-	"rerank_api_key": false, "rerank_model": false, "rerank_base_url": false,
+	"rerank_provider": false,
+	"rerank_api_key":  false, "rerank_model": false, "rerank_base_url": false,
 	"vcs_url": true, "vcs_token": true, "vcs_groups": true, "vcs_webhook_secret": true,
 	"vcs_clone_concurrency": true, "vcs_exclude_projects": true,
 }
@@ -120,7 +119,6 @@ func (p *PlatformSettings) Values() map[string]any {
 		"code_min_score":                         p.CodeMinScore,
 		"rerank_max_per_service":                 p.RerankMaxPerService,
 		"rerank_max_per_service_low_band":        p.RerankMaxPerServiceLowBand,
-		"rerank_strict_diversity":                p.RerankStrictDiversity,
 		"rerank_provider":                        p.RerankProvider,
 		"rerank_api_key":                         p.RerankAPIKey,
 		"rerank_model":                           p.RerankModel,
@@ -224,9 +222,6 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 		if n, err := strconv.Atoi(v); err == nil {
 			p.RerankMaxPerServiceLowBand = n
 		}
-	}
-	if v := strings.TrimSpace(m["rerank_strict_diversity"]); v != "" {
-		p.RerankStrictDiversity = v == "1" || v == "true"
 	}
 	if v := strings.TrimSpace(m["rerank_provider"]); v != "" {
 		p.RerankProvider = v

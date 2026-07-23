@@ -20,7 +20,6 @@ func TestDefaultSettingsIncludesRerankAndContext(t *testing.T) {
 			CodeMinScore:               0.11,
 			RerankMaxPerService:        4,
 			RerankMaxPerServiceLowBand: 2,
-			RerankStrictDiversity:      true,
 			RerankProvider:             "dashscope",
 			RerankAPIKey:               "rk-test",
 			RerankModel:                "gte-rerank-v2",

@@ -55,6 +55,16 @@ func (h *Handler) APIBootstrap(w http.ResponseWriter, r *http.Request) {
 	log.Infof("[ops] starting full bootstrap")
 	ctx, cancel := systemOperationContext(r)
 	defer cancel()
+	if err := h.idx.RebuildGraph(ctx); err != nil {
+		log.Errorf("[ops] full bootstrap codegraph rebuild failed after %s: %v", time.Since(started).Round(time.Millisecond), err)
+		httputil.WriteErr(w, err)
+		return
+	}
+	if err := h.refreshCodeGraph(); err != nil {
+		log.Errorf("[ops] full bootstrap codegraph refresh failed after %s: %v", time.Since(started).Round(time.Millisecond), err)
+		httputil.WriteErr(w, err)
+		return
+	}
 	if err := h.idx.Bootstrap(ctx); err != nil {
 		log.Errorf("[ops] full bootstrap failed after %s: %v", time.Since(started).Round(time.Millisecond), err)
 		httputil.WriteErr(w, err)

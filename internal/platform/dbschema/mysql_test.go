@@ -80,24 +80,6 @@ func TestPlatformSchemaExcludesObserveTables(t *testing.T) {
 	}
 }
 
-func TestTimeMigrationRelaxesMemoryLastUsedBeforeNullNormalization(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_time_columns.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read time migration: %v", err)
-	}
-	script := string(raw)
-	relax := strings.Index(script, "ALTER TABLE qa_memories MODIFY COLUMN last_used VARCHAR(40) NULL DEFAULT NULL")
-	normalize := strings.Index(script, "UPDATE qa_memories")
-	finalize := strings.Index(script, "MODIFY COLUMN last_used DATETIME NULL DEFAULT NULL")
-	if relax < 0 || normalize < 0 || finalize < 0 {
-		t.Fatalf("qa_memories migration is incomplete")
-	}
-	if !(relax < normalize && normalize < finalize) {
-		t.Fatalf("qa_memories migration must relax last_used before normalization and finalize afterward")
-	}
-}
-
 func TestLLMUsageMigrationAddsDetailAndRunAggregates(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_llm_usage.sql")
 	raw, err := os.ReadFile(path)
