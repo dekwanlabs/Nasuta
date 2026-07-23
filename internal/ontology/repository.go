@@ -2,6 +2,7 @@ package ontology
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/platform"
 )
+
+var ErrUnavailable = errors.New("ontology unavailable")
 
 type Direction string
 
