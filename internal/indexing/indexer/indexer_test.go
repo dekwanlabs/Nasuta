@@ -105,6 +105,17 @@ func TestBuildBundleEndToEnd(t *testing.T) {
 	}
 }
 
+func TestBuildStructuralBundleExcludesDocumentsOnlyForScannerCallers(t *testing.T) {
+	root := miniWorkspace(t)
+	bundle := BuildStructuralBundle(root, DiscoverScanDirs(root))
+	if len(bundle.Runbooks) != 0 {
+		t.Fatalf("structural scanner runbooks = %#v", bundle.Runbooks)
+	}
+	if len(bundle.Services) == 0 || len(bundle.Endpoints) == 0 {
+		t.Fatalf("structural scanner lost code records: services=%d endpoints=%d", len(bundle.Services), len(bundle.Endpoints))
+	}
+}
+
 func TestScanRepoNormalizesRepositoryKey(t *testing.T) {
 	root := miniWorkspace(t)
 	b := ScanRepo(root, "repos/hsas/hsas-demo")

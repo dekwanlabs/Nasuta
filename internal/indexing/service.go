@@ -924,7 +924,7 @@ func (svc *Service) attachRepositorySnapshots(ctx context.Context, bundle *domai
 func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 	started := time.Now()
 	log.Infof("[rebuild-sql] scanning %s (dirs: %v)", svc.Cfg.WorkspaceRoot, svc.ScanDirs)
-	bundle := indexer.BuildStructuralBundle(svc.Cfg.WorkspaceRoot, svc.ScanDirs)
+	bundle := indexer.BuildBundle(svc.Cfg.WorkspaceRoot, svc.ScanDirs, svc.docDB)
 	log.Infof("[rebuild-sql] scan complete after %s: services=%d endpoints=%d dependencies=%d",
 		time.Since(started).Round(time.Millisecond), len(bundle.Services), len(bundle.Endpoints), len(bundle.Dependencies))
 	if err := svc.attachRepositorySnapshots(ctx, &bundle); err != nil {
