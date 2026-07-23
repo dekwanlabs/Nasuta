@@ -13,8 +13,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
-	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 // IndexingOps is the port to the indexing service for system operations.

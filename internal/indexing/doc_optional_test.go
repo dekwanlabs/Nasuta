@@ -8,7 +8,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
-	"github.com/dekwanlabs/nasuta/semantic/contract"
+	"github.com/dekwanlabs/nasuta/internal/semantic/contract"
 )
 
 func TestOptionalDocStorePathsAreSafe(t *testing.T) {

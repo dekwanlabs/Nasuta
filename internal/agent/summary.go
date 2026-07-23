@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
 // GeneratePersistentSummary produces a rolling summary of the full

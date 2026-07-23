@@ -7,7 +7,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 )
 
 // Memory is a process-local reference implementation of semantic.Store used to

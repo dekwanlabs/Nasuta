@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 )
 
 // ListOptions defines one bounded keyset page.

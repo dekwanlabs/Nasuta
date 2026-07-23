@@ -6,7 +6,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
-	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 )
 
 // EmbedDocMeta carries document fields that become the runbook payload.

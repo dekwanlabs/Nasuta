@@ -15,8 +15,8 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/platform/htmlconv"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/websearch"
 	"github.com/dekwanlabs/nasuta/log"
-	"github.com/dekwanlabs/nasuta/websearch"
 	nethtml "golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 )

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -222,16 +222,17 @@ func (hub *RunHub) Unsubscribe(runID string, ch chan SSEEvent) {
 func (hub *RunHub) OnStep(ctx context.Context, runID string, step StepRecord) {
 	if hub.runStore != nil && runID != "" {
 		if err := hub.runStore.AddStep(StepRow{
-			RunID:         runID,
-			StepNo:        step.StepNo,
-			Kind:          step.Kind,
-			Tool:          step.Tool,
-			Args:          step.Args,
-			ResultSummary: step.ResultSummary,
-			Content:       step.Content,
-			TokenDelta:    step.TokenDelta,
-			DurationMs:    step.DurationMs,
-			CreatedAt:     step.CreatedAt.UTC().Format(time.RFC3339),
+			RunID:           runID,
+			StepNo:          step.StepNo,
+			Kind:            step.Kind,
+			Tool:            step.Tool,
+			Args:            step.Args,
+			ResultSummary:   step.ResultSummary,
+			Content:         step.Content,
+			TokenDelta:      step.TokenDelta,
+			ReasoningTokens: step.ReasoningTokens,
+			DurationMs:      step.DurationMs,
+			CreatedAt:       step.CreatedAt.UTC().Format(time.RFC3339),
 		}); err != nil {
 			log.ErrorfCtx(ctx, "[hub] persist step error: %v", err)
 		}

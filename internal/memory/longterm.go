@@ -11,9 +11,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
-	"github.com/dekwanlabs/nasuta/semantic"
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 

@@ -6,7 +6,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
-	"github.com/dekwanlabs/nasuta/semantic/contract"
+	"github.com/dekwanlabs/nasuta/internal/semantic/contract"
 )
 
 // TestQdrantContract runs the shared semantic contract against a live Qdrant

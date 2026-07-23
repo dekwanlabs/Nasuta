@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
 type extractedEntry struct {

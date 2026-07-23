@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/platform/httpclient"
 	"github.com/go-resty/resty/v2"
@@ -158,10 +159,11 @@ func normalizeStopReason(reason string) string {
 }
 
 func (anthropic anthropicProvider) ChatMax(ctx context.Context, system, user string, maxTokens int) (string, error) {
-	return anthropic.chatMessages(ctx, []Message{{Role: "system", Content: system}, {Role: "user", Content: user}}, maxTokens)
+	content, _, err := anthropic.chatMessages(ctx, []Message{{Role: "system", Content: system}, {Role: "user", Content: user}}, maxTokens)
+	return content, err
 }
 
-func (anthropic anthropicProvider) chatMessages(ctx context.Context, messages []Message, maxTokens int) (string, error) {
+func (anthropic anthropicProvider) chatMessages(ctx context.Context, messages []Message, maxTokens int) (string, Usage, error) {
 	if maxTokens <= 0 {
 		maxTokens = anthropic.maxTokens
 	}
@@ -173,7 +175,7 @@ func (anthropic anthropicProvider) chatMessages(ctx context.Context, messages []
 		MaxTokens: maxTokens,
 	})
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
+		return "", Usage{}, fmt.Errorf("marshal request: %w", err)
 	}
 	resp, err := httpclient.Request(ctx, anthropic.rc).
 		SetHeader("x-api-key", anthropic.apiKey).
@@ -182,10 +184,10 @@ func (anthropic anthropicProvider) chatMessages(ctx context.Context, messages []
 		SetBody(body).
 		Post(anthropic.baseURL + "/v1/messages")
 	if err != nil {
-		return "", &CallError{Kind: ErrKindNetwork, Err: fmt.Errorf("http request: %w", err)}
+		return "", Usage{}, &CallError{Kind: ErrKindNetwork, Err: fmt.Errorf("http request: %w", err)}
 	}
 	if resp.StatusCode() != http.StatusOK {
-		return "", &CallError{
+		return "", Usage{}, &CallError{
 			Kind:       ErrKindStatus,
 			Status:     resp.StatusCode(),
 			Body:       boundedErrorBody(resp.Body()),
@@ -195,18 +197,19 @@ func (anthropic anthropicProvider) chatMessages(ctx context.Context, messages []
 
 	var result anthropicMessageResponse
 	if err := json.Unmarshal(resp.Body(), &result); err != nil {
-		return "", &CallError{Kind: ErrKindEnvelope, Err: err}
+		return "", Usage{}, &CallError{Kind: ErrKindEnvelope, Err: err}
 	}
 	content := concatTextBlocks(result.Content)
 	if strings.TrimSpace(content) == "" {
-		return "", &CallError{Kind: ErrKindEmpty}
+		return "", result.Usage.shared(), &CallError{Kind: ErrKindEmpty}
 	}
-	return content, nil
+	return content, result.Usage.shared(), nil
 }
 
 type anthropicMessageResponse struct {
 	Content    []anthropicContentBlock `json:"content"`
 	StopReason string                  `json:"stop_reason"`
+	Usage      anthropicUsage          `json:"usage"`
 }
 
 func concatTextBlocks(blocks []anthropicContentBlock) string {
@@ -249,6 +252,8 @@ func (anthropic anthropicProvider) ChatWithToolsMax(ctx context.Context, message
 			SetBody(body).
 			SetDoNotParseResponse(true).
 			Post(anthropic.baseURL + "/v1/messages")
+	}, func(duration time.Duration, attemptErr error) {
+		recordCallUsageWithDuration(ctx, "anthropic", anthropic.model, maxTokens, duration, Usage{}, attemptErr)
 	})
 	if err != nil {
 		return nil, err
@@ -299,6 +304,12 @@ func (anthropic anthropicProvider) ChatWithToolsMax(ctx context.Context, message
 // handleSSEEvent applies one Anthropic streaming event to the result state.
 func (anthropic anthropicProvider) handleSSEEvent(eventType, data string, result *ChatStreamResult, item5 StreamHandler, rh reasoningHandler, acc *inputJSONAccumulator) error {
 	switch eventType {
+	case "message_start":
+		var ev messageStartEvent
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			return nil
+		}
+		result.Usage = ev.Message.Usage.shared()
 	case "content_block_start":
 		var ev contentBlockStartEvent
 		if err := json.Unmarshal([]byte(data), &ev); err != nil {
@@ -326,7 +337,6 @@ func (anthropic anthropicProvider) handleSSEEvent(eventType, data string, result
 		case "thinking_delta":
 			if ev.Delta.Thinking != "" {
 				result.Reasoning += ev.Delta.Thinking
-				result.ReasoningTokens++
 				if rh != nil {
 					rh.OnReasoning(ev.Delta.Thinking)
 				}
@@ -353,6 +363,9 @@ func (anthropic anthropicProvider) handleSSEEvent(eventType, data string, result
 		if ev.Delta.StopReason != "" {
 			result.FinishReason = normalizeStopReason(ev.Delta.StopReason)
 		}
+		result.Usage.OutputTokens = ev.Usage.OutputTokens
+		result.Usage.TotalTokens = result.Usage.InputTokens + result.Usage.OutputTokens
+		result.ReasoningTokens = result.Usage.ReasoningTokens
 	case "error":
 		var ev anthropicErrorEvent
 		if err := json.Unmarshal([]byte(data), &ev); err == nil && ev.Error.Message != "" {
@@ -360,6 +373,12 @@ func (anthropic anthropicProvider) handleSSEEvent(eventType, data string, result
 		}
 	}
 	return nil
+}
+
+type messageStartEvent struct {
+	Message struct {
+		Usage anthropicUsage `json:"usage"`
+	} `json:"message"`
 }
 
 type contentBlockStartEvent struct {
@@ -393,6 +412,7 @@ type messageDeltaEvent struct {
 	Delta struct {
 		StopReason string `json:"stop_reason"`
 	} `json:"delta"`
+	Usage anthropicUsage `json:"usage"`
 }
 
 type anthropicErrorEvent struct {

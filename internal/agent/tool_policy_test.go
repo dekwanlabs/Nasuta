@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
-	"github.com/dekwanlabs/nasuta/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 

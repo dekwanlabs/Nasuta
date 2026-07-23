@@ -13,6 +13,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
@@ -20,10 +21,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
-	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
-	"github.com/dekwanlabs/nasuta/semantic"
 	"github.com/dekwanlabs/nasuta/tool"
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -194,6 +194,15 @@ func (svc *QA) Memory() *memory.MemoryStore { return svc.memory }
 
 func (svc *QA) LLM() *llm.LLMClient { return svc.llm }
 
+// UsageContext associates an auxiliary model call with the Run that triggered it.
+func (svc *QA) UsageContext(ctx context.Context, runID, phase string) context.Context {
+	if svc == nil || svc.runStore == nil || runID == "" {
+		return ctx
+	}
+	ctx = llm.WithUsageRecorder(ctx, runID, svc.runStore)
+	return llm.WithUsagePhase(ctx, phase)
+}
+
 // emitStep pushes a lightweight phase hint to the run hub.
 func (svc *QA) emitStep(runID, text string) {
 	if svc.hub != nil {
@@ -237,6 +246,17 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if runID == "" {
 		runID = NewRunID()
 	}
+	if svc.runStore != nil {
+		if err := svc.runStore.Create(RunRecord{
+			ID: runID, UserID: userID, SessionID: conversation.SessionID,
+			Question: question, Mode: "single", MaxSteps: svc.agent.MaxStepsFor(question),
+			StartedAt: time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			log.ErrorfCtx(ctx, "[qa] create run error: %v", err)
+		} else {
+			ctx = llm.WithUsageRecorder(ctx, runID, svc.runStore)
+		}
+	}
 	explicitPlan := request.EvidencePlan
 	toolPolicy := ToolPolicyForPlan(domain.DirectPlan(), svc.writeAvailable && request.AllowWrite)
 	executor := svc.toolExecutor()
@@ -276,7 +296,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		defer preWg.Done()
 		planningStarted := time.Now()
 		defer func() { planningDuration = time.Since(planningStarted) }()
-		hctx, cancel := context.WithTimeout(ctx, helperTimeout)
+		hctx, cancel := context.WithTimeout(llm.WithUsagePhase(ctx, llm.PhaseRoute), helperTimeout)
 		defer cancel()
 		termsQuestion := strings.TrimSpace(question)
 		if explicitPlan != nil {
@@ -397,6 +417,9 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	evidencePlan := effectiveDecision.Plan
 	prefetched, err := svc.executePrefetch(ctx, toolSnapshot, request.ToolPlan)
 	if err != nil {
+		if svc.hub != nil {
+			svc.hub.Complete(runID, RunOutcome{Status: RunStatusFailed, Err: err})
+		}
 		return nil, err
 	}
 	preloadedContext := make([]ContextBlock, 0, len(prefetched)+len(request.PreloadedContext))
@@ -711,18 +734,10 @@ func (svc *QA) runAgentWithPlan(ctx context.Context, question string, conversati
 func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] runAgent runID=%s", runID)
 
-	runMode := "single"
 	maxSteps := svc.agent.MaxStepsForPlan(question, plan)
 	if svc.runStore != nil {
-		if err := svc.runStore.Create(RunRecord{
-			ID:        runID,
-			UserID:    userID,
-			Question:  question,
-			Mode:      runMode,
-			MaxSteps:  maxSteps,
-			StartedAt: time.Now().UTC().Format(time.RFC3339),
-		}); err != nil {
-			log.ErrorfCtx(ctx, "[qa] create run error: %v", err)
+		if err := svc.runStore.SetMaxSteps(runID, maxSteps); err != nil {
+			log.ErrorfCtx(ctx, "[qa] update run max steps: %v", err)
 		}
 	}
 
@@ -748,7 +763,8 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 
 		if outcome.Status == RunStatusDone && res != nil &&
 			svc.memory != nil && userID != 0 && res.Answer != "" {
-			memCtx, memCancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+			memCtx := llm.WithUsagePhase(context.WithoutCancel(ctx), llm.PhaseMemoryExtract)
+			memCtx, memCancel := context.WithTimeout(memCtx, 60*time.Second)
 			extractStarted := time.Now()
 			if mems, err := memory.ExtractMemories(memCtx, svc.llm, question, res.Answer); err == nil {
 				domain.RecordTrace(memCtx, domain.EvaluationTrace{
@@ -996,6 +1012,61 @@ func (rs *RunStore) AddStep(st StepRow) error {
 	return err
 }
 
+// SetMaxSteps records the plan-specific loop bound resolved after routing.
+func (rs *RunStore) SetMaxSteps(id string, maxSteps int) error {
+	_, err := rs.db.Exec(`UPDATE agent_runs SET max_steps=? WHERE id=?`, maxSteps, id)
+	return err
+}
+
+// RecordLLMCall stores one provider call and updates its Run aggregate atomically.
+func (rs *RunStore) RecordLLMCall(ctx context.Context, call llm.CallUsage) error {
+	tx, err := rs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var callCount int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT llm_call_count FROM agent_runs WHERE id=? FOR UPDATE`, call.RunID,
+	).Scan(&callCount); err != nil {
+		return err
+	}
+	callSeq := callCount + 1
+	usage := call.Usage
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO agent_llm_calls(
+			run_id,call_seq,phase,provider,model,input_tokens,cached_input_tokens,
+			output_tokens,reasoning_tokens,total_tokens,max_output_tokens,duration_ms,status)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		call.RunID, callSeq, call.Phase, call.Provider, call.Model,
+		usage.InputTokens, usage.CachedInputTokens, usage.OutputTokens,
+		usage.ReasoningTokens, usage.TotalTokens, call.MaxOutputTokens,
+		call.Duration.Milliseconds(), call.Status,
+	); err != nil {
+		return err
+	}
+	reservedTokens := 0
+	if call.MaxOutputTokens > 0 {
+		reservedTokens = usage.InputTokens + call.MaxOutputTokens
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE agent_runs SET
+			input_tokens=input_tokens+?,cached_input_tokens=cached_input_tokens+?,
+			output_tokens=output_tokens+?,reasoning_tokens=reasoning_tokens+?,
+			total_tokens=total_tokens+?,llm_call_count=?,
+			peak_input_tokens=GREATEST(peak_input_tokens,?),
+			peak_reserved_tokens=GREATEST(peak_reserved_tokens,?)
+		 WHERE id=?`,
+		usage.InputTokens, usage.CachedInputTokens, usage.OutputTokens,
+		usage.ReasoningTokens, usage.TotalTokens, callSeq,
+		usage.InputTokens, reservedTokens, call.RunID,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (rs *RunStore) List(userID int64, sessionID string, status RunStatus, limit int) ([]RunRecord, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -1015,7 +1086,9 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 		pageSize = 20
 	}
 
-	q := `SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,started_at,ended_at FROM agent_runs`
+	q := `SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,
+		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
+		peak_input_tokens,peak_reserved_tokens,started_at,ended_at FROM agent_runs`
 	countQ := `SELECT COUNT(*) FROM agent_runs`
 	var where []string
 	var args []any
@@ -1067,7 +1140,10 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 
 func (rs *RunStore) Get(id string) (*RunDetail, error) {
 	r, err := scanRunRecord(rs.db.QueryRow(
-		`SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,started_at,ended_at FROM agent_runs WHERE id=?`, id))
+		`SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,
+			input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
+			peak_input_tokens,peak_reserved_tokens,started_at,ended_at
+		 FROM agent_runs WHERE id=?`, id))
 	if err != nil {
 		return nil, err
 	}
@@ -1093,7 +1169,41 @@ func (rs *RunStore) Get(id string) (*RunDetail, error) {
 		st.CreatedAt = store.FormatDatabaseTime(createdAt)
 		steps = append(steps, st)
 	}
-	return &RunDetail{RunRecord: r, Steps: steps}, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	llmCalls, err := rs.listLLMCalls(id, 1000)
+	if err != nil {
+		return nil, err
+	}
+	return &RunDetail{RunRecord: r, Steps: steps, LLMCalls: llmCalls}, nil
+}
+
+func (rs *RunStore) listLLMCalls(runID string, limit int) ([]LLMCallRow, error) {
+	rows, err := rs.db.Query(
+		`SELECT id,run_id,call_seq,phase,provider,model,input_tokens,cached_input_tokens,
+			output_tokens,reasoning_tokens,total_tokens,max_output_tokens,duration_ms,status,created_at
+		 FROM agent_llm_calls WHERE run_id=? ORDER BY call_seq LIMIT ?`, runID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	calls := make([]LLMCallRow, 0, min(limit, 16))
+	for rows.Next() {
+		var call LLMCallRow
+		var createdAt sql.NullTime
+		if err := rows.Scan(
+			&call.ID, &call.RunID, &call.CallSeq, &call.Phase, &call.Provider, &call.Model,
+			&call.InputTokens, &call.CachedInputTokens, &call.OutputTokens,
+			&call.ReasoningTokens, &call.TotalTokens, &call.MaxOutputTokens,
+			&call.DurationMs, &call.Status, &createdAt,
+		); err != nil {
+			return nil, err
+		}
+		call.CreatedAt = store.FormatDatabaseTime(createdAt)
+		calls = append(calls, call)
+	}
+	return calls, rows.Err()
 }
 
 type rowScanner interface {
@@ -1104,7 +1214,10 @@ func scanRunRecord(row rowScanner) (RunRecord, error) {
 	var record RunRecord
 	var startedAt, endedAt sql.NullTime
 	if err := row.Scan(&record.ID, &record.UserID, &record.SessionID, &record.Question, &record.Status,
-		&record.Mode, &record.MaxSteps, &record.StepCount, &record.TokenUsed, &startedAt, &endedAt); err != nil {
+		&record.Mode, &record.MaxSteps, &record.StepCount, &record.TokenUsed,
+		&record.InputTokens, &record.CachedInputTokens, &record.OutputTokens,
+		&record.ReasoningTokens, &record.TotalTokens, &record.LLMCallCount,
+		&record.PeakInputTokens, &record.PeakReservedTokens, &startedAt, &endedAt); err != nil {
 		return record, err
 	}
 	record.StartedAt = store.FormatDatabaseTime(startedAt)
@@ -1118,6 +1231,11 @@ func (rs *RunStore) DeleteBySession(sessionID string, userID int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`DELETE c FROM agent_llm_calls c JOIN agent_runs r ON c.run_id = r.id WHERE r.session_id = ? AND r.user_id=?`,
+		sessionID, userID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(
 		`DELETE s FROM agent_steps s JOIN agent_runs r ON s.run_id = r.id WHERE r.session_id = ? AND r.user_id=?`,
 		sessionID, userID); err != nil {
@@ -1196,17 +1314,43 @@ func outcomeFor(result *RunResult, runErr error) RunOutcome {
 }
 
 type RunRecord struct {
-	ID        string    `json:"id"`
-	UserID    int64     `json:"user_id"`
-	SessionID string    `json:"session_id"`
-	Question  string    `json:"question"`
-	Status    RunStatus `json:"status"`
-	Mode      string    `json:"mode"`
-	MaxSteps  int       `json:"max_steps"`
-	StepCount int       `json:"step_count"`
-	TokenUsed int       `json:"token_used"`
-	StartedAt string    `json:"started_at"`
-	EndedAt   string    `json:"ended_at"`
+	ID                 string    `json:"id"`
+	UserID             int64     `json:"user_id"`
+	SessionID          string    `json:"session_id"`
+	Question           string    `json:"question"`
+	Status             RunStatus `json:"status"`
+	Mode               string    `json:"mode"`
+	MaxSteps           int       `json:"max_steps"`
+	StepCount          int       `json:"step_count"`
+	TokenUsed          int       `json:"token_used"`
+	InputTokens        int64     `json:"input_tokens"`
+	CachedInputTokens  int64     `json:"cached_input_tokens"`
+	OutputTokens       int64     `json:"output_tokens"`
+	ReasoningTokens    int64     `json:"reasoning_tokens"`
+	TotalTokens        int64     `json:"total_tokens"`
+	LLMCallCount       int       `json:"llm_call_count"`
+	PeakInputTokens    int       `json:"peak_input_tokens"`
+	PeakReservedTokens int       `json:"peak_reserved_tokens"`
+	StartedAt          string    `json:"started_at"`
+	EndedAt            string    `json:"ended_at"`
+}
+
+type LLMCallRow struct {
+	ID                int64  `json:"id"`
+	RunID             string `json:"run_id"`
+	CallSeq           int    `json:"call_seq"`
+	Phase             string `json:"phase"`
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	InputTokens       int    `json:"input_tokens"`
+	CachedInputTokens int    `json:"cached_input_tokens"`
+	OutputTokens      int    `json:"output_tokens"`
+	ReasoningTokens   int    `json:"reasoning_tokens"`
+	TotalTokens       int    `json:"total_tokens"`
+	MaxOutputTokens   int    `json:"max_output_tokens"`
+	DurationMs        int64  `json:"duration_ms"`
+	Status            string `json:"status"`
+	CreatedAt         string `json:"created_at"`
 }
 
 type StepKind string
@@ -1249,7 +1393,8 @@ type StepRow struct {
 
 type RunDetail struct {
 	RunRecord
-	Steps []StepRow `json:"steps"`
+	Steps    []StepRow    `json:"steps"`
+	LLMCalls []LLMCallRow `json:"llm_calls"`
 }
 
 type ControlKind int

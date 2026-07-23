@@ -23,11 +23,10 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/transport/mcp"
 	"github.com/dekwanlabs/nasuta/internal/transport/routes"
 	"github.com/dekwanlabs/nasuta/internal/transport/webhook"
+	"github.com/dekwanlabs/nasuta/internal/writeaction"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
-	"github.com/dekwanlabs/nasuta/websearch"
-	"github.com/dekwanlabs/nasuta/writeaction"
 )
 
 // Platform owns reusable runtime state and exposes only stable composition ports.
@@ -137,11 +136,6 @@ func (platform *Platform) Knowledge() knowledge.API { return platform.knowledge 
 
 // ReadTools returns the restricted publisher available to scenario code.
 func (platform *Platform) ReadTools() *tool.ReadRegistry { return platform.readTools }
-
-// RegisterWebSearchProvider adds or replaces a search provider for this host.
-func (platform *Platform) RegisterWebSearchProvider(name string, provider websearch.Provider) error {
-	return platform.knowledge.RegisterWebSearchProvider(name, provider)
-}
 
 func (platform *Platform) configureIncidents(evidence incident.EvidenceProvider) error {
 	if platform.authDB == nil {

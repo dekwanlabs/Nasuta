@@ -8,7 +8,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
 func drainHub(ch chan SSEEvent, timeout time.Duration) []SSEEvent {

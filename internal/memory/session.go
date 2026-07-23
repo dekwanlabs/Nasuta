@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
-	"github.com/dekwanlabs/nasuta/llm"
 	_ "github.com/go-sql-driver/mysql"
 )
 

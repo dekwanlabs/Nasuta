@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/qdrant/go-client/qdrant"
 )
 

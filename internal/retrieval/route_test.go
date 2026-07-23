@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
 func TestBindPlanDecision(t *testing.T) {

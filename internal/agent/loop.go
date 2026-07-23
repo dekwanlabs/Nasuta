@@ -8,11 +8,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
-	"github.com/dekwanlabs/nasuta/llm"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -185,7 +186,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 			StepNo:     stepSeq,
 			Kind:       StepKindRetrieval,
 			Content:    rc.Text,
-			TokenDelta: len(rc.Text),
+			TokenDelta: utf8.RuneCountInString(rc.Text),
 			CreatedAt:  time.Now(),
 		})
 	}
@@ -202,7 +203,8 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 		t0 := time.Now()
 		h := newStreamPipe(agent.observer, runID, stepp, t0, agent.onFirstAnswerToken)
 
-		chatResult, err := agent.llm.ChatWithToolsMax(loopCtx, messages, tools, h, agent.cfg.AnswerMaxTokens)
+		callCtx := llm.WithUsagePhase(loopCtx, llm.PhaseAgentStep)
+		chatResult, err := agent.llm.ChatWithToolsMax(callCtx, messages, tools, h, agent.cfg.AnswerMaxTokens)
 		duration := time.Since(t0)
 		timing := h.Timings()
 		if err != nil {
@@ -245,7 +247,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 			StepNo:          stepSeq,
 			Kind:            StepKindThink,
 			Content:         chatResult.Content,
-			TokenDelta:      len(chatResult.Content),
+			TokenDelta:      utf8.RuneCountInString(chatResult.Content),
 			ReasoningTokens: chatResult.ReasoningTokens,
 			DurationMs:      int(duration / time.Millisecond),
 			CreatedAt:       t0,
@@ -269,7 +271,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 				StepNo:          stepSeq,
 				Kind:            StepKindAnswer,
 				Content:         chatResult.Content,
-				TokenDelta:      len(chatResult.Content),
+				TokenDelta:      utf8.RuneCountInString(chatResult.Content),
 				ReasoningTokens: chatResult.ReasoningTokens,
 				DurationMs:      int(duration / time.Millisecond),
 				CreatedAt:       t0,
@@ -388,6 +390,7 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 
 // forceConclusion asks the model to finish with the evidence already gathered.
 func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages []llm.Message, stepSeq *int, runStarted time.Time) (*llm.ChatStreamResult, error) {
+	ctx = llm.WithUsagePhase(ctx, llm.PhaseForcedConclusion)
 	messages = append(messages, llm.Message{
 		Role:    "user",
 		Content: forceConclusionInstruction,
@@ -454,7 +457,7 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 			StepNo:          *stepSeq,
 			Kind:            StepKindAnswer,
 			Content:         res.Content,
-			TokenDelta:      len(res.Content),
+			TokenDelta:      utf8.RuneCountInString(res.Content),
 			ReasoningTokens: res.ReasoningTokens,
 			DurationMs:      int(time.Since(t0) / time.Millisecond),
 			CreatedAt:       t0,
@@ -503,13 +506,15 @@ func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message
 			llm.Message{Role: "assistant", Content: res.Content},
 			llm.Message{Role: "user", Content: continuationInstruction},
 		)
-		cont, err := agent.llm.ChatWithToolsMax(ctx, msgs, nil, h, maxTokens)
+		continuationCtx := llm.WithUsagePhase(ctx, llm.PhaseContinuation)
+		cont, err := agent.llm.ChatWithToolsMax(continuationCtx, msgs, nil, h, maxTokens)
 		if err != nil {
 			log.ErrorfCtx(ctx, "[agent] continuation round %d failed: %v", rounds, err)
 			return res, fmt.Errorf("continuation round %d: %w", rounds, err)
 		}
 		res.Content += cont.Content
 		res.ReasoningTokens += cont.ReasoningTokens
+		res.Usage = res.Usage.Add(cont.Usage)
 		res.FinishReason = cont.FinishReason
 	}
 	if res.FinishReason == "length" {

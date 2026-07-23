@@ -25,9 +25,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
-	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 // ToolsSink lets indexing refresh agent-side search helpers after rebuilds.

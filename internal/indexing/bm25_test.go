@@ -13,8 +13,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
-	"github.com/dekwanlabs/nasuta/semantic"
-	"github.com/dekwanlabs/nasuta/semantic/contract"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
+	"github.com/dekwanlabs/nasuta/internal/semantic/contract"
 )
 
 type fakeEmbedder struct{ dim int }

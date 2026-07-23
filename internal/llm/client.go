@@ -111,12 +111,17 @@ func NewLLMClientWithHTTPAndProvider(baseURL, apiKey, model, provider string, ma
 
 // chatRequest is the request body for /chat/completions.
 type chatRequest struct {
-	Model      string    `json:"model"`
-	Messages   []Message `json:"messages"`
-	MaxTokens  int       `json:"max_tokens,omitempty"`
-	Stream     bool      `json:"stream"`
-	Tools      []ToolDef `json:"tools,omitempty"`
-	ToolChoice string    `json:"tool_choice,omitempty"` // "auto" | "none"
+	Model         string         `json:"model"`
+	Messages      []Message      `json:"messages"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Tools         []ToolDef      `json:"tools,omitempty"`
+	ToolChoice    string         `json:"tool_choice,omitempty"` // "auto" | "none"
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // Chat runs a single non-streaming LLM call with the client's default token budget.
@@ -133,20 +138,30 @@ func (lc *LLMClient) ChatMax(ctx context.Context, system, user string, maxTokens
 }
 
 // chatMessages is the single non-streaming provider dispatcher.
-func (lc *LLMClient) chatMessages(ctx context.Context, messages []Message, maxTokens int) (string, error) {
-	lc.logPrompt(ctx, messages, 0, maxTokens)
+func (lc *LLMClient) chatMessages(ctx context.Context, messages []Message, maxTokens int) (content string, callErr error) {
+	recordedMaxTokens := maxTokens
+	if lc.provider == "anthropic" && recordedMaxTokens <= 0 {
+		recordedMaxTokens = lc.maxTokens
+	}
+	lc.logPrompt(ctx, messages, 0, recordedMaxTokens)
+	started := time.Now()
+	var usage Usage
+	defer func() {
+		recordCallUsage(ctx, lc.provider, lc.model, recordedMaxTokens, started, usage, callErr)
+	}()
 	switch lc.provider {
 	case "openai":
-		return lc.chatMessagesOpenAI(ctx, messages, maxTokens)
+		content, usage, callErr = lc.chatMessagesOpenAI(ctx, messages, maxTokens)
 	case "anthropic":
-		return lc.anthropic().chatMessages(ctx, messages, maxTokens)
+		content, usage, callErr = lc.anthropic().chatMessages(ctx, messages, recordedMaxTokens)
 	default:
-		return "", fmt.Errorf("unsupported LLM provider %q", lc.provider)
+		callErr = fmt.Errorf("unsupported LLM provider %q", lc.provider)
 	}
+	return content, callErr
 }
 
 // chatMessagesOpenAI performs one OpenAI-compatible non-streaming call.
-func (lc *LLMClient) chatMessagesOpenAI(ctx context.Context, messages []Message, maxTokens int) (string, error) {
+func (lc *LLMClient) chatMessagesOpenAI(ctx context.Context, messages []Message, maxTokens int) (string, Usage, error) {
 	body := chatRequest{Model: lc.model, Messages: messages, MaxTokens: maxTokens, Stream: false}
 	var result struct {
 		Choices []struct {
@@ -154,15 +169,16 @@ func (lc *LLMClient) chatMessagesOpenAI(ctx context.Context, messages []Message,
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage openAIUsage `json:"usage"`
 	}
 	resp, err := httpclient.Request(ctx, lc.rc).
 		SetBody(body).
 		Post(lc.baseURL + "/chat/completions")
 	if err != nil {
-		return "", &CallError{Kind: ErrKindNetwork, Err: err}
+		return "", Usage{}, &CallError{Kind: ErrKindNetwork, Err: err}
 	}
 	if resp.StatusCode() != http.StatusOK {
-		return "", &CallError{
+		return "", Usage{}, &CallError{
 			Kind:       ErrKindStatus,
 			Status:     resp.StatusCode(),
 			Body:       boundedErrorBody(resp.Body()),
@@ -170,16 +186,16 @@ func (lc *LLMClient) chatMessagesOpenAI(ctx context.Context, messages []Message,
 		}
 	}
 	if err := json.Unmarshal(resp.Body(), &result); err != nil {
-		return "", &CallError{Kind: ErrKindEnvelope, Err: err}
+		return "", Usage{}, &CallError{Kind: ErrKindEnvelope, Err: err}
 	}
 	if len(result.Choices) == 0 {
-		return "", &CallError{Kind: ErrKindEmpty}
+		return "", result.Usage.shared(), &CallError{Kind: ErrKindEmpty}
 	}
 	content := result.Choices[0].Message.Content
 	if strings.TrimSpace(content) == "" {
-		return "", &CallError{Kind: ErrKindEmpty}
+		return "", result.Usage.shared(), &CallError{Kind: ErrKindEmpty}
 	}
-	return content, nil
+	return content, result.Usage.shared(), nil
 }
 
 // StreamChat streams chat-completion deltas to tokenCh.
@@ -258,7 +274,8 @@ func (lc *LLMClient) streamChat(ctx context.Context, messages []Message, tokenCh
 type ChatStreamResult struct {
 	Content         string
 	Reasoning       string // concatenated reasoning_content deltas
-	ReasoningTokens int    // best-effort count for budgeting/accounting
+	ReasoningTokens int    // provider-reported output-token detail
+	Usage           Usage
 	ToolCalls       []ToolCall
 	FinishReason    string
 }
@@ -293,17 +310,26 @@ func (lc *LLMClient) ChatWithTools(ctx context.Context, messages []Message, tool
 }
 
 // ChatWithToolsMax runs one streaming turn with an optional max token override.
-func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, tools []ToolDef, h StreamHandler, maxTokens int) (*ChatStreamResult, error) {
+func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, tools []ToolDef, h StreamHandler, maxTokens int) (result *ChatStreamResult, callErr error) {
 	if maxTokens <= 0 {
 		maxTokens = lc.maxTokens
 	}
 	lc.logPrompt(ctx, messages, len(tools), maxTokens)
+	started := time.Now()
+	defer func() {
+		var usage Usage
+		if result != nil {
+			usage = result.Usage
+		}
+		recordCallUsage(ctx, lc.provider, lc.model, maxTokens, started, usage, callErr)
+	}()
 	if lc.provider == "anthropic" {
-		return lc.anthropic().ChatWithToolsMax(ctx, messages, tools, h, maxTokens)
+		result, callErr = lc.anthropic().ChatWithToolsMax(ctx, messages, tools, h, maxTokens)
+		return result, callErr
 	}
 	req := chatRequest{
 		Model: lc.model, Messages: messages, MaxTokens: maxTokens,
-		Stream: true, Tools: tools,
+		Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Tools: tools,
 	}
 	if len(tools) > 0 {
 		req.ToolChoice = "auto"
@@ -319,6 +345,8 @@ func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, t
 			SetBody(body).
 			SetDoNotParseResponse(true).
 			Post(lc.baseURL + "/chat/completions")
+	}, func(duration time.Duration, attemptErr error) {
+		recordCallUsageWithDuration(ctx, lc.provider, lc.model, maxTokens, duration, Usage{}, attemptErr)
 	})
 	if err != nil {
 		return nil, err
@@ -330,7 +358,7 @@ func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, t
 	defer raw.Close()
 
 	acc := newToolCallAccumulator()
-	result := &ChatStreamResult{}
+	result = &ChatStreamResult{}
 	var rh reasoningHandler
 	if h != nil {
 		rh, _ = h.(reasoningHandler)
@@ -351,10 +379,13 @@ func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, t
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
+		if chunk.Usage != nil {
+			result.Usage = chunk.Usage.shared()
+			result.ReasoningTokens = result.Usage.ReasoningTokens
+		}
 		for _, ch := range chunk.Choices {
 			if ch.Delta.ReasoningContent != "" {
 				result.Reasoning += ch.Delta.ReasoningContent
-				result.ReasoningTokens++
 				if rh != nil {
 					rh.OnReasoning(ch.Delta.ReasoningContent)
 				}
@@ -445,6 +476,7 @@ type streamChoice struct {
 }
 type streamChunk struct {
 	Choices []streamChoice `json:"choices"`
+	Usage   *openAIUsage   `json:"usage,omitempty"`
 }
 
 // streamToolCall is one streamed fragment of a tool call.

@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 	"google.golang.org/grpc"

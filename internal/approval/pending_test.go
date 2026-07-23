@@ -7,8 +7,8 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/writeaction"
 	"github.com/dekwanlabs/nasuta/tool"
-	"github.com/dekwanlabs/nasuta/writeaction"
 )
 
 func TestGetUsesPendingActionScanner(t *testing.T) {

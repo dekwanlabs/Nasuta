@@ -13,9 +13,9 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
-	"github.com/dekwanlabs/nasuta/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -60,6 +60,42 @@ func TestRunStoreCompleteTransitionsOnlyActiveRun(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := store.Complete("run", outcome); err != nil {
 		t.Fatalf("Complete: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunStoreRecordLLMCallUpdatesDetailAndAggregateAtomically(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &RunStore{db: db}
+	call := llm.CallUsage{
+		RunID: "run", Phase: llm.PhaseAgentStep, Provider: "openai", Model: "model",
+		MaxOutputTokens: 50, Duration: 12 * time.Millisecond, Status: llm.CallStatusSucceeded,
+		Usage: llm.Usage{
+			InputTokens: 10, CachedInputTokens: 2, OutputTokens: 5,
+			ReasoningTokens: 1, TotalTokens: 15,
+		},
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT llm_call_count FROM agent_runs").
+		WithArgs("run").
+		WillReturnRows(sqlmock.NewRows([]string{"llm_call_count"}).AddRow(2))
+	mock.ExpectExec("INSERT INTO agent_llm_calls").
+		WithArgs("run", 3, llm.PhaseAgentStep, "openai", "model", 10, 2, 5, 1, 15, 50, int64(12), llm.CallStatusSucceeded).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE agent_runs SET").
+		WithArgs(10, 2, 5, 1, 15, 3, 10, 60, "run").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := store.RecordLLMCall(t.Context(), call); err != nil {
+		t.Fatalf("RecordLLMCall: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

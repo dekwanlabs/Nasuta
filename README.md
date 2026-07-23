@@ -30,11 +30,11 @@ import (
 )
 ```
 
-`llm`、`log`、`platform/httpclient`、`platform/httputil`、`writeaction`
-这些包目前仍然保留，是给场景层和适配层复用的辅助能力；但业务实现、检索、
-索引、传输编排都应继续往 `internal/` 收口。身份认证（`internal/auth`）属于
-平台内部装配能力：上层通过 `app.Extension` 拿到的是已套好鉴权边界的 `APIRegistrar`，
-不需要也不暴露 auth 句柄。
+`log`、`platform/httpclient`、`platform/httputil` 目前仍然保留，是给场景层和
+适配层复用的辅助能力。LLM 客户端、语义存储契约、网页搜索 Provider 和平台写操作
+目录没有外部装配入口，因此位于 `internal/`，不承诺对外兼容。业务实现、检索、索引、
+传输编排也应继续往 `internal/` 收口。身份认证（`internal/auth`）属于平台内部装配能力：上层通过
+`app.Extension` 拿到的是已套好鉴权边界的 `APIRegistrar`，不需要也不暴露 auth 句柄。
 
 发布前，旁边的 `codeloom` 项目通过 `go.work` 和本地 `replace` 联调。为本项目创建独立
 Git 仓库、推送并打 tag 后，依赖方删除本地 `replace`，改用正式版本：

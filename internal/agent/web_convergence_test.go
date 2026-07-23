@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
 func TestWebEvidenceConvergesAfterIndependentFetches(t *testing.T) {

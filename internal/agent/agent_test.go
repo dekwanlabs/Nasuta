@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
-	"github.com/dekwanlabs/nasuta/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -309,9 +309,8 @@ func TestContinueIfNeeded_MaxRoundsCap(t *testing.T) {
 	}
 }
 
-// TestReasoningContent_ParsedStreamedCounted verifies reasoning_content handling.
-// Deltas must be parsed, accumulated, counted, and streamed to OnReasoning.
-// This guards the old bug where reasoning tokens were silently dropped.
+// TestReasoningContent_ParsedAndStreamed verifies reasoning_content handling.
+// Token accounting remains zero when the Provider omits usage.
 func TestReasoningContent_ParsedStreamedCounted(t *testing.T) {
 	srv := fakeStreamServer(t, []streamEvent{
 		{reasoning: "先思考", finish: ""},
@@ -330,8 +329,8 @@ func TestReasoningContent_ParsedStreamedCounted(t *testing.T) {
 	if res.Reasoning != "先思考再思考" {
 		t.Fatalf("reasoning = %q, want 先思考再思考", res.Reasoning)
 	}
-	if res.ReasoningTokens != 2 {
-		t.Fatalf("reasoning tokens = %d, want 2", res.ReasoningTokens)
+	if res.ReasoningTokens != 0 {
+		t.Fatalf("reasoning tokens = %d, want provider-reported zero", res.ReasoningTokens)
 	}
 	if res.Content != "答案是这样" {
 		t.Fatalf("content = %q, want 答案是这样", res.Content)

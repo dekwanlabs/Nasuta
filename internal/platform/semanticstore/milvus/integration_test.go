@@ -6,7 +6,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
-	"github.com/dekwanlabs/nasuta/semantic/contract"
+	"github.com/dekwanlabs/nasuta/internal/semantic/contract"
 )
 
 // TestMilvusContract runs the shared semantic contract against a live Milvus

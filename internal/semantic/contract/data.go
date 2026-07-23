@@ -1,6 +1,6 @@
 package contract
 
-import "github.com/dekwanlabs/nasuta/semantic"
+import "github.com/dekwanlabs/nasuta/internal/semantic"
 
 // Contract repos are stable strings so purge can delete by Repository across
 // runs and the same collection can be reused without leftover state.

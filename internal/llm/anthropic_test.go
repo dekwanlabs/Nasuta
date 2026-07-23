@@ -60,6 +60,10 @@ func TestAnthropicChat_NonStreaming(term2 *testing.T) {
 				{"type": "text", "text": "world"},
 			},
 			"stop_reason": "end_turn",
+			"usage": map[string]any{
+				"input_tokens": 12, "output_tokens": 4,
+				"cache_creation_input_tokens": 2, "cache_read_input_tokens": 3,
+			},
 		}
 		writer1.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(writer1).Encode(resp)
@@ -67,12 +71,21 @@ func TestAnthropicChat_NonStreaming(term2 *testing.T) {
 	defer srv.Close()
 
 	client := newAnthropicClient(term2, srv.URL)
-	out, err := client.Chat(term2.Context(), "you are helpful", "hi")
+	recorder := &captureUsageRecorder{}
+	ctx := WithUsagePhase(WithUsageRecorder(term2.Context(), "run-anthropic", recorder), PhaseRoute)
+	out, err := client.Chat(ctx, "you are helpful", "hi")
 	if err != nil {
 		term2.Fatalf("Chat: %v", err)
 	}
 	if out != "Hello, world" {
 		term2.Fatalf("content = %q, want %q", out, "Hello, world")
+	}
+	wantUsage := Usage{InputTokens: 17, CachedInputTokens: 5, OutputTokens: 4, TotalTokens: 21}
+	if len(recorder.calls) != 1 || recorder.calls[0].Usage != wantUsage {
+		term2.Fatalf("recorded usage = %+v, want %+v", recorder.calls, wantUsage)
+	}
+	if recorder.calls[0].MaxOutputTokens != 100 {
+		term2.Fatalf("max output tokens = %d, want client default 100", recorder.calls[0].MaxOutputTokens)
 	}
 }
 
@@ -209,8 +222,8 @@ func TestAnthropicToolUseInputJSONDeltaAccumulation(term5 *testing.T) {
 }
 
 // TestAnthropicThinkingBlock_ReasoningStreamedCounted verifies thinking_delta
-// fragments accumulate into Reasoning/ReasoningTokens and stream live via
-// OnReasoning (mirrors TestReasoningContent_ParsedStreamedCounted).
+// fragments accumulate and stream live. Anthropic usage does not expose a
+// separate thinking-token detail, so ReasoningTokens remains zero.
 func TestAnthropicThinkingBlock_ReasoningStreamedCounted(term6 *testing.T) {
 	frames := []string{
 		sseLine("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "thinking"}}),
@@ -235,8 +248,8 @@ func TestAnthropicThinkingBlock_ReasoningStreamedCounted(term6 *testing.T) {
 	if res.Reasoning != "先思考再思考" {
 		term6.Fatalf("reasoning = %q, want 先思考再思考", res.Reasoning)
 	}
-	if res.ReasoningTokens != 2 {
-		term6.Fatalf("reasoning tokens = %d, want 2", res.ReasoningTokens)
+	if res.ReasoningTokens != 0 {
+		term6.Fatalf("reasoning tokens = %d, want provider-reported zero", res.ReasoningTokens)
 	}
 	if res.Content != "答案" {
 		term6.Fatalf("content = %q, want 答案", res.Content)

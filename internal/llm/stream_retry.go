@@ -4,16 +4,19 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 )
 
 // postStream retries setup failures only; retrying after token delivery would
 // duplicate deltas already emitted to the caller.
-func postStream(ctx context.Context, do func() (*resty.Response, error)) (*resty.Response, error) {
+func postStream(ctx context.Context, do func() (*resty.Response, error), onRetry func(time.Duration, error)) (*resty.Response, error) {
 	backoff := defaultBackoff
 	for attempt := 1; attempt <= defaultMaxAttempts; attempt++ {
+		started := time.Now()
 		resp, err := do()
+		duration := time.Since(started)
 		if err == nil && resp.StatusCode() == http.StatusOK {
 			return resp, nil
 		}
@@ -38,6 +41,9 @@ func postStream(ctx context.Context, do func() (*resty.Response, error)) (*resty
 		}
 		if !sleepFor(ctx, ce, backoff) {
 			return nil, ctx.Err()
+		}
+		if onRetry != nil {
+			onRetry(duration, ce)
 		}
 		backoff = doubleBackoff(backoff)
 	}

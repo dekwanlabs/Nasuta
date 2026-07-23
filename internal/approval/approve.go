@@ -7,8 +7,8 @@ import (
 
 	"github.com/dekwanlabs/nasuta/incident"
 	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/writeaction"
 	"github.com/dekwanlabs/nasuta/tool"
-	"github.com/dekwanlabs/nasuta/writeaction"
 )
 
 type Status = ActionStatus

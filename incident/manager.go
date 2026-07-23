@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/knowledge"
-	"github.com/dekwanlabs/nasuta/llm"
 )
 
 type Status string

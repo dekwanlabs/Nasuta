@@ -27,7 +27,7 @@ func TestPostStreamRetriesOn429(t *testing.T) {
 	rc := httpclient.New(time.Second, nil)
 	resp, err := postStream(context.Background(), func() (*resty.Response, error) {
 		return rc.R().SetDoNotParseResponse(true).Get(srv.URL)
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("postStream: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestPostStreamNonRetryableStatusNoRetry(t *testing.T) {
 	rc := httpclient.New(time.Second, nil)
 	_, err := postStream(context.Background(), func() (*resty.Response, error) {
 		return rc.R().SetDoNotParseResponse(true).Get(srv.URL)
-	})
+	}, nil)
 	var ce *CallError
 	if !errors.As(err, &ce) || ce.Status != http.StatusBadRequest {
 		t.Fatalf("want 400 CallError, got %v", err)

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 )
 
 type semanticStatusStore struct {

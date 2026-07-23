@@ -3,7 +3,7 @@ package contract_test
 import (
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/semantic/contract"
+	"github.com/dekwanlabs/nasuta/internal/semantic/contract"
 )
 
 // TestContractAgainstMemory drives the shared contract suite against the

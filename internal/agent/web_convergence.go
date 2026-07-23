@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"golang.org/x/net/publicsuffix"
 )
 

@@ -15,8 +15,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
-	"github.com/dekwanlabs/nasuta/llm"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 )
@@ -171,7 +171,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		return
 	}
 	if terminal != nil && terminal.Status == agent.RunStatusDone && answerText != "" {
-		handler.saveTurnToSession(ctx, sessionID, userID, question, answerText)
+		handler.saveTurnToSession(ctx, runID, sessionID, userID, question, answerText)
 	}
 }
 
@@ -344,7 +344,7 @@ func (handler *Handler) APIQASessionDelete(w http.ResponseWriter, r *http.Reques
 	httputil.WriteJSON(w, map[string]string{"status": "deleted"})
 }
 
-func (handler *Handler) saveTurnToSession(ctx context.Context, sessionID string, userID int64, question, answer string) {
+func (handler *Handler) saveTurnToSession(ctx context.Context, runID, sessionID string, userID int64, question, answer string) {
 	if handler.qaSessions == nil || sessionID == "" || answer == "" {
 		return
 	}
@@ -367,6 +367,7 @@ func (handler *Handler) saveTurnToSession(ctx context.Context, sessionID string,
 			return
 		}
 		bgCtx := log.WithTraceID(context.Background(), log.GenerateTraceID())
+		bgCtx = handler.qa.UsageContext(bgCtx, runID, llm.PhaseSessionSummary)
 		summary, err := agent.GeneratePersistentSummary(bgCtx, handler.qa.LLM(), sess.Messages)
 		if err != nil {
 			log.ErrorfCtx(bgCtx, "[qa] summary generation failed for session %s: %v", sessionID, err)

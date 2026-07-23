@@ -34,7 +34,7 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 		{group: GroupAuth, tables: []string{"users", "sessions", "settings"}},
 		{group: GroupDocuments, tables: []string{"documents"}},
 		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages"}},
-		{group: GroupQARun, tables: []string{"agent_runs", "agent_steps"}},
+		{group: GroupQARun, tables: []string{"agent_runs", "agent_steps", "agent_llm_calls"}},
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
 		{group: GroupIncident, tables: []string{"incident_records"}},
 		{group: GroupApproval, tables: []string{"pending_actions"}},
@@ -95,6 +95,23 @@ func TestTimeMigrationRelaxesMemoryLastUsedBeforeNullNormalization(t *testing.T)
 	}
 	if !(relax < normalize && normalize < finalize) {
 		t.Fatalf("qa_memories migration must relax last_used before normalization and finalize afterward")
+	}
+}
+
+func TestLLMUsageMigrationAddsDetailAndRunAggregates(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_llm_usage.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read LLM usage migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"CREATE TABLE agent_llm_calls", "ADD COLUMN input_tokens", "ADD COLUMN output_tokens",
+		"ADD COLUMN total_tokens", "ADD COLUMN peak_reserved_tokens",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("LLM usage migration missing %q", required)
+		}
 	}
 }
 

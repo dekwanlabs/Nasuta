@@ -11,9 +11,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
-	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 type enrichedNode struct {

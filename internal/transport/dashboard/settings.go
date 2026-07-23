@@ -14,8 +14,8 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
-	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 type projectInfo struct {

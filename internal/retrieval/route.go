@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/llm"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
 type RoutingCapabilities struct {

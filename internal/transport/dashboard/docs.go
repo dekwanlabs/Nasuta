@@ -14,9 +14,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/indexing/docgen"
 	"github.com/dekwanlabs/nasuta/internal/indexing/indexer"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
-	"github.com/dekwanlabs/nasuta/semantic"
 )
 
 type docUploadReq struct {

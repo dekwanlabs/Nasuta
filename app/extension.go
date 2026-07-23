@@ -11,16 +11,14 @@ import (
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
-	"github.com/dekwanlabs/nasuta/websearch"
 )
 
 // ExtensionDeps exposes the stable construction inputs available to an upper-layer application.
 type ExtensionDeps struct {
-	Settings                  config.PlatformSettings
-	WorkspaceRoot             string
-	Knowledge                 knowledge.API
-	ReadTools                 *tool.ReadRegistry
-	RegisterWebSearchProvider func(string, websearch.Provider) error
+	Settings      config.PlatformSettings
+	WorkspaceRoot string
+	Knowledge     knowledge.API
+	ReadTools     *tool.ReadRegistry
 }
 
 // APIRegistrar attaches one authenticated application endpoint.
@@ -79,10 +77,9 @@ func MustRun(factory ExtensionFactory) {
 
 func (platform *Platform) extensionDeps() ExtensionDeps {
 	return ExtensionDeps{
-		Settings:                  platform.Settings(),
-		WorkspaceRoot:             platform.WorkspaceRoot(),
-		Knowledge:                 platform.Knowledge(),
-		ReadTools:                 platform.ReadTools(),
-		RegisterWebSearchProvider: platform.RegisterWebSearchProvider,
+		Settings:      platform.Settings(),
+		WorkspaceRoot: platform.WorkspaceRoot(),
+		Knowledge:     platform.Knowledge(),
+		ReadTools:     platform.ReadTools(),
 	}
 }

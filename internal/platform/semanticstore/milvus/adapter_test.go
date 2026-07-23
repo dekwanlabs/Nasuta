@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 )
 
 func TestCompileFilterUsesOnlyDeclaredScalarFields(t *testing.T) {

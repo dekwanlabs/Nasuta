@@ -9,7 +9,7 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore/milvus"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
-	"github.com/dekwanlabs/nasuta/semantic"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 )
 
 // New is the only production dispatcher for semantic providers.

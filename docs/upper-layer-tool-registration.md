@@ -4,7 +4,7 @@
 只读工具,让它同时出现在 **Agent QA loop** 和 **MCP** 客户端面前。
 
 本文只覆盖 `tool` 包对外开放的 **read 工具** 契约。写操作(`KindWrite`)不通过
-这条路径 —— 它们由平台自己的 `writeaction` 目录管理,不对上层注册器开放。
+这条路径 —— 它们由平台自己的 `internal/writeaction` 目录管理,不对上层注册器开放。
 
 ---
 
@@ -20,7 +20,6 @@ type ExtensionDeps struct {
     WorkspaceRoot             string
     Knowledge                 knowledge.API
     ReadTools                 *tool.ReadRegistry   // ← 上层唯一的工具注册入口
-    RegisterWebSearchProvider func(string, websearch.Provider) error
 }
 ```
 
