@@ -87,6 +87,15 @@ type DependencyEdge struct {
 	Confidence       float64              `json:"confidence"`
 }
 
+// DependencyTrace is one bounded upstream/downstream ontology answer.
+type DependencyTrace struct {
+	Service    string           `json:"service,omitempty"`
+	Candidates []string         `json:"candidates,omitempty"`
+	Upstream   []DependencyEdge `json:"upstream"`
+	Downstream []DependencyEdge `json:"downstream"`
+	Truncated  bool             `json:"truncated"`
+}
+
 // RepositoryRecord identifies the source revision represented by a snapshot.
 type RepositoryRecord struct {
 	Repo      string `json:"repo"`

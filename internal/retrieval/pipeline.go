@@ -14,7 +14,6 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -110,7 +109,7 @@ type toolset interface {
 	FindCode(ctx context.Context, query, lang string, limit int) (domain.SearchResult[domain.CodeSearchHit], error)
 	FindAPIs(ctx context.Context, service, pathKeyword string, limit int) ([]domain.EndpointRecord, error)
 	FindRunbooks(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (domain.SearchResult[domain.RunbookSearchHit], error)
-	TraceDeps(service, direction string, depth int) graph.Result
+	TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error)
 	ServiceModules(ctx context.Context, repos []string) ([]domain.ServiceRecord, error)
 }
 

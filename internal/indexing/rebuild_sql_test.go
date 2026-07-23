@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	ontologysqlite "github.com/dekwanlabs/nasuta/internal/platform/ontologystore/sqlite"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
@@ -33,7 +32,6 @@ func TestRebuildSQLIndexRefreshesScanDirsAndPublishesCurrentRepositories(t *test
 		Cfg:      config.Config{WorkspaceRoot: root, SQLitePath: filepath.Join(root, "index.db")},
 		Platform: &config.PlatformSettings{},
 		DB:       db,
-		Graph:    graph.New(),
 		ScanDirs: []string{"repos/team/removed"},
 	}
 	svc.SetOntologyPublisher(ontologysqlite.New(db))

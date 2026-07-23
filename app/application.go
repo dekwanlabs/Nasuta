@@ -54,7 +54,12 @@ func parseOptions() options {
 func runSelftest(ctx context.Context, knowledge *agent.Service, service string) {
 	fmt.Println(toJSON(knowledge.IndexSummary(ctx)))
 	fmt.Println(toJSON(knowledge.ServiceLookup(ctx, service, 3)))
-	fmt.Println(toJSON(knowledge.TraceDeps(service, "both", 2)))
+	dependencies, err := knowledge.TraceDeps(ctx, service, "both", 2)
+	if err != nil {
+		fmt.Println(toJSON(map[string]any{"service": service, "error": err.Error()}))
+	} else {
+		fmt.Println(toJSON(dependencies))
+	}
 	fmt.Println(toJSON(knowledge.ListApis(ctx, service, "", 10)))
 	fmt.Println(toJSON(knowledge.DocGapCheck(ctx, service)))
 	fmt.Println(toJSON(knowledge.RunbookSearch(ctx, "eureka", 5, false, "")))

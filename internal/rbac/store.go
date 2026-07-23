@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 )
 
 type Store struct {
@@ -19,20 +17,15 @@ const (
 )
 
 func NewStore(db *sql.DB) (*Store, error) {
+	if db == nil {
+		return nil, fmt.Errorf("rbac: database is required")
+	}
 	s := &Store{db: db}
-	if err := dbschema.MigrateMySQL(db, dbschema.GroupRBAC); err != nil {
-		return nil, fmt.Errorf("rbac: migrate: %w", err)
-	}
-	if _, err := db.Exec(`ALTER TABLE rbac_roles ADD COLUMN prompt TEXT`); err != nil {
-		if !strings.Contains(err.Error(), "Duplicate column") && !strings.Contains(err.Error(), "1060") {
-			return nil, fmt.Errorf("rbac: add prompt column: %w", err)
-		}
-	}
 	if err := s.seed(); err != nil {
 		return nil, fmt.Errorf("rbac: seed: %w", err)
 	}
 	if err := s.repair(); err != nil {
-		return nil, fmt.Errorf("rbac: repair: %w", err)
+		return nil, fmt.Errorf("rbac: ensure role assignments: %w", err)
 	}
 	return s, nil
 }
@@ -44,9 +37,6 @@ func (s *Store) repair() error {
 		userRoleName, "Standard user access",
 	); err != nil {
 		return fmt.Errorf("ensure system roles: %w", err)
-	}
-	if _, err := s.db.Exec(`DELETE FROM rbac_menus WHERE path IN ('/rbac/users','/rbac/roles','/rbac/menus','/rbac/keys')`); err != nil {
-		return fmt.Errorf("remove legacy RBAC menus: %w", err)
 	}
 	var rbacCount int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rbac_menus WHERE path = '/rbac'`).Scan(&rbacCount); err != nil {

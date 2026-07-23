@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 type ExtensionDeps struct {
 	Settings      config.PlatformSettings
 	WorkspaceRoot string
+	Database      *sql.DB
 	Knowledge     knowledge.API
 	ReadTools     *tool.ReadRegistry
 }
@@ -79,6 +81,7 @@ func (platform *Platform) extensionDeps() ExtensionDeps {
 	return ExtensionDeps{
 		Settings:      platform.Settings(),
 		WorkspaceRoot: platform.WorkspaceRoot(),
+		Database:      platform.platformDB,
 		Knowledge:     platform.Knowledge(),
 		ReadTools:     platform.ReadTools(),
 	}

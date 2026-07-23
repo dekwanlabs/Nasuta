@@ -11,7 +11,6 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	ontologysqlite "github.com/dekwanlabs/nasuta/internal/platform/ontologystore/sqlite"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
@@ -144,7 +143,6 @@ func newBM25TestService(t *testing.T) (*Service, *agent.Service, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := graph.New()
 	emb := fakeEmbedder{dim: 8}
 	cfg := config.Config{
 		WorkspaceRoot:        root,
@@ -159,10 +157,9 @@ func newBM25TestService(t *testing.T) (*Service, *agent.Service, string) {
 		DB:       db,
 		Semantic: contract.NewMemory(),
 		Embedder: emb,
-		Graph:    g,
 		ScanDirs: []string{"demo-svc"},
 	}
-	tools := agent.NewTools(agent.Deps{DB: db, Graph: g, Semantic: contract.NewMemory(), Embedder: emb})
+	tools := agent.NewTools(agent.Deps{DB: db, Semantic: contract.NewMemory(), Embedder: emb})
 	svc.SetTools(tools)
 	return svc, tools, root
 }
@@ -234,7 +231,7 @@ func TestEmbedRepoCodeKeepsOtherRepoSparseCoordinates(t *testing.T) {
 			WorkspaceRoot: root, SQLitePath: filepath.Join(root, "index.db"),
 			EmbeddingBatch: 4, EmbeddingConcurrency: 1, IndexCode: true,
 		},
-		DB: db, Semantic: semantic, Embedder: fakeEmbedder{dim: 8}, Graph: graph.New(),
+		DB: db, Semantic: semantic, Embedder: fakeEmbedder{dim: 8},
 	}
 	dirs := []string{"repos/team/orders", "repos/team/payments"}
 	if err := svc.EmbedCodeChunks(context.Background(), dirs); err != nil {
@@ -281,7 +278,7 @@ func TestBootstrapClearsStaleServiceVectors(t *testing.T) {
 	}
 	svc := &Service{
 		Cfg: config.Config{WorkspaceRoot: root, SQLitePath: filepath.Join(root, "index.db")},
-		DB:  db, Semantic: recorded, Embedder: fakeEmbedder{dim: 8}, Graph: graph.New(),
+		DB:  db, Semantic: recorded, Embedder: fakeEmbedder{dim: 8},
 	}
 	svc.SetOntologyPublisher(ontologysqlite.New(db))
 	if err := svc.Bootstrap(context.Background()); err != nil {

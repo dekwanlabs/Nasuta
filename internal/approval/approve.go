@@ -7,6 +7,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/incident"
 	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/writeaction"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -76,7 +77,7 @@ func (svc *Service) Approve(ctx context.Context, id string, approver int64) (*Pe
 	}
 	_, err = svc.db.Exec(
 		`UPDATE pending_actions SET status=?, approver=?, result_json=?, decided_at=? WHERE id=?`,
-		status, approver, mustJSON(result), databaseTime(now), id)
+		status, approver, mustJSON(result), store.DatabaseTime(now), id)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +96,7 @@ func (svc *Service) Reject(id string, approver int64, reason string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := svc.db.Exec(
 		`UPDATE pending_actions SET status=?, approver=?, result_json=?, decided_at=? WHERE id=?`,
-		ActionRejected, approver, mustJSON(map[string]any{"reason": reason}), databaseTime(now), id)
+		ActionRejected, approver, mustJSON(map[string]any{"reason": reason}), store.DatabaseTime(now), id)
 	return err
 }
 

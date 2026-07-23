@@ -224,7 +224,12 @@ func (handler *Handler) TraceDeps(w http.ResponseWriter, r *http.Request) {
 	if depth > 5 {
 		depth = 5
 	}
-	httputil.WriteJSON(w, handler.tools.TraceDeps(service, direction, depth))
+	result, err := handler.tools.TraceDeps(r.Context(), service, direction, depth)
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
 }
 
 func (handler *Handler) ListApis(w http.ResponseWriter, r *http.Request) {

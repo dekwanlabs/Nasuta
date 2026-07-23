@@ -75,6 +75,58 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 	}
 }
 
+func TestDependencyLimitCountsDependenciesAndKeepsAllEvidence(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	orders := testService("team/orders", ".", "orders")
+	payments := testService("team/payments", ".", "payments")
+	inventory := testService("team/inventory", ".", "inventory")
+	sharedPath := "repos/team/orders/src/client.go"
+	bundle := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{
+			{Repo: orders.Repo, HeadSHA: "orders-sha", IndexedAt: time.Now().UnixMilli()},
+			{Repo: payments.Repo, HeadSHA: "payments-sha", IndexedAt: time.Now().UnixMilli()},
+			{Repo: inventory.Repo, HeadSHA: "inventory-sha", IndexedAt: time.Now().UnixMilli()},
+		},
+		Services: []domain.ServiceRecord{orders, payments, inventory},
+		Dependencies: []domain.DependencyEdge{
+			{
+				CallerServiceKey: orders.ServiceKey, TargetKind: domain.DependencyTargetService,
+				TargetServiceKey: payments.ServiceKey, From: orders.ServiceName, To: payments.ServiceName,
+				Type: domain.EdgeHTTP, Confidence: 0.9,
+				Evidence: []domain.Evidence{
+					{Path: sharedPath, Line: 10, Kind: domain.SourceCodeScan},
+					{Path: sharedPath, Line: 20, Kind: domain.SourceCodeScan},
+				},
+			},
+			{
+				CallerServiceKey: orders.ServiceKey, TargetKind: domain.DependencyTargetService,
+				TargetServiceKey: inventory.ServiceKey, From: orders.ServiceName, To: inventory.ServiceName,
+				Type: domain.EdgeHTTP, Confidence: 0.8,
+				Evidence: []domain.Evidence{{Path: sharedPath, Line: 30, Kind: domain.SourceCodeScan}},
+			},
+		},
+	}
+	if err := db.ReplaceStructure(context.Background(), "dependencies", bundle); err != nil {
+		t.Fatal(err)
+	}
+
+	edges, more, err := db.DependenciesByEvidencePath(context.Background(), sharedPath, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !more || len(edges) != 1 {
+		t.Fatalf("edges=%#v more=%v", edges, more)
+	}
+	if len(edges[0].Evidence) != 2 {
+		t.Fatalf("evidence=%#v, want complete first dependency evidence", edges[0].Evidence)
+	}
+}
+
 func TestReplaceWorkspacePublishesStructureAndOntologyGeneration(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
 	if err != nil {

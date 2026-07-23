@@ -6,7 +6,6 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 )
 
 type servicePathFakeTools struct {
@@ -33,8 +32,8 @@ func (f servicePathFakeTools) FindRunbooks(context.Context, string, int, bool, s
 	return domain.SearchResult[domain.RunbookSearchHit]{}, nil
 }
 
-func (f servicePathFakeTools) TraceDeps(string, string, int) graph.Result {
-	return graph.Result{}
+func (f servicePathFakeTools) TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error) {
+	return domain.DependencyTrace{}, nil
 }
 
 func (f servicePathFakeTools) ServiceModules(_ context.Context, repos []string) ([]domain.ServiceRecord, error) {

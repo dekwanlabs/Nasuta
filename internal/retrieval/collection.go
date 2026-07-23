@@ -222,7 +222,11 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 		return
 	}
 	for _, c := range services {
-		res := retrieve.tools.TraceDeps(c, "both", 2)
+		res, err := retrieve.tools.TraceDeps(ctx, c, "both", 2)
+		if err != nil {
+			log.WarnfCtx(ctx, "[qa] collect deps for %s: %v", c, err)
+			continue
+		}
 		if len(res.Upstream) > 0 || len(res.Downstream) > 0 {
 			var sb strings.Builder
 			sb.WriteString("## Dependency Chain\n")

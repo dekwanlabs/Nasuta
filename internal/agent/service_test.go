@@ -14,7 +14,6 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -172,7 +171,9 @@ func (emptyRetrievalTools) FindAPIs(context.Context, string, string, int) ([]dom
 func (emptyRetrievalTools) FindRunbooks(context.Context, string, int, bool, string) (domain.SearchResult[domain.RunbookSearchHit], error) {
 	return domain.SearchResult[domain.RunbookSearchHit]{}, nil
 }
-func (emptyRetrievalTools) TraceDeps(string, string, int) graph.Result { return graph.Result{} }
+func (emptyRetrievalTools) TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error) {
+	return domain.DependencyTrace{}, nil
+}
 func (emptyRetrievalTools) ServiceModules(context.Context, []string) ([]domain.ServiceRecord, error) {
 	return nil, nil
 }

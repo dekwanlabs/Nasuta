@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -40,14 +42,6 @@ type PendingAction struct {
 	ExpiresAt   string         `json:"expires_at"`
 }
 
-// Page is the bounded dashboard representation owned by the application API.
-type Page[T any] struct {
-	Total    int `json:"total"`
-	Page     int `json:"page"`
-	PageSize int `json:"page_size"`
-	List     []T `json:"list"`
-}
-
 // Create records a proposed write action in pending status and returns it.
 func (svc *Service) Create(action PendingAction) (*PendingAction, error) {
 	if action.ID == "" {
@@ -65,7 +59,7 @@ func (svc *Service) Create(action PendingAction) (*PendingAction, error) {
 		`INSERT INTO pending_actions(id,tool,incident_id,args_json,rationale,impact,status,requested_by,created_at,expires_at)
 		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		action.ID, action.Tool, action.IncidentID, string(argsJSON), action.Rationale, action.Impact, action.Status, action.RequestedBy,
-		databaseTime(action.CreatedAt), databaseTime(action.ExpiresAt))
+		store.DatabaseTime(action.CreatedAt), store.DatabaseTime(action.ExpiresAt))
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +78,7 @@ func (svc *Service) Get(id string) (*PendingAction, error) {
 }
 
 // ListPage returns paginated actions, optionally filtered by status.
-func (svc *Service) ListPage(status ActionStatus, page, pageSize int) (*Page[PendingAction], error) {
+func (svc *Service) ListPage(status ActionStatus, page, pageSize int) (*domain.Page[PendingAction], error) {
 	if page < 1 {
 		page = 1
 	}
@@ -126,7 +120,7 @@ func (svc *Service) ListPage(status ActionStatus, page, pageSize int) (*Page[Pen
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return &Page[PendingAction]{
+	return &domain.Page[PendingAction]{
 		Total:    total,
 		Page:     page,
 		PageSize: pageSize,
@@ -147,8 +141,8 @@ func scanPendingAction(row rowScanner) (PendingAction, error) {
 		&act.Status, &act.RequestedBy, &approver, &resultJSON, &createdAt, &decided, &expiresAt); err != nil {
 		return act, err
 	}
-	act.CreatedAt = formatDatabaseTime(createdAt)
-	act.ExpiresAt = formatDatabaseTime(expiresAt)
+	act.CreatedAt = store.FormatDatabaseTime(createdAt)
+	act.ExpiresAt = store.FormatDatabaseTime(expiresAt)
 	fillAction(&act, argsJSON, resultJSON, approver, decided)
 	return act, nil
 }
@@ -161,26 +155,7 @@ func fillAction(act *PendingAction, argsJSON, resultJSON sql.NullString, approve
 		act.Result = r
 	}
 	act.Approver = approver.Int64
-	act.DecidedAt = formatDatabaseTime(decided)
-}
-
-func databaseTime(value string) any {
-	if value == "" {
-		return nil
-	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
-		if parsed, err := time.Parse(layout, value); err == nil {
-			return parsed
-		}
-	}
-	return value
-}
-
-func formatDatabaseTime(value sql.NullTime) string {
-	if !value.Valid {
-		return ""
-	}
-	return value.Time.UTC().Format(time.RFC3339Nano)
+	act.DecidedAt = store.FormatDatabaseTime(decided)
 }
 
 func mustJSON(v any) string {

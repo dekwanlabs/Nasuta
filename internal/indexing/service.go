@@ -22,7 +22,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/indexing/indexer"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -37,14 +36,13 @@ type ToolsSink interface {
 	InvalidateServices()
 }
 
-// Service owns the durable index plus the derived in-memory search state.
+// Service owns the durable index plus the derived BM25 search state.
 type Service struct {
 	Cfg       config.Config
 	Platform  *config.PlatformSettings
 	DB        *store.SQLite
 	Semantic  semantic.Store
 	Embedder  embed.Embedder
-	Graph     *graph.Graph
 	tools     ToolsSink
 	ScanDirs  []string
 	publisher ontology.Publisher
@@ -78,9 +76,6 @@ func (svc *Service) SetOntologyPublisher(publisher ontology.Publisher) {
 }
 
 func (svc *Service) Close() {
-	if svc.docDB != nil {
-		_ = svc.docDB.Close()
-	}
 	if svc.Semantic != nil {
 		if err := svc.Semantic.Close(); err != nil {
 			log.Infof("[indexing] semantic close: %v", err)
@@ -93,8 +88,8 @@ func (svc *Service) Close() {
 	}
 }
 
-// Build initializes stores, optional backends, and the graph snapshot.
-func Build(cfg config.Config) (*Service, error) {
+// Build initializes stores and optional backends.
+func Build(cfg config.Config, docDB *store.DocStore, docStoreErr error) (*Service, error) {
 	db, err := store.Open(cfg.SQLitePath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -105,24 +100,12 @@ func Build(cfg config.Config) (*Service, error) {
 		return nil, fmt.Errorf("build semantic store: %w", err)
 	}
 	embedder := embed.New(cfg)
-	g := graph.New()
-	docDB, err := store.OpenDocStore(config.LoadMySQLDSN())
-	var docStoreErr error
-	if err != nil {
-		log.Warnf("[build] doc store disabled: %v", err)
-		docStoreErr = err
-		docDB = nil
-	}
-
 	svc := &Service{
-		Cfg: cfg, DB: db, Semantic: semanticBackend, Embedder: embedder, Graph: g,
+		Cfg: cfg, DB: db, Semantic: semanticBackend, Embedder: embedder,
 		docDB: docDB, docStoreErr: docStoreErr, Platform: &config.PlatformSettings{},
 	}
 	svc.loadBM25()
 	svc.ScanDirs = svc.LoadScanDirs()
-	if err := svc.reloadDependencyGraph(context.Background()); err != nil {
-		return nil, err
-	}
 	return svc, nil
 }
 
@@ -189,18 +172,7 @@ func (svc *Service) setBM25(b *retrieval.BM25Builder) {
 	}
 }
 
-func (svc *Service) reloadDependencyGraph(ctx context.Context) error {
-	edges, err := svc.DB.Edges(ctx)
-	if err != nil {
-		return fmt.Errorf("reload dependency graph: read edges: %w", err)
-	}
-	svc.applyDependencyGraph(edges)
-	return nil
-}
-
-func (svc *Service) applyDependencyGraph(edges []domain.DependencyEdge) {
-	svc.Graph.Rebuild(edges)
-	log.Infof("[dependency-graph] applied snapshot: edges=%d", len(edges))
+func (svc *Service) invalidateToolCaches() {
 	if svc.tools != nil {
 		svc.tools.InvalidateServices()
 	}
@@ -210,7 +182,7 @@ func (svc *Service) RebuildGraph(ctx context.Context) error {
 	if err := svc.runCodegraphIndex(ctx); err != nil {
 		return fmt.Errorf("rebuild codegraph: %w", err)
 	}
-	return svc.reloadDependencyGraph(ctx)
+	return nil
 }
 
 func (svc *Service) runCodegraphIndex(ctx context.Context) error {
@@ -956,7 +928,7 @@ func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 		return err
 	}
 	log.Infof("[rebuild-sql] snapshot published after %s", time.Since(started).Round(time.Millisecond))
-	svc.applyDependencyGraph(bundle.Dependencies)
+	svc.invalidateToolCaches()
 	log.Infof("[rebuild-sql] completed after %s: services=%d endpoints=%d dependencies=%d",
 		time.Since(started).Round(time.Millisecond), len(bundle.Services), len(bundle.Endpoints), len(bundle.Dependencies))
 	return nil
@@ -975,7 +947,7 @@ func (svc *Service) Bootstrap(ctx context.Context) error {
 	if err := svc.publishWorkspace(ctx, bundle); err != nil {
 		return err
 	}
-	svc.applyDependencyGraph(bundle.Dependencies)
+	svc.invalidateToolCaches()
 	log.Infof("[bootstrap] services=%d endpoints=%d dependencies=%d runbooks=%d",
 		len(bundle.Services), len(bundle.Endpoints), len(bundle.Dependencies), len(bundle.Runbooks))
 
@@ -1027,7 +999,7 @@ func (svc *Service) publishWorkspace(ctx context.Context, bundle domain.IndexBun
 	return nil
 }
 
-// ReindexRepo refreshes one repo's structural index and graph edges.
+// ReindexRepo refreshes one repository's structural and ontology snapshot.
 func (svc *Service) ReindexRepo(ctx context.Context, repo, commit string) error {
 	if repo == "" {
 		return fmt.Errorf("empty repo")

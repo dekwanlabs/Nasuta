@@ -68,3 +68,56 @@ func TestQueryRelationsCanonicalizesOnceAndRetriesStaleSnapshot(t *testing.T) {
 		t.Fatalf("caller predicates were mutated: %#v", predicates)
 	}
 }
+
+type dependencyRetryRepository struct{ resolveCalls int }
+
+func (repository *dependencyRetryRepository) Resolve(context.Context, ResolveQuery) (ResolveResult, error) {
+	repository.resolveCalls++
+	generation := "g1"
+	if repository.resolveCalls > 1 {
+		generation = "g2"
+	}
+	return ResolveResult{
+		Generation: generation,
+		Entities:   []EntityRef{{ID: "orders", Class: ClassService, Name: "orders"}},
+	}, nil
+}
+
+func (*dependencyRetryRepository) EntitiesByID(_ context.Context, query EntityQuery) ([]EntityRef, error) {
+	entities := make([]EntityRef, 0, len(query.IDs))
+	for _, id := range query.IDs {
+		entities = append(entities, EntityRef{ID: id, Class: ClassService, Name: id})
+	}
+	return entities, nil
+}
+
+func (*dependencyRetryRepository) Neighbors(_ context.Context, query NeighborQuery) ([]Fact, bool, error) {
+	if query.Generation == "g1" && query.Direction == DirectionOutgoing {
+		return nil, false, ErrStaleSnapshot
+	}
+	if query.Direction == DirectionIncoming {
+		return []Fact{{ID: "inventory-orders", SubjectID: "inventory", Predicate: PredicateDependsOn, ObjectID: "orders"}}, false, nil
+	}
+	return []Fact{{ID: "orders-payments", SubjectID: "orders", Predicate: PredicateDependsOn, ObjectID: "payments"}}, false, nil
+}
+
+func (*dependencyRetryRepository) Stats(context.Context) (Stats, error) { return Stats{}, nil }
+
+func TestTraceDependenciesKeepsBothDirectionsOnOneGeneration(t *testing.T) {
+	repository := &dependencyRetryRepository{}
+	result, err := NewService(repository).TraceDependencies(context.Background(), DependencyQuery{
+		Service: " orders ", Direction: " BOTH ", MaxDepth: 2, MaxNodes: 20, MaxFanout: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.resolveCalls != 2 {
+		t.Fatalf("resolve calls = %d, want one full retry", repository.resolveCalls)
+	}
+	if len(result.Upstream) != 1 || result.Upstream[0].Subject.Name != "inventory" {
+		t.Fatalf("upstream = %#v", result.Upstream)
+	}
+	if len(result.Downstream) != 1 || result.Downstream[0].Object.Name != "payments" {
+		t.Fatalf("downstream = %#v", result.Downstream)
+	}
+}

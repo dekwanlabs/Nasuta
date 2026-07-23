@@ -8,9 +8,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
-	_ "github.com/go-sql-driver/mysql"
 )
 
 type SessionStore struct {
@@ -37,15 +35,12 @@ type MessagePage struct {
 
 var ErrSessionOwnership = errors.New("memory/session: session belongs to another user")
 
-func OpenSessionStore(dsn string) (*SessionStore, error) {
-	db, err := store.MySQL(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("memory/session: open: %w", err)
+// NewSessionStore binds QA session queries to the platform-owned MySQL pool.
+func NewSessionStore(db *sql.DB) *SessionStore {
+	if db == nil {
+		return nil
 	}
-	if err := dbschema.MigrateMySQL(db, dbschema.GroupQASession); err != nil {
-		return nil, fmt.Errorf("memory/session: migrate schema: %w", err)
-	}
-	return &SessionStore{db: db}, nil
+	return &SessionStore{db: db}
 }
 
 func (ss *SessionStore) List(userID int64) ([]SessionRecord, error) {

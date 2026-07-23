@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/semantic/contract"
 )
 
@@ -20,7 +19,6 @@ func TestOptionalDocStorePathsAreSafe(t *testing.T) {
 		Cfg:      config.Config{WorkspaceRoot: root},
 		Semantic: contract.NewMemory(),
 		Embedder: fakeEmbedder{dim: 4},
-		Graph:    graph.New(),
 	}
 
 	ctx := context.Background()

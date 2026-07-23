@@ -58,8 +58,11 @@ type DependencyEdge struct {
 
 // DependencyResult is the upstream/downstream answer for one trace.
 type DependencyResult struct {
+	Service    string           `json:"service,omitempty"`
+	Candidates []string         `json:"candidates,omitempty"`
 	Upstream   []DependencyEdge `json:"upstream"`
 	Downstream []DependencyEdge `json:"downstream"`
+	Truncated  bool             `json:"truncated"`
 }
 
 // RunbookQuery searches the runbook corpus by free-text query.

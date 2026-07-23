@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
@@ -35,22 +36,24 @@ type IndexingOps interface {
 }
 
 type Handler struct {
-	db             *store.SQLite
-	docDB          *store.DocStore
-	authDB         *auth.DB
-	semantic       semantic.Store
-	embedder       embed.Embedder
-	tools          *agent.Service
-	qa             *agent.QA
-	registry       *agent.Registry
-	writeAvailable bool
-	codegraphDB    *codegraph.DB
-	callChain      *callchain.Service
-	qaSessions     *memory.SessionStore
-	cfg            config.Config
-	platform       *config.PlatformSettings
-	idx            IndexingOps
-	rolePromptFn   func(userID int64) string
+	db                 *store.SQLite
+	docDB              *store.DocStore
+	authDB             *auth.DB
+	platformDB         *sql.DB
+	semantic           semantic.Store
+	embedder           embed.Embedder
+	tools              *agent.Service
+	qa                 *agent.QA
+	persistentRunStore *agent.RunStore
+	registry           *agent.Registry
+	writeAvailable     bool
+	codegraphDB        *codegraph.DB
+	callChain          *callchain.Service
+	qaSessions         *memory.SessionStore
+	cfg                config.Config
+	platform           *config.PlatformSettings
+	idx                IndexingOps
+	rolePromptFn       func(userID int64) string
 }
 
 // SetRolePrompt wires a function that returns the combined RBAC-role
@@ -69,28 +72,44 @@ func (handler *Handler) rolePromptFor(userID int64) string {
 }
 
 // NewHandler builds the dashboard HTTP handler.
-func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem semantic.Store, emb embed.Embedder, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool, cgDB *codegraph.DB, chain *callchain.Service) *Handler {
+func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, platformDB *sql.DB, sem semantic.Store, emb embed.Embedder, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool, cgDB *codegraph.DB, chain *callchain.Service) *Handler {
 	if ps == nil {
 		ps = &config.PlatformSettings{}
 	}
+	runStore := openRunStore(platformDB)
 	h := &Handler{
-		db:             db,
-		docDB:          docDB,
-		authDB:         authDB,
-		semantic:       sem,
-		embedder:       emb,
-		tools:          t,
-		qa:             agent.NewQA(agent.QADeps{Tools: t, Semantic: sem, Embedder: emb, WriteAvailable: writeAvailable, Cfg: cfg, Platform: ps, Registry: registry, CodeGraphDB: cgDB}),
-		registry:       registry,
-		writeAvailable: writeAvailable,
-		cfg:            cfg,
-		platform:       ps,
-		idx:            idx,
-		callChain:      chain,
+		db:                 db,
+		docDB:              docDB,
+		authDB:             authDB,
+		platformDB:         platformDB,
+		semantic:           sem,
+		embedder:           emb,
+		tools:              t,
+		qa:                 agent.NewQA(agent.QADeps{Tools: t, Semantic: sem, Embedder: emb, WriteAvailable: writeAvailable, Cfg: cfg, Platform: ps, Registry: registry, CodeGraphDB: cgDB, DB: platformDB, RunStore: runStore}),
+		persistentRunStore: runStore,
+		registry:           registry,
+		writeAvailable:     writeAvailable,
+		cfg:                cfg,
+		platform:           ps,
+		idx:                idx,
+		callChain:          chain,
 	}
 	h.codegraphDB = cgDB
-	h.qaSessions = openQASessions(cfg)
+	h.qaSessions = openQASessions(platformDB)
 	return h
+}
+
+func openRunStore(db *sql.DB) *agent.RunStore {
+	if db == nil {
+		return nil
+	}
+	runStore, err := agent.NewRunStore(db)
+	if err != nil {
+		log.Warnf("[dashboard] agent run store disabled: %v", err)
+		return nil
+	}
+	log.Infof("[dashboard] agent run store enabled (MySQL)")
+	return runStore
 }
 
 func (handler *Handler) refreshCodeGraph() error {
@@ -118,16 +137,11 @@ func (handler *Handler) refreshCodeGraph() error {
 	return nil
 }
 
-func openQASessions(cfg config.Config) *memory.SessionStore {
-	if config.LoadMySQLDSN() == "" {
-		log.Warnf("[dashboard] qa session store disabled (MYSQL_DSN not configured)")
+func openQASessions(db *sql.DB) *memory.SessionStore {
+	if db == nil {
 		return nil
 	}
-	qaDB, err := memory.OpenSessionStore(config.LoadMySQLDSN())
-	if err != nil {
-		log.Warnf("[dashboard] qa session store disabled: %v", err)
-		return nil
-	}
+	qaDB := memory.NewSessionStore(db)
 	log.Infof("[dashboard] qa session store enabled (MySQL)")
 	return qaDB
 }

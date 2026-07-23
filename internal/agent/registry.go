@@ -9,7 +9,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -64,10 +63,13 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 				"direction": propString("upstream | downstream | both (default both)."),
 				"depth":     propInt("Traversal depth 1-5 (default 2)."),
 			}, []string{"service"}),
-			Handler: stringHandler(func(_ context.Context, args tool.Arguments) (string, error) {
+			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				depth := clampInt(argInt(args, "depth", 2), 1, 5)
-				result := svc.TraceDeps(argStr(args, "service", ""), argStr(args, "direction", "both"), depth)
-				return marshalResult(graphResultToMap(result))
+				result, err := svc.TraceDeps(ctx, argStr(args, "service", ""), argStr(args, "direction", "both"), depth)
+				if err != nil {
+					return "", err
+				}
+				return marshalResult(dependencyTraceToMap(result))
 			}),
 		},
 		{
@@ -305,14 +307,28 @@ func marshalResult(value any) (string, error) {
 	return string(data), nil
 }
 
-func graphResultToMap(result graph.Result) map[string]any {
+func dependencyTraceToMap(result domain.DependencyTrace) map[string]any {
 	upstream := make([]map[string]any, len(result.Upstream))
 	for i, edge := range result.Upstream {
-		upstream[i] = map[string]any{"from": edge.From, "to": edge.To}
+		upstream[i] = dependencyEdgeToMap(edge)
 	}
 	downstream := make([]map[string]any, len(result.Downstream))
 	for i, edge := range result.Downstream {
-		downstream[i] = map[string]any{"from": edge.From, "to": edge.To}
+		downstream[i] = dependencyEdgeToMap(edge)
 	}
-	return map[string]any{"upstream": upstream, "downstream": downstream}
+	return map[string]any{
+		"service": result.Service, "candidates": result.Candidates,
+		"upstream": upstream, "downstream": downstream, "truncated": result.Truncated,
+	}
+}
+
+func dependencyEdgeToMap(edge domain.DependencyEdge) map[string]any {
+	result := map[string]any{
+		"from": edge.From, "to": edge.To, "type": edge.Type,
+		"confidence": edge.Confidence, "evidence": edge.Evidence,
+	}
+	if edge.ExternalTarget != "" {
+		result["externalTarget"] = edge.ExternalTarget
+	}
+	return result
 }

@@ -595,7 +595,9 @@ func (store *SQLite) DependenciesByEvidencePath(ctx context.Context, filePath st
 	if limit <= 0 {
 		limit = 10
 	}
-	return store.queryDependencyEvidence(ctx, `WHERE e.file_path=?`, []any{filePath}, limit)
+	return store.queryDependencies(ctx,
+		`JOIN dependency_evidence matched ON matched.dependency_id=d.dependency_id`,
+		`WHERE matched.file_path=?`, []any{filePath}, limit)
 }
 
 // IncomingDependencies returns bounded evidence for dependencies targeting one service.
@@ -603,61 +605,39 @@ func (store *SQLite) IncomingDependencies(ctx context.Context, targetServiceKey 
 	if limit <= 0 {
 		limit = 40
 	}
-	return store.queryDependencyEvidence(ctx, `WHERE d.target_service_key=?`, []any{targetServiceKey}, limit)
+	return store.queryDependencies(ctx, "", `WHERE d.target_service_key=?`, []any{targetServiceKey}, limit)
 }
 
-func (store *SQLite) queryDependencyEvidence(ctx context.Context, where string, args []any, limit int) ([]domain.DependencyEdge, bool, error) {
+func (store *SQLite) queryDependencies(ctx context.Context, selectionJoin, where string, args []any, limit int) ([]domain.DependencyEdge, bool, error) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	queryArgs := append(append([]any{}, args...), limit+1)
-	rows, err := store.db.QueryContext(ctx, `SELECT d.dependency_id,d.caller_service_key,caller.service_name,
+	rows, err := store.db.QueryContext(ctx, `WITH selected AS (
+	SELECT d.dependency_id FROM dependencies d `+selectionJoin+` `+where+`
+	GROUP BY d.dependency_id ORDER BY d.dependency_id LIMIT ?
+)
+SELECT d.dependency_id,d.caller_service_key,caller.service_name,
 d.target_kind,COALESCE(d.target_service_key,''),COALESCE(target.service_name,''),COALESCE(d.external_target,''),
 d.protocol,d.confidence,e.file_path,e.line,e.symbol,e.source_kind
-FROM dependencies d
+FROM selected
+JOIN dependencies d ON d.dependency_id=selected.dependency_id
 JOIN services caller ON caller.service_key=d.caller_service_key
 LEFT JOIN services target ON target.service_key=d.target_service_key
-JOIN dependency_evidence e ON e.dependency_id=d.dependency_id
-`+where+` ORDER BY d.dependency_id,e.evidence_id LIMIT ?`, queryArgs...)
+LEFT JOIN dependency_evidence e ON e.dependency_id=d.dependency_id
+ORDER BY d.dependency_id,e.evidence_id`, queryArgs...)
 	if err != nil {
 		return nil, false, err
 	}
 	defer rows.Close()
-	edges := make([]domain.DependencyEdge, 0)
-	byID := make(map[int64]int)
-	rowCount := 0
-	more := false
-	for rows.Next() {
-		rowCount++
-		if rowCount > limit {
-			more = true
-			break
-		}
-		var id int64
-		var edge domain.DependencyEdge
-		var targetKind, protocol, targetName string
-		var evidence domain.Evidence
-		if err := rows.Scan(&id, &edge.CallerServiceKey, &edge.From, &targetKind, &edge.TargetServiceKey,
-			&targetName, &edge.ExternalTarget, &protocol, &edge.Confidence,
-			&evidence.Path, &evidence.Line, &evidence.Symbol, &evidence.Kind); err != nil {
-			return nil, false, err
-		}
-		index, found := byID[id]
-		if !found {
-			edge.TargetKind = domain.DependencyTargetKind(targetKind)
-			edge.Type = domain.EdgeType(protocol)
-			if edge.TargetKind == domain.DependencyTargetService {
-				edge.To = targetName
-			} else {
-				edge.To = edge.ExternalTarget
-			}
-			edge.Evidence = []domain.Evidence{}
-			index = len(edges)
-			byID[id] = index
-			edges = append(edges, edge)
-		}
-		edges[index].Evidence = append(edges[index].Evidence, evidence)
+	edges, err := scanDependencyRows(rows)
+	if err != nil {
+		return nil, false, err
 	}
-	return edges, more, rows.Err()
+	more := len(edges) > limit
+	if more {
+		edges = edges[:limit]
+	}
+	return edges, more, nil
 }
 
 // EndpointNearNode resolves a route annotation inside or immediately before a symbol.
@@ -804,6 +784,10 @@ ORDER BY d.dependency_id,e.evidence_id`)
 		return nil, err
 	}
 	defer rows.Close()
+	return scanDependencyRows(rows)
+}
+
+func scanDependencyRows(rows *sql.Rows) ([]domain.DependencyEdge, error) {
 	edges := make([]domain.DependencyEdge, 0)
 	byID := make(map[int64]int)
 	for rows.Next() {
@@ -876,21 +860,16 @@ type Summary struct {
 }
 
 func (store *SQLite) Summary(ctx context.Context) (Summary, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 	var summary Summary
-	var err error
-	if summary.Services, err = store.count(ctx, `SELECT COUNT(*) FROM services`); err != nil {
-		return summary, err
-	}
-	if summary.Endpoints, err = store.count(ctx, `SELECT COUNT(*) FROM endpoints`); err != nil {
-		return summary, err
-	}
-	if summary.Dependencies, err = store.count(ctx, `SELECT COUNT(*) FROM dependencies`); err != nil {
-		return summary, err
-	}
-	if summary.Repos, err = store.count(ctx, `SELECT COUNT(*) FROM repositories`); err != nil {
-		return summary, err
-	}
-	return summary, nil
+	err := store.db.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM services),
+		(SELECT COUNT(*) FROM endpoints),
+		(SELECT COUNT(*) FROM dependencies),
+		(SELECT COUNT(*) FROM repositories)`).Scan(
+		&summary.Services, &summary.Endpoints, &summary.Dependencies, &summary.Repos)
+	return summary, err
 }
 
 func (store *SQLite) count(ctx context.Context, query string, args ...any) (int, error) {

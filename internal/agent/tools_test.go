@@ -8,8 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -183,5 +185,48 @@ func TestSymbolQueryTokens(t *testing.T) {
 	want := []string{"H5RecipeFeign", "recipeFavorite"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("symbolQueryTokens = %#v, want %#v", got, want)
+	}
+}
+
+type apiTargetRepository struct{}
+
+func (apiTargetRepository) Resolve(context.Context, ontology.ResolveQuery) (ontology.ResolveResult, error) {
+	return ontology.ResolveResult{
+		Generation: "test",
+		Entities: []ontology.EntityRef{{
+			ID: "endpoint", Class: ontology.ClassAPIEndpoint, Name: "POST /orders",
+		}},
+	}, nil
+}
+
+func (apiTargetRepository) EntitiesByID(context.Context, ontology.EntityQuery) ([]ontology.EntityRef, error) {
+	return []ontology.EntityRef{{ID: "symbol", Class: ontology.ClassCodeSymbol, Name: "OrdersController.CreateOrder"}}, nil
+}
+
+func (apiTargetRepository) Neighbors(context.Context, ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
+	return []ontology.Fact{{
+		ID: "implementation", SubjectID: "endpoint", Predicate: ontology.PredicateImplementedBy, ObjectID: "symbol",
+		Evidence: []ontology.Evidence{{
+			Path: "repos/team/orders/OrdersController.java", Line: 42, Symbol: "OrdersController.CreateOrder",
+			Source: ontology.EvidenceSourceCodeScan,
+		}},
+	}}, false, nil
+}
+
+func (apiTargetRepository) Stats(context.Context) (ontology.Stats, error) {
+	return ontology.Stats{}, nil
+}
+
+func TestResolveAPICallTargetUsesOntologyImplementationEvidence(t *testing.T) {
+	svc := &Service{ontology: ontology.NewService(apiTargetRepository{})}
+	request, err := svc.resolveAPICallTarget(context.Background(), callchain.Request{Query: "POST /orders"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Query != "OrdersController.CreateOrder" || request.QualifiedName != request.Query {
+		t.Fatalf("resolved query = %+v", request)
+	}
+	if request.File != "repos/team/orders/OrdersController.java" || request.Line != 42 {
+		t.Fatalf("resolved location = %+v", request)
 	}
 }

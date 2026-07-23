@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Nasuta — the reusable backend knowledge core, published as the standalone Go module `github.com/dekwanlabs/nasuta`. It indexes a workspace of services (structure + docs) plus all languages (code/config/SQL/docs) semantically and exposes the result to AI agents over **MCP Streamable HTTP** and to a web UI over a **REST dashboard API**. Hybrid retrieval combines a semantic vector store with an in-process BM25 sparse layer; a structured store holds records and an in-memory graph powers dependency walks.
+Nasuta — the reusable backend knowledge core, published as the standalone Go module `github.com/dekwanlabs/nasuta`. It indexes a workspace of services (structure + docs) plus all languages (code/config/SQL/docs) semantically and exposes the result to AI agents over **MCP Streamable HTTP** and to a web UI over a **REST dashboard API**. Hybrid retrieval combines a semantic vector store with an in-process BM25 sparse layer; SQLite atomically holds structured records and the ontology snapshot used for dependency walks.
 
 This module is consumed by the sibling `codeloom` application (via `go.work` + a local `replace` during development, a tagged version after release). Nasuta owns **reusable capability and platform composition**; it must not pull application-specific business policy upward. Keep that direction in mind — code that only makes sense for one downstream app does not belong here.
 
@@ -50,26 +50,22 @@ cmd/nasuta/   standalone entrypoint
 knowledge/    outward query contract
 tool/         outward tool-extension contract
 config/       outward config contract
-semantic/     outward semantic store contract + provider dispatch
 incident/     outward incident workflow (analyze / fix / notify)
-llm/          reusable LLM client (shared with scenario/adapter layers)
 log/          thin slog facade
 platform/     config / httpclient / httputil helpers reused across layers
-writeaction/  platform-owned write-action catalog (authorized runs only)
-websearch/    web search backends
 internal/     implementation — not a compatibility promise
 ```
 
-`internal/` groups the implementation: `agent` (QA loop + tool surface), `retrieval`, `indexing` (`indexer`, `docgen`), `callchain`, `memory`, `approval`, `auth`, `rbac`, `domain`, `platform` (`store`/`semanticstore`/`embed`/`graph`/`dbschema`/`htmlconv`), and `transport` (`mcp`/`dashboard`/`routes`/`incidenthttp`/`webhook`).
+`internal/` groups the implementation: `agent` (QA loop + tool surface), `retrieval`, `indexing` (`indexer`, `docgen`), `callchain`, `memory`, `approval`, `auth`, `rbac`, `domain`, `llm`, `ontology`, `semantic`, `websearch`, `writeaction`, `platform` (`store`/`semanticstore`/`embed`/`ontologystore`/`dbschema`/`htmlconv`), and `transport` (`mcp`/`dashboard`/`routes`/`incidenthttp`/`webhook`).
 
-Downstream consumers import only the outward packages above (plus the reuse helpers `llm`/`log`/`platform`/`writeaction`). Business implementation, retrieval, indexing, and transport orchestration all stay collected under `internal/`. Authentication (`internal/auth`) is internal platform assembly: upper layers receive an already-scoped `APIRegistrar` via `app.Extension` and never touch an auth handle.
+Downstream consumers import only the outward packages above. Business implementation, retrieval, indexing, and transport orchestration all stay collected under `internal/`. Authentication (`internal/auth`) is internal platform assembly: upper layers receive an already-scoped `APIRegistrar` via `app.Extension` and never touch an auth handle.
 
 ### Two external interfaces over the same index
 
-1. **MCP** (`/mcp`, Streamable HTTP) — for agent clients, backed by the `tool` registry (built via `internal/agent`). Exposes built-in **read** tools: `get_service`, `trace_deps`, `list_apis`, `search_code`, `get_symbol`, `trace_calls`, `search_runbooks`, `web_search`. Write actions never enter the upper-layer registrar or MCP; the platform-owned `writeaction` catalog exposes them only to authorized runs. Protected by bearer token when `NASUTA_AUTH_TOKEN` is set.
+1. **MCP** (`/mcp`, Streamable HTTP) — for agent clients, backed by the `tool` registry (built via `internal/agent`). Exposes nine built-in **read** tools: `get_service`, `trace_deps`, `list_apis`, `search_code`, `get_symbol`, `trace_calls`, `search_runbooks`, `check_docs`, and `index_stats`. `query_relations` is added when ontology is available; `web_search` is added when configured. Write actions never enter the upper-layer registrar or MCP; the platform-owned internal catalog exposes them only to authorized runs. Protected by bearer token when `NASUTA_AUTH_TOKEN` is set.
 2. **REST dashboard** (`/api/*`) — for the web UI, including a conversational QA endpoint that drives the agent loop with SSE streaming.
 
-Both share one indexing/retrieval state, store, and graph, constructed by `app` and composed once at the entrypoint.
+Both share one indexing/retrieval state, structured store, and ontology provider, constructed by `app` and composed once at the entrypoint. Dependency tools and QA context traverse ontology `depends_on` facts; there is no second in-memory dependency graph.
 
 ### Hybrid retrieval + BM25 handoff (concurrency-sensitive)
 

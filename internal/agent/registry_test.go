@@ -70,6 +70,31 @@ func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
 	}
 }
 
+func TestTraceDepsUsesOntologyFacts(t *testing.T) {
+	svc := &Service{ontology: ontology.NewService(staticOntologyRepository{})}
+	var trace *Tool
+	for _, candidate := range builtinTools(svc, config.Config{}) {
+		if candidate.ID == "trace_deps" {
+			trace = &candidate
+			break
+		}
+	}
+	if trace == nil {
+		t.Fatal("trace_deps was not registered")
+	}
+	result, err := trace.Handler.Execute(context.Background(), map[string]any{
+		"service": "orders", "direction": "both", "depth": 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"service": "orders"`, `"to": "payments"`, `"type": "http"`, `"truncated": false`} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("trace_deps output missing %s: %s", want, result.Content)
+		}
+	}
+}
+
 type staticOntologyRepository struct{}
 
 func (staticOntologyRepository) Resolve(context.Context, ontology.ResolveQuery) (ontology.ResolveResult, error) {
@@ -84,7 +109,11 @@ func (staticOntologyRepository) EntitiesByID(context.Context, ontology.EntityQue
 }
 
 func (staticOntologyRepository) Neighbors(context.Context, ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
-	return []ontology.Fact{{ID: "dependency", SubjectID: "orders", Predicate: ontology.PredicateDependsOn, ObjectID: "payments"}}, false, nil
+	return []ontology.Fact{{
+		ID: "dependency", SubjectID: "orders", Predicate: ontology.PredicateDependsOn, ObjectID: "payments",
+		Qualifiers: map[string]string{"protocol": "http"}, Confidence: 0.9,
+		Evidence: []ontology.Evidence{{Path: "repos/team/orders/client.go", Line: 8, Source: ontology.EvidenceSourceCodeScan}},
+	}}, false, nil
 }
 
 func (staticOntologyRepository) Stats(context.Context) (ontology.Stats, error) {

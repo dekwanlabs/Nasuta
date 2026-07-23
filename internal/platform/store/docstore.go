@@ -6,8 +6,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
-	_ "github.com/go-sql-driver/mysql"
 	"gopkg.in/yaml.v3"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -19,36 +17,12 @@ type DocStore struct {
 	db *sql.DB
 }
 
-// OpenDocStore opens the document store when MySQL is configured.
-func OpenDocStore(dsn string) (*DocStore, error) {
-	if dsn == "" {
-		return nil, nil
+// NewDocStore binds document queries to the platform-owned MySQL pool.
+func NewDocStore(db *sql.DB) *DocStore {
+	if db == nil {
+		return nil
 	}
-	db, err := MySQL(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("docstore open: %w", err)
-	}
-	if err := dbschema.MigrateMySQL(db, dbschema.GroupDocuments); err != nil {
-		return nil, fmt.Errorf("docstore migrate: %w", err)
-	}
-	if err := safeAddColumn(db, "documents", "kind", "VARCHAR(32) NOT NULL DEFAULT 'document'"); err != nil {
-		return nil, fmt.Errorf("docstore migrate kind column: %w", err)
-	}
-	return &DocStore{db: db}, nil
-}
-
-func (s *DocStore) Close() error { return nil }
-
-// safeAddColumn makes additive schema changes idempotent.
-func safeAddColumn(db *sql.DB, table, column, def string) error {
-	_, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, def))
-	if err != nil {
-		if strings.Contains(err.Error(), "Duplicate column") || strings.Contains(err.Error(), "1060") {
-			return nil
-		}
-		return err
-	}
-	return nil
+	return &DocStore{db: db}
 }
 
 func (s *DocStore) InsertDoc(doc domain.DocRecord) error {
@@ -80,22 +54,6 @@ func (s *DocStore) GetDoc(id string) (domain.DocRecord, error) {
 	}
 	d.CreatedAt, d.UpdatedAt = FormatDatabaseTime(createdAt), FormatDatabaseTime(updatedAt)
 	return d, nil
-}
-
-func (s *DocStore) ListDocs() ([]domain.DocRecord, error) {
-	rows, err := s.db.Query(
-		`SELECT id, title, filename, COALESCE(kind,''), COALESCE(content,''), chunk_count, created_at, updated_at
-		 FROM documents ORDER BY updated_at DESC`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanDocRows(rows)
-}
-
-func (s *DocStore) ListDocsMetaPage(page, pageSize int) (*domain.Page[domain.DocRecord], error) {
-	return s.ListDocsMetaPageFiltered(page, pageSize, "", "", "", "")
 }
 
 func (s *DocStore) ListDocsMetaPageFiltered(page, pageSize int, kind, query, sortBy, sortOrder string) (*domain.Page[domain.DocRecord], error) {
@@ -185,18 +143,6 @@ func docListOrderBy(sortBy, sortOrder string) string {
 	}
 }
 
-func (s *DocStore) ListDocsMeta() ([]domain.DocRecord, error) {
-	rows, err := s.db.Query(
-		`SELECT id, title, filename, COALESCE(kind,''), chunk_count, created_at, updated_at
-		 FROM documents ORDER BY updated_at DESC`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanDocMetaRows(rows)
-}
-
 func (s *DocStore) DeleteDoc(id string) (string, error) {
 	_, err := s.db.Exec(`DELETE FROM documents WHERE id = ?`, id)
 	if err != nil {
@@ -204,18 +150,6 @@ func (s *DocStore) DeleteDoc(id string) (string, error) {
 	}
 	log.Infof("[docstore] deleted document %s", id)
 	return id, nil
-}
-
-func (s *DocStore) ListDocsByKind(kind string) ([]domain.DocRecord, error) {
-	rows, err := s.db.Query(
-		`SELECT id, title, filename, COALESCE(kind,''), COALESCE(content,''), chunk_count, created_at, updated_at
-		 FROM documents WHERE kind = ? ORDER BY updated_at DESC`, kind,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanDocRows(rows)
 }
 
 func (s *DocStore) ListDocsMetaByKind(kind string) ([]domain.DocRecord, error) {

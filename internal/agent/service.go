@@ -15,7 +15,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
-	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
@@ -38,6 +37,8 @@ type QADeps struct {
 	Platform       *config.PlatformSettings
 	Registry       *Registry
 	CodeGraphDB    *codegraph.DB
+	DB             *sql.DB
+	RunStore       *RunStore
 }
 
 // QA is the agent-facing runtime facade.
@@ -135,11 +136,7 @@ func NewQA(d QADeps) *QA {
 		log.Infof("[qa] reranker: dashscope (%s)", platformSettings.RerankModel)
 	}
 
-	if rs, err := OpenRunStore(config.LoadMySQLDSN()); err == nil {
-		svc.runStore = rs
-	} else {
-		log.Errorf("[qa] run store open failed: %v", err)
-	}
+	svc.runStore = d.RunStore
 	svc.hub = NewRunHub(svc.runStore)
 
 	if d.Registry != nil {
@@ -165,8 +162,7 @@ func NewQA(d QADeps) *QA {
 		svc.emitStep(runID, "找到啦，我来把答案写出来 ✍️")
 	})
 
-	memoryDSN := config.LoadMySQLDSN()
-	if memoryDSN != "" && d.Embedder != nil && d.Embedder.Enabled() {
+	if d.DB != nil && d.Embedder != nil && d.Embedder.Enabled() {
 		memorySemanticConfig := d.Cfg.Semantic
 		memorySemanticConfig.Collection = "memory"
 		memSemantic, err := semanticstore.New(memorySemanticConfig)
@@ -175,11 +171,8 @@ func NewQA(d QADeps) *QA {
 		} else if err := memSemantic.Ensure(context.Background(), semantic.Schema{Collection: "memory", DenseDim: d.Embedder.Dim()}); err != nil {
 			_ = memSemantic.Close()
 			log.Warnf("[qa] memory collection ensure failed: %v", err)
-		} else if ms, err := memory.OpenMemoryStore(memoryDSN, memSemantic, d.Embedder, d.Cfg.MemoryWorkContextTTL); err == nil {
-			svc.memory = ms
 		} else {
-			_ = memSemantic.Close()
-			log.Warnf("[qa] memory store disabled: %v", err)
+			svc.memory = memory.NewMemoryStore(d.DB, memSemantic, d.Embedder, d.Cfg.MemoryWorkContextTTL)
 		}
 	}
 
@@ -491,7 +484,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot)
 	}
 
-	emit("好嘞，关键词到手了，我去我的图书馆里翻一翻~ 📚")
+	emit("好嘞，关键词到手了，我去查一下资料~ 📚")
 	rc, err := svc.retriever.RetrievePlan(
 		ctx, canonicalQuery, question, terms, evidencePlan,
 	)
@@ -898,34 +891,21 @@ type RunStore struct {
 	db *sql.DB
 }
 
-var (
-	runRecoveryOnce sync.Once
-	runRecoveryErr  error
-)
-
-func OpenRunStore(dsn string) (*RunStore, error) {
-	db, err := store.MySQL(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("agent/runstore: open: %w", err)
-	}
-	if err := dbschema.MigrateMySQL(db, dbschema.GroupQARun); err != nil {
-		return nil, fmt.Errorf("agent/runstore: migrate: %w", err)
+// NewRunStore binds agent run queries to the platform-owned MySQL pool.
+func NewRunStore(db *sql.DB) (*RunStore, error) {
+	if db == nil {
+		return nil, fmt.Errorf("agent/runstore: database is required")
 	}
 	runStore := &RunStore{db: db}
-	runRecoveryOnce.Do(func() {
-		var recovered int64
-		recovered, runRecoveryErr = runStore.RecoverInterrupted()
-		if runRecoveryErr == nil && recovered > 0 {
-			log.Warnf("[qa] recovered %d interrupted agent runs as aborted", recovered)
-		}
-	})
-	if runRecoveryErr != nil {
-		return nil, fmt.Errorf("agent/runstore: recover interrupted runs: %w", runRecoveryErr)
+	recovered, err := runStore.RecoverInterrupted()
+	if err != nil {
+		return nil, fmt.Errorf("agent/runstore: recover interrupted runs: %w", err)
+	}
+	if recovered > 0 {
+		log.Warnf("[qa] recovered %d interrupted agent runs as aborted", recovered)
 	}
 	return runStore, nil
 }
-
-func (rs *RunStore) Close() error { return nil }
 
 // RecoverInterrupted closes process-local Runs left active by a prior process.
 func (rs *RunStore) RecoverInterrupted() (int64, error) {

@@ -15,6 +15,8 @@
 - Feign 支持下游实现桥接和反向上游桥接，桥接后继续做有界方法遍历；Agent 与 Dashboard 使用同一结果。
 - 服务边扫描新增 JVM/Python HTTP、gRPC、Dubbo，以及 Kafka producer-topic-consumer 关联。
 - agent 策略明确区分方法 `calls`、已验证 `service_route` 和仅服务级依赖，并禁止把 `truncated/unresolved` 表述为完整链路。
+- `trace_deps` 与 QA 依赖上下文已迁移到 Ontology Repository；旧内存 Dependency Graph 已删除。
+- `trace_calls` 可先通过 `APIEndpoint implemented_by CodeSymbol` 将完整 API 路由解析为 CodeGraph 文件和行号入口。
 - 新增 `NASUTA_CODEGRAPH_CONTRACT=1` 门控的外部 builder contract 测试，验证源码到 nodes、calls 和调用点行号；普通测试环境不依赖 CLI。
 
 仍保留一个明确边界：gRPC、Kafka、Dubbo 当前形成服务级依赖边，但尚未形成协议到具体实现方法的符号桥。它属于本文 P1 后续增强，不影响 Feign 方法级双向闭环。
@@ -29,19 +31,20 @@
    - 语义命中的 `code_chunk` 不会直接转换成 CodeGraph 节点继续遍历；预检索中的 CodeGraph 证据来自另一条独立 FTS 查询。
    - CodeGraph `edges` 表实际有 `line`、`col`、`provenance`；问题不是 builder 没有保存调用点，而是 Nasuta 的 `queryRelated` 和 `CallChain` 没有读取、返回这些字段。
 
-服务级 `trace_deps` 的**存储和查询机制闭环**，但扫描覆盖并不完整，因此不应表述为“所有协议的服务依赖完全闭环”。
+服务级 `trace_deps` 的**存储和查询机制已经由本体闭环**，但扫描覆盖并不完整，因此不应表述为“所有协议的服务依赖完全闭环”。
 
 ## 2. 实施前数据与执行边界
 
 ### 2.1 服务级依赖图
 
-服务级依赖由 Nasuta 扫描源码后写入结构化 SQLite，再由 `reloadDependencyGraph` 加载到内存图：
+服务级依赖由 Nasuta 扫描源码后投影为同代际的本体 Fact：
 
 ```text
 源码扫描器
   -> domain.DependencyEdge
-  -> .nasuta/index.db
-  -> Graph.Rebuild
+  -> Ontology Projector
+  -> .nasuta/index.db ontology_facts
+  -> ontology.Service / FindBoundedPaths
   -> trace_deps
 ```
 
@@ -221,5 +224,5 @@ Dashboard 当前能力：
 | Dashboard 方法链 | `internal/transport/dashboard/tools.go`：`APICodeGraphEndpoint`、`expandDownstream`、`serviceFromPath` |
 | 预检索 CodeGraph | `internal/retrieval/collection.go`：`collectCodeGraph`；`internal/retrieval/pipeline.go`：`codeGraphQuery`、`codeGraphNode` |
 | 服务依赖扫描 | `internal/indexing/indexer/bootstrap.go`：`ScanCode` |
-| 服务依赖图装载 | `internal/indexing/service.go`：`reloadDependencyGraph` |
+| 服务依赖查询 | `internal/ontology/service.go`：`TraceDependencies` |
 | CodeGraph 外部构建 | `internal/indexing/service.go`：`RebuildGraph`、`runCodegraphIndex` |

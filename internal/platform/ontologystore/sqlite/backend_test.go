@@ -32,7 +32,7 @@ func TestBackendPublishesAndQueriesBoundedOntology(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if truncated || len(facts) != 1 || len(facts[0].Evidence) != 1 {
+	if truncated || len(facts) != 2 || len(facts[0].Evidence) != 1 || len(facts[1].Evidence) != 1 {
 		t.Fatalf("facts=%#v truncated=%v", facts, truncated)
 	}
 
@@ -43,7 +43,7 @@ func TestBackendPublishesAndQueriesBoundedOntology(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if truncated || len(paths) != 1 || len(paths[0].Facts) != 1 {
+	if truncated || len(paths) != 2 || len(paths[0].Facts) != 1 || len(paths[1].Facts) != 1 {
 		t.Fatalf("paths=%#v truncated=%v", paths, truncated)
 	}
 
@@ -51,7 +51,7 @@ func TestBackendPublishesAndQueriesBoundedOntology(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Entities != 4 || stats.Facts != 3 || stats.ByPredicate[ontology.PredicateDependsOn] != 1 {
+	if stats.Entities != 4 || stats.Facts != 4 || stats.ByPredicate[ontology.PredicateDependsOn] != 2 {
 		t.Fatalf("stats = %#v", stats)
 	}
 
@@ -66,8 +66,41 @@ func TestBackendPublishesAndQueriesBoundedOntology(t *testing.T) {
 	if result.Root == nil || result.Root.Name != "orders" || len(result.Entities) != 1 || result.Entities[0].Name != "payments" {
 		t.Fatalf("relation result = %#v", result)
 	}
-	if len(result.Facts) != 1 || result.Facts[0].Subject.Name != "orders" || result.Facts[0].Object.Name != "payments" {
+	if len(result.Facts) != 2 || result.Facts[0].Subject.Name != "orders" || result.Facts[0].Object.Name != "payments" {
 		t.Fatalf("relation facts = %#v", result.Facts)
+	}
+
+	dependencies, err := ontology.NewService(backend).TraceDependencies(ctx, ontology.DependencyQuery{
+		Service: "orders", Direction: ontology.DirectionBoth, MaxDepth: 3, MaxNodes: 20, MaxFanout: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dependencies.Root == nil || dependencies.Root.Name != "orders" || len(dependencies.Upstream) != 0 || len(dependencies.Downstream) != 2 {
+		t.Fatalf("dependency result = %#v", dependencies)
+	}
+	protocols := map[string]struct{}{}
+	for _, fact := range dependencies.Downstream {
+		if fact.Subject.Name != "orders" || fact.Object.Name != "payments" {
+			t.Fatalf("dependency fact = %#v", fact)
+		}
+		protocols[fact.Qualifiers["protocol"]] = struct{}{}
+	}
+	if _, ok := protocols["http"]; !ok {
+		t.Fatalf("dependency protocols = %#v", protocols)
+	}
+	if _, ok := protocols["kafka"]; !ok {
+		t.Fatalf("dependency protocols = %#v", protocols)
+	}
+
+	upstream, err := ontology.NewService(backend).TraceDependencies(ctx, ontology.DependencyQuery{
+		Service: "payments", Direction: ontology.DirectionIncoming, MaxDepth: 3, MaxNodes: 20, MaxFanout: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstream.Upstream) != 2 || len(upstream.Downstream) != 0 || upstream.Upstream[0].Subject.Name != "orders" {
+		t.Fatalf("upstream dependency result = %#v", upstream)
 	}
 }
 
@@ -140,12 +173,20 @@ func testBackend(t *testing.T) *Backend {
 			{Repo: payments.Repo, HeadSHA: "payments-sha", IndexedAt: time.Now().UnixMilli()},
 		},
 		Services: []domain.ServiceRecord{orders, payments},
-		Dependencies: []domain.DependencyEdge{{
-			CallerServiceKey: orders.ServiceKey, TargetKind: domain.DependencyTargetService,
-			TargetServiceKey: payments.ServiceKey, From: orders.ServiceName, To: payments.ServiceName,
-			Type: domain.EdgeHTTP, Confidence: 0.9,
-			Evidence: []domain.Evidence{{Path: "repos/team/orders/client.go", Line: 8, Kind: domain.SourceCodeScan}},
-		}},
+		Dependencies: []domain.DependencyEdge{
+			{
+				CallerServiceKey: orders.ServiceKey, TargetKind: domain.DependencyTargetService,
+				TargetServiceKey: payments.ServiceKey, From: orders.ServiceName, To: payments.ServiceName,
+				Type: domain.EdgeHTTP, Confidence: 0.9,
+				Evidence: []domain.Evidence{{Path: "repos/team/orders/client.go", Line: 8, Kind: domain.SourceCodeScan}},
+			},
+			{
+				CallerServiceKey: orders.ServiceKey, TargetKind: domain.DependencyTargetService,
+				TargetServiceKey: payments.ServiceKey, From: orders.ServiceName, To: payments.ServiceName,
+				Type: domain.EdgeKafka, Confidence: 0.8,
+				Evidence: []domain.Evidence{{Path: "repos/team/orders/events.go", Line: 21, Kind: domain.SourceCodeScan}},
+			},
+		},
 	}
 	snapshot, err := ontology.Project(bundle)
 	if err != nil {

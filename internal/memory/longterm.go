@@ -8,9 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
-	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -31,17 +29,12 @@ type MemoryStore struct {
 	now            func() time.Time
 }
 
-// OpenMemoryStore opens the long-term memory store.
-func OpenMemoryStore(dsn string, semantic semantic.Store, embedder embed.Embedder, workContextTTL time.Duration) (*MemoryStore, error) {
-	db, err := store.MySQL(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("memory: open: %w", err)
+// NewMemoryStore binds long-term memory to the platform-owned MySQL pool.
+func NewMemoryStore(db *sql.DB, semantic semantic.Store, embedder embed.Embedder, workContextTTL time.Duration) *MemoryStore {
+	if db == nil {
+		return nil
 	}
-	if err := dbschema.MigrateMySQL(db, dbschema.GroupQAMemory); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("memory: migrate: %w", err)
-	}
-	return newMemoryStore(db, semantic, embedder, workContextTTL), nil
+	return newMemoryStore(db, semantic, embedder, workContextTTL)
 }
 
 func newMemoryStore(db *sql.DB, semantic semantic.Store, embedder embed.Embedder, workContextTTL time.Duration) *MemoryStore {

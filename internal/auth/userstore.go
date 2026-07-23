@@ -5,10 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/dekwanlabs/nasuta/internal/platform/dbschema"
-	"github.com/dekwanlabs/nasuta/internal/platform/store"
-	_ "github.com/go-sql-driver/mysql"
 )
 
 const (
@@ -25,24 +21,12 @@ type DB struct {
 	db *sql.DB
 }
 
-// NewDB opens a MySQL connection and ensures the auth schema exists.
-func NewDB(dsn string) (*DB, error) {
-	db, err := store.MySQL(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("auth: open: %w", err)
+// NewDB binds authentication queries to the platform-owned MySQL pool.
+func NewDB(db *sql.DB) *DB {
+	if db == nil {
+		return nil
 	}
-	store := &DB{db: db}
-	if err := store.migrate(); err != nil {
-		return nil, fmt.Errorf("auth: migrate: %w", err)
-	}
-	return store, nil
-}
-
-func (db *DB) migrate() error {
-	if err := dbschema.MigrateMySQL(db.db, dbschema.GroupAuth); err != nil {
-		return fmt.Errorf("migrate DDL: %w", err)
-	}
-	return nil
+	return &DB{db: db}
 }
 
 // User represents an authenticated user (via Feishu OAuth or email/password).
@@ -245,9 +229,6 @@ func (db *DB) DeleteSession(token string) error {
 
 // GetSettings returns all settings as a map[key]value.
 func (db *DB) GetSettings() (map[string]string, error) {
-	if db == nil || db.db == nil {
-		return nil, fmt.Errorf("auth: db not available")
-	}
 	rows, err := db.db.Query(`SELECT k, v FROM ` + tblSettings)
 	if err != nil {
 		return nil, err
@@ -281,4 +262,3 @@ func (db *DB) SetSettings(pairs map[string]string) error {
 	)
 	return err
 }
-func (d *DB) RawDB() *sql.DB { return d.db }

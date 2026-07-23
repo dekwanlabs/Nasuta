@@ -16,7 +16,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -29,7 +28,6 @@ import (
 // Deps bundles the stores and services used by tool handlers.
 type Deps struct {
 	DB            *store.SQLite
-	Graph         *graph.Graph
 	Semantic      semantic.Store
 	Embedder      embed.Embedder
 	WorkspaceRoot string
@@ -49,7 +47,6 @@ type docStore interface {
 // Service exposes the retrieval and analysis tools used by the agent.
 type Service struct {
 	db                    *store.SQLite
-	graph                 *graph.Graph
 	semantic              semantic.Store
 	embedder              embed.Embedder
 	workspaceRoot         string
@@ -69,7 +66,6 @@ type Service struct {
 func NewTools(d Deps) *Service {
 	return &Service{
 		db:            d.DB,
-		graph:         d.Graph,
 		semantic:      d.Semantic,
 		embedder:      d.Embedder,
 		workspaceRoot: d.WorkspaceRoot,
@@ -369,13 +365,17 @@ func (srv *Service) SearchCode(ctx context.Context, query knowledge.CodeSearchQu
 	return toCodeSearchResult(found), nil
 }
 
-// TraceDependencies exposes the dependency graph without tool JSON.
-func (srv *Service) TraceDependencies(_ context.Context, query knowledge.DependencyQuery) (knowledge.DependencyResult, error) {
+// TraceDependencies exposes evidence-backed ontology dependencies without tool JSON.
+func (srv *Service) TraceDependencies(ctx context.Context, query knowledge.DependencyQuery) (knowledge.DependencyResult, error) {
 	if query.Direction == "" {
 		query.Direction = "both"
 	}
 	depth := clampInt(query.Depth, 1, 5)
-	return toDependencyResult(srv.TraceDeps(query.Service, query.Direction, depth)), nil
+	result, err := srv.TraceDeps(ctx, query.Service, query.Direction, depth)
+	if err != nil {
+		return knowledge.DependencyResult{}, err
+	}
+	return toDependencyResult(result), nil
 }
 
 // SearchRunbooks exposes typed runbook search to extensions.
@@ -461,8 +461,8 @@ func toServiceSearchResult(found domain.SearchResult[domain.ServiceRecord]) know
 	return knowledge.ServiceSearchResult{Matches: matches, Semantic: found.Semantic}
 }
 
-// toDependencyResult maps the internal graph answer onto the stable public contract.
-func toDependencyResult(found graph.Result) knowledge.DependencyResult {
+// toDependencyResult maps the internal ontology answer onto the stable public contract.
+func toDependencyResult(found domain.DependencyTrace) knowledge.DependencyResult {
 	conv := func(edges []domain.DependencyEdge) []knowledge.DependencyEdge {
 		out := make([]knowledge.DependencyEdge, 0, len(edges))
 		for _, edge := range edges {
@@ -476,7 +476,10 @@ func toDependencyResult(found graph.Result) knowledge.DependencyResult {
 		}
 		return out
 	}
-	return knowledge.DependencyResult{Upstream: conv(found.Upstream), Downstream: conv(found.Downstream)}
+	return knowledge.DependencyResult{
+		Service: found.Service, Candidates: found.Candidates,
+		Upstream: conv(found.Upstream), Downstream: conv(found.Downstream), Truncated: found.Truncated,
+	}
 }
 
 // FindCode searches indexed code and returns typed hits for internal consumers.
@@ -691,15 +694,65 @@ func errString(err error) string {
 	return err.Error()
 }
 
-func (srv *Service) TraceDeps(service, direction string, depth int) graph.Result {
-	dir := graph.Both
+func (srv *Service) TraceDeps(ctx context.Context, service, direction string, depth int) (domain.DependencyTrace, error) {
+	if srv.ontology == nil {
+		return domain.DependencyTrace{}, ontology.ErrUnavailable
+	}
+	dir := ontology.DirectionBoth
 	switch direction {
 	case "upstream":
-		dir = graph.Upstream
+		dir = ontology.DirectionIncoming
 	case "downstream":
-		dir = graph.Downstream
+		dir = ontology.DirectionOutgoing
+	case "both":
+	default:
+		return domain.DependencyTrace{}, fmt.Errorf("unsupported dependency direction %q", direction)
 	}
-	return srv.graph.Chain(service, dir, depth)
+	result, err := srv.ontology.TraceDependencies(ctx, ontology.DependencyQuery{
+		Service: service, Direction: dir, MaxDepth: depth, MaxNodes: 500, MaxFanout: 100,
+	})
+	if err != nil {
+		return domain.DependencyTrace{}, err
+	}
+	return dependencyTrace(result), nil
+}
+
+func dependencyTrace(result ontology.DependencyResult) domain.DependencyTrace {
+	convert := func(facts []ontology.RelationFact) []domain.DependencyEdge {
+		edges := make([]domain.DependencyEdge, 0, len(facts))
+		for _, fact := range facts {
+			evidence := make([]domain.Evidence, 0, len(fact.Evidence))
+			for _, item := range fact.Evidence {
+				evidence = append(evidence, domain.Evidence{
+					Path: item.Path, Line: item.Line, Symbol: item.Symbol, Kind: domain.SourceKind(item.Source),
+				})
+			}
+			edge := domain.DependencyEdge{
+				CallerServiceKey: fact.Subject.ID, From: fact.Subject.Name, To: fact.Object.Name,
+				Type: domain.EdgeType(fact.Qualifiers["protocol"]), Evidence: evidence, Confidence: fact.Confidence,
+			}
+			if fact.Object.Class == ontology.ClassExternalSystem {
+				edge.TargetKind = domain.DependencyTargetExternal
+				edge.ExternalTarget = fact.Object.Name
+			} else {
+				edge.TargetKind = domain.DependencyTargetService
+				edge.TargetServiceKey = fact.Object.ID
+			}
+			edges = append(edges, edge)
+		}
+		return edges
+	}
+	trace := domain.DependencyTrace{
+		Upstream: convert(result.Upstream), Downstream: convert(result.Downstream), Truncated: result.Truncated,
+	}
+	if result.Root != nil {
+		trace.Service = result.Root.Name
+	}
+	trace.Candidates = make([]string, 0, len(result.Candidates))
+	for _, candidate := range result.Candidates {
+		trace.Candidates = append(trace.Candidates, candidate.Name)
+	}
+	return trace
 }
 
 func (srv *Service) ListApis(ctx context.Context, service, pathKeyword string, limit int) map[string]any {
@@ -1136,11 +1189,41 @@ func (srv *Service) TraceCalls(ctx context.Context, request callchain.Request) m
 	if srv.callChain == nil || !srv.callChain.Available() {
 		return map[string]any{"error": "call chain unavailable: codegraph or structure index is not ready"}
 	}
+	var err error
+	request, err = srv.resolveAPICallTarget(ctx, request)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
 	result, err := srv.callChain.Trace(ctx, request)
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
 	return callChainResult(srv.workspaceRoot, result)
+}
+
+func (srv *Service) resolveAPICallTarget(ctx context.Context, request callchain.Request) (callchain.Request, error) {
+	if srv.ontology == nil || request.Query == "" || request.File != "" || request.Line > 0 || request.QualifiedName != "" {
+		return request, nil
+	}
+	result, err := srv.ontology.QueryRelations(ctx, ontology.RelationQuery{
+		Entity: request.Query, EntityClass: ontology.ClassAPIEndpoint,
+		Predicates: []ontology.Predicate{ontology.PredicateImplementedBy}, Direction: ontology.DirectionOutgoing,
+		MaxDepth: 1, MaxNodes: 20, MaxFanout: 20,
+	})
+	if err != nil {
+		return request, fmt.Errorf("resolve API call target: %w", err)
+	}
+	if result.Root == nil || len(result.Facts) != 1 {
+		return request, nil
+	}
+	fact := result.Facts[0]
+	request.Query = fact.Object.Name
+	request.QualifiedName = fact.Object.Name
+	if len(fact.Evidence) > 0 {
+		request.File = fact.Evidence[0].Path
+		request.Line = fact.Evidence[0].Line
+	}
+	return request, nil
 }
 
 func callChainResult(root string, result callchain.Result) map[string]any {

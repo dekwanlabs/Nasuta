@@ -1,12 +1,12 @@
 # Nasuta 本体化重构设计
 
-> 状态：SQLite 第一阶段已实现；Neo4j Adapter 按需求驱动暂缓
+> 状态：SQLite 第一阶段及 `trace_deps` 迁移已实现；Neo4j Adapter 按需求驱动暂缓
 >
 > 范围：已实现的 SQLite 本体化边界、实施决策与后续 Neo4j 计划
 
 ## 1. 摘要与决策
 
-Nasuta 当前已经拥有 `ServiceRecord`、`EndpointRecord`、`DependencyEdge`、Runbook、代码符号、证据和依赖图。这些结构表达了领域事实，但类型含义、关系约束、实体身份、跨类型查询和证据规则仍分散在索引器、SQLite、内存图和 Agent 工具中，属于“隐式本体”。
+Nasuta 已经拥有 `ServiceRecord`、`EndpointRecord`、`DependencyEdge`、Runbook、代码符号和证据。这些结构表达了领域事实，但类型含义、关系约束、实体身份、跨类型查询和证据规则曾分散在索引器、SQLite、内存图和 Agent 工具中，属于“隐式本体”。
 
 本设计将这些隐式语义提升为显式、可验证、可查询的工作区本体，并作出以下决策：
 
@@ -16,7 +16,7 @@ Nasuta 当前已经拥有 `ServiceRecord`、`EndpointRecord`、`DependencyEdge`�
 4. 通过 `ontology.Repository` 保留 Neo4j Provider 扩展能力，但运行时只允许一个本体后端，不进行 SQLite/Neo4j 双写。
 5. Provider 使用一个显式分发器。显式配置的 Neo4j 失败必须可观察，不能静默替换为 SQLite。
 6. Qdrant/Milvus 继续负责语义召回，codegraph 继续负责完整的方法调用关系；两者都不是本体事实主存储。
-7. 第一阶段新增通用关系查询，不替换 `get_service`、`list_apis`、`trace_deps` 和 `trace_calls`。经过影子校验后，再按专用工具逐个迁移。
+7. 通用关系查询与 `trace_deps` 统一读取 Ontology Repository；`trace_calls` 使用本体解析 API 入口后继续交给 CodeGraph。`get_service`、`list_apis` 仍保留完整详情读取模型。
 8. 本体 Go 契约先保持内部，不增加面向上层应用的公开注册入口。
 
 本次重构的直接收益是统一语义、证据和查询边界，降低后续增加 Database、MessageTopic、Incident 等概念的成本。它不会仅凭引入“本体”或 Neo4j 自动提高抽取准确率；准确率仍由确定性抽取、实体解析和证据质量决定。
@@ -43,7 +43,7 @@ Codegraph 保存 Symbol calls Symbol
 | Service、Endpoint、Dependency 数据结构 | `internal/domain` |
 | 多语言确定性扫描和规范化 | `internal/indexing/indexer` |
 | 结构化快照 | `internal/platform/store.SQLite` |
-| 服务依赖遍历 | `internal/platform/graph` |
+| 服务依赖遍历 | `internal/ontology.Service`、`ontology.Repository` |
 | 方法调用链 | `internal/platform/store/codegraph`、`internal/callchain` |
 | 向量与混合检索 | `internal/semantic`、`internal/retrieval` |
 | Agent 专用工具 | `internal/agent` |
@@ -52,7 +52,7 @@ Codegraph 保存 Symbol calls Symbol
 ### 2.2 现有问题
 
 1. `Service`、`API`、`Dependency` 的语义依赖具体字段和工具说明，没有统一 Schema。
-2. 相同关系可能分别存在于结构表、内存图、Runbook 和 codegraph 中，缺少共同的事实标识与证据模型。
+2. 相同关系曾分别存在于结构表、内存图、Runbook 和 codegraph 中，缺少共同的事实标识与证据模型。
 3. Agent 能分别调用专用工具，但无法表达“服务 → API → Symbol → Runbook”这类跨类型查询。
 4. 当前关系字段允许代码构造出语义错误的数据，主要依赖各扫描器自律。
 5. 新增概念时容易把抽取、存储、查询和工具输出一起耦合修改。
@@ -149,7 +149,7 @@ provider=neo4j  → 只查询和发布 Neo4j 本体
 
 Neo4j 配置错误或不可达时，本体能力应进入明确的 unavailable 状态并记录错误；不能自动改查 SQLite 后声称 Neo4j 正常。
 
-现有专用工具继续读取原有结构化 SQLite/内存图，不属于 Provider 替换，因为它们是尚未迁移的独立能力。
+`trace_deps` 与 QA 依赖上下文只读取当前 Ontology Provider。结构化详情、向量检索和 CodeGraph 仍是独立能力，不属于 Provider 替换。
 
 ## 5. 第一版本体模型
 
@@ -976,12 +976,12 @@ query_relations
 |---|---|---|
 | `get_service` | 现有结构化索引 | 保持不变 |
 | `list_apis` | 现有 endpoints | 保持不变 |
-| `trace_deps` | 现有内存 Graph | 保持不变，影子对比 |
-| `trace_calls` | codegraph/callchain | 保持不变 |
+| `trace_deps` | ontology.Service | 已迁移，复用同代际 `depends_on` 路径查询 |
+| `trace_calls` | ontology.Service + codegraph/callchain | API 入口由本体解析，方法遍历仍由 CodeGraph 完成 |
 | `search_code` | Semantic + BM25 | 保持不变 |
 | `query_relations` | ontology.Service | 新增 |
 
-稳定后可以逐个让专用工具复用本体 Repository，但每次迁移必须有行为特征测试，不能一次性替换全部查询。
+专用工具只迁移本体能够完整表达的部分。Service/API 完整详情、语义内容和方法调用边不复制进通用关系查询。
 
 ### 13.3 Retrieval 集成
 
@@ -994,7 +994,7 @@ query_relations
 “哪些 Runbook 描述这个服务”
 ```
 
-明确 Service 专用依赖问题仍优先 `trace_deps`，方法级调用问题仍优先 `trace_calls`。
+明确 Service 专用依赖问题优先 `trace_deps`，方法级调用问题优先 `trace_calls`；两者都通过本体获得跨层关系入口。
 
 ## 14. 模块改动清单
 
@@ -1007,7 +1007,7 @@ query_relations
 | `internal/indexing/service.go` | 编排本体投影和发布 | Indexing 拥有索引生命周期 |
 | `internal/platform/store/sqlite.go` | Schema 升级、本体表、原子写入 | SQLite 只拥有存储机制 |
 | `internal/platform/ontologystore` | 新增 Provider 分发 | 唯一后端选择点 |
-| `internal/platform/graph` | 第一阶段不改 | 降低行为变更范围 |
+| `internal/platform/graph` | 删除 | `depends_on` 已由 Ontology Repository 统一查询，不保留第二份运行时图 |
 | `internal/platform/store/codegraph` | 第一阶段不改 | 完整调用图仍由专用存储拥有 |
 | `internal/agent/tools.go` | 精确注入 ontology.Service | 不保留泛型依赖容器 |
 | `internal/agent/registry.go` | 条件注册 query_relations | 能力不可用时不伪装可用 |
@@ -1061,7 +1061,7 @@ query_relations
 
 默认仍使用 SQLite。
 
-### 阶段 4：影子校验
+### 阶段 4：影子校验（已完成）
 
 在测试或显式诊断模式比较：
 
@@ -1072,15 +1072,11 @@ list_apis vs ontology exposes
 
 差异只记录，不改变线上回答。需要确认差异来自模型语义、投影错误还是旧工具逻辑。
 
-### 阶段 5：专用工具逐个迁移
+### 阶段 5：专用工具逐个迁移（部分完成）
 
-只有影子结果稳定后，才分别评估：
-
-1. `trace_deps` 是否改用 ontology Repository；
-2. `list_apis` 是否改用 ontology Repository；
-3. `get_service` 是否复用 Entity Resolver。
-
-`trace_calls` 不在本阶段迁移。
+1. `trace_deps`、QA 依赖上下文和 REST 依赖追踪已改用 Ontology Repository，并删除内存 Graph。
+2. `trace_calls` 已使用 `APIEndpoint implemented_by CodeSymbol` 解析 API 起点，完整调用边仍由 CodeGraph 查询。
+3. `list_apis` 和 `get_service` 保留结构化详情查询；当前本体未承载它们的全部返回字段，不做有损替换。
 
 ### 阶段 6：Neo4j Provider（需求驱动）
 

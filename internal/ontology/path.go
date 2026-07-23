@@ -10,14 +10,14 @@ func FindBoundedPaths(ctx context.Context, repository neighborReader, query Path
 	if err := ValidatePathQuery(query); err != nil {
 		return nil, false, err
 	}
-	visited := map[string]struct{}{query.StartID: {}}
+	discoveredDepth := map[string]int{query.StartID: 0}
 	parents := make(map[string]pathParent, query.MaxNodes)
 	frontier := []string{query.StartID}
 	paths := make([]Path, 0)
 	truncated := false
 
 	for depth := 1; depth <= query.MaxDepth && len(frontier) > 0; depth++ {
-		limit := min(200, query.MaxNodes-len(visited)+len(frontier)*query.MaxFanout)
+		limit := min(200, query.MaxNodes-len(discoveredDepth)+len(frontier)*query.MaxFanout)
 		if limit < 1 {
 			return paths, true, nil
 		}
@@ -45,14 +45,17 @@ func FindBoundedPaths(ctx context.Context, repository neighborReader, query Path
 				continue
 			}
 			fanout[from]++
-			if _, seen := visited[to]; seen {
+			if previousDepth, seen := discoveredDepth[to]; seen {
+				if previousDepth == depth {
+					paths = append(paths, extendPath(query.StartID, from, to, fact, parents))
+				}
 				continue
 			}
-			if len(visited) >= query.MaxNodes {
+			if len(discoveredDepth) >= query.MaxNodes {
 				truncated = true
 				continue
 			}
-			visited[to] = struct{}{}
+			discoveredDepth[to] = depth
 			parents[to] = pathParent{from: from, fact: fact}
 			next = append(next, to)
 			path := buildPath(query.StartID, to, parents)
@@ -70,6 +73,16 @@ func FindBoundedPaths(ctx context.Context, repository neighborReader, query Path
 		return []Path{}, truncated, nil
 	}
 	return paths, truncated, nil
+}
+
+func extendPath(startID, fromID, targetID string, fact Fact, parents map[string]pathParent) Path {
+	if fromID == startID {
+		return Path{EntityIDs: []string{startID, targetID}, Facts: []Fact{fact}}
+	}
+	path := buildPath(startID, fromID, parents)
+	path.EntityIDs = append(path.EntityIDs, targetID)
+	path.Facts = append(path.Facts, fact)
+	return path
 }
 
 type pathParent struct {

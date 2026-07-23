@@ -42,3 +42,22 @@ func TestFindBoundedPathsStopsAtCyclesAndPreservesDirectFacts(t *testing.T) {
 		t.Fatalf("path facts = %#v", paths[1].Facts)
 	}
 }
+
+func TestFindBoundedPathsPreservesParallelFactsAtTheSameDepth(t *testing.T) {
+	repository := pathRepository{facts: []Fact{
+		{ID: "http", SubjectID: "orders", ObjectID: "payments", Predicate: PredicateDependsOn, Qualifiers: map[string]string{"protocol": "http"}},
+		{ID: "kafka", SubjectID: "orders", ObjectID: "payments", Predicate: PredicateDependsOn, Qualifiers: map[string]string{"protocol": "kafka"}},
+	}}
+	paths, truncated, err := FindBoundedPaths(context.Background(), repository, PathQuery{
+		StartID: "orders", Direction: DirectionOutgoing, MaxDepth: 2, MaxNodes: 10, MaxFanout: 10, Generation: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated || len(paths) != 2 {
+		t.Fatalf("paths=%#v truncated=%v", paths, truncated)
+	}
+	if paths[0].Facts[0].ID != "http" || paths[1].Facts[0].ID != "kafka" {
+		t.Fatalf("parallel facts = %#v", paths)
+	}
+}

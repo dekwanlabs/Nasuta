@@ -18,6 +18,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/indexing"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/ontologystore"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/rbac"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
@@ -35,6 +36,7 @@ import (
 type Platform struct {
 	cfg         config.Config
 	settings    *config.PlatformSettings
+	platformDB  *sql.DB
 	index       *indexing.Service
 	knowledge   *agent.Service
 	registry    *tool.Registry
@@ -57,13 +59,21 @@ func New() (*Platform, error) {
 	cfg := config.Load()
 	InitLogging(cfg.Log)
 
-	index, err := indexing.Build(cfg)
+	platformDB, platformDBErr := openPlatformDB()
+	docDB := store.NewDocStore(platformDB)
+	index, err := indexing.Build(cfg, docDB, platformDBErr)
 	if err != nil {
+		if platformDB != nil {
+			_ = platformDB.Close()
+		}
 		return nil, fmt.Errorf("build platform index: %w", err)
 	}
 	ontologyBackend, err := ontologystore.New(cfg.Ontology, index.DB)
 	if err != nil {
 		index.Close()
+		if platformDB != nil {
+			_ = platformDB.Close()
+		}
 		return nil, fmt.Errorf("build ontology backend: %w", err)
 	}
 	index.SetOntologyPublisher(ontologyBackend)
@@ -74,7 +84,7 @@ func New() (*Platform, error) {
 	}
 	callChainService := callchain.New(index.DB, codeGraph)
 	knowledgeService := agent.NewTools(agent.Deps{
-		DB: index.DB, Graph: index.Graph, Semantic: index.Semantic,
+		DB: index.DB, Semantic: index.Semantic,
 		Embedder: index.Embedder, WorkspaceRoot: cfg.WorkspaceRoot, DocStore: index.DocDB(),
 		CallChain: callChainService, Ontology: ontology.NewService(ontologyBackend),
 	})
@@ -82,7 +92,7 @@ func New() (*Platform, error) {
 	knowledgeService.SetWebSearchEngine(cfg.WebSearchEngine)
 	knowledgeService.SetWebSearchAPIKey(cfg.WebSearchAPIKey)
 
-	authDB, authService := buildAuth(cfg)
+	authDB, authService := buildAuth(cfg, platformDB)
 	settings := loadPlatformSettings(authDB)
 	index.SetPlatform(settings)
 	registry := agent.NewRegistry(knowledgeService, cfg)
@@ -90,7 +100,7 @@ func New() (*Platform, error) {
 	platform := &Platform{
 		cfg: cfg, settings: settings, index: index, knowledge: knowledgeService,
 		registry: registry, readTools: tool.NewReadRegistry(registry),
-		authDB: authDB, authService: authService,
+		platformDB: platformDB, authDB: authDB, authService: authService,
 		codegraph: codeGraph, callChain: callChainService,
 		ontology: ontologyBackend,
 	}
@@ -98,16 +108,28 @@ func New() (*Platform, error) {
 	return platform, nil
 }
 
-func buildAuth(cfg config.Config) (*auth.DB, *auth.Service) {
-	if config.LoadMySQLDSN() == "" {
-		log.Warnf("[server] auth disabled (MYSQL_DSN not set)")
-		return nil, nil
+func openPlatformDB() (*sql.DB, error) {
+	dsn := config.LoadMySQLDSN()
+	if dsn == "" {
+		err := fmt.Errorf("MYSQL_DSN not set")
+		log.Warnf("[server] MySQL-backed capabilities disabled (%v)", err)
+		return nil, err
 	}
-	authDB, err := auth.NewDB(config.LoadMySQLDSN())
+	db, err := store.OpenMySQL(dsn)
 	if err != nil {
-		log.Warnf("[server] MySQL auth DB unavailable: %v (auth disabled)", err)
+		log.Warnf("[server] MySQL-backed capabilities disabled: %v", err)
+		return nil, err
+	}
+	log.Infof("[server] MySQL platform store enabled")
+	return db, nil
+}
+
+func buildAuth(cfg config.Config, db *sql.DB) (*auth.DB, *auth.Service) {
+	if db == nil {
+		log.Warnf("[server] auth disabled (MySQL unavailable)")
 		return nil, nil
 	}
+	authDB := auth.NewDB(db)
 	oauth := auth.NewFeishuOAuth(cfg.FeishuAppID, cfg.FeishuAppSecret)
 	log.Infof("[server] auth enabled (MySQL: ok, Feishu: %v)", cfg.FeishuConfigured())
 	return authDB, auth.NewService(oauth, authDB, cfg.FeishuRedirectURI, cfg.WebBaseURL)
@@ -128,10 +150,10 @@ func loadPlatformSettings(authDB *auth.DB) *config.PlatformSettings {
 }
 
 func (platform *Platform) initRBAC() {
-	if platform.authDB == nil {
+	if platform.platformDB == nil {
 		return
 	}
-	store, err := rbac.NewStore(platform.authDB.RawDB())
+	store, err := rbac.NewStore(platform.platformDB)
 	if err != nil {
 		log.Warnf("[server] RBAC store init failed: %v", err)
 		return
@@ -148,11 +170,11 @@ func (platform *Platform) Knowledge() knowledge.API { return platform.knowledge 
 func (platform *Platform) ReadTools() *tool.ReadRegistry { return platform.readTools }
 
 func (platform *Platform) configureIncidents(evidence incident.EvidenceProvider) error {
-	if platform.authDB == nil {
+	if platform.platformDB == nil {
 		log.Warnf("[server] incident and approval disabled (MySQL unavailable)")
 		return nil
 	}
-	return platform.configureIncidentsWithDB(platform.authDB.RawDB(), evidence)
+	return platform.configureIncidentsWithDB(platform.platformDB, evidence)
 }
 
 func (platform *Platform) configureIncidentsWithDB(db *sql.DB, evidence incident.EvidenceProvider) error {
@@ -209,7 +231,7 @@ func (platform *Platform) Settings() config.PlatformSettings {
 // RegisterCommonRoutes attaches only reusable platform routes to mux.
 func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	dashboardHandler := dashboard.NewHandler(
-		platform.index.DB, platform.index.DocDB(), platform.authDB,
+		platform.index.DB, platform.index.DocDB(), platform.authDB, platform.platformDB,
 		platform.index.Semantic, platform.index.Embedder,
 		platform.knowledge, platform.cfg, platform.settings, platform.index,
 		platform.registry, platform.writeReady, platform.codegraph, platform.callChain,
@@ -261,6 +283,9 @@ func (platform *Platform) Close() error {
 		_ = platform.ontology.Close()
 	}
 	platform.index.Close()
+	if platform.platformDB != nil {
+		return platform.platformDB.Close()
+	}
 	return nil
 }
 

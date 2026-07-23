@@ -36,6 +36,22 @@ type RelationResult struct {
 	Truncated  bool           `json:"truncated"`
 }
 
+type DependencyQuery struct {
+	Service   string
+	Direction Direction
+	MaxDepth  int
+	MaxNodes  int
+	MaxFanout int
+}
+
+type DependencyResult struct {
+	Root       *EntityRef     `json:"root,omitempty"`
+	Candidates []EntityRef    `json:"candidates,omitempty"`
+	Upstream   []RelationFact `json:"upstream"`
+	Downstream []RelationFact `json:"downstream"`
+	Truncated  bool           `json:"truncated"`
+}
+
 type Service struct{ repository Repository }
 
 func NewService(repository Repository) *Service {
@@ -67,6 +83,10 @@ func (service *Service) queryRelations(ctx context.Context, query RelationQuery)
 	if err != nil {
 		return RelationResult{}, err
 	}
+	return service.queryResolvedRelations(ctx, resolved, query)
+}
+
+func (service *Service) queryResolvedRelations(ctx context.Context, resolved ResolveResult, query RelationQuery) (RelationResult, error) {
 	result := RelationResult{Entities: []EntityRef{}, Facts: []RelationFact{}}
 	if len(resolved.Entities) != 1 {
 		result.Candidates = resolved.Entities
@@ -83,6 +103,61 @@ func (service *Service) queryRelations(ctx context.Context, query RelationQuery)
 	}
 	result.Truncated = truncated
 	return service.hydrateResult(ctx, resolved.Generation, result, paths)
+}
+
+func (service *Service) TraceDependencies(ctx context.Context, query DependencyQuery) (DependencyResult, error) {
+	query.Service = strings.TrimSpace(query.Service)
+	query.Direction = Direction(strings.ToLower(strings.TrimSpace(string(query.Direction))))
+	result, err := service.traceDependencies(ctx, query)
+	if errors.Is(err, ErrStaleSnapshot) {
+		return service.traceDependencies(ctx, query)
+	}
+	return result, err
+}
+
+func (service *Service) traceDependencies(ctx context.Context, query DependencyQuery) (DependencyResult, error) {
+	if err := validateDirection(query.Direction); err != nil {
+		return DependencyResult{}, err
+	}
+	resolved, err := service.repository.Resolve(ctx, ResolveQuery{
+		Text: query.Service, Classes: []Class{ClassService}, Limit: 20,
+	})
+	if err != nil {
+		return DependencyResult{}, err
+	}
+	result := DependencyResult{
+		Candidates: resolved.Entities, Upstream: []RelationFact{}, Downstream: []RelationFact{},
+	}
+	if len(resolved.Entities) != 1 {
+		return result, nil
+	}
+	root := resolved.Entities[0]
+	result.Root = &root
+	result.Candidates = nil
+	queryRelations := func(direction Direction) (RelationResult, error) {
+		return service.queryResolvedRelations(ctx, resolved, RelationQuery{
+			Entity: query.Service, EntityClass: ClassService,
+			Predicates: []Predicate{PredicateDependsOn}, Direction: direction,
+			MaxDepth: query.MaxDepth, MaxNodes: query.MaxNodes, MaxFanout: query.MaxFanout,
+		})
+	}
+	if query.Direction != DirectionOutgoing {
+		upstream, err := queryRelations(DirectionIncoming)
+		if err != nil {
+			return DependencyResult{}, err
+		}
+		result.Upstream = upstream.Facts
+		result.Truncated = result.Truncated || upstream.Truncated
+	}
+	if query.Direction != DirectionIncoming {
+		downstream, err := queryRelations(DirectionOutgoing)
+		if err != nil {
+			return DependencyResult{}, err
+		}
+		result.Downstream = downstream.Facts
+		result.Truncated = result.Truncated || downstream.Truncated
+	}
+	return result, nil
 }
 
 func (service *Service) hydrateResult(ctx context.Context, generation string, result RelationResult, paths []Path) (RelationResult, error) {
@@ -123,13 +198,17 @@ func (service *Service) hydrateResult(ctx context.Context, generation string, re
 	for _, entity := range result.Entities {
 		byID[entity.ID] = entity
 	}
-	factIDs := make([]string, 0, len(facts))
-	for id := range facts {
-		factIDs = append(factIDs, id)
+	orderedFacts := make([]factDepth, 0, len(facts))
+	for _, fact := range facts {
+		orderedFacts = append(orderedFacts, fact)
 	}
-	sort.Strings(factIDs)
-	for _, id := range factIDs {
-		item := facts[id]
+	sort.Slice(orderedFacts, func(i, j int) bool {
+		if orderedFacts[i].depth != orderedFacts[j].depth {
+			return orderedFacts[i].depth < orderedFacts[j].depth
+		}
+		return orderedFacts[i].fact.ID < orderedFacts[j].fact.ID
+	})
+	for _, item := range orderedFacts {
 		result.Facts = append(result.Facts, RelationFact{
 			ID: item.fact.ID, Subject: byID[item.fact.SubjectID], Predicate: item.fact.Predicate,
 			Object: byID[item.fact.ObjectID], Qualifiers: item.fact.Qualifiers,
