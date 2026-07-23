@@ -39,14 +39,15 @@ type ToolsSink interface {
 
 // Service owns the durable index plus the derived in-memory search state.
 type Service struct {
-	Cfg      config.Config
-	Platform *config.PlatformSettings
-	DB       *store.SQLite
-	Semantic semantic.Store
-	Embedder embed.Embedder
-	Graph    *graph.Graph
-	tools    ToolsSink
-	ScanDirs []string
+	Cfg       config.Config
+	Platform  *config.PlatformSettings
+	DB        *store.SQLite
+	Semantic  semantic.Store
+	Embedder  embed.Embedder
+	Graph     *graph.Graph
+	tools     ToolsSink
+	ScanDirs  []string
+	publisher ontology.Publisher
 
 	docDB *store.DocStore
 
@@ -69,6 +70,10 @@ func (svc *Service) SetTools(t ToolsSink) {
 			t.SetBM25(b)
 		}
 	}
+}
+
+func (svc *Service) SetOntologyPublisher(publisher ontology.Publisher) {
+	svc.publisher = publisher
 }
 
 func (svc *Service) Close() {
@@ -926,8 +931,8 @@ func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 		return fmt.Errorf("attach repository snapshots: %w", err)
 	}
 	log.Infof("[rebuild-sql] repository revisions loaded: repositories=%d", len(bundle.Repositories))
-	if err := svc.DB.ReplaceStructure(ctx, ontology.GenerationFor(bundle.Repositories), bundle); err != nil {
-		return fmt.Errorf("replace all: %w", err)
+	if err := svc.publishWorkspace(ctx, bundle); err != nil {
+		return err
 	}
 	log.Infof("[rebuild-sql] snapshot published after %s", time.Since(started).Round(time.Millisecond))
 	if err := svc.reloadDependencyGraph(ctx); err != nil {
@@ -945,8 +950,8 @@ func (svc *Service) Bootstrap(ctx context.Context) error {
 	if err := svc.attachRepositorySnapshots(ctx, &bundle); err != nil {
 		return err
 	}
-	if err := svc.DB.ReplaceStructure(ctx, ontology.GenerationFor(bundle.Repositories), bundle); err != nil {
-		return fmt.Errorf("replace all: %w", err)
+	if err := svc.publishWorkspace(ctx, bundle); err != nil {
+		return err
 	}
 	if err := svc.reloadDependencyGraph(ctx); err != nil {
 		return err
@@ -975,6 +980,24 @@ func (svc *Service) Bootstrap(ctx context.Context) error {
 			return fmt.Errorf("embed code: %w", err)
 		}
 	}
+	return nil
+}
+
+func (svc *Service) publishWorkspace(ctx context.Context, bundle domain.IndexBundle) error {
+	if svc.publisher == nil {
+		return fmt.Errorf("ontology publisher is not configured")
+	}
+	snapshot, err := ontology.Project(bundle)
+	if err != nil {
+		return fmt.Errorf("project ontology snapshot: %w", err)
+	}
+	generation := ontology.GenerationFor(bundle.Repositories)
+	if err := svc.publisher.PublishWorkspace(ctx, ontology.WorkspaceSnapshot{
+		Generation: generation, Structure: bundle, Ontology: snapshot,
+	}); err != nil {
+		return fmt.Errorf("publish workspace snapshot %q: %w", generation, err)
+	}
+	log.Infof("[ontology] published generation=%s entities=%d facts=%d", generation, len(snapshot.Entities), len(snapshot.Facts))
 	return nil
 }
 

@@ -16,6 +16,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/indexing"
+	"github.com/dekwanlabs/nasuta/internal/ontology"
+	"github.com/dekwanlabs/nasuta/internal/platform/ontologystore"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/rbac"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
@@ -47,6 +49,7 @@ type Platform struct {
 	incidentAPI *incidenthttp.Handler
 	codegraph   *codegraph.DB
 	callChain   *callchain.Service
+	ontology    ontology.Backend
 }
 
 // New constructs the reusable platform without registering scenario routes.
@@ -58,6 +61,12 @@ func New() (*Platform, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build platform index: %w", err)
 	}
+	ontologyBackend, err := ontologystore.New(cfg.Ontology, index.DB)
+	if err != nil {
+		index.Close()
+		return nil, fmt.Errorf("build ontology backend: %w", err)
+	}
+	index.SetOntologyPublisher(ontologyBackend)
 	codeGraph, err := codegraph.Open(cfg.WorkspaceRoot)
 	if err != nil {
 		log.Warnf("[server] codegraph call-chain disabled: %v", err)
@@ -83,6 +92,7 @@ func New() (*Platform, error) {
 		registry: registry, readTools: tool.NewReadRegistry(registry),
 		authDB: authDB, authService: authService,
 		codegraph: codeGraph, callChain: callChainService,
+		ontology: ontologyBackend,
 	}
 	platform.initRBAC()
 	return platform, nil
@@ -246,6 +256,9 @@ func (platform *Platform) Close() error {
 	}
 	if platform.callChain != nil {
 		_ = platform.callChain.Close()
+	}
+	if platform.ontology != nil {
+		_ = platform.ontology.Close()
 	}
 	platform.index.Close()
 	return nil

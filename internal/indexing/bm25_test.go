@@ -12,6 +12,7 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
+	ontologysqlite "github.com/dekwanlabs/nasuta/internal/platform/ontologystore/sqlite"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/internal/semantic/contract"
@@ -282,6 +283,7 @@ func TestBootstrapClearsStaleServiceVectors(t *testing.T) {
 		Cfg: config.Config{WorkspaceRoot: root, SQLitePath: filepath.Join(root, "index.db")},
 		DB:  db, Semantic: recorded, Embedder: fakeEmbedder{dim: 8}, Graph: graph.New(),
 	}
+	svc.SetOntologyPublisher(ontologysqlite.New(db))
 	if err := svc.Bootstrap(context.Background()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
