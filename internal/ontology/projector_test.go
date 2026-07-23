@@ -13,10 +13,16 @@ func TestProjectBuildsDeterministicEntitiesFactsAndEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := ValidateSnapshot(first); err != nil {
+		t.Fatal(err)
+	}
 	bundle.Services[0], bundle.Services[1] = bundle.Services[1], bundle.Services[0]
 	bundle.Dependencies[0], bundle.Dependencies[1] = bundle.Dependencies[1], bundle.Dependencies[0]
 	second, err := Project(bundle)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSnapshot(second); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(first, second) {

@@ -63,11 +63,7 @@ func (build *builder) snapshot() (Snapshot, error) {
 	}
 	sort.Slice(build.entities, func(i, j int) bool { return build.entities[i].ID < build.entities[j].ID })
 	sort.Slice(build.facts, func(i, j int) bool { return build.facts[i].ID < build.facts[j].ID })
-	snapshot := Snapshot{SchemaVersion: CurrentSchemaVersion, Entities: build.entities, Facts: build.facts}
-	if err := ValidateSnapshot(snapshot); err != nil {
-		return Snapshot{}, err
-	}
-	return snapshot, nil
+	return Snapshot{SchemaVersion: CurrentSchemaVersion, Entities: build.entities, Facts: build.facts}, nil
 }
 
 func mergeStrings(current, additions []string) []string {

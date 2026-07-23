@@ -117,6 +117,30 @@ func TestReplaceWorkspacePublishesStructureAndOntologyGeneration(t *testing.T) {
 	}
 }
 
+func TestReplaceWorkspaceRejectsInvalidOntology(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service := testService("team/orders", ".", "orders")
+	bundle := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{{Repo: service.Repo, HeadSHA: "sha", IndexedAt: time.Now().UnixMilli()}},
+		Services:     []domain.ServiceRecord{service},
+	}
+	snapshot := ontology.Snapshot{
+		SchemaVersion: ontology.CurrentSchemaVersion,
+		Entities: []ontology.Entity{{
+			ID: "invalid", Class: ontology.ClassService, Key: service.ServiceKey,
+			Name: service.ServiceName, Confidence: service.Confidence,
+		}},
+	}
+
+	if err := db.ReplaceWorkspace(context.Background(), "invalid-ontology", bundle, snapshot); err == nil {
+		t.Fatal("ReplaceWorkspace accepted ontology without projected entities")
+	}
+}
+
 func TestReplaceAllFailureKeepsPublishedSnapshot(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
 	if err != nil {

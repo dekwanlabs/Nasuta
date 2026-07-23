@@ -32,36 +32,17 @@ func (store *SQLite) ResolveOntology(ctx context.Context, query ontology.Resolve
 			args = append(args, string(class))
 		}
 	}
-	args = append(args, query.Limit)
-	rows, err := store.db.QueryContext(ctx, `SELECT e.entity_id,e.class,e.canonical_key,e.name,e.properties_json,e.confidence,
-MIN(CASE WHEN e.entity_id=? THEN 0 WHEN e.canonical_key=? THEN 1 WHEN a.normalized_alias=? THEN 2 ELSE 3 END) AS rank
+	args = append(args, text, text, normalized, query.Limit)
+	rows, err := store.db.QueryContext(ctx, `SELECT e.entity_id,e.class,e.canonical_key,e.name,e.properties_json,e.confidence
 FROM ontology_entities e LEFT JOIN ontology_aliases a ON a.entity_id=e.entity_id
 WHERE `+where+` GROUP BY e.entity_id,e.class,e.canonical_key,e.name,e.properties_json,e.confidence
-ORDER BY rank,lower(e.name),e.entity_id LIMIT ?`, append([]any{text, text, normalized}, args...)...)
+ORDER BY MIN(CASE WHEN e.entity_id=? THEN 0 WHEN e.canonical_key=? THEN 1 WHEN a.normalized_alias=? THEN 2 ELSE 3 END),lower(e.name),e.entity_id LIMIT ?`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("resolve ontology entity: %w", err)
 	}
-	defer rows.Close()
-	entities := make([]ontology.Entity, 0, query.Limit)
-	for rows.Next() {
-		var entity ontology.Entity
-		var class, properties string
-		var rank int
-		if err := rows.Scan(&entity.ID, &class, &entity.Key, &entity.Name, &properties, &entity.Confidence, &rank); err != nil {
-			return nil, fmt.Errorf("scan ontology entity: %w", err)
-		}
-		entity.Class = ontology.Class(class)
-		if err := json.Unmarshal([]byte(properties), &entity.Properties); err != nil {
-			return nil, fmt.Errorf("decode ontology entity %q properties: %w", entity.ID, err)
-		}
-		entities = append(entities, entity)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
+	entities, err := scanOntologyEntities(rows, query.Limit)
+	if err != nil {
 		return nil, fmt.Errorf("resolve ontology entities: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close ontology entity rows: %w", err)
 	}
 	if err := loadOntologyAliases(ctx, store.db, entities); err != nil {
 		return nil, err
@@ -90,13 +71,24 @@ FROM ontology_entities WHERE entity_id IN (`+placeholders(len(args))+`) ORDER BY
 	if err != nil {
 		return nil, fmt.Errorf("query ontology entities by ID: %w", err)
 	}
+	entities, err := scanOntologyEntities(rows, len(query.IDs))
+	if err != nil {
+		return nil, fmt.Errorf("query ontology entities by ID: %w", err)
+	}
+	if err := loadOntologyAliases(ctx, store.db, entities); err != nil {
+		return nil, err
+	}
+	return entities, nil
+}
+
+func scanOntologyEntities(rows *sql.Rows, capacity int) ([]ontology.Entity, error) {
 	defer rows.Close()
-	entities := make([]ontology.Entity, 0, len(query.IDs))
+	entities := make([]ontology.Entity, 0, capacity)
 	for rows.Next() {
 		var entity ontology.Entity
 		var class, properties string
 		if err := rows.Scan(&entity.ID, &class, &entity.Key, &entity.Name, &properties, &entity.Confidence); err != nil {
-			return nil, fmt.Errorf("scan ontology entity by ID: %w", err)
+			return nil, fmt.Errorf("scan ontology entity: %w", err)
 		}
 		entity.Class = ontology.Class(class)
 		if err := json.Unmarshal([]byte(properties), &entity.Properties); err != nil {
@@ -105,13 +97,10 @@ FROM ontology_entities WHERE entity_id IN (`+placeholders(len(args))+`) ORDER BY
 		entities = append(entities, entity)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("query ontology entities by ID: %w", err)
+		return nil, err
 	}
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close ontology entity rows: %w", err)
-	}
-	if err := loadOntologyAliases(ctx, store.db, entities); err != nil {
-		return nil, err
 	}
 	return entities, nil
 }
