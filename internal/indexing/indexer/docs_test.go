@@ -1,12 +1,24 @@
 package indexer
 
 import (
+	"errors"
 	"reflect"
 	"slices"
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
+
+type knowledgeDocStoreStub struct {
+	docs  []domain.DocRecord
+	err   error
+	reads int
+}
+
+func (store *knowledgeDocStoreStub) ListDocsByKinds([]string) ([]domain.DocRecord, error) {
+	store.reads++
+	return store.docs, store.err
+}
 
 func TestRunbookFrontmatterMapsServiceRelations(t *testing.T) {
 	fm := parseFrontmatter(`---
@@ -40,5 +52,29 @@ func TestCanonicalRunbookKeepsNormalizedServiceAtProjectionBoundary(t *testing.T
 	}}
 	if !reflect.DeepEqual(records, want) {
 		t.Fatalf("canonical runbooks = %#v", records)
+	}
+}
+
+func TestLoadKnowledgeBaseUsesOneConsistentDocumentRead(t *testing.T) {
+	store := &knowledgeDocStoreStub{docs: []domain.DocRecord{{
+		ID: "orders-recovery", Title: "Orders recovery", Filename: "runbooks/orders.md", Kind: domain.DocKindFlow,
+		Content: "---\nservice: orders\ndepends_on: payments\n---\n# Orders recovery\n",
+	}}}
+	runbooks, dependencies, err := LoadKnowledgeBase(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.reads != 1 || len(runbooks) != 1 || len(dependencies) != 1 {
+		t.Fatalf("reads=%d runbooks=%d dependencies=%d", store.reads, len(runbooks), len(dependencies))
+	}
+	if runbooks[0].ServiceName != "orders" || dependencies[0].From != "orders" || dependencies[0].To != "payments" {
+		t.Fatalf("runbook=%+v dependency=%+v", runbooks[0], dependencies[0])
+	}
+}
+
+func TestLoadKnowledgeBaseDoesNotTurnReadFailureIntoEmptySnapshot(t *testing.T) {
+	store := &knowledgeDocStoreStub{err: errors.New("mysql unavailable")}
+	if _, _, err := LoadKnowledgeBase(store); err == nil {
+		t.Fatal("knowledge-base read failure was treated as an empty snapshot")
 	}
 }

@@ -12,17 +12,18 @@ import (
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
-func (store *SQLite) ResolveOntology(ctx context.Context, query ontology.ResolveQuery) ([]ontology.Entity, error) {
+func (store *SQLite) ResolveOntology(ctx context.Context, query ontology.ResolveQuery) (ontology.ResolveResult, error) {
 	if err := ontology.ValidateResolveQuery(query); err != nil {
-		return nil, err
+		return ontology.ResolveResult{}, err
 	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	if err := requireOntologyGeneration(ctx, store.db, query.Generation); err != nil {
-		return nil, err
+	generation, err := ontologyGeneration(ctx, store.db)
+	if err != nil {
+		return ontology.ResolveResult{}, err
 	}
 
-	text := strings.TrimSpace(query.Text)
+	text := query.Text
 	normalized := platform.Normalize(text)
 	where := `(e.entity_id=? OR e.canonical_key=? OR a.normalized_alias=? OR lower(e.name) LIKE ?)`
 	args := []any{text, text, normalized, strings.ToLower(text) + "%"}
@@ -33,29 +34,23 @@ func (store *SQLite) ResolveOntology(ctx context.Context, query ontology.Resolve
 		}
 	}
 	args = append(args, text, text, normalized, query.Limit)
-	rows, err := store.db.QueryContext(ctx, `SELECT e.entity_id,e.class,e.canonical_key,e.name,e.properties_json,e.confidence
+	rows, err := store.db.QueryContext(ctx, `SELECT e.entity_id,e.class,e.name
 FROM ontology_entities e LEFT JOIN ontology_aliases a ON a.entity_id=e.entity_id
-WHERE `+where+` GROUP BY e.entity_id,e.class,e.canonical_key,e.name,e.properties_json,e.confidence
+WHERE `+where+` GROUP BY e.entity_id,e.class,e.name
 ORDER BY MIN(CASE WHEN e.entity_id=? THEN 0 WHEN e.canonical_key=? THEN 1 WHEN a.normalized_alias=? THEN 2 ELSE 3 END),lower(e.name),e.entity_id LIMIT ?`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("resolve ontology entity: %w", err)
+		return ontology.ResolveResult{}, fmt.Errorf("resolve ontology entity: %w", err)
 	}
-	entities, err := scanOntologyEntities(rows, query.Limit)
+	entities, err := scanOntologyEntityRefs(rows, query.Limit)
 	if err != nil {
-		return nil, fmt.Errorf("resolve ontology entities: %w", err)
+		return ontology.ResolveResult{}, fmt.Errorf("resolve ontology entities: %w", err)
 	}
-	if err := loadOntologyAliases(ctx, store.db, entities); err != nil {
-		return nil, err
-	}
-	return entities, nil
+	return ontology.ResolveResult{Generation: generation, Entities: entities}, nil
 }
 
-func (store *SQLite) OntologyEntitiesByID(ctx context.Context, query ontology.EntityQuery) ([]ontology.Entity, error) {
+func (store *SQLite) OntologyEntitiesByID(ctx context.Context, query ontology.EntityQuery) ([]ontology.EntityRef, error) {
 	if err := ontology.ValidateEntityQuery(query); err != nil {
 		return nil, err
-	}
-	if len(query.IDs) == 0 {
-		return []ontology.Entity{}, nil
 	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
@@ -66,34 +61,28 @@ func (store *SQLite) OntologyEntitiesByID(ctx context.Context, query ontology.En
 	for i, id := range query.IDs {
 		args[i] = id
 	}
-	rows, err := store.db.QueryContext(ctx, `SELECT entity_id,class,canonical_key,name,properties_json,confidence
+	rows, err := store.db.QueryContext(ctx, `SELECT entity_id,class,name
 FROM ontology_entities WHERE entity_id IN (`+placeholders(len(args))+`) ORDER BY class,lower(name),entity_id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query ontology entities by ID: %w", err)
 	}
-	entities, err := scanOntologyEntities(rows, len(query.IDs))
+	entities, err := scanOntologyEntityRefs(rows, len(query.IDs))
 	if err != nil {
 		return nil, fmt.Errorf("query ontology entities by ID: %w", err)
-	}
-	if err := loadOntologyAliases(ctx, store.db, entities); err != nil {
-		return nil, err
 	}
 	return entities, nil
 }
 
-func scanOntologyEntities(rows *sql.Rows, capacity int) ([]ontology.Entity, error) {
+func scanOntologyEntityRefs(rows *sql.Rows, capacity int) ([]ontology.EntityRef, error) {
 	defer rows.Close()
-	entities := make([]ontology.Entity, 0, capacity)
+	entities := make([]ontology.EntityRef, 0, capacity)
 	for rows.Next() {
-		var entity ontology.Entity
-		var class, properties string
-		if err := rows.Scan(&entity.ID, &class, &entity.Key, &entity.Name, &properties, &entity.Confidence); err != nil {
+		var entity ontology.EntityRef
+		var class string
+		if err := rows.Scan(&entity.ID, &class, &entity.Name); err != nil {
 			return nil, fmt.Errorf("scan ontology entity: %w", err)
 		}
 		entity.Class = ontology.Class(class)
-		if err := json.Unmarshal([]byte(properties), &entity.Properties); err != nil {
-			return nil, fmt.Errorf("decode ontology entity %q properties: %w", entity.ID, err)
-		}
 		entities = append(entities, entity)
 	}
 	if err := rows.Err(); err != nil {
@@ -160,7 +149,6 @@ FROM ontology_facts WHERE `+where+` ORDER BY predicate,subject_id,object_id,fact
 		facts = append(facts, fact)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
 		return nil, false, fmt.Errorf("query ontology neighbors: %w", err)
 	}
 	if err := rows.Close(); err != nil {
@@ -180,16 +168,11 @@ func (store *SQLite) OntologyStats(ctx context.Context) (ontology.Stats, error) 
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	var stats ontology.Stats
-	var schemaVersion int
-	if err := store.db.QueryRowContext(ctx, `SELECT generation,ontology_schema_version FROM workspace_snapshot WHERE singleton_id=1`).Scan(&stats.Generation, &schemaVersion); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return stats, ontology.ErrUnavailable
-		}
-		return stats, fmt.Errorf("read ontology generation: %w", err)
+	generation, err := ontologyGeneration(ctx, store.db)
+	if err != nil {
+		return stats, err
 	}
-	if schemaVersion != ontology.CurrentSchemaVersion {
-		return stats, fmt.Errorf("%w: schema version %d", ontology.ErrUnavailable, schemaVersion)
-	}
+	stats.Generation = generation
 	for query, destination := range map[string]*int{
 		`SELECT COUNT(*) FROM ontology_entities`:      &stats.Entities,
 		`SELECT COUNT(*) FROM ontology_facts`:         &stats.Facts,
@@ -215,48 +198,30 @@ func (store *SQLite) OntologyStats(ctx context.Context) (ontology.Stats, error) 
 }
 
 func requireOntologyGeneration(ctx context.Context, db *sql.DB, expected string) error {
-	var generation string
-	var version int
-	err := db.QueryRowContext(ctx, `SELECT generation,ontology_schema_version FROM workspace_snapshot WHERE singleton_id=1`).Scan(&generation, &version)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ontology.ErrUnavailable
-	}
+	generation, err := ontologyGeneration(ctx, db)
 	if err != nil {
-		return fmt.Errorf("read ontology generation: %w", err)
+		return err
 	}
-	if version != ontology.CurrentSchemaVersion {
-		return fmt.Errorf("%w: schema version %d", ontology.ErrUnavailable, version)
-	}
-	if expected != "" && generation != expected {
+	if generation != expected {
 		return fmt.Errorf("%w: expected %q, active %q", ontology.ErrStaleSnapshot, expected, generation)
 	}
 	return nil
 }
 
-func loadOntologyAliases(ctx context.Context, db *sql.DB, entities []ontology.Entity) error {
-	if len(entities) == 0 {
-		return nil
+func ontologyGeneration(ctx context.Context, db *sql.DB) (string, error) {
+	var generation string
+	var version int
+	err := db.QueryRowContext(ctx, `SELECT generation,ontology_schema_version FROM workspace_snapshot WHERE singleton_id=1`).Scan(&generation, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ontology.ErrUnavailable
 	}
-	args := make([]any, len(entities))
-	byID := make(map[string]int, len(entities))
-	for i := range entities {
-		args[i] = entities[i].ID
-		byID[entities[i].ID] = i
-		entities[i].Aliases = []string{}
-	}
-	rows, err := db.QueryContext(ctx, `SELECT entity_id,normalized_alias FROM ontology_aliases WHERE entity_id IN (`+placeholders(len(args))+`) ORDER BY entity_id,normalized_alias`, args...)
 	if err != nil {
-		return fmt.Errorf("load ontology aliases: %w", err)
+		return "", fmt.Errorf("read ontology generation: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, alias string
-		if err := rows.Scan(&id, &alias); err != nil {
-			return fmt.Errorf("scan ontology alias: %w", err)
-		}
-		entities[byID[id]].Aliases = append(entities[byID[id]].Aliases, alias)
+	if version != ontology.CurrentSchemaVersion {
+		return "", fmt.Errorf("%w: schema version %d", ontology.ErrUnavailable, version)
 	}
-	return rows.Err()
+	return generation, nil
 }
 
 func loadOntologyEvidence(ctx context.Context, db *sql.DB, facts []ontology.Fact) error {

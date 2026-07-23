@@ -10,7 +10,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
-	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
@@ -41,7 +40,6 @@ type Handler struct {
 	authDB         *auth.DB
 	semantic       semantic.Store
 	embedder       embed.Embedder
-	graph          *graph.Graph
 	tools          *agent.Service
 	qa             *agent.QA
 	registry       *agent.Registry
@@ -71,7 +69,7 @@ func (handler *Handler) rolePromptFor(userID int64) string {
 }
 
 // NewHandler builds the dashboard HTTP handler.
-func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem semantic.Store, emb embed.Embedder, g *graph.Graph, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool, cgDB *codegraph.DB, chain *callchain.Service) *Handler {
+func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem semantic.Store, emb embed.Embedder, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool, cgDB *codegraph.DB, chain *callchain.Service) *Handler {
 	if ps == nil {
 		ps = &config.PlatformSettings{}
 	}
@@ -81,7 +79,6 @@ func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem se
 		authDB:         authDB,
 		semantic:       sem,
 		embedder:       emb,
-		graph:          g,
 		tools:          t,
 		qa:             agent.NewQA(agent.QADeps{Tools: t, Semantic: sem, Embedder: emb, WriteAvailable: writeAvailable, Cfg: cfg, Platform: ps, Registry: registry, CodeGraphDB: cgDB}),
 		registry:       registry,

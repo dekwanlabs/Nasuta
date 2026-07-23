@@ -79,13 +79,6 @@ func NewTools(d Deps) *Service {
 	}
 }
 
-func (srv *Service) QueryRelations(ctx context.Context, query ontology.RelationQuery) (ontology.RelationResult, error) {
-	if srv.ontology == nil {
-		return ontology.RelationResult{}, ontology.ErrUnavailable
-	}
-	return srv.ontology.QueryRelations(ctx, query)
-}
-
 func (srv *Service) SetBM25(b *retrieval.BM25Builder) { srv.bm25.Store(b) }
 
 func (srv *Service) BM25View() *retrieval.BM25Builder { return srv.bm25.Load() }

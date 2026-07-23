@@ -1,25 +1,26 @@
 package ontology
 
-type ClassDef struct {
+type classDef struct {
 	Properties map[string]struct{}
+	ID         func(string) string
 }
 
-type RelationDef struct {
+type relationDef struct {
 	SubjectClasses map[Class]struct{}
 	ObjectClasses  map[Class]struct{}
 	Qualifiers     map[string]struct{}
 }
 
-var classSchema = map[Class]ClassDef{
-	ClassRepository:     {Properties: stringSet("repo", "head_sha")},
-	ClassService:        {Properties: stringSet("repo", "module_path", "language", "owner", "runtime")},
-	ClassAPIEndpoint:    {Properties: stringSet("method", "path", "file", "handler")},
-	ClassCodeSymbol:     {Properties: stringSet("repo", "file", "qualified_name", "language")},
-	ClassExternalSystem: {Properties: stringSet("target", "protocol_hint")},
-	ClassRunbook:        {Properties: stringSet("repo", "title", "path", "scope", "tags")},
+var classSchema = map[Class]classDef{
+	ClassRepository:     {Properties: stringSet("repo", "head_sha"), ID: RepositoryID},
+	ClassService:        {Properties: stringSet("repo", "module_path", "language", "owner", "runtime"), ID: ServiceID},
+	ClassAPIEndpoint:    {Properties: stringSet("method", "path", "file", "handler"), ID: compoundID3(APIEndpointID)},
+	ClassCodeSymbol:     {Properties: stringSet("repo", "file", "qualified_name", "language"), ID: compoundID3(CodeSymbolID)},
+	ClassExternalSystem: {Properties: stringSet("target"), ID: ExternalSystemID},
+	ClassRunbook:        {Properties: stringSet("repo", "title", "path", "scope", "tags"), ID: compoundID2(RunbookID)},
 }
 
-var relationSchema = map[Predicate]RelationDef{
+var relationSchema = map[Predicate]relationDef{
 	PredicateContains: {
 		SubjectClasses: classSet(ClassRepository),
 		ObjectClasses:  classSet(ClassService),

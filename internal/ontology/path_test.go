@@ -30,7 +30,7 @@ func TestFindBoundedPathsStopsAtCyclesAndPreservesDirectFacts(t *testing.T) {
 		{ID: "ca", SubjectID: "c", ObjectID: "a", Predicate: PredicateDependsOn},
 	}}
 	paths, truncated, err := FindBoundedPaths(context.Background(), repository, PathQuery{
-		StartID: "a", Direction: DirectionOutgoing, MaxDepth: 5, MaxNodes: 10, MaxFanout: 10,
+		StartID: "a", Direction: DirectionOutgoing, MaxDepth: 5, MaxNodes: 10, MaxFanout: 10, Generation: "test",
 	})
 	if err != nil {
 		t.Fatal(err)

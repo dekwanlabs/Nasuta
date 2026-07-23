@@ -55,7 +55,10 @@ public interface UserFeign {
 
 func TestBuildBundleEndToEnd(t *testing.T) {
 	root := miniWorkspace(t)
-	b := BuildBundle(root, DiscoverScanDirs(root), nil)
+	b, err := BuildBundle(root, DiscoverScanDirs(root), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// service candidates are merged and keyed before they reach the store.
 	svc := findService(b.Services, "hsas-demo")

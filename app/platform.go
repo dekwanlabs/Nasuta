@@ -210,7 +210,7 @@ func (platform *Platform) Settings() config.PlatformSettings {
 func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	dashboardHandler := dashboard.NewHandler(
 		platform.index.DB, platform.index.DocDB(), platform.authDB,
-		platform.index.Semantic, platform.index.Embedder, platform.index.Graph,
+		platform.index.Semantic, platform.index.Embedder,
 		platform.knowledge, platform.cfg, platform.settings, platform.index,
 		platform.registry, platform.writeReady, platform.codegraph, platform.callChain,
 	)

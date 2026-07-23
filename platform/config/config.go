@@ -279,12 +279,12 @@ func Load() Config {
 
 func loadOntologyConfig() OntologyConfig {
 	return OntologyConfig{
-		Provider: strings.ToLower(envFirst("sqlite", "NASUTA_ONTOLOGY_PROVIDER", "ONTOLOGY_PROVIDER")),
+		Provider: strings.ToLower(nasutaEnv("ONTOLOGY_PROVIDER", "sqlite")),
 		Neo4j: Neo4jConfig{
-			URI:      envFirst("", "NASUTA_ONTOLOGY_NEO4J_URI", "ONTOLOGY_NEO4J_URI"),
-			Username: envFirst("", "NASUTA_ONTOLOGY_NEO4J_USERNAME", "ONTOLOGY_NEO4J_USERNAME"),
-			Password: envFirst("", "NASUTA_ONTOLOGY_NEO4J_PASSWORD", "ONTOLOGY_NEO4J_PASSWORD"),
-			Database: envFirst("neo4j", "NASUTA_ONTOLOGY_NEO4J_DATABASE", "ONTOLOGY_NEO4J_DATABASE"),
+			URI:      nasutaEnv("ONTOLOGY_NEO4J_URI", ""),
+			Username: nasutaEnv("ONTOLOGY_NEO4J_USERNAME", ""),
+			Password: nasutaEnv("ONTOLOGY_NEO4J_PASSWORD", ""),
+			Database: nasutaEnv("ONTOLOGY_NEO4J_DATABASE", "neo4j"),
 		},
 	}
 }

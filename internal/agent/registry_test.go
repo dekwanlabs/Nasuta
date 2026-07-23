@@ -65,31 +65,28 @@ func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, `"name": "payments"`) || !strings.Contains(result.Content, `"direct": true`) {
+	if !strings.Contains(result.Content, `"name": "payments"`) || !strings.Contains(result.Content, `"depth": 1`) {
 		t.Fatalf("tool output = %s", result.Content)
 	}
 }
 
 type staticOntologyRepository struct{}
 
-func (staticOntologyRepository) Resolve(context.Context, ontology.ResolveQuery) ([]ontology.Entity, error) {
-	return []ontology.Entity{{ID: "orders", Class: ontology.ClassService, Name: "orders"}}, nil
+func (staticOntologyRepository) Resolve(context.Context, ontology.ResolveQuery) (ontology.ResolveResult, error) {
+	return ontology.ResolveResult{
+		Generation: "test",
+		Entities:   []ontology.EntityRef{{ID: "orders", Class: ontology.ClassService, Name: "orders"}},
+	}, nil
 }
 
-func (staticOntologyRepository) EntitiesByID(context.Context, ontology.EntityQuery) ([]ontology.Entity, error) {
-	return []ontology.Entity{{ID: "payments", Class: ontology.ClassService, Name: "payments"}}, nil
+func (staticOntologyRepository) EntitiesByID(context.Context, ontology.EntityQuery) ([]ontology.EntityRef, error) {
+	return []ontology.EntityRef{{ID: "payments", Class: ontology.ClassService, Name: "payments"}}, nil
 }
 
 func (staticOntologyRepository) Neighbors(context.Context, ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
 	return []ontology.Fact{{ID: "dependency", SubjectID: "orders", Predicate: ontology.PredicateDependsOn, ObjectID: "payments"}}, false, nil
 }
 
-func (staticOntologyRepository) FindPaths(ctx context.Context, query ontology.PathQuery) ([]ontology.Path, bool, error) {
-	return ontology.FindBoundedPaths(ctx, staticOntologyRepository{}, query)
-}
-
 func (staticOntologyRepository) Stats(context.Context) (ontology.Stats, error) {
 	return ontology.Stats{Generation: "test"}, nil
 }
-
-func (staticOntologyRepository) Close() error { return nil }

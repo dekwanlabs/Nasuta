@@ -76,6 +76,24 @@ func TestCanonicalDependenciesMergeEvidence(t *testing.T) {
 	}
 }
 
+func TestCanonicalDependenciesNormalizeExternalTargetOnce(t *testing.T) {
+	bundle := CanonicalizeBundle(domain.IndexBundle{
+		Services: []domain.ServiceRecord{{
+			ServiceName: "a", Repo: "team/a", ModulePath: ".", Layer: "server", Language: "go",
+		}},
+		Dependencies: []domain.DependencyEdge{{
+			From: "a", To: " External.API ", Type: domain.EdgeHTTP,
+		}},
+	})
+	if len(bundle.Dependencies) != 1 {
+		t.Fatalf("dependencies = %d, want one", len(bundle.Dependencies))
+	}
+	edge := bundle.Dependencies[0]
+	if edge.ExternalTarget != "external.api" || edge.To != "External.API" {
+		t.Fatalf("external target = %q, display target = %q", edge.ExternalTarget, edge.To)
+	}
+}
+
 func TestChunkByNodes(t *testing.T) {
 	text := "package x\n\nfunc A() {\n  doA()\n}\n\nfunc B() {\n  doB()\n}\n"
 	nodes := []codegraph.Node{

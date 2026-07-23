@@ -2,6 +2,7 @@ package indexing
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,6 +69,16 @@ func TestRepoHeadSHAErrorIncludesRepositoryPathAndGitStderr(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("repoHeadSHA error %q does not contain %q", err, want)
 		}
+	}
+}
+
+func TestBuildWorkspaceBundleRejectsConfiguredDocStoreFailure(t *testing.T) {
+	svc := &Service{
+		Cfg:         config.Config{WorkspaceRoot: t.TempDir()},
+		docStoreErr: errors.New("mysql unavailable"),
+	}
+	if _, err := svc.buildWorkspaceBundle(); err == nil || !strings.Contains(err.Error(), "mysql unavailable") {
+		t.Fatalf("buildWorkspaceBundle error = %v", err)
 	}
 }
 

@@ -91,8 +91,8 @@ func TestReplaceWorkspacePublishesStructureAndOntologyGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	generation := ontology.GenerationFor(bundle.Repositories)
-	if err := db.ReplaceWorkspace(context.Background(), generation, bundle, snapshot); err != nil {
+	generation, err := db.ReplaceWorkspace(context.Background(), bundle, snapshot)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -136,7 +136,7 @@ func TestReplaceWorkspaceRejectsInvalidOntology(t *testing.T) {
 		}},
 	}
 
-	if err := db.ReplaceWorkspace(context.Background(), "invalid-ontology", bundle, snapshot); err == nil {
+	if _, err := db.ReplaceWorkspace(context.Background(), bundle, snapshot); err == nil {
 		t.Fatal("ReplaceWorkspace accepted ontology without projected entities")
 	}
 }

@@ -2,6 +2,7 @@ package ontology
 
 import (
 	"fmt"
+	"math"
 	"path"
 	"strings"
 )
@@ -48,7 +49,7 @@ func validateEntity(entity Entity) error {
 	if entity.ID == "" || entity.Key == "" || entity.Name == "" {
 		return fmt.Errorf("incomplete %s entity %q", entity.Class, entity.ID)
 	}
-	if expected := expectedEntityID(entity); expected == "" || entity.ID != expected {
+	if expected := definition.ID(entity.Key); expected == "" || entity.ID != expected {
 		return fmt.Errorf("invalid %s entity ID %q", entity.Class, entity.ID)
 	}
 	if err := validateConfidence(entity.Confidence); err != nil {
@@ -114,7 +115,7 @@ func validateFact(fact Fact, entities map[string]Entity) error {
 }
 
 func validateConfidence(confidence float64) error {
-	if confidence < 0 || confidence > 1 {
+	if math.IsNaN(confidence) || math.IsInf(confidence, 0) || confidence < 0 || confidence > 1 {
 		return fmt.Errorf("confidence %.3f is outside [0,1]", confidence)
 	}
 	return nil

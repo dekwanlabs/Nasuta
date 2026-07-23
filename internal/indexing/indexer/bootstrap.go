@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -48,13 +49,21 @@ func BuildStructuralBundle(root string, dirs []string) domain.IndexBundle {
 }
 
 // BuildBundle builds structural records and separately sourced runbook records.
-func BuildBundle(root string, dirs []string, docStore *store.DocStore) domain.IndexBundle {
-	runbooks := IndexKnowledgeBaseFromDocStore(docStore)
+func BuildBundle(root string, dirs []string, docStore *store.DocStore) (domain.IndexBundle, error) {
+	var runbooks []domain.RunbookRecord
+	var runbookEdges []domain.DependencyEdge
+	if docStore != nil {
+		var err error
+		runbooks, runbookEdges, err = LoadKnowledgeBase(docStore)
+		if err != nil {
+			return domain.IndexBundle{}, fmt.Errorf("load knowledge base: %w", err)
+		}
+	}
 	log.Infof("[indexer] loaded %d KB docs from DocStore", len(runbooks))
 	code := ScanCode(root, dirs)
-	code.Dependencies = append(code.Dependencies, RunbookEdgesFromDocStore(docStore)...)
+	code.Dependencies = append(code.Dependencies, runbookEdges...)
 	code.Runbooks = runbooks
-	return CanonicalizeBundle(code)
+	return CanonicalizeBundle(code), nil
 }
 
 // ScanRepo builds the structural snapshot for one repository.
@@ -230,7 +239,7 @@ func canonicalDependencies(records []domain.DependencyEdge, lookup serviceLookup
 		} else {
 			edge.TargetKind = domain.DependencyTargetExternal
 			edge.TargetServiceKey = ""
-			edge.ExternalTarget = edge.To
+			edge.ExternalTarget = strings.ToLower(edge.To)
 		}
 		targetRef := edge.TargetServiceKey
 		if edge.TargetKind == domain.DependencyTargetExternal {

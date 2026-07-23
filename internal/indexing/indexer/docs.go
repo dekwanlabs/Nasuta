@@ -1,12 +1,11 @@
 package indexer
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/platform/store"
-	"github.com/dekwanlabs/nasuta/log"
 	"gopkg.in/yaml.v3"
 )
 
@@ -70,22 +69,25 @@ func extractTitle(content string) string {
 	return ""
 }
 
-// IndexKnowledgeBaseFromDocStore reads flow and schema docs from MySQL.
-// The DocStore is the sole runbook source.
-// It returns nil on missing docStore or error so retrieval can degrade gracefully.
-func IndexKnowledgeBaseFromDocStore(docStore *store.DocStore) []domain.RunbookRecord {
+// KnowledgeDocStore is the document read boundary used by workspace indexing.
+type KnowledgeDocStore interface {
+	ListDocsByKinds([]string) ([]domain.DocRecord, error)
+}
+
+// LoadKnowledgeBase builds one consistent runbook and declared-dependency view.
+func LoadKnowledgeBase(docStore KnowledgeDocStore) ([]domain.RunbookRecord, []domain.DependencyEdge, error) {
 	if docStore == nil {
-		return nil
+		return nil, nil, nil
 	}
 	docs, err := docStore.ListDocsByKinds(domain.KnowledgeDocKinds)
 	if err != nil {
-		log.Warnf("[indexer] failed to read KB docs from DocStore: %v", err)
-		return nil
+		return nil, nil, fmt.Errorf("list knowledge documents: %w", err)
 	}
 	if len(docs) == 0 {
-		return nil
+		return nil, nil, nil
 	}
-	var records []domain.RunbookRecord
+	records := make([]domain.RunbookRecord, 0, len(docs))
+	var edges []domain.DependencyEdge
 	for _, d := range docs {
 		fm := parseFrontmatter(d.Content)
 		id := fmString(fm.data, "id")
@@ -111,26 +113,6 @@ func IndexKnowledgeBaseFromDocStore(docStore *store.DocStore) []domain.RunbookRe
 			Text:        fm.content,
 			Confidence:  1,
 		})
-	}
-	return records
-}
-
-// RunbookEdgesFromDocStore extracts service dependency edges declared in runbook
-// frontmatter. A runbook names its subject via `service:`, then `depends_on:`
-// lists targets (subject → target) and `called_by:` lists callers (caller →
-// subject). Runbook-declared edges fill gaps the code scanners miss (App→Server,
-// cross-protocol, name mismatches). No subject → no edges (nothing to anchor).
-func RunbookEdgesFromDocStore(docStore *store.DocStore) []domain.DependencyEdge {
-	if docStore == nil {
-		return nil
-	}
-	docs, err := docStore.ListDocsByKinds(domain.KnowledgeDocKinds)
-	if err != nil {
-		return nil
-	}
-	var edges []domain.DependencyEdge
-	for _, d := range docs {
-		fm := parseFrontmatter(d.Content)
 		subject := fmString(fm.data, "service")
 		if subject == "" {
 			continue
@@ -147,5 +129,5 @@ func RunbookEdgesFromDocStore(docStore *store.DocStore) []domain.DependencyEdge 
 			})
 		}
 	}
-	return edges
+	return records, edges, nil
 }

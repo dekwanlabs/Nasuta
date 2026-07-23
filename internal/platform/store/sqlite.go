@@ -253,11 +253,18 @@ func (store *SQLite) ReplaceStructure(ctx context.Context, generation string, bu
 }
 
 // ReplaceWorkspace keeps structure and ontology on the same atomic file generation.
-func (store *SQLite) ReplaceWorkspace(ctx context.Context, generation string, bundle domain.IndexBundle, snapshot ontology.Snapshot) error {
+func (store *SQLite) ReplaceWorkspace(ctx context.Context, bundle domain.IndexBundle, snapshot ontology.Snapshot) (string, error) {
 	if err := ontology.ValidateSnapshot(snapshot); err != nil {
-		return fmt.Errorf("validate ontology snapshot: %w", err)
+		return "", fmt.Errorf("validate ontology snapshot: %w", err)
 	}
-	return store.replaceSnapshot(ctx, generation, bundle, &snapshot)
+	generation, err := (ontology.WorkspaceSnapshot{Structure: bundle, Ontology: snapshot}).Generation()
+	if err != nil {
+		return "", fmt.Errorf("derive workspace generation: %w", err)
+	}
+	if err := store.replaceSnapshot(ctx, generation, bundle, &snapshot); err != nil {
+		return "", err
+	}
+	return generation, nil
 }
 
 func (store *SQLite) replaceSnapshot(ctx context.Context, generation string, bundle domain.IndexBundle, snapshot *ontology.Snapshot) error {

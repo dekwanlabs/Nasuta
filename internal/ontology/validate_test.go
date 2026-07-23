@@ -1,6 +1,9 @@
 package ontology
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestValidateSnapshotRejectsInvalidRelationDomain(t *testing.T) {
 	repository := Entity{ID: RepositoryID("team/repo"), Class: ClassRepository, Key: "team/repo", Name: "team/repo", Confidence: 1}
@@ -35,5 +38,30 @@ func TestFactIDIgnoresQualifierMapOrder(t *testing.T) {
 	right := FactID("a", PredicateDependsOn, "b", map[string]string{"scope": "x", "protocol": "http"})
 	if left != right {
 		t.Fatalf("fact IDs differ: %q != %q", left, right)
+	}
+}
+
+func TestDependentQueriesRequireGeneration(t *testing.T) {
+	if err := ValidateNeighborQuery(NeighborQuery{
+		EntityIDs: []string{"service"}, Direction: DirectionOutgoing, Limit: 1,
+	}); err == nil {
+		t.Fatal("neighbor query without generation validated")
+	}
+	if err := ValidateEntityQuery(EntityQuery{IDs: []string{"service"}}); err == nil {
+		t.Fatal("entity query without generation validated")
+	}
+	if err := ValidatePathQuery(PathQuery{
+		StartID: "service", Direction: DirectionOutgoing, MaxDepth: 1, MaxNodes: 1, MaxFanout: 1,
+	}); err == nil {
+		t.Fatal("path query without generation validated")
+	}
+}
+
+func TestValidateSnapshotRejectsNonFiniteConfidence(t *testing.T) {
+	entity := Entity{
+		ID: "service-key", Class: ClassService, Key: "service-key", Name: "orders", Confidence: math.NaN(),
+	}
+	if err := ValidateSnapshot(Snapshot{SchemaVersion: CurrentSchemaVersion, Entities: []Entity{entity}}); err == nil {
+		t.Fatal("snapshot with NaN confidence validated")
 	}
 }

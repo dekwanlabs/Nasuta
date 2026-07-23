@@ -51,33 +51,22 @@ func canonicalMap(values map[string]string) string {
 	return out.String()
 }
 
-func expectedEntityID(entity Entity) string {
-	switch entity.Class {
-	case ClassRepository:
-		return RepositoryID(entity.Key)
-	case ClassService:
-		return ServiceID(entity.Key)
-	case ClassAPIEndpoint:
-		parts := strings.Split(entity.Key, "\x00")
-		if len(parts) != 3 {
+func compoundID2(build func(string, string) string) func(string) string {
+	return func(key string) string {
+		values := strings.Split(key, "\x00")
+		if len(values) != 2 {
 			return ""
 		}
-		return APIEndpointID(parts[0], parts[1], parts[2])
-	case ClassCodeSymbol:
-		parts := strings.Split(entity.Key, "\x00")
-		if len(parts) != 3 {
+		return build(values[0], values[1])
+	}
+}
+
+func compoundID3(build func(string, string, string) string) func(string) string {
+	return func(key string) string {
+		values := strings.Split(key, "\x00")
+		if len(values) != 3 {
 			return ""
 		}
-		return CodeSymbolID(parts[0], parts[1], parts[2])
-	case ClassExternalSystem:
-		return ExternalSystemID(entity.Key)
-	case ClassRunbook:
-		parts := strings.Split(entity.Key, "\x00")
-		if len(parts) != 2 {
-			return ""
-		}
-		return RunbookID(parts[0], parts[1])
-	default:
-		return ""
+		return build(values[0], values[1], values[2])
 	}
 }

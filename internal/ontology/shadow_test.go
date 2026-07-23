@@ -41,7 +41,7 @@ func TestProjectionShadowsExistingDependencyAndEndpointRecords(t *testing.T) {
 	for _, dependency := range bundle.Dependencies {
 		objectID := dependency.TargetServiceKey
 		if dependency.TargetKind == domain.DependencyTargetExternal {
-			objectID = ExternalSystemID(normalizeExternalTarget(dependency.ExternalTarget))
+			objectID = ExternalSystemID(dependency.ExternalTarget)
 		}
 		key := dependency.CallerServiceKey + "\x00" + objectID + "\x00" + string(dependency.Type)
 		if _, ok := dependencyFacts[key]; !ok {

@@ -120,7 +120,7 @@ LLM 候选在未来也必须经过 Schema 校验、实体解析、原始证据�
 - API Path 具有前导 `/`；
 - Repo、ModulePath、文件路径使用既有规范；
 - Service 使用已经生成的 `ServiceKey`；
-- 外部目标在投影入口规范化；
+- 外部目标在结构索引入口规范化；
 - 别名在写入前生成规范形式。
 
 进入 `ontology.Entity` 和 `ontology.Fact` 后，下游不再重复 Trim、Lower、兼容旧别名或补默认值。非法数据必须失败并指出来源。
@@ -161,7 +161,7 @@ Neo4j 配置错误或不可达时，本体能力应进入明确的 unavailable �
 | `service` | 现有 ServiceKey | ServiceRecord | repo、module_path、language、owner、runtime |
 | `api_endpoint` | serviceKey + method + path | EndpointRecord | method、path、file、handler |
 | `code_symbol` | repo + file + qualified/handler name | EndpointRecord/codegraph 引用 | file、qualified_name、language |
-| `external_system` | 规范化 target | DependencyEdge | target、protocol_hint |
+| `external_system` | 规范化 target | DependencyEdge | target |
 | `runbook` | runbook ID | RunbookRecord | title、path、scope、tags |
 
 第一版不创建 Database、DatabaseTable、MessageTopic、Incident、LogEvent、TraceSpan。它们必须在确定性抽取和实际查询需求成熟后单独加入。
@@ -313,9 +313,7 @@ func APIEndpointID(endpoint domain.EndpointRecord) string {
 }
 
 func ExternalSystemID(target string) string {
-    return platform.UUIDFromString(
-        "external_system\x00" + normalizeExternalTarget(target),
-    )
+    return platform.UUIDFromString("external_system\x00" + target)
 }
 
 func FactID(fact Fact) string {
@@ -359,14 +357,15 @@ func Project(bundle domain.IndexBundle) (Snapshot, error) {
         builder.AddRunbookRelations(runbook)
     }
 
-    snapshot := builder.Build()
-    return snapshot, ValidateSnapshot(snapshot)
+    return builder.Build()
 }
 ```
 
+Projector 只负责确定性投影和合并；Publisher 是正式发布边界，在写入完整 Workspace 快照前统一调用 `ValidateSnapshot`，避免生成阶段和发布阶段重复校验同一份 Snapshot。
+
 ### 7.2 Runbook 模型调整
 
-当前 `RunbookRecord` 未保存 frontmatter 中的 `service:`，投影层不能再次读取 DocStore。应在文档入口扩展：
+当前 `RunbookRecord` 未保存 frontmatter 中的 `service:`，投影层不能再次读取 DocStore。文档入口一次读取同一批 DocStore 记录，同时生成 Runbook 和声明依赖；读取失败必须中止本次发布，不能当成空知识库清除上一代事实。模型扩展为：
 
 ```go
 type RunbookRecord struct {
@@ -486,39 +485,38 @@ SQLite Adapter              Neo4j Adapter
 
 ```go
 type Repository interface {
-    Resolve(context.Context, ResolveQuery) ([]Entity, error)
-    EntitiesByID(context.Context, EntityQuery) ([]Entity, error)
+    Resolve(context.Context, ResolveQuery) (ResolveResult, error)
+    EntitiesByID(context.Context, EntityQuery) ([]EntityRef, error)
     Neighbors(context.Context, NeighborQuery) ([]Fact, bool, error)
-    FindPaths(context.Context, PathQuery) ([]Path, bool, error)
     Stats(context.Context) (Stats, error)
-    Close() error
 }
 ```
 
 `EntitiesByID` 只用于关系查询完成后批量补齐 Entity 名称和 Class，最多接收 200 个 ID。它避免 Tool 层按路径逐个解析形成 N+1 查询，不是通用实体扫描接口。
+有界路径遍历是 `internal/ontology` 基于 `Neighbors` 提供的通用算法，不要求每个 Provider 重复实现。
 
 发布契约：
 
 ```go
 type WorkspaceSnapshot struct {
-    Generation string
-    Structure  domain.IndexBundle
-    Ontology   Snapshot
+    Structure domain.IndexBundle
+    Ontology  Snapshot
 }
 
 type Publisher interface {
-    PublishWorkspace(context.Context, WorkspaceSnapshot) error
+    PublishWorkspace(context.Context, WorkspaceSnapshot) (generation string, err error)
 }
 
 type Backend interface {
     Repository
     Publisher
+    Close() error
 }
 ```
 
-`Generation` 由排序后的 `repo + HEAD SHA` 集合确定性生成。SQLite Backend 在一个临时数据库中发布两部分；Neo4j Backend 协调结构 SQLite 和 Neo4j 代际快照，并用 Generation 阻止跨版本本体查询。
+`Generation` 对规范化后的完整 Structure 与 Ontology Snapshot 做确定性摘要，忽略 `IndexedAt` 这类刷新时间，不作为第二份可变字段保存。这样 Runbook、结构元数据或本体事实变化都会切换 Generation，而相同内容的重复构建保持稳定。Publisher 返回实际发布的 Generation，避免调用方和存储层重复计算。SQLite Backend 在一个临时数据库中发布两部分；Neo4j Backend 协调结构 SQLite 和 Neo4j 代际快照，并用 Generation 阻止跨版本本体查询。
 
-一次关系查询先从 `Stats` 固定 Generation，随后把 Generation 传给 Resolve、Neighbors 和 EntitiesByID。若发布恰好发生在调用之间，Repository 返回 `ErrStaleSnapshot`，Service 最多从头重试一次，禁止拼接两个快照的数据。
+一次关系查询由 `Resolve` 返回命中的实体和本次读取的 Generation，随后把 Generation 传给 Neighbors 和 EntitiesByID。若发布恰好发生在调用之间，Repository 返回 `ErrStaleSnapshot`，Service 最多从头重试一次，禁止拼接两个快照的数据。Stats 只服务健康与统计，不参与普通关系查询。
 
 禁止暴露：
 
@@ -547,11 +545,22 @@ type ResolveQuery struct {
     Limit   int
 }
 
+type ResolveResult struct {
+    Generation string
+    Entities   []EntityRef
+}
+
+type EntityQuery struct {
+    IDs        []string
+    Generation string
+}
+
 type NeighborQuery struct {
     EntityIDs  []string
     Predicates []Predicate
     Direction  Direction
     Limit      int
+    Generation string
 }
 
 type PathQuery struct {
@@ -562,6 +571,7 @@ type PathQuery struct {
     MaxDepth   int
     MaxNodes   int
     MaxFanout  int
+    Generation string
 }
 ```
 
@@ -679,13 +689,12 @@ func (store *SQLite) ReplaceStructure(
 
 func (store *SQLite) ReplaceWorkspace(
     ctx context.Context,
-    generation string,
     bundle domain.IndexBundle,
     ontologySnapshot ontology.Snapshot,
-) error
+) (generation string, err error)
 ```
 
-SQLite Ontology Backend 调用 `ReplaceWorkspace`；Neo4j Backend 调用 `ReplaceStructure` 后发布 Neo4j Snapshot。两个方法共享内部临时数据库写入机制，但对调用方表达不同的不变量，不保留含糊的通用 `ReplaceAll`。
+SQLite Ontology Backend 调用 `ReplaceWorkspace`，由 Store 从完整 Workspace 派生并返回 Generation；Neo4j Backend 调用 `ReplaceStructure` 后发布 Neo4j Snapshot。两个方法共享内部临时数据库写入机制，但对调用方表达不同的不变量，不保留含糊的通用 `ReplaceAll`。
 
 发布流程：
 
@@ -739,13 +748,13 @@ type Neo4jConfig struct {
 环境配置建议与现有 Semantic Provider 风格一致：
 
 ```text
-ONTOLOGY_PROVIDER=sqlite
+NASUTA_ONTOLOGY_PROVIDER=sqlite
 
-# ONTOLOGY_PROVIDER=neo4j
-# ONTOLOGY_NEO4J_URI=neo4j://localhost:7687
-# ONTOLOGY_NEO4J_USERNAME=neo4j
-# ONTOLOGY_NEO4J_PASSWORD=replace-me
-# ONTOLOGY_NEO4J_DATABASE=neo4j
+# NASUTA_ONTOLOGY_PROVIDER=neo4j
+# NASUTA_ONTOLOGY_NEO4J_URI=neo4j://localhost:7687
+# NASUTA_ONTOLOGY_NEO4J_USERNAME=neo4j
+# NASUTA_ONTOLOGY_NEO4J_PASSWORD=replace-me
+# NASUTA_ONTOLOGY_NEO4J_DATABASE=neo4j
 ```
 
 密码不能出现在日志、Dashboard 返回或错误详情中。
@@ -758,7 +767,7 @@ func New(
     sqliteDB *store.SQLite,
 ) (ontology.Backend, error) {
     switch cfg.Provider {
-    case "", "sqlite":
+    case "sqlite":
         return sqlite.New(sqliteDB), nil
     case "neo4j":
         return neo4j.New(sqliteDB, cfg.Neo4j)
@@ -813,7 +822,7 @@ Evidence 可以作为受 Fact ID 约束的独立节点或关系属性列表。Ad
 Neo4j 不具备 SQLite 文件 rename 语义，且结构数据仍在 SQLite，因此使用 Generation 门控的代际快照：
 
 ```text
-生成 WorkspaceSnapshot Generation
+从 WorkspaceSnapshot.Structure 派生 Generation
 → 原子发布结构 SQLite（不写 ontology_* 事实）
 → 在 Neo4j 创建 building snapshot
 → 带 snapshot_id/generation 批量写 Entity 和 Fact
@@ -839,9 +848,8 @@ Neo4j 不具备 SQLite 文件 rename 语义，且结构数据仍在 SQLite，因
 
 ```go
 workspace := ontology.WorkspaceSnapshot{
-    Generation: generationFor(bundle.Repositories),
-    Structure:  bundle,
-    Ontology:   snapshot,
+    Structure: bundle,
+    Ontology:  snapshot,
 }
 if err := backend.PublishWorkspace(ctx, workspace); err != nil {
     return fmt.Errorf("publish workspace snapshot: %w", err)
@@ -927,7 +935,6 @@ query_relations
       "predicate": "exposes",
       "object": "POST /orders",
       "depth": 1,
-      "direct": true,
       "confidence": 0.95,
       "evidence": [
         {
@@ -942,7 +949,6 @@ query_relations
       "predicate": "depends_on",
       "object": "payment-service",
       "depth": 1,
-      "direct": true,
       "qualifiers": {"protocol": "feign"},
       "confidence": 0.9,
       "evidence": [
@@ -1041,7 +1047,7 @@ query_relations
 
 - SQLite Schema 升级；
 - 本体表写入；
-- Resolve/Neighbors/FindPaths；
+- Resolve/Neighbors，以及基于 Neighbors 的通用 FindBoundedPaths；
 - 与结构化数据同快照发布；
 - Repository 查询合同和 Backend 发布合同测试。
 
@@ -1231,7 +1237,7 @@ SQLite 在普通测试中运行。Neo4j 合同测试需要显式环境开关和�
 
 - 输入规范化和预算校验；
 - 多候选实体消歧输出；
-- direct/path 标识；
+- depth 与基础 Fact 的路径语义；
 - truncated 传播；
 - unavailable Provider 行为；
 - 不泄漏内部存储错误和凭证；
@@ -1280,7 +1286,7 @@ SQLite 在普通测试中运行。Neo4j 合同测试需要显式环境开关和�
 | 过早通用化接口 | 难用且限制 Neo4j | 只支持 Resolve/Neighbors/Bounded Path |
 | LLM 事实污染 | 概率猜测变成确定事实 | 第一阶段禁止 LLM 正式写入 |
 | 双写不一致 | Provider 结果分裂 | 单 Provider，禁止生产双写 |
-| 多跳被当成直接依赖 | 错误影响分析 | direct/path 明确分离 |
+| 多跳被当成直接依赖 | 错误影响分析 | 用 depth 和基础 Fact 明确表达路径 |
 | Neo4j 失败静默回退 | 配置与实际行为不一致 | 显式错误和 unavailable，不替换 Provider |
 | SQLite 高 Fanout | 查询抖动/内存增长 | 批量 BFS、MaxDepth/Nodes/Fanout |
 | Schema 一次扩得过大 | 抽取质量低、维护成本高 | 第一版只覆盖已有稳定数据 |
@@ -1298,7 +1304,7 @@ SQLite 在普通测试中运行。Neo4j 合同测试需要显式环境开关和�
 6. 相同输入重复索引后 Entity ID、Fact ID 完全稳定。
 7. 所有 Fact 通过 Schema、引用和属性白名单校验。
 8. 结构数据和本体数据在同一个 SQLite 快照原子发布。
-9. Resolve/Neighbors/FindPaths 全部有存储层 Limit 和服务层预算。
+9. Resolve/Neighbors 有存储层 Limit，FindBoundedPaths 有服务层深度、节点和 Fanout 预算。
 10. 多跳结果携带深度和基础事实，不伪装为直接事实。
 11. `query_relations` 返回 Evidence、Confidence 和 truncated。
 12. Provider 配置只有一个显式分发点，无静默后端替换。

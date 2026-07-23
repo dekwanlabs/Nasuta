@@ -49,7 +49,8 @@ type Service struct {
 	ScanDirs  []string
 	publisher ontology.Publisher
 
-	docDB *store.DocStore
+	docDB       *store.DocStore
+	docStoreErr error
 
 	VCS    *indexer.Client
 	Syncer *indexer.Syncer
@@ -106,12 +107,17 @@ func Build(cfg config.Config) (*Service, error) {
 	embedder := embed.New(cfg)
 	g := graph.New()
 	docDB, err := store.OpenDocStore(config.LoadMySQLDSN())
+	var docStoreErr error
 	if err != nil {
 		log.Warnf("[build] doc store disabled: %v", err)
+		docStoreErr = err
 		docDB = nil
 	}
 
-	svc := &Service{Cfg: cfg, DB: db, Semantic: semanticBackend, Embedder: embedder, Graph: g, docDB: docDB, Platform: &config.PlatformSettings{}}
+	svc := &Service{
+		Cfg: cfg, DB: db, Semantic: semanticBackend, Embedder: embedder, Graph: g,
+		docDB: docDB, docStoreErr: docStoreErr, Platform: &config.PlatformSettings{},
+	}
 	svc.loadBM25()
 	svc.ScanDirs = svc.LoadScanDirs()
 	if err := svc.reloadDependencyGraph(context.Background()); err != nil {
@@ -188,12 +194,16 @@ func (svc *Service) reloadDependencyGraph(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reload dependency graph: read edges: %w", err)
 	}
+	svc.applyDependencyGraph(edges)
+	return nil
+}
+
+func (svc *Service) applyDependencyGraph(edges []domain.DependencyEdge) {
 	svc.Graph.Rebuild(edges)
-	log.Infof("[dependency-graph] reloaded from SQLite: edges=%d", len(edges))
+	log.Infof("[dependency-graph] applied snapshot: edges=%d", len(edges))
 	if svc.tools != nil {
 		svc.tools.InvalidateServices()
 	}
-	return nil
 }
 
 func (svc *Service) RebuildGraph(ctx context.Context) error {
@@ -503,11 +513,13 @@ func (svc *Service) EmbedDocs(ctx context.Context) error {
 	}
 	docgen.New(svc.Cfg, svc.Platform, svc.docDB).GenerateDocs(ctx, []string{svc.Cfg.WorkspaceRoot})
 
-	if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{Repository: "docs"}); err != nil {
-		log.Warnf("[embed] delete docs-repo vectors: %v", err)
+	runbooks, _, err := indexer.LoadKnowledgeBase(svc.docDB)
+	if err != nil {
+		return fmt.Errorf("load runbooks: %w", err)
 	}
-
-	runbooks := indexer.IndexKnowledgeBaseFromDocStore(svc.docDB)
+	if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{Repository: "docs"}); err != nil {
+		return fmt.Errorf("delete docs-repo vectors: %w", err)
+	}
 	if err := svc.embedRunbooks(ctx, runbooks); err != nil {
 		return fmt.Errorf("embed runbooks: %w", err)
 	}
@@ -930,7 +942,10 @@ func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 	started := time.Now()
 	svc.ScanDirs = svc.LoadScanDirs()
 	log.Infof("[rebuild-sql] scanning %s (dirs: %v)", svc.Cfg.WorkspaceRoot, svc.ScanDirs)
-	bundle := indexer.BuildBundle(svc.Cfg.WorkspaceRoot, svc.ScanDirs, svc.docDB)
+	bundle, err := svc.buildWorkspaceBundle()
+	if err != nil {
+		return err
+	}
 	log.Infof("[rebuild-sql] scan complete after %s: services=%d endpoints=%d dependencies=%d",
 		time.Since(started).Round(time.Millisecond), len(bundle.Services), len(bundle.Endpoints), len(bundle.Dependencies))
 	if err := svc.attachRepositorySnapshots(ctx, &bundle); err != nil {
@@ -941,9 +956,7 @@ func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 		return err
 	}
 	log.Infof("[rebuild-sql] snapshot published after %s", time.Since(started).Round(time.Millisecond))
-	if err := svc.reloadDependencyGraph(ctx); err != nil {
-		return err
-	}
+	svc.applyDependencyGraph(bundle.Dependencies)
 	log.Infof("[rebuild-sql] completed after %s: services=%d endpoints=%d dependencies=%d",
 		time.Since(started).Round(time.Millisecond), len(bundle.Services), len(bundle.Endpoints), len(bundle.Dependencies))
 	return nil
@@ -952,16 +965,17 @@ func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 // Bootstrap rebuilds the workspace index end to end.
 func (svc *Service) Bootstrap(ctx context.Context) error {
 	log.Infof("[bootstrap] scanning %s (dirs: %v)", svc.Cfg.WorkspaceRoot, svc.ScanDirs)
-	bundle := indexer.BuildBundle(svc.Cfg.WorkspaceRoot, svc.ScanDirs, svc.docDB)
+	bundle, err := svc.buildWorkspaceBundle()
+	if err != nil {
+		return err
+	}
 	if err := svc.attachRepositorySnapshots(ctx, &bundle); err != nil {
 		return err
 	}
 	if err := svc.publishWorkspace(ctx, bundle); err != nil {
 		return err
 	}
-	if err := svc.reloadDependencyGraph(ctx); err != nil {
-		return err
-	}
+	svc.applyDependencyGraph(bundle.Dependencies)
 	log.Infof("[bootstrap] services=%d endpoints=%d dependencies=%d runbooks=%d",
 		len(bundle.Services), len(bundle.Endpoints), len(bundle.Dependencies), len(bundle.Runbooks))
 
@@ -976,7 +990,7 @@ func (svc *Service) Bootstrap(ctx context.Context) error {
 	}
 	// Clear the shared docs bucket first so deleted or re-keyed doc chunks do not linger.
 	if err := svc.Semantic.Delete(ctx, semantic.DeleteQuery{Repository: "docs"}); err != nil {
-		log.Warnf("[bootstrap] delete docs runbook vectors: %v", err)
+		return fmt.Errorf("delete docs runbook vectors: %w", err)
 	}
 	if err := svc.embedRunbooks(ctx, bundle.Runbooks); err != nil {
 		return fmt.Errorf("embed runbooks: %w", err)
@@ -989,6 +1003,13 @@ func (svc *Service) Bootstrap(ctx context.Context) error {
 	return nil
 }
 
+func (svc *Service) buildWorkspaceBundle() (domain.IndexBundle, error) {
+	if svc.docStoreErr != nil {
+		return domain.IndexBundle{}, fmt.Errorf("document store unavailable: %w", svc.docStoreErr)
+	}
+	return indexer.BuildBundle(svc.Cfg.WorkspaceRoot, svc.ScanDirs, svc.docDB)
+}
+
 func (svc *Service) publishWorkspace(ctx context.Context, bundle domain.IndexBundle) error {
 	if svc.publisher == nil {
 		return fmt.Errorf("ontology publisher is not configured")
@@ -997,11 +1018,10 @@ func (svc *Service) publishWorkspace(ctx context.Context, bundle domain.IndexBun
 	if err != nil {
 		return fmt.Errorf("project ontology snapshot: %w", err)
 	}
-	generation := ontology.GenerationFor(bundle.Repositories)
-	if err := svc.publisher.PublishWorkspace(ctx, ontology.WorkspaceSnapshot{
-		Generation: generation, Structure: bundle, Ontology: snapshot,
-	}); err != nil {
-		return fmt.Errorf("publish workspace snapshot %q: %w", generation, err)
+	workspace := ontology.WorkspaceSnapshot{Structure: bundle, Ontology: snapshot}
+	generation, err := svc.publisher.PublishWorkspace(ctx, workspace)
+	if err != nil {
+		return fmt.Errorf("publish workspace snapshot: %w", err)
 	}
 	log.Infof("[ontology] published generation=%s entities=%d facts=%d", generation, len(snapshot.Entities), len(snapshot.Facts))
 	return nil

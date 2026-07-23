@@ -45,8 +45,7 @@ func Project(bundle domain.IndexBundle) (Snapshot, error) {
 	for _, dependency := range bundle.Dependencies {
 		objectID := dependency.TargetServiceKey
 		if dependency.TargetKind == domain.DependencyTargetExternal {
-			target := normalizeExternalTarget(dependency.ExternalTarget)
-			external := externalSystemEntity(target, dependency)
+			external := externalSystemEntity(dependency.ExternalTarget, dependency)
 			build.addEntity(external)
 			objectID = external.ID
 		}
@@ -148,9 +147,5 @@ func ontologyEvidence(records []domain.Evidence) []Evidence {
 }
 
 func normalizedAlias(value string) string {
-	return platform.Normalize(strings.TrimSpace(value))
-}
-
-func normalizeExternalTarget(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
+	return platform.Normalize(value)
 }

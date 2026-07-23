@@ -3,8 +3,8 @@ package ontology
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sort"
+	"strings"
 )
 
 type RelationQuery struct {
@@ -17,12 +17,6 @@ type RelationQuery struct {
 	MaxFanout   int
 }
 
-type EntityRef struct {
-	ID    string `json:"id"`
-	Class Class  `json:"class"`
-	Name  string `json:"name"`
-}
-
 type RelationFact struct {
 	ID         string            `json:"id"`
 	Subject    EntityRef         `json:"subject"`
@@ -32,7 +26,6 @@ type RelationFact struct {
 	Confidence float64           `json:"confidence"`
 	Evidence   []Evidence        `json:"evidence"`
 	Depth      int               `json:"depth"`
-	Direct     bool              `json:"direct"`
 }
 
 type RelationResult struct {
@@ -53,16 +46,11 @@ func NewService(repository Repository) *Service {
 }
 
 func (service *Service) Stats(ctx context.Context) (Stats, error) {
-	if service == nil || service.repository == nil {
-		return Stats{}, ErrUnavailable
-	}
 	return service.repository.Stats(ctx)
 }
 
 func (service *Service) QueryRelations(ctx context.Context, query RelationQuery) (RelationResult, error) {
-	if service == nil || service.repository == nil {
-		return RelationResult{}, ErrUnavailable
-	}
+	query = canonicalRelationQuery(query)
 	result, err := service.queryRelations(ctx, query)
 	if errors.Is(err, ErrStaleSnapshot) {
 		return service.queryRelations(ctx, query)
@@ -71,42 +59,30 @@ func (service *Service) QueryRelations(ctx context.Context, query RelationQuery)
 }
 
 func (service *Service) queryRelations(ctx context.Context, query RelationQuery) (RelationResult, error) {
-	stats, err := service.repository.Stats(ctx)
-	if err != nil {
-		return RelationResult{}, err
-	}
 	classes := []Class(nil)
 	if query.EntityClass != "" {
-		if _, ok := classSchema[query.EntityClass]; !ok {
-			return RelationResult{}, fmt.Errorf("unsupported ontology class %q", query.EntityClass)
-		}
 		classes = []Class{query.EntityClass}
 	}
-	for _, predicate := range query.Predicates {
-		if _, ok := relationSchema[predicate]; !ok {
-			return RelationResult{}, fmt.Errorf("unsupported ontology predicate %q", predicate)
-		}
-	}
-	resolved, err := service.repository.Resolve(ctx, ResolveQuery{Text: query.Entity, Classes: classes, Limit: 20, Generation: stats.Generation})
+	resolved, err := service.repository.Resolve(ctx, ResolveQuery{Text: query.Entity, Classes: classes, Limit: 20})
 	if err != nil {
 		return RelationResult{}, err
 	}
 	result := RelationResult{Entities: []EntityRef{}, Facts: []RelationFact{}}
-	if len(resolved) != 1 {
-		result.Candidates = entityRefs(resolved)
+	if len(resolved.Entities) != 1 {
+		result.Candidates = resolved.Entities
 		return result, nil
 	}
-	root := entityRef(resolved[0])
+	root := resolved.Entities[0]
 	result.Root = &root
-	paths, truncated, err := service.repository.FindPaths(ctx, PathQuery{
+	paths, truncated, err := FindBoundedPaths(ctx, service.repository, PathQuery{
 		StartID: root.ID, Predicates: query.Predicates, Direction: query.Direction,
-		MaxDepth: query.MaxDepth, MaxNodes: query.MaxNodes, MaxFanout: query.MaxFanout, Generation: stats.Generation,
+		MaxDepth: query.MaxDepth, MaxNodes: query.MaxNodes, MaxFanout: query.MaxFanout, Generation: resolved.Generation,
 	})
 	if err != nil {
 		return RelationResult{}, err
 	}
 	result.Truncated = truncated
-	return service.hydrateResult(ctx, stats.Generation, result, paths)
+	return service.hydrateResult(ctx, resolved.Generation, result, paths)
 }
 
 func (service *Service) hydrateResult(ctx context.Context, generation string, result RelationResult, paths []Path) (RelationResult, error) {
@@ -131,18 +107,21 @@ func (service *Service) hydrateResult(ctx context.Context, generation string, re
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	entities, err := service.repository.EntitiesByID(ctx, EntityQuery{IDs: ids, Generation: generation})
-	if err != nil {
-		return RelationResult{}, err
+	if len(ids) > 0 {
+		entities, err := service.repository.EntitiesByID(ctx, EntityQuery{IDs: ids, Generation: generation})
+		if err != nil {
+			return RelationResult{}, err
+		}
+		for _, entity := range entities {
+			result.Entities = append(result.Entities, entity)
+		}
 	}
-	byID := make(map[string]EntityRef, len(entities)+1)
+	byID := make(map[string]EntityRef, len(result.Entities)+1)
 	if result.Root != nil {
 		byID[result.Root.ID] = *result.Root
 	}
-	for _, entity := range entities {
-		ref := entityRef(entity)
-		byID[entity.ID] = ref
-		result.Entities = append(result.Entities, ref)
+	for _, entity := range result.Entities {
+		byID[entity.ID] = entity
 	}
 	factIDs := make([]string, 0, len(facts))
 	for id := range facts {
@@ -155,25 +134,31 @@ func (service *Service) hydrateResult(ctx context.Context, generation string, re
 			ID: item.fact.ID, Subject: byID[item.fact.SubjectID], Predicate: item.fact.Predicate,
 			Object: byID[item.fact.ObjectID], Qualifiers: item.fact.Qualifiers,
 			Confidence: item.fact.Confidence, Evidence: item.fact.Evidence,
-			Depth: item.depth, Direct: true,
+			Depth: item.depth,
 		})
 	}
 	return result, nil
 }
 
+func canonicalRelationQuery(query RelationQuery) RelationQuery {
+	query.Entity = strings.TrimSpace(query.Entity)
+	query.EntityClass = Class(strings.ToLower(strings.TrimSpace(string(query.EntityClass))))
+	query.Direction = Direction(strings.ToLower(strings.TrimSpace(string(query.Direction))))
+	predicates := make([]Predicate, 0, len(query.Predicates))
+	seen := make(map[Predicate]struct{}, len(query.Predicates))
+	for _, predicate := range query.Predicates {
+		predicate = Predicate(strings.ToLower(strings.TrimSpace(string(predicate))))
+		if _, duplicate := seen[predicate]; duplicate {
+			continue
+		}
+		seen[predicate] = struct{}{}
+		predicates = append(predicates, predicate)
+	}
+	query.Predicates = predicates
+	return query
+}
+
 type factDepth struct {
 	fact  Fact
 	depth int
-}
-
-func entityRefs(entities []Entity) []EntityRef {
-	refs := make([]EntityRef, 0, len(entities))
-	for _, entity := range entities {
-		refs = append(refs, entityRef(entity))
-	}
-	return refs
-}
-
-func entityRef(entity Entity) EntityRef {
-	return EntityRef{ID: entity.ID, Class: entity.Class, Name: entity.Name}
 }

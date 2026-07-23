@@ -221,7 +221,7 @@ func relationTool(svc *Service) Tool {
 			for _, value := range argStrings(args, "relations") {
 				predicates = append(predicates, ontology.Predicate(value))
 			}
-			result, err := svc.QueryRelations(ctx, ontology.RelationQuery{
+			result, err := svc.ontology.QueryRelations(ctx, ontology.RelationQuery{
 				Entity: argStr(args, "entity", ""), EntityClass: ontology.Class(argStr(args, "entity_class", "")),
 				Predicates: predicates, Direction: ontology.Direction(argStr(args, "direction", "outgoing")),
 				MaxDepth: argInt(args, "max_depth", 2), MaxNodes: argInt(args, "max_nodes", 50),

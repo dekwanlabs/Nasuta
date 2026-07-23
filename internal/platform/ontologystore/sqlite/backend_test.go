@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,17 +17,17 @@ func TestBackendPublishesAndQueriesBoundedOntology(t *testing.T) {
 	backend := testBackend(t)
 	ctx := context.Background()
 
-	entities, err := backend.Resolve(ctx, ontology.ResolveQuery{Text: "orders", Classes: []ontology.Class{ontology.ClassService}, Limit: 5})
+	resolved, err := backend.Resolve(ctx, ontology.ResolveQuery{Text: "orders", Classes: []ontology.Class{ontology.ClassService}, Limit: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entities) != 1 || entities[0].Name != "orders" {
-		t.Fatalf("resolved entities = %#v", entities)
+	if len(resolved.Entities) != 1 || resolved.Entities[0].Name != "orders" {
+		t.Fatalf("resolved entities = %#v", resolved.Entities)
 	}
 
 	facts, truncated, err := backend.Neighbors(ctx, ontology.NeighborQuery{
-		EntityIDs: []string{entities[0].ID}, Predicates: []ontology.Predicate{ontology.PredicateDependsOn},
-		Direction: ontology.DirectionOutgoing, Limit: 10,
+		EntityIDs: []string{resolved.Entities[0].ID}, Predicates: []ontology.Predicate{ontology.PredicateDependsOn},
+		Direction: ontology.DirectionOutgoing, Limit: 10, Generation: resolved.Generation,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -35,9 +36,9 @@ func TestBackendPublishesAndQueriesBoundedOntology(t *testing.T) {
 		t.Fatalf("facts=%#v truncated=%v", facts, truncated)
 	}
 
-	paths, truncated, err := backend.FindPaths(ctx, ontology.PathQuery{
-		StartID: entities[0].ID, Predicates: []ontology.Predicate{ontology.PredicateDependsOn},
-		Direction: ontology.DirectionOutgoing, MaxDepth: 3, MaxNodes: 20, MaxFanout: 10,
+	paths, truncated, err := ontology.FindBoundedPaths(ctx, backend, ontology.PathQuery{
+		StartID: resolved.Entities[0].ID, Predicates: []ontology.Predicate{ontology.PredicateDependsOn},
+		Direction: ontology.DirectionOutgoing, MaxDepth: 3, MaxNodes: 20, MaxFanout: 10, Generation: resolved.Generation,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -73,14 +74,54 @@ func TestBackendPublishesAndQueriesBoundedOntology(t *testing.T) {
 func TestBackendReportsTruncationAtStorageLimit(t *testing.T) {
 	backend := testBackend(t)
 	ordersID := platform.UUIDFromString("team/orders\x00.")
+	stats, err := backend.Stats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	facts, truncated, err := backend.Neighbors(context.Background(), ontology.NeighborQuery{
-		EntityIDs: []string{ordersID}, Direction: ontology.DirectionBoth, Limit: 1,
+		EntityIDs: []string{ordersID}, Direction: ontology.DirectionBoth, Limit: 1, Generation: stats.Generation,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !truncated || len(facts) != 1 {
 		t.Fatalf("facts=%d truncated=%v", len(facts), truncated)
+	}
+}
+
+func TestBackendRejectsReadsFromReplacedGeneration(t *testing.T) {
+	backend := testBackend(t)
+	resolved, err := backend.Resolve(context.Background(), ontology.ResolveQuery{
+		Text: "orders", Classes: []ontology.Class{ontology.ClassService}, Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orders := ontologyTestService("team/orders", "orders")
+	orders.Owner = "new-owner"
+	bundle := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{{
+			Repo: orders.Repo, HeadSHA: "orders-sha", IndexedAt: time.Now().UnixMilli(),
+		}},
+		Services: []domain.ServiceRecord{orders},
+	}
+	snapshot, err := ontology.Project(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.PublishWorkspace(context.Background(), ontology.WorkspaceSnapshot{
+		Structure: bundle, Ontology: snapshot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = backend.Neighbors(context.Background(), ontology.NeighborQuery{
+		EntityIDs: []string{resolved.Entities[0].ID}, Direction: ontology.DirectionOutgoing,
+		Limit: 10, Generation: resolved.Generation,
+	})
+	if !errors.Is(err, ontology.ErrStaleSnapshot) {
+		t.Fatalf("old generation read error = %v", err)
 	}
 }
 
@@ -111,10 +152,8 @@ func testBackend(t *testing.T) *Backend {
 		t.Fatal(err)
 	}
 	backend := New(db)
-	workspace := ontology.WorkspaceSnapshot{
-		Generation: ontology.GenerationFor(bundle.Repositories), Structure: bundle, Ontology: snapshot,
-	}
-	if err := backend.PublishWorkspace(context.Background(), workspace); err != nil {
+	workspace := ontology.WorkspaceSnapshot{Structure: bundle, Ontology: snapshot}
+	if _, err := backend.PublishWorkspace(context.Background(), workspace); err != nil {
 		t.Fatal(err)
 	}
 	return backend
