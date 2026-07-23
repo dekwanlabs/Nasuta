@@ -76,7 +76,7 @@ func New() (*Platform, error) {
 	knowledgeService := agent.NewTools(agent.Deps{
 		DB: index.DB, Graph: index.Graph, Semantic: index.Semantic,
 		Embedder: index.Embedder, WorkspaceRoot: cfg.WorkspaceRoot, DocStore: index.DocDB(),
-		CallChain: callChainService,
+		CallChain: callChainService, Ontology: ontology.NewService(ontologyBackend),
 	})
 	index.SetTools(knowledgeService)
 	knowledgeService.SetWebSearchEngine(cfg.WebSearchEngine)

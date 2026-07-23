@@ -8,6 +8,7 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -170,6 +171,9 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 			}),
 		},
 	}
+	if svc.ontology != nil {
+		tools = append(tools, relationTool(svc))
+	}
 
 	if !cfg.WebSearchEnabled {
 		return tools
@@ -195,6 +199,40 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		},
 	)
 	return tools
+}
+
+func relationTool(svc *Service) Tool {
+	return Tool{
+		ID: "query_relations",
+		Description: "Query evidence-backed relationships in the current indexed ontology across services, APIs, symbols, dependencies, and runbooks. " +
+			"Multi-hop paths show reachability rather than a new direct fact; an empty result only means the current snapshot has no matching evidence, and truncated results are incomplete.",
+		Kind: ToolKindRead,
+		InputSchema: objectSchema(map[string]any{
+			"entity":       propString("Entity name, canonical key, alias, or ID."),
+			"entity_class": propString("Optional class: repository | service | api_endpoint | code_symbol | external_system | runbook."),
+			"relations":    propStringArray("Optional predicates: contains, exposes, implemented_by, depends_on, documented_by."),
+			"direction":    propString("outgoing | incoming | both (default outgoing)."),
+			"max_depth":    propInt("Traversal depth 1-5 (default 2)."),
+			"max_nodes":    propInt("Distinct node budget 1-500 (default 50)."),
+			"max_fanout":   propInt("Per-node fact budget 1-100 (default 20)."),
+		}, []string{"entity"}),
+		Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
+			predicates := make([]ontology.Predicate, 0)
+			for _, value := range argStrings(args, "relations") {
+				predicates = append(predicates, ontology.Predicate(value))
+			}
+			result, err := svc.QueryRelations(ctx, ontology.RelationQuery{
+				Entity: argStr(args, "entity", ""), EntityClass: ontology.Class(argStr(args, "entity_class", "")),
+				Predicates: predicates, Direction: ontology.Direction(argStr(args, "direction", "outgoing")),
+				MaxDepth: argInt(args, "max_depth", 2), MaxNodes: argInt(args, "max_nodes", 50),
+				MaxFanout: argInt(args, "max_fanout", 20),
+			})
+			if err != nil {
+				return "", err
+			}
+			return marshalResult(result)
+		}),
+	}
 }
 
 func stringHandler(run func(context.Context, tool.Arguments) (string, error)) tool.Handler {
@@ -223,6 +261,10 @@ func propInt(desc string) map[string]any {
 	return map[string]any{"type": "integer", "description": desc}
 }
 
+func propStringArray(desc string) map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
+}
+
 func argStr(args tool.Arguments, key, fallback string) string {
 	if value := args.String(key); value != "" {
 		return value
@@ -232,6 +274,17 @@ func argStr(args tool.Arguments, key, fallback string) string {
 
 func argInt(args tool.Arguments, key string, fallback int) int {
 	return args.Int(key, fallback)
+}
+
+func argStrings(args tool.Arguments, key string) []string {
+	value, _ := args[key].([]any)
+	out := make([]string, 0, len(value))
+	for _, item := range value {
+		if text, ok := item.(string); ok && text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
 }
 
 func clampInt(value, low, high int) int {

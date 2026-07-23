@@ -14,6 +14,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
@@ -35,6 +36,7 @@ type Deps struct {
 	// DocStore is optional in deployments without MySQL.
 	DocStore  docStore
 	CallChain *callchain.Service
+	Ontology  *ontology.Service
 }
 
 // docStore is the runbook-facing subset of the document store.
@@ -53,6 +55,7 @@ type Service struct {
 	workspaceRoot         string
 	docStore              docStore
 	callChain             *callchain.Service
+	ontology              *ontology.Service
 	bm25                  atomic.Pointer[retrieval.BM25Builder]
 	mergedSvcCache        atomic.Pointer[[]domain.ServiceRecord]
 	denseWarnOnce         sync.Once
@@ -72,7 +75,15 @@ func NewTools(d Deps) *Service {
 		workspaceRoot: d.WorkspaceRoot,
 		docStore:      d.DocStore,
 		callChain:     d.CallChain,
+		ontology:      d.Ontology,
 	}
+}
+
+func (srv *Service) QueryRelations(ctx context.Context, query ontology.RelationQuery) (ontology.RelationResult, error) {
+	if srv.ontology == nil {
+		return ontology.RelationResult{}, ontology.ErrUnavailable
+	}
+	return srv.ontology.QueryRelations(ctx, query)
 }
 
 func (srv *Service) SetBM25(b *retrieval.BM25Builder) { srv.bm25.Store(b) }
@@ -781,7 +792,7 @@ func (srv *Service) IndexSummary(ctx context.Context) map[string]any {
 			"error":           err.Error(),
 		}
 	}
-	return map[string]any{
+	result := map[string]any{
 		"services":        sm.Services,
 		"endpoints":       sm.Endpoints,
 		"dependencies":    sm.Dependencies,
@@ -789,6 +800,20 @@ func (srv *Service) IndexSummary(ctx context.Context) map[string]any {
 		"repos":           sm.Repos,
 		"semanticEnabled": srv.semanticEnabled(),
 	}
+	if srv.ontology == nil {
+		result["ontology"] = map[string]any{"enabled": false, "status": "unavailable"}
+		return result
+	}
+	stats, ontologyErr := srv.ontology.Stats(ctx)
+	if ontologyErr != nil {
+		result["ontology"] = map[string]any{"enabled": false, "status": "unavailable", "error": ontologyErr.Error()}
+		return result
+	}
+	result["ontology"] = map[string]any{
+		"enabled": true, "status": "available", "generation": stats.Generation,
+		"entities": stats.Entities, "facts": stats.Facts, "evidence": stats.Evidence,
+	}
+	return result
 }
 
 // runbookCount returns the number of runbooks in the DocStore, or 0 when

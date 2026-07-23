@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/ontology"
 )
 
 func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
@@ -36,3 +38,58 @@ func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 		}
 	}
 }
+
+func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
+	without := builtinTools(&Service{}, config.Config{})
+	for _, candidate := range without {
+		if candidate.ID == "query_relations" {
+			t.Fatal("query_relations registered without ontology service")
+		}
+	}
+
+	svc := &Service{ontology: ontology.NewService(staticOntologyRepository{})}
+	tools := builtinTools(svc, config.Config{})
+	var relation *Tool
+	for i := range tools {
+		if tools[i].ID == "query_relations" {
+			relation = &tools[i]
+			break
+		}
+	}
+	if relation == nil {
+		t.Fatal("query_relations was not registered")
+	}
+	result, err := relation.Handler.Execute(context.Background(), map[string]any{
+		"entity": "orders", "relations": []any{"depends_on"}, "max_depth": 2, "max_nodes": 20, "max_fanout": 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, `"name": "payments"`) || !strings.Contains(result.Content, `"direct": true`) {
+		t.Fatalf("tool output = %s", result.Content)
+	}
+}
+
+type staticOntologyRepository struct{}
+
+func (staticOntologyRepository) Resolve(context.Context, ontology.ResolveQuery) ([]ontology.Entity, error) {
+	return []ontology.Entity{{ID: "orders", Class: ontology.ClassService, Name: "orders"}}, nil
+}
+
+func (staticOntologyRepository) EntitiesByID(context.Context, ontology.EntityQuery) ([]ontology.Entity, error) {
+	return []ontology.Entity{{ID: "payments", Class: ontology.ClassService, Name: "payments"}}, nil
+}
+
+func (staticOntologyRepository) Neighbors(context.Context, ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
+	return []ontology.Fact{{ID: "dependency", SubjectID: "orders", Predicate: ontology.PredicateDependsOn, ObjectID: "payments"}}, false, nil
+}
+
+func (staticOntologyRepository) FindPaths(ctx context.Context, query ontology.PathQuery) ([]ontology.Path, bool, error) {
+	return ontology.FindBoundedPaths(ctx, staticOntologyRepository{}, query)
+}
+
+func (staticOntologyRepository) Stats(context.Context) (ontology.Stats, error) {
+	return ontology.Stats{Generation: "test"}, nil
+}
+
+func (staticOntologyRepository) Close() error { return nil }

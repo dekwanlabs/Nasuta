@@ -487,12 +487,15 @@ SQLite Adapter              Neo4j Adapter
 ```go
 type Repository interface {
     Resolve(context.Context, ResolveQuery) ([]Entity, error)
+    EntitiesByID(context.Context, EntityQuery) ([]Entity, error)
     Neighbors(context.Context, NeighborQuery) ([]Fact, bool, error)
     FindPaths(context.Context, PathQuery) ([]Path, bool, error)
     Stats(context.Context) (Stats, error)
     Close() error
 }
 ```
+
+`EntitiesByID` 只用于关系查询完成后批量补齐 Entity 名称和 Class，最多接收 200 个 ID。它避免 Tool 层按路径逐个解析形成 N+1 查询，不是通用实体扫描接口。
 
 发布契约：
 
@@ -514,6 +517,8 @@ type Backend interface {
 ```
 
 `Generation` 由排序后的 `repo + HEAD SHA` 集合确定性生成。SQLite Backend 在一个临时数据库中发布两部分；Neo4j Backend 协调结构 SQLite 和 Neo4j 代际快照，并用 Generation 阻止跨版本本体查询。
+
+一次关系查询先从 `Stats` 固定 Generation，随后把 Generation 传给 Resolve、Neighbors 和 EntitiesByID。若发布恰好发生在调用之间，Repository 返回 `ErrStaleSnapshot`，Service 最多从头重试一次，禁止拼接两个快照的数据。
 
 禁止暴露：
 

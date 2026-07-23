@@ -52,6 +52,13 @@ func NewService(repository Repository) *Service {
 	return &Service{repository: repository}
 }
 
+func (service *Service) Stats(ctx context.Context) (Stats, error) {
+	if service == nil || service.repository == nil {
+		return Stats{}, ErrUnavailable
+	}
+	return service.repository.Stats(ctx)
+}
+
 func (service *Service) QueryRelations(ctx context.Context, query RelationQuery) (RelationResult, error) {
 	if service == nil || service.repository == nil {
 		return RelationResult{}, ErrUnavailable
