@@ -3,8 +3,11 @@ package ontology
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 type Direction string
@@ -73,6 +76,15 @@ type Publisher interface {
 type Backend interface {
 	Repository
 	Publisher
+}
+
+func GenerationFor(repositories []domain.RepositoryRecord) string {
+	seeds := make([]string, 0, len(repositories))
+	for _, repository := range repositories {
+		seeds = append(seeds, repository.Repo+"\x00"+repository.HeadSHA)
+	}
+	sort.Strings(seeds)
+	return platform.UUIDFromString("workspace\x00" + strings.Join(seeds, "\x00"))
 }
 
 func ValidateResolveQuery(query ResolveQuery) error {

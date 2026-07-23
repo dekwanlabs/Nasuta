@@ -20,6 +20,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/indexing/docgen"
 	"github.com/dekwanlabs/nasuta/internal/indexing/indexer"
+	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/graph"
 	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
@@ -925,7 +926,7 @@ func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 		return fmt.Errorf("attach repository snapshots: %w", err)
 	}
 	log.Infof("[rebuild-sql] repository revisions loaded: repositories=%d", len(bundle.Repositories))
-	if err := svc.DB.ReplaceAll(ctx, bundle); err != nil {
+	if err := svc.DB.ReplaceStructure(ctx, ontology.GenerationFor(bundle.Repositories), bundle); err != nil {
 		return fmt.Errorf("replace all: %w", err)
 	}
 	log.Infof("[rebuild-sql] snapshot published after %s", time.Since(started).Round(time.Millisecond))
@@ -944,7 +945,7 @@ func (svc *Service) Bootstrap(ctx context.Context) error {
 	if err := svc.attachRepositorySnapshots(ctx, &bundle); err != nil {
 		return err
 	}
-	if err := svc.DB.ReplaceAll(ctx, bundle); err != nil {
+	if err := svc.DB.ReplaceStructure(ctx, ontology.GenerationFor(bundle.Repositories), bundle); err != nil {
 		return fmt.Errorf("replace all: %w", err)
 	}
 	if err := svc.reloadDependencyGraph(ctx); err != nil {

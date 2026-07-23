@@ -12,12 +12,13 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	_ "modernc.org/sqlite"
 )
 
-const structureSchemaVersion = 2
+const structureSchemaVersion = 3
 
 const schema = `
 CREATE TABLE repositories (
@@ -106,7 +107,58 @@ CREATE INDEX idx_dependency_evidence_dependency
   ON dependency_evidence(dependency_id, file_path, line);
 CREATE INDEX idx_dependency_evidence_file ON dependency_evidence(file_path, line);
 
-PRAGMA user_version = 2;
+CREATE TABLE workspace_snapshot (
+  singleton_id            INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  generation              TEXT NOT NULL,
+  ontology_schema_version INTEGER NOT NULL
+);
+
+CREATE TABLE ontology_entities (
+  entity_id       TEXT PRIMARY KEY,
+  class           TEXT NOT NULL,
+  canonical_key   TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  properties_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(properties_json)),
+  confidence      REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+  UNIQUE (class, canonical_key)
+);
+
+CREATE INDEX idx_ontology_entities_class_name ON ontology_entities(class, name, entity_id);
+
+CREATE TABLE ontology_aliases (
+  entity_id        TEXT NOT NULL REFERENCES ontology_entities(entity_id) ON DELETE CASCADE,
+  normalized_alias TEXT NOT NULL,
+  source           TEXT NOT NULL,
+  PRIMARY KEY (entity_id, normalized_alias)
+);
+
+CREATE INDEX idx_ontology_alias_lookup ON ontology_aliases(normalized_alias, entity_id);
+
+CREATE TABLE ontology_facts (
+  fact_id          TEXT PRIMARY KEY,
+  subject_id       TEXT NOT NULL REFERENCES ontology_entities(entity_id) ON DELETE CASCADE,
+  predicate        TEXT NOT NULL,
+  object_id        TEXT NOT NULL REFERENCES ontology_entities(entity_id) ON DELETE CASCADE,
+  qualifiers_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(qualifiers_json)),
+  confidence      REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+  UNIQUE (subject_id, predicate, object_id, qualifiers_json)
+);
+
+CREATE INDEX idx_ontology_facts_out ON ontology_facts(subject_id, predicate, object_id);
+CREATE INDEX idx_ontology_facts_in ON ontology_facts(object_id, predicate, subject_id);
+
+CREATE TABLE ontology_fact_evidence (
+  fact_id     TEXT NOT NULL REFERENCES ontology_facts(fact_id) ON DELETE CASCADE,
+  file_path   TEXT NOT NULL,
+  line        INTEGER NOT NULL CHECK (line >= 0),
+  symbol      TEXT NOT NULL DEFAULT '',
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan')),
+  PRIMARY KEY (fact_id, file_path, line, symbol, source_kind)
+);
+
+CREATE INDEX idx_ontology_evidence_path ON ontology_fact_evidence(file_path, line, fact_id);
+
+PRAGMA user_version = 3;
 `
 
 // SQLite stores the canonical structured workspace snapshot.
@@ -195,8 +247,23 @@ func (store *SQLite) Close() error {
 	return db.Close()
 }
 
-// ReplaceAll validates and atomically publishes one complete snapshot.
-func (store *SQLite) ReplaceAll(ctx context.Context, bundle domain.IndexBundle) error {
+// ReplaceStructure publishes a structure-only snapshot for non-SQLite ontology providers.
+func (store *SQLite) ReplaceStructure(ctx context.Context, generation string, bundle domain.IndexBundle) error {
+	return store.replaceSnapshot(ctx, generation, bundle, nil)
+}
+
+// ReplaceWorkspace keeps structure and ontology on the same atomic file generation.
+func (store *SQLite) ReplaceWorkspace(ctx context.Context, generation string, bundle domain.IndexBundle, snapshot ontology.Snapshot) error {
+	if err := ontology.ValidateSnapshot(snapshot); err != nil {
+		return fmt.Errorf("validate ontology snapshot: %w", err)
+	}
+	return store.replaceSnapshot(ctx, generation, bundle, &snapshot)
+}
+
+func (store *SQLite) replaceSnapshot(ctx context.Context, generation string, bundle domain.IndexBundle, snapshot *ontology.Snapshot) error {
+	if generation == "" {
+		return fmt.Errorf("workspace generation is required")
+	}
 	if err := validateBundle(bundle); err != nil {
 		return err
 	}
@@ -211,7 +278,7 @@ func (store *SQLite) ReplaceAll(ctx context.Context, bundle domain.IndexBundle) 
 		_ = db.Close()
 		return fmt.Errorf("temporary sqlite %q unexpectedly has an obsolete schema", tmp)
 	}
-	if err := writeSnapshot(ctx, db, bundle); err != nil {
+	if err := writeSnapshot(ctx, db, generation, bundle, snapshot); err != nil {
 		_ = db.Close()
 		return err
 	}
@@ -287,12 +354,19 @@ func validateBundle(bundle domain.IndexBundle) error {
 	return nil
 }
 
-func writeSnapshot(ctx context.Context, db *sql.DB, bundle domain.IndexBundle) error {
+func writeSnapshot(ctx context.Context, db *sql.DB, generation string, bundle domain.IndexBundle, snapshot *ontology.Snapshot) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin sqlite snapshot: %w", err)
 	}
 	defer tx.Rollback()
+	ontologyVersion := 0
+	if snapshot != nil {
+		ontologyVersion = snapshot.SchemaVersion
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO workspace_snapshot(singleton_id,generation,ontology_schema_version) VALUES(1,?,?)`, generation, ontologyVersion); err != nil {
+		return fmt.Errorf("insert workspace generation %q: %w", generation, err)
+	}
 	for _, repository := range bundle.Repositories {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO repositories(repo,head_sha,indexed_at) VALUES(?,?,?)`,
@@ -349,8 +423,51 @@ dependency_id,file_path,line,symbol,source_kind) VALUES(?,?,?,?,?)`,
 			}
 		}
 	}
+	if snapshot != nil {
+		if err := writeOntologySnapshot(ctx, tx, *snapshot); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit sqlite snapshot: %w", err)
+	}
+	return nil
+}
+
+func writeOntologySnapshot(ctx context.Context, tx *sql.Tx, snapshot ontology.Snapshot) error {
+	for _, entity := range snapshot.Entities {
+		properties, err := json.Marshal(entity.Properties)
+		if err != nil {
+			return fmt.Errorf("marshal ontology entity %q properties: %w", entity.ID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ontology_entities(
+entity_id,class,canonical_key,name,properties_json,confidence) VALUES(?,?,?,?,?,?)`,
+			entity.ID, string(entity.Class), entity.Key, entity.Name, properties, entity.Confidence); err != nil {
+			return fmt.Errorf("insert ontology entity %q: %w", entity.ID, err)
+		}
+		for _, alias := range entity.Aliases {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO ontology_aliases(entity_id,normalized_alias,source) VALUES(?,?,?)`, entity.ID, alias, "projection"); err != nil {
+				return fmt.Errorf("insert ontology alias %q for %q: %w", alias, entity.ID, err)
+			}
+		}
+	}
+	for _, fact := range snapshot.Facts {
+		qualifiers, err := json.Marshal(fact.Qualifiers)
+		if err != nil {
+			return fmt.Errorf("marshal ontology fact %q qualifiers: %w", fact.ID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ontology_facts(
+fact_id,subject_id,predicate,object_id,qualifiers_json,confidence) VALUES(?,?,?,?,?,?)`,
+			fact.ID, fact.SubjectID, string(fact.Predicate), fact.ObjectID, qualifiers, fact.Confidence); err != nil {
+			return fmt.Errorf("insert ontology fact %q: %w", fact.ID, err)
+		}
+		for _, evidence := range fact.Evidence {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO ontology_fact_evidence(
+fact_id,file_path,line,symbol,source_kind) VALUES(?,?,?,?,?)`,
+				fact.ID, evidence.Path, evidence.Line, evidence.Symbol, string(evidence.Source)); err != nil {
+				return fmt.Errorf("insert ontology evidence %q:%d for %q: %w", evidence.Path, evidence.Line, fact.ID, err)
+			}
+		}
 	}
 	return nil
 }
@@ -397,6 +514,16 @@ func (store *SQLite) GetIndexSHA(ctx context.Context, repo string) (string, erro
 		return "", nil
 	}
 	return sha, err
+}
+
+// WorkspaceGeneration identifies the structure and ontology version currently visible.
+func (store *SQLite) WorkspaceGeneration(ctx context.Context) (string, int, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	var generation string
+	var schemaVersion int
+	err := store.db.QueryRowContext(ctx, `SELECT generation,ontology_schema_version FROM workspace_snapshot WHERE singleton_id=1`).Scan(&generation, &schemaVersion)
+	return generation, schemaVersion, err
 }
 
 // AllServices returns the canonical service rows without read-time merging.

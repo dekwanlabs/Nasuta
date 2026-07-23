@@ -133,7 +133,7 @@ func buildStructure(t *testing.T, workspace string) *store.SQLite {
 			File: "repos/team/payments/PaymentsController.java", Line: 40, Source: domain.SourceCodeScan, Confidence: 0.95,
 		}},
 	}
-	if err := db.ReplaceAll(context.Background(), bundle); err != nil {
+	if err := db.ReplaceStructure(context.Background(), "callchain", bundle); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}

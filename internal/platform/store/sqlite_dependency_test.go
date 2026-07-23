@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
@@ -39,7 +40,7 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 			Confidence: 0.9,
 		}},
 	}
-	if err := db.ReplaceAll(context.Background(), bundle); err != nil {
+	if err := db.ReplaceStructure(context.Background(), "first", bundle); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,7 +59,7 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 		Repositories: []domain.RepositoryRecord{{Repo: orders.Repo, HeadSHA: "orders-sha-2", IndexedAt: time.Now().UnixMilli()}},
 		Services:     []domain.ServiceRecord{orders},
 	}
-	if err := db.ReplaceAll(context.Background(), replacement); err != nil {
+	if err := db.ReplaceStructure(context.Background(), "replacement", replacement); err != nil {
 		t.Fatal(err)
 	}
 	edges, err = db.Edges(context.Background())
@@ -74,6 +75,48 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 	}
 }
 
+func TestReplaceWorkspacePublishesStructureAndOntologyGeneration(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	service := testService("team/orders", ".", "orders")
+	bundle := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{{Repo: service.Repo, HeadSHA: "sha", IndexedAt: time.Now().UnixMilli()}},
+		Services:     []domain.ServiceRecord{service},
+	}
+	snapshot, err := ontology.Project(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := ontology.GenerationFor(bundle.Repositories)
+	if err := db.ReplaceWorkspace(context.Background(), generation, bundle, snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	gotGeneration, schemaVersion, err := db.WorkspaceGeneration(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotGeneration != generation || schemaVersion != ontology.CurrentSchemaVersion {
+		t.Fatalf("generation=%q schema=%d", gotGeneration, schemaVersion)
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	var entities, facts int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM ontology_entities`).Scan(&entities); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM ontology_facts`).Scan(&facts); err != nil {
+		t.Fatal(err)
+	}
+	if entities != 2 || facts != 1 {
+		t.Fatalf("entities=%d facts=%d, want 2/1", entities, facts)
+	}
+}
+
 func TestReplaceAllFailureKeepsPublishedSnapshot(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
 	if err != nil {
@@ -86,13 +129,13 @@ func TestReplaceAllFailureKeepsPublishedSnapshot(t *testing.T) {
 		Repositories: []domain.RepositoryRecord{{Repo: service.Repo, HeadSHA: "current-sha", IndexedAt: time.Now().UnixMilli()}},
 		Services:     []domain.ServiceRecord{service},
 	}
-	if err := db.ReplaceAll(context.Background(), current); err != nil {
+	if err := db.ReplaceStructure(context.Background(), "current", current); err != nil {
 		t.Fatal(err)
 	}
 
 	invalid := current
 	invalid.Repositories = []domain.RepositoryRecord{{Repo: service.Repo, HeadSHA: "", IndexedAt: time.Now().UnixMilli()}}
-	if err := db.ReplaceAll(context.Background(), invalid); err == nil {
+	if err := db.ReplaceStructure(context.Background(), "invalid", invalid); err == nil {
 		t.Fatal("invalid replacement unexpectedly succeeded")
 	}
 
@@ -119,7 +162,7 @@ func TestServiceForPathUsesLongestModulePrefix(t *testing.T) {
 		Repositories: []domain.RepositoryRecord{{Repo: repo, HeadSHA: "sha", IndexedAt: time.Now().UnixMilli()}},
 		Services:     []domain.ServiceRecord{root, api, admin},
 	}
-	if err := db.ReplaceAll(context.Background(), bundle); err != nil {
+	if err := db.ReplaceStructure(context.Background(), "modules", bundle); err != nil {
 		t.Fatal(err)
 	}
 
