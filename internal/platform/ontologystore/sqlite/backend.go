@@ -16,6 +16,10 @@ func (backend *Backend) Resolve(ctx context.Context, query ontology.ResolveQuery
 	return backend.store.ResolveOntology(ctx, query)
 }
 
+func (backend *Backend) EntitiesByID(ctx context.Context, query ontology.EntityQuery) ([]ontology.Entity, error) {
+	return backend.store.OntologyEntitiesByID(ctx, query)
+}
+
 func (backend *Backend) Neighbors(ctx context.Context, query ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
 	return backend.store.OntologyNeighbors(ctx, query)
 }

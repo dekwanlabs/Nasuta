@@ -23,6 +23,7 @@ func FindBoundedPaths(ctx context.Context, repository neighborReader, query Path
 		}
 		facts, more, err := repository.Neighbors(ctx, NeighborQuery{
 			EntityIDs: frontier, Predicates: query.Predicates, Direction: query.Direction, Limit: limit,
+			Generation: query.Generation,
 		})
 		if err != nil {
 			return nil, false, err

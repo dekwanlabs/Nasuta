@@ -53,6 +53,21 @@ func TestBackendPublishesAndQueriesBoundedOntology(t *testing.T) {
 	if stats.Entities != 4 || stats.Facts != 3 || stats.ByPredicate[ontology.PredicateDependsOn] != 1 {
 		t.Fatalf("stats = %#v", stats)
 	}
+
+	result, err := ontology.NewService(backend).QueryRelations(ctx, ontology.RelationQuery{
+		Entity: "orders", EntityClass: ontology.ClassService,
+		Predicates: []ontology.Predicate{ontology.PredicateDependsOn}, Direction: ontology.DirectionOutgoing,
+		MaxDepth: 3, MaxNodes: 20, MaxFanout: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Root == nil || result.Root.Name != "orders" || len(result.Entities) != 1 || result.Entities[0].Name != "payments" {
+		t.Fatalf("relation result = %#v", result)
+	}
+	if len(result.Facts) != 1 || result.Facts[0].Subject.Name != "orders" || result.Facts[0].Object.Name != "payments" {
+		t.Fatalf("relation facts = %#v", result.Facts)
+	}
 }
 
 func TestBackendReportsTruncationAtStorageLimit(t *testing.T) {

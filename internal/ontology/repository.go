@@ -12,6 +12,7 @@ import (
 )
 
 var ErrUnavailable = errors.New("ontology unavailable")
+var ErrStaleSnapshot = errors.New("ontology snapshot changed")
 
 type Direction string
 
@@ -22,9 +23,15 @@ const (
 )
 
 type ResolveQuery struct {
-	Text    string
-	Classes []Class
-	Limit   int
+	Text       string
+	Classes    []Class
+	Limit      int
+	Generation string
+}
+
+type EntityQuery struct {
+	IDs        []string
+	Generation string
 }
 
 type NeighborQuery struct {
@@ -32,6 +39,7 @@ type NeighborQuery struct {
 	Predicates []Predicate
 	Direction  Direction
 	Limit      int
+	Generation string
 }
 
 type PathQuery struct {
@@ -42,6 +50,7 @@ type PathQuery struct {
 	MaxDepth   int
 	MaxNodes   int
 	MaxFanout  int
+	Generation string
 }
 
 type Path struct {
@@ -66,6 +75,7 @@ type WorkspaceSnapshot struct {
 
 type Repository interface {
 	Resolve(context.Context, ResolveQuery) ([]Entity, error)
+	EntitiesByID(context.Context, EntityQuery) ([]Entity, error)
 	Neighbors(context.Context, NeighborQuery) ([]Fact, bool, error)
 	FindPaths(context.Context, PathQuery) ([]Path, bool, error)
 	Stats(context.Context) (Stats, error)
@@ -108,6 +118,13 @@ func ValidateNeighborQuery(query NeighborQuery) error {
 		return fmt.Errorf("ontology neighbor limit %d is outside [1,200]", query.Limit)
 	}
 	return validateDirection(query.Direction)
+}
+
+func ValidateEntityQuery(query EntityQuery) error {
+	if len(query.IDs) > 200 {
+		return fmt.Errorf("ontology entity ID count %d exceeds 200", len(query.IDs))
+	}
+	return nil
 }
 
 func ValidatePathQuery(query PathQuery) error {

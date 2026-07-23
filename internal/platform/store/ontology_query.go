@@ -18,7 +18,7 @@ func (store *SQLite) ResolveOntology(ctx context.Context, query ontology.Resolve
 	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	if err := requireOntologyGeneration(ctx, store.db); err != nil {
+	if err := requireOntologyGeneration(ctx, store.db, query.Generation); err != nil {
 		return nil, err
 	}
 
@@ -69,13 +69,60 @@ ORDER BY rank,lower(e.name),e.entity_id LIMIT ?`, append([]any{text, text, norma
 	return entities, nil
 }
 
+func (store *SQLite) OntologyEntitiesByID(ctx context.Context, query ontology.EntityQuery) ([]ontology.Entity, error) {
+	if err := ontology.ValidateEntityQuery(query); err != nil {
+		return nil, err
+	}
+	if len(query.IDs) == 0 {
+		return []ontology.Entity{}, nil
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if err := requireOntologyGeneration(ctx, store.db, query.Generation); err != nil {
+		return nil, err
+	}
+	args := make([]any, len(query.IDs))
+	for i, id := range query.IDs {
+		args[i] = id
+	}
+	rows, err := store.db.QueryContext(ctx, `SELECT entity_id,class,canonical_key,name,properties_json,confidence
+FROM ontology_entities WHERE entity_id IN (`+placeholders(len(args))+`) ORDER BY class,lower(name),entity_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query ontology entities by ID: %w", err)
+	}
+	defer rows.Close()
+	entities := make([]ontology.Entity, 0, len(query.IDs))
+	for rows.Next() {
+		var entity ontology.Entity
+		var class, properties string
+		if err := rows.Scan(&entity.ID, &class, &entity.Key, &entity.Name, &properties, &entity.Confidence); err != nil {
+			return nil, fmt.Errorf("scan ontology entity by ID: %w", err)
+		}
+		entity.Class = ontology.Class(class)
+		if err := json.Unmarshal([]byte(properties), &entity.Properties); err != nil {
+			return nil, fmt.Errorf("decode ontology entity %q properties: %w", entity.ID, err)
+		}
+		entities = append(entities, entity)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query ontology entities by ID: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close ontology entity rows: %w", err)
+	}
+	if err := loadOntologyAliases(ctx, store.db, entities); err != nil {
+		return nil, err
+	}
+	return entities, nil
+}
+
 func (store *SQLite) OntologyNeighbors(ctx context.Context, query ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
 	if err := ontology.ValidateNeighborQuery(query); err != nil {
 		return nil, false, err
 	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	if err := requireOntologyGeneration(ctx, store.db); err != nil {
+	if err := requireOntologyGeneration(ctx, store.db, query.Generation); err != nil {
 		return nil, false, err
 	}
 
@@ -178,9 +225,10 @@ func (store *SQLite) OntologyStats(ctx context.Context) (ontology.Stats, error) 
 	return stats, nil
 }
 
-func requireOntologyGeneration(ctx context.Context, db *sql.DB) error {
+func requireOntologyGeneration(ctx context.Context, db *sql.DB, expected string) error {
+	var generation string
 	var version int
-	err := db.QueryRowContext(ctx, `SELECT ontology_schema_version FROM workspace_snapshot WHERE singleton_id=1`).Scan(&version)
+	err := db.QueryRowContext(ctx, `SELECT generation,ontology_schema_version FROM workspace_snapshot WHERE singleton_id=1`).Scan(&generation, &version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ontology.ErrUnavailable
 	}
@@ -189,6 +237,9 @@ func requireOntologyGeneration(ctx context.Context, db *sql.DB) error {
 	}
 	if version != ontology.CurrentSchemaVersion {
 		return fmt.Errorf("%w: schema version %d", ontology.ErrUnavailable, version)
+	}
+	if expected != "" && generation != expected {
+		return fmt.Errorf("%w: expected %q, active %q", ontology.ErrStaleSnapshot, expected, generation)
 	}
 	return nil
 }
