@@ -104,12 +104,44 @@ func CanonicalizeBundle(bundle domain.IndexBundle) domain.IndexBundle {
 	endpoints := canonicalEndpoints(bundle.Endpoints, lookup)
 	dependencies := canonicalDependencies(bundle.Dependencies, lookup)
 	repositories := canonicalRepositories(bundle.Repositories)
+	runbooks := canonicalRunbooks(bundle.Runbooks)
 
 	bundle.Repositories = repositories
 	bundle.Services = services
 	bundle.Endpoints = endpoints
 	bundle.Dependencies = dependencies
+	bundle.Runbooks = runbooks
 	return bundle
+}
+
+func canonicalRunbooks(records []domain.RunbookRecord) []domain.RunbookRecord {
+	out := make([]domain.RunbookRecord, 0, len(records))
+	seen := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		record.ID = strings.TrimSpace(record.ID)
+		record.Repo = canonicalRepo(record.Repo)
+		record.Title = strings.TrimSpace(record.Title)
+		record.Path = canonicalPath(record.Path)
+		record.Scope = strings.TrimSpace(record.Scope)
+		record.ServiceName = strings.TrimSpace(record.ServiceName)
+		tags := make([]string, 0, len(record.Tags))
+		for _, tag := range record.Tags {
+			if tag = strings.TrimSpace(tag); tag != "" {
+				tags = append(tags, tag)
+			}
+		}
+		record.Tags = nonNil(platform.Dedupe(tags))
+		key := record.Repo + "\x00" + record.ID
+		if record.ID == "" || record.Path == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, record)
+	}
+	return out
 }
 
 func canonicalService(service domain.ServiceRecord) domain.ServiceRecord {
@@ -151,6 +183,9 @@ func canonicalEndpoints(records []domain.EndpointRecord, lookup serviceLookup) [
 		endpoint.Repo = service.Repo
 		endpoint.Method = strings.ToUpper(strings.TrimSpace(endpoint.Method))
 		endpoint.Path = strings.TrimSpace(endpoint.Path)
+		if endpoint.Source == "" {
+			endpoint.Source = domain.SourceCodeScan
+		}
 		if endpoint.Path == "" {
 			endpoint.Path = "/"
 		} else if !strings.HasPrefix(endpoint.Path, "/") {

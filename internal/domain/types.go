@@ -97,14 +97,15 @@ type RepositoryRecord struct {
 // RunbookRecord is a runbook document (persisted in the platform DocStore/MySQL,
 // body embedded into the configured semantic store for recall).
 type RunbookRecord struct {
-	ID         string   `json:"id"`
-	Repo       string   `json:"repo,omitempty"`
-	Title      string   `json:"title"`
-	Path       string   `json:"path"`
-	Scope      string   `json:"scope,omitempty"`
-	Tags       []string `json:"tags"`
-	Text       string   `json:"text,omitempty"`
-	Confidence float64  `json:"confidence"`
+	ID          string   `json:"id"`
+	Repo        string   `json:"repo,omitempty"`
+	Title       string   `json:"title"`
+	Path        string   `json:"path"`
+	Scope       string   `json:"scope,omitempty"`
+	ServiceName string   `json:"serviceName,omitempty"`
+	Tags        []string `json:"tags"`
+	Text        string   `json:"text,omitempty"`
+	Confidence  float64  `json:"confidence"`
 }
 
 // CodeChunk is a language-agnostic slice of a source/config/SQL/doc file,

@@ -101,14 +101,15 @@ func IndexKnowledgeBaseFromDocStore(docStore *store.DocStore) []domain.RunbookRe
 		// kind is now the single source of truth.
 		scope := d.Kind
 		records = append(records, domain.RunbookRecord{
-			ID:         id,
-			Repo:       "docs",
-			Title:      title,
-			Path:       d.Filename,
-			Scope:      scope,
-			Tags:       fmStringArray(fm.data, "tags"),
-			Text:       fm.content,
-			Confidence: 1,
+			ID:          id,
+			Repo:        "docs",
+			Title:       title,
+			Path:        d.Filename,
+			Scope:       scope,
+			ServiceName: fmString(fm.data, "service"),
+			Tags:        fmStringArray(fm.data, "tags"),
+			Text:        fm.content,
+			Confidence:  1,
 		})
 	}
 	return records
