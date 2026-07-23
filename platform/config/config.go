@@ -47,6 +47,18 @@ type SemanticTLS struct {
 	ServerName string
 }
 
+type OntologyConfig struct {
+	Provider string
+	Neo4j    Neo4jConfig
+}
+
+type Neo4jConfig struct {
+	URI      string
+	Username string
+	Password string
+	Database string
+}
+
 // Config holds runtime configuration sourced from environment variables.
 // Platform-settable settings (VCS, LLM, Agent) live in PlatformSettings
 // and are populated from the MySQL settings table.
@@ -70,6 +82,7 @@ type Config struct {
 	WebSearchAPIKey     string // API key for brave / tavily / etc.
 
 	Semantic SemanticConfig
+	Ontology OntologyConfig
 
 	EmbeddingProvider    string
 	EmbeddingAPIKey      string
@@ -231,6 +244,7 @@ func Load() Config {
 		DailySyncTime:        nasutaEnv("DAILY_SYNC_TIME", "02:07"),
 
 		Semantic:             loadSemanticConfig(),
+		Ontology:             loadOntologyConfig(),
 		EmbeddingProvider:    env("EMBEDDING_PROVIDER", "openai"),
 		EmbeddingAPIKey:      env("EMBEDDING_API_KEY", ""),
 		EmbeddingModel:       env("EMBEDDING_MODEL", "text-embedding-3-small"),
@@ -259,6 +273,18 @@ func Load() Config {
 			MaxBackups: nasutaEnvInt("LOG_MAX_BACKUPS", 7),
 			MaxAge:     nasutaEnvInt("LOG_MAX_AGE", 30),
 			Compress:   nasutaEnvBool("LOG_COMPRESS", false),
+		},
+	}
+}
+
+func loadOntologyConfig() OntologyConfig {
+	return OntologyConfig{
+		Provider: strings.ToLower(envFirst("sqlite", "NASUTA_ONTOLOGY_PROVIDER", "ONTOLOGY_PROVIDER")),
+		Neo4j: Neo4jConfig{
+			URI:      envFirst("", "NASUTA_ONTOLOGY_NEO4J_URI", "ONTOLOGY_NEO4J_URI"),
+			Username: envFirst("", "NASUTA_ONTOLOGY_NEO4J_USERNAME", "ONTOLOGY_NEO4J_USERNAME"),
+			Password: envFirst("", "NASUTA_ONTOLOGY_NEO4J_PASSWORD", "ONTOLOGY_NEO4J_PASSWORD"),
+			Database: envFirst("neo4j", "NASUTA_ONTOLOGY_NEO4J_DATABASE", "ONTOLOGY_NEO4J_DATABASE"),
 		},
 	}
 }

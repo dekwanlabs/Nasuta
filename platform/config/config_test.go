@@ -94,3 +94,15 @@ func TestLoadCodeGraphContainerUsesExplicitValue(t *testing.T) {
 		t.Fatalf("CodeGraphContainer = %q, want %q", cfg.CodeGraphContainer, "codegraph-test")
 	}
 }
+
+func TestLoadOntologyDefaultsToSQLiteAndNormalizesNeo4jConfig(t *testing.T) {
+	t.Setenv("NASUTA_ONTOLOGY_PROVIDER", "NEO4J")
+	t.Setenv("NASUTA_ONTOLOGY_NEO4J_URI", "neo4j://graph.internal:7687")
+	t.Setenv("NASUTA_ONTOLOGY_NEO4J_USERNAME", "reader")
+	t.Setenv("NASUTA_ONTOLOGY_NEO4J_DATABASE", "knowledge")
+
+	cfg := Load()
+	if cfg.Ontology.Provider != "neo4j" || cfg.Ontology.Neo4j.URI != "neo4j://graph.internal:7687" || cfg.Ontology.Neo4j.Database != "knowledge" {
+		t.Fatalf("ontology config = %+v", cfg.Ontology)
+	}
+}

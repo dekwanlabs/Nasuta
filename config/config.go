@@ -17,6 +17,10 @@ type SemanticAuth = platformconfig.SemanticAuth
 
 type SemanticTLS = platformconfig.SemanticTLS
 
+type OntologyConfig = platformconfig.OntologyConfig
+
+type Neo4jConfig = platformconfig.Neo4jConfig
+
 // PlatformSettings holds runtime settings managed by the platform UI.
 type PlatformSettings = platformconfig.PlatformSettings
 
