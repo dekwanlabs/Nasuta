@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -143,6 +144,10 @@ func (agent *Agent) RunWithContext(ctx context.Context, runID, question string, 
 
 // RunWithSnapshot keeps definitions and handlers fixed for the whole run.
 func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, policy ToolPolicy, toolSnapshot tool.Snapshot) (*RunResult, error) {
+	return agent.runWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, toolSnapshot, nil)
+}
+
+func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, policy ToolPolicy, toolSnapshot tool.Snapshot, requiredToolIDs []string) (*RunResult, error) {
 	traceEnabled := domain.TraceEnabled(ctx)
 	runStarted := time.Now()
 	runCtx, runCancel := context.WithTimeout(ctx, agent.cfg.Timeout)
@@ -171,12 +176,25 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 	log.InfofCtx(ctx, "[agent] run %s history compiled in %s: recent=%d summaryChars=%d contextChars=%d",
 		runID, historyDuration, len(conversation.Recent), len([]rune(conversation.Summary)), contextChars(messages))
 	tools := agent.executor.Definitions(toolSnapshot)
+	requiredTools := make(map[string]struct{}, len(requiredToolIDs))
+	for _, id := range requiredToolIDs {
+		if id != "" {
+			requiredTools[id] = struct{}{}
+		}
+	}
+	if len(requiredTools) > 0 {
+		messages = append(messages, llm.Message{
+			Role:    "system",
+			Content: requiredToolsInstruction(pendingRequiredTools(requiredTools, nil)),
+		})
+	}
 
 	result := &RunResult{RunID: runID}
 	stepSeq := 0
 	answered := false
 	seenTools := map[string]bool{}
 	seenChunks := map[string]bool{}
+	attemptedRequiredTools := make(map[string]struct{}, len(requiredTools))
 	var webEvidence webEvidenceState
 	evidenceTurnExtended := false
 
@@ -192,6 +210,9 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 	}
 
 	stepLimit := maxSteps
+	if len(requiredTools) > 0 && stepLimit < agent.cfg.MaxSteps {
+		stepLimit++
+	}
 	for step := 1; step <= stepLimit; step++ {
 		if agent.controller != nil {
 			if stopped := agent.handleControl(runCtx, runID, step, &messages, result); stopped {
@@ -201,7 +222,11 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 
 		stepp := step
 		t0 := time.Now()
+		pendingBeforeTurn := pendingRequiredTools(requiredTools, attemptedRequiredTools)
 		h := newStreamPipe(agent.observer, runID, stepp, t0, agent.onFirstAnswerToken)
+		if len(pendingBeforeTurn) > 0 {
+			h = newBufferedStreamPipe(agent.observer, runID, stepp, t0, agent.onFirstAnswerToken)
+		}
 
 		callCtx := llm.WithUsagePhase(loopCtx, llm.PhaseAgentStep)
 		chatResult, err := agent.llm.ChatWithToolsMax(callCtx, messages, tools, h, agent.cfg.AnswerMaxTokens)
@@ -254,6 +279,18 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 		})
 
 		if len(chatResult.ToolCalls) == 0 {
+			if len(pendingBeforeTurn) > 0 {
+				h.Discard()
+				messages = append(messages,
+					llm.Message{Role: "assistant", Content: chatResult.Content},
+					llm.Message{Role: "system", Content: requiredToolsInstruction(pendingBeforeTurn)},
+				)
+				if step == stepLimit && stepLimit < agent.cfg.MaxSteps {
+					stepLimit++
+				}
+				log.InfofCtx(ctx, "[agent] run %s rejected conclusion before required tool attempts: %v", runID, pendingBeforeTurn)
+				continue
+			}
 			if traceEnabled && timing.FirstContent > 0 {
 				domain.RecordTrace(ctx, domain.EvaluationTrace{
 					Node: "first_answer_token",
@@ -298,6 +335,9 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 		webAttempted, webSucceeded := false, false
 		turnProducedEvidence := false
 		for _, call := range chatResult.ToolCalls {
+			if _, required := requiredTools[call.Function.Name]; required {
+				attemptedRequiredTools[call.Function.Name] = struct{}{}
+			}
 			stepSeq++
 			agent.observer.OnStep(runCtx, runID, StepRecord{
 				StepNo:    stepSeq,
@@ -354,6 +394,13 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 			}
 			messages = append(messages, toolMessage(call.ID, call.Function.Name, compressed.Content))
 		}
+		pendingAfterTurn := pendingRequiredTools(requiredTools, attemptedRequiredTools)
+		if len(pendingAfterTurn) > 0 {
+			messages = append(messages, llm.Message{Role: "system", Content: requiredToolsInstruction(pendingAfterTurn)})
+			if step == stepLimit && stepLimit < agent.cfg.MaxSteps {
+				stepLimit++
+			}
+		}
 		if extended := extendEvidenceStepLimit(step, stepLimit, agent.cfg.MaxSteps, turnProducedEvidence, evidenceTurnExtended); extended > stepLimit {
 			stepLimit = extended
 			evidenceTurnExtended = true
@@ -373,13 +420,19 @@ func (agent *Agent) RunWithSnapshot(ctx context.Context, runID, question string,
 	}
 
 	if !answered && !result.Aborted && result.Err == nil {
-		log.InfofCtx(ctx, "[agent] run %s forcing conclusion (steps=%d)", runID, result.Steps)
-		final, ferr := agent.forceConclusion(runCtx, runID, messages, &stepSeq, runStarted)
-		if ferr != nil {
-			result.Err = ferr
-			log.ErrorfCtx(ctx, "[agent] run %s force-conclusion error: %v", runID, ferr)
-		} else if final != nil {
-			result.Answer += final.Content
+		pending := pendingRequiredTools(requiredTools, attemptedRequiredTools)
+		if len(pending) > 0 {
+			result.Err = fmt.Errorf("required evidence tools not attempted before step limit: %s", strings.Join(pending, ", "))
+			log.ErrorfCtx(ctx, "[agent] run %s required evidence incomplete: %v", runID, result.Err)
+		} else {
+			log.InfofCtx(ctx, "[agent] run %s forcing conclusion (steps=%d)", runID, result.Steps)
+			final, ferr := agent.forceConclusion(runCtx, runID, messages, &stepSeq, runStarted)
+			if ferr != nil {
+				result.Err = ferr
+				log.ErrorfCtx(ctx, "[agent] run %s force-conclusion error: %v", runID, ferr)
+			} else if final != nil {
+				result.Answer += final.Content
+			}
 		}
 	}
 
@@ -816,6 +869,22 @@ func extendEvidenceStepLimit(step, current, configured int, produced, alreadyExt
 		return current
 	}
 	return current + 1
+}
+
+func pendingRequiredTools(required, attempted map[string]struct{}) []string {
+	pending := make([]string, 0, len(required))
+	for id := range required {
+		if _, ok := attempted[id]; !ok {
+			pending = append(pending, id)
+		}
+	}
+	sort.Strings(pending)
+	return pending
+}
+
+func requiredToolsInstruction(ids []string) string {
+	return "The evidence router requires an actual attempt of each of these tools before a final answer: " +
+		strings.Join(ids, ", ") + ". Call every pending tool with arguments grounded in the current question. A tool error still counts as an attempt and must be reported; do not substitute a different evidence source."
 }
 
 func formatToolResultForLLM(name, result string) string {

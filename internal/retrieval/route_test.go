@@ -149,6 +149,14 @@ func TestToolRoutingContractUsesConversationContextForFollowUps(t *testing.T) {
 	}
 }
 
+func TestQueryTermsContractKeepsExplicitCurrentTargetIsolated(t *testing.T) {
+	for _, required := range []string{"current question dominates", "genuinely omitted", "do not copy unrelated targets"} {
+		if !strings.Contains(strings.ToLower(queryTermsContract), required) {
+			t.Fatalf("query terms contract missing %q", required)
+		}
+	}
+}
+
 func TestBindToolIDsRejectsUnregisteredTool(t *testing.T) {
 	_, err := bindToolIDs(
 		map[string]any{"tool_ids": []any{"unknown"}},

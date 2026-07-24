@@ -190,6 +190,88 @@ func TestRunExtendsOneToolCapableTurnAfterBoundaryEvidence(t *testing.T) {
 	}
 }
 
+func TestRunAttemptsRequiredRoutedToolBeforeAnswer(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-code\",\"type\":\"function\",\"function\":{\"name\":\"code_evidence\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+		case 2:
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"没有运行时证据也直接回答。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		case 3:
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-runtime\",\"type\":\"function\",\"function\":{\"name\":\"runtime_evidence\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+		default:
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"基于运行时证据回答。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		}
+	}))
+	defer server.Close()
+
+	var runtimeAttempts int32
+	registry := testRegistry(t,
+		Tool{
+			ID: "code_evidence", Description: "code evidence", Kind: ToolKindRead,
+			InputSchema: objectSchema(nil, nil),
+			Handler:     stringHandler(func(context.Context, tool.Arguments) (string, error) { return `{"found":true}`, nil }),
+		},
+		Tool{
+			ID: "runtime_evidence", Description: "runtime evidence", Kind: ToolKindRead,
+			InputSchema: objectSchema(nil, nil),
+			Handler: stringHandler(func(context.Context, tool.Arguments) (string, error) {
+				atomic.AddInt32(&runtimeAttempts, 1)
+				return `{"count":42}`, nil
+			}),
+		},
+	)
+	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{})
+	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+		MaxSteps: 4, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
+	}, nil, nil)
+	plan := domain.EvidencePlan{Sources: domain.Internal}
+	policy := ToolPolicyForPlan(plan, false)
+	result, err := agent.runWithSnapshot(
+		t.Context(), "run_required_tool", "当前有多少用户？", ConversationContext{}, nil,
+		plan, policy, agent.executor.Snapshot(policy), []string{"runtime_evidence"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&runtimeAttempts) != 1 {
+		t.Fatalf("runtime attempts = %d, want 1", runtimeAttempts)
+	}
+	if result.Err != nil || result.Steps != 4 || result.Answer != "基于运行时证据回答。" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestRunDoesNotForceConclusionWithoutRequiredToolAttempt(t *testing.T) {
+	server := fakeStreamServer(t, []streamEvent{{content: "直接回答。", finish: "stop"}})
+	defer server.Close()
+
+	registry := testRegistry(t, Tool{
+		ID: "runtime_evidence", Description: "runtime evidence", Kind: ToolKindRead,
+		InputSchema: objectSchema(nil, nil),
+		Handler:     stringHandler(func(context.Context, tool.Arguments) (string, error) { return `{}`, nil }),
+	})
+	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, server.Client())
+	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+		MaxSteps: 1, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
+	}, nil, nil)
+	plan := domain.EvidencePlan{Sources: domain.Internal}
+	policy := ToolPolicyForPlan(plan, false)
+	result, err := agent.runWithSnapshot(
+		t.Context(), "run_required_tool_limit", "当前有多少用户？", ConversationContext{}, nil,
+		plan, policy, agent.executor.Snapshot(policy), []string{"runtime_evidence"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Answer != "" || result.Err == nil || !strings.Contains(result.Err.Error(), "runtime_evidence") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestContinueIfNeeded_NoTruncation(t *testing.T) {
 	srv := fakeStreamServer(t, []streamEvent{
 		{content: "完整回答", finish: "stop"},

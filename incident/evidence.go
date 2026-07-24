@@ -50,9 +50,17 @@ type APISummary struct {
 }
 
 type LogSearchResult struct {
-	Total     int          `json:"total"`
-	Hits      []LogHit     `json:"hits"`
-	Summaries []APISummary `json:"summaries"`
+	Total     int                  `json:"total"`
+	Hits      []LogHit             `json:"hits"`
+	Summaries []APISummary         `json:"summaries"`
+	Metrics   map[string]LogMetric `json:"metrics,omitempty"`
+}
+
+// LogMetric is one provider-computed aggregate over matching log records.
+type LogMetric struct {
+	Field       string `json:"field"`
+	Value       uint64 `json:"value"`
+	Approximate bool   `json:"approximate,omitempty"`
 }
 
 type Span struct {

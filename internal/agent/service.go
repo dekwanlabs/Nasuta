@@ -467,9 +467,6 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		q = question
 	}
 	retrievalTerms := strings.TrimSpace(strings.Join(terms.DomainTerms, " "))
-	if retrievalPrefix != "" {
-		retrievalTerms = strings.TrimSpace(retrievalPrefix + " " + retrievalTerms)
-	}
 	canonicalQuery := canonicalRetrievalQuery(q, retrievalTerms)
 	if canonicalQuery != q {
 		log.InfofCtx(ctx, "[qa] retrieval query: augmented with grounded terms (%d chars)", len(retrievalTerms))
@@ -488,7 +485,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		rc := &retrieval.RetrievedContext{OriginalQuestion: question}
 		mergePreloadedContext(rc, preloadedContext, svc.contextBudget())
 		appendUnavailableWeb(rc, webUnavailable)
-		return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot)
+		return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot, routedToolIDs)
 	}
 
 	emit("好嘞，关键词到手了，我去查一下资料~ 📚")
@@ -515,7 +512,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		log.InfofCtx(ctx, "[qa] pre-retrieve refs: %s", platform.TruncateForLog(strings.Join(refStrs, " | "), 800))
 	}
 	log.InfofCtx(ctx, "[qa] pre-retrieve context:\n%s", platform.TruncateForLog(rc.Text, 4000))
-	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot)
+	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot, routedToolIDs)
 }
 
 func routingCandidates(snapshot tool.Snapshot) []retrieval.ToolRouteCandidate {
@@ -731,10 +728,10 @@ func appendUnavailableWeb(rc *retrieval.RetrievedContext, unavailable bool) {
 
 func (svc *QA) runAgentWithPlan(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan) (*AskResult, error) {
 	policy := ToolPolicyForPlan(plan, false)
-	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, plan, policy, svc.toolExecutor().Snapshot(policy))
+	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, plan, policy, svc.toolExecutor().Snapshot(policy), nil)
 }
 
-func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot) (*AskResult, error) {
+func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot, requiredToolIDs []string) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] runAgent runID=%s", runID)
 
 	maxSteps := svc.agent.MaxStepsForPlan(question, plan)
@@ -758,7 +755,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	conversation.Instructions = instructions
 
 	go func() {
-		res, runErr := svc.agent.RunWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, snapshot)
+		res, runErr := svc.agent.runWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, snapshot, requiredToolIDs)
 		outcome := outcomeFor(res, runErr)
 		if svc.hub != nil {
 			svc.hub.Complete(runID, outcome)
