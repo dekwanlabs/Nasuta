@@ -500,6 +500,9 @@ func (ss *SessionStore) SessionContextStats(sessionID string, userID int64) (tok
 		 WHERE s.id=? AND s.user_id=?
 		 GROUP BY s.compacted_through_turn`,
 		sessionID, userID).Scan(&tokens, &compactedThrough)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, nil
+	}
 	return tokens, compactedThrough, err
 }
 

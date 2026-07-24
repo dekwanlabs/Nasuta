@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -219,6 +220,25 @@ func TestGetContextSessionLoadsOnlyTurnsAfterCompaction(t *testing.T) {
 	}
 	if session.CompactedThroughTurn != 4 || len(session.Messages) != 2 {
 		t.Fatalf("session = %#v", session)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionContextStatsTreatsNewSessionAsEmpty(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	mock.ExpectQuery(`SELECT COALESCE\(SUM\(CASE WHEN t\.turn_no>s\.compacted_through_turn`).
+		WithArgs("new-session", int64(42)).
+		WillReturnError(sql.ErrNoRows)
+
+	tokens, compactedThrough, err := store.SessionContextStats("new-session", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 0 || compactedThrough != 0 {
+		t.Fatalf("stats = (%d, %d), want empty", tokens, compactedThrough)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
