@@ -43,6 +43,42 @@ func TestBuildAgentMessagesUsesCanonicalSummaryAndRecentTail(t *testing.T) {
 	}
 }
 
+func TestReplayableTailMessagesKeepsCompleteToolGroup(t *testing.T) {
+	call := llm.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: llm.ToolFunction{Name: "observe", Arguments: `{"url":"/v1/items"}`},
+	}
+	messages := []llm.Message{
+		{Role: "user", Content: "查一下"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{call}},
+		{Role: "tool", ToolCallID: "call-1", Name: "observe", Content: "found"},
+		{Role: "assistant", Content: "查到了"},
+	}
+
+	got := replayableTailMessages(messages, 2)
+	if len(got) != 4 || got[0].Content != "查一下" || len(got[1].ToolCalls) != 1 || got[2].Role != "tool" || got[3].Content != "查到了" {
+		t.Fatalf("replayable tail = %#v", got)
+	}
+}
+
+func TestReplayableTailMessagesDropsInvalidToolGroups(t *testing.T) {
+	calls := []llm.ToolCall{
+		{ID: "call-1", Function: llm.ToolFunction{Name: "observe", Arguments: `{}`}},
+		{ID: "call-2", Function: llm.ToolFunction{Name: "search", Arguments: `{}`}},
+	}
+	messages := []llm.Message{
+		{Role: "tool", ToolCallID: "orphan", Name: "observe", Content: "orphan"},
+		{Role: "assistant", ToolCalls: calls},
+		{Role: "tool", ToolCallID: "call-1", Name: "observe", Content: "partial"},
+		{Role: "user", Content: "继续"},
+	}
+
+	got := replayableTailMessages(messages, 10)
+	if len(got) != 1 || got[0].Role != "user" || got[0].Content != "继续" {
+		t.Fatalf("invalid groups were replayed: %#v", got)
+	}
+}
+
 func TestBuildAgentMessagesTreatsReferenceCountAsCandidates(t *testing.T) {
 	agent := &Agent{cfg: AgentConfig{HistoryLimit: 2}}
 	messages := agent.buildAgentMessages(

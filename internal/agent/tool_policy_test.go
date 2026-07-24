@@ -7,7 +7,6 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -46,44 +45,33 @@ func TestToolSnapshotBlocksToolRegisteredMidRun(t *testing.T) {
 	}
 }
 
-func TestSelectRoutedToolsHidesUnmatchedReadIntent(t *testing.T) {
+func TestRoutingMetadataDoesNotChangeSnapshotVisibility(t *testing.T) {
 	always := testAgentTool("always", ToolKindRead, noopTool)
 	gated := testAgentTool("runtime", ToolKindRead, noopTool)
 	gated.Routing = &tool.RoutingSpec{Intent: "current runtime evidence"}
 	write := testAgentTool("write", ToolKindWrite, noopTool)
 	registry := testRegistry(t, always, gated, write)
-	snapshot := registry.Snapshot(tool.AllPolicy())
+	snapshot := registry.Snapshot(ToolPolicyForPlan(domain.DirectPlan(), false))
 
-	filtered, _ := selectRoutedTools(snapshot, nil)
-	if _, ok := filtered.Get("runtime"); ok {
-		t.Fatal("unmatched routed read tool remained visible")
-	}
-	for _, id := range []tool.ToolID{"always", "write"} {
-		if _, ok := filtered.Get(id); !ok {
-			t.Fatalf("tool %q was unexpectedly filtered", id)
+	for _, id := range []tool.ToolID{"always", "runtime"} {
+		if _, ok := snapshot.Get(id); !ok {
+			t.Fatalf("read tool %q was unexpectedly hidden", id)
 		}
 	}
-
-	filtered, _ = selectRoutedTools(snapshot, []string{"runtime"})
-	if _, ok := filtered.Get("runtime"); !ok {
-		t.Fatal("matched routed read tool was not visible")
+	if _, ok := snapshot.Get("write"); ok {
+		t.Fatal("write tool was visible without write permission")
 	}
 }
 
-func TestContextualRoutedToolIDsRetainsCandidatesForInternalFollowUp(t *testing.T) {
-	candidates := []retrieval.ToolRouteCandidate{{ID: "runtime", Intent: "current runtime evidence"}}
-	internalPlan := domain.EvidencePlan{Sources: domain.Internal}
-	selected, retained := contextualRoutedToolIDs(nil, candidates, "prior runtime investigation", internalPlan)
-	if !retained || len(selected) != 1 || selected[0] != "runtime" {
-		t.Fatalf("selected=%v retained=%v", selected, retained)
+func TestPreferredToolsInstructionIsAdvisory(t *testing.T) {
+	instruction := preferredToolsInstruction([]string{"runtime"})
+	for _, want := range []string{"runtime", "advisory, not mandatory", "answer directly", "Other registered tools remain available"} {
+		if !strings.Contains(instruction, want) {
+			t.Fatalf("instruction missing %q: %s", want, instruction)
+		}
 	}
-	selected, retained = contextualRoutedToolIDs(nil, candidates, "prior runtime investigation", domain.DirectPlan())
-	if retained || len(selected) != 0 {
-		t.Fatalf("direct selected=%v retained=%v", selected, retained)
-	}
-	selected, retained = contextualRoutedToolIDs([]string{"runtime"}, candidates, "context", internalPlan)
-	if retained || len(selected) != 1 {
-		t.Fatalf("existing selection=%v retained=%v", selected, retained)
+	if strings.Contains(instruction, "must call") || strings.Contains(instruction, "required") {
+		t.Fatalf("preference was expressed as a requirement: %s", instruction)
 	}
 }
 

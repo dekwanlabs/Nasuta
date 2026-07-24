@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestFastLLMConfiguredUsesMainEndpointAndKey(t *testing.T) {
 	ps := &PlatformSettings{
@@ -58,6 +61,21 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 	}
 	if settings.RetrievalRouterMaxTokens != DefaultRetrievalRouterMaxTokens {
 		t.Fatalf("max tokens = %d", settings.RetrievalRouterMaxTokens)
+	}
+	if time.Duration(settings.AgentAnswerReserve) != DefaultAgentAnswerReserve {
+		t.Fatalf("answer reserve = %s", time.Duration(settings.AgentAnswerReserve))
+	}
+}
+
+func TestCanonicalAgentAnswerReserveRequiresPositiveDuration(t *testing.T) {
+	got, err := CanonicalPlatformSetting("agent_answer_reserve", "30s")
+	if err != nil || got != "30s" {
+		t.Fatalf("canonical reserve = %q, err=%v", got, err)
+	}
+	for _, value := range []string{"0s", "-1s", "invalid"} {
+		if _, err := CanonicalPlatformSetting("agent_answer_reserve", value); err == nil {
+			t.Fatalf("reserve %q was accepted", value)
+		}
 	}
 }
 

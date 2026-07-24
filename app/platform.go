@@ -137,6 +137,7 @@ func buildAuth(cfg config.Config, db *sql.DB) (*auth.DB, *auth.Service) {
 
 func loadPlatformSettings(authDB *auth.DB) *config.PlatformSettings {
 	settings := &config.PlatformSettings{}
+	settings.Apply(nil)
 	if authDB == nil {
 		return settings
 	}

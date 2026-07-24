@@ -14,9 +14,9 @@ func GeneratePersistentSummary(ctx context.Context, client *llm.LLMClient, messa
 	if client == nil || len(messages) == 0 {
 		return "", nil
 	}
-	var sb strings.Builder
-	for _, m := range messages {
-		fmt.Fprintf(&sb, "%s: %s\n", m.Role, m.Content)
+	transcript := persistentSummaryTranscript(messages)
+	if transcript == "" {
+		return "", nil
 	}
 	const sys = `You are the **Nasuta Persistent Summarizer**, responsible for generating rolling summaries for cross-session memory.
 
@@ -45,5 +45,25 @@ User (payment-service developer, EU deployment) is investigating an upstream aut
 
 **Bad summary (not retrievable):**
 The user was debugging an issue. Ruled out database and cache. Needs to check another region next.`
-	return client.Chat(ctx, sys, sb.String())
+	return client.Chat(ctx, sys, transcript)
+}
+
+func persistentSummaryTranscript(messages []llm.Message) string {
+	var sb strings.Builder
+	for _, m := range messages {
+		switch {
+		case m.Role == "assistant" && len(m.ToolCalls) > 0:
+			for _, call := range m.ToolCalls {
+				fmt.Fprintf(&sb, "assistant tool_call %s: %s\n", call.Function.Name, runeSafeTruncate(call.Function.Arguments, 1000))
+			}
+			if m.Content != "" {
+				fmt.Fprintf(&sb, "assistant: %s\n", m.Content)
+			}
+		case m.Role == "tool":
+			fmt.Fprintf(&sb, "tool %s: %s\n", m.Name, runeSafeTruncate(m.Content, sessionToolResultLimit))
+		default:
+			fmt.Fprintf(&sb, "%s: %s\n", m.Role, m.Content)
+		}
+	}
+	return sb.String()
 }

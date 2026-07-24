@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
 func TestGetRecentSessionQueriesOnlyRequestedTail(t *testing.T) {
@@ -20,13 +21,13 @@ func TestGetRecentSessionQueriesOnlyRequestedTail(t *testing.T) {
 			AddRow("session-1", 42, "title", "summary", now, now))
 	mock.ExpectQuery(`SELECT m\.role, m\.content.*ORDER BY m\.seq DESC LIMIT \?`).
 		WithArgs("session-1", int64(42), 6).
-		WillReturnRows(sqlmock.NewRows([]string{"role", "content"}).
-			AddRow("assistant", "nine").
-			AddRow("user", "eight").
-			AddRow("assistant", "seven").
-			AddRow("user", "six").
-			AddRow("assistant", "five").
-			AddRow("user", "four"))
+		WillReturnRows(sqlmock.NewRows([]string{"role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
+			AddRow("assistant", "nine", "", "", "").
+			AddRow("user", "eight", "", "", "").
+			AddRow("assistant", "seven", "", "", "").
+			AddRow("user", "six", "", "", "").
+			AddRow("assistant", "five", "", "", "").
+			AddRow("user", "four", "", "", ""))
 
 	session, err := store.GetRecentSession("session-1", 42, 6)
 	if err != nil {
@@ -48,10 +49,10 @@ func TestListMessagesBeforeUsesExclusiveCursor(t *testing.T) {
 	defer closeDB()
 	mock.ExpectQuery(`SELECT m\.seq, m\.role, m\.content.*m\.seq < \?.*ORDER BY m\.seq DESC LIMIT \?`).
 		WithArgs("session-1", int64(42), 4, 3).
-		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content"}).
-			AddRow(3, "assistant", "three").
-			AddRow(2, "user", "two").
-			AddRow(1, "assistant", "one"))
+		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
+			AddRow(3, "assistant", "three", "", "", "").
+			AddRow(2, "user", "two", "", "", "").
+			AddRow(1, "assistant", "one", "", "", ""))
 
 	page, err := store.ListMessagesBefore("session-1", 42, 4, 2)
 	if err != nil {
@@ -62,6 +63,77 @@ func TestListMessagesBeforeUsesExclusiveCursor(t *testing.T) {
 	}
 	if page.Messages[0].Content != "two" || page.Messages[1].Content != "three" {
 		t.Fatalf("messages are not chronological: %#v", page.Messages)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetRecentSessionRestoresStructuredToolMessages(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT s.id, s.user_id, s.title, COALESCE(s.summary,''), s.created_at, s.updated_at
+         FROM qa_sessions s WHERE s.id = ? AND s.user_id = ?`)).
+		WithArgs("session-1", int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "created_at", "updated_at"}).
+			AddRow("session-1", 42, "title", "summary", now, now))
+	mock.ExpectQuery(`SELECT m\.role, m\.content.*ORDER BY m\.seq DESC LIMIT \?`).
+		WithArgs("session-1", int64(42), 2).
+		WillReturnRows(sqlmock.NewRows([]string{"role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
+			AddRow("tool", `{"count":42}`, "", "call-1", "observe_logs").
+			AddRow("assistant", "", `[{"id":"call-1","type":"function","function":{"name":"observe_logs","arguments":"{\"trace_id\":\"abc123\"}"}}]`, "", ""))
+
+	session, err := store.GetRecentSession("session-1", 42, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Messages) != 2 || len(session.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("messages = %#v", session.Messages)
+	}
+	call := session.Messages[0].ToolCalls[0]
+	if call.ID != "call-1" || call.Function.Name != "observe_logs" || call.Function.Arguments != `{"trace_id":"abc123"}` {
+		t.Fatalf("tool call = %#v", call)
+	}
+	result := session.Messages[1]
+	if result.Role != "tool" || result.ToolCallID != "call-1" || result.Name != "observe_logs" {
+		t.Fatalf("tool result = %#v", result)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAppendMessagesPersistsStructuredToolFields(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT user_id FROM qa_sessions WHERE id=\? FOR UPDATE`).
+		WithArgs("session-1").
+		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(42))
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(seq\), -1\) FROM qa_messages WHERE session_id = \?`).
+		WithArgs("session-1").
+		WillReturnRows(sqlmock.NewRows([]string{"max_seq"}).AddRow(3))
+	mock.ExpectExec(`INSERT INTO qa_messages\(session_id,seq,role,content,tool_calls_json,tool_call_id,tool_name,created_at\) VALUES`).
+		WithArgs(
+			"session-1", 4, "assistant", "",
+			`[{"id":"call-1","type":"function","function":{"name":"observe_logs","arguments":"{}"}}]`, "", "", sqlmock.AnyArg(),
+			"session-1", 5, "tool", "backend unavailable", "", "call-1", "observe_logs", sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(`UPDATE qa_sessions SET updated_at = \? WHERE id = \? AND user_id=\?`).
+		WithArgs(sqlmock.AnyArg(), "session-1", int64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err := store.AppendMessages("session-1", 42, []llm.Message{
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{
+			ID: "call-1", Type: "function", Function: llm.ToolFunction{Name: "observe_logs", Arguments: `{}`},
+		}}},
+		{Role: "tool", Content: "backend unavailable", ToolCallID: "call-1", Name: "observe_logs"},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

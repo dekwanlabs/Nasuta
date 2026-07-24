@@ -171,7 +171,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		return
 	}
 	if terminal != nil && terminal.Status == agent.RunStatusDone && answerText != "" {
-		handler.saveTurnToSession(ctx, runID, sessionID, userID, question, answerText)
+		handler.saveTurnToSession(ctx, runID, sessionID, userID, question, answerText, terminal.SessionMessages)
 	}
 }
 
@@ -344,7 +344,7 @@ func (handler *Handler) APIQASessionDelete(w http.ResponseWriter, r *http.Reques
 	httputil.WriteJSON(w, map[string]string{"status": "deleted"})
 }
 
-func (handler *Handler) saveTurnToSession(ctx context.Context, runID, sessionID string, userID int64, question, answer string) {
+func (handler *Handler) saveTurnToSession(ctx context.Context, runID, sessionID string, userID int64, question, answer string, toolMessages []llm.Message) {
 	if handler.qaSessions == nil || sessionID == "" || answer == "" {
 		return
 	}
@@ -352,10 +352,11 @@ func (handler *Handler) saveTurnToSession(ctx context.Context, runID, sessionID 
 		log.ErrorfCtx(ctx, "[qa] ensure session %s failed: %v", sessionID, err)
 		return
 	}
-	if err := handler.qaSessions.AppendMessages(sessionID, userID, []llm.Message{
-		{Role: "user", Content: question},
-		{Role: "assistant", Content: answer},
-	}); err != nil {
+	messages := make([]llm.Message, 0, len(toolMessages)+2)
+	messages = append(messages, llm.Message{Role: "user", Content: question})
+	messages = append(messages, toolMessages...)
+	messages = append(messages, llm.Message{Role: "assistant", Content: answer})
+	if err := handler.qaSessions.AppendMessages(sessionID, userID, messages); err != nil {
 		log.ErrorfCtx(ctx, "[qa] failed to append messages to session %s: %v", sessionID, err)
 		return
 	}

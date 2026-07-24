@@ -2,6 +2,7 @@ package memory
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -108,12 +109,16 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 	}
 	if len(r.Messages) > 0 {
 		placeholders := make([]string, len(r.Messages))
-		args := make([]any, 0, len(r.Messages)*5)
+		args := make([]any, 0, len(r.Messages)*8)
 		for i, m := range r.Messages {
-			placeholders[i] = "(?,?,?,?,?)"
-			args = append(args, r.ID, i, m.Role, m.Content, store.DatabaseTime(r.UpdatedAt))
+			toolCalls, err := marshalToolCalls(m.ToolCalls)
+			if err != nil {
+				return fmt.Errorf("memory/session: encode message %d tool calls: %w", i, err)
+			}
+			placeholders[i] = "(?,?,?,?,?,?,?,?)"
+			args = append(args, r.ID, i, m.Role, m.Content, toolCalls, m.ToolCallID, m.Name, store.DatabaseTime(r.UpdatedAt))
 		}
-		query := "INSERT INTO qa_messages(session_id,seq,role,content,created_at) VALUES " + strings.Join(placeholders, ",")
+		query := "INSERT INTO qa_messages(session_id,seq,role,content,tool_calls_json,tool_call_id,tool_name,created_at) VALUES " + strings.Join(placeholders, ",")
 		if _, err := tx.Exec(query, args...); err != nil {
 			return err
 		}
@@ -170,7 +175,7 @@ func (ss *SessionStore) GetRecentSession(id string, userID int64, limit int) (*S
 		return r, err
 	}
 	rows, err := ss.db.Query(
-		`SELECT m.role, m.content
+		`SELECT m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name
 		 FROM qa_messages m
 		 JOIN qa_sessions s ON s.id = m.session_id
 		 WHERE m.session_id = ? AND s.user_id = ?
@@ -181,8 +186,8 @@ func (ss *SessionStore) GetRecentSession(id string, userID int64, limit int) (*S
 	defer rows.Close()
 	desc := make([]llm.Message, 0, limit)
 	for rows.Next() {
-		var message llm.Message
-		if err := rows.Scan(&message.Role, &message.Content); err != nil {
+		message, err := scanSessionMessage(rows)
+		if err != nil {
 			return nil, err
 		}
 		desc = append(desc, message)
@@ -204,7 +209,7 @@ func (ss *SessionStore) GetFullSession(id string, userID int64) (*SessionRecord,
 		return r, err
 	}
 	mrows, err := ss.db.Query(
-		`SELECT m.role, m.content
+		`SELECT m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name
 		 FROM qa_messages m
 		 JOIN qa_sessions s ON s.id = m.session_id
 		 WHERE m.session_id = ? AND s.user_id = ?
@@ -214,8 +219,8 @@ func (ss *SessionStore) GetFullSession(id string, userID int64) (*SessionRecord,
 	}
 	defer mrows.Close()
 	for mrows.Next() {
-		var m llm.Message
-		if err := mrows.Scan(&m.Role, &m.Content); err != nil {
+		m, err := scanSessionMessage(mrows)
+		if err != nil {
 			return nil, err
 		}
 		r.Messages = append(r.Messages, m)
@@ -229,7 +234,7 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	query := `SELECT m.seq, m.role, m.content
+	query := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name
 	          FROM qa_messages m
 	          JOIN qa_sessions s ON s.id = m.session_id
 	          WHERE m.session_id = ? AND s.user_id = ?`
@@ -252,7 +257,11 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 	desc := make([]sequencedMessage, 0, limit+1)
 	for rows.Next() {
 		var item sequencedMessage
-		if err := rows.Scan(&item.seq, &item.msg.Role, &item.msg.Content); err != nil {
+		var toolCalls string
+		if err := rows.Scan(&item.seq, &item.msg.Role, &item.msg.Content, &toolCalls, &item.msg.ToolCallID, &item.msg.Name); err != nil {
+			return nil, err
+		}
+		if err := unmarshalToolCalls(toolCalls, &item.msg); err != nil {
 			return nil, err
 		}
 		desc = append(desc, item)
@@ -298,12 +307,16 @@ func (ss *SessionStore) AppendMessages(sessionID string, userID int64, msgs []ll
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	placeholders := make([]string, len(msgs))
-	args := make([]any, 0, len(msgs)*5)
+	args := make([]any, 0, len(msgs)*8)
 	for i, m := range msgs {
-		placeholders[i] = "(?,?,?,?,?)"
-		args = append(args, sessionID, maxSeq+1+i, m.Role, m.Content, store.DatabaseTime(now))
+		toolCalls, err := marshalToolCalls(m.ToolCalls)
+		if err != nil {
+			return fmt.Errorf("memory/session: encode appended message %d tool calls: %w", i, err)
+		}
+		placeholders[i] = "(?,?,?,?,?,?,?,?)"
+		args = append(args, sessionID, maxSeq+1+i, m.Role, m.Content, toolCalls, m.ToolCallID, m.Name, store.DatabaseTime(now))
 	}
-	query := "INSERT INTO qa_messages(session_id,seq,role,content,created_at) VALUES " + strings.Join(placeholders, ",")
+	query := "INSERT INTO qa_messages(session_id,seq,role,content,tool_calls_json,tool_call_id,tool_name,created_at) VALUES " + strings.Join(placeholders, ",")
 	if _, err := tx.Exec(query, args...); err != nil {
 		return err
 	}
@@ -376,6 +389,43 @@ func lockSessionOwner(tx *sql.Tx, id string, userID int64) (bool, error) {
 		return false, ErrSessionOwnership
 	}
 	return true, nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSessionMessage(scanner rowScanner) (llm.Message, error) {
+	var message llm.Message
+	var toolCalls string
+	if err := scanner.Scan(&message.Role, &message.Content, &toolCalls, &message.ToolCallID, &message.Name); err != nil {
+		return llm.Message{}, err
+	}
+	if err := unmarshalToolCalls(toolCalls, &message); err != nil {
+		return llm.Message{}, err
+	}
+	return message, nil
+}
+
+func marshalToolCalls(calls []llm.ToolCall) (string, error) {
+	if len(calls) == 0 {
+		return "", nil
+	}
+	raw, err := json.Marshal(calls)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func unmarshalToolCalls(raw string, message *llm.Message) error {
+	if raw == "" {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(raw), &message.ToolCalls); err != nil {
+		return fmt.Errorf("memory/session: decode tool calls: %w", err)
+	}
+	return nil
 }
 
 func firstUserQuestion(msgs []llm.Message) string {

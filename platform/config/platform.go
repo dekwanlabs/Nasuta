@@ -11,6 +11,7 @@ import (
 const (
 	DefaultRetrievalRouterDirectConfidence = 0.90
 	DefaultRetrievalRouterMaxTokens        = 512
+	DefaultAgentAnswerReserve              = 30 * time.Second
 )
 
 // PlatformSettings holds runtime settings managed from the platform UI.
@@ -248,6 +249,9 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 			p.AgentAnswerReserve = Duration(d)
 		}
 	}
+	if p.AgentAnswerReserve <= 0 {
+		p.AgentAnswerReserve = Duration(DefaultAgentAnswerReserve)
+	}
 	if v := strings.TrimSpace(m["agent_max_steps"]); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			p.AgentMaxSteps = n
@@ -302,6 +306,12 @@ func (p *PlatformSettings) routerMaxTokens() int {
 func CanonicalPlatformSetting(key, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	switch key {
+	case "agent_answer_reserve":
+		reserve, err := time.ParseDuration(value)
+		if err != nil || reserve <= 0 {
+			return "", fmt.Errorf("agent_answer_reserve must be a positive duration")
+		}
+		return reserve.String(), nil
 	case "retrieval_router_direct_min_confidence":
 		confidence, err := strconv.ParseFloat(value, 64)
 		if err != nil || confidence <= 0 || confidence > 1 {

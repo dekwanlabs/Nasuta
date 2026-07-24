@@ -163,10 +163,11 @@ type SSEEvent struct {
 
 // RunTerminal is the sole real-time projection of one persisted Run outcome.
 type RunTerminal struct {
-	Status    RunStatus `json:"status"`
-	StepCount int       `json:"step_count"`
-	TokenUsed int       `json:"token_used"`
-	Error     string    `json:"error,omitempty"`
+	Status          RunStatus     `json:"status"`
+	StepCount       int           `json:"step_count"`
+	TokenUsed       int           `json:"token_used"`
+	Error           string        `json:"error,omitempty"`
+	SessionMessages []llm.Message `json:"-"`
 }
 
 // EmitTrace broadcasts opt-in evaluation telemetry without persisting business steps.
@@ -301,6 +302,7 @@ func (hub *RunHub) Complete(runID string, outcome RunOutcome) {
 	}
 	terminal := &RunTerminal{
 		Status: outcome.Status, StepCount: outcome.StepCount, TokenUsed: outcome.TokenUsed,
+		SessionMessages: append([]llm.Message(nil), outcome.SessionMessages...),
 	}
 	if outcome.Err != nil {
 		terminal.Error = outcome.Err.Error()

@@ -367,17 +367,14 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		log.WarnfCtx(ctx, "[qa] evidence planning degraded: %v", planningErr)
 		routedToolIDs = nil
 	}
-	var retainedContextTools bool
-	if planningErr == nil {
-		routedToolIDs, retainedContextTools = contextualRoutedToolIDs(
-			routedToolIDs, toolCandidates, routeContext, effectiveDecision.Plan,
-		)
+	toolSnapshot := candidateSnapshot
+	availableToolIDs := snapshotToolIDs(toolSnapshot)
+	if len(routedToolIDs) > 0 {
+		conversation.Instructions = append(conversation.Instructions, llm.Message{
+			Role:    "system",
+			Content: preferredToolsInstruction(routedToolIDs),
+		})
 	}
-	if retainedContextTools {
-		log.InfofCtx(ctx, "[qa] contextual follow-up retained routed read tools: %v", routedToolIDs)
-	}
-	toolSnapshot, allowedToolIDs := selectRoutedTools(candidateSnapshot, routedToolIDs)
-	toolPolicy.AllowedIDs = allowedToolIDs
 	log.InfofCtx(ctx, "[qa] evidence plan proposed=%s proposed_sources=%v confidence=%.2f origin=%s effective=%s effective_sources=%v effective_confidence=%.2f effective_origin=%s",
 		decision.Plan.String(), decision.Plan.SourceNames(), decision.Confidence, decision.Origin,
 		effectiveDecision.Plan.String(), effectiveDecision.Plan.SourceNames(), effectiveDecision.Confidence, effectiveDecision.Origin)
@@ -399,7 +396,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 				"proposed_plan": decision.Plan.String(), "proposed_sources": decision.Plan.SourceNames(), "proposed_confidence": decision.Confidence,
 				"proposed_origin": decision.Origin,
 				"effective_plan":  effectiveDecision.Plan.String(), "effective_sources": effectiveDecision.Plan.SourceNames(), "effective_confidence": effectiveDecision.Confidence,
-				"effective_origin": effectiveDecision.Origin, "routed_tool_ids": routedToolIDs,
+				"effective_origin": effectiveDecision.Origin, "preferred_tool_ids": routedToolIDs, "available_tool_ids": availableToolIDs,
 				"planning_error": planningError, "fallback_error": fallbackError,
 			},
 		})
@@ -485,7 +482,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		rc := &retrieval.RetrievedContext{OriginalQuestion: question}
 		mergePreloadedContext(rc, preloadedContext, svc.contextBudget())
 		appendUnavailableWeb(rc, webUnavailable)
-		return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot, routedToolIDs)
+		return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot)
 	}
 
 	emit("好嘞，关键词到手了，我去查一下资料~ 📚")
@@ -512,7 +509,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		log.InfofCtx(ctx, "[qa] pre-retrieve refs: %s", platform.TruncateForLog(strings.Join(refStrs, " | "), 800))
 	}
 	log.InfofCtx(ctx, "[qa] pre-retrieve context:\n%s", platform.TruncateForLog(rc.Text, 4000))
-	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot, routedToolIDs)
+	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot)
 }
 
 func routingCandidates(snapshot tool.Snapshot) []retrieval.ToolRouteCandidate {
@@ -529,42 +526,18 @@ func routingCandidates(snapshot tool.Snapshot) []retrieval.ToolRouteCandidate {
 	return candidates
 }
 
-func allRoutedToolIDs(candidates []retrieval.ToolRouteCandidate) []string {
-	ids := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		ids = append(ids, candidate.ID)
+func snapshotToolIDs(snapshot tool.Snapshot) []string {
+	tools := snapshot.Tools()
+	ids := make([]string, 0, len(tools))
+	for _, candidate := range tools {
+		ids = append(ids, string(candidate.ID))
 	}
 	return ids
 }
 
-func contextualRoutedToolIDs(
-	selected []string,
-	candidates []retrieval.ToolRouteCandidate,
-	routeContext string,
-	plan domain.EvidencePlan,
-) ([]string, bool) {
-	if len(selected) > 0 || strings.TrimSpace(routeContext) == "" || !plan.Has(domain.Internal) {
-		return selected, false
-	}
-	ids := allRoutedToolIDs(candidates)
-	return ids, len(ids) > 0
-}
-
-func selectRoutedTools(snapshot tool.Snapshot, routedIDs []string) (tool.Snapshot, map[tool.ToolID]struct{}) {
-	routed := make(map[tool.ToolID]struct{}, len(routedIDs))
-	for _, id := range routedIDs {
-		routed[tool.ToolID(id)] = struct{}{}
-	}
-	allowed := make(map[tool.ToolID]struct{})
-	for _, candidate := range snapshot.Tools() {
-		if candidate.Kind == tool.KindRead && candidate.Routing != nil {
-			if _, selected := routed[candidate.ID]; !selected {
-				continue
-			}
-		}
-		allowed[candidate.ID] = struct{}{}
-	}
-	return snapshot.Select(allowed), allowed
+func preferredToolsInstruction(ids []string) string {
+	return "Tool routing preference for this turn: " + strings.Join(ids, ", ") +
+		". Treat this as advisory, not mandatory. Call a preferred tool only when it resolves a material evidence gap; if conversation history or existing evidence is sufficient, answer directly. Other registered tools remain available, and tool failures must be reported rather than hidden."
 }
 
 func (svc *QA) executePrefetch(ctx context.Context, snapshot tool.Snapshot, plan ToolPlan) ([]ContextBlock, error) {
@@ -728,10 +701,10 @@ func appendUnavailableWeb(rc *retrieval.RetrievedContext, unavailable bool) {
 
 func (svc *QA) runAgentWithPlan(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan) (*AskResult, error) {
 	policy := ToolPolicyForPlan(plan, false)
-	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, plan, policy, svc.toolExecutor().Snapshot(policy), nil)
+	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, plan, policy, svc.toolExecutor().Snapshot(policy))
 }
 
-func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot, requiredToolIDs []string) (*AskResult, error) {
+func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] runAgent runID=%s", runID)
 
 	maxSteps := svc.agent.MaxStepsForPlan(question, plan)
@@ -755,7 +728,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	conversation.Instructions = instructions
 
 	go func() {
-		res, runErr := svc.agent.runWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, snapshot, requiredToolIDs)
+		res, runErr := svc.agent.runWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, snapshot)
 		outcome := outcomeFor(res, runErr)
 		if svc.hub != nil {
 			svc.hub.Complete(runID, outcome)
@@ -1262,11 +1235,12 @@ var ErrEmptyAnswer = errors.New("agent: completed without a visible answer")
 
 // RunOutcome is the single terminal fact consumed by persistence and streaming.
 type RunOutcome struct {
-	Status    RunStatus
-	StepCount int
-	TokenUsed int
-	Answer    string
-	Err       error
+	Status          RunStatus
+	StepCount       int
+	TokenUsed       int
+	Answer          string
+	SessionMessages []llm.Message
+	Err             error
 }
 
 func outcomeFor(result *RunResult, runErr error) RunOutcome {
@@ -1277,9 +1251,10 @@ func outcomeFor(result *RunResult, runErr error) RunOutcome {
 		return RunOutcome{Status: RunStatusFailed, Err: runErr}
 	}
 	outcome := RunOutcome{
-		StepCount: result.Steps,
-		TokenUsed: len(result.Answer),
-		Answer:    result.Answer,
+		StepCount:       result.Steps,
+		TokenUsed:       len(result.Answer),
+		Answer:          result.Answer,
+		SessionMessages: append([]llm.Message(nil), result.SessionMessages...),
 	}
 	switch {
 	case result.Aborted:

@@ -190,85 +190,94 @@ func TestRunExtendsOneToolCapableTurnAfterBoundaryEvidence(t *testing.T) {
 	}
 }
 
-func TestRunAttemptsRequiredRoutedToolBeforeAnswer(t *testing.T) {
+func TestRunAllowsDirectAnswerWithoutPreferredTool(t *testing.T) {
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		drainRequestBody(r)
 		w.Header().Set("Content-Type", "text/event-stream")
-		switch atomic.AddInt32(&calls, 1) {
-		case 1:
-			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-code\",\"type\":\"function\",\"function\":{\"name\":\"code_evidence\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
-		case 2:
-			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"没有运行时证据也直接回答。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
-		case 3:
-			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-runtime\",\"type\":\"function\",\"function\":{\"name\":\"runtime_evidence\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
-		default:
-			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"基于运行时证据回答。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
-		}
+		atomic.AddInt32(&calls, 1)
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"已有上下文足够，直接回答。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer server.Close()
 
 	var runtimeAttempts int32
-	registry := testRegistry(t,
-		Tool{
-			ID: "code_evidence", Description: "code evidence", Kind: ToolKindRead,
-			InputSchema: objectSchema(nil, nil),
-			Handler:     stringHandler(func(context.Context, tool.Arguments) (string, error) { return `{"found":true}`, nil }),
-		},
-		Tool{
-			ID: "runtime_evidence", Description: "runtime evidence", Kind: ToolKindRead,
-			InputSchema: objectSchema(nil, nil),
-			Handler: stringHandler(func(context.Context, tool.Arguments) (string, error) {
-				atomic.AddInt32(&runtimeAttempts, 1)
-				return `{"count":42}`, nil
-			}),
-		},
-	)
+	registry := testRegistry(t, Tool{
+		ID: "runtime_evidence", Description: "runtime evidence", Kind: ToolKindRead,
+		InputSchema: objectSchema(nil, nil),
+		Handler: stringHandler(func(context.Context, tool.Arguments) (string, error) {
+			atomic.AddInt32(&runtimeAttempts, 1)
+			return `{"count":42}`, nil
+		}),
+	})
 	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{})
 	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
-		MaxSteps: 4, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
+		MaxSteps: 2, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
 	}, nil, nil)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
 	policy := ToolPolicyForPlan(plan, false)
 	result, err := agent.runWithSnapshot(
-		t.Context(), "run_required_tool", "当前有多少用户？", ConversationContext{}, nil,
-		plan, policy, agent.executor.Snapshot(policy), []string{"runtime_evidence"},
+		t.Context(), "run_preferred_tool", "继续", ConversationContext{Instructions: []llm.Message{{
+			Role: "system", Content: preferredToolsInstruction([]string{"runtime_evidence"}),
+		}}}, nil, plan, policy, agent.executor.Snapshot(policy),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if atomic.LoadInt32(&runtimeAttempts) != 1 {
-		t.Fatalf("runtime attempts = %d, want 1", runtimeAttempts)
+	if atomic.LoadInt32(&runtimeAttempts) != 0 {
+		t.Fatalf("runtime attempts = %d, want 0", runtimeAttempts)
 	}
-	if result.Err != nil || result.Steps != 4 || result.Answer != "基于运行时证据回答。" {
+	if atomic.LoadInt32(&calls) != 1 || result.Err != nil || result.Steps != 1 || result.Answer != "已有上下文足够，直接回答。" {
 		t.Fatalf("result = %#v", result)
 	}
 }
 
-func TestRunDoesNotForceConclusionWithoutRequiredToolAttempt(t *testing.T) {
-	server := fakeStreamServer(t, []streamEvent{{content: "直接回答。", finish: "stop"}})
+func TestRunForcesConclusionAfterToolFailure(t *testing.T) {
+	var calls int32
+	var sawToolError atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&calls, 1) == 1 {
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-runtime\",\"type\":\"function\",\"function\":{\"name\":\"runtime_evidence\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		sawToolError.Store(strings.Contains(string(body), "backend unavailable"))
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"运行时查询失败，当前只能根据已有资料说明处理方案。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
 	defer server.Close()
 
+	var attempts int32
 	registry := testRegistry(t, Tool{
 		ID: "runtime_evidence", Description: "runtime evidence", Kind: ToolKindRead,
 		InputSchema: objectSchema(nil, nil),
-		Handler:     stringHandler(func(context.Context, tool.Arguments) (string, error) { return `{}`, nil }),
+		Handler: stringHandler(func(context.Context, tool.Arguments) (string, error) {
+			atomic.AddInt32(&attempts, 1)
+			return "", errors.New("backend unavailable")
+		}),
 	})
 	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, server.Client())
+	observer := &captureObserver{}
 	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
 		MaxSteps: 1, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
-	}, nil, nil)
+	}, observer, nil)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
 	policy := ToolPolicyForPlan(plan, false)
 	result, err := agent.runWithSnapshot(
-		t.Context(), "run_required_tool_limit", "当前有多少用户？", ConversationContext{}, nil,
-		plan, policy, agent.executor.Snapshot(policy), []string{"runtime_evidence"},
+		t.Context(), "run_tool_failure", "当前有多少用户？", ConversationContext{}, nil,
+		plan, policy, agent.executor.Snapshot(policy),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Answer != "" || result.Err == nil || !strings.Contains(result.Err.Error(), "runtime_evidence") {
+	if result.Err != nil || result.Answer != "运行时查询失败，当前只能根据已有资料说明处理方案。" {
 		t.Fatalf("result = %#v", result)
+	}
+	if atomic.LoadInt32(&attempts) != 1 || !sawToolError.Load() {
+		t.Fatalf("attempts=%d sawToolError=%v", attempts, sawToolError.Load())
+	}
+	if got := strings.Join(observer.tokens, ""); got != result.Answer {
+		t.Fatalf("streamed answer = %q, want %q", got, result.Answer)
 	}
 }
 
@@ -598,6 +607,21 @@ func TestRunPersistsFullToolOutputBeforeSendingCompressedModelContent(t *testing
 		!strings.Contains(modelToolContent, "needle") {
 		t.Fatalf("model tool content missing envelope or relevant evidence: %s", modelToolContent)
 	}
+	if len(result.SessionMessages) != 2 {
+		t.Fatalf("session messages = %#v, want one call and one result", result.SessionMessages)
+	}
+	callMessage, resultMessage := result.SessionMessages[0], result.SessionMessages[1]
+	if callMessage.Role != "assistant" || len(callMessage.ToolCalls) != 1 ||
+		callMessage.ToolCalls[0].Function.Arguments != `{"target":"needle"}` {
+		t.Fatalf("persisted tool call = %#v", callMessage)
+	}
+	if resultMessage.Role != "tool" || resultMessage.ToolCallID != "call-1" || resultMessage.Name != "large_read" {
+		t.Fatalf("persisted tool result = %#v", resultMessage)
+	}
+	if len([]rune(resultMessage.Content)) > sessionToolResultLimit+40 ||
+		!strings.HasSuffix(resultMessage.Content, "[truncated for session replay]") {
+		t.Fatalf("persisted tool result was not bounded: %d runes", len([]rune(resultMessage.Content)))
+	}
 }
 
 func TestForceConclusion_StreamsLiveAndRecordsAnswer(t *testing.T) {
@@ -678,13 +702,17 @@ func TestForceConclusion_RetriesToolProtocolWithoutStreamingIt(t *testing.T) {
 }
 
 func TestWithDefaults_AnswerReserveClamped(t *testing.T) {
-	// Reserve larger than timeout must be halved so the loop always keeps room.
+	// Reserve at or beyond timeout must be halved so the loop always keeps room.
 	cfg := AgentConfig{Timeout: 10 * time.Second, AnswerReserve: 30 * time.Second}.withDefaults()
 	if cfg.AnswerReserve >= cfg.Timeout {
 		t.Fatalf("reserve %s should be < timeout %s after clamping", cfg.AnswerReserve, cfg.Timeout)
 	}
 	if cfg.AnswerReserve != 5*time.Second {
 		t.Fatalf("reserve = %s, want 5s (half of timeout)", cfg.AnswerReserve)
+	}
+	cfg = AgentConfig{Timeout: 10 * time.Second, AnswerReserve: 10 * time.Second}.withDefaults()
+	if cfg.AnswerReserve != 5*time.Second {
+		t.Fatalf("equal reserve = %s, want 5s (half of timeout)", cfg.AnswerReserve)
 	}
 
 	// ConclusionMaxTokens falls back to AnswerMaxTokens when unset (0). Timeout

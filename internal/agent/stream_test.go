@@ -181,7 +181,10 @@ func TestHub_CompletePublishesOneTerminalEvent(t *testing.T) {
 	hub := NewRunHub(nil)
 	const runID = "terminal-once"
 	ch := hub.Subscribe(runID)
-	outcome := RunOutcome{Status: RunStatusDone, StepCount: 2, TokenUsed: 12, Answer: "answer"}
+	outcome := RunOutcome{
+		Status: RunStatusDone, StepCount: 2, TokenUsed: 12, Answer: "answer",
+		SessionMessages: []llm.Message{{Role: "tool", ToolCallID: "call-1", Name: "observe", Content: "result"}},
+	}
 	hub.Complete(runID, outcome)
 	hub.Complete(runID, outcome)
 
@@ -189,6 +192,9 @@ func TestHub_CompletePublishesOneTerminalEvent(t *testing.T) {
 	case event := <-ch:
 		if event.Terminal == nil || event.Terminal.Status != RunStatusDone {
 			t.Fatalf("event = %+v, want done terminal", event)
+		}
+		if len(event.Terminal.SessionMessages) != 1 || event.Terminal.SessionMessages[0].ToolCallID != "call-1" {
+			t.Fatalf("terminal lost session tool messages: %+v", event.Terminal)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("missing terminal event")

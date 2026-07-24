@@ -104,6 +104,40 @@ func TestMemoryLastUsedUsesDateTime(t *testing.T) {
 	}
 }
 
+func TestQAMessageSchemaStoresToolProtocol(t *testing.T) {
+	statements := mysqlSchema[GroupQASession]
+	if len(statements) != 2 {
+		t.Fatalf("qa session schema statements = %d", len(statements))
+	}
+	for _, required := range []string{
+		"tool_calls_json MEDIUMTEXT NULL",
+		"tool_call_id VARCHAR(128) NOT NULL DEFAULT ''",
+		"tool_name   VARCHAR(128) NOT NULL DEFAULT ''",
+	} {
+		if !strings.Contains(statements[1], required) {
+			t.Fatalf("qa_messages schema missing %q", required)
+		}
+	}
+}
+
+func TestQAMessageToolMigrationAddsProtocolColumns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_message_tools.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read QA message tool migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN tool_calls_json",
+		"ADD COLUMN tool_call_id",
+		"ADD COLUMN tool_name",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("QA message tool migration missing %q", required)
+		}
+	}
+}
+
 func TestMemorySchemaEnforcesOneActiveFact(t *testing.T) {
 	statements := mysqlSchema[GroupQAMemory]
 	if len(statements) != 1 {
