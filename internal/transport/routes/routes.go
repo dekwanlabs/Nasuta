@@ -71,6 +71,7 @@ func Setup(mux *http.ServeMux, rc Config) {
 	api("GET /api/semantic/status", dash.APISemanticStatus)
 
 	api("POST /api/qa/ask", dash.APIQAAsk)
+	api("GET /api/qa/runtime", dash.APIQARuntimeStatus)
 	api("GET /api/qa/memories", dash.APIQAMemories)
 	api("DELETE /api/qa/memories", dash.APIQAMemoriesClear)
 	api("DELETE /api/qa/memories/{id}", dash.APIQAMemoryDelete)

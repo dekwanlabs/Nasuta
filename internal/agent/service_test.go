@@ -122,6 +122,39 @@ func TestRunStoreRecordLLMCallUpdatesDetailAndAggregateAtomically(t *testing.T) 
 	}
 }
 
+func TestRunStoreUsageSummaryUsesSessionAggregateAndLatestRound(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &RunStore{db: db}
+
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(total_tokens\\),0\\) FROM agent_runs").
+		WithArgs(int64(7), "session-1").
+		WillReturnRows(sqlmock.NewRows([]string{"total_tokens"}).AddRow(420))
+	mock.ExpectQuery("SELECT id,input_tokens,cached_input_tokens,total_tokens").
+		WithArgs(int64(7), "session-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "input_tokens", "cached_input_tokens", "total_tokens",
+		}).AddRow("run-2", 100, 90, 125))
+
+	summary, err := store.UsageSummary(t.Context(), 7, "session-1", "")
+	if err != nil {
+		t.Fatalf("UsageSummary: %v", err)
+	}
+	want := RunUsageSummary{
+		RunID: "run-2", SessionTotalTokens: 420,
+		RoundInputTokens: 100, RoundCachedInputTokens: 90, RoundTotalTokens: 125,
+	}
+	if summary != want {
+		t.Fatalf("summary = %+v, want %+v", summary, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunStoreRejectsTerminalOverwrite(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

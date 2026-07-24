@@ -40,3 +40,15 @@ func TestParseQAAskRequestSourceMode(t *testing.T) {
 		})
 	}
 }
+
+func TestQARuntimeStatusFormatting(t *testing.T) {
+	if got := qaEndpointDomain("https://api.example.com:8443/v1"); got != "api.example.com" {
+		t.Fatalf("endpoint domain = %q", got)
+	}
+	if got := cachePercent(90, 100); got != 90 {
+		t.Fatalf("cache percent = %d, want 90", got)
+	}
+	if got := cachePercent(0, 0); got != 0 {
+		t.Fatalf("empty cache percent = %d, want 0", got)
+	}
+}

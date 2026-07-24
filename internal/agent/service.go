@@ -1038,6 +1038,40 @@ func (rs *RunStore) List(userID int64, sessionID string, status RunStatus, limit
 	return page.List, nil
 }
 
+// UsageSummary returns bounded token aggregates for one session and round.
+func (rs *RunStore) UsageSummary(ctx context.Context, userID int64, sessionID, runID string) (RunUsageSummary, error) {
+	var summary RunUsageSummary
+	if sessionID == "" {
+		return summary, nil
+	}
+	if err := rs.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(total_tokens),0) FROM agent_runs WHERE user_id=? AND session_id=?`,
+		userID, sessionID,
+	).Scan(&summary.SessionTotalTokens); err != nil {
+		return summary, err
+	}
+
+	query := `SELECT id,input_tokens,cached_input_tokens,total_tokens
+		FROM agent_runs WHERE user_id=? AND session_id=?`
+	args := []any{userID, sessionID}
+	if runID != "" {
+		query += " AND id=?"
+		args = append(args, runID)
+	} else {
+		query += " ORDER BY started_at DESC,id DESC LIMIT 1"
+	}
+	err := rs.db.QueryRowContext(ctx, query, args...).Scan(
+		&summary.RunID,
+		&summary.RoundInputTokens,
+		&summary.RoundCachedInputTokens,
+		&summary.RoundTotalTokens,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return summary, nil
+	}
+	return summary, err
+}
+
 func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, page, pageSize int) (*domain.Page[RunRecord], error) {
 	if page < 1 {
 		page = 1
@@ -1295,6 +1329,15 @@ type RunRecord struct {
 	PeakReservedTokens int       `json:"peak_reserved_tokens"`
 	StartedAt          string    `json:"started_at"`
 	EndedAt            string    `json:"ended_at"`
+}
+
+// RunUsageSummary is the token snapshot needed by the live QA composer.
+type RunUsageSummary struct {
+	RunID                  string `json:"run_id"`
+	SessionTotalTokens     int64  `json:"session_total_tokens"`
+	RoundInputTokens       int64  `json:"round_input_tokens"`
+	RoundCachedInputTokens int64  `json:"round_cached_input_tokens"`
+	RoundTotalTokens       int64  `json:"round_total_tokens"`
 }
 
 type LLMCallRow struct {

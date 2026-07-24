@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -186,6 +187,63 @@ func (handler *Handler) APIQASessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, list)
+}
+
+// APIQARuntimeStatus serves the composer endpoint and bounded usage snapshot.
+func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Request) {
+	query := httputil.Query(r)
+	sessionID := query.Str("session_id")
+	runID := query.Str("run_id")
+	if err := query.Err(); err != nil {
+		httputil.WriteBadRequest(w, err.Error())
+		return
+	}
+
+	var usage agent.RunUsageSummary
+	usageAvailable := false
+	if runs := handler.runStore(); runs != nil {
+		var err error
+		usage, err = runs.UsageSummary(r.Context(), currentUserID(r), sessionID, runID)
+		if err != nil {
+			httputil.WriteErr(w, err)
+			return
+		}
+		usageAvailable = true
+	}
+
+	status := "deactive"
+	endpointDomain := ""
+	if handler.platform != nil {
+		endpointDomain = qaEndpointDomain(handler.platform.LLMBaseURL)
+		if handler.platform.LLMEnabled() {
+			status = "active"
+		}
+	}
+	httputil.WriteJSON(w, map[string]any{
+		"endpoint_domain":           endpointDomain,
+		"endpoint_status":           status,
+		"token_usage_available":     usageAvailable,
+		"cache_percent":             cachePercent(usage.RoundCachedInputTokens, usage.RoundInputTokens),
+		"session_total_tokens":      usage.SessionTotalTokens,
+		"round_total_tokens":        usage.RoundTotalTokens,
+		"round_input_tokens":        usage.RoundInputTokens,
+		"round_cached_input_tokens": usage.RoundCachedInputTokens,
+	})
+}
+
+func qaEndpointDomain(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
+func cachePercent(cachedTokens, inputTokens int64) int {
+	if inputTokens <= 0 {
+		return 0
+	}
+	return int((cachedTokens*100 + inputTokens/2) / inputTokens)
 }
 
 func (handler *Handler) APIQAMemories(w http.ResponseWriter, r *http.Request) {
