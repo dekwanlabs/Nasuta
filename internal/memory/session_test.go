@@ -2,7 +2,7 @@ package memory
 
 import (
 	"errors"
-	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,11 +14,10 @@ func TestGetRecentSessionQueriesOnlyRequestedTail(t *testing.T) {
 	store, mock, closeDB := newMockSessionStore(t)
 	defer closeDB()
 	now := time.Now()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT s.id, s.user_id, s.title, COALESCE(s.summary,''), s.created_at, s.updated_at
-         FROM qa_sessions s WHERE s.id = ? AND s.user_id = ?`)).
+	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "created_at", "updated_at"}).
-			AddRow("session-1", 42, "title", "summary", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", "summary", 0, now, now, 3))
 	mock.ExpectQuery(`SELECT m\.role, m\.content.*ORDER BY m\.seq DESC LIMIT \?`).
 		WithArgs("session-1", int64(42), 6).
 		WillReturnRows(sqlmock.NewRows([]string{"role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
@@ -69,15 +68,48 @@ func TestListMessagesBeforeUsesExclusiveCursor(t *testing.T) {
 	}
 }
 
+func TestListTurnsBeforeKeepsCompleteTurns(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	mock.ExpectQuery(`SELECT t\.first_seq, t\.last_seq.*t\.last_seq < \?.*ORDER BY t\.turn_no DESC LIMIT \?`).
+		WithArgs("session-1", int64(42), 8, 3).
+		WillReturnRows(sqlmock.NewRows([]string{"first_seq", "last_seq"}).
+			AddRow(5, 7).
+			AddRow(2, 4).
+			AddRow(0, 1))
+	mock.ExpectQuery(`SELECT m\.seq, m\.role, m\.content.*m\.seq >= \?.*m\.seq < \?.*ORDER BY m\.seq ASC`).
+		WithArgs("session-1", int64(42), 2, 8).
+		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
+			AddRow(2, "user", "question two", "", "", "").
+			AddRow(3, "assistant", "tool call", "", "", "").
+			AddRow(4, "tool", "tool result", "", "call-1", "search").
+			AddRow(5, "user", "question three", "", "", "").
+			AddRow(6, "assistant", "tool call", "", "", "").
+			AddRow(7, "assistant", "answer three", "", "", ""))
+
+	page, err := store.ListTurnsBefore("session-1", 42, 8, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.HasMore || page.NextBeforeSeq != 2 || len(page.Messages) != 6 {
+		t.Fatalf("page = %#v", page)
+	}
+	if page.Messages[0].Content != "question two" || page.Messages[5].Content != "answer three" {
+		t.Fatalf("turn messages are incomplete or unordered: %#v", page.Messages)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGetRecentSessionRestoresStructuredToolMessages(t *testing.T) {
 	store, mock, closeDB := newMockSessionStore(t)
 	defer closeDB()
 	now := time.Now()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT s.id, s.user_id, s.title, COALESCE(s.summary,''), s.created_at, s.updated_at
-         FROM qa_sessions s WHERE s.id = ? AND s.user_id = ?`)).
+	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "created_at", "updated_at"}).
-			AddRow("session-1", 42, "title", "summary", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", "summary", 0, now, now, 1))
 	mock.ExpectQuery(`SELECT m\.role, m\.content.*ORDER BY m\.seq DESC LIMIT \?`).
 		WithArgs("session-1", int64(42), 2).
 		WillReturnRows(sqlmock.NewRows([]string{"role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
@@ -104,29 +136,32 @@ func TestGetRecentSessionRestoresStructuredToolMessages(t *testing.T) {
 	}
 }
 
-func TestAppendMessagesPersistsStructuredToolFields(t *testing.T) {
+func TestAppendTurnPersistsStructuredToolFields(t *testing.T) {
 	store, mock, closeDB := newMockSessionStore(t)
 	defer closeDB()
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT user_id FROM qa_sessions WHERE id=\? FOR UPDATE`).
 		WithArgs("session-1").
 		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(42))
-	mock.ExpectQuery(`SELECT COALESCE\(MAX\(seq\), -1\) FROM qa_messages WHERE session_id = \?`).
-		WithArgs("session-1").
-		WillReturnRows(sqlmock.NewRows([]string{"max_seq"}).AddRow(3))
-	mock.ExpectExec(`INSERT INTO qa_messages\(session_id,seq,role,content,tool_calls_json,tool_call_id,tool_name,created_at\) VALUES`).
+	mock.ExpectQuery(`SELECT COALESCE\(\(SELECT MAX\(seq\).*SELECT MAX\(turn_no\)`).
+		WithArgs("session-1", "session-1").
+		WillReturnRows(sqlmock.NewRows([]string{"max_seq", "max_turn"}).AddRow(3, 2))
+	mock.ExpectExec(`INSERT INTO qa_messages\(session_id,seq,turn_no,role,content,tool_calls_json,tool_call_id,tool_name,created_at\) VALUES`).
 		WithArgs(
-			"session-1", 4, "assistant", "",
+			"session-1", 4, 3, "assistant", "",
 			`[{"id":"call-1","type":"function","function":{"name":"observe_logs","arguments":"{}"}}]`, "", "", sqlmock.AnyArg(),
-			"session-1", 5, "tool", "backend unavailable", "", "call-1", "observe_logs", sqlmock.AnyArg(),
+			"session-1", 5, 3, "tool", "backend unavailable", "", "call-1", "observe_logs", sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(`INSERT INTO qa_turns\(session_id,turn_no,run_id,first_seq,last_seq,token_estimate,created_at\) VALUES`).
+		WithArgs("session-1", 3, "run-1", 4, 5, sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE qa_sessions SET updated_at = \? WHERE id = \? AND user_id=\?`).
 		WithArgs(sqlmock.AnyArg(), "session-1", int64(42)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	err := store.AppendMessages("session-1", 42, []llm.Message{
+	turnNo, err := store.AppendTurn("session-1", "run-1", 42, []llm.Message{
 		{Role: "assistant", ToolCalls: []llm.ToolCall{{
 			ID: "call-1", Type: "function", Function: llm.ToolFunction{Name: "observe_logs", Arguments: `{}`},
 		}}},
@@ -134,6 +169,188 @@ func TestAppendMessagesPersistsStructuredToolFields(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if turnNo != 3 {
+		t.Fatalf("turn = %d", turnNo)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAssignSessionTurnsKeepsToolProtocolInsideUserRound(t *testing.T) {
+	messages := []llm.Message{
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call-1", Function: llm.ToolFunction{Name: "observe"}}}},
+		{Role: "tool", ToolCallID: "call-1", Name: "observe", Content: "evidence"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "q2"},
+		{Role: "assistant", Content: "a2"},
+	}
+	turnNos, turns := assignSessionTurns(messages)
+	want := []int{1, 1, 1, 1, 2, 2}
+	for i := range want {
+		if turnNos[i] != want[i] {
+			t.Fatalf("turnNos = %v", turnNos)
+		}
+	}
+	if len(turns) != 2 || turns[0].firstSeq != 0 || turns[0].lastSeq != 3 || turns[1].firstSeq != 4 || turns[1].lastSeq != 5 {
+		t.Fatalf("turns = %#v", turns)
+	}
+}
+
+func TestGetContextSessionLoadsOnlyTurnsAfterCompaction(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	now := time.Now()
+	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
+		WithArgs("session-1", int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", "summary", 4, now, now, 6))
+	mock.ExpectQuery(`SELECT m\.role.*m\.turn_no>\?.*ORDER BY m\.seq LIMIT \?`).
+		WithArgs("session-1", int64(42), 4, maxContextSessionMessages+1).
+		WillReturnRows(sqlmock.NewRows([]string{"role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
+			AddRow("user", "turn five", "", "", "").
+			AddRow("assistant", "answer five", "", "", ""))
+
+	session, err := store.GetContextSession("session-1", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.CompactedThroughTurn != 4 || len(session.Messages) != 2 {
+		t.Fatalf("session = %#v", session)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyCompactionRejectsStaleBoundary(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT user_id,compacted_through_turn FROM qa_sessions WHERE id=\? FOR UPDATE`).
+		WithArgs("session-1").
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "compacted_through_turn"}).AddRow(42, 5))
+	mock.ExpectRollback()
+
+	applied, err := store.ApplyCompaction(CompactionCandidate{
+		SessionID: "session-1", UserID: 42, PreviousThrough: 3, FromTurn: 4, ToTurn: 6,
+	}, []TurnContextRecord{
+		{Ref: "cmp-4", SessionID: "session-1", UserID: 42, TurnNumber: 4},
+		{Ref: "cmp-5", SessionID: "session-1", UserID: 42, TurnNumber: 5},
+		{Ref: "cmp-6", SessionID: "session-1", UserID: 42, TurnNumber: 6},
+	}, "summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied {
+		t.Fatal("stale compaction was applied")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareCompactionReadsOnlyNewTurnsAndKeepsThree(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	now := time.Now()
+	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
+		WithArgs("session-1", int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", "old summary", 2, now, now, 6))
+	mock.ExpectQuery(`SELECT m\.turn_no,t\.run_id,t\.token_estimate,m\.role.*m\.turn_no BETWEEN \? AND \?.*ORDER BY m\.turn_no,m\.seq`).
+		WithArgs("session-1", int64(42), 3, 3).
+		WillReturnRows(sqlmock.NewRows([]string{"turn_no", "run_id", "token_estimate", "role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
+			AddRow(3, "run-3", 120, "user", "q3", "", "", "").
+			AddRow(3, "run-3", 120, "assistant", "a3", "", "", ""))
+
+	candidate, err := store.PrepareCompaction("session-1", 42, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.FromTurn != 3 || candidate.ToTurn != 3 || candidate.PreviousThrough != 2 {
+		t.Fatalf("candidate = %#v", candidate)
+	}
+	if len(candidate.Turns) != 1 || candidate.Turns[0].SourceTokens != 120 || len(candidate.Turns[0].Messages) != 2 || candidate.PreviousSummary != "old summary" {
+		t.Fatalf("candidate content = %#v", candidate)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareCompactionReportsMissingTurnNumbers(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	now := time.Now()
+	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
+		WithArgs("session-1", int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", "", 0, now, now, 4))
+	mock.ExpectQuery(`SELECT m\.turn_no,t\.run_id,t\.token_estimate,m\.role.*m\.turn_no BETWEEN \? AND \?.*ORDER BY m\.turn_no,m\.seq`).
+		WithArgs("session-1", int64(42), 1, 3).
+		WillReturnRows(sqlmock.NewRows([]string{"turn_no", "run_id", "token_estimate", "role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
+			AddRow(1, "run-1", 10, "user", "q1", "", "", "").
+			AddRow(3, "run-3", 10, "user", "q3", "", "", ""))
+
+	_, err := store.PrepareCompaction("session-1", 42, 1)
+	if err == nil || !strings.Contains(err.Error(), "missing: 2") {
+		t.Fatalf("err = %v, want missing turn 2", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyCompactionPublishesOneAtomicSnapshot(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT user_id,compacted_through_turn FROM qa_sessions WHERE id=\? FOR UPDATE`).
+		WithArgs("session-1").
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "compacted_through_turn"}).AddRow(42, 2))
+	mock.ExpectExec(`INSERT INTO qa_turn_contexts.*VALUES`).
+		WithArgs("cmp-3", "session-1", int64(42), "run-3", 3, "detail", "short summary", 120, 30, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE qa_sessions SET summary=\?,compacted_through_turn=\?,updated_at=\?`).
+		WithArgs("new summary", 3, sqlmock.AnyArg(), "session-1", int64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	applied, err := store.ApplyCompaction(CompactionCandidate{
+		SessionID: "session-1", UserID: 42, PreviousThrough: 2,
+		FromTurn: 3, ToTurn: 3,
+	}, []TurnContextRecord{{
+		Ref: "cmp-3", SessionID: "session-1", UserID: 42, RunID: "run-3",
+		TurnNumber: 3, Text: "detail", SummaryText: "short summary", SourceTokens: 120, RetainedTokens: 30,
+	}}, "new summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied {
+		t.Fatal("current compaction was not applied")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetTurnDetailBoundsReferenceToCurrentSession(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	mock.ExpectQuery(`SELECT ref,session_id,user_id,run_id,text,turn_number,summary_text,source_tokens,retained_tokens.*FROM qa_turn_contexts`).
+		WithArgs("cmp-1", "session-1", int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"ref", "session_id", "user_id", "run_id", "text", "turn_number", "summary_text", "source_tokens", "retained_tokens"}).
+			AddRow("cmp-1", "session-1", 42, "run-1", "TURN 1\n\nUSER\nq1", 1, "summary", 90, 20))
+
+	record, err := store.GetTurnDetail("session-1", 42, "cmp-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Ref != "cmp-1" || record.TurnNumber != 1 || record.Text == "" {
+		t.Fatalf("record = %#v", record)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -168,6 +385,12 @@ func TestDeleteSessionRequiresOwner(t *testing.T) {
 	mock.ExpectQuery(`SELECT 1 FROM qa_sessions WHERE id=\? AND user_id=\? FOR UPDATE`).
 		WithArgs("session-1", int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"owned"}).AddRow(1))
+	mock.ExpectExec(`DELETE FROM qa_turn_contexts WHERE session_id = \?`).
+		WithArgs("session-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM qa_turns WHERE session_id = \?`).
+		WithArgs("session-1").
+		WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectExec(`DELETE FROM qa_messages WHERE session_id = \?`).
 		WithArgs("session-1").
 		WillReturnResult(sqlmock.NewResult(0, 4))

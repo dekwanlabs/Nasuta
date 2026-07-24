@@ -142,7 +142,7 @@ func NewQA(d QADeps) *QA {
 	if d.Registry != nil {
 		svc.registry = d.Registry
 	} else {
-		svc.registry = NewRegistry(d.Tools, d.Cfg)
+		svc.registry = NewRegistry(d.Tools, d.Cfg, memory.NewSessionStore(d.DB))
 	}
 	svc.writeAvailable = d.WriteAvailable
 	svc.executor = NewToolExecutor(svc.registry)
@@ -155,7 +155,7 @@ func NewQA(d QADeps) *QA {
 		ConclusionMaxTokens: platformSettings.LLMConclusionMaxTokens,
 		MaxContinueRounds:   platformSettings.LLMMaxContinueRounds,
 		DomainKnowledge:     platformSettings.DomainKnowledge,
-		HistoryLimit:        6,
+		HistoryLimit:        0,
 	}, svc.hub, svc.hub)
 	// Keep the phase hint behind the reasoning stream.
 	svc.agent.SetOnFirstAnswerToken(func(runID string) {
@@ -253,6 +253,9 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	toolPolicy := ToolPolicyForPlan(domain.DirectPlan(), svc.writeAvailable && request.AllowWrite)
 	executor := svc.toolExecutor()
 	candidateSnapshot := executor.Snapshot(toolPolicy)
+	if conversation.CompactedThroughTurn <= 0 {
+		candidateSnapshot = withoutTool(candidateSnapshot, "get_session_turn_details")
+	}
 	toolCandidates := routingCandidates(candidateSnapshot)
 	traceEnabled := domain.TraceEnabled(ctx)
 	emit := func(text string) {
@@ -268,7 +271,9 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if hasConflictingConversationEntity(question, continuityBasis) {
 		log.InfofCtx(ctx, "[qa] conversation context omitted after explicit entity switch")
 		conversation.Summary = ""
+		conversation.CompactedThroughTurn = 0
 		conversation.Recent = nil
+		candidateSnapshot = withoutTool(candidateSnapshot, "get_session_turn_details")
 		retrievalPrefix = ""
 	}
 	routeContext := buildRouteContext(conversation.Summary, retrievalPrefix)
@@ -535,6 +540,16 @@ func snapshotToolIDs(snapshot tool.Snapshot) []string {
 	return ids
 }
 
+func withoutTool(snapshot tool.Snapshot, excluded tool.ToolID) tool.Snapshot {
+	ids := make(map[tool.ToolID]struct{})
+	for _, candidate := range snapshot.Tools() {
+		if candidate.ID != excluded {
+			ids[candidate.ID] = struct{}{}
+		}
+	}
+	return snapshot.Select(ids)
+}
+
 func preferredToolsInstruction(ids []string) string {
 	return "Tool routing preference for this turn: " + strings.Join(ids, ", ") +
 		". Treat this as advisory, not mandatory. Call a preferred tool only when it resolves a material evidence gap; if conversation history or existing evidence is sufficient, answer directly. Other registered tools remain available, and tool failures must be reported rather than hidden."
@@ -706,6 +721,10 @@ func (svc *QA) runAgentWithPlan(ctx context.Context, question string, conversati
 
 func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] runAgent runID=%s", runID)
+	if conversation.CompactedThroughTurn <= 0 {
+		snapshot = withoutTool(snapshot, "get_session_turn_details")
+	}
+	ctx = withSessionToolScope(ctx, conversation, userID)
 
 	maxSteps := svc.agent.MaxStepsForPlan(question, plan)
 	if svc.runStore != nil {
@@ -1051,7 +1070,7 @@ func (rs *RunStore) UsageSummary(ctx context.Context, userID int64, sessionID, r
 		return summary, err
 	}
 
-	query := `SELECT id,input_tokens,cached_input_tokens,total_tokens
+	query := `SELECT id,input_tokens,cached_input_tokens,total_tokens,peak_input_tokens,peak_reserved_tokens
 		FROM agent_runs WHERE user_id=? AND session_id=?`
 	args := []any{userID, sessionID}
 	if runID != "" {
@@ -1065,6 +1084,8 @@ func (rs *RunStore) UsageSummary(ctx context.Context, userID int64, sessionID, r
 		&summary.RoundInputTokens,
 		&summary.RoundCachedInputTokens,
 		&summary.RoundTotalTokens,
+		&summary.RoundPeakInputTokens,
+		&summary.RoundPeakReservedTokens,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return summary, nil
@@ -1171,6 +1192,31 @@ func (rs *RunStore) Get(id string) (*RunDetail, error) {
 		return nil, err
 	}
 	return &RunDetail{RunRecord: r, Steps: steps, LLMCalls: llmCalls}, nil
+}
+
+// PeakInputTokens reads only the metric needed by session compaction.
+func (rs *RunStore) PeakInputTokens(id string) (int, error) {
+	var tokens int
+	err := rs.db.QueryRow(`SELECT peak_input_tokens FROM agent_runs WHERE id=?`, id).Scan(&tokens)
+	return tokens, err
+}
+
+// LatestContextTokens returns the latest round's largest reserved context footprint.
+func (rs *RunStore) LatestContextTokens(userID int64, sessionID string) (int, error) {
+	if sessionID == "" {
+		return 0, nil
+	}
+	var tokens int
+	err := rs.db.QueryRow(
+		`SELECT GREATEST(peak_input_tokens,peak_reserved_tokens)
+		 FROM agent_runs WHERE user_id=? AND session_id=?
+		 ORDER BY started_at DESC,id DESC LIMIT 1`,
+		userID, sessionID,
+	).Scan(&tokens)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return tokens, err
 }
 
 func (rs *RunStore) listLLMCalls(runID string, limit int) ([]LLMCallRow, error) {
@@ -1333,11 +1379,13 @@ type RunRecord struct {
 
 // RunUsageSummary is the token snapshot needed by the live QA composer.
 type RunUsageSummary struct {
-	RunID                  string `json:"run_id"`
-	SessionTotalTokens     int64  `json:"session_total_tokens"`
-	RoundInputTokens       int64  `json:"round_input_tokens"`
-	RoundCachedInputTokens int64  `json:"round_cached_input_tokens"`
-	RoundTotalTokens       int64  `json:"round_total_tokens"`
+	RunID                   string `json:"run_id"`
+	SessionTotalTokens      int64  `json:"session_total_tokens"`
+	RoundInputTokens        int64  `json:"round_input_tokens"`
+	RoundCachedInputTokens  int64  `json:"round_cached_input_tokens"`
+	RoundTotalTokens        int64  `json:"round_total_tokens"`
+	RoundPeakInputTokens    int64  `json:"round_peak_input_tokens"`
+	RoundPeakReservedTokens int64  `json:"round_peak_reserved_tokens"`
 }
 
 type LLMCallRow struct {

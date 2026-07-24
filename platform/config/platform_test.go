@@ -65,6 +65,20 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 	if time.Duration(settings.AgentAnswerReserve) != DefaultAgentAnswerReserve {
 		t.Fatalf("answer reserve = %s", time.Duration(settings.AgentAnswerReserve))
 	}
+	if settings.LLMContextWindow != DefaultLLMContextWindow {
+		t.Fatalf("context window = %d", settings.LLMContextWindow)
+	}
+}
+
+func TestCanonicalLLMContextWindow(t *testing.T) {
+	if got, err := CanonicalPlatformSetting("llm_context_window", "128000"); err != nil || got != "128000" {
+		t.Fatalf("canonical context window = %q, err=%v", got, err)
+	}
+	for _, value := range []string{"8191", "2000001", "invalid"} {
+		if _, err := CanonicalPlatformSetting("llm_context_window", value); err == nil {
+			t.Fatalf("context window %q was accepted", value)
+		}
+	}
 }
 
 func TestCanonicalAgentAnswerReserveRequiresPositiveDuration(t *testing.T) {

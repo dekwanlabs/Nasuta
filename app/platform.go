@@ -16,6 +16,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/indexing"
+	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/ontologystore"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
@@ -95,7 +96,7 @@ func New() (*Platform, error) {
 	authDB, authService := buildAuth(cfg, platformDB)
 	settings := loadPlatformSettings(authDB)
 	index.SetPlatform(settings)
-	registry := agent.NewRegistry(knowledgeService, cfg)
+	registry := agent.NewRegistry(knowledgeService, cfg, memory.NewSessionStore(platformDB))
 
 	platform := &Platform{
 		cfg: cfg, settings: settings, index: index, knowledge: knowledgeService,

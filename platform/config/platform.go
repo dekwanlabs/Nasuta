@@ -12,6 +12,7 @@ const (
 	DefaultRetrievalRouterDirectConfidence = 0.90
 	DefaultRetrievalRouterMaxTokens        = 512
 	DefaultAgentAnswerReserve              = 30 * time.Second
+	DefaultLLMContextWindow                = 128000
 )
 
 // PlatformSettings holds runtime settings managed from the platform UI.
@@ -32,6 +33,7 @@ type PlatformSettings struct {
 	LLMAnswerMaxTokens     int
 	LLMConclusionMaxTokens int
 	LLMMaxContinueRounds   int
+	LLMContextWindow       int
 
 	RerankEnabled              bool
 	RerankPool                 int
@@ -60,7 +62,7 @@ var platformSettingKeys = map[string]bool{
 	"llm_model": true, "llm_fast_model": true,
 	"llm_base_url": true, "llm_provider": true, "llm_max_tokens": true, "llm_api_key": true,
 	"llm_answer_max_tokens": true, "agent_conclusion_max_tokens": true,
-	"llm_max_continue_rounds": true, "agent_answer_reserve": true,
+	"llm_max_continue_rounds": true, "llm_context_window": false, "agent_answer_reserve": true,
 	"agent_timeout": true, "agent_max_steps": true, "context_budget": false, "domain_knowledge": true,
 	"retrieval_router_direct_min_confidence": false, "retrieval_router_max_tokens": false,
 	"rerank_enabled": false, "rerank_pool": false, "rerank_topk": false,
@@ -104,6 +106,7 @@ func (p *PlatformSettings) Values() map[string]any {
 		"llm_answer_max_tokens":                  p.LLMAnswerMaxTokens,
 		"agent_conclusion_max_tokens":            p.LLMConclusionMaxTokens,
 		"llm_max_continue_rounds":                strconv.Itoa(p.LLMMaxContinueRounds),
+		"llm_context_window":                     p.LLMContextWindow,
 		"agent_timeout":                          time.Duration(p.AgentTimeout).String(),
 		"agent_answer_reserve":                   time.Duration(p.AgentAnswerReserve).String(),
 		"agent_max_steps":                        p.AgentMaxSteps,
@@ -134,6 +137,9 @@ func (p *PlatformSettings) Values() map[string]any {
 }
 
 func (p *PlatformSettings) Apply(m map[string]string) {
+	if p.LLMContextWindow == 0 {
+		p.LLMContextWindow = DefaultLLMContextWindow
+	}
 	if p.RetrievalRouterConfidence == 0 {
 		p.RetrievalRouterConfidence = DefaultRetrievalRouterDirectConfidence
 	}
@@ -173,6 +179,11 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	if v := strings.TrimSpace(m["llm_max_continue_rounds"]); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			p.LLMMaxContinueRounds = n
+		}
+	}
+	if v := strings.TrimSpace(m["llm_context_window"]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			p.LLMContextWindow = n
 		}
 	}
 
@@ -322,6 +333,12 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 		tokens, err := strconv.Atoi(value)
 		if err != nil || tokens < 128 || tokens > 4096 {
 			return "", fmt.Errorf("retrieval_router_max_tokens must be between 128 and 4096")
+		}
+		return strconv.Itoa(tokens), nil
+	case "llm_context_window":
+		tokens, err := strconv.Atoi(value)
+		if err != nil || tokens < 8192 || tokens > 2_000_000 {
+			return "", fmt.Errorf("llm_context_window must be between 8192 and 2000000")
 		}
 		return strconv.Itoa(tokens), nil
 	default:

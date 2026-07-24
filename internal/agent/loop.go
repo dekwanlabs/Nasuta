@@ -37,11 +37,12 @@ type AgentConfig struct {
 // and recent verbatim turns. RolePrompt is request-scoped RBAC identity; it is
 // composed into the primary system prompt and is not conversation history.
 type ConversationContext struct {
-	SessionID    string
-	RolePrompt   string
-	Summary      string
-	Recent       []llm.Message
-	Instructions []llm.Message
+	SessionID            string
+	RolePrompt           string
+	Summary              string
+	CompactedThroughTurn int
+	Recent               []llm.Message
+	Instructions         []llm.Message
 }
 
 func (c AgentConfig) withDefaults() AgentConfig {
@@ -169,6 +170,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 			Input: map[string]any{
 				"recent_messages": len(conversation.Recent), "recent_chars": messageChars(conversation.Recent),
 				"summary_chars": len([]rune(conversation.Summary)), "instructions": len(conversation.Instructions),
+				"compacted_through_turn": conversation.CompactedThroughTurn,
 			},
 			Output: map[string]any{"messages": len(messages), "context_chars": contextChars(messages)},
 		})
@@ -584,7 +586,7 @@ func (agent *Agent) buildAgentMessages(question string, conversation Conversatio
 	msgs = append(msgs, conversation.Instructions...)
 
 	if conversation.Summary != "" {
-		msgs = append(msgs, llm.Message{Role: "system", Content: "## Conversation Summary\n" + conversation.Summary})
+		msgs = append(msgs, llm.Message{Role: "system", Content: "<rolling_summary>\n" + conversation.Summary + "\n</rolling_summary>"})
 	}
 	msgs = append(msgs, replayableTailMessages(conversation.Recent, agent.cfg.HistoryLimit)...)
 

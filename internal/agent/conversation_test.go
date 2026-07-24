@@ -12,9 +12,10 @@ import (
 func TestBuildAgentMessagesUsesCanonicalSummaryAndRecentTail(t *testing.T) {
 	agent := &Agent{cfg: AgentConfig{HistoryLimit: 2}}
 	conversation := ConversationContext{
-		Summary:      "canonical session summary",
-		RolePrompt:   "## Identity\n- Role: SRE",
-		Instructions: []llm.Message{{Role: "system", Content: "role instruction"}},
+		Summary:              "ref=cmp-123, text=canonical session summary\n" + rollingSummaryInstruction,
+		CompactedThroughTurn: 4,
+		RolePrompt:           "## Identity\n- Role: SRE",
+		Instructions:         []llm.Message{{Role: "system", Content: "role instruction"}},
 		Recent: []llm.Message{
 			{Role: "user", Content: "old turn"},
 			{Role: "assistant", Content: "recent answer"},
@@ -27,7 +28,7 @@ func TestBuildAgentMessagesUsesCanonicalSummaryAndRecentTail(t *testing.T) {
 	for _, message := range got {
 		joined += "\n" + message.Content
 	}
-	for _, want := range []string{"canonical session summary", "## Identity\n- Role: SRE", "role instruction", "recent answer", "recent question", "current question"} {
+	for _, want := range []string{"canonical session summary", "cmp-123", "<rolling_summary>", "get_session_turn_details", "## Identity\n- Role: SRE", "role instruction", "recent answer", "recent question", "current question"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("messages missing %q: %s", want, joined)
 		}

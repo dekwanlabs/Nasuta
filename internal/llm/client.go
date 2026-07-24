@@ -429,8 +429,8 @@ func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, t
 }
 
 func (lc *LLMClient) logPrompt(ctx context.Context, messages []Message, toolCount, maxTokens int) {
-	log.InfofCtx(ctx, "[llm] request provider=%s model=%s max_tokens=%d messages=%d tools=%d prompt:\n%s",
-		lc.provider, lc.model, maxTokens, len(messages), toolCount, joinPromptMessages(messages))
+	//log.InfofCtx(ctx, "[llm] request provider=%s model=%s max_tokens=%d messages=%d tools=%d prompt:\n%s",
+	//	lc.provider, lc.model, maxTokens, len(messages), toolCount, joinPromptMessages(messages))
 }
 
 func joinPromptMessages(messages []Message) string {

@@ -59,9 +59,58 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteErr(w, err)
 		return
 	}
-	conversation := handler.loadSessionContext(r.Context(), req.SessionID, currentUserID(r), req.History)
+	conversation, err := handler.prepareSessionContext(
+		r.Context(), req.Question, req.SessionID, currentUserID(r), req.History, stream.emit,
+	)
+	if err != nil {
+		log.ErrorfCtx(r.Context(), "[qa] session compaction failed for %s: %v", req.SessionID, err)
+		stream.emit("error", jsonStr(map[string]string{"message": err.Error()}))
+		return
+	}
 	conversation.SessionID = req.SessionID
 	handler.serveAgentSSE(r.Context(), req.Question, conversation, req.SessionID, req.Trace, req.EvidencePlan, stream.emit, r)
+}
+
+func (handler *Handler) prepareSessionContext(ctx context.Context, question, sessionID string, userID int64,
+	fallback []llm.Message, sseEvent func(string, string)) (agent.ConversationContext, error) {
+	if sessionID == "" || handler.qaSessions == nil || handler.qa == nil || handler.platform == nil {
+		return handler.loadSessionContext(ctx, sessionID, userID, fallback), nil
+	}
+	latestContextTokens := 0
+	if runs := handler.qa.RunStore(); runs != nil {
+		var err error
+		latestContextTokens, err = runs.LatestContextTokens(userID, sessionID)
+		if err != nil {
+			return agent.ConversationContext{}, fmt.Errorf("load latest session context usage: %w", err)
+		}
+	}
+	compactCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	result, err := agent.CompactSessionIfNeeded(
+		compactCtx, handler.qa.LLM(), handler.qaSessions, sessionID, userID,
+		handler.platform.LLMContextWindow, latestContextTokens, question,
+		func(fromTurn, toTurn int) {
+			sseEvent("compaction", jsonStr(map[string]string{
+				"status": "start",
+				"text":   fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", fromTurn, toTurn),
+			}))
+		},
+	)
+	if err != nil {
+		return agent.ConversationContext{}, fmt.Errorf("prepare session compaction %q: %w", sessionID, err)
+	}
+	if result.Applied {
+		sseEvent("compaction", jsonStr(map[string]string{
+			"status": "done",
+			"text":   "历史上下文压缩完成",
+		}))
+		log.InfofCtx(ctx, "[qa] compacted session %s turns %d-%d refs=%d before answer",
+			sessionID, result.FromTurn, result.ToTurn, len(result.References))
+	} else if result.Stale {
+		log.InfofCtx(ctx, "[qa] ignored stale pre-answer compaction for session %s through turn %d",
+			sessionID, result.ToTurn)
+	}
+	return handler.loadSessionContext(ctx, sessionID, userID, fallback), nil
 }
 
 func jsonStr(v any) string {
@@ -111,18 +160,22 @@ func (s *sseWriter) emit(event, data string) {
 
 func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string, userID int64, fallback []llm.Message) agent.ConversationContext {
 	if sessionID == "" || handler.qaSessions == nil {
-		return agent.ConversationContext{Recent: fallback}
+		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}
 	}
-	sess, err := handler.qaSessions.GetRecentSession(sessionID, userID, 6)
+	sess, err := handler.qaSessions.GetContextSession(sessionID, userID)
 	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] session load error: %v", err)
-		return agent.ConversationContext{Recent: fallback}
+		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}
 	}
 	if sess == nil {
-		return agent.ConversationContext{Recent: fallback}
+		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}
 	}
-	log.InfofCtx(ctx, "[qa] loaded session %s: recent=%d summary=%d chars", sessionID, len(sess.Messages), len([]rune(sess.Summary)))
-	return agent.ConversationContext{Summary: sess.Summary, Recent: sess.Messages}
+	log.InfofCtx(ctx, "[qa] loaded session %s: recent=%d summary=%d chars compactedThrough=%d",
+		sessionID, len(sess.Messages), len([]rune(sess.Summary)), sess.CompactedThroughTurn)
+	return agent.ConversationContext{
+		SessionID: sessionID, Summary: sess.Summary,
+		CompactedThroughTurn: sess.CompactedThroughTurn, Recent: sess.Messages,
+	}
 }
 
 func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, sseEvent func(string, string), r *http.Request) {
@@ -213,12 +266,15 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 
 	status := "deactive"
 	endpointDomain := ""
+	roundMaxTokens := 0
 	if handler.platform != nil {
 		endpointDomain = qaEndpointDomain(handler.platform.LLMBaseURL)
+		roundMaxTokens = handler.platform.LLMContextWindow
 		if handler.platform.LLMEnabled() {
 			status = "active"
 		}
 	}
+	roundCurrentTokens := max(usage.RoundPeakInputTokens, usage.RoundPeakReservedTokens)
 	httputil.WriteJSON(w, map[string]any{
 		"endpoint_domain":           endpointDomain,
 		"endpoint_status":           status,
@@ -226,6 +282,8 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 		"cache_percent":             cachePercent(usage.RoundCachedInputTokens, usage.RoundInputTokens),
 		"session_total_tokens":      usage.SessionTotalTokens,
 		"round_total_tokens":        usage.RoundTotalTokens,
+		"round_current_tokens":      roundCurrentTokens,
+		"round_max_tokens":          roundMaxTokens,
 		"round_input_tokens":        usage.RoundInputTokens,
 		"round_cached_input_tokens": usage.RoundCachedInputTokens,
 	})
@@ -331,6 +389,7 @@ func (handler *Handler) APIQASessionMessages(w http.ResponseWriter, r *http.Requ
 	q := httputil.Query(r)
 	beforeSeq := q.Int("before_seq", -1)
 	limit := q.Int("limit", 20)
+	turnLimit := q.Int("turn_limit", 0)
 	if err := q.Err(); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -343,7 +402,17 @@ func (handler *Handler) APIQASessionMessages(w http.ResponseWriter, r *http.Requ
 		httputil.WriteBadRequest(w, "limit must be between 1 and 100")
 		return
 	}
-	page, err := handler.qaSessions.ListMessagesBefore(r.PathValue("id"), currentUserID(r), beforeSeq, limit)
+	if turnLimit < 0 || turnLimit > 100 {
+		httputil.WriteBadRequest(w, "turn_limit must be between 1 and 100")
+		return
+	}
+	var page *memory.MessagePage
+	var err error
+	if turnLimit > 0 {
+		page, err = handler.qaSessions.ListTurnsBefore(r.PathValue("id"), currentUserID(r), beforeSeq, turnLimit)
+	} else {
+		page, err = handler.qaSessions.ListMessagesBefore(r.PathValue("id"), currentUserID(r), beforeSeq, limit)
+	}
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
@@ -414,32 +483,12 @@ func (handler *Handler) saveTurnToSession(ctx context.Context, runID, sessionID 
 	messages = append(messages, llm.Message{Role: "user", Content: question})
 	messages = append(messages, toolMessages...)
 	messages = append(messages, llm.Message{Role: "assistant", Content: answer})
-	if err := handler.qaSessions.AppendMessages(sessionID, userID, messages); err != nil {
+	turnNo, err := handler.qaSessions.AppendTurn(sessionID, runID, userID, messages)
+	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] failed to append messages to session %s: %v", sessionID, err)
 		return
 	}
-	log.InfofCtx(ctx, "[qa] saved turn to session %s", sessionID)
-
-	go func() {
-		sess, err := handler.qaSessions.GetFullSession(sessionID, userID)
-		if err != nil || sess == nil || len(sess.Messages) == 0 {
-			return
-		}
-		bgCtx := log.WithTraceID(context.Background(), log.GenerateTraceID())
-		bgCtx = handler.qa.UsageContext(bgCtx, runID, llm.PhaseSessionSummary)
-		summary, err := agent.GeneratePersistentSummary(bgCtx, handler.qa.LLM(), sess.Messages)
-		if err != nil {
-			log.ErrorfCtx(bgCtx, "[qa] summary generation failed for session %s: %v", sessionID, err)
-			return
-		}
-		if summary != "" {
-			if err := handler.qaSessions.UpdateSummary(sessionID, userID, summary); err != nil {
-				log.ErrorfCtx(bgCtx, "[qa] failed to persist summary for session %s: %v", sessionID, err)
-			} else {
-				log.InfofCtx(bgCtx, "[qa] summary updated for session %s (%d chars)", sessionID, len(summary))
-			}
-		}
-	}()
+	log.InfofCtx(ctx, "[qa] saved turn %d to session %s", turnNo, sessionID)
 }
 
 func (handler *Handler) APIQARuns(w http.ResponseWriter, r *http.Request) {

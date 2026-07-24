@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,14 +18,48 @@ type SessionStore struct {
 }
 
 type SessionRecord struct {
-	ID           string        `json:"id"`
-	UserID       int64         `json:"user_id"`
-	Title        string        `json:"title"`
-	Summary      string        `json:"summary"`
-	Messages     []llm.Message `json:"messages,omitempty"`
-	MessageCount int           `json:"message_count"`
-	CreatedAt    string        `json:"created_at"`
-	UpdatedAt    string        `json:"updated_at"`
+	ID                   string        `json:"id"`
+	UserID               int64         `json:"user_id"`
+	Title                string        `json:"title"`
+	Summary              string        `json:"summary"`
+	CompactedThroughTurn int           `json:"compacted_through_turn,omitempty"`
+	Messages             []llm.Message `json:"messages,omitempty"`
+	MessageCount         int           `json:"message_count"`
+	LatestTurn           int           `json:"latest_turn,omitempty"`
+	CreatedAt            string        `json:"created_at"`
+	UpdatedAt            string        `json:"updated_at"`
+}
+
+// CompactionCandidate is one contiguous, not-yet-summarized turn range.
+type CompactionCandidate struct {
+	SessionID       string
+	UserID          int64
+	PreviousSummary string
+	PreviousThrough int
+	FromTurn        int
+	ToTurn          int
+	Turns           []TurnCompactionCandidate
+}
+
+// TurnCompactionCandidate keeps one logical turn intact before compression.
+type TurnCompactionCandidate struct {
+	RunID        string
+	TurnNumber   int
+	SourceTokens int
+	Messages     []llm.Message
+}
+
+// TurnContextRecord is the bounded detail exposed by one stable reference.
+type TurnContextRecord struct {
+	Ref            string `json:"ref"`
+	SessionID      string `json:"sessionId"`
+	UserID         int64  `json:"userId,string"`
+	RunID          string `json:"-"`
+	Text           string `json:"text"`
+	TurnNumber     int    `json:"turnNumber"`
+	SummaryText    string `json:"-"`
+	SourceTokens   int    `json:"-"`
+	RetainedTokens int    `json:"-"`
 }
 
 // MessagePage is one reverse-cursor page returned in chronological order.
@@ -77,6 +112,7 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 	if r.Title == "" && len(r.Messages) > 0 {
 		r.Title = firstUserQuestion(r.Messages)
 	}
+	r.Summary = ""
 
 	tx, err := ss.db.Begin()
 	if err != nil {
@@ -90,36 +126,46 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 	}
 	if exists {
 		if _, err := tx.Exec(
-			`UPDATE qa_sessions SET title=?,summary=?,updated_at=? WHERE id=? AND user_id=?`,
+			`UPDATE qa_sessions SET title=?,summary=?,compacted_through_turn=0,updated_at=? WHERE id=? AND user_id=?`,
 			r.Title, r.Summary, store.DatabaseTime(r.UpdatedAt), r.ID, r.UserID,
 		); err != nil {
 			return err
 		}
 	} else {
 		if _, err := tx.Exec(
-			`INSERT INTO qa_sessions(id,user_id,title,summary,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
+			`INSERT INTO qa_sessions(id,user_id,title,summary,compacted_through_turn,created_at,updated_at) VALUES(?,?,?,?,0,?,?)`,
 			r.ID, r.UserID, r.Title, r.Summary,
 			store.DatabaseTime(r.CreatedAt), store.DatabaseTime(r.UpdatedAt),
 		); err != nil {
 			return err
 		}
 	}
+	if _, err := tx.Exec(`DELETE FROM qa_turn_contexts WHERE session_id = ?`, r.ID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM qa_turns WHERE session_id = ?`, r.ID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM qa_messages WHERE session_id = ?`, r.ID); err != nil {
 		return err
 	}
 	if len(r.Messages) > 0 {
+		turnNos, turns := assignSessionTurns(r.Messages)
 		placeholders := make([]string, len(r.Messages))
-		args := make([]any, 0, len(r.Messages)*8)
+		args := make([]any, 0, len(r.Messages)*9)
 		for i, m := range r.Messages {
 			toolCalls, err := marshalToolCalls(m.ToolCalls)
 			if err != nil {
 				return fmt.Errorf("memory/session: encode message %d tool calls: %w", i, err)
 			}
-			placeholders[i] = "(?,?,?,?,?,?,?,?)"
-			args = append(args, r.ID, i, m.Role, m.Content, toolCalls, m.ToolCallID, m.Name, store.DatabaseTime(r.UpdatedAt))
+			placeholders[i] = "(?,?,?,?,?,?,?,?,?)"
+			args = append(args, r.ID, i, turnNos[i], m.Role, m.Content, toolCalls, m.ToolCallID, m.Name, store.DatabaseTime(r.UpdatedAt))
 		}
-		query := "INSERT INTO qa_messages(session_id,seq,role,content,tool_calls_json,tool_call_id,tool_name,created_at) VALUES " + strings.Join(placeholders, ",")
+		query := "INSERT INTO qa_messages(session_id,seq,turn_no,role,content,tool_calls_json,tool_call_id,tool_name,created_at) VALUES " + strings.Join(placeholders, ",")
 		if _, err := tx.Exec(query, args...); err != nil {
+			return err
+		}
+		if err := insertSessionTurns(tx, r.ID, turns, r.UpdatedAt); err != nil {
 			return err
 		}
 	}
@@ -139,6 +185,12 @@ func (ss *SessionStore) Delete(id string, userID int64) (bool, error) {
 		}
 		return false, err
 	}
+	if _, err := tx.Exec(`DELETE FROM qa_turn_contexts WHERE session_id = ?`, id); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`DELETE FROM qa_turns WHERE session_id = ?`, id); err != nil {
+		return false, err
+	}
 	if _, err := tx.Exec(`DELETE FROM qa_messages WHERE session_id = ?`, id); err != nil {
 		return false, err
 	}
@@ -153,11 +205,14 @@ func (ss *SessionStore) Delete(id string, userID int64) (bool, error) {
 
 func (ss *SessionStore) getSession(id string, userID int64) (*SessionRecord, error) {
 	row := ss.db.QueryRow(
-		`SELECT s.id, s.user_id, s.title, COALESCE(s.summary,''), s.created_at, s.updated_at
+		`SELECT s.id, s.user_id, s.title, COALESCE(s.summary,''),
+		        s.compacted_through_turn, s.created_at, s.updated_at,
+		        COALESCE((SELECT MAX(t.turn_no) FROM qa_turns t WHERE t.session_id=s.id),0)
 		 FROM qa_sessions s WHERE s.id = ? AND s.user_id = ?`, id, userID)
 	var r SessionRecord
 	var createdAt, updatedAt sql.NullTime
-	if err := row.Scan(&r.ID, &r.UserID, &r.Title, &r.Summary, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&r.ID, &r.UserID, &r.Title, &r.Summary,
+		&r.CompactedThroughTurn, &createdAt, &updatedAt, &r.LatestTurn); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -168,7 +223,7 @@ func (ss *SessionStore) getSession(id string, userID int64) (*SessionRecord, err
 	return &r, nil
 }
 
-// GetRecentSession loads only the tail needed by the online agent path.
+// GetRecentSession loads one explicitly bounded message tail.
 func (ss *SessionStore) GetRecentSession(id string, userID int64, limit int) (*SessionRecord, error) {
 	r, err := ss.getSession(id, userID)
 	if err != nil || r == nil || limit <= 0 {
@@ -202,31 +257,37 @@ func (ss *SessionStore) GetRecentSession(id string, userID int64, limit int) (*S
 	return r, nil
 }
 
-// GetFullSession is reserved for workflows that intentionally need all messages.
-func (ss *SessionStore) GetFullSession(id string, userID int64) (*SessionRecord, error) {
+const maxContextSessionMessages = 512
+
+// GetContextSession loads only the not-yet-compacted turn range used online.
+func (ss *SessionStore) GetContextSession(id string, userID int64) (*SessionRecord, error) {
 	r, err := ss.getSession(id, userID)
 	if err != nil || r == nil {
 		return r, err
 	}
-	mrows, err := ss.db.Query(
+	rows, err := ss.db.Query(
 		`SELECT m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name
 		 FROM qa_messages m
-		 JOIN qa_sessions s ON s.id = m.session_id
-		 WHERE m.session_id = ? AND s.user_id = ?
-		 ORDER BY m.seq`, id, userID)
+		 JOIN qa_sessions s ON s.id=m.session_id
+		 WHERE m.session_id=? AND s.user_id=? AND m.turn_no>?
+		 ORDER BY m.seq LIMIT ?`,
+		id, userID, r.CompactedThroughTurn, maxContextSessionMessages+1)
 	if err != nil {
 		return nil, err
 	}
-	defer mrows.Close()
-	for mrows.Next() {
-		m, err := scanSessionMessage(mrows)
+	defer rows.Close()
+	r.Messages = make([]llm.Message, 0, 32)
+	for rows.Next() {
+		message, err := scanSessionMessage(rows)
 		if err != nil {
 			return nil, err
 		}
-		r.Messages = append(r.Messages, m)
+		r.Messages = append(r.Messages, message)
+		if len(r.Messages) > maxContextSessionMessages {
+			return nil, fmt.Errorf("memory/session: uncompacted context for %q exceeds %d messages", id, maxContextSessionMessages)
+		}
 	}
-	r.MessageCount = len(r.Messages)
-	return r, mrows.Err()
+	return r, rows.Err()
 }
 
 // ListMessagesBefore fetches at most limit messages before seq; beforeSeq < 0 starts at the tail.
@@ -283,67 +344,381 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 	return page, nil
 }
 
-func (ss *SessionStore) AppendMessages(sessionID string, userID int64, msgs []llm.Message) error {
+// ListTurnsBefore keeps tool-heavy turns intact while bounding history by turn count.
+func (ss *SessionStore) ListTurnsBefore(id string, userID int64, beforeSeq, limit int) (*MessagePage, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	type turnBound struct {
+		firstSeq int
+		lastSeq  int
+	}
+	query := `SELECT t.first_seq, t.last_seq
+	          FROM qa_turns t
+	          JOIN qa_sessions s ON s.id = t.session_id
+	          WHERE t.session_id = ? AND s.user_id = ?`
+	args := []any{id, userID}
+	if beforeSeq >= 0 {
+		query += ` AND t.last_seq < ?`
+		args = append(args, beforeSeq)
+	}
+	query += ` ORDER BY t.turn_no DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := ss.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	bounds := make([]turnBound, 0, limit+1)
+	for rows.Next() {
+		var bound turnBound
+		if err := rows.Scan(&bound.firstSeq, &bound.lastSeq); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		bounds = append(bounds, bound)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(bounds) == 0 {
+		return &MessagePage{NextBeforeSeq: -1}, nil
+	}
+
+	hasMore := len(bounds) > limit
+	if hasMore {
+		bounds = bounds[:limit]
+	}
+	firstSeq := bounds[len(bounds)-1].firstSeq
+	messageQuery := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name
+	                 FROM qa_messages m
+	                 JOIN qa_sessions s ON s.id = m.session_id
+	                 WHERE m.session_id = ? AND s.user_id = ? AND m.seq >= ?`
+	messageArgs := []any{id, userID, firstSeq}
+	if beforeSeq >= 0 {
+		messageQuery += ` AND m.seq < ?`
+		messageArgs = append(messageArgs, beforeSeq)
+	}
+	messageQuery += ` ORDER BY m.seq ASC`
+	messageRows, err := ss.db.Query(messageQuery, messageArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer messageRows.Close()
+	page := &MessagePage{
+		Messages:      make([]llm.Message, 0, limit*2),
+		HasMore:       hasMore,
+		NextBeforeSeq: firstSeq,
+	}
+	for messageRows.Next() {
+		var seq int
+		var msg llm.Message
+		var toolCalls string
+		if err := messageRows.Scan(&seq, &msg.Role, &msg.Content, &toolCalls, &msg.ToolCallID, &msg.Name); err != nil {
+			return nil, err
+		}
+		if err := unmarshalToolCalls(toolCalls, &msg); err != nil {
+			return nil, err
+		}
+		page.Messages = append(page.Messages, msg)
+	}
+	if err := messageRows.Err(); err != nil {
+		return nil, err
+	}
+	return page, nil
+}
+
+// AppendTurn assigns one durable turn number to an atomic user-to-answer group.
+func (ss *SessionStore) AppendTurn(sessionID, runID string, userID int64, msgs []llm.Message) (int, error) {
 	if len(msgs) == 0 {
-		return nil
+		return 0, nil
 	}
 	tx, err := ss.db.Begin()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 	exists, err := lockSessionOwner(tx, sessionID, userID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if !exists {
-		return fmt.Errorf("memory/session: session %q not found", sessionID)
+		return 0, fmt.Errorf("memory/session: session %q not found", sessionID)
 	}
 
-	var maxSeq int
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), -1) FROM qa_messages WHERE session_id = ?`, sessionID).Scan(&maxSeq); err != nil {
-		return err
+	var maxSeq, maxTurn int
+	if err := tx.QueryRow(
+		`SELECT COALESCE((SELECT MAX(seq) FROM qa_messages WHERE session_id=?),-1),
+		        COALESCE((SELECT MAX(turn_no) FROM qa_turns WHERE session_id=?),0)`,
+		sessionID, sessionID).Scan(&maxSeq, &maxTurn); err != nil {
+		return 0, err
 	}
+	turnNo := maxTurn + 1
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	placeholders := make([]string, len(msgs))
-	args := make([]any, 0, len(msgs)*8)
+	args := make([]any, 0, len(msgs)*9)
 	for i, m := range msgs {
 		toolCalls, err := marshalToolCalls(m.ToolCalls)
 		if err != nil {
-			return fmt.Errorf("memory/session: encode appended message %d tool calls: %w", i, err)
+			return 0, fmt.Errorf("memory/session: encode appended message %d tool calls: %w", i, err)
 		}
-		placeholders[i] = "(?,?,?,?,?,?,?,?)"
-		args = append(args, sessionID, maxSeq+1+i, m.Role, m.Content, toolCalls, m.ToolCallID, m.Name, store.DatabaseTime(now))
+		placeholders[i] = "(?,?,?,?,?,?,?,?,?)"
+		args = append(args, sessionID, maxSeq+1+i, turnNo, m.Role, m.Content, toolCalls, m.ToolCallID, m.Name, store.DatabaseTime(now))
 	}
-	query := "INSERT INTO qa_messages(session_id,seq,role,content,tool_calls_json,tool_call_id,tool_name,created_at) VALUES " + strings.Join(placeholders, ",")
+	query := "INSERT INTO qa_messages(session_id,seq,turn_no,role,content,tool_calls_json,tool_call_id,tool_name,created_at) VALUES " + strings.Join(placeholders, ",")
 	if _, err := tx.Exec(query, args...); err != nil {
-		return err
+		return 0, err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO qa_turns(session_id,turn_no,run_id,first_seq,last_seq,token_estimate,created_at) VALUES(?,?,?,?,?,?,?)`,
+		sessionID, turnNo, runID, maxSeq+1, maxSeq+len(msgs), estimateSessionTokens(msgs), store.DatabaseTime(now)); err != nil {
+		return 0, err
 	}
 	if _, err := tx.Exec(
 		`UPDATE qa_sessions SET updated_at = ? WHERE id = ? AND user_id=?`,
 		store.DatabaseTime(now), sessionID, userID,
 	); err != nil {
-		return err
+		return 0, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return turnNo, nil
 }
 
-func (ss *SessionStore) UpdateSummary(id string, userID int64, summary string) error {
-	result, err := ss.db.Exec(
-		`UPDATE qa_sessions SET summary = ?, updated_at = ? WHERE id = ? AND user_id=?`,
-		summary, store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)), id, userID)
+// SessionContextStats avoids loading message bodies for threshold checks.
+func (ss *SessionStore) SessionContextStats(sessionID string, userID int64) (tokens, compactedThrough int, err error) {
+	err = ss.db.QueryRow(
+		`SELECT COALESCE(SUM(CASE WHEN t.turn_no>s.compacted_through_turn THEN t.token_estimate ELSE 0 END),0),
+		        s.compacted_through_turn
+		 FROM qa_sessions s
+		 LEFT JOIN qa_turns t ON t.session_id=s.id
+		 WHERE s.id=? AND s.user_id=?
+		 GROUP BY s.compacted_through_turn`,
+		sessionID, userID).Scan(&tokens, &compactedThrough)
+	return tokens, compactedThrough, err
+}
+
+// PrepareCompaction reads only the newly eligible contiguous turn range.
+func (ss *SessionStore) PrepareCompaction(sessionID string, userID int64, keepTurns int) (*CompactionCandidate, error) {
+	if keepTurns < 1 {
+		return nil, fmt.Errorf("memory/session: keep turns must be positive")
+	}
+	session, err := ss.getSession(sessionID, userID)
+	if err != nil || session == nil {
+		return nil, err
+	}
+	toTurn := session.LatestTurn - keepTurns
+	if toTurn <= session.CompactedThroughTurn {
+		return nil, nil
+	}
+	fromTurn := session.CompactedThroughTurn + 1
+	rows, err := ss.db.Query(
+		`SELECT m.turn_no,t.run_id,t.token_estimate,m.role,m.content,
+		        COALESCE(m.tool_calls_json,''),m.tool_call_id,m.tool_name
+		 FROM qa_messages m
+		 JOIN qa_sessions s ON s.id=m.session_id
+		 JOIN qa_turns t ON t.session_id=m.session_id AND t.turn_no=m.turn_no
+		 WHERE m.session_id=? AND s.user_id=? AND m.turn_no BETWEEN ? AND ?
+		 ORDER BY m.turn_no,m.seq`, sessionID, userID, fromTurn, toTurn)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	affected, err := result.RowsAffected()
+	defer rows.Close()
+	turns := make([]TurnCompactionCandidate, 0, toTurn-fromTurn+1)
+	for rows.Next() {
+		var turnNumber, sourceTokens int
+		var runID, toolCalls string
+		var message llm.Message
+		if err := rows.Scan(
+			&turnNumber, &runID, &sourceTokens, &message.Role, &message.Content,
+			&toolCalls, &message.ToolCallID, &message.Name,
+		); err != nil {
+			return nil, err
+		}
+		if err := unmarshalToolCalls(toolCalls, &message); err != nil {
+			return nil, err
+		}
+		if len(turns) == 0 || turns[len(turns)-1].TurnNumber != turnNumber {
+			turns = append(turns, TurnCompactionCandidate{
+				RunID: runID, TurnNumber: turnNumber, SourceTokens: sourceTokens,
+			})
+		}
+		turn := &turns[len(turns)-1]
+		turn.Messages = append(turn.Messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(turns) != toTurn-fromTurn+1 {
+		missing := make([]string, 0, toTurn-fromTurn+1-len(turns))
+		turnIndex := 0
+		for expected := fromTurn; expected <= toTurn; expected++ {
+			if turnIndex < len(turns) && turns[turnIndex].TurnNumber == expected {
+				turnIndex++
+				continue
+			}
+			missing = append(missing, strconv.Itoa(expected))
+		}
+		return nil, fmt.Errorf("memory/session: incomplete turn range %d-%d (missing: %s)",
+			fromTurn, toTurn, strings.Join(missing, ","))
+	}
+	return &CompactionCandidate{
+		SessionID: sessionID, UserID: userID, PreviousSummary: session.Summary,
+		PreviousThrough: session.CompactedThroughTurn, FromTurn: fromTurn,
+		ToTurn: toTurn, Turns: turns,
+	}, nil
+}
+
+// ApplyCompaction rejects stale generators instead of overwriting newer progress.
+func (ss *SessionStore) ApplyCompaction(candidate CompactionCandidate, records []TurnContextRecord, summary string) (bool, error) {
+	if len(records) != candidate.ToTurn-candidate.FromTurn+1 {
+		return false, fmt.Errorf("memory/session: compressed records do not cover turns %d-%d", candidate.FromTurn, candidate.ToTurn)
+	}
+	for i, record := range records {
+		expectedTurn := candidate.FromTurn + i
+		if record.SessionID != candidate.SessionID || record.UserID != candidate.UserID || record.TurnNumber != expectedTurn {
+			return false, fmt.Errorf("memory/session: invalid compressed record for turn %d", expectedTurn)
+		}
+	}
+	tx, err := ss.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
-	if affected == 0 {
-		return fmt.Errorf("memory/session: session %q not found for user", id)
+	defer tx.Rollback()
+	var ownerID int64
+	var currentThrough int
+	if err := tx.QueryRow(
+		`SELECT user_id,compacted_through_turn FROM qa_sessions WHERE id=? FOR UPDATE`,
+		candidate.SessionID).Scan(&ownerID, &currentThrough); err != nil {
+		return false, err
 	}
-	return nil
+	if ownerID != candidate.UserID {
+		return false, ErrSessionOwnership
+	}
+	if currentThrough != candidate.PreviousThrough {
+		return false, nil
+	}
+	placeholders := make([]string, len(records))
+	args := make([]any, 0, len(records)*10)
+	now := store.DatabaseTime(time.Now().UTC().Format(time.RFC3339))
+	for i, record := range records {
+		placeholders[i] = "(?,?,?,?,?,?,?,?,?,?)"
+		args = append(args,
+			record.Ref, record.SessionID, record.UserID, record.RunID, record.TurnNumber,
+			record.Text, record.SummaryText, record.SourceTokens, record.RetainedTokens, now,
+		)
+	}
+	if _, err := tx.Exec(
+		"INSERT INTO qa_turn_contexts(ref,session_id,user_id,run_id,turn_number,text,summary_text,source_tokens,retained_tokens,created_at) VALUES "+strings.Join(placeholders, ","),
+		args...); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(
+		`UPDATE qa_sessions SET summary=?,compacted_through_turn=?,updated_at=?
+		 WHERE id=? AND user_id=?`,
+		summary, candidate.ToTurn, now,
+		candidate.SessionID, candidate.UserID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// GetTurnDetail resolves exactly one bounded context under the current owner.
+func (ss *SessionStore) GetTurnDetail(sessionID string, userID int64, reference string) (*TurnContextRecord, error) {
+	var record TurnContextRecord
+	err := ss.db.QueryRow(
+		`SELECT ref,session_id,user_id,run_id,text,turn_number,summary_text,source_tokens,retained_tokens
+		 FROM qa_turn_contexts
+		 WHERE ref=? AND session_id=? AND user_id=?`,
+		reference, sessionID, userID).Scan(
+		&record.Ref, &record.SessionID, &record.UserID, &record.RunID, &record.Text,
+		&record.TurnNumber, &record.SummaryText, &record.SourceTokens, &record.RetainedTokens,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("memory/session: turn reference %q is not available in the current session", reference)
+		}
+		return nil, err
+	}
+	return &record, nil
+}
+
+type pendingSessionTurn struct {
+	no, firstSeq, lastSeq, tokens int
+}
+
+func assignSessionTurns(messages []llm.Message) ([]int, []pendingSessionTurn) {
+	turnNos := make([]int, len(messages))
+	turns := make([]pendingSessionTurn, 0, len(messages)/2+1)
+	turnNo := 0
+	for i, message := range messages {
+		if turnNo == 0 || message.Role == "user" {
+			turnNo++
+			turns = append(turns, pendingSessionTurn{no: turnNo, firstSeq: i, lastSeq: i})
+		}
+		turnNos[i] = turnNo
+		turn := &turns[len(turns)-1]
+		turn.lastSeq = i
+		turn.tokens += estimateSessionMessageTokens(message)
+	}
+	return turnNos, turns
+}
+
+func insertSessionTurns(tx *sql.Tx, sessionID string, turns []pendingSessionTurn, createdAt string) error {
+	if len(turns) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(turns))
+	args := make([]any, 0, len(turns)*7)
+	for i, turn := range turns {
+		placeholders[i] = "(?,?,?,?,?,?,?)"
+		args = append(args, sessionID, turn.no, "", turn.firstSeq, turn.lastSeq, turn.tokens, store.DatabaseTime(createdAt))
+	}
+	_, err := tx.Exec(
+		"INSERT INTO qa_turns(session_id,turn_no,run_id,first_seq,last_seq,token_estimate,created_at) VALUES "+strings.Join(placeholders, ","),
+		args...)
+	return err
+}
+
+func estimateSessionTokens(messages []llm.Message) int {
+	tokens := 0
+	for _, message := range messages {
+		tokens += estimateSessionMessageTokens(message)
+	}
+	return tokens
+}
+
+func estimateSessionMessageTokens(message llm.Message) int {
+	units := 0
+	for _, value := range []string{message.Role, message.Content, message.ToolCallID, message.Name} {
+		units += estimateSessionTextUnits(value)
+	}
+	for _, call := range message.ToolCalls {
+		for _, value := range []string{call.ID, call.Function.Name, call.Function.Arguments} {
+			units += estimateSessionTextUnits(value)
+		}
+	}
+	return (units + 29) / 30
+}
+
+func estimateSessionTextUnits(value string) int {
+	units := 0
+	for _, r := range value {
+		if r <= 127 {
+			units += 11
+		} else {
+			units += 66
+		}
+	}
+	return units
 }
 
 func (ss *SessionStore) EnsureSession(id string, userID int64, title string) error {

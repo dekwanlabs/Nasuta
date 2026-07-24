@@ -28,7 +28,7 @@ type DynamicHandler struct {
 
 func NewDynamicHandler(tools *agent.Service, registry *agent.Registry) *DynamicHandler {
 	if registry == nil {
-		registry = agent.NewRegistry(tools, config.Config{})
+		registry = agent.NewRegistry(tools, config.Config{}, nil)
 	}
 	handler := &DynamicHandler{tools: tools, registry: registry}
 	if err := handler.rebuild(); err != nil {
@@ -87,7 +87,7 @@ func BuildMCP(tools *agent.Service, registry *agent.Registry) (*server.MCPServer
 	)
 
 	if registry == nil {
-		registry = agent.NewRegistry(tools, config.Config{})
+		registry = agent.NewRegistry(tools, config.Config{}, nil)
 	}
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 	executor := tool.NewExecutor(30 * time.Second)

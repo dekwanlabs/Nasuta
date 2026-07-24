@@ -129,6 +129,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 				user_id    BIGINT NOT NULL DEFAULT 0,
 				title      VARCHAR(512) NOT NULL DEFAULT '',
 				summary    TEXT,
+				compacted_through_turn INT NOT NULL DEFAULT 0,
 				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 				KEY idx_user (user_id)
@@ -137,6 +138,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 				id         BIGINT AUTO_INCREMENT PRIMARY KEY,
 				session_id VARCHAR(64) NOT NULL,
 				seq        INT NOT NULL,
+				turn_no    INT NOT NULL,
 				role       VARCHAR(32) NOT NULL,
 				content    MEDIUMTEXT NOT NULL,
 				tool_calls_json MEDIUMTEXT NULL,
@@ -144,7 +146,33 @@ var mysqlSchema = map[MySQLGroup][]string{
 				tool_name   VARCHAR(128) NOT NULL DEFAULT '',
 				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				UNIQUE KEY uniq_session_seq (session_id, seq),
-				KEY idx_session (session_id)
+				KEY idx_session (session_id),
+				KEY idx_session_turn (session_id, turn_no, seq)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS qa_turns (
+				session_id    VARCHAR(64) NOT NULL,
+				turn_no       INT NOT NULL,
+				run_id        VARCHAR(64) NOT NULL DEFAULT '',
+				first_seq     INT NOT NULL,
+				last_seq      INT NOT NULL,
+				token_estimate INT NOT NULL DEFAULT 0,
+				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (session_id, turn_no),
+				KEY idx_session_last (session_id, turn_no DESC)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS qa_turn_contexts (
+				ref           VARCHAR(64) PRIMARY KEY,
+				session_id    VARCHAR(64) NOT NULL,
+				user_id       BIGINT NOT NULL,
+				run_id        VARCHAR(64) NOT NULL DEFAULT '',
+				turn_number   INT NOT NULL,
+				text          MEDIUMTEXT NOT NULL,
+				summary_text  TEXT NOT NULL,
+				source_tokens INT NOT NULL DEFAULT 0,
+				retained_tokens INT NOT NULL DEFAULT 0,
+				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE KEY uniq_session_turn_context (session_id, turn_number),
+				KEY idx_user_session (user_id, session_id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	},
 	GroupQARun: {

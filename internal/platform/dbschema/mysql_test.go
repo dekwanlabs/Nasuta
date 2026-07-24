@@ -33,7 +33,7 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 	}{
 		{group: GroupAuth, tables: []string{"users", "sessions", "settings"}},
 		{group: GroupDocuments, tables: []string{"documents"}},
-		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages"}},
+		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_turn_contexts"}},
 		{group: GroupQARun, tables: []string{"agent_runs", "agent_steps", "agent_llm_calls"}},
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
 		{group: GroupIncident, tables: []string{"incident_records"}},
@@ -106,7 +106,7 @@ func TestMemoryLastUsedUsesDateTime(t *testing.T) {
 
 func TestQAMessageSchemaStoresToolProtocol(t *testing.T) {
 	statements := mysqlSchema[GroupQASession]
-	if len(statements) != 2 {
+	if len(statements) != 4 {
 		t.Fatalf("qa session schema statements = %d", len(statements))
 	}
 	for _, required := range []string{
@@ -134,6 +134,42 @@ func TestQAMessageToolMigrationAddsProtocolColumns(t *testing.T) {
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("QA message tool migration missing %q", required)
+		}
+	}
+}
+
+func TestQASessionTurnCompactionMigrationBackfillsBoundaries(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_session_turn_compaction.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read QA session compaction migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN turn_no", "CREATE TABLE IF NOT EXISTS qa_turns",
+		"CREATE TABLE IF NOT EXISTS qa_turn_contexts", "compacted_through_turn",
+		"OVER (PARTITION BY session_id ORDER BY seq",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("QA session compaction migration missing %q", required)
+		}
+	}
+}
+
+func TestQATurnRunIDMigrationAddsMissingColumn(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_turns_run_id.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read QA turn run id migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ALTER TABLE qa_turns",
+		"ADD COLUMN run_id",
+		"VARCHAR(64) NOT NULL DEFAULT ''",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("QA turn run id migration missing %q", required)
 		}
 	}
 }

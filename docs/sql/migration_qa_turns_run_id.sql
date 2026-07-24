@@ -1,0 +1,2 @@
+ALTER TABLE qa_turns
+  ADD COLUMN run_id VARCHAR(64) NOT NULL DEFAULT '' AFTER turn_no;

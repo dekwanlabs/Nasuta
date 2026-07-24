@@ -5,13 +5,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 	descriptions := make(map[string]string)
-	for _, candidate := range builtinTools(&Service{}, config.Config{}) {
+	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil) {
 		descriptions[string(candidate.ID)] = candidate.Description
 	}
 	checks := map[string][]string{
@@ -39,8 +42,59 @@ func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 	}
 }
 
+func TestSessionTurnDetailsToolIsPrivateAndRequiresCurrentReference(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sessions := memory.NewSessionStore(db)
+	candidate := sessionTurnDetailsTool(sessions)
+	if !candidate.MCPHidden {
+		t.Fatal("session detail tool must not enter MCP")
+	}
+	if _, err := candidate.Handler.Execute(context.Background(), tool.Arguments{"ref": "cmp-1"}); err == nil {
+		t.Fatal("detail tool accepted a call without session scope")
+	}
+	ctx := withSessionToolScope(context.Background(), ConversationContext{
+		SessionID: "session-1", CompactedThroughTurn: 1,
+	}, 42)
+	mock.ExpectQuery(`SELECT ref,session_id,user_id,run_id,text,turn_number,summary_text,source_tokens,retained_tokens.*FROM qa_turn_contexts`).
+		WithArgs("cmp-current", "session-1", int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"ref", "session_id", "user_id", "run_id", "text", "turn_number", "summary_text", "source_tokens", "retained_tokens"}).
+			AddRow("cmp-current", "session-1", 42, "run-1", "detail", 1, "summary", 50, 10))
+	if _, err := candidate.Handler.Execute(ctx, tool.Arguments{"ref": "cmp-current"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWithoutToolRemovesSessionDetailsFromRunSnapshot(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	registry := NewRegistry(&Service{}, config.Config{}, memory.NewSessionStore(db))
+	snapshot := registry.Snapshot(tool.ReadPolicy())
+	if _, ok := snapshot.Get("get_session_turn_details"); !ok {
+		t.Fatal("registered detail tool missing")
+	}
+	filtered := withoutTool(snapshot, "get_session_turn_details")
+	if _, ok := filtered.Get("get_session_turn_details"); ok {
+		t.Fatal("detail tool remained visible without a compaction reference")
+	}
+	for _, published := range snapshot.MCPTools() {
+		if published.ID == "get_session_turn_details" {
+			t.Fatal("detail tool was published over MCP")
+		}
+	}
+}
+
 func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
-	without := builtinTools(&Service{}, config.Config{})
+	without := builtinTools(&Service{}, config.Config{}, nil)
 	for _, candidate := range without {
 		if candidate.ID == "query_relations" {
 			t.Fatal("query_relations registered without ontology service")
@@ -48,7 +102,7 @@ func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
 	}
 
 	svc := &Service{ontology: ontology.NewService(staticOntologyRepository{})}
-	tools := builtinTools(svc, config.Config{})
+	tools := builtinTools(svc, config.Config{}, nil)
 	var relation *Tool
 	for i := range tools {
 		if tools[i].ID == "query_relations" {
@@ -73,7 +127,7 @@ func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
 func TestTraceDepsUsesOntologyFacts(t *testing.T) {
 	svc := &Service{ontology: ontology.NewService(staticOntologyRepository{})}
 	var trace *Tool
-	for _, candidate := range builtinTools(svc, config.Config{}) {
+	for _, candidate := range builtinTools(svc, config.Config{}, nil) {
 		if candidate.ID == "trace_deps" {
 			trace = &candidate
 			break
@@ -97,7 +151,7 @@ func TestTraceDepsUsesOntologyFacts(t *testing.T) {
 
 func TestBuiltinToolReturnsExecutionErrorWhenBackendIsUnavailable(t *testing.T) {
 	var symbol *Tool
-	for _, candidate := range builtinTools(&Service{}, config.Config{}) {
+	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil) {
 		if candidate.ID == "get_symbol" {
 			symbol = &candidate
 			break

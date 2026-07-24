@@ -8,6 +8,7 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -30,15 +31,15 @@ func ToolPolicyForPlan(_ domain.EvidencePlan, allowWrite bool) ToolPolicy {
 }
 
 // NewRegistry registers every built-in tool through the public batch API.
-func NewRegistry(svc *Service, cfg config.Config) *Registry {
+func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore) *Registry {
 	registry := tool.NewRegistry()
-	if err := registry.RegisterAll(builtinTools(svc, cfg)); err != nil {
+	if err := registry.RegisterAll(builtinTools(svc, cfg, sessions)); err != nil {
 		panic(fmt.Sprintf("register built-in tools: %v", err))
 	}
 	return registry
 }
 
-func builtinTools(svc *Service, cfg config.Config) []Tool {
+func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore) []Tool {
 	tools := []Tool{
 		{
 			ID: "get_service",
@@ -208,6 +209,9 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 	if svc.ontology != nil {
 		tools = append(tools, relationTool(svc))
 	}
+	if sessions != nil {
+		tools = append(tools, sessionTurnDetailsTool(sessions))
+	}
 
 	if !cfg.WebSearchEnabled {
 		return tools
@@ -233,6 +237,30 @@ func builtinTools(svc *Service, cfg config.Config) []Tool {
 		},
 	)
 	return tools
+}
+
+func sessionTurnDetailsTool(sessions *memory.SessionStore) Tool {
+	return Tool{
+		ID: "get_session_turn_details",
+		Description: "Read one bounded archived turn referenced by the current conversation's rolling summary. " +
+			"Call only when exact prior wording, identifiers, tool arguments, or evidence are necessary and the summary is insufficient. " +
+			"Ordinary follow-up questions should use the summary without calling this tool.",
+		Kind: ToolKindRead, MCPHidden: true,
+		InputSchema: objectSchema(map[string]any{
+			"ref": propString("One ref shown in the current rolling summary, for example cmp_xxx."),
+		}, []string{"ref"}),
+		Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
+			scope, ok := sessionScopeFromContext(ctx)
+			if !ok {
+				return "", fmt.Errorf("session turn details are unavailable without a current compressed conversation")
+			}
+			record, err := sessions.GetTurnDetail(scope.SessionID, scope.UserID, argStr(args, "ref", ""))
+			if err != nil {
+				return "", err
+			}
+			return marshalResult(record)
+		}),
+	}
 }
 
 func relationTool(svc *Service) Tool {
