@@ -268,13 +268,8 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 
 	emit("嗯...让我先琢磨一下你在问什么 ✨")
 	retrievalPrefix := buildRagCtx(conversation.Recent)
-	continuityBasis := retrievalPrefix
-	if continuityBasis == "" {
-		continuityBasis = conversation.SessionState
-	}
-	if hasConflictingConversationEntity(question, continuityBasis) {
+	if hasConflictingConversationEntity(question, retrievalPrefix) {
 		log.InfofCtx(ctx, "[qa] conversation context omitted after explicit entity switch")
-		conversation.SessionState = ""
 		conversation.RetrievedHistory = ""
 		conversation.CompactedThroughTurn = 0
 		conversation.Recent = nil
@@ -283,18 +278,13 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	}
 	if svc.history != nil && conversation.CompactedThroughTurn > 0 && conversation.SessionID != "" {
 		historyBudget := min(int(float64(svc.contextWindow)*0.08), 32768)
-		activeEntities, entityErr := sessionStateEntities(conversation.SessionState)
-		if entityErr != nil {
-			return nil, entityErr
-		}
-		historyContinuity := strings.TrimSpace(retrievalPrefix + "\n" + activeEntities)
-		recalledHistory, recallErr := svc.history.Recall(ctx, userID, conversation.SessionID, question, historyContinuity, historyBudget)
+		recalledHistory, recallErr := svc.history.Recall(ctx, userID, conversation.SessionID, question, retrievalPrefix, historyBudget)
 		if recallErr != nil {
 			return nil, fmt.Errorf("recall current session history: %w", recallErr)
 		}
 		conversation.RetrievedHistory = recalledHistory
 	}
-	routeContext := buildRouteContext(conversation.SessionState, retrievalPrefix)
+	routeContext := retrievalPrefix
 
 	cleanQuestion := strings.TrimSpace(question)
 	var terms retrieval.QueryTerms
@@ -865,21 +855,6 @@ func buildRagCtx(history []llm.Message) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
-}
-
-func buildRouteContext(summary, recent string) string {
-	const summaryLimit = 1500
-	runes := []rune(summary)
-	if len(runes) > summaryLimit {
-		summary = string(runes[:summaryLimit])
-	}
-	if summary == "" {
-		return recent
-	}
-	if recent == "" {
-		return "[summary]: " + summary
-	}
-	return "[summary]: " + summary + "\n" + recent
 }
 
 func extractBacktick(text string) []string {

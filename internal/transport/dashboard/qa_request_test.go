@@ -20,7 +20,6 @@ func TestCompactionRestartRecommendation(t *testing.T) {
 		want   string
 	}{
 		{name: "hard failure", failed: true, want: "compaction_failed"},
-		{name: "state fallback", result: agent.SessionCompactionResult{StateFallback: true}, want: "compaction_degraded"},
 		{name: "critical", result: agent.SessionCompactionResult{NewSessionRecommended: true, CriticalWaterReached: true}, want: "context_critical"},
 		{name: "archive limit", result: agent.SessionCompactionResult{NewSessionRecommended: true}, want: "archived_history_limit"},
 		{name: "not recommended"},

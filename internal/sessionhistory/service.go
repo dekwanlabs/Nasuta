@@ -3,7 +3,9 @@ package sessionhistory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -14,8 +16,10 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 const (
@@ -27,10 +31,12 @@ const (
 
 // Service owns current-session history recall and eventual vector indexing.
 type Service struct {
-	sessions *memory.SessionStore
-	semantic semantic.Store
-	embedder embed.Embedder
-	syncMu   sync.Mutex
+	sessions      *memory.SessionStore
+	semantic      semantic.Store
+	embedder      embed.Embedder
+	bm25          *retrieval.BM25Builder
+	bm25VocabPath string
+	syncMu        sync.Mutex
 }
 
 // New keeps lexical recall available when the optional dense backend is absent.
@@ -39,6 +45,23 @@ func New(sessions *memory.SessionStore, sem semantic.Store, emb embed.Embedder) 
 		return nil
 	}
 	return &Service{sessions: sessions, semantic: sem, embedder: emb}
+}
+
+// EnableBM25 binds sparse coordinates to the dedicated history collection.
+func (service *Service) EnableBM25(vocabPath string) error {
+	if service == nil || vocabPath == "" {
+		return fmt.Errorf("session history BM25: vocabulary path is required")
+	}
+	builder, err := retrieval.LoadVocab(vocabPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("session history BM25: load vocabulary %q: %w", vocabPath, err)
+		}
+		builder = retrieval.NewBM25Builder()
+	}
+	service.bm25 = builder
+	service.bm25VocabPath = vocabPath
+	return nil
 }
 
 // PrepareRecords canonicalizes lexical terms at the archive ingress boundary.
@@ -110,17 +133,24 @@ func (service *Service) find(ctx context.Context, userID int64, sessionID, query
 			mode = "lexical_only_dense_error"
 			log.ErrorfCtx(ctx, "[qa] session history dense query returned %d vectors, want 1", len(vectors))
 		} else {
-			hits, searchErr := service.semantic.Search(ctx, semantic.Query{
+			searchQuery := semantic.Query{
 				DenseVector: vectors[0],
 				Filter: semantic.Filter{
 					Keywords:   map[string]string{"kind": "session_turn", "session_id": sessionID},
 					AnyInteger: map[string][]int64{"user_id": {userID}},
 				},
 				Limit: candidateLimit,
-			})
+			}
+			if service.bm25 != nil {
+				indices, values := retrieval.SparseToSorted(service.bm25.QuerySparse(query))
+				if len(indices) > 0 {
+					searchQuery.SparseVector = &semantic.SparseVector{Indices: indices, Values: values}
+				}
+			}
+			hits, searchErr := service.semantic.Search(ctx, searchQuery)
 			if searchErr != nil {
 				mode = "lexical_only_dense_error"
-				log.ErrorfCtx(ctx, "[qa] session history dense search failed: %v", searchErr)
+				log.ErrorfCtx(ctx, "[qa] session history hybrid search failed: %v", searchErr)
 			} else {
 				mode = "hybrid"
 				dense = make([]string, 0, len(hits))
@@ -417,7 +447,7 @@ func (service *Service) processTasks(ctx context.Context, tasks []memory.History
 	for _, task := range tasks {
 		switch task.Operation {
 		case "delete":
-			deleteIDs = append(deleteIDs, task.Ref)
+			deleteIDs = append(deleteIDs, semanticPointID(task.Ref))
 		case "upsert":
 			key := scope{userID: task.UserID, sessionID: task.SessionID}
 			upserts[key] = append(upserts[key], task.Ref)
@@ -436,7 +466,7 @@ func (service *Service) processTasks(ctx context.Context, tasks []memory.History
 			return err
 		}
 		if len(records) == 0 {
-			if err := service.semantic.Delete(ctx, semantic.DeleteQuery{IDs: refs}); err != nil {
+			if err := service.semantic.Delete(ctx, semantic.DeleteQuery{IDs: semanticPointIDs(refs)}); err != nil {
 				return fmt.Errorf("session history index: remove stale upserts: %w", err)
 			}
 			continue
@@ -452,9 +482,22 @@ func (service *Service) processTasks(ctx context.Context, tasks []memory.History
 		if len(vectors) != len(records) {
 			return fmt.Errorf("session history index: got %d vectors for %d summaries", len(vectors), len(records))
 		}
+		sparseVectors := make([]*semantic.SparseVector, len(records))
+		if service.bm25 != nil {
+			for i, record := range records {
+				tokens := service.bm25.AddDoc(record.Summary)
+				indices, values := retrieval.SparseToSorted(service.bm25.BuildSparse(tokens))
+				if len(indices) > 0 {
+					sparseVectors[i] = &semantic.SparseVector{Indices: indices, Values: values}
+				}
+			}
+			if err := service.bm25.SaveVocab(service.bm25VocabPath); err != nil {
+				return fmt.Errorf("session history index: save BM25 vocabulary %q: %w", service.bm25VocabPath, err)
+			}
+		}
 		points := make([]semantic.Record, len(records))
 		for i, record := range records {
-			points[i] = semantic.Record{ID: record.Ref, DenseVector: vectors[i], Metadata: map[string]any{
+			points[i] = semantic.Record{ID: semanticPointID(record.Ref), DenseVector: vectors[i], SparseVector: sparseVectors[i], Metadata: map[string]any{
 				"kind": "session_turn", "ref": record.Ref, "user_id": key.userID,
 				"session_id": key.sessionID, "turn_number": record.TurnNumber,
 			}}
@@ -464,6 +507,18 @@ func (service *Service) processTasks(ctx context.Context, tasks []memory.History
 		}
 	}
 	return nil
+}
+
+func semanticPointID(ref string) string {
+	return platform.UUIDFromString("session_history\x00" + ref)
+}
+
+func semanticPointIDs(refs []string) []string {
+	ids := make([]string, len(refs))
+	for i, ref := range refs {
+		ids[i] = semanticPointID(ref)
+	}
+	return ids
 }
 
 // Run retries pending vector mutations until the platform context is canceled.

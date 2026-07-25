@@ -128,8 +128,6 @@ var mysqlSchema = map[MySQLGroup][]string{
 				id         VARCHAR(64) PRIMARY KEY,
 				user_id    BIGINT NOT NULL DEFAULT 0,
 				title      VARCHAR(512) NOT NULL DEFAULT '',
-				session_state JSON NULL,
-				session_state_tokens INT NOT NULL DEFAULT 0,
 				archived_summary_tokens BIGINT NOT NULL DEFAULT 0,
 				compacted_through_turn INT NOT NULL DEFAULT 0,
 				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

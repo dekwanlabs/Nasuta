@@ -63,7 +63,7 @@ func TestQASessionHistoryRetrievalMigrationReplacesRollingSummary(t *testing.T) 
 	}
 	script := string(raw)
 	for _, required := range []string{
-		"DELETE FROM qa_turn_contexts", "DROP COLUMN summary", "ADD COLUMN session_state JSON",
+		"DELETE FROM qa_turn_contexts", "DROP COLUMN summary",
 		"archived_summary_tokens", "summary_tokens", "qa_session_history_terms",
 		"qa_session_history_index_outbox", "compacted_through_turn = 0",
 	} {
@@ -88,10 +88,13 @@ func TestManagedSchemaDoesNotStoreTimesAsStrings(t *testing.T) {
 
 func TestQASessionSchemaUsesJSONCompactionPayloads(t *testing.T) {
 	statements := strings.Join(mysqlSchema[GroupQASession], "\n")
-	for _, required := range []string{"session_state JSON NULL", "detail_json   JSON NOT NULL", "summary_tokens INT NOT NULL"} {
+	for _, required := range []string{"archived_summary_tokens BIGINT NOT NULL", "detail_json   JSON NOT NULL", "summary_tokens INT NOT NULL"} {
 		if !strings.Contains(statements, required) {
 			t.Fatalf("QA session schema missing %q", required)
 		}
+	}
+	if strings.Contains(statements, "session_state") {
+		t.Fatal("QA session schema still declares session state columns")
 	}
 	if strings.Contains(statements, "text          MEDIUMTEXT NOT NULL") {
 		t.Fatal("QA turn contexts still use legacy text detail storage")

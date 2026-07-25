@@ -160,8 +160,6 @@ func compactionRestartRecommendation(result agent.SessionCompactionResult, compa
 	switch {
 	case compactionFailed:
 		return "compaction_failed", "历史上下文压缩失败，当前会话无法安全继续，请开启新对话后重试。", true
-	case result.StateFallback:
-		return "compaction_degraded", "历史上下文压缩未能完整保留会话状态，建议开启新对话继续。", true
 	case !result.NewSessionRecommended:
 		return "", "", false
 	case result.CriticalWaterReached:
@@ -257,11 +255,10 @@ func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string
 	if sess == nil {
 		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}
 	}
-	log.InfofCtx(ctx, "[qa] loaded session %s: recent=%d state=%d chars compactedThrough=%d",
-		sessionID, len(sess.Messages), len([]rune(sess.SessionState)), sess.CompactedThroughTurn)
+	log.InfofCtx(ctx, "[qa] loaded session %s: recent=%d compactedThrough=%d",
+		sessionID, len(sess.Messages), sess.CompactedThroughTurn)
 	return agent.ConversationContext{
-		SessionID: sessionID, SessionState: sess.SessionState,
-		CompactedThroughTurn: sess.CompactedThroughTurn, Recent: sess.Messages,
+		SessionID: sessionID, CompactedThroughTurn: sess.CompactedThroughTurn, Recent: sess.Messages,
 	}
 }
 

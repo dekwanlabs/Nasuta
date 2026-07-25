@@ -8,6 +8,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 const (
@@ -73,6 +74,8 @@ func compressTurnDetail(turnNumber int, messages []llm.Message) (json.RawMessage
 			results: max(160, budgets.results*3/4), answer: max(100, budgets.answer*3/4),
 		}
 	}
+	value, _ := json.Marshal(buildArchivedTurnDetail(turnNumber, messages, budgets))
+	log.Errorf("Failed to compress turn %v", string(value))
 	return nil, fmt.Errorf("archived turn %d exceeds %d tokens after bounded compression", turnNumber, turnDetailTokenLimit)
 }
 

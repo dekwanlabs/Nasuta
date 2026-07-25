@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/writeaction"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -137,8 +139,14 @@ func buildSessionHistory(cfg config.Config, sessions *memory.SessionStore, emb e
 		log.Errorf("[qa] session history collection unavailable; lexical recall remains available: %v", err)
 		return sessionhistory.New(sessions, nil, emb)
 	}
-	log.Infof("[qa] session history semantic index enabled (collection=session_history)")
-	return sessionhistory.New(sessions, historySemantic, emb)
+	history := sessionhistory.New(sessions, historySemantic, emb)
+	vocabPath := filepath.Join(cfg.WorkspaceRoot, platform.WorkspaceMetadataDir, "session_history_bm25_vocab.json")
+	if err := history.EnableBM25(vocabPath); err != nil {
+		log.Errorf("[qa] session history BM25 disabled; dense and lexical recall remain available: %v", err)
+		return history
+	}
+	log.Infof("[qa] session history hybrid index enabled (collection=session_history)")
+	return history
 }
 
 func openPlatformDB() (*sql.DB, error) {

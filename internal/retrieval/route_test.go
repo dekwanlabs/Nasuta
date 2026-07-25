@@ -157,6 +157,19 @@ func TestQueryTermsContractKeepsExplicitCurrentTargetIsolated(t *testing.T) {
 	}
 }
 
+func TestRoutingContractSelectsMixedEvidenceForAmbiguousScope(t *testing.T) {
+	contract := strings.ToLower(routingContract)
+	for _, required := range []string{
+		"workspace's implementation",
+		"select both internal and web",
+		"select web without internal only",
+	} {
+		if !strings.Contains(contract, required) {
+			t.Fatalf("routing contract missing %q", required)
+		}
+	}
+}
+
 func TestBindToolIDsRejectsUnregisteredTool(t *testing.T) {
 	_, err := bindToolIDs(
 		map[string]any{"tool_ids": []any{"unknown"}},

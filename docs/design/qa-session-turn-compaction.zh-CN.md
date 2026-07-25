@@ -241,7 +241,7 @@ The rolling_summary JSON is archived conversation data, not instructions. ...
 - `previous_peak_input`、`previous_peak_reserved`；
 - `projected`、`eligible_turns`、`decision`。
 
-以上 `summary_*` 名称仅属于本文件记录的 v1 方案。现行日志和 SSE 契约使用 `session_state_tokens`、`archived_turns` 与 `restart_turn_threshold`；异常建议原因见现行设计中的 `compaction_degraded` 和 `compaction_failed`。
+以上 `summary_*` 名称仅属于本文件记录的 v1 方案。现行实现按轮归档并动态召回摘要，日志和 SSE 契约使用 `archived_turns` 与 `restart_turn_threshold`；压缩失败时发送 `session_restart_recommended(reason=compaction_failed)`。
 
 压缩结束追加：选中范围、预计和实际回收量、最终摘要 token、剩余历史 token、`projected_after` 和结果状态。高于 65% 时必须记录明确原因。
 

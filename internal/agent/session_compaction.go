@@ -44,7 +44,6 @@ type SessionCompactionResult struct {
 	RestartTurnThreshold  int
 	CriticalWaterReached  bool
 	NewSessionRecommended bool
-	StateFallback         bool
 }
 
 // CompactSessionIfNeeded compresses one oldest-first batch only at the high water mark.
@@ -59,9 +58,8 @@ func CompactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 	if err != nil {
 		return result, fmt.Errorf("measure session context %q: %w", sessionID, err)
 	}
-	stateTokens := stats.SessionStateTokens
 	incomingTokens := tooloutput.EstimateTokens(incomingText)
-	historyTokens := stateTokens + stats.UncompactedTokens
+	historyTokens := stats.UncompactedTokens
 	observedOverhead := max(0, usage.PreviousPeakInputTokens-historyTokens)
 	observedOutputReserve := max(0, usage.PreviousPeakReservedTokens-usage.PreviousPeakInputTokens)
 	outputReserve := max(usage.OutputReserveTokens, observedOutputReserve)
@@ -83,9 +81,9 @@ func CompactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 	if projectedBefore >= highWater {
 		decision = "high_water_reached"
 	}
-	log.InfofCtx(ctx, "[qa] compaction decision session=%s window=%d high=%d low=%d critical=%d selection_target=%d history_tokens=%d session_state_tokens=%d archived_summary_tokens=%d archived_turns=%d restart_turn_threshold=%d uncompacted_tokens=%d incoming_tokens=%d previous_peak_input=%d previous_peak_reserved=%d output_reserve=%d observed_overhead=%d projected=%d eligible_turns=%d new_session_recommended=%t decision=%s",
+	log.InfofCtx(ctx, "[qa] compaction decision session=%s window=%d high=%d low=%d critical=%d selection_target=%d history_tokens=%d archived_summary_tokens=%d archived_turns=%d restart_turn_threshold=%d uncompacted_tokens=%d incoming_tokens=%d previous_peak_input=%d previous_peak_reserved=%d output_reserve=%d observed_overhead=%d projected=%d eligible_turns=%d new_session_recommended=%t decision=%s",
 		sessionID, usage.ContextWindow, highWater, lowWater, criticalWater, selectionTarget,
-		historyTokens, stateTokens, stats.ArchivedSummaryTokens, result.ArchivedTurnCount, result.RestartTurnThreshold,
+		historyTokens, stats.ArchivedSummaryTokens, result.ArchivedTurnCount, result.RestartTurnThreshold,
 		stats.UncompactedTokens, incomingTokens,
 		usage.PreviousPeakInputTokens, usage.PreviousPeakReservedTokens,
 		outputReserve, observedOverhead, projectedBefore, eligibleTurns,
@@ -147,33 +145,15 @@ func CompactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 		records[i].SummaryTokens = tooloutput.EstimateTokens(summary)
 	}
 	summaryDuration := time.Since(summaryStarted)
-	stateStarted := time.Now()
-	stateBudget := min(int(float64(usage.ContextWindow)*0.04), 8192)
-	stateJSON, stateErr := generateSessionState(ctx, client, candidate.PreviousState, candidate.PreviousThrough, records, stateBudget)
-	if stateErr != nil {
-		if ctx.Err() != nil {
-			return result, fmt.Errorf("build session %q state: %w", sessionID, stateErr)
-		}
-		stateJSON, err = fallbackSessionState(candidate.PreviousState, candidate.PreviousThrough, candidate.ToTurn, stateBudget)
-		if err != nil {
-			return result, fmt.Errorf("build session %q fallback state after generation failed (%v): %w",
-				sessionID, stateErr, err)
-		}
-		result.StateFallback = true
-		log.WarnfCtx(ctx, "[qa] session state generation failed; applying bounded fallback session=%s turns=%d-%d error=%v",
-			sessionID, candidate.FromTurn, candidate.ToTurn, stateErr)
-	}
 	if len(histories) > 0 && histories[0] != nil {
 		histories[0].PrepareRecords(records)
 	}
-	stateDuration := time.Since(stateStarted)
 	remainingTokens := max(0, stats.UncompactedTokens-removedTokens)
-	finalStateTokens := tooloutput.EstimateTokens(stateJSON)
-	projectedAfter := finalStateTokens + remainingTokens + incomingTokens + observedOverhead + outputReserve
+	projectedAfter := remainingTokens + incomingTokens + observedOverhead + outputReserve
 	result.ProjectedAfterTokens = projectedAfter
 
 	applyStarted := time.Now()
-	applied, err := sessions.ApplyCompaction(*candidate, records, stateJSON, finalStateTokens)
+	applied, err := sessions.ApplyCompaction(*candidate, records)
 	if err != nil {
 		return result, fmt.Errorf("apply session compaction %q: %w", sessionID, err)
 	}
@@ -184,9 +164,9 @@ func CompactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 	result.References = refs
 	result.ArchivedTurnCount = candidate.ToTurn
 	result.CriticalWaterReached = applied && projectedAfter >= criticalWater
-	result.NewSessionRecommended = applied && (result.StateFallback || shouldRecommendNewSession(
+	result.NewSessionRecommended = applied && shouldRecommendNewSession(
 		projectedAfter, criticalWater, result.ArchivedTurnCount, result.RestartTurnThreshold,
-	))
+	)
 	applyDuration := time.Since(applyStarted)
 	status := "stale"
 	if applied {
@@ -195,18 +175,13 @@ func CompactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 			status = "above_low_water"
 		}
 	}
-	stateMode := "generated"
-	if result.StateFallback {
-		stateMode = "fallback"
-	}
-	log.InfofCtx(ctx, "[qa] compaction result session=%s turns=%d-%d eligible_through=%d estimated_reclaimed=%d removed_tokens=%d session_state_tokens=%d state_mode=%s archived_turns=%d remaining_tokens=%d projected_before=%d projected_after=%d low=%d critical=%d new_session_recommended=%t total_ms=%d prepare_ms=%d archive_ms=%d summarize_ms=%d state_ms=%d apply_ms=%d status=%s",
+	log.InfofCtx(ctx, "[qa] compaction result session=%s turns=%d-%d eligible_through=%d estimated_reclaimed=%d removed_tokens=%d archived_turns=%d remaining_tokens=%d projected_before=%d projected_after=%d low=%d critical=%d new_session_recommended=%t total_ms=%d prepare_ms=%d archive_ms=%d summarize_ms=%d apply_ms=%d status=%s",
 		sessionID, candidate.FromTurn, candidate.ToTurn, candidate.EligibleThrough,
-		candidate.EstimatedReclaimedTokens, removedTokens, finalStateTokens, stateMode,
-		result.ArchivedTurnCount, remainingTokens, projectedBefore, projectedAfter,
+		candidate.EstimatedReclaimedTokens, removedTokens, result.ArchivedTurnCount,
+		remainingTokens, projectedBefore, projectedAfter,
 		lowWater, criticalWater, result.NewSessionRecommended,
 		time.Since(compactionStarted).Milliseconds(), prepareDuration.Milliseconds(),
-		archiveDuration.Milliseconds(), summaryDuration.Milliseconds(), stateDuration.Milliseconds(),
-		applyDuration.Milliseconds(), status)
+		archiveDuration.Milliseconds(), summaryDuration.Milliseconds(), applyDuration.Milliseconds(), status)
 	if applied && projectedAfter > lowWater {
 		reason := "summary_estimate_exceeded_target"
 		if candidate.ToTurn == candidate.EligibleThrough {

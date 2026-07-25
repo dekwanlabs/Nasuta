@@ -1,5 +1,5 @@
--- Replace the unbounded rolling summary with bounded session state and
--- rebuildable per-turn history indexes. This intentionally resets old
+-- Replace the unbounded rolling summary with rebuildable per-turn history
+-- indexes. This intentionally resets old
 -- compaction snapshots; raw qa_messages and qa_turns remain authoritative.
 
 DELETE FROM qa_turn_contexts;
@@ -10,9 +10,7 @@ SET summary = NULL,
 
 ALTER TABLE qa_sessions
   DROP COLUMN summary,
-  ADD COLUMN session_state JSON NULL AFTER title,
-  ADD COLUMN session_state_tokens INT NOT NULL DEFAULT 0 AFTER session_state,
-  ADD COLUMN archived_summary_tokens BIGINT NOT NULL DEFAULT 0 AFTER session_state_tokens;
+  ADD COLUMN archived_summary_tokens BIGINT NOT NULL DEFAULT 0 AFTER title;
 
 ALTER TABLE qa_turn_contexts
   ADD COLUMN summary_tokens INT NOT NULL DEFAULT 0 AFTER summary_text;

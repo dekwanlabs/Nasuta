@@ -15,7 +15,13 @@ import (
 )
 
 func TestGenerateTurnCompactionSummariesBatchesLargeRanges(t *testing.T) {
+	recordCount := turnSummaryBatchSize*2 + 1
+	batchCount := (recordCount + turnSummaryBatchSize - 1) / turnSummaryBatchSize
+	expectedPeak := int32(min(batchCount, turnSummaryBatchWorkers))
 	var calls atomic.Int32
+	var inFlight atomic.Int32
+	var peakInFlight atomic.Int32
+	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Messages  []llm.Message `json:"messages"`
@@ -25,7 +31,18 @@ func TestGenerateTurnCompactionSummariesBatchesLargeRanges(t *testing.T) {
 			t.Errorf("decode request: %v", err)
 			return
 		}
-		calls.Add(1)
+		current := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			peak := peakInFlight.Load()
+			if current <= peak || peakInFlight.CompareAndSwap(peak, current) {
+				break
+			}
+		}
+		if calls.Add(1) == expectedPeak {
+			close(release)
+		}
+		<-release
 		if request.MaxTokens != turnSummaryBatchMaxTokens {
 			t.Errorf("max tokens = %d, want %d", request.MaxTokens, turnSummaryBatchMaxTokens)
 		}
@@ -40,6 +57,9 @@ func TestGenerateTurnCompactionSummariesBatchesLargeRanges(t *testing.T) {
 		if err := json.Unmarshal([]byte(payload), &input); err != nil {
 			t.Errorf("decode summary input: %v", err)
 			return
+		}
+		if len(input) > turnSummaryBatchSize {
+			t.Errorf("summary batch contains %d turns, limit %d", len(input), turnSummaryBatchSize)
 		}
 		items := make([]map[string]any, 0, len(input))
 		for _, item := range input {
@@ -56,7 +76,7 @@ func TestGenerateTurnCompactionSummariesBatchesLargeRanges(t *testing.T) {
 	}))
 	defer server.Close()
 
-	records := make([]memory.TurnContextRecord, turnSummaryBatchSize*2+1)
+	records := make([]memory.TurnContextRecord, recordCount)
 	for i := range records {
 		records[i] = memory.TurnContextRecord{
 			Ref: "cmp-" + string(rune('a'+i)), TurnNumber: i + 1,
@@ -68,8 +88,11 @@ func TestGenerateTurnCompactionSummariesBatchesLargeRanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 3 || len(summaries) != len(records) {
+	if calls.Load() != int32(batchCount) || len(summaries) != len(records) {
 		t.Fatalf("calls = %d, summaries = %d", calls.Load(), len(summaries))
+	}
+	if peakInFlight.Load() != expectedPeak {
+		t.Fatalf("peak concurrent batches = %d, want %d", peakInFlight.Load(), expectedPeak)
 	}
 }
 
@@ -127,93 +150,5 @@ func TestParseTurnSummariesBoundsModelTextLocally(t *testing.T) {
 	}
 	if tokens := tooloutput.EstimateTokens(got["cmp-1"]); tokens > turnSummaryTokenLimit {
 		t.Fatalf("bounded summary uses %d tokens, limit %d", tokens, turnSummaryTokenLimit)
-	}
-}
-
-func TestGenerateSessionStateProducesBoundedCanonicalJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request struct {
-			MaxTokens int `json:"max_tokens"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Errorf("decode request: %v", err)
-			return
-		}
-		if request.MaxTokens != 5120 {
-			t.Errorf("max tokens = %d, want 5120", request.MaxTokens)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": `{"version":2,"updatedThroughTurn":2,"goals":[{"text":"ship history recall","refs":["cmp-new"]}],"constraints":[],"decisions":[],"activeEntities":["session_history"],"openItems":[]}`}}}})
-	}))
-	defer server.Close()
-	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 100, server.Client())
-	previous := `{"version":2,"updatedThroughTurn":1,"goals":[{"text":"old goal","refs":["cmp-old"]}],"constraints":[],"decisions":[],"activeEntities":[],"openItems":[]}`
-	got, err := generateSessionState(t.Context(), client, previous, 1, []memory.TurnContextRecord{
-		{Ref: "cmp-new", TurnNumber: 2, SummaryText: "new finding"},
-	}, 5120)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var state sessionState
-	if err := json.Unmarshal([]byte(got), &state); err != nil {
-		t.Fatal(err)
-	}
-	if state.UpdatedThroughTurn != 2 || len(state.Goals) != 1 || state.Goals[0].Refs[0] != "cmp-new" {
-		t.Fatalf("state = %+v", state)
-	}
-	if strings.Contains(got, "instruction") {
-		t.Fatalf("behavior instruction leaked into stored JSON: %s", got)
-	}
-}
-
-func TestCanonicalizeSessionStateBoundsModelOutput(t *testing.T) {
-	items := make([]sessionStateItem, sessionStateCategoryLimit+2)
-	for i := range items {
-		items[i] = sessionStateItem{Text: strings.Repeat("detail ", 100), Refs: []string{" cmp-1 ", "cmp-2", "cmp-3", "cmp-4"}}
-	}
-	state := sessionState{Goals: items, Constraints: items, Decisions: items, OpenItems: items,
-		ActiveEntities: make([]string, sessionStateEntityLimit+2)}
-	canonicalizeSessionState(&state)
-	if len(state.Goals) != sessionStateGoalLimit || len(state.Constraints) != sessionStateCategoryLimit ||
-		len(state.Decisions) != sessionStateCategoryLimit || len(state.OpenItems) != sessionStateCategoryLimit ||
-		len(state.ActiveEntities) != sessionStateEntityLimit {
-		t.Fatalf("state was not bounded: %+v", state)
-	}
-	if tooloutput.EstimateTokens(state.Goals[0].Text) > sessionStateTextTokenLimit ||
-		len(state.Goals[0].Refs) != 3 || state.Goals[0].Refs[0] != "cmp-1" {
-		t.Fatalf("item was not canonicalized: %+v", state.Goals[0])
-	}
-}
-
-func TestFallbackSessionStateAdvancesBoundaryAndPreservesState(t *testing.T) {
-	previous := `{"version":2,"updatedThroughTurn":4,"goals":[{"text":"goal","refs":["cmp-old"]}],"constraints":[],"decisions":[],"activeEntities":["service"],"openItems":[]}`
-	got, err := fallbackSessionState(previous, 4, 24, 512)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var state sessionState
-	if err := json.Unmarshal([]byte(got), &state); err != nil {
-		t.Fatal(err)
-	}
-	if state.UpdatedThroughTurn != 24 || len(state.Goals) != 1 || state.Goals[0].Text != "goal" {
-		t.Fatalf("fallback state = %+v", state)
-	}
-
-	empty, err := fallbackSessionState("", 0, 24, 512)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(empty, "null") {
-		t.Fatalf("empty fallback must use canonical arrays: %s", empty)
-	}
-
-	reset, err := fallbackSessionState(previous, 4, 24, tooloutput.EstimateTokens(empty))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(reset), &state); err != nil {
-		t.Fatal(err)
-	}
-	if len(state.Goals) != 0 {
-		t.Fatalf("over-budget previous state was retained: %+v", state)
 	}
 }

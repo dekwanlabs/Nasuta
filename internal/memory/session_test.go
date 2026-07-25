@@ -17,7 +17,7 @@ func TestGetRecentSessionQueriesOnlyRequestedTail(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sessionRow(now, "state", 0, 3))
+		WillReturnRows(sessionRow(now, 0, 3))
 	mock.ExpectQuery(`SELECT m\.role, m\.content.*ORDER BY m\.seq DESC LIMIT \?`).
 		WithArgs("session-1", int64(42), 6).
 		WillReturnRows(sqlmock.NewRows([]string{"role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
@@ -108,7 +108,7 @@ func TestGetRecentSessionRestoresStructuredToolMessages(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sessionRow(now, "state", 0, 1))
+		WillReturnRows(sessionRow(now, 0, 1))
 	mock.ExpectQuery(`SELECT m\.role, m\.content.*ORDER BY m\.seq DESC LIMIT \?`).
 		WithArgs("session-1", int64(42), 2).
 		WillReturnRows(sqlmock.NewRows([]string{"role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
@@ -204,7 +204,7 @@ func TestGetContextSessionLoadsOnlyTurnsAfterCompaction(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sessionRow(now, "state", 4, 6))
+		WillReturnRows(sessionRow(now, 4, 6))
 	mock.ExpectQuery(`SELECT m\.role.*m\.turn_no>\?.*ORDER BY m\.seq LIMIT \?`).
 		WithArgs("session-1", int64(42), 4, maxContextSessionMessages+1).
 		WillReturnRows(sqlmock.NewRows([]string{"role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
@@ -226,7 +226,7 @@ func TestGetContextSessionLoadsOnlyTurnsAfterCompaction(t *testing.T) {
 func TestSessionContextStatsTreatsNewSessionAsEmpty(t *testing.T) {
 	store, mock, closeDB := newMockSessionStore(t)
 	defer closeDB()
-	mock.ExpectQuery(`SELECT COALESCE\(CAST\(s\.session_state AS CHAR\),''\),s\.session_state_tokens`).
+	mock.ExpectQuery(`SELECT s\.archived_summary_tokens,s\.compacted_through_turn`).
 		WithArgs("new-session", int64(42)).
 		WillReturnError(sql.ErrNoRows)
 
@@ -257,7 +257,7 @@ func TestApplyCompactionRejectsStaleBoundary(t *testing.T) {
 		{Ref: "cmp-4", SessionID: "session-1", UserID: 42, TurnNumber: 4, DetailJSON: []byte(`{"turn":4}`)},
 		{Ref: "cmp-5", SessionID: "session-1", UserID: 42, TurnNumber: 5, DetailJSON: []byte(`{"turn":5}`)},
 		{Ref: "cmp-6", SessionID: "session-1", UserID: 42, TurnNumber: 6, DetailJSON: []byte(`{"turn":6}`)},
-	}, `{"version":2}`, 10)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,8 +275,8 @@ func TestPrepareCompactionReadsOnlyNewTurnsAndKeepsThree(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "session_state", "session_state_tokens", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
-			AddRow("session-1", 42, "title", `{"version":2,"updatedThroughTurn":2}`, 10, 20, 2, now, now, 6))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", 20, 2, now, now, 6))
 	mock.ExpectQuery(`SELECT t\.turn_no,t\.token_estimate.*t\.turn_no BETWEEN \? AND \?.*ORDER BY t\.turn_no`).
 		WithArgs("session-1", int64(42), 3, 3).
 		WillReturnRows(sqlmock.NewRows([]string{"turn_no", "token_estimate"}).AddRow(3, 120))
@@ -295,7 +295,7 @@ func TestPrepareCompactionReadsOnlyNewTurnsAndKeepsThree(t *testing.T) {
 	if candidate.FromTurn != 3 || candidate.ToTurn != 3 || candidate.PreviousThrough != 2 {
 		t.Fatalf("candidate = %#v", candidate)
 	}
-	if len(candidate.Turns) != 1 || candidate.Turns[0].SourceTokens != 120 || len(candidate.Turns[0].Messages) != 2 || candidate.PreviousState == "" {
+	if len(candidate.Turns) != 1 || candidate.Turns[0].SourceTokens != 120 || len(candidate.Turns[0].Messages) != 2 {
 		t.Fatalf("candidate content = %#v", candidate)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -309,7 +309,7 @@ func TestPrepareCompactionSelectsOldestBatchToReductionTarget(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sessionRow(now, "", 0, 7))
+		WillReturnRows(sessionRow(now, 0, 7))
 	mock.ExpectQuery(`SELECT t\.turn_no,t\.token_estimate.*t\.turn_no BETWEEN \? AND \?.*ORDER BY t\.turn_no`).
 		WithArgs("session-1", int64(42), 1, 4).
 		WillReturnRows(sqlmock.NewRows([]string{"turn_no", "token_estimate"}).
@@ -346,8 +346,8 @@ func TestPrepareCompactionReportsMissingTurnNumbers(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "session_state", "session_state_tokens", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
-			AddRow("session-1", 42, "title", "", 0, 0, 0, now, now, 4))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", 0, 0, now, now, 4))
 	mock.ExpectQuery(`SELECT t\.turn_no,t\.token_estimate.*t\.turn_no BETWEEN \? AND \?.*ORDER BY t\.turn_no`).
 		WithArgs("session-1", int64(42), 1, 3).
 		WillReturnRows(sqlmock.NewRows([]string{"turn_no", "token_estimate"}).
@@ -378,8 +378,8 @@ func TestApplyCompactionPublishesOneAtomicSnapshot(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO qa_session_history_index_outbox.*VALUES`).
 		WithArgs("cmp-3", "session-1", int64(42), nil, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec(`UPDATE qa_sessions SET session_state=\?,session_state_tokens=\?,`).
-		WithArgs(`{"version":2,"updatedThroughTurn":3}`, 8, int64(3), 3, sqlmock.AnyArg(), "session-1", int64(42)).
+	mock.ExpectExec(`UPDATE qa_sessions SET archived_summary_tokens=archived_summary_tokens\+\?,compacted_through_turn=\?,updated_at=\?`).
+		WithArgs(int64(3), 3, sqlmock.AnyArg(), "session-1", int64(42)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -389,7 +389,7 @@ func TestApplyCompactionPublishesOneAtomicSnapshot(t *testing.T) {
 	}, []TurnContextRecord{{
 		Ref: "cmp-3", SessionID: "session-1", UserID: 42, RunID: "run-3",
 		TurnNumber: 3, DetailJSON: []byte(`{"version":1,"turn":3}`), SummaryText: "short summary", SummaryTokens: 3, SourceTokens: 120, RetainedTokens: 30,
-	}}, `{"version":2,"updatedThroughTurn":3}`, 8)
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,8 +427,8 @@ func TestListSessionsReturnsMetadataWithoutLoadingBodies(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT s\.id, s\.title.*SELECT COUNT\(\*\).*LIMIT 50`).
 		WithArgs(int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "title", "summary", "user_id", "created_at", "updated_at", "message_count"}).
-			AddRow("session-1", "title", "summary", 42, now, now, 37))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "title", "user_id", "created_at", "updated_at", "message_count"}).
+			AddRow("session-1", "title", 42, now, now, 37))
 
 	sessions, err := store.List(42)
 	if err != nil {
@@ -532,9 +532,9 @@ func newMockSessionStore(t *testing.T) (*SessionStore, sqlmock.Sqlmock, func()) 
 	return &SessionStore{db: db}, mock, func() { db.Close() }
 }
 
-func sessionRow(now time.Time, state string, compactedThrough, latestTurn int) *sqlmock.Rows {
+func sessionRow(now time.Time, compactedThrough, latestTurn int) *sqlmock.Rows {
 	return sqlmock.NewRows([]string{
-		"id", "user_id", "title", "session_state", "session_state_tokens",
-		"archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn",
-	}).AddRow("session-1", 42, "title", state, 10, 20, compactedThrough, now, now, latestTurn)
+		"id", "user_id", "title", "archived_summary_tokens", "compacted_through_turn",
+		"created_at", "updated_at", "latest_turn",
+	}).AddRow("session-1", 42, "title", 20, compactedThrough, now, now, latestTurn)
 }

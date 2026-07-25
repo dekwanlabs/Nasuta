@@ -77,7 +77,9 @@ Sources:
 
 Rules:
 - Return no sources when the request is fully answerable from stable general knowledge or material already supplied by the user.
-- A technical topic alone does not require internal retrieval. Select internal only when the answer depends on this workspace.
+- A technical topic alone does not require internal retrieval. Select internal when the answer depends on this workspace's implementation, behavior, configuration, data flow, or other indexed facts.
+- When it is unclear whether a named system, domain, module, service, or technical term refers to this workspace or to an external/general concept, select both internal and web.
+- Select web without internal only when the request clearly concerns external or general information and does not depend on workspace-specific facts.
 - Memory never establishes the current workspace, service, configuration, or schema. Select internal for those facts even when a similar memory may exist.
 - Select memory only when the answer depends on cross-session user preferences, responsibilities, work context, or explicitly historical experience.
 - When user background and current workspace facts are both required, select memory and internal; internal supplies the current fact and memory only supplies the user perspective.

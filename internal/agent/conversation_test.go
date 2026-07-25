@@ -9,10 +9,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 )
 
-func TestBuildAgentMessagesUsesBoundedStateRecallAndRecentTail(t *testing.T) {
+func TestBuildAgentMessagesUsesRecalledHistoryAndRecentTail(t *testing.T) {
 	agent := &Agent{cfg: AgentConfig{HistoryLimit: 2}}
 	conversation := ConversationContext{
-		SessionState:         `{"version":2,"updatedThroughTurn":4,"goals":[{"text":"canonical session goal","refs":["cmp-123"]}],"constraints":[],"decisions":[],"activeEntities":[],"openItems":[]}`,
 		RetrievedHistory:     `{"version":1,"mode":"hybrid","turns":[{"ref":"cmp-124","turn":2,"summary":"recalled finding"}]}`,
 		CompactedThroughTurn: 4,
 		RolePrompt:           "## Identity\n- Role: SRE",
@@ -29,7 +28,7 @@ func TestBuildAgentMessagesUsesBoundedStateRecallAndRecentTail(t *testing.T) {
 	for _, message := range got {
 		joined += "\n" + message.Content
 	}
-	for _, want := range []string{"canonical session goal", "recalled finding", "cmp-123", `<session_state format="json">`, `<retrieved_session_history format="json">`, "get_turn", "find_turns", "## Identity\n- Role: SRE", "role instruction", "recent answer", "recent question", "current question"} {
+	for _, want := range []string{"recalled finding", "cmp-124", `<retrieved_session_history format="json">`, "get_turn", "find_turns", "## Identity\n- Role: SRE", "role instruction", "recent answer", "recent question", "current question"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("messages missing %q: %s", want, joined)
 		}
@@ -136,14 +135,20 @@ func TestAgentPromptForPlanUsesCompactWebPromptOnlyForWeb(t *testing.T) {
 	}
 }
 
-func TestBuildRouteContextIncludesBoundedSummaryWithoutChangingRetrievalPrefix(t *testing.T) {
-	retrievalPrefix := "[user]: recent"
-	got := buildRouteContext(strings.Repeat("a", 1600), retrievalPrefix)
-	if !strings.HasPrefix(got, "[summary]: ") || !strings.Contains(got, retrievalPrefix) {
-		t.Fatalf("route context = %q", got)
+func TestEvidencePlanGuidesPreRetrievalWithoutRestrictingReadTools(t *testing.T) {
+	instruction := evidencePlanInstruction(domain.EvidencePlan{Sources: domain.Web})
+	for _, want := range []string{"automatic pre-retrieval", "Other registered read capabilities remain available"} {
+		if !strings.Contains(instruction, want) {
+			t.Fatalf("evidence plan instruction missing %q: %s", want, instruction)
+		}
 	}
-	if len([]rune(got)) != len([]rune("[summary]: "))+1500+1+len([]rune(retrievalPrefix)) {
-		t.Fatalf("route context was not bounded: %d", len([]rune(got)))
+	for _, forbidden := range []string{"Use only the selected evidence capabilities", "using only fetched web evidence", "selected evidence plan allows internal tools"} {
+		if strings.Contains(instruction, forbidden) || strings.Contains(webAgentSystemPrompt, forbidden) {
+			t.Fatalf("evidence prompt still imposes hard source restriction %q", forbidden)
+		}
+	}
+	if !strings.Contains(webAgentSystemPrompt, "another registered read capability") {
+		t.Fatal("web prompt does not preserve access to registered read capabilities")
 	}
 }
 
