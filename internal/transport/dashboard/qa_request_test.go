@@ -1,10 +1,13 @@
 package dashboard
 
 import (
+	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
@@ -29,6 +32,38 @@ func TestCompactionRestartRecommendation(t *testing.T) {
 				t.Fatalf("reason=%q message=%q recommend=%t", reason, message, recommend)
 			}
 		})
+	}
+}
+
+func TestEmitCompactionFailureRecommendation(t *testing.T) {
+	handler := &Handler{platform: &config.PlatformSettings{LLMContextWindow: 128000}}
+	result := agent.SessionCompactionResult{
+		ArchivedTurnCount:     24,
+		RestartTurnThreshold:  209,
+		ProjectedBeforeTokens: 176070,
+	}
+	var event, data string
+	handler.emitSessionRestartRecommendation(context.Background(), func(gotEvent, gotData string) {
+		event, data = gotEvent, gotData
+	}, "qa-session", result, true)
+	if event != "session_restart_recommended" {
+		t.Fatalf("event = %q", event)
+	}
+	var payload struct {
+		Text                 string `json:"text"`
+		Reason               string `json:"reason"`
+		ArchivedTurns        int    `json:"archived_turns"`
+		RestartTurnThreshold int    `json:"restart_turn_threshold"`
+		ProjectedTokens      int    `json:"projected_tokens"`
+		ContextWindow        int    `json:"context_window"`
+	}
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.Reason != "compaction_failed" || payload.Text == "" ||
+		payload.ArchivedTurns != 24 || payload.RestartTurnThreshold != 209 ||
+		payload.ProjectedTokens != 176070 || payload.ContextWindow != 128000 {
+		t.Fatalf("payload = %+v", payload)
 	}
 }
 
