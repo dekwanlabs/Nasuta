@@ -156,23 +156,23 @@ func TestRunStoreUsageSummaryUsesSessionAggregateAndLatestRound(t *testing.T) {
 	}
 }
 
-func TestRunStoreLatestContextTokensUsesReservedPeak(t *testing.T) {
+func TestRunStoreLatestContextUsageReturnsBothPeaks(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
 	store := &RunStore{db: db}
-	mock.ExpectQuery(`SELECT GREATEST\(peak_input_tokens,peak_reserved_tokens\).*ORDER BY started_at DESC,id DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT peak_input_tokens,peak_reserved_tokens.*ORDER BY started_at DESC,id DESC LIMIT 1`).
 		WithArgs(int64(7), "session-1").
-		WillReturnRows(sqlmock.NewRows([]string{"context_tokens"}).AddRow(118000))
+		WillReturnRows(sqlmock.NewRows([]string{"peak_input_tokens", "peak_reserved_tokens"}).AddRow(86000, 118000))
 
-	tokens, err := store.LatestContextTokens(7, "session-1")
+	usage, err := store.LatestContextUsage(7, "session-1")
 	if err != nil {
-		t.Fatalf("LatestContextTokens: %v", err)
+		t.Fatalf("LatestContextUsage: %v", err)
 	}
-	if tokens != 118000 {
-		t.Fatalf("tokens = %d, want 118000", tokens)
+	if usage.PeakInputTokens != 86000 || usage.PeakReservedTokens != 118000 {
+		t.Fatalf("usage = %+v", usage)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

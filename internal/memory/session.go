@@ -32,13 +32,30 @@ type SessionRecord struct {
 
 // CompactionCandidate is one contiguous, not-yet-summarized turn range.
 type CompactionCandidate struct {
-	SessionID       string
-	UserID          int64
-	PreviousSummary string
-	PreviousThrough int
-	FromTurn        int
-	ToTurn          int
-	Turns           []TurnCompactionCandidate
+	SessionID                string
+	UserID                   int64
+	PreviousSummary          string
+	PreviousThrough          int
+	FromTurn                 int
+	ToTurn                   int
+	EligibleThrough          int
+	EstimatedReclaimedTokens int
+	Turns                    []TurnCompactionCandidate
+}
+
+// SessionContextStats is the bounded persisted footprint used for compaction decisions.
+type SessionContextStats struct {
+	SummaryJSON          string
+	UncompactedTokens    int
+	CompactedThroughTurn int
+	LatestTurn           int
+}
+
+// CompactionSelection describes one oldest-first batch target.
+type CompactionSelection struct {
+	KeepRecentTurns       int
+	TargetReductionTokens int
+	SummaryItemTokens     int
 }
 
 // TurnCompactionCandidate keeps one logical turn intact before compression.
@@ -51,15 +68,15 @@ type TurnCompactionCandidate struct {
 
 // TurnContextRecord is the bounded detail exposed by one stable reference.
 type TurnContextRecord struct {
-	Ref            string `json:"ref"`
-	SessionID      string `json:"sessionId"`
-	UserID         int64  `json:"userId,string"`
-	RunID          string `json:"-"`
-	Text           string `json:"text"`
-	TurnNumber     int    `json:"turnNumber"`
-	SummaryText    string `json:"-"`
-	SourceTokens   int    `json:"-"`
-	RetainedTokens int    `json:"-"`
+	Ref            string          `json:"ref"`
+	SessionID      string          `json:"sessionId"`
+	UserID         int64           `json:"userId,string"`
+	RunID          string          `json:"-"`
+	DetailJSON     json.RawMessage `json:"detail"`
+	TurnNumber     int             `json:"turnNumber"`
+	SummaryText    string          `json:"-"`
+	SourceTokens   int             `json:"-"`
+	RetainedTokens int             `json:"-"`
 }
 
 // MessagePage is one reverse-cursor page returned in chronological order.
@@ -81,7 +98,7 @@ func NewSessionStore(db *sql.DB) *SessionStore {
 
 func (ss *SessionStore) List(userID int64) ([]SessionRecord, error) {
 	rows, err := ss.db.Query(
-		`SELECT s.id, s.title, COALESCE(s.summary,''), COALESCE(s.user_id,0), s.created_at, s.updated_at,
+		`SELECT s.id, s.title, COALESCE(CAST(s.summary AS CHAR),''), COALESCE(s.user_id,0), s.created_at, s.updated_at,
 		        (SELECT COUNT(*) FROM qa_messages m WHERE m.session_id = s.id)
 		 FROM qa_sessions s WHERE s.user_id = ? ORDER BY s.updated_at DESC LIMIT 50`,
 		userID)
@@ -126,15 +143,15 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 	}
 	if exists {
 		if _, err := tx.Exec(
-			`UPDATE qa_sessions SET title=?,summary=?,compacted_through_turn=0,updated_at=? WHERE id=? AND user_id=?`,
-			r.Title, r.Summary, store.DatabaseTime(r.UpdatedAt), r.ID, r.UserID,
+			`UPDATE qa_sessions SET title=?,summary=NULL,compacted_through_turn=0,updated_at=? WHERE id=? AND user_id=?`,
+			r.Title, store.DatabaseTime(r.UpdatedAt), r.ID, r.UserID,
 		); err != nil {
 			return err
 		}
 	} else {
 		if _, err := tx.Exec(
 			`INSERT INTO qa_sessions(id,user_id,title,summary,compacted_through_turn,created_at,updated_at) VALUES(?,?,?,?,0,?,?)`,
-			r.ID, r.UserID, r.Title, r.Summary,
+			r.ID, r.UserID, r.Title, nil,
 			store.DatabaseTime(r.CreatedAt), store.DatabaseTime(r.UpdatedAt),
 		); err != nil {
 			return err
@@ -205,7 +222,7 @@ func (ss *SessionStore) Delete(id string, userID int64) (bool, error) {
 
 func (ss *SessionStore) getSession(id string, userID int64) (*SessionRecord, error) {
 	row := ss.db.QueryRow(
-		`SELECT s.id, s.user_id, s.title, COALESCE(s.summary,''),
+		`SELECT s.id, s.user_id, s.title, COALESCE(CAST(s.summary AS CHAR),''),
 		        s.compacted_through_turn, s.created_at, s.updated_at,
 		        COALESCE((SELECT MAX(t.turn_no) FROM qa_turns t WHERE t.session_id=s.id),0)
 		 FROM qa_sessions s WHERE s.id = ? AND s.user_id = ?`, id, userID)
@@ -491,35 +508,84 @@ func (ss *SessionStore) AppendTurn(sessionID, runID string, userID int64, msgs [
 }
 
 // SessionContextStats avoids loading message bodies for threshold checks.
-func (ss *SessionStore) SessionContextStats(sessionID string, userID int64) (tokens, compactedThrough int, err error) {
-	err = ss.db.QueryRow(
-		`SELECT COALESCE(SUM(CASE WHEN t.turn_no>s.compacted_through_turn THEN t.token_estimate ELSE 0 END),0),
-		        s.compacted_through_turn
-		 FROM qa_sessions s
-		 LEFT JOIN qa_turns t ON t.session_id=s.id
-		 WHERE s.id=? AND s.user_id=?
-		 GROUP BY s.compacted_through_turn`,
-		sessionID, userID).Scan(&tokens, &compactedThrough)
+func (ss *SessionStore) SessionContextStats(sessionID string, userID int64) (SessionContextStats, error) {
+	var stats SessionContextStats
+	err := ss.db.QueryRow(
+		`SELECT COALESCE(CAST(s.summary AS CHAR),''),s.compacted_through_turn,
+		        COALESCE((SELECT SUM(t.token_estimate) FROM qa_turns t
+		                  WHERE t.session_id=s.id AND t.turn_no>s.compacted_through_turn),0),
+		        COALESCE((SELECT MAX(t.turn_no) FROM qa_turns t WHERE t.session_id=s.id),0)
+		 FROM qa_sessions s WHERE s.id=? AND s.user_id=?`,
+		sessionID, userID).Scan(
+		&stats.SummaryJSON, &stats.CompactedThroughTurn,
+		&stats.UncompactedTokens, &stats.LatestTurn,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, nil
+		return SessionContextStats{}, nil
 	}
-	return tokens, compactedThrough, err
+	return stats, err
 }
 
 // PrepareCompaction reads only the newly eligible contiguous turn range.
-func (ss *SessionStore) PrepareCompaction(sessionID string, userID int64, keepTurns int) (*CompactionCandidate, error) {
-	if keepTurns < 1 {
+func (ss *SessionStore) PrepareCompaction(sessionID string, userID int64, selection CompactionSelection) (*CompactionCandidate, error) {
+	if selection.KeepRecentTurns < 1 {
 		return nil, fmt.Errorf("memory/session: keep turns must be positive")
+	}
+	if selection.TargetReductionTokens <= 0 {
+		return nil, fmt.Errorf("memory/session: target reduction must be positive")
 	}
 	session, err := ss.getSession(sessionID, userID)
 	if err != nil || session == nil {
 		return nil, err
 	}
-	toTurn := session.LatestTurn - keepTurns
-	if toTurn <= session.CompactedThroughTurn {
+	eligibleThrough := session.LatestTurn - selection.KeepRecentTurns
+	if eligibleThrough <= session.CompactedThroughTurn {
 		return nil, nil
 	}
 	fromTurn := session.CompactedThroughTurn + 1
+	metaRows, err := ss.db.Query(
+		`SELECT t.turn_no,t.token_estimate
+		 FROM qa_turns t JOIN qa_sessions s ON s.id=t.session_id
+		 WHERE t.session_id=? AND s.user_id=? AND t.turn_no BETWEEN ? AND ?
+		 ORDER BY t.turn_no`,
+		sessionID, userID, fromTurn, eligibleThrough)
+	if err != nil {
+		return nil, err
+	}
+	toTurn := 0
+	estimatedReclaimed := 0
+	expectedTurn := fromTurn
+	for metaRows.Next() {
+		var turnNumber, sourceTokens int
+		if err := metaRows.Scan(&turnNumber, &sourceTokens); err != nil {
+			metaRows.Close()
+			return nil, err
+		}
+		if turnNumber != expectedTurn {
+			metaRows.Close()
+			return nil, fmt.Errorf("memory/session: incomplete turn range %d-%d (missing: %d)",
+				fromTurn, eligibleThrough, expectedTurn)
+		}
+		toTurn = turnNumber
+		estimatedReclaimed += sourceTokens - selection.SummaryItemTokens
+		expectedTurn++
+		if estimatedReclaimed >= selection.TargetReductionTokens {
+			break
+		}
+	}
+	if err := metaRows.Err(); err != nil {
+		metaRows.Close()
+		return nil, err
+	}
+	metaRows.Close()
+	if toTurn == 0 {
+		return nil, fmt.Errorf("memory/session: incomplete turn range %d-%d (missing: %d)",
+			fromTurn, eligibleThrough, fromTurn)
+	}
+	if estimatedReclaimed < selection.TargetReductionTokens && toTurn < eligibleThrough {
+		return nil, fmt.Errorf("memory/session: incomplete turn range %d-%d (missing: %d)",
+			fromTurn, eligibleThrough, toTurn+1)
+	}
 	rows, err := ss.db.Query(
 		`SELECT m.turn_no,t.run_id,t.token_estimate,m.role,m.content,
 		        COALESCE(m.tool_calls_json,''),m.tool_call_id,m.tool_name
@@ -573,7 +639,8 @@ func (ss *SessionStore) PrepareCompaction(sessionID string, userID int64, keepTu
 	return &CompactionCandidate{
 		SessionID: sessionID, UserID: userID, PreviousSummary: session.Summary,
 		PreviousThrough: session.CompactedThroughTurn, FromTurn: fromTurn,
-		ToTurn: toTurn, Turns: turns,
+		ToTurn: toTurn, EligibleThrough: eligibleThrough,
+		EstimatedReclaimedTokens: estimatedReclaimed, Turns: turns,
 	}, nil
 }
 
@@ -587,6 +654,12 @@ func (ss *SessionStore) ApplyCompaction(candidate CompactionCandidate, records [
 		if record.SessionID != candidate.SessionID || record.UserID != candidate.UserID || record.TurnNumber != expectedTurn {
 			return false, fmt.Errorf("memory/session: invalid compressed record for turn %d", expectedTurn)
 		}
+		if !json.Valid(record.DetailJSON) {
+			return false, fmt.Errorf("memory/session: invalid detail JSON for turn %d", expectedTurn)
+		}
+	}
+	if !json.Valid([]byte(summary)) {
+		return false, fmt.Errorf("memory/session: invalid rolling summary JSON")
 	}
 	tx, err := ss.db.Begin()
 	if err != nil {
@@ -613,11 +686,11 @@ func (ss *SessionStore) ApplyCompaction(candidate CompactionCandidate, records [
 		placeholders[i] = "(?,?,?,?,?,?,?,?,?,?)"
 		args = append(args,
 			record.Ref, record.SessionID, record.UserID, record.RunID, record.TurnNumber,
-			record.Text, record.SummaryText, record.SourceTokens, record.RetainedTokens, now,
+			[]byte(record.DetailJSON), record.SummaryText, record.SourceTokens, record.RetainedTokens, now,
 		)
 	}
 	if _, err := tx.Exec(
-		"INSERT INTO qa_turn_contexts(ref,session_id,user_id,run_id,turn_number,text,summary_text,source_tokens,retained_tokens,created_at) VALUES "+strings.Join(placeholders, ","),
+		"INSERT INTO qa_turn_contexts(ref,session_id,user_id,run_id,turn_number,detail_json,summary_text,source_tokens,retained_tokens,created_at) VALUES "+strings.Join(placeholders, ","),
 		args...); err != nil {
 		return false, err
 	}
@@ -637,12 +710,13 @@ func (ss *SessionStore) ApplyCompaction(candidate CompactionCandidate, records [
 // GetTurnDetail resolves exactly one bounded context under the current owner.
 func (ss *SessionStore) GetTurnDetail(sessionID string, userID int64, reference string) (*TurnContextRecord, error) {
 	var record TurnContextRecord
+	var detail []byte
 	err := ss.db.QueryRow(
-		`SELECT ref,session_id,user_id,run_id,text,turn_number,summary_text,source_tokens,retained_tokens
+		`SELECT ref,session_id,user_id,run_id,detail_json,turn_number,summary_text,source_tokens,retained_tokens
 		 FROM qa_turn_contexts
 		 WHERE ref=? AND session_id=? AND user_id=?`,
 		reference, sessionID, userID).Scan(
-		&record.Ref, &record.SessionID, &record.UserID, &record.RunID, &record.Text,
+		&record.Ref, &record.SessionID, &record.UserID, &record.RunID, &detail,
 		&record.TurnNumber, &record.SummaryText, &record.SourceTokens, &record.RetainedTokens,
 	)
 	if err != nil {
@@ -651,6 +725,10 @@ func (ss *SessionStore) GetTurnDetail(sessionID string, userID int64, reference 
 		}
 		return nil, err
 	}
+	if !json.Valid(detail) {
+		return nil, fmt.Errorf("memory/session: stored turn detail %q is not valid JSON", reference)
+	}
+	record.DetailJSON = detail
 	return &record, nil
 }
 
@@ -744,7 +822,7 @@ func (ss *SessionStore) EnsureSession(id string, userID int64, title string) err
 		)
 	} else {
 		_, err = tx.Exec(
-			`INSERT INTO qa_sessions(id,user_id,title,summary,created_at,updated_at) VALUES(?,?,?,'',?,?)`,
+			`INSERT INTO qa_sessions(id,user_id,title,summary,created_at,updated_at) VALUES(?,?,?,NULL,?,?)`,
 			id, userID, title, store.DatabaseTime(now), store.DatabaseTime(now),
 		)
 	}

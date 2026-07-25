@@ -29,6 +29,17 @@ func Truncate(value string, maxTokens int) string {
 	return truncate(value, maxTokens, originalTokens)
 }
 
+// TruncateContent preserves evidence boundaries when coverage metadata is stored separately.
+func TruncateContent(value string, maxTokens int) string {
+	if maxTokens <= 0 {
+		return ""
+	}
+	if EstimateTokens(value) <= maxTokens {
+		return value
+	}
+	return truncateWithoutMarker(value, maxTokens)
+}
+
 func truncate(value string, maxTokens, originalTokens int) string {
 	if maxTokens <= 0 {
 		return ""

@@ -1201,22 +1201,28 @@ func (rs *RunStore) PeakInputTokens(id string) (int, error) {
 	return tokens, err
 }
 
-// LatestContextTokens returns the latest round's largest reserved context footprint.
-func (rs *RunStore) LatestContextTokens(userID int64, sessionID string) (int, error) {
+// ContextUsageSnapshot is the latest round's observed context footprint.
+type ContextUsageSnapshot struct {
+	PeakInputTokens    int
+	PeakReservedTokens int
+}
+
+// LatestContextUsage returns the latest round's observed input and reserved peaks.
+func (rs *RunStore) LatestContextUsage(userID int64, sessionID string) (ContextUsageSnapshot, error) {
 	if sessionID == "" {
-		return 0, nil
+		return ContextUsageSnapshot{}, nil
 	}
-	var tokens int
+	var usage ContextUsageSnapshot
 	err := rs.db.QueryRow(
-		`SELECT GREATEST(peak_input_tokens,peak_reserved_tokens)
+		`SELECT peak_input_tokens,peak_reserved_tokens
 		 FROM agent_runs WHERE user_id=? AND session_id=?
 		 ORDER BY started_at DESC,id DESC LIMIT 1`,
 		userID, sessionID,
-	).Scan(&tokens)
+	).Scan(&usage.PeakInputTokens, &usage.PeakReservedTokens)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return ContextUsageSnapshot{}, nil
 	}
-	return tokens, err
+	return usage, err
 }
 
 func (rs *RunStore) listLLMCalls(runID string, limit int) ([]LLMCallRow, error) {

@@ -130,6 +130,16 @@ func TestTruncateHonorsTinyBudgetsAndUTF8(t *testing.T) {
 	}
 }
 
+func TestTruncateContentLeavesCoverageToStructuredMetadata(t *testing.T) {
+	got := TruncateContent(strings.Repeat("evidence ", 200), 40)
+	if EstimateTokens(got) > 40 {
+		t.Fatalf("content uses %d tokens", EstimateTokens(got))
+	}
+	if strings.Contains(got, "tool output truncated") {
+		t.Fatalf("inline truncation marker leaked into structured content: %s", got)
+	}
+}
+
 func largeDeviceJSON(count, target int) string {
 	devices := make([]map[string]any, 0, count)
 	for i := 0; i < count; i++ {

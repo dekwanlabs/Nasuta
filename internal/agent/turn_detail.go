@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -16,40 +18,159 @@ const (
 	turnAnswerTokenLimit = 450
 )
 
-func compressTurnDetail(turnNumber int, messages []llm.Message) string {
-	var users, calls, results, answers strings.Builder
-	callNo, resultNo := 0, 0
+type archivedTurnDetail struct {
+	Version     int                  `json:"version"`
+	Turn        int                  `json:"turn"`
+	User        archivedText         `json:"user"`
+	ToolCalls   []archivedToolCall   `json:"toolCalls"`
+	ToolResults []archivedToolResult `json:"toolResults"`
+	Assistant   archivedText         `json:"assistant"`
+}
+
+type archivedText struct {
+	Content                 string `json:"content"`
+	Coverage                string `json:"coverage"`
+	OriginalEstimatedTokens int    `json:"originalEstimatedTokens"`
+	RetainedEstimatedTokens int    `json:"retainedEstimatedTokens"`
+}
+
+type archivedToolCall struct {
+	Name                    string          `json:"name"`
+	Arguments               json.RawMessage `json:"arguments"`
+	Coverage                string          `json:"coverage"`
+	OriginalEstimatedTokens int             `json:"originalEstimatedTokens"`
+	RetainedEstimatedTokens int             `json:"retainedEstimatedTokens"`
+}
+
+type archivedToolResult struct {
+	Name                    string          `json:"name"`
+	Content                 json.RawMessage `json:"content"`
+	Coverage                string          `json:"coverage"`
+	OriginalEstimatedTokens int             `json:"originalEstimatedTokens"`
+	RetainedEstimatedTokens int             `json:"retainedEstimatedTokens"`
+}
+
+type turnDetailBudgets struct {
+	user, calls, results, answer int
+}
+
+func compressTurnDetail(turnNumber int, messages []llm.Message) (json.RawMessage, error) {
+	budgets := turnDetailBudgets{
+		user: turnUserTokenLimit, calls: turnCallsTokenLimit,
+		results: turnResultTokenLimit, answer: turnAnswerTokenLimit,
+	}
+	for attempt := 0; attempt < 4; attempt++ {
+		detail := buildArchivedTurnDetail(turnNumber, messages, budgets)
+		raw, err := json.Marshal(detail)
+		if err != nil {
+			return nil, fmt.Errorf("marshal archived turn %d: %w", turnNumber, err)
+		}
+		if tooloutput.EstimateTokens(string(raw)) <= turnDetailTokenLimit {
+			return raw, nil
+		}
+		budgets = turnDetailBudgets{
+			user: max(80, budgets.user*3/4), calls: max(80, budgets.calls*3/4),
+			results: max(160, budgets.results*3/4), answer: max(100, budgets.answer*3/4),
+		}
+	}
+	return nil, fmt.Errorf("archived turn %d exceeds %d tokens after bounded compression", turnNumber, turnDetailTokenLimit)
+}
+
+func buildArchivedTurnDetail(turnNumber int, messages []llm.Message, budgets turnDetailBudgets) archivedTurnDetail {
+	var users, answers strings.Builder
+	toolCalls := make([]llm.ToolCall, 0)
+	toolResults := make([]llm.Message, 0)
 	for _, message := range messages {
 		switch {
 		case message.Role == "user":
 			appendSectionText(&users, message.Content)
 		case message.Role == "tool":
-			resultNo++
-			fmt.Fprintf(&results, "%d. %s\n%s\n", resultNo, message.Name, message.Content)
+			toolResults = append(toolResults, message)
 		case message.Role == "assistant" && len(message.ToolCalls) > 0:
-			for _, call := range message.ToolCalls {
-				callNo++
-				fmt.Fprintf(&calls, "%d. %s %s\n", callNo, call.Function.Name, call.Function.Arguments)
-			}
+			toolCalls = append(toolCalls, message.ToolCalls...)
 			appendSectionText(&answers, message.Content)
 		case message.Role == "assistant":
 			appendSectionText(&answers, message.Content)
 		}
 	}
 
-	userText := tooloutput.Truncate(users.String(), turnUserTokenLimit)
-	callText := tooloutput.Truncate(calls.String(), turnCallsTokenLimit)
-	resultText := tooloutput.Compress(tooloutput.Request{
-		Question: userText, Content: results.String(), MaxTokens: turnResultTokenLimit,
-	}).Content
-	answerText := tooloutput.Truncate(answers.String(), turnAnswerTokenLimit)
+	archivedCalls := make([]archivedToolCall, 0, len(toolCalls))
+	callBudget := dividedBudget(budgets.calls, len(toolCalls))
+	for _, call := range toolCalls {
+		originalTokens := tooloutput.EstimateTokens(call.Function.Arguments)
+		arguments := tooloutput.TruncateContent(call.Function.Arguments, callBudget)
+		retainedTokens := tooloutput.EstimateTokens(arguments)
+		coverage := "full"
+		if retainedTokens < originalTokens {
+			coverage = "partial"
+		}
+		archivedCalls = append(archivedCalls, archivedToolCall{
+			Name: call.Function.Name, Arguments: canonicalJSONValue(arguments), Coverage: coverage,
+			OriginalEstimatedTokens: originalTokens, RetainedEstimatedTokens: retainedTokens,
+		})
+	}
 
-	var detail strings.Builder
-	fmt.Fprintf(&detail, "TURN %d\n\nUSER\n%s", turnNumber, emptySection(userText))
-	fmt.Fprintf(&detail, "\n\nTOOL CALLS\n%s", emptySection(callText))
-	fmt.Fprintf(&detail, "\n\nTOOL RESULTS\n%s", emptySection(resultText))
-	fmt.Fprintf(&detail, "\n\nASSISTANT\n%s", emptySection(answerText))
-	return tooloutput.Truncate(detail.String(), turnDetailTokenLimit)
+	archivedResults := make([]archivedToolResult, 0, len(toolResults))
+	resultBudget := dividedBudget(budgets.results, len(toolResults))
+	question := tooloutput.TruncateContent(users.String(), budgets.user)
+	for _, result := range toolResults {
+		compressed := tooloutput.Compress(tooloutput.Request{
+			Question: question, Content: result.Content, MaxTokens: resultBudget,
+		})
+		content := compressed.Content
+		if compressed.FallbackReason != "" {
+			content = tooloutput.TruncateContent(result.Content, resultBudget)
+		}
+		coverage := compressed.ChunkCoverage
+		if coverage == "" {
+			coverage = "full"
+		}
+		archivedResults = append(archivedResults, archivedToolResult{
+			Name: result.Name, Content: canonicalJSONValue(content),
+			Coverage: coverage, OriginalEstimatedTokens: compressed.OriginalTokens,
+			RetainedEstimatedTokens: tooloutput.EstimateTokens(content),
+		})
+	}
+
+	return archivedTurnDetail{
+		Version: 1, Turn: turnNumber,
+		User:      boundedArchivedText(users.String(), budgets.user),
+		ToolCalls: archivedCalls, ToolResults: archivedResults,
+		Assistant: boundedArchivedText(answers.String(), budgets.answer),
+	}
+}
+
+func boundedArchivedText(value string, budget int) archivedText {
+	originalTokens := tooloutput.EstimateTokens(value)
+	content := tooloutput.TruncateContent(value, budget)
+	retainedTokens := tooloutput.EstimateTokens(content)
+	coverage := "full"
+	if retainedTokens < originalTokens {
+		coverage = "partial"
+	}
+	return archivedText{
+		Content: content, Coverage: coverage,
+		OriginalEstimatedTokens: originalTokens, RetainedEstimatedTokens: retainedTokens,
+	}
+}
+
+func canonicalJSONValue(value string) json.RawMessage {
+	trimmed := strings.TrimSpace(value)
+	if json.Valid([]byte(trimmed)) {
+		var compacted bytes.Buffer
+		if err := json.Compact(&compacted, []byte(trimmed)); err == nil {
+			return json.RawMessage(compacted.String())
+		}
+	}
+	raw, _ := json.Marshal(value)
+	return raw
+}
+
+func dividedBudget(total, count int) int {
+	if count <= 0 {
+		return total
+	}
+	return max(48, total/count)
 }
 
 func appendSectionText(dst *strings.Builder, value string) {
@@ -60,11 +181,4 @@ func appendSectionText(dst *strings.Builder, value string) {
 		dst.WriteByte('\n')
 	}
 	dst.WriteString(value)
-}
-
-func emptySection(value string) string {
-	if value == "" {
-		return "(none)"
-	}
-	return value
 }

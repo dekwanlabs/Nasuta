@@ -76,19 +76,28 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 	if sessionID == "" || handler.qaSessions == nil || handler.qa == nil || handler.platform == nil {
 		return handler.loadSessionContext(ctx, sessionID, userID, fallback), nil
 	}
-	latestContextTokens := 0
+	var latestUsage agent.ContextUsageSnapshot
 	if runs := handler.qa.RunStore(); runs != nil {
 		var err error
-		latestContextTokens, err = runs.LatestContextTokens(userID, sessionID)
+		latestUsage, err = runs.LatestContextUsage(userID, sessionID)
 		if err != nil {
 			return agent.ConversationContext{}, fmt.Errorf("load latest session context usage: %w", err)
 		}
 	}
+	outputReserve := max(
+		handler.platform.LLMMaxTokens,
+		max(handler.platform.LLMAnswerMaxTokens, handler.platform.LLMConclusionMaxTokens),
+	)
 	compactCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	result, err := agent.CompactSessionIfNeeded(
 		compactCtx, handler.qa.LLM(), handler.qaSessions, sessionID, userID,
-		handler.platform.LLMContextWindow, latestContextTokens, question,
+		agent.SessionCompactionUsage{
+			ContextWindow:              handler.platform.LLMContextWindow,
+			PreviousPeakInputTokens:    latestUsage.PeakInputTokens,
+			PreviousPeakReservedTokens: latestUsage.PeakReservedTokens,
+			OutputReserveTokens:        outputReserve,
+		}, question,
 		func(fromTurn, toTurn int) {
 			sseEvent("compaction", jsonStr(map[string]string{
 				"status": "start",
@@ -109,6 +118,29 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 	} else if result.Stale {
 		log.InfofCtx(ctx, "[qa] ignored stale pre-answer compaction for session %s through turn %d",
 			sessionID, result.ToTurn)
+	}
+	if result.NewSessionRecommended {
+		projectedTokens := result.ProjectedAfterTokens
+		if projectedTokens == 0 {
+			projectedTokens = result.ProjectedBeforeTokens
+		}
+		reason := "summary_history_limit"
+		message := "当前会话已积累较多压缩历史，建议开启新对话继续，以保持上下文清晰。"
+		if result.CriticalWaterReached {
+			reason = "context_critical"
+			message = "当前会话压缩后仍接近上下文上限，建议开启新对话继续，避免回答被截断。"
+		}
+		sseEvent("session_restart_recommended", jsonStr(map[string]any{
+			"text":             message,
+			"reason":           reason,
+			"summary_items":    result.SummaryItemCount,
+			"item_threshold":   result.SummaryItemThreshold,
+			"projected_tokens": projectedTokens,
+			"context_window":   handler.platform.LLMContextWindow,
+		}))
+		log.WarnfCtx(ctx, "[qa] recommended new session session=%s reason=%s projected=%d window=%d summary_items=%d item_threshold=%d",
+			sessionID, reason, projectedTokens, handler.platform.LLMContextWindow,
+			result.SummaryItemCount, result.SummaryItemThreshold)
 	}
 	return handler.loadSessionContext(ctx, sessionID, userID, fallback), nil
 }

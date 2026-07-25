@@ -68,6 +68,18 @@ func TestManagedSchemaDoesNotStoreTimesAsStrings(t *testing.T) {
 	}
 }
 
+func TestQASessionSchemaUsesJSONCompactionPayloads(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupQASession], "\n")
+	for _, required := range []string{"summary    JSON NULL", "detail_json   JSON NOT NULL"} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("QA session schema missing %q", required)
+		}
+	}
+	if strings.Contains(statements, "text          MEDIUMTEXT NOT NULL") {
+		t.Fatal("QA turn contexts still use legacy text detail storage")
+	}
+}
+
 func TestPlatformSchemaExcludesObserveTables(t *testing.T) {
 	for group, statements := range mysqlSchema {
 		for _, statement := range statements {
@@ -152,6 +164,23 @@ func TestQASessionTurnCompactionMigrationBackfillsBoundaries(t *testing.T) {
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("QA session compaction migration missing %q", required)
+		}
+	}
+}
+
+func TestQASessionCompactionJSONMigrationResetsLegacySnapshots(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_session_compaction_json.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read QA session compaction JSON migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"DELETE FROM qa_turn_contexts", "SET summary = NULL", "MODIFY COLUMN summary JSON NULL",
+		"CHANGE COLUMN text detail_json JSON NOT NULL", "DROP TABLE IF EXISTS qa_session_compactions",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("QA session compaction JSON migration missing %q", required)
 		}
 	}
 }

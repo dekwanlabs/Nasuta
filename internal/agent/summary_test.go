@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,13 +31,17 @@ func TestGenerateTurnCompactionSummariesBatchesLargeRanges(t *testing.T) {
 		if strings.Contains(user, "cmp-") {
 			t.Errorf("opaque refs leaked into summary prompt")
 		}
-		items := make([]map[string]any, 0, turnSummaryBatchSize)
-		for _, line := range strings.Split(user, "\n") {
-			if !strings.HasPrefix(line, "ITEM ") {
-				continue
-			}
-			item := strings.Fields(line)[1]
-			items = append(items, map[string]any{"item": len(items) + 1, "text": "summary " + item})
+		var input []struct {
+			Item int `json:"item"`
+		}
+		payload := user[strings.IndexByte(user, '['):]
+		if err := json.Unmarshal([]byte(payload), &input); err != nil {
+			t.Errorf("decode summary input: %v", err)
+			return
+		}
+		items := make([]map[string]any, 0, len(input))
+		for _, item := range input {
+			items = append(items, map[string]any{"item": item.Item, "text": fmt.Sprintf("summary %d", item.Item)})
 		}
 		content, err := json.Marshal(items)
 		if err != nil {
@@ -52,7 +57,8 @@ func TestGenerateTurnCompactionSummariesBatchesLargeRanges(t *testing.T) {
 	records := make([]memory.TurnContextRecord, turnSummaryBatchSize*2+1)
 	for i := range records {
 		records[i] = memory.TurnContextRecord{
-			Ref: "cmp-" + string(rune('a'+i)), TurnNumber: i + 1, Text: "turn detail",
+			Ref: "cmp-" + string(rune('a'+i)), TurnNumber: i + 1,
+			DetailJSON: []byte(fmt.Sprintf(`{"version":1,"turn":%d}`, i+1)),
 		}
 	}
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 100, server.Client())
@@ -105,17 +111,22 @@ func TestParseTurnSummariesRequiresExactItemSet(t *testing.T) {
 	}
 }
 
-func TestBuildRollingSummaryKeepsOneInstruction(t *testing.T) {
-	previous := "ref=cmp-old, text=old finding\n" + rollingSummaryInstruction
-	got := buildRollingSummary(previous, []memory.TurnContextRecord{
-		{Ref: "cmp-new", SummaryText: "new finding"},
+func TestBuildRollingSummaryProducesCanonicalJSON(t *testing.T) {
+	previous := `{"version":1,"compactedThroughTurn":1,"items":[{"turn":1,"ref":"cmp-old","summary":"old finding"}]}`
+	got, err := buildRollingSummary(previous, 1, []memory.TurnContextRecord{
+		{Ref: "cmp-new", TurnNumber: 2, SummaryText: "new finding"},
 	})
-	for _, want := range []string{"ref=cmp-old, text=old finding", "ref=cmp-new, text=new finding", rollingSummaryInstruction} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("summary missing %q: %s", want, got)
-		}
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Count(got, rollingSummaryInstructionPrefix) != 1 {
-		t.Fatalf("instruction count mismatch: %s", got)
+	var summary rollingSummary
+	if err := json.Unmarshal([]byte(got), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.CompactedThroughTurn != 2 || len(summary.Items) != 2 || summary.Items[1].Ref != "cmp-new" {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if strings.Contains(got, "instruction") {
+		t.Fatalf("behavior instruction leaked into stored JSON: %s", got)
 	}
 }

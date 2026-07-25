@@ -38,7 +38,10 @@ FROM qa_messages
 GROUP BY session_id,turn_no;
 
 UPDATE qa_sessions
-SET summary='', compacted_through_turn=0;
+SET summary=NULL, compacted_through_turn=0;
+
+ALTER TABLE qa_sessions
+  MODIFY COLUMN summary JSON NULL;
 
 CREATE TABLE IF NOT EXISTS qa_turn_contexts (
   ref             VARCHAR(64) PRIMARY KEY,
@@ -46,7 +49,7 @@ CREATE TABLE IF NOT EXISTS qa_turn_contexts (
   user_id         BIGINT NOT NULL,
   run_id          VARCHAR(64) NOT NULL DEFAULT '',
   turn_number     INT NOT NULL,
-  text            MEDIUMTEXT NOT NULL,
+  detail_json     JSON NOT NULL,
   summary_text    TEXT NOT NULL,
   source_tokens   INT NOT NULL DEFAULT 0,
   retained_tokens INT NOT NULL DEFAULT 0,

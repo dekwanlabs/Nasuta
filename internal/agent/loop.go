@@ -596,7 +596,8 @@ func (agent *Agent) buildAgentMessages(question string, conversation Conversatio
 	msgs = append(msgs, conversation.Instructions...)
 
 	if conversation.Summary != "" {
-		msgs = append(msgs, llm.Message{Role: "system", Content: "<rolling_summary>\n" + conversation.Summary + "\n</rolling_summary>"})
+		msgs = append(msgs, llm.Message{Role: "system", Content: rollingSummaryInstruction +
+			"\n<rolling_summary format=\"json\">\n" + conversation.Summary + "\n</rolling_summary>"})
 	}
 	msgs = append(msgs, replayableTailMessages(conversation.Recent, agent.cfg.HistoryLimit)...)
 
