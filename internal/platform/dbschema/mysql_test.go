@@ -33,7 +33,7 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 	}{
 		{group: GroupAuth, tables: []string{"users", "sessions", "settings"}},
 		{group: GroupDocuments, tables: []string{"documents"}},
-		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_turn_contexts"}},
+		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_turn_contexts", "qa_session_history_terms", "qa_session_history_index_outbox"}},
 		{group: GroupQARun, tables: []string{"agent_runs", "agent_steps", "agent_llm_calls"}},
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
 		{group: GroupIncident, tables: []string{"incident_records"}},
@@ -55,6 +55,24 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 	}
 }
 
+func TestQASessionHistoryRetrievalMigrationReplacesRollingSummary(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_session_history_retrieval.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read QA session history migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"DELETE FROM qa_turn_contexts", "DROP COLUMN summary", "ADD COLUMN session_state JSON",
+		"archived_summary_tokens", "summary_tokens", "qa_session_history_terms",
+		"qa_session_history_index_outbox", "compacted_through_turn = 0",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("QA session history migration missing %q", required)
+		}
+	}
+}
+
 func TestManagedSchemaDoesNotStoreTimesAsStrings(t *testing.T) {
 	for group, statements := range mysqlSchema {
 		for _, statement := range statements {
@@ -70,7 +88,7 @@ func TestManagedSchemaDoesNotStoreTimesAsStrings(t *testing.T) {
 
 func TestQASessionSchemaUsesJSONCompactionPayloads(t *testing.T) {
 	statements := strings.Join(mysqlSchema[GroupQASession], "\n")
-	for _, required := range []string{"summary    JSON NULL", "detail_json   JSON NOT NULL"} {
+	for _, required := range []string{"session_state JSON NULL", "detail_json   JSON NOT NULL", "summary_tokens INT NOT NULL"} {
 		if !strings.Contains(statements, required) {
 			t.Fatalf("QA session schema missing %q", required)
 		}
@@ -118,7 +136,7 @@ func TestMemoryLastUsedUsesDateTime(t *testing.T) {
 
 func TestQAMessageSchemaStoresToolProtocol(t *testing.T) {
 	statements := mysqlSchema[GroupQASession]
-	if len(statements) != 4 {
+	if len(statements) != 6 {
 		t.Fatalf("qa session schema statements = %d", len(statements))
 	}
 	for _, required := range []string{

@@ -79,8 +79,8 @@ func (e *CallError) Retryable() bool {
 // Sentinel errors for structured-call outcomes after retry/repair are exhausted.
 var (
 	// ErrInvalidJSON means the model output could not be parsed or validated
-	// even after programmatic repair and reprompt.
-	ErrInvalidJSON = errors.New("llm: invalid JSON after repair and reprompt")
+	// within the configured repair budget.
+	ErrInvalidJSON = errors.New("llm: invalid JSON response")
 	// ErrMaxAttempts means the call exhausted its transport retry budget.
 	ErrMaxAttempts = errors.New("llm: call exhausted retry attempts")
 )

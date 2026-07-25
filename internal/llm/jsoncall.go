@@ -45,9 +45,11 @@ func chatJSONWith(ctx context.Context, call chatCaller, system, user string, out
 			}
 			return err
 		}
-		if ok, problem := parseRepairValidate(raw, out, opts.Validate); ok {
+		ok, problem := parseRepairValidate(raw, out, opts.Validate)
+		if ok {
 			return nil
-		} else if repairs < maxRepair && attempt < maxAttempts {
+		}
+		if repairs < maxRepair && attempt < maxAttempts {
 			msgs = append(msgs,
 				Message{Role: "assistant", Content: raw},
 				Message{Role: "user", Content: repairPrompt(problem)},
@@ -55,7 +57,7 @@ func chatJSONWith(ctx context.Context, call chatCaller, system, user string, out
 			repairs++
 			continue
 		}
-		return fmt.Errorf("%w: %s", ErrInvalidJSON, truncateForErr(raw))
+		return fmt.Errorf("%w: %s; response=%s", ErrInvalidJSON, problem, truncateForErr(raw))
 	}
 	return ErrMaxAttempts
 }
@@ -86,7 +88,7 @@ func parseRepairValidate(raw string, out any, validate func(any) error) (bool, s
 	return true, ""
 }
 
-const repairPromptTemplate = "Your previous response was not valid JSON and could not be repaired: %s\n" +
+const repairPromptTemplate = "Your previous response did not satisfy the required JSON contract: %s\n" +
 	"Return ONLY a single valid JSON object matching the requested schema. " +
 	"No prose, no code fences, no comments, no trailing commas."
 

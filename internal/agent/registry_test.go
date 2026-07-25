@@ -59,10 +59,10 @@ func TestSessionTurnDetailsToolIsPrivateAndRequiresCurrentReference(t *testing.T
 	ctx := withSessionToolScope(context.Background(), ConversationContext{
 		SessionID: "session-1", CompactedThroughTurn: 1,
 	}, 42)
-	mock.ExpectQuery(`SELECT ref,session_id,user_id,run_id,detail_json,turn_number,summary_text,source_tokens,retained_tokens.*FROM qa_turn_contexts`).
+	mock.ExpectQuery(`SELECT ref,session_id,user_id,run_id,detail_json,turn_number,summary_text,summary_tokens,source_tokens,retained_tokens.*FROM qa_turn_contexts`).
 		WithArgs("cmp-current", "session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"ref", "session_id", "user_id", "run_id", "detail_json", "turn_number", "summary_text", "source_tokens", "retained_tokens"}).
-			AddRow("cmp-current", "session-1", 42, "run-1", `{"version":1,"turn":1}`, 1, "summary", 50, 10))
+		WillReturnRows(sqlmock.NewRows([]string{"ref", "session_id", "user_id", "run_id", "detail_json", "turn_number", "summary_text", "summary_tokens", "source_tokens", "retained_tokens"}).
+			AddRow("cmp-current", "session-1", 42, "run-1", `{"version":1,"turn":1}`, 1, "summary", 2, 50, 10))
 	if _, err := candidate.Handler.Execute(ctx, tool.Arguments{"ref": "cmp-current"}); err != nil {
 		t.Fatal(err)
 	}
@@ -79,15 +79,15 @@ func TestWithoutToolRemovesSessionDetailsFromRunSnapshot(t *testing.T) {
 	defer db.Close()
 	registry := NewRegistry(&Service{}, config.Config{}, memory.NewSessionStore(db))
 	snapshot := registry.Snapshot(tool.ReadPolicy())
-	if _, ok := snapshot.Get("get_session_turn_details"); !ok {
+	if _, ok := snapshot.Get("get_turn"); !ok {
 		t.Fatal("registered detail tool missing")
 	}
-	filtered := withoutTool(snapshot, "get_session_turn_details")
-	if _, ok := filtered.Get("get_session_turn_details"); ok {
+	filtered := withoutSessionHistoryTools(snapshot)
+	if _, ok := filtered.Get("get_turn"); ok {
 		t.Fatal("detail tool remained visible without a compaction reference")
 	}
 	for _, published := range snapshot.MCPTools() {
-		if published.ID == "get_session_turn_details" {
+		if published.ID == "get_turn" {
 			t.Fatal("detail tool was published over MCP")
 		}
 	}

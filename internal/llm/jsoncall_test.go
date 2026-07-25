@@ -77,6 +77,9 @@ func TestChatJSONExhaustedReturnsInvalidJSON(t *testing.T) {
 	if !errors.Is(err, ErrInvalidJSON) {
 		t.Fatalf("want ErrInvalidJSON, got %v", err)
 	}
+	if !strings.Contains(err.Error(), "malformed JSON") {
+		t.Fatalf("validation problem missing from error: %v", err)
+	}
 	if f.calls != 2 {
 		t.Fatalf("calls=%d want 2", f.calls)
 	}

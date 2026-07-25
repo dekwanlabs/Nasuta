@@ -33,6 +33,8 @@ const (
 	statusField     = "status"
 	generationField = "index_generation"
 	userIDField     = "user_id"
+	sessionIDField  = `metadata["session_id"]`
+	turnNumberField = `metadata["turn_number"]`
 	maxStringLength = 65535
 	maxSearchLimit  = 1000
 )
@@ -42,6 +44,8 @@ var filterFields = map[string]string{
 	"doc_id": documentIDField, "path": pathField, "lang": langField, "status": statusField,
 	"index_generation": generationField,
 	"user_id":          userIDField,
+	"session_id":       sessionIDField,
+	"turn_number":      turnNumberField,
 }
 
 // readConsistency forces Strong consistency so a search or query immediately
@@ -503,7 +507,7 @@ func compileFilter(filter semantic.Filter) (string, error) {
 	sort.Strings(keys)
 	for _, key := range keys {
 		field, ok := filterFields[key]
-		if !ok || field != userIDField {
+		if !ok || (field != userIDField && field != turnNumberField) {
 			return "", fmt.Errorf("milvus: unsupported integer filter %q", key)
 		}
 		values := filter.AnyInteger[key]

@@ -50,6 +50,7 @@ type Handler struct {
 	codegraphDB        *codegraph.DB
 	callChain          *callchain.Service
 	qaSessions         *memory.SessionStore
+	history            agent.SessionHistory
 	cfg                config.Config
 	platform           *config.PlatformSettings
 	idx                IndexingOps
@@ -72,11 +73,15 @@ func (handler *Handler) rolePromptFor(userID int64) string {
 }
 
 // NewHandler builds the dashboard HTTP handler.
-func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, platformDB *sql.DB, sem semantic.Store, emb embed.Embedder, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool, cgDB *codegraph.DB, chain *callchain.Service) *Handler {
+func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, platformDB *sql.DB, sem semantic.Store, emb embed.Embedder, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool, cgDB *codegraph.DB, chain *callchain.Service, histories ...agent.SessionHistory) *Handler {
 	if ps == nil {
 		ps = &config.PlatformSettings{}
 	}
 	runStore := openRunStore(platformDB)
+	var history agent.SessionHistory
+	if len(histories) > 0 {
+		history = histories[0]
+	}
 	h := &Handler{
 		db:                 db,
 		docDB:              docDB,
@@ -85,7 +90,7 @@ func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, platfo
 		semantic:           sem,
 		embedder:           emb,
 		tools:              t,
-		qa:                 agent.NewQA(agent.QADeps{Tools: t, Semantic: sem, Embedder: emb, WriteAvailable: writeAvailable, Cfg: cfg, Platform: ps, Registry: registry, CodeGraphDB: cgDB, DB: platformDB, RunStore: runStore}),
+		qa:                 agent.NewQA(agent.QADeps{Tools: t, Semantic: sem, Embedder: emb, WriteAvailable: writeAvailable, Cfg: cfg, Platform: ps, Registry: registry, CodeGraphDB: cgDB, DB: platformDB, RunStore: runStore, History: history}),
 		persistentRunStore: runStore,
 		registry:           registry,
 		writeAvailable:     writeAvailable,
@@ -93,6 +98,7 @@ func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, platfo
 		platform:           ps,
 		idx:                idx,
 		callChain:          chain,
+		history:            history,
 	}
 	h.codegraphDB = cgDB
 	h.qaSessions = openQASessions(platformDB)

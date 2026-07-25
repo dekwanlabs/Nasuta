@@ -5,8 +5,32 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
+
+func TestCompactionRestartRecommendation(t *testing.T) {
+	tests := []struct {
+		name   string
+		result agent.SessionCompactionResult
+		failed bool
+		want   string
+	}{
+		{name: "hard failure", failed: true, want: "compaction_failed"},
+		{name: "state fallback", result: agent.SessionCompactionResult{StateFallback: true}, want: "compaction_degraded"},
+		{name: "critical", result: agent.SessionCompactionResult{NewSessionRecommended: true, CriticalWaterReached: true}, want: "context_critical"},
+		{name: "archive limit", result: agent.SessionCompactionResult{NewSessionRecommended: true}, want: "archived_history_limit"},
+		{name: "not recommended"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, message, recommend := compactionRestartRecommendation(tt.result, tt.failed)
+			if reason != tt.want || recommend != (tt.want != "") || (recommend && message == "") {
+				t.Fatalf("reason=%q message=%q recommend=%t", reason, message, recommend)
+			}
+		})
+	}
+}
 
 func TestParseQAAskRequestSourceMode(t *testing.T) {
 	tests := []struct {

@@ -39,6 +39,7 @@ type QADeps struct {
 	CodeGraphDB    *codegraph.DB
 	DB             *sql.DB
 	RunStore       *RunStore
+	History        SessionHistory
 }
 
 // QA is the agent-facing runtime facade.
@@ -51,12 +52,14 @@ type QA struct {
 	registry         *Registry
 	executor         *ToolExecutor
 	memory           *memory.MemoryStore
+	history          SessionHistory
 	writeAvailable   bool
 	hub              *RunHub
 	runStore         *RunStore
 	cfg              config.Config
 	routerConfidence float64
 	routerMaxTokens  int
+	contextWindow    int
 }
 
 // AskResult identifies the asynchronous run and its pre-retrieved context.
@@ -115,6 +118,7 @@ func NewQA(d QADeps) *QA {
 	svc := &QA{
 		retriever: ret, cfg: d.Cfg,
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
+		history: d.History, contextWindow: platformSettings.LLMContextWindow,
 	}
 
 	useDashScope := platformSettings.RerankProvider == "dashscope" && platformSettings.RerankAPIKey != ""
@@ -142,7 +146,7 @@ func NewQA(d QADeps) *QA {
 	if d.Registry != nil {
 		svc.registry = d.Registry
 	} else {
-		svc.registry = NewRegistry(d.Tools, d.Cfg, memory.NewSessionStore(d.DB))
+		svc.registry = NewRegistry(d.Tools, d.Cfg, memory.NewSessionStore(d.DB), d.History)
 	}
 	svc.writeAvailable = d.WriteAvailable
 	svc.executor = NewToolExecutor(svc.registry)
@@ -213,7 +217,7 @@ func (svc *QA) AskAgent(ctx context.Context, question string, history []llm.Mess
 	return svc.AskAgentWithContext(ctx, question, ConversationContext{Recent: history}, userID, rolePrompt, runID, nil, false)
 }
 
-// AskAgentWithContext preserves the canonical session summary without recompressing it.
+// AskAgentWithContext preserves bounded session state and recalled history.
 func (svc *QA) AskAgentWithContext(ctx context.Context, question string, conversation ConversationContext, userID int64, rolePrompt, runID string, explicitPlan *domain.EvidencePlan, allowWrite bool) (*AskResult, error) {
 	return svc.Ask(ctx, QARequest{
 		Question: question, Conversation: conversation, UserID: userID,
@@ -253,8 +257,8 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	toolPolicy := ToolPolicyForPlan(domain.DirectPlan(), svc.writeAvailable && request.AllowWrite)
 	executor := svc.toolExecutor()
 	candidateSnapshot := executor.Snapshot(toolPolicy)
-	if conversation.CompactedThroughTurn <= 0 {
-		candidateSnapshot = withoutTool(candidateSnapshot, "get_session_turn_details")
+	if conversation.CompactedThroughTurn <= 0 || svc.history == nil {
+		candidateSnapshot = withoutSessionHistoryTools(candidateSnapshot)
 	}
 	toolCandidates := routingCandidates(candidateSnapshot)
 	traceEnabled := domain.TraceEnabled(ctx)
@@ -266,17 +270,31 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	retrievalPrefix := buildRagCtx(conversation.Recent)
 	continuityBasis := retrievalPrefix
 	if continuityBasis == "" {
-		continuityBasis = conversation.Summary
+		continuityBasis = conversation.SessionState
 	}
 	if hasConflictingConversationEntity(question, continuityBasis) {
 		log.InfofCtx(ctx, "[qa] conversation context omitted after explicit entity switch")
-		conversation.Summary = ""
+		conversation.SessionState = ""
+		conversation.RetrievedHistory = ""
 		conversation.CompactedThroughTurn = 0
 		conversation.Recent = nil
-		candidateSnapshot = withoutTool(candidateSnapshot, "get_session_turn_details")
+		candidateSnapshot = withoutSessionHistoryTools(candidateSnapshot)
 		retrievalPrefix = ""
 	}
-	routeContext := buildRouteContext(conversation.Summary, retrievalPrefix)
+	if svc.history != nil && conversation.CompactedThroughTurn > 0 && conversation.SessionID != "" {
+		historyBudget := min(int(float64(svc.contextWindow)*0.08), 32768)
+		activeEntities, entityErr := sessionStateEntities(conversation.SessionState)
+		if entityErr != nil {
+			return nil, entityErr
+		}
+		historyContinuity := strings.TrimSpace(retrievalPrefix + "\n" + activeEntities)
+		recalledHistory, recallErr := svc.history.Recall(ctx, userID, conversation.SessionID, question, historyContinuity, historyBudget)
+		if recallErr != nil {
+			return nil, fmt.Errorf("recall current session history: %w", recallErr)
+		}
+		conversation.RetrievedHistory = recalledHistory
+	}
+	routeContext := buildRouteContext(conversation.SessionState, retrievalPrefix)
 
 	cleanQuestion := strings.TrimSpace(question)
 	var terms retrieval.QueryTerms
@@ -550,6 +568,16 @@ func withoutTool(snapshot tool.Snapshot, excluded tool.ToolID) tool.Snapshot {
 	return snapshot.Select(ids)
 }
 
+func withoutSessionHistoryTools(snapshot tool.Snapshot) tool.Snapshot {
+	ids := make(map[tool.ToolID]struct{})
+	for _, candidate := range snapshot.Tools() {
+		if candidate.ID != "get_turn" && candidate.ID != "find_turns" {
+			ids[candidate.ID] = struct{}{}
+		}
+	}
+	return snapshot.Select(ids)
+}
+
 func preferredToolsInstruction(ids []string) string {
 	return "Tool routing preference for this turn: " + strings.Join(ids, ", ") +
 		". Treat this as advisory, not mandatory. Call a preferred tool only when it resolves a material evidence gap; if conversation history or existing evidence is sufficient, answer directly. Other registered tools remain available, and tool failures must be reported rather than hidden."
@@ -721,8 +749,8 @@ func (svc *QA) runAgentWithPlan(ctx context.Context, question string, conversati
 
 func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] runAgent runID=%s", runID)
-	if conversation.CompactedThroughTurn <= 0 {
-		snapshot = withoutTool(snapshot, "get_session_turn_details")
+	if conversation.CompactedThroughTurn <= 0 || svc.history == nil {
+		snapshot = withoutSessionHistoryTools(snapshot)
 	}
 	ctx = withSessionToolScope(ctx, conversation, userID)
 

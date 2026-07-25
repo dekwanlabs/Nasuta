@@ -18,10 +18,14 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/indexing"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
+	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/ontologystore"
+	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/rbac"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
+	"github.com/dekwanlabs/nasuta/internal/sessionhistory"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
 	"github.com/dekwanlabs/nasuta/internal/transport/incidenthttp"
 	"github.com/dekwanlabs/nasuta/internal/transport/mcp"
@@ -53,6 +57,7 @@ type Platform struct {
 	codegraph   *codegraph.DB
 	callChain   *callchain.Service
 	ontology    ontology.Backend
+	history     *sessionhistory.Service
 }
 
 // New constructs the reusable platform without registering scenario routes.
@@ -96,7 +101,9 @@ func New() (*Platform, error) {
 	authDB, authService := buildAuth(cfg, platformDB)
 	settings := loadPlatformSettings(authDB)
 	index.SetPlatform(settings)
-	registry := agent.NewRegistry(knowledgeService, cfg, memory.NewSessionStore(platformDB))
+	sessions := memory.NewSessionStore(platformDB)
+	history := buildSessionHistory(cfg, sessions, index.Embedder)
+	registry := agent.NewRegistry(knowledgeService, cfg, sessions, history)
 
 	platform := &Platform{
 		cfg: cfg, settings: settings, index: index, knowledge: knowledgeService,
@@ -104,9 +111,34 @@ func New() (*Platform, error) {
 		platformDB: platformDB, authDB: authDB, authService: authService,
 		codegraph: codeGraph, callChain: callChainService,
 		ontology: ontologyBackend,
+		history:  history,
 	}
 	platform.initRBAC()
 	return platform, nil
+}
+
+func buildSessionHistory(cfg config.Config, sessions *memory.SessionStore, emb embed.Embedder) *sessionhistory.Service {
+	if sessions == nil {
+		return nil
+	}
+	if emb == nil || !emb.Enabled() {
+		log.Warnf("[qa] session history dense index disabled; lexical recall remains available")
+		return sessionhistory.New(sessions, nil, emb)
+	}
+	historyConfig := cfg.Semantic
+	historyConfig.Collection = "session_history"
+	historySemantic, err := semanticstore.New(historyConfig)
+	if err != nil {
+		log.Errorf("[qa] session history semantic store unavailable; lexical recall remains available: %v", err)
+		return sessionhistory.New(sessions, nil, emb)
+	}
+	if err := historySemantic.Ensure(context.Background(), semantic.Schema{Collection: "session_history", DenseDim: emb.Dim()}); err != nil {
+		_ = historySemantic.Close()
+		log.Errorf("[qa] session history collection unavailable; lexical recall remains available: %v", err)
+		return sessionhistory.New(sessions, nil, emb)
+	}
+	log.Infof("[qa] session history semantic index enabled (collection=session_history)")
+	return sessionhistory.New(sessions, historySemantic, emb)
 }
 
 func openPlatformDB() (*sql.DB, error) {
@@ -236,7 +268,7 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 		platform.index.DB, platform.index.DocDB(), platform.authDB, platform.platformDB,
 		platform.index.Semantic, platform.index.Embedder,
 		platform.knowledge, platform.cfg, platform.settings, platform.index,
-		platform.registry, platform.writeReady, platform.codegraph, platform.callChain,
+		platform.registry, platform.writeReady, platform.codegraph, platform.callChain, platform.history,
 	)
 	if platform.rolePrompt != nil {
 		dashboardHandler.SetRolePrompt(platform.rolePrompt)
@@ -260,6 +292,9 @@ func (platform *Platform) AuthenticatedAPI(mux *http.ServeMux) APIRegistrar {
 // Serve runs background platform work and serves the already-composed root mux.
 func (platform *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 	go platform.startDailySyncTicker(ctx)
+	if platform.history != nil {
+		go platform.history.Run(ctx)
+	}
 	log.Infof("[server] listening on %s (MCP: /mcp, webhook: /internal/vcs-hook, api: /api)", platform.cfg.HTTPAddr)
 	if platform.cfg.AuthToken == "" {
 		log.Warnf("[server] WARNING: no NASUTA_AUTH_TOKEN set, /mcp is unauthenticated")
@@ -283,6 +318,9 @@ func (platform *Platform) Close() error {
 	}
 	if platform.ontology != nil {
 		_ = platform.ontology.Close()
+	}
+	if platform.history != nil {
+		_ = platform.history.Close()
 	}
 	platform.index.Close()
 	if platform.platformDB != nil {

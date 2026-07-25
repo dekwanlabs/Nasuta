@@ -23,6 +23,21 @@ func TestCompileFilterUsesOnlyDeclaredScalarFields(t *testing.T) {
 	}
 }
 
+func TestCompileFilterSupportsSessionHistoryMetadata(t *testing.T) {
+	expr, err := compileFilter(semantic.Filter{
+		Keywords:   map[string]string{"session_id": "qa-1"},
+		AnyInteger: map[string][]int64{"turn_number": {7, 8}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`metadata["session_id"] == "qa-1"`, `metadata["turn_number"] in [7,8]`} {
+		if !strings.Contains(expr, want) {
+			t.Fatalf("expression %q missing %q", expr, want)
+		}
+	}
+}
+
 func TestSearchRejectsInvalidSparseVectorBeforeCallingMilvus(t *testing.T) {
 	_, err := (&Adapter{}).Search(context.Background(), semantic.Query{
 		DenseVector: []float32{1}, SparseVector: &semantic.SparseVector{}, Limit: 1,

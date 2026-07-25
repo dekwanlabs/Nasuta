@@ -9,10 +9,11 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 )
 
-func TestBuildAgentMessagesUsesCanonicalSummaryAndRecentTail(t *testing.T) {
+func TestBuildAgentMessagesUsesBoundedStateRecallAndRecentTail(t *testing.T) {
 	agent := &Agent{cfg: AgentConfig{HistoryLimit: 2}}
 	conversation := ConversationContext{
-		Summary:              `{"version":1,"compactedThroughTurn":4,"items":[{"turn":1,"ref":"cmp-123","summary":"canonical session summary"}]}`,
+		SessionState:         `{"version":2,"updatedThroughTurn":4,"goals":[{"text":"canonical session goal","refs":["cmp-123"]}],"constraints":[],"decisions":[],"activeEntities":[],"openItems":[]}`,
+		RetrievedHistory:     `{"version":1,"mode":"hybrid","turns":[{"ref":"cmp-124","turn":2,"summary":"recalled finding"}]}`,
 		CompactedThroughTurn: 4,
 		RolePrompt:           "## Identity\n- Role: SRE",
 		Instructions:         []llm.Message{{Role: "system", Content: "role instruction"}},
@@ -28,7 +29,7 @@ func TestBuildAgentMessagesUsesCanonicalSummaryAndRecentTail(t *testing.T) {
 	for _, message := range got {
 		joined += "\n" + message.Content
 	}
-	for _, want := range []string{"canonical session summary", "cmp-123", `<rolling_summary format="json">`, "get_session_turn_details", "## Identity\n- Role: SRE", "role instruction", "recent answer", "recent question", "current question"} {
+	for _, want := range []string{"canonical session goal", "recalled finding", "cmp-123", `<session_state format="json">`, `<retrieved_session_history format="json">`, "get_turn", "find_turns", "## Identity\n- Role: SRE", "role instruction", "recent answer", "recent question", "current question"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("messages missing %q: %s", want, joined)
 		}

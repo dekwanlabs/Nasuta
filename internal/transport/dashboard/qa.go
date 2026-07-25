@@ -39,7 +39,13 @@ type qaRunControlReq struct {
 type sseWriter struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
+	mu      sync.Mutex
 }
+
+const (
+	qaSSEHeartbeatInterval = 10 * time.Second
+	qaCompactionMinTimeout = 2 * time.Minute
+)
 
 func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 	req, err := parseQAAskRequest(r)
@@ -59,6 +65,8 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteErr(w, err)
 		return
 	}
+	stopHeartbeat := stream.startHeartbeat(r.Context(), qaSSEHeartbeatInterval)
+	defer stopHeartbeat()
 	conversation, err := handler.prepareSessionContext(
 		r.Context(), req.Question, req.SessionID, currentUserID(r), req.History, stream.emit,
 	)
@@ -88,7 +96,8 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 		handler.platform.LLMMaxTokens,
 		max(handler.platform.LLMAnswerMaxTokens, handler.platform.LLMConclusionMaxTokens),
 	)
-	compactCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	compactionTimeout := max(qaCompactionMinTimeout, time.Duration(handler.platform.AgentTimeout))
+	compactCtx, cancel := context.WithTimeout(ctx, compactionTimeout)
 	defer cancel()
 	result, err := agent.CompactSessionIfNeeded(
 		compactCtx, handler.qa.LLM(), handler.qaSessions, sessionID, userID,
@@ -103,9 +112,10 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 				"status": "start",
 				"text":   fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", fromTurn, toTurn),
 			}))
-		},
+		}, handler.history,
 	)
 	if err != nil {
+		handler.emitSessionRestartRecommendation(ctx, sseEvent, sessionID, result, true)
 		return agent.ConversationContext{}, fmt.Errorf("prepare session compaction %q: %w", sessionID, err)
 	}
 	if result.Applied {
@@ -119,30 +129,46 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 		log.InfofCtx(ctx, "[qa] ignored stale pre-answer compaction for session %s through turn %d",
 			sessionID, result.ToTurn)
 	}
-	if result.NewSessionRecommended {
-		projectedTokens := result.ProjectedAfterTokens
-		if projectedTokens == 0 {
-			projectedTokens = result.ProjectedBeforeTokens
-		}
-		reason := "summary_history_limit"
-		message := "当前会话已积累较多压缩历史，建议开启新对话继续，以保持上下文清晰。"
-		if result.CriticalWaterReached {
-			reason = "context_critical"
-			message = "当前会话压缩后仍接近上下文上限，建议开启新对话继续，避免回答被截断。"
-		}
-		sseEvent("session_restart_recommended", jsonStr(map[string]any{
-			"text":             message,
-			"reason":           reason,
-			"summary_items":    result.SummaryItemCount,
-			"item_threshold":   result.SummaryItemThreshold,
-			"projected_tokens": projectedTokens,
-			"context_window":   handler.platform.LLMContextWindow,
-		}))
-		log.WarnfCtx(ctx, "[qa] recommended new session session=%s reason=%s projected=%d window=%d summary_items=%d item_threshold=%d",
-			sessionID, reason, projectedTokens, handler.platform.LLMContextWindow,
-			result.SummaryItemCount, result.SummaryItemThreshold)
-	}
+	handler.emitSessionRestartRecommendation(ctx, sseEvent, sessionID, result, false)
 	return handler.loadSessionContext(ctx, sessionID, userID, fallback), nil
+}
+
+func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, sseEvent func(string, string),
+	sessionID string, result agent.SessionCompactionResult, compactionFailed bool) {
+	reason, message, recommend := compactionRestartRecommendation(result, compactionFailed)
+	if !recommend {
+		return
+	}
+	projectedTokens := result.ProjectedAfterTokens
+	if projectedTokens == 0 {
+		projectedTokens = result.ProjectedBeforeTokens
+	}
+	sseEvent("session_restart_recommended", jsonStr(map[string]any{
+		"text":                   message,
+		"reason":                 reason,
+		"archived_turns":         result.ArchivedTurnCount,
+		"restart_turn_threshold": result.RestartTurnThreshold,
+		"projected_tokens":       projectedTokens,
+		"context_window":         handler.platform.LLMContextWindow,
+	}))
+	log.WarnfCtx(ctx, "[qa] recommended new session session=%s reason=%s projected=%d window=%d archived_turns=%d restart_turn_threshold=%d",
+		sessionID, reason, projectedTokens, handler.platform.LLMContextWindow,
+		result.ArchivedTurnCount, result.RestartTurnThreshold)
+}
+
+func compactionRestartRecommendation(result agent.SessionCompactionResult, compactionFailed bool) (string, string, bool) {
+	switch {
+	case compactionFailed:
+		return "compaction_failed", "历史上下文压缩失败，当前会话无法安全继续，请开启新对话后重试。", true
+	case result.StateFallback:
+		return "compaction_degraded", "历史上下文压缩未能完整保留会话状态，建议开启新对话继续。", true
+	case !result.NewSessionRecommended:
+		return "", "", false
+	case result.CriticalWaterReached:
+		return "context_critical", "当前会话压缩后仍接近上下文上限，建议开启新对话继续，避免回答被截断。", true
+	default:
+		return "archived_history_limit", "当前会话已积累较多压缩历史，建议开启新对话继续，以保持上下文清晰。", true
+	}
 }
 
 func jsonStr(v any) string {
@@ -186,8 +212,37 @@ func newSSEWriter(w http.ResponseWriter) (*sseWriter, error) {
 }
 
 func (s *sseWriter) emit(event, data string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, data)
 	s.flusher.Flush()
+}
+
+func (s *sseWriter) startHeartbeat(ctx context.Context, interval time.Duration) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C:
+				s.mu.Lock()
+				fmt.Fprint(s.w, ": keepalive\n\n")
+				s.flusher.Flush()
+				s.mu.Unlock()
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
 }
 
 func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string, userID int64, fallback []llm.Message) agent.ConversationContext {
@@ -202,10 +257,10 @@ func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string
 	if sess == nil {
 		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}
 	}
-	log.InfofCtx(ctx, "[qa] loaded session %s: recent=%d summary=%d chars compactedThrough=%d",
-		sessionID, len(sess.Messages), len([]rune(sess.Summary)), sess.CompactedThroughTurn)
+	log.InfofCtx(ctx, "[qa] loaded session %s: recent=%d state=%d chars compactedThrough=%d",
+		sessionID, len(sess.Messages), len([]rune(sess.SessionState)), sess.CompactedThroughTurn)
 	return agent.ConversationContext{
-		SessionID: sessionID, Summary: sess.Summary,
+		SessionID: sessionID, SessionState: sess.SessionState,
 		CompactedThroughTurn: sess.CompactedThroughTurn, Recent: sess.Messages,
 	}
 }

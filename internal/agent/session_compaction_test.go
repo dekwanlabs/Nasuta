@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,9 +20,9 @@ func TestSessionCompactionStartsAtEightyPercent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	mock.ExpectQuery(`SELECT COALESCE\(CAST\(s\.summary AS CHAR\),''\),s\.compacted_through_turn`).
+	mock.ExpectQuery(`SELECT COALESCE\(CAST\(s\.session_state AS CHAR\),''\),s\.session_state_tokens`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"summary", "compacted_through_turn", "tokens", "latest_turn"}).AddRow("", 0, 79, 6))
+		WillReturnRows(compactionStatsRow("", 0, 0, 0, 79, 6))
 
 	result, err := CompactSessionIfNeeded(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
@@ -39,6 +41,7 @@ func TestSessionCompactionStartsAtEightyPercent(t *testing.T) {
 }
 
 func TestSessionCompactionBatchesOldestTurnsToLowWater(t *testing.T) {
+	var stateCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Messages []llm.Message `json:"messages"`
@@ -47,7 +50,11 @@ func TestSessionCompactionBatchesOldestTurnsToLowWater(t *testing.T) {
 			t.Errorf("decode request: %v", err)
 			return
 		}
-		content := `[{"item":1,"text":"summary one"},{"item":2,"text":"summary two"},{"item":3,"text":"summary three"}]`
+		content := `{"items":[{"item":1,"text":"summary one"},{"item":2,"text":"summary two"},{"item":3,"text":"summary three"}]}`
+		if len(request.Messages) > 0 && strings.Contains(request.Messages[0].Content, "bounded state") {
+			stateCalls.Add(1)
+			content = `{"version":2,"updatedThroughTurn":2,"goals":[],"constraints":[],"decisions":[],"activeEntities":[],"openItems":[]}`
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]any{"content": content}}},
 		})
@@ -60,14 +67,13 @@ func TestSessionCompactionBatchesOldestTurnsToLowWater(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Now()
-	mock.ExpectQuery(`SELECT COALESCE\(CAST\(s\.summary AS CHAR\),''\),s\.compacted_through_turn`).
+	mock.ExpectQuery(`SELECT COALESCE\(CAST\(s\.session_state AS CHAR\),''\),s\.session_state_tokens`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"summary", "compacted_through_turn", "tokens", "latest_turn"}).
-			AddRow("", 0, 1700, 6))
+		WillReturnRows(compactionStatsRow("", 0, 0, 0, 1700, 6))
 	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
-			AddRow("session-1", 42, "title", "", 0, now, now, 6))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "session_state", "session_state_tokens", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", "", 0, 0, 0, now, now, 6))
 	mock.ExpectQuery(`SELECT t\.turn_no,t\.token_estimate.*t\.turn_no BETWEEN \? AND \?.*ORDER BY t\.turn_no`).
 		WithArgs("session-1", int64(42), 1, 3).
 		WillReturnRows(sqlmock.NewRows([]string{"turn_no", "token_estimate"}).
@@ -89,7 +95,9 @@ func TestSessionCompactionBatchesOldestTurnsToLowWater(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"user_id", "compacted_through_turn"}).AddRow(42, 0))
 	mock.ExpectExec(`INSERT INTO qa_turn_contexts.*detail_json`).
 		WillReturnResult(sqlmock.NewResult(0, 3))
-	mock.ExpectExec(`UPDATE qa_sessions SET summary=\?,compacted_through_turn=\?,updated_at=\?`).
+	mock.ExpectExec(`INSERT INTO qa_session_history_index_outbox.*VALUES`).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec(`UPDATE qa_sessions SET session_state=\?,session_state_tokens=\?,`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -103,8 +111,12 @@ func TestSessionCompactionBatchesOldestTurnsToLowWater(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Applied || result.FromTurn != 1 || result.ToTurn != 3 || startedFrom != 1 || startedTo != 3 {
+	if !result.Applied || !result.StateFallback || !result.NewSessionRecommended ||
+		result.FromTurn != 1 || result.ToTurn != 3 || startedFrom != 1 || startedTo != 3 {
 		t.Fatalf("result = %+v, callback=%d-%d", result, startedFrom, startedTo)
+	}
+	if stateCalls.Load() != 1 {
+		t.Fatalf("state calls = %d, want 1", stateCalls.Load())
 	}
 	if result.ProjectedAfterTokens > int(2000*sessionLowWaterRatio) {
 		t.Fatalf("projected after = %d, want <= low water", result.ProjectedAfterTokens)
@@ -120,10 +132,9 @@ func TestSessionCompactionDoesNotStayActiveBelowHighWater(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	mock.ExpectQuery(`SELECT COALESCE\(CAST\(s\.summary AS CHAR\),''\),s\.compacted_through_turn`).
+	mock.ExpectQuery(`SELECT COALESCE\(CAST\(s\.session_state AS CHAR\),''\),s\.session_state_tokens`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"summary", "compacted_through_turn", "tokens", "latest_turn"}).
-			AddRow(`{"version":1,"compactedThroughTurn":2,"items":[{"turn":1,"ref":"cmp-1","summary":"one"},{"turn":2,"ref":"cmp-2","summary":"two"}]}`, 2, 10, 6))
+		WillReturnRows(compactionStatsRow(`{"version":2,"updatedThroughTurn":2}`, 8, 20, 2, 10, 6))
 
 	result, err := CompactSessionIfNeeded(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
@@ -148,14 +159,13 @@ func TestSessionCompactionRecommendsNewSessionAtCriticalWater(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Now()
-	mock.ExpectQuery(`SELECT COALESCE\(CAST\(s\.summary AS CHAR\),''\),s\.compacted_through_turn`).
+	mock.ExpectQuery(`SELECT COALESCE\(CAST\(s\.session_state AS CHAR\),''\),s\.session_state_tokens`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"summary", "compacted_through_turn", "tokens", "latest_turn"}).
-			AddRow(`{}`, 21, 30399, 24))
+		WillReturnRows(compactionStatsRow(`{}`, 1, 3864, 21, 30399, 24))
 	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "summary", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
-			AddRow("session-1", 42, "title", `{}`, 21, now, now, 24))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "session_state", "session_state_tokens", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", `{}`, 1, 3864, 21, now, now, 24))
 
 	result, err := CompactSessionIfNeeded(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
@@ -165,7 +175,7 @@ func TestSessionCompactionRecommendsNewSessionAtCriticalWater(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.NewSessionRecommended || result.SummaryItemCount != 21 || result.SummaryItemThreshold != 53 {
+	if !result.NewSessionRecommended || result.ArchivedTurnCount != 21 || result.RestartTurnThreshold != 53 {
 		t.Fatalf("result = %+v", result)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -173,8 +183,13 @@ func TestSessionCompactionRecommendsNewSessionAtCriticalWater(t *testing.T) {
 	}
 }
 
+func compactionStatsRow(state string, stateTokens int, archivedTokens int64, compactedThrough, uncompactedTokens, latestTurn int) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"session_state", "session_state_tokens", "archived_summary_tokens", "compacted_through_turn", "tokens", "latest_turn"}).
+		AddRow(state, stateTokens, archivedTokens, compactedThrough, uncompactedTokens, latestTurn)
+}
+
 func TestNewSessionRecommendationTriggersAtEitherThreshold(t *testing.T) {
-	if threshold := restartSummaryItemThreshold(128000); threshold != 209 {
+	if threshold := restartTurnThreshold(128000); threshold != 209 {
 		t.Fatalf("128K restart item threshold = %d, want 209", threshold)
 	}
 	criticalWater := 950

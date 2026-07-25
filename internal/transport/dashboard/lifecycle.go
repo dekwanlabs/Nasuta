@@ -17,7 +17,7 @@ func (handler *Handler) reloadQA() {
 }
 
 func (handler *Handler) rebuildQA(ps *config.PlatformSettings) {
-	handler.qa = agent.NewQA(agent.QADeps{Tools: handler.tools, Semantic: handler.semantic, Embedder: handler.embedder, WriteAvailable: handler.writeAvailable, Cfg: handler.cfg, Platform: ps, Registry: handler.registry, CodeGraphDB: handler.codegraphDB, DB: handler.platformDB, RunStore: handler.persistentRunStore})
+	handler.qa = agent.NewQA(agent.QADeps{Tools: handler.tools, Semantic: handler.semantic, Embedder: handler.embedder, WriteAvailable: handler.writeAvailable, Cfg: handler.cfg, Platform: ps, Registry: handler.registry, CodeGraphDB: handler.codegraphDB, DB: handler.platformDB, RunStore: handler.persistentRunStore, History: handler.history})
 	handler.syncPlatform(ps)
 }
 

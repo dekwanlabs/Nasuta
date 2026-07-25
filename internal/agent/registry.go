@@ -31,15 +31,23 @@ func ToolPolicyForPlan(_ domain.EvidencePlan, allowWrite bool) ToolPolicy {
 }
 
 // NewRegistry registers every built-in tool through the public batch API.
-func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore) *Registry {
+func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore, histories ...SessionHistory) *Registry {
 	registry := tool.NewRegistry()
-	if err := registry.RegisterAll(builtinTools(svc, cfg, sessions)); err != nil {
+	var history SessionHistory
+	if len(histories) > 0 {
+		history = histories[0]
+	}
+	if err := registry.RegisterAll(builtinTools(svc, cfg, sessions, history)); err != nil {
 		panic(fmt.Sprintf("register built-in tools: %v", err))
 	}
 	return registry
 }
 
-func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore) []Tool {
+func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore, histories ...SessionHistory) []Tool {
+	var history SessionHistory
+	if len(histories) > 0 {
+		history = histories[0]
+	}
 	tools := []Tool{
 		{
 			ID: "get_service",
@@ -212,6 +220,9 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 	if sessions != nil {
 		tools = append(tools, sessionTurnDetailsTool(sessions))
 	}
+	if history != nil {
+		tools = append(tools, findTurnsTool(history))
+	}
 
 	if !cfg.WebSearchEnabled {
 		return tools
@@ -241,13 +252,12 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 
 func sessionTurnDetailsTool(sessions *memory.SessionStore) Tool {
 	return Tool{
-		ID: "get_session_turn_details",
-		Description: "Read one bounded archived turn referenced by the current conversation's rolling summary. " +
-			"Call only when exact prior wording, identifiers, tool arguments, or evidence are necessary and the summary is insufficient. " +
-			"Ordinary follow-up questions should use the summary without calling this tool.",
+		ID: "get_turn",
+		Description: "Read one archived turn referenced by current-session state or recalled history. " +
+			"Call only when exact prior wording, identifiers, tool arguments, or evidence are necessary.",
 		Kind: ToolKindRead, MCPHidden: true,
 		InputSchema: objectSchema(map[string]any{
-			"ref": propString("One ref shown in the current rolling summary, for example cmp_xxx."),
+			"ref": propString("One ref shown in session state or recalled history, for example cmp_xxx."),
 		}, []string{"ref"}),
 		Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 			scope, ok := sessionScopeFromContext(ctx)
@@ -259,6 +269,26 @@ func sessionTurnDetailsTool(sessions *memory.SessionStore) Tool {
 				return "", err
 			}
 			return marshalResult(record)
+		}),
+	}
+}
+
+func findTurnsTool(history SessionHistory) Tool {
+	return Tool{
+		ID: "find_turns",
+		Description: "Search archived turns in the current QA session when automatically recalled history leaves a material gap. " +
+			"An empty result means only that the bounded search found no match, not that the history contains no relevant fact.",
+		Kind: ToolKindRead, MCPHidden: true,
+		InputSchema: objectSchema(map[string]any{
+			"query": propString("What to find in the current session history."),
+			"limit": propInt("Maximum summaries to return (default 8, max 24)."),
+		}, []string{"query"}),
+		Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
+			scope, ok := sessionScopeFromContext(ctx)
+			if !ok {
+				return "", fmt.Errorf("session history is unavailable without a current compressed conversation")
+			}
+			return history.Find(ctx, scope.UserID, scope.SessionID, argStr(args, "query", ""), clampInt(argInt(args, "limit", 8), 1, 24), 8192)
 		}),
 	}
 }

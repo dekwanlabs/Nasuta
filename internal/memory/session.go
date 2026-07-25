@@ -18,23 +18,25 @@ type SessionStore struct {
 }
 
 type SessionRecord struct {
-	ID                   string        `json:"id"`
-	UserID               int64         `json:"user_id"`
-	Title                string        `json:"title"`
-	Summary              string        `json:"summary"`
-	CompactedThroughTurn int           `json:"compacted_through_turn,omitempty"`
-	Messages             []llm.Message `json:"messages,omitempty"`
-	MessageCount         int           `json:"message_count"`
-	LatestTurn           int           `json:"latest_turn,omitempty"`
-	CreatedAt            string        `json:"created_at"`
-	UpdatedAt            string        `json:"updated_at"`
+	ID                    string        `json:"id"`
+	UserID                int64         `json:"user_id"`
+	Title                 string        `json:"title"`
+	SessionState          string        `json:"session_state"`
+	SessionStateTokens    int           `json:"session_state_tokens,omitempty"`
+	ArchivedSummaryTokens int64         `json:"archived_summary_tokens,omitempty"`
+	CompactedThroughTurn  int           `json:"compacted_through_turn,omitempty"`
+	Messages              []llm.Message `json:"messages,omitempty"`
+	MessageCount          int           `json:"message_count"`
+	LatestTurn            int           `json:"latest_turn,omitempty"`
+	CreatedAt             string        `json:"created_at"`
+	UpdatedAt             string        `json:"updated_at"`
 }
 
 // CompactionCandidate is one contiguous, not-yet-summarized turn range.
 type CompactionCandidate struct {
 	SessionID                string
 	UserID                   int64
-	PreviousSummary          string
+	PreviousState            string
 	PreviousThrough          int
 	FromTurn                 int
 	ToTurn                   int
@@ -45,10 +47,12 @@ type CompactionCandidate struct {
 
 // SessionContextStats is the bounded persisted footprint used for compaction decisions.
 type SessionContextStats struct {
-	SummaryJSON          string
-	UncompactedTokens    int
-	CompactedThroughTurn int
-	LatestTurn           int
+	SessionStateJSON      string
+	SessionStateTokens    int
+	ArchivedSummaryTokens int64
+	UncompactedTokens     int
+	CompactedThroughTurn  int
+	LatestTurn            int
 }
 
 // CompactionSelection describes one oldest-first batch target.
@@ -75,8 +79,16 @@ type TurnContextRecord struct {
 	DetailJSON     json.RawMessage `json:"detail"`
 	TurnNumber     int             `json:"turnNumber"`
 	SummaryText    string          `json:"-"`
+	SummaryTokens  int             `json:"-"`
 	SourceTokens   int             `json:"-"`
 	RetainedTokens int             `json:"-"`
+	Terms          []HistoryTerm   `json:"-"`
+}
+
+// HistoryTerm is one canonical lexical key persisted with an archived turn.
+type HistoryTerm struct {
+	Value  string
+	Weight int
 }
 
 // MessagePage is one reverse-cursor page returned in chronological order.
@@ -98,7 +110,7 @@ func NewSessionStore(db *sql.DB) *SessionStore {
 
 func (ss *SessionStore) List(userID int64) ([]SessionRecord, error) {
 	rows, err := ss.db.Query(
-		`SELECT s.id, s.title, COALESCE(CAST(s.summary AS CHAR),''), COALESCE(s.user_id,0), s.created_at, s.updated_at,
+		`SELECT s.id, s.title, COALESCE(CAST(s.session_state AS CHAR),''), COALESCE(s.user_id,0), s.created_at, s.updated_at,
 		        (SELECT COUNT(*) FROM qa_messages m WHERE m.session_id = s.id)
 		 FROM qa_sessions s WHERE s.user_id = ? ORDER BY s.updated_at DESC LIMIT 50`,
 		userID)
@@ -111,7 +123,7 @@ func (ss *SessionStore) List(userID int64) ([]SessionRecord, error) {
 	for rows.Next() {
 		var r SessionRecord
 		var createdAt, updatedAt sql.NullTime
-		if err := rows.Scan(&r.ID, &r.Title, &r.Summary, &r.UserID, &createdAt, &updatedAt, &r.MessageCount); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.SessionState, &r.UserID, &createdAt, &updatedAt, &r.MessageCount); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = store.FormatDatabaseTime(createdAt)
@@ -129,7 +141,7 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 	if r.Title == "" && len(r.Messages) > 0 {
 		r.Title = firstUserQuestion(r.Messages)
 	}
-	r.Summary = ""
+	r.SessionState = ""
 
 	tx, err := ss.db.Begin()
 	if err != nil {
@@ -143,19 +155,25 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 	}
 	if exists {
 		if _, err := tx.Exec(
-			`UPDATE qa_sessions SET title=?,summary=NULL,compacted_through_turn=0,updated_at=? WHERE id=? AND user_id=?`,
+			`UPDATE qa_sessions SET title=?,session_state=NULL,session_state_tokens=0,archived_summary_tokens=0,compacted_through_turn=0,updated_at=? WHERE id=? AND user_id=?`,
 			r.Title, store.DatabaseTime(r.UpdatedAt), r.ID, r.UserID,
 		); err != nil {
 			return err
 		}
 	} else {
 		if _, err := tx.Exec(
-			`INSERT INTO qa_sessions(id,user_id,title,summary,compacted_through_turn,created_at,updated_at) VALUES(?,?,?,?,0,?,?)`,
+			`INSERT INTO qa_sessions(id,user_id,title,session_state,compacted_through_turn,created_at,updated_at) VALUES(?,?,?,?,0,?,?)`,
 			r.ID, r.UserID, r.Title, nil,
 			store.DatabaseTime(r.CreatedAt), store.DatabaseTime(r.UpdatedAt),
 		); err != nil {
 			return err
 		}
+	}
+	if err := enqueueSessionHistoryDeletes(tx, r.ID, r.UserID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM qa_session_history_terms WHERE session_id = ?`, r.ID); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM qa_turn_contexts WHERE session_id = ?`, r.ID); err != nil {
 		return err
@@ -202,6 +220,12 @@ func (ss *SessionStore) Delete(id string, userID int64) (bool, error) {
 		}
 		return false, err
 	}
+	if err := enqueueSessionHistoryDeletes(tx, id, userID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`DELETE FROM qa_session_history_terms WHERE session_id = ?`, id); err != nil {
+		return false, err
+	}
 	if _, err := tx.Exec(`DELETE FROM qa_turn_contexts WHERE session_id = ?`, id); err != nil {
 		return false, err
 	}
@@ -222,14 +246,15 @@ func (ss *SessionStore) Delete(id string, userID int64) (bool, error) {
 
 func (ss *SessionStore) getSession(id string, userID int64) (*SessionRecord, error) {
 	row := ss.db.QueryRow(
-		`SELECT s.id, s.user_id, s.title, COALESCE(CAST(s.summary AS CHAR),''),
-		        s.compacted_through_turn, s.created_at, s.updated_at,
+		`SELECT s.id, s.user_id, s.title, COALESCE(CAST(s.session_state AS CHAR),''),
+		        s.session_state_tokens,s.archived_summary_tokens,s.compacted_through_turn,s.created_at,s.updated_at,
 		        COALESCE((SELECT MAX(t.turn_no) FROM qa_turns t WHERE t.session_id=s.id),0)
 		 FROM qa_sessions s WHERE s.id = ? AND s.user_id = ?`, id, userID)
 	var r SessionRecord
 	var createdAt, updatedAt sql.NullTime
-	if err := row.Scan(&r.ID, &r.UserID, &r.Title, &r.Summary,
-		&r.CompactedThroughTurn, &createdAt, &updatedAt, &r.LatestTurn); err != nil {
+	if err := row.Scan(&r.ID, &r.UserID, &r.Title, &r.SessionState,
+		&r.SessionStateTokens, &r.ArchivedSummaryTokens, &r.CompactedThroughTurn,
+		&createdAt, &updatedAt, &r.LatestTurn); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -511,13 +536,15 @@ func (ss *SessionStore) AppendTurn(sessionID, runID string, userID int64, msgs [
 func (ss *SessionStore) SessionContextStats(sessionID string, userID int64) (SessionContextStats, error) {
 	var stats SessionContextStats
 	err := ss.db.QueryRow(
-		`SELECT COALESCE(CAST(s.summary AS CHAR),''),s.compacted_through_turn,
+		`SELECT COALESCE(CAST(s.session_state AS CHAR),''),s.session_state_tokens,
+		        s.archived_summary_tokens,s.compacted_through_turn,
 		        COALESCE((SELECT SUM(t.token_estimate) FROM qa_turns t
 		                  WHERE t.session_id=s.id AND t.turn_no>s.compacted_through_turn),0),
 		        COALESCE((SELECT MAX(t.turn_no) FROM qa_turns t WHERE t.session_id=s.id),0)
 		 FROM qa_sessions s WHERE s.id=? AND s.user_id=?`,
 		sessionID, userID).Scan(
-		&stats.SummaryJSON, &stats.CompactedThroughTurn,
+		&stats.SessionStateJSON, &stats.SessionStateTokens, &stats.ArchivedSummaryTokens,
+		&stats.CompactedThroughTurn,
 		&stats.UncompactedTokens, &stats.LatestTurn,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -637,7 +664,7 @@ func (ss *SessionStore) PrepareCompaction(sessionID string, userID int64, select
 			fromTurn, toTurn, strings.Join(missing, ","))
 	}
 	return &CompactionCandidate{
-		SessionID: sessionID, UserID: userID, PreviousSummary: session.Summary,
+		SessionID: sessionID, UserID: userID, PreviousState: session.SessionState,
 		PreviousThrough: session.CompactedThroughTurn, FromTurn: fromTurn,
 		ToTurn: toTurn, EligibleThrough: eligibleThrough,
 		EstimatedReclaimedTokens: estimatedReclaimed, Turns: turns,
@@ -645,7 +672,7 @@ func (ss *SessionStore) PrepareCompaction(sessionID string, userID int64, select
 }
 
 // ApplyCompaction rejects stale generators instead of overwriting newer progress.
-func (ss *SessionStore) ApplyCompaction(candidate CompactionCandidate, records []TurnContextRecord, summary string) (bool, error) {
+func (ss *SessionStore) ApplyCompaction(candidate CompactionCandidate, records []TurnContextRecord, state string, stateTokens int) (bool, error) {
 	if len(records) != candidate.ToTurn-candidate.FromTurn+1 {
 		return false, fmt.Errorf("memory/session: compressed records do not cover turns %d-%d", candidate.FromTurn, candidate.ToTurn)
 	}
@@ -658,8 +685,11 @@ func (ss *SessionStore) ApplyCompaction(candidate CompactionCandidate, records [
 			return false, fmt.Errorf("memory/session: invalid detail JSON for turn %d", expectedTurn)
 		}
 	}
-	if !json.Valid([]byte(summary)) {
-		return false, fmt.Errorf("memory/session: invalid rolling summary JSON")
+	if !json.Valid([]byte(state)) {
+		return false, fmt.Errorf("memory/session: invalid session state JSON")
+	}
+	if stateTokens <= 0 {
+		return false, fmt.Errorf("memory/session: session state token count must be positive")
 	}
 	tx, err := ss.db.Begin()
 	if err != nil {
@@ -680,24 +710,37 @@ func (ss *SessionStore) ApplyCompaction(candidate CompactionCandidate, records [
 		return false, nil
 	}
 	placeholders := make([]string, len(records))
-	args := make([]any, 0, len(records)*10)
+	args := make([]any, 0, len(records)*11)
 	now := store.DatabaseTime(time.Now().UTC().Format(time.RFC3339))
+	archivedTokens := int64(0)
 	for i, record := range records {
-		placeholders[i] = "(?,?,?,?,?,?,?,?,?,?)"
+		if record.SummaryTokens <= 0 {
+			return false, fmt.Errorf("memory/session: summary token count for turn %d must be positive", record.TurnNumber)
+		}
+		placeholders[i] = "(?,?,?,?,?,?,?,?,?,?,?)"
 		args = append(args,
 			record.Ref, record.SessionID, record.UserID, record.RunID, record.TurnNumber,
-			[]byte(record.DetailJSON), record.SummaryText, record.SourceTokens, record.RetainedTokens, now,
+			[]byte(record.DetailJSON), record.SummaryText, record.SummaryTokens,
+			record.SourceTokens, record.RetainedTokens, now,
 		)
+		archivedTokens += int64(record.SummaryTokens)
 	}
 	if _, err := tx.Exec(
-		"INSERT INTO qa_turn_contexts(ref,session_id,user_id,run_id,turn_number,detail_json,summary_text,source_tokens,retained_tokens,created_at) VALUES "+strings.Join(placeholders, ","),
+		"INSERT INTO qa_turn_contexts(ref,session_id,user_id,run_id,turn_number,detail_json,summary_text,summary_tokens,source_tokens,retained_tokens,created_at) VALUES "+strings.Join(placeholders, ","),
 		args...); err != nil {
 		return false, err
 	}
+	if err := insertHistoryTerms(tx, records); err != nil {
+		return false, err
+	}
+	if err := enqueueHistoryUpserts(tx, records, now); err != nil {
+		return false, err
+	}
 	if _, err := tx.Exec(
-		`UPDATE qa_sessions SET summary=?,compacted_through_turn=?,updated_at=?
+		`UPDATE qa_sessions SET session_state=?,session_state_tokens=?,
+		 archived_summary_tokens=archived_summary_tokens+?,compacted_through_turn=?,updated_at=?
 		 WHERE id=? AND user_id=?`,
-		summary, candidate.ToTurn, now,
+		state, stateTokens, archivedTokens, candidate.ToTurn, now,
 		candidate.SessionID, candidate.UserID); err != nil {
 		return false, err
 	}
@@ -712,12 +755,13 @@ func (ss *SessionStore) GetTurnDetail(sessionID string, userID int64, reference 
 	var record TurnContextRecord
 	var detail []byte
 	err := ss.db.QueryRow(
-		`SELECT ref,session_id,user_id,run_id,detail_json,turn_number,summary_text,source_tokens,retained_tokens
+		`SELECT ref,session_id,user_id,run_id,detail_json,turn_number,summary_text,summary_tokens,source_tokens,retained_tokens
 		 FROM qa_turn_contexts
 		 WHERE ref=? AND session_id=? AND user_id=?`,
 		reference, sessionID, userID).Scan(
 		&record.Ref, &record.SessionID, &record.UserID, &record.RunID, &detail,
-		&record.TurnNumber, &record.SummaryText, &record.SourceTokens, &record.RetainedTokens,
+		&record.TurnNumber, &record.SummaryText, &record.SummaryTokens,
+		&record.SourceTokens, &record.RetainedTokens,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -822,7 +866,7 @@ func (ss *SessionStore) EnsureSession(id string, userID int64, title string) err
 		)
 	} else {
 		_, err = tx.Exec(
-			`INSERT INTO qa_sessions(id,user_id,title,summary,created_at,updated_at) VALUES(?,?,?,NULL,?,?)`,
+			`INSERT INTO qa_sessions(id,user_id,title,session_state,created_at,updated_at) VALUES(?,?,?,NULL,?,?)`,
 			id, userID, title, store.DatabaseTime(now), store.DatabaseTime(now),
 		)
 	}

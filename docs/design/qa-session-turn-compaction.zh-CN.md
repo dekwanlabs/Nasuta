@@ -1,5 +1,7 @@
 # QA 会话高低水位压缩与 JSON 归档设计
 
+> 本文保留旧 Rolling summary 方案的决策背景，不再描述当前运行格式。现行实现见 [QA 会话历史语义召回与有界上下文设计](./qa-session-history-semantic-retrieval.zh-CN.md)；运行时不兼容本文件中的 v1 摘要格式。
+
 ## 目标
 
 长会话的模型上下文与持久化记录采用不同生命周期：
