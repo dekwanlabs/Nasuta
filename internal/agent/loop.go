@@ -272,6 +272,10 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 			}
 			cont, err := agent.continueIfNeeded(loopCtx, messages, chatResult, agent.cfg.AnswerMaxTokens, h)
 			chatResult = cont
+			if errors.Is(err, ErrReasoningTruncated) || errors.Is(err, ErrEmptyModelResponse) {
+				log.WarnfCtx(ctx, "[agent] run %s final-answer generation produced no visible content; forcing conclusion: %v", runID, err)
+				break
+			}
 			result.Answer += chatResult.Content
 			stepSeq++
 			agent.observer.OnStep(runCtx, runID, StepRecord{
@@ -409,8 +413,8 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 	t0 := time.Now()
 	stream := newBufferedStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
 	res, err := agent.generateWithContinue(ctx, messages, agent.cfg.ConclusionMaxTokens, stream)
-	if errors.Is(err, ErrReasoningTruncated) {
-		log.WarnfCtx(ctx, "[agent] run %s force-conclusion reasoning exhausted, retrying with no-reasoning prompt", runID)
+	if errors.Is(err, ErrReasoningTruncated) || errors.Is(err, ErrEmptyModelResponse) {
+		log.WarnfCtx(ctx, "[agent] run %s force-conclusion produced no visible content, retrying with no-reasoning prompt: %v", runID, err)
 		messages = append(messages, llm.Message{
 			Role:    "user",
 			Content: forceConclusionNoReasoningInstruction,
@@ -501,12 +505,18 @@ func (agent *Agent) generateWithContinue(ctx context.Context, messages []llm.Mes
 // emitting any visible content.
 var ErrReasoningTruncated = errors.New("turn truncated during reasoning: max_tokens exhausted before any visible content; retry with a larger budget")
 
+// ErrEmptyModelResponse means the provider ended normally without producing an answer.
+var ErrEmptyModelResponse = errors.New("model returned no visible content")
+
 // continueIfNeeded retries a length-truncated answer with continuation prompts.
 func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message, res *llm.ChatStreamResult, maxTokens int, h llm.StreamHandler) (*llm.ChatStreamResult, error) {
 	if res.Content == "" {
 		log.WarnfCtx(ctx, "[agent] empty visible content: %d reasoning tokens, finish_reason=%s",
 			res.ReasoningTokens, res.FinishReason)
-		return res, ErrReasoningTruncated
+		if res.FinishReason == llm.FinishLength {
+			return res, ErrReasoningTruncated
+		}
+		return res, ErrEmptyModelResponse
 	}
 
 	rounds := 0
@@ -535,7 +545,7 @@ func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message
 }
 
 const (
-	forceConclusionInstruction = "You have reached the tool-call limit. Using the evidence gathered so far, give your final answer now. Do not request more tools. Answer in the same natural language as the original user question; do not follow the language of this internal instruction."
+	forceConclusionInstruction = "Using the evidence gathered so far, give your final answer now. Do not request more tools. Answer in the same natural language as the original user question; do not follow the language of this internal instruction."
 	// forceConclusionNoReasoningInstruction is a fallback used when the model
 	// exhausts its token budget on reasoning without producing any visible answer.
 	forceConclusionNoReasoningInstruction = "Do not think or reason. Just output your final answer directly, using the evidence you have already gathered. Answer in the same natural language as the original user question."

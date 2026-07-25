@@ -462,6 +462,55 @@ func TestContinueIfNeeded_ReasoningStageTruncation(t *testing.T) {
 	}
 }
 
+func TestContinueIfNeeded_EmptyStopIsNotReasoningTruncation(t *testing.T) {
+	srv := fakeStreamServer(t, []streamEvent{{finish: "stop"}})
+	defer srv.Close()
+
+	agent := newTestAgent(t, srv.URL)
+	res, err := agent.llm.ChatWithToolsMax(t.Context(), nil, nil, nil, 100)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	_, cerr := agent.continueIfNeeded(t.Context(), nil, res, 100, nil)
+	if !errors.Is(cerr, ErrEmptyModelResponse) {
+		t.Fatalf("expected ErrEmptyModelResponse, got %v", cerr)
+	}
+	if errors.Is(cerr, ErrReasoningTruncated) {
+		t.Fatalf("empty stop response was misclassified as reasoning truncation")
+	}
+}
+
+func TestRunRecoversFromEmptyStopWithForcedConclusion(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		content := ""
+		if atomic.AddInt32(&calls, 1) == 2 {
+			content = "根据已有证据给出结论。"
+		}
+		chunk := streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: content}, FinishReason: "stop"}}}
+		data, _ := json.Marshal(chunk)
+		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
+	}))
+	defer srv.Close()
+
+	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, &http.Client{})
+	agent := NewAgent(client, nil, AgentConfig{
+		MaxSteps: 2, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
+	}, nil, nil)
+	result, err := agent.RunWithPlan(t.Context(), "run_empty_stop", "请分析当前问题", nil, nil, domain.EvidencePlan{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Err != nil || result.Answer != "根据已有证据给出结论。" {
+		t.Fatalf("result = %#v", result)
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("LLM calls = %d, want 2", calls)
+	}
+}
+
 func TestGenerateWithContinue_NoTruncation(t *testing.T) {
 	srv := fakeStreamServer(t, []streamEvent{
 		{content: "短回答", finish: "stop"},
