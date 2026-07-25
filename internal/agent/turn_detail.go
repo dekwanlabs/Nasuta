@@ -170,7 +170,7 @@ func dividedBudget(total, count int) int {
 	if count <= 0 {
 		return total
 	}
-	return max(48, total/count)
+	return total / count
 }
 
 func appendSectionText(dst *strings.Builder, value string) {
