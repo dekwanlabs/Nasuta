@@ -12,7 +12,7 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-// collectServices formats the anchor's services with their endpoints.
+// collectServices formats service candidates without implying endpoint relevance.
 func (retrieve *Retriever) collectServices(ctx context.Context, services []string, svcMatches map[string]serviceMatch, addPart func(partial)) {
 	if len(services) == 0 {
 		return
@@ -28,23 +28,6 @@ func (retrieve *Retriever) collectServices(ctx context.Context, services []strin
 		}
 		sb.WriteString("\n")
 		refs = append(refs, Reference{Type: "service", Label: name, Target: name})
-	}
-	sb.WriteString("\n### Service Endpoints\n")
-	for _, name := range services {
-		epList, err := retrieve.tools.FindAPIs(ctx, name, "", 3)
-		if err != nil {
-			log.InfofCtx(ctx, "[qa] endpoint lookup for %s failed: %v", name, err)
-			continue
-		}
-		if len(epList) == 0 {
-			continue
-		}
-		fmt.Fprintf(&sb, "**%s:**\n", name)
-		for _, e := range epList {
-			if e.Path != "" {
-				fmt.Fprintf(&sb, "- `%s %s`\n", e.Method, e.Path)
-			}
-		}
 	}
 	log.InfofCtx(ctx, "[qa] collect services: %d services, %d refs", len(services), len(refs))
 	addPart(partial{text: sb.String(), refs: refs, priority: partialPriorityService})

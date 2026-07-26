@@ -42,6 +42,18 @@ public class DemoController {
 
     @PostMapping("/items/create")
     public Long create() { return 1L; }
+
+    @PostMapping("/items/annotated")
+    @ApiResponses({
+        @ApiResponse(code = 1001, message = "first"),
+        @ApiResponse(code = 1002, message = "second"),
+        @ApiResponse(code = 1003, message = "third"),
+        @ApiResponse(code = 1004, message = "fourth"),
+        @ApiResponse(code = 1005, message = "fifth"),
+        @ApiResponse(code = 1006, message = "sixth"),
+        @ApiResponse(code = 1007, message = "seventh")
+    })
+    public Long annotated() { return 2L; }
 }`)
 	writeFile(t, root, base+"/src/main/java/com/demo/UserFeign.java", `package com.demo;
 @FeignClient(value = "hsds-user-provider", path = "/user")
@@ -83,6 +95,11 @@ func TestBuildBundleEndToEnd(t *testing.T) {
 	}
 	if got := findEndpoint(b.Endpoints, "POST", "/demo/items/create"); got == nil {
 		t.Errorf("endpoint POST /demo/items/create not found")
+	}
+	if got := findEndpoint(b.Endpoints, "POST", "/demo/items/annotated"); got == nil {
+		t.Errorf("endpoint POST /demo/items/annotated not found")
+	} else if got.HandlerMethod != "annotated" {
+		t.Errorf("long-annotation handlerMethod = %q, want annotated", got.HandlerMethod)
 	}
 
 	// Feign is represented by the generic dependency model with symbol evidence.

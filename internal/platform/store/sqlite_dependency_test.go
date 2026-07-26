@@ -75,6 +75,46 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 	}
 }
 
+func TestListApisSearchesPathControllerAndHandler(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	service := testService("team/users", ".", "users")
+	bundle := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{{Repo: service.Repo, HeadSHA: "users-sha", IndexedAt: time.Now().UnixMilli()}},
+		Services:     []domain.ServiceRecord{service},
+		Endpoints: []domain.EndpointRecord{
+			{
+				ServiceKey: service.ServiceKey, ServiceName: service.ServiceName, Repo: service.Repo,
+				Method: "POST", Path: "/user/social-auth/link/check", Handler: "ThirdPartyAuthV2Controller",
+				HandlerMethod: "linkCheck", File: "repos/team/users/ThirdPartyAuthV2Controller.java",
+				Source: domain.SourceCodeScan, Confidence: 0.85,
+			},
+			{
+				ServiceKey: service.ServiceKey, ServiceName: service.ServiceName, Repo: service.Repo,
+				Method: "GET", Path: "/user/profile", Handler: "UserController", HandlerMethod: "profile",
+				File: "repos/team/users/UserController.java", Source: domain.SourceCodeScan, Confidence: 0.85,
+			},
+		},
+	}
+	if err := db.ReplaceStructure(context.Background(), "apis", bundle); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, keyword := range []string{"social-auth", "thirdpartyauth", "LINKCHECK"} {
+		page, err := db.ListApis(context.Background(), service.ServiceName, keyword, 1, 10)
+		if err != nil {
+			t.Fatalf("keyword %q: %v", keyword, err)
+		}
+		if page.Total != 1 || len(page.List) != 1 || page.List[0].Path != "/user/social-auth/link/check" {
+			t.Fatalf("keyword %q returned %#v", keyword, page)
+		}
+	}
+}
+
 func TestDependencyLimitCountsDependenciesAndKeepsAllEvidence(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
 	if err != nil {

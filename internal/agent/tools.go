@@ -785,8 +785,8 @@ func dependencyTrace(result ontology.DependencyResult) domain.DependencyTrace {
 	return trace
 }
 
-func (srv *Service) ListApis(ctx context.Context, service, pathKeyword string, limit int) map[string]any {
-	result, err := srv.ListApisResult(ctx, service, pathKeyword, limit)
+func (srv *Service) ListApis(ctx context.Context, service, keyword string, limit int) map[string]any {
+	result, err := srv.ListApisResult(ctx, service, keyword, limit)
 	if err != nil {
 		return map[string]any{"matches": nil, "error": err.Error()}
 	}
@@ -794,9 +794,9 @@ func (srv *Service) ListApis(ctx context.Context, service, pathKeyword string, l
 }
 
 // ListApisResult returns indexed APIs without hiding storage failures.
-func (srv *Service) ListApisResult(ctx context.Context, service, pathKeyword string, limit int) (map[string]any, error) {
+func (srv *Service) ListApisResult(ctx context.Context, service, keyword string, limit int) (map[string]any, error) {
 	limit = clampInt(limit, 1, 100)
-	matches, err := srv.FindAPIs(ctx, service, pathKeyword, limit)
+	matches, err := srv.FindAPIs(ctx, service, keyword, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -804,8 +804,8 @@ func (srv *Service) ListApisResult(ctx context.Context, service, pathKeyword str
 }
 
 // FindAPIs returns typed endpoint records for internal consumers.
-func (srv *Service) FindAPIs(ctx context.Context, service, pathKeyword string, limit int) ([]domain.EndpointRecord, error) {
-	page, err := srv.db.ListApis(ctx, service, pathKeyword, 1, limit)
+func (srv *Service) FindAPIs(ctx context.Context, service, keyword string, limit int) ([]domain.EndpointRecord, error) {
+	page, err := srv.db.ListApis(ctx, service, keyword, 1, limit)
 	if err != nil || page == nil {
 		return nil, err
 	}

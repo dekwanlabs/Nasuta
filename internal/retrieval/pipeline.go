@@ -107,7 +107,7 @@ type toolset interface {
 	AllServices(ctx context.Context) ([]domain.ServiceRecord, error)
 	FindServices(ctx context.Context, query string, limit int) (domain.SearchResult[domain.ServiceRecord], error)
 	FindCode(ctx context.Context, query, lang string, limit int) (domain.SearchResult[domain.CodeSearchHit], error)
-	FindAPIs(ctx context.Context, service, pathKeyword string, limit int) ([]domain.EndpointRecord, error)
+	FindAPIs(ctx context.Context, service, keyword string, limit int) ([]domain.EndpointRecord, error)
 	FindRunbooks(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (domain.SearchResult[domain.RunbookSearchHit], error)
 	TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error)
 	ServiceModules(ctx context.Context, repos []string) ([]domain.ServiceRecord, error)

@@ -419,8 +419,10 @@ func isClassLevelMapping(lines []string, index int) bool {
 var javaMethodRe = regexp.MustCompile(`(?:public|protected|private)?\s*[\w<>\[\],\s\.]+?\s+(\w+)\s*\(`)
 
 func javaMethodName(lines []string, index int) string {
-	end := min(index+8, len(lines))
-	for i := index; i < end; i++ {
+	for i := index; i < len(lines); i++ {
+		if i > index && mappingMethod(lines[i]) != "" {
+			return ""
+		}
 		line := lines[i]
 		if strings.Contains(line, "@") && !strings.Contains(line, "(") {
 			continue

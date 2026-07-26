@@ -720,19 +720,20 @@ type EndpointPage struct {
 	List  []domain.EndpointRecord `json:"list"`
 }
 
-// ListApis lists APIs for an exact service name and optional path prefix.
-func (store *SQLite) ListApis(ctx context.Context, service, pathPrefix string, page, pageSize int) (*EndpointPage, error) {
+// ListApis searches bounded API metadata within an optional exact service.
+func (store *SQLite) ListApis(ctx context.Context, service, keyword string, page, pageSize int) (*EndpointPage, error) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	where := " WHERE 1=1"
-	args := make([]any, 0, 2)
+	args := make([]any, 0, 4)
 	if service != "" {
 		where += " AND s.service_name = ?"
 		args = append(args, service)
 	}
-	if pathPrefix != "" {
-		where += " AND e.path >= ? AND e.path < ?"
-		args = append(args, pathPrefix, pathPrefix+"\U0010ffff")
+	if keyword = strings.ToLower(strings.TrimSpace(keyword)); keyword != "" {
+		pattern := "%" + escapeLikeKeyword(keyword) + "%"
+		where += ` AND (LOWER(e.path) LIKE ? ESCAPE '\' OR LOWER(e.handler) LIKE ? ESCAPE '\' OR LOWER(e.handler_method) LIKE ? ESCAPE '\')`
+		args = append(args, pattern, pattern, pattern)
 	}
 	var total int
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM endpoints e JOIN services s ON s.service_key=e.service_key`+where, args...).Scan(&total); err != nil {
@@ -766,6 +767,10 @@ FROM endpoints e JOIN services s ON s.service_key=e.service_key`+where+` ORDER B
 		list = append(list, endpoint)
 	}
 	return &EndpointPage{Total: total, List: list}, rows.Err()
+}
+
+func escapeLikeKeyword(keyword string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(keyword)
 }
 
 // Edges returns logical dependencies with all evidence locations.

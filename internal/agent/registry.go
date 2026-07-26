@@ -48,6 +48,12 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 	if len(histories) > 0 {
 		history = histories[0]
 	}
+	listAPISchema := objectSchema(map[string]any{
+		"service": propString("Optional exact service name filter."),
+		"keyword": propString("Optional case-insensitive path, controller, or handler keyword."),
+		"limit":   propInt("Max results (default 20)."),
+	}, nil)
+	listAPISchema["additionalProperties"] = false
 	tools := []Tool{
 		{
 			ID: "get_service",
@@ -87,16 +93,12 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		},
 		{
 			ID: "list_apis",
-			Description: "Authoritatively look up indexed complete API routes and handlers by service and/or path keyword. " +
-				"Use this before claiming an endpoint; Java routes combine class-level and method-level mappings. Do not compose a route from partial code annotations.",
-			Kind: ToolKindRead,
-			InputSchema: objectSchema(map[string]any{
-				"service":     propString("Optional service name filter."),
-				"pathKeyword": propString("Optional endpoint path keyword."),
-				"limit":       propInt("Max results (default 20)."),
-			}, nil),
+			Description: "Authoritatively look up indexed complete API routes by service and/or a path, controller, or handler keyword. " +
+				"Use this to locate a runtime endpoint before querying logs; omit service when ownership is unknown. Java routes combine class-level and method-level mappings. Do not compose a route from partial code annotations.",
+			Kind:        ToolKindRead,
+			InputSchema: listAPISchema,
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.ListApisResult(ctx, args.String("service"), args.String("pathKeyword"), args.Int("limit", 20))
+				result, err := svc.ListApisResult(ctx, args.String("service"), args.String("keyword"), args.Int("limit", 20))
 				if err != nil {
 					return "", err
 				}

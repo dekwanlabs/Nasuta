@@ -42,6 +42,36 @@ func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 	}
 }
 
+func TestListAPIsPublishesKeywordContract(t *testing.T) {
+	var listAPIs *Tool
+	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil) {
+		if candidate.ID == "list_apis" {
+			listAPIs = &candidate
+			break
+		}
+	}
+	if listAPIs == nil {
+		t.Fatal("list_apis was not registered")
+	}
+	properties, ok := listAPIs.InputSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("list_apis properties = %#v", listAPIs.InputSchema["properties"])
+	}
+	if _, ok := properties["keyword"]; !ok {
+		t.Fatal("list_apis does not publish keyword")
+	}
+	if _, ok := properties["pathKeyword"]; ok {
+		t.Fatal("list_apis still publishes obsolete pathKeyword")
+	}
+	registry := tool.NewRegistry()
+	if err := registry.Register(*listAPIs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.NewExecutor(0).Execute(context.Background(), registry.Snapshot(tool.ReadPolicy()), "list_apis", tool.Arguments{"pathKeyword": "social-auth"}); err == nil {
+		t.Fatal("list_apis accepted obsolete pathKeyword")
+	}
+}
+
 func TestSessionTurnDetailsToolIsPrivateAndRequiresCurrentReference(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

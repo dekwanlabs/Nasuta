@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/config"
@@ -25,7 +26,23 @@ func (f servicePathFakeTools) FindCode(context.Context, string, string, int) (do
 }
 
 func (f servicePathFakeTools) FindAPIs(context.Context, string, string, int) ([]domain.EndpointRecord, error) {
-	return nil, nil
+	panic("unexpected endpoint lookup")
+}
+
+func TestCollectServicesDoesNotAttachUnscoredEndpoints(t *testing.T) {
+	retrieve := New(servicePathFakeTools{}, config.Config{})
+	var got partial
+	retrieve.collectServices(context.Background(), []string{"hsas-app-user"}, map[string]serviceMatch{
+		"hsas-app-user": {name: "hsas-app-user", layer: "server", lang: "java"},
+	}, func(part partial) {
+		got = part
+	})
+	if !strings.Contains(got.text, "**hsas-app-user**") {
+		t.Fatalf("service context = %q", got.text)
+	}
+	if strings.Contains(got.text, "Service Endpoints") {
+		t.Fatalf("service context contains unscored endpoints: %q", got.text)
+	}
 }
 
 func (f servicePathFakeTools) FindRunbooks(context.Context, string, int, bool, string) (domain.SearchResult[domain.RunbookSearchHit], error) {
