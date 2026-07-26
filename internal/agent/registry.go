@@ -59,7 +59,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.ServiceLookupResult(ctx, argStr(args, "query", ""), argInt(args, "limit", 10))
+				result, err := svc.ServiceLookupResult(ctx, args.String("query"), args.Int("limit", 10))
 				if err != nil {
 					return "", err
 				}
@@ -77,8 +77,8 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"depth":     propInt("Traversal depth 1-5 (default 2)."),
 			}, []string{"service"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				depth := clampInt(argInt(args, "depth", 2), 1, 5)
-				result, err := svc.TraceDeps(ctx, argStr(args, "service", ""), argStr(args, "direction", "both"), depth)
+				depth := args.BoundedInt("depth", 2, 1, 5)
+				result, err := svc.TraceDeps(ctx, args.String("service"), args.StringDefault("direction", "both"), depth)
 				if err != nil {
 					return "", err
 				}
@@ -96,7 +96,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"limit":       propInt("Max results (default 20)."),
 			}, nil),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.ListApisResult(ctx, argStr(args, "service", ""), argStr(args, "pathKeyword", ""), argInt(args, "limit", 20))
+				result, err := svc.ListApisResult(ctx, args.String("service"), args.String("pathKeyword"), args.Int("limit", 20))
 				if err != nil {
 					return "", err
 				}
@@ -115,7 +115,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.CodeSearchResult(ctx, argStr(args, "query", ""), argStr(args, "lang", ""), argInt(args, "limit", 10))
+				result, err := svc.CodeSearchResult(ctx, args.String("query"), args.String("lang"), args.Int("limit", 10))
 				if err != nil {
 					return "", err
 				}
@@ -134,8 +134,8 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"limit":          propInt("Max nodes to return (default 5, max 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.GetSymbolResult(ctx, argStr(args, "query", ""),
-					argStr(args, "file", ""), argStr(args, "qualified_name", ""), argInt(args, "limit", 5))
+				result, err := svc.GetSymbolResult(ctx, args.String("query"),
+					args.String("file"), args.String("qualified_name"), args.Int("limit", 5))
 				if err != nil {
 					return "", err
 				}
@@ -159,10 +159,10 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 			}, nil),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				result, err := svc.TraceCallsResult(ctx, callchain.Request{
-					Query: argStr(args, "query", ""), File: argStr(args, "file", ""),
-					Line: argInt(args, "line", 0), QualifiedName: argStr(args, "qualified_name", ""),
-					Direction: argStr(args, "direction", "both"), MaxDepth: argInt(args, "max_depth", 3),
-					MaxNodes: argInt(args, "max_nodes", 40), MaxFanout: argInt(args, "max_fanout", 20),
+					Query: args.String("query"), File: args.String("file"),
+					Line: args.Int("line", 0), QualifiedName: args.String("qualified_name"),
+					Direction: args.StringDefault("direction", "both"), MaxDepth: args.Int("max_depth", 3),
+					MaxNodes: args.Int("max_nodes", 40), MaxFanout: args.Int("max_fanout", 20),
 				})
 				if err != nil {
 					return "", err
@@ -180,7 +180,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.RunbookSearchResult(ctx, argStr(args, "query", ""), argInt(args, "limit", 10), false, "")
+				result, err := svc.RunbookSearchResult(ctx, args.String("query"), args.Int("limit", 10), false, "")
 				if err != nil {
 					return "", err
 				}
@@ -193,7 +193,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 			Kind:        ToolKindRead,
 			InputSchema: objectSchema(map[string]any{"service": propString("Service name to check.")}, []string{"service"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.DocGapCheckResult(ctx, argStr(args, "service", ""))
+				result, err := svc.DocGapCheckResult(ctx, args.String("service"))
 				if err != nil {
 					return "", err
 				}
@@ -239,7 +239,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"limit": propInt("Max results (default 5, max 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				results, err := svc.WebSearchWithFetch(ctx, argStr(args, "query", ""), argInt(args, "limit", 5))
+				results, err := svc.WebSearchWithFetch(ctx, args.String("query"), args.Int("limit", 5))
 				if err != nil {
 					return "", err
 				}
@@ -264,7 +264,7 @@ func sessionTurnDetailsTool(sessions *memory.SessionStore) Tool {
 			if !ok {
 				return "", fmt.Errorf("session turn details are unavailable without a current compressed conversation")
 			}
-			record, err := sessions.GetTurnDetail(scope.SessionID, scope.UserID, argStr(args, "ref", ""))
+			record, err := sessions.GetTurnDetail(scope.SessionID, scope.UserID, args.String("ref"))
 			if err != nil {
 				return "", err
 			}
@@ -288,7 +288,7 @@ func findTurnsTool(history SessionHistory) Tool {
 			if !ok {
 				return "", fmt.Errorf("session history is unavailable without a current compressed conversation")
 			}
-			return history.Find(ctx, scope.UserID, scope.SessionID, argStr(args, "query", ""), clampInt(argInt(args, "limit", 8), 1, 24), 8192)
+			return history.Find(ctx, scope.UserID, scope.SessionID, args.String("query"), args.BoundedInt("limit", 8, 1, 24), 8192)
 		}),
 	}
 }
@@ -310,14 +310,14 @@ func relationTool(svc *Service) Tool {
 		}, []string{"entity"}),
 		Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 			predicates := make([]ontology.Predicate, 0)
-			for _, value := range argStrings(args, "relations") {
+			for _, value := range args.Strings("relations") {
 				predicates = append(predicates, ontology.Predicate(value))
 			}
 			result, err := svc.ontology.QueryRelations(ctx, ontology.RelationQuery{
-				Entity: argStr(args, "entity", ""), EntityClass: ontology.Class(argStr(args, "entity_class", "")),
-				Predicates: predicates, Direction: ontology.Direction(argStr(args, "direction", "outgoing")),
-				MaxDepth: argInt(args, "max_depth", 2), MaxNodes: argInt(args, "max_nodes", 50),
-				MaxFanout: argInt(args, "max_fanout", 20),
+				Entity: args.String("entity"), EntityClass: ontology.Class(args.String("entity_class")),
+				Predicates: predicates, Direction: ontology.Direction(args.StringDefault("direction", "outgoing")),
+				MaxDepth: args.Int("max_depth", 2), MaxNodes: args.Int("max_nodes", 50),
+				MaxFanout: args.Int("max_fanout", 20),
 			})
 			if err != nil {
 				return "", err
@@ -355,28 +355,6 @@ func propInt(desc string) map[string]any {
 
 func propStringArray(desc string) map[string]any {
 	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
-}
-
-func argStr(args tool.Arguments, key, fallback string) string {
-	if value := args.String(key); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func argInt(args tool.Arguments, key string, fallback int) int {
-	return args.Int(key, fallback)
-}
-
-func argStrings(args tool.Arguments, key string) []string {
-	value, _ := args[key].([]any)
-	out := make([]string, 0, len(value))
-	for _, item := range value {
-		if text, ok := item.(string); ok && text != "" {
-			out = append(out, text)
-		}
-	}
-	return out
 }
 
 func clampInt(value, low, high int) int {

@@ -98,15 +98,15 @@ func BuildMCP(tools *agent.Service, registry *agent.Registry) (*server.MCPServer
 			return nil, fmt.Errorf("tool %q schema: %w", toolID, err)
 		}
 		mcpServer.AddTool(mcp.NewToolWithRawSchema(string(toolID), candidate.Description, schema), func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			args := argsMap(r)
-			traceEnabled, _ := args["_trace"].(bool)
+			args := tool.Arguments(argsMap(r))
+			traceEnabled := args.Bool("_trace")
 			delete(args, "_trace")
 			var recorder *mcpTraceRecorder
 			if traceEnabled {
 				recorder = &mcpTraceRecorder{started: time.Now()}
 				ctx = domain.WithTraceRecorder(ctx, recorder)
 			}
-			result, err := executor.Execute(ctx, snapshot, toolID, tool.Arguments(args))
+			result, err := executor.Execute(ctx, snapshot, toolID, args)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}

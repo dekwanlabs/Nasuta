@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -35,19 +36,68 @@ const (
 // Arguments contains one validated tool invocation.
 type Arguments map[string]any
 
+// String returns a trimmed string argument.
 func (args Arguments) String(key string) string {
 	value, _ := args[key].(string)
-	return value
+	return strings.TrimSpace(value)
 }
 
+// StringDefault returns fallback when the argument is empty or not a string.
+func (args Arguments) StringDefault(key, fallback string) string {
+	if value := args.String(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
+// Int returns an integer argument decoded from JSON or fallback.
 func (args Arguments) Int(key string, fallback int) int {
 	switch value := args[key].(type) {
 	case int:
 		return value
+	case int64:
+		return int(value)
 	case float64:
 		return int(value)
 	default:
 		return fallback
+	}
+}
+
+// BoundedInt constrains an integer argument to the inclusive bounds.
+func (args Arguments) BoundedInt(key string, fallback, low, high int) int {
+	return min(max(args.Int(key, fallback), low), high)
+}
+
+// Bool returns a boolean argument or false.
+func (args Arguments) Bool(key string) bool {
+	value, _ := args[key].(bool)
+	return value
+}
+
+// Strings returns trimmed, non-empty string elements.
+func (args Arguments) Strings(key string) []string {
+	switch raw := args[key].(type) {
+	case []any:
+		out := make([]string, 0, len(raw))
+		for _, value := range raw {
+			text, ok := value.(string)
+			text = strings.TrimSpace(text)
+			if ok && text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case []string:
+		out := make([]string, 0, len(raw))
+		for _, value := range raw {
+			if value = strings.TrimSpace(value); value != "" {
+				out = append(out, value)
+			}
+		}
+		return out
+	default:
+		return nil
 	}
 }
 

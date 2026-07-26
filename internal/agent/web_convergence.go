@@ -40,7 +40,7 @@ func (state *webEvidenceState) Observe(call llm.ToolCall, result string) bool {
 	if err != nil {
 		return false
 	}
-	rawURL, _ := args["url"].(string)
+	rawURL := args.String("url")
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Hostname() == "" {
 		return false

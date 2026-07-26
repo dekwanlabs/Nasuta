@@ -101,20 +101,18 @@ func (svc *Service) Reject(id string, approver int64, reason string) error {
 }
 
 func (svc *Service) execute(ctx context.Context, action *PendingAction) (any, error) {
+	args := tool.Arguments(action.Args)
 	switch action.Tool {
 	case "propose_branch":
-		assignee, _ := action.Args["assignee"].(string)
-		branchName, _ := action.Args["branch_name"].(string)
 		out, err := svc.incidents.StartFix(ctx, action.IncidentID, incident.FixRequest{
-			Assignee: assignee, BranchName: branchName,
+			Assignee: args.String("assignee"), BranchName: args.String("branch_name"),
 		})
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"incident_id": out.ID, "status": out.Status, "branches": out.FixBranches}, nil
 	case "propose_commit":
-		branchName, _ := action.Args["branch_name"].(string)
-		out, err := svc.incidents.CommitFix(ctx, action.IncidentID, incident.ConfirmRequest{BranchName: branchName})
+		out, err := svc.incidents.CommitFix(ctx, action.IncidentID, incident.ConfirmRequest{BranchName: args.String("branch_name")})
 		if err != nil {
 			return nil, err
 		}

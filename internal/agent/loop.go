@@ -833,7 +833,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 		result := fmt.Sprintf("error: %v", err)
 		return ToolExecution{FullContent: result, ModelContent: result}
 	}
-	arguments := tool.Arguments(args)
+	arguments := args
 
 	if _, ok := snapshot.Get(tool.ToolID(name)); !ok {
 		result := fmt.Sprintf("error: unknown tool %q", name)
@@ -1096,8 +1096,8 @@ func toolMessage(toolCallID, name, content string) llm.Message {
 }
 
 // parseArgs decodes a tool call's JSON arguments.
-func parseArgs(ctx context.Context, arguments string) (map[string]any, error) {
-	args := map[string]any{}
+func parseArgs(ctx context.Context, arguments string) (tool.Arguments, error) {
+	args := tool.Arguments{}
 	s := strings.TrimSpace(arguments)
 	if s == "" {
 		return args, nil
