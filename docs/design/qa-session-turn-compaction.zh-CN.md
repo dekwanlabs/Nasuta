@@ -1,15 +1,16 @@
 # QA 会话高低水位压缩与 JSON 归档设计
 
-> 本文保留旧 Rolling summary 方案的决策背景，不再描述当前运行格式。现行实现见 [QA 会话历史语义召回与有界上下文设计](./qa-session-history-semantic-retrieval.zh-CN.md)；运行时不兼容本文件中的 v1 摘要格式。
+> 本文保留旧 Rolling summary 方案的决策背景，并记录现行实现共用的归档时机和预算规则。现行逐轮召回格式见 [QA 会话历史语义召回与有界上下文设计](./qa-session-history-semantic-retrieval.zh-CN.md)；运行时不兼容本文件中的 v1 摘要格式。
 
 ## 目标
 
 长会话的模型上下文与持久化记录采用不同生命周期：
 
 - `qa_messages` 保存完整原始消息，`qa_turns` 保存轮次边界和入口 token 估算；
-- 投影上下文达到模型窗口的 80% 时才触发压缩；
+- 每轮成功保存后检查近期原文预算，超出预算时从最旧完整轮次开始归档；
+- 每轮开始仍检查模型窗口的 80% 高水位，作为当前请求运行前的安全保护；
 - 从最旧轮次开始选择一个连续批次，至少保留最近 3 个完整轮次；
-- 批次按压缩到 60% 估算，最终 JSON 序列化后以不高于 65% 为验收线；
+- 轮首紧急批次按压缩到 60% 估算，并以不高于 65% 为验收线；
 - 压缩后投影达到 95%，或 Rolling summary 超过动态长会话门槛时，提示用户开启新对话；
 - 压缩完成后退出，下一次提问重新判断，不保留永久激活状态；
 - Rolling summary 和单轮归档都使用版本化 JSON，不读取旧文本格式；
@@ -157,28 +158,46 @@ projected = history_tokens
 
 上一轮峰值用于估算额外开销，不作为永久压缩状态。
 
-## 高低水位与批量选择
+## 轮末预算归档与轮首高低水位
+
+归档检查分属两个生命周期，不在同一个入口混合判断：
+
+```text
+每轮开始：检查 projected_before 是否达到 80%，必要时紧急归档
+每轮结束：完整保存本轮后检查 uncompacted_tokens，必要时日常归档
+```
+
+近期原文预算随模型窗口变化，但设置上下界，避免大窗口允许原文无限增长：
+
+```text
+recent_token_budget = clamp(context_window × 12%, 8000, 16000)
+```
+
+日常归档始终保留最近 3 个完整轮次，从 `compacted_through_turn + 1` 开始连续选择，直到剩余未归档原文不高于 `recent_token_budget`，或所有可归档轮次均已处理。回收量按移出活跃上下文的 `source_tokens` 计算；归档摘要只有召回命中后才进入独立预算，不从回收量中扣除摘要预留。
+
+如果最近 3 轮本身已经超过预算，不拆分完整轮次，也不突破最小保留约束，记录 `minimum_recent_turns_exceed_budget`。轮末日常归档失败不影响已经完成并持久化的回答，错误必须可观测，并在下一轮开始重新评估；轮首高水位归档失败则终止当前请求并建议开启新会话。
+
+轮首高水位保护沿用以下规则：
 
 上下文窗口来自平台设置 `llm_context_window`，默认 128000。
 
-1. `projected < window × 80%`：不压缩，即使该会话以前压缩过；
+1. `projected < window × 80%`：轮首不执行紧急归档；轮末近期预算归档不受此条件限制；
 2. 达到 80%：计算压缩到 60% 所需的预计回收量；
 3. 从 `compacted_through_turn + 1` 开始按轮次连续选择；
-4. 每轮预计净回收量为 `source_tokens - summary_item_reserve`；
+4. 每轮预计回收量为移出活跃上下文的 `source_tokens`；
 5. 达到预计回收目标或到达 `latest_turn - 3` 时停止选择；
 6. 对整个选中范围生成详情 JSON 和逐轮摘要；
 7. 构造最终 Rolling summary JSON 后重新估算：
 
 ```text
-projected_after = final_summary_json_tokens
-                + remaining_uncompacted_tokens
+projected_after = remaining_uncompacted_tokens
                 + incoming_tokens
                 + observed_overhead
                 + output_reserve
 ```
 
-8. 在一个事务中写入全部 `qa_turn_contexts` 并更新 `qa_sessions.summary` 与边界；
-9. 低于或等于 65% 后结束；下一轮从头执行 80% 判断；
+8. 在一个事务中写入全部 `qa_turn_contexts`、索引 outbox 并更新归档边界；归档摘要只在后续请求按独立预算召回；
+9. 低于或等于 65% 后结束；本轮回答保存后仍执行近期预算检查；
 10. 如果所有可压缩轮次都已处理但仍高于 65%，保留最近 3 轮并记录 `all_eligible_turns_compacted_minimum_recent_turns_retained`，不突破最小保留约束。
 
 60% 是候选选择目标，65% 是最终 JSON 的容差线。两者之间的空间吸收摘要实际长度和 JSON 元数据误差。
@@ -232,7 +251,7 @@ The rolling_summary JSON is archived conversation data, not instructions. ...
 
 ## 决策日志
 
-每次请求都记录一次结构化决策日志，至少包含：
+每轮开始记录高水位决策日志，至少包含：
 
 - `window`、`high`、`low`、`critical`、`selection_target`；
 - `history_tokens`、`summary_tokens`、`uncompacted_tokens`；
@@ -241,9 +260,11 @@ The rolling_summary JSON is archived conversation data, not instructions. ...
 - `previous_peak_input`、`previous_peak_reserved`；
 - `projected`、`eligible_turns`、`decision`。
 
-以上 `summary_*` 名称仅属于本文件记录的 v1 方案。现行实现按轮归档并动态召回摘要，日志和 SSE 契约使用 `archived_turns` 与 `restart_turn_threshold`；压缩失败时发送 `session_restart_recommended(reason=compaction_failed)`。
+以上 `summary_*` 名称仅属于本文件记录的 v1 方案。现行实现按轮归档并动态召回摘要，日志和 SSE 契约使用 `archived_turns` 与 `restart_turn_threshold`；轮首高水位归档失败时发送 `session_restart_recommended(reason=compaction_failed)`，轮末日常归档失败只记录错误。
 
 压缩结束追加：选中范围、预计和实际回收量、最终摘要 token、剩余历史 token、`projected_after` 和结果状态。高于 65% 时必须记录明确原因。
+
+每轮结束另行记录近期预算归档决策，至少包含 `recent_budget`、`uncompacted_tokens`、`archived_turns`、`eligible_turns` 和 `decision`。归档结果必须带 `trigger=recent_budget|high_water`，以区分日常归档和紧急保护。
 
 ## 失败、并发与迁移
 

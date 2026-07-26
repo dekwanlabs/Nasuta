@@ -29,7 +29,7 @@ active_prompt_history = O(configured_token_budget)
 
 1. MySQL 是历史事实源，向量命中必须回到 MySQL 按用户、会话和引用复核。
 2. 所有已压缩轮次均可归档，但单次请求只注入固定 token 预算内的相关摘要。
-3. 最近完整轮次优先保留，当前实现至少保留最近 3 轮不压缩。
+3. 最近完整轮次优先保留，至少保留最近 3 轮原文，并以 `clamp(context_window × 12%, 8000, 16000)` 限制近期原文预算。
 4. `session_history` 使用 dense+BM25 混合召回，并与 MySQL 精确词项召回并用，兼顾语义改写、常规关键词和错误码、类名、路径、ID 等精确标识符。
 5. 配置过的语义后端失败必须可见，不能静默替换 provider。
 6. 摘要和详情都是数据，不是可覆盖系统指令的指令来源。
@@ -106,24 +106,39 @@ created_at
 
 语义索引使用独立的 `session_history` collection。point ID 从 `ref` 确定性生成，每个 point 同时写入 dense vector 和 BM25 sparse vector，payload 只保存过滤和定位所需元数据。BM25 使用独立的持久化词表 `.nasuta/session_history_bm25_vocab.json`；新增 token 坐标必须先持久化，再写入 point。MySQL 事务写入归档、词项和 `qa_session_history_index_outbox`；后台消费者异步写入向量后端。向量写入失败不会破坏 MySQL 事实源，词项召回仍可工作，失败原因和重试必须可观测。
 
-## 压缩流程
+## 归档流程
 
-达到上下文窗口 80% 高水位后，系统执行一次 oldest-first 压缩：
+归档由两个入口触发：轮末的近期原文预算检查负责常态化控制上下文，轮首的 80% 高水位检查只负责保护即将执行的请求。
 
-1. 从 `compacted_through_turn + 1` 开始选择连续完整轮次，至少保留最近 3 轮原文。
-2. 为每轮构造有界 `detail_json` 和稳定 `cmp_...` 引用。
-3. 每 4 轮组成一个摘要 LLM 请求；最多 3 个请求并发，更多批次按波次继续。
-4. 校验每个请求返回的 item 集合必须与输入一一对应，并把每条摘要截断到 120 token。
-5. 在一个事务中写入逐轮归档、词项、语义 outbox，累计 `archived_summary_tokens`，推进 `compacted_through_turn`。
-6. 下一次请求只加载压缩边界之后的最近原文，并按当前问题动态召回归档摘要。
+### 轮末日常归档
 
-不存在 session state 生成、fallback、存储或提示词注入。摘要生成任一批失败时，压缩事务不提交，调用方发送：
+1. 成功回答并原子保存完整轮次后，重新读取 `uncompacted_tokens`。
+2. 计算 `recent_token_budget = clamp(context_window × 12%, 8000, 16000)`。
+3. 超出预算且存在可归档轮次时，从 `compacted_through_turn + 1` 开始选择连续完整轮次，至少保留最近 3 轮原文。
+4. 按归档轮次的 `source_tokens` 累计回收量，直到剩余近期原文不高于预算，或到达 `latest_turn - 3`。
+5. 如果最近 3 轮本身超过预算，保持完整轮次并记录明确原因，不按消息截断轮次。
+
+### 轮首高水位保护
+
+1. 使用当前问题、上一轮观测开销和输出预留计算 `projected_before`。
+2. 低于窗口 80% 时不执行轮首归档；达到 80% 后，从最旧可归档轮次开始压缩到 60% 目标。
+3. 高水位归档不能突破最近 3 个完整轮次。
+
+两个入口随后共用同一条逐轮归档链路：
+
+1. 为选中轮次构造有界 `detail_json` 和稳定 `cmp_...` 引用。
+2. 每 4 轮组成一个摘要 LLM 请求；最多 3 个请求并发，更多批次按波次继续。
+3. 校验每个请求返回的 item 集合必须与输入一一对应，并把每条摘要截断到 120 token。
+4. 在一个事务中写入逐轮归档、词项、语义 outbox，累计 `archived_summary_tokens`，推进 `compacted_through_turn`。
+5. 下一次请求只加载压缩边界之后的最近原文，并按当前问题动态召回归档摘要。
+
+不存在 session state 生成、fallback、存储或提示词注入。摘要生成任一批失败时，归档事务不提交。轮首高水位归档失败时，调用方发送：
 
 ```text
 session_restart_recommended(reason=compaction_failed)
 ```
 
-然后终止当前请求并建议用户开启新对话。
+然后终止当前请求并建议用户开启新对话。轮末日常归档失败时，本轮回答已经保存，不回滚回答；记录错误并由下一轮重新检查，高水位保护仍然有效。
 
 ## 动态召回
 
@@ -173,13 +188,16 @@ projected_after = remaining_uncompacted_tokens
 
 | 失败点 | 行为 |
 |---|---|
-| 摘要 LLM 失败、超时或 JSON 无效 | 不提交压缩，发送 `compaction_failed` 新窗口建议 |
+| 轮首摘要 LLM 失败、超时或 JSON 无效 | 不提交归档，发送 `compaction_failed` 新窗口建议 |
+| 轮末日常归档失败 | 不提交归档，保留已保存回答和近期原文，记录错误并在下一轮重新检查 |
 | MySQL 事务失败 | 整体回滚，发送 `compaction_failed` 新窗口建议 |
 | 语义后端未配置 | 明确使用词项召回 |
 | 已配置语义后端失败 | 记录失败并进入可观测词项模式，不替换 provider |
 | outbox 写向量失败 | 保留 MySQL 归档并重试，词项召回继续可用 |
 | 召回无结果 | 仅使用最近原文，不制造历史事实 |
 | `get_turn` 越权或引用不存在 | 返回明确错误，不泄露其他会话数据 |
+
+上表中的 `compaction_failed` 适用于轮首高水位保护。轮末日常归档失败只保留原文并记录可观测错误，不把已经完成的回答改为失败。
 
 ## 观测
 
@@ -197,8 +215,10 @@ projected_after = remaining_uncompacted_tokens
 - 同时在途摘要请求不超过 3 个。
 - 任一摘要批缺项、重复项、越界 item 或空文本均阻止事务提交。
 - 压缩提交后边界单调推进，陈旧生成结果不能覆盖新边界。
-- 请求提示词只包含最近原文和预算内召回摘要，不含 session state。
-- 压缩失败时 SSE 必须先出现 `session_restart_recommended` 且 reason 为 `compaction_failed`。
+- 请求提示词只包含近期预算内的最近原文和预算内召回摘要，不含 session state。
+- 低于 80% 但近期原文超过 `recent_token_budget` 时，轮末仍归档最旧完整轮次。
+- 轮末归档始终保留最近 3 个完整轮次，已归档摘要与近期原文不重叠。
+- 轮首高水位归档失败时 SSE 必须先出现 `session_restart_recommended` 且 reason 为 `compaction_failed`；轮末失败不得改写已完成回答。
 - 所有历史读取同时限定当前 `user_id` 和 `session_id`。
 
 ## 决策摘要

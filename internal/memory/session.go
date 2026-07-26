@@ -54,7 +54,6 @@ type SessionContextStats struct {
 type CompactionSelection struct {
 	KeepRecentTurns       int
 	TargetReductionTokens int
-	SummaryItemTokens     int
 }
 
 // TurnCompactionCandidate keeps one logical turn intact before compression.
@@ -585,7 +584,7 @@ func (ss *SessionStore) PrepareCompaction(sessionID string, userID int64, select
 				fromTurn, eligibleThrough, expectedTurn)
 		}
 		toTurn = turnNumber
-		estimatedReclaimed += sourceTokens - selection.SummaryItemTokens
+		estimatedReclaimed += sourceTokens
 		expectedTurn++
 		if estimatedReclaimed >= selection.TargetReductionTokens {
 			break

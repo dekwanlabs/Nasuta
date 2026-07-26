@@ -287,7 +287,7 @@ func TestPrepareCompactionReadsOnlyNewTurnsAndKeepsThree(t *testing.T) {
 			AddRow(3, "run-3", 120, "assistant", "a3", "", "", ""))
 
 	candidate, err := store.PrepareCompaction("session-1", 42, CompactionSelection{
-		KeepRecentTurns: 3, TargetReductionTokens: 50, SummaryItemTokens: 20,
+		KeepRecentTurns: 3, TargetReductionTokens: 50,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -324,7 +324,7 @@ func TestPrepareCompactionSelectsOldestBatchToReductionTarget(t *testing.T) {
 			AddRow(2, "run-2", 300, "user", "q2", "", "", ""))
 
 	candidate, err := store.PrepareCompaction("session-1", 42, CompactionSelection{
-		KeepRecentTurns: 3, TargetReductionTokens: 350, SummaryItemTokens: 100,
+		KeepRecentTurns: 3, TargetReductionTokens: 350,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -332,7 +332,7 @@ func TestPrepareCompactionSelectsOldestBatchToReductionTarget(t *testing.T) {
 	if candidate.FromTurn != 1 || candidate.ToTurn != 2 || candidate.EligibleThrough != 4 {
 		t.Fatalf("candidate = %+v", candidate)
 	}
-	if candidate.EstimatedReclaimedTokens != 400 || len(candidate.Turns) != 2 {
+	if candidate.EstimatedReclaimedTokens != 600 || len(candidate.Turns) != 2 {
 		t.Fatalf("candidate selection = %+v", candidate)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -355,7 +355,7 @@ func TestPrepareCompactionReportsMissingTurnNumbers(t *testing.T) {
 			AddRow(3, 10))
 
 	_, err := store.PrepareCompaction("session-1", 42, CompactionSelection{
-		KeepRecentTurns: 1, TargetReductionTokens: 100, SummaryItemTokens: 1,
+		KeepRecentTurns: 1, TargetReductionTokens: 100,
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing: 2") {
 		t.Fatalf("err = %v, want missing turn 2", err)

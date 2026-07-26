@@ -573,6 +573,31 @@ func (handler *Handler) saveTurnToSession(ctx context.Context, runID, sessionID 
 		return
 	}
 	log.InfofCtx(ctx, "[qa] saved turn %d to session %s", turnNo, sessionID)
+	handler.archiveSessionHistoryAfterTurn(ctx, sessionID, userID)
+}
+
+func (handler *Handler) archiveSessionHistoryAfterTurn(ctx context.Context, sessionID string, userID int64) {
+	if handler.qa == nil || handler.qaSessions == nil || handler.platform == nil {
+		return
+	}
+	timeout := max(qaCompactionMinTimeout, time.Duration(handler.platform.AgentTimeout))
+	archiveCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := agent.ArchiveSessionHistoryIfNeeded(
+		archiveCtx, handler.qa.LLM(), handler.qaSessions, sessionID, userID,
+		handler.platform.LLMContextWindow, handler.history,
+	)
+	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] post-turn history archive failed for %s: %v", sessionID, err)
+		return
+	}
+	if result.Applied {
+		log.InfofCtx(ctx, "[qa] archived session %s turns %d-%d after saved turn",
+			sessionID, result.FromTurn, result.ToTurn)
+	} else if result.Stale {
+		log.InfofCtx(ctx, "[qa] ignored stale post-turn archive for session %s through turn %d",
+			sessionID, result.ToTurn)
+	}
 }
 
 func (handler *Handler) APIQARuns(w http.ResponseWriter, r *http.Request) {
