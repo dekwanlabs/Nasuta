@@ -5,9 +5,10 @@ import (
 	"testing"
 )
 
-func TestJoinPromptMessagesPreservesRequestOrderAndMetadata(t *testing.T) {
+func TestJoinDynamicPromptMessagesOmitsBasePromptAndPreservesRuntimeMessages(t *testing.T) {
 	messages := []Message{
-		{Role: "system", Content: "system rules"},
+		{Role: "system", Content: "base system rules"},
+		{Role: "system", Content: "retrieved runtime context"},
 		{Role: "assistant", ToolCalls: []ToolCall{{
 			ID: "call-1", Type: "function",
 			Function: ToolFunction{Name: "search_code", Arguments: `{"query":"RunOutcome"}`},
@@ -16,12 +17,12 @@ func TestJoinPromptMessagesPreservesRequestOrderAndMetadata(t *testing.T) {
 		{Role: "user", Content: "question"},
 	}
 
-	got := joinPromptMessages(messages)
+	got := joinDynamicPromptMessages(messages)
 	wants := []string{
-		"message 1 role=system", "system rules",
-		"message 2 role=assistant", `"name":"search_code"`,
-		"message 3 role=tool name=search_code tool_call_id=call-1", "tool result",
-		"message 4 role=user", "question",
+		"message 2 role=system", "retrieved runtime context",
+		"message 3 role=assistant", `"name":"search_code"`,
+		"message 4 role=tool name=search_code tool_call_id=call-1", "tool result",
+		"message 5 role=user", "question",
 	}
 	position := -1
 	for _, want := range wants {
@@ -31,10 +32,22 @@ func TestJoinPromptMessagesPreservesRequestOrderAndMetadata(t *testing.T) {
 		}
 		position += next + 1
 	}
+	if strings.Contains(got, "base system rules") || strings.Contains(got, "message 1 role=system") {
+		t.Fatalf("dynamic prompt contains base system prompt:\n%s", got)
+	}
 }
 
-func TestJoinPromptMessagesHandlesEmptyRequest(t *testing.T) {
-	if got := joinPromptMessages(nil); got != "(no messages)" {
-		t.Fatalf("joinPromptMessages(nil) = %q", got)
+func TestJoinDynamicPromptMessagesHandlesNoDynamicMessages(t *testing.T) {
+	for _, messages := range [][]Message{nil, {{Role: "system", Content: "base prompt"}}} {
+		if got := joinDynamicPromptMessages(messages); got != "(no dynamic messages)" {
+			t.Fatalf("joinDynamicPromptMessages(%#v) = %q", messages, got)
+		}
+	}
+}
+
+func TestJoinDynamicPromptMessagesKeepsFirstNonSystemMessage(t *testing.T) {
+	got := joinDynamicPromptMessages([]Message{{Role: "user", Content: "question"}})
+	if !strings.Contains(got, "message 1 role=user") || !strings.Contains(got, "question") {
+		t.Fatalf("dynamic prompt = %q", got)
 	}
 }

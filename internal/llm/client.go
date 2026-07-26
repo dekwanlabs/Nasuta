@@ -429,17 +429,23 @@ func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, t
 }
 
 func (lc *LLMClient) logPrompt(ctx context.Context, messages []Message, toolCount, maxTokens int) {
-	log.InfofCtx(ctx, "[llm] request provider=%s model=%s max_tokens=%d messages=%d tools=%d prompt:\n%s",
-		lc.provider, lc.model, maxTokens, len(messages), toolCount, joinPromptMessages(messages))
+	log.InfofCtx(ctx, "[llm] request provider=%s model=%s max_tokens=%d messages=%d tools=%d dynamic_prompt:\n%s",
+		lc.provider, lc.model, maxTokens, len(messages), toolCount, joinDynamicPromptMessages(messages))
 }
 
-func joinPromptMessages(messages []Message) string {
-	if len(messages) == 0 {
-		return "(no messages)"
+func joinDynamicPromptMessages(messages []Message) string {
+	start := 0
+	// Request assembly reserves the first system message for fixed instructions.
+	if len(messages) > 0 && messages[0].Role == "system" {
+		start = 1
+	}
+	if start == len(messages) {
+		return "(no dynamic messages)"
 	}
 	var joined strings.Builder
-	for i, message := range messages {
-		if i > 0 {
+	for i := start; i < len(messages); i++ {
+		message := messages[i]
+		if i > start {
 			joined.WriteByte('\n')
 		}
 		fmt.Fprintf(&joined, "----- message %d role=%s", i+1, message.Role)
