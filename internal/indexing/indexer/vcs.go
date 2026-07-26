@@ -189,16 +189,19 @@ func (s *Syncer) CloneOrFetch(ctx context.Context, proj Project, dir, branch str
 		return err
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		if out, err := runGit(ctx, dir, "remote", "set-url", "origin", auth); err != nil {
+			return fmt.Errorf("refresh credentials for %s: %v: %s", proj.PathWithNamespace, err, sanitize(out, s.token))
+		}
 		if branch == "" {
 			// DefaultBranch unknown: pull whatever the remote considers default.
 			if out, err := runGit(ctx, dir, "fetch", "--depth", "1", "origin"); err != nil {
-				return fmt.Errorf("fetch %s: %v: %s", proj.PathWithNamespace, err, out)
+				return fmt.Errorf("fetch %s: %v: %s", proj.PathWithNamespace, err, sanitize(out, s.token))
 			}
 			_, err = runGit(ctx, dir, "reset", "--hard", "origin/HEAD")
 			return err
 		}
 		if out, err := runGit(ctx, dir, "fetch", "--depth", "1", "origin", branch); err != nil {
-			return fmt.Errorf("fetch %s: %v: %s", proj.PathWithNamespace, err, out)
+			return fmt.Errorf("fetch %s: %v: %s", proj.PathWithNamespace, err, sanitize(out, s.token))
 		}
 		// Reset to origin/<branch> rather than FETCH_HEAD.
 		// FETCH_HEAD is less reliable for empty branches on some git versions.
@@ -233,11 +236,13 @@ func (s *Syncer) CloneOrFetch(ctx context.Context, proj Project, dir, branch str
 }
 
 // SyncAll clones or fetches every project under root concurrently.
-func (s *Syncer) SyncAll(ctx context.Context, projects []Project, root string) []string {
+func (s *Syncer) SyncAll(ctx context.Context, projects []Project, root string) ([]string, error) {
 	sem := make(chan struct{}, s.concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var ok []string
+	var failed int
+	var firstErr error
 
 	for _, p := range projects {
 		p := p
@@ -250,6 +255,12 @@ func (s *Syncer) SyncAll(ctx context.Context, projects []Project, root string) [
 			dir := filepath.Join(root, "repos", dirName)
 			if err := s.CloneOrFetch(ctx, p, dir, p.DefaultBranch); err != nil {
 				log.Errorf("[vcs] sync %s failed: %v", p.PathWithNamespace, err)
+				mu.Lock()
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
 				return
 			}
 			mu.Lock()
@@ -258,7 +269,10 @@ func (s *Syncer) SyncAll(ctx context.Context, projects []Project, root string) [
 		}()
 	}
 	wg.Wait()
-	return ok
+	if firstErr != nil {
+		return ok, fmt.Errorf("sync %d/%d projects failed: %w", failed, len(projects), firstErr)
+	}
+	return ok, nil
 }
 
 func runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {

@@ -3,6 +3,7 @@ package indexing
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +53,8 @@ type Service struct {
 
 	VCS    *indexer.Client
 	Syncer *indexer.Syncer
+
+	activeVCSTokenFingerprint string
 
 	bm25 atomic.Pointer[retrieval.BM25Builder]
 
@@ -148,6 +151,16 @@ func (svc *Service) initVCS() {
 	}
 	svc.VCS = indexer.NewClient(svc.Platform.VCSURL, svc.Platform.VCSToken)
 	svc.Syncer = indexer.NewSyncer(svc.Platform.VCSToken, svc.Platform.VCSConcurrency)
+	svc.activeVCSTokenFingerprint = vcsTokenFingerprint(svc.Platform.VCSToken)
+	log.Infof("[vcs] client initialized (token_fingerprint=%s)", svc.activeVCSTokenFingerprint)
+}
+
+func vcsTokenFingerprint(token string) string {
+	if token == "" {
+		return "none"
+	}
+	sum := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("%x", sum[:6])
 }
 
 // DiscoverScanDirs applies VCS exclusions to workspace scan roots.
@@ -782,23 +795,31 @@ func serviceDoc(sv domain.ServiceRecord) semDoc {
 
 // CheckoutAll syncs every configured VCS project into the workspace.
 func (svc *Service) CheckoutAll(ctx context.Context, vcsURL, vcsToken, vcsGroups, vcsConcurrency, vcsExcludeProjects string) ([]string, error) {
-	// The first sync may happen before VCS has been initialized from platform settings.
-	if svc.VCS == nil {
-		if vcsURL != "" && vcsToken != "" && vcsGroups != "" {
-			svc.Platform.VCSURL = vcsURL
-			svc.Platform.VCSToken = vcsToken
-			// Accept both newline-separated UI values and older comma-joined ones.
-			svc.Platform.VCSGroups = nil
-			for _, g := range strings.FieldsFunc(vcsGroups, func(r rune) bool { return r == '\n' || r == ',' || r == '\r' }) {
-				if t := strings.TrimSpace(g); t != "" {
-					svc.Platform.VCSGroups = append(svc.Platform.VCSGroups, t)
-				}
+	requestedFingerprint := vcsTokenFingerprint(vcsToken)
+	activeFingerprint := svc.activeVCSTokenFingerprint
+	if activeFingerprint == "" {
+		activeFingerprint = "none"
+	}
+	log.Infof("[vcs] checkout credentials loaded (token_fingerprint=%s, client_initialized=%t, active_token_fingerprint=%s)",
+		requestedFingerprint, svc.VCS != nil, activeFingerprint)
+	if svc.VCS != nil && requestedFingerprint != activeFingerprint {
+		log.Warnf("[vcs] stored token differs from initialized client; rebuilding client (stored_fingerprint=%s, active_fingerprint=%s)",
+			requestedFingerprint, activeFingerprint)
+	}
+	if vcsURL != "" && vcsToken != "" && vcsGroups != "" {
+		svc.Platform.VCSURL = vcsURL
+		svc.Platform.VCSToken = vcsToken
+		// Accept both newline-separated UI values and older comma-joined ones.
+		svc.Platform.VCSGroups = nil
+		for _, g := range strings.FieldsFunc(vcsGroups, func(r rune) bool { return r == '\n' || r == ',' || r == '\r' }) {
+			if t := strings.TrimSpace(g); t != "" {
+				svc.Platform.VCSGroups = append(svc.Platform.VCSGroups, t)
 			}
-			if n, err := strconv.Atoi(vcsConcurrency); err == nil && n > 0 {
-				svc.Platform.VCSConcurrency = n
-			}
-			svc.initVCS()
 		}
+		if n, err := strconv.Atoi(vcsConcurrency); err == nil && n > 0 {
+			svc.Platform.VCSConcurrency = n
+		}
+		svc.initVCS()
 	}
 	// Refresh exclusions on every call so settings changes take effect immediately.
 	if vcsExcludeProjects != "" {
@@ -816,10 +837,10 @@ func (svc *Service) CheckoutAll(ctx context.Context, vcsURL, vcsToken, vcsGroups
 	if err != nil {
 		return nil, err
 	}
-	synced := svc.Syncer.SyncAll(ctx, projects, svc.Cfg.WorkspaceRoot)
+	synced, err := svc.Syncer.SyncAll(ctx, projects, svc.Cfg.WorkspaceRoot)
 	log.Infof("[vcs] checked out %d/%d projects into %s", len(synced), len(projects), svc.Cfg.WorkspaceRoot)
 	svc.ScanDirs = svc.DiscoverScanDirs()
-	return synced, nil
+	return synced, err
 }
 
 // SyncOne fetches a single project and updates its local checkout.
