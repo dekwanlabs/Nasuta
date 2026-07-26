@@ -75,6 +75,21 @@ func (args Arguments) Bool(key string) bool {
 	return value
 }
 
+// Object returns a nested argument object or nil.
+func (args Arguments) Object(key string) Arguments {
+	value, _ := args[key].(map[string]any)
+	return Arguments(value)
+}
+
+// Time returns an optional RFC3339 timestamp argument.
+func (args Arguments) Time(key string) (time.Time, error) {
+	value := args.String(key)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339Nano, value)
+}
+
 // Strings returns trimmed, non-empty string elements.
 func (args Arguments) Strings(key string) []string {
 	switch raw := args[key].(type) {

@@ -15,6 +15,8 @@ func TestArguments(t *testing.T) {
 		"int64":        int64(4),
 		"float64":      float64(5),
 		"bool":         true,
+		"object":       map[string]any{"key": " value "},
+		"time":         "2026-07-26T08:30:00.123Z",
 		"strings":      []any{" first ", "", 2, "second"},
 		"typedStrings": []string{" third ", "  ", "fourth"},
 	}
@@ -34,6 +36,16 @@ func TestArguments(t *testing.T) {
 	}
 	if !args.Bool("bool") || args.Bool("missing") {
 		t.Fatalf("Bool values are invalid")
+	}
+	if args.Object("object").String("key") != "value" || args.Object("missing") != nil {
+		t.Fatalf("Object values are invalid")
+	}
+	parsed, err := args.Time("time")
+	if err != nil || parsed.Format(time.RFC3339Nano) != "2026-07-26T08:30:00.123Z" {
+		t.Fatalf("Time = %s, err = %v", parsed, err)
+	}
+	if missing, err := args.Time("missing"); err != nil || !missing.IsZero() {
+		t.Fatalf("missing Time = %s, err = %v", missing, err)
 	}
 	if got, want := args.Strings("strings"), []string{"first", "second"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Strings = %#v, want %#v", got, want)
