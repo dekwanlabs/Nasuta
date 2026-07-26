@@ -49,7 +49,7 @@ func New(sessions *memory.SessionStore, sem semantic.Store, emb embed.Embedder) 
 
 // EnableBM25 binds sparse coordinates to the dedicated history collection.
 func (service *Service) EnableBM25(vocabPath string) error {
-	if service == nil || vocabPath == "" {
+	if vocabPath == "" {
 		return fmt.Errorf("session history BM25: vocabulary path is required")
 	}
 	builder, err := retrieval.LoadVocab(vocabPath)
@@ -103,7 +103,7 @@ type historyPayload struct {
 
 func (service *Service) find(ctx context.Context, userID int64, sessionID, query string, limit, tokenBudget int, neighbors bool) (string, error) {
 	started := time.Now()
-	if service == nil || service.sessions == nil || userID <= 0 || sessionID == "" || strings.TrimSpace(query) == "" {
+	if userID <= 0 || sessionID == "" || strings.TrimSpace(query) == "" {
 		return "", nil
 	}
 	if limit <= 0 || limit > selectedLimit {
@@ -413,7 +413,7 @@ func isLowInformation(value string) bool {
 
 // SyncPending processes one bounded outbox batch.
 func (service *Service) SyncPending(ctx context.Context) error {
-	if service == nil || service.semantic == nil || service.embedder == nil || !service.embedder.Enabled() {
+	if service.semantic == nil || service.embedder == nil || !service.embedder.Enabled() {
 		return nil
 	}
 	service.syncMu.Lock()
@@ -523,7 +523,7 @@ func semanticPointIDs(refs []string) []string {
 
 // Run retries pending vector mutations until the platform context is canceled.
 func (service *Service) Run(ctx context.Context) {
-	if service == nil || service.semantic == nil {
+	if service.semantic == nil {
 		return
 	}
 	ticker := time.NewTicker(5 * time.Second)
@@ -542,7 +542,7 @@ func (service *Service) Run(ctx context.Context) {
 
 // Close releases the dedicated session-history semantic store.
 func (service *Service) Close() error {
-	if service == nil || service.semantic == nil {
+	if service.semantic == nil {
 		return nil
 	}
 	return service.semantic.Close()

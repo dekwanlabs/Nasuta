@@ -94,7 +94,8 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		{
 			ID: "list_apis",
 			Description: "Authoritatively look up indexed complete API routes by service and/or a path, controller, or handler keyword. " +
-				"Use this to locate a runtime endpoint before querying logs; omit service when ownership is unknown. Java routes combine class-level and method-level mappings. Do not compose a route from partial code annotations.",
+				"Use this to locate a runtime endpoint before querying logs; omit service when ownership is unknown. Java routes combine class-level and method-level mappings. " +
+				"This endpoint inventory does not establish caller or callee relationships. Trace callers to find an upstream controller, then use this lookup again to resolve that controller's complete route. Do not compose a route from partial code annotations.",
 			Kind:        ToolKindRead,
 			InputSchema: listAPISchema,
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
@@ -147,6 +148,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		{
 			ID: "trace_calls",
 			Description: "Trace method-level callers and callees from a symbol or exact code-hit location. " +
+				"Follow callers from an internal implementation through client adapters to locate upstream controller candidates, then use the authoritative API lookup for their complete routes. " +
 				"Verified service_route hops support cross-service calls; truncated or unresolved frontiers are incomplete, and this is not proof of complete service dependencies.",
 			Kind: ToolKindRead,
 			InputSchema: objectSchema(map[string]any{

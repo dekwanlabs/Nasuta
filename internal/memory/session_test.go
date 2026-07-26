@@ -46,12 +46,13 @@ func TestGetRecentSessionQueriesOnlyRequestedTail(t *testing.T) {
 func TestListMessagesBeforeUsesExclusiveCursor(t *testing.T) {
 	store, mock, closeDB := newMockSessionStore(t)
 	defer closeDB()
+	createdAt := time.Date(2026, time.July, 25, 8, 30, 0, 0, time.UTC)
 	mock.ExpectQuery(`SELECT m\.seq, m\.role, m\.content.*m\.seq < \?.*ORDER BY m\.seq DESC LIMIT \?`).
 		WithArgs("session-1", int64(42), 4, 3).
-		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
-			AddRow(3, "assistant", "three", "", "", "").
-			AddRow(2, "user", "two", "", "", "").
-			AddRow(1, "assistant", "one", "", "", ""))
+		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name", "created_at"}).
+			AddRow(3, "assistant", "three", "", "", "", createdAt).
+			AddRow(2, "user", "two", "", "", "", createdAt).
+			AddRow(1, "assistant", "one", "", "", "", createdAt))
 
 	page, err := store.ListMessagesBefore("session-1", 42, 4, 2)
 	if err != nil {
@@ -63,6 +64,9 @@ func TestListMessagesBeforeUsesExclusiveCursor(t *testing.T) {
 	if page.Messages[0].Content != "two" || page.Messages[1].Content != "three" {
 		t.Fatalf("messages are not chronological: %#v", page.Messages)
 	}
+	if page.Messages[0].CreatedAt != createdAt.Format(time.RFC3339) {
+		t.Fatalf("created_at = %q", page.Messages[0].CreatedAt)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +75,7 @@ func TestListMessagesBeforeUsesExclusiveCursor(t *testing.T) {
 func TestListTurnsBeforeKeepsCompleteTurns(t *testing.T) {
 	store, mock, closeDB := newMockSessionStore(t)
 	defer closeDB()
+	createdAt := time.Date(2026, time.July, 25, 8, 30, 0, 0, time.UTC)
 	mock.ExpectQuery(`SELECT t\.first_seq, t\.last_seq.*t\.last_seq < \?.*ORDER BY t\.turn_no DESC LIMIT \?`).
 		WithArgs("session-1", int64(42), 8, 3).
 		WillReturnRows(sqlmock.NewRows([]string{"first_seq", "last_seq"}).
@@ -79,13 +84,13 @@ func TestListTurnsBeforeKeepsCompleteTurns(t *testing.T) {
 			AddRow(0, 1))
 	mock.ExpectQuery(`SELECT m\.seq, m\.role, m\.content.*m\.seq >= \?.*m\.seq < \?.*ORDER BY m\.seq ASC`).
 		WithArgs("session-1", int64(42), 2, 8).
-		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
-			AddRow(2, "user", "question two", "", "", "").
-			AddRow(3, "assistant", "tool call", "", "", "").
-			AddRow(4, "tool", "tool result", "", "call-1", "search").
-			AddRow(5, "user", "question three", "", "", "").
-			AddRow(6, "assistant", "tool call", "", "", "").
-			AddRow(7, "assistant", "answer three", "", "", ""))
+		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name", "created_at"}).
+			AddRow(2, "user", "question two", "", "", "", createdAt).
+			AddRow(3, "assistant", "tool call", "", "", "", createdAt).
+			AddRow(4, "tool", "tool result", "", "call-1", "search", createdAt).
+			AddRow(5, "user", "question three", "", "", "", createdAt).
+			AddRow(6, "assistant", "tool call", "", "", "", createdAt).
+			AddRow(7, "assistant", "answer three", "", "", "", createdAt))
 
 	page, err := store.ListTurnsBefore("session-1", 42, 8, 2)
 	if err != nil {
@@ -96,6 +101,9 @@ func TestListTurnsBeforeKeepsCompleteTurns(t *testing.T) {
 	}
 	if page.Messages[0].Content != "question two" || page.Messages[5].Content != "answer three" {
 		t.Fatalf("turn messages are incomplete or unordered: %#v", page.Messages)
+	}
+	if page.Messages[0].CreatedAt != createdAt.Format(time.RFC3339) {
+		t.Fatalf("created_at = %q", page.Messages[0].CreatedAt)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

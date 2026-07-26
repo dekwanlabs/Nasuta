@@ -109,4 +109,24 @@ func TestQARuntimeStatusFormatting(t *testing.T) {
 	if got := cachePercent(0, 0); got != 0 {
 		t.Fatalf("empty cache percent = %d, want 0", got)
 	}
+
+	handler := &Handler{platform: &config.PlatformSettings{
+		LLMBaseURL:       "https://api.example.com/v1",
+		LLMAPIKey:        "test-key",
+		LLMModel:         "gpt-test",
+		LLMContextWindow: 128000,
+	}}
+	recorder := httptest.NewRecorder()
+	handler.APIQARuntimeStatus(recorder, httptest.NewRequest("GET", "/api/qa/runtime?session_id=session-1", nil))
+	var response struct {
+		Data struct {
+			Model string `json:"model"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Model != "gpt-test" {
+		t.Fatalf("model = %q", response.Data.Model)
+	}
 }

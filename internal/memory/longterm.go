@@ -49,8 +49,7 @@ func newMemoryStore(db *sql.DB, semantic semantic.Store, embedder embed.Embedder
 
 // Enabled reports whether semantic recall is available.
 func (memory *MemoryStore) Enabled() bool {
-	return memory != nil &&
-		memory.semantic != nil && memory.semantic.Capabilities().Dense &&
+	return memory.semantic != nil && memory.semantic.Capabilities().Dense &&
 		memory.embedder != nil && memory.embedder.Enabled()
 }
 

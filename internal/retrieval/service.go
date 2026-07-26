@@ -13,19 +13,6 @@ import (
 // Service is the outward-facing retrieval capability.
 type Service = Retriever
 
-// blankDash returns "-" for blank strings, otherwise the trimmed string.
-func blankDash(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "-"
-	}
-	return strings.TrimSpace(s)
-}
-
-// truncateInline collapses whitespace and truncates to one line.
-func truncateInline(s string, max int) string {
-	return platform.TruncateForLog(strings.Join(strings.Fields(s), " "), max)
-}
-
 func runbookTitles(matches []domain.RunbookSearchHit) []string {
 	titles := make([]string, 0, len(matches))
 	for _, match := range matches {

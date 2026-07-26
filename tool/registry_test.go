@@ -103,6 +103,47 @@ func TestExecutorRejectsUnknownArgumentsWhenSchemaIsClosed(t *testing.T) {
 	}
 }
 
+func TestExecutorEnforcesSchemaConstraints(t *testing.T) {
+	registry := NewRegistry()
+	candidate := testTool("constraints", "ok")
+	candidate.InputSchema = JSONSchema{
+		"type": TypeObject,
+		"properties": map[string]any{
+			"limit": map[string]any{"type": TypeInt, "minimum": 1, "maximum": 20},
+			"items": map[string]any{
+				"type": TypeArray, "minItems": 1,
+				"items": map[string]any{
+					"oneOf": []any{
+						map[string]any{"type": TypeString, "const": "logs"},
+						map[string]any{"type": TypeInt, "minimum": 10},
+					},
+				},
+			},
+		},
+	}
+	if err := registry.Register(candidate); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(0)
+	snapshot := registry.Snapshot(ReadPolicy())
+	for _, args := range []Arguments{
+		{"limit": 0},
+		{"limit": 21},
+		{"items": []any{}},
+		{"items": []any{"traces"}},
+		{"items": []any{9}},
+	} {
+		if _, err := executor.Execute(context.Background(), snapshot, "constraints", args); err == nil {
+			t.Fatalf("executor accepted %#v", args)
+		}
+	}
+	if _, err := executor.Execute(context.Background(), snapshot, "constraints", Arguments{
+		"limit": 20, "items": []any{"logs", 10},
+	}); err != nil {
+		t.Fatalf("valid constrained arguments: %v", err)
+	}
+}
+
 func TestEmptyBatchDoesNotAdvanceRevision(t *testing.T) {
 	registry := NewRegistry()
 	revision := registry.Revision()

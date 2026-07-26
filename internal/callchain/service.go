@@ -87,9 +87,6 @@ func (service *Service) SetGraph(graph *codegraph.DB) {
 
 // Close releases the shared codegraph connection.
 func (service *Service) Close() error {
-	if service == nil {
-		return nil
-	}
 	service.graphMu.Lock()
 	graph := service.graph
 	service.graph = nil
@@ -102,7 +99,7 @@ func (service *Service) Close() error {
 
 // Available reports whether function-level traversal can run.
 func (service *Service) Available() bool {
-	return service != nil && service.structure != nil && service.graphDB() != nil
+	return service.structure != nil && service.graphDB() != nil
 }
 
 func (service *Service) graphDB() *codegraph.DB {

@@ -234,9 +234,6 @@ func openStructureDB(path string) (*sql.DB, bool, error) {
 
 // Close closes the active snapshot after current readers finish.
 func (store *SQLite) Close() error {
-	if store == nil {
-		return nil
-	}
 	store.mu.Lock()
 	db := store.db
 	store.db = nil

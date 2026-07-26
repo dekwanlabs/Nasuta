@@ -20,16 +20,10 @@ type Handler struct {
 }
 
 func New(incidents *incident.Manager, actions *approval.Service, alertSecret string) *Handler {
-	if incidents == nil || actions == nil {
-		return nil
-	}
 	return &Handler{incidents: incidents, actions: actions, alertSecret: alertSecret}
 }
 
 func (handler *Handler) RegisterRoutes(api func(string, http.HandlerFunc)) {
-	if handler == nil {
-		return
-	}
 	api("POST /api/alert/webhook", handler.AlertWebhook)
 	api("POST /api/alert/manual", handler.AlertManual)
 	api("GET /api/incidents", handler.ListIncidents)

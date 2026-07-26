@@ -158,11 +158,6 @@ func normalizeStopReason(reason string) string {
 	}
 }
 
-func (anthropic anthropicProvider) ChatMax(ctx context.Context, system, user string, maxTokens int) (string, error) {
-	content, _, err := anthropic.chatMessages(ctx, []Message{{Role: "system", Content: system}, {Role: "user", Content: user}}, maxTokens)
-	return content, err
-}
-
 func (anthropic anthropicProvider) chatMessages(ctx context.Context, messages []Message, maxTokens int) (string, Usage, error) {
 	if maxTokens <= 0 {
 		maxTokens = anthropic.maxTokens

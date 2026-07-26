@@ -315,15 +315,10 @@ func (platform *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 
 // Close releases reusable platform resources.
 func (platform *Platform) Close() error {
-	if platform == nil || platform.index == nil {
-		return nil
-	}
 	if platform.incidents != nil {
 		_ = platform.incidents.Close()
 	}
-	if platform.callChain != nil {
-		_ = platform.callChain.Close()
-	}
+	_ = platform.callChain.Close()
 	if platform.ontology != nil {
 		_ = platform.ontology.Close()
 	}

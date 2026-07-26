@@ -87,9 +87,15 @@ type HistoryTerm struct {
 
 // MessagePage is one reverse-cursor page returned in chronological order.
 type MessagePage struct {
-	Messages      []llm.Message `json:"messages"`
-	NextBeforeSeq int           `json:"next_before_seq"`
-	HasMore       bool          `json:"has_more"`
+	Messages      []SessionMessage `json:"messages"`
+	NextBeforeSeq int              `json:"next_before_seq"`
+	HasMore       bool             `json:"has_more"`
+}
+
+// SessionMessage adds persistence metadata needed by history views.
+type SessionMessage struct {
+	llm.Message
+	CreatedAt string `json:"created_at"`
 }
 
 var ErrSessionOwnership = errors.New("memory/session: session belongs to another user")
@@ -329,7 +335,7 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	query := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name
+	query := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.created_at
 	          FROM qa_messages m
 	          JOIN qa_sessions s ON s.id = m.session_id
 	          WHERE m.session_id = ? AND s.user_id = ?`
@@ -347,16 +353,18 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 	defer rows.Close()
 	type sequencedMessage struct {
 		seq int
-		msg llm.Message
+		msg SessionMessage
 	}
 	desc := make([]sequencedMessage, 0, limit+1)
 	for rows.Next() {
 		var item sequencedMessage
 		var toolCalls string
-		if err := rows.Scan(&item.seq, &item.msg.Role, &item.msg.Content, &toolCalls, &item.msg.ToolCallID, &item.msg.Name); err != nil {
+		var createdAt sql.NullTime
+		if err := rows.Scan(&item.seq, &item.msg.Role, &item.msg.Content, &toolCalls, &item.msg.ToolCallID, &item.msg.Name, &createdAt); err != nil {
 			return nil, err
 		}
-		if err := unmarshalToolCalls(toolCalls, &item.msg); err != nil {
+		item.msg.CreatedAt = store.FormatDatabaseTime(createdAt)
+		if err := unmarshalToolCalls(toolCalls, &item.msg.Message); err != nil {
 			return nil, err
 		}
 		desc = append(desc, item)
@@ -368,7 +376,7 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 	if hasMore {
 		desc = desc[:limit]
 	}
-	page := &MessagePage{Messages: make([]llm.Message, len(desc)), HasMore: hasMore, NextBeforeSeq: -1}
+	page := &MessagePage{Messages: make([]SessionMessage, len(desc)), HasMore: hasMore, NextBeforeSeq: -1}
 	if len(desc) > 0 {
 		page.NextBeforeSeq = desc[len(desc)-1].seq
 	}
@@ -427,7 +435,7 @@ func (ss *SessionStore) ListTurnsBefore(id string, userID int64, beforeSeq, limi
 		bounds = bounds[:limit]
 	}
 	firstSeq := bounds[len(bounds)-1].firstSeq
-	messageQuery := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name
+	messageQuery := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.created_at
 	                 FROM qa_messages m
 	                 JOIN qa_sessions s ON s.id = m.session_id
 	                 WHERE m.session_id = ? AND s.user_id = ? AND m.seq >= ?`
@@ -443,18 +451,20 @@ func (ss *SessionStore) ListTurnsBefore(id string, userID int64, beforeSeq, limi
 	}
 	defer messageRows.Close()
 	page := &MessagePage{
-		Messages:      make([]llm.Message, 0, limit*2),
+		Messages:      make([]SessionMessage, 0, limit*2),
 		HasMore:       hasMore,
 		NextBeforeSeq: firstSeq,
 	}
 	for messageRows.Next() {
 		var seq int
-		var msg llm.Message
+		var msg SessionMessage
 		var toolCalls string
-		if err := messageRows.Scan(&seq, &msg.Role, &msg.Content, &toolCalls, &msg.ToolCallID, &msg.Name); err != nil {
+		var createdAt sql.NullTime
+		if err := messageRows.Scan(&seq, &msg.Role, &msg.Content, &toolCalls, &msg.ToolCallID, &msg.Name, &createdAt); err != nil {
 			return nil, err
 		}
-		if err := unmarshalToolCalls(toolCalls, &msg); err != nil {
+		msg.CreatedAt = store.FormatDatabaseTime(createdAt)
+		if err := unmarshalToolCalls(toolCalls, &msg.Message); err != nil {
 			return nil, err
 		}
 		page.Messages = append(page.Messages, msg)

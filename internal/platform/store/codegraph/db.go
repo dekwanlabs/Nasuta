@@ -128,9 +128,6 @@ func validateNodePaths(d *sql.DB) error {
 
 // Refresh switches future queries to the database produced by a full rebuild.
 func (d *DB) Refresh() error {
-	if d == nil {
-		return fmt.Errorf("codegraph: refresh unavailable database")
-	}
 	next, err := openDatabase(d.dbPath)
 	if err != nil {
 		return err
@@ -154,9 +151,6 @@ func (d *DB) Refresh() error {
 
 // Close closes the database.
 func (d *DB) Close() error {
-	if d == nil {
-		return nil
-	}
 	d.mu.Lock()
 	current := d.db
 	d.db = nil
@@ -168,9 +162,6 @@ func (d *DB) Close() error {
 }
 
 func (d *DB) query(query string, args ...any) (*sql.Rows, error) {
-	if d == nil {
-		return nil, sql.ErrConnDone
-	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.db == nil {
@@ -180,9 +171,6 @@ func (d *DB) query(query string, args ...any) (*sql.Rows, error) {
 }
 
 func (d *DB) scanRow(query string, args []any, dest ...any) error {
-	if d == nil {
-		return sql.ErrConnDone
-	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.db == nil {
@@ -622,11 +610,8 @@ func scanNodes(rows *sql.Rows) ([]Node, error) {
 
 // DistinctNodeFilePaths returns all distinct file paths under repos/ in one
 // query, so the caller can bucket them by repo client-side instead of running
-// one count query per repo. Returns nil when the DB is nil.
+// one count query per repo.
 func (d *DB) DistinctNodeFilePaths() ([]string, error) {
-	if d == nil {
-		return nil, nil
-	}
 	rows, err := d.query(`SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE 'repos/%'`)
 	if err != nil {
 		return nil, err

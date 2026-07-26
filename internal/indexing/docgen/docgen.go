@@ -66,7 +66,7 @@ func (g *Generator) GenerateDocs(ctx context.Context, roots []string) {
 // modules do not count as changed, allowing scheduled indexing to avoid a
 // redundant document embedding pass.
 func (g *Generator) GenerateDocsChanged(ctx context.Context, roots []string) bool {
-	if g == nil || g.docDB == nil {
+	if g.docDB == nil {
 		log.Infof("[docgen] document store unavailable; skip documentation generation")
 		return false
 	}
@@ -144,9 +144,6 @@ func isDir(path string) bool {
 }
 
 func (g *Generator) generateModule(group, name, dir string) bool {
-	if g == nil || g.docDB == nil {
-		return false
-	}
 	hash := hashModule(dir)
 	id := indexer.DocID(name, group+"/"+name+".md")
 	// Hash-skip: compare against the stored doc hash.

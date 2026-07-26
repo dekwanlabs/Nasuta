@@ -162,18 +162,6 @@ func nasutaEnvBool(name string, def bool) bool {
 	}
 }
 
-func envBool(key string, def bool) bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	switch value {
-	case "":
-		return def
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
 func nasutaEnvDuration(name string, def time.Duration) time.Duration {
 	value := strings.TrimSpace(os.Getenv("NASUTA_" + name))
 	if value == "" {

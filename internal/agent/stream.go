@@ -50,7 +50,7 @@ func newBufferedStreamPipe(observer Observer, runID string, stepNo int, started 
 }
 
 func (h *StreamPipe) recordTiming(kind string) {
-	if h == nil || h.started.IsZero() {
+	if h.started.IsZero() {
 		return
 	}
 	elapsed := time.Since(h.started)
@@ -81,9 +81,6 @@ func (h *StreamPipe) recordTiming(kind string) {
 
 // Timings returns one immutable snapshot after a model turn completes.
 func (h *StreamPipe) Timings() StreamTiming {
-	if h == nil {
-		return StreamTiming{}
-	}
 	h.timingMu.Lock()
 	defer h.timingMu.Unlock()
 	return h.timing
@@ -110,7 +107,7 @@ func (h *StreamPipe) OnToken(token string) {
 
 // Publish forwards a validated buffered answer as one visible token.
 func (h *StreamPipe) Publish(content string) {
-	if h == nil || h.discarding || content == "" {
+	if h.discarding || content == "" {
 		return
 	}
 	if !h.firedFirst {

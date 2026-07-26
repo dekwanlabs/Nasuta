@@ -1335,14 +1335,6 @@ func callChainResult(root string, result callchain.Result) map[string]any {
 	return response
 }
 
-func searchCgNodes(ctx context.Context, db *codegraph.DB, query string, limit int) ([]codegraph.Node, error) {
-	terms := symbolQueryTokens(query)
-	if len(terms) == 0 {
-		terms = []string{query}
-	}
-	return db.SearchSymbols(ctx, codegraph.SymbolQuery{Terms: terms, Limit: limit})
-}
-
 func symbolQueryTokens(query string) []string {
 	fields := strings.FieldsFunc(query, func(r rune) bool {
 		switch r {

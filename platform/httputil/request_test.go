@@ -104,3 +104,13 @@ func TestDecodeJSON(t *testing.T) {
 		t.Fatal("invalid body must error")
 	}
 }
+
+func TestDecodeStrictJSONRejectsUnknownFields(t *testing.T) {
+	var dst struct {
+		Name string `json:"name"`
+	}
+	request := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"name":"bar","legacy":true}`))
+	if err := DecodeStrictJSON(request, &dst); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown field error = %v", err)
+	}
+}

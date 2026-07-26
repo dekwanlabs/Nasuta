@@ -191,15 +191,6 @@ func (svc *QA) Memory() *memory.MemoryStore { return svc.memory }
 
 func (svc *QA) LLM() *llm.LLMClient { return svc.llm }
 
-// UsageContext associates an auxiliary model call with the Run that triggered it.
-func (svc *QA) UsageContext(ctx context.Context, runID, phase string) context.Context {
-	if svc == nil || svc.runStore == nil || runID == "" {
-		return ctx
-	}
-	ctx = llm.WithUsageRecorder(ctx, runID, svc.runStore)
-	return llm.WithUsagePhase(ctx, phase)
-}
-
 // emitStep pushes a lightweight phase hint to the run hub.
 func (svc *QA) emitStep(runID, text string) {
 	if svc.hub != nil {
@@ -548,16 +539,6 @@ func snapshotToolIDs(snapshot tool.Snapshot) []string {
 	return ids
 }
 
-func withoutTool(snapshot tool.Snapshot, excluded tool.ToolID) tool.Snapshot {
-	ids := make(map[tool.ToolID]struct{})
-	for _, candidate := range snapshot.Tools() {
-		if candidate.ID != excluded {
-			ids[candidate.ID] = struct{}{}
-		}
-	}
-	return snapshot.Select(ids)
-}
-
 func withoutSessionHistoryTools(snapshot tool.Snapshot) tool.Snapshot {
 	ids := make(map[tool.ToolID]struct{})
 	for _, candidate := range snapshot.Tools() {
@@ -619,7 +600,7 @@ func (svc *QA) toolExecutor() *ToolExecutor {
 	if svc.agent != nil && svc.agent.executor != nil {
 		return svc.agent.executor
 	}
-	return NewToolExecutor(nil)
+	return NewToolExecutor(tool.NewRegistry())
 }
 
 func unavailableToolBlock(id tool.ToolID, reason string) ContextBlock {

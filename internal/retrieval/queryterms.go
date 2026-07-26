@@ -15,8 +15,6 @@ type QueryTerms struct {
 // burning tokens on invisible thinking before visible output.
 const helperMaxTokens = 1024
 
-const analysisMaxTokens = helperMaxTokens * 2
-
 func (qt QueryTerms) normalize() QueryTerms {
 	dedupe := func(in []string, keepCase bool) []string {
 		seen := map[string]bool{}

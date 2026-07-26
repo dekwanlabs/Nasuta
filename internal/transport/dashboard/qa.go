@@ -350,9 +350,11 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 
 	status := "deactive"
 	endpointDomain := ""
+	model := ""
 	roundMaxTokens := 0
 	if handler.platform != nil {
 		endpointDomain = qaEndpointDomain(handler.platform.LLMBaseURL)
+		model = handler.platform.LLMModel
 		roundMaxTokens = handler.platform.LLMContextWindow
 		if handler.platform.LLMEnabled() {
 			status = "active"
@@ -362,6 +364,7 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 	httputil.WriteJSON(w, map[string]any{
 		"endpoint_domain":           endpointDomain,
 		"endpoint_status":           status,
+		"model":                     model,
 		"token_usage_available":     usageAvailable,
 		"cache_percent":             cachePercent(usage.RoundCachedInputTokens, usage.RoundInputTokens),
 		"session_total_tokens":      usage.SessionTotalTokens,

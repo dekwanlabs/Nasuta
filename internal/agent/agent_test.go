@@ -809,7 +809,7 @@ func TestRun_LoopExhaustedFallsThroughToConclusion(t *testing.T) {
 	obs := &captureObserver{}
 	// Timeout 1.2s with 1.0s reserved → the loop gets only ~0.2s before its ctx
 	// expires, then the conclusion has ~1.0s to finish.
-	agent := NewAgent(client, NewToolExecutor(nil), AgentConfig{
+	agent := NewAgent(client, NewToolExecutor(tool.NewRegistry()), AgentConfig{
 		MaxSteps: 3, AnswerMaxTokens: 100, MaxContinueRounds: 0,
 		Timeout: 1200 * time.Millisecond, AnswerReserve: 1000 * time.Millisecond,
 	}, obs, nil)

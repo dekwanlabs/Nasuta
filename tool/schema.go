@@ -131,6 +131,9 @@ func validateSchemaAlternatives(schema map[string]any, path string) error {
 
 func validateArguments(schema map[string]any, value any, path string) error {
 	typ := schemaType(schema)
+	if typ == "" {
+		return validateArgumentAlternatives(schema, value, path)
+	}
 	switch typ {
 	case TypeObject:
 		object, ok := value.(map[string]any)
@@ -167,6 +170,12 @@ func validateArguments(schema map[string]any, value any, path string) error {
 		if !ok {
 			return fmt.Errorf("%s must be an array", path)
 		}
+		if minimum, ok := schemaInt(schema["minItems"]); ok && len(items) < minimum {
+			return fmt.Errorf("%s must contain at least %d items", path, minimum)
+		}
+		if maximum, ok := schemaInt(schema["maxItems"]); ok && len(items) > maximum {
+			return fmt.Errorf("%s must contain at most %d items", path, maximum)
+		}
 		itemSchema, _ := schema["items"].(map[string]any)
 		for i, item := range items {
 			if err := validateArguments(itemSchema, item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
@@ -198,10 +207,61 @@ func validateArguments(schema map[string]any, value any, path string) error {
 			return fmt.Errorf("%s must be a boolean", path)
 		}
 	}
+	if number, ok := schemaNumber(value); ok {
+		if minimum, exists := schemaNumber(schema["minimum"]); exists && number < minimum {
+			return fmt.Errorf("%s must be at least %v", path, schema["minimum"])
+		}
+		if maximum, exists := schemaNumber(schema["maximum"]); exists && number > maximum {
+			return fmt.Errorf("%s must be at most %v", path, schema["maximum"])
+		}
+	}
 	if enum, ok := schema["enum"].([]any); ok && !enumContains(enum, value) {
 		return fmt.Errorf("%s has an unsupported value", path)
 	}
+	if expected, ok := schema["const"]; ok && fmt.Sprint(expected) != fmt.Sprint(value) {
+		return fmt.Errorf("%s must equal %v", path, expected)
+	}
 	return nil
+}
+
+func validateArgumentAlternatives(schema map[string]any, value any, path string) error {
+	for _, keyword := range []string{"oneOf", "anyOf"} {
+		raw, exists := schema[keyword]
+		if !exists {
+			continue
+		}
+		alternatives, _ := raw.([]any)
+		matches := 0
+		for _, alternative := range alternatives {
+			child, _ := alternative.(map[string]any)
+			if validateArguments(child, value, path) == nil {
+				matches++
+			}
+		}
+		if (keyword == "oneOf" && matches != 1) || (keyword == "anyOf" && matches == 0) {
+			return fmt.Errorf("%s does not match %s", path, keyword)
+		}
+		return nil
+	}
+	return nil
+}
+
+func schemaInt(value any) (int, bool) {
+	number, ok := schemaNumber(value)
+	return int(number), ok && math.Trunc(number) == number
+}
+
+func schemaNumber(value any) (float64, bool) {
+	switch number := value.(type) {
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	case float64:
+		return number, true
+	default:
+		return 0, false
+	}
 }
 
 func schemaType(schema map[string]any) SchemaType {

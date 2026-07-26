@@ -393,24 +393,6 @@ func strAny(v any) string {
 	}
 }
 
-func floatAny(v any) float64 {
-	switch x := v.(type) {
-	case float64:
-		return x
-	case float32:
-		return float64(x)
-	case int:
-		return float64(x)
-	case int64:
-		return float64(x)
-	case json.Number:
-		f, _ := x.Float64()
-		return f
-	default:
-		return 0
-	}
-}
-
 func unique(in []string) []string {
 	seen := map[string]bool{}
 	var out []string

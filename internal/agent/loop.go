@@ -67,6 +67,9 @@ type Agent struct {
 
 // NewAgent builds an Agent with optional observer/controller hooks.
 func NewAgent(llm *llm.LLMClient, executor *ToolExecutor, cfg AgentConfig, observer Observer, controller Controller) *Agent {
+	if executor == nil {
+		executor = NewToolExecutor(tool.NewRegistry())
+	}
 	if observer == nil {
 		observer = NoopObserver()
 	}
@@ -78,8 +81,6 @@ func NewAgent(llm *llm.LLMClient, executor *ToolExecutor, cfg AgentConfig, obser
 		cfg:        cfg.withDefaults(),
 	}
 }
-
-func (agent *Agent) Cfg() AgentConfig { return agent.cfg }
 
 func (agent *Agent) MaxStepsFor(question string) int {
 	configured := agent.cfg.MaxSteps
@@ -744,7 +745,9 @@ Apply the role, evidence discipline, and answer rules from the core prompt. This
 - **Do not repeat the same retrieval intent.** Rewording a failed free-text query usually returns the same index results. Switch to an exact symbol, call edge, endpoint, dependency, or runbook lookup.
 - **Keep runtime concepts endpoint-scoped.** Do not treat similarly named endpoints as the same business concept. A count requires a complete list/count response or aggregation, not repeated samples containing one identifier. When a question names several runtime resources, query each relevant endpoint separately in the same tool round.
 - **Locate unknown runtime endpoints first.** A related service or arbitrary endpoint sample does not establish the requested API. Before a runtime query for a named feature, use the authoritative route lookup when the seed evidence lacks its exact complete endpoint. If ownership is unknown, search without a service filter first; distinguish public entry routes from downstream implementations using the returned service and code evidence.
+- **Resolve client-facing entries across tool boundaries.** The authoritative API lookup is an endpoint inventory, not a call graph. When evidence starts at an internal implementation but the question concerns a client or gateway entry, trace callers through client adapters to an upstream controller, verify the cross-service hop, and look up that controller's complete route. Keep the internal provider route, upstream controller route, and gateway route distinct; do not stop at a same-name endpoint.
 - **Do not start with broad identity discovery when endpoints are known.** If seed evidence or the tool contract provides a relevant endpoint, include it in the first runtime query. Use identity-only discovery only for an explicitly broad activity request or when no endpoint can be established.
+- **Prefer structured runtime scope.** When an exact endpoint, trace, identity, or response-code filter is available, use it instead of message-text keywords. For an API failure, combine the endpoint scope with the configured non-zero response-code control; use message text only when no structured runtime scope can be established.
 - **Treat bounded and compressed results as samples.** Partial coverage never proves that another device, record, schedule, shortcut, error, or trace does not exist. State the exact scope and time of the retained evidence.
 - **Name runtime result states precisely.** If no relevant query ran, say it was not queried (Chinese: “尚未查询”). If a query ran with zero hits, say no log was matched (“未命中日志”). Say a current list is empty (“当前列表为空”) only when a matching list response explicitly contains an empty list. Report relevant non-zero business issues returned by runtime evidence. Never reconstruct a complete endpoint from partial annotations; use the authoritative complete route lookup.
 - **Read search_code scores according to scoreKind.** A dense result carries semanticScore (0–1 cosine similarity), where >~0.5 is relevant and a top score below ~0.4 is weak. A hybrid result carries fusionScore, an RRF ranking-consensus score with no cosine threshold; use it only to compare results within that response. A low dense top score, high-overlap result, or empty result is a signal to stop rewording the same search and switch strategy. (get_symbol and trace_calls use exact names and have no relevance score.)
@@ -794,9 +797,6 @@ func NewToolExecutor(registry *Registry) *ToolExecutor {
 
 // Snapshot pins definitions and handlers before the model sees any tool.
 func (te *ToolExecutor) Snapshot(policy ToolPolicy) tool.Snapshot {
-	if te == nil || te.registry == nil {
-		return tool.Snapshot{}
-	}
 	return te.registry.Snapshot(policy)
 }
 
@@ -825,10 +825,6 @@ func (te *ToolExecutor) DefinitionsFor(policy ToolPolicy) []llm.ToolDef {
 // Execute runs against the same snapshot used to publish model definitions.
 func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, call llm.ToolCall, seen map[string]bool, seenChunks map[string]bool) ToolExecution {
 	name := call.Function.Name
-	if te == nil || te.runtime == nil {
-		result := "error: tool registry unavailable"
-		return ToolExecution{FullContent: result, ModelContent: result}
-	}
 	args, err := parseArgs(ctx, call.Function.Arguments)
 	if err != nil {
 		result := fmt.Sprintf("error: %v", err)
@@ -989,9 +985,6 @@ func boundedSingleLine(value string, maxChars int) string {
 
 // ExecuteArguments is the non-LLM entry used by trusted prefetch plans.
 func (te *ToolExecutor) ExecuteArguments(ctx context.Context, snapshot tool.Snapshot, id tool.ToolID, args tool.Arguments) (tool.Result, error) {
-	if te == nil || te.runtime == nil {
-		return tool.Result{}, fmt.Errorf("tool registry unavailable")
-	}
 	return te.runtime.Execute(ctx, snapshot, id, args)
 }
 

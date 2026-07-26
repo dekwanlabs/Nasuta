@@ -33,9 +33,6 @@ func NewReadRegistry(registry *Registry) *ReadRegistry {
 
 // Reconcile atomically publishes one owner's complete desired tool set.
 func (publisher *ReadRegistry) Reconcile(set ReadToolSet) error {
-	if publisher == nil || publisher.registry == nil {
-		return fmt.Errorf("reconcile read tools: registry is required")
-	}
 	owner := strings.TrimSpace(set.Owner)
 	if owner == "" {
 		return fmt.Errorf("reconcile read tools: owner is required")
@@ -251,14 +248,7 @@ func (registry *Registry) Revision() uint64 {
 }
 
 func (registry *Registry) load() *registryState {
-	if registry == nil {
-		return &registryState{tools: map[ToolID]Tool{}, owners: map[ToolID]string{}}
-	}
-	current := registry.state.Load()
-	if current == nil {
-		return &registryState{tools: map[ToolID]Tool{}, owners: map[ToolID]string{}}
-	}
-	return current
+	return registry.state.Load()
 }
 
 func (registry *Registry) publish(current, next *registryState) {
