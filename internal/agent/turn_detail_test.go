@@ -44,7 +44,49 @@ func TestCompressTurnDetailProducesBoundedStructuredJSON(t *testing.T) {
 }
 
 func TestCompressTurnDetailHonorsAggregateToolBudgets(t *testing.T) {
-	const toolCount = 14
+	const toolCount = 20
+	detailJSON, err := compressTurnDetail(34, toolHeavyTurnMessages(toolCount))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var detail archivedTurnDetail
+	if err := json.Unmarshal(detailJSON, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.ToolCalls) != toolCount || len(detail.ToolResults) != toolCount ||
+		detail.OmittedToolCalls != 0 || detail.OmittedToolResults != 0 {
+		t.Fatalf("tool archive counts = %d+%d/%d+%d, want %d/%d",
+			len(detail.ToolCalls), detail.OmittedToolCalls,
+			len(detail.ToolResults), detail.OmittedToolResults, toolCount, toolCount)
+	}
+	if tokens := tooloutput.EstimateTokens(string(detailJSON)); tokens > turnDetailTokenLimit {
+		t.Fatalf("detail uses %d tokens, want at most %d", tokens, turnDetailTokenLimit)
+	}
+}
+
+func TestCompressTurnDetailOmitsMiddleToolEventsWhenMetadataExceedsBudget(t *testing.T) {
+	const toolCount = 40
+	detailJSON, err := compressTurnDetail(35, toolHeavyTurnMessages(toolCount))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var detail archivedTurnDetail
+	if err := json.Unmarshal(detailJSON, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.OmittedToolCalls == 0 || detail.OmittedToolResults == 0 ||
+		len(detail.ToolCalls)+detail.OmittedToolCalls != toolCount ||
+		len(detail.ToolResults)+detail.OmittedToolResults != toolCount {
+		t.Fatalf("tool archive coverage = %d+%d/%d+%d, want totals %d/%d",
+			len(detail.ToolCalls), detail.OmittedToolCalls,
+			len(detail.ToolResults), detail.OmittedToolResults, toolCount, toolCount)
+	}
+	if tokens := tooloutput.EstimateTokens(string(detailJSON)); tokens > turnDetailTokenLimit {
+		t.Fatalf("detail uses %d tokens, want at most %d", tokens, turnDetailTokenLimit)
+	}
+}
+
+func toolHeavyTurnMessages(toolCount int) []llm.Message {
 	messages := []llm.Message{{
 		Role:    "user",
 		Content: "对齐现有实现并给出完整接入方案",
@@ -69,20 +111,5 @@ func TestCompressTurnDetailHonorsAggregateToolBudgets(t *testing.T) {
 		Role:    "assistant",
 		Content: strings.Repeat("完整方案与迁移步骤", 1200),
 	})
-
-	detailJSON, err := compressTurnDetail(34, messages)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var detail archivedTurnDetail
-	if err := json.Unmarshal(detailJSON, &detail); err != nil {
-		t.Fatal(err)
-	}
-	if len(detail.ToolCalls) != toolCount || len(detail.ToolResults) != toolCount {
-		t.Fatalf("tool archive counts = %d/%d, want %d/%d",
-			len(detail.ToolCalls), len(detail.ToolResults), toolCount, toolCount)
-	}
-	if tokens := tooloutput.EstimateTokens(string(detailJSON)); tokens > turnDetailTokenLimit {
-		t.Fatalf("detail uses %d tokens, want at most %d", tokens, turnDetailTokenLimit)
-	}
+	return messages
 }

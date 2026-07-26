@@ -20,12 +20,14 @@ const (
 )
 
 type archivedTurnDetail struct {
-	Version     int                  `json:"version"`
-	Turn        int                  `json:"turn"`
-	User        archivedText         `json:"user"`
-	ToolCalls   []archivedToolCall   `json:"toolCalls"`
-	ToolResults []archivedToolResult `json:"toolResults"`
-	Assistant   archivedText         `json:"assistant"`
+	Version            int                  `json:"version"`
+	Turn               int                  `json:"turn"`
+	User               archivedText         `json:"user"`
+	ToolCalls          []archivedToolCall   `json:"toolCalls"`
+	OmittedToolCalls   int                  `json:"omittedToolCalls,omitempty"`
+	ToolResults        []archivedToolResult `json:"toolResults"`
+	OmittedToolResults int                  `json:"omittedToolResults,omitempty"`
+	Assistant          archivedText         `json:"assistant"`
 }
 
 type archivedText struct {
@@ -53,30 +55,65 @@ type archivedToolResult struct {
 
 type turnDetailBudgets struct {
 	user, calls, results, answer int
+	toolItems                    int
 }
 
 func compressTurnDetail(turnNumber int, messages []llm.Message) (json.RawMessage, error) {
 	budgets := turnDetailBudgets{
 		user: turnUserTokenLimit, calls: turnCallsTokenLimit,
-		results: turnResultTokenLimit, answer: turnAnswerTokenLimit,
+		results: turnResultTokenLimit, answer: turnAnswerTokenLimit, toolItems: -1,
 	}
-	for attempt := 0; attempt < 4; attempt++ {
+	for {
 		detail := buildArchivedTurnDetail(turnNumber, messages, budgets)
 		raw, err := json.Marshal(detail)
 		if err != nil {
 			return nil, fmt.Errorf("marshal archived turn %d: %w", turnNumber, err)
 		}
-		if tooloutput.EstimateTokens(string(raw)) <= turnDetailTokenLimit {
+		tokens := tooloutput.EstimateTokens(string(raw))
+		if tokens <= turnDetailTokenLimit {
 			return raw, nil
 		}
-		budgets = turnDetailBudgets{
-			user: max(80, budgets.user*3/4), calls: max(80, budgets.calls*3/4),
-			results: max(160, budgets.results*3/4), answer: max(100, budgets.answer*3/4),
+		next := shrinkTurnDetailBudgets(budgets)
+		if next == budgets {
+			itemCount := max(len(detail.ToolCalls)+detail.OmittedToolCalls,
+				len(detail.ToolResults)+detail.OmittedToolResults)
+			if budgets.toolItems != 0 && itemCount > 0 {
+				budgets.toolItems = reducedItemLimit(budgets.toolItems, itemCount)
+				continue
+			}
+			log.Errorf("Failed to compress turn %d: tokens=%d calls=%d results=%d",
+				turnNumber, tokens, len(detail.ToolCalls), len(detail.ToolResults))
+			return nil, fmt.Errorf("archived turn %d uses %d tokens after bounded compression (limit: %d)",
+				turnNumber, tokens, turnDetailTokenLimit)
 		}
+		budgets = next
 	}
-	value, _ := json.Marshal(buildArchivedTurnDetail(turnNumber, messages, budgets))
-	log.Errorf("Failed to compress turn %v", string(value))
-	return nil, fmt.Errorf("archived turn %d exceeds %d tokens after bounded compression", turnNumber, turnDetailTokenLimit)
+}
+
+func shrinkTurnDetailBudgets(budgets turnDetailBudgets) turnDetailBudgets {
+	return turnDetailBudgets{
+		user: shrinkBudget(budgets.user, 80), calls: shrinkBudget(budgets.calls, 80),
+		results: shrinkBudget(budgets.results, 160), answer: shrinkBudget(budgets.answer, 100),
+		toolItems: budgets.toolItems,
+	}
+}
+
+func shrinkBudget(value, minimum int) int {
+	if value <= 0 {
+		return 0
+	}
+	return max(minimum, value*3/4)
+}
+
+func reducedItemLimit(current, total int) int {
+	if current < 0 || current > total {
+		current = total
+	}
+	next := current * 3 / 4
+	if next == current {
+		next--
+	}
+	return max(0, next)
 }
 
 func buildArchivedTurnDetail(turnNumber int, messages []llm.Message, budgets turnDetailBudgets) archivedTurnDetail {
@@ -96,6 +133,8 @@ func buildArchivedTurnDetail(turnNumber int, messages []llm.Message, budgets tur
 			appendSectionText(&answers, message.Content)
 		}
 	}
+	toolCalls, omittedCalls := boundedEdges(toolCalls, budgets.toolItems)
+	toolResults, omittedResults := boundedEdges(toolResults, budgets.toolItems)
 
 	archivedCalls := make([]archivedToolCall, 0, len(toolCalls))
 	callBudget := dividedBudget(budgets.calls, len(toolCalls))
@@ -138,9 +177,27 @@ func buildArchivedTurnDetail(turnNumber int, messages []llm.Message, budgets tur
 	return archivedTurnDetail{
 		Version: 1, Turn: turnNumber,
 		User:      boundedArchivedText(users.String(), budgets.user),
-		ToolCalls: archivedCalls, ToolResults: archivedResults,
+		ToolCalls: archivedCalls, OmittedToolCalls: omittedCalls,
+		ToolResults: archivedResults, OmittedToolResults: omittedResults,
 		Assistant: boundedArchivedText(answers.String(), budgets.answer),
 	}
+}
+
+func boundedEdges[T any](values []T, limit int) ([]T, int) {
+	if limit < 0 || len(values) <= limit {
+		return values, 0
+	}
+	if limit == 0 {
+		return nil, len(values)
+	}
+	head := (limit + 1) / 2
+	tail := limit - head
+	out := make([]T, 0, limit)
+	out = append(out, values[:head]...)
+	if tail > 0 {
+		out = append(out, values[len(values)-tail:]...)
+	}
+	return out, len(values) - len(out)
 }
 
 func boundedArchivedText(value string, budget int) archivedText {
