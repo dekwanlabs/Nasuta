@@ -25,18 +25,22 @@ type LogSearchRequest struct {
 }
 
 type LogHit struct {
-	Timestamp string  `json:"timestamp"`
-	TraceID   string  `json:"trace_id"`
-	Method    string  `json:"method"`
-	Status    string  `json:"status"`
-	Code      string  `json:"code"`
-	CostMs    float64 `json:"cost_ms"`
-	API       string  `json:"api"`
-	URL       string  `json:"url"`
-	Request   string  `json:"request"`
-	Response  string  `json:"response"`
-	Message   string  `json:"message"`
-	Identity  string  `json:"identity,omitempty"`
+	Timestamp     string  `json:"timestamp"`
+	TraceID       string  `json:"trace_id"`
+	Method        string  `json:"method"`
+	Status        string  `json:"status"`
+	Code          string  `json:"code"`
+	CostMs        float64 `json:"cost_ms"`
+	CostAvailable bool    `json:"cost_available"`
+	API           string  `json:"api"`
+	URL           string  `json:"url"`
+	Request       string  `json:"request"`
+	Response      string  `json:"response"`
+	Message       string  `json:"message"`
+	Identity      string  `json:"identity,omitempty"`
+	UserID        string  `json:"user_id,omitempty"`
+	DeviceSN      string  `json:"device_sn,omitempty"`
+	Email         string  `json:"email,omitempty"`
 }
 
 type APISummary struct {
