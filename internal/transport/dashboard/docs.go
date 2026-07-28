@@ -64,6 +64,8 @@ var allowedTextDocExt = map[string]struct{}{
 
 var allowedUploadDocKinds = domain.UploadableDocKindSet
 
+const docUploadProcessingTimeout = 5 * time.Minute
+
 func (handler *Handler) APIDocs(w http.ResponseWriter, r *http.Request) {
 	if handler.docDB == nil {
 		httputil.WriteJSON(w, &domain.Page[domain.DocRecord]{Total: 0, Page: 1, PageSize: 20, List: []domain.DocRecord{}})
@@ -101,33 +103,18 @@ func (handler *Handler) APIDocUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	draft.Kind = normalizeUploadDocKind(draft.Kind)
 
-	// Structural validation + LLM reformat for flow docs. The template is
-	// the reference shape; when content doesn't conform, the LLM rewrites it
-	// into the template structure before storage.
-	if draft.Kind == domain.DocKindFlow {
-		res := docgen.ValidateFlow(draft.Content)
-		if !res.Valid {
-			log.Warnf("[docs] flow %q failed validation: %s — reformatting", draft.Title, strings.Join(res.Errors, "; "))
-			reformatted, rerr := docgen.ReformatFlowWithSettings(handler.cfg, handler.platform, handler.docDB, r.Context(), draft.Content)
-			if rerr != nil {
-				httputil.WriteErr(w, fmt.Errorf("flow validation failed (%s) and reformat unavailable: %w", strings.Join(res.Errors, "; "), rerr))
-				return
-			}
-			draft.Content = reformatted
-		}
-	}
-
-	doc, chunks, err := buildDocRecord(draft, allowedUploadDocKinds)
+	doc, _, err := buildDocRecord(draft, allowedUploadDocKinds)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
 	}
-	doc, err = handler.saveDocRecord(r.Context(), "docs", doc, chunks)
+	response, err := handler.saveUploadedDoc(doc)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
 	}
-	httputil.WriteJSON(w, doc)
+	handler.processUploadedDocAsync(doc)
+	httputil.WriteJSON(w, response)
 }
 
 // APIDocTemplate returns the canonical template for a document kind. Powers the
@@ -580,6 +567,51 @@ func (handler *Handler) saveDocRecord(ctx context.Context, scope string, doc dom
 	}
 	doc.Content = ""
 	return doc, nil
+}
+
+func (handler *Handler) saveUploadedDoc(doc domain.DocRecord) (domain.DocRecord, error) {
+	if handler.docDB != nil {
+		if err := handler.docDB.InsertDoc(doc); err != nil {
+			return domain.DocRecord{}, fmt.Errorf("save document: %w", err)
+		}
+	}
+	doc.Content = ""
+	return doc, nil
+}
+
+func (handler *Handler) processUploadedDocAsync(doc domain.DocRecord) {
+	log.Infof("[docs] submitted post-upload processing for %q (%s)", doc.Title, doc.ID)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), docUploadProcessingTimeout)
+		defer cancel()
+		if err := handler.processUploadedDoc(ctx, doc); err != nil {
+			log.Errorf("[docs] post-upload processing failed for %q: %v", doc.Title, err)
+		}
+	}()
+}
+
+func (handler *Handler) processUploadedDoc(ctx context.Context, doc domain.DocRecord) error {
+	if doc.Kind == domain.DocKindFlow {
+		res := docgen.ValidateFlow(doc.Content)
+		if !res.Valid {
+			log.Warnf("[docs] flow %q failed validation: %s — reformatting", doc.Title, strings.Join(res.Errors, "; "))
+			reformatted, err := docgen.ReformatFlowWithSettings(handler.cfg, handler.platform, handler.docDB, ctx, doc.Content)
+			if err != nil {
+				log.Errorf("[docs] flow %q reformat failed: %v; indexing original content", doc.Title, err)
+			} else {
+				doc.Content = reformatted
+				doc.ChunkCount = len(chunkDocument(doc))
+				doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				if handler.docDB != nil {
+					if err := handler.docDB.InsertDoc(doc); err != nil {
+						return fmt.Errorf("save reformatted document %q: %w", doc.ID, err)
+					}
+				}
+			}
+		}
+	}
+	_, err := handler.reindexStoredDoc(ctx, "docs", doc)
+	return err
 }
 
 func (handler *Handler) loadDoc(id, label string) (domain.DocRecord, error) {
