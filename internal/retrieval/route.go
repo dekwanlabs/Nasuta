@@ -54,6 +54,7 @@ Return a JSON object with this exact shape:
 
 const toolRoutingContract = `Select only registered read tools whose declared intent is required by the current request.
 Do not select a tool merely because its capability is available or topically related.
+Select no tools when the request can be answered directly from casual conversation, basic arithmetic or reasoning, stable general knowledge, or material already supplied by the user.
 Resolve pronouns and omitted entities from conversation_context. When a contextual follow-up asks for the actual state of an entity already investigated with runtime evidence, keep the runtime evidence tool selected even if the user does not repeat words such as logs or online.`
 
 const timeContract = `Normalize relative time semantics without calculating dates or using your own current time.
@@ -77,6 +78,8 @@ Sources:
 
 Rules:
 - Return no sources when the request is fully answerable from stable general knowledge or material already supplied by the user.
+- Obvious direct-answer requests should return no sources with high confidence. These include greetings and casual conversation; basic arithmetic or reasoning; rewriting, translating, or summarizing user-supplied material; and stable everyday questions that do not require current facts.
+- Apply the direct-answer rule regardless of the language used in the question.
 - A technical topic alone does not require internal retrieval. Select internal when the answer depends on this workspace's implementation, behavior, configuration, data flow, or other indexed facts.
 - When it is unclear whether a named system, domain, module, service, or technical term refers to this workspace or to an external/general concept, select both internal and web.
 - Select web without internal only when the request clearly concerns external or general information and does not depend on workspace-specific facts.

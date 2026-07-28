@@ -170,6 +170,34 @@ func TestRoutingContractSelectsMixedEvidenceForAmbiguousScope(t *testing.T) {
 	}
 }
 
+func TestRoutingContractsAllowDirectAnswersWithoutTools(t *testing.T) {
+	routeContract := strings.ToLower(routingContract)
+	for _, required := range []string{
+		"direct-answer requests",
+		"casual conversation",
+		"basic arithmetic or reasoning",
+		"stable everyday questions",
+		"regardless of the language",
+		"high confidence",
+	} {
+		if !strings.Contains(routeContract, required) {
+			t.Fatalf("routing contract missing %q", required)
+		}
+	}
+
+	toolContract := strings.ToLower(toolRoutingContract)
+	for _, required := range []string{
+		"select no tools",
+		"casual conversation",
+		"basic arithmetic or reasoning",
+		"material already supplied by the user",
+	} {
+		if !strings.Contains(toolContract, required) {
+			t.Fatalf("tool routing contract missing %q", required)
+		}
+	}
+}
+
 func TestBindToolIDsRejectsUnregisteredTool(t *testing.T) {
 	_, err := bindToolIDs(
 		map[string]any{"tool_ids": []any{"unknown"}},
