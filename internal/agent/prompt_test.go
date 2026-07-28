@@ -98,6 +98,22 @@ func TestAllAgentPromptsExplainCompressedToolCoverage(t *testing.T) {
 	}
 }
 
+func TestAllAgentPromptsRequireEfficientImplementations(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"core":   systemPrompt,
+		"direct": directAgentSystemPrompt,
+		"web":    webAgentSystemPrompt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, required := range []string{"every user requirement", "least practical time complexity"} {
+				if !strings.Contains(prompt, required) {
+					t.Fatalf("prompt missing efficient-generation rule %q", required)
+				}
+			}
+		})
+	}
+}
+
 func TestSystemPromptDoesNotAllowInferenceToCompleteRuntimeChains(t *testing.T) {
 	for _, must := range []string{
 		"Inference must never create a missing execution hop",

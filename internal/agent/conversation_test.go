@@ -115,6 +115,12 @@ func TestAgentPromptRequiresLookupBeforeEndingIncompleteFlow(t *testing.T) {
 			t.Fatalf("agent prompt missing incomplete-flow guard %q", want)
 		}
 	}
+	if !strings.Contains(agentSystemPrompt, "observe_url") || !strings.Contains(agentSystemPrompt, "在日志追踪中查看") {
+		t.Fatal("agent prompt does not require Observe trace deep links")
+	}
+	if !strings.Contains(agentSystemPrompt, "Never enumerate more than five individual error records") {
+		t.Fatal("agent prompt does not bound runtime error detail")
+	}
 	if strings.Contains(agentSystemPrompt, "ONE short English sentence") {
 		t.Fatal("tool rationale still conflicts with the question-language rule")
 	}
@@ -188,5 +194,15 @@ func TestHasConflictingConversationEntity(t *testing.T) {
 				t.Fatalf("hasConflictingConversationEntity() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestBuildRagCtxExcludesAssistantAnswer(t *testing.T) {
+	history := []llm.Message{
+		{Role: "user", Content: "Matter 的签署流程是什么样的？"},
+		{Role: "assistant", Content: "完整回答\n```java\nMatterSigner.signCSR(csr)\n```\n`matter_sign_cert`"},
+	}
+	if got := buildRagCtx(history); got != "Matter 的签署流程是什么样的？" {
+		t.Fatalf("route context = %q", got)
 	}
 }

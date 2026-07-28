@@ -244,6 +244,9 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		}
 		ctx = llm.WithUsageRecorder(ctx, runID, svc.runStore)
 	}
+	if svc.hub != nil {
+		ctx = llm.WithCallLifecycleObserver(ctx, runID, svc.hub)
+	}
 	explicitPlan := request.EvidencePlan
 	toolPolicy := ToolPolicyForPlan(domain.DirectPlan(), svc.writeAvailable && request.AllowWrite)
 	executor := svc.toolExecutor()
@@ -804,40 +807,16 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 }
 
 func buildRagCtx(history []llm.Message) string {
-	if len(history) == 0 {
-		return ""
-	}
-
-	var lastUserQ, lastAssistA string
 	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "assistant" && lastAssistA == "" {
-			lastAssistA = history[i].Content
-		}
-		if history[i].Role == "user" && lastUserQ == "" {
-			lastUserQ = history[i].Content
-		}
-		if lastUserQ != "" && lastAssistA != "" {
-			break
+		if history[i].Role == "user" {
+			return history[i].Content
 		}
 	}
-	if lastUserQ == "" && lastAssistA == "" {
-		return ""
-	}
-
-	var parts []string
-	if lastUserQ != "" {
-		parts = append(parts, lastUserQ)
-	}
-	// Carry over only explicit backtick identifiers the assistant deliberately marked -
-	// not free-text tech terms, which re-inject tangential names from a possibly-wrong
-	// prior answer and drift the next retrieval. Anaphora is ResolveStandaloneQuery's job.
-	parts = append(parts, extractBacktick(lastAssistA)...)
-	if len(parts) == 0 {
-		return ""
-	}
-	return strings.Join(parts, " ")
+	return ""
 }
 
+// extractBacktick is retained for the prior route-context policy. The current
+// planner intentionally does not call it because assistant answers are excluded.
 func extractBacktick(text string) []string {
 	var tokens []string
 	seen := map[string]bool{}
