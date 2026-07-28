@@ -15,8 +15,8 @@ const RedactedValue = "[REDACTED]"
 var (
 	privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----`)
 	uriPassword     = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://[^/@\s:]+:)[^/@\s]+@`)
-	sensitiveLine   = regexp.MustCompile(`(?im)^(\s*["']?[a-z0-9_.-]*(?:password|passwd|token|secret|credentials?|authorization|cookies?|private[-_.]?key|api[-_.]?key|access[-_.]?key(?:id)?|client[-_.]?secret)["']?\s*[:=]\s*).*$`)
-	sensitiveText   = regexp.MustCompile(`(?i)((?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api[_-]?key|access[_-]?key(?:id)?|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|credentials?|private[_-]?key|secret)\s*[:=]\s*["']?)(?:bearer\s+)?[^\s,"';}\]]+`)
+	sensitiveLine   = regexp.MustCompile(`(?im)^(\s*["']?[a-z0-9_.-]*(?:password|passwd|token|secret|credentials?|cookies?|private[-_.]?key|api[-_.]?key|access[-_.]?key(?:id)?|client[-_.]?secret)["']?\s*[:=]\s*).*$`)
+	sensitiveText   = regexp.MustCompile(`(?i)((?:proxy-authorization|cookie|set-cookie|x-api-key|api[_-]?key|access[_-]?key(?:id)?|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|credentials?|private[_-]?key|secret)\s*[:=]\s*["']?)(?:bearer\s+)?[^\s,"';}\]]+`)
 )
 
 // RedactSensitiveText removes credentials from structured or plain text.
@@ -161,7 +161,7 @@ func isSensitiveKey(key string) bool {
 	normalized := strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(strings.ToLower(key))
 	for _, suffix := range []string{
 		"password", "passwd", "token", "secret", "credential", "credentials",
-		"authorization", "cookie", "cookies", "privatekey", "apikey", "accesskey", "accesskeyid",
+		"cookie", "cookies", "privatekey", "apikey", "accesskey", "accesskeyid",
 	} {
 		if strings.HasSuffix(normalized, suffix) {
 			return true
