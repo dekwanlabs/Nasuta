@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/log"
@@ -19,6 +20,11 @@ const (
 const (
 	CallStatusSucceeded = "succeeded"
 	CallStatusFailed    = "failed"
+)
+
+const (
+	CallLifecycleStarted  = "started"
+	CallLifecycleFinished = "finished"
 )
 
 // Usage is the provider-reported accounting for one model call.
@@ -65,10 +71,30 @@ type UsageRecorder interface {
 	RecordLLMCall(context.Context, CallUsage) error
 }
 
-type usageContext struct {
+// CallLifecycle describes one logical model request for live clients.
+type CallLifecycle struct {
+	CallSeq    int    `json:"call_seq"`
+	Phase      string `json:"phase"`
+	Status     string `json:"status"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+}
+
+// CallLifecycleObserver receives request boundaries independently of usage persistence.
+type CallLifecycleObserver interface {
+	OnLLMCall(context.Context, string, CallLifecycle)
+}
+
+type callLifecycleState struct {
 	runID    string
-	phase    string
-	recorder UsageRecorder
+	observer CallLifecycleObserver
+	next     atomic.Int64
+}
+
+type usageContext struct {
+	runID     string
+	phase     string
+	recorder  UsageRecorder
+	lifecycle *callLifecycleState
 }
 
 type usageContextKey struct{}
@@ -81,11 +107,45 @@ func WithUsageRecorder(ctx context.Context, runID string, recorder UsageRecorder
 	return context.WithValue(ctx, usageContextKey{}, metadata)
 }
 
+// WithCallLifecycleObserver enables live timing for every logical model request.
+func WithCallLifecycleObserver(ctx context.Context, runID string, observer CallLifecycleObserver) context.Context {
+	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
+	metadata.runID = runID
+	metadata.lifecycle = &callLifecycleState{runID: runID, observer: observer}
+	return context.WithValue(ctx, usageContextKey{}, metadata)
+}
+
 // WithUsagePhase identifies why the next model call is being made.
 func WithUsagePhase(ctx context.Context, phase string) context.Context {
 	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
 	metadata.phase = phase
 	return context.WithValue(ctx, usageContextKey{}, metadata)
+}
+
+func beginCallLifecycle(ctx context.Context) func(error) {
+	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
+	state := metadata.lifecycle
+	if state == nil || state.observer == nil || state.runID == "" {
+		return func(error) {}
+	}
+	phase := metadata.phase
+	if phase == "" {
+		phase = "unclassified"
+	}
+	callSeq := int(state.next.Add(1))
+	started := time.Now()
+	state.observer.OnLLMCall(ctx, state.runID, CallLifecycle{
+		CallSeq: callSeq, Phase: phase, Status: CallLifecycleStarted,
+	})
+	return func(callErr error) {
+		status := CallLifecycleFinished
+		if callErr != nil {
+			status = CallStatusFailed
+		}
+		state.observer.OnLLMCall(context.WithoutCancel(ctx), state.runID, CallLifecycle{
+			CallSeq: callSeq, Phase: phase, Status: status, DurationMs: time.Since(started).Milliseconds(),
+		})
+	}
 }
 
 func recordCallUsage(ctx context.Context, provider, model string, maxOutputTokens int, started time.Time, usage Usage, callErr error) {

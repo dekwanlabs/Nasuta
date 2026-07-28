@@ -285,17 +285,53 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 
 	user := auth.UserFromContext(r.Context())
 	allowWrite := handler.writeAvailable && user != nil && user.IsAdmin
-	result, err := handler.qa.AskAgentWithContext(ctx, question, conversation, userID, handler.rolePromptFor(userID), runID, evidencePlan, allowWrite)
+	type askResponse struct {
+		result *agent.AskResult
+		err    error
+	}
+	askDone := make(chan askResponse, 1)
+	go func() {
+		result, err := handler.qa.AskAgentWithContext(ctx, question, conversation, userID, handler.rolePromptFor(userID), runID, evidencePlan, allowWrite)
+		askDone <- askResponse{result: result, err: err}
+	}()
+
+	var response askResponse
+	responseReceived := false
+	var answerText string
+	var terminal *agent.RunTerminal
+	for !responseReceived {
+		if channel == nil {
+			select {
+			case response = <-askDone:
+				responseReceived = true
+			case <-r.Context().Done():
+				return
+			}
+			continue
+		}
+		select {
+		case response = <-askDone:
+			responseReceived = true
+		case ev := <-channel:
+			answerText = emitHubEvent(answerText, ev, runID, sseEvent)
+			if ev.Terminal != nil {
+				terminal = ev.Terminal
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
 	if traceRecorder != nil {
 		for _, event := range traceRecorder.Activate() {
 			sseEvent("trace", jsonStr(event))
 		}
 	}
-	if err != nil {
-		log.ErrorfCtx(ctx, "[qa] agent init error: %v", err)
-		sseEvent("error", jsonStr(map[string]string{"message": err.Error()}))
+	if response.err != nil {
+		log.ErrorfCtx(ctx, "[qa] agent init error: %v", response.err)
+		sseEvent("error", jsonStr(map[string]string{"message": response.err.Error()}))
 		return
 	}
+	result := response.result
 
 	if result.Context != nil && len(result.Context.References) > 0 {
 		sseEvent("context", jsonStr(map[string]any{
@@ -304,7 +340,9 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		}))
 	}
 
-	answerText, terminal := handler.streamAgentEvents(result, channel, sseEvent, r)
+	if terminal == nil {
+		answerText, terminal = handler.streamAgentEvents(result, channel, answerText, sseEvent, r)
+	}
 	if r.Context().Err() != nil {
 		return
 	}
@@ -694,8 +732,7 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 	httputil.WriteJSON(w, map[string]string{"status": "sent"})
 }
 
-func (handler *Handler) streamAgentEvents(result *agent.AskResult, hubCh chan agent.SSEEvent, sseEvent func(string, string), r *http.Request) (string, *agent.RunTerminal) {
-	var answerText string
+func (handler *Handler) streamAgentEvents(result *agent.AskResult, hubCh chan agent.SSEEvent, answerText string, sseEvent func(string, string), r *http.Request) (string, *agent.RunTerminal) {
 	for {
 		if hubCh == nil {
 			return answerText, nil
@@ -726,7 +763,7 @@ func emitHubEvent(answerText string, ev agent.SSEEvent, runID string, sseEvent f
 		case agent.StepKindToolCall:
 			sseEvent("tool", jsonStr(map[string]any{"step": ev.Step.StepNo, "name": ev.Step.Tool, "args": ev.Step.Args}))
 		case agent.StepKindToolResult:
-			sseEvent("tool_result", jsonStr(map[string]any{"step": ev.Step.StepNo, "tool": ev.Step.Tool, "summary": ev.Step.ResultSummary}))
+			sseEvent("tool_result", jsonStr(map[string]any{"step": ev.Step.StepNo, "tool": ev.Step.Tool, "summary": ev.Step.ResultSummary, "duration_ms": ev.Step.DurationMs}))
 		case agent.StepKindAnswer:
 		}
 	}
@@ -736,6 +773,9 @@ func emitHubEvent(answerText string, ev agent.SSEEvent, runID string, sseEvent f
 	}
 	if ev.Reasoning != "" {
 		sseEvent("reasoning", jsonStr(map[string]string{"text": ev.Reasoning}))
+	}
+	if ev.LLMCall != nil {
+		sseEvent("llm_timing", jsonStr(ev.LLMCall))
 	}
 	if ev.Phase != "" {
 		sseEvent("phase", jsonStr(map[string]string{"text": ev.Phase}))

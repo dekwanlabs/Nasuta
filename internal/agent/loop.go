@@ -334,6 +334,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 				Tool:          call.Function.Name,
 				ResultSummary: runeSafeTruncate(execution.FullContent, 1200),
 				Content:       execution.FullContent,
+				DurationMs:    execution.DurationMs,
 				CreatedAt:     time.Now(),
 			})
 			compressed := tooloutput.Compress(tooloutput.Request{
@@ -788,6 +789,7 @@ type ToolExecution struct {
 	Arguments    tool.Arguments
 	Notices      []string
 	Evidence     bool
+	DurationMs   int
 }
 
 // NewToolExecutor wraps a registry with a default per-tool timeout.
@@ -853,7 +855,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 	if err != nil {
 		result := fmt.Sprintf("error: %v", err)
 		log.InfofCtx(ctx, "[agent] tool %s error after %s: args=%s err=%v", name, duration, platform.TruncateForLog(argSummary(args), 400), err)
-		return ToolExecution{FullContent: result, ModelContent: result, Arguments: arguments}
+		return ToolExecution{FullContent: result, ModelContent: result, Arguments: arguments, DurationMs: int(duration / time.Millisecond)}
 	}
 	result := toolResult.Content
 	if seen != nil {
@@ -868,6 +870,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 		ModelContent: formatToolResultForLLM(name, result),
 		Arguments:    arguments,
 		Evidence:     true,
+		DurationMs:   int(duration / time.Millisecond),
 	}
 	if seenChunks != nil && isSearchTool(name) {
 		if note := overlapNote(name, result, seenChunks); note != "" {

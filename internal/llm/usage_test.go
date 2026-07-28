@@ -14,6 +14,14 @@ type captureUsageRecorder struct {
 	calls []CallUsage
 }
 
+type captureLifecycleObserver struct {
+	events []CallLifecycle
+}
+
+func (observer *captureLifecycleObserver) OnLLMCall(_ context.Context, _ string, event CallLifecycle) {
+	observer.events = append(observer.events, event)
+}
+
 func (recorder *captureUsageRecorder) RecordLLMCall(_ context.Context, call CallUsage) error {
 	recorder.calls = append(recorder.calls, call)
 	return nil
@@ -76,6 +84,33 @@ func TestOpenAIStreamingUsageAndRequestOption(t *testing.T) {
 	want := (Usage{InputTokens: 13, OutputTokens: 5, ReasoningTokens: 1, TotalTokens: 18})
 	if result.Usage != want || result.ReasoningTokens != 1 {
 		t.Fatalf("result usage = %+v reasoning=%d, want %+v", result.Usage, result.ReasoningTokens, want)
+	}
+}
+
+func TestLogicalCallLifecyclePublishesBoundaries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	observer := &captureLifecycleObserver{}
+	ctx := WithCallLifecycleObserver(t.Context(), "run-live", observer)
+	ctx = WithUsagePhase(ctx, PhaseAgentStep)
+	client := NewLLMClientWithHTTPAndProvider(server.URL, "key", "model", "openai", 100, nil)
+	if _, err := client.ChatWithToolsMax(ctx, []Message{{Role: "user", Content: "q"}}, nil, nil, 40); err != nil {
+		t.Fatalf("ChatWithToolsMax: %v", err)
+	}
+	if len(observer.events) != 2 {
+		t.Fatalf("events = %+v, want start and finish", observer.events)
+	}
+	started, finished := observer.events[0], observer.events[1]
+	if started.CallSeq != 1 || started.Phase != PhaseAgentStep || started.Status != CallLifecycleStarted {
+		t.Fatalf("started = %+v", started)
+	}
+	if finished.CallSeq != 1 || finished.Phase != PhaseAgentStep || finished.Status != CallLifecycleFinished {
+		t.Fatalf("finished = %+v", finished)
 	}
 }
 

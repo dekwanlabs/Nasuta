@@ -144,6 +144,8 @@ func (lc *LLMClient) chatMessages(ctx context.Context, messages []Message, maxTo
 		recordedMaxTokens = lc.maxTokens
 	}
 	lc.logPrompt(ctx, messages, 0, recordedMaxTokens)
+	finishLifecycle := beginCallLifecycle(ctx)
+	defer func() { finishLifecycle(callErr) }()
 	started := time.Now()
 	var usage Usage
 	defer func() {
@@ -315,6 +317,8 @@ func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, t
 		maxTokens = lc.maxTokens
 	}
 	lc.logPrompt(ctx, messages, len(tools), maxTokens)
+	finishLifecycle := beginCallLifecycle(ctx)
+	defer func() { finishLifecycle(callErr) }()
 	started := time.Now()
 	defer func() {
 		var usage Usage

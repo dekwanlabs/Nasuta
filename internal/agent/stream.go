@@ -150,6 +150,7 @@ type SSEEvent struct {
 	Step      *StepRecord             `json:"step,omitempty"`
 	Token     string                  `json:"token,omitempty"`
 	Reasoning string                  `json:"reasoning,omitempty"`
+	LLMCall   *llm.CallLifecycle      `json:"llm_call,omitempty"`
 	Trace     *domain.EvaluationTrace `json:"trace,omitempty"`
 	// Phase is a lightweight pre-loop status hint.
 	// Unlike Step, it is not persisted; unlike Reasoning, it is not model output.
@@ -251,6 +252,11 @@ func (hub *RunHub) OnToken(ctx context.Context, runID, token string) {
 
 func (hub *RunHub) OnReasoning(ctx context.Context, runID, token string) {
 	hub.broadcastToken(ctx, runID, SSEEvent{Reasoning: token})
+}
+
+// OnLLMCall publishes model request boundaries without persisting duplicate timing data.
+func (hub *RunHub) OnLLMCall(ctx context.Context, runID string, call llm.CallLifecycle) {
+	hub.broadcast(ctx, runID, SSEEvent{LLMCall: &call})
 }
 
 // EmitPhase broadcasts a lightweight pre-loop status hint to SSE subscribers.

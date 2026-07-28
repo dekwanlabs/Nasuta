@@ -2,11 +2,13 @@ package dashboard
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
 func TestQATraceRecorderSequencesEvents(t *testing.T) {
@@ -33,11 +35,33 @@ func TestStreamAgentEventsDrainsTraceBeforeTerminal(t *testing.T) {
 	hubEvents <- agent.SSEEvent{Terminal: &agent.RunTerminal{Status: agent.RunStatusDone}}
 	var names []string
 	handler := &Handler{}
-	_, terminal := handler.streamAgentEvents(&agent.AskResult{RunID: "run"}, hubEvents, func(name, _ string) {
+	_, terminal := handler.streamAgentEvents(&agent.AskResult{RunID: "run"}, hubEvents, "", func(name, _ string) {
 		names = append(names, name)
 	}, httptest.NewRequest("GET", "/", nil))
 	if terminal == nil || terminal.Status != agent.RunStatusDone || len(names) != 3 || names[0] != "trace" || names[1] != "run_end" || names[2] != "done" {
 		t.Fatalf("terminal=%+v events=%v", terminal, names)
+	}
+}
+
+func TestEmitHubEventWritesLLMTimingSSE(t *testing.T) {
+	var eventName, data string
+	timing := llm.CallLifecycle{CallSeq: 2, Phase: llm.PhaseAgentStep, Status: llm.CallLifecycleFinished, DurationMs: 1200}
+	emitHubEvent("", agent.SSEEvent{LLMCall: &timing}, "run", func(name, value string) {
+		eventName, data = name, value
+	})
+	if eventName != "llm_timing" || !strings.Contains(data, `"call_seq":2`) {
+		t.Fatalf("event=%q data=%q", eventName, data)
+	}
+}
+
+func TestEmitHubEventWritesToolDurationSSE(t *testing.T) {
+	var eventName, data string
+	step := agent.StepRecord{StepNo: 4, Kind: agent.StepKindToolResult, Tool: "observe_logs", DurationMs: 1543}
+	emitHubEvent("", agent.SSEEvent{Step: &step}, "run", func(name, value string) {
+		eventName, data = name, value
+	})
+	if eventName != "tool_result" || !strings.Contains(data, `"duration_ms":1543`) {
+		t.Fatalf("event=%q data=%q", eventName, data)
 	}
 }
 
