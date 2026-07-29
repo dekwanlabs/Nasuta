@@ -45,7 +45,7 @@ func chatJSONWith(ctx context.Context, call chatCaller, system, user string, out
 			}
 			return err
 		}
-		ok, problem := parseRepairValidate(raw, out, opts.Validate)
+		ok, problem := parseRepairValidate(raw, out, opts.Validate, opts.DisallowUnknownFields)
 		if ok {
 			return nil
 		}
@@ -67,15 +67,15 @@ func chatJSONWith(ctx context.Context, call chatCaller, system, user string, out
 // targets a fresh zero value so a failed first parse cannot leave stale fields
 // (maps keep existing entries across re-unmarshal). Returns (ok, problem) where
 // problem is a human-readable reason fed back to the model on reprompt.
-func parseRepairValidate(raw string, out any, validate func(any) error) (bool, string) {
+func parseRepairValidate(raw string, out any, validate func(any) error, disallowUnknownFields bool) (bool, string) {
 	rv := reflect.ValueOf(out)
 	if rv.Kind() != reflect.Ptr || rv.IsNil() {
 		return false, "out must be a non-nil pointer"
 	}
 	fresh := reflect.New(rv.Elem().Type())
-	if err := ParseJSONLoose(raw, fresh.Interface()); err != nil {
+	if err := parseJSONLoose(raw, fresh.Interface(), disallowUnknownFields); err != nil {
 		fresh = reflect.New(rv.Elem().Type())
-		if err := ParseJSONLoose(RepairJSON(raw), fresh.Interface()); err != nil {
+		if err := parseJSONLoose(RepairJSON(raw), fresh.Interface(), disallowUnknownFields); err != nil {
 			return false, "malformed JSON (" + err.Error() + ")"
 		}
 	}

@@ -68,6 +68,31 @@ func TestChatJSONValidateFailureReprompts(t *testing.T) {
 	}
 }
 
+func TestChatJSONDisallowUnknownFieldsReprompts(t *testing.T) {
+	type nested struct {
+		Name string `json:"name"`
+	}
+	type document struct {
+		Module nested `json:"module"`
+	}
+	f := &fakeCaller{answers: []string{
+		`{"module":{"name":"delivery","unexpected":true}}`,
+		`{"module":{"name":"delivery"}}`,
+	}}
+	opts := fastOpts()
+	opts.DisallowUnknownFields = true
+	var out document
+	if err := chatJSONWith(context.Background(), f.call, "s", "u", &out, opts); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out.Module.Name != "delivery" || f.calls != 2 {
+		t.Fatalf("out=%+v calls=%d", out, f.calls)
+	}
+	if !strings.Contains(f.seen[1][3].Content, `unknown field "unexpected"`) {
+		t.Fatalf("repair prompt does not identify the unknown field: %s", f.seen[1][3].Content)
+	}
+}
+
 func TestChatJSONExhaustedReturnsInvalidJSON(t *testing.T) {
 	f := &fakeCaller{answers: []string{`garbage1`, `garbage2`}}
 	opts := fastOpts()
@@ -126,7 +151,7 @@ func TestChatJSONDeadContextNoRetry(t *testing.T) {
 
 func TestParseRepairValidateFreshParseNoStale(t *testing.T) {
 	out := map[string]any{"stale": "leftover"}
-	ok, _ := parseRepairValidate(`{"a":1}`, &out, nil)
+	ok, _ := parseRepairValidate(`{"a":1}`, &out, nil, false)
 	if !ok || out["stale"] != nil || out["a"] != float64(1) {
 		t.Fatalf("stale data survived: out=%v ok=%v", out, ok)
 	}
@@ -134,7 +159,7 @@ func TestParseRepairValidateFreshParseNoStale(t *testing.T) {
 
 func TestParseRepairValidateRejectsNilPointer(t *testing.T) {
 	var out *map[string]any
-	if ok, _ := parseRepairValidate(`{"a":1}`, out, nil); ok {
+	if ok, _ := parseRepairValidate(`{"a":1}`, out, nil, false); ok {
 		t.Fatal("typed nil pointer must be rejected")
 	}
 }

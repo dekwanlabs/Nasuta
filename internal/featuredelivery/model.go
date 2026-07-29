@@ -89,80 +89,110 @@ type RequirementDocument struct {
 }
 
 type RequirementAnalysisDocument struct {
-	Background                string          `json:"background"`
-	Goals                     []string        `json:"goals"`
-	UsersAndScenarios         []string        `json:"users_and_scenarios"`
-	FunctionalRequirements    []string        `json:"functional_requirements"`
-	NonFunctionalRequirements []string        `json:"non_functional_requirements"`
-	InScope                   []string        `json:"in_scope"`
-	OutOfScope                []string        `json:"out_of_scope"`
-	BusinessRules             []string        `json:"business_rules"`
-	AcceptanceCriteria        []string        `json:"acceptance_criteria"`
-	Assumptions               []string        `json:"assumptions"`
-	BlockingQuestions         []string        `json:"blocking_questions"`
-	OpenQuestions             []string        `json:"open_questions"`
-	InitialImpact             []string        `json:"initial_impact"`
-	Claims                    []EvidenceClaim `json:"claims"`
+	ProblemStatement       string   `json:"problem_statement"`
+	Goals                  []string `json:"goals"`
+	SuccessMetrics         []string `json:"success_metrics"`
+	NonGoals               []string `json:"non_goals"`
+	PersonasAndScenarios   []string `json:"personas_and_scenarios"`
+	UserStories            []string `json:"user_stories"`
+	FunctionalRequirements []string `json:"functional_requirements"`
+	QualityExpectations    []string `json:"quality_expectations"`
+	InScope                []string `json:"in_scope"`
+	BusinessConstraints    []string `json:"business_constraints"`
+	BusinessRules          []string `json:"business_rules"`
+	AcceptanceCriteria     []string `json:"acceptance_criteria"`
+	Assumptions            []string `json:"assumptions"`
+	BlockingQuestions      []string `json:"blocking_questions"`
+	OpenQuestions          []string `json:"open_questions"`
 }
 
 type TechnicalProposalDocument struct {
-	CurrentFacts         []EvidenceClaim  `json:"current_facts"`
-	AffectedAreas        []string         `json:"affected_areas"`
-	Options              []ProposalOption `json:"options"`
-	Recommendation       string           `json:"recommendation"`
-	RecommendationReason string           `json:"recommendation_reason"`
-	DataAndAPIImpact     []string         `json:"data_and_api_impact"`
-	CompatibilityRisks   []string         `json:"compatibility_risks"`
-	Rollout              []string         `json:"rollout"`
-	Rollback             []string         `json:"rollback"`
-	OpenDecisions        []string         `json:"open_decisions"`
-	BlockingQuestions    []string         `json:"blocking_questions"`
+	CurrentTechnicalBaseline     []EvidenceClaim      `json:"current_technical_baseline"`
+	ArchitectureDrivers          []string             `json:"architecture_drivers"`
+	AffectedCapabilities         []string             `json:"affected_capabilities"`
+	CandidateArchitectures       []ArchitectureOption `json:"candidate_architectures"`
+	TechnicalDecision            TechnicalDecision    `json:"technical_decision"`
+	CompatibilityObligations     []string             `json:"compatibility_obligations"`
+	SecurityObligations          []string             `json:"security_obligations"`
+	PerformanceObligations       []string             `json:"performance_obligations"`
+	OperationalObligations       []string             `json:"operational_obligations"`
+	DeliveryAndMigrationStrategy []string             `json:"delivery_and_migration_strategy"`
+	OpenDecisions                []string             `json:"open_decisions"`
+	BlockingQuestions            []string             `json:"blocking_questions"`
 }
 
-type ProposalOption struct {
-	Name     string   `json:"name"`
-	Summary  string   `json:"summary"`
-	Benefits []string `json:"benefits"`
-	Costs    []string `json:"costs"`
-	Risks    []string `json:"risks"`
+type ArchitectureOption struct {
+	Name                 string   `json:"name"`
+	Summary              string   `json:"summary"`
+	ArchitecturePattern  string   `json:"architecture_pattern"`
+	CommunicationPattern string   `json:"communication_pattern"`
+	DataPattern          string   `json:"data_pattern"`
+	DeploymentPattern    string   `json:"deployment_pattern"`
+	ContractPattern      string   `json:"contract_pattern"`
+	MigrationPattern     string   `json:"migration_pattern"`
+	ReliabilityPattern   string   `json:"reliability_pattern"`
+	ObservabilityPattern string   `json:"observability_pattern"`
+	Benefits             []string `json:"benefits"`
+	Costs                []string `json:"costs"`
+	Risks                []string `json:"risks"`
+	Reversibility        []string `json:"reversibility"`
+}
+
+type TechnicalDecision struct {
+	SelectedOption    string   `json:"selected_option"`
+	Rationale         string   `json:"rationale"`
+	AcceptedTradeoffs []string `json:"accepted_tradeoffs"`
 }
 
 type SystemDesignDocument struct {
-	ArchitectureBoundaries []string        `json:"architecture_boundaries"`
-	Modules                []DesignModule  `json:"modules"`
-	KeyFlows               []string        `json:"key_flows"`
-	APIContracts           []string        `json:"api_contracts"`
-	DataModel              []string        `json:"data_model"`
-	Consistency            []string        `json:"consistency"`
-	Security               []string        `json:"security"`
-	Configuration          []string        `json:"configuration"`
-	ErrorsAndDegradation   []string        `json:"errors_and_degradation"`
-	Observability          []string        `json:"observability"`
-	Testing                []string        `json:"testing"`
-	RolloutAndRollback     []string        `json:"rollout_and_rollback"`
-	RejectedAlternatives   []string        `json:"rejected_alternatives"`
-	BlockingQuestions      []string        `json:"blocking_questions"`
-	Claims                 []EvidenceClaim `json:"claims"`
+	ArchitectureDecisionRecord ArchitectureDecisionRecord `json:"architecture_decision_record"`
+	DomainModel                []string                   `json:"domain_model"`
+	ArchitectureBoundaries     []string                   `json:"architecture_boundaries"`
+	Modules                    []DesignModule             `json:"modules"`
+	KeyFlows                   []string                   `json:"key_flows"`
+	InterfaceContracts         []string                   `json:"interface_contracts"`
+	DataOwnershipAndModel      []string                   `json:"data_ownership_and_model"`
+	ConsistencyAndConcurrency  []string                   `json:"consistency_and_concurrency"`
+	Scalability                []string                   `json:"scalability"`
+	Maintainability            []string                   `json:"maintainability"`
+	ReliabilityAndRecovery     []string                   `json:"reliability_and_recovery"`
+	Security                   []string                   `json:"security"`
+	Configuration              []string                   `json:"configuration"`
+	Observability              []string                   `json:"observability"`
+	EvolutionAndMigration      []string                   `json:"evolution_and_migration"`
+	TestingStrategy            []string                   `json:"testing_strategy"`
+	BlockingQuestions          []string                   `json:"blocking_questions"`
+}
+
+type ArchitectureDecisionRecord struct {
+	Status       string   `json:"status"`
+	Context      string   `json:"context"`
+	Decision     string   `json:"decision"`
+	Consequences []string `json:"consequences"`
 }
 
 type DesignModule struct {
 	Name             string   `json:"name"`
 	Responsibilities []string `json:"responsibilities"`
 	Dependencies     []string `json:"dependencies"`
+	Invariants       []string `json:"invariants"`
 }
 
 type ImplementationPlanDocument struct {
-	Repositories      []RepositoryPlan `json:"repositories"`
-	Contracts         []string         `json:"contracts"`
-	Migrations        []string         `json:"migrations"`
-	Risks             []string         `json:"risks"`
-	DoNotModify       []string         `json:"do_not_modify"`
-	BlockingQuestions []string         `json:"blocking_questions"`
+	DeliveryGoal             string           `json:"delivery_goal"`
+	Repositories             []RepositoryPlan `json:"repositories"`
+	DependenciesAndContracts []string         `json:"dependencies_and_contracts"`
+	MigrationWork            []string         `json:"migration_work"`
+	DefinitionOfDone         []string         `json:"definition_of_done"`
+	RisksAndMitigations      []DeliveryRisk   `json:"risks_and_mitigations"`
+	DoNotModify              []string         `json:"do_not_modify"`
+	BlockingQuestions        []string         `json:"blocking_questions"`
 }
 
 type RepositoryPlan struct {
 	Repository         string               `json:"repository"`
 	ExpectedPaths      []string             `json:"expected_paths"`
+	Dependencies       []string             `json:"dependencies"`
 	Steps              []ImplementationStep `json:"steps"`
 	ValidationCommands [][]string           `json:"validation_commands"`
 }
@@ -170,6 +200,13 @@ type RepositoryPlan struct {
 type ImplementationStep struct {
 	Description string   `json:"description"`
 	DoneWhen    []string `json:"done_when"`
+}
+
+type DeliveryRisk struct {
+	Description string `json:"description"`
+	Likelihood  string `json:"likelihood"`
+	Impact      string `json:"impact"`
+	Mitigation  string `json:"mitigation"`
 }
 
 type EvidenceClaim struct {

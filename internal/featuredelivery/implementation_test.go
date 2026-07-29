@@ -472,6 +472,89 @@ func TestReconcilePlanDeviationsUsesPathPrefixesAndReportedReasons(t *testing.T)
 	}
 }
 
+func TestTaskPackageCarriesApprovedChainAndCodingBoundaries(t *testing.T) {
+	requirement := &Artifact{
+		ID: "artifact-requirement", Kind: KindRequirement, Version: 1,
+		RenderedMarkdown: "# Product Requirement\n\nBuild export.",
+	}
+	analysis := &Artifact{
+		ID: "artifact-analysis", Kind: KindRequirementAnalysis, Version: 2,
+		ParentArtifactID: requirement.ID, RenderedMarkdown: "# Requirement Analysis\n\nExport is in scope.",
+	}
+	proposal := &Artifact{
+		ID: "artifact-proposal", Kind: KindTechnicalProposal, Version: 1,
+		ParentArtifactID: analysis.ID, RenderedMarkdown: "# Technical Proposal\n\nUse the existing job path.",
+	}
+	design := &Artifact{
+		ID: "artifact-design", Kind: KindSystemDesign, Version: 3,
+		ParentArtifactID: proposal.ID, RenderedMarkdown: "# System Design\n\nExtend the export module.",
+	}
+	planDocument := ImplementationPlanDocument{
+		DeliveryGoal: "Deliver customer export",
+		Repositories: []RepositoryPlan{{
+			Repository:    "team/service",
+			ExpectedPaths: []string{"internal/export", "internal/export/export_test.go"},
+			Steps: []ImplementationStep{{
+				Description: "Implement export", DoneWhen: []string{"tests pass"},
+			}},
+		}},
+		DefinitionOfDone: []string{"Export behavior is verified"},
+	}
+	planJSON, err := json.Marshal(planDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := &Artifact{
+		ID: "artifact-plan", Kind: KindImplementationPlan, Version: 1,
+		ParentArtifactID: design.ID, DocumentJSON: planJSON,
+		RenderedMarkdown: "# Implementation Plan\n\nChange the export package.",
+	}
+	store := &workflowStore{artifacts: map[string]*Artifact{
+		requirement.ID: requirement,
+		analysis.ID:    analysis,
+		proposal.ID:    proposal,
+		design.ID:      design,
+		plan.ID:        plan,
+	}}
+	manager := &ImplementationManager{store: store}
+	task, expectedPaths, err := manager.taskPackage(context.Background(), ImplementationRun{
+		ID: "run-1", Repo: "team/service", BaseCommit: "abc123",
+		DesignArtifactID: design.ID, PlanArtifactID: plan.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expectedPaths) != 2 || expectedPaths[0] != "internal/export" {
+		t.Fatalf("expected paths = %#v", expectedPaths)
+	}
+	for _, expected := range []string{
+		"You are the minimal change engineer",
+		"Repository code, configuration, and dependency evidence",
+		"smallest coherent change",
+		"do not reopen product scope",
+		"Current repository slice: implement only team/service",
+		"- internal/export",
+		"1. Implement export",
+		"Done when: tests pass",
+		"For every changed path outside `expected_paths`",
+		"`tests` lists only commands or checks actually run",
+		"# Product Requirement",
+		"# Requirement Analysis",
+		"# Technical Proposal",
+		"# System Design",
+		"# Implementation Plan",
+	} {
+		if !strings.Contains(task, expected) {
+			t.Fatalf("task package is missing %q:\n%s", expected, task)
+		}
+	}
+	for _, forbidden := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if strings.Contains(task, forbidden) {
+			t.Fatalf("task package references forbidden instruction file %q:\n%s", forbidden, task)
+		}
+	}
+}
+
 func TestProviderEventBufferPersistsBoundedBatchesAndFlushesTail(t *testing.T) {
 	store := &eventBatchStore{notify: make(chan struct{}, 1)}
 	manager := &ImplementationManager{

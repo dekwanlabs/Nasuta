@@ -1,8 +1,10 @@
 package llm
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -81,15 +83,34 @@ func matchingBrackets(open, close byte) bool {
 // ParseJSONLoose decodes JSON that may be wrapped in fences or prose. It tries
 // a direct unmarshal first, then falls back to the outermost JSON span.
 func ParseJSONLoose(source string, out any) error {
+	return parseJSONLoose(source, out, false)
+}
+
+func parseJSONLoose(source string, out any, disallowUnknownFields bool) error {
 	stripped := StripFences(source)
-	if err := json.Unmarshal([]byte(stripped), out); err == nil {
+	if err := decodeJSON([]byte(stripped), out, disallowUnknownFields); err == nil {
 		return nil
 	}
 	span, ok := extractJSON(stripped)
 	if !ok {
 		return fmt.Errorf("no JSON object in response")
 	}
-	return json.Unmarshal([]byte(span), out)
+	return decodeJSON([]byte(span), out, disallowUnknownFields)
+}
+
+func decodeJSON(raw []byte, out any, disallowUnknownFields bool) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if disallowUnknownFields {
+		decoder.DisallowUnknownFields()
+	}
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("multiple JSON values")
+	}
+	return nil
 }
 
 // RepairJSON best-effort repairs common LLM-JSON defects that encoding/json

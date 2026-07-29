@@ -12,14 +12,15 @@ const (
 	maxBackoff         = 8 * time.Second
 )
 
-// CallOptions tunes one non-streaming LLM call. RepairAttempts and Validate
-// apply only to ChatJSON; the zero value is usable.
+// CallOptions tunes one non-streaming LLM call. JSON-specific fields apply
+// only to ChatJSON; the zero value is usable.
 type CallOptions struct {
-	MaxTokens      int
-	MaxAttempts    int
-	Backoff        time.Duration
-	RepairAttempts int
-	Validate       func(parsed any) error
+	MaxTokens             int
+	MaxAttempts           int
+	Backoff               time.Duration
+	RepairAttempts        int
+	DisallowUnknownFields bool
+	Validate              func(parsed any) error
 }
 
 func (o CallOptions) maxAttempts() int {

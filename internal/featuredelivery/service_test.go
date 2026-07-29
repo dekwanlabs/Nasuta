@@ -114,9 +114,13 @@ func TestAddArtifactInheritsValidatedEvidenceSnapshot(t *testing.T) {
 	}
 	service := NewService(store, nil, time.Second)
 	document := []byte(`{
-		"current_facts":[{"statement":"The current path is synchronous","classification":"fact","evidence_ids":[0]}],
-		"options":[{"name":"A","summary":"Keep it","benefits":[],"costs":[],"risks":[]},{"name":"B","summary":"Change it","benefits":[],"costs":[],"risks":[]}],
-		"recommendation":"B","recommendation_reason":"Lower latency"
+		"current_technical_baseline":[{"statement":"The current path is synchronous","classification":"fact","evidence_ids":[0]}],
+		"architecture_drivers":["Reduce latency"],
+		"candidate_architectures":[
+			{"name":"A","summary":"Keep it","architecture_pattern":"modular monolith","communication_pattern":"calls","data_pattern":"crud","deployment_pattern":"binary","contract_pattern":"api","migration_pattern":"expand-contract","reliability_pattern":"timeouts","observability_pattern":"logs","benefits":[],"costs":[],"risks":[],"reversibility":[]},
+			{"name":"B","summary":"Change it","architecture_pattern":"service","communication_pattern":"events","data_pattern":"owned data","deployment_pattern":"container","contract_pattern":"events","migration_pattern":"parallel run","reliability_pattern":"retries","observability_pattern":"traces","benefits":[],"costs":[],"risks":[],"reversibility":[]}
+		],
+		"technical_decision":{"selected_option":"B","rationale":"Lower latency","accepted_tradeoffs":["More operations"]}
 	}`)
 
 	artifact, err := service.AddArtifact(

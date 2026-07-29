@@ -107,26 +107,60 @@ func validateDocument(kind ArtifactKind, document any) error {
 		}
 	case KindRequirementAnalysis:
 		value := document.(*RequirementAnalysisDocument)
-		if strings.TrimSpace(value.Background) == "" || len(value.Goals) == 0 || len(value.FunctionalRequirements) == 0 || len(value.AcceptanceCriteria) == 0 {
-			return fmt.Errorf("requirement analysis requires background, goals, functional requirements, and acceptance criteria")
+		if strings.TrimSpace(value.ProblemStatement) == "" || len(value.Goals) == 0 || len(value.FunctionalRequirements) == 0 || len(value.AcceptanceCriteria) == 0 {
+			return fmt.Errorf("requirement analysis requires a problem statement, goals, functional requirements, and acceptance criteria")
 		}
-		return validateClaims(value.Claims)
 	case KindTechnicalProposal:
 		value := document.(*TechnicalProposalDocument)
-		if len(value.CurrentFacts) == 0 || len(value.Options) < 2 || strings.TrimSpace(value.Recommendation) == "" || strings.TrimSpace(value.RecommendationReason) == "" {
-			return fmt.Errorf("technical proposal requires facts, at least two options, and a recommendation")
+		if len(value.CurrentTechnicalBaseline) == 0 || len(value.ArchitectureDrivers) == 0 || len(value.CandidateArchitectures) < 2 ||
+			strings.TrimSpace(value.TechnicalDecision.SelectedOption) == "" || strings.TrimSpace(value.TechnicalDecision.Rationale) == "" ||
+			len(value.TechnicalDecision.AcceptedTradeoffs) == 0 {
+			return fmt.Errorf("technical proposal requires a baseline, architecture drivers, at least two candidates, and a decision with trade-offs")
 		}
-		return validateClaims(value.CurrentFacts)
+		optionNames := make(map[string]struct{}, len(value.CandidateArchitectures))
+		for i := range value.CandidateArchitectures {
+			option := &value.CandidateArchitectures[i]
+			option.Name = strings.TrimSpace(option.Name)
+			if option.Name == "" || strings.TrimSpace(option.Summary) == "" ||
+				strings.TrimSpace(option.ArchitecturePattern) == "" ||
+				strings.TrimSpace(option.CommunicationPattern) == "" ||
+				strings.TrimSpace(option.DataPattern) == "" ||
+				strings.TrimSpace(option.DeploymentPattern) == "" ||
+				strings.TrimSpace(option.ContractPattern) == "" ||
+				strings.TrimSpace(option.MigrationPattern) == "" ||
+				strings.TrimSpace(option.ReliabilityPattern) == "" ||
+				strings.TrimSpace(option.ObservabilityPattern) == "" {
+				return fmt.Errorf("candidate architecture %d requires name, summary, and every architecture pattern", i)
+			}
+			if _, ok := optionNames[option.Name]; ok {
+				return fmt.Errorf("candidate architecture %q appears more than once", option.Name)
+			}
+			optionNames[option.Name] = struct{}{}
+		}
+		value.TechnicalDecision.SelectedOption = strings.TrimSpace(value.TechnicalDecision.SelectedOption)
+		if _, ok := optionNames[value.TechnicalDecision.SelectedOption]; !ok {
+			return fmt.Errorf("technical decision selects unknown candidate %q", value.TechnicalDecision.SelectedOption)
+		}
+		return validateClaims(value.CurrentTechnicalBaseline)
 	case KindSystemDesign:
 		value := document.(*SystemDesignDocument)
-		if len(value.ArchitectureBoundaries) == 0 || len(value.Modules) == 0 || len(value.Testing) == 0 {
+		record := value.ArchitectureDecisionRecord
+		if strings.TrimSpace(record.Status) == "" || strings.TrimSpace(record.Context) == "" ||
+			strings.TrimSpace(record.Decision) == "" || len(record.Consequences) == 0 {
+			return fmt.Errorf("system design requires a complete architecture decision record")
+		}
+		if len(value.ArchitectureBoundaries) == 0 || len(value.Modules) == 0 || len(value.TestingStrategy) == 0 {
 			return fmt.Errorf("system design requires architecture boundaries, modules, and testing strategy")
 		}
-		return validateClaims(value.Claims)
+		for i, module := range value.Modules {
+			if strings.TrimSpace(module.Name) == "" || len(module.Responsibilities) == 0 || len(module.Invariants) == 0 {
+				return fmt.Errorf("design module %d requires name, responsibilities, and invariants", i)
+			}
+		}
 	case KindImplementationPlan:
 		value := document.(*ImplementationPlanDocument)
-		if len(value.Repositories) == 0 {
-			return fmt.Errorf("implementation plan requires at least one repository")
+		if strings.TrimSpace(value.DeliveryGoal) == "" || len(value.Repositories) == 0 || len(value.DefinitionOfDone) == 0 {
+			return fmt.Errorf("implementation plan requires a delivery goal, at least one repository, and definition of done")
 		}
 		seen := make(map[string]struct{}, len(value.Repositories))
 		for i := range value.Repositories {
@@ -153,13 +187,35 @@ func validateDocument(kind ArtifactKind, document any) error {
 				paths = append(paths, canonicalPath)
 			}
 			repository.ExpectedPaths = paths
+			for stepIndex, step := range repository.Steps {
+				if strings.TrimSpace(step.Description) == "" || len(step.DoneWhen) == 0 {
+					return fmt.Errorf("repository plan %d step %d requires description and done_when", i, stepIndex)
+				}
+			}
 			if _, ok := seen[canonical]; ok {
 				return fmt.Errorf("repository %q appears more than once", canonical)
 			}
 			seen[canonical] = struct{}{}
 		}
+		for i, risk := range value.RisksAndMitigations {
+			if strings.TrimSpace(risk.Description) == "" || strings.TrimSpace(risk.Mitigation) == "" {
+				return fmt.Errorf("delivery risk %d requires description and mitigation", i)
+			}
+			if !validRiskLevel(risk.Likelihood) || !validRiskLevel(risk.Impact) {
+				return fmt.Errorf("delivery risk %d requires low, medium, or high likelihood and impact", i)
+			}
+		}
 	}
 	return nil
+}
+
+func validRiskLevel(value string) bool {
+	switch value {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
 }
 
 func NormalizePlanPath(value string) (string, error) {
@@ -182,12 +238,8 @@ func NormalizePlanPath(value string) (string, error) {
 func validateEvidenceReferences(document any, evidenceCount int) error {
 	var claims []EvidenceClaim
 	switch value := document.(type) {
-	case *RequirementAnalysisDocument:
-		claims = value.Claims
 	case *TechnicalProposalDocument:
-		claims = value.CurrentFacts
-	case *SystemDesignDocument:
-		claims = value.Claims
+		claims = value.CurrentTechnicalBaseline
 	}
 	for claimIndex, claim := range claims {
 		seen := make(map[int]struct{}, len(claim.EvidenceIDs))
@@ -254,71 +306,95 @@ func renderDocument(kind ArtifactKind, document any) string {
 	case KindRequirementAnalysis:
 		value := document.(*RequirementAnalysisDocument)
 		writeTitle(&builder, "Requirement Analysis")
-		writeText(&builder, "Background", value.Background)
+		writeText(&builder, "Problem Statement", value.ProblemStatement)
 		writeList(&builder, "Goals", value.Goals)
-		writeList(&builder, "Users And Scenarios", value.UsersAndScenarios)
+		writeList(&builder, "Success Metrics", value.SuccessMetrics)
+		writeList(&builder, "Non-Goals", value.NonGoals)
+		writeList(&builder, "Personas And Scenarios", value.PersonasAndScenarios)
+		writeList(&builder, "User Stories", value.UserStories)
 		writeList(&builder, "Functional Requirements", value.FunctionalRequirements)
-		writeList(&builder, "Non-Functional Requirements", value.NonFunctionalRequirements)
+		writeList(&builder, "Quality Expectations", value.QualityExpectations)
 		writeList(&builder, "In Scope", value.InScope)
-		writeList(&builder, "Out Of Scope", value.OutOfScope)
+		writeList(&builder, "Business Constraints", value.BusinessConstraints)
 		writeList(&builder, "Business Rules", value.BusinessRules)
 		writeList(&builder, "Acceptance Criteria", value.AcceptanceCriteria)
 		writeList(&builder, "Assumptions", value.Assumptions)
 		writeList(&builder, "Blocking Questions", value.BlockingQuestions)
 		writeList(&builder, "Open Questions", value.OpenQuestions)
-		writeList(&builder, "Initial Impact", value.InitialImpact)
-		writeClaims(&builder, value.Claims)
 	case KindTechnicalProposal:
 		value := document.(*TechnicalProposalDocument)
 		writeTitle(&builder, "Technical Proposal")
-		writeClaimsNamed(&builder, "Current Facts", value.CurrentFacts)
-		writeList(&builder, "Affected Areas", value.AffectedAreas)
-		builder.WriteString("## Options\n\n")
-		for _, option := range value.Options {
-			builder.WriteString("### " + option.Name + "\n\n")
-			builder.WriteString(option.Summary + "\n\n")
-			writeList(&builder, "Benefits", option.Benefits)
-			writeList(&builder, "Costs", option.Costs)
-			writeList(&builder, "Risks", option.Risks)
+		writeClaimsNamed(&builder, "Current Technical Baseline", value.CurrentTechnicalBaseline)
+		writeList(&builder, "Architecture Drivers", value.ArchitectureDrivers)
+		writeList(&builder, "Affected Capabilities", value.AffectedCapabilities)
+		writeHeading(&builder, 2, "Candidate Architectures")
+		for _, option := range value.CandidateArchitectures {
+			writeHeading(&builder, 3, option.Name)
+			writeTextLevel(&builder, 4, "Summary", option.Summary)
+			writeTextLevel(&builder, 4, "Architecture Pattern", option.ArchitecturePattern)
+			writeTextLevel(&builder, 4, "Communication Pattern", option.CommunicationPattern)
+			writeTextLevel(&builder, 4, "Data Pattern", option.DataPattern)
+			writeTextLevel(&builder, 4, "Deployment Pattern", option.DeploymentPattern)
+			writeTextLevel(&builder, 4, "Contract Pattern", option.ContractPattern)
+			writeTextLevel(&builder, 4, "Migration Pattern", option.MigrationPattern)
+			writeTextLevel(&builder, 4, "Reliability Pattern", option.ReliabilityPattern)
+			writeTextLevel(&builder, 4, "Observability Pattern", option.ObservabilityPattern)
+			writeListLevel(&builder, 4, "Benefits", option.Benefits)
+			writeListLevel(&builder, 4, "Costs", option.Costs)
+			writeListLevel(&builder, 4, "Risks", option.Risks)
+			writeListLevel(&builder, 4, "Reversibility", option.Reversibility)
 		}
-		writeText(&builder, "Recommendation", value.Recommendation)
-		writeText(&builder, "Recommendation Reason", value.RecommendationReason)
-		writeList(&builder, "Data And API Impact", value.DataAndAPIImpact)
-		writeList(&builder, "Compatibility Risks", value.CompatibilityRisks)
-		writeList(&builder, "Rollout", value.Rollout)
-		writeList(&builder, "Rollback", value.Rollback)
+		writeHeading(&builder, 2, "Technical Decision")
+		writeTextLevel(&builder, 3, "Selected Option", value.TechnicalDecision.SelectedOption)
+		writeTextLevel(&builder, 3, "Rationale", value.TechnicalDecision.Rationale)
+		writeListLevel(&builder, 3, "Accepted Tradeoffs", value.TechnicalDecision.AcceptedTradeoffs)
+		writeList(&builder, "Compatibility Obligations", value.CompatibilityObligations)
+		writeList(&builder, "Security Obligations", value.SecurityObligations)
+		writeList(&builder, "Performance Obligations", value.PerformanceObligations)
+		writeList(&builder, "Operational Obligations", value.OperationalObligations)
+		writeList(&builder, "Delivery And Migration Strategy", value.DeliveryAndMigrationStrategy)
 		writeList(&builder, "Open Decisions", value.OpenDecisions)
 		writeList(&builder, "Blocking Questions", value.BlockingQuestions)
 	case KindSystemDesign:
 		value := document.(*SystemDesignDocument)
 		writeTitle(&builder, "System Design")
+		writeHeading(&builder, 2, "Architecture Decision Record")
+		writeTextLevel(&builder, 3, "Status", value.ArchitectureDecisionRecord.Status)
+		writeTextLevel(&builder, 3, "Context", value.ArchitectureDecisionRecord.Context)
+		writeTextLevel(&builder, 3, "Decision", value.ArchitectureDecisionRecord.Decision)
+		writeListLevel(&builder, 3, "Consequences", value.ArchitectureDecisionRecord.Consequences)
+		writeList(&builder, "Domain Model", value.DomainModel)
 		writeList(&builder, "Architecture Boundaries", value.ArchitectureBoundaries)
-		builder.WriteString("## Modules\n\n")
+		writeHeading(&builder, 2, "Modules")
 		for _, module := range value.Modules {
-			builder.WriteString("### " + module.Name + "\n\n")
-			writeList(&builder, "Responsibilities", module.Responsibilities)
-			writeList(&builder, "Dependencies", module.Dependencies)
+			writeHeading(&builder, 3, module.Name)
+			writeListLevel(&builder, 4, "Responsibilities", module.Responsibilities)
+			writeListLevel(&builder, 4, "Dependencies", module.Dependencies)
+			writeListLevel(&builder, 4, "Invariants", module.Invariants)
 		}
 		writeList(&builder, "Key Flows", value.KeyFlows)
-		writeList(&builder, "API Contracts", value.APIContracts)
-		writeList(&builder, "Data Model", value.DataModel)
-		writeList(&builder, "Consistency", value.Consistency)
+		writeList(&builder, "Interface Contracts", value.InterfaceContracts)
+		writeList(&builder, "Data Ownership And Model", value.DataOwnershipAndModel)
+		writeList(&builder, "Consistency And Concurrency", value.ConsistencyAndConcurrency)
+		writeList(&builder, "Scalability", value.Scalability)
+		writeList(&builder, "Maintainability", value.Maintainability)
+		writeList(&builder, "Reliability And Recovery", value.ReliabilityAndRecovery)
 		writeList(&builder, "Security", value.Security)
 		writeList(&builder, "Configuration", value.Configuration)
-		writeList(&builder, "Errors And Degradation", value.ErrorsAndDegradation)
 		writeList(&builder, "Observability", value.Observability)
-		writeList(&builder, "Testing", value.Testing)
-		writeList(&builder, "Rollout And Rollback", value.RolloutAndRollback)
-		writeList(&builder, "Rejected Alternatives", value.RejectedAlternatives)
+		writeList(&builder, "Evolution And Migration", value.EvolutionAndMigration)
+		writeList(&builder, "Testing Strategy", value.TestingStrategy)
 		writeList(&builder, "Blocking Questions", value.BlockingQuestions)
-		writeClaims(&builder, value.Claims)
 	case KindImplementationPlan:
 		value := document.(*ImplementationPlanDocument)
 		writeTitle(&builder, "Implementation Plan")
+		writeText(&builder, "Delivery Goal", value.DeliveryGoal)
+		writeHeading(&builder, 2, "Repositories")
 		for _, repository := range value.Repositories {
-			builder.WriteString("## Repository: " + repository.Repository + "\n\n")
-			writeList(&builder, "Expected Paths", repository.ExpectedPaths)
-			builder.WriteString("### Steps\n\n")
+			writeHeading(&builder, 3, repository.Repository)
+			writeListLevel(&builder, 4, "Expected Paths", repository.ExpectedPaths)
+			writeListLevel(&builder, 4, "Dependencies", repository.Dependencies)
+			writeHeading(&builder, 4, "Steps")
 			for i, step := range repository.Steps {
 				fmt.Fprintf(&builder, "%d. %s\n", i+1, step.Description)
 				for _, done := range step.DoneWhen {
@@ -326,11 +402,21 @@ func renderDocument(kind ArtifactKind, document any) string {
 				}
 			}
 			builder.WriteString("\n")
-			writeCommands(&builder, repository.ValidationCommands)
+			writeCommandsLevel(&builder, 4, repository.ValidationCommands)
 		}
-		writeList(&builder, "Contracts", value.Contracts)
-		writeList(&builder, "Migrations", value.Migrations)
-		writeList(&builder, "Risks", value.Risks)
+		writeList(&builder, "Dependencies And Contracts", value.DependenciesAndContracts)
+		writeList(&builder, "Migration Work", value.MigrationWork)
+		writeList(&builder, "Definition Of Done", value.DefinitionOfDone)
+		if len(value.RisksAndMitigations) > 0 {
+			writeHeading(&builder, 2, "Risks And Mitigations")
+			for i, risk := range value.RisksAndMitigations {
+				fmt.Fprintf(&builder, "### Risk %d\n\n", i+1)
+				writeTextLevel(&builder, 4, "Description", risk.Description)
+				writeTextLevel(&builder, 4, "Likelihood", risk.Likelihood)
+				writeTextLevel(&builder, 4, "Impact", risk.Impact)
+				writeTextLevel(&builder, 4, "Mitigation", risk.Mitigation)
+			}
+		}
 		writeList(&builder, "Do Not Modify", value.DoNotModify)
 		writeList(&builder, "Blocking Questions", value.BlockingQuestions)
 	}
@@ -342,32 +428,41 @@ func writeTitle(builder *strings.Builder, title string) {
 }
 
 func writeText(builder *strings.Builder, title, value string) {
+	writeTextLevel(builder, 2, title, value)
+}
+
+func writeTextLevel(builder *strings.Builder, level int, title, value string) {
 	if strings.TrimSpace(value) == "" {
 		return
 	}
-	builder.WriteString("## " + title + "\n\n" + value + "\n\n")
+	writeHeading(builder, level, title)
+	builder.WriteString(value + "\n\n")
 }
 
 func writeList(builder *strings.Builder, title string, values []string) {
+	writeListLevel(builder, 2, title, values)
+}
+
+func writeListLevel(builder *strings.Builder, level int, title string, values []string) {
 	if len(values) == 0 {
 		return
 	}
-	builder.WriteString("## " + title + "\n\n")
+	writeHeading(builder, level, title)
 	for _, value := range values {
 		builder.WriteString("- " + value + "\n")
 	}
 	builder.WriteString("\n")
 }
 
-func writeClaims(builder *strings.Builder, claims []EvidenceClaim) {
-	writeClaimsNamed(builder, "Claims", claims)
+func writeHeading(builder *strings.Builder, level int, title string) {
+	builder.WriteString(strings.Repeat("#", level) + " " + title + "\n\n")
 }
 
 func writeClaimsNamed(builder *strings.Builder, title string, claims []EvidenceClaim) {
 	if len(claims) == 0 {
 		return
 	}
-	builder.WriteString("## " + title + "\n\n")
+	writeHeading(builder, 2, title)
 	for _, claim := range claims {
 		fmt.Fprintf(builder, "- [%s] %s", claim.Classification, claim.Statement)
 		if len(claim.EvidenceIDs) > 0 {
@@ -378,11 +473,11 @@ func writeClaimsNamed(builder *strings.Builder, title string, claims []EvidenceC
 	builder.WriteString("\n")
 }
 
-func writeCommands(builder *strings.Builder, commands [][]string) {
+func writeCommandsLevel(builder *strings.Builder, level int, commands [][]string) {
 	if len(commands) == 0 {
 		return
 	}
-	builder.WriteString("### Validation Commands\n\n")
+	writeHeading(builder, level, "Validation Commands")
 	for _, command := range commands {
 		builder.WriteString("- `" + strings.Join(command, " ") + "`\n")
 	}
