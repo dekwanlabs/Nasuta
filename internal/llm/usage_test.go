@@ -3,12 +3,37 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 )
+
+func TestOpenAIEmptyResponseReportsTokenExhaustion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]any{"content": "", "reasoning_content": "hidden"},
+				"finish_reason": "length",
+			}},
+			"usage": map[string]any{
+				"prompt_tokens": 4214, "completion_tokens": 4000, "total_tokens": 8214,
+				"completion_tokens_details": map[string]any{"reasoning_tokens": 4000},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewLLMClientWithHTTPAndProvider(server.URL, "key", "model", "openai", 4000, server.Client())
+	_, err := client.ChatMax(t.Context(), "system", "user", 4000)
+	var callErr *CallError
+	if !errors.As(err, &callErr) || callErr.Kind != ErrKindEmpty ||
+		callErr.FinishReason != "length" || callErr.OutputTokens != 4000 || callErr.ReasoningTokens != 4000 {
+		t.Fatalf("error=%v callError=%+v", err, callErr)
+	}
+}
 
 type captureUsageRecorder struct {
 	calls []CallUsage

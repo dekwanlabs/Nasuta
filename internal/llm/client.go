@@ -170,6 +170,7 @@ func (lc *LLMClient) chatMessagesOpenAI(ctx context.Context, messages []Message,
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage openAIUsage `json:"usage"`
 	}
@@ -195,7 +196,11 @@ func (lc *LLMClient) chatMessagesOpenAI(ctx context.Context, messages []Message,
 	}
 	content := result.Choices[0].Message.Content
 	if strings.TrimSpace(content) == "" {
-		return "", result.Usage.shared(), &CallError{Kind: ErrKindEmpty}
+		usage := result.Usage.shared()
+		return "", usage, &CallError{
+			Kind: ErrKindEmpty, FinishReason: result.Choices[0].FinishReason,
+			OutputTokens: usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
+		}
 	}
 	return content, result.Usage.shared(), nil
 }

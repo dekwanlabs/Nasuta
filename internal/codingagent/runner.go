@@ -16,6 +16,8 @@ const (
 	maxProviderEventBytes = 1 << 20
 	maxProviderOutput     = 8 << 20
 	maxProviderEvents     = 5000
+	maxPlatformEvents     = 64
+	maxChangedPaths       = 32
 )
 
 type Config struct {

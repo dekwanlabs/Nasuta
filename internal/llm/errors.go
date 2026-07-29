@@ -30,11 +30,14 @@ const (
 // CallError classifies one LLM call failure. Callers that only need "did it
 // work" treat it as error; retry-aware callers inspect Retryable().
 type CallError struct {
-	Kind       ErrorKind
-	Status     int           // HTTP status when Kind == ErrKindStatus
-	Body       string        // response body excerpt for logging
-	Err        error         // underlying error when wrapping a transport/parse failure
-	RetryAfter time.Duration // server-advised backoff (Retry-After header), 0 if none
+	Kind            ErrorKind
+	Status          int           // HTTP status when Kind == ErrKindStatus
+	Body            string        // response body excerpt for logging
+	Err             error         // underlying error when wrapping a transport/parse failure
+	RetryAfter      time.Duration // server-advised backoff (Retry-After header), 0 if none
+	FinishReason    string
+	OutputTokens    int
+	ReasoningTokens int
 }
 
 func (e *CallError) Error() string {
@@ -47,6 +50,12 @@ func (e *CallError) Error() string {
 		}
 		return "LLM network error"
 	case ErrKindEmpty:
+		if e.FinishReason != "" || e.OutputTokens > 0 || e.ReasoningTokens > 0 {
+			return fmt.Sprintf(
+				"empty LLM response (finish_reason=%s, output_tokens=%d, reasoning_tokens=%d)",
+				e.FinishReason, e.OutputTokens, e.ReasoningTokens,
+			)
+		}
 		return "empty LLM response"
 	case ErrKindEnvelope:
 		if e.Err != nil {

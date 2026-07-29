@@ -365,8 +365,9 @@ var mysqlSchema = map[MySQLGroup][]string{
 				content_hash       CHAR(64) NOT NULL,
 				created_by         BIGINT NOT NULL,
 				created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				UNIQUE KEY uniq_request_kind_version (request_id, kind, version),
-				KEY idx_request_created (request_id, created_at, id),
+					UNIQUE KEY uniq_request_kind_version (request_id, kind, version),
+					KEY idx_request_kind_parent_version (request_id, kind, parent_artifact_id, version),
+					KEY idx_request_created (request_id, created_at, id),
 				KEY idx_parent (parent_artifact_id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS feature_artifact_reviews (
@@ -449,6 +450,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 				additions               INT NOT NULL,
 				deletions               INT NOT NULL,
 				files_json              JSON NOT NULL,
+				plan_deviations_json    JSON NOT NULL,
 				validation_results_json JSON NOT NULL,
 				provider_summary        TEXT NOT NULL,
 				created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

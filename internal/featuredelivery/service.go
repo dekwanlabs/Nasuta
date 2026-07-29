@@ -5,14 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
 	maxFeatureTitle  = 512
 	maxReviewComment = 8000
-	maxArtifactPage  = 500
+	maxRepository    = 512
 )
 
 type Service struct {
@@ -31,11 +33,10 @@ func (service *Service) CreateImplementation(ctx context.Context, requestID stri
 	if !admin {
 		return nil, false, ErrForbidden
 	}
-	feature, artifacts, lineage, err := service.GetFeature(ctx, requestID, userID, true)
+	feature, lineage, err := service.GetFeature(ctx, requestID, userID, true)
 	if err != nil {
 		return nil, false, err
 	}
-	_ = artifacts
 	if service.implementations == nil {
 		return nil, false, ErrUnavailable
 	}
@@ -71,10 +72,33 @@ func (service *Service) CancelImplementation(ctx context.Context, runID string, 
 }
 
 func (service *Service) ListRunEvents(ctx context.Context, runID string, afterSeq int64, limit int, userID int64, admin bool) ([]RunEvent, error) {
-	if _, err := service.GetImplementation(ctx, runID, userID, admin); err != nil {
+	_, reader, err := service.OpenRunEvents(ctx, runID, userID, admin)
+	if err != nil {
 		return nil, err
 	}
-	return service.store.ListRunEvents(ctx, runID, afterSeq, limit)
+	return reader.List(ctx, afterSeq, limit)
+}
+
+// RunEventReader scopes repeated event reads to one authorized run.
+type RunEventReader struct {
+	store Store
+	runID string
+}
+
+// OpenRunEvents authorizes once before a bounded replay or live stream.
+func (service *Service) OpenRunEvents(ctx context.Context, runID string, userID int64, admin bool) (*ImplementationRun, *RunEventReader, error) {
+	run, err := service.GetImplementation(ctx, runID, userID, admin)
+	if err != nil {
+		return nil, nil, err
+	}
+	return run, &RunEventReader{store: service.store, runID: runID}, nil
+}
+
+func (reader *RunEventReader) List(ctx context.Context, afterSeq int64, limit int) ([]RunEvent, error) {
+	if reader == nil || reader.store == nil {
+		return nil, ErrUnavailable
+	}
+	return reader.store.ListRunEvents(ctx, reader.runID, afterSeq, limit)
 }
 
 func (service *Service) SubscribeRun(runID string) (<-chan RunEvent, func(), error) {
@@ -135,17 +159,32 @@ func (service *Service) CreateFeature(ctx context.Context, title string, require
 	return &feature, &artifact, nil
 }
 
-func (service *Service) GetFeature(ctx context.Context, id string, userID int64, admin bool) (*FeatureRequest, []Artifact, Lineage, error) {
+func (service *Service) GetFeature(ctx context.Context, id string, userID int64, admin bool) (*FeatureRequest, Lineage, error) {
 	feature, err := service.authorizedFeature(ctx, id, userID, admin)
 	if err != nil {
-		return nil, nil, Lineage{}, err
+		return nil, Lineage{}, err
 	}
-	artifacts, err := service.store.ListArtifacts(ctx, id, maxArtifactPage)
+	lineage, err := service.store.GetCurrentLineage(ctx, id)
 	if err != nil {
-		return nil, nil, Lineage{}, err
+		return nil, Lineage{}, err
 	}
-	lineage := DeriveLineage(artifacts)
-	return feature, artifacts, lineage, nil
+	return feature, lineage, nil
+}
+
+func (service *Service) ListArtifacts(ctx context.Context, requestID string, cursor ArtifactCursor, limit int, userID int64, admin bool) ([]ArtifactSummary, Lineage, error) {
+	if _, err := service.authorizedFeature(ctx, requestID, userID, admin); err != nil {
+		return nil, Lineage{}, err
+	}
+	items, err := service.store.ListArtifacts(ctx, requestID, cursor, limit)
+	if err != nil {
+		return nil, Lineage{}, err
+	}
+	lineage, err := service.store.GetCurrentLineage(ctx, requestID)
+	if err != nil {
+		return nil, Lineage{}, err
+	}
+	markStaleSummaries(items, lineage)
+	return items, lineage, nil
 }
 
 func (service *Service) ListFeatures(ctx context.Context, userID int64, admin bool, cursor FeatureCursor, limit int) ([]FeatureRequest, error) {
@@ -239,13 +278,23 @@ func (service *Service) GenerateArtifact(ctx context.Context, requestID string, 
 		run.ErrorSummary = truncateText(generationErr.Error(), 2048)
 		ended := service.now()
 		run.EndedAt = &ended
-		_ = service.store.FinishGenerationRun(context.WithoutCancel(ctx), run.ID, run.Status, inputTokens, outputTokens, run.ErrorSummary)
+		if finishErr := service.store.FinishGenerationRun(context.WithoutCancel(ctx), run.ID, run.Status, inputTokens, outputTokens, run.ErrorSummary); finishErr != nil {
+			generationErr = errors.Join(generationErr, fmt.Errorf("persist failed generation %q: %w", run.ID, finishErr))
+		}
 		return nil, &run, generationErr
 	}
 	artifact.CreatedAt = service.now()
-	saved, err := service.store.CreateArtifact(ctx, artifact)
+	saved, err := service.store.CompleteGeneration(generationCtx, run.ID, artifact, inputTokens, outputTokens)
 	if err != nil {
-		_ = service.store.FinishGenerationRun(context.WithoutCancel(ctx), run.ID, "failed", inputTokens, outputTokens, truncateText(err.Error(), 2048))
+		run.Status = "failed"
+		run.InputTokens = inputTokens
+		run.OutputTokens = outputTokens
+		run.ErrorSummary = truncateText(err.Error(), 2048)
+		ended := service.now()
+		run.EndedAt = &ended
+		if finishErr := service.store.FinishGenerationRun(context.WithoutCancel(ctx), run.ID, run.Status, inputTokens, outputTokens, run.ErrorSummary); finishErr != nil {
+			err = errors.Join(err, fmt.Errorf("persist failed generation %q: %w", run.ID, finishErr))
+		}
 		return nil, &run, err
 	}
 	run.Status = "succeeded"
@@ -253,9 +302,6 @@ func (service *Service) GenerateArtifact(ctx context.Context, requestID string, 
 	run.OutputTokens = outputTokens
 	ended := service.now()
 	run.EndedAt = &ended
-	if err := service.store.FinishGenerationRun(ctx, run.ID, run.Status, inputTokens, outputTokens, ""); err != nil {
-		return nil, &run, err
-	}
 	return saved, &run, nil
 }
 
@@ -321,6 +367,24 @@ func (service *Service) GetArtifact(ctx context.Context, requestID, artifactID s
 	return artifact, nil
 }
 
+func (service *Service) GetGenerationRun(ctx context.Context, runID string, userID int64, admin bool) (*GenerationRun, error) {
+	run, err := service.store.GetGenerationRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := service.authorizedFeature(ctx, run.RequestID, userID, admin); err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+func (service *Service) ListGenerationRuns(ctx context.Context, requestID string, cursor GenerationCursor, limit int, userID int64, admin bool) ([]GenerationRun, error) {
+	if _, err := service.authorizedFeature(ctx, requestID, userID, admin); err != nil {
+		return nil, err
+	}
+	return service.store.ListGenerationRuns(ctx, requestID, cursor, limit)
+}
+
 func (service *Service) PatchPath(ctx context.Context, runID string, userID int64, admin bool) (string, *ChangeSet, error) {
 	run, err := service.GetImplementation(ctx, runID, userID, admin)
 	if err != nil {
@@ -334,6 +398,34 @@ func (service *Service) PatchPath(ctx context.Context, runID string, userID int6
 		return "", nil, err
 	}
 	return path, run.ChangeSet, nil
+}
+
+func (service *Service) ValidationOutputPath(ctx context.Context, runID string, sequence int, userID int64, admin bool) (string, *ValidationResult, error) {
+	if sequence <= 0 {
+		return "", nil, ErrInvalid
+	}
+	run, err := service.GetImplementation(ctx, runID, userID, admin)
+	if err != nil {
+		return "", nil, err
+	}
+	if run.ChangeSet == nil || service.implementations == nil {
+		return "", nil, ErrNotFound
+	}
+	for index := range run.ChangeSet.ValidationResults {
+		result := &run.ChangeSet.ValidationResults[index]
+		if result.Sequence != sequence {
+			continue
+		}
+		if result.OutputRelPath == "" || result.OutputSHA256 == "" || result.OutputBytes < 0 {
+			return "", nil, ErrNotFound
+		}
+		path, err := service.implementations.ValidationOutputPath(result.OutputRelPath)
+		if err != nil {
+			return "", nil, err
+		}
+		return path, result, nil
+	}
+	return "", nil, ErrNotFound
 }
 
 func (service *Service) authorizedFeature(ctx context.Context, id string, userID int64, admin bool) (*FeatureRequest, error) {
@@ -351,18 +443,45 @@ func (service *Service) authorizedFeature(ctx context.Context, id string, userID
 }
 
 func (service *Service) currentParent(ctx context.Context, requestID string, kind ArtifactKind) (*Artifact, error) {
-	artifacts, err := service.store.ListArtifacts(ctx, requestID, maxArtifactPage)
+	lineage, err := service.store.GetCurrentLineage(ctx, requestID)
 	if err != nil {
 		return nil, err
 	}
-	lineage := DeriveLineage(artifacts)
 	return ExpectedParent(lineage, kind)
 }
 
+func markStaleSummaries(items []ArtifactSummary, lineage Lineage) {
+	current := make(map[string]struct{}, 5)
+	for _, artifact := range []*Artifact{
+		lineage.Requirement, lineage.RequirementAnalysis, lineage.TechnicalProposal,
+		lineage.SystemDesign, lineage.ImplementationPlan,
+	} {
+		if artifact != nil {
+			current[artifact.ID] = struct{}{}
+		}
+	}
+	for index := range items {
+		_, active := current[items[index].ID]
+		items[index].Stale = !active
+	}
+}
+
 func NormalizeRepository(value string) (string, error) {
-	value = strings.Trim(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")), "/")
-	if value == "" || strings.Contains(value, "\x00") || strings.HasPrefix(value, ".") {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return "", fmt.Errorf("repository is required: %w", ErrInvalid)
+	}
+	if len(value) > maxRepository || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") {
+		return "", fmt.Errorf("invalid repository %q: %w", value, ErrInvalid)
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) {
+			return "", fmt.Errorf("invalid repository %q: %w", value, ErrInvalid)
+		}
+	}
+	value = strings.TrimRight(value, "/")
+	if value == "" || path.IsAbs(value) || path.Clean(value) != value || strings.HasPrefix(value, ".") {
+		return "", fmt.Errorf("invalid repository %q: %w", value, ErrInvalid)
 	}
 	parts := strings.Split(value, "/")
 	for _, part := range parts {

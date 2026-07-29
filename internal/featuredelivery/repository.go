@@ -10,6 +10,16 @@ type FeatureCursor struct {
 	ID        string
 }
 
+type ArtifactCursor struct {
+	Kind    ArtifactKind
+	Version int
+}
+
+type GenerationCursor struct {
+	StartedAt time.Time
+	ID        string
+}
+
 type RunCursor struct {
 	CreatedAt time.Time
 	ID        string
@@ -24,10 +34,14 @@ type Store interface {
 
 	CreateArtifact(context.Context, Artifact) (*Artifact, error)
 	GetArtifact(context.Context, string) (*Artifact, error)
-	ListArtifacts(context.Context, string, int) ([]Artifact, error)
+	ListArtifacts(context.Context, string, ArtifactCursor, int) ([]ArtifactSummary, error)
+	GetCurrentLineage(context.Context, string) (Lineage, error)
 	ReviewArtifact(context.Context, ArtifactReview) error
 
 	CreateGenerationRun(context.Context, GenerationRun) error
+	CompleteGeneration(context.Context, string, Artifact, int64, int64) (*Artifact, error)
+	GetGenerationRun(context.Context, string) (*GenerationRun, error)
+	ListGenerationRuns(context.Context, string, GenerationCursor, int) ([]GenerationRun, error)
 	FinishGenerationRun(context.Context, string, string, int64, int64, string) error
 	InterruptGenerationRuns(context.Context) error
 
@@ -46,6 +60,7 @@ type Store interface {
 	InterruptActiveImplementations(context.Context, time.Time, time.Time) ([]string, error)
 
 	AppendRunEvent(context.Context, RunEvent) (*RunEvent, error)
+	AppendRunEvents(context.Context, []RunEvent) ([]RunEvent, error)
 	ListRunEvents(context.Context, string, int64, int) ([]RunEvent, error)
 	SaveChangeSetAndFinish(context.Context, ChangeSet, RunStatus, string, time.Time) error
 	GetChangeSet(context.Context, string) (*ChangeSet, error)

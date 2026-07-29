@@ -43,8 +43,17 @@ func (s *Store) repair() error {
 		return fmt.Errorf("check RBAC menu: %w", err)
 	}
 	if rbacCount == 0 {
-		if err := s.CreateMenu(&Menu{ParentID: 0, Name: "权限管理", Path: "/rbac", Icon: "Lock", SortOrder: 8}); err != nil {
+		if err := s.CreateMenu(&Menu{ParentID: 0, Name: "权限管理", Path: "/rbac", Icon: "Lock", SortOrder: 9}); err != nil {
 			return fmt.Errorf("create RBAC menu: %w", err)
+		}
+	}
+	var featureCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rbac_menus WHERE path = '/features'`).Scan(&featureCount); err != nil {
+		return fmt.Errorf("check Feature Delivery menu: %w", err)
+	}
+	if featureCount == 0 {
+		if err := s.CreateMenu(&Menu{ParentID: 0, Name: "研发任务", Path: "/features", Icon: "Management", SortOrder: 5}); err != nil {
+			return fmt.Errorf("create Feature Delivery menu: %w", err)
 		}
 	}
 
@@ -91,10 +100,11 @@ func (s *Store) seed() error {
 	menus := []Menu{
 		{ParentID: 0, Name: "Dashboard", Path: "/dashboard", Icon: "Monitor", SortOrder: 1},
 		{ParentID: 0, Name: "AI Q&A", Path: "/qa", Icon: "ChatLineRound", SortOrder: 4},
-		{ParentID: 0, Name: "Agent Runs", Path: "/agent-runs", Icon: "View", SortOrder: 5},
-		{ParentID: 0, Name: "Docs", Path: "/docs", Icon: "Document", SortOrder: 6},
-		{ParentID: 0, Name: "Settings", Path: "/settings", Icon: "Setting", SortOrder: 7},
-		{ParentID: 0, Name: "权限管理", Path: "/rbac", Icon: "Lock", SortOrder: 8},
+		{ParentID: 0, Name: "研发任务", Path: "/features", Icon: "Management", SortOrder: 5},
+		{ParentID: 0, Name: "Agent Runs", Path: "/agent-runs", Icon: "View", SortOrder: 6},
+		{ParentID: 0, Name: "Docs", Path: "/docs", Icon: "Document", SortOrder: 7},
+		{ParentID: 0, Name: "Settings", Path: "/settings", Icon: "Setting", SortOrder: 8},
+		{ParentID: 0, Name: "权限管理", Path: "/rbac", Icon: "Lock", SortOrder: 9},
 	}
 	for i := range menus {
 		if err := s.CreateMenu(&menus[i]); err != nil {

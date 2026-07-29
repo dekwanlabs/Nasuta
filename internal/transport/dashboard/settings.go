@@ -69,6 +69,17 @@ func (handler *Handler) APISettingsPut(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteErr(w, fmt.Errorf("no valid setting keys provided"))
 		return
 	}
+	if _, providersChanged := filtered["coding_enabled_providers"]; providersChanged {
+		if err := handler.validateCodingSettingsUpdate(filtered); err != nil {
+			httputil.WriteBadRequest(w, err.Error())
+			return
+		}
+	} else if _, defaultChanged := filtered["coding_default_provider"]; defaultChanged {
+		if err := handler.validateCodingSettingsUpdate(filtered); err != nil {
+			httputil.WriteBadRequest(w, err.Error())
+			return
+		}
+	}
 
 	if err := handler.authDB.SetSettings(filtered); err != nil {
 		httputil.WriteErr(w, err)
@@ -76,6 +87,18 @@ func (handler *Handler) APISettingsPut(w http.ResponseWriter, r *http.Request) {
 	}
 	handler.reloadQA()
 	httputil.WriteJSON(w, map[string]any{"updated": len(filtered), "keys": keysOf(filtered)})
+}
+
+func (handler *Handler) validateCodingSettingsUpdate(update map[string]string) error {
+	stored, err := handler.authDB.GetSettings()
+	if err != nil {
+		return fmt.Errorf("load settings for coding validation: %w", err)
+	}
+	settings := &config.PlatformSettings{}
+	settings.Apply(nil)
+	settings.Apply(stored)
+	settings.Apply(update)
+	return settings.ValidateCodingSettings()
 }
 
 func filterSettings(body map[string]string) (map[string]string, error) {

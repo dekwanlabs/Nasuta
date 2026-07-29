@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 const (
@@ -17,6 +19,10 @@ const (
 	implementationPoll      = time.Second
 	implementationCleanup   = time.Minute
 	implementationRecovery  = 30 * time.Second
+	providerEventBatchSize  = 32
+	providerEventFlush      = 250 * time.Millisecond
+	eventFlushTimeout       = 5 * time.Second
+	maxProviderDetailBytes  = 64 << 10
 	maxClientRequestIDBytes = 128
 	maxRunErrorBytes        = 2048
 )
@@ -103,6 +109,15 @@ func (manager *ImplementationManager) Create(ctx context.Context, feature Featur
 	if !planContainsRepository(*lineage.ImplementationPlan, repo) {
 		return nil, false, ErrConflict
 	}
+	if options.ParentRunID != "" {
+		parent, err := manager.store.GetImplementation(ctx, options.ParentRunID)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := validateReimplementationParent(*parent, feature.ID, repo); err != nil {
+			return nil, false, err
+		}
+	}
 	if _, ok := manager.enabled[options.Provider]; !ok {
 		return nil, false, fmt.Errorf("coding provider %q is not enabled: %w", options.Provider, ErrUnavailable)
 	}
@@ -184,6 +199,7 @@ func (manager *ImplementationManager) Run(ctx context.Context) {
 	if manager == nil || manager.store == nil || manager.git == nil || manager.runner == nil {
 		return
 	}
+	log.InfofCtx(ctx, "[feature-delivery] implementation workers starting deployment=single_instance isolation=local_process concurrency=%d", manager.config.MaxConcurrency)
 	manager.recoverExpired(ctx)
 	for worker := 0; worker < manager.config.MaxConcurrency; worker++ {
 		go manager.worker(ctx, worker)
@@ -195,6 +211,7 @@ func (manager *ImplementationManager) Run(ctx context.Context) {
 func (manager *ImplementationManager) worker(ctx context.Context, index int) {
 	workerID, err := NewID(fmt.Sprintf("worker%d", index))
 	if err != nil {
+		log.ErrorfCtx(ctx, "[feature-delivery] create worker id index=%d: %v", index, err)
 		return
 	}
 	ticker := time.NewTicker(implementationPoll)
@@ -206,6 +223,7 @@ func (manager *ImplementationManager) worker(ctx context.Context, index int) {
 			continue
 		}
 		if !errors.Is(err, ErrNotFound) && ctx.Err() == nil {
+			log.WarnfCtx(ctx, "[feature-delivery] claim implementation worker=%s: %v", workerID, err)
 			select {
 			case <-ctx.Done():
 				return
@@ -221,6 +239,8 @@ func (manager *ImplementationManager) worker(ctx context.Context, index int) {
 }
 
 func (manager *ImplementationManager) execute(parent context.Context, workerID string, run ImplementationRun) {
+	executionStarted := manager.now()
+	log.InfofCtx(parent, "[feature-delivery] implementation started run=%s feature=%s provider=%s repo=%s", run.ID, run.RequestID, run.Provider, run.Repo)
 	timeoutCtx, timeoutCancel := context.WithTimeoutCause(parent, manager.config.Timeout, errImplementationTimedOut)
 	runCtx, cancel := context.WithCancelCause(timeoutCtx)
 	manager.registerCancel(run.ID, cancel)
@@ -240,7 +260,7 @@ func (manager *ImplementationManager) execute(parent context.Context, workerID s
 		manager.finishFailure(runCtx, run, workerID, RunPreparing, err)
 		return
 	}
-	task, err := manager.taskPackage(runCtx, run)
+	task, expectedPaths, err := manager.taskPackage(runCtx, run)
 	if err != nil {
 		manager.finishFailure(runCtx, run, workerID, RunPreparing, err)
 		return
@@ -250,11 +270,20 @@ func (manager *ImplementationManager) execute(parent context.Context, workerID s
 		return
 	}
 	_, _ = manager.appendEvent(runCtx, run.ID, EventProviderStarted, run.Provider+" started", nil)
+	providerEvents := newProviderEventBuffer(manager, run.ID)
 	result, err := manager.runner.Run(runCtx, CodingRequest{
 		RunID: run.ID, Provider: run.Provider, Model: run.Model,
 		WorktreePath: prepared.WorktreePath, BaseCommit: run.BaseCommit,
 		TaskPackage: task, NetworkEnabled: run.NetworkEnabled, Timeout: manager.config.Timeout,
-	}, manager.providerEventSink(run.ID))
+	}, providerEvents.Append)
+	flushCtx, flushCancel := context.WithTimeout(context.WithoutCancel(runCtx), eventFlushTimeout)
+	flushErr := providerEvents.Flush(flushCtx)
+	flushCancel()
+	if err == nil {
+		err = flushErr
+	} else if flushErr != nil {
+		err = errors.Join(err, flushErr)
+	}
 	if err != nil {
 		manager.finishFailureWithResult(runCtx, run, workerID, RunRunning, result, err)
 		return
@@ -273,6 +302,7 @@ func (manager *ImplementationManager) execute(parent context.Context, workerID s
 		manager.finishFailureWithResult(runCtx, run, workerID, RunValidating, result, err)
 		return
 	}
+	change.PlanDeviations = reconcilePlanDeviations(change.Files, expectedPaths, result.Deviations)
 	validations, err := manager.git.RunValidation(runCtx, *prepared, run.ID)
 	change.ValidationResults = validations
 	if err != nil {
@@ -290,6 +320,7 @@ func (manager *ImplementationManager) execute(parent context.Context, workerID s
 			return
 		}
 		_, _ = manager.appendEvent(context.Background(), run.ID, EventRunFailed, summary, nil)
+		log.WarnfCtx(parent, "[feature-delivery] implementation finished run=%s status=%s duration_ms=%d", run.ID, RunFailed, manager.now().Sub(executionStarted).Milliseconds())
 		return
 	}
 	_, _ = manager.appendEvent(runCtx, run.ID, EventValidationFinished, "independent validation finished", nil)
@@ -301,6 +332,7 @@ func (manager *ImplementationManager) execute(parent context.Context, workerID s
 		return
 	}
 	_, _ = manager.appendEvent(context.Background(), run.ID, EventRunSucceeded, "implementation succeeded", nil)
+	log.InfofCtx(parent, "[feature-delivery] implementation finished run=%s status=%s duration_ms=%d", run.ID, RunSucceeded, manager.now().Sub(executionStarted).Milliseconds())
 }
 
 func (manager *ImplementationManager) renewLease(ctx context.Context, cancel context.CancelCauseFunc, done <-chan struct{}, workerID, runID string) {
@@ -365,16 +397,11 @@ func (manager *ImplementationManager) finishFailureWithResult(runCtx context.Con
 	retain := manager.now().Add(manager.config.WorktreeTTL)
 	update.RetainUntil = &retain
 	if err := manager.store.TransitionImplementation(context.Background(), run.ID, workerID, from, status, update); err != nil {
+		log.ErrorfCtx(context.Background(), "[feature-delivery] persist terminal implementation run=%s status=%s: %v", run.ID, status, err)
 		return
 	}
 	_, _ = manager.appendEvent(context.Background(), run.ID, event, summary, nil)
-}
-
-func (manager *ImplementationManager) providerEventSink(runID string) EventSink {
-	return func(ctx context.Context, event ProviderEvent) error {
-		_, err := manager.appendEvent(ctx, runID, event.Kind, truncateText(event.Summary, 4000), event.Detail)
-		return err
-	}
+	log.WarnfCtx(context.Background(), "[feature-delivery] implementation finished run=%s status=%s provider=%s repo=%s", run.ID, status, run.Provider, run.Repo)
 }
 
 func (manager *ImplementationManager) appendEvent(ctx context.Context, runID string, kind EventKind, summary string, detail json.RawMessage) (*RunEvent, error) {
@@ -382,27 +409,178 @@ func (manager *ImplementationManager) appendEvent(ctx context.Context, runID str
 		RunID: runID, Kind: kind, Summary: summary, Detail: detail, CreatedAt: manager.now(),
 	})
 	if err != nil {
+		log.WarnfCtx(ctx, "[feature-delivery] append run event run=%s kind=%s: %v", runID, kind, err)
 		return nil, err
 	}
 	manager.hub.Publish(*event)
 	return event, nil
 }
 
-func (manager *ImplementationManager) taskPackage(ctx context.Context, run ImplementationRun) (string, error) {
+type providerEventBuffer struct {
+	manager  *ImplementationManager
+	runID    string
+	requests chan providerEventRequest
+	done     chan struct{}
+	err      error
+}
+
+type providerEventRequest struct {
+	event *ProviderEvent
+	flush chan error
+	ctx   context.Context
+}
+
+func newProviderEventBuffer(manager *ImplementationManager, runID string) *providerEventBuffer {
+	buffer := &providerEventBuffer{
+		manager: manager, runID: runID,
+		requests: make(chan providerEventRequest, 1), done: make(chan struct{}),
+	}
+	go buffer.run()
+	return buffer
+}
+
+func (buffer *providerEventBuffer) Append(ctx context.Context, event ProviderEvent) error {
+	if !isProviderEvent(event.Kind) {
+		return fmt.Errorf("unsupported provider event kind %q: %w", event.Kind, ErrInvalid)
+	}
+	if len(event.Detail) > maxProviderDetailBytes || (len(event.Detail) > 0 && !json.Valid(event.Detail)) {
+		return fmt.Errorf("provider event detail is invalid or exceeds %d bytes: %w", maxProviderDetailBytes, ErrInvalid)
+	}
+	request := providerEventRequest{event: &event}
+	select {
+	case <-buffer.done:
+		return buffer.err
+	default:
+	}
+	select {
+	case buffer.requests <- request:
+		return nil
+	case <-buffer.done:
+		return buffer.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (buffer *providerEventBuffer) Flush(ctx context.Context) error {
+	response := make(chan error, 1)
+	request := providerEventRequest{flush: response, ctx: ctx}
+	select {
+	case <-buffer.done:
+		return buffer.err
+	default:
+	}
+	select {
+	case buffer.requests <- request:
+	case <-buffer.done:
+		return buffer.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-response:
+		return err
+	case <-buffer.done:
+		return buffer.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (buffer *providerEventBuffer) run() {
+	ticker := time.NewTicker(providerEventFlush)
+	defer ticker.Stop()
+	defer close(buffer.done)
+	events := make([]RunEvent, 0, providerEventBatchSize)
+	flush := func(ctx context.Context) error {
+		if len(events) == 0 {
+			return nil
+		}
+		persisted, err := buffer.manager.store.AppendRunEvents(ctx, events)
+		if err != nil {
+			return err
+		}
+		if len(persisted) != len(events) {
+			return fmt.Errorf("persisted %d of %d provider events", len(persisted), len(events))
+		}
+		for _, event := range persisted {
+			buffer.manager.hub.Publish(event)
+		}
+		events = events[:0]
+		return nil
+	}
+	for {
+		select {
+		case request := <-buffer.requests:
+			if request.flush != nil {
+				buffer.err = flush(request.ctx)
+				request.flush <- buffer.err
+				return
+			}
+			event := request.event
+			events = append(events, RunEvent{
+				RunID: buffer.runID, Kind: event.Kind, Summary: truncateText(event.Summary, 4000),
+				Detail: append(json.RawMessage(nil), event.Detail...), CreatedAt: buffer.manager.now(),
+			})
+			if len(events) == providerEventBatchSize {
+				flushCtx, cancel := context.WithTimeout(context.Background(), eventFlushTimeout)
+				buffer.err = flush(flushCtx)
+				cancel()
+				if buffer.err != nil {
+					return
+				}
+			}
+		case <-ticker.C:
+			flushCtx, cancel := context.WithTimeout(context.Background(), eventFlushTimeout)
+			buffer.err = flush(flushCtx)
+			cancel()
+			if buffer.err != nil {
+				return
+			}
+		}
+	}
+}
+
+func isProviderEvent(kind EventKind) bool {
+	switch kind {
+	case EventProviderMessage, EventCommandStarted, EventCommandFinished, EventFileChanged:
+		return true
+	default:
+		return false
+	}
+}
+
+func (manager *ImplementationManager) taskPackage(ctx context.Context, run ImplementationRun) (string, []string, error) {
 	plan, err := manager.store.GetArtifact(ctx, run.PlanArtifactID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	design, err := manager.store.GetArtifact(ctx, run.DesignArtifactID)
 	if err != nil {
-		return "", err
+		return "", nil, err
+	}
+	var planDocument ImplementationPlanDocument
+	if err := json.Unmarshal(plan.DocumentJSON, &planDocument); err != nil {
+		return "", nil, fmt.Errorf("decode implementation plan: %w", err)
+	}
+	var expectedPaths []string
+	foundRepository := false
+	for _, repository := range planDocument.Repositories {
+		if repository.Repository == run.Repo {
+			foundRepository = true
+			expectedPaths = append([]string(nil), repository.ExpectedPaths...)
+			break
+		}
+	}
+	if !foundRepository {
+		return "", nil, fmt.Errorf("implementation plan does not contain repository %q: %w", run.Repo, ErrConflict)
 	}
 	chain := []*Artifact{plan, design}
 	parentID := design.ParentArtifactID
 	for parentID != "" && len(chain) < 5 {
 		parent, err := manager.store.GetArtifact(ctx, parentID)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		chain = append(chain, parent)
 		parentID = parent.ParentArtifactID
@@ -416,8 +594,45 @@ func (manager *ImplementationManager) taskPackage(ctx context.Context, run Imple
 		artifact := chain[index]
 		fmt.Fprintf(&builder, "## %s v%d (%s)\n\n%s\n", artifact.Kind, artifact.Version, artifact.ID, artifact.RenderedMarkdown)
 	}
-	builder.WriteString("\nReturn a concise JSON result with summary and tests fields.\n")
-	return builder.String(), nil
+	builder.WriteString("\nReturn concise JSON with summary, tests, and deviations. For every changed path outside expected_paths, deviations must include that exact repository-relative path and the reason it was necessary.\n")
+	return builder.String(), expectedPaths, nil
+}
+
+func reconcilePlanDeviations(files []ChangedFile, expectedPaths []string, reported []PlanDeviation) []PlanDeviation {
+	expected := make(map[string]struct{}, len(expectedPaths))
+	for _, path := range expectedPaths {
+		expected[path] = struct{}{}
+	}
+	reasons := make(map[string]string, len(reported))
+	for _, deviation := range reported {
+		reasons[deviation.Path] = deviation.Reason
+	}
+	deviations := make([]PlanDeviation, 0)
+	for _, file := range files {
+		if planCoversPath(expected, file.Path) {
+			continue
+		}
+		reason, explained := reasons[file.Path]
+		if !explained {
+			reason = "coding provider did not explain this unplanned change"
+		}
+		deviations = append(deviations, PlanDeviation{Path: file.Path, Reason: reason, Explained: explained})
+	}
+	return deviations
+}
+
+func planCoversPath(expected map[string]struct{}, file string) bool {
+	for candidate := file; candidate != ""; {
+		if _, ok := expected[candidate]; ok {
+			return true
+		}
+		separator := strings.LastIndexByte(candidate, '/')
+		if separator < 0 {
+			return false
+		}
+		candidate = candidate[:separator]
+	}
+	return false
 }
 
 func (manager *ImplementationManager) cleaner(ctx context.Context) {
@@ -450,9 +665,14 @@ func (manager *ImplementationManager) recoverExpired(ctx context.Context) {
 	for ctx.Err() == nil {
 		now := manager.now()
 		interrupted, err := manager.store.InterruptActiveImplementations(ctx, now, now.Add(manager.config.WorktreeTTL))
-		if err != nil || len(interrupted) == 0 {
+		if err != nil {
+			log.WarnfCtx(ctx, "[feature-delivery] recover expired implementations: %v", err)
 			return
 		}
+		if len(interrupted) == 0 {
+			return
+		}
+		log.WarnfCtx(ctx, "[feature-delivery] recovered expired implementations count=%d", len(interrupted))
 		for _, runID := range interrupted {
 			_, _ = manager.appendEvent(ctx, runID, EventRunInterrupted, "worker lease expired", nil)
 		}
@@ -462,6 +682,7 @@ func (manager *ImplementationManager) recoverExpired(ctx context.Context) {
 func (manager *ImplementationManager) cleanupPage(ctx context.Context) {
 	runs, err := manager.store.ListExpiredWorktrees(ctx, manager.now(), 20)
 	if err != nil {
+		log.WarnfCtx(ctx, "[feature-delivery] list expired worktrees: %v", err)
 		return
 	}
 	for _, run := range runs {
@@ -469,8 +690,11 @@ func (manager *ImplementationManager) cleanupPage(ctx context.Context) {
 		summary := ""
 		if err != nil {
 			summary = truncateText(err.Error(), maxRunErrorBytes)
+			log.WarnfCtx(ctx, "[feature-delivery] remove worktree run=%s repo=%s: %v", run.ID, run.Repo, err)
 		}
-		_ = manager.store.MarkWorktreeCleaned(ctx, run.ID, summary)
+		if markErr := manager.store.MarkWorktreeCleaned(ctx, run.ID, summary); markErr != nil {
+			log.WarnfCtx(ctx, "[feature-delivery] mark worktree cleanup run=%s: %v", run.ID, markErr)
+		}
 	}
 }
 
@@ -479,6 +703,13 @@ func (manager *ImplementationManager) PatchPath(relative string) (string, error)
 		return "", ErrUnavailable
 	}
 	return manager.git.PatchPath(relative)
+}
+
+func (manager *ImplementationManager) ValidationOutputPath(relative string) (string, error) {
+	if manager == nil || manager.git == nil {
+		return "", ErrUnavailable
+	}
+	return manager.git.ArtifactPath(relative)
 }
 
 func (manager *ImplementationManager) registerCancel(runID string, cancel context.CancelCauseFunc) {
@@ -492,11 +723,18 @@ func (manager *ImplementationManager) Status(ctx context.Context) CodingCapabili
 	if manager == nil {
 		return status
 	}
-	status.Enabled = manager.git != nil && manager.runner != nil && len(manager.enabled) > 0
 	status.GitFound = manager.git != nil
 	status.Isolation = "local_process"
 	if manager.runner != nil {
 		status.Providers = manager.runner.ProviderStatus(ctx)
+	}
+	if manager.git != nil {
+		for provider := range manager.enabled {
+			if providerReady(status.Providers[provider]) {
+				status.Enabled = true
+				break
+			}
+		}
 	}
 	return status
 }
@@ -513,17 +751,24 @@ func (manager *ImplementationManager) unregisterCancel(runID string) {
 }
 
 func planContainsRepository(artifact Artifact, repo string) bool {
-	document, _, err := decodeDocument(KindImplementationPlan, artifact.DocumentJSON)
-	if err != nil {
+	var document ImplementationPlanDocument
+	if err := json.Unmarshal(artifact.DocumentJSON, &document); err != nil {
 		return false
 	}
-	for _, repository := range document.(*ImplementationPlanDocument).Repositories {
-		normalized, err := NormalizeRepository(repository.Repository)
-		if err == nil && normalized == repo {
+	for _, repository := range document.Repositories {
+		if repository.Repository == repo {
 			return true
 		}
 	}
 	return false
+}
+
+func validateReimplementationParent(parent ImplementationRun, requestID, repo string) error {
+	if parent.RequestID != requestID || parent.Repo != repo || parent.Status != RunSucceeded ||
+		parent.Review == nil || parent.Review.Decision != DecisionRejected {
+		return fmt.Errorf("parent_run_id must reference a rejected successful run for the same feature and repository: %w", ErrConflict)
+	}
+	return nil
 }
 
 func implementationRequestHash(options ImplementationOptions, repo, commit, model string, userID int64, username string) string {

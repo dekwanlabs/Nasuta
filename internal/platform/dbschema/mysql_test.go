@@ -61,6 +61,28 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 	}
 }
 
+func TestFeatureDeliverySchemaStoresPlanDeviations(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
+	if !strings.Contains(statements, "plan_deviations_json    JSON NOT NULL") {
+		t.Fatal("feature delivery schema does not require plan deviation metadata")
+	}
+
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_feature_change_set_deviations.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read feature change set migration: %v", err)
+	}
+	for _, required := range []string{
+		"ADD COLUMN plan_deviations_json JSON NULL",
+		"SET plan_deviations_json = JSON_ARRAY()",
+		"MODIFY COLUMN plan_deviations_json JSON NOT NULL",
+	} {
+		if !strings.Contains(string(raw), required) {
+			t.Fatalf("feature change set migration missing %q", required)
+		}
+	}
+}
+
 func TestQASessionHistoryRetrievalMigrationReplacesRollingSummary(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_session_history_retrieval.sql")
 	raw, err := os.ReadFile(path)

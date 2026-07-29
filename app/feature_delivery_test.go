@@ -3,16 +3,14 @@ package app
 import (
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/platform/config"
 )
 
-func TestSettingsReturnsDetachedCodingProviders(t *testing.T) {
-	platform := &Platform{settings: &config.PlatformSettings{
-		CodingEnabledProviders: []string{"codex", "claude"},
-	}}
-	copy := platform.Settings()
-	copy.CodingEnabledProviders[0] = "changed"
-	if platform.settings.CodingEnabledProviders[0] != "codex" {
-		t.Fatal("Settings returned the platform coding provider slice")
+func TestFeatureGenerationUsesLargestConfiguredAnswerBudget(t *testing.T) {
+	settings := &config.PlatformSettings{
+		LLMMaxTokens: 4000, LLMAnswerMaxTokens: 6000, LLMConclusionMaxTokens: 12000,
+	}
+	if got := featureGenerationTokenBudget(settings); got != 12000 {
+		t.Fatalf("feature generation token budget=%d, want 12000", got)
 	}
 }

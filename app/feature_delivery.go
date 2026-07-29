@@ -11,6 +11,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/transport/featurehttp"
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform/config"
 )
 
 type featureDeliveryRuntime struct {
@@ -31,12 +32,13 @@ func (platform *Platform) initFeatureDelivery() error {
 
 	var generator *featuredelivery.Generator
 	if platform.settings.LLMEnabled() {
+		generationMaxTokens := featureGenerationTokenBudget(platform.settings)
 		client := llm.NewLLMClientWithHTTPAndProvider(
 			platform.settings.LLMBaseURL,
 			platform.settings.LLMAPIKey,
 			platform.settings.LLMModel,
 			platform.settings.LLMProvider,
-			platform.settings.LLMMaxTokens,
+			generationMaxTokens,
 			nil,
 		)
 		generator = featuredelivery.NewGenerator(
@@ -44,7 +46,7 @@ func (platform *Platform) initFeatureDelivery() error {
 			client,
 			platform.settings.LLMProvider,
 			platform.settings.LLMModel,
-			platform.settings.LLMMaxTokens,
+			generationMaxTokens,
 		)
 	} else {
 		log.Warnf("[feature-delivery] artifact generation disabled (LLM unavailable)")
@@ -60,6 +62,14 @@ func (platform *Platform) initFeatureDelivery() error {
 	platform.configureFeatureImplementation(deliveryStore, service)
 	log.Infof("[feature-delivery] persistence enabled")
 	return nil
+}
+
+func featureGenerationTokenBudget(settings *config.PlatformSettings) int {
+	if settings == nil {
+		return 0
+	}
+	// Structured artifacts must finish in one response, so reserve the largest configured answer budget.
+	return max(settings.LLMMaxTokens, settings.LLMAnswerMaxTokens, settings.LLMConclusionMaxTokens)
 }
 
 func (platform *Platform) configureFeatureImplementation(deliveryStore featuredelivery.Store, service *featuredelivery.Service) {
@@ -105,7 +115,12 @@ func (platform *Platform) configureFeatureImplementation(deliveryStore featurede
 	)
 	service.SetImplementationManager(manager)
 	platform.featureDelivery.implementations = manager
-	log.Infof("[feature-delivery] coding configured (providers=%v)", platform.settings.CodingEnabledProviders)
+	log.Infof(
+		"[feature-delivery] coding configured deployment=single_instance isolation=local_process concurrency=%d network_allowed=%t providers=%v",
+		platform.settings.CodingMaxConcurrency,
+		platform.settings.CodingAllowNetwork,
+		platform.settings.CodingEnabledProviders,
+	)
 }
 
 func (runtime *featureDeliveryRuntime) start(ctx context.Context) {

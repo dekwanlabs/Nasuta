@@ -32,9 +32,6 @@ func normalizeRequirement(value featuredelivery.RequirementDocument) (featuredel
 		return value, fmt.Errorf("requirement description is required")
 	}
 	var err error
-	if value.TargetRepositories, err = normalizeRepositories(value.TargetRepositories); err != nil {
-		return value, err
-	}
 	for _, target := range []struct {
 		name   string
 		values *[]string
@@ -49,26 +46,6 @@ func normalizeRequirement(value featuredelivery.RequirementDocument) (featuredel
 		}
 	}
 	return value, nil
-}
-
-func normalizeRepositories(values []string) ([]string, error) {
-	if len(values) > maxRequirementListItems {
-		return nil, fmt.Errorf("target_repositories exceeds %d items", maxRequirementListItems)
-	}
-	out := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		repository, err := featuredelivery.NormalizeRepository(value)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := seen[repository]; ok {
-			continue
-		}
-		seen[repository] = struct{}{}
-		out = append(out, repository)
-	}
-	return out, nil
 }
 
 func normalizeTextList(name string, values []string) ([]string, error) {
@@ -130,6 +107,11 @@ type runCursorPayload struct {
 	ID        string    `json:"id"`
 }
 
+type artifactCursorPayload struct {
+	Kind    featuredelivery.ArtifactKind `json:"kind"`
+	Version int                          `json:"version"`
+}
+
 func decodeFeatureCursor(value string) (featuredelivery.FeatureCursor, error) {
 	if strings.TrimSpace(value) == "" {
 		return featuredelivery.FeatureCursor{}, nil
@@ -150,6 +132,31 @@ func decodeRunCursor(value string) (featuredelivery.RunCursor, error) {
 		return featuredelivery.RunCursor{}, fmt.Errorf("invalid implementation cursor")
 	}
 	return featuredelivery.RunCursor{CreatedAt: payload.CreatedAt, ID: payload.ID}, nil
+}
+
+func decodeArtifactCursor(value string) (featuredelivery.ArtifactCursor, error) {
+	if strings.TrimSpace(value) == "" {
+		return featuredelivery.ArtifactCursor{}, nil
+	}
+	var payload artifactCursorPayload
+	if err := decodeCursor(value, &payload); err != nil || payload.Version < 1 {
+		return featuredelivery.ArtifactCursor{}, fmt.Errorf("invalid artifact cursor")
+	}
+	if _, err := featuredelivery.ParseArtifactKind(string(payload.Kind)); err != nil {
+		return featuredelivery.ArtifactCursor{}, fmt.Errorf("invalid artifact cursor")
+	}
+	return featuredelivery.ArtifactCursor{Kind: payload.Kind, Version: payload.Version}, nil
+}
+
+func decodeGenerationCursor(value string) (featuredelivery.GenerationCursor, error) {
+	if strings.TrimSpace(value) == "" {
+		return featuredelivery.GenerationCursor{}, nil
+	}
+	var payload runCursorPayload
+	if err := decodeCursor(value, &payload); err != nil || payload.CreatedAt.IsZero() || payload.ID == "" {
+		return featuredelivery.GenerationCursor{}, fmt.Errorf("invalid generation cursor")
+	}
+	return featuredelivery.GenerationCursor{StartedAt: payload.CreatedAt, ID: payload.ID}, nil
 }
 
 func decodeCursor(value string, payload any) error {
@@ -174,6 +181,22 @@ func nextRunCursor(items []featuredelivery.ImplementationRun, limit int) string 
 	}
 	last := items[len(items)-1]
 	return encodeCursor(runCursorPayload{CreatedAt: last.CreatedAt, ID: last.ID})
+}
+
+func nextArtifactCursor(items []featuredelivery.ArtifactSummary, limit int) string {
+	if len(items) != limit || len(items) == 0 {
+		return ""
+	}
+	last := items[len(items)-1]
+	return encodeCursor(artifactCursorPayload{Kind: last.Kind, Version: last.Version})
+}
+
+func nextGenerationCursor(items []featuredelivery.GenerationRun, limit int) string {
+	if len(items) != limit || len(items) == 0 {
+		return ""
+	}
+	last := items[len(items)-1]
+	return encodeCursor(runCursorPayload{CreatedAt: last.StartedAt, ID: last.ID})
 }
 
 func encodeCursor(payload any) string {

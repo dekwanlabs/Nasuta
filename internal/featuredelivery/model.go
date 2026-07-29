@@ -83,7 +83,6 @@ type FeatureRequest struct {
 
 type RequirementDocument struct {
 	Description         string   `json:"description"`
-	TargetRepositories  []string `json:"target_repositories"`
 	BusinessConstraints []string `json:"business_constraints"`
 	Attachments         []string `json:"attachments"`
 	AcceptanceCriteria  []string `json:"acceptance_criteria"`
@@ -207,6 +206,20 @@ type Artifact struct {
 	Stale            bool            `json:"stale"`
 }
 
+type ArtifactSummary struct {
+	ID               string          `json:"id"`
+	RequestID        string          `json:"request_id"`
+	Kind             ArtifactKind    `json:"kind"`
+	Version          int             `json:"version"`
+	ParentArtifactID string          `json:"parent_artifact_id,omitempty"`
+	Origin           ArtifactOrigin  `json:"origin"`
+	ContentHash      string          `json:"content_hash"`
+	CreatedBy        int64           `json:"created_by"`
+	CreatedAt        time.Time       `json:"created_at"`
+	Review           *ArtifactReview `json:"review,omitempty"`
+	Stale            bool            `json:"stale"`
+}
+
 type ArtifactReview struct {
 	ArtifactID string         `json:"artifact_id"`
 	Decision   ReviewDecision `json:"decision"`
@@ -305,6 +318,7 @@ type CodingResult struct {
 	ExitCode          int
 	Summary           string
 	TestSummary       string
+	Deviations        []PlanDeviation
 	InputTokens       int64
 	OutputTokens      int64
 	EventCount        int
@@ -366,7 +380,14 @@ type ValidationResult struct {
 	OutputSummary string   `json:"output_summary"`
 	OutputRelPath string   `json:"output_rel_path,omitempty"`
 	OutputSHA256  string   `json:"output_sha256,omitempty"`
+	OutputBytes   int64    `json:"output_bytes"`
 	TimedOut      bool     `json:"timed_out"`
+}
+
+type PlanDeviation struct {
+	Path      string `json:"path"`
+	Reason    string `json:"reason"`
+	Explained bool   `json:"explained"`
 }
 
 type ChangeSet struct {
@@ -379,6 +400,7 @@ type ChangeSet struct {
 	Additions         int                `json:"additions"`
 	Deletions         int                `json:"deletions"`
 	Files             []ChangedFile      `json:"files"`
+	PlanDeviations    []PlanDeviation    `json:"plan_deviations"`
 	ValidationResults []ValidationResult `json:"validation_results"`
 	ProviderSummary   string             `json:"provider_summary"`
 	CreatedAt         time.Time          `json:"created_at"`
@@ -444,6 +466,22 @@ func IsActiveRun(status RunStatus) bool {
 
 func IsTerminalRun(status RunStatus) bool {
 	return status == RunSucceeded || status == RunFailed || status == RunCancelled || status == RunInterrupted
+}
+
+// CanTransitionRun enforces the persisted implementation lifecycle.
+func CanTransitionRun(from, to RunStatus) bool {
+	switch from {
+	case RunQueued:
+		return to == RunPreparing || to == RunCancelled
+	case RunPreparing:
+		return to == RunRunning || to == RunFailed || to == RunCancelled || to == RunInterrupted
+	case RunRunning:
+		return to == RunValidating || to == RunFailed || to == RunCancelled || to == RunInterrupted
+	case RunValidating:
+		return to == RunSucceeded || to == RunFailed || to == RunCancelled || to == RunInterrupted
+	default:
+		return false
+	}
 }
 
 func ValidateDecision(value string) (ReviewDecision, error) {

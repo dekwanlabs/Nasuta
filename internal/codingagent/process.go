@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 type processRequest struct {
@@ -27,38 +29,49 @@ type processRequest struct {
 	OutputLimit int
 }
 
-type providerMessage struct {
+type parsedProviderEvent struct {
 	SessionID string
-	Summary   string
-	Detail    json.RawMessage
+	Events    []featuredelivery.ProviderEvent
 	Final     *finalResult
 }
 
-type eventParser func(json.RawMessage) (providerMessage, error)
+type eventParser func(json.RawMessage) (parsedProviderEvent, error)
 
 func runProvider(ctx context.Context, process processRequest, provider string, request featuredelivery.CodingRequest, sink featuredelivery.EventSink, parser eventParser) (featuredelivery.CodingResult, error) {
 	version := probeVersion(ctx, process.Path)
 	result := featuredelivery.CodingResult{ProviderVersion: version}
+	providerEventCount := 0
 	final, exitCode, _, err := runProcess(ctx, process, func(raw json.RawMessage) error {
-		if result.EventCount >= maxProviderEvents {
+		if providerEventCount >= maxProviderEvents {
 			return fmt.Errorf("provider events exceed %d", maxProviderEvents)
 		}
-		message, parseErr := parser(raw)
+		providerEventCount++
+		parsed, parseErr := parser(raw)
 		if parseErr != nil {
 			return fmt.Errorf("parse %s event: %w", provider, parseErr)
 		}
-		result.EventCount++
-		if message.SessionID != "" {
-			result.ProviderSessionID = message.SessionID
+		if parsed.SessionID != "" {
+			result.ProviderSessionID = truncate(redact(parsed.SessionID), 255)
 		}
-		if message.Final != nil {
-			result.Summary = message.Final.Summary
-			result.TestSummary = message.Final.Tests
+		if parsed.Final != nil {
+			result.Summary = truncate(redact(parsed.Final.Summary), 8000)
+			result.TestSummary = truncate(redact(parsed.Final.Tests), 8000)
+			result.Deviations = sanitizeDeviations(parsed.Final.Deviations)
 		}
-		if sink != nil {
-			return sink(ctx, featuredelivery.ProviderEvent{
-				Kind: featuredelivery.EventProviderMessage, Summary: redact(message.Summary), Detail: redactJSON(message.Detail),
-			})
+		if len(parsed.Events) > maxPlatformEvents {
+			return fmt.Errorf("%s event expands to more than %d platform events", provider, maxPlatformEvents)
+		}
+		if len(parsed.Events) > maxProviderEvents-result.EventCount {
+			return fmt.Errorf("platform events exceed %d", maxProviderEvents)
+		}
+		result.EventCount += len(parsed.Events)
+		for _, event := range parsed.Events {
+			if sink != nil {
+				event.Summary = truncate(redact(event.Summary), 4000)
+				if err := sink(ctx, event); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
@@ -67,9 +80,33 @@ func runProvider(ctx context.Context, process processRequest, provider string, r
 		return result, err
 	}
 	if result.Summary == "" {
-		result.Summary = truncate(string(final), 8000)
+		result.Summary = truncate(redact(string(final)), 8000)
 	}
 	return result, nil
+}
+
+func sanitizeDeviations(values []featuredelivery.PlanDeviation) []featuredelivery.PlanDeviation {
+	if len(values) > 100 {
+		values = values[:100]
+	}
+	out := make([]featuredelivery.PlanDeviation, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		path, err := featuredelivery.NormalizePlanPath(redact(value.Path))
+		if err != nil {
+			continue
+		}
+		reason := strings.TrimSpace(truncate(redact(value.Reason), 2000))
+		if reason == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, featuredelivery.PlanDeviation{Path: path, Reason: reason, Explained: true})
+	}
+	return out
 }
 
 func runProcess(ctx context.Context, request processRequest, handle func(json.RawMessage) error) ([]byte, int, bool, error) {
@@ -108,38 +145,40 @@ func runProcess(ctx context.Context, request processRequest, handle func(json.Ra
 		terminateProcessGroup(command.Process.Pid, processDone)
 	}()
 
-	var stdoutBuffer limitedBuffer
-	stdoutBuffer.limit = request.OutputLimit
-	stdoutResult := make(chan error, 1)
+	budget := newOutputBudget(request.OutputLimit)
+	stdoutBuffer := limitedBuffer{budget: budget}
+	streamResults := make(chan streamReadResult, 2)
 	go func() {
 		var readErr error
 		if handle == nil {
 			_, readErr = io.Copy(&stdoutBuffer, stdout)
-			if readErr == nil && stdoutBuffer.exceeded {
-				readErr = fmt.Errorf("process output exceeds %d bytes", stdoutBuffer.limit)
-			}
 		} else {
 			readErr = readJSONLines(stdout, &stdoutBuffer, handle)
 		}
-		stdoutResult <- readErr
+		streamResults <- streamReadResult{stdout: true, err: readErr}
 	}()
 
-	var stderrBuffer limitedBuffer
-	stderrBuffer.limit = request.OutputLimit
-	stderrResult := make(chan error, 1)
+	stderrBuffer := limitedBuffer{budget: budget}
 	go func() {
 		_, readErr := io.Copy(&stderrBuffer, stderr)
-		stderrResult <- readErr
+		streamResults <- streamReadResult{err: readErr}
 	}()
 
-	readErr := <-stdoutResult
-	if readErr != nil {
-		select {
-		case abort <- struct{}{}:
-		default:
+	var stdoutErr, stderrErr error
+	for range 2 {
+		readResult := <-streamResults
+		if readResult.stdout {
+			stdoutErr = readResult.err
+		} else {
+			stderrErr = readResult.err
+		}
+		if readResult.err != nil {
+			select {
+			case abort <- struct{}{}:
+			default:
+			}
 		}
 	}
-	stderrErr := <-stderrResult
 	waitErr := command.Wait()
 	close(processDone)
 	close(stopCancellation)
@@ -153,11 +192,11 @@ func runProcess(ctx context.Context, request processRequest, handle func(json.Ra
 			exitCode = exitErr.ExitCode()
 		}
 	}
-	if readErr != nil {
-		return stdoutBuffer.Bytes(), exitCode, cancelled.Load(), readErr
+	if stdoutErr != nil {
+		return stdoutBuffer.Bytes(), exitCode, cancelled.Load(), normalizeOutputError(stdoutErr, request.OutputLimit)
 	}
 	if stderrErr != nil {
-		return stdoutBuffer.Bytes(), exitCode, cancelled.Load(), stderrErr
+		return stdoutBuffer.Bytes(), exitCode, cancelled.Load(), normalizeOutputError(stderrErr, request.OutputLimit)
 	}
 	if cancelled.Load() {
 		return stdoutBuffer.Bytes(), exitCode, true, ctx.Err()
@@ -197,31 +236,66 @@ func readJSONLines(reader io.Reader, captured *limitedBuffer, handle func(json.R
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read provider stream: %w", err)
 	}
-	if captured.exceeded {
-		return fmt.Errorf("provider output exceeds %d bytes", captured.limit)
-	}
 	return nil
 }
 
+var errOutputLimit = errors.New("process output limit exceeded")
+
+type streamReadResult struct {
+	stdout bool
+	err    error
+}
+
+type outputBudget struct {
+	mu        sync.Mutex
+	remaining int
+}
+
+func newOutputBudget(limit int) *outputBudget {
+	return &outputBudget{remaining: max(limit, 0)}
+}
+
+func (budget *outputBudget) take(size int) int {
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	if size <= budget.remaining {
+		budget.remaining -= size
+		return size
+	}
+	allowed := budget.remaining
+	budget.remaining = 0
+	return allowed
+}
+
 type limitedBuffer struct {
-	bytes.Buffer
-	limit    int
-	exceeded bool
+	data   bytes.Buffer
+	budget *outputBudget
 }
 
 func (buffer *limitedBuffer) Write(data []byte) (int, error) {
-	original := len(data)
-	remaining := buffer.limit - buffer.Len()
-	if remaining <= 0 {
-		buffer.exceeded = true
-		return original, nil
+	allowed := buffer.budget.take(len(data))
+	if allowed > 0 {
+		_, _ = buffer.data.Write(data[:allowed])
 	}
-	if len(data) > remaining {
-		data = data[:remaining]
-		buffer.exceeded = true
+	if allowed != len(data) {
+		return allowed, errOutputLimit
 	}
-	_, _ = buffer.Buffer.Write(data)
-	return original, nil
+	return allowed, nil
+}
+
+func (buffer *limitedBuffer) Bytes() []byte {
+	return buffer.data.Bytes()
+}
+
+func (buffer *limitedBuffer) String() string {
+	return buffer.data.String()
+}
+
+func normalizeOutputError(err error, limit int) error {
+	if errors.Is(err, errOutputLimit) {
+		return fmt.Errorf("provider output exceeds shared %d byte limit", limit)
+	}
+	return err
 }
 
 func providerEnvironment(provider, tempHome string) []string {
@@ -264,6 +338,7 @@ func probeVersion(ctx context.Context, path string) string {
 }
 
 func redact(value string) string {
+	value = platform.RedactSensitiveText(value)
 	for _, key := range []string{"CODEX_API_KEY", "ANTHROPIC_API_KEY"} {
 		if secret := os.Getenv(key); secret != "" {
 			value = strings.ReplaceAll(value, secret, "[REDACTED]")
@@ -272,14 +347,12 @@ func redact(value string) string {
 	return value
 }
 
-func redactJSON(value json.RawMessage) json.RawMessage {
-	redacted := string(value)
-	for _, key := range []string{"CODEX_API_KEY", "ANTHROPIC_API_KEY"} {
-		if secret := os.Getenv(key); secret != "" {
-			redacted = strings.ReplaceAll(redacted, secret, "[REDACTED]")
-		}
+func eventDetail(value any) json.RawMessage {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
 	}
-	return json.RawMessage(redacted)
+	return encoded
 }
 
 func truncate(value string, limit int) string {

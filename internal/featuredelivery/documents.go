@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -26,9 +28,15 @@ func BuildArtifact(kind ArtifactKind, requestID, parentID string, origin Artifac
 	}
 	for i := range evidence {
 		evidence[i].Summary = strings.TrimSpace(evidence[i].Summary)
+		if evidence[i].Summary == "" {
+			return Artifact{}, fmt.Errorf("evidence %d summary is required: %w", i, ErrInvalid)
+		}
 		if len(evidence[i].Summary) > maxEvidenceText {
 			return Artifact{}, fmt.Errorf("evidence %d summary exceeds %d bytes: %w", i, maxEvidenceText, ErrInvalid)
 		}
+	}
+	if err := validateEvidenceReferences(document, len(evidence)); err != nil {
+		return Artifact{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	rendered := renderDocument(kind, document)
 	content := sha256.Sum256(append(append([]byte(nil), canonical...), []byte("\n"+rendered)...))
@@ -119,14 +127,76 @@ func validateDocument(kind ArtifactKind, document any) error {
 			return fmt.Errorf("implementation plan requires at least one repository")
 		}
 		seen := make(map[string]struct{}, len(value.Repositories))
-		for i, repository := range value.Repositories {
-			if strings.TrimSpace(repository.Repository) == "" || len(repository.Steps) == 0 {
+		for i := range value.Repositories {
+			repository := &value.Repositories[i]
+			if len(repository.Steps) == 0 {
 				return fmt.Errorf("repository plan %d requires repository and steps", i)
 			}
-			if _, ok := seen[repository.Repository]; ok {
-				return fmt.Errorf("repository %q appears more than once", repository.Repository)
+			canonical, err := NormalizeRepository(repository.Repository)
+			if err != nil {
+				return fmt.Errorf("repository plan %d: %w", i, err)
 			}
-			seen[repository.Repository] = struct{}{}
+			repository.Repository = canonical
+			paths := repository.ExpectedPaths[:0]
+			seenPaths := make(map[string]struct{}, len(repository.ExpectedPaths))
+			for pathIndex, value := range repository.ExpectedPaths {
+				canonicalPath, err := NormalizePlanPath(value)
+				if err != nil {
+					return fmt.Errorf("repository plan %d expected path %d: %w", i, pathIndex, err)
+				}
+				if _, ok := seenPaths[canonicalPath]; ok {
+					continue
+				}
+				seenPaths[canonicalPath] = struct{}{}
+				paths = append(paths, canonicalPath)
+			}
+			repository.ExpectedPaths = paths
+			if _, ok := seen[canonical]; ok {
+				return fmt.Errorf("repository %q appears more than once", canonical)
+			}
+			seen[canonical] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func NormalizePlanPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") {
+		return "", fmt.Errorf("path must be a non-empty repository-relative path")
+	}
+	for _, r := range value {
+		if r == 0 || unicode.IsControl(r) {
+			return "", fmt.Errorf("path contains a control character")
+		}
+	}
+	canonical := path.Clean(value)
+	if canonical == "." || canonical == ".." || strings.HasPrefix(canonical, "../") {
+		return "", fmt.Errorf("path escapes the repository")
+	}
+	return canonical, nil
+}
+
+func validateEvidenceReferences(document any, evidenceCount int) error {
+	var claims []EvidenceClaim
+	switch value := document.(type) {
+	case *RequirementAnalysisDocument:
+		claims = value.Claims
+	case *TechnicalProposalDocument:
+		claims = value.CurrentFacts
+	case *SystemDesignDocument:
+		claims = value.Claims
+	}
+	for claimIndex, claim := range claims {
+		seen := make(map[int]struct{}, len(claim.EvidenceIDs))
+		for _, evidenceID := range claim.EvidenceIDs {
+			if evidenceID < 0 || evidenceID >= evidenceCount {
+				return fmt.Errorf("claim %d references evidence %d outside snapshot", claimIndex, evidenceID)
+			}
+			if _, ok := seen[evidenceID]; ok {
+				return fmt.Errorf("claim %d references evidence %d more than once", claimIndex, evidenceID)
+			}
+			seen[evidenceID] = struct{}{}
 		}
 	}
 	return nil
@@ -176,7 +246,6 @@ func renderDocument(kind ArtifactKind, document any) string {
 		value := document.(*RequirementDocument)
 		writeTitle(&builder, "Product Requirement")
 		writeText(&builder, "Description", value.Description)
-		writeList(&builder, "Target Repositories", value.TargetRepositories)
 		writeList(&builder, "Business Constraints", value.BusinessConstraints)
 		writeList(&builder, "Attachments", value.Attachments)
 		writeList(&builder, "Acceptance Criteria", value.AcceptanceCriteria)

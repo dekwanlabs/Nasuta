@@ -19,7 +19,6 @@ func TestBuildArtifactRejectsTrailingJSON(t *testing.T) {
 func TestBuildArtifactRendersDeterministically(t *testing.T) {
 	raw, err := json.Marshal(RequirementDocument{
 		Description:        "Add delivery runs",
-		TargetRepositories: []string{"team/nasuta"},
 		AcceptanceCriteria: []string{"A patch is produced"},
 	})
 	if err != nil {
@@ -53,5 +52,69 @@ func TestBlockingQuestions(t *testing.T) {
 	}
 	if len(questions) != 1 {
 		t.Fatalf("unexpected questions: %#v", questions)
+	}
+}
+
+func TestBuildArtifactRejectsEvidenceOutsideSnapshot(t *testing.T) {
+	raw := []byte(`{
+		"background":"b","goals":["g"],"functional_requirements":["f"],
+		"acceptance_criteria":["a"],
+		"claims":[{"statement":"existing behavior","classification":"fact","evidence_ids":[0]}]
+	}`)
+	_, err := BuildArtifact(KindRequirementAnalysis, "feat_1", "art_req", OriginAgent, raw, nil, 1)
+	if err == nil || !strings.Contains(err.Error(), "outside snapshot") {
+		t.Fatalf("expected invalid evidence reference, got %v", err)
+	}
+}
+
+func TestBuildArtifactCanonicalizesImplementationRepositories(t *testing.T) {
+	raw := []byte(`{
+		"repositories":[{
+			"repository":" team/nasuta/ ",
+			"steps":[{"description":"implement","done_when":["tests pass"]}]
+		}]
+	}`)
+	artifact, err := BuildArtifact(KindImplementationPlan, "feat_1", "art_design", OriginAgent, raw, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document ImplementationPlanDocument
+	if err := json.Unmarshal(artifact.DocumentJSON, &document); err != nil {
+		t.Fatal(err)
+	}
+	if got := document.Repositories[0].Repository; got != "team/nasuta" {
+		t.Fatalf("repository = %q", got)
+	}
+}
+
+func TestBuildArtifactCanonicalizesImplementationExpectedPaths(t *testing.T) {
+	raw := []byte(`{
+		"repositories":[{
+			"repository":"team/nasuta",
+			"expected_paths":[" internal/featuredelivery/ ","internal/featuredelivery"],
+			"steps":[{"description":"implement","done_when":["tests pass"]}]
+		}]
+	}`)
+	artifact, err := BuildArtifact(KindImplementationPlan, "feat_1", "art_design", OriginAgent, raw, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document ImplementationPlanDocument
+	if err := json.Unmarshal(artifact.DocumentJSON, &document); err != nil {
+		t.Fatal(err)
+	}
+	paths := document.Repositories[0].ExpectedPaths
+	if len(paths) != 1 || paths[0] != "internal/featuredelivery" {
+		t.Fatalf("expected paths = %v", paths)
+	}
+
+	raw = []byte(`{
+		"repositories":[{
+			"repository":"team/nasuta","expected_paths":["../outside"],
+			"steps":[{"description":"implement","done_when":["tests pass"]}]
+		}]
+	}`)
+	if _, err := BuildArtifact(KindImplementationPlan, "feat_1", "art_design", OriginAgent, raw, nil, 1); err == nil {
+		t.Fatal("repository-escaping expected path must be rejected")
 	}
 }

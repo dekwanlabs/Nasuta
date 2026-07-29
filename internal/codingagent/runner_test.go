@@ -50,7 +50,7 @@ if [ "$1" = "--version" ]; then
 fi
 printf '%s\n' "$@" > ` + shellQuote(capture) + `
 printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
-printf '%s\n' '{"type":"turn.completed","structured_output":{"summary":"done","tests":"ok"}}'
+printf '%s\n' '{"type":"turn.completed","structured_output":{"summary":"done codex-secret","tests":"ok codex-secret","deviations":[{"path":"internal/extra.go","reason":"needed codex-secret"},{"path":"internal/extra.go","reason":"duplicate"}]}}'
 `
 			codex := writeFakeCLI(t, temp, "codex", "", script)
 			t.Setenv("CODEX_API_KEY", "codex-secret")
@@ -63,8 +63,12 @@ printf '%s\n' '{"type":"turn.completed","structured_output":{"summary":"done","t
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Summary != "done" || result.ProviderSessionID != "session-1" {
+			if result.Summary != "done [REDACTED]" || result.TestSummary != "ok [REDACTED]" || result.ProviderSessionID != "session-1" {
 				t.Fatalf("result = %+v", result)
+			}
+			if len(result.Deviations) != 1 || result.Deviations[0].Path != "internal/extra.go" ||
+				result.Deviations[0].Reason != "needed [REDACTED]" || !result.Deviations[0].Explained {
+				t.Fatalf("deviations = %+v", result.Deviations)
 			}
 			args, err := os.ReadFile(capture)
 			if err != nil {
@@ -188,6 +192,64 @@ func TestRunProcessCancellationTerminatesProvider(t *testing.T) {
 	}
 	if time.Since(started) > 5*time.Second {
 		t.Fatal("provider cancellation took too long")
+	}
+}
+
+func TestRunProcessRejectsStderrOverSharedBudget(t *testing.T) {
+	temp := t.TempDir()
+	script := writeFakeCLI(t, temp, "stderr-heavy", "", `head -c 256 /dev/zero >&2`)
+	_, _, _, err := runProcess(context.Background(), processRequest{
+		Path: script, Env: baseEnvironment(), OutputLimit: 128,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "shared 128 byte limit") {
+		t.Fatalf("output error = %v", err)
+	}
+}
+
+func TestRunProcessSharesBudgetAcrossStdoutAndStderr(t *testing.T) {
+	temp := t.TempDir()
+	script := writeFakeCLI(t, temp, "combined-heavy", "", `
+head -c 80 /dev/zero
+head -c 80 /dev/zero >&2
+`)
+	_, _, _, err := runProcess(context.Background(), processRequest{
+		Path: script, Env: baseEnvironment(), OutputLimit: 100,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "shared 100 byte limit") {
+		t.Fatalf("output error = %v", err)
+	}
+}
+
+func TestRunProviderLimitsExpandedPlatformEventTotal(t *testing.T) {
+	temp := t.TempDir()
+	script := writeFakeCLI(t, temp, "expanding-provider", "", `
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' '1.0.0'
+  exit 0
+fi
+i=0
+while [ "$i" -lt 79 ]; do
+  printf '%s\n' '{"type":"event"}'
+  i=$((i + 1))
+done
+`)
+	parser := func(json.RawMessage) (parsedProviderEvent, error) {
+		events := make([]featuredelivery.ProviderEvent, maxPlatformEvents)
+		for index := range events {
+			events[index] = featuredelivery.ProviderEvent{Kind: featuredelivery.EventProviderMessage, Summary: "event"}
+		}
+		return parsedProviderEvent{Events: events}, nil
+	}
+	result, err := runProvider(
+		context.Background(),
+		processRequest{Path: script, Env: baseEnvironment(), OutputLimit: maxProviderOutput},
+		"test", featuredelivery.CodingRequest{}, nil, parser,
+	)
+	if err == nil || !strings.Contains(err.Error(), "platform events exceed 5000") {
+		t.Fatalf("event limit error = %v", err)
+	}
+	if result.EventCount != 4992 {
+		t.Fatalf("persistable event count = %d", result.EventCount)
 	}
 }
 

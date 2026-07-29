@@ -133,7 +133,6 @@ Nasuta 已经拥有：
 
 - 标题；
 - 原始需求正文；
-- 可选目标仓库；
 - 可选业务约束；
 - 可选附件引用；
 - 可选期望验收条件。
@@ -142,12 +141,12 @@ HTTP 入口负责：
 
 1. 裁剪首尾空白；
 2. 校验标题、正文和附件数量上限；
-3. 规范化仓库标识；
-4. 拒绝绝对路径、目录穿越和 workspace 外路径；
-5. 创建 `FeatureRequest`；
-6. 同一事务创建 `requirement` Artifact v1。
+3. 规范化业务约束、附件和验收条件；
+4. 创建 `FeatureRequest`；
+5. 同一事务创建 `requirement` Artifact v1。
 
 原始需求不在 `feature_requests` 中重复保存。需求修改通过创建新的 `requirement` Artifact 版本完成，旧版本永不覆盖。
+创建阶段不指定目标仓库。受影响仓库以及是否需要新增服务，必须由后续 Agent 基于代码、依赖和文档证据推导，不能把用户预选仓库当成设计结论。
 
 ### 6.2 生成需求分析
 
@@ -162,7 +161,7 @@ HTTP 入口负责：
 - 验收条件；
 - 假设；
 - 阻塞问题和非阻塞问题；
-- 初步影响范围；
+- 基于证据推导的初步影响范围，包括潜在仓库和新增服务必要性；
 - 证据与推断。
 
 需求分析引用精确的 `requirement` Artifact ID。若存在阻塞问题，该版本可以保存和展示，但不能审核通过；用户补充需求后创建新的需求版本并重新生成分析。
@@ -172,7 +171,7 @@ HTTP 入口负责：
 技术方案只能基于当前审核通过的需求分析，至少包含：
 
 - 当前系统事实；
-- 受影响服务或模块；
+- 基于证据确认的受影响服务、模块和仓库；
 - 两个以上候选方案，除非只有一个方案在约束上成立；
 - 方案收益、成本和风险；
 - 数据、接口、兼容性和区域影响；
@@ -188,6 +187,7 @@ HTTP 入口负责：
 
 - 架构边界与依赖方向；
 - 模块和职责；
+- 复用现有服务或新增服务的明确决策及理由；
 - 关键请求时序；
 - API 契约；
 - 数据模型和迁移；
@@ -206,7 +206,7 @@ HTTP 入口负责：
 
 实现计划只能基于当前审核通过的系统设计，按仓库输出：
 
-- 目标仓库；
+- 从已审核系统设计推导出的目标仓库；
 - 预计修改的包、模块和文件；
 - 新增或修改的契约；
 - 数据库迁移；
@@ -892,7 +892,7 @@ WHERE id=? AND status='queued';
 
 `coding_max_concurrency` 限制当前实例同时运行的 Coding Provider 数量。并发槽位使用固定容量 semaphore，不为每个等待 Run 创建无界 goroutine。
 
-多实例部署时，仅本地 semaphore 不足，因此数据库 Claim 还必须配合全局活动 Run 上限。第一版若只支持单实例，启动日志和文档必须明确该约束；支持多实例前需要数据库级配额 Claim。
+第一版部署模式固定为单实例，启动日志显式输出 `deployment=single_instance`。多实例部署时，仅本地 semaphore 不足；支持多实例前必须增加数据库级全局活动 Run 配额 Claim，不能只复制当前进程。
 
 ### 14.2 仓库并发
 
@@ -985,6 +985,7 @@ CREATE TABLE feature_artifacts (
     created_by        BIGINT NOT NULL,
     created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_request_kind_version (request_id, kind, version),
+    KEY idx_request_kind_parent_version (request_id, kind, parent_artifact_id, version),
     KEY idx_request_created (request_id, created_at, id),
     KEY idx_parent (parent_artifact_id)
 );
@@ -1106,6 +1107,7 @@ CREATE TABLE feature_change_sets (
     additions          INT NOT NULL,
     deletions          INT NOT NULL,
     files_json         JSON NOT NULL,
+    plan_deviations_json JSON NOT NULL,
     validation_results_json JSON NOT NULL,
     provider_summary   TEXT NOT NULL,
     created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1138,8 +1140,8 @@ CREATE TABLE feature_change_reviews (
 所有在线读取必须有界：
 
 - 研发任务列表使用 `(updated_at, id)` keyset cursor；
-- Artifact 列表按类型和版本读取，单个 Request 的类型是固定闭集；
-- Generation Run 和 Implementation Run 使用 `(created_at, id)` cursor；
+- Artifact 列表使用 `(kind, version)` keyset cursor；
+- Generation Run 使用 `(started_at, id)` cursor，Implementation Run 使用 `(created_at, id)` cursor；
 - 事件使用 `seq > after_seq LIMIT page_size`；
 - 验证命令元数据作为有界 JSON 随 Change Set 读取，完整输出按一条命令流式读取；
 - Patch 使用流式下载和响应大小保护；
@@ -1161,12 +1163,16 @@ POST   /api/features/{id}/requirements
 POST   /api/features/{id}/archive
 ```
 
+归档是幂等的只读边界。归档后仍可查看已有 Artifact、Generation、Run、Patch 和验证输出，
+但创建需求/Artifact 新版本、启动 Generation 或 Implementation 返回 `409`；已经启动的 Run
+继续按固定输入完成，不因归档被隐式取消。
+
 `POST /api/features` 在一个事务内创建 Request 和 requirement v1。
 
 ### 17.2 Artifact
 
 ```text
-GET    /api/features/{id}/artifacts
+GET    /api/features/{id}/artifacts?cursor=&limit=
 GET    /api/features/{id}/artifacts/{artifact_id}
 POST   /api/features/{id}/artifacts/{kind}/generate
 POST   /api/features/{id}/artifacts/{kind}
@@ -1177,10 +1183,17 @@ POST   /api/features/{id}/artifacts/{artifact_id}/review
 `requirement` 只能通过专用需求版本接口创建，通用 Artifact 创建接口拒绝该 Kind。
 
 第一版生成请求同步返回 Artifact 和 Generation Run 摘要，不提供 Generation SSE。
-调用方超时重试会生成新的不可变版本，因此前端在请求未得到确定结果时应先按 Request
-重新读取 Artifact 列表。
+Artifact 插入与 Generation Run 成功状态在同一事务中提交。调用方未得到确定结果时应先按
+Request 重新读取 Generation Run 和 Artifact 列表，不能直接假定生成失败。
 
-### 17.3 Implementation
+### 17.3 Generation 审计
+
+```text
+GET    /api/features/{id}/generations?cursor=&limit=
+GET    /api/feature-generations/{run_id}
+```
+
+### 17.4 Implementation
 
 ```text
 POST   /api/features/{id}/implementations
@@ -1189,10 +1202,11 @@ GET    /api/feature-implementations/{run_id}
 POST   /api/feature-implementations/{run_id}/cancel
 GET    /api/feature-implementations/{run_id}/events?after_seq=
 GET    /api/feature-implementations/{run_id}/patch
+GET    /api/feature-implementations/{run_id}/validations/{sequence}/output
 POST   /api/feature-implementations/{run_id}/review
 ```
 
-### 17.4 幂等
+### 17.5 幂等
 
 Implementation 创建必须携带稳定 `client_request_id`。表中保存
 `requested_by + client_request_id + request_hash` 并建立唯一键：同一用户和 Key 的同一
@@ -1201,7 +1215,7 @@ Implementation 创建必须携带稳定 `client_request_id`。表中保存
 Feature 和 Generation 第一版不承诺通用 `Idempotency-Key` 语义。需要覆盖所有写接口时，
 再独立设计带过期、请求哈希和响应恢复的通用幂等存储，不能只缓存不完整 HTTP 响应。
 
-### 17.5 HTTP 状态
+### 17.6 HTTP 状态
 
 | 场景 | 状态 |
 | --- | --- |
@@ -1214,6 +1228,18 @@ Feature 和 Generation 第一版不承诺通用 `Idempotency-Key` 语义。需�
 | 外部 Provider 运行失败 | `502` 或 Run `failed` 终态 |
 
 异步 Run 已成功创建后，后续失败通过 Run 终态和 SSE 表达，不把原始 POST 保持到 Provider 完成。
+
+### 17.7 Web 工作台
+
+下游 Web 只实现 Feature Delivery 的展示和输入适配，不拥有业务状态或流程规则。工作台覆盖：
+
+- Feature 创建、归档和需求新版本；
+- 五阶段当前谱系、Artifact 版本、人工修订、审核和有界证据引用；
+- Generation Run 审计；
+- Implementation 创建、取消、事件、Change Set、验证输出、审核和被拒绝 Run 的重新实施；
+- Coding Provider 实际能力状态与平台默认 Provider。
+
+Coding 与 Delivery 设置保存后需要重启服务生效。当前 Worker 生命周期由平台进程拥有，不能在只热重载 QA 的设置回调中遗留旧 Worker 后再启动新 Worker。
 
 ## 18. SSE 与事件
 
@@ -1444,6 +1470,7 @@ duration_ms
 - 启动或取消 Implementation；
 - 审核 Change Set；
 - 下载 Patch。
+- 下载完整验证输出。
 
 Provider 自身不是审核人。LLM 生成内容的 `created_by` 保存请求用户，`origin=agent` 说明来源。
 
@@ -1559,6 +1586,8 @@ Incident 当前直接在原仓库 Checkout 分支的实现不能作为本功能 
 
 ### 25.4 Worktree 测试
 
+使用本地临时 Git 仓库和 Fake Coding Runner 覆盖完整实施链路，禁止依赖真实 Provider、凭据或网络。
+
 - 固定 Base Commit；
 - 原工作目录有未提交修改时仍不受影响；
 - 首次 Run 创建 `<username>-workspace`、owner 文件和 Run 子目录；
@@ -1571,6 +1600,7 @@ Incident 当前直接在原仓库 Checkout 分支的实现不能作为本功能 
 - 并发首次创建只产生一个用户映射和一个父目录；
 - 路径逃逸和符号链接；
 - Provider 修改文件后 Patch 正确；
+- Fake Runner 修改、独立验证、Change Set 原子保存和成功终态形成完整闭环；
 - 大 Patch 明确失败；
 - 取消后子进程组退出；
 - TTL 到期后只清理 Run Worktree，保留 User Workspace 父目录；

@@ -1,13 +1,17 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
 )
 
@@ -97,5 +101,48 @@ func TestFilterSettingsKeepsExplicitEmptyValues(t *testing.T) {
 	}
 	if _, ok := got["unknown_setting"]; ok {
 		t.Fatal("unknown_setting should be filtered out")
+	}
+}
+
+func TestCodingSettingsRelationshipValidation(t *testing.T) {
+	settings := &config.PlatformSettings{}
+	settings.Apply(nil)
+	settings.Apply(map[string]string{
+		"coding_enabled_providers": "codex,claude",
+		"coding_default_provider":  "claude",
+	})
+	settings.Apply(map[string]string{"coding_enabled_providers": "codex"})
+	if err := settings.ValidateCodingSettings(); err == nil {
+		t.Fatal("expected disabled default provider to be rejected")
+	}
+	settings.Apply(map[string]string{"coding_default_provider": "codex"})
+	if err := settings.ValidateCodingSettings(); err != nil {
+		t.Fatalf("valid coding settings rejected: %v", err)
+	}
+}
+
+func TestSettingsPutRejectsCodingDefaultOutsideEnabledProviders(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(`SELECT k, v FROM settings`).WillReturnRows(
+		sqlmock.NewRows([]string{"k", "v"}).
+			AddRow("coding_enabled_providers", "codex,claude").
+			AddRow("coding_default_provider", "claude"),
+	)
+	handler := &Handler{authDB: auth.NewDB(db), platform: &config.PlatformSettings{}}
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(
+		`{"coding_enabled_providers":"codex"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.APISettingsPut(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

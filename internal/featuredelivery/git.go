@@ -14,7 +14,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/dekwanlabs/nasuta/platform"
 )
 
 const (
@@ -230,6 +233,12 @@ func (manager *GitManager) RunValidation(ctx context.Context, prepared PreparedW
 	if !prepared.ValidationExists {
 		return []ValidationResult{{Sequence: 1, Status: "validation_not_configured"}}, nil
 	}
+	validationHome, err := os.MkdirTemp("", "nasuta-validation-*")
+	if err != nil {
+		return nil, fmt.Errorf("prepare validation environment: %w", err)
+	}
+	defer os.RemoveAll(validationHome)
+	environment := validationEnvironment(validationHome)
 	results := make([]ValidationResult, 0, len(prepared.Validation))
 	artifactDir, err := containedPath(manager.artifactsRoot, runID)
 	if err != nil {
@@ -241,24 +250,28 @@ func (manager *GitManager) RunValidation(ctx context.Context, prepared PreparedW
 	for index, command := range prepared.Validation {
 		started := time.Now()
 		commandCtx, cancel := context.WithTimeout(ctx, time.Duration(command.Timeout))
-		output, exitCode, timedOut, runErr := runBoundedCommand(commandCtx, prepared.WorktreePath, validationEnvironment(), maxValidationOutput, command.Argv[0], command.Argv[1:]...)
+		output, exitCode, timedOut, runErr := runBoundedCommand(commandCtx, prepared.WorktreePath, environment, maxValidationOutput, command.Argv[0], command.Argv[1:]...)
 		cancel()
+		redactedOutput := []byte(platform.RedactSensitiveText(string(output)))
+		if len(redactedOutput) > maxValidationOutput {
+			return results, fmt.Errorf("redacted validation output exceeds %d bytes", maxValidationOutput)
+		}
 		name := fmt.Sprintf("validation-%02d.log", index+1)
 		path := filepath.Join(artifactDir, name)
-		if err := writeAtomic(path, output, 0o600); err != nil {
+		if err := writeAtomic(path, redactedOutput, 0o600); err != nil {
 			return nil, err
 		}
-		sum := sha256.Sum256(output)
+		sum := sha256.Sum256(redactedOutput)
 		status := "passed"
 		if runErr != nil {
 			status = "failed"
 		}
 		result := ValidationResult{
-			Sequence: index + 1, Argv: append([]string(nil), command.Argv...),
+			Sequence: index + 1, Argv: redactValidationArgv(command.Argv),
 			Status: status, ExitCode: exitCode, DurationMS: time.Since(started).Milliseconds(),
-			OutputSummary: truncateText(string(output), 4000),
+			OutputSummary: truncateText(string(redactedOutput), 4000),
 			OutputRelPath: filepath.ToSlash(filepath.Join(runID, name)),
-			OutputSHA256:  hex.EncodeToString(sum[:]), TimedOut: timedOut,
+			OutputSHA256:  hex.EncodeToString(sum[:]), OutputBytes: int64(len(redactedOutput)), TimedOut: timedOut,
 		}
 		results = append(results, result)
 		if runErr != nil {
@@ -268,12 +281,16 @@ func (manager *GitManager) RunValidation(ctx context.Context, prepared PreparedW
 	return results, nil
 }
 
-func (manager *GitManager) PatchPath(relative string) (string, error) {
+func (manager *GitManager) ArtifactPath(relative string) (string, error) {
 	path, err := containedPath(manager.artifactsRoot, filepath.FromSlash(relative))
 	if err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+func (manager *GitManager) PatchPath(relative string) (string, error) {
+	return manager.ArtifactPath(relative)
 }
 
 func (manager *GitManager) RemoveWorktree(ctx context.Context, run ImplementationRun) error {
@@ -437,15 +454,32 @@ func (manager *GitManager) gitOutput(ctx context.Context, dir string, env []stri
 }
 
 func runBoundedCommand(ctx context.Context, dir string, env []string, limit int, name string, args ...string) ([]byte, int, bool, error) {
-	command := exec.CommandContext(ctx, name, args...)
+	if err := ctx.Err(); err != nil {
+		return nil, -1, errors.Is(err, context.DeadlineExceeded), err
+	}
+	command := exec.Command(name, args...)
 	command.Dir = dir
 	if env != nil {
 		command.Env = env
 	}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	buffer := &boundedBuffer{limit: limit}
 	command.Stdout = buffer
 	command.Stderr = buffer
-	err := command.Run()
+	if err := command.Start(); err != nil {
+		return nil, -1, false, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	var err error
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		err = terminateCommandGroup(command.Process.Pid, done)
+		if err == nil {
+			err = ctx.Err()
+		}
+	}
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 	exitCode := 0
 	if err != nil {
@@ -459,9 +493,25 @@ func runBoundedCommand(ctx context.Context, dir string, env []string, limit int,
 		return buffer.Bytes(), exitCode, timedOut, fmt.Errorf("command output exceeds %d bytes", limit)
 	}
 	if err != nil {
-		return buffer.Bytes(), exitCode, timedOut, fmt.Errorf("run %q: %w: %s", name, err, truncateText(buffer.String(), 2000))
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return buffer.Bytes(), exitCode, timedOut, fmt.Errorf("run %q: %w", name, err)
 	}
 	return buffer.Bytes(), exitCode, timedOut, nil
+}
+
+func terminateCommandGroup(pid int, done <-chan error) error {
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		return <-done
+	}
 }
 
 type boundedBuffer struct {
@@ -564,14 +614,27 @@ func applyNumstat(files []ChangedFile, raw []byte) {
 	}
 }
 
-func validationEnvironment() []string {
-	out := make([]string, 0, 6)
-	for _, key := range []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"} {
+func validationEnvironment(home string) []string {
+	out := make([]string, 0, 5)
+	for _, key := range []string{"PATH", "LANG", "LC_ALL"} {
 		if value := os.Getenv(key); value != "" {
 			out = append(out, key+"="+value)
 		}
 	}
+	out = append(out, "HOME="+home, "TMPDIR="+home)
 	return out
+}
+
+func redactValidationArgv(argv []string) []string {
+	redacted := make([]string, len(argv))
+	for index, argument := range argv {
+		redacted[index] = platform.RedactSensitiveText(argument)
+		if index > 0 && redacted[index] == argument {
+			key := strings.TrimLeft(argv[index-1], "-")
+			redacted[index] = platform.RedactConfigValue(key, argument)
+		}
+	}
+	return redacted
 }
 
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
@@ -599,21 +662,21 @@ func (manager *GitManager) verifyRunArtifacts(run ImplementationRun) error {
 	if run.ChangeSet == nil {
 		return nil
 	}
-	if err := manager.verifyArtifact(run.ChangeSet.PatchRelPath, run.ChangeSet.PatchSHA256); err != nil {
+	if err := manager.verifyArtifact(run.ChangeSet.PatchRelPath, run.ChangeSet.PatchSHA256, run.ChangeSet.PatchBytes); err != nil {
 		return fmt.Errorf("verify patch: %w", err)
 	}
 	for _, validation := range run.ChangeSet.ValidationResults {
 		if validation.OutputRelPath == "" {
 			continue
 		}
-		if err := manager.verifyArtifact(validation.OutputRelPath, validation.OutputSHA256); err != nil {
+		if err := manager.verifyArtifact(validation.OutputRelPath, validation.OutputSHA256, validation.OutputBytes); err != nil {
 			return fmt.Errorf("verify validation output %d: %w", validation.Sequence, err)
 		}
 	}
 	return nil
 }
 
-func (manager *GitManager) verifyArtifact(relative, expectedHash string) error {
+func (manager *GitManager) verifyArtifact(relative, expectedHash string, expectedBytes int64) error {
 	if expectedHash == "" || len(expectedHash) != sha256.Size*2 || !isHex(expectedHash) {
 		return fmt.Errorf("artifact hash is invalid")
 	}
@@ -632,6 +695,8 @@ func (manager *GitManager) verifyArtifact(relative, expectedHash string) error {
 	}
 	if info, err := file.Stat(); err != nil {
 		return err
+	} else if info.Size() != expectedBytes {
+		return fmt.Errorf("artifact size mismatch")
 	} else if info.Size() > maxGitOutputBytes {
 		return fmt.Errorf("artifact exceeds %d bytes", maxGitOutputBytes)
 	}

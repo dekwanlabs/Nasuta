@@ -21,7 +21,7 @@ func (handler *Handler) RunEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := r.PathValue("run_id")
-	run, err := handler.service.GetImplementation(r.Context(), runID, user.ID, user.IsAdmin)
+	run, reader, err := handler.service.OpenRunEvents(r.Context(), runID, user.ID, user.IsAdmin)
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -36,7 +36,7 @@ func (handler *Handler) RunEvents(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteErr(w, err)
 		return
 	}
-	lastSeq, terminal, err := handler.replayEvents(r.Context(), writer, runID, afterSeq)
+	lastSeq, terminal, err := handler.replayEvents(r.Context(), writer, reader, afterSeq)
 	if err != nil {
 		writer.emitError(err)
 		return
@@ -52,7 +52,7 @@ func (handler *Handler) RunEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unsubscribe()
 
-	lastSeq, terminal, err = handler.replayEvents(r.Context(), writer, runID, lastSeq)
+	lastSeq, terminal, err = handler.replayEvents(r.Context(), writer, reader, lastSeq)
 	if err != nil {
 		writer.emitError(err)
 		return
@@ -68,19 +68,17 @@ func (handler *Handler) RunEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case event := <-live:
-			if event.Seq <= lastSeq {
-				continue
-			}
-			if err := writer.emit(event); err != nil {
+			var liveTerminal bool
+			lastSeq, liveTerminal, err = handler.emitLiveEvent(r.Context(), writer, reader, lastSeq, event)
+			if err != nil {
 				return
 			}
-			lastSeq = event.Seq
-			if terminalEvent(event.Kind) {
+			if liveTerminal {
 				return
 			}
 		case <-ticker.C:
 			var replayTerminal bool
-			lastSeq, replayTerminal, err = handler.replayEvents(r.Context(), writer, runID, lastSeq)
+			lastSeq, replayTerminal, err = handler.replayEvents(r.Context(), writer, reader, lastSeq)
 			if err != nil {
 				writer.emitError(err)
 				return
@@ -93,10 +91,28 @@ func (handler *Handler) RunEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (handler *Handler) replayEvents(ctx context.Context, writer *eventWriter, runID string, afterSeq int64) (int64, bool, error) {
+func (handler *Handler) emitLiveEvent(ctx context.Context, writer *eventWriter, reader *featuredelivery.RunEventReader, lastSeq int64, event featuredelivery.RunEvent) (int64, bool, error) {
+	if event.Seq <= lastSeq {
+		return lastSeq, false, nil
+	}
+	if event.Seq > lastSeq+1 {
+		var terminal bool
+		var err error
+		lastSeq, terminal, err = handler.replayEvents(ctx, writer, reader, lastSeq)
+		if err != nil || terminal || event.Seq <= lastSeq {
+			return lastSeq, terminal, err
+		}
+	}
+	if err := writer.emit(event); err != nil {
+		return lastSeq, false, err
+	}
+	return event.Seq, terminalEvent(event.Kind), nil
+}
+
+func (handler *Handler) replayEvents(ctx context.Context, writer *eventWriter, reader *featuredelivery.RunEventReader, afterSeq int64) (int64, bool, error) {
 	lastSeq := afterSeq
 	for {
-		events, err := handler.service.ListRunEvents(ctx, runID, lastSeq, eventReplayPage, 0, true)
+		events, err := reader.List(ctx, lastSeq, eventReplayPage)
 		if err != nil {
 			return lastSeq, false, err
 		}
