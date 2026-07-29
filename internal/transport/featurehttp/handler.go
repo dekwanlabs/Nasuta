@@ -162,6 +162,11 @@ func (handler *Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	kind, err := featuredelivery.ParseArtifactKind(r.URL.Query().Get("kind"))
+	if err != nil {
+		httputil.WriteBadRequest(w, "kind is required and must be a supported artifact kind")
+		return
+	}
 	limit, err := requestLimit(r, 20, 100)
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
@@ -172,8 +177,12 @@ func (handler *Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
+	if cursor.Kind != "" && cursor.Kind != kind {
+		httputil.WriteBadRequest(w, "artifact cursor does not match kind")
+		return
+	}
 	artifacts, lineage, err := handler.service.ListArtifacts(
-		r.Context(), r.PathValue("id"), cursor, limit, user.ID, user.IsAdmin,
+		r.Context(), r.PathValue("id"), kind, cursor, limit, user.ID, user.IsAdmin,
 	)
 	if err != nil {
 		writeDomainError(w, err)
@@ -275,6 +284,7 @@ func (handler *Handler) AddArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var request struct {
 		ParentArtifactID string          `json:"parent_artifact_id"`
+		BaseArtifactID   string          `json:"base_artifact_id"`
 		Document         json.RawMessage `json:"document"`
 	}
 	if err := httputil.DecodeStrictJSON(r, &request); err != nil {
@@ -282,8 +292,9 @@ func (handler *Handler) AddArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.ParentArtifactID = strings.TrimSpace(request.ParentArtifactID)
+	request.BaseArtifactID = strings.TrimSpace(request.BaseArtifactID)
 	artifact, err := handler.service.AddArtifact(
-		r.Context(), r.PathValue("id"), kind, request.ParentArtifactID, request.Document, user.ID, user.IsAdmin,
+		r.Context(), r.PathValue("id"), kind, request.ParentArtifactID, request.BaseArtifactID, request.Document, user.ID, user.IsAdmin,
 	)
 	if err != nil {
 		writeDomainError(w, err)

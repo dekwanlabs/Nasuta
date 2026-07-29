@@ -171,11 +171,11 @@ func (service *Service) GetFeature(ctx context.Context, id string, userID int64,
 	return feature, lineage, nil
 }
 
-func (service *Service) ListArtifacts(ctx context.Context, requestID string, cursor ArtifactCursor, limit int, userID int64, admin bool) ([]ArtifactSummary, Lineage, error) {
+func (service *Service) ListArtifacts(ctx context.Context, requestID string, kind ArtifactKind, cursor ArtifactCursor, limit int, userID int64, admin bool) ([]ArtifactSummary, Lineage, error) {
 	if _, err := service.authorizedFeature(ctx, requestID, userID, admin); err != nil {
 		return nil, Lineage{}, err
 	}
-	items, err := service.store.ListArtifacts(ctx, requestID, cursor, limit)
+	items, err := service.store.ListArtifacts(ctx, requestID, kind, cursor, limit)
 	if err != nil {
 		return nil, Lineage{}, err
 	}
@@ -217,7 +217,7 @@ func (service *Service) AddRequirement(ctx context.Context, requestID string, re
 	return service.store.CreateArtifact(ctx, artifact)
 }
 
-func (service *Service) AddArtifact(ctx context.Context, requestID string, kind ArtifactKind, parentID string, documentJSON []byte, userID int64, admin bool) (*Artifact, error) {
+func (service *Service) AddArtifact(ctx context.Context, requestID string, kind ArtifactKind, parentID, baseArtifactID string, documentJSON []byte, userID int64, admin bool) (*Artifact, error) {
 	if kind == KindRequirement {
 		return nil, ErrConflict
 	}
@@ -231,7 +231,18 @@ func (service *Service) AddArtifact(ctx context.Context, requestID string, kind 
 	if parentID != parent.ID {
 		return nil, ErrConflict
 	}
-	artifact, err := BuildArtifact(kind, requestID, parent.ID, OriginUser, documentJSON, nil, userID)
+	var evidence []EvidenceRef
+	if baseArtifactID != "" {
+		base, err := service.store.GetArtifact(ctx, baseArtifactID)
+		if err != nil {
+			return nil, err
+		}
+		if base.RequestID != requestID || base.Kind != kind || base.ParentArtifactID != parent.ID {
+			return nil, ErrConflict
+		}
+		evidence = base.Evidence
+	}
+	artifact, err := BuildArtifact(kind, requestID, parent.ID, OriginUser, documentJSON, evidence, userID)
 	if err != nil {
 		return nil, err
 	}

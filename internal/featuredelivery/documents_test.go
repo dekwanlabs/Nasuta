@@ -35,6 +35,9 @@ func TestBuildArtifactRendersDeterministically(t *testing.T) {
 	if first.ContentHash != second.ContentHash || first.RenderedMarkdown != second.RenderedMarkdown {
 		t.Fatal("same document did not produce stable content")
 	}
+	if first.Evidence == nil {
+		t.Fatal("empty evidence must be represented as an empty array")
+	}
 }
 
 func TestBlockingQuestions(t *testing.T) {

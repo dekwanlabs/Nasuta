@@ -44,6 +44,8 @@ func BuildArtifact(kind ArtifactKind, requestID, parentID string, origin Artifac
 	if err != nil {
 		return Artifact{}, err
 	}
+	evidenceSnapshot := make([]EvidenceRef, len(evidence))
+	copy(evidenceSnapshot, evidence)
 	return Artifact{
 		ID:               id,
 		RequestID:        requestID,
@@ -52,7 +54,7 @@ func BuildArtifact(kind ArtifactKind, requestID, parentID string, origin Artifac
 		Origin:           origin,
 		DocumentJSON:     canonical,
 		RenderedMarkdown: rendered,
-		Evidence:         append([]EvidenceRef(nil), evidence...),
+		Evidence:         evidenceSnapshot,
 		ContentHash:      hex.EncodeToString(content[:]),
 		CreatedBy:        createdBy,
 	}, nil

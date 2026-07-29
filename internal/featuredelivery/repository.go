@@ -34,7 +34,7 @@ type Store interface {
 
 	CreateArtifact(context.Context, Artifact) (*Artifact, error)
 	GetArtifact(context.Context, string) (*Artifact, error)
-	ListArtifacts(context.Context, string, ArtifactCursor, int) ([]ArtifactSummary, error)
+	ListArtifacts(context.Context, string, ArtifactKind, ArtifactCursor, int) ([]ArtifactSummary, error)
 	GetCurrentLineage(context.Context, string) (Lineage, error)
 	ReviewArtifact(context.Context, ArtifactReview) error
 

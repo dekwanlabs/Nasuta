@@ -204,16 +204,16 @@ func (store *FeatureDeliveryStore) GetArtifact(ctx context.Context, id string) (
 	return &artifact, nil
 }
 
-func (store *FeatureDeliveryStore) ListArtifacts(ctx context.Context, requestID string, cursor featuredelivery.ArtifactCursor, limit int) ([]featuredelivery.ArtifactSummary, error) {
+func (store *FeatureDeliveryStore) ListArtifacts(ctx context.Context, requestID string, kind featuredelivery.ArtifactKind, cursor featuredelivery.ArtifactCursor, limit int) ([]featuredelivery.ArtifactSummary, error) {
 	limit = boundedLimit(limit, 20, maxArtifactPage)
-	query := artifactSummarySelect + ` WHERE a.request_id=?`
-	args := make([]any, 0, 5)
-	args = append(args, requestID)
-	if cursor.Kind != "" {
-		query += ` AND (a.kind>? OR (a.kind=? AND a.version<?))`
-		args = append(args, cursor.Kind, cursor.Kind, cursor.Version)
+	query := artifactSummarySelect + ` WHERE a.request_id=? AND a.kind=?`
+	args := make([]any, 0, 4)
+	args = append(args, requestID, kind)
+	if cursor.Version > 0 {
+		query += ` AND a.version<?`
+		args = append(args, cursor.Version)
 	}
-	query += ` ORDER BY a.kind,a.version DESC LIMIT ?`
+	query += ` ORDER BY a.version DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {

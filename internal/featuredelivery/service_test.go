@@ -21,6 +21,40 @@ type generationFailureStore struct {
 	finishCalled bool
 }
 
+type manualArtifactStore struct {
+	Store
+	feature FeatureRequest
+	parent  Artifact
+	base    Artifact
+	created Artifact
+}
+
+func (store *manualArtifactStore) GetFeature(_ context.Context, id string) (*FeatureRequest, error) {
+	if id != store.feature.ID {
+		return nil, ErrNotFound
+	}
+	feature := store.feature
+	return &feature, nil
+}
+
+func (store *manualArtifactStore) GetCurrentLineage(context.Context, string) (Lineage, error) {
+	parent := store.parent
+	return Lineage{RequirementAnalysis: &parent}, nil
+}
+
+func (store *manualArtifactStore) GetArtifact(_ context.Context, id string) (*Artifact, error) {
+	if id != store.base.ID {
+		return nil, ErrNotFound
+	}
+	base := store.base
+	return &base, nil
+}
+
+func (store *manualArtifactStore) CreateArtifact(_ context.Context, artifact Artifact) (*Artifact, error) {
+	store.created = artifact
+	return &artifact, nil
+}
+
 func (store *generationFailureStore) GetFeature(_ context.Context, id string) (*FeatureRequest, error) {
 	if id != store.feature.ID {
 		return nil, ErrNotFound
@@ -66,6 +100,54 @@ func TestNormalizeRepository(t *testing.T) {
 		if got, err := NormalizeRepository(input); err == nil {
 			t.Fatalf("NormalizeRepository(%q) = %q, want error", input, got)
 		}
+	}
+}
+
+func TestAddArtifactInheritsValidatedEvidenceSnapshot(t *testing.T) {
+	store := &manualArtifactStore{
+		feature: FeatureRequest{ID: "feat-1", CreatedBy: 7},
+		parent:  Artifact{ID: "analysis-1", RequestID: "feat-1", Kind: KindRequirementAnalysis},
+		base: Artifact{
+			ID: "proposal-1", RequestID: "feat-1", Kind: KindTechnicalProposal, ParentArtifactID: "analysis-1",
+			Evidence: []EvidenceRef{{Kind: "code", Path: "service.go", Summary: "Existing behavior", Hash: "hash-1"}},
+		},
+	}
+	service := NewService(store, nil, time.Second)
+	document := []byte(`{
+		"current_facts":[{"statement":"The current path is synchronous","classification":"fact","evidence_ids":[0]}],
+		"options":[{"name":"A","summary":"Keep it","benefits":[],"costs":[],"risks":[]},{"name":"B","summary":"Change it","benefits":[],"costs":[],"risks":[]}],
+		"recommendation":"B","recommendation_reason":"Lower latency"
+	}`)
+
+	artifact, err := service.AddArtifact(
+		context.Background(), "feat-1", KindTechnicalProposal, "analysis-1", "proposal-1", document, 7, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.Evidence) != 1 || artifact.Evidence[0].Hash != "hash-1" {
+		t.Fatalf("evidence = %+v", artifact.Evidence)
+	}
+	if store.created.Origin != OriginUser || store.created.ParentArtifactID != "analysis-1" {
+		t.Fatalf("created artifact = %+v", store.created)
+	}
+}
+
+func TestAddArtifactRejectsForeignEvidenceSnapshot(t *testing.T) {
+	store := &manualArtifactStore{
+		feature: FeatureRequest{ID: "feat-1", CreatedBy: 7},
+		parent:  Artifact{ID: "analysis-1", RequestID: "feat-1", Kind: KindRequirementAnalysis},
+		base: Artifact{
+			ID: "proposal-foreign", RequestID: "feat-2", Kind: KindTechnicalProposal, ParentArtifactID: "analysis-1",
+		},
+	}
+	service := NewService(store, nil, time.Second)
+
+	_, err := service.AddArtifact(
+		context.Background(), "feat-1", KindTechnicalProposal, "analysis-1", "proposal-foreign", []byte(`{}`), 7, false,
+	)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("error = %v, want conflict", err)
 	}
 }
 

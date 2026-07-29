@@ -117,6 +117,30 @@ func TestAdministrativeMutationsRejectRegularUsers(t *testing.T) {
 	}
 }
 
+func TestListArtifactsRequiresMatchingKind(t *testing.T) {
+	handler := New(nil)
+	cursor := encodeCursor(artifactCursorPayload{Kind: featuredelivery.KindSystemDesign, Version: 2})
+	for _, target := range []struct {
+		name string
+		url  string
+	}{
+		{name: "missing kind", url: "/api/features/feat-1/artifacts"},
+		{name: "cursor kind mismatch", url: "/api/features/feat-1/artifacts?kind=requirement_analysis&cursor=" + cursor},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, target.url, nil)
+			request = request.WithContext(auth.WithUser(request.Context(), &auth.User{ID: 7}))
+			response := httptest.NewRecorder()
+
+			handler.ListArtifacts(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d, want %d", response.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
 func TestDownloadValidationOutput(t *testing.T) {
 	content := []byte("go test ./...\nok\n")
 	handler, _ := validationDownloadHandler(t, content, nil)

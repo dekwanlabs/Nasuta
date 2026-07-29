@@ -188,9 +188,9 @@ func TestListArtifactsUsesSummaryColumnsAndCursor(t *testing.T) {
 	}
 	defer db.Close()
 	createdAt := time.Date(2026, 7, 29, 11, 0, 0, 0, time.UTC)
-	query := artifactSummarySelect + ` WHERE a.request_id=? AND (a.kind>? OR (a.kind=? AND a.version<?)) ORDER BY a.kind,a.version DESC LIMIT ?`
+	query := artifactSummarySelect + ` WHERE a.request_id=? AND a.kind=? AND a.version<? ORDER BY a.version DESC LIMIT ?`
 	mock.ExpectQuery(query).
-		WithArgs("feat-1", featuredelivery.KindRequirementAnalysis, featuredelivery.KindRequirementAnalysis, 3, 20).
+		WithArgs("feat-1", featuredelivery.KindRequirementAnalysis, 3, 20).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "request_id", "kind", "version", "parent_artifact_id", "origin",
 			"content_hash", "created_by", "created_at", "review_id", "decision", "comment", "reviewer", "reviewed_at",
@@ -200,7 +200,7 @@ func TestListArtifactsUsesSummaryColumnsAndCursor(t *testing.T) {
 		))
 
 	items, err := NewFeatureDeliveryStore(db).ListArtifacts(
-		context.Background(), "feat-1",
+		context.Background(), "feat-1", featuredelivery.KindRequirementAnalysis,
 		featuredelivery.ArtifactCursor{Kind: featuredelivery.KindRequirementAnalysis, Version: 3}, 20,
 	)
 	if err != nil {
