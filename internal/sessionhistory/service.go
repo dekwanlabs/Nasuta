@@ -404,7 +404,13 @@ func hasMixedCase(value string) bool {
 
 func isLowInformation(value string) bool {
 	switch value {
-	case "the", "and", "for", "with", "this", "that", "from", "into", "what", "when", "where", "怎么", "这个", "那个", "现在", "需要", "可以":
+	case "the", "and", "for", "with", "this", "that", "from", "into", "what", "when", "where", "how", "now", "need", "can",
+		"怎么", "这个", "那个", "现在", "需要", "可以",
+		"der", "die", "das", "und", "für", "mit", "dies", "diese", "dieser", "von", "aus", "was", "wann", "wo", "wie", "jetzt", "brauchen", "können",
+		"il", "lo", "la", "gli", "le", "per", "con", "questo", "questa", "quello", "quella", "da", "cosa", "quando", "dove", "come", "ora", "serve", "può",
+		"el", "los", "las", "para", "este", "esta", "esto", "ese", "esa", "desde", "qué", "cuándo", "dónde", "cómo", "ahora", "necesita", "puede",
+		"これ", "それ", "あれ", "この", "その", "あの", "何", "いつ", "どこ", "どう", "今", "現在", "必要", "できる", "できます",
+		"이", "그", "저", "이것", "그것", "저것", "무엇", "언제", "어디", "어떻게", "지금", "현재", "필요", "가능":
 		return true
 	default:
 		return false

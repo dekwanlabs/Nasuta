@@ -119,8 +119,9 @@ func TestSelectPayloadUsesSerializedTokenBudget(t *testing.T) {
 }
 
 func TestExtractTermsPrioritizesTechnicalIdentifiersAndCapsOutput(t *testing.T) {
-	terms := extractTerms("ShopifyStorefrontClient createCart /api/cart trace_id=abc-123 ordinary words", 4)
-	if len(terms) != 4 {
+	limit := 5
+	terms := extractTerms("ShopifyStorefrontClient createCart /api/cart trace_id=abc-123 ordinary words", limit)
+	if len(terms) != limit {
 		t.Fatalf("terms = %+v", terms)
 	}
 	for _, term := range terms {
