@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestChatJSONFirstTryOK(t *testing.T) {
@@ -107,6 +108,13 @@ func TestChatJSONExhaustedReturnsInvalidJSON(t *testing.T) {
 	}
 	if f.calls != 2 {
 		t.Fatalf("calls=%d want 2", f.calls)
+	}
+}
+
+func TestTruncateForErrPreservesUTF8(t *testing.T) {
+	got := truncateForErr(strings.Repeat("设计", 300))
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateForErr returned invalid UTF-8: %q", got)
 	}
 }
 

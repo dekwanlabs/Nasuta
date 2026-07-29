@@ -4,6 +4,7 @@ Replace the placeholder values in the required JSON shape below and preserve eve
 {{ .Contract }}
 
 Nasuta renders Markdown chapters deterministically from these keys. Do not rename, merge, omit, or add fields.
+Write every natural-language field in Simplified Chinese. Keep only code identifiers, commands, file paths, API or schema names, and untranslatable proper nouns in their original form.
 
 Target artifact kind: {{ .Kind }}
 

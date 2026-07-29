@@ -34,6 +34,8 @@ Describe how the approved architecture operates concretely. Protect domain and d
 
 Populate every key in the supplied JSON contract. Nasuta renders the keys as these Markdown chapters in this order:
 
+Except for `architecture_decision_record` and `modules`, every chapter field below must be a JSON array of strings. Every array item must be a string; do not use objects, key-value records, or nested arrays to express structured details. `architecture_decision_record.consequences` and each module's `responsibilities`, `dependencies`, and `invariants` must also be arrays of strings.
+
 1. `architecture_decision_record` -> Architecture Decision Record, containing `status`, `context`, `decision`, and `consequences`.
 2. `domain_model` -> Domain Model: business concepts, bounded contexts, entities, value objects, aggregates, events, or an explicit statement that simple transaction scripts are sufficient.
 3. `architecture_boundaries` -> Architecture Boundaries: ownership, dependency direction, trust boundaries, and integration boundaries.

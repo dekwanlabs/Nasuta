@@ -343,7 +343,7 @@ func (service *Service) ReviewArtifact(ctx context.Context, requestID, artifactI
 			return err
 		}
 		if len(blocking) > 0 {
-			return ErrConflict
+			return fmt.Errorf("artifact has %d unresolved blocking questions; revise and clear them before approval: %w", len(blocking), ErrConflict)
 		}
 	}
 	return service.store.ReviewArtifact(ctx, ArtifactReview{

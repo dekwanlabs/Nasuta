@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,34 @@ type manualArtifactStore struct {
 	parent  Artifact
 	base    Artifact
 	created Artifact
+}
+
+type artifactReviewStore struct {
+	Store
+	feature  FeatureRequest
+	parent   Artifact
+	artifact Artifact
+}
+
+func (store *artifactReviewStore) GetFeature(_ context.Context, id string) (*FeatureRequest, error) {
+	if id != store.feature.ID {
+		return nil, ErrNotFound
+	}
+	feature := store.feature
+	return &feature, nil
+}
+
+func (store *artifactReviewStore) GetCurrentLineage(context.Context, string) (Lineage, error) {
+	parent := store.parent
+	return Lineage{Requirement: &parent}, nil
+}
+
+func (store *artifactReviewStore) GetArtifact(_ context.Context, id string) (*Artifact, error) {
+	if id != store.artifact.ID {
+		return nil, ErrNotFound
+	}
+	artifact := store.artifact
+	return &artifact, nil
 }
 
 func (store *manualArtifactStore) GetFeature(_ context.Context, id string) (*FeatureRequest, error) {
@@ -152,6 +181,34 @@ func TestAddArtifactRejectsForeignEvidenceSnapshot(t *testing.T) {
 	)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("error = %v, want conflict", err)
+	}
+}
+
+func TestReviewArtifactExplainsUnresolvedBlockingQuestions(t *testing.T) {
+	store := &artifactReviewStore{
+		feature: FeatureRequest{ID: "feat-1", CreatedBy: 7},
+		parent:  Artifact{ID: "requirement-1", RequestID: "feat-1", Kind: KindRequirement},
+		artifact: Artifact{
+			ID: "analysis-1", RequestID: "feat-1", Kind: KindRequirementAnalysis,
+			ParentArtifactID: "requirement-1",
+			DocumentJSON: []byte(`{
+				"problem_statement":"Customers need export",
+				"goals":["Enable export"],
+				"functional_requirements":["Customers can request an export"],
+				"acceptance_criteria":["A requested export is available"],
+				"blocking_questions":["Which languages?","What range?"]
+			}`),
+		},
+	}
+	service := NewService(store, nil, time.Second)
+
+	err := service.ReviewArtifact(context.Background(), "feat-1", "analysis-1", DecisionApproved, "", 1)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("error = %v, want conflict", err)
+	}
+	want := "artifact has 2 unresolved blocking questions; revise and clear them before approval"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want message containing %q", err, want)
 	}
 }
 

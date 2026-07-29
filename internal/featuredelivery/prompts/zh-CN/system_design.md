@@ -34,6 +34,8 @@
 
 填写所给 JSON 契约中的每一个键。Nasuta 按以下顺序将字段确定性渲染为 Markdown 章节：
 
+除 `architecture_decision_record` 和 `modules` 外，以下所有章节字段都必须是 JSON 字符串数组；数组中的每一项必须是字符串，不得使用对象、键值对或嵌套数组表达结构化细节。`architecture_decision_record.consequences` 以及每个模块的 `responsibilities`、`dependencies`、`invariants` 也必须是字符串数组。
+
 1. `architecture_decision_record` -> Architecture Decision Record，包含 `status`、`context`、`decision` 和 `consequences`。
 2. `domain_model` -> Domain Model：业务概念、限界上下文、实体、值对象、聚合、事件，或明确说明简单事务脚本已足够。
 3. `architecture_boundaries` -> Architecture Boundaries：所有权、依赖方向、信任边界和集成边界。

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/knowledge"
@@ -320,9 +321,14 @@ func (usage *generationUsage) RecordLLMCall(_ context.Context, call llm.CallUsag
 }
 
 func truncateText(value string, limit int) string {
+	value = strings.ToValidUTF8(value, "")
 	value = strings.TrimSpace(value)
 	if len(value) <= limit {
 		return value
 	}
-	return value[:limit]
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }

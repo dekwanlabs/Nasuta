@@ -309,6 +309,7 @@ func TestGenerationPromptRequestsBareDocumentBody(t *testing.T) {
 	for _, expected := range []string{
 		"Return only the document body",
 		"Do not wrap it in artifact fields",
+		"Write every natural-language field in Simplified Chinese",
 		`"problem_statement": "string"`,
 		`"functional_requirements"`,
 		`"acceptance_criteria"`,

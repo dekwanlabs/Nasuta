@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"unicode/utf8"
 )
 
 const defaultRepairAttempts = 1
@@ -101,5 +102,9 @@ func truncateForErr(s string) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	s = s[:max]
+	for !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s + "…"
 }

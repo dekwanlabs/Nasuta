@@ -27,12 +27,9 @@ func BuildArtifact(kind ArtifactKind, requestID, parentID string, origin Artifac
 		return Artifact{}, fmt.Errorf("evidence exceeds %d entries: %w", maxEvidenceRefs, ErrInvalid)
 	}
 	for i := range evidence {
-		evidence[i].Summary = strings.TrimSpace(evidence[i].Summary)
+		evidence[i].Summary = truncateText(evidence[i].Summary, maxEvidenceText)
 		if evidence[i].Summary == "" {
 			return Artifact{}, fmt.Errorf("evidence %d summary is required: %w", i, ErrInvalid)
-		}
-		if len(evidence[i].Summary) > maxEvidenceText {
-			return Artifact{}, fmt.Errorf("evidence %d summary exceeds %d bytes: %w", i, maxEvidenceText, ErrInvalid)
 		}
 	}
 	if err := validateEvidenceReferences(document, len(evidence)); err != nil {

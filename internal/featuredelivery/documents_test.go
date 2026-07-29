@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestBuildArtifactRejectsTrailingJSON(t *testing.T) {
@@ -355,6 +356,22 @@ func validTechnicalProposalDocument() TechnicalProposalDocument {
 
 func technicalProposalEvidence() []EvidenceRef {
 	return []EvidenceRef{{Kind: "code", Summary: "current behavior"}}
+}
+
+func TestBuildArtifactCanonicalizesLongUTF8EvidenceSummary(t *testing.T) {
+	document, err := json.Marshal(validTechnicalProposalDocument())
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := []EvidenceRef{{Kind: "code", Summary: "  " + strings.Repeat("证据", maxEvidenceText) + "  "}}
+	artifact, err := BuildArtifact(KindTechnicalProposal, "req-1", "parent-1", OriginUser, document, evidence, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := artifact.Evidence[0].Summary
+	if len(summary) > maxEvidenceText || !utf8.ValidString(summary) {
+		t.Fatalf("summary bytes=%d valid_utf8=%t", len(summary), utf8.ValidString(summary))
+	}
 }
 
 func validSystemDesignDocument() SystemDesignDocument {
