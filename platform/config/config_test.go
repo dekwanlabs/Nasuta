@@ -42,6 +42,18 @@ func TestLoadDefaultsSQLiteToWorkspaceMetadataDir(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsCodingWorkRootToWorkspaceMetadataDir(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("NASUTA_WORKSPACE_ROOT", root)
+	t.Setenv("NASUTA_CODING_WORK_ROOT", "")
+
+	cfg := Load()
+	want := filepath.Join(root, platform.WorkspaceMetadataDir, "coding")
+	if cfg.CodingWorkRoot != want {
+		t.Fatalf("CodingWorkRoot = %q, want %q", cfg.CodingWorkRoot, want)
+	}
+}
+
 func TestLoadKeepsQdrantConfigurationCompatible(t *testing.T) {
 	t.Setenv("QDRANT_HOST", "qdrant.internal")
 	t.Setenv("QDRANT_PORT", "7334")

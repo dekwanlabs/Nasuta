@@ -232,7 +232,7 @@ func Load() Config {
 		SQLitePath:           nasutaEnv("SQLITE_PATH", filepath.Join(root, platform.WorkspaceMetadataDir, "index.db")),
 		CodexBin:             nasutaEnv("CODEX_BIN", "codex"),
 		ClaudeBin:            nasutaEnv("CLAUDE_BIN", "claude"),
-		CodingWorkRoot:       nasutaEnv("CODING_WORK_ROOT", "/coding-work"),
+		CodingWorkRoot:       nasutaEnv("CODING_WORK_ROOT", filepath.Join(root, platform.WorkspaceMetadataDir, "coding")),
 		HTTPAddr:             nasutaEnv("HTTP_ADDR", ":8201"),
 		AuthToken:            nasutaEnv("AUTH_TOKEN", ""),
 		DailySyncTime:        nasutaEnv("DAILY_SYNC_TIME", "02:07"),

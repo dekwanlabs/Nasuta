@@ -1325,12 +1325,13 @@ Provider；`coding_default_provider` 只用于前端默认选中，并在入口�
 ```text
 NASUTA_CODEX_BIN
 NASUTA_CLAUDE_BIN
-NASUTA_CODING_WORK_ROOT=/coding-work
+NASUTA_CODING_WORK_ROOT=/workspace/.nasuta/coding
 ```
 
 默认 Binary Name 分别为 `codex` 和 `claude`，由 `exec.LookPath` 解析。Coding Work Root
-默认为 `/coding-work`，因此 Run 路径默认为
-`/coding-work/worktrees/<username>-workspace/<run-id>`。数据库设置不能指定任意可执行文件路径。
+默认为 `<workspace>/.nasuta/coding`，因此 Run 路径默认为
+`<workspace>/.nasuta/coding/worktrees/<username>-workspace/<run-id>`。容器部署可显式配置为
+`/coding-work`。数据库设置不能指定任意可执行文件路径。
 
 ### 19.3 Capability Status
 
@@ -1362,6 +1363,9 @@ NASUTA_CODING_WORK_ROOT=/coding-work
   }
 }
 ```
+
+Coding 初始化失败时，`coding.reason` 返回稳定原因码，例如 `workspace_unavailable`、
+`git_unavailable` 或 `invalid_configuration`；详细错误仅写服务日志。
 
 状态检查不执行付费模型请求，只检查规范配置、Binary、静态协议契约、凭据隔离能力和必要目录。
 

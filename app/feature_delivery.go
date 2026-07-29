@@ -18,6 +18,7 @@ type featureDeliveryRuntime struct {
 	service         *featuredelivery.Service
 	api             *featurehttp.Handler
 	implementations *featuredelivery.ImplementationManager
+	codingReason    string
 }
 
 func (platform *Platform) initFeatureDelivery() error {
@@ -74,20 +75,24 @@ func featureGenerationTokenBudget(settings *config.PlatformSettings) int {
 
 func (platform *Platform) configureFeatureImplementation(deliveryStore featuredelivery.Store, service *featuredelivery.Service) {
 	if len(platform.settings.CodingEnabledProviders) == 0 {
+		platform.featureDelivery.codingReason = "not_configured"
 		log.Warnf("[feature-delivery] coding disabled (no provider configured)")
 		return
 	}
 	if err := platform.settings.ValidateCodingSettings(); err != nil {
+		platform.featureDelivery.codingReason = "invalid_configuration"
 		log.Warnf("[feature-delivery] coding disabled: %v", err)
 		return
 	}
 	workspaces, err := featuredelivery.NewWorkspaceManager(deliveryStore, platform.cfg.CodingWorkRoot)
 	if err != nil {
+		platform.featureDelivery.codingReason = "workspace_unavailable"
 		log.Warnf("[feature-delivery] coding disabled (workspace unavailable): %v", err)
 		return
 	}
 	gitManager, err := featuredelivery.NewGitManager(platform.cfg.WorkspaceRoot, platform.cfg.CodingWorkRoot, workspaces)
 	if err != nil {
+		platform.featureDelivery.codingReason = "git_unavailable"
 		log.Warnf("[feature-delivery] coding disabled (Git unavailable): %v", err)
 		return
 	}
@@ -115,6 +120,7 @@ func (platform *Platform) configureFeatureImplementation(deliveryStore featurede
 	)
 	service.SetImplementationManager(manager)
 	platform.featureDelivery.implementations = manager
+	platform.featureDelivery.codingReason = ""
 	log.Infof(
 		"[feature-delivery] coding configured deployment=single_instance isolation=local_process concurrency=%d network_allowed=%t providers=%v",
 		platform.settings.CodingMaxConcurrency,
@@ -133,9 +139,15 @@ func (runtime *featureDeliveryRuntime) status(ctx context.Context) featuredelive
 	if runtime.service == nil {
 		return featuredelivery.FeatureDeliveryStatus{
 			Coding: featuredelivery.CodingCapabilityStatus{
+				Reason:    "persistence_unavailable",
 				Providers: map[string]featuredelivery.CodingProviderStatus{},
 			},
 		}
 	}
-	return runtime.service.Status(ctx)
+	status := runtime.service.Status(ctx)
+	if status.Coding.Enabled || status.Coding.Reason != "" {
+		return status
+	}
+	status.Coding.Reason = runtime.codingReason
+	return status
 }

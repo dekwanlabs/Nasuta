@@ -354,6 +354,7 @@ type CodingCapabilityStatus struct {
 	Enabled   bool                            `json:"enabled"`
 	GitFound  bool                            `json:"git_found"`
 	Isolation string                          `json:"isolation,omitempty"`
+	Reason    string                          `json:"reason,omitempty"`
 	Providers map[string]CodingProviderStatus `json:"providers"`
 }
 
