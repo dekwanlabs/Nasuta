@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,11 +91,13 @@ func TestClaudeRunWritesCredentialAndNetworkPolicies(t *testing.T) {
 		t.Run(map[bool]string{false: "network_disabled", true: "network_enabled"}[networkEnabled], func(t *testing.T) {
 			temp := t.TempDir()
 			capture := filepath.Join(temp, "claude-settings.json")
+			argsCapture := filepath.Join(temp, "claude-args")
 			script := `
 if [ "$1" = "--version" ]; then
   printf '%s\n' '2.1.219 (Claude Code)'
   exit 0
 fi
+printf '%s\n' "$@" > ` + shellQuote(argsCapture) + `
 previous=''
 for argument in "$@"; do
   if [ "$previous" = "--settings" ]; then
@@ -133,6 +136,13 @@ printf '%s\n' '{"type":"result","session_id":"session-2","structured_output":{"s
 			}
 			if err := json.Unmarshal(settingsJSON, &settings); err != nil {
 				t.Fatal(err)
+			}
+			args, err := os.ReadFile(argsCapture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Contains(strings.Fields(string(args)), "--verbose") {
+				t.Fatalf("Claude args missing --verbose:\n%s", args)
 			}
 			sandbox := settings.Sandbox
 			if !sandbox.Enabled || !sandbox.FailIfUnavailable || sandbox.AllowUnsandboxedCommands {

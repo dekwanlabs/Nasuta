@@ -50,7 +50,7 @@ func (runner *Runner) runClaude(ctx context.Context, request featuredelivery.Cod
 		return featuredelivery.CodingResult{}, err
 	}
 	args := []string{
-		"-p", "--output-format", "stream-json", "--no-session-persistence",
+		"-p", "--verbose", "--output-format", "stream-json", "--no-session-persistence",
 		"--setting-sources", "", "--settings", settingsPath,
 		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 		"--permission-mode", "acceptEdits", "--tools", "Read,Edit,Write,Bash",

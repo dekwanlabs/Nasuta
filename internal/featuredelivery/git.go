@@ -450,6 +450,9 @@ func rawDiffHasSubmodule(output []byte) bool {
 
 func (manager *GitManager) gitOutput(ctx context.Context, dir string, env []string, limit int, args ...string) ([]byte, error) {
 	output, _, _, err := runBoundedCommand(ctx, dir, env, limit, manager.git, args...)
+	if err != nil && len(output) > 0 {
+		return output, fmt.Errorf("%w: %s", err, strings.TrimSpace(strings.ToValidUTF8(string(output), "")))
+	}
 	return output, err
 }
 

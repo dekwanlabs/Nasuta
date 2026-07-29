@@ -59,6 +59,31 @@ func TestLoadDeliveryConfigRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestLoadDeliveryConfigAllowsMissingFile(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	repo := t.TempDir()
+	runGit(t, git, repo, "init")
+	runGit(t, git, repo, "config", "user.email", "test@example.com")
+	runGit(t, git, repo, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, git, repo, "add", "README.md")
+	runGit(t, git, repo, "commit", "-m", "initial")
+
+	manager := &GitManager{git: git}
+	commands, exists, err := manager.loadDeliveryConfig(context.Background(), repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists || commands != nil {
+		t.Fatalf("exists=%t commands=%v", exists, commands)
+	}
+}
+
 func TestVerifyArtifactDetectsHashMismatch(t *testing.T) {
 	root := t.TempDir()
 	manager := &GitManager{artifactsRoot: root}
