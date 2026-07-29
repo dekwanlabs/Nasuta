@@ -98,6 +98,9 @@ func (handler *Handler) APISystemStatus(w http.ResponseWriter, r *http.Request) 
 		"git_version":   "",
 	}
 	result["git_installed"], result["git_version"] = gitStatus()
+	if handler.featureStatusFn != nil {
+		result["feature_delivery"] = handler.featureStatusFn(r.Context())
+	}
 	httputil.WriteJSON(w, result)
 }
 

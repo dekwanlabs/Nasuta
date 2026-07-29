@@ -38,6 +38,12 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
 		{group: GroupIncident, tables: []string{"incident_records"}},
 		{group: GroupApproval, tables: []string{"pending_actions"}},
+		{group: GroupFeatureDelivery, tables: []string{
+			"feature_user_workspaces", "feature_requests", "feature_artifacts",
+			"feature_artifact_reviews", "feature_generation_runs",
+			"feature_implementation_runs", "feature_run_events",
+			"feature_change_sets", "feature_change_reviews",
+		}},
 	}
 	for _, tc := range cases {
 		stmts, ok := mysqlSchema[tc.group]

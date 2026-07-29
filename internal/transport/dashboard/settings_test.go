@@ -1,11 +1,30 @@
 package dashboard
 
 import (
+	"context"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
 )
+
+func TestSystemStatusIncludesFeatureDeliveryCapability(t *testing.T) {
+	handler := &Handler{}
+	handler.SetFeatureDeliveryStatus(func(context.Context) featuredelivery.FeatureDeliveryStatus {
+		return featuredelivery.FeatureDeliveryStatus{
+			Persistence: featuredelivery.CapabilityStatus{Enabled: true},
+		}
+	})
+	recorder := httptest.NewRecorder()
+	handler.APISystemStatus(recorder, httptest.NewRequest("GET", "/api/system/status", nil))
+	if !strings.Contains(recorder.Body.String(), `"feature_delivery"`) ||
+		!strings.Contains(recorder.Body.String(), `"persistence":{"enabled":true}`) {
+		t.Fatalf("status response = %s", recorder.Body.String())
+	}
+}
 
 func TestDefaultSettingsIncludesRerankAndContext(t *testing.T) {
 	handler := &Handler{

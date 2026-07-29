@@ -1,0 +1,77 @@
+package featuredelivery
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestApplyNumstatHandlesRenames(t *testing.T) {
+	files := []ChangedFile{{Path: "new/name.go", Status: "R"}}
+	applyNumstat(files, []byte("12\t3\t\x00old/name.go\x00new/name.go\x00"))
+	if files[0].Additions != 12 || files[0].Deletions != 3 {
+		t.Fatalf("rename stats = +%d -%d", files[0].Additions, files[0].Deletions)
+	}
+}
+
+func TestRawDiffHasSubmoduleChecksBothModes(t *testing.T) {
+	for _, raw := range [][]byte{
+		[]byte(":160000 100644 a b M\x00module\x00"),
+		[]byte(":100644 160000 a b M\x00module\x00"),
+	} {
+		if !rawDiffHasSubmodule(raw) {
+			t.Fatalf("submodule mode not detected in %q", raw)
+		}
+	}
+	if rawDiffHasSubmodule([]byte(":100644 100755 a b M\x00script\x00")) {
+		t.Fatal("ordinary mode change detected as submodule")
+	}
+}
+
+func TestLoadDeliveryConfigRejectsTrailingJSON(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	repo := t.TempDir()
+	runGit(t, git, repo, "init")
+	runGit(t, git, repo, "config", "user.email", "test@example.com")
+	runGit(t, git, repo, "config", "user.name", "Test")
+	if err := os.Mkdir(filepath.Join(repo, ".nasuta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"validation":[{"argv":["go","test","./..."],"timeout":"1m"}]} {}`)
+	if err := os.WriteFile(filepath.Join(repo, ".nasuta", "delivery.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, git, repo, "add", ".nasuta/delivery.json")
+	runGit(t, git, repo, "commit", "-m", "config")
+
+	manager := &GitManager{git: git}
+	if _, _, err := manager.loadDeliveryConfig(context.Background(), repo, "HEAD"); err == nil {
+		t.Fatal("trailing JSON must be rejected")
+	}
+}
+
+func TestVerifyArtifactDetectsHashMismatch(t *testing.T) {
+	root := t.TempDir()
+	manager := &GitManager{artifactsRoot: root}
+	if err := os.WriteFile(filepath.Join(root, "patch"), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.verifyArtifact("patch", strings.Repeat("0", 64)); err == nil {
+		t.Fatal("hash mismatch must fail")
+	}
+}
+
+func runGit(t *testing.T, git, dir string, args ...string) {
+	t.Helper()
+	command := exec.Command(git, args...)
+	command.Dir = dir
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+}

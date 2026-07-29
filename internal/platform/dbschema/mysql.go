@@ -9,14 +9,15 @@ import (
 type MySQLGroup string
 
 const (
-	GroupAuth      MySQLGroup = "auth"
-	GroupRBAC      MySQLGroup = "rbac"
-	GroupDocuments MySQLGroup = "documents"
-	GroupQASession MySQLGroup = "qa_session"
-	GroupQARun     MySQLGroup = "qa_run"
-	GroupQAMemory  MySQLGroup = "qa_memory"
-	GroupIncident  MySQLGroup = "incident"
-	GroupApproval  MySQLGroup = "approval"
+	GroupAuth            MySQLGroup = "auth"
+	GroupRBAC            MySQLGroup = "rbac"
+	GroupDocuments       MySQLGroup = "documents"
+	GroupQASession       MySQLGroup = "qa_session"
+	GroupQARun           MySQLGroup = "qa_run"
+	GroupQAMemory        MySQLGroup = "qa_memory"
+	GroupIncident        MySQLGroup = "incident"
+	GroupApproval        MySQLGroup = "approval"
+	GroupFeatureDelivery MySQLGroup = "feature_delivery"
 )
 
 // allMySQLGroups lists every schema group in dependency order. GroupRBAC follows
@@ -30,6 +31,7 @@ var allMySQLGroups = []MySQLGroup{
 	GroupQAMemory,
 	GroupIncident,
 	GroupApproval,
+	GroupFeatureDelivery,
 }
 
 // AllGroups returns every known MySQL schema group.
@@ -330,6 +332,134 @@ var mysqlSchema = map[MySQLGroup][]string{
 				expires_at   TIMESTAMP NOT NULL,
 				KEY idx_status (status),
 				KEY idx_incident (incident_id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	},
+	GroupFeatureDelivery: {
+		`CREATE TABLE IF NOT EXISTS feature_user_workspaces (
+				user_id           BIGINT PRIMARY KEY,
+				username_key      VARCHAR(128) NOT NULL,
+				username_snapshot VARCHAR(128) NOT NULL,
+				created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE KEY uniq_workspace_username (username_key)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS feature_requests (
+				id          VARCHAR(64) PRIMARY KEY,
+				title       VARCHAR(512) NOT NULL,
+				created_by  BIGINT NOT NULL,
+				archived_at TIMESTAMP NULL,
+				created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+				KEY idx_owner_updated (created_by, updated_at, id),
+				KEY idx_updated (updated_at, id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS feature_artifacts (
+				id                 VARCHAR(64) PRIMARY KEY,
+				request_id         VARCHAR(64) NOT NULL,
+				kind               VARCHAR(32) NOT NULL,
+				version            INT NOT NULL,
+				parent_artifact_id VARCHAR(64) NOT NULL DEFAULT '',
+				origin             VARCHAR(16) NOT NULL,
+				document_json      JSON NOT NULL,
+				rendered_markdown  MEDIUMTEXT NOT NULL,
+				evidence_json      JSON NOT NULL,
+				content_hash       CHAR(64) NOT NULL,
+				created_by         BIGINT NOT NULL,
+				created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE KEY uniq_request_kind_version (request_id, kind, version),
+				KEY idx_request_created (request_id, created_at, id),
+				KEY idx_parent (parent_artifact_id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS feature_artifact_reviews (
+				artifact_id VARCHAR(64) PRIMARY KEY,
+				decision    VARCHAR(16) NOT NULL,
+				comment     TEXT NOT NULL,
+				reviewer    BIGINT NOT NULL,
+				created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				KEY idx_reviewer_created (reviewer, created_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS feature_generation_runs (
+				id                 VARCHAR(64) PRIMARY KEY,
+				request_id         VARCHAR(64) NOT NULL,
+				artifact_kind      VARCHAR(32) NOT NULL,
+				parent_artifact_id VARCHAR(64) NOT NULL,
+				status             VARCHAR(16) NOT NULL,
+				provider           VARCHAR(32) NOT NULL,
+				model              VARCHAR(128) NOT NULL,
+				requested_by       BIGINT NOT NULL,
+				input_tokens       BIGINT NOT NULL DEFAULT 0,
+				output_tokens      BIGINT NOT NULL DEFAULT 0,
+				error_summary      VARCHAR(2048) NOT NULL DEFAULT '',
+				started_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				ended_at           TIMESTAMP NULL,
+				KEY idx_request_started (request_id, started_at, id),
+				KEY idx_status_started (status, started_at, id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS feature_implementation_runs (
+				id                     VARCHAR(64) PRIMARY KEY,
+				request_id             VARCHAR(64) NOT NULL,
+				client_request_id      VARCHAR(128) NOT NULL,
+				request_hash           CHAR(64) NOT NULL,
+				design_artifact_id     VARCHAR(64) NOT NULL,
+				plan_artifact_id       VARCHAR(64) NOT NULL,
+				parent_run_id          VARCHAR(64) NOT NULL DEFAULT '',
+				repo                   VARCHAR(512) NOT NULL,
+				base_ref               VARCHAR(255) NOT NULL,
+				base_commit            VARCHAR(64) NOT NULL,
+				workspace_user_id      BIGINT NOT NULL,
+				workspace_username     VARCHAR(128) NOT NULL,
+				provider               VARCHAR(32) NOT NULL,
+				model                  VARCHAR(128) NOT NULL DEFAULT '',
+				provider_version       VARCHAR(64) NOT NULL DEFAULT '',
+				network_enabled        TINYINT(1) NOT NULL DEFAULT 0,
+				status                 VARCHAR(16) NOT NULL,
+				worker_id              VARCHAR(128) NOT NULL DEFAULT '',
+				lease_expires_at       TIMESTAMP NULL,
+				cancel_requested_at    TIMESTAMP NULL,
+				provider_session_id    VARCHAR(255) NOT NULL DEFAULT '',
+				exit_code              INT NULL,
+				error_summary          VARCHAR(2048) NOT NULL DEFAULT '',
+				requested_by           BIGINT NOT NULL,
+				started_at             TIMESTAMP NULL,
+				ended_at               TIMESTAMP NULL,
+				retain_until           TIMESTAMP NULL,
+				worktree_cleaned_at    TIMESTAMP NULL,
+				cleanup_error          VARCHAR(2048) NOT NULL DEFAULT '',
+				created_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE KEY uniq_requester_client_request (requested_by, client_request_id),
+				KEY idx_request_created (request_id, created_at, id),
+				KEY idx_status_created (status, created_at, id),
+				KEY idx_lease (status, lease_expires_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS feature_run_events (
+				run_id      VARCHAR(64) NOT NULL,
+				seq         BIGINT NOT NULL,
+				kind        VARCHAR(32) NOT NULL,
+				summary     TEXT NOT NULL,
+				detail_json JSON NULL,
+				created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (run_id, seq)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS feature_change_sets (
+				run_id                  VARCHAR(64) PRIMARY KEY,
+				worktree_head           VARCHAR(64) NOT NULL,
+				patch_rel_path          VARCHAR(1024) NOT NULL,
+				patch_sha256            CHAR(64) NOT NULL,
+				patch_bytes             BIGINT NOT NULL,
+				files_changed           INT NOT NULL,
+				additions               INT NOT NULL,
+				deletions               INT NOT NULL,
+				files_json              JSON NOT NULL,
+				validation_results_json JSON NOT NULL,
+				provider_summary        TEXT NOT NULL,
+				created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS feature_change_reviews (
+				run_id     VARCHAR(64) PRIMARY KEY,
+				decision   VARCHAR(16) NOT NULL,
+				comment    TEXT NOT NULL,
+				reviewer   BIGINT NOT NULL,
+				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				KEY idx_reviewer_created (reviewer, created_at)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	},
 }

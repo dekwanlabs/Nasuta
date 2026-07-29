@@ -13,6 +13,10 @@ const (
 	DefaultRetrievalRouterMaxTokens        = 512
 	DefaultAgentAnswerReserve              = 30 * time.Second
 	DefaultLLMContextWindow                = 128000
+	DefaultFeatureGenerationTimeout        = 5 * time.Minute
+	DefaultCodingTimeout                   = 30 * time.Minute
+	DefaultCodingMaxConcurrency            = 1
+	DefaultCodingWorktreeTTL               = 72 * time.Hour
 )
 
 // PlatformSettings holds runtime settings managed from the platform UI.
@@ -55,6 +59,16 @@ type PlatformSettings struct {
 	RetrievalRouterConfidence  float64
 	RetrievalRouterMaxTokens   int
 
+	CodingEnabledProviders   []string
+	CodingDefaultProvider    string
+	CodingCodexModel         string
+	CodingClaudeModel        string
+	FeatureGenerationTimeout Duration
+	CodingTimeout            Duration
+	CodingMaxConcurrency     int
+	CodingAllowNetwork       bool
+	CodingWorktreeTTL        Duration
+
 	DomainKnowledge string
 }
 
@@ -73,6 +87,11 @@ var platformSettingKeys = map[string]bool{
 	"rerank_api_key":  false, "rerank_model": false, "rerank_base_url": false,
 	"vcs_url": true, "vcs_token": true, "vcs_groups": true, "vcs_webhook_secret": true,
 	"vcs_clone_concurrency": true, "vcs_exclude_projects": true,
+	"coding_enabled_providers": true, "coding_default_provider": true,
+	"coding_codex_model": true, "coding_claude_model": true,
+	"feature_generation_timeout": true, "coding_timeout": true,
+	"coding_max_concurrency": true, "coding_allow_network": true,
+	"coding_worktree_ttl": true,
 }
 
 // IsPlatformSetting reports whether key belongs to the persisted settings contract.
@@ -133,6 +152,15 @@ func (p *PlatformSettings) Values() map[string]any {
 		"vcs_webhook_secret":                     p.VCSWebhookSecret,
 		"vcs_clone_concurrency":                  strconv.Itoa(p.VCSConcurrency),
 		"vcs_exclude_projects":                   strings.Join(p.VCSExcludeProjects, "\n"),
+		"coding_enabled_providers":               strings.Join(p.CodingEnabledProviders, ","),
+		"coding_default_provider":                p.CodingDefaultProvider,
+		"coding_codex_model":                     p.CodingCodexModel,
+		"coding_claude_model":                    p.CodingClaudeModel,
+		"feature_generation_timeout":             time.Duration(p.FeatureGenerationTimeout).String(),
+		"coding_timeout":                         time.Duration(p.CodingTimeout).String(),
+		"coding_max_concurrency":                 strconv.Itoa(p.CodingMaxConcurrency),
+		"coding_allow_network":                   strconv.FormatBool(p.CodingAllowNetwork),
+		"coding_worktree_ttl":                    time.Duration(p.CodingWorktreeTTL).String(),
 	}
 }
 
@@ -145,6 +173,18 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	}
 	if p.RetrievalRouterMaxTokens == 0 {
 		p.RetrievalRouterMaxTokens = DefaultRetrievalRouterMaxTokens
+	}
+	if p.FeatureGenerationTimeout <= 0 {
+		p.FeatureGenerationTimeout = Duration(DefaultFeatureGenerationTimeout)
+	}
+	if p.CodingTimeout <= 0 {
+		p.CodingTimeout = Duration(DefaultCodingTimeout)
+	}
+	if p.CodingMaxConcurrency <= 0 {
+		p.CodingMaxConcurrency = DefaultCodingMaxConcurrency
+	}
+	if p.CodingWorktreeTTL <= 0 {
+		p.CodingWorktreeTTL = Duration(DefaultCodingWorktreeTTL)
 	}
 	if v := strings.TrimSpace(m["llm_model"]); v != "" {
 		p.LLMModel = v
@@ -298,6 +338,44 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	if v := strings.TrimSpace(m["vcs_exclude_projects"]); v != "" {
 		p.VCSExcludeProjects = ParseExcludeList(v)
 	}
+	if raw, ok := m["coding_enabled_providers"]; ok {
+		if value, err := canonicalCodingProviders(raw); err == nil {
+			p.CodingEnabledProviders = splitList(value)
+		}
+	}
+	if raw, ok := m["coding_default_provider"]; ok {
+		p.CodingDefaultProvider = strings.ToLower(strings.TrimSpace(raw))
+	}
+	if raw, ok := m["coding_codex_model"]; ok {
+		p.CodingCodexModel = strings.TrimSpace(raw)
+	}
+	if raw, ok := m["coding_claude_model"]; ok {
+		p.CodingClaudeModel = strings.TrimSpace(raw)
+	}
+	if v := strings.TrimSpace(m["feature_generation_timeout"]); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			p.FeatureGenerationTimeout = Duration(d)
+		}
+	}
+	if v := strings.TrimSpace(m["coding_timeout"]); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			p.CodingTimeout = Duration(d)
+		}
+	}
+	if v := strings.TrimSpace(m["coding_max_concurrency"]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			p.CodingMaxConcurrency = n
+		}
+	}
+	if raw, ok := m["coding_allow_network"]; ok {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		p.CodingAllowNetwork = value == "1" || value == "true"
+	}
+	if v := strings.TrimSpace(m["coding_worktree_ttl"]); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			p.CodingWorktreeTTL = Duration(d)
+		}
+	}
 }
 
 func (p *PlatformSettings) routerConfidence() float64 {
@@ -317,6 +395,35 @@ func (p *PlatformSettings) routerMaxTokens() int {
 func CanonicalPlatformSetting(key, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	switch key {
+	case "coding_enabled_providers":
+		return canonicalCodingProviders(value)
+	case "coding_default_provider":
+		value = strings.ToLower(value)
+		if value != "" && value != "codex" && value != "claude" {
+			return "", fmt.Errorf("coding_default_provider must be empty, codex, or claude")
+		}
+		return value, nil
+	case "feature_generation_timeout":
+		return canonicalDurationSetting(key, value, time.Second, time.Hour)
+	case "coding_timeout":
+		return canonicalDurationSetting(key, value, time.Minute, 12*time.Hour)
+	case "coding_worktree_ttl":
+		return canonicalDurationSetting(key, value, time.Hour, 30*24*time.Hour)
+	case "coding_max_concurrency":
+		concurrency, err := strconv.Atoi(value)
+		if err != nil || concurrency < 1 || concurrency > 32 {
+			return "", fmt.Errorf("coding_max_concurrency must be between 1 and 32")
+		}
+		return strconv.Itoa(concurrency), nil
+	case "coding_allow_network":
+		switch strings.ToLower(value) {
+		case "1", "true":
+			return "true", nil
+		case "0", "false":
+			return "false", nil
+		default:
+			return "", fmt.Errorf("coding_allow_network must be true or false")
+		}
 	case "agent_answer_reserve":
 		reserve, err := time.ParseDuration(value)
 		if err != nil || reserve <= 0 {
@@ -344,6 +451,47 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 	default:
 		return value, nil
 	}
+}
+
+func canonicalCodingProviders(value string) (string, error) {
+	requested := make(map[string]struct{}, 2)
+	for _, provider := range splitList(strings.ToLower(value)) {
+		switch provider {
+		case "codex", "claude":
+			requested[provider] = struct{}{}
+		default:
+			return "", fmt.Errorf("unsupported coding provider %q", provider)
+		}
+	}
+	ordered := make([]string, 0, len(requested))
+	for _, provider := range []string{"codex", "claude"} {
+		if _, ok := requested[provider]; ok {
+			ordered = append(ordered, provider)
+		}
+	}
+	return strings.Join(ordered, ","), nil
+}
+
+func canonicalDurationSetting(key, value string, min, max time.Duration) (string, error) {
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration < min || duration > max {
+		return "", fmt.Errorf("%s must be between %s and %s", key, min, max)
+	}
+	return duration.String(), nil
+}
+
+// ValidateCodingSettings checks relationships that cannot be validated one key at a time.
+func (p *PlatformSettings) ValidateCodingSettings() error {
+	enabled := make(map[string]struct{}, len(p.CodingEnabledProviders))
+	for _, provider := range p.CodingEnabledProviders {
+		enabled[provider] = struct{}{}
+	}
+	if p.CodingDefaultProvider != "" {
+		if _, ok := enabled[p.CodingDefaultProvider]; !ok {
+			return fmt.Errorf("coding_default_provider %q is not enabled", p.CodingDefaultProvider)
+		}
+	}
+	return nil
 }
 
 // VCSEnabled reports whether VCS syncing is configured.

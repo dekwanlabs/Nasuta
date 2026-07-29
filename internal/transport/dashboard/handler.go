@@ -9,6 +9,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
+	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
@@ -55,6 +56,7 @@ type Handler struct {
 	platform           *config.PlatformSettings
 	idx                IndexingOps
 	rolePromptFn       func(userID int64) string
+	featureStatusFn    func(context.Context) featuredelivery.FeatureDeliveryStatus
 }
 
 // SetRolePrompt wires a function that returns the combined RBAC-role
@@ -62,6 +64,10 @@ type Handler struct {
 // built (which happens after the dashboard handler). Safe to leave unset.
 func (handler *Handler) SetRolePrompt(fn func(userID int64) string) {
 	handler.rolePromptFn = fn
+}
+
+func (handler *Handler) SetFeatureDeliveryStatus(fn func(context.Context) featuredelivery.FeatureDeliveryStatus) {
+	handler.featureStatusFn = fn
 }
 
 // rolePromptFor returns the role prompt for a user, or "" when unresolved.

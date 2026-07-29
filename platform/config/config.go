@@ -63,10 +63,13 @@ type Neo4jConfig struct {
 // Platform-settable settings (VCS, LLM, Agent) live in PlatformSettings
 // and are populated from the MySQL settings table.
 type Config struct {
-	WorkspaceRoot string
-	ScanDirs      []string
-	IndexCode     bool
-	SQLitePath    string
+	WorkspaceRoot  string
+	ScanDirs       []string
+	IndexCode      bool
+	SQLitePath     string
+	CodexBin       string
+	ClaudeBin      string
+	CodingWorkRoot string
 
 	MemoryWorkContextTTL time.Duration
 
@@ -227,6 +230,9 @@ func Load() Config {
 		WebSearchEngine:      nasutaEnv("WEB_SEARCH_ENGINE", "duckduckgo"),
 		WebSearchAPIKey:      nasutaEnv("WEB_SEARCH_API_KEY", ""),
 		SQLitePath:           nasutaEnv("SQLITE_PATH", filepath.Join(root, platform.WorkspaceMetadataDir, "index.db")),
+		CodexBin:             nasutaEnv("CODEX_BIN", "codex"),
+		ClaudeBin:            nasutaEnv("CLAUDE_BIN", "claude"),
+		CodingWorkRoot:       nasutaEnv("CODING_WORK_ROOT", "/coding-work"),
 		HTTPAddr:             nasutaEnv("HTTP_ADDR", ":8201"),
 		AuthToken:            nasutaEnv("AUTH_TOKEN", ""),
 		DailySyncTime:        nasutaEnv("DAILY_SYNC_TIME", "02:07"),

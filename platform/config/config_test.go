@@ -10,6 +10,9 @@ import (
 func TestLoadUsesNasutaEnvironment(t *testing.T) {
 	t.Setenv("NASUTA_HTTP_ADDR", ":9100")
 	t.Setenv("NASUTA_LOG_MAX_AGE", "45")
+	t.Setenv("NASUTA_CODEX_BIN", "/opt/codex")
+	t.Setenv("NASUTA_CLAUDE_BIN", "/opt/claude")
+	t.Setenv("NASUTA_CODING_WORK_ROOT", "/var/lib/nasuta-coding")
 
 	cfg := Load()
 
@@ -18,6 +21,12 @@ func TestLoadUsesNasutaEnvironment(t *testing.T) {
 	}
 	if cfg.Log.MaxAge != 45 {
 		t.Fatalf("Log.MaxAge = %d, want Nasuta value", cfg.Log.MaxAge)
+	}
+	if cfg.CodexBin != "/opt/codex" || cfg.ClaudeBin != "/opt/claude" {
+		t.Fatalf("coding binaries = %q, %q", cfg.CodexBin, cfg.ClaudeBin)
+	}
+	if cfg.CodingWorkRoot != "/var/lib/nasuta-coding" {
+		t.Fatalf("CodingWorkRoot = %q", cfg.CodingWorkRoot)
 	}
 }
 

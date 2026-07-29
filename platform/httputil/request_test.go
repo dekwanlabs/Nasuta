@@ -114,3 +114,13 @@ func TestDecodeStrictJSONRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("unknown field error = %v", err)
 	}
 }
+
+func TestDecodeStrictJSONRejectsTrailingValue(t *testing.T) {
+	var dst struct {
+		Name string `json:"name"`
+	}
+	request := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"name":"bar"} {}`))
+	if err := DecodeStrictJSON(request, &dst); err == nil || !strings.Contains(err.Error(), "multiple JSON values") {
+		t.Fatalf("trailing value error = %v", err)
+	}
+}

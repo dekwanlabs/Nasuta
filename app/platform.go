@@ -41,25 +41,26 @@ import (
 
 // Platform owns reusable runtime state and exposes only stable composition ports.
 type Platform struct {
-	cfg         config.Config
-	settings    *config.PlatformSettings
-	platformDB  *sql.DB
-	index       *indexing.Service
-	knowledge   *agent.Service
-	registry    *tool.Registry
-	readTools   *tool.ReadRegistry
-	writeReady  bool
-	authDB      *auth.DB
-	authService *auth.Service
-	rbacHandler *rbac.Handler
-	rolePrompt  func(int64) string
-	incidents   *incident.Manager
-	actions     *approval.Service
-	incidentAPI *incidenthttp.Handler
-	codegraph   *codegraph.DB
-	callChain   *callchain.Service
-	ontology    ontology.Backend
-	history     *sessionhistory.Service
+	cfg             config.Config
+	settings        *config.PlatformSettings
+	platformDB      *sql.DB
+	index           *indexing.Service
+	knowledge       *agent.Service
+	registry        *tool.Registry
+	readTools       *tool.ReadRegistry
+	writeReady      bool
+	authDB          *auth.DB
+	authService     *auth.Service
+	rbacHandler     *rbac.Handler
+	rolePrompt      func(int64) string
+	incidents       *incident.Manager
+	actions         *approval.Service
+	incidentAPI     *incidenthttp.Handler
+	codegraph       *codegraph.DB
+	callChain       *callchain.Service
+	ontology        ontology.Backend
+	history         *sessionhistory.Service
+	featureDelivery featureDeliveryRuntime
 }
 
 // New constructs the reusable platform without registering scenario routes.
@@ -116,6 +117,10 @@ func New() (*Platform, error) {
 		history:  history,
 	}
 	platform.initRBAC()
+	if err := platform.initFeatureDelivery(); err != nil {
+		_ = platform.Close()
+		return nil, fmt.Errorf("configure feature delivery: %w", err)
+	}
 	return platform, nil
 }
 
@@ -267,6 +272,7 @@ func (platform *Platform) Settings() config.PlatformSettings {
 	settings := *platform.settings
 	settings.VCSGroups = append([]string(nil), platform.settings.VCSGroups...)
 	settings.VCSExcludeProjects = append([]string(nil), platform.settings.VCSExcludeProjects...)
+	settings.CodingEnabledProviders = append([]string(nil), platform.settings.CodingEnabledProviders...)
 	return settings
 }
 
@@ -281,6 +287,7 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	if platform.rolePrompt != nil {
 		dashboardHandler.SetRolePrompt(platform.rolePrompt)
 	}
+	dashboardHandler.SetFeatureDeliveryStatus(platform.featureDelivery.status)
 	routes.Setup(mux, routes.Config{
 		Auth: platform.authService, Dashboard: dashboardHandler, RBAC: platform.rbacHandler,
 		MCP: mcp.NewDynamicHandler(platform.knowledge, platform.registry),
@@ -289,6 +296,9 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	})
 	if platform.incidentAPI != nil {
 		platform.incidentAPI.RegisterRoutes(platform.AuthenticatedAPI(mux))
+	}
+	if platform.featureDelivery.api != nil {
+		platform.featureDelivery.api.RegisterRoutes(platform.AuthenticatedAPI(mux))
 	}
 }
 
@@ -300,6 +310,7 @@ func (platform *Platform) AuthenticatedAPI(mux *http.ServeMux) APIRegistrar {
 // Serve runs background platform work and serves the already-composed root mux.
 func (platform *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 	go platform.startDailySyncTicker(ctx)
+	platform.featureDelivery.start(ctx)
 	if platform.history != nil {
 		go platform.history.Run(ctx)
 	}
