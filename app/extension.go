@@ -29,6 +29,7 @@ type APIRegistrar = func(string, http.HandlerFunc)
 // Extension is the application-owned surface mounted onto one platform host.
 type Extension struct {
 	RegisterRoutes   func(APIRegistrar)
+	WebHandler       http.Handler
 	IncidentEvidence incident.EvidenceProvider
 	Close            func() error
 }
@@ -64,10 +65,17 @@ func Run(ctx context.Context, factory ExtensionFactory) (runErr error) {
 
 	mux := http.NewServeMux()
 	platform.RegisterCommonRoutes(mux)
+	mountExtension(platform, mux, extension)
+	return platform.Serve(ctx, mux)
+}
+
+func mountExtension(platform *Platform, mux *http.ServeMux, extension Extension) {
 	if extension.RegisterRoutes != nil {
 		extension.RegisterRoutes(platform.AuthenticatedAPI(mux))
 	}
-	return platform.Serve(ctx, mux)
+	if extension.WebHandler != nil {
+		mux.Handle("GET /", extension.WebHandler)
+	}
 }
 
 // MustRun starts one extension host and terminates on construction or serving failure.
