@@ -14,6 +14,7 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -94,6 +95,20 @@ func TestForcedConclusionCannotExtractLongTermMemory(t *testing.T) {
 	}
 	if !memoryExtractionAllowed(outcome, &RunResult{Answer: "answer"}) {
 		t.Fatal("normal completed answer was not eligible for memory extraction")
+	}
+}
+
+func TestAdmitExtractedMemoriesRejectsAssistantInference(t *testing.T) {
+	records := []memory.MemoryRecord{
+		{FactKey: "user:response-language", SourceType: memory.SourceExplicitUser},
+		{FactKey: "workspace:service:root-cause", SourceType: memory.SourceAssistantInference},
+	}
+	admitted, rejected := admitExtractedMemories(records, EvidencePartial)
+	if len(admitted) != 1 || admitted[0].SourceType != memory.SourceExplicitUser {
+		t.Fatalf("admitted = %#v", admitted)
+	}
+	if rejected["assistant_inference"] != 1 {
+		t.Fatalf("rejected = %#v", rejected)
 	}
 }
 

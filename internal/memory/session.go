@@ -18,16 +18,17 @@ type SessionStore struct {
 }
 
 type SessionRecord struct {
-	ID                    string        `json:"id"`
-	UserID                int64         `json:"user_id"`
-	Title                 string        `json:"title"`
-	ArchivedSummaryTokens int64         `json:"archived_summary_tokens,omitempty"`
-	CompactedThroughTurn  int           `json:"compacted_through_turn,omitempty"`
-	Messages              []llm.Message `json:"messages,omitempty"`
-	MessageCount          int           `json:"message_count"`
-	LatestTurn            int           `json:"latest_turn,omitempty"`
-	CreatedAt             string        `json:"created_at"`
-	UpdatedAt             string        `json:"updated_at"`
+	ID                    string         `json:"id"`
+	UserID                int64          `json:"user_id"`
+	Title                 string         `json:"title"`
+	ArchivedSummaryTokens int64          `json:"archived_summary_tokens,omitempty"`
+	CompactedThroughTurn  int            `json:"compacted_through_turn,omitempty"`
+	Messages              []llm.Message  `json:"messages,omitempty"`
+	RecentTurns           []TurnMetadata `json:"-"`
+	MessageCount          int            `json:"message_count"`
+	LatestTurn            int            `json:"latest_turn,omitempty"`
+	CreatedAt             string         `json:"created_at"`
+	UpdatedAt             string         `json:"updated_at"`
 }
 
 // CompactionCandidate is one contiguous, not-yet-summarized turn range.
@@ -298,39 +299,6 @@ func (ss *SessionStore) GetRecentSession(id string, userID int64, limit int) (*S
 	return r, nil
 }
 
-const maxContextSessionMessages = 512
-
-// GetContextSession loads only the not-yet-compacted turn range used online.
-func (ss *SessionStore) GetContextSession(id string, userID int64) (*SessionRecord, error) {
-	r, err := ss.getSession(id, userID)
-	if err != nil || r == nil {
-		return r, err
-	}
-	rows, err := ss.db.Query(
-		`SELECT m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name
-		 FROM qa_messages m
-		 JOIN qa_sessions s ON s.id=m.session_id
-		 WHERE m.session_id=? AND s.user_id=? AND m.turn_no>?
-		 ORDER BY m.seq LIMIT ?`,
-		id, userID, r.CompactedThroughTurn, maxContextSessionMessages+1)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	r.Messages = make([]llm.Message, 0, 32)
-	for rows.Next() {
-		message, err := scanSessionMessage(rows)
-		if err != nil {
-			return nil, err
-		}
-		r.Messages = append(r.Messages, message)
-		if len(r.Messages) > maxContextSessionMessages {
-			return nil, fmt.Errorf("memory/session: uncompacted context for %q exceeds %d messages", id, maxContextSessionMessages)
-		}
-	}
-	return r, rows.Err()
-}
-
 // ListMessagesBefore fetches at most limit messages before seq; beforeSeq < 0 starts at the tail.
 func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, limit int) (*MessagePage, error) {
 	if limit <= 0 || limit > 100 {
@@ -507,6 +475,19 @@ func (ss *SessionStore) AppendTurn(sessionID, runID string, userID int64, msgs [
 	}
 	turnNo := maxTurn + 1
 	now := time.Now().UTC().Format(time.RFC3339)
+	metadata := buildTurnMetadata(turnNo, runID, msgs, now)
+	entitiesJSON, err := encodeMetadataJSON(metadata.Entities)
+	if err != nil {
+		return 0, fmt.Errorf("memory/session: encode turn entities: %w", err)
+	}
+	termsJSON, err := encodeMetadataJSON(metadata.QuestionTerms)
+	if err != nil {
+		return 0, fmt.Errorf("memory/session: encode turn terms: %w", err)
+	}
+	manifestJSON, err := encodeMetadataJSON(metadata.EvidenceManifest)
+	if err != nil {
+		return 0, fmt.Errorf("memory/session: encode evidence manifest: %w", err)
+	}
 
 	placeholders := make([]string, len(msgs))
 	args := make([]any, 0, len(msgs)*9)
@@ -523,8 +504,11 @@ func (ss *SessionStore) AppendTurn(sessionID, runID string, userID int64, msgs [
 		return 0, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO qa_turns(session_id,turn_no,run_id,first_seq,last_seq,token_estimate,created_at) VALUES(?,?,?,?,?,?,?)`,
-		sessionID, turnNo, runID, maxSeq+1, maxSeq+len(msgs), estimateSessionTokens(msgs), store.DatabaseTime(now)); err != nil {
+		`INSERT INTO qa_turns(session_id,turn_no,run_id,first_seq,last_seq,token_estimate,question_text,topic_key,
+		                       entities_json,question_terms_json,evidence_manifest_json,created_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		sessionID, turnNo, runID, maxSeq+1, maxSeq+len(msgs), metadata.TokenEstimate,
+		metadata.Question, metadata.TopicKey, entitiesJSON, termsJSON, manifestJSON, store.DatabaseTime(now)); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(
@@ -775,6 +759,7 @@ func (ss *SessionStore) GetTurnDetail(sessionID string, userID int64, reference 
 
 type pendingSessionTurn struct {
 	no, firstSeq, lastSeq, tokens int
+	metadata                      TurnMetadata
 }
 
 func assignSessionTurns(messages []llm.Message) ([]int, []pendingSessionTurn) {
@@ -791,6 +776,10 @@ func assignSessionTurns(messages []llm.Message) ([]int, []pendingSessionTurn) {
 		turn.lastSeq = i
 		turn.tokens += estimateSessionMessageTokens(message)
 	}
+	for i := range turns {
+		turn := &turns[i]
+		turn.metadata = buildTurnMetadata(turn.no, "", messages[turn.firstSeq:turn.lastSeq+1], "")
+	}
 	return turnNos, turns
 }
 
@@ -799,13 +788,26 @@ func insertSessionTurns(tx *sql.Tx, sessionID string, turns []pendingSessionTurn
 		return nil
 	}
 	placeholders := make([]string, len(turns))
-	args := make([]any, 0, len(turns)*7)
+	args := make([]any, 0, len(turns)*12)
 	for i, turn := range turns {
-		placeholders[i] = "(?,?,?,?,?,?,?)"
-		args = append(args, sessionID, turn.no, "", turn.firstSeq, turn.lastSeq, turn.tokens, store.DatabaseTime(createdAt))
+		entitiesJSON, err := encodeMetadataJSON(turn.metadata.Entities)
+		if err != nil {
+			return fmt.Errorf("memory/session: encode turn %d entities: %w", turn.no, err)
+		}
+		termsJSON, err := encodeMetadataJSON(turn.metadata.QuestionTerms)
+		if err != nil {
+			return fmt.Errorf("memory/session: encode turn %d terms: %w", turn.no, err)
+		}
+		manifestJSON, err := encodeMetadataJSON(turn.metadata.EvidenceManifest)
+		if err != nil {
+			return fmt.Errorf("memory/session: encode turn %d evidence manifest: %w", turn.no, err)
+		}
+		placeholders[i] = "(?,?,?,?,?,?,?,?,?,?,?,?)"
+		args = append(args, sessionID, turn.no, "", turn.firstSeq, turn.lastSeq, turn.tokens,
+			turn.metadata.Question, turn.metadata.TopicKey, entitiesJSON, termsJSON, manifestJSON, store.DatabaseTime(createdAt))
 	}
 	_, err := tx.Exec(
-		"INSERT INTO qa_turns(session_id,turn_no,run_id,first_seq,last_seq,token_estimate,created_at) VALUES "+strings.Join(placeholders, ","),
+		"INSERT INTO qa_turns(session_id,turn_no,run_id,first_seq,last_seq,token_estimate,question_text,topic_key,entities_json,question_terms_json,evidence_manifest_json,created_at) VALUES "+strings.Join(placeholders, ","),
 		args...)
 	return err
 }

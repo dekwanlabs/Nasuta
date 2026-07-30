@@ -158,6 +158,11 @@ var mysqlSchema = map[MySQLGroup][]string{
 				first_seq     INT NOT NULL,
 				last_seq      INT NOT NULL,
 				token_estimate INT NOT NULL DEFAULT 0,
+				question_text VARCHAR(2048) NOT NULL DEFAULT '',
+				topic_key VARCHAR(512) NOT NULL DEFAULT '',
+				entities_json JSON NOT NULL,
+				question_terms_json JSON NOT NULL,
+				evidence_manifest_json JSON NOT NULL,
 				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				PRIMARY KEY (session_id, turn_no),
 				KEY idx_session_last (session_id, turn_no DESC)

@@ -2,7 +2,7 @@
 
 ## 1. 状态与结论
 
-- 状态：设计稿，尚未实施本文的上下文选择机制
+- 状态：已实施，待生产 Run 校准参数
 - 所属模块：Nasuta QA
 - 适用入口：`/api/qa/ask`
 - 关联设计：`qa-session-turn-compaction.zh-CN.md`、`qa-session-history-semantic-retrieval.zh-CN.md`、`qa-tool-selection-and-multiturn-evidence.zh-CN.md`
@@ -18,12 +18,20 @@
 本文后续实现的核心决定如下：
 
 1. 不再无条件回放固定数量的最近完整轮次。
-2. 当前问题先判断为续接、切换或不确定，再选择历史；该判断不引入持久化状态机。
+2. 当前问题派生连续话题相关度和历史依赖，再选择历史；这些值不持久化为会话状态。
 3. Fast Model 只接收当前问题和有界元数据，不接收历史完整回答或工具输出。
 4. 历史选择以“完整对话轮”为原子单位，工具调用及对应结果不能拆开。
 5. 所有上下文分区使用 token 硬预算；单轮、单工具结果和总输入均有上限。
 6. 已归档历史按相关性召回，未归档历史先查有界元数据，再批量读取被选中的轮次。
 7. 长期记忆只保存稳定的用户事实、偏好和明确约束，不保存运行时诊断结论。
+
+当前实现参数：
+
+- 活跃历史元数据窗口 `N=24`；
+- 连续相关候选使用大小为 `K=4` 的最小堆；
+- 活跃历史预算为可用窗口的 `25%`，并以 `32,000 tokens` 为硬上限；
+- Provider 调用前预留 `max(answer_max_tokens, conclusion_max_tokens)` 输出额度和
+  `max(context_window * 5%, 1024)` 安全余量。
 
 ## 2. 问题定义
 
@@ -68,27 +76,63 @@
 6. 输入模型前必须满足总 token 预算；不能依赖 Provider 截断。
 7. 未选中的历史内容不得先被完整读取到应用内存。
 
-## 5. 话题关系
+## 5. 话题相关度与历史依赖
 
-每次请求派生一个临时 `TopicRelation`：
+话题关系不是续接或切换的二元状态。同一实体可以从日志调查过渡到配置、代码或 Trace，
+因此每次请求派生一个临时 `HistoryRelation`：
 
-| 值 | 含义 | 历史策略 |
+```json
+{
+  "topic_affinity": 0.72,
+  "confidence": 0.61,
+  "needs_prior_entities": true,
+  "needs_prior_conclusion": false,
+  "needs_prior_evidence": false,
+  "explicit_turn_refs": []
+}
+```
+
+| 字段 | 含义 | 对历史选择的影响 |
 | --- | --- | --- |
-| `continue` | 当前问题依赖上一话题 | 优先上一轮、显式引用轮次和同话题证据 |
-| `switch` | 当前问题开启新话题 | 不回放旧回答；只允许跨话题长期记忆和明确检索结果 |
-| `uncertain` | 信息不足 | 注入最小上一轮摘要，不注入完整工具结果 |
+| `topic_affinity` | 当前问题与上一话题的连续相关度，范围 `0..1` | 参与近期候选排序，不单独决定是否注入上一轮 |
+| `confidence` | Fast Model 对本次派生结果的置信度 | 只用于观测和保守升级，不得因低置信度删除历史 |
+| `needs_prior_entities` | 当前问题需要上一轮实体消解指代或省略 | 上一轮成为必选候选，至少注入实体和有界用户问题 |
+| `needs_prior_conclusion` | 当前问题依赖上一轮判断或未完成事项 | 注入有界详情、结论和证据完整度 |
+| `needs_prior_evidence` | 当前问题需要上一轮原始工具证据 | 优先完整原子回放，预算不足时使用包含工具结果的结构化详情 |
+| `explicit_turn_refs` | 用户明确引用的 turn/run | 对应轮次始终是最高优先级候选 |
 
-该值不持久化为会话状态。每轮根据当前问题、上一轮问题元数据和显式引用重新派生。这样不存在状态迁移、恢复和并发一致性负担。
+这些值不持久化为会话状态。每轮根据当前问题、上一轮问题元数据和显式引用重新派生，
+不存在状态迁移、恢复和并发一致性负担。`topic_affinity` 由实体交集、`topic_key`
+相似度、问题词项交集、显式引用、时间衰减和明确实体冲突共同计算；具体权重通过生产
+Run 校准，不使用单一阈值模拟话题状态。
 
-话题关系复用现有 query preprocessing 调用输出，禁止新增独立 LLM 往返。输入仅包含：
+上述字段复用现有 query preprocessing 调用输出，禁止新增独立 LLM 往返。输入仅包含：
 
 - 当前问题；
 - 上一轮用户问题的有界文本；
 - 上一轮 `topic_key` 和实体列表；
+- 上一轮有界证据清单，只含工具名、来源、引用 ID、覆盖状态和省略数量，不含 payload；
 - 当前会话标题；
 - 用户显式引用的 turn 或 run ID。
 
-不得发送上一轮完整 assistant 回答、request/response/message、工具参数或工具结果给 Fast Model。模型失败时使用确定性降级：存在指代词且实体有交集判定 `continue`，明确新实体且无交集判定 `switch`，其余为 `uncertain`。降级必须记录日志和 trace。
+不得发送上一轮完整 assistant 回答、request/response/message、工具参数或工具结果给
+Fast Model。Fast Model 只判断需要哪类历史，不负责从完整历史中解析最终指代。
+
+模型失败或输出无效时使用确定性降级：
+
+1. 显式 turn/run 引用原样保留；
+2. 当前问题含指代或省略表达且没有明确的新冲突实体时，设置
+   `needs_prior_entities=true`，上一轮成为必选候选；
+3. 当前问题明确依赖“刚才结果、证据或错误”，或指代对象只能从上一轮证据中解析时，同时设置
+   `needs_prior_conclusion=true` 和 `needs_prior_evidence=true`；
+4. 当前问题存在明确的新冲突实体且未引用旧历史时，降低 `topic_affinity`，不设置历史依赖；
+5. 其他情况只计算本地相关度，不因无法确定而默认注入或删除完整工具结果。
+
+降级必须记录日志和 trace。低 `confidence` 本身不是裁剪依据；存在指代依赖时，低置信度
+只能扩大依赖范围，不能把已识别的依赖从证据降为摘要。若有指代或省略表达、上一轮证据
+清单非空，并且仅凭上一轮问题和实体无法确定回答所需内容，则保守设置
+`needs_prior_evidence=true`，而不是缩减为无法解析指代的最小摘要。完整证据仍不进入 Fast
+Model，只在历史选择完成后按预算提供给最终回答模型。
 
 ## 6. 上下文分区与硬预算
 
@@ -127,26 +171,45 @@ B = W - O - S - G
 
 ### 7.1 候选读取
 
-在线路径只读取最近 `N` 条轮次元数据，默认 `N=24`：
+对于尚未归档的活跃历史，在线路径只读取最近 `N` 条轮次元数据，默认 `N=24`：
 
 ```sql
-SELECT turn_no, run_id, token_estimate, topic_key, entities_json, created_at
+SELECT turn_no, run_id, token_estimate, topic_key, entities_json,
+       question_terms_json, evidence_manifest_json, created_at
 FROM qa_turns
 WHERE session_id = ?
 ORDER BY turn_no DESC
 LIMIT ?;
 ```
 
-不在此阶段读取 `qa_messages.content`。归档历史继续通过词项/BM25 索引返回有界 Top K。
+不在此阶段读取 `qa_messages.content`。这一步不是新的语义召回，也不替代现有
+Session History 检索；它只负责从尚未进入归档索引的近期轮次中选择需要原子回放的
+候选，保证“继续上一轮”等请求不依赖异步索引时效。
+
+已归档历史继续复用现有混合召回：Dense 向量与 BM25 Sparse Vector 在语义存储中
+执行 Hybrid Search，同时保留 MySQL 词项倒排候选，随后通过 RRF 融合排序并批量读取
+`qa_turn_contexts` 中的权威摘要。归档召回的 `selectedLimit=24` 是结果数量上限；本节的
+`N=24` 是未归档元数据候选窗口，二者职责不同，不应共用配置或实现。
 
 ### 7.2 选择规则
 
-1. `continue`：上一完整轮为必选候选；显式引用轮次优先级最高。
-2. `switch`：不选择最近完整轮，只允许用户明确引用的轮次。
-3. `uncertain`：最多选择上一轮的结构化摘要，不选择其原始工具结果。
-4. 其他候选按实体交集、关键词交集、显式引用和时间衰减评分。
+1. 显式引用的 turn/run 是最高优先级必选候选。
+2. 任一 `needs_prior_*` 为 true 时，上一轮是必选候选；依赖类型决定读取后的表示形式，
+   `confidence` 不得取消该选择。
+3. 其他候选按连续相关度评分；评分组合实体交集、`topic_key` 相似度、问题词项交集、
+   显式引用、时间衰减和实体冲突，并截断到 `0..1`。
+4. 同一实体从日志过渡到配置、代码或 Trace 时保留中高相关度，但只有当前问题依赖旧证据时
+   才回放旧工具结果。
 5. 使用大小为 K 的最小堆保留 Top K，不对全部候选排序；复杂度为 `O(N log K)`，N 和 K 都有硬上限。
 6. 一次 `WHERE turn_no IN (...)` 批量读取选中轮次，禁止逐轮查询。
+7. 读取后按依赖类型选择表示：实体依赖使用元数据和有界用户问题，结论依赖使用结构化
+   详情和证据状态，证据依赖优先完整原子轮。
+
+依赖类型允许单向升级：实体依赖可升级为结论或证据依赖，结论依赖可升级为证据依赖；
+不得因 Fast Model 低置信度向下收缩。对于“那这个接口呢？”一类省略问题，若接口可由
+`entities_json` 唯一解析且本轮会重新查询，只需实体依赖；若接口或回答条件只存在于上一轮
+request、response、message 或工具证据中，则必须升级为证据依赖。这样既避免无条件回放
+全部工具结果，也不会因为关系判断不确定而丢掉完成回答所需的上下文。
 
 ### 7.3 原子轮回放
 
@@ -159,7 +222,20 @@ tool(result) * n
 assistant(final answer)
 ```
 
-预算不足时按轮整体降级为归档摘要，不能只保留 tool result 或只删除 assistant tool call。单轮超过历史分区上限时，不回放原文，改用其有界 `detail_json` 和摘要；仍超限则仅保留引用 ID、实体和一行摘要。
+不能只保留 tool result 或只删除 assistant tool call。每个选中轮次按以下层级整体选择，
+当前层放不下时先整组撤回，再尝试下一层：
+
+1. 完整原子轮；
+2. 有界结构化详情，包含用户问题、工具调用、工具结果、最终回答以及各部分
+   `coverage` 和省略数量；
+3. 引用 ID、实体、证据状态和一行摘要；
+4. 整轮省略，并记录预算拒绝原因。
+
+结构化详情作为 `HISTORICAL_CONTEXT` JSON 注入，不再伪装成 assistant/tool 消息，
+因此不会产生缺失 tool result 的非法协议序列。已归档轮次直接读取
+`qa_turn_contexts.detail_json` 和 `summary_text`；尚未归档的选中轮次在一次批量读取原始
+消息后，使用现有确定性 `compressTurnDetail` 在内存中生成有界详情，不增加 LLM 调用。
+未归档轮次仍放不下时，使用 `qa_turns` 元数据形成最小表示，不临时生成 LLM 摘要。
 
 ## 8. 元数据与存储契约
 
@@ -167,13 +243,22 @@ assistant(final answer)
 
 | 字段 | 用途 |
 | --- | --- |
+| `question_text` | 有界的当轮用户问题，用于指代解析和最小引用表示 |
 | `topic_key` | 当前轮稳定话题键，不含自由文本 |
 | `entities_json` | 去重后的服务、接口、trace、配置键等实体 |
 | `question_terms_json` | 当前用户问题的规范词项 |
+| `evidence_manifest_json` | 有界证据清单，只含工具名、来源、引用 ID、覆盖状态和省略数量 |
 
-这些字段在保存完整轮次时一次写入。HTTP/Agent 写入边界负责裁剪、去重、长度限制和 JSON 校验；读取端信任其规范形式，不重复清洗。历史证据状态通过 `qa_turns.run_id -> agent_runs.id` 获取，不在 `qa_turns` 重复保存。
+这些字段在保存完整轮次时一次写入。`evidence_manifest_json` 从当轮工具调用和压缩结果的
+结构化 envelope 生成，不保存参数、结果正文或 assistant 回答；单项数和总字节数均有硬上限。
+HTTP/Agent 写入边界负责裁剪、去重、长度限制和 JSON 校验；读取端信任其规范形式，不重复
+清洗，也不得通过扫描 `qa_messages.content` 或 `agent_steps.content` 临时重建清单。历史整体
+证据状态通过 `qa_turns.run_id -> agent_runs.id` 获取，不在 `qa_turns` 重复保存。
 
-老数据使用一次性迁移回填空数组和空 `topic_key`。不得长期保留读时兼容分支。
+老数据使用一次性迁移为 `entities_json`、`question_terms_json` 回填空数组，为 `topic_key`
+回填空值，并将无法重建的证据清单写成显式 `manifest_unavailable`，不能用空数组混同“当轮
+没有工具证据”。依赖升级规则据此选择结构化详情或重新调用工具；不得扫描大字段猜测，
+也不得长期保留读时兼容分支。
 
 ## 9. 可信边界
 
@@ -208,19 +293,22 @@ assistant(final answer)
 
 每个 Run 增加一条 `context_assemble` trace，至少包含：
 
-- `topic_relation`、置信度和降级原因；
+- `topic_affinity`、`confidence`、三个 `needs_prior_*` 字段、来源和降级原因；
+- 历史依赖是否升级、升级原因和采用的回放层级；
 - 候选轮数、选中轮数、摘要降级轮数；
 - 各分区 token、总输入预算和剩余额度；
 - 选中 turn/ref 及选择原因；
 - 被预算拒绝的轮数和工具结果数；
 - 最终输入 token 峰值与输出预留。
 
-聚合指标：
+以下聚合指标是后续接入指标系统时的目标口径，当前仓库尚无 Prometheus/metrics 导出子系统；
+已实施的观测载体是持久化 Run 中的 `context_assemble` trace：
 
 - `qa_context_budget_utilization`；
 - `qa_context_turns_selected`；
 - `qa_context_turns_omitted`；
-- `qa_topic_relation_total{relation,origin}`；
+- `qa_topic_affinity` 直方图；
+- `qa_history_dependency_total{kind,origin}`；
 - `qa_memory_write_rejected_total{reason}`；
 - `qa_context_over_budget_total`，验收目标必须为 0。
 
@@ -230,7 +318,7 @@ assistant(final answer)
 
 | 失败 | 行为 |
 | --- | --- |
-| TopicRelation 模型输出无效 | 使用确定性关系判断并记录 degraded |
+| HistoryRelation 模型输出无效 | 使用确定性相关度和历史依赖判断并记录 degraded |
 | 轮次元数据读取失败 | 当前轮失败，不携带猜测历史继续 |
 | 归档召回不可用 | 继续当前问题，但显式标记历史证据不可用 |
 | 单轮超过历史预算 | 整轮降级为摘要或引用，不拆工具协议 |
@@ -241,32 +329,33 @@ assistant(final answer)
 
 ## 13. 分阶段实施
 
-### 阶段 A：预算与观测
+### 阶段 A：预算与观测（已实施）
 
 - 引入统一 token budget assembler；
 - 对当前最近轮回放增加单轮和总预算；
 - 输出 `context_assemble` trace；
 - 保持现有历史选择结果，先验证无超预算。
 
-### 阶段 B：话题分流
+### 阶段 B：相关度与历史依赖（已实施）
 
 - 扩展现有 preprocessing 合同；
 - 写入 turn 元数据；
-- 对 `switch` 停止注入旧话题完整轮次；
+- 对连续相关度和三类历史依赖执行候选选择，不再使用三值话题分流；
 - 灰度记录新旧选择差异，不立即影响全部请求。
 
-### 阶段 C：相关性回放
+### 阶段 C：相关性回放（已实施）
 
 - 有界读取候选元数据；
 - Top K 选择和批量消息读取；
 - 原子轮降级；
 - 移除固定保留最近三轮的机制。
 
-### 阶段 D：记忆收紧
+### 阶段 D：记忆收紧（在线准入已实施）
 
 - 按证据状态和来源执行记忆准入；
 - 增加拒绝原因指标；
-- 清理历史上由 assistant 推导写入的非用户事实。
+- 清理历史上由 assistant 推导写入的非用户事实。该项需要独立数据迁移，不能通过在线
+  读取时过滤代替，当前尚未执行。
 
 ## 14. 验收标准
 
@@ -274,14 +363,19 @@ assistant(final answer)
 2. “继续查刚才的 trace”能恢复上一轮 trace、查询范围和关键错误证据。
 3. 最近一轮包含超大 response 时，总输入仍小于 `W - O - G`。
 4. 任意裁剪后，assistant tool call 与 tool result 数量及 ID 仍合法配对。
-5. TopicRelation 判断不增加 LLM 调用次数，Fast Model 请求不包含历史完整回答。
+5. HistoryRelation 派生不增加 LLM 调用次数，Fast Model 请求不包含历史完整回答。
 6. 强制收敛、证据部分完整和证据不可用的 Run 均不写事实型长期记忆。
 7. 在线历史读取有 `LIMIT`，内容读取使用一次批量查询，不出现 N+1。
-8. `qa_context_over_budget_total` 在压测和回归用例中为 0。
-9. 话题分流和历史选择都有单元测试、SQL mock 测试及至少一条端到端 SSE 回归。
+8. Provider 调用前的预算守卫在回归用例中无漏检；接入指标系统后，
+   `qa_context_over_budget_total` 的压测目标为 0。
+9. “A 服务日志 → A 服务配置”保留实体连续性但不自动回放无关日志证据。
+10. “那这个接口呢？”在 Fast Model 低置信度时仍能恢复上一轮接口；指代只能由上一轮
+    工具证据解析时，历史依赖升级且最终回答能取得预算内的必要证据。
+11. 相关度、历史依赖和历史选择都有单元测试、SQL mock 测试及至少一条端到端 SSE 回归。
 
 ## 15. 待确认项
 
-1. `N=24`、Top K 和各分区比例需用生产 Run 的 token 分布校准。
+1. 当前采用 `N=24`、Top K `K=4`、活跃历史 `25%` 且最多 `32,000 tokens`；仍需用生产
+   Run 的 token 分布校准。
 2. 是否在 QA 前端展示“本轮引用了哪些历史轮次”属于产品决策，不阻塞后端实施。
 3. 既有长期记忆的清理规则需要单独迁移设计，不能在读路径永久过滤旧数据。

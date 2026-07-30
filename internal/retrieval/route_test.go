@@ -3,6 +3,7 @@ package retrieval
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,6 +69,32 @@ func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	}
 	if len(result.Terms.DomainTerms) != 1 || result.Terms.DomainTerms[0] != "设备删除" || len(result.Terms.Identifiers) != 1 {
 		t.Fatalf("terms = %+v", result.Terms)
+	}
+}
+
+func TestAnalyzeEvidenceDerivesHistoryRelationInSameCall(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), "previous question metadata") {
+			t.Fatalf("request missing bounded history metadata: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"history_relation\":{\"topic_affinity\":0.7,\"confidence\":0.8,\"needs_prior_entities\":true,\"needs_prior_conclusion\":false,\"needs_prior_evidence\":false,\"explicit_turn_refs\":[]}}"}}]}`))
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+
+	result, err := AnalyzeEvidence(
+		context.Background(), client, "继续查", "previous question metadata", "继续查",
+		RoutingCapabilities{}, nil, 512,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || !result.History.NeedsPriorEntities || result.History.TopicAffinity != 0.7 {
+		t.Fatalf("calls=%d history=%+v", calls, result.History)
 	}
 }
 
@@ -208,6 +235,40 @@ func TestBindToolIDsRejectsUnregisteredTool(t *testing.T) {
 	}
 }
 
+func TestBindHistoryRelationPromotesDependenciesAndGroundsReferences(t *testing.T) {
+	relation, err := bindHistoryRelation(map[string]any{
+		"topic_affinity":         0.72,
+		"confidence":             0.41,
+		"needs_prior_entities":   false,
+		"needs_prior_conclusion": false,
+		"needs_prior_evidence":   true,
+		"explicit_turn_refs":     []any{"turn-12", "invented-run", "turn-12"},
+	}, "继续 turn-12 的证据")
+	if err != nil {
+		t.Fatalf("bindHistoryRelation: %v", err)
+	}
+	if !relation.NeedsPriorEntities || !relation.NeedsPriorConclusion || !relation.NeedsPriorEvidence {
+		t.Fatalf("dependencies were not promoted: %+v", relation)
+	}
+	if len(relation.ExplicitTurnRefs) != 1 || relation.ExplicitTurnRefs[0] != "turn-12" {
+		t.Fatalf("grounded refs = %v", relation.ExplicitTurnRefs)
+	}
+}
+
+func TestBindHistoryRelationRejectsInvalidScores(t *testing.T) {
+	_, err := bindHistoryRelation(map[string]any{
+		"topic_affinity":         1.1,
+		"confidence":             0.8,
+		"needs_prior_entities":   false,
+		"needs_prior_conclusion": false,
+		"needs_prior_evidence":   false,
+		"explicit_turn_refs":     []any{},
+	}, "question")
+	if err == nil {
+		t.Fatal("out-of-range affinity was accepted")
+	}
+}
+
 // TestRoutingExamplesValidateAgainstSchema guards against the prompt/validator
 // schema drift that silently dropped web routing: the contract examples must
 // parse and validate under the same schema analyzeQuestion enforces (top-level
@@ -249,6 +310,15 @@ func TestRoutingExamplesValidateAgainstSchema(t *testing.T) {
 	}
 	if _, err := bindTimeExpr(timeRaw, ""); err != nil {
 		t.Fatalf("timeExampleJSON does not validate: %v", err)
+	}
+
+	historyTop := mustParseJSON(t, historyExampleJSON)
+	historyRaw, ok := historyTop["history_relation"].(map[string]any)
+	if !ok {
+		t.Fatalf("historyExampleJSON missing top-level history_relation object: %s", historyExampleJSON)
+	}
+	if _, err := bindHistoryRelation(historyRaw, ""); err != nil {
+		t.Fatalf("historyExampleJSON does not validate: %v", err)
 	}
 }
 

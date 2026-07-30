@@ -93,7 +93,7 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 func (handler *Handler) prepareSessionContext(ctx context.Context, question, sessionID string, userID int64,
 	fallback []llm.Message, sseEvent func(string, string)) (agent.ConversationContext, error) {
 	if sessionID == "" || handler.qaSessions == nil || handler.qa == nil || handler.platform == nil {
-		return handler.loadSessionContext(ctx, sessionID, userID, fallback), nil
+		return handler.loadSessionContext(ctx, sessionID, userID, fallback)
 	}
 	var latestUsage agent.ContextUsageSnapshot
 	if runs := handler.qa.RunStore(); runs != nil {
@@ -141,7 +141,7 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 			sessionID, result.ToTurn)
 	}
 	handler.emitSessionRestartRecommendation(ctx, sseEvent, sessionID, result, false)
-	return handler.loadSessionContext(ctx, sessionID, userID, fallback), nil
+	return handler.loadSessionContext(ctx, sessionID, userID, fallback)
 }
 
 func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, sseEvent func(string, string),
@@ -254,23 +254,24 @@ func (s *sseWriter) startHeartbeat(ctx context.Context, interval time.Duration) 
 	}
 }
 
-func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string, userID int64, fallback []llm.Message) agent.ConversationContext {
+func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string, userID int64, fallback []llm.Message) (agent.ConversationContext, error) {
 	if sessionID == "" || handler.qaSessions == nil {
-		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}
+		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}, nil
 	}
-	sess, err := handler.qaSessions.GetContextSession(sessionID, userID)
+	sess, err := handler.qaSessions.GetContextMetadata(sessionID, userID, memory.RecentTurnMetadataLimit)
 	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] session load error: %v", err)
-		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}
+		return agent.ConversationContext{}, fmt.Errorf("load bounded session metadata %q: %w", sessionID, err)
 	}
 	if sess == nil {
-		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}
+		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}, nil
 	}
-	log.InfofCtx(ctx, "[qa] loaded session %s: recent=%d compactedThrough=%d",
-		sessionID, len(sess.Messages), sess.CompactedThroughTurn)
+	log.InfofCtx(ctx, "[qa] loaded session %s: candidateTurns=%d compactedThrough=%d",
+		sessionID, len(sess.RecentTurns), sess.CompactedThroughTurn)
 	return agent.ConversationContext{
-		SessionID: sessionID, CompactedThroughTurn: sess.CompactedThroughTurn, Recent: sess.Messages,
-	}
+		SessionID: sessionID, SessionTitle: sess.Title, CompactedThroughTurn: sess.CompactedThroughTurn,
+		RecentTurns: sess.RecentTurns,
+	}, nil
 }
 
 func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, sseEvent func(string, string), r *http.Request) {

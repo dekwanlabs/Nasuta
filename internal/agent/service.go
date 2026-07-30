@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -40,6 +41,7 @@ type QADeps struct {
 	DB             *sql.DB
 	RunStore       *RunStore
 	History        SessionHistory
+	Sessions       *memory.SessionStore
 }
 
 // QA is the agent-facing runtime facade.
@@ -52,6 +54,7 @@ type QA struct {
 	registry         *Registry
 	executor         *ToolExecutor
 	memory           *memory.MemoryStore
+	sessions         *memory.SessionStore
 	history          SessionHistory
 	writeAvailable   bool
 	hub              *RunHub
@@ -118,7 +121,10 @@ func NewQA(d QADeps) *QA {
 	svc := &QA{
 		retriever: ret, cfg: d.Cfg,
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
-		history: d.History, contextWindow: platformSettings.LLMContextWindow,
+		history: d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
+	}
+	if svc.sessions == nil && d.DB != nil {
+		svc.sessions = memory.NewSessionStore(d.DB)
 	}
 
 	useDashScope := platformSettings.RerankProvider == "dashscope" && platformSettings.RerankAPIKey != ""
@@ -146,7 +152,7 @@ func NewQA(d QADeps) *QA {
 	if d.Registry != nil {
 		svc.registry = d.Registry
 	} else {
-		svc.registry = NewRegistry(d.Tools, d.Cfg, memory.NewSessionStore(d.DB), d.History)
+		svc.registry = NewRegistry(d.Tools, d.Cfg, svc.sessions, d.History)
 	}
 	svc.writeAvailable = d.WriteAvailable
 	svc.executor = NewToolExecutor(svc.registry)
@@ -157,6 +163,7 @@ func NewQA(d QADeps) *QA {
 		AnswerReserve:       time.Duration(platformSettings.AgentAnswerReserve),
 		AnswerMaxTokens:     platformSettings.LLMAnswerMaxTokens,
 		ConclusionMaxTokens: platformSettings.LLMConclusionMaxTokens,
+		ContextWindow:       platformSettings.LLMContextWindow,
 		MaxContinueRounds:   platformSettings.LLMMaxContinueRounds,
 		DomainKnowledge:     platformSettings.DomainKnowledge,
 		HistoryLimit:        0,
@@ -261,24 +268,10 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	}
 
 	emit("嗯...让我先琢磨一下你在问什么 ✨")
-	retrievalPrefix := buildRagCtx(conversation.Recent)
-	if hasConflictingConversationEntity(question, retrievalPrefix) {
-		log.InfofCtx(ctx, "[qa] conversation context omitted after explicit entity switch")
-		conversation.RetrievedHistory = ""
-		conversation.CompactedThroughTurn = 0
-		conversation.Recent = nil
-		candidateSnapshot = withoutSessionHistoryTools(candidateSnapshot)
-		retrievalPrefix = ""
+	routeContext := buildHistoryRouteContext(conversation)
+	if routeContext == "" {
+		routeContext = buildRagCtx(conversation.Recent)
 	}
-	if svc.history != nil && conversation.CompactedThroughTurn > 0 && conversation.SessionID != "" {
-		historyBudget := min(int(float64(svc.contextWindow)*0.08), 32768)
-		recalledHistory, recallErr := svc.history.Recall(ctx, userID, conversation.SessionID, question, retrievalPrefix, historyBudget)
-		if recallErr != nil {
-			return nil, fmt.Errorf("recall current session history: %w", recallErr)
-		}
-		conversation.RetrievedHistory = recalledHistory
-	}
-	routeContext := retrievalPrefix
 
 	cleanQuestion := strings.TrimSpace(question)
 	var terms retrieval.QueryTerms
@@ -286,6 +279,8 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	decision := domain.InternalFallbackDecision()
 	var planningErr error
 	var routedToolIDs []string
+	var historyRelation retrieval.HistoryRelation
+	var historyRelationValid bool
 	var preWg sync.WaitGroup
 	requestAnchor := time.Now()
 	analysisStarted := requestAnchor
@@ -310,6 +305,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 				return
 			}
 			cleanQuestion, terms, timeExpr, decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
+			historyRelation, historyRelationValid = analysis.History, routeContext != ""
 			routedToolIDs = analysis.ToolIDs
 		} else if shouldShortCircuitMeta(question) {
 			cleanQuestion = strings.TrimSpace(question)
@@ -333,10 +329,55 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 				return
 			}
 			cleanQuestion, terms, timeExpr, decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
+			historyRelation, historyRelationValid = analysis.History, routeContext != ""
 			routedToolIDs = analysis.ToolIDs
 		}
 	}()
 	preWg.Wait()
+	historyRelation, relationOrigin, relationUpgrade := resolveHistoryRelation(
+		question, conversation.RecentTurns, historyRelation, historyRelationValid,
+	)
+	assembled, assembleStats, assembleErr := svc.assembleActiveHistory(
+		ctx, question, userID, conversation, historyRelation, relationOrigin, relationUpgrade,
+	)
+	if assembleErr != nil {
+		return nil, assembleErr
+	}
+	conversation = assembled
+	continuity := ""
+	if len(conversation.RecentTurns) > 0 &&
+		(historyRelation.NeedsPriorEntities || historyRelation.NeedsPriorConclusion || historyRelation.NeedsPriorEvidence) {
+		continuity = conversation.RecentTurns[0].Question
+	}
+	if svc.history != nil && conversation.CompactedThroughTurn > 0 && conversation.SessionID != "" {
+		historyBudget := min(int(float64(svc.contextWindow)*0.08), 32768)
+		recalledHistory, recallErr := svc.history.Recall(ctx, userID, conversation.SessionID, question, continuity, historyBudget)
+		if recallErr != nil {
+			return nil, fmt.Errorf("recall current session history: %w", recallErr)
+		}
+		conversation.RetrievedHistory = recalledHistory
+	}
+	if traceEnabled {
+		assembleStatus := "completed"
+		if relationOrigin == "deterministic" {
+			assembleStatus = "degraded"
+		}
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
+			Node: "context_assemble", Status: assembleStatus, Output: map[string]any{
+				"topic_affinity": historyRelation.TopicAffinity, "confidence": historyRelation.Confidence,
+				"relation_origin":        relationOrigin,
+				"needs_prior_entities":   historyRelation.NeedsPriorEntities,
+				"needs_prior_conclusion": historyRelation.NeedsPriorConclusion,
+				"needs_prior_evidence":   historyRelation.NeedsPriorEvidence,
+				"dependency_upgrade":     relationUpgrade, "candidate_turns": assembleStats.CandidateCount,
+				"selected_turns": assembleStats.SelectedCount, "full_turns": assembleStats.FullTurnCount,
+				"detail_turns": assembleStats.DetailCount, "reference_turns": assembleStats.ReferenceCount,
+				"omitted_turns": assembleStats.OmittedCount, "history_budget_tokens": assembleStats.HistoryBudgetTokens,
+				"history_used_tokens":   assembleStats.HistoryUsedTokens,
+				"selected_turn_numbers": assembleStats.SelectedTurnNumbers, "selected_reasons": assembleStats.SelectedReasons,
+			},
+		})
+	}
 	resolvedTime, hasResolvedTime, timeErr := retrieval.ResolveTime(timeExpr, requestAnchor)
 	if timeErr != nil {
 		planningErr = errors.Join(planningErr, fmt.Errorf("resolve relative time: %w", timeErr))
@@ -353,7 +394,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if traceEnabled {
 		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "query_analysis", DurationMS: time.Since(analysisStarted).Milliseconds(),
-			Input: map[string]any{"question": question, "history_messages": len(conversation.Recent)},
+			Input: map[string]any{"question": question, "history_candidates": len(conversation.RecentTurns)},
 			Output: map[string]any{
 				"clean_question": cleanQuestion, "domain_terms": terms.DomainTerms,
 				"identifiers":   terms.Identifiers,
@@ -779,10 +820,17 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 			memCtx := llm.WithUsagePhase(context.WithoutCancel(ctx), llm.PhaseMemoryExtract)
 			memCtx, memCancel := context.WithTimeout(memCtx, 60*time.Second)
 			extractStarted := time.Now()
-			if mems, err := memory.ExtractMemories(memCtx, svc.llm, question, res.Answer); err == nil {
+			memoryQuestion := tooloutput.TruncateContent(question, 1000)
+			memoryAnswer := tooloutput.TruncateContent(res.Answer, 2000)
+			if extracted, err := memory.ExtractMemories(memCtx, svc.llm, memoryQuestion, memoryAnswer); err == nil {
+				mems, rejected := admitExtractedMemories(extracted, res.Evidence.Status)
 				domain.RecordTrace(memCtx, domain.EvaluationTrace{
 					Node: "memory_extract", DurationMS: time.Since(extractStarted).Milliseconds(),
-					Output: map[string]any{"records": len(mems)},
+					Output: map[string]any{
+						"extracted": len(extracted), "admitted": len(mems),
+						"rejected_assistant_inference": rejected["assistant_inference"],
+						"rejected_incomplete_evidence": rejected["incomplete_evidence"],
+					},
 				})
 				writeStarted := time.Now()
 				outcomes := make(map[memory.WriteOutcome]int, 4)
@@ -828,6 +876,24 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 func memoryExtractionAllowed(outcome RunOutcome, result *RunResult) bool {
 	return outcome.Status == RunStatusDone && result != nil &&
 		!result.ForcedConclusion && strings.TrimSpace(result.Answer) != ""
+}
+
+func admitExtractedMemories(records []memory.MemoryRecord, evidence EvidenceStatus) ([]memory.MemoryRecord, map[string]int) {
+	admitted := make([]memory.MemoryRecord, 0, len(records))
+	rejected := make(map[string]int, 2)
+	incomplete := evidence == EvidencePartial || evidence == EvidenceUnavailable
+	for _, record := range records {
+		if record.SourceType == memory.SourceAssistantInference {
+			rejected["assistant_inference"]++
+			continue
+		}
+		if incomplete && record.SourceType != memory.SourceExplicitUser && record.SourceType != memory.SourceUserStated {
+			rejected["incomplete_evidence"]++
+			continue
+		}
+		admitted = append(admitted, record)
+	}
+	return admitted, rejected
 }
 
 func buildRagCtx(history []llm.Message) string {

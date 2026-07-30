@@ -84,6 +84,7 @@ func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, platfo
 		ps = &config.PlatformSettings{}
 	}
 	runStore := openRunStore(platformDB)
+	qaSessions := openQASessions(platformDB)
 	var history agent.SessionHistory
 	if len(histories) > 0 {
 		history = histories[0]
@@ -96,7 +97,7 @@ func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, platfo
 		semantic:           sem,
 		embedder:           emb,
 		tools:              t,
-		qa:                 agent.NewQA(agent.QADeps{Tools: t, Semantic: sem, Embedder: emb, WriteAvailable: writeAvailable, Cfg: cfg, Platform: ps, Registry: registry, CodeGraphDB: cgDB, DB: platformDB, RunStore: runStore, History: history}),
+		qa:                 agent.NewQA(agent.QADeps{Tools: t, Semantic: sem, Embedder: emb, WriteAvailable: writeAvailable, Cfg: cfg, Platform: ps, Registry: registry, CodeGraphDB: cgDB, DB: platformDB, RunStore: runStore, History: history, Sessions: qaSessions}),
 		persistentRunStore: runStore,
 		registry:           registry,
 		writeAvailable:     writeAvailable,
@@ -105,9 +106,9 @@ func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, platfo
 		idx:                idx,
 		callChain:          chain,
 		history:            history,
+		qaSessions:         qaSessions,
 	}
 	h.codegraphDB = cgDB
-	h.qaSessions = openQASessions(platformDB)
 	return h
 }
 

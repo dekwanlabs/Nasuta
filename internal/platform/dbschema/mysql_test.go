@@ -271,6 +271,24 @@ func TestQATurnRunIDMigrationAddsMissingColumn(t *testing.T) {
 	}
 }
 
+func TestQAContextPollutionMigrationAddsCanonicalTurnMetadata(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_context_pollution_control.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read QA context pollution migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN question_text", "ADD COLUMN topic_key", "ADD COLUMN entities_json",
+		"ADD COLUMN question_terms_json", "ADD COLUMN evidence_manifest_json",
+		"'status', 'manifest_unavailable'", "MODIFY COLUMN entities_json JSON NOT NULL",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("QA context pollution migration missing %q", required)
+		}
+	}
+}
+
 func TestMemorySchemaEnforcesOneActiveFact(t *testing.T) {
 	statements := mysqlSchema[GroupQAMemory]
 	if len(statements) != 1 {

@@ -22,6 +22,17 @@ type AnalysisResult struct {
 	Terms    QueryTerms
 	ToolIDs  []string
 	Time     TimeExpr
+	History  HistoryRelation
+}
+
+// HistoryRelation separates continuous topical affinity from concrete history dependencies.
+type HistoryRelation struct {
+	TopicAffinity        float64  `json:"topic_affinity"`
+	Confidence           float64  `json:"confidence"`
+	NeedsPriorEntities   bool     `json:"needs_prior_entities"`
+	NeedsPriorConclusion bool     `json:"needs_prior_conclusion"`
+	NeedsPriorEvidence   bool     `json:"needs_prior_evidence"`
+	ExplicitTurnRefs     []string `json:"explicit_turn_refs"`
 }
 
 // ToolRouteCandidate is trusted routing metadata from a registered read tool.
@@ -41,7 +52,20 @@ const (
 	toolExampleJSON       = `{"tools":{"tool_ids":[]}}`
 	queryTermsExampleJSON = `{"query_terms":{"domain_terms":[],"identifiers":[]}}`
 	timeExampleJSON       = `{"time":{"kind":"none","n":0,"unit":"","raw":""}}`
+	historyExampleJSON    = `{"history_relation":{"topic_affinity":0.0,"confidence":0.0,"needs_prior_entities":false,"needs_prior_conclusion":false,"needs_prior_evidence":false,"explicit_turn_refs":[]}}`
 )
+
+const historyRelationContract = `Determine how the current question depends on the bounded previous-turn metadata.
+- topic_affinity is a continuous value from 0 to 1. A shift from logs to configuration or code for the same entity remains partially related.
+- confidence is confidence in this dependency analysis from 0 to 1. Low confidence must not be used to discard an identified dependency.
+- needs_prior_entities is true when a pronoun, ellipsis, or omitted target requires prior entities.
+- needs_prior_conclusion is true when the question depends on the prior conclusion or unfinished work.
+- needs_prior_evidence is true when the answer requires prior request, response, message, or tool evidence rather than only an entity name.
+- explicit_turn_refs contains at most 4 turn or run references explicitly written by the user. Do not invent references.
+- Dependencies are monotonic: evidence implies conclusion and entities; conclusion implies entities.
+The conversation_context contains only bounded metadata and never the prior assistant answer or tool payload.
+Return a JSON object with this exact shape:
+` + historyExampleJSON
 
 const queryTermsContract = `Extract compact retrieval terms from the current question.
 - domain_terms: at most 5 discriminative domain phrases, including useful non-English phrases.
@@ -155,6 +179,10 @@ Available tools: `+string(encoded))
 		contracts = append(contracts, "Time contract:\n"+timeContract)
 		properties = append(properties, "\"time\"")
 	}
+	if strings.TrimSpace(routeContext) != "" {
+		contracts = append(contracts, "History relation contract:\n"+historyRelationContract)
+		properties = append(properties, "\"history_relation\"")
+	}
 	if len(properties) == 0 {
 		empty.Decision = decision
 		return empty, nil
@@ -175,6 +203,7 @@ Available tools: `+string(encoded))
 	var raw map[string]any
 	var toolIDs []string
 	var timeExpr TimeExpr
+	var historyRelation HistoryRelation
 	opts := llm.CallOptions{
 		MaxTokens: maxTokens,
 		Validate: func(p any) error {
@@ -227,6 +256,17 @@ Available tools: `+string(encoded))
 				}
 				timeExpr = extracted
 			}
+			if strings.TrimSpace(routeContext) != "" {
+				historyRaw, ok := (*m)["history_relation"].(map[string]any)
+				if !ok {
+					return fmt.Errorf("missing history_relation object")
+				}
+				extracted, err := bindHistoryRelation(historyRaw, question)
+				if err != nil {
+					return err
+				}
+				historyRelation = extracted
+			}
 			return nil
 		},
 	}
@@ -237,7 +277,82 @@ Available tools: `+string(encoded))
 		return empty, fmt.Errorf("evidence router failed: %w", err)
 	}
 
-	return AnalysisResult{Decision: decision, Question: clean, Terms: terms, ToolIDs: toolIDs, Time: timeExpr}, nil
+	return AnalysisResult{
+		Decision: decision, Question: clean, Terms: terms, ToolIDs: toolIDs,
+		Time: timeExpr, History: historyRelation,
+	}, nil
+}
+
+func bindHistoryRelation(raw map[string]any, question string) (HistoryRelation, error) {
+	readScore := func(key string) (float64, error) {
+		value, ok := raw[key].(float64)
+		if !ok || value < 0 || value > 1 {
+			return 0, fmt.Errorf("history_relation.%s must be between 0 and 1", key)
+		}
+		return value, nil
+	}
+	readBool := func(key string) (bool, error) {
+		value, ok := raw[key].(bool)
+		if !ok {
+			return false, fmt.Errorf("history_relation.%s must be a boolean", key)
+		}
+		return value, nil
+	}
+	affinity, err := readScore("topic_affinity")
+	if err != nil {
+		return HistoryRelation{}, err
+	}
+	confidence, err := readScore("confidence")
+	if err != nil {
+		return HistoryRelation{}, err
+	}
+	entities, err := readBool("needs_prior_entities")
+	if err != nil {
+		return HistoryRelation{}, err
+	}
+	conclusion, err := readBool("needs_prior_conclusion")
+	if err != nil {
+		return HistoryRelation{}, err
+	}
+	evidence, err := readBool("needs_prior_evidence")
+	if err != nil {
+		return HistoryRelation{}, err
+	}
+	items, ok := raw["explicit_turn_refs"].([]any)
+	if !ok {
+		return HistoryRelation{}, fmt.Errorf("history_relation.explicit_turn_refs must be an array")
+	}
+	if len(items) > 4 {
+		return HistoryRelation{}, fmt.Errorf("history_relation.explicit_turn_refs exceeds 4 items")
+	}
+	refs := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for i, item := range items {
+		ref, ok := item.(string)
+		if !ok {
+			return HistoryRelation{}, fmt.Errorf("history_relation.explicit_turn_refs[%d] must be a string", i)
+		}
+		ref = strings.TrimSpace(ref)
+		if ref == "" || !strings.Contains(strings.ToLower(question), strings.ToLower(ref)) {
+			continue
+		}
+		if _, duplicate := seen[ref]; duplicate {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	if evidence {
+		conclusion = true
+		entities = true
+	} else if conclusion {
+		entities = true
+	}
+	return HistoryRelation{
+		TopicAffinity: affinity, Confidence: confidence,
+		NeedsPriorEntities: entities, NeedsPriorConclusion: conclusion,
+		NeedsPriorEvidence: evidence, ExplicitTurnRefs: refs,
+	}, nil
 }
 
 func hasTemporalCandidate(candidates []ToolRouteCandidate) bool {
