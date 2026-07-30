@@ -49,10 +49,10 @@ func TestListMessagesBeforeUsesExclusiveCursor(t *testing.T) {
 	createdAt := time.Date(2026, time.July, 25, 8, 30, 0, 0, time.UTC)
 	mock.ExpectQuery(`SELECT m\.seq, m\.role, m\.content.*m\.seq < \?.*ORDER BY m\.seq DESC LIMIT \?`).
 		WithArgs("session-1", int64(42), 4, 3).
-		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name", "created_at"}).
-			AddRow(3, "assistant", "three", "", "", "", createdAt).
-			AddRow(2, "user", "two", "", "", "", createdAt).
-			AddRow(1, "assistant", "one", "", "", "", createdAt))
+		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name", "created_at", "run_id"}).
+			AddRow(3, "assistant", "three", "", "", "", createdAt, "run-2").
+			AddRow(2, "user", "two", "", "", "", createdAt, "").
+			AddRow(1, "assistant", "one", "", "", "", createdAt, "run-1"))
 
 	page, err := store.ListMessagesBefore("session-1", 42, 4, 2)
 	if err != nil {
@@ -66,6 +66,9 @@ func TestListMessagesBeforeUsesExclusiveCursor(t *testing.T) {
 	}
 	if page.Messages[0].CreatedAt != createdAt.Format(time.RFC3339) {
 		t.Fatalf("created_at = %q", page.Messages[0].CreatedAt)
+	}
+	if page.Messages[0].RunID != "" || page.Messages[1].RunID != "run-2" {
+		t.Fatalf("run ids = %q, %q", page.Messages[0].RunID, page.Messages[1].RunID)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -84,13 +87,13 @@ func TestListTurnsBeforeKeepsCompleteTurns(t *testing.T) {
 			AddRow(0, 1))
 	mock.ExpectQuery(`SELECT m\.seq, m\.role, m\.content.*m\.seq >= \?.*m\.seq < \?.*ORDER BY m\.seq ASC`).
 		WithArgs("session-1", int64(42), 2, 8).
-		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name", "created_at"}).
-			AddRow(2, "user", "question two", "", "", "", createdAt).
-			AddRow(3, "assistant", "tool call", "", "", "", createdAt).
-			AddRow(4, "tool", "tool result", "", "call-1", "search", createdAt).
-			AddRow(5, "user", "question three", "", "", "", createdAt).
-			AddRow(6, "assistant", "tool call", "", "", "", createdAt).
-			AddRow(7, "assistant", "answer three", "", "", "", createdAt))
+		WillReturnRows(sqlmock.NewRows([]string{"seq", "role", "content", "tool_calls_json", "tool_call_id", "tool_name", "created_at", "run_id"}).
+			AddRow(2, "user", "question two", "", "", "", createdAt, "").
+			AddRow(3, "assistant", "tool call", "", "", "", createdAt, "").
+			AddRow(4, "tool", "tool result", "", "call-1", "search", createdAt, "").
+			AddRow(5, "user", "question three", "", "", "", createdAt, "").
+			AddRow(6, "assistant", "tool call", "", "", "", createdAt, "").
+			AddRow(7, "assistant", "answer three", "", "", "", createdAt, "run-3"))
 
 	page, err := store.ListTurnsBefore("session-1", 42, 8, 2)
 	if err != nil {
@@ -104,6 +107,14 @@ func TestListTurnsBeforeKeepsCompleteTurns(t *testing.T) {
 	}
 	if page.Messages[0].CreatedAt != createdAt.Format(time.RFC3339) {
 		t.Fatalf("created_at = %q", page.Messages[0].CreatedAt)
+	}
+	for i := range page.Messages[:len(page.Messages)-1] {
+		if page.Messages[i].RunID != "" {
+			t.Fatalf("message %d unexpectedly linked to run %q", i, page.Messages[i].RunID)
+		}
+	}
+	if page.Messages[len(page.Messages)-1].RunID != "run-3" {
+		t.Fatalf("final answer run id = %q", page.Messages[len(page.Messages)-1].RunID)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

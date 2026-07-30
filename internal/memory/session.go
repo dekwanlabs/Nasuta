@@ -96,6 +96,7 @@ type MessagePage struct {
 type SessionMessage struct {
 	llm.Message
 	CreatedAt string `json:"created_at"`
+	RunID     string `json:"-"`
 }
 
 var ErrSessionOwnership = errors.New("memory/session: session belongs to another user")
@@ -335,9 +336,11 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	query := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.created_at
+	query := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.created_at,
+	                 COALESCE(CASE WHEN m.seq=t.last_seq AND m.role='assistant' THEN t.run_id ELSE '' END,'')
 	          FROM qa_messages m
 	          JOIN qa_sessions s ON s.id = m.session_id
+	          LEFT JOIN qa_turns t ON t.session_id=m.session_id AND t.turn_no=m.turn_no
 	          WHERE m.session_id = ? AND s.user_id = ?`
 	args := []any{id, userID}
 	if beforeSeq >= 0 {
@@ -360,7 +363,7 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 		var item sequencedMessage
 		var toolCalls string
 		var createdAt sql.NullTime
-		if err := rows.Scan(&item.seq, &item.msg.Role, &item.msg.Content, &toolCalls, &item.msg.ToolCallID, &item.msg.Name, &createdAt); err != nil {
+		if err := rows.Scan(&item.seq, &item.msg.Role, &item.msg.Content, &toolCalls, &item.msg.ToolCallID, &item.msg.Name, &createdAt, &item.msg.RunID); err != nil {
 			return nil, err
 		}
 		item.msg.CreatedAt = store.FormatDatabaseTime(createdAt)
@@ -435,9 +438,11 @@ func (ss *SessionStore) ListTurnsBefore(id string, userID int64, beforeSeq, limi
 		bounds = bounds[:limit]
 	}
 	firstSeq := bounds[len(bounds)-1].firstSeq
-	messageQuery := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.created_at
+	messageQuery := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.created_at,
+	                        COALESCE(CASE WHEN m.seq=t.last_seq AND m.role='assistant' THEN t.run_id ELSE '' END,'')
 	                 FROM qa_messages m
 	                 JOIN qa_sessions s ON s.id = m.session_id
+	                 LEFT JOIN qa_turns t ON t.session_id=m.session_id AND t.turn_no=m.turn_no
 	                 WHERE m.session_id = ? AND s.user_id = ? AND m.seq >= ?`
 	messageArgs := []any{id, userID, firstSeq}
 	if beforeSeq >= 0 {
@@ -460,7 +465,7 @@ func (ss *SessionStore) ListTurnsBefore(id string, userID int64, beforeSeq, limi
 		var msg SessionMessage
 		var toolCalls string
 		var createdAt sql.NullTime
-		if err := messageRows.Scan(&seq, &msg.Role, &msg.Content, &toolCalls, &msg.ToolCallID, &msg.Name, &createdAt); err != nil {
+		if err := messageRows.Scan(&seq, &msg.Role, &msg.Content, &toolCalls, &msg.ToolCallID, &msg.Name, &createdAt, &msg.RunID); err != nil {
 			return nil, err
 		}
 		msg.CreatedAt = store.FormatDatabaseTime(createdAt)

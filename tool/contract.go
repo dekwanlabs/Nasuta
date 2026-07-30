@@ -144,10 +144,17 @@ type Reference struct {
 	Target string `json:"target"`
 }
 
+// EvidenceCoverage reports bounded omissions made by the tool owner.
+type EvidenceCoverage struct {
+	Partial      bool `json:"partial,omitempty"`
+	OmittedItems int  `json:"omitted_items,omitempty"`
+}
+
 // Result is the bounded content passed back to the caller.
 type Result struct {
-	Content    string      `json:"content"`
-	References []Reference `json:"references,omitempty"`
+	Content    string           `json:"content"`
+	References []Reference      `json:"references,omitempty"`
+	Coverage   EvidenceCoverage `json:"coverage,omitempty"`
 }
 
 // Handler executes a tool under the run context.

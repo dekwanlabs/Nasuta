@@ -158,6 +158,25 @@ func TestLLMUsageMigrationAddsDetailAndRunAggregates(t *testing.T) {
 	}
 }
 
+func TestAgentEvidenceCoverageMigrationAddsRunAggregates(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_evidence_coverage.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read agent evidence coverage migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN evidence_status VARCHAR(16) NOT NULL DEFAULT 'unavailable'", "ADD COLUMN forced_conclusion",
+		"ADD COLUMN evidence_result_count", "ADD COLUMN tool_call_count",
+		"ADD COLUMN tool_failure_count", "ADD COLUMN partial_result_count",
+		"ADD COLUMN omitted_evidence_count",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("agent evidence coverage migration missing %q", required)
+		}
+	}
+}
+
 func TestMemoryLastUsedUsesDateTime(t *testing.T) {
 	statements := mysqlSchema[GroupQAMemory]
 	if len(statements) != 1 || !strings.Contains(statements[0], "last_used      DATETIME NULL DEFAULT NULL") {

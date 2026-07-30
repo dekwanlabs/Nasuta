@@ -18,6 +18,13 @@ func TestRedactSensitiveText(t *testing.T) {
 	}
 }
 
+func TestRedactSensitiveTextRemovesPlainAuthorizationHeader(t *testing.T) {
+	redacted := RedactSensitiveText("Authorization: Bearer plain-secret\nAccept: application/json")
+	if strings.Contains(redacted, "plain-secret") || !strings.Contains(redacted, RedactedValue) {
+		t.Fatalf("authorization header leaked: %s", redacted)
+	}
+}
+
 func TestRedactConfigValue(t *testing.T) {
 	if got := RedactConfigValue("spring.datasource.password", "plain-secret"); got != RedactedValue {
 		t.Fatalf("sensitive key = %q", got)

@@ -21,6 +21,39 @@ import (
 
 const defaultToolOutputTokenLimit = 10_000
 
+type EvidenceStatus string
+
+const (
+	EvidenceNotRequired EvidenceStatus = "not_required"
+	EvidenceComplete    EvidenceStatus = "complete"
+	EvidencePartial     EvidenceStatus = "partial"
+	EvidenceUnavailable EvidenceStatus = "unavailable"
+)
+
+// EvidenceMetrics summarizes delivery coverage without re-reading persisted steps.
+type EvidenceMetrics struct {
+	Status             EvidenceStatus `json:"status"`
+	ForcedConclusion   bool           `json:"forced_conclusion"`
+	ToolCallCount      int            `json:"tool_call_count"`
+	ResultCount        int            `json:"result_count"`
+	ToolFailureCount   int            `json:"tool_failure_count"`
+	PartialResultCount int            `json:"partial_result_count"`
+	OmittedItemCount   int            `json:"omitted_item_count"`
+}
+
+func (metrics *EvidenceMetrics) finalize(direct bool) {
+	switch {
+	case metrics.ResultCount == 0 && metrics.ToolCallCount == 0 && direct:
+		metrics.Status = EvidenceNotRequired
+	case metrics.ResultCount == 0:
+		metrics.Status = EvidenceUnavailable
+	case metrics.ForcedConclusion || metrics.ToolFailureCount > 0 || metrics.PartialResultCount > 0:
+		metrics.Status = EvidencePartial
+	default:
+		metrics.Status = EvidenceComplete
+	}
+}
+
 // AgentConfig tunes the agent loop and answer generation limits.
 type AgentConfig struct {
 	MaxSteps            int
@@ -43,6 +76,8 @@ type ConversationContext struct {
 	CompactedThroughTurn int
 	Recent               []llm.Message
 	Instructions         []llm.Message
+	FullInvestigation    bool
+	EvidenceSeeded       bool
 }
 
 func (c AgentConfig) withDefaults() AgentConfig {
@@ -99,6 +134,14 @@ func (agent *Agent) MaxStepsFor(question string) int {
 
 // MaxStepsForPlan leaves one extra turn for web research to fetch a selected page.
 func (agent *Agent) MaxStepsForPlan(question string, plan domain.EvidencePlan) int {
+	return agent.MaxStepsForContext(question, plan, false)
+}
+
+// MaxStepsForContext grants routed runtime investigations their configured budget.
+func (agent *Agent) MaxStepsForContext(question string, plan domain.EvidencePlan, fullInvestigation bool) int {
+	if fullInvestigation {
+		return agent.cfg.MaxSteps
+	}
 	steps := agent.MaxStepsFor(question)
 	if plan.Has(domain.Web) && steps >= 2 {
 		return min(agent.cfg.MaxSteps, max(steps, 3))
@@ -125,12 +168,14 @@ func requiresExtendedToolLoop(question string) bool {
 func (agent *Agent) SetOnFirstAnswerToken(fn func(runID string)) { agent.onFirstAnswerToken = fn }
 
 type RunResult struct {
-	RunID           string
-	Answer          string // final text answer (concatenated tokens)
-	Steps           int    // loop iterations taken
-	Aborted         bool   // true if aborted by user or timeout
-	Err             error
-	SessionMessages []llm.Message
+	RunID            string
+	Answer           string // final text answer (concatenated tokens)
+	Steps            int    // loop iterations taken
+	Evidence         EvidenceMetrics
+	ForcedConclusion bool
+	Aborted          bool // true if aborted by user or timeout
+	Err              error
+	SessionMessages  []llm.Message
 }
 
 // RunWithPlan enforces one immutable retrieval/tool policy for the whole run.
@@ -158,7 +203,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 	loopCtx, loopCancel := context.WithTimeout(runCtx, agent.cfg.Timeout-agent.cfg.AnswerReserve)
 	defer loopCancel()
 
-	maxSteps := agent.MaxStepsForPlan(question, plan)
+	maxSteps := agent.MaxStepsForContext(question, plan, conversation.FullInvestigation)
 	log.InfofCtx(ctx, "[agent] run %s start: %q (maxSteps=%d configured=%d timeout=%s reserve=%s)",
 		runID, platform.TruncateForLog(question, 10), maxSteps, agent.cfg.MaxSteps, agent.cfg.Timeout, agent.cfg.AnswerReserve)
 
@@ -181,6 +226,9 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 	tools := agent.executor.Definitions(toolSnapshot)
 
 	result := &RunResult{RunID: runID}
+	if conversation.EvidenceSeeded || rc != nil && rc.Text != "" {
+		result.Evidence.ResultCount = 1
+	}
 	stepSeq := 0
 	answered := false
 	seenTools := map[string]bool{}
@@ -312,6 +360,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 		webAttempted, webSucceeded := false, false
 		turnProducedEvidence := false
 		for _, call := range chatResult.ToolCalls {
+			result.Evidence.ToolCallCount++
 			stepSeq++
 			agent.observer.OnStep(runCtx, runID, StepRecord{
 				StepNo:    stepSeq,
@@ -321,6 +370,11 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 				CreatedAt: time.Now(),
 			})
 			execution := agent.executor.Execute(loopCtx, toolSnapshot, call, seenTools, seenChunks)
+			if execution.Failed {
+				result.Evidence.ToolFailureCount++
+			} else if execution.Evidence {
+				result.Evidence.ResultCount++
+			}
 			turnProducedEvidence = turnProducedEvidence || execution.Evidence
 			acceptedWebEvidence := webEvidence.Observe(call, execution.FullContent)
 			if isWebEvidenceTool(call.Function.Name) {
@@ -341,6 +395,12 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 				Question: question, Content: execution.ModelContent,
 				Notices: execution.Notices, MaxTokens: defaultToolOutputTokenLimit,
 			})
+			partial := execution.Coverage.Partial || compressed.ChunkCoverage == "partial" ||
+				compressed.ItemCoverage == "partial" || compressed.FieldCoverage == "partial"
+			if partial {
+				result.Evidence.PartialResultCount++
+			}
+			result.Evidence.OmittedItemCount += execution.Coverage.OmittedItems + compressed.OmittedChunks
 			log.InfofCtx(ctx,
 				"[agent] tool %s model output: strategy=%s format=%s tokens=%d->%d chunks=%d->%d duration=%s",
 				call.Function.Name, compressed.Strategy, compressed.SourceFormat,
@@ -390,6 +450,8 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 	}
 
 	if !answered && !result.Aborted && result.Err == nil {
+		result.ForcedConclusion = true
+		result.Evidence.ForcedConclusion = true
 		log.InfofCtx(ctx, "[agent] run %s forcing conclusion (steps=%d)", runID, result.Steps)
 		final, ferr := agent.forceConclusion(runCtx, runID, messages, &stepSeq, runStarted)
 		if ferr != nil {
@@ -399,6 +461,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 			result.Answer += final.Content
 		}
 	}
+	result.Evidence.finalize(plan.Direct())
 
 	log.InfofCtx(ctx, "[agent] run %s end: steps=%d answerLen=%d aborted=%v err=%v",
 		runID, result.Steps, len(result.Answer), result.Aborted, result.Err)
@@ -793,6 +856,8 @@ type ToolExecution struct {
 	Arguments    tool.Arguments
 	Notices      []string
 	Evidence     bool
+	Failed       bool
+	Coverage     tool.EvidenceCoverage
 	DurationMs   int
 }
 
@@ -834,13 +899,13 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 	args, err := parseArgs(ctx, call.Function.Arguments)
 	if err != nil {
 		result := fmt.Sprintf("error: %v", err)
-		return ToolExecution{FullContent: result, ModelContent: result}
+		return ToolExecution{FullContent: result, ModelContent: result, Failed: true}
 	}
 	arguments := args
 
 	if _, ok := snapshot.Get(tool.ToolID(name)); !ok {
 		result := fmt.Sprintf("error: unknown tool %q", name)
-		return ToolExecution{FullContent: result, ModelContent: result, Arguments: arguments}
+		return ToolExecution{FullContent: result, ModelContent: result, Arguments: arguments, Failed: true}
 	}
 
 	fp := ""
@@ -859,7 +924,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 	if err != nil {
 		result := fmt.Sprintf("error: %v", err)
 		log.InfofCtx(ctx, "[agent] tool %s error after %s: args=%s err=%v", name, duration, platform.TruncateForLog(argSummary(args), 400), err)
-		return ToolExecution{FullContent: result, ModelContent: result, Arguments: arguments, DurationMs: int(duration / time.Millisecond)}
+		return ToolExecution{FullContent: result, ModelContent: result, Arguments: arguments, Failed: true, DurationMs: int(duration / time.Millisecond)}
 	}
 	result := toolResult.Content
 	if seen != nil {
@@ -874,6 +939,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 		ModelContent: formatToolResultForLLM(name, result),
 		Arguments:    arguments,
 		Evidence:     true,
+		Coverage:     toolResult.Coverage,
 		DurationMs:   int(duration / time.Millisecond),
 	}
 	if seenChunks != nil && isSearchTool(name) {

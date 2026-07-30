@@ -382,6 +382,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 			Content: preferredToolsInstruction(routedToolIDs),
 		})
 	}
+	conversation.FullInvestigation = routedToolsNeedFullInvestigation(toolCandidates, routedToolIDs)
 	log.InfofCtx(ctx, "[qa] evidence plan proposed=%s proposed_sources=%v confidence=%.2f origin=%s effective=%s effective_sources=%v effective_confidence=%.2f effective_origin=%s",
 		decision.Plan.String(), decision.Plan.SourceNames(), decision.Confidence, decision.Origin,
 		effectiveDecision.Plan.String(), effectiveDecision.Plan.SourceNames(), effectiveDecision.Confidence, effectiveDecision.Origin)
@@ -531,6 +532,24 @@ func routingCandidates(snapshot tool.Snapshot) []retrieval.ToolRouteCandidate {
 		})
 	}
 	return candidates
+}
+
+func routedToolsNeedFullInvestigation(candidates []retrieval.ToolRouteCandidate, selected []string) bool {
+	if len(selected) == 0 {
+		return false
+	}
+	temporal := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Temporal {
+			temporal[candidate.ID] = struct{}{}
+		}
+	}
+	for _, id := range selected {
+		if _, ok := temporal[id]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func snapshotToolIDs(snapshot tool.Snapshot) []string {
@@ -728,7 +747,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	}
 	ctx = withSessionToolScope(ctx, conversation, userID)
 
-	maxSteps := svc.agent.MaxStepsForPlan(question, plan)
+	maxSteps := svc.agent.MaxStepsForContext(question, plan, conversation.FullInvestigation)
 	if svc.runStore != nil {
 		if err := svc.runStore.SetMaxSteps(runID, maxSteps); err != nil {
 			log.ErrorfCtx(ctx, "[qa] update run max steps: %v", err)
@@ -747,6 +766,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	}
 	conversation.RolePrompt = rolePrompt
 	conversation.Instructions = instructions
+	conversation.EvidenceSeeded = len(recalled) > 0 || rc != nil && rc.Text != ""
 
 	go func() {
 		res, runErr := svc.agent.runWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, snapshot)
@@ -755,8 +775,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 			svc.hub.Complete(runID, outcome)
 		}
 
-		if outcome.Status == RunStatusDone && res != nil &&
-			svc.memory != nil && userID != 0 && res.Answer != "" {
+		if memoryExtractionAllowed(outcome, res) && svc.memory != nil && userID != 0 {
 			memCtx := llm.WithUsagePhase(context.WithoutCancel(ctx), llm.PhaseMemoryExtract)
 			memCtx, memCancel := context.WithTimeout(memCtx, 60*time.Second)
 			extractStarted := time.Now()
@@ -804,6 +823,11 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	}()
 
 	return &AskResult{RunID: runID, Context: rc}, nil
+}
+
+func memoryExtractionAllowed(outcome RunOutcome, result *RunResult) bool {
+	return outcome.Status == RunStatusDone && result != nil &&
+		!result.ForcedConclusion && strings.TrimSpace(result.Answer) != ""
 }
 
 func buildRagCtx(history []llm.Message) string {
@@ -905,9 +929,14 @@ func (rs *RunStore) Complete(id string, outcome RunOutcome) error {
 	}
 	result, err := rs.db.Exec(
 		`UPDATE agent_runs
-		 SET status=?,step_count=?,token_used=?,ended_at=?
+		 SET status=?,step_count=?,token_used=?,evidence_status=?,forced_conclusion=?,
+			evidence_result_count=?,tool_call_count=?,tool_failure_count=?,partial_result_count=?,
+			omitted_evidence_count=?,ended_at=?
 		 WHERE id=? AND status IN (?,?)`,
-		outcome.Status, outcome.StepCount, outcome.TokenUsed,
+		outcome.Status, outcome.StepCount, outcome.TokenUsed, outcome.Evidence.Status,
+		outcome.Evidence.ForcedConclusion, outcome.Evidence.ResultCount,
+		outcome.Evidence.ToolCallCount, outcome.Evidence.ToolFailureCount,
+		outcome.Evidence.PartialResultCount, outcome.Evidence.OmittedItemCount,
 		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)), id,
 		RunStatusRunning, RunStatusPaused,
 	)
@@ -1066,7 +1095,8 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 
 	q := `SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,
 		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
-		peak_input_tokens,peak_reserved_tokens,started_at,ended_at FROM agent_runs`
+		peak_input_tokens,peak_reserved_tokens,evidence_status,forced_conclusion,evidence_result_count,
+		tool_call_count,tool_failure_count,partial_result_count,omitted_evidence_count,started_at,ended_at FROM agent_runs`
 	countQ := `SELECT COUNT(*) FROM agent_runs`
 	var where []string
 	var args []any
@@ -1120,7 +1150,8 @@ func (rs *RunStore) Get(id string) (*RunDetail, error) {
 	r, err := scanRunRecord(rs.db.QueryRow(
 		`SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,
 			input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
-			peak_input_tokens,peak_reserved_tokens,started_at,ended_at
+			peak_input_tokens,peak_reserved_tokens,evidence_status,forced_conclusion,evidence_result_count,
+			tool_call_count,tool_failure_count,partial_result_count,omitted_evidence_count,started_at,ended_at
 		 FROM agent_runs WHERE id=?`, id))
 	if err != nil {
 		return nil, err
@@ -1155,6 +1186,41 @@ func (rs *RunStore) Get(id string) (*RunDetail, error) {
 		return nil, err
 	}
 	return &RunDetail{RunRecord: r, Steps: steps, LLMCalls: llmCalls}, nil
+}
+
+// EvidenceByIDs loads one bounded page of persisted evidence summaries.
+func (rs *RunStore) EvidenceByIDs(userID int64, sessionID string, runIDs []string) (map[string]EvidenceMetrics, error) {
+	evidence := make(map[string]EvidenceMetrics, len(runIDs))
+	if len(runIDs) == 0 {
+		return evidence, nil
+	}
+	args := make([]any, 0, len(runIDs)+2)
+	args = append(args, userID, sessionID)
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	query := `SELECT id,evidence_status,forced_conclusion,evidence_result_count,tool_call_count,
+	                 tool_failure_count,partial_result_count,omitted_evidence_count
+	          FROM agent_runs WHERE user_id=? AND session_id=? AND id IN (` +
+		strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",") + `)`
+	rows, err := rs.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		var metrics EvidenceMetrics
+		if err := rows.Scan(
+			&runID, &metrics.Status, &metrics.ForcedConclusion, &metrics.ResultCount,
+			&metrics.ToolCallCount, &metrics.ToolFailureCount, &metrics.PartialResultCount,
+			&metrics.OmittedItemCount,
+		); err != nil {
+			return nil, err
+		}
+		evidence[runID] = metrics
+	}
+	return evidence, rows.Err()
 }
 
 // PeakInputTokens reads only the metric needed by session compaction.
@@ -1226,7 +1292,10 @@ func scanRunRecord(row rowScanner) (RunRecord, error) {
 		&record.Mode, &record.MaxSteps, &record.StepCount, &record.TokenUsed,
 		&record.InputTokens, &record.CachedInputTokens, &record.OutputTokens,
 		&record.ReasoningTokens, &record.TotalTokens, &record.LLMCallCount,
-		&record.PeakInputTokens, &record.PeakReservedTokens, &startedAt, &endedAt); err != nil {
+		&record.PeakInputTokens, &record.PeakReservedTokens, &record.EvidenceStatus,
+		&record.ForcedConclusion, &record.EvidenceResultCount, &record.ToolCallCount,
+		&record.ToolFailureCount, &record.PartialResultCount, &record.OmittedEvidenceCount,
+		&startedAt, &endedAt); err != nil {
 		return record, err
 	}
 	record.StartedAt = store.FormatDatabaseTime(startedAt)
@@ -1289,6 +1358,7 @@ type RunOutcome struct {
 	TokenUsed       int
 	Answer          string
 	SessionMessages []llm.Message
+	Evidence        EvidenceMetrics
 	Err             error
 }
 
@@ -1297,13 +1367,20 @@ func outcomeFor(result *RunResult, runErr error) RunOutcome {
 		if runErr == nil {
 			runErr = errors.New("agent: run returned no result")
 		}
-		return RunOutcome{Status: RunStatusFailed, Err: runErr}
+		return RunOutcome{
+			Status: RunStatusFailed, Err: runErr,
+			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
+		}
 	}
 	outcome := RunOutcome{
 		StepCount:       result.Steps,
 		TokenUsed:       len(result.Answer),
 		Answer:          result.Answer,
 		SessionMessages: append([]llm.Message(nil), result.SessionMessages...),
+		Evidence:        result.Evidence,
+	}
+	if outcome.Evidence.Status == "" {
+		outcome.Evidence.Status = EvidenceUnavailable
 	}
 	switch {
 	case result.Aborted:
@@ -1325,25 +1402,32 @@ func outcomeFor(result *RunResult, runErr error) RunOutcome {
 }
 
 type RunRecord struct {
-	ID                 string    `json:"id"`
-	UserID             int64     `json:"user_id"`
-	SessionID          string    `json:"session_id"`
-	Question           string    `json:"question"`
-	Status             RunStatus `json:"status"`
-	Mode               string    `json:"mode"`
-	MaxSteps           int       `json:"max_steps"`
-	StepCount          int       `json:"step_count"`
-	TokenUsed          int       `json:"token_used"`
-	InputTokens        int64     `json:"input_tokens"`
-	CachedInputTokens  int64     `json:"cached_input_tokens"`
-	OutputTokens       int64     `json:"output_tokens"`
-	ReasoningTokens    int64     `json:"reasoning_tokens"`
-	TotalTokens        int64     `json:"total_tokens"`
-	LLMCallCount       int       `json:"llm_call_count"`
-	PeakInputTokens    int       `json:"peak_input_tokens"`
-	PeakReservedTokens int       `json:"peak_reserved_tokens"`
-	StartedAt          string    `json:"started_at"`
-	EndedAt            string    `json:"ended_at"`
+	ID                   string         `json:"id"`
+	UserID               int64          `json:"user_id"`
+	SessionID            string         `json:"session_id"`
+	Question             string         `json:"question"`
+	Status               RunStatus      `json:"status"`
+	Mode                 string         `json:"mode"`
+	MaxSteps             int            `json:"max_steps"`
+	StepCount            int            `json:"step_count"`
+	TokenUsed            int            `json:"token_used"`
+	InputTokens          int64          `json:"input_tokens"`
+	CachedInputTokens    int64          `json:"cached_input_tokens"`
+	OutputTokens         int64          `json:"output_tokens"`
+	ReasoningTokens      int64          `json:"reasoning_tokens"`
+	TotalTokens          int64          `json:"total_tokens"`
+	LLMCallCount         int            `json:"llm_call_count"`
+	PeakInputTokens      int            `json:"peak_input_tokens"`
+	PeakReservedTokens   int            `json:"peak_reserved_tokens"`
+	EvidenceStatus       EvidenceStatus `json:"evidence_status"`
+	ForcedConclusion     bool           `json:"forced_conclusion"`
+	EvidenceResultCount  int            `json:"evidence_result_count"`
+	ToolCallCount        int            `json:"tool_call_count"`
+	ToolFailureCount     int            `json:"tool_failure_count"`
+	PartialResultCount   int            `json:"partial_result_count"`
+	OmittedEvidenceCount int            `json:"omitted_evidence_count"`
+	StartedAt            string         `json:"started_at"`
+	EndedAt              string         `json:"ended_at"`
 }
 
 // RunUsageSummary is the token snapshot needed by the live QA composer.

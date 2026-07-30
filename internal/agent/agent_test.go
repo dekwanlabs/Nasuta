@@ -506,6 +506,9 @@ func TestRunRecoversFromEmptyStopWithForcedConclusion(t *testing.T) {
 	if result.Err != nil || result.Answer != "根据已有证据给出结论。" {
 		t.Fatalf("result = %#v", result)
 	}
+	if !result.ForcedConclusion || !result.Evidence.ForcedConclusion || result.Evidence.Status != EvidenceNotRequired {
+		t.Fatalf("forced conclusion evidence = %#v", result.Evidence)
+	}
 	if atomic.LoadInt32(&calls) != 2 {
 		t.Fatalf("LLM calls = %d, want 2", calls)
 	}

@@ -65,6 +65,32 @@ func TestEmitHubEventWritesToolDurationSSE(t *testing.T) {
 	}
 }
 
+func TestEmitHubEventWritesEvidenceMetricsSSE(t *testing.T) {
+	var runEndData string
+	terminal := agent.RunTerminal{
+		Status: agent.RunStatusDone,
+		Evidence: agent.EvidenceMetrics{
+			Status: agent.EvidencePartial, ForcedConclusion: true,
+			ToolCallCount: 3, ResultCount: 2, ToolFailureCount: 1,
+			PartialResultCount: 1, OmittedItemCount: 4,
+		},
+	}
+	emitHubEvent("answer", agent.SSEEvent{Terminal: &terminal}, "run", func(name, data string) {
+		if name == "run_end" {
+			runEndData = data
+		}
+	})
+	for _, want := range []string{
+		`"status":"partial"`, `"forced_conclusion":true`, `"tool_call_count":3`,
+		`"result_count":2`, `"tool_failure_count":1`, `"partial_result_count":1`,
+		`"omitted_item_count":4`,
+	} {
+		if !strings.Contains(runEndData, want) {
+			t.Fatalf("run_end data %q missing %q", runEndData, want)
+		}
+	}
+}
+
 func TestEmitHubEventWritesTraceSSE(t *testing.T) {
 	var eventName, data string
 	event := domain.EvaluationTrace{Sequence: 1, Node: "vector_search", Status: "completed"}

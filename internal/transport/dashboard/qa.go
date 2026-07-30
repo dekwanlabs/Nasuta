@@ -36,6 +36,17 @@ type qaRunControlReq struct {
 	Message string `json:"message"`
 }
 
+type qaHistoryMessage struct {
+	memory.SessionMessage
+	Evidence *agent.EvidenceMetrics `json:"evidence,omitempty"`
+}
+
+type qaHistoryPage struct {
+	Messages      []qaHistoryMessage `json:"messages"`
+	NextBeforeSeq int                `json:"next_before_seq"`
+	HasMore       bool               `json:"has_more"`
+}
+
 type sseWriter struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
@@ -542,7 +553,48 @@ func (handler *Handler) APIQASessionMessages(w http.ResponseWriter, r *http.Requ
 		httputil.WriteErr(w, err)
 		return
 	}
-	httputil.WriteJSON(w, page)
+	historyPage, err := handler.qaHistoryPage(r.Context(), currentUserID(r), r.PathValue("id"), page)
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, historyPage)
+}
+
+func (handler *Handler) qaHistoryPage(ctx context.Context, userID int64, sessionID string, page *memory.MessagePage) (*qaHistoryPage, error) {
+	result := &qaHistoryPage{
+		Messages:      make([]qaHistoryMessage, len(page.Messages)),
+		NextBeforeSeq: page.NextBeforeSeq,
+		HasMore:       page.HasMore,
+	}
+	runSet := make(map[string]struct{}, len(page.Messages)/2)
+	runIDs := make([]string, 0, len(page.Messages)/2)
+	for i, message := range page.Messages {
+		result.Messages[i].SessionMessage = message
+		if message.RunID == "" {
+			continue
+		}
+		if _, exists := runSet[message.RunID]; exists {
+			continue
+		}
+		runSet[message.RunID] = struct{}{}
+		runIDs = append(runIDs, message.RunID)
+	}
+	runs := handler.runStore()
+	if len(runIDs) == 0 || runs == nil {
+		return result, nil
+	}
+	evidenceByRun, err := runs.EvidenceByIDs(userID, sessionID, runIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load QA history evidence: %w", err)
+	}
+	for i := range result.Messages {
+		metrics, ok := evidenceByRun[result.Messages[i].RunID]
+		if ok {
+			result.Messages[i].Evidence = &metrics
+		}
+	}
+	return result, nil
 }
 
 func (handler *Handler) APIQASessionSave(w http.ResponseWriter, r *http.Request) {
@@ -781,7 +833,9 @@ func emitHubEvent(answerText string, ev agent.SSEEvent, runID string, sseEvent f
 		sseEvent("phase", jsonStr(map[string]string{"text": ev.Phase}))
 	}
 	if ev.Terminal != nil {
-		sseEvent("run_end", jsonStr(map[string]any{"run_id": runID, "status": ev.Terminal.Status}))
+		sseEvent("run_end", jsonStr(map[string]any{
+			"run_id": runID, "status": ev.Terminal.Status, "evidence": ev.Terminal.Evidence,
+		}))
 		if ev.Terminal.Status == agent.RunStatusDone {
 			sseEvent("done", "{}")
 		} else {
@@ -841,10 +895,7 @@ func (handler *Handler) ensureQASessions(w http.ResponseWriter) bool {
 }
 
 func (handler *Handler) runStore() *agent.RunStore {
-	if handler.qa == nil {
-		return nil
-	}
-	return handler.qa.RunStore()
+	return handler.persistentRunStore
 }
 
 func (handler *Handler) memoryStore() *memory.MemoryStore {

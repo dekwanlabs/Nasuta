@@ -46,6 +46,57 @@ func TestOutcomeForRejectsEmptySuccess(t *testing.T) {
 	}
 }
 
+func TestEvidenceMetricsFinalStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		direct bool
+		input  EvidenceMetrics
+		want   EvidenceStatus
+	}{
+		{name: "direct", direct: true, want: EvidenceNotRequired},
+		{name: "missing", input: EvidenceMetrics{ToolCallCount: 1, ToolFailureCount: 1}, want: EvidenceUnavailable},
+		{name: "complete", input: EvidenceMetrics{ToolCallCount: 1, ResultCount: 1}, want: EvidenceComplete},
+		{name: "partial", input: EvidenceMetrics{ToolCallCount: 2, ResultCount: 1, PartialResultCount: 1, OmittedItemCount: 3}, want: EvidencePartial},
+		{name: "forced", input: EvidenceMetrics{ResultCount: 1, ForcedConclusion: true}, want: EvidencePartial},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			metrics := test.input
+			metrics.finalize(test.direct)
+			if metrics.Status != test.want {
+				t.Fatalf("status = %q, want %q", metrics.Status, test.want)
+			}
+		})
+	}
+}
+
+func TestRoutedTemporalToolUsesFullInvestigationBudget(t *testing.T) {
+	candidates := []retrieval.ToolRouteCandidate{
+		{ID: "search_code", Temporal: false},
+		{ID: "observe_logs", Temporal: true},
+	}
+	if !routedToolsNeedFullInvestigation(candidates, []string{"observe_logs"}) {
+		t.Fatal("selected temporal tool did not enable full investigation")
+	}
+	agent := &Agent{cfg: AgentConfig{MaxSteps: 8}}
+	if got := agent.MaxStepsForContext("查一下问题", domain.EvidencePlan{}, true); got != 8 {
+		t.Fatalf("max steps = %d, want 8", got)
+	}
+	if routedToolsNeedFullInvestigation(candidates, []string{"search_code"}) {
+		t.Fatal("non-temporal tool enabled full investigation")
+	}
+}
+
+func TestForcedConclusionCannotExtractLongTermMemory(t *testing.T) {
+	outcome := RunOutcome{Status: RunStatusDone}
+	if memoryExtractionAllowed(outcome, &RunResult{Answer: "answer", ForcedConclusion: true}) {
+		t.Fatal("forced conclusion was eligible for memory extraction")
+	}
+	if !memoryExtractionAllowed(outcome, &RunResult{Answer: "answer"}) {
+		t.Fatal("normal completed answer was not eligible for memory extraction")
+	}
+}
+
 func TestRunStoreCompleteTransitionsOnlyActiveRun(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -53,12 +104,51 @@ func TestRunStoreCompleteTransitionsOnlyActiveRun(t *testing.T) {
 	}
 	defer db.Close()
 	store := &RunStore{db: db}
-	outcome := RunOutcome{Status: RunStatusDone, StepCount: 2, TokenUsed: 12}
+	outcome := RunOutcome{
+		Status: RunStatusDone, StepCount: 2, TokenUsed: 12,
+		Evidence: EvidenceMetrics{
+			Status: EvidencePartial, ForcedConclusion: true, ResultCount: 3,
+			ToolCallCount: 4, ToolFailureCount: 1, PartialResultCount: 2, OmittedItemCount: 5,
+		},
+	}
 	mock.ExpectExec("UPDATE agent_runs").
-		WithArgs(RunStatusDone, 2, 12, sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused).
+		WithArgs(
+			RunStatusDone, 2, 12, EvidencePartial, true, 3, 4, 1, 2, 5,
+			sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused,
+		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := store.Complete("run", outcome); err != nil {
 		t.Fatalf("Complete: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunStoreEvidenceByIDsIsBoundToUserAndSession(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &RunStore{db: db}
+	mock.ExpectQuery(`SELECT id,evidence_status.*FROM agent_runs WHERE user_id=\? AND session_id=\? AND id IN \(\?,\?\)`).
+		WithArgs(int64(42), "session-1", "run-1", "run-2").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "evidence_status", "forced_conclusion", "evidence_result_count", "tool_call_count",
+			"tool_failure_count", "partial_result_count", "omitted_evidence_count",
+		}).AddRow("run-1", EvidencePartial, true, 2, 3, 1, 1, 4))
+
+	evidence, err := store.EvidenceByIDs(42, "session-1", []string{"run-1", "run-2"})
+	if err != nil {
+		t.Fatalf("EvidenceByIDs: %v", err)
+	}
+	metrics, ok := evidence["run-1"]
+	if !ok || metrics.Status != EvidencePartial || !metrics.ForcedConclusion || metrics.OmittedItemCount != 4 {
+		t.Fatalf("evidence = %#v", evidence)
+	}
+	if _, ok := evidence["run-2"]; ok {
+		t.Fatalf("unexpected evidence for absent run: %#v", evidence)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -187,9 +277,15 @@ func TestRunStoreRejectsTerminalOverwrite(t *testing.T) {
 	defer db.Close()
 	store := &RunStore{db: db}
 	mock.ExpectExec("UPDATE agent_runs").
-		WithArgs(RunStatusFailed, 0, 0, sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused).
+		WithArgs(
+			RunStatusFailed, 0, 0, EvidenceUnavailable, false, 0, 0, 0, 0, 0,
+			sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused,
+		).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	err = store.Complete("run", RunOutcome{Status: RunStatusFailed})
+	err = store.Complete("run", RunOutcome{
+		Status:   RunStatusFailed,
+		Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
+	})
 	if !errors.Is(err, ErrRunNotActive) {
 		t.Fatalf("Complete error = %v, want ErrRunNotActive", err)
 	}
