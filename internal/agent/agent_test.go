@@ -279,6 +279,17 @@ func TestRunForcesConclusionAfterToolFailure(t *testing.T) {
 	if got := strings.Join(observer.tokens, ""); got != result.Answer {
 		t.Fatalf("streamed answer = %q, want %q", got, result.Answer)
 	}
+	var failedResult *StepRecord
+	for index := range observer.steps {
+		step := &observer.steps[index]
+		if step.Kind == StepKindToolResult {
+			failedResult = step
+			break
+		}
+	}
+	if failedResult == nil || !failedResult.Failed || !strings.Contains(failedResult.ResultSummary, "backend unavailable") {
+		t.Fatalf("failed tool result step = %#v", failedResult)
+	}
 }
 
 func TestContinueIfNeeded_NoTruncation(t *testing.T) {

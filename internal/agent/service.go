@@ -1541,6 +1541,7 @@ type StepRecord struct {
 	Tool            string    `json:"tool,omitempty"`
 	Args            string    `json:"args,omitempty"`
 	ResultSummary   string    `json:"result_summary,omitempty"`
+	Failed          bool      `json:"failed,omitempty"`
 	Content         string    `json:"content,omitempty"`
 	TokenDelta      int       `json:"token_delta"`
 	ReasoningTokens int       `json:"reasoning_tokens"`

@@ -816,7 +816,10 @@ func emitHubEvent(answerText string, ev agent.SSEEvent, runID string, sseEvent f
 		case agent.StepKindToolCall:
 			sseEvent("tool", jsonStr(map[string]any{"step": ev.Step.StepNo, "name": ev.Step.Tool, "args": ev.Step.Args}))
 		case agent.StepKindToolResult:
-			sseEvent("tool_result", jsonStr(map[string]any{"step": ev.Step.StepNo, "tool": ev.Step.Tool, "summary": ev.Step.ResultSummary, "duration_ms": ev.Step.DurationMs}))
+			sseEvent("tool_result", jsonStr(map[string]any{
+				"step": ev.Step.StepNo, "tool": ev.Step.Tool, "summary": ev.Step.ResultSummary,
+				"failed": ev.Step.Failed, "duration_ms": ev.Step.DurationMs,
+			}))
 		case agent.StepKindAnswer:
 		}
 	}

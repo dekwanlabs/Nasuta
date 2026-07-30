@@ -54,13 +54,13 @@ func TestEmitHubEventWritesLLMTimingSSE(t *testing.T) {
 	}
 }
 
-func TestEmitHubEventWritesToolDurationSSE(t *testing.T) {
+func TestEmitHubEventWritesToolResultSSE(t *testing.T) {
 	var eventName, data string
-	step := agent.StepRecord{StepNo: 4, Kind: agent.StepKindToolResult, Tool: "observe_logs", DurationMs: 1543}
+	step := agent.StepRecord{StepNo: 4, Kind: agent.StepKindToolResult, Tool: "observe_logs", Failed: true, DurationMs: 1543}
 	emitHubEvent("", agent.SSEEvent{Step: &step}, "run", func(name, value string) {
 		eventName, data = name, value
 	})
-	if eventName != "tool_result" || !strings.Contains(data, `"duration_ms":1543`) {
+	if eventName != "tool_result" || !strings.Contains(data, `"duration_ms":1543`) || !strings.Contains(data, `"failed":true`) {
 		t.Fatalf("event=%q data=%q", eventName, data)
 	}
 }
