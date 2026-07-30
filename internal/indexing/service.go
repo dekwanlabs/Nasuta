@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
@@ -192,8 +194,95 @@ func (svc *Service) invalidateToolCaches() {
 }
 
 func (svc *Service) RebuildGraph(ctx context.Context) error {
+	if err := ensureCodegraphConfig(svc.Cfg.WorkspaceRoot); err != nil {
+		return fmt.Errorf("configure codegraph: %w", err)
+	}
 	if err := svc.runCodegraphIndex(ctx); err != nil {
 		return fmt.Errorf("rebuild codegraph: %w", err)
+	}
+	db, err := codegraph.Open(svc.Cfg.WorkspaceRoot)
+	if err != nil {
+		return fmt.Errorf("validate rebuilt codegraph: %w", err)
+	}
+	if db == nil {
+		return fmt.Errorf("validate rebuilt codegraph: database unavailable")
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close rebuilt codegraph: %w", err)
+	}
+	return nil
+}
+
+var codegraphRuntimeExcludes = []string{
+	".nasuta/",
+	".codeloom/",
+	".docs/",
+	"docs/",
+}
+
+func ensureCodegraphConfig(workspaceRoot string) error {
+	path := filepath.Join(workspaceRoot, "codegraph.json")
+	config := make(map[string]json.RawMessage)
+	data, err := os.ReadFile(path)
+	if err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+
+	var excludes []string
+	if raw := config["exclude"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &excludes); err != nil {
+			return fmt.Errorf("parse %s exclude: %w", path, err)
+		}
+	}
+	seen := make(map[string]struct{}, len(excludes)+len(codegraphRuntimeExcludes))
+	for _, pattern := range excludes {
+		seen[pattern] = struct{}{}
+	}
+	changed := false
+	for _, pattern := range codegraphRuntimeExcludes {
+		if _, ok := seen[pattern]; ok {
+			continue
+		}
+		excludes = append(excludes, pattern)
+		seen[pattern] = struct{}{}
+		changed = true
+	}
+	if !changed && data != nil {
+		return nil
+	}
+
+	rawExcludes, err := json.Marshal(excludes)
+	if err != nil {
+		return fmt.Errorf("encode codegraph excludes: %w", err)
+	}
+	config["exclude"] = rawExcludes
+	next, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", path, err)
+	}
+	next = append(next, '\n')
+	if err := os.MkdirAll(workspaceRoot, 0o755); err != nil {
+		return fmt.Errorf("create codegraph workspace %s: %w", workspaceRoot, err)
+	}
+	tmp, err := os.CreateTemp(workspaceRoot, ".codegraph.json-*")
+	if err != nil {
+		return fmt.Errorf("create temporary codegraph config: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(next); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary codegraph config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary codegraph config: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
 }

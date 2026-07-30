@@ -12,6 +12,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
+	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
@@ -201,12 +202,15 @@ func (handler *Handler) CodeSearch(w http.ResponseWriter, r *http.Request) {
 func (handler *Handler) RunbookSearch(w http.ResponseWriter, r *http.Request) {
 	q := httputil.Query(r)
 	query := q.Str("query")
-	limit := q.Int("limit", 10)
+	docID := q.Str("doc_id")
+	limit := q.Int("limit", 3)
 	if q.Err() != nil {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	httputil.WriteJSON(w, handler.tools.RunbookSearch(r.Context(), query, limit, false, ""))
+	httputil.WriteJSON(w, handler.tools.RunbookSearch(r.Context(), knowledge.RunbookQuery{
+		Query: query, DocID: docID, Limit: limit,
+	}))
 }
 
 func (handler *Handler) TraceDeps(w http.ResponseWriter, r *http.Request) {

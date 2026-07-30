@@ -271,6 +271,63 @@ func (s *DocStore) RunbookMetas() ([]domain.RunbookRecord, error) {
 	return out, nil
 }
 
+// RunbookMetaByID confirms one runbook without loading its body.
+func (s *DocStore) RunbookMetaByID(id string) (domain.RunbookRecord, error) {
+	var rb domain.RunbookRecord
+	err := s.db.QueryRow(
+		`SELECT id, title, filename, COALESCE(kind,'')
+		 FROM documents WHERE id = ? AND kind IN (`+strings.TrimRight(strings.Repeat("?,", len(domain.RunbookKinds)), ",")+`)`,
+		append([]any{id}, stringSliceToAny(domain.RunbookKinds)...)...,
+	).Scan(&rb.ID, &rb.Title, &rb.Path, &rb.Scope)
+	if err != nil {
+		return domain.RunbookRecord{}, err
+	}
+	rb.Repo = "docs"
+	rb.Confidence = 1
+	return rb, nil
+}
+
+// SearchRunbooksKeyword bounds fallback retrieval at the storage boundary.
+func (s *DocStore) SearchRunbooksKeyword(query string, limit int) ([]domain.RunbookRecord, error) {
+	if limit < 1 {
+		return []domain.RunbookRecord{}, nil
+	}
+	kinds := stringSliceToAny(domain.RunbookKinds)
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(kinds)), ",")
+	like := "%" + query + "%"
+	args := append(kinds, like, like, like, limit)
+	rows, err := s.db.Query(
+		`SELECT id, title, filename, COALESCE(kind,''), COALESCE(content,'')
+		 FROM documents
+		 WHERE kind IN (`+placeholders+`) AND (id LIKE ? OR title LIKE ? OR content LIKE ?)
+		 ORDER BY updated_at DESC LIMIT ?`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]domain.RunbookRecord, 0, limit)
+	for rows.Next() {
+		var rb domain.RunbookRecord
+		if err := rows.Scan(&rb.ID, &rb.Title, &rb.Path, &rb.Scope, &rb.Text); err != nil {
+			return nil, err
+		}
+		rb.Repo = "docs"
+		rb.Confidence = 1
+		out = append(out, rb)
+	}
+	return out, rows.Err()
+}
+
+func stringSliceToAny(values []string) []any {
+	out := make([]any, len(values))
+	for i, value := range values {
+		out[i] = value
+	}
+	return out
+}
+
 // RunbookByID loads one runbook body and frontmatter.
 func (s *DocStore) RunbookByID(id string) (domain.RunbookRecord, error) {
 	d, err := s.GetDoc(id)

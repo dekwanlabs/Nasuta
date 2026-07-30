@@ -9,6 +9,21 @@ import (
 // ToolID is the stable identity shared by Agent and MCP.
 type ToolID string
 
+// ReferenceType identifies a canonical entity surfaced by retrieval.
+type ReferenceType string
+
+const (
+	ReferenceRunbook ReferenceType = "runbook"
+	ReferenceService ReferenceType = "service"
+	ReferenceSymbol  ReferenceType = "symbol"
+)
+
+// ReferenceInput declares which known entity types one argument accepts.
+type ReferenceInput struct {
+	Argument string
+	Accepts  []ReferenceType
+}
+
 // Kind separates read operations from approval-gated writes.
 type Kind string
 
@@ -139,9 +154,9 @@ func TimeRangeFromContext(ctx context.Context) (TimeRange, bool) {
 
 // Reference identifies evidence returned by a tool.
 type Reference struct {
-	Type   string `json:"type"`
-	Label  string `json:"label"`
-	Target string `json:"target"`
+	Type   ReferenceType `json:"type"`
+	Label  string        `json:"label"`
+	Target string        `json:"target"`
 }
 
 // EvidenceCoverage reports bounded omissions made by the tool owner.
@@ -183,25 +198,27 @@ type RoutingSpec struct {
 
 // Tool is the single contract consumed by Agent and MCP.
 type Tool struct {
-	ID          ToolID
-	Description string
-	Kind        Kind
-	InputSchema JSONSchema
-	Routing     *RoutingSpec
-	Prefetch    *PrefetchSpec
-	Handler     Handler
-	MCPHidden   bool
+	ID              ToolID
+	Description     string
+	Kind            Kind
+	InputSchema     JSONSchema
+	ReferenceInputs []ReferenceInput
+	Routing         *RoutingSpec
+	Prefetch        *PrefetchSpec
+	Handler         Handler
+	MCPHidden       bool
 }
 
 // ReadTool is the only tool shape exposed to upper-layer compositions.
 type ReadTool struct {
-	ID          ToolID
-	Description string
-	InputSchema JSONSchema
-	Routing     *RoutingSpec
-	Prefetch    *PrefetchSpec
-	Handler     Handler
-	MCPHidden   bool
+	ID              ToolID
+	Description     string
+	InputSchema     JSONSchema
+	ReferenceInputs []ReferenceInput
+	Routing         *RoutingSpec
+	Prefetch        *PrefetchSpec
+	Handler         Handler
+	MCPHidden       bool
 }
 
 // ReadToolSet is one owner's complete desired read-tool catalog.
@@ -213,7 +230,8 @@ type ReadToolSet struct {
 func (candidate ReadTool) tool() Tool {
 	return Tool{
 		ID: candidate.ID, Description: candidate.Description, Kind: KindRead,
-		InputSchema: candidate.InputSchema, Routing: candidate.Routing, Prefetch: candidate.Prefetch,
+		InputSchema: candidate.InputSchema, ReferenceInputs: candidate.ReferenceInputs,
+		Routing: candidate.Routing, Prefetch: candidate.Prefetch,
 		Handler: candidate.Handler, MCPHidden: candidate.MCPHidden,
 	}
 }

@@ -262,6 +262,63 @@ func TestReadRegistryReconcileCannotReplaceWriteTool(t *testing.T) {
 	}
 }
 
+func TestCandidateToolsAreDerivedFromCurrentSnapshot(t *testing.T) {
+	registry := NewRegistry()
+	handler := HandlerFunc(func(context.Context, Arguments) (Result, error) {
+		return Result{Content: "ok"}, nil
+	})
+	runbook := Tool{
+		ID: "runbook_reader", Description: "reads runbooks", Kind: KindRead,
+		InputSchema: JSONSchema{"type": "object", "properties": map[string]any{
+			"doc_id": map[string]any{"type": "string"},
+		}},
+		ReferenceInputs: []ReferenceInput{{Argument: "doc_id", Accepts: []ReferenceType{ReferenceRunbook}}},
+		Handler:         handler,
+	}
+	if err := registry.Register(runbook); err != nil {
+		t.Fatal(err)
+	}
+	if got := registry.Snapshot(ReadPolicy()).CandidateTools(ReferenceRunbook); len(got) != 1 || got[0] != "runbook_reader" {
+		t.Fatalf("candidate tools = %v", got)
+	}
+	if err := registry.Unregister("runbook_reader"); err != nil {
+		t.Fatal(err)
+	}
+	if got := registry.Snapshot(ReadPolicy()).CandidateTools(ReferenceRunbook); len(got) != 0 {
+		t.Fatalf("removed tool remained a candidate: %v", got)
+	}
+}
+
+func TestReadToolReferenceDeclarationsMatchNativeTools(t *testing.T) {
+	registry := NewRegistry()
+	publisher := NewReadRegistry(registry)
+	handler := HandlerFunc(func(context.Context, Arguments) (Result, error) {
+		return Result{Content: "ok"}, nil
+	})
+	if err := publisher.Reconcile(ReadToolSet{
+		Owner: "extension",
+		Tools: []ReadTool{{
+			ID: "extension_runbook", Description: "extension runbook reader",
+			InputSchema: JSONSchema{"type": "object", "properties": map[string]any{
+				"doc_id": map[string]any{"type": "string"},
+			}},
+			ReferenceInputs: []ReferenceInput{{Argument: "doc_id", Accepts: []ReferenceType{ReferenceRunbook}}},
+			Handler:         handler,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := registry.Snapshot(ReadPolicy())
+	candidates := snapshot.CandidateTools(ReferenceRunbook)
+	if len(candidates) != 1 || candidates[0] != "extension_runbook" {
+		t.Fatalf("extension candidates = %v", candidates)
+	}
+	registered, ok := snapshot.Get("extension_runbook")
+	if !ok || len(registered.ReferenceInputs) != 1 || registered.ReferenceInputs[0].Argument != "doc_id" {
+		t.Fatalf("extension declaration = %#v", registered.ReferenceInputs)
+	}
+}
+
 func testReadTool(id ToolID, content string) ReadTool {
 	candidate := testTool(id, content)
 	return ReadTool{

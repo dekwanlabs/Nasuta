@@ -23,6 +23,7 @@ type codeDoc struct {
 	filePath      string
 	methodSig     string
 	funcName      string
+	docID         string
 	kind          string
 	startLine     int
 	endLine       int

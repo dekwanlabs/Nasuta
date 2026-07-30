@@ -40,6 +40,8 @@ type Deps struct {
 // docStore is the runbook-facing subset of the document store.
 type docStore interface {
 	RunbookMetas() ([]domain.RunbookRecord, error)
+	RunbookMetaByID(id string) (domain.RunbookRecord, error)
+	SearchRunbooksKeyword(query string, limit int) ([]domain.RunbookRecord, error)
 	RunbookByID(id string) (domain.RunbookRecord, error)
 	CountRunbooks() (int, error)
 }
@@ -211,8 +213,8 @@ func (srv *Service) semanticServiceNames(ctx context.Context, query string, limi
 }
 
 // RunbookSearch searches the runbook corpus with semantic and keyword fallback.
-func (srv *Service) RunbookSearch(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) map[string]any {
-	result, err := srv.RunbookSearchResult(ctx, query, limit, includeText, scopeFilter)
+func (srv *Service) RunbookSearch(ctx context.Context, query knowledge.RunbookQuery) map[string]any {
+	result, err := srv.RunbookSearchResult(ctx, query)
 	if err != nil {
 		return map[string]any{"matches": nil, "semantic": false, "error": err.Error()}
 	}
@@ -220,17 +222,20 @@ func (srv *Service) RunbookSearch(ctx context.Context, query string, limit int, 
 }
 
 // RunbookSearchResult returns the runbook payload without hiding store failures.
-func (srv *Service) RunbookSearchResult(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (map[string]any, error) {
-	limit = clampInt(limit, 1, 100)
-	result, err := srv.FindRunbooks(ctx, query, limit, includeText, scopeFilter)
+func (srv *Service) RunbookSearchResult(ctx context.Context, query knowledge.RunbookQuery) (map[string]any, error) {
+	query.Limit = clampInt(query.Limit, 1, 10)
+	result, err := srv.FindRunbooks(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"matches": runbookSearchHitsToMaps(result.Matches), "semantic": result.Semantic}, nil
+	return map[string]any{
+		"matches": result.Matches, "semantic": result.Semantic,
+		"docScoped": result.DocScoped, "truncated": result.Truncated,
+	}, nil
 }
 
 // FindRunbooks returns typed runbook matches for internal consumers.
-func (srv *Service) FindRunbooks(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (result domain.SearchResult[domain.RunbookSearchHit], resultErr error) {
+func (srv *Service) FindRunbooks(ctx context.Context, query knowledge.RunbookQuery) (result domain.RunbookSearchResult, resultErr error) {
 	started := time.Now()
 	if domain.TraceEnabled(ctx) {
 		defer func() {
@@ -242,97 +247,98 @@ func (srv *Service) FindRunbooks(ctx context.Context, query string, limit int, i
 			}
 			domain.RecordTrace(ctx, domain.EvaluationTrace{
 				Node: "runbook_search", Status: status, DurationMS: time.Since(started).Milliseconds(),
-				Input: map[string]any{"query": query, "limit": limit, "scope": scopeFilter}, Output: output,
+				Input: map[string]any{"query": query.Query, "limit": query.Limit, "doc_id": query.DocID}, Output: output,
 			})
 		}()
 	}
 	if srv.docStore == nil {
-		return domain.SearchResult[domain.RunbookSearchHit]{Matches: []domain.RunbookSearchHit{}}, nil
+		return domain.RunbookSearchResult{Matches: []domain.RunbookSearchHit{}, DocScoped: query.DocID != ""}, nil
 	}
-	all, err := srv.docStore.RunbookMetas()
-	if err != nil {
-		return domain.SearchResult[domain.RunbookSearchHit]{}, err
-	}
-	if scopeFilter != "" {
-		all = filterRunbooksByScope(all, scopeFilter)
-	}
-
-	strip := !includeText
 	if srv.semanticEnabled() {
-		vecs, embErr := srv.embedder.Embed(ctx, []string{query})
-		if embErr != nil || len(vecs) == 0 {
-			log.InfofCtx(ctx, "[runbook_search] embed failed (err=%v vecs=%d) query=%q → keyword fallback", embErr, len(vecs), query)
-		} else {
-			// Over-fetch because chunk-level hits and dedupe shrink the final set.
-			fetchLimit := max(limit*4, 12)
-			hits, searchErr := srv.semantic.Search(ctx, semantic.Query{
-				DenseVector: vecs[0], Filter: semantic.Filter{Keywords: map[string]string{"kind": "runbook"}}, Limit: fetchLimit,
-			})
-			if searchErr != nil {
-				log.InfofCtx(ctx, "[runbook_search] semantic search error: %v query=%q → keyword fallback", searchErr, query)
-			} else {
-				scored := runbooksFromHits(hits, all)
-				log.InfofCtx(ctx, "[runbook_search] semantic hits=%d → joined=%d docs (metas=%d, scopeFilter=%q) query=%q", len(hits), len(scored), len(all), scopeFilter, query)
-				if includeText {
-					// Bodies stay lazy so the common title-only path remains cheap.
-					for i := range scored {
-						if scored[i].rec.Text != "" {
-							continue
-						}
-						if rb, gerr := srv.docStore.RunbookByID(scored[i].rec.ID); gerr == nil {
-							scored[i].rec.Text = rb.Text
-							scored[i].rec.Tags = rb.Tags
-						}
-					}
-				}
-				if len(scored) > limit {
-					scored = scored[:limit]
-				}
-				if len(scored) > 0 {
-					return domain.SearchResult[domain.RunbookSearchHit]{Matches: runbookHitsToTyped(scored, strip), Semantic: true}, nil
-				}
+		var meta domain.RunbookRecord
+		if query.DocID != "" {
+			var err error
+			meta, err = srv.docStore.RunbookMetaByID(query.DocID)
+			if err != nil {
+				return domain.RunbookSearchResult{}, fmt.Errorf("runbook_not_found: doc_id %q: %w", query.DocID, err)
 			}
 		}
+		vecs, err := srv.embedder.Embed(ctx, []string{query.Query})
+		if err != nil {
+			return domain.RunbookSearchResult{}, fmt.Errorf("embed runbook query: %w", err)
+		}
+		if len(vecs) == 0 {
+			return domain.RunbookSearchResult{}, fmt.Errorf("embed runbook query: empty vector")
+		}
+		keywords := map[string]string{"kind": "runbook"}
+		fetchLimit := max(query.Limit*4, 12)
+		if query.DocID != "" {
+			keywords["doc_id"] = query.DocID
+			fetchLimit = query.Limit + 1
+		}
+		hits, err := srv.semantic.Search(ctx, semantic.Query{
+			DenseVector: vecs[0], Filter: semantic.Filter{Keywords: keywords}, Limit: fetchLimit,
+		})
+		if err != nil {
+			return domain.RunbookSearchResult{}, fmt.Errorf("search runbooks: %w", err)
+		}
+		return runbookResultFromHits(hits, meta, query), nil
 	} else {
 		log.InfofCtx(ctx, "[runbook_search] semantic disabled (Semantic=%v Embedder=%v) → keyword fallback", srv.semantic != nil, srv.embedder != nil)
 	}
-	// Keyword fallback scores metas first, then backfills only the survivors.
-	seed := scoreRunbooks(all, query, limit*2) // meta-only scoring (body empty → 80-tier only)
-	if len(seed) == 0 {
-		return domain.SearchResult[domain.RunbookSearchHit]{Matches: []domain.RunbookSearchHit{}}, nil
+	var all []domain.RunbookRecord
+	if query.DocID != "" {
+		meta, metaErr := srv.docStore.RunbookMetaByID(query.DocID)
+		if metaErr != nil {
+			return domain.RunbookSearchResult{}, fmt.Errorf("runbook_not_found: doc_id %q: %w", query.DocID, metaErr)
+		}
+		full, fullErr := srv.docStore.RunbookByID(meta.ID)
+		if fullErr != nil {
+			return domain.RunbookSearchResult{}, fmt.Errorf("load runbook %q: %w", meta.ID, fullErr)
+		}
+		all = []domain.RunbookRecord{full}
+	} else {
+		var err error
+		all, err = srv.docStore.SearchRunbooksKeyword(query.Query, query.Limit*2)
+		if err != nil {
+			return domain.RunbookSearchResult{}, fmt.Errorf("keyword search runbooks: %w", err)
+		}
 	}
-	q := platform.Normalize(query)
+	seed := scoreRunbooks(all, query.Query, query.Limit*2)
+	if len(seed) == 0 {
+		return domain.RunbookSearchResult{Matches: []domain.RunbookSearchHit{}, DocScoped: query.DocID != ""}, nil
+	}
+	q := platform.Normalize(query.Query)
 	scored := make([]scoredRunbook, 0, len(seed))
 	for _, rb := range seed {
-		if rb.Text == "" {
-			if full, gerr := srv.docStore.RunbookByID(rb.ID); gerr == nil {
-				rb.Text = full.Text
-				rb.Tags = full.Tags
-			}
-		}
 		if sc := scoreRunbook(rb, q); sc > 0 {
 			scored = append(scored, scoredRunbook{rb, sc})
 		}
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
-	n := min(len(scored), limit)
+	n := min(len(scored), query.Limit)
 	out := make([]domain.RunbookSearchHit, n)
 	for i := range n {
 		rb := scored[i].rec
-		if strip {
-			rb.Text = ""
-		}
 		evidenceClass, trustTier := domain.EvidenceForRunbookScope(rb.Scope)
-		out[i] = domain.RunbookSearchHit{Record: rb, Score: float64(scored[i].score), EvidenceClass: evidenceClass, TrustTier: trustTier}
+		text := rb.Text
+		if runes := []rune(text); len(runes) > 4000 {
+			text = string(runes[:4000])
+		}
+		out[i] = domain.RunbookSearchHit{
+			DocID: rb.ID, Title: rb.Title, Path: rb.Path, DocKind: rb.Scope,
+			EvidenceClass: evidenceClass, TrustTier: trustTier,
+			Chunks: []domain.RunbookChunk{{ChunkText: text}},
+		}
 	}
-	return domain.SearchResult[domain.RunbookSearchHit]{Matches: out}, nil
+	return domain.RunbookSearchResult{Matches: out, DocScoped: query.DocID != ""}, nil
 }
 
 func traceRunbookNames(matches []domain.RunbookSearchHit) []string {
 	limit := min(len(matches), 10)
 	names := make([]string, 0, limit)
 	for _, match := range matches[:limit] {
-		names = append(names, match.Record.Title)
+		names = append(names, match.Title)
 	}
 	return names
 }
@@ -347,10 +353,6 @@ func filterRunbooksByScope(all []domain.RunbookRecord, scope string) []domain.Ru
 	}
 	return out
 }
-
-// SearchRunbookBySvc was removed because it pulled every runbook body from MySQL.
-// RunbookSearch now covers the same use case via semantic recall and doc_id join.
-// See collectRunbooks.
 
 func (srv *Service) CodeSearch(ctx context.Context, query, lang string, limit int) map[string]any {
 	result, err := srv.CodeSearchResult(ctx, query, lang, limit)
@@ -410,8 +412,8 @@ func (srv *Service) TraceDependencies(ctx context.Context, query knowledge.Depen
 
 // SearchRunbooks exposes typed runbook search to extensions.
 func (srv *Service) SearchRunbooks(ctx context.Context, query knowledge.RunbookQuery) (knowledge.RunbookSearchResult, error) {
-	query.Limit = clampInt(query.Limit, 1, 100)
-	found, err := srv.FindRunbooks(ctx, query.Query, query.Limit, false, "")
+	query.Limit = clampInt(query.Limit, 1, 10)
+	found, err := srv.FindRunbooks(ctx, query)
 	if err != nil {
 		return knowledge.RunbookSearchResult{}, err
 	}
@@ -449,26 +451,25 @@ func toCodeSearchResult(found domain.SearchResult[domain.CodeSearchHit]) knowled
 }
 
 // toRunbookSearchResult maps the internal typed answer onto the stable public contract.
-func toRunbookSearchResult(found domain.SearchResult[domain.RunbookSearchHit]) knowledge.RunbookSearchResult {
+func toRunbookSearchResult(found domain.RunbookSearchResult) knowledge.RunbookSearchResult {
 	matches := make([]knowledge.RunbookSearchHit, 0, len(found.Matches))
 	for _, hit := range found.Matches {
+		chunks := make([]knowledge.RunbookChunk, 0, len(hit.Chunks))
+		for _, chunk := range hit.Chunks {
+			chunks = append(chunks, knowledge.RunbookChunk{
+				ChunkIndex: chunk.ChunkIndex, SectionHeader: chunk.SectionHeader,
+				ChunkText: chunk.ChunkText, SemanticScore: chunk.SemanticScore,
+			})
+		}
 		matches = append(matches, knowledge.RunbookSearchHit{
-			Record: knowledge.RunbookRecord{
-				ID:    hit.Record.ID,
-				Repo:  hit.Record.Repo,
-				Title: hit.Record.Title,
-				Path:  hit.Record.Path,
-				Scope: hit.Record.Scope,
-				Tags:  hit.Record.Tags,
-			},
-			SectionHeader: hit.SectionHeader,
-			ChunkText:     hit.ChunkText,
-			Score:         hit.Score,
-			EvidenceClass: hit.EvidenceClass,
-			TrustTier:     hit.TrustTier,
+			DocID: hit.DocID, Title: hit.Title, Path: hit.Path, DocKind: hit.DocKind,
+			EvidenceClass: hit.EvidenceClass, TrustTier: hit.TrustTier, Chunks: chunks,
 		})
 	}
-	return knowledge.RunbookSearchResult{Matches: matches, Semantic: found.Semantic}
+	return knowledge.RunbookSearchResult{
+		Matches: matches, Semantic: found.Semantic,
+		DocScoped: found.DocScoped, Truncated: found.Truncated,
+	}
 }
 
 // toServiceSearchResult maps the internal typed answer onto the stable public contract.
@@ -826,11 +827,18 @@ func (srv *Service) DocGapCheckResult(ctx context.Context, serviceName string) (
 	if err != nil {
 		return nil, err
 	}
-	hit := scoreServices(all, serviceName, 1)
-	if len(hit) == 0 {
-		return map[string]any{"service": serviceName, "found": false, "missing": []string{"service-card"}}, nil
+	var svc domain.ServiceRecord
+	found := false
+	for _, candidate := range all {
+		if candidate.ServiceName == serviceName {
+			svc = candidate
+			found = true
+			break
+		}
 	}
-	svc := hit[0]
+	if !found {
+		return nil, fmt.Errorf("service_not_found: service %q", serviceName)
+	}
 	endpoints, err := srv.db.EndpointCountFor(ctx, svc.ServiceName)
 	if err != nil {
 		return nil, fmt.Errorf("endpoint count for %q: %w", svc.ServiceName, err)
@@ -1048,76 +1056,88 @@ func mergeServiceMatches(semNames []string, all, base []domain.ServiceRecord, li
 	return out
 }
 
-// scoredRunbookHit pairs a runbook with its dense similarity score.
-type scoredRunbookHit struct {
-	rec           domain.RunbookRecord
-	score         float32
-	semanticScore float32
-	evidenceClass string
-	trustTier     int
-	chunkText     string // matched chunk body focused for reranking
-	sectionHeader string // the matched chunk's section heading
+func runbookResultFromHits(hits []semantic.Hit, meta domain.RunbookRecord, query knowledge.RunbookQuery) domain.RunbookSearchResult {
+	result := domain.RunbookSearchResult{
+		Matches: []domain.RunbookSearchHit{}, Semantic: true, DocScoped: query.DocID != "",
+	}
+	if query.DocID != "" {
+		seen := make(map[int]struct{}, query.Limit+1)
+		chunks := make([]domain.RunbookChunk, 0, query.Limit)
+		for _, hit := range hits {
+			index := intFromPayload(hit.Metadata["chunk_index"])
+			if _, ok := seen[index]; ok {
+				continue
+			}
+			seen[index] = struct{}{}
+			if len(chunks) == query.Limit {
+				result.Truncated = true
+				break
+			}
+			chunks = append(chunks, runbookChunkFromHit(hit, index))
+		}
+		sort.Slice(chunks, func(i, j int) bool { return chunks[i].ChunkIndex < chunks[j].ChunkIndex })
+		if len(chunks) > 0 {
+			class, trust := runbookEvidence(semantic.Hit{}, meta)
+			result.Matches = append(result.Matches, domain.RunbookSearchHit{
+				DocID: meta.ID, Title: meta.Title, Path: meta.Path, DocKind: meta.Scope,
+				EvidenceClass: class, TrustTier: trust, Chunks: chunks,
+			})
+		}
+		return result
+	}
+
+	positions := make(map[string]int, query.Limit)
+	for _, hit := range hits {
+		docID, _ := hit.Metadata["doc_id"].(string)
+		if docID == "" {
+			continue
+		}
+		if position, ok := positions[docID]; ok {
+			if hit.Score > float32(result.Matches[position].Chunks[0].SemanticScore) {
+				result.Matches[position].Chunks[0] = runbookChunkFromHit(hit, intFromPayload(hit.Metadata["chunk_index"]))
+			}
+			continue
+		}
+		if len(result.Matches) == query.Limit {
+			continue
+		}
+		title, _ := hit.Metadata["title"].(string)
+		path, _ := hit.Metadata["path"].(string)
+		kind, _ := hit.Metadata["scope"].(string)
+		if kind == "" {
+			kind, _ = hit.Metadata["doc_kind"].(string)
+		}
+		class, trust := runbookEvidence(hit, domain.RunbookRecord{Scope: kind})
+		positions[docID] = len(result.Matches)
+		result.Matches = append(result.Matches, domain.RunbookSearchHit{
+			DocID: docID, Title: title, Path: path, DocKind: kind,
+			EvidenceClass: class, TrustTier: trust,
+			Chunks: []domain.RunbookChunk{runbookChunkFromHit(hit, intFromPayload(hit.Metadata["chunk_index"]))},
+		})
+	}
+	return result
 }
 
-func runbooksFromHits(hits []semantic.Hit, all []domain.RunbookRecord) []scoredRunbookHit {
-	byID := map[string]domain.RunbookRecord{}
-	byPath := map[string]domain.RunbookRecord{}
-	byDocID := map[string]domain.RunbookRecord{} // doc_id payload → record
-	for _, rb := range all {
-		byID[rb.ID] = rb
-		byPath[rb.Path] = rb
-		// Index by ID under byDocID too — hits with only doc_id (no id/path)
-		// can still be joined. KB docs set doc_id == id, so this is a no-cost fallback.
-		byDocID[rb.ID] = rb
+func runbookChunkFromHit(hit semantic.Hit, index int) domain.RunbookChunk {
+	text, _ := hit.Metadata["text"].(string)
+	section, _ := hit.Metadata["section_header"].(string)
+	return domain.RunbookChunk{
+		ChunkIndex: index, SectionHeader: section,
+		ChunkText: text, SemanticScore: float64(hit.Score),
 	}
-	best := map[string]scoredRunbookHit{}
-	for _, h := range hits {
-		chunkText, _ := h.Metadata["text"].(string)
-		sectionHeader, _ := h.Metadata["section_header"].(string)
-		add := func(rb domain.RunbookRecord) {
-			evidenceClass, trustTier := runbookEvidence(h, rb)
-			score := float32(domain.TrustAdjustedScore(float64(h.Score), trustTier))
-			item := scoredRunbookHit{
-				rec:           rb,
-				score:         score,
-				semanticScore: h.Score,
-				evidenceClass: evidenceClass,
-				trustTier:     trustTier,
-				chunkText:     chunkText,
-				sectionHeader: sectionHeader,
-			}
-			key := rb.ID
-			if key == "" {
-				key = rb.Path
-			}
-			if prev, ok := best[key]; !ok || item.score > prev.score {
-				best[key] = item
-			}
-		}
-		if id, ok := h.Metadata["id"].(string); ok {
-			if rb, found := byID[id]; found {
-				add(rb)
-				continue
-			}
-		}
-		if docID, ok := h.Metadata["doc_id"].(string); ok {
-			if rb, found := byDocID[docID]; found {
-				add(rb)
-				continue
-			}
-		}
-		if p, ok := h.Metadata["path"].(string); ok {
-			if rb, found := byPath[p]; found {
-				add(rb)
-			}
-		}
+}
+
+func intFromPayload(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
 	}
-	out := make([]scoredRunbookHit, 0, len(best))
-	for _, h := range best {
-		out = append(out, h)
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].score > out[j].score })
-	return out
 }
 
 func runbookEvidence(h semantic.Hit, rb domain.RunbookRecord) (string, int) {
@@ -1131,37 +1151,6 @@ func runbookEvidence(h semantic.Hit, rb domain.RunbookRecord) (string, int) {
 		scope, _ = h.Metadata["scope"].(string)
 	}
 	return domain.EvidenceForRunbookScope(scope)
-}
-
-func runbookHitsToTyped(hits []scoredRunbookHit, strip bool) []domain.RunbookSearchHit {
-	out := make([]domain.RunbookSearchHit, 0, len(hits))
-	for _, h := range hits {
-		rb := h.rec
-		if strip {
-			rb.Text = ""
-		}
-		out = append(out, domain.RunbookSearchHit{
-			Record: rb, ChunkText: h.chunkText, SectionHeader: h.sectionHeader,
-			Score: float64(h.score), SemanticScore: float64(h.semanticScore),
-			EvidenceClass: h.evidenceClass, TrustTier: h.trustTier,
-		})
-	}
-	return out
-}
-
-func runbookSearchHitsToMaps(hits []domain.RunbookSearchHit) []map[string]any {
-	out := make([]map[string]any, 0, len(hits))
-	for _, hit := range hits {
-		rb := hit.Record
-		out = append(out, map[string]any{
-			"id": rb.ID, "repo": rb.Repo, "title": rb.Title, "path": rb.Path,
-			"scope": rb.Scope, "tags": rb.Tags, "text": rb.Text, "confidence": rb.Confidence,
-			"chunkText": hit.ChunkText, "sectionHeader": hit.SectionHeader,
-			"score": hit.Score, "semanticScore": hit.SemanticScore,
-			"evidenceClass": hit.EvidenceClass, "trustTier": hit.TrustTier,
-		})
-	}
-	return out
 }
 
 // GetSymbol searches codegraph symbols and loads their source snippets.

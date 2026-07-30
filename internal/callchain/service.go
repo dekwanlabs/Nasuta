@@ -172,11 +172,15 @@ func (service *Service) resolve(ctx context.Context, request Request) (*codegrap
 		}
 		return node, nil, nil
 	}
-	if strings.TrimSpace(request.Query) == "" {
-		return nil, nil, fmt.Errorf("resolve call-chain symbol: query or file+line is required")
+	query := request.Query
+	if strings.TrimSpace(query) == "" {
+		query = request.QualifiedName
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, nil, fmt.Errorf("resolve call-chain symbol: query, qualified_name, or file+line is required")
 	}
 	nodes, err := service.graphDB().SearchSymbols(ctx, codegraph.SymbolQuery{
-		Terms: symbolTerms(request.Query), Limit: 40,
+		Terms: symbolTerms(query), Limit: 40,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -214,10 +218,35 @@ func matchesQualifier(node codegraph.Node, file, qualifiedName string) bool {
 	if file != "" && node.FilePath != file && !strings.HasSuffix(node.FilePath, "/"+strings.Trim(file, "/")) {
 		return false
 	}
-	if qualifiedName != "" && !strings.EqualFold(node.QualifiedName, qualifiedName) {
+	if qualifiedName != "" && !sameQualifiedName(node.QualifiedName, qualifiedName) {
 		return false
 	}
 	return true
+}
+
+func sameQualifiedName(left, right string) bool {
+	leftParts := qualifiedNameParts(left)
+	rightParts := qualifiedNameParts(right)
+	if len(leftParts) != len(rightParts) {
+		return false
+	}
+	for i := range leftParts {
+		if !strings.EqualFold(leftParts[i], rightParts[i]) {
+			return false
+		}
+	}
+	return len(leftParts) > 0
+}
+
+func qualifiedNameParts(name string) []string {
+	return strings.FieldsFunc(name, func(r rune) bool {
+		switch r {
+		case '.', '#', '/', '\\', ':':
+			return true
+		default:
+			return false
+		}
+	})
 }
 
 func ambiguous(nodes []codegraph.Node) bool {

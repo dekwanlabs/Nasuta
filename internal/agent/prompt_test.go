@@ -55,6 +55,14 @@ func TestSystemPromptRequiresEvidenceForPhysicalResourceNames(t *testing.T) {
 	}
 }
 
+func TestSystemPromptPreservesEvidenceStatementBoundaries(t *testing.T) {
+	for _, required := range []string{"Never broaden the subject, scope, or quantifier", "local list cannot establish a global total", "require explicit support for the same subject"} {
+		if !strings.Contains(systemPrompt, required) {
+			t.Fatalf("systemPrompt missing statement-boundary rule %q", required)
+		}
+	}
+}
+
 func TestComposeSystemPromptReplacesRoleSlotBeforeRules(t *testing.T) {
 	for name, template := range map[string]string{
 		"core":   systemPrompt,

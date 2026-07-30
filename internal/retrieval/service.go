@@ -16,8 +16,8 @@ type Service = Retriever
 func runbookTitles(matches []domain.RunbookSearchHit) []string {
 	titles := make([]string, 0, len(matches))
 	for _, match := range matches {
-		if match.Record.Title != "" {
-			titles = append(titles, match.Record.Title)
+		if match.Title != "" {
+			titles = append(titles, match.Title)
 		}
 	}
 	return titles

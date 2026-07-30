@@ -15,8 +15,10 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 // Reference is one source surfaced with retrieved context.
@@ -108,7 +110,7 @@ type toolset interface {
 	FindServices(ctx context.Context, query string, limit int) (domain.SearchResult[domain.ServiceRecord], error)
 	FindCode(ctx context.Context, query, lang string, limit int) (domain.SearchResult[domain.CodeSearchHit], error)
 	FindAPIs(ctx context.Context, service, keyword string, limit int) ([]domain.EndpointRecord, error)
-	FindRunbooks(ctx context.Context, query string, limit int, includeText bool, scopeFilter string) (domain.SearchResult[domain.RunbookSearchHit], error)
+	FindRunbooks(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error)
 	TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error)
 	ServiceModules(ctx context.Context, repos []string) ([]domain.ServiceRecord, error)
 }
@@ -274,7 +276,7 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 
 	go func() {
 		defer wg.Done()
-		result, err := retrieve.tools.FindRunbooks(ctx, searchQuery, 5, true, "")
+		result, err := retrieve.tools.FindRunbooks(ctx, knowledge.RunbookQuery{Query: searchQuery, Limit: 5})
 		if err != nil {
 			log.InfofCtx(ctx, "[qa] runbook search error: %v", err)
 			return
@@ -524,7 +526,7 @@ func (retrieve *Retriever) formatCodePool(ctx context.Context, pool []codeDoc) [
 				fmt.Fprintf(&text, " (%s)", d.kind)
 			}
 			fmt.Fprintf(&text, "\n%s\n", d.text)
-			ref = Reference{Type: "runbook", Label: title, Target: title}
+			ref = Reference{Type: string(tool.ReferenceRunbook), Label: title, Target: d.docID}
 		case "codegraph":
 			text.WriteString("## CodeGraph Deep Analysis\n")
 			text.WriteString(d.text)

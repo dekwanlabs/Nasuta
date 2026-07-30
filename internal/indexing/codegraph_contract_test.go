@@ -30,6 +30,16 @@ func Callee() int { return 1 }
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	worktreePath := filepath.Join(workspace, ".nasuta", "coding", "worktrees", "run-1", "generated.go")
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(worktreePath, []byte("package generated\nfunc RuntimeOnly() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCodegraphConfig(workspace); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if err := runCodegraphAt(ctx, cli, workspace); err != nil {

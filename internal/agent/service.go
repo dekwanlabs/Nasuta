@@ -645,7 +645,7 @@ func (svc *QA) executePrefetch(ctx context.Context, snapshot tool.Snapshot, plan
 		references := make([]retrieval.Reference, 0, len(result.References))
 		for _, ref := range result.References {
 			references = append(references, retrieval.Reference{
-				Type: ref.Type, Label: ref.Label, Target: ref.Target,
+				Type: string(ref.Type), Label: ref.Label, Target: ref.Target,
 			})
 		}
 		blocks = append(blocks, ContextBlock{

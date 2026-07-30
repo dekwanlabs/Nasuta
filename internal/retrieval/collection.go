@@ -80,6 +80,7 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 		return
 	}
 	type chunk struct {
+		docID       string
 		title       string
 		section     string
 		text        string
@@ -95,42 +96,35 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 	dropped := map[string]struct{}{}
 	const maxChunksPerRunbook = 3
 	for _, hit := range runbookHits {
-		rb := hit.Record
-		title := rb.Title
+		title := hit.Title
 		if title == "" {
 			continue
 		}
-		if hit.Score < retrieve.platform.RunbookMinScore {
-			dropped[title] = struct{}{}
-			continue
+		for _, matched := range hit.Chunks {
+			if matched.SemanticScore < retrieve.platform.RunbookMinScore {
+				dropped[title] = struct{}{}
+				continue
+			}
+			text := strings.TrimSpace(matched.ChunkText)
+			if text == "" || len(byTitle[title]) >= maxChunksPerRunbook {
+				continue
+			}
+			if seenText[title] == nil {
+				seenText[title] = map[string]struct{}{}
+			}
+			if _, duplicate := seenText[title][text]; duplicate {
+				continue
+			}
+			seenText[title][text] = struct{}{}
+			if _, ok := seenTitle[title]; !ok {
+				seenTitle[title] = struct{}{}
+				titleOrder = append(titleOrder, title)
+			}
+			byTitle[title] = append(byTitle[title], chunk{
+				docID: hit.DocID, title: title, section: matched.SectionHeader, text: text, scope: hit.DocKind,
+				score: matched.SemanticScore, evidenceCls: hit.EvidenceClass, trust: hit.TrustTier,
+			})
 		}
-		text := hit.ChunkText
-		if text = strings.TrimSpace(text); text == "" {
-			continue
-		}
-		if len(byTitle[title]) >= maxChunksPerRunbook {
-			continue
-		}
-		if seenText[title] == nil {
-			seenText[title] = map[string]struct{}{}
-		}
-		if _, duplicate := seenText[title][text]; duplicate {
-			continue
-		}
-		seenText[title][text] = struct{}{}
-		if _, ok := seenTitle[title]; !ok {
-			seenTitle[title] = struct{}{}
-			titleOrder = append(titleOrder, title)
-		}
-		byTitle[title] = append(byTitle[title], chunk{
-			title:       title,
-			section:     hit.SectionHeader,
-			text:        text,
-			scope:       rb.Scope,
-			score:       hit.SemanticScore,
-			evidenceCls: hit.EvidenceClass,
-			trust:       hit.TrustTier,
-		})
 	}
 	if len(dropped) > 0 {
 		titles := make([]string, 0, len(dropped))
@@ -176,6 +170,7 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 			layer:         "docs",
 			filePath:      title,
 			funcName:      label,
+			docID:         chunks[0].docID,
 			kind:          chunks[0].scope,
 			text:          text,
 			chars:         len(text),

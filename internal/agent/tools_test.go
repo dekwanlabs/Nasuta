@@ -16,6 +16,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
+	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -115,6 +116,54 @@ func TestCodeSearchKeepsRRFSeparateFromCosine(t *testing.T) {
 	if _, leaked := match["semanticScore"]; leaked {
 		t.Fatalf("RRF score must not be exposed as cosine: %#v", match)
 	}
+}
+
+func TestRunbookResultFromHitsDeduplicatesDocumentsByBestChunk(t *testing.T) {
+	hits := []semantic.Hit{
+		runbookHit("doc-a", 3, 0.7),
+		runbookHit("doc-b", 1, 0.8),
+		runbookHit("doc-a", 2, 0.9),
+	}
+	result := runbookResultFromHits(hits, domain.RunbookRecord{}, knowledge.RunbookQuery{Limit: 2})
+
+	if len(result.Matches) != 2 {
+		t.Fatalf("matches = %d, want 2", len(result.Matches))
+	}
+	if got := result.Matches[0].Chunks[0].ChunkIndex; got != 2 {
+		t.Fatalf("doc-a chunk = %d, want best chunk 2", got)
+	}
+	if got := result.Matches[1].DocID; got != "doc-b" {
+		t.Fatalf("second doc = %q, want doc-b", got)
+	}
+}
+
+func TestRunbookResultFromHitsScopesDeduplicatesTruncatesAndSortsChunks(t *testing.T) {
+	hits := []semantic.Hit{
+		runbookHit("doc-a", 4, 0.9),
+		runbookHit("doc-a", 2, 0.8),
+		runbookHit("doc-a", 4, 0.7),
+		runbookHit("doc-a", 3, 0.6),
+	}
+	meta := domain.RunbookRecord{ID: "doc-a", Title: "Architecture", Path: "docs/a.md", Scope: "flow"}
+	result := runbookResultFromHits(hits, meta, knowledge.RunbookQuery{DocID: "doc-a", Limit: 2})
+
+	if !result.Semantic || !result.DocScoped || !result.Truncated {
+		t.Fatalf("result flags = semantic:%v scoped:%v truncated:%v", result.Semantic, result.DocScoped, result.Truncated)
+	}
+	if len(result.Matches) != 1 || len(result.Matches[0].Chunks) != 2 {
+		t.Fatalf("matches = %#v, want one document with two chunks", result.Matches)
+	}
+	chunks := result.Matches[0].Chunks
+	if chunks[0].ChunkIndex != 2 || chunks[1].ChunkIndex != 4 {
+		t.Fatalf("chunk order = [%d %d], want [2 4]", chunks[0].ChunkIndex, chunks[1].ChunkIndex)
+	}
+}
+
+func runbookHit(docID string, chunkIndex int, score float32) semantic.Hit {
+	return semantic.Hit{Score: score, Metadata: map[string]any{
+		"doc_id": docID, "title": docID, "path": "docs/" + docID + ".md", "scope": "flow",
+		"chunk_index": chunkIndex, "section_header": "Section", "text": docID,
+	}}
 }
 
 type fusionSemantic struct {

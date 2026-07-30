@@ -10,6 +10,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
+	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -108,10 +109,13 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		},
 		{
 			ID: "search_code",
-			Description: "Semantic search over indexed source code, config, SQL and docs across all languages. " +
+			Description: "Semantic search over code_chunk source code, config, SQL, and repository Markdown across all languages. It does not search knowledge runbooks or retrieve a known knowledge document. " +
 				"Use it as a fallback to discover an unknown implementation or configuration, not as proof of an exact symbol, complete API route, or call chain. " +
 				"Returns file path, line range and a snippet preview. Requires semantic search to be enabled.",
 			Kind: ToolKindRead,
+			ReferenceInputs: []tool.ReferenceInput{{
+				Argument: "query", Accepts: []tool.ReferenceType{tool.ReferenceService, tool.ReferenceSymbol},
+			}},
 			InputSchema: objectSchema(map[string]any{
 				"query": propString("Natural-language or code-intent query."),
 				"lang":  propString("Optional language filter, e.g. java, python, go, sql, yaml."),
@@ -130,8 +134,11 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 			Description: "Query the codegraph index for exact definitions and source bodies of functions, methods, classes, or interfaces. " +
 				"A definition does not establish its callers or callees; use call tracing for those edges.",
 			Kind: ToolKindRead,
+			ReferenceInputs: []tool.ReferenceInput{{
+				Argument: "query", Accepts: []tool.ReferenceType{tool.ReferenceSymbol},
+			}},
 			InputSchema: objectSchema(map[string]any{
-				"query":          propString("Function name, class name, or service keyword to look up."),
+				"query":          propString("Function, method, class, or interface name; do not pass a service name, document title, or runbook ID."),
 				"file":           propString("Optional canonical repos/... path scope."),
 				"qualified_name": propString("Optional exact qualified name."),
 				"limit":          propInt("Max nodes to return (default 5, max 10)."),
@@ -151,11 +158,15 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"Follow callers from an internal implementation through client adapters to locate upstream controller candidates, then use the authoritative API lookup for their complete routes. " +
 				"Verified service_route hops support cross-service calls; truncated or unresolved frontiers are incomplete, and this is not proof of complete service dependencies.",
 			Kind: ToolKindRead,
+			ReferenceInputs: []tool.ReferenceInput{
+				{Argument: "query", Accepts: []tool.ReferenceType{tool.ReferenceSymbol}},
+				{Argument: "qualified_name", Accepts: []tool.ReferenceType{tool.ReferenceSymbol}},
+			},
 			InputSchema: objectSchema(map[string]any{
 				"query":          propString("Function or method name to trace when file+line is unavailable."),
 				"file":           propString("Optional canonical repos/... source path used for exact location or disambiguation."),
 				"line":           propInt("Optional source line; use with file for an exact semantic-hit start."),
-				"qualified_name": propString("Optional exact qualified name used to disambiguate overloaded names."),
+				"qualified_name": propString("Exact qualified name; may be used alone or with file to disambiguate duplicate definitions."),
 				"direction":      propString("callers | callees | both (default both)."),
 				"max_depth":      propInt("Traversal depth 1-8 (default 3)."),
 				"max_nodes":      propInt("Distinct node budget 1-200 (default 40)."),
@@ -176,15 +187,26 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		},
 		{
 			ID: "search_runbooks",
-			Description: "Search operational runbooks by symptom, task type, or tag for procedures and recovery guidance. " +
-				"Runbooks describe intended operations and do not prove current runtime state or executed behavior.",
+			Description: "Search knowledge documents and operational runbooks covering system architecture, business flows, modules, schemas, business guidance, and operations. " +
+				"When a document ID is known, set doc_id to retrieve relevant chunks only from that document. Knowledge documents describe intended behavior and do not prove current runtime state.",
 			Kind: ToolKindRead,
+			ReferenceInputs: []tool.ReferenceInput{{
+				Argument: "doc_id", Accepts: []tool.ReferenceType{tool.ReferenceRunbook},
+			}},
 			InputSchema: objectSchema(map[string]any{
-				"query": propString("Symptom, task, or keyword to search."),
-				"limit": propInt("Max results (default 10)."),
+				"query":  propString("Fact or behavior to verify in the knowledge corpus."),
+				"doc_id": propString("Optional canonical knowledge document ID."),
+				"limit":  propInt("Max documents or scoped chunks (default 3, max 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.RunbookSearchResult(ctx, args.String("query"), args.Int("limit", 10), false, "")
+				query := args.String("query")
+				if query == "" {
+					return "", fmt.Errorf("search runbooks: query is required")
+				}
+				result, err := svc.RunbookSearchResult(ctx, knowledge.RunbookQuery{
+					Query: query, DocID: args.String("doc_id"),
+					Limit: args.BoundedInt("limit", 3, 1, 10),
+				})
 				if err != nil {
 					return "", err
 				}
@@ -193,8 +215,11 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		},
 		{
 			ID:          "check_docs",
-			Description: "Check documentation coverage and evidence gaps for a service. It does not establish runtime or business facts.",
+			Description: "Check documentation coverage, entrypoints, APIs, dependencies, and source-of-truth coverage for one canonical service name. It does not read or complete a knowledge document and does not establish runtime behavior.",
 			Kind:        ToolKindRead,
+			ReferenceInputs: []tool.ReferenceInput{{
+				Argument: "service", Accepts: []tool.ReferenceType{tool.ReferenceService},
+			}},
 			InputSchema: objectSchema(map[string]any{"service": propString("Service name to check.")}, []string{"service"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				result, err := svc.DocGapCheckResult(ctx, args.String("service"))

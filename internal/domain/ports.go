@@ -2,10 +2,10 @@ package domain
 
 import "context"
 
+// Searcher exposes bounded knowledge lookups to internal consumers.
 type Searcher interface {
 	ServiceLookup(ctx context.Context, query string, limit int) map[string]any
 	CodeSearch(ctx context.Context, query, lang string, limit int) map[string]any
-	RunbookSearch(ctx context.Context, query string, limit int, includeText bool, scope string) map[string]any
 }
 
 type Embedder interface {

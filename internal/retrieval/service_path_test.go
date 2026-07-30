@@ -7,6 +7,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/knowledge"
 )
 
 type servicePathFakeTools struct {
@@ -45,8 +46,8 @@ func TestCollectServicesDoesNotAttachUnscoredEndpoints(t *testing.T) {
 	}
 }
 
-func (f servicePathFakeTools) FindRunbooks(context.Context, string, int, bool, string) (domain.SearchResult[domain.RunbookSearchHit], error) {
-	return domain.SearchResult[domain.RunbookSearchHit]{}, nil
+func (f servicePathFakeTools) FindRunbooks(context.Context, knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+	return domain.RunbookSearchResult{}, nil
 }
 
 func (f servicePathFakeTools) TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error) {

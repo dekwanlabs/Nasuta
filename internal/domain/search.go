@@ -24,13 +24,29 @@ type CodeSearchHit struct {
 	TrustTier     int     `json:"trustTier"`
 }
 
-// RunbookSearchHit combines runbook metadata with the matched chunk evidence.
+// RunbookChunk is one independently traceable document fragment.
+type RunbookChunk struct {
+	ChunkIndex    int     `json:"chunkIndex"`
+	SectionHeader string  `json:"sectionHeader,omitempty"`
+	ChunkText     string  `json:"chunkText"`
+	SemanticScore float64 `json:"semanticScore"`
+}
+
+// RunbookSearchHit groups matched chunks under their source document.
 type RunbookSearchHit struct {
-	Record        RunbookRecord `json:"record"`
-	ChunkText     string        `json:"chunkText,omitempty"`
-	SectionHeader string        `json:"sectionHeader,omitempty"`
-	Score         float64       `json:"score"`
-	SemanticScore float64       `json:"semanticScore,omitempty"`
-	EvidenceClass string        `json:"evidenceClass"`
-	TrustTier     int           `json:"trustTier"`
+	DocID         string         `json:"docId"`
+	Title         string         `json:"title"`
+	Path          string         `json:"path"`
+	DocKind       string         `json:"docKind"`
+	EvidenceClass string         `json:"evidenceClass"`
+	TrustTier     int            `json:"trustTier"`
+	Chunks        []RunbookChunk `json:"chunks"`
+}
+
+// RunbookSearchResult records retrieval mode and bounded omissions.
+type RunbookSearchResult struct {
+	Matches   []RunbookSearchHit `json:"matches"`
+	Semantic  bool               `json:"semantic"`
+	DocScoped bool               `json:"docScoped"`
+	Truncated bool               `json:"truncated"`
 }

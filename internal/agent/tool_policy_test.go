@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -39,7 +40,7 @@ func TestToolSnapshotBlocksToolRegisteredMidRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := llm.ToolCall{ID: "1", Function: llm.ToolFunction{Name: "late", Arguments: `{}`}}
-	result := executor.Execute(context.Background(), snapshot, call, nil, nil)
+	result := executor.Execute(context.Background(), snapshot, call, nil, nil, nil)
 	if !strings.Contains(result.FullContent, "unknown tool") {
 		t.Fatalf("result = %q, want pinned snapshot rejection", result.FullContent)
 	}
@@ -72,6 +73,82 @@ func TestPreferredToolsInstructionIsAdvisory(t *testing.T) {
 	}
 	if strings.Contains(instruction, "must call") || strings.Contains(instruction, "required") {
 		t.Fatalf("preference was expressed as a requirement: %s", instruction)
+	}
+}
+
+func TestReferenceMismatchEnforcesDeclaredToolBoundaries(t *testing.T) {
+	references := map[string]tool.ReferenceType{
+		"flow-system-overview": tool.ReferenceRunbook,
+		"hsds-base-system":     tool.ReferenceService,
+		"NormalizeCommand":     tool.ReferenceSymbol,
+	}
+	runbookTool := referenceTestTool("search_runbooks", "doc_id", tool.ReferenceRunbook)
+	codeTool := referenceTestTool("search_code", "query", tool.ReferenceService, tool.ReferenceSymbol)
+	docsTool := referenceTestTool("check_docs", "service", tool.ReferenceService)
+	symbolTool := referenceTestTool("get_symbol", "query", tool.ReferenceSymbol)
+	traceTool := referenceTestTool("trace_calls", "query", tool.ReferenceSymbol)
+	registry := testRegistry(t, runbookTool, codeTool, docsTool, symbolTool, traceTool)
+	snapshot := registry.Snapshot(tool.ReadPolicy())
+
+	tests := []struct {
+		name      string
+		candidate tool.Tool
+		args      tool.Arguments
+		wantCode  string
+	}{
+		{"runbook accepted by runbook search", runbookTool, tool.Arguments{"doc_id": "flow-system-overview"}, ""},
+		{"runbook rejected by code search", codeTool, tool.Arguments{"query": "flow-system-overview architecture"}, "entity_type_mismatch"},
+		{"runbook rejected by docs check", docsTool, tool.Arguments{"service": "flow-system-overview"}, "entity_type_mismatch"},
+		{"runbook rejected by symbol lookup", symbolTool, tool.Arguments{"query": "flow-system-overview"}, "entity_type_mismatch"},
+		{"service accepted by docs check", docsTool, tool.Arguments{"service": "hsds-base-system"}, ""},
+		{"symbol accepted by symbol lookup", symbolTool, tool.Arguments{"query": "NormalizeCommand"}, ""},
+		{"symbol accepted by call trace", traceTool, tool.Arguments{"query": "NormalizeCommand"}, ""},
+		{"unknown free query allowed", codeTool, tool.Arguments{"query": "command normalization"}, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := referenceMismatch(snapshot, test.candidate, test.args, references)
+			if test.wantCode == "" {
+				if got != "" {
+					t.Fatalf("mismatch = %s, want none", got)
+				}
+				return
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(got), &payload); err != nil {
+				t.Fatalf("decode mismatch: %v", err)
+			}
+			if payload["code"] != test.wantCode {
+				t.Fatalf("code = %v, want %s", payload["code"], test.wantCode)
+			}
+		})
+	}
+}
+
+func TestReferenceMismatchUsesCompleteTokenBoundaries(t *testing.T) {
+	references := map[string]tool.ReferenceType{"flow-system-overview": tool.ReferenceRunbook}
+	candidate := referenceTestTool("search_code", "query", tool.ReferenceService)
+	snapshot := testRegistry(t,
+		candidate,
+		referenceTestTool("search_runbooks", "doc_id", tool.ReferenceRunbook),
+	).Snapshot(tool.ReadPolicy())
+
+	for _, query := range []string{"prefix-flow-system-overview", "flow-system-overview-suffix", "xflow-system-overview"} {
+		if got := referenceMismatch(snapshot, candidate, tool.Arguments{"query": query}, references); got != "" {
+			t.Fatalf("query %q matched a partial token: %s", query, got)
+		}
+	}
+	if got := referenceMismatch(snapshot, candidate, tool.Arguments{"query": "(flow-system-overview)"}, references); !strings.Contains(got, "entity_type_mismatch") {
+		t.Fatalf("complete token was not rejected: %s", got)
+	}
+}
+
+func referenceTestTool(id tool.ToolID, argument string, accepts ...tool.ReferenceType) Tool {
+	return Tool{
+		ID: id, Description: "test reference tool", Kind: ToolKindRead,
+		InputSchema:     objectSchema(map[string]any{argument: propString("reference")}, nil),
+		ReferenceInputs: []tool.ReferenceInput{{Argument: argument, Accepts: accepts}},
+		Handler:         stringHandler(noopTool),
 	}
 }
 

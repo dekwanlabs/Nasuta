@@ -238,6 +238,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 	answered := false
 	seenTools := map[string]bool{}
 	seenChunks := map[string]bool{}
+	referenceTypes := referenceTypeIndex(rc)
 	var webEvidence webEvidenceState
 	evidenceTurnExtended := false
 
@@ -384,7 +385,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 				Args:      call.Function.Arguments,
 				CreatedAt: time.Now(),
 			})
-			execution := agent.executor.Execute(loopCtx, toolSnapshot, call, seenTools, seenChunks)
+			execution := agent.executor.Execute(loopCtx, toolSnapshot, call, referenceTypes, seenTools, seenChunks)
 			if execution.Failed {
 				result.Evidence.ToolFailureCount++
 			} else if execution.Evidence {
@@ -943,7 +944,7 @@ func (te *ToolExecutor) DefinitionsFor(policy ToolPolicy) []llm.ToolDef {
 }
 
 // Execute runs against the same snapshot used to publish model definitions.
-func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, call llm.ToolCall, seen map[string]bool, seenChunks map[string]bool) ToolExecution {
+func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, call llm.ToolCall, referenceTypes map[string]tool.ReferenceType, seen map[string]bool, seenChunks map[string]bool) ToolExecution {
 	name := call.Function.Name
 	args, err := parseArgs(ctx, call.Function.Arguments)
 	if err != nil {
@@ -952,9 +953,13 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 	}
 	arguments := args
 
-	if _, ok := snapshot.Get(tool.ToolID(name)); !ok {
+	candidate, ok := snapshot.Get(tool.ToolID(name))
+	if !ok {
 		result := fmt.Sprintf("error: unknown tool %q", name)
 		return ToolExecution{FullContent: result, ModelContent: result, Arguments: arguments, Failed: true}
+	}
+	if mismatch := referenceMismatch(snapshot, candidate, arguments, referenceTypes); mismatch != "" {
+		return ToolExecution{FullContent: mismatch, ModelContent: mismatch, Arguments: arguments, Failed: true}
 	}
 
 	fp := ""
@@ -998,6 +1003,83 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 		}
 	}
 	return execution
+}
+
+func referenceTypeIndex(context *retrieval.RetrievedContext) map[string]tool.ReferenceType {
+	if context == nil || len(context.References) == 0 {
+		return nil
+	}
+	index := make(map[string]tool.ReferenceType, len(context.References))
+	for _, reference := range context.References {
+		referenceType := tool.ReferenceType(reference.Type)
+		switch referenceType {
+		case tool.ReferenceRunbook, tool.ReferenceService, tool.ReferenceSymbol:
+			if reference.Target != "" {
+				index[reference.Target] = referenceType
+			}
+		}
+	}
+	return index
+}
+
+func referenceMismatch(snapshot tool.Snapshot, candidate tool.Tool, args tool.Arguments, references map[string]tool.ReferenceType) string {
+	if len(references) == 0 || len(candidate.ReferenceInputs) == 0 {
+		return ""
+	}
+	for _, input := range candidate.ReferenceInputs {
+		value := args.String(input.Argument)
+		if value == "" {
+			continue
+		}
+		for entity, actualType := range references {
+			if !containsReferenceToken(value, entity) || acceptsReference(input.Accepts, actualType) {
+				continue
+			}
+			candidates := snapshot.CandidateTools(actualType)
+			candidateNames := make([]string, len(candidates))
+			for i, id := range candidates {
+				candidateNames[i] = string(id)
+			}
+			content, _ := json.Marshal(map[string]any{
+				"code": "entity_type_mismatch", "entity": entity,
+				"actualType": actualType, "tool": candidate.ID, "candidateTools": candidateNames,
+			})
+			return string(content)
+		}
+	}
+	return ""
+}
+
+func acceptsReference(accepted []tool.ReferenceType, actual tool.ReferenceType) bool {
+	for _, candidate := range accepted {
+		if candidate == actual {
+			return true
+		}
+	}
+	return false
+}
+
+func containsReferenceToken(value, entity string) bool {
+	for offset := 0; ; {
+		position := strings.Index(value[offset:], entity)
+		if position < 0 {
+			return false
+		}
+		start := offset + position
+		end := start + len(entity)
+		if referenceBoundary(value, start-1) && referenceBoundary(value, end) {
+			return true
+		}
+		offset = end
+	}
+}
+
+func referenceBoundary(value string, index int) bool {
+	if index < 0 || index >= len(value) {
+		return true
+	}
+	b := value[index]
+	return !(b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '-')
 }
 
 func isWebEvidenceTool(name string) bool {
@@ -1112,7 +1194,7 @@ func (te *ToolExecutor) ExecuteArguments(ctx context.Context, snapshot tool.Snap
 
 // ExecuteWithPolicy snapshots current tools for one-shot callers.
 func (te *ToolExecutor) ExecuteWithPolicy(ctx context.Context, policy ToolPolicy, call llm.ToolCall, seen map[string]bool, seenChunks map[string]bool) ToolExecution {
-	return te.Execute(ctx, te.Snapshot(policy), call, seen, seenChunks)
+	return te.Execute(ctx, te.Snapshot(policy), call, nil, seen, seenChunks)
 }
 
 // isSearchTool reports whether a tool fans out over an index (prone to reworded-query repetition).

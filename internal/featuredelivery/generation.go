@@ -192,10 +192,12 @@ func (generator *Generator) collectEvidence(ctx context.Context, parent Artifact
 	}
 	for index, result := range runbooks {
 		for _, hit := range boundedSlice(result.Matches, plan.Runbooks[index].Limit) {
-			appendEvidence(EvidenceRef{
-				Kind: "runbook", Repo: hit.Record.Repo, Path: hit.Record.Path,
-				Summary: strings.TrimSpace(hit.SectionHeader + "\n" + hit.ChunkText),
-			})
+			for _, chunk := range hit.Chunks {
+				appendEvidence(EvidenceRef{
+					Kind: "runbook", Path: hit.Path,
+					Summary: strings.TrimSpace(chunk.SectionHeader + "\n" + chunk.ChunkText),
+				})
+			}
 		}
 	}
 

@@ -288,6 +288,7 @@ func prepareBatch(candidates []Tool) ([]Tool, error) {
 		}
 		seen[candidate.ID] = struct{}{}
 		candidate.InputSchema = cloneSchema(candidate.InputSchema)
+		candidate.ReferenceInputs = cloneReferenceInputs(candidate.ReferenceInputs)
 		if candidate.Routing != nil {
 			spec := *candidate.Routing
 			candidate.Routing = &spec
@@ -337,6 +338,22 @@ type Snapshot struct {
 	order    []ToolID
 }
 
+// CandidateTools returns tools whose declarations accept the reference type.
+func (snapshot Snapshot) CandidateTools(referenceType ReferenceType) []ToolID {
+	out := make([]ToolID, 0)
+	for _, id := range snapshot.order {
+		for _, input := range snapshot.tools[id].ReferenceInputs {
+			for _, accepted := range input.Accepts {
+				if accepted == referenceType {
+					out = append(out, id)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
 func (snapshot Snapshot) Revision() uint64 {
 	return snapshot.revision
 }
@@ -384,6 +401,7 @@ func (snapshot Snapshot) Select(ids map[ToolID]struct{}) Snapshot {
 
 func cloneTool(candidate Tool) Tool {
 	candidate.InputSchema = cloneSchema(candidate.InputSchema)
+	candidate.ReferenceInputs = cloneReferenceInputs(candidate.ReferenceInputs)
 	if candidate.Routing != nil {
 		spec := *candidate.Routing
 		candidate.Routing = &spec
@@ -393,4 +411,15 @@ func cloneTool(candidate Tool) Tool {
 		candidate.Prefetch = &spec
 	}
 	return candidate
+}
+
+func cloneReferenceInputs(inputs []ReferenceInput) []ReferenceInput {
+	out := make([]ReferenceInput, len(inputs))
+	for i, input := range inputs {
+		out[i] = ReferenceInput{
+			Argument: input.Argument,
+			Accepts:  append([]ReferenceType(nil), input.Accepts...),
+		}
+	}
+	return out
 }

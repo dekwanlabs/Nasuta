@@ -67,34 +67,36 @@ type DependencyResult struct {
 
 // RunbookQuery searches the runbook corpus by free-text query.
 type RunbookQuery struct {
-	Query string
-	Limit int
+	Query string `json:"query"`
+	DocID string `json:"docId,omitempty"`
+	Limit int    `json:"limit"`
 }
 
-// RunbookRecord is the runbook metadata exposed to scenario tools.
-type RunbookRecord struct {
-	ID    string   `json:"id"`
-	Repo  string   `json:"repo,omitempty"`
-	Title string   `json:"title"`
-	Path  string   `json:"path"`
-	Scope string   `json:"scope,omitempty"`
-	Tags  []string `json:"tags"`
+// RunbookChunk is one independently traceable document fragment.
+type RunbookChunk struct {
+	ChunkIndex    int     `json:"chunkIndex"`
+	SectionHeader string  `json:"sectionHeader,omitempty"`
+	ChunkText     string  `json:"chunkText"`
+	SemanticScore float64 `json:"semanticScore"`
 }
 
-// RunbookSearchHit is one matched runbook chunk.
+// RunbookSearchHit groups matched chunks under their source document.
 type RunbookSearchHit struct {
-	Record        RunbookRecord `json:"record"`
-	SectionHeader string        `json:"sectionHeader,omitempty"`
-	ChunkText     string        `json:"chunkText,omitempty"`
-	Score         float64       `json:"score"`
-	EvidenceClass string        `json:"evidenceClass"`
-	TrustTier     int           `json:"trustTier"`
+	DocID         string         `json:"docId"`
+	Title         string         `json:"title"`
+	Path          string         `json:"path"`
+	DocKind       string         `json:"docKind"`
+	EvidenceClass string         `json:"evidenceClass"`
+	TrustTier     int            `json:"trustTier"`
+	Chunks        []RunbookChunk `json:"chunks"`
 }
 
 // RunbookSearchResult is the bounded runbook-search answer.
 type RunbookSearchResult struct {
-	Matches  []RunbookSearchHit
-	Semantic bool
+	Matches   []RunbookSearchHit `json:"matches"`
+	Semantic  bool               `json:"semantic"`
+	DocScoped bool               `json:"docScoped"`
+	Truncated bool               `json:"truncated"`
 }
 
 // ServiceSearchQuery locates service modules by free-text query.

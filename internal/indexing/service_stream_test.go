@@ -2,6 +2,9 @@ package indexing
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -30,5 +33,57 @@ func TestCodegraphIndexArgsForceFullRebuild(t *testing.T) {
 	want := []string{"index", "--force", "--quiet", "/workspace"}
 	if got := codegraphIndexArgs("/workspace"); !slices.Equal(got, want) {
 		t.Fatalf("args = %v, want %v", got, want)
+	}
+}
+
+func TestEnsureCodegraphConfigPreservesExistingSettings(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "codegraph.json")
+	if err := os.WriteFile(path, []byte(`{"extensions":{".foo":"go"},"exclude":["custom/"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureCodegraphConfig(workspace); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCodegraphConfig(workspace); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("second update changed an already canonical config")
+	}
+
+	var config struct {
+		Extensions map[string]string `json:"extensions"`
+		Exclude    []string          `json:"exclude"`
+	}
+	if err := json.Unmarshal(first, &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Extensions[".foo"] != "go" {
+		t.Fatalf("extensions = %v", config.Extensions)
+	}
+	want := append([]string{"custom/"}, codegraphRuntimeExcludes...)
+	if !slices.Equal(config.Exclude, want) {
+		t.Fatalf("exclude = %v, want %v", config.Exclude, want)
+	}
+}
+
+func TestEnsureCodegraphConfigRejectsInvalidExistingConfig(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "codegraph.json")
+	if err := os.WriteFile(path, []byte(`{"exclude":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCodegraphConfig(workspace); err == nil {
+		t.Fatal("ensureCodegraphConfig accepted malformed JSON")
 	}
 }

@@ -98,6 +98,12 @@ func TestTraceReturnsCandidatesForAmbiguousSymbol(t *testing.T) {
 	if err != nil || result.Target == nil || result.Target.ID != "feign" {
 		t.Fatalf("qualified result=%+v err=%v", result, err)
 	}
+	result, err = service.Trace(context.Background(), Request{
+		QualifiedName: "PaymentsClient.charge", Direction: "both",
+	})
+	if err != nil || result.Target == nil || result.Target.ID != "feign" {
+		t.Fatalf("qualified-only result=%+v err=%v", result, err)
+	}
 }
 
 func TestTraceReportsUnavailableIndexes(t *testing.T) {
@@ -167,7 +173,7 @@ CREATE TABLE edges (source TEXT,target TEXT,kind TEXT,metadata TEXT,line INTEGER
 CREATE VIRTUAL TABLE nodes_fts USING fts5(id,name,qualified_name,docstring,signature,content='nodes',content_rowid='rowid');
 INSERT INTO nodes VALUES
  ('caller','method','checkout','orders.checkout','repos/team/orders/Caller.java','java',10,20,''),
- ('feign','method','charge','PaymentsClient.charge','repos/team/orders/PaymentsClient.java','java',30,35,''),
+ ('feign','method','charge','PaymentsClient::charge','repos/team/orders/PaymentsClient.java','java',30,35,''),
  ('feign-route','route','POST /payments/charge','PaymentsClient.charge.route','repos/team/orders/PaymentsClient.java','java',29,29,''),
  ('impl','method','chargeImpl','PaymentsController.chargeImpl','repos/team/payments/PaymentsController.java','java',40,50,''),
  ('impl-route','route','POST /payments/charge','PaymentsController.chargeImpl.route','repos/team/payments/PaymentsController.java','java',40,40,''),

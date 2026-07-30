@@ -29,6 +29,21 @@ func validateTool(candidate Tool) error {
 	if err := validateSchema(candidate.InputSchema, "input"); err != nil {
 		return fmt.Errorf("tool %q schema: %w", candidate.ID, err)
 	}
+	for _, input := range candidate.ReferenceInputs {
+		if strings.TrimSpace(input.Argument) == "" || input.Argument != strings.TrimSpace(input.Argument) {
+			return fmt.Errorf("tool %q reference argument %q must be canonical", candidate.ID, input.Argument)
+		}
+		if len(input.Accepts) == 0 {
+			return fmt.Errorf("tool %q reference argument %q requires accepted types", candidate.ID, input.Argument)
+		}
+		for _, accepted := range input.Accepts {
+			switch accepted {
+			case ReferenceRunbook, ReferenceService, ReferenceSymbol:
+			default:
+				return fmt.Errorf("tool %q reference argument %q has invalid type %q", candidate.ID, input.Argument, accepted)
+			}
+		}
+	}
 	if candidate.Prefetch != nil {
 		if candidate.Kind != KindRead {
 			return fmt.Errorf("tool %q prefetch requires read kind", candidate.ID)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -51,18 +52,18 @@ func parseOptions() options {
 	return value
 }
 
-func runSelftest(ctx context.Context, knowledge *agent.Service, service string) {
-	fmt.Println(toJSON(knowledge.IndexSummary(ctx)))
-	fmt.Println(toJSON(knowledge.ServiceLookup(ctx, service, 3)))
-	dependencies, err := knowledge.TraceDeps(ctx, service, "both", 2)
+func runSelftest(ctx context.Context, tools *agent.Service, service string) {
+	fmt.Println(toJSON(tools.IndexSummary(ctx)))
+	fmt.Println(toJSON(tools.ServiceLookup(ctx, service, 3)))
+	dependencies, err := tools.TraceDeps(ctx, service, "both", 2)
 	if err != nil {
 		fmt.Println(toJSON(map[string]any{"service": service, "error": err.Error()}))
 	} else {
 		fmt.Println(toJSON(dependencies))
 	}
-	fmt.Println(toJSON(knowledge.ListApis(ctx, service, "", 10)))
-	fmt.Println(toJSON(knowledge.DocGapCheck(ctx, service)))
-	fmt.Println(toJSON(knowledge.RunbookSearch(ctx, "eureka", 5, false, "")))
+	fmt.Println(toJSON(tools.ListApis(ctx, service, "", 10)))
+	fmt.Println(toJSON(tools.DocGapCheck(ctx, service)))
+	fmt.Println(toJSON(tools.RunbookSearch(ctx, knowledge.RunbookQuery{Query: "eureka", Limit: 5})))
 }
 
 func toJSON(value any) string {

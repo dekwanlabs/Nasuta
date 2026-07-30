@@ -71,8 +71,10 @@ func (source *evidenceKnowledge) SearchRunbooks(_ context.Context, query knowled
 	matches := make([]knowledge.RunbookSearchHit, 10)
 	for index := range matches {
 		matches[index] = knowledge.RunbookSearchHit{
-			Record:        knowledge.RunbookRecord{Repo: "team/repo", Path: fmt.Sprintf("%s-%02d.md", prefix, index)},
-			SectionHeader: "Runbook", ChunkText: fmt.Sprintf("runbook %s %d", prefix, index),
+			Path: fmt.Sprintf("%s-%02d.md", prefix, index),
+			Chunks: []knowledge.RunbookChunk{{
+				SectionHeader: "Runbook", ChunkText: fmt.Sprintf("runbook %s %d", prefix, index),
+			}},
 		}
 	}
 	return knowledge.RunbookSearchResult{Matches: matches}, nil

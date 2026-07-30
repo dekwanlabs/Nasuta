@@ -16,6 +16,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -357,8 +358,8 @@ func (emptyRetrievalTools) FindCode(context.Context, string, string, int) (domai
 func (emptyRetrievalTools) FindAPIs(context.Context, string, string, int) ([]domain.EndpointRecord, error) {
 	return nil, nil
 }
-func (emptyRetrievalTools) FindRunbooks(context.Context, string, int, bool, string) (domain.SearchResult[domain.RunbookSearchHit], error) {
-	return domain.SearchResult[domain.RunbookSearchHit]{}, nil
+func (emptyRetrievalTools) FindRunbooks(context.Context, knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+	return domain.RunbookSearchResult{}, nil
 }
 func (emptyRetrievalTools) TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error) {
 	return domain.DependencyTrace{}, nil
