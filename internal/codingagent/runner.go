@@ -80,10 +80,8 @@ func (runner *Runner) ProviderStatus(ctx context.Context) map[string]featuredeli
 func (runner *Runner) providerStatus(ctx context.Context, provider string) featuredelivery.CodingProviderStatus {
 	status := featuredelivery.CodingProviderStatus{Enabled: true}
 	binary := runner.codexBin
-	credential := "CODEX_API_KEY"
 	if provider == "claude" {
 		binary = runner.claudeBin
-		credential = "ANTHROPIC_API_KEY"
 	}
 	path, err := exec.LookPath(binary)
 	if err != nil {
@@ -107,10 +105,19 @@ func (runner *Runner) providerStatus(ctx context.Context, provider string) featu
 		return status
 	}
 	status.CredentialIsolated = true
-	if strings.TrimSpace(os.Getenv(credential)) == "" {
+	credentialConfigured := strings.TrimSpace(os.Getenv("CODEX_API_KEY")) != ""
+	if provider == "claude" {
+		credentialConfigured = claudeCredentialConfigured()
+	}
+	if !credentialConfigured {
 		status.Reason = "credential_missing"
 	}
 	return status
+}
+
+func claudeCredentialConfigured() bool {
+	return strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" ||
+		strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != ""
 }
 
 func providerReady(status featuredelivery.CodingProviderStatus) bool {

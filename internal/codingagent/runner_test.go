@@ -92,12 +92,14 @@ func TestClaudeRunWritesCredentialAndNetworkPolicies(t *testing.T) {
 			temp := t.TempDir()
 			capture := filepath.Join(temp, "claude-settings.json")
 			argsCapture := filepath.Join(temp, "claude-args")
+			envCapture := filepath.Join(temp, "claude-env")
 			script := `
 if [ "$1" = "--version" ]; then
   printf '%s\n' '2.1.219 (Claude Code)'
   exit 0
 fi
 printf '%s\n' "$@" > ` + shellQuote(argsCapture) + `
+printf '%s|%s|%s\n' "${ANTHROPIC_API_KEY:-}" "${ANTHROPIC_AUTH_TOKEN:-}" "${ANTHROPIC_BASE_URL:-}" > ` + shellQuote(envCapture) + `
 previous=''
 for argument in "$@"; do
   if [ "$previous" = "--settings" ]; then
@@ -105,16 +107,29 @@ for argument in "$@"; do
   fi
   previous="$argument"
 done
-printf '%s\n' '{"type":"result","session_id":"session-2","structured_output":{"summary":"done","tests":"ok"}}'
+printf '%s\n' '{"type":"result","session_id":"session-2","structured_output":{"summary":"done anthropic-secret","tests":"ok"}}'
 `
 			claude := writeFakeCLI(t, temp, "claude", "", script)
 			t.Setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+			t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+			t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic-gateway.example")
 			runner := New(Config{ClaudeBin: claude, EnabledProviders: []string{"claude"}})
 
-			if _, err := runner.Run(context.Background(), featuredelivery.CodingRequest{
+			result, err := runner.Run(context.Background(), featuredelivery.CodingRequest{
 				Provider: "claude", WorktreePath: temp, TaskPackage: "task", NetworkEnabled: networkEnabled,
-			}, nil); err != nil {
+			}, nil)
+			if err != nil {
 				t.Fatal(err)
+			}
+			if result.Summary != "done [REDACTED]" {
+				t.Fatalf("summary = %q", result.Summary)
+			}
+			environment, err := os.ReadFile(envCapture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(environment) != "anthropic-secret||https://anthropic-gateway.example\n" {
+				t.Fatalf("Claude environment = %q", environment)
 			}
 			settingsJSON, err := os.ReadFile(capture)
 			if err != nil {
@@ -148,9 +163,11 @@ printf '%s\n' '{"type":"result","session_id":"session-2","structured_output":{"s
 			if !sandbox.Enabled || !sandbox.FailIfUnavailable || sandbox.AllowUnsandboxedCommands {
 				t.Fatalf("Claude sandbox policy = %+v", sandbox)
 			}
-			if len(sandbox.Credentials.EnvVars) != 1 ||
+			if len(sandbox.Credentials.EnvVars) != 2 ||
 				sandbox.Credentials.EnvVars[0]["name"] != "ANTHROPIC_API_KEY" ||
-				sandbox.Credentials.EnvVars[0]["mode"] != "deny" {
+				sandbox.Credentials.EnvVars[0]["mode"] != "deny" ||
+				sandbox.Credentials.EnvVars[1]["name"] != "ANTHROPIC_AUTH_TOKEN" ||
+				sandbox.Credentials.EnvVars[1]["mode"] != "deny" {
 				t.Fatalf("Claude credential policy = %+v", sandbox.Credentials)
 			}
 			if !sandbox.Network.StrictAllowlist {
@@ -168,12 +185,42 @@ printf '%s\n' '{"type":"result","session_id":"session-2","structured_output":{"s
 	}
 }
 
+func TestClaudeAuthTokenEnvironment(t *testing.T) {
+	temp := t.TempDir()
+	capture := filepath.Join(temp, "claude-env")
+	claude := writeFakeCLI(t, temp, "claude", "", `
+if [ "$1" = "--version" ]; then
+  printf '%s\n' '2.1.219 (Claude Code)'
+  exit 0
+fi
+printf '%s|%s|%s\n' "${ANTHROPIC_API_KEY:-}" "${ANTHROPIC_AUTH_TOKEN:-}" "${ANTHROPIC_BASE_URL:-}" > `+shellQuote(capture)+`
+printf '%s\n' '{"type":"result","structured_output":{"summary":"done","tests":"ok"}}'
+`)
+	runner := New(Config{
+		ClaudeBin: claude, EnabledProviders: []string{"claude"},
+	})
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "gateway-secret")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
+	if _, err := runner.Run(context.Background(), featuredelivery.CodingRequest{
+		Provider: "claude", WorktreePath: temp, TaskPackage: "task",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	environment, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(environment) != "|gateway-secret|https://gateway.example\n" {
+		t.Fatalf("Claude environment = %q", environment)
+	}
+}
+
 func TestRunnerDoesNotSubstituteProvider(t *testing.T) {
 	temp := t.TempDir()
 	marker := filepath.Join(temp, "claude-called")
 	claude := writeFakeCLI(t, temp, "claude", "", `touch `+shellQuote(marker))
 	t.Setenv("CODEX_API_KEY", "codex-secret")
-	t.Setenv("ANTHROPIC_API_KEY", "anthropic-secret")
 	runner := New(Config{
 		CodexBin: filepath.Join(temp, "missing-codex"), ClaudeBin: claude,
 		EnabledProviders: []string{"codex", "claude"},

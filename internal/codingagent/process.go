@@ -308,8 +308,10 @@ func providerEnvironment(provider, tempHome string) []string {
 			environment = append(environment, "CODEX_API_KEY="+value)
 		}
 	case "claude":
-		if value := os.Getenv("ANTHROPIC_API_KEY"); value != "" {
-			environment = append(environment, "ANTHROPIC_API_KEY="+value)
+		for _, key := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"} {
+			if value := os.Getenv(key); value != "" {
+				environment = append(environment, key+"="+value)
+			}
 		}
 	}
 	return environment
@@ -339,7 +341,7 @@ func probeVersion(ctx context.Context, path string) string {
 
 func redact(value string) string {
 	value = platform.RedactSensitiveText(value)
-	for _, key := range []string{"CODEX_API_KEY", "ANTHROPIC_API_KEY"} {
+	for _, key := range []string{"CODEX_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
 		if secret := os.Getenv(key); secret != "" {
 			value = strings.ReplaceAll(value, secret, "[REDACTED]")
 		}

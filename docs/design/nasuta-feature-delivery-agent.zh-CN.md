@@ -592,12 +592,20 @@ Claude Code 最低兼容版本为 `2.1.219`，该版本开始支持 `sandbox.net
 
 ### 9.7 Provider 凭据
 
-Coding Provider 凭据通过进程环境或部署密钥挂载注入：
+Coding Provider 凭据通过进程环境或部署密钥挂载注入。Claude Code 复用 Nasuta 进程启动环境中的 Claude 配置，不要求再单独填写一份密钥：
 
 ```text
 CODEX_API_KEY
 ANTHROPIC_API_KEY
+ANTHROPIC_AUTH_TOKEN
+ANTHROPIC_BASE_URL
 ```
+
+Claude 启动时按白名单继承 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 和
+`ANTHROPIC_BASE_URL`，不继承完整宿主环境。官方服务通常使用 `ANTHROPIC_API_KEY`；中转站
+可继续使用该 Key，也可使用 `ANTHROPIC_AUTH_TOKEN`，并通过 `ANTHROPIC_BASE_URL` 指向
+支持 Anthropic Messages 协议的中转地址。只配置 Key 时仍按官方地址运行；只增加 Base URL
+即可切换到中转站，不需要修改平台的 LLM 配置。
 
 Nasuta 不把个人订阅 OAuth 凭据代理给其他用户，不把凭据写入 Artifact、Run 事件、日志、任务包或前端响应。
 

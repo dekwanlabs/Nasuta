@@ -34,7 +34,10 @@ func (runner *Runner) runClaude(ctx context.Context, request featuredelivery.Cod
 			"failIfUnavailable":        true,
 			"allowUnsandboxedCommands": false,
 			"credentials": map[string]any{
-				"envVars": []map[string]string{{"name": "ANTHROPIC_API_KEY", "mode": "deny"}},
+				"envVars": []map[string]string{
+					{"name": "ANTHROPIC_API_KEY", "mode": "deny"},
+					{"name": "ANTHROPIC_AUTH_TOKEN", "mode": "deny"},
+				},
 			},
 			"network": map[string]any{
 				"allowedDomains":  allowedDomains,
