@@ -38,6 +38,9 @@ func TestExtensionDepsDetachSettingsAndExposeStablePorts(t *testing.T) {
 func TestMountExtensionRegistersAPIAndWebHandler(t *testing.T) {
 	platform := &Platform{}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
 	mountExtension(platform, mux, Extension{
 		RegisterRoutes: func(api APIRegistrar) {
 			api("GET /api/extension", func(w http.ResponseWriter, _ *http.Request) {
@@ -59,6 +62,12 @@ func TestMountExtensionRegistersAPIAndWebHandler(t *testing.T) {
 	mux.ServeHTTP(webResponse, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
 	if webResponse.Code != http.StatusOK || strings.TrimSpace(webResponse.Body.String()) != "web" {
 		t.Fatalf("web response = (%d, %q)", webResponse.Code, webResponse.Body.String())
+	}
+
+	authResponse := httptest.NewRecorder()
+	mux.ServeHTTP(authResponse, httptest.NewRequest(http.MethodGet, "/auth/callback", nil))
+	if authResponse.Code != http.StatusAccepted {
+		t.Fatalf("auth callback status = %d; want %d", authResponse.Code, http.StatusAccepted)
 	}
 
 	methodResponse := httptest.NewRecorder()

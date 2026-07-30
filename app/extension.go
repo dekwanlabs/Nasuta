@@ -74,7 +74,14 @@ func mountExtension(platform *Platform, mux *http.ServeMux, extension Extension)
 		extension.RegisterRoutes(platform.AuthenticatedAPI(mux))
 	}
 	if extension.WebHandler != nil {
-		mux.Handle("GET /", extension.WebHandler)
+		mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", "GET, HEAD")
+				http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+				return
+			}
+			extension.WebHandler.ServeHTTP(w, r)
+		}))
 	}
 }
 
