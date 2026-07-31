@@ -102,7 +102,7 @@ func TestPersistentSummaryTranscriptIncludesBoundedToolEvidence(t *testing.T) {
 		{Role: "assistant", ToolCalls: []llm.ToolCall{{
 			ID: "call-1", Function: llm.ToolFunction{Name: "observe_logs", Arguments: `{"trace_id":"abc123"}`},
 		}}},
-		{Role: "tool", ToolCallID: "call-1", Name: "observe_logs", Content: strings.Repeat("x", sessionToolResultLimit+100)},
+		{Role: "tool", ToolCallID: "call-1", Name: "observe_logs", Content: strings.Repeat("x", summaryToolProjectionRunes+100)},
 		{Role: "assistant", Content: "查询失败，无法确认线上状态。"},
 	})
 
@@ -111,7 +111,7 @@ func TestPersistentSummaryTranscriptIncludesBoundedToolEvidence(t *testing.T) {
 			t.Fatalf("transcript missing %q: %s", want, transcript)
 		}
 	}
-	if strings.Count(transcript, "x") > sessionToolResultLimit {
+	if strings.Count(transcript, "x") > summaryToolProjectionRunes {
 		t.Fatalf("tool result was not bounded: %d chars", strings.Count(transcript, "x"))
 	}
 }

@@ -41,8 +41,8 @@ func TestToolSnapshotBlocksToolRegisteredMidRun(t *testing.T) {
 	}
 	call := llm.ToolCall{ID: "1", Function: llm.ToolFunction{Name: "late", Arguments: `{}`}}
 	result := executor.Execute(context.Background(), snapshot, call, nil, nil, nil)
-	if !strings.Contains(result.FullContent, "unknown tool") {
-		t.Fatalf("result = %q, want pinned snapshot rejection", result.FullContent)
+	if !strings.Contains(result.AuthoritativeContent, "unknown tool") {
+		t.Fatalf("result = %q, want pinned snapshot rejection", result.AuthoritativeContent)
 	}
 }
 

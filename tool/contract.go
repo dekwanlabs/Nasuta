@@ -165,11 +165,17 @@ type EvidenceCoverage struct {
 	OmittedItems int  `json:"omitted_items,omitempty"`
 }
 
+// AnswerContract declares opaque values that a final answer must copy exactly.
+type AnswerContract struct {
+	RequiredLiterals []string `json:"required_literals,omitempty"`
+}
+
 // Result is the bounded content passed back to the caller.
 type Result struct {
-	Content    string           `json:"content"`
-	References []Reference      `json:"references,omitempty"`
-	Coverage   EvidenceCoverage `json:"coverage,omitempty"`
+	Content        string           `json:"content"`
+	References     []Reference      `json:"references,omitempty"`
+	Coverage       EvidenceCoverage `json:"coverage,omitempty"`
+	AnswerContract AnswerContract   `json:"answer_contract,omitempty"`
 }
 
 // Handler executes a tool under the run context.

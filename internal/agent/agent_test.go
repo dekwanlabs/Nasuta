@@ -301,7 +301,7 @@ func TestRunForcesConclusionAfterToolFailure(t *testing.T) {
 			break
 		}
 	}
-	if failedResult == nil || !failedResult.Failed || !strings.Contains(failedResult.ResultSummary, "backend unavailable") {
+	if failedResult == nil || !failedResult.Failed || !strings.Contains(failedResult.Content, "backend unavailable") {
 		t.Fatalf("failed tool result step = %#v", failedResult)
 	}
 }
@@ -598,8 +598,9 @@ type captureObserver struct {
 	reasoning []string
 }
 
-func (c *captureObserver) OnStep(_ context.Context, _ string, s StepRecord) {
+func (c *captureObserver) OnStep(_ context.Context, _ string, s StepRecord) error {
 	c.steps = append(c.steps, s)
+	return nil
 }
 func (c *captureObserver) OnToken(_ context.Context, _ string, tok string) {
 	c.tokens = append(c.tokens, tok)
@@ -608,9 +609,9 @@ func (c *captureObserver) OnReasoning(_ context.Context, _ string, tok string) {
 	c.reasoning = append(c.reasoning, tok)
 }
 
-func TestRunPersistsFullToolOutputBeforeSendingCompressedModelContent(t *testing.T) {
+func TestRunDeliversFreshToolOutputWithoutLoss(t *testing.T) {
 	fullContent := `{"records":[` + strings.Repeat(`{"name":"other","payload":"`+strings.Repeat("x", 200)+`"},`, 180) +
-		`{"name":"target","payload":"needle"}]}`
+		`{"name":"target","payload":"needle"}],"next_cursor":"cursor-final"}`
 	var modelToolContent string
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -651,13 +652,8 @@ func TestRunPersistsFullToolOutputBeforeSendingCompressedModelContent(t *testing
 	}, observer, nil)
 
 	result, err := agent.RunWithPlan(
-		t.Context(),
-		"run_tool_compression",
-		"needle 对应的记录是什么？",
-		nil,
-		nil,
-		domain.EvidencePlan{Sources: domain.Internal},
-		false,
+		t.Context(), "run_tool_delivery", "needle 对应的记录是什么？", nil, nil,
+		domain.EvidencePlan{Sources: domain.Internal}, false,
 	)
 	if err != nil {
 		t.Fatalf("RunWithPlan() error = %v", err)
@@ -666,38 +662,27 @@ func TestRunPersistsFullToolOutputBeforeSendingCompressedModelContent(t *testing
 		t.Fatalf("result = %+v", result)
 	}
 
-	var persisted string
-	for _, step := range observer.steps {
-		if step.Kind == StepKindToolResult {
-			persisted = step.Content
+	var trace *StepRecord
+	for i := range observer.steps {
+		if observer.steps[i].Kind == StepKindToolResult {
+			trace = &observer.steps[i]
 			break
 		}
 	}
-	if persisted != fullContent {
-		t.Fatalf("persisted tool output changed: got %d chars, want %d", len(persisted), len(fullContent))
+	if trace == nil || trace.Content != fullContent || trace.PromptContent != fullContent {
+		t.Fatalf("tool trace = %#v", trace)
 	}
-	if modelToolContent == "" || modelToolContent == fullContent {
-		t.Fatalf("model tool content was not compressed")
+	if trace.AuthoritativeSHA256 == "" || trace.AuthoritativeSHA256 != trace.PromptSHA256 || trace.SizeBytes != int64(len(fullContent)) {
+		t.Fatalf("tool trace hashes/size = %#v", trace)
 	}
-	if !strings.Contains(modelToolContent, `"_nasuta"`) ||
-		!strings.Contains(modelToolContent, `"compressed":true`) ||
-		!strings.Contains(modelToolContent, "needle") {
-		t.Fatalf("model tool content missing envelope or relevant evidence: %s", modelToolContent)
+	if modelToolContent != fullContent {
+		t.Fatalf("model tool content changed: got %d bytes, want %d", len(modelToolContent), len(fullContent))
 	}
-	if len(result.SessionMessages) != 2 {
-		t.Fatalf("session messages = %#v, want one call and one result", result.SessionMessages)
+	if len(result.SessionMessages) != 2 || result.SessionMessages[1].Content != fullContent {
+		t.Fatalf("session messages = %#v", result.SessionMessages)
 	}
-	callMessage, resultMessage := result.SessionMessages[0], result.SessionMessages[1]
-	if callMessage.Role != "assistant" || len(callMessage.ToolCalls) != 1 ||
-		callMessage.ToolCalls[0].Function.Arguments != `{"target":"needle"}` {
-		t.Fatalf("persisted tool call = %#v", callMessage)
-	}
-	if resultMessage.Role != "tool" || resultMessage.ToolCallID != "call-1" || resultMessage.Name != "large_read" {
-		t.Fatalf("persisted tool result = %#v", resultMessage)
-	}
-	if len([]rune(resultMessage.Content)) > sessionToolResultLimit+40 ||
-		!strings.HasSuffix(resultMessage.Content, "[truncated for session replay]") {
-		t.Fatalf("persisted tool result was not bounded: %d runes", len([]rune(resultMessage.Content)))
+	if !strings.Contains(modelToolContent, `"name":"target"`) || !strings.Contains(modelToolContent, `"next_cursor":"cursor-final"`) {
+		t.Fatalf("JSON tail was lost: %s", modelToolContent[len(modelToolContent)-200:])
 	}
 }
 
@@ -716,7 +701,7 @@ func TestForceConclusion_StreamsLiveAndRecordsAnswer(t *testing.T) {
 	}, obs, nil)
 
 	seq := 0
-	res, err := agent.forceConclusion(t.Context(), "run_test", nil, &seq, time.Now())
+	res, err := agent.forceConclusion(t.Context(), "run_test", nil, nil, &seq, time.Now())
 	if err != nil {
 		t.Fatalf("forceConclusion: %v", err)
 	}
@@ -763,7 +748,7 @@ func TestForceConclusion_RetriesToolProtocolWithoutStreamingIt(t *testing.T) {
 	}, obs, nil)
 
 	seq := 0
-	res, err := agent.forceConclusion(t.Context(), "run_protocol", nil, &seq, time.Now())
+	res, err := agent.forceConclusion(t.Context(), "run_protocol", nil, nil, &seq, time.Now())
 	if err != nil {
 		t.Fatalf("forceConclusion() error = %v", err)
 	}
@@ -917,5 +902,208 @@ func TestRun_PreservesPartialForcedConclusionWhenDeadlineExpires(t *testing.T) {
 	}
 	if outcome := outcomeFor(result, nil); outcome.Status != RunStatusDone {
 		t.Fatalf("outcome = %#v, want completed answer", outcome)
+	}
+}
+
+func TestRunRetriesOnlyCurrentRunAnswerContract(t *testing.T) {
+	const (
+		priorSerial = "SN-prior-round-complete"
+		serial      = "SN-prefix-0123456789-suffix"
+	)
+	var calls int32
+	var repairPrompt string
+	var historicalContractVisible bool
+	var currentContractVisible bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var request struct {
+			Messages []llm.Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		call := atomic.AddInt32(&calls, 1)
+		for _, message := range request.Messages {
+			if message.Role != "system" || !strings.HasPrefix(message.Content, exactAnswerContractPrefix) {
+				continue
+			}
+			historicalContractVisible = historicalContractVisible || strings.Contains(message.Content, priorSerial)
+			currentContractVisible = currentContractVisible || strings.Contains(message.Content, serial)
+		}
+		content := "设备 SN：…0123456789…"
+		if call == 1 {
+			writeTestSSE(t, w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-exact","type":"function","function":{"name":"exact_read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+			return
+		}
+		if call == 3 {
+			for _, message := range request.Messages {
+				if message.Role == "user" && strings.Contains(message.Content, "exact-output validator") {
+					repairPrompt = message.Content
+				}
+			}
+			content = "本轮 SN：" + serial
+		}
+		encoded, _ := json.Marshal(streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: content}, FinishReason: "stop"}}})
+		writeTestSSE(t, w, string(encoded))
+	}))
+	defer server.Close()
+
+	registry := testRegistry(t, Tool{
+		ID: "exact_read", Description: "test exact output", Kind: ToolKindRead,
+		InputSchema: objectSchema(map[string]any{}, nil),
+		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
+			return tool.Result{
+				Content: `{"sn":"` + serial + `"}`,
+				AnswerContract: tool.AnswerContract{
+					RequiredLiterals: []string{serial},
+				},
+			}, nil
+		}),
+	})
+	observer := &captureObserver{}
+	agent := NewAgent(
+		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
+		NewToolExecutor(registry),
+		AgentConfig{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
+		observer,
+		nil,
+	)
+
+	priorMessage, ok := answerContractMessage(tool.AnswerContract{RequiredLiterals: []string{priorSerial}})
+	if !ok {
+		t.Fatal("prior answer contract was empty")
+	}
+	result, err := agent.RunWithContext(
+		t.Context(), "run_exact_retry", "继续列出完整 SN",
+		ConversationContext{Recent: []llm.Message{priorMessage}}, nil,
+		domain.EvidencePlan{Sources: domain.Internal}, false,
+	)
+	if err != nil {
+		t.Fatalf("RunWithPlan() error = %v", err)
+	}
+	if result.Err != nil || result.Answer != "本轮 SN："+serial {
+		t.Fatalf("result = %#v", result)
+	}
+	if got := strings.Join(observer.tokens, ""); got != result.Answer {
+		t.Fatalf("visible tokens = %q, want only validated answer %q", got, result.Answer)
+	}
+	if !strings.Contains(repairPrompt, serial) || strings.Contains(repairPrompt, priorSerial) || !strings.Contains(repairPrompt, "Never abbreviate") {
+		t.Fatalf("repair prompt = %q", repairPrompt)
+	}
+	if atomic.LoadInt32(&calls) != 3 {
+		t.Fatalf("LLM calls = %d, want 3", calls)
+	}
+	if historicalContractVisible || !currentContractVisible {
+		t.Fatalf("contract visibility historical=%v current=%v", historicalContractVisible, currentContractVisible)
+	}
+	if len(result.SessionMessages) != 2 {
+		t.Fatalf("session messages = %#v", result.SessionMessages)
+	}
+}
+
+func TestRunFailsWhenRequiredLiteralStillMissing(t *testing.T) {
+	const serial = "SN-must-remain-complete"
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		call := atomic.AddInt32(&calls, 1)
+		if call == 1 {
+			writeTestSSE(t, w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-exact","type":"function","function":{"name":"exact_read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+			return
+		}
+		encoded, _ := json.Marshal(streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: "SN：…complete"}, FinishReason: "stop"}}})
+		writeTestSSE(t, w, string(encoded))
+	}))
+	defer server.Close()
+
+	registry := testRegistry(t, Tool{
+		ID: "exact_read", Description: "test exact output", Kind: ToolKindRead,
+		InputSchema: objectSchema(map[string]any{}, nil),
+		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
+			return tool.Result{Content: serial, AnswerContract: tool.AnswerContract{RequiredLiterals: []string{serial}}}, nil
+		}),
+	})
+	observer := &captureObserver{}
+	agent := NewAgent(
+		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
+		NewToolExecutor(registry),
+		AgentConfig{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
+		observer,
+		nil,
+	)
+
+	result, err := agent.RunWithPlan(t.Context(), "run_exact_failure", "列出完整 SN", nil, nil, domain.EvidencePlan{Sources: domain.Internal}, false)
+	if err != nil {
+		t.Fatalf("RunWithPlan() error = %v", err)
+	}
+	if !errors.Is(result.Err, ErrAnswerContractViolation) || result.Answer != "" {
+		t.Fatalf("result = %#v", result)
+	}
+	if got := strings.Join(observer.tokens, ""); got != "" {
+		t.Fatalf("invalid answer leaked to client: %q", got)
+	}
+	if atomic.LoadInt32(&calls) != 4 {
+		t.Fatalf("LLM calls = %d, want initial tool call + answer + 2 retries", calls)
+	}
+}
+
+func TestBuildAgentMessagesDropsHistoricalAnswerContract(t *testing.T) {
+	message, ok := answerContractMessage(tool.AnswerContract{RequiredLiterals: []string{"SN-history"}})
+	if !ok {
+		t.Fatal("answerContractMessage() returned no message")
+	}
+	agent := &Agent{}
+	messages := agent.buildAgentMessages("current question", ConversationContext{Recent: []llm.Message{message}}, nil, domain.EvidencePlan{})
+	for _, candidate := range messages {
+		if strings.HasPrefix(candidate.Content, exactAnswerContractPrefix) {
+			t.Fatalf("historical answer contract leaked into current run: %#v", candidate)
+		}
+	}
+}
+
+func writeTestSSE(t *testing.T, w http.ResponseWriter, data string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
+}
+
+func TestForceConclusionRejectsAnswerContractViolation(t *testing.T) {
+	const serial = "SN-force-conclusion-complete"
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		atomic.AddInt32(&calls, 1)
+		encoded, _ := json.Marshal(streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: "SN：…complete"}, FinishReason: "stop"}}})
+		writeTestSSE(t, w, string(encoded))
+	}))
+	defer server.Close()
+
+	observer := &captureObserver{}
+	agent := NewAgent(
+		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
+		nil,
+		AgentConfig{ConclusionMaxTokens: 100, MaxContinueRounds: 0},
+		observer,
+		nil,
+	)
+	contract := &exactAnswerContract{}
+	contract.Add(tool.AnswerContract{RequiredLiterals: []string{serial}})
+	seq := 0
+	res, err := agent.forceConclusion(t.Context(), "run_force_exact", nil, contract, &seq, time.Now())
+	if !errors.Is(err, ErrAnswerContractViolation) || res == nil {
+		t.Fatalf("res=%#v err=%v", res, err)
+	}
+	if got := strings.Join(observer.tokens, ""); got != "" {
+		t.Fatalf("invalid forced conclusion leaked to client: %q", got)
+	}
+	if atomic.LoadInt32(&calls) != 3 {
+		t.Fatalf("LLM calls = %d, want initial answer + 2 retries", calls)
+	}
+	for _, step := range observer.steps {
+		if step.Kind == StepKindAnswer {
+			t.Fatalf("invalid answer step was recorded: %#v", step)
+		}
 	}
 }

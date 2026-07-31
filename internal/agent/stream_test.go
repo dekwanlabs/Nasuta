@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -79,6 +80,9 @@ func TestHub_BroadcastDeliversToSubscriber(t *testing.T) {
 	}
 	if got[1].Step == nil || got[1].Step.Tool != "probe" {
 		t.Errorf("second event step = %+v, want tool=probe", got[1].Step)
+	}
+	if got[1].Step != nil && got[1].Step.CreatedAt.IsZero() {
+		t.Error("step timestamp was not defaulted")
 	}
 }
 
@@ -266,5 +270,41 @@ func TestHub_PersistsPauseAndResume(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHubBroadcastsOnlyTemporaryPreviewForToolResults(t *testing.T) {
+	hub := NewRunHub(nil)
+	const runID = "tool-preview"
+	channel := hub.Subscribe(runID)
+	content := strings.Repeat("authoritative-", 200)
+	promptContent := strings.Repeat("model-input-", 200)
+
+	if err := hub.OnStep(t.Context(), runID, StepRecord{
+		StepNo:        2,
+		Kind:          StepKindToolResult,
+		Content:       content,
+		PromptContent: promptContent,
+		SizeBytes:     int64(len(content)),
+	}); err != nil {
+		t.Fatalf("OnStep: %v", err)
+	}
+
+	select {
+	case event := <-channel:
+		if event.Step == nil {
+			t.Fatalf("event = %+v", event)
+		}
+		if event.Step.Content != "" || event.Step.PromptContent != "" {
+			t.Fatalf("SSE carried authoritative payload: %+v", event.Step)
+		}
+		if event.Step.ResultPreview == "" || !strings.HasPrefix(content, strings.TrimSuffix(event.Step.ResultPreview, "...")) {
+			t.Fatalf("preview = %q", event.Step.ResultPreview)
+		}
+		if event.Step.SizeBytes != int64(len(content)) {
+			t.Fatalf("size bytes = %d", event.Step.SizeBytes)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing tool result event")
 	}
 }

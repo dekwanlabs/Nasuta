@@ -224,30 +224,51 @@ func (hub *RunHub) Unsubscribe(runID string, ch chan SSEEvent) {
 	hub.mu.Unlock()
 }
 
-func (hub *RunHub) OnStep(ctx context.Context, runID string, step StepRecord) {
+func (hub *RunHub) OnStep(ctx context.Context, runID string, step StepRecord) error {
+	if step.CreatedAt.IsZero() {
+		step.CreatedAt = time.Now()
+	}
+	var persistErr error
 	if hub.runStore != nil && runID != "" {
-		if err := hub.runStore.AddStep(StepRow{
-			RunID:           runID,
-			StepNo:          step.StepNo,
-			Kind:            step.Kind,
-			Tool:            step.Tool,
-			Args:            step.Args,
-			ResultSummary:   step.ResultSummary,
-			Content:         step.Content,
-			TokenDelta:      step.TokenDelta,
-			ReasoningTokens: step.ReasoningTokens,
-			DurationMs:      step.DurationMs,
-			CreatedAt:       step.CreatedAt.UTC().Format(time.RFC3339),
-		}); err != nil {
-			log.ErrorfCtx(ctx, "[hub] persist step error: %v", err)
+		persistErr = hub.runStore.AddStep(StepRow{
+			RunID:               runID,
+			StepNo:              step.StepNo,
+			Kind:                step.Kind,
+			TraceID:             step.TraceID,
+			ArtifactID:          step.ArtifactID,
+			ToolCallID:          step.ToolCallID,
+			Tool:                step.Tool,
+			Args:                step.Args,
+			Failed:              step.Failed,
+			DeliveryError:       step.DeliveryError,
+			Content:             step.Content,
+			PromptContent:       step.PromptContent,
+			AuthoritativeSHA256: step.AuthoritativeSHA256,
+			PromptSHA256:        step.PromptSHA256,
+			SizeBytes:           step.SizeBytes,
+			Coverage:            step.Coverage,
+			AnswerContract:      step.AnswerContract,
+			TokenDelta:          step.TokenDelta,
+			ReasoningTokens:     step.ReasoningTokens,
+			DurationMs:          step.DurationMs,
+			CreatedAt:           step.CreatedAt.UTC().Format(time.RFC3339),
+		})
+		if persistErr != nil {
+			log.ErrorfCtx(ctx, "[hub] persist step error: %v", persistErr)
 			hub.mu.Lock()
 			if _, exists := hub.stepErrs[runID]; !exists {
-				hub.stepErrs[runID] = err
+				hub.stepErrs[runID] = persistErr
 			}
 			hub.mu.Unlock()
 		}
 	}
+	if step.Kind == StepKindToolResult {
+		step.ResultPreview = toolResultPreview(step.Content)
+		step.Content = ""
+		step.PromptContent = ""
+	}
 	hub.broadcast(ctxWithRunID(runID), runID, SSEEvent{Step: &step})
+	return persistErr
 }
 
 func (hub *RunHub) OnToken(ctx context.Context, runID, token string) {
@@ -455,7 +476,7 @@ func (hub *RunHub) WaitResume(ctx context.Context, runID string) error {
 
 // Observer is the agent loop's window into live run observability.
 type Observer interface {
-	OnStep(ctx context.Context, runID string, step StepRecord)
+	OnStep(ctx context.Context, runID string, step StepRecord) error
 	OnToken(ctx context.Context, runID string, token string)
 	OnReasoning(ctx context.Context, runID string, token string)
 }
@@ -468,7 +489,7 @@ type Controller interface {
 
 type noopObserver struct{}
 
-func (noopObserver) OnStep(context.Context, string, StepRecord) {}
+func (noopObserver) OnStep(context.Context, string, StepRecord) error { return nil }
 
 func (noopObserver) OnToken(context.Context, string, string) {}
 

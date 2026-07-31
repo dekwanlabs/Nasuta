@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -720,12 +721,48 @@ func (handler *Handler) APIQARunGet(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceUnavailable(w, "run store not available")
 		return
 	}
-	detail, err := runs.Get(r.PathValue("id"))
+	detail, err := runs.GetForUser(r.PathValue("id"), currentUserID(r))
+	if errors.Is(err, sql.ErrNoRows) {
+		httputil.WriteErrStatus(w, http.StatusNotFound, errors.New("run not found"))
+		return
+	}
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
 	}
 	httputil.WriteJSON(w, detail)
+}
+
+// APIQAToolResultArtifact reads a bounded chunk of one authoritative tool result.
+func (handler *Handler) APIQAToolResultArtifact(w http.ResponseWriter, r *http.Request) {
+	runs := handler.runStore()
+	if runs == nil {
+		httputil.WriteServiceUnavailable(w, "run store not available")
+		return
+	}
+	q := httputil.Query(r)
+	offset := q.Int("offset", 0)
+	limit := q.Int("limit", 64<<10)
+	if q.Err() != nil || offset < 0 || limit <= 0 {
+		if q.Err() != nil {
+			httputil.WriteBadRequest(w, q.Err().Error())
+		} else {
+			httputil.WriteBadRequest(w, "offset must be non-negative and limit must be positive")
+		}
+		return
+	}
+	artifact, err := runs.GetToolResultArtifact(
+		currentUserID(r), q.Str("session_id"), r.PathValue("id"), int64(offset), limit,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		httputil.WriteErrStatus(w, http.StatusNotFound, errors.New("artifact not found"))
+		return
+	}
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, artifact)
 }
 
 func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) {
@@ -741,13 +778,13 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	runID := r.PathValue("id")
-	run, err := runs.Get(runID)
-	if err != nil {
-		httputil.WriteErr(w, err)
+	run, err := runs.GetForUser(runID, currentUserID(r))
+	if errors.Is(err, sql.ErrNoRows) {
+		httputil.WriteErrStatus(w, http.StatusNotFound, errors.New("run not found"))
 		return
 	}
-	if userID := currentUserID(r); userID != 0 && run.UserID != userID {
-		httputil.WriteErrStatus(w, http.StatusNotFound, errors.New("run not found"))
+	if err != nil {
+		httputil.WriteErr(w, err)
 		return
 	}
 	switch req.Action {
@@ -817,8 +854,10 @@ func emitHubEvent(answerText string, ev agent.SSEEvent, runID string, sseEvent f
 			sseEvent("tool", jsonStr(map[string]any{"step": ev.Step.StepNo, "name": ev.Step.Tool, "args": ev.Step.Args}))
 		case agent.StepKindToolResult:
 			sseEvent("tool_result", jsonStr(map[string]any{
-				"step": ev.Step.StepNo, "tool": ev.Step.Tool, "summary": ev.Step.ResultSummary,
-				"failed": ev.Step.Failed, "duration_ms": ev.Step.DurationMs,
+				"step": ev.Step.StepNo, "tool": ev.Step.Tool, "result_preview": ev.Step.ResultPreview,
+				"trace_id": ev.Step.TraceID, "artifact_id": ev.Step.ArtifactID,
+				"failed": ev.Step.Failed, "delivery_error": ev.Step.DeliveryError,
+				"duration_ms": ev.Step.DurationMs, "size_bytes": ev.Step.SizeBytes,
 			}))
 		case agent.StepKindAnswer:
 		}

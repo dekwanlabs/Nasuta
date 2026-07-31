@@ -90,16 +90,16 @@ func TestComposeSystemPromptReplacesRoleSlotBeforeRules(t *testing.T) {
 	}
 }
 
-func TestAllAgentPromptsExplainCompressedToolCoverage(t *testing.T) {
+func TestAllAgentPromptsExplainPartialToolCoverage(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"core":   systemPrompt,
 		"direct": directAgentSystemPrompt,
 		"web":    webAgentSystemPrompt,
 	} {
 		t.Run(name, func(t *testing.T) {
-			for _, required := range []string{`"_nasuta.compressed"`, "omitted", "unknown"} {
+			for _, required := range []string{"delivery succeeded", "partial", "omitted", "unknown"} {
 				if !strings.Contains(prompt, required) {
-					t.Fatalf("prompt missing compressed-result rule %q", required)
+					t.Fatalf("prompt missing partial-result rule %q", required)
 				}
 			}
 		})

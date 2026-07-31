@@ -81,6 +81,7 @@ func Setup(mux *http.ServeMux, rc Config) {
 	api("DELETE /api/qa/sessions/{id}", dash.APIQASessionDelete)
 	api("GET /api/qa/runs", dash.APIQARuns)
 	api("GET /api/qa/runs/{id}", dash.APIQARunGet)
+	api("GET /api/qa/tool-result-artifacts/{id}", dash.APIQAToolResultArtifact)
 	api("POST /api/qa/runs/{id}", dash.APIQARunControl)
 	api("GET /api/settings", dash.APISettingsGet)
 	api("PUT /api/settings", dash.APISettingsPut)

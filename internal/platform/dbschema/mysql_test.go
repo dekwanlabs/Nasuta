@@ -34,7 +34,7 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 		{group: GroupAuth, tables: []string{"users", "sessions", "settings"}},
 		{group: GroupDocuments, tables: []string{"documents"}},
 		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_turn_contexts", "qa_session_history_terms", "qa_session_history_index_outbox"}},
-		{group: GroupQARun, tables: []string{"agent_runs", "agent_steps", "agent_llm_calls"}},
+		{group: GroupQARun, tables: []string{"agent_runs", "agent_steps", "agent_tool_result_artifacts", "agent_llm_calls"}},
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
 		{group: GroupIncident, tables: []string{"incident_records"}},
 		{group: GroupApproval, tables: []string{"pending_actions"}},
@@ -316,4 +316,45 @@ func containsCreateTable(stmts []string, table string) bool {
 		}
 	}
 	return false
+}
+
+func TestAgentToolResultTraceMigrationPreservesAuthoritativeResults(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_tool_result_trace.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read agent tool result trace migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"DROP COLUMN result_summary",
+		"ADD COLUMN prompt_content MEDIUMTEXT",
+		"ADD COLUMN authoritative_sha256 CHAR(64)",
+		"ADD COLUMN prompt_sha256 CHAR(64)",
+		"ADD KEY idx_trace (trace_id)",
+		"CREATE TABLE agent_tool_result_artifacts",
+		"content       LONGBLOB NOT NULL",
+		"UNIQUE KEY uniq_run_tool_call (run_id, tool_call_id)",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("agent tool result trace migration missing %q", required)
+		}
+	}
+	if strings.Contains(script, "UNIQUE KEY uniq_trace") || strings.Contains(script, "UNIQUE KEY idx_trace") {
+		t.Fatal("legacy rows with empty trace IDs cannot use a unique trace index")
+	}
+
+	statements := strings.Join(mysqlSchema[GroupQARun], "\n")
+	for _, required := range []string{
+		"prompt_content       MEDIUMTEXT",
+		"authoritative_sha256 CHAR(64) NOT NULL",
+		"agent_tool_result_artifacts",
+		"content      LONGBLOB NOT NULL",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("managed QA run schema missing %q", required)
+		}
+	}
+	if strings.Contains(statements, "result_summary") {
+		t.Fatal("managed QA run schema still persists a result preview")
+	}
 }

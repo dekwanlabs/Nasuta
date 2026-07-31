@@ -196,8 +196,8 @@ func TestToolExecutorAllowsRetryAfterFailure(t *testing.T) {
 	policy := ToolPolicyForPlan(domain.EvidencePlan{Sources: domain.AllEvidence}, true)
 	first := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
 	second := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
-	if first.FullContent != "error: temporary failure" || first.Evidence || second.FullContent != "ok" || !second.Evidence || tries != 2 {
-		t.Fatalf("retry behavior = first:%q second:%q tries:%d", first.FullContent, second.FullContent, tries)
+	if first.AuthoritativeContent != "error: temporary failure" || first.Evidence || second.AuthoritativeContent != "ok" || !second.Evidence || tries != 2 {
+		t.Fatalf("retry behavior = first:%q second:%q tries:%d", first.AuthoritativeContent, second.AuthoritativeContent, tries)
 	}
 }
 

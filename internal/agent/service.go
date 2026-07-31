@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
@@ -1042,11 +1044,61 @@ func (rs *RunStore) AddStep(st StepRow) error {
 	if st.CreatedAt == "" {
 		st.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	_, err := rs.db.Exec(
-		`INSERT INTO agent_steps(run_id,step_no,kind,tool,args,result_summary,content,token_delta,reasoning_tokens,duration_ms,created_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		st.RunID, st.StepNo, st.Kind, st.Tool, st.Args, st.ResultSummary, st.Content, st.TokenDelta, st.ReasoningTokens, st.DurationMs, store.DatabaseTime(st.CreatedAt))
-	return err
+	coverageJSON, err := json.Marshal(st.Coverage)
+	if err != nil {
+		return fmt.Errorf("marshal tool result coverage: %w", err)
+	}
+	contractJSON, err := json.Marshal(st.AnswerContract)
+	if err != nil {
+		return fmt.Errorf("marshal tool result answer contract: %w", err)
+	}
+	tx, err := rs.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin agent step: %w", err)
+	}
+	defer tx.Rollback()
+
+	content := any(st.Content)
+	if st.ArtifactID != "" {
+		contentType := "text/plain; charset=utf-8"
+		if json.Valid([]byte(st.Content)) {
+			contentType = "application/json"
+		}
+		result, err := tx.Exec(
+			`INSERT INTO agent_tool_result_artifacts(
+				id,user_id,session_id,run_id,tool_call_id,content,content_type,sha256,size_bytes,coverage_json,created_at)
+			 SELECT ?,user_id,session_id,id,?,?,?,?,?,?,?,? FROM agent_runs WHERE id=?`,
+			st.ArtifactID, st.ToolCallID, []byte(st.Content), contentType, st.AuthoritativeSHA256,
+			st.SizeBytes, coverageJSON, store.DatabaseTime(st.CreatedAt), st.RunID)
+		if err != nil {
+			return fmt.Errorf("persist tool result artifact %q: %w", st.ArtifactID, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect tool result artifact %q: %w", st.ArtifactID, err)
+		}
+		if affected != 1 {
+			return fmt.Errorf("persist tool result artifact %q: run %q not found", st.ArtifactID, st.RunID)
+		}
+		content = nil
+	}
+	_, err = tx.Exec(
+		`INSERT INTO agent_steps(
+			run_id,step_no,kind,trace_id,artifact_id,tool_call_id,tool,args,content,prompt_content,
+			authoritative_sha256,prompt_sha256,content_bytes,coverage_json,answer_contract_json,failed,
+			delivery_error,token_delta,reasoning_tokens,duration_ms,created_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		st.RunID, st.StepNo, st.Kind, st.TraceID, st.ArtifactID, st.ToolCallID, st.Tool, st.Args,
+		content, st.PromptContent, st.AuthoritativeSHA256, st.PromptSHA256, st.SizeBytes,
+		coverageJSON, contractJSON, st.Failed, st.DeliveryError, st.TokenDelta, st.ReasoningTokens,
+		st.DurationMs, store.DatabaseTime(st.CreatedAt))
+	if err != nil {
+		return fmt.Errorf("persist agent step %d: %w", st.StepNo, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit agent step %d: %w", st.StepNo, err)
+	}
+	return nil
 }
 
 // SetMaxSteps records the plan-specific loop bound resolved after routing.
@@ -1213,34 +1265,81 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 }
 
 func (rs *RunStore) Get(id string) (*RunDetail, error) {
-	r, err := scanRunRecord(rs.db.QueryRow(
-		`SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,
-			input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
-			peak_input_tokens,peak_reserved_tokens,evidence_status,forced_conclusion,evidence_result_count,
-			tool_call_count,tool_failure_count,partial_result_count,omitted_evidence_count,started_at,ended_at
-		 FROM agent_runs WHERE id=?`, id))
+	return rs.get(id, nil)
+}
+
+// GetForUser loads one run only when it belongs to the requested user.
+func (rs *RunStore) GetForUser(id string, userID int64) (*RunDetail, error) {
+	return rs.get(id, &userID)
+}
+
+func (rs *RunStore) get(id string, userID *int64) (*RunDetail, error) {
+	query := `SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,
+		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
+		peak_input_tokens,peak_reserved_tokens,evidence_status,forced_conclusion,evidence_result_count,
+		tool_call_count,tool_failure_count,partial_result_count,omitted_evidence_count,started_at,ended_at
+		FROM agent_runs WHERE id=?`
+	args := []any{id}
+	if userID != nil {
+		query += " AND user_id=?"
+		args = append(args, *userID)
+	}
+	r, err := scanRunRecord(rs.db.QueryRow(query, args...))
 	if err != nil {
 		return nil, err
 	}
 
 	rows, err := rs.db.Query(
-		`SELECT id,run_id,step_no,kind,tool,args,result_summary,content,token_delta,reasoning_tokens,duration_ms,created_at
-		 FROM agent_steps WHERE run_id=? ORDER BY step_no, id`, id)
+		`SELECT s.id,s.run_id,s.step_no,s.kind,s.trace_id,s.artifact_id,s.tool_call_id,s.tool,s.args,
+			s.content,s.prompt_content,s.authoritative_sha256,s.prompt_sha256,s.content_bytes,
+			s.coverage_json,s.answer_contract_json,s.failed,s.delivery_error,s.token_delta,
+			s.reasoning_tokens,s.duration_ms,s.created_at,
+			CASE WHEN s.artifact_id<>'' THEN CAST(SUBSTRING(a.content,1,4096) AS CHAR CHARACTER SET utf8mb4) ELSE NULL END
+		 FROM agent_steps s
+		 LEFT JOIN agent_tool_result_artifacts a ON a.id=s.artifact_id
+		 WHERE s.run_id=? ORDER BY s.step_no,s.id`, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var steps []StepRow
+	steps := make([]StepRow, 0)
 	for rows.Next() {
 		var st StepRow
-		var args, summary, content sql.NullString
+		var traceID, artifactID, toolCallID, args, content, promptContent sql.NullString
+		var authoritativeSHA, promptSHA, coverageRaw, contractRaw, deliveryError, artifactPreview sql.NullString
 		var createdAt sql.NullTime
-		if err := rows.Scan(&st.ID, &st.RunID, &st.StepNo, &st.Kind, &st.Tool, &args, &summary, &content, &st.TokenDelta, &st.ReasoningTokens, &st.DurationMs, &createdAt); err != nil {
+		if err := rows.Scan(
+			&st.ID, &st.RunID, &st.StepNo, &st.Kind, &traceID, &artifactID, &toolCallID, &st.Tool, &args,
+			&content, &promptContent, &authoritativeSHA, &promptSHA, &st.SizeBytes, &coverageRaw,
+			&contractRaw, &st.Failed, &deliveryError, &st.TokenDelta, &st.ReasoningTokens,
+			&st.DurationMs, &createdAt, &artifactPreview,
+		); err != nil {
 			return nil, err
 		}
+		st.TraceID = traceID.String
+		st.ArtifactID = artifactID.String
+		st.ToolCallID = toolCallID.String
 		st.Args = args.String
-		st.ResultSummary = summary.String
 		st.Content = content.String
+		st.PromptContent = promptContent.String
+		st.AuthoritativeSHA256 = authoritativeSHA.String
+		st.PromptSHA256 = promptSHA.String
+		st.DeliveryError = deliveryError.String
+		if coverageRaw.Valid && coverageRaw.String != "" {
+			if err := json.Unmarshal([]byte(coverageRaw.String), &st.Coverage); err != nil {
+				return nil, fmt.Errorf("decode step %d coverage: %w", st.StepNo, err)
+			}
+		}
+		if contractRaw.Valid && contractRaw.String != "" {
+			if err := json.Unmarshal([]byte(contractRaw.String), &st.AnswerContract); err != nil {
+				return nil, fmt.Errorf("decode step %d answer contract: %w", st.StepNo, err)
+			}
+		}
+		previewSource := st.Content
+		if previewSource == "" {
+			previewSource = artifactPreview.String
+		}
+		st.ResultPreview = toolResultPreview(previewSource)
 		st.CreatedAt = store.FormatDatabaseTime(createdAt)
 		steps = append(steps, st)
 	}
@@ -1252,6 +1351,81 @@ func (rs *RunStore) Get(id string) (*RunDetail, error) {
 		return nil, err
 	}
 	return &RunDetail{RunRecord: r, Steps: steps, LLMCalls: llmCalls}, nil
+}
+
+const maxToolResultArtifactChunkBytes = 256 << 10
+
+// ToolResultArtifactChunk is one bounded, tenant-scoped artifact read.
+type ToolResultArtifactChunk struct {
+	ID          string                `json:"id"`
+	SessionID   string                `json:"session_id"`
+	RunID       string                `json:"run_id"`
+	ToolCallID  string                `json:"tool_call_id"`
+	Content     string                `json:"content"`
+	ContentType string                `json:"content_type"`
+	SHA256      string                `json:"sha256"`
+	SizeBytes   int64                 `json:"size_bytes"`
+	Coverage    tool.EvidenceCoverage `json:"coverage"`
+	Offset      int64                 `json:"offset"`
+	NextOffset  int64                 `json:"next_offset"`
+	HasMore     bool                  `json:"has_more"`
+	CreatedAt   string                `json:"created_at"`
+}
+
+// GetToolResultArtifact reads one bounded slice after enforcing user/session ownership.
+func (rs *RunStore) GetToolResultArtifact(userID int64, sessionID, artifactID string, offset int64, limit int) (*ToolResultArtifactChunk, error) {
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact id is required")
+	}
+	if offset < 0 {
+		return nil, fmt.Errorf("artifact offset must be non-negative")
+	}
+	limit = min(max(limit, utf8.UTFMax), maxToolResultArtifactChunkBytes)
+	var artifact ToolResultArtifactChunk
+	var content []byte
+	var coverageRaw string
+	var createdAt sql.NullTime
+	err := rs.db.QueryRow(
+		`SELECT id,session_id,run_id,tool_call_id,SUBSTRING(content,?,?),content_type,sha256,size_bytes,
+			CAST(coverage_json AS CHAR),created_at
+		 FROM agent_tool_result_artifacts
+		 WHERE id=? AND user_id=? AND (?='' OR session_id=?) LIMIT 1`,
+		offset+1, limit, artifactID, userID, sessionID, sessionID,
+	).Scan(
+		&artifact.ID, &artifact.SessionID, &artifact.RunID, &artifact.ToolCallID, &content,
+		&artifact.ContentType, &artifact.SHA256, &artifact.SizeBytes, &coverageRaw, &createdAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if coverageRaw != "" {
+		if err := json.Unmarshal([]byte(coverageRaw), &artifact.Coverage); err != nil {
+			return nil, fmt.Errorf("decode artifact %q coverage: %w", artifactID, err)
+		}
+	}
+	content, err = validArtifactTextPrefix(content, offset)
+	if err != nil {
+		return nil, err
+	}
+	artifact.Content = string(content)
+	artifact.Offset = offset
+	artifact.NextOffset = offset + int64(len(content))
+	artifact.HasMore = artifact.NextOffset < artifact.SizeBytes
+	artifact.CreatedAt = store.FormatDatabaseTime(createdAt)
+	return &artifact, nil
+}
+
+func validArtifactTextPrefix(content []byte, offset int64) ([]byte, error) {
+	if utf8.Valid(content) {
+		return content, nil
+	}
+	for trim := 1; trim < utf8.UTFMax && trim < len(content); trim++ {
+		candidate := content[:len(content)-trim]
+		if utf8.Valid(candidate) {
+			return candidate, nil
+		}
+	}
+	return nil, fmt.Errorf("artifact content is not valid UTF-8 at byte offset %d", offset)
 }
 
 // EvidenceByIDs loads one bounded page of persisted evidence summaries.
@@ -1377,6 +1551,11 @@ func (rs *RunStore) DeleteBySession(sessionID string, userID int64) error {
 	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`DELETE c FROM agent_llm_calls c JOIN agent_runs r ON c.run_id = r.id WHERE r.session_id = ? AND r.user_id=?`,
+		sessionID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`DELETE a FROM agent_tool_result_artifacts a JOIN agent_runs r ON a.run_id = r.id WHERE r.session_id = ? AND r.user_id=?`,
 		sessionID, userID); err != nil {
 		return err
 	}
@@ -1536,32 +1715,53 @@ const (
 )
 
 type StepRecord struct {
-	StepNo          int       `json:"step_no"`
-	Kind            StepKind  `json:"kind"`
-	Tool            string    `json:"tool,omitempty"`
-	Args            string    `json:"args,omitempty"`
-	ResultSummary   string    `json:"result_summary,omitempty"`
-	Failed          bool      `json:"failed,omitempty"`
-	Content         string    `json:"content,omitempty"`
-	TokenDelta      int       `json:"token_delta"`
-	ReasoningTokens int       `json:"reasoning_tokens"`
-	DurationMs      int       `json:"duration_ms"`
-	CreatedAt       time.Time `json:"created_at"`
+	StepNo              int                   `json:"step_no"`
+	Kind                StepKind              `json:"kind"`
+	TraceID             string                `json:"trace_id,omitempty"`
+	ArtifactID          string                `json:"artifact_id,omitempty"`
+	ToolCallID          string                `json:"tool_call_id,omitempty"`
+	Tool                string                `json:"tool,omitempty"`
+	Args                string                `json:"args,omitempty"`
+	ResultPreview       string                `json:"result_preview,omitempty"`
+	Failed              bool                  `json:"failed,omitempty"`
+	DeliveryError       string                `json:"delivery_error,omitempty"`
+	Content             string                `json:"content,omitempty"`
+	PromptContent       string                `json:"prompt_content,omitempty"`
+	AuthoritativeSHA256 string                `json:"authoritative_sha256,omitempty"`
+	PromptSHA256        string                `json:"prompt_sha256,omitempty"`
+	SizeBytes           int64                 `json:"size_bytes,omitempty"`
+	Coverage            tool.EvidenceCoverage `json:"coverage,omitempty"`
+	AnswerContract      tool.AnswerContract   `json:"answer_contract,omitempty"`
+	TokenDelta          int                   `json:"token_delta"`
+	ReasoningTokens     int                   `json:"reasoning_tokens"`
+	DurationMs          int                   `json:"duration_ms"`
+	CreatedAt           time.Time             `json:"created_at"`
 }
 
 type StepRow struct {
-	ID              int64    `json:"id"`
-	RunID           string   `json:"run_id"`
-	StepNo          int      `json:"step_no"`
-	Kind            StepKind `json:"kind"`
-	Tool            string   `json:"tool,omitempty"`
-	Args            string   `json:"args,omitempty"`
-	ResultSummary   string   `json:"result_summary,omitempty"`
-	Content         string   `json:"content,omitempty"`
-	TokenDelta      int      `json:"token_delta"`
-	ReasoningTokens int      `json:"reasoning_tokens"`
-	DurationMs      int      `json:"duration_ms"`
-	CreatedAt       string   `json:"created_at"`
+	ID                  int64                 `json:"id"`
+	RunID               string                `json:"run_id"`
+	StepNo              int                   `json:"step_no"`
+	Kind                StepKind              `json:"kind"`
+	TraceID             string                `json:"trace_id,omitempty"`
+	ArtifactID          string                `json:"artifact_id,omitempty"`
+	ToolCallID          string                `json:"tool_call_id,omitempty"`
+	Tool                string                `json:"tool,omitempty"`
+	Args                string                `json:"args,omitempty"`
+	ResultPreview       string                `json:"result_preview,omitempty"`
+	Failed              bool                  `json:"failed,omitempty"`
+	DeliveryError       string                `json:"delivery_error,omitempty"`
+	Content             string                `json:"content,omitempty"`
+	PromptContent       string                `json:"prompt_content,omitempty"`
+	AuthoritativeSHA256 string                `json:"authoritative_sha256,omitempty"`
+	PromptSHA256        string                `json:"prompt_sha256,omitempty"`
+	SizeBytes           int64                 `json:"size_bytes,omitempty"`
+	Coverage            tool.EvidenceCoverage `json:"coverage,omitempty"`
+	AnswerContract      tool.AnswerContract   `json:"answer_contract,omitempty"`
+	TokenDelta          int                   `json:"token_delta"`
+	ReasoningTokens     int                   `json:"reasoning_tokens"`
+	DurationMs          int                   `json:"duration_ms"`
+	CreatedAt           string                `json:"created_at"`
 }
 
 type RunDetail struct {

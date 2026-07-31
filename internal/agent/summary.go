@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	turnSummaryTokenLimit     = 120
-	turnSummaryBatchSize      = 4
-	turnSummaryBatchWorkers   = 6
-	turnSummaryBatchMaxTokens = 2048
+	turnSummaryTokenLimit      = 120
+	turnSummaryBatchSize       = 4
+	turnSummaryBatchWorkers    = 6
+	turnSummaryBatchMaxTokens  = 2048
+	summaryToolProjectionRunes = 1200
 )
 
 type turnSummaryResponse struct {
@@ -177,7 +178,7 @@ func persistentSummaryTranscript(messages []llm.Message) string {
 				fmt.Fprintf(&sb, "assistant: %s\n", m.Content)
 			}
 		case m.Role == "tool":
-			fmt.Fprintf(&sb, "tool %s: %s\n", m.Name, runeSafeTruncate(m.Content, sessionToolResultLimit))
+			fmt.Fprintf(&sb, "tool %s: %s\n", m.Name, runeSafeTruncate(m.Content, summaryToolProjectionRunes))
 		default:
 			fmt.Fprintf(&sb, "%s: %s\n", m.Role, m.Content)
 		}
