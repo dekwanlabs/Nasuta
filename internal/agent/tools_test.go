@@ -237,6 +237,22 @@ func TestSymbolQueryTokens(t *testing.T) {
 	}
 }
 
+func TestGetSymbolResultRequiresLookupKey(t *testing.T) {
+	for _, test := range []struct {
+		name, query, qualifiedName, wantError string
+	}{
+		{name: "empty", wantError: "query or qualified_name is required"},
+		{name: "qualified name", qualifiedName: "com.example.FirebaseService.tryAcquireFirebaseRequestGuard", wantError: "workspace root"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := (&Service{}).GetSymbolResult(context.Background(), test.query, "", test.qualifiedName, 5)
+			if result != nil || err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("symbol lookup = result:%#v err:%v", result, err)
+			}
+		})
+	}
+}
+
 type apiTargetRepository struct{}
 
 func (apiTargetRepository) Resolve(context.Context, ontology.ResolveQuery) (ontology.ResolveResult, error) {

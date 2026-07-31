@@ -135,6 +135,9 @@ func (h *StreamPipe) Flush() {}
 // Discard stops forwarding — tokens already streamed are fine as preamble.
 func (h *StreamPipe) Discard() { h.discarding = true }
 
+// HasToolCallDelta reports whether this turn began a tool call instead of an answer.
+func (h *StreamPipe) HasToolCallDelta() bool { return h.discarding }
+
 // OnReasoning forwards streamed reasoning deltas to the observer.
 func (h *StreamPipe) OnReasoning(token string) {
 	h.recordTiming("reasoning")

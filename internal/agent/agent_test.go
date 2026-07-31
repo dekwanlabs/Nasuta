@@ -55,6 +55,20 @@ func fakeStreamServer(t *testing.T, events []streamEvent) *httptest.Server {
 	}))
 }
 
+func partialAnswerServer(t *testing.T, content string, calls *int32) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		atomic.AddInt32(calls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: content}}}}
+		data, _ := json.Marshal(chunk)
+		_, _ = w.Write([]byte("data: " + string(data) + "\n\n"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+}
+
 type streamChunkJS struct {
 	Choices []streamChoiceJS `json:"choices"`
 }
@@ -840,5 +854,68 @@ func TestRun_LoopExhaustedFallsThroughToConclusion(t *testing.T) {
 	}
 	if atomic.LoadInt32(&callCount) < 2 {
 		t.Fatalf("expected a second (conclusion) LLM call, got %d", callCount)
+	}
+}
+
+func TestRun_PreservesPartialAnswerWhenLoopDeadlineExpires(t *testing.T) {
+	var calls int32
+	srv := partialAnswerServer(t, "回答进行到这里", &calls)
+	defer srv.Close()
+
+	observer := &captureObserver{}
+	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, srv.Client())
+	agent := NewAgent(client, nil, AgentConfig{
+		MaxSteps: 1, AnswerMaxTokens: 100, MaxContinueRounds: 0,
+		Timeout: 800 * time.Millisecond, AnswerReserve: 500 * time.Millisecond,
+	}, observer, nil)
+
+	result, err := agent.RunWithPlan(t.Context(), "run_partial_loop", "q", nil, &retrieval.RetrievedContext{}, domain.EvidencePlan{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Err != nil || result.Answer != "回答进行到这里" {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.ForcedConclusion {
+		t.Fatal("partial visible answer should not trigger a second conclusion")
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("LLM calls = %d, want 1", calls)
+	}
+	if got := strings.Join(observer.tokens, ""); got != result.Answer {
+		t.Fatalf("streamed answer = %q, want %q", got, result.Answer)
+	}
+	if outcome := outcomeFor(result, nil); outcome.Status != RunStatusDone {
+		t.Fatalf("outcome = %#v, want completed answer", outcome)
+	}
+}
+
+func TestRun_PreservesPartialForcedConclusionWhenDeadlineExpires(t *testing.T) {
+	var calls int32
+	srv := partialAnswerServer(t, "结论尚未完成", &calls)
+	defer srv.Close()
+
+	observer := &captureObserver{}
+	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, srv.Client())
+	agent := NewAgent(client, nil, AgentConfig{
+		MaxSteps: 0, AnswerMaxTokens: 100, MaxContinueRounds: 0,
+		Timeout: 300 * time.Millisecond, AnswerReserve: 100 * time.Millisecond,
+	}, observer, nil)
+
+	result, err := agent.RunWithPlan(t.Context(), "run_partial_conclusion", "q", nil, &retrieval.RetrievedContext{}, domain.EvidencePlan{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Err != nil || result.Answer != "结论尚未完成" || !result.ForcedConclusion {
+		t.Fatalf("result = %#v", result)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("LLM calls = %d, want 1", calls)
+	}
+	if got := strings.Join(observer.tokens, ""); got != result.Answer {
+		t.Fatalf("streamed conclusion = %q, want %q", got, result.Answer)
+	}
+	if outcome := outcomeFor(result, nil); outcome.Status != RunStatusDone {
+		t.Fatalf("outcome = %#v, want completed answer", outcome)
 	}
 }

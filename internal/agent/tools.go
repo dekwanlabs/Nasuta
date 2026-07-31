@@ -1169,6 +1169,14 @@ func (srv *Service) GetSymbolFiltered(ctx context.Context, query, file, qualifie
 
 // GetSymbolResult queries codegraph without hiding availability or query failures.
 func (srv *Service) GetSymbolResult(ctx context.Context, query, file, qualifiedName string, limit int) (map[string]any, error) {
+	query = strings.TrimSpace(query)
+	qualifiedName = strings.TrimSpace(qualifiedName)
+	if query == "" {
+		query = qualifiedName
+	}
+	if query == "" {
+		return nil, fmt.Errorf("get symbol: query or qualified_name is required")
+	}
 	root := srv.workspaceRoot
 	if root == "" {
 		return nil, fmt.Errorf("codegraph: no workspace root configured")

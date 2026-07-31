@@ -653,7 +653,7 @@ func (handler *Handler) saveTurnToSession(ctx context.Context, runID, sessionID 
 	if handler.qaSessions == nil || sessionID == "" || answer == "" {
 		return
 	}
-	if err := handler.qaSessions.EnsureSession(sessionID, userID, platform.TruncateForLog(question, 512)); err != nil {
+	if err := handler.qaSessions.EnsureSession(sessionID, userID, platform.TruncateForLog(question, 256)); err != nil {
 		log.ErrorfCtx(ctx, "[qa] ensure session %s failed: %v", sessionID, err)
 		return
 	}

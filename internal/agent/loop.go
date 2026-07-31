@@ -287,6 +287,11 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 					Output: map[string]any{"error": err.Error()},
 				})
 			}
+			if agent.preserveInterruptedAnswer(runCtx, runID, &stepSeq, result, chatResult, h, t0, duration) {
+				answered = true
+				log.WarnfCtx(ctx, "[agent] run %s preserving partial answer from interrupted step %d: %v", runID, stepp, err)
+				break
+			}
 			if loopCtx.Err() != nil {
 				log.InfofCtx(ctx, "[agent] run %s loop budget exhausted at step %d: %v", runID, stepp, loopCtx.Err())
 				break
@@ -337,6 +342,11 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 			}
 			cont, err := agent.continueIfNeeded(loopCtx, messages, chatResult, agent.cfg.AnswerMaxTokens, h)
 			chatResult = cont
+			if err != nil && agent.preserveInterruptedAnswer(runCtx, runID, &stepSeq, result, chatResult, h, t0, duration) {
+				answered = true
+				log.WarnfCtx(ctx, "[agent] run %s preserving partial final answer at step %d: %v", runID, stepp, err)
+				break
+			}
 			if errors.Is(err, ErrReasoningTruncated) || errors.Is(err, ErrEmptyModelResponse) {
 				log.WarnfCtx(ctx, "[agent] run %s final-answer generation produced no visible content; forcing conclusion: %v", runID, err)
 				break
@@ -472,8 +482,13 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 		log.InfofCtx(ctx, "[agent] run %s forcing conclusion (steps=%d)", runID, result.Steps)
 		final, ferr := agent.forceConclusion(runCtx, runID, messages, &stepSeq, runStarted)
 		if ferr != nil {
-			result.Err = ferr
-			log.ErrorfCtx(ctx, "[agent] run %s force-conclusion error: %v", runID, ferr)
+			if hasDeliverableAnswer(final) {
+				result.Answer += final.Content
+				log.WarnfCtx(ctx, "[agent] run %s preserving partial force-conclusion answer: %v", runID, ferr)
+			} else {
+				result.Err = ferr
+				log.ErrorfCtx(ctx, "[agent] run %s force-conclusion error: %v", runID, ferr)
+			}
 		} else if final != nil {
 			result.Answer += final.Content
 		}
@@ -548,7 +563,7 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		}
 	}
 	*stepSeq++
-	if res != nil && err == nil {
+	if hasDeliverableAnswer(res) {
 		stream.Publish(res.Content)
 		agent.observer.OnStep(ctx, runID, StepRecord{
 			StepNo:          *stepSeq,
@@ -572,6 +587,28 @@ func hasLeakedToolProtocol(res *llm.ChatStreamResult) bool {
 	content := strings.ToLower(strings.ReplaceAll(res.Content, "｜", "|"))
 	return strings.Contains(content, "dsml") &&
 		(strings.Contains(content, "tool_calls") || strings.Contains(content, "invoke name="))
+}
+
+func hasDeliverableAnswer(res *llm.ChatStreamResult) bool {
+	return res != nil && strings.TrimSpace(res.Content) != "" && len(res.ToolCalls) == 0 && !hasLeakedToolProtocol(res)
+}
+
+func (agent *Agent) preserveInterruptedAnswer(ctx context.Context, runID string, stepSeq *int, result *RunResult, res *llm.ChatStreamResult, stream *StreamPipe, started time.Time, duration time.Duration) bool {
+	if stream.HasToolCallDelta() || !hasDeliverableAnswer(res) {
+		return false
+	}
+	result.Answer += res.Content
+	*stepSeq++
+	agent.observer.OnStep(ctx, runID, StepRecord{
+		StepNo:          *stepSeq,
+		Kind:            StepKindAnswer,
+		Content:         res.Content,
+		TokenDelta:      utf8.RuneCountInString(res.Content),
+		ReasoningTokens: res.ReasoningTokens,
+		DurationMs:      int(duration / time.Millisecond),
+		CreatedAt:       started,
+	})
+	return true
 }
 
 func (agent *Agent) generateWithContinue(ctx context.Context, messages []llm.Message, maxTokens int, h llm.StreamHandler) (*llm.ChatStreamResult, error) {

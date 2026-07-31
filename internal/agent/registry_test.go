@@ -72,6 +72,30 @@ func TestListAPIsPublishesKeywordContract(t *testing.T) {
 	}
 }
 
+func TestGetSymbolAllowsQualifiedNameWithoutQuery(t *testing.T) {
+	var symbol *Tool
+	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil) {
+		if candidate.ID == "get_symbol" {
+			symbol = &candidate
+			break
+		}
+	}
+	if symbol == nil {
+		t.Fatal("get_symbol was not registered")
+	}
+	registry := tool.NewRegistry()
+	if err := registry.Register(*symbol); err != nil {
+		t.Fatal(err)
+	}
+	executor := tool.NewExecutor(0)
+	_, err := executor.Execute(context.Background(), registry.Snapshot(tool.ReadPolicy()), "get_symbol", tool.Arguments{
+		"qualified_name": "com.example.FirebaseService.tryAcquireFirebaseRequestGuard",
+	})
+	if err == nil || !strings.Contains(err.Error(), "workspace root") {
+		t.Fatalf("qualified-name lookup did not reach the handler: %v", err)
+	}
+}
+
 func TestSessionTurnDetailsToolIsPrivateAndRequiresCurrentReference(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

@@ -55,6 +55,13 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		"limit":   propInt("Max results (default 20)."),
 	}, nil)
 	listAPISchema["additionalProperties"] = false
+	symbolProperties := map[string]any{
+		"query":          propString("Function, method, class, or interface name; do not pass a service name, document title, or runbook ID."),
+		"file":           propString("Optional canonical repos/... path scope."),
+		"qualified_name": propString("Optional exact qualified name; may be used without query."),
+		"limit":          propInt("Max nodes to return (default 5, max 10)."),
+	}
+	symbolSchema := objectSchema(symbolProperties, nil)
 	tools := []Tool{
 		{
 			ID: "get_service",
@@ -134,15 +141,11 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 			Description: "Query the codegraph index for exact definitions and source bodies of functions, methods, classes, or interfaces. " +
 				"A definition does not establish its callers or callees; use call tracing for those edges.",
 			Kind: ToolKindRead,
-			ReferenceInputs: []tool.ReferenceInput{{
-				Argument: "query", Accepts: []tool.ReferenceType{tool.ReferenceSymbol},
-			}},
-			InputSchema: objectSchema(map[string]any{
-				"query":          propString("Function, method, class, or interface name; do not pass a service name, document title, or runbook ID."),
-				"file":           propString("Optional canonical repos/... path scope."),
-				"qualified_name": propString("Optional exact qualified name."),
-				"limit":          propInt("Max nodes to return (default 5, max 10)."),
-			}, []string{"query"}),
+			ReferenceInputs: []tool.ReferenceInput{
+				{Argument: "query", Accepts: []tool.ReferenceType{tool.ReferenceSymbol}},
+				{Argument: "qualified_name", Accepts: []tool.ReferenceType{tool.ReferenceSymbol}},
+			},
+			InputSchema: symbolSchema,
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				result, err := svc.GetSymbolResult(ctx, args.String("query"),
 					args.String("file"), args.String("qualified_name"), args.Int("limit", 5))
