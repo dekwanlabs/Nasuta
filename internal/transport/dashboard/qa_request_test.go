@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
@@ -129,4 +130,38 @@ func TestQARuntimeStatusFormatting(t *testing.T) {
 	if response.Data.Model != "gpt-test" {
 		t.Fatalf("model = %q", response.Data.Model)
 	}
+}
+
+func TestRunQACompactionAsyncDetachesFromRequest(t *testing.T) {
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+	started := make(chan error, 1)
+	release := make(chan struct{})
+	returned := make(chan struct{})
+
+	go func() {
+		runQACompactionAsync(requestCtx, time.Second, func(ctx context.Context) {
+			started <- ctx.Err()
+			<-release
+		})
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("async compaction blocked the request path")
+	}
+	select {
+	case err := <-started:
+		if err != nil {
+			close(release)
+			t.Fatalf("detached compaction inherited request cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("async compaction did not start")
+	}
+	close(release)
 }

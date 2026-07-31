@@ -668,18 +668,31 @@ func (handler *Handler) saveTurnToSession(ctx context.Context, runID, sessionID 
 		return
 	}
 	log.InfofCtx(ctx, "[qa] saved turn %d to session %s", turnNo, sessionID)
-	handler.archiveSessionHistoryAfterTurn(ctx, sessionID, userID)
+	handler.archiveSessionHistoryAfterTurnAsync(ctx, sessionID, userID)
 }
 
-func (handler *Handler) archiveSessionHistoryAfterTurn(ctx context.Context, sessionID string, userID int64) {
+func (handler *Handler) archiveSessionHistoryAfterTurnAsync(ctx context.Context, sessionID string, userID int64) {
 	if handler.qa == nil || handler.qaSessions == nil || handler.platform == nil {
 		return
 	}
 	timeout := max(qaCompactionMinTimeout, time.Duration(handler.platform.AgentTimeout))
-	archiveCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	log.InfofCtx(ctx, "[qa] scheduled post-turn history archive for session %s", sessionID)
+	runQACompactionAsync(ctx, timeout, func(archiveCtx context.Context) {
+		handler.archiveSessionHistoryAfterTurn(archiveCtx, sessionID, userID)
+	})
+}
+
+func runQACompactionAsync(ctx context.Context, timeout time.Duration, compact func(context.Context)) {
+	compactCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	go func() {
+		defer cancel()
+		compact(compactCtx)
+	}()
+}
+
+func (handler *Handler) archiveSessionHistoryAfterTurn(ctx context.Context, sessionID string, userID int64) {
 	result, err := agent.ArchiveSessionHistoryIfNeeded(
-		archiveCtx, handler.qa.LLM(), handler.qaSessions, sessionID, userID,
+		ctx, handler.qa.LLM(), handler.qaSessions, sessionID, userID,
 		handler.platform.LLMContextWindow, handler.history,
 	)
 	if err != nil {
