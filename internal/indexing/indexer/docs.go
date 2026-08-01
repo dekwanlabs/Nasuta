@@ -90,10 +90,6 @@ func LoadKnowledgeBase(docStore KnowledgeDocStore) ([]domain.RunbookRecord, []do
 	var edges []domain.DependencyEdge
 	for _, d := range docs {
 		fm := parseFrontmatter(d.Content)
-		id := fmString(fm.data, "id")
-		if id == "" {
-			id = d.ID
-		}
 		title := extractTitle(fm.content)
 		if title == "" {
 			title = d.Title
@@ -103,7 +99,7 @@ func LoadKnowledgeBase(docStore KnowledgeDocStore) ([]domain.RunbookRecord, []do
 		// kind is now the single source of truth.
 		scope := d.Kind
 		records = append(records, domain.RunbookRecord{
-			ID:          id,
+			ID:          d.ID,
 			Repo:        "docs",
 			Title:       title,
 			Path:        d.Filename,

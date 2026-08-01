@@ -264,6 +264,8 @@ func TestQATurnRunIDMigrationAddsMissingColumn(t *testing.T) {
 		"ALTER TABLE qa_turns",
 		"ADD COLUMN run_id",
 		"VARCHAR(64) NOT NULL DEFAULT ''",
+		"GENERATED ALWAYS AS (NULLIF(run_id, '')) STORED",
+		"UNIQUE KEY uniq_session_run (session_id, run_id_key)",
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("QA turn run id migration missing %q", required)

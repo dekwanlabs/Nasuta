@@ -89,15 +89,16 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 		evidenceCls string
 		trust       int
 	}
-	byTitle := map[string][]chunk{}
+	byDocID := map[string][]chunk{}
 	seenText := map[string]map[string]struct{}{}
-	seenTitle := map[string]struct{}{}
-	var titleOrder []string
+	seenDoc := map[string]struct{}{}
+	var docOrder []string
 	dropped := map[string]struct{}{}
 	const maxChunksPerRunbook = 3
 	for _, hit := range runbookHits {
 		title := hit.Title
-		if title == "" {
+		docID := hit.DocID
+		if title == "" || docID == "" {
 			continue
 		}
 		for _, matched := range hit.Chunks {
@@ -106,22 +107,22 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 				continue
 			}
 			text := strings.TrimSpace(matched.ChunkText)
-			if text == "" || len(byTitle[title]) >= maxChunksPerRunbook {
+			if text == "" || len(byDocID[docID]) >= maxChunksPerRunbook {
 				continue
 			}
-			if seenText[title] == nil {
-				seenText[title] = map[string]struct{}{}
+			if seenText[docID] == nil {
+				seenText[docID] = map[string]struct{}{}
 			}
-			if _, duplicate := seenText[title][text]; duplicate {
+			if _, duplicate := seenText[docID][text]; duplicate {
 				continue
 			}
-			seenText[title][text] = struct{}{}
-			if _, ok := seenTitle[title]; !ok {
-				seenTitle[title] = struct{}{}
-				titleOrder = append(titleOrder, title)
+			seenText[docID][text] = struct{}{}
+			if _, ok := seenDoc[docID]; !ok {
+				seenDoc[docID] = struct{}{}
+				docOrder = append(docOrder, docID)
 			}
-			byTitle[title] = append(byTitle[title], chunk{
-				docID: hit.DocID, title: title, section: matched.SectionHeader, text: text, scope: hit.DocKind,
+			byDocID[docID] = append(byDocID[docID], chunk{
+				docID: docID, title: title, section: matched.SectionHeader, text: text, scope: hit.DocKind,
 				score: matched.SemanticScore, evidenceCls: hit.EvidenceClass, trust: hit.TrustTier,
 			})
 		}
@@ -134,15 +135,16 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 		sort.Strings(titles)
 		log.InfofCtx(ctx, "[qa] runbooks dropped below score %.2f: %v", retrieve.platform.RunbookMinScore, titles)
 	}
-	if len(titleOrder) == 0 {
+	if len(docOrder) == 0 {
 		return
 	}
-	titles := make([]string, 0, len(titleOrder))
-	for _, title := range titleOrder {
-		chunks := byTitle[title]
+	titles := make([]string, 0, len(docOrder))
+	for _, docID := range docOrder {
+		chunks := byDocID[docID]
 		if len(chunks) == 0 {
 			continue
 		}
+		title := chunks[0].title
 		var merged strings.Builder
 		bestScore := 0.0
 		for i, c := range chunks {
@@ -179,63 +181,92 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 			trustTier:     chunks[0].trust,
 		})
 	}
-	log.InfofCtx(ctx, "[qa] runbooks selected (merged %d unique titles from %d chunks):", len(titles), len(runbookHits))
-	for i, t := range titles {
-		cs := byTitle[t]
+	log.InfofCtx(ctx, "[qa] runbooks selected (merged %d documents from %d hits):", len(titles), len(runbookHits))
+	for i, docID := range docOrder {
+		cs := byDocID[docID]
+		if len(cs) == 0 {
+			continue
+		}
 		best := 0.0
 		for _, c := range cs {
 			if c.score > best {
 				best = c.score
 			}
 		}
-		log.InfofCtx(ctx, "  [%d] %s trust=%d score=%.3f semantic=%.3f chunks=%d", i, t, cs[0].trust, best, best, len(cs))
+		log.InfofCtx(ctx, "  [%d] %s (%s) trust=%d score=%.3f semantic=%.3f chunks=%d",
+			i, cs[0].title, docID, cs[0].trust, best, best, len(cs))
 	}
 	log.InfofCtx(ctx, "[qa] runbooks matched: %d %v", len(titles), titles)
 }
 
-// collectDeps queries the dependency chain for each anchored service and formats
-// the first one that has edges.
+// collectDeps collects unique dependency edges across anchored services.
 func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, addPart func(partial)) {
 	if len(services) == 0 {
 		return
 	}
-	for _, c := range services {
-		res, err := retrieve.tools.TraceDeps(ctx, c, "both", 2)
+	const maxDependencyEdges = 30
+	type dependencyEdge struct {
+		from, to, direction string
+	}
+	edges := make([]dependencyEdge, 0, maxDependencyEdges)
+	seen := make(map[string]struct{}, maxDependencyEdges)
+	queried := 0
+	omittedEdges := 0
+	for _, service := range services {
+		if len(edges) >= maxDependencyEdges {
+			break
+		}
+		res, err := retrieve.tools.TraceDeps(ctx, service, "both", 2)
+		queried++
 		if err != nil {
-			log.WarnfCtx(ctx, "[qa] collect deps for %s: %v", c, err)
+			log.WarnfCtx(ctx, "[qa] collect deps for %s: %v", service, err)
 			continue
 		}
-		if len(res.Upstream) > 0 || len(res.Downstream) > 0 {
-			var sb strings.Builder
-			sb.WriteString("## Dependency Chain\n")
-			const maxDependencyEdges = 30
-			written := 0
-			for _, e := range res.Upstream {
-				if written >= maxDependencyEdges {
-					break
+		appendEdges := func(direction string, candidates []domain.DependencyEdge) {
+			for _, edge := range candidates {
+				key := direction + "\x00" + edge.From + "\x00" + edge.To
+				if _, duplicate := seen[key]; duplicate {
+					continue
 				}
-				fmt.Fprintf(&sb, "- %s → %s (upstream)\n", e.From, e.To)
-				written++
-			}
-			for _, e := range res.Downstream {
-				if written >= maxDependencyEdges {
-					break
+				if len(edges) >= maxDependencyEdges {
+					omittedEdges++
+					continue
 				}
-				fmt.Fprintf(&sb, "- %s → %s (downstream)\n", e.From, e.To)
-				written++
+				seen[key] = struct{}{}
+				edges = append(edges, dependencyEdge{from: edge.From, to: edge.To, direction: direction})
 			}
-			if written < len(res.Upstream)+len(res.Downstream) {
-				sb.WriteString("- ...(additional edges omitted)\n")
-			}
-			log.InfofCtx(ctx, "[qa] collect deps: %s up=%d down=%d", c, len(res.Upstream), len(res.Downstream))
-			addPart(partial{
-				text:     sb.String(),
-				refs:     []Reference{{Type: "service", Label: c, Target: c}},
-				priority: partialPriorityDependency,
-			})
-			return
 		}
+		appendEdges("upstream", res.Upstream)
+		appendEdges("downstream", res.Downstream)
 	}
+	if len(edges) == 0 {
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("## Dependency Chain\n")
+	for _, edge := range edges {
+		fmt.Fprintf(&sb, "- %s → %s (%s)\n", edge.from, edge.to, edge.direction)
+	}
+	unqueried := len(services) - queried
+	if omittedEdges > 0 || unqueried > 0 {
+		sb.WriteString("- ...(additional edges omitted)\n")
+	}
+	refs := make([]Reference, 0, queried)
+	for _, service := range services[:queried] {
+		refs = append(refs, Reference{Type: "service", Label: service, Target: service})
+	}
+	log.InfofCtx(ctx, "[qa] collect deps: services=%d/%d edges=%d omitted_edges=%d",
+		queried, len(services), len(edges), omittedEdges)
+	if domain.TraceEnabled(ctx) {
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
+			Node: "dependency_collect",
+			Output: map[string]any{
+				"queried_services": queried, "unqueried_services": unqueried,
+				"selected_edges": len(edges), "omitted_edges": omittedEdges,
+			},
+		})
+	}
+	addPart(partial{text: sb.String(), refs: refs, priority: partialPriorityDependency})
 }
 
 // collectCodeGraph performs one scoped FTS query, then fetches selected bodies.

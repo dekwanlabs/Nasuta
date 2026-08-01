@@ -12,7 +12,7 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-// StreamPipe buffers model output until the caller confirms it is an answer.
+// StreamPipe records provider timing and publishes only validated answer output.
 type StreamPipe struct {
 	observer   Observer
 	runID      string
@@ -38,10 +38,6 @@ type StreamTiming struct {
 
 func newStreamPipe(observer Observer, runID string, stepNo int, started time.Time, onFirstToken func(string)) *StreamPipe {
 	return &StreamPipe{observer: observer, runID: runID, stepNo: stepNo, started: started, onFirstToken: onFirstToken}
-}
-
-func newBufferedStreamPipe(observer Observer, runID string, stepNo int, started time.Time, onFirstToken func(string)) *StreamPipe {
-	return newStreamPipe(observer, runID, stepNo, started, onFirstToken)
 }
 
 func (h *StreamPipe) recordTiming(kind string) {
@@ -108,9 +104,6 @@ func (h *StreamPipe) OnToolCallDelta() {
 	h.recordTiming("tool_delta")
 	h.discarding = true
 }
-
-// Flush is a no-op; Publish exposes validated output.
-func (h *StreamPipe) Flush() {}
 
 // Discard marks the turn as non-answer output.
 func (h *StreamPipe) Discard() { h.discarding = true }
@@ -197,7 +190,7 @@ func (hub *RunHub) EmitTrace(runID string, event domain.EvaluationTrace) {
 // RunHub fans out live agent events to SSE subscribers and stores control signals.
 type RunHub struct {
 	mu        sync.Mutex
-	subs      map[string][]chan SSEEvent
+	subs      map[string][]*runSubscriber
 	signals   map[string][]ControlSignal
 	paused    map[string]chan struct{}
 	completed map[string]struct{}
@@ -207,7 +200,7 @@ type RunHub struct {
 
 func NewRunHub(runStore *RunStore) *RunHub {
 	return &RunHub{
-		subs:      map[string][]chan SSEEvent{},
+		subs:      map[string][]*runSubscriber{},
 		signals:   map[string][]ControlSignal{},
 		paused:    map[string]chan struct{}{},
 		completed: map[string]struct{}{},
@@ -217,18 +210,20 @@ func NewRunHub(runStore *RunStore) *RunHub {
 }
 
 func (hub *RunHub) Subscribe(runID string) chan SSEEvent {
-	ch := make(chan SSEEvent, 512)
+	sub := newRunSubscriber(runID)
 	hub.mu.Lock()
-	hub.subs[runID] = append(hub.subs[runID], ch)
+	hub.subs[runID] = append(hub.subs[runID], sub)
 	hub.mu.Unlock()
-	return ch
+	return sub.events
 }
 
 func (hub *RunHub) Unsubscribe(runID string, ch chan SSEEvent) {
 	hub.mu.Lock()
 	subs := hub.subs[runID]
-	for i, c := range subs {
-		if c == ch {
+	var removed *runSubscriber
+	for i, sub := range subs {
+		if sub.events == ch {
+			removed = sub
 			hub.subs[runID] = append(subs[:i], subs[i+1:]...)
 			break
 		}
@@ -238,6 +233,9 @@ func (hub *RunHub) Unsubscribe(runID string, ch chan SSEEvent) {
 		delete(hub.completed, runID)
 	}
 	hub.mu.Unlock()
+	if removed != nil {
+		removed.close()
+	}
 }
 
 func (hub *RunHub) OnStep(ctx context.Context, runID string, step StepRecord) error {
@@ -369,23 +367,88 @@ func (hub *RunHub) Complete(runID string, outcome RunOutcome) {
 
 func (hub *RunHub) broadcast(runID string, ev SSEEvent) {
 	hub.mu.Lock()
-	subs := append([]chan SSEEvent(nil), hub.subs[runID]...)
+	subs := append([]*runSubscriber(nil), hub.subs[runID]...)
 	hub.mu.Unlock()
-	for _, ch := range subs {
-		select {
-		case ch <- ev:
-		default:
-			if ev.Type == EventRunFinished {
-				// Preserve the sole terminal fact even when diagnostics filled the buffer.
-				select {
-				case <-ch:
-				default:
-				}
-				ch <- ev
-				continue
-			}
+	for _, sub := range subs {
+		if !sub.enqueue(ev) {
 			log.WarnfCtx(ctxWithRunID(runID), "[hub] event %s dropped for run %s: subscriber buffer full", ev.Type, runID)
 		}
+	}
+}
+
+const subscriberDiagnosticLimit = 512
+
+type runSubscriber struct {
+	runID  string
+	events chan SSEEvent
+	wake   chan struct{}
+	stop   chan struct{}
+	once   sync.Once
+	mu     sync.Mutex
+	queue  []SSEEvent
+}
+
+func newRunSubscriber(runID string) *runSubscriber {
+	sub := &runSubscriber{
+		runID: runID, events: make(chan SSEEvent, 512),
+		wake: make(chan struct{}, 1), stop: make(chan struct{}),
+	}
+	go sub.deliver()
+	return sub
+}
+
+func (sub *runSubscriber) enqueue(event SSEEvent) bool {
+	sub.mu.Lock()
+	if isBestEffortEvent(event.Type) && len(sub.queue) >= subscriberDiagnosticLimit {
+		sub.mu.Unlock()
+		return false
+	}
+	sub.queue = append(sub.queue, event)
+	sub.mu.Unlock()
+	select {
+	case sub.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func (sub *runSubscriber) deliver() {
+	for {
+		sub.mu.Lock()
+		if len(sub.queue) == 0 {
+			sub.mu.Unlock()
+			select {
+			case <-sub.wake:
+				continue
+			case <-sub.stop:
+				return
+			}
+		}
+		event := sub.queue[0]
+		sub.queue[0] = SSEEvent{}
+		sub.queue = sub.queue[1:]
+		sub.mu.Unlock()
+		select {
+		case sub.events <- event:
+			if event.Type == EventRunFinished {
+				return
+			}
+		case <-sub.stop:
+			return
+		}
+	}
+}
+
+func (sub *runSubscriber) close() {
+	sub.once.Do(func() { close(sub.stop) })
+}
+
+func isBestEffortEvent(event EventType) bool {
+	switch event {
+	case EventReasoningDelta, EventTrace, EventStatus, EventLLMCall:
+		return true
+	default:
+		return false
 	}
 }
 

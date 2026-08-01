@@ -15,6 +15,7 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -56,6 +57,9 @@ const (
 	partialPriorityGeneral    = 3
 	partialPriorityDependency = 4
 	partialPriorityService    = 5
+	codeSourceRecallLimit     = 20
+	runbookSourceRecallLimit  = 20
+	serviceSourceRecallLimit  = 8
 )
 
 type codeHit struct {
@@ -220,11 +224,20 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 
 	var wg sync.WaitGroup
 	wg.Add(3)
+	type sourceStatus struct {
+		status string
+		count  int
+		err    error
+	}
+	codeStatus := sourceStatus{}
+	runbookStatus := sourceStatus{}
+	serviceStatus := sourceStatus{}
 
 	go func() {
 		defer wg.Done()
-		result, err := retrieve.tools.FindCode(ctx, searchQuery, "", 10)
+		result, err := retrieve.tools.FindCode(ctx, searchQuery, "", codeSourceRecallLimit)
 		if err != nil {
+			codeStatus.status, codeStatus.err = "failed", err
 			log.InfofCtx(ctx, "[qa] semantic code search error: %v", err)
 			return
 		}
@@ -271,13 +284,16 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 		mu.Lock()
 		a.codeHits = localHits
 		mu.Unlock()
+		codeStatus.count = len(localHits)
+		codeStatus.status = retrievalSourceStatus(len(localHits))
 		log.InfofCtx(ctx, "[qa] semantic code search raw hits: %d", len(localHits))
 	}()
 
 	go func() {
 		defer wg.Done()
-		result, err := retrieve.tools.FindRunbooks(ctx, knowledge.RunbookQuery{Query: searchQuery, Limit: 5})
+		result, err := retrieve.tools.FindRunbooks(ctx, knowledge.RunbookQuery{Query: searchQuery, Limit: runbookSourceRecallLimit})
 		if err != nil {
+			runbookStatus.status, runbookStatus.err = "failed", err
 			log.InfofCtx(ctx, "[qa] runbook search error: %v", err)
 			return
 		}
@@ -285,6 +301,8 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 		mu.Lock()
 		a.runbooks = matches
 		mu.Unlock()
+		runbookStatus.count = len(matches)
+		runbookStatus.status = retrievalSourceStatus(len(matches))
 		log.InfofCtx(ctx, "[qa] runbook hits: %d %v", len(matches), runbookTitles(matches))
 	}()
 
@@ -294,8 +312,9 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 		if serviceScoped {
 			matches = retrieve.configuredServiceMatches(ctx, servicePatterns, 8)
 		} else {
-			result, err := retrieve.tools.FindServices(ctx, searchQuery, 8)
+			result, err := retrieve.tools.FindServices(ctx, searchQuery, serviceSourceRecallLimit)
 			if err != nil {
+				serviceStatus.status, serviceStatus.err = "failed", err
 				log.InfofCtx(ctx, "[qa] service search error: %v", err)
 				return
 			}
@@ -319,9 +338,27 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 		for _, svc := range matches {
 			addSvc(svc.ServiceName)
 		}
+		serviceStatus.count = len(matches)
+		serviceStatus.status = retrievalSourceStatus(len(matches))
 	}()
 
 	wg.Wait()
+	statuses := map[string]sourceStatus{
+		"code": codeStatus, "runbook": runbookStatus, "service": serviceStatus,
+	}
+	traceOutput := make(map[string]any, len(statuses))
+	for source, status := range statuses {
+		item := map[string]any{"status": status.status, "candidate_count": status.count}
+		if status.err != nil {
+			item["error"] = status.err.Error()
+		}
+		traceOutput[source] = item
+	}
+	log.InfofCtx(ctx, "[qa] retrieval sources: code=%s runbook=%s service=%s",
+		codeStatus.status, runbookStatus.status, serviceStatus.status)
+	if domain.TraceEnabled(ctx) {
+		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "retrieval_sources", Output: traceOutput})
+	}
 
 	preview := a.services
 	if len(preview) > 8 {
@@ -330,6 +367,13 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 	log.InfofCtx(ctx, "[qa] anchor: services=%d codeHits=%d runbooks=%d first=%v",
 		len(a.services), len(a.codeHits), len(a.runbooks), preview)
 	return a
+}
+
+func retrievalSourceStatus(count int) string {
+	if count == 0 {
+		return "empty"
+	}
+	return "completed"
 }
 
 func matchesConfiguredService(name string, patterns []string) bool {
@@ -438,24 +482,24 @@ func (retrieve *Retriever) assemble(ctx context.Context, parts []partial, codePo
 		if p.text == "" || budget <= 0 {
 			continue
 		}
-		runes := []rune(p.text)
-		truncated := len(runes) > budget
+		partTokens := tokenestimate.Count(p.text)
+		truncated := partTokens > budget
 		if truncated {
-			marker := []rune("\n...(truncated)")
-			if budget > len(marker) {
-				allText.WriteString(string(runes[:budget-len(marker)]))
-				allText.WriteString(string(marker))
-			} else {
-				allText.WriteString(string(runes[:budget]))
+			const marker = "\n...(truncated)"
+			markerTokens := tokenestimate.Count(marker)
+			contentBudget := max(0, budget-markerTokens)
+			allText.WriteString(tokenestimate.Prefix(p.text, contentBudget))
+			if markerTokens <= budget {
+				allText.WriteString(marker)
 			}
 			budget = 0
 			stats.Truncated++
 		} else {
 			allText.WriteString(p.text)
-			budget -= len(runes)
+			budget -= partTokens
 			if budget > 0 {
 				allText.WriteByte('\n')
-				budget--
+				budget -= tokenestimate.Count("\n")
 			}
 		}
 		stats.Included++

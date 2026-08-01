@@ -42,9 +42,11 @@ func TestEmitCompactionFailureRecommendation(t *testing.T) {
 		RestartTurnThreshold:  209,
 		ProjectedBeforeTokens: 176070,
 	}
-	var event, data string
-	handler.emitSessionRestartRecommendation(context.Background(), func(gotEvent, gotData string) {
+	var event string
+	var data any
+	handler.emitSessionRestartRecommendation(context.Background(), func(gotEvent string, gotData any) error {
 		event, data = gotEvent, gotData
+		return nil
 	}, "qa-session", result, true)
 	if event != "session.restart_recommended" {
 		t.Fatalf("event = %q", event)
@@ -57,7 +59,11 @@ func TestEmitCompactionFailureRecommendation(t *testing.T) {
 		ProjectedTokens      int    `json:"projected_tokens"`
 		ContextWindow        int    `json:"context_window"`
 	}
-	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
 		t.Fatalf("decode payload: %v", err)
 	}
 	if payload.Reason != "compaction_failed" || payload.Text == "" ||

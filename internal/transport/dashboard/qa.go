@@ -49,9 +49,11 @@ type qaHistoryPage struct {
 }
 
 type sseWriter struct {
-	w       http.ResponseWriter
-	flusher http.Flusher
-	mu      sync.Mutex
+	w      http.ResponseWriter
+	mu     sync.Mutex
+	failed chan struct{}
+	once   sync.Once
+	err    error
 }
 
 const (
@@ -84,7 +86,7 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.ErrorfCtx(r.Context(), "[qa] session compaction failed for %s: %v", req.SessionID, err)
-		stream.emit("run.finished", jsonStr(agent.RunTerminal{Status: agent.RunStatusFailed, Error: err.Error()}))
+		_ = stream.emit("run.finished", agent.RunTerminal{Status: agent.RunStatusFailed, Error: err.Error()})
 		return
 	}
 	conversation.SessionID = req.SessionID
@@ -92,7 +94,7 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) prepareSessionContext(ctx context.Context, question, sessionID string, userID int64,
-	fallback []llm.Message, sseEvent func(string, string)) (agent.ConversationContext, error) {
+	fallback []llm.Message, sseEvent func(string, any) error) (agent.ConversationContext, error) {
 	if sessionID == "" || handler.qaSessions == nil || handler.qa == nil || handler.platform == nil {
 		return handler.loadSessionContext(ctx, sessionID, userID, fallback)
 	}
@@ -111,6 +113,7 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 	compactionTimeout := max(qaCompactionMinTimeout, time.Duration(handler.platform.AgentTimeout))
 	compactCtx, cancel := context.WithTimeout(ctx, compactionTimeout)
 	defer cancel()
+	var emitErr error
 	result, err := agent.CompactSessionIfNeeded(
 		compactCtx, handler.qa.LLM(), handler.qaSessions, sessionID, userID,
 		agent.SessionCompactionUsage{
@@ -120,21 +123,29 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 			OutputReserveTokens:        outputReserve,
 		}, question,
 		func(fromTurn, toTurn int) {
-			sseEvent("session.status", jsonStr(map[string]string{
+			if emitErr != nil {
+				return
+			}
+			emitErr = sseEvent("session.status", map[string]string{
 				"status": "start",
 				"text":   fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", fromTurn, toTurn),
-			}))
+			})
 		}, handler.history,
 	)
+	if emitErr != nil {
+		return agent.ConversationContext{}, emitErr
+	}
 	if err != nil {
 		handler.emitSessionRestartRecommendation(ctx, sseEvent, sessionID, result, true)
 		return agent.ConversationContext{}, fmt.Errorf("prepare session compaction %q: %w", sessionID, err)
 	}
 	if result.Applied {
-		sseEvent("session.status", jsonStr(map[string]string{
+		if err := sseEvent("session.status", map[string]string{
 			"status": "done",
 			"text":   "历史上下文压缩完成",
-		}))
+		}); err != nil {
+			return agent.ConversationContext{}, err
+		}
 		log.InfofCtx(ctx, "[qa] compacted session %s turns %d-%d refs=%d before answer",
 			sessionID, result.FromTurn, result.ToTurn, len(result.References))
 	} else if result.Stale {
@@ -145,7 +156,7 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 	return handler.loadSessionContext(ctx, sessionID, userID, fallback)
 }
 
-func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, sseEvent func(string, string),
+func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, sseEvent func(string, any) error,
 	sessionID string, result agent.SessionCompactionResult, compactionFailed bool) {
 	reason, message, recommend := compactionRestartRecommendation(result, compactionFailed)
 	if !recommend {
@@ -155,14 +166,17 @@ func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, ss
 	if projectedTokens == 0 {
 		projectedTokens = result.ProjectedBeforeTokens
 	}
-	sseEvent("session.restart_recommended", jsonStr(map[string]any{
+	if err := sseEvent("session.restart_recommended", map[string]any{
 		"text":                   message,
 		"reason":                 reason,
 		"archived_turns":         result.ArchivedTurnCount,
 		"restart_turn_threshold": result.RestartTurnThreshold,
 		"projected_tokens":       projectedTokens,
 		"context_window":         handler.platform.LLMContextWindow,
-	}))
+	}); err != nil {
+		log.WarnfCtx(ctx, "[qa] emit session restart recommendation failed session=%s: %v", sessionID, err)
+		return
+	}
 	log.WarnfCtx(ctx, "[qa] recommended new session session=%s reason=%s projected=%d window=%d archived_turns=%d restart_turn_threshold=%d",
 		sessionID, reason, projectedTokens, handler.platform.LLMContextWindow,
 		result.ArchivedTurnCount, result.RestartTurnThreshold)
@@ -179,11 +193,6 @@ func compactionRestartRecommendation(result agent.SessionCompactionResult, compa
 	default:
 		return "archived_history_limit", "当前会话已积累较多压缩历史，建议开启新对话继续，以保持上下文清晰。", true
 	}
-}
-
-func jsonStr(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }
 
 func parseQAAskRequest(r *http.Request) (qaAskRequest, error) {
@@ -214,18 +223,43 @@ func newSSEWriter(w http.ResponseWriter) (*sseWriter, error) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		return nil, fmt.Errorf("streaming not supported")
 	}
-	return &sseWriter{w: w, flusher: flusher}, nil
+	return &sseWriter{w: w, failed: make(chan struct{})}, nil
 }
 
-func (s *sseWriter) emit(event, data string) {
+func (s *sseWriter) emit(event string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return s.fail(fmt.Errorf("encode SSE event %q: %w", event, err))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, data)
-	s.flusher.Flush()
+	if s.err != nil {
+		return s.err
+	}
+	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, data); err != nil {
+		return s.failLocked(fmt.Errorf("write SSE event %q: %w", event, err))
+	}
+	if err := http.NewResponseController(s.w).Flush(); err != nil {
+		return s.failLocked(fmt.Errorf("flush SSE event %q: %w", event, err))
+	}
+	return nil
+}
+
+func (s *sseWriter) fail(err error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failLocked(err)
+}
+
+func (s *sseWriter) failLocked(err error) error {
+	s.once.Do(func() {
+		s.err = err
+		close(s.failed)
+	})
+	return s.err
 }
 
 func (s *sseWriter) startHeartbeat(ctx context.Context, interval time.Duration) func() {
@@ -241,10 +275,17 @@ func (s *sseWriter) startHeartbeat(ctx context.Context, interval time.Duration) 
 				return
 			case <-stop:
 				return
+			case <-s.failed:
+				return
 			case <-ticker.C:
 				s.mu.Lock()
-				fmt.Fprint(s.w, ": keepalive\n\n")
-				s.flusher.Flush()
+				if s.err == nil {
+					if _, err := fmt.Fprint(s.w, ": keepalive\n\n"); err != nil {
+						s.failLocked(fmt.Errorf("write SSE heartbeat: %w", err))
+					} else if err := http.NewResponseController(s.w).Flush(); err != nil {
+						s.failLocked(fmt.Errorf("flush SSE heartbeat: %w", err))
+					}
+				}
 				s.mu.Unlock()
 			}
 		}
@@ -275,9 +316,17 @@ func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string
 	}, nil
 }
 
-func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, sseEvent func(string, string), r *http.Request) {
+func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, allowEmit func(string, any) error, r *http.Request) {
 	userID := currentUserID(r)
 	log.InfofCtx(ctx, "[qa] agent mode: question=%q userID=%d", platform.TruncateForLog(question, 12), userID)
+	runCtx := context.WithoutCancel(ctx)
+	sseEvent := func(event string, payload any) bool {
+		if err := allowEmit(event, payload); err != nil {
+			log.WarnfCtx(ctx, "[qa] SSE projection failed session=%s event=%s: %v", sessionID, event, err)
+			return false
+		}
+		return true
+	}
 
 	// Subscribe before AskAgent starts.
 	// AskAgent emits phase hints during synchronous preprocessing and retrieval.
@@ -289,11 +338,13 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		channel = hub.Subscribe(runID)
 		defer hub.Unsubscribe(runID, channel)
 	}
-	sseEvent("run.started", jsonStr(map[string]any{"run_id": runID}))
+	if !sseEvent("run.started", map[string]any{"run_id": runID}) {
+		return
+	}
 	var traceRecorder *qaTraceRecorder
 	if traceEnabled && hub != nil {
 		traceRecorder = &qaTraceRecorder{started: time.Now(), runID: runID, hub: hub}
-		ctx = domain.WithTraceRecorder(ctx, traceRecorder)
+		runCtx = domain.WithTraceRecorder(runCtx, traceRecorder)
 	}
 
 	user := auth.UserFromContext(r.Context())
@@ -304,7 +355,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	}
 	askDone := make(chan askResponse, 1)
 	go func() {
-		result, err := handler.qa.AskAgentWithContext(ctx, question, conversation, userID, handler.rolePromptFor(userID), runID, evidencePlan, allowWrite)
+		result, err := handler.qa.AskAgentWithContext(runCtx, question, conversation, userID, handler.rolePromptFor(userID), runID, evidencePlan, allowWrite)
 		askDone <- askResponse{result: result, err: err}
 	}()
 
@@ -325,7 +376,9 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		case response = <-askDone:
 			responseReceived = true
 		case ev := <-channel:
-			emitHubEvent(ev, sseEvent)
+			if !emitHubEvent(ev, sseEvent) {
+				return
+			}
 			terminal = agent.TerminalFromEvent(ev)
 		case <-r.Context().Done():
 			return
@@ -333,24 +386,28 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	}
 	if traceRecorder != nil {
 		for _, event := range traceRecorder.Activate() {
-			sseEvent("trace", jsonStr(event))
+			if !sseEvent("trace", event) {
+				return
+			}
 		}
 	}
 	if response.err != nil {
 		log.ErrorfCtx(ctx, "[qa] agent init error: %v", response.err)
 		if terminal == nil {
 			terminal = &agent.RunTerminal{RunID: runID, Status: agent.RunStatusFailed, Error: response.err.Error()}
-			sseEvent("run.finished", jsonStr(terminal))
+			sseEvent("run.finished", terminal)
 		}
 		return
 	}
 	result := response.result
 
 	if result.Context != nil && len(result.Context.References) > 0 {
-		sseEvent("context", jsonStr(map[string]any{
+		if !sseEvent("context", map[string]any{
 			"references": result.Context.References,
 			"hitCount":   result.Context.HitCount,
-		}))
+		}) {
+			return
+		}
 	}
 
 	if terminal == nil {
@@ -358,9 +415,6 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	}
 	if r.Context().Err() != nil {
 		return
-	}
-	if terminal != nil && terminal.Status == agent.RunStatusDone && terminal.Answer != "" {
-		handler.saveTurnToSession(ctx, runID, sessionID, userID, question, terminal.Answer, terminal.SessionMessages)
 	}
 }
 
@@ -650,62 +704,12 @@ func (handler *Handler) APIQASessionDelete(w http.ResponseWriter, r *http.Reques
 	httputil.WriteJSON(w, map[string]string{"status": "deleted"})
 }
 
-func (handler *Handler) saveTurnToSession(ctx context.Context, runID, sessionID string, userID int64, question, answer string, toolMessages []llm.Message) {
-	if handler.qaSessions == nil || sessionID == "" || answer == "" {
-		return
-	}
-	if err := handler.qaSessions.EnsureSession(sessionID, userID, platform.TruncateForLog(question, 256)); err != nil {
-		log.ErrorfCtx(ctx, "[qa] ensure session %s failed: %v", sessionID, err)
-		return
-	}
-	messages := make([]llm.Message, 0, len(toolMessages)+2)
-	messages = append(messages, llm.Message{Role: "user", Content: question})
-	messages = append(messages, toolMessages...)
-	messages = append(messages, llm.Message{Role: "assistant", Content: answer})
-	turnNo, err := handler.qaSessions.AppendTurn(sessionID, runID, userID, messages)
-	if err != nil {
-		log.ErrorfCtx(ctx, "[qa] failed to append messages to session %s: %v", sessionID, err)
-		return
-	}
-	log.InfofCtx(ctx, "[qa] saved turn %d to session %s", turnNo, sessionID)
-	handler.archiveSessionHistoryAfterTurnAsync(ctx, sessionID, userID)
-}
-
-func (handler *Handler) archiveSessionHistoryAfterTurnAsync(ctx context.Context, sessionID string, userID int64) {
-	if handler.qa == nil || handler.qaSessions == nil || handler.platform == nil {
-		return
-	}
-	timeout := max(qaCompactionMinTimeout, time.Duration(handler.platform.AgentTimeout))
-	log.InfofCtx(ctx, "[qa] scheduled post-turn history archive for session %s", sessionID)
-	runQACompactionAsync(ctx, timeout, func(archiveCtx context.Context) {
-		handler.archiveSessionHistoryAfterTurn(archiveCtx, sessionID, userID)
-	})
-}
-
 func runQACompactionAsync(ctx context.Context, timeout time.Duration, compact func(context.Context)) {
 	compactCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	go func() {
 		defer cancel()
 		compact(compactCtx)
 	}()
-}
-
-func (handler *Handler) archiveSessionHistoryAfterTurn(ctx context.Context, sessionID string, userID int64) {
-	result, err := agent.ArchiveSessionHistoryIfNeeded(
-		ctx, handler.qa.LLM(), handler.qaSessions, sessionID, userID,
-		handler.platform.LLMContextWindow, handler.history,
-	)
-	if err != nil {
-		log.ErrorfCtx(ctx, "[qa] post-turn history archive failed for %s: %v", sessionID, err)
-		return
-	}
-	if result.Applied {
-		log.InfofCtx(ctx, "[qa] archived session %s turns %d-%d after saved turn",
-			sessionID, result.FromTurn, result.ToTurn)
-	} else if result.Stale {
-		log.InfofCtx(ctx, "[qa] ignored stale post-turn archive for session %s through turn %d",
-			sessionID, result.ToTurn)
-	}
 }
 
 func (handler *Handler) APIQARuns(w http.ResponseWriter, r *http.Request) {
@@ -835,7 +839,7 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 	httputil.WriteJSON(w, map[string]string{"status": "sent"})
 }
 
-func (handler *Handler) streamAgentEvents(hubCh chan agent.SSEEvent, sseEvent func(string, string), r *http.Request) *agent.RunTerminal {
+func (handler *Handler) streamAgentEvents(hubCh chan agent.SSEEvent, sseEvent func(string, any) bool, r *http.Request) *agent.RunTerminal {
 	for {
 		if hubCh == nil {
 			return nil
@@ -845,7 +849,9 @@ func (handler *Handler) streamAgentEvents(hubCh chan agent.SSEEvent, sseEvent fu
 			if !ok {
 				return nil
 			}
-			emitHubEvent(ev, sseEvent)
+			if !emitHubEvent(ev, sseEvent) {
+				return nil
+			}
 			if terminal := agent.TerminalFromEvent(ev); terminal != nil {
 				return terminal
 			}
@@ -855,8 +861,8 @@ func (handler *Handler) streamAgentEvents(hubCh chan agent.SSEEvent, sseEvent fu
 	}
 }
 
-func emitHubEvent(ev agent.SSEEvent, sseEvent func(string, string)) {
-	sseEvent(string(ev.Type), jsonStr(ev.Data))
+func emitHubEvent(ev agent.SSEEvent, sseEvent func(string, any) bool) bool {
+	return sseEvent(string(ev.Type), ev.Data)
 }
 
 type qaTraceRecorder struct {

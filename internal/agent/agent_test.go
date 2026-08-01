@@ -102,27 +102,23 @@ func newTestAgent(t *testing.T, serverURL string) *Agent {
 
 func TestMaxStepsForQuestion(t *testing.T) {
 	agent := &Agent{cfg: AgentConfig{MaxSteps: 5}}
-	cases := []struct {
-		question string
-		want     int
-	}{
-		{"what does this service do", 2},
-		{"review this architecture", 3},
-		{"trace the caller call chain", 5},
-		{"why did this request timeout", 5},
-	}
-	for _, tc := range cases {
-		if got := agent.MaxStepsFor(tc.question); got != tc.want {
-			t.Errorf("MaxStepsFor(%q) = %d, want %d", tc.question, got, tc.want)
+	for _, question := range []string{
+		"what does this service do",
+		"review this architecture",
+		"trace the caller call chain",
+		"why did this request timeout",
+	} {
+		if got := agent.MaxStepsFor(question); got != 5 {
+			t.Errorf("MaxStepsFor(%q) = %d, want configured limit 5", question, got)
 		}
 	}
 }
 
-func TestMaxStepsForWebPlanAllowsFetchTurn(t *testing.T) {
+func TestMaxStepsForWebPlanUsesConfiguredLimit(t *testing.T) {
 	agent := &Agent{cfg: AgentConfig{MaxSteps: 5}}
 	plan := domain.EvidencePlan{Sources: domain.Web}
-	if got := agent.MaxStepsForPlan("school information", plan); got != 3 {
-		t.Fatalf("MaxStepsForPlan() = %d, want 3", got)
+	if got := agent.MaxStepsForPlan("school information", plan); got != 5 {
+		t.Fatalf("MaxStepsForPlan() = %d, want 5", got)
 	}
 }
 
@@ -408,9 +404,8 @@ func TestContinueIfNeeded_MaxRoundsCap(t *testing.T) {
 		t.Fatalf("chat: %v", err)
 	}
 	res, cerr := agent.continueIfNeeded(t.Context(), nil, res, 100, nil)
-	// Hit the round cap with non-empty content → "still truncated" path, no error.
-	if cerr != nil {
-		t.Fatalf("continueIfNeeded: unexpected error at round cap: %v", cerr)
+	if !errors.Is(cerr, ErrAnswerTruncated) {
+		t.Fatalf("continueIfNeeded: got %v, want ErrAnswerTruncated", cerr)
 	}
 	if res.FinishReason != "length" {
 		t.Fatalf("should still be length after round cap, got %q", res.FinishReason)
@@ -763,18 +758,10 @@ func TestForceConclusion_RetriesToolProtocolWithoutStreamingIt(t *testing.T) {
 	}
 }
 
-func TestWithDefaults_AnswerReserveClamped(t *testing.T) {
-	// Reserve at or beyond timeout must be halved so the loop always keeps room.
+func TestWithDefaults_DoesNotRewriteInvalidAnswerReserve(t *testing.T) {
 	cfg := AgentConfig{Timeout: 10 * time.Second, AnswerReserve: 30 * time.Second}.withDefaults()
-	if cfg.AnswerReserve >= cfg.Timeout {
-		t.Fatalf("reserve %s should be < timeout %s after clamping", cfg.AnswerReserve, cfg.Timeout)
-	}
-	if cfg.AnswerReserve != 5*time.Second {
-		t.Fatalf("reserve = %s, want 5s (half of timeout)", cfg.AnswerReserve)
-	}
-	cfg = AgentConfig{Timeout: 10 * time.Second, AnswerReserve: 10 * time.Second}.withDefaults()
-	if cfg.AnswerReserve != 5*time.Second {
-		t.Fatalf("equal reserve = %s, want 5s (half of timeout)", cfg.AnswerReserve)
+	if cfg.AnswerReserve != 30*time.Second {
+		t.Fatalf("reserve = %s, want configured value preserved", cfg.AnswerReserve)
 	}
 
 	// ConclusionMaxTokens falls back to AnswerMaxTokens when unset (0). Timeout
@@ -858,7 +845,7 @@ func TestRun_PreservesPartialAnswerWhenLoopDeadlineExpires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Err != nil || result.Answer != "回答进行到这里" {
+	if result.Err == nil || result.Answer != "回答进行到这里" {
 		t.Fatalf("result = %#v", result)
 	}
 	if result.ForcedConclusion {
@@ -870,8 +857,8 @@ func TestRun_PreservesPartialAnswerWhenLoopDeadlineExpires(t *testing.T) {
 	if got := strings.Join(observer.tokens, ""); got != result.Answer {
 		t.Fatalf("streamed answer = %q, want %q", got, result.Answer)
 	}
-	if outcome := outcomeFor(result, nil); outcome.Status != RunStatusDone {
-		t.Fatalf("outcome = %#v, want completed answer", outcome)
+	if outcome := outcomeFor(result, nil); outcome.Status != RunStatusFailed {
+		t.Fatalf("outcome = %#v, want failed partial answer", outcome)
 	}
 }
 
@@ -891,7 +878,7 @@ func TestRun_PreservesPartialForcedConclusionWhenDeadlineExpires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Err != nil || result.Answer != "结论尚未完成" || !result.ForcedConclusion {
+	if result.Err == nil || result.Answer != "结论尚未完成" || !result.ForcedConclusion {
 		t.Fatalf("result = %#v", result)
 	}
 	if atomic.LoadInt32(&calls) != 1 {
@@ -900,8 +887,8 @@ func TestRun_PreservesPartialForcedConclusionWhenDeadlineExpires(t *testing.T) {
 	if got := strings.Join(observer.tokens, ""); got != result.Answer {
 		t.Fatalf("streamed conclusion = %q, want %q", got, result.Answer)
 	}
-	if outcome := outcomeFor(result, nil); outcome.Status != RunStatusDone {
-		t.Fatalf("outcome = %#v, want completed answer", outcome)
+	if outcome := outcomeFor(result, nil); outcome.Status != RunStatusFailed {
+		t.Fatalf("outcome = %#v, want failed partial answer", outcome)
 	}
 }
 

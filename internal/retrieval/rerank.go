@@ -60,27 +60,31 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 	log.InfofCtx(ctx, "[qa] code pool input: %d docs\n%s", len(pool), poolSummary(pool, "input"))
 
 	before := len(pool)
-	pool = topByRecall(pool, retrieve.platform.RerankPool)
-	log.InfofCtx(ctx, "[qa] code pool coarse-truncate: → %d", len(pool))
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_truncate", Input: map[string]any{"candidates": before, "limit": retrieve.platform.RerankPool}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
-	}
-
-	before = len(pool)
 	pool = dedupBySource(pool)
 	log.InfofCtx(ctx, "[qa] code pool dedup: → %d\n%s", len(pool), poolSummary(pool, "dedup"))
 	if traceEnabled {
 		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_dedup", Input: map[string]any{"candidates": before}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
 	}
 
+	before = len(pool)
+	pool = selectRerankCandidates(pool, retrieve.platform.RerankPool, 2)
+	log.InfofCtx(ctx, "[qa] code pool coarse-truncate: → %d", len(pool))
+	if traceEnabled {
+		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_truncate", Input: map[string]any{"candidates": before, "limit": retrieve.platform.RerankPool, "minimum_per_source": 2}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
+	}
+
 	poolBeforeRerank := append([]codeDoc(nil), pool...)
 	rerankStarted := time.Now()
-	pool = rerankPool(ctx, retrieve.reranker, query, pool, retrieve.platform.RerankMinDensePreflight)
+	reranked := rerankPool(ctx, retrieve.reranker, query, pool, retrieve.platform.RerankMinDensePreflight)
+	pool = reranked.docs
 	if traceEnabled {
 		domain.RecordTrace(ctx, domain.EvaluationTrace{
 			Node: "candidate_rerank", DurationMS: time.Since(rerankStarted).Milliseconds(),
-			Input:  map[string]any{"candidates": len(poolBeforeRerank), "enabled": retrieve.reranker.Enabled()},
-			Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)},
+			Input: map[string]any{"candidates": len(poolBeforeRerank), "enabled": retrieve.reranker.Enabled()},
+			Output: map[string]any{
+				"candidates": len(pool), "mode": reranked.mode,
+				"error": errorString(reranked.err), "top": tracePool(pool),
+			},
 		})
 	}
 	{
@@ -155,6 +159,37 @@ func topByRecall(docs []codeDoc, n int) []codeDoc {
 	return docs
 }
 
+func selectRerankCandidates(docs []codeDoc, limit, minimumPerSource int) []codeDoc {
+	docs = topByRecall(docs, 0)
+	if limit <= 0 || len(docs) <= limit {
+		return docs
+	}
+	selected := make([]bool, len(docs))
+	sourceCounts := make(map[string]int)
+	out := make([]codeDoc, 0, limit)
+	for i, doc := range docs {
+		if sourceCounts[doc.source] >= minimumPerSource {
+			continue
+		}
+		selected[i] = true
+		sourceCounts[doc.source]++
+		out = append(out, doc)
+		if len(out) == limit {
+			return topByRecall(out, 0)
+		}
+	}
+	for i, doc := range docs {
+		if selected[i] {
+			continue
+		}
+		out = append(out, doc)
+		if len(out) == limit {
+			break
+		}
+	}
+	return topByRecall(out, 0)
+}
+
 func dedupBySource(docs []codeDoc) []codeDoc {
 	kept := map[string]codeDoc{}
 	info := func(d codeDoc) int { return d.chars + W_REFS*d.refs }
@@ -211,9 +246,15 @@ func (d codeDoc) rankScore() float64 { return d.rerankScore + bandBonus(d.trustT
 
 const rerankWeight = 0.7
 
-func rerankPool(ctx context.Context, rr Reranker, query string, docs []codeDoc, minDensePreflight float64) []codeDoc {
+type rerankResult struct {
+	docs []codeDoc
+	mode string
+	err  error
+}
+
+func rerankPool(ctx context.Context, rr Reranker, query string, docs []codeDoc, minDensePreflight float64) rerankResult {
 	if len(docs) == 0 {
-		return docs
+		return rerankResult{docs: docs, mode: "empty"}
 	}
 	maxDense := 0.0
 	allHaveDense := true
@@ -250,19 +291,44 @@ func rerankPool(ctx context.Context, rr Reranker, query string, docs []codeDoc, 
 					docs[i].rerankScore = blend(scores[i], docs[i].candidateScore())
 				}
 				sortByRankScore(docs)
-				return docs
+				return rerankResult{docs: docs, mode: "remote"}
 			}
-			log.WarnfCtx(ctx, "[qa] rerank failed/timed out (%v), falling back to dense order", err)
+			if err == nil {
+				err = fmt.Errorf("reranker returned %d scores for %d candidates", len(scores), len(docs))
+			}
+			log.WarnfCtx(ctx, "[qa] rerank failed/timed out (%v), preserving recall order", err)
+			scoreByRecall(docs)
+			return rerankResult{docs: docs, mode: "recall_after_error", err: err}
 		}
 	}
-	// Dense rerank is the deterministic local fallback when remote rerank is unavailable.
+	// The local scorer is the configured mode when no external reranker is enabled.
 	var dr denseReranker
 	scores, _ := dr.Score(ctx, query, docs)
 	for i := range docs {
 		docs[i].rerankScore = scores[i]
 	}
 	sortByRankScore(docs)
-	return docs
+	return rerankResult{docs: docs, mode: "local"}
+}
+
+func scoreByRecall(docs []codeDoc) {
+	maxRecall := 0.0
+	for _, doc := range docs {
+		maxRecall = max(maxRecall, doc.candidateScore())
+	}
+	for i := range docs {
+		if maxRecall > 0 {
+			docs[i].rerankScore = docs[i].candidateScore() / maxRecall
+		}
+	}
+	sortByRankScore(docs)
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func sortByRankScore(docs []codeDoc) {
@@ -417,11 +483,7 @@ func (dashReranker dashscopeReranker) Score(ctx context.Context, query string, d
 	req.Input.Query = query
 	req.Input.Documents = make([]string, len(docs))
 	for i, d := range docs {
-		body := d.text
-		if len(body) > rerankDocChars {
-			body = body[:rerankDocChars]
-		}
-		req.Input.Documents[i] = body
+		req.Input.Documents[i] = truncateRerankDocument(d.text, rerankDocChars)
 	}
 
 	var out dashscopeRerankResponse
@@ -471,4 +533,15 @@ func (dashReranker dashscopeReranker) Score(ctx context.Context, query string, d
 		}
 	}
 	return scores, nil
+}
+
+func truncateRerankDocument(value string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes])
 }

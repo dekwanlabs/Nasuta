@@ -215,18 +215,23 @@ func TestHub_CompletePreservesTerminalWhenSubscriberBufferIsFull(t *testing.T) {
 	hub := NewRunHub(nil)
 	const runID = "full-buffer"
 	ch := hub.Subscribe(runID)
-	for i := 0; i < cap(ch); i++ {
-		ch <- SSEEvent{Type: EventTrace}
+	defer hub.Unsubscribe(runID, ch)
+	for i := 0; i < subscriberDiagnosticLimit*2; i++ {
+		hub.EmitTrace(runID, domain.EvaluationTrace{Sequence: i + 1})
 	}
 	hub.Complete(runID, RunOutcome{Status: RunStatusDone, Answer: "answer"})
 
 	var terminal *RunTerminal
-	for i := 0; i < cap(ch); i++ {
-		if eventTerminal := TerminalFromEvent(<-ch); eventTerminal != nil {
-			terminal = eventTerminal
+	deadline := time.After(time.Second)
+	for terminal == nil {
+		select {
+		case event := <-ch:
+			terminal = TerminalFromEvent(event)
+		case <-deadline:
+			t.Fatal("terminal event was not delivered after diagnostic congestion")
 		}
 	}
-	if terminal == nil || terminal.Answer != "answer" {
+	if terminal.Answer != "answer" {
 		t.Fatalf("terminal = %+v", terminal)
 	}
 }

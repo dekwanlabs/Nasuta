@@ -83,9 +83,6 @@ type ConversationContext struct {
 }
 
 func (c AgentConfig) withDefaults() AgentConfig {
-	if c.Timeout > 0 && c.AnswerReserve >= c.Timeout {
-		c.AnswerReserve = c.Timeout / 2
-	}
 	if c.ConclusionMaxTokens <= 0 {
 		c.ConclusionMaxTokens = c.AnswerMaxTokens
 	}
@@ -120,18 +117,7 @@ func NewAgent(llm *llm.LLMClient, executor *ToolExecutor, cfg AgentConfig, obser
 }
 
 func (agent *Agent) MaxStepsFor(question string) int {
-	configured := agent.cfg.MaxSteps
-	if configured <= 2 || requiresExtendedToolLoop(question) {
-		return configured
-	}
-	switch ClassifyResponseMode(question) {
-	case domain.BugAnalysis, domain.RequirementsAnalysis:
-		return configured
-	case domain.ArchitectureReview, domain.CodeReview:
-		return min(configured, 3)
-	default:
-		return min(configured, 2)
-	}
+	return agent.cfg.MaxSteps
 }
 
 // MaxStepsForPlan leaves one extra turn for web research to fetch a selected page.
@@ -141,29 +127,7 @@ func (agent *Agent) MaxStepsForPlan(question string, plan domain.EvidencePlan) i
 
 // MaxStepsForContext grants routed runtime investigations their configured budget.
 func (agent *Agent) MaxStepsForContext(question string, plan domain.EvidencePlan, fullInvestigation bool) int {
-	if fullInvestigation {
-		return agent.cfg.MaxSteps
-	}
-	steps := agent.MaxStepsFor(question)
-	if plan.Has(domain.Web) && steps >= 2 {
-		return min(agent.cfg.MaxSteps, max(steps, 3))
-	}
-	return steps
-}
-
-var extendedToolLoopSignals = []string{
-	"调用链", "调用关系", "上下游", "依赖链", "谁调用", "被谁调用", "写入路径", "落库路径", "端到端追踪",
-	"call chain", "caller", "callee", "dependency chain", "write path", "end-to-end trace",
-}
-
-func requiresExtendedToolLoop(question string) bool {
-	q := strings.ToLower(question)
-	for _, signal := range extendedToolLoopSignals {
-		if strings.Contains(q, signal) {
-			return true
-		}
-	}
-	return false
+	return agent.cfg.MaxSteps
 }
 
 // SetOnFirstAnswerToken installs a callback fired before the first answer token.
@@ -270,7 +234,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 			return result, err
 		}
 		t0 := time.Now()
-		h := newBufferedStreamPipe(agent.observer, runID, stepp, t0, agent.onFirstAnswerToken)
+		h := newStreamPipe(agent.observer, runID, stepp, t0, agent.onFirstAnswerToken)
 
 		callCtx := llm.WithUsagePhase(loopCtx, llm.PhaseAgentStep)
 		chatResult, err := agent.llm.ChatWithToolsMax(callCtx, messages, tools, h, agent.cfg.AnswerMaxTokens)
@@ -285,7 +249,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 				})
 			}
 			if !answerContract.Active() && agent.preserveInterruptedAnswer(runCtx, runID, &stepSeq, result, chatResult, h, t0, duration) {
-				answered = true
+				result.Err = fmt.Errorf("agent step %d: %w", stepp, err)
 				log.WarnfCtx(ctx, "[agent] run %s preserving partial answer from interrupted step %d: %v", runID, stepp, err)
 				break
 			}
@@ -329,7 +293,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 			cont, err := agent.continueIfNeeded(loopCtx, messages, chatResult, agent.cfg.AnswerMaxTokens, h)
 			chatResult = cont
 			if err != nil && !answerContract.Active() && agent.preserveInterruptedAnswer(runCtx, runID, &stepSeq, result, chatResult, h, t0, duration) {
-				answered = true
+				result.Err = err
 				log.WarnfCtx(ctx, "[agent] run %s preserving partial final answer at step %d: %v", runID, stepp, err)
 				break
 			}
@@ -478,6 +442,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 			validPartial := !answerContract.Active() || final != nil && len(answerContract.Missing(final.Content)) == 0
 			if hasDeliverableAnswer(final) && validPartial && !errors.Is(ferr, ErrAnswerContractViolation) {
 				result.Answer += final.Content
+				result.Err = ferr
 				log.WarnfCtx(ctx, "[agent] run %s preserving partial force-conclusion answer: %v", runID, ferr)
 			} else {
 				result.Err = ferr
@@ -502,7 +467,7 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		Content: forceConclusionInstruction,
 	})
 	t0 := time.Now()
-	stream := newBufferedStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
+	stream := newStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
 	res, err := agent.generateWithContinue(ctx, messages, agent.cfg.ConclusionMaxTokens, stream)
 	if errors.Is(err, ErrReasoningTruncated) || errors.Is(err, ErrEmptyModelResponse) {
 		log.WarnfCtx(ctx, "[agent] run %s force-conclusion produced no visible content, retrying with no-reasoning prompt: %v", runID, err)
@@ -511,14 +476,14 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 			Content: forceConclusionNoReasoningInstruction,
 		})
 		t0 = time.Now()
-		stream = newBufferedStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
+		stream = newStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
 		res, err = agent.generateWithContinue(ctx, messages, agent.cfg.ConclusionMaxTokens, stream)
 	}
 	if err == nil && hasLeakedToolProtocol(res) {
 		log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", runID)
 		messages = append(messages, llm.Message{Role: "user", Content: protocolRepairInstruction})
 		t0 = time.Now()
-		stream = newBufferedStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
+		stream = newStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
 		res, err = agent.generateWithContinue(ctx, messages, agent.cfg.ConclusionMaxTokens, stream)
 		if err == nil && hasLeakedToolProtocol(res) {
 			res = nil
@@ -626,6 +591,9 @@ func (agent *Agent) generateWithContinue(ctx context.Context, messages []llm.Mes
 // emitting any visible content.
 var ErrReasoningTruncated = errors.New("turn truncated during reasoning: max_tokens exhausted before any visible content; retry with a larger budget")
 
+// ErrAnswerTruncated means continuation rounds ended before the visible answer completed.
+var ErrAnswerTruncated = errors.New("answer remained truncated after continuation limit")
+
 // ErrEmptyModelResponse means the provider ended normally without producing an answer.
 var ErrEmptyModelResponse = errors.New("model returned no visible content")
 
@@ -664,6 +632,7 @@ func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message
 	}
 	if res.FinishReason == "length" {
 		log.WarnfCtx(ctx, "[agent] answer still truncated after %d continuation rounds", agent.cfg.MaxContinueRounds)
+		return res, ErrAnswerTruncated
 	}
 	return res, nil
 }

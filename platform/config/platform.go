@@ -546,6 +546,25 @@ func (p *PlatformSettings) ValidateCodingSettings() error {
 	return nil
 }
 
+// ValidateAgentSettings checks relationships between independently stored limits.
+func (p *PlatformSettings) ValidateAgentSettings() error {
+	timeout := time.Duration(p.AgentTimeout)
+	reserve := time.Duration(p.AgentAnswerReserve)
+	if timeout <= 0 {
+		return fmt.Errorf("agent_timeout must be positive")
+	}
+	if reserve <= 0 {
+		return fmt.Errorf("agent_answer_reserve must be positive")
+	}
+	if reserve >= timeout {
+		return fmt.Errorf("agent_answer_reserve must be less than agent_timeout")
+	}
+	if p.LLMContextWindow > 0 && p.ContextBudget >= p.LLMContextWindow {
+		return fmt.Errorf("context_budget must be less than llm_context_window")
+	}
+	return nil
+}
+
 // VCSEnabled reports whether VCS syncing is configured.
 func (p *PlatformSettings) VCSEnabled() bool {
 	return p.VCSURL != "" && p.VCSToken != "" && len(p.VCSGroups) > 0

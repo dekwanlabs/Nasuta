@@ -164,7 +164,9 @@ var mysqlSchema = map[MySQLGroup][]string{
 				question_terms_json JSON NOT NULL,
 				evidence_manifest_json JSON NOT NULL,
 				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				run_id_key    VARCHAR(64) AS (NULLIF(run_id, '')) STORED,
 				PRIMARY KEY (session_id, turn_no),
+				UNIQUE KEY uniq_session_run (session_id, run_id_key),
 				KEY idx_session_last (session_id, turn_no DESC)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS qa_turn_contexts (

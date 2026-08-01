@@ -58,7 +58,7 @@ func TestCanonicalRunbookKeepsNormalizedServiceAtProjectionBoundary(t *testing.T
 func TestLoadKnowledgeBaseUsesOneConsistentDocumentRead(t *testing.T) {
 	store := &knowledgeDocStoreStub{docs: []domain.DocRecord{{
 		ID: "orders-recovery", Title: "Orders recovery", Filename: "runbooks/orders.md", Kind: domain.DocKindFlow,
-		Content: "---\nservice: orders\ndepends_on: payments\n---\n# Orders recovery\n",
+		Content: "---\nid: legacy-orders-recovery\nservice: orders\ndepends_on: payments\n---\n# Orders recovery\n",
 	}}}
 	runbooks, dependencies, err := LoadKnowledgeBase(store)
 	if err != nil {
@@ -66,6 +66,9 @@ func TestLoadKnowledgeBaseUsesOneConsistentDocumentRead(t *testing.T) {
 	}
 	if store.reads != 1 || len(runbooks) != 1 || len(dependencies) != 1 {
 		t.Fatalf("reads=%d runbooks=%d dependencies=%d", store.reads, len(runbooks), len(dependencies))
+	}
+	if runbooks[0].ID != "orders-recovery" {
+		t.Fatalf("runbook ID = %q, want document store ID", runbooks[0].ID)
 	}
 	if runbooks[0].ServiceName != "orders" || dependencies[0].From != "orders" || dependencies[0].To != "payments" {
 		t.Fatalf("runbook=%+v dependency=%+v", runbooks[0], dependencies[0])

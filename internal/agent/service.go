@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -211,6 +210,7 @@ func (svc *QA) emitStep(runID, text string) {
 // its fallback (clean question / tech terms / original question) instead of
 // stalling retrieval until the request deadline. The parent ctx caps it lower.
 const helperTimeout = 12 * time.Second
+const sessionArchiveTimeout = 2 * time.Minute
 
 // AskAgent starts a run with verbatim recent history and no explicit evidence plan.
 func (svc *QA) AskAgent(ctx context.Context, question string, history []llm.Message, userID int64, rolePrompt, runID string) (*AskResult, error) {
@@ -283,15 +283,10 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	var routedToolIDs []string
 	var historyRelation retrieval.HistoryRelation
 	var historyRelationValid bool
-	var preWg sync.WaitGroup
 	requestAnchor := time.Now()
 	analysisStarted := requestAnchor
-	var planningDuration time.Duration
-	preWg.Add(1)
-	go func() {
-		defer preWg.Done()
-		planningStarted := time.Now()
-		defer func() { planningDuration = time.Since(planningStarted) }()
+	planningStarted := time.Now()
+	func() {
 		hctx, cancel := context.WithTimeout(llm.WithUsagePhase(ctx, llm.PhaseRoute), helperTimeout)
 		defer cancel()
 		termsQuestion := strings.TrimSpace(question)
@@ -335,7 +330,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 			routedToolIDs = analysis.ToolIDs
 		}
 	}()
-	preWg.Wait()
+	planningDuration := time.Since(planningStarted)
 	historyRelation, relationOrigin, relationUpgrade := resolveHistoryRelation(
 		question, conversation.RecentTurns, historyRelation, historyRelationValid,
 	)
@@ -804,8 +799,18 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	go func() {
 		res, runErr := svc.agent.runWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, snapshot)
 		outcome := outcomeFor(res, runErr)
+		if outcome.Status == RunStatusDone {
+			if err := svc.persistSessionTurn(context.WithoutCancel(ctx), runID, conversation.SessionID, userID, question, outcome); err != nil {
+				log.ErrorfCtx(ctx, "[qa] persist completed run %s session turn: %v", runID, err)
+				outcome.Status = RunStatusFailed
+				outcome.Err = err
+			}
+		}
 		if svc.hub != nil {
 			svc.hub.Complete(runID, outcome)
+		}
+		if outcome.Status == RunStatusDone {
+			svc.archiveSessionHistoryAsync(ctx, conversation.SessionID, userID)
 		}
 
 		if memoryExtractionAllowed(outcome, res) && svc.memory != nil && userID != 0 {
@@ -863,6 +868,49 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	}()
 
 	return &AskResult{RunID: runID, Context: rc}, nil
+}
+
+func (svc *QA) persistSessionTurn(ctx context.Context, runID, sessionID string, userID int64, question string, outcome RunOutcome) error {
+	if svc.sessions == nil || sessionID == "" {
+		return nil
+	}
+	if err := svc.sessions.EnsureSession(sessionID, userID, platform.TruncateForLog(question, 256)); err != nil {
+		return fmt.Errorf("ensure session %q: %w", sessionID, err)
+	}
+	messages := make([]llm.Message, 0, len(outcome.SessionMessages)+2)
+	messages = append(messages, llm.Message{Role: "user", Content: question})
+	messages = append(messages, outcome.SessionMessages...)
+	messages = append(messages, llm.Message{Role: "assistant", Content: outcome.Answer})
+	turnNo, err := svc.sessions.AppendTurn(sessionID, runID, userID, messages)
+	if err != nil {
+		return fmt.Errorf("append run %q to session %q: %w", runID, sessionID, err)
+	}
+	log.InfofCtx(ctx, "[qa] saved run %s as turn %d in session %s", runID, turnNo, sessionID)
+	return nil
+}
+
+func (svc *QA) archiveSessionHistoryAsync(ctx context.Context, sessionID string, userID int64) {
+	if svc.sessions == nil || sessionID == "" || svc.contextWindow <= 0 {
+		return
+	}
+	archiveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionArchiveTimeout)
+	go func() {
+		defer cancel()
+		result, err := ArchiveSessionHistoryIfNeeded(
+			archiveCtx, svc.llm, svc.sessions, sessionID, userID, svc.contextWindow, svc.history,
+		)
+		if err != nil {
+			log.ErrorfCtx(archiveCtx, "[qa] post-turn history archive failed for %s: %v", sessionID, err)
+			return
+		}
+		if result.Applied {
+			log.InfofCtx(archiveCtx, "[qa] archived session %s turns %d-%d after saved turn",
+				sessionID, result.FromTurn, result.ToTurn)
+		} else if result.Stale {
+			log.InfofCtx(archiveCtx, "[qa] ignored stale post-turn archive for session %s through turn %d",
+				sessionID, result.ToTurn)
+		}
+	}()
 }
 
 func memoryExtractionAllowed(outcome RunOutcome, result *RunResult) bool {

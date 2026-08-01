@@ -453,6 +453,9 @@ func (ss *SessionStore) AppendTurn(sessionID, runID string, userID int64, msgs [
 	if len(msgs) == 0 {
 		return 0, nil
 	}
+	if runID == "" {
+		return 0, fmt.Errorf("memory/session: run id is required")
+	}
 	tx, err := ss.db.Begin()
 	if err != nil {
 		return 0, err
@@ -464,6 +467,17 @@ func (ss *SessionStore) AppendTurn(sessionID, runID string, userID int64, msgs [
 	}
 	if !exists {
 		return 0, fmt.Errorf("memory/session: session %q not found", sessionID)
+	}
+	var existingTurn int
+	err = tx.QueryRow(
+		`SELECT turn_no FROM qa_turns WHERE session_id=? AND run_id=? LIMIT 1`,
+		sessionID, runID,
+	).Scan(&existingTurn)
+	if err == nil {
+		return existingTurn, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("memory/session: find run %q in session %q: %w", runID, sessionID, err)
 	}
 
 	var maxSeq, maxTurn int

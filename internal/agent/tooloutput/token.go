@@ -3,6 +3,8 @@ package tooloutput
 import (
 	"fmt"
 	"strings"
+
+	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 )
 
 const (
@@ -13,11 +15,7 @@ const (
 
 // EstimateTokens provides one conservative, provider-independent input estimate.
 func EstimateTokens(value string) int {
-	units := 0
-	for _, r := range value {
-		units += runeTokenUnits(r)
-	}
-	return (units + tokenUnits - 1) / tokenUnits
+	return tokenestimate.Count(value)
 }
 
 // Truncate preserves both evidence boundaries when structured compression cannot proceed.

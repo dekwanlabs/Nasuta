@@ -161,6 +161,9 @@ func TestAppendTurnPersistsStructuredToolFields(t *testing.T) {
 	mock.ExpectQuery(`SELECT user_id FROM qa_sessions WHERE id=\? FOR UPDATE`).
 		WithArgs("session-1").
 		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(42))
+	mock.ExpectQuery(`SELECT turn_no FROM qa_turns WHERE session_id=\? AND run_id=\? LIMIT 1`).
+		WithArgs("session-1", "run-1").
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`SELECT COALESCE\(\(SELECT MAX\(seq\).*SELECT MAX\(turn_no\)`).
 		WithArgs("session-1", "session-1").
 		WillReturnRows(sqlmock.NewRows([]string{"max_seq", "max_turn"}).AddRow(3, 2))
@@ -193,6 +196,38 @@ func TestAppendTurnPersistsStructuredToolFields(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAppendTurnReturnsExistingTurnForRun(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT user_id FROM qa_sessions WHERE id=\? FOR UPDATE`).
+		WithArgs("session-1").
+		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(42))
+	mock.ExpectQuery(`SELECT turn_no FROM qa_turns WHERE session_id=\? AND run_id=\? LIMIT 1`).
+		WithArgs("session-1", "run-1").
+		WillReturnRows(sqlmock.NewRows([]string{"turn_no"}).AddRow(7))
+	mock.ExpectCommit()
+
+	turnNo, err := store.AppendTurn("session-1", "run-1", 42, []llm.Message{{Role: "user", Content: "question"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turnNo != 7 {
+		t.Fatalf("turn = %d, want 7", turnNo)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAppendTurnRejectsMissingRunID(t *testing.T) {
+	store, _, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	if _, err := store.AppendTurn("session-1", "", 42, []llm.Message{{Role: "user", Content: "question"}}); err == nil {
+		t.Fatal("AppendTurn accepted an empty run id")
 	}
 }
 

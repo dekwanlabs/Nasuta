@@ -8,6 +8,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 )
 
 func TestRetrievePlanWebOnlySkipsInternalFanout(t *testing.T) {
@@ -89,8 +90,8 @@ func TestAssembleCountsReferenceForTruncatedEvidence(t *testing.T) {
 		priority: partialPriorityEvidence,
 	}}
 	rc := r.assemble(context.Background(), parts, nil, "query")
-	if got := len([]rune(rc.Text)); got > 24 {
-		t.Fatalf("context runes = %d, want <= 24", got)
+	if got := tokenestimate.Count(rc.Text); got > 24 {
+		t.Fatalf("context tokens = %d, want <= 24", got)
 	}
 	if rc.HitCount != 1 || len(rc.References) != 1 {
 		t.Fatalf("references = %d hitCount = %d, want 1/1", len(rc.References), rc.HitCount)

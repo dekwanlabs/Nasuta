@@ -3,12 +3,14 @@ package retrieval
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -245,7 +247,11 @@ func TestRerankPool_FallsBackToDenseWhenRerankerDisabled(t *testing.T) {
 		{denseScore: 0.9},
 		{denseScore: 0.5},
 	}
-	out := rerankPool(context.Background(), denseReranker{}, "q", docs, 0)
+	result := rerankPool(context.Background(), denseReranker{}, "q", docs, 0)
+	out := result.docs
+	if result.mode != "local" {
+		t.Fatalf("mode = %q, want local", result.mode)
+	}
 	if len(out) != 3 {
 		t.Fatalf("expected 3, got %d", len(out))
 	}
@@ -258,15 +264,17 @@ func TestRerankPool_FallsBackToDenseWhenRerankerDisabled(t *testing.T) {
 	}
 }
 
-func TestRerankPool_FallsBackToDenseOnRerankerError(t *testing.T) {
+func TestRerankPool_PreservesRecallOrderOnRerankerError(t *testing.T) {
 	docs := []codeDoc{
 		{denseScore: 0.1},
 		{denseScore: 0.9},
 	}
-	// errorReranker returns an error → must fall back to dense ordering.
-	out := rerankPool(context.Background(), errorReranker{}, "q", docs, 0)
-	if out[0].denseScore != 0.9 {
-		t.Fatalf("on rerank error should fall back to dense order, got top dense=%f", out[0].denseScore)
+	result := rerankPool(context.Background(), errorReranker{}, "q", docs, 0)
+	if result.mode != "recall_after_error" || !errors.Is(result.err, errReranker) {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.docs[0].denseScore != 0.9 {
+		t.Fatalf("recall order top dense=%f", result.docs[0].denseScore)
 	}
 }
 
@@ -315,7 +323,7 @@ func TestPostProcessCodePipeline(t *testing.T) {
 			t.Fatal("svc-c (below threshold) should have been dropped")
 		}
 	}
-	wantNodes := []string{"candidate_truncate", "candidate_dedup", "candidate_rerank", "candidate_threshold", "candidate_diversity"}
+	wantNodes := []string{"candidate_dedup", "candidate_truncate", "candidate_rerank", "candidate_threshold", "candidate_diversity"}
 	if len(recorder.events) != len(wantNodes) {
 		t.Fatalf("trace events = %#v", recorder.events)
 	}
@@ -393,6 +401,13 @@ func TestDashScopeReranker_EnabledRequiresKey(t *testing.T) {
 	}
 }
 
+func TestTruncateRerankDocumentPreservesUTF8(t *testing.T) {
+	got := truncateRerankDocument("调用链🙂abc", 4)
+	if got != "调用链🙂" || !utf8.ValidString(got) {
+		t.Fatalf("truncated document = %q", got)
+	}
+}
+
 func TestDashScopeReranker_ErrorsOnHTTP500(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
@@ -421,9 +436,7 @@ func TestDashScopeReranker_ErrorsOnCountMismatch(t *testing.T) {
 	}
 }
 
-// TestRerankPool_FallsBackOnDashScopeError wires a failing DashScope reranker
-// into rerankPool and asserts it degrades to dense order without panicking.
-func TestRerankPool_FallsBackOnDashScopeError(t *testing.T) {
+func TestRerankPool_PreservesRecallOnDashScopeError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -431,12 +444,16 @@ func TestRerankPool_FallsBackOnDashScopeError(t *testing.T) {
 
 	rr := newTestDashScopeReranker(srv.URL, srv)
 	docs := []codeDoc{{denseScore: 0.1}, {denseScore: 0.9}, {denseScore: 0.5}}
-	out := rerankPool(context.Background(), rr, "q", docs, 0)
+	result := rerankPool(context.Background(), rr, "q", docs, 0)
+	out := result.docs
+	if result.mode != "recall_after_error" || result.err == nil {
+		t.Fatalf("result = %#v", result)
+	}
 	if len(out) != 3 {
 		t.Fatalf("expected 3, got %d", len(out))
 	}
 	if out[0].denseScore != 0.9 {
-		t.Fatalf("on dashscope error should fall back to dense order, got top dense=%f", out[0].denseScore)
+		t.Fatalf("on dashscope error should preserve recall order, got top dense=%f", out[0].denseScore)
 	}
 }
 
@@ -445,7 +462,7 @@ func TestRerankPoolDoesNotApplyDensePreflightToRRF(t *testing.T) {
 		{filePath: "a.go", recallScore: 0.9, scoreKind: "rrf"},
 		{filePath: "b.go", recallScore: 0.1, scoreKind: "rrf"},
 	}
-	out := rerankPool(context.Background(), fixedReranker{scores: []float64{0, 1}}, "q", docs, 0.5)
+	out := rerankPool(context.Background(), fixedReranker{scores: []float64{0, 1}}, "q", docs, 0.5).docs
 	if out[0].filePath != "b.go" {
 		t.Fatalf("RRF candidates incorrectly used dense preflight; top=%s", out[0].filePath)
 	}
@@ -496,7 +513,7 @@ func TestRerankPool_RelevanceNotVetoedByBand(t *testing.T) {
 		{source: "runbook", filePath: "schema-x", funcName: "schema-x", text: "s", trustTier: domain.TrustCuratedSchema}, // idx 2
 	}
 	rr := fixedReranker{scores: []float64{0.99, 0.40, 0.60}}
-	out := rerankPool(context.Background(), rr, "q", docs, 0)
+	out := rerankPool(context.Background(), rr, "q", docs, 0).docs
 
 	if out[0].filePath != "db/pro.sql" {
 		t.Fatalf("highest-relevance DDL must lead despite lowest band; got %s", out[0].filePath)
@@ -518,7 +535,7 @@ func TestRerankPool_TrustNudgesCloseCall(t *testing.T) {
 		{source: "code", filePath: "Ctrl.java", text: "c", trustTier: domain.TrustCodeRuntime}, // band 4, rel 0.50
 	}
 	rr := fixedReranker{scores: []float64{0.55, 0.50}}
-	out := rerankPool(context.Background(), rr, "q", docs, 0)
+	out := rerankPool(context.Background(), rr, "q", docs, 0).docs
 	if out[0].filePath != "Ctrl.java" {
 		t.Fatalf("higher-band doc must win a close call (rel gap 0.05 < band nudge 0.16); got %s", out[0].filePath)
 	}
@@ -531,7 +548,7 @@ func TestRerankPool_WithinBandOrdersByRelevance(t *testing.T) {
 		{source: "code", filePath: "b.sql", text: "b", trustTier: domain.TrustUserDocument}, // same band as raw DDL
 	}
 	rr := fixedReranker{scores: []float64{0.30, 0.80}}
-	out := rerankPool(context.Background(), rr, "q", docs, 0)
+	out := rerankPool(context.Background(), rr, "q", docs, 0).docs
 	if out[0].filePath != "b.sql" {
 		t.Fatalf("within a band, higher relevance must lead; got %s first", out[0].filePath)
 	}
