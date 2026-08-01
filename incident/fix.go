@@ -60,7 +60,13 @@ func (manager *Manager) StartFix(ctx context.Context, id string, req FixRequest)
 		services = []string{"unknown"}
 	}
 	for _, svc := range services {
-		resolvedSvc, repo := manager.repoForService(ctx, svc)
+		resolvedSvc, repo, err := manager.repoForService(ctx, svc)
+		if err != nil {
+			return nil, fmt.Errorf("resolve repository for service %q: %w", svc, err)
+		}
+		if repo == "" {
+			return nil, fmt.Errorf("resolve repository for service %q: no repository mapping", svc)
+		}
 		branch := req.BranchName
 		if branch == "" {
 			branch = defaultBranchName(manager.cfg.FixBranchPrefix, inc.RootCause, inc.AlertTitle, req.Assignee)

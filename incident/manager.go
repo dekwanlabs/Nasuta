@@ -102,12 +102,20 @@ func (manager *Manager) CreateFromAlert(ctx context.Context, source string, aler
 	svcs := servicesFromAlert(alert)
 	for i, s := range svcs {
 		clean := stripRegion(s)
-		if resolved, _ := manager.repoForService(ctx, clean); resolved != s && resolved != "" {
+		resolved, _, err := manager.repoForService(ctx, clean)
+		if err != nil {
+			return nil, fmt.Errorf("resolve service %q: %w", clean, err)
+		}
+		if resolved != s && resolved != "" {
 			svcs[i] = resolved
 		}
 	}
 	dedupKey := dedupKey(alert, svcs)
-	if existing, err := manager.findOpenDedup(ctx, dedupKey); err == nil && existing != nil {
+	existing, err := manager.findOpenDedup(ctx, dedupKey)
+	if err != nil {
+		return nil, fmt.Errorf("find open incident by dedup key: %w", err)
+	}
+	if existing != nil {
 		return existing, nil
 	}
 	inc := &Incident{
@@ -292,24 +300,23 @@ func (manager *Manager) Delete(ctx context.Context, id string) error {
 	return err
 }
 
-func (manager *Manager) repoForService(ctx context.Context, service string) (resolvedName string, repo string) {
-	if manager.knowledge == nil || service == "" || service == "unknown" {
-		return service, service
-	}
+func (manager *Manager) repoForService(ctx context.Context, service string) (resolvedName string, repo string, err error) {
 	service = stripRegion(service)
-	result, err := manager.knowledge.SearchServices(ctx, knowledge.ServiceSearchQuery{Query: service, Limit: 1})
-	if err == nil && len(result.Matches) > 0 {
-		match := result.Matches[0]
-		name := match.ServiceName
-		r := match.Repo
-		if name != "" {
-			if r == "" {
-				r = name
-			}
-			return name, r
-		}
+	if manager.knowledge == nil || service == "" || service == "unknown" {
+		return service, "", nil
 	}
-	return service, service
+	result, err := manager.knowledge.SearchServices(ctx, knowledge.ServiceSearchQuery{Query: service, Limit: 1})
+	if err != nil {
+		return "", "", fmt.Errorf("search services: %w", err)
+	}
+	if len(result.Matches) == 0 {
+		return service, "", nil
+	}
+	match := result.Matches[0]
+	if match.ServiceName == "" {
+		return service, match.Repo, nil
+	}
+	return match.ServiceName, match.Repo, nil
 }
 
 func (manager *Manager) filesHint(ctx context.Context, service string, inc *Incident) []string {

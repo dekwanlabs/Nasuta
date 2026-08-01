@@ -67,7 +67,7 @@ public interface UserFeign {
 
 func TestBuildBundleEndToEnd(t *testing.T) {
 	root := miniWorkspace(t)
-	b, err := BuildBundle(root, DiscoverScanDirs(root), nil)
+	b, err := BuildBundle(root, mustDiscoverScanDirs(t, root), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ public class LibController {
 // discarded by canonicalEndpoints as "unresolved service".
 func TestScanJavaServicesRegistersLibraryModules(t *testing.T) {
 	root := multiModuleWorkspace(t)
-	b, err := BuildBundle(root, DiscoverScanDirs(root), nil)
+	b, err := BuildBundle(root, mustDiscoverScanDirs(t, root), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ async def create_item():
     return {}
 `)
 
-	b := BuildStructuralBundle(root, DiscoverScanDirs(root))
+	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
 	service := findService(b.Services, "catalog-api")
 	if service == nil {
 		t.Fatalf("catalog-api service not found; services=%v", serviceNames(b.Services))
@@ -253,7 +253,7 @@ class SharedController {
     fun shared(): String = "ok"
 }`)
 
-	b := BuildStructuralBundle(root, DiscoverScanDirs(root))
+	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
 	service := findService(b.Services, "shared-api")
 	if service == nil {
 		t.Fatalf("shared-api service not found; services=%v", serviceNames(b.Services))
@@ -278,7 +278,7 @@ export class OrdersController {
 }`)
 	writeFile(t, root, base+"/src/hapi.ts", `server.route({ path: "/health", method: "GET", handler })`)
 
-	b := BuildStructuralBundle(root, DiscoverScanDirs(root))
+	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
 	for _, want := range []struct {
 		method string
 		path   string
@@ -300,7 +300,7 @@ func TestScanGoServicesDedupesByRepositoryModule(t *testing.T) {
 		writeFile(t, root, base+"/main.go", "package main\nfunc main() {}\n")
 	}
 
-	b := BuildStructuralBundle(root, DiscoverScanDirs(root))
+	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
 	count := 0
 	for _, service := range b.Services {
 		if service.ServiceName == "gateway" {
@@ -323,7 +323,7 @@ public class ItemsController : ControllerBase {
     public string List() { return "ok"; }
 }`)
 
-	b := BuildStructuralBundle(root, DiscoverScanDirs(root))
+	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
 	service := findService(b.Services, "Shared.Api")
 	if service == nil {
 		t.Fatalf("Shared.Api service not found; services=%v", serviceNames(b.Services))
@@ -340,7 +340,7 @@ func TestAndroidModuleIsNotRegisteredAsKotlinServer(t *testing.T) {
 	writeFile(t, root, base+"/src/main/AndroidManifest.xml", `<manifest package="com.example.client"></manifest>`)
 	writeFile(t, root, base+"/src/main/kotlin/App.kt", `class App`)
 
-	b := BuildStructuralBundle(root, DiscoverScanDirs(root))
+	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
 	service := findService(b.Services, "com.example.client")
 	if service == nil {
 		t.Fatalf("Android service not found; services=%v", serviceNames(b.Services))
@@ -356,7 +356,7 @@ func TestScanIOSServicesFindsXcodeProjectDirectories(t *testing.T) {
 	writeFile(t, root, base+"/Client.xcodeproj/project.pbxproj", `PRODUCT_NAME = ClientApp;`)
 	writeFile(t, root, base+"/Sources/AppDelegate.swift", `final class AppDelegate {}`)
 
-	b := BuildStructuralBundle(root, DiscoverScanDirs(root))
+	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
 	service := findService(b.Services, "ClientApp")
 	if service == nil {
 		t.Fatalf("ClientApp service not found; services=%v", serviceNames(b.Services))
@@ -368,7 +368,7 @@ func TestScanIOSServicesFindsXcodeProjectDirectories(t *testing.T) {
 
 func TestBuildStructuralBundleExcludesDocumentsOnlyForScannerCallers(t *testing.T) {
 	root := miniWorkspace(t)
-	bundle := BuildStructuralBundle(root, DiscoverScanDirs(root))
+	bundle := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
 	if len(bundle.Runbooks) != 0 {
 		t.Fatalf("structural scanner runbooks = %#v", bundle.Runbooks)
 	}

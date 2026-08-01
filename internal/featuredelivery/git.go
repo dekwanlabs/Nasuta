@@ -371,7 +371,7 @@ func (manager *GitManager) resolveRepository(repo string) (string, error) {
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("repository %q escapes workspace", normalized)
 	}
-	if info, err := os.Stat(filepath.Join(resolved, ".git")); err != nil || (!info.IsDir() && info.Mode().IsRegular() == false) {
+	if info, err := os.Stat(filepath.Join(resolved, ".git")); err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
 		return "", fmt.Errorf("repository %q is not a Git repository", normalized)
 	}
 	return resolved, nil

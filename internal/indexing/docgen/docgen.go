@@ -39,21 +39,19 @@ const docgenMaxTokens = 8000
 // New creates a Generator. docDB is the MySQL document store the generated
 // module docs are written to; pass nil when MySQL is not configured (generation
 // is then skipped — module docs require the document store).
-func New(cfg config.Config, ps *config.PlatformSettings, docDB *store.DocStore) *Generator {
+func New(cfg config.Config, ps *config.PlatformSettings, docDB *store.DocStore) (*Generator, error) {
 	if ps == nil {
 		ps = &config.PlatformSettings{}
 	}
-	// docgen uses its own OpenAI-format client (not internal/llm). Anthropic
-	// provider mode is not supported here; indexing always speaks OpenAI API.
 	if ps.LLMProvider == "anthropic" {
-		log.Warnf("[docgen] Anthropic provider not supported for doc generation; using OpenAI format. Set llm_provider=openai for consistent behavior.")
+		return nil, fmt.Errorf("doc generation does not support LLM provider %q", ps.LLMProvider)
 	}
 	return &Generator{
 		cfg:      cfg,
 		platform: ps,
 		docDB:    docDB,
 		llm:      newLLMClient(ps.LLMBaseURL, ps.LLMAPIKey, ps.LLMModel, docgenMaxTokens),
-	}
+	}, nil
 }
 
 // GenerateDocs generates module documentation for the given directory roots.

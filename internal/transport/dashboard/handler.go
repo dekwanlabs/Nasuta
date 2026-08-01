@@ -33,7 +33,7 @@ type IndexingOps interface {
 	EmbedDocs(ctx context.Context) error
 	EmbedCodeChunks(ctx context.Context, dirs []string) error
 	SetPlatform(ps *config.PlatformSettings)
-	DiscoverScanDirs() []string
+	DiscoverScanDirs() ([]string, error)
 }
 
 type Handler struct {

@@ -907,31 +907,6 @@ func buildRagCtx(history []llm.Message) string {
 	return ""
 }
 
-// extractBacktick is retained for the prior route-context policy. The current
-// planner intentionally does not call it because assistant answers are excluded.
-func extractBacktick(text string) []string {
-	var tokens []string
-	seen := map[string]bool{}
-	for {
-		start := strings.Index(text, "`")
-		if start < 0 {
-			break
-		}
-		text = text[start+1:]
-		end := strings.Index(text, "`")
-		if end < 0 {
-			break
-		}
-		tok := strings.ToLower(strings.TrimSpace(text[:end]))
-		text = text[end+1:]
-		if len(tok) >= 4 && !seen[tok] {
-			seen[tok] = true
-			tokens = append(tokens, tok)
-		}
-	}
-	return tokens
-}
-
 func NewRunID() string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {

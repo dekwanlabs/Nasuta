@@ -50,6 +50,9 @@ func BuildStructuralBundle(root string, dirs []string) domain.IndexBundle {
 
 // BuildBundle builds structural records and separately sourced runbook records.
 func BuildBundle(root string, dirs []string, docStore *store.DocStore) (domain.IndexBundle, error) {
+	if err := ValidateScanInputs(root, dirs); err != nil {
+		return domain.IndexBundle{}, fmt.Errorf("validate scan inputs: %w", err)
+	}
 	var runbooks []domain.RunbookRecord
 	var runbookEdges []domain.DependencyEdge
 	if docStore != nil {

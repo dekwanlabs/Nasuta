@@ -187,9 +187,7 @@ func (service *Service) hydrateResult(ctx context.Context, generation string, re
 		if err != nil {
 			return RelationResult{}, err
 		}
-		for _, entity := range entities {
-			result.Entities = append(result.Entities, entity)
-		}
+		result.Entities = append(result.Entities, entities...)
 	}
 	byID := make(map[string]EntityRef, len(result.Entities)+1)
 	if result.Root != nil {

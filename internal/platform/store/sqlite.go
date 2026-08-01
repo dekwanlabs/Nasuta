@@ -553,7 +553,7 @@ func (store *SQLite) ServiceForPath(ctx context.Context, filePath string) (domai
 	path := strings.Trim(strings.ReplaceAll(filePath, "\\", "/"), "/")
 	parts := strings.Split(path, "/")
 	if len(parts) < 4 || parts[0] != "repos" {
-		return domain.ServiceRecord{}, fmt.Errorf("resolve service path %q: expected repos/<group>/<project>/...", filePath)
+		return domain.ServiceRecord{}, fmt.Errorf("resolve service path %q: expected repos/<group>/<project>/path", filePath)
 	}
 	repo := parts[1] + "/" + parts[2]
 	relative := strings.Join(parts[3:], "/")

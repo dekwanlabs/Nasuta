@@ -110,7 +110,11 @@ func Build(cfg config.Config, docDB *store.DocStore, docStoreErr error) (*Servic
 		docDB: docDB, docStoreErr: docStoreErr, Platform: &config.PlatformSettings{},
 	}
 	svc.loadBM25()
-	svc.ScanDirs = svc.LoadScanDirs()
+	svc.ScanDirs, err = svc.LoadScanDirs()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("load scan directories: %w", err)
+	}
 	return svc, nil
 }
 
@@ -140,9 +144,9 @@ func (svc *Service) loadBM25() {
 	log.Warnf("[indexing] BM25 vocab missing at %s - hybrid search disabled (dense-only). Trigger the \"Embed Code\" platform action to rebuild it; it is no longer auto-rebuilt on startup.", vocabPath)
 }
 
-func (svc *Service) LoadScanDirs() []string {
+func (svc *Service) LoadScanDirs() ([]string, error) {
 	if len(svc.Cfg.ScanDirs) > 0 {
-		return svc.Cfg.ScanDirs
+		return svc.Cfg.ScanDirs, nil
 	}
 	return svc.DiscoverScanDirs()
 }
@@ -166,10 +170,13 @@ func vcsTokenFingerprint(token string) string {
 }
 
 // DiscoverScanDirs applies VCS exclusions to workspace scan roots.
-func (svc *Service) DiscoverScanDirs() []string {
-	dirs := indexer.DiscoverScanDirs(svc.Cfg.WorkspaceRoot)
+func (svc *Service) DiscoverScanDirs() ([]string, error) {
+	dirs, err := indexer.DiscoverScanDirs(svc.Cfg.WorkspaceRoot)
+	if err != nil {
+		return nil, err
+	}
 	if len(svc.Platform.VCSExcludeProjects) == 0 {
-		return dirs
+		return dirs, nil
 	}
 	out := dirs[:0]
 	for _, d := range dirs {
@@ -177,7 +184,16 @@ func (svc *Service) DiscoverScanDirs() []string {
 			out = append(out, d)
 		}
 	}
-	return out
+	return out, nil
+}
+
+func (svc *Service) refreshScanDirs() error {
+	dirs, err := svc.DiscoverScanDirs()
+	if err != nil {
+		return fmt.Errorf("discover scan directories: %w", err)
+	}
+	svc.ScanDirs = dirs
+	return nil
 }
 
 func (svc *Service) setBM25(b *retrieval.BM25Builder) {
@@ -585,7 +601,11 @@ func (svc *Service) EmbedDocs(ctx context.Context) error {
 	if err := svc.Semantic.Ensure(ctx, semantic.Schema{Collection: svc.Cfg.Semantic.Collection, DenseDim: svc.Embedder.Dim()}); err != nil {
 		return fmt.Errorf("ensure semantic collection: %w", err)
 	}
-	docgen.New(svc.Cfg, svc.Platform, svc.docDB).GenerateDocs(ctx, []string{svc.Cfg.WorkspaceRoot})
+	generator, err := docgen.New(svc.Cfg, svc.Platform, svc.docDB)
+	if err != nil {
+		return fmt.Errorf("create documentation generator: %w", err)
+	}
+	generator.GenerateDocs(ctx, []string{svc.Cfg.WorkspaceRoot})
 
 	runbooks, _, err := indexer.LoadKnowledgeBase(svc.docDB)
 	if err != nil {
@@ -611,7 +631,9 @@ func (svc *Service) DailySync(ctx context.Context, vcsURL, vcsToken, vcsGroups, 
 	if err != nil {
 		return fmt.Errorf("checkout: %w", err)
 	}
-	svc.ScanDirs = svc.DiscoverScanDirs()
+	if err := svc.refreshScanDirs(); err != nil {
+		return err
+	}
 	log.Infof("[daily-sync] checked out %d repos", len(synced))
 
 	// Detect repos with new commits by comparing HEAD SHA against last indexed SHA.
@@ -747,6 +769,9 @@ func (svc *Service) EmbedCodeChunks(ctx context.Context, dirs []string) error {
 	defer svc.indexMu.Unlock()
 	if len(dirs) == 0 {
 		return nil
+	}
+	if err := indexer.ValidateScanInputs(svc.Cfg.WorkspaceRoot, dirs); err != nil {
+		return fmt.Errorf("validate code scan inputs: %w", err)
 	}
 	if err := svc.Semantic.Ensure(ctx, semantic.Schema{Collection: svc.Cfg.Semantic.Collection, DenseDim: svc.Embedder.Dim()}); err != nil {
 		return fmt.Errorf("ensure semantic collection: %w", err)
@@ -928,7 +953,9 @@ func (svc *Service) CheckoutAll(ctx context.Context, vcsURL, vcsToken, vcsGroups
 	}
 	synced, err := svc.Syncer.SyncAll(ctx, projects, svc.Cfg.WorkspaceRoot)
 	log.Infof("[vcs] checked out %d/%d projects into %s", len(synced), len(projects), svc.Cfg.WorkspaceRoot)
-	svc.ScanDirs = svc.DiscoverScanDirs()
+	if scanErr := svc.refreshScanDirs(); scanErr != nil {
+		return synced, scanErr
+	}
 	return synced, err
 }
 
@@ -951,7 +978,9 @@ func (svc *Service) SyncOne(ctx context.Context, pathWithNamespace string) error
 	if err := svc.Syncer.CloneOrFetch(ctx, *proj, dir, proj.DefaultBranch); err != nil {
 		return fmt.Errorf("sync %s: %w", pathWithNamespace, err)
 	}
-	svc.ScanDirs = svc.DiscoverScanDirs()
+	if err := svc.refreshScanDirs(); err != nil {
+		return err
+	}
 	log.Infof("[vcs] synced %q into %s", pathWithNamespace, dir)
 	return nil
 }
@@ -991,7 +1020,9 @@ func (svc *Service) SyncProject(ctx context.Context, pathWithNamespace, gitURL, 
 	if err := svc.Syncer.CloneOrFetch(ctx, proj, dir, branch); err != nil {
 		return err
 	}
-	svc.ScanDirs = svc.DiscoverScanDirs()
+	if err := svc.refreshScanDirs(); err != nil {
+		return err
+	}
 	return svc.ReindexRepo(ctx, dirName, commit)
 }
 
@@ -1022,7 +1053,11 @@ func (svc *Service) attachRepositorySnapshots(ctx context.Context, bundle *domai
 // RebuildSQLIndex refreshes the structural SQLite index without touching vectors.
 func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 	started := time.Now()
-	svc.ScanDirs = svc.LoadScanDirs()
+	var err error
+	svc.ScanDirs, err = svc.LoadScanDirs()
+	if err != nil {
+		return fmt.Errorf("load scan directories: %w", err)
+	}
 	log.Infof("[rebuild-sql] scanning %s (dirs: %v)", svc.Cfg.WorkspaceRoot, svc.ScanDirs)
 	bundle, err := svc.buildWorkspaceBundle()
 	if err != nil {
@@ -1115,7 +1150,9 @@ func (svc *Service) ReindexRepo(ctx context.Context, repo, commit string) error 
 		return fmt.Errorf("empty repo")
 	}
 	log.Infof("[reindex] repo=%q commit=%q", repo, commit)
-	svc.ScanDirs = svc.DiscoverScanDirs()
+	if err := svc.refreshScanDirs(); err != nil {
+		return err
+	}
 	return svc.RebuildSQLIndex(ctx)
 }
 
@@ -1199,14 +1236,20 @@ func (svc *Service) InitProject(ctx context.Context, repo string) error {
 	}
 	log.Infof("[init-project] repo=%q", repo)
 	scanDir := filepath.Join("repos", repo)
-	svc.ScanDirs = svc.DiscoverScanDirs()
+	if err := svc.refreshScanDirs(); err != nil {
+		return err
+	}
 	if err := svc.RebuildSQLIndex(ctx); err != nil {
 		return fmt.Errorf("rebuild structure snapshot: %w", err)
 	}
 
 	// Hash skip keeps this cheap on repeated runs while still filling brand-new repos.
 	dir := filepath.Join(svc.Cfg.WorkspaceRoot, scanDir)
-	docgen.New(svc.Cfg, svc.Platform, svc.docDB).GenerateDocs(ctx, []string{dir})
+	generator, err := docgen.New(svc.Cfg, svc.Platform, svc.docDB)
+	if err != nil {
+		return fmt.Errorf("create documentation generator: %w", err)
+	}
+	generator.GenerateDocs(ctx, []string{dir})
 	if svc.Cfg.IndexCode {
 		if err := svc.EmbedRepoCode(ctx, repo); err != nil {
 			return fmt.Errorf("embed code: %w", err)
@@ -1240,7 +1283,11 @@ func (svc *Service) generateDocsForRepo(ctx context.Context, repo string) (bool,
 	}
 
 	log.Infof("[gendocs] repo=%q", repo)
-	changed := docgen.New(svc.Cfg, svc.Platform, svc.docDB).GenerateDocsChanged(ctx, []string{dir})
+	generator, err := docgen.New(svc.Cfg, svc.Platform, svc.docDB)
+	if err != nil {
+		return false, fmt.Errorf("create documentation generator: %w", err)
+	}
+	changed := generator.GenerateDocsChanged(ctx, []string{dir})
 	log.Infof("[gendocs] repo=%q done", repo)
 	return changed, nil
 }

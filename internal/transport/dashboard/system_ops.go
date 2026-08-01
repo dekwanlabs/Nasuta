@@ -142,7 +142,13 @@ func (h *Handler) APIEmbedCode(w http.ResponseWriter, r *http.Request) {
 	log.Infof("[ops] starting code embed")
 	ctx, cancel := systemOperationContext(r)
 	defer cancel()
-	if err := h.idx.EmbedCodeChunks(ctx, h.idx.DiscoverScanDirs()); err != nil {
+	dirs, err := h.idx.DiscoverScanDirs()
+	if err != nil {
+		log.Errorf("[ops] discover code scan directories: %v", err)
+		httputil.WriteErr(w, err)
+		return
+	}
+	if err := h.idx.EmbedCodeChunks(ctx, dirs); err != nil {
 		log.Errorf("[ops] code embed failed after %s: %v", time.Since(started).Round(time.Millisecond), err)
 		httputil.WriteErr(w, err)
 		return

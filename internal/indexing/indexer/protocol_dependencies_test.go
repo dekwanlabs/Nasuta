@@ -25,7 +25,7 @@ requests.get("http://profile/api")
 grpc.insecure_channel("events:50051")
 `)
 
-	edges := scanJVMAndPythonDependencies(root, DiscoverScanDirs(root))
+	edges := scanJVMAndPythonDependencies(root, mustDiscoverScanDirs(t, root))
 	want := map[string]struct{}{
 		"orders\x00payments\x00http": {}, "orders\x00inventory\x00grpc": {},
 		"orders\x00PricingService\x00rpc": {}, "analytics\x00profile\x00http": {},
@@ -49,7 +49,7 @@ func TestKafkaScannerJoinsProducerToConsumer(t *testing.T) {
 	writeFile(t, root, "repos/team/billing/pom.xml", `<project><artifactId>billing</artifactId></project>`)
 	writeFile(t, root, "repos/team/billing/src/Listener.java", `class Listener { @KafkaListener(topics = "order-created") void consume() {} }`)
 
-	edges := scanKafkaDependencies(root, DiscoverScanDirs(root))
+	edges := scanKafkaDependencies(root, mustDiscoverScanDirs(t, root))
 	if len(edges) != 1 {
 		t.Fatalf("edges=%+v", edges)
 	}

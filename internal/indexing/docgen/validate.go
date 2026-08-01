@@ -154,7 +154,10 @@ func ReformatFlowWithSettings(cfg config.Config, ps *config.PlatformSettings, do
 	if ps == nil {
 		return original, fmt.Errorf("platform settings required")
 	}
-	g := New(cfg, ps, docDB)
+	g, err := New(cfg, ps, docDB)
+	if err != nil {
+		return original, err
+	}
 	return g.ReformatFlow(ctx, original)
 }
 

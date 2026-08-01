@@ -343,17 +343,6 @@ func traceRunbookNames(matches []domain.RunbookSearchHit) []string {
 	return names
 }
 
-// filterRunbooksByScope returns runbooks whose scope field equals scope.
-func filterRunbooksByScope(all []domain.RunbookRecord, scope string) []domain.RunbookRecord {
-	out := make([]domain.RunbookRecord, 0, len(all))
-	for _, rb := range all {
-		if rb.Scope == scope {
-			out = append(out, rb)
-		}
-	}
-	return out
-}
-
 func (srv *Service) CodeSearch(ctx context.Context, query, lang string, limit int) map[string]any {
 	result, err := srv.CodeSearchResult(ctx, query, lang, limit)
 	if err != nil {

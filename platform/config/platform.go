@@ -394,7 +394,31 @@ func (p *PlatformSettings) routerMaxTokens() int {
 
 func CanonicalPlatformSetting(key, value string) (string, error) {
 	value = strings.TrimSpace(value)
+	if !IsPlatformSetting(key) {
+		return "", fmt.Errorf("unknown platform setting %q", key)
+	}
+	if value == "" {
+		return "", nil
+	}
 	switch key {
+	case "llm_provider":
+		value = strings.ToLower(value)
+		if value != "" && value != "openai" && value != "anthropic" {
+			return "", fmt.Errorf("llm_provider must be empty, openai, or anthropic")
+		}
+		return value, nil
+	case "rerank_enabled", "coding_allow_network":
+		return canonicalBoolSetting(key, value)
+	case "llm_max_tokens", "llm_answer_max_tokens", "agent_conclusion_max_tokens", "llm_max_continue_rounds":
+		return canonicalNonNegativeIntSetting(key, value)
+	case "agent_max_steps", "context_budget", "rerank_pool",
+		"rerank_topk", "rerank_max_per_service", "rerank_max_per_service_low_band",
+		"vcs_clone_concurrency":
+		return canonicalPositiveIntSetting(key, value)
+	case "rerank_min_score", "rerank_min_dense_preflight", "runbook_min_score", "code_min_score":
+		return canonicalScoreSetting(key, value)
+	case "agent_timeout":
+		return canonicalDurationSetting(key, value, time.Second, 24*time.Hour)
 	case "coding_enabled_providers":
 		return canonicalCodingProviders(value)
 	case "coding_default_provider":
@@ -415,15 +439,6 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 			return "", fmt.Errorf("coding_max_concurrency must be between 1 and 32")
 		}
 		return strconv.Itoa(concurrency), nil
-	case "coding_allow_network":
-		switch strings.ToLower(value) {
-		case "1", "true":
-			return "true", nil
-		case "0", "false":
-			return "false", nil
-		default:
-			return "", fmt.Errorf("coding_allow_network must be true or false")
-		}
 	case "agent_answer_reserve":
 		reserve, err := time.ParseDuration(value)
 		if err != nil || reserve <= 0 {
@@ -448,9 +463,46 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 			return "", fmt.Errorf("llm_context_window must be between 8192 and 2000000")
 		}
 		return strconv.Itoa(tokens), nil
+	case "vcs_groups", "vcs_exclude_projects":
+		return strings.Join(ParseExcludeList(value), "\n"), nil
 	default:
 		return value, nil
 	}
+}
+
+func canonicalBoolSetting(key, value string) (string, error) {
+	switch strings.ToLower(value) {
+	case "1", "true":
+		return "true", nil
+	case "0", "false":
+		return "false", nil
+	default:
+		return "", fmt.Errorf("%s must be true or false", key)
+	}
+}
+
+func canonicalPositiveIntSetting(key, value string) (string, error) {
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		return "", fmt.Errorf("%s must be a positive integer", key)
+	}
+	return strconv.Itoa(n), nil
+}
+
+func canonicalNonNegativeIntSetting(key, value string) (string, error) {
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		return "", fmt.Errorf("%s must be a non-negative integer", key)
+	}
+	return strconv.Itoa(n), nil
+}
+
+func canonicalScoreSetting(key, value string) (string, error) {
+	score, err := strconv.ParseFloat(value, 64)
+	if err != nil || score < 0 || score > 1 {
+		return "", fmt.Errorf("%s must be between 0 and 1", key)
+	}
+	return strconv.FormatFloat(score, 'f', -1, 64), nil
 }
 
 func canonicalCodingProviders(value string) (string, error) {

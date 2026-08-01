@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,19 +25,21 @@ var ignoredDirs = map[string]struct{}{
 // DiscoverScanDirs lists project directories under root that should be scanned.
 // It excludes ignored and hidden entries.
 // The walk goes two levels deep under repos/<group>/<project>.
-func DiscoverScanDirs(root string) []string {
+func DiscoverScanDirs(root string) ([]string, error) {
 	reposDir := filepath.Join(root, "repos")
 	groups, err := os.ReadDir(reposDir)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read repositories directory %q: %w", reposDir, err)
 	}
 	var dirs []string
+	var scanErrs []error
 	for _, g := range groups {
 		if !g.IsDir() || strings.HasPrefix(g.Name(), ".") {
 			continue
 		}
 		entries, err := os.ReadDir(filepath.Join(reposDir, g.Name()))
 		if err != nil {
+			scanErrs = append(scanErrs, fmt.Errorf("read repository group %q: %w", g.Name(), err))
 			continue
 		}
 		for _, e := range entries {
@@ -45,7 +49,46 @@ func DiscoverScanDirs(root string) []string {
 			dirs = append(dirs, filepath.Join("repos", g.Name(), e.Name()))
 		}
 	}
-	return dirs
+	return dirs, errors.Join(scanErrs...)
+}
+
+// ValidateScanInputs prevents an unreadable workspace from producing a partial snapshot.
+func ValidateScanInputs(root string, dirs []string) error {
+	var scanErrs []error
+	for _, dir := range dirs {
+		base := filepath.Join(root, dir)
+		err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				scanErrs = append(scanErrs, fmt.Errorf("access %q: %w", path, err))
+				if entry != nil && entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if entry.IsDir() {
+				if _, skip := ignoredDirs[entry.Name()]; skip {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if sensitiveFile(path) {
+				return nil
+			}
+			file, openErr := os.Open(path)
+			if openErr != nil {
+				scanErrs = append(scanErrs, fmt.Errorf("read %q: %w", path, openErr))
+				return nil
+			}
+			if closeErr := file.Close(); closeErr != nil {
+				scanErrs = append(scanErrs, fmt.Errorf("close %q: %w", path, closeErr))
+			}
+			return nil
+		})
+		if err != nil {
+			scanErrs = append(scanErrs, fmt.Errorf("walk scan directory %q: %w", dir, err))
+		}
+	}
+	return errors.Join(scanErrs...)
 }
 
 // sensitiveFile reports whether a path should never be indexed / embedded.
