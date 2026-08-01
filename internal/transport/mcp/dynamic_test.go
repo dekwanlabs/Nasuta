@@ -9,7 +9,7 @@ import (
 
 func TestDynamicHandlerRebuildsAfterRegistryRevision(t *testing.T) {
 	registry := tool.NewRegistry()
-	handler := NewDynamicHandler(nil, registry)
+	handler := NewDynamicHandler(registry)
 	initial := handler.currentRevision()
 	if err := registry.Register(tool.Tool{
 		ID:          "dynamic",

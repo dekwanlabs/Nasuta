@@ -348,11 +348,9 @@ var mysqlSchema = map[MySQLGroup][]string{
 				fix_branches_json  LONGTEXT,
 				fix_started_at     TIMESTAMP NULL DEFAULT NULL,
 				fixed_at           TIMESTAMP NULL DEFAULT NULL,
-				created_unix       BIGINT NOT NULL DEFAULT 0,
-				updated_unix       BIGINT NOT NULL DEFAULT 0,
 				KEY idx_dedup (dedup_key),
 				KEY idx_status (status),
-				KEY idx_created (created_unix)
+				KEY idx_created_at_id (created_at, id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	},
 	GroupApproval: {

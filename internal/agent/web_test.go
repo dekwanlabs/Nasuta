@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -188,20 +187,5 @@ func TestWebSearchWithFetchSkipsIrrelevantCandidate(t *testing.T) {
 	}
 	if response.Fetched != nil || !strings.Contains(response.FetchNote, "skipped") {
 		t.Fatalf("response = %+v, want skipped automatic fetch", response)
-	}
-}
-
-func TestWebSearchToolPayloadIsDeliveredWithoutLoss(t *testing.T) {
-	response := WebSearchResponse{
-		Results: []WebSearchResult{{Title: "relevant candidate", URL: "https://example.com/result", Snippet: "candidate summary"}},
-		Fetched: &WebFetchedEvidence{Title: "large page", URL: "https://example.com/page", Content: strings.Repeat("page content ", 4000)},
-	}
-	raw, err := json.Marshal(response)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if got := formatToolResultForLLM("web_search", string(raw)); got != string(raw) {
-		t.Fatal("web search payload changed before model delivery")
 	}
 }

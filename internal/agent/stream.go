@@ -12,15 +12,12 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-// StreamPipe streams tokens immediately. If a tool-call delta fires mid-turn
-// (OnToolCallDelta), it stops forwarding — the tokens already sent serve as
-// the model's visible preamble/thinking for that tool call.
+// StreamPipe buffers model output until the caller confirms it is an answer.
 type StreamPipe struct {
 	observer   Observer
 	runID      string
 	stepNo     int
 	discarding bool // set true when tool-call delta received; stop forwarding tokens
-	buffered   bool // hold answer tokens until the caller validates the complete response
 	started    time.Time
 	timingMu   sync.Mutex
 	timing     StreamTiming
@@ -44,9 +41,7 @@ func newStreamPipe(observer Observer, runID string, stepNo int, started time.Tim
 }
 
 func newBufferedStreamPipe(observer Observer, runID string, stepNo int, started time.Time, onFirstToken func(string)) *StreamPipe {
-	h := newStreamPipe(observer, runID, stepNo, started, onFirstToken)
-	h.buffered = true
-	return h
+	return newStreamPipe(observer, runID, stepNo, started, onFirstToken)
 }
 
 func (h *StreamPipe) recordTiming(kind string) {
@@ -88,21 +83,6 @@ func (h *StreamPipe) Timings() StreamTiming {
 
 func (h *StreamPipe) OnToken(token string) {
 	h.recordTiming("content")
-	if h.discarding || h.buffered {
-		return
-	}
-	// The first visible token means the model has started the answer.
-	// Emit the "writing the answer" hint here so it lands after reasoning.
-	// Tool-call turns may leak a short preamble before discarding kicks in.
-	if !h.firedFirst {
-		h.firedFirst = true
-		if h.onFirstToken != nil {
-			h.onFirstToken(h.runID)
-		}
-	}
-	if h.observer != nil {
-		h.observer.OnToken(context.Background(), h.runID, token)
-	}
 }
 
 // Publish forwards a validated buffered answer as one visible token.
@@ -129,10 +109,10 @@ func (h *StreamPipe) OnToolCallDelta() {
 	h.discarding = true
 }
 
-// Flush is a no-op — tokens already streamed live.
+// Flush is a no-op; Publish exposes validated output.
 func (h *StreamPipe) Flush() {}
 
-// Discard stops forwarding — tokens already streamed are fine as preamble.
+// Discard marks the turn as non-answer output.
 func (h *StreamPipe) Discard() { h.discarding = true }
 
 // HasToolCallDelta reports whether this turn began a tool call instead of an answer.
@@ -148,23 +128,52 @@ func (h *StreamPipe) OnReasoning(token string) {
 
 func (h *StreamPipe) OnToolCall(_ llm.ToolCall) { h.recordTiming("tool_call") }
 
-// SSEEvent is one event pushed to a connected SSE client during a live run.
+type EventType string
+
+const (
+	EventAnswerDelta    EventType = "answer.delta"
+	EventToolStarted    EventType = "tool.started"
+	EventToolFinished   EventType = "tool.finished"
+	EventStatus         EventType = "status"
+	EventReasoningDelta EventType = "reasoning.delta"
+	EventTrace          EventType = "trace"
+	EventLLMCall        EventType = "llm.call"
+	EventRunFinished    EventType = "run.finished"
+)
+
+type TextEvent struct {
+	Text string `json:"text"`
+}
+
+type ToolStartedEvent struct {
+	Step int    `json:"step"`
+	Name string `json:"name"`
+	Args string `json:"args"`
+}
+
+type ToolFinishedEvent struct {
+	Step          int    `json:"step"`
+	Tool          string `json:"tool"`
+	Summary       string `json:"summary"`
+	TraceID       string `json:"trace_id,omitempty"`
+	ArtifactID    string `json:"artifact_id,omitempty"`
+	Failed        bool   `json:"failed"`
+	DeliveryError string `json:"delivery_error,omitempty"`
+	DurationMs    int    `json:"duration_ms"`
+	SizeBytes     int64  `json:"size_bytes"`
+}
+
+// SSEEvent is the tagged event forwarded unchanged by the HTTP transport.
 type SSEEvent struct {
-	Step      *StepRecord             `json:"step,omitempty"`
-	Token     string                  `json:"token,omitempty"`
-	Reasoning string                  `json:"reasoning,omitempty"`
-	LLMCall   *llm.CallLifecycle      `json:"llm_call,omitempty"`
-	Trace     *domain.EvaluationTrace `json:"trace,omitempty"`
-	// Phase is a lightweight pre-loop status hint.
-	// Unlike Step, it is not persisted; unlike Reasoning, it is not model output.
-	// It covers preprocessing and retrieval before LLM streaming starts.
-	Phase    string       `json:"phase,omitempty"`
-	Terminal *RunTerminal `json:"terminal,omitempty"`
+	Type EventType `json:"type"`
+	Data any       `json:"data"`
 }
 
 // RunTerminal is the sole real-time projection of one persisted Run outcome.
 type RunTerminal struct {
+	RunID           string          `json:"run_id"`
 	Status          RunStatus       `json:"status"`
+	Answer          string          `json:"answer,omitempty"`
 	StepCount       int             `json:"step_count"`
 	TokenUsed       int             `json:"token_used"`
 	Error           string          `json:"error,omitempty"`
@@ -172,9 +181,17 @@ type RunTerminal struct {
 	SessionMessages []llm.Message   `json:"-"`
 }
 
+func TerminalFromEvent(event SSEEvent) *RunTerminal {
+	if event.Type != EventRunFinished {
+		return nil
+	}
+	terminal, _ := event.Data.(*RunTerminal)
+	return terminal
+}
+
 // EmitTrace broadcasts opt-in evaluation telemetry without persisting business steps.
 func (hub *RunHub) EmitTrace(runID string, event domain.EvaluationTrace) {
-	hub.broadcastTrace(ctxWithRunID(runID), runID, SSEEvent{Trace: &event})
+	hub.broadcast(runID, SSEEvent{Type: EventTrace, Data: event})
 }
 
 // RunHub fans out live agent events to SSE subscribers and stores control signals.
@@ -220,7 +237,6 @@ func (hub *RunHub) Unsubscribe(runID string, ch chan SSEEvent) {
 		delete(hub.subs, runID)
 		delete(hub.completed, runID)
 	}
-	close(ch)
 	hub.mu.Unlock()
 }
 
@@ -262,33 +278,39 @@ func (hub *RunHub) OnStep(ctx context.Context, runID string, step StepRecord) er
 			hub.mu.Unlock()
 		}
 	}
-	if step.Kind == StepKindToolResult {
-		step.ResultPreview = toolResultPreview(step.Content)
-		step.Content = ""
-		step.PromptContent = ""
+	switch step.Kind {
+	case StepKindToolCall:
+		hub.broadcast(runID, SSEEvent{Type: EventToolStarted, Data: ToolStartedEvent{
+			Step: step.StepNo, Name: step.Tool, Args: step.Args,
+		}})
+	case StepKindToolResult:
+		hub.broadcast(runID, SSEEvent{Type: EventToolFinished, Data: ToolFinishedEvent{
+			Step: step.StepNo, Tool: step.Tool, Summary: toolResultPreview(step.Content),
+			TraceID: step.TraceID, ArtifactID: step.ArtifactID, Failed: step.Failed,
+			DeliveryError: step.DeliveryError, DurationMs: step.DurationMs, SizeBytes: step.SizeBytes,
+		}})
 	}
-	hub.broadcast(ctxWithRunID(runID), runID, SSEEvent{Step: &step})
 	return persistErr
 }
 
 func (hub *RunHub) OnToken(ctx context.Context, runID, token string) {
-	hub.broadcastToken(ctx, runID, SSEEvent{Token: token})
+	hub.broadcast(runID, SSEEvent{Type: EventAnswerDelta, Data: TextEvent{Text: token}})
 }
 
 func (hub *RunHub) OnReasoning(ctx context.Context, runID, token string) {
-	hub.broadcastToken(ctx, runID, SSEEvent{Reasoning: token})
+	hub.broadcast(runID, SSEEvent{Type: EventReasoningDelta, Data: TextEvent{Text: token}})
 }
 
 // OnLLMCall publishes model request boundaries without persisting duplicate timing data.
 func (hub *RunHub) OnLLMCall(ctx context.Context, runID string, call llm.CallLifecycle) {
-	hub.broadcast(ctx, runID, SSEEvent{LLMCall: &call})
+	hub.broadcast(runID, SSEEvent{Type: EventLLMCall, Data: call})
 }
 
 // EmitPhase broadcasts a lightweight pre-loop status hint to SSE subscribers.
 // Unlike OnStep, it does NOT persist a step row — phase hints are transient UI
 // status, not agent reasoning steps, so they must not pollute agent_steps.
 func (hub *RunHub) EmitPhase(runID, text string) {
-	hub.broadcast(ctxWithRunID(runID), runID, SSEEvent{Phase: text})
+	hub.broadcast(runID, SSEEvent{Type: EventStatus, Data: TextEvent{Text: text}})
 }
 
 func (hub *RunHub) Complete(runID string, outcome RunOutcome) {
@@ -329,14 +351,15 @@ func (hub *RunHub) Complete(runID string, outcome RunOutcome) {
 		}
 	}
 	terminal := &RunTerminal{
-		Status: outcome.Status, StepCount: outcome.StepCount, TokenUsed: outcome.TokenUsed,
+		RunID: runID, Status: outcome.Status, Answer: outcome.Answer,
+		StepCount: outcome.StepCount, TokenUsed: outcome.TokenUsed,
 		Evidence:        outcome.Evidence,
 		SessionMessages: append([]llm.Message(nil), outcome.SessionMessages...),
 	}
 	if outcome.Err != nil {
 		terminal.Error = outcome.Err.Error()
 	}
-	hub.broadcast(ctxWithRunID(runID), runID, SSEEvent{Terminal: terminal})
+	hub.broadcast(runID, SSEEvent{Type: EventRunFinished, Data: terminal})
 	hub.mu.Lock()
 	if len(hub.subs[runID]) == 0 {
 		delete(hub.completed, runID)
@@ -344,42 +367,27 @@ func (hub *RunHub) Complete(runID string, outcome RunOutcome) {
 	hub.mu.Unlock()
 }
 
-func (hub *RunHub) broadcast(_ context.Context, runID string, ev SSEEvent) {
+func (hub *RunHub) broadcast(runID string, ev SSEEvent) {
 	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	for _, ch := range hub.subs[runID] {
+	subs := append([]chan SSEEvent(nil), hub.subs[runID]...)
+	hub.mu.Unlock()
+	for _, ch := range subs {
 		select {
 		case ch <- ev:
 		default:
+			if ev.Type == EventRunFinished {
+				// Preserve the sole terminal fact even when diagnostics filled the buffer.
+				select {
+				case <-ch:
+				default:
+				}
+				ch <- ev
+				continue
+			}
+			log.WarnfCtx(ctxWithRunID(runID), "[hub] event %s dropped for run %s: subscriber buffer full", ev.Type, runID)
 		}
 	}
 }
-
-func (hub *RunHub) broadcastToken(ctx context.Context, runID string, ev SSEEvent) {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	for _, ch := range hub.subs[runID] {
-		select {
-		case ch <- ev:
-		case <-time.After(tokenSendTimeout):
-			log.WarnfCtx(ctx, "[hub] token dropped for run %s: subscriber buffer full after %s", runID, tokenSendTimeout)
-		}
-	}
-}
-
-func (hub *RunHub) broadcastTrace(ctx context.Context, runID string, ev SSEEvent) {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	for _, ch := range hub.subs[runID] {
-		select {
-		case ch <- ev:
-		case <-time.After(tokenSendTimeout):
-			log.WarnfCtx(ctx, "[hub] evaluation trace blocked for run %s after %s", runID, tokenSendTimeout)
-		}
-	}
-}
-
-const tokenSendTimeout = 5 * time.Second
 
 func (hub *RunHub) Send(runID string, sig ControlSignal) {
 	hub.mu.Lock()

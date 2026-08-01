@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -175,10 +176,12 @@ func (srv *Service) FindServices(ctx context.Context, query string, limit int) (
 
 	semantic := false
 	if srv.semanticEnabled() {
-		if names, err := srv.semanticServiceNames(ctx, query, limit); err == nil {
-			matches = mergeServiceMatches(names, all, matches, limit)
-			semantic = true
+		names, err := srv.semanticServiceNames(ctx, query, limit)
+		if err != nil {
+			return domain.SearchResult[domain.ServiceRecord]{}, fmt.Errorf("semantic service search: %w", err)
 		}
+		matches = mergeServiceMatches(names, all, matches, limit)
+		semantic = true
 	}
 	return domain.SearchResult[domain.ServiceRecord]{Matches: matches, Semantic: semantic}, nil
 }
@@ -194,14 +197,17 @@ func traceServiceNames(matches []domain.ServiceRecord) []string {
 
 func (srv *Service) semanticServiceNames(ctx context.Context, query string, limit int) ([]string, error) {
 	vecs, err := srv.embedder.Embed(ctx, []string{query})
-	if err != nil || len(vecs) == 0 {
-		return nil, err
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+	if len(vecs) == 0 {
+		return nil, fmt.Errorf("embed query: empty vector")
 	}
 	hits, err := srv.semantic.Search(ctx, semantic.Query{
 		DenseVector: vecs[0], Filter: semantic.Filter{Keywords: map[string]string{"kind": "service"}}, Limit: limit,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("search service vectors: %w", err)
 	}
 	var names []string
 	for _, h := range hits {
@@ -304,22 +310,14 @@ func (srv *Service) FindRunbooks(ctx context.Context, query knowledge.RunbookQue
 			return domain.RunbookSearchResult{}, fmt.Errorf("keyword search runbooks: %w", err)
 		}
 	}
-	seed := scoreRunbooks(all, query.Query, query.Limit*2)
-	if len(seed) == 0 {
+	scored := scoreRunbooks(all, query.Query, query.Limit)
+	if len(scored) == 0 {
 		return domain.RunbookSearchResult{Matches: []domain.RunbookSearchHit{}, DocScoped: query.DocID != ""}, nil
 	}
-	q := platform.Normalize(query.Query)
-	scored := make([]scoredRunbook, 0, len(seed))
-	for _, rb := range seed {
-		if sc := scoreRunbook(rb, q); sc > 0 {
-			scored = append(scored, scoredRunbook{rb, sc})
-		}
-	}
-	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
 	n := min(len(scored), query.Limit)
 	out := make([]domain.RunbookSearchHit, n)
 	for i := range n {
-		rb := scored[i].rec
+		rb := scored[i]
 		evidenceClass, trustTier := domain.EvidenceForRunbookScope(rb.Scope)
 		text := rb.Text
 		if runes := []rune(text); len(runes) > 4000 {
@@ -533,11 +531,13 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 	if lang != "" {
 		filters["lang"] = lang
 	}
-	fetchLimit := max(limit*3, limit)
-	var hits []semantic.Hit
+	fetchLimit := limit * 3
 	mode := "dense"
 	sparseTerms := 0
-	searchStarted := time.Now()
+	searchQuery := semantic.Query{
+		DenseVector: vecs[0], Filter: semantic.Filter{Keywords: filters},
+		Limit: fetchLimit, GroupBy: "path",
+	}
 	if bm := srv.BM25View(); bm != nil {
 		sparseStarted := time.Now()
 		sv := bm.QuerySparse(query)
@@ -551,26 +551,19 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 		}
 		if len(indices) == 0 {
 			log.InfofCtx(ctx, "[search_code] dense fallback: query has no known BM25 terms, dim=%d", len(vecs[0]))
-			hits, err = srv.semantic.Search(ctx, semantic.Query{
-				DenseVector: vecs[0], Filter: semantic.Filter{Keywords: filters}, Limit: fetchLimit, GroupBy: "path",
-			})
 		} else {
 			mode = "hybrid"
 			log.InfofCtx(ctx, "[search_code] hybrid: dim=%d sparseTerms=%d", len(vecs[0]), len(indices))
-			hits, err = srv.semantic.Search(ctx, semantic.Query{
-				DenseVector: vecs[0], SparseVector: &semantic.SparseVector{Indices: indices, Values: values},
-				Filter: semantic.Filter{Keywords: filters}, Limit: fetchLimit, GroupBy: "path",
-			})
+			searchQuery.SparseVector = &semantic.SparseVector{Indices: indices, Values: values}
 		}
 	} else {
 		srv.denseWarnOnce.Do(func() {
 			log.WarnfCtx(ctx, "[search_code] hybrid search disabled (BM25 nil) — running dense-only; run the full code embedding operation to enable it")
 		})
 		log.InfofCtx(ctx, "[search_code] dense-only: dim=%d (BM25 nil)", len(vecs[0]))
-		hits, err = srv.semantic.Search(ctx, semantic.Query{
-			DenseVector: vecs[0], Filter: semantic.Filter{Keywords: filters}, Limit: fetchLimit, GroupBy: "path",
-		})
 	}
+	searchStarted := time.Now()
+	hits, err := srv.semantic.Search(ctx, searchQuery)
 	if traceEnabled {
 		searchStatus := "completed"
 		searchOutput := map[string]any{"hits": len(hits), "top": traceSemanticHits(hits)}
@@ -620,17 +613,9 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 			Score: adjusted, ScoreKind: string(h.ScoreKind), EvidenceClass: evidenceClass, TrustTier: trustTier,
 		}
 		if h.ScoreKind == semantic.ScoreFusion {
-			fusionScore := h.FusionScore
-			if fusionScore == 0 {
-				fusionScore = h.Score
-			}
-			match.FusionScore = float64(fusionScore)
+			match.FusionScore = float64(h.FusionScore)
 		} else {
-			denseScore := h.DenseScore
-			if denseScore == 0 {
-				denseScore = h.Score
-			}
-			match.SemanticScore = float64(denseScore)
+			match.SemanticScore = float64(h.DenseScore)
 		}
 		matches = append(matches, match)
 		if len(matches) >= limit {
@@ -796,8 +781,11 @@ func (srv *Service) ListApisResult(ctx context.Context, service, keyword string,
 // FindAPIs returns typed endpoint records for internal consumers.
 func (srv *Service) FindAPIs(ctx context.Context, service, keyword string, limit int) ([]domain.EndpointRecord, error) {
 	page, err := srv.db.ListApis(ctx, service, keyword, 1, limit)
-	if err != nil || page == nil {
+	if err != nil {
 		return nil, err
+	}
+	if page == nil {
+		return nil, fmt.Errorf("list APIs: store returned nil page")
 	}
 	return page.List, nil
 }
@@ -896,6 +884,11 @@ func (srv *Service) IndexSummaryResult(ctx context.Context) (map[string]any, err
 		"repos":           sm.Repos,
 		"semanticEnabled": srv.semanticEnabled(),
 	}
+	if srv.docStore == nil {
+		result["runbookIndex"] = map[string]any{"enabled": false, "status": "unavailable"}
+	} else {
+		result["runbookIndex"] = map[string]any{"enabled": true, "status": "available"}
+	}
 	if srv.ontology == nil {
 		result["ontology"] = map[string]any{"enabled": false, "status": "unavailable"}
 		return result, nil
@@ -929,7 +922,7 @@ type scoredService struct {
 
 func scoreServices(all []domain.ServiceRecord, query string, limit int) []domain.ServiceRecord {
 	q := platform.Normalize(query)
-	var scored []scoredService
+	scored := make([]scoredService, 0, len(all))
 	for _, svc := range all {
 		if sc := scoreService(svc, q); sc > 0 {
 			scored = append(scored, scoredService{svc, sc})
@@ -982,7 +975,7 @@ type scoredRunbook struct {
 
 func scoreRunbooks(all []domain.RunbookRecord, query string, limit int) []domain.RunbookRecord {
 	q := platform.Normalize(query)
-	var scored []scoredRunbook
+	scored := make([]scoredRunbook, 0, len(all))
 	for _, rb := range all {
 		if sc := scoreRunbook(rb, q); sc > 0 {
 			scored = append(scored, scoredRunbook{rb, sc})
@@ -1020,12 +1013,12 @@ func scoreRunbook(rb domain.RunbookRecord, q string) int {
 
 // mergeServiceMatches appends semantic-only hits to keyword matches for extra recall.
 func mergeServiceMatches(semNames []string, all, base []domain.ServiceRecord, limit int) []domain.ServiceRecord {
-	byName := map[string]domain.ServiceRecord{}
+	byName := make(map[string]domain.ServiceRecord, len(all))
 	for _, s := range all {
 		byName[s.ServiceName] = s
 	}
-	seen := map[string]struct{}{}
-	out := []domain.ServiceRecord{}
+	seen := make(map[string]struct{}, min(limit, len(base)+len(semNames)))
+	out := make([]domain.ServiceRecord, 0, min(limit, len(base)+len(semNames)))
 	for _, svc := range base {
 		out = append(out, svc)
 		seen[svc.ServiceName] = struct{}{}
@@ -1142,11 +1135,6 @@ func runbookEvidence(h semantic.Hit, rb domain.RunbookRecord) (string, int) {
 	return domain.EvidenceForRunbookScope(scope)
 }
 
-// GetSymbol searches codegraph symbols and loads their source snippets.
-func (srv *Service) GetSymbol(ctx context.Context, query string, limit int) map[string]any {
-	return srv.GetSymbolFiltered(ctx, query, "", "", limit)
-}
-
 // GetSymbolFiltered applies explicit file and qualified-name disambiguation.
 func (srv *Service) GetSymbolFiltered(ctx context.Context, query, file, qualifiedName string, limit int) map[string]any {
 	result, err := srv.GetSymbolResult(ctx, query, file, qualifiedName, limit)
@@ -1212,7 +1200,10 @@ func (srv *Service) GetSymbolResult(ctx context.Context, query, file, qualifiedN
 		if qualifiedName != "" && !strings.EqualFold(n.QualifiedName, qualifiedName) {
 			continue
 		}
-		source := readNodeSource(root, n)
+		source, err := readNodeSource(root, n)
+		if err != nil {
+			return nil, err
+		}
 		matches = append(matches, map[string]any{
 			"id": n.ID, "function": n.Name, "qualifiedName": n.QualifiedName,
 			"kind": n.Kind, "file": n.FilePath, "line": n.StartLine, "source": source,
@@ -1243,16 +1234,16 @@ func (srv *Service) TraceCallsResult(ctx context.Context, request callchain.Requ
 	if srv.callChain == nil || !srv.callChain.Available() {
 		return nil, fmt.Errorf("call chain unavailable: codegraph or structure index is not ready")
 	}
-	var err error
-	request, err = srv.resolveAPICallTarget(ctx, request)
+	requested := request
+	resolved, err := srv.resolveAPICallTarget(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-	result, err := srv.callChain.Trace(ctx, request)
+	result, err := srv.callChain.Trace(ctx, resolved)
 	if err != nil {
 		return nil, err
 	}
-	return callChainResult(srv.workspaceRoot, result), nil
+	return callChainResult(srv.workspaceRoot, requested, resolved, result)
 }
 
 func (srv *Service) resolveAPICallTarget(ctx context.Context, request callchain.Request) (callchain.Request, error) {
@@ -1280,18 +1271,17 @@ func (srv *Service) resolveAPICallTarget(ctx context.Context, request callchain.
 	return request, nil
 }
 
-func callChainResult(root string, result callchain.Result) map[string]any {
-	const sourceCap = 1500
-	decorate := func(direction callchain.DirectionResult, callers bool) map[string]any {
+func callChainResult(root string, requested, resolved callchain.Request, result callchain.Result) (map[string]any, error) {
+	decorate := func(direction callchain.DirectionResult, callers bool) (map[string]any, error) {
 		nodes := make([]map[string]any, 0, len(direction.Hops))
 		for _, hop := range direction.Hops {
 			node := hop.Target
 			if callers {
 				node = hop.Source
 			}
-			source := readNodeSource(root, node.Node)
-			if len(source) > sourceCap {
-				source = source[:sourceCap] + "\n...(truncated)"
+			source, err := readNodeSource(root, node.Node)
+			if err != nil {
+				return nil, err
 			}
 			nodes = append(nodes, map[string]any{
 				"id": node.ID, "function": node.Name, "qualifiedName": node.QualifiedName,
@@ -1302,23 +1292,32 @@ func callChainResult(root string, result callchain.Result) map[string]any {
 			})
 		}
 		return map[string]any{
-			"nodes": nodes, "hops": direction.Hops, "truncated": direction.Truncated,
+			"nodes": nodes, "truncated": direction.Truncated,
 			"nextFrontier": direction.NextFrontier, "unresolved": direction.Unresolved,
-		}
+		}, nil
+	}
+	callers, err := decorate(result.Callers, true)
+	if err != nil {
+		return nil, err
+	}
+	callees, err := decorate(result.Callees, false)
+	if err != nil {
+		return nil, err
 	}
 	response := map[string]any{
 		"direction": result.Direction, "maxDepth": result.MaxDepth,
 		"maxNodes": result.MaxNodes, "maxFanout": result.MaxFanout,
-		"callers": decorate(result.Callers, true), "callees": decorate(result.Callees, false),
+		"requestedTarget": requested, "resolvedTarget": resolved,
+		"callers": callers, "callees": callees,
 	}
 	if result.Target != nil {
 		response["target"] = result.Target
 	}
 	if len(result.Candidates) > 0 {
 		response["candidates"] = result.Candidates
-		response["error"] = "ambiguous symbol; provide file or qualified_name"
+		response["ambiguous"] = true
 	}
-	return response
+	return response, nil
 }
 
 func symbolQueryTokens(query string) []string {
@@ -1333,17 +1332,17 @@ func symbolQueryTokens(query string) []string {
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
 		f = strings.TrimSpace(f)
-		if len([]rune(f)) >= 3 {
+		if utf8.RuneCountInString(f) >= 3 {
 			out = append(out, f)
 		}
 	}
 	return out
 }
 
-// readNodeSource reads a node's source from its file using start/end line ranges.
-func readNodeSource(root string, n codegraph.Node) string {
+// readNodeSource loads the indexed range and reports index/filesystem drift.
+func readNodeSource(root string, n codegraph.Node) (string, error) {
 	if n.FilePath == "" || n.StartLine <= 0 {
-		return ""
+		return "", fmt.Errorf("read source: node %q has no file location", n.QualifiedName)
 	}
 	absPath := filepath.Join(root, n.FilePath)
 	if !strings.HasPrefix(n.FilePath, "repos/") {
@@ -1351,7 +1350,7 @@ func readNodeSource(root string, n codegraph.Node) string {
 	}
 	data, err := os.ReadFile(absPath)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read source %q: %w", n.FilePath, err)
 	}
 	lines := strings.Split(string(data), "\n")
 	if n.EndLine > len(lines) {
@@ -1370,8 +1369,9 @@ func readNodeSource(root string, n codegraph.Node) string {
 		end = len(lines)
 	}
 	body := strings.Join(lines[start:end], "\n")
-	if len(body) > 4000 {
-		body = body[:4000] + "\n...(truncated)"
+	runes := []rune(body)
+	if len(runes) > 4000 {
+		body = string(runes[:4000]) + "\n...(truncated)"
 	}
-	return body
+	return body, nil
 }

@@ -84,7 +84,7 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.ErrorfCtx(r.Context(), "[qa] session compaction failed for %s: %v", req.SessionID, err)
-		stream.emit("error", jsonStr(map[string]string{"message": err.Error()}))
+		stream.emit("run.finished", jsonStr(agent.RunTerminal{Status: agent.RunStatusFailed, Error: err.Error()}))
 		return
 	}
 	conversation.SessionID = req.SessionID
@@ -120,7 +120,7 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 			OutputReserveTokens:        outputReserve,
 		}, question,
 		func(fromTurn, toTurn int) {
-			sseEvent("compaction", jsonStr(map[string]string{
+			sseEvent("session.status", jsonStr(map[string]string{
 				"status": "start",
 				"text":   fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", fromTurn, toTurn),
 			}))
@@ -131,7 +131,7 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 		return agent.ConversationContext{}, fmt.Errorf("prepare session compaction %q: %w", sessionID, err)
 	}
 	if result.Applied {
-		sseEvent("compaction", jsonStr(map[string]string{
+		sseEvent("session.status", jsonStr(map[string]string{
 			"status": "done",
 			"text":   "历史上下文压缩完成",
 		}))
@@ -155,7 +155,7 @@ func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, ss
 	if projectedTokens == 0 {
 		projectedTokens = result.ProjectedBeforeTokens
 	}
-	sseEvent("session_restart_recommended", jsonStr(map[string]any{
+	sseEvent("session.restart_recommended", jsonStr(map[string]any{
 		"text":                   message,
 		"reason":                 reason,
 		"archived_turns":         result.ArchivedTurnCount,
@@ -289,7 +289,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		channel = hub.Subscribe(runID)
 		defer hub.Unsubscribe(runID, channel)
 	}
-	sseEvent("run_start", jsonStr(map[string]any{"run_id": runID, "mode": "single"}))
+	sseEvent("run.started", jsonStr(map[string]any{"run_id": runID}))
 	var traceRecorder *qaTraceRecorder
 	if traceEnabled && hub != nil {
 		traceRecorder = &qaTraceRecorder{started: time.Now(), runID: runID, hub: hub}
@@ -310,7 +310,6 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 
 	var response askResponse
 	responseReceived := false
-	var answerText string
 	var terminal *agent.RunTerminal
 	for !responseReceived {
 		if channel == nil {
@@ -326,10 +325,8 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		case response = <-askDone:
 			responseReceived = true
 		case ev := <-channel:
-			answerText = emitHubEvent(answerText, ev, runID, sseEvent)
-			if ev.Terminal != nil {
-				terminal = ev.Terminal
-			}
+			emitHubEvent(ev, sseEvent)
+			terminal = agent.TerminalFromEvent(ev)
 		case <-r.Context().Done():
 			return
 		}
@@ -341,7 +338,10 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	}
 	if response.err != nil {
 		log.ErrorfCtx(ctx, "[qa] agent init error: %v", response.err)
-		sseEvent("error", jsonStr(map[string]string{"message": response.err.Error()}))
+		if terminal == nil {
+			terminal = &agent.RunTerminal{RunID: runID, Status: agent.RunStatusFailed, Error: response.err.Error()}
+			sseEvent("run.finished", jsonStr(terminal))
+		}
 		return
 	}
 	result := response.result
@@ -354,13 +354,13 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	}
 
 	if terminal == nil {
-		answerText, terminal = handler.streamAgentEvents(result, channel, answerText, sseEvent, r)
+		terminal = handler.streamAgentEvents(channel, sseEvent, r)
 	}
 	if r.Context().Err() != nil {
 		return
 	}
-	if terminal != nil && terminal.Status == agent.RunStatusDone && answerText != "" {
-		handler.saveTurnToSession(ctx, runID, sessionID, userID, question, answerText, terminal.SessionMessages)
+	if terminal != nil && terminal.Status == agent.RunStatusDone && terminal.Answer != "" {
+		handler.saveTurnToSession(ctx, runID, sessionID, userID, question, terminal.Answer, terminal.SessionMessages)
 	}
 }
 
@@ -835,74 +835,28 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 	httputil.WriteJSON(w, map[string]string{"status": "sent"})
 }
 
-func (handler *Handler) streamAgentEvents(result *agent.AskResult, hubCh chan agent.SSEEvent, answerText string, sseEvent func(string, string), r *http.Request) (string, *agent.RunTerminal) {
+func (handler *Handler) streamAgentEvents(hubCh chan agent.SSEEvent, sseEvent func(string, string), r *http.Request) *agent.RunTerminal {
 	for {
 		if hubCh == nil {
-			return answerText, nil
+			return nil
 		}
 		select {
 		case ev, ok := <-hubCh:
 			if !ok {
-				return answerText, nil
+				return nil
 			}
-			answerText = emitHubEvent(answerText, ev, result.RunID, sseEvent)
-			if ev.Terminal != nil {
-				return answerText, ev.Terminal
+			emitHubEvent(ev, sseEvent)
+			if terminal := agent.TerminalFromEvent(ev); terminal != nil {
+				return terminal
 			}
 		case <-r.Context().Done():
-			return answerText, nil
+			return nil
 		}
 	}
 }
 
-func emitHubEvent(answerText string, ev agent.SSEEvent, runID string, sseEvent func(string, string)) string {
-	if ev.Trace != nil {
-		sseEvent("trace", jsonStr(ev.Trace))
-	}
-	if ev.Step != nil {
-		switch ev.Step.Kind {
-		case agent.StepKindThink:
-			sseEvent("progress", jsonStr(map[string]any{"step": ev.Step.StepNo, "text": ev.Step.Content}))
-		case agent.StepKindToolCall:
-			sseEvent("tool", jsonStr(map[string]any{"step": ev.Step.StepNo, "name": ev.Step.Tool, "args": ev.Step.Args}))
-		case agent.StepKindToolResult:
-			sseEvent("tool_result", jsonStr(map[string]any{
-				"step": ev.Step.StepNo, "tool": ev.Step.Tool, "result_preview": ev.Step.ResultPreview,
-				"trace_id": ev.Step.TraceID, "artifact_id": ev.Step.ArtifactID,
-				"failed": ev.Step.Failed, "delivery_error": ev.Step.DeliveryError,
-				"duration_ms": ev.Step.DurationMs, "size_bytes": ev.Step.SizeBytes,
-			}))
-		case agent.StepKindAnswer:
-		}
-	}
-	if ev.Token != "" {
-		answerText += ev.Token
-		sseEvent("token", jsonStr(map[string]string{"text": ev.Token}))
-	}
-	if ev.Reasoning != "" {
-		sseEvent("reasoning", jsonStr(map[string]string{"text": ev.Reasoning}))
-	}
-	if ev.LLMCall != nil {
-		sseEvent("llm_timing", jsonStr(ev.LLMCall))
-	}
-	if ev.Phase != "" {
-		sseEvent("phase", jsonStr(map[string]string{"text": ev.Phase}))
-	}
-	if ev.Terminal != nil {
-		sseEvent("run_end", jsonStr(map[string]any{
-			"run_id": runID, "status": ev.Terminal.Status, "evidence": ev.Terminal.Evidence,
-		}))
-		if ev.Terminal.Status == agent.RunStatusDone {
-			sseEvent("done", "{}")
-		} else {
-			message := ev.Terminal.Error
-			if message == "" {
-				message = "run " + string(ev.Terminal.Status)
-			}
-			sseEvent("error", jsonStr(map[string]string{"message": message}))
-		}
-	}
-	return answerText
+func emitHubEvent(ev agent.SSEEvent, sseEvent func(string, string)) {
+	sseEvent(string(ev.Type), jsonStr(ev.Data))
 }
 
 type qaTraceRecorder struct {

@@ -228,7 +228,7 @@ func TestRunAllowsDirectAnswerWithoutPreferredTool(t *testing.T) {
 		MaxSteps: 2, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
 	}, nil, nil)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
-	policy := ToolPolicyForPlan(plan, false)
+	policy := ToolPolicyForRun(false)
 	result, err := agent.runWithSnapshot(
 		t.Context(), "run_preferred_tool", "继续", ConversationContext{Instructions: []llm.Message{{
 			Role: "system", Content: preferredToolsInstruction([]string{"runtime_evidence"}),
@@ -276,7 +276,7 @@ func TestRunForcesConclusionAfterToolFailure(t *testing.T) {
 		MaxSteps: 1, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
 	}, observer, nil)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
-	policy := ToolPolicyForPlan(plan, false)
+	policy := ToolPolicyForRun(false)
 	result, err := agent.runWithSnapshot(
 		t.Context(), "run_tool_failure", "当前有多少用户？", ConversationContext{}, nil,
 		plan, policy, agent.executor.Snapshot(policy),

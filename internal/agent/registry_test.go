@@ -14,7 +14,7 @@ import (
 
 func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 	descriptions := make(map[string]string)
-	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil) {
+	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil, nil) {
 		descriptions[string(candidate.ID)] = candidate.Description
 	}
 	checks := map[string][]string{
@@ -44,7 +44,7 @@ func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 
 func TestListAPIsPublishesKeywordContract(t *testing.T) {
 	var listAPIs *Tool
-	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil) {
+	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil, nil) {
 		if candidate.ID == "list_apis" {
 			listAPIs = &candidate
 			break
@@ -74,7 +74,7 @@ func TestListAPIsPublishesKeywordContract(t *testing.T) {
 
 func TestGetSymbolAllowsQualifiedNameWithoutQuery(t *testing.T) {
 	var symbol *Tool
-	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil) {
+	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil, nil) {
 		if candidate.ID == "get_symbol" {
 			symbol = &candidate
 			break
@@ -131,7 +131,7 @@ func TestWithoutToolRemovesSessionDetailsFromRunSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	registry := NewRegistry(&Service{}, config.Config{}, memory.NewSessionStore(db))
+	registry := NewRegistry(&Service{}, config.Config{}, memory.NewSessionStore(db), nil)
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 	if _, ok := snapshot.Get("get_turn"); !ok {
 		t.Fatal("registered detail tool missing")
@@ -148,7 +148,7 @@ func TestWithoutToolRemovesSessionDetailsFromRunSnapshot(t *testing.T) {
 }
 
 func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
-	without := builtinTools(&Service{}, config.Config{}, nil)
+	without := builtinTools(&Service{}, config.Config{}, nil, nil)
 	for _, candidate := range without {
 		if candidate.ID == "query_relations" {
 			t.Fatal("query_relations registered without ontology service")
@@ -156,7 +156,7 @@ func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
 	}
 
 	svc := &Service{ontology: ontology.NewService(staticOntologyRepository{})}
-	tools := builtinTools(svc, config.Config{}, nil)
+	tools := builtinTools(svc, config.Config{}, nil, nil)
 	var relation *Tool
 	for i := range tools {
 		if tools[i].ID == "query_relations" {
@@ -181,7 +181,7 @@ func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
 func TestTraceDepsUsesOntologyFacts(t *testing.T) {
 	svc := &Service{ontology: ontology.NewService(staticOntologyRepository{})}
 	var trace *Tool
-	for _, candidate := range builtinTools(svc, config.Config{}, nil) {
+	for _, candidate := range builtinTools(svc, config.Config{}, nil, nil) {
 		if candidate.ID == "trace_deps" {
 			trace = &candidate
 			break
@@ -205,7 +205,7 @@ func TestTraceDepsUsesOntologyFacts(t *testing.T) {
 
 func TestBuiltinToolReturnsExecutionErrorWhenBackendIsUnavailable(t *testing.T) {
 	var symbol *Tool
-	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil) {
+	for _, candidate := range builtinTools(&Service{}, config.Config{}, nil, nil) {
 		if candidate.ID == "get_symbol" {
 			symbol = &candidate
 			break

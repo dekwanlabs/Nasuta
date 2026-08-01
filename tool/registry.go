@@ -84,11 +84,6 @@ func (registry *Registry) RegisterAll(candidates []Tool) error {
 	return nil
 }
 
-// Replace swaps one existing tool by ID.
-func (registry *Registry) Replace(candidate Tool) error {
-	return registry.ReplaceAll([]Tool{candidate})
-}
-
 func (registry *Registry) reconcileReadSet(owner string, candidates []Tool) error {
 	prepared, err := prepareBatch(candidates)
 	if err != nil {
@@ -153,74 +148,6 @@ func (registry *Registry) reconcileReadSet(owner string, candidates []Tool) erro
 		}
 		next.tools[candidate.ID] = candidate
 		next.owners[candidate.ID] = owner
-	}
-	registry.publish(current, next)
-	return nil
-}
-
-// ReplaceAll publishes the whole replacement batch atomically.
-func (registry *Registry) ReplaceAll(candidates []Tool) error {
-	if len(candidates) == 0 {
-		return nil
-	}
-	prepared, err := prepareBatch(candidates)
-	if err != nil {
-		return err
-	}
-	registry.writeMu.Lock()
-	defer registry.writeMu.Unlock()
-
-	current := registry.load()
-	next := cloneState(current)
-	for _, candidate := range prepared {
-		if _, exists := next.tools[candidate.ID]; !exists {
-			return fmt.Errorf("replace tools: id %q is not registered", candidate.ID)
-		}
-		next.tools[candidate.ID] = candidate
-	}
-	registry.publish(current, next)
-	return nil
-}
-
-// Unregister removes one existing tool.
-func (registry *Registry) Unregister(id ToolID) error {
-	return registry.UnregisterAll([]ToolID{id})
-}
-
-// UnregisterAll removes the whole batch atomically.
-func (registry *Registry) UnregisterAll(ids []ToolID) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	seen := make(map[ToolID]struct{}, len(ids))
-	for _, id := range ids {
-		if id == "" {
-			return fmt.Errorf("unregister tools: id is required")
-		}
-		if _, duplicate := seen[id]; duplicate {
-			return fmt.Errorf("unregister tools: duplicate id %q", id)
-		}
-		seen[id] = struct{}{}
-	}
-
-	registry.writeMu.Lock()
-	defer registry.writeMu.Unlock()
-	current := registry.load()
-	for _, id := range ids {
-		if _, exists := current.tools[id]; !exists {
-			return fmt.Errorf("unregister tools: id %q is not registered", id)
-		}
-	}
-	next := cloneState(current)
-	for _, id := range ids {
-		delete(next.tools, id)
-		delete(next.owners, id)
-	}
-	next.order = next.order[:0]
-	for _, id := range current.order {
-		if _, removed := seen[id]; !removed {
-			next.order = append(next.order, id)
-		}
 	}
 	registry.publish(current, next)
 	return nil

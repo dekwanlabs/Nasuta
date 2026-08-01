@@ -7,7 +7,6 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
-	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/knowledge"
@@ -23,8 +22,8 @@ const (
 	ToolKindWrite = tool.KindWrite
 )
 
-// ToolPolicyForPlan fixes the tool permission set for one run.
-func ToolPolicyForPlan(_ domain.EvidencePlan, allowWrite bool) ToolPolicy {
+// ToolPolicyForRun fixes the tool permission set for one run.
+func ToolPolicyForRun(allowWrite bool) ToolPolicy {
 	return ToolPolicy{
 		AllowRead:  true,
 		AllowWrite: allowWrite,
@@ -32,23 +31,15 @@ func ToolPolicyForPlan(_ domain.EvidencePlan, allowWrite bool) ToolPolicy {
 }
 
 // NewRegistry registers every built-in tool through the public batch API.
-func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore, histories ...SessionHistory) *Registry {
+func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore, history SessionHistory) *Registry {
 	registry := tool.NewRegistry()
-	var history SessionHistory
-	if len(histories) > 0 {
-		history = histories[0]
-	}
 	if err := registry.RegisterAll(builtinTools(svc, cfg, sessions, history)); err != nil {
 		panic(fmt.Sprintf("register built-in tools: %v", err))
 	}
 	return registry
 }
 
-func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore, histories ...SessionHistory) []Tool {
-	var history SessionHistory
-	if len(histories) > 0 {
-		history = histories[0]
-	}
+func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore, history SessionHistory) []Tool {
 	listAPISchema := objectSchema(map[string]any{
 		"service": propString("Optional exact service name filter."),
 		"keyword": propString("Optional case-insensitive path, controller, or handler keyword."),
@@ -96,7 +87,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				if err != nil {
 					return "", err
 				}
-				return marshalResult(dependencyTraceToMap(result))
+				return marshalResult(result)
 			}),
 		},
 		{
@@ -120,9 +111,6 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"Use it as a fallback to discover an unknown implementation or configuration, not as proof of an exact symbol, complete API route, or call chain. " +
 				"Returns file path, line range and a snippet preview. Requires semantic search to be enabled.",
 			Kind: ToolKindRead,
-			ReferenceInputs: []tool.ReferenceInput{{
-				Argument: "query", Accepts: []tool.ReferenceType{tool.ReferenceService, tool.ReferenceSymbol},
-			}},
 			InputSchema: objectSchema(map[string]any{
 				"query": propString("Natural-language or code-intent query."),
 				"lang":  propString("Optional language filter, e.g. java, python, go, sql, yaml."),
@@ -140,11 +128,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 			ID: "get_symbol",
 			Description: "Query the codegraph index for exact definitions and source bodies of functions, methods, classes, or interfaces. " +
 				"A definition does not establish its callers or callees; use call tracing for those edges.",
-			Kind: ToolKindRead,
-			ReferenceInputs: []tool.ReferenceInput{
-				{Argument: "query", Accepts: []tool.ReferenceType{tool.ReferenceSymbol}},
-				{Argument: "qualified_name", Accepts: []tool.ReferenceType{tool.ReferenceSymbol}},
-			},
+			Kind:        ToolKindRead,
 			InputSchema: symbolSchema,
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
 				result, err := svc.GetSymbolResult(ctx, args.String("query"),
@@ -161,10 +145,6 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"Follow callers from an internal implementation through client adapters to locate upstream controller candidates, then use the authoritative API lookup for their complete routes. " +
 				"Verified service_route hops support cross-service calls; truncated or unresolved frontiers are incomplete, and this is not proof of complete service dependencies.",
 			Kind: ToolKindRead,
-			ReferenceInputs: []tool.ReferenceInput{
-				{Argument: "query", Accepts: []tool.ReferenceType{tool.ReferenceSymbol}},
-				{Argument: "qualified_name", Accepts: []tool.ReferenceType{tool.ReferenceSymbol}},
-			},
 			InputSchema: objectSchema(map[string]any{
 				"query":          propString("Function or method name to trace when file+line is unavailable."),
 				"file":           propString("Optional canonical repos/... source path used for exact location or disambiguation."),
@@ -405,30 +385,4 @@ func marshalResult(value any) (string, error) {
 		return "", err
 	}
 	return string(data), nil
-}
-
-func dependencyTraceToMap(result domain.DependencyTrace) map[string]any {
-	upstream := make([]map[string]any, len(result.Upstream))
-	for i, edge := range result.Upstream {
-		upstream[i] = dependencyEdgeToMap(edge)
-	}
-	downstream := make([]map[string]any, len(result.Downstream))
-	for i, edge := range result.Downstream {
-		downstream[i] = dependencyEdgeToMap(edge)
-	}
-	return map[string]any{
-		"service": result.Service, "candidates": result.Candidates,
-		"upstream": upstream, "downstream": downstream, "truncated": result.Truncated,
-	}
-}
-
-func dependencyEdgeToMap(edge domain.DependencyEdge) map[string]any {
-	result := map[string]any{
-		"from": edge.From, "to": edge.To, "type": edge.Type,
-		"confidence": edge.Confidence, "evidence": edge.Evidence,
-	}
-	if edge.ExternalTarget != "" {
-		result["externalTarget"] = edge.ExternalTarget
-	}
-	return result
 }

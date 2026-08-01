@@ -376,11 +376,13 @@ func TestRunAgentFinishesHubWhenLLMCallFails(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 100, server.Client())
 	registry := testRegistry(t)
+	executor := NewToolExecutor(registry)
 	hub := NewRunHub(nil)
 	qa := &QA{
-		llm:   client,
-		agent: NewAgent(client, NewToolExecutor(registry), AgentConfig{MaxSteps: 1, Timeout: time.Second, AnswerReserve: 100 * time.Millisecond, AnswerMaxTokens: 100}, hub, hub),
-		hub:   hub,
+		llm:      client,
+		executor: executor,
+		agent:    NewAgent(client, executor, AgentConfig{MaxSteps: 1, Timeout: time.Second, AnswerReserve: 100 * time.Millisecond, AnswerMaxTokens: 100}, hub, hub),
+		hub:      hub,
 	}
 
 	const runID = "run-llm-failure"
@@ -391,7 +393,8 @@ func TestRunAgentFinishesHubWhenLLMCallFails(t *testing.T) {
 
 	select {
 	case event := <-ch:
-		if event.Terminal == nil || event.Terminal.Status != RunStatusFailed {
+		terminal := TerminalFromEvent(event)
+		if terminal == nil || terminal.Status != RunStatusFailed {
 			t.Fatalf("first hub event = %+v, want failed terminal", event)
 		}
 	case <-time.After(2 * time.Second):
@@ -406,8 +409,8 @@ func waitForTerminal(t *testing.T, ch chan SSEEvent) *RunTerminal {
 	for {
 		select {
 		case event := <-ch:
-			if event.Terminal != nil {
-				return event.Terminal
+			if terminal := TerminalFromEvent(event); terminal != nil {
+				return terminal
 			}
 		case <-timer.C:
 			t.Fatal("run did not emit terminal event")
@@ -443,10 +446,11 @@ func TestAskAgentDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
 	registry := testRegistry(t, testAgentTool("internal", ToolKindRead, noopTool))
+	executor := NewToolExecutor(registry)
 	hub := NewRunHub(nil)
 	qa := &QA{
-		llm: client, fastLLM: client,
-		agent: NewAgent(client, NewToolExecutor(registry), AgentConfig{
+		llm: client, fastLLM: client, executor: executor,
+		agent: NewAgent(client, executor, AgentConfig{
 			MaxSteps: 1, Timeout: 2 * time.Second, AnswerReserve: 200 * time.Millisecond, AnswerMaxTokens: 512,
 		}, hub, hub),
 		hub: hub, routerConfidence: 0.9, routerMaxTokens: 512,
@@ -496,11 +500,12 @@ func TestAskAgentRouterInvalidOutputFallsBackInternal(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
 	registry := testRegistry(t, testAgentTool("internal", ToolKindRead, noopTool))
+	executor := NewToolExecutor(registry)
 	hub := NewRunHub(nil)
 	qa := &QA{
-		llm: client, fastLLM: client,
+		llm: client, fastLLM: client, executor: executor,
 		retriever: retrieval.New(emptyRetrievalTools{}, config.Config{}),
-		agent: NewAgent(client, NewToolExecutor(registry), AgentConfig{
+		agent: NewAgent(client, executor, AgentConfig{
 			MaxSteps: 1, Timeout: 2 * time.Second, AnswerReserve: 200 * time.Millisecond, AnswerMaxTokens: 512,
 		}, hub, hub),
 		hub: hub, routerConfidence: 0.9, routerMaxTokens: 512,

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -18,15 +17,14 @@ func TestToolPolicyFiltersDefinitionsByKind(t *testing.T) {
 	)
 	executor := NewToolExecutor(registry)
 
-	if defs := executor.DefinitionsFor(ToolPolicyForPlan(domain.DirectPlan(), false)); strings.Join(toolDefNames(defs), ",") != "read" {
+	if defs := executor.DefinitionsFor(ToolPolicyForRun(false)); strings.Join(toolDefNames(defs), ",") != "read" {
 		t.Fatalf("direct definitions = %v, want read", toolDefNames(defs))
 	}
-	plan := domain.EvidencePlan{Sources: domain.Internal}
-	defs := executor.DefinitionsFor(ToolPolicyForPlan(plan, false))
+	defs := executor.DefinitionsFor(ToolPolicyForRun(false))
 	if got := strings.Join(toolDefNames(defs), ","); got != "read" {
 		t.Fatalf("definitions = %q, want read", got)
 	}
-	defs = executor.DefinitionsFor(ToolPolicyForPlan(plan, true))
+	defs = executor.DefinitionsFor(ToolPolicyForRun(true))
 	if got := strings.Join(toolDefNames(defs), ","); got != "read,write" {
 		t.Fatalf("definitions with write = %q, want read,write", got)
 	}
@@ -35,12 +33,12 @@ func TestToolPolicyFiltersDefinitionsByKind(t *testing.T) {
 func TestToolSnapshotBlocksToolRegisteredMidRun(t *testing.T) {
 	registry := testRegistry(t, testAgentTool("read", ToolKindRead, noopTool))
 	executor := NewToolExecutor(registry)
-	snapshot := executor.Snapshot(ToolPolicyForPlan(domain.EvidencePlan{Sources: domain.Internal}, false))
+	snapshot := executor.Snapshot(ToolPolicyForRun(false))
 	if err := registry.Register(testAgentTool("late", ToolKindRead, noopTool)); err != nil {
 		t.Fatal(err)
 	}
 	call := llm.ToolCall{ID: "1", Function: llm.ToolFunction{Name: "late", Arguments: `{}`}}
-	result := executor.Execute(context.Background(), snapshot, call, nil, nil, nil)
+	result := executor.Execute(context.Background(), snapshot, call, nil, nil)
 	if !strings.Contains(result.AuthoritativeContent, "unknown tool") {
 		t.Fatalf("result = %q, want pinned snapshot rejection", result.AuthoritativeContent)
 	}
@@ -52,7 +50,7 @@ func TestRoutingMetadataDoesNotChangeSnapshotVisibility(t *testing.T) {
 	gated.Routing = &tool.RoutingSpec{Intent: "current runtime evidence"}
 	write := testAgentTool("write", ToolKindWrite, noopTool)
 	registry := testRegistry(t, always, gated, write)
-	snapshot := registry.Snapshot(ToolPolicyForPlan(domain.DirectPlan(), false))
+	snapshot := registry.Snapshot(ToolPolicyForRun(false))
 
 	for _, id := range []tool.ToolID{"always", "runtime"} {
 		if _, ok := snapshot.Get(id); !ok {
@@ -83,10 +81,10 @@ func TestReferenceMismatchEnforcesDeclaredToolBoundaries(t *testing.T) {
 		"NormalizeCommand":     tool.ReferenceSymbol,
 	}
 	runbookTool := referenceTestTool("search_runbooks", "doc_id", tool.ReferenceRunbook)
-	codeTool := referenceTestTool("search_code", "query", tool.ReferenceService, tool.ReferenceSymbol)
+	codeTool := freeTextTestTool("search_code", "query")
 	docsTool := referenceTestTool("check_docs", "service", tool.ReferenceService)
-	symbolTool := referenceTestTool("get_symbol", "query", tool.ReferenceSymbol)
-	traceTool := referenceTestTool("trace_calls", "query", tool.ReferenceSymbol)
+	symbolTool := freeTextTestTool("get_symbol", "query")
+	traceTool := freeTextTestTool("trace_calls", "query")
 	registry := testRegistry(t, runbookTool, codeTool, docsTool, symbolTool, traceTool)
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 
@@ -97,9 +95,9 @@ func TestReferenceMismatchEnforcesDeclaredToolBoundaries(t *testing.T) {
 		wantCode  string
 	}{
 		{"runbook accepted by runbook search", runbookTool, tool.Arguments{"doc_id": "flow-system-overview"}, ""},
-		{"runbook rejected by code search", codeTool, tool.Arguments{"query": "flow-system-overview architecture"}, "entity_type_mismatch"},
+		{"runbook allowed in code search query", codeTool, tool.Arguments{"query": "flow-system-overview architecture"}, ""},
 		{"runbook rejected by docs check", docsTool, tool.Arguments{"service": "flow-system-overview"}, "entity_type_mismatch"},
-		{"runbook rejected by symbol lookup", symbolTool, tool.Arguments{"query": "flow-system-overview"}, "entity_type_mismatch"},
+		{"runbook allowed in symbol free text", symbolTool, tool.Arguments{"query": "flow-system-overview"}, ""},
 		{"service accepted by docs check", docsTool, tool.Arguments{"service": "hsds-base-system"}, ""},
 		{"symbol accepted by symbol lookup", symbolTool, tool.Arguments{"query": "NormalizeCommand"}, ""},
 		{"symbol accepted by call trace", traceTool, tool.Arguments{"query": "NormalizeCommand"}, ""},
@@ -125,21 +123,48 @@ func TestReferenceMismatchEnforcesDeclaredToolBoundaries(t *testing.T) {
 	}
 }
 
-func TestReferenceMismatchUsesCompleteTokenBoundaries(t *testing.T) {
+func TestReferenceMismatchUsesCompleteTokenBoundariesForStructuredReferences(t *testing.T) {
 	references := map[string]tool.ReferenceType{"flow-system-overview": tool.ReferenceRunbook}
-	candidate := referenceTestTool("search_code", "query", tool.ReferenceService)
+	candidate := referenceTestTool("check_docs", "service", tool.ReferenceService)
 	snapshot := testRegistry(t,
 		candidate,
 		referenceTestTool("search_runbooks", "doc_id", tool.ReferenceRunbook),
 	).Snapshot(tool.ReadPolicy())
 
 	for _, query := range []string{"prefix-flow-system-overview", "flow-system-overview-suffix", "xflow-system-overview"} {
-		if got := referenceMismatch(snapshot, candidate, tool.Arguments{"query": query}, references); got != "" {
+		if got := referenceMismatch(snapshot, candidate, tool.Arguments{"service": query}, references); got != "" {
 			t.Fatalf("query %q matched a partial token: %s", query, got)
 		}
 	}
-	if got := referenceMismatch(snapshot, candidate, tool.Arguments{"query": "(flow-system-overview)"}, references); !strings.Contains(got, "entity_type_mismatch") {
+	if got := referenceMismatch(snapshot, candidate, tool.Arguments{"service": "(flow-system-overview)"}, references); !strings.Contains(got, "entity_type_mismatch") {
 		t.Fatalf("complete token was not rejected: %s", got)
+	}
+}
+
+func TestCanonicalSessionToolCallsPreservesInvalidAndMarksOversizedArguments(t *testing.T) {
+	invalid := `{"query":`
+	oversized := strings.Repeat("x", sessionToolArgumentLimit+1)
+	calls := canonicalSessionToolCalls([]llm.ToolCall{
+		{Function: llm.ToolFunction{Name: "invalid", Arguments: invalid}},
+		{Function: llm.ToolFunction{Name: "oversized", Arguments: oversized}},
+		{Function: llm.ToolFunction{Name: "valid", Arguments: `{"b":2,"a":1}`}},
+	})
+	if calls[0].Function.Arguments != invalid {
+		t.Fatalf("invalid arguments = %q, want original", calls[0].Function.Arguments)
+	}
+	if calls[1].Function.Arguments != `{"_nasuta_omitted":"arguments exceeded session limit"}` {
+		t.Fatalf("oversized arguments = %q", calls[1].Function.Arguments)
+	}
+	if calls[2].Function.Arguments != `{"a":1,"b":2}` {
+		t.Fatalf("canonical arguments = %q", calls[2].Function.Arguments)
+	}
+}
+
+func freeTextTestTool(id tool.ToolID, argument string) Tool {
+	return Tool{
+		ID: id, Description: "test free-text tool", Kind: ToolKindRead,
+		InputSchema: objectSchema(map[string]any{argument: propString("query")}, nil),
+		Handler:     stringHandler(noopTool),
 	}
 }
 

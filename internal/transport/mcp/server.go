@@ -8,8 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -19,18 +17,17 @@ import (
 
 // DynamicHandler atomically rebuilds the MCP surface when the registry changes.
 type DynamicHandler struct {
-	tools    *agent.Service
-	registry *agent.Registry
+	registry *tool.Registry
 	mu       sync.RWMutex
 	revision uint64
 	handler  http.Handler
 }
 
-func NewDynamicHandler(tools *agent.Service, registry *agent.Registry) *DynamicHandler {
+func NewDynamicHandler(registry *tool.Registry) *DynamicHandler {
 	if registry == nil {
-		registry = agent.NewRegistry(tools, config.Config{}, nil)
+		panic("mcp: registry is required")
 	}
-	handler := &DynamicHandler{tools: tools, registry: registry}
+	handler := &DynamicHandler{registry: registry}
 	if err := handler.rebuild(); err != nil {
 		log.Errorf("[mcp] initial tool surface build failed: %v", err)
 		handler.handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -69,7 +66,7 @@ func (handler *DynamicHandler) rebuild() error {
 	if handler.handler != nil && handler.revision == revision {
 		return nil
 	}
-	mcpServer, err := BuildMCP(handler.tools, handler.registry)
+	mcpServer, err := BuildMCP(handler.registry)
 	if err != nil {
 		return err
 	}
@@ -81,14 +78,14 @@ func (handler *DynamicHandler) rebuild() error {
 // BuildMCP registers the knowledge tools on a new MCP server. Tool descriptions
 // and parameter schemas come from the shared tools.Registry (ADR: single source
 // of truth), so the MCP surface and the internal Agent loop never drift apart.
-func BuildMCP(tools *agent.Service, registry *agent.Registry) (*server.MCPServer, error) {
+func BuildMCP(registry *tool.Registry) (*server.MCPServer, error) {
+	if registry == nil {
+		return nil, fmt.Errorf("mcp: registry is required")
+	}
 	mcpServer := server.NewMCPServer("codeloom", "1.0.0",
 		server.WithToolCapabilities(true),
 	)
 
-	if registry == nil {
-		registry = agent.NewRegistry(tools, config.Config{}, nil)
-	}
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 	executor := tool.NewExecutor(30 * time.Second)
 	for _, candidate := range snapshot.MCPTools() {

@@ -187,7 +187,7 @@ func (agent *Agent) RunWithPlan(ctx context.Context, runID, question string, his
 
 // RunWithContext runs without synchronous history summarization on the request path.
 func (agent *Agent) RunWithContext(ctx context.Context, runID, question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, allowWrite bool) (*RunResult, error) {
-	policy := ToolPolicyForPlan(plan, allowWrite)
+	policy := ToolPolicyForRun(allowWrite)
 	return agent.RunWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, agent.executor.Snapshot(policy))
 }
 
@@ -235,7 +235,6 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 	stepSeq := 0
 	answered := false
 	seenTools := map[string]bool{}
-	seenChunks := map[string]bool{}
 	referenceTypes := referenceTypeIndex(rc)
 	var webEvidence webEvidenceState
 	evidenceTurnExtended := false
@@ -271,10 +270,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 			return result, err
 		}
 		t0 := time.Now()
-		h := newStreamPipe(agent.observer, runID, stepp, t0, agent.onFirstAnswerToken)
-		if answerContract.Active() {
-			h = newBufferedStreamPipe(agent.observer, runID, stepp, t0, agent.onFirstAnswerToken)
-		}
+		h := newBufferedStreamPipe(agent.observer, runID, stepp, t0, agent.onFirstAnswerToken)
 
 		callCtx := llm.WithUsagePhase(loopCtx, llm.PhaseAgentStep)
 		chatResult, err := agent.llm.ChatWithToolsMax(callCtx, messages, tools, h, agent.cfg.AnswerMaxTokens)
@@ -349,19 +345,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 				log.ErrorfCtx(ctx, "[agent] run %s exact-answer validation failed at step %d: %v", runID, stepp, err)
 				break
 			}
-			if answerContract.Active() {
-				h.Publish(chatResult.Content)
-			}
-			stepSeq++
-			agent.observer.OnStep(runCtx, runID, StepRecord{
-				StepNo:          stepSeq,
-				Kind:            StepKindThink,
-				Content:         chatResult.Content,
-				TokenDelta:      utf8.RuneCountInString(chatResult.Content),
-				ReasoningTokens: chatResult.ReasoningTokens,
-				DurationMs:      int(duration / time.Millisecond),
-				CreatedAt:       t0,
-			})
+			h.Publish(chatResult.Content)
 			result.Answer += chatResult.Content
 			stepSeq++
 			agent.observer.OnStep(runCtx, runID, StepRecord{
@@ -417,7 +401,7 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 				Args:      call.Function.Arguments,
 				CreatedAt: time.Now(),
 			})
-			execution := agent.executor.Execute(loopCtx, toolSnapshot, call, referenceTypes, seenTools, seenChunks)
+			execution := agent.executor.Execute(loopCtx, toolSnapshot, call, referenceTypes, seenTools)
 			execution = agent.prepareToolDelivery(runID, messages, tools, call, execution)
 			if execution.Failed {
 				result.Evidence.ToolFailureCount++
@@ -612,6 +596,7 @@ func (agent *Agent) preserveInterruptedAnswer(ctx context.Context, runID string,
 		return false
 	}
 	result.Answer += res.Content
+	stream.Publish(res.Content)
 	*stepSeq++
 	agent.observer.OnStep(ctx, runID, StepRecord{
 		StepNo:          *stepSeq,
@@ -955,7 +940,6 @@ type ToolExecutor struct {
 type ToolExecution struct {
 	AuthoritativeContent string
 	PromptContent        string
-	Arguments            tool.Arguments
 	Notices              []string
 	Evidence             bool
 	Failed               bool
@@ -999,7 +983,7 @@ func (te *ToolExecutor) DefinitionsFor(policy ToolPolicy) []llm.ToolDef {
 }
 
 // Execute runs against the same snapshot used to publish model definitions.
-func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, call llm.ToolCall, referenceTypes map[string]tool.ReferenceType, seen map[string]bool, seenChunks map[string]bool) ToolExecution {
+func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, call llm.ToolCall, referenceTypes map[string]tool.ReferenceType, seen map[string]bool) ToolExecution {
 	name := call.Function.Name
 	args, err := parseArgs(ctx, call.Function.Arguments)
 	if err != nil {
@@ -1011,10 +995,10 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 	candidate, ok := snapshot.Get(tool.ToolID(name))
 	if !ok {
 		result := fmt.Sprintf("error: unknown tool %q", name)
-		return ToolExecution{AuthoritativeContent: result, PromptContent: result, Arguments: arguments, Failed: true}
+		return ToolExecution{AuthoritativeContent: result, PromptContent: result, Failed: true}
 	}
 	if mismatch := referenceMismatch(snapshot, candidate, arguments, referenceTypes); mismatch != "" {
-		return ToolExecution{AuthoritativeContent: mismatch, PromptContent: mismatch, Arguments: arguments, Failed: true}
+		return ToolExecution{AuthoritativeContent: mismatch, PromptContent: mismatch, Failed: true}
 	}
 
 	fp := ""
@@ -1023,7 +1007,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 		if seen[fp] {
 			log.InfofCtx(ctx, "[agent] tool %s deduped (repeat call — returning placeholder)", name)
 			result := "(already searched with the same arguments; see previous result above)"
-			return ToolExecution{AuthoritativeContent: result, PromptContent: result, Arguments: arguments}
+			return ToolExecution{AuthoritativeContent: result, PromptContent: result}
 		}
 	}
 
@@ -1033,7 +1017,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 	if err != nil {
 		result := fmt.Sprintf("error: %v", err)
 		log.InfofCtx(ctx, "[agent] tool %s error after %s: args=%s err=%v", name, duration, platform.TruncateForLog(argSummary(args), 400), err)
-		return ToolExecution{AuthoritativeContent: result, PromptContent: result, Arguments: arguments, Failed: true, DurationMs: int(duration / time.Millisecond)}
+		return ToolExecution{AuthoritativeContent: result, PromptContent: result, Failed: true, DurationMs: int(duration / time.Millisecond)}
 	}
 	result := toolResult.Content
 	if seen != nil {
@@ -1045,18 +1029,11 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 	log.InfofCtx(ctx, "[agent] tool %s result: %s", name, platform.TruncateForLog(result, 1200))
 	execution := ToolExecution{
 		AuthoritativeContent: result,
-		PromptContent:        formatToolResultForLLM(name, result),
-		Arguments:            arguments,
+		PromptContent:        result,
 		Evidence:             true,
 		Coverage:             toolResult.Coverage,
 		AnswerContract:       toolResult.AnswerContract,
 		DurationMs:           int(duration / time.Millisecond),
-	}
-	if seenChunks != nil && isSearchTool(name) {
-		if note := overlapNote(name, result, seenChunks); note != "" {
-			log.InfofCtx(ctx, "[agent] tool %s high-overlap — appending convergence note", name)
-			execution.Notices = append(execution.Notices, note)
-		}
 	}
 	return execution
 }
@@ -1162,23 +1139,22 @@ func canonicalSessionToolCalls(calls []llm.ToolCall) []llm.ToolCall {
 	out := make([]llm.ToolCall, len(calls))
 	for i, call := range calls {
 		out[i] = call
+		if len(call.Function.Arguments) > sessionToolArgumentLimit {
+			out[i].Function.Arguments = `{"_nasuta_omitted":"arguments exceeded session limit"}`
+			continue
+		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil || args == nil {
-			out[i].Function.Arguments = `{}`
+			// Preserve malformed model output for audit instead of making it look valid.
 			continue
 		}
 		canonical, err := json.Marshal(args)
-		if err != nil || len(canonical) > sessionToolArgumentLimit {
-			out[i].Function.Arguments = `{"_nasuta_omitted":"arguments exceeded session limit"}`
+		if err != nil {
 			continue
 		}
 		out[i].Function.Arguments = string(canonical)
 	}
 	return out
-}
-
-func formatToolResultForLLM(_ string, result string) string {
-	return result
 }
 
 // ExecuteArguments is the non-LLM entry used by trusted prefetch plans.
@@ -1187,60 +1163,8 @@ func (te *ToolExecutor) ExecuteArguments(ctx context.Context, snapshot tool.Snap
 }
 
 // ExecuteWithPolicy snapshots current tools for one-shot callers.
-func (te *ToolExecutor) ExecuteWithPolicy(ctx context.Context, policy ToolPolicy, call llm.ToolCall, seen map[string]bool, seenChunks map[string]bool) ToolExecution {
-	return te.Execute(ctx, te.Snapshot(policy), call, nil, seen, seenChunks)
-}
-
-// isSearchTool reports whether a tool fans out over an index (prone to reworded-query repetition).
-func isSearchTool(name string) bool {
-	return name == "search_code" || name == "get_symbol"
-}
-
-// overlapKeys extracts "path:line" location keys from search tool results for overlap counting.
-func overlapKeys(result string) []string {
-	var root struct {
-		Matches []map[string]any `json:"matches"`
-	}
-	if err := json.Unmarshal([]byte(result), &root); err != nil {
-		return nil
-	}
-	keys := make([]string, 0, len(root.Matches))
-	for _, m := range root.Matches {
-		loc, _ := m["path"].(string)
-		line := m["startLine"]
-		if loc == "" {
-			loc, _ = m["file"].(string) // get_symbol
-			line = m["line"]
-		}
-		if loc == "" {
-			continue
-		}
-		keys = append(keys, fmt.Sprintf("%s:%v", loc, line))
-	}
-	return keys
-}
-
-// overlapNote records locations into seenChunks and returns a convergence hint
-// when the result adds little new evidence (>70% overlap or empty). Returns "" if fresh.
-func overlapNote(name, result string, seenChunks map[string]bool) string {
-	keys := overlapKeys(result)
-	if len(keys) == 0 {
-		// Empty search result — nothing new by definition. Point the agent away
-		// from re-searching the same index.
-		return "⚠️ This search returned no results. Switch to a different tool or answer from the evidence you already have — do NOT re-search the same index with reworded terms."
-	}
-	fresh := 0
-	for _, k := range keys {
-		if !seenChunks[k] {
-			fresh++
-			seenChunks[k] = true
-		}
-	}
-	overlap := 1.0 - float64(fresh)/float64(len(keys))
-	if overlap > 0.7 {
-		return fmt.Sprintf("⚠️ About %.0f%% of these results overlap earlier searches — no new evidence found. Switch to a different tool (e.g. trace_deps / list_apis / trace_calls / get_symbol with an exact symbol name) or answer from the evidence you already have.", overlap*100)
-	}
-	return ""
+func (te *ToolExecutor) ExecuteWithPolicy(ctx context.Context, policy ToolPolicy, call llm.ToolCall, seen map[string]bool) ToolExecution {
+	return te.Execute(ctx, te.Snapshot(policy), call, nil, seen)
 }
 
 // toolFingerprint builds a stable dedup key (name + canonical JSON args).

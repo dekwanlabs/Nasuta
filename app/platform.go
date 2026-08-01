@@ -290,7 +290,7 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	dashboardHandler.SetFeatureDeliveryStatus(platform.featureDelivery.status)
 	routes.Setup(mux, routes.Config{
 		Auth: platform.authService, Dashboard: dashboardHandler, RBAC: platform.rbacHandler,
-		MCP: mcp.NewDynamicHandler(platform.knowledge, platform.registry),
+		MCP: mcp.NewDynamicHandler(platform.registry),
 		VCS: webhook.VCSHandler(platform.index, platform.settings.VCSWebhookSecret),
 		Cfg: platform.cfg,
 	})

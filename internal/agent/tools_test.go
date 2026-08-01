@@ -21,6 +21,8 @@ import (
 )
 
 type testEmbedder struct{}
+type failingEmbedder struct{ err error }
+type emptyEmbedder struct{}
 
 type semanticTestBase struct{}
 
@@ -41,6 +43,16 @@ func (testEmbedder) Embed(context.Context, []string) ([][]float32, error) {
 }
 func (testEmbedder) Dim() int      { return 2 }
 func (testEmbedder) Enabled() bool { return true }
+
+func (e failingEmbedder) Embed(context.Context, []string) ([][]float32, error) {
+	return nil, e.err
+}
+func (failingEmbedder) Dim() int      { return 2 }
+func (failingEmbedder) Enabled() bool { return true }
+
+func (emptyEmbedder) Embed(context.Context, []string) ([][]float32, error) { return nil, nil }
+func (emptyEmbedder) Dim() int                                             { return 2 }
+func (emptyEmbedder) Enabled() bool                                        { return true }
 
 type searchFallbackSemantic struct {
 	semanticTestBase
@@ -71,6 +83,38 @@ func (s *searchFallbackSemantic) SearchHybrid(_ context.Context, query semantic.
 }
 
 var _ embed.Embedder = testEmbedder{}
+
+func TestSemanticServiceNamesReportsProviderFailures(t *testing.T) {
+	t.Run("embed error", func(t *testing.T) {
+		svc := NewTools(Deps{Embedder: failingEmbedder{err: errors.New("provider unavailable")}})
+		if _, err := svc.semanticServiceNames(context.Background(), "orders", 5); err == nil || !strings.Contains(err.Error(), "provider unavailable") {
+			t.Fatalf("semanticServiceNames error = %v", err)
+		}
+	})
+	t.Run("empty embedding", func(t *testing.T) {
+		svc := NewTools(Deps{Embedder: emptyEmbedder{}})
+		if _, err := svc.semanticServiceNames(context.Background(), "orders", 5); err == nil || !strings.Contains(err.Error(), "empty vector") {
+			t.Fatalf("semanticServiceNames error = %v", err)
+		}
+	})
+	t.Run("search error", func(t *testing.T) {
+		semanticStore := &errorSemantic{err: errors.New("search unavailable")}
+		svc := NewTools(Deps{Semantic: semanticStore, Embedder: testEmbedder{}})
+		if _, err := svc.semanticServiceNames(context.Background(), "orders", 5); err == nil || !strings.Contains(err.Error(), "search unavailable") {
+			t.Fatalf("semanticServiceNames error = %v", err)
+		}
+	})
+}
+
+type errorSemantic struct {
+	semanticTestBase
+	err error
+}
+
+func (*errorSemantic) Capabilities() semantic.Capabilities { return semantic.RequiredCapabilities() }
+func (s *errorSemantic) Search(context.Context, semantic.Query) ([]semantic.Hit, error) {
+	return nil, s.err
+}
 
 func TestCodeSearchUsesDenseFallbackWhenBM25HasNoKnownTerms(t *testing.T) {
 	semantic := &searchFallbackSemantic{hybridShouldFail: true}
@@ -176,7 +220,7 @@ func (s *fusionSemantic) Search(ctx context.Context, query semantic.Query) ([]se
 	return s.SearchHybrid(ctx, query)
 }
 func (s *fusionSemantic) SearchHybrid(context.Context, semantic.Query) ([]semantic.Hit, error) {
-	return []semantic.Hit{{Score: s.score, ScoreKind: semantic.ScoreFusion, Metadata: map[string]any{
+	return []semantic.Hit{{Score: s.score, FusionScore: s.score, ScoreKind: semantic.ScoreFusion, Metadata: map[string]any{
 		"path": "repos/team/orders/main.go", "lang": "go", "repo": "team/orders", "text": "checkout timeout",
 	}}}, nil
 }
@@ -193,9 +237,9 @@ func TestToolExecutorAllowsRetryAfterFailure(t *testing.T) {
 	executor := NewToolExecutor(registry)
 	seen := map[string]bool{}
 	call := llm.ToolCall{ID: "1", Function: llm.ToolFunction{Name: "unstable", Arguments: `{}`}}
-	policy := ToolPolicyForPlan(domain.EvidencePlan{Sources: domain.AllEvidence}, true)
-	first := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
-	second := executor.ExecuteWithPolicy(context.Background(), policy, call, seen, nil)
+	policy := ToolPolicyForRun(true)
+	first := executor.ExecuteWithPolicy(context.Background(), policy, call, seen)
+	second := executor.ExecuteWithPolicy(context.Background(), policy, call, seen)
 	if first.AuthoritativeContent != "error: temporary failure" || first.Evidence || second.AuthoritativeContent != "ok" || !second.Evidence || tries != 2 {
 		t.Fatalf("retry behavior = first:%q second:%q tries:%d", first.AuthoritativeContent, second.AuthoritativeContent, tries)
 	}
@@ -219,13 +263,28 @@ func TestReadNodeSourceHandlesGitlabPrefixedPath(t *testing.T) {
 		t.Fatalf("write source: %v", err)
 	}
 
-	got := readNodeSource(root, codegraph.Node{
+	got, err := readNodeSource(root, codegraph.Node{
 		FilePath:  "repos/hsas/svc/Foo.java",
 		StartLine: 2,
 		EndLine:   4,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(got, "service.recipeFavorite();") {
 		t.Fatalf("readNodeSource returned %q, want method body", got)
+	}
+}
+
+func TestReadNodeSourceReportsMissingFile(t *testing.T) {
+	_, err := readNodeSource(t.TempDir(), codegraph.Node{
+		QualifiedName: "orders.Service.Run",
+		FilePath:      "repos/orders/service.go",
+		StartLine:     1,
+		EndLine:       3,
+	})
+	if err == nil || !strings.Contains(err.Error(), "service.go") {
+		t.Fatalf("readNodeSource error = %v", err)
 	}
 }
 

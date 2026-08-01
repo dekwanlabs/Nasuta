@@ -46,7 +46,7 @@ func TestEmitCompactionFailureRecommendation(t *testing.T) {
 	handler.emitSessionRestartRecommendation(context.Background(), func(gotEvent, gotData string) {
 		event, data = gotEvent, gotData
 	}, "qa-session", result, true)
-	if event != "session_restart_recommended" {
+	if event != "session.restart_recommended" {
 		t.Fatalf("event = %q", event)
 	}
 	var payload struct {

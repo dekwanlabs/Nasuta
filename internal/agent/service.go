@@ -257,8 +257,8 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		ctx = llm.WithCallLifecycleObserver(ctx, runID, svc.hub)
 	}
 	explicitPlan := request.EvidencePlan
-	toolPolicy := ToolPolicyForPlan(domain.DirectPlan(), svc.writeAvailable && request.AllowWrite)
-	executor := svc.toolExecutor()
+	toolPolicy := ToolPolicyForRun(svc.writeAvailable && request.AllowWrite)
+	executor := svc.executor
 	candidateSnapshot := executor.Snapshot(toolPolicy)
 	if conversation.CompactedThroughTurn <= 0 || svc.history == nil {
 		candidateSnapshot = withoutSessionHistoryTools(candidateSnapshot)
@@ -636,7 +636,7 @@ func (svc *QA) executePrefetch(ctx context.Context, snapshot tool.Snapshot, plan
 		if candidate.Kind != tool.KindRead || candidate.Prefetch == nil {
 			return nil, fmt.Errorf("prefetch tool %q is not eligible", call.ToolID)
 		}
-		result, err := svc.toolExecutor().ExecuteArguments(ctx, snapshot, call.ToolID, call.Arguments)
+		result, err := svc.executor.ExecuteArguments(ctx, snapshot, call.ToolID, call.Arguments)
 		if err != nil {
 			if call.Required {
 				return nil, fmt.Errorf("required prefetch tool %q: %w", call.ToolID, err)
@@ -656,16 +656,6 @@ func (svc *QA) executePrefetch(ctx context.Context, snapshot tool.Snapshot, plan
 		})
 	}
 	return blocks, nil
-}
-
-func (svc *QA) toolExecutor() *ToolExecutor {
-	if svc.executor != nil {
-		return svc.executor
-	}
-	if svc.agent != nil && svc.agent.executor != nil {
-		return svc.agent.executor
-	}
-	return NewToolExecutor(tool.NewRegistry())
 }
 
 func unavailableToolBlock(id tool.ToolID, reason string) ContextBlock {
@@ -779,8 +769,8 @@ func appendUnavailableWeb(rc *retrieval.RetrievedContext, unavailable bool) {
 }
 
 func (svc *QA) runAgentWithPlan(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan) (*AskResult, error) {
-	policy := ToolPolicyForPlan(plan, false)
-	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, plan, policy, svc.toolExecutor().Snapshot(policy))
+	policy := ToolPolicyForRun(false)
+	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, plan, policy, svc.executor.Snapshot(policy))
 }
 
 func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot) (*AskResult, error) {

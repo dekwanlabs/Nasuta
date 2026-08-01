@@ -9,6 +9,10 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
+type errorRecorder interface {
+	RecordHTTPError(error)
+}
+
 // WriteJSON writes a success response wrapped in ApiResponse.
 func WriteJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -23,6 +27,9 @@ func WriteErr(w http.ResponseWriter, err error) {
 
 // WriteErrStatus writes an error response with a custom HTTP status code.
 func WriteErrStatus(w http.ResponseWriter, status int, err error) {
+	if recorder, ok := w.(errorRecorder); ok {
+		recorder.RecordHTTPError(err)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	code := status

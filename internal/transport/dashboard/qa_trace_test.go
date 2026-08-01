@@ -23,96 +23,55 @@ func TestQATraceRecorderSequencesEvents(t *testing.T) {
 	}
 	recorder.RecordTrace(domain.EvaluationTrace{Node: "agent_model_turn"})
 	live := <-channel
-	if live.Trace == nil || live.Trace.Sequence != 3 {
+	trace, ok := live.Data.(domain.EvaluationTrace)
+	if live.Type != agent.EventTrace || !ok || trace.Sequence != 3 {
 		t.Fatalf("live event = %#v", live)
 	}
 }
 
 func TestStreamAgentEventsDrainsTraceBeforeTerminal(t *testing.T) {
 	hubEvents := make(chan agent.SSEEvent, 2)
-	trace := domain.EvaluationTrace{Node: "retrieval_assemble", Status: "completed"}
-	hubEvents <- agent.SSEEvent{Trace: &trace}
-	hubEvents <- agent.SSEEvent{Terminal: &agent.RunTerminal{Status: agent.RunStatusDone}}
+	hubEvents <- agent.SSEEvent{Type: agent.EventTrace, Data: domain.EvaluationTrace{Node: "retrieval_assemble"}}
+	terminal := &agent.RunTerminal{Status: agent.RunStatusDone, Answer: "answer"}
+	hubEvents <- agent.SSEEvent{Type: agent.EventRunFinished, Data: terminal}
 	var names []string
 	handler := &Handler{}
-	_, terminal := handler.streamAgentEvents(&agent.AskResult{RunID: "run"}, hubEvents, "", func(name, _ string) {
-		names = append(names, name)
-	}, httptest.NewRequest("GET", "/", nil))
-	if terminal == nil || terminal.Status != agent.RunStatusDone || len(names) != 3 || names[0] != "trace" || names[1] != "run_end" || names[2] != "done" {
-		t.Fatalf("terminal=%+v events=%v", terminal, names)
+	got := handler.streamAgentEvents(hubEvents, func(name, _ string) { names = append(names, name) }, httptest.NewRequest("GET", "/", nil))
+	if got != terminal || len(names) != 2 || names[0] != "trace" || names[1] != "run.finished" {
+		t.Fatalf("terminal=%+v events=%v", got, names)
 	}
 }
 
-func TestEmitHubEventWritesLLMTimingSSE(t *testing.T) {
+func TestEmitHubEventForwardsTaggedEvent(t *testing.T) {
 	var eventName, data string
 	timing := llm.CallLifecycle{CallSeq: 2, Phase: llm.PhaseAgentStep, Status: llm.CallLifecycleFinished, DurationMs: 1200}
-	emitHubEvent("", agent.SSEEvent{LLMCall: &timing}, "run", func(name, value string) {
+	emitHubEvent(agent.SSEEvent{Type: agent.EventLLMCall, Data: timing}, func(name, value string) {
 		eventName, data = name, value
 	})
-	if eventName != "llm_timing" || !strings.Contains(data, `"call_seq":2`) {
+	if eventName != "llm.call" || !strings.Contains(data, `"call_seq":2`) {
 		t.Fatalf("event=%q data=%q", eventName, data)
 	}
 }
 
-func TestEmitHubEventWritesToolResultSSE(t *testing.T) {
+func TestEmitHubEventUsesToolSummary(t *testing.T) {
 	var eventName, data string
-	step := agent.StepRecord{StepNo: 4, Kind: agent.StepKindToolResult, Tool: "observe_logs", Failed: true, DurationMs: 1543}
-	emitHubEvent("", agent.SSEEvent{Step: &step}, "run", func(name, value string) {
+	payload := agent.ToolFinishedEvent{Step: 4, Tool: "observe_logs", Summary: "matched logs", Failed: true, DurationMs: 1543}
+	emitHubEvent(agent.SSEEvent{Type: agent.EventToolFinished, Data: payload}, func(name, value string) {
 		eventName, data = name, value
 	})
-	if eventName != "tool_result" || !strings.Contains(data, `"duration_ms":1543`) || !strings.Contains(data, `"failed":true`) {
+	if eventName != "tool.finished" || !strings.Contains(data, `"summary":"matched logs"`) || !strings.Contains(data, `"failed":true`) {
 		t.Fatalf("event=%q data=%q", eventName, data)
 	}
 }
 
-func TestEmitHubEventWritesEvidenceMetricsSSE(t *testing.T) {
-	var runEndData string
-	terminal := agent.RunTerminal{
-		Status: agent.RunStatusDone,
-		Evidence: agent.EvidenceMetrics{
-			Status: agent.EvidencePartial, ForcedConclusion: true,
-			ToolCallCount: 3, ResultCount: 2, ToolFailureCount: 1,
-			PartialResultCount: 1, OmittedItemCount: 4,
-		},
-	}
-	emitHubEvent("answer", agent.SSEEvent{Terminal: &terminal}, "run", func(name, data string) {
-		if name == "run_end" {
-			runEndData = data
-		}
-	})
-	for _, want := range []string{
-		`"status":"partial"`, `"forced_conclusion":true`, `"tool_call_count":3`,
-		`"result_count":2`, `"tool_failure_count":1`, `"partial_result_count":1`,
-		`"omitted_item_count":4`,
-	} {
-		if !strings.Contains(runEndData, want) {
-			t.Fatalf("run_end data %q missing %q", runEndData, want)
-		}
-	}
-}
-
-func TestEmitHubEventWritesTraceSSE(t *testing.T) {
-	var eventName, data string
-	event := domain.EvaluationTrace{Sequence: 1, Node: "vector_search", Status: "completed"}
-	emitHubEvent("", agent.SSEEvent{Trace: &event}, "run", func(name, value string) {
-		eventName, data = name, value
-	})
-	if eventName != "trace" || data == "" {
-		t.Fatalf("event=%q data=%q", eventName, data)
-	}
-}
-
-func TestEmitHubEventNonSuccessDoesNotEmitDone(t *testing.T) {
-	for _, terminal := range []agent.RunTerminal{
-		{Status: agent.RunStatusFailed, Error: "provider failed"},
-		{Status: agent.RunStatusAborted},
-	} {
+func TestRunFinishedIsTheOnlyTerminalEvent(t *testing.T) {
+	for _, status := range []agent.RunStatus{agent.RunStatusDone, agent.RunStatusFailed, agent.RunStatusAborted} {
 		var names []string
-		emitHubEvent("partial", agent.SSEEvent{Terminal: &terminal}, "run", func(name, _ string) {
+		emitHubEvent(agent.SSEEvent{Type: agent.EventRunFinished, Data: &agent.RunTerminal{Status: status}}, func(name, _ string) {
 			names = append(names, name)
 		})
-		if len(names) != 2 || names[0] != "run_end" || names[1] != "error" {
-			t.Fatalf("status=%s events=%v, want run_end,error", terminal.Status, names)
+		if len(names) != 1 || names[0] != "run.finished" {
+			t.Fatalf("status=%s events=%v", status, names)
 		}
 	}
 }

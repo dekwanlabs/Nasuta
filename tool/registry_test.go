@@ -25,31 +25,6 @@ func TestRegisterAllIsAtomic(t *testing.T) {
 	}
 }
 
-func TestSnapshotPinsReplacedHandler(t *testing.T) {
-	registry := NewRegistry()
-	if err := registry.Register(testTool("versioned", "v1")); err != nil {
-		t.Fatal(err)
-	}
-	old := registry.Snapshot(ReadPolicy())
-	if err := registry.Replace(testTool("versioned", "v2")); err != nil {
-		t.Fatal(err)
-	}
-	current := registry.Snapshot(ReadPolicy())
-	executor := NewExecutor(0)
-
-	oldResult, err := executor.Execute(context.Background(), old, "versioned", Arguments{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	currentResult, err := executor.Execute(context.Background(), current, "versioned", Arguments{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if oldResult.Content != "v1" || currentResult.Content != "v2" {
-		t.Fatalf("snapshot results = %q, %q", oldResult.Content, currentResult.Content)
-	}
-}
-
 func TestInvalidSchemaRejectsWholeBatch(t *testing.T) {
 	registry := NewRegistry()
 	valid := testTool("valid", "ok")
@@ -280,12 +255,6 @@ func TestCandidateToolsAreDerivedFromCurrentSnapshot(t *testing.T) {
 	}
 	if got := registry.Snapshot(ReadPolicy()).CandidateTools(ReferenceRunbook); len(got) != 1 || got[0] != "runbook_reader" {
 		t.Fatalf("candidate tools = %v", got)
-	}
-	if err := registry.Unregister("runbook_reader"); err != nil {
-		t.Fatal(err)
-	}
-	if got := registry.Snapshot(ReadPolicy()).CandidateTools(ReferenceRunbook); len(got) != 0 {
-		t.Fatalf("removed tool remained a candidate: %v", got)
 	}
 }
 

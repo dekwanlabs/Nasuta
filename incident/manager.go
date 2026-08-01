@@ -142,7 +142,7 @@ func (manager *Manager) List(ctx context.Context) ([]Incident, error) {
 	rows, err := manager.db.QueryContext(ctx, `
 SELECT id,dedup_key,created_at,updated_at,status,source,alert_title,affected_svcs_json,
        root_cause,solution,assigned_to,fix_branches_json,fix_started_at,fixed_at
-FROM `+incidentTable+` ORDER BY created_unix DESC LIMIT 200`)
+FROM `+incidentTable+` ORDER BY created_at DESC, id DESC LIMIT 200`)
 	if err != nil {
 		return nil, fmt.Errorf("list incidents: %w", err)
 	}
@@ -193,7 +193,7 @@ func (manager *Manager) findOpenDedup(ctx context.Context, key string) (*Inciden
 	row := manager.db.QueryRowContext(ctx, `
 SELECT id FROM `+incidentTable+`
 WHERE dedup_key=? AND status NOT IN ('fixed','closed')
-ORDER BY created_unix DESC LIMIT 1`, key)
+ORDER BY created_at DESC, id DESC LIMIT 1`, key)
 	var id string
 	if err := row.Scan(&id); err != nil {
 		if err == sql.ErrNoRows {
@@ -273,25 +273,25 @@ func (manager *Manager) save(ctx context.Context, inc *Incident) error {
 	fixedAt := timeStringPtr(inc.FixedAt)
 	_, err := manager.db.ExecContext(ctx, `
 INSERT INTO `+incidentTable+`(id,dedup_key,created_at,updated_at,status,source,alert_title,alert_payload_json,error_logs_json,traces_json,
-  affected_svcs_json,root_cause,solution,analysis_doc,assigned_to,fix_branches_json,fix_started_at,fixed_at,created_unix,updated_unix)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  affected_svcs_json,root_cause,solution,analysis_doc,assigned_to,fix_branches_json,fix_started_at,fixed_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON DUPLICATE KEY UPDATE
   dedup_key=VALUES(dedup_key),updated_at=VALUES(updated_at),status=VALUES(status),source=VALUES(source),alert_title=VALUES(alert_title),
   alert_payload_json=VALUES(alert_payload_json),error_logs_json=VALUES(error_logs_json),traces_json=VALUES(traces_json),
   affected_svcs_json=VALUES(affected_svcs_json),root_cause=VALUES(root_cause),solution=VALUES(solution),
   analysis_doc=VALUES(analysis_doc),assigned_to=VALUES(assigned_to),fix_branches_json=VALUES(fix_branches_json),
-  fix_started_at=VALUES(fix_started_at),fixed_at=VALUES(fixed_at),updated_unix=VALUES(updated_unix)`,
+  fix_started_at=VALUES(fix_started_at),fixed_at=VALUES(fixed_at)`,
 		inc.ID, inc.DedupKey, inc.CreatedAt, inc.UpdatedAt, inc.Status, inc.Source,
 		inc.AlertTitle, payload, logs, traces, svcs, inc.RootCause, inc.Solution, inc.AnalysisDoc, inc.AssignedTo,
-		branches, fixStarted, fixedAt, inc.CreatedAt.Unix(), inc.UpdatedAt.Unix())
+		branches, fixStarted, fixedAt)
 	return err
 }
 
 func (manager *Manager) SaveErrorLogs(ctx context.Context, inc *Incident) error {
 	logsJSON := mustJSON(inc.ErrorLogs)
 	_, err := manager.db.ExecContext(ctx,
-		`UPDATE `+incidentTable+` SET error_logs_json = ?, updated_unix = ? WHERE id = ?`,
-		logsJSON, time.Now().Unix(), inc.ID)
+		`UPDATE `+incidentTable+` SET error_logs_json = ?, updated_at = ? WHERE id = ?`,
+		logsJSON, time.Now(), inc.ID)
 	return err
 }
 

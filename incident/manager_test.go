@@ -19,7 +19,7 @@ func TestListUsesOneSummaryQuery(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(`
 SELECT id,dedup_key,created_at,updated_at,status,source,alert_title,affected_svcs_json,
        root_cause,solution,assigned_to,fix_branches_json,fix_started_at,fixed_at
-FROM incident_records ORDER BY created_unix DESC LIMIT 200`)).
+FROM incident_records ORDER BY created_at DESC, id DESC LIMIT 200`)).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "dedup_key", "created_at", "updated_at", "status", "source", "alert_title",
 			"affected_svcs_json", "root_cause", "solution", "assigned_to", "fix_branches_json", "fix_started_at", "fixed_at",

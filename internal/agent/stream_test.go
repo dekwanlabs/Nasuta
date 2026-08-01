@@ -22,7 +22,7 @@ func drainHub(ch chan SSEEvent, timeout time.Duration) []SSEEvent {
 				return got
 			}
 			got = append(got, ev)
-			if ev.Terminal != nil {
+			if ev.Type == EventRunFinished {
 				return got
 			}
 		case <-deadline:
@@ -37,7 +37,8 @@ func TestHub_BroadcastsEvaluationTrace(t *testing.T) {
 	hub.EmitTrace("trace-run", domain.EvaluationTrace{Sequence: 1, Node: "evidence_plan", Status: "completed"})
 	select {
 	case event := <-ch:
-		if event.Trace == nil || event.Trace.Node != "evidence_plan" {
+		trace, ok := event.Data.(domain.EvaluationTrace)
+		if event.Type != EventTrace || !ok || trace.Node != "evidence_plan" {
 			t.Fatalf("event = %#v", event)
 		}
 	case <-time.After(time.Second):
@@ -69,20 +70,19 @@ func TestHub_BroadcastDeliversToSubscriber(t *testing.T) {
 
 	ch := h.Subscribe("r1")
 	h.OnToken(context.Background(), "r1", "hello")
-	h.OnStep(context.Background(), "r1", StepRecord{StepNo: 1, Tool: "probe"})
+	h.OnStep(context.Background(), "r1", StepRecord{StepNo: 1, Kind: StepKindToolCall, Tool: "probe"})
 
 	got := drainHub(ch, time.Second)
 	if len(got) < 2 {
 		t.Fatalf("expected at least 2 events, got %d (%+v)", len(got), got)
 	}
-	if got[0].Token != "hello" {
-		t.Errorf("first event token = %q, want %q", got[0].Token, "hello")
+	text, ok := got[0].Data.(TextEvent)
+	if got[0].Type != EventAnswerDelta || !ok || text.Text != "hello" {
+		t.Errorf("first event = %+v, want answer delta", got[0])
 	}
-	if got[1].Step == nil || got[1].Step.Tool != "probe" {
-		t.Errorf("second event step = %+v, want tool=probe", got[1].Step)
-	}
-	if got[1].Step != nil && got[1].Step.CreatedAt.IsZero() {
-		t.Error("step timestamp was not defaulted")
+	tool, ok := got[1].Data.(ToolStartedEvent)
+	if got[1].Type != EventToolStarted || !ok || tool.Name != "probe" {
+		t.Errorf("second event = %+v, want tool=probe", got[1])
 	}
 }
 
@@ -194,11 +194,12 @@ func TestHub_CompletePublishesOneTerminalEvent(t *testing.T) {
 
 	select {
 	case event := <-ch:
-		if event.Terminal == nil || event.Terminal.Status != RunStatusDone {
+		terminal := TerminalFromEvent(event)
+		if terminal == nil || terminal.Status != RunStatusDone || terminal.Answer != "answer" {
 			t.Fatalf("event = %+v, want done terminal", event)
 		}
-		if len(event.Terminal.SessionMessages) != 1 || event.Terminal.SessionMessages[0].ToolCallID != "call-1" {
-			t.Fatalf("terminal lost session tool messages: %+v", event.Terminal)
+		if len(terminal.SessionMessages) != 1 || terminal.SessionMessages[0].ToolCallID != "call-1" {
+			t.Fatalf("terminal lost session tool messages: %+v", terminal)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("missing terminal event")
@@ -207,6 +208,26 @@ func TestHub_CompletePublishesOneTerminalEvent(t *testing.T) {
 	case event := <-ch:
 		t.Fatalf("duplicate terminal event: %+v", event)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestHub_CompletePreservesTerminalWhenSubscriberBufferIsFull(t *testing.T) {
+	hub := NewRunHub(nil)
+	const runID = "full-buffer"
+	ch := hub.Subscribe(runID)
+	for i := 0; i < cap(ch); i++ {
+		ch <- SSEEvent{Type: EventTrace}
+	}
+	hub.Complete(runID, RunOutcome{Status: RunStatusDone, Answer: "answer"})
+
+	var terminal *RunTerminal
+	for i := 0; i < cap(ch); i++ {
+		if eventTerminal := TerminalFromEvent(<-ch); eventTerminal != nil {
+			terminal = eventTerminal
+		}
+	}
+	if terminal == nil || terminal.Answer != "answer" {
+		t.Fatalf("terminal = %+v", terminal)
 	}
 }
 
@@ -292,17 +313,15 @@ func TestHubBroadcastsOnlyTemporaryPreviewForToolResults(t *testing.T) {
 
 	select {
 	case event := <-channel:
-		if event.Step == nil {
+		payload, ok := event.Data.(ToolFinishedEvent)
+		if event.Type != EventToolFinished || !ok {
 			t.Fatalf("event = %+v", event)
 		}
-		if event.Step.Content != "" || event.Step.PromptContent != "" {
-			t.Fatalf("SSE carried authoritative payload: %+v", event.Step)
+		if payload.Summary == "" || !strings.HasPrefix(content, strings.TrimSuffix(payload.Summary, "...")) {
+			t.Fatalf("summary = %q", payload.Summary)
 		}
-		if event.Step.ResultPreview == "" || !strings.HasPrefix(content, strings.TrimSuffix(event.Step.ResultPreview, "...")) {
-			t.Fatalf("preview = %q", event.Step.ResultPreview)
-		}
-		if event.Step.SizeBytes != int64(len(content)) {
-			t.Fatalf("size bytes = %d", event.Step.SizeBytes)
+		if payload.SizeBytes != int64(len(content)) {
+			t.Fatalf("size bytes = %d", payload.SizeBytes)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("missing tool result event")

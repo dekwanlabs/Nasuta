@@ -184,7 +184,12 @@ func (handler *Handler) ServiceLookup(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	httputil.WriteJSON(w, handler.tools.ServiceLookup(r.Context(), query, limit))
+	result, err := handler.tools.ServiceLookupResult(r.Context(), query, limit)
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
 }
 
 func (handler *Handler) CodeSearch(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +201,12 @@ func (handler *Handler) CodeSearch(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	httputil.WriteJSON(w, handler.tools.CodeSearch(r.Context(), query, lang, limit))
+	result, err := handler.tools.CodeSearchResult(r.Context(), query, lang, limit)
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
 }
 
 func (handler *Handler) RunbookSearch(w http.ResponseWriter, r *http.Request) {
@@ -208,9 +218,14 @@ func (handler *Handler) RunbookSearch(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	httputil.WriteJSON(w, handler.tools.RunbookSearch(r.Context(), knowledge.RunbookQuery{
+	result, err := handler.tools.RunbookSearchResult(r.Context(), knowledge.RunbookQuery{
 		Query: query, DocID: docID, Limit: limit,
-	}))
+	})
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
 }
 
 func (handler *Handler) TraceDeps(w http.ResponseWriter, r *http.Request) {
@@ -245,15 +260,30 @@ func (handler *Handler) ListApis(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	httputil.WriteJSON(w, handler.tools.ListApis(r.Context(), service, keyword, limit))
+	result, err := handler.tools.ListApisResult(r.Context(), service, keyword, limit)
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
 }
 
 func (handler *Handler) DocGapCheck(w http.ResponseWriter, r *http.Request) {
-	httputil.WriteJSON(w, handler.tools.DocGapCheck(r.Context(), httputil.Query(r).Str("service")))
+	result, err := handler.tools.DocGapCheckResult(r.Context(), httputil.Query(r).Str("service"))
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
 }
 
 func (handler *Handler) IndexSummary(w http.ResponseWriter, r *http.Request) {
-	httputil.WriteJSON(w, handler.tools.IndexSummary(r.Context()))
+	result, err := handler.tools.IndexSummaryResult(r.Context())
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
 }
 
 func (handler *Handler) GetSymbol(w http.ResponseWriter, r *http.Request) {
@@ -266,7 +296,12 @@ func (handler *Handler) GetSymbol(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	httputil.WriteJSON(w, handler.tools.GetSymbolFiltered(r.Context(), query, file, qualifiedName, limit))
+	result, err := handler.tools.GetSymbolResult(r.Context(), query, file, qualifiedName, limit)
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
 }
 
 func (handler *Handler) TraceCalls(w http.ResponseWriter, r *http.Request) {
@@ -280,7 +315,12 @@ func (handler *Handler) TraceCalls(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	httputil.WriteJSON(w, handler.tools.TraceCalls(r.Context(), request))
+	result, err := handler.tools.TraceCallsResult(r.Context(), request)
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
 }
 
 func (handler *Handler) APICodeGraphEndpoint(w http.ResponseWriter, r *http.Request) {

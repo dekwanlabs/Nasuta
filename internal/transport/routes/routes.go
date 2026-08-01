@@ -3,6 +3,7 @@ package routes
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/auth"
@@ -26,8 +27,58 @@ func TraceMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := log.WithTraceID(r.Context(), log.GenerateTraceID())
 		r = r.WithContext(ctx)
-		next.ServeHTTP(w, r)
+		response := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
+		started := time.Now()
+		next.ServeHTTP(response, r)
+
+		if response.status < http.StatusBadRequest {
+			return
+		}
+		message := "http request failed method=%s path=%s status=%d duration=%s"
+		args := []any{r.Method, r.URL.Path, response.status, time.Since(started)}
+		if response.err != nil {
+			message += " error=%v"
+			args = append(args, response.err)
+		}
+		if response.status >= http.StatusInternalServerError {
+			log.ErrorfCtx(ctx, message, args...)
+			return
+		}
+		log.WarnfCtx(ctx, message, args...)
 	})
+}
+
+type responseRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+	err         error
+}
+
+func (w *responseRecorder) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseRecorder) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *responseRecorder) Flush() {
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *responseRecorder) RecordHTTPError(err error) {
+	if w.err == nil {
+		w.err = err
+	}
 }
 
 func bearerAuth(token string, next http.Handler) http.Handler {
