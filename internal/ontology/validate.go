@@ -128,7 +128,9 @@ func validateEvidence(evidence Evidence) error {
 	if evidence.Line < 0 {
 		return fmt.Errorf("negative evidence line %d", evidence.Line)
 	}
-	if evidence.Source != EvidenceSourceDoc && evidence.Source != EvidenceSourceCodeScan {
+	if evidence.Source != EvidenceSourceDoc &&
+		evidence.Source != EvidenceSourceCodeScan &&
+		evidence.Source != EvidenceSourceConfig {
 		return fmt.Errorf("unsupported evidence source %q", evidence.Source)
 	}
 	return nil

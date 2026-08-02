@@ -114,10 +114,10 @@ func entrypointService(root, rel, moduleRoot string) domain.ServiceRecord {
 	}
 }
 
-// scanFeignClients finds @FeignClient declarations -> caller/target edges.
-func scanFeignClients(root string, dirs []string) []domain.DependencyEdge {
+// scanFeignClients preserves Feign configuration until dependency resolution.
+func scanFeignClients(root string, dirs []string) []feignReference {
 	files := walkFiles(root, dirs, hasSuffix(".java"))
-	var records []domain.DependencyEdge
+	var records []feignReference
 	for _, file := range files {
 		text := readFile(file)
 		if !strings.Contains(text, "@FeignClient") {
@@ -132,21 +132,20 @@ func scanFeignClients(root string, dirs []string) []domain.DependencyEdge {
 				continue
 			}
 			annotation := collectAnnotation(lines, i)
-			target := extractAnnotationValue(annotation, "value", "name")
-			if target == "" {
-				target = extractFirstString(annotation)
+			clientName := extractAnnotationValue(annotation, "value", "name")
+			if clientName == "" {
+				clientName = extractFirstString(annotation)
 			}
-			if target == "" {
+			targetURL := extractAnnotationValue(annotation, "url")
+			if clientName == "" && targetURL == "" {
 				continue
 			}
 			conf := 0.9
 			if caller == "unknown" {
 				conf = 0.65
 			}
-			records = append(records, domain.DependencyEdge{
-				From: caller,
-				To:   target,
-				Type: domain.EdgeFeign,
+			records = append(records, feignReference{
+				From: caller, ClientName: clientName, URL: targetURL,
 				Evidence: []domain.Evidence{{
 					Path: rel, Line: i + 1, Symbol: iface, Kind: domain.SourceCodeScan,
 				}},

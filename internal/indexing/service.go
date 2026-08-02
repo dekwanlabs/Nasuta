@@ -49,6 +49,7 @@ type Service struct {
 	tools     ToolsSink
 	ScanDirs  []string
 	publisher ontology.Publisher
+	configs   config.Resolver
 
 	docDB       *store.DocStore
 	docStoreErr error
@@ -78,6 +79,11 @@ func (svc *Service) SetTools(t ToolsSink) {
 
 func (svc *Service) SetOntologyPublisher(publisher ontology.Publisher) {
 	svc.publisher = publisher
+}
+
+// SetConfigResolver connects application-owned configuration sources.
+func (svc *Service) SetConfigResolver(resolver config.Resolver) {
+	svc.configs = resolver
 }
 
 func (svc *Service) Close() {
@@ -1059,7 +1065,7 @@ func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 		return fmt.Errorf("load scan directories: %w", err)
 	}
 	log.Infof("[rebuild-sql] scanning %s (dirs: %v)", svc.Cfg.WorkspaceRoot, svc.ScanDirs)
-	bundle, err := svc.buildWorkspaceBundle()
+	bundle, err := svc.buildWorkspaceBundle(ctx)
 	if err != nil {
 		return err
 	}
@@ -1082,7 +1088,7 @@ func (svc *Service) RebuildSQLIndex(ctx context.Context) error {
 // Bootstrap rebuilds the workspace index end to end.
 func (svc *Service) Bootstrap(ctx context.Context) error {
 	log.Infof("[bootstrap] scanning %s (dirs: %v)", svc.Cfg.WorkspaceRoot, svc.ScanDirs)
-	bundle, err := svc.buildWorkspaceBundle()
+	bundle, err := svc.buildWorkspaceBundle(ctx)
 	if err != nil {
 		return err
 	}
@@ -1120,11 +1126,11 @@ func (svc *Service) Bootstrap(ctx context.Context) error {
 	return nil
 }
 
-func (svc *Service) buildWorkspaceBundle() (domain.IndexBundle, error) {
+func (svc *Service) buildWorkspaceBundle(ctx context.Context) (domain.IndexBundle, error) {
 	if svc.docStoreErr != nil {
 		return domain.IndexBundle{}, fmt.Errorf("document store unavailable: %w", svc.docStoreErr)
 	}
-	return indexer.BuildBundle(svc.Cfg.WorkspaceRoot, svc.ScanDirs, svc.docDB)
+	return indexer.BuildBundleWithResolver(ctx, svc.Cfg.WorkspaceRoot, svc.ScanDirs, svc.docDB, svc.configs)
 }
 
 func (svc *Service) publishWorkspace(ctx context.Context, bundle domain.IndexBundle) error {

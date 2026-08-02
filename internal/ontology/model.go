@@ -26,6 +26,7 @@ type EvidenceSource string
 const (
 	EvidenceSourceDoc      EvidenceSource = "doc"
 	EvidenceSourceCodeScan EvidenceSource = "code-scan"
+	EvidenceSourceConfig   EvidenceSource = "config"
 )
 
 type Entity struct {

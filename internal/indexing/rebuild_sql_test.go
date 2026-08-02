@@ -75,7 +75,7 @@ func TestBuildWorkspaceBundleRejectsConfiguredDocStoreFailure(t *testing.T) {
 		Cfg:         config.Config{WorkspaceRoot: t.TempDir()},
 		docStoreErr: errors.New("mysql unavailable"),
 	}
-	if _, err := svc.buildWorkspaceBundle(); err == nil || !strings.Contains(err.Error(), "mysql unavailable") {
+	if _, err := svc.buildWorkspaceBundle(context.Background()); err == nil || !strings.Contains(err.Error(), "mysql unavailable") {
 		t.Fatalf("buildWorkspaceBundle error = %v", err)
 	}
 }

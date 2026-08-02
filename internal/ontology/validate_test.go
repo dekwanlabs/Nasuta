@@ -24,7 +24,7 @@ func TestValidateSnapshotAcceptsStableServiceDependency(t *testing.T) {
 	fact := Fact{
 		SubjectID: service.ID, Predicate: PredicateDependsOn, ObjectID: target.ID,
 		Qualifiers: map[string]string{"protocol": "http"}, Confidence: 0.8,
-		Evidence: []Evidence{{Path: "repos/team/orders/config.yml", Line: 3, Source: EvidenceSourceCodeScan}},
+		Evidence: []Evidence{{Path: "repos/team/orders/config.yml", Line: 3, Source: EvidenceSourceConfig}},
 	}
 	fact.ID = FactID(fact.SubjectID, fact.Predicate, fact.ObjectID, fact.Qualifiers)
 

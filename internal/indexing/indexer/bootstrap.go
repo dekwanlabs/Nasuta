@@ -1,11 +1,13 @@
 package indexer
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/log"
@@ -14,6 +16,16 @@ import (
 
 // ScanCode runs every structural code scanner and publishes canonical records.
 func ScanCode(root string, dirs []string) domain.IndexBundle {
+	bundle, _ := scanCode(context.Background(), root, dirs, nil)
+	return bundle
+}
+
+func scanCode(
+	ctx context.Context,
+	root string,
+	dirs []string,
+	resolver config.Resolver,
+) (domain.IndexBundle, error) {
 	services := append(scanJavaServices(root, dirs), scanPythonServices(root, dirs)...)
 	services = append(services, scanGoServices(root, dirs)...)
 	services = append(services, scanKotlinServices(root, dirs)...)
@@ -28,7 +40,11 @@ func ScanCode(root string, dirs []string) domain.IndexBundle {
 	endpoints = append(endpoints, scanCSharpEndpoints(root, dirs)...)
 	endpoints = append(endpoints, scanNodeJSEndpoints(root, dirs)...)
 
-	deps := append(scanFeignClients(root, dirs), scanKotlinFeigns(root, dirs)...)
+	feignRefs := append(scanFeignClients(root, dirs), scanKotlinFeigns(root, dirs)...)
+	deps, err := resolveFeignDependencies(ctx, feignRefs, resolver)
+	if err != nil {
+		return domain.IndexBundle{}, err
+	}
 	deps = append(deps, scanCSharpRefits(root, dirs)...)
 	deps = append(deps, scanGoDependencies(root, dirs)...)
 	deps = append(deps, scanCSharpDependencies(root, dirs)...)
@@ -40,7 +56,7 @@ func ScanCode(root string, dirs []string) domain.IndexBundle {
 
 	return CanonicalizeBundle(domain.IndexBundle{
 		Services: services, Endpoints: endpoints, Dependencies: deps,
-	})
+	}), nil
 }
 
 // BuildStructuralBundle builds only the SQLite structural snapshot.
@@ -50,6 +66,17 @@ func BuildStructuralBundle(root string, dirs []string) domain.IndexBundle {
 
 // BuildBundle builds structural records and separately sourced runbook records.
 func BuildBundle(root string, dirs []string, docStore *store.DocStore) (domain.IndexBundle, error) {
+	return BuildBundleWithResolver(context.Background(), root, dirs, docStore, nil)
+}
+
+// BuildBundleWithResolver resolves external configuration before canonicalization.
+func BuildBundleWithResolver(
+	ctx context.Context,
+	root string,
+	dirs []string,
+	docStore *store.DocStore,
+	resolver config.Resolver,
+) (domain.IndexBundle, error) {
 	if err := ValidateScanInputs(root, dirs); err != nil {
 		return domain.IndexBundle{}, fmt.Errorf("validate scan inputs: %w", err)
 	}
@@ -63,7 +90,10 @@ func BuildBundle(root string, dirs []string, docStore *store.DocStore) (domain.I
 		}
 	}
 	log.Infof("[indexer] loaded %d KB docs from DocStore", len(runbooks))
-	code := ScanCode(root, dirs)
+	code, err := scanCode(ctx, root, dirs, resolver)
+	if err != nil {
+		return domain.IndexBundle{}, err
+	}
 	code.Dependencies = append(code.Dependencies, runbookEdges...)
 	code.Runbooks = runbooks
 	return CanonicalizeBundle(code), nil

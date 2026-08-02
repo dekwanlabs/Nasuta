@@ -68,7 +68,7 @@ func projectionFixture() domain.IndexBundle {
 	orders := domain.ServiceRecord{ServiceKey: "orders-key", ServiceName: "orders", Repo: "team/orders", ModulePath: ".", Language: "go", Confidence: 0.9}
 	payments := domain.ServiceRecord{ServiceKey: "payments-key", ServiceName: "payments", Repo: "team/payments", ModulePath: ".", Language: "go", Confidence: 0.9}
 	evidenceA := domain.Evidence{Path: "repos/team/orders/client.go", Line: 10, Kind: domain.SourceCodeScan}
-	evidenceB := domain.Evidence{Path: "repos/team/orders/retry.go", Line: 20, Kind: domain.SourceCodeScan}
+	evidenceB := domain.Evidence{Path: "config-center/na/application/orders/payments.url", Kind: domain.SourceConfig}
 	return domain.IndexBundle{
 		Repositories: []domain.RepositoryRecord{{Repo: "team/orders", HeadSHA: "a"}, {Repo: "team/payments", HeadSHA: "b"}},
 		Services:     []domain.ServiceRecord{orders, payments},

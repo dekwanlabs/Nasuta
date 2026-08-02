@@ -31,6 +31,7 @@ type Extension struct {
 	RegisterRoutes   func(APIRegistrar)
 	WebHandler       http.Handler
 	IncidentEvidence incident.EvidenceProvider
+	ConfigResolver   config.Resolver
 	Close            func() error
 }
 
@@ -53,6 +54,7 @@ func Run(ctx context.Context, factory ExtensionFactory) (runErr error) {
 		if err != nil {
 			return fmt.Errorf("build application extension: %w", err)
 		}
+		platform.index.SetConfigResolver(extension.ConfigResolver)
 		if extension.Close != nil {
 			defer func() {
 				runErr = errors.Join(runErr, extension.Close())

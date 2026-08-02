@@ -6,6 +6,7 @@ type SourceKind string
 const (
 	SourceDoc      SourceKind = "doc"
 	SourceCodeScan SourceKind = "code-scan"
+	SourceConfig   SourceKind = "config"
 )
 
 // Evidence points at a file (and optionally a line) backing a record.
