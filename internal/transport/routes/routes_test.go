@@ -2,6 +2,7 @@ package routes
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,87 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
+
+func TestBearerAuthAcceptsConfiguredTokenWithoutDatabaseLookup(t *testing.T) {
+	var keyAuthCalled bool
+	handler := bearerAuth("configured-token", func(context.Context, string) (bool, error) {
+		keyAuthCalled = true
+		return false, nil
+	}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer configured-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if keyAuthCalled {
+		t.Fatal("persisted key lookup ran for the configured token")
+	}
+}
+
+func TestBearerAuthAcceptsPersistedMCPKey(t *testing.T) {
+	handler := bearerAuth("", func(_ context.Context, candidate string) (bool, error) {
+		return candidate == "mcp-assigned-key", nil
+	}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer mcp-assigned-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestBearerAuthRejectsInvalidMCPKey(t *testing.T) {
+	handler := bearerAuth("", func(context.Context, string) (bool, error) {
+		return false, nil
+	}, http.NotFoundHandler())
+
+	request := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer invalid-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestBearerAuthSurfacesPersistedKeyBackendFailure(t *testing.T) {
+	handler := bearerAuth("", func(context.Context, string) (bool, error) {
+		return false, errors.New("database unavailable")
+	}, http.NotFoundHandler())
+
+	request := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer mcp-assigned-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestBearerAuthAllowsRequestsWhenNoAuthenticationIsConfigured(t *testing.T) {
+	handler := bearerAuth("", nil, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/mcp", nil))
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
 
 func TestCommonRoutesExcludeApplicationObserveEndpoints(t *testing.T) {
 	mux := http.NewServeMux()

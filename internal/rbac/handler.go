@@ -4,11 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
 type Handler struct {
@@ -242,9 +243,6 @@ func (h *Handler) ListMCPKeys(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteErr(w, err)
 		return
 	}
-	for i := range keys {
-		keys[i].APIKey = keys[i].APIKey[:12] + "..." // mask
-	}
 	writeJSON(w, keys)
 }
 
@@ -257,6 +255,11 @@ func (h *Handler) CreateMCPKey(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, "bad request")
 		return
 	}
+	body.KeyName = strings.TrimSpace(body.KeyName)
+	if body.KeyName == "" {
+		httputil.WriteBadRequest(w, "key name is required")
+		return
+	}
 	key := GenerateAPIKey()
 	if err := h.store.CreateMCPKey(userID, body.KeyName, key); err != nil {
 		httputil.WriteErr(w, err)
@@ -266,8 +269,9 @@ func (h *Handler) CreateMCPKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) RevokeMCPKey(w http.ResponseWriter, r *http.Request) {
-	keyID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err := h.store.RevokeMCPKey(keyID); err != nil {
+	userID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	keyID, _ := strconv.ParseInt(r.PathValue("keyID"), 10, 64)
+	if err := h.store.RevokeMCPKey(userID, keyID); err != nil {
 		httputil.WriteErr(w, err)
 		return
 	}

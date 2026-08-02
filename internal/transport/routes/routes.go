@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"context"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 	"time"
@@ -13,14 +15,17 @@ import (
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
+type MCPKeyAuthenticator func(context.Context, string) (bool, error)
+
 // Config contains only common platform transports.
 type Config struct {
-	Auth      *auth.Service
-	Dashboard *dashboard.Handler
-	RBAC      *rbac.Handler
-	MCP       http.Handler     // Streamable HTTP MCP server
-	VCS       http.HandlerFunc // VCS webhook handler
-	Cfg       config.Config
+	Auth       *auth.Service
+	Dashboard  *dashboard.Handler
+	RBAC       *rbac.Handler
+	MCP        http.Handler // Streamable HTTP MCP server
+	MCPKeyAuth MCPKeyAuthenticator
+	VCS        http.HandlerFunc // VCS webhook handler
+	Cfg        config.Config
 }
 
 func TraceMiddleware(next http.Handler) http.Handler {
@@ -81,16 +86,36 @@ func (w *responseRecorder) RecordHTTPError(err error) {
 	}
 }
 
-func bearerAuth(token string, next http.Handler) http.Handler {
+func bearerAuth(token string, keyAuth MCPKeyAuthenticator, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if token != "" {
-			authHeader := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authHeader, "Bearer ") || strings.TrimPrefix(authHeader, "Bearer ") != token {
-				httputil.WriteUnauthorized(w, "invalid or missing bearer token")
+		if token == "" && keyAuth == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			httputil.WriteUnauthorized(w, "invalid or missing bearer token")
+			return
+		}
+		candidate := strings.TrimPrefix(authHeader, "Bearer ")
+		if token != "" && subtle.ConstantTimeCompare([]byte(candidate), []byte(token)) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if keyAuth != nil {
+			valid, err := keyAuth(r.Context(), candidate)
+			if err != nil {
+				log.ErrorfCtx(r.Context(), "authenticate MCP key: %v", err)
+				httputil.WriteServiceUnavailable(w, "MCP authentication unavailable")
+				return
+			}
+			if valid {
+				next.ServeHTTP(w, r)
 				return
 			}
 		}
-		next.ServeHTTP(w, r)
+		httputil.WriteUnauthorized(w, "invalid or missing bearer token")
 	})
 }
 
@@ -111,7 +136,7 @@ func Setup(mux *http.ServeMux, rc Config) {
 		pub("/auth/me", authDisabled("auth not configured"))
 	}
 
-	mux.Handle("/mcp", bearerAuth(rc.Cfg.AuthToken, rc.MCP))
+	mux.Handle("/mcp", bearerAuth(rc.Cfg.AuthToken, rc.MCPKeyAuth, rc.MCP))
 	pub("/internal/vcs-hook", rc.VCS)
 	pub("/healthz", healthz)
 

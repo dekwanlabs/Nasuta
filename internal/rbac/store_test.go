@@ -1,10 +1,83 @@
 package rbac
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestListMCPKeysReturnsOnlyPreview(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	createdAt := time.Now()
+	mock.ExpectQuery(`SELECT id, user_id, key_name, CONCAT\(LEFT\(api_key, 12\), '\.\.\.'\), is_active, created_at, expires_at`).
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "user_id", "key_name", "key_preview", "is_active", "created_at", "expires_at",
+		}).AddRow(7, 42, "local-agent", "mcp-abcdefgh...", 1, createdAt, nil))
+
+	store := &Store{db: db}
+	keys, err := store.ListMCPKeys(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0].KeyPreview != "mcp-abcdefgh..." {
+		t.Fatalf("keys = %#v", keys)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAuthenticateMCPKeyUsesActiveUnexpiredRecord(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`(?s)SELECT EXISTS\(.*WHERE api_key=\?.*AND is_active=1.*expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP.*LIMIT 1`).
+		WithArgs("mcp-assigned-key").
+		WillReturnRows(sqlmock.NewRows([]string{"valid"}).AddRow(1))
+
+	store := &Store{db: db}
+	valid, err := store.AuthenticateMCPKey(context.Background(), "mcp-assigned-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !valid {
+		t.Fatal("assigned MCP key was not accepted")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRevokeMCPKeyScopesUpdateToOwner(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec(`UPDATE rbac_mcp_keys SET is_active=0 WHERE id=\? AND user_id=\?`).
+		WithArgs(int64(7), int64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	store := &Store{db: db}
+	if err := store.RevokeMCPKey(42, 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestListUsersBatchesRoleHydration(t *testing.T) {
 	db, mock, err := sqlmock.New()

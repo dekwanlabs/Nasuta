@@ -52,6 +52,7 @@ type Platform struct {
 	authDB          *auth.DB
 	authService     *auth.Service
 	rbacHandler     *rbac.Handler
+	mcpKeyAuth      routes.MCPKeyAuthenticator
 	rolePrompt      func(int64) string
 	incidents       *incident.Manager
 	actions         *approval.Service
@@ -203,9 +204,13 @@ func (platform *Platform) initRBAC() {
 	store, err := rbac.NewStore(platform.platformDB)
 	if err != nil {
 		log.Warnf("[server] RBAC store init failed: %v", err)
+		platform.mcpKeyAuth = func(context.Context, string) (bool, error) {
+			return false, fmt.Errorf("RBAC store unavailable: %w", err)
+		}
 		return
 	}
 	platform.rbacHandler = rbac.NewHandler(store)
+	platform.mcpKeyAuth = store.AuthenticateMCPKey
 	platform.rolePrompt = store.RolePromptFor
 	log.Infof("[server] RBAC enabled")
 }
@@ -290,9 +295,10 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	dashboardHandler.SetFeatureDeliveryStatus(platform.featureDelivery.status)
 	routes.Setup(mux, routes.Config{
 		Auth: platform.authService, Dashboard: dashboardHandler, RBAC: platform.rbacHandler,
-		MCP: mcp.NewDynamicHandler(platform.registry),
-		VCS: webhook.VCSHandler(platform.index, platform.settings.VCSWebhookSecret),
-		Cfg: platform.cfg,
+		MCP:        mcp.NewDynamicHandler(platform.registry),
+		MCPKeyAuth: platform.mcpKeyAuth,
+		VCS:        webhook.VCSHandler(platform.index, platform.settings.VCSWebhookSecret),
+		Cfg:        platform.cfg,
 	})
 	if platform.incidentAPI != nil {
 		platform.incidentAPI.RegisterRoutes(platform.AuthenticatedAPI(mux))
@@ -315,8 +321,8 @@ func (platform *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 		go platform.history.Run(ctx)
 	}
 	log.Infof("[server] listening on %s (MCP: /mcp, webhook: /internal/vcs-hook, api: /api)", platform.cfg.HTTPAddr)
-	if platform.cfg.AuthToken == "" {
-		log.Warnf("[server] WARNING: no NASUTA_AUTH_TOKEN set, /mcp is unauthenticated")
+	if platform.cfg.AuthToken == "" && platform.mcpKeyAuth == nil {
+		log.Warnf("[server] WARNING: no MCP authentication configured, /mcp is unauthenticated")
 	}
 	if err := http.ListenAndServe(platform.cfg.HTTPAddr, routes.TraceMiddleware(mux)); err != nil {
 		return fmt.Errorf("http server: %w", err)

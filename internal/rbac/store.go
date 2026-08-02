@@ -1,6 +1,7 @@
 package rbac
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -339,13 +340,13 @@ func scanMenus(rows *sql.Rows) ([]Menu, error) {
 // MCP Keys
 
 type MCPKey struct {
-	ID        int64      `json:"id"`
-	UserID    int64      `json:"user_id"`
-	KeyName   string     `json:"key_name"`
-	APIKey    string     `json:"api_key"`
-	IsActive  bool       `json:"is_active"`
-	CreatedAt time.Time  `json:"created_at"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	ID         int64      `json:"id"`
+	UserID     int64      `json:"user_id"`
+	KeyName    string     `json:"key_name"`
+	KeyPreview string     `json:"key_preview"`
+	IsActive   bool       `json:"is_active"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 }
 
 func (s *Store) CreateMCPKey(userID int64, keyName, apiKey string) error {
@@ -353,14 +354,15 @@ func (s *Store) CreateMCPKey(userID int64, keyName, apiKey string) error {
 	return err
 }
 
-func (s *Store) RevokeMCPKey(id int64) error {
-	_, err := s.db.Exec(`UPDATE rbac_mcp_keys SET is_active=0 WHERE id=?`, id)
+func (s *Store) RevokeMCPKey(userID, keyID int64) error {
+	_, err := s.db.Exec(`UPDATE rbac_mcp_keys SET is_active=0 WHERE id=? AND user_id=?`, keyID, userID)
 	return err
 }
 
 func (s *Store) ListMCPKeys(userID int64) ([]MCPKey, error) {
 	rows, err := s.db.Query(
-		`SELECT id, user_id, key_name, api_key, is_active, created_at, expires_at FROM rbac_mcp_keys WHERE user_id=? ORDER BY created_at DESC`, userID)
+		`SELECT id, user_id, key_name, CONCAT(LEFT(api_key, 12), '...'), is_active, created_at, expires_at
+		 FROM rbac_mcp_keys WHERE user_id=? ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +372,7 @@ func (s *Store) ListMCPKeys(userID int64) ([]MCPKey, error) {
 		var k MCPKey
 		var active int
 		var exp sql.NullTime
-		if err := rows.Scan(&k.ID, &k.UserID, &k.KeyName, &k.APIKey, &active, &k.CreatedAt, &exp); err != nil {
+		if err := rows.Scan(&k.ID, &k.UserID, &k.KeyName, &k.KeyPreview, &active, &k.CreatedAt, &exp); err != nil {
 			return nil, err
 		}
 		k.IsActive = active == 1
@@ -380,4 +382,23 @@ func (s *Store) ListMCPKeys(userID int64) ([]MCPKey, error) {
 		out = append(out, k)
 	}
 	return out, nil
+}
+
+// AuthenticateMCPKey checks the persisted lifecycle state at request time so
+// revocation and expiry take effect without restarting the server.
+func (s *Store) AuthenticateMCPKey(ctx context.Context, apiKey string) (bool, error) {
+	var valid bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM rbac_mcp_keys
+			WHERE api_key=?
+			  AND is_active=1
+			  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+			LIMIT 1
+		)`, apiKey).Scan(&valid)
+	if err != nil {
+		return false, fmt.Errorf("authenticate MCP key: %w", err)
+	}
+	return valid, nil
 }
