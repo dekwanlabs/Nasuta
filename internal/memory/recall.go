@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 )
 
@@ -86,7 +87,14 @@ func (memory *MemoryStore) RecallWithIntent(ctx context.Context, userID int64, q
 	if intent == TemporalCurrent {
 		filter.Keywords["status"] = string(StatusActive)
 	}
-	hits, err := memory.semantic.Search(ctx, semantic.Query{DenseVector: vecs[0], Filter: filter, Limit: limit * 6})
+	searchQuery := semantic.Query{DenseVector: vecs[0], Filter: filter, Limit: limit * 6}
+	if memory.bm25 != nil {
+		indices, values := retrieval.SparseToSorted(memory.bm25.QuerySparse(query))
+		if len(indices) > 0 {
+			searchQuery.SparseVector = &semantic.SparseVector{Indices: indices, Values: values}
+		}
+	}
+	hits, err := memory.semantic.Search(ctx, searchQuery)
 	if err != nil {
 		return result, fmt.Errorf("memory: search candidates: %w", err)
 	}

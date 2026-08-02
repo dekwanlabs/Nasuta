@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -20,11 +22,15 @@ type LongTermRecord = MemoryRecord
 const memorySelectColumns = `id,user_id,fact_key,kind,content,source_type,authority,status,
 	superseded_by,source_session,confidence,expires_at,created_at,updated_at,last_used,use_count`
 
+const memoryBM25RebuildBatch = 64
+
 // MemoryStore keeps durable state in MySQL and candidates in the selected semantic store.
 type MemoryStore struct {
 	db             *sql.DB
 	semantic       semantic.Store
 	embedder       embed.Embedder
+	bm25           *retrieval.BM25Builder
+	bm25VocabPath  string
 	workContextTTL time.Duration
 	now            func() time.Time
 }
@@ -51,6 +57,33 @@ func newMemoryStore(db *sql.DB, semantic semantic.Store, embedder embed.Embedder
 func (memory *MemoryStore) Enabled() bool {
 	return memory.semantic != nil && memory.semantic.Capabilities().Dense &&
 		memory.embedder != nil && memory.embedder.Enabled()
+}
+
+// EnableBM25 binds sparse coordinates to the dedicated memory collection.
+func (memory *MemoryStore) EnableBM25(ctx context.Context, vocabPath string) error {
+	if vocabPath == "" {
+		return fmt.Errorf("memory BM25: vocabulary path is required")
+	}
+	builder, err := retrieval.LoadVocab(vocabPath)
+	if err == nil {
+		memory.bm25 = builder
+		memory.bm25VocabPath = vocabPath
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("memory BM25: load vocabulary %q: %w", vocabPath, err)
+	}
+
+	builder = retrieval.NewBM25Builder()
+	if err := memory.rebuildVectors(ctx, builder, memoryBM25RebuildBatch); err != nil {
+		return fmt.Errorf("memory BM25: rebuild existing memories: %w", err)
+	}
+	if err := builder.SaveVocab(vocabPath); err != nil {
+		return fmt.Errorf("memory BM25: save vocabulary %q: %w", vocabPath, err)
+	}
+	memory.bm25 = builder
+	memory.bm25VocabPath = vocabPath
+	return nil
 }
 
 // Write applies authority-based replacement and then refreshes vector candidates.
@@ -244,7 +277,103 @@ func (memory *MemoryStore) vectorize(ctx context.Context, rec MemoryRecord) erro
 	if len(vecs) != 1 {
 		return fmt.Errorf("embed memory %q: expected one vector, got %d", rec.ID, len(vecs))
 	}
-	payload := map[string]any{
+	var sparse *semantic.SparseVector
+	if memory.bm25 != nil {
+		sparse = buildMemorySparse(memory.bm25, rec)
+		if err := memory.bm25.SaveVocab(memory.bm25VocabPath); err != nil {
+			return fmt.Errorf("save memory BM25 vocabulary %q: %w", memory.bm25VocabPath, err)
+		}
+	}
+	return memory.semantic.Upsert(ctx, []semantic.Record{
+		{ID: rec.ID, DenseVector: vecs[0], SparseVector: sparse, Metadata: memoryVectorPayload(rec)},
+	})
+}
+
+func (memory *MemoryStore) rebuildVectors(ctx context.Context, builder *retrieval.BM25Builder, batchSize int) error {
+	if !memory.Enabled() {
+		return fmt.Errorf("semantic recall unavailable")
+	}
+	if batchSize <= 0 {
+		return fmt.Errorf("batch size must be positive")
+	}
+	cursor := ""
+	for {
+		records, err := memory.loadVectorRecords(ctx, cursor, batchSize)
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
+			return nil
+		}
+		texts := make([]string, len(records))
+		for i := range records {
+			texts[i] = records[i].Content
+		}
+		vectors, err := memory.embedder.Embed(ctx, texts)
+		if err != nil {
+			return fmt.Errorf("embed batch after %q: %w", cursor, err)
+		}
+		if len(vectors) != len(records) {
+			return fmt.Errorf("embed batch after %q: got %d vectors for %d memories", cursor, len(vectors), len(records))
+		}
+		points := make([]semantic.Record, len(records))
+		for i := range records {
+			points[i] = semantic.Record{
+				ID:           records[i].ID,
+				DenseVector:  vectors[i],
+				SparseVector: buildMemorySparse(builder, records[i]),
+				Metadata:     memoryVectorPayload(records[i]),
+			}
+		}
+		if err := memory.semantic.Upsert(ctx, points); err != nil {
+			return fmt.Errorf("upsert batch after %q: %w", cursor, err)
+		}
+		cursor = records[len(records)-1].ID
+		if len(records) < batchSize {
+			return nil
+		}
+	}
+}
+
+func (memory *MemoryStore) loadVectorRecords(ctx context.Context, afterID string, limit int) ([]MemoryRecord, error) {
+	rows, err := memory.db.QueryContext(ctx,
+		`SELECT id,user_id,fact_key,content,source_type,status
+		 FROM qa_memories
+		 WHERE id>?
+		 ORDER BY id
+		 LIMIT ?`,
+		afterID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load vector records after %q: %w", afterID, err)
+	}
+	defer rows.Close()
+
+	records := make([]MemoryRecord, 0, limit)
+	for rows.Next() {
+		var rec MemoryRecord
+		if err := rows.Scan(&rec.ID, &rec.UserID, &rec.FactKey, &rec.Content, &rec.SourceType, &rec.Status); err != nil {
+			return nil, fmt.Errorf("scan vector record: %w", err)
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate vector records: %w", err)
+	}
+	return records, nil
+}
+
+func buildMemorySparse(builder *retrieval.BM25Builder, rec MemoryRecord) *semantic.SparseVector {
+	tokens := builder.AddDoc(rec.FactKey + "\n" + rec.Content)
+	indices, values := retrieval.SparseToSorted(builder.BuildSparse(tokens))
+	if len(indices) == 0 {
+		return nil
+	}
+	return &semantic.SparseVector{Indices: indices, Values: values}
+}
+
+func memoryVectorPayload(rec MemoryRecord) map[string]any {
+	return map[string]any{
 		"kind":        "memory",
 		"memory_id":   rec.ID,
 		"user_id":     rec.UserID,
@@ -252,9 +381,6 @@ func (memory *MemoryStore) vectorize(ctx context.Context, rec MemoryRecord) erro
 		"source_type": string(rec.SourceType),
 		"status":      string(rec.Status),
 	}
-	return memory.semantic.Upsert(ctx, []semantic.Record{
-		{ID: rec.ID, DenseVector: vecs[0], Metadata: payload},
-	})
 }
 
 func isDuplicateKey(err error) bool {

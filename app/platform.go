@@ -146,7 +146,7 @@ func buildSessionHistory(cfg config.Config, sessions *memory.SessionStore, emb e
 		return sessionhistory.New(sessions, nil, emb)
 	}
 	history := sessionhistory.New(sessions, historySemantic, emb)
-	vocabPath := filepath.Join(cfg.WorkspaceRoot, platform.WorkspaceMetadataDir, "session_history_bm25_vocab.json")
+	vocabPath := filepath.Join(cfg.WorkspaceRoot, platform.WorkspaceMetadataDir, "history_bm25_vocab.json")
 	if err := history.EnableBM25(vocabPath); err != nil {
 		log.Errorf("[qa] session history BM25 disabled; dense and lexical recall remain available: %v", err)
 		return history

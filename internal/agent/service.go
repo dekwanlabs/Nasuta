@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -184,7 +185,14 @@ func NewQA(d QADeps) *QA {
 			_ = memSemantic.Close()
 			log.Warnf("[qa] memory collection ensure failed: %v", err)
 		} else {
-			svc.memory = memory.NewMemoryStore(d.DB, memSemantic, d.Embedder, d.Cfg.MemoryWorkContextTTL)
+			memoryStore := memory.NewMemoryStore(d.DB, memSemantic, d.Embedder, d.Cfg.MemoryWorkContextTTL)
+			vocabPath := filepath.Join(d.Cfg.WorkspaceRoot, platform.WorkspaceMetadataDir, "memory_bm25_vocab.json")
+			if err := memoryStore.EnableBM25(context.Background(), vocabPath); err != nil {
+				log.Warnf("[qa] memory BM25 disabled; dense recall remains available: %v", err)
+			} else {
+				log.Infof("[qa] memory hybrid index enabled (collection=memory)")
+			}
+			svc.memory = memoryStore
 		}
 	}
 

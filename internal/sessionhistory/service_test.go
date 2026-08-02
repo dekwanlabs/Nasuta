@@ -72,7 +72,7 @@ func TestFindFusesDenseAndLexicalThenRevalidatesMySQL(t *testing.T) {
 			AddRow("cmp-lexical", 9, "exact createCart result", 4))
 
 	service := New(memory.NewSessionStore(db), sem, historyEmbedder{})
-	if err := service.EnableBM25(filepath.Join(t.TempDir(), "session_history_bm25_vocab.json")); err != nil {
+	if err := service.EnableBM25(filepath.Join(t.TempDir(), "history_bm25_vocab.json")); err != nil {
 		t.Fatal(err)
 	}
 	service.bm25.AddDoc("createCart")
@@ -151,7 +151,7 @@ func TestSyncPendingIndexesCommittedSummaryBeforeCompletingOutbox(t *testing.T) 
 
 	sem := &recordingHistoryStore{Memory: contract.NewMemory()}
 	service := New(memory.NewSessionStore(db), sem, historyEmbedder{})
-	vocabPath := filepath.Join(t.TempDir(), "session_history_bm25_vocab.json")
+	vocabPath := filepath.Join(t.TempDir(), "history_bm25_vocab.json")
 	if err := service.EnableBM25(vocabPath); err != nil {
 		t.Fatal(err)
 	}

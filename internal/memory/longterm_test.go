@@ -2,11 +2,14 @@ package memory
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
 )
 
 func TestWriteSupersedesLowerAuthorityFact(t *testing.T) {
@@ -199,6 +202,86 @@ func TestWriteAppliesTTLToExtractedWorkContext(t *testing.T) {
 	}
 	if result.Outcome != WriteInserted {
 		t.Fatalf("result = %#v", result)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteAddsBM25SparseVector(t *testing.T) {
+	memory, semanticStore, mock, closeDB := newMemoryTestStore(t)
+	defer closeDB()
+	vocabPath := filepath.Join(t.TempDir(), "memory_bm25_vocab.json")
+	seedMemoryVocab(t, vocabPath)
+	if err := memory.EnableBM25(t.Context(), vocabPath); err != nil {
+		t.Fatal(err)
+	}
+	id := "22222222-2222-2222-2222-222222222222"
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND status='active'.*FOR UPDATE`).
+		WithArgs(int64(42), "workspace:apollo-service:endpoint").
+		WillReturnRows(sqlmock.NewRows(memoryColumns()))
+	expectMemoryInsert(mock, id, StatusActive, nil)
+	mock.ExpectCommit()
+
+	result, err := memory.Write(t.Context(), MemoryRecord{
+		ID: id, UserID: 42, FactKey: "workspace:apollo-service:endpoint",
+		Kind: KindProfile, Content: "Apollo endpoint is config.internal", SourceType: SourceExplicitUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.VectorSynced || len(semanticStore.points) != 1 {
+		t.Fatalf("result = %#v, points = %#v", result, semanticStore.points)
+	}
+	sparse := semanticStore.points[0].SparseVector
+	if sparse == nil || len(sparse.Indices) == 0 || len(sparse.Indices) != len(sparse.Values) {
+		t.Fatalf("memory point missing BM25 sparse vector: %#v", semanticStore.points[0])
+	}
+	reloaded, err := retrieval.LoadVocab(vocabPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.QuerySparse("apollo endpoint")) == 0 {
+		t.Fatal("saved memory vocabulary does not contain written terms")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnableBM25RebuildsExistingMemoriesBeforeSavingVocabulary(t *testing.T) {
+	memory, semanticStore, mock, closeDB := newMemoryTestStore(t)
+	defer closeDB()
+	vocabPath := filepath.Join(t.TempDir(), "memory_bm25_vocab.json")
+	rows := sqlmock.NewRows([]string{"id", "user_id", "fact_key", "content", "source_type", "status"}).
+		AddRow("11111111-1111-1111-1111-111111111111", int64(42), "workspace:apollo-service", "Apollo endpoint", SourceExplicitUser, StatusActive).
+		AddRow("22222222-2222-2222-2222-222222222222", int64(42), "user:response-language", "Use Chinese", SourceUserStated, StatusActive)
+	mock.ExpectQuery(`(?s)SELECT id,user_id,fact_key,content,source_type,status.*FROM qa_memories.*WHERE id>\?.*ORDER BY id.*LIMIT \?`).
+		WithArgs("", memoryBM25RebuildBatch).
+		WillReturnRows(rows)
+
+	if err := memory.EnableBM25(t.Context(), vocabPath); err != nil {
+		t.Fatal(err)
+	}
+	if len(semanticStore.points) != 2 {
+		t.Fatalf("rebuilt points = %#v", semanticStore.points)
+	}
+	for _, point := range semanticStore.points {
+		if point.SparseVector == nil || len(point.SparseVector.Indices) == 0 {
+			t.Fatalf("rebuilt point missing sparse vector: %#v", point)
+		}
+	}
+	if _, err := os.Stat(vocabPath); err != nil {
+		t.Fatalf("memory vocabulary was not saved after rebuild: %v", err)
+	}
+	reloaded, err := retrieval.LoadVocab(vocabPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.QuerySparse("apollo")) == 0 {
+		t.Fatal("rebuilt vocabulary does not contain existing memory terms")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
