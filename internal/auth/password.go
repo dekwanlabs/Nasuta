@@ -26,8 +26,7 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-// Register creates an email/password account and logs it in (issues a session
-// cookie). The first registered account becomes admin.
+// Register creates an email/password account and returns its bearer session.
 func (service *Service) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -75,8 +74,7 @@ func (service *Service) Register(w http.ResponseWriter, r *http.Request) {
 	service.issueSession(w, user)
 }
 
-// LoginWithPassword authenticates an email/password account and issues a
-// session cookie.
+// LoginWithPassword authenticates an account and returns its bearer session.
 func (service *Service) LoginWithPassword(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -101,8 +99,22 @@ func (service *Service) LoginWithPassword(w http.ResponseWriter, r *http.Request
 	service.issueSession(w, user)
 }
 
-// issueSession creates a session, sets the cookie, and writes the user info
-// in the same raw shape as Me() (the frontend reads res.data directly).
+type sessionResponse struct {
+	AccessToken string       `json:"access_token"`
+	TokenType   string       `json:"token_type"`
+	ExpiresIn   int64        `json:"expires_in"`
+	User        userResponse `json:"user"`
+}
+
+type userResponse struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	AvatarURL string `json:"avatar_url"`
+	IsAdmin   bool   `json:"is_admin"`
+}
+
+// issueSession returns the token required by protected API requests.
 func (service *Service) issueSession(w http.ResponseWriter, user *User) {
 	token := GenerateToken()
 	if err := service.db.CreateSession(token, user.ID, sessionTTL); err != nil {
@@ -110,20 +122,17 @@ func (service *Service) issueSession(w http.ResponseWriter, user *User) {
 		httputil.WriteErr(w, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    token,
-		Path:     "/",
-		MaxAge:   int(sessionTTL.Seconds()),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"id":         user.ID,
-		"name":       user.Name,
-		"email":      user.Email,
-		"avatar_url": user.AvatarURL,
-		"is_admin":   user.IsAdmin,
+	json.NewEncoder(w).Encode(sessionResponse{
+		AccessToken: token,
+		TokenType:   "Bearer",
+		ExpiresIn:   int64(sessionTTL.Seconds()),
+		User: userResponse{
+			ID:        user.ID,
+			Name:      user.Name,
+			Email:     user.Email,
+			AvatarURL: user.AvatarURL,
+			IsAdmin:   user.IsAdmin,
+		},
 	})
 }

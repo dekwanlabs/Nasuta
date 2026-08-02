@@ -106,8 +106,8 @@ func bearerAuth(token string, keyAuth MCPKeyAuthenticator, next http.Handler) ht
 		if keyAuth != nil {
 			valid, err := keyAuth(r.Context(), candidate)
 			if err != nil {
-				log.ErrorfCtx(r.Context(), "authenticate MCP key: %v", err)
-				httputil.WriteServiceUnavailable(w, "MCP authentication unavailable")
+				log.ErrorfCtx(r.Context(), "authenticate service key: %v", err)
+				httputil.WriteServiceUnavailable(w, "authentication unavailable")
 				return
 			}
 			if valid {
@@ -117,6 +117,33 @@ func bearerAuth(token string, keyAuth MCPKeyAuthenticator, next http.Handler) ht
 		}
 		httputil.WriteUnauthorized(w, "invalid or missing bearer token")
 	})
+}
+
+func qaAskAuth(
+	authService *auth.Service,
+	token string,
+	keyAuth MCPKeyAuthenticator,
+	next http.HandlerFunc,
+) http.Handler {
+	serviceAuthConfigured := token != "" || keyAuth != nil
+	if authService == nil {
+		if !serviceAuthConfigured {
+			return next
+		}
+		return bearerAuth(token, keyAuth, next)
+	}
+	if !serviceAuthConfigured {
+		return authService.RequireAuth(next)
+	}
+
+	serviceAuth := bearerAuth(token, keyAuth, next)
+	return authService.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth.UserFromContext(r.Context()) != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		serviceAuth.ServeHTTP(w, r)
+	}))
 }
 
 func Setup(mux *http.ServeMux, rc Config) {
@@ -146,7 +173,7 @@ func Setup(mux *http.ServeMux, rc Config) {
 	api("GET /api/edges", dash.APIEdges)
 	api("GET /api/semantic/status", dash.APISemanticStatus)
 
-	api("POST /api/qa/ask", dash.APIQAAsk)
+	mux.Handle("POST /api/qa/ask", qaAskAuth(rc.Auth, rc.Cfg.AuthToken, rc.MCPKeyAuth, dash.APIQAAsk))
 	api("GET /api/qa/runtime", dash.APIQARuntimeStatus)
 	api("GET /api/qa/memories", dash.APIQAMemories)
 	api("DELETE /api/qa/memories", dash.APIQAMemoriesClear)

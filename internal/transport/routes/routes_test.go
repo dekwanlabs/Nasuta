@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
@@ -96,6 +99,141 @@ func TestBearerAuthAllowsRequestsWhenNoAuthenticationIsConfigured(t *testing.T) 
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
 	}
 }
+
+func TestQAAskAuthAcceptsPersistedServiceKey(t *testing.T) {
+	handler := qaAskAuth(nil, "", func(_ context.Context, candidate string) (bool, error) {
+		return candidate == "assigned-key", nil
+	}, noContentHandler)
+	request := httptest.NewRequest(http.MethodPost, "/api/qa/ask", nil)
+	request.Header.Set("Authorization", "Bearer assigned-key")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestQAAskAuthAcceptsConfiguredToken(t *testing.T) {
+	handler := qaAskAuth(nil, "configured-token", nil, noContentHandler)
+	request := httptest.NewRequest(http.MethodPost, "/api/qa/ask", nil)
+	request.Header.Set("Authorization", "Bearer configured-token")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestQAAskAuthAcceptsPersistedServiceKeyWhenSessionAuthIsConfigured(t *testing.T) {
+	sqlDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	authService := auth.NewService(nil, auth.NewDB(sqlDB), "", "")
+	handler := qaAskAuth(authService, "", func(_ context.Context, candidate string) (bool, error) {
+		return candidate == "assigned-key", nil
+	}, noContentHandler)
+	request := httptest.NewRequest(http.MethodPost, "/api/qa/ask", nil)
+	request.Header.Set("Authorization", "Bearer assigned-key")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestQAAskAuthAcceptsConfiguredTokenWhenSessionAuthIsConfigured(t *testing.T) {
+	sqlDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	authService := auth.NewService(nil, auth.NewDB(sqlDB), "", "")
+	handler := qaAskAuth(authService, "configured-token", nil, noContentHandler)
+	request := httptest.NewRequest(http.MethodPost, "/api/qa/ask", nil)
+	request.Header.Set("Authorization", "Bearer configured-token")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestQAAskAuthRejectsInvalidServiceKey(t *testing.T) {
+	handler := qaAskAuth(nil, "", func(context.Context, string) (bool, error) {
+		return false, nil
+	}, noContentHandler)
+	request := httptest.NewRequest(http.MethodPost, "/api/qa/ask", nil)
+	request.Header.Set("Authorization", "Bearer invalid-key")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestQAAskAuthAllowsRequestsWhenAuthenticationIsNotConfigured(t *testing.T) {
+	handler := qaAskAuth(nil, "", nil, noContentHandler)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/qa/ask", nil))
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestQAAskAuthPreservesSessionOnlyAuthentication(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	authService := auth.NewService(nil, auth.NewDB(sqlDB), "", "")
+	handler := qaAskAuth(authService, "", nil, noContentHandler)
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/api/qa/ask", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT user_id FROM sessions WHERE token=? AND expires_at>NOW()")).
+		WithArgs("session-token").
+		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(int64(7)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id,COALESCE(feishu_uid,''),open_id,name,email,avatar_url,department,is_admin FROM users WHERE id=?")).
+		WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "feishu_uid", "open_id", "name", "email", "avatar_url", "department", "is_admin",
+		}).AddRow(int64(7), "", "", "Evaluator", "eva@example.com", "", "", 0))
+	request := httptest.NewRequest(http.MethodPost, "/api/qa/ask", nil)
+	request.AddCookie(&http.Cookie{Name: "cl_session", Value: "session-token"})
+	authorized := httptest.NewRecorder()
+
+	handler.ServeHTTP(authorized, request)
+
+	if authorized.Code != http.StatusNoContent {
+		t.Fatalf("authenticated status = %d, want %d", authorized.Code, http.StatusNoContent)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+var noContentHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
+})
 
 func TestCommonRoutesExcludeApplicationObserveEndpoints(t *testing.T) {
 	mux := http.NewServeMux()

@@ -3,11 +3,13 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
 // Service is the auth capability entry: OAuth flow, session lookup, and HTTP middleware.
@@ -24,18 +26,11 @@ func NewService(feishu *FeishuOAuth, db *DB, redirectURI, webBase string) *Servi
 }
 
 func (service *Service) resolveUser(r *http.Request) *User {
-	cookie, err := r.Cookie(sessionCookie)
-	if err != nil {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			return nil
-		}
-		cookie = &http.Cookie{Value: strings.TrimPrefix(auth, "Bearer ")}
-	}
-	if cookie.Value == "" {
+	token := requestSessionToken(r)
+	if token == "" {
 		return nil
 	}
-	user, err := service.db.GetSession(cookie.Value)
+	user, err := service.db.GetSession(token)
 	if err != nil {
 		log.Errorf("[auth] session lookup error: %v", err)
 		return nil
@@ -108,29 +103,58 @@ func (service *Service) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    token,
-		Path:     "/",
-		MaxAge:   int(sessionTTL.Seconds()),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-
 	dest := service.webBase
 	if dest == "" {
 		dest = "/"
 	}
-	http.Redirect(w, r, dest, http.StatusFound)
+	destination, err := accessTokenRedirect(dest, token)
+	if err != nil {
+		log.Errorf("[auth] parse web base URL: %v", err)
+		httputil.WriteErr(w, fmt.Errorf("invalid web base URL"))
+		return
+	}
+	http.Redirect(w, r, destination, http.StatusFound)
+}
+
+func accessTokenRedirect(destination, token string) (string, error) {
+	target, err := url.Parse(destination)
+	if err != nil {
+		return "", err
+	}
+	values := url.Values{}
+	values.Set("access_token", token)
+	values.Set("token_type", "Bearer")
+	values.Set("expires_in", strconv.FormatInt(int64(sessionTTL.Seconds()), 10))
+	target.Fragment = values.Encode()
+	return target.String(), nil
 }
 
 func (service *Service) Logout(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(sessionCookie)
-	if err == nil && cookie.Value != "" {
-		service.db.DeleteSession(cookie.Value)
+	if token := requestSessionToken(r); token != "" {
+		if err := service.db.DeleteSession(token); err != nil {
+			log.Errorf("[auth] delete session error: %v", err)
+			httputil.WriteErr(w, err)
+			return
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	http.Redirect(w, r, service.webBase+"/login", http.StatusFound)
+}
+
+func requestSessionToken(r *http.Request) string {
+	const prefix = "Bearer "
+	if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, prefix) {
+		return strings.TrimSpace(strings.TrimPrefix(authorization, prefix))
+	}
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
 }
 
 func (service *Service) Middleware(next http.Handler) http.Handler {
