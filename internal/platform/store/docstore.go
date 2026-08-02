@@ -309,13 +309,11 @@ func (s *DocStore) SearchRunbooksKeyword(query string, limit int) ([]domain.Runb
 	defer rows.Close()
 	out := make([]domain.RunbookRecord, 0, limit)
 	for rows.Next() {
-		var rb domain.RunbookRecord
-		if err := rows.Scan(&rb.ID, &rb.Title, &rb.Path, &rb.Scope, &rb.Text); err != nil {
+		var doc domain.DocRecord
+		if err := rows.Scan(&doc.ID, &doc.Title, &doc.Filename, &doc.Kind, &doc.Content); err != nil {
 			return nil, err
 		}
-		rb.Repo = "docs"
-		rb.Confidence = 1
-		out = append(out, rb)
+		out = append(out, docToRunbook(doc))
 	}
 	return out, rows.Err()
 }
@@ -340,16 +338,12 @@ func (s *DocStore) RunbookByID(id string) (domain.RunbookRecord, error) {
 // docToRunbook converts a stored markdown doc to a runbook record.
 func docToRunbook(d domain.DocRecord) domain.RunbookRecord {
 	fm := parseDocFrontmatter(d.Content)
-	id := fmScalar(fm.data, "id")
-	if id == "" {
-		id = d.ID
-	}
 	title := extractMarkdownTitle(fm.content)
 	if title == "" {
 		title = d.Title
 	}
 	return domain.RunbookRecord{
-		ID:         id,
+		ID:         d.ID,
 		Repo:       "docs",
 		Title:      title,
 		Path:       d.Filename,
@@ -378,15 +372,6 @@ func parseDocFrontmatter(raw string) docFrontmatter {
 		data = map[string]any{}
 	}
 	return docFrontmatter{data: data, content: m[2]}
-}
-
-func fmScalar(data map[string]any, key string) string {
-	if v, ok := data[key]; ok {
-		if s, ok := v.(string); ok {
-			return strings.TrimSpace(s)
-		}
-	}
-	return ""
 }
 
 func fmScalarArray(data map[string]any, key string) []string {

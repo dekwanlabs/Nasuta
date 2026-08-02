@@ -26,9 +26,8 @@ trigger to completion.
 
 ` + "```yaml" + `
 ---
-id: flow-<domain>-<topic>            # unique id, kebab-case
-scope: event-driven                     # fixed value
-tags: [flow, <service>, <domain>, ...]  # at least 3 tags for semantic recall
+scope: event-driven                    # fixed value
+tags: [flow, <service>, <domain>, ...] # at least 3 tags for semantic recall
 ---
 ` + "```" + `
 
@@ -61,6 +60,7 @@ Example: ` + "`# Flow: Device Provisioning & SN Lifecycle`" + `
 
 ### Notes
 
+- Do not add id or doc_id to frontmatter; the platform assigns the canonical document ID.
 - All service names, API paths, and Feign interface names must come from real
   code — never invent them. Verify against codegraph before writing.
 - Kibana index uses the ` + "`hs-iot-<service>-*`" + ` format, derived from existing
@@ -83,9 +83,11 @@ func ValidateFlow(content string) FlowValidationResult {
 	var res FlowValidationResult
 	fm, body := splitFrontmatter(content)
 
-	id := fm.scalar("id")
-	if id == "" {
-		res.Errors = append(res.Errors, "frontmatter field 'id' is missing")
+	if _, exists := fm.data["id"]; exists {
+		res.Errors = append(res.Errors, "frontmatter field 'id' is platform-owned and must be omitted")
+	}
+	if _, exists := fm.data["doc_id"]; exists {
+		res.Errors = append(res.Errors, "frontmatter field 'doc_id' is platform-owned and must be omitted")
 	}
 	scope := fm.scalar("scope")
 	if scope != "event-driven" {
@@ -122,7 +124,8 @@ func (g *Generator) ReformatFlow(ctx context.Context, original string) (string, 
 
 Rules:
 - Output ONLY the final markdown document, no commentary.
-- Start with the frontmatter block (id, scope: event-driven, tags with at least 3 entries).
+- Start with the frontmatter block (scope: event-driven, tags with at least 3 entries).
+- Do not add an id or doc_id field; the platform assigns the canonical document ID.
 - Use exactly these section headings in order: ## Trigger Sources, ## Full Chain, ## Key Services, ## Troubleshooting, ## Dependencies.
 - Keep all real service names, API paths, and Feign interface names from the original — do not invent or rename them.
 - Use tables for Trigger Sources, Key Services, and Troubleshooting.

@@ -1518,7 +1518,6 @@ search_runbooks(query=<当前缺失事实>, doc_id=<runbook ID>)。
 文档继续使用现有元数据：
 
 ```yaml
-id: flow-cookbook-architecture
 scope: event-driven
 tags: [event, cookbook, architecture]
 ```

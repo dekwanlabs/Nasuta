@@ -3,11 +3,25 @@ package store
 import (
 	"database/sql/driver"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
+
+func TestDocToRunbookUsesDocumentStoreID(t *testing.T) {
+	got := docToRunbook(domain.DocRecord{
+		ID: "doc-b3da2891a54da9ca", Title: "flow-system-overview", Filename: "flow-system-overview.md", Kind: domain.DocKindFlow,
+		Content: "---\nid: flow-system-overview\ntags: [flow, architecture, gateway]\n---\n# Flow: System Architecture Overview\n\nBody\n",
+	})
+	if got.ID != "doc-b3da2891a54da9ca" {
+		t.Fatalf("runbook ID = %q, want document store ID", got.ID)
+	}
+	if strings.Contains(got.Text, "id: flow-system-overview") {
+		t.Fatalf("runbook text contains frontmatter: %q", got.Text)
+	}
+}
 
 func TestRunbookMetaByIDUsesNarrowQuery(t *testing.T) {
 	db, mock, err := sqlmock.New()

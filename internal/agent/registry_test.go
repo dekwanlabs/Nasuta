@@ -24,7 +24,7 @@ func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 		"search_code":     {"fallback", "not as proof", "complete API route"},
 		"get_symbol":      {"exact definitions", "does not establish its callers"},
 		"trace_calls":     {"method-level callers and callees", "upstream controller candidates", "not proof of complete service dependencies"},
-		"search_runbooks": {"operational runbooks", "do not prove current runtime state"},
+		"search_runbooks": {"operational runbooks", "copy matches[].docId exactly", "do not prove current runtime state"},
 		"check_docs":      {"documentation coverage", "does not establish runtime"},
 		"index_stats":     {"health and summary counts", "does not establish business behavior"},
 	}

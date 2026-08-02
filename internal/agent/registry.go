@@ -171,14 +171,15 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		{
 			ID: "search_runbooks",
 			Description: "Search knowledge documents and operational runbooks covering system architecture, business flows, modules, schemas, business guidance, and operations. " +
-				"When a document ID is known, set doc_id to retrieve relevant chunks only from that document. Knowledge documents describe intended behavior and do not prove current runtime state.",
+				"To scope the search, copy matches[].docId exactly from a previous result; never infer it from a title, path, filename, or document content. " +
+				"Knowledge documents describe intended behavior and do not prove current runtime state.",
 			Kind: ToolKindRead,
 			ReferenceInputs: []tool.ReferenceInput{{
 				Argument: "doc_id", Accepts: []tool.ReferenceType{tool.ReferenceRunbook},
 			}},
 			InputSchema: objectSchema(map[string]any{
 				"query":  propString("Fact or behavior to verify in the knowledge corpus."),
-				"doc_id": propString("Optional canonical knowledge document ID."),
+				"doc_id": propString("Optional canonical document ID copied exactly from matches[].docId. Never use a title, path, filename, or document content."),
 				"limit":  propInt("Max documents or scoped chunks (default 3, max 10)."),
 			}, []string{"query"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {

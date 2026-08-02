@@ -111,3 +111,24 @@ func TestChunkByNodes(t *testing.T) {
 		t.Errorf("chunk A wrong range: %d-%d", chunks[0].StartLine, chunks[0].EndLine)
 	}
 }
+
+func TestChunkMarkdownExcludesFrontmatter(t *testing.T) {
+	chunks := ChunkMarkdown("doc-a", "Architecture", `---
+id: legacy-architecture
+scope: event-driven
+tags: [flow, architecture, gateway]
+---
+# Architecture
+
+Gateway routes traffic to application services.
+`, DefaultDocChunkConfig())
+	if len(chunks) == 0 {
+		t.Fatal("ChunkMarkdown() returned no chunks")
+	}
+	if strings.Contains(chunks[0].Text, "legacy-architecture") || strings.Contains(chunks[0].Text, "scope: event-driven") {
+		t.Fatalf("chunk contains frontmatter: %q", chunks[0].Text)
+	}
+	if !strings.Contains(chunks[0].Text, "Gateway routes traffic") {
+		t.Fatalf("chunk missing markdown body: %q", chunks[0].Text)
+	}
+}

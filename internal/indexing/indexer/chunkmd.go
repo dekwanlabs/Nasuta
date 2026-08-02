@@ -38,6 +38,7 @@ var mdHeadingRe = regexp.MustCompile(`(?m)^#{2,4}\s+(.+)$`)
 
 // ChunkMarkdown splits a markdown document into semantic chunks.
 func ChunkMarkdown(docID, title, content string, cfg DocChunkConfig) []DocChunk {
+	content = parseFrontmatter(content).content
 	if cfg.MaxChars <= 0 {
 		cfg = DefaultDocChunkConfig()
 	}
