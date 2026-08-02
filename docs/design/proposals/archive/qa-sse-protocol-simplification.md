@@ -2,8 +2,9 @@
 
 [English](qa-sse-protocol-simplification.md) | [中文](qa-sse-protocol-simplification.zh-CN.md)
 
-> Status: implemented; awaiting acceptance; not a normative baseline
+> Status: implemented and archived; non-normative historical record
 > Date: 2026-08-01
+> Archived: 2026-08-01
 > Scope: Nasuta QA/Agent/LLM and CodeLoom Dashboard QA
 > Consolidation targets: `agent-platform/01-architecture-and-execution` and `08-observability-and-evaluation`
 
@@ -155,4 +156,4 @@ The backend and frontend switched on 2026-08-01:
 - The extracted SSE parser handles chunk splits, CRLF, multiple frames, multiline data, and explicit malformed-JSON failures.
 - Hub broadcasting no longer waits under its global mutex; full subscriber buffers produce observable drops.
 
-Agent/dashboard tests, race tests, `go build ./...`, frontend type checking, and the production build pass. A real-browser disconnect E2E has not yet run, so this remains awaiting acceptance and has not been merged into the normative module documents.
+Agent/dashboard tests, race tests, `go build ./...`, frontend type checking, and the production build pass. A real-browser disconnect E2E has not yet run and remains a non-blocking residual verification item. The implementation is accepted and archived; modules 01 and 08 own the normative contract.

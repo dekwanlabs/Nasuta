@@ -2,8 +2,9 @@
 
 [English](qa-sse-protocol-simplification.md) | [中文](qa-sse-protocol-simplification.zh-CN.md)
 
-> 状态：已实现，待验收，非规范性基线
+> 状态：已实现并归档，非规范性历史记录
 > 日期：2026-08-01
+> 归档日期：2026-08-01
 > 影响范围：Nasuta QA/Agent/LLM；CodeLoom Dashboard QA
 > 最终归并目标：`agent-platform/01-architecture-and-execution` 与 `08-observability-and-evaluation`
 
@@ -241,4 +242,4 @@ Hub 使用每订阅者有界 Buffer。广播不得持有全局锁等待网络写
 - SSE Parser 已独立，支持 Chunk 拆分、CRLF、多 Frame、多行 Data，并显式报告非法 JSON；
 - Hub 广播不再持锁等待订阅者，慢订阅者满载时记录丢弃事件。
 
-已通过 `go test ./internal/agent/... ./internal/transport/dashboard/...`、对应 Race Test、`go build ./...`、前端 Typecheck 和 Production Build。尚未执行真实浏览器断流 E2E，因此本文保持“待验收”，暂不归并正式模块文档。
+已通过 `go test ./internal/agent/... ./internal/transport/dashboard/...`、对应 Race Test、`go build ./...`、前端 Typecheck 和 Production Build。真实浏览器断流 E2E 未执行，作为非阻断的残余验证记录；实现已验收并归档，正式合同以模块 01 和 08 为准。
