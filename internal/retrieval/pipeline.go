@@ -557,10 +557,10 @@ func (retrieve *Retriever) formatCodePool(ctx context.Context, pool []codeDoc) [
 			label := retrieve.shortPath(ctx, d.filePath)
 			if d.startLine > 0 {
 				fmt.Fprintf(&text, "### %s (L%d-L%d)\n```\n%s\n```\n", label, d.startLine, d.endLine, d.text)
-				ref = Reference{Type: "code", Label: fmt.Sprintf("%s:L%d", label, d.startLine), Target: label}
+				ref = Reference{Type: "code", Label: fmt.Sprintf("%s:L%d", label, d.startLine), Target: d.filePath}
 			} else {
 				fmt.Fprintf(&text, "### %s\n```\n%s\n```\n", label, d.text)
-				ref = Reference{Type: "code", Label: label, Target: label}
+				ref = Reference{Type: "code", Label: label, Target: d.filePath}
 			}
 		case "runbook":
 			text.WriteString("## Evidence — Docs\n")
@@ -575,7 +575,7 @@ func (retrieve *Retriever) formatCodePool(ctx context.Context, pool []codeDoc) [
 			text.WriteString("## CodeGraph Deep Analysis\n")
 			text.WriteString(d.text)
 			text.WriteString("\n")
-			ref = Reference{Type: "codegraph", Label: d.funcName, Target: retrieve.shortPath(ctx, d.filePath)}
+			ref = Reference{Type: "codegraph", Label: d.funcName, Target: d.filePath}
 		default:
 			continue
 		}

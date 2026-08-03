@@ -82,6 +82,26 @@ func TestFormatCodePoolPreservesRerankOrderAcrossLayers(t *testing.T) {
 	}
 }
 
+func TestFormatCodePoolKeepsCanonicalReferenceTargets(t *testing.T) {
+	r := &Retriever{}
+	path := "repos/hsds/hsds-aiot-service/service/device_service.py"
+	parts := r.formatCodePool(context.Background(), []codeDoc{
+		{source: "code", layer: "server", filePath: path, startLine: 12, endLine: 18, text: "def update_shadow(): pass"},
+		{source: "codegraph", filePath: path, funcName: "update_shadow", text: "call graph"},
+	})
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want 2", len(parts))
+	}
+	for index, part := range parts {
+		if len(part.refs) != 1 || part.refs[0].Target != path {
+			t.Fatalf("parts[%d] references = %#v, want canonical target %q", index, part.refs, path)
+		}
+	}
+	if parts[0].refs[0].Label == path {
+		t.Fatalf("code reference label = %q, want compact display label", parts[0].refs[0].Label)
+	}
+}
+
 func TestAssembleCountsReferenceForTruncatedEvidence(t *testing.T) {
 	r := New(nil, config.Config{}).WithPlatform(&config.PlatformSettings{ContextBudget: 24})
 	parts := []partial{{
