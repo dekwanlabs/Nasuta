@@ -373,7 +373,7 @@ CREATE TABLE dependency_evidence (
   file_path     TEXT NOT NULL,
   line          INTEGER NOT NULL CHECK (line >= 0),
   symbol        TEXT NOT NULL DEFAULT '',
-  source_kind   TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan')),
+  source_kind   TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan', 'config')),
   UNIQUE (dependency_id, file_path, line, symbol, source_kind)
 );
 
@@ -383,7 +383,7 @@ CREATE INDEX idx_dependency_evidence_file
   ON dependency_evidence(file_path, line);
 ```
 
-这张表保留所有有效证据，不再只取 `Evidence[0]`。`symbol` 替代没有实际数据的 Feign 专用 `interface_method`，可表示任意协议的源码锚点。
+这张表保留所有有效证据，不再只取 `Evidence[0]`。`config` 表示用于解析依赖目标的外部配置中心值。`symbol` 替代没有实际数据的 Feign 专用 `interface_method`，可表示任意协议的源码锚点。
 
 #### 5. CodeGraph 读取契约
 
@@ -1181,7 +1181,7 @@ CREATE TABLE ontology_fact_evidence (
   file_path   TEXT NOT NULL,
   line        INTEGER NOT NULL CHECK (line >= 0),
   symbol      TEXT NOT NULL DEFAULT '',
-  source_kind TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan')),
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan', 'config')),
   PRIMARY KEY (fact_id, file_path, line, symbol, source_kind)
 );
 

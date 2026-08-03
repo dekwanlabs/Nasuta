@@ -75,6 +75,71 @@ func TestReplaceAllPublishesCanonicalDependenciesAndEvidence(t *testing.T) {
 	}
 }
 
+func TestReplaceWorkspacePersistsConfigDependencyEvidence(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	orders := testService("team/orders", ".", "orders")
+	payments := testService("team/payments", ".", "payments")
+	configEvidence := domain.Evidence{
+		Path: "config-center/na/application/orders/payments.base-url",
+		Kind: domain.SourceConfig,
+	}
+	bundle := domain.IndexBundle{
+		Repositories: []domain.RepositoryRecord{
+			{Repo: orders.Repo, HeadSHA: "orders-sha", IndexedAt: time.Now().UnixMilli()},
+			{Repo: payments.Repo, HeadSHA: "payments-sha", IndexedAt: time.Now().UnixMilli()},
+		},
+		Services: []domain.ServiceRecord{orders, payments},
+		Dependencies: []domain.DependencyEdge{{
+			CallerServiceKey: orders.ServiceKey,
+			TargetKind:       domain.DependencyTargetService,
+			TargetServiceKey: payments.ServiceKey,
+			From:             orders.ServiceName,
+			To:               payments.ServiceName,
+			Type:             domain.EdgeFeign,
+			Evidence:         []domain.Evidence{configEvidence},
+			Confidence:       0.9,
+		}},
+	}
+	snapshot, err := ontology.Project(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := db.ReplaceWorkspace(context.Background(), bundle, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	edges, err := db.Edges(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(edges) != 1 || len(edges[0].Evidence) != 1 || edges[0].Evidence[0] != configEvidence {
+		t.Fatalf("dependency evidence = %#v, want config evidence", edges)
+	}
+
+	facts, _, err := db.OntologyNeighbors(context.Background(), ontology.NeighborQuery{
+		EntityIDs:  []string{orders.ServiceKey},
+		Predicates: []ontology.Predicate{ontology.PredicateDependsOn},
+		Direction:  ontology.DirectionOutgoing,
+		Limit:      10,
+		Generation: generation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOntologyEvidence := ontology.Evidence{
+		Path: configEvidence.Path, Source: ontology.EvidenceSourceConfig,
+	}
+	if len(facts) != 1 || len(facts[0].Evidence) != 1 || facts[0].Evidence[0] != wantOntologyEvidence {
+		t.Fatalf("ontology evidence = %#v, want config evidence", facts)
+	}
+}
+
 func TestListApisSearchesPathControllerAndHandler(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "index.db"))
 	if err != nil {

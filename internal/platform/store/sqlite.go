@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const structureSchemaVersion = 3
+const structureSchemaVersion = 4
 
 const schema = `
 CREATE TABLE repositories (
@@ -99,7 +99,7 @@ CREATE TABLE dependency_evidence (
   file_path     TEXT NOT NULL,
   line          INTEGER NOT NULL CHECK (line >= 0),
   symbol        TEXT NOT NULL DEFAULT '',
-  source_kind   TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan')),
+  source_kind   TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan', 'config')),
   UNIQUE (dependency_id, file_path, line, symbol, source_kind)
 );
 
@@ -152,13 +152,13 @@ CREATE TABLE ontology_fact_evidence (
   file_path   TEXT NOT NULL,
   line        INTEGER NOT NULL CHECK (line >= 0),
   symbol      TEXT NOT NULL DEFAULT '',
-  source_kind TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan')),
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan', 'config')),
   PRIMARY KEY (fact_id, file_path, line, symbol, source_kind)
 );
 
 CREATE INDEX idx_ontology_evidence_path ON ontology_fact_evidence(file_path, line, fact_id);
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 `
 
 // SQLite stores the canonical structured workspace snapshot.

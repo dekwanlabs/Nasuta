@@ -345,7 +345,7 @@ CREATE TABLE dependency_evidence (
   file_path     TEXT NOT NULL,
   line          INTEGER NOT NULL CHECK (line >= 0),
   symbol        TEXT NOT NULL DEFAULT '',
-  source_kind   TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan')),
+  source_kind   TEXT NOT NULL CHECK (source_kind IN ('doc', 'code-scan', 'config')),
   UNIQUE (dependency_id, file_path, line, symbol, source_kind)
 );
 
@@ -355,7 +355,7 @@ CREATE INDEX idx_dependency_evidence_file
   ON dependency_evidence(file_path, line);
 ```
 
-This table preserves every valid evidence item instead of only `Evidence[0]`. `symbol` replaces the unused Feign-specific `interface_method` and can anchor any protocol.
+This table preserves every valid evidence item instead of only `Evidence[0]`. `config` identifies external configuration-center values used to resolve dependency targets. `symbol` replaces the unused Feign-specific `interface_method` and can anchor any protocol.
 
 #### 5. CodeGraph Read Contract
 
