@@ -242,6 +242,147 @@ async def create_item():
 	}
 }
 
+func TestScanPythonRoutesPreservesFastAPIDecorators(t *testing.T) {
+	root := t.TempDir()
+	base := "repos/ai/catalog-api"
+	writeFile(t, root, base+"/pyproject.toml", `[project]
+name = "catalog-api"
+`)
+	writeFile(t, root, base+"/routes.py", `from fastapi import APIRouter, FastAPI
+
+router = APIRouter(
+    prefix="/items",
+    description="""Metadata with a closing parenthesis ).
+    """
+)
+app = FastAPI()
+
+@router.get()
+@router.head(
+    "",
+)
+async def list_root():
+    return []
+
+@router.post(
+    "/create",
+    response_model=build_model(
+        "item",
+    ),
+    description="""
+    A multiline description with ).
+    @router.delete("/not-a-route")
+    """,
+)
+async def create_item():
+    return {}
+
+@router.put(
+    response_model=Result,
+    path="/named",
+)
+async def update_item():
+    return {}
+
+@app.get("/health")
+async def health():
+    return {"ok": True}
+`)
+
+	bundle := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
+	wants := []struct {
+		method  string
+		path    string
+		handler string
+	}{
+		{method: "GET", path: "/items", handler: "list_root"},
+		{method: "HEAD", path: "/items", handler: "list_root"},
+		{method: "POST", path: "/items/create", handler: "create_item"},
+		{method: "PUT", path: "/items/named", handler: "update_item"},
+		{method: "GET", path: "/health", handler: "health"},
+	}
+	for _, want := range wants {
+		endpoint := findEndpoint(bundle.Endpoints, want.method, want.path)
+		if endpoint == nil {
+			t.Fatalf("%s %s not indexed; endpoints=%v", want.method, want.path, endpointPaths(bundle.Endpoints))
+		}
+		if endpoint.HandlerMethod != want.handler || endpoint.Line <= 0 {
+			t.Errorf("%s %s handler/line = %q/%d, want %q/positive", want.method, want.path, endpoint.HandlerMethod, endpoint.Line, want.handler)
+		}
+	}
+	if endpoint := findEndpoint(bundle.Endpoints, "DELETE", "/items/not-a-route"); endpoint != nil {
+		t.Fatalf("decorator text inside a multiline string was indexed: %+v", endpoint)
+	}
+}
+
+func TestScanJavaEndpointsPreservesSpringMappingSemantics(t *testing.T) {
+	root := t.TempDir()
+	base := "repos/hsas/hsas-routing"
+	writeFile(t, root, base+"/pom.xml", `<project>
+  <artifactId>hsas-routing</artifactId>
+</project>`)
+	writeFile(t, root, base+"/src/main/java/com/demo/RoutingApplication.java",
+		"package com.demo;\n@SpringBootApplication\npublic class RoutingApplication {}\n")
+	writeFile(t, root, base+"/src/main/java/com/demo/RoutingController.java", `package com.demo;
+@RestController
+@RequestMapping(path = {"/v1", "/legacy"})
+public class RoutingController {
+    @GetMapping(path = {"/items", "/records"})
+    public Object list() { return null; }
+
+    @PostMapping(produces = "application/json")
+    public Object create() { return null; }
+
+    @RequestMapping(
+        value = {"/bulk", "/batch"},
+        method = {RequestMethod.GET, RequestMethod.POST}
+    )
+    public Object bulk() { return null; }
+
+    @DeleteMapping("/gone")
+    public Object delete() { return null; }
+
+    @GetMapping({"/items/{id}"})
+    public Object getById() { return null; }
+
+    @PutMapping("/apps/{name}/status?value={status}")
+    public Object updateStatus() { return null; }
+
+    @GetMapping(("/wrapped"))
+    public Object wrapped() { return null; }
+}`)
+
+	bundle := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
+	wants := []struct {
+		method  string
+		path    string
+		handler string
+	}{
+		{method: "GET", path: "/v1/items", handler: "list"},
+		{method: "GET", path: "/legacy/records", handler: "list"},
+		{method: "POST", path: "/v1", handler: "create"},
+		{method: "POST", path: "/legacy", handler: "create"},
+		{method: "GET", path: "/v1/bulk", handler: "bulk"},
+		{method: "POST", path: "/legacy/batch", handler: "bulk"},
+		{method: "DELETE", path: "/v1/gone", handler: "delete"},
+		{method: "GET", path: "/v1/items/{id}", handler: "getById"},
+		{method: "PUT", path: "/legacy/apps/{name}/status?value={status}", handler: "updateStatus"},
+		{method: "GET", path: "/v1/wrapped", handler: "wrapped"},
+	}
+	for _, want := range wants {
+		endpoint := findEndpoint(bundle.Endpoints, want.method, want.path)
+		if endpoint == nil {
+			t.Fatalf("%s %s not indexed; endpoints=%v", want.method, want.path, endpointPaths(bundle.Endpoints))
+		}
+		if endpoint.HandlerMethod != want.handler {
+			t.Errorf("%s %s handler = %q, want %q", want.method, want.path, endpoint.HandlerMethod, want.handler)
+		}
+	}
+	if endpoint := findEndpoint(bundle.Endpoints, "POST", "/v1/application/json"); endpoint != nil {
+		t.Fatalf("non-path annotation value was indexed as a route: %+v", endpoint)
+	}
+}
+
 func TestScanKotlinServicesRegistersLibraryModules(t *testing.T) {
 	root := t.TempDir()
 	base := "repos/mobile/shared-api"

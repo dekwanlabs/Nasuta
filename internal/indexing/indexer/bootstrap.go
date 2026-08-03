@@ -41,6 +41,7 @@ func scanCode(
 	endpoints = append(endpoints, scanNodeJSEndpoints(root, dirs)...)
 
 	feignRefs := append(scanFeignClients(root, dirs), scanKotlinFeigns(root, dirs)...)
+	feignRefs = expandFeignConsumers(root, dirs, services, feignRefs)
 	deps, err := resolveFeignDependencies(ctx, feignRefs, resolver)
 	if err != nil {
 		return domain.IndexBundle{}, err

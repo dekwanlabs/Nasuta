@@ -66,7 +66,22 @@ func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 	return records
 }
 
-var pyRouteRe = regexp.MustCompile(`@\w+\.(get|post|put|delete|patch|head|options)\(([^)]*)\)`)
+type pythonRouteDecorator struct {
+	receiver string
+	method   string
+	args     string
+	handler  string
+	line     int
+	end      int
+}
+
+var (
+	pyRouteDecoratorRe = regexp.MustCompile(`(?m)^[ \t]*@([A-Za-z_]\w*)\.(get|post|put|delete|patch|head|options)\s*\(`)
+	pyRouterAssignRe   = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_]\w*)\s*=\s*APIRouter\s*\(`)
+	pyPrefixArgRe      = regexp.MustCompile(`(?s)\bprefix\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+	pyPathArgRe        = regexp.MustCompile(`(?s)\bpath\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+	pyDefRe            = regexp.MustCompile(`(?m)^[ \t]*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(`)
+)
 
 // scanPythonEndpoints finds FastAPI router routes.
 func scanPythonEndpoints(root string, dirs []string) []domain.EndpointRecord {
@@ -84,30 +99,162 @@ func scanPythonEndpoints(root string, dirs []string) []domain.EndpointRecord {
 		if serviceName == "" {
 			serviceName = readPythonProjectName(moduleRoot)
 		}
-		routerPrefix := extractPythonRouterPrefix(text)
+		routerPrefixes := pythonRouterPrefixes(text)
 		handler := strings.TrimSuffix(filepath.Base(file), ".py")
-		lines := strings.Split(text, "\n")
-		for i, line := range lines {
-			m := pyRouteRe.FindStringSubmatch(line)
-			if m == nil {
-				continue
-			}
-			route := extractFirstString(m[2])
+		for _, route := range scanPythonRouteDecorators(text) {
 			records = append(records, domain.EndpointRecord{
 				ServiceName:   serviceName,
 				Repo:          topSegment(rel),
-				Method:        strings.ToUpper(m[1]),
-				Path:          joinPaths(routerPrefix, route),
+				Method:        strings.ToUpper(route.method),
+				Path:          joinPaths(routerPrefixes[route.receiver], pythonRoutePath(route.args)),
 				Handler:       handler,
-				HandlerMethod: pythonHandlerName(lines, i), // ★ codegraph anchor
+				HandlerMethod: route.handler,
 				File:          rel,
-				Line:          i + 1,
+				Line:          route.line,
 				Source:        domain.SourceCodeScan,
 				Confidence:    0.85,
 			})
 		}
 	}
 	return records
+}
+
+func scanPythonRouteDecorators(text string) []pythonRouteDecorator {
+	matches := pyRouteDecoratorRe.FindAllStringSubmatchIndex(text, -1)
+	routes := make([]pythonRouteDecorator, 0, len(matches))
+	line, lineStart, consumedUntil := 1, 0, 0
+	for _, match := range matches {
+		start := match[0]
+		line += strings.Count(text[lineStart:start], "\n")
+		lineStart = start
+		if start < consumedUntil {
+			continue
+		}
+		args, end, ok := pythonCallArgs(text, match[1]-1)
+		if !ok {
+			continue
+		}
+		consumedUntil = end
+		routes = append(routes, pythonRouteDecorator{
+			receiver: text[match[2]:match[3]],
+			method:   text[match[4]:match[5]],
+			args:     args,
+			line:     line,
+			end:      end,
+		})
+	}
+
+	definitions := pyDefRe.FindAllStringSubmatchIndex(text, -1)
+	definitionIndex := 0
+	for i := range routes {
+		for definitionIndex < len(definitions) && definitions[definitionIndex][0] < routes[i].end {
+			definitionIndex++
+		}
+		if definitionIndex < len(definitions) {
+			match := definitions[definitionIndex]
+			routes[i].handler = text[match[2]:match[3]]
+		}
+	}
+	return routes
+}
+
+func pythonRouterPrefixes(text string) map[string]string {
+	matches := pyRouterAssignRe.FindAllStringSubmatchIndex(text, -1)
+	prefixes := make(map[string]string, len(matches))
+	consumedUntil := 0
+	for _, match := range matches {
+		if match[0] < consumedUntil {
+			continue
+		}
+		args, end, ok := pythonCallArgs(text, match[1]-1)
+		if !ok {
+			continue
+		}
+		consumedUntil = end
+		if prefix, ok := pythonKeywordString(args, pyPrefixArgRe); ok {
+			prefixes[text[match[2]:match[3]]] = prefix
+		}
+	}
+	return prefixes
+}
+
+func pythonRoutePath(args string) string {
+	if path, ok := pythonKeywordString(args, pyPathArgRe); ok {
+		return path
+	}
+	trimmed := strings.TrimSpace(args)
+	if trimmed == "" || (trimmed[0] != '"' && trimmed[0] != '\'') {
+		return ""
+	}
+	return extractFirstString(trimmed)
+}
+
+func pythonKeywordString(args string, re *regexp.Regexp) (string, bool) {
+	match := re.FindStringSubmatch(args)
+	if match == nil {
+		return "", false
+	}
+	if match[1] != "" {
+		return match[1], true
+	}
+	return match[2], true
+}
+
+// pythonCallArgs keeps decorators intact when their metadata contains nested
+// calls, comments, or multiline strings.
+func pythonCallArgs(text string, open int) (string, int, bool) {
+	if open < 0 || open >= len(text) || text[open] != '(' {
+		return "", 0, false
+	}
+	depth := 0
+	var quote byte
+	triple := false
+	comment := false
+	for i := open; i < len(text); i++ {
+		c := text[i]
+		if comment {
+			if c == '\n' {
+				comment = false
+			}
+			continue
+		}
+		if quote != 0 {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if triple {
+				if i+2 < len(text) && text[i] == quote && text[i+1] == quote && text[i+2] == quote {
+					quote = 0
+					triple = false
+					i += 2
+				}
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '#':
+			comment = true
+		case '\'', '"':
+			quote = c
+			triple = i+2 < len(text) && text[i+1] == c && text[i+2] == c
+			if triple {
+				i += 2
+			}
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return text[open+1 : i], i + 1, true
+			}
+		}
+	}
+	return "", 0, false
 }
 
 var (
@@ -161,30 +308,6 @@ func findPythonModuleRoot(root, file string) string {
 		current = parent
 	}
 	return current
-}
-
-var pyRouterPrefixRe = regexp.MustCompile(`APIRouter\([^)]*prefix\s*=\s*["']([^"']+)["']`)
-
-func extractPythonRouterPrefix(text string) string {
-	if m := pyRouterPrefixRe.FindStringSubmatch(text); m != nil {
-		return m[1]
-	}
-	return ""
-}
-
-var pyDefRe = regexp.MustCompile(`(?:async\s+)?def\s+(\w+)\s*\(`)
-
-func pythonHandlerName(lines []string, index int) string {
-	end := index + 4
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for i := index; i < end; i++ {
-		if m := pyDefRe.FindStringSubmatch(lines[i]); m != nil {
-			return m[1]
-		}
-	}
-	return ""
 }
 
 var (

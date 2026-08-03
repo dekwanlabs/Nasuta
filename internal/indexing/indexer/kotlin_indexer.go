@@ -168,8 +168,13 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 		if !strings.Contains(text, "@FeignClient") {
 			continue
 		}
+		text = stripJVMComments(text)
 		rel := relativeTo(root, file)
 		caller := inferKotlinServiceName(root, file)
+		modulePath := ""
+		if moduleRoot := findKotlinModuleRoot(root, file); moduleRoot != "" {
+			modulePath = relativeTo(root, moduleRoot)
+		}
 		iface := strings.TrimSuffix(filepath.Base(file), ".kt")
 		lines := strings.Split(text, "\n")
 		for i, line := range lines {
@@ -190,7 +195,7 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 				conf = 0.65
 			}
 			records = append(records, feignReference{
-				From: caller, ClientName: clientName, URL: targetURL,
+				From: caller, ModulePath: modulePath, ClientName: clientName, URL: targetURL,
 				Evidence: []domain.Evidence{{
 					Path: rel, Line: i + 1, Symbol: iface, Kind: domain.SourceCodeScan,
 				}},

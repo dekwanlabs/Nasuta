@@ -65,6 +65,9 @@ func ValidateScanInputs(root string, dirs []string) error {
 				}
 				return nil
 			}
+			if entry.Type()&fs.ModeSymlink != 0 {
+				return nil
+			}
 			if entry.IsDir() {
 				if _, skip := ignoredDirs[entry.Name()]; skip {
 					return filepath.SkipDir
@@ -119,6 +122,9 @@ func walkFiles(root string, dirs []string, match func(name string) bool) []strin
 			if err != nil {
 				return nil
 			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				return nil
+			}
 			if d.IsDir() {
 				if _, skip := ignoredDirs[d.Name()]; skip {
 					return filepath.SkipDir
@@ -154,9 +160,7 @@ func readFile(path string) string {
 	return string(b)
 }
 
-// collectAnnotation, extractAnnotationValue, mappingMethod,
-// isClassLevelMapping, javaMethodName and their regexps are Java-specific and
-// live in java.go next to their only callers.
+// Spring annotation helpers live in java.go and are shared by the JVM scanners.
 
 var firstStringRe = regexp.MustCompile(`["']([^"']*)["']`)
 

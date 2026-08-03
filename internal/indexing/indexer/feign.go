@@ -19,6 +19,7 @@ var configPlaceholderRe = regexp.MustCompile(`\$\{([^{}]+)\}`)
 
 type feignReference struct {
 	From       string
+	ModulePath string
 	ClientName string
 	URL        string
 	Evidence   []domain.Evidence

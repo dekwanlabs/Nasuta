@@ -3,7 +3,9 @@ package indexer
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/config"
@@ -140,6 +142,138 @@ func TestFeignConfigExpansionSupportsNestedDefaults(t *testing.T) {
 	}
 }
 
+func TestFeignScannersIgnoreJVMComments(t *testing.T) {
+	root := t.TempDir()
+	source := "repos/hsds/hsds-upgrade"
+	writeJavaService(t, root, source, "hsds-upgrade")
+	writeFile(t, root, source+"/src/main/java/com/example/UpgradeFeign.java", `package com.example;
+// @FeignClient(name = "ignored-line", url = "${ignored.line}")
+@FeignClient(value = "hsds-upgrade-provider"/*, url = "${ignored.block}"*/)
+public interface UpgradeFeign {}
+`)
+	writeFile(t, root, source+"/src/main/java/com/example/GatewayFeign.java", `package com.example;
+@FeignClient(name = "gateway", url = "https://gateway.example.com/api")
+public interface GatewayFeign {}
+`)
+	writeFile(t, root, source+"/src/main/kotlin/com/example/CatalogFeign.kt", `package com.example
+// @FeignClient(name = "ignored-kotlin", url = "${ignored.kotlin.line}")
+@FeignClient(name = "catalog", /* url = "${ignored.kotlin.block}" */)
+interface CatalogFeign
+`)
+
+	dirs := mustDiscoverScanDirs(t, root)
+	refs := append(scanFeignClients(root, dirs), scanKotlinFeigns(root, dirs)...)
+	if len(refs) != 3 {
+		t.Fatalf("Feign references = %#v, want three active annotations", refs)
+	}
+	got := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		got[ref.ClientName] = ref.URL
+	}
+	want := map[string]string{
+		"hsds-upgrade-provider": "",
+		"gateway":               "https://gateway.example.com/api",
+		"catalog":               "",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("Feign references = %#v, want %#v", got, want)
+	}
+}
+
+func TestFeignDependenciesResolveAgainstRuntimeConsumers(t *testing.T) {
+	root := t.TempDir()
+	base := "repos/team/shared-feign"
+	writeFile(t, root, base+"/pom.xml", `<project>
+  <groupId>com.example</groupId>
+  <artifactId>shared-feign</artifactId>
+  <packaging>pom</packaging>
+</project>`)
+	writeFile(t, root, base+"/client-lib/pom.xml", `<project>
+  <groupId>com.example</groupId>
+  <artifactId>client-lib</artifactId>
+</project>`)
+	writeFile(t, root, base+"/client-lib/src/main/java/com/example/SharedFeign.java", `package com.example;
+@FeignClient(name = "shared", url = "${shared.url}")
+public interface SharedFeign {}
+`)
+	writeFile(t, root, base+"/middle-lib/pom.xml", `<project>
+  <groupId>com.example</groupId>
+  <artifactId>middle-lib</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>client-lib</artifactId>
+    </dependency>
+  </dependencies>
+</project>`)
+	writeFile(t, root, base+"/service-a/pom.xml", `<project>
+  <groupId>com.example</groupId>
+  <artifactId>service-a</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>middle-lib</artifactId>
+    </dependency>
+  </dependencies>
+</project>`)
+	writeFile(t, root, base+"/service-a/src/main/java/com/example/ServiceAApplication.java",
+		"package com.example;\n@SpringBootApplication\npublic class ServiceAApplication {}\n")
+	writeFile(t, root, base+"/service-b/pom.xml", `<project>
+  <groupId>com.example</groupId>
+  <artifactId>service-b</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>client-lib</artifactId>
+    </dependency>
+  </dependencies>
+</project>`)
+	writeFile(t, root, base+"/service-b/src/main/java/com/example/ServiceBApplication.java",
+		"package com.example;\n@SpringBootApplication\npublic class ServiceBApplication {}\n")
+
+	var requested []config.Ref
+	resolver := configResolverFunc(func(
+		_ context.Context,
+		refs []config.Ref,
+	) (map[config.Ref]config.Value, error) {
+		requested = append(requested, refs...)
+		return map[config.Ref]config.Value{
+			{Application: "service-a", Key: "shared.url"}: {
+				Value: "https://a.example.com", Source: "config-center/na/application/service-a/shared.url",
+			},
+			{Application: "service-b", Key: "shared.url"}: {
+				Value: "https://b.example.com", Source: "config-center/na/application/service-b/shared.url",
+			},
+		}, nil
+	})
+
+	bundle, err := BuildBundleWithResolver(
+		context.Background(), root, mustDiscoverScanDirs(t, root), nil, resolver,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.SortFunc(requested, func(a, b config.Ref) int {
+		if a.Application != b.Application {
+			return strings.Compare(a.Application, b.Application)
+		}
+		return strings.Compare(a.Key, b.Key)
+	})
+	wantRequested := []config.Ref{
+		{Application: "service-a", Key: "shared.url"},
+		{Application: "service-b", Key: "shared.url"},
+	}
+	if !slices.Equal(requested, wantRequested) {
+		t.Fatalf("requested config refs = %#v, want %#v", requested, wantRequested)
+	}
+	if dependency := findDependencyFrom(bundle.Dependencies, "service-a", "a.example.com"); dependency == nil {
+		t.Fatalf("service-a dependency missing: %#v", bundle.Dependencies)
+	}
+	if dependency := findDependencyFrom(bundle.Dependencies, "service-b", "b.example.com"); dependency == nil {
+		t.Fatalf("service-b dependency missing: %#v", bundle.Dependencies)
+	}
+}
+
 func feignWorkspace(t *testing.T, applicationYAML string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -175,6 +309,15 @@ func writeJavaService(t *testing.T, root, base, artifactID string) {
 func findDependency(dependencies []domain.DependencyEdge, target string) *domain.DependencyEdge {
 	for i := range dependencies {
 		if dependencies[i].To == target {
+			return &dependencies[i]
+		}
+	}
+	return nil
+}
+
+func findDependencyFrom(dependencies []domain.DependencyEdge, from, target string) *domain.DependencyEdge {
+	for i := range dependencies {
+		if dependencies[i].From == from && dependencies[i].To == target {
 			return &dependencies[i]
 		}
 	}

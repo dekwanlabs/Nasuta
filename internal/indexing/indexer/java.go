@@ -123,8 +123,13 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 		if !strings.Contains(text, "@FeignClient") {
 			continue
 		}
+		text = stripJVMComments(text)
 		rel := relativeTo(root, file)
 		caller := inferJavaServiceName(root, file)
+		modulePath := ""
+		if moduleRoot := findModuleRoot(root, file, "pom.xml"); moduleRoot != "" {
+			modulePath = relativeTo(root, moduleRoot)
+		}
 		iface := strings.TrimSuffix(filepath.Base(file), ".java")
 		lines := strings.Split(text, "\n")
 		for i, line := range lines {
@@ -145,7 +150,7 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 				conf = 0.65
 			}
 			records = append(records, feignReference{
-				From: caller, ClientName: clientName, URL: targetURL,
+				From: caller, ModulePath: modulePath, ClientName: clientName, URL: targetURL,
 				Evidence: []domain.Evidence{{
 					Path: rel, Line: i + 1, Symbol: iface, Kind: domain.SourceCodeScan,
 				}},
@@ -167,35 +172,41 @@ func scanJavaEndpoints(root string, dirs []string) []domain.EndpointRecord {
 		}
 		rel := relativeTo(root, file)
 		serviceName := inferJavaServiceName(root, file)
-		classPrefix := extractClassRequestPrefix(text)
 		handler := strings.TrimSuffix(filepath.Base(file), ".java")
 		lines := strings.Split(text, "\n")
+		classLine := javaClassLine(lines)
+		classPrefixes := extractClassRequestPrefixes(lines, classLine)
 		for i, line := range lines {
-			method := mappingMethod(line)
-			if method == "" {
-				continue
-			}
-			if method == "ANY" && isClassLevelMapping(lines, i) {
+			annotationName := mappingAnnotationName(line)
+			if annotationName == "" || i < classLine {
 				continue
 			}
 			annotation := collectAnnotation(lines, i)
-			route := extractFirstString(annotation)
-			conf := 0.85
-			if route == "" {
-				conf = 0.6
+			methods := javaMappingMethods(annotationName, annotation)
+			routes := javaMappingPaths(annotation)
+			handlerMethod := javaMethodName(lines, i)
+			for _, classPrefix := range classPrefixes {
+				for _, route := range routes {
+					conf := 0.85
+					if route == "" {
+						conf = 0.6
+					}
+					for _, method := range methods {
+						records = append(records, domain.EndpointRecord{
+							ServiceName:   serviceName,
+							Repo:          topSegment(rel),
+							Method:        method,
+							Path:          joinPaths(classPrefix, route),
+							Handler:       handler,
+							HandlerMethod: handlerMethod,
+							File:          rel,
+							Line:          i + 1,
+							Source:        domain.SourceCodeScan,
+							Confidence:    conf,
+						})
+					}
+				}
 			}
-			records = append(records, domain.EndpointRecord{
-				ServiceName:   serviceName,
-				Repo:          topSegment(rel),
-				Method:        method,
-				Path:          joinPaths(classPrefix, route),
-				Handler:       handler,
-				HandlerMethod: javaMethodName(lines, i), // ★ codegraph anchor
-				File:          rel,
-				Line:          i + 1,
-				Source:        domain.SourceCodeScan,
-				Confidence:    conf,
-			})
 		}
 	}
 	return records
@@ -341,18 +352,24 @@ func inferModulePathFromRel(rel string) string {
 	return parts[0]
 }
 
-var (
-	requestMappingRe = regexp.MustCompile(`@RequestMapping\(([^)]*)\)`)
-	classSplitRe     = regexp.MustCompile(`public\s+class|class\s+`)
-)
-
-func extractClassRequestPrefix(text string) string {
-	beforeClass := classSplitRe.Split(text, 2)[0]
-	matches := requestMappingRe.FindAllStringSubmatch(beforeClass, -1)
-	if len(matches) == 0 {
-		return ""
+func javaClassLine(lines []string) int {
+	for i, line := range lines {
+		if classDeclRe.MatchString(line) {
+			return i
+		}
 	}
-	return extractFirstString(matches[len(matches)-1][1])
+	return len(lines)
+}
+
+func extractClassRequestPrefixes(lines []string, classLine int) []string {
+	prefixes := []string{""}
+	for i := 0; i < classLine; i++ {
+		if mappingAnnotationName(lines[i]) != "RequestMapping" {
+			continue
+		}
+		prefixes = javaMappingPaths(collectAnnotation(lines, i))
+	}
+	return prefixes
 }
 
 // collectAnnotation accumulates lines from start until parentheses balance,
@@ -388,29 +405,160 @@ func extractAnnotationValue(annotation string, names ...string) string {
 	return ""
 }
 
-func mappingMethod(line string) string {
+func mappingAnnotationName(line string) string {
 	switch {
 	case strings.Contains(line, "@GetMapping"):
-		return "GET"
+		return "GetMapping"
 	case strings.Contains(line, "@PostMapping"):
-		return "POST"
+		return "PostMapping"
 	case strings.Contains(line, "@PutMapping"):
-		return "PUT"
+		return "PutMapping"
 	case strings.Contains(line, "@DeleteMapping"):
-		return "DELETE"
+		return "DeleteMapping"
 	case strings.Contains(line, "@PatchMapping"):
-		return "PATCH"
+		return "PatchMapping"
 	case strings.Contains(line, "@RequestMapping"):
-		return "ANY"
+		return "RequestMapping"
 	}
 	return ""
 }
 
-var classDeclRe = regexp.MustCompile(`\b(class|interface)\s+\w+`)
+func mappingMethod(line string) string {
+	name := mappingAnnotationName(line)
+	if name == "" {
+		return ""
+	}
+	return javaMappingMethods(name, line)[0]
+}
 
 func isClassLevelMapping(lines []string, index int) bool {
 	end := min(index+6, len(lines))
 	return classDeclRe.MatchString(strings.Join(lines[index:end], "\n"))
+}
+
+var (
+	classDeclRe          = regexp.MustCompile(`\b(class|interface)\s+\w+`)
+	requestMappingRe     = regexp.MustCompile(`@RequestMapping\(([^)]*)\)`)
+	javaRequestMethodRe  = regexp.MustCompile(`RequestMethod\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)`)
+	javaQuotedStringRe   = regexp.MustCompile(`"(?:\\.|[^"\\])*"`)
+	javaAnnotationArgsRe = regexp.MustCompile(`(?s)^[^(]*\((.*)\)\s*$`)
+)
+
+func javaMappingMethods(name, annotation string) []string {
+	switch name {
+	case "GetMapping":
+		return []string{"GET"}
+	case "PostMapping":
+		return []string{"POST"}
+	case "PutMapping":
+		return []string{"PUT"}
+	case "DeleteMapping":
+		return []string{"DELETE"}
+	case "PatchMapping":
+		return []string{"PATCH"}
+	}
+	methodArg, ok := javaNamedArgument(annotation, "method")
+	if !ok {
+		return []string{"ANY"}
+	}
+	matches := javaRequestMethodRe.FindAllStringSubmatch(methodArg, -1)
+	if len(matches) == 0 {
+		return []string{"ANY"}
+	}
+	methods := make([]string, 0, len(matches))
+	seen := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		if _, ok := seen[match[1]]; ok {
+			continue
+		}
+		seen[match[1]] = struct{}{}
+		methods = append(methods, match[1])
+	}
+	return methods
+}
+
+func javaMappingPaths(annotation string) []string {
+	if path, ok := javaNamedArgument(annotation, "path"); ok {
+		return javaStringValues(path)
+	}
+	if value, ok := javaNamedArgument(annotation, "value"); ok {
+		return javaStringValues(value)
+	}
+	args := javaAnnotationArguments(annotation)
+	if len(args) == 0 {
+		return []string{""}
+	}
+	first := strings.TrimSpace(args[0])
+	for len(first) >= 2 && first[0] == '(' && first[len(first)-1] == ')' {
+		first = strings.TrimSpace(first[1 : len(first)-1])
+	}
+	if first == "" || (first[0] != '"' && first[0] != '{') {
+		return []string{""}
+	}
+	return javaStringValues(first)
+}
+
+func javaNamedArgument(annotation, name string) (string, bool) {
+	for _, arg := range javaAnnotationArguments(annotation) {
+		left, right, ok := strings.Cut(arg, "=")
+		if ok && strings.TrimSpace(left) == name {
+			return strings.TrimSpace(right), true
+		}
+	}
+	return "", false
+}
+
+func javaAnnotationArguments(annotation string) []string {
+	match := javaAnnotationArgsRe.FindStringSubmatch(strings.TrimSpace(annotation))
+	if match == nil {
+		return nil
+	}
+	args := strings.TrimSpace(match[1])
+	if args == "" {
+		return nil
+	}
+	parts := make([]string, 0, 3)
+	start, depth := 0, 0
+	inString, escaped := false, false
+	for i := 0; i < len(args); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case inString && args[i] == '\\':
+			escaped = true
+		case args[i] == '"':
+			inString = !inString
+		case inString:
+		case args[i] == '{' || args[i] == '(' || args[i] == '[':
+			depth++
+		case args[i] == '}' || args[i] == ')' || args[i] == ']':
+			depth--
+		case args[i] == ',' && depth == 0:
+			parts = append(parts, strings.TrimSpace(args[start:i]))
+			start = i + 1
+		}
+	}
+	parts = append(parts, strings.TrimSpace(args[start:]))
+	return parts
+}
+
+func javaStringValues(expression string) []string {
+	matches := javaQuotedStringRe.FindAllString(expression, -1)
+	if len(matches) == 0 {
+		return []string{""}
+	}
+	values := make([]string, 0, len(matches))
+	for _, match := range matches {
+		value, err := strconv.Unquote(match)
+		if err != nil {
+			continue
+		}
+		values = append(values, value)
+	}
+	if len(values) == 0 {
+		return []string{""}
+	}
+	return values
 }
 
 // javaMethodName extracts the method/field name from the first declaration
@@ -419,7 +567,7 @@ var javaMethodRe = regexp.MustCompile(`(?:public|protected|private)?\s*[\w<>\[\]
 
 func javaMethodName(lines []string, index int) string {
 	for i := index; i < len(lines); i++ {
-		if i > index && mappingMethod(lines[i]) != "" {
+		if i > index && mappingAnnotationName(lines[i]) != "" {
 			return ""
 		}
 		line := lines[i]
