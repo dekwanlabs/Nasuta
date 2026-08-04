@@ -502,13 +502,13 @@ func toDependencyResult(found domain.DependencyTrace) knowledge.DependencyResult
 
 // FindCode searches indexed code and returns typed hits for internal consumers.
 func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int) (domain.SearchResult[domain.CodeSearchHit], error) {
-	traceEnabled := domain.TraceEnabled(ctx)
 	if limit <= 0 {
 		limit = 10
 	}
 	if !srv.semanticEnabled() {
 		return domain.SearchResult[domain.CodeSearchHit]{}, fmt.Errorf("search_code requires semantic search and embedding configuration")
 	}
+	traceEnabled := domain.TraceEnabled(ctx)
 	embedStarted := time.Now()
 	vecs, err := srv.embedder.Embed(ctx, []string{query})
 	if err != nil || len(vecs) == 0 {
@@ -1161,6 +1161,9 @@ func (srv *Service) GetSymbolResult(ctx context.Context, query, file, qualifiedN
 	if limit <= 0 {
 		limit = 5
 	}
+	if limit < 2 {
+		limit = 2
+	}
 	if limit > 10 {
 		limit = 10
 	}
@@ -1176,41 +1179,68 @@ func (srv *Service) GetSymbolResult(ctx context.Context, query, file, qualifiedN
 	defer db.Close()
 
 	nodes, err := db.SearchSymbols(ctx, codegraph.SymbolQuery{
-		Terms: symbolQueryTokens(query), PathPrefixes: nonEmptyStrings(file), Limit: limit * 4,
+		Terms:        symbolQueryTokens(query),
+		PathPrefixes: nonEmptyStrings(file),
+		Limit:        40,
 	})
 	if err != nil {
 		return nil, err
 	}
+	nodes = exactSymbolCandidates(nodes, query, qualifiedName)
 	if len(nodes) == 0 {
-		return map[string]any{"matches": []any{}}, nil
+		return map[string]any{"resolution": "not_found", "matches": []any{}}, nil
+	}
+	if len(nodes) > 1 {
+		candidateLimit := min(limit, len(nodes))
+		candidates := make([]any, 0, candidateLimit)
+		for _, n := range nodes[:candidateLimit] {
+			candidates = append(candidates, map[string]any{
+				"kind": n.Kind, "qualifiedName": n.QualifiedName,
+				"file": n.FilePath, "line": n.StartLine,
+			})
+		}
+		return map[string]any{
+			"resolution": "ambiguous",
+			"candidates": candidates,
+		}, nil
 	}
 
-	// Build results with source from file system.
-	matches := make([]any, 0, limit)
-	added := 0
+	n := nodes[0]
+	source, err := readNodeSource(root, n)
+	if err != nil {
+		return nil, err
+	}
+	match := map[string]any{
+		"id": n.ID, "function": n.Name, "qualifiedName": n.QualifiedName,
+		"kind": n.Kind, "file": n.FilePath, "line": n.StartLine, "source": source,
+	}
+	return map[string]any{"resolution": "unique", "matches": []any{match}}, nil
+}
+
+func exactSymbolCandidates(nodes []codegraph.Node, query, qualifiedName string) []codegraph.Node {
+	out := make([]codegraph.Node, 0, len(nodes))
+	seen := make(map[string]struct{}, len(nodes))
 	for _, n := range nodes {
-		if added >= limit {
-			break
-		}
-		// Skip non-callable kinds.
 		switch n.Kind {
 		case "field", "import", "namespace", "file", "constant":
 			continue
 		}
-		if qualifiedName != "" && !strings.EqualFold(n.QualifiedName, qualifiedName) {
+		if qualifiedName != "" {
+			if !strings.EqualFold(n.QualifiedName, qualifiedName) {
+				continue
+			}
+		} else if !strings.EqualFold(n.Name, query) && !strings.EqualFold(n.QualifiedName, query) {
 			continue
 		}
-		source, err := readNodeSource(root, n)
-		if err != nil {
-			return nil, err
+		key := strings.ToLower(n.FilePath) + "\x00" +
+			strings.ToLower(n.QualifiedName) + "\x00" + strings.ToLower(n.Kind)
+		if _, ok := seen[key]; ok {
+			continue
 		}
-		matches = append(matches, map[string]any{
-			"id": n.ID, "function": n.Name, "qualifiedName": n.QualifiedName,
-			"kind": n.Kind, "file": n.FilePath, "line": n.StartLine, "source": source,
-		})
-		added++
+		seen[key] = struct{}{}
+		out = append(out, n)
 	}
-	return map[string]any{"matches": matches}, nil
+	return out
 }
 
 func nonEmptyStrings(value string) []string {

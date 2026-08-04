@@ -230,7 +230,7 @@ func prepareBatch(candidates []Tool) ([]Tool, error) {
 }
 
 func cloneSchema(schema JSONSchema) JSONSchema {
-	return cloneMap(map[string]any(schema))
+	return cloneMap(schema)
 }
 
 func cloneMap(source map[string]any) map[string]any {

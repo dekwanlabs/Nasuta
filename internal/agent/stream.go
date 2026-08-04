@@ -9,6 +9,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -164,14 +165,16 @@ type SSEEvent struct {
 
 // RunTerminal is the sole real-time projection of one persisted Run outcome.
 type RunTerminal struct {
-	RunID           string          `json:"run_id"`
-	Status          RunStatus       `json:"status"`
-	Answer          string          `json:"answer,omitempty"`
-	StepCount       int             `json:"step_count"`
-	TokenUsed       int             `json:"token_used"`
-	Error           string          `json:"error,omitempty"`
-	Evidence        EvidenceMetrics `json:"evidence"`
-	SessionMessages []llm.Message   `json:"-"`
+	RunID           string               `json:"run_id"`
+	Status          RunStatus            `json:"status"`
+	Answer          string               `json:"answer,omitempty"`
+	StepCount       int                  `json:"step_count"`
+	TokenUsed       int                  `json:"token_used"`
+	References      []retrieval.Reference `json:"references,omitempty"`
+	HitCount        int                  `json:"hit_count"`
+	Error           string               `json:"error,omitempty"`
+	Evidence        EvidenceMetrics      `json:"evidence"`
+	SessionMessages []llm.Message        `json:"-"`
 }
 
 func TerminalFromEvent(event SSEEvent) *RunTerminal {
@@ -351,6 +354,8 @@ func (hub *RunHub) Complete(runID string, outcome RunOutcome) {
 	terminal := &RunTerminal{
 		RunID: runID, Status: outcome.Status, Answer: outcome.Answer,
 		StepCount: outcome.StepCount, TokenUsed: outcome.TokenUsed,
+		References:      outcome.References,
+		HitCount:        outcome.HitCount,
 		Evidence:        outcome.Evidence,
 		SessionMessages: append([]llm.Message(nil), outcome.SessionMessages...),
 	}

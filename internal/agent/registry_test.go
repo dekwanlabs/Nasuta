@@ -20,9 +20,9 @@ func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 	checks := map[string][]string{
 		"get_service":     {"metadata", "does not establish dependencies"},
 		"trace_deps":      {"service-level", "does not establish method-level"},
-		"list_apis":       {"complete API routes", "class-level and method-level", "does not establish caller or callee"},
+		"list_apis":       {"complete API routes", "get_symbol must resolve that target uniquely first", "class-level and method-level", "does not establish caller or callee"},
 		"search_code":     {"fallback", "not as proof", "complete API route"},
-		"get_symbol":      {"exact definitions", "does not establish its callers"},
+		"get_symbol":      {"exact definitions", "first and only tool call", "including when the user ultimately asks for APIs", "does not establish its callers"},
 		"trace_calls":     {"method-level callers and callees", "upstream controller candidates", "not proof of complete service dependencies"},
 		"search_runbooks": {"operational runbooks", "copy matches[].docId exactly", "do not prove current runtime state"},
 		"check_docs":      {"documentation coverage", "does not establish runtime"},

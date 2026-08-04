@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -310,6 +311,92 @@ func TestGetSymbolResultRequiresLookupKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetSymbolResultResolvesExactCandidates(t *testing.T) {
+	workspace := writeSymbolTestWorkspace(t)
+	svc := NewTools(Deps{WorkspaceRoot: workspace})
+
+	ambiguous, err := svc.GetSymbolResult(context.Background(), "UserController", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguous["resolution"] != "ambiguous" {
+		t.Fatalf("resolution = %#v, want ambiguous", ambiguous["resolution"])
+	}
+	candidates, ok := ambiguous["candidates"].([]any)
+	if !ok || len(candidates) != 2 {
+		t.Fatalf("candidates = %#v, want two canonical targets", ambiguous["candidates"])
+	}
+
+	for name, query := range map[string]struct {
+		file          string
+		qualifiedName string
+	}{
+		"file":           {file: "repos/team/app/UserController.java"},
+		"qualified name": {qualifiedName: "app::UserController"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := svc.GetSymbolResult(
+				context.Background(), "UserController", query.file, query.qualifiedName, 5,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result["resolution"] != "unique" {
+				t.Fatalf("resolution = %#v, want unique", result["resolution"])
+			}
+			matches, ok := result["matches"].([]any)
+			if !ok || len(matches) != 1 {
+				t.Fatalf("matches = %#v, want one deduplicated target", result["matches"])
+			}
+		})
+	}
+}
+
+func writeSymbolTestWorkspace(t *testing.T) string {
+	t.Helper()
+	workspace := t.TempDir()
+	for _, path := range []string{
+		"repos/team/app/UserController.java",
+		"repos/team/admin/UserController.java",
+	} {
+		fullPath := filepath.Join(workspace, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte("class UserController {\n}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dbPath := filepath.Join(workspace, ".codegraph", "codegraph.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+CREATE TABLE nodes (
+ id TEXT PRIMARY KEY,kind TEXT NOT NULL,name TEXT NOT NULL,qualified_name TEXT NOT NULL,
+ file_path TEXT NOT NULL,language TEXT NOT NULL,start_line INTEGER NOT NULL,end_line INTEGER NOT NULL,
+ signature TEXT
+);
+CREATE TABLE edges (source TEXT,target TEXT,kind TEXT);
+CREATE VIRTUAL TABLE nodes_fts USING fts5(id,name,qualified_name,docstring,signature,content='nodes',content_rowid='rowid');
+INSERT INTO nodes VALUES
+ ('app','class','UserController','app::UserController','repos/team/app/UserController.java','java',1,2,'class UserController'),
+ ('app-duplicate','class','UserController','app::UserController','repos/team/app/UserController.java','java',1,2,'class UserController'),
+ ('admin','class','UserController','admin::UserController','repos/team/admin/UserController.java','java',1,2,'class UserController');
+INSERT INTO nodes_fts(rowid,id,name,qualified_name,signature)
+ SELECT rowid,id,name,qualified_name,signature FROM nodes;
+`); err != nil {
+		t.Fatal(err)
+	}
+	return workspace
 }
 
 type apiTargetRepository struct{}

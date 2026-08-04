@@ -16,6 +16,7 @@ const (
 	ReferenceRunbook ReferenceType = "runbook"
 	ReferenceService ReferenceType = "service"
 	ReferenceSymbol  ReferenceType = "symbol"
+	ReferenceCode    ReferenceType = "code"
 )
 
 // ReferenceInput declares which known entity types one argument accepts.

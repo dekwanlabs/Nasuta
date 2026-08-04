@@ -122,6 +122,29 @@ func TestAllAgentPromptsRequireEfficientImplementations(t *testing.T) {
 	}
 }
 
+func TestWorkspaceIdentifierAmbiguityUsesOneExactLookup(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"direct": directAgentSystemPrompt,
+		"tools":  agentToolPrompt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, required := range []string{
+				"first tool-calling turn MUST contain exactly one get_symbol call",
+				"no parallel",
+				"priority over API",
+				`resolution "ambiguous"`,
+				"list the returned file or qualified-name candidates",
+				"do not call another tool or answer the original question",
+				`result is "unique"`,
+			} {
+				if !strings.Contains(prompt, required) {
+					t.Fatalf("prompt missing result-driven ambiguity policy %q", required)
+				}
+			}
+		})
+	}
+}
+
 func TestSystemPromptDoesNotAllowInferenceToCompleteRuntimeChains(t *testing.T) {
 	for _, must := range []string{
 		"Inference must never create a missing execution hop",

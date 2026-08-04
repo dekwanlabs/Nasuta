@@ -857,7 +857,7 @@ func TestRun_PreservesPartialAnswerWhenLoopDeadlineExpires(t *testing.T) {
 	if got := strings.Join(observer.tokens, ""); got != result.Answer {
 		t.Fatalf("streamed answer = %q, want %q", got, result.Answer)
 	}
-	if outcome := outcomeFor(result, nil); outcome.Status != RunStatusFailed {
+	if outcome := outcomeFor(result, nil, nil); outcome.Status != RunStatusFailed {
 		t.Fatalf("outcome = %#v, want failed partial answer", outcome)
 	}
 }
@@ -887,7 +887,7 @@ func TestRun_PreservesPartialForcedConclusionWhenDeadlineExpires(t *testing.T) {
 	if got := strings.Join(observer.tokens, ""); got != result.Answer {
 		t.Fatalf("streamed conclusion = %q, want %q", got, result.Answer)
 	}
-	if outcome := outcomeFor(result, nil); outcome.Status != RunStatusFailed {
+	if outcome := outcomeFor(result, nil, nil); outcome.Status != RunStatusFailed {
 		t.Fatalf("outcome = %#v, want failed partial answer", outcome)
 	}
 }

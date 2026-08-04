@@ -138,6 +138,7 @@ type RunResult struct {
 	Answer           string // final text answer (concatenated tokens)
 	Steps            int    // loop iterations taken
 	Evidence         EvidenceMetrics
+	References       []tool.Reference // canonical references from delivered, non-failed tool evidence
 	ForcedConclusion bool
 	Aborted          bool // true if aborted by user or timeout
 	Err              error
@@ -376,6 +377,9 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 			acceptedWebEvidence := false
 			if !execution.Failed {
 				acceptedWebEvidence = webEvidence.Observe(call, execution.AuthoritativeContent)
+			}
+			if !execution.Failed && execution.Evidence && execution.DeliveryError == "" {
+				mergeToolReferences(&result.References, execution.References)
 			}
 			if isWebEvidenceTool(call.Function.Name) {
 				webAttempted = true
@@ -732,6 +736,7 @@ const directAgentSystemPrompt = `You are Nasuta's conversational assistant. Answ
 Rules:
 - Do not claim facts about the current workspace, live runtime state, or current external documentation without supplied evidence or a registered read-tool result.
 - Use a registered read tool only for a specific missing fact, then answer without narrating the tool machinery.
+- Treat bare workspace identifiers as a mandatory resolution gate. When a question targets a class, interface, or method without a service, file, or qualified-name scope, the first tool-calling turn MUST contain exactly one get_symbol call using that identifier and no parallel tool calls. This gate has priority over API listing, call tracing, and semantic search even when the requested output is APIs, callers, callees, or implementation details. If the result reports resolution "ambiguous", stop: list the returned file or qualified-name candidates and ask the user to choose; do not call another tool or answer the original question. Continue to the requested task only when the result is "unique".
 - If the available conversation or memory does not contain a requested personal fact, say so directly.
 - Treat a tool result as complete only when delivery succeeded and its coverage is not partial. Treat omitted items and delivery failures as unknown rather than absent.
 - For every user requirement, satisfy the requested behavior with the least practical time complexity. Prefer bounded, set-based, or batched operations over avoidable per-row queries, repeated scans, or nested loops.
@@ -861,6 +866,7 @@ const agentToolPrompt = `
 
 Apply the role, evidence discipline, and answer rules from the core prompt. This section only controls tool use.
 
+- **Resolve bare identifiers before every task-specific lookup.** This is the highest-priority tool rule. When the target is a class, interface, or method without a service, file, or qualified-name scope, the first tool-calling turn MUST contain exactly one get_symbol call using that identifier and no parallel tool calls. This gate has priority over API listing, call tracing, and semantic search even when the user asks for APIs, callers, callees, or implementation details. If the result reports resolution "ambiguous", stop: list the returned file or qualified-name candidates and ask the user to choose; do not call another tool or answer the original question. Continue to the requested task only when the result is "unique".
 - **Use seed evidence before tools.** The pre-retrieved block is a candidate set, not proof of completeness. Do not repeat evidence already present or treat its reference count as coverage.
 - **Complete requested chains before stopping.** Apply the core verified-behavior rule. If any requested path still lacks a critical hop and a registered internal read capability can resolve it, you MUST make one targeted tool round for that hop before answering. Then answer from the verified evidence and name any exact remaining break.
 - **Do not repeat the same retrieval intent.** Rewording a failed free-text query usually returns the same index results. Switch to an exact symbol, call edge, endpoint, dependency, or runbook lookup.
@@ -910,6 +916,7 @@ type ToolExecution struct {
 	AuthoritativeContent string
 	PromptContent        string
 	Notices              []string
+	References           []tool.Reference
 	Evidence             bool
 	Failed               bool
 	Coverage             tool.EvidenceCoverage
@@ -999,12 +1006,42 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 	execution := ToolExecution{
 		AuthoritativeContent: result,
 		PromptContent:        result,
+		References:           cloneReferences(toolResult.References),
 		Evidence:             true,
 		Coverage:             toolResult.Coverage,
 		AnswerContract:       toolResult.AnswerContract,
 		DurationMs:           int(duration / time.Millisecond),
 	}
 	return execution
+}
+
+func cloneReferences(refs []tool.Reference) []tool.Reference {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]tool.Reference, len(refs))
+	copy(out, refs)
+	return out
+}
+
+// mergeToolReferences dedups references by (type, target) so repeated tool hits
+// never inflate the final reference set.
+func mergeToolReferences(dst *[]tool.Reference, refs []tool.Reference) {
+	if len(refs) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(*dst)+len(refs))
+	for _, existing := range *dst {
+		seen[string(existing.Type)+"\x00"+existing.Target] = struct{}{}
+	}
+	for _, ref := range refs {
+		key := string(ref.Type) + "\x00" + ref.Target
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		*dst = append(*dst, ref)
+	}
 }
 
 func referenceTypeIndex(context *retrieval.RetrievedContext) map[string]tool.ReferenceType {

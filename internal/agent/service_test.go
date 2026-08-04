@@ -37,7 +37,7 @@ func TestOutcomeForRejectsEmptySuccess(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			outcome := outcomeFor(test.result, test.runErr)
+			outcome := outcomeFor(test.result, nil, test.runErr)
 			if outcome.Status != test.status {
 				t.Fatalf("status = %s, want %s", outcome.Status, test.status)
 			}

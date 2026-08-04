@@ -50,7 +50,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		"query":          propString("Function, method, class, or interface name; do not pass a service name, document title, or runbook ID."),
 		"file":           propString("Optional canonical repos/... path scope."),
 		"qualified_name": propString("Optional exact qualified name; may be used without query."),
-		"limit":          propInt("Max nodes to return (default 5, max 10)."),
+		"limit":          propInt("Max nodes to return (default 5, min 2, max 10)."),
 	}
 	symbolSchema := objectSchema(symbolProperties, nil)
 	tools := []Tool{
@@ -93,6 +93,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 		{
 			ID: "list_apis",
 			Description: "Authoritatively look up indexed complete API routes by service and/or a path, controller, or handler keyword. " +
+				"Do not use this as the first lookup for a bare class, interface, method, controller, or handler with no service, file, or qualified-name scope; get_symbol must resolve that target uniquely first. " +
 				"Use this to locate a runtime endpoint before querying logs; omit service when ownership is unknown. Java routes combine class-level and method-level mappings. " +
 				"This endpoint inventory does not establish caller or callee relationships. Trace callers to find an upstream controller, then use this lookup again to resolve that controller's complete route. Do not compose a route from partial code annotations.",
 			Kind:        ToolKindRead,
@@ -116,17 +117,25 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"lang":  propString("Optional language filter, e.g. java, python, go, sql, yaml."),
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
-			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.CodeSearchResult(ctx, args.String("query"), args.String("lang"), args.Int("limit", 10))
+			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
+				result, err := svc.SearchCode(ctx, knowledge.CodeSearchQuery{
+					Query: args.String("query"), Lang: args.String("lang"), Limit: args.Int("limit", 10),
+				})
 				if err != nil {
-					return "", err
+					return tool.Result{}, err
 				}
-				return marshalResult(result)
+				content, err := marshalResult(result)
+				if err != nil {
+					return tool.Result{}, err
+				}
+				return tool.Result{Content: content, References: codeRefs(result.Matches)}, nil
 			}),
 		},
 		{
 			ID: "get_symbol",
 			Description: "Query the codegraph index for exact definitions and source bodies of functions, methods, classes, or interfaces. " +
+				"For a bare class, interface, or method with no service, file, or qualified-name scope, this must be the first and only tool call in the initial tool round, including when the user ultimately asks for APIs or call relationships. " +
+				"Returns a unique definition, an explicit bounded ambiguity candidate list, or not_found. " +
 				"A definition does not establish its callers or callees; use call tracing for those edges.",
 			Kind:        ToolKindRead,
 			InputSchema: symbolSchema,
@@ -182,19 +191,23 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"doc_id": propString("Optional canonical document ID copied exactly from matches[].docId. Never use a title, path, filename, or document content."),
 				"limit":  propInt("Max documents or scoped chunks (default 3, max 10)."),
 			}, []string{"query"}),
-			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
+			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
 				query := args.String("query")
 				if query == "" {
-					return "", fmt.Errorf("search runbooks: query is required")
+					return tool.Result{}, fmt.Errorf("search runbooks: query is required")
 				}
-				result, err := svc.RunbookSearchResult(ctx, knowledge.RunbookQuery{
+				result, err := svc.SearchRunbooks(ctx, knowledge.RunbookQuery{
 					Query: query, DocID: args.String("doc_id"),
 					Limit: args.BoundedInt("limit", 3, 1, 10),
 				})
 				if err != nil {
-					return "", err
+					return tool.Result{}, err
 				}
-				return marshalResult(result)
+				content, err := marshalResult(result)
+				if err != nil {
+					return tool.Result{}, err
+				}
+				return tool.Result{Content: content, References: runbookRefs(result.Matches)}, nil
 			}),
 		},
 		{
@@ -386,4 +399,36 @@ func marshalResult(value any) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// codeRefs derives canonical code references from search_result code hits.
+// Each reference targets the normalized repos/... path so the evaluator can
+// match it against a declaration verbatim.
+func codeRefs(hits []knowledge.CodeSearchHit) []tool.Reference {
+	refs := make([]tool.Reference, 0, len(hits))
+	for _, hit := range hits {
+		if hit.Path == "" {
+			continue
+		}
+		label := hit.Path
+		if hit.StartLine > 0 {
+			label = fmt.Sprintf("%s:L%d", hit.Path, hit.StartLine)
+		}
+		refs = append(refs, tool.Reference{Type: tool.ReferenceCode, Label: label, Target: hit.Path})
+	}
+	return refs
+}
+
+// runbookRefs derives canonical runbook references from search_runbooks hits.
+// Each reference targets the document id (docID) which is the authoritative
+// identity the evaluator matches against.
+func runbookRefs(hits []knowledge.RunbookSearchHit) []tool.Reference {
+	refs := make([]tool.Reference, 0, len(hits))
+	for _, hit := range hits {
+		if hit.DocID == "" {
+			continue
+		}
+		refs = append(refs, tool.Reference{Type: tool.ReferenceRunbook, Label: hit.Title, Target: hit.DocID})
+	}
+	return refs
 }

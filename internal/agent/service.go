@@ -806,7 +806,7 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 
 	go func() {
 		res, runErr := svc.agent.runWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, snapshot)
-		outcome := outcomeFor(res, runErr)
+		outcome := outcomeFor(res, contextReferences(rc), runErr)
 		if outcome.Status == RunStatusDone {
 			if err := svc.persistSessionTurn(context.WithoutCancel(ctx), runID, conversation.SessionID, userID, question, outcome); err != nil {
 				log.ErrorfCtx(ctx, "[qa] persist completed run %s session turn: %v", runID, err)
@@ -1625,10 +1625,12 @@ type RunOutcome struct {
 	Answer          string
 	SessionMessages []llm.Message
 	Evidence        EvidenceMetrics
+	References      []retrieval.Reference
+	HitCount        int
 	Err             error
 }
 
-func outcomeFor(result *RunResult, runErr error) RunOutcome {
+func outcomeFor(result *RunResult, preRetrieved []retrieval.Reference, runErr error) RunOutcome {
 	if result == nil {
 		if runErr == nil {
 			runErr = errors.New("agent: run returned no result")
@@ -1644,7 +1646,9 @@ func outcomeFor(result *RunResult, runErr error) RunOutcome {
 		Answer:          result.Answer,
 		SessionMessages: append([]llm.Message(nil), result.SessionMessages...),
 		Evidence:        result.Evidence,
+		References:      mergeOutcomeReferences(preRetrieved, result.References),
 	}
+	outcome.HitCount = len(outcome.References)
 	if outcome.Evidence.Status == "" {
 		outcome.Evidence.Status = EvidenceUnavailable
 	}
@@ -1665,6 +1669,40 @@ func outcomeFor(result *RunResult, runErr error) RunOutcome {
 		outcome.Status = RunStatusDone
 	}
 	return outcome
+}
+
+// contextReferences returns the pre-retrieval references carried by the
+// retrieved context, or nil when none were assembled.
+func contextReferences(rc *retrieval.RetrievedContext) []retrieval.Reference {
+	if rc == nil {
+		return nil
+	}
+	return rc.References
+}
+
+// mergeOutcomeReferences unions the pre-retrieval references with the dynamic
+// tool-derived references, converting the latter to the retrieval schema and
+// deduplicating by (type, target) so the final set is canonical.
+func mergeOutcomeReferences(preRetrieved []retrieval.Reference, dynamic []tool.Reference) []retrieval.Reference {
+	merged := make([]retrieval.Reference, 0, len(preRetrieved)+len(dynamic))
+	seen := make(map[string]struct{}, len(preRetrieved)+len(dynamic))
+	for _, ref := range preRetrieved {
+		key := ref.Type + "\x00" + ref.Target
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, ref)
+	}
+	for _, ref := range dynamic {
+		key := string(ref.Type) + "\x00" + ref.Target
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, retrieval.Reference{Type: string(ref.Type), Label: ref.Label, Target: ref.Target})
+	}
+	return merged
 }
 
 type RunRecord struct {
