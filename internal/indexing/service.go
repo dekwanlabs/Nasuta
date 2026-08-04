@@ -238,6 +238,8 @@ func (svc *Service) RebuildGraph(ctx context.Context) error {
 var codegraphRuntimeExcludes = []string{
 	".nasuta/",
 	".codeloom/",
+	".claude/",
+	".codex/",
 	".docs/",
 	"docs/",
 }

@@ -47,3 +47,53 @@ func TestScanInputsSkipSymbolicLinks(t *testing.T) {
 		t.Fatalf("walkFiles = %v, want only %q", files, source)
 	}
 }
+
+func TestWalkFilesSkipsAgentMetadataDirectories(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repos", "group", "service")
+	source := filepath.Join(repoDir, "main.go")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".claude", ".codex"} {
+		dir := filepath.Join(repoDir, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "ignored.go"), []byte("package ignored\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dirs := []string{filepath.Join("repos", "group", "service")}
+	files := walkFiles(root, dirs, hasSuffix(".go"))
+	if len(files) != 1 || files[0] != source {
+		t.Fatalf("walkFiles = %v, want only %q", files, source)
+	}
+}
+
+func TestLanguageDetectionSkipsAgentMetadataDirectories(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{".claude", ".codex"} {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "FakeApplication.kt"), []byte("class FakeApplication\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "FakeApplication.java"), []byte("class FakeApplication {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := readAndroidLang(root); got != "java" {
+		t.Fatalf("readAndroidLang = %q, want java", got)
+	}
+	if hasApplicationFile(root) {
+		t.Fatal("hasApplicationFile found an entrypoint in agent metadata")
+	}
+}

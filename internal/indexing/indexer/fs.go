@@ -14,12 +14,18 @@ import (
 
 var ignoredDirs = map[string]struct{}{
 	"target": {}, ".git": {}, "node_modules": {}, ".venv": {}, "venv": {},
-	"dist": {}, "build": {}, ".idea": {}, platform.WorkspaceMetadataDir: {}, "__pycache__": {},
+	"dist": {}, "build": {}, ".idea": {}, ".claude": {}, ".codex": {},
+	platform.WorkspaceMetadataDir: {}, "__pycache__": {},
 	"bin": {}, "obj": {}, // .NET/C# build output
 	".dart_tool":  {},               // Dart/Flutter tool cache
 	"DerivedData": {}, ".build": {}, // Swift/Xcode build output
 	".gradle":           {},                            // Gradle/Kotlin cache
 	"cmake-build-debug": {}, "cmake-build-release": {}, // C/C++ CMake build
+}
+
+func ignoredDirectory(name string) bool {
+	_, ignored := ignoredDirs[name]
+	return ignored
 }
 
 // DiscoverScanDirs lists project directories under root that should be scanned.
@@ -69,7 +75,7 @@ func ValidateScanInputs(root string, dirs []string) error {
 				return nil
 			}
 			if entry.IsDir() {
-				if _, skip := ignoredDirs[entry.Name()]; skip {
+				if ignoredDirectory(entry.Name()) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -126,7 +132,7 @@ func walkFiles(root string, dirs []string, match func(name string) bool) []strin
 				return nil
 			}
 			if d.IsDir() {
-				if _, skip := ignoredDirs[d.Name()]; skip {
+				if ignoredDirectory(d.Name()) {
 					return filepath.SkipDir
 				}
 				return nil

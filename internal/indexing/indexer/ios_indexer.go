@@ -23,7 +23,7 @@ func scanIOSServices(root string, dirs []string) []domain.ServiceRecord {
 				return nil
 			}
 			if d.IsDir() {
-				if _, skip := ignoredDirs[d.Name()]; skip {
+				if ignoredDirectory(d.Name()) {
 					return filepath.SkipDir
 				}
 				if strings.HasSuffix(d.Name(), ".xcodeproj") || strings.HasSuffix(d.Name(), ".xcworkspace") {
@@ -167,8 +167,11 @@ func detectIOSLang(dir string) string {
 	// Check whether this iOS project uses Swift or Objective-C
 	swiftCount, objcCount := 0, 0
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			if d != nil && (d.Name() == "Pods" || d.Name() == "DerivedData" || strings.HasPrefix(d.Name(), ".")) {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if ignoredDirectory(d.Name()) || d.Name() == "Pods" || strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil

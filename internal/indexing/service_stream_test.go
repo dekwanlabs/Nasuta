@@ -77,6 +77,14 @@ func TestEnsureCodegraphConfigPreservesExistingSettings(t *testing.T) {
 	}
 }
 
+func TestCodegraphRuntimeExcludesAgentMetadataDirectories(t *testing.T) {
+	for _, pattern := range []string{".claude/", ".codex/"} {
+		if !slices.Contains(codegraphRuntimeExcludes, pattern) {
+			t.Fatalf("codegraph runtime excludes missing %q", pattern)
+		}
+	}
+}
+
 func TestEnsureCodegraphConfigRejectsInvalidExistingConfig(t *testing.T) {
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "codegraph.json")

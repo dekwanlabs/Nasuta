@@ -251,6 +251,10 @@ var hashModuleSourceExts = map[string]bool{
 	".rb": true, ".php": true,
 }
 
+var hashOnlySkipDirs = map[string]bool{
+	"test": true, "tests": true, "bin": true, "obj": true, ".dart_tool": true,
+}
+
 func isHashModuleFile(name string) bool {
 	if hashModuleSourceExts[strings.ToLower(filepath.Ext(name))] {
 		return true
@@ -276,8 +280,7 @@ func hashModule(dir string) string {
 			return nil
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case "target", ".git", "node_modules", ".venv", "venv", "build", "dist", "__pycache__", "test", "tests", "bin", "obj", ".dart_tool", "DerivedData", ".build", ".gradle", "cmake-build-debug", "cmake-build-release":
+			if skipDirectory(d.Name()) || hashOnlySkipDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil

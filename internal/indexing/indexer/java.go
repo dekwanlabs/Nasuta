@@ -301,7 +301,13 @@ func hasApplicationFile(dir string) bool {
 		if err != nil || found {
 			return nil
 		}
-		if !d.IsDir() && strings.HasSuffix(d.Name(), "Application.java") {
+		if d.IsDir() {
+			if ignoredDirectory(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), "Application.java") {
 			found = true
 		}
 		return nil

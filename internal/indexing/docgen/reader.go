@@ -39,12 +39,17 @@ var sourceExts = map[string]bool{
 var skipDirs = map[string]bool{
 	".git": true, "build": true, "cmake-build-debug": true, "cmake-build-release": true,
 	"node_modules": true, ".venv": true, "venv": true, "__pycache__": true,
+	".claude": true, ".codex": true,
 	"Pods": true, ".build": true, "DerivedData": true, "Carthage": true,
 	"target": true, ".gradle": true, ".idea": true, ".vscode": true,
 	"vendor": true, "third_party": true, "thirdparty": true,
 	"dist": true, ".next": true, ".nuxt": true, "out": true,
 	"coverage": true, ".nyc_output": true,
 	".tox": true, ".eggs": true, "*.egg-info": true,
+}
+
+func skipDirectory(name string) bool {
+	return skipDirs[name]
 }
 
 // fileEntry is one collected file.
@@ -61,7 +66,7 @@ func collectProjectFiles(dir string) string {
 
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
-			if d != nil && skipDirs[d.Name()] {
+			if d != nil && skipDirectory(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil

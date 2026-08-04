@@ -136,7 +136,13 @@ func readAndroidLang(dir string) string {
 	// Check whether this Android project uses Kotlin or Java
 	hasKt := false
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || hasKt || d.IsDir() {
+		if err != nil || hasKt {
+			return nil
+		}
+		if d.IsDir() {
+			if ignoredDirectory(d.Name()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if strings.HasSuffix(d.Name(), ".kt") {
