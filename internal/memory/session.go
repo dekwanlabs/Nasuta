@@ -186,18 +186,7 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 	}
 	if len(r.Messages) > 0 {
 		turnNos, turns := assignSessionTurns(r.Messages)
-		placeholders := make([]string, len(r.Messages))
-		args := make([]any, 0, len(r.Messages)*9)
-		for i, m := range r.Messages {
-			toolCalls, err := marshalToolCalls(m.ToolCalls)
-			if err != nil {
-				return fmt.Errorf("memory/session: encode message %d tool calls: %w", i, err)
-			}
-			placeholders[i] = "(?,?,?,?,?,?,?,?,?)"
-			args = append(args, r.ID, i, turnNos[i], m.Role, m.Content, toolCalls, m.ToolCallID, m.Name, store.DatabaseTime(r.UpdatedAt))
-		}
-		query := "INSERT INTO qa_messages(session_id,seq,turn_no,role,content,tool_calls_json,tool_call_id,tool_name,created_at) VALUES " + strings.Join(placeholders, ",")
-		if _, err := tx.Exec(query, args...); err != nil {
+		if err := insertSessionMessages(tx, r.ID, 0, turnNos, r.Messages, r.UpdatedAt); err != nil {
 			return err
 		}
 		if err := insertSessionTurns(tx, r.ID, turns, r.UpdatedAt); err != nil {
@@ -448,7 +437,7 @@ func (ss *SessionStore) ListTurnsBefore(id string, userID int64, beforeSeq, limi
 	return page, nil
 }
 
-// AppendTurn assigns one durable turn number to an atomic user-to-answer group.
+// AppendTurn atomically records the model-visible protocol for audit and replay.
 func (ss *SessionStore) AppendTurn(sessionID, runID string, userID int64, msgs []llm.Message) (int, error) {
 	if len(msgs) == 0 {
 		return 0, nil
@@ -468,61 +457,31 @@ func (ss *SessionStore) AppendTurn(sessionID, runID string, userID int64, msgs [
 	if !exists {
 		return 0, fmt.Errorf("memory/session: session %q not found", sessionID)
 	}
-	var existingTurn int
-	err = tx.QueryRow(
-		`SELECT turn_no FROM qa_turns WHERE session_id=? AND run_id=? LIMIT 1`,
-		sessionID, runID,
-	).Scan(&existingTurn)
-	if err == nil {
+	existingTurn, found, err := findSessionRunTurn(tx, sessionID, runID)
+	if err != nil {
+		return 0, err
+	}
+	if found {
 		return existingTurn, tx.Commit()
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("memory/session: find run %q in session %q: %w", runID, sessionID, err)
-	}
 
-	var maxSeq, maxTurn int
-	if err := tx.QueryRow(
-		`SELECT COALESCE((SELECT MAX(seq) FROM qa_messages WHERE session_id=?),-1),
-		        COALESCE((SELECT MAX(turn_no) FROM qa_turns WHERE session_id=?),0)`,
-		sessionID, sessionID).Scan(&maxSeq, &maxTurn); err != nil {
+	firstSeq, turnNo, err := nextSessionTurnPosition(tx, sessionID)
+	if err != nil {
 		return 0, err
 	}
-	turnNo := maxTurn + 1
 	now := time.Now().UTC().Format(time.RFC3339)
 	metadata := buildTurnMetadata(turnNo, runID, msgs, now)
-	entitiesJSON, err := encodeMetadataJSON(metadata.Entities)
-	if err != nil {
-		return 0, fmt.Errorf("memory/session: encode turn entities: %w", err)
+	turnNos := make([]int, len(msgs))
+	for i := range turnNos {
+		turnNos[i] = turnNo
 	}
-	termsJSON, err := encodeMetadataJSON(metadata.QuestionTerms)
-	if err != nil {
-		return 0, fmt.Errorf("memory/session: encode turn terms: %w", err)
-	}
-	manifestJSON, err := encodeMetadataJSON(metadata.EvidenceManifest)
-	if err != nil {
-		return 0, fmt.Errorf("memory/session: encode evidence manifest: %w", err)
-	}
-
-	placeholders := make([]string, len(msgs))
-	args := make([]any, 0, len(msgs)*9)
-	for i, m := range msgs {
-		toolCalls, err := marshalToolCalls(m.ToolCalls)
-		if err != nil {
-			return 0, fmt.Errorf("memory/session: encode appended message %d tool calls: %w", i, err)
-		}
-		placeholders[i] = "(?,?,?,?,?,?,?,?,?)"
-		args = append(args, sessionID, maxSeq+1+i, turnNo, m.Role, m.Content, toolCalls, m.ToolCallID, m.Name, store.DatabaseTime(now))
-	}
-	query := "INSERT INTO qa_messages(session_id,seq,turn_no,role,content,tool_calls_json,tool_call_id,tool_name,created_at) VALUES " + strings.Join(placeholders, ",")
-	if _, err := tx.Exec(query, args...); err != nil {
+	if err := insertSessionMessages(tx, sessionID, firstSeq, turnNos, msgs, now); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO qa_turns(session_id,turn_no,run_id,first_seq,last_seq,token_estimate,question_text,topic_key,
-		                       entities_json,question_terms_json,evidence_manifest_json,created_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		sessionID, turnNo, runID, maxSeq+1, maxSeq+len(msgs), metadata.TokenEstimate,
-		metadata.Question, metadata.TopicKey, entitiesJSON, termsJSON, manifestJSON, store.DatabaseTime(now)); err != nil {
+	turn := pendingSessionTurn{
+		no: turnNo, runID: runID, firstSeq: firstSeq, lastSeq: firstSeq + len(msgs) - 1, metadata: metadata,
+	}
+	if err := insertSessionTurns(tx, sessionID, []pendingSessionTurn{turn}, now); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(
@@ -772,8 +731,9 @@ func (ss *SessionStore) GetTurnDetail(sessionID string, userID int64, reference 
 }
 
 type pendingSessionTurn struct {
-	no, firstSeq, lastSeq, tokens int
-	metadata                      TurnMetadata
+	no, firstSeq, lastSeq int
+	runID                 string
+	metadata              TurnMetadata
 }
 
 func assignSessionTurns(messages []llm.Message) ([]int, []pendingSessionTurn) {
@@ -788,7 +748,6 @@ func assignSessionTurns(messages []llm.Message) ([]int, []pendingSessionTurn) {
 		turnNos[i] = turnNo
 		turn := &turns[len(turns)-1]
 		turn.lastSeq = i
-		turn.tokens += estimateSessionMessageTokens(message)
 	}
 	for i := range turns {
 		turn := &turns[i]
@@ -817,13 +776,71 @@ func insertSessionTurns(tx *sql.Tx, sessionID string, turns []pendingSessionTurn
 			return fmt.Errorf("memory/session: encode turn %d evidence manifest: %w", turn.no, err)
 		}
 		placeholders[i] = "(?,?,?,?,?,?,?,?,?,?,?,?)"
-		args = append(args, sessionID, turn.no, "", turn.firstSeq, turn.lastSeq, turn.tokens,
+		args = append(args, sessionID, turn.no, turn.runID, turn.firstSeq, turn.lastSeq, turn.metadata.TokenEstimate,
 			turn.metadata.Question, turn.metadata.TopicKey, entitiesJSON, termsJSON, manifestJSON, store.DatabaseTime(createdAt))
 	}
 	_, err := tx.Exec(
 		"INSERT INTO qa_turns(session_id,turn_no,run_id,first_seq,last_seq,token_estimate,question_text,topic_key,entities_json,question_terms_json,evidence_manifest_json,created_at) VALUES "+strings.Join(placeholders, ","),
 		args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("memory/session: insert turns for session %q: %w", sessionID, err)
+	}
+	return nil
+}
+
+func insertSessionMessages(
+	tx *sql.Tx,
+	sessionID string,
+	firstSeq int,
+	turnNos []int,
+	messages []llm.Message,
+	createdAt string,
+) error {
+	placeholders := make([]string, len(messages))
+	args := make([]any, 0, len(messages)*9)
+	for i, message := range messages {
+		toolCalls, err := marshalToolCalls(message.ToolCalls)
+		if err != nil {
+			return fmt.Errorf("memory/session: encode message %d tool calls: %w", i, err)
+		}
+		placeholders[i] = "(?,?,?,?,?,?,?,?,?)"
+		args = append(args, sessionID, firstSeq+i, turnNos[i], message.Role, message.Content,
+			toolCalls, message.ToolCallID, message.Name, store.DatabaseTime(createdAt))
+	}
+	_, err := tx.Exec(
+		"INSERT INTO qa_messages(session_id,seq,turn_no,role,content,tool_calls_json,tool_call_id,tool_name,created_at) VALUES "+strings.Join(placeholders, ","),
+		args...)
+	if err != nil {
+		return fmt.Errorf("memory/session: insert messages for session %q: %w", sessionID, err)
+	}
+	return nil
+}
+
+func findSessionRunTurn(tx *sql.Tx, sessionID, runID string) (int, bool, error) {
+	var turnNo int
+	err := tx.QueryRow(
+		`SELECT turn_no FROM qa_turns WHERE session_id=? AND run_id=? LIMIT 1`,
+		sessionID, runID,
+	).Scan(&turnNo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("memory/session: find run %q in session %q: %w", runID, sessionID, err)
+	}
+	return turnNo, true, nil
+}
+
+func nextSessionTurnPosition(tx *sql.Tx, sessionID string) (int, int, error) {
+	var maxSeq, maxTurn int
+	if err := tx.QueryRow(
+		`SELECT COALESCE((SELECT MAX(seq) FROM qa_messages WHERE session_id=?),-1),
+		        COALESCE((SELECT MAX(turn_no) FROM qa_turns WHERE session_id=?),0)`,
+		sessionID, sessionID,
+	).Scan(&maxSeq, &maxTurn); err != nil {
+		return 0, 0, fmt.Errorf("memory/session: find append position for session %q: %w", sessionID, err)
+	}
+	return maxSeq + 1, maxTurn + 1, nil
 }
 
 func estimateSessionTokens(messages []llm.Message) int {

@@ -1025,9 +1025,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 		seen[fp] = true
 	}
 
-	log.InfofCtx(ctx, "[agent] tool %s ok in %s (%d chars)", name, duration, len(result))
-	log.InfofCtx(ctx, "[agent] tool %s args: %s", name, platform.TruncateForLog(argSummary(args), 600))
-	log.InfofCtx(ctx, "[agent] tool %s result: %s", name, platform.TruncateForLog(result, 1200))
+	log.InfofCtx(ctx, "[agent] tool %s ok in %s (%d chars): args=%s result=%s", name, duration, len(result),
+		platform.TruncateForLog(argSummary(args), 600), platform.TruncateForLog(result, 1200))
 	execution := ToolExecution{
 		AuthoritativeContent: result,
 		PromptContent:        result,
