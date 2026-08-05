@@ -35,6 +35,10 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 		{group: GroupDocuments, tables: []string{"documents"}},
 		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_turn_contexts", "qa_session_history_terms", "qa_session_history_index_outbox"}},
 		{group: GroupQARun, tables: []string{"agent_runs", "agent_steps", "agent_tool_result_artifacts", "agent_llm_calls"}},
+		{group: GroupWorkflow, tables: []string{
+			"workflow_runs", "workflow_node_runs", "handoff_artifacts",
+			"workflow_events", "gate_decisions",
+		}},
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
 		{group: GroupIncident, tables: []string{"incident_records"}},
 		{group: GroupApproval, tables: []string{"pending_actions"}},
@@ -43,6 +47,9 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 			"feature_artifact_reviews", "feature_generation_runs",
 			"feature_implementation_runs", "feature_run_events",
 			"feature_change_sets", "feature_change_reviews",
+			"review_policies", "review_rounds", "review_assignments",
+			"review_reports", "review_findings", "review_finding_evidence",
+			"review_gate_results", "finding_resolutions",
 		}},
 	}
 	for _, tc := range cases {
@@ -173,6 +180,27 @@ func TestAgentEvidenceCoverageMigrationAddsRunAggregates(t *testing.T) {
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("agent evidence coverage migration missing %q", required)
+		}
+	}
+}
+
+func TestAgentDefinitionSnapshotMigrationPinsRunIdentity(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupQARun], "\n")
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_definition_snapshots.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read agent definition snapshot migration: %v", err)
+	}
+	for _, required := range []string{
+		"agent_id", "definition_version", "definition_hash", "tool_snapshot_id",
+		"input_schema_version", "output_schema_version", "parent_run_id",
+		"workflow_run_id", "workflow_node_id", "error_code",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("agent run schema missing %q", required)
+		}
+		if !strings.Contains(string(raw), "ADD COLUMN "+required) {
+			t.Fatalf("agent definition snapshot migration missing %q", required)
 		}
 	}
 }

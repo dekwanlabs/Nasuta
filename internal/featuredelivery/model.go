@@ -258,11 +258,14 @@ type ArtifactSummary struct {
 }
 
 type ArtifactReview struct {
-	ArtifactID string         `json:"artifact_id"`
-	Decision   ReviewDecision `json:"decision"`
-	Comment    string         `json:"comment"`
-	Reviewer   int64          `json:"reviewer"`
-	CreatedAt  time.Time      `json:"created_at"`
+	ArtifactID    string         `json:"artifact_id"`
+	SubjectHash   string         `json:"subject_hash"`
+	ReviewRoundID string         `json:"review_round_id"`
+	GateResultID  string         `json:"gate_result_id"`
+	Decision      ReviewDecision `json:"decision"`
+	Comment       string         `json:"comment"`
+	Reviewer      int64          `json:"reviewer"`
+	CreatedAt     time.Time      `json:"created_at"`
 }
 
 type GenerationRun struct {
@@ -445,11 +448,14 @@ type ChangeSet struct {
 }
 
 type ChangeReview struct {
-	RunID     string         `json:"run_id"`
-	Decision  ReviewDecision `json:"decision"`
-	Comment   string         `json:"comment"`
-	Reviewer  int64          `json:"reviewer"`
-	CreatedAt time.Time      `json:"created_at"`
+	RunID         string         `json:"run_id"`
+	SubjectHash   string         `json:"subject_hash"`
+	ReviewRoundID string         `json:"review_round_id"`
+	GateResultID  string         `json:"gate_result_id"`
+	Decision      ReviewDecision `json:"decision"`
+	Comment       string         `json:"comment"`
+	Reviewer      int64          `json:"reviewer"`
+	CreatedAt     time.Time      `json:"created_at"`
 }
 
 type Lineage struct {

@@ -237,28 +237,32 @@ func (store *FeatureDeliveryStore) ListArtifacts(ctx context.Context, requestID 
 const artifactSummarySelect = `SELECT
 	a.id,a.request_id,a.kind,a.version,a.parent_artifact_id,a.origin,
 	a.content_hash,a.created_by,a.created_at,
-	r.artifact_id,r.decision,r.comment,r.reviewer,r.created_at
+	r.artifact_id,r.subject_hash,r.review_round_id,r.gate_result_id,
+	r.decision,r.comment,r.reviewer,r.created_at
 	FROM feature_artifacts a
 	LEFT JOIN feature_artifact_reviews r ON r.artifact_id=a.id`
 
 func scanArtifactSummary(row rowScanner) (featuredelivery.ArtifactSummary, error) {
 	var artifact featuredelivery.ArtifactSummary
-	var reviewID, decision, comment sql.NullString
+	var reviewID, subjectHash, reviewRoundID, gateResultID, decision, comment sql.NullString
 	var reviewer sql.NullInt64
 	var reviewedAt sql.NullTime
 	err := row.Scan(
 		&artifact.ID, &artifact.RequestID, &artifact.Kind, &artifact.Version,
 		&artifact.ParentArtifactID, &artifact.Origin, &artifact.ContentHash,
 		&artifact.CreatedBy, &artifact.CreatedAt,
-		&reviewID, &decision, &comment, &reviewer, &reviewedAt,
+		&reviewID, &subjectHash, &reviewRoundID, &gateResultID,
+		&decision, &comment, &reviewer, &reviewedAt,
 	)
 	if err != nil {
 		return artifact, err
 	}
 	if reviewID.Valid {
 		artifact.Review = &featuredelivery.ArtifactReview{
-			ArtifactID: reviewID.String, Decision: featuredelivery.ReviewDecision(decision.String),
-			Comment: comment.String, Reviewer: reviewer.Int64, CreatedAt: reviewedAt.Time,
+			ArtifactID: reviewID.String, SubjectHash: subjectHash.String,
+			ReviewRoundID: reviewRoundID.String, GateResultID: gateResultID.String,
+			Decision: featuredelivery.ReviewDecision(decision.String),
+			Comment:  comment.String, Reviewer: reviewer.Int64, CreatedAt: reviewedAt.Time,
 		}
 	}
 	return artifact, nil
@@ -320,14 +324,15 @@ const currentLineageSelect = `WITH RECURSIVE approved_ranked AS (
 const artifactSelect = `SELECT
 	a.id,a.request_id,a.kind,a.version,a.parent_artifact_id,a.origin,a.document_json,
 	a.rendered_markdown,a.evidence_json,a.content_hash,a.created_by,a.created_at,
-	r.artifact_id,r.decision,r.comment,r.reviewer,r.created_at
+	r.artifact_id,r.subject_hash,r.review_round_id,r.gate_result_id,
+	r.decision,r.comment,r.reviewer,r.created_at
 	FROM feature_artifacts a
 	LEFT JOIN feature_artifact_reviews r ON r.artifact_id=a.id`
 
 func scanArtifact(row rowScanner) (featuredelivery.Artifact, error) {
 	var artifact featuredelivery.Artifact
 	var documentJSON, evidenceJSON []byte
-	var reviewID, decision, comment sql.NullString
+	var reviewID, subjectHash, reviewRoundID, gateResultID, decision, comment sql.NullString
 	var reviewer sql.NullInt64
 	var reviewedAt sql.NullTime
 	err := row.Scan(
@@ -335,7 +340,8 @@ func scanArtifact(row rowScanner) (featuredelivery.Artifact, error) {
 		&artifact.ParentArtifactID, &artifact.Origin, &documentJSON,
 		&artifact.RenderedMarkdown, &evidenceJSON, &artifact.ContentHash,
 		&artifact.CreatedBy, &artifact.CreatedAt,
-		&reviewID, &decision, &comment, &reviewer, &reviewedAt,
+		&reviewID, &subjectHash, &reviewRoundID, &gateResultID,
+		&decision, &comment, &reviewer, &reviewedAt,
 	)
 	if err != nil {
 		return artifact, err
@@ -346,11 +352,14 @@ func scanArtifact(row rowScanner) (featuredelivery.Artifact, error) {
 	}
 	if reviewID.Valid {
 		artifact.Review = &featuredelivery.ArtifactReview{
-			ArtifactID: reviewID.String,
-			Decision:   featuredelivery.ReviewDecision(decision.String),
-			Comment:    comment.String,
-			Reviewer:   reviewer.Int64,
-			CreatedAt:  reviewedAt.Time,
+			ArtifactID:    reviewID.String,
+			SubjectHash:   subjectHash.String,
+			ReviewRoundID: reviewRoundID.String,
+			GateResultID:  gateResultID.String,
+			Decision:      featuredelivery.ReviewDecision(decision.String),
+			Comment:       comment.String,
+			Reviewer:      reviewer.Int64,
+			CreatedAt:     reviewedAt.Time,
 		}
 	}
 	return artifact, nil
@@ -374,12 +383,15 @@ func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review fe
 	if err := lockFeature(ctx, tx, requestID); err != nil {
 		return err
 	}
-	var parentArtifactID string
+	var parentArtifactID, contentHash string
+	var artifactVersion int
+	var evidenceJSON []byte
 	var kind featuredelivery.ArtifactKind
 	if err := tx.QueryRowContext(ctx,
-		`SELECT kind,parent_artifact_id FROM feature_artifacts WHERE id=? AND request_id=? LIMIT 1 FOR UPDATE`,
+		`SELECT kind,parent_artifact_id,version,content_hash,evidence_json
+		 FROM feature_artifacts WHERE id=? AND request_id=? LIMIT 1 FOR UPDATE`,
 		review.ArtifactID, requestID,
-	).Scan(&kind, &parentArtifactID); errors.Is(err, sql.ErrNoRows) {
+	).Scan(&kind, &parentArtifactID, &artifactVersion, &contentHash, &evidenceJSON); errors.Is(err, sql.ErrNoRows) {
 		return featuredelivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("lock reviewed artifact %q: %w", review.ArtifactID, err)
@@ -394,9 +406,29 @@ func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review fe
 	if parentArtifactID != currentParentID {
 		return featuredelivery.ErrConflict
 	}
+	var evidence []featuredelivery.EvidenceRef
+	if err := json.Unmarshal(evidenceJSON, &evidence); err != nil {
+		return fmt.Errorf("decode reviewed artifact %q evidence: %w", review.ArtifactID, err)
+	}
+	subject, err := featuredelivery.BuildArtifactReviewSubject(featuredelivery.Artifact{
+		ID: review.ArtifactID, Kind: kind, Version: artifactVersion,
+		ParentArtifactID: parentArtifactID, Evidence: evidence, ContentHash: contentHash,
+	})
+	if err != nil {
+		return err
+	}
+	if review.SubjectHash != subject.ContentHash {
+		return featuredelivery.ErrConflict
+	}
+	if review.ReviewRoundID == "" || review.GateResultID == "" {
+		return featuredelivery.ErrInvalid
+	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO feature_artifact_reviews(artifact_id,decision,comment,reviewer,created_at) VALUES(?,?,?,?,?)`,
-		review.ArtifactID, review.Decision, review.Comment, review.Reviewer, review.CreatedAt,
+		`INSERT INTO feature_artifact_reviews(
+			artifact_id,subject_hash,review_round_id,gate_result_id,decision,comment,reviewer,created_at
+		 ) VALUES(?,?,?,?,?,?,?,?)`,
+		review.ArtifactID, review.SubjectHash, review.ReviewRoundID, review.GateResultID,
+		review.Decision, review.Comment, review.Reviewer, review.CreatedAt,
 	); err != nil {
 		if duplicateKey(err) {
 			return featuredelivery.ErrConflict
@@ -762,7 +794,8 @@ const implementationSummarySelect = `SELECT
 	r.provider,r.model,r.provider_version,r.network_enabled,r.status,r.worker_id,r.lease_expires_at,
 	r.cancel_requested_at,r.provider_session_id,r.exit_code,r.error_summary,r.requested_by,
 	r.started_at,r.ended_at,r.retain_until,r.worktree_cleaned_at,r.cleanup_error,r.created_at,
-	v.run_id,v.decision,v.comment,v.reviewer,v.created_at
+	v.run_id,v.subject_hash,v.review_round_id,v.gate_result_id,
+	v.decision,v.comment,v.reviewer,v.created_at
 	FROM feature_implementation_runs r
 	LEFT JOIN feature_change_reviews v ON v.run_id=r.id`
 
@@ -774,7 +807,8 @@ const implementationSelect = `SELECT
 	r.started_at,r.ended_at,r.retain_until,r.worktree_cleaned_at,r.cleanup_error,r.created_at,
 	c.run_id,c.worktree_head,c.patch_rel_path,c.patch_sha256,c.patch_bytes,c.files_changed,
 	c.additions,c.deletions,c.files_json,c.plan_deviations_json,c.validation_results_json,c.provider_summary,c.created_at,
-	v.run_id,v.decision,v.comment,v.reviewer,v.created_at
+	v.run_id,v.subject_hash,v.review_round_id,v.gate_result_id,
+	v.decision,v.comment,v.reviewer,v.created_at
 	FROM feature_implementation_runs r
 	LEFT JOIN feature_change_sets c ON c.run_id=r.id
 	LEFT JOIN feature_change_reviews v ON v.run_id=r.id`
@@ -787,7 +821,7 @@ func scanImplementation(row rowScanner) (featuredelivery.ImplementationRun, erro
 	var patchBytes sql.NullInt64
 	var filesChanged, additions, deletions sql.NullInt64
 	var changeCreated sql.NullTime
-	var reviewRunID, reviewDecision, reviewComment sql.NullString
+	var reviewRunID, reviewSubjectHash, reviewRoundID, reviewGateResultID, reviewDecision, reviewComment sql.NullString
 	var reviewer sql.NullInt64
 	var reviewCreated sql.NullTime
 	err := row.Scan(
@@ -801,7 +835,8 @@ func scanImplementation(row rowScanner) (featuredelivery.ImplementationRun, erro
 		&changeRunID, &worktreeHead, &patchPath, &patchHash, &patchBytes,
 		&filesChanged, &additions, &deletions, &filesJSON, &deviationsJSON, &validationsJSON,
 		&providerSummary, &changeCreated,
-		&reviewRunID, &reviewDecision, &reviewComment, &reviewer, &reviewCreated,
+		&reviewRunID, &reviewSubjectHash, &reviewRoundID, &reviewGateResultID,
+		&reviewDecision, &reviewComment, &reviewer, &reviewCreated,
 	)
 	if err != nil {
 		return run, err
@@ -856,7 +891,7 @@ func scanImplementationSummary(row rowScanner) (featuredelivery.ImplementationRu
 	var run featuredelivery.ImplementationRun
 	var lease, cancel, started, ended, retain, cleaned sql.NullTime
 	var exitCode sql.NullInt64
-	var reviewRunID, reviewDecision, reviewComment sql.NullString
+	var reviewRunID, reviewSubjectHash, reviewRoundID, reviewGateResultID, reviewDecision, reviewComment sql.NullString
 	var reviewer sql.NullInt64
 	var reviewCreated sql.NullTime
 	err := row.Scan(
@@ -867,7 +902,8 @@ func scanImplementationSummary(row rowScanner) (featuredelivery.ImplementationRu
 		&run.Status, &run.WorkerID, &lease, &cancel, &run.ProviderSessionID,
 		&exitCode, &run.ErrorSummary, &run.RequestedBy, &started, &ended, &retain,
 		&cleaned, &run.CleanupError, &run.CreatedAt,
-		&reviewRunID, &reviewDecision, &reviewComment, &reviewer, &reviewCreated,
+		&reviewRunID, &reviewSubjectHash, &reviewRoundID, &reviewGateResultID,
+		&reviewDecision, &reviewComment, &reviewer, &reviewCreated,
 	)
 	if err != nil {
 		return run, err
@@ -884,8 +920,14 @@ func scanImplementationSummary(row rowScanner) (featuredelivery.ImplementationRu
 	}
 	if reviewRunID.Valid {
 		run.Review = &featuredelivery.ChangeReview{
-			RunID: reviewRunID.String, Decision: featuredelivery.ReviewDecision(reviewDecision.String),
-			Comment: reviewComment.String, Reviewer: reviewer.Int64, CreatedAt: reviewCreated.Time,
+			RunID:         reviewRunID.String,
+			SubjectHash:   reviewSubjectHash.String,
+			ReviewRoundID: reviewRoundID.String,
+			GateResultID:  reviewGateResultID.String,
+			Decision:      featuredelivery.ReviewDecision(reviewDecision.String),
+			Comment:       reviewComment.String,
+			Reviewer:      reviewer.Int64,
+			CreatedAt:     reviewCreated.Time,
 		}
 	}
 	return run, nil
@@ -1252,9 +1294,55 @@ func (store *FeatureDeliveryStore) ReviewChangeSet(ctx context.Context, review f
 	if status != featuredelivery.RunSucceeded {
 		return featuredelivery.ErrConflict
 	}
+	var repository, baseCommit, headCommit, patchHash, providerSummary string
+	var filesJSON, deviationsJSON, validationsJSON []byte
+	if err := tx.QueryRowContext(ctx,
+		`SELECT r.repo,r.base_commit,c.worktree_head,c.patch_sha256,
+			c.files_json,c.plan_deviations_json,c.validation_results_json,c.provider_summary
+		 FROM feature_implementation_runs r
+		 JOIN feature_change_sets c ON c.run_id=r.id
+		 WHERE r.id=? LIMIT 1 FOR UPDATE`,
+		review.RunID,
+	).Scan(
+		&repository, &baseCommit, &headCommit, &patchHash,
+		&filesJSON, &deviationsJSON, &validationsJSON, &providerSummary,
+	); errors.Is(err, sql.ErrNoRows) {
+		return featuredelivery.ErrConflict
+	} else if err != nil {
+		return fmt.Errorf("lock change set %q: %w", review.RunID, err)
+	}
+	var change featuredelivery.ChangeSet
+	change.RunID = review.RunID
+	change.WorktreeHead = headCommit
+	change.PatchSHA256 = patchHash
+	change.ProviderSummary = providerSummary
+	if err := json.Unmarshal(filesJSON, &change.Files); err != nil {
+		return fmt.Errorf("decode changed files for review %q: %w", review.RunID, err)
+	}
+	if err := json.Unmarshal(deviationsJSON, &change.PlanDeviations); err != nil {
+		return fmt.Errorf("decode plan deviations for review %q: %w", review.RunID, err)
+	}
+	if err := json.Unmarshal(validationsJSON, &change.ValidationResults); err != nil {
+		return fmt.Errorf("decode validations for review %q: %w", review.RunID, err)
+	}
+	subject, err := featuredelivery.BuildChangeSetReviewSubject(featuredelivery.ImplementationRun{
+		ID: review.RunID, Repo: repository, BaseCommit: baseCommit, ChangeSet: &change,
+	})
+	if err != nil {
+		return err
+	}
+	if review.SubjectHash != subject.ContentHash {
+		return featuredelivery.ErrConflict
+	}
+	if review.ReviewRoundID == "" || review.GateResultID == "" {
+		return featuredelivery.ErrInvalid
+	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO feature_change_reviews(run_id,decision,comment,reviewer,created_at) VALUES(?,?,?,?,?)`,
-		review.RunID, review.Decision, review.Comment, review.Reviewer, review.CreatedAt,
+		`INSERT INTO feature_change_reviews(
+			run_id,subject_hash,review_round_id,gate_result_id,decision,comment,reviewer,created_at
+		 ) VALUES(?,?,?,?,?,?,?,?)`,
+		review.RunID, review.SubjectHash, review.ReviewRoundID, review.GateResultID,
+		review.Decision, review.Comment, review.Reviewer, review.CreatedAt,
 	); err != nil {
 		if duplicateKey(err) {
 			return featuredelivery.ErrConflict

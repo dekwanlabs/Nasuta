@@ -2,13 +2,24 @@
 
 [返回设计索引](README.zh-CN.md)
 
-> 状态：专项实施方案
+> 状态：第一阶段已实现，生产闭环持续完善
 > 更新日期：2026-08-05
 > 适用范围：Nasuta Feature Delivery 全流程
 > 前置方案：[Nasuta 多 Agent 平台方案](12-multi-agent-platform-proposal.zh-CN.md)
 > 依赖基线：模块 08、09、10
 
 ## 1. 结论
+
+### 实施状态
+
+第一阶段已落地 Review 数据模型、确定性 Gate、Reviewer Runtime 适配、MySQL 持久化和人工审批绑定：
+
+- Review Policy、Round、Assignment、Report、Finding、Evidence、Gate Result 和 Resolution 已版本化；
+- Reviewer 可通过通用 `agent.Runtime` 独立并行执行，必需 Reviewer 失败会得到 `incomplete`；
+- 有证据的 Critical/High Finding 触发 `revise`，无证据的严重 Finding 触发 `human_required`；
+- 人工 Artifact/Change Set 审批必须绑定当前 Subject Hash、已完成 Review Round 和匹配 Gate Result，旧审批不能复用。
+
+Adjudicator、完整 Review Round API、Reviewer Panel 配置界面、生产级指标和 Feature Delivery 各节点的默认 Policy 仍待后续接入。当前实现不使用多数投票，也不会自动批准研发产物。
 
 推荐在 Feature Delivery 每个研发节点引入：
 

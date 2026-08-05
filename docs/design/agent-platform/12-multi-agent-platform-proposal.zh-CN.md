@@ -2,12 +2,22 @@
 
 [返回设计索引](README.zh-CN.md)
 
-> 状态：专项目标设计
+> 状态：第一阶段已实现，编排能力持续完善
 > 更新日期：2026-08-05
 > 前置方案：[单 Agent 解耦与独立 Runtime 方案](11-single-agent-decoupling-proposal.zh-CN.md)
 > 依赖基线：模块 01–10
 
 ## 1. 结论
+
+### 实施状态
+
+第一阶段已落地 `internal/agentworkflow` 多 Agent 内核及对应数据库迁移，当前支持：
+
+- Agent、Gate、Human Approval、Join、Transform 节点；
+- DAG 校验、并行执行、Handoff、权限交集和不可变内容 Hash；
+- Workflow/Node/Artifact 的版本快照与审计基础。
+
+完整的场景 API、队列化恢复、生产级 Workflow 事件投影、控制面发布流程和指标面板仍待后续阶段接入。当前实现优先稳定通用编排合同，不把 CodeLoom 或 Feature Delivery 的业务策略上移到 Nasuta。
 
 推荐建设“确定性 Orchestrator + 独立 Agent Run + 类型化 Artifact Handoff”的多 Agent 平台：
 

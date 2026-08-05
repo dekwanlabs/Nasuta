@@ -150,15 +150,22 @@ func TestReviewArtifactLocksFeatureBeforeArtifact(t *testing.T) {
 	mock.ExpectQuery(`SELECT id FROM feature_requests WHERE id=\? LIMIT 1 FOR UPDATE`).
 		WithArgs("feat-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("feat-1"))
-	mock.ExpectQuery(`SELECT kind,parent_artifact_id FROM feature_artifacts WHERE id=\? AND request_id=\? LIMIT 1 FOR UPDATE`).
+	mock.ExpectQuery(`(?s)SELECT kind,parent_artifact_id,version,content_hash,evidence_json.*WHERE id=\? AND request_id=\? LIMIT 1 FOR UPDATE`).
 		WithArgs("analysis-1", "feat-1").
-		WillReturnRows(sqlmock.NewRows([]string{"kind", "parent_artifact_id"}).
-			AddRow(featuredelivery.KindRequirementAnalysis, "req-1"))
+		WillReturnRows(sqlmock.NewRows([]string{"kind", "parent_artifact_id", "version", "content_hash", "evidence_json"}).
+			AddRow(featuredelivery.KindRequirementAnalysis, "req-1", 1, "artifact-hash", []byte(`[]`)))
 	mock.ExpectQuery(`(?s)SELECT id FROM feature_artifacts.*kind=\?.*ORDER BY version DESC LIMIT 1`).
 		WithArgs("feat-1", featuredelivery.KindRequirement).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("req-1"))
+	subject, err := featuredelivery.BuildArtifactReviewSubject(featuredelivery.Artifact{
+		ID: "analysis-1", Kind: featuredelivery.KindRequirementAnalysis, Version: 1,
+		ParentArtifactID: "req-1", Evidence: []featuredelivery.EvidenceRef{}, ContentHash: "artifact-hash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	mock.ExpectExec(`INSERT INTO feature_artifact_reviews`).
-		WithArgs("analysis-1", featuredelivery.DecisionApproved, "approved", int64(42), reviewedAt).
+		WithArgs("analysis-1", subject.ContentHash, "round-1", "gate-1", featuredelivery.DecisionApproved, "approved", int64(42), reviewedAt).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`UPDATE feature_requests SET updated_at=CURRENT_TIMESTAMP WHERE id=\?`).
 		WithArgs("feat-1").
@@ -167,11 +174,12 @@ func TestReviewArtifactLocksFeatureBeforeArtifact(t *testing.T) {
 
 	store := NewFeatureDeliveryStore(db)
 	err = store.ReviewArtifact(context.Background(), featuredelivery.ArtifactReview{
-		ArtifactID: "analysis-1",
-		Decision:   featuredelivery.DecisionApproved,
-		Comment:    "approved",
-		Reviewer:   42,
-		CreatedAt:  reviewedAt,
+		ArtifactID:  "analysis-1",
+		SubjectHash: subject.ContentHash, ReviewRoundID: "round-1", GateResultID: "gate-1",
+		Decision:  featuredelivery.DecisionApproved,
+		Comment:   "approved",
+		Reviewer:  42,
+		CreatedAt: reviewedAt,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,10 +201,11 @@ func TestListArtifactsUsesSummaryColumnsAndCursor(t *testing.T) {
 		WithArgs("feat-1", featuredelivery.KindRequirementAnalysis, 3, 20).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "request_id", "kind", "version", "parent_artifact_id", "origin",
-			"content_hash", "created_by", "created_at", "review_id", "decision", "comment", "reviewer", "reviewed_at",
+			"content_hash", "created_by", "created_at", "review_id", "subject_hash", "review_round_id", "gate_result_id",
+			"decision", "comment", "reviewer", "reviewed_at",
 		}).AddRow(
 			"analysis-2", "feat-1", featuredelivery.KindRequirementAnalysis, 2, "req-1", featuredelivery.OriginAgent,
-			"hash", int64(7), createdAt, nil, nil, nil, nil, nil,
+			"hash", int64(7), createdAt, nil, nil, nil, nil, nil, nil, nil, nil,
 		))
 
 	items, err := NewFeatureDeliveryStore(db).ListArtifacts(
@@ -224,15 +233,15 @@ func TestGetCurrentLineageUsesOneBoundedQuery(t *testing.T) {
 	columns := []string{
 		"id", "request_id", "kind", "version", "parent_artifact_id", "origin", "document_json",
 		"rendered_markdown", "evidence_json", "content_hash", "created_by", "created_at",
-		"review_id", "decision", "comment", "reviewer", "reviewed_at",
+		"review_id", "subject_hash", "review_round_id", "gate_result_id", "decision", "comment", "reviewer", "reviewed_at",
 	}
 	rows := sqlmock.NewRows(columns).
 		AddRow("req-2", "feat-1", featuredelivery.KindRequirement, 2, "", featuredelivery.OriginUser,
 			[]byte(`{"description":"request"}`), "request", []byte(`[]`), "req-hash", int64(7), createdAt,
-			nil, nil, nil, nil, nil).
+			nil, nil, nil, nil, nil, nil, nil, nil).
 		AddRow("analysis-3", "feat-1", featuredelivery.KindRequirementAnalysis, 3, "req-2", featuredelivery.OriginAgent,
 			[]byte(`{"background":"analysis"}`), "analysis", []byte(`[]`), "analysis-hash", int64(7), createdAt,
-			"analysis-3", featuredelivery.DecisionApproved, "approved", int64(9), createdAt)
+			"analysis-3", nil, nil, nil, featuredelivery.DecisionApproved, "approved", int64(9), createdAt)
 	mock.ExpectQuery(currentLineageSelect).WithArgs("feat-1", "feat-1").WillReturnRows(rows)
 
 	lineage, err := NewFeatureDeliveryStore(db).GetCurrentLineage(context.Background(), "feat-1")
@@ -510,7 +519,7 @@ func implementationRunRows(run featuredelivery.ImplementationRun) *sqlmock.Rows 
 		"started_at", "ended_at", "retain_until", "worktree_cleaned_at", "cleanup_error", "created_at",
 		"change_run_id", "worktree_head", "patch_rel_path", "patch_sha256", "patch_bytes", "files_changed",
 		"additions", "deletions", "files_json", "plan_deviations_json", "validation_results_json", "provider_summary", "change_created_at",
-		"review_run_id", "decision", "comment", "reviewer", "review_created_at",
+		"review_run_id", "subject_hash", "review_round_id", "gate_result_id", "decision", "comment", "reviewer", "review_created_at",
 	}
 	return sqlmock.NewRows(columns).AddRow(
 		run.ID, run.RequestID, run.ClientRequestID, run.RequestHash, run.DesignArtifactID, run.PlanArtifactID,
@@ -520,7 +529,7 @@ func implementationRunRows(run featuredelivery.ImplementationRun) *sqlmock.Rows 
 		nil, nil, nil, nil, run.CleanupError, run.CreatedAt,
 		nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil,
 	)
 }
 
@@ -531,12 +540,17 @@ func implementationSummaryRows(run featuredelivery.ImplementationRun) *sqlmock.R
 		"provider", "model", "provider_version", "network_enabled", "status", "worker_id", "lease_expires_at",
 		"cancel_requested_at", "provider_session_id", "exit_code", "error_summary", "requested_by",
 		"started_at", "ended_at", "retain_until", "worktree_cleaned_at", "cleanup_error", "created_at",
-		"review_run_id", "decision", "comment", "reviewer", "review_created_at",
+		"review_run_id", "subject_hash", "review_round_id", "gate_result_id",
+		"decision", "comment", "reviewer", "review_created_at",
 	}
 	var reviewRunID, decision, comment any
+	var subjectHash, reviewRoundID, gateResultID any
 	var reviewer, reviewCreated any
 	if run.Review != nil {
 		reviewRunID = run.Review.RunID
+		subjectHash = run.Review.SubjectHash
+		reviewRoundID = run.Review.ReviewRoundID
+		gateResultID = run.Review.GateResultID
 		decision = run.Review.Decision
 		comment = run.Review.Comment
 		reviewer = run.Review.Reviewer
@@ -548,7 +562,8 @@ func implementationSummaryRows(run featuredelivery.ImplementationRun) *sqlmock.R
 		run.Provider, run.Model, run.ProviderVersion, run.NetworkEnabled, run.Status, run.WorkerID, nil,
 		nil, run.ProviderSessionID, nil, run.ErrorSummary, run.RequestedBy,
 		nil, nil, nil, nil, run.CleanupError, run.CreatedAt,
-		reviewRunID, decision, comment, reviewer, reviewCreated,
+		reviewRunID, subjectHash, reviewRoundID, gateResultID,
+		decision, comment, reviewer, reviewCreated,
 	)
 }
 

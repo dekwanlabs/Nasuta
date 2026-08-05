@@ -66,6 +66,20 @@ type Store interface {
 	GetChangeSet(context.Context, string) (*ChangeSet, error)
 	ReviewChangeSet(context.Context, ChangeReview) error
 
+	SaveReviewPolicy(context.Context, ReviewPolicy) error
+	GetReviewPolicy(context.Context, string, int64) (*ReviewPolicy, error)
+	CreateReviewRound(context.Context, ReviewRound, []ReviewAssignment) error
+	GetReviewRound(context.Context, string) (*ReviewRound, error)
+	ListReviewAssignments(context.Context, string, ReviewAssignmentCursor, int) ([]ReviewAssignment, error)
+	TransitionReviewRound(context.Context, string, ReviewRoundStatus, ReviewRoundStatus, time.Time) error
+	TransitionReviewAssignment(context.Context, string, ReviewAssignmentStatus, ReviewAssignmentStatus, string, string, time.Time) error
+	CompleteReviewAssignment(context.Context, ReviewReport) error
+	LoadFullReviewEvaluation(context.Context, string) (ReviewEvaluation, error)
+	CompleteReviewRound(context.Context, ReviewGateResult, time.Time) error
+	GetReviewGateResult(context.Context, string) (*ReviewGateResult, error)
+	CreateFindingResolution(context.Context, FindingResolution) error
+	ListFindingResolutionsByIDs(context.Context, []string, string) ([]FindingResolution, error)
+
 	ListExpiredWorktrees(context.Context, time.Time, int) ([]ImplementationRun, error)
 	MarkWorktreeCleaned(context.Context, string, string) error
 }

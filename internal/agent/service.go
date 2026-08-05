@@ -13,8 +13,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
+	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -30,42 +32,50 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// QADeps bundles the services needed to build the QA runtime.
+// QADeps bundles the services needed by the QA scenario.
 type QADeps struct {
-	Tools          *Service
-	Semantic       semantic.Store
-	Embedder       embed.Embedder
-	WriteAvailable bool
-	Cfg            config.Config
-	Platform       *config.PlatformSettings
-	Registry       *Registry
-	CodeGraphDB    *codegraph.DB
-	DB             *sql.DB
-	RunStore       *RunStore
-	History        SessionHistory
-	Sessions       *memory.SessionStore
+	Tools       *Service
+	Semantic    semantic.Store
+	Embedder    embed.Embedder
+	Cfg         config.Config
+	Platform    *config.PlatformSettings
+	CodeGraphDB *codegraph.DB
+	DB          *sql.DB
+	History     SessionHistory
+	Sessions    *memory.SessionStore
+	Definitions DefinitionResolver
+	Agent       agentapi.DefinitionRef
+	Runtime     *QARuntime
+}
+
+type DefinitionResolver interface {
+	Resolve(agentapi.DefinitionRef) (agentapi.Definition, error)
 }
 
 // QA is the agent-facing runtime facade.
 type QA struct {
 	llm *llm.LLMClient
 	// fastLLM handles cheap structured steps and falls back to llm when unset.
-	fastLLM          *llm.LLMClient
-	retriever        *retrieval.Retriever
-	agent            *Agent
-	registry         *Registry
-	executor         *ToolExecutor
-	memory           *memory.MemoryStore
-	sessions         *memory.SessionStore
-	history          SessionHistory
-	writeAvailable   bool
-	hub              *RunHub
-	runStore         *RunStore
-	cfg              config.Config
+	fastLLM            *llm.LLMClient
+	retriever          *retrieval.Retriever
+	agent              *Agent
+	registry           *Registry
+	executor           *ToolExecutor
+	memory             *memory.MemoryStore
+	sessions           *memory.SessionStore
+	history            SessionHistory
+	writeAvailable     bool
+	hub                *RunHub
+	runStore           *RunStore
+	cfg                config.Config
 	routerConfidence   float64
 	routerMaxTokens    int
 	contextWindow      int
 	toolPruningEnabled bool
+	definitions        DefinitionResolver
+	agentRef           agentapi.DefinitionRef
+	definitionErr      error
+	runtimeErr         error
 }
 
 // AskResult identifies the asynchronous run and its pre-retrieved context.
@@ -104,6 +114,10 @@ type QARequest struct {
 	EvidencePlan     *domain.EvidencePlan
 	ToolPlan         ToolPlan
 	AllowWrite       bool
+	Agent            agentapi.DefinitionRef
+	ParentRunID      string
+	WorkflowRunID    string
+	WorkflowNodeID   string
 }
 
 // NewQA wires retrieval, agent, memory, and write tools together.
@@ -125,57 +139,44 @@ func NewQA(d QADeps) *QA {
 		retriever: ret, cfg: d.Cfg,
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
 		toolPruningEnabled: platformSettings.ToolPruningEnabled,
-		history: d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
+		history:            d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
+		definitions: d.Definitions, agentRef: d.Agent,
+	}
+	if svc.agentRef.ID == "" {
+		svc.agentRef = agentapi.DefinitionRef{ID: "qa.answerer"}
+	}
+	if svc.definitions == nil {
+		catalog := agentcatalog.New()
+		definition, err := agentcatalog.DefaultQA(platformSettings)
+		if err == nil {
+			err = catalog.Publish([]agentapi.Definition{definition})
+		}
+		svc.definitions = catalog
+		svc.definitionErr = err
 	}
 	if svc.sessions == nil && d.DB != nil {
 		svc.sessions = memory.NewSessionStore(d.DB)
 	}
 
 	useDashScope := platformSettings.RerankProvider == "dashscope" && platformSettings.RerankAPIKey != ""
-
-	svc.llm = llm.NewLLMClientWithHTTPAndProvider(platformSettings.LLMBaseURL, platformSettings.LLMAPIKey, platformSettings.LLMModel, platformSettings.LLMProvider, platformSettings.LLMMaxTokens, nil)
-	if platformSettings.FastLLMConfigured() {
-		fastProvider := platformSettings.LLMProvider
-		if fastProvider == "" {
-			fastProvider = "openai"
-		}
-		svc.fastLLM = llm.NewLLMClientWithHTTPAndProvider(platformSettings.LLMBaseURL, platformSettings.LLMAPIKey, platformSettings.LLMFastModel, fastProvider, platformSettings.LLMMaxTokens, nil)
-		log.Infof("[qa] fast model enabled for preprocess/queryterms: %s @ %s (%s)", platformSettings.LLMFastModel, platformSettings.LLMBaseURL, fastProvider)
-	} else {
-		svc.fastLLM = svc.llm
-	}
 	log.Infof("[qa] retrieval router: direct_min_confidence=%.2f max_tokens=%d", routerConfidence, routerMaxTokens)
 	if useDashScope {
 		ret.WithReranker(retrieval.NewDashScopeReranker(platformSettings))
 		log.Infof("[qa] reranker: dashscope (%s)", platformSettings.RerankModel)
 	}
 
-	svc.runStore = d.RunStore
-	svc.hub = NewRunHub(svc.runStore)
-
-	if d.Registry != nil {
-		svc.registry = d.Registry
+	if d.Runtime == nil {
+		svc.runtimeErr = fmt.Errorf("QA runtime is not configured")
 	} else {
-		svc.registry = NewRegistry(d.Tools, d.Cfg, svc.sessions, d.History)
+		svc.llm = d.Runtime.llm
+		svc.fastLLM = d.Runtime.fastLLM
+		svc.agent = d.Runtime.agent
+		svc.registry = d.Runtime.registry
+		svc.executor = d.Runtime.executor
+		svc.writeAvailable = d.Runtime.writeAvailable
+		svc.hub = d.Runtime.hub
+		svc.runStore = d.Runtime.runStore
 	}
-	svc.writeAvailable = d.WriteAvailable
-	svc.executor = NewToolExecutor(svc.registry)
-
-	svc.agent = NewAgent(svc.llm, svc.executor, AgentConfig{
-		Timeout:             time.Duration(platformSettings.AgentTimeout),
-		MaxSteps:            platformSettings.AgentMaxSteps,
-		AnswerReserve:       time.Duration(platformSettings.AgentAnswerReserve),
-		AnswerMaxTokens:     platformSettings.LLMAnswerMaxTokens,
-		ConclusionMaxTokens: platformSettings.LLMConclusionMaxTokens,
-		ContextWindow:       platformSettings.LLMContextWindow,
-		MaxContinueRounds:   platformSettings.LLMMaxContinueRounds,
-		DomainKnowledge:     platformSettings.DomainKnowledge,
-		HistoryLimit:        0,
-	}, svc.hub, svc.hub)
-	// Keep the phase hint behind the reasoning stream.
-	svc.agent.SetOnFirstAnswerToken(func(runID string) {
-		svc.emitStep(runID, "找到啦，我来把答案写出来 ✍️")
-	})
 
 	if d.DB != nil && d.Embedder != nil && d.Embedder.Enabled() {
 		memorySemanticConfig := d.Cfg.Semantic
@@ -237,6 +238,9 @@ func (svc *QA) AskAgentWithContext(ctx context.Context, question string, convers
 
 // Ask starts one QA run with optional trusted scenario context.
 func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
+	if svc.runtimeErr != nil {
+		return nil, svc.runtimeErr
+	}
 	question := strings.TrimSpace(request.Question)
 	if question == "" {
 		return nil, fmt.Errorf("question is required")
@@ -253,10 +257,39 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if runID == "" {
 		runID = NewRunID()
 	}
+	toolPolicy := ToolPolicyForRun(svc.writeAvailable && request.AllowWrite)
+	executor := svc.executor
+	var candidateSnapshot tool.Snapshot
+	if executor != nil {
+		candidateSnapshot = executor.Snapshot(toolPolicy)
+	}
+	if executor != nil && (conversation.CompactedThroughTurn <= 0 || svc.history == nil) {
+		candidateSnapshot = withoutSessionHistoryTools(candidateSnapshot)
+	}
+	agentRef := request.Agent
+	if agentRef.ID == "" {
+		agentRef = svc.agentRef
+	}
+	if svc.definitionErr != nil {
+		return nil, fmt.Errorf("resolve agent definition %q: %w", agentRef.ID, svc.definitionErr)
+	}
+	var definition agentapi.Definition
+	if svc.definitions != nil {
+		var err error
+		definition, err = svc.definitions.Resolve(agentRef)
+		if err != nil {
+			return nil, fmt.Errorf("resolve agent definition %q: %w", agentRef.ID, err)
+		}
+	}
 	if svc.runStore != nil {
 		if err := svc.runStore.Create(RunRecord{
 			ID: runID, UserID: userID, SessionID: conversation.SessionID,
-			Question: question, Mode: "single", MaxSteps: svc.agent.MaxStepsFor(question),
+			AgentID: definition.ID, DefinitionVersion: definition.Version,
+			DefinitionHash: definition.ContentHash, ToolSnapshotID: candidateSnapshot.ID(),
+			InputSchemaVersion: definition.InputSchema.Version, OutputSchemaVersion: definition.OutputSchema.Version,
+			ParentRunID: request.ParentRunID, WorkflowRunID: request.WorkflowRunID,
+			WorkflowNodeID: request.WorkflowNodeID,
+			Question:       question, Mode: "single", MaxSteps: svc.agent.MaxStepsFor(question),
 			StartedAt: time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
 			return nil, fmt.Errorf("create agent run %q: %w", runID, err)
@@ -267,12 +300,6 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		ctx = llm.WithCallLifecycleObserver(ctx, runID, svc.hub)
 	}
 	explicitPlan := request.EvidencePlan
-	toolPolicy := ToolPolicyForRun(svc.writeAvailable && request.AllowWrite)
-	executor := svc.executor
-	candidateSnapshot := executor.Snapshot(toolPolicy)
-	if conversation.CompactedThroughTurn <= 0 || svc.history == nil {
-		candidateSnapshot = withoutSessionHistoryTools(candidateSnapshot)
-	}
 	toolCandidates := routingCandidates(candidateSnapshot)
 	traceEnabled := domain.TraceEnabled(ctx)
 	emit := func(text string) {
@@ -1021,9 +1048,14 @@ func (rs *RunStore) Create(r RunRecord) error {
 		r.Status = RunStatusRunning
 	}
 	_, err := rs.db.Exec(
-		`INSERT INTO agent_runs(id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,started_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, r.UserID, r.SessionID, r.Question, r.Status, r.Mode, r.MaxSteps, 0, 0, store.DatabaseTime(r.StartedAt))
+		`INSERT INTO agent_runs(
+			id,user_id,session_id,agent_id,definition_version,definition_hash,tool_snapshot_id,
+			input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
+			question,status,error_code,mode,max_steps,step_count,token_used,started_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, r.UserID, r.SessionID, r.AgentID, r.DefinitionVersion, r.DefinitionHash, r.ToolSnapshotID,
+		r.InputSchemaVersion, r.OutputSchemaVersion, r.ParentRunID, r.WorkflowRunID, r.WorkflowNodeID,
+		r.Question, r.Status, r.ErrorCode, r.Mode, r.MaxSteps, 0, 0, store.DatabaseTime(r.StartedAt))
 	return err
 }
 
@@ -1036,11 +1068,11 @@ func (rs *RunStore) Complete(id string, outcome RunOutcome) error {
 	}
 	result, err := rs.db.Exec(
 		`UPDATE agent_runs
-		 SET status=?,step_count=?,token_used=?,evidence_status=?,forced_conclusion=?,
+		 SET status=?,error_code=?,step_count=?,token_used=?,evidence_status=?,forced_conclusion=?,
 			evidence_result_count=?,tool_call_count=?,tool_failure_count=?,partial_result_count=?,
 			omitted_evidence_count=?,ended_at=?
 		 WHERE id=? AND status IN (?,?)`,
-		outcome.Status, outcome.StepCount, outcome.TokenUsed, outcome.Evidence.Status,
+		outcome.Status, outcome.ErrorCode, outcome.StepCount, outcome.TokenUsed, outcome.Evidence.Status,
 		outcome.Evidence.ForcedConclusion, outcome.Evidence.ResultCount,
 		outcome.Evidence.ToolCallCount, outcome.Evidence.ToolFailureCount,
 		outcome.Evidence.PartialResultCount, outcome.Evidence.OmittedItemCount,
@@ -1250,7 +1282,9 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 		pageSize = 20
 	}
 
-	q := `SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,
+	q := `SELECT id,user_id,session_id,agent_id,definition_version,definition_hash,tool_snapshot_id,
+		input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
+		question,status,error_code,mode,max_steps,step_count,token_used,
 		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
 		peak_input_tokens,peak_reserved_tokens,evidence_status,forced_conclusion,evidence_result_count,
 		tool_call_count,tool_failure_count,partial_result_count,omitted_evidence_count,started_at,ended_at FROM agent_runs`
@@ -1313,7 +1347,9 @@ func (rs *RunStore) GetForUser(id string, userID int64) (*RunDetail, error) {
 }
 
 func (rs *RunStore) get(id string, userID *int64) (*RunDetail, error) {
-	query := `SELECT id,user_id,session_id,question,status,mode,max_steps,step_count,token_used,
+	query := `SELECT id,user_id,session_id,agent_id,definition_version,definition_hash,tool_snapshot_id,
+		input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
+		question,status,error_code,mode,max_steps,step_count,token_used,
 		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
 		peak_input_tokens,peak_reserved_tokens,evidence_status,forced_conclusion,evidence_result_count,
 		tool_call_count,tool_failure_count,partial_result_count,omitted_evidence_count,started_at,ended_at
@@ -1567,8 +1603,11 @@ type rowScanner interface {
 func scanRunRecord(row rowScanner) (RunRecord, error) {
 	var record RunRecord
 	var startedAt, endedAt sql.NullTime
-	if err := row.Scan(&record.ID, &record.UserID, &record.SessionID, &record.Question, &record.Status,
-		&record.Mode, &record.MaxSteps, &record.StepCount, &record.TokenUsed,
+	if err := row.Scan(&record.ID, &record.UserID, &record.SessionID,
+		&record.AgentID, &record.DefinitionVersion, &record.DefinitionHash, &record.ToolSnapshotID,
+		&record.InputSchemaVersion, &record.OutputSchemaVersion, &record.ParentRunID,
+		&record.WorkflowRunID, &record.WorkflowNodeID, &record.Question, &record.Status,
+		&record.ErrorCode, &record.Mode, &record.MaxSteps, &record.StepCount, &record.TokenUsed,
 		&record.InputTokens, &record.CachedInputTokens, &record.OutputTokens,
 		&record.ReasoningTokens, &record.TotalTokens, &record.LLMCallCount,
 		&record.PeakInputTokens, &record.PeakReservedTokens, &record.EvidenceStatus,
@@ -1638,6 +1677,7 @@ var ErrEmptyAnswer = errors.New("agent: completed without a visible answer")
 // RunOutcome is the single terminal fact consumed by persistence and streaming.
 type RunOutcome struct {
 	Status          RunStatus
+	ErrorCode       string
 	StepCount       int
 	TokenUsed       int
 	Answer          string
@@ -1673,15 +1713,19 @@ func outcomeFor(result *RunResult, preRetrieved []retrieval.Reference, runErr er
 	switch {
 	case result.Aborted:
 		outcome.Status = RunStatusAborted
+		outcome.ErrorCode = "cancelled"
 		outcome.Err = runErr
 	case runErr != nil:
 		outcome.Status = RunStatusFailed
+		outcome.ErrorCode = "runtime_failed"
 		outcome.Err = runErr
 	case result.Err != nil:
 		outcome.Status = RunStatusFailed
+		outcome.ErrorCode = "agent_failed"
 		outcome.Err = result.Err
 	case strings.TrimSpace(result.Answer) == "":
 		outcome.Status = RunStatusFailed
+		outcome.ErrorCode = "empty_output"
 		outcome.Err = ErrEmptyAnswer
 	default:
 		outcome.Status = RunStatusDone
@@ -1727,8 +1771,18 @@ type RunRecord struct {
 	ID                   string         `json:"id"`
 	UserID               int64          `json:"user_id"`
 	SessionID            string         `json:"session_id"`
+	AgentID              string         `json:"agent_id"`
+	DefinitionVersion    int64          `json:"definition_version"`
+	DefinitionHash       string         `json:"definition_hash"`
+	ToolSnapshotID       string         `json:"tool_snapshot_id"`
+	InputSchemaVersion   int64          `json:"input_schema_version"`
+	OutputSchemaVersion  int64          `json:"output_schema_version"`
+	ParentRunID          string         `json:"parent_run_id"`
+	WorkflowRunID        string         `json:"workflow_run_id"`
+	WorkflowNodeID       string         `json:"workflow_node_id"`
 	Question             string         `json:"question"`
 	Status               RunStatus      `json:"status"`
+	ErrorCode            string         `json:"error_code"`
 	Mode                 string         `json:"mode"`
 	MaxSteps             int            `json:"max_steps"`
 	StepCount            int            `json:"step_count"`

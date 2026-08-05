@@ -595,7 +595,7 @@ func (handler *Handler) processUploadedDoc(ctx context.Context, doc domain.DocRe
 		res := docgen.ValidateFlow(doc.Content)
 		if !res.Valid {
 			log.Warnf("[docs] flow %q failed validation: %s — reformatting", doc.Title, strings.Join(res.Errors, "; "))
-			reformatted, err := docgen.ReformatFlowWithSettings(handler.cfg, handler.platform, handler.docDB, ctx, doc.Content)
+			reformatted, err := docgen.ReformatFlowWithSettings(handler.cfg, handler.platformSettings(), handler.docDB, ctx, doc.Content)
 			if err != nil {
 				log.Errorf("[docs] flow %q reformat failed: %v; indexing original content", doc.Title, err)
 			} else {

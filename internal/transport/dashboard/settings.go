@@ -47,7 +47,7 @@ func (handler *Handler) APISettingsGet(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (handler *Handler) defaultSettings() map[string]any {
-	return handler.platform.Values()
+	return handler.platformSettings().Values()
 }
 
 func (handler *Handler) APISettingsPut(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +89,10 @@ func (handler *Handler) APISettingsPut(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteErr(w, err)
 		return
 	}
-	handler.reloadQA()
+	if err := handler.reloadQA(handler.codegraphDB); err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
 	httputil.WriteJSON(w, map[string]any{"updated": len(filtered), "keys": keysOf(filtered)})
 }
 
@@ -98,7 +101,7 @@ func (handler *Handler) validatePlatformSettingsUpdate(update map[string]string)
 	if err != nil {
 		return fmt.Errorf("load settings for validation: %w", err)
 	}
-	settings := *handler.platform
+	settings := *handler.platformSettings()
 	settings.Apply(stored)
 	settings.Apply(update)
 	return settings.ValidateAgentSettings()

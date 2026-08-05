@@ -130,6 +130,23 @@ func TestEmptyBatchDoesNotAdvanceRevision(t *testing.T) {
 	}
 }
 
+func TestSnapshotIDPinsRevisionAndVisibleTools(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register(testTool("first", "v1")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := registry.Snapshot(ReadPolicy())
+	if snapshot.ID() == "" || snapshot.ID() != registry.Snapshot(ReadPolicy()).ID() {
+		t.Fatal("snapshot id is empty or unstable")
+	}
+	if err := registry.Register(testTool("second", "v1")); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ID() == registry.Snapshot(ReadPolicy()).ID() {
+		t.Fatal("snapshot id did not change after publication")
+	}
+}
+
 func TestSnapshotSchemaMutationDoesNotChangeRegistry(t *testing.T) {
 	registry := NewRegistry()
 	if err := registry.Register(testTool("immutable", "ok")); err != nil {

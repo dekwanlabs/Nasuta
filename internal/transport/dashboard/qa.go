@@ -70,7 +70,7 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 	// QA needs a configured LLM to run the agent loop. Reject before the SSE
 	// stream starts (headers unflushed) so the client gets a clear status code
 	// rather than a faked retrieval-only answer.
-	if handler.qa == nil {
+	if handler.qaService() == nil {
 		httputil.WriteServiceUnavailable(w, "QA service not initialized")
 		return
 	}
@@ -95,11 +95,12 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 
 func (handler *Handler) prepareSessionContext(ctx context.Context, question, sessionID string, userID int64,
 	fallback []llm.Message, sseEvent func(string, any) error) (agent.ConversationContext, error) {
-	if sessionID == "" || handler.qaSessions == nil || handler.qa == nil || handler.platform == nil {
+	runtime := handler.currentQARuntime()
+	if sessionID == "" || runtime.Sessions == nil || runtime.QA == nil || runtime.Settings == nil {
 		return handler.loadSessionContext(ctx, sessionID, userID, fallback)
 	}
 	var latestUsage agent.ContextUsageSnapshot
-	if runs := handler.qa.RunStore(); runs != nil {
+	if runs := runtime.RunStore; runs != nil {
 		var err error
 		latestUsage, err = runs.LatestContextUsage(userID, sessionID)
 		if err != nil {
@@ -107,17 +108,17 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 		}
 	}
 	outputReserve := max(
-		handler.platform.LLMMaxTokens,
-		max(handler.platform.LLMAnswerMaxTokens, handler.platform.LLMConclusionMaxTokens),
+		runtime.Settings.LLMMaxTokens,
+		max(runtime.Settings.LLMAnswerMaxTokens, runtime.Settings.LLMConclusionMaxTokens),
 	)
-	compactionTimeout := max(qaCompactionMinTimeout, time.Duration(handler.platform.AgentTimeout))
+	compactionTimeout := max(qaCompactionMinTimeout, time.Duration(runtime.Settings.AgentTimeout))
 	compactCtx, cancel := context.WithTimeout(ctx, compactionTimeout)
 	defer cancel()
 	var emitErr error
 	result, err := agent.CompactSessionIfNeeded(
-		compactCtx, handler.qa.LLM(), handler.qaSessions, sessionID, userID,
+		compactCtx, runtime.QA.LLM(), runtime.Sessions, sessionID, userID,
 		agent.SessionCompactionUsage{
-			ContextWindow:              handler.platform.LLMContextWindow,
+			ContextWindow:              runtime.Settings.LLMContextWindow,
 			PreviousPeakInputTokens:    latestUsage.PeakInputTokens,
 			PreviousPeakReservedTokens: latestUsage.PeakReservedTokens,
 			OutputReserveTokens:        outputReserve,
@@ -130,7 +131,7 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 				"status": "start",
 				"text":   fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", fromTurn, toTurn),
 			})
-		}, handler.history,
+		}, runtime.History,
 	)
 	if emitErr != nil {
 		return agent.ConversationContext{}, emitErr
@@ -172,13 +173,13 @@ func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, ss
 		"archived_turns":         result.ArchivedTurnCount,
 		"restart_turn_threshold": result.RestartTurnThreshold,
 		"projected_tokens":       projectedTokens,
-		"context_window":         handler.platform.LLMContextWindow,
+		"context_window":         handler.platformSettings().LLMContextWindow,
 	}); err != nil {
 		log.WarnfCtx(ctx, "[qa] emit session restart recommendation failed session=%s: %v", sessionID, err)
 		return
 	}
 	log.WarnfCtx(ctx, "[qa] recommended new session session=%s reason=%s projected=%d window=%d archived_turns=%d restart_turn_threshold=%d",
-		sessionID, reason, projectedTokens, handler.platform.LLMContextWindow,
+		sessionID, reason, projectedTokens, handler.platformSettings().LLMContextWindow,
 		result.ArchivedTurnCount, result.RestartTurnThreshold)
 }
 
@@ -297,10 +298,11 @@ func (s *sseWriter) startHeartbeat(ctx context.Context, interval time.Duration) 
 }
 
 func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string, userID int64, fallback []llm.Message) (agent.ConversationContext, error) {
-	if sessionID == "" || handler.qaSessions == nil {
+	sessions := handler.qaSessionStore()
+	if sessionID == "" || sessions == nil {
 		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}, nil
 	}
-	sess, err := handler.qaSessions.GetContextMetadata(sessionID, userID, memory.RecentTurnMetadataLimit)
+	sess, err := sessions.GetContextMetadata(sessionID, userID, memory.RecentTurnMetadataLimit)
 	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] session load error: %v", err)
 		return agent.ConversationContext{}, fmt.Errorf("load bounded session metadata %q: %w", sessionID, err)
@@ -317,6 +319,11 @@ func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string
 }
 
 func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, allowEmit func(string, any) error, r *http.Request) {
+	runtime := handler.currentQARuntime()
+	if runtime.QA == nil {
+		_ = allowEmit("run.finished", agent.RunTerminal{Status: agent.RunStatusFailed, Error: "QA service not initialized"})
+		return
+	}
 	userID := currentUserID(r)
 	log.InfofCtx(ctx, "[qa] agent mode: question=%q userID=%d", platform.TruncateForLog(question, 12), userID)
 	runCtx := context.WithoutCancel(ctx)
@@ -333,7 +340,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	// Subscribing later would drop those early updates.
 	runID := agent.NewRunID()
 	var channel chan agent.SSEEvent
-	hub := handler.qa.Hub()
+	hub := runtime.QA.Hub()
 	if hub != nil {
 		channel = hub.Subscribe(runID)
 		defer hub.Unsubscribe(runID, channel)
@@ -348,14 +355,14 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	}
 
 	user := auth.UserFromContext(r.Context())
-	allowWrite := handler.writeAvailable && user != nil && user.IsAdmin
+	allowWrite := runtime.WriteAvailable && user != nil && user.IsAdmin
 	type askResponse struct {
 		result *agent.AskResult
 		err    error
 	}
 	askDone := make(chan askResponse, 1)
 	go func() {
-		result, err := handler.qa.AskAgentWithContext(runCtx, question, conversation, userID, handler.rolePromptFor(userID), runID, evidencePlan, allowWrite)
+		result, err := runtime.QA.AskAgentWithContext(runCtx, question, conversation, userID, handler.rolePromptFor(userID), runID, evidencePlan, allowWrite)
 		askDone <- askResponse{result: result, err: err}
 	}()
 
@@ -423,7 +430,7 @@ func (handler *Handler) APIQASessions(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceUnavailable(w, "qa session store not available")
 		return
 	}
-	list, err := handler.qaSessions.List(currentUserID(r))
+	list, err := handler.qaSessionStore().List(currentUserID(r))
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
@@ -457,11 +464,12 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 	endpointDomain := ""
 	model := ""
 	roundMaxTokens := 0
-	if handler.platform != nil {
-		endpointDomain = qaEndpointDomain(handler.platform.LLMBaseURL)
-		model = handler.platform.LLMModel
-		roundMaxTokens = handler.platform.LLMContextWindow
-		if handler.platform.LLMEnabled() {
+	settings := handler.platformSettings()
+	if settings != nil {
+		endpointDomain = qaEndpointDomain(settings.LLMBaseURL)
+		model = settings.LLMModel
+		roundMaxTokens = settings.LLMContextWindow
+		if settings.LLMEnabled() {
 			status = "active"
 		}
 	}
@@ -600,10 +608,11 @@ func (handler *Handler) APIQASessionMessages(w http.ResponseWriter, r *http.Requ
 	}
 	var page *memory.MessagePage
 	var err error
+	sessions := handler.qaSessionStore()
 	if turnLimit > 0 {
-		page, err = handler.qaSessions.ListTurnsBefore(r.PathValue("id"), currentUserID(r), beforeSeq, turnLimit)
+		page, err = sessions.ListTurnsBefore(r.PathValue("id"), currentUserID(r), beforeSeq, turnLimit)
 	} else {
-		page, err = handler.qaSessions.ListMessagesBefore(r.PathValue("id"), currentUserID(r), beforeSeq, limit)
+		page, err = sessions.ListMessagesBefore(r.PathValue("id"), currentUserID(r), beforeSeq, limit)
 	}
 	if err != nil {
 		httputil.WriteErr(w, err)
@@ -668,7 +677,7 @@ func (handler *Handler) APIQASessionSave(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	rec.UserID = currentUserID(r)
-	if err := handler.qaSessions.Save(rec); err != nil {
+	if err := handler.qaSessionStore().Save(rec); err != nil {
 		httputil.WriteErr(w, err)
 		return
 	}
@@ -682,7 +691,7 @@ func (handler *Handler) APIQASessionDelete(w http.ResponseWriter, r *http.Reques
 	}
 	id := r.PathValue("id")
 	userID := currentUserID(r)
-	deleted, err := handler.qaSessions.Delete(id, userID)
+	deleted, err := handler.qaSessionStore().Delete(id, userID)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
@@ -696,7 +705,7 @@ func (handler *Handler) APIQASessionDelete(w http.ResponseWriter, r *http.Reques
 			log.ErrorfCtx(r.Context(), "[qa] delete memories for session %s: %v", id, err)
 		}
 	}
-	if rs := handler.qa.RunStore(); rs != nil {
+	if rs := handler.runStore(); rs != nil {
 		if err := rs.DeleteBySession(id, userID); err != nil {
 			log.ErrorfCtx(r.Context(), "[qa] delete runs for session %s: %v", id, err)
 		}
@@ -907,23 +916,25 @@ func currentUserID(r *http.Request) int64 {
 }
 
 func (handler *Handler) ensureQASessions(w http.ResponseWriter) bool {
-	return handler.qaSessions != nil
+	return handler.qaSessionStore() != nil
 }
 
 func (handler *Handler) runStore() *agent.RunStore {
-	return handler.persistentRunStore
+	return handler.currentQARuntime().RunStore
 }
 
 func (handler *Handler) memoryStore() *memory.MemoryStore {
-	if handler.qa == nil {
+	qa := handler.qaService()
+	if qa == nil {
 		return nil
 	}
-	return handler.qa.Memory()
+	return qa.Memory()
 }
 
 func (handler *Handler) qaHub() *agent.RunHub {
-	if handler.qa == nil {
+	qa := handler.qaService()
+	if qa == nil {
 		return nil
 	}
-	return handler.qa.Hub()
+	return qa.Hub()
 }

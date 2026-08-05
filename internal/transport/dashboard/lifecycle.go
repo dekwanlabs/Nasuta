@@ -1,28 +1,47 @@
 package dashboard
 
 import (
-	"time"
+	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/internal/memory"
+	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 )
 
-func (handler *Handler) reloadQA() {
-	ps := loadPlatformSettings(handler.authDB)
-	handler.platform = ps
-	handler.rebuildQA(ps)
-	log.Infof("[settings] QA service reloaded (model=%s, timeout=%s, max_steps=%d)",
-		handler.platform.LLMModel, time.Duration(handler.platform.AgentTimeout), handler.platform.AgentMaxSteps)
-}
-
-func (handler *Handler) rebuildQA(ps *config.PlatformSettings) {
-	handler.qa = agent.NewQA(agent.QADeps{Tools: handler.tools, Semantic: handler.semantic, Embedder: handler.embedder, WriteAvailable: handler.writeAvailable, Cfg: handler.cfg, Platform: ps, Registry: handler.registry, CodeGraphDB: handler.codegraphDB, DB: handler.platformDB, RunStore: handler.persistentRunStore, History: handler.history})
-	handler.syncPlatform(ps)
-}
-
-func (handler *Handler) syncPlatform(ps *config.PlatformSettings) {
-	if handler.idx != nil {
-		handler.idx.SetPlatform(ps)
+func (handler *Handler) currentQARuntime() QARuntime {
+	if handler.qaRuntimeFn != nil {
+		return handler.qaRuntimeFn()
 	}
+	return QARuntime{
+		QA: handler.qa, RunStore: handler.persistentRunStore,
+		Sessions: handler.qaSessions, History: handler.history,
+		Settings: handler.platform, WriteAvailable: handler.writeAvailable,
+	}
+}
+
+func (handler *Handler) qaService() *agent.QA {
+	return handler.currentQARuntime().QA
+}
+
+func (handler *Handler) qaSessionStore() *memory.SessionStore {
+	return handler.currentQARuntime().Sessions
+}
+
+func (handler *Handler) platformSettings() *config.PlatformSettings {
+	settings := handler.currentQARuntime().Settings
+	if settings == nil {
+		return &config.PlatformSettings{}
+	}
+	return settings
+}
+
+func (handler *Handler) reloadQA(graph *codegraph.DB) error {
+	if handler.reloadQAFn == nil {
+		return nil
+	}
+	if err := handler.reloadQAFn(graph); err != nil {
+		return fmt.Errorf("reload QA runtime: %w", err)
+	}
+	return nil
 }

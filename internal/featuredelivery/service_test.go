@@ -202,7 +202,9 @@ func TestReviewArtifactExplainsUnresolvedBlockingQuestions(t *testing.T) {
 	}
 	service := NewService(store, nil, time.Second)
 
-	err := service.ReviewArtifact(context.Background(), "feat-1", "analysis-1", DecisionApproved, "", 1)
+	err := service.ReviewArtifact(
+		context.Background(), "feat-1", "analysis-1", DecisionApproved, "", ReviewApprovalBinding{}, 1,
+	)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("error = %v, want conflict", err)
 	}

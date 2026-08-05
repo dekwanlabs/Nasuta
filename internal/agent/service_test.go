@@ -131,12 +131,46 @@ func TestRunStoreCompleteTransitionsOnlyActiveRun(t *testing.T) {
 	}
 	mock.ExpectExec("UPDATE agent_runs").
 		WithArgs(
-			RunStatusDone, 2, 12, EvidencePartial, true, 3, 4, 1, 2, 5,
+			RunStatusDone, "", 2, 12, EvidencePartial, true, 3, 4, 1, 2, 5,
 			sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := store.Complete("run", outcome); err != nil {
 		t.Fatalf("Complete: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunStoreCreatePersistsAgentAndWorkflowSnapshot(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &RunStore{db: db}
+	record := RunRecord{
+		ID: "run-1", UserID: 42, SessionID: "session-1",
+		AgentID: "qa.answerer", DefinitionVersion: 3,
+		DefinitionHash: strings.Repeat("a", 64), ToolSnapshotID: "tools_snapshot",
+		InputSchemaVersion: 2, OutputSchemaVersion: 4,
+		ParentRunID: "run-parent", WorkflowRunID: "workflow-1", WorkflowNodeID: "answer",
+		Question: "question", Status: RunStatusRunning, Mode: "workflow", MaxSteps: 5,
+		StartedAt: "2026-08-05T01:02:03Z",
+	}
+	mock.ExpectExec("INSERT INTO agent_runs").
+		WithArgs(
+			record.ID, record.UserID, record.SessionID, record.AgentID, record.DefinitionVersion,
+			record.DefinitionHash, record.ToolSnapshotID, record.InputSchemaVersion,
+			record.OutputSchemaVersion, record.ParentRunID, record.WorkflowRunID,
+			record.WorkflowNodeID, record.Question, record.Status, record.ErrorCode,
+			record.Mode, record.MaxSteps, 0, 0, sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := store.Create(record); err != nil {
+		t.Fatalf("Create: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -296,7 +330,7 @@ func TestRunStoreRejectsTerminalOverwrite(t *testing.T) {
 	store := &RunStore{db: db}
 	mock.ExpectExec("UPDATE agent_runs").
 		WithArgs(
-			RunStatusFailed, 0, 0, EvidenceUnavailable, false, 0, 0, 0, 0, 0,
+			RunStatusFailed, "", 0, 0, EvidenceUnavailable, false, 0, 0, 0, 0, 0,
 			sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 0))

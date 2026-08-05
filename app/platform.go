@@ -8,11 +8,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/incident"
 	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
 	"github.com/dekwanlabs/nasuta/internal/approval"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
@@ -62,6 +65,13 @@ type Platform struct {
 	ontology        ontology.Backend
 	history         *sessionhistory.Service
 	featureDelivery featureDeliveryRuntime
+	qaReloadMu      sync.Mutex
+	qaMu            sync.RWMutex
+	qaDefinitionVer int64
+	agentCatalog    *agentcatalog.Catalog
+	qaSessions      *memory.SessionStore
+	qaRunStore      *agent.RunStore
+	qaRuntime       dashboard.QARuntime
 }
 
 // New constructs the reusable platform without registering scenario routes.
@@ -115,7 +125,20 @@ func New() (*Platform, error) {
 		platformDB: platformDB, authDB: authDB, authService: authService,
 		codegraph: codeGraph, callChain: callChainService,
 		ontology: ontologyBackend,
-		history:  history,
+		history:  history, qaSessions: sessions, agentCatalog: agentcatalog.New(),
+	}
+	if platformDB != nil {
+		runStore, runStoreErr := agent.NewRunStore(platformDB)
+		if runStoreErr != nil {
+			log.Warnf("[qa] agent run store disabled: %v", runStoreErr)
+		} else {
+			platform.qaRunStore = runStore
+			log.Infof("[qa] agent run store enabled (MySQL)")
+		}
+	}
+	if err := platform.reloadQARuntime(codeGraph); err != nil {
+		_ = platform.Close()
+		return nil, fmt.Errorf("configure QA runtime: %w", err)
 	}
 	platform.initRBAC()
 	if err := platform.initFeatureDelivery(); err != nil {
@@ -265,6 +288,11 @@ func (platform *Platform) configureIncidentsWithDB(db *sql.DB, evidence incident
 	platform.actions = actions
 	platform.incidentAPI = incidenthttp.New(manager, actions, platform.cfg.AlertWebhookSecret)
 	platform.writeReady = true
+	if platform.agentCatalog != nil {
+		if err := platform.reloadQARuntime(platform.codegraph); err != nil {
+			return fmt.Errorf("reload QA runtime with write actions: %w", err)
+		}
+	}
 	log.Infof("[server] incident and approval workflows enabled")
 	return nil
 }
@@ -274,6 +302,8 @@ func (platform *Platform) WorkspaceRoot() string { return platform.cfg.Workspace
 
 // Settings returns a detached copy so scenario composition cannot mutate platform state.
 func (platform *Platform) Settings() config.PlatformSettings {
+	platform.qaMu.RLock()
+	defer platform.qaMu.RUnlock()
 	settings := *platform.settings
 	settings.VCSGroups = append([]string(nil), platform.settings.VCSGroups...)
 	settings.VCSExcludeProjects = append([]string(nil), platform.settings.VCSExcludeProjects...)
@@ -284,10 +314,11 @@ func (platform *Platform) Settings() config.PlatformSettings {
 // RegisterCommonRoutes attaches only reusable platform routes to mux.
 func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	dashboardHandler := dashboard.NewHandler(
-		platform.index.DB, platform.index.DocDB(), platform.authDB, platform.platformDB,
+		platform.index.DB, platform.index.DocDB(), platform.authDB,
 		platform.index.Semantic, platform.index.Embedder,
-		platform.knowledge, platform.cfg, platform.settings, platform.index,
-		platform.registry, platform.writeReady, platform.codegraph, platform.callChain, platform.history,
+		platform.knowledge, platform.cfg, platform.index,
+		platform.codegraph, platform.callChain,
+		platform.currentQARuntime, platform.reloadQARuntime,
 	)
 	if platform.rolePrompt != nil {
 		dashboardHandler.SetRolePrompt(platform.rolePrompt)
@@ -306,6 +337,84 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	if platform.featureDelivery.api != nil {
 		platform.featureDelivery.api.RegisterRoutes(platform.AuthenticatedAPI(mux))
 	}
+}
+
+func (platform *Platform) buildQARuntime(settings *config.PlatformSettings, graph *codegraph.DB, version int64) (dashboard.QARuntime, agentapi.Definition, error) {
+	snapshot := *settings
+	snapshot.VCSGroups = append([]string(nil), settings.VCSGroups...)
+	snapshot.VCSExcludeProjects = append([]string(nil), settings.VCSExcludeProjects...)
+	snapshot.CodingEnabledProviders = append([]string(nil), settings.CodingEnabledProviders...)
+	if !snapshot.LLMEnabled() {
+		return dashboard.QARuntime{
+			RunStore: platform.qaRunStore, Sessions: platform.qaSessions,
+			History: platform.history, Settings: &snapshot,
+			WriteAvailable: platform.writeReady,
+		}, agentapi.Definition{}, nil
+	}
+	if err := snapshot.ValidateAgentSettings(); err != nil {
+		return dashboard.QARuntime{}, agentapi.Definition{}, err
+	}
+	definition, err := agentcatalog.DefaultQAVersion(&snapshot, version)
+	if err != nil {
+		return dashboard.QARuntime{}, agentapi.Definition{}, fmt.Errorf("prepare QA definition: %w", err)
+	}
+	runtime := agent.NewQARuntime(agent.QARuntimeDeps{
+		Tools: platform.knowledge, Registry: platform.registry,
+		Cfg: platform.cfg, Platform: &snapshot,
+		Sessions: platform.qaSessions, History: platform.history,
+		WriteAvailable: platform.writeReady, RunStore: platform.qaRunStore,
+	})
+	qa := agent.NewQA(agent.QADeps{
+		Tools: platform.knowledge, Semantic: platform.index.Semantic,
+		Embedder: platform.index.Embedder, Cfg: platform.cfg, Platform: &snapshot,
+		CodeGraphDB: graph, DB: platform.platformDB,
+		History: platform.history, Sessions: platform.qaSessions,
+		Definitions: platform.agentCatalog,
+		Agent:       agentapi.DefinitionRef{ID: definition.ID, Version: definition.Version},
+		Runtime:     runtime,
+	})
+	return dashboard.QARuntime{
+		QA: qa, RunStore: platform.qaRunStore, Sessions: platform.qaSessions,
+		History: platform.history, Settings: &snapshot,
+		WriteAvailable: platform.writeReady,
+	}, definition, nil
+}
+
+func (platform *Platform) currentQARuntime() dashboard.QARuntime {
+	platform.qaMu.RLock()
+	defer platform.qaMu.RUnlock()
+	return platform.qaRuntime
+}
+
+func (platform *Platform) reloadQARuntime(graph *codegraph.DB) error {
+	platform.qaReloadMu.Lock()
+	defer platform.qaReloadMu.Unlock()
+
+	settings := loadPlatformSettings(platform.authDB)
+	version := platform.qaDefinitionVer + 1
+	candidate, definition, err := platform.buildQARuntime(settings, graph, version)
+	if err != nil {
+		return err
+	}
+	if definition.ID != "" {
+		if err := platform.agentCatalog.Publish([]agentapi.Definition{definition}); err != nil {
+			return fmt.Errorf("publish QA definition: %w", err)
+		}
+	}
+
+	platform.qaMu.Lock()
+	platform.settings = candidate.Settings
+	platform.qaRuntime = candidate
+	if definition.ID != "" {
+		platform.qaDefinitionVer = version
+	}
+	platform.codegraph = graph
+	platform.qaMu.Unlock()
+	platform.index.SetPlatform(candidate.Settings)
+	log.Infof("[settings] QA runtime reloaded (definition_version=%d, model=%s, timeout=%s, max_steps=%d)",
+		platform.qaDefinitionVer, candidate.Settings.LLMModel,
+		time.Duration(candidate.Settings.AgentTimeout), candidate.Settings.AgentMaxSteps)
+	return nil
 }
 
 // AuthenticatedAPI gives the root composition the platform auth boundary without exposing its store.

@@ -309,13 +309,13 @@ func (handler *Handler) ReviewArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	decision, comment, err := decodeReview(r)
+	decision, comment, binding, err := decodeReview(r)
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
 	err = handler.service.ReviewArtifact(
-		r.Context(), r.PathValue("id"), r.PathValue("artifact_id"), decision, comment, user.ID,
+		r.Context(), r.PathValue("id"), r.PathValue("artifact_id"), decision, comment, binding, user.ID,
 	)
 	if err != nil {
 		writeDomainError(w, err)
@@ -404,12 +404,12 @@ func (handler *Handler) ReviewChangeSet(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	decision, comment, err := decodeReview(r)
+	decision, comment, binding, err := decodeReview(r)
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
-	if err := handler.service.ReviewChangeSet(r.Context(), r.PathValue("run_id"), decision, comment, user.ID); err != nil {
+	if err := handler.service.ReviewChangeSet(r.Context(), r.PathValue("run_id"), decision, comment, binding, user.ID); err != nil {
 		writeDomainError(w, err)
 		return
 	}
@@ -532,19 +532,26 @@ func adminUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
 	return user, true
 }
 
-func decodeReview(r *http.Request) (featuredelivery.ReviewDecision, string, error) {
+func decodeReview(r *http.Request) (featuredelivery.ReviewDecision, string, featuredelivery.ReviewApprovalBinding, error) {
 	var request struct {
-		Decision string `json:"decision"`
-		Comment  string `json:"comment"`
+		Decision      string `json:"decision"`
+		Comment       string `json:"comment"`
+		SubjectHash   string `json:"subject_hash"`
+		ReviewRoundID string `json:"review_round_id"`
+		GateResultID  string `json:"gate_result_id"`
 	}
 	if err := httputil.DecodeStrictJSON(r, &request); err != nil {
-		return "", "", err
+		return "", "", featuredelivery.ReviewApprovalBinding{}, err
 	}
 	decision := featuredelivery.ReviewDecision(strings.ToLower(strings.TrimSpace(request.Decision)))
 	if decision != featuredelivery.DecisionApproved && decision != featuredelivery.DecisionRejected {
-		return "", "", fmt.Errorf("decision must be approved or rejected")
+		return "", "", featuredelivery.ReviewApprovalBinding{}, fmt.Errorf("decision must be approved or rejected")
 	}
-	return decision, strings.TrimSpace(request.Comment), nil
+	return decision, strings.TrimSpace(request.Comment), featuredelivery.ReviewApprovalBinding{
+		SubjectHash:   strings.TrimSpace(request.SubjectHash),
+		ReviewRoundID: strings.TrimSpace(request.ReviewRoundID),
+		GateResultID:  strings.TrimSpace(request.GateResultID),
+	}, nil
 }
 
 func writeDomainError(w http.ResponseWriter, err error) {

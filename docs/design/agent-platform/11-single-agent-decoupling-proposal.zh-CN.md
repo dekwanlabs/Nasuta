@@ -2,12 +2,23 @@
 
 [返回设计索引](README.zh-CN.md)
 
-> 状态：专项实施方案
+> 状态：第一阶段已实现，后续演进中
 > 更新日期：2026-08-05
 > 适用范围：Nasuta QA Agent 及后续可复用 Agent
 > 依赖基线：模块 01、02、04、06、08、09
 
 ## 1. 结论
+
+### 实施状态
+
+第一阶段已在 Nasuta 中落地：
+
+- `agent.Definition`、`agent.Runtime` 和 `agentcatalog` 已形成独立执行合同；
+- QA Runtime 已由 `app.Platform` 统一持有和组装；
+- Agent Run 已保存 Definition、Tool Snapshot、Schema、Workflow 等版本快照；
+- 现有 QA SSE、Run、Step、Usage 和取消链路保持兼容。
+
+尚未落地的是跨进程 Remote Worker、Agent 控制面 UI 和完整运行指标体系。这些属于后续部署与运营阶段，不影响本阶段在进程内为多 Agent 提供稳定执行单元。
 
 推荐把当前 `internal/agent.QA` 拆成“场景编排”和“通用执行”两层，在同一进程内先形成独立 Agent Runtime：
 

@@ -21,6 +21,7 @@ type Service struct {
 	store             Store
 	generator         *Generator
 	implementations   *ImplementationManager
+	reviewer          ReviewRunner
 	generationTimeout time.Duration
 	now               func() time.Time
 }
@@ -316,7 +317,14 @@ func (service *Service) GenerateArtifact(ctx context.Context, requestID string, 
 	return saved, &run, nil
 }
 
-func (service *Service) ReviewArtifact(ctx context.Context, requestID, artifactID string, decision ReviewDecision, comment string, reviewerID int64) error {
+func (service *Service) ReviewArtifact(
+	ctx context.Context,
+	requestID, artifactID string,
+	decision ReviewDecision,
+	comment string,
+	binding ReviewApprovalBinding,
+	reviewerID int64,
+) error {
 	if decision != DecisionApproved && decision != DecisionRejected {
 		return fmt.Errorf("invalid review decision %q: %w", decision, ErrInvalid)
 	}
@@ -327,15 +335,25 @@ func (service *Service) ReviewArtifact(ctx context.Context, requestID, artifactI
 	if err != nil {
 		return err
 	}
-	if artifact.RequestID != requestID || artifact.Kind == KindRequirement {
+	if artifact.RequestID != requestID {
 		return ErrNotFound
 	}
-	parent, err := service.currentParent(ctx, requestID, artifact.Kind)
-	if err != nil {
-		return err
-	}
-	if artifact.ParentArtifactID != parent.ID {
-		return ErrConflict
+	if artifact.Kind == KindRequirement {
+		lineage, err := service.store.GetCurrentLineage(ctx, requestID)
+		if err != nil {
+			return err
+		}
+		if lineage.Requirement == nil || lineage.Requirement.ID != artifact.ID {
+			return ErrConflict
+		}
+	} else {
+		parent, err := service.currentParent(ctx, requestID, artifact.Kind)
+		if err != nil {
+			return err
+		}
+		if artifact.ParentArtifactID != parent.ID {
+			return ErrConflict
+		}
 	}
 	if decision == DecisionApproved {
 		blocking, err := BlockingQuestions(*artifact)
@@ -346,21 +364,53 @@ func (service *Service) ReviewArtifact(ctx context.Context, requestID, artifactI
 			return fmt.Errorf("artifact has %d unresolved blocking questions; revise and clear them before approval: %w", len(blocking), ErrConflict)
 		}
 	}
+	subject, err := BuildArtifactReviewSubject(*artifact)
+	if err != nil {
+		return err
+	}
+	if err := service.validateApprovalBinding(ctx, subject, binding, decision, comment); err != nil {
+		return err
+	}
 	return service.store.ReviewArtifact(ctx, ArtifactReview{
-		ArtifactID: artifactID, Decision: decision, Comment: comment,
+		ArtifactID: artifactID, SubjectHash: binding.SubjectHash,
+		ReviewRoundID: binding.ReviewRoundID, GateResultID: binding.GateResultID,
+		Decision: decision, Comment: comment,
 		Reviewer: reviewerID, CreatedAt: service.now(),
 	})
 }
 
-func (service *Service) ReviewChangeSet(ctx context.Context, runID string, decision ReviewDecision, comment string, reviewerID int64) error {
+func (service *Service) ReviewChangeSet(
+	ctx context.Context,
+	runID string,
+	decision ReviewDecision,
+	comment string,
+	binding ReviewApprovalBinding,
+	reviewerID int64,
+) error {
 	if decision != DecisionApproved && decision != DecisionRejected {
 		return fmt.Errorf("invalid review decision %q: %w", decision, ErrInvalid)
 	}
 	if len(comment) > maxReviewComment {
 		return fmt.Errorf("review comment exceeds %d bytes: %w", maxReviewComment, ErrInvalid)
 	}
+	run, err := service.store.GetImplementation(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status != RunSucceeded || run.ChangeSet == nil {
+		return ErrConflict
+	}
+	subject, err := BuildChangeSetReviewSubject(*run)
+	if err != nil {
+		return err
+	}
+	if err := service.validateApprovalBinding(ctx, subject, binding, decision, comment); err != nil {
+		return err
+	}
 	return service.store.ReviewChangeSet(ctx, ChangeReview{
-		RunID: runID, Decision: decision, Comment: comment, Reviewer: reviewerID, CreatedAt: service.now(),
+		RunID: runID, SubjectHash: binding.SubjectHash,
+		ReviewRoundID: binding.ReviewRoundID, GateResultID: binding.GateResultID,
+		Decision: decision, Comment: comment, Reviewer: reviewerID, CreatedAt: service.now(),
 	})
 }
 

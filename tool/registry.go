@@ -1,8 +1,11 @@
 package tool
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -283,6 +286,17 @@ func (snapshot Snapshot) CandidateTools(referenceType ReferenceType) []ToolID {
 
 func (snapshot Snapshot) Revision() uint64 {
 	return snapshot.revision
+}
+
+// ID identifies the exact visible tool set pinned for one run.
+func (snapshot Snapshot) ID() string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(strconv.FormatUint(snapshot.revision, 10)))
+	for _, id := range snapshot.order {
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(id))
+	}
+	return "tools_" + hex.EncodeToString(hash.Sum(nil))
 }
 
 func (snapshot Snapshot) Get(id ToolID) (Tool, bool) {

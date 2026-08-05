@@ -57,6 +57,17 @@ type Handler struct {
 	idx                IndexingOps
 	rolePromptFn       func(userID int64) string
 	featureStatusFn    func(context.Context) featuredelivery.FeatureDeliveryStatus
+	qaRuntimeFn        func() QARuntime
+	reloadQAFn         func(*codegraph.DB) error
+}
+
+type QARuntime struct {
+	QA             *agent.QA
+	RunStore       *agent.RunStore
+	Sessions       *memory.SessionStore
+	History        agent.SessionHistory
+	Settings       *config.PlatformSettings
+	WriteAvailable bool
 }
 
 // SetRolePrompt wires a function that returns the combined RBAC-role
@@ -79,50 +90,22 @@ func (handler *Handler) rolePromptFor(userID int64) string {
 }
 
 // NewHandler builds the dashboard HTTP handler.
-func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, platformDB *sql.DB, sem semantic.Store, emb embed.Embedder, t *agent.Service, cfg config.Config, ps *config.PlatformSettings, idx IndexingOps, registry *agent.Registry, writeAvailable bool, cgDB *codegraph.DB, chain *callchain.Service, histories ...agent.SessionHistory) *Handler {
-	if ps == nil {
-		ps = &config.PlatformSettings{}
-	}
-	runStore := openRunStore(platformDB)
-	qaSessions := openQASessions(platformDB)
-	var history agent.SessionHistory
-	if len(histories) > 0 {
-		history = histories[0]
-	}
+func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem semantic.Store, emb embed.Embedder, t *agent.Service, cfg config.Config, idx IndexingOps, cgDB *codegraph.DB, chain *callchain.Service, qaRuntime func() QARuntime, reloadQA func(*codegraph.DB) error) *Handler {
 	h := &Handler{
-		db:                 db,
-		docDB:              docDB,
-		authDB:             authDB,
-		platformDB:         platformDB,
-		semantic:           sem,
-		embedder:           emb,
-		tools:              t,
-		qa:                 agent.NewQA(agent.QADeps{Tools: t, Semantic: sem, Embedder: emb, WriteAvailable: writeAvailable, Cfg: cfg, Platform: ps, Registry: registry, CodeGraphDB: cgDB, DB: platformDB, RunStore: runStore, History: history, Sessions: qaSessions}),
-		persistentRunStore: runStore,
-		registry:           registry,
-		writeAvailable:     writeAvailable,
-		cfg:                cfg,
-		platform:           ps,
-		idx:                idx,
-		callChain:          chain,
-		history:            history,
-		qaSessions:         qaSessions,
+		db:          db,
+		docDB:       docDB,
+		authDB:      authDB,
+		semantic:    sem,
+		embedder:    emb,
+		tools:       t,
+		cfg:         cfg,
+		idx:         idx,
+		callChain:   chain,
+		qaRuntimeFn: qaRuntime,
+		reloadQAFn:  reloadQA,
 	}
 	h.codegraphDB = cgDB
 	return h
-}
-
-func openRunStore(db *sql.DB) *agent.RunStore {
-	if db == nil {
-		return nil
-	}
-	runStore, err := agent.NewRunStore(db)
-	if err != nil {
-		log.Warnf("[dashboard] agent run store disabled: %v", err)
-		return nil
-	}
-	log.Infof("[dashboard] agent run store enabled (MySQL)")
-	return runStore
 }
 
 func (handler *Handler) refreshCodeGraph() error {
@@ -145,16 +128,9 @@ func (handler *Handler) refreshCodeGraph() error {
 	if handler.callChain != nil {
 		handler.callChain.SetGraph(cgDB)
 	}
-	handler.rebuildQA(handler.platform)
+	if err := handler.reloadQA(cgDB); err != nil {
+		return fmt.Errorf("reload QA after codegraph rebuild: %w", err)
+	}
 	log.Infof("[dashboard] codegraph connection enabled after rebuild")
 	return nil
-}
-
-func openQASessions(db *sql.DB) *memory.SessionStore {
-	if db == nil {
-		return nil
-	}
-	qaDB := memory.NewSessionStore(db)
-	log.Infof("[dashboard] qa session store enabled (MySQL)")
-	return qaDB
 }
