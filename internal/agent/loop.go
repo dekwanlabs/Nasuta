@@ -80,6 +80,8 @@ type ConversationContext struct {
 	Instructions         []llm.Message
 	FullInvestigation    bool
 	EvidenceSeeded       bool
+	PrunedToolIDs        map[tool.ToolID]struct{} // non-nil => drop non-base tools from model-facing defs; nil => offer full set
+	PruneApplied         bool                     // true => pruning is live (not dry-run) and reduces the offered set
 }
 
 func (c AgentConfig) withDefaults() AgentConfig {
@@ -192,6 +194,29 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 	log.InfofCtx(ctx, "[agent] run %s history compiled in %s: recent=%d recalledHistoryChars=%d contextChars=%d",
 		runID, historyDuration, len(conversation.Recent), len([]rune(conversation.RetrievedHistory)), contextChars(messages))
 	tools := agent.executor.Definitions(toolSnapshot)
+	if len(conversation.PrunedToolIDs) > 0 {
+		// Dry-run until PruneApplied flips: always measure the would-be saving,
+		// but only shrink the offered set when pruning is live. Execution keeps
+		// the full snapshot so a pruned tool is still callable if replayed.
+		effective := prunedDefinitions(tools, conversation.PrunedToolIDs)
+		fullEnc, _ := json.Marshal(tools)
+		effEnc, _ := json.Marshal(effective)
+		fullTok := tooloutput.EstimateTokens(string(fullEnc))
+		effTok := tooloutput.EstimateTokens(string(effEnc))
+		log.InfofCtx(ctx, "[agent] run %s tool pruning: applied=%t offered=%d/%d tokens=%d->%d saved=%d removed=%v",
+			runID, conversation.PruneApplied, len(effective), len(tools), fullTok, effTok, fullTok-effTok, removedToolDefIDs(tools, effective))
+		if traceEnabled {
+			domain.RecordTrace(ctx, domain.EvaluationTrace{
+				Node: "tool_pruning", Input: map[string]any{"applied": conversation.PruneApplied},
+				Output: map[string]any{"offered": len(effective), "total": len(tools),
+					"full_tokens": fullTok, "pruned_tokens": effTok, "saved_tokens": fullTok - effTok,
+					"removed_tool_ids": removedToolDefIDs(tools, effective)},
+			})
+		}
+		if conversation.PruneApplied {
+			tools = effective
+		}
+	}
 
 	result := &RunResult{RunID: runID}
 	if conversation.EvidenceSeeded || rc != nil && rc.Text != "" {

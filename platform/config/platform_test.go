@@ -82,6 +82,31 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 	}
 }
 
+func TestToolPruningDefaultsOffAndAppliesToggle(t *testing.T) {
+	var settings PlatformSettings
+	settings.Apply(nil)
+	if settings.ToolPruningEnabled {
+		t.Fatalf("tool pruning default = true, want false (dry-run measurement)")
+	}
+	settings.Apply(map[string]string{"tool_pruning_enabled": "1"})
+	if !settings.ToolPruningEnabled {
+		t.Fatalf("tool pruning = false, want true after explicit 1")
+	}
+	settings.Apply(map[string]string{"tool_pruning_enabled": "0"})
+	if settings.ToolPruningEnabled {
+		t.Fatalf("tool pruning = true, want false after explicit 0")
+	}
+	if v, ok := settings.Values()["tool_pruning_enabled"]; !ok || v != false {
+		t.Fatalf("values[tool_pruning_enabled] = %v, want false", v)
+	}
+	if got, err := CanonicalPlatformSetting("tool_pruning_enabled", "true"); err != nil || got != "true" {
+		t.Fatalf("canonical = %q, err=%v", got, err)
+	}
+	if _, err := CanonicalPlatformSetting("tool_pruning_enabled", "banana"); err == nil {
+		t.Fatalf("canonical accepted invalid value banana")
+	}
+}
+
 func TestCanonicalLLMContextWindow(t *testing.T) {
 	if got, err := CanonicalPlatformSetting("llm_context_window", "128000"); err != nil || got != "128000" {
 		t.Fatalf("canonical context window = %q, err=%v", got, err)
@@ -161,6 +186,7 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"llm_max_continue_rounds": "0", "llm_context_window": "128000", "agent_answer_reserve": "30s",
 		"agent_timeout": "5m", "agent_max_steps": "1", "context_budget": "1", "domain_knowledge": "domain",
 		"retrieval_router_direct_min_confidence": "0.9", "retrieval_router_max_tokens": "512",
+		"tool_pruning_enabled": "false",
 		"rerank_enabled": "true", "rerank_pool": "1", "rerank_topk": "1", "rerank_min_score": "0.1",
 		"rerank_min_dense_preflight": "0", "runbook_min_score": "0.2", "code_min_score": "1",
 		"rerank_max_per_service": "1", "rerank_max_per_service_low_band": "1", "rerank_provider": "provider",

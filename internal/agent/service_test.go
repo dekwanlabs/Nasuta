@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -527,6 +529,116 @@ func TestAskAgentRouterInvalidOutputFallsBackInternal(t *testing.T) {
 	if result.Context == nil {
 		t.Fatal("context is nil")
 	}
+}
+
+// TestAskAgentPrunesScenarioToolsWhenRoutingSaysSo drives the full AskAgent path
+// with two base read tools and two routing-gated scenario tools, asserting the
+// offered tool set shrinks when pruning is live and stays full in dry-run.
+func TestAskAgentPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
+	run := func(pruningEnabled bool, routeBody string) (toolNames []string, traces []domain.EvaluationTrace) {
+		var agentToolNames []string
+		recorder := &toolTraceRecorder{}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request struct {
+				Stream bool  `json:"stream"`
+				Tools  []any `json:"tools"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode request: %v", err)
+				return
+			}
+			if !request.Stream {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(routeBody))
+				return
+			}
+			for _, tool := range request.Tools {
+				name, _ := tool.(map[string]any)["function"].(map[string]any)["name"].(string)
+				agentToolNames = append(agentToolNames, name)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"direct answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		}))
+		defer server.Close()
+
+		client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+		registry := testRegistry(t,
+			testAgentTool("get_service", ToolKindRead, noopTool),
+			testAgentTool("search_code", ToolKindRead, noopTool),
+			scenarioTool("observe_logs"),
+			scenarioTool("search_config"),
+		)
+		executor := NewToolExecutor(registry)
+		hub := NewRunHub(nil)
+		qa := &QA{
+			llm: client, fastLLM: client, executor: executor,
+			retriever: retrieval.New(emptyRetrievalTools{}, config.Config{}),
+			agent: NewAgent(client, executor, AgentConfig{
+				MaxSteps: 1, Timeout: 2 * time.Second, AnswerReserve: 200 * time.Millisecond, AnswerMaxTokens: 512,
+			}, hub, hub),
+			hub: hub, routerConfidence: 0.9, routerMaxTokens: 512,
+			toolPruningEnabled: pruningEnabled,
+		}
+		ctx := domain.WithTraceRecorder(context.Background(), recorder)
+		runID := fmt.Sprintf("prune-run-%t", pruningEnabled)
+		terminalCh := hub.Subscribe(runID)
+		result, err := qa.AskAgent(ctx, "how many requests failed?", nil, 0, "", runID)
+		if err != nil {
+			t.Fatalf("AskAgent: %v", err)
+		}
+		if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
+			t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
+		}
+		if result.Context == nil {
+			t.Fatal("context is nil")
+		}
+		return agentToolNames, recorder.events
+	}
+
+	// Router selects observe_logs only; the router requires the query_terms
+	// object to accompany the route and tools objects.
+	routeBody := `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"tools\":{\"tool_ids\":[\"observe_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]}}"}}]}`
+
+	t.Run("live pruning keeps base plus routed", func(t *testing.T) {
+		names, _ := run(true, routeBody)
+		sort.Strings(names)
+		if strings.Join(names, ",") != "get_service,observe_logs,search_code" {
+			t.Fatalf("offered tools = %v, want get_service+observe_logs+search_code (search_config pruned)", names)
+		}
+	})
+
+	t.Run("dry-run keeps the full set", func(t *testing.T) {
+		names, traces := run(false, routeBody)
+		sort.Strings(names)
+		if strings.Join(names, ",") != "get_service,observe_logs,search_code,search_config" {
+			t.Fatalf("dry-run offered tools = %v, want the full set", names)
+		}
+		var saved float64
+		found := false
+		for _, trace := range traces {
+			if trace.Node != "tool_pruning" {
+				continue
+			}
+			found = true
+			if applied, _ := trace.Input["applied"].(bool); applied {
+				t.Fatalf("dry-run trace recorded applied=true")
+			}
+			// The recorder stores the raw Go value (int); a JSON round-trip would
+			// widen it to float64. Accept both.
+			switch v := trace.Output["saved_tokens"].(type) {
+			case int:
+				saved = float64(v)
+			case float64:
+				saved = v
+			}
+		}
+		if !found {
+			t.Fatal("no tool_pruning trace node recorded in dry-run")
+		}
+		if saved <= 0 {
+			t.Fatal("dry-run recorded no positive token saving")
+		}
+	})
 }
 
 func TestCanonicalRetrievalQueryAugmentsWithContextTerms(t *testing.T) {

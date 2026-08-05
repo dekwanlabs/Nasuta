@@ -297,8 +297,13 @@ func TestAnthropicMessageTranslation(term7 *testing.T) {
 		term7.Fatalf("unmarshal request: %v", err)
 	}
 
-	if req.System != "you are an agent\n\nextra rules" {
-		term7.Fatalf("system = %q, want two parts joined", req.System)
+	// Without tools the system stays a plain JSON string.
+	var sys string
+	if err := json.Unmarshal(req.System, &sys); err != nil {
+		term7.Fatalf("system is not a string: %v", err)
+	}
+	if sys != "you are an agent\n\nextra rules" {
+		term7.Fatalf("system = %q, want two parts joined", sys)
 	}
 	if len(req.Messages) != 3 {
 		term7.Fatalf("messages = %d, want 3 (user, assistant, merged-tool-results user)", len(req.Messages))
@@ -377,6 +382,49 @@ func TestAnthropicToolDefTranslation(term8 *testing.T) {
 	}
 	if req.ToolChoice == nil || req.ToolChoice.Type != "auto" {
 		term8.Fatalf("tool_choice = %+v, want auto", req.ToolChoice)
+	}
+	// The last tool carries the cache breakpoint, and the system prompt is a
+	// single cacheable block so tools+system cache together across steps.
+	if t0.CacheControl == nil || t0.CacheControl.Type != "ephemeral" {
+		term8.Fatalf("tool cache_control = %+v, want ephemeral on last tool", t0.CacheControl)
+	}
+	var blocks []anthropicSystemBlock
+	if err := json.Unmarshal(req.System, &blocks); err != nil {
+		term8.Fatalf("system is not a block array: %v", err)
+	}
+	if len(blocks) != 1 || blocks[0].CacheControl == nil || blocks[0].CacheControl.Type != "ephemeral" {
+		term8.Fatalf("system blocks = %+v, want one cacheable block", blocks)
+	}
+}
+
+func TestAnthropicCacheControlOnlyOnLastTool(term *testing.T) {
+	frames := []string{
+		sseLine("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"}}),
+		sseLine("message_stop", map[string]any{"type": "message_stop"}),
+	}
+	srv, bodyOf := newAnthropicFakeServer(term, frames)
+	defer srv.Close()
+
+	client := newAnthropicClient(term, srv.URL)
+	tools := []ToolDef{
+		{Type: "function", Function: ToolFunctionDef{Name: "first", Description: "First", Parameters: map[string]any{"type": "object"}}},
+		{Type: "function", Function: ToolFunctionDef{Name: "second", Description: "Second", Parameters: map[string]any{"type": "object"}}},
+	}
+	if _, err := client.ChatWithToolsMax(term.Context(), []Message{{Role: "user", Content: "q"}}, tools, nil, 100); err != nil {
+		term.Fatalf("ChatWithToolsMax: %v", err)
+	}
+	var req anthropicRequest
+	if err := json.Unmarshal(bodyOf(), &req); err != nil {
+		term.Fatalf("unmarshal request: %v", err)
+	}
+	if len(req.Tools) != 2 {
+		term.Fatalf("tools = %d, want 2", len(req.Tools))
+	}
+	if req.Tools[0].CacheControl != nil {
+		term.Fatalf("first tool cache_control = %+v, want nil", req.Tools[0].CacheControl)
+	}
+	if req.Tools[1].CacheControl == nil || req.Tools[1].CacheControl.Type != "ephemeral" {
+		term.Fatalf("last tool cache_control = %+v, want ephemeral", req.Tools[1].CacheControl)
 	}
 }
 

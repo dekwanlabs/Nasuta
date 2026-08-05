@@ -62,9 +62,10 @@ type QA struct {
 	hub              *RunHub
 	runStore         *RunStore
 	cfg              config.Config
-	routerConfidence float64
-	routerMaxTokens  int
-	contextWindow    int
+	routerConfidence   float64
+	routerMaxTokens    int
+	contextWindow      int
+	toolPruningEnabled bool
 }
 
 // AskResult identifies the asynchronous run and its pre-retrieved context.
@@ -123,6 +124,7 @@ func NewQA(d QADeps) *QA {
 	svc := &QA{
 		retriever: ret, cfg: d.Cfg,
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
+		toolPruningEnabled: platformSettings.ToolPruningEnabled,
 		history: d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
 	}
 	if svc.sessions == nil && d.DB != nil {
@@ -429,6 +431,13 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		})
 	}
 	conversation.FullInvestigation = routedToolsNeedFullInvestigation(toolCandidates, routedToolIDs)
+	// Always measure the would-be pruning when routing is healthy; the config
+	// toggle only decides whether the pruned set is actually applied. Dry-run
+	// (PruneApplied=false) logs the saving while sending the full set.
+	if decidePrune(planningErr, effectiveDecision) {
+		conversation.PrunedToolIDs = svc.prunedToolIDSet(toolSnapshot, routedToolIDs)
+		conversation.PruneApplied = svc.toolPruningEnabled
+	}
 	log.InfofCtx(ctx, "[qa] evidence plan proposed=%s proposed_sources=%v confidence=%.2f origin=%s effective=%s effective_sources=%v effective_confidence=%.2f effective_origin=%s",
 		decision.Plan.String(), decision.Plan.SourceNames(), decision.Confidence, decision.Origin,
 		effectiveDecision.Plan.String(), effectiveDecision.Plan.SourceNames(), effectiveDecision.Confidence, effectiveDecision.Origin)
@@ -605,6 +614,15 @@ func snapshotToolIDs(snapshot tool.Snapshot) []string {
 		ids = append(ids, string(candidate.ID))
 	}
 	return ids
+}
+
+func (svc *QA) prunedToolIDSet(snapshot tool.Snapshot, routed []string) map[tool.ToolID]struct{} {
+	candidates := routingCandidates(snapshot)
+	allowed := baseToolIDSet(snapshot, candidates)
+	for id := range pruneAllowance(routed, candidates) {
+		allowed[id] = struct{}{}
+	}
+	return allowed
 }
 
 func withoutSessionHistoryTools(snapshot tool.Snapshot) tool.Snapshot {

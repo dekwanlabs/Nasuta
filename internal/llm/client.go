@@ -336,6 +336,10 @@ func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, t
 		result, callErr = lc.anthropic().ChatWithToolsMax(ctx, messages, tools, h, maxTokens)
 		return result, callErr
 	}
+	// No explicit cache marker is emitted on the OpenAI-compatible path:
+	// prompt_cache_breakpoint is a GPT-5.x-family-only field that the corporate
+	// gateway (e.g. deepseek-v4-pro) would reject or ignore, and the gateway
+	// already prefix-caches implicitly (measured 32-99% of step input cached).
 	req := chatRequest{
 		Model: lc.model, Messages: messages, MaxTokens: maxTokens,
 		Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Tools: tools,

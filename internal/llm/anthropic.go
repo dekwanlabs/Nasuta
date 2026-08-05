@@ -27,7 +27,7 @@ const anthropicVersion = "2023-06-01"
 
 type anthropicRequest struct {
 	Model      string               `json:"model"`
-	System     string               `json:"system,omitempty"`
+	System     json.RawMessage      `json:"system,omitempty"`
 	Messages   []anthropicMessage   `json:"messages"`
 	MaxTokens  int                  `json:"max_tokens"`
 	Stream     bool                 `json:"stream"`
@@ -51,9 +51,22 @@ type anthropicContentBlock struct {
 }
 
 type anthropicTool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"input_schema"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	InputSchema map[string]any         `json:"input_schema"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
+type anthropicCacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+// anthropicSystemBlock is the block form of the Anthropic system field, which
+// supports prompt caching via a cache_control breakpoint on the last block.
+type anthropicSystemBlock struct {
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicToolChoice struct {
@@ -141,7 +154,23 @@ func translateToolDefs(tools []ToolDef) []anthropicTool {
 			InputSchema: term.Function.Parameters,
 		})
 	}
+	if len(out) > 0 {
+		// The breakpoint on the last tool caches the entire tools block, which
+		// renders first and is byte-stable within one agent run.
+		out[len(out)-1].CacheControl = &anthropicCacheControl{Type: "ephemeral"}
+	}
 	return out
+}
+
+// anthropicSystemWithCache renders the system prompt as a single cacheable block.
+func anthropicSystemWithCache(system string) json.RawMessage {
+	blocks := []anthropicSystemBlock{{
+		Type:         "text",
+		Text:         system,
+		CacheControl: &anthropicCacheControl{Type: "ephemeral"},
+	}}
+	raw, _ := json.Marshal(blocks)
+	return raw
 }
 
 // normalizeStopReason maps Anthropic stop reasons onto shared finish reasons.
@@ -163,9 +192,10 @@ func (anthropic anthropicProvider) chatMessages(ctx context.Context, messages []
 		maxTokens = anthropic.maxTokens
 	}
 	system, wireMessages := translateMessages(messages)
+	systemRaw, _ := json.Marshal(system) // plain string form; no tools means nothing to cache against
 	body, err := json.Marshal(anthropicRequest{
 		Model:     anthropic.model,
-		System:    system,
+		System:    systemRaw,
 		Messages:  wireMessages,
 		MaxTokens: maxTokens,
 	})
@@ -222,9 +252,16 @@ func (anthropic anthropicProvider) ChatWithToolsMax(ctx context.Context, message
 		maxTokens = anthropic.maxTokens
 	}
 	system, wireMsgs := translateMessages(messages)
+	// With tools, cache the stable tools+system prefix across steps: a
+	// breakpoint on the last system block caches everything rendered before it
+	// (tools render first). Without tools the plain string form is kept.
+	systemRaw, _ := json.Marshal(system)
+	if len(tools) > 0 {
+		systemRaw = anthropicSystemWithCache(system)
+	}
 	req := anthropicRequest{
 		Model:     anthropic.model,
-		System:    system,
+		System:    systemRaw,
 		Messages:  wireMsgs,
 		MaxTokens: maxTokens,
 		Stream:    true,

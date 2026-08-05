@@ -58,6 +58,7 @@ type PlatformSettings struct {
 	AgentAnswerReserve         Duration
 	RetrievalRouterConfidence  float64
 	RetrievalRouterMaxTokens   int
+	ToolPruningEnabled         bool
 
 	CodingEnabledProviders   []string
 	CodingDefaultProvider    string
@@ -79,6 +80,7 @@ var platformSettingKeys = map[string]bool{
 	"llm_max_continue_rounds": true, "llm_context_window": false, "agent_answer_reserve": true,
 	"agent_timeout": true, "agent_max_steps": true, "context_budget": false, "domain_knowledge": true,
 	"retrieval_router_direct_min_confidence": false, "retrieval_router_max_tokens": false,
+	"tool_pruning_enabled": false,
 	"rerank_enabled": false, "rerank_pool": false, "rerank_topk": false,
 	"rerank_min_score": false, "rerank_min_dense_preflight": false,
 	"runbook_min_score": false, "code_min_score": false,
@@ -131,6 +133,7 @@ func (p *PlatformSettings) Values() map[string]any {
 		"agent_max_steps":                        p.AgentMaxSteps,
 		"retrieval_router_direct_min_confidence": p.routerConfidence(),
 		"retrieval_router_max_tokens":            p.routerMaxTokens(),
+		"tool_pruning_enabled":                   p.ToolPruningEnabled,
 		"context_budget":                         p.ContextBudget,
 		"domain_knowledge":                       p.DomainKnowledge,
 		"rerank_enabled":                         p.RerankEnabled,
@@ -186,6 +189,7 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	if p.CodingWorktreeTTL <= 0 {
 		p.CodingWorktreeTTL = Duration(DefaultCodingWorktreeTTL)
 	}
+	p.ToolPruningEnabled = false // default off; dry-run measurement logs what pruning would save
 	if v := strings.TrimSpace(m["llm_model"]); v != "" {
 		p.LLMModel = v
 	}
@@ -229,6 +233,9 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 
 	if v := strings.TrimSpace(m["rerank_enabled"]); v != "" {
 		p.RerankEnabled = v == "1" || v == "true"
+	}
+	if v := strings.TrimSpace(m["tool_pruning_enabled"]); v != "" {
+		p.ToolPruningEnabled = v == "1" || v == "true"
 	}
 	if v := strings.TrimSpace(m["rerank_pool"]); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -407,7 +414,7 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 			return "", fmt.Errorf("llm_provider must be empty, openai, or anthropic")
 		}
 		return value, nil
-	case "rerank_enabled", "coding_allow_network":
+	case "rerank_enabled", "coding_allow_network", "tool_pruning_enabled":
 		return canonicalBoolSetting(key, value)
 	case "llm_max_tokens", "llm_answer_max_tokens", "agent_conclusion_max_tokens", "llm_max_continue_rounds":
 		return canonicalNonNegativeIntSetting(key, value)
