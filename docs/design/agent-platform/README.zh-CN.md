@@ -3,7 +3,7 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
 > 状态：统一设计入口
-> 更新日期：2026-07-31
+> 更新日期：2026-08-05
 > 来源：CodeLoom `docs/design/agent` 与 Nasuta `docs/design`
 
 ## 1. 文档定位
@@ -48,6 +48,16 @@
 | 8 | 可观测性、Token 与评估 | [08-observability-and-evaluation.zh-CN.md](08-observability-and-evaluation.zh-CN.md) | [08-observability-and-evaluation.md](08-observability-and-evaluation.md) |
 | 9 | 写工具、审批与安全 | [09-write-safety-and-approval.zh-CN.md](09-write-safety-and-approval.zh-CN.md) | [09-write-safety-and-approval.md](09-write-safety-and-approval.md) |
 | 10 | Feature Delivery Agent | [10-feature-delivery.zh-CN.md](10-feature-delivery.zh-CN.md) | [10-feature-delivery.md](10-feature-delivery.md) |
+
+## 2.1 专项实施方案
+
+以下文档基于 01–10 的统一设计基线，面向后续 Agent 平台演进和 Feature Delivery 落地。当前先提供中文版本，不改变上述双语模块的规范地位。
+
+| 顺序 | 方案 | 文档 |
+|---:|---|---|
+| 11 | 单 Agent 解耦与独立 Runtime | [11-single-agent-decoupling-proposal.zh-CN.md](11-single-agent-decoupling-proposal.zh-CN.md) |
+| 12 | Nasuta 多 Agent 平台 | [12-multi-agent-platform-proposal.zh-CN.md](12-multi-agent-platform-proposal.zh-CN.md) |
+| 13 | 研发节点多 Agent 评审 | [13-development-multi-agent-review-proposal.zh-CN.md](13-development-multi-agent-review-proposal.zh-CN.md) |
 
 ## 3. 全局不变量
 

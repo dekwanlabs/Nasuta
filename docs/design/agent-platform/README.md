@@ -3,7 +3,7 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
 > Status: consolidated design entry point
-> Updated: 2026-07-31
+> Updated: 2026-08-05
 > Sources: CodeLoom `docs/design/agent` and Nasuta `docs/design`
 
 ## 1. Purpose
@@ -48,6 +48,16 @@ The migration covers 45 physical Markdown files, 30 logical documents, and 12,25
 | 8 | Observability, tokens, and evaluation | [08-observability-and-evaluation.md](08-observability-and-evaluation.md) | [08-observability-and-evaluation.zh-CN.md](08-observability-and-evaluation.zh-CN.md) |
 | 9 | Write safety and approval | [09-write-safety-and-approval.md](09-write-safety-and-approval.md) | [09-write-safety-and-approval.zh-CN.md](09-write-safety-and-approval.zh-CN.md) |
 | 10 | Feature Delivery Agent | [10-feature-delivery.md](10-feature-delivery.md) | [10-feature-delivery.zh-CN.md](10-feature-delivery.zh-CN.md) |
+
+## 2.1 Focused Implementation Proposals
+
+The following Chinese proposals build on modules 01–10 and define the next implementation steps for the Agent platform and Feature Delivery. They are focused delivery proposals rather than replacements for the bilingual normative modules above.
+
+| Order | Proposal | Document |
+|---:|---|---|
+| 11 | Single-Agent Decoupling and Independent Runtime | [11-single-agent-decoupling-proposal.zh-CN.md](11-single-agent-decoupling-proposal.zh-CN.md) |
+| 12 | Nasuta Multi-Agent Platform | [12-multi-agent-platform-proposal.zh-CN.md](12-multi-agent-platform-proposal.zh-CN.md) |
+| 13 | Multi-Agent Review at Development Stages | [13-development-multi-agent-review-proposal.zh-CN.md](13-development-multi-agent-review-proposal.zh-CN.md) |
 
 ## 3. Global Invariants
 
