@@ -26,6 +26,11 @@ func tokenize(text string) []string {
 	return uniqTokens(tokenizeDocument(text))
 }
 
+// TokenizeQuery exposes the same canonical terms used by sparse retrieval.
+func TokenizeQuery(text string) []string {
+	return tokenize(text)
+}
+
 // tokenizeDocument preserves duplicates so document sparse vectors retain
 // term-frequency information. Query tokenization deduplicates the same output.
 func tokenizeDocument(text string) []string {
@@ -256,7 +261,7 @@ func (b *BM25Builder) BuildSparse(tokens []string) SparseVector {
 }
 
 func (b *BM25Builder) QuerySparse(query string) SparseVector {
-	tokens := tokenize(query)
+	tokens := TokenizeQuery(query)
 	if len(tokens) == 0 {
 		return nil
 	}

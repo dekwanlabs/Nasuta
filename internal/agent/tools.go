@@ -421,18 +421,26 @@ func (srv *Service) SearchServices(ctx context.Context, query knowledge.ServiceS
 func toCodeSearchResult(found domain.SearchResult[domain.CodeSearchHit]) knowledge.CodeSearchResult {
 	matches := make([]knowledge.CodeSearchHit, 0, len(found.Matches))
 	for _, hit := range found.Matches {
-		matches = append(matches, knowledge.CodeSearchHit{
+		match := knowledge.CodeSearchHit{
 			Path:          hit.Path,
 			Lang:          hit.Lang,
 			Repo:          hit.Repo,
+			Layer:         hit.Layer,
 			StartLine:     hit.StartLine,
 			EndLine:       hit.EndLine,
+			Text:          hit.Text,
 			Preview:       hit.Preview,
 			Score:         hit.Score,
 			ScoreKind:     hit.ScoreKind,
 			EvidenceClass: hit.EvidenceClass,
 			TrustTier:     hit.TrustTier,
-		})
+		}
+		if hit.ScoreKind == string(semantic.ScoreFusion) {
+			match.FusionScore = &hit.FusionScore
+		} else {
+			match.SemanticScore = &hit.SemanticScore
+		}
+		matches = append(matches, match)
 	}
 	return knowledge.CodeSearchResult{Matches: matches, Semantic: found.Semantic}
 }
@@ -531,7 +539,7 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 	if lang != "" {
 		filters["lang"] = lang
 	}
-	fetchLimit := limit * 3
+	fetchLimit := min(max(limit*8, 40), 200)
 	mode := "dense"
 	sparseTerms := 0
 	searchQuery := semantic.Query{
@@ -582,21 +590,13 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 		return domain.SearchResult[domain.CodeSearchHit]{}, err
 	}
 	log.InfofCtx(ctx, "[search_code] semantic backend returned %d hits before filtering", len(hits))
-	// Rank by raw semantic similarity, not trust-adjusted score.
-	// Trust matters later during reranking, not at recall time.
-	// A high-trust low-relevance hit should not displace a relevant one here.
 	sort.SliceStable(hits, func(i, j int) bool {
 		return hits[i].Score > hits[j].Score
 	})
-	matches := make([]domain.CodeSearchHit, 0, len(hits))
-	// One chunk per file: hits are score-sorted so first-seen is the best match.
-	// Recalling multiple windows of one long doc floods the pool and starves
-	// unique sources; rerank's dedupBySource collapses them to one before
-	// scoring anyway, so dedup here keeps recall diverse from the start.
+	candidates := make([]semantic.Hit, 0, len(hits))
 	seenFile := make(map[string]struct{}, len(hits))
 	for _, h := range hits {
 		path, _ := h.Metadata["path"].(string)
-		// Skip Nasuta-generated artifacts until they are filtered at index time.
 		if strings.Contains(path, "/"+platform.WorkspaceMetadataDir) || strings.HasPrefix(path, platform.WorkspaceMetadataDir) {
 			continue
 		}
@@ -604,10 +604,25 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 			continue
 		}
 		seenFile[path] = struct{}{}
+		candidates = append(candidates, h)
+	}
+	log.InfofCtx(ctx, "[search_code] dedup by file: %d hits -> %d files", len(hits), len(candidates))
+	if traceEnabled {
+		domain.RecordTrace(ctx, domain.EvaluationTrace{
+			Node: "file_dedup", Input: map[string]any{"hits": len(hits), "fetch_limit": fetchLimit},
+			Output: map[string]any{"files": len(candidates), "top": traceSemanticHits(candidates)},
+		})
+	}
+
+	ranked := rankCodeHits(query, candidates, limit)
+	matches := make([]domain.CodeSearchHit, 0, len(ranked))
+	for _, candidate := range ranked {
+		h := candidate.hit
 		evidenceClass, trustTier := evidenceFromCodeHit(h)
 		adjusted := domain.TrustAdjustedScore(float64(h.Score), trustTier)
 		match := domain.CodeSearchHit{
-			Path: path, Lang: payloadString(h.Metadata, "lang"), Repo: payloadString(h.Metadata, "repo"), Layer: payloadString(h.Metadata, "layer"),
+			Path: payloadString(h.Metadata, "path"), Lang: payloadString(h.Metadata, "lang"),
+			Repo: payloadString(h.Metadata, "repo"), Layer: payloadString(h.Metadata, "layer"),
 			StartLine: payloadInt(h.Metadata["start_line"]), EndLine: payloadInt(h.Metadata["end_line"]),
 			Text: payloadString(h.Metadata, "text"), Preview: payloadString(h.Metadata, "preview"),
 			Score: adjusted, ScoreKind: string(h.ScoreKind), EvidenceClass: evidenceClass, TrustTier: trustTier,
@@ -618,15 +633,12 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 			match.SemanticScore = float64(h.DenseScore)
 		}
 		matches = append(matches, match)
-		if len(matches) >= limit {
-			break
-		}
 	}
-	log.InfofCtx(ctx, "[search_code] dedup by file: %d hits -> %d files", len(hits), len(matches))
 	if traceEnabled {
 		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "file_dedup", Input: map[string]any{"hits": len(hits), "limit": limit},
-			Output: map[string]any{"files": len(matches), "top": traceCodeMatches(matches)},
+			Node:   "code_rank",
+			Input:  map[string]any{"candidates": len(candidates), "limit": limit},
+			Output: map[string]any{"matches": len(matches), "top": traceRankedCodeHits(ranked)},
 		})
 	}
 	return domain.SearchResult[domain.CodeSearchHit]{Matches: matches, Semantic: true}, nil
@@ -644,13 +656,14 @@ func traceSemanticHits(hits []semantic.Hit) []map[string]any {
 	return items
 }
 
-func traceCodeMatches(matches []domain.CodeSearchHit) []map[string]any {
-	limit := min(len(matches), 10)
+func traceRankedCodeHits(hits []rankedCodeHit) []map[string]any {
+	limit := min(len(hits), 10)
 	items := make([]map[string]any, 0, limit)
-	for _, match := range matches[:limit] {
+	for _, hit := range hits[:limit] {
 		items = append(items, map[string]any{
-			"path": match.Path, "repo": match.Repo, "score": match.Score,
-			"semantic_score": match.SemanticScore, "fusion_score": match.FusionScore, "score_kind": match.ScoreKind,
+			"path": payloadString(hit.hit.Metadata, "path"), "base_score": hit.hit.Score,
+			"rank_score": hit.rankScore, "lexical_coverage": hit.lexicalCoverage,
+			"identity_coverage": hit.identityCoverage, "covered_terms": len(hit.coveredQueryUnit),
 		})
 	}
 	return items

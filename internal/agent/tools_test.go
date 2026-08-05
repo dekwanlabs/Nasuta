@@ -135,7 +135,7 @@ func TestCodeSearchUsesDenseFallbackWhenBM25HasNoKnownTerms(t *testing.T) {
 	if !ok || len(matches) != 1 {
 		t.Fatalf("matches = %#v, want one dense result", result["matches"])
 	}
-	wantNodes := []string{"query_embedding", "sparse_query", "vector_search", "file_dedup"}
+	wantNodes := []string{"query_embedding", "sparse_query", "vector_search", "file_dedup", "code_rank"}
 	if len(recorder.events) != len(wantNodes) {
 		t.Fatalf("trace events = %#v", recorder.events)
 	}

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -11,6 +12,47 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/tool"
 )
+
+func TestSearchCodePublishesLowerCamelPayload(t *testing.T) {
+	svc := NewTools(Deps{Semantic: &searchFallbackSemantic{}, Embedder: testEmbedder{}})
+	var searchCode *Tool
+	for _, candidate := range builtinTools(svc, config.Config{}, nil, nil) {
+		if candidate.ID == "search_code" {
+			searchCode = &candidate
+			break
+		}
+	}
+	if searchCode == nil {
+		t.Fatal("search_code was not registered")
+	}
+	result, err := searchCode.Handler.Execute(context.Background(), tool.Arguments{"query": "orders", "limit": 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+		t.Fatalf("decode search_code payload: %v", err)
+	}
+	if _, ok := payload["matches"]; !ok {
+		t.Fatalf("search_code payload missing matches: %s", result.Content)
+	}
+	if _, ok := payload["Matches"]; ok {
+		t.Fatalf("search_code payload leaked Go field name: %s", result.Content)
+	}
+	var matches []map[string]any
+	if err := json.Unmarshal(payload["matches"], &matches); err != nil || len(matches) != 1 {
+		t.Fatalf("decode matches = %#v, err=%v", matches, err)
+	}
+	if matches[0]["path"] != "repos/team/orders/main.go" || matches[0]["text"] != "func order() {}" {
+		t.Fatalf("search_code match lost public fields: %#v", matches[0])
+	}
+	if _, ok := matches[0]["semanticScore"]; !ok {
+		t.Fatalf("dense match missing semanticScore: %#v", matches[0])
+	}
+	if len(result.References) != 1 || result.References[0].Target != "repos/team/orders/main.go" {
+		t.Fatalf("search_code references = %#v", result.References)
+	}
+}
 
 func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 	descriptions := make(map[string]string)

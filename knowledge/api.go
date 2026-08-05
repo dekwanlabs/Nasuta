@@ -19,25 +19,29 @@ type CodeSearchQuery struct {
 	Limit int
 }
 
-// CodeSearchHit is one code chunk surfaced to scenario tools. It carries only
-// the externally useful fields; internal scoring detail stays in domain types.
+// CodeSearchHit is one code chunk surfaced to scenario tools.
+// ScoreKind keeps dense similarity distinct from rank-fusion scores.
 type CodeSearchHit struct {
-	Path          string  `json:"path"`
-	Lang          string  `json:"lang"`
-	Repo          string  `json:"repo"`
-	StartLine     int     `json:"startLine"`
-	EndLine       int     `json:"endLine"`
-	Preview       string  `json:"preview"`
-	Score         float64 `json:"score"`
-	ScoreKind     string  `json:"scoreKind"`
-	EvidenceClass string  `json:"evidenceClass"`
-	TrustTier     int     `json:"trustTier"`
+	Path          string   `json:"path"`
+	Lang          string   `json:"lang"`
+	Repo          string   `json:"repo"`
+	Layer         string   `json:"layer"`
+	StartLine     int      `json:"startLine"`
+	EndLine       int      `json:"endLine"`
+	Text          string   `json:"text"`
+	Preview       string   `json:"preview"`
+	Score         float64  `json:"score"`
+	ScoreKind     string   `json:"scoreKind"`
+	FusionScore   *float64 `json:"fusionScore,omitempty"`
+	SemanticScore *float64 `json:"semanticScore,omitempty"`
+	EvidenceClass string   `json:"evidenceClass"`
+	TrustTier     int      `json:"trustTier"`
 }
 
 // CodeSearchResult is the bounded code-search answer.
 type CodeSearchResult struct {
-	Matches  []CodeSearchHit
-	Semantic bool
+	Matches  []CodeSearchHit `json:"matches"`
+	Semantic bool            `json:"semantic"`
 }
 
 // DependencyQuery traces one service's upstream or downstream edges.
@@ -122,6 +126,6 @@ type ServiceRecord struct {
 
 // ServiceSearchResult is the bounded service-search answer.
 type ServiceSearchResult struct {
-	Matches  []ServiceRecord
-	Semantic bool
+	Matches  []ServiceRecord `json:"matches"`
+	Semantic bool            `json:"semantic"`
 }
