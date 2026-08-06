@@ -53,7 +53,11 @@ func resolveFeignDependencies(
 		})
 		resolved, err := resolver.ResolveConfig(ctx, pending)
 		if err != nil {
-			return nil, fmt.Errorf("resolve Feign configuration: %w", err)
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("resolve Feign configuration: %w", ctx.Err())
+			}
+			log.WarnfCtx(ctx, "[indexer] Feign config resolver failed; continuing with unresolved config-backed dependencies omitted: %v", err)
+			break
 		}
 		for _, ref := range pending {
 			requested[ref] = struct{}{}

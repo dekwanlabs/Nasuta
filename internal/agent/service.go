@@ -1106,7 +1106,7 @@ func (rs *RunStore) AddStep(st StepRow) error {
 		result, err := tx.Exec(
 			`INSERT INTO agent_tool_result_artifacts(
 				id,user_id,session_id,run_id,tool_call_id,content,content_type,sha256,size_bytes,coverage_json,created_at)
-			 SELECT ?,user_id,session_id,id,?,?,?,?,?,?,?,? FROM agent_runs WHERE id=?`,
+			 SELECT ?,user_id,session_id,id,?,?,?,?,?,?,? FROM agent_runs WHERE id=?`,
 			st.ArtifactID, st.ToolCallID, []byte(st.Content), contentType, st.AuthoritativeSHA256,
 			st.SizeBytes, coverageJSON, store.DatabaseTime(st.CreatedAt), st.RunID)
 		if err != nil {

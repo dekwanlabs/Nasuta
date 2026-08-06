@@ -70,7 +70,7 @@ func BuildBundle(root string, dirs []string, docStore *store.DocStore) (domain.I
 	return BuildBundleWithResolver(context.Background(), root, dirs, docStore, nil)
 }
 
-// BuildBundleWithResolver resolves external configuration before canonicalization.
+// BuildBundleWithResolver logs provider failures and omits only unresolved Feign edges.
 func BuildBundleWithResolver(
 	ctx context.Context,
 	root string,

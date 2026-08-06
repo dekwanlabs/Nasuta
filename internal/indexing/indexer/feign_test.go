@@ -1,8 +1,10 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -105,19 +107,76 @@ func TestFeignDependenciesDropUnresolvedConfiguration(t *testing.T) {
 	}
 }
 
-func TestFeignDependenciesSurfaceConfiguredResolverFailure(t *testing.T) {
+func TestFeignDependenciesDegradeConfiguredResolverFailureWithWarning(t *testing.T) {
 	root := feignWorkspace(t, "")
+	writeFile(t, root, "repos/hsds/hsds-offline-cookbook/src/main/java/com/hesung/hsds/feign/StaticFeign.java", `package com.hesung.hsds.feign;
+@FeignClient(name = "hsds-online-service")
+public interface StaticFeign {}
+`)
+	writeFile(t, root, "repos/hsds/hsds-offline-cookbook/src/main/java/com/hesung/hsds/feign/DefaultFeign.java", `package com.hesung.hsds.feign;
+@FeignClient(name = "${optional.service:hsds-offline-service}")
+public interface DefaultFeign {}
+`)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	called := 0
 	resolver := configResolverFunc(func(
 		context.Context,
 		[]config.Ref,
 	) (map[config.Ref]config.Value, error) {
+		called++
 		return nil, errors.New("config center unavailable")
 	})
-	_, err := BuildBundleWithResolver(
+	bundle, err := BuildBundleWithResolver(
 		context.Background(), root, mustDiscoverScanDirs(t, root), nil, resolver,
 	)
-	if err == nil {
-		t.Fatal("configured resolver failure was hidden")
+	if err != nil {
+		t.Fatalf("BuildBundleWithResolver: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("resolver calls = %d, want 1", called)
+	}
+	if dependency := findDependencyFrom(bundle.Dependencies, "hsds-offline-cookbook", "hsds-online-service"); dependency == nil {
+		t.Fatalf("static Feign dependency missing after resolver failure: %#v", bundle.Dependencies)
+	}
+	if dependency := findDependencyFrom(bundle.Dependencies, "hsds-offline-cookbook", "hsds-offline-service"); dependency == nil {
+		t.Fatalf("defaulted Feign dependency missing after resolver failure: %#v", bundle.Dependencies)
+	}
+	for _, dependency := range bundle.Dependencies {
+		if strings.Contains(dependency.To, "${") || dependency.To == "openai-client" {
+			t.Fatalf("unresolved config dependency leaked into graph: %#v", dependency)
+		}
+	}
+	got := logs.String()
+	for _, want := range []string{
+		"level=WARN",
+		"Feign config resolver failed",
+		"continuing with unresolved config-backed dependencies omitted",
+		"config center unavailable",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log does not contain %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestFeignDependenciesPropagateResolverCancellation(t *testing.T) {
+	root := feignWorkspace(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resolver := configResolverFunc(func(
+		ctx context.Context,
+		_ []config.Ref,
+	) (map[config.Ref]config.Value, error) {
+		return nil, ctx.Err()
+	})
+	_, err := BuildBundleWithResolver(
+		ctx, root, mustDiscoverScanDirs(t, root), nil, resolver,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("BuildBundleWithResolver error = %v, want context cancellation", err)
 	}
 }
 
