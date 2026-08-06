@@ -139,7 +139,7 @@ func readNodeJSPackageName(dir string) string {
 	return filepath.Base(dir)
 }
 
-func findNodeJSModuleRoot(root, file string) string {
+	func findNodeJSModuleRoot(root, file string) string {
 	current := filepath.Dir(file)
 	for strings.HasPrefix(current, root) {
 		if readFile(filepath.Join(current, "package.json")) != "" {

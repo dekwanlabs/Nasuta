@@ -120,28 +120,34 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 	var records []feignReference
 	for _, file := range files {
 		text := readFile(file)
-		if !strings.Contains(text, "@FeignClient") {
+		if !strings.Contains(text, "FeignClient") {
 			continue
 		}
-		text = stripJVMComments(text)
+		source := scanJVMSource(text)
 		rel := relativeTo(root, file)
 		caller := inferJavaServiceName(root, file)
 		modulePath := ""
-		if moduleRoot := findModuleRoot(root, file, "pom.xml"); moduleRoot != "" {
+		if moduleRoot := findJavaModuleRoot(root, file); moduleRoot != "" {
 			modulePath = relativeTo(root, moduleRoot)
 		}
-		iface := strings.TrimSuffix(filepath.Base(file), ".java")
-		lines := strings.Split(text, "\n")
-		for i, line := range lines {
-			if !strings.Contains(line, "@FeignClient") {
+		for _, annotation := range source.annotations {
+			if annotation.name != "FeignClient" {
 				continue
 			}
-			annotation := collectAnnotation(lines, i)
-			clientName := extractAnnotationValue(annotation, "value", "name")
-			if clientName == "" {
-				clientName = extractFirstString(annotation)
+			declaration, ok := javaDeclarationAfter(
+				source.tokens, annotation.tokenEnd, annotation.braceDepth,
+			)
+			if !ok || declaration.kind != javaTypeDeclaration {
+				continue
 			}
-			targetURL := extractAnnotationValue(annotation, "url")
+			clientName, nameResolved := strictFeignClientName(annotation)
+			if !nameResolved {
+				clientName = ""
+			}
+			targetURL, urlPresent, urlResolved := strictFeignStringArgument(annotation, "url")
+			if urlPresent && !urlResolved {
+				targetURL = ""
+			}
 			if clientName == "" && targetURL == "" {
 				continue
 			}
@@ -152,7 +158,7 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 			records = append(records, feignReference{
 				From: caller, ModulePath: modulePath, ClientName: clientName, URL: targetURL,
 				Evidence: []domain.Evidence{{
-					Path: rel, Line: i + 1, Symbol: iface, Kind: domain.SourceCodeScan,
+					Path: rel, Line: annotation.line, Symbol: declaration.name, Kind: domain.SourceCodeScan,
 				}},
 				Confidence: conf,
 			})
@@ -161,55 +167,10 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 	return records
 }
 
-// scanJavaEndpoints finds Controller mapping annotations -> endpoint records.
+// scanJavaEndpoints runs every Java framework adapter over the shared JVM
+// frontend. Framework-specific semantics stay out of the language scanner.
 func scanJavaEndpoints(root string, dirs []string) []domain.EndpointRecord {
-	files := walkFiles(root, dirs, hasSuffix(".java"))
-	var records []domain.EndpointRecord
-	for _, file := range files {
-		text := readFile(file)
-		if !strings.Contains(text, "@RestController") && !strings.Contains(text, "@Controller") {
-			continue
-		}
-		rel := relativeTo(root, file)
-		serviceName := inferJavaServiceName(root, file)
-		handler := strings.TrimSuffix(filepath.Base(file), ".java")
-		lines := strings.Split(text, "\n")
-		classLine := javaClassLine(lines)
-		classPrefixes := extractClassRequestPrefixes(lines, classLine)
-		for i, line := range lines {
-			annotationName := mappingAnnotationName(line)
-			if annotationName == "" || i < classLine {
-				continue
-			}
-			annotation := collectAnnotation(lines, i)
-			methods := javaMappingMethods(annotationName, annotation)
-			routes := javaMappingPaths(annotation)
-			handlerMethod := javaMethodName(lines, i)
-			for _, classPrefix := range classPrefixes {
-				for _, route := range routes {
-					conf := 0.85
-					if route == "" {
-						conf = 0.6
-					}
-					for _, method := range methods {
-						records = append(records, domain.EndpointRecord{
-							ServiceName:   serviceName,
-							Repo:          topSegment(rel),
-							Method:        method,
-							Path:          joinPaths(classPrefix, route),
-							Handler:       handler,
-							HandlerMethod: handlerMethod,
-							File:          rel,
-							Line:          i + 1,
-							Source:        domain.SourceCodeScan,
-							Confidence:    conf,
-						})
-					}
-				}
-			}
-		}
-	}
-	return records
+	return scanFrameworkEndpoints(root, dirs, "java")
 }
 
 func findModuleRoot(root, file, marker string) string {
@@ -223,6 +184,15 @@ func findModuleRoot(root, file, marker string) string {
 			break
 		}
 		current = parent
+	}
+	return ""
+}
+
+func findJavaModuleRoot(root, file string) string {
+	for _, marker := range []string{"pom.xml", "build.gradle", "build.gradle.kts"} {
+		if moduleRoot := findModuleRoot(root, file, marker); moduleRoot != "" {
+			return moduleRoot
+		}
 	}
 	return ""
 }
@@ -271,8 +241,11 @@ func inferJavaServiceName(root, file string) string {
 	if appRoot := findNearestApplicationModule(root, file); appRoot != "" {
 		return readArtifactID(filepath.Join(appRoot, "pom.xml"))
 	}
-	if moduleRoot := findModuleRoot(root, file, "pom.xml"); moduleRoot != "" {
-		return readArtifactID(filepath.Join(moduleRoot, "pom.xml"))
+	if moduleRoot := findJavaModuleRoot(root, file); moduleRoot != "" {
+		if _, err := os.Stat(filepath.Join(moduleRoot, "pom.xml")); err == nil {
+			return readArtifactID(filepath.Join(moduleRoot, "pom.xml"))
+		}
+		return readKotlinArtifactID(moduleRoot)
 	}
 	return "unknown"
 }
@@ -356,26 +329,6 @@ func inferModulePathFromRel(rel string) string {
 		return parts[0] + "/" + parts[1]
 	}
 	return parts[0]
-}
-
-func javaClassLine(lines []string) int {
-	for i, line := range lines {
-		if classDeclRe.MatchString(line) {
-			return i
-		}
-	}
-	return len(lines)
-}
-
-func extractClassRequestPrefixes(lines []string, classLine int) []string {
-	prefixes := []string{""}
-	for i := 0; i < classLine; i++ {
-		if mappingAnnotationName(lines[i]) != "RequestMapping" {
-			continue
-		}
-		prefixes = javaMappingPaths(collectAnnotation(lines, i))
-	}
-	return prefixes
 }
 
 // collectAnnotation accumulates lines from start until parentheses balance,
@@ -565,24 +518,4 @@ func javaStringValues(expression string) []string {
 		return []string{""}
 	}
 	return values
-}
-
-// javaMethodName extracts the method/field name from the first declaration
-// line at or after index (used as the codegraph anchor).
-var javaMethodRe = regexp.MustCompile(`(?:public|protected|private)?\s*[\w<>\[\],\s\.]+?\s+(\w+)\s*\(`)
-
-func javaMethodName(lines []string, index int) string {
-	for i := index; i < len(lines); i++ {
-		if i > index && mappingAnnotationName(lines[i]) != "" {
-			return ""
-		}
-		line := lines[i]
-		if strings.Contains(line, "@") && !strings.Contains(line, "(") {
-			continue
-		}
-		if m := javaMethodRe.FindStringSubmatch(line); m != nil {
-			return m[1]
-		}
-	}
-	return ""
 }

@@ -38,7 +38,7 @@ type ServiceRecord struct {
 	Confidence    float64    `json:"confidence"`
 }
 
-// EndpointRecord is a Java Controller or Python FastAPI route.
+// EndpointRecord is a resolved HTTP route backed by source evidence.
 type EndpointRecord struct {
 	ServiceKey    string     `json:"serviceKey,omitempty"`
 	ServiceName   string     `json:"serviceName"`

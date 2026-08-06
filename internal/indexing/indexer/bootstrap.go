@@ -34,11 +34,7 @@ func scanCode(
 	services = append(services, scanAndroidServices(root, dirs)...)
 	services = append(services, scanIOSServices(root, dirs)...)
 
-	endpoints := append(scanJavaEndpoints(root, dirs), scanPythonEndpoints(root, dirs)...)
-	endpoints = append(endpoints, scanGoEndpoints(root, dirs)...)
-	endpoints = append(endpoints, scanKotlinEndpoints(root, dirs)...)
-	endpoints = append(endpoints, scanCSharpEndpoints(root, dirs)...)
-	endpoints = append(endpoints, scanNodeJSEndpoints(root, dirs)...)
+	endpoints := scanFrameworkEndpoints(root, dirs)
 
 	feignRefs := append(scanFeignClients(root, dirs), scanKotlinFeigns(root, dirs)...)
 	feignRefs = expandFeignConsumers(root, dirs, services, feignRefs)

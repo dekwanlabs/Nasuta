@@ -54,60 +54,6 @@ func scanGoServices(root string, dirs []string) []domain.ServiceRecord {
 	return records
 }
 
-// scanGoEndpoints finds Go HTTP route registrations (Gin, Echo, net/http, Chi, Fiber).
-func scanGoEndpoints(root string, dirs []string) []domain.EndpointRecord {
-	files := walkFiles(root, dirs, hasSuffix(".go"))
-	var records []domain.EndpointRecord
-	for _, file := range files {
-		text := readFile(file)
-		if !strings.Contains(text, ".GET") && !strings.Contains(text, ".POST") &&
-			!strings.Contains(text, ".HandleFunc") && !strings.Contains(text, ".Group(") &&
-			!strings.Contains(text, "Handle(") && !strings.Contains(text, ".Get(") &&
-			!strings.Contains(text, ".Post(") {
-			continue
-		}
-		rel := relativeTo(root, file)
-		moduleRoot := findModuleRoot(root, file, "go.mod")
-		serviceName := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			serviceName = readGoModuleName(moduleRoot)
-		}
-		handler := strings.TrimSuffix(filepath.Base(file), ".go")
-		lines := strings.Split(text, "\n")
-		for i, line := range lines {
-			for _, re := range goEndpointPatterns {
-				m := re.FindStringSubmatch(line)
-				if m == nil {
-					continue
-				}
-				method := "ANY"
-				path := ""
-				if len(m) >= 3 {
-					method = strings.ToUpper(m[1])
-					path = m[2]
-				} else if len(m) >= 2 {
-					path = m[1]
-				}
-				if path == "" {
-					continue
-				}
-				records = append(records, domain.EndpointRecord{
-					ServiceName:   serviceName,
-					Repo:          topSegment(rel),
-					Method:        method,
-					Path:          path,
-					Handler:       handler,
-					HandlerMethod: goHandlerName(lines, i),
-					File:          rel,
-					Line:          i + 1,
-					Source:        domain.SourceCodeScan,
-					Confidence:    0.85,
-				})
-			}
-		}
-	}
-	return records
-}
 
 // scanGoDependencies finds HTTP client calls and gRPC client usage in Go code.
 func scanGoDependencies(root string, dirs []string) []domain.DependencyEdge {
@@ -221,18 +167,6 @@ func parseInts(s string) []int {
 
 var goHandlerRe = regexp.MustCompile(`func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(`)
 
-func goHandlerName(lines []string, index int) string {
-	end := index + 4
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for i := index; i < end; i++ {
-		if m := goHandlerRe.FindStringSubmatch(lines[i]); m != nil {
-			return m[1]
-		}
-	}
-	return ""
-}
 
 var goHTTPCallRe = regexp.MustCompile(`https?://([^\s"'\)]+)`)
 
