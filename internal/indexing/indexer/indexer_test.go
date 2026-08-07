@@ -388,6 +388,8 @@ func TestScanKotlinServicesRegistersLibraryModules(t *testing.T) {
 	base := "repos/mobile/shared-api"
 	writeFile(t, root, base+"/build.gradle.kts", `plugins { kotlin("jvm") version "2.0.0" }`)
 	writeFile(t, root, base+"/src/main/kotlin/api/SharedController.kt", `package api
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RestController
 @RestController
 class SharedController {
     @GetMapping("/shared")
@@ -412,12 +414,16 @@ func TestScanNodeJSRoutesPreservesFrameworkSemantics(t *testing.T) {
 	root := t.TempDir()
 	base := "repos/web/orders-api"
 	writeFile(t, root, base+"/package.json", `{"name":"@demo/orders-api"}`)
-	writeFile(t, root, base+"/src/orders.controller.ts", `@Controller("orders")
+	writeFile(t, root, base+"/src/orders.controller.ts", `import { Controller, Get } from "@nestjs/common";
+
+@Controller("orders")
 export class OrdersController {
   @Get(":id")
   findOne() {}
 }`)
-	writeFile(t, root, base+"/src/hapi.ts", `server.route({ path: "/health", method: "GET", handler })`)
+	writeFile(t, root, base+"/src/hapi.ts", `import * as Hapi from "@hapi/hapi";
+const server = Hapi.server({});
+server.route({ path: "/health", method: "GET", handler })`)
 
 	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
 	for _, want := range []struct {
@@ -458,6 +464,7 @@ func TestScanCSharpServicesRegistersControllerLibrary(t *testing.T) {
 	base := "repos/dotnet/shared-api"
 	writeFile(t, root, base+"/Shared.Api.csproj", `<Project Sdk="Microsoft.NET.Sdk.Web"></Project>`)
 	writeFile(t, root, base+"/Controllers/ItemsController.cs", `[ApiController]
+using Microsoft.AspNetCore.Mvc;
 [Route("items")]
 public class ItemsController : ControllerBase {
     [HttpGet("list")]

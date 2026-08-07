@@ -13,7 +13,7 @@ var javaSpringMVCAdapter = endpointAdapter{
 			return false
 		}
 		for _, annotation := range syntax.annotations {
-			if javaAnnotationIsSpring(annotation.name) {
+			if isResolvedJavaSpringAnnotation(syntax, annotation) {
 				return true
 			}
 		}
@@ -26,8 +26,19 @@ var javaJAXRSAdapter = endpointAdapter{
 	language:  "java",
 	framework: "jax-rs",
 	applies: func(source endpointSource) bool {
-		syntax, ok := source.syntax.(jvmSource)
-		return ok && hasJAXRSImport(syntax)
+	syntax, ok := source.syntax.(jvmSource)
+	if !ok {
+		return false
+	}
+	if hasJAXRSImport(syntax) {
+		return true
+	}
+	for _, annotation := range syntax.annotations {
+		if isJAXRSNamespace(annotation.qualifiedName) {
+			return true
+		}
+	}
+	return false
 	},
 	scan: scanJAXRS,
 }
@@ -92,7 +103,8 @@ func scanSpringMVC(source endpointSource) []endpointCandidate {
 	bindings := bindJavaAnnotations(syntax)
 	controllers := make(map[int]*springControllerBinding)
 	for _, binding := range bindings {
-		if !javaAnnotationIsController(binding.annotation.name) ||
+		if !isResolvedJavaSpringAnnotation(syntax, binding.annotation) ||
+			!javaAnnotationIsController(binding.annotation.name) ||
 			binding.declaration.kind != javaTypeDeclaration {
 			continue
 		}
@@ -111,7 +123,8 @@ func scanSpringMVC(source endpointSource) []endpointCandidate {
 	}
 
 	for _, binding := range bindings {
-		if binding.annotation.name != "RequestMapping" ||
+		if !isResolvedJavaSpringAnnotation(syntax, binding.annotation) ||
+			binding.annotation.name != "RequestMapping" ||
 			binding.declaration.kind != javaTypeDeclaration {
 			continue
 		}
@@ -148,7 +161,8 @@ func scanSpringMVC(source endpointSource) []endpointCandidate {
 
 	var candidates []endpointCandidate
 	for _, binding := range bindings {
-		if !isJavaMappingAnnotation(binding.annotation.name) ||
+		if !isResolvedJavaSpringAnnotation(syntax, binding.annotation) ||
+			!isJavaMappingAnnotation(binding.annotation.name) ||
 			binding.declaration.kind != javaMethodDeclaration {
 			continue
 		}
@@ -271,14 +285,58 @@ func javaAnnotationIsSpring(name string) bool {
 	return javaAnnotationIsController(name) || isJavaMappingAnnotation(name)
 }
 
-func hasJAXRSImport(source jvmSource) bool {
-	for _, qualified := range source.imports {
-		if strings.HasPrefix(qualified, "javax.ws.rs.") ||
-			strings.HasPrefix(qualified, "jakarta.ws.rs.") {
+func isResolvedJavaSpringAnnotation(source jvmSource, annotation jvmAnnotation) bool {
+	qualified, ok := javaSpringAnnotationQualifiedName(annotation.name)
+	return ok && jvmAnnotationHasQualifiedName(source, annotation, qualified)
+}
+
+func javaSpringAnnotationQualifiedName(name string) (string, bool) {
+	switch name {
+	case "RestController":
+		return "org.springframework.web.bind.annotation.RestController", true
+	case "Controller":
+		return "org.springframework.stereotype.Controller", true
+	case "RequestMapping", "GetMapping", "PostMapping", "PutMapping",
+		"DeleteMapping", "PatchMapping":
+		return "org.springframework.web.bind.annotation." + name, true
+	default:
+		return "", false
+	}
+}
+
+func jvmAnnotationHasQualifiedName(source jvmSource, annotation jvmAnnotation, expected string) bool {
+	if annotation.qualifiedName == expected {
+		return true
+	}
+	if strings.Contains(annotation.qualifiedName, ".") {
+		return false
+	}
+	if imported := source.imports[annotation.name]; imported == expected {
+		return true
+	}
+	prefix := expected[:strings.LastIndex(expected, ".")+1]
+	wildcard := prefix + "*"
+	for _, imported := range source.imports {
+		if imported == wildcard {
 			return true
 		}
 	}
 	return false
+}
+
+func hasJAXRSImport(source jvmSource) bool {
+	for _, qualified := range source.imports {
+		if isJAXRSNamespace(qualified) || qualified == "javax.ws.rs.*" ||
+			qualified == "jakarta.ws.rs.*" {
+			return true
+		}
+	}
+	return false
+}
+
+func isJAXRSNamespace(qualified string) bool {
+	return strings.HasPrefix(qualified, "javax.ws.rs.") ||
+		strings.HasPrefix(qualified, "jakarta.ws.rs.")
 }
 
 func isJAXRSAnnotation(source jvmSource, annotation jvmAnnotation, names ...string) bool {
@@ -286,13 +344,16 @@ func isJAXRSAnnotation(source jvmSource, annotation jvmAnnotation, names ...stri
 		if annotation.name != name {
 			continue
 		}
-		if strings.HasPrefix(annotation.qualifiedName, "javax.ws.rs.") ||
-			strings.HasPrefix(annotation.qualifiedName, "jakarta.ws.rs.") {
+		if isJAXRSNamespace(annotation.qualifiedName) {
 			return true
 		}
-		if imported := source.imports[name]; strings.HasPrefix(imported, "javax.ws.rs.") ||
-			strings.HasPrefix(imported, "jakarta.ws.rs.") {
+		if imported := source.imports[name]; isJAXRSNamespace(imported) {
 			return true
+		}
+		for _, imported := range source.imports {
+			if imported == "javax.ws.rs.*" || imported == "jakarta.ws.rs.*" {
+				return true
+			}
 		}
 	}
 	return false

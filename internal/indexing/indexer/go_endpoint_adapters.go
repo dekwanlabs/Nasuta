@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -12,7 +13,7 @@ import (
 type goSource struct {
 	file    *ast.File
 	fset    *token.FileSet
-	imports  map[string]string
+	imports map[string]string
 	consts  map[string]string
 	srcText string
 }
@@ -57,13 +58,26 @@ func goImports(file *ast.File) map[string]string {
 		if err != nil || path == "" {
 			continue
 		}
-		name := filepath.Base(path)
+		name := goImportName(path)
 		if spec.Name != nil {
 			name = spec.Name.Name
 		}
 		imports[name] = path
 	}
 	return imports
+}
+
+var goMajorVersionPathRe = regexp.MustCompile(`^v[0-9]+$`)
+
+// goImportName handles semantic-import-version paths such as echo/v4, whose
+// default package name remains echo unless the import has an explicit alias.
+func goImportName(path string) string {
+	name := filepath.Base(path)
+	parent := filepath.Base(filepath.Dir(path))
+	if goMajorVersionPathRe.MatchString(name) && parent != "." && parent != string(filepath.Separator) {
+		return parent
+	}
+	return name
 }
 
 func goStringConstants(file *ast.File) map[string]string {
@@ -92,11 +106,12 @@ func goStringConstants(file *ast.File) map[string]string {
 }
 
 type goRouterSpec struct {
-	framework    string
-	importPaths  []string
-	constructors map[string]struct{}
-	groupMethods map[string]struct{}
-	fixedMethods map[string]string
+	framework      string
+	importPaths    []string
+	constructors   map[string]struct{}
+	groupMethods   map[string]struct{}
+	fixedMethods   map[string]string
+	dynamicMethods map[string]struct{}
 }
 
 var (
@@ -110,6 +125,7 @@ var (
 			"PATCH": "PATCH", "HEAD": "HEAD", "OPTIONS": "OPTIONS",
 			"Any": "ANY",
 		},
+		dynamicMethods: setOfStrings("Handle", "Match"),
 	})
 	goEchoAdapter = newGoRouterAdapter(goRouterSpec{
 		framework:    "echo",
@@ -121,6 +137,7 @@ var (
 			"PATCH": "PATCH", "HEAD": "HEAD", "OPTIONS": "OPTIONS",
 			"Any": "ANY",
 		},
+		dynamicMethods: setOfStrings("Add", "Match"),
 	})
 	goChiAdapter = newGoRouterAdapter(goRouterSpec{
 		framework:    "chi",
@@ -132,6 +149,7 @@ var (
 			"Patch": "PATCH", "Head": "HEAD", "Options": "OPTIONS",
 			"Handle": "ANY", "HandleFunc": "ANY",
 		},
+		dynamicMethods: setOfStrings("Method", "MethodFunc", "Match"),
 	})
 	goFiberAdapter = newGoRouterAdapter(goRouterSpec{
 		framework:    "fiber",
@@ -143,6 +161,7 @@ var (
 			"Patch": "PATCH", "Head": "HEAD", "Options": "OPTIONS",
 			"All": "ANY",
 		},
+		dynamicMethods: setOfStrings("Add"),
 	})
 	goHTTPRouterAdapter = newGoRouterAdapter(goRouterSpec{
 		framework:    "httprouter",
@@ -152,6 +171,7 @@ var (
 			"GET": "GET", "POST": "POST", "PUT": "PUT", "DELETE": "DELETE",
 			"PATCH": "PATCH", "HEAD": "HEAD",
 		},
+		dynamicMethods: setOfStrings("Handle"),
 	})
 )
 
@@ -175,9 +195,7 @@ func scanGoRouter(source endpointSource, spec goRouterSpec) []endpointCandidate 
 		return nil
 	}
 	bindings := goRouterBindings(syntax, spec)
-	if len(bindings) == 0 {
-		return nil
-	}
+	methodOverrides := goRouteMethodOverrides(syntax, spec)
 	var candidates []endpointCandidate
 	ast.Inspect(syntax.file, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
@@ -204,8 +222,11 @@ func scanGoRouter(source endpointSource, spec goRouterSpec) []endpointCandidate 
 			return true
 		}
 		paths := []valueExpr{joinPathValues(prefix, goStaticValue(syntax, call.Args[pathIndex]))}
-		if methodName == "Match" {
+		if _, dynamic := spec.dynamicMethods[methodName]; dynamic {
 			methods = goMethodValues(syntax, call.Args[0])
+		}
+		if override, exists := methodOverrides[call.Pos()]; exists {
+			methods = override
 		}
 		handler := ""
 		handlerIndex := pathIndex + 1
@@ -220,6 +241,32 @@ func scanGoRouter(source endpointSource, spec goRouterSpec) []endpointCandidate 
 		return true
 	})
 	return candidates
+}
+
+// goRouteMethodOverrides captures Gorilla's fluent
+// r.HandleFunc("/x", h).Methods("GET", "POST") form.
+func goRouteMethodOverrides(source goSource, spec goRouterSpec) map[token.Pos][]valueExpr {
+	if spec.framework != "gorilla/mux" {
+		return nil
+	}
+	overrides := make(map[token.Pos][]valueExpr)
+	ast.Inspect(source.file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Methods" || len(call.Args) == 0 {
+			return true
+		}
+		inner, ok := selector.X.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		overrides[inner.Pos()] = goMethodArguments(source, call.Args)
+		return true
+	})
+	return overrides
 }
 
 func goHasImport(source goSource, paths []string) bool {
@@ -315,10 +362,11 @@ func goIsConstructor(source goSource, call *ast.CallExpr, spec goRouterSpec) boo
 		_, ok = spec.constructors[function.Sel.Name]
 		return ok
 	case *ast.Ident:
-		if source.imports["."] == "" {
+		imported, ok := source.imports["."]
+		if !ok || !containsString(spec.importPaths, imported) {
 			return false
 		}
-		_, ok := spec.constructors[function.Name]
+		_, ok = spec.constructors[function.Name]
 		return ok
 	default:
 		return false
@@ -333,31 +381,24 @@ func goRouteSignature(
 	if method, ok := spec.fixedMethods[name]; ok {
 		return []valueExpr{literalValue(method)}, 0, true
 	}
-	switch name {
-	case "Add", "Handle", "HandleFunc", "Method", "MethodFunc":
-		if name == "Add" || name == "Method" || name == "MethodFunc" {
-			return nil, 1, true
-		}
-		return []valueExpr{literalValue("ANY")}, 0, true
-	case "Match":
+	if _, ok := spec.dynamicMethods[name]; ok {
 		if len(call.Args) < 2 {
 			return nil, 0, false
 		}
 		return nil, 1, true
-	default:
-		return nil, 0, false
 	}
+	return nil, 0, false
 }
 
 func goMethodValues(source goSource, expression ast.Expr) []valueExpr {
-	if literal, ok := goStaticString(expression, source.consts); ok {
+	if literal, ok := goStaticMethod(source, expression); ok {
 		return []valueExpr{literalValue(strings.ToUpper(literal))}
 	}
 	switch expression := expression.(type) {
 	case *ast.CompositeLit:
 		out := make([]valueExpr, 0, len(expression.Elts))
 		for _, element := range expression.Elts {
-			value, ok := goStaticString(element, source.consts)
+			value, ok := goStaticMethod(source, element)
 			if !ok {
 				return []valueExpr{unresolvedValue(goExprText(source, element))}
 			}
@@ -368,6 +409,49 @@ func goMethodValues(source goSource, expression ast.Expr) []valueExpr {
 		}
 	}
 	return []valueExpr{unresolvedValue(goExprText(source, expression))}
+}
+
+func goMethodArguments(source goSource, expressions []ast.Expr) []valueExpr {
+	if len(expressions) == 0 {
+		return []valueExpr{unresolvedValue("")}
+	}
+	out := make([]valueExpr, 0, len(expressions))
+	for _, expression := range expressions {
+		out = append(out, goMethodValues(source, expression)...)
+	}
+	return out
+}
+
+func goStaticMethod(source goSource, expression ast.Expr) (string, bool) {
+	if literal, ok := goStaticString(expression, source.consts); ok {
+		return literal, true
+	}
+	selector, ok := expression.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	pkg, ok := selector.X.(*ast.Ident)
+	if !ok || source.imports[pkg.Name] != "net/http" {
+		return "", false
+	}
+	switch selector.Sel.Name {
+	case "MethodGet":
+		return "GET", true
+	case "MethodPost":
+		return "POST", true
+	case "MethodPut":
+		return "PUT", true
+	case "MethodDelete":
+		return "DELETE", true
+	case "MethodPatch":
+		return "PATCH", true
+	case "MethodHead":
+		return "HEAD", true
+	case "MethodOptions":
+		return "OPTIONS", true
+	default:
+		return "", false
+	}
 }
 
 func goStaticValue(source goSource, expression ast.Expr) valueExpr {
@@ -447,9 +531,6 @@ func scanNetHTTP(source endpointSource) []endpointCandidate {
 		return nil
 	}
 	bindings := goNetHTTPBindings(syntax)
-	if len(bindings) == 0 {
-		return nil
-	}
 	var candidates []endpointCandidate
 	ast.Inspect(syntax.file, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
@@ -467,7 +548,7 @@ func scanNetHTTP(source endpointSource) []endpointCandidate {
 		if len(call.Args) == 0 {
 			return true
 		}
-		prefix, known := goRouterExpr(syntax, selector.X, goNetHTTPSpec(), bindings)
+		prefix, known := goNetHTTPReceiver(syntax, selector.X, bindings)
 		if !known {
 			return true
 		}
@@ -476,6 +557,11 @@ func scanNetHTTP(source endpointSource) []endpointCandidate {
 			return true
 		}
 		method, path := goHTTPMethodPattern(pathValue.value)
+		// Host-qualified ServeMux patterns are not service routes. Do not
+		// turn the host into a synthetic endpoint path.
+		if path == "" || !strings.HasPrefix(path, "/") {
+			return true
+		}
 		paths := joinPathValues(prefix, literalValue(path))
 		handler := ""
 		if len(call.Args) >= 2 {
@@ -494,13 +580,33 @@ func scanNetHTTP(source endpointSource) []endpointCandidate {
 	return candidates
 }
 
+func goNetHTTPReceiver(source goSource, expression ast.Expr, bindings map[string]valueExpr) (valueExpr, bool) {
+	if value, ok := goRouterExpr(source, expression, goNetHTTPSpec(), bindings); ok {
+		return value, true
+	}
+	switch expression := expression.(type) {
+	case *ast.Ident:
+		if source.imports[expression.Name] == "net/http" {
+			return literalValue(""), true
+		}
+	case *ast.SelectorExpr:
+		pkg, ok := expression.X.(*ast.Ident)
+		if ok && expression.Sel.Name == "DefaultServeMux" &&
+			source.imports[pkg.Name] == "net/http" {
+			return literalValue(""), true
+		}
+	}
+	return valueExpr{}, false
+}
+
 func goNetHTTPSpec() goRouterSpec {
 	return goRouterSpec{
-		framework:   "net/http",
-		importPaths: []string{"net/http"},
-		constructors: setOfStrings("NewServeMux"),
-		groupMethods: map[string]struct{}{},
-		fixedMethods: map[string]string{},
+		framework:      "net/http",
+		importPaths:    []string{"net/http"},
+		constructors:   setOfStrings("NewServeMux"),
+		groupMethods:   map[string]struct{}{},
+		fixedMethods:   map[string]string{},
+		dynamicMethods: map[string]struct{}{},
 	}
 }
 
@@ -536,10 +642,6 @@ func goNetHTTPBindings(source goSource) map[string]valueExpr {
 		}
 		return true
 	})
-	// Always consider stdlib http.DefaultServeMux as known.
-	if _, exists := bindings["http"]; exists {
-		bindings["http.DefaultServeMux"] = literalValue("")
-	}
 	return bindings
 }
 
@@ -564,14 +666,16 @@ func goIsNetHTTPConstructor(source goSource, expression ast.Expr) bool {
 }
 
 var goGorillaMuxAdapter = newGoRouterAdapter(goRouterSpec{
-	framework:   "gorilla/mux",
-	importPaths: []string{"github.com/gorilla/mux"},
+	framework:    "gorilla/mux",
+	importPaths:  []string{"github.com/gorilla/mux"},
 	constructors: setOfStrings("NewRouter"),
 	groupMethods: setOfStrings("NewRoute", "PathPrefix", "Subrouter"),
 	fixedMethods: map[string]string{
+		"Handle":      "ANY",
 		"HandlerFunc": "ANY",
 		"HandleFunc":  "ANY",
 	},
+	dynamicMethods: map[string]struct{}{},
 })
 
 func goExprText(source goSource, expression ast.Expr) string {

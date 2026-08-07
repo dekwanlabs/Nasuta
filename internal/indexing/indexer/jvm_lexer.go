@@ -226,9 +226,12 @@ func extractJVMImports(tokens []jvmToken) map[string]string {
 			i++
 		}
 		parts := make([]string, 0, 4)
+		wildcard := false
 		for i < len(tokens) && tokens[i].text != ";" {
 			if tokens[i].kind == jvmIdentifierToken {
 				parts = append(parts, tokens[i].text)
+			} else if tokens[i].text == "*" {
+				wildcard = true
 			}
 			i++
 		}
@@ -236,6 +239,11 @@ func extractJVMImports(tokens []jvmToken) map[string]string {
 			continue
 		}
 		qualified := strings.Join(parts, ".")
+		if wildcard {
+			qualified += ".*"
+			imports[qualified] = qualified
+			continue
+		}
 		simple := parts[len(parts)-1]
 		imports[simple] = qualified
 	}

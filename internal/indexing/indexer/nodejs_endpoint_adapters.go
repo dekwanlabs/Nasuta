@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -69,7 +70,10 @@ func extractNodeJSImports(text string) map[string]string {
 		// ESM: import { X } from "module"
 		if strings.HasPrefix(trimmed, "import ") {
 			if idx := strings.LastIndex(trimmed, " from "); idx >= 0 {
-				module := strings.Trim(trimmed[idx+6:], "'\" ")
+				module := nodejsQuotedModule(trimmed[idx+6:])
+				if module == "" {
+					continue
+				}
 				// Extract named imports
 				names := trimmed[7:idx]
 				names = strings.TrimPrefix(names, "{")
@@ -93,31 +97,52 @@ func extractNodeJSImports(text string) map[string]string {
 			continue
 		}
 		// CJS: const X = require("module")
-		if strings.Contains(trimmed, "= require(") {
+		if match := nodejsRequireRe.FindStringSubmatch(trimmed); match != nil {
+			module := match[1]
 			parts := strings.SplitN(trimmed, "=", 2)
 			target := strings.TrimSpace(parts[0])
 			target = strings.TrimPrefix(target, "const ")
 			target = strings.TrimPrefix(target, "let ")
 			target = strings.TrimPrefix(target, "var ")
 			target = strings.TrimSpace(target)
+			if !strings.HasPrefix(target, "{") {
+				if colon := strings.IndexByte(target, ':'); colon >= 0 {
+					target = strings.TrimSpace(target[:colon])
+				}
+			}
 			// Handle destructuring: const { X } = require("module")
 			if strings.HasPrefix(target, "{") {
 				target = strings.TrimPrefix(target, "{")
 				target = strings.TrimSuffix(target, "}")
 				for _, name := range strings.Split(target, ",") {
 					name = strings.TrimSpace(name)
-					if _, ln, _ := strings.Cut(name, ":"); ln != "" {
-						imports[strings.TrimSpace(ln)] = ""
+					if imported, local, hasAlias := strings.Cut(name, ":"); hasAlias {
+						if strings.TrimSpace(imported) != "" && strings.TrimSpace(local) != "" {
+							imports[strings.TrimSpace(local)] = module
+						}
 					} else if name != "" {
-						imports[name] = ""
+						imports[name] = module
 					}
 				}
 			} else if target != "" {
-				imports[target] = ""
+				imports[target] = module
 			}
 		}
 	}
 	return imports
+}
+
+var nodejsRequireRe = regexp.MustCompile(`\brequire\s*\(\s*["']([^"']+)["']\s*\)`)
+
+func nodejsQuotedModule(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) < 2 || (value[0] != '"' && value[0] != '\'') {
+		return ""
+	}
+	if end := strings.IndexByte(value[1:], value[0]); end >= 0 {
+		return value[1 : end+1]
+	}
+	return ""
 }
 
 func extractNodeJSDecorators(text string) []nodejsDecoratorInfo {
@@ -160,6 +185,11 @@ func extractNodeJSAssignments(text string) []nodejsAssignmentInfo {
 				rhs := trimmed[len(kw):]
 				if parts := strings.SplitN(rhs, "=", 2); len(parts) == 2 {
 					target := strings.TrimSpace(parts[0])
+					if !strings.HasPrefix(target, "{") {
+						if colon := strings.IndexByte(target, ':'); colon >= 0 {
+							target = strings.TrimSpace(target[:colon])
+						}
+					}
 					value := strings.TrimSpace(parts[1])
 					value = strings.TrimSuffix(value, ";")
 					assignments = append(assignments, nodejsAssignmentInfo{
@@ -178,19 +208,7 @@ func extractNodeJSAssignments(text string) []nodejsAssignmentInfo {
 // nodejsImported checks if source imports the given module.
 func nodejsImported(source nodejsSource, module string) bool {
 	for _, imported := range source.imports {
-		if imported == module || strings.HasPrefix(module, imported) {
-			return true
-		}
-	}
-	return false
-}
-
-// nodejsIsConstructor checks if a value expression constructs a known router/app.
-func nodejsIsConstructor(value string, constructorNames ...string) bool {
-	value = strings.TrimSuffix(value, ";")
-	value = strings.TrimSpace(value)
-	for _, name := range constructorNames {
-		if strings.HasPrefix(value, name+"(") || strings.HasPrefix(value, name+".Router(") {
+		if imported == module || strings.HasPrefix(imported, module+"/") {
 			return true
 		}
 	}
@@ -198,14 +216,45 @@ func nodejsIsConstructor(value string, constructorNames ...string) bool {
 }
 
 // nodejsRouterVars finds variable names assigned to known constructors.
-func nodejsRouterVars(source nodejsSource, constructorNames ...string) map[string]struct{} {
+func nodejsRouterVars(source nodejsSource, moduleNames ...string) map[string]struct{} {
 	vars := make(map[string]struct{})
 	for _, assignment := range source.assignments {
-		if nodejsIsConstructor(assignment.value, constructorNames...) {
+		if nodejsAssignmentConstructs(assignment.value, source.imports, moduleNames...) {
 			vars[assignment.target] = struct{}{}
 		}
 	}
 	return vars
+}
+
+func nodejsAssignmentConstructs(value string, imports map[string]string, moduleNames ...string) bool {
+	value = strings.TrimSpace(strings.TrimSuffix(value, ";"))
+	value = strings.TrimPrefix(value, "new ")
+	for local, module := range imports {
+		if !nodejsModuleMatchesAny(module, moduleNames...) {
+			continue
+		}
+		if strings.HasPrefix(value, local+"(") || strings.HasPrefix(value, local+".Router(") {
+			return true
+		}
+	}
+	if match := nodejsRequireRe.FindStringSubmatchIndex(value); match != nil {
+		module := value[match[2]:match[3]]
+		if !nodejsModuleMatchesAny(module, moduleNames...) {
+			return false
+		}
+		tail := strings.TrimSpace(value[match[1]:])
+		return strings.HasPrefix(tail, "(") || strings.HasPrefix(tail, ".Router(")
+	}
+	return false
+}
+
+func nodejsModuleMatchesAny(module string, wanted ...string) bool {
+	for _, candidate := range wanted {
+		if module == candidate || strings.HasPrefix(module, candidate+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- Express adapter ----
@@ -225,11 +274,11 @@ func scanNodeJSExpress(source endpointSource) []endpointCandidate {
 	if !ok {
 		return nil
 	}
-	routerVars := nodejsRouterVars(syntax, "express", "express.Router")
+	routerVars := nodejsRouterVars(syntax, "express")
 	if len(routerVars) == 0 {
 		return nil
 	}
-	return scanNodeJSRoutesWithReceivers(source.text, routerVars, "express", 0.85)
+	return scanNodeJSRoutesWithReceivers(source, routerVars, "express", 0.85)
 }
 
 // ---- Fastify adapter ----
@@ -253,7 +302,7 @@ func scanNodeJSFastify(source endpointSource) []endpointCandidate {
 	if len(routerVars) == 0 {
 		return nil
 	}
-	return scanNodeJSRoutesWithReceivers(source.text, routerVars, "fastify", 0.85)
+	return scanNodeJSRoutesWithReceivers(source, routerVars, "fastify", 0.85)
 }
 
 // ---- Koa adapter ----
@@ -263,7 +312,8 @@ var nodejsKoaAdapter = endpointAdapter{
 	framework: "koa",
 	applies: func(source endpointSource) bool {
 		syntax, ok := source.syntax.(nodejsSource)
-		return ok && (nodejsImported(syntax, "koa") || nodejsImported(syntax, "koa-router"))
+		return ok && (nodejsImported(syntax, "koa") || nodejsImported(syntax, "koa-router") ||
+			nodejsImported(syntax, "@koa/router"))
 	},
 	scan: scanNodeJSKoa,
 }
@@ -273,11 +323,11 @@ func scanNodeJSKoa(source endpointSource) []endpointCandidate {
 	if !ok {
 		return nil
 	}
-	routerVars := nodejsRouterVars(syntax, "Koa", "koa", "koa.Router", "Router")
+	routerVars := nodejsRouterVars(syntax, "koa-router", "@koa/router", "koa")
 	if len(routerVars) == 0 {
 		return nil
 	}
-	return scanNodeJSRoutesWithReceivers(source.text, routerVars, "koa", 0.8)
+	return scanNodeJSRoutesWithReceivers(source, routerVars, "koa", 0.8)
 }
 
 // ---- NestJS adapter ----
@@ -371,40 +421,37 @@ func scanNodeJSHapi(source endpointSource) []endpointCandidate {
 // scanNodeJSRoutesWithReceivers scans text for .method("path") calls on known
 // receiver variable names. Only routes whose receiver is in knownVars are accepted.
 func scanNodeJSRoutesWithReceivers(
-	text string,
+	source endpointSource,
 	knownVars map[string]struct{},
 	framework string,
 	confidence float64,
 ) []endpointCandidate {
 	var candidates []endpointCandidate
-	// Use the nodeMethodRouteRe from the old code for string extraction
-	for _, m := range nodeMethodRouteRe.FindAllStringSubmatch(text, -1) {
-		method := strings.ToUpper(m[1])
-		path := m[2]
-		// Find the receiver: look backward from the match for ".get(" pattern
-		fullMatch := m[0]
-		if dotIdx := strings.Index(fullMatch, "."); dotIdx > 0 {
-			receiver := fullMatch[:dotIdx]
-			// Receiver might end with \n or spaces, strip them
-			receiver = strings.TrimSpace(receiver)
-			// Check if receiver is in known vars
-			if _, ok := knownVars[receiver]; !ok {
-				continue
-			}
+	lines := strings.Split(source.text, "\n")
+	for _, indices := range nodejsReceiverRouteRe.FindAllStringSubmatchIndex(source.text, -1) {
+		if len(indices) < 8 {
+			continue
 		}
-		candidates = append(candidates, endpointCandidate{
-			ServiceName:   "",
-			Repo:          "",
-			Framework:     framework,
-			Methods:       []valueExpr{literalValue(method)},
-			Paths:         []valueExpr{literalValue(path)},
-			Handler:       "",
-			HandlerMethod: "",
-			Confidence:    confidence,
-		})
+		receiver := source.text[indices[2]:indices[3]]
+		if _, ok := knownVars[receiver]; !ok {
+			continue
+		}
+		method := strings.ToUpper(source.text[indices[4]:indices[5]])
+		path := source.text[indices[6]:indices[7]]
+		line := strings.Count(source.text[:indices[0]], "\n") + 1
+		candidates = append(candidates, sourceEndpointCandidate(
+			source, framework,
+			[]valueExpr{literalValue(method)},
+			[]valueExpr{literalValue(path)},
+			strings.TrimSuffix(filepath.Base(source.rel), filepath.Ext(source.rel)),
+			nodejsHandlerName(lines, line-1),
+			line, confidence,
+		))
 	}
 	return candidates
 }
+
+var nodejsReceiverRouteRe = regexp.MustCompile(`(?i)\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\.\s*(get|post|put|delete|patch|head|options)\s*\(\s*["']([^"']+)["']`)
 
 // Re-export of compile-time variables from nodejs_indexer.go (still needed by the existing
 // scanNodeJSEndpoints function until it's removed).

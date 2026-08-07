@@ -18,26 +18,30 @@ type csharpSource struct {
 }
 
 type csharpAttrInfo struct {
-	name      string
-	arguments string
-	line      int
-	start     int
-	end       int
+	name          string
+	qualifiedName string
+	arguments     string
+	line          int
+	start         int
+	end           int
 }
 
 type csharpClassInfo struct {
-	name      string
-	baseTypes []string
-	start     int
-	bodyStart int
-	bodyEnd   int
-	line      int
+	name       string
+	baseTypes  []string
+	start      int
+	bodyStart  int
+	bodyEnd    int
+	line       int
+	depth      int
+	attributes []csharpAttrInfo
 }
 
 type csharpMethodInfo struct {
 	name       string
 	start      int
 	line       int
+	depth      int
 	attributes []csharpAttrInfo
 }
 
@@ -65,13 +69,115 @@ func parseCSharpEndpointSource(root, file, text string) (endpointSource, bool) {
 }
 
 func parseCSharpSource(text string) csharpSource {
-	stripped := stripCSharpCommentsAndStrings(text)
+	commentsStripped := stripCSharpComments(text)
+	declarationsStripped := stripCSharpCommentsAndStrings(text)
+	attributes := extractCSharpAttributes(commentsStripped)
+	classes := extractCSharpClasses(declarationsStripped)
+	methods := extractCSharpMethods(declarationsStripped)
+	bindCSharpAttributes(commentsStripped, attributes, classes, methods)
 	return csharpSource{
-		usings:     extractCSharpUsings(stripped),
-		attributes: extractCSharpAttributes(stripped),
-		classes:    extractCSharpClasses(stripped),
-		methods:    extractCSharpMethods(stripped),
+		usings:     extractCSharpUsings(commentsStripped),
+		attributes: attributes,
+		classes:    classes,
+		methods:    methods,
 	}
+}
+
+// stripCSharpComments preserves byte offsets and string literal contents. The
+// attribute frontend needs both: offsets for declaration binding and the
+// original literal text for route values.
+func stripCSharpComments(text string) string {
+	out := []byte(text)
+	for i := 0; i < len(text); {
+		if end, ok := csharpLiteralEnd(text, i); ok {
+			i = end
+			continue
+		}
+		switch {
+		case strings.HasPrefix(text[i:], "//"):
+			for i < len(out) && out[i] != '\n' {
+				out[i] = ' '
+				i++
+			}
+		case strings.HasPrefix(text[i:], "/*"):
+			out[i], out[i+1] = ' ', ' '
+			i += 2
+			for i < len(out) {
+				if strings.HasPrefix(text[i:], "*/") {
+					out[i], out[i+1] = ' ', ' '
+					i += 2
+					break
+				}
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+				i++
+			}
+		default:
+			i++
+		}
+	}
+	return string(out)
+}
+
+func csharpLiteralEnd(text string, start int) (int, bool) {
+	if start >= len(text) {
+		return start, false
+	}
+	if text[start] == '\'' {
+		return csharpQuotedLiteralEnd(text, start, '\'', false), true
+	}
+
+	i := start
+	for i < len(text) && text[i] == '$' {
+		i++
+	}
+	verbatim := false
+	if i < len(text) && text[i] == '@' {
+		verbatim = true
+		i++
+	}
+	if i == start && text[i] == '@' {
+		verbatim = true
+		i++
+		if i < len(text) && text[i] == '$' {
+			i++
+		}
+	}
+	if i >= len(text) || text[i] != '"' {
+		return start, false
+	}
+
+	quotes := 0
+	for i+quotes < len(text) && text[i+quotes] == '"' {
+		quotes++
+	}
+	if quotes >= 3 {
+		needle := strings.Repeat(`"`, quotes)
+		if close := strings.Index(text[i+quotes:], needle); close >= 0 {
+			return i + quotes + close + quotes, true
+		}
+		return len(text), true
+	}
+	return csharpQuotedLiteralEnd(text, i, '"', verbatim), true
+}
+
+func csharpQuotedLiteralEnd(text string, start int, quote byte, verbatim bool) int {
+	for i := start + 1; i < len(text); i++ {
+		if verbatim && quote == '"' && text[i] == '"' &&
+			i+1 < len(text) && text[i+1] == '"' {
+			i++
+			continue
+		}
+		if !verbatim && text[i] == '\\' {
+			i++
+			continue
+		}
+		if text[i] == quote {
+			return i + 1
+		}
+	}
+	return len(text)
 }
 
 func stripCSharpCommentsAndStrings(text string) string {
@@ -228,7 +334,8 @@ func extractCSharpUsings(text string) map[string]string {
 	lines := strings.Split(text, "\n")
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "using ") || strings.HasSuffix(trimmed, ";") != true {
+		trimmed = strings.TrimPrefix(trimmed, "global ")
+		if !strings.HasPrefix(trimmed, "using ") || !strings.HasSuffix(trimmed, ";") {
 			continue
 		}
 		// "using Microsoft.AspNetCore.Mvc;"
@@ -263,34 +370,193 @@ func hasCSharpUsing(source csharpSource, namespacePrefix string) bool {
 
 func extractCSharpAttributes(text string) []csharpAttrInfo {
 	var attrs []csharpAttrInfo
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
+	for i := 0; i < len(text); {
+		if end, ok := csharpLiteralEnd(text, i); ok {
+			i = end
 			continue
 		}
-		inner := trimmed[1 : len(trimmed)-1]
-		name := inner
-		args := ""
-		if idx := strings.IndexByte(inner, '('); idx >= 0 {
-			name = inner[:idx]
-			args = inner[idx+1:]
-			if last := strings.LastIndexByte(args, ')'); last >= 0 {
-				args = args[:last]
-			}
+		if text[i] != '[' || !csharpAttributeStart(text, i) {
+			i++
+			continue
 		}
-		attrs = append(attrs, csharpAttrInfo{
-			name:      name,
-			arguments: args,
-			line:      i + 1,
-		})
+		close := matchingCSharpBracket(text, i)
+		if close < 0 {
+			i++
+			continue
+		}
+		line := 1 + strings.Count(text[:i], "\n")
+		for _, part := range splitTopLevelCSharp(text[i+1:close], ',') {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if colon := topLevelCSharpIndex(part, ':'); colon >= 0 {
+				target := strings.TrimSpace(part[:colon])
+				switch target {
+				case "assembly", "module", "field", "event", "method",
+					"param", "property", "return", "type":
+					part = strings.TrimSpace(part[colon+1:])
+				}
+			}
+			name := part
+			arguments := ""
+			if open := topLevelCSharpIndex(part, '('); open >= 0 {
+				closeParen := matchingCSharpDelimiter(part, open, '(', ')')
+				if closeParen < 0 {
+					continue
+				}
+				name = strings.TrimSpace(part[:open])
+				arguments = part[open+1 : closeParen]
+			}
+			qualified := strings.TrimSpace(strings.TrimPrefix(name, "global::"))
+			simple := qualified
+			if dot := strings.LastIndexByte(simple, '.'); dot >= 0 {
+				simple = simple[dot+1:]
+			}
+			simple = strings.TrimSuffix(simple, "Attribute")
+			if !isCSharpIdent(simple) {
+				continue
+			}
+			attrs = append(attrs, csharpAttrInfo{
+				name:          simple,
+				qualifiedName: strings.TrimSuffix(qualified, "Attribute"),
+				arguments:     arguments,
+				line:          line,
+				start:         i,
+				end:           close + 1,
+			})
+		}
+		i = close + 1
 	}
 	return attrs
+}
+
+func csharpAttributeStart(text string, index int) bool {
+	lineStart := strings.LastIndexByte(text[:index], '\n') + 1
+	prefix := strings.TrimSpace(text[lineStart:index])
+	return prefix == "" || strings.HasSuffix(prefix, "]")
+}
+
+func matchingCSharpBracket(text string, start int) int {
+	depth := 0
+	for i := start; i < len(text); {
+		if end, ok := csharpLiteralEnd(text, i); ok {
+			i = end
+			continue
+		}
+		switch text[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+		i++
+	}
+	return -1
+}
+
+func splitTopLevelCSharp(text string, delimiter byte) []string {
+	var parts []string
+	start := 0
+	paren, bracket, brace := 0, 0, 0
+	for i := 0; i < len(text); {
+		if end, ok := csharpLiteralEnd(text, i); ok {
+			i = end
+			continue
+		}
+		switch text[i] {
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		default:
+			if text[i] == delimiter && paren == 0 && bracket == 0 && brace == 0 {
+				parts = append(parts, text[start:i])
+				start = i + 1
+			}
+		}
+		i++
+	}
+	return append(parts, text[start:])
+}
+
+func topLevelCSharpIndex(text string, target byte) int {
+	paren, bracket, brace := 0, 0, 0
+	for i := 0; i < len(text); {
+		if end, ok := csharpLiteralEnd(text, i); ok {
+			i = end
+			continue
+		}
+		if text[i] == target && paren == 0 && bracket == 0 && brace == 0 {
+			return i
+		}
+		switch text[i] {
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		}
+		i++
+	}
+	return -1
+}
+
+func matchingCSharpDelimiter(text string, start int, open, close byte) int {
+	depth := 0
+	for i := start; i < len(text); {
+		if end, ok := csharpLiteralEnd(text, i); ok {
+			i = end
+			continue
+		}
+		switch text[i] {
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+		i++
+	}
+	return -1
 }
 
 func extractCSharpClasses(text string) []csharpClassInfo {
 	var classes []csharpClassInfo
 	lines := strings.Split(text, "\n")
+	offset := 0
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		parts := strings.Fields(trimmed)
@@ -299,54 +565,204 @@ func extractCSharpClasses(text string) []csharpClassInfo {
 				// Find name after keyword
 				nameIdx := j + 1
 				if nameIdx < len(parts) {
-					name := strings.TrimRight(parts[nameIdx], "{:<>")
+					name := csharpDeclaredName(parts[nameIdx])
+					if !isCSharpIdent(name) {
+						break
+					}
 					// Filter base types after ':'
 					baseTypes := []string{}
-					if nameIdx+1 < len(parts) && parts[nameIdx+1] == ":" {
-						for k := nameIdx + 2; k < len(parts); k++ {
-							bt := strings.TrimRight(parts[k], "{,;")
-							baseTypes = append(baseTypes, bt)
+					if colon := strings.IndexByte(trimmed, ':'); colon >= 0 {
+						bases := trimmed[colon+1:]
+						if open := strings.IndexByte(bases, '{'); open >= 0 {
+							bases = bases[:open]
 						}
+						for _, base := range strings.Split(bases, ",") {
+							if base = strings.TrimSpace(base); base != "" {
+								baseTypes = append(baseTypes, base)
+							}
+						}
+					}
+					lineStart := offset + firstNonSpaceByte(line)
+					keyword := offset + strings.Index(line, part)
+					bodyStart := strings.IndexByte(text[keyword:], '{')
+					if bodyStart < 0 {
+						break
+					}
+					bodyStart += keyword
+					bodyEnd := matchingCSharpDelimiter(text, bodyStart, '{', '}')
+					if bodyEnd < 0 {
+						break
 					}
 					classes = append(classes, csharpClassInfo{
 						name:      name,
 						baseTypes: baseTypes,
+						start:     lineStart,
+						bodyStart: bodyStart,
+						bodyEnd:   bodyEnd,
 						line:      i + 1,
+						depth:     csharpBraceDepth(text, lineStart),
 					})
 				}
 				break
 			}
 		}
+		offset += len(line) + 1
 	}
 	return classes
+}
+
+func csharpDeclaredName(text string) string {
+	for i, r := range text {
+		if r == '<' || r == '(' || r == ':' || r == '{' {
+			return text[:i]
+		}
+	}
+	return strings.TrimRight(text, "{:;,")
 }
 
 func extractCSharpMethods(text string) []csharpMethodInfo {
 	var methods []csharpMethodInfo
 	lines := strings.Split(text, "\n")
+	offset := 0
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		// Skip attributes, class/interface declarations
 		if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "class ") ||
 			strings.HasPrefix(trimmed, "interface ") || strings.HasPrefix(trimmed, "record ") {
+			offset += len(line) + 1
 			continue
 		}
-		// Look for method pattern: returnType MethodName(params)
-		parts := strings.Fields(trimmed)
-		for j, part := range parts {
-			if idx := strings.IndexByte(part, '('); idx > 0 {
-				// Found a potential method
-				name := part[:idx]
-				if isCSharpIdent(name) && j > 0 {
-					methods = append(methods, csharpMethodInfo{
-						name: name,
-						line: i + 1,
-					})
-				}
+		name, ok := csharpMethodNameOnLine(line)
+		if ok {
+			start := offset + firstNonSpaceByte(line)
+			methods = append(methods, csharpMethodInfo{
+				name:  name,
+				start: start,
+				line:  i + 1,
+				depth: csharpBraceDepth(text, start),
+			})
+		}
+		offset += len(line) + 1
+	}
+	return methods
+}
+
+func csharpMethodNameOnLine(line string) (string, bool) {
+	for open := strings.IndexByte(line, '('); open >= 0; {
+		end := open
+		for end > 0 && (line[end-1] == ' ' || line[end-1] == '\t') {
+			end--
+		}
+		start := end
+		for start > 0 {
+			r, size := utf8.DecodeLastRuneInString(line[:start])
+			if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+				break
+			}
+			start -= size
+		}
+		name := line[start:end]
+		prefix := strings.TrimSpace(line[:start])
+		if isCSharpIdent(name) && prefix != "" &&
+			!strings.HasSuffix(prefix, ".") && !strings.Contains(prefix, "=") &&
+			!isCSharpControlWord(name) {
+			return name, true
+		}
+		next := strings.IndexByte(line[open+1:], '(')
+		if next < 0 {
+			break
+		}
+		open += next + 1
+	}
+	return "", false
+}
+
+func isCSharpControlWord(word string) bool {
+	switch word {
+	case "if", "for", "foreach", "while", "switch", "catch", "lock",
+		"using", "nameof", "typeof", "sizeof", "new", "return", "throw":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstNonSpaceByte(text string) int {
+	for i, r := range text {
+		if !unicode.IsSpace(r) {
+			return i
+		}
+	}
+	return len(text)
+}
+
+func csharpBraceDepth(text string, end int) int {
+	depth := 0
+	if end > len(text) {
+		end = len(text)
+	}
+	for i := 0; i < end; i++ {
+		switch text[i] {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
 			}
 		}
 	}
-	return methods
+	return depth
+}
+
+func bindCSharpAttributes(
+	text string,
+	attributes []csharpAttrInfo,
+	classes []csharpClassInfo,
+	methods []csharpMethodInfo,
+) {
+	for i := range classes {
+		classes[i].attributes = csharpAttributesBefore(text, attributes, classes[i].start)
+	}
+	for i := range methods {
+		methods[i].attributes = csharpAttributesBefore(text, attributes, methods[i].start)
+	}
+}
+
+func csharpAttributesBefore(
+	text string,
+	attributes []csharpAttrInfo,
+	declarationStart int,
+) []csharpAttrInfo {
+	cursor := declarationStart
+	var reversed []csharpAttrInfo
+	for i := len(attributes) - 1; i >= 0; {
+		for i >= 0 && attributes[i].end > cursor {
+			i--
+		}
+		if i < 0 {
+			break
+		}
+		groupStart, groupEnd := attributes[i].start, attributes[i].end
+		first := i
+		for first > 0 &&
+			attributes[first-1].start == groupStart &&
+			attributes[first-1].end == groupEnd {
+			first--
+		}
+		if strings.TrimSpace(text[groupEnd:cursor]) != "" {
+			break
+		}
+		for j := i; j >= first; j-- {
+			reversed = append(reversed, attributes[j])
+		}
+		cursor = groupStart
+		i = first - 1
+	}
+	bound := make([]csharpAttrInfo, len(reversed))
+	for i := range reversed {
+		bound[len(reversed)-1-i] = reversed[i]
+	}
+	return bound
 }
 
 func isCSharpIdent(s string) bool {
@@ -436,7 +852,18 @@ var csharpASPNETControllerAdapter = endpointAdapter{
 	framework: "aspnet-core-controller",
 	applies: func(source endpointSource) bool {
 		syntax, ok := source.syntax.(csharpSource)
-		return ok && hasCSharpUsing(syntax, "Microsoft.AspNetCore.Mvc")
+		if !ok {
+			return false
+		}
+		if hasCSharpUsing(syntax, "Microsoft.AspNetCore.Mvc") {
+			return true
+		}
+		for _, attr := range syntax.attributes {
+			if strings.HasPrefix(attr.qualifiedName, "Microsoft.AspNetCore.Mvc.") {
+				return true
+			}
+		}
+		return false
 	},
 	scan: scanASPNETController,
 }
@@ -446,33 +873,127 @@ func scanASPNETController(source endpointSource) []endpointCandidate {
 	if !ok {
 		return nil
 	}
-	// Find class-level [Route] prefix
-	classPrefix := ""
-	for _, attr := range syntax.attributes {
-		if attr.name == "Route" {
-			classPrefix = routeAttributePath(attr)
-		}
-	}
 	var candidates []endpointCandidate
-	for _, attr := range syntax.attributes {
-		method := httpAttrMethod(attr.name)
-		if method == "" {
+	for _, class := range syntax.classes {
+		if !isCSharpControllerClass(syntax, class) {
 			continue
 		}
-		path, ok := attributeStringArg(attr)
-		if !ok {
-			continue
+		prefix := literalValue("")
+		classRoutes := csharpAttributesNamed(syntax, class.attributes, "Route")
+		switch len(classRoutes) {
+		case 0:
+		case 1:
+			path, resolved := attributeStringArg(classRoutes[0])
+			if !resolved {
+				prefix = unresolvedValue(classRoutes[0].arguments)
+			} else {
+				prefix = literalValue(path)
+			}
+		default:
+			prefix = unresolvedValue("multiple class Route attributes")
 		}
-		handler := findCSharpMethodName(syntax, attr.line)
-		candidates = append(candidates, sourceEndpointCandidate(
-			source, "aspnet-core",
-			[]valueExpr{literalValue(method)},
-			[]valueExpr{literalValue(joinPaths(classPrefix, path))},
-			filepath.Base(source.rel), handler,
-			attr.line, 0.85,
-		))
+
+		for _, handler := range syntax.methods {
+			if !csharpClassDirectlyContains(class, handler.start, handler.depth) {
+				continue
+			}
+			methodRoutes := csharpAttributesNamed(syntax, handler.attributes, "Route")
+			for _, attr := range handler.attributes {
+				if !isCSharpMVCAttribute(syntax, attr) {
+					continue
+				}
+				method := httpAttrMethod(attr.name)
+				if method == "" {
+					continue
+				}
+				path, resolved := attributeStringArg(attr)
+				if !resolved {
+					candidates = append(candidates, sourceEndpointCandidate(
+						source, "aspnet-core",
+						[]valueExpr{literalValue(method)},
+						[]valueExpr{unresolvedValue(attr.arguments)},
+						class.name, handler.name,
+						attr.line, 0.85,
+					))
+					continue
+				}
+				if path == "" && len(methodRoutes) == 1 {
+					path, resolved = attributeStringArg(methodRoutes[0])
+				}
+				route := unresolvedValue(attr.arguments)
+				if resolved {
+					route = joinPathValues(prefix, literalValue(path))
+				}
+				candidates = append(candidates, sourceEndpointCandidate(
+					source, "aspnet-core",
+					[]valueExpr{literalValue(method)},
+					[]valueExpr{route},
+					class.name, handler.name,
+					attr.line, 0.85,
+				))
+			}
+		}
 	}
 	return candidates
+}
+
+func isCSharpControllerClass(source csharpSource, class csharpClassInfo) bool {
+	for _, attr := range class.attributes {
+		if isCSharpMVCAttribute(source, attr) &&
+			(attr.name == "ApiController" || attr.name == "Controller") {
+			return true
+		}
+	}
+	for _, base := range class.baseTypes {
+		switch csharpSimpleTypeName(base) {
+		case "Controller", "ControllerBase":
+			return true
+		}
+	}
+	return false
+}
+
+func csharpSimpleTypeName(name string) string {
+	name = strings.TrimSpace(strings.TrimPrefix(name, "global::"))
+	if generic := strings.IndexByte(name, '<'); generic >= 0 {
+		name = name[:generic]
+	}
+	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
+		name = name[dot+1:]
+	}
+	return strings.TrimSpace(name)
+}
+
+func csharpClassDirectlyContains(class csharpClassInfo, offset, depth int) bool {
+	return class.bodyStart >= 0 && class.bodyEnd > class.bodyStart &&
+		offset > class.bodyStart && offset < class.bodyEnd &&
+		depth == class.depth+1
+}
+
+func csharpAttributesNamed(
+	source csharpSource,
+	attributes []csharpAttrInfo,
+	name string,
+) []csharpAttrInfo {
+	var matches []csharpAttrInfo
+	for _, attr := range attributes {
+		if attr.name == name && isCSharpMVCAttribute(source, attr) {
+			matches = append(matches, attr)
+		}
+	}
+	return matches
+}
+
+func isCSharpMVCAttribute(source csharpSource, attr csharpAttrInfo) bool {
+	if strings.HasPrefix(attr.qualifiedName, "Microsoft.AspNetCore.Mvc.") {
+		return true
+	}
+	if qualified := source.usings[attr.qualifiedName]; strings.HasPrefix(
+		qualified, "Microsoft.AspNetCore.Mvc.",
+	) {
+		return true
+	}
+	return hasCSharpUsing(source, "Microsoft.AspNetCore.Mvc")
 }
 
 func httpAttrMethod(name string) string {
@@ -494,15 +1015,6 @@ func httpAttrMethod(name string) string {
 	default:
 		return ""
 	}
-}
-
-func findCSharpMethodName(source csharpSource, afterLine int) string {
-	for _, m := range source.methods {
-		if m.line > afterLine {
-			return m.name
-		}
-	}
-	return ""
 }
 
 // ---- ASP.NET Core Minimal API adapter ----

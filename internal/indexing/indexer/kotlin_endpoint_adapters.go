@@ -18,8 +18,9 @@ type kotlinSource struct {
 
 type kotlinFunctionInfo struct {
 	name  string
-	start int // token index
+	start int
 	line  int
+	depth int
 }
 
 type kotlinClassInfo struct {
@@ -36,6 +37,7 @@ func parseKotlinEndpointSource(root, file, text string) (endpointSource, bool) {
 	if len(syntax.tokens) == 0 {
 		return endpointSource{}, false
 	}
+	syntax.imports = extractKotlinImports(syntax.tokens)
 	moduleRoot := findKotlinModuleRoot(root, file)
 	modulePath := ""
 	if moduleRoot != "" {
@@ -53,10 +55,58 @@ func parseKotlinEndpointSource(root, file, text string) (endpointSource, bool) {
 		text:        text,
 		syntax: kotlinSource{
 			jvmSource: syntax,
-			functions:  kotlinFunctionDeclarations(syntax.tokens),
-			classes:    kotlinClassDeclarations(syntax.tokens),
+			functions: kotlinFunctionDeclarations(syntax.tokens),
+			classes:   kotlinClassDeclarations(syntax.tokens),
 		},
 	}, true
+}
+
+// Kotlin imports end at a newline, unlike Java imports. Keeping this parser in
+// the Kotlin frontend also preserves aliases and wildcard framework imports.
+func extractKotlinImports(tokens []jvmToken) map[string]string {
+	imports := make(map[string]string)
+	for i := 0; i < len(tokens); i++ {
+		if tokens[i].text != "import" {
+			continue
+		}
+		line := tokens[i].line
+		parts := make([]string, 0, 6)
+		alias := ""
+		wildcard := false
+		j := i + 1
+		for ; j < len(tokens) && tokens[j].line == line; j++ {
+			switch tokens[j].text {
+			case ";":
+				goto importDone
+			case "as":
+				if j+1 < len(tokens) && tokens[j+1].line == line &&
+					tokens[j+1].kind == jvmIdentifierToken {
+					alias = tokens[j+1].text
+					j++
+				}
+			case "*":
+				wildcard = true
+			default:
+				if tokens[j].kind == jvmIdentifierToken {
+					parts = append(parts, tokens[j].text)
+				}
+			}
+		}
+	importDone:
+		if len(parts) == 0 {
+			continue
+		}
+		qualified := strings.Join(parts, ".")
+		if wildcard {
+			qualified += ".*"
+			imports[qualified] = qualified
+		} else if alias != "" {
+			imports[alias] = qualified
+		} else {
+			imports[parts[len(parts)-1]] = qualified
+		}
+	}
+	return imports
 }
 
 // kotlinFunctionDeclarations finds fun declarations in JVM tokens.
@@ -67,21 +117,33 @@ func kotlinFunctionDeclarations(tokens []jvmToken) []kotlinFunctionInfo {
 		if token.kind != jvmIdentifierToken || token.text != "fun" {
 			continue
 		}
-		if i+1 >= len(tokens) || tokens[i+1].kind != jvmIdentifierToken {
-			continue
+		function, ok := kotlinFunctionDeclarationAt(tokens, i)
+		if ok {
+			functions = append(functions, function)
 		}
-		// Skip if preceded by "class" keyword (function type parameter)
-		if i > 0 && tokens[i-1].kind == jvmIdentifierToken &&
-			(tokens[i-1].text == "class" || tokens[i-1].text == "interface") {
-			continue
-		}
-		functions = append(functions, kotlinFunctionInfo{
-			name:  tokens[i+1].text,
-			start: i,
-			line:  tokens[i].line,
-		})
 	}
 	return functions
+}
+
+func kotlinFunctionDeclarationAt(tokens []jvmToken, keyword int) (kotlinFunctionInfo, bool) {
+	for i := keyword + 1; i < len(tokens); i++ {
+		if tokens[i].braceDepth != tokens[keyword].braceDepth {
+			return kotlinFunctionInfo{}, false
+		}
+		switch tokens[i].text {
+		case "(":
+			if i == 0 || tokens[i-1].kind != jvmIdentifierToken {
+				return kotlinFunctionInfo{}, false
+			}
+			return kotlinFunctionInfo{
+				name: tokens[i-1].text, start: tokens[keyword].start,
+				line: tokens[keyword].line, depth: tokens[keyword].braceDepth,
+			}, true
+		case "=", "{", "}", ";":
+			return kotlinFunctionInfo{}, false
+		}
+	}
+	return kotlinFunctionInfo{}, false
 }
 
 // kotlinClassDeclarations finds class/object declarations in JVM tokens.
@@ -92,7 +154,7 @@ func kotlinClassDeclarations(tokens []jvmToken) []kotlinClassInfo {
 			continue
 		}
 		switch token.text {
-		case "class", "object":
+		case "class", "interface", "object":
 		default:
 			continue
 		}
@@ -110,15 +172,7 @@ func kotlinClassDeclarations(tokens []jvmToken) []kotlinClassInfo {
 				kind = prev + " class"
 			}
 		}
-		// Find the name (after keyword, skip modifiers)
 		nameIdx := i + 1
-		for nameIdx < len(tokens) && tokens[nameIdx].kind != jvmIdentifierToken {
-			if tokens[nameIdx].text == "{" || tokens[nameIdx].text == ";" ||
-				tokens[nameIdx].text == "(" {
-				break
-			}
-			nameIdx++
-		}
 		if nameIdx >= len(tokens) || tokens[nameIdx].kind != jvmIdentifierToken {
 			continue
 		}
@@ -129,12 +183,28 @@ func kotlinClassDeclarations(tokens []jvmToken) []kotlinClassInfo {
 		}
 		// Find body
 		body := -1
+		parenDepth, bracketDepth := 0, 0
 		for j := nameIdx + 1; j < len(tokens); j++ {
-			if tokens[j].text == "{" && tokens[j].kind == jvmSymbolToken {
+			switch tokens[j].text {
+			case "(":
+				parenDepth++
+			case ")":
+				if parenDepth > 0 {
+					parenDepth--
+				}
+			case "[":
+				bracketDepth++
+			case "]":
+				if bracketDepth > 0 {
+					bracketDepth--
+				}
+			}
+			if tokens[j].text == "{" && tokens[j].kind == jvmSymbolToken &&
+				parenDepth == 0 && bracketDepth == 0 {
 				body = j
 				break
 			}
-			if tokens[j].text == ";" {
+			if tokens[j].text == ";" && parenDepth == 0 && bracketDepth == 0 {
 				break
 			}
 		}
@@ -145,11 +215,14 @@ func kotlinClassDeclarations(tokens []jvmToken) []kotlinClassInfo {
 				bodyEnd = tokens[close].start
 			}
 		}
+		if body < 0 || bodyEnd < 0 {
+			continue
+		}
 		classes = append(classes, kotlinClassInfo{
 			name:      name,
 			kind:      kind,
 			start:     tokens[i].start,
-			bodyStart: bodyEnd,
+			bodyStart: tokens[body].start,
 			bodyEnd:   bodyEnd,
 			depth:     tokens[i].braceDepth,
 		})
@@ -157,41 +230,147 @@ func kotlinClassDeclarations(tokens []jvmToken) []kotlinClassInfo {
 	return classes
 }
 
-// kotlinEnclosingClass returns the class/object that contains the given offset.
-func kotlinEnclosingClass(classes []kotlinClassInfo, offset, depth int) *kotlinClassInfo {
-	var best *kotlinClassInfo
-	bestSpan := 0
-	for i := range classes {
-		c := classes[i]
-		if c.bodyStart < 0 || offset <= c.bodyStart || offset >= c.bodyEnd {
-			continue
-		}
-		if depth < c.depth+1 {
-			continue
-		}
-		span := c.bodyEnd - c.bodyStart
-		if best == nil || span < bestSpan {
-			best = &classes[i]
-			bestSpan = span
-		}
-	}
-	return best
+type kotlinDeclarationKind uint8
+
+const (
+	kotlinClassDeclaration kotlinDeclarationKind = iota + 1
+	kotlinFunctionDeclaration
+)
+
+type kotlinDeclaration struct {
+	kind                      kotlinDeclarationKind
+	name                      string
+	start, bodyStart, bodyEnd int
+	depth                     int
 }
 
-// kotlinAnnotationController returns the class declaration for a @RestController
-// or @Controller annotation, or nil.
-func kotlinAnnotationController(source kotlinSource, annotation jvmAnnotation) *kotlinClassInfo {
-	if !javaAnnotationIsController(annotation.name) {
-		return nil
-	}
-	// Find the class/object declaration directly after the annotation.
-	for _, class := range source.classes {
-		if class.start > annotation.tokenEnd &&
-			class.start <= annotation.tokenEnd+500 { // reasonable bound
-			return &class
+type boundKotlinAnnotation struct {
+	annotation  jvmAnnotation
+	declaration kotlinDeclaration
+}
+
+func bindKotlinAnnotations(source kotlinSource) []boundKotlinAnnotation {
+	bindings := make([]boundKotlinAnnotation, 0, len(source.annotations))
+	for _, annotation := range source.annotations {
+		declaration, ok := kotlinDeclarationAfter(source, annotation.tokenEnd, annotation.braceDepth)
+		if ok {
+			bindings = append(bindings, boundKotlinAnnotation{
+				annotation: annotation, declaration: declaration,
+			})
 		}
 	}
-	return nil
+	return bindings
+}
+
+func kotlinDeclarationAfter(source kotlinSource, from, depth int) (kotlinDeclaration, bool) {
+	classes := make(map[int]kotlinClassInfo, len(source.classes))
+	for _, class := range source.classes {
+		classes[class.start] = class
+	}
+	functions := make(map[int]kotlinFunctionInfo, len(source.functions))
+	for _, function := range source.functions {
+		functions[function.start] = function
+	}
+	for i := from; i < len(source.tokens); i++ {
+		token := source.tokens[i]
+		if token.braceDepth != depth {
+			return kotlinDeclaration{}, false
+		}
+		if token.text == "@" {
+			if _, next, ok := parseJVMAnnotation("", source.tokens, i); ok {
+				i = next - 1
+				continue
+			}
+		}
+		if token.kind == jvmIdentifierToken {
+			switch token.text {
+			case "class", "interface", "object":
+				if class, ok := classes[token.start]; ok {
+					return kotlinDeclaration{
+						kind: kotlinClassDeclaration, name: class.name, start: class.start,
+						bodyStart: class.bodyStart, bodyEnd: class.bodyEnd, depth: class.depth,
+					}, true
+				}
+				return kotlinDeclaration{}, false
+			case "fun":
+				if function, ok := functions[token.start]; ok {
+					return kotlinDeclaration{
+						kind: kotlinFunctionDeclaration, name: function.name,
+						start: function.start, bodyStart: -1, bodyEnd: -1, depth: function.depth,
+					}, true
+				}
+				return kotlinDeclaration{}, false
+			case "val", "var", "typealias", "constructor", "init":
+				return kotlinDeclaration{}, false
+			}
+			continue
+		}
+		switch token.text {
+		case ";", "=", "{", "}", "(":
+			return kotlinDeclaration{}, false
+		}
+	}
+	return kotlinDeclaration{}, false
+}
+
+var kotlinSpringAnnotationNames = map[string]string{
+	"RestController": "org.springframework.web.bind.annotation.RestController",
+	"Controller":     "org.springframework.stereotype.Controller",
+	"RequestMapping": "org.springframework.web.bind.annotation.RequestMapping",
+	"GetMapping":     "org.springframework.web.bind.annotation.GetMapping",
+	"PostMapping":    "org.springframework.web.bind.annotation.PostMapping",
+	"PutMapping":     "org.springframework.web.bind.annotation.PutMapping",
+	"DeleteMapping":  "org.springframework.web.bind.annotation.DeleteMapping",
+	"PatchMapping":   "org.springframework.web.bind.annotation.PatchMapping",
+}
+
+func resolvedKotlinSpringAnnotation(source kotlinSource, annotation jvmAnnotation) (jvmAnnotation, bool) {
+	qualified := annotation.qualifiedName
+	if !strings.Contains(qualified, ".") {
+		if imported := source.imports[annotation.name]; imported != "" {
+			qualified = imported
+		}
+	}
+	for name, expected := range kotlinSpringAnnotationNames {
+		if qualified == expected ||
+			(annotation.name == name && kotlinImports(source, expected)) {
+			annotation.name = name
+			return annotation, true
+		}
+	}
+	return jvmAnnotation{}, false
+}
+
+func kotlinImports(source kotlinSource, qualified string) bool {
+	simple := qualified[strings.LastIndex(qualified, ".")+1:]
+	if imported, exists := source.imports[simple]; exists {
+		return imported == qualified
+	}
+	for _, imported := range source.imports {
+		if !strings.HasSuffix(imported, ".*") {
+			continue
+		}
+		prefix := strings.TrimSuffix(imported, "*")
+		if strings.HasPrefix(qualified, prefix) &&
+			!strings.Contains(strings.TrimPrefix(qualified, prefix), ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func kotlinSpringAnnotationBindings(source kotlinSource) []boundKotlinAnnotation {
+	bindings := bindKotlinAnnotations(source)
+	resolved := make([]boundKotlinAnnotation, 0, len(bindings))
+	for _, binding := range bindings {
+		annotation, ok := resolvedKotlinSpringAnnotation(source, binding.annotation)
+		if !ok {
+			continue
+		}
+		binding.annotation = annotation
+		resolved = append(resolved, binding)
+	}
+	return resolved
 }
 
 // ---- Kotlin Spring MVC adapter ----
@@ -205,7 +384,7 @@ var kotlinSpringMVCAdapter = endpointAdapter{
 			return false
 		}
 		for _, annotation := range syntax.annotations {
-			if javaAnnotationIsSpring(annotation.name) {
+			if _, ok := resolvedKotlinSpringAnnotation(syntax, annotation); ok {
 				return true
 			}
 		}
@@ -219,34 +398,29 @@ func scanKotlinSpringMVC(source endpointSource) []endpointCandidate {
 	if !ok {
 		return nil
 	}
-	// Reuse the Java Spring MVC scanning logic since annotations are JVM-common.
-	// Build a jvmSource from the embedded data.
-	jvmSrc := syntax.jvmSource
+	bindings := kotlinSpringAnnotationBindings(syntax)
 
 	// Controller bindings: find @RestController/@Controller on classes/objects.
 	type controllerBinding struct {
-		class     kotlinClassInfo
-		prefixes  []valueExpr
-		methods   []valueExpr
-		resolved  bool
+		declaration kotlinDeclaration
+		prefixes    []valueExpr
+		methods     []valueExpr
+		resolved    bool
 	}
 	controllers := make(map[int]*controllerBinding)
-	for _, annotation := range jvmSrc.annotations {
-		if !javaAnnotationIsController(annotation.name) {
+	for _, binding := range bindings {
+		if !javaAnnotationIsController(binding.annotation.name) ||
+			binding.declaration.kind != kotlinClassDeclaration {
 			continue
 		}
-		class := kotlinAnnotationController(syntax, annotation)
-		if class == nil {
+		if _, exists := controllers[binding.declaration.start]; exists {
 			continue
 		}
-		if _, exists := controllers[class.start]; exists {
-			continue
-		}
-		controllers[class.start] = &controllerBinding{
-			class:    *class,
-			prefixes: []valueExpr{literalValue("")},
-			methods:  []valueExpr{literalValue("ANY")},
-			resolved:  true,
+		controllers[binding.declaration.start] = &controllerBinding{
+			declaration: binding.declaration,
+			prefixes:    []valueExpr{literalValue("")},
+			methods:     []valueExpr{literalValue("ANY")},
+			resolved:    true,
 		}
 	}
 	if len(controllers) == 0 {
@@ -254,24 +428,21 @@ func scanKotlinSpringMVC(source endpointSource) []endpointCandidate {
 	}
 
 	// Process @RequestMapping on classes.
-	for _, annotation := range jvmSrc.annotations {
-		if annotation.name != "RequestMapping" {
+	for _, binding := range bindings {
+		if binding.annotation.name != "RequestMapping" ||
+			binding.declaration.kind != kotlinClassDeclaration {
 			continue
 		}
-		class := kotlinAnnotationController(syntax, annotation)
-		if class == nil {
-			continue
-		}
-		ctrl := controllers[class.start]
+		ctrl := controllers[binding.declaration.start]
 		if ctrl == nil || !ctrl.resolved {
 			continue
 		}
-		prefixes, pathsResolved := springMappingPaths(annotation)
-		methods, methodsResolved := springMappingMethods(annotation)
+		prefixes, pathsResolved := springMappingPaths(binding.annotation)
+		methods, methodsResolved := springMappingMethods(binding.annotation)
 		if !pathsResolved || !methodsResolved {
 			ctrl.resolved = false
-			ctrl.prefixes = []valueExpr{unresolvedValue(annotation.text)}
-			ctrl.methods = []valueExpr{unresolvedValue(annotation.text)}
+			ctrl.prefixes = []valueExpr{unresolvedValue(binding.annotation.text)}
+			ctrl.methods = []valueExpr{unresolvedValue(binding.annotation.text)}
 			continue
 		}
 		if ctrl.prefixes[0].kind != valueLiteral ||
@@ -279,8 +450,8 @@ func scanKotlinSpringMVC(source endpointSource) []endpointCandidate {
 			ctrl.methods[0].kind != valueLiteral ||
 			ctrl.methods[0].value != "ANY" {
 			ctrl.resolved = false
-			ctrl.prefixes = []valueExpr{unresolvedValue(annotation.text)}
-			ctrl.methods = []valueExpr{unresolvedValue(annotation.text)}
+			ctrl.prefixes = []valueExpr{unresolvedValue(binding.annotation.text)}
+			ctrl.methods = []valueExpr{unresolvedValue(binding.annotation.text)}
 			continue
 		}
 		ctrl.prefixes = prefixes
@@ -289,18 +460,21 @@ func scanKotlinSpringMVC(source endpointSource) []endpointCandidate {
 
 	// Process method mapping annotations.
 	var candidates []endpointCandidate
-	for _, annotation := range jvmSrc.annotations {
-		if !isJavaMappingAnnotation(annotation.name) {
+	for _, binding := range bindings {
+		if !isJavaMappingAnnotation(binding.annotation.name) ||
+			binding.declaration.kind != kotlinFunctionDeclaration {
 			continue
 		}
 		// Find enclosing controller.
 		var ctrl *controllerBinding
 		bestSpan := 0
 		for _, c := range controllers {
-			if !c.class.classContains(annotation.start, annotation.braceDepth) {
+			if !kotlinDeclarationDirectlyContains(
+				c.declaration, binding.annotation.start, binding.annotation.braceDepth,
+			) {
 				continue
 			}
-			span := c.class.bodyEnd - c.class.bodyStart
+			span := c.declaration.bodyEnd - c.declaration.bodyStart
 			if ctrl == nil || span < bestSpan {
 				ctrl = c
 				bestSpan = span
@@ -309,46 +483,40 @@ func scanKotlinSpringMVC(source endpointSource) []endpointCandidate {
 		if ctrl == nil {
 			continue
 		}
-		paths, pathsResolved := springMappingPaths(annotation)
-		methods, methodsResolved := springMappingMethods(annotation)
+		paths, pathsResolved := springMappingPaths(binding.annotation)
+		methods, methodsResolved := springMappingMethods(binding.annotation)
 		if !pathsResolved {
-			paths = []valueExpr{unresolvedValue(annotation.text)}
+			paths = []valueExpr{unresolvedValue(binding.annotation.text)}
 		}
 		if !methodsResolved {
-			methods = []valueExpr{unresolvedValue(annotation.text)}
+			methods = []valueExpr{unresolvedValue(binding.annotation.text)}
 		}
 		if !ctrl.resolved {
-			paths = []valueExpr{unresolvedValue(annotation.text)}
+			paths = []valueExpr{unresolvedValue(binding.annotation.text)}
 		} else {
 			paths = combinePathValues(ctrl.prefixes, paths)
 			methods = combineMethodValues(ctrl.methods, methods)
 		}
 		if len(paths) == 0 {
-			paths = []valueExpr{unresolvedValue(annotation.text)}
+			paths = []valueExpr{unresolvedValue(binding.annotation.text)}
 		}
 		if len(methods) == 0 {
-			methods = []valueExpr{unresolvedValue(annotation.text)}
-		}
-		// Find handler function name after annotation.
-		handlerMethod := ""
-		for _, fn := range syntax.functions {
-			if fn.line > annotation.line && fn.line <= annotation.line+8 {
-				handlerMethod = fn.name
-				break
-			}
+			methods = []valueExpr{unresolvedValue(binding.annotation.text)}
 		}
 		candidates = append(candidates, sourceEndpointCandidate(
 			source, "spring-mvc", methods, paths,
-			ctrl.class.name, handlerMethod,
-			annotation.line, 0.85,
+			ctrl.declaration.name, binding.declaration.name,
+			binding.annotation.line, 0.85,
 		))
 	}
 	return candidates
 }
 
-func (c kotlinClassInfo) classContains(offset, depth int) bool {
-	return c.bodyStart >= 0 && c.bodyEnd > 0 &&
-		offset > c.bodyStart && offset < c.bodyEnd && depth == c.depth+1
+func kotlinDeclarationDirectlyContains(declaration kotlinDeclaration, offset, depth int) bool {
+	return declaration.kind == kotlinClassDeclaration &&
+		declaration.bodyStart >= 0 && declaration.bodyEnd > declaration.bodyStart &&
+		offset > declaration.bodyStart && offset < declaration.bodyEnd &&
+		depth == declaration.depth+1
 }
 
 // ---- Kotlin Ktor adapter ----
