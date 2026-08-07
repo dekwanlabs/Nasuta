@@ -1,6 +1,9 @@
 package indexer
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -15,8 +18,11 @@ func scanGoServices(root string, dirs []string) []domain.ServiceRecord {
 	var records []domain.ServiceRecord
 	seenModules := map[string]struct{}{}
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
-		if !strings.Contains(text, "package main") || !strings.Contains(text, "func main()") {
+		if !goHasMain(text) {
 			continue
 		}
 		rel := relativeTo(root, file)
@@ -33,13 +39,12 @@ func scanGoServices(root string, dirs []string) []domain.ServiceRecord {
 			continue
 		}
 		seenModules[moduleKey] = struct{}{}
-		layer := inferLayer(serviceName, modulePath)
 		runtime := readGoVersion(moduleRoot)
 		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
-			Layer:         "server",
-			Scope:         layer,
+			Layer:         "",
+			Scope:         "",
 			ModulePath:    modulePath,
 			Language:      "go",
 			Runtime:       runtime,
@@ -54,66 +59,14 @@ func scanGoServices(root string, dirs []string) []domain.ServiceRecord {
 	return records
 }
 
-// scanGoEndpoints finds Go HTTP route registrations (Gin, Echo, net/http, Chi, Fiber).
-func scanGoEndpoints(root string, dirs []string) []domain.EndpointRecord {
-	files := walkFiles(root, dirs, hasSuffix(".go"))
-	var records []domain.EndpointRecord
-	for _, file := range files {
-		text := readFile(file)
-		if !strings.Contains(text, ".GET") && !strings.Contains(text, ".POST") &&
-			!strings.Contains(text, ".HandleFunc") && !strings.Contains(text, ".Group(") &&
-			!strings.Contains(text, "Handle(") && !strings.Contains(text, ".Get(") &&
-			!strings.Contains(text, ".Post(") {
-			continue
-		}
-		rel := relativeTo(root, file)
-		moduleRoot := findModuleRoot(root, file, "go.mod")
-		serviceName := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			serviceName = readGoModuleName(moduleRoot)
-		}
-		handler := strings.TrimSuffix(filepath.Base(file), ".go")
-		lines := strings.Split(text, "\n")
-		for i, line := range lines {
-			for _, re := range goEndpointPatterns {
-				m := re.FindStringSubmatch(line)
-				if m == nil {
-					continue
-				}
-				method := "ANY"
-				path := ""
-				if len(m) >= 3 {
-					method = strings.ToUpper(m[1])
-					path = m[2]
-				} else if len(m) >= 2 {
-					path = m[1]
-				}
-				if path == "" {
-					continue
-				}
-				records = append(records, domain.EndpointRecord{
-					ServiceName:   serviceName,
-					Repo:          topSegment(rel),
-					Method:        method,
-					Path:          path,
-					Handler:       handler,
-					HandlerMethod: goHandlerName(lines, i),
-					File:          rel,
-					Line:          i + 1,
-					Source:        domain.SourceCodeScan,
-					Confidence:    0.85,
-				})
-			}
-		}
-	}
-	return records
-}
-
 // scanGoDependencies finds HTTP client calls and gRPC client usage in Go code.
 func scanGoDependencies(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, hasSuffix(".go"))
 	var edges []domain.DependencyEdge
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "http.NewRequest") && !strings.Contains(text, "resty.") &&
 			!strings.Contains(text, "http.Client") && !strings.Contains(text, "pb.New") &&
@@ -121,11 +74,7 @@ func scanGoDependencies(root string, dirs []string) []domain.DependencyEdge {
 			continue
 		}
 		rel := relativeTo(root, file)
-		moduleRoot := findModuleRoot(root, file, "go.mod")
-		caller := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			caller = readGoModuleName(moduleRoot)
-		}
+		caller := dependencyIdentity(root, file)
 		// HTTP URL-based dependencies
 		for _, m := range goHTTPCallRe.FindAllStringSubmatch(text, -1) {
 			if len(m) > 1 {
@@ -135,11 +84,12 @@ func scanGoDependencies(root string, dirs []string) []domain.DependencyEdge {
 				target = strings.TrimSuffix(target, ":8080")
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
 					edges = append(edges, domain.DependencyEdge{
-						From:       caller,
-						To:         target,
-						Type:       domain.EdgeHTTP,
-						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence: 0.5,
+						CallerServiceKey: caller.Key,
+						From:             caller.Name,
+						To:               target,
+						Type:             domain.EdgeHTTP,
+						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+						Confidence:       0.5,
 					})
 				}
 			}
@@ -150,11 +100,12 @@ func scanGoDependencies(root string, dirs []string) []domain.DependencyEdge {
 				target := m[1]
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
 					edges = append(edges, domain.DependencyEdge{
-						From:       caller,
-						To:         target,
-						Type:       domain.EdgeGRPC,
-						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence: 0.55,
+						CallerServiceKey: caller.Key,
+						From:             caller.Name,
+						To:               target,
+						Type:             domain.EdgeGRPC,
+						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+						Confidence:       0.55,
 					})
 				}
 			}
@@ -198,6 +149,20 @@ func readGoPorts(dir string) []int {
 	return nil
 }
 
+func goHasMain(text string) bool {
+	file, err := parser.ParseFile(token.NewFileSet(), "", text, 0)
+	if err != nil || file.Name.Name != "main" {
+		return false
+	}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Recv == nil && function.Name.Name == "main" {
+			return true
+		}
+	}
+	return false
+}
+
 var goEndpointPatterns = []*regexp.Regexp{
 	// Gin: router.GET("/path", ...)  — uppercase method, immediate path
 	regexp.MustCompile(`(?i)\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\(\s*"([^"]+)"`),
@@ -220,20 +185,6 @@ func parseInts(s string) []int {
 }
 
 var goHandlerRe = regexp.MustCompile(`func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(`)
-
-func goHandlerName(lines []string, index int) string {
-	end := index + 4
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for i := index; i < end; i++ {
-		if m := goHandlerRe.FindStringSubmatch(lines[i]); m != nil {
-			return m[1]
-		}
-	}
-	return ""
-}
-
 var goHTTPCallRe = regexp.MustCompile(`https?://([^\s"'\)]+)`)
 
 var goGRPCClientRe = regexp.MustCompile(`pb\.New(\w+)Client|grpc\.Dial\s*\(\s*"([^"]+)"`)

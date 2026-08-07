@@ -18,12 +18,13 @@ const maxConfigResolutionRounds = 8
 var configPlaceholderRe = regexp.MustCompile(`\$\{([^{}]+)\}`)
 
 type feignReference struct {
-	From       string
-	ModulePath string
-	ClientName string
-	URL        string
-	Evidence   []domain.Evidence
-	Confidence float64
+	From             string
+	CallerServiceKey string
+	ModulePath       string
+	ClientName       string
+	URL              string
+	Evidence         []domain.Evidence
+	Confidence       float64
 }
 
 func resolveFeignDependencies(
@@ -53,7 +54,11 @@ func resolveFeignDependencies(
 		})
 		resolved, err := resolver.ResolveConfig(ctx, pending)
 		if err != nil {
-			return nil, fmt.Errorf("resolve Feign configuration: %w", err)
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("resolve Feign configuration: %w", ctx.Err())
+			}
+			log.WarnfCtx(ctx, "[indexer] Feign config resolver failed; continuing with unresolved config-backed dependencies omitted: %v", err)
+			break
 		}
 		for _, ref := range pending {
 			requested[ref] = struct{}{}
@@ -90,11 +95,12 @@ func resolveFeignDependencies(
 			continue
 		}
 		edges = append(edges, domain.DependencyEdge{
-			From:       ref.From,
-			To:         target,
-			Type:       domain.EdgeFeign,
-			Evidence:   append(ref.Evidence, configEvidence...),
-			Confidence: ref.Confidence,
+			CallerServiceKey: ref.CallerServiceKey,
+			From:             ref.From,
+			To:               target,
+			Type:             domain.EdgeFeign,
+			Evidence:         append(ref.Evidence, configEvidence...),
+			Confidence:       ref.Confidence,
 		})
 	}
 	return edges, nil

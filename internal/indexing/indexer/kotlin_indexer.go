@@ -17,6 +17,9 @@ func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 	var records []domain.ServiceRecord
 	byModule := make(map[string]int)
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		rel := relativeTo(root, file)
 		moduleRoot := findKotlinModuleRoot(root, file)
@@ -38,8 +41,8 @@ func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 			records = append(records, domain.ServiceRecord{
 				ServiceName: serviceName,
 				Repo:        topSegment(rel),
-				Layer:       "server",
-				Scope:       inferLayer(serviceName, modulePath),
+				Layer:       "",
+				Scope:       "",
 				ModulePath:  modulePath,
 				Language:    "kotlin",
 				Tags:        []string{"code-scan"},
@@ -49,16 +52,10 @@ func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 			idx = len(records) - 1
 			byModule[moduleKey] = idx
 		}
-		if !strings.Contains(text, "@SpringBootApplication") &&
-			!strings.Contains(text, "SpringApplication.run") &&
-			!strings.Contains(text, "fun main") &&
-			!strings.Contains(text, "embeddedServer") {
+		if !hasKotlinRuntimeEvidence(text) {
 			continue
 		}
-		layer := inferLayer(serviceName, modulePath)
 		rec := &records[idx]
-		rec.Layer = "server"
-		rec.Scope = layer
 		rec.Runtime = "spring-boot"
 		rec.SourceOfTruth = append(rec.SourceOfTruth, rel)
 		rec.Entrypoints = append(rec.Entrypoints, domain.Evidence{Path: rel, Kind: domain.SourceCodeScan})
@@ -68,102 +65,14 @@ func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 	return records
 }
 
-// scanKotlinEndpoints finds Spring annotation routes + Ktor DSL + Javalin routes.
-func scanKotlinEndpoints(root string, dirs []string) []domain.EndpointRecord {
-	files := walkFiles(root, dirs, hasSuffix(".kt"))
-	var records []domain.EndpointRecord
-	for _, file := range files {
-		text := readFile(file)
-		rel := relativeTo(root, file)
-		serviceName := inferKotlinServiceName(root, file)
-		handler := strings.TrimSuffix(filepath.Base(file), ".kt")
-		lines := strings.Split(text, "\n")
-
-		// Spring-style: @RestController / @Controller with @GetMapping etc.
-		if strings.Contains(text, "@RestController") || strings.Contains(text, "@Controller") {
-			classPrefix := extractKotlinClassPrefix(text)
-			for i, line := range lines {
-				method := mappingMethod(line)
-				if method == "" {
-					continue
-				}
-				if method == "ANY" && isClassLevelMapping(lines, i) {
-					continue
-				}
-				annotation := collectAnnotation(lines, i)
-				route := extractFirstString(annotation)
-				conf := 0.85
-				if route == "" {
-					conf = 0.6
-				}
-				records = append(records, domain.EndpointRecord{
-					ServiceName: serviceName, Repo: topSegment(rel),
-					Method: method, Path: joinPaths(classPrefix, route),
-					Handler: handler, HandlerMethod: kotlinMethodName(lines, i),
-					File: rel, Line: i + 1, Source: domain.SourceCodeScan, Confidence: conf,
-				})
-			}
-		}
-
-		// Ktor DSL: routing { get("/path") { } }, route("/prefix") { get("/sub") { } }
-		if strings.Contains(text, "routing") || strings.Contains(text, "route(") {
-			routes := scanKtorRouting(text, handler, rel, serviceName)
-			records = append(records, routes...)
-		}
-
-		// Javalin: app.get("/path") { ctx -> }, app.routes { get("/path") { } }
-		if strings.Contains(text, "Javalin") || strings.Contains(text, "javalin") {
-			for _, re := range javalinPatterns {
-				for _, m := range re.FindAllStringSubmatch(text, -1) {
-					if len(m) >= 3 {
-						records = append(records, domain.EndpointRecord{
-							ServiceName: serviceName, Repo: topSegment(rel),
-							Method: strings.ToUpper(m[1]), Path: m[2],
-							Handler: handler, File: rel, Source: domain.SourceCodeScan, Confidence: 0.8,
-						})
-					}
-				}
-			}
-		}
-	}
-	return records
-}
-
-// scanKtorRouting extracts routes from Ktor's routing DSL.
-func scanKtorRouting(text, handler, rel, serviceName string) []domain.EndpointRecord {
-	var records []domain.EndpointRecord
-	// Top-level routes: get("/path") { ... }, post("/path") { ... }
-	for _, re := range ktorRoutePatterns {
-		for _, m := range re.FindAllStringSubmatch(text, -1) {
-			if len(m) >= 3 {
-				records = append(records, domain.EndpointRecord{
-					ServiceName: serviceName, Repo: topSegment(rel),
-					Method: strings.ToUpper(m[1]), Path: m[2],
-					Handler: handler, File: rel, Source: domain.SourceCodeScan, Confidence: 0.8,
-				})
-			}
-		}
-	}
-	return records
-}
-
-var ktorRoutePatterns = []*regexp.Regexp{
-	// get("/path") { }, post("/path") { } — inside routing { } block
-	regexp.MustCompile(`\b(get|post|put|delete|patch|head|options)\s*\(\s*"([^"]+)"`),
-}
-
-var javalinPatterns = []*regexp.Regexp{
-	// app.get("/path", handler) or app.routes { get("/path") { } }
-	regexp.MustCompile(`app\.(get|post|put|delete|patch|head|options)\s*\(\s*"([^"]+)"`),
-	// Javalin 6+: get("/path") { ctx -> } inside app.routes { }
-	regexp.MustCompile(`\bApiBuilder\.(get|post|put|delete|patch)\s*\(\s*"([^"]+)"`),
-}
-
 // scanKotlinFeigns preserves Feign configuration until dependency resolution.
 func scanKotlinFeigns(root string, dirs []string) []feignReference {
 	files := walkFiles(root, dirs, hasSuffix(".kt"))
 	var records []feignReference
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "@FeignClient") {
 			continue
@@ -172,8 +81,10 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 		rel := relativeTo(root, file)
 		caller := inferKotlinServiceName(root, file)
 		modulePath := ""
+		callerServiceKey := ""
 		if moduleRoot := findKotlinModuleRoot(root, file); moduleRoot != "" {
 			modulePath = relativeTo(root, moduleRoot)
+			callerServiceKey = serviceIdentityForModule(root, moduleRoot, caller).Key
 		}
 		iface := strings.TrimSuffix(filepath.Base(file), ".kt")
 		lines := strings.Split(text, "\n")
@@ -195,7 +106,8 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 				conf = 0.65
 			}
 			records = append(records, feignReference{
-				From: caller, ModulePath: modulePath, ClientName: clientName, URL: targetURL,
+				From: caller, CallerServiceKey: callerServiceKey, ModulePath: modulePath,
+				ClientName: clientName, URL: targetURL,
 				Evidence: []domain.Evidence{{
 					Path: rel, Line: i + 1, Symbol: iface, Kind: domain.SourceCodeScan,
 				}},

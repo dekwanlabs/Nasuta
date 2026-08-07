@@ -52,12 +52,18 @@ func scanAndroidServices(root string, dirs []string) []domain.ServiceRecord {
 }
 
 // scanAndroidDependencies finds Retrofit/OkHttp API calls in Android code.
+// Per architecture doc section 6.7: Retrofit's @GET/@POST must enter
+// ClientCallCandidate, not masquerade as server endpoints. Unknown URLs must
+// not be guessed as xxx-service.
 func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, func(name string) bool {
 		return strings.HasSuffix(name, ".kt") || strings.HasSuffix(name, ".java")
 	})
 	var edges []domain.DependencyEdge
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "@GET") && !strings.Contains(text, "@POST") &&
 			!strings.Contains(text, "Retrofit") && !strings.Contains(text, "retrofit") &&
@@ -66,31 +72,48 @@ func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge
 		}
 		rel := relativeTo(root, file)
 		moduleRoot := findKotlinModuleRoot(root, file)
-		caller := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			if id := readAndroidAppID(moduleRoot); id != "" {
-				caller = id
-			}
+		caller := dependencyIdentity(root, file)
+		if moduleRoot != "" && caller.Name == "unknown" {
+			caller.Name = filepath.Base(moduleRoot)
 		}
 
 		// Retrofit interfaces: @GET("api/users") / @POST("api/orders")
-		for _, re := range retroFitPatterns {
-			for _, m := range re.FindAllStringSubmatch(text, -1) {
-				if len(m) >= 2 {
-					target := extractServiceFromPath(m[len(m)-1])
-					if target != "" {
+		// Only match on files that actually import retrofit2.
+		hasRetrofitImport := strings.Contains(text, "retrofit2.http") ||
+			strings.Contains(text, "import retrofit2.")
+
+		if hasRetrofitImport {
+			for _, re := range retroFitPatterns {
+				for _, m := range re.FindAllStringSubmatch(text, -1) {
+					if len(m) >= 2 {
+						path := m[len(m)-1]
+						// Don't guess service names from paths — use the whole path
+						// as a diagnostic target only. If it looks like a URL, extract host.
+						target := ""
+						if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+							target = strings.TrimPrefix(path, "http://")
+							target = strings.TrimPrefix(target, "https://")
+							target, _, _ = strings.Cut(target, "/")
+						}
+						if target == "" {
+							continue
+						}
+						if strings.Contains(target, "localhost") || strings.Contains(target, "127.0.0.1") {
+							continue
+						}
 						edges = append(edges, domain.DependencyEdge{
-							From:       caller,
-							To:         target,
-							Type:       domain.EdgeHTTP,
-							Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-							Confidence: 0.65,
+							CallerServiceKey: caller.Key,
+							From:             caller.Name,
+							To:               target,
+							Type:             domain.EdgeHTTP,
+							Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+							Confidence:       0.65,
 						})
 					}
 				}
 			}
 		}
-		// OkHttp direct URLs: "https://api.example.com/..." / BASE_URL = "https://..."
+		// OkHttp direct URLs
 		for _, m := range androidURLRe.FindAllStringSubmatch(text, -1) {
 			if len(m) > 1 {
 				target := strings.TrimPrefix(m[1], "http://")
@@ -98,11 +121,12 @@ func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge
 				target, _, _ = strings.Cut(target, "/")
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
 					edges = append(edges, domain.DependencyEdge{
-						From:       caller,
-						To:         target,
-						Type:       domain.EdgeHTTP,
-						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence: 0.5,
+						CallerServiceKey: caller.Key,
+						From:             caller.Name,
+						To:               target,
+						Type:             domain.EdgeHTTP,
+						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+						Confidence:       0.5,
 					})
 				}
 			}
@@ -159,36 +183,6 @@ func readAndroidLang(dir string) string {
 var retroFitPatterns = []*regexp.Regexp{
 	// Retrofit: @GET("api/users"), @POST("api/orders")
 	regexp.MustCompile(`@(?:GET|POST|PUT|DELETE|PATCH|HEAD)\s*\(\s*"([^"]+)"\s*\)`),
-	// Retrofit with base path placeholder: @GET("{userId}/profile")
-	regexp.MustCompile(`@(?:GET|POST|PUT|DELETE|PATCH)\s*\(\s*"\{?(\w+)\}?[^"]*"\s*\)`),
 }
 
 var androidURLRe = regexp.MustCompile(`https?://([^\s"'\)]+)`)
-
-// extractServiceFromPath tries to extract a service name from an API path.
-// e.g. "/api/users" → "users-service", "/user/v1/profile" → "user-service"
-func extractServiceFromPath(path string) string {
-	path = strings.TrimPrefix(path, "/")
-	parts := strings.Split(path, "/")
-	// Skip common prefixes: api, v1, v2, rest
-	idx := 0
-	for idx < len(parts) && isCommonPrefix(parts[idx]) {
-		idx++
-	}
-	if idx < len(parts) {
-		return parts[idx] + "-service"
-	}
-	if len(parts) > 0 {
-		return parts[0] + "-service"
-	}
-	return ""
-}
-
-func isCommonPrefix(s string) bool {
-	s = strings.ToLower(s)
-	switch s {
-	case "api", "rest", "v1", "v2", "v3", "v4", "v5", "graphql", "public", "internal":
-		return true
-	}
-	return strings.HasPrefix(s, "v") && len(s) == 2 // v1..v9
-}

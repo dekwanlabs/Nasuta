@@ -60,7 +60,8 @@ func expandFeignConsumers(
 		}
 		for _, application := range applications {
 			expanded := ref
-			expanded.From = application
+			expanded.From = application.Name
+			expanded.CallerServiceKey = application.Key
 			out = append(out, expanded)
 		}
 	}
@@ -71,15 +72,15 @@ func mavenRuntimeConsumers(
 	root string,
 	dirs []string,
 	services []domain.ServiceRecord,
-) map[string][]string {
+) map[string][]serviceIdentity {
 	modules := scanMavenModules(root, dirs)
 	if len(modules) == 0 {
 		return nil
 	}
-	runtimeByPath := make(map[string]string)
+	runtimeByPath := make(map[string]serviceIdentity)
 	for _, service := range services {
 		if service.Runtime == "spring-boot" {
-			runtimeByPath[canonicalPath(service.ModulePath)] = service.ServiceName
+			runtimeByPath[canonicalPath(service.ModulePath)] = serviceIdentityFromRecord(service)
 		}
 	}
 
@@ -90,10 +91,10 @@ func mavenRuntimeConsumers(
 		byArtifact[module.coordinate.artifactID] = append(byArtifact[module.coordinate.artifactID], i)
 	}
 
-	consumerSets := make(map[string]map[string]struct{})
+	consumerSets := make(map[string]map[serviceIdentity]struct{})
 	for i, module := range modules {
 		application := runtimeByPath[module.path]
-		if application == "" {
+		if application.Name == "" {
 			continue
 		}
 		visited := map[int]struct{}{i: {}}
@@ -116,7 +117,7 @@ func mavenRuntimeConsumers(
 			dependencyModule := modules[current]
 			applications := consumerSets[dependencyModule.path]
 			if applications == nil {
-				applications = make(map[string]struct{})
+				applications = make(map[serviceIdentity]struct{})
 				consumerSets[dependencyModule.path] = applications
 			}
 			applications[application] = struct{}{}
@@ -131,13 +132,21 @@ func mavenRuntimeConsumers(
 		}
 	}
 
-	consumers := make(map[string][]string, len(consumerSets))
+	consumers := make(map[string][]serviceIdentity, len(consumerSets))
 	for modulePath, applications := range consumerSets {
-		ordered := make([]string, 0, len(applications))
+		ordered := make([]serviceIdentity, 0, len(applications))
 		for application := range applications {
 			ordered = append(ordered, application)
 		}
-		sort.Strings(ordered)
+		sort.Slice(ordered, func(i, j int) bool {
+			if ordered[i].Name != ordered[j].Name {
+				return ordered[i].Name < ordered[j].Name
+			}
+			if ordered[i].Repo != ordered[j].Repo {
+				return ordered[i].Repo < ordered[j].Repo
+			}
+			return ordered[i].ModulePath < ordered[j].ModulePath
+		})
 		consumers[modulePath] = ordered
 	}
 	return consumers

@@ -83,6 +83,9 @@ func scanIOSDependencies(root string, dirs []string) []domain.DependencyEdge {
 	})
 	var edges []domain.DependencyEdge
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "URLSession") && !strings.Contains(text, "Alamofire") &&
 			!strings.Contains(text, "AF.request") && !strings.Contains(text, "Moya") &&
@@ -91,11 +94,9 @@ func scanIOSDependencies(root string, dirs []string) []domain.DependencyEdge {
 		}
 		rel := relativeTo(root, file)
 		moduleRoot := findIOSModuleRoot(root, file)
-		caller := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			if name := readIOSAppName(moduleRoot); name != "" {
-				caller = name
-			}
+		caller := dependencyIdentity(root, file)
+		if moduleRoot != "" && caller.Name == "unknown" {
+			caller.Name = filepath.Base(moduleRoot)
 		}
 
 		// Alamofire: AF.request("https://api.example.com/path")
@@ -104,11 +105,12 @@ func scanIOSDependencies(root string, dirs []string) []domain.DependencyEdge {
 				target := extractIOSHost(m[1])
 				if target != "" {
 					edges = append(edges, domain.DependencyEdge{
-						From:       caller,
-						To:         target,
-						Type:       domain.EdgeHTTP,
-						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence: 0.6,
+						CallerServiceKey: caller.Key,
+						From:             caller.Name,
+						To:               target,
+						Type:             domain.EdgeHTTP,
+						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+						Confidence:       0.6,
 					})
 				}
 			}
@@ -120,11 +122,12 @@ func scanIOSDependencies(root string, dirs []string) []domain.DependencyEdge {
 				target := extractIOSHost(m[1])
 				if target != "" {
 					edges = append(edges, domain.DependencyEdge{
-						From:       caller,
-						To:         target,
-						Type:       domain.EdgeHTTP,
-						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence: 0.5,
+						CallerServiceKey: caller.Key,
+						From:             caller.Name,
+						To:               target,
+						Type:             domain.EdgeHTTP,
+						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+						Confidence:       0.5,
 					})
 				}
 			}

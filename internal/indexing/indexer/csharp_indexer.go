@@ -22,14 +22,17 @@ func scanCSharpServices(root string, dirs []string) []domain.ServiceRecord {
 		serviceName := readCSharpProjectName(moduleRoot)
 		rel := relativeTo(root, project)
 		records = append(records, domain.ServiceRecord{
-			ServiceName: serviceName, Repo: topSegment(rel), Layer: "server",
-			Scope: inferLayer(serviceName, modulePath), ModulePath: modulePath,
-			Language: "csharp", Tags: []string{"code-scan"}, Docs: []string{},
+			ServiceName: serviceName, Repo: topSegment(rel),
+			ModulePath: modulePath,
+			Language:   "csharp", Tags: []string{"code-scan"}, Docs: []string{},
 			SourceOfTruth: []string{rel}, Confidence: 0.7,
 		})
 		byModule[canonicalPath(modulePath)] = len(records) - 1
 	}
 	for _, file := range walkFiles(root, dirs, hasSuffix(".cs")) {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "WebApplication") &&
 			!strings.Contains(text, "CreateHostBuilder") &&
@@ -57,6 +60,9 @@ func scanCSharpEndpoints(root string, dirs []string) []domain.EndpointRecord {
 	files := walkFiles(root, dirs, hasSuffix(".cs"))
 	var records []domain.EndpointRecord
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		base := strings.ToLower(filepath.Base(file))
 		if strings.Contains(base, ".designer.") || strings.Contains(base, ".generated.") || strings.Contains(base, ".g.cs") {
 			continue
@@ -124,26 +130,26 @@ func scanCSharpRefits(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, hasSuffix(".cs"))
 	var records []domain.DependencyEdge
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		// Refit interfaces use [Get("/path")], [Post("/path")] on interface methods
 		if !strings.Contains(text, "interface") || !strings.Contains(text, "[Get") && !strings.Contains(text, "[Post") {
 			continue
 		}
 		rel := relativeTo(root, file)
-		moduleRoot := findCSharpModuleRoot(root, file)
-		caller := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			caller = readCSharpProjectName(moduleRoot)
-		}
+		caller := dependencyIdentity(root, file)
 		// Extract base URL from [BaseAddress("https://api.example.com")] or interface name
 		target := extractRefitTarget(text)
 		if target == "" {
 			target = strings.TrimSuffix(filepath.Base(file), ".cs")
 		}
 		records = append(records, domain.DependencyEdge{
-			From: caller,
-			To:   target,
-			Type: domain.EdgeHTTP,
+			CallerServiceKey: caller.Key,
+			From:             caller.Name,
+			To:               target,
+			Type:             domain.EdgeHTTP,
 			Evidence: []domain.Evidence{{
 				Path: rel, Symbol: strings.TrimSuffix(filepath.Base(file), ".cs"), Kind: domain.SourceCodeScan,
 			}},
@@ -158,16 +164,15 @@ func scanCSharpDependencies(root string, dirs []string) []domain.DependencyEdge 
 	files := walkFiles(root, dirs, hasSuffix(".cs"))
 	var edges []domain.DependencyEdge
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "HttpClient") && !strings.Contains(text, "RestClient") {
 			continue
 		}
 		rel := relativeTo(root, file)
-		moduleRoot := findCSharpModuleRoot(root, file)
-		caller := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			caller = readCSharpProjectName(moduleRoot)
-		}
+		caller := dependencyIdentity(root, file)
 		for _, m := range csharpHTTPCallRe.FindAllStringSubmatch(text, -1) {
 			if len(m) > 1 {
 				target := strings.TrimPrefix(m[1], "http://")
@@ -175,11 +180,12 @@ func scanCSharpDependencies(root string, dirs []string) []domain.DependencyEdge 
 				target, _, _ = strings.Cut(target, "/")
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
 					edges = append(edges, domain.DependencyEdge{
-						From:       caller,
-						To:         target,
-						Type:       domain.EdgeHTTP,
-						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence: 0.5,
+						CallerServiceKey: caller.Key,
+						From:             caller.Name,
+						To:               target,
+						Type:             domain.EdgeHTTP,
+						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+						Confidence:       0.5,
 					})
 				}
 			}

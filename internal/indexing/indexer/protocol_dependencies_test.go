@@ -33,6 +33,9 @@ grpc.insecure_channel("events:50051")
 	}
 	for _, edge := range edges {
 		delete(want, edge.From+"\x00"+edge.To+"\x00"+string(edge.Type))
+		if edge.CallerServiceKey == "" {
+			t.Fatalf("protocol edge lost caller ownership: %+v", edge)
+		}
 		if len(edge.Evidence) != 1 || edge.Evidence[0].Line <= 0 {
 			t.Fatalf("edge has no precise evidence: %+v", edge)
 		}
@@ -56,5 +59,25 @@ func TestKafkaScannerJoinsProducerToConsumer(t *testing.T) {
 	edge := edges[0]
 	if edge.From != "orders" || edge.To != "billing" || edge.Type != domain.EdgeKafka || len(edge.Evidence) != 2 {
 		t.Fatalf("joined kafka edge=%+v", edge)
+	}
+	if edge.CallerServiceKey == "" {
+		t.Fatalf("Kafka edge lost producer ownership: %+v", edge)
+	}
+}
+
+func TestProtocolDependencyScannersIgnoreTestSourcesAndFeign(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "repos/team/orders/pom.xml", `<project><artifactId>orders</artifactId></project>`)
+	writeFile(t, root, "repos/team/orders/src/test/java/com/example/ClientTest.java", `
+class ClientTest { void call() { restTemplate.getForObject("http://test-only/api", String.class); } }
+`)
+	writeFile(t, root, "repos/team/orders/src/main/java/com/example/RemoteClient.java", `
+@FeignClient(url = "http://payments/api")
+interface RemoteClient {}
+`)
+
+	edges := scanJVMAndPythonDependencies(root, mustDiscoverScanDirs(t, root))
+	if len(edges) != 0 {
+		t.Fatalf("generic protocol scanner produced test or Feign edges: %+v", edges)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
@@ -19,6 +21,10 @@ func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 	var records []domain.ServiceRecord
 	seen := make(map[string]struct{}, len(files))
 	for _, file := range files {
+		rel := relativeTo(root, file)
+		if isTestSourcePath(rel) {
+			continue
+		}
 		moduleRoot := filepath.Dir(file)
 		if filepath.Base(file) == "main.py" {
 			if found := findPythonModuleRoot(root, file); found != "" {
@@ -31,12 +37,10 @@ func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 			continue
 		}
 		seen[key] = struct{}{}
-		rel := relativeTo(root, file)
 		serviceName := readPythonAppName(moduleRoot)
 		if serviceName == "" {
 			serviceName = readPythonProjectName(moduleRoot)
 		}
-		layer := inferLayer(serviceName, modulePath)
 		runtime, confidence := "", 0.7
 		entrypoints := []domain.Evidence{}
 		sourceOfTruth := []string{rel}
@@ -50,12 +54,12 @@ func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
-			Layer:         "server",
-			Scope:         layer,
+			Layer:         "",
+			Scope:         "",
 			ModulePath:    modulePath,
 			Language:      "python",
 			Runtime:       runtime,
-			Tags:          []string{"code-scan", "ai"},
+			Tags:          []string{"code-scan"},
 			Docs:          []string{},
 			SourceOfTruth: sourceOfTruth,
 			Entrypoints:   entrypoints,
@@ -66,129 +70,776 @@ func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 	return records
 }
 
-type pythonRouteDecorator struct {
+// ---- Python language frontend ----
+
+type pythonSource struct {
+	imports     map[string]string
+	decorators  []pythonDecoratorInfo
+	functions   []pythonFunctionInfo
+	assignments []pythonAssignmentInfo
+}
+
+type pythonDecoratorInfo struct {
 	receiver string
-	method   string
+	name     string
 	args     string
-	handler  string
 	line     int
 	end      int
 }
 
-var (
-	pyRouteDecoratorRe = regexp.MustCompile(`(?m)^[ \t]*@([A-Za-z_]\w*)\.(get|post|put|delete|patch|head|options)\s*\(`)
-	pyRouterAssignRe   = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_]\w*)\s*=\s*APIRouter\s*\(`)
-	pyPrefixArgRe      = regexp.MustCompile(`(?s)\bprefix\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	pyPathArgRe        = regexp.MustCompile(`(?s)\bpath\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	pyDefRe            = regexp.MustCompile(`(?m)^[ \t]*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(`)
-)
+type pythonFunctionInfo struct {
+	name string
+	line int
+}
 
-// scanPythonEndpoints finds FastAPI router routes.
-func scanPythonEndpoints(root string, dirs []string) []domain.EndpointRecord {
-	files := walkFiles(root, dirs, hasSuffix(".py"))
-	var records []domain.EndpointRecord
-	for _, file := range files {
-		text := readFile(file)
-		if !strings.Contains(text, "APIRouter") && !strings.Contains(text, "@router.") &&
-			!strings.Contains(text, "@app.") {
+type pythonAssignmentInfo struct {
+	target string
+	value  string
+	args   string
+	line   int
+}
+
+func parsePythonEndpointSource(root, file, text string) (endpointSource, bool) {
+	source := parsePythonSource(text)
+	moduleRoot := findPythonModuleRoot(root, file)
+	modulePath := ""
+	if moduleRoot != "" {
+		modulePath = relativeTo(root, moduleRoot)
+	}
+	serviceName := readPythonAppName(moduleRoot)
+	if serviceName == "" {
+		serviceName = readPythonProjectName(moduleRoot)
+	}
+	return endpointSource{
+		language:    "python",
+		root:        root,
+		file:        file,
+		rel:         relativeTo(root, file),
+		repo:        topSegment(relativeTo(root, file)),
+		moduleRoot:  moduleRoot,
+		modulePath:  modulePath,
+		serviceName: serviceName,
+		text:        text,
+		syntax:      source,
+	}, true
+}
+
+// stripPythonCommentsAndStrings replaces Python comments and string literals
+// with whitespace, preserving line counts and byte offsets. We use a marker
+// approach: strings and comments are replaced but their original positions are
+// preserved so that structural analysis (finding @, ., def, etc.) does not
+// mistake code-like patterns inside strings for real code.
+
+// parsePythonSource extracts imports, decorators, functions, and assignments
+// from Python source text.
+func parsePythonSource(original string) pythonSource {
+	stripped := stripPythonCommentsAndStrings(original)
+	imports := extractPythonImports(original)
+	decorators := extractPythonDecorators(original, stripped)
+	functions := extractPythonFunctions(original)
+	assignments := extractPythonAssignments(original)
+	return pythonSource{
+		imports:     imports,
+		decorators:  decorators,
+		functions:   functions,
+		assignments: assignments,
+	}
+}
+func stripPythonCommentsAndStrings(text string) string {
+	out := make([]byte, len(text))
+	copy(out, text)
+	i := 0
+	for i < len(out) {
+		switch {
+		case strings.HasPrefix(text[i:], "#"):
+			for i < len(out) && out[i] != '\n' {
+				out[i] = ' '
+				i++
+			}
+		case strings.HasPrefix(text[i:], `"""`):
+			i += 3
+			for i+2 < len(out) {
+				if text[i] == '"' && text[i+1] == '"' && text[i+2] == '"' {
+					out[i], out[i+1], out[i+2] = ' ', ' ', ' '
+					i += 3
+					break
+				}
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+				i++
+			}
+		case strings.HasPrefix(text[i:], `'''`):
+			i += 3
+			for i+2 < len(out) {
+				if text[i] == '\'' && text[i+1] == '\'' && text[i+2] == '\'' {
+					out[i], out[i+1], out[i+2] = ' ', ' ', ' '
+					i += 3
+					break
+				}
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+				i++
+			}
+		case out[i] == '"':
+			out[i] = ' '
+			i++
+			for i < len(out) {
+				if out[i] == '\\' {
+					out[i] = ' '
+					i++
+					if i < len(out) {
+						out[i] = ' '
+						i++
+					}
+					continue
+				}
+				if out[i] == '"' {
+					out[i] = ' '
+					i++
+					break
+				}
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+				i++
+			}
+		case out[i] == '\'':
+			out[i] = ' '
+			i++
+			for i < len(out) {
+				if out[i] == '\\' {
+					out[i] = ' '
+					i++
+					if i < len(out) {
+						out[i] = ' '
+						i++
+					}
+					continue
+				}
+				if out[i] == '\'' {
+					out[i] = ' '
+					i++
+					break
+				}
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+				i++
+			}
+		default:
+			i++
+		}
+	}
+	return string(out)
+}
+
+// extractPythonImports parses import and from-import statements from original.
+func extractPythonImports(original string) map[string]string {
+	imports := make(map[string]string)
+	lines := strings.Split(original, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "import ") && !strings.HasPrefix(trimmed, "from ") {
 			continue
 		}
-		rel := relativeTo(root, file)
-		moduleRoot := findPythonModuleRoot(root, file)
-		serviceName := readPythonAppName(moduleRoot)
-		if serviceName == "" {
-			serviceName = readPythonProjectName(moduleRoot)
+		if trimmed == "import" || trimmed == "from" {
+			// Import continuing on next line
+			if i+1 < len(lines) {
+				cont := strings.TrimSpace(lines[i+1])
+				if strings.HasPrefix(cont, "import ") {
+					for _, part := range strings.Split(cont[7:], ",") {
+						part = strings.TrimSpace(part)
+						if module, alias, ok := strings.Cut(part, " as "); ok {
+							imports[strings.TrimSpace(alias)] = strings.TrimSpace(module)
+						} else if part != "" {
+							imports[part] = part
+						}
+					}
+				}
+			}
+			continue
 		}
-		routerPrefixes := pythonRouterPrefixes(text)
-		handler := strings.TrimSuffix(filepath.Base(file), ".py")
-		for _, route := range scanPythonRouteDecorators(text) {
-			records = append(records, domain.EndpointRecord{
-				ServiceName:   serviceName,
-				Repo:          topSegment(rel),
-				Method:        strings.ToUpper(route.method),
-				Path:          joinPaths(routerPrefixes[route.receiver], pythonRoutePath(route.args)),
-				Handler:       handler,
-				HandlerMethod: route.handler,
-				File:          rel,
-				Line:          route.line,
-				Source:        domain.SourceCodeScan,
-				Confidence:    0.85,
+		if strings.HasPrefix(trimmed, "from ") {
+			rest := trimmed[5:]
+			if idx := strings.Index(rest, " import "); idx >= 0 {
+				module := strings.TrimSpace(rest[:idx])
+				names := strings.TrimSpace(rest[idx+8:])
+				if names == "(" {
+					// Parenthesized import — scan forward
+					for j := i + 1; j < len(lines); j++ {
+						names += " " + strings.TrimSpace(lines[j])
+						if strings.Contains(lines[j], ")") {
+							break
+						}
+					}
+					if idx2 := strings.Index(names, ")"); idx2 >= 0 {
+						names = names[:idx2]
+					}
+				}
+				for _, part := range strings.Split(names, ",") {
+					part = strings.TrimSpace(part)
+					if name, alias, ok := strings.Cut(part, " as "); ok {
+						imports[strings.TrimSpace(alias)] = module + "." + strings.TrimSpace(name)
+					} else if part != "" {
+						imports[part] = module + "." + part
+					}
+				}
+			}
+		} else {
+			for _, part := range strings.Split(trimmed[7:], ",") {
+				part = strings.TrimSpace(part)
+				if module, alias, ok := strings.Cut(part, " as "); ok {
+					imports[strings.TrimSpace(alias)] = strings.TrimSpace(module)
+				} else if part != "" {
+					imports[part] = part
+				}
+			}
+		}
+	}
+	return imports
+}
+
+// extractPythonDecorators finds @receiver.name(args) decorators.
+// It uses stripped text for structural navigation (finding @, ., identifiers) but
+// switches to original text when parsing the argument list so that string literals
+// remain intact.
+func extractPythonDecorators(original, stripped string) []pythonDecoratorInfo {
+	var decorators []pythonDecoratorInfo
+	i := 0
+	for i < len(stripped) {
+		if stripped[i] == '\n' {
+			i++
+			continue
+		}
+		if stripped[i] != '@' {
+			i++
+			continue
+		}
+		// Read receiver: @receiver.name
+		j := i + 1
+		for j < len(stripped) && isPythonIdentByte(stripped[j]) {
+			j++
+		}
+		receiver := stripped[i+1 : j]
+		if receiver == "" {
+			i = j
+			continue
+		}
+		name := ""
+		if j < len(stripped) && stripped[j] == '.' {
+			k := j + 1
+			for k < len(stripped) && isPythonIdentByte(stripped[k]) {
+				k++
+			}
+			if k > j+1 {
+				name = stripped[j+1 : k]
+				j = k
+			}
+		}
+		if name == "" {
+			i = j
+			continue
+		}
+		// Skip whitespace to find '('
+		for j < len(stripped) && (stripped[j] == ' ' || stripped[j] == '\t') {
+			j++
+		}
+		if j >= len(stripped) || stripped[j] != '(' {
+			i = j
+			continue
+		}
+		// Parse arguments from the original text so string literals are preserved.
+		args, end, ok := pythonCallArgs(original, j)
+		if !ok {
+			i = j + 1
+			continue
+		}
+		lineNo := strings.Count(stripped[:j+1], "\n") + 1
+		decorators = append(decorators, pythonDecoratorInfo{
+			receiver: receiver,
+			name:     name,
+			args:     args,
+			line:     lineNo,
+			end:      end,
+		})
+		i = end
+	}
+	return decorators
+}
+
+// extractPythonFunctions finds def declarations in original source text.
+func extractPythonFunctions(original string) []pythonFunctionInfo {
+	var functions []pythonFunctionInfo
+	lines := strings.Split(original, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "def ") {
+			if strings.HasPrefix(trimmed, "async ") && strings.Contains(trimmed, " def ") {
+				trimmed = trimmed[strings.Index(trimmed, " def ")+1:]
+			} else {
+				continue
+			}
+		}
+		rest := strings.TrimPrefix(trimmed, "def ")
+		if idx := strings.IndexByte(rest, '('); idx > 0 {
+			functions = append(functions, pythonFunctionInfo{
+				name: strings.TrimSpace(rest[:idx]),
+				line: i + 1,
 			})
 		}
 	}
-	return records
+	return functions
 }
 
-func scanPythonRouteDecorators(text string) []pythonRouteDecorator {
-	matches := pyRouteDecoratorRe.FindAllStringSubmatchIndex(text, -1)
-	routes := make([]pythonRouteDecorator, 0, len(matches))
-	line, lineStart, consumedUntil := 1, 0, 0
-	for _, match := range matches {
-		start := match[0]
-		line += strings.Count(text[lineStart:start], "\n")
-		lineStart = start
-		if start < consumedUntil {
+// extractPythonAssignments finds name = Constructor(args) patterns in original
+// source. It handles multi-line RHS by scanning forward for the full argument list.
+func extractPythonAssignments(original string) []pythonAssignmentInfo {
+	var assignments []pythonAssignmentInfo
+	lines := strings.Split(original, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "=") || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		args, end, ok := pythonCallArgs(text, match[1]-1)
-		if !ok {
+		if strings.HasPrefix(trimmed, "@") || strings.HasPrefix(trimmed, "def ") ||
+			strings.HasPrefix(trimmed, "class ") || strings.HasPrefix(trimmed, "import ") ||
+			strings.HasPrefix(trimmed, "from ") {
 			continue
 		}
-		consumedUntil = end
-		routes = append(routes, pythonRouteDecorator{
-			receiver: text[match[2]:match[3]],
-			method:   text[match[4]:match[5]],
-			args:     args,
-			line:     line,
-			end:      end,
+		eqIdx := strings.Index(trimmed, "=")
+		target := strings.TrimSpace(trimmed[:eqIdx])
+		rhs := strings.TrimSpace(trimmed[eqIdx+1:])
+		if !pythonConstructorExpression(rhs) {
+			continue
+		}
+		if !isPythonIdent(target) {
+			continue
+		}
+		// Handle multi-line RHS: scan forward if rhs ends with "(" but has
+		// no matching ")" on the same line.
+		var args string
+		if idx := strings.IndexByte(rhs, '('); idx >= 0 {
+			// Count current line paren depth
+			depth := 0
+			for _, ch := range rhs[idx:] {
+				switch ch {
+				case '(':
+					depth++
+				case ')':
+					depth--
+				}
+			}
+			if depth == 0 {
+				args = rhs[idx+1 : len(rhs)-1] // already closed
+			} else {
+				// Multi-line — the arg text starts from rhs[idx+1:]
+				argText := rhs[idx+1:]
+				if !strings.HasSuffix(argText, "\n") {
+					argText += "\n"
+				}
+				for j := i + 1; j < len(lines); j++ {
+					next := lines[j]
+					for _, ch := range next {
+						switch ch {
+						case '(':
+							depth++
+						case ')':
+							depth--
+						}
+					}
+					if depth == 0 {
+						// Last line may have trailing ')'
+						if last := strings.LastIndexByte(next, ')'); last >= 0 {
+							argText += next[:last]
+						} else {
+							argText += next
+						}
+						break
+					}
+					argText += next + "\n"
+				}
+				if depth == 0 {
+					args = strings.TrimSpace(argText)
+				}
+			}
+		}
+		assignments = append(assignments, pythonAssignmentInfo{
+			target: target,
+			value:  rhs,
+			args:   args,
+			line:   i + 1,
 		})
 	}
-
-	definitions := pyDefRe.FindAllStringSubmatchIndex(text, -1)
-	definitionIndex := 0
-	for i := range routes {
-		for definitionIndex < len(definitions) && definitions[definitionIndex][0] < routes[i].end {
-			definitionIndex++
-		}
-		if definitionIndex < len(definitions) {
-			match := definitions[definitionIndex]
-			routes[i].handler = text[match[2]:match[3]]
-		}
-	}
-	return routes
+	return assignments
 }
 
-func pythonRouterPrefixes(text string) map[string]string {
-	matches := pyRouterAssignRe.FindAllStringSubmatchIndex(text, -1)
-	prefixes := make(map[string]string, len(matches))
-	consumedUntil := 0
-	for _, match := range matches {
-		if match[0] < consumedUntil {
+func pythonConstructorExpression(rhs string) bool {
+	rhs = strings.TrimSpace(rhs)
+	open := strings.IndexByte(rhs, '(')
+	if open <= 0 {
+		return false
+	}
+	constructor := strings.TrimSpace(rhs[:open])
+	if dot := strings.LastIndexByte(constructor, '.'); dot >= 0 {
+		constructor = strings.TrimSpace(constructor[dot+1:])
+	}
+	if constructor == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(constructor)
+	return unicode.IsUpper(r)
+}
+
+func isPythonIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	first, size := utf8.DecodeRuneInString(s)
+	if !isPythonIdentStart(first) {
+		return false
+	}
+	for i := size; i < len(s); {
+		r, sz := utf8.DecodeRuneInString(s[i:])
+		if !isPythonIdentPart(r) {
+			return false
+		}
+		i += sz
+	}
+	return true
+}
+
+func isPythonIdentByte(ch byte) bool {
+	return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+}
+
+func isPythonIdentStart(r rune) bool {
+	return r == '_' || unicode.IsLetter(r)
+}
+
+func isPythonIdentPart(r rune) bool {
+	return isPythonIdentStart(r) || unicode.IsDigit(r)
+}
+
+// pythonImported checks whether source imports the given module (top-level or
+// submodule). Aliases are resolved so "from fastapi import APIRouter" makes
+// "fastapi" visible through its alias.
+func pythonImported(source pythonSource, module string) bool {
+	for _, qualified := range source.imports {
+		if qualified == module || strings.HasPrefix(qualified, module+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// pythonReceiverPrefixes tracks only receivers constructed by the adapter's
+// framework, preventing unrelated decorators from becoming endpoints.
+func pythonReceiverPrefixes(source pythonSource, framework string) map[string]valueExpr {
+	prefixes := make(map[string]valueExpr, len(source.assignments))
+	for _, assignment := range source.assignments {
+		constructor, _, _ := strings.Cut(assignment.value, "(")
+		qualified := pythonImportedName(source, strings.TrimSpace(constructor))
+		if !isPythonRouterConstructor(qualified, framework) {
 			continue
 		}
-		args, end, ok := pythonCallArgs(text, match[1]-1)
-		if !ok {
-			continue
+		prefixName := "prefix"
+		if qualified == "flask.Blueprint" {
+			prefixName = "url_prefix"
 		}
-		consumedUntil = end
-		if prefix, ok := pythonKeywordString(args, pyPrefixArgRe); ok {
-			prefixes[text[match[2]:match[3]]] = prefix
+		if prefix, found := pythonKeywordValueExpr(assignment.args, prefixName); found {
+			prefixes[assignment.target] = prefix
+		} else {
+			prefixes[assignment.target] = literalValue("")
 		}
 	}
 	return prefixes
 }
 
-func pythonRoutePath(args string) string {
-	if path, ok := pythonKeywordString(args, pyPathArgRe); ok {
-		return path
+func pythonImportedName(source pythonSource, name string) string {
+	if qualified, ok := source.imports[name]; ok {
+		return qualified
 	}
-	trimmed := strings.TrimSpace(args)
-	if trimmed == "" || (trimmed[0] != '"' && trimmed[0] != '\'') {
+	module, member, found := strings.Cut(name, ".")
+	if !found {
 		return ""
 	}
-	return extractFirstString(trimmed)
+	qualified, ok := source.imports[module]
+	if !ok {
+		return ""
+	}
+	return qualified + "." + member
 }
 
+func isPythonRouterConstructor(name, framework string) bool {
+	switch framework {
+	case "fastapi":
+		return name == "fastapi.FastAPI" || name == "fastapi.APIRouter"
+	case "flask":
+		return name == "flask.Flask" || name == "flask.Blueprint"
+	}
+	return false
+}
+
+// pythonHandlerAfter returns the function name of the first def after the
+// decorator at the given line. Returns "" if not found.
+func pythonHandlerAfter(source pythonSource, decoratorLine int) string {
+	best := ""
+	bestDist := 0
+	for _, fn := range source.functions {
+		if fn.line > decoratorLine {
+			dist := fn.line - decoratorLine
+			if best == "" || dist < bestDist {
+				best = fn.name
+				bestDist = dist
+			}
+		}
+	}
+	return best
+}
+
+// ---- FastAPI adapter ----
+
+var pythonFastAPIAdapter = endpointAdapter{
+	language:  "python",
+	framework: "fastapi",
+	applies: func(source endpointSource) bool {
+		syntax, ok := source.syntax.(pythonSource)
+		return ok && pythonImported(syntax, "fastapi")
+	},
+	scan: scanFastAPI,
+}
+
+func scanFastAPI(source endpointSource) []endpointCandidate {
+	syntax, ok := source.syntax.(pythonSource)
+	if !ok {
+		return nil
+	}
+	prefixes := pythonReceiverPrefixes(syntax, "fastapi")
+	methodDecorators := map[string]string{
+		"get": "GET", "post": "POST", "put": "PUT", "delete": "DELETE",
+		"patch": "PATCH", "head": "HEAD", "options": "OPTIONS",
+	}
+	var candidates []endpointCandidate
+	for _, decorator := range syntax.decorators {
+		method, ok := methodDecorators[decorator.name]
+		if !ok {
+			continue
+		}
+		prefix, knownReceiver := prefixes[decorator.receiver]
+		if !knownReceiver {
+			continue
+		}
+		route := pythonDecoratorPath(decorator.args)
+		handler := pythonHandlerAfter(syntax, decorator.line)
+		candidates = append(candidates, sourceEndpointCandidate(
+			source, "fastapi",
+			[]valueExpr{literalValue(method)},
+			[]valueExpr{joinPathValues(prefix, route)},
+			strings.TrimSuffix(filepath.Base(source.rel), ".py"), handler,
+			decorator.line, 0.85,
+		))
+	}
+	return candidates
+}
+
+// pythonDecoratorPath extracts the path value from a decorator's arguments.
+// It handles positional strings, path= keyword args, empty strings, and
+// commas separated by newlines.
+func pythonDecoratorPath(args string) valueExpr {
+	// Split into positional/keyword arguments at depth 0
+	parts := splitPythonArgs(args)
+	if len(parts) == 0 {
+		return literalValue("")
+	}
+	first := strings.TrimSpace(parts[0])
+	// If the first arg is a keyword arg (without string content), try path= or
+	// return unresolved.
+	if isPythonKeyword(first) {
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if name, val, ok := strings.Cut(part, "="); ok && strings.TrimSpace(name) == "path" {
+				return pythonStringValue(val)
+			}
+		}
+		return unresolvedValue(args)
+	}
+	for _, part := range parts[1:] {
+		if name, val, ok := strings.Cut(strings.TrimSpace(part), "="); ok &&
+			strings.TrimSpace(name) == "path" {
+			return pythonStringValue(val)
+		}
+	}
+	// Positional: extract the string value (empty string "" is valid).
+	return pythonStringValue(first)
+}
+
+func pythonKeywordValueExpr(args, name string) (valueExpr, bool) {
+	for _, part := range splitPythonArgs(args) {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && strings.TrimSpace(key) == name {
+			return pythonStringValue(value), true
+		}
+	}
+	return valueExpr{}, false
+}
+
+func pythonStringValue(value string) valueExpr {
+	value = strings.TrimSpace(value)
+	if literal, ok := extractPythonStringLiteral(value); ok {
+		return literalValue(literal)
+	}
+	return unresolvedValue(value)
+}
+
+// splitPythonArgs splits a comma-separated argument list respecting nesting
+// depth (parentheses, brackets, braces) and string boundaries.
+func splitPythonArgs(s string) []string {
+	var parts []string
+	depth := 0
+	inString := false
+	var quote byte
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == quote {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			inString = true
+			quote = c
+		case '(', '{', '[':
+			depth++
+		case ')', '}', ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	if start < len(s) {
+		parts = append(parts, s[start:])
+	}
+	return parts
+}
+
+// isPythonKeyword returns true when s looks like "name=value" (no quoted string
+// in the name).
+func isPythonKeyword(s string) bool {
+	if idx := strings.IndexByte(s, '='); idx > 0 {
+		// Check there's no string marker before the '='
+		return !strings.ContainsAny(s[:idx], "\"'")
+	}
+	return false
+}
+
+// extractPythonStringLiteral extracts the value from a quoted Python string.
+func extractPythonStringLiteral(s string) (string, bool) {
+	if len(s) < 2 {
+		return "", false
+	}
+	quote := s[0]
+	if (quote != '"' && quote != '\'') || s[len(s)-1] != quote {
+		return "", false
+	}
+	return s[1 : len(s)-1], true
+}
+
+// ---- Flask adapter ----
+
+var pythonFlaskAdapter = endpointAdapter{
+	language:  "python",
+	framework: "flask",
+	applies: func(source endpointSource) bool {
+		syntax, ok := source.syntax.(pythonSource)
+		return ok && pythonImported(syntax, "flask")
+	},
+	scan: scanFlask,
+}
+
+func scanFlask(source endpointSource) []endpointCandidate {
+	syntax, ok := source.syntax.(pythonSource)
+	if !ok {
+		return nil
+	}
+	prefixes := pythonReceiverPrefixes(syntax, "flask")
+	methodDecorators := map[string]string{
+		"get": "GET", "post": "POST", "put": "PUT", "delete": "DELETE",
+		"patch": "PATCH", "head": "HEAD", "options": "OPTIONS",
+	}
+	var candidates []endpointCandidate
+	for _, decorator := range syntax.decorators {
+		prefix, knownReceiver := prefixes[decorator.receiver]
+		if !knownReceiver {
+			continue
+		}
+		var methods []valueExpr
+		var route valueExpr
+		if decorator.name == "route" {
+			// @app.route(path, methods=["GET", "POST"])
+			route = pythonDecoratorPath(decorator.args)
+			if methodList, ok := pythonKeywordString(decorator.args, pyMethodsArgRe); ok {
+				methods = pythonMethodListValues(methodList)
+			} else if pythonHasKeyword(decorator.args, "methods") {
+				methods = []valueExpr{unresolvedValue(decorator.args)}
+			} else {
+				methods = []valueExpr{literalValue("GET")}
+			}
+		} else if method, ok := methodDecorators[decorator.name]; ok {
+			methods = []valueExpr{literalValue(method)}
+			route = pythonDecoratorPath(decorator.args)
+		} else {
+			continue
+		}
+		handler := pythonHandlerAfter(syntax, decorator.line)
+		candidates = append(candidates, sourceEndpointCandidate(
+			source, "flask",
+			methods,
+			[]valueExpr{joinPathValues(prefix, route)},
+			strings.TrimSuffix(filepath.Base(source.rel), ".py"), handler,
+			decorator.line, 0.8,
+		))
+	}
+	return candidates
+}
+
+// pythonMethodListValues parses a Python list like "GET", "POST" into valueExprs.
+func pythonMethodListValues(s string) []valueExpr {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		s = s[1 : len(s)-1]
+	}
+	var methods []valueExpr
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if v, ok := extractPythonStringLiteral(part); ok {
+			methods = append(methods, literalValue(strings.ToUpper(v)))
+		} else {
+			return []valueExpr{unresolvedValue(s)}
+		}
+	}
+	if len(methods) == 0 {
+		return []valueExpr{literalValue("GET")}
+	}
+	return methods
+}
+
+var pyMethodsArgRe = regexp.MustCompile(`\bmethods\s*=\s*(\[[^\]]*\])`)
+
+// pythonKeywordString extracts a string value from a keyword argument using the
+// given regex. The regex must have two capturing groups for double and single quotes.
 func pythonKeywordString(args string, re *regexp.Regexp) (string, bool) {
 	match := re.FindStringSubmatch(args)
 	if match == nil {
@@ -198,6 +849,11 @@ func pythonKeywordString(args string, re *regexp.Regexp) (string, bool) {
 		return match[1], true
 	}
 	return match[2], true
+}
+
+func pythonHasKeyword(args, name string) bool {
+	_, found := pythonKeywordValueExpr(args, name)
+	return found
 }
 
 // pythonCallArgs keeps decorators intact when their metadata contains nested
@@ -333,7 +989,14 @@ func findPythonEntrypoint(moduleRoot string) string {
 	for _, candidate := range []string{"main.py", "app/main.py", "src/main.py"} {
 		path := filepath.Join(moduleRoot, candidate)
 		text := readFile(path)
-		if strings.Contains(text, "FastAPI(") || strings.Contains(text, "uvicorn.run(") {
+		source := parsePythonSource(text)
+		for _, assignment := range source.assignments {
+			constructor, _, _ := strings.Cut(assignment.value, "(")
+			if pythonImportedName(source, strings.TrimSpace(constructor)) == "fastapi.FastAPI" {
+				return path
+			}
+		}
+		if pythonImported(source, "uvicorn") && strings.Contains(stripPythonCommentsAndStrings(text), "uvicorn.run(") {
 			return path
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -69,9 +70,12 @@ func TestRunStoreAddStepPersistsArtifactBeforeReference(t *testing.T) {
 	}
 	coverageJSON, _ := json.Marshal(step.Coverage)
 	contractJSON, _ := json.Marshal(step.AnswerContract)
+	artifactInsert := regexp.QuoteMeta(`INSERT INTO agent_tool_result_artifacts(
+		id,user_id,session_id,run_id,tool_call_id,content,content_type,sha256,size_bytes,coverage_json,created_at)
+	 SELECT ?,user_id,session_id,id,?,?,?,?,?,?,? FROM agent_runs WHERE id=?`)
 
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO agent_tool_result_artifacts").
+	mock.ExpectExec("^"+artifactInsert+"$").
 		WithArgs(
 			step.ArtifactID, step.ToolCallID, []byte(step.Content), "application/json",
 			step.AuthoritativeSHA256, step.SizeBytes, coverageJSON, sqlmock.AnyArg(), step.RunID,
