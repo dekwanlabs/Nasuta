@@ -45,15 +45,18 @@ type SchemaRef struct {
 }
 
 type ModelPolicy struct {
-	Provider        string         `json:"provider"`
-	Model           string         `json:"model"`
-	MaxOutputTokens int            `json:"max_output_tokens"`
-	Parameters      map[string]any `json:"parameters,omitempty"`
+	Provider                          string         `json:"provider"`
+	Model                             string         `json:"model"`
+	MaxOutputTokens                   int            `json:"max_output_tokens"`
+	InputPriceMicrosPerMillionTokens  int64          `json:"input_price_micros_per_million_tokens"`
+	OutputPriceMicrosPerMillionTokens int64          `json:"output_price_micros_per_million_tokens"`
+	Parameters                        map[string]any `json:"parameters,omitempty"`
 }
 
 type ToolPolicy struct {
-	VisibleToolIDs []string `json:"visible_tool_ids,omitempty"`
-	AllowWrite     bool     `json:"allow_write"`
+	VisibleToolIDs  []string `json:"visible_tool_ids,omitempty"`
+	RestrictVisible bool     `json:"restrict_visible"`
+	AllowWrite      bool     `json:"allow_write"`
 }
 
 type BudgetPolicy struct {
@@ -100,6 +103,10 @@ func Prepare(definition Definition) (Definition, error) {
 	}
 	if prepared.Model.MaxOutputTokens <= 0 {
 		return Definition{}, fmt.Errorf("agent definition %q max output tokens must be positive", prepared.ID)
+	}
+	if prepared.Model.InputPriceMicrosPerMillionTokens < 0 ||
+		prepared.Model.OutputPriceMicrosPerMillionTokens < 0 {
+		return Definition{}, fmt.Errorf("agent definition %q model prices cannot be negative", prepared.ID)
 	}
 	if prepared.Budget.Timeout <= 0 || prepared.Budget.MaxSteps <= 0 || prepared.Budget.ContextTokens <= 0 {
 		return Definition{}, fmt.Errorf("agent definition %q budgets must be positive", prepared.ID)
@@ -162,10 +169,11 @@ func cloneDefinition(definition Definition) Definition {
 	definition.Tools.VisibleToolIDs = append([]string(nil), definition.Tools.VisibleToolIDs...)
 	definition.Permissions.Scopes = append([]string(nil), definition.Permissions.Scopes...)
 	if definition.Model.Parameters != nil {
-		definition.Model.Parameters = make(map[string]any, len(definition.Model.Parameters))
+		parameters := make(map[string]any, len(definition.Model.Parameters))
 		for key, value := range definition.Model.Parameters {
-			definition.Model.Parameters[key] = value
+			parameters[key] = value
 		}
+		definition.Model.Parameters = parameters
 	}
 	return definition
 }

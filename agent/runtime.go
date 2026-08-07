@@ -34,18 +34,80 @@ type Reference struct {
 }
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
+}
+
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+type ToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// ToolScope narrows one run below the immutable Definition capability ceiling.
+type ToolScope struct {
+	AllowWrite      bool     `json:"allow_write"`
+	RestrictVisible bool     `json:"restrict_visible"`
+	VisibleToolIDs  []string `json:"visible_tool_ids,omitempty"`
+	OfferedToolIDs  []string `json:"offered_tool_ids,omitempty"`
+	PruneApplied    bool     `json:"prune_applied"`
+}
+
+// RunPolicy carries execution semantics that are independent of a scenario's planner types.
+type RunPolicy struct {
+	EvidenceRequired bool  `json:"evidence_required"`
+	EvidenceSeeded   bool  `json:"evidence_seeded"`
+	WebResearch      bool  `json:"web_research"`
+	MaxToolCalls     int64 `json:"max_tool_calls"`
+	RedactSensitive  bool  `json:"redact_sensitive"`
+}
+
+// DefinitionSelection records the rollout decision that selected a definition.
+type DefinitionSelection struct {
+	RuleVersion           int64  `json:"rule_version,omitempty"`
+	RuleHash              string `json:"rule_hash,omitempty"`
+	CandidateVersion      int64  `json:"candidate_version,omitempty"`
+	BucketBasisPoints     int    `json:"bucket_basis_points,omitempty"`
+	PercentageBasisPoints int    `json:"percentage_basis_points,omitempty"`
+	StableKeyHash         string `json:"stable_key_hash,omitempty"`
+	Reason                string `json:"reason,omitempty"`
 }
 
 type RunRequest struct {
-	RunID       string          `json:"run_id"`
-	Agent       DefinitionRef   `json:"agent"`
-	Input       json.RawMessage `json:"input"`
-	Messages    []Message       `json:"messages,omitempty"`
-	Context     []ContextBlock  `json:"context,omitempty"`
-	Actor       Actor           `json:"actor"`
-	Correlation Correlation     `json:"correlation"`
+	RunID          string           `json:"run_id"`
+	Agent          DefinitionRef    `json:"agent"`
+	DefinitionHash string           `json:"definition_hash"`
+	Selection      DefinitionSelection `json:"selection,omitempty"`
+	Input          json.RawMessage  `json:"input"`
+	Messages       []Message        `json:"messages,omitempty"`
+	Context        []ContextBlock   `json:"context,omitempty"`
+	Permissions    PermissionPolicy `json:"permissions"`
+	ToolScope      ToolScope        `json:"tool_scope"`
+	Policy         RunPolicy        `json:"policy"`
+	Actor          Actor            `json:"actor"`
+	Correlation    Correlation      `json:"correlation"`
+}
+
+// RunStart fixes the identity and capability ceiling before scenario preparation.
+type RunStart struct {
+	RunID          string           `json:"run_id"`
+	Agent          DefinitionRef    `json:"agent"`
+	DefinitionHash string           `json:"definition_hash"`
+	Selection      DefinitionSelection `json:"selection,omitempty"`
+	Input          json.RawMessage  `json:"input"`
+	Permissions    PermissionPolicy `json:"permissions"`
+	ToolScope      ToolScope        `json:"tool_scope"`
+	Policy         RunPolicy        `json:"policy"`
+	Actor          Actor            `json:"actor"`
+	Correlation    Correlation      `json:"correlation"`
 }
 
 // RunSnapshot pins all mutable control-plane choices before execution starts.
@@ -54,6 +116,7 @@ type RunSnapshot struct {
 	AgentID             string           `json:"agent_id"`
 	DefinitionVersion   int64            `json:"definition_version"`
 	DefinitionHash      string           `json:"definition_hash"`
+	Selection           DefinitionSelection `json:"selection,omitempty"`
 	Provider            string           `json:"provider"`
 	Model               string           `json:"model"`
 	ModelParameters     map[string]any   `json:"model_parameters,omitempty"`
@@ -83,6 +146,7 @@ type Usage struct {
 	OutputTokens    int64 `json:"output_tokens"`
 	ReasoningTokens int64 `json:"reasoning_tokens"`
 	TotalTokens     int64 `json:"total_tokens"`
+	CostMicros      int64 `json:"cost_micros"`
 }
 
 type RunError struct {
@@ -91,12 +155,24 @@ type RunError struct {
 	Retryable bool   `json:"retryable"`
 }
 
+type EvidenceSummary struct {
+	Status             string `json:"status"`
+	ForcedConclusion   bool   `json:"forced_conclusion"`
+	ToolCallCount      int    `json:"tool_call_count"`
+	ResultCount        int    `json:"result_count"`
+	ToolFailureCount   int    `json:"tool_failure_count"`
+	PartialResultCount int    `json:"partial_result_count"`
+	OmittedItemCount   int    `json:"omitted_item_count"`
+}
+
 type RunResult struct {
 	RunID      string          `json:"run_id"`
 	Status     RunStatus       `json:"status"`
 	Output     json.RawMessage `json:"output,omitempty"`
 	Text       string          `json:"text,omitempty"`
+	Evidence   EvidenceSummary `json:"evidence"`
 	References []Reference     `json:"references,omitempty"`
+	Messages   []Message       `json:"messages,omitempty"`
 	Usage      Usage           `json:"usage"`
 	Error      *RunError       `json:"error,omitempty"`
 }
@@ -104,4 +180,17 @@ type RunResult struct {
 // Runtime executes one already-compiled request against a pinned definition.
 type Runtime interface {
 	Run(ctx context.Context, request RunRequest) (RunResult, error)
+}
+
+// ManagedRun keeps preparation accounting and the scenario commit boundary on one Run.
+type ManagedRun interface {
+	Context(context.Context) context.Context
+	Execute(context.Context, RunRequest) (RunResult, error)
+	Finish(*RunError) error
+}
+
+// ManagedRuntime starts Runs before a scenario performs model-backed preparation.
+type ManagedRuntime interface {
+	Runtime
+	Begin(context.Context, RunStart) (ManagedRun, error)
 }

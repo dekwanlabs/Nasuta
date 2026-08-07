@@ -11,10 +11,13 @@ func TestPrepareDefinitionIsDeterministicAndDetached(t *testing.T) {
 		Prompt:       PromptSpec{System: "Answer with evidence.", Version: "1"},
 		InputSchema:  SchemaRef{ID: "qa.request", Version: 1},
 		OutputSchema: SchemaRef{ID: "qa.answer", Version: 1},
-		Model:        ModelPolicy{Provider: "openai", Model: "model", MaxOutputTokens: 1024},
-		Tools:        ToolPolicy{VisibleToolIDs: []string{"search_code"}},
-		Budget:       BudgetPolicy{Timeout: time.Minute, MaxSteps: 5, ContextTokens: 32000},
-		Permissions:  PermissionPolicy{Scopes: []string{"knowledge.read"}},
+		Model: ModelPolicy{
+			Provider: "openai", Model: "model", MaxOutputTokens: 1024,
+			Parameters: map[string]any{"temperature": float64(0)},
+		},
+		Tools:       ToolPolicy{VisibleToolIDs: []string{"search_code"}},
+		Budget:      BudgetPolicy{Timeout: time.Minute, MaxSteps: 5, ContextTokens: 32000},
+		Permissions: PermissionPolicy{Scopes: []string{"knowledge.read"}},
 	}
 	first, err := Prepare(definition)
 	if err != nil {
@@ -27,9 +30,23 @@ func TestPrepareDefinitionIsDeterministicAndDetached(t *testing.T) {
 	if first.ContentHash == "" || first.ContentHash != second.ContentHash {
 		t.Fatalf("content hash is not deterministic: %q %q", first.ContentHash, second.ContentHash)
 	}
+	priced := definition
+	priced.Model.InputPriceMicrosPerMillionTokens = 10
+	priced.Model.OutputPriceMicrosPerMillionTokens = 20
+	preparedPriced, err := Prepare(priced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ContentHash == preparedPriced.ContentHash {
+		t.Fatal("model prices did not change the definition content hash")
+	}
 	definition.Tools.VisibleToolIDs[0] = "changed"
 	if first.Tools.VisibleToolIDs[0] != "search_code" {
 		t.Fatal("prepared definition retained caller-owned tool slice")
+	}
+	definition.Model.Parameters["temperature"] = float64(1)
+	if first.Model.Parameters["temperature"] != float64(0) {
+		t.Fatal("prepared definition retained caller-owned model parameters")
 	}
 }
 
