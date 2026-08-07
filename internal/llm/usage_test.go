@@ -86,13 +86,13 @@ func TestOpenAINonStreamingUsageIsRecorded(t *testing.T) {
 }
 
 func TestOpenAIStreamingUsageAndRequestOption(t *testing.T) {
+	var captured chatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request chatRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		if request.StreamOptions == nil || !request.StreamOptions.IncludeUsage {
-			t.Errorf("stream_options = %+v", request.StreamOptions)
+		if captured.StreamOptions == nil || !captured.StreamOptions.IncludeUsage {
+			t.Errorf("stream_options = %+v", captured.StreamOptions)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n")
@@ -102,9 +102,29 @@ func TestOpenAIStreamingUsageAndRequestOption(t *testing.T) {
 	defer server.Close()
 
 	client := NewLLMClientWithHTTPAndProvider(server.URL, "key", "model", "openai", 100, nil)
-	result, err := client.ChatWithToolsMax(t.Context(), []Message{{Role: "user", Content: "q"}}, nil, nil, 40)
+	temperature := 0.2
+	topP := 0.8
+	frequencyPenalty := -0.4
+	presencePenalty := 0.6
+	result, err := client.ChatWithToolsMaxWithParameters(
+		t.Context(), []Message{{Role: "user", Content: "q"}}, nil, nil, 40,
+		ModelParameters{
+			Temperature:      &temperature,
+			TopP:             &topP,
+			Stop:             []string{"END"},
+			FrequencyPenalty: &frequencyPenalty,
+			PresencePenalty:  &presencePenalty,
+		},
+	)
 	if err != nil {
 		t.Fatalf("ChatWithToolsMax: %v", err)
+	}
+	if captured.Temperature == nil || *captured.Temperature != temperature ||
+		captured.TopP == nil || *captured.TopP != topP ||
+		len(captured.Stop) != 1 || captured.Stop[0] != "END" ||
+		captured.FrequencyPenalty == nil || *captured.FrequencyPenalty != frequencyPenalty ||
+		captured.PresencePenalty == nil || *captured.PresencePenalty != presencePenalty {
+		t.Fatalf("request parameters = %+v", captured)
 	}
 	want := (Usage{InputTokens: 13, OutputTokens: 5, ReasoningTokens: 1, TotalTokens: 18})
 	if result.Usage != want || result.ReasoningTokens != 1 {

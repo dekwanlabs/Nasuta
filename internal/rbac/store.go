@@ -57,6 +57,15 @@ func (s *Store) repair() error {
 			return fmt.Errorf("create Feature Delivery menu: %w", err)
 		}
 	}
+	var reviewCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rbac_menus WHERE path = '/review-rounds'`).Scan(&reviewCount); err != nil {
+		return fmt.Errorf("check Review Panel menu: %w", err)
+	}
+	if reviewCount == 0 {
+		if err := s.CreateMenu(&Menu{ParentID: 0, Name: "评审面板", Path: "/review-rounds", Icon: "Finished", SortOrder: 5}); err != nil {
+			return fmt.Errorf("create Review Panel menu: %w", err)
+		}
+	}
 
 	if _, err := s.db.Exec(`
 		INSERT IGNORE INTO rbac_user_roles (user_id, role_id)
@@ -102,6 +111,7 @@ func (s *Store) seed() error {
 		{ParentID: 0, Name: "Dashboard", Path: "/dashboard", Icon: "Monitor", SortOrder: 1},
 		{ParentID: 0, Name: "AI Q&A", Path: "/qa", Icon: "ChatLineRound", SortOrder: 4},
 		{ParentID: 0, Name: "研发任务", Path: "/features", Icon: "Management", SortOrder: 5},
+		{ParentID: 0, Name: "评审面板", Path: "/review-rounds", Icon: "Finished", SortOrder: 5},
 		{ParentID: 0, Name: "Agent Runs", Path: "/agent-runs", Icon: "View", SortOrder: 6},
 		{ParentID: 0, Name: "Docs", Path: "/docs", Icon: "Document", SortOrder: 7},
 		{ParentID: 0, Name: "Settings", Path: "/settings", Icon: "Setting", SortOrder: 8},

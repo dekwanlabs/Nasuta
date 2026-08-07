@@ -34,10 +34,16 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 		{group: GroupAuth, tables: []string{"users", "sessions", "settings"}},
 		{group: GroupDocuments, tables: []string{"documents"}},
 		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_turn_contexts", "qa_session_history_terms", "qa_session_history_index_outbox"}},
-		{group: GroupQARun, tables: []string{"agent_runs", "agent_steps", "agent_tool_result_artifacts", "agent_llm_calls"}},
+		{group: GroupQARun, tables: []string{
+			"agent_definitions", "agent_definition_audit",
+			"agent_definition_rollouts", "agent_definition_rollout_audit",
+			"agent_runs", "agent_steps", "agent_tool_result_artifacts", "agent_llm_calls",
+		}},
 		{group: GroupWorkflow, tables: []string{
+			"workflow_definitions", "workflow_definition_audit",
+			"workflow_definition_rollouts", "workflow_definition_rollout_audit",
 			"workflow_runs", "workflow_node_runs", "handoff_artifacts",
-			"workflow_events", "gate_decisions",
+			"workflow_events", "workflow_approvals", "gate_decisions",
 		}},
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
 		{group: GroupIncident, tables: []string{"incident_records"}},
@@ -47,9 +53,12 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 			"feature_artifact_reviews", "feature_generation_runs",
 			"feature_implementation_runs", "feature_run_events",
 			"feature_change_sets", "feature_change_reviews",
-			"review_policies", "review_rounds", "review_assignments",
-			"review_reports", "review_findings", "review_finding_evidence",
+			"review_policies", "review_policy_audit", "review_policy_rollouts",
+			"review_policy_rollout_audit", "review_rounds", "review_assignments",
+			"review_round_events", "review_reports", "review_report_reuses",
+			"review_findings", "review_finding_evidence", "review_adjudications",
 			"review_gate_results", "finding_resolutions",
+			"review_evaluation_labels",
 		}},
 	}
 	for _, tc := range cases {
@@ -64,6 +73,217 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 			if !containsCreateTable(stmts, table) {
 				t.Fatalf("group %q missing create statement for %s", tc.group, table)
 			}
+		}
+	}
+}
+
+func TestAgentWorkflowCatalogMigrationCreatesControlPlaneTables(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_workflow_catalog.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read agent workflow catalog migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS agent_definitions",
+		"UNIQUE KEY uniq_agent_definition_default",
+		"CREATE TABLE IF NOT EXISTS agent_definition_audit",
+		"KEY idx_agent_definition_audit (definition_id, seq)",
+		"CREATE TABLE IF NOT EXISTS workflow_definitions",
+		"UNIQUE KEY uniq_workflow_definition_default",
+		"CREATE TABLE IF NOT EXISTS workflow_definition_audit",
+		"KEY idx_workflow_definition_audit (definition_id, seq)",
+		"CREATE TABLE IF NOT EXISTS workflow_definition_rollouts",
+		"CREATE TABLE IF NOT EXISTS workflow_definition_rollout_audit",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("agent workflow catalog migration missing %q", required)
+		}
+	}
+}
+
+func TestAgentRolloutSchemaAndMigrationStoreSelection(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupQARun], "\n")
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS agent_definition_rollouts",
+		"CREATE TABLE IF NOT EXISTS agent_definition_rollout_audit",
+		"selection_json JSON NOT NULL",
+		"KEY idx_agent_rollout_audit (agent_id, seq)",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("agent rollout schema missing %q", required)
+		}
+	}
+
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_rollout.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read agent rollout migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN selection_json JSON NULL",
+		"SET selection_json = JSON_OBJECT()",
+		"MODIFY COLUMN selection_json JSON NOT NULL",
+		"CREATE TABLE IF NOT EXISTS agent_definition_rollouts",
+		"CREATE TABLE IF NOT EXISTS agent_definition_rollout_audit",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("agent rollout migration missing %q", required)
+		}
+	}
+}
+
+func TestWorkflowRolloutSchemaAndMigrationStoreSelection(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupWorkflow], "\n")
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS workflow_definition_rollouts",
+		"CREATE TABLE IF NOT EXISTS workflow_definition_rollout_audit",
+		"selection_json       JSON NOT NULL",
+		"KEY idx_workflow_rollout_audit (workflow_id, seq)",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("workflow rollout schema missing %q", required)
+		}
+	}
+
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_workflow_rollout.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read workflow rollout migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN selection_json JSON NULL",
+		"SET selection_json = JSON_OBJECT()",
+		"MODIFY COLUMN selection_json JSON NOT NULL",
+		"CREATE TABLE IF NOT EXISTS workflow_definition_rollouts",
+		"CREATE TABLE IF NOT EXISTS workflow_definition_rollout_audit",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("workflow rollout migration missing %q", required)
+		}
+	}
+}
+
+func TestReviewPolicySchemaStoresRolloutMetadata(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
+	for _, required := range []string{
+		"active          TINYINT(1) NOT NULL DEFAULT 1",
+		"is_default      TINYINT(1) NOT NULL DEFAULT 0",
+		"default_key     VARCHAR(48) GENERATED ALWAYS",
+		"CREATE TABLE IF NOT EXISTS review_policy_audit",
+		"KEY idx_review_policy_audit (policy_id, seq)",
+		"CREATE TABLE IF NOT EXISTS review_policy_rollouts",
+		"CREATE TABLE IF NOT EXISTS review_policy_rollout_audit",
+		"KEY idx_review_policy_rollout_audit (subject_kind, seq)",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("review policy schema missing %q", required)
+		}
+	}
+}
+
+func TestReviewPolicyMigrationStoresRolloutMetadata(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_feature_multi_agent_review.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read feature review migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS review_policy_audit",
+		"UNIQUE KEY uniq_review_policy_default (default_key)",
+		"KEY idx_review_policy_audit (policy_id, seq)",
+		"CREATE TABLE IF NOT EXISTS review_policy_rollouts",
+		"CREATE TABLE IF NOT EXISTS review_policy_rollout_audit",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("feature review migration missing %q", required)
+		}
+	}
+}
+
+func TestReviewPolicyRolloutMigrationStoresRoundSelectionSnapshot(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_review_policy_rollout.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read review policy rollout migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN policy_selection_json JSON NULL",
+		"SET policy_selection_json = JSON_OBJECT()",
+		"MODIFY COLUMN policy_selection_json JSON NOT NULL",
+		"CREATE TABLE IF NOT EXISTS review_policy_rollouts",
+		"CREATE TABLE IF NOT EXISTS review_policy_rollout_audit",
+		"KEY idx_review_policy_rollout_audit (subject_kind, seq)",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("review policy rollout migration missing %q", required)
+		}
+	}
+}
+
+func TestReviewEvaluationSchemaStoresImmutableLabels(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS review_evaluation_labels",
+		"UNIQUE KEY uniq_review_evaluation_target (round_id, target_hash)",
+		"KEY idx_review_evaluation_policy (policy_id, policy_version, created_at, seq)",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("review evaluation schema missing %q", required)
+		}
+	}
+
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_review_evaluation.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read review evaluation migration: %v", err)
+	}
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS review_evaluation_labels",
+		"UNIQUE KEY uniq_review_evaluation_target (round_id, target_hash)",
+		"KEY idx_review_evaluation_round (round_id, seq)",
+	} {
+		if !strings.Contains(string(raw), required) {
+			t.Fatalf("review evaluation migration missing %q", required)
+		}
+	}
+}
+
+func TestWorkflowSchemaStoresApprovalSnapshots(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupWorkflow], "\n")
+	for _, required := range []string{
+		"actor_permissions_json JSON NOT NULL",
+		"scenario_permissions_json JSON NOT NULL",
+		"CREATE TABLE IF NOT EXISTS workflow_approvals",
+		"PRIMARY KEY (workflow_run_id, node_id)",
+		"approver_user_id     BIGINT NOT NULL",
+		"approver_tenant_id   VARCHAR(128) NOT NULL",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("workflow schema missing %q", required)
+		}
+	}
+
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_workflow_human_approval.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read workflow approval migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN actor_permissions_json JSON NULL",
+		"ADD COLUMN scenario_permissions_json JSON NULL",
+		"JSON_OBJECT()",
+		"MODIFY COLUMN actor_permissions_json JSON NOT NULL",
+		"MODIFY COLUMN scenario_permissions_json JSON NOT NULL",
+		"CREATE TABLE IF NOT EXISTS workflow_approvals",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("workflow approval migration missing %q", required)
 		}
 	}
 }

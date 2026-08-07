@@ -7,6 +7,7 @@ require (
 	github.com/go-ego/gse v1.0.2
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/go-sql-driver/mysql v1.10.0
+	github.com/google/jsonschema-go v0.4.2
 	github.com/joho/godotenv v1.5.1
 	github.com/mark3labs/mcp-go v0.32.0
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2

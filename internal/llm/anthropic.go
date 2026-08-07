@@ -26,13 +26,17 @@ type anthropicProvider struct {
 const anthropicVersion = "2023-06-01"
 
 type anthropicRequest struct {
-	Model      string               `json:"model"`
-	System     json.RawMessage      `json:"system,omitempty"`
-	Messages   []anthropicMessage   `json:"messages"`
-	MaxTokens  int                  `json:"max_tokens"`
-	Stream     bool                 `json:"stream"`
-	Tools      []anthropicTool      `json:"tools,omitempty"`
-	ToolChoice *anthropicToolChoice `json:"tool_choice,omitempty"`
+	Model         string               `json:"model"`
+	System        json.RawMessage      `json:"system,omitempty"`
+	Messages      []anthropicMessage   `json:"messages"`
+	MaxTokens     int                  `json:"max_tokens"`
+	Stream        bool                 `json:"stream"`
+	Tools         []anthropicTool      `json:"tools,omitempty"`
+	ToolChoice    *anthropicToolChoice `json:"tool_choice,omitempty"`
+	Temperature   *float64             `json:"temperature,omitempty"`
+	TopP          *float64             `json:"top_p,omitempty"`
+	StopSequences []string             `json:"stop_sequences,omitempty"`
+	TopK          *int                 `json:"top_k,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -51,9 +55,9 @@ type anthropicContentBlock struct {
 }
 
 type anthropicTool struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	InputSchema map[string]any         `json:"input_schema"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description"`
+	InputSchema  map[string]any         `json:"input_schema"`
 	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
@@ -248,6 +252,19 @@ func concatTextBlocks(blocks []anthropicContentBlock) string {
 }
 
 func (anthropic anthropicProvider) ChatWithToolsMax(ctx context.Context, messages []Message, tools []ToolDef, item4 StreamHandler, maxTokens int) (*ChatStreamResult, error) {
+	return anthropic.ChatWithToolsMaxWithParameters(
+		ctx, messages, tools, item4, maxTokens, ModelParameters{},
+	)
+}
+
+func (anthropic anthropicProvider) ChatWithToolsMaxWithParameters(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDef,
+	item4 StreamHandler,
+	maxTokens int,
+	parameters ModelParameters,
+) (*ChatStreamResult, error) {
 	if maxTokens <= 0 {
 		maxTokens = anthropic.maxTokens
 	}
@@ -260,12 +277,16 @@ func (anthropic anthropicProvider) ChatWithToolsMax(ctx context.Context, message
 		systemRaw = anthropicSystemWithCache(system)
 	}
 	req := anthropicRequest{
-		Model:     anthropic.model,
-		System:    systemRaw,
-		Messages:  wireMsgs,
-		MaxTokens: maxTokens,
-		Stream:    true,
-		Tools:     translateToolDefs(tools),
+		Model:         anthropic.model,
+		System:        systemRaw,
+		Messages:      wireMsgs,
+		MaxTokens:     maxTokens,
+		Stream:        true,
+		Tools:         translateToolDefs(tools),
+		Temperature:   parameters.Temperature,
+		TopP:          parameters.TopP,
+		StopSequences: append([]string(nil), parameters.Stop...),
+		TopK:          parameters.TopK,
 	}
 	if len(tools) > 0 {
 		req.ToolChoice = &anthropicToolChoice{Type: "auto"}

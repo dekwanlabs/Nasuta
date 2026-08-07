@@ -111,13 +111,18 @@ func NewLLMClientWithHTTPAndProvider(baseURL, apiKey, model, provider string, ma
 
 // chatRequest is the request body for /chat/completions.
 type chatRequest struct {
-	Model         string         `json:"model"`
-	Messages      []Message      `json:"messages"`
-	MaxTokens     int            `json:"max_tokens,omitempty"`
-	Stream        bool           `json:"stream"`
-	StreamOptions *streamOptions `json:"stream_options,omitempty"`
-	Tools         []ToolDef      `json:"tools,omitempty"`
-	ToolChoice    string         `json:"tool_choice,omitempty"` // "auto" | "none"
+	Model            string         `json:"model"`
+	Messages         []Message      `json:"messages"`
+	MaxTokens        int            `json:"max_tokens,omitempty"`
+	Stream           bool           `json:"stream"`
+	StreamOptions    *streamOptions `json:"stream_options,omitempty"`
+	Tools            []ToolDef      `json:"tools,omitempty"`
+	ToolChoice       string         `json:"tool_choice,omitempty"` // "auto" | "none"
+	Temperature      *float64       `json:"temperature,omitempty"`
+	TopP             *float64       `json:"top_p,omitempty"`
+	Stop             []string       `json:"stop,omitempty"`
+	FrequencyPenalty *float64       `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float64       `json:"presence_penalty,omitempty"`
 }
 
 type streamOptions struct {
@@ -318,6 +323,20 @@ func (lc *LLMClient) ChatWithTools(ctx context.Context, messages []Message, tool
 
 // ChatWithToolsMax runs one streaming turn with an optional max token override.
 func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, tools []ToolDef, h StreamHandler, maxTokens int) (result *ChatStreamResult, callErr error) {
+	return lc.ChatWithToolsMaxWithParameters(
+		ctx, messages, tools, h, maxTokens, ModelParameters{},
+	)
+}
+
+// ChatWithToolsMaxWithParameters runs one streaming turn with validated model options.
+func (lc *LLMClient) ChatWithToolsMaxWithParameters(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDef,
+	h StreamHandler,
+	maxTokens int,
+	parameters ModelParameters,
+) (result *ChatStreamResult, callErr error) {
 	if maxTokens <= 0 {
 		maxTokens = lc.maxTokens
 	}
@@ -333,7 +352,9 @@ func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, t
 		recordCallUsage(ctx, lc.provider, lc.model, maxTokens, started, usage, callErr)
 	}()
 	if lc.provider == "anthropic" {
-		result, callErr = lc.anthropic().ChatWithToolsMax(ctx, messages, tools, h, maxTokens)
+		result, callErr = lc.anthropic().ChatWithToolsMaxWithParameters(
+			ctx, messages, tools, h, maxTokens, parameters,
+		)
 		return result, callErr
 	}
 	// No explicit cache marker is emitted on the OpenAI-compatible path:
@@ -344,6 +365,11 @@ func (lc *LLMClient) ChatWithToolsMax(ctx context.Context, messages []Message, t
 		Model: lc.model, Messages: messages, MaxTokens: maxTokens,
 		Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Tools: tools,
 	}
+	req.Temperature = parameters.Temperature
+	req.TopP = parameters.TopP
+	req.Stop = append([]string(nil), parameters.Stop...)
+	req.FrequencyPenalty = parameters.FrequencyPenalty
+	req.PresencePenalty = parameters.PresencePenalty
 	if len(tools) > 0 {
 		req.ToolChoice = "auto"
 	}

@@ -125,6 +125,8 @@ func TestRepairEnsuresDefaultRolesAndPermissions(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM rbac_menus WHERE path = '/features'`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM rbac_menus WHERE path = '/review-rounds'`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectExec(`(?s)INSERT IGNORE INTO rbac_user_roles.*WHERE u\.is_admin = 1`).
 		WithArgs(adminRoleName).
 		WillReturnResult(sqlmock.NewResult(0, 1))

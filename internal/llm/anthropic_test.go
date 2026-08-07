@@ -397,6 +397,43 @@ func TestAnthropicToolDefTranslation(term8 *testing.T) {
 	}
 }
 
+func TestAnthropicModelParametersUseAnthropicWireNames(t *testing.T) {
+	frames := []string{
+		sseLine("message_delta", map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]any{"stop_reason": "end_turn"},
+		}),
+		sseLine("message_stop", map[string]any{"type": "message_stop"}),
+	}
+	srv, bodyOf := newAnthropicFakeServer(t, frames)
+	defer srv.Close()
+
+	client := newAnthropicClient(t, srv.URL)
+	temperature := 0.2
+	topP := 0.8
+	topK := 32
+	if _, err := client.ChatWithToolsMaxWithParameters(
+		t.Context(), []Message{{Role: "user", Content: "q"}}, nil, nil, 100,
+		ModelParameters{
+			Temperature: &temperature, TopP: &topP,
+			Stop: []string{"END"}, TopK: &topK,
+		},
+	); err != nil {
+		t.Fatalf("ChatWithToolsMaxWithParameters: %v", err)
+	}
+
+	var request anthropicRequest
+	if err := json.Unmarshal(bodyOf(), &request); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if request.Temperature == nil || *request.Temperature != temperature ||
+		request.TopP == nil || *request.TopP != topP ||
+		len(request.StopSequences) != 1 || request.StopSequences[0] != "END" ||
+		request.TopK == nil || *request.TopK != topK {
+		t.Fatalf("request parameters = %+v", request)
+	}
+}
+
 func TestAnthropicCacheControlOnlyOnLastTool(term *testing.T) {
 	frames := []string{
 		sseLine("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"}}),
