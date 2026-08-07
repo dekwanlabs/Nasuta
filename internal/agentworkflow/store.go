@@ -37,6 +37,7 @@ const (
 
 type WorkflowRunRecord struct {
 	ID                  string                    `json:"id"`
+	ParentRunID         string                    `json:"parent_run_id,omitempty"`
 	WorkflowID          string                    `json:"workflow_id"`
 	WorkflowVersion     int64                     `json:"workflow_version"`
 	WorkflowHash        string                    `json:"workflow_hash"`
@@ -163,12 +164,12 @@ func (workflowStore *Store) StartWorkflow(
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_runs(
-		id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
 		tool_call_count,cost_micros,retry_count,error_code,started_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		run.ID, run.WorkflowID, run.WorkflowVersion, run.WorkflowHash, selection, run.InputHash,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		run.ID, run.ParentRunID, run.WorkflowID, run.WorkflowVersion, run.WorkflowHash, selection, run.InputHash,
 		run.ActorUserID, run.ActorTenantID, actorPermissions, run.Scenario,
 		scenarioPermissions, RunRunning, budget,
 		run.Usage.InputTokens, run.Usage.OutputTokens, run.Usage.ReasoningTokens,
@@ -460,7 +461,7 @@ func (workflowStore *Store) FinishWorkflow(
 func (workflowStore *Store) GetRun(ctx context.Context, id string) (*WorkflowRunRecord, error) {
 	var run WorkflowRunRecord
 	row := workflowStore.db.QueryRowContext(ctx, `SELECT
-		id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
 		tool_call_count,cost_micros,retry_count,error_code,started_at,ended_at
@@ -725,12 +726,12 @@ func (workflowStore *Store) CreateRun(ctx context.Context, run WorkflowRunRecord
 		return fmt.Errorf("marshal workflow scenario permissions: %w", err)
 	}
 	_, err = workflowStore.db.ExecContext(ctx, `INSERT INTO workflow_runs(
-		id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
 		tool_call_count,cost_micros,retry_count,error_code,started_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		run.ID, run.WorkflowID, run.WorkflowVersion, run.WorkflowHash, selection, run.InputHash,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		run.ID, run.ParentRunID, run.WorkflowID, run.WorkflowVersion, run.WorkflowHash, selection, run.InputHash,
 		run.ActorUserID, run.ActorTenantID, actorPermissions, run.Scenario,
 		scenarioPermissions, run.Status, budget,
 		run.Usage.InputTokens, run.Usage.OutputTokens, run.Usage.ReasoningTokens,
@@ -1269,7 +1270,7 @@ func scanWorkflowRun(row rowScanner, run *WorkflowRunRecord) error {
 	var selection, budget, actorPermissions, scenarioPermissions []byte
 	var endedAt sql.NullTime
 	if err := row.Scan(
-		&run.ID, &run.WorkflowID, &run.WorkflowVersion, &run.WorkflowHash,
+		&run.ID, &run.ParentRunID, &run.WorkflowID, &run.WorkflowVersion, &run.WorkflowHash,
 		&selection, &run.InputHash, &run.ActorUserID, &run.ActorTenantID, &actorPermissions,
 		&run.Scenario, &scenarioPermissions, &run.Status, &budget,
 		&run.Usage.InputTokens, &run.Usage.OutputTokens, &run.Usage.ReasoningTokens,

@@ -10,11 +10,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
@@ -65,6 +65,107 @@ type Service struct {
 	webSearchProvidersMu  sync.RWMutex
 	webSearchProviders    map[string]WebSearchProvider
 }
+
+type queryEmbeddingOutput struct {
+	Vectors  [][]float32
+	EmbedErr error
+}
+
+var queryEmbeddingSpec = executiontrace.Spec[string, queryEmbeddingOutput]{
+	Operation: "knowledge.query_embedding",
+	Node:      "query_embedding",
+	Input: func(query string) map[string]any {
+		return map[string]any{"query": query}
+	},
+	Output: func(_ string, output queryEmbeddingOutput, err error) map[string]any {
+		if err != nil {
+			return map[string]any{"error": errString(output.EmbedErr), "vectors": len(output.Vectors)}
+		}
+		return map[string]any{"vectors": len(output.Vectors), "dimensions": len(output.Vectors[0])}
+	},
+}
+
+type sparseQueryOutput struct {
+	Indices []uint32
+	Values  []float32
+}
+
+var sparseQuerySpec = executiontrace.Spec[string, sparseQueryOutput]{
+	Operation: "knowledge.sparse_query",
+	Node:      "sparse_query",
+	Input: func(query string) map[string]any {
+		return map[string]any{"query": query}
+	},
+	Output: func(_ string, output sparseQueryOutput, _ error) map[string]any {
+		return map[string]any{"terms": len(output.Indices), "known_terms": len(output.Indices) > 0}
+	},
+}
+
+type vectorSearchInput struct {
+	Query       semantic.Query
+	Mode        string
+	FetchLimit  int
+	SparseTerms int
+	Filters     map[string]string
+}
+
+var vectorSearchSpec = executiontrace.Spec[vectorSearchInput, []semantic.Hit]{
+	Operation: "knowledge.vector_search",
+	Node:      "vector_search",
+	Input: func(input vectorSearchInput) map[string]any {
+		return map[string]any{
+			"mode": input.Mode, "fetch_limit": input.FetchLimit,
+			"sparse_terms": input.SparseTerms, "filters": input.Filters,
+		}
+	},
+	Output: func(_ vectorSearchInput, hits []semantic.Hit, err error) map[string]any {
+		output := map[string]any{"hits": len(hits), "top": traceSemanticHits(hits)}
+		if err != nil {
+			output["error"] = err.Error()
+		}
+		return output
+	},
+}
+
+type fileDedupInput struct {
+	Hits       []semantic.Hit
+	FetchLimit int
+}
+
+var fileDedupSpec = executiontrace.Spec[fileDedupInput, []semantic.Hit]{
+	Operation: "knowledge.file_dedup",
+	Node:      "file_dedup",
+	Input: func(input fileDedupInput) map[string]any {
+		return map[string]any{"hits": len(input.Hits), "fetch_limit": input.FetchLimit}
+	},
+	Output: func(_ fileDedupInput, candidates []semantic.Hit, _ error) map[string]any {
+		return map[string]any{"files": len(candidates), "top": traceSemanticHits(candidates)}
+	},
+}
+
+type codeRankInput struct {
+	Query      string
+	Candidates []semantic.Hit
+	Limit      int
+}
+
+type codeRankOutput struct {
+	Ranked  []rankedCodeHit
+	Matches []domain.CodeSearchHit
+}
+
+var codeRankSpec = executiontrace.Spec[codeRankInput, codeRankOutput]{
+	Operation: "knowledge.code_rank",
+	Node:      "code_rank",
+	Input: func(input codeRankInput) map[string]any {
+		return map[string]any{"candidates": len(input.Candidates), "limit": input.Limit}
+	},
+	Output: func(_ codeRankInput, output codeRankOutput, _ error) map[string]any {
+		return map[string]any{"matches": len(output.Matches), "top": traceRankedCodeHits(output.Ranked)}
+	},
+}
+
+var errEmptyQueryEmbedding = fmt.Errorf("empty query embedding")
 
 func NewTools(d Deps) *Service {
 	return &Service{
@@ -152,35 +253,47 @@ func (srv *Service) ServiceLookupResult(ctx context.Context, query string, limit
 }
 
 // FindServices returns typed service matches for internal consumers.
-func (srv *Service) FindServices(ctx context.Context, query string, limit int) (result domain.SearchResult[domain.ServiceRecord], resultErr error) {
-	started := time.Now()
-	if domain.TraceEnabled(ctx) {
-		defer func() {
-			status := "completed"
-			output := map[string]any{"matches": len(result.Matches), "semantic": result.Semantic, "services": traceServiceNames(result.Matches)}
-			if resultErr != nil {
-				status = "failed"
-				output["error"] = resultErr.Error()
-			}
-			domain.RecordTrace(ctx, domain.EvaluationTrace{
-				Node: "service_search", Status: status, DurationMS: time.Since(started).Milliseconds(),
-				Input: map[string]any{"query": query, "limit": limit}, Output: output,
-			})
-		}()
-	}
+func (srv *Service) FindServices(ctx context.Context, query string, limit int) (domain.SearchResult[domain.ServiceRecord], error) {
+	input := serviceSearchInput{Query: query, Limit: limit}
+	return executiontrace.Invoke(ctx, serviceSearchSpec, input, func(ctx context.Context, input serviceSearchInput) (domain.SearchResult[domain.ServiceRecord], error) {
+		return srv.findServices(ctx, input)
+	})
+}
+
+type serviceSearchInput struct {
+	Query string
+	Limit int
+}
+
+var serviceSearchSpec = executiontrace.Spec[serviceSearchInput, domain.SearchResult[domain.ServiceRecord]]{
+	Operation: "knowledge.service_search",
+	Node:      "service_search",
+	Input: func(input serviceSearchInput) map[string]any {
+		return map[string]any{"query": input.Query, "limit": input.Limit}
+	},
+	Output: func(_ serviceSearchInput, result domain.SearchResult[domain.ServiceRecord], err error) map[string]any {
+		output := map[string]any{"matches": len(result.Matches), "semantic": result.Semantic, "services": traceServiceNames(result.Matches)}
+		if err != nil {
+			output["error"] = err.Error()
+		}
+		return output
+	},
+}
+
+func (srv *Service) findServices(ctx context.Context, input serviceSearchInput) (domain.SearchResult[domain.ServiceRecord], error) {
 	all, err := srv.services(ctx)
 	if err != nil {
 		return domain.SearchResult[domain.ServiceRecord]{}, err
 	}
-	matches := scoreServices(all, query, limit)
+	matches := scoreServices(all, input.Query, input.Limit)
 
 	semantic := false
 	if srv.semanticEnabled() {
-		names, err := srv.semanticServiceNames(ctx, query, limit)
+		names, err := srv.semanticServiceNames(ctx, input.Query, input.Limit)
 		if err != nil {
 			return domain.SearchResult[domain.ServiceRecord]{}, fmt.Errorf("semantic service search: %w", err)
 		}
-		matches = mergeServiceMatches(names, all, matches, limit)
+		matches = mergeServiceMatches(names, all, matches, input.Limit)
 		semantic = true
 	}
 	return domain.SearchResult[domain.ServiceRecord]{Matches: matches, Semantic: semantic}, nil
@@ -241,22 +354,28 @@ func (srv *Service) RunbookSearchResult(ctx context.Context, query knowledge.Run
 }
 
 // FindRunbooks returns typed runbook matches for internal consumers.
-func (srv *Service) FindRunbooks(ctx context.Context, query knowledge.RunbookQuery) (result domain.RunbookSearchResult, resultErr error) {
-	started := time.Now()
-	if domain.TraceEnabled(ctx) {
-		defer func() {
-			status := "completed"
-			output := map[string]any{"matches": len(result.Matches), "semantic": result.Semantic, "runbooks": traceRunbookNames(result.Matches)}
-			if resultErr != nil {
-				status = "failed"
-				output["error"] = resultErr.Error()
-			}
-			domain.RecordTrace(ctx, domain.EvaluationTrace{
-				Node: "runbook_search", Status: status, DurationMS: time.Since(started).Milliseconds(),
-				Input: map[string]any{"query": query.Query, "limit": query.Limit, "doc_id": query.DocID}, Output: output,
-			})
-		}()
-	}
+func (srv *Service) FindRunbooks(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+	return executiontrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+		return srv.findRunbooks(ctx, query)
+	})
+}
+
+var runbookSearchSpec = executiontrace.Spec[knowledge.RunbookQuery, domain.RunbookSearchResult]{
+	Operation: "knowledge.runbook_search",
+	Node:      "runbook_search",
+	Input: func(query knowledge.RunbookQuery) map[string]any {
+		return map[string]any{"query": query.Query, "limit": query.Limit, "doc_id": query.DocID}
+	},
+	Output: func(_ knowledge.RunbookQuery, result domain.RunbookSearchResult, err error) map[string]any {
+		output := map[string]any{"matches": len(result.Matches), "semantic": result.Semantic, "runbooks": traceRunbookNames(result.Matches)}
+		if err != nil {
+			output["error"] = err.Error()
+		}
+		return output
+	},
+}
+
+func (srv *Service) findRunbooks(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
 	if srv.docStore == nil {
 		return domain.RunbookSearchResult{Matches: []domain.RunbookSearchHit{}, DocScoped: query.DocID != ""}, nil
 	}
@@ -516,25 +635,22 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 	if !srv.semanticEnabled() {
 		return domain.SearchResult[domain.CodeSearchHit]{}, fmt.Errorf("search_code requires semantic search and embedding configuration")
 	}
-	traceEnabled := domain.TraceEnabled(ctx)
-	embedStarted := time.Now()
-	vecs, err := srv.embedder.Embed(ctx, []string{query})
-	if err != nil || len(vecs) == 0 {
-		if traceEnabled {
-			domain.RecordTrace(ctx, domain.EvaluationTrace{
-				Node: "query_embedding", Status: "failed", DurationMS: time.Since(embedStarted).Milliseconds(),
-				Input: map[string]any{"query": query}, Output: map[string]any{"error": errString(err), "vectors": len(vecs)},
-			})
+	embedding, err := executiontrace.Invoke(ctx, queryEmbeddingSpec, query, func(ctx context.Context, query string) (queryEmbeddingOutput, error) {
+		vectors, embedErr := srv.embedder.Embed(ctx, []string{query})
+		output := queryEmbeddingOutput{Vectors: vectors, EmbedErr: embedErr}
+		if embedErr != nil {
+			return output, embedErr
 		}
-		log.ErrorfCtx(ctx, "[search_code] embed failed: err=%v vecs=%d", err, len(vecs))
-		return domain.SearchResult[domain.CodeSearchHit]{}, fmt.Errorf("embed query: %s", errString(err))
+		if len(vectors) == 0 {
+			return output, errEmptyQueryEmbedding
+		}
+		return output, nil
+	})
+	if err != nil {
+		log.ErrorfCtx(ctx, "[search_code] embed failed: err=%v vecs=%d", embedding.EmbedErr, len(embedding.Vectors))
+		return domain.SearchResult[domain.CodeSearchHit]{}, fmt.Errorf("embed query: %s", errString(embedding.EmbedErr))
 	}
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "query_embedding", DurationMS: time.Since(embedStarted).Milliseconds(),
-			Input: map[string]any{"query": query}, Output: map[string]any{"vectors": len(vecs), "dimensions": len(vecs[0])},
-		})
-	}
+	vecs := embedding.Vectors
 	filters := map[string]string{"kind": "code_chunk"}
 	if lang != "" {
 		filters["lang"] = lang
@@ -547,22 +663,18 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 		Limit: fetchLimit, GroupBy: "path",
 	}
 	if bm := srv.BM25View(); bm != nil {
-		sparseStarted := time.Now()
-		sv := bm.QuerySparse(query)
-		indices, values := retrieval.SparseToSorted(sv)
-		sparseTerms = len(indices)
-		if traceEnabled {
-			domain.RecordTrace(ctx, domain.EvaluationTrace{
-				Node: "sparse_query", DurationMS: time.Since(sparseStarted).Milliseconds(),
-				Input: map[string]any{"query": query}, Output: map[string]any{"terms": sparseTerms, "known_terms": sparseTerms > 0},
-			})
-		}
-		if len(indices) == 0 {
+		sparse, _ := executiontrace.Invoke(ctx, sparseQuerySpec, query, func(_ context.Context, query string) (sparseQueryOutput, error) {
+			vector := bm.QuerySparse(query)
+			indices, values := retrieval.SparseToSorted(vector)
+			return sparseQueryOutput{Indices: indices, Values: values}, nil
+		})
+		sparseTerms = len(sparse.Indices)
+		if sparseTerms == 0 {
 			log.InfofCtx(ctx, "[search_code] dense fallback: query has no known BM25 terms, dim=%d", len(vecs[0]))
 		} else {
 			mode = "hybrid"
-			log.InfofCtx(ctx, "[search_code] hybrid: dim=%d sparseTerms=%d", len(vecs[0]), len(indices))
-			searchQuery.SparseVector = &semantic.SparseVector{Indices: indices, Values: values}
+			log.InfofCtx(ctx, "[search_code] hybrid: dim=%d sparseTerms=%d", len(vecs[0]), sparseTerms)
+			searchQuery.SparseVector = &semantic.SparseVector{Indices: sparse.Indices, Values: sparse.Values}
 		}
 	} else {
 		srv.denseWarnOnce.Do(func() {
@@ -570,78 +682,65 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 		})
 		log.InfofCtx(ctx, "[search_code] dense-only: dim=%d (BM25 nil)", len(vecs[0]))
 	}
-	searchStarted := time.Now()
-	hits, err := srv.semantic.Search(ctx, searchQuery)
-	if traceEnabled {
-		searchStatus := "completed"
-		searchOutput := map[string]any{"hits": len(hits), "top": traceSemanticHits(hits)}
-		if err != nil {
-			searchStatus = "failed"
-			searchOutput["error"] = err.Error()
-		}
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "vector_search", Status: searchStatus, DurationMS: time.Since(searchStarted).Milliseconds(),
-			Input:  map[string]any{"mode": mode, "fetch_limit": fetchLimit, "sparse_terms": sparseTerms, "filters": filters},
-			Output: searchOutput,
-		})
-	}
+	hits, err := executiontrace.Invoke(ctx, vectorSearchSpec, vectorSearchInput{
+		Query: searchQuery, Mode: mode, FetchLimit: fetchLimit, SparseTerms: sparseTerms, Filters: filters,
+	}, func(ctx context.Context, input vectorSearchInput) ([]semantic.Hit, error) {
+		return srv.semantic.Search(ctx, input.Query)
+	})
 	if err != nil {
 		log.ErrorfCtx(ctx, "[search_code] semantic search failed: %v", err)
 		return domain.SearchResult[domain.CodeSearchHit]{}, err
 	}
 	log.InfofCtx(ctx, "[search_code] semantic backend returned %d hits before filtering", len(hits))
-	sort.SliceStable(hits, func(i, j int) bool {
-		return hits[i].Score > hits[j].Score
+	candidates, _ := executiontrace.Invoke(ctx, fileDedupSpec, fileDedupInput{
+		Hits: hits, FetchLimit: fetchLimit,
+	}, func(_ context.Context, input fileDedupInput) ([]semantic.Hit, error) {
+		sort.SliceStable(input.Hits, func(i, j int) bool {
+			return input.Hits[i].Score > input.Hits[j].Score
+		})
+		candidates := make([]semantic.Hit, 0, len(input.Hits))
+		seenFile := make(map[string]struct{}, len(input.Hits))
+		for _, hit := range input.Hits {
+			path, _ := hit.Metadata["path"].(string)
+			if strings.Contains(path, "/"+platform.WorkspaceMetadataDir) || strings.HasPrefix(path, platform.WorkspaceMetadataDir) {
+				continue
+			}
+			if _, duplicate := seenFile[path]; duplicate {
+				continue
+			}
+			seenFile[path] = struct{}{}
+			candidates = append(candidates, hit)
+		}
+		return candidates, nil
 	})
-	candidates := make([]semantic.Hit, 0, len(hits))
-	seenFile := make(map[string]struct{}, len(hits))
-	for _, h := range hits {
-		path, _ := h.Metadata["path"].(string)
-		if strings.Contains(path, "/"+platform.WorkspaceMetadataDir) || strings.HasPrefix(path, platform.WorkspaceMetadataDir) {
-			continue
-		}
-		if _, dup := seenFile[path]; dup {
-			continue
-		}
-		seenFile[path] = struct{}{}
-		candidates = append(candidates, h)
-	}
 	log.InfofCtx(ctx, "[search_code] dedup by file: %d hits -> %d files", len(hits), len(candidates))
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "file_dedup", Input: map[string]any{"hits": len(hits), "fetch_limit": fetchLimit},
-			Output: map[string]any{"files": len(candidates), "top": traceSemanticHits(candidates)},
-		})
-	}
 
-	ranked := rankCodeHits(query, candidates, limit)
-	matches := make([]domain.CodeSearchHit, 0, len(ranked))
-	for _, candidate := range ranked {
-		h := candidate.hit
-		evidenceClass, trustTier := evidenceFromCodeHit(h)
-		adjusted := domain.TrustAdjustedScore(float64(h.Score), trustTier)
-		match := domain.CodeSearchHit{
-			Path: payloadString(h.Metadata, "path"), Lang: payloadString(h.Metadata, "lang"),
-			Repo: payloadString(h.Metadata, "repo"), Layer: payloadString(h.Metadata, "layer"),
-			StartLine: payloadInt(h.Metadata["start_line"]), EndLine: payloadInt(h.Metadata["end_line"]),
-			Text: payloadString(h.Metadata, "text"), Preview: payloadString(h.Metadata, "preview"),
-			Score: adjusted, ScoreKind: string(h.ScoreKind), EvidenceClass: evidenceClass, TrustTier: trustTier,
+	ranked, _ := executiontrace.Invoke(ctx, codeRankSpec, codeRankInput{
+		Query: query, Candidates: candidates, Limit: limit,
+	}, func(_ context.Context, input codeRankInput) (codeRankOutput, error) {
+		ranked := rankCodeHits(input.Query, input.Candidates, input.Limit)
+		matches := make([]domain.CodeSearchHit, 0, len(ranked))
+		for _, candidate := range ranked {
+			hit := candidate.hit
+			evidenceClass, trustTier := evidenceFromCodeHit(hit)
+			adjusted := domain.TrustAdjustedScore(float64(hit.Score), trustTier)
+			match := domain.CodeSearchHit{
+				Path: payloadString(hit.Metadata, "path"), Lang: payloadString(hit.Metadata, "lang"),
+				Repo: payloadString(hit.Metadata, "repo"), Layer: payloadString(hit.Metadata, "layer"),
+				StartLine: payloadInt(hit.Metadata["start_line"]), EndLine: payloadInt(hit.Metadata["end_line"]),
+				Text: payloadString(hit.Metadata, "text"), Preview: payloadString(hit.Metadata, "preview"),
+				Score: adjusted, ScoreKind: string(hit.ScoreKind), EvidenceClass: evidenceClass, TrustTier: trustTier,
+			}
+			if hit.ScoreKind == semantic.ScoreFusion {
+				match.FusionScore = float64(hit.FusionScore)
+			} else {
+				match.SemanticScore = float64(hit.DenseScore)
+			}
+			matches = append(matches, match)
 		}
-		if h.ScoreKind == semantic.ScoreFusion {
-			match.FusionScore = float64(h.FusionScore)
-		} else {
-			match.SemanticScore = float64(h.DenseScore)
-		}
-		matches = append(matches, match)
-	}
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node:   "code_rank",
-			Input:  map[string]any{"candidates": len(candidates), "limit": limit},
-			Output: map[string]any{"matches": len(matches), "top": traceRankedCodeHits(ranked)},
-		})
-	}
-	return domain.SearchResult[domain.CodeSearchHit]{Matches: matches, Semantic: true}, nil
+		return codeRankOutput{Ranked: ranked, Matches: matches}, nil
+	})
+	return domain.SearchResult[domain.CodeSearchHit]{Matches: ranked.Matches, Semantic: true}, nil
 }
 
 func traceSemanticHits(hits []semantic.Hit) []map[string]any {

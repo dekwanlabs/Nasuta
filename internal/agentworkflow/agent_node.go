@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
 )
 
@@ -69,7 +70,7 @@ func (executor *AgentNodeExecutor) Execute(
 	if err != nil {
 		return NodeResult{}, err
 	}
-	result, err := executor.runtime.Run(ctx, agentapi.RunRequest{
+	runRequest := agentapi.RunRequest{
 		RunID: runID, Agent: request.Node.Agent, DefinitionHash: definition.ContentHash,
 		Input: request.Inputs[0].Payload, Permissions: permissions,
 		ToolScope: agentapi.ToolScope{
@@ -78,10 +79,24 @@ func (executor *AgentNodeExecutor) Execute(
 		Policy: agentapi.RunPolicy{MaxToolCalls: request.Node.Budget.MaxToolCalls},
 		Actor:  request.Actor,
 		Correlation: agentapi.Correlation{
+			ParentRunID:   request.WorkflowRunID,
 			WorkflowRunID: request.WorkflowRunID,
 			NodeID:        request.Node.ID,
 		},
+	}
+	childCtx := executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+		RunID: runID, ParentRunID: request.WorkflowRunID,
+		WorkflowRunID: request.WorkflowRunID, AgentRunID: runID,
+		WorkflowNodeID: request.Node.ID,
 	})
+	result, err := executiontrace.Invoke(
+		childCtx,
+		multiAgentChildRunTraceSpec,
+		runRequest,
+		func(ctx context.Context, runRequest agentapi.RunRequest) (agentapi.RunResult, error) {
+			return executor.runtime.Run(ctx, runRequest)
+		},
+	)
 	nodeResult := NodeResult{
 		AgentRunID: runID,
 		Usage: WorkflowUsage{
@@ -121,6 +136,47 @@ func (executor *AgentNodeExecutor) Execute(
 		Completeness:   Complete,
 	}
 	return nodeResult, nil
+}
+
+var multiAgentChildRunTraceSpec = executiontrace.Spec[agentapi.RunRequest, agentapi.RunResult]{
+	Operation: "multi_agent.child_run",
+	Node:      "multi_agent_child_run",
+	Input: func(request agentapi.RunRequest) map[string]any {
+		return map[string]any{
+			"agent_id":         request.Agent.ID,
+			"agent_version":    request.Agent.Version,
+			"workflow_node_id": request.Correlation.NodeID,
+		}
+	},
+	Output: func(request agentapi.RunRequest, result agentapi.RunResult, err error) map[string]any {
+		fields := map[string]any{
+			"agent_run_id":  request.RunID,
+			"run_status":    result.Status,
+			"input_tokens":  result.Usage.InputTokens,
+			"output_tokens": result.Usage.OutputTokens,
+			"total_tokens":  result.Usage.TotalTokens,
+			"tool_calls":    result.Evidence.ToolCallCount,
+		}
+		if err != nil {
+			fields["error"] = err.Error()
+		} else if result.Error != nil {
+			fields["error_code"] = result.Error.Code
+		}
+		return fields
+	},
+	Status: func(result agentapi.RunResult, err error) string {
+		if err != nil {
+			return ""
+		}
+		switch result.Status {
+		case agentapi.RunFailed:
+			return "failed"
+		case agentapi.RunCancelled:
+			return "cancelled"
+		default:
+			return ""
+		}
+	},
 }
 
 type agentNodeRunError struct {

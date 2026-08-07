@@ -8,6 +8,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 )
 
@@ -22,6 +23,24 @@ func TestRetrievePlanWebOnlySkipsInternalFanout(t *testing.T) {
 	}
 	if rc.Text != "" || rc.HitCount != 0 {
 		t.Fatalf("web-only pre-retrieval = %+v, want empty", rc)
+	}
+}
+
+func TestDiscoverPreservesRetrievalSourcesTraceContract(t *testing.T) {
+	var events []domain.EvaluationTrace
+	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	}))
+	retrieve := New(servicePathFakeTools{}, config.Config{})
+	retrieve.discover(ctx, "checkout", nil, false)
+	if len(events) != 1 || events[0].Node != "retrieval_sources" {
+		t.Fatalf("events = %#v", events)
+	}
+	for _, source := range []string{"code", "runbook", "service"} {
+		item, ok := events[0].Output[source].(map[string]any)
+		if !ok || item["status"] != "empty" || item["candidate_count"] != 0 {
+			t.Fatalf("source %q = %#v", source, events[0].Output[source])
+		}
 	}
 }
 

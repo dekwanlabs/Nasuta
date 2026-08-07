@@ -7,6 +7,12 @@ import (
 	"testing"
 )
 
+type panicExecutionObserver struct{}
+
+func (panicExecutionObserver) OnToolExecution(context.Context, Execution) {
+	panic("observer failed")
+}
+
 func TestRegisterAllIsAtomic(t *testing.T) {
 	registry := NewRegistry()
 	if err := registry.Register(testTool("existing", "v1")); err != nil {
@@ -54,6 +60,18 @@ func TestExecutorValidatesRequiredArguments(t *testing.T) {
 	_, err := NewExecutor(0).Execute(context.Background(), registry.Snapshot(ReadPolicy()), "required", Arguments{})
 	if err == nil {
 		t.Fatal("executor accepted missing required argument")
+	}
+}
+
+func TestExecutorObserverPanicDoesNotReplaceToolResult(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register(testTool("observed", "ok")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithExecutionObserver(t.Context(), panicExecutionObserver{})
+	result, err := NewExecutor(0).Execute(ctx, registry.Snapshot(ReadPolicy()), "observed", Arguments{})
+	if err != nil || result.Content != "ok" {
+		t.Fatalf("result = %#v, error = %v", result, err)
 	}
 }
 

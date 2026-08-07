@@ -3,12 +3,16 @@ package agentworkflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 )
 
 func TestPrepareRejectsCyclesAndSchemaMismatches(t *testing.T) {
@@ -123,6 +127,166 @@ func TestOrchestratorRunsParallelWaveAndJoinsByProducerNodeID(t *testing.T) {
 	}
 }
 
+func TestOrchestratorTracesMultipleTerminalAggregation(t *testing.T) {
+	var events []domain.EvaluationTrace
+	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	})
+	definition := testWorkflow()
+	definition.Nodes = definition.Nodes[:2]
+	definition.Edges = nil
+	definition.Budget.MaxNodes = 2
+	orchestrator := NewOrchestrator(testSchemaRegistry(t), staticOutputExecutor{}, nil)
+	_, err := orchestrator.Run(ctx, definition, RunRequest{
+		RunID: "workflow_trace_terminals", Input: json.RawMessage(`{"subject":"x"}`),
+		ActorPermissions:    agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
+		ScenarioPermissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aggregate *domain.EvaluationTrace
+	for index := range events {
+		if events[index].Node == "multi_agent_aggregate" {
+			aggregate = &events[index]
+			break
+		}
+	}
+	if aggregate == nil || aggregate.RunID != "workflow_trace_terminals" ||
+		aggregate.WorkflowRunID != "workflow_trace_terminals" || aggregate.WorkflowNodeID != "workflow.output" {
+		t.Fatalf("aggregate = %#v events = %#v", aggregate, events)
+	}
+	producers, ok := aggregate.Input["producer_node_ids"].([]string)
+	if !ok || !reflect.DeepEqual(producers, []string{"review.a", "review.b"}) {
+		t.Fatalf("aggregate producers = %#v", aggregate.Input["producer_node_ids"])
+	}
+}
+
+func TestOrchestratorAggregatesParallelChildRunTrace(t *testing.T) {
+	var events []domain.EvaluationTrace
+	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	})
+	agentExecutor, err := NewAgentNodeExecutor(
+		testSchemaRegistry(t),
+		testAgentDefinitions(t),
+		agentRuntimeFunc(func(_ context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
+			payload, marshalErr := json.Marshal(map[string]string{"node": request.Correlation.NodeID})
+			if marshalErr != nil {
+				return agentapi.RunResult{}, marshalErr
+			}
+			return agentapi.RunResult{
+				RunID: request.RunID, Status: agentapi.RunSucceeded, Output: payload,
+			}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := NewOrchestrator(testSchemaRegistry(t), agentExecutor, nil)
+	_, err = orchestrator.Run(ctx, testWorkflow(), RunRequest{
+		RunID: "workflow_trace_parallel", Input: json.RawMessage(`{"subject":"x"}`),
+		ActorPermissions:    agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
+		ScenarioPermissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 7 {
+		t.Fatalf("events = %#v", events)
+	}
+	traceID := events[0].TraceID
+	childRuns := make(map[string]string, 2)
+	var dispatch, aggregate *domain.EvaluationTrace
+	for index := range events {
+		event := &events[index]
+		if event.Sequence != index+1 || event.TraceID == "" || event.TraceID != traceID {
+			t.Fatalf("event %d = %#v", index, event)
+		}
+		switch event.Node {
+		case "multi_agent_child_run":
+			if event.RunID == "" || event.RunID != event.AgentRunID ||
+				event.ParentRunID != "workflow_trace_parallel" ||
+				event.WorkflowRunID != "workflow_trace_parallel" ||
+				event.WorkflowNodeID == "" {
+				t.Fatalf("child event = %#v", event)
+			}
+			childRuns[event.RunID] = event.WorkflowNodeID
+		case "multi_agent_dispatch":
+			dispatch = event
+		case "multi_agent_aggregate":
+			aggregate = event
+		}
+	}
+	if len(childRuns) != 2 || dispatch == nil || aggregate == nil {
+		t.Fatalf("child runs=%v dispatch=%#v aggregate=%#v", childRuns, dispatch, aggregate)
+	}
+	if dispatch.RunID != "workflow_trace_parallel" || dispatch.WorkflowRunID != "workflow_trace_parallel" ||
+		dispatch.Output["dispatched"] != 2 || dispatch.Output["failed"] != 0 {
+		t.Fatalf("dispatch = %#v", dispatch)
+	}
+	dispatchedRuns, ok := dispatch.Output["child_run_ids"].([]string)
+	if !ok || len(dispatchedRuns) != 2 {
+		t.Fatalf("dispatch child runs = %#v", dispatch.Output["child_run_ids"])
+	}
+	for _, runID := range dispatchedRuns {
+		if _, exists := childRuns[runID]; !exists {
+			t.Fatalf("dispatched child %q not found in %v", runID, childRuns)
+		}
+	}
+	producers, ok := aggregate.Input["producer_node_ids"].([]string)
+	if !ok || !reflect.DeepEqual(producers, []string{"review.a", "review.b"}) ||
+		aggregate.WorkflowNodeID != "synthesize" {
+		t.Fatalf("aggregate = %#v", aggregate)
+	}
+}
+
+func TestOrchestratorEmitsWorkflowNodeTraceFromSharedScope(t *testing.T) {
+	var events []domain.EvaluationTrace
+	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	})
+	orchestrator := NewOrchestrator(testSchemaRegistry(t), staticOutputExecutor{}, nil)
+	_, err := orchestrator.Run(ctx, singleNodeWorkflow(), RunRequest{
+		RunID: "workflow_trace_1", ParentRunID: "qa_parent_1",
+		Input: json.RawMessage(`{"subject":"x"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v", events)
+	}
+	event := events[0]
+	if event.Sequence != 1 || event.Node != "workflow_node" || event.Status != "completed" ||
+		event.TraceID == "" || event.RunID != "workflow_trace_1" ||
+		event.ParentRunID != "qa_parent_1" ||
+		event.WorkflowRunID != "workflow_trace_1" || event.WorkflowNodeID != "review.a" ||
+		event.Output["workflow_run_id"] != "workflow_trace_1" || event.Output["node_id"] != "review.a" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestOrchestratorTracesWaitingHumanStatus(t *testing.T) {
+	definition := singleNodeWorkflow()
+	definition.Nodes[0].Kind = NodeHumanApproval
+	definition.Nodes[0].OutputSchema = definition.InputSchema
+	definition.OutputSchema = definition.InputSchema
+	var events []domain.EvaluationTrace
+	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	})
+	_, err := NewOrchestrator(testSchemaRegistry(t), nil, nil).Run(ctx, definition, RunRequest{
+		RunID: "workflow_trace_wait", Input: json.RawMessage(`{"subject":"x"}`),
+	})
+	if !errors.Is(err, ErrHumanApprovalRequired) {
+		t.Fatalf("error = %v", err)
+	}
+	if len(events) != 1 || events[0].Status != "waiting_human" || events[0].Output["node_id"] != "review.a" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
 func TestOrchestratorRejectsInputOutsideWorkflowSchema(t *testing.T) {
 	orchestrator := NewOrchestrator(testSchemaRegistry(t), &recordingExecutor{}, nil)
 	_, err := orchestrator.Run(t.Context(), testWorkflow(), RunRequest{
@@ -207,6 +371,12 @@ func (invalidOutputExecutor) Execute(context.Context, NodeRequest) (NodeResult, 
 }
 
 type staticOutputExecutor struct{}
+
+type agentRuntimeFunc func(context.Context, agentapi.RunRequest) (agentapi.RunResult, error)
+
+func (run agentRuntimeFunc) Run(ctx context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
+	return run(ctx, request)
+}
 
 func (staticOutputExecutor) Execute(_ context.Context, request NodeRequest) (NodeResult, error) {
 	payload, _ := json.Marshal(map[string]string{"node": request.Node.ID})

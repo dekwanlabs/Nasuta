@@ -31,9 +31,10 @@ func TestServicePersistsSuccessfulWorkflowLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := service.Execute(t.Context(), ExecuteRequest{
-		Workflow: DefinitionRef{ID: definition.ID, Version: definition.Version},
-		Input:    json.RawMessage(`{"subject":"x"}`),
-		Actor:    agentapi.Actor{UserID: 9, TenantID: "tenant-a"},
+		ParentRunID: "qa_parent_1",
+		Workflow:    DefinitionRef{ID: definition.ID, Version: definition.Version},
+		Input:       json.RawMessage(`{"subject":"x"}`),
+		Actor:       agentapi.Actor{UserID: 9, TenantID: "tenant-a"},
 		ActorPermissions: agentapi.PermissionPolicy{
 			Scopes: []string{"knowledge.read"},
 		},
@@ -53,6 +54,7 @@ func TestServicePersistsSuccessfulWorkflowLifecycle(t *testing.T) {
 	if persistence.startedRun.ID != result.RunID ||
 		persistence.startedRun.WorkflowHash == "" ||
 		persistence.startedRun.InputHash == "" ||
+		persistence.startedRun.ParentRunID != "qa_parent_1" ||
 		persistence.startedRun.ActorUserID != 9 ||
 		persistence.startedRun.Scenario != "test.review" {
 		t.Fatalf("started run = %+v", persistence.startedRun)

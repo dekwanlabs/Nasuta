@@ -8,6 +8,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
 	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
 )
@@ -58,6 +59,40 @@ func NewExecutor(service reviewExecutionService) *Executor {
 }
 
 func (executor *Executor) Execute(
+	ctx context.Context,
+	request agentworkflow.NodeRequest,
+) (agentworkflow.NodeResult, error) {
+	return executiontrace.Invoke(ctx, reviewStageTraceSpec, request, executor.execute)
+}
+
+var reviewStageTraceSpec = executiontrace.Spec[agentworkflow.NodeRequest, agentworkflow.NodeResult]{
+	Operation: "feature_delivery.review_stage",
+	Node:      "feature_delivery_stage",
+	Input: func(request agentworkflow.NodeRequest) map[string]any {
+		return map[string]any{
+			"node_id":      request.Node.ID,
+			"transform_id": request.Node.TransformID,
+			"attempt":      request.Attempt,
+			"input_count":  len(request.Inputs),
+		}
+	},
+	Output: func(_ agentworkflow.NodeRequest, result agentworkflow.NodeResult, err error) map[string]any {
+		fields := map[string]any{
+			"agent_run_id":  result.AgentRunID,
+			"completeness":  result.Handoff.Completeness,
+			"input_tokens":  result.Usage.InputTokens,
+			"output_tokens": result.Usage.OutputTokens,
+			"total_tokens":  result.Usage.TotalTokens,
+			"tool_calls":    result.Usage.ToolCalls,
+		}
+		if err != nil {
+			fields["error"] = err.Error()
+		}
+		return fields
+	},
+}
+
+func (executor *Executor) execute(
 	ctx context.Context,
 	request agentworkflow.NodeRequest,
 ) (agentworkflow.NodeResult, error) {
@@ -133,40 +168,27 @@ func (executor *Executor) assignment(
 	if err != nil {
 		return agentworkflow.NodeResult{}, err
 	}
-	var report *featuredelivery.ReviewReport
-	var usage featuredelivery.ReviewUsage
-	var runErr error
-	if service, ok := executor.service.(reviewExecutionServiceWithUsage); ok {
-		report, usage, runErr = service.ExecuteReviewAssignmentAttemptWithUsage(
-			ctx,
-			roundID,
-			reviewerID,
-			request.WorkflowRunID,
-			runID,
-			request.Attempt,
-			request.Actor,
-			true,
-		)
-	} else {
-		report, runErr = executor.service.ExecuteReviewAssignmentAttempt(
-			ctx,
-			roundID,
-			reviewerID,
-			request.WorkflowRunID,
-			runID,
-			request.Attempt,
-			request.Actor,
-			true,
-		)
-	}
+	childCtx := executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+		RunID: runID, ParentRunID: request.WorkflowRunID,
+		WorkflowRunID: request.WorkflowRunID, AgentRunID: runID,
+		WorkflowNodeID: request.Node.ID,
+	})
+	child, runErr := executiontrace.Invoke(
+		childCtx,
+		reviewChildRunTraceSpec,
+		reviewChildRunInput{
+			roundID: roundID, reviewerID: reviewerID, runID: runID, request: request,
+		},
+		executor.executeAssignment,
+	)
 	nodeResult := agentworkflow.NodeResult{
 		AgentRunID: runID,
-		Usage:      toWorkflowUsage(usage),
+		Usage:      toWorkflowUsage(child.usage),
 	}
 	if runErr != nil {
 		return nodeResult, runErr
 	}
-	payload, err := json.Marshal(report)
+	payload, err := json.Marshal(child.report)
 	if err != nil {
 		return nodeResult, fmt.Errorf("marshal review report: %w", err)
 	}
@@ -174,6 +196,73 @@ func (executor *Executor) assignment(
 		Payload: payload, Completeness: agentworkflow.Complete,
 	}
 	return nodeResult, nil
+}
+
+type reviewChildRunInput struct {
+	roundID    string
+	reviewerID string
+	runID      string
+	request    agentworkflow.NodeRequest
+}
+
+type reviewChildRunOutput struct {
+	report *featuredelivery.ReviewReport
+	usage  featuredelivery.ReviewUsage
+}
+
+var reviewChildRunTraceSpec = executiontrace.Spec[reviewChildRunInput, reviewChildRunOutput]{
+	Operation: "multi_agent.child_run",
+	Node:      "multi_agent_child_run",
+	Input: func(input reviewChildRunInput) map[string]any {
+		return map[string]any{
+			"agent_id":         input.request.Node.TransformID,
+			"reviewer_id":      input.reviewerID,
+			"workflow_node_id": input.request.Node.ID,
+		}
+	},
+	Output: func(input reviewChildRunInput, output reviewChildRunOutput, err error) map[string]any {
+		fields := map[string]any{
+			"agent_run_id":  input.runID,
+			"input_tokens":  output.usage.InputTokens,
+			"output_tokens": output.usage.OutputTokens,
+			"total_tokens":  output.usage.TotalTokens,
+			"tool_calls":    output.usage.ToolCalls,
+		}
+		if err != nil {
+			fields["error"] = err.Error()
+		}
+		return fields
+	},
+}
+
+func (executor *Executor) executeAssignment(
+	ctx context.Context,
+	input reviewChildRunInput,
+) (reviewChildRunOutput, error) {
+	if service, ok := executor.service.(reviewExecutionServiceWithUsage); ok {
+		report, usage, err := service.ExecuteReviewAssignmentAttemptWithUsage(
+			ctx,
+			input.roundID,
+			input.reviewerID,
+			input.request.WorkflowRunID,
+			input.runID,
+			input.request.Attempt,
+			input.request.Actor,
+			true,
+		)
+		return reviewChildRunOutput{report: report, usage: usage}, err
+	}
+	report, err := executor.service.ExecuteReviewAssignmentAttempt(
+		ctx,
+		input.roundID,
+		input.reviewerID,
+		input.request.WorkflowRunID,
+		input.runID,
+		input.request.Attempt,
+		input.request.Actor,
+		true,
+	)
+	return reviewChildRunOutput{report: report}, err
 }
 
 func (executor *Executor) adjudicate(

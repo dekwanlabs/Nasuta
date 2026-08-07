@@ -1,15 +1,18 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
-	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/tracecontract"
 )
 
 type failingSSEWriter struct {
@@ -38,21 +41,40 @@ func (writer *failingSSEWriter) FlushError() error {
 	return writer.flushErr
 }
 
-func TestQATraceRecorderSequencesEvents(t *testing.T) {
+func TestQATraceExporterStreamsScopeEvents(t *testing.T) {
 	hub := agent.NewRunHub(nil)
 	channel := hub.Subscribe("run")
-	recorder := &qaTraceRecorder{started: time.Now(), runID: "run", hub: hub}
-	recorder.RecordTrace(domain.EvaluationTrace{Node: "evidence_plan"})
-	recorder.RecordTrace(domain.EvaluationTrace{Node: "query_rewrite"})
-	buffered := recorder.Activate()
-	if len(buffered) != 2 || buffered[0].Sequence != 1 || buffered[1].Sequence != 2 {
-		t.Fatalf("buffered = %#v", buffered)
+	scope := executiontrace.Begin(executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		hub.EmitTrace("run", event)
+	}))
+	ctx := executiontrace.WithScope(t.Context(), scope)
+	domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "evidence_plan"})
+	domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "agent_model_turn"})
+	for sequence := 1; sequence <= 2; sequence++ {
+		live := <-channel
+		trace, ok := live.Data.(domain.EvaluationTrace)
+		if live.Type != agent.EventTrace || !ok || trace.Sequence != sequence {
+			t.Fatalf("live event = %#v", live)
+		}
 	}
-	recorder.RecordTrace(domain.EvaluationTrace{Node: "agent_model_turn"})
-	live := <-channel
-	trace, ok := live.Data.(domain.EvaluationTrace)
-	if live.Type != agent.EventTrace || !ok || trace.Sequence != 3 {
-		t.Fatalf("live event = %#v", live)
+}
+
+func TestQATraceUsesV1WireContract(t *testing.T) {
+	event := tracecontract.EventV1{
+		TraceID: "trace-1", RunID: "agent-1", ParentRunID: "workflow-1",
+		WorkflowRunID: "workflow-1", AgentRunID: "agent-1", WorkflowNodeID: "review.code",
+		Node: "evidence_plan", Status: "completed",
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded tracecontract.EventV1
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded, event) {
+		t.Fatalf("trace contract = %#v", decoded)
 	}
 }
 
@@ -95,6 +117,37 @@ func TestEmitHubEventUsesToolSummary(t *testing.T) {
 	})
 	if eventName != "tool.finished" || data != payload {
 		t.Fatalf("event=%q data=%#v", eventName, data)
+	}
+}
+
+func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
+	payload := agent.ExecutionEvent{
+		RunID: "qa-parent", WorkflowRunID: "workflow-1", NodeID: "investigate.code",
+		Strategy: "multi_agent", Status: "completed", Reason: "evidence joined",
+		Complexity: 0.95, Confidence: 0.91,
+	}
+	tests := []struct {
+		eventType agent.EventType
+	}{
+		{eventType: agent.EventExecutionRouted},
+		{eventType: agent.EventExecutionDegraded},
+		{eventType: agent.EventWorkflowStarted},
+		{eventType: agent.EventAgentStarted},
+		{eventType: agent.EventAgentCompleted},
+		{eventType: agent.EventEvidenceJoined},
+	}
+	for _, test := range tests {
+		t.Run(string(test.eventType), func(t *testing.T) {
+			var eventName string
+			var data any
+			emitHubEvent(agent.SSEEvent{Type: test.eventType, Data: payload}, func(name string, value any) bool {
+				eventName, data = name, value
+				return true
+			})
+			if eventName != string(test.eventType) || data != payload {
+				t.Fatalf("event=%q data=%#v", eventName, data)
+			}
+		})
 	}
 }
 

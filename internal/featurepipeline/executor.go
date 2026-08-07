@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
 	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
 )
@@ -31,6 +32,38 @@ func (executor *Executor) SetPollInterval(interval time.Duration) {
 }
 
 func (executor *Executor) Execute(
+	ctx context.Context,
+	request agentworkflow.NodeRequest,
+) (agentworkflow.NodeResult, error) {
+	return executiontrace.Invoke(ctx, featureStageTraceSpec, request, executor.execute)
+}
+
+var featureStageTraceSpec = executiontrace.Spec[agentworkflow.NodeRequest, agentworkflow.NodeResult]{
+	Operation: "feature_delivery.stage",
+	Node:      "feature_delivery_stage",
+	Input: func(request agentworkflow.NodeRequest) map[string]any {
+		return map[string]any{
+			"node_id":      request.Node.ID,
+			"transform_id": request.Node.TransformID,
+			"attempt":      request.Attempt,
+			"input_count":  len(request.Inputs),
+		}
+	},
+	Output: func(_ agentworkflow.NodeRequest, result agentworkflow.NodeResult, err error) map[string]any {
+		fields := map[string]any{
+			"completeness":  result.Handoff.Completeness,
+			"input_tokens":  result.Usage.InputTokens,
+			"output_tokens": result.Usage.OutputTokens,
+			"total_tokens":  result.Usage.TotalTokens,
+		}
+		if err != nil {
+			fields["error"] = err.Error()
+		}
+		return fields
+	},
+}
+
+func (executor *Executor) execute(
 	ctx context.Context,
 	request agentworkflow.NodeRequest,
 ) (agentworkflow.NodeResult, error) {

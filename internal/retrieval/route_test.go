@@ -55,7 +55,7 @@ func TestBindPlanDecisionAllowsDirect(t *testing.T) {
 func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"web\"],\"confidence\":0.96},\"query_terms\":{\"domain_terms\":[\"设备删除\"],\"identifiers\":[\"question\"]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"web\"],\"confidence\":0.96},\"query_terms\":{\"domain_terms\":[\"设备删除\"],\"identifiers\":[\"question\"]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.82,\"confidence\":0.91,\"reasons\":[\"requires_cross_source_analysis\",\"requires_independent_evidence_validation\"]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -70,6 +70,9 @@ func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	if len(result.Terms.DomainTerms) != 1 || result.Terms.DomainTerms[0] != "设备删除" || len(result.Terms.Identifiers) != 1 {
 		t.Fatalf("terms = %+v", result.Terms)
 	}
+	if result.Execution.Strategy != ExecutionMultiAgent || result.Execution.Complexity != 0.82 || len(result.Execution.Reasons) != 2 {
+		t.Fatalf("execution = %+v", result.Execution)
+	}
 }
 
 func TestAnalyzeEvidenceDerivesHistoryRelationInSameCall(t *testing.T) {
@@ -81,7 +84,7 @@ func TestAnalyzeEvidenceDerivesHistoryRelationInSameCall(t *testing.T) {
 			t.Fatalf("request missing bounded history metadata: %s", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"history_relation\":{\"topic_affinity\":0.7,\"confidence\":0.8,\"needs_prior_entities\":true,\"needs_prior_conclusion\":false,\"needs_prior_evidence\":false,\"explicit_turn_refs\":[]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.2,\"confidence\":0.9,\"reasons\":[\"single_focused_question\"]},\"history_relation\":{\"topic_affinity\":0.7,\"confidence\":0.8,\"needs_prior_entities\":true,\"needs_prior_conclusion\":false,\"needs_prior_evidence\":false,\"explicit_turn_refs\":[]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -132,7 +135,7 @@ func TestAnalyzeForPlanSkipsRouterWhenNoHelpersConfigured(t *testing.T) {
 func TestAnalyzeEvidenceSelectsRegisteredToolIntent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[\"runtime failure\"],\"identifiers\":[]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[\"runtime failure\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"reasons\":[\"single_source_sufficient\"]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -152,7 +155,7 @@ func TestAnalyzeEvidenceSelectsRegisteredToolIntent(t *testing.T) {
 func TestAnalyzeEvidenceExtractsGroundedMultilingualTime(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"time\":{\"kind\":\"last\",\"n\":0,\"unit\":\"day\",\"raw\":\"últimos días\"}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"reasons\":[\"single_source_sufficient\"]},\"time\":{\"kind\":\"last\",\"n\":0,\"unit\":\"day\",\"raw\":\"últimos días\"}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -319,6 +322,41 @@ func TestRoutingExamplesValidateAgainstSchema(t *testing.T) {
 	}
 	if _, err := bindHistoryRelation(historyRaw, ""); err != nil {
 		t.Fatalf("historyExampleJSON does not validate: %v", err)
+	}
+
+	executionTop := mustParseJSON(t, executionExampleJSON)
+	executionRaw, ok := executionTop["execution"].(map[string]any)
+	if !ok {
+		t.Fatalf("executionExampleJSON missing top-level execution object: %s", executionExampleJSON)
+	}
+	if _, err := bindExecutionSuggestion(executionRaw); err != nil {
+		t.Fatalf("executionExampleJSON does not validate: %v", err)
+	}
+}
+
+func TestBindExecutionSuggestionRejectsUnknownAndUnboundedValues(t *testing.T) {
+	tests := []map[string]any{
+		{"strategy": "dynamic_team", "complexity": 0.8, "confidence": 0.9, "reasons": []any{}},
+		{"strategy": "multi_agent", "complexity": 1.1, "confidence": 0.9, "reasons": []any{}},
+		{"strategy": "multi_agent", "complexity": 0.8, "confidence": 0.9, "reasons": []any{"specific_keyword_rule"}},
+	}
+	for _, raw := range tests {
+		if _, err := bindExecutionSuggestion(raw); err == nil {
+			t.Fatalf("invalid execution suggestion accepted: %#v", raw)
+		}
+	}
+}
+
+func TestBindExecutionSuggestionDeduplicatesStableReasons(t *testing.T) {
+	suggestion, err := bindExecutionSuggestion(map[string]any{
+		"strategy": "multi_agent", "complexity": 0.8, "confidence": 0.9,
+		"reasons": []any{"requires_multiple_subproblems", "requires_multiple_subproblems"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(suggestion.Reasons) != 1 || suggestion.Reasons[0] != "requires_multiple_subproblems" {
+		t.Fatalf("suggestion = %+v", suggestion)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
 )
 
@@ -20,6 +21,7 @@ var (
 
 type RunRequest struct {
 	RunID               string
+	ParentRunID         string
 	Input               json.RawMessage
 	Actor               agentapi.Actor
 	ActorPermissions    agentapi.PermissionPolicy
@@ -150,6 +152,15 @@ func (orchestrator *Orchestrator) RunObserved(
 	request RunRequest,
 	observer RunObserver,
 ) (Result, error) {
+	trace, ownsTrace := workflowExecutionTrace(ctx)
+	if ownsTrace {
+		defer trace.Close()
+	}
+	ctx = executiontrace.WithScope(ctx, trace)
+	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+		RunID: request.RunID, ParentRunID: request.ParentRunID,
+		WorkflowRunID: request.RunID,
+	})
 	prepared, metadata, err := orchestrator.prepareRun(definition, request)
 	if err != nil {
 		return Result{}, err
@@ -179,6 +190,15 @@ func (orchestrator *Orchestrator) ResumeObserved(
 	progress WorkflowProgress,
 	observer RunObserver,
 ) (Result, error) {
+	trace, ownsTrace := workflowExecutionTrace(ctx)
+	if ownsTrace {
+		defer trace.Close()
+	}
+	ctx = executiontrace.WithScope(ctx, trace)
+	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+		RunID: request.RunID, ParentRunID: request.ParentRunID,
+		WorkflowRunID: request.RunID,
+	})
 	prepared, metadata, err := orchestrator.prepareRun(definition, request)
 	if err != nil {
 		return Result{}, err
@@ -196,6 +216,12 @@ func (orchestrator *Orchestrator) ResumeObserved(
 		return Result{}, fmt.Errorf("workflow %q progress start time is required", prepared.ID)
 	}
 	return orchestrator.runPrepared(ctx, prepared, metadata, request, progress, observer)
+}
+
+func workflowExecutionTrace(ctx context.Context) (*executiontrace.Scope, bool) {
+	inherited := executiontrace.FromContext(ctx)
+	trace := executiontrace.Begin(ctx)
+	return trace, trace != nil && inherited == nil
 }
 
 func (orchestrator *Orchestrator) prepareRun(
@@ -249,35 +275,12 @@ func (orchestrator *Orchestrator) runPrepared(
 			}
 			return Result{}, fmt.Errorf("workflow %q cannot make progress", definition.ID)
 		}
-		wave := make([]nodeOutcome, len(ready))
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, definition.Budget.MaxParallelism)
-		for index, nodeID := range ready {
-			index, node := index, metadata.nodes[nodeID]
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				select {
-				case sem <- struct{}{}:
-					defer func() { <-sem }()
-				case <-runCtx.Done():
-					wave[index].err = runCtx.Err()
-					return
-				}
-				inputs := predecessorHandoffs(node.ID, metadata.predecessors, outputs, progress.Input)
-				wave[index] = orchestrator.executeNode(
-					runCtx,
-					definition,
-					request,
-					node,
-					inputs,
-					progress.NodeAttempts[node.ID],
-					account,
-					observer,
-				)
-			}()
+		wave, err := orchestrator.dispatchWave(
+			runCtx, definition, metadata, request, progress, outputs, ready, account, observer,
+		)
+		if err != nil {
+			return Result{}, err
 		}
-		wg.Wait()
 		var waveErr error
 		for index, outcome := range wave {
 			node := metadata.nodes[ready[index]]
@@ -318,13 +321,12 @@ func (orchestrator *Orchestrator) runPrepared(
 	}
 	output := terminals[0]
 	if len(terminals) > 1 {
-		output, err = joinHandoffs(
+		output, err = orchestrator.aggregateHandoffs(
+			ctx,
 			request.RunID,
-			"workflow.output",
-			definition.OutputSchema,
+			NodeDefinition{ID: "workflow.output", OutputSchema: definition.OutputSchema},
 			terminals,
 			definition.Budget.MaxHandoffBytes,
-			orchestrator.schemas,
 		)
 		if err != nil {
 			return Result{}, err
@@ -346,6 +348,98 @@ func (orchestrator *Orchestrator) runPrepared(
 		RunID: request.RunID, Output: output, NodeOutputs: outputs, Gates: gates,
 		Usage: account.Usage(),
 	}, nil
+}
+
+type dispatchInput struct {
+	definition WorkflowDefinition
+	ready      []string
+}
+
+type dispatchOutput struct {
+	outcomes []nodeOutcome
+}
+
+var multiAgentDispatchTraceSpec = executiontrace.Spec[dispatchInput, dispatchOutput]{
+	Operation: "multi_agent.dispatch",
+	Node:      "multi_agent_dispatch",
+	Input: func(input dispatchInput) map[string]any {
+		return map[string]any{
+			"workflow_id":    input.definition.ID,
+			"ready_nodes":    append([]string(nil), input.ready...),
+			"parallel_limit": input.definition.Budget.MaxParallelism,
+		}
+	},
+	Output: func(_ dispatchInput, output dispatchOutput, _ error) map[string]any {
+		childRunIDs := make([]string, 0, len(output.outcomes))
+		failed := 0
+		for _, outcome := range output.outcomes {
+			if outcome.nodeResult.AgentRunID != "" {
+				childRunIDs = append(childRunIDs, outcome.nodeResult.AgentRunID)
+			}
+			if outcome.err != nil {
+				failed++
+			}
+		}
+		return map[string]any{
+			"child_run_ids": childRunIDs,
+			"dispatched":    len(output.outcomes),
+			"failed":        failed,
+		}
+	},
+	Record: func(output dispatchOutput, _ error) bool {
+		return len(output.outcomes) > 1
+	},
+}
+
+func (orchestrator *Orchestrator) dispatchWave(
+	ctx context.Context,
+	definition WorkflowDefinition,
+	metadata graphMetadata,
+	request RunRequest,
+	progress WorkflowProgress,
+	outputs map[string]Handoff,
+	ready []string,
+	account *workflowBudgetAccount,
+	observer RunObserver,
+) ([]nodeOutcome, error) {
+	result, err := executiontrace.Invoke(
+		ctx,
+		multiAgentDispatchTraceSpec,
+		dispatchInput{definition: definition, ready: ready},
+		func(ctx context.Context, _ dispatchInput) (dispatchOutput, error) {
+			wave := make([]nodeOutcome, len(ready))
+			var waitGroup sync.WaitGroup
+			semaphore := make(chan struct{}, definition.Budget.MaxParallelism)
+			for index, nodeID := range ready {
+				index, node := index, metadata.nodes[nodeID]
+				waitGroup.Add(1)
+				go func() {
+					defer waitGroup.Done()
+					select {
+					case semaphore <- struct{}{}:
+						defer func() { <-semaphore }()
+					case <-ctx.Done():
+						wave[index].err = ctx.Err()
+						return
+					}
+					inputs := predecessorHandoffs(node.ID, metadata.predecessors, outputs, progress.Input)
+					wave[index] = orchestrator.executeNode(
+						ctx,
+						definition,
+						request,
+						node,
+						inputs,
+						progress.NodeAttempts[node.ID],
+						account,
+						observer,
+					)
+				}()
+			}
+			waitGroup.Wait()
+			return dispatchOutput{outcomes: wave}, nil
+		},
+	)
+	return result.outcomes, err
 }
 
 type nodeOutcome struct {
@@ -420,6 +514,53 @@ func (orchestrator *Orchestrator) executeNodeAttempt(
 	account *workflowBudgetAccount,
 	observer RunObserver,
 ) nodeOutcome {
+	nodeCtx = executiontrace.WithCorrelation(nodeCtx, executiontrace.Correlation{
+		RunID: nodeRequest.WorkflowRunID, WorkflowRunID: nodeRequest.WorkflowRunID,
+		WorkflowNodeID: nodeRequest.Node.ID,
+	})
+	outcome, err := executiontrace.Invoke(nodeCtx, workflowNodeTraceSpec, nodeRequest, func(nodeCtx context.Context, _ NodeRequest) (nodeOutcome, error) {
+		outcome := orchestrator.executeNodeAttemptUntraced(nodeCtx, definition, request, nodeRequest, account, observer)
+		return outcome, outcome.err
+	})
+	outcome.err = err
+	return outcome
+}
+
+var workflowNodeTraceSpec = executiontrace.Spec[NodeRequest, nodeOutcome]{
+	Operation: "workflow.node.execute",
+	Node:      "workflow_node",
+	Input: func(request NodeRequest) map[string]any {
+		return map[string]any{"input_count": len(request.Inputs)}
+	},
+	Output: func(request NodeRequest, result nodeOutcome, err error) map[string]any {
+		output := map[string]any{
+			"workflow_run_id": request.WorkflowRunID,
+			"node_id":         request.Node.ID,
+			"node_kind":       request.Node.Kind,
+			"attempt":         request.Attempt,
+			"agent_run_id":    result.nodeResult.AgentRunID,
+		}
+		if err != nil {
+			output["error"] = err.Error()
+		}
+		return output
+	},
+	Status: func(_ nodeOutcome, err error) string {
+		if errors.Is(err, ErrHumanApprovalRequired) {
+			return "waiting_human"
+		}
+		return ""
+	},
+}
+
+func (orchestrator *Orchestrator) executeNodeAttemptUntraced(
+	nodeCtx context.Context,
+	definition WorkflowDefinition,
+	request RunRequest,
+	nodeRequest NodeRequest,
+	account *workflowBudgetAccount,
+	observer RunObserver,
+) nodeOutcome {
 	node := nodeRequest.Node
 	inputs := nodeRequest.Inputs
 	reservation, err := account.Reserve(node, nodeRequest.Attempt)
@@ -443,13 +584,8 @@ func (orchestrator *Orchestrator) executeNodeAttempt(
 	var executeErr error
 	switch node.Kind {
 	case NodeJoin:
-		handoff, executeErr = joinHandoffs(
-			request.RunID,
-			node.ID,
-			node.OutputSchema,
-			inputs,
-			definition.Budget.MaxHandoffBytes,
-			orchestrator.schemas,
+		handoff, executeErr = orchestrator.aggregateHandoffs(
+			nodeCtx, request.RunID, node, inputs, definition.Budget.MaxHandoffBytes,
 		)
 	case NodeGate:
 		evaluator := orchestrator.gates[node.Gate.ID]

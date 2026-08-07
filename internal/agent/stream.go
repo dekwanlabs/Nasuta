@@ -125,14 +125,20 @@ func (h *StreamPipe) OnToolCall(_ llm.ToolCall) { h.recordTiming("tool_call") }
 type EventType string
 
 const (
-	EventAnswerDelta    EventType = "answer.delta"
-	EventToolStarted    EventType = "tool.started"
-	EventToolFinished   EventType = "tool.finished"
-	EventStatus         EventType = "status"
-	EventReasoningDelta EventType = "reasoning.delta"
-	EventTrace          EventType = "trace"
-	EventLLMCall        EventType = "llm.call"
-	EventRunFinished    EventType = "run.finished"
+	EventAnswerDelta       EventType = "answer.delta"
+	EventToolStarted       EventType = "tool.started"
+	EventToolFinished      EventType = "tool.finished"
+	EventStatus            EventType = "status"
+	EventReasoningDelta    EventType = "reasoning.delta"
+	EventTrace             EventType = "trace"
+	EventLLMCall           EventType = "llm.call"
+	EventExecutionRouted   EventType = "execution.routed"
+	EventExecutionDegraded EventType = "execution.degraded"
+	EventWorkflowStarted   EventType = "workflow.started"
+	EventAgentStarted      EventType = "agent.started"
+	EventAgentCompleted    EventType = "agent.completed"
+	EventEvidenceJoined    EventType = "evidence.joined"
+	EventRunFinished       EventType = "run.finished"
 )
 
 type TextEvent struct {
@@ -155,6 +161,22 @@ type ToolFinishedEvent struct {
 	DeliveryError string `json:"delivery_error,omitempty"`
 	DurationMs    int    `json:"duration_ms"`
 	SizeBytes     int64  `json:"size_bytes"`
+}
+
+// ExecutionEvent is the stable product projection for routed QA work.
+type ExecutionEvent struct {
+	RunID         string  `json:"run_id"`
+	WorkflowRunID string  `json:"workflow_run_id,omitempty"`
+	NodeID        string  `json:"node_id,omitempty"`
+	Strategy      string  `json:"strategy,omitempty"`
+	Status        string  `json:"status"`
+	Reason        string  `json:"reason,omitempty"`
+	Complexity    float64 `json:"complexity,omitempty"`
+	Confidence    float64 `json:"confidence,omitempty"`
+}
+
+type ExecutionEventEmitter interface {
+	EmitExecutionEvent(EventType, ExecutionEvent)
 }
 
 // SSEEvent is the tagged event forwarded unchanged by the HTTP transport.
@@ -312,6 +334,11 @@ func (hub *RunHub) OnLLMCall(ctx context.Context, runID string, call llm.CallLif
 // status, not agent reasoning steps, so they must not pollute agent_steps.
 func (hub *RunHub) EmitPhase(runID, text string) {
 	hub.broadcast(runID, SSEEvent{Type: EventStatus, Data: TextEvent{Text: text}})
+}
+
+// EmitExecutionEvent keeps product progress separate from evaluation trace events.
+func (hub *RunHub) EmitExecutionEvent(eventType EventType, event ExecutionEvent) {
+	hub.broadcast(event.RunID, SSEEvent{Type: eventType, Data: event})
 }
 
 func (hub *RunHub) Complete(runID string, outcome RunOutcome) {

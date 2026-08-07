@@ -161,6 +161,7 @@ func TestDefinitionRuntimeRedactsRunInputBeforePersistence(t *testing.T) {
 	expectedInput := platform.RedactSensitiveText(string(request.Input))
 	mock.ExpectExec("INSERT INTO agent_runs").WithArgs(
 		request.RunID,
+		RunKindAgent,
 		request.Actor.UserID,
 		request.Correlation.SessionID,
 		definition.ID,

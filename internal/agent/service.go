@@ -18,6 +18,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
@@ -34,22 +35,25 @@ import (
 
 // QADeps bundles the services needed by the QA scenario.
 type QADeps struct {
-	Tools          *Service
-	Semantic       semantic.Store
-	Embedder       embed.Embedder
-	Cfg            config.Config
-	Platform       *config.PlatformSettings
-	CodeGraphDB    *codegraph.DB
-	DB             *sql.DB
-	History        SessionHistory
-	Sessions       *memory.SessionStore
-	Definitions    DefinitionResolver
-	Agent          agentapi.DefinitionRef
-	Runtime        agentapi.ManagedRuntime
-	RuntimeTools   ScenarioToolSource
-	Models         *QAModels
-	PhaseEmitter   interface{ EmitPhase(string, string) }
-	WriteAvailable bool
+	Tools             *Service
+	Semantic          semantic.Store
+	Embedder          embed.Embedder
+	Cfg               config.Config
+	Platform          *config.PlatformSettings
+	CodeGraphDB       *codegraph.DB
+	DB                *sql.DB
+	History           SessionHistory
+	Sessions          *memory.SessionStore
+	Definitions       DefinitionResolver
+	Agent             agentapi.DefinitionRef
+	Runtime           agentapi.ManagedRuntime
+	RuntimeTools      ScenarioToolSource
+	Models            *QAModels
+	PhaseEmitter      interface{ EmitPhase(string, string) }
+	Investigation     InvestigationRunner
+	ScenarioLifecycle ScenarioLifecycle
+	ExecutionEvents   ExecutionEventEmitter
+	WriteAvailable    bool
 }
 
 type DefinitionResolver interface {
@@ -79,6 +83,9 @@ type QA struct {
 	runtime            agentapi.ManagedRuntime
 	runtimeTools       ScenarioToolSource
 	phaseEmitter       interface{ EmitPhase(string, string) }
+	investigation      InvestigationRunner
+	scenarios          ScenarioLifecycle
+	executionEvents    ExecutionEventEmitter
 	memory             *memory.MemoryStore
 	sessions           *memory.SessionStore
 	history            SessionHistory
@@ -100,6 +107,53 @@ type QA struct {
 type AskResult struct {
 	RunID   string
 	Context *retrieval.RetrievedContext
+}
+
+type memoryRecallInput struct {
+	Store          *memory.MemoryStore
+	UserID         int64
+	Query          string
+	Limit          int
+	TemporalIntent memory.TemporalIntent
+}
+
+type memoryRecallOutput struct {
+	Result memory.RecallResult
+	Status string
+	Error  string
+}
+
+var memoryRecallSpec = executiontrace.Spec[*memoryRecallInput, memoryRecallOutput]{
+	Operation: "memory.recall",
+	Node:      "memory_recall",
+	Input: func(input *memoryRecallInput) map[string]any {
+		result := map[string]any{"user_id": input.UserID, "limit": input.Limit}
+		if input.TemporalIntent != "" {
+			result["temporal_intent"] = input.TemporalIntent
+		}
+		return result
+	},
+	Output: func(_ *memoryRecallInput, output memoryRecallOutput, _ error) map[string]any {
+		if output.Status != "completed" {
+			return map[string]any{"records": len(output.Result.Records), "error": output.Error}
+		}
+		stats := output.Result.Stats
+		return map[string]any{
+			"candidates": stats.Candidates, "invalid_payload": stats.InvalidPayload,
+			"missing_records": stats.MissingRecords, "unauthorized": stats.Unauthorized,
+			"superseded_filtered": stats.SupersededFiltered, "expired_filtered": stats.ExpiredFiltered,
+			"episode_filtered": stats.EpisodeFiltered, "records": stats.Injected,
+		}
+	},
+	Status: func(output memoryRecallOutput, _ error) string { return output.Status },
+}
+
+var memoryInjectSpec = executiontrace.Spec[[]memory.MemoryRecord, string]{
+	Operation: "memory.inject",
+	Node:      "memory_inject",
+	Output: func(records []memory.MemoryRecord, formatted string, _ error) map[string]any {
+		return map[string]any{"records": len(records), "characters": len([]rune(formatted))}
+	},
 }
 
 // ContextBlock is trusted evidence prepared by an upper-layer scenario.
@@ -165,7 +219,9 @@ func NewQA(d QADeps) *QA {
 		domainKnowledge: platformSettings.DomainKnowledge,
 		definitions:     d.Definitions, agentRef: d.Agent,
 		runtime: d.Runtime, runtimeTools: d.RuntimeTools,
-		phaseEmitter: d.PhaseEmitter, writeAvailable: d.WriteAvailable,
+		phaseEmitter: d.PhaseEmitter, investigation: d.Investigation,
+		scenarios: d.ScenarioLifecycle, executionEvents: d.ExecutionEvents,
+		writeAvailable: d.WriteAvailable,
 	}
 	if svc.agentRef.ID == "" {
 		svc.agentRef = agentapi.DefinitionRef{ID: "qa.answerer"}
@@ -275,16 +331,114 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if runID == "" {
 		runID = NewRunID()
 	}
+	trace, ownsTrace := beginExecutionTrace(ctx)
+	ctx = executiontrace.WithScope(ctx, trace)
+	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+		RunID: runID, ParentRunID: request.ParentRunID,
+	})
+	closeTrace := func() {
+		if ownsTrace {
+			trace.Close()
+		}
+	}
 	toolPolicy := ToolPolicyForRun(svc.writeAvailable && request.AllowWrite)
 	candidateTools := svc.runtimeTools.PrepareTools(toolPolicy)
 	if conversation.CompactedThroughTurn <= 0 || svc.history == nil {
 		candidateTools = withoutSessionHistoryTools(candidateTools)
 	}
+	explicitPlan := request.EvidencePlan
+	toolCandidates := routingCandidates(candidateTools.Tools())
+	emit := func(text string) {
+		svc.emitStep(runID, text)
+	}
+
+	emit("嗯...让我先琢磨一下你在问什么 ✨")
+	routeContext := buildHistoryRouteContext(conversation)
+	if routeContext == "" {
+		routeContext = buildRagCtx(conversation.Recent)
+	}
+
+	requestAnchor := time.Now()
+	hctx, cancelPlanning := context.WithTimeout(llm.WithUsagePhase(ctx, llm.PhaseRoute), helperTimeout)
+	planning, _ := svc.planEvidence(hctx, evidencePlanningInput{
+		Question: question, RouteContext: routeContext, ExplicitPlan: explicitPlan,
+		ToolCandidates: toolCandidates, AvailableTools: scenarioToolIDs(candidateTools.Tools()), UserID: userID,
+	})
+	cancelPlanning()
+	cleanQuestion, terms, timeExpr := planning.CleanQuestion, planning.Terms, planning.Time
+	decision, effectiveDecision := planning.Decision, planning.Effective
+	planningErr, routedToolIDs := planning.PlanningError, planning.RoutedToolIDs
+	analysis, _ := analyzeQuery(ctx, queryAnalysisInput{
+		Question: question, CleanQuestion: cleanQuestion, Terms: terms, Time: timeExpr,
+		Anchor: requestAnchor, RecentTurns: conversation.RecentTurns,
+		History: planning.History, HistoryValid: planning.HistoryValid,
+	})
+	assembled, assembleErr := svc.assembleContext(ctx, contextAssembleInput{
+		Question: question, UserID: userID, Conversation: conversation,
+		Relation: analysis.History, Origin: analysis.HistoryOrigin, Upgrade: analysis.HistoryUpdate,
+	})
+	if assembleErr != nil {
+		closeTrace()
+		return nil, assembleErr
+	}
+	conversation = assembled.Conversation
+	if analysis.TimeError != nil {
+		planningErr = errors.Join(planningErr, fmt.Errorf("resolve relative time: %w", analysis.TimeError))
+	} else if analysis.HasTimeRange {
+		ctx = tool.WithTimeRange(ctx, analysis.TimeRange)
+		log.InfofCtx(ctx, "[qa] relative time resolved raw=%q from=%s to=%s",
+			analysis.TimeRange.Raw, analysis.TimeRange.From.Format(time.RFC3339), analysis.TimeRange.To.Format(time.RFC3339))
+	}
+
+	if decision.Origin == domain.Model &&
+		decision.Plan.Direct() && decision.Confidence < svc.routerConfidence {
+		log.WarnfCtx(ctx, "[qa] evidence planner direct confidence %.2f below %.2f; using internal fallback", decision.Confidence, svc.routerConfidence)
+	}
+	if planningErr != nil {
+		log.WarnfCtx(ctx, "[qa] evidence planning degraded: %v", planningErr)
+		routedToolIDs = nil
+	}
+	policy := ExecutionPolicy{
+		AllowMultiAgent: standardQARequest(request, svc.agentRef),
+		MinComplexity:   defaultMultiAgentMinComplexity,
+		MinConfidence:   defaultMultiAgentMinConfidence,
+	}
+	workflowAvailable := false
+	if policy.AllowMultiAgent && svc.investigation != nil && svc.scenarios != nil {
+		workflowAvailable = svc.investigation.Available()
+	}
+	execution := routeExecution(ctx, executionRouteInput{
+		Suggestion: planning.Execution, Policy: policy,
+		EvidencePlan: effectiveDecision.Plan, AllowWrite: request.AllowWrite,
+		WorkflowAvailable: workflowAvailable,
+		History:           planning.History, HistoryValid: planning.HistoryValid,
+		ToolCandidates: toolCandidates, RoutedToolIDs: routedToolIDs,
+	})
+	svc.emitExecutionEvent(EventExecutionRouted, ExecutionEvent{
+		RunID: runID, Strategy: string(execution.Strategy), Status: "completed",
+		Complexity: planning.Execution.Complexity, Confidence: planning.Execution.Confidence,
+	})
+	degradedReason := execution.DowngradeReason
+	if degradedReason == "" && planningErr != nil {
+		degradedReason = "route_degraded"
+	}
+	if degradedReason != "" {
+		svc.emitExecutionEvent(EventExecutionDegraded, ExecutionEvent{
+			RunID: runID, Strategy: string(execution.Strategy), Status: "degraded",
+			Reason: degradedReason, Complexity: planning.Execution.Complexity,
+			Confidence: planning.Execution.Confidence,
+		})
+	}
+	if execution.Strategy == retrieval.ExecutionMultiAgent {
+		return svc.submitInvestigation(ctx, request, question, conversation, userID, runID, trace, ownsTrace)
+	}
+
 	agentRef := request.Agent
 	if agentRef.ID == "" {
 		agentRef = svc.agentRef
 	}
 	if svc.definitionErr != nil {
+		closeTrace()
 		return nil, fmt.Errorf("resolve agent definition %q: %w", agentRef.ID, svc.definitionErr)
 	}
 	var definition agentapi.Definition
@@ -298,6 +452,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 			definition, err = svc.definitions.Resolve(agentRef)
 		}
 		if err != nil {
+			closeTrace()
 			return nil, fmt.Errorf("resolve agent definition %q: %w", agentRef.ID, err)
 		}
 	}
@@ -322,6 +477,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		},
 	})
 	if err != nil {
+		closeTrace()
 		return nil, fmt.Errorf("begin QA run %q: %w", runID, err)
 	}
 	ctx = run.Context(ctx)
@@ -331,161 +487,8 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		}); finishErr != nil {
 			log.ErrorfCtx(ctx, "[qa] finish failed preparation %s: %v", runID, finishErr)
 		}
+		closeTrace()
 	}
-	explicitPlan := request.EvidencePlan
-	toolCandidates := routingCandidates(candidateTools.Tools())
-	traceEnabled := domain.TraceEnabled(ctx)
-	emit := func(text string) {
-		svc.emitStep(runID, text)
-	}
-
-	emit("嗯...让我先琢磨一下你在问什么 ✨")
-	routeContext := buildHistoryRouteContext(conversation)
-	if routeContext == "" {
-		routeContext = buildRagCtx(conversation.Recent)
-	}
-
-	cleanQuestion := strings.TrimSpace(question)
-	var terms retrieval.QueryTerms
-	var timeExpr retrieval.TimeExpr
-	decision := domain.InternalFallbackDecision()
-	var planningErr error
-	var routedToolIDs []string
-	var historyRelation retrieval.HistoryRelation
-	var historyRelationValid bool
-	requestAnchor := time.Now()
-	analysisStarted := requestAnchor
-	planningStarted := time.Now()
-	func() {
-		hctx, cancel := context.WithTimeout(llm.WithUsagePhase(ctx, llm.PhaseRoute), helperTimeout)
-		defer cancel()
-		termsQuestion := strings.TrimSpace(question)
-		if explicitPlan != nil {
-			analysis, err := retrieval.AnalyzeForPlan(
-				hctx, svc.fastLLM, question, routeContext, termsQuestion,
-				toolCandidates, svc.routerMaxTokens, *explicitPlan,
-			)
-			if err != nil {
-				planningErr = err
-				cleanQuestion = strings.TrimSpace(question)
-				decision = domain.PlanDecision{Plan: *explicitPlan, Confidence: 1, Origin: domain.Explicit}
-				return
-			}
-			cleanQuestion, terms, timeExpr, decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
-			historyRelation, historyRelationValid = analysis.History, routeContext != ""
-			routedToolIDs = analysis.ToolIDs
-		} else if shouldShortCircuitMeta(question) {
-			cleanQuestion = strings.TrimSpace(question)
-			decision = domain.PlanDecision{
-				Plan: domain.DirectPlan(), Confidence: 1, Origin: domain.Rule,
-			}
-		} else {
-			analysis, err := retrieval.AnalyzeEvidence(
-				hctx, svc.fastLLM, question, routeContext, termsQuestion,
-				retrieval.RoutingCapabilities{
-					Memory: svc.memory != nil && svc.memory.Enabled() && userID != 0,
-					Web:    svc.cfg.WebSearchEnabled,
-				},
-				toolCandidates,
-				svc.routerMaxTokens,
-			)
-			if err != nil {
-				planningErr = err
-				cleanQuestion = strings.TrimSpace(question)
-				decision = domain.InternalFallbackDecision()
-				return
-			}
-			cleanQuestion, terms, timeExpr, decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
-			historyRelation, historyRelationValid = analysis.History, routeContext != ""
-			routedToolIDs = analysis.ToolIDs
-		}
-	}()
-	planningDuration := time.Since(planningStarted)
-	historyRelation, relationOrigin, relationUpgrade := resolveHistoryRelation(
-		question, conversation.RecentTurns, historyRelation, historyRelationValid,
-	)
-	assembled, assembleStats, assembleErr := svc.assembleActiveHistory(
-		ctx, question, userID, conversation, historyRelation, relationOrigin, relationUpgrade,
-	)
-	if assembleErr != nil {
-		finishPreparationFailure(assembleErr)
-		return nil, assembleErr
-	}
-	conversation = assembled
-	continuity := ""
-	if len(conversation.RecentTurns) > 0 &&
-		(historyRelation.NeedsPriorEntities || historyRelation.NeedsPriorConclusion || historyRelation.NeedsPriorEvidence) {
-		continuity = conversation.RecentTurns[0].Question
-	}
-	if svc.history != nil && conversation.CompactedThroughTurn > 0 && conversation.SessionID != "" {
-		historyBudget := min(int(float64(svc.contextWindow)*0.08), 32768)
-		recalledHistory, recallErr := svc.history.Recall(ctx, userID, conversation.SessionID, question, continuity, historyBudget)
-		if recallErr != nil {
-			runErr := fmt.Errorf("recall current session history: %w", recallErr)
-			finishPreparationFailure(runErr)
-			return nil, runErr
-		}
-		conversation.RetrievedHistory = recalledHistory
-	}
-	if traceEnabled {
-		assembleStatus := "completed"
-		if relationOrigin == "deterministic" {
-			assembleStatus = "degraded"
-		}
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "context_assemble", Status: assembleStatus, Output: map[string]any{
-				"topic_affinity": historyRelation.TopicAffinity, "confidence": historyRelation.Confidence,
-				"relation_origin":        relationOrigin,
-				"needs_prior_entities":   historyRelation.NeedsPriorEntities,
-				"needs_prior_conclusion": historyRelation.NeedsPriorConclusion,
-				"needs_prior_evidence":   historyRelation.NeedsPriorEvidence,
-				"dependency_upgrade":     relationUpgrade, "candidate_turns": assembleStats.CandidateCount,
-				"selected_turns": assembleStats.SelectedCount, "full_turns": assembleStats.FullTurnCount,
-				"detail_turns": assembleStats.DetailCount, "reference_turns": assembleStats.ReferenceCount,
-				"omitted_turns": assembleStats.OmittedCount, "history_budget_tokens": assembleStats.HistoryBudgetTokens,
-				"history_used_tokens":   assembleStats.HistoryUsedTokens,
-				"selected_turn_numbers": assembleStats.SelectedTurnNumbers, "selected_reasons": assembleStats.SelectedReasons,
-			},
-		})
-	}
-	resolvedTime, hasResolvedTime, timeErr := retrieval.ResolveTime(timeExpr, requestAnchor)
-	if timeErr != nil {
-		planningErr = errors.Join(planningErr, fmt.Errorf("resolve relative time: %w", timeErr))
-	} else if hasResolvedTime {
-		ctx = tool.WithTimeRange(ctx, resolvedTime)
-		log.InfofCtx(ctx, "[qa] relative time resolved raw=%q from=%s to=%s",
-			resolvedTime.Raw, resolvedTime.From.Format(time.RFC3339), resolvedTime.To.Format(time.RFC3339))
-	}
-	timeFrom, timeTo := "", ""
-	if hasResolvedTime {
-		timeFrom = resolvedTime.From.Format(time.RFC3339)
-		timeTo = resolvedTime.To.Format(time.RFC3339)
-	}
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "query_analysis", DurationMS: time.Since(analysisStarted).Milliseconds(),
-			Input: map[string]any{"question": question, "history_candidates": len(conversation.RecentTurns)},
-			Output: map[string]any{
-				"clean_question": cleanQuestion, "domain_terms": terms.DomainTerms,
-				"identifiers":   terms.Identifiers,
-				"response_mode": ClassifyResponseMode(question),
-				"time_kind":     timeExpr.Kind, "time_raw": timeExpr.Raw,
-				"time_from": timeFrom, "time_to": timeTo,
-			},
-		})
-	}
-
-	effectiveDecision := decision
-	if decision.Origin == domain.Model &&
-		decision.Plan.Direct() && decision.Confidence < svc.routerConfidence {
-		log.WarnfCtx(ctx, "[qa] evidence planner direct confidence %.2f below %.2f; using internal fallback", decision.Confidence, svc.routerConfidence)
-		effectiveDecision = domain.InternalFallbackDecision()
-	}
-	if planningErr != nil {
-		log.WarnfCtx(ctx, "[qa] evidence planning degraded: %v", planningErr)
-		routedToolIDs = nil
-	}
-	availableToolIDs := scenarioToolIDs(candidateTools.Tools())
 	if len(routedToolIDs) > 0 {
 		conversation.Instructions = append(conversation.Instructions, llm.Message{
 			Role:    "system",
@@ -503,29 +506,6 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] evidence plan proposed=%s proposed_sources=%v confidence=%.2f origin=%s effective=%s effective_sources=%v effective_confidence=%.2f effective_origin=%s",
 		decision.Plan.String(), decision.Plan.SourceNames(), decision.Confidence, decision.Origin,
 		effectiveDecision.Plan.String(), effectiveDecision.Plan.SourceNames(), effectiveDecision.Confidence, effectiveDecision.Origin)
-	if traceEnabled {
-		fallbackError := ""
-		if planningErr != nil && effectiveDecision.Origin == domain.Fallback {
-			fallbackError = planningErr.Error()
-		}
-		status := "completed"
-		planningError := ""
-		if planningErr != nil {
-			status = "degraded"
-			planningError = planningErr.Error()
-		}
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "evidence_plan", Status: status, DurationMS: planningDuration.Milliseconds(),
-			Output: map[string]any{
-				"response_mode": ClassifyResponseMode(question),
-				"proposed_plan": decision.Plan.String(), "proposed_sources": decision.Plan.SourceNames(), "proposed_confidence": decision.Confidence,
-				"proposed_origin": decision.Origin,
-				"effective_plan":  effectiveDecision.Plan.String(), "effective_sources": effectiveDecision.Plan.SourceNames(), "effective_confidence": effectiveDecision.Confidence,
-				"effective_origin": effectiveDecision.Origin, "preferred_tool_ids": routedToolIDs, "available_tool_ids": availableToolIDs,
-				"planning_error": planningError, "fallback_error": fallbackError,
-			},
-		})
-	}
 	webUnavailable := effectiveDecision.Plan.Has(domain.Web) && !svc.cfg.WebSearchEnabled
 	if webUnavailable {
 		log.WarnfCtx(ctx, "[qa] retrieval source unavailable: web")
@@ -543,40 +523,29 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	var recalled []memory.MemoryRecord
 	memoryUnavailable := ""
 	if evidencePlan.Has(domain.Memory) {
-		memoryStarted := time.Now()
-		memoryStatus := "completed"
-		memoryError := ""
-		if svc.memory == nil || !svc.memory.Enabled() || userID == 0 {
-			memoryStatus = "unavailable"
-			memoryError = "memory capability not configured for this user"
-			memoryUnavailable = memoryError
-			log.WarnfCtx(ctx, "[qa] evidence source unavailable: memory")
-		} else if recall, err := svc.memory.Recall(ctx, userID, question, 3); err == nil {
-			recalled = recall.Records
-			if traceEnabled {
-				domain.RecordTrace(ctx, domain.EvaluationTrace{
-					Node: "memory_recall", Status: memoryStatus, DurationMS: time.Since(memoryStarted).Milliseconds(),
-					Input: map[string]any{"user_id": userID, "limit": 3, "temporal_intent": recall.Intent},
-					Output: map[string]any{
-						"candidates": recall.Stats.Candidates, "invalid_payload": recall.Stats.InvalidPayload,
-						"missing_records": recall.Stats.MissingRecords, "unauthorized": recall.Stats.Unauthorized,
-						"superseded_filtered": recall.Stats.SupersededFiltered, "expired_filtered": recall.Stats.ExpiredFiltered,
-						"episode_filtered": recall.Stats.EpisodeFiltered, "records": recall.Stats.Injected,
-					},
-				})
-			}
-		} else {
-			memoryStatus = "failed"
-			memoryError = err.Error()
-			memoryUnavailable = "memory recall failed: " + memoryError
-			log.ErrorfCtx(ctx, "[qa] memory recall error: %v", err)
+		memoryInput := &memoryRecallInput{
+			Store: svc.memory, UserID: userID, Query: question, Limit: 3,
 		}
-		if traceEnabled && memoryStatus != "completed" {
-			domain.RecordTrace(ctx, domain.EvaluationTrace{
-				Node: "memory_recall", Status: memoryStatus, DurationMS: time.Since(memoryStarted).Milliseconds(),
-				Input:  map[string]any{"user_id": userID, "limit": 3},
-				Output: map[string]any{"records": len(recalled), "error": memoryError},
-			})
+		memoryResult, _ := executiontrace.Invoke(ctx, memoryRecallSpec, memoryInput, func(ctx context.Context, input *memoryRecallInput) (memoryRecallOutput, error) {
+			if input.Store == nil || !input.Store.Enabled() || input.UserID == 0 {
+				return memoryRecallOutput{Status: "unavailable", Error: "memory capability not configured for this user"}, nil
+			}
+			recall, recallErr := input.Store.Recall(ctx, input.UserID, input.Query, input.Limit)
+			if recallErr != nil {
+				return memoryRecallOutput{Status: "failed", Error: recallErr.Error()}, nil
+			}
+			input.TemporalIntent = recall.Intent
+			return memoryRecallOutput{Result: recall, Status: "completed"}, nil
+		})
+		switch memoryResult.Status {
+		case "unavailable":
+			memoryUnavailable = memoryResult.Error
+			log.WarnfCtx(ctx, "[qa] evidence source unavailable: memory")
+		case "failed":
+			memoryUnavailable = "memory recall failed: " + memoryResult.Error
+			log.ErrorfCtx(ctx, "[qa] memory recall error: %s", memoryResult.Error)
+		default:
+			recalled = memoryResult.Result.Records
 		}
 	}
 	if memoryUnavailable != "" {
@@ -587,25 +556,17 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		q = question
 	}
 	retrievalTerms := strings.TrimSpace(strings.Join(terms.DomainTerms, " "))
-	canonicalQuery := canonicalRetrievalQuery(q, retrievalTerms)
+	canonicalQuery, _ := rewriteQuery(ctx, queryRewriteInput{CleanQuestion: q, ContextTerms: retrievalTerms})
 	if canonicalQuery != q {
 		log.InfofCtx(ctx, "[qa] retrieval query: augmented with grounded terms (%d chars)", len(retrievalTerms))
 	}
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "query_rewrite", Input: map[string]any{"clean_question": q},
-			Output: map[string]any{"retrieval_query": canonicalQuery, "context_augmented": canonicalQuery != q},
-		})
-	}
 	preRetrieve := evidencePlan.Has(domain.Internal)
 	if !preRetrieve {
-		if traceEnabled {
-			domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "retrieval_dispatch", Output: map[string]any{"skipped": true, "sources": evidencePlan.SourceNames()}})
-		}
-		rc := &retrieval.RetrievedContext{OriginalQuestion: question}
-		mergePreloadedContext(rc, preloadedContext, svc.contextBudget())
-		appendUnavailableWeb(rc, webUnavailable)
-		return svc.submitRun(ctx, run, request, definition, selection, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, candidateTools)
+		rc, _ := skipRetrieval(ctx, retrievalDispatchInput{
+			Question: question, Plan: evidencePlan, Blocks: preloadedContext,
+			Budget: svc.contextBudget(), WebDown: webUnavailable,
+		})
+		return svc.submitRun(ctx, run, request, definition, selection, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, candidateTools, trace, ownsTrace)
 	}
 
 	emit("好嘞，关键词到手了，我去查一下资料~ 📚")
@@ -630,7 +591,83 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		log.InfofCtx(ctx, "[qa] pre-retrieve refs: %s", platform.TruncateForLog(strings.Join(refStrs, " | "), 800))
 	}
 	log.InfofCtx(ctx, "[qa] pre-retrieve context:\n%s", platform.TruncateForLog(rc.Text, 4000))
-	return svc.submitRun(ctx, run, request, definition, selection, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, candidateTools)
+	return svc.submitRun(ctx, run, request, definition, selection, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, candidateTools, trace, ownsTrace)
+}
+
+func standardQARequest(request QARequest, defaultAgent agentapi.DefinitionRef) bool {
+	if len(request.PreloadedContext) > 0 || len(request.Instructions) > 0 ||
+		len(request.ToolPlan.Prefetch) > 0 || request.ParentRunID != "" ||
+		request.WorkflowRunID != "" || request.WorkflowNodeID != "" {
+		return false
+	}
+	if request.Agent.ID == "" {
+		return true
+	}
+	return request.Agent.ID == defaultAgent.ID &&
+		(request.Agent.Version == 0 || request.Agent.Version == defaultAgent.Version)
+}
+
+func (svc *QA) emitExecutionEvent(eventType EventType, event ExecutionEvent) {
+	if svc.executionEvents != nil {
+		svc.executionEvents.EmitExecutionEvent(eventType, event)
+	}
+}
+
+func (svc *QA) submitInvestigation(
+	ctx context.Context,
+	request QARequest,
+	question string,
+	conversation ConversationContext,
+	userID int64,
+	runID string,
+	trace *executiontrace.Scope,
+	ownsTrace bool,
+) (*AskResult, error) {
+	workflowRunID := "workflow_" + strings.TrimPrefix(NewRunID(), "run_")
+	scenario, err := svc.scenarios.BeginScenario(ctx, ScenarioRunStart{
+		RunID: runID, ParentRunID: request.ParentRunID, UserID: userID,
+		SessionID: conversation.SessionID, Question: question, Mode: "multi_agent",
+	})
+	if err != nil {
+		if ownsTrace {
+			trace.Close()
+		}
+		return nil, fmt.Errorf("begin QA parent run %q: %w", runID, err)
+	}
+	runCtx := context.WithoutCancel(scenario.Context(ctx))
+	go func() {
+		if ownsTrace {
+			defer trace.Close()
+		}
+		result, runErr := svc.investigation.Run(runCtx, InvestigationRequest{
+			WorkflowRunID: workflowRunID, ParentRunID: runID,
+			Question: question, Actor: agentapi.Actor{UserID: userID},
+		})
+		outcome := investigationOutcome(result, runErr)
+		if outcome.Status == RunStatusDone {
+			if err := svc.persistSessionTurn(
+				runCtx,
+				runID,
+				conversation.SessionID,
+				userID,
+				question,
+				outcome,
+			); err != nil {
+				log.ErrorfCtx(runCtx, "[qa] persist completed parent run %s session turn: %v", runID, err)
+				outcome.Status = RunStatusFailed
+				outcome.ErrorCode = "session_persistence_failed"
+				outcome.Err = err
+			}
+		}
+		if finishErr := scenario.Finish(outcome); finishErr != nil {
+			log.ErrorfCtx(runCtx, "[qa] finish parent run %s: %v", runID, finishErr)
+			return
+		}
+		if outcome.Status == RunStatusDone {
+			svc.archiveSessionHistoryAsync(runCtx, conversation.SessionID, userID)
+		}
+	}()
+	return &AskResult{RunID: runID}, nil
 }
 
 func routingCandidates(tools []tool.Tool) []retrieval.ToolRouteCandidate {
@@ -889,17 +926,16 @@ func (svc *QA) submitRun(
 	plan domain.EvidencePlan,
 	policy ToolPolicy,
 	prepared ScenarioToolSet,
+	trace *executiontrace.Scope,
+	ownsTrace bool,
 ) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", runID, definition.ID, definition.Version)
 	instructions := append([]llm.Message{}, conversation.Instructions...)
 	if len(recalled) > 0 {
-		memoryStarted := time.Now()
-		formatted := memory.FormatMemories(recalled)
-		instructions = append(instructions, llm.Message{Role: "system", Content: formatted})
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "memory_inject", DurationMS: time.Since(memoryStarted).Milliseconds(),
-			Output: map[string]any{"records": len(recalled), "characters": len([]rune(formatted))},
+		formatted, _ := executiontrace.Invoke(ctx, memoryInjectSpec, recalled, func(_ context.Context, records []memory.MemoryRecord) (string, error) {
+			return memory.FormatMemories(records), nil
 		})
+		instructions = append(instructions, llm.Message{Role: "system", Content: formatted})
 	}
 	conversation.RolePrompt = rolePrompt
 	conversation.Instructions = instructions
@@ -939,6 +975,9 @@ func (svc *QA) submitRun(
 	ctx = withSessionToolScope(ctx, conversation, userID)
 
 	go func() {
+		if ownsTrace {
+			defer trace.Close()
+		}
 		result, runErr := run.Execute(ctx, request)
 		if runErr != nil {
 			log.ErrorfCtx(ctx, "[qa] runtime run %s failed: %v", runID, runErr)
@@ -972,52 +1011,21 @@ func (svc *QA) submitRun(
 		if memoryExtractionAllowed(outcome, internalResultFromPublic(result)) && svc.memory != nil && userID != 0 {
 			memCtx := llm.WithUsagePhase(context.WithoutCancel(ctx), llm.PhaseMemoryExtract)
 			memCtx, memCancel := context.WithTimeout(memCtx, 60*time.Second)
-			extractStarted := time.Now()
 			memoryQuestion := tooloutput.TruncateContent(question, 1000)
 			memoryAnswer := tooloutput.TruncateContent(result.Text, 2000)
-			if extracted, err := memory.ExtractMemories(memCtx, svc.helperLLM, memoryQuestion, memoryAnswer); err == nil {
-				mems, rejected := admitExtractedMemories(extracted, EvidenceStatus(result.Evidence.Status))
-				domain.RecordTrace(memCtx, domain.EvaluationTrace{
-					Node: "memory_extract", DurationMS: time.Since(extractStarted).Milliseconds(),
-					Output: map[string]any{
-						"extracted": len(extracted), "admitted": len(mems),
-						"rejected_assistant_inference": rejected["assistant_inference"],
-						"rejected_incomplete_evidence": rejected["incomplete_evidence"],
-					},
+			extraction, err := extractMemories(memCtx, memoryExtractInput{
+				Client: svc.helperLLM, Question: memoryQuestion, Answer: memoryAnswer,
+				EvidenceStatus: EvidenceStatus(result.Evidence.Status),
+			})
+			if err == nil {
+				_, _ = writeMemories(memCtx, memoryWriteInput{
+					Store: svc.memory, Records: extraction.Records, UserID: userID, SessionID: conversation.SessionID,
 				})
-				writeStarted := time.Now()
-				outcomes := make(map[memory.WriteOutcome]int, 4)
-				vectorSynced := 0
-				for i := range mems {
-					mems[i].UserID = userID
-					mems[i].SourceSession = conversation.SessionID
-					result, err := svc.memory.Write(memCtx, mems[i])
-					if err != nil {
-						log.ErrorfCtx(ctx, "[qa] memory write error: %v", err)
-						continue
-					}
-					outcomes[result.Outcome]++
-					if result.VectorSynced {
-						vectorSynced++
-					}
-				}
-				domain.RecordTrace(memCtx, domain.EvaluationTrace{
-					Node: "memory_write", DurationMS: time.Since(writeStarted).Milliseconds(),
-					Output: map[string]any{
-						"records": len(mems), "inserted": outcomes[memory.WriteInserted],
-						"refreshed": outcomes[memory.WriteRefreshed], "superseded": outcomes[memory.WriteSuperseded],
-						"rejected": outcomes[memory.WriteRejected], "vector_synced": vectorSynced,
-					},
-				})
-				if len(mems) > 0 {
-					log.InfofCtx(ctx, "[qa] extracted %d memories for user %d", len(mems), userID)
+				if len(extraction.Records) > 0 {
+					log.InfofCtx(ctx, "[qa] extracted %d memories for user %d", len(extraction.Records), userID)
 				}
 			} else {
 				log.ErrorfCtx(ctx, "[qa] memory extraction error: %v", err)
-				domain.RecordTrace(memCtx, domain.EvaluationTrace{
-					Node: "memory_extract", Status: "failed", DurationMS: time.Since(extractStarted).Milliseconds(),
-					Output: map[string]any{"error": err.Error()},
-				})
 			}
 			memCancel()
 		}
@@ -1235,6 +1243,9 @@ func (rs *RunStore) RecoverInterrupted() (int64, error) {
 }
 
 func (rs *RunStore) Create(r RunRecord) error {
+	if r.RunKind == "" {
+		r.RunKind = RunKindAgent
+	}
 	if r.StartedAt == "" {
 		r.StartedAt = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -1247,11 +1258,11 @@ func (rs *RunStore) Create(r RunRecord) error {
 	}
 	_, err = rs.db.Exec(
 		`INSERT INTO agent_runs(
-			id,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
+			id,run_kind,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
 			input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
 			question,status,error_code,mode,max_steps,step_count,token_used,started_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, r.UserID, r.SessionID, r.AgentID, r.DefinitionVersion, r.DefinitionHash,
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, r.RunKind, r.UserID, r.SessionID, r.AgentID, r.DefinitionVersion, r.DefinitionHash,
 		selectionJSON, r.ToolSnapshotID,
 		r.InputSchemaVersion, r.OutputSchemaVersion, r.ParentRunID, r.WorkflowRunID, r.WorkflowNodeID,
 		r.Question, r.Status, r.ErrorCode, r.Mode, r.MaxSteps, 0, 0, store.DatabaseTime(r.StartedAt))
@@ -1481,7 +1492,7 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 		pageSize = 20
 	}
 
-	q := `SELECT id,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
+	q := `SELECT id,run_kind,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
 		input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
 		question,status,error_code,mode,max_steps,step_count,token_used,
 		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
@@ -1546,7 +1557,7 @@ func (rs *RunStore) GetForUser(id string, userID int64) (*RunDetail, error) {
 }
 
 func (rs *RunStore) get(id string, userID *int64) (*RunDetail, error) {
-	query := `SELECT id,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
+	query := `SELECT id,run_kind,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
 		input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
 		question,status,error_code,mode,max_steps,step_count,token_used,
 		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
@@ -1803,7 +1814,7 @@ func scanRunRecord(row rowScanner) (RunRecord, error) {
 	var record RunRecord
 	var selectionRaw []byte
 	var startedAt, endedAt sql.NullTime
-	if err := row.Scan(&record.ID, &record.UserID, &record.SessionID,
+	if err := row.Scan(&record.ID, &record.RunKind, &record.UserID, &record.SessionID,
 		&record.AgentID, &record.DefinitionVersion, &record.DefinitionHash, &selectionRaw, &record.ToolSnapshotID,
 		&record.InputSchemaVersion, &record.OutputSchemaVersion, &record.ParentRunID,
 		&record.WorkflowRunID, &record.WorkflowNodeID, &record.Question, &record.Status,
@@ -1976,6 +1987,7 @@ func mergeOutcomeReferences(preRetrieved []agentapi.Reference, dynamic []tool.Re
 
 type RunRecord struct {
 	ID                   string                       `json:"id"`
+	RunKind              RunKind                      `json:"run_kind"`
 	UserID               int64                        `json:"user_id"`
 	SessionID            string                       `json:"session_id"`
 	AgentID              string                       `json:"agent_id"`
@@ -2013,6 +2025,13 @@ type RunRecord struct {
 	StartedAt            string                       `json:"started_at"`
 	EndedAt              string                       `json:"ended_at"`
 }
+
+type RunKind string
+
+const (
+	RunKindAgent    RunKind = "agent"
+	RunKindQAParent RunKind = "qa_parent"
+)
 
 // RunUsageSummary is the token snapshot needed by the live QA composer.
 type RunUsageSummary struct {

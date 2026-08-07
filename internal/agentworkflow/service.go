@@ -26,6 +26,7 @@ const (
 
 type ExecuteRequest struct {
 	RunID               string
+	ParentRunID         string
 	Workflow            DefinitionRef
 	Input               json.RawMessage
 	Actor               agentapi.Actor
@@ -267,7 +268,8 @@ func (service *Service) executePrepared(
 ) (Result, error) {
 	observer := &storeRunObserver{store: service.store}
 	result, runErr := orchestrator.RunObserved(ctx, prepared.definition, RunRequest{
-		RunID: prepared.record.ID, Input: prepared.input.Payload,
+		RunID: prepared.record.ID, ParentRunID: prepared.record.ParentRunID,
+		Input: prepared.input.Payload,
 		Actor: agentapi.Actor{
 			UserID:   prepared.record.ActorUserID,
 			TenantID: prepared.record.ActorTenantID,
@@ -858,7 +860,7 @@ func (service *Service) resumeRun(
 		return service.finishResumedRun(runCtx, workflowRunID, Result{}, err)
 	}
 	observed, runErr := orchestrator.ResumeObserved(runCtx, definition, RunRequest{
-		RunID: workflowRunID,
+		RunID: workflowRunID, ParentRunID: state.Run.ParentRunID,
 		Actor: agentapi.Actor{
 			UserID: state.Run.ActorUserID, TenantID: state.Run.ActorTenantID,
 		},
@@ -1254,6 +1256,10 @@ func prepareWorkflowRun(
 	} else if !canonicalID.MatchString(runID) {
 		return preparedRun{}, fmt.Errorf("workflow run id %q is invalid: %w", runID, ErrInvalid)
 	}
+	parentRunID := strings.TrimSpace(request.ParentRunID)
+	if parentRunID != "" && !canonicalID.MatchString(parentRunID) {
+		return preparedRun{}, fmt.Errorf("workflow parent run id %q is invalid: %w", parentRunID, ErrInvalid)
+	}
 	startedAt := time.Now().UTC()
 	input, err := PrepareHandoff(Handoff{
 		WorkflowRunID:  runID,
@@ -1273,6 +1279,7 @@ func prepareWorkflowRun(
 	}
 	record := WorkflowRunRecord{
 		ID:                  runID,
+		ParentRunID:         parentRunID,
 		WorkflowID:          definition.ID,
 		WorkflowVersion:     definition.Version,
 		WorkflowHash:        definition.ContentHash,

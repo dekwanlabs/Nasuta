@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -98,17 +99,17 @@ func BuildMCP(registry *tool.Registry) (*server.MCPServer, error) {
 			args := tool.Arguments(argsMap(r))
 			traceEnabled := args.Bool("_trace")
 			delete(args, "_trace")
-			var recorder *mcpTraceRecorder
 			if traceEnabled {
-				recorder = &mcpTraceRecorder{started: time.Now()}
-				ctx = domain.WithTraceRecorder(ctx, recorder)
+				ctx = executiontrace.WithEvaluation(ctx, nil)
 			}
-			result, err := executor.Execute(ctx, snapshot, toolID, args)
+			result, traceEvents, err := executiontrace.Capture(ctx, executiontrace.Correlation{}, func(ctx context.Context) (tool.Result, error) {
+				return executor.Execute(ctx, snapshot, toolID, args)
+			})
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			if recorder != nil {
-				result.Content = attachTrace(result.Content, recorder.snapshot())
+			if traceEnabled {
+				result.Content = attachTrace(result.Content, traceEvents)
 			}
 			return mcp.NewToolResultText(result.Content), nil
 		})
@@ -157,30 +158,6 @@ func cloneSchemaMap(source map[string]any) map[string]any {
 		}
 	}
 	return out
-}
-
-type mcpTraceRecorder struct {
-	mu       sync.Mutex
-	started  time.Time
-	sequence int
-	events   []domain.EvaluationTrace
-}
-
-func (recorder *mcpTraceRecorder) RecordTrace(event domain.EvaluationTrace) {
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	recorder.sequence++
-	event.Sequence = recorder.sequence
-	if event.ElapsedMS == 0 {
-		event.ElapsedMS = time.Since(recorder.started).Milliseconds()
-	}
-	recorder.events = append(recorder.events, event)
-}
-
-func (recorder *mcpTraceRecorder) snapshot() []domain.EvaluationTrace {
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	return append([]domain.EvaluationTrace(nil), recorder.events...)
 }
 
 func attachTrace(result string, events []domain.EvaluationTrace) string {

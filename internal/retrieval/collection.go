@@ -5,12 +5,53 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/log"
 )
+
+type dependencyEdge struct {
+	from, to, direction string
+}
+
+type dependencyCollection struct {
+	edges        []dependencyEdge
+	queried      int
+	unqueried    int
+	omittedEdges int
+}
+
+var dependencyCollectSpec = executiontrace.Spec[[]string, dependencyCollection]{
+	Operation: "retrieval.dependency_collect",
+	Node:      "dependency_collect",
+	Output: func(_ []string, result dependencyCollection, _ error) map[string]any {
+		return map[string]any{
+			"queried_services": result.queried, "unqueried_services": result.unqueried,
+			"selected_edges": len(result.edges), "omitted_edges": result.omittedEdges,
+		}
+	},
+	Record: func(result dependencyCollection, _ error) bool {
+		return len(result.edges) > 0
+	},
+}
+
+type codeGraphSearchInput struct {
+	keywords []string
+	services []string
+}
+
+var codeGraphSearchSpec = executiontrace.Spec[codeGraphSearchInput, []codegraph.Node]{
+	Operation: "retrieval.codegraph_search",
+	Node:      "codegraph_search",
+	Input: func(input codeGraphSearchInput) map[string]any {
+		return map[string]any{"keywords": input.keywords, "services": input.services}
+	},
+	Output: func(_ codeGraphSearchInput, result []codegraph.Node, _ error) map[string]any {
+		return map[string]any{"hits": len(result)}
+	},
+}
 
 // collectServices formats service candidates without implying endpoint relevance.
 func (retrieve *Retriever) collectServices(ctx context.Context, services []string, svcMatches map[string]serviceMatch, addPart func(partial)) {
@@ -204,10 +245,32 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 	if len(services) == 0 {
 		return
 	}
-	const maxDependencyEdges = 30
-	type dependencyEdge struct {
-		from, to, direction string
+	result, _ := executiontrace.Invoke(ctx, dependencyCollectSpec, services,
+		func(ctx context.Context, services []string) (dependencyCollection, error) {
+			return retrieve.collectDependencyEdges(ctx, services), nil
+		})
+	if len(result.edges) == 0 {
+		return
 	}
+	var sb strings.Builder
+	sb.WriteString("## Dependency Chain\n")
+	for _, edge := range result.edges {
+		fmt.Fprintf(&sb, "- %s → %s (%s)\n", edge.from, edge.to, edge.direction)
+	}
+	if result.omittedEdges > 0 || result.unqueried > 0 {
+		sb.WriteString("- ...(additional edges omitted)\n")
+	}
+	refs := make([]Reference, 0, result.queried)
+	for _, service := range services[:result.queried] {
+		refs = append(refs, Reference{Type: "service", Label: service, Target: service})
+	}
+	log.InfofCtx(ctx, "[qa] collect deps: services=%d/%d edges=%d omitted_edges=%d",
+		result.queried, len(services), len(result.edges), result.omittedEdges)
+	addPart(partial{text: sb.String(), refs: refs, priority: partialPriorityDependency})
+}
+
+func (retrieve *Retriever) collectDependencyEdges(ctx context.Context, services []string) dependencyCollection {
+	const maxDependencyEdges = 30
 	edges := make([]dependencyEdge, 0, maxDependencyEdges)
 	seen := make(map[string]struct{}, maxDependencyEdges)
 	queried := 0
@@ -239,48 +302,17 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 		appendEdges("upstream", res.Upstream)
 		appendEdges("downstream", res.Downstream)
 	}
-	if len(edges) == 0 {
-		return
-	}
-	var sb strings.Builder
-	sb.WriteString("## Dependency Chain\n")
-	for _, edge := range edges {
-		fmt.Fprintf(&sb, "- %s → %s (%s)\n", edge.from, edge.to, edge.direction)
-	}
 	unqueried := len(services) - queried
-	if omittedEdges > 0 || unqueried > 0 {
-		sb.WriteString("- ...(additional edges omitted)\n")
-	}
-	refs := make([]Reference, 0, queried)
-	for _, service := range services[:queried] {
-		refs = append(refs, Reference{Type: "service", Label: service, Target: service})
-	}
-	log.InfofCtx(ctx, "[qa] collect deps: services=%d/%d edges=%d omitted_edges=%d",
-		queried, len(services), len(edges), omittedEdges)
-	if domain.TraceEnabled(ctx) {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "dependency_collect",
-			Output: map[string]any{
-				"queried_services": queried, "unqueried_services": unqueried,
-				"selected_edges": len(edges), "omitted_edges": omittedEdges,
-			},
-		})
-	}
-	addPart(partial{text: sb.String(), refs: refs, priority: partialPriorityDependency})
+	return dependencyCollection{edges: edges, queried: queried, unqueried: unqueried, omittedEdges: omittedEdges}
 }
 
 // collectCodeGraph performs one scoped FTS query, then fetches selected bodies.
 func (retrieve *Retriever) collectCodeGraph(ctx context.Context, keywords, services []string, terms QueryTerms, addCode func(codeDoc)) {
-	traceEnabled := domain.TraceEnabled(ctx)
-	started := time.Now()
-	allHits := retrieve.codeGraphQuery(ctx, keywords, services, 20)
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "codegraph_search", DurationMS: time.Since(started).Milliseconds(),
-			Input:  map[string]any{"keywords": keywords, "services": services},
-			Output: map[string]any{"hits": len(allHits)},
-		})
-	}
+	allHits, _ := executiontrace.Invoke(ctx, codeGraphSearchSpec, codeGraphSearchInput{
+		keywords: keywords, services: services,
+	}, func(ctx context.Context, input codeGraphSearchInput) ([]codegraph.Node, error) {
+		return retrieve.codeGraphQuery(ctx, input.keywords, input.services, 20), nil
+	})
 	log.InfofCtx(ctx, "[qa] codegraph query: %d keywords → %d hits", len(keywords), len(allHits))
 	if len(allHits) == 0 {
 		return

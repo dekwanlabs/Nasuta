@@ -10,10 +10,10 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 	"github.com/dekwanlabs/nasuta/knowledge"
@@ -98,6 +98,38 @@ type anchor struct {
 	runbooks   []domain.RunbookSearchHit
 }
 
+type retrievalSourceOutcome struct {
+	status string
+	count  int
+	err    error
+}
+
+type retrievalSourcesResult struct {
+	anchor  anchor
+	code    retrievalSourceOutcome
+	runbook retrievalSourceOutcome
+	service retrievalSourceOutcome
+}
+
+var retrievalSourcesSpec = executiontrace.Spec[retrievalDiscoverInput, retrievalSourcesResult]{
+	Operation: "retrieval.sources",
+	Node:      "retrieval_sources",
+	Output: func(_ retrievalDiscoverInput, result retrievalSourcesResult, _ error) map[string]any {
+		statuses := map[string]retrievalSourceOutcome{
+			"code": result.code, "runbook": result.runbook, "service": result.service,
+		}
+		output := make(map[string]any, len(statuses))
+		for source, status := range statuses {
+			item := map[string]any{"status": status.status, "candidate_count": status.count}
+			if status.err != nil {
+				item["error"] = status.err.Error()
+			}
+			output[source] = item
+		}
+		return output
+	},
+}
+
 // Retriever orchestrates workspace code, docs, and codegraph retrieval.
 type Retriever struct {
 	tools          toolset
@@ -158,7 +190,6 @@ func sortPartsByPriority(parts []partial) {
 
 // RetrievePlan dispatches only the pre-retrieval backends selected for this run.
 func (retrieve *Retriever) RetrievePlan(ctx context.Context, searchQuery, rawQuestion string, terms QueryTerms, evidencePlan domain.EvidencePlan) (*RetrievedContext, error) {
-	traceEnabled := domain.TraceEnabled(ctx)
 	if !evidencePlan.Valid() {
 		return nil, fmt.Errorf("retrieval: invalid source bits %08b", evidencePlan.Sources)
 	}
@@ -167,41 +198,106 @@ func (retrieve *Retriever) RetrievePlan(ctx context.Context, searchQuery, rawQue
 	}
 	var a anchor
 	if evidencePlan.Has(domain.Internal) {
-		started := time.Now()
-		a = retrieve.discover(ctx, searchQuery, nil, false)
-		if traceEnabled {
-			domain.RecordTrace(ctx, domain.EvaluationTrace{
-				Node: "retrieval_discover", DurationMS: time.Since(started).Milliseconds(),
-				Input:  map[string]any{"query": searchQuery, "service_scoped": false},
-				Output: map[string]any{"services": len(a.services), "code_hits": len(a.codeHits), "runbooks": len(a.runbooks)},
-			})
-		}
-	}
-	expandStarted := time.Now()
-	parts, codePool := retrieve.expand(ctx, a, rawQuestion, terms, evidencePlan)
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "retrieval_expand", DurationMS: time.Since(expandStarted).Milliseconds(),
-			Output: map[string]any{"parts": len(parts), "code_pool": len(codePool), "sources": evidencePlan.SourceNames()},
+		a, _ = executiontrace.Invoke(ctx, retrievalDiscoverSpec, retrievalDiscoverInput{
+			Query: searchQuery, ServiceScoped: false,
+		}, func(ctx context.Context, input retrievalDiscoverInput) (anchor, error) {
+			return retrieve.discover(ctx, input.Query, input.ServicePatterns, input.ServiceScoped), nil
 		})
 	}
-	assembleStarted := time.Now()
-	result := retrieve.assemble(ctx, parts, codePool, searchQuery)
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "retrieval_assemble", DurationMS: time.Since(assembleStarted).Milliseconds(),
-			Output: map[string]any{
-				"hit_count": result.HitCount, "references": len(result.References), "context_chars": result.selection.Chars,
-				"selected": result.selection.Selected, "included": result.selection.Included,
-				"dropped": result.selection.Dropped, "truncated": result.selection.Truncated,
-			},
-		})
-	}
+	expanded, _ := executiontrace.Invoke(ctx, retrievalExpandSpec, retrievalExpandInput{
+		Anchor: a, RawQuestion: rawQuestion, Terms: terms, EvidencePlan: evidencePlan,
+	}, func(ctx context.Context, input retrievalExpandInput) (retrievalExpandOutput, error) {
+		parts, codePool := retrieve.expand(ctx, input.Anchor, input.RawQuestion, input.Terms, input.EvidencePlan)
+		return retrievalExpandOutput{Parts: parts, CodePool: codePool}, nil
+	})
+	result, _ := executiontrace.Invoke(ctx, retrievalAssembleSpec, retrievalAssembleInput{
+		Parts: expanded.Parts, CodePool: expanded.CodePool, SearchQuery: searchQuery,
+	}, func(ctx context.Context, input retrievalAssembleInput) (*RetrievedContext, error) {
+		return retrieve.assemble(ctx, input.Parts, input.CodePool, input.SearchQuery), nil
+	})
 	return result, nil
+}
+
+type retrievalDiscoverInput struct {
+	Query           string
+	ServicePatterns []string
+	ServiceScoped   bool
+}
+
+var retrievalDiscoverSpec = executiontrace.Spec[retrievalDiscoverInput, anchor]{
+	Operation: "retrieval.discover",
+	Node:      "retrieval_discover",
+	Input: func(input retrievalDiscoverInput) map[string]any {
+		return map[string]any{"query": input.Query, "service_scoped": input.ServiceScoped}
+	},
+	Output: func(_ retrievalDiscoverInput, result anchor, _ error) map[string]any {
+		return map[string]any{"services": len(result.services), "code_hits": len(result.codeHits), "runbooks": len(result.runbooks)}
+	},
+}
+
+type retrievalExpandInput struct {
+	Anchor       anchor
+	RawQuestion  string
+	Terms        QueryTerms
+	EvidencePlan domain.EvidencePlan
+}
+
+type retrievalExpandOutput struct {
+	Parts    []partial
+	CodePool []codeDoc
+}
+
+var retrievalExpandSpec = executiontrace.Spec[retrievalExpandInput, retrievalExpandOutput]{
+	Operation: "retrieval.expand",
+	Node:      "retrieval_expand",
+	Output: func(input retrievalExpandInput, result retrievalExpandOutput, _ error) map[string]any {
+		return map[string]any{"parts": len(result.Parts), "code_pool": len(result.CodePool), "sources": input.EvidencePlan.SourceNames()}
+	},
+}
+
+type retrievalAssembleInput struct {
+	Parts       []partial
+	CodePool    []codeDoc
+	SearchQuery string
+}
+
+var retrievalAssembleSpec = executiontrace.Spec[retrievalAssembleInput, *RetrievedContext]{
+	Operation: "retrieval.assemble",
+	Node:      "retrieval_assemble",
+	Output: func(_ retrievalAssembleInput, result *RetrievedContext, _ error) map[string]any {
+		if result == nil {
+			return nil
+		}
+		return map[string]any{
+			"hit_count": result.HitCount, "references": len(result.References), "context_chars": result.selection.Chars,
+			"selected": result.selection.Selected, "included": result.selection.Included,
+			"dropped": result.selection.Dropped, "truncated": result.selection.Truncated,
+		}
+	},
 }
 
 // discover gathers the narrow set of candidate services, code hits, and runbooks.
 func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, servicePatterns []string, serviceScoped bool) anchor {
+	result, _ := executiontrace.Invoke(ctx, retrievalSourcesSpec, retrievalDiscoverInput{
+		Query: searchQuery, ServicePatterns: servicePatterns, ServiceScoped: serviceScoped,
+	}, retrieve.discoverSources)
+	a := result.anchor
+	log.InfofCtx(ctx, "[qa] retrieval sources: code=%s runbook=%s service=%s",
+		result.code.status, result.runbook.status, result.service.status)
+
+	preview := a.services
+	if len(preview) > 8 {
+		preview = preview[:8]
+	}
+	log.InfofCtx(ctx, "[qa] anchor: services=%d codeHits=%d runbooks=%d first=%v",
+		len(a.services), len(a.codeHits), len(a.runbooks), preview)
+	return a
+}
+
+func (retrieve *Retriever) discoverSources(ctx context.Context, input retrievalDiscoverInput) (retrievalSourcesResult, error) {
+	searchQuery := input.Query
+	servicePatterns := input.ServicePatterns
+	serviceScoped := input.ServiceScoped
 	var a anchor
 	a.svcMatches = map[string]serviceMatch{}
 	seen := map[string]bool{}
@@ -224,14 +320,9 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 
 	var wg sync.WaitGroup
 	wg.Add(3)
-	type sourceStatus struct {
-		status string
-		count  int
-		err    error
-	}
-	codeStatus := sourceStatus{}
-	runbookStatus := sourceStatus{}
-	serviceStatus := sourceStatus{}
+	codeStatus := retrievalSourceOutcome{}
+	runbookStatus := retrievalSourceOutcome{}
+	serviceStatus := retrievalSourceOutcome{}
 
 	go func() {
 		defer wg.Done()
@@ -343,30 +434,9 @@ func (retrieve *Retriever) discover(ctx context.Context, searchQuery string, ser
 	}()
 
 	wg.Wait()
-	statuses := map[string]sourceStatus{
-		"code": codeStatus, "runbook": runbookStatus, "service": serviceStatus,
-	}
-	traceOutput := make(map[string]any, len(statuses))
-	for source, status := range statuses {
-		item := map[string]any{"status": status.status, "candidate_count": status.count}
-		if status.err != nil {
-			item["error"] = status.err.Error()
-		}
-		traceOutput[source] = item
-	}
-	log.InfofCtx(ctx, "[qa] retrieval sources: code=%s runbook=%s service=%s",
-		codeStatus.status, runbookStatus.status, serviceStatus.status)
-	if domain.TraceEnabled(ctx) {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "retrieval_sources", Output: traceOutput})
-	}
-
-	preview := a.services
-	if len(preview) > 8 {
-		preview = preview[:8]
-	}
-	log.InfofCtx(ctx, "[qa] anchor: services=%d codeHits=%d runbooks=%d first=%v",
-		len(a.services), len(a.codeHits), len(a.runbooks), preview)
-	return a
+	return retrievalSourcesResult{
+		anchor: a, code: codeStatus, runbook: runbookStatus, service: serviceStatus,
+	}, nil
 }
 
 func retrievalSourceStatus(count int) string {

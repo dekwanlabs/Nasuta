@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS workflow_runs (
     id VARCHAR(64) PRIMARY KEY,
+    parent_run_id VARCHAR(64) NOT NULL DEFAULT '',
     workflow_id VARCHAR(128) NOT NULL,
     workflow_version BIGINT NOT NULL,
     workflow_hash CHAR(64) NOT NULL,
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     ended_at TIMESTAMP NULL,
     KEY idx_workflow_started (workflow_id, workflow_version, started_at, id),
+    KEY idx_parent_run (parent_run_id, started_at, id),
     KEY idx_status_started (status, started_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

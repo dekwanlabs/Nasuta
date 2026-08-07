@@ -11,6 +11,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -105,6 +106,158 @@ type Agent struct {
 	onFirstAnswerToken func(runID string)
 }
 
+type agentModelTurnInput struct {
+	Step     int
+	Messages []llm.Message
+	Tools    []llm.ToolDef
+	Stream   *StreamPipe
+}
+
+type agentModelTurnOutput struct {
+	Result *llm.ChatStreamResult
+	Timing StreamTiming
+}
+
+type forceConclusionInput struct {
+	RunID          string
+	Messages       []llm.Message
+	AnswerContract *exactAnswerContract
+}
+
+type forceConclusionOutput struct {
+	Result         *llm.ChatStreamResult
+	Stream         *StreamPipe
+	Timing         StreamTiming
+	AttemptStarted time.Time
+}
+
+type historyCompileInput struct {
+	Messages []llm.Message
+}
+
+var historyCompileSpec = executiontrace.Spec[historyCompileInput, []llm.Message]{
+	Operation: "agent.history_compile",
+	Node:      "history_compile",
+	Input: func(input historyCompileInput) map[string]any {
+		return map[string]any{"compiled_messages": len(input.Messages), "compiled_chars": messageChars(input.Messages)}
+	},
+	Output: func(_ historyCompileInput, output []llm.Message, _ error) map[string]any {
+		return map[string]any{"messages": len(output), "context_chars": contextChars(output)}
+	},
+}
+
+type toolPruningInput struct {
+	Tools   []llm.ToolDef
+	Offered map[tool.ToolID]struct{}
+	Applied bool
+}
+
+type toolPruningOutput struct {
+	Effective    []llm.ToolDef
+	FullTokens   int
+	PrunedTokens int
+	RemovedIDs   []string
+}
+
+var toolPruningSpec = executiontrace.Spec[toolPruningInput, toolPruningOutput]{
+	Operation: "agent.tool_pruning",
+	Node:      "tool_pruning",
+	Input: func(input toolPruningInput) map[string]any {
+		return map[string]any{"applied": input.Applied}
+	},
+	Output: func(input toolPruningInput, output toolPruningOutput, _ error) map[string]any {
+		return map[string]any{
+			"offered": len(output.Effective), "total": len(input.Tools),
+			"full_tokens": output.FullTokens, "pruned_tokens": output.PrunedTokens,
+			"saved_tokens":     output.FullTokens - output.PrunedTokens,
+			"removed_tool_ids": output.RemovedIDs,
+		}
+	},
+}
+
+type contextBudgetInput struct {
+	Step     int
+	Messages []llm.Message
+	Tools    []llm.ToolDef
+}
+
+var contextBudgetSpec = executiontrace.Spec[contextBudgetInput, struct{}]{
+	Operation: "agent.context_budget",
+	Node:      "context_budget",
+	Input: func(input contextBudgetInput) map[string]any {
+		return map[string]any{"step": input.Step, "messages": len(input.Messages), "tools": len(input.Tools)}
+	},
+	Output: func(_ contextBudgetInput, _ struct{}, err error) map[string]any {
+		return map[string]any{"error": err.Error()}
+	},
+	Record: func(_ struct{}, err error) bool { return err != nil },
+}
+
+var agentModelTurnSpec = executiontrace.Spec[agentModelTurnInput, agentModelTurnOutput]{
+	Operation: "agent.model_turn",
+	Node:      "agent_model_turn",
+	Input: func(input agentModelTurnInput) map[string]any {
+		return map[string]any{"step": input.Step, "messages": len(input.Messages), "tools": len(input.Tools)}
+	},
+	Output: func(_ agentModelTurnInput, output agentModelTurnOutput, err error) map[string]any {
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		toolNames := make([]string, 0, len(output.Result.ToolCalls))
+		for _, call := range output.Result.ToolCalls {
+			toolNames = append(toolNames, call.Function.Name)
+		}
+		return map[string]any{
+			"finish_reason": output.Result.FinishReason, "tool_calls": toolNames,
+			"content_chars": len([]rune(output.Result.Content)), "reasoning_tokens": output.Result.ReasoningTokens,
+			"first_event_ms": output.Timing.FirstEvent.Milliseconds(), "first_reasoning_ms": output.Timing.FirstReasoning.Milliseconds(),
+			"first_content_ms": output.Timing.FirstContent.Milliseconds(), "first_tool_delta_ms": output.Timing.FirstToolDelta.Milliseconds(),
+			"first_tool_call_ms": output.Timing.FirstToolCall.Milliseconds(),
+		}
+	},
+}
+
+var forceConclusionSpec = executiontrace.Spec[*forceConclusionInput, forceConclusionOutput]{
+	Operation: "agent.force_conclusion",
+	Node:      "force_conclusion",
+	Input: func(input *forceConclusionInput) map[string]any {
+		return map[string]any{"messages": len(input.Messages)}
+	},
+	Output: func(_ *forceConclusionInput, output forceConclusionOutput, err error) map[string]any {
+		result := map[string]any{
+			"first_event_ms": output.Timing.FirstEvent.Milliseconds(), "first_reasoning_ms": output.Timing.FirstReasoning.Milliseconds(),
+			"first_content_ms": output.Timing.FirstContent.Milliseconds(),
+		}
+		if err != nil {
+			result["error"] = err.Error()
+		}
+		if output.Result != nil {
+			result["finish_reason"] = output.Result.FinishReason
+			result["content_chars"] = len([]rune(output.Result.Content))
+			result["reasoning_tokens"] = output.Result.ReasoningTokens
+		}
+		return result
+	},
+}
+
+type firstAnswerTokenTraceInput struct {
+	Step       any
+	TurnTTFTMS int64
+	RunElapsedMS int64
+}
+
+var firstAnswerTokenTraceSpec = executiontrace.Spec[firstAnswerTokenTraceInput, struct{}]{
+	Operation: "agent.first_answer_token",
+	Node:      "first_answer_token",
+	Output: func(input firstAnswerTokenTraceInput, _ struct{}, _ error) map[string]any {
+		return map[string]any{
+			"step":           input.Step,
+			"turn_ttft_ms":   input.TurnTTFTMS,
+			"run_elapsed_ms": input.RunElapsedMS,
+		}
+	},
+}
+
 // NewAgent builds an Agent with optional observer/controller hooks.
 func NewAgent(llm *llm.LLMClient, executor *ToolExecutor, cfg AgentConfig, observer Observer, controller Controller) *Agent {
 	if executor == nil {
@@ -197,7 +350,6 @@ func (agent *Agent) runWithSnapshot(ctx context.Context, runID, question string,
 }
 
 func (agent *Agent) runCompiled(ctx context.Context, runID string, input loopInput, toolSnapshot tool.Snapshot) (*RunResult, error) {
-	traceEnabled := domain.TraceEnabled(ctx)
 	runStarted := time.Now()
 	runCtx, runCancel := context.WithTimeout(ctx, agent.cfg.Timeout)
 	defer runCancel()
@@ -211,15 +363,10 @@ func (agent *Agent) runCompiled(ctx context.Context, runID string, input loopInp
 
 	historyStarted := time.Now()
 	answerContract := &exactAnswerContract{}
-	messages := append([]llm.Message(nil), input.messages...)
+	messages, _ := executiontrace.Invoke(ctx, historyCompileSpec, historyCompileInput{Messages: input.messages}, func(_ context.Context, input historyCompileInput) ([]llm.Message, error) {
+		return append([]llm.Message(nil), input.Messages...), nil
+	})
 	historyDuration := time.Since(historyStarted)
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "history_compile", DurationMS: historyDuration.Milliseconds(),
-			Input:  map[string]any{"compiled_messages": len(messages), "compiled_chars": messageChars(messages)},
-			Output: map[string]any{"messages": len(messages), "context_chars": contextChars(messages)},
-		})
-	}
 	log.InfofCtx(ctx, "[agent] run %s request compiled in %s: messages=%d contextChars=%d",
 		runID, historyDuration, len(messages), contextChars(messages))
 	tools := agent.executor.Definitions(toolSnapshot)
@@ -227,23 +374,23 @@ func (agent *Agent) runCompiled(ctx context.Context, runID string, input loopInp
 		// Dry-run until PruneApplied flips: always measure the would-be saving,
 		// but only shrink the offered set when pruning is live. Execution keeps
 		// the full snapshot so a pruned tool is still callable if replayed.
-		effective := prunedDefinitions(tools, input.offeredToolIDs)
-		fullEnc, _ := json.Marshal(tools)
-		effEnc, _ := json.Marshal(effective)
-		fullTok := tooloutput.EstimateTokens(string(fullEnc))
-		effTok := tooloutput.EstimateTokens(string(effEnc))
+		pruning, _ := executiontrace.Invoke(ctx, toolPruningSpec, toolPruningInput{
+			Tools: tools, Offered: input.offeredToolIDs, Applied: input.toolPruningApplied,
+		}, func(_ context.Context, input toolPruningInput) (toolPruningOutput, error) {
+			effective := prunedDefinitions(input.Tools, input.Offered)
+			fullEncoded, _ := json.Marshal(input.Tools)
+			prunedEncoded, _ := json.Marshal(effective)
+			return toolPruningOutput{
+				Effective:  effective,
+				FullTokens: tooloutput.EstimateTokens(string(fullEncoded)), PrunedTokens: tooloutput.EstimateTokens(string(prunedEncoded)),
+				RemovedIDs: removedToolDefIDs(input.Tools, effective),
+			}, nil
+		})
 		log.InfofCtx(ctx, "[agent] run %s tool pruning: applied=%t offered=%d/%d tokens=%d->%d saved=%d removed=%v",
-			runID, input.toolPruningApplied, len(effective), len(tools), fullTok, effTok, fullTok-effTok, removedToolDefIDs(tools, effective))
-		if traceEnabled {
-			domain.RecordTrace(ctx, domain.EvaluationTrace{
-				Node: "tool_pruning", Input: map[string]any{"applied": input.toolPruningApplied},
-				Output: map[string]any{"offered": len(effective), "total": len(tools),
-					"full_tokens": fullTok, "pruned_tokens": effTok, "saved_tokens": fullTok - effTok,
-					"removed_tool_ids": removedToolDefIDs(tools, effective)},
-			})
-		}
+			runID, input.toolPruningApplied, len(pruning.Effective), len(tools), pruning.FullTokens, pruning.PrunedTokens,
+			pruning.FullTokens-pruning.PrunedTokens, pruning.RemovedIDs)
 		if input.toolPruningApplied {
-			tools = effective
+			tools = pruning.Effective
 		}
 	}
 
@@ -278,34 +425,31 @@ func (agent *Agent) runCompiled(ctx context.Context, runID string, input loopInp
 		}
 
 		stepp := step
-		if err := agent.ensureInputBudget(messages, tools); err != nil {
-			if traceEnabled {
-				domain.RecordTrace(ctx, domain.EvaluationTrace{
-					Node: "context_budget", Status: "failed",
-					Input:  map[string]any{"step": stepp, "messages": len(messages), "tools": len(tools)},
-					Output: map[string]any{"error": err.Error()},
-				})
-			}
-			return result, err
+		_, budgetErr := executiontrace.Invoke(ctx, contextBudgetSpec, contextBudgetInput{
+			Step: stepp, Messages: messages, Tools: tools,
+		}, func(_ context.Context, input contextBudgetInput) (struct{}, error) {
+			return struct{}{}, agent.ensureInputBudget(input.Messages, input.Tools)
+		})
+		if budgetErr != nil {
+			return result, budgetErr
 		}
 		t0 := time.Now()
 		h := newStreamPipe(agent.observer, runID, stepp, t0, agent.onFirstAnswerToken)
 
 		callCtx := llm.WithUsagePhase(loopCtx, llm.PhaseAgentStep)
-		chatResult, err := agent.llm.ChatWithToolsMaxWithParameters(
-			callCtx, messages, tools, h, agent.cfg.AnswerMaxTokens,
-			agent.cfg.ModelParameters,
-		)
+		turn, err := executiontrace.Invoke(callCtx, agentModelTurnSpec, agentModelTurnInput{
+			Step: stepp, Messages: messages, Tools: tools, Stream: h,
+		}, func(callCtx context.Context, input agentModelTurnInput) (agentModelTurnOutput, error) {
+			chatResult, callErr := agent.llm.ChatWithToolsMaxWithParameters(
+				callCtx, input.Messages, input.Tools, input.Stream, agent.cfg.AnswerMaxTokens,
+				agent.cfg.ModelParameters,
+			)
+			return agentModelTurnOutput{Result: chatResult, Timing: input.Stream.Timings()}, callErr
+		})
+		chatResult := turn.Result
 		duration := time.Since(t0)
-		timing := h.Timings()
+		timing := turn.Timing
 		if err != nil {
-			if traceEnabled {
-				domain.RecordTrace(ctx, domain.EvaluationTrace{
-					Node: "agent_model_turn", Status: "failed", DurationMS: duration.Milliseconds(),
-					Input:  map[string]any{"step": stepp, "messages": len(messages), "tools": len(tools)},
-					Output: map[string]any{"error": err.Error()},
-				})
-			}
 			if !answerContract.Active() && agent.preserveInterruptedAnswer(runCtx, runID, &stepSeq, result, chatResult, h, t0, duration) {
 				result.Err = fmt.Errorf("agent step %d: %w", stepp, err)
 				log.WarnfCtx(ctx, "[agent] run %s preserving partial answer from interrupted step %d: %v", runID, stepp, err)
@@ -317,37 +461,12 @@ func (agent *Agent) runCompiled(ctx context.Context, runID string, input loopInp
 			}
 			return result, fmt.Errorf("agent step %d: %w", stepp, err)
 		}
-		if traceEnabled {
-			toolNames := make([]string, 0, len(chatResult.ToolCalls))
-			for _, call := range chatResult.ToolCalls {
-				toolNames = append(toolNames, call.Function.Name)
-			}
-			domain.RecordTrace(ctx, domain.EvaluationTrace{
-				Node: "agent_model_turn", DurationMS: duration.Milliseconds(),
-				Input: map[string]any{"step": stepp, "messages": len(messages), "tools": len(tools)},
-				Output: map[string]any{
-					"finish_reason": chatResult.FinishReason, "tool_calls": toolNames,
-					"content_chars": len([]rune(chatResult.Content)), "reasoning_tokens": chatResult.ReasoningTokens,
-					"first_event_ms": timing.FirstEvent.Milliseconds(), "first_reasoning_ms": timing.FirstReasoning.Milliseconds(),
-					"first_content_ms": timing.FirstContent.Milliseconds(), "first_tool_delta_ms": timing.FirstToolDelta.Milliseconds(),
-					"first_tool_call_ms": timing.FirstToolCall.Milliseconds(),
-				},
-			})
-		}
 		log.InfofCtx(ctx, "[agent] run %s model step %d timing: total=%s firstEvent=%s firstReasoning=%s firstContent=%s firstToolDelta=%s firstToolCall=%s",
 			runID, stepp, duration, timing.FirstEvent, timing.FirstReasoning, timing.FirstContent, timing.FirstToolDelta, timing.FirstToolCall)
 		result.Steps = stepp
 
 		if len(chatResult.ToolCalls) == 0 {
-			if traceEnabled && timing.FirstContent > 0 {
-				domain.RecordTrace(ctx, domain.EvaluationTrace{
-					Node: "first_answer_token",
-					Output: map[string]any{
-						"step": stepp, "turn_ttft_ms": timing.FirstContent.Milliseconds(),
-						"run_elapsed_ms": t0.Sub(runStarted).Milliseconds() + timing.FirstContent.Milliseconds(),
-					},
-				})
-			}
+			recordFirstAnswerToken(ctx, stepp, timing.FirstContent, t0.Sub(runStarted)+timing.FirstContent)
 			cont, err := agent.continueIfNeeded(loopCtx, messages, chatResult, agent.cfg.AnswerMaxTokens, h)
 			chatResult = cont
 			if err != nil && !answerContract.Active() && agent.preserveInterruptedAnswer(runCtx, runID, &stepSeq, result, chatResult, h, t0, duration) {
@@ -532,67 +651,53 @@ func (agent *Agent) runCompiled(ctx context.Context, runID string, input loopInp
 // forceConclusion asks the model to finish with the evidence already gathered.
 func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages []llm.Message, answerContract *exactAnswerContract, stepSeq *int, runStarted time.Time) (*llm.ChatStreamResult, error) {
 	ctx = llm.WithUsagePhase(ctx, llm.PhaseForcedConclusion)
-	messages = append(messages, llm.Message{
-		Role:    "user",
-		Content: forceConclusionInstruction,
-	})
-	t0 := time.Now()
-	stream := newStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
-	res, err := agent.generateWithContinue(ctx, messages, agent.cfg.ConclusionMaxTokens, stream)
-	if errors.Is(err, ErrReasoningTruncated) || errors.Is(err, ErrEmptyModelResponse) {
-		log.WarnfCtx(ctx, "[agent] run %s force-conclusion produced no visible content, retrying with no-reasoning prompt: %v", runID, err)
-		messages = append(messages, llm.Message{
+	input := &forceConclusionInput{RunID: runID, Messages: messages, AnswerContract: answerContract}
+	conclusion, err := executiontrace.Invoke(ctx, forceConclusionSpec, input, func(ctx context.Context, input *forceConclusionInput) (forceConclusionOutput, error) {
+		input.Messages = append(input.Messages, llm.Message{
 			Role:    "user",
-			Content: forceConclusionNoReasoningInstruction,
+			Content: forceConclusionInstruction,
 		})
-		t0 = time.Now()
-		stream = newStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
-		res, err = agent.generateWithContinue(ctx, messages, agent.cfg.ConclusionMaxTokens, stream)
-	}
-	if err == nil && hasLeakedToolProtocol(res) {
-		log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", runID)
-		messages = append(messages, llm.Message{Role: "user", Content: protocolRepairInstruction})
-		t0 = time.Now()
-		stream = newStreamPipe(agent.observer, runID, 0, t0, agent.onFirstAnswerToken)
-		res, err = agent.generateWithContinue(ctx, messages, agent.cfg.ConclusionMaxTokens, stream)
-		if err == nil && hasLeakedToolProtocol(res) {
-			res = nil
-			err = ErrToolProtocolLeak
-		}
-	}
-	if err == nil {
-		res, err = agent.validateOrRepairAnswer(ctx, messages, res, answerContract, agent.cfg.ConclusionMaxTokens, stream)
-	}
-	if domain.TraceEnabled(ctx) {
-		status := "completed"
-		timing := stream.Timings()
-		output := map[string]any{
-			"first_event_ms": timing.FirstEvent.Milliseconds(), "first_reasoning_ms": timing.FirstReasoning.Milliseconds(),
-			"first_content_ms": timing.FirstContent.Milliseconds(),
-		}
-		if err != nil {
-			status = "failed"
-			output["error"] = err.Error()
-		}
-		if res != nil {
-			output["finish_reason"] = res.FinishReason
-			output["content_chars"] = len([]rune(res.Content))
-			output["reasoning_tokens"] = res.ReasoningTokens
-		}
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "force_conclusion", Status: status, DurationMS: time.Since(t0).Milliseconds(),
-			Input: map[string]any{"messages": len(messages)}, Output: output,
-		})
-		if timing.FirstContent > 0 {
-			elapsed := timing.FirstContent.Milliseconds()
-			if !runStarted.IsZero() {
-				elapsed = t0.Sub(runStarted).Milliseconds() + timing.FirstContent.Milliseconds()
-			}
-			domain.RecordTrace(ctx, domain.EvaluationTrace{
-				Node:   "first_answer_token",
-				Output: map[string]any{"step": "force_conclusion", "turn_ttft_ms": timing.FirstContent.Milliseconds(), "run_elapsed_ms": elapsed},
+		attemptStarted := time.Now()
+		stream := newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
+		res, callErr := agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
+		if errors.Is(callErr, ErrReasoningTruncated) || errors.Is(callErr, ErrEmptyModelResponse) {
+			log.WarnfCtx(ctx, "[agent] run %s force-conclusion produced no visible content, retrying with no-reasoning prompt: %v", input.RunID, callErr)
+			input.Messages = append(input.Messages, llm.Message{
+				Role:    "user",
+				Content: forceConclusionNoReasoningInstruction,
 			})
+			attemptStarted = time.Now()
+			stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
+			res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
 		}
+		if callErr == nil && hasLeakedToolProtocol(res) {
+			log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", input.RunID)
+			input.Messages = append(input.Messages, llm.Message{Role: "user", Content: protocolRepairInstruction})
+			attemptStarted = time.Now()
+			stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
+			res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
+			if callErr == nil && hasLeakedToolProtocol(res) {
+				res = nil
+				callErr = ErrToolProtocolLeak
+			}
+		}
+		if callErr == nil {
+			res, callErr = agent.validateOrRepairAnswer(ctx, input.Messages, res, input.AnswerContract, agent.cfg.ConclusionMaxTokens, stream)
+		}
+		return forceConclusionOutput{
+			Result: res, Stream: stream, Timing: stream.Timings(), AttemptStarted: attemptStarted,
+		}, callErr
+	})
+	res := conclusion.Result
+	stream := conclusion.Stream
+	timing := conclusion.Timing
+	t0 := conclusion.AttemptStarted
+	if timing.FirstContent > 0 {
+		elapsed := timing.FirstContent.Milliseconds()
+		if !runStarted.IsZero() {
+			elapsed = t0.Sub(runStarted).Milliseconds() + timing.FirstContent.Milliseconds()
+		}
+		recordFirstAnswerToken(ctx, "force_conclusion", timing.FirstContent, time.Duration(elapsed)*time.Millisecond)
 	}
 	*stepSeq++
 	validAnswer := !answerContract.Active() || res != nil && len(answerContract.Missing(res.Content)) == 0
@@ -609,6 +714,24 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		})
 	}
 	return res, err
+}
+
+func recordFirstAnswerToken(ctx context.Context, step any, turnTTFT, runElapsed time.Duration) {
+	if turnTTFT <= 0 {
+		return
+	}
+	_, _ = executiontrace.Invoke(
+		ctx,
+		firstAnswerTokenTraceSpec,
+		firstAnswerTokenTraceInput{
+			Step:         step,
+			TurnTTFTMS:   turnTTFT.Milliseconds(),
+			RunElapsedMS: runElapsed.Milliseconds(),
+		},
+		func(context.Context, firstAnswerTokenTraceInput) (struct{}, error) {
+			return struct{}{}, nil
+		},
+	)
 }
 
 var ErrToolProtocolLeak = errors.New("final answer contained an unsupported tool protocol")

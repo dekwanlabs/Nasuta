@@ -1,21 +1,21 @@
 package domain
 
-import "context"
+import (
+	"context"
+
+	"github.com/dekwanlabs/nasuta/tracecontract"
+)
 
 // EvaluationTrace is a request-scoped, read-only execution event.
-type EvaluationTrace struct {
-	Sequence   int            `json:"sequence,omitempty"`
-	Node       string         `json:"node"`
-	Status     string         `json:"status"`
-	ElapsedMS  int64          `json:"elapsed_ms,omitempty"`
-	DurationMS int64          `json:"duration_ms,omitempty"`
-	Input      map[string]any `json:"input,omitempty"`
-	Output     map[string]any `json:"output,omitempty"`
-}
+type EvaluationTrace = tracecontract.EventV1
 
 // TraceRecorder accepts events only when an ingress explicitly enables tracing.
 type TraceRecorder interface {
 	RecordTrace(EvaluationTrace)
+}
+
+type traceRecorderState interface {
+	Enabled() bool
 }
 
 type traceRecorderKey struct{}
@@ -34,7 +34,13 @@ func TraceEnabled(ctx context.Context) bool {
 		return false
 	}
 	recorder, _ := ctx.Value(traceRecorderKey{}).(TraceRecorder)
-	return recorder != nil
+	if recorder == nil {
+		return false
+	}
+	if state, ok := recorder.(traceRecorderState); ok {
+		return state.Enabled()
+	}
+	return true
 }
 
 // RecordTrace is a no-op for normal product requests.

@@ -267,6 +267,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS agent_runs (
 				id         VARCHAR(64) PRIMARY KEY,
+				run_kind   VARCHAR(16) NOT NULL DEFAULT 'agent',
 				user_id    BIGINT NOT NULL DEFAULT 0,
 				session_id VARCHAR(64) NOT NULL DEFAULT '',
 				agent_id   VARCHAR(128) NOT NULL DEFAULT '',
@@ -306,6 +307,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 				KEY idx_user (user_id),
 				KEY idx_session (session_id),
 				KEY idx_status (status),
+				KEY idx_run_kind (run_kind),
 				KEY idx_agent_version (agent_id, definition_version),
 				KEY idx_workflow_node (workflow_run_id, workflow_node_id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
@@ -429,6 +431,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS workflow_runs (
 				id                   VARCHAR(64) PRIMARY KEY,
+				parent_run_id        VARCHAR(64) NOT NULL DEFAULT '',
 				workflow_id          VARCHAR(128) NOT NULL,
 				workflow_version     BIGINT NOT NULL,
 				workflow_hash        CHAR(64) NOT NULL,
@@ -452,6 +455,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 				started_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				ended_at             TIMESTAMP NULL,
 				KEY idx_workflow_started (workflow_id, workflow_version, started_at, id),
+				KEY idx_parent_run (parent_run_id, started_at, id),
 				KEY idx_status_started (status, started_at, id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS workflow_node_runs (

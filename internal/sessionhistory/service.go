@@ -13,7 +13,7 @@ import (
 	"unicode"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
-	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -101,16 +101,62 @@ type historyPayload struct {
 	Turns   []memory.HistorySummary `json:"turns"`
 }
 
+type recallInput struct {
+	UserID      int64
+	SessionID   string
+	Query       string
+	Limit       int
+	TokenBudget int
+	Neighbors   bool
+}
+
+type recallOutput struct {
+	Payload           string
+	Mode              string
+	DenseCandidates   int
+	LexicalCandidates int
+	FusedCandidates   int
+	StaleCandidates   int
+	SelectedItems     int
+	SelectedTokens    int
+	NeighborItems     int
+	Record            bool
+}
+
+var sessionHistoryRecallSpec = executiontrace.Spec[recallInput, recallOutput]{
+	Operation: "session_history.recall",
+	Node:      "session_history_recall",
+	Output: func(input recallInput, output recallOutput, _ error) map[string]any {
+		return map[string]any{
+			"mode": output.Mode, "dense_candidates": output.DenseCandidates, "lexical_candidates": output.LexicalCandidates,
+			"fused_candidates": output.FusedCandidates, "stale_candidates": output.StaleCandidates,
+			"selected_items": output.SelectedItems, "selected_tokens": output.SelectedTokens,
+			"neighbor_items": output.NeighborItems, "query_tokens": tooloutput.EstimateTokens(input.Query),
+		}
+	},
+	Record: func(output recallOutput, err error) bool {
+		return err == nil && output.Record
+	},
+}
+
 func (service *Service) find(ctx context.Context, userID int64, sessionID, query string, limit, tokenBudget int, neighbors bool) (string, error) {
-	started := time.Now()
+	result, err := executiontrace.Invoke(ctx, sessionHistoryRecallSpec, recallInput{
+		UserID: userID, SessionID: sessionID, Query: query, Limit: limit, TokenBudget: tokenBudget, Neighbors: neighbors,
+	}, service.findHistory)
+	return result.Payload, err
+}
+
+func (service *Service) findHistory(ctx context.Context, input recallInput) (recallOutput, error) {
+	userID, sessionID, query := input.UserID, input.SessionID, input.Query
+	limit, tokenBudget, neighbors := input.Limit, input.TokenBudget, input.Neighbors
 	if userID <= 0 || sessionID == "" || strings.TrimSpace(query) == "" {
-		return "", nil
+		return recallOutput{}, nil
 	}
 	if limit <= 0 || limit > selectedLimit {
 		limit = selectedLimit
 	}
 	if tokenBudget <= 0 {
-		return "", nil
+		return recallOutput{}, nil
 	}
 	queryTerms := extractTerms(query, 16)
 	canonicalTerms := make([]string, 0, len(queryTerms))
@@ -119,7 +165,7 @@ func (service *Service) find(ctx context.Context, userID int64, sessionID, query
 	}
 	lexical, err := service.sessions.FindHistoryRefs(ctx, userID, sessionID, canonicalTerms, candidateLimit)
 	if err != nil {
-		return "", err
+		return recallOutput{}, err
 	}
 
 	mode := "lexical_only_unavailable_dense"
@@ -175,7 +221,7 @@ func (service *Service) find(ctx context.Context, userID int64, sessionID, query
 	if mode == "hybrid" && len(dense) == 0 && len(lexical) > 0 {
 		pending, pendingErr := service.sessions.HasPendingHistoryUpserts(ctx, userID, sessionID)
 		if pendingErr != nil {
-			return "", pendingErr
+			return recallOutput{}, pendingErr
 		}
 		if pending {
 			mode = "lexical_only_pending_dense"
@@ -185,8 +231,9 @@ func (service *Service) find(ctx context.Context, userID int64, sessionID, query
 	ranked := fuseRanks(dense, lexical)
 	if len(ranked) == 0 {
 		log.InfofCtx(ctx, "[qa] session history recall session=%s mode=no_history_hit dense=%d lexical=%d", sessionID, len(dense), len(lexical))
-		recordRecallTrace(ctx, started, "no_history_hit", query, len(dense), len(lexical), 0, 0, 0, 0, 0)
-		return "", nil
+		return recallOutput{
+			Mode: "no_history_hit", DenseCandidates: len(dense), LexicalCandidates: len(lexical), Record: true,
+		}, nil
 	}
 	refs := make([]string, 0, min(len(ranked), candidateLimit))
 	for _, candidate := range ranked {
@@ -194,7 +241,7 @@ func (service *Service) find(ctx context.Context, userID int64, sessionID, query
 	}
 	records, err := service.sessions.LoadHistorySummaries(ctx, userID, sessionID, refs)
 	if err != nil {
-		return "", err
+		return recallOutput{}, err
 	}
 	byRef := make(map[string]memory.HistorySummary, len(records))
 	for _, record := range records {
@@ -225,7 +272,7 @@ func (service *Service) find(ctx context.Context, userID int64, sessionID, query
 		}
 		adjacent, neighborErr := service.sessions.LoadHistoryNeighbors(ctx, userID, sessionID, turns)
 		if neighborErr != nil {
-			return "", neighborErr
+			return recallOutput{}, neighborErr
 		}
 		seen := make(map[string]struct{}, len(ordered)+len(adjacent))
 		for _, record := range ordered {
@@ -266,26 +313,17 @@ func (service *Service) find(ctx context.Context, userID int64, sessionID, query
 		}
 	}
 	selected, selectedItems, err := selectPayloadWithCount(mode, ordered, limit, tokenBudget)
-	if err == nil {
-		log.InfofCtx(ctx, "[qa] session history recall session=%s mode=%s dense=%d lexical=%d fused=%d revalidated=%d selected_tokens=%d",
-			sessionID, mode, len(dense), len(lexical), len(ranked), len(records), tooloutput.EstimateTokens(selected))
-		recordRecallTrace(ctx, started, mode, query, len(dense), len(lexical), len(ranked),
-			len(ranked)-len(records), selectedItems, tooloutput.EstimateTokens(selected), neighborItems)
+	if err != nil {
+		return recallOutput{}, err
 	}
-	return selected, err
-}
-
-func recordRecallTrace(ctx context.Context, started time.Time, mode, query string, dense, lexical, fused,
-	stale, selectedItems, selectedTokens, neighborItems int) {
-	domain.RecordTrace(ctx, domain.EvaluationTrace{
-		Node: "session_history_recall", DurationMS: time.Since(started).Milliseconds(),
-		Output: map[string]any{
-			"mode": mode, "dense_candidates": dense, "lexical_candidates": lexical,
-			"fused_candidates": fused, "stale_candidates": stale,
-			"selected_items": selectedItems, "selected_tokens": selectedTokens,
-			"neighbor_items": neighborItems, "query_tokens": tooloutput.EstimateTokens(query),
-		},
-	})
+	selectedTokens := tooloutput.EstimateTokens(selected)
+	log.InfofCtx(ctx, "[qa] session history recall session=%s mode=%s dense=%d lexical=%d fused=%d revalidated=%d selected_tokens=%d",
+		sessionID, mode, len(dense), len(lexical), len(ranked), len(records), selectedTokens)
+	return recallOutput{
+		Payload: selected, Mode: mode, DenseCandidates: len(dense), LexicalCandidates: len(lexical),
+		FusedCandidates: len(ranked), StaleCandidates: len(ranked) - len(records),
+		SelectedItems: selectedItems, SelectedTokens: selectedTokens, NeighborItems: neighborItems, Record: true,
+	}, nil
 }
 
 func fuseRanks(dense, lexical []string) []rankedRef {

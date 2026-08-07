@@ -347,6 +347,22 @@ func TestPostProcessCodePipelineHonorsThresholdWhenAllCandidatesFail(t *testing.
 	}
 }
 
+func TestPostProcessCodePipelineMarksRerankerFallbackDegraded(t *testing.T) {
+	r := &Retriever{reranker: errorReranker{}, platform: rerankTestCfg()}
+	recorder := &rerankTraceRecorder{}
+	ctx := domain.WithTraceRecorder(t.Context(), recorder)
+	r.postProcessCodePool(ctx, []codeDoc{doc("svc-a", "a/1.java", "m", "aaaa", 0.95)}, "q")
+	for _, event := range recorder.events {
+		if event.Node == "candidate_rerank" {
+			if event.Status != "degraded" || event.Output["mode"] != "recall_after_error" || event.Output["error"] != errReranker.Error() {
+				t.Fatalf("candidate_rerank = %#v", event)
+			}
+			return
+		}
+	}
+	t.Fatalf("candidate_rerank missing from %#v", recorder.events)
+}
+
 // newTestDashScopeReranker points a dashscopeReranker at a fake server.
 func newTestDashScopeReranker(url string, srv *httptest.Server) dashscopeReranker {
 	return dashscopeReranker{

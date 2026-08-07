@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -98,6 +99,111 @@ func newTestAgent(t *testing.T, serverURL string) *Agent {
 		Timeout:           10 * time.Second,
 		AnswerReserve:     5 * time.Second,
 	}, nil, nil)
+}
+
+func TestAgentModelTurnTraceContract(t *testing.T) {
+	server := fakeStreamServer(t, []streamEvent{
+		{reasoning: "分析"},
+		{content: "结论", finish: "stop"},
+	})
+	defer server.Close()
+
+	var events []domain.EvaluationTrace
+	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	}))
+	result, err := newTestAgent(t, server.URL).RunWithPlan(ctx, "trace_model_turn", "问题", nil, nil, domain.EvidencePlan{}, false)
+	if err != nil || result.Err != nil {
+		t.Fatalf("RunWithPlan() error = %v, result error = %v", err, result.Err)
+	}
+
+	event := traceEventByNode(t, events, "agent_model_turn")
+	if event.Status != "completed" || event.DurationMS < 0 {
+		t.Fatalf("agent_model_turn status = %q duration = %d", event.Status, event.DurationMS)
+	}
+	if _, ok := event.Input["step"].(int); !ok {
+		t.Fatalf("step = %#v, want int", event.Input["step"])
+	}
+	if _, ok := event.Input["messages"].(int); !ok {
+		t.Fatalf("messages = %#v, want int", event.Input["messages"])
+	}
+	if _, ok := event.Input["tools"].(int); !ok {
+		t.Fatalf("tools = %#v, want int", event.Input["tools"])
+	}
+	if event.Output["finish_reason"] != "stop" || event.Output["content_chars"] != 2 {
+		t.Fatalf("agent_model_turn output = %#v", event.Output)
+	}
+	for _, field := range []string{
+		"reasoning_tokens", "first_event_ms", "first_reasoning_ms", "first_content_ms", "first_tool_delta_ms", "first_tool_call_ms",
+	} {
+		if _, ok := event.Output[field].(int64); !ok && field != "reasoning_tokens" {
+			t.Fatalf("%s = %#v, want int64", field, event.Output[field])
+		}
+	}
+	if _, ok := event.Output["reasoning_tokens"].(int); !ok {
+		t.Fatalf("reasoning_tokens = %#v, want int", event.Output["reasoning_tokens"])
+	}
+	if _, ok := event.Output["tool_calls"].([]string); !ok {
+		t.Fatalf("tool_calls = %#v, want []string", event.Output["tool_calls"])
+	}
+}
+
+func TestAgentModelTurnTraceClassifiesCancellation(t *testing.T) {
+	var events []domain.EvaluationTrace
+	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	}))
+	stream := newStreamPipe(NoopObserver(), "cancelled_turn", 1, time.Now(), nil)
+	_, err := executiontrace.Invoke(ctx, agentModelTurnSpec, agentModelTurnInput{Step: 1, Stream: stream},
+		func(context.Context, agentModelTurnInput) (agentModelTurnOutput, error) {
+			return agentModelTurnOutput{Timing: stream.Timings()}, context.Canceled
+		})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Invoke() error = %v, want context.Canceled", err)
+	}
+	event := traceEventByNode(t, events, "agent_model_turn")
+	if event.Status != "cancelled" || event.Output["error"] != context.Canceled.Error() {
+		t.Fatalf("cancelled event = %#v", event)
+	}
+}
+
+func TestForceConclusionTraceContractAndTokenOrder(t *testing.T) {
+	server := fakeStreamServer(t, []streamEvent{{content: "最终结论", finish: "stop"}})
+	defer server.Close()
+
+	var events []domain.EvaluationTrace
+	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	}))
+	agent := newTestAgent(t, server.URL)
+	agent.cfg.MaxSteps = 0
+	result, err := agent.RunWithPlan(ctx, "trace_force_conclusion", "问题", nil, nil, domain.EvidencePlan{}, false)
+	if err != nil || result.Err != nil || result.Answer != "最终结论" {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+
+	conclusion := traceEventByNode(t, events, "force_conclusion")
+	firstToken := traceEventByNode(t, events, "first_answer_token")
+	if conclusion.Status != "completed" || conclusion.Sequence >= firstToken.Sequence {
+		t.Fatalf("conclusion = %#v, first token = %#v", conclusion, firstToken)
+	}
+	if conclusion.Output["finish_reason"] != "stop" || conclusion.Output["content_chars"] != 4 {
+		t.Fatalf("force_conclusion output = %#v", conclusion.Output)
+	}
+	if firstToken.Output["step"] != "force_conclusion" {
+		t.Fatalf("first_answer_token output = %#v", firstToken.Output)
+	}
+}
+
+func traceEventByNode(t *testing.T, events []domain.EvaluationTrace, node string) domain.EvaluationTrace {
+	t.Helper()
+	for _, event := range events {
+		if event.Node == node {
+			return event
+		}
+	}
+	t.Fatalf("trace node %q not found in %#v", node, events)
+	return domain.EvaluationTrace{}
 }
 
 func TestMaxStepsForQuestion(t *testing.T) {

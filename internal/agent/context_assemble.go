@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -37,6 +38,74 @@ type contextAssembleStats struct {
 	HistoryUsedTokens   int
 	SelectedTurnNumbers []int
 	SelectedReasons     []string
+}
+
+type contextAssembleInput struct {
+	Question     string
+	UserID       int64
+	Conversation ConversationContext
+	Relation     retrieval.HistoryRelation
+	Origin       string
+	Upgrade      string
+}
+
+type contextAssembleOutput struct {
+	Conversation ConversationContext
+	Stats        contextAssembleStats
+}
+
+var contextAssembleSpec = executiontrace.Spec[contextAssembleInput, contextAssembleOutput]{
+	Operation: "agent.context_assemble",
+	Node:      "context_assemble",
+	Output: func(_ contextAssembleInput, output contextAssembleOutput, err error) map[string]any {
+		stats := output.Stats
+		return map[string]any{
+			"topic_affinity": stats.Relation.TopicAffinity, "confidence": stats.Relation.Confidence,
+			"relation_origin":        stats.RelationOrigin,
+			"needs_prior_entities":   stats.Relation.NeedsPriorEntities,
+			"needs_prior_conclusion": stats.Relation.NeedsPriorConclusion,
+			"needs_prior_evidence":   stats.Relation.NeedsPriorEvidence,
+			"dependency_upgrade":     stats.UpgradeReason, "candidate_turns": stats.CandidateCount,
+			"selected_turns": stats.SelectedCount, "full_turns": stats.FullTurnCount,
+			"detail_turns": stats.DetailCount, "reference_turns": stats.ReferenceCount,
+			"omitted_turns": stats.OmittedCount, "history_budget_tokens": stats.HistoryBudgetTokens,
+			"history_used_tokens":   stats.HistoryUsedTokens,
+			"selected_turn_numbers": stats.SelectedTurnNumbers, "selected_reasons": stats.SelectedReasons,
+		}
+	},
+	Status: func(output contextAssembleOutput, err error) string {
+		if err == nil && output.Stats.RelationOrigin == "deterministic" {
+			return "degraded"
+		}
+		return ""
+	},
+}
+
+func (svc *QA) assembleContext(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
+	return executiontrace.Invoke(ctx, contextAssembleSpec, input, func(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
+		conversation, stats, err := svc.assembleActiveHistory(
+			ctx, input.Question, input.UserID, input.Conversation, input.Relation, input.Origin, input.Upgrade,
+		)
+		output := contextAssembleOutput{Conversation: conversation, Stats: stats}
+		if err != nil {
+			return output, err
+		}
+		continuity := ""
+		if len(conversation.RecentTurns) > 0 &&
+			(input.Relation.NeedsPriorEntities || input.Relation.NeedsPriorConclusion || input.Relation.NeedsPriorEvidence) {
+			continuity = conversation.RecentTurns[0].Question
+		}
+		if svc.history == nil || conversation.CompactedThroughTurn <= 0 || conversation.SessionID == "" {
+			return output, nil
+		}
+		historyBudget := min(int(float64(svc.contextWindow)*0.08), 32768)
+		recalled, err := svc.history.Recall(ctx, input.UserID, conversation.SessionID, input.Question, continuity, historyBudget)
+		if err != nil {
+			return output, fmt.Errorf("recall current session history: %w", err)
+		}
+		output.Conversation.RetrievedHistory = recalled
+		return output, nil
+	})
 }
 
 type scoredTurn struct {

@@ -11,6 +11,8 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
 	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
 	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
 )
@@ -183,17 +185,23 @@ func (retryableReviewError) Retryable() bool { return true }
 type reviewExecutionStub struct {
 	evaluateErr error
 	failCalls   int
+	snapshot    *featuredelivery.ReviewWorkflowSnapshot
+	report      *featuredelivery.ReviewReport
 }
 
-func (*reviewExecutionStub) LoadReviewWorkflowSnapshot(
+func (stub *reviewExecutionStub) LoadReviewWorkflowSnapshot(
 	context.Context,
 	string,
 	bool,
 ) (*featuredelivery.ReviewWorkflowSnapshot, error) {
+	if stub.snapshot != nil {
+		snapshot := *stub.snapshot
+		return &snapshot, nil
+	}
 	return nil, featuredelivery.ErrNotFound
 }
 
-func (*reviewExecutionStub) ExecuteReviewAssignmentAttempt(
+func (stub *reviewExecutionStub) ExecuteReviewAssignmentAttempt(
 	context.Context,
 	string,
 	string,
@@ -203,6 +211,10 @@ func (*reviewExecutionStub) ExecuteReviewAssignmentAttempt(
 	agentapi.Actor,
 	bool,
 ) (*featuredelivery.ReviewReport, error) {
+	if stub.report != nil {
+		report := *stub.report
+		return &report, nil
+	}
 	return nil, featuredelivery.ErrNotFound
 }
 
@@ -278,6 +290,78 @@ func TestExecutorRequiresFeatureDeliveryPermission(t *testing.T) {
 	}
 	if stub.failCalls != 0 {
 		t.Fatalf("permission rejection failed review round %d times", stub.failCalls)
+	}
+}
+
+func TestExecutorEmitsFeatureDeliveryStageTrace(t *testing.T) {
+	var events []domain.EvaluationTrace
+	scope := executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	})
+	ctx := executiontrace.WithScope(t.Context(), scope)
+	_, err := NewExecutor(&reviewExecutionStub{}).Execute(ctx, agentworkflow.NodeRequest{
+		WorkflowRunID: "review.round-1",
+		Node: agentworkflow.NodeDefinition{
+			ID: NodeAdjudicate, TransformID: TransformAdjudication,
+		},
+		Inputs: []agentworkflow.Handoff{{Payload: json.RawMessage(`[]`)}},
+	})
+	if err == nil {
+		t.Fatal("Execute succeeded without feature delivery permission")
+	}
+	if len(events) != 1 || events[0].Node != "feature_delivery_stage" ||
+		events[0].Status != "failed" ||
+		events[0].Input["node_id"] != NodeAdjudicate ||
+		events[0].Input["transform_id"] != TransformAdjudication {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestReviewAssignmentEmitsCorrelatedChildRunTrace(t *testing.T) {
+	reviewer := featuredelivery.ReviewerSpec{ID: "architecture"}
+	nodeID := reviewerNodeID(reviewer.ID)
+	stub := &reviewExecutionStub{
+		snapshot: &featuredelivery.ReviewWorkflowSnapshot{
+			Round: featuredelivery.ReviewRound{Reviewers: []featuredelivery.ReviewerSpec{reviewer}},
+		},
+		report: &featuredelivery.ReviewReport{ReviewerID: reviewer.ID},
+	}
+	var events []domain.EvaluationTrace
+	scope := executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	})
+	ctx := executiontrace.WithScope(t.Context(), scope)
+	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+		RunID: "review.round-1", WorkflowRunID: "review.round-1", WorkflowNodeID: nodeID,
+	})
+	result, err := NewExecutor(stub).Execute(ctx, agentworkflow.NodeRequest{
+		WorkflowRunID: "review.round-1",
+		Node: agentworkflow.NodeDefinition{
+			ID: nodeID, TransformID: TransformAssignment,
+		},
+		Inputs:  []agentworkflow.Handoff{{Payload: json.RawMessage(`{"round_id":"round-1"}`)}},
+		Attempt: 1,
+		EffectivePermissions: agentapi.PermissionPolicy{
+			Scopes: []string{platformscope.FeatureDelivery},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AgentRunID == "" || len(events) != 2 {
+		t.Fatalf("result=%+v events=%#v", result, events)
+	}
+	child, stage := events[0], events[1]
+	if child.Node != "multi_agent_child_run" || child.TraceID == "" ||
+		child.TraceID != stage.TraceID || child.RunID != result.AgentRunID ||
+		child.AgentRunID != result.AgentRunID || child.ParentRunID != "review.round-1" ||
+		child.WorkflowRunID != "review.round-1" || child.WorkflowNodeID != nodeID {
+		t.Fatalf("child = %#v stage = %#v", child, stage)
+	}
+	if stage.Node != "feature_delivery_stage" || stage.RunID != "review.round-1" ||
+		stage.WorkflowRunID != "review.round-1" || stage.WorkflowNodeID != nodeID ||
+		stage.Output["agent_run_id"] != result.AgentRunID {
+		t.Fatalf("stage = %#v", stage)
 	}
 }
 

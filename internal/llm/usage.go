@@ -84,6 +84,23 @@ type CallLifecycleObserver interface {
 	OnLLMCall(context.Context, string, CallLifecycle)
 }
 
+// ExecutionObserver receives one physical model execution outcome.
+type ExecutionObserver interface {
+	OnLLMExecution(context.Context, Execution)
+}
+
+// Execution describes one model request without prescribing an export protocol.
+type Execution struct {
+	CallSeq         int
+	Phase           string
+	Provider        string
+	Model           string
+	MaxOutputTokens int
+	Duration        time.Duration
+	Err             error
+	Panic           any
+}
+
 type callLifecycleState struct {
 	runID    string
 	observer CallLifecycleObserver
@@ -95,6 +112,7 @@ type usageContext struct {
 	phase     string
 	recorder  UsageRecorder
 	lifecycle *callLifecycleState
+	execution ExecutionObserver
 }
 
 type usageContextKey struct{}
@@ -115,6 +133,19 @@ func WithCallLifecycleObserver(ctx context.Context, runID string, observer CallL
 	return context.WithValue(ctx, usageContextKey{}, metadata)
 }
 
+// WithExecutionObserver attaches one run-scoped model execution observer.
+func WithExecutionObserver(ctx context.Context, observer ExecutionObserver) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
+	metadata.execution = observer
+	if metadata.lifecycle == nil {
+		metadata.lifecycle = &callLifecycleState{}
+	}
+	return context.WithValue(ctx, usageContextKey{}, metadata)
+}
+
 // WithUsagePhase identifies why the next model call is being made.
 func WithUsagePhase(ctx context.Context, phase string) context.Context {
 	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
@@ -122,29 +153,51 @@ func WithUsagePhase(ctx context.Context, phase string) context.Context {
 	return context.WithValue(ctx, usageContextKey{}, metadata)
 }
 
-func beginCallLifecycle(ctx context.Context) func(error) {
+func beginCallLifecycle(ctx context.Context, provider, model string, maxOutputTokens int) func(error, any) {
 	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
 	state := metadata.lifecycle
-	if state == nil || state.observer == nil || state.runID == "" {
-		return func(error) {}
+	execution := metadata.execution
+	if (state == nil || state.observer == nil || state.runID == "") && execution == nil {
+		return func(error, any) {}
 	}
 	phase := metadata.phase
 	if phase == "" {
 		phase = "unclassified"
 	}
-	callSeq := int(state.next.Add(1))
+	callSeq := 1
+	if state != nil {
+		callSeq = int(state.next.Add(1))
+	}
 	started := time.Now()
-	state.observer.OnLLMCall(ctx, state.runID, CallLifecycle{
-		CallSeq: callSeq, Phase: phase, Status: CallLifecycleStarted,
-	})
-	return func(callErr error) {
+	if state != nil && state.observer != nil && state.runID != "" {
+		state.observer.OnLLMCall(ctx, state.runID, CallLifecycle{
+			CallSeq: callSeq, Phase: phase, Status: CallLifecycleStarted,
+		})
+	}
+	return func(callErr error, recovered any) {
 		status := CallLifecycleFinished
-		if callErr != nil {
+		if callErr != nil || recovered != nil {
 			status = CallStatusFailed
 		}
-		state.observer.OnLLMCall(context.WithoutCancel(ctx), state.runID, CallLifecycle{
-			CallSeq: callSeq, Phase: phase, Status: status, DurationMs: time.Since(started).Milliseconds(),
-		})
+		duration := time.Since(started)
+		if state != nil && state.observer != nil && state.runID != "" {
+			state.observer.OnLLMCall(context.WithoutCancel(ctx), state.runID, CallLifecycle{
+				CallSeq: callSeq, Phase: phase, Status: status, DurationMs: duration.Milliseconds(),
+			})
+		}
+		if execution != nil {
+			func() {
+				defer func() {
+					if observerPanic := recover(); observerPanic != nil {
+						log.ErrorfCtx(ctx, "[llm] execution observer call=%d phase=%s: %v", callSeq, phase, observerPanic)
+					}
+				}()
+				execution.OnLLMExecution(context.WithoutCancel(ctx), Execution{
+					CallSeq: callSeq, Phase: phase, Provider: provider, Model: model,
+					MaxOutputTokens: maxOutputTokens, Duration: duration, Err: callErr, Panic: recovered,
+				})
+			}()
+		}
 	}
 }
 

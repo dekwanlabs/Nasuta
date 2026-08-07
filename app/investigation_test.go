@@ -1,0 +1,36 @@
+package app
+
+import (
+	"testing"
+
+	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+)
+
+func TestProjectInvestigationEvent(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      agentworkflow.Event
+		wantType   agent.EventType
+		wantStatus string
+		want       bool
+	}{
+		{name: "workflow", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "workflow_started"}, wantType: agent.EventWorkflowStarted, wantStatus: "running", want: true},
+		{name: "agent start", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "node_started", NodeID: "investigate.code"}, wantType: agent.EventAgentStarted, wantStatus: "running", want: true},
+		{name: "agent complete", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "node_succeeded", NodeID: "synthesize"}, wantType: agent.EventAgentCompleted, wantStatus: "completed", want: true},
+		{name: "agent failed", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "node_failed", NodeID: "investigate.docs", Summary: "node failed"}, wantType: agent.EventAgentCompleted, wantStatus: "failed", want: true},
+		{name: "evidence joined", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "node_succeeded", NodeID: "evidence.join"}, wantType: agent.EventEvidenceJoined, wantStatus: "completed", want: true},
+		{name: "handoff ignored", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "handoff_created", NodeID: "synthesize"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			eventType, event, ok := projectInvestigationEvent("qa_parent_1", test.event)
+			if ok != test.want || eventType != test.wantType || event.Status != test.wantStatus {
+				t.Fatalf("projection = (%q, %+v, %t)", eventType, event, ok)
+			}
+			if ok && (event.RunID != "qa_parent_1" || event.WorkflowRunID != "workflow_1" || event.Strategy != "multi_agent") {
+				t.Fatalf("correlation = %+v", event)
+			}
+		})
+	}
+}

@@ -17,12 +17,27 @@ type RoutingCapabilities struct {
 }
 
 type AnalysisResult struct {
-	Decision domain.PlanDecision
-	Question string
-	Terms    QueryTerms
-	ToolIDs  []string
-	Time     TimeExpr
-	History  HistoryRelation
+	Decision  domain.PlanDecision
+	Execution ExecutionSuggestion
+	Question  string
+	Terms     QueryTerms
+	ToolIDs   []string
+	Time      TimeExpr
+	History   HistoryRelation
+}
+
+type ExecutionStrategy string
+
+const (
+	ExecutionSingleAgent ExecutionStrategy = "single_agent"
+	ExecutionMultiAgent  ExecutionStrategy = "multi_agent"
+)
+
+type ExecutionSuggestion struct {
+	Strategy   ExecutionStrategy `json:"strategy"`
+	Complexity float64           `json:"complexity"`
+	Confidence float64           `json:"confidence"`
+	Reasons    []string          `json:"reasons"`
 }
 
 // HistoryRelation separates continuous topical affinity from concrete history dependencies.
@@ -53,7 +68,35 @@ const (
 	queryTermsExampleJSON = `{"query_terms":{"domain_terms":[],"identifiers":[]}}`
 	timeExampleJSON       = `{"time":{"kind":"none","n":0,"unit":"","raw":""}}`
 	historyExampleJSON    = `{"history_relation":{"topic_affinity":0.0,"confidence":0.0,"needs_prior_entities":false,"needs_prior_conclusion":false,"needs_prior_evidence":false,"explicit_turn_refs":[]}}`
+	executionExampleJSON  = `{"execution":{"strategy":"single_agent","complexity":0.0,"confidence":0.0,"reasons":[]}}`
 )
+
+var executionReasonCodes = map[string]struct{}{
+	"requires_multiple_subproblems":            {},
+	"requires_cross_source_analysis":           {},
+	"requires_cross_service_analysis":          {},
+	"requires_independent_evidence_validation": {},
+	"requires_conflict_resolution":             {},
+	"requires_risk_sensitive_analysis":         {},
+	"supports_parallel_investigation":          {},
+	"single_focused_question":                  {},
+	"single_source_sufficient":                 {},
+	"subproblems_are_sequential":               {},
+	"provided_context_sufficient":              {},
+}
+
+const executionContract = `Suggest whether the current request benefits from one agent or a fixed read-only multi-agent investigation workflow.
+- strategy must be single_agent or multi_agent.
+- complexity measures structural complexity from 0 to 1.
+- confidence measures confidence in the execution suggestion from 0 to 1.
+- Recommend multi_agent only when at least two independently useful investigation responsibilities can run before deterministic synthesis.
+- Consider subproblem count, evidence dimensions, impact scope, uncertainty, risk, and parallelizability.
+- Do not recommend multi_agent merely because a request is technical, long, or asks for internal evidence.
+- Evidence source selection and execution strategy are independent. Explicit evidence sources constrain sources but do not force multi_agent.
+- reasons contains at most 4 unique codes selected only from: requires_multiple_subproblems, requires_cross_source_analysis, requires_cross_service_analysis, requires_independent_evidence_validation, requires_conflict_resolution, requires_risk_sensitive_analysis, supports_parallel_investigation, single_focused_question, single_source_sufficient, subproblems_are_sequential, provided_context_sufficient.
+- Never return agent IDs, workflow IDs, providers, permissions, tool grants, or parallelism.
+Return a JSON object with this exact shape:
+` + executionExampleJSON
 
 const historyRelationContract = `Determine how the current question depends on the bounded previous-turn metadata.
 - topic_affinity is a continuous value from 0 to 1. A shift from logs to configuration or code for the same entity remains partially related.
@@ -151,7 +194,10 @@ func analyzeQuestion(
 ) (AnalysisResult, error) {
 	clean := strings.TrimSpace(question)
 	terms := QueryTerms{DomainTerms: ExtractTechTerms(termsQuestion)}.normalize()
-	empty := AnalysisResult{Question: clean, Terms: terms}
+	empty := AnalysisResult{
+		Question: clean, Terms: terms,
+		Execution: ExecutionSuggestion{Strategy: ExecutionSingleAgent},
+	}
 
 	var contracts []string
 	var properties []string
@@ -183,6 +229,11 @@ Available tools: `+string(encoded))
 		contracts = append(contracts, "History relation contract:\n"+historyRelationContract)
 		properties = append(properties, "\"history_relation\"")
 	}
+	analyzeExecution := len(properties) > 0
+	if analyzeExecution {
+		contracts = append(contracts, "Execution routing contract:\n"+executionContract)
+		properties = append(properties, "\"execution\"")
+	}
 	if len(properties) == 0 {
 		empty.Decision = decision
 		return empty, nil
@@ -204,6 +255,7 @@ Available tools: `+string(encoded))
 	var toolIDs []string
 	var timeExpr TimeExpr
 	var historyRelation HistoryRelation
+	execution := ExecutionSuggestion{Strategy: ExecutionSingleAgent}
 	opts := llm.CallOptions{
 		MaxTokens: maxTokens,
 		Validate: func(p any) error {
@@ -245,6 +297,17 @@ Available tools: `+string(encoded))
 				extracted.Identifiers = groundedIdentifiers(extracted.Identifiers, termsQuestion)
 				terms = extracted.normalize()
 			}
+			if analyzeExecution {
+				executionRaw, ok := (*m)["execution"].(map[string]any)
+				if !ok {
+					return fmt.Errorf("missing execution object")
+				}
+				extractedExecution, err := bindExecutionSuggestion(executionRaw)
+				if err != nil {
+					return err
+				}
+				execution = extractedExecution
+			}
 			if temporal {
 				timeRaw, ok := (*m)["time"].(map[string]any)
 				if !ok {
@@ -279,7 +342,49 @@ Available tools: `+string(encoded))
 
 	return AnalysisResult{
 		Decision: decision, Question: clean, Terms: terms, ToolIDs: toolIDs,
-		Time: timeExpr, History: historyRelation,
+		Time: timeExpr, History: historyRelation, Execution: execution,
+	}, nil
+}
+
+func bindExecutionSuggestion(raw map[string]any) (ExecutionSuggestion, error) {
+	strategy, ok := raw["strategy"].(string)
+	if !ok || ExecutionStrategy(strategy) != ExecutionSingleAgent && ExecutionStrategy(strategy) != ExecutionMultiAgent {
+		return ExecutionSuggestion{}, fmt.Errorf("execution.strategy must be single_agent or multi_agent")
+	}
+	complexity, ok := raw["complexity"].(float64)
+	if !ok || complexity < 0 || complexity > 1 {
+		return ExecutionSuggestion{}, fmt.Errorf("execution.complexity must be between 0 and 1")
+	}
+	confidence, ok := raw["confidence"].(float64)
+	if !ok || confidence < 0 || confidence > 1 {
+		return ExecutionSuggestion{}, fmt.Errorf("execution.confidence must be between 0 and 1")
+	}
+	items, ok := raw["reasons"].([]any)
+	if !ok {
+		return ExecutionSuggestion{}, fmt.Errorf("execution.reasons must be an array")
+	}
+	if len(items) > 4 {
+		return ExecutionSuggestion{}, fmt.Errorf("execution.reasons exceeds 4 items")
+	}
+	reasons := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for index, item := range items {
+		reason, ok := item.(string)
+		if !ok {
+			return ExecutionSuggestion{}, fmt.Errorf("execution.reasons[%d] must be a string", index)
+		}
+		if _, allowed := executionReasonCodes[reason]; !allowed {
+			return ExecutionSuggestion{}, fmt.Errorf("execution reason %q is unknown", reason)
+		}
+		if _, duplicate := seen[reason]; duplicate {
+			continue
+		}
+		seen[reason] = struct{}{}
+		reasons = append(reasons, reason)
+	}
+	return ExecutionSuggestion{
+		Strategy: ExecutionStrategy(strategy), Complexity: complexity,
+		Confidence: confidence, Reasons: reasons,
 	}, nil
 }
 

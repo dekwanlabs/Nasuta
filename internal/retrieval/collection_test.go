@@ -7,7 +7,17 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 )
+
+type dependencyTraceTools struct {
+	servicePathFakeTools
+	trace domain.DependencyTrace
+}
+
+func (tools dependencyTraceTools) TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error) {
+	return tools.trace, nil
+}
 
 func TestCollectRunbooksUsesMatchedChunksAndDeduplicates(t *testing.T) {
 	retrieve := New(nil, config.Config{})
@@ -62,5 +72,63 @@ func TestCollectRunbooksKeepsSameTitleDocumentsSeparate(t *testing.T) {
 	}
 	if docs[0].docID == docs[1].docID || strings.Contains(docs[0].text, docs[1].text) {
 		t.Fatalf("same-title documents were merged: %#v", docs)
+	}
+}
+
+func TestCollectDepsPreservesConditionalTraceContract(t *testing.T) {
+	tests := []struct {
+		name       string
+		trace      domain.DependencyTrace
+		wantEvents int
+		wantParts  int
+	}{
+		{name: "empty"},
+		{
+			name:       "edge",
+			trace:      domain.DependencyTrace{Downstream: []domain.DependencyEdge{{From: "svc-a", To: "svc-b"}}},
+			wantEvents: 1,
+			wantParts:  1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var events []domain.EvaluationTrace
+			ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+				events = append(events, event)
+			}))
+			retrieve := New(dependencyTraceTools{trace: test.trace}, config.Config{})
+			var parts []partial
+			retrieve.collectDeps(ctx, []string{"svc-a"}, func(part partial) { parts = append(parts, part) })
+			if len(events) != test.wantEvents || len(parts) != test.wantParts {
+				t.Fatalf("events = %#v, parts = %#v", events, parts)
+			}
+			if test.wantEvents == 1 {
+				event := events[0]
+				if event.Node != "dependency_collect" || event.Output["queried_services"] != 1 ||
+					event.Output["unqueried_services"] != 0 || event.Output["selected_edges"] != 1 || event.Output["omitted_edges"] != 0 {
+					t.Fatalf("event = %#v", event)
+				}
+			}
+		})
+	}
+}
+
+func TestCollectCodeGraphPreservesSearchTraceContract(t *testing.T) {
+	var events []domain.EvaluationTrace
+	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	}))
+	retrieve := New(nil, config.Config{})
+	retrieve.collectCodeGraph(ctx, []string{"checkout"}, []string{"svc-a"}, QueryTerms{}, func(codeDoc) {})
+	if len(events) != 1 || events[0].Node != "codegraph_search" || events[0].Output["hits"] != 0 {
+		t.Fatalf("events = %#v", events)
+	}
+	keywords, ok := events[0].Input["keywords"].([]string)
+	if !ok || len(keywords) != 1 || keywords[0] != "checkout" {
+		t.Fatalf("keywords = %#v", events[0].Input["keywords"])
+	}
+	services, ok := events[0].Input["services"].([]string)
+	if !ok || len(services) != 1 || services[0] != "svc-a" {
+		t.Fatalf("services = %#v", events[0].Input["services"])
 	}
 }

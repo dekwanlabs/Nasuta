@@ -17,6 +17,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/log"
@@ -348,10 +349,10 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	if !sseEvent("run.started", map[string]any{"run_id": runID}) {
 		return
 	}
-	var traceRecorder *qaTraceRecorder
 	if traceEnabled && hub != nil {
-		traceRecorder = &qaTraceRecorder{started: time.Now(), runID: runID, hub: hub}
-		runCtx = domain.WithTraceRecorder(runCtx, traceRecorder)
+		runCtx = executiontrace.WithEvaluation(runCtx, func(event domain.EvaluationTrace) {
+			hub.EmitTrace(runID, event)
+		})
 	}
 
 	user := auth.UserFromContext(r.Context())
@@ -389,13 +390,6 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 			terminal = agent.TerminalFromEvent(ev)
 		case <-r.Context().Done():
 			return
-		}
-	}
-	if traceRecorder != nil {
-		for _, event := range traceRecorder.Activate() {
-			if !sseEvent("trace", event) {
-				return
-			}
 		}
 	}
 	if response.err != nil {
@@ -872,40 +866,6 @@ func (handler *Handler) streamAgentEvents(hubCh chan agent.SSEEvent, sseEvent fu
 
 func emitHubEvent(ev agent.SSEEvent, sseEvent func(string, any) bool) bool {
 	return sseEvent(string(ev.Type), ev.Data)
-}
-
-type qaTraceRecorder struct {
-	mu       sync.Mutex
-	started  time.Time
-	sequence int
-	runID    string
-	hub      *agent.RunHub
-	live     bool
-	buffered []domain.EvaluationTrace
-}
-
-func (recorder *qaTraceRecorder) RecordTrace(event domain.EvaluationTrace) {
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	recorder.sequence++
-	event.Sequence = recorder.sequence
-	if event.ElapsedMS == 0 {
-		event.ElapsedMS = time.Since(recorder.started).Milliseconds()
-	}
-	if !recorder.live {
-		recorder.buffered = append(recorder.buffered, event)
-		return
-	}
-	recorder.hub.EmitTrace(recorder.runID, event)
-}
-
-func (recorder *qaTraceRecorder) Activate() []domain.EvaluationTrace {
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	recorder.live = true
-	events := append([]domain.EvaluationTrace(nil), recorder.buffered...)
-	recorder.buffered = nil
-	return events
 }
 
 func currentUserID(r *http.Request) int64 {

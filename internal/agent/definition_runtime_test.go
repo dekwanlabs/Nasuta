@@ -17,6 +17,8 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -540,6 +542,97 @@ func TestDefinitionRuntimeBroadcastsTerminalWhenRunCreationFails(t *testing.T) {
 	}
 }
 
+func TestDefinitionRuntimeManagesScenarioParentLifecycle(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	start := ScenarioRunStart{
+		RunID: "qa-parent-1", ParentRunID: "outer-parent", UserID: 42,
+		SessionID: "session-1", Question: "trace dependencies", Mode: "multi_agent",
+	}
+	mock.ExpectExec("INSERT INTO agent_runs").WithArgs(
+		start.RunID, RunKindQAParent, start.UserID, start.SessionID,
+		"", int64(0), "", []byte(`{}`), "", int64(0), int64(0),
+		start.ParentRunID, "", "", start.Question, RunStatusRunning, "",
+		start.Mode, 0, 0, 0, sqlmock.AnyArg(),
+	).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE agent_runs").WithArgs(
+		RunStatusDone, "", 0, 18, EvidenceComplete, false, 2, 0, 0, 0, 0,
+		sqlmock.AnyArg(), start.RunID, RunStatusRunning, RunStatusPaused,
+	).WillReturnResult(sqlmock.NewResult(0, 1))
+
+	definition := testQADefinition(t, nil)
+	runtime := newTestDefinitionRuntime(
+		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), &RunStore{db: db},
+	)
+	trace := executiontrace.NewScope(executiontrace.Evaluation, nil)
+	root := executiontrace.WithScope(t.Context(), trace)
+	events := runtime.Hub().Subscribe(start.RunID)
+	managed, err := runtime.BeginScenario(root, start)
+	if err != nil {
+		t.Fatalf("BeginScenario: %v", err)
+	}
+	ctx := managed.Context(t.Context())
+	if executiontrace.FromContext(ctx) != trace {
+		t.Fatal("scenario context did not inherit trace scope")
+	}
+	domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "scenario_test"})
+	recorded := trace.Snapshot()
+	if len(recorded) != 1 || recorded[0].RunID != start.RunID || recorded[0].ParentRunID != start.ParentRunID {
+		t.Fatalf("trace correlation = %+v", recorded)
+	}
+
+	outcome := RunOutcome{
+		Status: RunStatusDone, TokenUsed: 18, HitCount: 2,
+		Evidence: EvidenceMetrics{Status: EvidenceComplete, ResultCount: 2},
+	}
+	if err := managed.Finish(outcome); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if err := managed.Finish(outcome); err == nil || !strings.Contains(err.Error(), "already finished") {
+		t.Fatalf("second Finish error = %v", err)
+	}
+	terminal := waitForTerminal(t, events)
+	if terminal.RunID != start.RunID || terminal.Status != RunStatusDone || terminal.TokenUsed != 18 {
+		t.Fatalf("terminal = %+v", terminal)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDefinitionRuntimeBroadcastsTerminalWhenScenarioCreationFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectExec("INSERT INTO agent_runs").WillReturnError(errors.New("database unavailable"))
+
+	definition := testQADefinition(t, nil)
+	runtime := newTestDefinitionRuntime(
+		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), &RunStore{db: db},
+	)
+	start := ScenarioRunStart{RunID: "scenario-create-fail", Question: "question", Mode: "multi_agent"}
+	events := runtime.Hub().Subscribe(start.RunID)
+
+	managed, err := runtime.BeginScenario(t.Context(), start)
+	if managed != nil || err == nil || !strings.Contains(err.Error(), "create scenario run") {
+		t.Fatalf("managed=%v error=%v, want scenario creation failure", managed, err)
+	}
+	terminal := waitForTerminal(t, events)
+	if terminal.Status != RunStatusFailed || terminal.Evidence.Status != EvidenceUnavailable ||
+		!strings.Contains(terminal.Error, "database unavailable") {
+		t.Fatalf("terminal = %+v", terminal)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDefinitionRuntimeExecutesStructuredOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		defer request.Body.Close()
@@ -854,5 +947,38 @@ func TestDefinitionUsageRecorderRejectsCostOverflow(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "accumulate model cost") {
 		t.Fatalf("RecordLLMCall error = %v, want accumulated cost overflow", err)
+	}
+}
+
+func TestDefinitionManagedRunAttachesRequestedTraceScope(t *testing.T) {
+	definition := testQADefinition(t, nil)
+	runtime := newTestDefinitionRuntime(
+		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), nil,
+	)
+	request := testQARequest(definition)
+	request.RunID = "managed-trace-run"
+	var events []domain.EvaluationTrace
+	traceCtx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	})
+	managed, err := runtime.Begin(traceCtx, runStart(request))
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	ctx := managed.Context(t.Context())
+	if !domain.TraceEnabled(ctx) {
+		t.Fatal("managed run did not attach the requested trace scope")
+	}
+	domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "evidence_plan"})
+	if len(events) != 1 || events[0].Sequence != 1 || events[0].Node != "evidence_plan" ||
+		events[0].TraceID == "" || events[0].RunID != request.RunID || events[0].AgentRunID != request.RunID {
+		t.Fatalf("events = %#v", events)
+	}
+	if err := managed.Finish(&agentapi.RunError{Code: "test_finished", Message: "done"}); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "late_event"})
+	if len(events) != 1 {
+		t.Fatalf("managed run accepted a late trace event: %#v", events)
 	}
 }

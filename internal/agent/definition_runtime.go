@@ -15,6 +15,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -61,11 +62,44 @@ type definitionManagedRun struct {
 	start     agentapi.RunStart
 	execution definitionExecution
 	recorder  *definitionUsageRecorder
+	trace     *executiontrace.Scope
+	ownsTrace bool
 
 	mu       sync.Mutex
 	executed bool
 	finished bool
 	outcome  RunOutcome
+}
+
+// ScenarioRunStart carries business-run identity without an agent snapshot.
+type ScenarioRunStart struct {
+	RunID       string
+	ParentRunID string
+	UserID      int64
+	SessionID   string
+	Question    string
+	Mode        string
+}
+
+// ScenarioRun owns one non-agent parent lifecycle.
+type ScenarioRun interface {
+	Context(context.Context) context.Context
+	Finish(RunOutcome) error
+}
+
+// ScenarioLifecycle keeps parent persistence behind the Runtime boundary.
+type ScenarioLifecycle interface {
+	BeginScenario(context.Context, ScenarioRunStart) (ScenarioRun, error)
+}
+
+type scenarioManagedRun struct {
+	runtime   *DefinitionRuntime
+	start     ScenarioRunStart
+	trace     *executiontrace.Scope
+	ownsTrace bool
+
+	mu       sync.Mutex
+	finished bool
 }
 
 // NewDefinitionRuntime pins one configured model endpoint for definition execution.
@@ -130,6 +164,13 @@ func (runtime *DefinitionRuntime) EmitPhase(runID, text string) {
 	}
 }
 
+// EmitExecutionEvent publishes scenario progress through the shared QA stream.
+func (runtime *DefinitionRuntime) EmitExecutionEvent(eventType EventType, event ExecutionEvent) {
+	if runtime != nil && runtime.hub != nil {
+		runtime.hub.EmitExecutionEvent(eventType, event)
+	}
+}
+
 // ScenarioToolSet pins tools used while a scenario prepares one RunRequest.
 type ScenarioToolSet interface {
 	Tools() []tool.Tool
@@ -181,7 +222,8 @@ func (runtime *DefinitionRuntime) Run(
 	if err != nil {
 		return failedDefinitionRun(request.RunID, "invalid_request", err), nil
 	}
-	managed, err := runtime.beginPrepared(runStart(request), execution)
+	trace, ownsTrace := beginExecutionTrace(ctx)
+	managed, err := runtime.beginPrepared(runStart(request), execution, trace, ownsTrace)
 	if err != nil {
 		return agentapi.RunResult{}, err
 	}
@@ -199,7 +241,7 @@ func (runtime *DefinitionRuntime) Run(
 
 // Begin creates a Run before model-backed scenario preparation starts.
 func (runtime *DefinitionRuntime) Begin(
-	_ context.Context,
+	ctx context.Context,
 	start agentapi.RunStart,
 ) (agentapi.ManagedRun, error) {
 	start = redactDefinitionStart(start)
@@ -212,12 +254,70 @@ func (runtime *DefinitionRuntime) Begin(
 	if err != nil {
 		return nil, err
 	}
-	return runtime.beginPrepared(start, execution)
+	trace, ownsTrace := beginExecutionTrace(ctx)
+	return runtime.beginPrepared(start, execution, trace, ownsTrace)
+}
+
+// BeginScenario persists a parent Run without inventing an agent definition snapshot.
+func (runtime *DefinitionRuntime) BeginScenario(
+	ctx context.Context,
+	start ScenarioRunStart,
+) (ScenarioRun, error) {
+	trace, ownsTrace := beginExecutionTrace(ctx)
+	if runtime.runStore != nil {
+		if err := runtime.runStore.Create(RunRecord{
+			ID: start.RunID, RunKind: RunKindQAParent, UserID: start.UserID,
+			SessionID: start.SessionID, ParentRunID: start.ParentRunID,
+			Question: start.Question, Mode: start.Mode,
+		}); err != nil {
+			if ownsTrace {
+				trace.Close()
+			}
+			runtime.hub.complete(start.RunID, RunOutcome{
+				Status: RunStatusFailed, ErrorCode: "persistence_failed", Err: err,
+				Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
+			}, false)
+			return nil, fmt.Errorf("create scenario run %q: %w", start.RunID, err)
+		}
+	}
+	return &scenarioManagedRun{
+		runtime: runtime, start: start, trace: trace, ownsTrace: ownsTrace,
+	}, nil
+}
+
+func (run *scenarioManagedRun) Context(ctx context.Context) context.Context {
+	ctx = executiontrace.WithScope(ctx, run.trace)
+	return executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+		RunID: run.start.RunID, ParentRunID: run.start.ParentRunID,
+	})
+}
+
+func (run *scenarioManagedRun) Finish(outcome RunOutcome) error {
+	run.mu.Lock()
+	if run.finished {
+		run.mu.Unlock()
+		return fmt.Errorf("scenario run %q is already finished", run.start.RunID)
+	}
+	run.finished = true
+	run.mu.Unlock()
+	if run.ownsTrace {
+		run.trace.Close()
+	}
+	run.runtime.hub.Complete(run.start.RunID, outcome)
+	return nil
+}
+
+func beginExecutionTrace(ctx context.Context) (*executiontrace.Scope, bool) {
+	inherited := executiontrace.FromContext(ctx)
+	trace := executiontrace.Begin(ctx)
+	return trace, trace != nil && inherited == nil
 }
 
 func (runtime *DefinitionRuntime) beginPrepared(
 	start agentapi.RunStart,
 	execution definitionExecution,
+	trace *executiontrace.Scope,
+	ownsTrace bool,
 ) (*definitionManagedRun, error) {
 	recorder := &definitionUsageRecorder{
 		store:                             runtime.runStore,
@@ -225,6 +325,9 @@ func (runtime *DefinitionRuntime) beginPrepared(
 		outputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
 	}
 	if err := runtime.createRun(start, execution); err != nil {
+		if ownsTrace {
+			trace.Close()
+		}
 		runtime.hub.complete(start.RunID, RunOutcome{
 			Status: RunStatusFailed, ErrorCode: "persistence_failed", Err: err,
 			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
@@ -232,7 +335,7 @@ func (runtime *DefinitionRuntime) beginPrepared(
 		return nil, err
 	}
 	return &definitionManagedRun{
-		runtime: runtime, start: start, execution: execution, recorder: recorder,
+		runtime: runtime, start: start, execution: execution, recorder: recorder, trace: trace, ownsTrace: ownsTrace,
 	}, nil
 }
 
@@ -248,7 +351,7 @@ func (runtime *DefinitionRuntime) createRun(
 		mode = "workflow"
 	}
 	if err := runtime.runStore.Create(RunRecord{
-		ID: start.RunID, UserID: start.Actor.UserID,
+		ID: start.RunID, RunKind: RunKindAgent, UserID: start.Actor.UserID,
 		SessionID: start.Correlation.SessionID,
 		AgentID:   execution.snapshot.AgentID, DefinitionVersion: execution.snapshot.DefinitionVersion,
 		DefinitionHash:      execution.snapshot.DefinitionHash,
@@ -268,6 +371,12 @@ func (runtime *DefinitionRuntime) createRun(
 }
 
 func (run *definitionManagedRun) Context(ctx context.Context) context.Context {
+	ctx = executiontrace.WithScope(ctx, run.trace)
+	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+		RunID: run.start.RunID, ParentRunID: run.start.Correlation.ParentRunID,
+		WorkflowRunID: run.start.Correlation.WorkflowRunID, AgentRunID: run.start.RunID,
+		WorkflowNodeID: run.start.Correlation.NodeID,
+	})
 	ctx = llm.WithUsageRecorder(ctx, run.start.RunID, run.recorder)
 	return llm.WithCallLifecycleObserver(ctx, run.start.RunID, run.runtime.hub)
 }
@@ -381,6 +490,9 @@ func (run *definitionManagedRun) Finish(runError *agentapi.RunError) error {
 	}
 	run.finished = true
 	run.mu.Unlock()
+	if run.ownsTrace {
+		run.trace.Close()
+	}
 	run.runtime.hub.Complete(run.start.RunID, outcome)
 	return nil
 }

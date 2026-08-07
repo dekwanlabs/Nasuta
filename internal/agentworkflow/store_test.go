@@ -25,7 +25,8 @@ func TestStartWorkflowCommitsRunInputAndEventsAtomically(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	run := WorkflowRunRecord{
-		ID: "run_1", WorkflowID: "delivery.review", WorkflowVersion: 2,
+		ID: "run_1", ParentRunID: "qa_parent_1",
+		WorkflowID: "delivery.review", WorkflowVersion: 2,
 		WorkflowHash: "workflow_hash",
 		Selection: DefinitionSelection{
 			RuleVersion: 3, RuleHash: "rule_hash", CandidateVersion: 2,
@@ -74,13 +75,13 @@ func TestStartWorkflowCommitsRunInputAndEventsAtomically(t *testing.T) {
 	}
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO workflow_runs(
-		id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
 		tool_call_count,cost_micros,retry_count,error_code,started_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
 		WithArgs(
-			"run_1", "delivery.review", int64(2), "workflow_hash", selection, "input_hash",
+			"run_1", "qa_parent_1", "delivery.review", int64(2), "workflow_hash", selection, "input_hash",
 			int64(7), "tenant-a", actorPermissions, "delivery.review", scenarioPermissions,
 			RunRunning, budget,
 			int64(11), int64(12), int64(13), int64(36), int64(14), int64(15), int64(16),
@@ -540,20 +541,20 @@ func TestGetRunUsesBoundedReadAndDecodesSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
-		id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
 		tool_call_count,cost_micros,retry_count,error_code,started_at,ended_at
 		FROM workflow_runs WHERE id=? LIMIT 1`)).
 		WithArgs("run_1").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "workflow_id", "workflow_version", "workflow_hash", "selection_json", "input_hash",
+			"id", "parent_run_id", "workflow_id", "workflow_version", "workflow_hash", "selection_json", "input_hash",
 			"actor_user_id", "actor_tenant_id", "actor_permissions_json", "scenario",
 			"scenario_permissions_json", "status", "budget_json", "input_tokens",
 			"output_tokens", "reasoning_tokens", "total_tokens", "tool_call_count",
 			"cost_micros", "retry_count", "error_code", "started_at", "ended_at",
 		}).AddRow(
-			"run_1", "delivery.review", int64(2), "workflow_hash", selectionJSON, "input_hash",
+			"run_1", "qa_parent_1", "delivery.review", int64(2), "workflow_hash", selectionJSON, "input_hash",
 			int64(7), "tenant-a", actorPermissionsJSON, "delivery.review",
 			scenarioPermissionsJSON, RunSucceeded, budgetJSON,
 			usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.TotalTokens,
@@ -563,7 +564,8 @@ func TestGetRunUsesBoundedReadAndDecodesSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.ID != "run_1" || run.Status != RunSucceeded || run.Budget != budget ||
+	if run.ID != "run_1" || run.ParentRunID != "qa_parent_1" ||
+		run.Status != RunSucceeded || run.Budget != budget ||
 		run.Selection != selection ||
 		run.Usage != usage ||
 		run.EndedAt == nil || !run.EndedAt.Equal(endedAt) ||
@@ -1050,20 +1052,20 @@ func TestLoadFullRunStateRestoresDurableCheckpoint(t *testing.T) {
 	}
 
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
-		id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
 		tool_call_count,cost_micros,retry_count,error_code,started_at,ended_at
 		FROM workflow_runs WHERE id=? LIMIT 1`)).
 		WithArgs("run_1").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "workflow_id", "workflow_version", "workflow_hash", "selection_json", "input_hash",
+			"id", "parent_run_id", "workflow_id", "workflow_version", "workflow_hash", "selection_json", "input_hash",
 			"actor_user_id", "actor_tenant_id", "actor_permissions_json", "scenario",
 			"scenario_permissions_json", "status", "budget_json", "input_tokens",
 			"output_tokens", "reasoning_tokens", "total_tokens", "tool_call_count",
 			"cost_micros", "retry_count", "error_code", "started_at", "ended_at",
 		}).AddRow(
-			"run_1", "delivery.approval", int64(3), "workflow_hash", selectionJSON, "input_hash",
+			"run_1", "qa_parent_1", "delivery.approval", int64(3), "workflow_hash", selectionJSON, "input_hash",
 			int64(41), "tenant-a", actorPermissionsJSON, "approval.test",
 			scenarioPermissionsJSON, RunRunning, budgetJSON,
 			runUsage.InputTokens, runUsage.OutputTokens, runUsage.ReasoningTokens,
@@ -1179,7 +1181,8 @@ func TestLoadFullRunStateRestoresDurableCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Run.ActorUserID != 41 || state.Run.ActorTenantID != "tenant-a" ||
+	if state.Run.ParentRunID != "qa_parent_1" || state.Run.ActorUserID != 41 ||
+		state.Run.ActorTenantID != "tenant-a" ||
 		state.Run.Selection != selection ||
 		state.Run.Usage != runUsage ||
 		len(state.Run.ActorPermissions.Scopes) != 2 ||

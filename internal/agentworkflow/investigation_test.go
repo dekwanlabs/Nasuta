@@ -13,6 +13,8 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 )
 
 func TestDefaultDelegatedInvestigationPinsStableReadOnlyDAG(t *testing.T) {
@@ -64,6 +66,7 @@ func TestDefaultDelegatedInvestigationPinsStableReadOnlyDAG(t *testing.T) {
 
 func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *testing.T) {
 	const version int64 = 8
+	const parentRunID = "qa_parent_1"
 	schemas, agents := investigationCatalogs(t, version)
 	workflow, err := DefaultDelegatedInvestigation(version, time.Second)
 	if err != nil {
@@ -83,11 +86,16 @@ func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	var traces []domain.EvaluationTrace
+	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		traces = append(traces, event)
+	})
 	actor := agentapi.Actor{UserID: 23, TenantID: "tenant-a"}
-	result, err := service.Execute(t.Context(), ExecuteRequest{
-		Workflow: DefinitionRef{ID: DelegatedInvestigationID, Version: version},
-		Input:    json.RawMessage(`{"question":"Why is checkout failing?"}`),
-		Actor:    actor,
+	result, err := service.Execute(ctx, ExecuteRequest{
+		ParentRunID: parentRunID,
+		Workflow:    DefinitionRef{ID: DelegatedInvestigationID, Version: version},
+		Input:       json.RawMessage(`{"question":"Why is checkout failing?"}`),
+		Actor:       actor,
 		ActorPermissions: agentapi.PermissionPolicy{
 			Scopes: []string{"knowledge.read"},
 		},
@@ -116,6 +124,7 @@ func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *te
 	for agentID, request := range requests {
 		if request.Agent.Version != version || request.DefinitionHash == "" ||
 			request.Actor != actor || request.Correlation.WorkflowRunID != result.RunID ||
+			request.Correlation.ParentRunID != result.RunID ||
 			request.Correlation.NodeID != wantNodes[agentID] || request.ToolScope.AllowWrite ||
 			!reflect.DeepEqual(request.Permissions.Scopes, []string{"knowledge.read"}) {
 			t.Fatalf("request for %q = %+v", agentID, request)
@@ -139,10 +148,47 @@ func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *te
 		t.Fatalf("join order = %v", got)
 	}
 	persistence.mu.Lock()
-	defer persistence.mu.Unlock()
-	if len(persistence.startedNodes) != 5 || len(persistence.succeededNodes) != 5 ||
-		persistence.finishedStatus != RunSucceeded {
-		t.Fatalf("persisted lifecycle = started:%d succeeded:%d status:%s", len(persistence.startedNodes), len(persistence.succeededNodes), persistence.finishedStatus)
+	startedRun := persistence.startedRun
+	startedNodes := len(persistence.startedNodes)
+	succeededNodes := len(persistence.succeededNodes)
+	finishedStatus := persistence.finishedStatus
+	persistence.mu.Unlock()
+	if startedRun.ParentRunID != parentRunID ||
+		startedNodes != 5 || succeededNodes != 5 ||
+		finishedStatus != RunSucceeded {
+		t.Fatalf("persisted lifecycle = run:%+v started:%d succeeded:%d status:%s", startedRun, startedNodes, succeededNodes, finishedStatus)
+	}
+
+	workflowNodes := make(map[string]struct{}, 5)
+	childRuns := make(map[string]struct{}, 4)
+	traceID := ""
+	for _, event := range traces {
+		if event.TraceID == "" || event.Sequence <= 0 {
+			t.Fatalf("trace event missing identity = %+v", event)
+		}
+		if traceID == "" {
+			traceID = event.TraceID
+		} else if event.TraceID != traceID {
+			t.Fatalf("trace IDs are not shared: got %q and %q", traceID, event.TraceID)
+		}
+		switch event.Node {
+		case "workflow_node":
+			if event.RunID != result.RunID || event.ParentRunID != parentRunID ||
+				event.WorkflowRunID != result.RunID || event.WorkflowNodeID == "" {
+				t.Fatalf("workflow node trace = %+v", event)
+			}
+			workflowNodes[event.WorkflowNodeID] = struct{}{}
+		case "multi_agent_child_run":
+			if event.RunID == "" || event.RunID != event.AgentRunID ||
+				event.ParentRunID != result.RunID ||
+				event.WorkflowRunID != result.RunID || event.WorkflowNodeID == "" {
+				t.Fatalf("child trace = %+v", event)
+			}
+			childRuns[event.RunID] = struct{}{}
+		}
+	}
+	if len(workflowNodes) != 5 || len(childRuns) != 4 {
+		t.Fatalf("trace coverage = workflow_nodes:%v child_runs:%v", workflowNodes, childRuns)
 	}
 }
 

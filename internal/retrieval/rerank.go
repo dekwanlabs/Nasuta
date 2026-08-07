@@ -11,6 +11,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/platform/httpclient"
@@ -56,37 +57,30 @@ type Reranker interface {
 }
 
 func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeDoc, query string) []codeDoc {
-	traceEnabled := domain.TraceEnabled(ctx)
 	log.InfofCtx(ctx, "[qa] code pool input: %d docs\n%s", len(pool), poolSummary(pool, "input"))
 
 	before := len(pool)
-	pool = dedupBySource(pool)
+	pool, _ = executiontrace.Invoke(ctx, candidateDedupSpec, candidateDedupInput{Docs: pool}, func(_ context.Context, input candidateDedupInput) ([]codeDoc, error) {
+		return dedupBySource(input.Docs), nil
+	})
 	log.InfofCtx(ctx, "[qa] code pool dedup: → %d\n%s", len(pool), poolSummary(pool, "dedup"))
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_dedup", Input: map[string]any{"candidates": before}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
-	}
 
 	before = len(pool)
-	pool = selectRerankCandidates(pool, retrieve.platform.RerankPool, 2)
+	pool, _ = executiontrace.Invoke(ctx, candidateTruncateSpec, candidateTruncateInput{
+		Docs: pool, Limit: retrieve.platform.RerankPool, MinimumPerSource: 2,
+	}, func(_ context.Context, input candidateTruncateInput) ([]codeDoc, error) {
+		return selectRerankCandidates(input.Docs, input.Limit, input.MinimumPerSource), nil
+	})
 	log.InfofCtx(ctx, "[qa] code pool coarse-truncate: → %d", len(pool))
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_truncate", Input: map[string]any{"candidates": before, "limit": retrieve.platform.RerankPool, "minimum_per_source": 2}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
-	}
 
 	poolBeforeRerank := append([]codeDoc(nil), pool...)
-	rerankStarted := time.Now()
-	reranked := rerankPool(ctx, retrieve.reranker, query, pool, retrieve.platform.RerankMinDensePreflight)
+	reranked, _ := executiontrace.Invoke(ctx, candidateRerankSpec, candidateRerankInput{
+		Docs: pool, Query: query, Reranker: retrieve.reranker, MinDensePreflight: retrieve.platform.RerankMinDensePreflight,
+	}, func(ctx context.Context, input candidateRerankInput) (rerankResult, error) {
+		result := rerankPool(ctx, input.Reranker, input.Query, input.Docs, input.MinDensePreflight)
+		return result, nil
+	})
 	pool = reranked.docs
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{
-			Node: "candidate_rerank", DurationMS: time.Since(rerankStarted).Milliseconds(),
-			Input: map[string]any{"candidates": len(poolBeforeRerank), "enabled": retrieve.reranker.Enabled()},
-			Output: map[string]any{
-				"candidates": len(pool), "mode": reranked.mode,
-				"error": errorString(reranked.err), "top": tracePool(pool),
-			},
-		})
-	}
 	{
 		top, bot := 0.0, 0.0
 		if len(pool) > 0 {
@@ -99,23 +93,109 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 	}
 
 	before = len(pool)
-	var rankedPool []codeDoc
-	if traceEnabled {
-		rankedPool = append([]codeDoc(nil), pool...)
-	}
-	pool = filterByScore(pool, retrieve.platform.RerankMinScore)
+	pool, _ = executiontrace.Invoke(ctx, candidateThresholdSpec, candidateThresholdInput{
+		Docs: pool, MinScore: retrieve.platform.RerankMinScore,
+	}, func(_ context.Context, input candidateThresholdInput) ([]codeDoc, error) {
+		return filterByScore(input.Docs, input.MinScore), nil
+	})
 	log.InfofCtx(ctx, "[qa] code pool threshold(%.2f): %d → %d", retrieve.platform.RerankMinScore, before, len(pool))
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_threshold", Input: map[string]any{"candidates": before, "min_score": retrieve.platform.RerankMinScore}, Output: map[string]any{"candidates": len(pool), "filtered": before - len(pool), "ranked_top": tracePool(rankedPool), "top": tracePool(pool)}})
-	}
 
 	before = len(pool)
-	pool = selectDiverse(pool, retrieve.platform.RerankTopK, retrieve.platform.RerankMaxPerService, retrieve.platform.RerankMaxPerServiceLowBand)
+	pool, _ = executiontrace.Invoke(ctx, candidateDiversitySpec, candidateDiversityInput{
+		Docs: pool, TopK: retrieve.platform.RerankTopK, MaxPerService: retrieve.platform.RerankMaxPerService,
+		MaxPerServiceLowBand: retrieve.platform.RerankMaxPerServiceLowBand,
+	}, func(_ context.Context, input candidateDiversityInput) ([]codeDoc, error) {
+		return selectDiverse(input.Docs, input.TopK, input.MaxPerService, input.MaxPerServiceLowBand), nil
+	})
 	log.InfofCtx(ctx, "[qa] code pool diversity(topK=%d, max/svc=%d, lowband/svc=%d): → %d\n%s", retrieve.platform.RerankTopK, retrieve.platform.RerankMaxPerService, retrieve.platform.RerankMaxPerServiceLowBand, len(pool), poolSummary(pool, "final"))
-	if traceEnabled {
-		domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "candidate_diversity", Input: map[string]any{"candidates": before, "top_k": retrieve.platform.RerankTopK, "max_per_service": retrieve.platform.RerankMaxPerService}, Output: map[string]any{"candidates": len(pool), "top": tracePool(pool)}})
-	}
 	return pool
+}
+
+type candidateDedupInput struct{ Docs []codeDoc }
+
+var candidateDedupSpec = executiontrace.Spec[candidateDedupInput, []codeDoc]{
+	Operation: "retrieval.candidate_dedup", Node: "candidate_dedup",
+	Input: func(input candidateDedupInput) map[string]any { return map[string]any{"candidates": len(input.Docs)} },
+	Output: func(_ candidateDedupInput, result []codeDoc, _ error) map[string]any {
+		return map[string]any{"candidates": len(result), "top": tracePool(result)}
+	},
+}
+
+type candidateTruncateInput struct {
+	Docs             []codeDoc
+	Limit            int
+	MinimumPerSource int
+}
+
+var candidateTruncateSpec = executiontrace.Spec[candidateTruncateInput, []codeDoc]{
+	Operation: "retrieval.candidate_truncate", Node: "candidate_truncate",
+	Input: func(input candidateTruncateInput) map[string]any {
+		return map[string]any{"candidates": len(input.Docs), "limit": input.Limit, "minimum_per_source": input.MinimumPerSource}
+	},
+	Output: func(_ candidateTruncateInput, result []codeDoc, _ error) map[string]any {
+		return map[string]any{"candidates": len(result), "top": tracePool(result)}
+	},
+}
+
+type candidateRerankInput struct {
+	Docs              []codeDoc
+	Query             string
+	Reranker          Reranker
+	MinDensePreflight float64
+}
+
+var candidateRerankSpec = executiontrace.Spec[candidateRerankInput, rerankResult]{
+	Operation: "retrieval.candidate_rerank", Node: "candidate_rerank",
+	Input: func(input candidateRerankInput) map[string]any {
+		return map[string]any{"candidates": len(input.Docs), "enabled": input.Reranker.Enabled()}
+	},
+	Output: func(_ candidateRerankInput, result rerankResult, _ error) map[string]any {
+		return map[string]any{
+			"candidates": len(result.docs), "mode": result.mode,
+			"error": errorString(result.err), "top": tracePool(result.docs),
+		}
+	},
+	Status: func(result rerankResult, _ error) string {
+		if result.err != nil {
+			return "degraded"
+		}
+		return ""
+	},
+}
+
+type candidateThresholdInput struct {
+	Docs     []codeDoc
+	MinScore float64
+}
+
+var candidateThresholdSpec = executiontrace.Spec[candidateThresholdInput, []codeDoc]{
+	Operation: "retrieval.candidate_threshold", Node: "candidate_threshold",
+	Input: func(input candidateThresholdInput) map[string]any {
+		return map[string]any{"candidates": len(input.Docs), "min_score": input.MinScore}
+	},
+	Output: func(input candidateThresholdInput, result []codeDoc, _ error) map[string]any {
+		return map[string]any{
+			"candidates": len(result), "filtered": len(input.Docs) - len(result),
+			"ranked_top": tracePool(input.Docs), "top": tracePool(result),
+		}
+	},
+}
+
+type candidateDiversityInput struct {
+	Docs                 []codeDoc
+	TopK                 int
+	MaxPerService        int
+	MaxPerServiceLowBand int
+}
+
+var candidateDiversitySpec = executiontrace.Spec[candidateDiversityInput, []codeDoc]{
+	Operation: "retrieval.candidate_diversity", Node: "candidate_diversity",
+	Input: func(input candidateDiversityInput) map[string]any {
+		return map[string]any{"candidates": len(input.Docs), "top_k": input.TopK, "max_per_service": input.MaxPerService}
+	},
+	Output: func(_ candidateDiversityInput, result []codeDoc, _ error) map[string]any {
+		return map[string]any{"candidates": len(result), "top": tracePool(result)}
+	},
 }
 
 func tracePool(pool []codeDoc) []map[string]any {

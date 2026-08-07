@@ -43,6 +43,12 @@ type captureLifecycleObserver struct {
 	events []CallLifecycle
 }
 
+type panicExecutionObserver struct{}
+
+func (panicExecutionObserver) OnLLMExecution(context.Context, Execution) {
+	panic("observer failed")
+}
+
 func (observer *captureLifecycleObserver) OnLLMCall(_ context.Context, _ string, event CallLifecycle) {
 	observer.events = append(observer.events, event)
 }
@@ -82,6 +88,22 @@ func TestOpenAINonStreamingUsageIsRecorded(t *testing.T) {
 	want := (Usage{InputTokens: 11, CachedInputTokens: 3, OutputTokens: 7, ReasoningTokens: 2, TotalTokens: 18})
 	if call.Usage != want {
 		t.Fatalf("usage = %+v, want %+v", call.Usage, want)
+	}
+}
+
+func TestExecutionObserverPanicDoesNotReplaceModelResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": "answer"}}},
+		})
+	}))
+	defer server.Close()
+
+	ctx := WithExecutionObserver(t.Context(), panicExecutionObserver{})
+	client := NewLLMClientWithHTTPAndProvider(server.URL, "key", "model", "openai", 100, nil)
+	answer, err := client.ChatMax(ctx, "system", "user", 40)
+	if err != nil || answer != "answer" {
+		t.Fatalf("answer = %q, error = %v", answer, err)
 	}
 }
 

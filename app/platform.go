@@ -500,18 +500,25 @@ func (platform *Platform) buildQARuntime(
 		return dashboard.QARuntime{}, nil, nil, fmt.Errorf("configure definition runtime: %w", err)
 	}
 	models := agent.NewQAModels(&snapshot)
+	investigationRunner := platformQAInvestigationRunner{
+		platform: platform,
+		events:   definitionRuntime,
+	}
 	qa := agent.NewQA(agent.QADeps{
 		Tools: platform.knowledge, Semantic: platform.index.Semantic,
 		Embedder: platform.index.Embedder, Cfg: platform.cfg, Platform: &snapshot,
 		CodeGraphDB: graph, DB: platform.platformDB,
 		History: platform.history, Sessions: platform.qaSessions,
-		Definitions:    platform.agentCatalog,
-		Agent:          agentapi.DefinitionRef{ID: definitions[0].ID},
-		Runtime:        definitionRuntime,
-		RuntimeTools:   definitionRuntime,
-		Models:         models,
-		PhaseEmitter:   definitionRuntime,
-		WriteAvailable: platform.writeReady,
+		Definitions:       platform.agentCatalog,
+		Agent:             agentapi.DefinitionRef{ID: definitions[0].ID},
+		Runtime:           definitionRuntime,
+		RuntimeTools:      definitionRuntime,
+		Models:            models,
+		PhaseEmitter:      definitionRuntime,
+		Investigation:     investigationRunner,
+		ScenarioLifecycle: definitionRuntime,
+		ExecutionEvents:   definitionRuntime,
+		WriteAvailable:    platform.writeReady,
 	})
 	return dashboard.QARuntime{
 		QA: qa, RunStore: platform.qaRunStore, Sessions: platform.qaSessions,

@@ -144,6 +144,22 @@ func TestCodeSearchUsesDenseFallbackWhenBM25HasNoKnownTerms(t *testing.T) {
 			t.Fatalf("trace[%d] = %q, want %q", i, recorder.events[i].Node, want)
 		}
 	}
+	vectorSearch := recorder.events[2]
+	if vectorSearch.Status != "completed" || vectorSearch.Input["mode"] != "dense" {
+		t.Fatalf("vector_search = %#v", vectorSearch)
+	}
+	if vectorSearch.Input["fetch_limit"] != 40 || vectorSearch.Input["sparse_terms"] != 0 {
+		t.Fatalf("vector_search input = %#v", vectorSearch.Input)
+	}
+	if filters, ok := vectorSearch.Input["filters"].(map[string]string); !ok || filters["kind"] != "code_chunk" {
+		t.Fatalf("vector_search filters = %#v", vectorSearch.Input["filters"])
+	}
+	if vectorSearch.Output["hits"] != 1 {
+		t.Fatalf("vector_search output = %#v", vectorSearch.Output)
+	}
+	if _, ok := vectorSearch.Output["top"].([]map[string]any); !ok {
+		t.Fatalf("vector_search top = %#v, want []map[string]any", vectorSearch.Output["top"])
+	}
 }
 
 func TestCodeSearchKeepsRRFSeparateFromCosine(t *testing.T) {
