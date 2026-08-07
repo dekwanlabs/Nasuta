@@ -127,7 +127,7 @@ func (g *Generator) GenerateDocsChanged(ctx context.Context, roots []string) boo
 		go func(t task) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if g.generateModule(t.group, t.docName, t.dir) {
+			if g.generateModule(ctx, t.group, t.docName, t.dir) {
 				changed.Store(true)
 			}
 		}(t)
@@ -141,7 +141,7 @@ func isDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func (g *Generator) generateModule(group, name, dir string) bool {
+func (g *Generator) generateModule(ctx context.Context, group, name, dir string) bool {
 	hash := hashModule(dir)
 	id := indexer.DocID(name, group+"/"+name+".md")
 	// Hash-skip: compare against the stored doc hash.
@@ -154,10 +154,11 @@ func (g *Generator) generateModule(group, name, dir string) bool {
 
 	log.Infof("[docgen] reading %s/%s ...", group, name)
 	filesCtx := collectProjectFiles(dir)
+	fileTree := collectFileTree(dir)
 
-	// Phase 1: quick classification (small prompt, short timeout).
-	classifyPrompt := buildClassifyPrompt(filesCtx)
-	classifyCtx, classifyCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Phase 1: quick classification (file tree only, short timeout).
+	classifyPrompt := buildClassifyPrompt(fileTree)
+	classifyCtx, classifyCancel := context.WithTimeout(ctx, 60*time.Second)
 	classifyAnswer, err := g.llm.chat(classifyCtx, classifyPrompt)
 	classifyCancel()
 	projectType := "generic"
@@ -177,7 +178,7 @@ func (g *Generator) generateModule(group, name, dir string) bool {
 	generatePrompt := buildGeneratePrompt(filesCtx, templateName)
 	log.Infof("[docgen] generating %s/%s (type=%s template=%s)...", group, name, projectType, templateName)
 
-	genCtx, genCancel := context.WithTimeout(context.Background(), 300*time.Second)
+	genCtx, genCancel := context.WithTimeout(ctx, 300*time.Second)
 	genAnswer, err := g.llm.chat(genCtx, generatePrompt)
 	genCancel()
 	if err != nil {

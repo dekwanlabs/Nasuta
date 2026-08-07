@@ -59,6 +59,46 @@ type fileEntry struct {
 	size    int
 }
 
+// collectFileTree walks dir and returns only the file tree (paths, no content).
+// Used for lightweight classification where full file contents are unnecessary.
+func collectFileTree(dir string) string {
+	var paths []string
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			if d != nil && skipDirectory(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || info.Size() > 200*1024 {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if !sourceExts[ext] && !isSpecialFile(d.Name()) {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, path)
+		paths = append(paths, rel)
+		return nil
+	})
+	sort.Slice(paths, func(i, j int) bool {
+		ai, aj := priority(paths[i]), priority(paths[j])
+		if ai != aj {
+			return ai < aj
+		}
+		return paths[i] < paths[j]
+	})
+	var sb strings.Builder
+	sb.WriteString("## Project File Tree\n```\n")
+	for _, p := range paths {
+		sb.WriteString(p)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("```\n")
+	return sb.String()
+}
+
 // collectProjectFiles walks dir and collects source files suitable for LLM analysis.
 // Returns a formatted string with the file tree and key file contents.
 func collectProjectFiles(dir string) string {
