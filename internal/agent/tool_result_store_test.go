@@ -264,14 +264,15 @@ func TestRunStoreGetReturnsFullInlineTraceAndBoundedArtifactPreview(t *testing.T
 	mock.ExpectQuery("FROM agent_runs WHERE id=\\? AND user_id=\\?").
 		WithArgs("run-1", int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "user_id", "session_id", "agent_id", "definition_version", "definition_hash", "tool_snapshot_id",
+			"id", "user_id", "session_id", "agent_id", "definition_version", "definition_hash", "selection_json", "tool_snapshot_id",
 			"input_schema_version", "output_schema_version", "parent_run_id", "workflow_run_id", "workflow_node_id",
 			"question", "status", "error_code", "mode", "max_steps", "step_count", "token_used",
 			"input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens", "llm_call_count",
 			"peak_input_tokens", "peak_reserved_tokens", "evidence_status", "forced_conclusion", "evidence_result_count",
 			"tool_call_count", "tool_failure_count", "partial_result_count", "omitted_evidence_count", "started_at", "ended_at",
 		}).AddRow(
-			"run-1", int64(42), "session-1", "qa.answerer", int64(1), strings.Repeat("a", 64), "tools_test",
+			"run-1", int64(42), "session-1", "qa.answerer", int64(1), strings.Repeat("a", 64),
+			`{"rule_version":2,"reason":"rollout_default"}`, "tools_test",
 			int64(1), int64(1), "", "", "",
 			"question", RunStatusDone, "", "", 2, 2, 10,
 			100, 20, 30, 5, 135, 2, 100, 120, EvidencePartial, false, 1, 2, 1, 1, 3, createdAt, createdAt,
@@ -304,6 +305,9 @@ func TestRunStoreGetReturnsFullInlineTraceAndBoundedArtifactPreview(t *testing.T
 	detail, err := store.GetForUser("run-1", 42)
 	if err != nil {
 		t.Fatalf("GetForUser: %v", err)
+	}
+	if detail.Selection.RuleVersion != 2 || detail.Selection.Reason != "rollout_default" {
+		t.Fatalf("selection = %+v", detail.Selection)
 	}
 	if len(detail.Steps) != 2 {
 		t.Fatalf("steps = %+v", detail.Steps)

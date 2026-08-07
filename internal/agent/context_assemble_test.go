@@ -112,7 +112,7 @@ func TestAssembleActiveHistoryLoadsOneCompleteAtomicTurn(t *testing.T) {
 	metadata.EvidenceManifest = memory.EvidenceManifest{Status: "available", Items: []memory.EvidenceManifestItem{{Tool: "observe_logs", Coverage: "full"}}}
 	svc := &QA{
 		sessions: memory.NewSessionStore(db), contextWindow: 128000,
-		agent: &Agent{cfg: AgentConfig{AnswerMaxTokens: 4000, ConclusionMaxTokens: 4000}},
+		outputReserve: 4000,
 	}
 	conversation, stats, err := svc.assembleActiveHistory(
 		context.Background(), "继续看刚才的错误证据", 42,

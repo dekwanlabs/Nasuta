@@ -34,43 +34,61 @@ import (
 
 // QADeps bundles the services needed by the QA scenario.
 type QADeps struct {
-	Tools       *Service
-	Semantic    semantic.Store
-	Embedder    embed.Embedder
-	Cfg         config.Config
-	Platform    *config.PlatformSettings
-	CodeGraphDB *codegraph.DB
-	DB          *sql.DB
-	History     SessionHistory
-	Sessions    *memory.SessionStore
-	Definitions DefinitionResolver
-	Agent       agentapi.DefinitionRef
-	Runtime     *QARuntime
+	Tools          *Service
+	Semantic       semantic.Store
+	Embedder       embed.Embedder
+	Cfg            config.Config
+	Platform       *config.PlatformSettings
+	CodeGraphDB    *codegraph.DB
+	DB             *sql.DB
+	History        SessionHistory
+	Sessions       *memory.SessionStore
+	Definitions    DefinitionResolver
+	Agent          agentapi.DefinitionRef
+	Runtime        agentapi.ManagedRuntime
+	RuntimeTools   ScenarioToolSource
+	Models         *QAModels
+	PhaseEmitter   interface{ EmitPhase(string, string) }
+	WriteAvailable bool
 }
 
 type DefinitionResolver interface {
 	Resolve(agentapi.DefinitionRef) (agentapi.Definition, error)
 }
 
+type DefinitionSelectionResolver interface {
+	ResolveFor(agentapi.DefinitionRef, string) (
+		agentapi.Definition,
+		agentapi.DefinitionSelection,
+		error,
+	)
+}
+
+type contextRetriever interface {
+	RetrievePlan(context.Context, string, string, retrieval.QueryTerms, domain.EvidencePlan) (*retrieval.RetrievedContext, error)
+	ContextBudget() int
+}
+
 // QA is the agent-facing runtime facade.
 type QA struct {
-	llm *llm.LLMClient
-	// fastLLM handles cheap structured steps and falls back to llm when unset.
+	// helperLLM handles session maintenance and memory extraction outside Runs.
+	helperLLM *llm.LLMClient
+	// fastLLM handles cheap structured preparation and falls back to helperLLM.
 	fastLLM            *llm.LLMClient
-	retriever          *retrieval.Retriever
-	agent              *Agent
-	registry           *Registry
-	executor           *ToolExecutor
+	retriever          contextRetriever
+	runtime            agentapi.ManagedRuntime
+	runtimeTools       ScenarioToolSource
+	phaseEmitter       interface{ EmitPhase(string, string) }
 	memory             *memory.MemoryStore
 	sessions           *memory.SessionStore
 	history            SessionHistory
 	writeAvailable     bool
-	hub                *RunHub
-	runStore           *RunStore
 	cfg                config.Config
 	routerConfidence   float64
 	routerMaxTokens    int
 	contextWindow      int
+	outputReserve      int
+	domainKnowledge    string
 	toolPruningEnabled bool
 	definitions        DefinitionResolver
 	agentRef           agentapi.DefinitionRef
@@ -140,16 +158,28 @@ func NewQA(d QADeps) *QA {
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
 		toolPruningEnabled: platformSettings.ToolPruningEnabled,
 		history:            d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
-		definitions: d.Definitions, agentRef: d.Agent,
+		outputReserve: max(
+			platformSettings.LLMAnswerMaxTokens,
+			platformSettings.LLMConclusionMaxTokens,
+		),
+		domainKnowledge: platformSettings.DomainKnowledge,
+		definitions:     d.Definitions, agentRef: d.Agent,
+		runtime: d.Runtime, runtimeTools: d.RuntimeTools,
+		phaseEmitter: d.PhaseEmitter, writeAvailable: d.WriteAvailable,
 	}
 	if svc.agentRef.ID == "" {
 		svc.agentRef = agentapi.DefinitionRef{ID: "qa.answerer"}
 	}
 	if svc.definitions == nil {
-		catalog := agentcatalog.New()
-		definition, err := agentcatalog.DefaultQA(platformSettings)
+		schemas := agentapi.NewSchemaRegistry()
+		err := schemas.Publish(agentcatalog.DefaultSchemas())
+		catalog := agentcatalog.New(schemas)
 		if err == nil {
-			err = catalog.Publish([]agentapi.Definition{definition})
+			var definition agentapi.Definition
+			definition, err = agentcatalog.DefaultQA(platformSettings)
+			if err == nil {
+				err = catalog.Publish([]agentapi.Definition{definition})
+			}
 		}
 		svc.definitions = catalog
 		svc.definitionErr = err
@@ -165,17 +195,11 @@ func NewQA(d QADeps) *QA {
 		log.Infof("[qa] reranker: dashscope (%s)", platformSettings.RerankModel)
 	}
 
-	if d.Runtime == nil {
+	if d.Runtime == nil || d.RuntimeTools == nil || d.Models == nil {
 		svc.runtimeErr = fmt.Errorf("QA runtime is not configured")
 	} else {
-		svc.llm = d.Runtime.llm
-		svc.fastLLM = d.Runtime.fastLLM
-		svc.agent = d.Runtime.agent
-		svc.registry = d.Runtime.registry
-		svc.executor = d.Runtime.executor
-		svc.writeAvailable = d.Runtime.writeAvailable
-		svc.hub = d.Runtime.hub
-		svc.runStore = d.Runtime.runStore
+		svc.helperLLM = d.Models.Primary()
+		svc.fastLLM = d.Models.Fast()
 	}
 
 	if d.DB != nil && d.Embedder != nil && d.Embedder.Enabled() {
@@ -202,18 +226,12 @@ func NewQA(d QADeps) *QA {
 	return svc
 }
 
-func (svc *QA) Hub() *RunHub { return svc.hub }
-
-func (svc *QA) RunStore() *RunStore { return svc.runStore }
-
 func (svc *QA) Memory() *memory.MemoryStore { return svc.memory }
-
-func (svc *QA) LLM() *llm.LLMClient { return svc.llm }
 
 // emitStep pushes a lightweight phase hint to the run hub.
 func (svc *QA) emitStep(runID, text string) {
-	if svc.hub != nil {
-		svc.hub.EmitPhase(runID, text)
+	if svc.phaseEmitter != nil {
+		svc.phaseEmitter.EmitPhase(runID, text)
 	}
 }
 
@@ -258,13 +276,9 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		runID = NewRunID()
 	}
 	toolPolicy := ToolPolicyForRun(svc.writeAvailable && request.AllowWrite)
-	executor := svc.executor
-	var candidateSnapshot tool.Snapshot
-	if executor != nil {
-		candidateSnapshot = executor.Snapshot(toolPolicy)
-	}
-	if executor != nil && (conversation.CompactedThroughTurn <= 0 || svc.history == nil) {
-		candidateSnapshot = withoutSessionHistoryTools(candidateSnapshot)
+	candidateTools := svc.runtimeTools.PrepareTools(toolPolicy)
+	if conversation.CompactedThroughTurn <= 0 || svc.history == nil {
+		candidateTools = withoutSessionHistoryTools(candidateTools)
 	}
 	agentRef := request.Agent
 	if agentRef.ID == "" {
@@ -274,33 +288,52 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		return nil, fmt.Errorf("resolve agent definition %q: %w", agentRef.ID, svc.definitionErr)
 	}
 	var definition agentapi.Definition
+	var selection agentapi.DefinitionSelection
 	if svc.definitions != nil {
 		var err error
-		definition, err = svc.definitions.Resolve(agentRef)
+		if resolver, ok := svc.definitions.(DefinitionSelectionResolver); ok {
+			stableKey := agentcatalog.StableSelectionKey(userID, conversation.SessionID)
+			definition, selection, err = resolver.ResolveFor(agentRef, stableKey)
+		} else {
+			definition, err = svc.definitions.Resolve(agentRef)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("resolve agent definition %q: %w", agentRef.ID, err)
 		}
 	}
-	if svc.runStore != nil {
-		if err := svc.runStore.Create(RunRecord{
-			ID: runID, UserID: userID, SessionID: conversation.SessionID,
-			AgentID: definition.ID, DefinitionVersion: definition.Version,
-			DefinitionHash: definition.ContentHash, ToolSnapshotID: candidateSnapshot.ID(),
-			InputSchemaVersion: definition.InputSchema.Version, OutputSchemaVersion: definition.OutputSchema.Version,
-			ParentRunID: request.ParentRunID, WorkflowRunID: request.WorkflowRunID,
-			WorkflowNodeID: request.WorkflowNodeID,
-			Question:       question, Mode: "single", MaxSteps: svc.agent.MaxStepsFor(question),
-			StartedAt: time.Now().UTC().Format(time.RFC3339),
-		}); err != nil {
-			return nil, fmt.Errorf("create agent run %q: %w", runID, err)
-		}
-		ctx = llm.WithUsageRecorder(ctx, runID, svc.runStore)
+	run, err := svc.runtime.Begin(ctx, agentapi.RunStart{
+		RunID: runID,
+		Agent: agentapi.DefinitionRef{
+			ID: definition.ID, Version: definition.Version,
+		},
+		DefinitionHash: definition.ContentHash,
+		Selection:      selection,
+		Input:          qaRunInput(question),
+		Permissions:    qaRunPermissions(toolPolicy.AllowWrite),
+		ToolScope: agentapi.ToolScope{
+			AllowWrite:      toolPolicy.AllowWrite,
+			RestrictVisible: true,
+			VisibleToolIDs:  scenarioToolIDs(candidateTools.Tools()),
+		},
+		Actor: agentapi.Actor{UserID: userID},
+		Correlation: agentapi.Correlation{
+			SessionID: conversation.SessionID, ParentRunID: request.ParentRunID,
+			WorkflowRunID: request.WorkflowRunID, NodeID: request.WorkflowNodeID,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("begin QA run %q: %w", runID, err)
 	}
-	if svc.hub != nil {
-		ctx = llm.WithCallLifecycleObserver(ctx, runID, svc.hub)
+	ctx = run.Context(ctx)
+	finishPreparationFailure := func(err error) {
+		if finishErr := run.Finish(&agentapi.RunError{
+			Code: "preparation_failed", Message: err.Error(),
+		}); finishErr != nil {
+			log.ErrorfCtx(ctx, "[qa] finish failed preparation %s: %v", runID, finishErr)
+		}
 	}
 	explicitPlan := request.EvidencePlan
-	toolCandidates := routingCandidates(candidateSnapshot)
+	toolCandidates := routingCandidates(candidateTools.Tools())
 	traceEnabled := domain.TraceEnabled(ctx)
 	emit := func(text string) {
 		svc.emitStep(runID, text)
@@ -375,6 +408,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		ctx, question, userID, conversation, historyRelation, relationOrigin, relationUpgrade,
 	)
 	if assembleErr != nil {
+		finishPreparationFailure(assembleErr)
 		return nil, assembleErr
 	}
 	conversation = assembled
@@ -387,7 +421,9 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		historyBudget := min(int(float64(svc.contextWindow)*0.08), 32768)
 		recalledHistory, recallErr := svc.history.Recall(ctx, userID, conversation.SessionID, question, continuity, historyBudget)
 		if recallErr != nil {
-			return nil, fmt.Errorf("recall current session history: %w", recallErr)
+			runErr := fmt.Errorf("recall current session history: %w", recallErr)
+			finishPreparationFailure(runErr)
+			return nil, runErr
 		}
 		conversation.RetrievedHistory = recalledHistory
 	}
@@ -449,8 +485,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		log.WarnfCtx(ctx, "[qa] evidence planning degraded: %v", planningErr)
 		routedToolIDs = nil
 	}
-	toolSnapshot := candidateSnapshot
-	availableToolIDs := snapshotToolIDs(toolSnapshot)
+	availableToolIDs := scenarioToolIDs(candidateTools.Tools())
 	if len(routedToolIDs) > 0 {
 		conversation.Instructions = append(conversation.Instructions, llm.Message{
 			Role:    "system",
@@ -462,7 +497,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	// toggle only decides whether the pruned set is actually applied. Dry-run
 	// (PruneApplied=false) logs the saving while sending the full set.
 	if decidePrune(planningErr, effectiveDecision) {
-		conversation.PrunedToolIDs = svc.prunedToolIDSet(toolSnapshot, routedToolIDs)
+		conversation.PrunedToolIDs = svc.prunedToolIDSet(candidateTools.Tools(), routedToolIDs)
 		conversation.PruneApplied = svc.toolPruningEnabled
 	}
 	log.InfofCtx(ctx, "[qa] evidence plan proposed=%s proposed_sources=%v confidence=%.2f origin=%s effective=%s effective_sources=%v effective_confidence=%.2f effective_origin=%s",
@@ -496,11 +531,9 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		log.WarnfCtx(ctx, "[qa] retrieval source unavailable: web")
 	}
 	evidencePlan := effectiveDecision.Plan
-	prefetched, err := svc.executePrefetch(ctx, toolSnapshot, request.ToolPlan)
+	prefetched, err := svc.executePrefetch(ctx, candidateTools, request.ToolPlan)
 	if err != nil {
-		if svc.hub != nil {
-			svc.hub.Complete(runID, RunOutcome{Status: RunStatusFailed, Err: err})
-		}
+		finishPreparationFailure(err)
 		return nil, err
 	}
 	preloadedContext := make([]ContextBlock, 0, len(prefetched)+len(request.PreloadedContext))
@@ -572,7 +605,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		rc := &retrieval.RetrievedContext{OriginalQuestion: question}
 		mergePreloadedContext(rc, preloadedContext, svc.contextBudget())
 		appendUnavailableWeb(rc, webUnavailable)
-		return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot)
+		return svc.submitRun(ctx, run, request, definition, selection, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, candidateTools)
 	}
 
 	emit("好嘞，关键词到手了，我去查一下资料~ 📚")
@@ -582,9 +615,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if err != nil {
 		runErr := fmt.Errorf("retrieve internal evidence: %w", err)
 		log.ErrorfCtx(ctx, "[qa] agent pre-retrieve error: %v", runErr)
-		if svc.hub != nil {
-			svc.hub.Complete(runID, RunOutcome{Status: RunStatusFailed, Err: runErr})
-		}
+		finishPreparationFailure(runErr)
 		return nil, runErr
 	}
 	rc.OriginalQuestion = question
@@ -599,11 +630,10 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		log.InfofCtx(ctx, "[qa] pre-retrieve refs: %s", platform.TruncateForLog(strings.Join(refStrs, " | "), 800))
 	}
 	log.InfofCtx(ctx, "[qa] pre-retrieve context:\n%s", platform.TruncateForLog(rc.Text, 4000))
-	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, toolSnapshot)
+	return svc.submitRun(ctx, run, request, definition, selection, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, candidateTools)
 }
 
-func routingCandidates(snapshot tool.Snapshot) []retrieval.ToolRouteCandidate {
-	tools := snapshot.Tools()
+func routingCandidates(tools []tool.Tool) []retrieval.ToolRouteCandidate {
 	candidates := make([]retrieval.ToolRouteCandidate, 0, len(tools))
 	for _, candidate := range tools {
 		if candidate.Kind != tool.KindRead || candidate.Routing == nil {
@@ -634,8 +664,7 @@ func routedToolsNeedFullInvestigation(candidates []retrieval.ToolRouteCandidate,
 	return false
 }
 
-func snapshotToolIDs(snapshot tool.Snapshot) []string {
-	tools := snapshot.Tools()
+func scenarioToolIDs(tools []tool.Tool) []string {
 	ids := make([]string, 0, len(tools))
 	for _, candidate := range tools {
 		ids = append(ids, string(candidate.ID))
@@ -643,23 +672,51 @@ func snapshotToolIDs(snapshot tool.Snapshot) []string {
 	return ids
 }
 
-func (svc *QA) prunedToolIDSet(snapshot tool.Snapshot, routed []string) map[tool.ToolID]struct{} {
-	candidates := routingCandidates(snapshot)
-	allowed := baseToolIDSet(snapshot, candidates)
+func (svc *QA) prunedToolIDSet(tools []tool.Tool, routed []string) map[tool.ToolID]struct{} {
+	candidates := routingCandidates(tools)
+	allowed := baseToolIDSet(tools, candidates)
 	for id := range pruneAllowance(routed, candidates) {
 		allowed[id] = struct{}{}
 	}
 	return allowed
 }
 
-func withoutSessionHistoryTools(snapshot tool.Snapshot) tool.Snapshot {
-	ids := make(map[tool.ToolID]struct{})
-	for _, candidate := range snapshot.Tools() {
-		if candidate.ID != "get_turn" && candidate.ID != "find_turns" {
-			ids[candidate.ID] = struct{}{}
-		}
+type filteredScenarioTools struct {
+	base  ScenarioToolSet
+	tools []tool.Tool
+	byID  map[tool.ToolID]tool.Tool
+}
+
+func (filtered filteredScenarioTools) Tools() []tool.Tool {
+	return append([]tool.Tool(nil), filtered.tools...)
+}
+
+func (filtered filteredScenarioTools) Get(id tool.ToolID) (tool.Tool, bool) {
+	candidate, ok := filtered.byID[id]
+	return candidate, ok
+}
+
+func (filtered filteredScenarioTools) ExecuteArguments(ctx context.Context, id tool.ToolID, arguments tool.Arguments) (tool.Result, error) {
+	if _, ok := filtered.byID[id]; !ok {
+		return tool.Result{}, fmt.Errorf("tool %q is outside the prepared scenario tools", id)
 	}
-	return snapshot.Select(ids)
+	return filtered.base.ExecuteArguments(ctx, id, arguments)
+}
+
+func withoutSessionHistoryTools(prepared ScenarioToolSet) ScenarioToolSet {
+	tools := prepared.Tools()
+	filtered := filteredScenarioTools{
+		base: prepared, tools: make([]tool.Tool, 0, len(tools)),
+		byID: make(map[tool.ToolID]tool.Tool, len(tools)),
+	}
+	for _, candidate := range tools {
+		if candidate.ID == "get_turn" || candidate.ID == "find_turns" {
+			continue
+		}
+		filtered.tools = append(filtered.tools, candidate)
+		filtered.byID[candidate.ID] = candidate
+	}
+	return filtered
 }
 
 func preferredToolsInstruction(ids []string) string {
@@ -667,13 +724,13 @@ func preferredToolsInstruction(ids []string) string {
 		". Treat this as advisory, not mandatory. Call a preferred tool only when it resolves a material evidence gap; if conversation history or existing evidence is sufficient, answer directly. Other registered tools remain available, and tool failures must be reported rather than hidden."
 }
 
-func (svc *QA) executePrefetch(ctx context.Context, snapshot tool.Snapshot, plan ToolPlan) ([]ContextBlock, error) {
+func (svc *QA) executePrefetch(ctx context.Context, prepared ScenarioToolSet, plan ToolPlan) ([]ContextBlock, error) {
 	if len(plan.Prefetch) == 0 {
 		return nil, nil
 	}
 	blocks := make([]ContextBlock, 0, len(plan.Prefetch))
 	for _, call := range plan.Prefetch {
-		candidate, ok := snapshot.Get(call.ToolID)
+		candidate, ok := prepared.Get(call.ToolID)
 		if !ok {
 			if call.Required {
 				return nil, fmt.Errorf("required prefetch tool %q is unavailable", call.ToolID)
@@ -684,7 +741,7 @@ func (svc *QA) executePrefetch(ctx context.Context, snapshot tool.Snapshot, plan
 		if candidate.Kind != tool.KindRead || candidate.Prefetch == nil {
 			return nil, fmt.Errorf("prefetch tool %q is not eligible", call.ToolID)
 		}
-		result, err := svc.executor.ExecuteArguments(ctx, snapshot, call.ToolID, call.Arguments)
+		result, err := prepared.ExecuteArguments(ctx, call.ToolID, call.Arguments)
 		if err != nil {
 			if call.Required {
 				return nil, fmt.Errorf("required prefetch tool %q: %w", call.ToolID, err)
@@ -816,25 +873,24 @@ func appendUnavailableWeb(rc *retrieval.RetrievedContext, unavailable bool) {
 	rc.Text += "## Evidence Availability\n- Web source unavailable: web search is not configured.\n"
 }
 
-func (svc *QA) runAgentWithPlan(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan) (*AskResult, error) {
-	policy := ToolPolicyForRun(false)
-	return svc.runAgentWithSnapshot(ctx, question, conversation, userID, rc, recalled, rolePrompt, runID, plan, policy, svc.executor.Snapshot(policy))
-}
-
-func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conversation ConversationContext, userID int64, rc *retrieval.RetrievedContext, recalled []memory.MemoryRecord, rolePrompt, runID string, plan domain.EvidencePlan, policy ToolPolicy, snapshot tool.Snapshot) (*AskResult, error) {
-	log.InfofCtx(ctx, "[qa] runAgent runID=%s", runID)
-	if conversation.CompactedThroughTurn <= 0 || svc.history == nil {
-		snapshot = withoutSessionHistoryTools(snapshot)
-	}
-	ctx = withSessionToolScope(ctx, conversation, userID)
-
-	maxSteps := svc.agent.MaxStepsForContext(question, plan, conversation.FullInvestigation)
-	if svc.runStore != nil {
-		if err := svc.runStore.SetMaxSteps(runID, maxSteps); err != nil {
-			log.ErrorfCtx(ctx, "[qa] update run max steps: %v", err)
-		}
-	}
-
+func (svc *QA) submitRun(
+	ctx context.Context,
+	run agentapi.ManagedRun,
+	scenario QARequest,
+	definition agentapi.Definition,
+	selection agentapi.DefinitionSelection,
+	question string,
+	conversation ConversationContext,
+	userID int64,
+	rc *retrieval.RetrievedContext,
+	recalled []memory.MemoryRecord,
+	rolePrompt string,
+	runID string,
+	plan domain.EvidencePlan,
+	policy ToolPolicy,
+	prepared ScenarioToolSet,
+) (*AskResult, error) {
+	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", runID, definition.ID, definition.Version)
 	instructions := append([]llm.Message{}, conversation.Instructions...)
 	if len(recalled) > 0 {
 		memoryStarted := time.Now()
@@ -848,32 +904,79 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	conversation.RolePrompt = rolePrompt
 	conversation.Instructions = instructions
 	conversation.EvidenceSeeded = len(recalled) > 0 || rc != nil && rc.Text != ""
+	messages := buildAgentMessages(
+		question, conversation, rc, plan, svc.domainKnowledge, 0,
+	)
+	request := agentapi.RunRequest{
+		RunID: runID,
+		Agent: agentapi.DefinitionRef{
+			ID: definition.ID, Version: definition.Version,
+		},
+		DefinitionHash: definition.ContentHash,
+		Selection:      selection,
+		Input:          qaRunInput(question),
+		Messages:       publicMessages(messages),
+		Context:        qaContextBlocks(rc),
+		Permissions:    qaRunPermissions(policy.AllowWrite),
+		ToolScope: agentapi.ToolScope{
+			AllowWrite:      policy.AllowWrite,
+			RestrictVisible: true,
+			VisibleToolIDs:  scenarioToolIDs(prepared.Tools()),
+			OfferedToolIDs:  orderedToolIDs(prepared.Tools(), conversation.PrunedToolIDs),
+			PruneApplied:    conversation.PruneApplied,
+		},
+		Policy: agentapi.RunPolicy{
+			EvidenceRequired: !plan.Direct(),
+			EvidenceSeeded:   conversation.EvidenceSeeded,
+			WebResearch:      plan.Has(domain.Web),
+		},
+		Actor: agentapi.Actor{UserID: userID},
+		Correlation: agentapi.Correlation{
+			SessionID: conversation.SessionID, ParentRunID: scenario.ParentRunID,
+			WorkflowRunID: scenario.WorkflowRunID, NodeID: scenario.WorkflowNodeID,
+		},
+	}
+	ctx = withSessionToolScope(ctx, conversation, userID)
 
 	go func() {
-		res, runErr := svc.agent.runWithSnapshot(ctx, runID, question, conversation, rc, plan, policy, snapshot)
-		outcome := outcomeFor(res, contextReferences(rc), runErr)
+		result, runErr := run.Execute(ctx, request)
+		if runErr != nil {
+			log.ErrorfCtx(ctx, "[qa] runtime run %s failed: %v", runID, runErr)
+			if finishErr := run.Finish(&agentapi.RunError{
+				Code: "runtime_failed", Message: runErr.Error(),
+			}); finishErr != nil {
+				log.ErrorfCtx(ctx, "[qa] finish failed run %s: %v", runID, finishErr)
+			}
+			return
+		}
+		outcome := outcomeFromPublicResult(result)
 		if outcome.Status == RunStatusDone {
 			if err := svc.persistSessionTurn(context.WithoutCancel(ctx), runID, conversation.SessionID, userID, question, outcome); err != nil {
 				log.ErrorfCtx(ctx, "[qa] persist completed run %s session turn: %v", runID, err)
-				outcome.Status = RunStatusFailed
-				outcome.Err = err
+				if finishErr := run.Finish(&agentapi.RunError{
+					Code: "session_persistence_failed", Message: err.Error(),
+				}); finishErr != nil {
+					log.ErrorfCtx(ctx, "[qa] finish session persistence failure %s: %v", runID, finishErr)
+				}
+				return
 			}
 		}
-		if svc.hub != nil {
-			svc.hub.Complete(runID, outcome)
+		if finishErr := run.Finish(nil); finishErr != nil {
+			log.ErrorfCtx(ctx, "[qa] finish run %s: %v", runID, finishErr)
+			return
 		}
 		if outcome.Status == RunStatusDone {
 			svc.archiveSessionHistoryAsync(ctx, conversation.SessionID, userID)
 		}
 
-		if memoryExtractionAllowed(outcome, res) && svc.memory != nil && userID != 0 {
+		if memoryExtractionAllowed(outcome, internalResultFromPublic(result)) && svc.memory != nil && userID != 0 {
 			memCtx := llm.WithUsagePhase(context.WithoutCancel(ctx), llm.PhaseMemoryExtract)
 			memCtx, memCancel := context.WithTimeout(memCtx, 60*time.Second)
 			extractStarted := time.Now()
 			memoryQuestion := tooloutput.TruncateContent(question, 1000)
-			memoryAnswer := tooloutput.TruncateContent(res.Answer, 2000)
-			if extracted, err := memory.ExtractMemories(memCtx, svc.llm, memoryQuestion, memoryAnswer); err == nil {
-				mems, rejected := admitExtractedMemories(extracted, res.Evidence.Status)
+			memoryAnswer := tooloutput.TruncateContent(result.Text, 2000)
+			if extracted, err := memory.ExtractMemories(memCtx, svc.helperLLM, memoryQuestion, memoryAnswer); err == nil {
+				mems, rejected := admitExtractedMemories(extracted, EvidenceStatus(result.Evidence.Status))
 				domain.RecordTrace(memCtx, domain.EvaluationTrace{
 					Node: "memory_extract", DurationMS: time.Since(extractStarted).Milliseconds(),
 					Output: map[string]any{
@@ -923,6 +1026,97 @@ func (svc *QA) runAgentWithSnapshot(ctx context.Context, question string, conver
 	return &AskResult{RunID: runID, Context: rc}, nil
 }
 
+func qaRunPermissions(allowWrite bool) agentapi.PermissionPolicy {
+	scopes := []string{knowledgeReadScope}
+	if allowWrite {
+		scopes = append(scopes, knowledgeWriteScope)
+	}
+	return agentapi.PermissionPolicy{Scopes: scopes}
+}
+
+func qaRunInput(question string) json.RawMessage {
+	payload, _ := json.Marshal(struct {
+		Question string `json:"question"`
+	}{Question: question})
+	return payload
+}
+
+func qaContextBlocks(rc *retrieval.RetrievedContext) []agentapi.ContextBlock {
+	if rc == nil || rc.Text == "" {
+		return nil
+	}
+	references := make([]agentapi.Reference, 0, len(rc.References))
+	for _, reference := range rc.References {
+		references = append(references, agentapi.Reference{
+			Type: reference.Type, Label: reference.Label, Target: reference.Target,
+		})
+	}
+	return []agentapi.ContextBlock{{
+		Source: "qa.evidence", Title: "QA Evidence", Content: rc.Text,
+		References: references, Complete: true, ContentHash: hashString(rc.Text),
+	}}
+}
+
+func orderedToolIDs(tools []tool.Tool, selected map[tool.ToolID]struct{}) []string {
+	if len(selected) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(selected))
+	for _, candidate := range tools {
+		if _, ok := selected[candidate.ID]; ok {
+			ids = append(ids, string(candidate.ID))
+		}
+	}
+	return ids
+}
+
+func outcomeFromPublicResult(result agentapi.RunResult) RunOutcome {
+	outcome := RunOutcome{
+		Answer: result.Text, TokenUsed: len(result.Text),
+		SessionMessages: publicResultMessages(result.Messages),
+		Evidence: EvidenceMetrics{
+			Status: EvidenceStatus(result.Evidence.Status), ForcedConclusion: result.Evidence.ForcedConclusion,
+			ToolCallCount: result.Evidence.ToolCallCount, ResultCount: result.Evidence.ResultCount,
+			ToolFailureCount:   result.Evidence.ToolFailureCount,
+			PartialResultCount: result.Evidence.PartialResultCount,
+			OmittedItemCount:   result.Evidence.OmittedItemCount,
+		},
+		References: append([]agentapi.Reference(nil), result.References...),
+	}
+	outcome.HitCount = len(outcome.References)
+	switch result.Status {
+	case agentapi.RunSucceeded:
+		outcome.Status = RunStatusDone
+	case agentapi.RunCancelled:
+		outcome.Status = RunStatusAborted
+	default:
+		outcome.Status = RunStatusFailed
+	}
+	if result.Error != nil {
+		outcome.ErrorCode = result.Error.Code
+		outcome.Err = errors.New(result.Error.Message)
+	}
+	return outcome
+}
+
+func internalResultFromPublic(result agentapi.RunResult) *RunResult {
+	return &RunResult{
+		Answer: result.Text, ForcedConclusion: result.Evidence.ForcedConclusion,
+		Evidence: EvidenceMetrics{Status: EvidenceStatus(result.Evidence.Status)},
+	}
+}
+
+func publicResultMessages(messages []agentapi.Message) []llm.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	out := make([]llm.Message, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, internalMessage(message))
+	}
+	return out
+}
+
 func (svc *QA) persistSessionTurn(ctx context.Context, runID, sessionID string, userID int64, question string, outcome RunOutcome) error {
 	if svc.sessions == nil || sessionID == "" {
 		return nil
@@ -950,7 +1144,7 @@ func (svc *QA) archiveSessionHistoryAsync(ctx context.Context, sessionID string,
 	go func() {
 		defer cancel()
 		result, err := ArchiveSessionHistoryIfNeeded(
-			archiveCtx, svc.llm, svc.sessions, sessionID, userID, svc.contextWindow, svc.history,
+			archiveCtx, svc.helperLLM, svc.sessions, sessionID, userID, svc.contextWindow, svc.history,
 		)
 		if err != nil {
 			log.ErrorfCtx(archiveCtx, "[qa] post-turn history archive failed for %s: %v", sessionID, err)
@@ -1047,13 +1241,18 @@ func (rs *RunStore) Create(r RunRecord) error {
 	if r.Status == "" {
 		r.Status = RunStatusRunning
 	}
-	_, err := rs.db.Exec(
+	selectionJSON, err := json.Marshal(r.Selection)
+	if err != nil {
+		return fmt.Errorf("marshal run %q selection: %w", r.ID, err)
+	}
+	_, err = rs.db.Exec(
 		`INSERT INTO agent_runs(
-			id,user_id,session_id,agent_id,definition_version,definition_hash,tool_snapshot_id,
+			id,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
 			input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
 			question,status,error_code,mode,max_steps,step_count,token_used,started_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, r.UserID, r.SessionID, r.AgentID, r.DefinitionVersion, r.DefinitionHash, r.ToolSnapshotID,
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, r.UserID, r.SessionID, r.AgentID, r.DefinitionVersion, r.DefinitionHash,
+		selectionJSON, r.ToolSnapshotID,
 		r.InputSchemaVersion, r.OutputSchemaVersion, r.ParentRunID, r.WorkflowRunID, r.WorkflowNodeID,
 		r.Question, r.Status, r.ErrorCode, r.Mode, r.MaxSteps, 0, 0, store.DatabaseTime(r.StartedAt))
 	return err
@@ -1282,7 +1481,7 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 		pageSize = 20
 	}
 
-	q := `SELECT id,user_id,session_id,agent_id,definition_version,definition_hash,tool_snapshot_id,
+	q := `SELECT id,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
 		input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
 		question,status,error_code,mode,max_steps,step_count,token_used,
 		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
@@ -1347,7 +1546,7 @@ func (rs *RunStore) GetForUser(id string, userID int64) (*RunDetail, error) {
 }
 
 func (rs *RunStore) get(id string, userID *int64) (*RunDetail, error) {
-	query := `SELECT id,user_id,session_id,agent_id,definition_version,definition_hash,tool_snapshot_id,
+	query := `SELECT id,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
 		input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
 		question,status,error_code,mode,max_steps,step_count,token_used,
 		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
@@ -1602,9 +1801,10 @@ type rowScanner interface {
 
 func scanRunRecord(row rowScanner) (RunRecord, error) {
 	var record RunRecord
+	var selectionRaw []byte
 	var startedAt, endedAt sql.NullTime
 	if err := row.Scan(&record.ID, &record.UserID, &record.SessionID,
-		&record.AgentID, &record.DefinitionVersion, &record.DefinitionHash, &record.ToolSnapshotID,
+		&record.AgentID, &record.DefinitionVersion, &record.DefinitionHash, &selectionRaw, &record.ToolSnapshotID,
 		&record.InputSchemaVersion, &record.OutputSchemaVersion, &record.ParentRunID,
 		&record.WorkflowRunID, &record.WorkflowNodeID, &record.Question, &record.Status,
 		&record.ErrorCode, &record.Mode, &record.MaxSteps, &record.StepCount, &record.TokenUsed,
@@ -1615,6 +1815,11 @@ func scanRunRecord(row rowScanner) (RunRecord, error) {
 		&record.ToolFailureCount, &record.PartialResultCount, &record.OmittedEvidenceCount,
 		&startedAt, &endedAt); err != nil {
 		return record, err
+	}
+	if len(selectionRaw) > 0 {
+		if err := json.Unmarshal(selectionRaw, &record.Selection); err != nil {
+			return record, fmt.Errorf("decode run %q selection: %w", record.ID, err)
+		}
 	}
 	record.StartedAt = store.FormatDatabaseTime(startedAt)
 	record.EndedAt = store.FormatDatabaseTime(endedAt)
@@ -1683,12 +1888,12 @@ type RunOutcome struct {
 	Answer          string
 	SessionMessages []llm.Message
 	Evidence        EvidenceMetrics
-	References      []retrieval.Reference
+	References      []agentapi.Reference
 	HitCount        int
 	Err             error
 }
 
-func outcomeFor(result *RunResult, preRetrieved []retrieval.Reference, runErr error) RunOutcome {
+func outcomeFor(result *RunResult, preRetrieved []agentapi.Reference, runErr error) RunOutcome {
 	if result == nil {
 		if runErr == nil {
 			runErr = errors.New("agent: run returned no result")
@@ -1733,20 +1938,22 @@ func outcomeFor(result *RunResult, preRetrieved []retrieval.Reference, runErr er
 	return outcome
 }
 
-// contextReferences returns the pre-retrieval references carried by the
-// retrieved context, or nil when none were assembled.
-func contextReferences(rc *retrieval.RetrievedContext) []retrieval.Reference {
+func publicContextReferences(rc *retrieval.RetrievedContext) []agentapi.Reference {
 	if rc == nil {
 		return nil
 	}
-	return rc.References
+	references := make([]agentapi.Reference, 0, len(rc.References))
+	for _, reference := range rc.References {
+		references = append(references, agentapi.Reference{
+			Type: reference.Type, Label: reference.Label, Target: reference.Target,
+		})
+	}
+	return references
 }
 
-// mergeOutcomeReferences unions the pre-retrieval references with the dynamic
-// tool-derived references, converting the latter to the retrieval schema and
-// deduplicating by (type, target) so the final set is canonical.
-func mergeOutcomeReferences(preRetrieved []retrieval.Reference, dynamic []tool.Reference) []retrieval.Reference {
-	merged := make([]retrieval.Reference, 0, len(preRetrieved)+len(dynamic))
+// mergeOutcomeReferences keeps one canonical public reference set across sources.
+func mergeOutcomeReferences(preRetrieved []agentapi.Reference, dynamic []tool.Reference) []agentapi.Reference {
+	merged := make([]agentapi.Reference, 0, len(preRetrieved)+len(dynamic))
 	seen := make(map[string]struct{}, len(preRetrieved)+len(dynamic))
 	for _, ref := range preRetrieved {
 		key := ref.Type + "\x00" + ref.Target
@@ -1762,48 +1969,49 @@ func mergeOutcomeReferences(preRetrieved []retrieval.Reference, dynamic []tool.R
 			continue
 		}
 		seen[key] = struct{}{}
-		merged = append(merged, retrieval.Reference{Type: string(ref.Type), Label: ref.Label, Target: ref.Target})
+		merged = append(merged, agentapi.Reference{Type: string(ref.Type), Label: ref.Label, Target: ref.Target})
 	}
 	return merged
 }
 
 type RunRecord struct {
-	ID                   string         `json:"id"`
-	UserID               int64          `json:"user_id"`
-	SessionID            string         `json:"session_id"`
-	AgentID              string         `json:"agent_id"`
-	DefinitionVersion    int64          `json:"definition_version"`
-	DefinitionHash       string         `json:"definition_hash"`
-	ToolSnapshotID       string         `json:"tool_snapshot_id"`
-	InputSchemaVersion   int64          `json:"input_schema_version"`
-	OutputSchemaVersion  int64          `json:"output_schema_version"`
-	ParentRunID          string         `json:"parent_run_id"`
-	WorkflowRunID        string         `json:"workflow_run_id"`
-	WorkflowNodeID       string         `json:"workflow_node_id"`
-	Question             string         `json:"question"`
-	Status               RunStatus      `json:"status"`
-	ErrorCode            string         `json:"error_code"`
-	Mode                 string         `json:"mode"`
-	MaxSteps             int            `json:"max_steps"`
-	StepCount            int            `json:"step_count"`
-	TokenUsed            int            `json:"token_used"`
-	InputTokens          int64          `json:"input_tokens"`
-	CachedInputTokens    int64          `json:"cached_input_tokens"`
-	OutputTokens         int64          `json:"output_tokens"`
-	ReasoningTokens      int64          `json:"reasoning_tokens"`
-	TotalTokens          int64          `json:"total_tokens"`
-	LLMCallCount         int            `json:"llm_call_count"`
-	PeakInputTokens      int            `json:"peak_input_tokens"`
-	PeakReservedTokens   int            `json:"peak_reserved_tokens"`
-	EvidenceStatus       EvidenceStatus `json:"evidence_status"`
-	ForcedConclusion     bool           `json:"forced_conclusion"`
-	EvidenceResultCount  int            `json:"evidence_result_count"`
-	ToolCallCount        int            `json:"tool_call_count"`
-	ToolFailureCount     int            `json:"tool_failure_count"`
-	PartialResultCount   int            `json:"partial_result_count"`
-	OmittedEvidenceCount int            `json:"omitted_evidence_count"`
-	StartedAt            string         `json:"started_at"`
-	EndedAt              string         `json:"ended_at"`
+	ID                   string                       `json:"id"`
+	UserID               int64                        `json:"user_id"`
+	SessionID            string                       `json:"session_id"`
+	AgentID              string                       `json:"agent_id"`
+	DefinitionVersion    int64                        `json:"definition_version"`
+	DefinitionHash       string                       `json:"definition_hash"`
+	Selection            agentapi.DefinitionSelection `json:"selection"`
+	ToolSnapshotID       string                       `json:"tool_snapshot_id"`
+	InputSchemaVersion   int64                        `json:"input_schema_version"`
+	OutputSchemaVersion  int64                        `json:"output_schema_version"`
+	ParentRunID          string                       `json:"parent_run_id"`
+	WorkflowRunID        string                       `json:"workflow_run_id"`
+	WorkflowNodeID       string                       `json:"workflow_node_id"`
+	Question             string                       `json:"question"`
+	Status               RunStatus                    `json:"status"`
+	ErrorCode            string                       `json:"error_code"`
+	Mode                 string                       `json:"mode"`
+	MaxSteps             int                          `json:"max_steps"`
+	StepCount            int                          `json:"step_count"`
+	TokenUsed            int                          `json:"token_used"`
+	InputTokens          int64                        `json:"input_tokens"`
+	CachedInputTokens    int64                        `json:"cached_input_tokens"`
+	OutputTokens         int64                        `json:"output_tokens"`
+	ReasoningTokens      int64                        `json:"reasoning_tokens"`
+	TotalTokens          int64                        `json:"total_tokens"`
+	LLMCallCount         int                          `json:"llm_call_count"`
+	PeakInputTokens      int                          `json:"peak_input_tokens"`
+	PeakReservedTokens   int                          `json:"peak_reserved_tokens"`
+	EvidenceStatus       EvidenceStatus               `json:"evidence_status"`
+	ForcedConclusion     bool                         `json:"forced_conclusion"`
+	EvidenceResultCount  int                          `json:"evidence_result_count"`
+	ToolCallCount        int                          `json:"tool_call_count"`
+	ToolFailureCount     int                          `json:"tool_failure_count"`
+	PartialResultCount   int                          `json:"partial_result_count"`
+	OmittedEvidenceCount int                          `json:"omitted_evidence_count"`
+	StartedAt            string                       `json:"started_at"`
+	EndedAt              string                       `json:"ended_at"`
 }
 
 // RunUsageSummary is the token snapshot needed by the live QA composer.

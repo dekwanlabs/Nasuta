@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -25,7 +25,7 @@ func TestMergeToolReferencesDedupsByTypeAndTarget(t *testing.T) {
 }
 
 func TestMergeOutcomeReferencesUnionsRetrievedAndDynamic(t *testing.T) {
-	retrieved := []retrieval.Reference{{Type: "code", Target: "pre.go"}, {Type: "runbook", Target: "doc-abc"}}
+	retrieved := []agentapi.Reference{{Type: "code", Target: "pre.go"}, {Type: "runbook", Target: "doc-abc"}}
 	dynamic := []tool.Reference{
 		{Type: tool.ReferenceRunbook, Label: "design", Target: "doc-abc"}, // dedup vs retrieved
 		{Type: tool.ReferenceCode, Target: "rules.yaml"},

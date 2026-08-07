@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -153,16 +154,27 @@ func TestRunStoreCreatePersistsAgentAndWorkflowSnapshot(t *testing.T) {
 	record := RunRecord{
 		ID: "run-1", UserID: 42, SessionID: "session-1",
 		AgentID: "qa.answerer", DefinitionVersion: 3,
-		DefinitionHash: strings.Repeat("a", 64), ToolSnapshotID: "tools_snapshot",
+		DefinitionHash: strings.Repeat("a", 64),
+		Selection: agentapi.DefinitionSelection{
+			RuleVersion: 2, RuleHash: strings.Repeat("b", 64),
+			CandidateVersion: 3, BucketBasisPoints: 812,
+			PercentageBasisPoints: 2500, StableKeyHash: strings.Repeat("c", 64),
+			Reason: "rollout_candidate",
+		},
+		ToolSnapshotID:     "tools_snapshot",
 		InputSchemaVersion: 2, OutputSchemaVersion: 4,
 		ParentRunID: "run-parent", WorkflowRunID: "workflow-1", WorkflowNodeID: "answer",
 		Question: "question", Status: RunStatusRunning, Mode: "workflow", MaxSteps: 5,
 		StartedAt: "2026-08-05T01:02:03Z",
 	}
+	selectionJSON, err := json.Marshal(record.Selection)
+	if err != nil {
+		t.Fatalf("marshal selection: %v", err)
+	}
 	mock.ExpectExec("INSERT INTO agent_runs").
 		WithArgs(
 			record.ID, record.UserID, record.SessionID, record.AgentID, record.DefinitionVersion,
-			record.DefinitionHash, record.ToolSnapshotID, record.InputSchemaVersion,
+			record.DefinitionHash, selectionJSON, record.ToolSnapshotID, record.InputSchemaVersion,
 			record.OutputSchemaVersion, record.ParentRunID, record.WorkflowRunID,
 			record.WorkflowNodeID, record.Question, record.Status, record.ErrorCode,
 			record.Mode, record.MaxSteps, 0, 0, sqlmock.AnyArg(),
@@ -201,27 +213,6 @@ func TestRunStoreEvidenceByIDsIsBoundToUserAndSession(t *testing.T) {
 	}
 	if _, ok := evidence["run-2"]; ok {
 		t.Fatalf("unexpected evidence for absent run: %#v", evidence)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestAskStopsWhenRunCreationFails(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock: %v", err)
-	}
-	defer db.Close()
-	mock.ExpectExec("INSERT INTO agent_runs").WillReturnError(errors.New("database unavailable"))
-
-	qa := &QA{
-		runStore: &RunStore{db: db},
-		agent:    &Agent{cfg: AgentConfig{MaxSteps: 3}},
-	}
-	result, err := qa.Ask(context.Background(), QARequest{Question: "where is the endpoint?", RunID: "run-create-fail"})
-	if err == nil || !strings.Contains(err.Error(), "create agent run") {
-		t.Fatalf("result=%+v error=%v, want run creation failure", result, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -410,32 +401,90 @@ func TestRunAgentFinishesHubWhenLLMCallFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 100, server.Client())
 	registry := testRegistry(t)
-	executor := NewToolExecutor(registry)
-	hub := NewRunHub(nil)
-	qa := &QA{
-		llm:      client,
-		executor: executor,
-		agent:    NewAgent(client, executor, AgentConfig{MaxSteps: 1, Timeout: time.Second, AnswerReserve: 100 * time.Millisecond, AnswerMaxTokens: 100}, hub, hub),
-		hub:      hub,
-	}
+	definition := testReviewerDefinition(t, nil)
+	runtime := newTestDefinitionRuntime(t, definition, registry, testRuntimeSettings(server.URL), nil)
 
 	const runID = "run-llm-failure"
-	ch := hub.Subscribe(runID)
-	if _, err := qa.runAgentWithPlan(context.Background(), "question", ConversationContext{}, 0, nil, nil, "", runID, domain.EvidencePlan{Sources: domain.AllEvidence}); err != nil {
-		t.Fatalf("runAgentWithPlan: %v", err)
+	request := testDefinitionRequest(definition)
+	request.RunID = runID
+	ch := runtime.Hub().Subscribe(runID)
+	result, err := runtime.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != agentapi.RunFailed {
+		t.Fatalf("result status = %s, want failed", result.Status)
 	}
 
-	select {
-	case event := <-ch:
-		terminal := TerminalFromEvent(event)
-		if terminal == nil || terminal.Status != RunStatusFailed {
-			t.Fatalf("first hub event = %+v, want failed terminal", event)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("run did not emit Done after LLM failure")
+	terminal := waitForTerminal(t, ch)
+	if terminal.Status != RunStatusFailed {
+		t.Fatalf("terminal = %+v, want failed", terminal)
 	}
+}
+
+func newQARuntimeFixture(
+	t *testing.T,
+	client *llm.LLMClient,
+	baseURL string,
+	registry *Registry,
+	retriever contextRetriever,
+	pruningEnabled bool,
+) (*QA, *DefinitionRuntime) {
+	return newQARuntimeFixtureWithStore(
+		t, client, baseURL, registry, retriever, pruningEnabled, nil,
+	)
+}
+
+func newQARuntimeFixtureWithStore(
+	t *testing.T,
+	client *llm.LLMClient,
+	baseURL string,
+	registry *Registry,
+	retriever contextRetriever,
+	pruningEnabled bool,
+	store *RunStore,
+) (*QA, *DefinitionRuntime) {
+	t.Helper()
+	definition := testQADefinition(t, func(definition *agentapi.Definition) {
+		definition.Budget.ContextTokens = 32768
+	})
+	runtime := newTestDefinitionRuntime(
+		t, definition, registry, testRuntimeSettings(baseURL), store,
+	)
+	qa := &QA{
+		helperLLM: client, fastLLM: client,
+		retriever: retriever,
+		runtime:   runtime, runtimeTools: runtime, phaseEmitter: runtime,
+		definitions: definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
+			if ref.ID != definition.ID || ref.Version != definition.Version {
+				return agentapi.Definition{}, fmt.Errorf("definition not found")
+			}
+			return definition, nil
+		}),
+		agentRef:         agentapi.DefinitionRef{ID: definition.ID, Version: definition.Version},
+		routerConfidence: 0.9, routerMaxTokens: 512,
+		toolPruningEnabled: pruningEnabled,
+	}
+	return qa, runtime
+}
+
+type failingContextRetriever struct {
+	err error
+}
+
+func (retriever failingContextRetriever) RetrievePlan(
+	context.Context,
+	string,
+	string,
+	retrieval.QueryTerms,
+	domain.EvidencePlan,
+) (*retrieval.RetrievedContext, error) {
+	return nil, retriever.err
+}
+
+func (failingContextRetriever) ContextBudget() int {
+	return 48000
 }
 
 func waitForTerminal(t *testing.T, ch chan SSEEvent) *RunTerminal {
@@ -482,17 +531,9 @@ func TestAskAgentDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
 	registry := testRegistry(t, testAgentTool("internal", ToolKindRead, noopTool))
-	executor := NewToolExecutor(registry)
-	hub := NewRunHub(nil)
-	qa := &QA{
-		llm: client, fastLLM: client, executor: executor,
-		agent: NewAgent(client, executor, AgentConfig{
-			MaxSteps: 1, Timeout: 2 * time.Second, AnswerReserve: 200 * time.Millisecond, AnswerMaxTokens: 512,
-		}, hub, hub),
-		hub: hub, routerConfidence: 0.9, routerMaxTokens: 512,
-	}
+	qa, runtime := newQARuntimeFixture(t, client, server.URL, registry, nil, false)
 
-	terminalCh := hub.Subscribe("direct-run")
+	terminalCh := runtime.Hub().Subscribe("direct-run")
 	result, err := qa.AskAgent(context.Background(), "What causes a rainbow?", nil, 0, "", "direct-run")
 	if err != nil {
 		t.Fatalf("AskAgent: %v", err)
@@ -505,6 +546,113 @@ func TestAskAgentDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 	}
 	if result.Context == nil || result.Context.Text != "" {
 		t.Fatalf("context = %+v, want empty direct context", result.Context)
+	}
+}
+
+func TestAskSessionPersistenceFailureCompletesRunAsFailed(t *testing.T) {
+	runDB, runMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runDB.Close()
+	sessionDB, sessionMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sessionDB.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(writer, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	const runID = "session-persistence-failed-run"
+	runMock.ExpectExec("INSERT INTO agent_runs").WillReturnResult(sqlmock.NewResult(1, 1))
+	runMock.ExpectBegin()
+	runMock.ExpectQuery("SELECT llm_call_count FROM agent_runs").WithArgs(runID).
+		WillReturnRows(sqlmock.NewRows([]string{"llm_call_count"}).AddRow(0))
+	runMock.ExpectExec("INSERT INTO agent_llm_calls").WillReturnResult(sqlmock.NewResult(1, 1))
+	runMock.ExpectExec("UPDATE agent_runs SET").WillReturnResult(sqlmock.NewResult(0, 1))
+	runMock.ExpectCommit()
+	runMock.ExpectBegin()
+	runMock.ExpectExec("INSERT INTO agent_steps").WillReturnResult(sqlmock.NewResult(1, 1))
+	runMock.ExpectCommit()
+	runMock.ExpectExec("UPDATE agent_runs").WithArgs(
+		RunStatusFailed, "session_persistence_failed", 1, len("answer"),
+		EvidenceNotRequired, false, 0, 0, 0, 0, 0,
+		sqlmock.AnyArg(), runID, RunStatusRunning, RunStatusPaused,
+	).WillReturnResult(sqlmock.NewResult(0, 1))
+	sessionMock.ExpectBegin().WillReturnError(errors.New("session database unavailable"))
+
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "review-model", 256, server.Client())
+	qa, runtime := newQARuntimeFixtureWithStore(
+		t, client, server.URL, tool.NewRegistry(), nil, false, &RunStore{db: runDB},
+	)
+	qa.sessions = memory.NewSessionStore(sessionDB)
+	events := runtime.Hub().Subscribe(runID)
+	_, err = qa.AskAgentWithContext(
+		context.Background(), "你能做什么？",
+		ConversationContext{SessionID: "session-1"}, 42, "", runID, nil, false,
+	)
+	if err != nil {
+		t.Fatalf("AskAgentWithContext: %v", err)
+	}
+	terminal := waitForTerminal(t, events)
+	if terminal.Status != RunStatusFailed || !strings.Contains(terminal.Error, "session database unavailable") {
+		t.Fatalf("terminal = %+v", terminal)
+	}
+	select {
+	case event := <-events:
+		if event.Type == EventRunFinished {
+			t.Fatal("session persistence failure published multiple terminal events")
+		}
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := runMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessionMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAskRetrievalFailureCompletesStartedRunAsFailed(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const runID = "retrieval-failed-run"
+	mock.ExpectExec("INSERT INTO agent_runs").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE agent_runs").WithArgs(
+		RunStatusFailed, "preparation_failed", 0, 0,
+		EvidenceUnavailable, false, 0, 0, 0, 0, 0,
+		sqlmock.AnyArg(), runID, RunStatusRunning, RunStatusPaused,
+	).WillReturnResult(sqlmock.NewResult(0, 1))
+
+	qa, runtime := newQARuntimeFixtureWithStore(
+		t, nil, "http://unused", tool.NewRegistry(),
+		failingContextRetriever{err: errors.New("retrieval backend unavailable")},
+		false, &RunStore{db: db},
+	)
+	plan := domain.EvidencePlan{Sources: domain.Internal}
+	events := runtime.Hub().Subscribe(runID)
+	_, err = qa.AskAgentWithContext(
+		context.Background(), "find the implementation", ConversationContext{},
+		42, "", runID, &plan, false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "retrieve internal evidence") {
+		t.Fatalf("error = %v", err)
+	}
+	terminal := waitForTerminal(t, events)
+	if terminal.Status != RunStatusFailed || !strings.Contains(terminal.Error, "retrieval backend unavailable") {
+		t.Fatalf("terminal = %+v", terminal)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -536,18 +684,12 @@ func TestAskAgentRouterInvalidOutputFallsBackInternal(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
 	registry := testRegistry(t, testAgentTool("internal", ToolKindRead, noopTool))
-	executor := NewToolExecutor(registry)
-	hub := NewRunHub(nil)
-	qa := &QA{
-		llm: client, fastLLM: client, executor: executor,
-		retriever: retrieval.New(emptyRetrievalTools{}, config.Config{}),
-		agent: NewAgent(client, executor, AgentConfig{
-			MaxSteps: 1, Timeout: 2 * time.Second, AnswerReserve: 200 * time.Millisecond, AnswerMaxTokens: 512,
-		}, hub, hub),
-		hub: hub, routerConfidence: 0.9, routerMaxTokens: 512,
-	}
+	qa, runtime := newQARuntimeFixture(
+		t, client, server.URL, registry,
+		retrieval.New(emptyRetrievalTools{}, config.Config{}), false,
+	)
 
-	terminalCh := hub.Subscribe("invalid-route-run")
+	terminalCh := runtime.Hub().Subscribe("invalid-route-run")
 	result, err := qa.AskAgent(context.Background(), "What causes a rainbow?", nil, 0, "", "invalid-route-run")
 	if err != nil {
 		t.Fatalf("AskAgent: %v", err)
@@ -602,20 +744,13 @@ func TestAskAgentPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
 			scenarioTool("observe_logs"),
 			scenarioTool("search_config"),
 		)
-		executor := NewToolExecutor(registry)
-		hub := NewRunHub(nil)
-		qa := &QA{
-			llm: client, fastLLM: client, executor: executor,
-			retriever: retrieval.New(emptyRetrievalTools{}, config.Config{}),
-			agent: NewAgent(client, executor, AgentConfig{
-				MaxSteps: 1, Timeout: 2 * time.Second, AnswerReserve: 200 * time.Millisecond, AnswerMaxTokens: 512,
-			}, hub, hub),
-			hub: hub, routerConfidence: 0.9, routerMaxTokens: 512,
-			toolPruningEnabled: pruningEnabled,
-		}
+		qa, runtime := newQARuntimeFixture(
+			t, client, server.URL, registry,
+			retrieval.New(emptyRetrievalTools{}, config.Config{}), pruningEnabled,
+		)
 		ctx := domain.WithTraceRecorder(context.Background(), recorder)
 		runID := fmt.Sprintf("prune-run-%t", pruningEnabled)
-		terminalCh := hub.Subscribe(runID)
+		terminalCh := runtime.Hub().Subscribe(runID)
 		result, err := qa.AskAgent(ctx, "how many requests failed?", nil, 0, "", runID)
 		if err != nil {
 			t.Fatalf("AskAgent: %v", err)
@@ -720,9 +855,12 @@ func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 			}, nil
 		}),
 	})
-	qa := &QA{executor: NewToolExecutor(registry)}
-	snapshot := qa.executor.Snapshot(ToolPolicy{AllowRead: true})
-	blocks, err := qa.executePrefetch(context.Background(), snapshot, ToolPlan{
+	qa := &QA{}
+	prepared := preparedScenarioTools{
+		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
+		executor: NewToolExecutor(registry),
+	}
+	blocks, err := qa.executePrefetch(context.Background(), prepared, ToolPlan{
 		Prefetch: []PlannedToolCall{{ToolID: "prefetch", Required: true}},
 	})
 	if err != nil {

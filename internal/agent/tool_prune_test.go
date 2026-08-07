@@ -26,7 +26,8 @@ func TestBaseToolIDSetKeepsCoreAndExcludesRoutingCandidates(t *testing.T) {
 		scenarioTool("search_config"),
 	)
 	snapshot := registry.Snapshot(tool.ReadPolicy())
-	base := baseToolIDSet(snapshot, routingCandidates(snapshot))
+	tools := snapshot.Tools()
+	base := baseToolIDSet(tools, routingCandidates(tools))
 
 	for _, id := range []tool.ToolID{"get_service", "search_code"} {
 		if _, ok := base[id]; !ok {
@@ -79,8 +80,8 @@ func TestPrunedDefinitionsPreservesOrderAndMembership(t *testing.T) {
 		{Function: llm.ToolFunctionDef{Name: "search_config"}},
 	}
 	allowed := map[tool.ToolID]struct{}{
-		"get_service": {},
-		"search_code": {},
+		"get_service":  {},
+		"search_code":  {},
 		"observe_logs": {},
 	}
 	kept := prunedDefinitions(full, allowed)
@@ -100,7 +101,7 @@ func TestPrunedToolIDSetIsBaseUnionRouted(t *testing.T) {
 	)
 	svc := &QA{}
 	snapshot := registry.Snapshot(tool.ReadPolicy())
-	allowed := svc.prunedToolIDSet(snapshot, []string{"observe_logs"})
+	allowed := svc.prunedToolIDSet(snapshot.Tools(), []string{"observe_logs"})
 
 	for _, id := range []tool.ToolID{"get_service", "observe_logs"} {
 		if _, ok := allowed[id]; !ok {

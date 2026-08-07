@@ -178,7 +178,10 @@ func TestWithoutToolRemovesSessionDetailsFromRunSnapshot(t *testing.T) {
 	if _, ok := snapshot.Get("get_turn"); !ok {
 		t.Fatal("registered detail tool missing")
 	}
-	filtered := withoutSessionHistoryTools(snapshot)
+	filtered := withoutSessionHistoryTools(preparedScenarioTools{
+		snapshot: snapshot,
+		executor: NewToolExecutor(registry),
+	})
 	if _, ok := filtered.Get("get_turn"); ok {
 		t.Fatal("detail tool remained visible without a compaction reference")
 	}

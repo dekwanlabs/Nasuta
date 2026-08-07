@@ -1,40 +1,33 @@
 package agent
 
 import (
-	"time"
-
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-// QARuntime owns the reusable execution mechanism used by the QA scenario.
-type QARuntime struct {
-	llm            *llm.LLMClient
-	fastLLM        *llm.LLMClient
-	agent          *Agent
-	registry       *Registry
-	executor       *ToolExecutor
-	writeAvailable bool
-	hub            *RunHub
-	runStore       *RunStore
+// QAModels owns model clients used by QA preparation and session maintenance.
+type QAModels struct {
+	primary *llm.LLMClient
+	fast    *llm.LLMClient
 }
 
-type QARuntimeDeps struct {
-	Tools          *Service
-	Registry       *Registry
-	Cfg            config.Config
-	Platform       *config.PlatformSettings
-	Sessions       *memory.SessionStore
-	History        SessionHistory
-	WriteAvailable bool
-	RunStore       *RunStore
+func (models *QAModels) Primary() *llm.LLMClient {
+	if models == nil {
+		return nil
+	}
+	return models.primary
 }
 
-// NewQARuntime pins model, tool, budget, and observation dependencies.
-func NewQARuntime(deps QARuntimeDeps) *QARuntime {
-	settings := deps.Platform
+func (models *QAModels) Fast() *llm.LLMClient {
+	if models == nil {
+		return nil
+	}
+	return models.fast
+}
+
+// NewQAModels pins helper-model choices used outside the execution loop.
+func NewQAModels(settings *config.PlatformSettings) *QAModels {
 	client := llm.NewLLMClientWithHTTPAndProvider(
 		settings.LLMBaseURL,
 		settings.LLMAPIKey,
@@ -60,31 +53,5 @@ func NewQARuntime(deps QARuntimeDeps) *QARuntime {
 		log.Infof("[qa] fast model enabled for preprocess/queryterms: %s @ %s (%s)",
 			settings.LLMFastModel, settings.LLMBaseURL, fastProvider)
 	}
-
-	registry := deps.Registry
-	if registry == nil {
-		registry = NewRegistry(deps.Tools, deps.Cfg, deps.Sessions, deps.History)
-	}
-	runHub := NewRunHub(deps.RunStore)
-	executor := NewToolExecutor(registry)
-	loop := NewAgent(client, executor, AgentConfig{
-		Timeout:             time.Duration(settings.AgentTimeout),
-		MaxSteps:            settings.AgentMaxSteps,
-		AnswerReserve:       time.Duration(settings.AgentAnswerReserve),
-		AnswerMaxTokens:     settings.LLMAnswerMaxTokens,
-		ConclusionMaxTokens: settings.LLMConclusionMaxTokens,
-		ContextWindow:       settings.LLMContextWindow,
-		MaxContinueRounds:   settings.LLMMaxContinueRounds,
-		DomainKnowledge:     settings.DomainKnowledge,
-		HistoryLimit:        0,
-	}, runHub, runHub)
-	loop.SetOnFirstAnswerToken(func(runID string) {
-		runHub.EmitPhase(runID, "找到啦，我来把答案写出来 ✍️")
-	})
-	return &QARuntime{
-		llm: client, fastLLM: fastClient, agent: loop,
-		registry: registry, executor: executor,
-		writeAvailable: deps.WriteAvailable,
-		hub:            runHub, runStore: deps.RunStore,
-	}
+	return &QAModels{primary: client, fast: fastClient}
 }

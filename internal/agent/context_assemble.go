@@ -174,9 +174,8 @@ func (svc *QA) assembleActiveHistory(ctx context.Context, question string, userI
 	}
 	budget := activeHistoryMaxTokens
 	if svc.contextWindow > 0 {
-		outputReserve := max(svc.agent.cfg.AnswerMaxTokens, svc.agent.cfg.ConclusionMaxTokens)
 		safety := max(svc.contextWindow/20, 1024)
-		budget = min(activeHistoryMaxTokens, max(0, svc.contextWindow-outputReserve-safety)/4)
+		budget = min(activeHistoryMaxTokens, max(0, svc.contextWindow-svc.outputReserve-safety)/4)
 	}
 	stats.HistoryBudgetTokens = budget
 	historical := make([]historicalTurn, 0, len(selected))

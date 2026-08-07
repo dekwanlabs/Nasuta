@@ -10,13 +10,13 @@ import (
 // baseToolIDSet keeps every tool the router is not allowed to prune.
 // Routing candidates are the only tools pruning may drop; the base set is the
 // complement so newly registered core tools stay available automatically.
-func baseToolIDSet(snapshot tool.Snapshot, candidates []retrieval.ToolRouteCandidate) map[tool.ToolID]struct{} {
+func baseToolIDSet(tools []tool.Tool, candidates []retrieval.ToolRouteCandidate) map[tool.ToolID]struct{} {
 	prunable := make(map[tool.ToolID]struct{}, len(candidates))
 	for _, candidate := range candidates {
 		prunable[tool.ToolID(candidate.ID)] = struct{}{}
 	}
 	base := make(map[tool.ToolID]struct{})
-	for _, candidate := range snapshot.Tools() {
+	for _, candidate := range tools {
 		if _, prunable := prunable[candidate.ID]; prunable {
 			continue
 		}

@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -170,7 +170,7 @@ type RunTerminal struct {
 	Answer          string               `json:"answer,omitempty"`
 	StepCount       int                  `json:"step_count"`
 	TokenUsed       int                  `json:"token_used"`
-	References      []retrieval.Reference `json:"references,omitempty"`
+	References      []agentapi.Reference `json:"references,omitempty"`
 	HitCount        int                  `json:"hit_count"`
 	Error           string               `json:"error,omitempty"`
 	Evidence        EvidenceMetrics      `json:"evidence"`
@@ -315,6 +315,10 @@ func (hub *RunHub) EmitPhase(runID, text string) {
 }
 
 func (hub *RunHub) Complete(runID string, outcome RunOutcome) {
+	hub.complete(runID, outcome, true)
+}
+
+func (hub *RunHub) complete(runID string, outcome RunOutcome, persist bool) {
 	if !outcome.Status.Terminal() {
 		outcome.Status = RunStatusFailed
 		outcome.Err = fmt.Errorf("agent: non-terminal outcome")
@@ -340,7 +344,7 @@ func (hub *RunHub) Complete(runID string, outcome RunOutcome) {
 		outcome.Status = RunStatusFailed
 		outcome.Err = fmt.Errorf("persist agent step: %w", stepErr)
 	}
-	if hub.runStore != nil {
+	if persist && hub.runStore != nil {
 		if err := hub.runStore.Complete(runID, outcome); err != nil {
 			if errors.Is(err, ErrRunNotActive) {
 				log.WarnfCtx(ctxWithRunID(runID), "[hub] terminal transition rejected: %v", err)

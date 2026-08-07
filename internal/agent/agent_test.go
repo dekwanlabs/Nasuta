@@ -241,6 +241,57 @@ func TestRunAllowsDirectAnswerWithoutPreferredTool(t *testing.T) {
 	}
 }
 
+func TestRunStopsBeforeToolExecutionWhenToolCallBudgetIsExhausted(t *testing.T) {
+	var modelCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		atomic.AddInt32(&modelCalls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeTestSSE(t, w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"evidence","arguments":"{}"}},{"index":1,"id":"call-2","type":"function","function":{"name":"evidence","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+	}))
+	defer server.Close()
+
+	var toolCalls int32
+	registry := testRegistry(t, Tool{
+		ID: "evidence", Description: "test evidence", Kind: ToolKindRead,
+		InputSchema: objectSchema(nil, nil),
+		Handler: stringHandler(func(context.Context, tool.Arguments) (string, error) {
+			atomic.AddInt32(&toolCalls, 1)
+			return `{"found":true}`, nil
+		}),
+	})
+	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{})
+	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+		MaxSteps: 2, MaxToolCalls: 1, AnswerMaxTokens: 100,
+		Timeout: 5 * time.Second, AnswerReserve: time.Second,
+	}, nil, nil)
+	result, err := agent.RunWithPlan(
+		t.Context(),
+		"run_tool_budget",
+		"查找证据",
+		nil,
+		nil,
+		domain.EvidencePlan{Sources: domain.Internal},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(result.Err, ErrToolCallBudgetExhausted) {
+		t.Fatalf("result error = %v, want tool call budget exhaustion", result.Err)
+	}
+	if result.Evidence.ToolCallCount != 1 || atomic.LoadInt32(&toolCalls) != 1 {
+		t.Fatalf(
+			"evidence calls=%d executed calls=%d",
+			result.Evidence.ToolCallCount,
+			atomic.LoadInt32(&toolCalls),
+		)
+	}
+	if atomic.LoadInt32(&modelCalls) != 1 {
+		t.Fatalf("model calls = %d, want 1", atomic.LoadInt32(&modelCalls))
+	}
+}
+
 func TestRunForcesConclusionAfterToolFailure(t *testing.T) {
 	var calls int32
 	var sawToolError atomic.Bool
