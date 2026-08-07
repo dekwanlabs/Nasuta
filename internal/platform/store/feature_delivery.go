@@ -423,6 +423,28 @@ func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review fe
 	if review.ReviewRoundID == "" || review.GateResultID == "" {
 		return featuredelivery.ErrInvalid
 	}
+	var existing featuredelivery.ArtifactReview
+	err = tx.QueryRowContext(ctx,
+		`SELECT artifact_id,subject_hash,review_round_id,gate_result_id,decision,comment,reviewer
+		 FROM feature_artifact_reviews WHERE artifact_id=? LIMIT 1 FOR UPDATE`,
+		review.ArtifactID,
+	).Scan(
+		&existing.ArtifactID, &existing.SubjectHash, &existing.ReviewRoundID,
+		&existing.GateResultID, &existing.Decision, &existing.Comment,
+		&existing.Reviewer,
+	)
+	if err == nil {
+		if !sameArtifactReviewFact(existing, review) {
+			return featuredelivery.ErrConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit idempotent artifact review %q: %w", review.ArtifactID, err)
+		}
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read artifact review %q: %w", review.ArtifactID, err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO feature_artifact_reviews(
 			artifact_id,subject_hash,review_round_id,gate_result_id,decision,comment,reviewer,created_at
@@ -444,6 +466,16 @@ func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review fe
 	return nil
 }
 
+func sameArtifactReviewFact(left, right featuredelivery.ArtifactReview) bool {
+	return left.ArtifactID == right.ArtifactID &&
+		left.SubjectHash == right.SubjectHash &&
+		left.ReviewRoundID == right.ReviewRoundID &&
+		left.GateResultID == right.GateResultID &&
+		left.Decision == right.Decision &&
+		left.Comment == right.Comment &&
+		left.Reviewer == right.Reviewer
+}
+
 func (store *FeatureDeliveryStore) CreateGenerationRun(ctx context.Context, run featuredelivery.GenerationRun) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -455,12 +487,14 @@ func (store *FeatureDeliveryStore) CreateGenerationRun(ctx context.Context, run 
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO feature_generation_runs(
-			id,request_id,artifact_kind,parent_artifact_id,status,provider,model,
-			requested_by,input_tokens,output_tokens,error_summary,started_at,ended_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		run.ID, run.RequestID, run.ArtifactKind, run.ParentArtifactID, run.Status,
-		run.Provider, run.Model, run.RequestedBy, run.InputTokens, run.OutputTokens,
-		run.ErrorSummary, run.StartedAt, run.EndedAt,
+			id,request_id,artifact_kind,parent_artifact_id,workflow_run_id,workflow_node_id,
+			workflow_attempt,artifact_id,status,provider,model,requested_by,input_tokens,
+			output_tokens,error_summary,started_at,ended_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		run.ID, run.RequestID, run.ArtifactKind, run.ParentArtifactID,
+		run.WorkflowRunID, run.WorkflowNodeID, run.WorkflowAttempt, run.ArtifactID,
+		run.Status, run.Provider, run.Model, run.RequestedBy, run.InputTokens,
+		run.OutputTokens, run.ErrorSummary, run.StartedAt, run.EndedAt,
 	); err != nil {
 		return fmt.Errorf("insert generation run %q: %w", run.ID, err)
 	}
@@ -513,8 +547,9 @@ func (store *FeatureDeliveryStore) CompleteGeneration(ctx context.Context, runID
 	}
 	result, err := tx.ExecContext(ctx,
 		`UPDATE feature_generation_runs
-		 SET status='succeeded',input_tokens=?,output_tokens=?,error_summary='',ended_at=CURRENT_TIMESTAMP
-		 WHERE id=? AND status='running'`, inputTokens, outputTokens, runID,
+		 SET artifact_id=?,status='succeeded',input_tokens=?,output_tokens=?,
+			error_summary='',ended_at=CURRENT_TIMESTAMP
+		 WHERE id=? AND status='running'`, artifact.ID, inputTokens, outputTokens, runID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("complete generation run %q: %w", runID, err)
@@ -538,6 +573,53 @@ func (store *FeatureDeliveryStore) GetGenerationRun(ctx context.Context, id stri
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get generation run %q: %w", id, err)
+	}
+	return &run, nil
+}
+
+func (store *FeatureDeliveryStore) GetGenerationForArtifact(
+	ctx context.Context,
+	artifactID string,
+) (*featuredelivery.GenerationRun, error) {
+	run, err := scanGenerationRun(store.db.QueryRowContext(
+		ctx,
+		generationRunSelect+`
+		WHERE artifact_id=? AND status='succeeded'
+		ORDER BY ended_at DESC,id DESC LIMIT 1`,
+		artifactID,
+	))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, featuredelivery.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get generation for artifact %q: %w", artifactID, err)
+	}
+	return &run, nil
+}
+
+func (store *FeatureDeliveryStore) GetSuccessfulGenerationForWorkflowNode(
+	ctx context.Context,
+	workflowRunID string,
+	workflowNodeID string,
+) (*featuredelivery.GenerationRun, error) {
+	run, err := scanGenerationRun(store.db.QueryRowContext(
+		ctx,
+		generationRunSelect+`
+		WHERE workflow_run_id=? AND workflow_node_id=? AND status='succeeded'
+		ORDER BY workflow_attempt DESC LIMIT 1`,
+		workflowRunID,
+		workflowNodeID,
+	))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, featuredelivery.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get successful generation for workflow node %q/%q: %w",
+			workflowRunID,
+			workflowNodeID,
+			err,
+		)
 	}
 	return &run, nil
 }
@@ -572,7 +654,8 @@ func (store *FeatureDeliveryStore) ListGenerationRuns(ctx context.Context, reque
 	return runs, nil
 }
 
-const generationRunSelect = `SELECT id,request_id,artifact_kind,parent_artifact_id,status,provider,model,
+const generationRunSelect = `SELECT id,request_id,artifact_kind,parent_artifact_id,
+	workflow_run_id,workflow_node_id,workflow_attempt,artifact_id,status,provider,model,
 	requested_by,input_tokens,output_tokens,error_summary,started_at,ended_at
 	FROM feature_generation_runs`
 
@@ -580,9 +663,10 @@ func scanGenerationRun(row rowScanner) (featuredelivery.GenerationRun, error) {
 	var run featuredelivery.GenerationRun
 	var endedAt sql.NullTime
 	err := row.Scan(
-		&run.ID, &run.RequestID, &run.ArtifactKind, &run.ParentArtifactID, &run.Status,
-		&run.Provider, &run.Model, &run.RequestedBy, &run.InputTokens, &run.OutputTokens,
-		&run.ErrorSummary, &run.StartedAt, &endedAt,
+		&run.ID, &run.RequestID, &run.ArtifactKind, &run.ParentArtifactID,
+		&run.WorkflowRunID, &run.WorkflowNodeID, &run.WorkflowAttempt, &run.ArtifactID,
+		&run.Status, &run.Provider, &run.Model, &run.RequestedBy, &run.InputTokens,
+		&run.OutputTokens, &run.ErrorSummary, &run.StartedAt, &endedAt,
 	)
 	run.EndedAt = nullableTime(endedAt)
 	return run, err

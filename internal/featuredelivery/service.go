@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -22,8 +23,15 @@ type Service struct {
 	generator         *Generator
 	implementations   *ImplementationManager
 	reviewer          ReviewRunner
+	adjudicator       AdjudicationRunner
 	generationTimeout time.Duration
 	now               func() time.Time
+	reviewHub         *ReviewEventHub
+
+	reviewerMu      sync.RWMutex
+	reviewCancelMu  sync.Mutex
+	reviewCancels   map[string]context.CancelCauseFunc
+	defaultPolicies map[SubjectKind]ReviewPolicyRef
 }
 
 func (service *Service) SetImplementationManager(manager *ImplementationManager) {
@@ -113,7 +121,9 @@ func (service *Service) SubscribeRun(runID string) (<-chan RunEvent, func(), err
 func NewService(store Store, generator *Generator, generationTimeout time.Duration) *Service {
 	return &Service{
 		store: store, generator: generator, generationTimeout: generationTimeout,
-		now: func() time.Time { return time.Now().UTC() },
+		now:           func() time.Time { return time.Now().UTC() },
+		reviewHub:     NewReviewEventHub(),
+		reviewCancels: make(map[string]context.CancelCauseFunc),
 	}
 }
 
@@ -252,6 +262,55 @@ func (service *Service) AddArtifact(ctx context.Context, requestID string, kind 
 }
 
 func (service *Service) GenerateArtifact(ctx context.Context, requestID string, kind ArtifactKind, userID int64, admin bool) (*Artifact, *GenerationRun, error) {
+	return service.generateArtifact(
+		ctx,
+		requestID,
+		kind,
+		"",
+		"",
+		0,
+		userID,
+		admin,
+	)
+}
+
+// GenerateArtifactForWorkflow binds a generated artifact to one durable node attempt.
+func (service *Service) GenerateArtifactForWorkflow(
+	ctx context.Context,
+	requestID string,
+	kind ArtifactKind,
+	workflowRunID string,
+	workflowNodeID string,
+	workflowAttempt int,
+	userID int64,
+	admin bool,
+) (*Artifact, *GenerationRun, error) {
+	if strings.TrimSpace(workflowRunID) == "" || strings.TrimSpace(workflowNodeID) == "" ||
+		workflowAttempt <= 0 {
+		return nil, nil, fmt.Errorf("workflow generation binding is invalid: %w", ErrInvalid)
+	}
+	return service.generateArtifact(
+		ctx,
+		requestID,
+		kind,
+		strings.TrimSpace(workflowRunID),
+		strings.TrimSpace(workflowNodeID),
+		workflowAttempt,
+		userID,
+		admin,
+	)
+}
+
+func (service *Service) generateArtifact(
+	ctx context.Context,
+	requestID string,
+	kind ArtifactKind,
+	workflowRunID string,
+	workflowNodeID string,
+	workflowAttempt int,
+	userID int64,
+	admin bool,
+) (*Artifact, *GenerationRun, error) {
 	feature, err := service.authorizedFeature(ctx, requestID, userID, admin)
 	if err != nil {
 		return nil, nil, err
@@ -263,6 +322,46 @@ func (service *Service) GenerateArtifact(ctx context.Context, requestID string, 
 	if err != nil {
 		return nil, nil, err
 	}
+	if workflowRunID != "" {
+		existing, lookupErr := service.store.GetSuccessfulGenerationForWorkflowNode(
+			ctx,
+			workflowRunID,
+			workflowNodeID,
+		)
+		if lookupErr == nil {
+			if existing.RequestID != requestID || existing.ArtifactKind != kind ||
+				existing.ParentArtifactID != parent.ID || existing.ArtifactID == "" {
+				return nil, nil, fmt.Errorf(
+					"workflow generation %q/%q has an incompatible successful result: %w",
+					workflowRunID,
+					workflowNodeID,
+					ErrConflict,
+				)
+			}
+			artifact, artifactErr := service.store.GetArtifact(ctx, existing.ArtifactID)
+			if artifactErr != nil {
+				return nil, nil, fmt.Errorf(
+					"load reused artifact %q for workflow node %q/%q: %w",
+					existing.ArtifactID,
+					workflowRunID,
+					workflowNodeID,
+					artifactErr,
+				)
+			}
+			if artifact.RequestID != requestID || artifact.Kind != kind ||
+				artifact.ParentArtifactID != parent.ID {
+				return nil, nil, fmt.Errorf(
+					"reused artifact %q is no longer current: %w",
+					artifact.ID,
+					ErrConflict,
+				)
+			}
+			return artifact, existing, nil
+		}
+		if !errors.Is(lookupErr, ErrNotFound) {
+			return nil, nil, lookupErr
+		}
+	}
 	runID, err := NewID("gen")
 	if err != nil {
 		return nil, nil, err
@@ -270,7 +369,9 @@ func (service *Service) GenerateArtifact(ctx context.Context, requestID string, 
 	now := service.now()
 	run := GenerationRun{
 		ID: runID, RequestID: requestID, ArtifactKind: kind, ParentArtifactID: parent.ID,
-		Status: "running", Provider: service.generator.provider, Model: service.generator.model,
+		WorkflowRunID: workflowRunID, WorkflowNodeID: workflowNodeID,
+		WorkflowAttempt: workflowAttempt,
+		Status:          "running", Provider: service.generator.provider, Model: service.generator.model,
 		RequestedBy: userID, StartedAt: now,
 	}
 	if err := service.store.CreateGenerationRun(ctx, run); err != nil {
@@ -310,6 +411,7 @@ func (service *Service) GenerateArtifact(ctx context.Context, requestID string, 
 		return nil, &run, err
 	}
 	run.Status = "succeeded"
+	run.ArtifactID = saved.ID
 	run.InputTokens = inputTokens
 	run.OutputTokens = outputTokens
 	ended := service.now()
@@ -435,6 +537,26 @@ func (service *Service) GetGenerationRun(ctx context.Context, runID string, user
 	}
 	if _, err := service.authorizedFeature(ctx, run.RequestID, userID, admin); err != nil {
 		return nil, err
+	}
+	return run, nil
+}
+
+func (service *Service) GetGenerationForArtifact(
+	ctx context.Context,
+	requestID string,
+	artifactID string,
+	userID int64,
+	admin bool,
+) (*GenerationRun, error) {
+	if _, err := service.authorizedFeature(ctx, requestID, userID, admin); err != nil {
+		return nil, err
+	}
+	run, err := service.store.GetGenerationForArtifact(ctx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	if run.RequestID != requestID || run.ArtifactID != artifactID {
+		return nil, ErrNotFound
 	}
 	return run, nil
 }

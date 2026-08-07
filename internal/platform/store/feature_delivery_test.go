@@ -164,6 +164,12 @@ func TestReviewArtifactLocksFeatureBeforeArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mock.ExpectQuery(`(?s)SELECT artifact_id,subject_hash,review_round_id,gate_result_id,decision,comment,reviewer.*FROM feature_artifact_reviews WHERE artifact_id=\? LIMIT 1 FOR UPDATE`).
+		WithArgs("analysis-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"artifact_id", "subject_hash", "review_round_id", "gate_result_id",
+			"decision", "comment", "reviewer",
+		}))
 	mock.ExpectExec(`INSERT INTO feature_artifact_reviews`).
 		WithArgs("analysis-1", subject.ContentHash, "round-1", "gate-1", featuredelivery.DecisionApproved, "approved", int64(42), reviewedAt).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -181,6 +187,76 @@ func TestReviewArtifactLocksFeatureBeforeArtifact(t *testing.T) {
 		Reviewer:  42,
 		CreatedAt: reviewedAt,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReviewArtifactReturnsExistingIdenticalFact(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	reviewedAt := time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT request_id FROM feature_artifacts WHERE id=\? LIMIT 1`).
+		WithArgs("analysis-1").
+		WillReturnRows(sqlmock.NewRows([]string{"request_id"}).AddRow("feat-1"))
+	mock.ExpectQuery(`SELECT id FROM feature_requests WHERE id=\? LIMIT 1 FOR UPDATE`).
+		WithArgs("feat-1").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("feat-1"))
+	mock.ExpectQuery(`(?s)SELECT kind,parent_artifact_id,version,content_hash,evidence_json.*WHERE id=\? AND request_id=\? LIMIT 1 FOR UPDATE`).
+		WithArgs("analysis-1", "feat-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"kind", "parent_artifact_id", "version", "content_hash", "evidence_json",
+		}).AddRow(
+			featuredelivery.KindRequirementAnalysis,
+			"req-1",
+			1,
+			"artifact-hash",
+			[]byte(`[]`),
+		))
+	mock.ExpectQuery(`(?s)SELECT id FROM feature_artifacts.*kind=\?.*ORDER BY version DESC LIMIT 1`).
+		WithArgs("feat-1", featuredelivery.KindRequirement).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("req-1"))
+	subject, err := featuredelivery.BuildArtifactReviewSubject(featuredelivery.Artifact{
+		ID: "analysis-1", Kind: featuredelivery.KindRequirementAnalysis, Version: 1,
+		ParentArtifactID: "req-1", Evidence: []featuredelivery.EvidenceRef{},
+		ContentHash: "artifact-hash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery(`(?s)SELECT artifact_id,subject_hash,review_round_id,gate_result_id,decision,comment,reviewer.*FROM feature_artifact_reviews WHERE artifact_id=\? LIMIT 1 FOR UPDATE`).
+		WithArgs("analysis-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"artifact_id", "subject_hash", "review_round_id", "gate_result_id",
+			"decision", "comment", "reviewer",
+		}).AddRow(
+			"analysis-1",
+			subject.ContentHash,
+			"round-1",
+			"gate-1",
+			featuredelivery.DecisionApproved,
+			"approved",
+			int64(42),
+		))
+	mock.ExpectCommit()
+
+	err = NewFeatureDeliveryStore(db).ReviewArtifact(
+		context.Background(),
+		featuredelivery.ArtifactReview{
+			ArtifactID: "analysis-1", SubjectHash: subject.ContentHash,
+			ReviewRoundID: "round-1", GateResultID: "gate-1",
+			Decision: featuredelivery.DecisionApproved, Comment: "approved",
+			Reviewer: 42, CreatedAt: reviewedAt.Add(time.Minute),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +364,7 @@ func TestCompleteGenerationCommitsArtifactAndRunTogether(t *testing.T) {
 			featuredelivery.OriginAgent, []byte(`{}`), "analysis", []byte(`[]`), "hash", int64(7), createdAt,
 		).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`(?s)UPDATE feature_generation_runs.*status='succeeded'.*WHERE id=\? AND status='running'`).
-		WithArgs(int64(12), int64(34), "gen-1").WillReturnResult(sqlmock.NewResult(0, 1))
+		WithArgs("analysis-1", int64(12), int64(34), "gen-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE feature_requests SET updated_at=CURRENT_TIMESTAMP WHERE id=\?`).
 		WithArgs("feat-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -316,10 +392,12 @@ func TestListGenerationRunsUsesStableCursorAndLimit(t *testing.T) {
 	mock.ExpectQuery(query).
 		WithArgs("feat-1", startedAt, startedAt, "gen-3", 20).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "request_id", "artifact_kind", "parent_artifact_id", "status", "provider", "model",
+			"id", "request_id", "artifact_kind", "parent_artifact_id", "workflow_run_id",
+			"workflow_node_id", "workflow_attempt", "artifact_id", "status", "provider", "model",
 			"requested_by", "input_tokens", "output_tokens", "error_summary", "started_at", "ended_at",
 		}).AddRow(
-			"gen-2", "feat-1", featuredelivery.KindTechnicalProposal, "analysis-1", "succeeded", "openai", "model-1",
+			"gen-2", "feat-1", featuredelivery.KindTechnicalProposal, "analysis-1", "",
+			"", 0, "", "succeeded", "openai", "model-1",
 			int64(7), int64(100), int64(50), "", startedAt.Add(-time.Minute), startedAt,
 		))
 
@@ -331,6 +409,79 @@ func TestListGenerationRunsUsesStableCursorAndLimit(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].ID != "gen-2" || runs[0].InputTokens != 100 {
 		t.Fatalf("generation runs = %+v", runs)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetSuccessfulGenerationForWorkflowNodeUsesLatestAttempt(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	startedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	query := generationRunSelect + `
+		WHERE workflow_run_id=? AND workflow_node_id=? AND status='succeeded'
+		ORDER BY workflow_attempt DESC LIMIT 1`
+	mock.ExpectQuery(query).
+		WithArgs("workflow-1", "generate.analysis").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "request_id", "artifact_kind", "parent_artifact_id", "workflow_run_id",
+			"workflow_node_id", "workflow_attempt", "artifact_id", "status", "provider", "model",
+			"requested_by", "input_tokens", "output_tokens", "error_summary", "started_at", "ended_at",
+		}).AddRow(
+			"gen-2", "feat-1", featuredelivery.KindRequirementAnalysis, "req-1", "workflow-1",
+			"generate.analysis", 2, "artifact-2", "succeeded", "openai", "model-1",
+			int64(7), int64(100), int64(50), "", startedAt, startedAt,
+		))
+
+	run, err := NewFeatureDeliveryStore(db).GetSuccessfulGenerationForWorkflowNode(
+		context.Background(), "workflow-1", "generate.analysis",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ID != "gen-2" || run.WorkflowAttempt != 2 || run.ArtifactID != "artifact-2" {
+		t.Fatalf("generation run = %+v", run)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetGenerationForArtifactUsesBoundedIndexedLookup(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	startedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	query := generationRunSelect + `
+		WHERE artifact_id=? AND status='succeeded'
+		ORDER BY ended_at DESC,id DESC LIMIT 1`
+	mock.ExpectQuery(query).
+		WithArgs("artifact-2").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "request_id", "artifact_kind", "parent_artifact_id", "workflow_run_id",
+			"workflow_node_id", "workflow_attempt", "artifact_id", "status", "provider", "model",
+			"requested_by", "input_tokens", "output_tokens", "error_summary", "started_at", "ended_at",
+		}).AddRow(
+			"gen-2", "feat-1", featuredelivery.KindRequirementAnalysis, "req-1", "workflow-1",
+			"generate.requirement_analysis", 1, "artifact-2", "succeeded", "openai", "model-1",
+			int64(7), int64(100), int64(50), "", startedAt, startedAt,
+		))
+
+	run, err := NewFeatureDeliveryStore(db).GetGenerationForArtifact(
+		context.Background(),
+		"artifact-2",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ID != "gen-2" || run.ArtifactID != "artifact-2" {
+		t.Fatalf("generation run = %+v", run)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

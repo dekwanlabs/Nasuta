@@ -273,6 +273,10 @@ type GenerationRun struct {
 	RequestID        string       `json:"request_id"`
 	ArtifactKind     ArtifactKind `json:"artifact_kind"`
 	ParentArtifactID string       `json:"parent_artifact_id"`
+	WorkflowRunID    string       `json:"workflow_run_id,omitempty"`
+	WorkflowNodeID   string       `json:"workflow_node_id,omitempty"`
+	WorkflowAttempt  int          `json:"workflow_attempt,omitempty"`
+	ArtifactID       string       `json:"artifact_id,omitempty"`
 	Status           string       `json:"status"`
 	Provider         string       `json:"provider"`
 	Model            string       `json:"model"`
