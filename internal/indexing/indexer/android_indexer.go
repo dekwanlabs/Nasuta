@@ -61,6 +61,9 @@ func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge
 	})
 	var edges []domain.DependencyEdge
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "@GET") && !strings.Contains(text, "@POST") &&
 			!strings.Contains(text, "Retrofit") && !strings.Contains(text, "retrofit") &&
@@ -69,11 +72,9 @@ func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge
 		}
 		rel := relativeTo(root, file)
 		moduleRoot := findKotlinModuleRoot(root, file)
-		caller := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			if id := readAndroidAppID(moduleRoot); id != "" {
-				caller = id
-			}
+		caller := dependencyIdentity(root, file)
+		if moduleRoot != "" && caller.Name == "unknown" {
+			caller.Name = filepath.Base(moduleRoot)
 		}
 
 		// Retrofit interfaces: @GET("api/users") / @POST("api/orders")
@@ -81,35 +82,34 @@ func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge
 		hasRetrofitImport := strings.Contains(text, "retrofit2.http") ||
 			strings.Contains(text, "import retrofit2.")
 
-		for _, re := range retroFitPatterns {
-			for _, m := range re.FindAllStringSubmatch(text, -1) {
-				if len(m) >= 2 {
-					path := m[len(m)-1]
-					// Don't guess service names from paths — use the whole path
-					// as a diagnostic target only. If it looks like a URL, extract host.
-					target := ""
-					if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-						target = strings.TrimPrefix(path, "http://")
-						target = strings.TrimPrefix(target, "https://")
-						target, _, _ = strings.Cut(target, "/")
-					} else if hasRetrofitImport {
-						// Retrofit path without base URL — use caller
-						// as the target label since we can't determine the true target.
-						target = ""
+		if hasRetrofitImport {
+			for _, re := range retroFitPatterns {
+				for _, m := range re.FindAllStringSubmatch(text, -1) {
+					if len(m) >= 2 {
+						path := m[len(m)-1]
+						// Don't guess service names from paths — use the whole path
+						// as a diagnostic target only. If it looks like a URL, extract host.
+						target := ""
+						if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+							target = strings.TrimPrefix(path, "http://")
+							target = strings.TrimPrefix(target, "https://")
+							target, _, _ = strings.Cut(target, "/")
+						}
+						if target == "" {
+							continue
+						}
+						if strings.Contains(target, "localhost") || strings.Contains(target, "127.0.0.1") {
+							continue
+						}
+						edges = append(edges, domain.DependencyEdge{
+							CallerServiceKey: caller.Key,
+							From:             caller.Name,
+							To:               target,
+							Type:             domain.EdgeHTTP,
+							Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+							Confidence:       0.65,
+						})
 					}
-					if target == "" {
-						continue
-					}
-					if strings.Contains(target, "localhost") || strings.Contains(target, "127.0.0.1") {
-						continue
-					}
-					edges = append(edges, domain.DependencyEdge{
-						From:       caller,
-						To:         target,
-						Type:       domain.EdgeHTTP,
-						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence: 0.65,
-					})
 				}
 			}
 		}
@@ -121,11 +121,12 @@ func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge
 				target, _, _ = strings.Cut(target, "/")
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
 					edges = append(edges, domain.DependencyEdge{
-						From:       caller,
-						To:         target,
-						Type:       domain.EdgeHTTP,
-						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence: 0.5,
+						CallerServiceKey: caller.Key,
+						From:             caller.Name,
+						To:               target,
+						Type:             domain.EdgeHTTP,
+						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+						Confidence:       0.5,
 					})
 				}
 			}

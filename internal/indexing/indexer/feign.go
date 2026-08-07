@@ -18,12 +18,13 @@ const maxConfigResolutionRounds = 8
 var configPlaceholderRe = regexp.MustCompile(`\$\{([^{}]+)\}`)
 
 type feignReference struct {
-	From       string
-	ModulePath string
-	ClientName string
-	URL        string
-	Evidence   []domain.Evidence
-	Confidence float64
+	From             string
+	CallerServiceKey string
+	ModulePath       string
+	ClientName       string
+	URL              string
+	Evidence         []domain.Evidence
+	Confidence       float64
 }
 
 func resolveFeignDependencies(
@@ -94,11 +95,12 @@ func resolveFeignDependencies(
 			continue
 		}
 		edges = append(edges, domain.DependencyEdge{
-			From:       ref.From,
-			To:         target,
-			Type:       domain.EdgeFeign,
-			Evidence:   append(ref.Evidence, configEvidence...),
-			Confidence: ref.Confidence,
+			CallerServiceKey: ref.CallerServiceKey,
+			From:             ref.From,
+			To:               target,
+			Type:             domain.EdgeFeign,
+			Evidence:         append(ref.Evidence, configEvidence...),
+			Confidence:       ref.Confidence,
 		})
 	}
 	return edges, nil

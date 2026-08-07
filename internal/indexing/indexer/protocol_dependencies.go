@@ -28,11 +28,14 @@ func scanJVMAndPythonDependencies(root string, dirs []string) []domain.Dependenc
 	})
 	edges := make([]domain.DependencyEdge, 0)
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if text == "" {
 			continue
 		}
-		caller := dependencyCaller(root, file)
+		caller := dependencyIdentity(root, file)
 		rel := relativeTo(root, file)
 		if hasHTTPClient(text) {
 			for _, match := range serviceURLRe.FindAllStringSubmatchIndex(text, -1) {
@@ -61,7 +64,7 @@ func scanJVMAndPythonDependencies(root string, dirs []string) []domain.Dependenc
 }
 
 type topicUse struct {
-	service  string
+	service  serviceIdentity
 	topic    string
 	evidence domain.Evidence
 }
@@ -74,12 +77,15 @@ func scanKafkaDependencies(root string, dirs []string) []domain.DependencyEdge {
 	producers := make([]topicUse, 0)
 	consumersByTopic := make(map[string][]topicUse)
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		lower := strings.ToLower(text)
 		if !strings.Contains(lower, "kafka") {
 			continue
 		}
-		service := dependencyCaller(root, file)
+		service := dependencyIdentity(root, file)
 		rel := relativeTo(root, file)
 		for _, match := range kafkaSendRe.FindAllStringSubmatchIndex(text, -1) {
 			producers = append(producers, topicUse{
@@ -103,40 +109,25 @@ func scanKafkaDependencies(root string, dirs []string) []domain.DependencyEdge {
 		consumers := consumersByTopic[producer.topic]
 		joined := false
 		for _, consumer := range consumers {
-			if consumer.service == producer.service {
+			if consumer.service.Key != "" && consumer.service.Key == producer.service.Key {
 				continue
 			}
 			joined = true
 			edges = append(edges, domain.DependencyEdge{
-				From: producer.service, To: consumer.service, Type: domain.EdgeKafka,
+				CallerServiceKey: producer.service.Key,
+				From:             producer.service.Name, To: consumer.service.Name, Type: domain.EdgeKafka,
 				Evidence: []domain.Evidence{producer.evidence, consumer.evidence}, Confidence: 0.85,
 			})
 		}
 		if !joined {
 			edges = append(edges, domain.DependencyEdge{
-				From: producer.service, To: "kafka:" + producer.topic, Type: domain.EdgeKafka,
+				CallerServiceKey: producer.service.Key,
+				From:             producer.service.Name, To: "kafka:" + producer.topic, Type: domain.EdgeKafka,
 				Evidence: []domain.Evidence{producer.evidence}, Confidence: 0.65,
 			})
 		}
 	}
 	return edges
-}
-
-func dependencyCaller(root, file string) string {
-	switch filepath.Ext(file) {
-	case ".java":
-		return inferJavaServiceName(root, file)
-	case ".kt":
-		return inferKotlinServiceName(root, file)
-	case ".py":
-		moduleRoot := findPythonDependencyRoot(root, file)
-		if name := readPythonAppName(moduleRoot); name != "" {
-			return name
-		}
-		return filepath.Base(moduleRoot)
-	default:
-		return "unknown"
-	}
 }
 
 func findPythonDependencyRoot(root, file string) string {
@@ -160,7 +151,7 @@ func hasHTTPClient(text string) bool {
 	return strings.Contains(lower, "resttemplate") || strings.Contains(lower, "webclient") ||
 		strings.Contains(lower, "httpclient") || strings.Contains(lower, "okhttp") ||
 		strings.Contains(lower, "requests.") || strings.Contains(lower, "httpx.") ||
-		strings.Contains(lower, "aiohttp") || strings.Contains(lower, "@feignclient")
+		strings.Contains(lower, "aiohttp")
 }
 
 func supportedProtocolFile(name string) bool {
@@ -172,9 +163,10 @@ func supportedProtocolFile(name string) bool {
 	}
 }
 
-func protocolEdge(from, to string, edgeType domain.EdgeType, path string, line int, confidence float64) domain.DependencyEdge {
+func protocolEdge(caller serviceIdentity, to string, edgeType domain.EdgeType, path string, line int, confidence float64) domain.DependencyEdge {
 	return domain.DependencyEdge{
-		From: from, To: to, Type: edgeType,
+		CallerServiceKey: caller.Key,
+		From:             caller.Name, To: to, Type: edgeType,
 		Evidence:   []domain.Evidence{{Path: path, Line: line, Kind: domain.SourceCodeScan}},
 		Confidence: confidence,
 	}

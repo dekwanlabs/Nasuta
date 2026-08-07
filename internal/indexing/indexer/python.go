@@ -21,6 +21,10 @@ func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 	var records []domain.ServiceRecord
 	seen := make(map[string]struct{}, len(files))
 	for _, file := range files {
+		rel := relativeTo(root, file)
+		if isTestSourcePath(rel) {
+			continue
+		}
 		moduleRoot := filepath.Dir(file)
 		if filepath.Base(file) == "main.py" {
 			if found := findPythonModuleRoot(root, file); found != "" {
@@ -33,12 +37,10 @@ func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 			continue
 		}
 		seen[key] = struct{}{}
-		rel := relativeTo(root, file)
 		serviceName := readPythonAppName(moduleRoot)
 		if serviceName == "" {
 			serviceName = readPythonProjectName(moduleRoot)
 		}
-		layer := inferLayer(serviceName, modulePath)
 		runtime, confidence := "", 0.7
 		entrypoints := []domain.Evidence{}
 		sourceOfTruth := []string{rel}
@@ -52,12 +54,12 @@ func scanPythonServices(root string, dirs []string) []domain.ServiceRecord {
 		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
-			Layer:         "server",
-			Scope:         layer,
+			Layer:         "",
+			Scope:         "",
 			ModulePath:    modulePath,
 			Language:      "python",
 			Runtime:       runtime,
-			Tags:          []string{"code-scan", "ai"},
+			Tags:          []string{"code-scan"},
 			Docs:          []string{},
 			SourceOfTruth: sourceOfTruth,
 			Entrypoints:   entrypoints,
@@ -987,7 +989,14 @@ func findPythonEntrypoint(moduleRoot string) string {
 	for _, candidate := range []string{"main.py", "app/main.py", "src/main.py"} {
 		path := filepath.Join(moduleRoot, candidate)
 		text := readFile(path)
-		if strings.Contains(text, "FastAPI(") || strings.Contains(text, "uvicorn.run(") {
+		source := parsePythonSource(text)
+		for _, assignment := range source.assignments {
+			constructor, _, _ := strings.Cut(assignment.value, "(")
+			if pythonImportedName(source, strings.TrimSpace(constructor)) == "fastapi.FastAPI" {
+				return path
+			}
+		}
+		if pythonImported(source, "uvicorn") && strings.Contains(stripPythonCommentsAndStrings(text), "uvicorn.run(") {
 			return path
 		}
 	}

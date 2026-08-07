@@ -142,6 +142,9 @@ func scanEndpointCandidates(root string, dirs []string, languages ...string) []e
 			}
 		}
 		for _, file := range walkFiles(root, dirs, frontend.match) {
+			if isTestSourcePath(relativeTo(root, file)) {
+				continue
+			}
 			text := readFile(file)
 			source, ok := frontend.parse(root, file, text)
 			if !ok {

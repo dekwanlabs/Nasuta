@@ -17,6 +17,9 @@ func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 	var records []domain.ServiceRecord
 	byModule := make(map[string]int)
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		rel := relativeTo(root, file)
 		moduleRoot := findKotlinModuleRoot(root, file)
@@ -38,8 +41,8 @@ func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 			records = append(records, domain.ServiceRecord{
 				ServiceName: serviceName,
 				Repo:        topSegment(rel),
-				Layer:       "server",
-				Scope:       inferLayer(serviceName, modulePath),
+				Layer:       "",
+				Scope:       "",
 				ModulePath:  modulePath,
 				Language:    "kotlin",
 				Tags:        []string{"code-scan"},
@@ -49,16 +52,10 @@ func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 			idx = len(records) - 1
 			byModule[moduleKey] = idx
 		}
-		if !strings.Contains(text, "@SpringBootApplication") &&
-			!strings.Contains(text, "SpringApplication.run") &&
-			!strings.Contains(text, "fun main") &&
-			!strings.Contains(text, "embeddedServer") {
+		if !hasKotlinRuntimeEvidence(text) {
 			continue
 		}
-		layer := inferLayer(serviceName, modulePath)
 		rec := &records[idx]
-		rec.Layer = "server"
-		rec.Scope = layer
 		rec.Runtime = "spring-boot"
 		rec.SourceOfTruth = append(rec.SourceOfTruth, rel)
 		rec.Entrypoints = append(rec.Entrypoints, domain.Evidence{Path: rel, Kind: domain.SourceCodeScan})
@@ -73,6 +70,9 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 	files := walkFiles(root, dirs, hasSuffix(".kt"))
 	var records []feignReference
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "@FeignClient") {
 			continue
@@ -81,8 +81,10 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 		rel := relativeTo(root, file)
 		caller := inferKotlinServiceName(root, file)
 		modulePath := ""
+		callerServiceKey := ""
 		if moduleRoot := findKotlinModuleRoot(root, file); moduleRoot != "" {
 			modulePath = relativeTo(root, moduleRoot)
+			callerServiceKey = serviceIdentityForModule(root, moduleRoot, caller).Key
 		}
 		iface := strings.TrimSuffix(filepath.Base(file), ".kt")
 		lines := strings.Split(text, "\n")
@@ -104,7 +106,8 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 				conf = 0.65
 			}
 			records = append(records, feignReference{
-				From: caller, ModulePath: modulePath, ClientName: clientName, URL: targetURL,
+				From: caller, CallerServiceKey: callerServiceKey, ModulePath: modulePath,
+				ClientName: clientName, URL: targetURL,
 				Evidence: []domain.Evidence{{
 					Path: rel, Line: i + 1, Symbol: iface, Kind: domain.SourceCodeScan,
 				}},

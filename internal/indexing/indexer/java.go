@@ -36,8 +36,8 @@ func scanJavaServices(root string, dirs []string) []domain.ServiceRecord {
 			rec: domain.ServiceRecord{
 				ServiceName: name,
 				Repo:        topSegment(relativeTo(root, pom)),
-				Layer:       "server",
-				Scope:       inferLayer(name, modulePath),
+				Layer:       "",
+				Scope:       "",
 				ModulePath:  modulePath,
 				Language:    "java",
 				Tags:        []string{"code-scan"},
@@ -49,13 +49,14 @@ func scanJavaServices(root string, dirs []string) []domain.ServiceRecord {
 	}
 
 	for _, file := range walkFiles(root, dirs, hasSuffix(".java")) {
-		text := readFile(file)
-		if !strings.Contains(text, "@SpringBootApplication") &&
-			!strings.Contains(text, "SpringApplication.run") &&
-			!strings.Contains(text, "public static void main") {
+		rel := relativeTo(root, file)
+		if isTestSourcePath(rel) {
 			continue
 		}
-		rel := relativeTo(root, file)
+		text := readFile(file)
+		if !hasJavaRuntimeEvidence(text) {
+			continue
+		}
 		moduleRoot := findModuleRoot(root, file, "pom.xml")
 		if moduleRoot == "" {
 			moduleRoot = findModuleRoot(root, file, "build.gradle")
@@ -100,8 +101,8 @@ func entrypointService(root, rel, moduleRoot string) domain.ServiceRecord {
 	return domain.ServiceRecord{
 		ServiceName:   serviceName,
 		Repo:          topSegment(rel),
-		Layer:         "server",
-		Scope:         inferLayer(serviceName, modulePath),
+		Layer:         "",
+		Scope:         "",
 		ModulePath:    modulePath,
 		Language:      "java",
 		Runtime:       "spring-boot",
@@ -119,6 +120,9 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 	files := walkFiles(root, dirs, hasSuffix(".java"))
 	var records []feignReference
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "FeignClient") {
 			continue
@@ -127,8 +131,14 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 		rel := relativeTo(root, file)
 		caller := inferJavaServiceName(root, file)
 		modulePath := ""
+		callerServiceKey := ""
 		if moduleRoot := findJavaModuleRoot(root, file); moduleRoot != "" {
 			modulePath = relativeTo(root, moduleRoot)
+			ownerRoot := findNearestApplicationModule(root, file)
+			if ownerRoot == "" {
+				ownerRoot = moduleRoot
+			}
+			callerServiceKey = serviceIdentityForModule(root, ownerRoot, caller).Key
 		}
 		for _, annotation := range source.annotations {
 			if annotation.name != "FeignClient" {
@@ -156,7 +166,8 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 				conf = 0.65
 			}
 			records = append(records, feignReference{
-				From: caller, ModulePath: modulePath, ClientName: clientName, URL: targetURL,
+				From: caller, CallerServiceKey: callerServiceKey, ModulePath: modulePath,
+				ClientName: clientName, URL: targetURL,
 				Evidence: []domain.Evidence{{
 					Path: rel, Line: annotation.line, Symbol: declaration.name, Kind: domain.SourceCodeScan,
 				}},
@@ -250,6 +261,63 @@ func inferJavaServiceName(root, file string) string {
 	return "unknown"
 }
 
+func isTestSourcePath(path string) bool {
+	path = strings.ToLower(canonicalPath(path))
+	p := "/" + path + "/"
+	for _, segment := range []string{"/src/test/", "/src/androidtest/", "/test/", "/tests/", "/__tests__/"} {
+		if strings.Contains(p, segment) {
+			return true
+		}
+	}
+	base := filepath.Base(path)
+	return strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, ".test.js") ||
+		strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".spec.js") ||
+		strings.HasSuffix(base, ".spec.ts")
+}
+
+func hasJavaRuntimeEvidence(text string) bool {
+	source := scanJVMSource(text)
+	return jvmHasAnnotation(source, "SpringBootApplication") ||
+		jvmHasTokenSequence(source.tokens, "SpringApplication", ".", "run") ||
+		jvmHasTokenSequence(source.tokens, "public", "static", "void", "main", "(")
+}
+
+func hasKotlinRuntimeEvidence(text string) bool {
+	source := scanJVMSource(text)
+	return jvmHasAnnotation(source, "SpringBootApplication") ||
+		jvmHasTokenSequence(source.tokens, "SpringApplication", ".", "run") ||
+		jvmHasTokenSequence(source.tokens, "fun", "main", "(") ||
+		jvmHasTokenSequence(source.tokens, "embeddedServer", "(")
+}
+
+func jvmHasAnnotation(source jvmSource, name string) bool {
+	for _, annotation := range source.annotations {
+		if annotation.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func jvmHasTokenSequence(tokens []jvmToken, sequence ...string) bool {
+	if len(sequence) == 0 || len(tokens) < len(sequence) {
+		return false
+	}
+	for i := 0; i <= len(tokens)-len(sequence); i++ {
+		matched := true
+		for j, want := range sequence {
+			if tokens[i+j].text != want {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 func findNearestApplicationModule(root, file string) string {
 	current := filepath.Dir(file)
 	for strings.HasPrefix(current, root) {
@@ -309,18 +377,6 @@ func readPorts(moduleRoot string) []int {
 		}
 	}
 	return platform.Dedupe(ports)
-}
-
-var knownLayers = []string{"hsmf", "hsas", "hsds", "cdp"}
-
-func inferLayer(serviceName, modulePath string) string {
-	mp := toPosix(modulePath)
-	for _, layer := range knownLayers {
-		if strings.HasPrefix(serviceName, layer+"-") || (mp != "" && strings.HasPrefix(mp, layer+"/")) {
-			return layer
-		}
-	}
-	return ""
 }
 
 func inferModulePathFromRel(rel string) string {

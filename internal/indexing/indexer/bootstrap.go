@@ -254,7 +254,13 @@ func canonicalDependencies(records []domain.DependencyEdge, lookup serviceLookup
 		if len(edge.Evidence) > 0 {
 			path = edge.Evidence[0].Path
 		}
-		caller, ok := lookup.resolve(edge.From, "", path)
+		var caller domain.ServiceRecord
+		var ok bool
+		if edge.CallerServiceKey != "" {
+			caller, ok = lookup.resolveKey(edge.CallerServiceKey)
+		} else {
+			caller, ok = lookup.resolve(edge.From, "", path)
+		}
 		if !ok {
 			log.Warnf("[indexer] drop dependency with unresolved caller: %s -> %s", edge.From, edge.To)
 			continue
@@ -289,15 +295,25 @@ func canonicalDependencies(records []domain.DependencyEdge, lookup serviceLookup
 
 type serviceLookup struct {
 	byName map[string][]domain.ServiceRecord
+	byKey  map[string]domain.ServiceRecord
 }
 
 func newServiceLookup(services []domain.ServiceRecord) serviceLookup {
 	byName := make(map[string][]domain.ServiceRecord, len(services))
+	byKey := make(map[string]domain.ServiceRecord, len(services))
 	for _, service := range services {
 		name := platform.Normalize(service.ServiceName)
 		byName[name] = append(byName[name], service)
+		if service.ServiceKey != "" {
+			byKey[service.ServiceKey] = service
+		}
 	}
-	return serviceLookup{byName: byName}
+	return serviceLookup{byName: byName, byKey: byKey}
+}
+
+func (lookup serviceLookup) resolveKey(key string) (domain.ServiceRecord, bool) {
+	service, ok := lookup.byKey[strings.TrimSpace(key)]
+	return service, ok
 }
 
 func (lookup serviceLookup) resolve(name, repo, file string) (domain.ServiceRecord, bool) {

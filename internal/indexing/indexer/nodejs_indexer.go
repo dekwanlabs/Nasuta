@@ -15,24 +15,34 @@ func scanNodeJSServices(root string, dirs []string) []domain.ServiceRecord {
 	var records []domain.ServiceRecord
 	for _, file := range files {
 		rel := relativeTo(root, file)
+		if isTestSourcePath(rel) {
+			continue
+		}
 		moduleRoot := filepath.Dir(file)
 		modulePath := relativeTo(root, moduleRoot)
 		serviceName := readNodeJSPackageName(moduleRoot)
-		layer := inferLayer(serviceName, modulePath)
+		runtime := ""
+		confidence := 0.7
+		entrypoints := []domain.Evidence(nil)
+		if nodePackageHasRuntimeEvidence(moduleRoot) {
+			runtime = "nodejs"
+			confidence = 0.85
+			entrypoints = []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}}
+		}
 		records = append(records, domain.ServiceRecord{
 			ServiceName:   serviceName,
 			Repo:          topSegment(rel),
-			Layer:         "front",
-			Scope:         layer,
+			Layer:         "",
+			Scope:         "",
 			ModulePath:    modulePath,
 			Language:      "nodejs",
-			Runtime:       "nodejs",
+			Runtime:       runtime,
 			Tags:          []string{"code-scan"},
 			Docs:          []string{},
 			SourceOfTruth: []string{rel},
-			Entrypoints:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+			Entrypoints:   entrypoints,
 			Ports:         readNodeJSPorts(moduleRoot),
-			Confidence:    0.85,
+			Confidence:    confidence,
 		})
 	}
 	return records
@@ -46,6 +56,9 @@ func scanNodeJSEndpoints(root string, dirs []string) []domain.EndpointRecord {
 	})
 	var records []domain.EndpointRecord
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, ".get(") && !strings.Contains(text, ".post(") &&
 			!strings.Contains(text, "router.") && !strings.Contains(text, "Router(") &&
@@ -86,21 +99,21 @@ func scanNodeJSEndpoints(root string, dirs []string) []domain.EndpointRecord {
 // scanNodeJSDependencies finds HTTP client calls (axios, fetch, node-fetch).
 func scanNodeJSDependencies(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, func(name string) bool {
-		return strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".ts")
+		return strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".ts") ||
+			strings.HasSuffix(name, ".mjs") || strings.HasSuffix(name, ".cjs")
 	})
 	var edges []domain.DependencyEdge
 	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
 		text := readFile(file)
 		if !strings.Contains(text, "axios") && !strings.Contains(text, "fetch(") &&
 			!strings.Contains(text, "request(") {
 			continue
 		}
 		rel := relativeTo(root, file)
-		moduleRoot := findNodeJSModuleRoot(root, file)
-		caller := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			caller = readNodeJSPackageName(moduleRoot)
-		}
+		caller := dependencyIdentity(root, file)
 		for _, m := range nodejsHTTPCallRe.FindAllStringSubmatch(text, -1) {
 			if len(m) > 1 {
 				target := strings.TrimPrefix(m[1], "http://")
@@ -108,11 +121,12 @@ func scanNodeJSDependencies(root string, dirs []string) []domain.DependencyEdge 
 				target, _, _ = strings.Cut(target, "/")
 				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
 					edges = append(edges, domain.DependencyEdge{
-						From:       caller,
-						To:         target,
-						Type:       domain.EdgeHTTP,
-						Evidence:   []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence: 0.5,
+						CallerServiceKey: caller.Key,
+						From:             caller.Name,
+						To:               target,
+						Type:             domain.EdgeHTTP,
+						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+						Confidence:       0.5,
 					})
 				}
 			}
@@ -139,7 +153,21 @@ func readNodeJSPackageName(dir string) string {
 	return filepath.Base(dir)
 }
 
-	func findNodeJSModuleRoot(root, file string) string {
+func nodePackageHasRuntimeEvidence(dir string) bool {
+	text := readFile(filepath.Join(dir, "package.json"))
+	if text == "" {
+		return false
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal([]byte(text), &pkg); err != nil {
+		return false
+	}
+	return strings.TrimSpace(pkg.Scripts["start"]) != ""
+}
+
+func findNodeJSModuleRoot(root, file string) string {
 	current := filepath.Dir(file)
 	for strings.HasPrefix(current, root) {
 		if readFile(filepath.Join(current, "package.json")) != "" {
