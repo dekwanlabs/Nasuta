@@ -10,6 +10,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
@@ -63,6 +64,8 @@ type Handler struct {
 
 type QARuntime struct {
 	QA             *agent.QA
+	Hub            *agent.RunHub
+	CompactionLLM  *llm.LLMClient
 	RunStore       *agent.RunStore
 	Sessions       *memory.SessionStore
 	History        agent.SessionHistory

@@ -116,7 +116,7 @@ func (handler *Handler) prepareSessionContext(ctx context.Context, question, ses
 	defer cancel()
 	var emitErr error
 	result, err := agent.CompactSessionIfNeeded(
-		compactCtx, runtime.QA.LLM(), runtime.Sessions, sessionID, userID,
+		compactCtx, runtime.CompactionLLM, runtime.Sessions, sessionID, userID,
 		agent.SessionCompactionUsage{
 			ContextWindow:              runtime.Settings.LLMContextWindow,
 			PreviousPeakInputTokens:    latestUsage.PeakInputTokens,
@@ -340,7 +340,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	// Subscribing later would drop those early updates.
 	runID := agent.NewRunID()
 	var channel chan agent.SSEEvent
-	hub := runtime.QA.Hub()
+	hub := runtime.Hub
 	if hub != nil {
 		channel = hub.Subscribe(runID)
 		defer hub.Unsubscribe(runID, channel)
@@ -932,9 +932,5 @@ func (handler *Handler) memoryStore() *memory.MemoryStore {
 }
 
 func (handler *Handler) qaHub() *agent.RunHub {
-	qa := handler.qaService()
-	if qa == nil {
-		return nil
-	}
-	return qa.Hub()
+	return handler.currentQARuntime().Hub
 }
