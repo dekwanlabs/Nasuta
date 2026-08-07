@@ -3,7 +3,7 @@
 [返回设计索引](README.zh-CN.md)
 
 > 状态：第一阶段已实现，生产闭环持续完善
-> 更新日期：2026-08-05
+> 更新日期：2026-08-07
 > 适用范围：Nasuta Feature Delivery 全流程
 > 前置方案：[Nasuta 多 Agent 平台方案](12-multi-agent-platform-proposal.zh-CN.md)
 > 依赖基线：模块 08、09、10
@@ -12,14 +12,52 @@
 
 ### 实施状态
 
-第一阶段已落地 Review 数据模型、确定性 Gate、Reviewer Runtime 适配、MySQL 持久化和人工审批绑定：
+第一阶段已落地 Review 数据模型、确定性 Gate、Reviewer Runtime 适配、MySQL 持久化、人工审批绑定和受控 API：
 
 - Review Policy、Round、Assignment、Report、Finding、Evidence、Gate Result 和 Resolution 已版本化；
 - Reviewer 可通过通用 `agent.Runtime` 独立并行执行，必需 Reviewer 失败会得到 `incomplete`；
 - 有证据的 Critical/High Finding 触发 `revise`，无证据的严重 Finding 触发 `human_required`；
-- 人工 Artifact/Change Set 审批必须绑定当前 Subject Hash、已完成 Review Round 和匹配 Gate Result，旧审批不能复用。
+- 人工 Artifact/Change Set 审批必须绑定当前 Subject Hash、已完成 Review Round 和匹配 Gate Result，旧审批不能复用；
+- Round 创建只接受已发布 Policy 的 ID 和版本，客户端不能提交 Reviewer、Agent、Provider、Prompt 或 Tool 配置；
+- 管理员可通过受控 HTTP API 发布不可变 Policy 版本并按 ID/Version 查询，服务端生成 CreatedAt 和 Content Hash；
+- Policy 和 Assignment 快照在 Reviewer 启动前校验，任何漂移都会使 Round 安全终止为 `failed`；
+- Round、Assignment、完整 Report、Finding 摘要、Finding 详情、Gate、管理员执行和四类 Resolution API 已接入；
+- Round 查询按 Feature 所有权授权，Assignment/Finding 使用 Cursor/Limit，Report 按 Round 和 Assignment 有界单行读取，Finding 列表不读取 Evidence；
+- Reviewer 或 Review Store 基础设施失败不会进入 Gate，Round 会明确结束为 `failed`；
+- Waiver 必须由人工管理员提交，并绑定当前 Subject Hash、理由和可选有效期；
+- Review Event 先持久化再广播，按 Round 内 `seq` 有序追加，查询使用 `after_seq + LIMIT`，事件类型必须匹配已持久化的 Round 状态；
+- Review Round Live SSE 已接入授权路由；一次所有权校验后按持久化事件分页回放，支持 `Last-Event-ID` 和 `after_seq`，订阅后二次回放补齐切换窗口，实时序列缺口从 Store 补洞，并在 Round 终态后稳定退出；
+- 管理员可原子取消 `created/running/evaluating` Round，事务内同时取消 `queued/running` Assignment，重复取消幂等，已完成 Report 保留；
+- 取消提交后会中止当前进程登记的 Reviewer Context；持久化状态可跨重启保留，但当前实现不提供跨进程 Worker Claim、Lease 或远程取消；
+- 应用层会按同一设置版本原子发布 QA、Architecture、Security、Reliability 四个 Definition，并为 Feature Delivery 安装通用 `DefinitionRuntime`；
+- 默认 Architecture、Security、Reliability Reviewer 仅有 `knowledge.read` 权限，不获得 Coding、写工具或审批能力；
+- 八类 Subject 的内置 Review Policy 会绑定 Reviewer Definition 的精确 ID、版本和 Content Hash，并在同一事务中原子发布；
+- Round 创建省略 Policy 引用时使用当前服务端默认版本，显式 ID/Version 仍可选择已发布版本，半截引用会被拒绝；
+- `change_set`、`validation_bundle`、`delivery_bundle` 已支持 Subject 构建、Round 创建和 Reviewer 执行；
+- Change Set Hash 不包含 Validation；Validation Bundle 绑定父 Change Set Hash；Delivery Bundle 同时绑定 Design、Plan、Change Set 和 Validation Hash；
+- Change/Validation 可评审 `succeeded` 或 `failed` 且已持久化 Change Set 的 Implementation Run，Delivery 只接受 `succeeded` Run；
+- Change Set 材料包含经 Hash/大小校验的有界 Patch，不包含 Validation；Validation 材料包含经校验、单项和总量有界的 UTF-8 日志摘要；Delivery 材料不加载完整 Patch 或日志；
+- Round 授权读取、Reviewer 启动和 Gate 前都会从当前持久化事实重建组合 Subject，任何漂移都返回冲突或使 Round 失败；
+- Validation `failed` 稳定产生 `revise` 和 `validation:<sequence>` Blocking ID；`validation_not_configured` 稳定产生 `incomplete` 和 `validation_execution` Coverage Gap；
+- Finding Fingerprint 在 Report 入站时由服务端按 Category、Location 和规范化 Claim 统一生成；Claim 会去除首尾空白、折叠内部空白并统一大小写，单个 Reviewer 的重复 Finding 会被拒绝；
+- Gate 会按 Fingerprint 聚合有证据且未解决的 Finding；多个 Reviewer 的 Severity 跨越 Policy 阻断阈值时稳定产生 `human_required`、`finding_severity_conflict` 和对应 `ConflictIDs`；
+- 内置 `review.adjudicator` Definition 与默认 Policy 已发布，Policy 精确绑定其 ID、版本和 Definition Hash，并强制只读；
+- Adjudicator 仅在存在跨阻断阈值冲突时执行，不创建 Assignment，也不增加 Round 状态；执行期间 Round 保持 `evaluating`；
+- 每个冲突 Fingerprint 生成一份不可变 `ReviewAdjudication`，固定 Round、Subject Hash、Policy Hash、Finding IDs 和 Adjudicator Definition Hash；
+- Adjudicator 输入只包含不可变 Subject、Policy Hash 和一个冲突组，不包含 Reviewer、Assignment、Report 身份、票数或多数意见；
+- 只有 `confirmed` 会消解 Severity 冲突，同时保留阻断 Finding 并使最终 Gate 为 `revise`；其他裁决和执行失败均保持 `human_required`；
+- 无冲突时不调用 Adjudicator；Adjudicator 不可用或失败会持久化 `needs_human`，裁决制品持久化失败则使 Round 明确结束为 `failed`；
+- Adjudication 审计读取复用 Round 的 Feature 所有权授权，按 `(fingerprint, id)` Cursor 和存储层 `LIMIT` 返回完整不可变裁决、理由及错误码；
+- 每个不可变 Review Policy 都会派生固定并行 Workflow Definition，Reviewer、稳定 Join、Adjudication 和 Gate 已迁入通用 Workflow；
+- Reviewer 的每次重试使用独立 Attempt，失败历史不会覆盖；同 Round 已成功 Report 会被复用，服务重启后可跳过成功节点并从 `running` 或 `evaluating` 继续收敛；
+- `fixed`、`waived`、`invalidated`、`superseded` 四类 Resolution 已完成领域校验；替换型处置要求同类且不同的 Replacement Subject，`fixed` 还要求 Replacement 已通过完成的 Review Round；
+- Resolution 采用追加式审计事实，授权读取使用稳定 Cursor 和存储层 `LIMIT`；通用 Resolution API 与兼容 Waiver 入口同时保留；
+- Review Policy 已固定整轮输入/输出 Token、Tool Call、Cost、Retry、Timeout 和 Optional Reviewer 处置，并派生 Workflow 与各 Reviewer Node Budget；
+- Workflow 在 Attempt 前预留预算、结束后结算真实 Usage；Node/Workflow Usage 事务化持久化并在恢复后继续累计，预算耗尽使用稳定 `workflow_budget_exhausted`；
+- Reviewer 与 Adjudicator 显式启用统一脱敏策略，Prompt、Context、Step、Result、Report、Finding、Evidence 文本、Adjudication 和 Event Detail 在 Hash、日志或持久化前脱敏；
+- 设置热加载只替换后续 Review Round 使用的 Runner，已启动 Round 固定使用启动时绑定的 Runtime；LLM 未配置时 Runner 被显式清除。
 
-Adjudicator、完整 Review Round API、Reviewer Panel 配置界面、生产级指标和 Feature Delivery 各节点的默认 Policy 仍待后续接入。当前实现不使用多数投票，也不会自动批准研发产物。
+LLM 未配置时执行 API 明确返回 `503`；配置的 Runtime 构建失败会阻止设置生效，不会替换 Provider。当前剩余缺口是 Policy 控制面、Round/Panel 运营入口、动态风险增补、跨 Round Report 显式复用、生产级指标/Evaluation 及跨进程 Reviewer 调度。当前实现不使用多数投票，也不会自动批准研发产物。
 
 推荐在 Feature Delivery 每个研发节点引入：
 
@@ -89,17 +127,23 @@ Feature Delivery 已经拥有：
 - Coding Provider 与隔离 Worktree；
 - Implementation Run、Claim、Lease 和 Event；
 - Nasuta 独立执行的 Validation；
-- Change Set 和交付人工审核。
+- Change Set 和交付人工审核；
+- 版本化 Review Policy、Round、Assignment、Report、Finding、Gate 和 Resolution；
+- 三类默认只读 Reviewer Definition 与通用 Runtime 执行；
+- 八类 Subject 的内置 Review Policy、事务化发布和服务端默认 Policy 选择；
+- 八类 Subject 的可执行材料构建、组合 Hash 和漂移校验；
+- Validation 事实驱动的确定性 Gate；
+- 服务端 Canonical Fingerprint、重复 Finding 拒绝和跨阻断阈值冲突 Gate；
+- 只读 Adjudicator Definition、不可变 Adjudication 制品和 Gate 二次计算；
+- Review Event、取消、人工 Waiver 和绑定 Subject Hash 的审批校验；
+- Review Round Live SSE 的持久化回放、断点续传、切换补窗、序列补洞和终态退出；
+- 按 Round 和 Assignment 授权读取唯一完整 Review Report，并校验持久化身份列与不可变正文一致。
 
 当前主要差距：
 
-- 一个 Artifact 只有单个人工 Review 结论；
-- 没有 Review Round 和多个独立 Assignment；
-- 没有统一 Finding Schema、严重级别和证据要求；
-- 没有按阶段配置 Reviewer Panel；
-- 没有自动 Gate、冲突处理和 Waiver；
-- 人工批准未强制绑定一轮完整 Agent 评审及 Subject Hash；
-- 无法统计每个 Reviewer 的真实缺陷发现率和误报率。
+- Reviewer Panel 尚无控制面配置界面和 Round 有界列表/详情入口；
+- 动态风险增补、跨 Round Report 显式复用、跨进程 Reviewer 调度和远程取消尚未实现；
+- Workflow 级成本、延迟、缺陷发现率、误报率和人工采纳率尚未形成生产指标。
 
 ## 5. 评审对象
 
@@ -130,7 +174,20 @@ type ReviewSubject struct {
 - `validation_bundle`；
 - `delivery_bundle`。
 
-任何正文、证据快照、Patch、Base/Head Commit 或验证结果变化，都会产生新的 Subject Hash 和 Review Round。旧 Round 保留历史，但不能批准新 Subject。
+Hash 边界按评审职责拆分：
+
+- `change_set` 绑定 Patch、Base/Head Commit、文件清单、计划偏差和 Provider Summary，不包含 Validation；
+- `validation_bundle` 绑定完整验证结果及父 Change Set Hash；
+- `delivery_bundle` 绑定 Design、Implementation Plan、Change Set 和 Validation Bundle。
+
+因此 Validation 变化不会使独立 Code Review 失效，但会使 Validation 和 Delivery Review 失效；Design、Plan、Change Set 或 Validation 任一变化都会使 Delivery Review 失效。旧 Round 保留历史，但不能批准新 Subject。
+
+Reviewer 材料与 Hash 使用相同职责边界：
+
+- Change Set：校验 Patch SHA-256 和字节数，最多提供 192 KiB Patch；
+- Validation：逐项校验日志 SHA-256 和字节数，单项最多 16 KiB、总计最多 64 KiB，截断保持 UTF-8 完整；
+- Delivery：提供 Design/Plan 正文、Change Set 摘要和 Validation 元数据，不重复加载完整 Patch 或验证日志；
+- 所有 Context Block 最终受 256 KiB 总上限约束，并标记是否完整。
 
 ## 6. Review Policy 与 Panel
 
@@ -228,7 +285,7 @@ type ReviewReport struct {
 }
 ```
 
-Report 必须通过 JSON Schema，且 `SubjectHash` 必须匹配 Assignment。自由文本 Summary 不能覆盖结构化 Finding。
+Report 必须通过 JSON Schema，且 `SubjectHash` 必须匹配 Assignment。自由文本 Summary 不能覆盖结构化 Finding。完整 Report 通过 Round 和 Assignment 唯一定位；读取时必须核对 Report 正文中的 ID、Round、Assignment、Reviewer、Subject Hash 和 Content Hash 与持久化身份列一致。
 
 ### 9.2 Finding
 
@@ -255,7 +312,8 @@ type Finding struct {
 - `Location` 尽可能定位 Artifact 字段、文件和行；
 - `Recommendation` 描述解决条件，不直接修改对象；
 - `Confidence` 用于人工排序，不用于抵消 Severity；
-- `Fingerprint` 用规范化 Category、Location 和 Claim 生成，用于聚合候选。
+- `Fingerprint` 由服务端在 Report 入站时用 Category、Location 和规范化 Claim 生成，Claim 会去除首尾空白、折叠内部空白并统一大小写，Agent 提交值不作为可信身份；
+- 同一 Report 内生成相同 Fingerprint 的重复 Finding 会被拒绝，避免一个 Reviewer 自己制造支持数或冲突。
 
 ### 9.3 Severity
 
@@ -273,16 +331,14 @@ type Finding struct {
 
 ### 10.1 聚合
 
-确定性聚合先按 Fingerprint 和位置形成候选组，再保留：
+当前确定性聚合按服务端生成的精确 Fingerprint 形成候选组，并保留所有原始 Finding 和 Evidence。Gate 对有证据、未被 Resolution 处理的候选执行以下规则：
 
-- 所有原始 Finding；
-- 各 Reviewer 的独立 Evidence；
-- 最高 Severity；
-- Severity 分歧；
-- Claim 冲突；
-- 支持 Reviewer 数量。
+- 同组 Finding 全部处于阻断侧时保留所有 Blocking ID，不能被其他 Reviewer 的空 Report 抵消；
+- 同组 Severity 同时落在阻断侧和非阻断侧时，保留阻断 Finding，并把该组全部 Finding ID 写入 `ConflictIDs`；
+- 跨阻断阈值冲突先稳定产生 `human_required` 和 `finding_severity_conflict`；Policy 配置 Adjudicator 时再执行只读二次核验；
+- 无证据的 Critical/High 仍优先按 `unsupported_blocking_finding` 进入人工处理，不伪装成可裁决的证据冲突。
 
-聚合不能删除少数派的 Critical/High Finding。文本相似度只用于候选分组，不能自动判定两个 Finding 等价。
+当前不使用文本相似度合并不同 Fingerprint，也不自动推断 Claim 相反或 Finding 等价。只有精确 Fingerprint 的跨阻断阈值 Severity 冲突进入 Adjudicator；后续只有在离线 Evaluation 证明收益后，才可增加候选召回。聚合和裁决始终不能删除少数派的 Critical/High Finding。
 
 ### 10.2 生命周期
 
@@ -310,6 +366,8 @@ type FindingResolution struct {
 
 当前状态从 Finding、Subject 谱系和 Resolution 推导，不在 Finding 上重复维护可漂移字段。
 
+四类 Resolution 均已进入领域 Service 和受控 HTTP：`fixed` 与 `superseded` 必须引用同 Subject Kind/Family 下不同的 Replacement Subject，`fixed` 还要求 Replacement 已存在完成且通过的 Review Round；审计读取复用 Finding 所属 Feature 的所有权授权，并在存储边界使用稳定 Cursor 和 `LIMIT`。
+
 ## 11. Review Round、Assignment 与 Gate
 
 ### 11.1 Review Round
@@ -334,6 +392,8 @@ created -> running -> evaluating -> completed
 ```
 
 `completed` 表示本轮自动评审和 Gate 已形成不可变结果，不等于 Artifact 已被人工批准。
+
+每个 Round 同时固定 `WorkflowRunID`，整轮和各 Reviewer 的预算使用量由通用 Workflow Run 保存，不在 Review 域重复维护第二套 Usage 账户。
 
 ### 11.2 Review Assignment
 
@@ -375,25 +435,24 @@ Gate Decision：
 2. 校验所有必需 Assignment 成功；
 3. 校验 Report Schema 和必需 Category 覆盖；
 4. 校验 Finding Evidence 最低要求；
-5. 聚合重复 Finding；
+5. 按服务端 Fingerprint 聚合重复 Finding；
 6. 检查未解决 Critical/High；
 7. 检查 Policy 指定的 Medium 阈值；
-8. 检查 Reviewer 间高严重级别冲突；
+8. 检查 Reviewer 间跨阻断阈值的 Severity 冲突；
 9. 输出 Decision 和明确 Reason Code。
 
 任何 Critical/High 的“通过票”都不能抵消另一个有效阻断 Finding。
 
 ## 12. Adjudicator
 
-Adjudicator 不是常驻 Reviewer，只在以下情况触发：
+Adjudicator 不是常驻 Reviewer。当前实现只在同一服务端 Fingerprint 内，Severity 同时落在 Policy 阻断侧和非阻断侧时触发。以下其他候选场景仍需先经过离线 Evaluation，不能直接扩大线上触发面：
 
 - 两个 Reviewer 对同一 Claim 给出相反事实判断；
-- Severity 跨越阻断阈值；
 - Finding 疑似重复但 Evidence 指向不同问题；
 - Critical/High Finding 的 Evidence 充分性存在争议；
 - Policy 要求对特定高风险类别进行二次核验。
 
-Adjudicator 输入包含 Subject、冲突 Finding 和原始 Evidence，不包含无关 Reviewer 身份或“多数意见”。输出：
+Adjudicator 由 Review Policy 精确绑定 Definition ID、Version、Content Hash，并强制 `read_only=true`。它不是 Reviewer Assignment，不参与首轮覆盖度或成功数统计，也不引入新的 Round 状态。Adjudicator 输入包含不可变 Subject、Policy Hash、单个 Fingerprint 冲突组和原始 Evidence，不包含 Reviewer、Assignment、Report 身份或“多数意见”。输出：
 
 ```text
 confirmed
@@ -411,7 +470,15 @@ Adjudicator 不能：
 - 执行写操作；
 - 在配置 Provider 失败时切换 Provider。
 
-Adjudication 结果作为附加证据进入 Gate。Critical 安全、数据损失、不可逆迁移等 Policy 指定问题即使经过 Adjudicator，仍可强制 `human_required`。
+每个输出作为不可变 `ReviewAdjudication` 持久化，固定 Round ID、Subject Hash、Policy Hash、Fingerprint、Finding IDs、Definition Ref 和 Definition Hash，随后重新加载完整 Evaluation 并计算 Gate：
+
+- `confirmed`：只消解该组 Severity 冲突，阻断 Finding 继续保留，最终为 `revise`；
+- `not_supported`、`distinct_findings`、`needs_human`：不消解冲突，最终保持 `human_required`；
+- Runtime 超时、取消、不可用或其他失败：转换为带 Error Code 的 `needs_human`，不静默忽略；
+- Adjudication 持久化失败：Round 结束为 `failed`，不写入 Gate Result；
+- 无冲突：不调用 Adjudicator。
+
+当前实现不会用 Adjudicator 把任何冲突直接改成 `pass`。Critical 安全、数据损失、不可逆迁移等更高风险规则后续仍可由 Policy 强制保持 `human_required`。
 
 ## 13. 与人工审核的关系
 
@@ -458,7 +525,7 @@ Reject 或 Revise 不修改原 Artifact。用户或生成 Agent 基于 Finding �
 ### 14.2 代码变更
 
 ```text
-Implementation Run 成功
+Implementation Run 产生持久化 Change Set
   -> 生成 Change Set
   -> Code Review Round
   -> 独立 Validation
@@ -467,7 +534,7 @@ Implementation Run 成功
   -> 人工 Change Review
 ```
 
-代码 Reviewer 评审 Diff 和相关上下文；Validation Reviewer 评审 Nasuta 独立执行结果；Delivery Reviewer 评审可发布性。三者不能被一个“代码看起来没问题”的结论合并。
+代码 Reviewer 评审 Diff 和相关上下文；Validation Reviewer 评审 Nasuta 独立执行结果；Delivery Reviewer 评审可发布性。Change/Validation 允许检查成功或失败 Run 的已持久化事实，Delivery 只允许成功 Run。三者不能被一个“代码看起来没问题”的结论合并。
 
 ### 14.3 上游变更
 
@@ -525,6 +592,8 @@ Subject、源码、注释、文档和测试输出都是不可信证据，不能�
 - Adjudicator 预算；
 - 证据和 Report 大小上限。
 
+当前实现已把 `MaxInputTokens`、`MaxOutputTokens`、`MaxTotalTokens`、`MaxToolCalls`、`MaxCostMicros`、`MaxRetries`、`Timeout` 和 Optional Reviewer 处置固定进 Policy，并派生为 Workflow 总预算及 Reviewer Node 预算。预算不足时，`CollectAvailable` 可跳过 Optional Reviewer；Gate 再按 Policy 选择继续或进入 `human_required`，不会伪装成完整覆盖。
+
 ### 17.2 成本控制
 
 - Reviewer 并行执行，降低墙钟时间；
@@ -556,18 +625,28 @@ Review Report 和 Finding 不可变。Gate Result 固定 Policy Hash 和所有�
 建议 API：
 
 ```text
+POST /api/feature-delivery/review-policies
+GET  /api/feature-delivery/review-policies/{policy_id}/versions/{version}
 POST /api/feature-delivery/subjects/{type}/{id}/review-rounds
 GET  /api/feature-delivery/review-rounds/{round_id}
+POST /api/feature-delivery/review-rounds/{round_id}/execute
 GET  /api/feature-delivery/review-rounds/{round_id}/assignments?cursor=&limit=
+GET  /api/feature-delivery/review-rounds/{round_id}/assignments/{assignment_id}/report
 GET  /api/feature-delivery/review-rounds/{round_id}/findings?severity=&cursor=&limit=
+GET  /api/feature-delivery/review-rounds/{round_id}/adjudications?cursor=&limit=
+GET  /api/feature-delivery/review-rounds/{round_id}/gate
+GET  /api/feature-delivery/findings/{finding_id}
+GET  /api/feature-delivery/findings/{finding_id}/resolutions
+POST /api/feature-delivery/findings/{finding_id}/resolutions
 GET  /api/feature-delivery/review-rounds/{round_id}/events?after_seq=&limit=
+GET  /api/feature-delivery/review-rounds/{round_id}/events/stream
 POST /api/feature-delivery/review-rounds/{round_id}/cancel
 POST /api/feature-delivery/findings/{finding_id}/waivers
 POST /api/feature-delivery/artifacts/{artifact_id}/reviews
 POST /api/feature-delivery/change-sets/{change_set_id}/reviews
 ```
 
-列表查询只返回摘要列；Finding Evidence、Report 正文和大 Diff 按 ID 单独读取。所有查询在 SQL 边界使用 Cursor/Limit。
+列表查询只返回摘要列；Finding Evidence、Report 正文和大 Diff 按独立资源读取。Report 查询使用 `round_id + assignment_id + LIMIT 1`，避免跨 Round 资源探测；所有列表查询在 SQL 边界使用 Cursor/Limit。Round 返回绑定的 `WorkflowRunID`，整轮 Usage 通过 `GET /api/workflow-runs/{run_id}` 查询。
 
 ## 19. 失败语义
 
@@ -670,22 +749,27 @@ Feature Request
 - Gate 只提供建议和阻断提示，人工 Review 仍是唯一批准入口；
 - 评估 Precision、Recall、成本和人工采纳率。
 
-### 阶段 3：代码与验证
+### 阶段 3：代码与验证（已完成首轮）
 
 - 接入 Change Set、Validation Bundle；
 - Reviewer 读取精确 Diff、Commit 和独立验证结果；
 - Critical/High 和验证失败进入强制阻断；
-- 引入 Finding Resolution 和 Waiver。
+- 已完成 Finding Resolution 和 Waiver，并支持四类 Resolution 的替换约束、授权 API 与有界审计读取。
 
-### 阶段 4：覆盖全部节点
+### 阶段 4：覆盖全部节点（固定 Panel 已完成）
 
-- 扩展到 Requirement、Analysis、Plan 和 Delivery；
-- 按风险标签动态增补 Reviewer；
+- 已扩展到 Requirement、Analysis、Plan 和 Delivery；
+- 已完成八类 Subject 的固定只读 Panel，按风险标签动态增补 Reviewer 尚待 Evaluation 和控制面支持；
 - 人工批准强制绑定完整且当前的 Review Round。
 
-### 阶段 5：Adjudicator 与优化
+### 阶段 5：Adjudicator 与优化（确定性二次核验已完成首轮）
 
-- 只对历史数据显示的高价值冲突启用 Adjudicator；
+- 已按服务端 Fingerprint 识别跨阻断阈值的 Severity 冲突，并通过 `ConflictIDs` 进入人工处置；
+- 已对该类精确冲突启用只读 Adjudicator，持久化不可变裁决并二次计算 Gate；
+- 已提供基于 Round 所有权授权和稳定 Cursor 的有界 Adjudication 审计读取；
+- 已实现保守单向规则：只有 `confirmed` 消解冲突且仍保留阻断 Finding，其他结果统一升级人工；
+- 已完成 Policy 派生的 Round/Node Budget、Optional Reviewer 预算处置和持久化 Usage 汇总；
+- 通过历史数据评估是否扩展到 Claim 冲突、Evidence 充分性和疑似重复 Finding；
 - 根据 Evaluation 合并低收益 Reviewer；
 - 调整 Panel、预算和 Gate 阈值；
 - 建立 Reviewer/Policy 版本对比和灰度发布。
@@ -702,7 +786,7 @@ Feature Request
 6. **权限**：Reviewer、Adjudicator 无法调用写工具、批准或修改 Subject。
 7. **失败矩阵**：必需/可选 Reviewer、Provider、Store、Adjudicator 和 SSE 失败。
 8. **并发与恢复**：重复 Claim、超时、取消、服务重启和重复事件。
-9. **有界读取**：Round、Assignment、Finding、Event 和 Evidence 查询都有 Limit。
+9. **有界读取**：Round、Assignment、Report、Finding、Adjudication、Event 和 Evidence 查询均在存储边界受限。
 10. **端到端**：Artifact -> Round -> Gate -> Human Review -> 新版本 -> Finding Resolution。
 
 ## 24. 风险与控制
@@ -735,5 +819,5 @@ Feature Request
 11. Finding 可追溯到 `fixed`、`waived`、`invalidated` 或 `superseded` Resolution。
 12. Code Review 使用精确 Diff/Base/Head Commit，Validation Review 使用 Nasuta 独立验证结果。
 13. Provider 失败可见且不静默替换。
-14. Round、Assignment、Finding 和 Event 查询在存储边界有界。
+14. Round、Assignment、Report、Finding、Adjudication 和 Event 查询在存储边界有界，并复用一致的所有权授权。
 15. 上线前通过历史样本证明 Panel 相比单 Reviewer 提高有效缺陷发现率，且成本和周期在配置预算内。

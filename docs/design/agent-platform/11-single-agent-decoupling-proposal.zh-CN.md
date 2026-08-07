@@ -3,7 +3,7 @@
 [返回设计索引](README.zh-CN.md)
 
 > 状态：第一阶段已实现，后续演进中
-> 更新日期：2026-08-05
+> 更新日期：2026-08-07
 > 适用范围：Nasuta QA Agent 及后续可复用 Agent
 > 依赖基线：模块 01、02、04、06、08、09
 
@@ -14,11 +14,16 @@
 第一阶段已在 Nasuta 中落地：
 
 - `agent.Definition`、`agent.Runtime` 和 `agentcatalog` 已形成独立执行合同；
+- 通用 `DefinitionRuntime` 已执行精确 Definition 版本、Provider/Model、注册 Scope、Tool Snapshot、上下文 Hash 和 Run Snapshot 校验；
+- `knowledge.read`、`knowledge.write` 和领域 Transform 使用的 `feature.delivery` 已进入共享 Scope 词表，Agent Runtime 会拒绝执行不属于自身资源边界的领域 Scope；
+- 委托运行的有效 Scope 由调用者、场景、Workflow、Node 和 Definition 逐层求交，不能扩大上游权限；
+- OpenAI 与 Anthropic 模型参数均按 Provider 白名单显式校验，并固定到不可变 Run Snapshot；
 - QA Runtime 已由 `app.Platform` 统一持有和组装；
+- QA 与默认 Reviewer Definition 已按同一设置版本原子发布，设置热加载会替换后续 Run 使用的 Runtime；
 - Agent Run 已保存 Definition、Tool Snapshot、Schema、Workflow 等版本快照；
 - 现有 QA SSE、Run、Step、Usage 和取消链路保持兼容。
 
-尚未落地的是跨进程 Remote Worker、Agent 控制面 UI 和完整运行指标体系。这些属于后续部署与运营阶段，不影响本阶段在进程内为多 Agent 提供稳定执行单元。
+尚未落地的是 Agent 持久化版本控制面、完整运行指标/Evaluation 和跨进程 Remote Worker。这些属于后续运营与部署阶段，不影响本阶段在进程内为多 Agent 提供稳定执行单元。
 
 推荐把当前 `internal/agent.QA` 拆成“场景编排”和“通用执行”两层，在同一进程内先形成独立 Agent Runtime：
 
@@ -314,6 +319,8 @@ internal/knowledgetools/
 5. 读工具和写动作继续使用不同 Catalog。
 6. 写动作必须同时满足 Definition 允许、调用方授权、Run 显式开启和人工审批。
 7. 多 Agent 准备阶段不改变现有 MCP 只读边界。
+
+Scope 必须先在共享词表注册，并由对应资源执行器声明所有权。`feature.delivery` 只能由 Feature Delivery Transform 执行，通用 Agent Runtime 不因 Definition 声明该 Scope 就获得领域能力。委托路径只允许求交，不能通过子 Agent、Workflow Node 或工具快照扩大有效 Scope。
 
 不得把 `allowWrite bool` 作为长期权限模型。迁移后使用结构化 `ToolScope` 和 `PermissionDecision`，明确决策来源及拒绝原因。
 

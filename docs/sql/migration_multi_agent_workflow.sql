@@ -3,12 +3,22 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     workflow_id VARCHAR(128) NOT NULL,
     workflow_version BIGINT NOT NULL,
     workflow_hash CHAR(64) NOT NULL,
+    selection_json JSON NOT NULL,
     input_hash CHAR(64) NOT NULL,
     actor_user_id BIGINT NOT NULL DEFAULT 0,
     actor_tenant_id VARCHAR(128) NOT NULL DEFAULT '',
+    actor_permissions_json JSON NOT NULL,
     scenario VARCHAR(128) NOT NULL DEFAULT '',
+    scenario_permissions_json JSON NOT NULL,
     status VARCHAR(24) NOT NULL,
     budget_json JSON NOT NULL,
+    input_tokens BIGINT NOT NULL DEFAULT 0,
+    output_tokens BIGINT NOT NULL DEFAULT 0,
+    reasoning_tokens BIGINT NOT NULL DEFAULT 0,
+    total_tokens BIGINT NOT NULL DEFAULT 0,
+    tool_call_count BIGINT NOT NULL DEFAULT 0,
+    cost_micros BIGINT NOT NULL DEFAULT 0,
+    retry_count BIGINT NOT NULL DEFAULT 0,
     error_code VARCHAR(64) NOT NULL DEFAULT '',
     started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     ended_at TIMESTAMP NULL,
@@ -26,6 +36,13 @@ CREATE TABLE IF NOT EXISTS workflow_node_runs (
     output_handoff_id VARCHAR(64) NOT NULL DEFAULT '',
     status VARCHAR(24) NOT NULL,
     error_code VARCHAR(64) NOT NULL DEFAULT '',
+    input_tokens BIGINT NOT NULL DEFAULT 0,
+    output_tokens BIGINT NOT NULL DEFAULT 0,
+    reasoning_tokens BIGINT NOT NULL DEFAULT 0,
+    total_tokens BIGINT NOT NULL DEFAULT 0,
+    tool_call_count BIGINT NOT NULL DEFAULT 0,
+    cost_micros BIGINT NOT NULL DEFAULT 0,
+    retry_count BIGINT NOT NULL DEFAULT 0,
     started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     ended_at TIMESTAMP NULL,
     PRIMARY KEY (workflow_run_id, node_id, attempt),
@@ -58,6 +75,18 @@ CREATE TABLE IF NOT EXISTS workflow_events (
     detail_json JSON NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (workflow_run_id, seq)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS workflow_approvals (
+    workflow_run_id VARCHAR(64) NOT NULL,
+    node_id VARCHAR(128) NOT NULL,
+    decision VARCHAR(16) NOT NULL,
+    approver_user_id BIGINT NOT NULL,
+    approver_tenant_id VARCHAR(128) NOT NULL,
+    comment TEXT NOT NULL,
+    decided_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (workflow_run_id, node_id),
+    KEY idx_approval_decided (workflow_run_id, decided_at, node_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS gate_decisions (

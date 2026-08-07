@@ -3,7 +3,7 @@
 [返回设计索引](README.zh-CN.md)
 
 > 状态：第一阶段已实现，编排能力持续完善
-> 更新日期：2026-08-05
+> 更新日期：2026-08-07
 > 前置方案：[单 Agent 解耦与独立 Runtime 方案](11-single-agent-decoupling-proposal.zh-CN.md)
 > 依赖基线：模块 01–10
 
@@ -15,9 +15,24 @@
 
 - Agent、Gate、Human Approval、Join、Transform 节点；
 - DAG 校验、并行执行、Handoff、权限交集和不可变内容 Hash；
-- Workflow/Node/Artifact 的版本快照与审计基础。
+- Workflow/Node/Artifact 的版本快照与审计基础；
+- 独立 `agent.Definition`、通用 `agent.Runtime` 和不可变 Agent Catalog；
+- 应用层按同一设置版本原子发布 QA、Architecture、Security、Reliability Definition；
+- Feature Delivery Review Round 通过通用 Runtime 并行执行多个隔离 Reviewer；
+- Feature Delivery 八类 Subject 的内置 Review Policy 已按精确 Definition 版本和 Hash 绑定，并通过单事务原子发布；
+- `change_set`、`validation_bundle`、`delivery_bundle` 均已成为可执行 Review Subject，执行前和授权读取时会从持久化事实重建 Subject 并拒绝漂移；
+- Validation 失败和未配置已进入确定性 Gate：失败产生 `revise`，未配置产生 `incomplete` 和 `validation_execution` Coverage Gap；
+- Review Finding 由服务端生成规范化 Fingerprint；Gate 可确定性识别跨阻断阈值的 Reviewer Severity 冲突，并输出 `human_required` 和 `ConflictIDs`；
+- 冲突裁决已持久化为不可变 Adjudication 制品，并提供复用 Review Round 所有权授权的稳定 Cursor 有界审计读取；
+- Delegated Investigation、Sequential Artifact Pipeline 和 Parallel Review Panel 三种首期 Workflow 已进入生产组装；
+- 通用 Workflow API、SSE、总预算、节点重试和服务启动恢复已完成；
+- 每个不可变 Review Policy 都会派生固定 Workflow Definition，Reviewer、Join、Adjudication 和 Gate 共享 Node、Attempt、Handoff、Event 和 Resume 生命周期；
+- Workflow 在 Run 入口校验 Actor/Scenario Scope，Node 与 Agent 委托只能收缩有效权限；领域 `feature.delivery` Scope 仅由注册 Transform 执行；
+- 通用重试根据 Scope 副作用元数据拒绝自动重试具备副作用的节点，不再依赖零散的知识写权限判断；
+- Review Policy 已固定整轮 Token、Tool Call、Cost、Retry、Timeout 和 Optional Reviewer 规则，并派生 Workflow/Node Budget；Node 与 Workflow Usage 事务化持久化且恢复后继续累计；
+- Reviewer 与 Adjudicator 已启用统一敏感信息策略，Prompt、Context、Step、Result、Report、Finding、Event 和裁决内容在 Hash、日志或持久化前脱敏。
 
-完整的场景 API、队列化恢复、生产级 Workflow 事件投影、控制面发布流程和指标面板仍待后续阶段接入。当前实现优先稳定通用编排合同，不把 CodeLoom 或 Feature Delivery 的业务策略上移到 Nasuta。
+当前剩余缺口主要是 Agent/Workflow/Review Policy Catalog 的持久化版本控制面、统一 Trace/Evaluation、Round/Panel 运营入口、动态风险 Panel、跨 Round Report 显式复用和跨进程 Worker。Feature Delivery 的领域制品、审批和 Gate 规则仍由领域服务拥有，通用 Workflow 只负责确定性调度、检查点和恢复，不把 CodeLoom 或 Feature Delivery 的业务策略上移到 Nasuta。
 
 推荐建设“确定性 Orchestrator + 独立 Agent Run + 类型化 Artifact Handoff”的多 Agent 平台：
 
@@ -70,14 +85,11 @@ Nasuta 已具备多 Agent 的大部分底层原语：
 
 ### 3.2 主要差距
 
-- 单 Agent 尚未形成独立 Definition 和 Runtime；
-- 没有 Workflow Definition、Node、Edge、Gate 和 Handoff 合同；
-- Run 之间没有 `workflow_run_id`、`node_id` 和 `parent_run_id` 关联；
-- 缺少跨 Agent 的输入/输出 Schema 校验；
-- 缺少并行节点的预算、取消和失败聚合；
+- Agent 与 Workflow Catalog 仍以进程内不可变快照为主，缺少持久化版本、默认版本、停用、灰度和审计控制面；
+- Workflow 已支持进程内执行和启动恢复，但跨进程 Claim/Lease、远程取消和独立 Worker 尚未落地；
+- Agent、Workflow 和 Handoff 已共享完整 JSON Schema Registry，后续缺口是 Schema 版本运营能力；
 - 缺少 Workflow 级 Trace、成本、质量和关键路径指标；
-- Feature Delivery 的阶段机制尚未抽象为可复用编排原语；
-- 当前单人工 Review 无法表达多 Reviewer、Review Round 和 Gate。
+- Feature Delivery Sequential Artifact Pipeline 和 Parallel Review Panel 已接入通用 Workflow，动态风险增补、跨 Round Report 显式复用、Round/Panel 运营入口和生产级指标尚未接入。
 
 ## 4. 备选方案
 
@@ -301,7 +313,7 @@ Gate 输出只能是已定义结果，例如 `pass`、`revise`、`blocked`、`hu
 - 相同 Agent/Workflow Snapshot；
 - 每次 Attempt 独立记录；
 - 已成功产生有效 Handoff 的节点不重复执行；
-- 非幂等写动作不由通用 Orchestrator 自动重试。
+- Scope 词表标记为具备副作用的节点不由通用 Orchestrator 自动重试。
 
 ### 7.4 取消与超时
 
@@ -410,6 +422,8 @@ Actor Permission
 ∩ Tool Capability Availability
 ```
 
+Actor 和 Scenario Scope 在 Workflow Run 入口完成注册校验，进入领域类型后不再做下游兼容清洗。Workflow、Node 和 Agent Definition 只能继续收缩有效 Scope；`feature.delivery` 等领域 Scope 必须由已注册且拥有该资源的 Transform Executor 执行，不能交给通用 Agent Runtime。
+
 安全要求：
 
 1. 子 Agent 不能继承调用者未拥有的权限；
@@ -446,6 +460,8 @@ Actor Permission
 - 可选成本上限。
 
 Orchestrator 在启动节点前预留预算，在结束后结算实际使用量。预算不足时不再启动新节点，并根据 Failure Policy 进入部分结果汇总或明确失败。
+
+Feature Review 的不可变 Policy 已将整轮输入/输出 Token、Tool Call、Cost、Retry、Timeout 和 Optional Reviewer 处置派生为 Workflow 与 Node Budget。Node Attempt 与 Workflow Usage 在同一终态事务结算，服务恢复后从持久化 Usage 继续核算；授权调用方可通过绑定的 Workflow Run 查询整轮 Usage。
 
 禁止模型通过循环委托规避预算。第一版不支持递归 Workflow。
 
@@ -630,8 +646,17 @@ Workflow Run
 
 ### 阶段 4：Parallel Review Panel
 
-- 引入 Review Round、Finding、Gate 和 Adjudicator；
-- 覆盖设计 Artifact、Change Set 和 Validation；
+- 已引入 Review Round、Finding 和确定性 Gate；
+- Finding 使用服务端规范化 Fingerprint 聚合，跨 Policy 阻断阈值的 Severity 分歧稳定产生 `human_required` 和 `ConflictIDs`；
+- 已接入 Policy 固定的只读 Adjudicator：仅处理上述精确冲突，不携带 Reviewer 身份或多数意见，并持久化不可变 Adjudication 制品；
+- Adjudication 制品已支持按 Review Round 所有权授权、`(fingerprint, id)` Cursor 和存储层 `LIMIT` 有界审计读取；
+- 只有 `confirmed` 会单向消解冲突，同时保留阻断 Finding 并输出 `revise`；其他决定、Runtime 失败或不可用均保持 `human_required`；
+- 已覆盖全部八类 Subject，包括设计 Artifact、Change Set、Validation Bundle 和 Delivery Bundle；
+- Change/Validation 允许评审已持久化 Change Set 的成功或失败 Run，Delivery 仅允许成功 Run；
+- Reviewer 材料按 Subject 分层：Change Set 读取有界 Patch 且不混入 Validation，Validation 校验日志 Hash/大小并提供有界 UTF-8 摘要，Delivery 只组合设计、计划和变更/验证元数据；
+- Reviewer、Adjudicator、Review Context、Step、Result、Report、Finding、Evidence 文本和 Event Detail 已在 Hash、日志或持久化前统一脱敏；
+- 已实现 `fixed`、`waived`、`invalidated`、`superseded` 四类追加式 Resolution 的领域校验、Replacement 约束、授权 API 和有界审计读取；
+- 已实现 Review Policy 派生的整轮预算、Optional Reviewer 预算处置和持久化 Usage 查询；
 - 建立 Reviewer 准确率、重叠率和人工采纳率指标。
 
 ### 阶段 5：异步调度与扩展

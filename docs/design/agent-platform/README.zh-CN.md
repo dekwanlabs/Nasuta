@@ -3,7 +3,7 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
 > 状态：统一设计入口
-> 更新日期：2026-08-05
+> 更新日期：2026-08-07
 > 来源：CodeLoom `docs/design/agent` 与 Nasuta `docs/design`
 
 ## 1. 文档定位
@@ -58,6 +58,9 @@
 | 11 | 单 Agent 解耦与独立 Runtime | [11-single-agent-decoupling-proposal.zh-CN.md](11-single-agent-decoupling-proposal.zh-CN.md) |
 | 12 | Nasuta 多 Agent 平台 | [12-multi-agent-platform-proposal.zh-CN.md](12-multi-agent-platform-proposal.zh-CN.md) |
 | 13 | 研发节点多 Agent 评审 | [13-development-multi-agent-review-proposal.zh-CN.md](13-development-multi-agent-review-proposal.zh-CN.md) |
+| 14 | Agent 平台实施差距审计 | [14-agent-platform-implementation-gap-assessment.zh-CN.md](14-agent-platform-implementation-gap-assessment.zh-CN.md) |
+
+截至 2026-08-07，差距审计剩余 12 项：P1 已清零，P2 9 项，后置分布式能力 3 项。具体证据、边界和建议顺序以方案 14 为准。
 
 ## 3. 全局不变量
 
