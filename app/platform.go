@@ -16,10 +16,15 @@ import (
 	"github.com/dekwanlabs/nasuta/incident"
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
+	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
 	"github.com/dekwanlabs/nasuta/internal/approval"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
+	"github.com/dekwanlabs/nasuta/internal/evaluation"
+	"github.com/dekwanlabs/nasuta/internal/featurepipeline"
+	"github.com/dekwanlabs/nasuta/internal/featurereviewworkflow"
 	"github.com/dekwanlabs/nasuta/internal/indexing"
+	"github.com/dekwanlabs/nasuta/internal/investigation"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
@@ -30,11 +35,15 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/rbac"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/internal/sessionhistory"
+	"github.com/dekwanlabs/nasuta/internal/transport/agenthttp"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
+	"github.com/dekwanlabs/nasuta/internal/transport/evaluationhttp"
 	"github.com/dekwanlabs/nasuta/internal/transport/incidenthttp"
+	"github.com/dekwanlabs/nasuta/internal/transport/investigationhttp"
 	"github.com/dekwanlabs/nasuta/internal/transport/mcp"
 	"github.com/dekwanlabs/nasuta/internal/transport/routes"
 	"github.com/dekwanlabs/nasuta/internal/transport/webhook"
+	"github.com/dekwanlabs/nasuta/internal/transport/workflowhttp"
 	"github.com/dekwanlabs/nasuta/internal/writeaction"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
@@ -42,36 +51,53 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
+const workflowRecoveryPageSize = 100
+
 // Platform owns reusable runtime state and exposes only stable composition ports.
 type Platform struct {
-	cfg             config.Config
-	settings        *config.PlatformSettings
-	platformDB      *sql.DB
-	index           *indexing.Service
-	knowledge       *agent.Service
-	registry        *tool.Registry
-	readTools       *tool.ReadRegistry
-	writeReady      bool
-	authDB          *auth.DB
-	authService     *auth.Service
-	rbacHandler     *rbac.Handler
-	mcpKeyAuth      routes.MCPKeyAuthenticator
-	rolePrompt      func(int64) string
-	incidents       *incident.Manager
-	actions         *approval.Service
-	incidentAPI     *incidenthttp.Handler
-	codegraph       *codegraph.DB
-	callChain       *callchain.Service
-	ontology        ontology.Backend
-	history         *sessionhistory.Service
-	featureDelivery featureDeliveryRuntime
-	qaReloadMu      sync.Mutex
-	qaMu            sync.RWMutex
-	qaDefinitionVer int64
-	agentCatalog    *agentcatalog.Catalog
-	qaSessions      *memory.SessionStore
-	qaRunStore      *agent.RunStore
-	qaRuntime       dashboard.QARuntime
+	cfg                config.Config
+	settings           *config.PlatformSettings
+	platformDB         *sql.DB
+	index              *indexing.Service
+	knowledge          *agent.Service
+	registry           *tool.Registry
+	readTools          *tool.ReadRegistry
+	writeReady         bool
+	authDB             *auth.DB
+	authService        *auth.Service
+	rbacHandler        *rbac.Handler
+	mcpKeyAuth         routes.MCPKeyAuthenticator
+	rolePrompt         func(int64) string
+	incidents          *incident.Manager
+	actions            *approval.Service
+	incidentAPI        *incidenthttp.Handler
+	codegraph          *codegraph.DB
+	callChain          *callchain.Service
+	ontology           ontology.Backend
+	history            *sessionhistory.Service
+	featureDelivery    featureDeliveryRuntime
+	qaReloadMu         sync.RWMutex
+	qaMu               sync.RWMutex
+	agentDefinitionVer int64
+	schemaRegistry     *agentapi.SchemaRegistry
+	agentCatalog       *agentcatalog.Catalog
+	workflowCatalog    *agentworkflow.Catalog
+	workflowStore      *agentworkflow.Store
+	workflowNodes      *agentworkflow.AgentNodeExecutor
+	workflowPipeline   *featurepipeline.Executor
+	workflowReview     *featurereviewworkflow.Executor
+	reviewCoordinator  *featurereviewworkflow.Coordinator
+	workflowTransforms agentworkflow.NodeExecutor
+	workflowRunner     *agentworkflow.Orchestrator
+	workflowService    *agentworkflow.Service
+	workflowAPI        *workflowhttp.Handler
+	agentAPI           *agenthttp.Handler
+	evaluationAPI      *evaluationhttp.Handler
+	investigationAPI   *investigationhttp.Handler
+	qaSessions         *memory.SessionStore
+	qaRunStore         *agent.RunStore
+	qaRuntime          dashboard.QARuntime
+	definitionRuntime  agentapi.Runtime
 }
 
 // New constructs the reusable platform without registering scenario routes.
@@ -118,16 +144,71 @@ func New() (*Platform, error) {
 	sessions := memory.NewSessionStore(platformDB)
 	history := buildSessionHistory(cfg, sessions, index.Embedder)
 	registry := agent.NewRegistry(knowledgeService, cfg, sessions, history)
+	schemaRegistry := agentapi.NewSchemaRegistry()
+	if err := schemaRegistry.Publish(agentcatalog.DefaultSchemas()); err != nil {
+		index.Close()
+		if platformDB != nil {
+			_ = platformDB.Close()
+		}
+		return nil, fmt.Errorf("publish default agent schemas: %w", err)
+	}
+	if err := schemaRegistry.Publish(featurepipeline.Schemas()); err != nil {
+		index.Close()
+		if platformDB != nil {
+			_ = platformDB.Close()
+		}
+		return nil, fmt.Errorf("publish feature pipeline schemas: %w", err)
+	}
+	if err := schemaRegistry.Publish(featurereviewworkflow.Schemas()); err != nil {
+		index.Close()
+		if platformDB != nil {
+			_ = platformDB.Close()
+		}
+		return nil, fmt.Errorf("publish feature review schemas: %w", err)
+	}
 
+	agentCatalog := agentcatalog.New(schemaRegistry)
 	platform := &Platform{
 		cfg: cfg, settings: settings, index: index, knowledge: knowledgeService,
 		registry: registry, readTools: tool.NewReadRegistry(registry),
 		platformDB: platformDB, authDB: authDB, authService: authService,
 		codegraph: codeGraph, callChain: callChainService,
 		ontology: ontologyBackend,
-		history:  history, qaSessions: sessions, agentCatalog: agentcatalog.New(),
+		history:  history, qaSessions: sessions,
+		schemaRegistry: schemaRegistry, agentCatalog: agentCatalog,
+		workflowCatalog: agentworkflow.NewCatalog(schemaRegistry, agentCatalog),
 	}
+	platform.agentAPI = agenthttp.New(agentCatalog)
+	platform.investigationAPI = investigationhttp.New(investigation.New(
+		platformInvestigationExecutor{platform: platform},
+	))
 	if platformDB != nil {
+		evaluationStore, evaluationStoreErr := evaluation.NewStore(platformDB)
+		if evaluationStoreErr != nil {
+			_ = platform.Close()
+			return nil, fmt.Errorf("configure evaluation store: %w", evaluationStoreErr)
+		}
+		evaluationService, evaluationServiceErr := evaluation.NewService(evaluationStore)
+		if evaluationServiceErr != nil {
+			_ = platform.Close()
+			return nil, fmt.Errorf("configure evaluation service: %w", evaluationServiceErr)
+		}
+		platform.evaluationAPI = evaluationhttp.New(evaluationService)
+		log.Infof("[evaluation] trace and version metrics enabled (MySQL)")
+		agentStore, agentStoreErr := agentcatalog.NewStore(platformDB)
+		if agentStoreErr != nil {
+			_ = platform.Close()
+			return nil, fmt.Errorf("configure agent catalog store: %w", agentStoreErr)
+		}
+		if attachErr := agentCatalog.AttachStore(context.Background(), agentStore); attachErr != nil {
+			_ = platform.Close()
+			return nil, fmt.Errorf("restore agent catalog: %w", attachErr)
+		}
+		platform.agentDefinitionVer = agentCatalog.MaxVersion()
+		log.Infof(
+			"[agent] catalog persistence enabled (restored_max_version=%d)",
+			platform.agentDefinitionVer,
+		)
 		runStore, runStoreErr := agent.NewRunStore(platformDB)
 		if runStoreErr != nil {
 			log.Warnf("[qa] agent run store disabled: %v", runStoreErr)
@@ -135,6 +216,10 @@ func New() (*Platform, error) {
 			platform.qaRunStore = runStore
 			log.Infof("[qa] agent run store enabled (MySQL)")
 		}
+	}
+	if err := platform.initAgentWorkflow(); err != nil {
+		_ = platform.Close()
+		return nil, fmt.Errorf("configure agent workflow: %w", err)
 	}
 	if err := platform.reloadQARuntime(codeGraph); err != nil {
 		_ = platform.Close()
@@ -146,6 +231,36 @@ func New() (*Platform, error) {
 		return nil, fmt.Errorf("configure feature delivery: %w", err)
 	}
 	return platform, nil
+}
+
+func (platform *Platform) initAgentWorkflow() error {
+	if platform.platformDB == nil {
+		log.Warnf("[workflow] persistence and execution disabled (MySQL unavailable)")
+		return nil
+	}
+	workflowStore, err := agentworkflow.NewStore(platform.platformDB)
+	if err != nil {
+		return err
+	}
+	if err := platform.workflowCatalog.AttachStore(
+		context.Background(),
+		workflowStore,
+	); err != nil {
+		return fmt.Errorf("restore workflow catalog: %w", err)
+	}
+	platform.agentDefinitionVer = max(
+		platform.agentDefinitionVer,
+		platform.workflowCatalog.MaxVersion(),
+	)
+	service, err := agentworkflow.NewService(platform.workflowCatalog, workflowStore, nil)
+	if err != nil {
+		return err
+	}
+	platform.workflowStore = workflowStore
+	platform.workflowService = service
+	platform.workflowAPI = workflowhttp.New(service)
+	log.Infof("[workflow] persistence enabled (MySQL)")
+	return nil
 }
 
 func buildSessionHistory(cfg config.Config, sessions *memory.SessionStore, emb embed.Embedder) *sessionhistory.Service {
@@ -337,9 +452,25 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	if platform.featureDelivery.api != nil {
 		platform.featureDelivery.api.RegisterRoutes(platform.AuthenticatedAPI(mux))
 	}
+	if platform.investigationAPI != nil {
+		platform.investigationAPI.RegisterRoutes(platform.AuthenticatedAPI(mux))
+	}
+	if platform.agentAPI != nil {
+		platform.agentAPI.RegisterRoutes(platform.AuthenticatedAPI(mux))
+	}
+	if platform.workflowAPI != nil {
+		platform.workflowAPI.RegisterRoutes(platform.AuthenticatedAPI(mux))
+	}
+	if platform.evaluationAPI != nil {
+		platform.evaluationAPI.RegisterRoutes(platform.AuthenticatedAPI(mux))
+	}
 }
 
-func (platform *Platform) buildQARuntime(settings *config.PlatformSettings, graph *codegraph.DB, version int64) (dashboard.QARuntime, agentapi.Definition, error) {
+func (platform *Platform) buildQARuntime(
+	settings *config.PlatformSettings,
+	graph *codegraph.DB,
+	version int64,
+) (dashboard.QARuntime, []agentapi.Definition, agentapi.Runtime, error) {
 	snapshot := *settings
 	snapshot.VCSGroups = append([]string(nil), settings.VCSGroups...)
 	snapshot.VCSExcludeProjects = append([]string(nil), settings.VCSExcludeProjects...)
@@ -349,35 +480,68 @@ func (platform *Platform) buildQARuntime(settings *config.PlatformSettings, grap
 			RunStore: platform.qaRunStore, Sessions: platform.qaSessions,
 			History: platform.history, Settings: &snapshot,
 			WriteAvailable: platform.writeReady,
-		}, agentapi.Definition{}, nil
+		}, nil, nil, nil
 	}
 	if err := snapshot.ValidateAgentSettings(); err != nil {
-		return dashboard.QARuntime{}, agentapi.Definition{}, err
+		return dashboard.QARuntime{}, nil, nil, err
 	}
-	definition, err := agentcatalog.DefaultQAVersion(&snapshot, version)
+	definitions, err := defaultAgentDefinitions(&snapshot, version)
 	if err != nil {
-		return dashboard.QARuntime{}, agentapi.Definition{}, fmt.Errorf("prepare QA definition: %w", err)
+		return dashboard.QARuntime{}, nil, nil, err
 	}
-	runtime := agent.NewQARuntime(agent.QARuntimeDeps{
-		Tools: platform.knowledge, Registry: platform.registry,
-		Cfg: platform.cfg, Platform: &snapshot,
-		Sessions: platform.qaSessions, History: platform.history,
-		WriteAvailable: platform.writeReady, RunStore: platform.qaRunStore,
-	})
+	definitionRuntime, err := agent.NewDefinitionRuntime(
+		platform.agentCatalog,
+		platform.schemaRegistry,
+		platform.registry,
+		&snapshot,
+		platform.qaRunStore,
+	)
+	if err != nil {
+		return dashboard.QARuntime{}, nil, nil, fmt.Errorf("configure definition runtime: %w", err)
+	}
+	models := agent.NewQAModels(&snapshot)
 	qa := agent.NewQA(agent.QADeps{
 		Tools: platform.knowledge, Semantic: platform.index.Semantic,
 		Embedder: platform.index.Embedder, Cfg: platform.cfg, Platform: &snapshot,
 		CodeGraphDB: graph, DB: platform.platformDB,
 		History: platform.history, Sessions: platform.qaSessions,
-		Definitions: platform.agentCatalog,
-		Agent:       agentapi.DefinitionRef{ID: definition.ID, Version: definition.Version},
-		Runtime:     runtime,
+		Definitions:    platform.agentCatalog,
+		Agent:          agentapi.DefinitionRef{ID: definitions[0].ID},
+		Runtime:        definitionRuntime,
+		RuntimeTools:   definitionRuntime,
+		Models:         models,
+		PhaseEmitter:   definitionRuntime,
+		WriteAvailable: platform.writeReady,
 	})
 	return dashboard.QARuntime{
 		QA: qa, RunStore: platform.qaRunStore, Sessions: platform.qaSessions,
 		History: platform.history, Settings: &snapshot,
-		WriteAvailable: platform.writeReady,
-	}, definition, nil
+		WriteAvailable: platform.writeReady, Hub: definitionRuntime.Hub(),
+		CompactionLLM: models.Primary(),
+	}, definitions, definitionRuntime, nil
+}
+
+func defaultAgentDefinitions(
+	settings *config.PlatformSettings,
+	version int64,
+) ([]agentapi.Definition, error) {
+	qa, err := agentcatalog.DefaultQAVersion(settings, version)
+	if err != nil {
+		return nil, fmt.Errorf("prepare QA definition: %w", err)
+	}
+	reviewers, err := agentcatalog.DefaultReviewersVersion(settings, version)
+	if err != nil {
+		return nil, fmt.Errorf("prepare reviewer definitions: %w", err)
+	}
+	investigators, err := agentcatalog.DefaultInvestigatorsVersion(settings, version)
+	if err != nil {
+		return nil, fmt.Errorf("prepare investigation definitions: %w", err)
+	}
+	definitions := make([]agentapi.Definition, 0, 1+len(reviewers)+len(investigators))
+	definitions = append(definitions, qa)
+	definitions = append(definitions, reviewers...)
+	definitions = append(definitions, investigators...)
+	return definitions, nil
 }
 
 func (platform *Platform) currentQARuntime() dashboard.QARuntime {
@@ -391,29 +555,89 @@ func (platform *Platform) reloadQARuntime(graph *codegraph.DB) error {
 	defer platform.qaReloadMu.Unlock()
 
 	settings := loadPlatformSettings(platform.authDB)
-	version := platform.qaDefinitionVer + 1
-	candidate, definition, err := platform.buildQARuntime(settings, graph, version)
+	version := platform.agentDefinitionVer + 1
+	candidate, definitions, definitionRuntime, err := platform.buildQARuntime(settings, graph, version)
 	if err != nil {
 		return err
 	}
-	if definition.ID != "" {
-		if err := platform.agentCatalog.Publish([]agentapi.Definition{definition}); err != nil {
-			return fmt.Errorf("publish QA definition: %w", err)
+	if len(definitions) > 0 {
+		if err := platform.agentCatalog.Publish(definitions); err != nil {
+			return fmt.Errorf("publish agent definitions: %w", err)
 		}
+		workflow, err := agentworkflow.DefaultDelegatedInvestigation(
+			version,
+			time.Duration(candidate.Settings.AgentTimeout),
+		)
+		if err != nil {
+			return fmt.Errorf("prepare delegated investigation workflow: %w", err)
+		}
+		if err := platform.workflowCatalog.Publish([]agentworkflow.WorkflowDefinition{workflow}); err != nil {
+			return fmt.Errorf("publish delegated investigation workflow: %w", err)
+		}
+	}
+	if err := platform.configureFeatureReviewRuntime(candidate.Settings, definitionRuntime, definitions); err != nil {
+		return err
+	}
+	if err := platform.configureAgentWorkflowRuntime(definitionRuntime); err != nil {
+		return err
 	}
 
 	platform.qaMu.Lock()
 	platform.settings = candidate.Settings
 	platform.qaRuntime = candidate
-	if definition.ID != "" {
-		platform.qaDefinitionVer = version
+	platform.definitionRuntime = definitionRuntime
+	if len(definitions) > 0 {
+		platform.agentDefinitionVer = version
 	}
 	platform.codegraph = graph
 	platform.qaMu.Unlock()
 	platform.index.SetPlatform(candidate.Settings)
-	log.Infof("[settings] QA runtime reloaded (definition_version=%d, model=%s, timeout=%s, max_steps=%d)",
-		platform.qaDefinitionVer, candidate.Settings.LLMModel,
+	log.Infof("[settings] agent runtimes reloaded (definition_version=%d, model=%s, timeout=%s, max_steps=%d)",
+		platform.agentDefinitionVer, candidate.Settings.LLMModel,
 		time.Duration(candidate.Settings.AgentTimeout), candidate.Settings.AgentMaxSteps)
+	return nil
+}
+
+func (platform *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime) error {
+	if platform.workflowService == nil {
+		return nil
+	}
+	platform.workflowTransforms = newWorkflowTransformDispatcher(
+		platform.workflowPipeline,
+		platform.workflowReview,
+	)
+	var agentNodes *agentworkflow.AgentNodeExecutor
+	if runtime != nil {
+		nodes, err := agentworkflow.NewAgentNodeExecutor(
+			platform.schemaRegistry,
+			platform.agentCatalog,
+			runtime,
+		)
+		if err != nil {
+			return fmt.Errorf("configure workflow agent nodes: %w", err)
+		}
+		agentNodes = nodes
+	}
+	if agentNodes == nil && platform.workflowTransforms == nil {
+		platform.workflowService.SetOrchestrator(nil)
+		platform.workflowNodes = nil
+		platform.workflowRunner = nil
+		log.Warnf("[workflow] execution disabled (agent and transform executors unavailable)")
+		return nil
+	}
+	nodes := agentworkflow.NewNodeDispatcher(agentNodes, platform.workflowTransforms)
+	runner := agentworkflow.NewOrchestrator(platform.schemaRegistry, nodes, nil)
+	platform.workflowService.SetOrchestrator(runner)
+	platform.workflowNodes = agentNodes
+	platform.workflowRunner = runner
+	switch {
+	case agentNodes != nil && platform.workflowTransforms != nil:
+		log.Infof("[workflow] agent and feature transform execution enabled")
+	case agentNodes != nil:
+		log.Infof("[workflow] agent execution enabled")
+	default:
+		log.Infof("[workflow] feature transform execution enabled (LLM unavailable)")
+	}
 	return nil
 }
 
@@ -424,10 +648,14 @@ func (platform *Platform) AuthenticatedAPI(mux *http.ServeMux) APIRegistrar {
 
 // Serve runs background platform work and serves the already-composed root mux.
 func (platform *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
+	workflowRecoveryCutoff := time.Now().UTC()
 	go platform.startDailySyncTicker(ctx)
 	platform.featureDelivery.start(ctx)
 	if platform.history != nil {
 		go platform.history.Run(ctx)
+	}
+	if platform.workflowService != nil && platform.workflowRunner != nil {
+		go platform.recoverActiveWorkflows(ctx, workflowRecoveryCutoff)
 	}
 	log.Infof("[server] listening on %s (MCP: /mcp, webhook: /internal/vcs-hook, api: /api)", platform.cfg.HTTPAddr)
 	if platform.cfg.AuthToken == "" && platform.mcpKeyAuth == nil {
@@ -439,8 +667,63 @@ func (platform *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 	return nil
 }
 
+func (platform *Platform) recoverActiveWorkflows(ctx context.Context, startedBefore time.Time) {
+	report, err := platform.workflowService.RecoverActiveWithObserver(
+		ctx,
+		startedBefore,
+		workflowRecoveryPageSize,
+		func(
+			ctx context.Context,
+			runID string,
+			result agentworkflow.ResumeResult,
+			resumeErr error,
+		) error {
+			if platform.reviewCoordinator == nil {
+				return nil
+			}
+			_, err := platform.reviewCoordinator.ReconcileRecoveredRun(
+				ctx,
+				runID,
+				result.Status,
+				resumeErr,
+			)
+			return err
+		},
+	)
+	if err != nil {
+		log.ErrorfCtx(
+			ctx,
+			"[workflow] startup recovery incomplete scanned=%d resumed=%d succeeded=%d waiting_human=%d failed=%d cancelled=%d timed_out=%d errors=%d: %v",
+			report.Scanned,
+			report.Resumed,
+			report.Succeeded,
+			report.WaitingHuman,
+			report.Failed,
+			report.Cancelled,
+			report.TimedOut,
+			report.Errors,
+			err,
+		)
+		return
+	}
+	log.InfofCtx(
+		ctx,
+		"[workflow] startup recovery complete scanned=%d resumed=%d succeeded=%d waiting_human=%d failed=%d cancelled=%d timed_out=%d",
+		report.Scanned,
+		report.Resumed,
+		report.Succeeded,
+		report.WaitingHuman,
+		report.Failed,
+		report.Cancelled,
+		report.TimedOut,
+	)
+}
+
 // Close releases reusable platform resources.
 func (platform *Platform) Close() error {
+	if platform.workflowService != nil {
+		platform.workflowService.Close()
+	}
 	if platform.incidents != nil {
 		_ = platform.incidents.Close()
 	}

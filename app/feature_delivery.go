@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"time"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
 	"github.com/dekwanlabs/nasuta/internal/codingagent"
 	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/featurepipeline"
+	"github.com/dekwanlabs/nasuta/internal/featurereviewworkflow"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/transport/featurehttp"
@@ -58,10 +62,148 @@ func (platform *Platform) initFeatureDelivery() error {
 		generator,
 		time.Duration(platform.settings.FeatureGenerationTimeout),
 	)
+	pipeline, err := featurepipeline.DefaultDefinition(featurepipeline.WorkflowVersion)
+	if err != nil {
+		return fmt.Errorf("prepare feature pipeline workflow: %w", err)
+	}
+	if err := platform.workflowCatalog.Publish([]agentworkflow.WorkflowDefinition{pipeline}); err != nil {
+		return fmt.Errorf("publish feature pipeline workflow: %w", err)
+	}
 	platform.featureDelivery.service = service
 	platform.featureDelivery.api = featurehttp.New(service)
+	platform.featureDelivery.api.SetPipelineStarter(
+		featurepipeline.NewStarter(platform.workflowService),
+	)
+	approvals := featurepipeline.NewApprovalCoordinator(service, platform.workflowService)
+	platform.featureDelivery.api.SetArtifactReviewer(approvals)
+	if platform.workflowAPI != nil {
+		platform.workflowAPI.SetApprovalDecider(approvals)
+	}
+	settings, runtime, definitions, err := platform.currentFeatureReviewRuntime()
+	if err != nil {
+		return err
+	}
+	if err := platform.configureFeatureReviewRuntime(
+		settings,
+		runtime,
+		definitions,
+	); err != nil {
+		return err
+	}
 	platform.configureFeatureImplementation(deliveryStore, service)
+	platform.workflowPipeline = featurepipeline.NewExecutor(service)
+	if err := platform.configureAgentWorkflowRuntime(runtime); err != nil {
+		return err
+	}
 	log.Infof("[feature-delivery] persistence enabled")
+	return nil
+}
+
+func (platform *Platform) currentFeatureReviewRuntime() (
+	*config.PlatformSettings,
+	agentapi.Runtime,
+	[]agentapi.Definition,
+	error,
+) {
+	platform.qaMu.RLock()
+	if platform.settings == nil {
+		platform.qaMu.RUnlock()
+		return nil, nil, nil, nil
+	}
+	settings := *platform.settings
+	runtime := platform.definitionRuntime
+	version := platform.agentDefinitionVer
+	catalog := platform.agentCatalog
+	platform.qaMu.RUnlock()
+
+	if !settings.LLMEnabled() {
+		return &settings, nil, nil, nil
+	}
+	if runtime == nil || version <= 0 || catalog == nil {
+		return nil, nil, nil, fmt.Errorf("configure agent review runtime: agent definitions are not published")
+	}
+	definitions, err := defaultAgentDefinitions(&settings, version)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for index, definition := range definitions {
+		published, err := catalog.Resolve(agentapi.DefinitionRef{
+			ID: definition.ID, Version: definition.Version,
+		})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("resolve published reviewer definition %q: %w", definition.ID, err)
+		}
+		if published.ContentHash != definition.ContentHash {
+			return nil, nil, nil, fmt.Errorf(
+				"published reviewer definition %q version %d does not match active settings",
+				definition.ID,
+				definition.Version,
+			)
+		}
+		definitions[index] = published
+	}
+	return &settings, runtime, definitions, nil
+}
+
+func (platform *Platform) configureFeatureReviewRuntime(
+	settings *config.PlatformSettings,
+	runtime agentapi.Runtime,
+	definitions []agentapi.Definition,
+) error {
+	service := platform.featureDelivery.service
+	if service == nil {
+		return nil
+	}
+	if settings == nil || !settings.LLMEnabled() {
+		service.SetReviewConfiguration(nil, nil)
+		service.SetAdjudicationRunner(nil)
+		platform.workflowReview = nil
+		platform.reviewCoordinator = nil
+		if platform.featureDelivery.api != nil {
+			platform.featureDelivery.api.SetReviewCoordinator(nil)
+		}
+		log.Warnf("[feature-delivery] agent review disabled (LLM unavailable)")
+		return nil
+	}
+	if runtime == nil {
+		return fmt.Errorf("configure agent review runtime: configured LLM has no definition runtime")
+	}
+	policies, defaults, err := service.InstallDefaultReviewPolicySet(
+		context.Background(),
+		definitions,
+	)
+	if err != nil {
+		return fmt.Errorf("publish default review policies: %w", err)
+	}
+	if platform.workflowService == nil {
+		return fmt.Errorf("configure agent review runtime: workflow service is unavailable")
+	}
+	workflowDefinitions := make([]agentworkflow.WorkflowDefinition, 0, len(policies))
+	for _, policy := range policies {
+		definition, err := featurereviewworkflow.Definition(policy)
+		if err != nil {
+			return fmt.Errorf("prepare review workflow for policy %q: %w", policy.ID, err)
+		}
+		workflowDefinitions = append(workflowDefinitions, definition)
+	}
+	if err := platform.workflowService.PublishDefinitions(workflowDefinitions, true); err != nil {
+		return fmt.Errorf("publish default review workflows: %w", err)
+	}
+	service.SetReviewConfiguration(featuredelivery.NewRuntimeReviewRunner(runtime), defaults)
+	service.SetAdjudicationRunner(featuredelivery.NewRuntimeAdjudicationRunner(runtime))
+	platform.workflowReview = featurereviewworkflow.NewExecutor(service)
+	platform.reviewCoordinator = featurereviewworkflow.NewCoordinator(
+		service,
+		platform.workflowService,
+	)
+	if platform.featureDelivery.api != nil {
+		platform.featureDelivery.api.SetReviewCoordinator(platform.reviewCoordinator)
+	}
+	log.Infof(
+		"[feature-delivery] agent review runtime enabled (default_policies=%d workflows=%d)",
+		len(defaults),
+		len(workflowDefinitions),
+	)
 	return nil
 }
 
