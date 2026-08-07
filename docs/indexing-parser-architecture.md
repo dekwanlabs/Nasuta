@@ -57,6 +57,32 @@ domain.EndpointRecord          现有结构化存储契约
 
 语言前端不判断“这是 Spring 还是 Gin”。适配器也不重新解析注释、字符串或括号；两者之间只通过语言专属 IR 和框架无关的 candidate 交接。
 
+### 3.1 当前实现状态与目标差距
+
+本文件同时描述目标架构和迁移约束，不能把目标链路理解为所有语言已经完成的现状。当前实现与目标的边界如下：
+
+**已经落地的基础能力**
+
+- Java 已通过共享 JVM source/frontend 处理 Spring MVC、JAX-RS、Feign 等结构；Kotlin 对 JVM 注解和部分路由/client 规则有独立扫描入口。
+- Maven 非聚合 module 会登记为 `ServiceRecord`；library module 即使没有 runtime 入口，也可以承载 endpoint 或 Feign evidence。
+- `CanonicalizeBundle` 统一规范化 `repo`、`modulePath`、`ServiceKey`，并在写入前解析 endpoint/dependency ownership。
+- Feign 配置引用有独立 resolver；Maven runtime consumer expansion 会沿可达的本地依赖闭包复制共享 client 的调用关系。
+- 各语言的源码依赖 scanner 都从 evidence 文件的 module ownership 生成 `CallerServiceKey`；Kafka producer/consumer 关联也按 key 区分同名服务。
+- 结构化扫描统一排除 `src/test/**`、Android test、常见 JS/TS test 文件和 Go `_test.go`；Node `package.json` 只有明确的 `scripts.start` 运行证据时才产生 runtime，`main` 只表示包入口。
+
+**尚未完成的迁移项**
+
+- `ModuleCatalog` 还没有成为所有语言 scanner 的统一 ingress；部分 scanner 仍然自行推断 repo、module 和 service。
+- endpoint candidate/projector 已覆盖主要 Java、Kotlin、Go、Python、C#、Node.js/TypeScript 路径，但尚未把所有 client、RPC、消息协议统一迁移到 candidate pipeline。
+- service/runtime 识别仍有语言特定启发式；生成代码、fixture 和测试源码的结构化扫描边界需要逐个 scanner 明确。
+- `Layer`、`Scope` 和业务标签不再从仓库名、服务名前缀（例如某个组织的产品前缀）推断；这类分类必须来自文档、显式配置或可验证的平台证据。
+- 依赖仍以服务级 `DependencyEdge` 为主，尚未持久化“调用方方法 → 目标 operation”的接口级事实。
+
+以下两条是不变量，而不是可选优化：
+
+1. **测试源码不产生 runtime 入口。** `src/test/**` 中的 `main`、`SpringApplication.run` 或测试启动辅助代码不能把 library module 提升为 Spring Boot 服务；正式 runtime 入口只能来自生产源码目录（例如 `src/main/**`），除非未来显式配置其他生产 source set。
+2. **依赖调用方使用稳定 ownership。** `ServiceName` 只用于展示和名称匹配，不是跨 repo/module 的唯一身份。共享 Feign 文件的 evidence 可以继续指向 library，但 consumer expansion 必须保留调用方的 `CallerServiceKey`（由 `repo + modulePath` 派生），不能从共享文件路径或非唯一名称反推 caller。
+
 ## 4. 中间模型
 
 ### 4.1 值解析状态
@@ -529,9 +555,11 @@ operation_calls
 服务发现和 endpoint 解析使用同一份 module ownership，但语义分开：
 
 - `main`、`func main`、`__main__` 只说明存在入口，不说明具体框架；
+- Java 的启动识别只扫描生产 source set；`src/test/**` 中的 `main`、`SpringApplication.run` 和测试启动辅助类一律不提升 module runtime；
 - Spring Boot 需要 `@SpringBootApplication`、Spring import 或 `SpringApplication.run` 等证据；
 - FastAPI/Flask 需要相应构造函数或启动调用证据；
 - Python 不默认附加 `ai` 等业务标签；
+- 通用语言 scanner 不从仓库目录、服务名前缀或包名推断业务 `Layer`、`Scope` 或标签；
 - Go 版本信息和 HTTP 框架身份不要混写成同一个字段。
 
 第一阶段保持现有 domain schema，先修正错误归类；框架作为 candidate/证据内部属性保留。
@@ -589,13 +617,15 @@ operation_calls
 
 ### 阶段 8：归属与服务识别
 
-- 抽出 ModuleCatalog；
-- 修正 runtime 和无依据标签；
+- 抽出 ModuleCatalog，并让各语言 scanner 从同一个 ownership ingress 取 repo/module/service；
+- 修正 runtime 和无依据标签；Java 启动识别必须排除 `src/test/**`；
+- 将 service identity 固化为 `repo + modulePath + ServiceKey`，名称只作为展示字段；
 - 验证同名服务跨 repo/module 的归属稳定性。
 
 ### 阶段 9：依赖解析
 
 - endpoint 稳定后，再把 Feign、RestTemplate、WebClient、Go/Python HTTP client、gRPC、Dubbo 等迁移到独立 client candidate pipeline；
+- Maven consumer expansion 必须保留 caller provenance：共享 Feign module 的 evidence 路径不等于最终 runtime caller，扩展结果必须携带 `CallerServiceKey`；
 - 先投影现有服务级 `DependencyEdge`，不修改 SQLite；
 - 接口级调用查询需求确认后，再设计 operation domain contract 和 schema v5；
 - 不把某个框架的 client 规则塞回语言前端。
@@ -612,6 +642,11 @@ operation_calls
 | 根路径 | 明确空路径生成 `/`；未知路径不生成 `/` |
 | method | 明确 `ANY` API 才生成 `ANY`；解析失败不回退 |
 | 归属 | 多 repo、嵌套 module、无 runtime 的 library module 均可解析 endpoint |
+| Java runtime | `src/test/**` 下的 `main`/`SpringApplication.run` 不得把 library module 标成 Spring Boot |
+| 依赖归属 | 共享 Feign module 被多个同名 caller 跨 repo 消费时，保留不同 `CallerServiceKey`，不得因名称或 evidence 路径歧义而 drop |
+| 跨语言 caller | Java/Kotlin/Python/Go/C#/Node/Android/iOS/Kafka dependency 都必须从 evidence module 产生稳定 caller key |
+| 业务分类 | 仓库名、包名、服务名前缀不能单独产生 `Layer`、`Scope` 或业务标签 |
+| 测试源码 | `src/test/**`、Android test、Go `_test.go`、JS/TS test 文件不能产生结构化 service/endpoint/dependency |
 | 投影 | unresolved candidate 不进入 `EndpointRecord`；重复 candidate 稳定去重 |
 | HTTP client | RestTemplate 固定 method、`exchange`、配置 URL、load-balanced service name |
 | RPC client | gRPC target/stub/method、Dubbo interface/method、未知 target 不误报 |
@@ -639,3 +674,4 @@ GOWORK=off go vet ./...
 7. 服务端 endpoint adapter 和客户端 call adapter 使用同一语言 IR，但职责分离。
 8. 第一阶段复用现有 SQLite schema，只保存服务级 dependency。
 9. 只有接口级 HTTP/RPC 调用需要持久化时，才引入 operation 层并升级 schema。
+10. 测试源码不能产生 runtime 入口；依赖 caller 不能丢失 repo/module ownership。
