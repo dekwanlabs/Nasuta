@@ -159,7 +159,42 @@ public class LibController {
     @GetMapping("/items")
     public String items() { return "ok"; }
 }`)
+	writeFile(t, root, base+"/lib-module/src/test/java/com/lib/ManualMain.java", `package com.lib;
+public class ManualMain {
+    public static void main(String[] args) {}
+}`)
 	return root
+}
+
+// TestScanJavaServicesIgnoresTestSourceEntrypoints keeps test helpers from
+// turning a library module into a Spring Boot runtime service.
+func TestScanJavaServicesIgnoresTestSourceEntrypoints(t *testing.T) {
+	root := multiModuleWorkspace(t)
+	services := scanJavaServices(root, mustDiscoverScanDirs(t, root))
+	library := findService(services, "lib-module")
+	if library == nil {
+		t.Fatalf("library module not registered; got %v", serviceNames(services))
+	}
+	if library.Runtime != "" {
+		t.Fatalf("library runtime = %q, want empty when main is only under src/test", library.Runtime)
+	}
+}
+
+func TestScanJavaServicesIgnoresRuntimeKeywordsOutsideCode(t *testing.T) {
+	root := t.TempDir()
+	base := "repos/team/shared-library"
+	writeFile(t, root, base+"/pom.xml", "<project><artifactId>shared-library</artifactId></project>")
+	writeFile(t, root, base+"/src/main/java/com/example/Example.java", `package com.example;
+// @SpringBootApplication public static void main(String[] args) {}
+public class Example {
+    String example = "SpringApplication.run";
+}`)
+
+	services := scanJavaServices(root, mustDiscoverScanDirs(t, root))
+	service := findService(services, "shared-library")
+	if service == nil || service.Runtime != "" {
+		t.Fatalf("runtime inferred from comments or strings: %+v", service)
+	}
 }
 
 // TestScanJavaServicesRegistersLibraryModules guards the fix for silent
@@ -436,6 +471,40 @@ server.route({ path: "/health", method: "GET", handler })`)
 	}
 	if endpoint := findEndpoint(b.Endpoints, "ANY", "/orders"); endpoint != nil {
 		t.Fatalf("controller prefix incorrectly indexed as endpoint: %+v", endpoint)
+	}
+}
+
+func TestNodeJSPackageWithoutRuntimeEvidenceIsNotAnApplication(t *testing.T) {
+	root := t.TempDir()
+	base := "repos/web/shared-types"
+	writeFile(t, root, base+"/package.json", `{"name":"@demo/shared-types","main":"dist/index.js"}`)
+	writeFile(t, root, base+"/src/index.ts", "export type User = { id: string };\n")
+
+	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
+	service := findService(b.Services, "shared-types")
+	if service == nil {
+		t.Fatalf("shared package was not registered; services=%v", serviceNames(b.Services))
+	}
+	if service.Runtime != "" || len(service.Entrypoints) != 0 {
+		t.Fatalf("shared package runtime evidence = %+v, want no runtime", service)
+	}
+}
+
+func TestPythonServiceDoesNotInferBusinessTagFromRepositoryName(t *testing.T) {
+	root := t.TempDir()
+	base := "repos/ai/catalog-api"
+	writeFile(t, root, base+"/pyproject.toml", "[project]\nname = \"catalog-api\"\n")
+	writeFile(t, root, base+"/main.py", "from fastapi import FastAPI\napp = FastAPI()\n")
+
+	b := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
+	service := findService(b.Services, "catalog-api")
+	if service == nil {
+		t.Fatalf("catalog-api service was not registered; services=%v", serviceNames(b.Services))
+	}
+	for _, tag := range service.Tags {
+		if tag == "ai" {
+			t.Fatalf("service received business tag from repository path: %+v", service)
+		}
 	}
 }
 

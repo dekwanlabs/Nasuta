@@ -388,3 +388,53 @@ func hasEvidenceKind(evidence []domain.Evidence, kind domain.SourceKind) bool {
 		return item.Kind == kind
 	})
 }
+
+func TestFeignConsumersKeepCallerIdentityAcrossSameNamedModules(t *testing.T) {
+	root := t.TempDir()
+	for _, repo := range []string{"hsas-sync", "hsas-mingdao-sync"} {
+		base := "repos/hsas/" + repo
+		writeFile(t, root, base+"/pom.xml", `<project>
+  <groupId>com.example</groupId>
+  <artifactId>`+repo+`</artifactId>
+  <packaging>pom</packaging>
+</project>`)
+		writeFile(t, root, base+"/hsas-sync-cookbook/pom.xml", `<project>
+  <groupId>com.example</groupId>
+  <artifactId>hsas-sync-cookbook</artifactId>
+</project>`)
+		writeFile(t, root, base+"/hsas-sync-cookbook/src/main/java/com/example/SyncFeign.java", `package com.example;
+@FeignClient(name = "hsas-file-application")
+public interface SyncFeign {}`)
+		writeFile(t, root, base+"/hsas-sync-application/pom.xml", `<project>
+  <groupId>com.example</groupId>
+  <artifactId>hsas-sync-application</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>hsas-sync-cookbook</artifactId>
+    </dependency>
+  </dependencies>
+</project>`)
+		writeFile(t, root, base+"/hsas-sync-application/src/main/java/com/example/SyncApplication.java",
+			"package com.example;\n@SpringBootApplication\npublic class SyncApplication {}\n")
+	}
+
+	bundle := BuildStructuralBundle(root, mustDiscoverScanDirs(t, root))
+	callers := make(map[string]struct{}, 2)
+	for _, dependency := range bundle.Dependencies {
+		if dependency.From == "hsas-sync-application" && dependency.To == "hsas-file-application" {
+			callers[dependency.CallerServiceKey] = struct{}{}
+		}
+	}
+	if len(callers) != 2 {
+		t.Fatalf("same-named Feign consumers = %#v, want two distinct callers; dependencies=%#v", callers, bundle.Dependencies)
+	}
+	for _, service := range bundle.Services {
+		if service.ServiceName != "hsas-sync-application" {
+			continue
+		}
+		if _, ok := callers[service.ServiceKey]; !ok {
+			t.Errorf("missing Feign dependency for %s/%s (key %s)", service.Repo, service.ModulePath, service.ServiceKey)
+		}
+	}
+}
