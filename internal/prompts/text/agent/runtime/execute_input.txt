@@ -1,0 +1,4 @@
+Execute this JSON input against output schema {{ .SchemaID }} version {{ .SchemaVersion }}. Return only the required output.
+<input format="json">
+{{ .Input }}
+</input>

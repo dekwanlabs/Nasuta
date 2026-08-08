@@ -84,7 +84,7 @@ func TestSessionCompactionBatchesOldestTurnsToLowWater(t *testing.T) {
 	mock.ExpectQuery(`SELECT user_id,compacted_through_turn FROM qa_sessions WHERE id=\? FOR UPDATE`).
 		WithArgs("session-1").
 		WillReturnRows(sqlmock.NewRows([]string{"user_id", "compacted_through_turn"}).AddRow(42, 0))
-	mock.ExpectExec(`INSERT INTO qa_turn_contexts.*detail_json`).
+	mock.ExpectExec(`UPDATE qa_turns target.*SET target\.context_ref=context\.ref`).
 		WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectExec(`INSERT INTO qa_session_history_index_outbox.*VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 2))
@@ -174,7 +174,7 @@ func TestPostTurnArchiveBoundsRecentHistoryBelowHighWater(t *testing.T) {
 	mock.ExpectQuery(`SELECT user_id,compacted_through_turn FROM qa_sessions WHERE id=\? FOR UPDATE`).
 		WithArgs("session-1").
 		WillReturnRows(sqlmock.NewRows([]string{"user_id", "compacted_through_turn"}).AddRow(42, 0))
-	mock.ExpectExec(`INSERT INTO qa_turn_contexts.*detail_json`).
+	mock.ExpectExec(`UPDATE qa_turns target.*SET target\.context_ref=context\.ref`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO qa_session_history_index_outbox.*VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 1))

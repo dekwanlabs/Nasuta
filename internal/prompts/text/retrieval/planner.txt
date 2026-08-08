@@ -1,0 +1,3 @@
+Complete the configured analyses in one response. Return JSON only with exactly these top-level properties: {{ .Properties }}.
+
+{{ .Contracts }}

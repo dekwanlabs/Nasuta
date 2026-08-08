@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
@@ -41,7 +41,7 @@ func (handler *Handler) RunEvents(w http.ResponseWriter, r *http.Request) {
 		writer.emitError(err)
 		return
 	}
-	if terminal || featuredelivery.IsTerminalRun(run.Status) {
+	if terminal || delivery.IsTerminalRun(run.Status) {
 		return
 	}
 
@@ -91,7 +91,7 @@ func (handler *Handler) RunEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (handler *Handler) emitLiveEvent(ctx context.Context, writer *eventWriter, reader *featuredelivery.RunEventReader, lastSeq int64, event featuredelivery.RunEvent) (int64, bool, error) {
+func (handler *Handler) emitLiveEvent(ctx context.Context, writer *eventWriter, reader *delivery.RunEventReader, lastSeq int64, event delivery.RunEvent) (int64, bool, error) {
 	if event.Seq <= lastSeq {
 		return lastSeq, false, nil
 	}
@@ -109,7 +109,7 @@ func (handler *Handler) emitLiveEvent(ctx context.Context, writer *eventWriter, 
 	return event.Seq, terminalEvent(event.Kind), nil
 }
 
-func (handler *Handler) replayEvents(ctx context.Context, writer *eventWriter, reader *featuredelivery.RunEventReader, afterSeq int64) (int64, bool, error) {
+func (handler *Handler) replayEvents(ctx context.Context, writer *eventWriter, reader *delivery.RunEventReader, afterSeq int64) (int64, bool, error) {
 	lastSeq := afterSeq
 	for {
 		events, err := reader.List(ctx, lastSeq, eventReplayPage)
@@ -166,7 +166,7 @@ func newEventWriter(w http.ResponseWriter) (*eventWriter, error) {
 	return &eventWriter{writer: w, flusher: flusher}, nil
 }
 
-func (writer *eventWriter) emit(event featuredelivery.RunEvent) error {
+func (writer *eventWriter) emit(event delivery.RunEvent) error {
 	raw, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -189,10 +189,10 @@ func (writer *eventWriter) keepalive() {
 	writer.flusher.Flush()
 }
 
-func terminalEvent(kind featuredelivery.EventKind) bool {
+func terminalEvent(kind delivery.EventKind) bool {
 	switch kind {
-	case featuredelivery.EventRunFailed, featuredelivery.EventRunCancelled,
-		featuredelivery.EventRunInterrupted, featuredelivery.EventRunSucceeded:
+	case delivery.EventRunFailed, delivery.EventRunCancelled,
+		delivery.EventRunInterrupted, delivery.EventRunSucceeded:
 		return true
 	default:
 		return false

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 )
 
@@ -57,10 +57,10 @@ func TestWorkflowRoutesRequireAuthenticationAndAdminPublication(t *testing.T) {
 }
 
 func TestWorkflowListUsesBoundedStableCursor(t *testing.T) {
-	workflows := &recordingService{definitions: []agentworkflow.DefinitionRecord{
-		{WorkflowDefinition: agentworkflow.WorkflowDefinition{ID: "a.flow", Version: 1}},
-		{WorkflowDefinition: agentworkflow.WorkflowDefinition{ID: "a.flow", Version: 2}},
-		{WorkflowDefinition: agentworkflow.WorkflowDefinition{ID: "b.flow", Version: 1}},
+	workflows := &recordingService{definitions: []workflow.DefinitionRecord{
+		{WorkflowDefinition: workflow.WorkflowDefinition{ID: "a.flow", Version: 1}},
+		{WorkflowDefinition: workflow.WorkflowDefinition{ID: "a.flow", Version: 2}},
+		{WorkflowDefinition: workflow.WorkflowDefinition{ID: "b.flow", Version: 1}},
 	}}
 	mux := workflowMux(&Handler{service: workflows})
 	cursor := encodeDefinitionCursor(workflows.definitions[0])
@@ -76,8 +76,8 @@ func TestWorkflowListUsesBoundedStableCursor(t *testing.T) {
 	}
 	var envelope struct {
 		Data struct {
-			Items      []agentworkflow.DefinitionRecord `json:"items"`
-			NextCursor string                           `json:"next_cursor"`
+			Items      []workflow.DefinitionRecord `json:"items"`
+			NextCursor string                      `json:"next_cursor"`
 		} `json:"data"`
 	}
 	decodeResponse(t, response, &envelope)
@@ -101,7 +101,7 @@ func TestWorkflowListUsesBoundedStableCursor(t *testing.T) {
 
 func TestWorkflowDefinitionControlsRequireAdminAndExposeAudit(t *testing.T) {
 	workflows := &recordingService{
-		audit: []agentworkflow.DefinitionAuditEvent{{
+		audit: []workflow.DefinitionAuditEvent{{
 			Seq: 4, DefinitionID: "review.flow", Version: 2,
 			Action: "default_set", ActorUserID: 8,
 		}},
@@ -190,8 +190,8 @@ func TestWorkflowDefinitionControlsRequireAdminAndExposeAudit(t *testing.T) {
 	}
 	var envelope struct {
 		Data struct {
-			Items        []agentworkflow.DefinitionAuditEvent `json:"items"`
-			NextAfterSeq int64                                `json:"next_after_seq"`
+			Items        []workflow.DefinitionAuditEvent `json:"items"`
+			NextAfterSeq int64                           `json:"next_after_seq"`
 		} `json:"data"`
 	}
 	decodeResponse(t, response, &envelope)
@@ -201,14 +201,14 @@ func TestWorkflowDefinitionControlsRequireAdminAndExposeAudit(t *testing.T) {
 }
 
 func TestWorkflowRolloutControlsAreAuthenticatedAndAuditable(t *testing.T) {
-	rule := agentworkflow.RolloutRule{
+	rule := workflow.RolloutRule{
 		WorkflowID: "review.flow", RuleVersion: 3, CandidateVersion: 2,
 		PercentageBPS: 2500, Salt: "rollout-2026-08",
 		RuleHash: strings.Repeat("a", 64), Active: true, CreatedBy: 8,
 	}
 	workflows := &recordingService{
 		rollout: rule, hasRollout: true,
-		rolloutAudit: []agentworkflow.RolloutAuditEvent{{
+		rolloutAudit: []workflow.RolloutAuditEvent{{
 			Seq: 5, WorkflowID: rule.WorkflowID, RuleVersion: rule.RuleVersion,
 			CandidateVersion: rule.CandidateVersion, PercentageBPS: rule.PercentageBPS,
 			RuleHash: rule.RuleHash, Action: "rollout_enabled", ActorUserID: 8,
@@ -262,7 +262,7 @@ func TestWorkflowRolloutControlsAreAuthenticatedAndAuditable(t *testing.T) {
 		t.Fatalf("rollout get status=%d body=%s", response.Code, response.Body.String())
 	}
 	var rolloutEnvelope struct {
-		Data agentworkflow.RolloutRule `json:"data"`
+		Data workflow.RolloutRule `json:"data"`
 	}
 	decodeResponse(t, response, &rolloutEnvelope)
 	if rolloutEnvelope.Data.RuleHash != rule.RuleHash {
@@ -296,8 +296,8 @@ func TestWorkflowRolloutControlsAreAuthenticatedAndAuditable(t *testing.T) {
 	}
 	var auditEnvelope struct {
 		Data struct {
-			Items        []agentworkflow.RolloutAuditEvent `json:"items"`
-			NextAfterSeq int64                             `json:"next_after_seq"`
+			Items        []workflow.RolloutAuditEvent `json:"items"`
+			NextAfterSeq int64                        `json:"next_after_seq"`
 		} `json:"data"`
 	}
 	decodeResponse(t, response, &auditEnvelope)
@@ -369,8 +369,8 @@ func TestWorkflowStartPreservesControlledReferenceAndReadOnlyBoundary(t *testing
 }
 
 func TestWorkflowRunAuthorizationAllowsOwnerAndAdmin(t *testing.T) {
-	workflows := &recordingService{run: agentworkflow.WorkflowRunRecord{
-		ID: "workflow_1", ActorUserID: 7, Status: agentworkflow.RunRunning,
+	workflows := &recordingService{run: workflow.WorkflowRunRecord{
+		ID: "workflow_1", ActorUserID: 7, Status: workflow.RunRunning,
 	}}
 	mux := workflowMux(&Handler{service: workflows})
 
@@ -406,20 +406,20 @@ func TestWorkflowRunAuthorizationAllowsOwnerAndAdmin(t *testing.T) {
 func TestWorkflowNodeAndHandoffPaginationPassStableCursors(t *testing.T) {
 	now := time.Date(2026, 8, 6, 10, 0, 0, 0, time.UTC)
 	workflows := &recordingService{
-		run: agentworkflow.WorkflowRunRecord{
-			ID: "workflow_1", ActorUserID: 7, Status: agentworkflow.RunRunning,
+		run: workflow.WorkflowRunRecord{
+			ID: "workflow_1", ActorUserID: 7, Status: workflow.RunRunning,
 		},
-		nodes: []agentworkflow.NodeRunRecord{
+		nodes: []workflow.NodeRunRecord{
 			{NodeID: "review", Attempt: 2},
 			{NodeID: "synthesize", Attempt: 1},
 		},
-		handoffs: []agentworkflow.Handoff{
+		handoffs: []workflow.Handoff{
 			{ID: "handoff_2", CreatedAt: now.Add(time.Second)},
 			{ID: "handoff_3", CreatedAt: now.Add(2 * time.Second)},
 		},
 	}
 	mux := workflowMux(&Handler{service: workflows})
-	nodeCursor := encodeCursor(agentworkflow.NodeRunCursor{
+	nodeCursor := encodeCursor(workflow.NodeRunCursor{
 		NodeID: "review", Attempt: 1,
 	})
 	response := serveWorkflowRequest(
@@ -442,7 +442,7 @@ func TestWorkflowNodeAndHandoffPaginationPassStableCursors(t *testing.T) {
 		)
 	}
 
-	handoffCursor := encodeCursor(agentworkflow.HandoffCursor{
+	handoffCursor := encodeCursor(workflow.HandoffCursor{
 		CreatedAt: now, ID: "handoff_1",
 	})
 	response = serveWorkflowRequest(
@@ -467,8 +467,8 @@ func TestWorkflowNodeAndHandoffPaginationPassStableCursors(t *testing.T) {
 }
 
 func TestWorkflowCancelIsIdempotent(t *testing.T) {
-	workflows := &recordingService{run: agentworkflow.WorkflowRunRecord{
-		ID: "workflow_1", ActorUserID: 7, Status: agentworkflow.RunRunning,
+	workflows := &recordingService{run: workflow.WorkflowRunRecord{
+		ID: "workflow_1", ActorUserID: 7, Status: workflow.RunRunning,
 	}}
 	mux := workflowMux(&Handler{service: workflows})
 
@@ -489,19 +489,19 @@ func TestWorkflowCancelIsIdempotent(t *testing.T) {
 			)
 		}
 		var envelope struct {
-			Data agentworkflow.CancelTransition `json:"data"`
+			Data workflow.CancelTransition `json:"data"`
 		}
 		decodeResponse(t, response, &envelope)
 		if envelope.Data.Applied != (call == 0) ||
-			envelope.Data.Status != agentworkflow.RunCancelled {
+			envelope.Data.Status != workflow.RunCancelled {
 			t.Fatalf("cancel %d transition=%+v", call+1, envelope.Data)
 		}
 	}
 }
 
 func TestWorkflowApprovalValidatesInputAndAuthorization(t *testing.T) {
-	workflows := &recordingService{run: agentworkflow.WorkflowRunRecord{
-		ID: "workflow_1", ActorUserID: 7, Status: agentworkflow.RunWaitingHuman,
+	workflows := &recordingService{run: workflow.WorkflowRunRecord{
+		ID: "workflow_1", ActorUserID: 7, Status: workflow.RunWaitingHuman,
 	}}
 	mux := workflowMux(&Handler{service: workflows})
 	path := "/api/workflow-runs/workflow_1/nodes/human.review/approval"
@@ -536,7 +536,7 @@ func TestWorkflowApprovalValidatesInputAndAuthorization(t *testing.T) {
 	if response.Code != http.StatusOK ||
 		workflows.lastApproval.WorkflowRunID != "workflow_1" ||
 		workflows.lastApproval.NodeID != "human.review" ||
-		workflows.lastApproval.Decision != agentworkflow.ApprovalApproved ||
+		workflows.lastApproval.Decision != workflow.ApprovalApproved ||
 		workflows.lastApproval.Comment != "checked" ||
 		!workflows.lastApproval.Admin {
 		t.Fatalf(
@@ -567,7 +567,7 @@ func TestWorkflowApprovalDelegatesToConfiguredDecider(t *testing.T) {
 		workflows.approvalCalls != 0 ||
 		decider.lastRequest.WorkflowRunID != "pipeline_1" ||
 		decider.lastRequest.NodeID != "approve.system_design" ||
-		decider.lastRequest.Decision != agentworkflow.ApprovalRejected ||
+		decider.lastRequest.Decision != workflow.ApprovalRejected ||
 		decider.lastRequest.Approver.UserID != 18 ||
 		!decider.lastRequest.Admin ||
 		decider.lastRequest.Comment != "revise" {
@@ -587,11 +587,11 @@ func TestWorkflowDomainErrorsMapToHTTPStatus(t *testing.T) {
 		err    error
 		status int
 	}{
-		{err: agentworkflow.ErrInvalid, status: http.StatusBadRequest},
-		{err: agentworkflow.ErrForbidden, status: http.StatusForbidden},
-		{err: agentworkflow.ErrNotFound, status: http.StatusNotFound},
-		{err: agentworkflow.ErrConflict, status: http.StatusConflict},
-		{err: agentworkflow.ErrUnavailable, status: http.StatusServiceUnavailable},
+		{err: workflow.ErrInvalid, status: http.StatusBadRequest},
+		{err: workflow.ErrForbidden, status: http.StatusForbidden},
+		{err: workflow.ErrNotFound, status: http.StatusNotFound},
+		{err: workflow.ErrConflict, status: http.StatusConflict},
+		{err: workflow.ErrUnavailable, status: http.StatusServiceUnavailable},
 		{err: errors.New("database failed"), status: http.StatusInternalServerError},
 	}
 	for _, test := range tests {
@@ -611,17 +611,17 @@ func TestWorkflowDomainErrorsMapToHTTPStatus(t *testing.T) {
 type recordingService struct {
 	mu sync.Mutex
 
-	definitions  []agentworkflow.DefinitionRecord
-	audit        []agentworkflow.DefinitionAuditEvent
-	rollout      agentworkflow.RolloutRule
+	definitions  []workflow.DefinitionRecord
+	audit        []workflow.DefinitionAuditEvent
+	rollout      workflow.RolloutRule
 	hasRollout   bool
-	rolloutAudit []agentworkflow.RolloutAuditEvent
-	run          agentworkflow.WorkflowRunRecord
-	nodes        []agentworkflow.NodeRunRecord
-	events       []agentworkflow.Event
-	handoffs     []agentworkflow.Handoff
+	rolloutAudit []workflow.RolloutAuditEvent
+	run          workflow.WorkflowRunRecord
+	nodes        []workflow.NodeRunRecord
+	events       []workflow.Event
+	handoffs     []workflow.Handoff
 	reader       eventReader
-	live         chan agentworkflow.Event
+	live         chan workflow.Event
 
 	writeWorkflow bool
 	cancelled     bool
@@ -643,34 +643,34 @@ type recordingService struct {
 	lastActive            bool
 	lastPercentageBPS     int
 	lastSalt              string
-	lastStart             agentworkflow.StartRequest
-	lastApproval          agentworkflow.ApprovalRequest
-	lastNodeCursor        agentworkflow.NodeRunCursor
-	lastHandoffCursor     agentworkflow.HandoffCursor
+	lastStart             workflow.StartRequest
+	lastApproval          workflow.ApprovalRequest
+	lastNodeCursor        workflow.NodeRunCursor
+	lastHandoffCursor     workflow.HandoffCursor
 	lastAfterSeq          int64
 	lastLimit             int
 }
 
 type recordingApprovalDecider struct {
 	calls       int
-	lastRequest agentworkflow.ApprovalRequest
+	lastRequest workflow.ApprovalRequest
 }
 
 func (decider *recordingApprovalDecider) DecideHumanApproval(
 	_ context.Context,
-	request agentworkflow.ApprovalRequest,
-) (agentworkflow.ApprovalResult, error) {
+	request workflow.ApprovalRequest,
+) (workflow.ApprovalResult, error) {
 	decider.calls++
 	decider.lastRequest = request
-	return agentworkflow.ApprovalResult{
+	return workflow.ApprovalResult{
 		Applied: true,
-		Status:  agentworkflow.RunRunning,
+		Status:  workflow.RunRunning,
 	}, nil
 }
 
 func (service *recordingService) PublishDefinitionsAs(
 	_ context.Context,
-	_ []agentworkflow.WorkflowDefinition,
+	_ []workflow.WorkflowDefinition,
 	actorUserID int64,
 	admin bool,
 ) error {
@@ -678,16 +678,16 @@ func (service *recordingService) PublishDefinitionsAs(
 	service.lastPublishAdmin = admin
 	service.lastActorUserID = actorUserID
 	if !admin {
-		return agentworkflow.ErrForbidden
+		return workflow.ErrForbidden
 	}
 	return nil
 }
 
 func (service *recordingService) ListDefinitionRecords(
 	_ context.Context,
-	cursor agentworkflow.DefinitionCursor,
+	cursor workflow.DefinitionCursor,
 	limit int,
-) ([]agentworkflow.DefinitionRecord, error) {
+) ([]workflow.DefinitionRecord, error) {
 	service.lastLimit = limit
 	start := 0
 	for start < len(service.definitions) {
@@ -699,7 +699,7 @@ func (service *recordingService) ListDefinitionRecords(
 		start++
 	}
 	end := min(start+limit, len(service.definitions))
-	return append([]agentworkflow.DefinitionRecord(nil), service.definitions[start:end]...), nil
+	return append([]workflow.DefinitionRecord(nil), service.definitions[start:end]...), nil
 }
 
 func (service *recordingService) SetDefinitionDefault(
@@ -714,7 +714,7 @@ func (service *recordingService) SetDefinitionDefault(
 	service.lastDefinitionVersion = version
 	service.lastActorUserID = actorUserID
 	if !admin {
-		return agentworkflow.ErrForbidden
+		return workflow.ErrForbidden
 	}
 	return nil
 }
@@ -733,7 +733,7 @@ func (service *recordingService) SetDefinitionActive(
 	service.lastActorUserID = actorUserID
 	service.lastActive = active
 	if !admin {
-		return agentworkflow.ErrForbidden
+		return workflow.ErrForbidden
 	}
 	return nil
 }
@@ -744,20 +744,20 @@ func (service *recordingService) ListDefinitionAudit(
 	afterSeq int64,
 	limit int,
 	admin bool,
-) ([]agentworkflow.DefinitionAuditEvent, error) {
+) ([]workflow.DefinitionAuditEvent, error) {
 	service.auditCalls++
 	service.lastDefinitionID = id
 	service.lastAfterSeq = afterSeq
 	service.lastLimit = limit
 	if !admin {
-		return nil, agentworkflow.ErrForbidden
+		return nil, workflow.ErrForbidden
 	}
-	return append([]agentworkflow.DefinitionAuditEvent(nil), service.audit...), nil
+	return append([]workflow.DefinitionAuditEvent(nil), service.audit...), nil
 }
 
 func (service *recordingService) GetDefinitionRollout(
 	id string,
-) (agentworkflow.RolloutRule, bool, error) {
+) (workflow.RolloutRule, bool, error) {
 	service.lastDefinitionID = id
 	return service.rollout, service.hasRollout, nil
 }
@@ -771,7 +771,7 @@ func (service *recordingService) SetDefinitionRollout(
 	active bool,
 	actorUserID int64,
 	admin bool,
-) (agentworkflow.RolloutRule, error) {
+) (workflow.RolloutRule, error) {
 	service.rolloutCalls++
 	service.lastDefinitionID = id
 	service.lastDefinitionVersion = candidateVersion
@@ -780,7 +780,7 @@ func (service *recordingService) SetDefinitionRollout(
 	service.lastActive = active
 	service.lastActorUserID = actorUserID
 	if !admin {
-		return agentworkflow.RolloutRule{}, agentworkflow.ErrForbidden
+		return workflow.RolloutRule{}, workflow.ErrForbidden
 	}
 	return service.rollout, nil
 }
@@ -791,34 +791,34 @@ func (service *recordingService) ListDefinitionRolloutAudit(
 	afterSeq int64,
 	limit int,
 	admin bool,
-) ([]agentworkflow.RolloutAuditEvent, error) {
+) ([]workflow.RolloutAuditEvent, error) {
 	service.rolloutAuditCalls++
 	service.lastDefinitionID = id
 	service.lastAfterSeq = afterSeq
 	service.lastLimit = limit
 	if !admin {
-		return nil, agentworkflow.ErrForbidden
+		return nil, workflow.ErrForbidden
 	}
-	return append([]agentworkflow.RolloutAuditEvent(nil), service.rolloutAudit...), nil
+	return append([]workflow.RolloutAuditEvent(nil), service.rolloutAudit...), nil
 }
 
 func (service *recordingService) Start(
 	_ context.Context,
-	request agentworkflow.StartRequest,
-) (*agentworkflow.WorkflowRunRecord, error) {
+	request workflow.StartRequest,
+) (*workflow.WorkflowRunRecord, error) {
 	service.startCalls++
 	service.lastStart = request
 	service.lastStart.Input = append(json.RawMessage(nil), request.Input...)
 	if service.writeWorkflow && !request.Admin {
-		return nil, agentworkflow.ErrForbidden
+		return nil, workflow.ErrForbidden
 	}
 	run := service.run
 	if run.ID == "" {
-		run = agentworkflow.WorkflowRunRecord{
+		run = workflow.WorkflowRunRecord{
 			ID:          "workflow_1",
 			WorkflowID:  request.Workflow.ID,
 			ActorUserID: request.Actor.UserID,
-			Status:      agentworkflow.RunRunning,
+			Status:      workflow.RunRunning,
 		}
 	}
 	return &run, nil
@@ -829,12 +829,12 @@ func (service *recordingService) GetRun(
 	runID string,
 	userID int64,
 	admin bool,
-) (*agentworkflow.WorkflowRunRecord, error) {
+) (*workflow.WorkflowRunRecord, error) {
 	if service.run.ID != runID {
-		return nil, agentworkflow.ErrNotFound
+		return nil, workflow.ErrNotFound
 	}
 	if !admin && service.run.ActorUserID != userID {
-		return nil, agentworkflow.ErrForbidden
+		return nil, workflow.ErrForbidden
 	}
 	run := service.run
 	return &run, nil
@@ -843,17 +843,17 @@ func (service *recordingService) GetRun(
 func (service *recordingService) ListNodeRuns(
 	ctx context.Context,
 	runID string,
-	cursor agentworkflow.NodeRunCursor,
+	cursor workflow.NodeRunCursor,
 	limit int,
 	userID int64,
 	admin bool,
-) ([]agentworkflow.NodeRunRecord, error) {
+) ([]workflow.NodeRunRecord, error) {
 	if _, err := service.GetRun(ctx, runID, userID, admin); err != nil {
 		return nil, err
 	}
 	service.lastNodeCursor = cursor
 	service.lastLimit = limit
-	return append([]agentworkflow.NodeRunRecord(nil), service.nodes...), nil
+	return append([]workflow.NodeRunRecord(nil), service.nodes...), nil
 }
 
 func (service *recordingService) ListEvents(
@@ -863,13 +863,13 @@ func (service *recordingService) ListEvents(
 	limit int,
 	userID int64,
 	admin bool,
-) ([]agentworkflow.Event, error) {
+) ([]workflow.Event, error) {
 	if _, err := service.GetRun(ctx, runID, userID, admin); err != nil {
 		return nil, err
 	}
 	service.lastAfterSeq = afterSeq
 	service.lastLimit = limit
-	return append([]agentworkflow.Event(nil), service.events...), nil
+	return append([]workflow.Event(nil), service.events...), nil
 }
 
 func (service *recordingService) OpenRunEvents(
@@ -877,7 +877,7 @@ func (service *recordingService) OpenRunEvents(
 	runID string,
 	userID int64,
 	admin bool,
-) (*agentworkflow.WorkflowRunRecord, eventReader, error) {
+) (*workflow.WorkflowRunRecord, eventReader, error) {
 	service.mu.Lock()
 	service.openCalls++
 	service.mu.Unlock()
@@ -894,12 +894,12 @@ func (service *recordingService) OpenRunEvents(
 
 func (service *recordingService) SubscribeEvents(
 	string,
-) (<-chan agentworkflow.Event, func(), error) {
+) (<-chan workflow.Event, func(), error) {
 	service.mu.Lock()
 	service.subscribeCalls++
 	service.mu.Unlock()
 	if service.live == nil {
-		service.live = make(chan agentworkflow.Event)
+		service.live = make(chan workflow.Event)
 	}
 	return service.live, func() {}, nil
 }
@@ -907,17 +907,17 @@ func (service *recordingService) SubscribeEvents(
 func (service *recordingService) ListHandoffs(
 	ctx context.Context,
 	runID string,
-	cursor agentworkflow.HandoffCursor,
+	cursor workflow.HandoffCursor,
 	limit int,
 	userID int64,
 	admin bool,
-) ([]agentworkflow.Handoff, error) {
+) ([]workflow.Handoff, error) {
 	if _, err := service.GetRun(ctx, runID, userID, admin); err != nil {
 		return nil, err
 	}
 	service.lastHandoffCursor = cursor
 	service.lastLimit = limit
-	return append([]agentworkflow.Handoff(nil), service.handoffs...), nil
+	return append([]workflow.Handoff(nil), service.handoffs...), nil
 }
 
 func (service *recordingService) Cancel(
@@ -925,34 +925,34 @@ func (service *recordingService) Cancel(
 	runID string,
 	userID int64,
 	admin bool,
-) (agentworkflow.CancelTransition, error) {
+) (workflow.CancelTransition, error) {
 	if _, err := service.GetRun(ctx, runID, userID, admin); err != nil {
-		return agentworkflow.CancelTransition{}, err
+		return workflow.CancelTransition{}, err
 	}
 	if service.cancelled {
-		return agentworkflow.CancelTransition{
-			Status: agentworkflow.RunCancelled,
+		return workflow.CancelTransition{
+			Status: workflow.RunCancelled,
 		}, nil
 	}
 	service.cancelled = true
-	service.run.Status = agentworkflow.RunCancelled
-	return agentworkflow.CancelTransition{
-		Applied: true, Status: agentworkflow.RunCancelled,
+	service.run.Status = workflow.RunCancelled
+	return workflow.CancelTransition{
+		Applied: true, Status: workflow.RunCancelled,
 	}, nil
 }
 
 func (service *recordingService) DecideHumanApproval(
 	_ context.Context,
-	request agentworkflow.ApprovalRequest,
-) (agentworkflow.ApprovalResult, error) {
+	request workflow.ApprovalRequest,
+) (workflow.ApprovalResult, error) {
 	service.approvalCalls++
 	service.lastApproval = request
 	if !request.Admin && request.Approver.UserID != service.run.ActorUserID {
-		return agentworkflow.ApprovalResult{}, agentworkflow.ErrForbidden
+		return workflow.ApprovalResult{}, workflow.ErrForbidden
 	}
-	return agentworkflow.ApprovalResult{
-		Applied: true, Status: agentworkflow.RunRunning,
-		Approval: agentworkflow.WorkflowApproval{
+	return workflow.ApprovalResult{
+		Applied: true, Status: workflow.RunRunning,
+		Approval: workflow.WorkflowApproval{
 			WorkflowRunID: request.WorkflowRunID,
 			NodeID:        request.NodeID,
 			Decision:      request.Decision,

@@ -56,7 +56,13 @@ platform/     config / httpclient / httputil helpers reused across layers
 internal/     implementation — not a compatibility promise
 ```
 
-`internal/` groups the implementation: `agent` (QA loop + tool surface), `retrieval`, `indexing` (`indexer`, `docgen`), `callchain`, `memory`, `approval`, `auth`, `rbac`, `domain`, `llm`, `ontology`, `semantic`, `websearch`, `writeaction`, `platform` (`store`/`semanticstore`/`embed`/`ontologystore`/`dbschema`/`htmlconv`), and `transport` (`mcp`/`dashboard`/`routes`/`incidenthttp`/`webhook`).
+`internal/` groups the implementation: `agent` (QA loop + tool surface) with
+`agent/catalog` and `agent/workflow`; `feature` with `feature/delivery`,
+`feature/pipeline`, and `feature/reviewworkflow`; `retrieval`; `indexing`
+(`indexer`, `docgen`); `callchain`; `memory`; `approval`; `auth`; `rbac`;
+`domain`; `llm`; `ontology`; `semantic`; `websearch`; `writeaction`; `platform`
+(`store`/`semanticstore`/`embed`/`ontologystore`/`dbschema`/`htmlconv`); and
+`transport` (`mcp`/`dashboard`/`routes`/`incidenthttp`/`webhook`).
 
 Downstream consumers import only the outward packages above. Business implementation, retrieval, indexing, and transport orchestration all stay collected under `internal/`. Authentication (`internal/auth`) is internal platform assembly: upper layers receive an already-scoped `APIRegistrar` via `app.Extension` and never touch an auth handle.
 

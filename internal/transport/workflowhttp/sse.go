@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
@@ -27,7 +27,7 @@ func (handler *Handler) StreamEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	runID := r.PathValue("run_id")
@@ -80,7 +80,7 @@ func (handler *Handler) StreamEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case event, open := <-live:
 			if !open {
-				writer.emitError(agentworkflow.ErrUnavailable)
+				writer.emitError(workflow.ErrUnavailable)
 				return
 			}
 			lastSeq, terminal, err = handler.emitLiveEvent(
@@ -113,7 +113,7 @@ func (handler *Handler) emitLiveEvent(
 	writer *eventWriter,
 	reader eventReader,
 	lastSeq int64,
-	event agentworkflow.Event,
+	event workflow.Event,
 ) (int64, bool, error) {
 	if event.Seq <= lastSeq {
 		return lastSeq, false, nil
@@ -181,7 +181,7 @@ func newEventWriter(w http.ResponseWriter) (*eventWriter, error) {
 	return &eventWriter{writer: w, flusher: flusher}, nil
 }
 
-func (writer *eventWriter) emit(event agentworkflow.Event) error {
+func (writer *eventWriter) emit(event workflow.Event) error {
 	raw, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -220,10 +220,10 @@ func terminalEvent(kind string) bool {
 	}
 }
 
-func terminalRunStatus(status agentworkflow.RunStatus) bool {
+func terminalRunStatus(status workflow.RunStatus) bool {
 	switch status {
-	case agentworkflow.RunSucceeded, agentworkflow.RunFailed,
-		agentworkflow.RunCancelled, agentworkflow.RunTimedOut:
+	case workflow.RunSucceeded, workflow.RunFailed,
+		workflow.RunCancelled, workflow.RunTimedOut:
 		return true
 	default:
 		return false

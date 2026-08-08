@@ -13,8 +13,10 @@ const (
 	GroupRBAC            MySQLGroup = "rbac"
 	GroupDocuments       MySQLGroup = "documents"
 	GroupQASession       MySQLGroup = "qa_session"
+	GroupCatalogControl  MySQLGroup = "catalog_control"
 	GroupQARun           MySQLGroup = "qa_run"
 	GroupWorkflow        MySQLGroup = "workflow"
+	GroupRuntimeEvents   MySQLGroup = "runtime_events"
 	GroupQAMemory        MySQLGroup = "qa_memory"
 	GroupIncident        MySQLGroup = "incident"
 	GroupApproval        MySQLGroup = "approval"
@@ -28,8 +30,10 @@ var allMySQLGroups = []MySQLGroup{
 	GroupRBAC,
 	GroupDocuments,
 	GroupQASession,
+	GroupCatalogControl,
 	GroupQARun,
 	GroupWorkflow,
+	GroupRuntimeEvents,
 	GroupQAMemory,
 	GroupIncident,
 	GroupApproval,
@@ -165,26 +169,19 @@ var mysqlSchema = map[MySQLGroup][]string{
 				entities_json JSON NOT NULL,
 				question_terms_json JSON NOT NULL,
 				evidence_manifest_json JSON NOT NULL,
+				context_ref VARCHAR(64) NULL,
+				context_detail_json JSON NULL,
+				context_summary_text TEXT NULL,
+				context_summary_tokens INT NULL,
+				context_source_tokens INT NULL,
+				context_retained_tokens INT NULL,
+				context_archived_at TIMESTAMP NULL,
 				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				run_id_key    VARCHAR(64) AS (NULLIF(run_id, '')) STORED,
 				PRIMARY KEY (session_id, turn_no),
 				UNIQUE KEY uniq_session_run (session_id, run_id_key),
+				UNIQUE KEY uniq_qa_turn_context_ref (context_ref),
 				KEY idx_session_last (session_id, turn_no DESC)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS qa_turn_contexts (
-				ref           VARCHAR(64) PRIMARY KEY,
-				session_id    VARCHAR(64) NOT NULL,
-				user_id       BIGINT NOT NULL,
-				run_id        VARCHAR(64) NOT NULL DEFAULT '',
-				turn_number   INT NOT NULL,
-				detail_json   JSON NOT NULL,
-				summary_text  TEXT NOT NULL,
-				summary_tokens INT NOT NULL DEFAULT 0,
-				source_tokens INT NOT NULL DEFAULT 0,
-				retained_tokens INT NOT NULL DEFAULT 0,
-				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				UNIQUE KEY uniq_session_turn_context (session_id, turn_number),
-				KEY idx_user_session (user_id, session_id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS qa_session_history_terms (
 				session_id  VARCHAR(64) NOT NULL,
@@ -211,6 +208,39 @@ var mysqlSchema = map[MySQLGroup][]string{
 				KEY idx_due (next_attempt, id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	},
+	GroupCatalogControl: {
+		`CREATE TABLE IF NOT EXISTS catalog_rollouts (
+				catalog_kind      VARCHAR(32) NOT NULL,
+				subject_id        VARCHAR(128) NOT NULL,
+				rule_version      BIGINT NOT NULL,
+				candidate_id      VARCHAR(128) NOT NULL DEFAULT '',
+				candidate_version BIGINT NOT NULL,
+				percentage_bps    INT NOT NULL,
+				salt              VARCHAR(255) NOT NULL,
+				rule_hash         CHAR(64) NOT NULL,
+				active            TINYINT(1) NOT NULL DEFAULT 1,
+				created_by        BIGINT NOT NULL DEFAULT 0,
+				created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (catalog_kind, subject_id),
+				UNIQUE KEY uniq_catalog_rollout_hash (catalog_kind, rule_hash),
+				KEY idx_catalog_rollout_active (catalog_kind, subject_id, active, rule_version)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS catalog_audit (
+				seq               BIGINT AUTO_INCREMENT PRIMARY KEY,
+				catalog_kind      VARCHAR(32) NOT NULL,
+				event_kind        VARCHAR(16) NOT NULL,
+				subject_id        VARCHAR(128) NOT NULL,
+				version           BIGINT NOT NULL,
+				candidate_id      VARCHAR(128) NOT NULL DEFAULT '',
+				candidate_version BIGINT NOT NULL DEFAULT 0,
+				percentage_bps    INT NOT NULL DEFAULT 0,
+				rule_hash         CHAR(64) NOT NULL DEFAULT '',
+				action            VARCHAR(32) NOT NULL,
+				actor_user_id     BIGINT NOT NULL DEFAULT 0,
+				created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				KEY idx_catalog_audit_stream (catalog_kind, event_kind, subject_id, seq)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	},
 	GroupQARun: {
 		`CREATE TABLE IF NOT EXISTS agent_definitions (
 				id              VARCHAR(128) NOT NULL,
@@ -229,41 +259,6 @@ var mysqlSchema = map[MySQLGroup][]string{
 				UNIQUE KEY uniq_agent_definition_default (default_key),
 				KEY idx_agent_definition_list (id, version),
 				KEY idx_agent_definition_active (id, active, version)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS agent_definition_audit (
-				seq           BIGINT AUTO_INCREMENT PRIMARY KEY,
-				definition_id VARCHAR(128) NOT NULL,
-				version       BIGINT NOT NULL,
-				action        VARCHAR(32) NOT NULL,
-				actor_user_id BIGINT NOT NULL DEFAULT 0,
-				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				KEY idx_agent_definition_audit (definition_id, seq)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS agent_definition_rollouts (
-				agent_id          VARCHAR(128) NOT NULL,
-				rule_version      BIGINT NOT NULL,
-				candidate_version BIGINT NOT NULL,
-				percentage_bps    INT NOT NULL,
-				salt              VARCHAR(255) NOT NULL,
-				rule_hash         CHAR(64) NOT NULL,
-				active            TINYINT(1) NOT NULL DEFAULT 1,
-				created_by        BIGINT NOT NULL DEFAULT 0,
-				created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				PRIMARY KEY (agent_id),
-				UNIQUE KEY uniq_agent_rollout_hash (rule_hash),
-				KEY idx_agent_rollout_active (agent_id, active, rule_version)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS agent_definition_rollout_audit (
-				seq               BIGINT AUTO_INCREMENT PRIMARY KEY,
-				agent_id          VARCHAR(128) NOT NULL,
-				rule_version      BIGINT NOT NULL,
-				candidate_version BIGINT NOT NULL,
-				percentage_bps    INT NOT NULL,
-				rule_hash         CHAR(64) NOT NULL,
-				action            VARCHAR(32) NOT NULL,
-				actor_user_id     BIGINT NOT NULL DEFAULT 0,
-				created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				KEY idx_agent_rollout_audit (agent_id, seq)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS agent_runs (
 				id         VARCHAR(64) PRIMARY KEY,
@@ -333,27 +328,19 @@ var mysqlSchema = map[MySQLGroup][]string{
 				token_delta          INT NOT NULL DEFAULT 0,
 				reasoning_tokens     INT NOT NULL DEFAULT 0,
 				duration_ms          INT NOT NULL DEFAULT 0,
+				artifact_content     LONGBLOB NULL,
+				artifact_content_type VARCHAR(128) NULL,
 				created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				artifact_id_key      VARCHAR(64) AS (NULLIF(artifact_id, '')) STORED,
+				artifact_tool_call_key VARCHAR(128) AS (
+					CASE WHEN artifact_id<>'' THEN tool_call_id ELSE NULL END
+				) STORED,
 				UNIQUE KEY uniq_run_step (run_id, step_no),
+				UNIQUE KEY uniq_agent_step_artifact (artifact_id_key),
+				UNIQUE KEY uniq_agent_step_artifact_call (run_id, artifact_tool_call_key),
 				KEY idx_trace (trace_id),
 				KEY idx_run (run_id),
 				KEY idx_artifact (artifact_id)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS agent_tool_result_artifacts (
-				id           VARCHAR(64) PRIMARY KEY,
-				user_id      BIGINT NOT NULL,
-				session_id   VARCHAR(64) NOT NULL,
-				run_id       VARCHAR(64) NOT NULL,
-				tool_call_id VARCHAR(128) NOT NULL,
-				content      LONGBLOB NOT NULL,
-				content_type VARCHAR(128) NOT NULL,
-				sha256       CHAR(64) NOT NULL,
-				size_bytes   BIGINT NOT NULL,
-				coverage_json JSON NOT NULL,
-				created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				UNIQUE KEY uniq_run_tool_call (run_id, tool_call_id),
-				KEY idx_user_session (user_id, session_id),
-				KEY idx_run (run_id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS agent_llm_calls (
 				id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -393,41 +380,6 @@ var mysqlSchema = map[MySQLGroup][]string{
 				UNIQUE KEY uniq_workflow_definition_default (default_key),
 				KEY idx_workflow_definition_list (id, version),
 				KEY idx_workflow_definition_active (id, active, version)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS workflow_definition_audit (
-				seq           BIGINT AUTO_INCREMENT PRIMARY KEY,
-				definition_id VARCHAR(128) NOT NULL,
-				version       BIGINT NOT NULL,
-				action        VARCHAR(32) NOT NULL,
-				actor_user_id BIGINT NOT NULL DEFAULT 0,
-				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				KEY idx_workflow_definition_audit (definition_id, seq)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS workflow_definition_rollouts (
-				workflow_id       VARCHAR(128) NOT NULL,
-				rule_version      BIGINT NOT NULL,
-				candidate_version BIGINT NOT NULL,
-				percentage_bps    INT NOT NULL,
-				salt              VARCHAR(255) NOT NULL,
-				rule_hash         CHAR(64) NOT NULL,
-				active            TINYINT(1) NOT NULL DEFAULT 1,
-				created_by        BIGINT NOT NULL DEFAULT 0,
-				created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				PRIMARY KEY (workflow_id),
-				UNIQUE KEY uniq_workflow_rollout_hash (rule_hash),
-				KEY idx_workflow_rollout_active (workflow_id, active, rule_version)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS workflow_definition_rollout_audit (
-				seq               BIGINT AUTO_INCREMENT PRIMARY KEY,
-				workflow_id       VARCHAR(128) NOT NULL,
-				rule_version      BIGINT NOT NULL,
-				candidate_version BIGINT NOT NULL,
-				percentage_bps    INT NOT NULL,
-				rule_hash         CHAR(64) NOT NULL,
-				action            VARCHAR(32) NOT NULL,
-				actor_user_id     BIGINT NOT NULL DEFAULT 0,
-				created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				KEY idx_workflow_rollout_audit (workflow_id, seq)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS workflow_runs (
 				id                   VARCHAR(64) PRIMARY KEY,
@@ -475,10 +427,25 @@ var mysqlSchema = map[MySQLGroup][]string{
 				tool_call_count     BIGINT NOT NULL DEFAULT 0,
 				cost_micros         BIGINT NOT NULL DEFAULT 0,
 				retry_count         BIGINT NOT NULL DEFAULT 0,
+				approval_decision   VARCHAR(16) NULL,
+				approver_user_id    BIGINT NULL,
+				approver_tenant_id  VARCHAR(128) NULL,
+				approval_comment    TEXT NULL,
+				approval_decided_at TIMESTAMP NULL,
+				gate_decision_id    VARCHAR(64) NULL,
+				gate_id             VARCHAR(128) NULL,
+				gate_subject_hash   CHAR(64) NULL,
+				gate_decision       VARCHAR(32) NULL,
+				gate_reason_codes_json JSON NULL,
+				gate_finding_ids_json JSON NULL,
+				gate_evaluated_at   TIMESTAMP NULL,
 				started_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				ended_at             TIMESTAMP NULL,
 				PRIMARY KEY (workflow_run_id, node_id, attempt),
+				UNIQUE KEY uniq_workflow_gate_decision (gate_decision_id),
 				KEY idx_agent_run (agent_run_id),
+				KEY idx_approval_decided (workflow_run_id, approval_decided_at, node_id),
+				KEY idx_subject_gate (gate_subject_hash, gate_id, gate_evaluated_at),
 				KEY idx_status_started (status, started_at, workflow_run_id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS handoff_artifacts (
@@ -496,39 +463,18 @@ var mysqlSchema = map[MySQLGroup][]string{
 				UNIQUE KEY uniq_run_node_hash (workflow_run_id, producer_node_id, content_hash),
 				KEY idx_run_created (workflow_run_id, created_at, id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS workflow_events (
-				workflow_run_id      VARCHAR(64) NOT NULL,
-				seq                  BIGINT NOT NULL,
-				kind                 VARCHAR(32) NOT NULL,
-				node_id              VARCHAR(128) NOT NULL DEFAULT '',
-				summary              TEXT NOT NULL,
-				detail_json          JSON NULL,
-				created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				PRIMARY KEY (workflow_run_id, seq)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS workflow_approvals (
-				workflow_run_id      VARCHAR(64) NOT NULL,
-				node_id              VARCHAR(128) NOT NULL,
-				decision             VARCHAR(16) NOT NULL,
-				approver_user_id     BIGINT NOT NULL,
-				approver_tenant_id   VARCHAR(128) NOT NULL,
-				comment              TEXT NOT NULL,
-				decided_at           TIMESTAMP NOT NULL,
-				PRIMARY KEY (workflow_run_id, node_id),
-				KEY idx_approval_decided (workflow_run_id, decided_at, node_id)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS gate_decisions (
-				id                   VARCHAR(64) PRIMARY KEY,
-				workflow_run_id      VARCHAR(64) NOT NULL,
-				node_id              VARCHAR(128) NOT NULL,
-				gate_id              VARCHAR(128) NOT NULL,
-				subject_hash         CHAR(64) NOT NULL,
-				decision             VARCHAR(32) NOT NULL,
-				reason_codes_json    JSON NOT NULL,
-				finding_ids_json     JSON NOT NULL,
-				evaluated_at         TIMESTAMP NOT NULL,
-				UNIQUE KEY uniq_run_node_gate (workflow_run_id, node_id, gate_id),
-				KEY idx_subject_gate (subject_hash, gate_id, evaluated_at)
+	},
+	GroupRuntimeEvents: {
+		`CREATE TABLE IF NOT EXISTS runtime_events (
+				stream_kind VARCHAR(32) NOT NULL,
+				stream_id   VARCHAR(64) NOT NULL,
+				seq         BIGINT NOT NULL,
+				kind        VARCHAR(32) NOT NULL,
+				node_id     VARCHAR(128) NOT NULL DEFAULT '',
+				summary     TEXT NOT NULL,
+				detail_json JSON NULL,
+				created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (stream_kind, stream_id, seq)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	},
 	GroupQAMemory: {
@@ -631,21 +577,17 @@ var mysqlSchema = map[MySQLGroup][]string{
 				content_hash       CHAR(64) NOT NULL,
 				created_by         BIGINT NOT NULL,
 				created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				review_subject_hash CHAR(64) NULL,
+				review_round_id     VARCHAR(64) NULL,
+				review_gate_result_id VARCHAR(64) NULL,
+				review_decision     VARCHAR(16) NULL,
+				review_comment      TEXT NULL,
+				review_reviewer     BIGINT NULL,
+				review_created_at   TIMESTAMP NULL,
 					UNIQUE KEY uniq_request_kind_version (request_id, kind, version),
 					KEY idx_request_kind_parent_version (request_id, kind, parent_artifact_id, version),
 					KEY idx_request_created (request_id, created_at, id),
 				KEY idx_parent (parent_artifact_id)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS feature_artifact_reviews (
-				artifact_id    VARCHAR(64) PRIMARY KEY,
-				subject_hash   CHAR(64) NOT NULL,
-				review_round_id VARCHAR(64) NOT NULL,
-				gate_result_id VARCHAR(64) NOT NULL,
-				decision       VARCHAR(16) NOT NULL,
-				comment        TEXT NOT NULL,
-				reviewer       BIGINT NOT NULL,
-				created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				KEY idx_reviewer_created (reviewer, created_at)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS feature_generation_runs (
 				id                 VARCHAR(64) PRIMARY KEY,
@@ -701,46 +643,30 @@ var mysqlSchema = map[MySQLGroup][]string{
 				retain_until           TIMESTAMP NULL,
 				worktree_cleaned_at    TIMESTAMP NULL,
 				cleanup_error          VARCHAR(2048) NOT NULL DEFAULT '',
+				worktree_head          VARCHAR(64) NULL,
+				patch_rel_path         VARCHAR(1024) NULL,
+				patch_sha256           CHAR(64) NULL,
+				patch_bytes            BIGINT NULL,
+				files_changed          INT NULL,
+				additions              INT NULL,
+				deletions              INT NULL,
+				files_json             JSON NULL,
+				plan_deviations_json   JSON NULL,
+				validation_results_json JSON NULL,
+				provider_summary       TEXT NULL,
+				change_set_created_at  TIMESTAMP NULL,
+				review_subject_hash    CHAR(64) NULL,
+				review_round_id        VARCHAR(64) NULL,
+				review_gate_result_id  VARCHAR(64) NULL,
+				review_decision        VARCHAR(16) NULL,
+				review_comment         TEXT NULL,
+				review_reviewer        BIGINT NULL,
+				review_created_at      TIMESTAMP NULL,
 				created_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				UNIQUE KEY uniq_requester_client_request (requested_by, client_request_id),
 				KEY idx_request_created (request_id, created_at, id),
 				KEY idx_status_created (status, created_at, id),
 				KEY idx_lease (status, lease_expires_at)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS feature_run_events (
-				run_id      VARCHAR(64) NOT NULL,
-				seq         BIGINT NOT NULL,
-				kind        VARCHAR(32) NOT NULL,
-				summary     TEXT NOT NULL,
-				detail_json JSON NULL,
-				created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				PRIMARY KEY (run_id, seq)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS feature_change_sets (
-				run_id                  VARCHAR(64) PRIMARY KEY,
-				worktree_head           VARCHAR(64) NOT NULL,
-				patch_rel_path          VARCHAR(1024) NOT NULL,
-				patch_sha256            CHAR(64) NOT NULL,
-				patch_bytes             BIGINT NOT NULL,
-				files_changed           INT NOT NULL,
-				additions               INT NOT NULL,
-				deletions               INT NOT NULL,
-				files_json              JSON NOT NULL,
-				plan_deviations_json    JSON NOT NULL,
-				validation_results_json JSON NOT NULL,
-				provider_summary        TEXT NOT NULL,
-				created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS feature_change_reviews (
-				run_id          VARCHAR(64) PRIMARY KEY,
-				subject_hash    CHAR(64) NOT NULL,
-				review_round_id VARCHAR(64) NOT NULL,
-				gate_result_id  VARCHAR(64) NOT NULL,
-				decision        VARCHAR(16) NOT NULL,
-				comment         TEXT NOT NULL,
-				reviewer        BIGINT NOT NULL,
-				created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				KEY idx_reviewer_created (reviewer, created_at)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS review_policies (
 				id              VARCHAR(128) NOT NULL,
@@ -757,45 +683,6 @@ var mysqlSchema = map[MySQLGroup][]string{
 				UNIQUE KEY uniq_review_policy_hash (content_hash),
 				UNIQUE KEY uniq_review_policy_default (default_key),
 				KEY idx_review_policy_rollout (subject_kind, active, is_default, id, version)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS review_policy_audit (
-				seq           BIGINT NOT NULL AUTO_INCREMENT,
-				policy_id     VARCHAR(128) NOT NULL,
-				version       BIGINT NOT NULL,
-				action        VARCHAR(32) NOT NULL,
-				actor_user_id BIGINT NOT NULL,
-				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				PRIMARY KEY (seq),
-				KEY idx_review_policy_audit (policy_id, seq)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS review_policy_rollouts (
-				subject_kind            VARCHAR(48) NOT NULL,
-				rule_version            BIGINT NOT NULL,
-				candidate_policy_id     VARCHAR(128) NOT NULL,
-				candidate_policy_version BIGINT NOT NULL,
-				percentage_bps          INT NOT NULL,
-				salt                    VARCHAR(255) NOT NULL,
-				rule_hash               CHAR(64) NOT NULL,
-				active                  TINYINT(1) NOT NULL DEFAULT 1,
-				created_by              BIGINT NOT NULL DEFAULT 0,
-				created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				PRIMARY KEY (subject_kind),
-				UNIQUE KEY uniq_review_policy_rollout_hash (rule_hash),
-				KEY idx_review_policy_rollout_active (subject_kind, active, rule_version)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS review_policy_rollout_audit (
-				seq                       BIGINT NOT NULL AUTO_INCREMENT,
-				subject_kind              VARCHAR(48) NOT NULL,
-				rule_version              BIGINT NOT NULL,
-				candidate_policy_id       VARCHAR(128) NOT NULL,
-				candidate_policy_version  BIGINT NOT NULL,
-				percentage_bps            INT NOT NULL,
-				rule_hash                 CHAR(64) NOT NULL,
-				action                    VARCHAR(32) NOT NULL,
-				actor_user_id             BIGINT NOT NULL DEFAULT 0,
-				created_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				PRIMARY KEY (seq),
-				KEY idx_review_policy_rollout_audit (subject_kind, seq)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS review_rounds (
 				id             VARCHAR(64) PRIMARY KEY,
@@ -818,8 +705,15 @@ var mysqlSchema = map[MySQLGroup][]string{
 				created_by     BIGINT NOT NULL,
 				created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				completed_at   TIMESTAMP NULL,
+				gate_result_id VARCHAR(64) NULL,
+				gate_decision VARCHAR(24) NULL,
+				gate_result_json JSON NULL,
+				gate_content_hash CHAR(64) NULL,
+				gate_created_at TIMESTAMP NULL,
+				UNIQUE KEY uniq_review_gate_result_id (gate_result_id),
 				KEY idx_review_subject (subject_kind, subject_id, created_at, id),
-				KEY idx_review_status (status, created_at, id)
+				KEY idx_review_status (status, created_at, id),
+				KEY idx_review_gate_subject (subject_hash, gate_created_at, gate_result_id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS review_assignments (
 				id              VARCHAR(64) PRIMARY KEY,
@@ -841,15 +735,6 @@ var mysqlSchema = map[MySQLGroup][]string{
 				KEY idx_assignment_round (round_id, created_at, id),
 				KEY idx_assignment_status (status, created_at, id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS review_round_events (
-				round_id    VARCHAR(64) NOT NULL,
-				seq         BIGINT NOT NULL,
-				kind        VARCHAR(32) NOT NULL,
-				summary     TEXT NOT NULL,
-				detail_json JSON NULL,
-				created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				PRIMARY KEY (round_id, seq)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS review_reports (
 				id             VARCHAR(64) PRIMARY KEY,
 				round_id       VARCHAR(64) NOT NULL,
@@ -859,31 +744,22 @@ var mysqlSchema = map[MySQLGroup][]string{
 				report_json    JSON NOT NULL,
 				report_hash    CHAR(64) NOT NULL,
 				content_hash   CHAR(64) NOT NULL,
+				reuse_id       VARCHAR(64) NULL,
+				reuse_source_round_id VARCHAR(64) NULL,
+				reuse_source_assignment_id VARCHAR(64) NULL,
+				reuse_source_report_id VARCHAR(64) NULL,
+				reuse_policy_hash CHAR(64) NULL,
+				reuse_definition_hash CHAR(64) NULL,
+				reuse_reason   TEXT NULL,
+				reuse_actor_id BIGINT NULL,
+				reuse_created_at TIMESTAMP NULL,
 				completed_at   TIMESTAMP NOT NULL,
 				UNIQUE KEY uniq_review_assignment_report (assignment_id),
+				UNIQUE KEY uniq_review_report_reuse_id (reuse_id),
 				KEY idx_report_round (round_id, completed_at, id),
-				KEY idx_report_reuse (report_hash, id)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS review_report_reuses (
-				id                   VARCHAR(64) PRIMARY KEY,
-				round_id             VARCHAR(64) NOT NULL,
-				assignment_id        VARCHAR(64) NOT NULL,
-				report_id            VARCHAR(64) NOT NULL,
-				reviewer_id          VARCHAR(128) NOT NULL,
-				source_round_id      VARCHAR(64) NOT NULL,
-				source_assignment_id VARCHAR(64) NOT NULL,
-				source_report_id     VARCHAR(64) NOT NULL,
-				subject_hash         CHAR(64) NOT NULL,
-				policy_hash          CHAR(64) NOT NULL,
-				definition_hash      CHAR(64) NOT NULL,
-				report_hash          CHAR(64) NOT NULL,
-				reason               TEXT NOT NULL,
-				actor_id             BIGINT NOT NULL,
-				created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				UNIQUE KEY uniq_review_report_reuse_assignment (assignment_id),
-				UNIQUE KEY uniq_review_report_reuse_report (report_id),
-				KEY idx_review_report_reuse_source (source_report_id, created_at, id),
-				KEY idx_review_report_reuse_round (round_id, created_at, id)
+				KEY idx_report_reuse (report_hash, id),
+				KEY idx_review_report_reuse_source (reuse_source_report_id, reuse_created_at, reuse_id),
+				KEY idx_review_report_reuse_round (round_id, reuse_created_at, reuse_id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS review_findings (
 				id              VARCHAR(64) PRIMARY KEY,
@@ -897,20 +773,12 @@ var mysqlSchema = map[MySQLGroup][]string{
 				confidence      DOUBLE NOT NULL,
 				fingerprint     CHAR(64) NOT NULL,
 				location_json   JSON NULL,
+				evidence_json   JSON NOT NULL,
 				content_hash    CHAR(64) NOT NULL,
 				created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				KEY idx_finding_round (round_id, id),
 				KEY idx_finding_severity (round_id, severity, id),
 				KEY idx_finding_fingerprint (fingerprint)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS review_finding_evidence (
-				finding_id  VARCHAR(64) NOT NULL,
-				sequence    INT NOT NULL,
-				kind        VARCHAR(64) NOT NULL,
-				ref_value   VARCHAR(1024) NOT NULL,
-				source_hash VARCHAR(128) NOT NULL,
-				summary     TEXT NOT NULL,
-				PRIMARY KEY (finding_id, sequence)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS review_adjudications (
 				id                VARCHAR(64) PRIMARY KEY,
@@ -928,18 +796,6 @@ var mysqlSchema = map[MySQLGroup][]string{
 				created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				UNIQUE KEY uniq_round_adjudication (round_id, fingerprint),
 				KEY idx_adjudication_round (round_id, created_at, id)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS review_gate_results (
-				id            VARCHAR(64) PRIMARY KEY,
-				round_id      VARCHAR(64) NOT NULL,
-				subject_hash  CHAR(64) NOT NULL,
-				decision      VARCHAR(24) NOT NULL,
-				result_json   JSON NOT NULL,
-				policy_hash   CHAR(64) NOT NULL,
-				content_hash  CHAR(64) NOT NULL,
-				created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				UNIQUE KEY uniq_review_round_gate (round_id),
-				KEY idx_gate_subject (subject_hash, created_at, id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS finding_resolutions (
 				id               VARCHAR(64) PRIMARY KEY,

@@ -175,9 +175,6 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 	if _, err := tx.Exec(`DELETE FROM qa_session_history_terms WHERE session_id = ?`, r.ID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM qa_turn_contexts WHERE session_id = ?`, r.ID); err != nil {
-		return err
-	}
 	if _, err := tx.Exec(`DELETE FROM qa_turns WHERE session_id = ?`, r.ID); err != nil {
 		return err
 	}
@@ -213,9 +210,6 @@ func (ss *SessionStore) Delete(id string, userID int64) (bool, error) {
 		return false, err
 	}
 	if _, err := tx.Exec(`DELETE FROM qa_session_history_terms WHERE session_id = ?`, id); err != nil {
-		return false, err
-	}
-	if _, err := tx.Exec(`DELETE FROM qa_turn_contexts WHERE session_id = ?`, id); err != nil {
 		return false, err
 	}
 	if _, err := tx.Exec(`DELETE FROM qa_turns WHERE session_id = ?`, id); err != nil {
@@ -664,26 +658,54 @@ func (ss *SessionStore) ApplyCompaction(candidate CompactionCandidate, records [
 	if currentThrough != candidate.PreviousThrough {
 		return false, nil
 	}
-	placeholders := make([]string, len(records))
-	args := make([]any, 0, len(records)*11)
+	var contextRows strings.Builder
+	args := make([]any, 0, len(records)*9+1)
 	now := store.DatabaseTime(time.Now().UTC().Format(time.RFC3339))
 	archivedTokens := int64(0)
 	for i, record := range records {
 		if record.SummaryTokens <= 0 {
 			return false, fmt.Errorf("memory/session: summary token count for turn %d must be positive", record.TurnNumber)
 		}
-		placeholders[i] = "(?,?,?,?,?,?,?,?,?,?,?)"
+		if i > 0 {
+			contextRows.WriteString(" UNION ALL ")
+		}
+		contextRows.WriteString(
+			"SELECT ? AS turn_no,? AS run_id,? AS ref,? AS detail_json," +
+				"? AS summary_text,? AS summary_tokens,? AS source_tokens," +
+				"? AS retained_tokens,? AS archived_at",
+		)
 		args = append(args,
-			record.Ref, record.SessionID, record.UserID, record.RunID, record.TurnNumber,
-			[]byte(record.DetailJSON), record.SummaryText, record.SummaryTokens,
-			record.SourceTokens, record.RetainedTokens, now,
+			record.TurnNumber, record.RunID, record.Ref, []byte(record.DetailJSON),
+			record.SummaryText, record.SummaryTokens, record.SourceTokens,
+			record.RetainedTokens, now,
 		)
 		archivedTokens += int64(record.SummaryTokens)
 	}
-	if _, err := tx.Exec(
-		"INSERT INTO qa_turn_contexts(ref,session_id,user_id,run_id,turn_number,detail_json,summary_text,summary_tokens,source_tokens,retained_tokens,created_at) VALUES "+strings.Join(placeholders, ","),
-		args...); err != nil {
+	args = append(args, candidate.SessionID)
+	result, err := tx.Exec(
+		`UPDATE qa_turns target
+		 JOIN (`+contextRows.String()+`) context
+		   ON context.turn_no=target.turn_no AND context.run_id=target.run_id
+		 SET target.context_ref=context.ref,
+		     target.context_detail_json=context.detail_json,
+		     target.context_summary_text=context.summary_text,
+		     target.context_summary_tokens=context.summary_tokens,
+		     target.context_source_tokens=context.source_tokens,
+		     target.context_retained_tokens=context.retained_tokens,
+		     target.context_archived_at=context.archived_at
+		 WHERE target.session_id=? AND target.context_ref IS NULL`,
+		args...,
+	)
+	if err != nil {
 		return false, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return false, err
+	} else if affected != int64(len(records)) {
+		return false, fmt.Errorf(
+			"memory/session: archived %d of %d selected turns",
+			affected, len(records),
+		)
 	}
 	if err := insertHistoryTerms(tx, records); err != nil {
 		return false, err
@@ -709,9 +731,12 @@ func (ss *SessionStore) GetTurnDetail(sessionID string, userID int64, reference 
 	var record TurnContextRecord
 	var detail []byte
 	err := ss.db.QueryRow(
-		`SELECT ref,session_id,user_id,run_id,detail_json,turn_number,summary_text,summary_tokens,source_tokens,retained_tokens
-		 FROM qa_turn_contexts
-		 WHERE ref=? AND session_id=? AND user_id=?`,
+		`SELECT t.context_ref,t.session_id,s.user_id,t.run_id,t.context_detail_json,
+			t.turn_no,t.context_summary_text,t.context_summary_tokens,
+			t.context_source_tokens,t.context_retained_tokens
+		 FROM qa_turns t
+		 JOIN qa_sessions s ON s.id=t.session_id
+		 WHERE t.context_ref=? AND t.session_id=? AND s.user_id=?`,
 		reference, sessionID, userID).Scan(
 		&record.Ref, &record.SessionID, &record.UserID, &record.RunID, &detail,
 		&record.TurnNumber, &record.SummaryText, &record.SummaryTokens,

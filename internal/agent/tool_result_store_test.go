@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -34,11 +33,12 @@ func TestRunStoreAddStepPersistsInlineToolResultAtomically(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO agent_steps").
-		WithArgs(
-			step.RunID, step.StepNo, step.Kind, step.TraceID, "", step.ToolCallID, step.Tool, step.Args,
-			step.Content, step.PromptContent, step.AuthoritativeSHA256, step.PromptSHA256, step.SizeBytes,
-			coverageJSON, contractJSON, false, "", 0, 0, step.DurationMs, sqlmock.AnyArg(),
-		).
+			WithArgs(
+				step.RunID, step.StepNo, step.Kind, step.TraceID, "", step.ToolCallID, step.Tool, step.Args,
+				step.Content, step.PromptContent, step.AuthoritativeSHA256, step.PromptSHA256, step.SizeBytes,
+				coverageJSON, contractJSON, false, "", 0, 0, step.DurationMs,
+				nil, nil, sqlmock.AnyArg(),
+			).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
@@ -50,7 +50,7 @@ func TestRunStoreAddStepPersistsInlineToolResultAtomically(t *testing.T) {
 	}
 }
 
-func TestRunStoreAddStepPersistsArtifactBeforeReference(t *testing.T) {
+func TestRunStoreAddStepPersistsArtifactWithReferenceAtomically(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -70,22 +70,14 @@ func TestRunStoreAddStepPersistsArtifactBeforeReference(t *testing.T) {
 	}
 	coverageJSON, _ := json.Marshal(step.Coverage)
 	contractJSON, _ := json.Marshal(step.AnswerContract)
-	artifactInsert := regexp.QuoteMeta(`INSERT INTO agent_tool_result_artifacts(
-		id,user_id,session_id,run_id,tool_call_id,content,content_type,sha256,size_bytes,coverage_json,created_at)
-	 SELECT ?,user_id,session_id,id,?,?,?,?,?,?,? FROM agent_runs WHERE id=?`)
 
 	mock.ExpectBegin()
-	mock.ExpectExec("^"+artifactInsert+"$").
-		WithArgs(
-			step.ArtifactID, step.ToolCallID, []byte(step.Content), "application/json",
-			step.AuthoritativeSHA256, step.SizeBytes, coverageJSON, sqlmock.AnyArg(), step.RunID,
-		).
-		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO agent_steps").
 		WithArgs(
 			step.RunID, step.StepNo, step.Kind, step.TraceID, step.ArtifactID, step.ToolCallID, step.Tool, step.Args,
 			nil, step.PromptContent, step.AuthoritativeSHA256, step.PromptSHA256, step.SizeBytes,
-			coverageJSON, contractJSON, true, step.DeliveryError, 0, 0, 0, sqlmock.AnyArg(),
+			coverageJSON, contractJSON, true, step.DeliveryError, 0, 0, 0,
+			[]byte(step.Content), "application/json", sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
@@ -98,7 +90,7 @@ func TestRunStoreAddStepPersistsArtifactBeforeReference(t *testing.T) {
 	}
 }
 
-func TestRunStoreAddStepRollsBackWhenArtifactPersistenceFails(t *testing.T) {
+func TestRunStoreAddStepRollsBackWhenMergedArtifactPersistenceFails(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -112,12 +104,12 @@ func TestRunStoreAddStepRollsBackWhenArtifactPersistenceFails(t *testing.T) {
 	}
 
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO agent_tool_result_artifacts").
+	mock.ExpectExec("INSERT INTO agent_steps").
 		WillReturnError(errors.New("artifact storage unavailable"))
 	mock.ExpectRollback()
 
 	err = store.AddStep(step)
-	if err == nil || !strings.Contains(err.Error(), "persist tool result artifact") {
+	if err == nil || !strings.Contains(err.Error(), "persist agent step") {
 		t.Fatalf("AddStep error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -133,7 +125,7 @@ func TestRunStoreGetToolResultArtifactUsesBoundedOwnedRead(t *testing.T) {
 	defer db.Close()
 	store := &RunStore{db: db}
 	createdAt := time.Date(2026, 7, 31, 1, 2, 3, 0, time.UTC)
-	mock.ExpectQuery("SELECT id,session_id,run_id,tool_call_id,SUBSTRING\\(content,\\?,\\?\\)").
+	mock.ExpectQuery("SELECT s\\.artifact_id,r\\.session_id,s\\.run_id,s\\.tool_call_id,.*SUBSTRING\\(s\\.artifact_content,\\?,\\?\\)").
 		WithArgs(int64(4), 4, "artifact-1", int64(42), "session-1", "session-1").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "session_id", "run_id", "tool_call_id", "content", "content_type", "sha256", "size_bytes", "coverage_json", "created_at",
@@ -197,7 +189,7 @@ func TestRunStoreGetForUserDoesNotTreatZeroAsOwnershipBypass(t *testing.T) {
 	}
 }
 
-func TestRunStoreDeleteBySessionDeletesArtifactsBeforeRuns(t *testing.T) {
+func TestRunStoreDeleteBySessionDeletesStepsBeforeRuns(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -207,9 +199,6 @@ func TestRunStoreDeleteBySessionDeletesArtifactsBeforeRuns(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("DELETE c FROM agent_llm_calls").
-		WithArgs("session-1", int64(42)).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("DELETE a FROM agent_tool_result_artifacts").
 		WithArgs("session-1", int64(42)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE s FROM agent_steps").
@@ -236,7 +225,7 @@ func TestRunStoreGetToolResultArtifactKeepsUTF8ChunkBoundaries(t *testing.T) {
 	defer db.Close()
 	store := &RunStore{db: db}
 	partial := []byte("你好")[:5]
-	mock.ExpectQuery("SELECT id,session_id,run_id,tool_call_id,SUBSTRING\\(content,\\?,\\?\\)").
+	mock.ExpectQuery("SELECT s\\.artifact_id,r\\.session_id,s\\.run_id,s\\.tool_call_id,.*SUBSTRING\\(s\\.artifact_content,\\?,\\?\\)").
 		WithArgs(int64(1), 5, "artifact-utf8", int64(42), "session-1", "session-1").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "session_id", "run_id", "tool_call_id", "content", "content_type", "sha256", "size_bytes", "coverage_json", "created_at",

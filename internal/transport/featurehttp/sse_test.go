@@ -11,40 +11,40 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/auth"
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
 type eventReplayStore struct {
-	featuredelivery.Store
+	delivery.Store
 	mu     sync.Mutex
-	events []featuredelivery.RunEvent
+	events []delivery.RunEvent
 	calls  []int64
 	reads  int
-	status featuredelivery.RunStatus
+	status delivery.RunStatus
 }
 
-func (store *eventReplayStore) GetImplementation(context.Context, string) (*featuredelivery.ImplementationRun, error) {
+func (store *eventReplayStore) GetImplementation(context.Context, string) (*delivery.ImplementationRun, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.reads++
 	status := store.status
 	if status == "" {
-		status = featuredelivery.RunRunning
+		status = delivery.RunRunning
 	}
-	return &featuredelivery.ImplementationRun{ID: "run-1", RequestID: "feat-1", Status: status}, nil
+	return &delivery.ImplementationRun{ID: "run-1", RequestID: "feat-1", Status: status}, nil
 }
 
-func (store *eventReplayStore) GetFeature(context.Context, string) (*featuredelivery.FeatureRequest, error) {
-	return &featuredelivery.FeatureRequest{ID: "feat-1", CreatedBy: 7}, nil
+func (store *eventReplayStore) GetFeature(context.Context, string) (*delivery.FeatureRequest, error) {
+	return &delivery.FeatureRequest{ID: "feat-1", CreatedBy: 7}, nil
 }
 
-func (store *eventReplayStore) ListRunEvents(_ context.Context, _ string, afterSeq int64, limit int) ([]featuredelivery.RunEvent, error) {
+func (store *eventReplayStore) ListRunEvents(_ context.Context, _ string, afterSeq int64, limit int) ([]delivery.RunEvent, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.calls = append(store.calls, afterSeq)
 	start := sort.Search(len(store.events), func(index int) bool { return store.events[index].Seq > afterSeq })
 	end := min(start+limit, len(store.events))
-	return append([]featuredelivery.RunEvent(nil), store.events[start:end]...), nil
+	return append([]delivery.RunEvent(nil), store.events[start:end]...), nil
 }
 
 func (store *eventReplayStore) cursors() []int64 {
@@ -88,7 +88,7 @@ func TestEventCursorPrefersQueryAndRejectsInvalidValues(t *testing.T) {
 
 func TestReplayEventsPaginatesWithoutGaps(t *testing.T) {
 	store := &eventReplayStore{events: makeEvents(1001, 0)}
-	handler := New(featuredelivery.NewService(store, nil, 0))
+	handler := New(delivery.NewService(store, nil, 0))
 	recorder := httptest.NewRecorder()
 	writer, err := newEventWriter(recorder)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestReplayEventsPaginatesWithoutGaps(t *testing.T) {
 
 func TestReplayEventsStopsAtTerminalEvent(t *testing.T) {
 	store := &eventReplayStore{events: makeEvents(800, 501)}
-	handler := New(featuredelivery.NewService(store, nil, 0))
+	handler := New(delivery.NewService(store, nil, 0))
 	recorder := httptest.NewRecorder()
 	writer, err := newEventWriter(recorder)
 	if err != nil {
@@ -141,7 +141,7 @@ func TestReplayEventsStopsAtTerminalEvent(t *testing.T) {
 
 func TestEmitLiveEventReplaysSequenceGapWithoutDuplicate(t *testing.T) {
 	store := &eventReplayStore{events: makeEvents(2, 0)}
-	handler := New(featuredelivery.NewService(store, nil, 0))
+	handler := New(delivery.NewService(store, nil, 0))
 	recorder := httptest.NewRecorder()
 	writer, err := newEventWriter(recorder)
 	if err != nil {
@@ -165,13 +165,13 @@ func TestEmitLiveEventReplaysSequenceGapWithoutDuplicate(t *testing.T) {
 
 func TestEmitLiveEventSkipsReplayForContiguousSequence(t *testing.T) {
 	store := &eventReplayStore{}
-	handler := New(featuredelivery.NewService(store, nil, 0))
+	handler := New(delivery.NewService(store, nil, 0))
 	recorder := httptest.NewRecorder()
 	writer, err := newEventWriter(recorder)
 	if err != nil {
 		t.Fatal(err)
 	}
-	event := featuredelivery.RunEvent{RunID: "run-1", Seq: 2, Kind: featuredelivery.EventProviderMessage}
+	event := delivery.RunEvent{RunID: "run-1", Seq: 2, Kind: delivery.EventProviderMessage}
 	reader := openTestRunEventReader(t, handler)
 	lastSeq, terminal, err := handler.emitLiveEvent(context.Background(), writer, reader, 1, event)
 	if err != nil || terminal || lastSeq != 2 {
@@ -183,8 +183,8 @@ func TestEmitLiveEventSkipsReplayForContiguousSequence(t *testing.T) {
 }
 
 func TestRunEventsAuthorizesOnceAcrossReplayPages(t *testing.T) {
-	store := &eventReplayStore{events: makeEvents(1001, 0), status: featuredelivery.RunSucceeded}
-	handler := New(featuredelivery.NewService(store, nil, 0))
+	store := &eventReplayStore{events: makeEvents(1001, 0), status: delivery.RunSucceeded}
+	handler := New(delivery.NewService(store, nil, 0))
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(func(pattern string, route http.HandlerFunc) { mux.HandleFunc(pattern, route) })
 	request := httptest.NewRequest(http.MethodGet, "/api/feature-implementations/run-1/events", nil)
@@ -201,23 +201,23 @@ func TestRunEventsAuthorizesOnceAcrossReplayPages(t *testing.T) {
 	}
 }
 
-func makeEvents(count int, terminalSeq int64) []featuredelivery.RunEvent {
+func makeEvents(count int, terminalSeq int64) []delivery.RunEvent {
 	createdAt := time.Date(2026, 7, 29, 15, 0, 0, 0, time.UTC)
-	events := make([]featuredelivery.RunEvent, count)
+	events := make([]delivery.RunEvent, count)
 	for index := range events {
 		seq := int64(index + 1)
-		kind := featuredelivery.EventProviderMessage
+		kind := delivery.EventProviderMessage
 		if seq == terminalSeq {
-			kind = featuredelivery.EventRunSucceeded
+			kind = delivery.EventRunSucceeded
 		}
-		events[index] = featuredelivery.RunEvent{
+		events[index] = delivery.RunEvent{
 			RunID: "run-1", Seq: seq, Kind: kind, Summary: "event", CreatedAt: createdAt,
 		}
 	}
 	return events
 }
 
-func openTestRunEventReader(t *testing.T, handler *Handler) *featuredelivery.RunEventReader {
+func openTestRunEventReader(t *testing.T, handler *Handler) *delivery.RunEventReader {
 	t.Helper()
 	_, reader, err := handler.service.OpenRunEvents(context.Background(), "run-1", 7, false)
 	if err != nil {

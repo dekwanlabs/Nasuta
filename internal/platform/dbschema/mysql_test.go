@@ -32,32 +32,27 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 		tables []string
 	}{
 		{group: GroupAuth, tables: []string{"users", "sessions", "settings"}},
+		{group: GroupRBAC, tables: []string{"rbac_roles", "rbac_user_roles", "rbac_menus", "rbac_role_menus", "rbac_mcp_keys"}},
 		{group: GroupDocuments, tables: []string{"documents"}},
-		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_turn_contexts", "qa_session_history_terms", "qa_session_history_index_outbox"}},
+		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_session_history_terms", "qa_session_history_index_outbox"}},
+		{group: GroupCatalogControl, tables: []string{"catalog_rollouts", "catalog_audit"}},
 		{group: GroupQARun, tables: []string{
-			"agent_definitions", "agent_definition_audit",
-			"agent_definition_rollouts", "agent_definition_rollout_audit",
-			"agent_runs", "agent_steps", "agent_tool_result_artifacts", "agent_llm_calls",
+			"agent_definitions", "agent_runs", "agent_steps", "agent_llm_calls",
 		}},
 		{group: GroupWorkflow, tables: []string{
-			"workflow_definitions", "workflow_definition_audit",
-			"workflow_definition_rollouts", "workflow_definition_rollout_audit",
-			"workflow_runs", "workflow_node_runs", "handoff_artifacts",
-			"workflow_events", "workflow_approvals", "gate_decisions",
+			"workflow_definitions", "workflow_runs", "workflow_node_runs", "handoff_artifacts",
 		}},
+		{group: GroupRuntimeEvents, tables: []string{"runtime_events"}},
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
 		{group: GroupIncident, tables: []string{"incident_records"}},
 		{group: GroupApproval, tables: []string{"pending_actions"}},
 		{group: GroupFeatureDelivery, tables: []string{
 			"feature_user_workspaces", "feature_requests", "feature_artifacts",
-			"feature_artifact_reviews", "feature_generation_runs",
-			"feature_implementation_runs", "feature_run_events",
-			"feature_change_sets", "feature_change_reviews",
-			"review_policies", "review_policy_audit", "review_policy_rollouts",
-			"review_policy_rollout_audit", "review_rounds", "review_assignments",
-			"review_round_events", "review_reports", "review_report_reuses",
-			"review_findings", "review_finding_evidence", "review_adjudications",
-			"review_gate_results", "finding_resolutions",
+			"feature_generation_runs",
+			"feature_implementation_runs", "review_policies", "review_rounds",
+			"review_assignments", "review_reports",
+			"review_findings", "review_adjudications",
+			"finding_resolutions",
 			"review_evaluation_labels",
 		}},
 	}
@@ -77,150 +72,63 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 	}
 }
 
-func TestAgentWorkflowCatalogMigrationCreatesControlPlaneTables(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_workflow_catalog.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read agent workflow catalog migration: %v", err)
+func TestManagedSchemaContainsFortyOneTables(t *testing.T) {
+	total := 0
+	for _, statements := range mysqlSchema {
+		total += len(statements)
 	}
-	script := string(raw)
-	for _, required := range []string{
-		"CREATE TABLE IF NOT EXISTS agent_definitions",
-		"UNIQUE KEY uniq_agent_definition_default",
-		"CREATE TABLE IF NOT EXISTS agent_definition_audit",
-		"KEY idx_agent_definition_audit (definition_id, seq)",
-		"CREATE TABLE IF NOT EXISTS workflow_definitions",
-		"UNIQUE KEY uniq_workflow_definition_default",
-		"CREATE TABLE IF NOT EXISTS workflow_definition_audit",
-		"KEY idx_workflow_definition_audit (definition_id, seq)",
-		"CREATE TABLE IF NOT EXISTS workflow_definition_rollouts",
-		"CREATE TABLE IF NOT EXISTS workflow_definition_rollout_audit",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("agent workflow catalog migration missing %q", required)
-		}
+	if total != 41 {
+		t.Fatalf("managed schema table count=%d want=41", total)
 	}
 }
 
-func TestAgentRolloutSchemaAndMigrationStoreSelection(t *testing.T) {
-	statements := strings.Join(mysqlSchema[GroupQARun], "\n")
+func TestAgentRolloutSchemaStoresSelection(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupCatalogControl], "\n")
 	for _, required := range []string{
-		"CREATE TABLE IF NOT EXISTS agent_definition_rollouts",
-		"CREATE TABLE IF NOT EXISTS agent_definition_rollout_audit",
-		"selection_json JSON NOT NULL",
-		"KEY idx_agent_rollout_audit (agent_id, seq)",
+		"CREATE TABLE IF NOT EXISTS catalog_rollouts",
+		"CREATE TABLE IF NOT EXISTS catalog_audit",
+		"catalog_kind      VARCHAR(32) NOT NULL",
+		"KEY idx_catalog_audit_stream (catalog_kind, event_kind, subject_id, seq)",
 	} {
 		if !strings.Contains(statements, required) {
 			t.Fatalf("agent rollout schema missing %q", required)
 		}
 	}
-
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_rollout.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read agent rollout migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"ADD COLUMN selection_json JSON NULL",
-		"SET selection_json = JSON_OBJECT()",
-		"MODIFY COLUMN selection_json JSON NOT NULL",
-		"CREATE TABLE IF NOT EXISTS agent_definition_rollouts",
-		"CREATE TABLE IF NOT EXISTS agent_definition_rollout_audit",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("agent rollout migration missing %q", required)
-		}
-	}
 }
 
-func TestWorkflowRolloutSchemaAndMigrationStoreSelection(t *testing.T) {
-	statements := strings.Join(mysqlSchema[GroupWorkflow], "\n")
+func TestWorkflowRolloutSchemaStoresSelection(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupCatalogControl], "\n")
 	for _, required := range []string{
-		"CREATE TABLE IF NOT EXISTS workflow_definition_rollouts",
-		"CREATE TABLE IF NOT EXISTS workflow_definition_rollout_audit",
-		"selection_json       JSON NOT NULL",
-		"KEY idx_workflow_rollout_audit (workflow_id, seq)",
+		"CREATE TABLE IF NOT EXISTS catalog_rollouts",
+		"CREATE TABLE IF NOT EXISTS catalog_audit",
+		"PRIMARY KEY (catalog_kind, subject_id)",
+		"UNIQUE KEY uniq_catalog_rollout_hash (catalog_kind, rule_hash)",
 	} {
 		if !strings.Contains(statements, required) {
 			t.Fatalf("workflow rollout schema missing %q", required)
 		}
 	}
-
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_workflow_rollout.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read workflow rollout migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"ADD COLUMN selection_json JSON NULL",
-		"SET selection_json = JSON_OBJECT()",
-		"MODIFY COLUMN selection_json JSON NOT NULL",
-		"CREATE TABLE IF NOT EXISTS workflow_definition_rollouts",
-		"CREATE TABLE IF NOT EXISTS workflow_definition_rollout_audit",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("workflow rollout migration missing %q", required)
-		}
-	}
 }
 
 func TestReviewPolicySchemaStoresRolloutMetadata(t *testing.T) {
-	statements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
+	policyStatements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
+	controlStatements := strings.Join(mysqlSchema[GroupCatalogControl], "\n")
 	for _, required := range []string{
 		"active          TINYINT(1) NOT NULL DEFAULT 1",
 		"is_default      TINYINT(1) NOT NULL DEFAULT 0",
 		"default_key     VARCHAR(48) GENERATED ALWAYS",
-		"CREATE TABLE IF NOT EXISTS review_policy_audit",
-		"KEY idx_review_policy_audit (policy_id, seq)",
-		"CREATE TABLE IF NOT EXISTS review_policy_rollouts",
-		"CREATE TABLE IF NOT EXISTS review_policy_rollout_audit",
-		"KEY idx_review_policy_rollout_audit (subject_kind, seq)",
 	} {
-		if !strings.Contains(statements, required) {
+		if !strings.Contains(policyStatements, required) {
 			t.Fatalf("review policy schema missing %q", required)
 		}
 	}
-}
-
-func TestReviewPolicyMigrationStoresRolloutMetadata(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_feature_multi_agent_review.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read feature review migration: %v", err)
-	}
-	script := string(raw)
 	for _, required := range []string{
-		"CREATE TABLE IF NOT EXISTS review_policy_audit",
-		"UNIQUE KEY uniq_review_policy_default (default_key)",
-		"KEY idx_review_policy_audit (policy_id, seq)",
-		"CREATE TABLE IF NOT EXISTS review_policy_rollouts",
-		"CREATE TABLE IF NOT EXISTS review_policy_rollout_audit",
+		"CREATE TABLE IF NOT EXISTS catalog_rollouts",
+		"CREATE TABLE IF NOT EXISTS catalog_audit",
+		"candidate_id      VARCHAR(128) NOT NULL DEFAULT ''",
 	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("feature review migration missing %q", required)
-		}
-	}
-}
-
-func TestReviewPolicyRolloutMigrationStoresRoundSelectionSnapshot(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_review_policy_rollout.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read review policy rollout migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"ADD COLUMN policy_selection_json JSON NULL",
-		"SET policy_selection_json = JSON_OBJECT()",
-		"MODIFY COLUMN policy_selection_json JSON NOT NULL",
-		"CREATE TABLE IF NOT EXISTS review_policy_rollouts",
-		"CREATE TABLE IF NOT EXISTS review_policy_rollout_audit",
-		"KEY idx_review_policy_rollout_audit (subject_kind, seq)",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("review policy rollout migration missing %q", required)
+		if !strings.Contains(controlStatements, required) {
+			t.Fatalf("catalog control schema missing %q", required)
 		}
 	}
 }
@@ -236,21 +144,6 @@ func TestReviewEvaluationSchemaStoresImmutableLabels(t *testing.T) {
 			t.Fatalf("review evaluation schema missing %q", required)
 		}
 	}
-
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_review_evaluation.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read review evaluation migration: %v", err)
-	}
-	for _, required := range []string{
-		"CREATE TABLE IF NOT EXISTS review_evaluation_labels",
-		"UNIQUE KEY uniq_review_evaluation_target (round_id, target_hash)",
-		"KEY idx_review_evaluation_round (round_id, seq)",
-	} {
-		if !strings.Contains(string(raw), required) {
-			t.Fatalf("review evaluation migration missing %q", required)
-		}
-	}
 }
 
 func TestWorkflowSchemaStoresApprovalSnapshots(t *testing.T) {
@@ -258,73 +151,21 @@ func TestWorkflowSchemaStoresApprovalSnapshots(t *testing.T) {
 	for _, required := range []string{
 		"actor_permissions_json JSON NOT NULL",
 		"scenario_permissions_json JSON NOT NULL",
-		"CREATE TABLE IF NOT EXISTS workflow_approvals",
-		"PRIMARY KEY (workflow_run_id, node_id)",
-		"approver_user_id     BIGINT NOT NULL",
-		"approver_tenant_id   VARCHAR(128) NOT NULL",
+		"approval_decision   VARCHAR(16) NULL",
+		"approver_user_id    BIGINT NULL",
+		"approver_tenant_id  VARCHAR(128) NULL",
+		"approval_decided_at TIMESTAMP NULL",
 	} {
 		if !strings.Contains(statements, required) {
 			t.Fatalf("workflow schema missing %q", required)
-		}
-	}
-
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_workflow_human_approval.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read workflow approval migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"ADD COLUMN actor_permissions_json JSON NULL",
-		"ADD COLUMN scenario_permissions_json JSON NULL",
-		"JSON_OBJECT()",
-		"MODIFY COLUMN actor_permissions_json JSON NOT NULL",
-		"MODIFY COLUMN scenario_permissions_json JSON NOT NULL",
-		"CREATE TABLE IF NOT EXISTS workflow_approvals",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("workflow approval migration missing %q", required)
 		}
 	}
 }
 
 func TestFeatureDeliverySchemaStoresPlanDeviations(t *testing.T) {
 	statements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
-	if !strings.Contains(statements, "plan_deviations_json    JSON NOT NULL") {
+	if !strings.Contains(statements, "plan_deviations_json   JSON NULL") {
 		t.Fatal("feature delivery schema does not require plan deviation metadata")
-	}
-
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_feature_change_set_deviations.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read feature change set migration: %v", err)
-	}
-	for _, required := range []string{
-		"ADD COLUMN plan_deviations_json JSON NULL",
-		"SET plan_deviations_json = JSON_ARRAY()",
-		"MODIFY COLUMN plan_deviations_json JSON NOT NULL",
-	} {
-		if !strings.Contains(string(raw), required) {
-			t.Fatalf("feature change set migration missing %q", required)
-		}
-	}
-}
-
-func TestQASessionHistoryRetrievalMigrationReplacesRollingSummary(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_session_history_retrieval.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read QA session history migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"DELETE FROM qa_turn_contexts", "DROP COLUMN summary",
-		"archived_summary_tokens", "summary_tokens", "qa_session_history_terms",
-		"qa_session_history_index_outbox", "compacted_through_turn = 0",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("QA session history migration missing %q", required)
-		}
 	}
 }
 
@@ -343,7 +184,12 @@ func TestManagedSchemaDoesNotStoreTimesAsStrings(t *testing.T) {
 
 func TestQASessionSchemaUsesJSONCompactionPayloads(t *testing.T) {
 	statements := strings.Join(mysqlSchema[GroupQASession], "\n")
-	for _, required := range []string{"archived_summary_tokens BIGINT NOT NULL", "detail_json   JSON NOT NULL", "summary_tokens INT NOT NULL"} {
+	for _, required := range []string{
+		"archived_summary_tokens BIGINT NOT NULL",
+		"context_detail_json JSON NULL",
+		"context_summary_tokens INT NULL",
+		"UNIQUE KEY uniq_qa_turn_context_ref (context_ref)",
+	} {
 		if !strings.Contains(statements, required) {
 			t.Fatalf("QA session schema missing %q", required)
 		}
@@ -368,49 +214,34 @@ func TestPlatformSchemaExcludesObserveTables(t *testing.T) {
 	}
 }
 
-func TestLLMUsageMigrationAddsDetailAndRunAggregates(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_llm_usage.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read LLM usage migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"CREATE TABLE agent_llm_calls", "ADD COLUMN input_tokens", "ADD COLUMN output_tokens",
-		"ADD COLUMN total_tokens", "ADD COLUMN peak_reserved_tokens",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("LLM usage migration missing %q", required)
-		}
-	}
-}
-
-func TestAgentEvidenceCoverageMigrationAddsRunAggregates(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_evidence_coverage.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read agent evidence coverage migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"ADD COLUMN evidence_status VARCHAR(16) NOT NULL DEFAULT 'unavailable'", "ADD COLUMN forced_conclusion",
-		"ADD COLUMN evidence_result_count", "ADD COLUMN tool_call_count",
-		"ADD COLUMN tool_failure_count", "ADD COLUMN partial_result_count",
-		"ADD COLUMN omitted_evidence_count",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("agent evidence coverage migration missing %q", required)
-		}
-	}
-}
-
-func TestAgentDefinitionSnapshotMigrationPinsRunIdentity(t *testing.T) {
+func TestLLMUsageSchemaStoresDetailAndRunAggregates(t *testing.T) {
 	statements := strings.Join(mysqlSchema[GroupQARun], "\n")
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_definition_snapshots.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read agent definition snapshot migration: %v", err)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS agent_llm_calls",
+		"input_tokens", "output_tokens", "total_tokens", "peak_reserved_tokens",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("LLM usage schema missing %q", required)
+		}
 	}
+}
+
+func TestAgentEvidenceCoverageSchemaStoresRunAggregates(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupQARun], "\n")
+	for _, required := range []string{
+		"evidence_status VARCHAR(16) NOT NULL DEFAULT 'unavailable'", "forced_conclusion",
+		"evidence_result_count", "tool_call_count",
+		"tool_failure_count", "partial_result_count",
+		"omitted_evidence_count",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("agent evidence coverage schema missing %q", required)
+		}
+	}
+}
+
+func TestAgentDefinitionSnapshotSchemaPinsRunIdentity(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupQARun], "\n")
 	for _, required := range []string{
 		"agent_id", "definition_version", "definition_hash", "tool_snapshot_id",
 		"input_schema_version", "output_schema_version", "parent_run_id",
@@ -418,9 +249,6 @@ func TestAgentDefinitionSnapshotMigrationPinsRunIdentity(t *testing.T) {
 	} {
 		if !strings.Contains(statements, required) {
 			t.Fatalf("agent run schema missing %q", required)
-		}
-		if !strings.Contains(string(raw), "ADD COLUMN "+required) {
-			t.Fatalf("agent definition snapshot migration missing %q", required)
 		}
 	}
 }
@@ -434,7 +262,7 @@ func TestMemoryLastUsedUsesDateTime(t *testing.T) {
 
 func TestQAMessageSchemaStoresToolProtocol(t *testing.T) {
 	statements := mysqlSchema[GroupQASession]
-	if len(statements) != 6 {
+	if len(statements) != 5 {
 		t.Fatalf("qa session schema statements = %d", len(statements))
 	}
 	for _, required := range []string{
@@ -448,94 +276,104 @@ func TestQAMessageSchemaStoresToolProtocol(t *testing.T) {
 	}
 }
 
-func TestQAMessageToolMigrationAddsProtocolColumns(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_message_tools.sql")
+func TestFeatureSubjectReviewRemovalMigrationCopiesBothSubjectKinds(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_remove_feature_subject_reviews.sql")
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read QA message tool migration: %v", err)
+		t.Fatalf("read feature subject review removal migration: %v", err)
 	}
 	script := string(raw)
 	for _, required := range []string{
-		"ADD COLUMN tool_calls_json",
-		"ADD COLUMN tool_call_id",
-		"ADD COLUMN tool_name",
+		"ALTER TABLE feature_artifacts",
+		"ALTER TABLE feature_implementation_runs",
+		"IF old_table_exists = 0 THEN",
+		"LEAVE migration",
+		"subject_kind NOT IN ('artifact', 'change_set')",
+		"orphan_artifact_count",
+		"orphan_change_set_count",
+		"artifact_conflict_count",
+		"change_set_conflict_count",
+		"UPDATE feature_artifacts artifact",
+		"UPDATE feature_implementation_runs implementation",
+		"old_artifact_count <> migrated_artifact_count",
+		"old_change_set_count <> migrated_change_set_count",
+		"SIGNAL SQLSTATE '45000'",
+		"DROP TABLE feature_subject_reviews",
 	} {
 		if !strings.Contains(script, required) {
-			t.Fatalf("QA message tool migration missing %q", required)
+			t.Fatalf("feature subject review removal migration missing %q", required)
 		}
+	}
+	for _, column := range []string{
+		"ADD COLUMN review_subject_hash CHAR(64) NULL",
+		"ADD COLUMN review_round_id VARCHAR(64) NULL",
+		"ADD COLUMN review_gate_result_id VARCHAR(64) NULL",
+		"ADD COLUMN review_decision VARCHAR(16) NULL",
+		"ADD COLUMN review_comment TEXT NULL",
+		"ADD COLUMN review_reviewer BIGINT NULL",
+		"ADD COLUMN review_created_at TIMESTAMP NULL",
+	} {
+		if count := strings.Count(script, column); count != 2 {
+			t.Fatalf("feature subject review removal migration has %d copies of %q, want 2", count, column)
+		}
+	}
+	artifactValidation := strings.Index(script, "old_artifact_count <> migrated_artifact_count")
+	changeSetValidation := strings.Index(script, "old_change_set_count <> migrated_change_set_count")
+	commit := strings.Index(script, "COMMIT;")
+	drop := strings.Index(script, "DROP TABLE feature_subject_reviews")
+	if artifactValidation < 0 || changeSetValidation < 0 ||
+		commit < artifactValidation || commit < changeSetValidation || drop < commit {
+		t.Fatal("feature subject review removal migration drops source data before validation and commit")
 	}
 }
 
-func TestQASessionTurnCompactionMigrationBackfillsBoundaries(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_session_turn_compaction.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read QA session compaction migration: %v", err)
-	}
-	script := string(raw)
+func TestReviewGateMigrationMergesIntoRound(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
 	for _, required := range []string{
-		"ADD COLUMN turn_no", "CREATE TABLE IF NOT EXISTS qa_turns",
-		"CREATE TABLE IF NOT EXISTS qa_turn_contexts", "compacted_through_turn",
-		"OVER (PARTITION BY session_id ORDER BY seq",
+		"gate_result_id VARCHAR(64) NULL",
+		"gate_result_json JSON NULL",
+		"UNIQUE KEY uniq_review_gate_result_id (gate_result_id)",
+		"KEY idx_review_gate_subject (subject_hash, gate_created_at, gate_result_id)",
 	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("QA session compaction migration missing %q", required)
+		if !strings.Contains(statements, required) {
+			t.Fatalf("review round schema missing %q", required)
 		}
+	}
+	if strings.Contains(statements, "CREATE TABLE IF NOT EXISTS review_gate_results") {
+		t.Fatal("feature schema still creates review_gate_results")
 	}
 }
 
-func TestQASessionCompactionJSONMigrationResetsLegacySnapshots(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_session_compaction_json.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read QA session compaction JSON migration: %v", err)
-	}
-	script := string(raw)
+func TestFeatureChangeSetMigrationMergesIntoImplementationRun(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
 	for _, required := range []string{
-		"DELETE FROM qa_turn_contexts", "SET summary = NULL", "MODIFY COLUMN summary JSON NULL",
-		"CHANGE COLUMN text detail_json JSON NOT NULL", "DROP TABLE IF EXISTS qa_session_compactions",
+		"worktree_head          VARCHAR(64) NULL",
+		"plan_deviations_json   JSON NULL",
+		"change_set_created_at  TIMESTAMP NULL",
 	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("QA session compaction JSON migration missing %q", required)
+		if !strings.Contains(statements, required) {
+			t.Fatalf("feature implementation schema missing %q", required)
 		}
+	}
+	if strings.Contains(statements, "CREATE TABLE IF NOT EXISTS feature_change_sets") {
+		t.Fatal("feature schema still creates feature_change_sets")
 	}
 }
 
-func TestQATurnRunIDMigrationAddsMissingColumn(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_turns_run_id.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read QA turn run id migration: %v", err)
-	}
-	script := string(raw)
+func TestReviewReportReuseMigrationMergesIntoReport(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
 	for _, required := range []string{
-		"ALTER TABLE qa_turns",
-		"ADD COLUMN run_id",
-		"VARCHAR(64) NOT NULL DEFAULT ''",
-		"GENERATED ALWAYS AS (NULLIF(run_id, '')) STORED",
-		"UNIQUE KEY uniq_session_run (session_id, run_id_key)",
+		"reuse_id       VARCHAR(64) NULL",
+		"reuse_source_report_id VARCHAR(64) NULL",
+		"UNIQUE KEY uniq_review_report_reuse_id (reuse_id)",
+		"KEY idx_review_report_reuse_source (reuse_source_report_id, reuse_created_at, reuse_id)",
 	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("QA turn run id migration missing %q", required)
+		if !strings.Contains(statements, required) {
+			t.Fatalf("review report schema missing %q", required)
 		}
 	}
-}
-
-func TestQAContextPollutionMigrationAddsCanonicalTurnMetadata(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_qa_context_pollution_control.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read QA context pollution migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"ADD COLUMN question_text", "ADD COLUMN topic_key", "ADD COLUMN entities_json",
-		"ADD COLUMN question_terms_json", "ADD COLUMN evidence_manifest_json",
-		"'status', 'manifest_unavailable'", "MODIFY COLUMN entities_json JSON NOT NULL",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("QA context pollution migration missing %q", required)
-		}
+	if strings.Contains(statements, "CREATE TABLE IF NOT EXISTS review_report_reuses") {
+		t.Fatal("feature schema still creates review_report_reuses")
 	}
 }
 
@@ -568,37 +406,14 @@ func containsCreateTable(stmts []string, table string) bool {
 	return false
 }
 
-func TestAgentToolResultTraceMigrationPreservesAuthoritativeResults(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_agent_tool_result_trace.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read agent tool result trace migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"DROP COLUMN result_summary",
-		"ADD COLUMN prompt_content MEDIUMTEXT",
-		"ADD COLUMN authoritative_sha256 CHAR(64)",
-		"ADD COLUMN prompt_sha256 CHAR(64)",
-		"ADD KEY idx_trace (trace_id)",
-		"CREATE TABLE agent_tool_result_artifacts",
-		"content       LONGBLOB NOT NULL",
-		"UNIQUE KEY uniq_run_tool_call (run_id, tool_call_id)",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("agent tool result trace migration missing %q", required)
-		}
-	}
-	if strings.Contains(script, "UNIQUE KEY uniq_trace") || strings.Contains(script, "UNIQUE KEY idx_trace") {
-		t.Fatal("legacy rows with empty trace IDs cannot use a unique trace index")
-	}
-
+func TestAgentToolResultTraceSchemaPreservesAuthoritativeResults(t *testing.T) {
 	statements := strings.Join(mysqlSchema[GroupQARun], "\n")
 	for _, required := range []string{
 		"prompt_content       MEDIUMTEXT",
 		"authoritative_sha256 CHAR(64) NOT NULL",
-		"agent_tool_result_artifacts",
-		"content      LONGBLOB NOT NULL",
+		"artifact_content     LONGBLOB NULL",
+		"artifact_content_type VARCHAR(128) NULL",
+		"UNIQUE KEY uniq_agent_step_artifact (artifact_id_key)",
 	} {
 		if !strings.Contains(statements, required) {
 			t.Fatalf("managed QA run schema missing %q", required)

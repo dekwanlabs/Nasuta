@@ -1,0 +1,8 @@
+Generate a comprehensive technical document following the template below.
+Base EVERY conclusion on the provided code. Mark inferences with [inferred]. Use English.
+
+--- TEMPLATE ---
+{{ .Template }}
+
+--- PROJECT FILES ---
+{{ .Files }}

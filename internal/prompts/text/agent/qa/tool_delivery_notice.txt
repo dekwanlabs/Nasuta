@@ -1,0 +1,1 @@
+TOOL_DELIVERY_NOTICE: {{ .Notice }}

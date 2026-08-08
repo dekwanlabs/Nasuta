@@ -9,22 +9,22 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
-func (runner *Runner) runCodex(ctx context.Context, request featuredelivery.CodingRequest, sink featuredelivery.EventSink) (featuredelivery.CodingResult, error) {
+func (runner *Runner) runCodex(ctx context.Context, request delivery.CodingRequest, sink delivery.EventSink) (delivery.CodingResult, error) {
 	path, err := exec.LookPath(runner.codexBin)
 	if err != nil {
-		return featuredelivery.CodingResult{}, fmt.Errorf("find codex binary: %w", err)
+		return delivery.CodingResult{}, fmt.Errorf("find codex binary: %w", err)
 	}
 	temp, err := os.MkdirTemp("", "nasuta-codex-*")
 	if err != nil {
-		return featuredelivery.CodingResult{}, err
+		return delivery.CodingResult{}, err
 	}
 	defer os.RemoveAll(temp)
 	schemaPath := filepath.Join(temp, "result-schema.json")
 	if err := os.WriteFile(schemaPath, finalResultSchema, 0o600); err != nil {
-		return featuredelivery.CodingResult{}, err
+		return delivery.CodingResult{}, err
 	}
 	args := []string{
 		"-c", `shell_environment_policy.inherit="none"`,
@@ -65,14 +65,14 @@ func parseCodexEvent(raw json.RawMessage) (parsedProviderEvent, error) {
 	eventType := stringValue(event, "type")
 	switch eventType {
 	case "thread.started", "turn.started":
-		parsed.Events = []featuredelivery.ProviderEvent{{Kind: featuredelivery.EventProviderMessage, Summary: eventType}}
+		parsed.Events = []delivery.ProviderEvent{{Kind: delivery.EventProviderMessage, Summary: eventType}}
 	case "item.started", "item.completed":
 		parsed.Events = codexItemEvents(eventType, event)
 	case "turn.completed":
-		parsed.Events = []featuredelivery.ProviderEvent{{Kind: featuredelivery.EventProviderMessage, Summary: eventType}}
+		parsed.Events = []delivery.ProviderEvent{{Kind: delivery.EventProviderMessage, Summary: eventType}}
 	default:
 		if eventType != "" {
-			parsed.Events = []featuredelivery.ProviderEvent{{Kind: featuredelivery.EventProviderMessage, Summary: eventType}}
+			parsed.Events = []delivery.ProviderEvent{{Kind: delivery.EventProviderMessage, Summary: eventType}}
 		}
 	}
 	if final := extractFinalResult(event); final != nil {
@@ -81,7 +81,7 @@ func parseCodexEvent(raw json.RawMessage) (parsedProviderEvent, error) {
 	return parsed, nil
 }
 
-func codexItemEvents(eventType string, event map[string]any) []featuredelivery.ProviderEvent {
+func codexItemEvents(eventType string, event map[string]any) []delivery.ProviderEvent {
 	item, ok := event["item"].(map[string]any)
 	if !ok {
 		return nil
@@ -92,12 +92,12 @@ func codexItemEvents(eventType string, event map[string]any) []featuredelivery.P
 		return nil
 	case "agent_message":
 		if text := stringValue(item, "text"); text != "" {
-			return []featuredelivery.ProviderEvent{{Kind: featuredelivery.EventProviderMessage, Summary: text}}
+			return []delivery.ProviderEvent{{Kind: delivery.EventProviderMessage, Summary: text}}
 		}
 	case "command_execution":
-		kind := featuredelivery.EventCommandStarted
+		kind := delivery.EventCommandStarted
 		if eventType == "item.completed" {
-			kind = featuredelivery.EventCommandFinished
+			kind = delivery.EventCommandFinished
 		}
 		detail := commandDetail{
 			ID: truncate(redact(stringValue(item, "id")), 255), Command: truncate(redact(stringValue(item, "command")), 2000),
@@ -108,19 +108,19 @@ func codexItemEvents(eventType string, event map[string]any) []featuredelivery.P
 		if summary == "" {
 			summary = string(kind)
 		}
-		return []featuredelivery.ProviderEvent{{Kind: kind, Summary: summary, Detail: eventDetail(detail)}}
+		return []delivery.ProviderEvent{{Kind: kind, Summary: summary, Detail: eventDetail(detail)}}
 	case "file_change":
 		paths := codexChangedPaths(item)
 		if len(paths) == 0 {
 			return nil
 		}
-		return []featuredelivery.ProviderEvent{{
-			Kind: featuredelivery.EventFileChanged, Summary: strings.Join(paths, ", "),
+		return []delivery.ProviderEvent{{
+			Kind: delivery.EventFileChanged, Summary: strings.Join(paths, ", "),
 			Detail: eventDetail(fileChangeDetail{Paths: paths, Action: truncate(redact(stringValue(item, "status")), 64)}),
 		}}
 	default:
 		if itemType != "" {
-			return []featuredelivery.ProviderEvent{{Kind: featuredelivery.EventProviderMessage, Summary: eventType + ": " + itemType}}
+			return []delivery.ProviderEvent{{Kind: delivery.EventProviderMessage, Summary: eventType + ": " + itemType}}
 		}
 	}
 	return nil

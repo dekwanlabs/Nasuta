@@ -12,7 +12,7 @@ import (
 
 const maxHistoryQueryItems = 100
 
-const historySummaryColumns = "ref,turn_number,summary_text,summary_tokens"
+const historySummaryColumns = "t.context_ref,t.turn_no,t.context_summary_text,t.context_summary_tokens"
 
 // HistorySummary is the authoritative archived text used after candidate retrieval.
 type HistorySummary struct {
@@ -96,8 +96,10 @@ func (ss *SessionStore) LoadHistorySummaries(ctx context.Context, userID int64, 
 		args = append(args, ref)
 	}
 	rows, err := ss.db.QueryContext(ctx, `SELECT `+historySummaryColumns+`
-		FROM qa_turn_contexts
-		WHERE user_id=? AND session_id=? AND ref IN (`+placeholders(len(refs))+`)`, args...)
+		FROM qa_turns t
+		JOIN qa_sessions s ON s.id=t.session_id
+		WHERE s.user_id=? AND t.session_id=?
+			AND t.context_ref IN (`+placeholders(len(refs))+`)`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("memory/session history: load summaries: %w", err)
 	}
@@ -134,9 +136,12 @@ func (ss *SessionStore) LoadHistoryNeighbors(ctx context.Context, userID int64, 
 		args = append(args, turn)
 	}
 	rows, err := ss.db.QueryContext(ctx, `SELECT `+historySummaryColumns+`
-		FROM qa_turn_contexts
-		WHERE user_id=? AND session_id=? AND turn_number IN (`+placeholders(len(neighborSet))+`)
-		ORDER BY turn_number`, args...)
+		FROM qa_turns t
+		JOIN qa_sessions s ON s.id=t.session_id
+		WHERE s.user_id=? AND t.session_id=?
+			AND t.context_ref IS NOT NULL
+			AND t.turn_no IN (`+placeholders(len(neighborSet))+`)
+		ORDER BY t.turn_no`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("memory/session history: load neighbors: %w", err)
 	}
@@ -254,13 +259,16 @@ func enqueueHistoryUpserts(tx *sql.Tx, records []TurnContextRecord, createdAt an
 
 func enqueueSessionHistoryDeletes(tx *sql.Tx, sessionID string, userID int64) error {
 	if _, err := tx.Exec(`DELETE o FROM qa_session_history_index_outbox o
-		JOIN qa_turn_contexts c ON c.ref=o.ref
-		WHERE c.session_id=? AND c.user_id=? AND o.operation='upsert'`, sessionID, userID); err != nil {
+		JOIN qa_turns t ON t.context_ref=o.ref
+		JOIN qa_sessions s ON s.id=t.session_id
+		WHERE t.session_id=? AND s.user_id=? AND o.operation='upsert'`, sessionID, userID); err != nil {
 		return err
 	}
 	_, err := tx.Exec(`INSERT INTO qa_session_history_index_outbox(operation,ref,session_id,user_id,next_attempt,created_at)
-		SELECT 'delete',ref,session_id,user_id,NULL,? FROM qa_turn_contexts
-		WHERE session_id=? AND user_id=?
+		SELECT 'delete',t.context_ref,t.session_id,s.user_id,NULL,?
+		FROM qa_turns t
+		JOIN qa_sessions s ON s.id=t.session_id
+		WHERE t.session_id=? AND s.user_id=? AND t.context_ref IS NOT NULL
 		ON DUPLICATE KEY UPDATE attempts=0,next_attempt=NULL,last_error=''`,
 		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)), sessionID, userID)
 	return err

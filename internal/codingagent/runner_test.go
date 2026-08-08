@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
 func TestProviderStatusRequiresCredentialAndCompatibleClaude(t *testing.T) {
@@ -58,7 +58,7 @@ printf '%s\n' '{"type":"turn.completed","structured_output":{"summary":"done cod
 			t.Setenv("ANTHROPIC_API_KEY", "must-not-be-forwarded")
 			runner := New(Config{CodexBin: codex, EnabledProviders: []string{"codex"}})
 
-			result, err := runner.Run(context.Background(), featuredelivery.CodingRequest{
+			result, err := runner.Run(context.Background(), delivery.CodingRequest{
 				Provider: "codex", WorktreePath: temp, TaskPackage: "task", NetworkEnabled: networkEnabled,
 			}, nil)
 			if err != nil {
@@ -115,7 +115,7 @@ printf '%s\n' '{"type":"result","session_id":"session-2","structured_output":{"s
 			t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic-gateway.example")
 			runner := New(Config{ClaudeBin: claude, EnabledProviders: []string{"claude"}})
 
-			result, err := runner.Run(context.Background(), featuredelivery.CodingRequest{
+			result, err := runner.Run(context.Background(), delivery.CodingRequest{
 				Provider: "claude", WorktreePath: temp, TaskPackage: "task", NetworkEnabled: networkEnabled,
 			}, nil)
 			if err != nil {
@@ -202,7 +202,7 @@ printf '%s\n' '{"type":"result","structured_output":{"summary":"done","tests":"o
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "gateway-secret")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
-	if _, err := runner.Run(context.Background(), featuredelivery.CodingRequest{
+	if _, err := runner.Run(context.Background(), delivery.CodingRequest{
 		Provider: "claude", WorktreePath: temp, TaskPackage: "task",
 	}, nil); err != nil {
 		t.Fatal(err)
@@ -226,8 +226,8 @@ func TestRunnerDoesNotSubstituteProvider(t *testing.T) {
 		EnabledProviders: []string{"codex", "claude"},
 	})
 
-	_, err := runner.Run(context.Background(), featuredelivery.CodingRequest{Provider: "codex"}, nil)
-	if !errors.Is(err, featuredelivery.ErrUnavailable) {
+	_, err := runner.Run(context.Background(), delivery.CodingRequest{Provider: "codex"}, nil)
+	if !errors.Is(err, delivery.ErrUnavailable) {
 		t.Fatalf("run error = %v", err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -291,16 +291,16 @@ while [ "$i" -lt 79 ]; do
 done
 `)
 	parser := func(json.RawMessage) (parsedProviderEvent, error) {
-		events := make([]featuredelivery.ProviderEvent, maxPlatformEvents)
+		events := make([]delivery.ProviderEvent, maxPlatformEvents)
 		for index := range events {
-			events[index] = featuredelivery.ProviderEvent{Kind: featuredelivery.EventProviderMessage, Summary: "event"}
+			events[index] = delivery.ProviderEvent{Kind: delivery.EventProviderMessage, Summary: "event"}
 		}
 		return parsedProviderEvent{Events: events}, nil
 	}
 	result, err := runProvider(
 		context.Background(),
 		processRequest{Path: script, Env: baseEnvironment(), OutputLimit: maxProviderOutput},
-		"test", featuredelivery.CodingRequest{}, nil, parser,
+		"test", delivery.CodingRequest{}, nil, parser,
 	)
 	if err == nil || !strings.Contains(err.Error(), "platform events exceed 5000") {
 		t.Fatalf("event limit error = %v", err)

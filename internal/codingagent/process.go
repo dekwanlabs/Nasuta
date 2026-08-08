@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
@@ -31,15 +31,15 @@ type processRequest struct {
 
 type parsedProviderEvent struct {
 	SessionID string
-	Events    []featuredelivery.ProviderEvent
+	Events    []delivery.ProviderEvent
 	Final     *finalResult
 }
 
 type eventParser func(json.RawMessage) (parsedProviderEvent, error)
 
-func runProvider(ctx context.Context, process processRequest, provider string, request featuredelivery.CodingRequest, sink featuredelivery.EventSink, parser eventParser) (featuredelivery.CodingResult, error) {
+func runProvider(ctx context.Context, process processRequest, provider string, request delivery.CodingRequest, sink delivery.EventSink, parser eventParser) (delivery.CodingResult, error) {
 	version := probeVersion(ctx, process.Path)
-	result := featuredelivery.CodingResult{ProviderVersion: version}
+	result := delivery.CodingResult{ProviderVersion: version}
 	providerEventCount := 0
 	final, exitCode, _, err := runProcess(ctx, process, func(raw json.RawMessage) error {
 		if providerEventCount >= maxProviderEvents {
@@ -85,14 +85,14 @@ func runProvider(ctx context.Context, process processRequest, provider string, r
 	return result, nil
 }
 
-func sanitizeDeviations(values []featuredelivery.PlanDeviation) []featuredelivery.PlanDeviation {
+func sanitizeDeviations(values []delivery.PlanDeviation) []delivery.PlanDeviation {
 	if len(values) > 100 {
 		values = values[:100]
 	}
-	out := make([]featuredelivery.PlanDeviation, 0, len(values))
+	out := make([]delivery.PlanDeviation, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		path, err := featuredelivery.NormalizePlanPath(redact(value.Path))
+		path, err := delivery.NormalizePlanPath(redact(value.Path))
 		if err != nil {
 			continue
 		}
@@ -104,7 +104,7 @@ func sanitizeDeviations(values []featuredelivery.PlanDeviation) []featuredeliver
 			continue
 		}
 		seen[path] = struct{}{}
-		out = append(out, featuredelivery.PlanDeviation{Path: path, Reason: reason, Explained: true})
+		out = append(out, delivery.PlanDeviation{Path: path, Reason: reason, Explained: true})
 	}
 	return out
 }

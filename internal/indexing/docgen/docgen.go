@@ -27,7 +27,7 @@ import (
 // Generator produces per-module documentation using LLM.
 type Generator struct {
 	cfg      config.Config
-	docDB    *store.DocStore // MySQL document store; nil (no MYSQL_DSN) → generation skipped
+	docDB    *store.DocStore // MySQL document store; nil (no Core DB) → generation skipped
 	llm      *llmClient
 	platform *config.PlatformSettings
 }

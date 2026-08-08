@@ -1,0 +1,1 @@
+Your previous response contained an unsupported tool-call control format. Do not emit DSML, XML tool calls, tool_calls, invoke tags, or any control markup. Answer the user's question directly using only the evidence already in the conversation.

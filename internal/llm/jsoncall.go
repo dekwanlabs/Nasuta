@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"reflect"
 	"unicode/utf8"
+
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
 const defaultRepairAttempts = 1
@@ -89,12 +91,10 @@ func parseRepairValidate(raw string, out any, validate func(any) error, disallow
 	return true, ""
 }
 
-const repairPromptTemplate = "Your previous response did not satisfy the required JSON contract: %s\n" +
-	"Return ONLY a single valid JSON object matching the requested schema. " +
-	"No prose, no code fences, no comments, no trailing commas."
-
 func repairPrompt(problem string) string {
-	return fmt.Sprintf(repairPromptTemplate, problem)
+	return prompts.MustRender(prompts.LLMJSONRepair, struct {
+		Problem string
+	}{Problem: problem})
 }
 
 func truncateForErr(s string) string {

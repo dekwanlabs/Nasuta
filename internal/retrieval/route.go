@@ -9,6 +9,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
 type RoutingCapabilities struct {
@@ -85,80 +86,14 @@ var executionReasonCodes = map[string]struct{}{
 	"provided_context_sufficient":              {},
 }
 
-const executionContract = `Suggest whether the current request benefits from one agent or a fixed read-only multi-agent investigation workflow.
-- strategy must be single_agent or multi_agent.
-- complexity measures structural complexity from 0 to 1.
-- confidence measures confidence in the execution suggestion from 0 to 1.
-- Recommend multi_agent only when at least two independently useful investigation responsibilities can run before deterministic synthesis.
-- Consider subproblem count, evidence dimensions, impact scope, uncertainty, risk, and parallelizability.
-- Do not recommend multi_agent merely because a request is technical, long, or asks for internal evidence.
-- Evidence source selection and execution strategy are independent. Explicit evidence sources constrain sources but do not force multi_agent.
-- reasons contains at most 4 unique codes selected only from: requires_multiple_subproblems, requires_cross_source_analysis, requires_cross_service_analysis, requires_independent_evidence_validation, requires_conflict_resolution, requires_risk_sensitive_analysis, supports_parallel_investigation, single_focused_question, single_source_sufficient, subproblems_are_sequential, provided_context_sufficient.
-- Never return agent IDs, workflow IDs, providers, permissions, tool grants, or parallelism.
-Return a JSON object with this exact shape:
-` + executionExampleJSON
-
-const historyRelationContract = `Determine how the current question depends on the bounded previous-turn metadata.
-- topic_affinity is a continuous value from 0 to 1. A shift from logs to configuration or code for the same entity remains partially related.
-- confidence is confidence in this dependency analysis from 0 to 1. Low confidence must not be used to discard an identified dependency.
-- needs_prior_entities is true when a pronoun, ellipsis, or omitted target requires prior entities.
-- needs_prior_conclusion is true when the question depends on the prior conclusion or unfinished work.
-- needs_prior_evidence is true when the answer requires prior request, response, message, or tool evidence rather than only an entity name.
-- explicit_turn_refs contains at most 4 turn or run references explicitly written by the user. Do not invent references.
-- Dependencies are monotonic: evidence implies conclusion and entities; conclusion implies entities.
-The conversation_context contains only bounded metadata and never the prior assistant answer or tool payload.
-Return a JSON object with this exact shape:
-` + historyExampleJSON
-
-const queryTermsContract = `Extract compact retrieval terms from the current question.
-- domain_terms: at most 5 discriminative domain phrases, including useful non-English phrases.
-- identifiers: at most 5 literal symbol names or opaque identifiers copied exactly from the question.
-- The current question dominates. Use conversation_context only to resolve a genuinely omitted or pronominal target.
-- When the current question names its target, do not copy unrelated targets or terms from earlier turns.
-- Do not classify identifiers and do not return actions, resources, services, or inferred values.
-Return a JSON object with this exact shape:
-` + queryTermsExampleJSON
-
-const toolRoutingContract = `Select only registered read tools whose declared intent is required by the current request.
-Do not select a tool merely because its capability is available or topically related.
-Select no tools when the request can be answered directly from casual conversation, basic arithmetic or reasoning, stable general knowledge, or material already supplied by the user.
-Resolve pronouns and omitted entities from conversation_context. When a contextual follow-up asks for the actual state of an entity already investigated with runtime evidence, keep the runtime evidence tool selected even if the user does not repeat words such as logs or online.`
-
-const timeContract = `Normalize relative time semantics without calculating dates or using your own current time.
-- kind=none when the current question has no relative time expression.
-- kind=recent for an unqualified equivalent of "recently"; n=0 and unit="".
-- kind=day for a calendar day relative to today; n=0 means today, -1 yesterday, -2 the day before yesterday; unit="".
-- kind=last for a rolling duration; n is positive and unit is minute, hour, day, or week.
-- For a vague equivalent of "recent days" with no number, use kind=last, n=0, unit=day. The server applies its configured default.
-- raw must be an exact non-empty substring copied from the current question for every kind except none.
-- Interpret any language, but never return absolute from/to timestamps for relative expressions.
-Return a JSON object with this exact shape:
-` + timeExampleJSON
-
-const routingContract = `You are the evidence router for a software knowledge agent.
-Decide which external evidence sources are required to answer the current user request reliably.
-
-Sources:
-- memory: durable user facts or preferences from earlier sessions that are not already present in the supplied conversation context.
-- internal: facts about the currently indexed workspace, code, services, APIs, configuration, runbooks, schemas, or call chains.
-- web: current external product documentation, third-party capabilities, standards, news, or other facts that may have changed.
-
-Rules:
-- Return no sources when the request is fully answerable from stable general knowledge or material already supplied by the user.
-- Obvious direct-answer requests should return no sources with high confidence. These include greetings and casual conversation; basic arithmetic or reasoning; rewriting, translating, or summarizing user-supplied material; and stable everyday questions that do not require current facts.
-- Apply the direct-answer rule regardless of the language used in the question.
-- A technical topic alone does not require internal retrieval. Select internal when the answer depends on this workspace's implementation, behavior, configuration, data flow, or other indexed facts.
-- When it is unclear whether a named system, domain, module, service, or technical term refers to this workspace or to an external/general concept, select both internal and web.
-- Select web without internal only when the request clearly concerns external or general information and does not depend on workspace-specific facts.
-- Memory never establishes the current workspace, service, configuration, or schema. Select internal for those facts even when a similar memory may exist.
-- Select memory only when the answer depends on cross-session user preferences, responsibilities, work context, or explicitly historical experience.
-- When user background and current workspace facts are both required, select memory and internal; internal supplies the current fact and memory only supplies the user perspective.
-- Select every independently required source; multi-source answers are allowed.
-- Source availability does not change the evidence need. If a required source is unavailable, still select it so the application can report the missing prerequisite.
-- confidence measures confidence in this routing decision, from 0 to 1.
-
-Return a JSON object with this exact shape, using zero or more individual source names:
-` + routeExampleJSON
+var (
+	executionContract       = prompts.Text(prompts.RetrievalExecution)
+	historyRelationContract = prompts.Text(prompts.RetrievalHistory)
+	queryTermsContract      = prompts.Text(prompts.RetrievalQueryTerms)
+	toolRoutingContract     = prompts.Text(prompts.RetrievalToolRouting)
+	timeContract            = prompts.Text(prompts.RetrievalTime)
+	routingContract         = prompts.Text(prompts.RetrievalRouting)
+)
 
 func AnalyzeEvidence(
 	ctx context.Context,
@@ -211,10 +146,13 @@ func analyzeQuestion(
 	}
 	if len(toolCandidates) > 0 {
 		encoded, _ := json.Marshal(toolCandidates)
-		contracts = append(contracts, "Tool routing contract:\n"+toolRoutingContract+`
-Return a JSON object with this exact shape:
-`+toolExampleJSON+`
-Available tools: `+string(encoded))
+		toolContract, err := prompts.Render(prompts.RetrievalToolRouting, struct {
+			AvailableTools string
+		}{AvailableTools: string(encoded)})
+		if err != nil {
+			return empty, fmt.Errorf("render tool routing contract: %w", err)
+		}
+		contracts = append(contracts, "Tool routing contract:\n"+toolContract)
 		properties = append(properties, "\"tools\"")
 	}
 	if fixedPlan == nil || len(toolCandidates) > 0 {
@@ -241,8 +179,16 @@ Available tools: `+string(encoded))
 	if client == nil {
 		return empty, fmt.Errorf("evidence planner unavailable: LLM client is nil")
 	}
-	system := fmt.Sprintf("Complete the configured analyses in one response. Return JSON only with exactly these top-level properties: %s.\n\n%s",
-		strings.Join(properties, ", "), strings.Join(contracts, "\n\n"))
+	system, err := prompts.Render(prompts.RetrievalPlanner, struct {
+		Properties string
+		Contracts  string
+	}{
+		Properties: strings.Join(properties, ", "),
+		Contracts:  strings.Join(contracts, "\n\n"),
+	})
+	if err != nil {
+		return empty, fmt.Errorf("render evidence planner prompt: %w", err)
+	}
 	payload, _ := json.Marshal(map[string]string{
 		"question":             question,
 		"conversation_context": routeContext,

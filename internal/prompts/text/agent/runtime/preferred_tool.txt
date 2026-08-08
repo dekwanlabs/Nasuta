@@ -1,0 +1,1 @@
+Tool routing preference for this turn: {{ .ToolIDs }}. Treat this as advisory, not mandatory. Call a preferred tool only when it resolves a material evidence gap; if conversation history or existing evidence is sufficient, answer directly. Other registered tools remain available, and tool failures must be reported rather than hidden.

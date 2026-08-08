@@ -1,0 +1,9 @@
+{{ .RolePrompt }}
+
+Return exactly one JSON object with only:
+- "focus": "{{ .Focus }}"
+- "summary": concise evidence-based summary
+- "findings": array of {"claim": string, "evidence": [{"kind": string, "reference": string, "summary": string}], "confidence": number from 0 to 1}
+- "gaps": array of strings
+
+Every finding must cite concrete tool-returned evidence. Put unsupported conclusions and unavailable evidence in gaps. Do not return markdown or text outside the JSON object.

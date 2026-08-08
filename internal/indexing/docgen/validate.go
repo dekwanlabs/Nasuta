@@ -8,6 +8,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/log"
 	"gopkg.in/yaml.v3"
 )
@@ -15,60 +16,7 @@ import (
 // FlowTemplateEnglish is the canonical English flow template shown
 // in the dashboard and used as the reformatting reference. Mirrors the Chinese
 // template in docs/knowledge-base/flows/FLOW_TEMPLATE.md.
-const FlowTemplateEnglish = `# Flow: <English Name> (<Chinese Name>)
-
-## Format
-
-Each flow document covers one complete **business chain**, from
-trigger to completion.
-
-### Frontmatter (required)
-
-` + "```yaml" + `
----
-scope: event-driven                    # fixed value
-tags: [flow, <service>, <domain>, ...] # at least 3 tags for semantic recall
----
-` + "```" + `
-
-### Title
-
-` + "`# Flow: <English Name> (<Chinese Name>)`" + `
-
-Example: ` + "`# Flow: Device Provisioning & SN Lifecycle`" + `
-
-### Required Sections (in order)
-
-1. **Overview** (1-2 paragraphs) — what this chain does, which services it
-   touches, and the business value.
-2. **Trigger Sources** (` + "`## Trigger Sources`" + `) — table: Event | Trigger
-   Service | Trigger Condition.
-3. **Full Chain** (` + "`## Full Chain`" + `) — ASCII diagram or nested list, from
-   trigger to terminal state.
-4. **Key Services** (` + "`## Key Services`" + `) — table: Service | Responsibility |
-   Database | Kibana Index.
-5. **Troubleshooting** (` + "`## Troubleshooting`" + `) — table: Common Problem →
-   Resolution Steps.
-6. **Dependencies** (` + "`## Dependencies`" + `) — external services this chain
-   depends on + who depends on this chain.
-
-### Optional Sections
-
-- **Data Storage** (` + "`## Data Storage`" + `) — table groups when multiple DBs.
-- **Middleware** (` + "`## Middleware`" + `) — Kafka/RabbitMQ/Redis etc.
-- **Branch Flows** (` + "`## Branch Flows`" + `) — alternative handling branches.
-
-### Notes
-
-- Do not add id or doc_id to frontmatter; the platform assigns the canonical document ID.
-- All service names, API paths, and Feign interface names must come from real
-  code — never invent them. Verify against codegraph before writing.
-- Kibana index uses the ` + "`hs-iot-<service>-*`" + ` format, derived from existing
-  indices.
-- Prefer tables over prose. Troubleshooting must be operational ("query the Y
-  index of service X, search keyword Z").
-- Cross-reference other documents via their ` + "`flow-xxx.md`" + ` filename.
-`
+var FlowTemplateEnglish = prompts.Text(prompts.DocgenFlowTemplate)
 
 // FlowValidationResult describes why a flow doc failed validation.
 type FlowValidationResult struct {
@@ -120,25 +68,16 @@ func (g *Generator) ReformatFlow(ctx context.Context, original string) (string, 
 	if g.llm == nil {
 		return original, fmt.Errorf("llm not configured")
 	}
-	prompt := fmt.Sprintf(`You are a technical documentation editor. Reformat the raw content below into the Nasuta flow template.
-
-Rules:
-- Output ONLY the final markdown document, no commentary.
-- Start with the frontmatter block (scope: event-driven, tags with at least 3 entries).
-- Do not add an id or doc_id field; the platform assigns the canonical document ID.
-- Use exactly these section headings in order: ## Trigger Sources, ## Full Chain, ## Key Services, ## Troubleshooting, ## Dependencies.
-- Keep all real service names, API paths, and Feign interface names from the original — do not invent or rename them.
-- Use tables for Trigger Sources, Key Services, and Troubleshooting.
-- If the original lacks a section, infer it from context or leave a TODO placeholder rather than fabricating details.
-- Write in the same language as the original content.
-
-Reference template:
-%s
-
-Raw content to reformat:
----
-%s
----`, FlowTemplateEnglish, original)
+	prompt, err := prompts.Render(prompts.DocgenReformat, struct {
+		Template string
+		Original string
+	}{
+		Template: FlowTemplateEnglish,
+		Original: original,
+	})
+	if err != nil {
+		return original, fmt.Errorf("render reformat prompt: %w", err)
+	}
 
 	llmCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()

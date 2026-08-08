@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
@@ -27,7 +27,7 @@ func (handler *Handler) StreamReviewEvents(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, featuredelivery.ErrUnavailable)
+		writeDomainError(w, delivery.ErrUnavailable)
 		return
 	}
 	round, reader, err := handler.service.OpenReviewEvents(
@@ -79,7 +79,7 @@ func (handler *Handler) StreamReviewEvents(w http.ResponseWriter, r *http.Reques
 			return
 		case event, open := <-live:
 			if !open {
-				writer.emitError(featuredelivery.ErrUnavailable)
+				writer.emitError(delivery.ErrUnavailable)
 				return
 			}
 			lastSeq, terminal, err = handler.emitLiveReviewEvent(
@@ -110,9 +110,9 @@ func (handler *Handler) StreamReviewEvents(w http.ResponseWriter, r *http.Reques
 func (handler *Handler) emitLiveReviewEvent(
 	ctx context.Context,
 	writer *reviewEventWriter,
-	reader *featuredelivery.ReviewEventReader,
+	reader *delivery.ReviewEventReader,
 	lastSeq int64,
-	event featuredelivery.ReviewEvent,
+	event delivery.ReviewEvent,
 ) (int64, bool, error) {
 	if event.Seq <= lastSeq {
 		return lastSeq, false, nil
@@ -136,7 +136,7 @@ func (handler *Handler) emitLiveReviewEvent(
 func (handler *Handler) replayReviewEvents(
 	ctx context.Context,
 	writer *reviewEventWriter,
-	reader *featuredelivery.ReviewEventReader,
+	reader *delivery.ReviewEventReader,
 	afterSeq int64,
 ) (int64, bool, error) {
 	lastSeq := afterSeq
@@ -180,7 +180,7 @@ func newReviewEventWriter(w http.ResponseWriter) (*reviewEventWriter, error) {
 	return &reviewEventWriter{writer: w, flusher: flusher}, nil
 }
 
-func (writer *reviewEventWriter) emit(event featuredelivery.ReviewEvent) error {
+func (writer *reviewEventWriter) emit(event delivery.ReviewEvent) error {
 	raw, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -209,22 +209,22 @@ func (writer *reviewEventWriter) keepalive() {
 	writer.flusher.Flush()
 }
 
-func terminalReviewEvent(kind featuredelivery.ReviewEventKind) bool {
+func terminalReviewEvent(kind delivery.ReviewEventKind) bool {
 	switch kind {
-	case featuredelivery.ReviewEventRoundCompleted,
-		featuredelivery.ReviewEventRoundFailed,
-		featuredelivery.ReviewEventRoundCancelled:
+	case delivery.ReviewEventRoundCompleted,
+		delivery.ReviewEventRoundFailed,
+		delivery.ReviewEventRoundCancelled:
 		return true
 	default:
 		return false
 	}
 }
 
-func terminalReviewRoundStatus(status featuredelivery.ReviewRoundStatus) bool {
+func terminalReviewRoundStatus(status delivery.ReviewRoundStatus) bool {
 	switch status {
-	case featuredelivery.RoundCompleted,
-		featuredelivery.RoundFailed,
-		featuredelivery.RoundCancelled:
+	case delivery.RoundCompleted,
+		delivery.RoundFailed,
+		delivery.RoundCancelled:
 		return true
 	default:
 		return false

@@ -12,14 +12,14 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/auth"
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
 func TestSystemStatusIncludesFeatureDeliveryCapability(t *testing.T) {
 	handler := &Handler{}
-	handler.SetFeatureDeliveryStatus(func(context.Context) featuredelivery.FeatureDeliveryStatus {
-		return featuredelivery.FeatureDeliveryStatus{
-			Persistence: featuredelivery.CapabilityStatus{Enabled: true},
+	handler.SetFeatureDeliveryStatus(func(context.Context) delivery.FeatureDeliveryStatus {
+		return delivery.FeatureDeliveryStatus{
+			Persistence: delivery.CapabilityStatus{Enabled: true},
 		}
 	})
 	recorder := httptest.NewRecorder()

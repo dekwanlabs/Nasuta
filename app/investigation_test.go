@@ -4,23 +4,23 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
 
 func TestProjectInvestigationEvent(t *testing.T) {
 	tests := []struct {
 		name       string
-		event      agentworkflow.Event
+		event      workflow.Event
 		wantType   agent.EventType
 		wantStatus string
 		want       bool
 	}{
-		{name: "workflow", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "workflow_started"}, wantType: agent.EventWorkflowStarted, wantStatus: "running", want: true},
-		{name: "agent start", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "node_started", NodeID: "investigate.code"}, wantType: agent.EventAgentStarted, wantStatus: "running", want: true},
-		{name: "agent complete", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "node_succeeded", NodeID: "synthesize"}, wantType: agent.EventAgentCompleted, wantStatus: "completed", want: true},
-		{name: "agent failed", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "node_failed", NodeID: "investigate.docs", Summary: "node failed"}, wantType: agent.EventAgentCompleted, wantStatus: "failed", want: true},
-		{name: "evidence joined", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "node_succeeded", NodeID: "evidence.join"}, wantType: agent.EventEvidenceJoined, wantStatus: "completed", want: true},
-		{name: "handoff ignored", event: agentworkflow.Event{WorkflowRunID: "workflow_1", Kind: "handoff_created", NodeID: "synthesize"}},
+		{name: "workflow", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "workflow_started"}, wantType: agent.EventWorkflowStarted, wantStatus: "running", want: true},
+		{name: "agent start", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "node_started", NodeID: "investigate.code"}, wantType: agent.EventAgentStarted, wantStatus: "running", want: true},
+		{name: "agent complete", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "node_succeeded", NodeID: "synthesize"}, wantType: agent.EventAgentCompleted, wantStatus: "completed", want: true},
+		{name: "agent failed", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "node_failed", NodeID: "investigate.docs", Summary: "node failed"}, wantType: agent.EventAgentCompleted, wantStatus: "failed", want: true},
+		{name: "evidence joined", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "node_succeeded", NodeID: "evidence.join"}, wantType: agent.EventEvidenceJoined, wantStatus: "completed", want: true},
+		{name: "handoff ignored", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "handoff_created", NodeID: "synthesize"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

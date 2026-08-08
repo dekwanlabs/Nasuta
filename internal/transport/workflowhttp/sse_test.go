@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 )
 
 type sliceEventReader struct {
 	mu     sync.Mutex
-	events []agentworkflow.Event
+	events []workflow.Event
 	calls  []int64
 }
 
@@ -24,7 +24,7 @@ func (reader *sliceEventReader) List(
 	_ context.Context,
 	afterSeq int64,
 	limit int,
-) ([]agentworkflow.Event, error) {
+) ([]workflow.Event, error) {
 	reader.mu.Lock()
 	defer reader.mu.Unlock()
 	reader.calls = append(reader.calls, afterSeq)
@@ -32,7 +32,7 @@ func (reader *sliceEventReader) List(
 		return reader.events[index].Seq > afterSeq
 	})
 	end := min(start+limit, len(reader.events))
-	return append([]agentworkflow.Event(nil), reader.events[start:end]...), nil
+	return append([]workflow.Event(nil), reader.events[start:end]...), nil
 }
 
 func (reader *sliceEventReader) cursors() []int64 {
@@ -96,7 +96,7 @@ func TestWorkflowReplayEventsPaginatesAndStopsAtTerminal(t *testing.T) {
 }
 
 func TestWorkflowLiveEventFillsPersistentSequenceGap(t *testing.T) {
-	reader := &sliceEventReader{events: []agentworkflow.Event{
+	reader := &sliceEventReader{events: []workflow.Event{
 		{
 			WorkflowRunID: "workflow_1", Seq: 2,
 			Kind: "node_succeeded", Summary: "node succeeded",
@@ -112,7 +112,7 @@ func TestWorkflowLiveEventFillsPersistentSequenceGap(t *testing.T) {
 		writer,
 		reader,
 		1,
-		agentworkflow.Event{
+		workflow.Event{
 			WorkflowRunID: "workflow_1", Seq: 3,
 			Kind: "handoff_created", Summary: "handoff created",
 		},
@@ -128,20 +128,20 @@ func TestWorkflowLiveEventFillsPersistentSequenceGap(t *testing.T) {
 }
 
 func TestWorkflowStreamReplaysThenSwitchesLiveWithOneAuthorization(t *testing.T) {
-	reader := &sliceEventReader{events: []agentworkflow.Event{
+	reader := &sliceEventReader{events: []workflow.Event{
 		{
 			WorkflowRunID: "workflow_1", Seq: 1,
 			Kind: "workflow_started", Summary: "started",
 		},
 	}}
-	live := make(chan agentworkflow.Event, 1)
-	live <- agentworkflow.Event{
+	live := make(chan workflow.Event, 1)
+	live <- workflow.Event{
 		WorkflowRunID: "workflow_1", Seq: 2,
 		Kind: "workflow_succeeded", Summary: "succeeded",
 	}
 	workflows := &recordingService{
-		run: agentworkflow.WorkflowRunRecord{
-			ID: "workflow_1", ActorUserID: 7, Status: agentworkflow.RunRunning,
+		run: workflow.WorkflowRunRecord{
+			ID: "workflow_1", ActorUserID: 7, Status: workflow.RunRunning,
 		},
 		reader: reader,
 		live:   live,
@@ -172,7 +172,7 @@ func TestWorkflowStreamReplaysThenSwitchesLiveWithOneAuthorization(t *testing.T)
 }
 
 func TestWorkflowStreamResumesAfterLastEventIDAndExitsAtTerminalRun(t *testing.T) {
-	reader := &sliceEventReader{events: []agentworkflow.Event{
+	reader := &sliceEventReader{events: []workflow.Event{
 		{
 			WorkflowRunID: "workflow_1", Seq: 1,
 			Kind: "workflow_started", Summary: "started",
@@ -183,8 +183,8 @@ func TestWorkflowStreamResumesAfterLastEventIDAndExitsAtTerminalRun(t *testing.T
 		},
 	}}
 	workflows := &recordingService{
-		run: agentworkflow.WorkflowRunRecord{
-			ID: "workflow_1", ActorUserID: 7, Status: agentworkflow.RunSucceeded,
+		run: workflow.WorkflowRunRecord{
+			ID: "workflow_1", ActorUserID: 7, Status: workflow.RunSucceeded,
 		},
 		reader: reader,
 	}
@@ -217,16 +217,16 @@ func TestWorkflowStreamResumesAfterLastEventIDAndExitsAtTerminalRun(t *testing.T
 	}
 }
 
-func makeWorkflowEvents(count int, terminalSeq int64) []agentworkflow.Event {
+func makeWorkflowEvents(count int, terminalSeq int64) []workflow.Event {
 	createdAt := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
-	events := make([]agentworkflow.Event, count)
+	events := make([]workflow.Event, count)
 	for index := range events {
 		seq := int64(index + 1)
 		kind := "node_progress"
 		if seq == terminalSeq {
 			kind = "workflow_succeeded"
 		}
-		events[index] = agentworkflow.Event{
+		events[index] = workflow.Event{
 			WorkflowRunID: "workflow_1",
 			Seq:           seq,
 			Kind:          kind,

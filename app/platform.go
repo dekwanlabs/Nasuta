@@ -15,14 +15,13 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/incident"
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/approval"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
-	"github.com/dekwanlabs/nasuta/internal/evaluation"
-	"github.com/dekwanlabs/nasuta/internal/featurepipeline"
-	"github.com/dekwanlabs/nasuta/internal/featurereviewworkflow"
+	"github.com/dekwanlabs/nasuta/internal/feature/pipeline"
+	"github.com/dekwanlabs/nasuta/internal/feature/reviewworkflow"
 	"github.com/dekwanlabs/nasuta/internal/indexing"
 	"github.com/dekwanlabs/nasuta/internal/investigation"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -37,7 +36,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/sessionhistory"
 	"github.com/dekwanlabs/nasuta/internal/transport/agenthttp"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
-	"github.com/dekwanlabs/nasuta/internal/transport/evaluationhttp"
 	"github.com/dekwanlabs/nasuta/internal/transport/incidenthttp"
 	"github.com/dekwanlabs/nasuta/internal/transport/investigationhttp"
 	"github.com/dekwanlabs/nasuta/internal/transport/mcp"
@@ -80,19 +78,18 @@ type Platform struct {
 	qaMu               sync.RWMutex
 	agentDefinitionVer int64
 	schemaRegistry     *agentapi.SchemaRegistry
-	agentCatalog       *agentcatalog.Catalog
-	workflowCatalog    *agentworkflow.Catalog
-	workflowStore      *agentworkflow.Store
-	workflowNodes      *agentworkflow.AgentNodeExecutor
-	workflowPipeline   *featurepipeline.Executor
-	workflowReview     *featurereviewworkflow.Executor
-	reviewCoordinator  *featurereviewworkflow.Coordinator
-	workflowTransforms agentworkflow.NodeExecutor
-	workflowRunner     *agentworkflow.Orchestrator
-	workflowService    *agentworkflow.Service
+	agentCatalog       *catalog.Catalog
+	workflowCatalog    *workflow.Catalog
+	workflowStore      *workflow.Store
+	workflowNodes      *workflow.AgentNodeExecutor
+	workflowPipeline   *pipeline.Executor
+	workflowReview     *reviewworkflow.Executor
+	reviewCoordinator  *reviewworkflow.Coordinator
+	workflowTransforms workflow.NodeExecutor
+	workflowRunner     *workflow.Orchestrator
+	workflowService    *workflow.Service
 	workflowAPI        *workflowhttp.Handler
 	agentAPI           *agenthttp.Handler
-	evaluationAPI      *evaluationhttp.Handler
 	investigationAPI   *investigationhttp.Handler
 	qaSessions         *memory.SessionStore
 	qaRunStore         *agent.RunStore
@@ -145,21 +142,21 @@ func New() (*Platform, error) {
 	history := buildSessionHistory(cfg, sessions, index.Embedder)
 	registry := agent.NewRegistry(knowledgeService, cfg, sessions, history)
 	schemaRegistry := agentapi.NewSchemaRegistry()
-	if err := schemaRegistry.Publish(agentcatalog.DefaultSchemas()); err != nil {
+	if err := schemaRegistry.Publish(catalog.DefaultSchemas()); err != nil {
 		index.Close()
 		if platformDB != nil {
 			_ = platformDB.Close()
 		}
 		return nil, fmt.Errorf("publish default agent schemas: %w", err)
 	}
-	if err := schemaRegistry.Publish(featurepipeline.Schemas()); err != nil {
+	if err := schemaRegistry.Publish(pipeline.Schemas()); err != nil {
 		index.Close()
 		if platformDB != nil {
 			_ = platformDB.Close()
 		}
 		return nil, fmt.Errorf("publish feature pipeline schemas: %w", err)
 	}
-	if err := schemaRegistry.Publish(featurereviewworkflow.Schemas()); err != nil {
+	if err := schemaRegistry.Publish(reviewworkflow.Schemas()); err != nil {
 		index.Close()
 		if platformDB != nil {
 			_ = platformDB.Close()
@@ -167,7 +164,7 @@ func New() (*Platform, error) {
 		return nil, fmt.Errorf("publish feature review schemas: %w", err)
 	}
 
-	agentCatalog := agentcatalog.New(schemaRegistry)
+	agentCatalog := catalog.New(schemaRegistry)
 	platform := &Platform{
 		cfg: cfg, settings: settings, index: index, knowledge: knowledgeService,
 		registry: registry, readTools: tool.NewReadRegistry(registry),
@@ -176,26 +173,14 @@ func New() (*Platform, error) {
 		ontology: ontologyBackend,
 		history:  history, qaSessions: sessions,
 		schemaRegistry: schemaRegistry, agentCatalog: agentCatalog,
-		workflowCatalog: agentworkflow.NewCatalog(schemaRegistry, agentCatalog),
+		workflowCatalog: workflow.NewCatalog(schemaRegistry, agentCatalog),
 	}
 	platform.agentAPI = agenthttp.New(agentCatalog)
 	platform.investigationAPI = investigationhttp.New(investigation.New(
 		platformInvestigationExecutor{platform: platform},
 	))
 	if platformDB != nil {
-		evaluationStore, evaluationStoreErr := evaluation.NewStore(platformDB)
-		if evaluationStoreErr != nil {
-			_ = platform.Close()
-			return nil, fmt.Errorf("configure evaluation store: %w", evaluationStoreErr)
-		}
-		evaluationService, evaluationServiceErr := evaluation.NewService(evaluationStore)
-		if evaluationServiceErr != nil {
-			_ = platform.Close()
-			return nil, fmt.Errorf("configure evaluation service: %w", evaluationServiceErr)
-		}
-		platform.evaluationAPI = evaluationhttp.New(evaluationService)
-		log.Infof("[evaluation] trace and version metrics enabled (MySQL)")
-		agentStore, agentStoreErr := agentcatalog.NewStore(platformDB)
+		agentStore, agentStoreErr := catalog.NewStore(platformDB)
 		if agentStoreErr != nil {
 			_ = platform.Close()
 			return nil, fmt.Errorf("configure agent catalog store: %w", agentStoreErr)
@@ -238,7 +223,7 @@ func (platform *Platform) initAgentWorkflow() error {
 		log.Warnf("[workflow] persistence and execution disabled (MySQL unavailable)")
 		return nil
 	}
-	workflowStore, err := agentworkflow.NewStore(platform.platformDB)
+	workflowStore, err := workflow.NewStore(platform.platformDB)
 	if err != nil {
 		return err
 	}
@@ -252,7 +237,7 @@ func (platform *Platform) initAgentWorkflow() error {
 		platform.agentDefinitionVer,
 		platform.workflowCatalog.MaxVersion(),
 	)
-	service, err := agentworkflow.NewService(platform.workflowCatalog, workflowStore, nil)
+	service, err := workflow.NewService(platform.workflowCatalog, workflowStore, nil)
 	if err != nil {
 		return err
 	}
@@ -461,9 +446,6 @@ func (platform *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	if platform.workflowAPI != nil {
 		platform.workflowAPI.RegisterRoutes(platform.AuthenticatedAPI(mux))
 	}
-	if platform.evaluationAPI != nil {
-		platform.evaluationAPI.RegisterRoutes(platform.AuthenticatedAPI(mux))
-	}
 }
 
 func (platform *Platform) buildQARuntime(
@@ -532,15 +514,15 @@ func defaultAgentDefinitions(
 	settings *config.PlatformSettings,
 	version int64,
 ) ([]agentapi.Definition, error) {
-	qa, err := agentcatalog.DefaultQAVersion(settings, version)
+	qa, err := catalog.DefaultQAVersion(settings, version)
 	if err != nil {
 		return nil, fmt.Errorf("prepare QA definition: %w", err)
 	}
-	reviewers, err := agentcatalog.DefaultReviewersVersion(settings, version)
+	reviewers, err := catalog.DefaultReviewersVersion(settings, version)
 	if err != nil {
 		return nil, fmt.Errorf("prepare reviewer definitions: %w", err)
 	}
-	investigators, err := agentcatalog.DefaultInvestigatorsVersion(settings, version)
+	investigators, err := catalog.DefaultInvestigatorsVersion(settings, version)
 	if err != nil {
 		return nil, fmt.Errorf("prepare investigation definitions: %w", err)
 	}
@@ -571,14 +553,14 @@ func (platform *Platform) reloadQARuntime(graph *codegraph.DB) error {
 		if err := platform.agentCatalog.Publish(definitions); err != nil {
 			return fmt.Errorf("publish agent definitions: %w", err)
 		}
-		workflow, err := agentworkflow.DefaultDelegatedInvestigation(
+		workflowDefinition, err := workflow.DefaultDelegatedInvestigation(
 			version,
 			time.Duration(candidate.Settings.AgentTimeout),
 		)
 		if err != nil {
 			return fmt.Errorf("prepare delegated investigation workflow: %w", err)
 		}
-		if err := platform.workflowCatalog.Publish([]agentworkflow.WorkflowDefinition{workflow}); err != nil {
+		if err := platform.workflowCatalog.Publish([]workflow.WorkflowDefinition{workflowDefinition}); err != nil {
 			return fmt.Errorf("publish delegated investigation workflow: %w", err)
 		}
 	}
@@ -613,9 +595,9 @@ func (platform *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime
 		platform.workflowPipeline,
 		platform.workflowReview,
 	)
-	var agentNodes *agentworkflow.AgentNodeExecutor
+	var agentNodes *workflow.AgentNodeExecutor
 	if runtime != nil {
-		nodes, err := agentworkflow.NewAgentNodeExecutor(
+		nodes, err := workflow.NewAgentNodeExecutor(
 			platform.schemaRegistry,
 			platform.agentCatalog,
 			runtime,
@@ -632,8 +614,8 @@ func (platform *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime
 		log.Warnf("[workflow] execution disabled (agent and transform executors unavailable)")
 		return nil
 	}
-	nodes := agentworkflow.NewNodeDispatcher(agentNodes, platform.workflowTransforms)
-	runner := agentworkflow.NewOrchestrator(platform.schemaRegistry, nodes, nil)
+	nodes := workflow.NewNodeDispatcher(agentNodes, platform.workflowTransforms)
+	runner := workflow.NewOrchestrator(platform.schemaRegistry, nodes, nil)
 	platform.workflowService.SetOrchestrator(runner)
 	platform.workflowNodes = agentNodes
 	platform.workflowRunner = runner
@@ -682,7 +664,7 @@ func (platform *Platform) recoverActiveWorkflows(ctx context.Context, startedBef
 		func(
 			ctx context.Context,
 			runID string,
-			result agentworkflow.ResumeResult,
+			result workflow.ResumeResult,
 			resumeErr error,
 		) error {
 			if platform.reviewCoordinator == nil {

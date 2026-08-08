@@ -1,0 +1,8 @@
+Extract compact retrieval terms from the current question.
+- domain_terms: at most 5 discriminative domain phrases, including useful non-English phrases.
+- identifiers: at most 5 literal symbol names or opaque identifiers copied exactly from the question.
+- The current question dominates. Use conversation_context only to resolve a genuinely omitted or pronominal target.
+- When the current question names its target, do not copy unrelated targets or terms from earlier turns.
+- Do not classify identifiers and do not return actions, resources, services, or inferred values.
+Return a JSON object with this exact shape:
+{"query_terms":{"domain_terms":[],"identifiers":[]}}

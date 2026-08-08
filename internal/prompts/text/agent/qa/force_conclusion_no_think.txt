@@ -1,0 +1,1 @@
+Do not think or reason. Just output your final answer directly, using the evidence you have already gathered. Answer in the same natural language as the original user question.

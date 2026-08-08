@@ -155,7 +155,7 @@ func TestSessionTurnDetailsToolIsPrivateAndRequiresCurrentReference(t *testing.T
 	ctx := withSessionToolScope(context.Background(), ConversationContext{
 		SessionID: "session-1", CompactedThroughTurn: 1,
 	}, 42)
-	mock.ExpectQuery(`SELECT ref,session_id,user_id,run_id,detail_json,turn_number,summary_text,summary_tokens,source_tokens,retained_tokens.*FROM qa_turn_contexts`).
+	mock.ExpectQuery(`SELECT t\.context_ref,t\.session_id,s\.user_id,t\.run_id,t\.context_detail_json.*FROM qa_turns t.*JOIN qa_sessions s`).
 		WithArgs("cmp-current", "session-1", int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"ref", "session_id", "user_id", "run_id", "detail_json", "turn_number", "summary_text", "summary_tokens", "source_tokens", "retained_tokens"}).
 			AddRow("cmp-current", "session-1", 42, "run-1", `{"version":1,"turn":1}`, 1, "summary", 2, 50, 10))

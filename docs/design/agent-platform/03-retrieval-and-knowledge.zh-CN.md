@@ -1668,7 +1668,7 @@ fix(agent): preserve evidence statement boundaries
 ##### 12.4 验证命令
 
 ```bash
-go test ./internal/agent/ ./internal/retrieval/ ./internal/featuredelivery/
+go test ./internal/agent/ ./internal/retrieval/ ./internal/feature/delivery/
 go build ./...
 go vet ./...
 ```

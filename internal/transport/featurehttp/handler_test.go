@@ -14,20 +14,20 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/auth"
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
-	"github.com/dekwanlabs/nasuta/internal/featurepipeline"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/pipeline"
 )
 
 type pipelineStarterRecorder struct {
-	request featurepipeline.Request
+	request pipeline.Request
 	actor   agentapi.Actor
 	calls   int
 }
 
 type reviewCoordinatorRecorder struct {
-	executeResult *featuredelivery.ReviewGateResult
+	executeResult *delivery.ReviewGateResult
 	executeErr    error
 	cancelErr     error
 	roundID       string
@@ -43,7 +43,7 @@ func (coordinator *reviewCoordinatorRecorder) Execute(
 	roundID string,
 	actor agentapi.Actor,
 	admin bool,
-) (*featuredelivery.ReviewGateResult, error) {
+) (*delivery.ReviewGateResult, error) {
 	coordinator.executeCalls++
 	coordinator.roundID = roundID
 	coordinator.actor = actor
@@ -69,54 +69,54 @@ func (coordinator *reviewCoordinatorRecorder) Cancel(
 
 func (starter *pipelineStarterRecorder) Start(
 	_ context.Context,
-	request featurepipeline.Request,
+	request pipeline.Request,
 	actor agentapi.Actor,
-) (*agentworkflow.WorkflowRunRecord, error) {
+) (*workflow.WorkflowRunRecord, error) {
 	starter.calls++
 	starter.request = request
 	starter.actor = actor
-	return &agentworkflow.WorkflowRunRecord{
+	return &workflow.WorkflowRunRecord{
 		ID:              "workflow_1",
-		WorkflowID:      featurepipeline.WorkflowID,
-		WorkflowVersion: featurepipeline.WorkflowVersion,
+		WorkflowID:      pipeline.WorkflowID,
+		WorkflowVersion: pipeline.WorkflowVersion,
 		ActorUserID:     actor.UserID,
-		Status:          agentworkflow.RunRunning,
+		Status:          workflow.RunRunning,
 	}, nil
 }
 
 type downloadStore struct {
-	featuredelivery.Store
-	feature featuredelivery.FeatureRequest
-	run     featuredelivery.ImplementationRun
+	delivery.Store
+	feature delivery.FeatureRequest
+	run     delivery.ImplementationRun
 }
 
 type generationAuditStore struct {
-	featuredelivery.Store
-	feature featuredelivery.FeatureRequest
-	run     featuredelivery.GenerationRun
+	delivery.Store
+	feature delivery.FeatureRequest
+	run     delivery.GenerationRun
 }
 
 type reviewPolicyStore struct {
-	featuredelivery.Store
-	policy featuredelivery.ReviewPolicy
+	delivery.Store
+	policy delivery.ReviewPolicy
 }
 
 type reviewPolicyRolloutHTTPStore struct {
-	featuredelivery.Store
-	policy       featuredelivery.ReviewPolicyRecord
-	rollout      featuredelivery.ReviewPolicyRolloutRule
+	delivery.Store
+	policy       delivery.ReviewPolicyRecord
+	rollout      delivery.ReviewPolicyRolloutRule
 	rolloutFound bool
-	audit        []featuredelivery.ReviewPolicyRolloutAuditEvent
-	auditKind    featuredelivery.SubjectKind
+	audit        []delivery.ReviewPolicyRolloutAuditEvent
+	auditKind    delivery.SubjectKind
 	auditAfter   int64
 	auditLimit   int
-	savedRollout featuredelivery.ReviewPolicyRolloutRule
+	savedRollout delivery.ReviewPolicyRolloutRule
 	savedActor   int64
 }
 
 func (store *reviewPolicyRolloutHTTPStore) PublishReviewPolicies(
 	context.Context,
-	[]featuredelivery.ReviewPolicy,
+	[]delivery.ReviewPolicy,
 	int64,
 ) error {
 	return nil
@@ -124,9 +124,9 @@ func (store *reviewPolicyRolloutHTTPStore) PublishReviewPolicies(
 
 func (store *reviewPolicyRolloutHTTPStore) ListReviewPolicyRecords(
 	context.Context,
-	featuredelivery.ReviewPolicyCursor,
+	delivery.ReviewPolicyCursor,
 	int,
-) ([]featuredelivery.ReviewPolicyRecord, error) {
+) ([]delivery.ReviewPolicyRecord, error) {
 	return nil, nil
 }
 
@@ -134,18 +134,18 @@ func (store *reviewPolicyRolloutHTTPStore) GetReviewPolicyRecord(
 	_ context.Context,
 	id string,
 	version int64,
-) (featuredelivery.ReviewPolicyRecord, error) {
+) (delivery.ReviewPolicyRecord, error) {
 	if id != store.policy.ID || version != store.policy.Version {
-		return featuredelivery.ReviewPolicyRecord{}, featuredelivery.ErrNotFound
+		return delivery.ReviewPolicyRecord{}, delivery.ErrNotFound
 	}
 	return store.policy, nil
 }
 
 func (store *reviewPolicyRolloutHTTPStore) GetDefaultReviewPolicy(
 	context.Context,
-	featuredelivery.SubjectKind,
-) (featuredelivery.ReviewPolicyRef, error) {
-	return featuredelivery.ReviewPolicyRef{}, featuredelivery.ErrNotFound
+	delivery.SubjectKind,
+) (delivery.ReviewPolicyRef, error) {
+	return delivery.ReviewPolicyRef{}, delivery.ErrNotFound
 }
 
 func (store *reviewPolicyRolloutHTTPStore) EnsureReviewPolicyDefault(
@@ -181,20 +181,20 @@ func (store *reviewPolicyRolloutHTTPStore) ListReviewPolicyAudit(
 	string,
 	int64,
 	int,
-) ([]featuredelivery.ReviewPolicyAuditEvent, error) {
+) ([]delivery.ReviewPolicyAuditEvent, error) {
 	return nil, nil
 }
 
 func (store *reviewPolicyRolloutHTTPStore) GetReviewPolicyRollout(
 	_ context.Context,
-	_ featuredelivery.SubjectKind,
-) (featuredelivery.ReviewPolicyRolloutRule, bool, error) {
+	_ delivery.SubjectKind,
+) (delivery.ReviewPolicyRolloutRule, bool, error) {
 	return store.rollout, store.rolloutFound, nil
 }
 
 func (store *reviewPolicyRolloutHTTPStore) SetReviewPolicyRollout(
 	_ context.Context,
-	rule featuredelivery.ReviewPolicyRolloutRule,
+	rule delivery.ReviewPolicyRolloutRule,
 	actorUserID int64,
 ) error {
 	store.savedRollout = rule
@@ -206,45 +206,45 @@ func (store *reviewPolicyRolloutHTTPStore) SetReviewPolicyRollout(
 
 func (store *reviewPolicyRolloutHTTPStore) ListReviewPolicyRolloutAudit(
 	_ context.Context,
-	kind featuredelivery.SubjectKind,
+	kind delivery.SubjectKind,
 	afterSeq int64,
 	limit int,
-) ([]featuredelivery.ReviewPolicyRolloutAuditEvent, error) {
+) ([]delivery.ReviewPolicyRolloutAuditEvent, error) {
 	store.auditKind = kind
 	store.auditAfter = afterSeq
 	store.auditLimit = limit
-	return append([]featuredelivery.ReviewPolicyRolloutAuditEvent(nil), store.audit...), nil
+	return append([]delivery.ReviewPolicyRolloutAuditEvent(nil), store.audit...), nil
 }
 
 type reviewRoundHTTPStore struct {
-	featuredelivery.Store
-	feature            featuredelivery.FeatureRequest
-	artifact           featuredelivery.Artifact
-	artifacts          map[string]featuredelivery.Artifact
-	run                featuredelivery.ImplementationRun
-	policy             featuredelivery.ReviewPolicy
-	round              featuredelivery.ReviewRound
-	assignments        []featuredelivery.ReviewAssignment
-	report             featuredelivery.ReviewReport
-	events             []featuredelivery.ReviewEvent
+	delivery.Store
+	feature            delivery.FeatureRequest
+	artifact           delivery.Artifact
+	artifacts          map[string]delivery.Artifact
+	run                delivery.ImplementationRun
+	policy             delivery.ReviewPolicy
+	round              delivery.ReviewRound
+	assignments        []delivery.ReviewAssignment
+	report             delivery.ReviewReport
+	events             []delivery.ReviewEvent
 	afterSeq           int64
 	eventLimit         int
-	adjudications      []featuredelivery.ReviewAdjudication
-	adjudicationCursor featuredelivery.ReviewAdjudicationCursor
+	adjudications      []delivery.ReviewAdjudication
+	adjudicationCursor delivery.ReviewAdjudicationCursor
 	adjudicationLimit  int
-	finding            featuredelivery.FindingDetail
-	resolutions        []featuredelivery.FindingResolution
-	resolution         featuredelivery.FindingResolution
+	finding            delivery.FindingDetail
+	resolutions        []delivery.FindingResolution
+	resolution         delivery.FindingResolution
 	resolutionSubject  string
-	resolutionCursor   featuredelivery.FindingResolutionCursor
+	resolutionCursor   delivery.FindingResolutionCursor
 	resolutionLimit    int
 	cancelCalls        int
-	reuseSources       []featuredelivery.ReviewReportReuseSource
-	reusedReports      []featuredelivery.ReviewReport
-	reportReuses       []featuredelivery.ReviewReportReuse
-	roundSummaries     []featuredelivery.ReviewRoundSummary
-	roundFilter        featuredelivery.ReviewRoundFilter
-	roundCursor        featuredelivery.ReviewRoundCursor
+	reuseSources       []delivery.ReviewReportReuseSource
+	reusedReports      []delivery.ReviewReport
+	reportReuses       []delivery.ReviewReportReuse
+	roundSummaries     []delivery.ReviewRoundSummary
+	roundFilter        delivery.ReviewRoundFilter
+	roundCursor        delivery.ReviewRoundCursor
 	roundLimit         int
 	roundUserID        int64
 	roundAdmin         bool
@@ -253,7 +253,7 @@ type reviewRoundHTTPStore struct {
 
 func (store *reviewPolicyStore) SaveReviewPolicies(
 	_ context.Context,
-	policies []featuredelivery.ReviewPolicy,
+	policies []delivery.ReviewPolicy,
 ) error {
 	if len(policies) > 0 {
 		store.policy = policies[len(policies)-1]
@@ -265,9 +265,9 @@ func (store *reviewPolicyStore) GetReviewPolicy(
 	_ context.Context,
 	id string,
 	version int64,
-) (*featuredelivery.ReviewPolicy, error) {
+) (*delivery.ReviewPolicy, error) {
 	if id != store.policy.ID || version != store.policy.Version {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	policy := store.policy
 	return &policy, nil
@@ -276,9 +276,9 @@ func (store *reviewPolicyStore) GetReviewPolicy(
 func (store *reviewRoundHTTPStore) GetFeature(
 	_ context.Context,
 	id string,
-) (*featuredelivery.FeatureRequest, error) {
+) (*delivery.FeatureRequest, error) {
 	if id != store.feature.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	feature := store.feature
 	return &feature, nil
@@ -287,13 +287,13 @@ func (store *reviewRoundHTTPStore) GetFeature(
 func (store *reviewRoundHTTPStore) GetArtifact(
 	_ context.Context,
 	id string,
-) (*featuredelivery.Artifact, error) {
+) (*delivery.Artifact, error) {
 	if artifact, ok := store.artifacts[id]; ok {
 		copy := artifact
 		return &copy, nil
 	}
 	if id != store.artifact.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	artifact := store.artifact
 	return &artifact, nil
@@ -302,9 +302,9 @@ func (store *reviewRoundHTTPStore) GetArtifact(
 func (store *reviewRoundHTTPStore) GetImplementation(
 	_ context.Context,
 	id string,
-) (*featuredelivery.ImplementationRun, error) {
+) (*delivery.ImplementationRun, error) {
 	if id != store.run.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	run := store.run
 	return &run, nil
@@ -313,9 +313,9 @@ func (store *reviewRoundHTTPStore) GetImplementation(
 func (store *reviewRoundHTTPStore) GetReviewRound(
 	_ context.Context,
 	id string,
-) (*featuredelivery.ReviewRound, error) {
+) (*delivery.ReviewRound, error) {
 	if id != store.round.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	round := store.round
 	return &round, nil
@@ -323,18 +323,18 @@ func (store *reviewRoundHTTPStore) GetReviewRound(
 
 func (store *reviewRoundHTTPStore) ListReviewRoundSummaries(
 	_ context.Context,
-	filter featuredelivery.ReviewRoundFilter,
-	cursor featuredelivery.ReviewRoundCursor,
+	filter delivery.ReviewRoundFilter,
+	cursor delivery.ReviewRoundCursor,
 	limit int,
 	userID int64,
 	admin bool,
-) ([]featuredelivery.ReviewRoundSummary, bool, error) {
+) ([]delivery.ReviewRoundSummary, bool, error) {
 	store.roundFilter = filter
 	store.roundCursor = cursor
 	store.roundLimit = limit
 	store.roundUserID = userID
 	store.roundAdmin = admin
-	return append([]featuredelivery.ReviewRoundSummary(nil), store.roundSummaries...),
+	return append([]delivery.ReviewRoundSummary(nil), store.roundSummaries...),
 		store.roundHasMore,
 		nil
 }
@@ -343,9 +343,9 @@ func (store *reviewRoundHTTPStore) GetReviewPolicy(
 	_ context.Context,
 	id string,
 	version int64,
-) (*featuredelivery.ReviewPolicy, error) {
+) (*delivery.ReviewPolicy, error) {
 	if id != store.policy.ID || version != store.policy.Version {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	policy := store.policy
 	return &policy, nil
@@ -354,34 +354,34 @@ func (store *reviewRoundHTTPStore) GetReviewPolicy(
 func (store *reviewRoundHTTPStore) GetReviewFinding(
 	_ context.Context,
 	id string,
-) (*featuredelivery.FindingDetail, error) {
+) (*delivery.FindingDetail, error) {
 	if id != store.finding.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	finding := store.finding
-	finding.Evidence = append([]featuredelivery.FindingEvidence(nil), store.finding.Evidence...)
+	finding.Evidence = append([]delivery.FindingEvidence(nil), store.finding.Evidence...)
 	return &finding, nil
 }
 
 func (store *reviewRoundHTTPStore) CreateReviewRound(
 	_ context.Context,
-	round featuredelivery.ReviewRound,
-	assignments []featuredelivery.ReviewAssignment,
+	round delivery.ReviewRound,
+	assignments []delivery.ReviewAssignment,
 ) error {
 	store.round = round
-	store.assignments = append([]featuredelivery.ReviewAssignment(nil), assignments...)
+	store.assignments = append([]delivery.ReviewAssignment(nil), assignments...)
 	return nil
 }
 
 func (store *reviewRoundHTTPStore) GetReviewReportReuseSources(
 	_ context.Context,
 	reportIDs []string,
-) ([]featuredelivery.ReviewReportReuseSource, error) {
+) ([]delivery.ReviewReportReuseSource, error) {
 	requested := make(map[string]struct{}, len(reportIDs))
 	for _, reportID := range reportIDs {
 		requested[reportID] = struct{}{}
 	}
-	sources := make([]featuredelivery.ReviewReportReuseSource, 0, len(reportIDs))
+	sources := make([]delivery.ReviewReportReuseSource, 0, len(reportIDs))
 	for _, source := range store.reuseSources {
 		if _, ok := requested[source.Report.ID]; ok {
 			sources = append(sources, source)
@@ -392,15 +392,15 @@ func (store *reviewRoundHTTPStore) GetReviewReportReuseSources(
 
 func (store *reviewRoundHTTPStore) CreateReviewRoundWithReuses(
 	_ context.Context,
-	round featuredelivery.ReviewRound,
-	assignments []featuredelivery.ReviewAssignment,
-	reports []featuredelivery.ReviewReport,
-	reuses []featuredelivery.ReviewReportReuse,
+	round delivery.ReviewRound,
+	assignments []delivery.ReviewAssignment,
+	reports []delivery.ReviewReport,
+	reuses []delivery.ReviewReportReuse,
 ) error {
 	store.round = round
-	store.assignments = append([]featuredelivery.ReviewAssignment(nil), assignments...)
-	store.reusedReports = append([]featuredelivery.ReviewReport(nil), reports...)
-	store.reportReuses = append([]featuredelivery.ReviewReportReuse(nil), reuses...)
+	store.assignments = append([]delivery.ReviewAssignment(nil), assignments...)
+	store.reusedReports = append([]delivery.ReviewReport(nil), reports...)
+	store.reportReuses = append([]delivery.ReviewReportReuse(nil), reuses...)
 	return nil
 }
 
@@ -409,21 +409,21 @@ func (store *reviewRoundHTTPStore) ListReviewEvents(
 	roundID string,
 	afterSeq int64,
 	limit int,
-) ([]featuredelivery.ReviewEvent, error) {
+) ([]delivery.ReviewEvent, error) {
 	if roundID != store.round.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	store.afterSeq = afterSeq
 	store.eventLimit = limit
-	return append([]featuredelivery.ReviewEvent(nil), store.events...), nil
+	return append([]delivery.ReviewEvent(nil), store.events...), nil
 }
 
 func (store *reviewRoundHTTPStore) GetReviewReportByAssignment(
 	_ context.Context,
 	roundID, assignmentID string,
-) (*featuredelivery.ReviewReport, error) {
+) (*delivery.ReviewReport, error) {
 	if roundID != store.report.RoundID || assignmentID != store.report.AssignmentID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	report := store.report
 	return &report, nil
@@ -432,15 +432,15 @@ func (store *reviewRoundHTTPStore) GetReviewReportByAssignment(
 func (store *reviewRoundHTTPStore) ListReviewAdjudications(
 	_ context.Context,
 	roundID string,
-	cursor featuredelivery.ReviewAdjudicationCursor,
+	cursor delivery.ReviewAdjudicationCursor,
 	limit int,
-) ([]featuredelivery.ReviewAdjudication, error) {
+) ([]delivery.ReviewAdjudication, error) {
 	if roundID != store.round.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	store.adjudicationCursor = cursor
 	store.adjudicationLimit = limit
-	return append([]featuredelivery.ReviewAdjudication(nil), store.adjudications...), nil
+	return append([]delivery.ReviewAdjudication(nil), store.adjudications...), nil
 }
 
 func (store *reviewRoundHTTPStore) RequestReviewRoundCancel(
@@ -449,27 +449,27 @@ func (store *reviewRoundHTTPStore) RequestReviewRoundCancel(
 	at time.Time,
 ) (bool, error) {
 	if roundID != store.round.ID {
-		return false, featuredelivery.ErrNotFound
+		return false, delivery.ErrNotFound
 	}
 	store.cancelCalls++
 	switch store.round.Status {
-	case featuredelivery.RoundCancelled:
+	case delivery.RoundCancelled:
 		return false, nil
-	case featuredelivery.RoundCreated, featuredelivery.RoundRunning, featuredelivery.RoundEvaluating:
-		store.round.Status = featuredelivery.RoundCancelled
+	case delivery.RoundCreated, delivery.RoundRunning, delivery.RoundEvaluating:
+		store.round.Status = delivery.RoundCancelled
 		store.round.CompletedAt = &at
 		return true, nil
 	default:
-		return false, featuredelivery.ErrConflict
+		return false, delivery.ErrConflict
 	}
 }
 
 func (store *reviewRoundHTTPStore) AppendReviewEvent(
 	_ context.Context,
-	event featuredelivery.ReviewEvent,
-) (*featuredelivery.ReviewEvent, error) {
+	event delivery.ReviewEvent,
+) (*delivery.ReviewEvent, error) {
 	if event.RoundID != store.round.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	event.Seq = int64(len(store.events) + 1)
 	store.events = append(store.events, event)
@@ -479,10 +479,10 @@ func (store *reviewRoundHTTPStore) AppendReviewEvent(
 
 func (store *reviewRoundHTTPStore) CreateFindingResolution(
 	_ context.Context,
-	resolution featuredelivery.FindingResolution,
+	resolution delivery.FindingResolution,
 ) error {
 	if resolution.FindingID != store.finding.ID {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	}
 	store.resolution = resolution
 	store.resolutions = append(store.resolutions, resolution)
@@ -492,52 +492,52 @@ func (store *reviewRoundHTTPStore) CreateFindingResolution(
 func (store *reviewRoundHTTPStore) ListFindingResolutions(
 	_ context.Context,
 	findingID, subjectHash string,
-	cursor featuredelivery.FindingResolutionCursor,
+	cursor delivery.FindingResolutionCursor,
 	limit int,
-) ([]featuredelivery.FindingResolution, error) {
+) ([]delivery.FindingResolution, error) {
 	if findingID != store.finding.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	store.resolutionSubject = subjectHash
 	store.resolutionCursor = cursor
 	store.resolutionLimit = limit
-	return append([]featuredelivery.FindingResolution(nil), store.resolutions...), nil
+	return append([]delivery.FindingResolution(nil), store.resolutions...), nil
 }
 
-func (store *generationAuditStore) GetFeature(_ context.Context, id string) (*featuredelivery.FeatureRequest, error) {
+func (store *generationAuditStore) GetFeature(_ context.Context, id string) (*delivery.FeatureRequest, error) {
 	if id != store.feature.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	feature := store.feature
 	return &feature, nil
 }
 
-func (store *generationAuditStore) GetGenerationRun(_ context.Context, id string) (*featuredelivery.GenerationRun, error) {
+func (store *generationAuditStore) GetGenerationRun(_ context.Context, id string) (*delivery.GenerationRun, error) {
 	if id != store.run.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	run := store.run
 	return &run, nil
 }
 
-func (store *generationAuditStore) ListGenerationRuns(_ context.Context, requestID string, _ featuredelivery.GenerationCursor, _ int) ([]featuredelivery.GenerationRun, error) {
+func (store *generationAuditStore) ListGenerationRuns(_ context.Context, requestID string, _ delivery.GenerationCursor, _ int) ([]delivery.GenerationRun, error) {
 	if requestID != store.feature.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
-	return []featuredelivery.GenerationRun{store.run}, nil
+	return []delivery.GenerationRun{store.run}, nil
 }
 
-func (store *downloadStore) GetFeature(_ context.Context, id string) (*featuredelivery.FeatureRequest, error) {
+func (store *downloadStore) GetFeature(_ context.Context, id string) (*delivery.FeatureRequest, error) {
 	if id != store.feature.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	feature := store.feature
 	return &feature, nil
 }
 
-func (store *downloadStore) GetImplementation(_ context.Context, id string) (*featuredelivery.ImplementationRun, error) {
+func (store *downloadStore) GetImplementation(_ context.Context, id string) (*delivery.ImplementationRun, error) {
 	if id != store.run.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	run := store.run
 	return &run, nil
@@ -724,7 +724,7 @@ func TestStartPipelineRejectsClientControlledWorkflowFields(t *testing.T) {
 func TestReviewPolicyHTTPControlPlaneCanonicalizesAdminInput(t *testing.T) {
 	store := &reviewPolicyStore{}
 	mux := http.NewServeMux()
-	New(featuredelivery.NewService(store, nil, time.Second)).RegisterRoutes(
+	New(delivery.NewService(store, nil, time.Second)).RegisterRoutes(
 		func(pattern string, handler http.HandlerFunc) { mux.HandleFunc(pattern, handler) },
 	)
 	request := httptest.NewRequest(
@@ -798,14 +798,14 @@ func TestReviewPolicyHTTPControlPlaneCanonicalizesAdminInput(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
 	var publishResponse struct {
-		Data featuredelivery.ReviewPolicy `json:"data"`
+		Data delivery.ReviewPolicy `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &publishResponse); err != nil {
 		t.Fatal(err)
 	}
 	published := publishResponse.Data
 	if published.ID != "system-design-review" ||
-		published.SubjectKind != featuredelivery.SubjectSystemDesign ||
+		published.SubjectKind != delivery.SubjectSystemDesign ||
 		published.Reviewers[0].ID != "architecture" ||
 		published.Reviewers[0].Agent.ID != "review.architecture" ||
 		published.Reviewers[0].DefinitionHash != "hash-a" ||
@@ -820,8 +820,8 @@ func TestReviewPolicyHTTPControlPlaneCanonicalizesAdminInput(t *testing.T) {
 		published.RiskRuleVersion != "change-risk.v1" ||
 		len(published.RiskRules) != 1 ||
 		published.RiskRules[0].ID != "large-change" ||
-		published.RiskRules[0].Conditions[0].Fact != featuredelivery.RiskFactFilesChanged ||
-		published.RiskRules[0].Conditions[0].Operator != featuredelivery.RiskGreaterThanOrEqual ||
+		published.RiskRules[0].Conditions[0].Fact != delivery.RiskFactFilesChanged ||
+		published.RiskRules[0].Conditions[0].Operator != delivery.RiskGreaterThanOrEqual ||
 		len(published.RiskRules[0].ReviewerIDs) != 1 ||
 		published.RiskRules[0].ReviewerIDs[0] != "operations" ||
 		published.ContentHash == "" || published.CreatedAt.IsZero() {
@@ -876,7 +876,7 @@ func TestPublishReviewPolicyRejectsServerOwnedFields(t *testing.T) {
 func TestReviewPolicyRolloutGetRequiresAuthentication(t *testing.T) {
 	store, service, mux := reviewPolicyRolloutHTTPFixture(t)
 	_, err := service.SetReviewPolicyRollout(
-		context.Background(), featuredelivery.SubjectSystemDesign,
+		context.Background(), delivery.SubjectSystemDesign,
 		store.policy.ID, store.policy.Version, 2500, "rollout-2026-08",
 		true, 7, true,
 	)
@@ -905,8 +905,8 @@ func TestReviewPolicyRolloutGetRequiresAuthentication(t *testing.T) {
 	}
 	var payload struct {
 		Data struct {
-			Found   bool                                    `json:"found"`
-			Rollout featuredelivery.ReviewPolicyRolloutRule `json:"rollout"`
+			Found   bool                             `json:"found"`
+			Rollout delivery.ReviewPolicyRolloutRule `json:"rollout"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
@@ -969,7 +969,7 @@ func TestSetReviewPolicyRolloutCanonicalizesAdministratorInput(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 	}
-	if store.savedRollout.SubjectKind != featuredelivery.SubjectSystemDesign ||
+	if store.savedRollout.SubjectKind != delivery.SubjectSystemDesign ||
 		store.savedRollout.CandidatePolicyID != store.policy.ID ||
 		store.savedRollout.CandidatePolicyVersion != store.policy.Version ||
 		store.savedRollout.PercentageBPS != 2500 ||
@@ -980,7 +980,7 @@ func TestSetReviewPolicyRolloutCanonicalizesAdministratorInput(t *testing.T) {
 		t.Fatalf("saved rollout = %+v, actor = %d", store.savedRollout, store.savedActor)
 	}
 	var payload struct {
-		Data featuredelivery.ReviewPolicyRolloutRule `json:"data"`
+		Data delivery.ReviewPolicyRolloutRule `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
@@ -1041,9 +1041,9 @@ func TestSetReviewPolicyRolloutRejectsInvalidInput(t *testing.T) {
 
 func TestListReviewPolicyRolloutAuditForwardsCursorAndLimit(t *testing.T) {
 	store, _, mux := reviewPolicyRolloutHTTPFixture(t)
-	store.audit = []featuredelivery.ReviewPolicyRolloutAuditEvent{
-		{Seq: 12, SubjectKind: featuredelivery.SubjectSystemDesign, RuleVersion: 2},
-		{Seq: 13, SubjectKind: featuredelivery.SubjectSystemDesign, RuleVersion: 3},
+	store.audit = []delivery.ReviewPolicyRolloutAuditEvent{
+		{Seq: 12, SubjectKind: delivery.SubjectSystemDesign, RuleVersion: 2},
+		{Seq: 13, SubjectKind: delivery.SubjectSystemDesign, RuleVersion: 3},
 	}
 	request := httptest.NewRequest(
 		http.MethodGet,
@@ -1058,14 +1058,14 @@ func TestListReviewPolicyRolloutAuditForwardsCursorAndLimit(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 	}
-	if store.auditKind != featuredelivery.SubjectSystemDesign ||
+	if store.auditKind != delivery.SubjectSystemDesign ||
 		store.auditAfter != 11 || store.auditLimit != 2 {
 		t.Fatalf("audit query = %s/%d/%d", store.auditKind, store.auditAfter, store.auditLimit)
 	}
 	var payload struct {
 		Data struct {
-			Items        []featuredelivery.ReviewPolicyRolloutAuditEvent `json:"items"`
-			NextAfterSeq int64                                           `json:"next_after_seq"`
+			Items        []delivery.ReviewPolicyRolloutAuditEvent `json:"items"`
+			NextAfterSeq int64                                    `json:"next_after_seq"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
@@ -1100,12 +1100,12 @@ func TestCreateReviewRoundRejectsClientDefinedPolicy(t *testing.T) {
 
 func TestCreateReviewRoundUsesServerDefaultPolicy(t *testing.T) {
 	store := reviewRoundHTTPFixture()
-	store.artifact.Kind = featuredelivery.KindSystemDesign
+	store.artifact.Kind = delivery.KindSystemDesign
 	store.artifact.Version = 1
 	store.policy = reviewHTTPPolicy(t)
-	service := featuredelivery.NewService(store, nil, time.Second)
-	service.SetReviewConfiguration(nil, map[featuredelivery.SubjectKind]featuredelivery.ReviewPolicyRef{
-		featuredelivery.SubjectSystemDesign: {
+	service := delivery.NewService(store, nil, time.Second)
+	service.SetReviewConfiguration(nil, map[delivery.SubjectKind]delivery.ReviewPolicyRef{
+		delivery.SubjectSystemDesign: {
 			ID: store.policy.ID, Version: store.policy.Version,
 		},
 	})
@@ -1134,7 +1134,7 @@ func TestCreateReviewRoundUsesServerDefaultPolicy(t *testing.T) {
 	}
 	var payload struct {
 		Data struct {
-			Round featuredelivery.ReviewRound `json:"round"`
+			Round delivery.ReviewRound `json:"round"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
@@ -1147,25 +1147,25 @@ func TestCreateReviewRoundUsesServerDefaultPolicy(t *testing.T) {
 
 func TestCreateReviewRoundAcceptsExplicitReportReuse(t *testing.T) {
 	store := reviewRoundHTTPFixture()
-	store.artifact.Kind = featuredelivery.KindSystemDesign
+	store.artifact.Kind = delivery.KindSystemDesign
 	store.artifact.Version = 1
 	store.policy = reviewHTTPPolicy(t)
-	subject, err := featuredelivery.BuildArtifactReviewSubject(store.artifact)
+	subject, err := delivery.BuildArtifactReviewSubject(store.artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
 	reviewer := store.policy.Reviewers[0]
-	sourceAssignment := featuredelivery.ReviewAssignment{
+	sourceAssignment := delivery.ReviewAssignment{
 		ID: "source-assignment", RoundID: "source-round", ReviewerID: reviewer.ID,
 		Agent: reviewer.Agent, DefinitionHash: reviewer.DefinitionHash,
 		Categories: append([]string(nil), reviewer.Categories...),
-		Required:   reviewer.Required, Status: featuredelivery.AssignmentRunning, Attempt: 1,
+		Required:   reviewer.Required, Status: delivery.AssignmentRunning, Attempt: 1,
 	}
-	sourceReport, err := featuredelivery.PrepareReviewReport(
-		featuredelivery.ReviewReport{
+	sourceReport, err := delivery.PrepareReviewReport(
+		delivery.ReviewReport{
 			RoundID: sourceAssignment.RoundID, AssignmentID: sourceAssignment.ID,
 			ReviewerID: sourceAssignment.ReviewerID, SubjectHash: subject.ContentHash,
-			Coverage: []featuredelivery.CoverageItem{{
+			Coverage: []delivery.CoverageItem{{
 				Category: reviewer.Categories[0], Covered: true,
 			}},
 			Summary:     "The immutable subject remains covered.",
@@ -1177,8 +1177,8 @@ func TestCreateReviewRoundAcceptsExplicitReportReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sourceAssignment.Status = featuredelivery.AssignmentSucceeded
-	store.reuseSources = []featuredelivery.ReviewReportReuseSource{{
+	sourceAssignment.Status = delivery.AssignmentSucceeded
+	store.reuseSources = []delivery.ReviewReportReuseSource{{
 		Report: sourceReport, Assignment: sourceAssignment,
 		PolicyID: store.policy.ID, PolicyVersion: store.policy.Version,
 		PolicyHash: store.policy.ContentHash,
@@ -1195,7 +1195,7 @@ func TestCreateReviewRoundAcceptsExplicitReportReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := featuredelivery.NewService(store, nil, time.Second)
+	service := delivery.NewService(store, nil, time.Second)
 	mux := http.NewServeMux()
 	New(service).RegisterRoutes(func(pattern string, handler http.HandlerFunc) {
 		mux.HandleFunc(pattern, handler)
@@ -1227,42 +1227,42 @@ func TestCreateReviewRoundAcceptsExplicitReportReuse(t *testing.T) {
 }
 
 func TestCreateImplementationReviewRoundUsesServerDefaultPolicy(t *testing.T) {
-	for _, kind := range []featuredelivery.SubjectKind{
-		featuredelivery.SubjectValidationBundle,
-		featuredelivery.SubjectDeliveryBundle,
+	for _, kind := range []delivery.SubjectKind{
+		delivery.SubjectValidationBundle,
+		delivery.SubjectDeliveryBundle,
 	} {
 		t.Run(string(kind), func(t *testing.T) {
 			store := reviewRoundHTTPFixture()
-			design := featuredelivery.Artifact{
+			design := delivery.Artifact{
 				ID: "design-1", RequestID: store.feature.ID,
-				Kind: featuredelivery.KindSystemDesign, Version: 1,
+				Kind: delivery.KindSystemDesign, Version: 1,
 				ContentHash: "design-hash",
 			}
-			plan := featuredelivery.Artifact{
+			plan := delivery.Artifact{
 				ID: "plan-1", RequestID: store.feature.ID,
-				Kind: featuredelivery.KindImplementationPlan, Version: 1,
+				Kind: delivery.KindImplementationPlan, Version: 1,
 				ParentArtifactID: design.ID, ContentHash: "plan-hash",
 			}
-			store.artifacts = map[string]featuredelivery.Artifact{
+			store.artifacts = map[string]delivery.Artifact{
 				design.ID: design,
 				plan.ID:   plan,
 			}
-			store.run = featuredelivery.ImplementationRun{
+			store.run = delivery.ImplementationRun{
 				ID: "run-1", RequestID: store.feature.ID,
 				DesignArtifactID: design.ID, PlanArtifactID: plan.ID,
 				Repo: "nasuta", BaseCommit: strings.Repeat("1", 40),
-				Status: featuredelivery.RunSucceeded, RequestedBy: store.feature.CreatedBy,
-				ChangeSet: &featuredelivery.ChangeSet{
+				Status: delivery.RunSucceeded, RequestedBy: store.feature.CreatedBy,
+				ChangeSet: &delivery.ChangeSet{
 					RunID: "run-1", WorktreeHead: strings.Repeat("2", 40),
 					PatchSHA256: "patch-hash",
-					ValidationResults: []featuredelivery.ValidationResult{{
+					ValidationResults: []delivery.ValidationResult{{
 						Sequence: 1, Status: "validation_not_configured",
 					}},
 				},
 			}
 			store.policy = reviewHTTPPolicyForSubject(t, kind)
-			service := featuredelivery.NewService(store, nil, time.Second)
-			service.SetReviewConfiguration(nil, map[featuredelivery.SubjectKind]featuredelivery.ReviewPolicyRef{
+			service := delivery.NewService(store, nil, time.Second)
+			service.SetReviewConfiguration(nil, map[delivery.SubjectKind]delivery.ReviewPolicyRef{
 				kind: {ID: store.policy.ID, Version: store.policy.Version},
 			})
 			mux := http.NewServeMux()
@@ -1328,11 +1328,11 @@ func TestCreateReviewRoundRejectsPartialPolicyReference(t *testing.T) {
 func TestListReviewRoundsParsesFeatureFilterAndStableCursor(t *testing.T) {
 	store := reviewRoundHTTPFixture()
 	createdAt := time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC)
-	store.roundSummaries = []featuredelivery.ReviewRoundSummary{{
+	store.roundSummaries = []delivery.ReviewRoundSummary{{
 		ID: "round-1", FeatureID: store.feature.ID,
-		SubjectKind: featuredelivery.SubjectSystemDesign,
+		SubjectKind: delivery.SubjectSystemDesign,
 		SubjectID:   store.artifact.ID, SubjectVersion: store.artifact.Version,
-		Status: featuredelivery.RoundCompleted, CreatedAt: createdAt,
+		Status: delivery.RoundCompleted, CreatedAt: createdAt,
 	}}
 	store.roundHasMore = true
 	cursor := reviewRoundCursorPayload{
@@ -1340,7 +1340,7 @@ func TestListReviewRoundsParsesFeatureFilterAndStableCursor(t *testing.T) {
 		ID:        "round-before",
 	}
 	mux := http.NewServeMux()
-	New(featuredelivery.NewService(store, nil, time.Second)).RegisterRoutes(
+	New(delivery.NewService(store, nil, time.Second)).RegisterRoutes(
 		func(pattern string, handler http.HandlerFunc) { mux.HandleFunc(pattern, handler) },
 	)
 	request := httptest.NewRequest(
@@ -1359,8 +1359,8 @@ func TestListReviewRoundsParsesFeatureFilterAndStableCursor(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
 	if store.roundFilter.FeatureID != store.feature.ID ||
-		store.roundFilter.SubjectKind != featuredelivery.SubjectSystemDesign ||
-		store.roundFilter.Status != featuredelivery.RoundCompleted ||
+		store.roundFilter.SubjectKind != delivery.SubjectSystemDesign ||
+		store.roundFilter.Status != delivery.RoundCompleted ||
 		store.roundCursor.CreatedAt != cursor.CreatedAt ||
 		store.roundCursor.ID != cursor.ID ||
 		store.roundLimit != 1 ||
@@ -1377,8 +1377,8 @@ func TestListReviewRoundsParsesFeatureFilterAndStableCursor(t *testing.T) {
 	}
 	var payload struct {
 		Data struct {
-			Items      []featuredelivery.ReviewRoundSummary `json:"items"`
-			NextCursor string                               `json:"next_cursor"`
+			Items      []delivery.ReviewRoundSummary `json:"items"`
+			NextCursor string                        `json:"next_cursor"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
@@ -1401,7 +1401,7 @@ func TestListReviewRoundsParsesFeatureFilterAndStableCursor(t *testing.T) {
 func TestListReviewEventsParsesBoundedQueryAndEnforcesOwnership(t *testing.T) {
 	store := reviewRoundHTTPFixture()
 	mux := http.NewServeMux()
-	New(featuredelivery.NewService(store, nil, time.Second)).RegisterRoutes(
+	New(delivery.NewService(store, nil, time.Second)).RegisterRoutes(
 		func(pattern string, handler http.HandlerFunc) { mux.HandleFunc(pattern, handler) },
 	)
 	request := httptest.NewRequest(
@@ -1422,7 +1422,7 @@ func TestListReviewEventsParsesBoundedQueryAndEnforcesOwnership(t *testing.T) {
 	}
 	var payload struct {
 		Data struct {
-			Items []featuredelivery.ReviewEvent `json:"items"`
+			Items []delivery.ReviewEvent `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
@@ -1450,9 +1450,9 @@ func TestListReviewEventsParsesBoundedQueryAndEnforcesOwnership(t *testing.T) {
 func TestListFindingResolutionsParsesCursorAndEnforcesOwnership(t *testing.T) {
 	store := reviewRoundHTTPFixture()
 	createdAt := time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC)
-	store.resolutions = []featuredelivery.FindingResolution{{
+	store.resolutions = []delivery.FindingResolution{{
 		ID: "resolution-1", FindingID: "finding-1",
-		Resolution:  featuredelivery.ResolutionInvalidated,
+		Resolution:  delivery.ResolutionInvalidated,
 		SubjectHash: store.round.Subject.ContentHash,
 		Rationale:   "The finding is no longer applicable.", ActorID: 9,
 		CreatedAt: createdAt,
@@ -1462,7 +1462,7 @@ func TestListFindingResolutionsParsesCursorAndEnforcesOwnership(t *testing.T) {
 		ID:        "resolution-before",
 	}
 	mux := http.NewServeMux()
-	New(featuredelivery.NewService(store, nil, time.Second)).RegisterRoutes(
+	New(delivery.NewService(store, nil, time.Second)).RegisterRoutes(
 		func(pattern string, handler http.HandlerFunc) { mux.HandleFunc(pattern, handler) },
 	)
 	request := httptest.NewRequest(
@@ -1490,15 +1490,15 @@ func TestListFindingResolutionsParsesCursorAndEnforcesOwnership(t *testing.T) {
 	}
 	var payload struct {
 		Data struct {
-			Items      []featuredelivery.FindingResolution `json:"items"`
-			NextCursor string                              `json:"next_cursor"`
+			Items      []delivery.FindingResolution `json:"items"`
+			NextCursor string                       `json:"next_cursor"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
 	if len(payload.Data.Items) != 1 ||
-		payload.Data.Items[0].Resolution != featuredelivery.ResolutionInvalidated ||
+		payload.Data.Items[0].Resolution != delivery.ResolutionInvalidated ||
 		payload.Data.NextCursor == "" {
 		t.Fatalf("payload = %+v", payload.Data)
 	}
@@ -1530,7 +1530,7 @@ func TestListFindingResolutionsParsesCursorAndEnforcesOwnership(t *testing.T) {
 func TestCreateFindingResolutionCanonicalizesAndRejectsUnknownJSON(t *testing.T) {
 	store := reviewRoundHTTPFixture()
 	mux := http.NewServeMux()
-	New(featuredelivery.NewService(store, nil, time.Second)).RegisterRoutes(
+	New(delivery.NewService(store, nil, time.Second)).RegisterRoutes(
 		func(pattern string, handler http.HandlerFunc) { mux.HandleFunc(pattern, handler) },
 	)
 	request := httptest.NewRequest(
@@ -1552,7 +1552,7 @@ func TestCreateFindingResolutionCanonicalizesAndRejectsUnknownJSON(t *testing.T)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
-	if store.resolution.Resolution != featuredelivery.ResolutionInvalidated ||
+	if store.resolution.Resolution != delivery.ResolutionInvalidated ||
 		store.resolution.SubjectHash != "subject-hash" ||
 		store.resolution.Rationale != "No longer applicable." ||
 		store.resolution.ActorID != 9 {
@@ -1581,13 +1581,13 @@ func TestCreateFindingResolutionCanonicalizesAndRejectsUnknownJSON(t *testing.T)
 
 func TestGetReviewReportEnforcesOwnershipAndAssignmentScope(t *testing.T) {
 	store := reviewRoundHTTPFixture()
-	store.report = featuredelivery.ReviewReport{
+	store.report = delivery.ReviewReport{
 		ID: "report-1", RoundID: "round-1", AssignmentID: "assignment-1",
 		ReviewerID: "architecture", SubjectHash: "subject-hash",
 		Summary: "No blocking findings.", ContentHash: "report-hash",
 	}
 	mux := http.NewServeMux()
-	New(featuredelivery.NewService(store, nil, time.Second)).RegisterRoutes(
+	New(delivery.NewService(store, nil, time.Second)).RegisterRoutes(
 		func(pattern string, handler http.HandlerFunc) { mux.HandleFunc(pattern, handler) },
 	)
 	for _, test := range []struct {
@@ -1623,7 +1623,7 @@ func TestGetReviewReportEnforcesOwnershipAndAssignmentScope(t *testing.T) {
 				return
 			}
 			var payload struct {
-				Data featuredelivery.ReviewReport `json:"data"`
+				Data delivery.ReviewReport `json:"data"`
 			}
 			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 				t.Fatal(err)
@@ -1638,7 +1638,7 @@ func TestGetReviewReportEnforcesOwnershipAndAssignmentScope(t *testing.T) {
 
 func TestListReviewAdjudicationsParsesCursorAndEnforcesOwnership(t *testing.T) {
 	store := reviewRoundHTTPFixture()
-	store.adjudications = []featuredelivery.ReviewAdjudication{{
+	store.adjudications = []delivery.ReviewAdjudication{{
 		ID:             "adjudication-1",
 		RoundID:        "round-1",
 		SubjectHash:    "subject-hash",
@@ -1647,7 +1647,7 @@ func TestListReviewAdjudicationsParsesCursorAndEnforcesOwnership(t *testing.T) {
 		FindingIDs:     []string{"finding-1", "finding-2"},
 		Agent:          agentapi.DefinitionRef{ID: "review.adjudicator", Version: 1},
 		DefinitionHash: "definition-hash",
-		Decision:       featuredelivery.AdjudicationNeedsHuman,
+		Decision:       delivery.AdjudicationNeedsHuman,
 		Rationale:      "The evidence remains ambiguous.",
 		ErrorCode:      "adjudication_runtime_failed",
 		ContentHash:    "content-hash",
@@ -1658,7 +1658,7 @@ func TestListReviewAdjudicationsParsesCursorAndEnforcesOwnership(t *testing.T) {
 		ID:          "adjudication-0",
 	}
 	mux := http.NewServeMux()
-	New(featuredelivery.NewService(store, nil, time.Second)).RegisterRoutes(
+	New(delivery.NewService(store, nil, time.Second)).RegisterRoutes(
 		func(pattern string, handler http.HandlerFunc) { mux.HandleFunc(pattern, handler) },
 	)
 	request := httptest.NewRequest(
@@ -1675,7 +1675,7 @@ func TestListReviewAdjudicationsParsesCursorAndEnforcesOwnership(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
-	if store.adjudicationCursor != (featuredelivery.ReviewAdjudicationCursor{
+	if store.adjudicationCursor != (delivery.ReviewAdjudicationCursor{
 		Fingerprint: cursor.Fingerprint,
 		ID:          cursor.ID,
 	}) || store.adjudicationLimit != 1 {
@@ -1687,8 +1687,8 @@ func TestListReviewAdjudicationsParsesCursorAndEnforcesOwnership(t *testing.T) {
 	}
 	var payload struct {
 		Data struct {
-			Items      []featuredelivery.ReviewAdjudication `json:"items"`
-			NextCursor string                               `json:"next_cursor"`
+			Items      []delivery.ReviewAdjudication `json:"items"`
+			NextCursor string                        `json:"next_cursor"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
@@ -1765,7 +1765,7 @@ func TestListReviewEventsRejectsInvalidQuery(t *testing.T) {
 func TestCancelReviewRoundAllowsAdministrator(t *testing.T) {
 	store := reviewRoundHTTPFixture()
 	mux := http.NewServeMux()
-	service := featuredelivery.NewService(store, nil, time.Second)
+	service := delivery.NewService(store, nil, time.Second)
 	coordinator := &reviewCoordinatorRecorder{
 		cancel: func(ctx context.Context, roundID string, _ agentapi.Actor, admin bool) error {
 			return service.CancelReviewRound(ctx, roundID, admin)
@@ -1791,11 +1791,11 @@ func TestCancelReviewRoundAllowsAdministrator(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
-	if store.cancelCalls != 1 || store.round.Status != featuredelivery.RoundCancelled {
+	if store.cancelCalls != 1 || store.round.Status != delivery.RoundCancelled {
 		t.Fatalf("cancel calls = %d, round = %+v", store.cancelCalls, store.round)
 	}
 	if len(store.events) != 2 ||
-		store.events[1].Kind != featuredelivery.ReviewEventRoundCancelled {
+		store.events[1].Kind != delivery.ReviewEventRoundCancelled {
 		t.Fatalf("events = %+v", store.events)
 	}
 	if coordinator.cancelCalls != 1 || coordinator.roundID != "round-1" ||
@@ -1805,8 +1805,8 @@ func TestCancelReviewRoundAllowsAdministrator(t *testing.T) {
 }
 
 func TestExecuteReviewRoundDelegatesToCoordinator(t *testing.T) {
-	result := &featuredelivery.ReviewGateResult{
-		ID: "gate-1", RoundID: "round-1", Decision: featuredelivery.GatePass,
+	result := &delivery.ReviewGateResult{
+		ID: "gate-1", RoundID: "round-1", Decision: delivery.GatePass,
 	}
 	coordinator := &reviewCoordinatorRecorder{executeResult: result}
 	handler := New(nil)
@@ -1836,7 +1836,7 @@ func TestExecuteReviewRoundDelegatesToCoordinator(t *testing.T) {
 
 func TestListArtifactsRequiresMatchingKind(t *testing.T) {
 	handler := New(nil)
-	cursor := encodeCursor(artifactCursorPayload{Kind: featuredelivery.KindSystemDesign, Version: 2})
+	cursor := encodeCursor(artifactCursorPayload{Kind: delivery.KindSystemDesign, Version: 2})
 	for _, target := range []struct {
 		name string
 		url  string
@@ -1860,42 +1860,42 @@ func TestListArtifactsRequiresMatchingKind(t *testing.T) {
 
 func reviewRoundHTTPFixture() *reviewRoundHTTPStore {
 	return &reviewRoundHTTPStore{
-		feature: featuredelivery.FeatureRequest{ID: "feat-1", CreatedBy: 7},
-		artifact: featuredelivery.Artifact{
+		feature: delivery.FeatureRequest{ID: "feat-1", CreatedBy: 7},
+		artifact: delivery.Artifact{
 			ID: "artifact-1", RequestID: "feat-1", ContentHash: "artifact-hash",
 		},
-		round: featuredelivery.ReviewRound{
-			ID: "round-1", Status: featuredelivery.RoundCreated,
-			Subject: featuredelivery.ReviewSubject{
-				Kind: featuredelivery.SubjectSystemDesign, ID: "artifact-1",
+		round: delivery.ReviewRound{
+			ID: "round-1", Status: delivery.RoundCreated,
+			Subject: delivery.ReviewSubject{
+				Kind: delivery.SubjectSystemDesign, ID: "artifact-1",
 				SourceContentHash: "artifact-hash", ContentHash: "subject-hash",
 			},
 		},
-		finding: featuredelivery.FindingDetail{
-			FindingSummary: featuredelivery.FindingSummary{
+		finding: delivery.FindingDetail{
+			FindingSummary: delivery.FindingSummary{
 				ID: "finding-1", RoundID: "round-1",
-				Severity: featuredelivery.SeverityHigh,
+				Severity: delivery.SeverityHigh,
 			},
 		},
-		events: []featuredelivery.ReviewEvent{{
-			RoundID: "round-1", Seq: 8, Kind: featuredelivery.ReviewEventRoundStarted,
+		events: []delivery.ReviewEvent{{
+			RoundID: "round-1", Seq: 8, Kind: delivery.ReviewEventRoundStarted,
 		}},
 	}
 }
 
-func reviewHTTPPolicy(t *testing.T) featuredelivery.ReviewPolicy {
-	return reviewHTTPPolicyForSubject(t, featuredelivery.SubjectSystemDesign)
+func reviewHTTPPolicy(t *testing.T) delivery.ReviewPolicy {
+	return reviewHTTPPolicyForSubject(t, delivery.SubjectSystemDesign)
 }
 
 func reviewHTTPPolicyForSubject(
 	t *testing.T,
-	kind featuredelivery.SubjectKind,
-) featuredelivery.ReviewPolicy {
+	kind delivery.SubjectKind,
+) delivery.ReviewPolicy {
 	t.Helper()
-	policy, err := featuredelivery.PrepareReviewPolicy(featuredelivery.ReviewPolicy{
+	policy, err := delivery.PrepareReviewPolicy(delivery.ReviewPolicy{
 		ID: "review-" + string(kind), Version: 1,
 		SubjectKind: kind,
-		Reviewers: []featuredelivery.ReviewerSpec{
+		Reviewers: []delivery.ReviewerSpec{
 			{
 				ID: "architecture",
 				Agent: agentapi.DefinitionRef{
@@ -1917,9 +1917,9 @@ func reviewHTTPPolicyForSubject(
 				ReadOnly:       true,
 			},
 		},
-		BlockingSeverities: []featuredelivery.Severity{
-			featuredelivery.SeverityCritical,
-			featuredelivery.SeverityHigh,
+		BlockingSeverities: []delivery.Severity{
+			delivery.SeverityCritical,
+			delivery.SeverityHigh,
 		},
 		RequiredCategories:     []string{"architecture", "reliability"},
 		MaxParallelism:         2,
@@ -1930,7 +1930,7 @@ func reviewHTTPPolicyForSubject(
 		MaxCostMicros:          2,
 		MaxRetries:             1,
 		Timeout:                time.Minute,
-		OptionalReviewerAction: featuredelivery.OptionalReviewerContinue,
+		OptionalReviewerAction: delivery.OptionalReviewerContinue,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1940,16 +1940,16 @@ func reviewHTTPPolicyForSubject(
 
 func reviewPolicyRolloutHTTPFixture(
 	t *testing.T,
-) (*reviewPolicyRolloutHTTPStore, *featuredelivery.Service, *http.ServeMux) {
+) (*reviewPolicyRolloutHTTPStore, *delivery.Service, *http.ServeMux) {
 	t.Helper()
 	policy := reviewHTTPPolicy(t)
 	store := &reviewPolicyRolloutHTTPStore{
-		policy: featuredelivery.ReviewPolicyRecord{
+		policy: delivery.ReviewPolicyRecord{
 			ReviewPolicy: policy,
 			Active:       true,
 		},
 	}
-	service := featuredelivery.NewService(store, nil, time.Minute)
+	service := delivery.NewService(store, nil, time.Minute)
 	service.SetReviewConfiguration(nil, nil)
 	mux := http.NewServeMux()
 	New(service).RegisterRoutes(func(pattern string, handler http.HandlerFunc) {
@@ -2024,10 +2024,10 @@ func TestDownloadPatchEnforcesAuthenticationAndOwnership(t *testing.T) {
 func TestDownloadPatchVerifiesMetadataAndHash(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		mutate func(*featuredelivery.ChangeSet)
+		mutate func(*delivery.ChangeSet)
 	}{
-		{name: "size mismatch", mutate: func(change *featuredelivery.ChangeSet) { change.PatchBytes++ }},
-		{name: "hash mismatch", mutate: func(change *featuredelivery.ChangeSet) { change.PatchSHA256 = strings.Repeat("0", 64) }},
+		{name: "size mismatch", mutate: func(change *delivery.ChangeSet) { change.PatchBytes++ }},
+		{name: "hash mismatch", mutate: func(change *delivery.ChangeSet) { change.PatchSHA256 = strings.Repeat("0", 64) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler := patchDownloadHandler(t, []byte("patch"), test.mutate)
@@ -2044,11 +2044,11 @@ func TestDownloadPatchVerifiesMetadataAndHash(t *testing.T) {
 
 func TestGenerationAuditRoutesEnforceAuthenticationAndOwnership(t *testing.T) {
 	store := &generationAuditStore{
-		feature: featuredelivery.FeatureRequest{ID: "feat-1", CreatedBy: 7},
-		run:     featuredelivery.GenerationRun{ID: "gen-1", RequestID: "feat-1"},
+		feature: delivery.FeatureRequest{ID: "feat-1", CreatedBy: 7},
+		run:     delivery.GenerationRun{ID: "gen-1", RequestID: "feat-1"},
 	}
 	mux := http.NewServeMux()
-	New(featuredelivery.NewService(store, nil, time.Minute)).RegisterRoutes(func(pattern string, handler http.HandlerFunc) {
+	New(delivery.NewService(store, nil, time.Minute)).RegisterRoutes(func(pattern string, handler http.HandlerFunc) {
 		mux.HandleFunc(pattern, handler)
 	})
 	tests := []struct {
@@ -2110,10 +2110,10 @@ func TestDownloadValidationOutputRejectsUnauthenticatedAndInvalidSequence(t *tes
 func TestDownloadValidationOutputVerifiesMetadataAndHash(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		mutate func(*featuredelivery.ValidationResult)
+		mutate func(*delivery.ValidationResult)
 	}{
-		{name: "size mismatch", mutate: func(result *featuredelivery.ValidationResult) { result.OutputBytes++ }},
-		{name: "hash mismatch", mutate: func(result *featuredelivery.ValidationResult) { result.OutputSHA256 = strings.Repeat("0", 64) }},
+		{name: "size mismatch", mutate: func(result *delivery.ValidationResult) { result.OutputBytes++ }},
+		{name: "hash mismatch", mutate: func(result *delivery.ValidationResult) { result.OutputSHA256 = strings.Repeat("0", 64) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler, _ := validationDownloadHandler(t, []byte("validation output"), test.mutate)
@@ -2128,16 +2128,16 @@ func TestDownloadValidationOutputVerifiesMetadataAndHash(t *testing.T) {
 	}
 }
 
-func validationDownloadHandler(t *testing.T, content []byte, mutate func(*featuredelivery.ValidationResult)) (http.Handler, *featuredelivery.ValidationResult) {
+func validationDownloadHandler(t *testing.T, content []byte, mutate func(*delivery.ValidationResult)) (http.Handler, *delivery.ValidationResult) {
 	t.Helper()
 	workspaceRoot := t.TempDir()
 	codingRoot := t.TempDir()
-	store := &downloadStore{feature: featuredelivery.FeatureRequest{ID: "feat-1", CreatedBy: 7}}
-	workspaces, err := featuredelivery.NewWorkspaceManager(store, codingRoot)
+	store := &downloadStore{feature: delivery.FeatureRequest{ID: "feat-1", CreatedBy: 7}}
+	workspaces, err := delivery.NewWorkspaceManager(store, codingRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	git, err := featuredelivery.NewGitManager(workspaceRoot, codingRoot, workspaces)
+	git, err := delivery.NewGitManager(workspaceRoot, codingRoot, workspaces)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2149,36 +2149,36 @@ func validationDownloadHandler(t *testing.T, content []byte, mutate func(*featur
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(content)
-	validation := featuredelivery.ValidationResult{
+	validation := delivery.ValidationResult{
 		Sequence: 1, OutputRelPath: "run-1/validation-01.log",
 		OutputSHA256: hex.EncodeToString(sum[:]), OutputBytes: int64(len(content)),
 	}
 	if mutate != nil {
 		mutate(&validation)
 	}
-	store.run = featuredelivery.ImplementationRun{
+	store.run = delivery.ImplementationRun{
 		ID: "run-1", RequestID: "feat-1",
-		ChangeSet: &featuredelivery.ChangeSet{ValidationResults: []featuredelivery.ValidationResult{validation}},
+		ChangeSet: &delivery.ChangeSet{ValidationResults: []delivery.ValidationResult{validation}},
 	}
-	service := featuredelivery.NewService(store, nil, time.Minute)
-	service.SetImplementationManager(featuredelivery.NewImplementationManager(
-		store, workspaces, git, nil, featuredelivery.ImplementationConfig{},
+	service := delivery.NewService(store, nil, time.Minute)
+	service.SetImplementationManager(delivery.NewImplementationManager(
+		store, workspaces, git, nil, delivery.ImplementationConfig{},
 	))
 	mux := http.NewServeMux()
 	New(service).RegisterRoutes(func(pattern string, handler http.HandlerFunc) { mux.HandleFunc(pattern, handler) })
 	return mux, &store.run.ChangeSet.ValidationResults[0]
 }
 
-func patchDownloadHandler(t *testing.T, content []byte, mutate func(*featuredelivery.ChangeSet)) http.Handler {
+func patchDownloadHandler(t *testing.T, content []byte, mutate func(*delivery.ChangeSet)) http.Handler {
 	t.Helper()
 	workspaceRoot := t.TempDir()
 	codingRoot := t.TempDir()
-	store := &downloadStore{feature: featuredelivery.FeatureRequest{ID: "feat-1", CreatedBy: 7}}
-	workspaces, err := featuredelivery.NewWorkspaceManager(store, codingRoot)
+	store := &downloadStore{feature: delivery.FeatureRequest{ID: "feat-1", CreatedBy: 7}}
+	workspaces, err := delivery.NewWorkspaceManager(store, codingRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	git, err := featuredelivery.NewGitManager(workspaceRoot, codingRoot, workspaces)
+	git, err := delivery.NewGitManager(workspaceRoot, codingRoot, workspaces)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2190,19 +2190,19 @@ func patchDownloadHandler(t *testing.T, content []byte, mutate func(*featuredeli
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(content)
-	change := &featuredelivery.ChangeSet{
+	change := &delivery.ChangeSet{
 		RunID: "run-1", PatchRelPath: "run-1/changes.patch",
 		PatchSHA256: hex.EncodeToString(sum[:]), PatchBytes: int64(len(content)),
 	}
 	if mutate != nil {
 		mutate(change)
 	}
-	store.run = featuredelivery.ImplementationRun{
+	store.run = delivery.ImplementationRun{
 		ID: "run-1", RequestID: "feat-1", ChangeSet: change,
 	}
-	service := featuredelivery.NewService(store, nil, time.Minute)
-	service.SetImplementationManager(featuredelivery.NewImplementationManager(
-		store, workspaces, git, nil, featuredelivery.ImplementationConfig{},
+	service := delivery.NewService(store, nil, time.Minute)
+	service.SetImplementationManager(delivery.NewImplementationManager(
+		store, workspaces, git, nil, delivery.ImplementationConfig{},
 	))
 	mux := http.NewServeMux()
 	New(service).RegisterRoutes(func(pattern string, handler http.HandlerFunc) { mux.HandleFunc(pattern, handler) })

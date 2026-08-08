@@ -1,0 +1,1124 @@
+create table if not exists Nasuta.agent_definitions
+(
+    id              varchar(128)                         not null,
+    version         bigint                               not null,
+    definition_json json                                 not null,
+    content_hash    char(64)                             not null,
+    active          tinyint(1) default 1                 not null,
+    is_default      tinyint(1) default 0                 not null,
+    created_by      bigint     default 0                 not null,
+    created_at      timestamp  default CURRENT_TIMESTAMP not null,
+    default_key     varchar(128) as ((case when (`is_default` = 1) then `id` else NULL end)) stored,
+    primary key (id, version),
+    constraint uniq_agent_definition_default
+        unique (default_key),
+    constraint uniq_agent_definition_hash
+        unique (content_hash)
+);
+
+create index idx_agent_definition_active
+    on Nasuta.agent_definitions (id, active, version);
+
+create index idx_agent_definition_list
+    on Nasuta.agent_definitions (id, version);
+
+create table if not exists Nasuta.agent_llm_calls
+(
+    id                  bigint auto_increment
+        primary key,
+    run_id              varchar(64)                         not null,
+    call_seq            int                                 not null,
+    phase               varchar(32)                         not null,
+    provider            varchar(32)                         not null,
+    model               varchar(128)                        not null,
+    input_tokens        int       default 0                 not null,
+    cached_input_tokens int       default 0                 not null,
+    output_tokens       int       default 0                 not null,
+    reasoning_tokens    int       default 0                 not null,
+    total_tokens        int       default 0                 not null,
+    max_output_tokens   int       default 0                 not null,
+    duration_ms         int       default 0                 not null,
+    status              varchar(16)                         not null,
+    created_at          timestamp default CURRENT_TIMESTAMP not null,
+    constraint uniq_run_call
+        unique (run_id, call_seq)
+);
+
+create table if not exists Nasuta.agent_runs
+(
+    id                     varchar(64)                            not null
+        primary key,
+    run_kind               varchar(16)  default 'agent'           not null,
+    user_id                bigint       default 0                 not null,
+    session_id             varchar(64)  default ''                not null,
+    agent_id               varchar(128) default ''                not null,
+    definition_version     bigint       default 0                 not null,
+    definition_hash        char(64)     default ''                not null,
+    selection_json         json                                   not null,
+    tool_snapshot_id       varchar(80)  default ''                not null,
+    input_schema_version   bigint       default 0                 not null,
+    output_schema_version  bigint       default 0                 not null,
+    parent_run_id          varchar(64)  default ''                not null,
+    workflow_run_id        varchar(64)  default ''                not null,
+    workflow_node_id       varchar(128) default ''                not null,
+    question               text                                   not null,
+    status                 varchar(16)                            not null,
+    error_code             varchar(64)  default ''                not null,
+    mode                   varchar(16)  default 'single'          not null,
+    max_steps              int          default 0                 not null,
+    step_count             int          default 0                 not null,
+    token_used             int          default 0                 not null,
+    input_tokens           bigint       default 0                 not null,
+    cached_input_tokens    bigint       default 0                 not null,
+    output_tokens          bigint       default 0                 not null,
+    reasoning_tokens       bigint       default 0                 not null,
+    total_tokens           bigint       default 0                 not null,
+    llm_call_count         int          default 0                 not null,
+    peak_input_tokens      int          default 0                 not null,
+    peak_reserved_tokens   int          default 0                 not null,
+    evidence_status        varchar(16)  default 'unavailable'     not null,
+    forced_conclusion      tinyint(1)   default 0                 not null,
+    evidence_result_count  int          default 0                 not null,
+    tool_call_count        int          default 0                 not null,
+    tool_failure_count     int          default 0                 not null,
+    partial_result_count   int          default 0                 not null,
+    omitted_evidence_count int          default 0                 not null,
+    started_at             timestamp    default CURRENT_TIMESTAMP not null,
+    ended_at               timestamp                              null
+);
+
+create index idx_agent_version
+    on Nasuta.agent_runs (agent_id, definition_version);
+
+create index idx_run_kind
+    on Nasuta.agent_runs (run_kind);
+
+create index idx_session
+    on Nasuta.agent_runs (session_id);
+
+create index idx_status_started_id
+    on Nasuta.agent_runs (status asc, started_at desc, id desc);
+
+create index idx_user_session_started_id
+    on Nasuta.agent_runs (user_id asc, session_id asc, started_at desc, id desc);
+
+create index idx_workflow_node
+    on Nasuta.agent_runs (workflow_run_id, workflow_node_id);
+
+create table if not exists Nasuta.agent_steps
+(
+    id                     bigint auto_increment
+        primary key,
+    run_id                 varchar(64)                            not null,
+    step_no                int                                    not null,
+    kind                   varchar(16)                            not null,
+    trace_id               varchar(64)  default ''                not null,
+    artifact_id            varchar(64)  default ''                not null,
+    tool_call_id           varchar(128) default ''                not null,
+    tool                   varchar(64)  default ''                not null,
+    args                   text                                   null,
+    content                mediumtext                             null,
+    prompt_content         mediumtext                             null,
+    authoritative_sha256   char(64)     default ''                not null,
+    prompt_sha256          char(64)     default ''                not null,
+    content_bytes          bigint       default 0                 not null,
+    coverage_json          json                                   not null,
+    answer_contract_json   json                                   not null,
+    failed                 tinyint(1)   default 0                 not null,
+    delivery_error         varchar(128) default ''                not null,
+    token_delta            int          default 0                 not null,
+    reasoning_tokens       int          default 0                 not null,
+    duration_ms            int          default 0                 not null,
+    created_at             timestamp    default CURRENT_TIMESTAMP not null,
+    artifact_content       longblob                               null,
+    artifact_content_type  varchar(128)                           null,
+    artifact_id_key        varchar(64) as (nullif(`artifact_id`, _utf8mb4'')) stored,
+    artifact_tool_call_key varchar(128) as ((case when (`artifact_id` <> _utf8mb4'') then `tool_call_id` else NULL end)) stored,
+    constraint uniq_agent_step_artifact
+        unique (artifact_id_key),
+    constraint uniq_agent_step_artifact_call
+        unique (run_id, artifact_tool_call_key),
+    constraint uniq_run_step
+        unique (run_id, step_no)
+);
+
+create index idx_artifact
+    on Nasuta.agent_steps (artifact_id);
+
+create index idx_trace
+    on Nasuta.agent_steps (trace_id);
+
+create table if not exists Nasuta.catalog_audit
+(
+    seq               bigint auto_increment
+        primary key,
+    catalog_kind      varchar(32)                            not null,
+    event_kind        varchar(16)                            not null,
+    subject_id        varchar(128)                           not null,
+    version           bigint                                 not null,
+    candidate_id      varchar(128) default ''                not null,
+    candidate_version bigint       default 0                 not null,
+    percentage_bps    int          default 0                 not null,
+    rule_hash         char(64)     default ''                not null,
+    action            varchar(32)                            not null,
+    actor_user_id     bigint       default 0                 not null,
+    created_at        timestamp    default CURRENT_TIMESTAMP not null
+);
+
+create index idx_catalog_audit_stream
+    on Nasuta.catalog_audit (catalog_kind, event_kind, subject_id, seq);
+
+create table if not exists Nasuta.catalog_rollouts
+(
+    catalog_kind      varchar(32)                            not null,
+    subject_id        varchar(128)                           not null,
+    rule_version      bigint                                 not null,
+    candidate_id      varchar(128) default ''                not null,
+    candidate_version bigint                                 not null,
+    percentage_bps    int                                    not null,
+    salt              varchar(255)                           not null,
+    rule_hash         char(64)                               not null,
+    active            tinyint(1)   default 1                 not null,
+    created_by        bigint       default 0                 not null,
+    created_at        timestamp    default CURRENT_TIMESTAMP not null,
+    primary key (catalog_kind, subject_id),
+    constraint uniq_catalog_rollout_hash
+        unique (catalog_kind, rule_hash)
+);
+
+create index idx_catalog_rollout_active
+    on Nasuta.catalog_rollouts (catalog_kind, subject_id, active, rule_version);
+
+create table if not exists Nasuta.documents
+(
+    id          varchar(64)                    not null
+        primary key,
+    title       text                           null,
+    filename    varchar(256)                   null,
+    content     mediumtext                     null,
+    chunk_count int         default 0          null,
+    created_at  timestamp                      null,
+    updated_at  timestamp                      null,
+    kind        varchar(32) default 'document' not null
+);
+
+create index idx_kind_updated_id
+    on Nasuta.documents (kind asc, updated_at desc, id desc);
+
+create index idx_updated_id
+    on Nasuta.documents (updated_at desc, id desc);
+
+create table if not exists Nasuta.feature_artifacts
+(
+    id                 varchar(64)                           not null
+        primary key,
+    request_id         varchar(64)                           not null,
+    kind               varchar(32)                           not null,
+    version            int                                   not null,
+    parent_artifact_id varchar(64) default ''                not null,
+    origin             varchar(16)                           not null,
+    document_json      json                                  not null,
+    rendered_markdown  mediumtext                            not null,
+    evidence_json      json                                  not null,
+    content_hash       char(64)                              not null,
+    created_by         bigint                                not null,
+    created_at         timestamp   default CURRENT_TIMESTAMP not null,
+    review_subject_hash char(64)                             null,
+    review_round_id     varchar(64)                          null,
+    review_gate_result_id varchar(64)                        null,
+    review_decision     varchar(16)                          null,
+    review_comment      text                                  null,
+    review_reviewer     bigint                                null,
+    review_created_at   timestamp                             null,
+    constraint uniq_request_kind_version
+        unique (request_id, kind, version)
+);
+
+create index idx_parent
+    on Nasuta.feature_artifacts (parent_artifact_id);
+
+create index idx_request_created
+    on Nasuta.feature_artifacts (request_id, created_at, id);
+
+create index idx_request_kind_parent_version
+    on Nasuta.feature_artifacts (request_id, kind, parent_artifact_id, version);
+
+create table if not exists Nasuta.feature_generation_runs
+(
+    id                 varchar(64)                             not null
+        primary key,
+    request_id         varchar(64)                             not null,
+    artifact_kind      varchar(32)                             not null,
+    parent_artifact_id varchar(64)                             not null,
+    workflow_run_id    varchar(64)   default ''                not null,
+    workflow_node_id   varchar(128)  default ''                not null,
+    workflow_attempt   int           default 0                 not null,
+    artifact_id        varchar(64)   default ''                not null,
+    status             varchar(16)                             not null,
+    provider           varchar(32)                             not null,
+    model              varchar(128)                            not null,
+    requested_by       bigint                                  not null,
+    input_tokens       bigint        default 0                 not null,
+    output_tokens      bigint        default 0                 not null,
+    error_summary      varchar(2048) default ''                not null,
+    started_at         timestamp     default CURRENT_TIMESTAMP not null,
+    ended_at           timestamp                               null,
+    constraint uniq_workflow_node_attempt
+        unique ((nullif(`workflow_run_id`, _utf8mb4'')), (nullif(`workflow_node_id`, _utf8mb4'')), (
+                 nullif(`workflow_attempt`, 0)))
+);
+
+create index idx_generation_artifact
+    on Nasuta.feature_generation_runs (artifact_id);
+
+create index idx_request_started
+    on Nasuta.feature_generation_runs (request_id, started_at, id);
+
+create index idx_status_started
+    on Nasuta.feature_generation_runs (status, started_at, id);
+
+create index idx_workflow_node_success
+    on Nasuta.feature_generation_runs (workflow_run_id, workflow_node_id, status, workflow_attempt);
+
+create table if not exists Nasuta.feature_implementation_runs
+(
+    id                      varchar(64)                             not null
+        primary key,
+    request_id              varchar(64)                             not null,
+    client_request_id       varchar(128)                            not null,
+    request_hash            char(64)                                not null,
+    design_artifact_id      varchar(64)                             not null,
+    plan_artifact_id        varchar(64)                             not null,
+    parent_run_id           varchar(64)   default ''                not null,
+    repo                    varchar(512)                            not null,
+    base_ref                varchar(255)                            not null,
+    base_commit             varchar(64)                             not null,
+    workspace_user_id       bigint                                  not null,
+    workspace_username      varchar(128)                            not null,
+    provider                varchar(32)                             not null,
+    model                   varchar(128)  default ''                not null,
+    provider_version        varchar(64)   default ''                not null,
+    network_enabled         tinyint(1)    default 0                 not null,
+    status                  varchar(16)                             not null,
+    worker_id               varchar(128)  default ''                not null,
+    lease_expires_at        timestamp                               null,
+    cancel_requested_at     timestamp                               null,
+    provider_session_id     varchar(255)  default ''                not null,
+    exit_code               int                                     null,
+    error_summary           varchar(2048) default ''                not null,
+    requested_by            bigint                                  not null,
+    started_at              timestamp                               null,
+    ended_at                timestamp                               null,
+    retain_until            timestamp                               null,
+    worktree_cleaned_at     timestamp                               null,
+    cleanup_error           varchar(2048) default ''                not null,
+    worktree_head           varchar(64)                             null,
+    patch_rel_path          varchar(1024)                           null,
+    patch_sha256            char(64)                                null,
+    patch_bytes             bigint                                  null,
+    files_changed           int                                     null,
+    additions               int                                     null,
+    deletions               int                                     null,
+    files_json              json                                    null,
+    plan_deviations_json    json                                    null,
+    validation_results_json json                                    null,
+    provider_summary        text                                    null,
+    change_set_created_at   timestamp                               null,
+    review_subject_hash     char(64)                                null,
+    review_round_id         varchar(64)                             null,
+    review_gate_result_id   varchar(64)                             null,
+    review_decision         varchar(16)                             null,
+    review_comment          text                                    null,
+    review_reviewer         bigint                                  null,
+    review_created_at       timestamp                               null,
+    created_at              timestamp     default CURRENT_TIMESTAMP not null,
+    constraint uniq_requester_client_request
+        unique (requested_by, client_request_id)
+);
+
+create index idx_cleanup_due
+    on Nasuta.feature_implementation_runs (worktree_cleaned_at, retain_until, id);
+
+create index idx_lease
+    on Nasuta.feature_implementation_runs (status, lease_expires_at);
+
+create index idx_request_created
+    on Nasuta.feature_implementation_runs (request_id, created_at, id);
+
+create index idx_status_created
+    on Nasuta.feature_implementation_runs (status, created_at, id);
+
+create table if not exists Nasuta.feature_requests
+(
+    id          varchar(64)                         not null
+        primary key,
+    title       varchar(512)                        not null,
+    created_by  bigint                              not null,
+    archived_at timestamp                           null,
+    created_at  timestamp default CURRENT_TIMESTAMP not null,
+    updated_at  timestamp default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP
+);
+
+create index idx_owner_updated
+    on Nasuta.feature_requests (created_by, updated_at, id);
+
+create index idx_updated
+    on Nasuta.feature_requests (updated_at, id);
+
+create table if not exists Nasuta.feature_user_workspaces
+(
+    user_id           bigint                              not null
+        primary key,
+    username_key      varchar(128)                        not null,
+    username_snapshot varchar(128)                        not null,
+    created_at        timestamp default CURRENT_TIMESTAMP not null,
+    constraint uniq_workspace_username
+        unique (username_key)
+);
+
+create table if not exists Nasuta.finding_resolutions
+(
+    id               varchar(64)                         not null
+        primary key,
+    finding_id       varchar(64)                         not null,
+    resolution       varchar(24)                         not null,
+    subject_hash     char(64)                            not null,
+    replacement_hash char(64)  default ''                not null,
+    rationale        text                                not null,
+    actor_id         bigint                              not null,
+    expires_at       timestamp                           null,
+    created_at       timestamp default CURRENT_TIMESTAMP not null
+);
+
+create index idx_resolution_expiry
+    on Nasuta.finding_resolutions (expires_at);
+
+create index idx_resolution_finding
+    on Nasuta.finding_resolutions (finding_id, subject_hash, created_at, id);
+
+create table if not exists Nasuta.handoff_artifacts
+(
+    id               varchar(64)                           not null
+        primary key,
+    workflow_run_id  varchar(64)                           not null,
+    producer_node_id varchar(128)                          not null,
+    producer_run_id  varchar(64) default ''                not null,
+    schema_id        varchar(128)                          not null,
+    schema_version   bigint                                not null,
+    payload_json     json                                  not null,
+    references_json  json                                  not null,
+    completeness     varchar(16)                           not null,
+    content_hash     char(64)                              not null,
+    created_at       timestamp   default CURRENT_TIMESTAMP not null,
+    constraint uniq_run_node_hash
+        unique (workflow_run_id, producer_node_id, content_hash)
+);
+
+create index idx_run_created
+    on Nasuta.handoff_artifacts (workflow_run_id, created_at, id);
+
+create table if not exists Nasuta.incident_records
+(
+    id                 varchar(64)                            not null
+        primary key,
+    dedup_key          varchar(512) default ''                not null,
+    created_at         timestamp    default CURRENT_TIMESTAMP not null,
+    updated_at         timestamp    default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP,
+    status             varchar(32)                            not null,
+    source             varchar(64)                            not null,
+    alert_title        varchar(512)                           not null,
+    alert_payload_json longtext                               null,
+    error_logs_json    longtext                               null,
+    traces_json        longtext                               null,
+    affected_svcs_json text                                   null,
+    root_cause         text                                   null,
+    solution           text                                   null,
+    analysis_doc       longtext                               null,
+    assigned_to        varchar(128) default ''                not null,
+    fix_branches_json  longtext                               null,
+    fix_started_at     timestamp                              null,
+    fixed_at           timestamp                              null
+);
+
+create index idx_created_at_id
+    on Nasuta.incident_records (created_at desc, id desc);
+
+create index idx_dedup
+    on Nasuta.incident_records (dedup_key);
+
+create index idx_status
+    on Nasuta.incident_records (status);
+
+create table if not exists Nasuta.observe_sources
+(
+    id               bigint auto_increment
+        primary key,
+    name             varchar(128)                           not null,
+    source           varchar(128)                           not null,
+    base_url         varchar(512)                           not null,
+    index_patterns   text                                   not null,
+    enabled          tinyint(1)   default 1                 not null,
+    is_default       tinyint(1)   default 0                 not null,
+    priority         int          default 0                 not null,
+    source_keywords  text                                   null,
+    service_patterns text                                   not null,
+    trace_source     varchar(128) default ''                not null,
+    trace_url        varchar(512) default ''                not null,
+    trace_auth       text                                   not null,
+    auth_config      mediumtext                             not null,
+    fields_config    json                                   not null,
+    created_at       timestamp    default CURRENT_TIMESTAMP not null,
+    updated_at       timestamp    default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP,
+    constraint source
+        unique (source)
+);
+
+create index idx_observe_enabled
+    on Nasuta.observe_sources (enabled, priority);
+
+create index idx_observe_source
+    on Nasuta.observe_sources (source);
+
+create table if not exists Nasuta.pending_actions
+(
+    id           varchar(64)                           not null
+        primary key,
+    tool         varchar(64)                           not null,
+    incident_id  varchar(64) default ''                not null,
+    args_json    text                                  not null,
+    rationale    text                                  not null,
+    impact       text                                  not null,
+    status       varchar(16) default 'pending'         not null,
+    requested_by bigint      default 0                 not null,
+    approver     bigint      default 0                 not null,
+    result_json  text                                  null,
+    created_at   timestamp   default CURRENT_TIMESTAMP not null,
+    decided_at   timestamp                             null,
+    expires_at   timestamp                             not null
+);
+
+create index idx_created_id
+    on Nasuta.pending_actions (created_at desc, id desc);
+
+create index idx_incident
+    on Nasuta.pending_actions (incident_id);
+
+create index idx_status_created_id
+    on Nasuta.pending_actions (status asc, created_at desc, id desc);
+
+create table if not exists Nasuta.qa_memories
+(
+    id              varchar(64)                               not null
+        primary key,
+    user_id         bigint      default 0                     not null,
+    fact_key        varchar(255)                              not null,
+    kind            varchar(32)                               not null,
+    content         text                                      not null,
+    source_type     varchar(32) default 'assistant_inference' not null,
+    authority       int         default 30                    not null,
+    status          varchar(16) default 'active'              not null,
+    superseded_by   varchar(64)                               null,
+    source_session  varchar(64) default ''                    not null,
+    confidence      float       default 1                     not null,
+    expires_at      datetime                                  null,
+    created_at      timestamp   default CURRENT_TIMESTAMP     not null,
+    updated_at      timestamp   default CURRENT_TIMESTAMP     not null on update CURRENT_TIMESTAMP,
+    last_used       timestamp                                 null,
+    use_count       int         default 0                     not null,
+    active_fact_key varchar(255) as ((case when (`status` = _utf8mb4'active') then `fact_key` else NULL end)) stored,
+    constraint uniq_user_factkey_active
+        unique (user_id, active_fact_key)
+);
+
+create index idx_kind
+    on Nasuta.qa_memories (kind);
+
+create index idx_user_source_session
+    on Nasuta.qa_memories (user_id, source_session);
+
+create index idx_user_status
+    on Nasuta.qa_memories (user_id, status);
+
+create table if not exists Nasuta.qa_messages
+(
+    id              bigint auto_increment
+        primary key,
+    session_id      varchar(64)                            not null,
+    seq             int                                    not null,
+    turn_no         int          default 0                 not null,
+    role            varchar(32)                            not null,
+    content         mediumtext                             not null,
+    tool_calls_json mediumtext                             null,
+    tool_call_id    varchar(128) default ''                not null,
+    tool_name       varchar(128) default ''                not null,
+    created_at      timestamp    default CURRENT_TIMESTAMP not null,
+    constraint uniq_session_seq
+        unique (session_id, seq)
+);
+
+create index idx_session_turn
+    on Nasuta.qa_messages (session_id, turn_no, seq);
+
+create table if not exists Nasuta.qa_session_history_index_outbox
+(
+    id           bigint auto_increment
+        primary key,
+    operation    varchar(16)                             not null,
+    ref          varchar(64)                             not null,
+    session_id   varchar(64)                             not null,
+    user_id      bigint                                  not null,
+    attempts     int           default 0                 not null,
+    next_attempt timestamp                               null,
+    last_error   varchar(1024) default ''                not null,
+    created_at   timestamp     default CURRENT_TIMESTAMP not null,
+    constraint uniq_operation_ref
+        unique (operation, ref)
+);
+
+create index idx_due
+    on Nasuta.qa_session_history_index_outbox (next_attempt, id);
+
+create index idx_operation_user_session
+    on Nasuta.qa_session_history_index_outbox (operation, user_id, session_id);
+
+create table if not exists Nasuta.qa_session_history_terms
+(
+    session_id  varchar(64)        not null,
+    user_id     bigint             not null,
+    term        varchar(191)       not null,
+    ref         varchar(64)        not null,
+    turn_number int                not null,
+    weight      smallint default 1 not null,
+    primary key (session_id, term, ref)
+);
+
+create index idx_ref
+    on Nasuta.qa_session_history_terms (ref);
+
+create index idx_user_session_turn
+    on Nasuta.qa_session_history_terms (user_id, session_id, turn_number);
+
+create table if not exists Nasuta.qa_sessions
+(
+    id                      varchar(64)                            not null
+        primary key,
+    user_id                 bigint       default 0                 not null,
+    title                   varchar(512) default ''                not null,
+    session_state           json                                   null,
+    session_state_tokens    int          default 0                 not null,
+    archived_summary_tokens bigint       default 0                 not null,
+    summary_ref             varchar(64)  default ''                not null,
+    compacted_through_turn  int          default 0                 not null,
+    created_at              timestamp    default CURRENT_TIMESTAMP not null,
+    updated_at              timestamp    default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP
+);
+
+create index idx_user_updated_id
+    on Nasuta.qa_sessions (user_id asc, updated_at desc, id desc);
+
+create table if not exists Nasuta.qa_turns
+(
+    session_id              varchar(64)                             not null,
+    turn_no                 int                                     not null,
+    run_id                  varchar(64)   default ''                not null,
+    run_id_key              varchar(64) as (nullif(`run_id`, _utf8mb4'')) stored,
+    first_seq               int                                     not null,
+    last_seq                int                                     not null,
+    token_estimate          int           default 0                 not null,
+    question_text           varchar(2048) default ''                not null,
+    topic_key               varchar(512)  default ''                not null,
+    entities_json           json                                    not null,
+    question_terms_json     json                                    not null,
+    evidence_manifest_json  json                                    not null,
+    created_at              timestamp     default CURRENT_TIMESTAMP not null,
+    context_ref             varchar(64)                             null,
+    context_detail_json     json                                    null,
+    context_summary_text    text                                    null,
+    context_summary_tokens  int                                     null,
+    context_source_tokens   int                                     null,
+    context_retained_tokens int                                     null,
+    context_archived_at     timestamp                               null,
+    primary key (session_id, turn_no),
+    constraint uniq_qa_turn_context_ref
+        unique (context_ref),
+    constraint uniq_session_run
+        unique (session_id, run_id_key)
+);
+
+create table if not exists Nasuta.rbac_menus
+(
+    id         bigint auto_increment
+        primary key,
+    parent_id  bigint       default 0                 null,
+    name       varchar(64)                            not null,
+    path       varchar(128) default ''                null,
+    icon       varchar(64)  default ''                null,
+    sort_order int          default 0                 null,
+    created_at timestamp    default CURRENT_TIMESTAMP null
+);
+
+create table if not exists Nasuta.rbac_roles
+(
+    id          bigint auto_increment
+        primary key,
+    name        varchar(64)                            not null,
+    description varchar(255) default ''                null,
+    created_at  timestamp    default CURRENT_TIMESTAMP null,
+    updated_at  timestamp    default CURRENT_TIMESTAMP null on update CURRENT_TIMESTAMP,
+    prompt      text                                   null,
+    constraint name
+        unique (name)
+);
+
+create table if not exists Nasuta.rbac_role_menus
+(
+    id      bigint auto_increment
+        primary key,
+    role_id bigint not null,
+    menu_id bigint not null,
+    constraint uk_role_menu
+        unique (role_id, menu_id),
+    constraint rbac_role_menus_ibfk_1
+        foreign key (role_id) references Nasuta.rbac_roles (id)
+            on delete cascade,
+    constraint rbac_role_menus_ibfk_2
+        foreign key (menu_id) references Nasuta.rbac_menus (id)
+            on delete cascade
+);
+
+create index menu_id
+    on Nasuta.rbac_role_menus (menu_id);
+
+create table if not exists Nasuta.review_adjudications
+(
+    id                varchar(64)                           not null
+        primary key,
+    round_id          varchar(64)                           not null,
+    subject_hash      char(64)                              not null,
+    policy_hash       char(64)                              not null,
+    fingerprint       char(64)                              not null,
+    agent_id          varchar(128)                          not null,
+    agent_version     bigint                                not null,
+    definition_hash   char(64)                              not null,
+    decision          varchar(24)                           not null,
+    error_code        varchar(64) default ''                not null,
+    adjudication_json json                                  not null,
+    content_hash      char(64)                              not null,
+    created_at        timestamp   default CURRENT_TIMESTAMP not null,
+    constraint uniq_round_adjudication
+        unique (round_id, fingerprint)
+);
+
+create index idx_adjudication_round
+    on Nasuta.review_adjudications (round_id, created_at, id);
+
+create table if not exists Nasuta.review_assignments
+(
+    id              varchar(64)                           not null
+        primary key,
+    round_id        varchar(64)                           not null,
+    reviewer_id     varchar(128)                          not null,
+    agent_id        varchar(128)                          not null,
+    agent_version   bigint                                not null,
+    definition_hash char(64)                              not null,
+    categories_json json                                  not null,
+    required_review tinyint(1)                            not null,
+    status          varchar(16)                           not null,
+    attempt         int                                   not null,
+    agent_run_id    varchar(64) default ''                not null,
+    error_code      varchar(64) default ''                not null,
+    created_at      timestamp   default CURRENT_TIMESTAMP not null,
+    started_at      timestamp                             null,
+    completed_at    timestamp                             null,
+    constraint uniq_round_reviewer_attempt
+        unique (round_id, reviewer_id, attempt)
+);
+
+create index idx_assignment_round
+    on Nasuta.review_assignments (round_id, created_at, id);
+
+create index idx_assignment_status
+    on Nasuta.review_assignments (status, created_at, id);
+
+create table if not exists Nasuta.review_evaluation_labels
+(
+    seq            bigint auto_increment
+        primary key,
+    id             varchar(64)                           not null,
+    round_id       varchar(64)                           not null,
+    policy_id      varchar(128)                          not null,
+    policy_version bigint                                not null,
+    subject_hash   char(64)                              not null,
+    finding_id     varchar(64) default ''                not null,
+    target_hash    char(64)                              not null,
+    category       varchar(128)                          not null,
+    label          varchar(24)                           not null,
+    created_by     bigint                                not null,
+    created_at     timestamp   default CURRENT_TIMESTAMP not null,
+    constraint uniq_review_evaluation_id
+        unique (id),
+    constraint uniq_review_evaluation_target
+        unique (round_id, target_hash)
+);
+
+create index idx_review_evaluation_policy
+    on Nasuta.review_evaluation_labels (policy_id, policy_version, created_at, seq);
+
+create index idx_review_evaluation_round
+    on Nasuta.review_evaluation_labels (round_id, seq);
+
+create table if not exists Nasuta.review_findings
+(
+    id             varchar(64)                         not null
+        primary key,
+    report_id      varchar(64)                         not null,
+    round_id       varchar(64)                         not null,
+    category       varchar(128)                        not null,
+    severity       varchar(16)                         not null,
+    claim          text                                not null,
+    impact         text                                not null,
+    recommendation text                                not null,
+    confidence     double                              not null,
+    fingerprint    char(64)                            not null,
+    location_json  json                                null,
+    evidence_json  json                                not null,
+    content_hash   char(64)                            not null,
+    created_at     timestamp default CURRENT_TIMESTAMP not null
+);
+
+create index idx_finding_fingerprint
+    on Nasuta.review_findings (fingerprint);
+
+create index idx_finding_round
+    on Nasuta.review_findings (round_id, id);
+
+create index idx_finding_severity
+    on Nasuta.review_findings (round_id, severity, id);
+
+create table if not exists Nasuta.review_policies
+(
+    id              varchar(128)                         not null,
+    version         bigint                               not null,
+    subject_kind    varchar(48)                          not null,
+    definition_json json                                 not null,
+    content_hash    char(64)                             not null,
+    active          tinyint(1) default 1                 not null,
+    is_default      tinyint(1) default 0                 not null,
+    created_by      bigint     default 0                 not null,
+    default_key     varchar(48) as (if((`is_default` = 1), `subject_kind`, NULL)) stored,
+    created_at      timestamp  default CURRENT_TIMESTAMP not null,
+    primary key (id, version),
+    constraint uniq_review_policy_default
+        unique (default_key),
+    constraint uniq_review_policy_hash
+        unique (content_hash)
+);
+
+create index idx_review_policy_rollout
+    on Nasuta.review_policies (subject_kind, active, is_default, id, version);
+
+create table if not exists Nasuta.review_reports
+(
+    id                         varchar(64)  not null
+        primary key,
+    round_id                   varchar(64)  not null,
+    assignment_id              varchar(64)  not null,
+    reviewer_id                varchar(128) not null,
+    subject_hash               char(64)     not null,
+    report_json                json         not null,
+    report_hash                char(64)     not null,
+    content_hash               char(64)     not null,
+    reuse_id                   varchar(64)  null,
+    reuse_source_round_id      varchar(64)  null,
+    reuse_source_assignment_id varchar(64)  null,
+    reuse_source_report_id     varchar(64)  null,
+    reuse_policy_hash          char(64)     null,
+    reuse_definition_hash      char(64)     null,
+    reuse_reason               text         null,
+    reuse_actor_id             bigint       null,
+    reuse_created_at           timestamp    null,
+    completed_at               timestamp    not null,
+    constraint uniq_review_assignment_report
+        unique (assignment_id),
+    constraint uniq_review_report_reuse_id
+        unique (reuse_id)
+);
+
+create index idx_report_reuse
+    on Nasuta.review_reports (report_hash, id);
+
+create index idx_report_round
+    on Nasuta.review_reports (round_id, completed_at, id);
+
+create index idx_review_report_reuse_round
+    on Nasuta.review_reports (round_id, reuse_created_at, reuse_id);
+
+create index idx_review_report_reuse_source
+    on Nasuta.review_reports (reuse_source_report_id, reuse_created_at, reuse_id);
+
+create table if not exists Nasuta.review_rounds
+(
+    id                      varchar(64)                           not null
+        primary key,
+    workflow_run_id         varchar(64) default ''                not null,
+    subject_kind            varchar(48)                           not null,
+    subject_id              varchar(64)                           not null,
+    subject_version         int                                   not null,
+    subject_hash            char(64)                              not null,
+    subject_json            json                                  not null,
+    policy_id               varchar(128)                          not null,
+    policy_version          bigint                                not null,
+    policy_hash             char(64)                              not null,
+    policy_selection_json   json                                  not null,
+    risk_facts_json         json                                  not null,
+    risk_hash               char(64)                              not null,
+    selection_rule_version  varchar(64) default ''                not null,
+    selected_reviewers_json json                                  not null,
+    panel_hash              char(64)                              not null,
+    status                  varchar(16)                           not null,
+    created_by              bigint                                not null,
+    created_at              timestamp   default CURRENT_TIMESTAMP not null,
+    completed_at            timestamp                             null,
+    gate_result_id          varchar(64)                           null,
+    gate_decision           varchar(24)                           null,
+    gate_result_json        json                                  null,
+    gate_content_hash       char(64)                              null,
+    gate_created_at         timestamp                             null,
+    constraint uniq_review_gate_result_id
+        unique (gate_result_id)
+);
+
+create index idx_review_gate_subject
+    on Nasuta.review_rounds (subject_hash, gate_created_at, gate_result_id);
+
+create index idx_review_status
+    on Nasuta.review_rounds (status, created_at, id);
+
+create index idx_review_subject
+    on Nasuta.review_rounds (subject_kind, subject_id, created_at, id);
+
+create table if not exists Nasuta.runtime_events
+(
+    stream_kind varchar(32)                            not null,
+    stream_id   varchar(64)                            not null,
+    seq         bigint                                 not null,
+    kind        varchar(32)                            not null,
+    node_id     varchar(128) default ''                not null,
+    summary     text                                   not null,
+    detail_json json                                   null,
+    created_at  timestamp    default CURRENT_TIMESTAMP not null,
+    primary key (stream_kind, stream_id, seq)
+);
+
+create table if not exists Nasuta.sessions
+(
+    token      varchar(64)                         not null
+        primary key,
+    user_id    bigint                              not null,
+    expires_at timestamp                           not null,
+    created_at timestamp default CURRENT_TIMESTAMP not null
+);
+
+create index idx_expires
+    on Nasuta.sessions (expires_at);
+
+create index idx_user
+    on Nasuta.sessions (user_id);
+
+create table if not exists Nasuta.settings
+(
+    k          varchar(128)                        not null
+        primary key,
+    v          text                                not null,
+    updated_at timestamp default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP
+);
+
+create table if not exists Nasuta.trace_records
+(
+    id                bigint unsigned auto_increment
+        primary key,
+    observe_source    varchar(128)                        not null,
+    trace_id          varchar(255)                        not null,
+    logs_json         json                                null,
+    trace_json        json                                null,
+    logs_captured_at  timestamp                           null,
+    trace_captured_at timestamp                           null,
+    created_at        timestamp default CURRENT_TIMESTAMP not null,
+    updated_at        timestamp default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP,
+    constraint uniq_source_trace
+        unique (observe_source, trace_id)
+);
+
+create index idx_trace_id
+    on Nasuta.trace_records (trace_id);
+
+create table if not exists Nasuta.users
+(
+    id            bigint auto_increment
+        primary key,
+    feishu_uid    varchar(64)                            null,
+    open_id       varchar(128) default ''                not null,
+    name          varchar(128) default ''                not null,
+    email         varchar(256) default ''                not null,
+    password_hash varchar(255) default ''                not null,
+    avatar_url    varchar(512) default ''                not null,
+    department    varchar(256) default ''                not null,
+    is_admin      tinyint(1)   default 0                 not null,
+    created_at    timestamp    default CURRENT_TIMESTAMP not null,
+    updated_at    timestamp    default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP,
+    email_key     varchar(256) as (nullif(`email`, _utf8mb4'')) stored,
+    constraint feishu_uid
+        unique (feishu_uid),
+    constraint uniq_email
+        unique (email_key)
+);
+
+create table if not exists Nasuta.rbac_mcp_keys
+(
+    id         bigint auto_increment
+        primary key,
+    user_id    bigint                              not null,
+    key_name   varchar(128)                        not null,
+    api_key    varchar(64)                         not null,
+    is_active  tinyint   default 1                 null,
+    created_at timestamp default CURRENT_TIMESTAMP null,
+    expires_at timestamp                           null,
+    constraint api_key
+        unique (api_key),
+    constraint rbac_mcp_keys_ibfk_1
+        foreign key (user_id) references Nasuta.users (id)
+            on delete cascade
+);
+
+create index idx_user_created_id
+    on Nasuta.rbac_mcp_keys (user_id asc, created_at desc, id desc);
+
+create table if not exists Nasuta.rbac_user_roles
+(
+    id      bigint auto_increment
+        primary key,
+    user_id bigint not null,
+    role_id bigint not null,
+    constraint uk_user_role
+        unique (user_id, role_id),
+    constraint rbac_user_roles_ibfk_1
+        foreign key (user_id) references Nasuta.users (id)
+            on delete cascade,
+    constraint rbac_user_roles_ibfk_2
+        foreign key (role_id) references Nasuta.rbac_roles (id)
+            on delete cascade
+);
+
+create index role_id
+    on Nasuta.rbac_user_roles (role_id);
+
+create table if not exists Nasuta.workflow_definitions
+(
+    id              varchar(128)                         not null,
+    version         bigint                               not null,
+    definition_json json                                 not null,
+    content_hash    char(64)                             not null,
+    active          tinyint(1) default 1                 not null,
+    is_default      tinyint(1) default 0                 not null,
+    created_by      bigint     default 0                 not null,
+    created_at      timestamp  default CURRENT_TIMESTAMP not null,
+    default_key     varchar(128) as ((case when (`is_default` = 1) then `id` else NULL end)) stored,
+    primary key (id, version),
+    constraint uniq_workflow_definition_default
+        unique (default_key),
+    constraint uniq_workflow_definition_hash
+        unique (content_hash)
+);
+
+create index idx_workflow_definition_active
+    on Nasuta.workflow_definitions (id, active, version);
+
+create index idx_workflow_definition_list
+    on Nasuta.workflow_definitions (id, version);
+
+create table if not exists Nasuta.workflow_node_runs
+(
+    workflow_run_id        varchar(64)                           not null,
+    node_id                varchar(128)                          not null,
+    attempt                int                                   not null,
+    kind                   varchar(24)                           not null,
+    agent_run_id           varchar(64) default ''                not null,
+    input_handoff_ids_json json                                  not null,
+    output_handoff_id      varchar(64) default ''                not null,
+    status                 varchar(24)                           not null,
+    error_code             varchar(64) default ''                not null,
+    input_tokens           bigint      default 0                 not null,
+    output_tokens          bigint      default 0                 not null,
+    reasoning_tokens       bigint      default 0                 not null,
+    total_tokens           bigint      default 0                 not null,
+    tool_call_count        bigint      default 0                 not null,
+    cost_micros            bigint      default 0                 not null,
+    retry_count            bigint      default 0                 not null,
+    started_at             timestamp   default CURRENT_TIMESTAMP not null,
+    ended_at               timestamp                             null,
+    approval_decision      varchar(16)                           null,
+    approver_user_id       bigint                                null,
+    approver_tenant_id     varchar(128)                          null,
+    approval_comment       text                                  null,
+    approval_decided_at    timestamp                             null,
+    gate_decision_id       varchar(64)                           null,
+    gate_id                varchar(128)                          null,
+    gate_subject_hash      char(64)                              null,
+    gate_decision          varchar(32)                           null,
+    gate_reason_codes_json json                                  null,
+    gate_finding_ids_json  json                                  null,
+    gate_evaluated_at      timestamp                             null,
+    primary key (workflow_run_id, node_id, attempt),
+    constraint uniq_workflow_gate_decision
+        unique (gate_decision_id)
+);
+
+create index idx_agent_run
+    on Nasuta.workflow_node_runs (agent_run_id);
+
+create index idx_approval_decided
+    on Nasuta.workflow_node_runs (workflow_run_id, approval_decided_at, node_id);
+
+create index idx_status_started
+    on Nasuta.workflow_node_runs (status, started_at, workflow_run_id);
+
+create index idx_subject_gate
+    on Nasuta.workflow_node_runs (gate_subject_hash, gate_id, gate_evaluated_at);
+
+create table if not exists Nasuta.workflow_runs
+(
+    id                        varchar(64)                            not null
+        primary key,
+    parent_run_id             varchar(64)  default ''                not null,
+    workflow_id               varchar(128)                           not null,
+    workflow_version          bigint                                 not null,
+    workflow_hash             char(64)                               not null,
+    selection_json            json                                   not null,
+    input_hash                char(64)                               not null,
+    actor_user_id             bigint       default 0                 not null,
+    actor_tenant_id           varchar(128) default ''                not null,
+    actor_permissions_json    json                                   not null,
+    scenario                  varchar(128) default ''                not null,
+    scenario_permissions_json json                                   not null,
+    status                    varchar(24)                            not null,
+    budget_json               json                                   not null,
+    input_tokens              bigint       default 0                 not null,
+    output_tokens             bigint       default 0                 not null,
+    reasoning_tokens          bigint       default 0                 not null,
+    total_tokens              bigint       default 0                 not null,
+    tool_call_count           bigint       default 0                 not null,
+    cost_micros               bigint       default 0                 not null,
+    retry_count               bigint       default 0                 not null,
+    error_code                varchar(64)  default ''                not null,
+    started_at                timestamp    default CURRENT_TIMESTAMP not null,
+    ended_at                  timestamp                              null
+);
+
+create index idx_parent_run
+    on Nasuta.workflow_runs (parent_run_id, started_at, id);
+
+create index idx_status_started
+    on Nasuta.workflow_runs (status, started_at, id);
+
+create index idx_workflow_started
+    on Nasuta.workflow_runs (workflow_id, workflow_version, started_at, id);

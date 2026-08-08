@@ -9,13 +9,13 @@ import (
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
 
 func TestServiceMapsFixedWorkflowRequestAndStructuredResult(t *testing.T) {
-	executor := &recordingExecutor{result: agentworkflow.Result{
+	executor := &recordingExecutor{result: workflow.Result{
 		RunID: "workflow_1",
-		Output: agentworkflow.Handoff{Payload: json.RawMessage(`{
+		Output: workflow.Handoff{Payload: json.RawMessage(`{
 			"answer":"Use the indexed call path.",
 			"citations":[{"claim":"checkout calls inventory","evidence":[{"kind":"call","reference":"Checkout.Place","summary":"calls inventory"}]}],
 			"limitations":["live runtime evidence unavailable"]
@@ -32,7 +32,7 @@ func TestServiceMapsFixedWorkflowRequestAndStructuredResult(t *testing.T) {
 		t.Fatalf("result = %+v", result)
 	}
 	request := executor.request
-	if request.Workflow.ID != agentworkflow.DelegatedInvestigationID || request.Workflow.Version != 0 ||
+	if request.Workflow.ID != workflow.DelegatedInvestigationID || request.Workflow.Version != 0 ||
 		request.Actor != actor || request.Scenario != Scenario ||
 		!reflect.DeepEqual(request.ActorPermissions.Scopes, []string{"knowledge.read"}) ||
 		!reflect.DeepEqual(request.ScenarioPermissions.Scopes, []string{"knowledge.read"}) ||
@@ -54,15 +54,15 @@ func TestServiceReportsUnavailableAndExecutionFailures(t *testing.T) {
 }
 
 type recordingExecutor struct {
-	request agentworkflow.ExecuteRequest
-	result  agentworkflow.Result
+	request workflow.ExecuteRequest
+	result  workflow.Result
 	err     error
 }
 
 func (executor *recordingExecutor) Execute(
 	_ context.Context,
-	request agentworkflow.ExecuteRequest,
-) (agentworkflow.Result, error) {
+	request workflow.ExecuteRequest,
+) (workflow.Result, error) {
 	executor.request = request
 	return executor.result, executor.err
 }

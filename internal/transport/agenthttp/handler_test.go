@@ -10,16 +10,16 @@ import (
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
+	catalogpkg "github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 )
 
 type recordingCatalog struct {
-	records      []agentcatalog.DefinitionRecord
-	audit        []agentcatalog.AuditEvent
-	rollout      agentcatalog.RolloutRule
+	records      []catalogpkg.DefinitionRecord
+	audit        []catalogpkg.AuditEvent
+	rollout      catalogpkg.RolloutRule
 	hasRollout   bool
-	rolloutAudit []agentcatalog.RolloutAuditEvent
+	rolloutAudit []catalogpkg.RolloutAuditEvent
 
 	publishCalls      int
 	defaultCalls      int
@@ -47,9 +47,9 @@ func (catalog *recordingCatalog) PublishAs(
 
 func (catalog *recordingCatalog) ListRecords(
 	_ context.Context,
-	cursor agentcatalog.DefinitionCursor,
+	cursor catalogpkg.DefinitionCursor,
 	limit int,
-) ([]agentcatalog.DefinitionRecord, error) {
+) ([]catalogpkg.DefinitionRecord, error) {
 	catalog.lastLimit = limit
 	start := 0
 	for start < len(catalog.records) {
@@ -61,7 +61,7 @@ func (catalog *recordingCatalog) ListRecords(
 		start++
 	}
 	end := min(start+limit, len(catalog.records))
-	return append([]agentcatalog.DefinitionRecord(nil), catalog.records[start:end]...), nil
+	return append([]catalogpkg.DefinitionRecord(nil), catalog.records[start:end]...), nil
 }
 
 func (catalog *recordingCatalog) SetDefault(
@@ -97,16 +97,16 @@ func (catalog *recordingCatalog) ListAudit(
 	id string,
 	afterSeq int64,
 	limit int,
-) ([]agentcatalog.AuditEvent, error) {
+) ([]catalogpkg.AuditEvent, error) {
 	catalog.lastID = id
 	catalog.lastAfterSeq = afterSeq
 	catalog.lastLimit = limit
-	return append([]agentcatalog.AuditEvent(nil), catalog.audit...), nil
+	return append([]catalogpkg.AuditEvent(nil), catalog.audit...), nil
 }
 
 func (catalog *recordingCatalog) GetRollout(
 	id string,
-) (agentcatalog.RolloutRule, bool) {
+) (catalogpkg.RolloutRule, bool) {
 	catalog.lastID = id
 	return catalog.rollout, catalog.hasRollout
 }
@@ -119,7 +119,7 @@ func (catalog *recordingCatalog) SetRollout(
 	salt string,
 	active bool,
 	actorUserID int64,
-) (agentcatalog.RolloutRule, error) {
+) (catalogpkg.RolloutRule, error) {
 	catalog.rolloutCalls++
 	catalog.lastID = id
 	catalog.lastVersion = candidateVersion
@@ -135,11 +135,11 @@ func (catalog *recordingCatalog) ListRolloutAudit(
 	id string,
 	afterSeq int64,
 	limit int,
-) ([]agentcatalog.RolloutAuditEvent, error) {
+) ([]catalogpkg.RolloutAuditEvent, error) {
 	catalog.lastID = id
 	catalog.lastAfterSeq = afterSeq
 	catalog.lastLimit = limit
-	return append([]agentcatalog.RolloutAuditEvent(nil), catalog.rolloutAudit...), nil
+	return append([]catalogpkg.RolloutAuditEvent(nil), catalog.rolloutAudit...), nil
 }
 
 func TestAgentControlPlaneRequiresAuthenticationAndAdministratorWrites(t *testing.T) {
@@ -175,7 +175,7 @@ func TestAgentControlPlaneRequiresAuthenticationAndAdministratorWrites(t *testin
 }
 
 func TestAgentListUsesBoundedStableCursor(t *testing.T) {
-	catalog := &recordingCatalog{records: []agentcatalog.DefinitionRecord{
+	catalog := &recordingCatalog{records: []catalogpkg.DefinitionRecord{
 		{Definition: agentapi.Definition{ID: "a.agent", Version: 1}},
 		{Definition: agentapi.Definition{ID: "a.agent", Version: 2}},
 		{Definition: agentapi.Definition{ID: "b.agent", Version: 1}},
@@ -191,8 +191,8 @@ func TestAgentListUsesBoundedStableCursor(t *testing.T) {
 	}
 	var envelope struct {
 		Data struct {
-			Items      []agentcatalog.DefinitionRecord `json:"items"`
-			NextCursor string                          `json:"next_cursor"`
+			Items      []catalogpkg.DefinitionRecord `json:"items"`
+			NextCursor string                        `json:"next_cursor"`
 		} `json:"data"`
 	}
 	decodeAgentResponse(t, response, &envelope)
@@ -205,7 +205,7 @@ func TestAgentListUsesBoundedStableCursor(t *testing.T) {
 }
 
 func TestAgentVersionControlsAndAuditAreAdministratorOnly(t *testing.T) {
-	catalog := &recordingCatalog{audit: []agentcatalog.AuditEvent{{
+	catalog := &recordingCatalog{audit: []catalogpkg.AuditEvent{{
 		Seq: 4, DefinitionID: "qa.answerer", Version: 2, Action: "default_set",
 	}}}
 	mux := agentMux(&Handler{catalog: catalog})
@@ -263,14 +263,14 @@ func TestAgentVersionControlsAndAuditAreAdministratorOnly(t *testing.T) {
 }
 
 func TestAgentRolloutControlsAreAuthenticatedAndAuditable(t *testing.T) {
-	rule := agentcatalog.RolloutRule{
+	rule := catalogpkg.RolloutRule{
 		AgentID: "qa.answerer", RuleVersion: 3, CandidateVersion: 2,
 		PercentageBPS: 2500, Salt: "rollout-2026-08",
 		RuleHash: strings.Repeat("a", 64), Active: true, CreatedBy: 8,
 	}
 	catalog := &recordingCatalog{
 		rollout: rule, hasRollout: true,
-		rolloutAudit: []agentcatalog.RolloutAuditEvent{{
+		rolloutAudit: []catalogpkg.RolloutAuditEvent{{
 			Seq: 5, AgentID: rule.AgentID, RuleVersion: rule.RuleVersion,
 			CandidateVersion: rule.CandidateVersion, PercentageBPS: rule.PercentageBPS,
 			RuleHash: rule.RuleHash, Action: "rollout_enabled", ActorUserID: 8,
@@ -318,7 +318,7 @@ func TestAgentRolloutControlsAreAuthenticatedAndAuditable(t *testing.T) {
 		t.Fatalf("rollout get status=%d body=%s", response.Code, response.Body.String())
 	}
 	var rolloutEnvelope struct {
-		Data agentcatalog.RolloutRule `json:"data"`
+		Data catalogpkg.RolloutRule `json:"data"`
 	}
 	decodeAgentResponse(t, response, &rolloutEnvelope)
 	if rolloutEnvelope.Data.RuleHash != rule.RuleHash {
@@ -370,14 +370,14 @@ func TestAgentHandlerMapsCatalogErrors(t *testing.T) {
 type failingCatalog struct{}
 
 func (failingCatalog) PublishAs(context.Context, []agentapi.Definition, int64) error {
-	return agentcatalog.ErrUnavailable
+	return catalogpkg.ErrUnavailable
 }
 func (failingCatalog) ListRecords(
 	context.Context,
-	agentcatalog.DefinitionCursor,
+	catalogpkg.DefinitionCursor,
 	int,
-) ([]agentcatalog.DefinitionRecord, error) {
-	return nil, agentcatalog.ErrUnavailable
+) ([]catalogpkg.DefinitionRecord, error) {
+	return nil, catalogpkg.ErrUnavailable
 }
 func (failingCatalog) SetDefault(context.Context, string, int64, int64) error {
 	return errors.New("unused")
@@ -385,8 +385,8 @@ func (failingCatalog) SetDefault(context.Context, string, int64, int64) error {
 func (failingCatalog) SetActive(context.Context, string, int64, bool, int64) error {
 	return errors.New("unused")
 }
-func (failingCatalog) GetRollout(string) (agentcatalog.RolloutRule, bool) {
-	return agentcatalog.RolloutRule{}, false
+func (failingCatalog) GetRollout(string) (catalogpkg.RolloutRule, bool) {
+	return catalogpkg.RolloutRule{}, false
 }
 func (failingCatalog) SetRollout(
 	context.Context,
@@ -396,15 +396,15 @@ func (failingCatalog) SetRollout(
 	string,
 	bool,
 	int64,
-) (agentcatalog.RolloutRule, error) {
-	return agentcatalog.RolloutRule{}, errors.New("unused")
+) (catalogpkg.RolloutRule, error) {
+	return catalogpkg.RolloutRule{}, errors.New("unused")
 }
 func (failingCatalog) ListAudit(
 	context.Context,
 	string,
 	int64,
 	int,
-) ([]agentcatalog.AuditEvent, error) {
+) ([]catalogpkg.AuditEvent, error) {
 	return nil, errors.New("unused")
 }
 func (failingCatalog) ListRolloutAudit(
@@ -412,7 +412,7 @@ func (failingCatalog) ListRolloutAudit(
 	string,
 	int64,
 	int,
-) ([]agentcatalog.RolloutAuditEvent, error) {
+) ([]catalogpkg.RolloutAuditEvent, error) {
 	return nil, errors.New("unused")
 }
 

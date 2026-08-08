@@ -1,0 +1,2 @@
+Your previous response did not satisfy the required JSON contract: {{ .Problem }}
+Return ONLY a single valid JSON object matching the requested schema. No prose, no code fences, no comments, no trailing commas.

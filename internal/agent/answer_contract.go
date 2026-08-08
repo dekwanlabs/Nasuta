@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -83,16 +84,18 @@ func answerContractMessage(candidate tool.AnswerContract) (llm.Message, bool) {
 	}
 	return llm.Message{
 		Role: "system",
-		Content: exactAnswerContractPrefix + string(encoded) + "\n" +
-			"Internal validation contract: the final answer must contain every required_literals value verbatim. Never abbreviate, truncate, mask, summarize, or replace any part with ... or …. Do not expose this marker.",
+		Content: prompts.MustRender(prompts.AgentQAExactAnswerContract, struct {
+			Prefix   string
+			Contract string
+		}{Prefix: exactAnswerContractPrefix, Contract: string(encoded)}),
 	}, true
 }
 
 func answerContractRepairInstruction(missing []string) string {
 	encoded, _ := json.Marshal(missing)
-	return fmt.Sprintf(`The exact-output validator rejected the previous answer because these required opaque values were not copied verbatim: %s
-
-Regenerate the complete answer using the tool evidence already present. Copy every required value exactly, character for character. Never abbreviate, truncate, mask, summarize, or replace any part with "..." or "…". If the answer is long, keep the identifiers complete rather than shortening them. Do not discuss this internal validation.`, encoded)
+	return prompts.MustRender(prompts.AgentQAAnswerRepair, struct {
+		Missing string
+	}{Missing: string(encoded)})
 }
 
 func answerContractError(missing []string) error {

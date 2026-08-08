@@ -1,0 +1,5 @@
+{{- if .Direct -}}
+[EVIDENCE_PLAN: direct] No source was selected for automatic pre-retrieval. Use supplied material or stable general knowledge first, and call a registered read tool when a current workspace, runtime, or external fact is required.
+{{- else -}}
+[EVIDENCE_PLAN: {{ .Plan }}] These sources were selected for automatic pre-retrieval. Use supplied evidence first. Other registered read capabilities remain available for a specific unresolved fact; do not call them speculatively.
+{{- end -}}

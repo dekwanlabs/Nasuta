@@ -1,0 +1,1 @@
+[WEB_EVIDENCE_STATUS] You have successfully fetched evidence from {{ .DomainCount }} independent web domains. If the evidence now supports the requested conclusion, answer immediately. Continue searching only for a specific unresolved fact, ambiguity, or source-quality gap that you can name; do not keep searching merely to accumulate more pages.

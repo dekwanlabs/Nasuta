@@ -1,0 +1,18 @@
+Classify this project into exactly one type: backend, frontend, mobile, mcu, embedded, host, module, generic.
+
+Definitions:
+- backend: server-side API/service (Spring Boot, Gin, FastAPI, Express, gRPC)
+- frontend: browser UI (React, Vue, Angular, Next.js)
+- mobile: iOS/Android/Flutter/React Native app
+- mcu: bare-metal / RTOS microcontroller firmware
+- embedded: embedded Linux, Buildroot/Yocto, kernel modules
+- host: desktop app (Qt, WPF, Electron desktop, PyQt) for device communication
+- module: communication module firmware (WiFi/BLE/4G/NB-IoT modem, AT commands)
+- generic: none of the above
+
+Rules: prefer specific types. Mobile apps use mobile platform SDKs. MCU has no OS.
+Analyze file extensions, build files, framework imports, and README.
+
+{{ .Files }}
+Return ONLY valid JSON (no fences):
+{"project_type":"<type>","confidence":"high|medium|low"}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -99,9 +100,8 @@ type llmAnalysis struct {
 
 func (manager *Manager) analyzeWithLLM(ctx context.Context, inc *Incident, from, to time.Time, logs *LogSearchResult, searchErr error) (*llmAnalysis, error) {
 	prompt := manager.buildLLMPrompt(ctx, inc, from, to, logs, searchErr)
-	system := "You are a senior production incident analyst. Return strict JSON only with keys root_cause, solution, analysis_doc. analysis_doc should be concise Markdown in Chinese with evidence from logs, traces, and code hints."
 	var out llmAnalysis
-	if err := manager.llm.ChatJSON(ctx, system, prompt, &out, llm.CallOptions{}); err != nil {
+	if err := manager.llm.ChatJSON(ctx, prompts.Text(prompts.IncidentSystem), prompt, &out, llm.CallOptions{}); err != nil {
 		return nil, fmt.Errorf("decode LLM JSON: %w", err)
 	}
 	return &out, nil

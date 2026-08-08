@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
@@ -33,7 +33,7 @@ func NewFeatureDeliveryStore(db *sql.DB) *FeatureDeliveryStore {
 	return &FeatureDeliveryStore{db: db}
 }
 
-func (store *FeatureDeliveryStore) CreateFeature(ctx context.Context, feature featuredelivery.FeatureRequest, artifact featuredelivery.Artifact) error {
+func (store *FeatureDeliveryStore) CreateFeature(ctx context.Context, feature delivery.FeatureRequest, artifact delivery.Artifact) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin feature creation: %w", err)
@@ -54,15 +54,15 @@ func (store *FeatureDeliveryStore) CreateFeature(ctx context.Context, feature fe
 	return nil
 }
 
-func (store *FeatureDeliveryStore) GetFeature(ctx context.Context, id string) (*featuredelivery.FeatureRequest, error) {
-	var feature featuredelivery.FeatureRequest
+func (store *FeatureDeliveryStore) GetFeature(ctx context.Context, id string) (*delivery.FeatureRequest, error) {
+	var feature delivery.FeatureRequest
 	var archived sql.NullTime
 	err := store.db.QueryRowContext(ctx,
 		`SELECT id,title,created_by,archived_at,created_at,updated_at
 		 FROM feature_requests WHERE id=? LIMIT 1`, id,
 	).Scan(&feature.ID, &feature.Title, &feature.CreatedBy, &archived, &feature.CreatedAt, &feature.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get feature %q: %w", id, err)
@@ -71,7 +71,7 @@ func (store *FeatureDeliveryStore) GetFeature(ctx context.Context, id string) (*
 	return &feature, nil
 }
 
-func (store *FeatureDeliveryStore) ListFeatures(ctx context.Context, ownerID int64, admin bool, cursor featuredelivery.FeatureCursor, limit int) ([]featuredelivery.FeatureRequest, error) {
+func (store *FeatureDeliveryStore) ListFeatures(ctx context.Context, ownerID int64, admin bool, cursor delivery.FeatureCursor, limit int) ([]delivery.FeatureRequest, error) {
 	limit = boundedLimit(limit, 20, maxFeaturePage)
 	query := `SELECT id,title,created_by,archived_at,created_at,updated_at FROM feature_requests`
 	args := make([]any, 0, 4)
@@ -95,9 +95,9 @@ func (store *FeatureDeliveryStore) ListFeatures(ctx context.Context, ownerID int
 		return nil, fmt.Errorf("list features: %w", err)
 	}
 	defer rows.Close()
-	features := make([]featuredelivery.FeatureRequest, 0, limit)
+	features := make([]delivery.FeatureRequest, 0, limit)
 	for rows.Next() {
-		var feature featuredelivery.FeatureRequest
+		var feature delivery.FeatureRequest
 		var archived sql.NullTime
 		if err := rows.Scan(&feature.ID, &feature.Title, &feature.CreatedBy, &archived, &feature.CreatedAt, &feature.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan feature: %w", err)
@@ -133,7 +133,7 @@ func (store *FeatureDeliveryStore) TouchFeature(ctx context.Context, id string) 
 	return requireAffected(result)
 }
 
-func (store *FeatureDeliveryStore) CreateArtifact(ctx context.Context, artifact featuredelivery.Artifact) (*featuredelivery.Artifact, error) {
+func (store *FeatureDeliveryStore) CreateArtifact(ctx context.Context, artifact delivery.Artifact) (*delivery.Artifact, error) {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin artifact creation: %w", err)
@@ -142,9 +142,9 @@ func (store *FeatureDeliveryStore) CreateArtifact(ctx context.Context, artifact 
 	if _, err := lockMutableFeature(ctx, tx, artifact.RequestID); err != nil {
 		return nil, err
 	}
-	if artifact.Kind == featuredelivery.KindRequirement {
+	if artifact.Kind == delivery.KindRequirement {
 		if artifact.ParentArtifactID != "" {
-			return nil, featuredelivery.ErrConflict
+			return nil, delivery.ErrConflict
 		}
 	} else {
 		parentID, err := currentParentArtifactID(ctx, tx, artifact.RequestID, artifact.Kind)
@@ -152,7 +152,7 @@ func (store *FeatureDeliveryStore) CreateArtifact(ctx context.Context, artifact 
 			return nil, err
 		}
 		if artifact.ParentArtifactID != parentID {
-			return nil, featuredelivery.ErrConflict
+			return nil, delivery.ErrConflict
 		}
 	}
 	if err := tx.QueryRowContext(ctx,
@@ -173,7 +173,7 @@ func (store *FeatureDeliveryStore) CreateArtifact(ctx context.Context, artifact 
 	return &artifact, nil
 }
 
-func insertArtifact(ctx context.Context, tx *sql.Tx, artifact featuredelivery.Artifact) error {
+func insertArtifact(ctx context.Context, tx *sql.Tx, artifact delivery.Artifact) error {
 	evidenceJSON, err := json.Marshal(artifact.Evidence)
 	if err != nil {
 		return fmt.Errorf("marshal artifact evidence: %w", err)
@@ -193,10 +193,10 @@ func insertArtifact(ctx context.Context, tx *sql.Tx, artifact featuredelivery.Ar
 	return nil
 }
 
-func (store *FeatureDeliveryStore) GetArtifact(ctx context.Context, id string) (*featuredelivery.Artifact, error) {
+func (store *FeatureDeliveryStore) GetArtifact(ctx context.Context, id string) (*delivery.Artifact, error) {
 	artifact, err := scanArtifact(store.db.QueryRowContext(ctx, artifactSelect+` WHERE a.id=? LIMIT 1`, id))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get artifact %q: %w", id, err)
@@ -204,7 +204,7 @@ func (store *FeatureDeliveryStore) GetArtifact(ctx context.Context, id string) (
 	return &artifact, nil
 }
 
-func (store *FeatureDeliveryStore) ListArtifacts(ctx context.Context, requestID string, kind featuredelivery.ArtifactKind, cursor featuredelivery.ArtifactCursor, limit int) ([]featuredelivery.ArtifactSummary, error) {
+func (store *FeatureDeliveryStore) ListArtifacts(ctx context.Context, requestID string, kind delivery.ArtifactKind, cursor delivery.ArtifactCursor, limit int) ([]delivery.ArtifactSummary, error) {
 	limit = boundedLimit(limit, 20, maxArtifactPage)
 	query := artifactSummarySelect + ` WHERE a.request_id=? AND a.kind=?`
 	args := make([]any, 0, 4)
@@ -220,7 +220,7 @@ func (store *FeatureDeliveryStore) ListArtifacts(ctx context.Context, requestID 
 		return nil, fmt.Errorf("list artifacts for feature %q: %w", requestID, err)
 	}
 	defer rows.Close()
-	artifacts := make([]featuredelivery.ArtifactSummary, 0, limit)
+	artifacts := make([]delivery.ArtifactSummary, 0, limit)
 	for rows.Next() {
 		artifact, err := scanArtifactSummary(rows)
 		if err != nil {
@@ -237,58 +237,57 @@ func (store *FeatureDeliveryStore) ListArtifacts(ctx context.Context, requestID 
 const artifactSummarySelect = `SELECT
 	a.id,a.request_id,a.kind,a.version,a.parent_artifact_id,a.origin,
 	a.content_hash,a.created_by,a.created_at,
-	r.artifact_id,r.subject_hash,r.review_round_id,r.gate_result_id,
-	r.decision,r.comment,r.reviewer,r.created_at
-	FROM feature_artifacts a
-	LEFT JOIN feature_artifact_reviews r ON r.artifact_id=a.id`
+	a.review_subject_hash,a.review_round_id,a.review_gate_result_id,
+	a.review_decision,a.review_comment,a.review_reviewer,a.review_created_at
+	FROM feature_artifacts a`
 
-func scanArtifactSummary(row rowScanner) (featuredelivery.ArtifactSummary, error) {
-	var artifact featuredelivery.ArtifactSummary
-	var reviewID, subjectHash, reviewRoundID, gateResultID, decision, comment sql.NullString
+func scanArtifactSummary(row rowScanner) (delivery.ArtifactSummary, error) {
+	var artifact delivery.ArtifactSummary
+	var subjectHash, reviewRoundID, gateResultID, decision, comment sql.NullString
 	var reviewer sql.NullInt64
 	var reviewedAt sql.NullTime
 	err := row.Scan(
 		&artifact.ID, &artifact.RequestID, &artifact.Kind, &artifact.Version,
 		&artifact.ParentArtifactID, &artifact.Origin, &artifact.ContentHash,
 		&artifact.CreatedBy, &artifact.CreatedAt,
-		&reviewID, &subjectHash, &reviewRoundID, &gateResultID,
+		&subjectHash, &reviewRoundID, &gateResultID,
 		&decision, &comment, &reviewer, &reviewedAt,
 	)
 	if err != nil {
 		return artifact, err
 	}
-	if reviewID.Valid {
-		artifact.Review = &featuredelivery.ArtifactReview{
-			ArtifactID: reviewID.String, SubjectHash: subjectHash.String,
+	if subjectHash.Valid {
+		artifact.Review = &delivery.ArtifactReview{
+			ArtifactID: artifact.ID, SubjectHash: subjectHash.String,
 			ReviewRoundID: reviewRoundID.String, GateResultID: gateResultID.String,
-			Decision: featuredelivery.ReviewDecision(decision.String),
+			Decision: delivery.ReviewDecision(decision.String),
 			Comment:  comment.String, Reviewer: reviewer.Int64, CreatedAt: reviewedAt.Time,
 		}
 	}
 	return artifact, nil
 }
 
-func (store *FeatureDeliveryStore) GetCurrentLineage(ctx context.Context, requestID string) (featuredelivery.Lineage, error) {
+func (store *FeatureDeliveryStore) GetCurrentLineage(ctx context.Context, requestID string) (delivery.Lineage, error) {
 	rows, err := store.db.QueryContext(ctx, currentLineageSelect, requestID, requestID)
 	if err != nil {
-		return featuredelivery.Lineage{}, fmt.Errorf("get current lineage for feature %q: %w", requestID, err)
+		return delivery.Lineage{}, fmt.Errorf("get current lineage for feature %q: %w", requestID, err)
 	}
 	defer rows.Close()
-	artifacts := make([]featuredelivery.Artifact, 0, 5)
+	artifacts := make([]delivery.Artifact, 0, 5)
 	for rows.Next() {
 		artifact, err := scanArtifact(rows)
 		if err != nil {
-			return featuredelivery.Lineage{}, fmt.Errorf("scan current lineage: %w", err)
+			return delivery.Lineage{}, fmt.Errorf("scan current lineage: %w", err)
 		}
 		artifacts = append(artifacts, artifact)
 	}
 	if err := rows.Err(); err != nil {
-		return featuredelivery.Lineage{}, fmt.Errorf("iterate current lineage: %w", err)
+		return delivery.Lineage{}, fmt.Errorf("iterate current lineage: %w", err)
 	}
 	if len(artifacts) == 0 {
-		return featuredelivery.Lineage{}, featuredelivery.ErrConflict
+		return delivery.Lineage{}, delivery.ErrConflict
 	}
-	return featuredelivery.DeriveLineage(artifacts), nil
+	return delivery.DeriveLineage(artifacts), nil
 }
 
 const currentLineageSelect = `WITH RECURSIVE approved_ranked AS (
@@ -298,9 +297,7 @@ const currentLineageSelect = `WITH RECURSIVE approved_ranked AS (
 			ORDER BY a.version DESC
 		) AS position
 	FROM feature_artifacts a
-	JOIN feature_artifact_reviews review
-	  ON review.artifact_id=a.id AND review.decision='approved'
-	WHERE a.request_id=?
+	WHERE a.request_id=? AND a.review_decision='approved'
 ), lineage(id,kind,depth) AS (
 	SELECT a.id,a.kind,1 FROM feature_artifacts a
 	WHERE a.request_id=? AND a.kind='requirement'
@@ -324,15 +321,14 @@ const currentLineageSelect = `WITH RECURSIVE approved_ranked AS (
 const artifactSelect = `SELECT
 	a.id,a.request_id,a.kind,a.version,a.parent_artifact_id,a.origin,a.document_json,
 	a.rendered_markdown,a.evidence_json,a.content_hash,a.created_by,a.created_at,
-	r.artifact_id,r.subject_hash,r.review_round_id,r.gate_result_id,
-	r.decision,r.comment,r.reviewer,r.created_at
-	FROM feature_artifacts a
-	LEFT JOIN feature_artifact_reviews r ON r.artifact_id=a.id`
+	a.review_subject_hash,a.review_round_id,a.review_gate_result_id,
+	a.review_decision,a.review_comment,a.review_reviewer,a.review_created_at
+	FROM feature_artifacts a`
 
-func scanArtifact(row rowScanner) (featuredelivery.Artifact, error) {
-	var artifact featuredelivery.Artifact
+func scanArtifact(row rowScanner) (delivery.Artifact, error) {
+	var artifact delivery.Artifact
 	var documentJSON, evidenceJSON []byte
-	var reviewID, subjectHash, reviewRoundID, gateResultID, decision, comment sql.NullString
+	var subjectHash, reviewRoundID, gateResultID, decision, comment sql.NullString
 	var reviewer sql.NullInt64
 	var reviewedAt sql.NullTime
 	err := row.Scan(
@@ -340,7 +336,7 @@ func scanArtifact(row rowScanner) (featuredelivery.Artifact, error) {
 		&artifact.ParentArtifactID, &artifact.Origin, &documentJSON,
 		&artifact.RenderedMarkdown, &evidenceJSON, &artifact.ContentHash,
 		&artifact.CreatedBy, &artifact.CreatedAt,
-		&reviewID, &subjectHash, &reviewRoundID, &gateResultID,
+		&subjectHash, &reviewRoundID, &gateResultID,
 		&decision, &comment, &reviewer, &reviewedAt,
 	)
 	if err != nil {
@@ -350,13 +346,13 @@ func scanArtifact(row rowScanner) (featuredelivery.Artifact, error) {
 	if err := json.Unmarshal(evidenceJSON, &artifact.Evidence); err != nil {
 		return artifact, fmt.Errorf("decode evidence for artifact %q: %w", artifact.ID, err)
 	}
-	if reviewID.Valid {
-		artifact.Review = &featuredelivery.ArtifactReview{
-			ArtifactID:    reviewID.String,
+	if subjectHash.Valid {
+		artifact.Review = &delivery.ArtifactReview{
+			ArtifactID:    artifact.ID,
 			SubjectHash:   subjectHash.String,
 			ReviewRoundID: reviewRoundID.String,
 			GateResultID:  gateResultID.String,
-			Decision:      featuredelivery.ReviewDecision(decision.String),
+			Decision:      delivery.ReviewDecision(decision.String),
 			Comment:       comment.String,
 			Reviewer:      reviewer.Int64,
 			CreatedAt:     reviewedAt.Time,
@@ -365,7 +361,7 @@ func scanArtifact(row rowScanner) (featuredelivery.Artifact, error) {
 	return artifact, nil
 }
 
-func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review featuredelivery.ArtifactReview) error {
+func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review delivery.ArtifactReview) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin artifact review: %w", err)
@@ -376,7 +372,7 @@ func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review fe
 		`SELECT request_id FROM feature_artifacts WHERE id=? LIMIT 1`,
 		review.ArtifactID,
 	).Scan(&requestID); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("read reviewed artifact %q: %w", review.ArtifactID, err)
 	}
@@ -386,31 +382,40 @@ func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review fe
 	var parentArtifactID, contentHash string
 	var artifactVersion int
 	var evidenceJSON []byte
-	var kind featuredelivery.ArtifactKind
+	var kind delivery.ArtifactKind
+	var existingSubjectHash, existingReviewRoundID, existingGateResultID, existingDecision, existingComment sql.NullString
+	var existingReviewer sql.NullInt64
+	var existingReviewedAt sql.NullTime
 	if err := tx.QueryRowContext(ctx,
 		`SELECT kind,parent_artifact_id,version,content_hash,evidence_json
+			,review_subject_hash,review_round_id,review_gate_result_id,review_decision,
+			review_comment,review_reviewer,review_created_at
 		 FROM feature_artifacts WHERE id=? AND request_id=? LIMIT 1 FOR UPDATE`,
 		review.ArtifactID, requestID,
-	).Scan(&kind, &parentArtifactID, &artifactVersion, &contentHash, &evidenceJSON); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+	).Scan(
+		&kind, &parentArtifactID, &artifactVersion, &contentHash, &evidenceJSON,
+		&existingSubjectHash, &existingReviewRoundID, &existingGateResultID,
+		&existingDecision, &existingComment, &existingReviewer, &existingReviewedAt,
+	); errors.Is(err, sql.ErrNoRows) {
+		return delivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("lock reviewed artifact %q: %w", review.ArtifactID, err)
 	}
-	if kind == featuredelivery.KindRequirement {
-		return featuredelivery.ErrConflict
+	if kind == delivery.KindRequirement {
+		return delivery.ErrConflict
 	}
 	currentParentID, err := currentParentArtifactID(ctx, tx, requestID, kind)
 	if err != nil {
 		return err
 	}
 	if parentArtifactID != currentParentID {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
-	var evidence []featuredelivery.EvidenceRef
+	var evidence []delivery.EvidenceRef
 	if err := json.Unmarshal(evidenceJSON, &evidence); err != nil {
 		return fmt.Errorf("decode reviewed artifact %q evidence: %w", review.ArtifactID, err)
 	}
-	subject, err := featuredelivery.BuildArtifactReviewSubject(featuredelivery.Artifact{
+	subject, err := delivery.BuildArtifactReviewSubject(delivery.Artifact{
 		ID: review.ArtifactID, Kind: kind, Version: artifactVersion,
 		ParentArtifactID: parentArtifactID, Evidence: evidence, ContentHash: contentHash,
 	})
@@ -418,44 +423,43 @@ func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review fe
 		return err
 	}
 	if review.SubjectHash != subject.ContentHash {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	if review.ReviewRoundID == "" || review.GateResultID == "" {
-		return featuredelivery.ErrInvalid
+		return delivery.ErrInvalid
 	}
-	var existing featuredelivery.ArtifactReview
-	err = tx.QueryRowContext(ctx,
-		`SELECT artifact_id,subject_hash,review_round_id,gate_result_id,decision,comment,reviewer
-		 FROM feature_artifact_reviews WHERE artifact_id=? LIMIT 1 FOR UPDATE`,
-		review.ArtifactID,
-	).Scan(
-		&existing.ArtifactID, &existing.SubjectHash, &existing.ReviewRoundID,
-		&existing.GateResultID, &existing.Decision, &existing.Comment,
-		&existing.Reviewer,
-	)
-	if err == nil {
+	if existingSubjectHash.Valid {
+		existing := delivery.ArtifactReview{
+			ArtifactID:    review.ArtifactID,
+			SubjectHash:   existingSubjectHash.String,
+			ReviewRoundID: existingReviewRoundID.String,
+			GateResultID:  existingGateResultID.String,
+			Decision:      delivery.ReviewDecision(existingDecision.String),
+			Comment:       existingComment.String,
+			Reviewer:      existingReviewer.Int64,
+			CreatedAt:     existingReviewedAt.Time,
+		}
 		if !sameArtifactReviewFact(existing, review) {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit idempotent artifact review %q: %w", review.ArtifactID, err)
 		}
 		return nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("read artifact review %q: %w", review.ArtifactID, err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO feature_artifact_reviews(
-			artifact_id,subject_hash,review_round_id,gate_result_id,decision,comment,reviewer,created_at
-		 ) VALUES(?,?,?,?,?,?,?,?)`,
-		review.ArtifactID, review.SubjectHash, review.ReviewRoundID, review.GateResultID,
-		review.Decision, review.Comment, review.Reviewer, review.CreatedAt,
-	); err != nil {
-		if duplicateKey(err) {
-			return featuredelivery.ErrConflict
-		}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE feature_artifacts
+		 SET review_subject_hash=?,review_round_id=?,review_gate_result_id=?,review_decision=?,
+		     review_comment=?,review_reviewer=?,review_created_at=?
+		 WHERE id=? AND review_subject_hash IS NULL`,
+		review.SubjectHash, review.ReviewRoundID, review.GateResultID, review.Decision,
+		review.Comment, review.Reviewer, review.CreatedAt, review.ArtifactID,
+	)
+	if err != nil {
 		return fmt.Errorf("review artifact %q: %w", review.ArtifactID, err)
+	}
+	if err := requireAffected(result); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE feature_requests SET updated_at=CURRENT_TIMESTAMP WHERE id=?`, requestID); err != nil {
 		return fmt.Errorf("touch feature after review: %w", err)
@@ -466,7 +470,7 @@ func (store *FeatureDeliveryStore) ReviewArtifact(ctx context.Context, review fe
 	return nil
 }
 
-func sameArtifactReviewFact(left, right featuredelivery.ArtifactReview) bool {
+func sameArtifactReviewFact(left, right delivery.ArtifactReview) bool {
 	return left.ArtifactID == right.ArtifactID &&
 		left.SubjectHash == right.SubjectHash &&
 		left.ReviewRoundID == right.ReviewRoundID &&
@@ -476,7 +480,7 @@ func sameArtifactReviewFact(left, right featuredelivery.ArtifactReview) bool {
 		left.Reviewer == right.Reviewer
 }
 
-func (store *FeatureDeliveryStore) CreateGenerationRun(ctx context.Context, run featuredelivery.GenerationRun) error {
+func (store *FeatureDeliveryStore) CreateGenerationRun(ctx context.Context, run delivery.GenerationRun) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin generation run: %w", err)
@@ -507,7 +511,7 @@ func (store *FeatureDeliveryStore) CreateGenerationRun(ctx context.Context, run 
 	return nil
 }
 
-func (store *FeatureDeliveryStore) CompleteGeneration(ctx context.Context, runID string, artifact featuredelivery.Artifact, inputTokens, outputTokens int64) (*featuredelivery.Artifact, error) {
+func (store *FeatureDeliveryStore) CompleteGeneration(ctx context.Context, runID string, artifact delivery.Artifact, inputTokens, outputTokens int64) (*delivery.Artifact, error) {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin generation completion: %w", err)
@@ -517,24 +521,24 @@ func (store *FeatureDeliveryStore) CompleteGeneration(ctx context.Context, runID
 		return nil, err
 	}
 	var requestID, parentID, status string
-	var kind featuredelivery.ArtifactKind
+	var kind delivery.ArtifactKind
 	if err := tx.QueryRowContext(ctx,
 		`SELECT request_id,artifact_kind,parent_artifact_id,status
 		 FROM feature_generation_runs WHERE id=? LIMIT 1 FOR UPDATE`, runID,
 	).Scan(&requestID, &kind, &parentID, &status); errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	} else if err != nil {
 		return nil, fmt.Errorf("lock generation run %q: %w", runID, err)
 	}
 	if status != "running" || requestID != artifact.RequestID || kind != artifact.Kind || parentID != artifact.ParentArtifactID {
-		return nil, featuredelivery.ErrConflict
+		return nil, delivery.ErrConflict
 	}
 	currentParentID, err := currentParentArtifactID(ctx, tx, artifact.RequestID, artifact.Kind)
 	if err != nil {
 		return nil, err
 	}
 	if artifact.ParentArtifactID != currentParentID {
-		return nil, featuredelivery.ErrConflict
+		return nil, delivery.ErrConflict
 	}
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(version),0)+1 FROM feature_artifacts WHERE request_id=? AND kind=?`,
@@ -566,10 +570,10 @@ func (store *FeatureDeliveryStore) CompleteGeneration(ctx context.Context, runID
 	return &artifact, nil
 }
 
-func (store *FeatureDeliveryStore) GetGenerationRun(ctx context.Context, id string) (*featuredelivery.GenerationRun, error) {
+func (store *FeatureDeliveryStore) GetGenerationRun(ctx context.Context, id string) (*delivery.GenerationRun, error) {
 	run, err := scanGenerationRun(store.db.QueryRowContext(ctx, generationRunSelect+` WHERE id=? LIMIT 1`, id))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get generation run %q: %w", id, err)
@@ -580,7 +584,7 @@ func (store *FeatureDeliveryStore) GetGenerationRun(ctx context.Context, id stri
 func (store *FeatureDeliveryStore) GetGenerationForArtifact(
 	ctx context.Context,
 	artifactID string,
-) (*featuredelivery.GenerationRun, error) {
+) (*delivery.GenerationRun, error) {
 	run, err := scanGenerationRun(store.db.QueryRowContext(
 		ctx,
 		generationRunSelect+`
@@ -589,7 +593,7 @@ func (store *FeatureDeliveryStore) GetGenerationForArtifact(
 		artifactID,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get generation for artifact %q: %w", artifactID, err)
@@ -601,7 +605,7 @@ func (store *FeatureDeliveryStore) GetSuccessfulGenerationForWorkflowNode(
 	ctx context.Context,
 	workflowRunID string,
 	workflowNodeID string,
-) (*featuredelivery.GenerationRun, error) {
+) (*delivery.GenerationRun, error) {
 	run, err := scanGenerationRun(store.db.QueryRowContext(
 		ctx,
 		generationRunSelect+`
@@ -611,7 +615,7 @@ func (store *FeatureDeliveryStore) GetSuccessfulGenerationForWorkflowNode(
 		workflowNodeID,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -624,7 +628,7 @@ func (store *FeatureDeliveryStore) GetSuccessfulGenerationForWorkflowNode(
 	return &run, nil
 }
 
-func (store *FeatureDeliveryStore) ListGenerationRuns(ctx context.Context, requestID string, cursor featuredelivery.GenerationCursor, limit int) ([]featuredelivery.GenerationRun, error) {
+func (store *FeatureDeliveryStore) ListGenerationRuns(ctx context.Context, requestID string, cursor delivery.GenerationCursor, limit int) ([]delivery.GenerationRun, error) {
 	limit = boundedLimit(limit, 20, maxRunPage)
 	query := generationRunSelect + ` WHERE request_id=?`
 	args := make([]any, 0, 5)
@@ -640,7 +644,7 @@ func (store *FeatureDeliveryStore) ListGenerationRuns(ctx context.Context, reque
 		return nil, fmt.Errorf("list generation runs for feature %q: %w", requestID, err)
 	}
 	defer rows.Close()
-	runs := make([]featuredelivery.GenerationRun, 0, limit)
+	runs := make([]delivery.GenerationRun, 0, limit)
 	for rows.Next() {
 		run, err := scanGenerationRun(rows)
 		if err != nil {
@@ -659,8 +663,8 @@ const generationRunSelect = `SELECT id,request_id,artifact_kind,parent_artifact_
 	requested_by,input_tokens,output_tokens,error_summary,started_at,ended_at
 	FROM feature_generation_runs`
 
-func scanGenerationRun(row rowScanner) (featuredelivery.GenerationRun, error) {
-	var run featuredelivery.GenerationRun
+func scanGenerationRun(row rowScanner) (delivery.GenerationRun, error) {
+	var run delivery.GenerationRun
 	var endedAt sql.NullTime
 	err := row.Scan(
 		&run.ID, &run.RequestID, &run.ArtifactKind, &run.ParentArtifactID,
@@ -694,13 +698,13 @@ func (store *FeatureDeliveryStore) InterruptGenerationRuns(ctx context.Context) 
 	return nil
 }
 
-func (store *FeatureDeliveryStore) GetOwnerIdentity(ctx context.Context, userID int64) (featuredelivery.OwnerIdentity, error) {
-	var identity featuredelivery.OwnerIdentity
+func (store *FeatureDeliveryStore) GetOwnerIdentity(ctx context.Context, userID int64) (delivery.OwnerIdentity, error) {
+	var identity delivery.OwnerIdentity
 	err := store.db.QueryRowContext(ctx,
 		`SELECT id,name,email FROM users WHERE id=? LIMIT 1`, userID,
 	).Scan(&identity.UserID, &identity.Name, &identity.Email)
 	if errors.Is(err, sql.ErrNoRows) {
-		return identity, featuredelivery.ErrNotFound
+		return identity, delivery.ErrNotFound
 	}
 	if err != nil {
 		return identity, fmt.Errorf("get owner identity %d: %w", userID, err)
@@ -708,13 +712,13 @@ func (store *FeatureDeliveryStore) GetOwnerIdentity(ctx context.Context, userID 
 	return identity, nil
 }
 
-func (store *FeatureDeliveryStore) GetUserWorkspace(ctx context.Context, userID int64) (*featuredelivery.UserWorkspace, error) {
+func (store *FeatureDeliveryStore) GetUserWorkspace(ctx context.Context, userID int64) (*delivery.UserWorkspace, error) {
 	workspace, err := scanUserWorkspace(store.db.QueryRowContext(ctx,
 		`SELECT user_id,username_key,username_snapshot,created_at
 		 FROM feature_user_workspaces WHERE user_id=? LIMIT 1`, userID,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get user workspace %d: %w", userID, err)
@@ -722,27 +726,27 @@ func (store *FeatureDeliveryStore) GetUserWorkspace(ctx context.Context, userID 
 	return &workspace, nil
 }
 
-func (store *FeatureDeliveryStore) CreateUserWorkspace(ctx context.Context, workspace featuredelivery.UserWorkspace) error {
+func (store *FeatureDeliveryStore) CreateUserWorkspace(ctx context.Context, workspace delivery.UserWorkspace) error {
 	_, err := store.db.ExecContext(ctx,
 		`INSERT INTO feature_user_workspaces(user_id,username_key,username_snapshot,created_at) VALUES(?,?,?,?)`,
 		workspace.UserID, workspace.UsernameKey, workspace.UsernameSnapshot, workspace.CreatedAt,
 	)
 	if err != nil {
 		if duplicateKey(err) {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 		return fmt.Errorf("create user workspace %d: %w", workspace.UserID, err)
 	}
 	return nil
 }
 
-func (store *FeatureDeliveryStore) GetUserWorkspaceByKey(ctx context.Context, key string) (*featuredelivery.UserWorkspace, error) {
+func (store *FeatureDeliveryStore) GetUserWorkspaceByKey(ctx context.Context, key string) (*delivery.UserWorkspace, error) {
 	workspace, err := scanUserWorkspace(store.db.QueryRowContext(ctx,
 		`SELECT user_id,username_key,username_snapshot,created_at
 		 FROM feature_user_workspaces WHERE username_key=? LIMIT 1`, key,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get user workspace key %q: %w", key, err)
@@ -750,13 +754,13 @@ func (store *FeatureDeliveryStore) GetUserWorkspaceByKey(ctx context.Context, ke
 	return &workspace, nil
 }
 
-func scanUserWorkspace(row rowScanner) (featuredelivery.UserWorkspace, error) {
-	var workspace featuredelivery.UserWorkspace
+func scanUserWorkspace(row rowScanner) (delivery.UserWorkspace, error) {
+	var workspace delivery.UserWorkspace
 	err := row.Scan(&workspace.UserID, &workspace.UsernameKey, &workspace.UsernameSnapshot, &workspace.CreatedAt)
 	return workspace, err
 }
 
-func (store *FeatureDeliveryStore) CreateImplementation(ctx context.Context, run featuredelivery.ImplementationRun) (*featuredelivery.ImplementationRun, bool, error) {
+func (store *FeatureDeliveryStore) CreateImplementation(ctx context.Context, run delivery.ImplementationRun) (*delivery.ImplementationRun, bool, error) {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("begin implementation creation: %w", err)
@@ -783,16 +787,16 @@ func (store *FeatureDeliveryStore) CreateImplementation(ctx context.Context, run
 		run.WorktreeCleanedAt, run.CleanupError, run.CreatedAt,
 	)
 	if err == nil {
-		designID, err := currentParentArtifactID(ctx, tx, run.RequestID, featuredelivery.KindImplementationPlan)
+		designID, err := currentParentArtifactID(ctx, tx, run.RequestID, delivery.KindImplementationPlan)
 		if err != nil {
 			return nil, false, err
 		}
-		planID, err := latestApprovedArtifactID(ctx, tx, run.RequestID, featuredelivery.KindImplementationPlan, designID)
+		planID, err := latestApprovedArtifactID(ctx, tx, run.RequestID, delivery.KindImplementationPlan, designID)
 		if err != nil {
 			return nil, false, err
 		}
 		if ownerID != run.WorkspaceUserID || designID != run.DesignArtifactID || planID != run.PlanArtifactID {
-			return nil, false, featuredelivery.ErrConflict
+			return nil, false, delivery.ErrConflict
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE feature_requests SET updated_at=CURRENT_TIMESTAMP WHERE id=?`, run.RequestID); err != nil {
 			return nil, false, err
@@ -813,18 +817,18 @@ func (store *FeatureDeliveryStore) CreateImplementation(ctx context.Context, run
 		return nil, false, getErr
 	}
 	if existing.RequestHash != run.RequestHash {
-		return nil, false, featuredelivery.ErrConflict
+		return nil, false, delivery.ErrConflict
 	}
 	return existing, false, nil
 }
 
-func (store *FeatureDeliveryStore) getImplementationByClientRequest(ctx context.Context, requestedBy int64, clientRequestID string) (*featuredelivery.ImplementationRun, error) {
+func (store *FeatureDeliveryStore) getImplementationByClientRequest(ctx context.Context, requestedBy int64, clientRequestID string) (*delivery.ImplementationRun, error) {
 	run, err := scanImplementation(store.db.QueryRowContext(ctx,
 		implementationSelect+` WHERE r.requested_by=? AND r.client_request_id=? LIMIT 1`,
 		requestedBy, clientRequestID,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get implementation by idempotency key: %w", err)
@@ -832,10 +836,10 @@ func (store *FeatureDeliveryStore) getImplementationByClientRequest(ctx context.
 	return &run, nil
 }
 
-func (store *FeatureDeliveryStore) GetImplementation(ctx context.Context, id string) (*featuredelivery.ImplementationRun, error) {
+func (store *FeatureDeliveryStore) GetImplementation(ctx context.Context, id string) (*delivery.ImplementationRun, error) {
 	run, err := scanImplementation(store.db.QueryRowContext(ctx, implementationSelect+` WHERE r.id=? LIMIT 1`, id))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get implementation %q: %w", id, err)
@@ -843,7 +847,7 @@ func (store *FeatureDeliveryStore) GetImplementation(ctx context.Context, id str
 	return &run, nil
 }
 
-func (store *FeatureDeliveryStore) ListImplementations(ctx context.Context, requestID string, cursor featuredelivery.RunCursor, limit int) ([]featuredelivery.ImplementationRun, error) {
+func (store *FeatureDeliveryStore) ListImplementations(ctx context.Context, requestID string, cursor delivery.RunCursor, limit int) ([]delivery.ImplementationRun, error) {
 	limit = boundedLimit(limit, 20, maxRunPage)
 	query := implementationSummarySelect + ` WHERE r.request_id=?`
 	args := []any{requestID}
@@ -858,7 +862,7 @@ func (store *FeatureDeliveryStore) ListImplementations(ctx context.Context, requ
 		return nil, fmt.Errorf("list implementations: %w", err)
 	}
 	defer rows.Close()
-	runs := make([]featuredelivery.ImplementationRun, 0, limit)
+	runs := make([]delivery.ImplementationRun, 0, limit)
 	for rows.Next() {
 		run, err := scanImplementationSummary(rows)
 		if err != nil {
@@ -878,10 +882,9 @@ const implementationSummarySelect = `SELECT
 	r.provider,r.model,r.provider_version,r.network_enabled,r.status,r.worker_id,r.lease_expires_at,
 	r.cancel_requested_at,r.provider_session_id,r.exit_code,r.error_summary,r.requested_by,
 	r.started_at,r.ended_at,r.retain_until,r.worktree_cleaned_at,r.cleanup_error,r.created_at,
-	v.run_id,v.subject_hash,v.review_round_id,v.gate_result_id,
-	v.decision,v.comment,v.reviewer,v.created_at
-	FROM feature_implementation_runs r
-	LEFT JOIN feature_change_reviews v ON v.run_id=r.id`
+	r.review_subject_hash,r.review_round_id,r.review_gate_result_id,
+	r.review_decision,r.review_comment,r.review_reviewer,r.review_created_at
+	FROM feature_implementation_runs r`
 
 const implementationSelect = `SELECT
 	r.id,r.request_id,r.client_request_id,r.request_hash,r.design_artifact_id,r.plan_artifact_id,
@@ -889,23 +892,22 @@ const implementationSelect = `SELECT
 	r.provider,r.model,r.provider_version,r.network_enabled,r.status,r.worker_id,r.lease_expires_at,
 	r.cancel_requested_at,r.provider_session_id,r.exit_code,r.error_summary,r.requested_by,
 	r.started_at,r.ended_at,r.retain_until,r.worktree_cleaned_at,r.cleanup_error,r.created_at,
-	c.run_id,c.worktree_head,c.patch_rel_path,c.patch_sha256,c.patch_bytes,c.files_changed,
-	c.additions,c.deletions,c.files_json,c.plan_deviations_json,c.validation_results_json,c.provider_summary,c.created_at,
-	v.run_id,v.subject_hash,v.review_round_id,v.gate_result_id,
-	v.decision,v.comment,v.reviewer,v.created_at
-	FROM feature_implementation_runs r
-	LEFT JOIN feature_change_sets c ON c.run_id=r.id
-	LEFT JOIN feature_change_reviews v ON v.run_id=r.id`
+	r.worktree_head,r.patch_rel_path,r.patch_sha256,r.patch_bytes,r.files_changed,
+	r.additions,r.deletions,r.files_json,r.plan_deviations_json,r.validation_results_json,
+	r.provider_summary,r.change_set_created_at,
+	r.review_subject_hash,r.review_round_id,r.review_gate_result_id,
+	r.review_decision,r.review_comment,r.review_reviewer,r.review_created_at
+	FROM feature_implementation_runs r`
 
-func scanImplementation(row rowScanner) (featuredelivery.ImplementationRun, error) {
-	var run featuredelivery.ImplementationRun
+func scanImplementation(row rowScanner) (delivery.ImplementationRun, error) {
+	var run delivery.ImplementationRun
 	var lease, cancel, started, ended, retain, cleaned sql.NullTime
 	var exitCode sql.NullInt64
-	var changeRunID, worktreeHead, patchPath, patchHash, filesJSON, deviationsJSON, validationsJSON, providerSummary sql.NullString
+	var worktreeHead, patchPath, patchHash, filesJSON, deviationsJSON, validationsJSON, providerSummary sql.NullString
 	var patchBytes sql.NullInt64
 	var filesChanged, additions, deletions sql.NullInt64
 	var changeCreated sql.NullTime
-	var reviewRunID, reviewSubjectHash, reviewRoundID, reviewGateResultID, reviewDecision, reviewComment sql.NullString
+	var reviewSubjectHash, reviewRoundID, reviewGateResultID, reviewDecision, reviewComment sql.NullString
 	var reviewer sql.NullInt64
 	var reviewCreated sql.NullTime
 	err := row.Scan(
@@ -916,10 +918,10 @@ func scanImplementation(row rowScanner) (featuredelivery.ImplementationRun, erro
 		&run.Status, &run.WorkerID, &lease, &cancel, &run.ProviderSessionID,
 		&exitCode, &run.ErrorSummary, &run.RequestedBy, &started, &ended, &retain,
 		&cleaned, &run.CleanupError, &run.CreatedAt,
-		&changeRunID, &worktreeHead, &patchPath, &patchHash, &patchBytes,
+		&worktreeHead, &patchPath, &patchHash, &patchBytes,
 		&filesChanged, &additions, &deletions, &filesJSON, &deviationsJSON, &validationsJSON,
 		&providerSummary, &changeCreated,
-		&reviewRunID, &reviewSubjectHash, &reviewRoundID, &reviewGateResultID,
+		&reviewSubjectHash, &reviewRoundID, &reviewGateResultID,
 		&reviewDecision, &reviewComment, &reviewer, &reviewCreated,
 	)
 	if err != nil {
@@ -935,9 +937,9 @@ func scanImplementation(row rowScanner) (featuredelivery.ImplementationRun, erro
 		value := int(exitCode.Int64)
 		run.ExitCode = &value
 	}
-	if changeRunID.Valid {
-		change := &featuredelivery.ChangeSet{
-			RunID:           changeRunID.String,
+	if changeCreated.Valid {
+		change := &delivery.ChangeSet{
+			RunID:           run.ID,
 			WorktreeHead:    worktreeHead.String,
 			PatchRelPath:    patchPath.String,
 			PatchSHA256:     patchHash.String,
@@ -959,23 +961,26 @@ func scanImplementation(row rowScanner) (featuredelivery.ImplementationRun, erro
 		}
 		run.ChangeSet = change
 	}
-	if reviewRunID.Valid {
-		run.Review = &featuredelivery.ChangeReview{
-			RunID:     reviewRunID.String,
-			Decision:  featuredelivery.ReviewDecision(reviewDecision.String),
-			Comment:   reviewComment.String,
-			Reviewer:  reviewer.Int64,
-			CreatedAt: reviewCreated.Time,
+	if reviewSubjectHash.Valid {
+		run.Review = &delivery.ChangeReview{
+			RunID:         run.ID,
+			SubjectHash:   reviewSubjectHash.String,
+			ReviewRoundID: reviewRoundID.String,
+			GateResultID:  reviewGateResultID.String,
+			Decision:      delivery.ReviewDecision(reviewDecision.String),
+			Comment:       reviewComment.String,
+			Reviewer:      reviewer.Int64,
+			CreatedAt:     reviewCreated.Time,
 		}
 	}
 	return run, nil
 }
 
-func scanImplementationSummary(row rowScanner) (featuredelivery.ImplementationRun, error) {
-	var run featuredelivery.ImplementationRun
+func scanImplementationSummary(row rowScanner) (delivery.ImplementationRun, error) {
+	var run delivery.ImplementationRun
 	var lease, cancel, started, ended, retain, cleaned sql.NullTime
 	var exitCode sql.NullInt64
-	var reviewRunID, reviewSubjectHash, reviewRoundID, reviewGateResultID, reviewDecision, reviewComment sql.NullString
+	var reviewSubjectHash, reviewRoundID, reviewGateResultID, reviewDecision, reviewComment sql.NullString
 	var reviewer sql.NullInt64
 	var reviewCreated sql.NullTime
 	err := row.Scan(
@@ -986,7 +991,7 @@ func scanImplementationSummary(row rowScanner) (featuredelivery.ImplementationRu
 		&run.Status, &run.WorkerID, &lease, &cancel, &run.ProviderSessionID,
 		&exitCode, &run.ErrorSummary, &run.RequestedBy, &started, &ended, &retain,
 		&cleaned, &run.CleanupError, &run.CreatedAt,
-		&reviewRunID, &reviewSubjectHash, &reviewRoundID, &reviewGateResultID,
+		&reviewSubjectHash, &reviewRoundID, &reviewGateResultID,
 		&reviewDecision, &reviewComment, &reviewer, &reviewCreated,
 	)
 	if err != nil {
@@ -1002,13 +1007,13 @@ func scanImplementationSummary(row rowScanner) (featuredelivery.ImplementationRu
 		value := int(exitCode.Int64)
 		run.ExitCode = &value
 	}
-	if reviewRunID.Valid {
-		run.Review = &featuredelivery.ChangeReview{
-			RunID:         reviewRunID.String,
+	if reviewSubjectHash.Valid {
+		run.Review = &delivery.ChangeReview{
+			RunID:         run.ID,
 			SubjectHash:   reviewSubjectHash.String,
 			ReviewRoundID: reviewRoundID.String,
 			GateResultID:  reviewGateResultID.String,
-			Decision:      featuredelivery.ReviewDecision(reviewDecision.String),
+			Decision:      delivery.ReviewDecision(reviewDecision.String),
 			Comment:       reviewComment.String,
 			Reviewer:      reviewer.Int64,
 			CreatedAt:     reviewCreated.Time,
@@ -1017,7 +1022,7 @@ func scanImplementationSummary(row rowScanner) (featuredelivery.ImplementationRu
 	return run, nil
 }
 
-func (store *FeatureDeliveryStore) ClaimNextImplementation(ctx context.Context, workerID string, leaseExpiresAt time.Time) (*featuredelivery.ImplementationRun, error) {
+func (store *FeatureDeliveryStore) ClaimNextImplementation(ctx context.Context, workerID string, leaseExpiresAt time.Time) (*delivery.ImplementationRun, error) {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin implementation claim: %w", err)
@@ -1029,7 +1034,7 @@ func (store *FeatureDeliveryStore) ClaimNextImplementation(ctx context.Context, 
 		 WHERE status='queued' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("select implementation claim: %w", err)
@@ -1052,16 +1057,16 @@ func (store *FeatureDeliveryStore) ClaimNextImplementation(ctx context.Context, 
 	return store.GetImplementation(ctx, id)
 }
 
-func (store *FeatureDeliveryStore) TransitionImplementation(ctx context.Context, id, workerID string, from, to featuredelivery.RunStatus, update featuredelivery.RunUpdate) error {
-	if !featuredelivery.CanTransitionRun(from, to) {
-		return fmt.Errorf("implementation transition from %s to %s is not allowed: %w", from, to, featuredelivery.ErrInvalid)
+func (store *FeatureDeliveryStore) TransitionImplementation(ctx context.Context, id, workerID string, from, to delivery.RunStatus, update delivery.RunUpdate) error {
+	if !delivery.CanTransitionRun(from, to) {
+		return fmt.Errorf("implementation transition from %s to %s is not allowed: %w", from, to, delivery.ErrInvalid)
 	}
-	if featuredelivery.IsTerminalRun(to) && (update.RetainUntil == nil || update.RetainUntil.IsZero()) {
-		return fmt.Errorf("terminal implementation transition requires retain_until: %w", featuredelivery.ErrInvalid)
+	if delivery.IsTerminalRun(to) && (update.RetainUntil == nil || update.RetainUntil.IsZero()) {
+		return fmt.Errorf("terminal implementation transition requires retain_until: %w", delivery.ErrInvalid)
 	}
 	query := `UPDATE feature_implementation_runs SET status=?,provider_version=?,provider_session_id=?,exit_code=?,error_summary=?`
 	args := []any{to, update.ProviderVersion, update.ProviderSessionID, update.ExitCode, update.ErrorSummary}
-	if featuredelivery.IsTerminalRun(to) {
+	if delivery.IsTerminalRun(to) {
 		query += `,ended_at=CURRENT_TIMESTAMP,retain_until=?,lease_expires_at=NULL`
 		args = append(args, update.RetainUntil)
 	}
@@ -1076,7 +1081,7 @@ func (store *FeatureDeliveryStore) TransitionImplementation(ctx context.Context,
 		return fmt.Errorf("transition implementation %q from %s to %s: %w", id, from, to, err)
 	}
 	if err := requireAffected(result); err != nil {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	return nil
 }
@@ -1107,22 +1112,22 @@ func (store *FeatureDeliveryStore) RenewImplementationLease(ctx context.Context,
 	return true, cancelRequested, nil
 }
 
-func (store *FeatureDeliveryStore) RequestCancel(ctx context.Context, id string) (featuredelivery.RunStatus, error) {
+func (store *FeatureDeliveryStore) RequestCancel(ctx context.Context, id string) (delivery.RunStatus, error) {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("begin cancellation: %w", err)
 	}
 	defer tx.Rollback()
-	var status featuredelivery.RunStatus
+	var status delivery.RunStatus
 	if err := tx.QueryRowContext(ctx,
 		`SELECT status FROM feature_implementation_runs WHERE id=? LIMIT 1 FOR UPDATE`, id,
 	).Scan(&status); errors.Is(err, sql.ErrNoRows) {
-		return "", featuredelivery.ErrNotFound
+		return "", delivery.ErrNotFound
 	} else if err != nil {
 		return "", fmt.Errorf("lock cancellation run %q: %w", id, err)
 	}
 	switch status {
-	case featuredelivery.RunQueued:
+	case delivery.RunQueued:
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE feature_implementation_runs
 			 SET status='cancelled',cancel_requested_at=CURRENT_TIMESTAMP,ended_at=CURRENT_TIMESTAMP
@@ -1130,8 +1135,8 @@ func (store *FeatureDeliveryStore) RequestCancel(ctx context.Context, id string)
 		); err != nil {
 			return "", fmt.Errorf("cancel queued run %q: %w", id, err)
 		}
-		status = featuredelivery.RunCancelled
-	case featuredelivery.RunPreparing, featuredelivery.RunRunning, featuredelivery.RunValidating:
+		status = delivery.RunCancelled
+	case delivery.RunPreparing, delivery.RunRunning, delivery.RunValidating:
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE feature_implementation_runs SET cancel_requested_at=COALESCE(cancel_requested_at,CURRENT_TIMESTAMP)
 			 WHERE id=?`, id,
@@ -1139,7 +1144,7 @@ func (store *FeatureDeliveryStore) RequestCancel(ctx context.Context, id string)
 			return "", fmt.Errorf("request cancellation %q: %w", id, err)
 		}
 	default:
-		return status, featuredelivery.ErrConflict
+		return status, delivery.ErrConflict
 	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit cancellation %q: %w", id, err)
@@ -1194,15 +1199,15 @@ func (store *FeatureDeliveryStore) InterruptActiveImplementations(ctx context.Co
 	return interrupted, nil
 }
 
-func (store *FeatureDeliveryStore) AppendRunEvent(ctx context.Context, event featuredelivery.RunEvent) (*featuredelivery.RunEvent, error) {
-	events, err := store.AppendRunEvents(ctx, []featuredelivery.RunEvent{event})
+func (store *FeatureDeliveryStore) AppendRunEvent(ctx context.Context, event delivery.RunEvent) (*delivery.RunEvent, error) {
+	events, err := store.AppendRunEvents(ctx, []delivery.RunEvent{event})
 	if err != nil {
 		return nil, err
 	}
 	return &events[0], nil
 }
 
-func (store *FeatureDeliveryStore) AppendRunEvents(ctx context.Context, events []featuredelivery.RunEvent) ([]featuredelivery.RunEvent, error) {
+func (store *FeatureDeliveryStore) AppendRunEvents(ctx context.Context, events []delivery.RunEvent) ([]delivery.RunEvent, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
@@ -1225,22 +1230,24 @@ func (store *FeatureDeliveryStore) AppendRunEvents(ctx context.Context, events [
 	}
 	var nextSeq int64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(seq),0)+1 FROM feature_run_events WHERE run_id=?`,
+		`SELECT COALESCE(MAX(seq),0)+1 FROM runtime_events
+		 WHERE stream_kind='feature_implementation' AND stream_id=?`,
 		runID,
 	).Scan(&nextSeq); err != nil {
 		return nil, fmt.Errorf("allocate event sequence: %w", err)
 	}
 	var query strings.Builder
-	query.WriteString(`INSERT INTO feature_run_events(run_id,seq,kind,summary,detail_json,created_at) VALUES`)
-	args := make([]any, 0, len(events)*6)
+	query.WriteString(`INSERT INTO runtime_events(
+		stream_kind,stream_id,seq,kind,node_id,summary,detail_json,created_at) VALUES`)
+	args := make([]any, 0, len(events)*7)
 	for index := range events {
 		if index > 0 {
 			query.WriteByte(',')
 		}
-		query.WriteString("(?,?,?,?,?,?)")
+		query.WriteString("('feature_implementation',?,?,?,?,?,?,?)")
 		events[index].Seq = nextSeq + int64(index)
 		event := events[index]
-		args = append(args, event.RunID, event.Seq, event.Kind, event.Summary, nullableJSON(event.Detail), event.CreatedAt)
+		args = append(args, event.RunID, event.Seq, event.Kind, "", event.Summary, nullableJSON(event.Detail), event.CreatedAt)
 	}
 	if _, err := tx.ExecContext(ctx, query.String(), args...); err != nil {
 		return nil, fmt.Errorf("insert %d events for run %q: %w", len(events), runID, err)
@@ -1251,20 +1258,22 @@ func (store *FeatureDeliveryStore) AppendRunEvents(ctx context.Context, events [
 	return events, nil
 }
 
-func (store *FeatureDeliveryStore) ListRunEvents(ctx context.Context, runID string, afterSeq int64, limit int) ([]featuredelivery.RunEvent, error) {
+func (store *FeatureDeliveryStore) ListRunEvents(ctx context.Context, runID string, afterSeq int64, limit int) ([]delivery.RunEvent, error) {
 	limit = boundedLimit(limit, 100, maxEventPage)
 	rows, err := store.db.QueryContext(ctx,
-		`SELECT run_id,seq,kind,summary,detail_json,created_at
-		 FROM feature_run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?`,
+		`SELECT stream_id,seq,kind,summary,detail_json,created_at
+		 FROM runtime_events
+		 WHERE stream_kind='feature_implementation' AND stream_id=? AND seq>?
+		 ORDER BY seq LIMIT ?`,
 		runID, afterSeq, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list events for run %q: %w", runID, err)
 	}
 	defer rows.Close()
-	events := make([]featuredelivery.RunEvent, 0, limit)
+	events := make([]delivery.RunEvent, 0, limit)
 	for rows.Next() {
-		var event featuredelivery.RunEvent
+		var event delivery.RunEvent
 		var detail []byte
 		if err := rows.Scan(&event.RunID, &event.Seq, &event.Kind, &event.Summary, &detail, &event.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan run event: %w", err)
@@ -1278,13 +1287,13 @@ func (store *FeatureDeliveryStore) ListRunEvents(ctx context.Context, runID stri
 	return events, nil
 }
 
-func (store *FeatureDeliveryStore) SaveChangeSetAndFinish(ctx context.Context, change featuredelivery.ChangeSet, terminalStatus featuredelivery.RunStatus, errorSummary string, retainUntil time.Time) error {
-	if !featuredelivery.CanTransitionRun(featuredelivery.RunValidating, terminalStatus) ||
-		(terminalStatus != featuredelivery.RunSucceeded && terminalStatus != featuredelivery.RunFailed) {
-		return fmt.Errorf("change set terminal status must be succeeded or failed: %w", featuredelivery.ErrInvalid)
+func (store *FeatureDeliveryStore) SaveChangeSetAndFinish(ctx context.Context, change delivery.ChangeSet, terminalStatus delivery.RunStatus, errorSummary string, retainUntil time.Time) error {
+	if !delivery.CanTransitionRun(delivery.RunValidating, terminalStatus) ||
+		(terminalStatus != delivery.RunSucceeded && terminalStatus != delivery.RunFailed) {
+		return fmt.Errorf("change set terminal status must be succeeded or failed: %w", delivery.ErrInvalid)
 	}
 	if retainUntil.IsZero() {
-		return fmt.Errorf("change set completion requires retain_until: %w", featuredelivery.ErrInvalid)
+		return fmt.Errorf("change set completion requires retain_until: %w", delivery.ErrInvalid)
 	}
 	filesJSON, err := json.Marshal(change.Files)
 	if err != nil {
@@ -1306,30 +1315,25 @@ func (store *FeatureDeliveryStore) SaveChangeSetAndFinish(ctx context.Context, c
 	if err := lockImplementation(ctx, tx, change.RunID); err != nil {
 		return err
 	}
-	var currentStatus featuredelivery.RunStatus
+	var currentStatus delivery.RunStatus
 	if err := tx.QueryRowContext(ctx,
 		`SELECT status FROM feature_implementation_runs WHERE id=? LIMIT 1`, change.RunID,
 	).Scan(&currentStatus); err != nil {
 		return fmt.Errorf("read run status for change set: %w", err)
 	}
-	if currentStatus != featuredelivery.RunValidating {
-		return featuredelivery.ErrConflict
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO feature_change_sets(
-			run_id,worktree_head,patch_rel_path,patch_sha256,patch_bytes,files_changed,
-			additions,deletions,files_json,plan_deviations_json,validation_results_json,provider_summary,created_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		change.RunID, change.WorktreeHead, change.PatchRelPath, change.PatchSHA256,
-		change.PatchBytes, change.FilesChanged, change.Additions, change.Deletions,
-		filesJSON, deviationsJSON, validationsJSON, change.ProviderSummary, change.CreatedAt,
-	); err != nil {
-		return fmt.Errorf("insert change set for run %q: %w", change.RunID, err)
+	if currentStatus != delivery.RunValidating {
+		return delivery.ErrConflict
 	}
 	result, err := tx.ExecContext(ctx,
 		`UPDATE feature_implementation_runs
-			 SET status=?,error_summary=?,ended_at=CURRENT_TIMESTAMP,retain_until=?,lease_expires_at=NULL
+			 SET worktree_head=?,patch_rel_path=?,patch_sha256=?,patch_bytes=?,files_changed=?,
+			     additions=?,deletions=?,files_json=?,plan_deviations_json=?,
+			     validation_results_json=?,provider_summary=?,change_set_created_at=?,
+			     status=?,error_summary=?,ended_at=CURRENT_TIMESTAMP,retain_until=?,lease_expires_at=NULL
 			 WHERE id=? AND status='validating'`,
+		change.WorktreeHead, change.PatchRelPath, change.PatchSHA256, change.PatchBytes,
+		change.FilesChanged, change.Additions, change.Deletions, filesJSON, deviationsJSON,
+		validationsJSON, change.ProviderSummary, change.CreatedAt,
 		terminalStatus, errorSummary, retainUntil, change.RunID,
 	)
 	if err != nil {
@@ -1340,7 +1344,7 @@ func (store *FeatureDeliveryStore) SaveChangeSetAndFinish(ctx context.Context, c
 		return fmt.Errorf("read completed implementation rows affected: %w", err)
 	}
 	if affected != 1 {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit change set: %w", err)
@@ -1348,54 +1352,60 @@ func (store *FeatureDeliveryStore) SaveChangeSetAndFinish(ctx context.Context, c
 	return nil
 }
 
-func (store *FeatureDeliveryStore) GetChangeSet(ctx context.Context, runID string) (*featuredelivery.ChangeSet, error) {
+func (store *FeatureDeliveryStore) GetChangeSet(ctx context.Context, runID string) (*delivery.ChangeSet, error) {
 	run, err := store.GetImplementation(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
 	if run.ChangeSet == nil {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	return run.ChangeSet, nil
 }
 
-func (store *FeatureDeliveryStore) ReviewChangeSet(ctx context.Context, review featuredelivery.ChangeReview) error {
+func (store *FeatureDeliveryStore) ReviewChangeSet(ctx context.Context, review delivery.ChangeReview) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin change review: %w", err)
 	}
 	defer tx.Rollback()
 	var requestID string
-	var status featuredelivery.RunStatus
+	var status delivery.RunStatus
 	if err := tx.QueryRowContext(ctx,
 		`SELECT request_id,status FROM feature_implementation_runs WHERE id=? LIMIT 1 FOR UPDATE`,
 		review.RunID,
 	).Scan(&requestID, &status); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("lock reviewed change set %q: %w", review.RunID, err)
 	}
-	if status != featuredelivery.RunSucceeded {
-		return featuredelivery.ErrConflict
+	if status != delivery.RunSucceeded {
+		return delivery.ErrConflict
 	}
 	var repository, baseCommit, headCommit, patchHash, providerSummary string
 	var filesJSON, deviationsJSON, validationsJSON []byte
+	var existingSubjectHash, existingReviewRoundID, existingGateResultID, existingDecision, existingComment sql.NullString
+	var existingReviewer sql.NullInt64
+	var existingReviewedAt sql.NullTime
 	if err := tx.QueryRowContext(ctx,
-		`SELECT r.repo,r.base_commit,c.worktree_head,c.patch_sha256,
-			c.files_json,c.plan_deviations_json,c.validation_results_json,c.provider_summary
-		 FROM feature_implementation_runs r
-		 JOIN feature_change_sets c ON c.run_id=r.id
-		 WHERE r.id=? LIMIT 1 FOR UPDATE`,
+		`SELECT repo,base_commit,worktree_head,patch_sha256,
+			files_json,plan_deviations_json,validation_results_json,provider_summary,
+			review_subject_hash,review_round_id,review_gate_result_id,review_decision,
+			review_comment,review_reviewer,review_created_at
+		 FROM feature_implementation_runs
+		 WHERE id=? AND change_set_created_at IS NOT NULL LIMIT 1 FOR UPDATE`,
 		review.RunID,
 	).Scan(
 		&repository, &baseCommit, &headCommit, &patchHash,
 		&filesJSON, &deviationsJSON, &validationsJSON, &providerSummary,
+		&existingSubjectHash, &existingReviewRoundID, &existingGateResultID,
+		&existingDecision, &existingComment, &existingReviewer, &existingReviewedAt,
 	); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	} else if err != nil {
 		return fmt.Errorf("lock change set %q: %w", review.RunID, err)
 	}
-	var change featuredelivery.ChangeSet
+	var change delivery.ChangeSet
 	change.RunID = review.RunID
 	change.WorktreeHead = headCommit
 	change.PatchSHA256 = patchHash
@@ -1409,29 +1419,34 @@ func (store *FeatureDeliveryStore) ReviewChangeSet(ctx context.Context, review f
 	if err := json.Unmarshal(validationsJSON, &change.ValidationResults); err != nil {
 		return fmt.Errorf("decode validations for review %q: %w", review.RunID, err)
 	}
-	subject, err := featuredelivery.BuildChangeSetReviewSubject(featuredelivery.ImplementationRun{
+	subject, err := delivery.BuildChangeSetReviewSubject(delivery.ImplementationRun{
 		ID: review.RunID, Repo: repository, BaseCommit: baseCommit, ChangeSet: &change,
 	})
 	if err != nil {
 		return err
 	}
 	if review.SubjectHash != subject.ContentHash {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	if review.ReviewRoundID == "" || review.GateResultID == "" {
-		return featuredelivery.ErrInvalid
+		return delivery.ErrInvalid
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO feature_change_reviews(
-			run_id,subject_hash,review_round_id,gate_result_id,decision,comment,reviewer,created_at
-		 ) VALUES(?,?,?,?,?,?,?,?)`,
-		review.RunID, review.SubjectHash, review.ReviewRoundID, review.GateResultID,
-		review.Decision, review.Comment, review.Reviewer, review.CreatedAt,
-	); err != nil {
-		if duplicateKey(err) {
-			return featuredelivery.ErrConflict
-		}
+	if existingSubjectHash.Valid {
+		return delivery.ErrConflict
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE feature_implementation_runs
+		 SET review_subject_hash=?,review_round_id=?,review_gate_result_id=?,review_decision=?,
+		     review_comment=?,review_reviewer=?,review_created_at=?
+		 WHERE id=? AND review_subject_hash IS NULL`,
+		review.SubjectHash, review.ReviewRoundID, review.GateResultID, review.Decision,
+		review.Comment, review.Reviewer, review.CreatedAt, review.RunID,
+	)
+	if err != nil {
 		return fmt.Errorf("review change set %q: %w", review.RunID, err)
+	}
+	if err := requireAffected(result); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE feature_requests SET updated_at=CURRENT_TIMESTAMP WHERE id=?`, requestID); err != nil {
 		return fmt.Errorf("touch feature after change review: %w", err)
@@ -1442,7 +1457,7 @@ func (store *FeatureDeliveryStore) ReviewChangeSet(ctx context.Context, review f
 	return nil
 }
 
-func (store *FeatureDeliveryStore) ListExpiredWorktrees(ctx context.Context, now time.Time, limit int) ([]featuredelivery.ImplementationRun, error) {
+func (store *FeatureDeliveryStore) ListExpiredWorktrees(ctx context.Context, now time.Time, limit int) ([]delivery.ImplementationRun, error) {
 	limit = boundedLimit(limit, 20, maxRunPage)
 	rows, err := store.db.QueryContext(ctx,
 		implementationSelect+`
@@ -1456,7 +1471,7 @@ func (store *FeatureDeliveryStore) ListExpiredWorktrees(ctx context.Context, now
 		return nil, fmt.Errorf("list expired worktrees: %w", err)
 	}
 	defer rows.Close()
-	runs := make([]featuredelivery.ImplementationRun, 0, limit)
+	runs := make([]delivery.ImplementationRun, 0, limit)
 	for rows.Next() {
 		run, err := scanImplementation(rows)
 		if err != nil {
@@ -1489,7 +1504,7 @@ func lockFeature(ctx context.Context, tx *sql.Tx, id string) error {
 	var locked string
 	err := tx.QueryRowContext(ctx, `SELECT id FROM feature_requests WHERE id=? LIMIT 1 FOR UPDATE`, id).Scan(&locked)
 	if errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("lock feature %q: %w", id, err)
@@ -1504,13 +1519,13 @@ func lockMutableFeature(ctx context.Context, tx *sql.Tx, id string) (int64, erro
 		`SELECT created_by,archived_at FROM feature_requests WHERE id=? LIMIT 1 FOR UPDATE`, id,
 	).Scan(&ownerID, &archivedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, featuredelivery.ErrNotFound
+		return 0, delivery.ErrNotFound
 	}
 	if err != nil {
 		return 0, fmt.Errorf("lock mutable feature %q: %w", id, err)
 	}
 	if archivedAt.Valid {
-		return 0, featuredelivery.ErrConflict
+		return 0, delivery.ErrConflict
 	}
 	return ownerID, nil
 }
@@ -1519,22 +1534,22 @@ type artifactQuerier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func currentParentArtifactID(ctx context.Context, query artifactQuerier, requestID string, kind featuredelivery.ArtifactKind) (string, error) {
+func currentParentArtifactID(ctx context.Context, query artifactQuerier, requestID string, kind delivery.ArtifactKind) (string, error) {
 	var parentID string
 	if err := query.QueryRowContext(ctx,
 		`SELECT id FROM feature_artifacts
 		 WHERE request_id=? AND kind=? ORDER BY version DESC LIMIT 1`,
-		requestID, featuredelivery.KindRequirement,
+		requestID, delivery.KindRequirement,
 	).Scan(&parentID); errors.Is(err, sql.ErrNoRows) {
-		return "", featuredelivery.ErrConflict
+		return "", delivery.ErrConflict
 	} else if err != nil {
 		return "", fmt.Errorf("read current requirement: %w", err)
 	}
-	for _, childKind := range []featuredelivery.ArtifactKind{
-		featuredelivery.KindRequirementAnalysis,
-		featuredelivery.KindTechnicalProposal,
-		featuredelivery.KindSystemDesign,
-		featuredelivery.KindImplementationPlan,
+	for _, childKind := range []delivery.ArtifactKind{
+		delivery.KindRequirementAnalysis,
+		delivery.KindTechnicalProposal,
+		delivery.KindSystemDesign,
+		delivery.KindImplementationPlan,
 	} {
 		if childKind == kind {
 			return parentID, nil
@@ -1545,20 +1560,20 @@ func currentParentArtifactID(ctx context.Context, query artifactQuerier, request
 		}
 		parentID = childID
 	}
-	return "", featuredelivery.ErrConflict
+	return "", delivery.ErrConflict
 }
 
-func latestApprovedArtifactID(ctx context.Context, query artifactQuerier, requestID string, kind featuredelivery.ArtifactKind, parentID string) (string, error) {
+func latestApprovedArtifactID(ctx context.Context, query artifactQuerier, requestID string, kind delivery.ArtifactKind, parentID string) (string, error) {
 	var id string
 	err := query.QueryRowContext(ctx,
 		`SELECT a.id FROM feature_artifacts a
-		 JOIN feature_artifact_reviews r ON r.artifact_id=a.id AND r.decision='approved'
 		 WHERE a.request_id=? AND a.kind=? AND a.parent_artifact_id=?
+		   AND a.review_decision='approved'
 		 ORDER BY a.version DESC LIMIT 1`,
 		requestID, kind, parentID,
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", featuredelivery.ErrConflict
+		return "", delivery.ErrConflict
 	}
 	if err != nil {
 		return "", fmt.Errorf("read current approved %s: %w", kind, err)
@@ -1572,7 +1587,7 @@ func lockImplementation(ctx context.Context, tx *sql.Tx, id string) error {
 		`SELECT id FROM feature_implementation_runs WHERE id=? LIMIT 1 FOR UPDATE`, id,
 	).Scan(&locked)
 	if errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("lock implementation %q: %w", id, err)
@@ -1610,7 +1625,7 @@ func requireAffected(result sql.Result) error {
 		return fmt.Errorf("read affected rows: %w", err)
 	}
 	if affected == 0 {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	}
 	return nil
 }

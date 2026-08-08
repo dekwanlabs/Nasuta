@@ -7,28 +7,28 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
-	"github.com/dekwanlabs/nasuta/internal/featurepipeline"
-	"github.com/dekwanlabs/nasuta/internal/featurereviewworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/pipeline"
+	"github.com/dekwanlabs/nasuta/internal/feature/reviewworkflow"
 	"github.com/dekwanlabs/nasuta/platform/config"
 )
 
 type appReviewStore struct {
-	featuredelivery.Store
-	policies    []featuredelivery.ReviewPolicy
-	round       *featuredelivery.ReviewRound
-	assignments []featuredelivery.ReviewAssignment
+	delivery.Store
+	policies    []delivery.ReviewPolicy
+	round       *delivery.ReviewRound
+	assignments []delivery.ReviewAssignment
 }
 
 type appAgentRuntimeFunc func(context.Context, agentapi.RunRequest) (agentapi.RunResult, error)
 
 func (store *appReviewStore) SaveReviewPolicies(
 	_ context.Context,
-	policies []featuredelivery.ReviewPolicy,
+	policies []delivery.ReviewPolicy,
 ) error {
-	store.policies = append([]featuredelivery.ReviewPolicy(nil), policies...)
+	store.policies = append([]delivery.ReviewPolicy(nil), policies...)
 	return nil
 }
 
@@ -36,22 +36,22 @@ func (store *appReviewStore) GetReviewPolicy(
 	_ context.Context,
 	id string,
 	version int64,
-) (*featuredelivery.ReviewPolicy, error) {
+) (*delivery.ReviewPolicy, error) {
 	for index := range store.policies {
 		if store.policies[index].ID == id && store.policies[index].Version == version {
 			policy := store.policies[index]
 			return &policy, nil
 		}
 	}
-	return nil, featuredelivery.ErrNotFound
+	return nil, delivery.ErrNotFound
 }
 
 func (store *appReviewStore) GetReviewRound(
 	_ context.Context,
 	id string,
-) (*featuredelivery.ReviewRound, error) {
+) (*delivery.ReviewRound, error) {
 	if store.round == nil || store.round.ID != id {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	round := *store.round
 	return &round, nil
@@ -60,13 +60,13 @@ func (store *appReviewStore) GetReviewRound(
 func (store *appReviewStore) ListReviewAssignments(
 	_ context.Context,
 	roundID string,
-	_ featuredelivery.ReviewAssignmentCursor,
+	_ delivery.ReviewAssignmentCursor,
 	_ int,
-) ([]featuredelivery.ReviewAssignment, error) {
+) ([]delivery.ReviewAssignment, error) {
 	if store.round == nil || store.round.ID != roundID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
-	return append([]featuredelivery.ReviewAssignment(nil), store.assignments...), nil
+	return append([]delivery.ReviewAssignment(nil), store.assignments...), nil
 }
 
 func (run appAgentRuntimeFunc) Run(
@@ -87,7 +87,7 @@ func TestFeatureGenerationUsesLargestConfiguredAnswerBudget(t *testing.T) {
 
 func TestFeatureDeliveryStatusReportsCodingInitializationFailure(t *testing.T) {
 	runtime := featureDeliveryRuntime{
-		service:      featuredelivery.NewService(nil, nil, 0),
+		service:      delivery.NewService(nil, nil, 0),
 		codingReason: "workspace_unavailable",
 	}
 
@@ -100,7 +100,7 @@ func TestFeatureDeliveryStatusReportsCodingInitializationFailure(t *testing.T) {
 func TestFeatureReviewRuntimeRejectsConfiguredLLMWithoutRuntime(t *testing.T) {
 	platform := &Platform{
 		featureDelivery: featureDeliveryRuntime{
-			service: featuredelivery.NewService(&appReviewStore{}, nil, 0),
+			service: delivery.NewService(&appReviewStore{}, nil, 0),
 		},
 	}
 	if err := platform.configureFeatureReviewRuntime(enabledAgentSettings(), nil, nil); err == nil {
@@ -115,10 +115,10 @@ func TestFeatureReviewStartupUsesPublishedPositiveDefinitionVersion(t *testing.T
 		t.Fatal(err)
 	}
 	schemas := agentapi.NewSchemaRegistry()
-	if err := schemas.Publish(agentcatalog.DefaultSchemas()); err != nil {
+	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
 		t.Fatal(err)
 	}
-	catalog := agentcatalog.New(schemas)
+	catalog := catalog.New(schemas)
 	if err := catalog.Publish(definitions); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestFeatureReviewStartupUsesPublishedPositiveDefinitionVersion(t *testing.T
 
 func TestFeatureReviewRuntimeClearsRunnerWhenLLMIsDisabled(t *testing.T) {
 	store := &appReviewStore{}
-	service := featuredelivery.NewService(store, nil, 0)
+	service := delivery.NewService(store, nil, 0)
 	platform := reviewWorkflowTestPlatform(t, service)
 	runtime := appAgentRuntimeFunc(func(
 		context.Context,
@@ -175,31 +175,31 @@ func TestFeatureReviewRuntimeClearsRunnerWhenLLMIsDisabled(t *testing.T) {
 		t.Fatalf("default policies = %d, want 8", len(store.policies))
 	}
 	policy := store.policies[0]
-	facts, err := featuredelivery.BuildArtifactReviewRiskFacts(featuredelivery.Artifact{})
+	facts, err := delivery.BuildArtifactReviewRiskFacts(delivery.Artifact{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	facts, riskHash, reviewers, panelHash, err := featuredelivery.PrepareReviewPanel(policy, facts)
+	facts, riskHash, reviewers, panelHash, err := delivery.PrepareReviewPanel(policy, facts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.round = &featuredelivery.ReviewRound{
+	store.round = &delivery.ReviewRound{
 		ID: "round-1",
-		Subject: featuredelivery.ReviewSubject{
+		Subject: delivery.ReviewSubject{
 			Kind: policy.SubjectKind,
 		},
 		PolicyID: policy.ID, PolicyVersion: policy.Version, PolicyHash: policy.ContentHash,
 		RiskFacts: facts, RiskHash: riskHash, RuleVersion: policy.RiskRuleVersion,
-		Reviewers: reviewers, PanelHash: panelHash, Status: featuredelivery.RoundCreated,
+		Reviewers: reviewers, PanelHash: panelHash, Status: delivery.RoundCreated,
 	}
-	store.assignments = make([]featuredelivery.ReviewAssignment, 0, len(reviewers))
+	store.assignments = make([]delivery.ReviewAssignment, 0, len(reviewers))
 	for _, reviewer := range reviewers {
-		store.assignments = append(store.assignments, featuredelivery.ReviewAssignment{
+		store.assignments = append(store.assignments, delivery.ReviewAssignment{
 			ID: "assignment." + reviewer.ID, RoundID: store.round.ID,
 			ReviewerID: reviewer.ID, Agent: reviewer.Agent,
 			DefinitionHash: reviewer.DefinitionHash,
 			Categories:     append([]string(nil), reviewer.Categories...),
-			Required:       reviewer.Required, Status: featuredelivery.AssignmentQueued,
+			Required:       reviewer.Required, Status: delivery.AssignmentQueued,
 		})
 	}
 	disabled := &config.PlatformSettings{}
@@ -209,14 +209,14 @@ func TestFeatureReviewRuntimeClearsRunnerWhenLLMIsDisabled(t *testing.T) {
 	}
 	if _, err := service.ExecuteReviewRound(
 		context.Background(), "round-1", agentapi.Actor{}, true,
-	); !errors.Is(err, featuredelivery.ErrUnavailable) {
+	); !errors.Is(err, delivery.ErrUnavailable) {
 		t.Fatalf("execute error = %v, want unavailable", err)
 	}
 }
 
 func reviewWorkflowTestPlatform(
 	t *testing.T,
-	service *featuredelivery.Service,
+	service *delivery.Service,
 ) *Platform {
 	t.Helper()
 	db, _, err := sqlmock.New()
@@ -226,21 +226,21 @@ func reviewWorkflowTestPlatform(
 	t.Cleanup(func() { _ = db.Close() })
 	schemas := agentapi.NewSchemaRegistry()
 	for _, definitions := range [][]agentapi.SchemaDefinition{
-		agentcatalog.DefaultSchemas(),
-		featurepipeline.Schemas(),
-		featurereviewworkflow.Schemas(),
+		catalog.DefaultSchemas(),
+		pipeline.Schemas(),
+		reviewworkflow.Schemas(),
 	} {
 		if err := schemas.Publish(definitions); err != nil {
 			t.Fatal(err)
 		}
 	}
-	agents := agentcatalog.New(schemas)
-	workflows := agentworkflow.NewCatalog(schemas, agents)
-	workflowStore, err := agentworkflow.NewStore(db)
+	agents := catalog.New(schemas)
+	workflows := workflow.NewCatalog(schemas, agents)
+	workflowStore, err := workflow.NewStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflowService, err := agentworkflow.NewService(workflows, workflowStore, nil)
+	workflowService, err := workflow.NewService(workflows, workflowStore, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

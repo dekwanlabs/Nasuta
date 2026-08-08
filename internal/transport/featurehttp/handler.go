@@ -16,10 +16,10 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/auth"
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
-	"github.com/dekwanlabs/nasuta/internal/featurepipeline"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/pipeline"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
@@ -30,18 +30,18 @@ const (
 )
 
 type Handler struct {
-	service           *featuredelivery.Service
+	service           *delivery.Service
 	pipelineStarter   pipelineStarter
 	artifactReviewer  artifactReviewer
 	reviewCoordinator reviewCoordinator
 }
 
-func New(service *featuredelivery.Service) *Handler {
+func New(service *delivery.Service) *Handler {
 	return &Handler{service: service}
 }
 
 type pipelineStarter interface {
-	Start(context.Context, featurepipeline.Request, agentapi.Actor) (*agentworkflow.WorkflowRunRecord, error)
+	Start(context.Context, pipeline.Request, agentapi.Actor) (*workflow.WorkflowRunRecord, error)
 }
 
 type artifactReviewer interface {
@@ -49,9 +49,9 @@ type artifactReviewer interface {
 		context.Context,
 		string,
 		string,
-		featuredelivery.ReviewDecision,
+		delivery.ReviewDecision,
 		string,
-		featuredelivery.ReviewApprovalBinding,
+		delivery.ReviewApprovalBinding,
 		int64,
 	) error
 }
@@ -62,7 +62,7 @@ type reviewCoordinator interface {
 		string,
 		agentapi.Actor,
 		bool,
-	) (*featuredelivery.ReviewGateResult, error)
+	) (*delivery.ReviewGateResult, error)
 	Cancel(context.Context, string, agentapi.Actor, bool) error
 }
 
@@ -146,7 +146,7 @@ func (handler *Handler) StartPipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.pipelineStarter == nil {
-		writeDomainError(w, featuredelivery.ErrUnavailable)
+		writeDomainError(w, delivery.ErrUnavailable)
 		return
 	}
 	run, err := handler.pipelineStarter.Start(
@@ -176,8 +176,8 @@ func (handler *Handler) CreateFeature(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Title       string                              `json:"title"`
-		Requirement featuredelivery.RequirementDocument `json:"requirement"`
+		Title       string                       `json:"title"`
+		Requirement delivery.RequirementDocument `json:"requirement"`
 	}
 	if err := httputil.DecodeStrictJSON(r, &request); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
@@ -238,7 +238,7 @@ func (handler *Handler) AddRequirement(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var requirement featuredelivery.RequirementDocument
+	var requirement delivery.RequirementDocument
 	if err := httputil.DecodeStrictJSON(r, &requirement); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -275,7 +275,7 @@ func (handler *Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	kind, err := featuredelivery.ParseArtifactKind(r.URL.Query().Get("kind"))
+	kind, err := delivery.ParseArtifactKind(r.URL.Query().Get("kind"))
 	if err != nil {
 		httputil.WriteBadRequest(w, "kind is required and must be a supported artifact kind")
 		return
@@ -364,8 +364,8 @@ func (handler *Handler) GenerateArtifact(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	kind, err := featuredelivery.ParseArtifactKind(r.PathValue("kind"))
-	if err != nil || kind == featuredelivery.KindRequirement {
+	kind, err := delivery.ParseArtifactKind(r.PathValue("kind"))
+	if err != nil || kind == delivery.KindRequirement {
 		httputil.WriteBadRequest(w, "invalid generated artifact kind")
 		return
 	}
@@ -374,7 +374,7 @@ func (handler *Handler) GenerateArtifact(w http.ResponseWriter, r *http.Request)
 		if run != nil {
 			log.WarnfCtx(r.Context(), "[feature-delivery] user %d generated artifact for feature %s run=%s kind=%s status=%s error=%v", user.ID, r.PathValue("id"), run.ID, kind, run.Status, err)
 		}
-		if featuredelivery.IsDomainError(err, featuredelivery.ErrUnavailable) {
+		if delivery.IsDomainError(err, delivery.ErrUnavailable) {
 			writeDomainError(w, err)
 		} else {
 			httputil.WriteErrStatus(w, http.StatusBadGateway, err)
@@ -390,8 +390,8 @@ func (handler *Handler) AddArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	kind, err := featuredelivery.ParseArtifactKind(r.PathValue("kind"))
-	if err != nil || kind == featuredelivery.KindRequirement {
+	kind, err := delivery.ParseArtifactKind(r.PathValue("kind"))
+	if err != nil || kind == delivery.KindRequirement {
 		httputil.WriteBadRequest(w, "invalid artifact kind")
 		return
 	}
@@ -432,7 +432,7 @@ func (handler *Handler) ReviewArtifact(w http.ResponseWriter, r *http.Request) {
 		reviewer = handler.service
 	}
 	if reviewer == nil {
-		writeDomainError(w, featuredelivery.ErrUnavailable)
+		writeDomainError(w, delivery.ErrUnavailable)
 		return
 	}
 	err = reviewer.ReviewArtifact(
@@ -451,7 +451,7 @@ func (handler *Handler) CreateImplementation(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	var options featuredelivery.ImplementationOptions
+	var options delivery.ImplementationOptions
 	if err := httputil.DecodeStrictJSON(r, &options); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -703,7 +703,7 @@ func (handler *Handler) GetReviewPolicyRollout(w http.ResponseWriter, r *http.Re
 	if _, ok := authenticatedUser(w, r); !ok {
 		return
 	}
-	kind, err := featuredelivery.ParseSubjectKind(r.PathValue("subject_kind"))
+	kind, err := delivery.ParseSubjectKind(r.PathValue("subject_kind"))
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -722,7 +722,7 @@ func (handler *Handler) SetReviewPolicyRollout(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	kind, err := featuredelivery.ParseSubjectKind(r.PathValue("subject_kind"))
+	kind, err := delivery.ParseSubjectKind(r.PathValue("subject_kind"))
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -760,7 +760,7 @@ func (handler *Handler) ListReviewPolicyRolloutAudit(w http.ResponseWriter, r *h
 	if _, ok := adminUser(w, r); !ok {
 		return
 	}
-	kind, err := featuredelivery.ParseSubjectKind(r.PathValue("subject_kind"))
+	kind, err := delivery.ParseSubjectKind(r.PathValue("subject_kind"))
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -797,15 +797,15 @@ func (handler *Handler) CreateReviewRound(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	kind, err := featuredelivery.ParseSubjectKind(r.PathValue("type"))
+	kind, err := delivery.ParseSubjectKind(r.PathValue("type"))
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
 	var request struct {
-		PolicyID      string                                     `json:"policy_id"`
-		PolicyVersion int64                                      `json:"policy_version"`
-		ReuseReports  []featuredelivery.ReviewReportReuseRequest `json:"reuse_reports,omitempty"`
+		PolicyID      string                              `json:"policy_id"`
+		PolicyVersion int64                               `json:"policy_version"`
+		ReuseReports  []delivery.ReviewReportReuseRequest `json:"reuse_reports,omitempty"`
 	}
 	if err := httputil.DecodeStrictJSON(r, &request); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
@@ -824,7 +824,7 @@ func (handler *Handler) CreateReviewRound(w http.ResponseWriter, r *http.Request
 	}
 	round, assignments, err := handler.service.CreateSubjectReviewRoundWithReuses(
 		r.Context(), kind, strings.TrimSpace(r.PathValue("subject_id")),
-		featuredelivery.ReviewPolicyRef{ID: request.PolicyID, Version: request.PolicyVersion},
+		delivery.ReviewPolicyRef{ID: request.PolicyID, Version: request.PolicyVersion},
 		reuseReports,
 		user.ID, user.IsAdmin,
 	)
@@ -871,17 +871,17 @@ func (handler *Handler) ListReviewRounds(w http.ResponseWriter, r *http.Request)
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
-	var filter featuredelivery.ReviewRoundFilter
+	var filter delivery.ReviewRoundFilter
 	filter.FeatureID = strings.TrimSpace(r.URL.Query().Get("feature_id"))
 	if value := strings.TrimSpace(r.URL.Query().Get("subject_kind")); value != "" {
-		filter.SubjectKind, err = featuredelivery.ParseSubjectKind(value)
+		filter.SubjectKind, err = delivery.ParseSubjectKind(value)
 		if err != nil {
 			httputil.WriteBadRequest(w, err.Error())
 			return
 		}
 	}
 	filter.SubjectID = strings.TrimSpace(r.URL.Query().Get("subject_id"))
-	filter.Status = featuredelivery.ReviewRoundStatus(strings.ToLower(
+	filter.Status = delivery.ReviewRoundStatus(strings.ToLower(
 		strings.TrimSpace(r.URL.Query().Get("status")),
 	))
 	if filter.Status != "" && !validReviewRoundStatus(filter.Status) {
@@ -907,7 +907,7 @@ func (handler *Handler) ExecuteReviewRound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if handler.reviewCoordinator == nil {
-		writeDomainError(w, featuredelivery.ErrUnavailable)
+		writeDomainError(w, delivery.ErrUnavailable)
 		return
 	}
 	result, err := handler.reviewCoordinator.Execute(
@@ -988,7 +988,7 @@ func (handler *Handler) ListReviewFindings(w http.ResponseWriter, r *http.Reques
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
-	severity, err := featuredelivery.ParseSeverity(r.URL.Query().Get("severity"))
+	severity, err := delivery.ParseSeverity(r.URL.Query().Get("severity"))
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -1082,7 +1082,7 @@ func (handler *Handler) CancelReviewRound(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if handler.reviewCoordinator == nil {
-		writeDomainError(w, featuredelivery.ErrUnavailable)
+		writeDomainError(w, delivery.ErrUnavailable)
 		return
 	}
 	if err := handler.reviewCoordinator.Cancel(
@@ -1167,7 +1167,7 @@ func (handler *Handler) CreateFindingResolution(w http.ResponseWriter, r *http.R
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
-	resolutionKind, err := featuredelivery.ParseFindingResolutionKind(request.Resolution)
+	resolutionKind, err := delivery.ParseFindingResolutionKind(request.Resolution)
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -1175,7 +1175,7 @@ func (handler *Handler) CreateFindingResolution(w http.ResponseWriter, r *http.R
 	resolution, err := handler.service.CreateFindingResolution(
 		r.Context(),
 		r.PathValue("finding_id"),
-		featuredelivery.FindingResolutionRequest{
+		delivery.FindingResolutionRequest{
 			Resolution:      resolutionKind,
 			SubjectHash:     strings.ToLower(strings.TrimSpace(request.SubjectHash)),
 			ReplacementHash: strings.ToLower(strings.TrimSpace(request.ReplacementHash)),
@@ -1316,7 +1316,7 @@ func openVerifiedArtifact(path string, expectedBytes int64, expectedHash string,
 
 func writeArtifactError(w http.ResponseWriter, name string, err error) {
 	if errors.Is(err, os.ErrNotExist) {
-		writeDomainError(w, featuredelivery.ErrNotFound)
+		writeDomainError(w, delivery.ErrNotFound)
 		return
 	}
 	httputil.WriteErr(w, fmt.Errorf("%s %w", name, err))
@@ -1337,13 +1337,13 @@ func adminUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
 		return nil, false
 	}
 	if !user.IsAdmin {
-		httputil.WriteErrStatus(w, http.StatusForbidden, featuredelivery.ErrForbidden)
+		httputil.WriteErrStatus(w, http.StatusForbidden, delivery.ErrForbidden)
 		return nil, false
 	}
 	return user, true
 }
 
-func decodeReview(r *http.Request) (featuredelivery.ReviewDecision, string, featuredelivery.ReviewApprovalBinding, error) {
+func decodeReview(r *http.Request) (delivery.ReviewDecision, string, delivery.ReviewApprovalBinding, error) {
 	var request struct {
 		Decision      string `json:"decision"`
 		Comment       string `json:"comment"`
@@ -1352,13 +1352,13 @@ func decodeReview(r *http.Request) (featuredelivery.ReviewDecision, string, feat
 		GateResultID  string `json:"gate_result_id"`
 	}
 	if err := httputil.DecodeStrictJSON(r, &request); err != nil {
-		return "", "", featuredelivery.ReviewApprovalBinding{}, err
+		return "", "", delivery.ReviewApprovalBinding{}, err
 	}
-	decision := featuredelivery.ReviewDecision(strings.ToLower(strings.TrimSpace(request.Decision)))
-	if decision != featuredelivery.DecisionApproved && decision != featuredelivery.DecisionRejected {
-		return "", "", featuredelivery.ReviewApprovalBinding{}, fmt.Errorf("decision must be approved or rejected")
+	decision := delivery.ReviewDecision(strings.ToLower(strings.TrimSpace(request.Decision)))
+	if decision != delivery.DecisionApproved && decision != delivery.DecisionRejected {
+		return "", "", delivery.ReviewApprovalBinding{}, fmt.Errorf("decision must be approved or rejected")
 	}
-	return decision, strings.TrimSpace(request.Comment), featuredelivery.ReviewApprovalBinding{
+	return decision, strings.TrimSpace(request.Comment), delivery.ReviewApprovalBinding{
 		SubjectHash:   strings.TrimSpace(request.SubjectHash),
 		ReviewRoundID: strings.TrimSpace(request.ReviewRoundID),
 		GateResultID:  strings.TrimSpace(request.GateResultID),
@@ -1367,20 +1367,20 @@ func decodeReview(r *http.Request) (featuredelivery.ReviewDecision, string, feat
 
 func writeDomainError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, featuredelivery.ErrForbidden),
-		errors.Is(err, agentworkflow.ErrForbidden):
+	case errors.Is(err, delivery.ErrForbidden),
+		errors.Is(err, workflow.ErrForbidden):
 		httputil.WriteErrStatus(w, http.StatusForbidden, err)
-	case errors.Is(err, featuredelivery.ErrInvalid),
-		errors.Is(err, agentworkflow.ErrInvalid):
+	case errors.Is(err, delivery.ErrInvalid),
+		errors.Is(err, workflow.ErrInvalid):
 		httputil.WriteBadRequest(w, err.Error())
-	case errors.Is(err, featuredelivery.ErrNotFound),
-		errors.Is(err, agentworkflow.ErrNotFound):
+	case errors.Is(err, delivery.ErrNotFound),
+		errors.Is(err, workflow.ErrNotFound):
 		httputil.WriteErrStatus(w, http.StatusNotFound, err)
-	case errors.Is(err, featuredelivery.ErrConflict),
-		errors.Is(err, agentworkflow.ErrConflict):
+	case errors.Is(err, delivery.ErrConflict),
+		errors.Is(err, workflow.ErrConflict):
 		httputil.WriteErrStatus(w, http.StatusConflict, err)
-	case errors.Is(err, featuredelivery.ErrUnavailable),
-		errors.Is(err, agentworkflow.ErrUnavailable):
+	case errors.Is(err, delivery.ErrUnavailable),
+		errors.Is(err, workflow.ErrUnavailable):
 		httputil.WriteErrStatus(w, http.StatusServiceUnavailable, err)
 	default:
 		httputil.WriteErr(w, err)

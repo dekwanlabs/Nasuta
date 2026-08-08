@@ -6,11 +6,11 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/codingagent"
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
-	"github.com/dekwanlabs/nasuta/internal/featurepipeline"
-	"github.com/dekwanlabs/nasuta/internal/featurereviewworkflow"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/pipeline"
+	"github.com/dekwanlabs/nasuta/internal/feature/reviewworkflow"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/transport/featurehttp"
@@ -19,9 +19,9 @@ import (
 )
 
 type featureDeliveryRuntime struct {
-	service         *featuredelivery.Service
+	service         *delivery.Service
 	api             *featurehttp.Handler
-	implementations *featuredelivery.ImplementationManager
+	implementations *delivery.ImplementationManager
 	codingReason    string
 }
 
@@ -35,7 +35,7 @@ func (platform *Platform) initFeatureDelivery() error {
 		return fmt.Errorf("interrupt unfinished feature generation: %w", err)
 	}
 
-	var generator *featuredelivery.Generator
+	var generator *delivery.Generator
 	if platform.settings.LLMEnabled() {
 		generationMaxTokens := featureGenerationTokenBudget(platform.settings)
 		client := llm.NewLLMClientWithHTTPAndProvider(
@@ -46,7 +46,7 @@ func (platform *Platform) initFeatureDelivery() error {
 			generationMaxTokens,
 			nil,
 		)
-		generator = featuredelivery.NewGenerator(
+		generator = delivery.NewGenerator(
 			platform.knowledge,
 			client,
 			platform.settings.LLMProvider,
@@ -57,24 +57,24 @@ func (platform *Platform) initFeatureDelivery() error {
 		log.Warnf("[feature-delivery] artifact generation disabled (LLM unavailable)")
 	}
 
-	service := featuredelivery.NewService(
+	service := delivery.NewService(
 		deliveryStore,
 		generator,
 		time.Duration(platform.settings.FeatureGenerationTimeout),
 	)
-	pipeline, err := featurepipeline.DefaultDefinition(featurepipeline.WorkflowVersion)
+	pipelineDefinition, err := pipeline.DefaultDefinition(pipeline.WorkflowVersion)
 	if err != nil {
 		return fmt.Errorf("prepare feature pipeline workflow: %w", err)
 	}
-	if err := platform.workflowCatalog.Publish([]agentworkflow.WorkflowDefinition{pipeline}); err != nil {
+	if err := platform.workflowCatalog.Publish([]workflow.WorkflowDefinition{pipelineDefinition}); err != nil {
 		return fmt.Errorf("publish feature pipeline workflow: %w", err)
 	}
 	platform.featureDelivery.service = service
 	platform.featureDelivery.api = featurehttp.New(service)
 	platform.featureDelivery.api.SetPipelineStarter(
-		featurepipeline.NewStarter(platform.workflowService),
+		pipeline.NewStarter(platform.workflowService),
 	)
-	approvals := featurepipeline.NewApprovalCoordinator(service, platform.workflowService)
+	approvals := pipeline.NewApprovalCoordinator(service, platform.workflowService)
 	platform.featureDelivery.api.SetArtifactReviewer(approvals)
 	if platform.workflowAPI != nil {
 		platform.workflowAPI.SetApprovalDecider(approvals)
@@ -91,7 +91,7 @@ func (platform *Platform) initFeatureDelivery() error {
 		return err
 	}
 	platform.configureFeatureImplementation(deliveryStore, service)
-	platform.workflowPipeline = featurepipeline.NewExecutor(service)
+	platform.workflowPipeline = pipeline.NewExecutor(service)
 	if err := platform.configureAgentWorkflowRuntime(runtime); err != nil {
 		return err
 	}
@@ -178,9 +178,9 @@ func (platform *Platform) configureFeatureReviewRuntime(
 	if platform.workflowService == nil {
 		return fmt.Errorf("configure agent review runtime: workflow service is unavailable")
 	}
-	workflowDefinitions := make([]agentworkflow.WorkflowDefinition, 0, len(policies))
+	workflowDefinitions := make([]workflow.WorkflowDefinition, 0, len(policies))
 	for _, policy := range policies {
-		definition, err := featurereviewworkflow.Definition(policy)
+		definition, err := reviewworkflow.Definition(policy)
 		if err != nil {
 			return fmt.Errorf("prepare review workflow for policy %q: %w", policy.ID, err)
 		}
@@ -189,10 +189,10 @@ func (platform *Platform) configureFeatureReviewRuntime(
 	if err := platform.workflowService.PublishDefinitions(workflowDefinitions, true); err != nil {
 		return fmt.Errorf("publish default review workflows: %w", err)
 	}
-	service.SetReviewConfiguration(featuredelivery.NewRuntimeReviewRunner(runtime), defaults)
-	service.SetAdjudicationRunner(featuredelivery.NewRuntimeAdjudicationRunner(runtime))
-	platform.workflowReview = featurereviewworkflow.NewExecutor(service)
-	platform.reviewCoordinator = featurereviewworkflow.NewCoordinator(
+	service.SetReviewConfiguration(delivery.NewRuntimeReviewRunner(runtime), defaults)
+	service.SetAdjudicationRunner(delivery.NewRuntimeAdjudicationRunner(runtime))
+	platform.workflowReview = reviewworkflow.NewExecutor(service)
+	platform.reviewCoordinator = reviewworkflow.NewCoordinator(
 		service,
 		platform.workflowService,
 	)
@@ -215,7 +215,7 @@ func featureGenerationTokenBudget(settings *config.PlatformSettings) int {
 	return max(settings.LLMMaxTokens, settings.LLMAnswerMaxTokens, settings.LLMConclusionMaxTokens)
 }
 
-func (platform *Platform) configureFeatureImplementation(deliveryStore featuredelivery.Store, service *featuredelivery.Service) {
+func (platform *Platform) configureFeatureImplementation(deliveryStore delivery.Store, service *delivery.Service) {
 	if len(platform.settings.CodingEnabledProviders) == 0 {
 		platform.featureDelivery.codingReason = "not_configured"
 		log.Warnf("[feature-delivery] coding disabled (no provider configured)")
@@ -226,13 +226,13 @@ func (platform *Platform) configureFeatureImplementation(deliveryStore featurede
 		log.Warnf("[feature-delivery] coding disabled: %v", err)
 		return
 	}
-	workspaces, err := featuredelivery.NewWorkspaceManager(deliveryStore, platform.cfg.CodingWorkRoot)
+	workspaces, err := delivery.NewWorkspaceManager(deliveryStore, platform.cfg.CodingWorkRoot)
 	if err != nil {
 		platform.featureDelivery.codingReason = "workspace_unavailable"
 		log.Warnf("[feature-delivery] coding disabled (workspace unavailable): %v", err)
 		return
 	}
-	gitManager, err := featuredelivery.NewGitManager(platform.cfg.WorkspaceRoot, platform.cfg.CodingWorkRoot, workspaces)
+	gitManager, err := delivery.NewGitManager(platform.cfg.WorkspaceRoot, platform.cfg.CodingWorkRoot, workspaces)
 	if err != nil {
 		platform.featureDelivery.codingReason = "git_unavailable"
 		log.Warnf("[feature-delivery] coding disabled (Git unavailable): %v", err)
@@ -243,12 +243,12 @@ func (platform *Platform) configureFeatureImplementation(deliveryStore featurede
 		ClaudeBin:        platform.cfg.ClaudeBin,
 		EnabledProviders: platform.settings.CodingEnabledProviders,
 	})
-	manager := featuredelivery.NewImplementationManager(
+	manager := delivery.NewImplementationManager(
 		deliveryStore,
 		workspaces,
 		gitManager,
 		runner,
-		featuredelivery.ImplementationConfig{
+		delivery.ImplementationConfig{
 			Timeout:          time.Duration(platform.settings.CodingTimeout),
 			WorktreeTTL:      time.Duration(platform.settings.CodingWorktreeTTL),
 			MaxConcurrency:   platform.settings.CodingMaxConcurrency,
@@ -277,12 +277,12 @@ func (runtime *featureDeliveryRuntime) start(ctx context.Context) {
 	}
 }
 
-func (runtime *featureDeliveryRuntime) status(ctx context.Context) featuredelivery.FeatureDeliveryStatus {
+func (runtime *featureDeliveryRuntime) status(ctx context.Context) delivery.FeatureDeliveryStatus {
 	if runtime.service == nil {
-		return featuredelivery.FeatureDeliveryStatus{
-			Coding: featuredelivery.CodingCapabilityStatus{
+		return delivery.FeatureDeliveryStatus{
+			Coding: delivery.CodingCapabilityStatus{
 				Reason:    "persistence_unavailable",
-				Providers: map[string]featuredelivery.CodingProviderStatus{},
+				Providers: map[string]delivery.CodingProviderStatus{},
 			},
 		}
 	}

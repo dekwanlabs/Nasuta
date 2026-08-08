@@ -626,7 +626,7 @@ Role、Mission、Boundary、Quality Gate 和 Handoff，避免需求分析提前�
 app/
   platform.go                     组装、能力状态、路由注册和关闭
 
-internal/featuredelivery/
+internal/feature/delivery/
   model.go                        领域类型与不变量
   service.go                      用例编排
   lineage.go                      当前谱系推导
@@ -660,20 +660,20 @@ internal/transport/featurehttp/
 ```text
 app
   -> featurehttp
-      -> featuredelivery
+      -> delivery
           -> knowledge.API
           -> internal llm client
           -> Store interface
           -> CodingRunner interface
 
 platform/store
-  -> featuredelivery domain types
+  -> delivery domain types
 
 codingagent
-  -> featuredelivery run request/event contracts
+  -> delivery run request/event contracts
 ```
 
-`featuredelivery.Service` 保存自己真正需要的依赖，不保存通用 `Deps` 容器。Transport 只负责输入规范化、认证身份、HTTP 状态和序列化。
+`delivery.Service` 保存自己真正需要的依赖，不保存通用 `Deps` 容器。Transport 只负责输入规范化、认证身份、HTTP 状态和序列化。
 
 ##### 9.3 Coding Runner
 
@@ -2031,10 +2031,10 @@ GOWORK=off go test -race -count=1 ./...
 - Nasuta 已实现的不可变 Artifact、审核、证据快照、Implementation Run 和 Change Set 模型。
 
 本文是各节点行为的设计规范。中英文 Prompt 分别独立存放在
-`internal/featuredelivery/prompts/en/` 和 `internal/featuredelivery/prompts/zh-CN/`，
-由 `internal/featuredelivery/prompt.go` 统一嵌入和渲染。当前运行时默认使用英文版；
+`internal/feature/delivery/prompts/en/` 和 `internal/feature/delivery/prompts/zh-CN/`，
+由 `internal/feature/delivery/prompt.go` 统一嵌入和渲染。当前运行时默认使用英文版；
 中文版保持相同的模板变量和行为契约，用于中文场景、审核和后续显式语言配置。
-JSON 字段以 `internal/featuredelivery/model.go` 为准。
+JSON 字段以 `internal/feature/delivery/model.go` 为准。
 
 #### 2. 总体定性
 
@@ -2207,8 +2207,8 @@ Mission：把已提交需求转换为稳定、清晰、可验收的产品契约�
 
 运行时 Prompt 独立存放：
 
-- 英文：`internal/featuredelivery/prompts/en/requirement_analysis.md`；
-- 中文：`internal/featuredelivery/prompts/zh-CN/requirement_analysis.md`。
+- 英文：`internal/feature/delivery/prompts/en/requirement_analysis.md`；
+- 中文：`internal/feature/delivery/prompts/zh-CN/requirement_analysis.md`。
 
 ##### 5.2 输入与所有权
 
@@ -2260,8 +2260,8 @@ Mission：在已审核需求分析范围内比较可行技术方案，作出有�
 
 运行时 Prompt 独立存放：
 
-- 英文：`internal/featuredelivery/prompts/en/technical_proposal.md`；
-- 中文：`internal/featuredelivery/prompts/zh-CN/technical_proposal.md`。
+- 英文：`internal/feature/delivery/prompts/en/technical_proposal.md`；
+- 中文：`internal/feature/delivery/prompts/zh-CN/technical_proposal.md`。
 
 ##### 6.2 输入与所有权
 
@@ -2311,8 +2311,8 @@ Mission：把已审核技术方案展开为可实施的系统边界、模块职�
 
 运行时 Prompt 独立存放：
 
-- 英文：`internal/featuredelivery/prompts/en/system_design.md`；
-- 中文：`internal/featuredelivery/prompts/zh-CN/system_design.md`。
+- 英文：`internal/feature/delivery/prompts/en/system_design.md`；
+- 中文：`internal/feature/delivery/prompts/zh-CN/system_design.md`。
 
 ##### 7.2 输入与所有权
 
@@ -2366,8 +2366,8 @@ Mission：把已审核系统设计翻译成最小、按仓库拆分、可验证�
 
 运行时 Prompt 独立存放：
 
-- 英文：`internal/featuredelivery/prompts/en/implementation_plan.md`；
-- 中文：`internal/featuredelivery/prompts/zh-CN/implementation_plan.md`。
+- 英文：`internal/feature/delivery/prompts/en/implementation_plan.md`；
+- 中文：`internal/feature/delivery/prompts/zh-CN/implementation_plan.md`。
 
 ##### 8.2 输入与所有权
 
@@ -2416,8 +2416,8 @@ Mission：在固定 Base Commit 的隔离 Worktree 中，以最小完整改动�
 
 运行时 Prompt 独立存放：
 
-- 英文：`internal/featuredelivery/prompts/en/coding_task.md`；
-- 中文：`internal/featuredelivery/prompts/zh-CN/coding_task.md`。
+- 英文：`internal/feature/delivery/prompts/en/coding_task.md`；
+- 中文：`internal/feature/delivery/prompts/zh-CN/coding_task.md`。
 
 Coding Task 接收已批准的完整 Artifact 链和当前仓库的计划切片。Prompt 负责约束最小完整改动、
 Worktree 边界、`expected_paths` 偏离报告、真实测试证据和禁止提交、Push、部署等行为；本文不复制
@@ -2543,21 +2543,21 @@ Implementation Run 的 `succeeded` 只表示：
 
 #### 13. 运行时映射
 
-运行时角色、边界、工作流和输出要求以 `internal/featuredelivery/prompts/{en,zh-CN}/*.md` 为
-权威来源；JSON 字段集合、类型和嵌套结构以 `internal/featuredelivery/model.go` 为权威来源。
+运行时角色、边界、工作流和输出要求以 `internal/feature/delivery/prompts/{en,zh-CN}/*.md` 为
+权威来源；JSON 字段集合、类型和嵌套结构以 `internal/feature/delivery/model.go` 为权威来源。
 本文只定性职责、章节映射和交接边界，不维护第二份可执行 Prompt 正文。
 
 | 规范内容 | 代码位置 |
 |---|---|
-| 英文节点 Role、Mission、Boundary、Quality Gate、Handoff | `internal/featuredelivery/prompts/en/*.md` |
-| 中文节点身份、任务、边界、质量门、交接 | `internal/featuredelivery/prompts/zh-CN/*.md` |
-| Prompt 嵌入、模板函数与渲染 | `internal/featuredelivery/prompt.go` |
-| JSON 文档类型 | `internal/featuredelivery/model.go` |
-| Schema 与证据校验 | `internal/featuredelivery/documents.go` |
-| Coding Task Prompt | `internal/featuredelivery/prompts/{en,zh-CN}/coding_task.md` |
+| 英文节点 Role、Mission、Boundary、Quality Gate、Handoff | `internal/feature/delivery/prompts/en/*.md` |
+| 中文节点身份、任务、边界、质量门、交接 | `internal/feature/delivery/prompts/zh-CN/*.md` |
+| Prompt 嵌入、模板函数与渲染 | `internal/feature/delivery/prompt.go` |
+| JSON 文档类型 | `internal/feature/delivery/model.go` |
+| Schema 与证据校验 | `internal/feature/delivery/documents.go` |
+| Coding Task Prompt | `internal/feature/delivery/prompts/{en,zh-CN}/coding_task.md` |
 | Provider 输出适配 | `internal/codingagent/process.go` |
-| Artifact 审核门 | `internal/featuredelivery/service.go` |
-| Change Set 与独立验证 | `internal/featuredelivery/git.go`、`internal/featuredelivery/implementation.go` |
+| Artifact 审核门 | `internal/feature/delivery/service.go` |
+| Change Set 与独立验证 | `internal/feature/delivery/git.go`、`internal/feature/delivery/implementation.go` |
 
 修改运行时契约时必须同步验证：
 

@@ -16,7 +16,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
+	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -140,7 +140,7 @@ func newTestDefinitionRuntime(
 ) *DefinitionRuntime {
 	t.Helper()
 	schemas := agentapi.NewSchemaRegistry()
-	if err := schemas.Publish(agentcatalog.DefaultSchemas()); err != nil {
+	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
 		t.Fatalf("publish schemas: %v", err)
 	}
 	runtime, err := NewDefinitionRuntime(

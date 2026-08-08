@@ -4,20 +4,20 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
-	"github.com/dekwanlabs/nasuta/internal/featurepipeline"
-	"github.com/dekwanlabs/nasuta/internal/featurereviewworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/internal/feature/pipeline"
+	"github.com/dekwanlabs/nasuta/internal/feature/reviewworkflow"
 )
 
 type workflowTransformDispatcher struct {
-	pipeline *featurepipeline.Executor
-	review   *featurereviewworkflow.Executor
+	pipeline *pipeline.Executor
+	review   *reviewworkflow.Executor
 }
 
 func newWorkflowTransformDispatcher(
-	pipeline *featurepipeline.Executor,
-	review *featurereviewworkflow.Executor,
-) agentworkflow.NodeExecutor {
+	pipeline *pipeline.Executor,
+	review *reviewworkflow.Executor,
+) workflow.NodeExecutor {
 	if pipeline == nil && review == nil {
 		return nil
 	}
@@ -26,38 +26,38 @@ func newWorkflowTransformDispatcher(
 
 func (dispatcher *workflowTransformDispatcher) Execute(
 	ctx context.Context,
-	request agentworkflow.NodeRequest,
-) (agentworkflow.NodeResult, error) {
+	request workflow.NodeRequest,
+) (workflow.NodeResult, error) {
 	switch request.Node.TransformID {
-	case featurepipeline.TransformRequirementAnalysis,
-		featurepipeline.TransformTechnicalProposal,
-		featurepipeline.TransformSystemDesign,
-		featurepipeline.TransformImplementationPlan,
-		featurepipeline.TransformCoding,
-		featurepipeline.TransformValidation:
+	case pipeline.TransformRequirementAnalysis,
+		pipeline.TransformTechnicalProposal,
+		pipeline.TransformSystemDesign,
+		pipeline.TransformImplementationPlan,
+		pipeline.TransformCoding,
+		pipeline.TransformValidation:
 		if dispatcher.pipeline == nil {
-			return agentworkflow.NodeResult{}, fmt.Errorf(
+			return workflow.NodeResult{}, fmt.Errorf(
 				"feature pipeline transform %q is unavailable",
 				request.Node.TransformID,
 			)
 		}
 		return dispatcher.pipeline.Execute(ctx, request)
-	case featurereviewworkflow.TransformAssignment,
-		featurereviewworkflow.TransformAdjudication,
-		featurereviewworkflow.TransformGate:
+	case reviewworkflow.TransformAssignment,
+		reviewworkflow.TransformAdjudication,
+		reviewworkflow.TransformGate:
 		if dispatcher.review == nil {
-			return agentworkflow.NodeResult{}, fmt.Errorf(
+			return workflow.NodeResult{}, fmt.Errorf(
 				"feature review transform %q is unavailable",
 				request.Node.TransformID,
 			)
 		}
 		return dispatcher.review.Execute(ctx, request)
 	default:
-		return agentworkflow.NodeResult{}, fmt.Errorf(
+		return workflow.NodeResult{}, fmt.Errorf(
 			"workflow transform %q is unsupported",
 			request.Node.TransformID,
 		)
 	}
 }
 
-var _ agentworkflow.NodeExecutor = (*workflowTransformDispatcher)(nil)
+var _ workflow.NodeExecutor = (*workflowTransformDispatcher)(nil)

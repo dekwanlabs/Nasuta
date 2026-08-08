@@ -411,8 +411,8 @@ internal/executiontrace/
 | `internal/agent/tools.go` | Tool Executor 拦截 | 中 |
 | `internal/retrieval` | Pipeline 与 Rerank 节点迁移 | 大 |
 | `internal/sessionhistory` | Recall 节点迁移 | 小 |
-| `internal/agentworkflow` | Trace Observer、父子 Run 关联 | 中 |
-| `internal/featuredelivery` | 研发任务节点接入 | 中，后续批次 |
+| `internal/agent/workflow` | Trace Observer、父子 Run 关联 | 中 |
+| `internal/feature/delivery` | 研发任务节点接入 | 中，后续批次 |
 
 预计直接修改 15–25 个生产文件、10–20 个测试文件。若只完成 Recorder 收敛，不做 QA 节点化，影响可控制在 8–12 个文件。
 
@@ -558,10 +558,10 @@ CodeLoom 通过 Nasuta 公共 Surface 使用能力，原则上不应引入 Execu
 
 | 验收项 | 实现位置 | 结果 |
 |---|---|---|
-| 统一 Scope 生命周期与 Trace ID | `internal/executiontrace/scope.go`、`internal/executiontrace/capture.go`、`internal/agent/definition_runtime.go`、`internal/agentworkflow/executor.go` | 已完成 |
-| Tool、LLM、Workflow 与多 Agent 执行边界自动记录 | `tool/execution.go`、`internal/llm/client.go`、`internal/agentworkflow/executor.go` | 已完成 |
-| QA、Retrieval、Memory、Feature Delivery 节点迁移 | `internal/agent/`、`internal/retrieval/`、`internal/sessionhistory/`、`internal/featurepipeline/`、`internal/featurereviewworkflow/` | 已完成 |
-| 父子 Run、Workflow Node 与并行顺序关联 | `internal/executiontrace/scope.go`、`internal/agentworkflow/execution_trace.go` | 已完成 |
+| 统一 Scope 生命周期与 Trace ID | `internal/executiontrace/scope.go`、`internal/executiontrace/capture.go`、`internal/agent/definition_runtime.go`、`internal/agent/workflow/executor.go` | 已完成 |
+| Tool、LLM、Workflow 与多 Agent 执行边界自动记录 | `tool/execution.go`、`internal/llm/client.go`、`internal/agent/workflow/executor.go` | 已完成 |
+| QA、Retrieval、Memory、Feature Delivery 节点迁移 | `internal/agent/`、`internal/retrieval/`、`internal/sessionhistory/`、`internal/feature/pipeline/`、`internal/feature/reviewworkflow/` | 已完成 |
+| 父子 Run、Workflow Node 与并行顺序关联 | `internal/executiontrace/scope.go`、`internal/agent/workflow/execution_trace.go` | 已完成 |
 | QA SSE `event: trace` 与 MCP `_trace` 兼容 | `internal/transport/dashboard/qa.go`、`internal/transport/mcp/server.go` | 已完成 |
 | Trace 字段投影、错误/Panic/取消状态与容量截断 | `internal/executiontrace/invoke.go`、`internal/executiontrace/scope.go` | 已完成 |
 | 旧业务 Trace 调用收敛 | `internal/executiontrace/invoke.go` 保留唯一兼容桥，其余业务包不直接调用 | 已完成 |

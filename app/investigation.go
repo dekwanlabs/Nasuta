@@ -8,7 +8,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/investigation"
 )
 
@@ -18,22 +18,22 @@ type platformInvestigationExecutor struct {
 
 func (executor platformInvestigationExecutor) Execute(
 	ctx context.Context,
-	request agentworkflow.ExecuteRequest,
-) (agentworkflow.Result, error) {
+	request workflow.ExecuteRequest,
+) (workflow.Result, error) {
 	if executor.platform == nil {
-		return agentworkflow.Result{}, investigation.ErrUnavailable
+		return workflow.Result{}, investigation.ErrUnavailable
 	}
 	platform := executor.platform
 	platform.qaReloadMu.RLock()
 	defer platform.qaReloadMu.RUnlock()
 	if platform.workflowService == nil || platform.definitionRuntime == nil ||
 		platform.agentDefinitionVer <= 0 {
-		return agentworkflow.Result{}, investigation.ErrUnavailable
+		return workflow.Result{}, investigation.ErrUnavailable
 	}
 	request.Workflow.Version = platform.agentDefinitionVer
 	result, err := platform.workflowService.Execute(ctx, request)
 	if err != nil {
-		return agentworkflow.Result{}, fmt.Errorf("execute active workflow version %d: %w", request.Workflow.Version, err)
+		return workflow.Result{}, fmt.Errorf("execute active workflow version %d: %w", request.Workflow.Version, err)
 	}
 	return result, nil
 }
@@ -86,10 +86,10 @@ func (runner platformQAInvestigationRunner) Run(
 		bridgeInvestigationEvents(events, stop, runner.events, request.ParentRunID)
 	}()
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
-	workflowResult, executeErr := platform.workflowService.Execute(ctx, agentworkflow.ExecuteRequest{
+	workflowResult, executeErr := platform.workflowService.Execute(ctx, workflow.ExecuteRequest{
 		RunID: request.WorkflowRunID, ParentRunID: request.ParentRunID,
-		Workflow: agentworkflow.DefinitionRef{
-			ID: agentworkflow.DelegatedInvestigationID, Version: platform.agentDefinitionVer,
+		Workflow: workflow.DefinitionRef{
+			ID: workflow.DelegatedInvestigationID, Version: platform.agentDefinitionVer,
 		},
 		Input: input, Actor: request.Actor, ActorPermissions: readOnly,
 		Scenario: investigation.Scenario, ScenarioPermissions: readOnly,
@@ -114,7 +114,7 @@ func (runner platformQAInvestigationRunner) Run(
 }
 
 func bridgeInvestigationEvents(
-	events <-chan agentworkflow.Event,
+	events <-chan workflow.Event,
 	stop <-chan struct{},
 	emitter agent.ExecutionEventEmitter,
 	parentRunID string,
@@ -139,7 +139,7 @@ func bridgeInvestigationEvents(
 func emitInvestigationEvent(
 	emitter agent.ExecutionEventEmitter,
 	parentRunID string,
-	event agentworkflow.Event,
+	event workflow.Event,
 ) {
 	if emitter == nil {
 		return
@@ -152,7 +152,7 @@ func emitInvestigationEvent(
 
 func projectInvestigationEvent(
 	parentRunID string,
-	event agentworkflow.Event,
+	event workflow.Event,
 ) (agent.EventType, agent.ExecutionEvent, bool) {
 	projected := agent.ExecutionEvent{
 		RunID: parentRunID, WorkflowRunID: event.WorkflowRunID,

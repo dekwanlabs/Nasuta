@@ -1,0 +1,53 @@
+# Flow: <English Name> (<Chinese Name>)
+
+## Format
+
+Each flow document covers one complete **business chain**, from
+trigger to completion.
+
+### Frontmatter (required)
+
+```yaml
+---
+scope: event-driven                    # fixed value
+tags: [flow, <service>, <domain>, ...] # at least 3 tags for semantic recall
+---
+```
+
+### Title
+
+`# Flow: <English Name> (<Chinese Name>)`
+
+Example: `# Flow: Device Provisioning & SN Lifecycle`
+
+### Required Sections (in order)
+
+1. **Overview** (1-2 paragraphs) — what this chain does, which services it
+   touches, and the business value.
+2. **Trigger Sources** (`## Trigger Sources`) — table: Event | Trigger
+   Service | Trigger Condition.
+3. **Full Chain** (`## Full Chain`) — ASCII diagram or nested list, from
+   trigger to terminal state.
+4. **Key Services** (`## Key Services`) — table: Service | Responsibility |
+   Database | Kibana Index.
+5. **Troubleshooting** (`## Troubleshooting`) — table: Common Problem →
+   Resolution Steps.
+6. **Dependencies** (`## Dependencies`) — external services this chain
+   depends on + who depends on this chain.
+
+### Optional Sections
+
+- **Data Storage** (`## Data Storage`) — table groups when multiple DBs.
+- **Middleware** (`## Middleware`) — Kafka/RabbitMQ/Redis etc.
+- **Branch Flows** (`## Branch Flows`) — alternative handling branches.
+
+### Notes
+
+- Do not add id or doc_id to frontmatter; the platform assigns the canonical document ID.
+- All service names, API paths, and Feign interface names must come from real
+  code — never invent them. Verify against codegraph before writing.
+- Kibana index uses the `hs-iot-<service>-*` format, derived from existing
+  indices.
+- Prefer tables over prose. Troubleshooting must be operational ("query the Y
+  index of service X, search keyword Z").
+- Cross-reference other documents via their `flow-xxx.md` filename.

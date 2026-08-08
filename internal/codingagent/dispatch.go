@@ -3,7 +3,7 @@ package codingagent
 import (
 	"encoding/json"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
 var finalResultSchema = json.RawMessage(`{
@@ -30,9 +30,9 @@ var finalResultSchema = json.RawMessage(`{
 }`)
 
 type finalResult struct {
-	Summary    string                          `json:"summary"`
-	Tests      string                          `json:"tests"`
-	Deviations []featuredelivery.PlanDeviation `json:"deviations"`
+	Summary    string                   `json:"summary"`
+	Tests      string                   `json:"tests"`
+	Deviations []delivery.PlanDeviation `json:"deviations"`
 }
 
 func stringValue(values map[string]any, keys ...string) string {

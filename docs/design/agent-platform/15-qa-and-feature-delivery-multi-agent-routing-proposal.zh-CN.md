@@ -36,7 +36,7 @@ QA / Feature Delivery API
 1. QA 自动判断问题复杂度，并在单 Agent 与 Delegated Investigation 之间选择。
 2. 多 Agent QA 与普通 QA 共享入口、会话、引用、最终答案和事件流。
 3. Feature Delivery 在需求、方案、设计、计划、编码和验证阶段按风险启用多 Agent。
-4. 复用现有 `internal/agentworkflow`、Agent Catalog、Reviewer Panel 和 Feature Pipeline。
+4. 复用现有 `internal/agent/workflow`、Agent Catalog、Reviewer Panel 和 Feature Pipeline。
 5. 路由决策可解释、可审计、可评估，并固定到 Run Snapshot。
 6. Agent 数量、权限、工具和预算由服务端 Policy 决定，不能由模型自由扩张。
 
@@ -68,7 +68,7 @@ QA / Feature Delivery API
 - `internal/retrieval/route.go`：问题分析和证据路由；
 - `internal/agent/service.go`：QA Run 创建、预检索和单 Agent 提交；
 - `internal/transport/dashboard/qa.go`：QA SSE 投影；
-- `internal/agentworkflow/investigation.go`：固定 Delegated Investigation DAG；
+- `internal/agent/workflow/investigation.go`：固定 Delegated Investigation DAG；
 - `internal/investigation/service.go`：独立 Investigation 场景入口。
 
 ### 3.2 Feature Delivery
@@ -587,10 +587,10 @@ Feature Delivery：
 | `internal/retrieval` | 执行策略分析合同与绑定校验 |
 | `internal/agent` | QA 单/多 Agent 分流、结果收敛、Session 持久化 |
 | `internal/investigation` | 从独立场景服务抽出可供 QA 调用的受限 Runner |
-| `internal/agentworkflow` | Parent Run 关联、部分调查失败收敛 |
+| `internal/agent/workflow` | Parent Run 关联、部分调查失败收敛 |
 | `internal/transport/dashboard` | QA SSE 投影多 Agent 事件 |
-| `internal/featurepipeline` | Artifact 阶段嵌入 Review Workflow |
-| `internal/featurereviewworkflow` | 保持 Reviewer、Join、Adjudication 和 Gate 实现 |
+| `internal/feature/pipeline` | Artifact 阶段嵌入 Review Workflow |
+| `internal/feature/reviewworkflow` | 保持 Reviewer、Join、Adjudication 和 Gate 实现 |
 | `app` | 场景 Policy、Runner 和 Workflow Runtime 组合 |
 | `web` | 展示执行策略和子 Agent 进度，不增加入口选择 |
 

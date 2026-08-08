@@ -8,7 +8,7 @@ import (
 	"fmt"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
 
 const Scenario = "delegated.investigation"
@@ -16,7 +16,7 @@ const Scenario = "delegated.investigation"
 var ErrUnavailable = errors.New("delegated investigation is unavailable")
 
 type WorkflowExecutor interface {
-	Execute(context.Context, agentworkflow.ExecuteRequest) (agentworkflow.Result, error)
+	Execute(context.Context, workflow.ExecuteRequest) (workflow.Result, error)
 }
 
 type Service struct {
@@ -61,8 +61,8 @@ func (service *Service) Run(ctx context.Context, question string, actor agentapi
 		return Result{}, fmt.Errorf("marshal investigation request: %w", err)
 	}
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
-	workflowResult, err := service.executor.Execute(ctx, agentworkflow.ExecuteRequest{
-		Workflow: agentworkflow.DefinitionRef{ID: agentworkflow.DelegatedInvestigationID},
+	workflowResult, err := service.executor.Execute(ctx, workflow.ExecuteRequest{
+		Workflow: workflow.DefinitionRef{ID: workflow.DelegatedInvestigationID},
 		Input:    input, Actor: actor, ActorPermissions: readOnly,
 		Scenario: Scenario, ScenarioPermissions: readOnly,
 	})

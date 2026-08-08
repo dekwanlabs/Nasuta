@@ -9,17 +9,17 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
-func (runner *Runner) runClaude(ctx context.Context, request featuredelivery.CodingRequest, sink featuredelivery.EventSink) (featuredelivery.CodingResult, error) {
+func (runner *Runner) runClaude(ctx context.Context, request delivery.CodingRequest, sink delivery.EventSink) (delivery.CodingResult, error) {
 	path, err := exec.LookPath(runner.claudeBin)
 	if err != nil {
-		return featuredelivery.CodingResult{}, fmt.Errorf("find claude binary: %w", err)
+		return delivery.CodingResult{}, fmt.Errorf("find claude binary: %w", err)
 	}
 	temp, err := os.MkdirTemp("", "nasuta-claude-*")
 	if err != nil {
-		return featuredelivery.CodingResult{}, err
+		return delivery.CodingResult{}, err
 	}
 	defer os.RemoveAll(temp)
 	settingsPath := filepath.Join(temp, "settings.json")
@@ -47,10 +47,10 @@ func (runner *Runner) runClaude(ctx context.Context, request featuredelivery.Cod
 	}
 	settingsJSON, err := json.Marshal(settings)
 	if err != nil {
-		return featuredelivery.CodingResult{}, fmt.Errorf("marshal claude settings: %w", err)
+		return delivery.CodingResult{}, fmt.Errorf("marshal claude settings: %w", err)
 	}
 	if err := os.WriteFile(settingsPath, settingsJSON, 0o600); err != nil {
-		return featuredelivery.CodingResult{}, err
+		return delivery.CodingResult{}, err
 	}
 	args := []string{
 		"-p", "--verbose", "--output-format", "stream-json", "--no-session-persistence",
@@ -87,12 +87,12 @@ func newClaudeEventParser() eventParser {
 		case "assistant", "user":
 			parsed.Events = claudeContentEvents(event, tools)
 		case "system":
-			parsed.Events = []featuredelivery.ProviderEvent{{Kind: featuredelivery.EventProviderMessage, Summary: "system: " + stringValue(event, "subtype")}}
+			parsed.Events = []delivery.ProviderEvent{{Kind: delivery.EventProviderMessage, Summary: "system: " + stringValue(event, "subtype")}}
 		case "result":
-			parsed.Events = []featuredelivery.ProviderEvent{{Kind: featuredelivery.EventProviderMessage, Summary: "result"}}
+			parsed.Events = []delivery.ProviderEvent{{Kind: delivery.EventProviderMessage, Summary: "result"}}
 		default:
 			if eventType != "" {
-				parsed.Events = []featuredelivery.ProviderEvent{{Kind: featuredelivery.EventProviderMessage, Summary: eventType}}
+				parsed.Events = []delivery.ProviderEvent{{Kind: delivery.EventProviderMessage, Summary: eventType}}
 			}
 		}
 		if result, ok := event["structured_output"]; ok {
@@ -108,7 +108,7 @@ func newClaudeEventParser() eventParser {
 				if json.Unmarshal([]byte(result), &final) == nil {
 					parsed.Final = &final
 				} else {
-					parsed.Events = []featuredelivery.ProviderEvent{{Kind: featuredelivery.EventProviderMessage, Summary: result}}
+					parsed.Events = []delivery.ProviderEvent{{Kind: delivery.EventProviderMessage, Summary: result}}
 				}
 			}
 		}
@@ -116,13 +116,13 @@ func newClaudeEventParser() eventParser {
 	}
 }
 
-func claudeContentEvents(event map[string]any, tools map[string]claudeTool) []featuredelivery.ProviderEvent {
+func claudeContentEvents(event map[string]any, tools map[string]claudeTool) []delivery.ProviderEvent {
 	message, ok := event["message"].(map[string]any)
 	if !ok {
 		return nil
 	}
 	content, _ := message["content"].([]any)
-	events := make([]featuredelivery.ProviderEvent, 0, min(len(content), maxPlatformEvents))
+	events := make([]delivery.ProviderEvent, 0, min(len(content), maxPlatformEvents))
 	for _, value := range content {
 		if len(events) == maxPlatformEvents {
 			break
@@ -136,7 +136,7 @@ func claudeContentEvents(event map[string]any, tools map[string]claudeTool) []fe
 			continue
 		case "text":
 			if text := stringValue(block, "text"); text != "" {
-				events = append(events, featuredelivery.ProviderEvent{Kind: featuredelivery.EventProviderMessage, Summary: text})
+				events = append(events, delivery.ProviderEvent{Kind: delivery.EventProviderMessage, Summary: text})
 			}
 		case "tool_use":
 			if toolEvent := claudeToolStart(block, tools); toolEvent != nil {
@@ -151,7 +151,7 @@ func claudeContentEvents(event map[string]any, tools map[string]claudeTool) []fe
 	return events
 }
 
-func claudeToolStart(block map[string]any, tools map[string]claudeTool) *featuredelivery.ProviderEvent {
+func claudeToolStart(block map[string]any, tools map[string]claudeTool) *delivery.ProviderEvent {
 	id := truncate(redact(stringValue(block, "id")), 255)
 	name := stringValue(block, "name")
 	input, _ := block["input"].(map[string]any)
@@ -163,13 +163,13 @@ func claudeToolStart(block map[string]any, tools map[string]claudeTool) *feature
 		return nil
 	}
 	command := truncate(redact(stringValue(input, "command")), 2000)
-	return &featuredelivery.ProviderEvent{
-		Kind: featuredelivery.EventCommandStarted, Summary: command,
+	return &delivery.ProviderEvent{
+		Kind: delivery.EventCommandStarted, Summary: command,
 		Detail: eventDetail(commandDetail{ID: id, Command: command, Status: "started"}),
 	}
 }
 
-func claudeToolFinish(block map[string]any, tools map[string]claudeTool) *featuredelivery.ProviderEvent {
+func claudeToolFinish(block map[string]any, tools map[string]claudeTool) *delivery.ProviderEvent {
 	id := truncate(redact(stringValue(block, "tool_use_id")), 255)
 	tool, ok := tools[id]
 	if ok {
@@ -180,8 +180,8 @@ func claudeToolFinish(block map[string]any, tools map[string]claudeTool) *featur
 		if failed || tool.path == "" {
 			return nil
 		}
-		return &featuredelivery.ProviderEvent{
-			Kind: featuredelivery.EventFileChanged, Summary: tool.path,
+		return &delivery.ProviderEvent{
+			Kind: delivery.EventFileChanged, Summary: tool.path,
 			Detail: eventDetail(fileChangeDetail{Paths: []string{tool.path}, Action: strings.ToLower(tool.name)}),
 		}
 	}
@@ -193,8 +193,8 @@ func claudeToolFinish(block map[string]any, tools map[string]claudeTool) *featur
 		status = "failed"
 	}
 	output := truncate(redact(claudeContentText(block["content"])), 4000)
-	return &featuredelivery.ProviderEvent{
-		Kind: featuredelivery.EventCommandFinished, Summary: status,
+	return &delivery.ProviderEvent{
+		Kind: delivery.EventCommandFinished, Summary: status,
 		Detail: eventDetail(commandDetail{ID: id, Output: output, Status: status}),
 	}
 }

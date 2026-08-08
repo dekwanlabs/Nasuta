@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
+	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
@@ -20,22 +20,22 @@ const (
 	maxPageSize     = 100
 )
 
-type catalog interface {
+type definitionCatalog interface {
 	PublishAs(context.Context, []agentapi.Definition, int64) error
-	ListRecords(context.Context, agentcatalog.DefinitionCursor, int) ([]agentcatalog.DefinitionRecord, error)
+	ListRecords(context.Context, catalog.DefinitionCursor, int) ([]catalog.DefinitionRecord, error)
 	SetDefault(context.Context, string, int64, int64) error
 	SetActive(context.Context, string, int64, bool, int64) error
-	GetRollout(string) (agentcatalog.RolloutRule, bool)
-	SetRollout(context.Context, string, int64, int, string, bool, int64) (agentcatalog.RolloutRule, error)
-	ListAudit(context.Context, string, int64, int) ([]agentcatalog.AuditEvent, error)
-	ListRolloutAudit(context.Context, string, int64, int) ([]agentcatalog.RolloutAuditEvent, error)
+	GetRollout(string) (catalog.RolloutRule, bool)
+	SetRollout(context.Context, string, int64, int, string, bool, int64) (catalog.RolloutRule, error)
+	ListAudit(context.Context, string, int64, int) ([]catalog.AuditEvent, error)
+	ListRolloutAudit(context.Context, string, int64, int) ([]catalog.RolloutAuditEvent, error)
 }
 
 type Handler struct {
-	catalog catalog
+	catalog definitionCatalog
 }
 
-func New(definitions *agentcatalog.Catalog) *Handler {
+func New(definitions *catalog.Catalog) *Handler {
 	if definitions == nil {
 		return &Handler{}
 	}
@@ -66,7 +66,7 @@ func (handler *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.catalog == nil {
-		writeDomainError(w, agentcatalog.ErrUnavailable)
+		writeDomainError(w, catalog.ErrUnavailable)
 		return
 	}
 	if err := handler.catalog.PublishAs(r.Context(), request.Definitions, user.ID); err != nil {
@@ -91,7 +91,7 @@ func (handler *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.catalog == nil {
-		writeDomainError(w, agentcatalog.ErrUnavailable)
+		writeDomainError(w, catalog.ErrUnavailable)
 		return
 	}
 	items, err := handler.catalog.ListRecords(r.Context(), cursor, limit)
@@ -119,7 +119,7 @@ func (handler *Handler) SetDefault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.catalog == nil {
-		writeDomainError(w, agentcatalog.ErrUnavailable)
+		writeDomainError(w, catalog.ErrUnavailable)
 		return
 	}
 	id := r.PathValue("agent_id")
@@ -150,7 +150,7 @@ func (handler *Handler) SetStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.catalog == nil {
-		writeDomainError(w, agentcatalog.ErrUnavailable)
+		writeDomainError(w, catalog.ErrUnavailable)
 		return
 	}
 	id := r.PathValue("agent_id")
@@ -180,7 +180,7 @@ func (handler *Handler) ListAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.catalog == nil {
-		writeDomainError(w, agentcatalog.ErrUnavailable)
+		writeDomainError(w, catalog.ErrUnavailable)
 		return
 	}
 	items, err := handler.catalog.ListAudit(
@@ -204,7 +204,7 @@ func (handler *Handler) GetRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.catalog == nil {
-		writeDomainError(w, agentcatalog.ErrUnavailable)
+		writeDomainError(w, catalog.ErrUnavailable)
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("agent_id"))
@@ -212,7 +212,7 @@ func (handler *Handler) GetRollout(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeDomainError(w, fmt.Errorf(
 			"agent rollout %q not found: %w",
-			id, agentcatalog.ErrNotFound,
+			id, catalog.ErrNotFound,
 		))
 		return
 	}
@@ -235,7 +235,7 @@ func (handler *Handler) SetRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.catalog == nil {
-		writeDomainError(w, agentcatalog.ErrUnavailable)
+		writeDomainError(w, catalog.ErrUnavailable)
 		return
 	}
 	rule, err := handler.catalog.SetRollout(
@@ -269,7 +269,7 @@ func (handler *Handler) ListRolloutAudit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if handler.catalog == nil {
-		writeDomainError(w, agentcatalog.ErrUnavailable)
+		writeDomainError(w, catalog.ErrUnavailable)
 		return
 	}
 	items, err := handler.catalog.ListRolloutAudit(
@@ -348,13 +348,13 @@ func pathVersion(r *http.Request) (int64, error) {
 
 func writeDomainError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, agentcatalog.ErrInvalid):
+	case errors.Is(err, catalog.ErrInvalid):
 		httputil.WriteBadRequest(w, err.Error())
-	case errors.Is(err, agentcatalog.ErrNotFound):
+	case errors.Is(err, catalog.ErrNotFound):
 		httputil.WriteErrStatus(w, http.StatusNotFound, err)
-	case errors.Is(err, agentcatalog.ErrConflict):
+	case errors.Is(err, catalog.ErrConflict):
 		httputil.WriteErrStatus(w, http.StatusConflict, err)
-	case errors.Is(err, agentcatalog.ErrUnavailable):
+	case errors.Is(err, catalog.ErrUnavailable):
 		httputil.WriteErrStatus(w, http.StatusServiceUnavailable, err)
 	default:
 		httputil.WriteErr(w, err)

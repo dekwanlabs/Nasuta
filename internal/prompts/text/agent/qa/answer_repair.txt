@@ -1,0 +1,3 @@
+The exact-output validator rejected the previous answer because these required opaque values were not copied verbatim: {{ .Missing }}
+
+Regenerate the complete answer using the tool evidence already present. Copy every required value exactly, character for character. Never abbreviate, truncate, mask, summarize, or replace any part with "..." or "…". If the answer is long, keep the identifiers complete rather than shortening them. Do not discuss this internal validation.

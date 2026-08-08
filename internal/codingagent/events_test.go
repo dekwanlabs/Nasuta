@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
 func TestCodexEventParserDropsReasoningAndMapsCommands(t *testing.T) {
@@ -27,7 +27,7 @@ func TestCodexEventParserDropsReasoningAndMapsCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(parsed.Events) != 1 || parsed.Events[0].Kind != featuredelivery.EventCommandFinished {
+	if len(parsed.Events) != 1 || parsed.Events[0].Kind != delivery.EventCommandFinished {
 		t.Fatalf("command events = %+v", parsed.Events)
 	}
 	encoded, _ := json.Marshal(parsed.Events[0])
@@ -50,8 +50,8 @@ func TestClaudeEventParserDropsThinkingAndTracksToolResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if parsed.SessionID != "session-1" || len(parsed.Events) != 2 ||
-		parsed.Events[0].Kind != featuredelivery.EventProviderMessage ||
-		parsed.Events[1].Kind != featuredelivery.EventCommandStarted {
+		parsed.Events[0].Kind != delivery.EventProviderMessage ||
+		parsed.Events[1].Kind != delivery.EventCommandStarted {
 		t.Fatalf("assistant events = %+v", parsed)
 	}
 	encoded, _ := json.Marshal(parsed.Events)
@@ -69,7 +69,7 @@ func TestClaudeEventParserDropsThinkingAndTracksToolResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(parsed.Events) != 1 || parsed.Events[0].Kind != featuredelivery.EventCommandFinished {
+	if len(parsed.Events) != 1 || parsed.Events[0].Kind != delivery.EventCommandFinished {
 		t.Fatalf("tool result events = %+v", parsed.Events)
 	}
 }
@@ -95,7 +95,7 @@ func TestClaudeEventParserEmitsFileChangeAfterSuccessfulWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(finish.Events) != 1 || finish.Events[0].Kind != featuredelivery.EventFileChanged ||
+	if len(finish.Events) != 1 || finish.Events[0].Kind != delivery.EventFileChanged ||
 		finish.Events[0].Summary != "internal/service.go" {
 		t.Fatalf("file result events = %+v", finish.Events)
 	}

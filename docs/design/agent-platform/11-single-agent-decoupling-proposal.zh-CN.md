@@ -13,7 +13,7 @@
 
 第一阶段已在 Nasuta 中落地：
 
-- `agent.Definition`、`agent.Runtime` 和 `agentcatalog` 已形成独立执行合同；
+- `agent.Definition`、`agent.Runtime` 和 `catalog` 已形成独立执行合同；
 - 通用 `DefinitionRuntime` 已执行精确 Definition 版本、Provider/Model、注册 Scope、Tool Snapshot、上下文 Hash 和 Run Snapshot 校验；
 - `knowledge.read`、`knowledge.write` 和领域 Transform 使用的 `feature.delivery` 已进入共享 Scope 词表，Agent Runtime 会拒绝执行不属于自身资源边界的领域 Scope；
 - 委托运行的有效 Scope 由调用者、场景、Workflow、Node 和 Definition 逐层求交，不能扩大上游权限；
@@ -143,7 +143,7 @@ flowchart LR
 transport -> app -> scenario -> public agent contracts
                          \-> internal agentruntime
 agentruntime -> llm/tool/run abstractions
-agentruntime -X-> qa/retrieval/memory/featuredelivery
+agentruntime -X-> qa/retrieval/memory/delivery
 ```
 
 Runtime 不回调 QA，也不持有通用依赖容器。每个运行对象只保存执行所需的精确依赖。
@@ -293,7 +293,7 @@ internal/agentruntime/
   budget.go           预算与最终回答预留
   output.go           输出校验
 
-internal/agentcatalog/
+internal/agent/catalog/
   catalog.go          Definition Snapshot 解析与发布
 
 internal/qa/
@@ -308,7 +308,7 @@ internal/knowledgetools/
 
 迁移过程中可以保留 `internal/agent` 作为兼容层，但最终应按概念拆分，避免变成新的杂物包。
 
-公共 `agent` 包只暴露应用组合所需合同。`internal/agentruntime` 和 `internal/agentcatalog` 保持 Nasuta 内部实现，CodeLoom 等应用通过 `app.Platform` 使用，不直接导入内部包。
+公共 `agent` 包只暴露应用组合所需合同。`internal/agentruntime` 和 `internal/agent/catalog` 保持 Nasuta 内部实现，CodeLoom 等应用通过 `app.Platform` 使用，不直接导入内部包。
 
 ## 9. Tool 与权限模型
 

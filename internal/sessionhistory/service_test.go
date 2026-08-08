@@ -65,7 +65,7 @@ func TestFindFusesDenseAndLexicalThenRevalidatesMySQL(t *testing.T) {
 	mock.ExpectQuery(`SELECT ref.*qa_session_history_terms`).
 		WithArgs(int64(42), "session-1", "createcart", 64).
 		WillReturnRows(sqlmock.NewRows([]string{"ref"}).AddRow("cmp-lexical"))
-	mock.ExpectQuery(`SELECT ref,turn_number,summary_text,summary_tokens.*qa_turn_contexts`).
+	mock.ExpectQuery(`SELECT t\.context_ref,t\.turn_no,t\.context_summary_text,t\.context_summary_tokens.*FROM qa_turns t.*JOIN qa_sessions s`).
 		WithArgs(int64(42), "session-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"ref", "turn_number", "summary_text", "summary_tokens"}).
 			AddRow("cmp-dense", 7, "semantic result", 3).
@@ -141,7 +141,7 @@ func TestSyncPendingIndexesCommittedSummaryBeforeCompletingOutbox(t *testing.T) 
 		WithArgs(sqlmock.AnyArg(), 64).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "operation", "ref", "session_id", "user_id", "attempts"}).
 			AddRow(11, "upsert", "cmp-1", "session-1", 42, 0))
-	mock.ExpectQuery(`SELECT ref,turn_number,summary_text,summary_tokens.*qa_turn_contexts`).
+	mock.ExpectQuery(`SELECT t\.context_ref,t\.turn_no,t\.context_summary_text,t\.context_summary_tokens.*FROM qa_turns t.*JOIN qa_sessions s`).
 		WithArgs(int64(42), "session-1", "cmp-1").
 		WillReturnRows(sqlmock.NewRows([]string{"ref", "turn_number", "summary_text", "summary_tokens"}).
 			AddRow("cmp-1", 3, "archived decision", 4))

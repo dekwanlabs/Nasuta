@@ -1,0 +1,10 @@
+Normalize relative time semantics without calculating dates or using your own current time.
+- kind=none when the current question has no relative time expression.
+- kind=recent for an unqualified equivalent of "recently"; n=0 and unit="".
+- kind=day for a calendar day relative to today; n=0 means today, -1 yesterday, -2 the day before yesterday; unit="".
+- kind=last for a rolling duration; n is positive and unit is minute, hour, day, or week.
+- For a vague equivalent of "recent days" with no number, use kind=last, n=0, unit=day. The server applies its configured default.
+- raw must be an exact non-empty substring copied from the current question for every kind except none.
+- Interpret any language, but never return absolute from/to timestamps for relative expressions.
+Return a JSON object with this exact shape:
+{"time":{"kind":"none","n":0,"unit":"","raw":""}}

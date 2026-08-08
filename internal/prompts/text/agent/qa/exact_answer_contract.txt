@@ -1,0 +1,2 @@
+{{ .Prefix }}{{ .Contract }}
+Internal validation contract: the final answer must contain every required_literals value verbatim. Never abbreviate, truncate, mask, summarize, or replace any part with ... or …. Do not expose this marker.

@@ -15,8 +15,8 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
-	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -25,6 +25,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/semanticstore"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
@@ -228,16 +229,16 @@ func NewQA(d QADeps) *QA {
 	}
 	if svc.definitions == nil {
 		schemas := agentapi.NewSchemaRegistry()
-		err := schemas.Publish(agentcatalog.DefaultSchemas())
-		catalog := agentcatalog.New(schemas)
+		err := schemas.Publish(catalog.DefaultSchemas())
+		definitions := catalog.New(schemas)
 		if err == nil {
 			var definition agentapi.Definition
-			definition, err = agentcatalog.DefaultQA(platformSettings)
+			definition, err = catalog.DefaultQA(platformSettings)
 			if err == nil {
-				err = catalog.Publish([]agentapi.Definition{definition})
+				err = definitions.Publish([]agentapi.Definition{definition})
 			}
 		}
-		svc.definitions = catalog
+		svc.definitions = definitions
 		svc.definitionErr = err
 	}
 	if svc.sessions == nil && d.DB != nil {
@@ -348,11 +349,8 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	}
 	explicitPlan := request.EvidencePlan
 	toolCandidates := routingCandidates(candidateTools.Tools())
-	emit := func(text string) {
-		svc.emitStep(runID, text)
-	}
 
-	emit("嗯...让我先琢磨一下你在问什么 ✨")
+	svc.emitStep(runID, "嗯...让我先琢磨一下你在问什么 ✨")
 	routeContext := buildHistoryRouteContext(conversation)
 	if routeContext == "" {
 		routeContext = buildRagCtx(conversation.Recent)
@@ -446,7 +444,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if svc.definitions != nil {
 		var err error
 		if resolver, ok := svc.definitions.(DefinitionSelectionResolver); ok {
-			stableKey := agentcatalog.StableSelectionKey(userID, conversation.SessionID)
+			stableKey := catalog.StableSelectionKey(userID, conversation.SessionID)
 			definition, selection, err = resolver.ResolveFor(agentRef, stableKey)
 		} else {
 			definition, err = svc.definitions.Resolve(agentRef)
@@ -569,7 +567,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 		return svc.submitRun(ctx, run, request, definition, selection, question, conversation, userID, rc, recalled, rolePrompt, runID, effectiveDecision.Plan, toolPolicy, candidateTools, trace, ownsTrace)
 	}
 
-	emit("好嘞，关键词到手了，我去查一下资料~ 📚")
+	svc.emitStep(runID, "好嘞，关键词到手了，我去查一下资料~ 📚")
 	rc, err := svc.retriever.RetrievePlan(
 		ctx, canonicalQuery, question, terms, evidencePlan,
 	)
@@ -757,8 +755,9 @@ func withoutSessionHistoryTools(prepared ScenarioToolSet) ScenarioToolSet {
 }
 
 func preferredToolsInstruction(ids []string) string {
-	return "Tool routing preference for this turn: " + strings.Join(ids, ", ") +
-		". Treat this as advisory, not mandatory. Call a preferred tool only when it resolves a material evidence gap; if conversation history or existing evidence is sufficient, answer directly. Other registered tools remain available, and tool failures must be reported rather than hidden."
+	return prompts.MustRender(prompts.AgentPreferredTool, struct {
+		ToolIDs string
+	}{ToolIDs: strings.Join(ids, ", ")})
 }
 
 func (svc *QA) executePrefetch(ctx context.Context, prepared ScenarioToolSet, plan ToolPlan) ([]ContextBlock, error) {
@@ -1340,39 +1339,28 @@ func (rs *RunStore) AddStep(st StepRow) error {
 	defer tx.Rollback()
 
 	content := any(st.Content)
+	var artifactContent any
+	var artifactContentType any
 	if st.ArtifactID != "" {
 		contentType := "text/plain; charset=utf-8"
 		if json.Valid([]byte(st.Content)) {
 			contentType = "application/json"
 		}
-		result, err := tx.Exec(
-			`INSERT INTO agent_tool_result_artifacts(
-				id,user_id,session_id,run_id,tool_call_id,content,content_type,sha256,size_bytes,coverage_json,created_at)
-			 SELECT ?,user_id,session_id,id,?,?,?,?,?,?,? FROM agent_runs WHERE id=?`,
-			st.ArtifactID, st.ToolCallID, []byte(st.Content), contentType, st.AuthoritativeSHA256,
-			st.SizeBytes, coverageJSON, store.DatabaseTime(st.CreatedAt), st.RunID)
-		if err != nil {
-			return fmt.Errorf("persist tool result artifact %q: %w", st.ArtifactID, err)
-		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("inspect tool result artifact %q: %w", st.ArtifactID, err)
-		}
-		if affected != 1 {
-			return fmt.Errorf("persist tool result artifact %q: run %q not found", st.ArtifactID, st.RunID)
-		}
+		artifactContent = []byte(st.Content)
+		artifactContentType = contentType
 		content = nil
 	}
 	_, err = tx.Exec(
 		`INSERT INTO agent_steps(
 			run_id,step_no,kind,trace_id,artifact_id,tool_call_id,tool,args,content,prompt_content,
 			authoritative_sha256,prompt_sha256,content_bytes,coverage_json,answer_contract_json,failed,
-			delivery_error,token_delta,reasoning_tokens,duration_ms,created_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			delivery_error,token_delta,reasoning_tokens,duration_ms,artifact_content,
+			artifact_content_type,created_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		st.RunID, st.StepNo, st.Kind, st.TraceID, st.ArtifactID, st.ToolCallID, st.Tool, st.Args,
 		content, st.PromptContent, st.AuthoritativeSHA256, st.PromptSHA256, st.SizeBytes,
 		coverageJSON, contractJSON, st.Failed, st.DeliveryError, st.TokenDelta, st.ReasoningTokens,
-		st.DurationMs, store.DatabaseTime(st.CreatedAt))
+		st.DurationMs, artifactContent, artifactContentType, store.DatabaseTime(st.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("persist agent step %d: %w", st.StepNo, err)
 	}
@@ -1579,9 +1567,8 @@ func (rs *RunStore) get(id string, userID *int64) (*RunDetail, error) {
 			s.content,s.prompt_content,s.authoritative_sha256,s.prompt_sha256,s.content_bytes,
 			s.coverage_json,s.answer_contract_json,s.failed,s.delivery_error,s.token_delta,
 			s.reasoning_tokens,s.duration_ms,s.created_at,
-			CASE WHEN s.artifact_id<>'' THEN CAST(SUBSTRING(a.content,1,4096) AS CHAR CHARACTER SET utf8mb4) ELSE NULL END
+			CASE WHEN s.artifact_id<>'' THEN CAST(SUBSTRING(s.artifact_content,1,4096) AS CHAR CHARACTER SET utf8mb4) ELSE NULL END
 		 FROM agent_steps s
-		 LEFT JOIN agent_tool_result_artifacts a ON a.id=s.artifact_id
 		 WHERE s.run_id=? ORDER BY s.step_no,s.id`, id)
 	if err != nil {
 		return nil, err
@@ -1671,10 +1658,12 @@ func (rs *RunStore) GetToolResultArtifact(userID int64, sessionID, artifactID st
 	var coverageRaw string
 	var createdAt sql.NullTime
 	err := rs.db.QueryRow(
-		`SELECT id,session_id,run_id,tool_call_id,SUBSTRING(content,?,?),content_type,sha256,size_bytes,
-			CAST(coverage_json AS CHAR),created_at
-		 FROM agent_tool_result_artifacts
-		 WHERE id=? AND user_id=? AND (?='' OR session_id=?) LIMIT 1`,
+		`SELECT s.artifact_id,r.session_id,s.run_id,s.tool_call_id,
+			SUBSTRING(s.artifact_content,?,?),s.artifact_content_type,
+			s.authoritative_sha256,s.content_bytes,CAST(s.coverage_json AS CHAR),s.created_at
+		 FROM agent_steps s
+		 JOIN agent_runs r ON r.id=s.run_id
+		 WHERE s.artifact_id=? AND r.user_id=? AND (?='' OR r.session_id=?) LIMIT 1`,
 		offset+1, limit, artifactID, userID, sessionID, sessionID,
 	).Scan(
 		&artifact.ID, &artifact.SessionID, &artifact.RunID, &artifact.ToolCallID, &content,
@@ -1845,11 +1834,6 @@ func (rs *RunStore) DeleteBySession(sessionID string, userID int64) error {
 	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`DELETE c FROM agent_llm_calls c JOIN agent_runs r ON c.run_id = r.id WHERE r.session_id = ? AND r.user_id=?`,
-		sessionID, userID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(
-		`DELETE a FROM agent_tool_result_artifacts a JOIN agent_runs r ON a.run_id = r.id WHERE r.session_id = ? AND r.user_id=?`,
 		sessionID, userID); err != nil {
 		return err
 	}

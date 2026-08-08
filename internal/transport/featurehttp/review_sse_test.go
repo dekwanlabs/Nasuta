@@ -11,17 +11,17 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/auth"
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
 type reviewEventStreamStore struct {
-	featuredelivery.Store
+	delivery.Store
 
 	mu           sync.Mutex
-	feature      featuredelivery.FeatureRequest
-	artifact     featuredelivery.Artifact
-	round        featuredelivery.ReviewRound
-	events       []featuredelivery.ReviewEvent
+	feature      delivery.FeatureRequest
+	artifact     delivery.Artifact
+	round        delivery.ReviewRound
+	events       []delivery.ReviewEvent
 	listCalls    []int64
 	roundReads   int
 	secondReplay chan struct{}
@@ -31,12 +31,12 @@ type reviewEventStreamStore struct {
 func (store *reviewEventStreamStore) GetReviewRound(
 	_ context.Context,
 	id string,
-) (*featuredelivery.ReviewRound, error) {
+) (*delivery.ReviewRound, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.roundReads++
 	if id != store.round.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	round := store.round
 	return &round, nil
@@ -45,11 +45,11 @@ func (store *reviewEventStreamStore) GetReviewRound(
 func (store *reviewEventStreamStore) GetArtifact(
 	_ context.Context,
 	id string,
-) (*featuredelivery.Artifact, error) {
+) (*delivery.Artifact, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if id != store.artifact.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	artifact := store.artifact
 	return &artifact, nil
@@ -58,11 +58,11 @@ func (store *reviewEventStreamStore) GetArtifact(
 func (store *reviewEventStreamStore) GetFeature(
 	_ context.Context,
 	id string,
-) (*featuredelivery.FeatureRequest, error) {
+) (*delivery.FeatureRequest, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if id != store.feature.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	feature := store.feature
 	return &feature, nil
@@ -73,11 +73,11 @@ func (store *reviewEventStreamStore) ListReviewEvents(
 	roundID string,
 	afterSeq int64,
 	limit int,
-) ([]featuredelivery.ReviewEvent, error) {
+) ([]delivery.ReviewEvent, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if roundID != store.round.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	store.listCalls = append(store.listCalls, afterSeq)
 	if len(store.listCalls) == 2 && store.secondReplay != nil {
@@ -87,7 +87,7 @@ func (store *reviewEventStreamStore) ListReviewEvents(
 		return store.events[index].Seq > afterSeq
 	})
 	end := min(start+limit, len(store.events))
-	return append([]featuredelivery.ReviewEvent(nil), store.events[start:end]...), nil
+	return append([]delivery.ReviewEvent(nil), store.events[start:end]...), nil
 }
 
 func (store *reviewEventStreamStore) RequestReviewRoundCancel(
@@ -98,29 +98,29 @@ func (store *reviewEventStreamStore) RequestReviewRoundCancel(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if roundID != store.round.ID {
-		return false, featuredelivery.ErrNotFound
+		return false, delivery.ErrNotFound
 	}
 	switch store.round.Status {
-	case featuredelivery.RoundCancelled:
+	case delivery.RoundCancelled:
 		return false, nil
-	case featuredelivery.RoundCreated, featuredelivery.RoundRunning,
-		featuredelivery.RoundEvaluating:
-		store.round.Status = featuredelivery.RoundCancelled
+	case delivery.RoundCreated, delivery.RoundRunning,
+		delivery.RoundEvaluating:
+		store.round.Status = delivery.RoundCancelled
 		store.round.CompletedAt = &at
 		return true, nil
 	default:
-		return false, featuredelivery.ErrConflict
+		return false, delivery.ErrConflict
 	}
 }
 
 func (store *reviewEventStreamStore) AppendReviewEvent(
 	_ context.Context,
-	event featuredelivery.ReviewEvent,
-) (*featuredelivery.ReviewEvent, error) {
+	event delivery.ReviewEvent,
+) (*delivery.ReviewEvent, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if event.RoundID != store.round.ID {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	event.Seq = int64(len(store.events) + 1)
 	store.events = append(store.events, event)
@@ -141,7 +141,7 @@ func (store *reviewEventStreamStore) authorizationReads() int {
 }
 
 func TestReviewReplayEventsPaginatesWithoutGaps(t *testing.T) {
-	store := newReviewEventStreamStore(featuredelivery.RoundRunning)
+	store := newReviewEventStreamStore(delivery.RoundRunning)
 	store.events = makeReviewEvents(1001, 0)
 	handler, reader := openReviewEventReader(t, store)
 	response := httptest.NewRecorder()
@@ -169,7 +169,7 @@ func TestReviewReplayEventsPaginatesWithoutGaps(t *testing.T) {
 }
 
 func TestReviewReplayEventsStopsAtTerminalEvent(t *testing.T) {
-	store := newReviewEventStreamStore(featuredelivery.RoundCompleted)
+	store := newReviewEventStreamStore(delivery.RoundCompleted)
 	store.events = makeReviewEvents(800, 501)
 	handler, reader := openReviewEventReader(t, store)
 	response := httptest.NewRecorder()
@@ -200,7 +200,7 @@ func TestReviewReplayEventsStopsAtTerminalEvent(t *testing.T) {
 }
 
 func TestReviewLiveEventFillsPersistentSequenceGapWithoutDuplicate(t *testing.T) {
-	store := newReviewEventStreamStore(featuredelivery.RoundRunning)
+	store := newReviewEventStreamStore(delivery.RoundRunning)
 	store.events = makeReviewEvents(2, 0)
 	handler, reader := openReviewEventReader(t, store)
 	response := httptest.NewRecorder()
@@ -223,13 +223,13 @@ func TestReviewLiveEventFillsPersistentSequenceGapWithoutDuplicate(t *testing.T)
 }
 
 func TestReviewEventStreamResumesAfterLastEventIDAndStopsAtTerminal(t *testing.T) {
-	store := newReviewEventStreamStore(featuredelivery.RoundCompleted)
-	store.events = []featuredelivery.ReviewEvent{
-		reviewEvent(1, featuredelivery.ReviewEventRoundStarted),
-		reviewEvent(2, featuredelivery.ReviewEventRoundCompleted),
-		reviewEvent(3, featuredelivery.ReviewEventAssignmentSucceeded),
+	store := newReviewEventStreamStore(delivery.RoundCompleted)
+	store.events = []delivery.ReviewEvent{
+		reviewEvent(1, delivery.ReviewEventRoundStarted),
+		reviewEvent(2, delivery.ReviewEventRoundCompleted),
+		reviewEvent(3, delivery.ReviewEventAssignmentSucceeded),
 	}
-	handler := New(featuredelivery.NewService(store, nil, time.Second))
+	handler := New(delivery.NewService(store, nil, time.Second))
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(func(pattern string, route http.HandlerFunc) {
 		mux.HandleFunc(pattern, route)
@@ -265,12 +265,12 @@ func TestReviewEventStreamResumesAfterLastEventIDAndStopsAtTerminal(t *testing.T
 }
 
 func TestReviewEventStreamReplaysThenSwitchesLiveWithOneAuthorization(t *testing.T) {
-	store := newReviewEventStreamStore(featuredelivery.RoundRunning)
-	store.events = []featuredelivery.ReviewEvent{
-		reviewEvent(1, featuredelivery.ReviewEventRoundStarted),
+	store := newReviewEventStreamStore(delivery.RoundRunning)
+	store.events = []delivery.ReviewEvent{
+		reviewEvent(1, delivery.ReviewEventRoundStarted),
 	}
 	store.secondReplay = make(chan struct{})
-	service := featuredelivery.NewService(store, nil, time.Second)
+	service := delivery.NewService(store, nil, time.Second)
 	handler := New(service)
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(func(pattern string, route http.HandlerFunc) {
@@ -317,11 +317,11 @@ func TestReviewEventStreamReplaysThenSwitchesLiveWithOneAuthorization(t *testing
 }
 
 func TestReviewEventStreamHidesUnauthorizedRound(t *testing.T) {
-	store := newReviewEventStreamStore(featuredelivery.RoundCompleted)
-	store.events = []featuredelivery.ReviewEvent{
-		reviewEvent(1, featuredelivery.ReviewEventRoundCompleted),
+	store := newReviewEventStreamStore(delivery.RoundCompleted)
+	store.events = []delivery.ReviewEvent{
+		reviewEvent(1, delivery.ReviewEventRoundCompleted),
 	}
-	handler := New(featuredelivery.NewService(store, nil, time.Second))
+	handler := New(delivery.NewService(store, nil, time.Second))
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(func(pattern string, route http.HandlerFunc) {
 		mux.HandleFunc(pattern, route)
@@ -347,17 +347,17 @@ func TestReviewEventStreamHidesUnauthorizedRound(t *testing.T) {
 }
 
 func newReviewEventStreamStore(
-	status featuredelivery.ReviewRoundStatus,
+	status delivery.ReviewRoundStatus,
 ) *reviewEventStreamStore {
 	return &reviewEventStreamStore{
-		feature: featuredelivery.FeatureRequest{ID: "feat-1", CreatedBy: 7},
-		artifact: featuredelivery.Artifact{
+		feature: delivery.FeatureRequest{ID: "feat-1", CreatedBy: 7},
+		artifact: delivery.Artifact{
 			ID: "artifact-1", RequestID: "feat-1", ContentHash: "artifact-hash",
 		},
-		round: featuredelivery.ReviewRound{
+		round: delivery.ReviewRound{
 			ID: "round-1", Status: status,
-			Subject: featuredelivery.ReviewSubject{
-				Kind: featuredelivery.SubjectSystemDesign, ID: "artifact-1",
+			Subject: delivery.ReviewSubject{
+				Kind: delivery.SubjectSystemDesign, ID: "artifact-1",
 				SourceContentHash: "artifact-hash",
 			},
 		},
@@ -367,9 +367,9 @@ func newReviewEventStreamStore(
 func openReviewEventReader(
 	t *testing.T,
 	store *reviewEventStreamStore,
-) (*Handler, *featuredelivery.ReviewEventReader) {
+) (*Handler, *delivery.ReviewEventReader) {
 	t.Helper()
-	handler := New(featuredelivery.NewService(store, nil, time.Second))
+	handler := New(delivery.NewService(store, nil, time.Second))
 	_, reader, err := handler.service.OpenReviewEvents(
 		context.Background(), "round-1", 7, false,
 	)
@@ -382,13 +382,13 @@ func openReviewEventReader(
 func makeReviewEvents(
 	count int,
 	terminalSeq int64,
-) []featuredelivery.ReviewEvent {
-	events := make([]featuredelivery.ReviewEvent, count)
+) []delivery.ReviewEvent {
+	events := make([]delivery.ReviewEvent, count)
 	for index := range events {
 		seq := int64(index + 1)
-		kind := featuredelivery.ReviewEventAssignmentStarted
+		kind := delivery.ReviewEventAssignmentStarted
 		if seq == terminalSeq {
-			kind = featuredelivery.ReviewEventRoundCompleted
+			kind = delivery.ReviewEventRoundCompleted
 		}
 		events[index] = reviewEvent(seq, kind)
 	}
@@ -397,9 +397,9 @@ func makeReviewEvents(
 
 func reviewEvent(
 	seq int64,
-	kind featuredelivery.ReviewEventKind,
-) featuredelivery.ReviewEvent {
-	return featuredelivery.ReviewEvent{
+	kind delivery.ReviewEventKind,
+) delivery.ReviewEvent {
+	return delivery.ReviewEvent{
 		RoundID: "round-1",
 		Seq:     seq,
 		Kind:    kind,

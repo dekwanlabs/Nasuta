@@ -3,11 +3,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/url"
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -81,5 +81,7 @@ func (state *webEvidenceState) ConvergenceHint() string {
 		return ""
 	}
 	state.lastHinted = count
-	return fmt.Sprintf(`[WEB_EVIDENCE_STATUS] You have successfully fetched evidence from %d independent web domains. If the evidence now supports the requested conclusion, answer immediately. Continue searching only for a specific unresolved fact, ambiguity, or source-quality gap that you can name; do not keep searching merely to accumulate more pages.`, count)
+	return prompts.MustRender(prompts.AgentQAWebConvergence, struct {
+		DomainCount int
+	}{DomainCount: count})
 }

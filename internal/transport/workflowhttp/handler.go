@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
@@ -22,36 +22,36 @@ const (
 )
 
 type eventReader interface {
-	List(context.Context, int64, int) ([]agentworkflow.Event, error)
+	List(context.Context, int64, int) ([]workflow.Event, error)
 }
 
 type service interface {
-	PublishDefinitionsAs(context.Context, []agentworkflow.WorkflowDefinition, int64, bool) error
-	ListDefinitionRecords(context.Context, agentworkflow.DefinitionCursor, int) ([]agentworkflow.DefinitionRecord, error)
+	PublishDefinitionsAs(context.Context, []workflow.WorkflowDefinition, int64, bool) error
+	ListDefinitionRecords(context.Context, workflow.DefinitionCursor, int) ([]workflow.DefinitionRecord, error)
 	SetDefinitionDefault(context.Context, string, int64, int64, bool) error
 	SetDefinitionActive(context.Context, string, int64, bool, int64, bool) error
-	ListDefinitionAudit(context.Context, string, int64, int, bool) ([]agentworkflow.DefinitionAuditEvent, error)
-	GetDefinitionRollout(string) (agentworkflow.RolloutRule, bool, error)
-	SetDefinitionRollout(context.Context, string, int64, int, string, bool, int64, bool) (agentworkflow.RolloutRule, error)
-	ListDefinitionRolloutAudit(context.Context, string, int64, int, bool) ([]agentworkflow.RolloutAuditEvent, error)
-	Start(context.Context, agentworkflow.StartRequest) (*agentworkflow.WorkflowRunRecord, error)
-	GetRun(context.Context, string, int64, bool) (*agentworkflow.WorkflowRunRecord, error)
-	ListNodeRuns(context.Context, string, agentworkflow.NodeRunCursor, int, int64, bool) ([]agentworkflow.NodeRunRecord, error)
-	ListEvents(context.Context, string, int64, int, int64, bool) ([]agentworkflow.Event, error)
-	OpenRunEvents(context.Context, string, int64, bool) (*agentworkflow.WorkflowRunRecord, eventReader, error)
-	SubscribeEvents(string) (<-chan agentworkflow.Event, func(), error)
-	ListHandoffs(context.Context, string, agentworkflow.HandoffCursor, int, int64, bool) ([]agentworkflow.Handoff, error)
-	Cancel(context.Context, string, int64, bool) (agentworkflow.CancelTransition, error)
-	DecideHumanApproval(context.Context, agentworkflow.ApprovalRequest) (agentworkflow.ApprovalResult, error)
+	ListDefinitionAudit(context.Context, string, int64, int, bool) ([]workflow.DefinitionAuditEvent, error)
+	GetDefinitionRollout(string) (workflow.RolloutRule, bool, error)
+	SetDefinitionRollout(context.Context, string, int64, int, string, bool, int64, bool) (workflow.RolloutRule, error)
+	ListDefinitionRolloutAudit(context.Context, string, int64, int, bool) ([]workflow.RolloutAuditEvent, error)
+	Start(context.Context, workflow.StartRequest) (*workflow.WorkflowRunRecord, error)
+	GetRun(context.Context, string, int64, bool) (*workflow.WorkflowRunRecord, error)
+	ListNodeRuns(context.Context, string, workflow.NodeRunCursor, int, int64, bool) ([]workflow.NodeRunRecord, error)
+	ListEvents(context.Context, string, int64, int, int64, bool) ([]workflow.Event, error)
+	OpenRunEvents(context.Context, string, int64, bool) (*workflow.WorkflowRunRecord, eventReader, error)
+	SubscribeEvents(string) (<-chan workflow.Event, func(), error)
+	ListHandoffs(context.Context, string, workflow.HandoffCursor, int, int64, bool) ([]workflow.Handoff, error)
+	Cancel(context.Context, string, int64, bool) (workflow.CancelTransition, error)
+	DecideHumanApproval(context.Context, workflow.ApprovalRequest) (workflow.ApprovalResult, error)
 }
 
 type serviceAdapter struct {
-	service *agentworkflow.Service
+	service *workflow.Service
 }
 
 func (adapter serviceAdapter) PublishDefinitionsAs(
 	ctx context.Context,
-	definitions []agentworkflow.WorkflowDefinition,
+	definitions []workflow.WorkflowDefinition,
 	actorUserID int64,
 	admin bool,
 ) error {
@@ -60,9 +60,9 @@ func (adapter serviceAdapter) PublishDefinitionsAs(
 
 func (adapter serviceAdapter) ListDefinitionRecords(
 	ctx context.Context,
-	cursor agentworkflow.DefinitionCursor,
+	cursor workflow.DefinitionCursor,
 	limit int,
-) ([]agentworkflow.DefinitionRecord, error) {
+) ([]workflow.DefinitionRecord, error) {
 	return adapter.service.ListDefinitionRecords(ctx, cursor, limit)
 }
 
@@ -97,13 +97,13 @@ func (adapter serviceAdapter) ListDefinitionAudit(
 	afterSeq int64,
 	limit int,
 	admin bool,
-) ([]agentworkflow.DefinitionAuditEvent, error) {
+) ([]workflow.DefinitionAuditEvent, error) {
 	return adapter.service.ListDefinitionAudit(ctx, id, afterSeq, limit, admin)
 }
 
 func (adapter serviceAdapter) GetDefinitionRollout(
 	id string,
-) (agentworkflow.RolloutRule, bool, error) {
+) (workflow.RolloutRule, bool, error) {
 	return adapter.service.GetDefinitionRollout(id)
 }
 
@@ -116,7 +116,7 @@ func (adapter serviceAdapter) SetDefinitionRollout(
 	active bool,
 	actorUserID int64,
 	admin bool,
-) (agentworkflow.RolloutRule, error) {
+) (workflow.RolloutRule, error) {
 	return adapter.service.SetDefinitionRollout(
 		ctx, id, candidateVersion, percentageBPS, salt, active, actorUserID, admin,
 	)
@@ -128,7 +128,7 @@ func (adapter serviceAdapter) ListDefinitionRolloutAudit(
 	afterSeq int64,
 	limit int,
 	admin bool,
-) ([]agentworkflow.RolloutAuditEvent, error) {
+) ([]workflow.RolloutAuditEvent, error) {
 	return adapter.service.ListDefinitionRolloutAudit(
 		ctx, id, afterSeq, limit, admin,
 	)
@@ -136,8 +136,8 @@ func (adapter serviceAdapter) ListDefinitionRolloutAudit(
 
 func (adapter serviceAdapter) Start(
 	ctx context.Context,
-	request agentworkflow.StartRequest,
-) (*agentworkflow.WorkflowRunRecord, error) {
+	request workflow.StartRequest,
+) (*workflow.WorkflowRunRecord, error) {
 	return adapter.service.Start(ctx, request)
 }
 
@@ -146,18 +146,18 @@ func (adapter serviceAdapter) GetRun(
 	runID string,
 	userID int64,
 	admin bool,
-) (*agentworkflow.WorkflowRunRecord, error) {
+) (*workflow.WorkflowRunRecord, error) {
 	return adapter.service.GetRun(ctx, runID, userID, admin)
 }
 
 func (adapter serviceAdapter) ListNodeRuns(
 	ctx context.Context,
 	runID string,
-	cursor agentworkflow.NodeRunCursor,
+	cursor workflow.NodeRunCursor,
 	limit int,
 	userID int64,
 	admin bool,
-) ([]agentworkflow.NodeRunRecord, error) {
+) ([]workflow.NodeRunRecord, error) {
 	return adapter.service.ListNodeRuns(ctx, runID, cursor, limit, userID, admin)
 }
 
@@ -168,7 +168,7 @@ func (adapter serviceAdapter) ListEvents(
 	limit int,
 	userID int64,
 	admin bool,
-) ([]agentworkflow.Event, error) {
+) ([]workflow.Event, error) {
 	return adapter.service.ListEvents(ctx, runID, afterSeq, limit, userID, admin)
 }
 
@@ -177,25 +177,25 @@ func (adapter serviceAdapter) OpenRunEvents(
 	runID string,
 	userID int64,
 	admin bool,
-) (*agentworkflow.WorkflowRunRecord, eventReader, error) {
+) (*workflow.WorkflowRunRecord, eventReader, error) {
 	run, reader, err := adapter.service.OpenRunEvents(ctx, runID, userID, admin)
 	return run, reader, err
 }
 
 func (adapter serviceAdapter) SubscribeEvents(
 	runID string,
-) (<-chan agentworkflow.Event, func(), error) {
+) (<-chan workflow.Event, func(), error) {
 	return adapter.service.SubscribeEvents(runID)
 }
 
 func (adapter serviceAdapter) ListHandoffs(
 	ctx context.Context,
 	runID string,
-	cursor agentworkflow.HandoffCursor,
+	cursor workflow.HandoffCursor,
 	limit int,
 	userID int64,
 	admin bool,
-) ([]agentworkflow.Handoff, error) {
+) ([]workflow.Handoff, error) {
 	return adapter.service.ListHandoffs(ctx, runID, cursor, limit, userID, admin)
 }
 
@@ -204,14 +204,14 @@ func (adapter serviceAdapter) Cancel(
 	runID string,
 	userID int64,
 	admin bool,
-) (agentworkflow.CancelTransition, error) {
+) (workflow.CancelTransition, error) {
 	return adapter.service.Cancel(ctx, runID, userID, admin)
 }
 
 func (adapter serviceAdapter) DecideHumanApproval(
 	ctx context.Context,
-	request agentworkflow.ApprovalRequest,
-) (agentworkflow.ApprovalResult, error) {
+	request workflow.ApprovalRequest,
+) (workflow.ApprovalResult, error) {
 	return adapter.service.DecideHumanApproval(ctx, request)
 }
 
@@ -223,11 +223,11 @@ type Handler struct {
 type approvalDecider interface {
 	DecideHumanApproval(
 		context.Context,
-		agentworkflow.ApprovalRequest,
-	) (agentworkflow.ApprovalResult, error)
+		workflow.ApprovalRequest,
+	) (workflow.ApprovalResult, error)
 }
 
-func New(workflows *agentworkflow.Service) *Handler {
+func New(workflows *workflow.Service) *Handler {
 	if workflows == nil {
 		return &Handler{}
 	}
@@ -263,14 +263,14 @@ func (handler *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Definitions []agentworkflow.WorkflowDefinition `json:"definitions"`
+		Definitions []workflow.WorkflowDefinition `json:"definitions"`
 	}
 	if err := httputil.DecodeStrictJSON(r, &request); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	if err := handler.service.PublishDefinitionsAs(
@@ -297,7 +297,7 @@ func (handler *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	items, err := handler.service.ListDefinitionRecords(
@@ -327,7 +327,7 @@ func (handler *Handler) SetDefault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	if err := handler.service.SetDefinitionDefault(
@@ -359,7 +359,7 @@ func (handler *Handler) SetStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	if err := handler.service.SetDefinitionActive(
@@ -391,7 +391,7 @@ func (handler *Handler) ListAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	items, err := handler.service.ListDefinitionAudit(
@@ -415,7 +415,7 @@ func (handler *Handler) GetRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("workflow_id"))
@@ -427,7 +427,7 @@ func (handler *Handler) GetRollout(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeDomainError(w, fmt.Errorf(
 			"workflow rollout %q not found: %w",
-			id, agentworkflow.ErrNotFound,
+			id, workflow.ErrNotFound,
 		))
 		return
 	}
@@ -450,7 +450,7 @@ func (handler *Handler) SetRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	rule, err := handler.service.SetDefinitionRollout(
@@ -486,7 +486,7 @@ func (handler *Handler) ListRolloutAudit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	items, err := handler.service.ListDefinitionRolloutAudit(
@@ -531,11 +531,11 @@ func (handler *Handler) Start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
-	run, err := handler.service.Start(r.Context(), agentworkflow.StartRequest{
-		Workflow: agentworkflow.DefinitionRef{
+	run, err := handler.service.Start(r.Context(), workflow.StartRequest{
+		Workflow: workflow.DefinitionRef{
 			ID: r.PathValue("workflow_id"), Version: request.Version,
 		},
 		Input: request.Input,
@@ -555,7 +555,7 @@ func (handler *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	run, err := handler.service.GetRun(
@@ -584,7 +584,7 @@ func (handler *Handler) ListNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	items, err := handler.service.ListNodeRuns(
@@ -619,7 +619,7 @@ func (handler *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	items, err := handler.service.ListEvents(
@@ -654,7 +654,7 @@ func (handler *Handler) ListHandoffs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	items, err := handler.service.ListHandoffs(
@@ -679,7 +679,7 @@ func (handler *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	transition, err := handler.service.Cancel(
@@ -705,16 +705,16 @@ func (handler *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
-	decision := agentworkflow.ApprovalDecision(
+	decision := workflow.ApprovalDecision(
 		strings.ToLower(strings.TrimSpace(request.Decision)),
 	)
-	if decision != agentworkflow.ApprovalApproved &&
-		decision != agentworkflow.ApprovalRejected {
+	if decision != workflow.ApprovalApproved &&
+		decision != workflow.ApprovalRejected {
 		httputil.WriteBadRequest(w, "decision must be approved or rejected")
 		return
 	}
 	if handler.service == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	approvals := handler.approvals
@@ -722,12 +722,12 @@ func (handler *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 		approvals = handler.service
 	}
 	if approvals == nil {
-		writeDomainError(w, agentworkflow.ErrUnavailable)
+		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
 	result, err := approvals.DecideHumanApproval(
 		r.Context(),
-		agentworkflow.ApprovalRequest{
+		workflow.ApprovalRequest{
 			WorkflowRunID: r.PathValue("run_id"),
 			NodeID:        r.PathValue("node_id"),
 			Decision:      decision,
@@ -764,15 +764,15 @@ func pathVersion(r *http.Request) (int64, error) {
 
 func writeDomainError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, agentworkflow.ErrInvalid):
+	case errors.Is(err, workflow.ErrInvalid):
 		httputil.WriteBadRequest(w, err.Error())
-	case errors.Is(err, agentworkflow.ErrForbidden):
+	case errors.Is(err, workflow.ErrForbidden):
 		httputil.WriteErrStatus(w, http.StatusForbidden, err)
-	case errors.Is(err, agentworkflow.ErrNotFound):
+	case errors.Is(err, workflow.ErrNotFound):
 		httputil.WriteErrStatus(w, http.StatusNotFound, err)
-	case errors.Is(err, agentworkflow.ErrConflict):
+	case errors.Is(err, workflow.ErrConflict):
 		httputil.WriteErrStatus(w, http.StatusConflict, err)
-	case errors.Is(err, agentworkflow.ErrUnavailable):
+	case errors.Is(err, workflow.ErrUnavailable):
 		httputil.WriteErrStatus(w, http.StatusServiceUnavailable, err)
 	default:
 		httputil.WriteErr(w, err)

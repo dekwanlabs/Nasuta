@@ -7,13 +7,13 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
+	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 )
 
 var canonicalAgentID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 
-func decodeDefinitionCursor(value string) (agentcatalog.DefinitionCursor, error) {
-	var cursor agentcatalog.DefinitionCursor
+func decodeDefinitionCursor(value string) (catalog.DefinitionCursor, error) {
+	var cursor catalog.DefinitionCursor
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return cursor, nil
@@ -26,13 +26,13 @@ func decodeDefinitionCursor(value string) (agentcatalog.DefinitionCursor, error)
 		return cursor, fmt.Errorf("invalid agent cursor: %w", err)
 	}
 	if !canonicalAgentID.MatchString(cursor.ID) || cursor.Version <= 0 {
-		return agentcatalog.DefinitionCursor{}, fmt.Errorf("invalid agent cursor")
+		return catalog.DefinitionCursor{}, fmt.Errorf("invalid agent cursor")
 	}
 	return cursor, nil
 }
 
-func encodeDefinitionCursor(record agentcatalog.DefinitionRecord) string {
-	raw, _ := json.Marshal(agentcatalog.DefinitionCursor{
+func encodeDefinitionCursor(record catalog.DefinitionRecord) string {
+	raw, _ := json.Marshal(catalog.DefinitionCursor{
 		ID: record.ID, Version: record.Version,
 	})
 	return base64.RawURLEncoding.EncodeToString(raw)

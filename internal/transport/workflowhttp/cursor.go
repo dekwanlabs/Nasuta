@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
 
 var canonicalCursorID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
@@ -26,62 +26,62 @@ func requestLimit(r *http.Request) (int, error) {
 	return limit, nil
 }
 
-func decodeDefinitionCursor(value string) (agentworkflow.DefinitionCursor, error) {
-	var cursor agentworkflow.DefinitionCursor
+func decodeDefinitionCursor(value string) (workflow.DefinitionCursor, error) {
+	var cursor workflow.DefinitionCursor
 	if err := decodeCursor(value, &cursor); err != nil {
-		return agentworkflow.DefinitionCursor{}, fmt.Errorf("invalid workflow cursor: %w", err)
+		return workflow.DefinitionCursor{}, fmt.Errorf("invalid workflow cursor: %w", err)
 	}
 	if strings.TrimSpace(value) == "" {
 		return cursor, nil
 	}
 	if !canonicalCursorID.MatchString(cursor.ID) || cursor.Version <= 0 {
-		return agentworkflow.DefinitionCursor{}, fmt.Errorf("invalid workflow cursor")
+		return workflow.DefinitionCursor{}, fmt.Errorf("invalid workflow cursor")
 	}
 	return cursor, nil
 }
 
-func encodeDefinitionCursor(definition agentworkflow.DefinitionRecord) string {
-	return encodeCursor(agentworkflow.DefinitionCursor{
+func encodeDefinitionCursor(definition workflow.DefinitionRecord) string {
+	return encodeCursor(workflow.DefinitionCursor{
 		ID: definition.ID, Version: definition.Version,
 	})
 }
 
-func decodeNodeCursor(value string) (agentworkflow.NodeRunCursor, error) {
-	var cursor agentworkflow.NodeRunCursor
+func decodeNodeCursor(value string) (workflow.NodeRunCursor, error) {
+	var cursor workflow.NodeRunCursor
 	if err := decodeCursor(value, &cursor); err != nil {
-		return agentworkflow.NodeRunCursor{}, fmt.Errorf("invalid node cursor: %w", err)
+		return workflow.NodeRunCursor{}, fmt.Errorf("invalid node cursor: %w", err)
 	}
 	if strings.TrimSpace(value) == "" {
 		return cursor, nil
 	}
 	if !canonicalCursorID.MatchString(cursor.NodeID) || cursor.Attempt <= 0 {
-		return agentworkflow.NodeRunCursor{}, fmt.Errorf("invalid node cursor")
+		return workflow.NodeRunCursor{}, fmt.Errorf("invalid node cursor")
 	}
 	return cursor, nil
 }
 
-func encodeNodeCursor(run agentworkflow.NodeRunRecord) string {
-	return encodeCursor(agentworkflow.NodeRunCursor{
+func encodeNodeCursor(run workflow.NodeRunRecord) string {
+	return encodeCursor(workflow.NodeRunCursor{
 		NodeID: run.NodeID, Attempt: run.Attempt,
 	})
 }
 
-func decodeHandoffCursor(value string) (agentworkflow.HandoffCursor, error) {
-	var cursor agentworkflow.HandoffCursor
+func decodeHandoffCursor(value string) (workflow.HandoffCursor, error) {
+	var cursor workflow.HandoffCursor
 	if err := decodeCursor(value, &cursor); err != nil {
-		return agentworkflow.HandoffCursor{}, fmt.Errorf("invalid handoff cursor: %w", err)
+		return workflow.HandoffCursor{}, fmt.Errorf("invalid handoff cursor: %w", err)
 	}
 	if strings.TrimSpace(value) == "" {
 		return cursor, nil
 	}
 	if cursor.CreatedAt.IsZero() || !canonicalCursorID.MatchString(cursor.ID) {
-		return agentworkflow.HandoffCursor{}, fmt.Errorf("invalid handoff cursor")
+		return workflow.HandoffCursor{}, fmt.Errorf("invalid handoff cursor")
 	}
 	return cursor, nil
 }
 
-func encodeHandoffCursor(handoff agentworkflow.Handoff) string {
-	return encodeCursor(agentworkflow.HandoffCursor{
+func encodeHandoffCursor(handoff workflow.Handoff) string {
+	return encodeCursor(workflow.HandoffCursor{
 		CreatedAt: handoff.CreatedAt, ID: handoff.ID,
 	})
 }

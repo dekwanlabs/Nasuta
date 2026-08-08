@@ -9,7 +9,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
@@ -57,7 +57,7 @@ type Handler struct {
 	platform           *config.PlatformSettings
 	idx                IndexingOps
 	rolePromptFn       func(userID int64) string
-	featureStatusFn    func(context.Context) featuredelivery.FeatureDeliveryStatus
+	featureStatusFn    func(context.Context) delivery.FeatureDeliveryStatus
 	qaRuntimeFn        func() QARuntime
 	reloadQAFn         func(*codegraph.DB) error
 }
@@ -80,7 +80,7 @@ func (handler *Handler) SetRolePrompt(fn func(userID int64) string) {
 	handler.rolePromptFn = fn
 }
 
-func (handler *Handler) SetFeatureDeliveryStatus(fn func(context.Context) featuredelivery.FeatureDeliveryStatus) {
+func (handler *Handler) SetFeatureDeliveryStatus(fn func(context.Context) delivery.FeatureDeliveryStatus) {
 	handler.featureStatusFn = fn
 }
 

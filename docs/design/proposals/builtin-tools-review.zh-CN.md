@@ -51,7 +51,7 @@
 **复杂度：参差。** 一半工具简洁（`list_apis`、`index_stats`、`check_docs`、`trace_calls`、`web_search`、写动作目录、`observe_logs`），另一半偏复杂（`search_code`、`get_service`、`trace_deps`、`search_runbooks`、`get_symbol`）。复杂的根因不是业务逻辑本身，而是三层横切问题：
 
 1. **`Xxx → XxxResult → FindXxx → SearchXxx → toXxxResult` 的多层中转**，其中 `Xxx`（吞错的 `map[string]any` 包装）和 `toXxxResult`（手写 map 转换）两层是纯样板，重复 JSON 标签已能完成的工作，且制造字段漂移风险面。
-2. **`domain.*` 与 `knowledge.*` 双类型层级本身是合理的**（`knowledge` 是被 `featuredelivery` 真实消费的公共契约），但 runbook 两侧字段逐字段相同，转换器是零差异拷贝；而 `trace_deps` 在 domain/knowledge 之外又叠加了第三个 map 表示，且与 dashboard 直连序列化的形状不一致。
+2. **`domain.*` 与 `knowledge.*` 双类型层级本身是合理的**（`knowledge` 是被 `delivery` 真实消费的公共契约），但 runbook 两侧字段逐字段相同，转换器是零差异拷贝；而 `trace_deps` 在 domain/knowledge 之外又叠加了第三个 map 表示，且与 dashboard 直连序列化的形状不一致。
 3. **入口间重复校验**（`clampInt`/方向默认在两个入口各做一次）与若干**死代码 / 防御性兜底**。
 
 **死路径/防御性兜底（违反"无静默兜底"约定）：** MCP nil-registry 兜底、`QA.toolExecutor()` 的空 registry 分支、`tool.Registry` 中无生产调用方的通用 `Replace/Unregister` API、`GetSymbol` 死方法——正常生产构造中不可达，部分若被触达会静默降级。`ReadRegistry.Reconcile` 及其 revision 驱动的 MCP 热更新是活路径，不属于清理范围。
@@ -154,10 +154,10 @@
 | `Xxx` | `map[string]any`（吞错进 map） | REST dashboard + 冒烟 | **样板**：所有工具重复同款 4 行 `if err != nil { return map{...,"error":...} }; return result` |
 | `XxxResult` | `(map[string]any, error)` | MCP registry | 多数仅 `clampInt` + 包一层，价值低 |
 | `FindXxx`/`TraceXxx` | `domain.*` | 内部检索 `retrieval/pipeline.go` | 合理 |
-| `SearchXxx`/`TraceDependencies` | `knowledge.*` | 场景工具 `featuredelivery/generation.go` | **合理**：真实公共契约消费方 |
+| `SearchXxx`/`TraceDependencies` | `knowledge.*` | 场景工具 `delivery/generation.go` | **合理**：真实公共契约消费方 |
 | `toXxxResult` | `domain.* → knowledge.*` | 桥接两类型世界 | 部分机械字段裁剪，部分零差异拷贝 |
 
-`knowledge.*` 层**有正当性**：`featuredelivery/generation.go` 真实导入 `knowledge.*`，且 `knowledge.ServiceRecord` 注释明确"只携带对外有用的身份与元数据"。问题不在这一层，而在 `Xxx`（吞错 map）与 MCP 专用的第三个 map 表示。
+`knowledge.*` 层**有正当性**：`delivery/generation.go` 真实导入 `knowledge.*`，且 `knowledge.ServiceRecord` 注释明确"只携带对外有用的身份与元数据"。问题不在这一层，而在 `Xxx`（吞错 map）与 MCP 专用的第三个 map 表示。
 
 ### 4.2 横切问题二：`map[string]any` 与字段漂移
 

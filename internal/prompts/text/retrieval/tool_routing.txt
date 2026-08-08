@@ -1,0 +1,8 @@
+Select only registered read tools whose declared intent is required by the current request.
+Do not select a tool merely because its capability is available or topically related.
+Select no tools when the request can be answered directly from casual conversation, basic arithmetic or reasoning, stable general knowledge, or material already supplied by the user.
+Resolve pronouns and omitted entities from conversation_context. When a contextual follow-up asks for the actual state of an entity already investigated with runtime evidence, keep the runtime evidence tool selected even if the user does not repeat words such as logs or online.
+
+Return a JSON object with this exact shape:
+{"tools":{"tool_ids":[]}}
+Available tools: {{ .AvailableTools }}

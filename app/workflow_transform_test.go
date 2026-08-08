@@ -6,25 +6,25 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
-	"github.com/dekwanlabs/nasuta/internal/featurepipeline"
-	"github.com/dekwanlabs/nasuta/internal/featurereviewworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/pipeline"
+	"github.com/dekwanlabs/nasuta/internal/feature/reviewworkflow"
 )
 
 func TestWorkflowTransformDispatcherRoutesKnownFamilies(t *testing.T) {
 	dispatcher := newWorkflowTransformDispatcher(
-		featurepipeline.NewExecutor(nil),
-		featurereviewworkflow.NewExecutor(nil),
+		pipeline.NewExecutor(nil),
+		reviewworkflow.NewExecutor(nil),
 	)
 	for _, transformID := range []string{
-		featurepipeline.TransformRequirementAnalysis,
-		featurereviewworkflow.TransformAssignment,
+		pipeline.TransformRequirementAnalysis,
+		reviewworkflow.TransformAssignment,
 	} {
-		_, err := dispatcher.Execute(context.Background(), agentworkflow.NodeRequest{
-			Node: agentworkflow.NodeDefinition{TransformID: transformID},
+		_, err := dispatcher.Execute(context.Background(), workflow.NodeRequest{
+			Node: workflow.NodeDefinition{TransformID: transformID},
 		})
-		if !errors.Is(err, featuredelivery.ErrUnavailable) {
+		if !errors.Is(err, delivery.ErrUnavailable) {
 			t.Fatalf("transform %q error = %v, want unavailable", transformID, err)
 		}
 	}
@@ -32,7 +32,7 @@ func TestWorkflowTransformDispatcherRoutesKnownFamilies(t *testing.T) {
 
 func TestWorkflowTransformDispatcherRejectsUnavailableAndUnknownTransforms(t *testing.T) {
 	dispatcher := newWorkflowTransformDispatcher(
-		featurepipeline.NewExecutor(nil),
+		pipeline.NewExecutor(nil),
 		nil,
 	)
 	for _, test := range []struct {
@@ -42,7 +42,7 @@ func TestWorkflowTransformDispatcherRejectsUnavailableAndUnknownTransforms(t *te
 	}{
 		{
 			name:        "review unavailable",
-			transformID: featurereviewworkflow.TransformAssignment,
+			transformID: reviewworkflow.TransformAssignment,
 			want:        "feature review transform",
 		},
 		{
@@ -52,8 +52,8 @@ func TestWorkflowTransformDispatcherRejectsUnavailableAndUnknownTransforms(t *te
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := dispatcher.Execute(context.Background(), agentworkflow.NodeRequest{
-				Node: agentworkflow.NodeDefinition{TransformID: test.transformID},
+			_, err := dispatcher.Execute(context.Background(), workflow.NodeRequest{
+				Node: workflow.NodeDefinition{TransformID: test.transformID},
 			})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want text %q", err, test.want)

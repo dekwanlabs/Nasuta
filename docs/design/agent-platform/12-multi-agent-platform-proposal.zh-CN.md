@@ -11,7 +11,7 @@
 
 ### 实施状态
 
-第一阶段已落地 `internal/agentworkflow` 多 Agent 内核及对应数据库迁移，当前支持：
+第一阶段已落地 `internal/agent/workflow` 多 Agent 内核及对应数据库迁移，当前支持：
 
 - Agent、Gate、Human Approval、Join、Transform 节点；
 - DAG 校验、并行执行、Handoff、权限交集和不可变内容 Hash；

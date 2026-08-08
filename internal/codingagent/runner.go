@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
 const (
@@ -41,18 +41,18 @@ func New(config Config) *Runner {
 	return &Runner{codexBin: config.CodexBin, claudeBin: config.ClaudeBin, enabled: enabled}
 }
 
-func (runner *Runner) Run(ctx context.Context, request featuredelivery.CodingRequest, sink featuredelivery.EventSink) (featuredelivery.CodingResult, error) {
+func (runner *Runner) Run(ctx context.Context, request delivery.CodingRequest, sink delivery.EventSink) (delivery.CodingResult, error) {
 	if runner == nil {
-		return featuredelivery.CodingResult{}, featuredelivery.ErrUnavailable
+		return delivery.CodingResult{}, delivery.ErrUnavailable
 	}
 	if _, ok := runner.enabled[request.Provider]; !ok {
-		return featuredelivery.CodingResult{}, fmt.Errorf("coding provider %q is not enabled: %w", request.Provider, featuredelivery.ErrUnavailable)
+		return delivery.CodingResult{}, fmt.Errorf("coding provider %q is not enabled: %w", request.Provider, delivery.ErrUnavailable)
 	}
 	status := runner.providerStatus(ctx, request.Provider)
 	if !providerReady(status) {
-		return featuredelivery.CodingResult{}, fmt.Errorf(
+		return delivery.CodingResult{}, fmt.Errorf(
 			"coding provider %q is unavailable (%s): %w",
-			request.Provider, status.Reason, featuredelivery.ErrUnavailable,
+			request.Provider, status.Reason, delivery.ErrUnavailable,
 		)
 	}
 	switch request.Provider {
@@ -61,15 +61,15 @@ func (runner *Runner) Run(ctx context.Context, request featuredelivery.CodingReq
 	case "claude":
 		return runner.runClaude(ctx, request, sink)
 	default:
-		return featuredelivery.CodingResult{}, fmt.Errorf("unsupported coding provider %q", request.Provider)
+		return delivery.CodingResult{}, fmt.Errorf("unsupported coding provider %q", request.Provider)
 	}
 }
 
-func (runner *Runner) ProviderStatus(ctx context.Context) map[string]featuredelivery.CodingProviderStatus {
-	statuses := make(map[string]featuredelivery.CodingProviderStatus, 2)
+func (runner *Runner) ProviderStatus(ctx context.Context) map[string]delivery.CodingProviderStatus {
+	statuses := make(map[string]delivery.CodingProviderStatus, 2)
 	for _, provider := range []string{"codex", "claude"} {
 		if _, ok := runner.enabled[provider]; !ok {
-			statuses[provider] = featuredelivery.CodingProviderStatus{Reason: "not_configured"}
+			statuses[provider] = delivery.CodingProviderStatus{Reason: "not_configured"}
 			continue
 		}
 		statuses[provider] = runner.providerStatus(ctx, provider)
@@ -77,8 +77,8 @@ func (runner *Runner) ProviderStatus(ctx context.Context) map[string]featuredeli
 	return statuses
 }
 
-func (runner *Runner) providerStatus(ctx context.Context, provider string) featuredelivery.CodingProviderStatus {
-	status := featuredelivery.CodingProviderStatus{Enabled: true}
+func (runner *Runner) providerStatus(ctx context.Context, provider string) delivery.CodingProviderStatus {
+	status := delivery.CodingProviderStatus{Enabled: true}
 	binary := runner.codexBin
 	if provider == "claude" {
 		binary = runner.claudeBin
@@ -120,7 +120,7 @@ func claudeCredentialConfigured() bool {
 		strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != ""
 }
 
-func providerReady(status featuredelivery.CodingProviderStatus) bool {
+func providerReady(status delivery.CodingProviderStatus) bool {
 	return status.Enabled && status.BinaryFound && status.ContractCompatible &&
 		status.CredentialIsolated && status.Reason == ""
 }

@@ -459,8 +459,8 @@ func TestApplyCompactionPublishesOneAtomicSnapshot(t *testing.T) {
 	mock.ExpectQuery(`SELECT user_id,compacted_through_turn FROM qa_sessions WHERE id=\? FOR UPDATE`).
 		WithArgs("session-1").
 		WillReturnRows(sqlmock.NewRows([]string{"user_id", "compacted_through_turn"}).AddRow(42, 2))
-	mock.ExpectExec(`INSERT INTO qa_turn_contexts.*VALUES`).
-		WithArgs("cmp-3", "session-1", int64(42), "run-3", 3, []byte(`{"version":1,"turn":3}`), "short summary", 3, 120, 30, sqlmock.AnyArg()).
+	mock.ExpectExec(`UPDATE qa_turns target.*SET target\.context_ref=context\.ref`).
+		WithArgs(3, "run-3", "cmp-3", []byte(`{"version":1,"turn":3}`), "short summary", 3, 120, 30, sqlmock.AnyArg(), "session-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT INTO qa_session_history_index_outbox.*VALUES`).
 		WithArgs("cmp-3", "session-1", int64(42), nil, sqlmock.AnyArg()).
@@ -491,7 +491,7 @@ func TestApplyCompactionPublishesOneAtomicSnapshot(t *testing.T) {
 func TestGetTurnDetailBoundsReferenceToCurrentSession(t *testing.T) {
 	store, mock, closeDB := newMockSessionStore(t)
 	defer closeDB()
-	mock.ExpectQuery(`SELECT ref,session_id,user_id,run_id,detail_json,turn_number,summary_text,summary_tokens,source_tokens,retained_tokens.*FROM qa_turn_contexts`).
+	mock.ExpectQuery(`SELECT t\.context_ref,t\.session_id,s\.user_id,t\.run_id,t\.context_detail_json.*FROM qa_turns t.*JOIN qa_sessions s`).
 		WithArgs("cmp-1", "session-1", int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"ref", "session_id", "user_id", "run_id", "detail_json", "turn_number", "summary_text", "summary_tokens", "source_tokens", "retained_tokens"}).
 			AddRow("cmp-1", "session-1", 42, "run-1", `{"version":1,"turn":1,"user":"q1"}`, 1, "summary", 2, 90, 20))
@@ -543,9 +543,6 @@ func TestDeleteSessionRequiresOwner(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), "session-1", int64(42)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`DELETE FROM qa_session_history_terms WHERE session_id = \?`).
-		WithArgs("session-1").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`DELETE FROM qa_turn_contexts WHERE session_id = \?`).
 		WithArgs("session-1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`DELETE FROM qa_turns WHERE session_id = \?`).

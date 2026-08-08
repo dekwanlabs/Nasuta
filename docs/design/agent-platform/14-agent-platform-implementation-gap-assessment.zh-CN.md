@@ -117,7 +117,7 @@ QA Runtime 所有权拆分、统一 Schema Registry、Scope 与模型参数合�
 
 ### 4.1 已完成
 
-- `internal/agentworkflow` 已定义 Workflow、Node、Edge、Budget、Failure Policy 和内容 Hash。
+- `internal/agent/workflow` 已定义 Workflow、Node、Edge、Budget、Failure Policy 和内容 Hash。
 - DAG 可执行性校验、稳定拓扑顺序和并行 Wave 已实现。
 - Agent、Transform、Join、Gate、Human Approval 节点类型已经建模。
 - Handoff 支持内容 Hash、大小限制、Completeness 和稳定 Join。

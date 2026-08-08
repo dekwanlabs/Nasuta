@@ -9,13 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/featuredelivery"
+	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 )
 
 const (
 	maxReviewAssignmentPage   = 16
 	maxReviewFindingPage      = 100
-	maxReviewEvidence         = 20
 	maxReviewEventPage        = 500
 	maxReviewAdjudicationPage = 1600
 	maxReviewResolutionPage   = 100
@@ -25,18 +24,18 @@ const (
 
 func (store *FeatureDeliveryStore) SaveReviewPolicies(
 	ctx context.Context,
-	policies []featuredelivery.ReviewPolicy,
+	policies []delivery.ReviewPolicy,
 ) error {
-	prepared := make([]featuredelivery.ReviewPolicy, 0, len(policies))
+	prepared := make([]delivery.ReviewPolicy, 0, len(policies))
 	seen := make(map[string]struct{}, len(policies))
 	for _, policy := range policies {
-		item, err := featuredelivery.PrepareReviewPolicy(policy)
+		item, err := delivery.PrepareReviewPolicy(policy)
 		if err != nil {
 			return err
 		}
 		key := fmt.Sprintf("%s\x00%d", item.ID, item.Version)
 		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("duplicate review policy %q version %d: %w", item.ID, item.Version, featuredelivery.ErrInvalid)
+			return fmt.Errorf("duplicate review policy %q version %d: %w", item.ID, item.Version, delivery.ErrInvalid)
 		}
 		seen[key] = struct{}{}
 		prepared = append(prepared, item)
@@ -75,7 +74,7 @@ func (store *FeatureDeliveryStore) SaveReviewPolicies(
 			return fmt.Errorf("read existing review policy %q version %d: %w", policy.ID, policy.Version, readErr)
 		}
 		if existingHash != policy.ContentHash {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -87,19 +86,19 @@ func (store *FeatureDeliveryStore) SaveReviewPolicies(
 // PublishReviewPolicies records actor and rollout metadata atomically.
 func (store *FeatureDeliveryStore) PublishReviewPolicies(
 	ctx context.Context,
-	policies []featuredelivery.ReviewPolicy,
+	policies []delivery.ReviewPolicy,
 	actorUserID int64,
 ) error {
-	prepared := make([]featuredelivery.ReviewPolicy, 0, len(policies))
+	prepared := make([]delivery.ReviewPolicy, 0, len(policies))
 	seen := make(map[string]struct{}, len(policies))
 	for _, policy := range policies {
-		item, err := featuredelivery.PrepareReviewPolicy(policy)
+		item, err := delivery.PrepareReviewPolicy(policy)
 		if err != nil {
 			return err
 		}
 		key := fmt.Sprintf("%s\x00%d", item.ID, item.Version)
 		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("duplicate review policy %q version %d: %w", item.ID, item.Version, featuredelivery.ErrInvalid)
+			return fmt.Errorf("duplicate review policy %q version %d: %w", item.ID, item.Version, delivery.ErrInvalid)
 		}
 		seen[key] = struct{}{}
 		prepared = append(prepared, item)
@@ -121,7 +120,7 @@ func (store *FeatureDeliveryStore) PublishReviewPolicies(
 		).Scan(&existingRaw, &existingHash)
 		if err == nil {
 			if existingHash != policy.ContentHash {
-				return featuredelivery.ErrConflict
+				return delivery.ErrConflict
 			}
 			continue
 		}
@@ -149,7 +148,7 @@ func (store *FeatureDeliveryStore) PublishReviewPolicies(
 		)
 		if err != nil {
 			if duplicateKey(err) {
-				return featuredelivery.ErrConflict
+				return delivery.ErrConflict
 			}
 			return fmt.Errorf("save review policy %q version %d: %w", policy.ID, policy.Version, err)
 		}
@@ -174,9 +173,9 @@ func (store *FeatureDeliveryStore) PublishReviewPolicies(
 
 func (store *FeatureDeliveryStore) ListReviewPolicyRecords(
 	ctx context.Context,
-	cursor featuredelivery.ReviewPolicyCursor,
+	cursor delivery.ReviewPolicyCursor,
 	limit int,
-) ([]featuredelivery.ReviewPolicyRecord, error) {
+) ([]delivery.ReviewPolicyRecord, error) {
 	limit = boundedLimit(limit, 20, maxReviewPolicyPage)
 	query := `SELECT definition_json,active,is_default,created_by,created_at
 		FROM review_policies`
@@ -192,10 +191,10 @@ func (store *FeatureDeliveryStore) ListReviewPolicyRecords(
 		return nil, fmt.Errorf("list review policy records: %w", err)
 	}
 	defer rows.Close()
-	records := make([]featuredelivery.ReviewPolicyRecord, 0, limit)
+	records := make([]delivery.ReviewPolicyRecord, 0, limit)
 	for rows.Next() {
 		var raw []byte
-		var record featuredelivery.ReviewPolicyRecord
+		var record delivery.ReviewPolicyRecord
 		var createdAt sql.NullTime
 		if err := rows.Scan(
 			&raw, &record.Active, &record.Default, &record.CreatedBy, &createdAt,
@@ -208,7 +207,7 @@ func (store *FeatureDeliveryStore) ListReviewPolicyRecords(
 		if record.CreatedAt.IsZero() && createdAt.Valid {
 			record.CreatedAt = createdAt.Time
 		}
-		prepared, err := featuredelivery.PrepareReviewPolicy(record.ReviewPolicy)
+		prepared, err := delivery.PrepareReviewPolicy(record.ReviewPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("validate stored review policy %q@%d: %w", record.ID, record.Version, err)
 		}
@@ -225,10 +224,10 @@ func (store *FeatureDeliveryStore) GetReviewPolicyRecord(
 	ctx context.Context,
 	id string,
 	version int64,
-) (featuredelivery.ReviewPolicyRecord, error) {
+) (delivery.ReviewPolicyRecord, error) {
 	var (
 		raw       []byte
-		record    featuredelivery.ReviewPolicyRecord
+		record    delivery.ReviewPolicyRecord
 		createdAt sql.NullTime
 	)
 	err := store.db.QueryRowContext(ctx, `SELECT
@@ -239,24 +238,24 @@ func (store *FeatureDeliveryStore) GetReviewPolicyRecord(
 		&raw, &record.Active, &record.Default, &record.CreatedBy, &createdAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ReviewPolicyRecord{}, featuredelivery.ErrNotFound
+		return delivery.ReviewPolicyRecord{}, delivery.ErrNotFound
 	}
 	if err != nil {
-		return featuredelivery.ReviewPolicyRecord{}, fmt.Errorf(
+		return delivery.ReviewPolicyRecord{}, fmt.Errorf(
 			"get review policy record %q@%d: %w", id, version, err,
 		)
 	}
 	if err := json.Unmarshal(raw, &record.ReviewPolicy); err != nil {
-		return featuredelivery.ReviewPolicyRecord{}, fmt.Errorf(
+		return delivery.ReviewPolicyRecord{}, fmt.Errorf(
 			"decode review policy record %q@%d: %w", id, version, err,
 		)
 	}
 	if record.CreatedAt.IsZero() && createdAt.Valid {
 		record.CreatedAt = createdAt.Time
 	}
-	prepared, err := featuredelivery.PrepareReviewPolicy(record.ReviewPolicy)
+	prepared, err := delivery.PrepareReviewPolicy(record.ReviewPolicy)
 	if err != nil {
-		return featuredelivery.ReviewPolicyRecord{}, fmt.Errorf(
+		return delivery.ReviewPolicyRecord{}, fmt.Errorf(
 			"validate stored review policy %q@%d: %w", id, version, err,
 		)
 	}
@@ -266,17 +265,17 @@ func (store *FeatureDeliveryStore) GetReviewPolicyRecord(
 
 func (store *FeatureDeliveryStore) GetDefaultReviewPolicy(
 	ctx context.Context,
-	kind featuredelivery.SubjectKind,
-) (featuredelivery.ReviewPolicyRef, error) {
-	var ref featuredelivery.ReviewPolicyRef
+	kind delivery.SubjectKind,
+) (delivery.ReviewPolicyRef, error) {
+	var ref delivery.ReviewPolicyRef
 	err := store.db.QueryRowContext(ctx, `SELECT id,version FROM review_policies
 		WHERE subject_kind=? AND active=1 AND is_default=1 LIMIT 1`, kind).
 		Scan(&ref.ID, &ref.Version)
 	if errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ReviewPolicyRef{}, featuredelivery.ErrNotFound
+		return delivery.ReviewPolicyRef{}, delivery.ErrNotFound
 	}
 	if err != nil {
-		return featuredelivery.ReviewPolicyRef{}, fmt.Errorf("get default review policy for %q: %w", kind, err)
+		return delivery.ReviewPolicyRef{}, fmt.Errorf("get default review policy for %q: %w", kind, err)
 	}
 	return ref, nil
 }
@@ -295,7 +294,7 @@ func (store *FeatureDeliveryStore) EnsureReviewPolicyDefault(
 	var kind string
 	if err := tx.QueryRowContext(ctx, `SELECT subject_kind FROM review_policies
 		WHERE id=? AND version=? LIMIT 1 FOR UPDATE`, id, version).Scan(&kind); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("lock review policy %q@%d: %w", id, version, err)
 	}
@@ -338,12 +337,12 @@ func (store *FeatureDeliveryStore) SetReviewPolicyDefault(
 	if err := tx.QueryRowContext(ctx, `SELECT subject_kind,active,is_default
 		FROM review_policies WHERE id=? AND version=? LIMIT 1 FOR UPDATE`,
 		id, version).Scan(&kind, &active, &current); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("lock review policy %q@%d: %w", id, version, err)
 	}
 	if !active {
-		return fmt.Errorf("review policy %q@%d is disabled: %w", id, version, featuredelivery.ErrConflict)
+		return fmt.Errorf("review policy %q@%d is disabled: %w", id, version, delivery.ErrConflict)
 	}
 	if !current {
 		if _, err := tx.ExecContext(ctx, `UPDATE review_policies
@@ -380,12 +379,12 @@ func (store *FeatureDeliveryStore) SetReviewPolicyActive(
 	if err := tx.QueryRowContext(ctx, `SELECT active,is_default
 		FROM review_policies WHERE id=? AND version=? LIMIT 1 FOR UPDATE`,
 		id, version).Scan(&current, &isDefault); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("lock review policy %q@%d: %w", id, version, err)
 	}
 	if !active && isDefault {
-		return fmt.Errorf("review policy %q@%d is the default: %w", id, version, featuredelivery.ErrConflict)
+		return fmt.Errorf("review policy %q@%d is the default: %w", id, version, delivery.ErrConflict)
 	}
 	if current != active {
 		if _, err := tx.ExecContext(ctx, `UPDATE review_policies
@@ -411,18 +410,21 @@ func (store *FeatureDeliveryStore) ListReviewPolicyAudit(
 	id string,
 	afterSeq int64,
 	limit int,
-) ([]featuredelivery.ReviewPolicyAuditEvent, error) {
+) ([]delivery.ReviewPolicyAuditEvent, error) {
 	limit = boundedLimit(limit, 20, maxReviewPolicyPage)
-	rows, err := store.db.QueryContext(ctx, `SELECT seq,policy_id,version,action,actor_user_id,created_at
-		FROM review_policy_audit WHERE policy_id=? AND seq>? ORDER BY seq LIMIT ?`,
+	rows, err := store.db.QueryContext(ctx, `SELECT seq,subject_id,version,action,actor_user_id,created_at
+		FROM catalog_audit
+		WHERE catalog_kind='review_policy' AND event_kind='definition'
+			AND subject_id=? AND seq>?
+		ORDER BY seq LIMIT ?`,
 		id, afterSeq, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list review policy %q audit: %w", id, err)
 	}
 	defer rows.Close()
-	events := make([]featuredelivery.ReviewPolicyAuditEvent, 0, limit)
+	events := make([]delivery.ReviewPolicyAuditEvent, 0, limit)
 	for rows.Next() {
-		var event featuredelivery.ReviewPolicyAuditEvent
+		var event delivery.ReviewPolicyAuditEvent
 		if err := rows.Scan(
 			&event.Seq, &event.PolicyID, &event.Version, &event.Action,
 			&event.ActorUserID, &event.CreatedAt,
@@ -439,13 +441,14 @@ func (store *FeatureDeliveryStore) ListReviewPolicyAudit(
 
 func (store *FeatureDeliveryStore) GetReviewPolicyRollout(
 	ctx context.Context,
-	kind featuredelivery.SubjectKind,
-) (featuredelivery.ReviewPolicyRolloutRule, bool, error) {
-	var rule featuredelivery.ReviewPolicyRolloutRule
+	kind delivery.SubjectKind,
+) (delivery.ReviewPolicyRolloutRule, bool, error) {
+	var rule delivery.ReviewPolicyRolloutRule
 	err := store.db.QueryRowContext(ctx, `SELECT
-		subject_kind,rule_version,candidate_policy_id,candidate_policy_version,
+		subject_id,rule_version,candidate_id,candidate_version,
 		percentage_bps,salt,rule_hash,active,created_by,created_at
-		FROM review_policy_rollouts WHERE subject_kind=? LIMIT 1`,
+		FROM catalog_rollouts
+		WHERE catalog_kind='review_policy' AND subject_id=? LIMIT 1`,
 		kind,
 	).Scan(
 		&rule.SubjectKind, &rule.RuleVersion, &rule.CandidatePolicyID,
@@ -453,10 +456,10 @@ func (store *FeatureDeliveryStore) GetReviewPolicyRollout(
 		&rule.RuleHash, &rule.Active, &rule.CreatedBy, &rule.CreatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ReviewPolicyRolloutRule{}, false, nil
+		return delivery.ReviewPolicyRolloutRule{}, false, nil
 	}
 	if err != nil {
-		return featuredelivery.ReviewPolicyRolloutRule{}, false, fmt.Errorf(
+		return delivery.ReviewPolicyRolloutRule{}, false, fmt.Errorf(
 			"get review policy rollout for %q: %w", kind, err,
 		)
 	}
@@ -465,7 +468,7 @@ func (store *FeatureDeliveryStore) GetReviewPolicyRollout(
 
 func (store *FeatureDeliveryStore) SetReviewPolicyRollout(
 	ctx context.Context,
-	rule featuredelivery.ReviewPolicyRolloutRule,
+	rule delivery.ReviewPolicyRolloutRule,
 	actorUserID int64,
 ) error {
 	tx, err := store.db.BeginTx(ctx, nil)
@@ -475,8 +478,8 @@ func (store *FeatureDeliveryStore) SetReviewPolicyRollout(
 	defer tx.Rollback()
 	var existingVersion int64
 	err = tx.QueryRowContext(ctx, `SELECT rule_version
-		FROM review_policy_rollouts
-		WHERE subject_kind=? LIMIT 1 FOR UPDATE`,
+		FROM catalog_rollouts
+		WHERE catalog_kind='review_policy' AND subject_id=? LIMIT 1 FOR UPDATE`,
 		rule.SubjectKind,
 	).Scan(&existingVersion)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -488,7 +491,7 @@ func (store *FeatureDeliveryStore) SetReviewPolicyRollout(
 		if rule.RuleVersion != 1 {
 			return fmt.Errorf(
 				"review policy rollout for %q expected initial rule version 1, got %d: %w",
-				rule.SubjectKind, rule.RuleVersion, featuredelivery.ErrConflict,
+				rule.SubjectKind, rule.RuleVersion, delivery.ErrConflict,
 			)
 		}
 	} else if rule.RuleVersion != existingVersion+1 {
@@ -497,7 +500,7 @@ func (store *FeatureDeliveryStore) SetReviewPolicyRollout(
 			rule.SubjectKind,
 			existingVersion+1,
 			rule.RuleVersion,
-			featuredelivery.ErrConflict,
+			delivery.ErrConflict,
 		)
 	}
 	createdAt := rule.CreatedAt
@@ -505,19 +508,19 @@ func (store *FeatureDeliveryStore) SetReviewPolicyRollout(
 		createdAt = time.Now().UTC()
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		_, err = tx.ExecContext(ctx, `INSERT INTO review_policy_rollouts(
-			subject_kind,rule_version,candidate_policy_id,candidate_policy_version,
+		_, err = tx.ExecContext(ctx, `INSERT INTO catalog_rollouts(
+			catalog_kind,subject_id,rule_version,candidate_id,candidate_version,
 			percentage_bps,salt,rule_hash,active,created_by,created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			VALUES('review_policy',?,?,?,?,?,?,?,?,?,?)`,
 			rule.SubjectKind, rule.RuleVersion, rule.CandidatePolicyID,
 			rule.CandidatePolicyVersion, rule.PercentageBPS, rule.Salt,
 			rule.RuleHash, rule.Active, actorUserID, createdAt,
 		)
 	} else {
-		_, err = tx.ExecContext(ctx, `UPDATE review_policy_rollouts SET
-			rule_version=?,candidate_policy_id=?,candidate_policy_version=?,
+		_, err = tx.ExecContext(ctx, `UPDATE catalog_rollouts SET
+			rule_version=?,candidate_id=?,candidate_version=?,
 			percentage_bps=?,salt=?,rule_hash=?,active=?,created_by=?,created_at=?
-			WHERE subject_kind=?`,
+			WHERE catalog_kind='review_policy' AND subject_id=?`,
 			rule.RuleVersion, rule.CandidatePolicyID,
 			rule.CandidatePolicyVersion, rule.PercentageBPS, rule.Salt,
 			rule.RuleHash, rule.Active, actorUserID, createdAt, rule.SubjectKind,
@@ -547,16 +550,18 @@ func (store *FeatureDeliveryStore) SetReviewPolicyRollout(
 
 func (store *FeatureDeliveryStore) ListReviewPolicyRolloutAudit(
 	ctx context.Context,
-	kind featuredelivery.SubjectKind,
+	kind delivery.SubjectKind,
 	afterSeq int64,
 	limit int,
-) ([]featuredelivery.ReviewPolicyRolloutAuditEvent, error) {
+) ([]delivery.ReviewPolicyRolloutAuditEvent, error) {
 	limit = boundedLimit(limit, 20, maxReviewPolicyPage)
 	rows, err := store.db.QueryContext(ctx, `SELECT
-		seq,subject_kind,rule_version,candidate_policy_id,candidate_policy_version,
+		seq,subject_id,version,candidate_id,candidate_version,
 		percentage_bps,rule_hash,action,actor_user_id,created_at
-		FROM review_policy_rollout_audit
-		WHERE subject_kind=? AND seq>? ORDER BY seq LIMIT ?`,
+		FROM catalog_audit
+		WHERE catalog_kind='review_policy' AND event_kind='rollout'
+			AND subject_id=? AND seq>?
+		ORDER BY seq LIMIT ?`,
 		kind, afterSeq, limit,
 	)
 	if err != nil {
@@ -565,9 +570,9 @@ func (store *FeatureDeliveryStore) ListReviewPolicyRolloutAudit(
 		)
 	}
 	defer rows.Close()
-	events := make([]featuredelivery.ReviewPolicyRolloutAuditEvent, 0, limit)
+	events := make([]delivery.ReviewPolicyRolloutAuditEvent, 0, limit)
 	for rows.Next() {
-		var event featuredelivery.ReviewPolicyRolloutAuditEvent
+		var event delivery.ReviewPolicyRolloutAuditEvent
 		if err := rows.Scan(
 			&event.Seq, &event.SubjectKind, &event.RuleVersion,
 			&event.CandidatePolicyID, &event.CandidatePolicyVersion,
@@ -596,8 +601,9 @@ func appendReviewPolicyAuditTx(
 	action string,
 	actorUserID int64,
 ) error {
-	if _, err := tx.ExecContext(ctx, `INSERT INTO review_policy_audit(
-		policy_id,version,action,actor_user_id,created_at) VALUES(?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO catalog_audit(
+		catalog_kind,event_kind,subject_id,version,action,actor_user_id,created_at)
+		VALUES('review_policy','definition',?,?,?,?,?)`,
 		id, version, action, actorUserID, time.Now().UTC(),
 	); err != nil {
 		return fmt.Errorf("append review policy %q@%d audit: %w", id, version, err)
@@ -608,14 +614,14 @@ func appendReviewPolicyAuditTx(
 func appendReviewPolicyRolloutAuditTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	rule featuredelivery.ReviewPolicyRolloutRule,
+	rule delivery.ReviewPolicyRolloutRule,
 	action string,
 	actorUserID int64,
 ) error {
-	if _, err := tx.ExecContext(ctx, `INSERT INTO review_policy_rollout_audit(
-		subject_kind,rule_version,candidate_policy_id,candidate_policy_version,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO catalog_audit(
+		catalog_kind,event_kind,subject_id,version,candidate_id,candidate_version,
 		percentage_bps,rule_hash,action,actor_user_id,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?)`,
+		VALUES('review_policy','rollout',?,?,?,?,?,?,?,?,?)`,
 		rule.SubjectKind, rule.RuleVersion, rule.CandidatePolicyID,
 		rule.CandidatePolicyVersion, rule.PercentageBPS, rule.RuleHash,
 		action, actorUserID, time.Now().UTC(),
@@ -628,23 +634,23 @@ func appendReviewPolicyRolloutAuditTx(
 	return nil
 }
 
-func (store *FeatureDeliveryStore) GetReviewPolicy(ctx context.Context, id string, version int64) (*featuredelivery.ReviewPolicy, error) {
+func (store *FeatureDeliveryStore) GetReviewPolicy(ctx context.Context, id string, version int64) (*delivery.ReviewPolicy, error) {
 	var raw []byte
 	err := store.db.QueryRowContext(ctx,
 		`SELECT definition_json FROM review_policies WHERE id=? AND version=? LIMIT 1`,
 		id, version,
 	).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get review policy %q version %d: %w", id, version, err)
 	}
-	var policy featuredelivery.ReviewPolicy
+	var policy delivery.ReviewPolicy
 	if err := json.Unmarshal(raw, &policy); err != nil {
 		return nil, fmt.Errorf("decode review policy %q version %d: %w", id, version, err)
 	}
-	prepared, err := featuredelivery.PrepareReviewPolicy(policy)
+	prepared, err := delivery.PrepareReviewPolicy(policy)
 	if err != nil {
 		return nil, fmt.Errorf("validate stored review policy %q version %d: %w", id, version, err)
 	}
@@ -653,64 +659,64 @@ func (store *FeatureDeliveryStore) GetReviewPolicy(ctx context.Context, id strin
 
 func (store *FeatureDeliveryStore) CreateReviewRound(
 	ctx context.Context,
-	round featuredelivery.ReviewRound,
-	assignments []featuredelivery.ReviewAssignment,
+	round delivery.ReviewRound,
+	assignments []delivery.ReviewAssignment,
 ) error {
 	return store.createReviewRound(ctx, round, assignments, nil, nil)
 }
 
 func (store *FeatureDeliveryStore) CreateReviewRoundWithReuses(
 	ctx context.Context,
-	round featuredelivery.ReviewRound,
-	assignments []featuredelivery.ReviewAssignment,
-	reports []featuredelivery.ReviewReport,
-	reuses []featuredelivery.ReviewReportReuse,
+	round delivery.ReviewRound,
+	assignments []delivery.ReviewAssignment,
+	reports []delivery.ReviewReport,
+	reuses []delivery.ReviewReportReuse,
 ) error {
 	if len(reports) == 0 || len(reports) != len(reuses) {
-		return featuredelivery.ErrInvalid
+		return delivery.ErrInvalid
 	}
 	return store.createReviewRound(ctx, round, assignments, reports, reuses)
 }
 
 func (store *FeatureDeliveryStore) createReviewRound(
 	ctx context.Context,
-	round featuredelivery.ReviewRound,
-	assignments []featuredelivery.ReviewAssignment,
-	reports []featuredelivery.ReviewReport,
-	reuses []featuredelivery.ReviewReportReuse,
+	round delivery.ReviewRound,
+	assignments []delivery.ReviewAssignment,
+	reports []delivery.ReviewReport,
+	reuses []delivery.ReviewReportReuse,
 ) error {
 	if len(assignments) < 2 || len(assignments) > maxReviewAssignmentPage {
-		return featuredelivery.ErrInvalid
+		return delivery.ErrInvalid
 	}
-	assignmentByID := make(map[string]featuredelivery.ReviewAssignment, len(assignments))
+	assignmentByID := make(map[string]delivery.ReviewAssignment, len(assignments))
 	reusedAssignments := make(map[string]struct{}, len(reports))
 	for _, assignment := range assignments {
 		if assignment.RoundID != round.ID {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 		switch assignment.Status {
-		case featuredelivery.AssignmentQueued:
-		case featuredelivery.AssignmentReused:
+		case delivery.AssignmentQueued:
+		case delivery.AssignmentReused:
 			reusedAssignments[assignment.ID] = struct{}{}
 		default:
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 		assignmentByID[assignment.ID] = assignment
 	}
-	reportByID := make(map[string]featuredelivery.ReviewReport, len(reports))
+	reportByID := make(map[string]delivery.ReviewReport, len(reports))
 	for _, report := range reports {
 		assignment, ok := assignmentByID[report.AssignmentID]
-		if !ok || assignment.Status != featuredelivery.AssignmentReused ||
+		if !ok || assignment.Status != delivery.AssignmentReused ||
 			report.RoundID != round.ID ||
 			report.ReviewerID != assignment.ReviewerID ||
 			report.SubjectHash != round.Subject.ContentHash ||
 			report.Reuse == nil {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 		reportByID[report.ID] = report
 	}
 	if len(reusedAssignments) != len(reports) {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	for _, reuse := range reuses {
 		report, ok := reportByID[reuse.ReportID]
@@ -726,7 +732,7 @@ func (store *FeatureDeliveryStore) createReviewRound(
 			report.Reuse.SourceRoundID != reuse.SourceRoundID ||
 			report.Reuse.SourceAssignmentID != reuse.SourceAssignmentID ||
 			report.Reuse.Reason != reuse.Reason {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 	}
 	subjectJSON, err := json.Marshal(round.Subject)
@@ -755,12 +761,12 @@ func (store *FeatureDeliveryStore) createReviewRound(
 		`SELECT content_hash FROM review_policies WHERE id=? AND version=? LIMIT 1 FOR UPDATE`,
 		round.PolicyID, round.PolicyVersion,
 	).Scan(&policyHash); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("lock review policy: %w", err)
 	}
 	if policyHash != round.PolicyHash {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO review_rounds(
@@ -776,7 +782,7 @@ func (store *FeatureDeliveryStore) createReviewRound(
 		round.CreatedAt, round.CompletedAt,
 	); err != nil {
 		if duplicateKey(err) {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 		return fmt.Errorf("insert review round %q: %w", round.ID, err)
 	}
@@ -797,7 +803,7 @@ func (store *FeatureDeliveryStore) createReviewRound(
 			assignment.StartedAt, assignment.CompletedAt,
 		); err != nil {
 			if duplicateKey(err) {
-				return featuredelivery.ErrConflict
+				return delivery.ErrConflict
 			}
 			return fmt.Errorf("insert review assignment %q: %w", assignment.ID, err)
 		}
@@ -808,23 +814,27 @@ func (store *FeatureDeliveryStore) createReviewRound(
 		}
 	}
 	for _, reuse := range reuses {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO review_report_reuses(
-				id,round_id,assignment_id,report_id,reviewer_id,
-				source_round_id,source_assignment_id,source_report_id,
-				subject_hash,policy_hash,definition_hash,report_hash,
-				reason,actor_id,created_at
-			 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			reuse.ID, reuse.RoundID, reuse.AssignmentID, reuse.ReportID,
-			reuse.ReviewerID, reuse.SourceRoundID, reuse.SourceAssignmentID,
-			reuse.SourceReportID, reuse.SubjectHash, reuse.PolicyHash,
-			reuse.DefinitionHash, reuse.ReportHash, reuse.Reason,
-			reuse.ActorID, reuse.CreatedAt,
-		); err != nil {
+		result, err := tx.ExecContext(ctx,
+			`UPDATE review_reports
+			 SET reuse_id=?,reuse_source_round_id=?,reuse_source_assignment_id=?,
+			     reuse_source_report_id=?,reuse_policy_hash=?,reuse_definition_hash=?,
+			     reuse_reason=?,reuse_actor_id=?,reuse_created_at=?
+			 WHERE id=? AND round_id=? AND assignment_id=? AND reviewer_id=?
+			   AND subject_hash=? AND report_hash=? AND reuse_id IS NULL`,
+			reuse.ID, reuse.SourceRoundID, reuse.SourceAssignmentID,
+			reuse.SourceReportID, reuse.PolicyHash, reuse.DefinitionHash,
+			reuse.Reason, reuse.ActorID, reuse.CreatedAt,
+			reuse.ReportID, reuse.RoundID, reuse.AssignmentID, reuse.ReviewerID,
+			reuse.SubjectHash, reuse.ReportHash,
+		)
+		if err != nil {
 			if duplicateKey(err) {
-				return featuredelivery.ErrConflict
+				return delivery.ErrConflict
 			}
-			return fmt.Errorf("insert review report reuse %q: %w", reuse.ID, err)
+			return fmt.Errorf("attach review report reuse %q: %w", reuse.ID, err)
+		}
+		if err := requireSingleAffected(result); err != nil {
+			return err
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -833,7 +843,7 @@ func (store *FeatureDeliveryStore) createReviewRound(
 	return nil
 }
 
-func (store *FeatureDeliveryStore) GetReviewRound(ctx context.Context, id string) (*featuredelivery.ReviewRound, error) {
+func (store *FeatureDeliveryStore) GetReviewRound(ctx context.Context, id string) (*delivery.ReviewRound, error) {
 	round, err := scanReviewRound(store.db.QueryRowContext(ctx,
 		`SELECT id,workflow_run_id,subject_json,policy_id,policy_version,policy_hash,
 			policy_selection_json,risk_facts_json,risk_hash,selection_rule_version,
@@ -842,7 +852,7 @@ func (store *FeatureDeliveryStore) GetReviewRound(ctx context.Context, id string
 		id,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get review round %q: %w", id, err)
@@ -852,12 +862,12 @@ func (store *FeatureDeliveryStore) GetReviewRound(ctx context.Context, id string
 
 func (store *FeatureDeliveryStore) ListReviewRoundSummaries(
 	ctx context.Context,
-	filter featuredelivery.ReviewRoundFilter,
-	cursor featuredelivery.ReviewRoundCursor,
+	filter delivery.ReviewRoundFilter,
+	cursor delivery.ReviewRoundCursor,
 	limit int,
 	userID int64,
 	admin bool,
-) ([]featuredelivery.ReviewRoundSummary, bool, error) {
+) ([]delivery.ReviewRoundSummary, bool, error) {
 	limit = boundedLimit(limit, 20, maxReviewRoundPage)
 	query := `SELECT r.id,r.workflow_run_id,f.id,r.subject_kind,r.subject_id,
 		r.subject_version,r.subject_hash,r.policy_id,r.policy_version,r.policy_hash,
@@ -907,9 +917,9 @@ func (store *FeatureDeliveryStore) ListReviewRoundSummaries(
 		return nil, false, fmt.Errorf("list review round summaries: %w", err)
 	}
 	defer rows.Close()
-	summaries := make([]featuredelivery.ReviewRoundSummary, 0, limit+1)
+	summaries := make([]delivery.ReviewRoundSummary, 0, limit+1)
 	for rows.Next() {
-		var summary featuredelivery.ReviewRoundSummary
+		var summary delivery.ReviewRoundSummary
 		var completed sql.NullTime
 		if err := rows.Scan(
 			&summary.ID, &summary.WorkflowRunID, &summary.FeatureID,
@@ -938,20 +948,19 @@ func (store *FeatureDeliveryStore) ListReviewRoundSummaries(
 func (store *FeatureDeliveryStore) GetLatestCompletedReviewRoundBySubjectHash(
 	ctx context.Context,
 	subjectHash string,
-) (*featuredelivery.ReviewRound, error) {
+) (*delivery.ReviewRound, error) {
 	round, err := scanReviewRound(store.db.QueryRowContext(ctx,
 		`SELECT r.id,r.workflow_run_id,r.subject_json,r.policy_id,r.policy_version,
 		        r.policy_hash,r.policy_selection_json,r.risk_facts_json,r.risk_hash,
 		        r.selection_rule_version,r.selected_reviewers_json,r.panel_hash,
 		        r.status,r.created_by,r.created_at,r.completed_at
-		 FROM review_gate_results g
-		 JOIN review_rounds r ON r.id=g.round_id
-		 WHERE g.subject_hash=? AND r.status='completed'
-		 ORDER BY g.created_at DESC,g.id DESC LIMIT 1`,
+		 FROM review_rounds r
+		 WHERE r.subject_hash=? AND r.status='completed' AND r.gate_result_id IS NOT NULL
+		 ORDER BY r.gate_created_at DESC,r.gate_result_id DESC LIMIT 1`,
 		subjectHash,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get latest completed review round for subject %q: %w", subjectHash, err)
@@ -959,8 +968,8 @@ func (store *FeatureDeliveryStore) GetLatestCompletedReviewRoundBySubjectHash(
 	return &round, nil
 }
 
-func scanReviewRound(row rowScanner) (featuredelivery.ReviewRound, error) {
-	var round featuredelivery.ReviewRound
+func scanReviewRound(row rowScanner) (delivery.ReviewRound, error) {
+	var round delivery.ReviewRound
 	var (
 		subjectJSON         []byte
 		policySelectionJSON []byte
@@ -1000,7 +1009,7 @@ func (store *FeatureDeliveryStore) BindReviewRoundWorkflow(
 	at time.Time,
 ) error {
 	if roundID == "" || workflowRunID == "" || at.IsZero() {
-		return featuredelivery.ErrInvalid
+		return delivery.ErrInvalid
 	}
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1012,13 +1021,13 @@ func (store *FeatureDeliveryStore) BindReviewRoundWorkflow(
 		`SELECT workflow_run_id FROM review_rounds WHERE id=? LIMIT 1 FOR UPDATE`,
 		roundID,
 	).Scan(&existing); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("lock review round %q workflow binding: %w", roundID, err)
 	}
 	if existing != "" {
 		if existing != workflowRunID {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 		return nil
 	}
@@ -1041,9 +1050,9 @@ func (store *FeatureDeliveryStore) BindReviewRoundWorkflow(
 func (store *FeatureDeliveryStore) ListReviewAssignments(
 	ctx context.Context,
 	roundID string,
-	cursor featuredelivery.ReviewAssignmentCursor,
+	cursor delivery.ReviewAssignmentCursor,
 	limit int,
-) ([]featuredelivery.ReviewAssignment, error) {
+) ([]delivery.ReviewAssignment, error) {
 	limit = boundedLimit(limit, maxReviewAssignmentPage, maxReviewAssignmentPage)
 	query := `SELECT id,round_id,reviewer_id,agent_id,agent_version,definition_hash,categories_json,
 		required_review,status,attempt,agent_run_id,error_code,created_at,started_at,completed_at
@@ -1060,7 +1069,7 @@ func (store *FeatureDeliveryStore) ListReviewAssignments(
 		return nil, fmt.Errorf("list review assignments for round %q: %w", roundID, err)
 	}
 	defer rows.Close()
-	assignments := make([]featuredelivery.ReviewAssignment, 0, limit)
+	assignments := make([]delivery.ReviewAssignment, 0, limit)
 	for rows.Next() {
 		assignment, err := scanReviewAssignment(rows)
 		if err != nil {
@@ -1077,7 +1086,7 @@ func (store *FeatureDeliveryStore) ListReviewAssignments(
 func (store *FeatureDeliveryStore) GetLatestReviewAssignment(
 	ctx context.Context,
 	roundID, reviewerID string,
-) (*featuredelivery.ReviewAssignment, error) {
+) (*delivery.ReviewAssignment, error) {
 	row := store.db.QueryRowContext(ctx,
 		`SELECT id,round_id,reviewer_id,agent_id,agent_version,definition_hash,categories_json,
 		 required_review,status,attempt,agent_run_id,error_code,created_at,started_at,completed_at
@@ -1087,7 +1096,7 @@ func (store *FeatureDeliveryStore) GetLatestReviewAssignment(
 	)
 	assignment, err := scanReviewAssignment(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1106,26 +1115,26 @@ func (store *FeatureDeliveryStore) StartReviewAssignmentAttempt(
 	attempt int,
 	agentRunID string,
 	at time.Time,
-) (*featuredelivery.ReviewAssignment, error) {
+) (*delivery.ReviewAssignment, error) {
 	if roundID == "" || reviewerID == "" || attempt <= 0 || agentRunID == "" || at.IsZero() {
-		return nil, featuredelivery.ErrInvalid
+		return nil, delivery.ErrInvalid
 	}
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin review assignment attempt: %w", err)
 	}
 	defer tx.Rollback()
-	var roundStatus featuredelivery.ReviewRoundStatus
+	var roundStatus delivery.ReviewRoundStatus
 	if err := tx.QueryRowContext(ctx,
 		`SELECT status FROM review_rounds WHERE id=? LIMIT 1 FOR UPDATE`,
 		roundID,
 	).Scan(&roundStatus); errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	} else if err != nil {
 		return nil, fmt.Errorf("lock review round %q: %w", roundID, err)
 	}
-	if roundStatus != featuredelivery.RoundRunning {
-		return nil, featuredelivery.ErrConflict
+	if roundStatus != delivery.RoundRunning {
+		return nil, delivery.ErrConflict
 	}
 	latest, err := scanReviewAssignment(tx.QueryRowContext(ctx,
 		`SELECT id,round_id,reviewer_id,agent_id,agent_version,definition_hash,categories_json,
@@ -1135,7 +1144,7 @@ func (store *FeatureDeliveryStore) StartReviewAssignmentAttempt(
 		roundID, reviewerID,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1145,13 +1154,13 @@ func (store *FeatureDeliveryStore) StartReviewAssignmentAttempt(
 			err,
 		)
 	}
-	if latest.Attempt == attempt && latest.Status == featuredelivery.AssignmentRunning &&
+	if latest.Attempt == attempt && latest.Status == delivery.AssignmentRunning &&
 		latest.AgentRunID == agentRunID {
 		return &latest, nil
 	}
 	if attempt == 1 {
-		if latest.Attempt != 1 || latest.Status != featuredelivery.AssignmentQueued {
-			return nil, featuredelivery.ErrConflict
+		if latest.Attempt != 1 || latest.Status != delivery.AssignmentQueued {
+			return nil, delivery.ErrConflict
 		}
 		result, err := tx.ExecContext(ctx,
 			`UPDATE review_assignments
@@ -1165,19 +1174,19 @@ func (store *FeatureDeliveryStore) StartReviewAssignmentAttempt(
 		if err := requireSingleAffected(result); err != nil {
 			return nil, err
 		}
-		latest.Status = featuredelivery.AssignmentRunning
+		latest.Status = delivery.AssignmentRunning
 		latest.AgentRunID = agentRunID
 		latest.ErrorCode = ""
 		latest.StartedAt = &at
 		latest.CompletedAt = nil
 	} else {
 		if latest.Attempt != attempt-1 ||
-			(latest.Status != featuredelivery.AssignmentQueued &&
-				latest.Status != featuredelivery.AssignmentRunning &&
-				latest.Status != featuredelivery.AssignmentFailed) {
-			return nil, featuredelivery.ErrConflict
+			(latest.Status != delivery.AssignmentQueued &&
+				latest.Status != delivery.AssignmentRunning &&
+				latest.Status != delivery.AssignmentFailed) {
+			return nil, delivery.ErrConflict
 		}
-		if latest.Status != featuredelivery.AssignmentFailed {
+		if latest.Status != delivery.AssignmentFailed {
 			result, err := tx.ExecContext(ctx,
 				`UPDATE review_assignments
 				 SET status='failed',error_code='workflow_restarted',completed_at=?
@@ -1191,7 +1200,7 @@ func (store *FeatureDeliveryStore) StartReviewAssignmentAttempt(
 				return nil, err
 			}
 		}
-		assignmentID, err := featuredelivery.NewID("assignment")
+		assignmentID, err := delivery.NewID("assignment")
 		if err != nil {
 			return nil, err
 		}
@@ -1199,11 +1208,11 @@ func (store *FeatureDeliveryStore) StartReviewAssignmentAttempt(
 		if err != nil {
 			return nil, fmt.Errorf("marshal reviewer categories: %w", err)
 		}
-		latest = featuredelivery.ReviewAssignment{
+		latest = delivery.ReviewAssignment{
 			ID: assignmentID, RoundID: roundID, ReviewerID: reviewerID,
 			Agent: latest.Agent, DefinitionHash: latest.DefinitionHash,
 			Categories: append([]string(nil), latest.Categories...), Required: latest.Required,
-			Status: featuredelivery.AssignmentRunning, Attempt: attempt,
+			Status: delivery.AssignmentRunning, Attempt: attempt,
 			AgentRunID: agentRunID, CreatedAt: at, StartedAt: &at,
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -1218,7 +1227,7 @@ func (store *FeatureDeliveryStore) StartReviewAssignmentAttempt(
 			latest.StartedAt, latest.CompletedAt,
 		); err != nil {
 			if duplicateKey(err) {
-				return nil, featuredelivery.ErrConflict
+				return nil, delivery.ErrConflict
 			}
 			return nil, fmt.Errorf("insert review assignment attempt %q: %w", latest.ID, err)
 		}
@@ -1232,7 +1241,7 @@ func (store *FeatureDeliveryStore) StartReviewAssignmentAttempt(
 func (store *FeatureDeliveryStore) GetSuccessfulReviewReport(
 	ctx context.Context,
 	roundID, reviewerID string,
-) (*featuredelivery.ReviewReport, error) {
+) (*delivery.ReviewReport, error) {
 	var raw []byte
 	err := store.db.QueryRowContext(ctx,
 		`SELECT r.report_json
@@ -1244,7 +1253,7 @@ func (store *FeatureDeliveryStore) GetSuccessfulReviewReport(
 		roundID, reviewerID,
 	).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1254,7 +1263,7 @@ func (store *FeatureDeliveryStore) GetSuccessfulReviewReport(
 			err,
 		)
 	}
-	var report featuredelivery.ReviewReport
+	var report delivery.ReviewReport
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return nil, fmt.Errorf("decode successful review report: %w", err)
 	}
@@ -1264,9 +1273,9 @@ func (store *FeatureDeliveryStore) GetSuccessfulReviewReport(
 func (store *FeatureDeliveryStore) GetReviewReportReuseSources(
 	ctx context.Context,
 	reportIDs []string,
-) ([]featuredelivery.ReviewReportReuseSource, error) {
+) ([]delivery.ReviewReportReuseSource, error) {
 	if len(reportIDs) == 0 || len(reportIDs) > maxReviewAssignmentPage {
-		return nil, featuredelivery.ErrInvalid
+		return nil, delivery.ErrInvalid
 	}
 	args := make([]any, 0, len(reportIDs)+1)
 	for _, reportID := range reportIDs {
@@ -1290,9 +1299,9 @@ func (store *FeatureDeliveryStore) GetReviewReportReuseSources(
 		return nil, fmt.Errorf("get reusable review reports: %w", err)
 	}
 	defer rows.Close()
-	sources := make([]featuredelivery.ReviewReportReuseSource, 0, len(reportIDs))
+	sources := make([]delivery.ReviewReportReuseSource, 0, len(reportIDs))
 	for rows.Next() {
-		var source featuredelivery.ReviewReportReuseSource
+		var source delivery.ReviewReportReuseSource
 		var (
 			id, roundID, assignmentID, reviewerID string
 			subjectHash, reportHash, contentHash  string
@@ -1323,10 +1332,10 @@ func (store *FeatureDeliveryStore) GetReviewReportReuseSources(
 			return nil, fmt.Errorf(
 				"stored reusable review report %q has inconsistent identity: %w",
 				id,
-				featuredelivery.ErrConflict,
+				delivery.ErrConflict,
 			)
 		}
-		if err := featuredelivery.ValidateReviewReportSnapshot(
+		if err := delivery.ValidateReviewReportSnapshot(
 			source.Report,
 			source.Assignment,
 			subjectHash,
@@ -1345,7 +1354,7 @@ func (store *FeatureDeliveryStore) GetReviewReportReuseSources(
 func (store *FeatureDeliveryStore) GetReviewReportByAssignment(
 	ctx context.Context,
 	roundID, assignmentID string,
-) (*featuredelivery.ReviewReport, error) {
+) (*delivery.ReviewReport, error) {
 	var (
 		id, storedRoundID, storedAssignmentID string
 		reviewerID, subjectHash, reportHash   string
@@ -1368,7 +1377,7 @@ func (store *FeatureDeliveryStore) GetReviewReportByAssignment(
 		&contentHash,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1378,7 +1387,7 @@ func (store *FeatureDeliveryStore) GetReviewReportByAssignment(
 			err,
 		)
 	}
-	var report featuredelivery.ReviewReport
+	var report delivery.ReviewReport
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return nil, fmt.Errorf(
 			"decode review report for assignment %q: %w",
@@ -1396,14 +1405,14 @@ func (store *FeatureDeliveryStore) GetReviewReportByAssignment(
 		return nil, fmt.Errorf(
 			"stored review report for assignment %q has inconsistent identity: %w",
 			assignmentID,
-			featuredelivery.ErrConflict,
+			delivery.ErrConflict,
 		)
 	}
 	return &report, nil
 }
 
-func scanReviewAssignment(row rowScanner) (featuredelivery.ReviewAssignment, error) {
-	var assignment featuredelivery.ReviewAssignment
+func scanReviewAssignment(row rowScanner) (delivery.ReviewAssignment, error) {
+	var assignment delivery.ReviewAssignment
 	var categoriesJSON []byte
 	var started, completed sql.NullTime
 	err := row.Scan(
@@ -1427,10 +1436,10 @@ func scanReviewAssignment(row rowScanner) (featuredelivery.ReviewAssignment, err
 func (store *FeatureDeliveryStore) ListReviewFindings(
 	ctx context.Context,
 	roundID string,
-	severity featuredelivery.Severity,
-	cursor featuredelivery.FindingCursor,
+	severity delivery.Severity,
+	cursor delivery.FindingCursor,
 	limit int,
-) ([]featuredelivery.FindingSummary, error) {
+) ([]delivery.FindingSummary, error) {
 	limit = boundedLimit(limit, 20, maxReviewFindingPage)
 	query := `SELECT id,report_id,round_id,category,severity,claim,impact,recommendation,
 		confidence,fingerprint,location_json,content_hash,created_at
@@ -1451,7 +1460,7 @@ func (store *FeatureDeliveryStore) ListReviewFindings(
 		return nil, fmt.Errorf("list review findings for round %q: %w", roundID, err)
 	}
 	defer rows.Close()
-	findings := make([]featuredelivery.FindingSummary, 0, limit)
+	findings := make([]delivery.FindingSummary, 0, limit)
 	for rows.Next() {
 		finding, err := scanFindingSummary(rows)
 		if err != nil {
@@ -1469,44 +1478,41 @@ func (store *FeatureDeliveryStore) ListReviewFindings(
 func (store *FeatureDeliveryStore) GetReviewFinding(
 	ctx context.Context,
 	id string,
-) (*featuredelivery.FindingDetail, error) {
-	finding, err := scanFindingSummary(store.db.QueryRowContext(ctx,
+) (*delivery.FindingDetail, error) {
+	var finding delivery.FindingSummary
+	var locationJSON, evidenceJSON []byte
+	err := store.db.QueryRowContext(ctx,
 		`SELECT id,report_id,round_id,category,severity,claim,impact,recommendation,
-			confidence,fingerprint,location_json,content_hash,created_at
+			confidence,fingerprint,location_json,evidence_json,content_hash,created_at
 		 FROM review_findings WHERE id=? LIMIT 1`,
 		id,
-	))
+	).Scan(
+		&finding.ID, &finding.ReportID, &finding.RoundID, &finding.Category, &finding.Severity,
+		&finding.Claim, &finding.Impact, &finding.Recommendation, &finding.Confidence,
+		&finding.Fingerprint, &locationJSON, &evidenceJSON, &finding.ContentHash, &finding.CreatedAt,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get review finding %q: %w", id, err)
 	}
-	rows, err := store.db.QueryContext(ctx,
-		`SELECT kind,ref_value,source_hash,summary
-		 FROM review_finding_evidence WHERE finding_id=? ORDER BY sequence LIMIT ?`,
-		id, maxReviewEvidence,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list evidence for review finding %q: %w", id, err)
-	}
-	defer rows.Close()
-	evidence := make([]featuredelivery.FindingEvidence, 0)
-	for rows.Next() {
-		var item featuredelivery.FindingEvidence
-		if err := rows.Scan(&item.Kind, &item.Ref, &item.Hash, &item.Summary); err != nil {
-			return nil, fmt.Errorf("scan evidence for review finding %q: %w", id, err)
+	if len(locationJSON) > 0 {
+		var location delivery.FindingLocation
+		if err := json.Unmarshal(locationJSON, &location); err != nil {
+			return nil, fmt.Errorf("decode location for review finding %q: %w", id, err)
 		}
-		evidence = append(evidence, item)
+		finding.Location = &location
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate evidence for review finding %q: %w", id, err)
+	var evidence []delivery.FindingEvidence
+	if err := json.Unmarshal(evidenceJSON, &evidence); err != nil {
+		return nil, fmt.Errorf("decode evidence for review finding %q: %w", id, err)
 	}
-	return &featuredelivery.FindingDetail{FindingSummary: finding, Evidence: evidence}, nil
+	return &delivery.FindingDetail{FindingSummary: finding, Evidence: evidence}, nil
 }
 
-func scanFindingSummary(row rowScanner) (featuredelivery.FindingSummary, error) {
-	var finding featuredelivery.FindingSummary
+func scanFindingSummary(row rowScanner) (delivery.FindingSummary, error) {
+	var finding delivery.FindingSummary
 	var locationJSON []byte
 	err := row.Scan(
 		&finding.ID, &finding.ReportID, &finding.RoundID, &finding.Category, &finding.Severity,
@@ -1517,7 +1523,7 @@ func scanFindingSummary(row rowScanner) (featuredelivery.FindingSummary, error) 
 		return finding, err
 	}
 	if len(locationJSON) > 0 {
-		var location featuredelivery.FindingLocation
+		var location delivery.FindingLocation
 		if err := json.Unmarshal(locationJSON, &location); err != nil {
 			return finding, err
 		}
@@ -1529,21 +1535,21 @@ func scanFindingSummary(row rowScanner) (featuredelivery.FindingSummary, error) 
 func (store *FeatureDeliveryStore) TransitionReviewRound(
 	ctx context.Context,
 	id string,
-	from, to featuredelivery.ReviewRoundStatus,
+	from, to delivery.ReviewRoundStatus,
 	at time.Time,
 ) error {
-	if !featuredelivery.CanTransitionReviewRound(from, to) {
-		return featuredelivery.ErrConflict
+	if !delivery.CanTransitionReviewRound(from, to) {
+		return delivery.ErrConflict
 	}
 	query := `UPDATE review_rounds SET status=?`
 	args := []any{to}
-	if to == featuredelivery.RoundCompleted || to == featuredelivery.RoundFailed || to == featuredelivery.RoundCancelled {
+	if to == delivery.RoundCompleted || to == delivery.RoundFailed || to == delivery.RoundCancelled {
 		query += `,completed_at=?`
 		args = append(args, at)
 	}
 	query += ` WHERE id=? AND status=?`
 	args = append(args, id, from)
-	if to == featuredelivery.RoundEvaluating {
+	if to == delivery.RoundEvaluating {
 		query += ` AND NOT EXISTS (
 			SELECT 1 FROM review_assignments
 			WHERE round_id=review_rounds.id AND status IN ('queued','running') LIMIT 1
@@ -1558,7 +1564,7 @@ func (store *FeatureDeliveryStore) TransitionReviewRound(
 		return fmt.Errorf("read review round transition result: %w", err)
 	}
 	if affected != 1 {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	return nil
 }
@@ -1566,18 +1572,18 @@ func (store *FeatureDeliveryStore) TransitionReviewRound(
 func (store *FeatureDeliveryStore) TransitionReviewAssignment(
 	ctx context.Context,
 	id string,
-	from, to featuredelivery.ReviewAssignmentStatus,
+	from, to delivery.ReviewAssignmentStatus,
 	agentRunID, errorCode string,
 	at time.Time,
 ) error {
-	if !featuredelivery.CanTransitionReviewAssignment(from, to) {
-		return featuredelivery.ErrConflict
+	if !delivery.CanTransitionReviewAssignment(from, to) {
+		return delivery.ErrConflict
 	}
 	query := `UPDATE review_assignments a
 		JOIN review_rounds r ON r.id=a.round_id
 		SET a.status=?,a.agent_run_id=?,a.error_code=?`
 	args := []any{to, agentRunID, errorCode}
-	if to == featuredelivery.AssignmentRunning {
+	if to == delivery.AssignmentRunning {
 		query += `,a.started_at=?`
 		args = append(args, at)
 	} else {
@@ -1595,7 +1601,7 @@ func (store *FeatureDeliveryStore) TransitionReviewAssignment(
 		return fmt.Errorf("read review assignment transition result: %w", err)
 	}
 	if affected != 1 {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	return nil
 }
@@ -1610,21 +1616,21 @@ func (store *FeatureDeliveryStore) RequestReviewRoundCancel(
 		return false, fmt.Errorf("begin review round cancellation: %w", err)
 	}
 	defer tx.Rollback()
-	var status featuredelivery.ReviewRoundStatus
+	var status delivery.ReviewRoundStatus
 	if err := tx.QueryRowContext(ctx,
 		`SELECT status FROM review_rounds WHERE id=? LIMIT 1 FOR UPDATE`,
 		id,
 	).Scan(&status); errors.Is(err, sql.ErrNoRows) {
-		return false, featuredelivery.ErrNotFound
+		return false, delivery.ErrNotFound
 	} else if err != nil {
 		return false, fmt.Errorf("lock review round cancellation %q: %w", id, err)
 	}
 	switch status {
-	case featuredelivery.RoundCancelled:
+	case delivery.RoundCancelled:
 		return false, nil
-	case featuredelivery.RoundCreated, featuredelivery.RoundRunning, featuredelivery.RoundEvaluating:
+	case delivery.RoundCreated, delivery.RoundRunning, delivery.RoundEvaluating:
 	default:
-		return false, featuredelivery.ErrConflict
+		return false, delivery.ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE review_assignments
@@ -1653,36 +1659,39 @@ func (store *FeatureDeliveryStore) RequestReviewRoundCancel(
 
 func (store *FeatureDeliveryStore) AppendReviewEvent(
 	ctx context.Context,
-	event featuredelivery.ReviewEvent,
-) (*featuredelivery.ReviewEvent, error) {
+	event delivery.ReviewEvent,
+) (*delivery.ReviewEvent, error) {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin review event append: %w", err)
 	}
 	defer tx.Rollback()
 	var roundID string
-	var status featuredelivery.ReviewRoundStatus
+	var status delivery.ReviewRoundStatus
 	if err := tx.QueryRowContext(ctx,
 		`SELECT id,status FROM review_rounds WHERE id=? LIMIT 1 FOR UPDATE`,
 		event.RoundID,
 	).Scan(&roundID, &status); errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	} else if err != nil {
 		return nil, fmt.Errorf("lock review round %q for event append: %w", event.RoundID, err)
 	}
-	if !featuredelivery.CanAppendReviewEvent(event.Kind, status) {
-		return nil, featuredelivery.ErrConflict
+	if !delivery.CanAppendReviewEvent(event.Kind, status) {
+		return nil, delivery.ErrConflict
 	}
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(seq),0)+1 FROM review_round_events WHERE round_id=?`,
+		`SELECT COALESCE(MAX(seq),0)+1 FROM runtime_events
+		 WHERE stream_kind='review_round' AND stream_id=?`,
 		event.RoundID,
 	).Scan(&event.Seq); err != nil {
 		return nil, fmt.Errorf("allocate review event sequence for round %q: %w", event.RoundID, err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO review_round_events(round_id,seq,kind,summary,detail_json,created_at)
-		 VALUES(?,?,?,?,?,?)`,
-		event.RoundID, event.Seq, event.Kind, event.Summary, nullableJSON(event.Detail), event.CreatedAt,
+		`INSERT INTO runtime_events(
+			stream_kind,stream_id,seq,kind,node_id,summary,detail_json,created_at)
+		 VALUES('review_round',?,?,?,?,?,?,?)`,
+		event.RoundID, event.Seq, event.Kind, "", event.Summary,
+		nullableJSON(event.Detail), event.CreatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("append review event for round %q: %w", event.RoundID, err)
 	}
@@ -1697,20 +1706,22 @@ func (store *FeatureDeliveryStore) ListReviewEvents(
 	roundID string,
 	afterSeq int64,
 	limit int,
-) ([]featuredelivery.ReviewEvent, error) {
+) ([]delivery.ReviewEvent, error) {
 	limit = boundedLimit(limit, 100, maxReviewEventPage)
 	rows, err := store.db.QueryContext(ctx,
-		`SELECT round_id,seq,kind,summary,detail_json,created_at
-		 FROM review_round_events WHERE round_id=? AND seq>? ORDER BY seq LIMIT ?`,
+		`SELECT stream_id,seq,kind,summary,detail_json,created_at
+		 FROM runtime_events
+		 WHERE stream_kind='review_round' AND stream_id=? AND seq>?
+		 ORDER BY seq LIMIT ?`,
 		roundID, afterSeq, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list review events for round %q: %w", roundID, err)
 	}
 	defer rows.Close()
-	events := make([]featuredelivery.ReviewEvent, 0, limit)
+	events := make([]delivery.ReviewEvent, 0, limit)
 	for rows.Next() {
-		var event featuredelivery.ReviewEvent
+		var event delivery.ReviewEvent
 		var detail []byte
 		if err := rows.Scan(
 			&event.RoundID, &event.Seq, &event.Kind, &event.Summary, &detail, &event.CreatedAt,
@@ -1726,14 +1737,14 @@ func (store *FeatureDeliveryStore) ListReviewEvents(
 	return events, nil
 }
 
-func (store *FeatureDeliveryStore) CompleteReviewAssignment(ctx context.Context, report featuredelivery.ReviewReport) error {
+func (store *FeatureDeliveryStore) CompleteReviewAssignment(ctx context.Context, report delivery.ReviewReport) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin review report completion: %w", err)
 	}
 	defer tx.Rollback()
 	var roundID, reviewerID, subjectHash, roundStatus, existingHash string
-	var status featuredelivery.ReviewAssignmentStatus
+	var status delivery.ReviewAssignmentStatus
 	if err := tx.QueryRowContext(ctx,
 		`SELECT a.round_id,a.reviewer_id,a.status,r.subject_hash,r.status,
 		        COALESCE(report.content_hash,'')
@@ -1750,21 +1761,21 @@ func (store *FeatureDeliveryStore) CompleteReviewAssignment(ctx context.Context,
 		&roundStatus,
 		&existingHash,
 	); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	} else if err != nil {
 		return fmt.Errorf("lock review assignment %q: %w", report.AssignmentID, err)
 	}
 	if report.RoundID != roundID || report.ReviewerID != reviewerID ||
 		report.SubjectHash != subjectHash {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
-	if status == featuredelivery.AssignmentSucceeded && existingHash == report.ContentHash {
+	if status == delivery.AssignmentSucceeded && existingHash == report.ContentHash {
 		return nil
 	}
-	if status != featuredelivery.AssignmentRunning ||
-		roundStatus != string(featuredelivery.RoundRunning) ||
+	if status != delivery.AssignmentRunning ||
+		roundStatus != string(delivery.RoundRunning) ||
 		existingHash != "" {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	if err := insertReviewReport(ctx, tx, report); err != nil {
 		return err
@@ -1789,7 +1800,7 @@ func (store *FeatureDeliveryStore) CompleteReviewAssignment(ctx context.Context,
 func insertReviewReport(
 	ctx context.Context,
 	tx *sql.Tx,
-	report featuredelivery.ReviewReport,
+	report delivery.ReviewReport,
 ) error {
 	reportJSON, err := json.Marshal(report)
 	if err != nil {
@@ -1805,7 +1816,7 @@ func insertReviewReport(
 		report.ContentHash, report.CompletedAt,
 	); err != nil {
 		if duplicateKey(err) {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 		return fmt.Errorf("insert review report %q: %w", report.ID, err)
 	}
@@ -1818,26 +1829,20 @@ func insertReviewReport(
 			}
 			location = raw
 		}
+		evidenceJSON, err := json.Marshal(finding.Evidence)
+		if err != nil {
+			return fmt.Errorf("marshal finding evidence: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO review_findings(
 				id,report_id,round_id,category,severity,claim,impact,recommendation,
-				confidence,fingerprint,location_json,content_hash,created_at
-			 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				confidence,fingerprint,location_json,evidence_json,content_hash,created_at
+			 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			finding.ID, report.ID, report.RoundID, finding.Category, finding.Severity,
 			finding.Claim, finding.Impact, finding.Recommendation, finding.Confidence,
-			finding.Fingerprint, location, finding.ContentHash, report.CompletedAt,
+			finding.Fingerprint, location, evidenceJSON, finding.ContentHash, report.CompletedAt,
 		); err != nil {
 			return fmt.Errorf("insert review finding %q: %w", finding.ID, err)
-		}
-		for index, evidence := range finding.Evidence {
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO review_finding_evidence(
-					finding_id,sequence,kind,ref_value,source_hash,summary
-				 ) VALUES(?,?,?,?,?,?)`,
-				finding.ID, index+1, evidence.Kind, evidence.Ref, evidence.Hash, evidence.Summary,
-			); err != nil {
-				return fmt.Errorf("insert evidence for finding %q: %w", finding.ID, err)
-			}
 		}
 	}
 	return nil
@@ -1845,18 +1850,18 @@ func insertReviewReport(
 
 func (store *FeatureDeliveryStore) SaveReviewAdjudications(
 	ctx context.Context,
-	adjudications []featuredelivery.ReviewAdjudication,
+	adjudications []delivery.ReviewAdjudication,
 ) error {
 	if len(adjudications) == 0 {
 		return nil
 	}
 	if len(adjudications) > maxReviewAdjudicationPage {
-		return featuredelivery.ErrInvalid
+		return delivery.ErrInvalid
 	}
-	prepared := make([]featuredelivery.ReviewAdjudication, 0, len(adjudications))
+	prepared := make([]delivery.ReviewAdjudication, 0, len(adjudications))
 	seen := make(map[string]struct{}, len(adjudications))
 	for _, adjudication := range adjudications {
-		item, err := featuredelivery.PrepareReviewAdjudication(adjudication)
+		item, err := delivery.PrepareReviewAdjudication(adjudication)
 		if err != nil {
 			return err
 		}
@@ -1865,7 +1870,7 @@ func (store *FeatureDeliveryStore) SaveReviewAdjudications(
 			return fmt.Errorf(
 				"duplicate review adjudication %q: %w",
 				item.Fingerprint,
-				featuredelivery.ErrInvalid,
+				delivery.ErrInvalid,
 			)
 		}
 		seen[key] = struct{}{}
@@ -1917,7 +1922,7 @@ func (store *FeatureDeliveryStore) SaveReviewAdjudications(
 			return fmt.Errorf("read existing review adjudication %q: %w", adjudication.ID, readErr)
 		}
 		if existingHash != adjudication.ContentHash {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -1929,9 +1934,9 @@ func (store *FeatureDeliveryStore) SaveReviewAdjudications(
 func (store *FeatureDeliveryStore) ListReviewAdjudications(
 	ctx context.Context,
 	roundID string,
-	cursor featuredelivery.ReviewAdjudicationCursor,
+	cursor delivery.ReviewAdjudicationCursor,
 	limit int,
-) ([]featuredelivery.ReviewAdjudication, error) {
+) ([]delivery.ReviewAdjudication, error) {
 	limit = boundedLimit(limit, 20, maxReviewAdjudicationPage)
 	query := `SELECT adjudication_json FROM review_adjudications
 		 WHERE round_id=?`
@@ -1947,17 +1952,17 @@ func (store *FeatureDeliveryStore) ListReviewAdjudications(
 		return nil, fmt.Errorf("list review adjudications: %w", err)
 	}
 	defer rows.Close()
-	items := make([]featuredelivery.ReviewAdjudication, 0)
+	items := make([]delivery.ReviewAdjudication, 0)
 	for rows.Next() {
 		var raw []byte
 		if err := rows.Scan(&raw); err != nil {
 			return nil, fmt.Errorf("scan review adjudication: %w", err)
 		}
-		var adjudication featuredelivery.ReviewAdjudication
+		var adjudication delivery.ReviewAdjudication
 		if err := json.Unmarshal(raw, &adjudication); err != nil {
 			return nil, fmt.Errorf("decode review adjudication: %w", err)
 		}
-		prepared, err := featuredelivery.PrepareReviewAdjudication(adjudication)
+		prepared, err := delivery.PrepareReviewAdjudication(adjudication)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"validate stored review adjudication %q: %w",
@@ -1974,21 +1979,21 @@ func (store *FeatureDeliveryStore) ListReviewAdjudications(
 }
 
 // LoadFullReviewEvaluation intentionally loads the bounded policy panel and its reports for one Gate calculation.
-func (store *FeatureDeliveryStore) LoadFullReviewEvaluation(ctx context.Context, roundID string) (featuredelivery.ReviewEvaluation, error) {
+func (store *FeatureDeliveryStore) LoadFullReviewEvaluation(ctx context.Context, roundID string) (delivery.ReviewEvaluation, error) {
 	round, err := store.GetReviewRound(ctx, roundID)
 	if err != nil {
-		return featuredelivery.ReviewEvaluation{}, err
+		return delivery.ReviewEvaluation{}, err
 	}
-	if round.Status != featuredelivery.RoundEvaluating {
-		return featuredelivery.ReviewEvaluation{}, featuredelivery.ErrConflict
+	if round.Status != delivery.RoundEvaluating {
+		return delivery.ReviewEvaluation{}, delivery.ErrConflict
 	}
 	policy, err := store.GetReviewPolicy(ctx, round.PolicyID, round.PolicyVersion)
 	if err != nil {
-		return featuredelivery.ReviewEvaluation{}, err
+		return delivery.ReviewEvaluation{}, err
 	}
 	assignments, err := store.listLatestReviewAssignments(ctx, roundID)
 	if err != nil {
-		return featuredelivery.ReviewEvaluation{}, err
+		return delivery.ReviewEvaluation{}, err
 	}
 	rows, err := store.db.QueryContext(ctx,
 		`SELECT report.report_json
@@ -2007,19 +2012,19 @@ func (store *FeatureDeliveryStore) LoadFullReviewEvaluation(ctx context.Context,
 		roundID, roundID, maxReviewAssignmentPage,
 	)
 	if err != nil {
-		return featuredelivery.ReviewEvaluation{}, fmt.Errorf("list review reports: %w", err)
+		return delivery.ReviewEvaluation{}, fmt.Errorf("list review reports: %w", err)
 	}
 	defer rows.Close()
-	reports := make([]featuredelivery.ReviewReport, 0, len(assignments))
+	reports := make([]delivery.ReviewReport, 0, len(assignments))
 	findingIDs := make([]string, 0)
 	for rows.Next() {
 		var raw []byte
 		if err := rows.Scan(&raw); err != nil {
-			return featuredelivery.ReviewEvaluation{}, fmt.Errorf("scan review report: %w", err)
+			return delivery.ReviewEvaluation{}, fmt.Errorf("scan review report: %w", err)
 		}
-		var report featuredelivery.ReviewReport
+		var report delivery.ReviewReport
 		if err := json.Unmarshal(raw, &report); err != nil {
-			return featuredelivery.ReviewEvaluation{}, fmt.Errorf("decode review report: %w", err)
+			return delivery.ReviewEvaluation{}, fmt.Errorf("decode review report: %w", err)
 		}
 		reports = append(reports, report)
 		for _, finding := range report.Findings {
@@ -2027,22 +2032,22 @@ func (store *FeatureDeliveryStore) LoadFullReviewEvaluation(ctx context.Context,
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return featuredelivery.ReviewEvaluation{}, fmt.Errorf("iterate review reports: %w", err)
+		return delivery.ReviewEvaluation{}, fmt.Errorf("iterate review reports: %w", err)
 	}
 	resolutions, err := store.ListFindingResolutionsByIDs(ctx, findingIDs, round.Subject.ContentHash)
 	if err != nil {
-		return featuredelivery.ReviewEvaluation{}, err
+		return delivery.ReviewEvaluation{}, err
 	}
 	adjudications, err := store.ListReviewAdjudications(
 		ctx,
 		roundID,
-		featuredelivery.ReviewAdjudicationCursor{},
+		delivery.ReviewAdjudicationCursor{},
 		maxReviewAdjudicationPage,
 	)
 	if err != nil {
-		return featuredelivery.ReviewEvaluation{}, err
+		return delivery.ReviewEvaluation{}, err
 	}
-	return featuredelivery.ReviewEvaluation{
+	return delivery.ReviewEvaluation{
 		Round: *round, Policy: *policy, Assignments: assignments,
 		Reports: reports, Adjudications: adjudications, Resolutions: resolutions,
 	}, nil
@@ -2051,7 +2056,7 @@ func (store *FeatureDeliveryStore) LoadFullReviewEvaluation(ctx context.Context,
 func (store *FeatureDeliveryStore) listLatestReviewAssignments(
 	ctx context.Context,
 	roundID string,
-) ([]featuredelivery.ReviewAssignment, error) {
+) ([]delivery.ReviewAssignment, error) {
 	rows, err := store.db.QueryContext(ctx,
 		`SELECT assignment.id,assignment.round_id,assignment.reviewer_id,
 		        assignment.agent_id,assignment.agent_version,assignment.definition_hash,
@@ -2075,7 +2080,7 @@ func (store *FeatureDeliveryStore) listLatestReviewAssignments(
 		return nil, fmt.Errorf("list latest review assignments for round %q: %w", roundID, err)
 	}
 	defer rows.Close()
-	assignments := make([]featuredelivery.ReviewAssignment, 0, maxReviewAssignmentPage)
+	assignments := make([]delivery.ReviewAssignment, 0, maxReviewAssignmentPage)
 	for rows.Next() {
 		assignment, err := scanReviewAssignment(rows)
 		if err != nil {
@@ -2091,11 +2096,11 @@ func (store *FeatureDeliveryStore) listLatestReviewAssignments(
 
 func (store *FeatureDeliveryStore) CompleteReviewRound(
 	ctx context.Context,
-	result featuredelivery.ReviewGateResult,
+	result delivery.ReviewGateResult,
 	completedAt time.Time,
 ) error {
 	if !isStoredGateDecision(result.Decision) {
-		return featuredelivery.ErrInvalid
+		return delivery.ErrInvalid
 	}
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
@@ -2107,12 +2112,11 @@ func (store *FeatureDeliveryStore) CompleteReviewRound(
 	}
 	defer tx.Rollback()
 	var subjectHash, policyHash, existingHash string
-	var status featuredelivery.ReviewRoundStatus
+	var status delivery.ReviewRoundStatus
 	if err := tx.QueryRowContext(ctx,
 		`SELECT round.subject_hash,round.policy_hash,round.status,
-		        COALESCE(gate.content_hash,'')
+		        COALESCE(round.gate_content_hash,'')
 		 FROM review_rounds round
-		 LEFT JOIN review_gate_results gate ON gate.round_id=round.id
 		 WHERE round.id=? LIMIT 1 FOR UPDATE`,
 		result.RoundID,
 	).Scan(
@@ -2121,37 +2125,31 @@ func (store *FeatureDeliveryStore) CompleteReviewRound(
 		&status,
 		&existingHash,
 	); errors.Is(err, sql.ErrNoRows) {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("lock review round %q: %w", result.RoundID, err)
 	}
 	if subjectHash != result.SubjectHash || policyHash != result.PolicyHash {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
-	if status == featuredelivery.RoundCompleted && existingHash == result.ContentHash {
+	if status == delivery.RoundCompleted && existingHash == result.ContentHash {
 		return nil
 	}
-	if status != featuredelivery.RoundEvaluating || existingHash != "" {
-		return featuredelivery.ErrConflict
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO review_gate_results(
-			id,round_id,subject_hash,decision,result_json,policy_hash,content_hash,created_at
-		 ) VALUES(?,?,?,?,?,?,?,?)`,
-		result.ID, result.RoundID, result.SubjectHash, result.Decision,
-		resultJSON, result.PolicyHash, result.ContentHash, result.CreatedAt,
-	); err != nil {
-		if duplicateKey(err) {
-			return featuredelivery.ErrConflict
-		}
-		return fmt.Errorf("insert review gate result %q: %w", result.ID, err)
+	if status != delivery.RoundEvaluating || existingHash != "" {
+		return delivery.ErrConflict
 	}
 	update, err := tx.ExecContext(ctx,
-		`UPDATE review_rounds SET status='completed',completed_at=?
-		 WHERE id=? AND status='evaluating'`,
-		completedAt, result.RoundID,
+		`UPDATE review_rounds
+		 SET gate_result_id=?,gate_decision=?,gate_result_json=?,gate_content_hash=?,
+		     gate_created_at=?,status='completed',completed_at=?
+		 WHERE id=? AND status='evaluating' AND gate_result_id IS NULL`,
+		result.ID, result.Decision, resultJSON, result.ContentHash,
+		result.CreatedAt, completedAt, result.RoundID,
 	)
 	if err != nil {
+		if duplicateKey(err) {
+			return delivery.ErrConflict
+		}
 		return fmt.Errorf("complete review round %q: %w", result.RoundID, err)
 	}
 	if err := requireSingleAffected(update); err != nil {
@@ -2163,19 +2161,20 @@ func (store *FeatureDeliveryStore) CompleteReviewRound(
 	return nil
 }
 
-func (store *FeatureDeliveryStore) GetReviewGateResult(ctx context.Context, id string) (*featuredelivery.ReviewGateResult, error) {
+func (store *FeatureDeliveryStore) GetReviewGateResult(ctx context.Context, id string) (*delivery.ReviewGateResult, error) {
 	var raw []byte
 	err := store.db.QueryRowContext(ctx,
-		`SELECT result_json FROM review_gate_results WHERE id=? LIMIT 1`,
+		`SELECT gate_result_json FROM review_rounds
+		 WHERE gate_result_id=? AND gate_result_json IS NOT NULL LIMIT 1`,
 		id,
 	).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get review gate result %q: %w", id, err)
 	}
-	var result featuredelivery.ReviewGateResult
+	var result delivery.ReviewGateResult
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("decode review gate result %q: %w", id, err)
 	}
@@ -2186,30 +2185,31 @@ func (store *FeatureDeliveryStore) GetReviewGateResult(ctx context.Context, id s
 func (store *FeatureDeliveryStore) GetReviewGateResultByRound(
 	ctx context.Context,
 	roundID string,
-) (*featuredelivery.ReviewGateResult, error) {
+) (*delivery.ReviewGateResult, error) {
 	var raw []byte
 	err := store.db.QueryRowContext(ctx,
-		`SELECT result_json FROM review_gate_results WHERE round_id=? LIMIT 1`,
+		`SELECT gate_result_json FROM review_rounds
+		 WHERE id=? AND gate_result_json IS NOT NULL LIMIT 1`,
 		roundID,
 	).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, featuredelivery.ErrNotFound
+		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get review gate result for round %q: %w", roundID, err)
 	}
-	var result featuredelivery.ReviewGateResult
+	var result delivery.ReviewGateResult
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("decode review gate result for round %q: %w", roundID, err)
 	}
 	return &result, nil
 }
 
-func (store *FeatureDeliveryStore) CreateFindingResolution(ctx context.Context, resolution featuredelivery.FindingResolution) error {
+func (store *FeatureDeliveryStore) CreateFindingResolution(ctx context.Context, resolution delivery.FindingResolution) error {
 	if resolution.ID == "" || resolution.FindingID == "" || resolution.SubjectHash == "" ||
 		resolution.Rationale == "" || resolution.ActorID <= 0 || resolution.CreatedAt.IsZero() ||
 		!isResolutionKind(resolution.Resolution) {
-		return featuredelivery.ErrInvalid
+		return delivery.ErrInvalid
 	}
 	result, err := store.db.ExecContext(ctx,
 		`INSERT INTO finding_resolutions(
@@ -2223,7 +2223,7 @@ func (store *FeatureDeliveryStore) CreateFindingResolution(ctx context.Context, 
 	)
 	if err != nil {
 		if duplicateKey(err) {
-			return featuredelivery.ErrConflict
+			return delivery.ErrConflict
 		}
 		return fmt.Errorf("create finding resolution %q: %w", resolution.ID, err)
 	}
@@ -2232,7 +2232,7 @@ func (store *FeatureDeliveryStore) CreateFindingResolution(ctx context.Context, 
 		return fmt.Errorf("read finding resolution %q result: %w", resolution.ID, err)
 	}
 	if affected != 1 {
-		return featuredelivery.ErrNotFound
+		return delivery.ErrNotFound
 	}
 	return nil
 }
@@ -2240,11 +2240,11 @@ func (store *FeatureDeliveryStore) CreateFindingResolution(ctx context.Context, 
 func (store *FeatureDeliveryStore) ListFindingResolutions(
 	ctx context.Context,
 	findingID, subjectHash string,
-	cursor featuredelivery.FindingResolutionCursor,
+	cursor delivery.FindingResolutionCursor,
 	limit int,
-) ([]featuredelivery.FindingResolution, error) {
+) ([]delivery.FindingResolution, error) {
 	if findingID == "" || subjectHash == "" {
-		return nil, featuredelivery.ErrInvalid
+		return nil, delivery.ErrInvalid
 	}
 	limit = boundedLimit(limit, 20, maxReviewResolutionPage)
 	query := `SELECT id,finding_id,resolution,subject_hash,replacement_hash,rationale,actor_id,expires_at,created_at
@@ -2261,7 +2261,7 @@ func (store *FeatureDeliveryStore) ListFindingResolutions(
 		return nil, fmt.Errorf("list finding resolutions for %q: %w", findingID, err)
 	}
 	defer rows.Close()
-	resolutions := make([]featuredelivery.FindingResolution, 0, limit)
+	resolutions := make([]delivery.FindingResolution, 0, limit)
 	for rows.Next() {
 		resolution, err := scanFindingResolution(rows)
 		if err != nil {
@@ -2279,12 +2279,12 @@ func (store *FeatureDeliveryStore) ListFindingResolutionsByIDs(
 	ctx context.Context,
 	findingIDs []string,
 	subjectHash string,
-) ([]featuredelivery.FindingResolution, error) {
+) ([]delivery.FindingResolution, error) {
 	if len(findingIDs) == 0 {
 		return nil, nil
 	}
 	if len(findingIDs) > maxReviewAssignmentPage*100 {
-		return nil, featuredelivery.ErrInvalid
+		return nil, delivery.ErrInvalid
 	}
 	args := make([]any, 0, len(findingIDs)+2)
 	args = append(args, subjectHash)
@@ -2305,7 +2305,7 @@ func (store *FeatureDeliveryStore) ListFindingResolutionsByIDs(
 		return nil, fmt.Errorf("list finding resolutions: %w", err)
 	}
 	defer rows.Close()
-	resolutions := make([]featuredelivery.FindingResolution, 0)
+	resolutions := make([]delivery.FindingResolution, 0)
 	for rows.Next() {
 		resolution, err := scanFindingResolution(rows)
 		if err != nil {
@@ -2319,8 +2319,8 @@ func (store *FeatureDeliveryStore) ListFindingResolutionsByIDs(
 	return resolutions, nil
 }
 
-func scanFindingResolution(row rowScanner) (featuredelivery.FindingResolution, error) {
-	var resolution featuredelivery.FindingResolution
+func scanFindingResolution(row rowScanner) (delivery.FindingResolution, error) {
+	var resolution delivery.FindingResolution
 	var expires sql.NullTime
 	err := row.Scan(
 		&resolution.ID, &resolution.FindingID, &resolution.Resolution,
@@ -2340,25 +2340,25 @@ func requireSingleAffected(result sql.Result) error {
 		return fmt.Errorf("read affected rows: %w", err)
 	}
 	if affected != 1 {
-		return featuredelivery.ErrConflict
+		return delivery.ErrConflict
 	}
 	return nil
 }
 
-func isStoredGateDecision(decision featuredelivery.GateDecision) bool {
+func isStoredGateDecision(decision delivery.GateDecision) bool {
 	switch decision {
-	case featuredelivery.GatePass, featuredelivery.GateRevise, featuredelivery.GateHumanRequired,
-		featuredelivery.GateIncomplete, featuredelivery.GateFailed:
+	case delivery.GatePass, delivery.GateRevise, delivery.GateHumanRequired,
+		delivery.GateIncomplete, delivery.GateFailed:
 		return true
 	default:
 		return false
 	}
 }
 
-func isResolutionKind(kind featuredelivery.FindingResolutionKind) bool {
+func isResolutionKind(kind delivery.FindingResolutionKind) bool {
 	switch kind {
-	case featuredelivery.ResolutionFixed, featuredelivery.ResolutionWaived,
-		featuredelivery.ResolutionInvalidated, featuredelivery.ResolutionSuperseded:
+	case delivery.ResolutionFixed, delivery.ResolutionWaived,
+		delivery.ResolutionInvalidated, delivery.ResolutionSuperseded:
 		return true
 	default:
 		return false

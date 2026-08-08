@@ -9,8 +9,8 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agentcatalog"
-	"github.com/dekwanlabs/nasuta/internal/agentworkflow"
+	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
 
 func TestDefaultAgentDefinitionsShareOneSettingsVersion(t *testing.T) {
@@ -34,10 +34,10 @@ func TestDefaultAgentDefinitionsShareOneSettingsVersion(t *testing.T) {
 		t.Fatalf("definitions = %d, want %d", len(definitions), len(wantIDs))
 	}
 	schemas := agentapi.NewSchemaRegistry()
-	if err := schemas.Publish(agentcatalog.DefaultSchemas()); err != nil {
+	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
 		t.Fatal(err)
 	}
-	catalog := agentcatalog.New(schemas)
+	catalog := catalog.New(schemas)
 	if err := catalog.Publish(definitions); err != nil {
 		t.Fatal(err)
 	}
@@ -88,16 +88,16 @@ func TestConfigureAgentWorkflowRuntimeTracksLLMAvailability(t *testing.T) {
 	}
 	defer db.Close()
 	schemas := agentapi.NewSchemaRegistry()
-	if err := schemas.Publish(agentcatalog.DefaultSchemas()); err != nil {
+	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
 		t.Fatal(err)
 	}
-	agents := agentcatalog.New(schemas)
-	workflowCatalog := agentworkflow.NewCatalog(schemas, agents)
-	workflowStore, err := agentworkflow.NewStore(db)
+	agents := catalog.New(schemas)
+	workflowCatalog := workflow.NewCatalog(schemas, agents)
+	workflowStore, err := workflow.NewStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := agentworkflow.NewService(workflowCatalog, workflowStore, nil)
+	service, err := workflow.NewService(workflowCatalog, workflowStore, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
