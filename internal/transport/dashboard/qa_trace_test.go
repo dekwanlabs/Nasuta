@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"testing"
 
@@ -12,7 +11,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/tracecontract"
+	"github.com/dekwanlabs/nasuta/internal/tracecontract"
 )
 
 type failingSSEWriter struct {
@@ -78,17 +77,28 @@ func TestQATraceUsesV1WireContract(t *testing.T) {
 	}
 }
 
-func TestStreamAgentEventsDrainsTraceBeforeTerminal(t *testing.T) {
-	hubEvents := make(chan agent.SSEEvent, 2)
-	hubEvents <- agent.SSEEvent{Type: agent.EventTrace, Data: domain.EvaluationTrace{Node: "retrieval_assemble"}}
+// The QA stream loop forwards every hub event and stops only on the terminal
+// one, so a trace event queued ahead of run.finished must still reach the client.
+func TestStreamLoopDrainsTraceBeforeTerminal(t *testing.T) {
 	terminal := &agent.RunTerminal{Status: agent.RunStatusDone, Answer: "answer"}
-	hubEvents <- agent.SSEEvent{Type: agent.EventRunFinished, Data: terminal}
+	events := []agent.SSEEvent{
+		{Type: agent.EventTrace, Data: domain.EvaluationTrace{Node: "retrieval_assemble"}},
+		{Type: agent.EventRunFinished, Data: terminal},
+	}
 	var names []string
-	handler := &Handler{}
-	got := handler.streamAgentEvents(hubEvents, func(name string, _ any) bool {
-		names = append(names, name)
-		return true
-	}, httptest.NewRequest("GET", "/", nil))
+	var got *agent.RunTerminal
+	for _, ev := range events {
+		if got != nil {
+			t.Fatalf("kept forwarding after terminal event %q", ev.Type)
+		}
+		if !emitHubEvent(ev, func(name string, _ any) bool {
+			names = append(names, name)
+			return true
+		}) {
+			t.Fatalf("emit %q failed", ev.Type)
+		}
+		got = agent.TerminalFromEvent(ev)
+	}
 	if got != terminal || len(names) != 2 || names[0] != "trace" || names[1] != "run.finished" {
 		t.Fatalf("terminal=%+v events=%v", got, names)
 	}

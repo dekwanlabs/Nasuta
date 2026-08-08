@@ -367,23 +367,38 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		askDone <- askResponse{result: result, err: err}
 	}()
 
-	var response askResponse
-	responseReceived := false
+	// Ask submits the run and returns once the agent goroutine starts, so askDone
+	// arrives long before run.finished. Both signals drive one loop: the hub
+	// channel streams every event through to the terminal one, while askDone only
+	// carries submission failure and the retrieved-context payload. Receiving on a
+	// nil channel never becomes ready, so a run without a hub relies on askDone
+	// alone — and since no run.finished can follow, it ends the stream there.
 	var terminal *agent.RunTerminal
-	for !responseReceived {
-		if channel == nil {
-			select {
-			case response = <-askDone:
-				responseReceived = true
-			case <-r.Context().Done():
+	for terminal == nil {
+		select {
+		case response := <-askDone:
+			if response.err != nil {
+				log.ErrorfCtx(ctx, "[qa] agent init error: %v", response.err)
+				sseEvent("run.finished", &agent.RunTerminal{
+					RunID: runID, Status: agent.RunStatusFailed, Error: response.err.Error(),
+				})
 				return
 			}
-			continue
-		}
-		select {
-		case response = <-askDone:
-			responseReceived = true
-		case ev := <-channel:
+			if rc := response.result.Context; rc != nil && len(rc.References) > 0 {
+				if !sseEvent("context", map[string]any{
+					"references": rc.References,
+					"hitCount":   rc.HitCount,
+				}) {
+					return
+				}
+			}
+			if channel == nil {
+				return
+			}
+		case ev, ok := <-channel:
+			if !ok {
+				return
+			}
 			if !emitHubEvent(ev, sseEvent) {
 				return
 			}
@@ -391,31 +406,6 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		case <-r.Context().Done():
 			return
 		}
-	}
-	if response.err != nil {
-		log.ErrorfCtx(ctx, "[qa] agent init error: %v", response.err)
-		if terminal == nil {
-			terminal = &agent.RunTerminal{RunID: runID, Status: agent.RunStatusFailed, Error: response.err.Error()}
-			sseEvent("run.finished", terminal)
-		}
-		return
-	}
-	result := response.result
-
-	if result.Context != nil && len(result.Context.References) > 0 {
-		if !sseEvent("context", map[string]any{
-			"references": result.Context.References,
-			"hitCount":   result.Context.HitCount,
-		}) {
-			return
-		}
-	}
-
-	if terminal == nil {
-		terminal = handler.streamAgentEvents(channel, sseEvent, r)
-	}
-	if r.Context().Err() != nil {
-		return
 	}
 }
 
@@ -840,28 +830,6 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	httputil.WriteJSON(w, map[string]string{"status": "sent"})
-}
-
-func (handler *Handler) streamAgentEvents(hubCh chan agent.SSEEvent, sseEvent func(string, any) bool, r *http.Request) *agent.RunTerminal {
-	for {
-		if hubCh == nil {
-			return nil
-		}
-		select {
-		case ev, ok := <-hubCh:
-			if !ok {
-				return nil
-			}
-			if !emitHubEvent(ev, sseEvent) {
-				return nil
-			}
-			if terminal := agent.TerminalFromEvent(ev); terminal != nil {
-				return terminal
-			}
-		case <-r.Context().Done():
-			return nil
-		}
-	}
 }
 
 func emitHubEvent(ev agent.SSEEvent, sseEvent func(string, any) bool) bool {

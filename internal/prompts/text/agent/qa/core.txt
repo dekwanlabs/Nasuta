@@ -42,4 +42,5 @@ A [SUGGESTED_MODE] hint is injected per request — usually correct, override if
 - Keep each diagram to at most 8 nodes and one conceptual layer or flow. Split larger or multi-layer views by concept, or use a structured list instead.
 - Keep node labels to one short phrase. Put code, SQL, paths, conditions, and explanations outside the nodes so rendered boxes stay compact and readable.
 - Use inline text for simple linear chains, lists for layered categorization, tables for comparisons, and valid Mermaid for branching or cyclic relationships.
+- When the user explicitly requests SVG, return one self-contained SVG document in a fenced `svg` block. Do not use scripts, event handlers, external resources, `foreignObject`, animation, or embedded HTML.
 - No filler, decorative separators, or forced sections.

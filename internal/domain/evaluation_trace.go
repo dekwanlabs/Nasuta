@@ -3,7 +3,7 @@ package domain
 import (
 	"context"
 
-	"github.com/dekwanlabs/nasuta/tracecontract"
+	"github.com/dekwanlabs/nasuta/internal/tracecontract"
 )
 
 // EvaluationTrace is a request-scoped, read-only execution event.

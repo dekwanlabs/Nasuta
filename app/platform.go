@@ -92,6 +92,7 @@ type Platform struct {
 	agentAPI           *agenthttp.Handler
 	investigationAPI   *investigationhttp.Handler
 	qaSessions         *memory.SessionStore
+	qaMemory           *memory.MemoryStore
 	qaRunStore         *agent.RunStore
 	qaRuntime          dashboard.QARuntime
 	definitionRuntime  agentapi.Runtime
@@ -276,6 +277,35 @@ func buildSessionHistory(cfg config.Config, sessions *memory.SessionStore, emb e
 	}
 	log.Infof("[qa] session history hybrid index enabled (collection=session_history)")
 	return history
+}
+
+func buildLongTermMemory(cfg config.Config, db *sql.DB, emb embed.Embedder) *memory.MemoryStore {
+	if db == nil || emb == nil || !emb.Enabled() {
+		return nil
+	}
+	memoryConfig := cfg.Semantic
+	memoryConfig.Collection = "memory"
+	memorySemantic, err := semanticstore.New(memoryConfig)
+	if err != nil {
+		log.Warnf("[qa] memory semantic store init failed: %v", err)
+		return nil
+	}
+	if err := memorySemantic.Ensure(context.Background(), semantic.Schema{
+		Collection: "memory",
+		DenseDim:   emb.Dim(),
+	}); err != nil {
+		_ = memorySemantic.Close()
+		log.Warnf("[qa] memory collection ensure failed: %v", err)
+		return nil
+	}
+	memoryStore := memory.NewMemoryStore(db, memorySemantic, emb, cfg.MemoryWorkContextTTL)
+	vocabPath := filepath.Join(cfg.WorkspaceRoot, platform.WorkspaceMetadataDir, "memory_bm25_vocab.json")
+	if err := memoryStore.EnableBM25(context.Background(), vocabPath); err != nil {
+		log.Warnf("[qa] memory BM25 disabled; dense recall remains available: %v", err)
+	} else {
+		log.Infof("[qa] memory hybrid index enabled (collection=memory)")
+	}
+	return memoryStore
 }
 
 func openPlatformDB() (*sql.DB, error) {
@@ -467,6 +497,13 @@ func (platform *Platform) buildQARuntime(
 	if err := snapshot.ValidateAgentSettings(); err != nil {
 		return dashboard.QARuntime{}, nil, nil, err
 	}
+	if platform.qaMemory == nil {
+		platform.qaMemory = buildLongTermMemory(
+			platform.cfg,
+			platform.platformDB,
+			platform.index.Embedder,
+		)
+	}
 	definitions, err := defaultAgentDefinitions(&snapshot, version)
 	if err != nil {
 		return dashboard.QARuntime{}, nil, nil, err
@@ -487,10 +524,9 @@ func (platform *Platform) buildQARuntime(
 		events:   definitionRuntime,
 	}
 	qa := agent.NewQA(agent.QADeps{
-		Tools: platform.knowledge, Semantic: platform.index.Semantic,
-		Embedder: platform.index.Embedder, Cfg: platform.cfg, Platform: &snapshot,
-		CodeGraphDB: graph, DB: platform.platformDB,
-		History: platform.history, Sessions: platform.qaSessions,
+		Tools: platform.knowledge, Cfg: platform.cfg, Platform: &snapshot,
+		CodeGraphDB: graph, History: platform.history,
+		Sessions: platform.qaSessions, Memory: platform.qaMemory,
 		Definitions:       platform.agentCatalog,
 		Agent:             agentapi.DefinitionRef{ID: definitions[0].ID},
 		Runtime:           definitionRuntime,
@@ -722,6 +758,9 @@ func (platform *Platform) Close() error {
 	}
 	if platform.history != nil {
 		_ = platform.history.Close()
+	}
+	if platform.qaMemory != nil {
+		_ = platform.qaMemory.Close()
 	}
 	platform.index.Close()
 	if platform.platformDB != nil {

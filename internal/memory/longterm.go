@@ -59,6 +59,14 @@ func (memory *MemoryStore) Enabled() bool {
 		memory.embedder != nil && memory.embedder.Enabled()
 }
 
+// Close releases the dedicated semantic backend owned by long-term memory.
+func (memory *MemoryStore) Close() error {
+	if memory == nil || memory.semantic == nil {
+		return nil
+	}
+	return memory.semantic.Close()
+}
+
 // EnableBM25 binds sparse coordinates to the dedicated memory collection.
 func (memory *MemoryStore) EnableBM25(ctx context.Context, vocabPath string) error {
 	if vocabPath == "" {

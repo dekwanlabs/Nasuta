@@ -6,7 +6,6 @@ import (
 	"errors"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -359,7 +358,6 @@ func TestPrepareHandoffBoundsPayloadBeforeSchemaValidation(t *testing.T) {
 }
 
 type recordingExecutor struct {
-	mu      sync.Mutex
 	started chan string
 	release chan struct{}
 }
