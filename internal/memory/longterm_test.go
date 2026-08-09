@@ -28,6 +28,7 @@ func TestWriteSupersedesLowerAuthorityFact(t *testing.T) {
 		WithArgs(newID, sqlmock.AnyArg(), oldID, int64(42)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	expectMemoryInsert(mock, newID, StatusActive, nil)
+	expectEmptySupersededPrune(mock, 42, "user:response-language")
 	mock.ExpectCommit()
 
 	result, err := memory.Write(context.Background(), MemoryRecord{
@@ -66,7 +67,11 @@ func TestWriteRejectsLowerAuthorityReplacement(t *testing.T) {
 		WithArgs(int64(42), "workspace:user-center:owner").
 		WillReturnRows(sqlmock.NewRows(memoryColumns()).
 			AddRow(memoryRow(activeID, 42, "workspace:user-center:owner", KindProfile, "Owns user center", SourceExplicitUser, StatusActive, nil, nil, now)...))
+	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND content=\? AND status='superseded'.*LIMIT 1.*FOR UPDATE`).
+		WithArgs(int64(42), "workspace:user-center:owner", "Possibly owns another service").
+		WillReturnRows(sqlmock.NewRows(memoryColumns()))
 	expectMemoryInsert(mock, incomingID, StatusSuperseded, activeID)
+	expectEmptySupersededPrune(mock, 42, "workspace:user-center:owner")
 	mock.ExpectCommit()
 
 	result, err := memory.Write(context.Background(), MemoryRecord{
@@ -81,6 +86,109 @@ func TestWriteRejectsLowerAuthorityReplacement(t *testing.T) {
 	}
 	if len(semantic.points) != 1 || semantic.points[0].Metadata["status"] != string(StatusSuperseded) {
 		t.Fatalf("points = %#v", semantic.points)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteReusesDuplicateRejectedFact(t *testing.T) {
+	memory, semantic, mock, closeDB := newMemoryTestStore(t)
+	defer closeDB()
+	now := memory.now()
+	activeID := "11111111-1111-1111-1111-111111111111"
+	duplicateID := "22222222-2222-2222-2222-222222222222"
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND status='active'.*FOR UPDATE`).
+		WithArgs(int64(42), "workspace:user-center:owner").
+		WillReturnRows(sqlmock.NewRows(memoryColumns()).
+			AddRow(memoryRow(activeID, 42, "workspace:user-center:owner", KindProfile, "Owns user center", SourceExplicitUser, StatusActive, nil, nil, now)...))
+	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND content=\? AND status='superseded'.*LIMIT 1.*FOR UPDATE`).
+		WithArgs(int64(42), "workspace:user-center:owner", "Possibly owns another service").
+		WillReturnRows(sqlmock.NewRows(memoryColumns()).
+			AddRow(memoryRow(
+				duplicateID, 42, "workspace:user-center:owner", KindAssistantInference,
+				"Possibly owns another service", SourceAssistantInference, StatusSuperseded,
+				activeID, nil, now,
+			)...))
+	mock.ExpectExec(`(?s)UPDATE qa_memories.*SET kind=\?,source_type=\?,authority=\?,source_session=\?,confidence=\?.*WHERE id=\? AND user_id=\? AND status='superseded'`).
+		WithArgs(
+			KindAssistantInference, SourceAssistantInference, AuthorityAssistantInference, "",
+			float32(1), nil, activeID, sqlmock.AnyArg(), 1, duplicateID, int64(42),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	result, err := memory.Write(context.Background(), MemoryRecord{
+		UserID: 42, FactKey: "workspace:user-center:owner",
+		Kind: KindAssistantInference, Content: "Possibly owns another service", SourceType: SourceAssistantInference,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != WriteRejected || result.ID != duplicateID || result.SupersededRecord != activeID {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(semantic.points) != 1 || semantic.points[0].ID != duplicateID {
+		t.Fatalf("points = %#v", semantic.points)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWritePrunesSupersededHistoryAndVectors(t *testing.T) {
+	memory, semanticStore, mock, closeDB := newMemoryTestStore(t)
+	defer closeDB()
+	now := memory.now()
+	activeID := "11111111-1111-1111-1111-111111111111"
+	incomingID := "22222222-2222-2222-2222-222222222222"
+	prunedIDs := []string{
+		"33333333-3333-3333-3333-333333333333",
+		"44444444-4444-4444-4444-444444444444",
+	}
+	factKey := "workspace:billing-service:owner"
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND status='active'.*FOR UPDATE`).
+		WithArgs(int64(42), factKey).
+		WillReturnRows(sqlmock.NewRows(memoryColumns()).
+			AddRow(memoryRow(
+				activeID, 42, factKey, KindAssistantInference, "Owned by the platform team",
+				SourceAssistantInference, StatusActive, nil, nil, now,
+			)...))
+	mock.ExpectExec(`(?s)UPDATE qa_memories.*SET status='superseded',superseded_by=\?,updated_at=\?.*WHERE id=\? AND user_id=\? AND status='active'`).
+		WithArgs(incomingID, sqlmock.AnyArg(), activeID, int64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMemoryInsert(mock, incomingID, StatusActive, nil)
+	mock.ExpectQuery(`(?s)SELECT id.*WHERE user_id=\? AND fact_key=\? AND status='superseded'.*LIMIT \? OFFSET \?.*FOR UPDATE`).
+		WithArgs(int64(42), factKey, supersededPruneBatch, supersededHistoryLimit).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).
+			AddRow(prunedIDs[0]).
+			AddRow(prunedIDs[1]))
+	mock.ExpectExec(`(?s)DELETE FROM qa_memories.*WHERE user_id=\? AND fact_key=\? AND status='superseded'.*id IN \(\?,\?\)`).
+		WithArgs(int64(42), factKey, prunedIDs[0], prunedIDs[1]).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectCommit()
+
+	result, err := memory.Write(context.Background(), MemoryRecord{
+		ID: incomingID, UserID: 42, FactKey: factKey,
+		Kind: KindProfile, Content: "Owned by the commerce team", SourceType: SourceExplicitUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != WriteSuperseded || !result.VectorSynced {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(semanticStore.deleted) != len(prunedIDs) {
+		t.Fatalf("deleted vectors = %#v", semanticStore.deleted)
+	}
+	for i, id := range prunedIDs {
+		if semanticStore.deleted[i] != id {
+			t.Fatalf("deleted vectors = %#v", semanticStore.deleted)
+		}
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -122,6 +230,12 @@ func TestWriteRefreshPromotesConfirmedContent(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func expectEmptySupersededPrune(mock sqlmock.Sqlmock, userID int64, factKey string) {
+	mock.ExpectQuery(`(?s)SELECT id.*WHERE user_id=\? AND fact_key=\? AND status='superseded'.*LIMIT \? OFFSET \?.*FOR UPDATE`).
+		WithArgs(userID, factKey, supersededPruneBatch, supersededHistoryLimit).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 }
 
 func TestWriteRefreshKeepsHigherAuthorityMetadata(t *testing.T) {

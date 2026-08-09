@@ -75,7 +75,6 @@ type QARequest struct {
 	Question         string
 	Conversation     ConversationContext
 	PreloadedContext []ContextBlock
-	Instructions     []string
 	UserID           int64
 	RolePrompt       string
 	RunID            string

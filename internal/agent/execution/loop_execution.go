@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 	"unicode/utf8"
 
@@ -28,6 +29,8 @@ type compiledLoop struct {
 	answerContract       *exactAnswerContract
 	messages             []llm.Message
 	tools                []llm.ToolDef
+	initialMessageCount  int
+	answerToolSources    map[int]string
 	result               *RunResult
 	stepSeq              int
 	answered             bool
@@ -69,19 +72,21 @@ func (agent *Agent) prepareCompiledLoop(
 		result.Evidence.ResultCount = 1
 	}
 	state := &compiledLoop{
-		ctx:            ctx,
-		runCtx:         runCtx,
-		loopCtx:        loopCtx,
-		runID:          runID,
-		input:          input,
-		toolSnapshot:   toolSnapshot,
-		runStarted:     runStarted,
-		answerContract: &exactAnswerContract{},
-		messages:       messages,
-		tools:          tools,
-		result:         result,
-		seenTools:      map[string]bool{},
-		stepLimit:      maxSteps,
+		ctx:                 ctx,
+		runCtx:              runCtx,
+		loopCtx:             loopCtx,
+		runID:               runID,
+		input:               input,
+		toolSnapshot:        toolSnapshot,
+		runStarted:          runStarted,
+		answerContract:      &exactAnswerContract{},
+		messages:            messages,
+		tools:               tools,
+		initialMessageCount: len(messages),
+		answerToolSources:   make(map[int]string),
+		result:              result,
+		seenTools:           map[string]bool{},
+		stepLimit:           maxSteps,
 	}
 	state.recordSeedEvidence(agent.observer)
 	return state
@@ -145,31 +150,41 @@ func (agent *Agent) finishCompiledLoop(state *compiledLoop) {
 		state.result.Evidence.ForcedConclusion = true
 		log.InfofCtx(state.ctx, "[agent] run %s forcing conclusion (steps=%d)",
 			state.runID, state.result.Steps)
-		final, err := agent.forceConclusion(
-			state.runCtx,
-			state.runID,
-			state.messages,
-			state.answerContract,
-			&state.stepSeq,
-			state.runStarted,
-		)
-		if err != nil {
-			validPartial := !state.answerContract.Active() ||
-				final != nil && len(state.answerContract.Missing(final.Content)) == 0
-			if hasDeliverableAnswer(final) && validPartial && !errors.Is(err, ErrAnswerContractViolation) {
-				state.result.Answer += final.Content
-				state.result.Err = err
-				log.WarnfCtx(state.ctx, "[agent] run %s preserving partial force-conclusion answer: %v",
-					state.runID, err)
-			} else {
-				state.result.Err = err
-				log.ErrorfCtx(state.ctx, "[agent] run %s force-conclusion error: %v", state.runID, err)
-			}
-		} else if final != nil {
-			state.result.Answer += final.Content
-		}
+		agent.concludeCompiledLoop(state)
 	}
 	state.result.Evidence.Finalize(state.input.Direct)
 	log.InfofCtx(state.ctx, "[agent] run %s end: steps=%d answerLen=%d aborted=%v err=%v",
 		state.runID, state.result.Steps, len(state.result.Answer), state.result.Aborted, state.result.Err)
+}
+
+func (agent *Agent) concludeCompiledLoop(state *compiledLoop) {
+	if _, err := agent.compactRunContextBeforeAnswer(state, nil, "forced_conclusion"); err != nil {
+		state.result.Err = fmt.Errorf("compact context before forced conclusion: %w", err)
+		log.ErrorfCtx(state.ctx, "[agent] run %s final-answer context compaction failed: %v",
+			state.runID, err)
+		return
+	}
+	final, err := agent.forceConclusion(
+		state.runCtx,
+		state.runID,
+		state.messages,
+		state.answerContract,
+		&state.stepSeq,
+		state.runStarted,
+	)
+	if err != nil {
+		validPartial := !state.answerContract.Active() ||
+			final != nil && len(state.answerContract.Missing(final.Content)) == 0
+		if hasDeliverableAnswer(final) && validPartial && !errors.Is(err, ErrAnswerContractViolation) {
+			state.result.Answer += final.Content
+			state.result.Err = err
+			log.WarnfCtx(state.ctx, "[agent] run %s preserving partial force-conclusion answer: %v",
+				state.runID, err)
+		} else {
+			state.result.Err = err
+			log.ErrorfCtx(state.ctx, "[agent] run %s force-conclusion error: %v", state.runID, err)
+		}
+	} else if final != nil {
+		state.result.Answer += final.Content
+	}
 }

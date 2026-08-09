@@ -53,7 +53,10 @@ func TestHub_BroadcastDeliversToSubscriber(t *testing.T) {
 
 	ch := h.Subscribe("r1")
 	h.OnToken(context.Background(), "r1", "hello")
-	h.OnStep(context.Background(), "r1", StepRecord{StepNo: 1, Kind: StepKindToolCall, Tool: "probe"})
+	h.OnStep(context.Background(), "r1", StepRecord{
+		StepNo: 1, Kind: StepKindToolCall,
+		ToolCallID: "call-probe-1", Tool: "probe",
+	})
 
 	got := drainHub(ch, time.Second)
 	if len(got) < 2 {
@@ -64,7 +67,8 @@ func TestHub_BroadcastDeliversToSubscriber(t *testing.T) {
 		t.Errorf("first event = %+v, want answer delta", got[0])
 	}
 	tool, ok := got[1].Data.(ToolStartedEvent)
-	if got[1].Type != EventToolStarted || !ok || tool.Name != "probe" {
+	if got[1].Type != EventToolStarted || !ok ||
+		tool.ToolCallID != "call-probe-1" || tool.Name != "probe" {
 		t.Errorf("second event = %+v, want tool=probe", got[1])
 	}
 }
@@ -369,6 +373,7 @@ func TestHubBroadcastsOnlyTemporaryPreviewForToolResults(t *testing.T) {
 	if err := hub.OnStep(t.Context(), runID, StepRecord{
 		StepNo:        2,
 		Kind:          StepKindToolResult,
+		ToolCallID:    "call-preview-1",
 		Content:       content,
 		PromptContent: promptContent,
 		SizeBytes:     int64(len(content)),
@@ -387,6 +392,9 @@ func TestHubBroadcastsOnlyTemporaryPreviewForToolResults(t *testing.T) {
 		}
 		if payload.SizeBytes != int64(len(content)) {
 			t.Fatalf("size bytes = %d", payload.SizeBytes)
+		}
+		if payload.ToolCallID != "call-preview-1" {
+			t.Fatalf("tool call id = %q", payload.ToolCallID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("missing tool result event")

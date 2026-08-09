@@ -20,18 +20,16 @@ const (
 	sessionCriticalWaterRatio   = 0.95
 	sessionRestartSummaryRatio  = 0.30
 	sessionRecentTurns          = 3
-	sessionRecentTokenRatio     = 0.12
-	sessionRecentTokenMinimum   = 8000
-	sessionRecentTokenMaximum   = 16000
 	summaryItemTokenReserve     = turnSummaryTokenLimit + 64
 )
 
 // SessionCompactionUsage contains the observable budget inputs for one decision.
 type SessionCompactionUsage struct {
-	ContextWindow              int
-	PreviousPeakInputTokens    int
-	PreviousPeakReservedTokens int
-	OutputReserveTokens        int
+	ContextWindow int
+	// IncomingTokens is the current request prompt outside session-owned history.
+	// When unset, the compactor estimates it from incomingText for compatibility.
+	IncomingTokens      int
+	OutputReserveTokens int
 }
 
 // SessionCompactionResult reports whether the monotonic archive boundary advanced.
@@ -50,18 +48,26 @@ type SessionCompactionResult struct {
 }
 
 type sessionCompactionPlan struct {
-	trigger          string
-	targetReduction  int
-	incomingTokens   int
-	observedOverhead int
-	outputReserve    int
-	lowWater         int
-	criticalWater    int
+	trigger         string
+	targetReduction int
+	incomingTokens  int
+	outputReserve   int
+	lowWater        int
+	criticalWater   int
 }
 
-// CompactSessionIfNeeded protects the next run when the projected context reaches high water.
+// CompactSessionIfNeeded bounds the session-owned part of the next run's context.
 func CompactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions *memory.SessionStore,
 	sessionID string, userID int64, usage SessionCompactionUsage, incomingText string,
+	onStart func(fromTurn, toTurn int), histories ...SessionHistory) (SessionCompactionResult, error) {
+	return compactSessionIfNeeded(
+		ctx, client, sessions, sessionID, userID, usage, incomingText,
+		"pre_answer_high_water", onStart, histories...,
+	)
+}
+
+func compactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions *memory.SessionStore,
+	sessionID string, userID int64, usage SessionCompactionUsage, incomingText, trigger string,
 	onStart func(fromTurn, toTurn int), histories ...SessionHistory) (SessionCompactionResult, error) {
 	var result SessionCompactionResult
 	if client == nil || sessions == nil || sessionID == "" || usage.ContextWindow <= 0 {
@@ -71,12 +77,13 @@ func CompactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 	if err != nil {
 		return result, fmt.Errorf("measure session context %q: %w", sessionID, err)
 	}
-	incomingTokens := tooloutput.EstimateTokens(incomingText)
+	incomingTokens := max(0, usage.IncomingTokens)
+	if incomingTokens == 0 {
+		incomingTokens = tooloutput.EstimateTokens(incomingText)
+	}
 	historyTokens := stats.UncompactedTokens
-	observedOverhead := max(0, usage.PreviousPeakInputTokens-historyTokens)
-	observedOutputReserve := max(0, usage.PreviousPeakReservedTokens-usage.PreviousPeakInputTokens)
-	outputReserve := max(usage.OutputReserveTokens, observedOutputReserve)
-	projectedBefore := historyTokens + incomingTokens + observedOverhead + outputReserve
+	outputReserve := max(0, usage.OutputReserveTokens)
+	projectedBefore := historyTokens + incomingTokens + outputReserve
 	result.ProjectedBeforeTokens = projectedBefore
 	result.RestartTurnThreshold = restartTurnThreshold(usage.ContextWindow)
 
@@ -94,55 +101,38 @@ func CompactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 	if projectedBefore >= highWater {
 		decision = "high_water_reached"
 	}
-	log.InfofCtx(ctx, "[qa] compaction decision session=%s window=%d high=%d low=%d critical=%d selection_target=%d history_tokens=%d archived_summary_tokens=%d archived_turns=%d restart_turn_threshold=%d uncompacted_tokens=%d incoming_tokens=%d previous_peak_input=%d previous_peak_reserved=%d output_reserve=%d observed_overhead=%d projected=%d eligible_turns=%d new_session_recommended=%t decision=%s",
-		sessionID, usage.ContextWindow, highWater, lowWater, criticalWater, selectionTarget,
+	log.InfofCtx(ctx, "[qa] compaction decision session=%s trigger=%s window=%d high=%d low=%d critical=%d selection_target=%d history_tokens=%d archived_summary_tokens=%d archived_turns=%d restart_turn_threshold=%d uncompacted_tokens=%d incoming_tokens=%d output_reserve=%d projected=%d eligible_turns=%d new_session_recommended=%t decision=%s",
+		sessionID, trigger, usage.ContextWindow, highWater, lowWater, criticalWater, selectionTarget,
 		historyTokens, stats.ArchivedSummaryTokens, result.ArchivedTurnCount, result.RestartTurnThreshold,
-		stats.UncompactedTokens, incomingTokens,
-		usage.PreviousPeakInputTokens, usage.PreviousPeakReservedTokens,
-		outputReserve, observedOverhead, projectedBefore, eligibleTurns,
+		stats.UncompactedTokens, incomingTokens, outputReserve, projectedBefore, eligibleTurns,
 		result.NewSessionRecommended, decision)
 	if projectedBefore < highWater {
 		return result, nil
 	}
 	return compactSessionTurns(ctx, client, sessions, sessionID, userID, stats, result, sessionCompactionPlan{
-		trigger: "high_water", targetReduction: projectedBefore - selectionTarget,
-		incomingTokens: incomingTokens, observedOverhead: observedOverhead, outputReserve: outputReserve,
+		trigger: trigger, targetReduction: projectedBefore - selectionTarget,
+		incomingTokens: incomingTokens, outputReserve: outputReserve,
 		lowWater: lowWater, criticalWater: criticalWater,
 	}, onStart, histories...)
 }
 
-// ArchiveSessionHistoryIfNeeded bounds the raw tail after a complete turn has been saved.
+// ArchiveSessionHistoryIfNeeded applies the same high-water policy after a turn is saved.
 func ArchiveSessionHistoryIfNeeded(ctx context.Context, client *llm.LLMClient, sessions *memory.SessionStore,
 	sessionID string, userID int64, contextWindow int, histories ...SessionHistory) (SessionCompactionResult, error) {
-	var result SessionCompactionResult
-	if client == nil || sessions == nil || sessionID == "" || contextWindow <= 0 {
-		return result, nil
-	}
-	stats, err := sessions.SessionContextStats(sessionID, userID)
-	if err != nil {
-		return result, fmt.Errorf("measure session context %q after turn: %w", sessionID, err)
-	}
-	recentBudget := recentHistoryTokenBudget(contextWindow)
-	criticalWater := int(float64(contextWindow) * sessionCriticalWaterRatio)
-	eligibleTurns := max(0, stats.LatestTurn-sessionRecentTurns-stats.CompactedThroughTurn)
-	result = newSessionCompactionResult(stats, contextWindow, stats.UncompactedTokens, criticalWater)
-	decision := "within_recent_budget"
-	if stats.UncompactedTokens > recentBudget && eligibleTurns > 0 {
-		decision = "recent_budget_exceeded"
-	}
-	log.InfofCtx(ctx, "[qa] post-turn archive decision session=%s recent_budget=%d uncompacted_tokens=%d archived_turns=%d eligible_turns=%d decision=%s",
-		sessionID, recentBudget, stats.UncompactedTokens, stats.CompactedThroughTurn, eligibleTurns, decision)
-	if stats.UncompactedTokens <= recentBudget || eligibleTurns == 0 {
-		if stats.UncompactedTokens > recentBudget {
-			log.WarnfCtx(ctx, "[qa] post-turn archive remains above budget session=%s uncompacted_tokens=%d recent_budget=%d reason=minimum_recent_turns_exceed_budget",
-				sessionID, stats.UncompactedTokens, recentBudget)
-		}
-		return result, nil
-	}
-	return compactSessionTurns(ctx, client, sessions, sessionID, userID, stats, result, sessionCompactionPlan{
-		trigger: "recent_budget", targetReduction: stats.UncompactedTokens - recentBudget,
-		lowWater: recentBudget, criticalWater: criticalWater,
-	}, nil, histories...)
+	return ArchiveSessionHistoryIfNeededWithStatus(
+		ctx, client, sessions, sessionID, userID,
+		SessionCompactionUsage{ContextWindow: contextWindow}, nil, histories...,
+	)
+}
+
+// ArchiveSessionHistoryIfNeededWithStatus performs idle compaction only after the high-water mark is reached.
+func ArchiveSessionHistoryIfNeededWithStatus(ctx context.Context, client *llm.LLMClient, sessions *memory.SessionStore,
+	sessionID string, userID int64, usage SessionCompactionUsage, onStart func(fromTurn, toTurn int),
+	histories ...SessionHistory) (SessionCompactionResult, error) {
+	return compactSessionIfNeeded(
+		ctx, client, sessions, sessionID, userID, usage, "",
+		"post_turn_high_water", onStart, histories...,
+	)
 }
 
 func compactSessionTurns(ctx context.Context, client *llm.LLMClient, sessions *memory.SessionStore,
@@ -206,7 +196,7 @@ func compactSessionTurns(ctx context.Context, client *llm.LLMClient, sessions *m
 		histories[0].PrepareRecords(records)
 	}
 	remainingTokens := max(0, stats.UncompactedTokens-removedTokens)
-	projectedAfter := remainingTokens + plan.incomingTokens + plan.observedOverhead + plan.outputReserve
+	projectedAfter := remainingTokens + plan.incomingTokens + plan.outputReserve
 	result.ProjectedAfterTokens = projectedAfter
 
 	applyStarted := time.Now()
@@ -245,23 +235,6 @@ func compactSessionTurns(ctx context.Context, client *llm.LLMClient, sessions *m
 			candidate.EligibleThrough)
 	}
 	return result, nil
-}
-
-func newSessionCompactionResult(stats memory.SessionContextStats, contextWindow, projected, criticalWater int) SessionCompactionResult {
-	restartThreshold := restartTurnThreshold(contextWindow)
-	return SessionCompactionResult{
-		ProjectedBeforeTokens: projected,
-		ArchivedTurnCount:     stats.CompactedThroughTurn,
-		RestartTurnThreshold:  restartThreshold,
-		CriticalWaterReached:  projected >= criticalWater,
-		NewSessionRecommended: shouldRecommendNewSession(
-			projected, criticalWater, stats.CompactedThroughTurn, restartThreshold,
-		),
-	}
-}
-
-func recentHistoryTokenBudget(contextWindow int) int {
-	return min(max(int(float64(contextWindow)*sessionRecentTokenRatio), sessionRecentTokenMinimum), sessionRecentTokenMaximum)
 }
 
 func restartTurnThreshold(contextWindow int) int {

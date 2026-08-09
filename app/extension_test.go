@@ -18,9 +18,9 @@ func TestExtensionDepsDetachSettingsAndExposeStablePorts(t *testing.T) {
 		VCSExcludeProjects: []string{"repo-a"},
 	}
 	platform := &Platform{
-		cfg:       config.Config{WorkspaceRoot: "/workspace"},
-		settings:  settings,
-		readTools: readTools,
+		cfg:      config.Config{WorkspaceRoot: "/workspace"},
+		settings: settings,
+		reads:    readTools,
 	}
 
 	deps := platform.extensionDeps()

@@ -12,11 +12,9 @@ import (
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	agentsession "github.com/dekwanlabs/nasuta/internal/agent/session"
 	agenttools "github.com/dekwanlabs/nasuta/internal/agent/tools"
-	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -27,111 +25,44 @@ type RunResult = agentexecution.RunResult
 type Service = agenttools.Service
 type SessionHistory = agentsession.SessionHistory
 type DefinitionResolver = agentdefinition.DefinitionResolver
-type DefinitionRuntime = agentdefinition.DefinitionRuntime
 type ScenarioRunStart = agentdefinition.ScenarioRunStart
-type ScenarioRun = agentdefinition.ScenarioRun
 type ScenarioLifecycle = agentdefinition.ScenarioLifecycle
 type ScenarioToolSet = agentdefinition.ScenarioToolSet
 type ScenarioToolSource = agentdefinition.ScenarioToolSource
-type AgentConfig = agentexecution.AgentConfig
-type ToolExecutor = agentexecution.ToolExecutor
 type Agent = agentexecution.Agent
-type Observer = agentexecution.Observer
-type Controller = agentexecution.Controller
 
 type RunOutcome = agentrun.RunOutcome
-type RunStatus = agentrun.RunStatus
+type RunStepRecord = agentrun.StepRecord
 type EvidenceStatus = agentrun.EvidenceStatus
 type EvidenceMetrics = agentrun.EvidenceMetrics
 type ExecutionEvent = agentrun.ExecutionEvent
 type ExecutionEventEmitter = agentrun.ExecutionEventEmitter
+type SessionStatusEvent = agentrun.SessionStatusEvent
 type EventType = agentrun.EventType
 type ToolPolicy = tool.Policy
 type Tool = tool.Tool
-type Registry = tool.Registry
-type RunStore = agentrun.RunStore
-type RunRecord = agentrun.RunRecord
-type RunUsageSummary = agentrun.RunUsageSummary
-type RunTerminal = agentrun.RunTerminal
-type SSEEvent = agentrun.SSEEvent
-type StepKind = agentrun.StepKind
-type StepRecord = agentrun.StepRecord
-type StreamPipe = agentexecution.StreamPipe
-type StreamTiming = agentexecution.StreamTiming
 
 const (
-	RunStatusRunning = agentrun.RunStatusRunning
-	RunStatusPaused  = agentrun.RunStatusPaused
 	RunStatusDone    = agentrun.RunStatusDone
 	RunStatusFailed  = agentrun.RunStatusFailed
 	RunStatusAborted = agentrun.RunStatusAborted
-	RunKindAgent     = agentrun.RunKindAgent
 
-	ToolKindRead  = tool.KindRead
-	ToolKindWrite = tool.KindWrite
-
-	EvidenceNotRequired = agentrun.EvidenceNotRequired
 	EvidenceComplete    = agentrun.EvidenceComplete
 	EvidencePartial     = agentrun.EvidencePartial
 	EvidenceUnavailable = agentrun.EvidenceUnavailable
 
-	StepKindThink      = agentrun.StepKindThink
-	StepKindToolCall   = agentrun.StepKindToolCall
-	StepKindToolResult = agentrun.StepKindToolResult
-	StepKindAnswer     = agentrun.StepKindAnswer
-	StepKindRetrieval  = agentrun.StepKindRetrieval
-
-	EventAnswerDelta       = agentrun.EventAnswerDelta
-	EventToolStarted       = agentrun.EventToolStarted
-	EventToolFinished      = agentrun.EventToolFinished
-	EventReasoningDelta    = agentrun.EventReasoningDelta
-	EventTrace             = agentrun.EventTrace
-	EventLLMCall           = agentrun.EventLLMCall
 	EventExecutionRouted   = agentrun.EventExecutionRouted
 	EventExecutionDegraded = agentrun.EventExecutionDegraded
-	EventWorkflowStarted   = agentrun.EventWorkflowStarted
-	EventAgentStarted      = agentrun.EventAgentStarted
-	EventAgentCompleted    = agentrun.EventAgentCompleted
-	EventEvidenceJoined    = agentrun.EventEvidenceJoined
-	EventRunFinished       = agentrun.EventRunFinished
 
 	knowledgeReadScope  = platformscope.KnowledgeRead
 	knowledgeWriteScope = platformscope.KnowledgeWrite
 )
 
 var ErrEmptyAnswer = agentrun.ErrEmptyAnswer
-var ErrRunNotActive = agentrun.ErrRunNotActive
 
-func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config AgentConfig, observer Observer, controller Controller) *Agent {
-	return agentexecution.NewAgent(client, executor, config, observer, controller)
+type preparationStepRecorder interface {
+	RecordPreparationStep(context.Context, agentrun.StepRecord) error
 }
-
-func NewToolExecutor(registry *Registry) *ToolExecutor {
-	return agentexecution.NewToolExecutor(registry)
-}
-
-func NoopObserver() Observer {
-	return agentexecution.NoopObserver()
-}
-
-func NewDefinitionRuntime(
-	definitions DefinitionResolver,
-	schemas *agentapi.SchemaRegistry,
-	registry *tool.Registry,
-	settings *config.PlatformSettings,
-	runStore *agentrun.RunStore,
-) (*DefinitionRuntime, error) {
-	return agentdefinition.NewDefinitionRuntime(definitions, schemas, registry, settings, runStore)
-}
-
-func TerminalFromEvent(event SSEEvent) *RunTerminal {
-	return agentrun.TerminalFromEvent(event)
-}
-
-func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore, history SessionHistory) *Registry {
-	return agenttools.NewRegistry(svc, cfg, sessions, history)
-}
-
 
 func toolPolicyForRun(allowWrite bool) ToolPolicy {
 	return ToolPolicy{

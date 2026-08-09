@@ -69,7 +69,10 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 			break
 		}
 
-		agent.recordThinkTurn(state, turn)
+		if err := agent.recordThinkTurn(state, turn); err != nil {
+			state.result.Err = err
+			break
+		}
 		outcome := agent.executeToolTurn(state, turn.result.ToolCalls)
 		if state.result.Err != nil {
 			break
@@ -82,6 +85,11 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 }
 
 func (agent *Agent) ensureTurnBudget(state *compiledLoop, step int) error {
+	if _, err := agent.compactRunContextBeforeAnswer(
+		state, state.tools, fmt.Sprintf("model_step_%d", step),
+	); err != nil {
+		return err
+	}
 	_, err := executiontrace.Invoke(
 		state.ctx,
 		contextBudgetSpec,
@@ -205,17 +213,27 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 		state.runID, turn.step)
 }
 
-func (agent *Agent) recordThinkTurn(state *compiledLoop, turn modelTurn) {
+func (agent *Agent) recordThinkTurn(state *compiledLoop, turn modelTurn) error {
+	reasoning := turn.result.Reasoning
+	if reasoning == "" {
+		reasoning = turn.result.Content
+	}
 	state.stepSeq++
-	_ = agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
-		StepNo:          state.stepSeq,
-		Kind:            StepKindThink,
-		Content:         turn.result.Content,
-		TokenDelta:      utf8.RuneCountInString(turn.result.Content),
-		ReasoningTokens: turn.result.ReasoningTokens,
-		DurationMs:      int(turn.duration / time.Millisecond),
-		CreatedAt:       turn.started,
-	})
+	if err := agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
+		StepNo:              state.stepSeq,
+		Kind:                StepKindThink,
+		Content:             reasoning,
+		PromptContent:       turn.result.Content,
+		AuthoritativeSHA256: toolContentSHA256(reasoning),
+		PromptSHA256:        toolContentSHA256(turn.result.Content),
+		SizeBytes:           int64(len(reasoning)),
+		TokenDelta:          utf8.RuneCountInString(reasoning),
+		ReasoningTokens:     turn.result.ReasoningTokens,
+		DurationMs:          int(turn.duration / time.Millisecond),
+		CreatedAt:           turn.started,
+	}); err != nil {
+		return fmt.Errorf("persist tool reasoning at model step %d: %w", turn.step, err)
+	}
 	turn.stream.Discard()
 
 	message := llm.Message{
@@ -225,6 +243,7 @@ func (agent *Agent) recordThinkTurn(state *compiledLoop, turn modelTurn) {
 	}
 	state.messages = append(state.messages, message)
 	state.result.SessionMessages = append(state.result.SessionMessages, message)
+	return nil
 }
 
 func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) toolTurnOutcome {
@@ -241,13 +260,17 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 		}
 		state.result.Evidence.ToolCallCount++
 		state.stepSeq++
-		_ = agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
-			StepNo:    state.stepSeq,
-			Kind:      StepKindToolCall,
-			Tool:      call.Function.Name,
-			Args:      call.Function.Arguments,
-			CreatedAt: time.Now(),
-		})
+		if err := agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
+			StepNo:     state.stepSeq,
+			Kind:       StepKindToolCall,
+			ToolCallID: call.ID,
+			Tool:       call.Function.Name,
+			Args:       call.Function.Arguments,
+			CreatedAt:  time.Now(),
+		}); err != nil {
+			state.result.Err = fmt.Errorf("persist tool call %q: %w", call.ID, err)
+			return outcome
+		}
 
 		execution := agent.executor.Execute(
 			state.loopCtx,

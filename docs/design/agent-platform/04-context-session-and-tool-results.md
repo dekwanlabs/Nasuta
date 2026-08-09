@@ -2,13 +2,14 @@
 
 [English](04-context-session-and-tool-results.md) | [中文](04-context-session-and-tool-results.zh-CN.md)
 
-> Status: target design; current fixed truncation and default tool compression conflict with this design and must be removed through the migration below
-> Updated: 2026-07-31
+> Status: implemented
+> Updated: 2026-08-09
+> Implementation: lossless fresh-result delivery, dynamic budgets, Artifact, Trace, two-sided AnswerContract validation, bounded reads, and high-water pre-answer runtime compaction
 > Sources: Session Summary, Context Pollution Control, Session History Retrieval, Turn Compaction, Structured Tool-output Compression
 
 ## 1. Decision
 
-Nasuta must not manage fresh tool evidence through silent truncation or generic semantic compression.
+Nasuta does not truncate or compress fresh tool evidence by default. When the pre-answer runtime context reaches the 80% high watermark, it may create an explicitly partial model-side projection while preserving authoritative Session, Trace, and Artifact content.
 
 Core invariants:
 
@@ -18,9 +19,10 @@ Core invariants:
 4. The UI may collapse content visually, but backend trace data is never truncated;
 5. If one result is too large, the tool must paginate, narrow the query, or return an explicit delivery failure instead of pretending a partial result is complete;
 6. Historical compaction applies only to old turns under real context pressure and never deletes authoritative source content;
-7. Exact-answer contracts validate both model input and final output.
+7. Exact-answer contracts validate both model input and final output;
+8. Pre-answer compaction removes tool-call narration first, compresses older tool results before newer ones, and gives recent evidence a larger retention budget.
 
-The current `sessionToolResultLimit = 1_200`, default `tooloutput.Compress`, and summary-style history replay violate these invariants.
+The previous `sessionToolResultLimit = 1_200` and default fresh-result compression paths have been removed. Lossy projections now operate only at explicit history or high-water answer boundaries after authoritative content is retained.
 
 ## 2. Three Separate Problems
 
@@ -28,7 +30,7 @@ Tool-result governance contains three separate problems and cannot use one fixed
 
 ### 2.1 Current Tool-result Delivery
 
-A result produced in the active run is first-party evidence for the answer. It requires high fidelity and is not compressed by default.
+A result produced in the active run is first-party evidence for the answer. It reaches the model in full by default. Only a high-water pre-answer pass may compress the model-side copy, with explicit coverage metadata and recoverable authoritative content.
 
 ### 2.2 Session and Trace Persistence
 
@@ -433,15 +435,19 @@ Allowed:
 
 - model projections of completed, archived old turns;
 - summaries used for topic location and conclusion recall;
-- recall representations of old non-exact evidence.
+- recall representations of old non-exact evidence;
+- structured model-side projections of older active-run tool results after the pre-answer context reaches the 80% high watermark.
 
 Forbidden:
 
 - the current question;
-- fresh evidence from the active run;
 - retained recent atomic turns;
 - authoritative tool results that have not been archived;
 - the only copy of an exact identifier.
+
+Pre-answer runtime compaction never rewrites persisted content. It first removes non-authoritative tool-call narration, then compresses tool results from oldest to newest toward roughly 60% of the context window. Recent tool results receive a higher retention floor; aggressive fallback is used only to avoid a hard-window overflow.
+
+Each applied projection records the Tool Call ID, tool name, compression strategy, source/current/retained token counts, and coverage fields in the `answer_context_compaction` Trace node. The runtime also emits a normal `status` event after compaction so the answer UI can show that context was reduced before generation.
 
 ### 9.3 Summary Contract
 
@@ -468,55 +474,49 @@ The online path reads bounded candidate metadata and selects by:
 
 Raw-evidence dependencies replay a complete atomic turn or Artifact chunks. Conclusion-only dependencies may use a structured summary.
 
-## 10. Current Implementation Gaps
+## 10. Current Implementation
 
-As of 2026-07-31:
+As of 2026-08-09:
 
-| Location | Current behavior | Target behavior |
-|---|---|---|
-| `internal/agent/loop.go` | Fresh results enter `tooloutput.Compress(..., 10_000)` by default | Normal results reach the model unchanged |
-| `sessionToolResultContent` | Each Session tool result is truncated to 1,200 runes | Complete inline content or lossless Artifact reference |
-| Step `ResultSummary` | A 1,200-rune preview is persisted | Full `Content` is authoritative; previews are derived at presentation boundaries |
-| `summary.go` | Tool evidence is reduced to 1,200 runes for summary input | Summary references Trace/Artifact and is not authoritative evidence |
-| `turn_detail.go` | Archived detail is lossy-compressed | A recall projection may be lossy only after complete source content is in Trace/Artifact |
-| `formatToolResultForLLM` | Ordinary tools may undergo field transformation | Only audited lossless transformations remain |
-| `AnswerContract` | Final-answer validation and repair exist | Add model-input preflight and delivery-failure handling |
+| Location | Implemented behavior |
+|---|---|
+| `internal/agent/execution/loop.go` | Normal fresh results reach the model unchanged; each call uses dynamic message, tool-definition, output-reserve, and safety budgets |
+| `internal/agent/execution/tool_delivery.go` | Oversized single results produce explicit delivery failures and recoverable Artifact references |
+| Session tool messages | Fixed 1,200-rune truncation is removed; normal results remain inline and complete |
+| Agent steps and Artifacts | Trace retains authoritative content, actual prompt content, hashes, coverage, AnswerContract, and failure metadata |
+| `internal/agent/execution/answer_context_compaction.go` | Post-tool model calls and forced conclusions recheck the 80% high watermark, compact only the transient model-side copy, and publish per-tool Trace metrics plus a UI status |
+| Session compaction | Retrieval completes before the request projection is measured; old turns compact toward roughly 60% while the latest three atomic turns remain |
 
-Step currently stores both `Content` and `ResultSummary`, so complete content may already exist in the database. Migration must still audit every reader so Session, UI detail, and model paths never consume `ResultSummary` as evidence.
-
-## 11. Migration
+## 11. Implementation Results
 
 ### Phase A: Stop Irrecoverable Loss
 
-1. Remove fixed truncation from `sessionToolResultContent`;
-2. Bypass default `tooloutput.Compress` for normal results;
-3. Audit and constrain `formatToolResultForLLM`;
-4. Add AnswerContract model-input preflight;
-5. Use complete tool output in Session and Trace;
-6. Make UI detail read complete `Content`.
+1. Removed fixed truncation from Session tool messages;
+2. Bypassed default `tooloutput.Compress` for normal results;
+3. Added AnswerContract model-input preflight;
+4. Kept complete tool output in Session and Trace.
 
 ### Phase B: Clarify Preview and Trace Semantics
 
-1. Remove persisted `ResultSummary`, or migrate and rename it to non-authoritative `ResultPreview`;
-2. Make list storage queries load metadata only and detail queries load complete content;
-3. Persist actual model input and its digest;
-4. Add authorization, retention, and sensitive-data policy for Trace payloads.
+1. Removed persisted `ResultSummary`;
+2. Kept previews at presentation boundaries;
+3. Persisted actual model input and its digest;
+4. Added user ownership checks to Run and Artifact reads.
 
 ### Phase C: Support Oversized Results
 
-1. Add pagination and cursors to large-result tools;
-2. Calculate remaining model budget dynamically;
-3. Add Artifact storage and bounded reads;
-4. Return retryable delivery errors for read tools that exceed the budget;
-5. Forbid implicit replay of write tools.
+1. Added dynamic remaining-budget checks;
+2. Added Artifact storage and bounded reads;
+3. Added retryable delivery errors for oversized read results;
+4. Kept write-tool replay explicit.
 
 ### Phase D: Maintain History
 
 1. Retain recent atomic turns in full;
-2. Archive old turns only after the actual high watermark is reached;
-3. Persist complete source content to Trace/Artifact first;
-4. Generate structured recall projections for old history;
-5. Remove the generic structured compressor from the fresh-evidence default path.
+2. Archive old turns only after the actual 80% high watermark is reached;
+3. Generate structured recall projections only after authoritative content is retained;
+4. Recheck the 80% watermark before each post-tool model call and before forced conclusion;
+5. Compact toward roughly 60% while preserving the question, tool protocol, latest evidence preference, and exact-answer contract.
 
 ## 12. Verification
 
@@ -535,7 +535,10 @@ Required tests:
 11. Old turns are not compressed below the high watermark;
 12. Losing a historical projection does not delete authoritative source content;
 13. Logs can locate the complete result through Trace ID;
-14. Normal small tools no longer invoke generic semantic compression.
+14. Normal small tools no longer invoke generic semantic compression;
+15. High-water post-tool calls compact older transient results before the next model call;
+16. Forced conclusion receives the compacted runtime context;
+17. Pre-answer compaction does not modify authoritative Session, Trace, or Artifact content.
 
 ## 13. Acceptance Criteria
 

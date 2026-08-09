@@ -209,6 +209,7 @@ func (run *definitionManagedRun) Execute(
 			Status: agentrun.RunStatusFailed, ErrorCode: "invalid_request", Err: err,
 			Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidenceUnavailable},
 		}
+		outcome = run.mergePreparationOutcome(outcome)
 		run.setOutcome(outcome)
 		return failedDefinitionRun(request.RunID, "invalid_request", err), nil
 	}
@@ -225,10 +226,7 @@ func (run *definitionManagedRun) Execute(
 		execution.definition.Model.MaxOutputTokens,
 		nil,
 	)
-	observer := agentrun.Observer(run.runtime.hub)
-	if request.Policy.RedactSensitive {
-		observer = redactingDefinitionObserver{next: observer}
-	}
+	observer := run.observer()
 	loop := agentexecution.NewAgent(client, run.runtime.executor, agentexecution.AgentConfig{
 		MaxSteps:            execution.snapshot.Budget.MaxSteps,
 		MaxToolCalls:        request.Policy.MaxToolCalls,
@@ -255,6 +253,8 @@ func (run *definitionManagedRun) Execute(
 		run.runtime.schemas,
 		execution.definition.OutputSchema,
 	)
+	outcome = run.mergePreparationOutcome(outcome)
+	publicResult.Evidence = publicEvidence(outcome.Evidence)
 	if request.Policy.RedactSensitive {
 		publicResult = redactDefinitionResult(publicResult)
 		outcome = redactDefinitionOutcome(outcome)
@@ -274,6 +274,12 @@ func (run *definitionManagedRun) Finish(runError *agentapi.RunError) error {
 		return fmt.Errorf("definition run %q has not executed", run.start.RunID)
 	}
 	outcome := run.outcome
+	if !run.outcomeSet {
+		outcome = mergePreparationOutcome(
+			outcome,
+			run.preparationEvidence,
+		)
+	}
 	if runError != nil {
 		code := strings.TrimSpace(runError.Code)
 		if code == "" {
@@ -305,6 +311,7 @@ func (run *definitionManagedRun) Finish(runError *agentapi.RunError) error {
 func (run *definitionManagedRun) setOutcome(outcome agentrun.RunOutcome) {
 	run.mu.Lock()
 	run.outcome = outcome
+	run.outcomeSet = true
 	run.mu.Unlock()
 }
 

@@ -15,6 +15,7 @@ const (
 	EventReasoningDelta    EventType = "reasoning.delta"
 	EventTrace             EventType = "trace"
 	EventLLMCall           EventType = "llm.call"
+	EventSessionStatus     EventType = "session.status"
 	EventExecutionRouted   EventType = "execution.routed"
 	EventExecutionDegraded EventType = "execution.degraded"
 	EventWorkflowStarted   EventType = "workflow.started"
@@ -29,13 +30,15 @@ type TextEvent struct {
 }
 
 type ToolStartedEvent struct {
-	Step int    `json:"step"`
-	Name string `json:"name"`
-	Args string `json:"args"`
+	Step       int    `json:"step"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	Name       string `json:"name"`
+	Args       string `json:"args"`
 }
 
 type ToolFinishedEvent struct {
 	Step          int    `json:"step"`
+	ToolCallID    string `json:"tool_call_id,omitempty"`
 	Tool          string `json:"tool"`
 	Summary       string `json:"summary"`
 	TraceID       string `json:"trace_id,omitempty"`
@@ -44,6 +47,14 @@ type ToolFinishedEvent struct {
 	DeliveryError string `json:"delivery_error,omitempty"`
 	DurationMs    int    `json:"duration_ms"`
 	SizeBytes     int64  `json:"size_bytes"`
+}
+
+type SessionStatusEvent struct {
+	Status      string `json:"status"`
+	Text        string `json:"text"`
+	FromTurn    int    `json:"from_turn,omitempty"`
+	ToTurn      int    `json:"to_turn,omitempty"`
+	UpdatedAtMs int64  `json:"updated_at_ms"`
 }
 
 // ExecutionEvent is the stable product projection for routed QA work.

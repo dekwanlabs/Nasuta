@@ -3,6 +3,7 @@ package qa
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -43,6 +44,8 @@ type QA struct {
 	agentRef           agentapi.DefinitionRef
 	definitionErr      error
 	runtimeErr         error
+	compactionMu       sync.RWMutex
+	compactionStatus   map[string]SessionStatusEvent
 }
 
 // NewQA wires retrieval, agent, memory, and write tools together.
@@ -66,8 +69,8 @@ func NewQA(d QADeps) *QA {
 		toolPruningEnabled: platformSettings.ToolPruningEnabled,
 		history:            d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
 		outputReserve: max(
-			platformSettings.LLMAnswerMaxTokens,
-			platformSettings.LLMConclusionMaxTokens,
+			platformSettings.LLMMaxTokens,
+			max(platformSettings.LLMAnswerMaxTokens, platformSettings.LLMConclusionMaxTokens),
 		),
 		domainKnowledge: platformSettings.DomainKnowledge,
 		definitions:     d.Definitions, agentRef: d.Agent,
@@ -75,6 +78,7 @@ func NewQA(d QADeps) *QA {
 		phaseEmitter: d.PhaseEmitter, investigation: d.Investigation,
 		scenarios: d.ScenarioLifecycle, executionEvents: d.ExecutionEvents,
 		writeAvailable: d.WriteAvailable, memory: d.Memory,
+		compactionStatus: make(map[string]SessionStatusEvent),
 	}
 	if svc.agentRef.ID == "" {
 		svc.agentRef = agentapi.DefinitionRef{ID: "qa.answerer"}
@@ -119,6 +123,28 @@ func (svc *QA) emitStep(runID, text string) {
 	}
 }
 
+func (svc *QA) updateSessionCompaction(runID, sessionID, status, text string, fromTurn, toTurn int) {
+	event := SessionStatusEvent{
+		Status: status, Text: text, FromTurn: fromTurn, ToTurn: toTurn,
+		UpdatedAtMs: time.Now().UnixMilli(),
+	}
+	svc.compactionMu.Lock()
+	svc.compactionStatus[sessionID] = event
+	svc.compactionMu.Unlock()
+	if emitter, ok := svc.phaseEmitter.(interface {
+		EmitSessionStatus(string, SessionStatusEvent)
+	}); ok {
+		emitter.EmitSessionStatus(runID, event)
+	}
+}
+
+// SessionCompactionStatus returns the latest transient archive status for one session.
+func (svc *QA) SessionCompactionStatus(sessionID string) SessionStatusEvent {
+	svc.compactionMu.RLock()
+	defer svc.compactionMu.RUnlock()
+	return svc.compactionStatus[sessionID]
+}
+
 // helperTimeout bounds each pre-retrieval LLM helper. A stuck helper degrades to
 // its fallback (clean question / tech terms / original question) instead of
 // stalling retrieval until the request deadline. The parent ctx caps it lower.
@@ -157,8 +183,8 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 }
 
 func standardQARequest(request QARequest, defaultAgent agentapi.DefinitionRef) bool {
-	if len(request.PreloadedContext) > 0 || len(request.Instructions) > 0 ||
-		len(request.ToolPlan.Prefetch) > 0 || request.ParentRunID != "" ||
+	if len(request.PreloadedContext) > 0 || len(request.ToolPlan.Prefetch) > 0 ||
+		request.ParentRunID != "" ||
 		request.WorkflowRunID != "" || request.WorkflowNodeID != "" {
 		return false
 	}

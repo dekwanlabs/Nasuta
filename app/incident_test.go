@@ -24,7 +24,7 @@ func TestConfigureIncidentsRegistersPlatformWriteCatalog(t *testing.T) {
 	if err := platform.configureIncidentsWithDB(db, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !platform.writeReady || platform.incidents == nil || platform.actions == nil || platform.incidentAPI == nil {
+	if platform.incident.manager == nil || platform.incident.api == nil {
 		t.Fatalf("incident platform was not fully configured: %#v", platform)
 	}
 	snapshot := registry.Snapshot(tool.AllPolicy())

@@ -99,7 +99,7 @@ func TestFeatureDeliveryStatusReportsCodingInitializationFailure(t *testing.T) {
 
 func TestFeatureReviewRuntimeRejectsConfiguredLLMWithoutRuntime(t *testing.T) {
 	platform := &Platform{
-		featureDelivery: featureDeliveryRuntime{
+		delivery: featureDeliveryRuntime{
 			service: delivery.NewService(&appReviewStore{}, nil, 0),
 		},
 	}
@@ -129,8 +129,12 @@ func TestFeatureReviewStartupUsesPublishedPositiveDefinitionVersion(t *testing.T
 		return agentapi.RunResult{}, nil
 	})
 	platform := &Platform{
-		settings: settings, agentCatalog: catalog, agentDefinitionVer: 1,
-		definitionRuntime: runtime,
+		settings: settings,
+		agents: agentRuntime{
+			catalog: catalog,
+			version: 1,
+			runtime: runtime,
+		},
 	}
 
 	activeSettings, activeRuntime, activeDefinitions, err := platform.currentFeatureReviewRuntime()
@@ -147,7 +151,7 @@ func TestFeatureReviewStartupUsesPublishedPositiveDefinitionVersion(t *testing.T
 		}
 	}
 
-	platform.agentDefinitionVer = 0
+	platform.agents.version = 0
 	if _, _, _, err := platform.currentFeatureReviewRuntime(); err == nil {
 		t.Fatal("zero definition version was accepted at feature delivery startup")
 	}
@@ -245,11 +249,11 @@ func reviewWorkflowTestPlatform(
 		t.Fatal(err)
 	}
 	return &Platform{
-		schemaRegistry:  schemas,
-		agentCatalog:    agents,
-		workflowCatalog: workflows,
-		workflowStore:   workflowStore,
-		workflowService: workflowService,
-		featureDelivery: featureDeliveryRuntime{service: service},
+		agents: agentRuntime{schemas: schemas, catalog: agents},
+		flow: workflowRuntime{
+			catalog: workflows,
+			service: workflowService,
+		},
+		delivery: featureDeliveryRuntime{service: service},
 	}
 }

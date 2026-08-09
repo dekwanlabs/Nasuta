@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
@@ -761,6 +762,140 @@ func (c *captureObserver) OnReasoning(_ context.Context, _ string, tok string) {
 	c.reasoning = append(c.reasoning, tok)
 }
 
+type failingStepObserver struct {
+	steps []StepRecord
+	err   error
+}
+
+func (observer *failingStepObserver) OnStep(
+	_ context.Context,
+	_ string,
+	step StepRecord,
+) error {
+	observer.steps = append(observer.steps, step)
+	return observer.err
+}
+
+func (*failingStepObserver) OnToken(context.Context, string, string) {}
+
+func (*failingStepObserver) OnReasoning(context.Context, string, string) {}
+
+func TestExecuteToolTurnStopsWhenToolCallCannotBePersisted(t *testing.T) {
+	observer := &failingStepObserver{err: errors.New("database unavailable")}
+	agent := &Agent{observer: observer}
+	state := &compiledLoop{
+		ctx:     t.Context(),
+		runCtx:  t.Context(),
+		loopCtx: t.Context(),
+		runID:   "run-tool-call-persist-failed",
+		result:  &RunResult{},
+	}
+
+	agent.executeToolTurn(state, []llm.ToolCall{{
+		ID: "call-persist-failed",
+		Function: llm.ToolFunction{
+			Name:      "observe",
+			Arguments: `{"query":"checkout"}`,
+		},
+	}})
+
+	if state.result.Err == nil || !strings.Contains(state.result.Err.Error(), "persist tool call") {
+		t.Fatalf("result error = %v", state.result.Err)
+	}
+	if len(observer.steps) != 1 ||
+		observer.steps[0].Kind != StepKindToolCall ||
+		observer.steps[0].ToolCallID != "call-persist-failed" {
+		t.Fatalf("steps = %#v", observer.steps)
+	}
+}
+
+func TestRecordThinkTurnPersistsToolReasoning(t *testing.T) {
+	observer := &captureObserver{}
+	agent := &Agent{observer: observer}
+	state := &compiledLoop{
+		runCtx: t.Context(),
+		runID:  "run-tool-reasoning",
+		result: &RunResult{},
+	}
+	turn := modelTurn{
+		step: 2,
+		result: &llm.ChatStreamResult{
+			Content:         "I will inspect the runtime evidence.",
+			Reasoning:       "The request depends on current runtime state, so I need the observe tool.",
+			ReasoningTokens: 17,
+			ToolCalls: []llm.ToolCall{{
+				ID: "call-observe",
+				Function: llm.ToolFunction{
+					Name:      "observe",
+					Arguments: `{"query":"checkout"}`,
+				},
+			}},
+		},
+		stream:   newStreamPipe(observer, state.runID, 2, time.Now(), nil),
+		started:  time.Now(),
+		duration: 25 * time.Millisecond,
+	}
+
+	if err := agent.recordThinkTurn(state, turn); err != nil {
+		t.Fatalf("recordThinkTurn: %v", err)
+	}
+	if len(observer.steps) != 1 {
+		t.Fatalf("steps = %#v", observer.steps)
+	}
+	step := observer.steps[0]
+	if step.Kind != StepKindThink ||
+		step.Content != turn.result.Reasoning ||
+		step.PromptContent != turn.result.Content ||
+		step.AuthoritativeSHA256 != toolContentSHA256(turn.result.Reasoning) ||
+		step.PromptSHA256 != toolContentSHA256(turn.result.Content) ||
+		step.SizeBytes != int64(len(turn.result.Reasoning)) ||
+		step.TokenDelta != utf8.RuneCountInString(turn.result.Reasoning) ||
+		step.ReasoningTokens != 17 ||
+		step.DurationMs != 25 {
+		t.Fatalf("tool reasoning step = %#v", step)
+	}
+	if len(state.messages) != 1 || len(state.messages[0].ToolCalls) != 1 ||
+		state.messages[0].Content != turn.result.Content ||
+		len(state.result.SessionMessages) != 1 {
+		t.Fatalf("state messages = %#v, session = %#v", state.messages, state.result.SessionMessages)
+	}
+}
+
+func TestRecordThinkTurnStopsWhenReasoningCannotBePersisted(t *testing.T) {
+	observer := &failingStepObserver{err: errors.New("database unavailable")}
+	agent := &Agent{observer: observer}
+	state := &compiledLoop{
+		runCtx: t.Context(),
+		runID:  "run-tool-reasoning-persist-failed",
+		result: &RunResult{},
+	}
+
+	err := agent.recordThinkTurn(state, modelTurn{
+		step: 1,
+		result: &llm.ChatStreamResult{
+			Reasoning: "The tool is required.",
+			ToolCalls: []llm.ToolCall{{
+				ID: "call-observe",
+				Function: llm.ToolFunction{
+					Name: "observe",
+				},
+			}},
+		},
+		stream:  newStreamPipe(observer, state.runID, 1, time.Now(), nil),
+		started: time.Now(),
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "persist tool reasoning") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(observer.steps) != 1 || observer.steps[0].Content != "The tool is required." {
+		t.Fatalf("steps = %#v", observer.steps)
+	}
+	if len(state.messages) != 0 || len(state.result.SessionMessages) != 0 {
+		t.Fatalf("messages were appended after persistence failure: %#v", state.messages)
+	}
+}
+
 func TestRunDeliversFreshToolOutputWithoutLoss(t *testing.T) {
 	fullContent := `{"records":[` + strings.Repeat(`{"name":"other","payload":"`+strings.Repeat("x", 200)+`"},`, 180) +
 		`{"name":"target","payload":"needle"}],"next_cursor":"cursor-final"}`
@@ -814,18 +949,28 @@ func TestRunDeliversFreshToolOutputWithoutLoss(t *testing.T) {
 		t.Fatalf("result = %+v", result)
 	}
 
-	var trace *StepRecord
+	var callTrace, resultTrace *StepRecord
 	for i := range observer.steps {
-		if observer.steps[i].Kind == StepKindToolResult {
-			trace = &observer.steps[i]
-			break
+		switch observer.steps[i].Kind {
+		case StepKindToolCall:
+			callTrace = &observer.steps[i]
+		case StepKindToolResult:
+			resultTrace = &observer.steps[i]
 		}
 	}
-	if trace == nil || trace.Content != fullContent || trace.PromptContent != fullContent {
-		t.Fatalf("tool trace = %#v", trace)
+	if callTrace == nil || callTrace.ToolCallID != "call-1" ||
+		callTrace.Tool != "large_read" ||
+		callTrace.Args != `{"target":"needle"}` {
+		t.Fatalf("tool call trace = %#v", callTrace)
 	}
-	if trace.AuthoritativeSHA256 == "" || trace.AuthoritativeSHA256 != trace.PromptSHA256 || trace.SizeBytes != int64(len(fullContent)) {
-		t.Fatalf("tool trace hashes/size = %#v", trace)
+	if resultTrace == nil || resultTrace.ToolCallID != callTrace.ToolCallID ||
+		resultTrace.Content != fullContent || resultTrace.PromptContent != fullContent {
+		t.Fatalf("tool result trace = %#v", resultTrace)
+	}
+	if resultTrace.AuthoritativeSHA256 == "" ||
+		resultTrace.AuthoritativeSHA256 != resultTrace.PromptSHA256 ||
+		resultTrace.SizeBytes != int64(len(fullContent)) {
+		t.Fatalf("tool trace hashes/size = %#v", resultTrace)
 	}
 	if modelToolContent != fullContent {
 		t.Fatalf("model tool content changed: got %d bytes, want %d", len(modelToolContent), len(fullContent))

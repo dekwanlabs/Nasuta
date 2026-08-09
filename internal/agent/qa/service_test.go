@@ -133,14 +133,13 @@ func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
 	}
 }
 
-func TestNormalizeQARequestCanonicalizesWithoutMutatingInputInstructions(t *testing.T) {
+func TestNormalizeQARequestCanonicalizesWithoutMutatingConversationInstructions(t *testing.T) {
 	request := QARequest{
 		Question: "  explain the checkout flow  ",
 		RunID:    "normalized-run",
 		Conversation: ConversationContext{
 			Instructions: []llm.Message{{Role: "system", Content: "existing"}},
 		},
-		Instructions: []string{" ", "  prefer runtime evidence  "},
 	}
 
 	normalized, err := normalizeQARequest(request)
@@ -150,8 +149,8 @@ func TestNormalizeQARequestCanonicalizesWithoutMutatingInputInstructions(t *test
 	if normalized.Question != "explain the checkout flow" {
 		t.Fatalf("question = %q", normalized.Question)
 	}
-	if len(normalized.Conversation.Instructions) != 2 ||
-		normalized.Conversation.Instructions[1].Content != "prefer runtime evidence" {
+	if len(normalized.Conversation.Instructions) != 1 ||
+		normalized.Conversation.Instructions[0].Content != "existing" {
 		t.Fatalf("instructions = %+v", normalized.Conversation.Instructions)
 	}
 	normalized.Conversation.Instructions[0].Content = "changed"
@@ -819,10 +818,12 @@ func TestAskExecutionEventsOrderDegradedRouteBeforeSingleAgent(t *testing.T) {
 	terminalEvents := runtime.Hub().Subscribe(runID)
 
 	result, err := qa.Ask(context.Background(), QARequest{
-		Question:     "trace the checkout flow",
-		Instructions: []string{"use the supplied scenario context"},
-		UserID:       42,
-		RunID:        runID,
+		Question: "trace the checkout flow",
+		PreloadedContext: []ContextBlock{{
+			Source: "scenario", Content: "supplied scenario context",
+		}},
+		UserID: 42,
+		RunID:  runID,
 	})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
@@ -1281,17 +1282,41 @@ func TestMergePreloadedContextDedupesContentAndReferences(t *testing.T) {
 	}
 }
 
+type preparationStepCapture struct {
+	steps  []RunStepRecord
+	failAt int
+}
+
+func (capture *preparationStepCapture) RecordPreparationStep(
+	_ context.Context,
+	step RunStepRecord,
+) error {
+	capture.steps = append(capture.steps, step)
+	if capture.failAt > 0 && len(capture.steps) == capture.failAt {
+		return errors.New("step persistence unavailable")
+	}
+	return nil
+}
+
 func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 	registry := testRegistry(t, Tool{
 		ID:          "prefetch",
 		Description: "runtime evidence",
 		Kind:        ToolKindRead,
-		InputSchema: objectSchema(map[string]any{}, nil),
-		Prefetch:    &tool.PrefetchSpec{Description: "load runtime evidence"},
-		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
+		InputSchema: objectSchema(
+			map[string]any{"query": propString("evidence query")},
+			[]string{"query"},
+		),
+		Prefetch: &tool.PrefetchSpec{Description: "load runtime evidence"},
+		Handler: tool.HandlerFunc(func(_ context.Context, arguments tool.Arguments) (tool.Result, error) {
+			if arguments["query"] != "checkout" {
+				t.Fatalf("arguments = %#v", arguments)
+			}
 			return tool.Result{
-				Content:    "evidence",
-				References: []tool.Reference{{Type: "trace", Target: "trace-1"}},
+				Content:        "evidence",
+				References:     []tool.Reference{{Type: "trace", Target: "trace-1"}},
+				Coverage:       tool.EvidenceCoverage{Partial: true, OmittedItems: 2},
+				AnswerContract: tool.AnswerContract{RequiredLiterals: []string{"TRACE-1"}},
 			}, nil
 		}),
 	})
@@ -1300,13 +1325,115 @@ func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
 		executor: NewToolExecutor(registry),
 	}
-	blocks, err := qa.executePrefetch(context.Background(), prepared, ToolPlan{
-		Prefetch: []PlannedToolCall{{ToolID: "prefetch", Required: true}},
-	})
+	recorder := &preparationStepCapture{}
+	const runID = "run-prefetch-success"
+	blocks, err := qa.executePrefetch(
+		context.Background(),
+		runID,
+		prepared,
+		ToolPlan{Prefetch: []PlannedToolCall{{
+			ToolID: "prefetch", Arguments: tool.Arguments{"query": "checkout"}, Required: true,
+		}}},
+		recorder,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(blocks) != 1 || blocks[0].Content != "evidence" || len(blocks[0].References) != 1 {
 		t.Fatalf("blocks = %#v", blocks)
+	}
+	if len(recorder.steps) != 2 {
+		t.Fatalf("steps = %#v", recorder.steps)
+	}
+	call, result := recorder.steps[0], recorder.steps[1]
+	wantCallID := prefetchToolCallID(runID, 0, "prefetch")
+	if call.Kind != agentrun.StepKindToolCall || call.ToolCallID != wantCallID ||
+		call.Tool != "prefetch" || call.Args != `{"query":"checkout"}` ||
+		call.CreatedAt.IsZero() {
+		t.Fatalf("tool call step = %#v", call)
+	}
+	if result.Kind != agentrun.StepKindToolResult || result.ToolCallID != call.ToolCallID ||
+		result.TraceID != prefetchToolResultTraceID(runID, wantCallID) ||
+		result.Content != "evidence" || result.PromptContent != "evidence" ||
+		result.AuthoritativeSHA256 != hashString("evidence") ||
+		result.PromptSHA256 != hashString("evidence") ||
+		result.SizeBytes != int64(len("evidence")) || result.Failed ||
+		!result.Coverage.Partial || result.Coverage.OmittedItems != 2 ||
+		len(result.AnswerContract.RequiredLiterals) != 1 ||
+		result.AnswerContract.RequiredLiterals[0] != "TRACE-1" ||
+		result.DurationMs < 0 || result.CreatedAt.IsZero() {
+		t.Fatalf("tool result step = %#v", result)
+	}
+}
+
+func TestExecutePrefetchRecordsFailedToolResult(t *testing.T) {
+	registry := testRegistry(t, Tool{
+		ID:          "prefetch",
+		Description: "runtime evidence",
+		Kind:        ToolKindRead,
+		InputSchema: objectSchema(map[string]any{}, nil),
+		Prefetch:    &tool.PrefetchSpec{Description: "load runtime evidence"},
+		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
+			return tool.Result{}, errors.New("backend unavailable")
+		}),
+	})
+	prepared := preparedScenarioTools{
+		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
+		executor: NewToolExecutor(registry),
+	}
+	recorder := &preparationStepCapture{}
+	blocks, err := (&QA{}).executePrefetch(
+		context.Background(),
+		"run-prefetch-failed",
+		prepared,
+		ToolPlan{Prefetch: []PlannedToolCall{{ToolID: "prefetch"}}},
+		recorder,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || !strings.Contains(blocks[0].Content, "backend unavailable") {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+	if len(recorder.steps) != 2 {
+		t.Fatalf("steps = %#v", recorder.steps)
+	}
+	call, result := recorder.steps[0], recorder.steps[1]
+	if call.ToolCallID == "" || result.ToolCallID != call.ToolCallID ||
+		!result.Failed || result.DeliveryError != "tool_execution_failed" ||
+		!strings.Contains(result.Content, "backend unavailable") {
+		t.Fatalf("failed result = %#v, call = %#v", result, call)
+	}
+}
+
+func TestExecutePrefetchStopsWhenToolCallCannotBeRecorded(t *testing.T) {
+	called := false
+	registry := testRegistry(t, Tool{
+		ID:          "prefetch",
+		Description: "runtime evidence",
+		Kind:        ToolKindRead,
+		InputSchema: objectSchema(map[string]any{}, nil),
+		Prefetch:    &tool.PrefetchSpec{Description: "load runtime evidence"},
+		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
+			called = true
+			return tool.Result{Content: "evidence"}, nil
+		}),
+	})
+	prepared := preparedScenarioTools{
+		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
+		executor: NewToolExecutor(registry),
+	}
+	_, err := (&QA{}).executePrefetch(
+		context.Background(),
+		"run-prefetch-persist-failed",
+		prepared,
+		ToolPlan{Prefetch: []PlannedToolCall{{ToolID: "prefetch"}}},
+		&preparationStepCapture{failAt: 1},
+	)
+	if err == nil || !strings.Contains(err.Error(), "record prefetch tool") {
+		t.Fatalf("error = %v", err)
+	}
+	if called {
+		t.Fatal("tool executed after its call step failed to persist")
 	}
 }

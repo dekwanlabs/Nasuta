@@ -15,10 +15,6 @@ type RunStore struct {
 	db *sql.DB
 }
 
-type runCreator interface {
-	Create(RunRecord) error
-}
-
 type runStepStore interface {
 	AddStep(StepRow) error
 }

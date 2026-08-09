@@ -165,11 +165,6 @@ func messageChars(msgs []llm.Message) int {
 	return total
 }
 
-// EstimateMessagesTokens applies the same budget estimate used by the loop.
-func EstimateMessagesTokens(messages []llm.Message) int {
-	return estimateMessagesTokens(messages)
-}
-
 func estimateMessagesTokens(messages []llm.Message) int {
 	total := 0
 	for _, message := range messages {
@@ -182,21 +177,37 @@ func estimateMessagesTokens(messages []llm.Message) int {
 	return total
 }
 
+func estimateInputTokens(messages []llm.Message, tools []llm.ToolDef) (int, error) {
+	inputTokens := estimateMessagesTokens(messages)
+	if len(tools) == 0 {
+		return inputTokens, nil
+	}
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return 0, fmt.Errorf("encode tool definitions: %w", err)
+	}
+	return inputTokens + tooloutput.EstimateTokens(string(encoded)), nil
+}
+
+func (agent *Agent) outputTokenReserve() int {
+	return max(agent.cfg.AnswerMaxTokens, agent.cfg.ConclusionMaxTokens)
+}
+
+func contextSafetyTokens(window int) int {
+	return max(window/20, 1024)
+}
+
 func (agent *Agent) ensureInputBudget(messages []llm.Message, tools []llm.ToolDef) error {
 	window := agent.cfg.ContextWindow
 	if window <= 0 {
 		return nil
 	}
-	inputTokens := estimateMessagesTokens(messages)
-	if len(tools) > 0 {
-		encoded, err := json.Marshal(tools)
-		if err != nil {
-			return fmt.Errorf("encode tool definitions for context budget: %w", err)
-		}
-		inputTokens += tooloutput.EstimateTokens(string(encoded))
+	inputTokens, err := estimateInputTokens(messages, tools)
+	if err != nil {
+		return fmt.Errorf("estimate context budget: %w", err)
 	}
-	outputReserve := max(agent.cfg.AnswerMaxTokens, agent.cfg.ConclusionMaxTokens)
-	safety := max(window/20, 1024)
+	outputReserve := agent.outputTokenReserve()
+	safety := contextSafetyTokens(window)
 	if inputTokens+outputReserve+safety > window {
 		return fmt.Errorf(
 			"QA context exceeds configured window before provider call: input=%d output_reserve=%d safety=%d window=%d; shorten the question or attachments",
@@ -204,15 +215,6 @@ func (agent *Agent) ensureInputBudget(messages []llm.Message, tools []llm.ToolDe
 		)
 	}
 	return nil
-}
-
-// runeSafeTruncate truncates to max runes safely.
-func runeSafeTruncate(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	return string(runes[:max]) + "..."
 }
 
 var (

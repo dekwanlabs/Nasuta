@@ -70,12 +70,12 @@ func (svc *QA) submitInvestigation(
 				outcome.Err = err
 			}
 		}
+		if outcome.Status == RunStatusDone {
+			svc.archiveSessionHistoryAsync(runCtx, runID, conversation.SessionID, userID)
+		}
 		if finishErr := scenario.Finish(outcome); finishErr != nil {
 			log.ErrorfCtx(runCtx, "[qa] finish parent run %s: %v", runID, finishErr)
 			return
-		}
-		if outcome.Status == RunStatusDone {
-			svc.archiveSessionHistoryAsync(runCtx, conversation.SessionID, userID)
 		}
 	}()
 	return &AskResult{RunID: runID}, nil
@@ -91,8 +91,6 @@ func (svc *QA) submitRun(
 	conversation ConversationContext,
 	userID int64,
 	rc *retrieval.RetrievedContext,
-	recalled []memory.MemoryRecord,
-	rolePrompt string,
 	runID string,
 	plan domain.EvidencePlan,
 	policy ToolPolicy,
@@ -101,16 +99,6 @@ func (svc *QA) submitRun(
 	ownsTrace bool,
 ) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", runID, definition.ID, definition.Version)
-	instructions := append([]llm.Message{}, conversation.Instructions...)
-	if len(recalled) > 0 {
-		formatted, _ := executiontrace.Invoke(ctx, memoryInjectSpec, recalled, func(_ context.Context, records []memory.MemoryRecord) (string, error) {
-			return memory.FormatMemories(records), nil
-		})
-		instructions = append(instructions, llm.Message{Role: "system", Content: formatted})
-	}
-	conversation.RolePrompt = rolePrompt
-	conversation.Instructions = instructions
-	conversation.EvidenceSeeded = len(recalled) > 0 || rc != nil && rc.Text != ""
 	messages := buildAgentMessages(
 		question, conversation, rc, plan, svc.domainKnowledge, 0,
 	)
@@ -171,12 +159,12 @@ func (svc *QA) submitRun(
 				return
 			}
 		}
+		if outcome.Status == RunStatusDone {
+			svc.archiveSessionHistoryAsync(ctx, runID, conversation.SessionID, userID)
+		}
 		if finishErr := run.Finish(nil); finishErr != nil {
 			log.ErrorfCtx(ctx, "[qa] finish run %s: %v", runID, finishErr)
 			return
-		}
-		if outcome.Status == RunStatusDone {
-			svc.archiveSessionHistoryAsync(ctx, conversation.SessionID, userID)
 		}
 
 		if memoryExtractionAllowed(outcome, internalResultFromPublic(result)) && svc.memory != nil && userID != 0 {
@@ -203,6 +191,29 @@ func (svc *QA) submitRun(
 	}()
 
 	return &AskResult{RunID: runID, Context: rc}, nil
+}
+
+func (svc *QA) prepareAnswerConversation(
+	ctx context.Context,
+	conversation ConversationContext,
+	recalled []memory.MemoryRecord,
+	rolePrompt string,
+	rc *retrieval.RetrievedContext,
+) ConversationContext {
+	instructions := append([]llm.Message{}, conversation.Instructions...)
+	if len(recalled) > 0 {
+		formatted, _ := executiontrace.Invoke(ctx, memoryInjectSpec, recalled, func(
+			_ context.Context,
+			records []memory.MemoryRecord,
+		) (string, error) {
+			return memory.FormatMemories(records), nil
+		})
+		instructions = append(instructions, llm.Message{Role: "system", Content: formatted})
+	}
+	conversation.RolePrompt = rolePrompt
+	conversation.Instructions = instructions
+	conversation.EvidenceSeeded = len(recalled) > 0 || rc != nil && rc.Text != ""
+	return conversation
 }
 
 func qaRunPermissions(allowWrite bool) agentapi.PermissionPolicy {
@@ -286,24 +297,56 @@ func (svc *QA) persistSessionTurn(ctx context.Context, runID, sessionID string, 
 	return nil
 }
 
-func (svc *QA) archiveSessionHistoryAsync(ctx context.Context, sessionID string, userID int64) {
+func (svc *QA) archiveSessionHistoryAsync(ctx context.Context, runID, sessionID string, userID int64) {
 	if svc.sessions == nil || sessionID == "" || svc.contextWindow <= 0 {
 		return
 	}
 	archiveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionArchiveTimeout)
 	go func() {
 		defer cancel()
-		result, err := agentsession.ArchiveSessionHistoryIfNeeded(
-			archiveCtx, svc.helperLLM, svc.sessions, sessionID, userID, svc.contextWindow, svc.history,
+		started := false
+		fromTurn, toTurn := 0, 0
+		result, err := agentsession.ArchiveSessionHistoryIfNeededWithStatus(
+			archiveCtx, svc.helperLLM, svc.sessions, sessionID, userID,
+			agentsession.SessionCompactionUsage{
+				ContextWindow:       svc.contextWindow,
+				OutputReserveTokens: svc.outputReserve,
+			},
+			func(from, to int) {
+				started = true
+				fromTurn, toTurn = from, to
+				svc.updateSessionCompaction(
+					runID, sessionID, "start",
+					fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", from, to),
+					fromTurn, toTurn,
+				)
+			},
+			svc.history,
 		)
 		if err != nil {
 			log.ErrorfCtx(archiveCtx, "[qa] post-turn history archive failed for %s: %v", sessionID, err)
+			if started {
+				svc.updateSessionCompaction(
+					runID, sessionID, "failed", "历史上下文压缩失败",
+					fromTurn, toTurn,
+				)
+			}
 			return
 		}
 		if result.Applied {
+			svc.updateSessionCompaction(
+				runID, sessionID, "done", "历史上下文压缩完成",
+				result.FromTurn, result.ToTurn,
+			)
 			log.InfofCtx(archiveCtx, "[qa] archived session %s turns %d-%d after saved turn",
 				sessionID, result.FromTurn, result.ToTurn)
 		} else if result.Stale {
+			if started {
+				svc.updateSessionCompaction(
+					runID, sessionID, "done", "历史上下文压缩完成",
+					result.FromTurn, result.ToTurn,
+				)
+			}
 			log.InfofCtx(archiveCtx, "[qa] ignored stale post-turn archive for session %s through turn %d",
 				sessionID, result.ToTurn)
 		}

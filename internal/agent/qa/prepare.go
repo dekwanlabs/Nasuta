@@ -20,15 +20,16 @@ import (
 )
 
 type qaPreparation struct {
-	request        QARequest
-	ctx            context.Context
-	trace          *executiontrace.Scope
-	ownsTrace      bool
-	toolPolicy     ToolPolicy
-	candidateTools ScenarioToolSet
-	toolCandidates []retrieval.ToolRouteCandidate
-	planning       evidencePlanningOutput
-	execution      executionRouteDecision
+	request          QARequest
+	ctx              context.Context
+	trace            *executiontrace.Scope
+	ownsTrace        bool
+	toolPolicy       ToolPolicy
+	candidateToolSet ScenarioToolSet
+	toolCandidates   []retrieval.ToolRouteCandidate
+	planning         evidencePlanningOutput
+	analysis         queryAnalysisOutput
+	execution        executionRouteDecision
 }
 
 type qaEvidence struct {
@@ -73,11 +74,11 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 	}
 
 	prepared.toolPolicy = toolPolicyForRun(svc.writeAvailable && request.AllowWrite)
-	prepared.candidateTools = svc.runtimeTools.PrepareTools(prepared.toolPolicy)
+	prepared.candidateToolSet = svc.runtimeTools.PrepareTools(prepared.toolPolicy)
 	if request.Conversation.CompactedThroughTurn <= 0 || svc.history == nil {
-		prepared.candidateTools = withoutSessionHistoryTools(prepared.candidateTools)
+		prepared.candidateToolSet = withoutSessionHistoryTools(prepared.candidateToolSet)
 	}
-	prepared.toolCandidates = routingCandidates(prepared.candidateTools.Tools())
+	prepared.toolCandidates = routingCandidates(prepared.candidateToolSet.Tools())
 
 	svc.emitStep(request.RunID, "嗯...让我先琢磨一下你在问什么 ✨")
 	routeContext := buildHistoryRouteContext(request.Conversation)
@@ -92,12 +93,12 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 	prepared.planning, _ = svc.planEvidence(hctx, evidencePlanningInput{
 		Question: request.Question, RouteContext: routeContext, ExplicitPlan: request.EvidencePlan,
 		ToolCandidates: prepared.toolCandidates,
-		AvailableTools: scenarioToolIDs(prepared.candidateTools.Tools()),
+		AvailableTools: scenarioToolIDs(prepared.candidateToolSet.Tools()),
 		UserID:         request.UserID,
 	})
 	cancelPlanning()
 
-	analysis, _ := analyzeQuery(ctx, queryAnalysisInput{
+	prepared.analysis, _ = analyzeQuery(ctx, queryAnalysisInput{
 		Question: request.Question, CleanQuestion: prepared.planning.CleanQuestion,
 		Terms: prepared.planning.Terms, Time: prepared.planning.Time,
 		Anchor: requestAnchor, RecentTurns: request.Conversation.RecentTurns,
@@ -105,25 +106,25 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 	})
 	assembled, err := svc.assembleContext(ctx, contextAssembleInput{
 		Question: request.Question, UserID: request.UserID, Conversation: request.Conversation,
-		Relation: analysis.History, Origin: analysis.HistoryOrigin,
-		Upgrade: analysis.HistoryUpdate,
+		Relation: prepared.analysis.History, Origin: prepared.analysis.HistoryOrigin,
+		Upgrade: prepared.analysis.HistoryUpdate,
 	})
 	if err != nil {
 		prepared.closeTrace()
 		return nil, err
 	}
 	prepared.request.Conversation = assembled.Conversation
-	if analysis.TimeError != nil {
+	if prepared.analysis.TimeError != nil {
 		prepared.planning.PlanningError = errors.Join(
 			prepared.planning.PlanningError,
-			fmt.Errorf("resolve relative time: %w", analysis.TimeError),
+			fmt.Errorf("resolve relative time: %w", prepared.analysis.TimeError),
 		)
-	} else if analysis.HasTimeRange {
-		prepared.ctx = tool.WithTimeRange(prepared.ctx, analysis.TimeRange)
+	} else if prepared.analysis.HasTimeRange {
+		prepared.ctx = tool.WithTimeRange(prepared.ctx, prepared.analysis.TimeRange)
 		log.InfofCtx(prepared.ctx, "[qa] relative time resolved raw=%q from=%s to=%s",
-			analysis.TimeRange.Raw,
-			analysis.TimeRange.From.Format(time.RFC3339),
-			analysis.TimeRange.To.Format(time.RFC3339),
+			prepared.analysis.TimeRange.Raw,
+			prepared.analysis.TimeRange.From.Format(time.RFC3339),
+			prepared.analysis.TimeRange.To.Format(time.RFC3339),
 		)
 	}
 
@@ -140,13 +141,6 @@ func normalizeQARequest(request QARequest) (QARequest, error) {
 	request.Conversation.Instructions = append(
 		[]llm.Message(nil), request.Conversation.Instructions...,
 	)
-	for _, instruction := range request.Instructions {
-		if instruction = strings.TrimSpace(instruction); instruction != "" {
-			request.Conversation.Instructions = append(request.Conversation.Instructions, llm.Message{
-				Role: "system", Content: instruction,
-			})
-		}
-	}
 	if request.RunID == "" {
 		request.RunID = NewRunID()
 	}
@@ -226,16 +220,29 @@ func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error
 	if webUnavailable {
 		log.WarnfCtx(runCtx, "[qa] retrieval source unavailable: web")
 	}
-	evidence, err := svc.prepareEvidence(runCtx, prepared, evidencePlan, webUnavailable)
+	stepRecorder, _ := run.(preparationStepRecorder)
+	evidence, err := svc.prepareEvidence(
+		runCtx, prepared, evidencePlan, webUnavailable, stepRecorder,
+	)
+	if err != nil {
+		prepared.finishPreparationFailure(runCtx, run, err)
+		return nil, err
+	}
+	conversation = svc.prepareAnswerConversation(
+		runCtx, conversation, evidence.recalled, prepared.request.RolePrompt, evidence.retrieved,
+	)
+	conversation, err = svc.compactBeforeAnswer(
+		runCtx, prepared, conversation, evidence.retrieved, evidencePlan,
+	)
 	if err != nil {
 		prepared.finishPreparationFailure(runCtx, run, err)
 		return nil, err
 	}
 	return svc.submitRun(
 		runCtx, run, prepared.request, definition, selection, prepared.request.Question,
-		conversation, prepared.request.UserID, evidence.retrieved, evidence.recalled,
-		prepared.request.RolePrompt, prepared.request.RunID, evidencePlan, prepared.toolPolicy,
-		prepared.candidateTools, prepared.trace, prepared.ownsTrace,
+		conversation, prepared.request.UserID, evidence.retrieved,
+		prepared.request.RunID, evidencePlan, prepared.toolPolicy,
+		prepared.candidateToolSet, prepared.trace, prepared.ownsTrace,
 	)
 }
 
@@ -253,7 +260,7 @@ func (svc *QA) prepareRunConversation(prepared *qaPreparation) ConversationConte
 	// Dry-run pruning still records the potential saving while keeping all tools visible.
 	if decidePrune(prepared.planning.PlanningError, prepared.planning.Effective) {
 		conversation.PrunedToolIDs = svc.prunedToolIDSet(
-			prepared.candidateTools.Tools(), routedToolIDs,
+			prepared.candidateToolSet.Tools(), routedToolIDs,
 		)
 		conversation.PruneApplied = svc.toolPruningEnabled
 	}
@@ -310,7 +317,7 @@ func (svc *QA) beginSingleAgentRun(
 		ToolScope: agentapi.ToolScope{
 			AllowWrite:      prepared.toolPolicy.AllowWrite,
 			RestrictVisible: true,
-			VisibleToolIDs:  scenarioToolIDs(prepared.candidateTools.Tools()),
+			VisibleToolIDs:  scenarioToolIDs(prepared.candidateToolSet.Tools()),
 		},
 		Actor: agentapi.Actor{UserID: prepared.request.UserID},
 		Correlation: agentapi.Correlation{
@@ -331,8 +338,15 @@ func (svc *QA) prepareEvidence(
 	prepared *qaPreparation,
 	evidencePlan domain.EvidencePlan,
 	webUnavailable bool,
+	stepRecorder preparationStepRecorder,
 ) (*qaEvidence, error) {
-	prefetched, err := svc.executePrefetch(ctx, prepared.candidateTools, prepared.request.ToolPlan)
+	prefetched, err := svc.executePrefetch(
+		ctx,
+		prepared.request.RunID,
+		prepared.candidateToolSet,
+		prepared.request.ToolPlan,
+		stepRecorder,
+	)
 	if err != nil {
 		return nil, err
 	}

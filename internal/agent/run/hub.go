@@ -111,11 +111,12 @@ func (hub *RunHub) OnStep(ctx context.Context, runID string, step StepRecord) er
 	switch step.Kind {
 	case StepKindToolCall:
 		hub.broadcast(runID, SSEEvent{Type: EventToolStarted, Data: ToolStartedEvent{
-			Step: step.StepNo, Name: step.Tool, Args: step.Args,
+			Step: step.StepNo, ToolCallID: step.ToolCallID, Name: step.Tool, Args: step.Args,
 		}})
 	case StepKindToolResult:
 		hub.broadcast(runID, SSEEvent{Type: EventToolFinished, Data: ToolFinishedEvent{
-			Step: step.StepNo, Tool: step.Tool, Summary: toolResultPreview(step.Content),
+			Step: step.StepNo, ToolCallID: step.ToolCallID,
+			Tool: step.Tool, Summary: toolResultPreview(step.Content),
 			TraceID: step.TraceID, ArtifactID: step.ArtifactID, Failed: step.Failed,
 			DeliveryError: step.DeliveryError, DurationMs: step.DurationMs, SizeBytes: step.SizeBytes,
 		}})
@@ -139,6 +140,10 @@ func (hub *RunHub) OnLLMCall(_ context.Context, runID string, call llm.CallLifec
 // EmitPhase publishes transient UI status without creating a persisted step.
 func (hub *RunHub) EmitPhase(runID, text string) {
 	hub.broadcast(runID, SSEEvent{Type: EventStatus, Data: TextEvent{Text: text}})
+}
+
+func (hub *RunHub) EmitSessionStatus(runID string, event SessionStatusEvent) {
+	hub.broadcast(runID, SSEEvent{Type: EventSessionStatus, Data: event})
 }
 
 func (hub *RunHub) EmitTrace(runID string, event domain.EvaluationTrace) {

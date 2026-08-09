@@ -25,32 +25,32 @@ type featureDeliveryRuntime struct {
 	codingReason    string
 }
 
-func (platform *Platform) initFeatureDelivery() error {
-	if platform.platformDB == nil {
+func (p *Platform) initFeatureDelivery() error {
+	if p.db == nil {
 		log.Warnf("[feature-delivery] disabled (MySQL unavailable)")
 		return nil
 	}
-	deliveryStore := store.NewFeatureDeliveryStore(platform.platformDB)
+	deliveryStore := store.NewFeatureDeliveryStore(p.db)
 	if err := deliveryStore.InterruptGenerationRuns(context.Background()); err != nil {
 		return fmt.Errorf("interrupt unfinished feature generation: %w", err)
 	}
 
 	var generator *delivery.Generator
-	if platform.settings.LLMEnabled() {
-		generationMaxTokens := featureGenerationTokenBudget(platform.settings)
+	if p.settings.LLMEnabled() {
+		generationMaxTokens := featureGenerationTokenBudget(p.settings)
 		client := llm.NewLLMClientWithHTTPAndProvider(
-			platform.settings.LLMBaseURL,
-			platform.settings.LLMAPIKey,
-			platform.settings.LLMModel,
-			platform.settings.LLMProvider,
+			p.settings.LLMBaseURL,
+			p.settings.LLMAPIKey,
+			p.settings.LLMModel,
+			p.settings.LLMProvider,
 			generationMaxTokens,
 			nil,
 		)
 		generator = delivery.NewGenerator(
-			platform.knowledge,
+			p.tools,
 			client,
-			platform.settings.LLMProvider,
-			platform.settings.LLMModel,
+			p.settings.LLMProvider,
+			p.settings.LLMModel,
 			generationMaxTokens,
 		)
 	} else {
@@ -60,61 +60,61 @@ func (platform *Platform) initFeatureDelivery() error {
 	service := delivery.NewService(
 		deliveryStore,
 		generator,
-		time.Duration(platform.settings.FeatureGenerationTimeout),
+		time.Duration(p.settings.FeatureGenerationTimeout),
 	)
 	pipelineDefinition, err := pipeline.DefaultDefinition(pipeline.WorkflowVersion)
 	if err != nil {
 		return fmt.Errorf("prepare feature pipeline workflow: %w", err)
 	}
-	if err := platform.workflowCatalog.Publish([]workflow.WorkflowDefinition{pipelineDefinition}); err != nil {
+	if err := p.flow.catalog.Publish([]workflow.WorkflowDefinition{pipelineDefinition}); err != nil {
 		return fmt.Errorf("publish feature pipeline workflow: %w", err)
 	}
-	platform.featureDelivery.service = service
-	platform.featureDelivery.api = featurehttp.New(service)
-	platform.featureDelivery.api.SetPipelineStarter(
-		pipeline.NewStarter(platform.workflowService),
+	p.delivery.service = service
+	p.delivery.api = featurehttp.New(service)
+	p.delivery.api.SetPipelineStarter(
+		pipeline.NewStarter(p.flow.service),
 	)
-	approvals := pipeline.NewApprovalCoordinator(service, platform.workflowService)
-	platform.featureDelivery.api.SetArtifactReviewer(approvals)
-	if platform.workflowAPI != nil {
-		platform.workflowAPI.SetApprovalDecider(approvals)
+	approvals := pipeline.NewApprovalCoordinator(service, p.flow.service)
+	p.delivery.api.SetArtifactReviewer(approvals)
+	if p.flow.api != nil {
+		p.flow.api.SetApprovalDecider(approvals)
 	}
-	settings, runtime, definitions, err := platform.currentFeatureReviewRuntime()
+	settings, runtime, definitions, err := p.currentFeatureReviewRuntime()
 	if err != nil {
 		return err
 	}
-	if err := platform.configureFeatureReviewRuntime(
+	if err := p.configureFeatureReviewRuntime(
 		settings,
 		runtime,
 		definitions,
 	); err != nil {
 		return err
 	}
-	platform.configureFeatureImplementation(deliveryStore, service)
-	platform.workflowPipeline = pipeline.NewExecutor(service)
-	if err := platform.configureAgentWorkflowRuntime(runtime); err != nil {
+	p.configureFeatureImplementation(deliveryStore, service)
+	p.flow.pipeline = pipeline.NewExecutor(service)
+	if err := p.configureAgentWorkflowRuntime(runtime); err != nil {
 		return err
 	}
 	log.Infof("[feature-delivery] persistence enabled")
 	return nil
 }
 
-func (platform *Platform) currentFeatureReviewRuntime() (
+func (p *Platform) currentFeatureReviewRuntime() (
 	*config.PlatformSettings,
 	agentapi.Runtime,
 	[]agentapi.Definition,
 	error,
 ) {
-	platform.qaMu.RLock()
-	if platform.settings == nil {
-		platform.qaMu.RUnlock()
+	p.qa.mu.RLock()
+	if p.settings == nil {
+		p.qa.mu.RUnlock()
 		return nil, nil, nil, nil
 	}
-	settings := *platform.settings
-	runtime := platform.definitionRuntime
-	version := platform.agentDefinitionVer
-	catalog := platform.agentCatalog
-	platform.qaMu.RUnlock()
+	settings := *p.settings
+	runtime := p.agents.runtime
+	version := p.agents.version
+	catalog := p.agents.catalog
+	p.qa.mu.RUnlock()
 
 	if !settings.LLMEnabled() {
 		return &settings, nil, nil, nil
@@ -145,22 +145,22 @@ func (platform *Platform) currentFeatureReviewRuntime() (
 	return &settings, runtime, definitions, nil
 }
 
-func (platform *Platform) configureFeatureReviewRuntime(
+func (p *Platform) configureFeatureReviewRuntime(
 	settings *config.PlatformSettings,
 	runtime agentapi.Runtime,
 	definitions []agentapi.Definition,
 ) error {
-	service := platform.featureDelivery.service
+	service := p.delivery.service
 	if service == nil {
 		return nil
 	}
 	if settings == nil || !settings.LLMEnabled() {
 		service.SetReviewConfiguration(nil, nil)
 		service.SetAdjudicationRunner(nil)
-		platform.workflowReview = nil
-		platform.reviewCoordinator = nil
-		if platform.featureDelivery.api != nil {
-			platform.featureDelivery.api.SetReviewCoordinator(nil)
+		p.flow.review = nil
+		p.flow.coordinator = nil
+		if p.delivery.api != nil {
+			p.delivery.api.SetReviewCoordinator(nil)
 		}
 		log.Warnf("[feature-delivery] agent review disabled (LLM unavailable)")
 		return nil
@@ -175,7 +175,7 @@ func (platform *Platform) configureFeatureReviewRuntime(
 	if err != nil {
 		return fmt.Errorf("publish default review policies: %w", err)
 	}
-	if platform.workflowService == nil {
+	if p.flow.service == nil {
 		return fmt.Errorf("configure agent review runtime: workflow service is unavailable")
 	}
 	workflowDefinitions := make([]workflow.WorkflowDefinition, 0, len(policies))
@@ -186,18 +186,18 @@ func (platform *Platform) configureFeatureReviewRuntime(
 		}
 		workflowDefinitions = append(workflowDefinitions, definition)
 	}
-	if err := platform.workflowService.PublishDefinitions(workflowDefinitions, true); err != nil {
+	if err := p.flow.service.PublishDefinitions(workflowDefinitions, true); err != nil {
 		return fmt.Errorf("publish default review workflows: %w", err)
 	}
 	service.SetReviewConfiguration(delivery.NewRuntimeReviewRunner(runtime), defaults)
 	service.SetAdjudicationRunner(delivery.NewRuntimeAdjudicationRunner(runtime))
-	platform.workflowReview = reviewworkflow.NewExecutor(service)
-	platform.reviewCoordinator = reviewworkflow.NewCoordinator(
+	p.flow.review = reviewworkflow.NewExecutor(service)
+	p.flow.coordinator = reviewworkflow.NewCoordinator(
 		service,
-		platform.workflowService,
+		p.flow.service,
 	)
-	if platform.featureDelivery.api != nil {
-		platform.featureDelivery.api.SetReviewCoordinator(platform.reviewCoordinator)
+	if p.delivery.api != nil {
+		p.delivery.api.SetReviewCoordinator(p.flow.coordinator)
 	}
 	log.Infof(
 		"[feature-delivery] agent review runtime enabled (default_policies=%d workflows=%d)",
@@ -215,33 +215,33 @@ func featureGenerationTokenBudget(settings *config.PlatformSettings) int {
 	return max(settings.LLMMaxTokens, settings.LLMAnswerMaxTokens, settings.LLMConclusionMaxTokens)
 }
 
-func (platform *Platform) configureFeatureImplementation(deliveryStore delivery.Store, service *delivery.Service) {
-	if len(platform.settings.CodingEnabledProviders) == 0 {
-		platform.featureDelivery.codingReason = "not_configured"
+func (p *Platform) configureFeatureImplementation(deliveryStore delivery.Store, service *delivery.Service) {
+	if len(p.settings.CodingEnabledProviders) == 0 {
+		p.delivery.codingReason = "not_configured"
 		log.Warnf("[feature-delivery] coding disabled (no provider configured)")
 		return
 	}
-	if err := platform.settings.ValidateCodingSettings(); err != nil {
-		platform.featureDelivery.codingReason = "invalid_configuration"
+	if err := p.settings.ValidateCodingSettings(); err != nil {
+		p.delivery.codingReason = "invalid_configuration"
 		log.Warnf("[feature-delivery] coding disabled: %v", err)
 		return
 	}
-	workspaces, err := delivery.NewWorkspaceManager(deliveryStore, platform.cfg.CodingWorkRoot)
+	workspaces, err := delivery.NewWorkspaceManager(deliveryStore, p.cfg.CodingWorkRoot)
 	if err != nil {
-		platform.featureDelivery.codingReason = "workspace_unavailable"
+		p.delivery.codingReason = "workspace_unavailable"
 		log.Warnf("[feature-delivery] coding disabled (workspace unavailable): %v", err)
 		return
 	}
-	gitManager, err := delivery.NewGitManager(platform.cfg.WorkspaceRoot, platform.cfg.CodingWorkRoot, workspaces)
+	gitManager, err := delivery.NewGitManager(p.cfg.WorkspaceRoot, p.cfg.CodingWorkRoot, workspaces)
 	if err != nil {
-		platform.featureDelivery.codingReason = "git_unavailable"
+		p.delivery.codingReason = "git_unavailable"
 		log.Warnf("[feature-delivery] coding disabled (Git unavailable): %v", err)
 		return
 	}
 	runner := codingagent.New(codingagent.Config{
-		CodexBin:         platform.cfg.CodexBin,
-		ClaudeBin:        platform.cfg.ClaudeBin,
-		EnabledProviders: platform.settings.CodingEnabledProviders,
+		CodexBin:         p.cfg.CodexBin,
+		ClaudeBin:        p.cfg.ClaudeBin,
+		EnabledProviders: p.settings.CodingEnabledProviders,
 	})
 	manager := delivery.NewImplementationManager(
 		deliveryStore,
@@ -249,25 +249,25 @@ func (platform *Platform) configureFeatureImplementation(deliveryStore delivery.
 		gitManager,
 		runner,
 		delivery.ImplementationConfig{
-			Timeout:          time.Duration(platform.settings.CodingTimeout),
-			WorktreeTTL:      time.Duration(platform.settings.CodingWorktreeTTL),
-			MaxConcurrency:   platform.settings.CodingMaxConcurrency,
-			AllowNetwork:     platform.settings.CodingAllowNetwork,
-			EnabledProviders: platform.settings.CodingEnabledProviders,
+			Timeout:          time.Duration(p.settings.CodingTimeout),
+			WorktreeTTL:      time.Duration(p.settings.CodingWorktreeTTL),
+			MaxConcurrency:   p.settings.CodingMaxConcurrency,
+			AllowNetwork:     p.settings.CodingAllowNetwork,
+			EnabledProviders: p.settings.CodingEnabledProviders,
 			DefaultModels: map[string]string{
-				"codex":  platform.settings.CodingCodexModel,
-				"claude": platform.settings.CodingClaudeModel,
+				"codex":  p.settings.CodingCodexModel,
+				"claude": p.settings.CodingClaudeModel,
 			},
 		},
 	)
 	service.SetImplementationManager(manager)
-	platform.featureDelivery.implementations = manager
-	platform.featureDelivery.codingReason = ""
+	p.delivery.implementations = manager
+	p.delivery.codingReason = ""
 	log.Infof(
 		"[feature-delivery] coding configured deployment=single_instance isolation=local_process concurrency=%d network_allowed=%t providers=%v",
-		platform.settings.CodingMaxConcurrency,
-		platform.settings.CodingAllowNetwork,
-		platform.settings.CodingEnabledProviders,
+		p.settings.CodingMaxConcurrency,
+		p.settings.CodingAllowNetwork,
+		p.settings.CodingEnabledProviders,
 	)
 }
 

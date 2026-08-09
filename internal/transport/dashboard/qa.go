@@ -15,6 +15,7 @@ import (
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 
 	"github.com/dekwanlabs/nasuta/internal/agent"
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
@@ -40,7 +41,7 @@ type qaRunControlReq struct {
 
 type qaHistoryMessage struct {
 	memory.SessionMessage
-	Evidence *agent.EvidenceMetrics `json:"evidence,omitempty"`
+	Evidence *agentrun.EvidenceMetrics `json:"evidence,omitempty"`
 }
 
 type qaHistoryPage struct {
@@ -59,7 +60,6 @@ type sseWriter struct {
 
 const (
 	qaSSEHeartbeatInterval = 10 * time.Second
-	qaCompactionMinTimeout = 2 * time.Minute
 )
 
 func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
@@ -83,78 +83,19 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 	stopHeartbeat := stream.startHeartbeat(r.Context(), qaSSEHeartbeatInterval)
 	defer stopHeartbeat()
 	conversation, err := handler.prepareSessionContext(
-		r.Context(), req.Question, req.SessionID, currentUserID(r), req.History, stream.emit,
+		r.Context(), req.SessionID, currentUserID(r), req.History,
 	)
 	if err != nil {
-		log.ErrorfCtx(r.Context(), "[qa] session compaction failed for %s: %v", req.SessionID, err)
-		_ = stream.emit("run.finished", agent.RunTerminal{Status: agent.RunStatusFailed, Error: err.Error()})
+		log.ErrorfCtx(r.Context(), "[qa] session context preparation failed for %s: %v", req.SessionID, err)
+		_ = stream.emit("run.finished", agentrun.RunTerminal{Status: agentrun.RunStatusFailed, Error: err.Error()})
 		return
 	}
 	conversation.SessionID = req.SessionID
 	handler.serveAgentSSE(r.Context(), req.Question, conversation, req.SessionID, req.Trace, req.EvidencePlan, stream.emit, r)
 }
 
-func (handler *Handler) prepareSessionContext(ctx context.Context, question, sessionID string, userID int64,
-	fallback []llm.Message, sseEvent func(string, any) error) (agent.ConversationContext, error) {
-	runtime := handler.currentQARuntime()
-	if sessionID == "" || runtime.Sessions == nil || runtime.QA == nil || runtime.Settings == nil {
-		return handler.loadSessionContext(ctx, sessionID, userID, fallback)
-	}
-	var latestUsage agent.ContextUsageSnapshot
-	if runs := runtime.RunStore; runs != nil {
-		var err error
-		latestUsage, err = runs.LatestContextUsage(userID, sessionID)
-		if err != nil {
-			return agent.ConversationContext{}, fmt.Errorf("load latest session context usage: %w", err)
-		}
-	}
-	outputReserve := max(
-		runtime.Settings.LLMMaxTokens,
-		max(runtime.Settings.LLMAnswerMaxTokens, runtime.Settings.LLMConclusionMaxTokens),
-	)
-	compactionTimeout := max(qaCompactionMinTimeout, time.Duration(runtime.Settings.AgentTimeout))
-	compactCtx, cancel := context.WithTimeout(ctx, compactionTimeout)
-	defer cancel()
-	var emitErr error
-	result, err := agent.CompactSessionIfNeeded(
-		compactCtx, runtime.CompactionLLM, runtime.Sessions, sessionID, userID,
-		agent.SessionCompactionUsage{
-			ContextWindow:              runtime.Settings.LLMContextWindow,
-			PreviousPeakInputTokens:    latestUsage.PeakInputTokens,
-			PreviousPeakReservedTokens: latestUsage.PeakReservedTokens,
-			OutputReserveTokens:        outputReserve,
-		}, question,
-		func(fromTurn, toTurn int) {
-			if emitErr != nil {
-				return
-			}
-			emitErr = sseEvent("session.status", map[string]string{
-				"status": "start",
-				"text":   fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", fromTurn, toTurn),
-			})
-		}, runtime.History,
-	)
-	if emitErr != nil {
-		return agent.ConversationContext{}, emitErr
-	}
-	if err != nil {
-		handler.emitSessionRestartRecommendation(ctx, sseEvent, sessionID, result, true)
-		return agent.ConversationContext{}, fmt.Errorf("prepare session compaction %q: %w", sessionID, err)
-	}
-	if result.Applied {
-		if err := sseEvent("session.status", map[string]string{
-			"status": "done",
-			"text":   "历史上下文压缩完成",
-		}); err != nil {
-			return agent.ConversationContext{}, err
-		}
-		log.InfofCtx(ctx, "[qa] compacted session %s turns %d-%d refs=%d before answer",
-			sessionID, result.FromTurn, result.ToTurn, len(result.References))
-	} else if result.Stale {
-		log.InfofCtx(ctx, "[qa] ignored stale pre-answer compaction for session %s through turn %d",
-			sessionID, result.ToTurn)
-	}
-	handler.emitSessionRestartRecommendation(ctx, sseEvent, sessionID, result, false)
+func (handler *Handler) prepareSessionContext(ctx context.Context, sessionID string, userID int64,
+	fallback []llm.Message) (agent.ConversationContext, error) {
 	return handler.loadSessionContext(ctx, sessionID, userID, fallback)
 }
 
@@ -322,7 +263,7 @@ func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string
 func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, allowEmit func(string, any) error, r *http.Request) {
 	runtime := handler.currentQARuntime()
 	if runtime.QA == nil {
-		_ = allowEmit("run.finished", agent.RunTerminal{Status: agent.RunStatusFailed, Error: "QA service not initialized"})
+		_ = allowEmit("run.finished", agentrun.RunTerminal{Status: agentrun.RunStatusFailed, Error: "QA service not initialized"})
 		return
 	}
 	userID := currentUserID(r)
@@ -340,7 +281,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	// AskAgent emits phase hints during synchronous preprocessing and retrieval.
 	// Subscribing later would drop those early updates.
 	runID := agent.NewRunID()
-	var channel chan agent.SSEEvent
+	var channel chan agentrun.SSEEvent
 	hub := runtime.Hub
 	if hub != nil {
 		channel = hub.Subscribe(runID)
@@ -373,14 +314,14 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	// carries submission failure and the retrieved-context payload. Receiving on a
 	// nil channel never becomes ready, so a run without a hub relies on askDone
 	// alone — and since no run.finished can follow, it ends the stream there.
-	var terminal *agent.RunTerminal
+	var terminal *agentrun.RunTerminal
 	for terminal == nil {
 		select {
 		case response := <-askDone:
 			if response.err != nil {
 				log.ErrorfCtx(ctx, "[qa] agent init error: %v", response.err)
-				sseEvent("run.finished", &agent.RunTerminal{
-					RunID: runID, Status: agent.RunStatusFailed, Error: response.err.Error(),
+				sseEvent("run.finished", &agentrun.RunTerminal{
+					RunID: runID, Status: agentrun.RunStatusFailed, Error: response.err.Error(),
 				})
 				return
 			}
@@ -402,7 +343,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 			if !emitHubEvent(ev, sseEvent) {
 				return
 			}
-			terminal = agent.TerminalFromEvent(ev)
+			terminal = agentrun.TerminalFromEvent(ev)
 		case <-r.Context().Done():
 			return
 		}
@@ -432,7 +373,7 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var usage agent.RunUsageSummary
+	var usage agentrun.RunUsageSummary
 	usageAvailable := false
 	if runs := handler.runStore(); runs != nil {
 		var err error
@@ -457,6 +398,10 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 			status = "active"
 		}
 	}
+	var compactionStatus agentrun.SessionStatusEvent
+	if runtime := handler.currentQARuntime(); runtime.QA != nil {
+		compactionStatus = runtime.QA.SessionCompactionStatus(sessionID)
+	}
 	roundCurrentTokens := max(usage.RoundPeakInputTokens, usage.RoundPeakReservedTokens)
 	httputil.WriteJSON(w, map[string]any{
 		"endpoint_domain":           endpointDomain,
@@ -470,6 +415,7 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 		"round_max_tokens":          roundMaxTokens,
 		"round_input_tokens":        usage.RoundInputTokens,
 		"round_cached_input_tokens": usage.RoundCachedInputTokens,
+		"session_compaction":        compactionStatus,
 	})
 }
 
@@ -717,7 +663,7 @@ func (handler *Handler) APIQARuns(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	list, err := runs.ListPage(currentUserID(r), q.Str("session_id"), agent.RunStatus(q.Str("status")), page, pageSize)
+	list, err := runs.ListPage(currentUserID(r), q.Str("session_id"), agentrun.RunStatus(q.Str("status")), page, pageSize)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
@@ -799,13 +745,13 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 	}
 	switch req.Action {
 	case "pause":
-		if run.Status != agent.RunStatusRunning {
+		if run.Status != agentrun.RunStatusRunning {
 			httputil.WriteBadRequest(w, "only a running run can be paused")
 			return
 		}
-		hub.Send(runID, agent.ControlSignal{Kind: agent.CtrlPause})
+		hub.Send(runID, agentrun.ControlSignal{Kind: agentrun.CtrlPause})
 	case "resume":
-		if run.Status != agent.RunStatusRunning && run.Status != agent.RunStatusPaused {
+		if run.Status != agentrun.RunStatusRunning && run.Status != agentrun.RunStatusPaused {
 			httputil.WriteBadRequest(w, "only an active run can be resumed")
 			return
 		}
@@ -814,17 +760,17 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	case "abort":
-		if run.Status != agent.RunStatusRunning && run.Status != agent.RunStatusPaused {
+		if run.Status != agentrun.RunStatusRunning && run.Status != agentrun.RunStatusPaused {
 			httputil.WriteBadRequest(w, "only an active run can be aborted")
 			return
 		}
-		hub.Send(runID, agent.ControlSignal{Kind: agent.CtrlAbort})
+		hub.Send(runID, agentrun.ControlSignal{Kind: agentrun.CtrlAbort})
 	case "nudge":
-		if run.Status != agent.RunStatusRunning && run.Status != agent.RunStatusPaused {
+		if run.Status != agentrun.RunStatusRunning && run.Status != agentrun.RunStatusPaused {
 			httputil.WriteBadRequest(w, "only an active run can be nudged")
 			return
 		}
-		hub.Send(runID, agent.ControlSignal{Kind: agent.CtrlNudge, Message: req.Message})
+		hub.Send(runID, agentrun.ControlSignal{Kind: agentrun.CtrlNudge, Message: req.Message})
 	default:
 		httputil.WriteBadRequest(w, "unknown action: "+req.Action)
 		return
@@ -832,7 +778,7 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 	httputil.WriteJSON(w, map[string]string{"status": "sent"})
 }
 
-func emitHubEvent(ev agent.SSEEvent, sseEvent func(string, any) bool) bool {
+func emitHubEvent(ev agentrun.SSEEvent, sseEvent func(string, any) bool) bool {
 	return sseEvent(string(ev.Type), ev.Data)
 }
 
@@ -847,7 +793,7 @@ func (handler *Handler) ensureQASessions(w http.ResponseWriter) bool {
 	return handler.qaSessionStore() != nil
 }
 
-func (handler *Handler) runStore() *agent.RunStore {
+func (handler *Handler) runStore() *agentrun.RunStore {
 	return handler.currentQARuntime().RunStore
 }
 
@@ -859,6 +805,6 @@ func (handler *Handler) memoryStore() *memory.MemoryStore {
 	return qa.Memory()
 }
 
-func (handler *Handler) qaHub() *agent.RunHub {
+func (handler *Handler) qaHub() *agentrun.RunHub {
 	return handler.currentQARuntime().Hub
 }

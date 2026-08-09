@@ -10,9 +10,70 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
+	agentdefinition "github.com/dekwanlabs/nasuta/internal/agent/definition"
+	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	agenttools "github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/tool"
 )
+
+// Test-only type aliases into the agent subpackages. These are needed by the
+// migrated fixtures but not by production QA code, so they live in the test
+// helper file instead of polluting dependencies.go.
+type DefinitionRuntime = agentdefinition.DefinitionRuntime
+type ScenarioRun = agentdefinition.ScenarioRun
+type AgentConfig = agentexecution.AgentConfig
+type ToolExecutor = agentexecution.ToolExecutor
+type Observer = agentexecution.Observer
+type Controller = agentexecution.Controller
+type Registry = tool.Registry
+type RunStore = agentrun.RunStore
+type RunStatus = agentrun.RunStatus
+type RunRecord = agentrun.RunRecord
+type RunUsageSummary = agentrun.RunUsageSummary
+type RunTerminal = agentrun.RunTerminal
+type SSEEvent = agentrun.SSEEvent
+
+const (
+	RunStatusRunning = agentrun.RunStatusRunning
+	RunStatusPaused  = agentrun.RunStatusPaused
+	RunKindAgent     = agentrun.RunKindAgent
+	ToolKindRead     = tool.KindRead
+	ToolKindWrite    = tool.KindWrite
+	EvidenceNotRequired = agentrun.EvidenceNotRequired
+	EventRunFinished     = agentrun.EventRunFinished
+)
+
+var ErrRunNotActive = agentrun.ErrRunNotActive
+
+func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config AgentConfig, observer Observer, controller Controller) *Agent {
+	return agentexecution.NewAgent(client, executor, config, observer, controller)
+}
+
+func NewToolExecutor(registry *Registry) *ToolExecutor {
+	return agentexecution.NewToolExecutor(registry)
+}
+
+func NewDefinitionRuntime(
+	definitions DefinitionResolver,
+	schemas *agentapi.SchemaRegistry,
+	registry *tool.Registry,
+	settings *config.PlatformSettings,
+	runStore *agentrun.RunStore,
+) (*DefinitionRuntime, error) {
+	return agentdefinition.NewDefinitionRuntime(definitions, schemas, registry, settings, runStore)
+}
+
+func TerminalFromEvent(event SSEEvent) *RunTerminal {
+	return agentrun.TerminalFromEvent(event)
+}
+
+func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore, history SessionHistory) *Registry {
+	return agenttools.NewRegistry(svc, cfg, sessions, history)
+}
 
 // ---- definition runtime fixtures (mirror of definition/runtime_test.go) ----
 

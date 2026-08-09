@@ -12,6 +12,34 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
+func TestServiceExecutionAvailableTracksOrchestrator(t *testing.T) {
+	var unavailable *Service
+	if unavailable.ExecutionAvailable() {
+		t.Fatal("nil service reported execution available")
+	}
+
+	schemas := testSchemaRegistry(t)
+	service, err := NewService(
+		NewCatalog(schemas, testAgentDefinitions(t)),
+		&recordingWorkflowPersistence{},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.ExecutionAvailable() {
+		t.Fatal("service without an orchestrator reported execution available")
+	}
+	service.SetOrchestrator(NewOrchestrator(schemas, staticOutputExecutor{}, nil))
+	if !service.ExecutionAvailable() {
+		t.Fatal("service with an orchestrator reported execution unavailable")
+	}
+	service.Close()
+	if service.ExecutionAvailable() {
+		t.Fatal("closed service reported execution available")
+	}
+}
+
 func TestServicePersistsSuccessfulWorkflowLifecycle(t *testing.T) {
 	schemas := testSchemaRegistry(t)
 	catalog := NewCatalog(schemas, testAgentDefinitions(t))

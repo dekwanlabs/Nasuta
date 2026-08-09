@@ -37,6 +37,15 @@ func (observer redactingDefinitionObserver) OnReasoning(
 	observer.next.OnReasoning(ctx, runID, platform.RedactSensitiveText(token))
 }
 
+func (observer redactingDefinitionObserver) EmitPhase(runID, text string) {
+	emitter, ok := observer.next.(interface {
+		EmitPhase(string, string)
+	})
+	if ok {
+		emitter.EmitPhase(runID, platform.RedactSensitiveText(text))
+	}
+}
+
 func redactDefinitionRequest(request agentapi.RunRequest) agentapi.RunRequest {
 	if !request.Policy.RedactSensitive {
 		return request

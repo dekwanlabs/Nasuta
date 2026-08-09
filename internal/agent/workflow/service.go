@@ -158,6 +158,12 @@ func (service *Service) SetOrchestrator(orchestrator *Orchestrator) {
 	service.mu.Unlock()
 }
 
+// ExecutionAvailable reports whether new workflow runs can execute.
+func (service *Service) ExecutionAvailable() bool {
+	_, err := service.executionCapability()
+	return err == nil
+}
+
 func (service *Service) executionCapability() (*Orchestrator, error) {
 	if service == nil || service.catalog == nil || service.store == nil {
 		return nil, ErrUnavailable

@@ -2,11 +2,15 @@ package qa
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -102,14 +106,46 @@ func preferredToolsInstruction(ids []string) string {
 	}{ToolIDs: strings.Join(ids, ", ")})
 }
 
-func (svc *QA) executePrefetch(ctx context.Context, prepared ScenarioToolSet, plan ToolPlan) ([]ContextBlock, error) {
+func (svc *QA) executePrefetch(
+	ctx context.Context,
+	runID string,
+	prepared ScenarioToolSet,
+	plan ToolPlan,
+	stepRecorder preparationStepRecorder,
+) ([]ContextBlock, error) {
 	if len(plan.Prefetch) == 0 {
 		return nil, nil
 	}
 	blocks := make([]ContextBlock, 0, len(plan.Prefetch))
-	for _, call := range plan.Prefetch {
+	for index, call := range plan.Prefetch {
+		args, err := json.Marshal(call.Arguments)
+		if err != nil {
+			return nil, fmt.Errorf("marshal prefetch tool %q arguments: %w", call.ToolID, err)
+		}
+		if len(args) == 0 || string(args) == "null" {
+			args = []byte("{}")
+		}
+		callID := prefetchToolCallID(runID, index, call.ToolID)
+		startedAt := time.Now()
+		if err := recordPrefetchStep(ctx, stepRecorder, agentrun.StepRecord{
+			Kind:       agentrun.StepKindToolCall,
+			ToolCallID: callID,
+			Tool:       string(call.ToolID),
+			Args:       string(args),
+			CreatedAt:  startedAt,
+		}); err != nil {
+			return nil, fmt.Errorf("record prefetch tool %q call: %w", call.ToolID, err)
+		}
+
 		candidate, ok := prepared.Get(call.ToolID)
 		if !ok {
+			failure := fmt.Errorf("tool is unavailable")
+			if err := recordPrefetchResult(
+				ctx, stepRecorder, runID, callID, call.ToolID, string(args),
+				tool.Result{}, failure, "tool_unavailable", startedAt,
+			); err != nil {
+				return nil, err
+			}
 			if call.Required {
 				return nil, fmt.Errorf("required prefetch tool %q is unavailable", call.ToolID)
 			}
@@ -117,15 +153,34 @@ func (svc *QA) executePrefetch(ctx context.Context, prepared ScenarioToolSet, pl
 			continue
 		}
 		if candidate.Kind != tool.KindRead || candidate.Prefetch == nil {
+			failure := fmt.Errorf("tool is not eligible for prefetch")
+			if err := recordPrefetchResult(
+				ctx, stepRecorder, runID, callID, call.ToolID, string(args),
+				tool.Result{}, failure, "tool_not_prefetch_eligible", startedAt,
+			); err != nil {
+				return nil, err
+			}
 			return nil, fmt.Errorf("prefetch tool %q is not eligible", call.ToolID)
 		}
 		result, err := prepared.ExecuteArguments(ctx, call.ToolID, call.Arguments)
 		if err != nil {
+			if recordErr := recordPrefetchResult(
+				ctx, stepRecorder, runID, callID, call.ToolID, string(args),
+				result, err, "tool_execution_failed", startedAt,
+			); recordErr != nil {
+				return nil, recordErr
+			}
 			if call.Required {
 				return nil, fmt.Errorf("required prefetch tool %q: %w", call.ToolID, err)
 			}
 			blocks = append(blocks, unavailableToolBlock(call.ToolID, err.Error()))
 			continue
+		}
+		if err := recordPrefetchResult(
+			ctx, stepRecorder, runID, callID, call.ToolID, string(args),
+			result, nil, "", startedAt,
+		); err != nil {
+			return nil, err
 		}
 		references := make([]retrieval.Reference, 0, len(result.References))
 		for _, ref := range result.References {
@@ -139,6 +194,68 @@ func (svc *QA) executePrefetch(ctx context.Context, prepared ScenarioToolSet, pl
 		})
 	}
 	return blocks, nil
+}
+
+func recordPrefetchStep(
+	ctx context.Context,
+	recorder preparationStepRecorder,
+	step agentrun.StepRecord,
+) error {
+	if recorder == nil {
+		return nil
+	}
+	return recorder.RecordPreparationStep(ctx, step)
+}
+
+func recordPrefetchResult(
+	ctx context.Context,
+	recorder preparationStepRecorder,
+	runID, callID string,
+	toolID tool.ToolID,
+	args string,
+	result tool.Result,
+	executionErr error,
+	deliveryError string,
+	startedAt time.Time,
+) error {
+	if recorder == nil {
+		return nil
+	}
+	content := result.Content
+	if executionErr != nil {
+		content = "error: " + executionErr.Error()
+	}
+	step := agentrun.StepRecord{
+		Kind:                agentrun.StepKindToolResult,
+		TraceID:             prefetchToolResultTraceID(runID, callID),
+		ToolCallID:          callID,
+		Tool:                string(toolID),
+		Args:                args,
+		Content:             content,
+		PromptContent:       content,
+		AuthoritativeSHA256: hashString(content),
+		PromptSHA256:        hashString(content),
+		SizeBytes:           int64(len(content)),
+		Coverage:            result.Coverage,
+		AnswerContract:      result.AnswerContract,
+		Failed:              executionErr != nil,
+		DeliveryError:       deliveryError,
+		DurationMs:          int(time.Since(startedAt) / time.Millisecond),
+		CreatedAt:           time.Now(),
+	}
+	if err := recorder.RecordPreparationStep(ctx, step); err != nil {
+		return fmt.Errorf("record prefetch tool %q result: %w", toolID, err)
+	}
+	return nil
+}
+
+func prefetchToolCallID(runID string, index int, toolID tool.ToolID) string {
+	seed := fmt.Sprintf("prefetch_tool_call\x00%s\x00%d\x00%s", runID, index, toolID)
+	return "call_" + platform.UUIDFromString(seed)
+}
+
+func prefetchToolResultTraceID(runID, callID string) string {
+	return "trc_" + platform.UUIDFromString("prefetch_tool_result\x00"+runID+"\x00"+callID)
 }
 
 func unavailableToolBlock(id tool.ToolID, reason string) ContextBlock {

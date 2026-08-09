@@ -73,10 +73,13 @@ type definitionManagedRun struct {
 	trace     *executiontrace.Scope
 	ownsTrace bool
 
-	mu       sync.Mutex
-	executed bool
-	finished bool
-	outcome  agentrun.RunOutcome
+	mu                   sync.Mutex
+	executed             bool
+	finished             bool
+	preparationStepCount int
+	preparationEvidence  agentrun.EvidenceMetrics
+	outcomeSet           bool
+	outcome              agentrun.RunOutcome
 }
 
 // ScenarioRunStart carries business-run identity without an agent snapshot.
@@ -176,6 +179,12 @@ func (runtime *DefinitionRuntime) Hub() *agentrun.RunHub {
 func (runtime *DefinitionRuntime) EmitPhase(runID, text string) {
 	if runtime != nil && runtime.hub != nil {
 		runtime.hub.EmitPhase(runID, text)
+	}
+}
+
+func (runtime *DefinitionRuntime) EmitSessionStatus(runID string, event agentrun.SessionStatusEvent) {
+	if runtime != nil && runtime.hub != nil {
+		runtime.hub.EmitSessionStatus(runID, event)
 	}
 }
 

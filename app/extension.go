@@ -98,7 +98,7 @@ func (platform *Platform) extensionDeps() ExtensionDeps {
 	return ExtensionDeps{
 		Settings:      platform.Settings(),
 		WorkspaceRoot: platform.WorkspaceRoot(),
-		Database:      platform.platformDB,
+		Database:      platform.db,
 		Knowledge:     platform.Knowledge(),
 		ReadTools:     platform.ReadTools(),
 	}

@@ -102,21 +102,23 @@ func TestConfigureAgentWorkflowRuntimeTracksLLMAvailability(t *testing.T) {
 		t.Fatal(err)
 	}
 	platform := &Platform{
-		schemaRegistry: schemas, agentCatalog: agents,
-		workflowCatalog: workflowCatalog, workflowStore: workflowStore,
-		workflowService: service,
+		agents: agentRuntime{schemas: schemas, catalog: agents},
+		flow: workflowRuntime{
+			catalog: workflowCatalog,
+			service: service,
+		},
 	}
 	runtime := staticWorkflowAgentRuntime{}
 	if err := platform.configureAgentWorkflowRuntime(runtime); err != nil {
 		t.Fatal(err)
 	}
-	if platform.workflowNodes == nil || platform.workflowRunner == nil {
+	if !platform.flow.service.ExecutionAvailable() {
 		t.Fatal("workflow runtime was not assembled")
 	}
 	if err := platform.configureAgentWorkflowRuntime(nil); err != nil {
 		t.Fatal(err)
 	}
-	if platform.workflowNodes != nil || platform.workflowRunner != nil {
+	if platform.flow.service.ExecutionAvailable() {
 		t.Fatal("workflow runtime remained enabled without an LLM runtime")
 	}
 }

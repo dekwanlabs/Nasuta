@@ -12,7 +12,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/memory"
 )
 
-func TestSessionCompactionStartsAtEightyPercent(t *testing.T) {
+func TestSessionCompactionDoesNotStartBelowEightyPercent(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -32,6 +32,39 @@ func TestSessionCompactionStartsAtEightyPercent(t *testing.T) {
 	}
 	if result.Applied || result.Stale {
 		t.Fatalf("result = %#v", result)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionCompactionUsesMeasuredIncomingTokens(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now()
+	mock.ExpectQuery(`SELECT s\.archived_summary_tokens,s\.compacted_through_turn`).
+		WithArgs("session-1", int64(42)).
+		WillReturnRows(compactionStatsRow(0, 0, 60, 3))
+	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
+		WithArgs("session-1", int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
+			AddRow("session-1", 42, "title", 0, 0, now, now, 3))
+
+	result, err := CompactSessionIfNeeded(
+		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
+		"session-1", 42,
+		SessionCompactionUsage{ContextWindow: 100, IncomingTokens: 15, OutputReserveTokens: 5},
+		"short question",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ProjectedBeforeTokens != 80 || result.Applied || result.Stale {
+		t.Fatalf("result = %+v", result)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -140,15 +173,34 @@ func TestSessionCompactionDoesNotStayActiveBelowHighWater(t *testing.T) {
 	}
 }
 
-func TestPostTurnArchiveBoundsRecentHistoryBelowHighWater(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		content := `{"items":[{"item":1,"text":"summary one"}]}`
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"choices": []map[string]any{{"message": map[string]any{"content": content}}},
-		})
-	}))
-	defer server.Close()
+func TestPostTurnArchiveDoesNotStartBelowHighWater(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(`SELECT s\.archived_summary_tokens,s\.compacted_through_turn`).
+		WithArgs("session-1", int64(42)).
+		WillReturnRows(compactionStatsRow(0, 0, 20000, 4))
 
+	result, err := ArchiveSessionHistoryIfNeededWithStatus(
+		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil),
+		memory.NewSessionStore(db), "session-1", 42,
+		SessionCompactionUsage{ContextWindow: 128000, OutputReserveTokens: 8000},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || result.Stale || result.ProjectedBeforeTokens != 28000 {
+		t.Fatalf("result = %+v", result)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPostTurnArchiveUsesSameHighWaterThreshold(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -157,59 +209,26 @@ func TestPostTurnArchiveBoundsRecentHistoryBelowHighWater(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT s\.archived_summary_tokens,s\.compacted_through_turn`).
 		WithArgs("session-1", int64(42)).
-		WillReturnRows(compactionStatsRow(0, 0, 20000, 4))
+		WillReturnRows(compactionStatsRow(0, 0, 1500, 3))
 	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
 		WithArgs("session-1", int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
-			AddRow("session-1", 42, "title", 0, 0, now, now, 4))
-	mock.ExpectQuery(`SELECT t\.turn_no,t\.token_estimate.*t\.turn_no BETWEEN \? AND \?.*ORDER BY t\.turn_no`).
-		WithArgs("session-1", int64(42), 1, 1).
-		WillReturnRows(sqlmock.NewRows([]string{"turn_no", "token_estimate"}).AddRow(1, 5000))
-	mock.ExpectQuery(`SELECT m\.turn_no,t\.run_id,t\.token_estimate,m\.role.*m\.turn_no BETWEEN \? AND \?.*ORDER BY m\.turn_no,m\.seq`).
-		WithArgs("session-1", int64(42), 1, 1).
-		WillReturnRows(sqlmock.NewRows([]string{"turn_no", "run_id", "token_estimate", "role", "content", "tool_calls_json", "tool_call_id", "tool_name"}).
-			AddRow(1, "run-1", 5000, "user", "q1", "", "", "").
-			AddRow(1, "run-1", 5000, "assistant", "a1", "", "", ""))
-	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT user_id,compacted_through_turn FROM qa_sessions WHERE id=\? FOR UPDATE`).
-		WithArgs("session-1").
-		WillReturnRows(sqlmock.NewRows([]string{"user_id", "compacted_through_turn"}).AddRow(42, 0))
-	mock.ExpectExec(`UPDATE qa_turns target.*SET target\.context_ref=context\.ref`).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`INSERT INTO qa_session_history_index_outbox.*VALUES`).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`UPDATE qa_sessions SET archived_summary_tokens=archived_summary_tokens\+\?,compacted_through_turn=\?,updated_at=\?`).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
+			AddRow("session-1", 42, "title", 0, 0, now, now, 3))
 
-	result, err := ArchiveSessionHistoryIfNeeded(
-		t.Context(), llm.NewLLMClientWithHTTP(server.URL, "key", "model", 100, server.Client()),
-		memory.NewSessionStore(db), "session-1", 42, 128000,
+	result, err := ArchiveSessionHistoryIfNeededWithStatus(
+		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil),
+		memory.NewSessionStore(db), "session-1", 42,
+		SessionCompactionUsage{ContextWindow: 2000, OutputReserveTokens: 100},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Applied || result.FromTurn != 1 || result.ToTurn != 1 || result.ProjectedAfterTokens != 15000 {
+	if result.Applied || result.Stale || result.ProjectedBeforeTokens != 1600 {
 		t.Fatalf("result = %+v", result)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestRecentHistoryTokenBudgetIsBounded(t *testing.T) {
-	tests := []struct {
-		window int
-		want   int
-	}{
-		{window: 32000, want: 8000},
-		{window: 128000, want: 15360},
-		{window: 512000, want: 16000},
-	}
-	for _, tt := range tests {
-		if got := recentHistoryTokenBudget(tt.window); got != tt.want {
-			t.Fatalf("recentHistoryTokenBudget(%d) = %d, want %d", tt.window, got, tt.want)
-		}
 	}
 }
 

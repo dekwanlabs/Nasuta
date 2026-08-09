@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -75,16 +74,12 @@ func (agent *Agent) toolDeliveryBudget(messages []llm.Message, tools []llm.ToolD
 	if agent.cfg.ContextWindow <= 0 {
 		return -1, 0, nil
 	}
-	inputTokens := estimateMessagesTokens(messages)
-	if len(tools) > 0 {
-		encoded, err := json.Marshal(tools)
-		if err != nil {
-			return 0, 0, fmt.Errorf("encode tool definitions: %w", err)
-		}
-		inputTokens += tooloutput.EstimateTokens(string(encoded))
+	inputTokens, err := estimateInputTokens(messages, tools)
+	if err != nil {
+		return 0, 0, err
 	}
-	outputReserve := max(agent.cfg.AnswerMaxTokens, agent.cfg.ConclusionMaxTokens)
-	safety := max(agent.cfg.ContextWindow/20, 1024)
+	outputReserve := agent.outputTokenReserve()
+	safety := contextSafetyTokens(agent.cfg.ContextWindow)
 	available := agent.cfg.ContextWindow - inputTokens - outputReserve - safety
 	candidate := []llm.Message{toolMessage(call.ID, call.Function.Name, execution.PromptContent)}
 	if contractMessage, ok := answerContractMessage(execution.AnswerContract); ok {
@@ -145,8 +140,4 @@ func newToolResultStep(runID string, stepNo int, call llm.ToolCall, execution To
 		AnswerContract:      execution.AnswerContract,
 		DurationMs:          execution.DurationMs,
 	}
-}
-
-func toolResultPreview(content string) string {
-	return runeSafeTruncate(content, 1200)
 }

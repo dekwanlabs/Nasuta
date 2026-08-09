@@ -4,6 +4,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	agentdefinition "github.com/dekwanlabs/nasuta/internal/agent/definition"
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -21,7 +22,7 @@ func NewDefinitionRuntime(
 	schemas *agentapi.SchemaRegistry,
 	registry *tool.Registry,
 	settings *config.PlatformSettings,
-	runStore *RunStore,
+	runStore *agentrun.RunStore,
 ) (*DefinitionRuntime, error) {
 	return agentdefinition.NewDefinitionRuntime(
 		definitions,

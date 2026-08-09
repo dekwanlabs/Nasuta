@@ -1,10 +1,12 @@
 package agent
 
 import (
+	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
 	agentqa "github.com/dekwanlabs/nasuta/internal/agent/qa"
 	"github.com/dekwanlabs/nasuta/platform/config"
 )
 
+type ConversationContext = agentexecution.ConversationContext
 type QA = agentqa.QA
 type QADeps = agentqa.QADeps
 type QAModels = agentqa.QAModels
