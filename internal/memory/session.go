@@ -18,17 +18,18 @@ type SessionStore struct {
 }
 
 type SessionRecord struct {
-	ID                    string         `json:"id"`
-	UserID                int64          `json:"user_id"`
-	Title                 string         `json:"title"`
-	ArchivedSummaryTokens int64          `json:"archived_summary_tokens,omitempty"`
-	CompactedThroughTurn  int            `json:"compacted_through_turn,omitempty"`
-	Messages              []llm.Message  `json:"messages,omitempty"`
-	RecentTurns           []TurnMetadata `json:"-"`
-	MessageCount          int            `json:"message_count"`
-	LatestTurn            int            `json:"latest_turn,omitempty"`
-	CreatedAt             string         `json:"created_at"`
-	UpdatedAt             string         `json:"updated_at"`
+	ID                    string               `json:"id"`
+	UserID                int64                `json:"user_id"`
+	Title                 string               `json:"title"`
+	ArchivedSummaryTokens int64                `json:"archived_summary_tokens,omitempty"`
+	CompactedThroughTurn  int                  `json:"compacted_through_turn,omitempty"`
+	Messages              []llm.Message        `json:"messages,omitempty"`
+	RecentTurns           []TurnMetadata       `json:"-"`
+	RecentDialogue        []RecentDialogueTurn `json:"-"`
+	MessageCount          int                  `json:"message_count"`
+	LatestTurn            int                  `json:"latest_turn,omitempty"`
+	CreatedAt             string               `json:"created_at"`
+	UpdatedAt             string               `json:"updated_at"`
 }
 
 // CompactionCandidate is one contiguous, not-yet-summarized turn range.

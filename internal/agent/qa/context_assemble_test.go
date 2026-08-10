@@ -10,7 +10,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 )
 
-func TestBuildHistoryRouteContextContainsMetadataOnly(t *testing.T) {
+func TestBuildHistoryRouteContextContainsMetadataAndRecentDialogue(t *testing.T) {
 	conversation := ConversationContext{
 		SessionTitle: "runtime investigation",
 		RecentTurns: []memory.TurnMetadata{{
@@ -20,16 +20,34 @@ func TestBuildHistoryRouteContextContainsMetadataOnly(t *testing.T) {
 				Tool: "observe_logs", Source: "observe_logs", References: []string{"trace-123"}, Coverage: "partial",
 			}}},
 		}},
+		RecentDialogue: []memory.RecentDialogueTurn{{
+			TurnNumber: 7, User: "列出 UserController 选项",
+			Assistant: "1. alpha\n2. hsas-backstage-user",
+		}},
 	}
 	got := buildHistoryRouteContext(conversation)
-	for _, want := range []string{"runtime investigation", "继续 trace-123", "observe_logs", "partial"} {
+	for _, want := range []string{"runtime investigation", "继续 trace-123", "observe_logs", "partial", "hsas-backstage-user", "recent_dialogue"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("route context missing %q: %s", want, got)
 		}
 	}
-	for _, forbidden := range []string{"assistant_answer", "tool_payload", "request_body", "response_body"} {
+	for _, forbidden := range []string{"assistant_answer", "tool_payload", "request_body", "response_body", "SECRET_TOOL_PAYLOAD"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("route context leaked %q: %s", forbidden, got)
+		}
+	}
+}
+
+func TestResolveHistoryRelationTreatsSelectionAsPriorConclusionReference(t *testing.T) {
+	latest := turnMetadataForQuestion(8, "列出 UserController 选项")
+	for _, question := range []string{"2", "第2个", "第二个", "选择 2"} {
+		relation, origin, upgrade := resolveHistoryRelation(
+			question, []memory.TurnMetadata{latest},
+			retrieval.HistoryRelation{TopicAffinity: 0.2, Confidence: 0.8}, true,
+		)
+		if origin != "model" || upgrade != "selection_reference" ||
+			!relation.NeedsPriorEntities || !relation.NeedsPriorConclusion {
+			t.Fatalf("question=%q relation=%+v origin=%q upgrade=%q", question, relation, origin, upgrade)
 		}
 	}
 }
@@ -114,6 +132,46 @@ func TestAssembleActiveHistoryLoadsOneCompleteAtomicTurn(t *testing.T) {
 	}
 	if len(conversation.Recent) != 4 || stats.FullTurnCount != 1 || conversation.HistoricalContext != "" {
 		t.Fatalf("conversation=%#v stats=%+v", conversation, stats)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAssembleActiveHistoryUsesRecentAnswerWithoutReloadingToolTurn(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	metadata := turnMetadataForQuestion(8, "列出 UserController 选项")
+	metadata.EvidenceManifest = memory.EvidenceManifest{
+		Status: "available", Items: []memory.EvidenceManifestItem{{Tool: "code_search", Coverage: "full"}},
+	}
+	svc := &QA{
+		sessions: memory.NewSessionStore(db), contextWindow: 128000,
+		outputReserve: 4000,
+	}
+	conversation, stats, err := svc.assembleActiveHistory(
+		context.Background(), "2", 42,
+		ConversationContext{
+			SessionID: "session-1", RecentTurns: []memory.TurnMetadata{metadata},
+			RecentDialogue: []memory.RecentDialogueTurn{{
+				TurnNumber: 8, User: "列出 UserController 选项",
+				Assistant: "1. alpha\n2. hsas-backstage-user",
+			}},
+		},
+		retrieval.HistoryRelation{NeedsPriorEntities: true, NeedsPriorConclusion: true},
+		"model", "selection_reference",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversation.Recent) != 0 || stats.DetailCount != 0 || stats.ReferenceCount != 1 {
+		t.Fatalf("conversation=%#v stats=%+v", conversation, stats)
+	}
+	if !strings.Contains(conversation.HistoricalContext, `"representation":"reference"`) {
+		t.Fatalf("historical context = %s", conversation.HistoricalContext)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

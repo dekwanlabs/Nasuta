@@ -43,6 +43,7 @@ type ConversationContext struct {
 	CompactedThroughTurn int
 	Recent               []llm.Message
 	RecentTurns          []memory.TurnMetadata
+	RecentDialogue       []memory.RecentDialogueTurn
 	SessionTitle         string
 	Instructions         []llm.Message
 	FullInvestigation    bool

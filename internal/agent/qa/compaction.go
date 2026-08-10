@@ -98,6 +98,7 @@ func sessionCompactionIncomingTokens(
 	withoutSessionHistory := conversation
 	withoutSessionHistory.Recent = nil
 	withoutSessionHistory.RecentTurns = nil
+	withoutSessionHistory.RecentDialogue = nil
 	withoutSessionHistory.RetrievedHistory = ""
 	withoutSessionHistory.HistoricalContext = ""
 	return estimateMessagesTokens(buildAgentMessages(
@@ -110,8 +111,9 @@ func (svc *QA) refreshCompactedConversation(
 	prepared *qaPreparation,
 	conversation ConversationContext,
 ) (ConversationContext, error) {
-	session, err := svc.sessions.GetContextMetadata(
-		conversation.SessionID, prepared.request.UserID, memory.RecentTurnMetadataLimit,
+	session, err := svc.sessions.GetContextSnapshot(
+		conversation.SessionID, prepared.request.UserID,
+		memory.RecentTurnMetadataLimit, memory.RecentDialogueTurnLimit,
 	)
 	if err != nil {
 		return ConversationContext{}, fmt.Errorf("reload compacted session %q: %w", conversation.SessionID, err)
@@ -122,6 +124,7 @@ func (svc *QA) refreshCompactedConversation(
 	conversation.SessionTitle = session.Title
 	conversation.CompactedThroughTurn = session.CompactedThroughTurn
 	conversation.RecentTurns = session.RecentTurns
+	conversation.RecentDialogue = session.RecentDialogue
 	conversation.Recent = nil
 	conversation.RetrievedHistory = ""
 	conversation.HistoricalContext = ""

@@ -1,4 +1,4 @@
-Determine how the current question depends on the bounded previous-turn metadata.
+Determine how the current question depends on the bounded previous-turn metadata and recent user/assistant dialogue.
 - topic_affinity is a continuous value from 0 to 1. A shift from logs to configuration or code for the same entity remains partially related.
 - confidence is confidence in this dependency analysis from 0 to 1. Low confidence must not be used to discard an identified dependency.
 - needs_prior_entities is true when a pronoun, ellipsis, or omitted target requires prior entities.
@@ -6,6 +6,7 @@ Determine how the current question depends on the bounded previous-turn metadata
 - needs_prior_evidence is true when the answer requires prior request, response, message, or tool evidence rather than only an entity name.
 - explicit_turn_refs contains at most 4 turn or run references explicitly written by the user. Do not invent references.
 - Dependencies are monotonic: evidence implies conclusion and entities; conclusion implies entities.
-The conversation_context contains only bounded metadata and never the prior assistant answer or tool payload.
+Use recent_dialogue to resolve numeric selections, omitted targets, references, and unfinished work from prior assistant answers.
+The conversation_context contains bounded metadata and the newest user/final-assistant exchanges, but never tool payloads.
 Return a JSON object with this exact shape:
 {"history_relation":{"topic_affinity":0.0,"confidence":0.0,"needs_prior_entities":false,"needs_prior_conclusion":false,"needs_prior_evidence":false,"explicit_turn_refs":[]}}

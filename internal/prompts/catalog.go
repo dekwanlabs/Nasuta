@@ -27,6 +27,7 @@ const (
 	AgentQAEvidencePlan           ID = "agent.qa.evidence_plan"
 	AgentQARetrievedHistory       ID = "agent.qa.retrieved_history"
 	AgentQAHistoricalContext      ID = "agent.qa.historical_context"
+	AgentQARecentDialogue         ID = "agent.qa.recent_dialogue"
 	AgentQAPreRetrievedEvidence   ID = "agent.qa.pre_retrieved_evidence"
 	AgentQAMidRunAddition         ID = "agent.qa.mid_run_addition"
 	AgentQAToolDeliveryNotice     ID = "agent.qa.tool_delivery_notice"
@@ -112,6 +113,7 @@ var idFiles = map[ID]string{
 	AgentQAEvidencePlan:                    "agent/qa/evidence_plan.txt",
 	AgentQARetrievedHistory:                "agent/qa/retrieved_history.txt",
 	AgentQAHistoricalContext:               "agent/qa/historical_context.txt",
+	AgentQARecentDialogue:                  "agent/qa/recent_dialogue.txt",
 	AgentQAPreRetrievedEvidence:            "agent/qa/pre_retrieved_evidence.txt",
 	AgentQAMidRunAddition:                  "agent/qa/mid_run_addition.txt",
 	AgentQAToolDeliveryNotice:              "agent/qa/tool_delivery_notice.txt",

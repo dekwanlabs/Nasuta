@@ -244,19 +244,21 @@ func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string
 	if sessionID == "" || sessions == nil {
 		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}, nil
 	}
-	sess, err := sessions.GetContextMetadata(sessionID, userID, memory.RecentTurnMetadataLimit)
+	sess, err := sessions.GetContextSnapshot(
+		sessionID, userID, memory.RecentTurnMetadataLimit, memory.RecentDialogueTurnLimit,
+	)
 	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] session load error: %v", err)
-		return agent.ConversationContext{}, fmt.Errorf("load bounded session metadata %q: %w", sessionID, err)
+		return agent.ConversationContext{}, fmt.Errorf("load bounded session context %q: %w", sessionID, err)
 	}
 	if sess == nil {
 		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}, nil
 	}
-	log.InfofCtx(ctx, "[qa] loaded session %s: candidateTurns=%d compactedThrough=%d",
-		sessionID, len(sess.RecentTurns), sess.CompactedThroughTurn)
+	log.InfofCtx(ctx, "[qa] loaded session %s: candidateTurns=%d recentDialogue=%d compactedThrough=%d",
+		sessionID, len(sess.RecentTurns), len(sess.RecentDialogue), sess.CompactedThroughTurn)
 	return agent.ConversationContext{
 		SessionID: sessionID, SessionTitle: sess.Title, CompactedThroughTurn: sess.CompactedThroughTurn,
-		RecentTurns: sess.RecentTurns,
+		RecentTurns: sess.RecentTurns, RecentDialogue: sess.RecentDialogue,
 	}, nil
 }
 

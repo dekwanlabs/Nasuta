@@ -30,6 +30,16 @@ func BuildAgentMessages(question string, conversation ConversationContext, rc *r
 	msgs = append(msgs, llm.Message{Role: "system", Content: evidencePlanInstruction(plan)})
 	msgs = append(msgs, conversation.Instructions...)
 
+	if len(conversation.RecentDialogue) > 0 {
+		if dialogue, err := json.Marshal(conversation.RecentDialogue); err == nil {
+			msgs = append(msgs, llm.Message{
+				Role: "system",
+				Content: prompts.MustRender(prompts.AgentQARecentDialogue, struct {
+					Dialogue string
+				}{Dialogue: string(dialogue)}),
+			})
+		}
+	}
 	if conversation.RetrievedHistory != "" {
 		msgs = append(msgs, llm.Message{
 			Role: "system",

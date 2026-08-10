@@ -23,6 +23,7 @@ const (
 )
 
 var explicitHistoryRefPattern = regexp.MustCompile(`(?i)(?:\b(?:turn|run)[-_: #]?[a-z0-9-]+\b|第[[:space:]]*[0-9]+[[:space:]]*轮)`)
+var selectionReferencePattern = regexp.MustCompile(`(?i)^[[:space:]]*(?:#?[0-9]{1,2}|第[[:space:]]*(?:[0-9]{1,2}|[一二三四五六七八九十两]+)[[:space:]]*(?:个|项|条|种|组|份|类|位|套)?|(?:选|选择)[[:space:]]*(?:第[[:space:]]*)?(?:[0-9]{1,2}|[一二三四五六七八九十两]+)[[:space:]]*(?:个|项|条|种|组|份|类|位|套)?)[[:space:]]*[。.!！]?[[:space:]]*$`)
 
 type contextAssembleStats struct {
 	Relation            retrieval.HistoryRelation
@@ -164,14 +165,20 @@ type historicalContextEnvelope struct {
 }
 
 func buildHistoryRouteContext(conversation ConversationContext) string {
-	if len(conversation.RecentTurns) == 0 {
+	if len(conversation.RecentTurns) == 0 && len(conversation.RecentDialogue) == 0 {
 		return ""
 	}
-	latest := conversation.RecentTurns[0]
 	payload := struct {
-		SessionTitle string              `json:"session_title,omitempty"`
-		PreviousTurn memory.TurnMetadata `json:"previous_turn"`
-	}{SessionTitle: conversation.SessionTitle, PreviousTurn: latest}
+		SessionTitle   string                      `json:"session_title,omitempty"`
+		PreviousTurn   *memory.TurnMetadata        `json:"previous_turn,omitempty"`
+		RecentDialogue []memory.RecentDialogueTurn `json:"recent_dialogue,omitempty"`
+	}{
+		SessionTitle:   conversation.SessionTitle,
+		RecentDialogue: conversation.RecentDialogue,
+	}
+	if len(conversation.RecentTurns) > 0 {
+		payload.PreviousTurn = &conversation.RecentTurns[0]
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return ""
@@ -203,6 +210,11 @@ func resolveHistoryRelation(question string, recent []memory.TurnMetadata, model
 	evidenceReference := containsAnyFold(question, []string{
 		"证据", "结果", "日志", "请求", "响应", "报错", "错误", "trace", "request", "response", "message", "result", "evidence",
 	})
+	if selectionReferencePattern.MatchString(question) {
+		relation.NeedsPriorConclusion = true
+		relation.NeedsPriorEntities = true
+		upgrade = "selection_reference"
+	}
 	if pronoun && !conflict && !relation.NeedsPriorEntities {
 		relation.NeedsPriorEntities = true
 		upgrade = "unresolved_reference"
@@ -242,22 +254,33 @@ func (svc *QA) assembleActiveHistory(ctx context.Context, question string, userI
 		conversation.Recent = nil
 		return conversation, stats, nil
 	}
-	if svc.sessions == nil || conversation.SessionID == "" {
-		return ConversationContext{}, stats, fmt.Errorf("active history selected without a session store")
+	latestTurn := conversation.RecentTurns[0].TurnNumber
+	latestHasAnswer := recentDialogueHasAssistant(conversation.RecentDialogue, latestTurn)
+	turnNumbers := make([]int, 0, len(selected))
+	for _, item := range selected {
+		metadata := item.metadata
+		fullPreferred := explicitTurnSelected(metadata, relation.ExplicitTurnRefs) ||
+			metadata.TurnNumber == latestTurn && relation.NeedsPriorEvidence
+		needsDetail := fullPreferred || metadata.TurnNumber == latestTurn &&
+			relation.NeedsPriorConclusion && !latestHasAnswer
+		if needsDetail {
+			turnNumbers = append(turnNumbers, metadata.TurnNumber)
+		}
 	}
-	turnNumbers := make([]int, len(selected))
-	for i := range selected {
-		turnNumbers[i] = selected[i].metadata.TurnNumber
-	}
-	turns, err := svc.sessions.LoadTurns(conversation.SessionID, userID, turnNumbers)
-	if err != nil {
-		return ConversationContext{}, stats, fmt.Errorf("load selected active history: %w", err)
+	turnByNumber := make(map[int][]llm.Message, len(turnNumbers))
+	if len(turnNumbers) > 0 {
+		if svc.sessions == nil || conversation.SessionID == "" {
+			return ConversationContext{}, stats, fmt.Errorf("active history detail selected without a session store")
+		}
+		turns, err := svc.sessions.LoadTurns(conversation.SessionID, userID, turnNumbers)
+		if err != nil {
+			return ConversationContext{}, stats, fmt.Errorf("load selected active history: %w", err)
+		}
+		for _, turn := range turns {
+			turnByNumber[turn.TurnNumber] = turn.Messages
+		}
 	}
 	_ = ctx
-	turnByNumber := make(map[int][]llm.Message, len(turns))
-	for _, turn := range turns {
-		turnByNumber[turn.TurnNumber] = turn.Messages
-	}
 	budget := activeHistoryMaxTokens
 	if svc.contextWindow > 0 {
 		safety := max(svc.contextWindow/20, 1024)
@@ -266,7 +289,6 @@ func (svc *QA) assembleActiveHistory(ctx context.Context, question string, userI
 	stats.HistoryBudgetTokens = budget
 	historical := make([]historicalTurn, 0, len(selected))
 	conversation.Recent = nil
-	latestTurn := conversation.RecentTurns[0].TurnNumber
 	for _, item := range selected {
 		metadata := item.metadata
 		messages := turnByNumber[metadata.TurnNumber]
@@ -285,7 +307,8 @@ func (svc *QA) assembleActiveHistory(ctx context.Context, question string, userI
 				continue
 			}
 		}
-		needsDetail := fullPreferred || metadata.TurnNumber == latestTurn && relation.NeedsPriorConclusion
+		needsDetail := fullPreferred || metadata.TurnNumber == latestTurn &&
+			relation.NeedsPriorConclusion && !latestHasAnswer
 		if needsDetail {
 			detail, detailErr := compressTurnDetail(metadata.TurnNumber, messages)
 			if detailErr == nil {
@@ -330,6 +353,15 @@ func (svc *QA) assembleActiveHistory(ctx context.Context, question string, userI
 		conversation.HistoricalContext = string(raw)
 	}
 	return conversation, stats, nil
+}
+
+func recentDialogueHasAssistant(dialogue []memory.RecentDialogueTurn, turnNumber int) bool {
+	for _, turn := range dialogue {
+		if turn.TurnNumber == turnNumber {
+			return strings.TrimSpace(turn.Assistant) != ""
+		}
+	}
+	return false
 }
 
 func selectActiveTurns(question string, candidates []memory.TurnMetadata, relation retrieval.HistoryRelation) []scoredTurn {

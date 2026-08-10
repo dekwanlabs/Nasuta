@@ -259,6 +259,63 @@ func TestGetContextMetadataUsesBoundedNarrowRead(t *testing.T) {
 	}
 }
 
+func TestGetContextSnapshotIncludesRecentDialogueWithoutToolPayload(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	now := time.Now()
+	mock.ExpectQuery(`SELECT s\.id.*compacted_through_turn.*qa_turns.*WHERE s\.id = \? AND s\.user_id = \?`).
+		WithArgs("session-1", int64(42)).
+		WillReturnRows(sessionRow(now, 0, 9))
+	mock.ExpectQuery(`SELECT t\.turn_no,t\.run_id,t\.token_estimate,t\.question_text,t\.topic_key,.*t\.entities_json,t\.question_terms_json,t\.evidence_manifest_json,.*r\.evidence_status.*r\.forced_conclusion.*t\.created_at.*t\.turn_no>\?.*ORDER BY t\.turn_no DESC LIMIT \?`).
+		WithArgs("session-1", int64(42), 0, RecentTurnMetadataLimit).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"turn_no", "run_id", "token_estimate", "question_text", "topic_key",
+			"entities_json", "question_terms_json", "evidence_manifest_json", "evidence_status", "forced_conclusion", "created_at",
+		}).
+			AddRow(9, "run-9", 120, "2", "2", `[]`, `["2"]`,
+				`{"status":"available","items":[]}`, "available", false, now).
+			AddRow(8, "run-8", 120, "列出用户控制器", "user-controller", `["user-controller"]`, `["列出","用户","控制器"]`,
+				`{"status":"none","items":[]}`, "unavailable", false, now).
+			AddRow(7, "run-7", 120, "分析用户控制器", "user-controller", `["user-controller"]`, `["分析","用户","控制器"]`,
+				`{"status":"none","items":[]}`, "unavailable", false, now))
+	mock.ExpectQuery(`SELECT m\.turn_no,m\.role,m\.content.*m\.turn_no IN \(\?,\?,\?\).*ORDER BY m\.turn_no,m\.seq`).
+		WithArgs("session-1", int64(42), 9, 8, 7).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"turn_no", "role", "content", "tool_calls_json", "tool_call_id", "tool_name",
+		}).
+			AddRow(7, "user", "分析用户控制器", "", "", "").
+			AddRow(7, "assistant", "存在 6 个选项", "", "", "").
+			AddRow(8, "user", "列出用户控制器", "", "", "").
+			AddRow(8, "assistant", "1. alpha\n2. hsas-backstage-user", "", "", "").
+			AddRow(9, "user", "2", "", "", "").
+			AddRow(9, "assistant", "", `[{"id":"call-9","type":"function","function":{"name":"observe","arguments":"{}"}}]`, "", "").
+			AddRow(9, "tool", "SECRET_TOOL_PAYLOAD", "", "call-9", "observe").
+			AddRow(9, "assistant", "已选择 hsas-backstage-user", "", "", ""))
+
+	session, err := store.GetContextSnapshot("session-1", 42, RecentTurnMetadataLimit, RecentDialogueTurnLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.RecentDialogue) != 3 {
+		t.Fatalf("recent dialogue = %#v", session.RecentDialogue)
+	}
+	if session.RecentDialogue[0].TurnNumber != 7 || session.RecentDialogue[2].TurnNumber != 9 {
+		t.Fatalf("recent dialogue is not chronological: %#v", session.RecentDialogue)
+	}
+	if session.RecentDialogue[1].Assistant != "1. alpha\n2. hsas-backstage-user" ||
+		session.RecentDialogue[2].Assistant != "已选择 hsas-backstage-user" {
+		t.Fatalf("assistant answers were not extracted: %#v", session.RecentDialogue)
+	}
+	for _, turn := range session.RecentDialogue {
+		if strings.Contains(turn.User+turn.Assistant, "SECRET_TOOL_PAYLOAD") {
+			t.Fatalf("tool payload leaked into recent dialogue: %#v", session.RecentDialogue)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLoadTurnsUsesOneBatchQueryAndKeepsAtomicOrder(t *testing.T) {
 	store, mock, closeDB := newMockSessionStore(t)
 	defer closeDB()

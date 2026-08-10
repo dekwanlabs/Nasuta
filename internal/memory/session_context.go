@@ -14,8 +14,10 @@ import (
 
 const (
 	RecentTurnMetadataLimit = 24
+	RecentDialogueTurnLimit = 3
 	maxContextTurnBatch     = 24
 	maxQuestionRunes        = 2048
+	maxAssistantAnswerRunes = 12 * 1024
 	maxMetadataTerms        = 24
 	maxManifestItems        = 12
 	maxManifestRefs         = 8
@@ -55,6 +57,13 @@ type TurnMetadata struct {
 type TurnMessages struct {
 	TurnNumber int
 	Messages   []llm.Message
+}
+
+// RecentDialogueTurn is a bounded user/final-assistant exchange without tool payloads.
+type RecentDialogueTurn struct {
+	TurnNumber int    `json:"turn"`
+	User       string `json:"user"`
+	Assistant  string `json:"assistant,omitempty"`
 }
 
 func buildTurnMetadata(turnNumber int, runID string, messages []llm.Message, createdAt string) TurnMetadata {
@@ -308,6 +317,47 @@ func (ss *SessionStore) GetContextMetadata(id string, userID int64, limit int) (
 		record.RecentTurns = append(record.RecentTurns, turn)
 	}
 	return record, rows.Err()
+}
+
+// GetContextSnapshot loads routing metadata plus the newest bounded user/assistant exchanges.
+func (ss *SessionStore) GetContextSnapshot(id string, userID int64, metadataLimit, dialogueLimit int) (*SessionRecord, error) {
+	record, err := ss.GetContextMetadata(id, userID, metadataLimit)
+	if err != nil || record == nil || len(record.RecentTurns) == 0 {
+		return record, err
+	}
+	if dialogueLimit <= 0 || dialogueLimit > RecentDialogueTurnLimit {
+		dialogueLimit = RecentDialogueTurnLimit
+	}
+	turnNumbers := make([]int, 0, min(dialogueLimit, len(record.RecentTurns)))
+	for _, turn := range record.RecentTurns[:min(dialogueLimit, len(record.RecentTurns))] {
+		turnNumbers = append(turnNumbers, turn.TurnNumber)
+	}
+	turns, err := ss.LoadTurns(id, userID, turnNumbers)
+	if err != nil {
+		return nil, err
+	}
+	record.RecentDialogue = recentDialogueFromTurns(turns)
+	return record, nil
+}
+
+func recentDialogueFromTurns(turns []TurnMessages) []RecentDialogueTurn {
+	dialogue := make([]RecentDialogueTurn, 0, len(turns))
+	for _, turn := range turns {
+		item := RecentDialogueTurn{TurnNumber: turn.TurnNumber}
+		for _, message := range turn.Messages {
+			content := strings.TrimSpace(message.Content)
+			switch {
+			case message.Role == "user" && item.User == "" && content != "":
+				item.User = truncateRunes(content, maxQuestionRunes)
+			case message.Role == "assistant" && content != "":
+				item.Assistant = truncateRunes(content, maxAssistantAnswerRunes)
+			}
+		}
+		if item.User != "" || item.Assistant != "" {
+			dialogue = append(dialogue, item)
+		}
+	}
+	return dialogue
 }
 
 // LoadTurns batch-loads selected atomic turns in chronological order.

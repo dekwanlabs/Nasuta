@@ -6,6 +6,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 )
 
@@ -21,6 +22,10 @@ func TestBuildAgentMessagesUsesRecalledHistoryAndRecentTail(t *testing.T) {
 			{Role: "assistant", Content: "recent answer"},
 			{Role: "user", Content: "recent question"},
 		},
+		RecentDialogue: []memory.RecentDialogueTurn{{
+			TurnNumber: 7, User: "列出 UserController 选项",
+			Assistant: "1. alpha\n2. hsas-backstage-user",
+		}},
 	}
 
 	got := agent.buildAgentMessages("current question", conversation, &retrieval.RetrievedContext{}, domain.DirectPlan())
@@ -28,7 +33,7 @@ func TestBuildAgentMessagesUsesRecalledHistoryAndRecentTail(t *testing.T) {
 	for _, message := range got {
 		joined += "\n" + message.Content
 	}
-	for _, want := range []string{"recalled finding", "cmp-124", `<retrieved_session_history format="json">`, "get_turn", "find_turns", "## Identity\n- Role: SRE", "role instruction", "recent answer", "recent question", "current question"} {
+	for _, want := range []string{"recalled finding", "cmp-124", `<retrieved_session_history format="json">`, "get_turn", "find_turns", "## Identity\n- Role: SRE", "role instruction", "hsas-backstage-user", "recent answer", "recent question", "current question"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("messages missing %q: %s", want, joined)
 		}
