@@ -272,18 +272,28 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 			return outcome
 		}
 
-		execution := agent.executor.Execute(
-			state.loopCtx,
-			state.toolSnapshot,
-			call,
-			state.input.ReferenceTypes,
-			state.seenTools,
-		)
+		executionCall, admission := agent.admitToolCall(state, call)
+		var execution ToolExecution
+		switch admission.Action {
+		case toolAdmissionAlreadyAvailable, toolAdmissionDenyBudget:
+			execution = toolAdmissionExecution(admission)
+		default:
+			execution = agent.executor.Execute(
+				state.loopCtx,
+				state.toolSnapshot,
+				executionCall,
+				state.input.ReferenceTypes,
+				state.seenTools,
+			)
+			if !execution.Failed {
+				state.evidenceLedger.add(execution.EvidenceUnits, "tool")
+			}
+		}
 		execution = agent.prepareToolDelivery(
 			state.runID,
 			state.messages,
 			state.tools,
-			call,
+			executionCall,
 			execution,
 		)
 		if execution.Failed {
@@ -295,12 +305,12 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 
 		acceptedWebEvidence := false
 		if !execution.Failed {
-			acceptedWebEvidence = state.webEvidence.Observe(call, execution.AuthoritativeContent)
+			acceptedWebEvidence = state.webEvidence.Observe(executionCall, execution.AuthoritativeContent)
 		}
 		if !execution.Failed && execution.Evidence && execution.DeliveryError == "" {
 			mergeToolReferences(&state.result.References, execution.References)
 		}
-		if isWebEvidenceTool(call.Function.Name) {
+		if isWebEvidenceTool(executionCall.Function.Name) {
 			outcome.webAttempted = true
 			outcome.webSucceeded = outcome.webSucceeded || acceptedWebEvidence
 		}
@@ -310,20 +320,21 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 		state.result.Evidence.OmittedItemCount += execution.Coverage.OmittedItems
 
 		state.stepSeq++
-		toolResultStep := newToolResultStep(state.runID, state.stepSeq, call, execution)
+		toolResultStep := newToolResultStep(state.runID, state.stepSeq, executionCall, execution)
 		if err := agent.observer.OnStep(state.runCtx, state.runID, toolResultStep); err != nil {
 			state.result.Err = fmt.Errorf("persist tool result trace %q: %w", toolResultStep.TraceID, err)
 			return outcome
 		}
 		log.InfofCtx(state.ctx, "[agent] tool result trace persisted: trace_id=%s tool_call_id=%s tool=%s bytes=%d sha256=%s artifact_id=%s failed=%v",
-			toolResultStep.TraceID, call.ID, call.Function.Name, toolResultStep.SizeBytes,
+			toolResultStep.TraceID, executionCall.ID, executionCall.Function.Name, toolResultStep.SizeBytes,
 			toolResultStep.AuthoritativeSHA256, execution.ArtifactID, execution.Failed)
 		if execution.DeliveryError != "" {
 			log.WarnfCtx(state.ctx, "[agent] tool %s delivery failed: trace_id=%s reason=%s bytes=%d",
-				call.Function.Name, toolResultStep.TraceID, execution.DeliveryError, toolResultStep.SizeBytes)
+				executionCall.Function.Name, toolResultStep.TraceID, execution.DeliveryError, toolResultStep.SizeBytes)
 		}
 
-		message := toolMessage(call.ID, call.Function.Name, execution.PromptContent)
+		consumeToolTokens(state, execution.PromptContent)
+		message := toolMessage(executionCall.ID, executionCall.Function.Name, execution.PromptContent)
 		state.messages = append(state.messages, message)
 		state.result.SessionMessages = append(state.result.SessionMessages, message)
 		if execution.Failed {

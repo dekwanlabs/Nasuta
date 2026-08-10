@@ -15,6 +15,7 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/platform/httpclient"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type codeDoc struct {
@@ -26,6 +27,8 @@ type codeDoc struct {
 	funcName      string
 	docID         string
 	kind          string
+	sections      []string
+	coverage      tool.EvidenceCoverage
 	startLine     int
 	endLine       int
 	text          string

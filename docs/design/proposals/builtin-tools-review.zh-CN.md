@@ -100,12 +100,12 @@
 | 10 | `web_search` | Read | web 搜索启用 | 是 | 简洁 |
 | 11 | `get_turn` | Read | `sessions != nil` | 否（`MCPHidden`） | 简洁 |
 | 12 | `find_turns` | Read | `history != nil` | 否（`MCPHidden`） | 简洁 |
-| 13 | `query_relations` | Read | `ontology != nil` | 是 | 简洁 |
+| 13 | `trace_relations` | Read | `ontology != nil` | 是 | 简洁 |
 | 14 | `observe_logs` | Read | 经 `ReadRegistry` 发布 | 是 | 简洁 |
 | 15 | `propose_branch` | Write | 事件流启用 | 否（`MCPHidden`） | 简洁 |
 | 16 | `propose_commit` | Write | 事件流启用 | 否（`MCPHidden`） | 简洁 |
 
-> 注：`AGENTS.md` 只列出 9 个核心读工具；`web_search`、`get_turn`、`find_turns`、`query_relations` 是条件追加工具，不应混入核心固定清单，但正式文档应说明其注册条件。
+> 注：`AGENTS.md` 只列出 9 个核心读工具；`web_search`、`get_turn`、`find_turns`、`trace_relations` 是条件追加工具，不应混入核心固定清单，但正式文档应说明其注册条件。
 
 ## 3. 链路与流程评估
 
@@ -188,7 +188,7 @@ domain 结构已带 json 标签，多数手写 map 是在重造序列化：
 | `list_apis` | 3 | 简洁 | 薄而规整，`[]domain.EndpointRecord` 直接序列化，基线良好 |
 | `index_stats` | 2 | 简洁，但能力语义待统一 | ontology 缺失 → `unavailable`、执行失败 → 显式 `%w` 是正确的；`docStore==nil` → `0,nil` 会把"未配置"与"真实零 runbook"合并，和本文目标结果模型冲突，应先明确外部合同；`runbookCount` 可内联 |
 | `web_search` | — | 简洁 | [internal/agent/web.go](../../internal/agent/web.go) 显式分发，每 provider 一函数（`searchDuckDuckGo`/`searchBrave`/`searchBing`）；**无静默兜底**：未知 engine 报错、Brave 缺 key 报错不退回 DDG |
-| `get_turn`/`find_turns`/`query_relations` | 1 | 简洁 | 真实后端（`memory`/`sessionhistory`/`ontology`），各 20–35 行委派 |
+| `get_turn`/`find_turns`/`trace_relations` | 1 | 简洁 | 真实后端（`memory`/`sessionhistory`/`ontology`），各 20–35 行委派 |
 | `propose_branch`/`propose_commit` | — | 简洁 | [catalog.go](../../internal/writeaction/catalog.go) 94 行完整非桩；`writeTool` helper 干净；统一走 `proposer.Propose` |
 | `observe_logs`/`ReadRegistry` | — | 简洁 | ~30 行；"受限"= 强制 `KindRead` 写安全闸，非 MCP 隐藏；`observe_logs` 经设计有意对 MCP 可见 |
 

@@ -3,6 +3,7 @@ package qa
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
@@ -29,6 +30,7 @@ type evidencePlanningOutput struct {
 	HistoryValid  bool
 	RoutedToolIDs []string
 	PlanningError error
+	PlanningTime  time.Duration
 }
 
 var evidencePlanningSpec = executiontrace.Spec[evidencePlanningInput, evidencePlanningOutput]{
@@ -45,6 +47,9 @@ var evidencePlanningSpec = executiontrace.Spec[evidencePlanningInput, evidencePl
 		}
 		return map[string]any{
 			"response_mode": classifyResponseMode(input.Question),
+			"retrieval_intent": domain.RetrievalIntentFor(
+				domain.ClassifyResponseMode(input.Question),
+			).Kind,
 			"proposed_plan": output.Decision.Plan.String(), "proposed_sources": output.Decision.Plan.SourceNames(),
 			"proposed_confidence": output.Decision.Confidence, "proposed_origin": output.Decision.Origin,
 			"effective_plan": output.Effective.Plan.String(), "effective_sources": output.Effective.Plan.SourceNames(),
@@ -72,10 +77,12 @@ func (svc *QA) planEvidence(ctx context.Context, input evidencePlanningInput) (e
 		}
 		termsQuestion := strings.TrimSpace(input.Question)
 		if input.ExplicitPlan != nil {
+			started := time.Now()
 			analysis, err := retrieval.AnalyzeForPlan(
 				ctx, svc.fastLLM, input.Question, input.RouteContext, termsQuestion,
 				input.ToolCandidates, svc.routerMaxTokens, *input.ExplicitPlan,
 			)
+			output.PlanningTime = time.Since(started)
 			if err != nil {
 				output.PlanningError = err
 				output.Decision = domain.PlanDecision{Plan: *input.ExplicitPlan, Confidence: 1, Origin: domain.Explicit}
@@ -89,6 +96,7 @@ func (svc *QA) planEvidence(ctx context.Context, input evidencePlanningInput) (e
 		} else if shouldShortCircuitMeta(input.Question) {
 			output.Decision = domain.PlanDecision{Plan: domain.DirectPlan(), Confidence: 1, Origin: domain.Rule}
 		} else {
+			started := time.Now()
 			analysis, err := retrieval.AnalyzeEvidence(
 				ctx, svc.fastLLM, input.Question, input.RouteContext, termsQuestion,
 				retrieval.RoutingCapabilities{
@@ -98,6 +106,7 @@ func (svc *QA) planEvidence(ctx context.Context, input evidencePlanningInput) (e
 				input.ToolCandidates,
 				svc.routerMaxTokens,
 			)
+			output.PlanningTime = time.Since(started)
 			if err != nil {
 				output.PlanningError = err
 				output.Decision = domain.InternalFallbackDecision()

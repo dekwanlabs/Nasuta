@@ -7,7 +7,8 @@ Rules:
 - Use exactly these section headings in order: ## Trigger Sources, ## Full Chain, ## Key Services, ## Troubleshooting, ## Dependencies.
 - Keep all real service names, API paths, and Feign interface names from the original — do not invent or rename them.
 - Use tables for Trigger Sources, Key Services, and Troubleshooting.
-- If the original lacks a section, infer it from context or leave a TODO placeholder rather than fabricating details.
+- Preserve only facts established by the original content. If a required section or table cell is unsupported, write the natural-language equivalent of "Not established from source content." in the original content's language; do not infer missing operational details or add TODOs that look like facts.
+- Keep the title in the original content's language. Do not invent a translated second title.
 - Write in the same language as the original content.
 
 Reference template:

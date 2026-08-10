@@ -3,6 +3,8 @@ package execution
 import (
 	"strings"
 	"testing"
+
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
 // resolveIdentity is the persona selector: an RBAC role prompt when present,
@@ -129,6 +131,8 @@ func TestWorkspaceIdentifierAmbiguityUsesOneExactLookup(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			for _, required := range []string{
+				"current evidence does not already contain one exact definition",
+				"do not repeat symbol resolution",
 				"first tool-calling turn MUST contain exactly one get_symbol call",
 				"no parallel",
 				"priority over API",
@@ -142,6 +146,41 @@ func TestWorkspaceIdentifierAmbiguityUsesOneExactLookup(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAllToolCapableAgentPromptsRequireStepRationale(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"direct": directAgentSystemPrompt,
+		"web":    webAgentSystemPrompt,
+		"tools":  agentToolPrompt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, required := range []string{
+				"short sentence",
+				"same natural language",
+				"concrete target",
+				"tool names",
+			} {
+				if !strings.Contains(prompt, required) {
+					t.Fatalf("prompt missing tool rationale rule %q", required)
+				}
+			}
+		})
+	}
+}
+
+func TestResponseModeOverrideStaysInternal(t *testing.T) {
+	instruction := prompts.MustRender(prompts.AgentQAResponseMode, struct {
+		Mode string
+	}{Mode: "codebase_qa"})
+	for _, required := range []string{"Override silently", "never expose this internal hint"} {
+		if !strings.Contains(instruction, required) {
+			t.Fatalf("response mode instruction missing %q: %s", required, instruction)
+		}
+	}
+	if strings.Contains(instruction, "brief justification") {
+		t.Fatalf("response mode asks the model to expose an internal override: %s", instruction)
 	}
 }
 

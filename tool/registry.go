@@ -227,6 +227,10 @@ func prepareBatch(candidates []Tool) ([]Tool, error) {
 			spec := *candidate.Prefetch
 			candidate.Prefetch = &spec
 		}
+		if candidate.Admission != nil {
+			spec := *candidate.Admission
+			candidate.Admission = &spec
+		}
 		prepared[i] = candidate
 	}
 	return prepared, nil
@@ -350,6 +354,10 @@ func cloneTool(candidate Tool) Tool {
 	if candidate.Prefetch != nil {
 		spec := *candidate.Prefetch
 		candidate.Prefetch = &spec
+	}
+	if candidate.Admission != nil {
+		spec := *candidate.Admission
+		candidate.Admission = &spec
 	}
 	return candidate
 }

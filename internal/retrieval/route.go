@@ -203,7 +203,8 @@ func analyzeQuestion(
 	var historyRelation HistoryRelation
 	execution := ExecutionSuggestion{Strategy: ExecutionSingleAgent}
 	opts := llm.CallOptions{
-		MaxTokens: maxTokens,
+		MaxTokens:   maxTokens,
+		MaxAttempts: 1,
 		Validate: func(p any) error {
 			m, _ := p.(*map[string]any)
 			if m == nil || *m == nil {

@@ -31,10 +31,12 @@ type Reference struct {
 
 // RetrievedContext is the assembled retrieval payload passed to the agent.
 type RetrievedContext struct {
-	Text             string      `json:"text"`
-	References       []Reference `json:"references"`
-	HitCount         int         `json:"hitCount"`
+	Text             string              `json:"text"`
+	References       []Reference         `json:"references"`
+	EvidenceUnits    []tool.EvidenceUnit `json:"evidenceUnits,omitempty"`
+	HitCount         int                 `json:"hitCount"`
 	OriginalQuestion string
+	Intent           domain.RetrievalIntent
 	selection        selectionStats
 }
 
@@ -49,7 +51,9 @@ type selectionStats struct {
 type partial struct {
 	text     string
 	refs     []Reference
+	units    []tool.EvidenceUnit
 	priority int
+	score    float64
 }
 
 const (
@@ -196,6 +200,7 @@ func (retrieve *Retriever) RetrievePlan(ctx context.Context, searchQuery, rawQue
 	if rawQuestion == "" {
 		rawQuestion = searchQuery
 	}
+	intent := domain.RetrievalIntentFor(domain.ClassifyResponseMode(rawQuestion))
 	var a anchor
 	if evidencePlan.Has(domain.Internal) {
 		a, _ = executiontrace.Invoke(ctx, retrievalDiscoverSpec, retrievalDiscoverInput{
@@ -205,15 +210,15 @@ func (retrieve *Retriever) RetrievePlan(ctx context.Context, searchQuery, rawQue
 		})
 	}
 	expanded, _ := executiontrace.Invoke(ctx, retrievalExpandSpec, retrievalExpandInput{
-		Anchor: a, RawQuestion: rawQuestion, Terms: terms, EvidencePlan: evidencePlan,
+		Anchor: a, RawQuestion: rawQuestion, Terms: terms, EvidencePlan: evidencePlan, Intent: intent,
 	}, func(ctx context.Context, input retrievalExpandInput) (retrievalExpandOutput, error) {
-		parts, codePool := retrieve.expand(ctx, input.Anchor, input.RawQuestion, input.Terms, input.EvidencePlan)
+		parts, codePool := retrieve.expand(ctx, input.Anchor, input.RawQuestion, input.Terms, input.EvidencePlan, input.Intent)
 		return retrievalExpandOutput{Parts: parts, CodePool: codePool}, nil
 	})
 	result, _ := executiontrace.Invoke(ctx, retrievalAssembleSpec, retrievalAssembleInput{
-		Parts: expanded.Parts, CodePool: expanded.CodePool, SearchQuery: searchQuery,
+		Parts: expanded.Parts, CodePool: expanded.CodePool, SearchQuery: searchQuery, Intent: intent,
 	}, func(ctx context.Context, input retrievalAssembleInput) (*RetrievedContext, error) {
-		return retrieve.assemble(ctx, input.Parts, input.CodePool, input.SearchQuery), nil
+		return retrieve.assemble(ctx, input.Parts, input.CodePool, input.SearchQuery, input.Intent), nil
 	})
 	return result, nil
 }
@@ -240,6 +245,7 @@ type retrievalExpandInput struct {
 	RawQuestion  string
 	Terms        QueryTerms
 	EvidencePlan domain.EvidencePlan
+	Intent       domain.RetrievalIntent
 }
 
 type retrievalExpandOutput struct {
@@ -251,7 +257,10 @@ var retrievalExpandSpec = executiontrace.Spec[retrievalExpandInput, retrievalExp
 	Operation: "retrieval.expand",
 	Node:      "retrieval_expand",
 	Output: func(input retrievalExpandInput, result retrievalExpandOutput, _ error) map[string]any {
-		return map[string]any{"parts": len(result.Parts), "code_pool": len(result.CodePool), "sources": input.EvidencePlan.SourceNames()}
+		return map[string]any{
+			"parts": len(result.Parts), "code_pool": len(result.CodePool),
+			"sources": input.EvidencePlan.SourceNames(), "intent": input.Intent.Kind,
+		}
 	},
 }
 
@@ -259,6 +268,7 @@ type retrievalAssembleInput struct {
 	Parts       []partial
 	CodePool    []codeDoc
 	SearchQuery string
+	Intent      domain.RetrievalIntent
 }
 
 var retrievalAssembleSpec = executiontrace.Spec[retrievalAssembleInput, *RetrievedContext]{
@@ -272,6 +282,7 @@ var retrievalAssembleSpec = executiontrace.Spec[retrievalAssembleInput, *Retriev
 			"hit_count": result.HitCount, "references": len(result.References), "context_chars": result.selection.Chars,
 			"selected": result.selection.Selected, "included": result.selection.Included,
 			"dropped": result.selection.Dropped, "truncated": result.selection.Truncated,
+			"intent": result.Intent.Kind, "evidence_units": len(result.EvidenceUnits),
 		}
 	},
 }
@@ -492,6 +503,7 @@ func (retrieve *Retriever) configuredServiceMatches(ctx context.Context, pattern
 // expand fans anchor hits into formatted parts plus the unified code pool.
 func (retrieve *Retriever) expand(
 	ctx context.Context, a anchor, rawQuestion string, terms QueryTerms, evidencePlan domain.EvidencePlan,
+	intent domain.RetrievalIntent,
 ) (parts []partial, codePool []codeDoc) {
 	var mu sync.Mutex
 	addPart := func(p partial) { mu.Lock(); parts = append(parts, p); mu.Unlock() }
@@ -499,14 +511,18 @@ func (retrieve *Retriever) expand(
 	var wg sync.WaitGroup
 
 	if evidencePlan.Has(domain.Internal) {
+		services := a.services
+		if intent.Kind == domain.RetrievalOverview && len(services) > 4 {
+			services = services[:4]
+		}
 		wg.Add(1)
-		go func() { defer wg.Done(); retrieve.collectServices(ctx, a.services, a.svcMatches, addPart) }()
+		go func() { defer wg.Done(); retrieve.collectServices(ctx, services, a.svcMatches, addPart) }()
 		wg.Add(1)
 		go func() { defer wg.Done(); retrieve.collectCode(ctx, a.codeHits, addCode) }()
 		wg.Add(1)
 		go func() { defer wg.Done(); retrieve.collectRunbooks(ctx, a.runbooks, addCode) }()
 		wg.Add(1)
-		go func() { defer wg.Done(); retrieve.collectDeps(ctx, a.services, addPart) }()
+		go func() { defer wg.Done(); retrieve.collectDeps(ctx, services, addPart) }()
 
 		cgKeywords := []string(nil)
 		if shouldExpandCodeGraph(rawQuestion, terms) {
@@ -526,7 +542,17 @@ func (retrieve *Retriever) expand(
 }
 
 // assemble applies pool post-processing, joins sections, and enforces the context budget.
-func (retrieve *Retriever) assemble(ctx context.Context, parts []partial, codePool []codeDoc, searchQuery string) *RetrievedContext {
+func (retrieve *Retriever) assemble(
+	ctx context.Context,
+	parts []partial,
+	codePool []codeDoc,
+	searchQuery string,
+	intents ...domain.RetrievalIntent,
+) *RetrievedContext {
+	intent := domain.RetrievalIntent{Kind: domain.RetrievalFocusedFact}
+	if len(intents) > 0 {
+		intent = intents[0]
+	}
 
 	if len(codePool) > 0 && retrieve.platform.RerankEnabled {
 		codePool = retrieve.postProcessCodePool(ctx, codePool, searchQuery)
@@ -534,6 +560,9 @@ func (retrieve *Retriever) assemble(ctx context.Context, parts []partial, codePo
 	} else if len(codePool) > 0 {
 		log.InfofCtx(ctx, "[qa] code pool final (rerank disabled): %d docs\n%s", len(codePool), poolSummary(codePool, "rerank-disabled"))
 		parts = append(parts, retrieve.formatCodePool(ctx, codePool)...)
+	}
+	if intent.Kind == domain.RetrievalOverview {
+		parts = selectOverviewEvidence(parts, intent.RequiredFacets)
 	}
 
 	log.InfofCtx(ctx, "[qa] retrieve parts: %d sources", len(parts))
@@ -545,27 +574,32 @@ func (retrieve *Retriever) assemble(ctx context.Context, parts []partial, codePo
 
 	var allText strings.Builder
 	var allRefs []Reference
+	var evidenceUnits []tool.EvidenceUnit
 	seenRefs := map[string]struct{}{}
+	seenUnits := map[string]struct{}{}
 	budget := retrieve.ContextBudget()
 	stats := selectionStats{Selected: len(parts)}
 	for _, p := range parts {
 		if p.text == "" || budget <= 0 {
 			continue
 		}
-		partTokens := tokenestimate.Count(p.text)
+		partText := retrieve.cleanWorkspacePaths(ctx, p.text)
+		partTokens := tokenestimate.Count(partText)
 		truncated := partTokens > budget
+		deliveredText := partText
 		if truncated {
 			const marker = "\n...(truncated)"
 			markerTokens := tokenestimate.Count(marker)
 			contentBudget := max(0, budget-markerTokens)
-			allText.WriteString(tokenestimate.Prefix(p.text, contentBudget))
+			deliveredText = tokenestimate.Prefix(partText, contentBudget)
 			if markerTokens <= budget {
-				allText.WriteString(marker)
+				deliveredText += marker
 			}
+			allText.WriteString(deliveredText)
 			budget = 0
 			stats.Truncated++
 		} else {
-			allText.WriteString(p.text)
+			allText.WriteString(deliveredText)
 			budget -= partTokens
 			if budget > 0 {
 				allText.WriteByte('\n')
@@ -581,21 +615,40 @@ func (retrieve *Retriever) assemble(ctx context.Context, parts []partial, codePo
 			seenRefs[key] = struct{}{}
 			allRefs = append(allRefs, ref)
 		}
+		for _, unit := range p.units {
+			unit = cloneEvidenceUnit(unit)
+			if truncated {
+				unit.Coverage.Complete = false
+				unit.Coverage.Partial = true
+			}
+			unit.ContentHash = evidenceHash(deliveredText)
+			unit.TokenCost = tokenestimate.Count(deliveredText)
+			for _, expanded := range expandEvidenceUnit(unit) {
+				key := evidenceUnitKey(expanded)
+				if _, duplicate := seenUnits[key]; duplicate {
+					continue
+				}
+				seenUnits[key] = struct{}{}
+				evidenceUnits = append(evidenceUnits, expanded)
+			}
+		}
 		if truncated {
 			log.InfofCtx(ctx, "[qa] context budget reached; truncated rank-preserving evidence selection")
 			break
 		}
 	}
 
-	contextText := retrieve.cleanWorkspacePaths(ctx, allText.String())
+	contextText := allText.String()
 	stats.Dropped = stats.Selected - stats.Included
 	stats.Chars = len([]rune(contextText))
 
 	return &RetrievedContext{
-		Text:       contextText,
-		References: allRefs,
-		HitCount:   len(allRefs),
-		selection:  stats,
+		Text:          contextText,
+		References:    allRefs,
+		EvidenceUnits: evidenceUnits,
+		HitCount:      len(allRefs),
+		Intent:        intent,
+		selection:     stats,
 	}
 }
 
@@ -649,7 +702,12 @@ func (retrieve *Retriever) formatCodePool(ctx context.Context, pool []codeDoc) [
 		default:
 			continue
 		}
-		parts = append(parts, partial{text: text.String(), refs: []Reference{ref}, priority: partialPriorityEvidence})
+		partText := text.String()
+		unit := evidenceUnitForCodeDoc(d, partText)
+		parts = append(parts, partial{
+			text: partText, refs: []Reference{ref}, units: []tool.EvidenceUnit{unit},
+			priority: partialPriorityEvidence, score: d.candidateScore(),
+		})
 	}
 	return parts
 }

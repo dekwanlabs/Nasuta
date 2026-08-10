@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -191,6 +192,7 @@ func (svc *QA) executePrefetch(
 		blocks = append(blocks, ContextBlock{
 			Source: string(call.ToolID), Title: candidate.Description,
 			Content: result.Content, References: references,
+			Evidence: cloneEvidenceUnits(result.EvidenceUnits),
 		})
 	}
 	return blocks, nil
@@ -284,6 +286,8 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 	}
 	seenContent := make(map[string]struct{}, len(blocks))
 	seenRefs := make(map[string]struct{}, len(context.References)+len(blocks))
+	seenEvidence := make(map[string]struct{}, len(blocks))
+	existingEvidenceCount := len(context.EvidenceUnits)
 	for _, ref := range context.References {
 		seenRefs[ref.Type+"\x00"+ref.Target] = struct{}{}
 	}
@@ -308,10 +312,12 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 		}
 		section := "## " + title + "\n" + content + "\n"
 		runes := []rune(section)
+		truncated := len(runes) > budget
 		if len(runes) > budget {
 			runes = runes[:budget]
 		}
-		text.WriteString(string(runes))
+		delivered := string(runes)
+		text.WriteString(delivered)
 		budget -= len(runes)
 		for _, ref := range block.References {
 			key := ref.Type + "\x00" + ref.Target
@@ -323,6 +329,9 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 			}
 			seenRefs[key] = struct{}{}
 			context.References = append(context.References, ref)
+		}
+		if !truncated {
+			appendQAEvidenceUnits(context, block.Evidence, delivered, seenEvidence)
 		}
 		if budget == 0 {
 			break
@@ -341,12 +350,90 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 			existing := []rune(context.Text)
 			if len(existing) > remaining {
 				existing = existing[:remaining]
+				context.EvidenceUnits = context.EvidenceUnits[existingEvidenceCount:]
 			}
 			text.WriteString(string(existing))
 		}
 	}
 	context.Text = text.String()
+	context.EvidenceUnits = dedupeQAEvidenceUnits(context.EvidenceUnits)
 	context.HitCount = len(context.References)
+}
+
+func appendQAEvidenceUnits(
+	context *retrieval.RetrievedContext,
+	units []tool.EvidenceUnit,
+	delivered string,
+	seen map[string]struct{},
+) {
+	for _, unit := range units {
+		unit.ContentHash = hashString(delivered)
+		unit.TokenCost = tooloutput.EstimateTokens(delivered)
+		sections := unit.Sections
+		if len(sections) == 0 {
+			sections = []string{""}
+		}
+		for _, section := range sections {
+			key := qaEvidenceUnitKey(unit, section)
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			item := unit
+			if section == "" {
+				item.Sections = nil
+			} else {
+				item.Sections = []string{section}
+			}
+			item.Facets = append([]string(nil), unit.Facets...)
+			context.EvidenceUnits = append(context.EvidenceUnits, item)
+		}
+	}
+}
+
+func qaEvidenceUnitKeys(unit tool.EvidenceUnit) []string {
+	if len(unit.Sections) == 0 {
+		return []string{qaEvidenceUnitKey(unit, "")}
+	}
+	keys := make([]string, 0, len(unit.Sections))
+	for _, section := range unit.Sections {
+		keys = append(keys, qaEvidenceUnitKey(unit, section))
+	}
+	return keys
+}
+
+func qaEvidenceUnitKey(unit tool.EvidenceUnit, section string) string {
+	return unit.SourceKind + "\x00" + unit.Target + "\x00" + section + "\x00" + unit.Version + "\x00" + unit.TimeRange
+}
+
+func dedupeQAEvidenceUnits(units []tool.EvidenceUnit) []tool.EvidenceUnit {
+	if len(units) < 2 {
+		return units
+	}
+	seen := make(map[string]struct{}, len(units))
+	out := units[:0]
+	for _, unit := range units {
+		keys := qaEvidenceUnitKeys(unit)
+		if len(keys) != 1 {
+			for _, section := range unit.Sections {
+				item := unit
+				item.Sections = []string{section}
+				key := qaEvidenceUnitKey(item, section)
+				if _, duplicate := seen[key]; duplicate {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, item)
+			}
+			continue
+		}
+		if _, duplicate := seen[keys[0]]; duplicate {
+			continue
+		}
+		seen[keys[0]] = struct{}{}
+		out = append(out, unit)
+	}
+	return out
 }
 
 func canonicalRetrievalQuery(cleanQuestion, contextTerms string) string {

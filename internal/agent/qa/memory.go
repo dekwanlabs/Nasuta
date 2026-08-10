@@ -77,6 +77,25 @@ func admitExtractedMemories(records []memory.MemoryRecord, evidence EvidenceStat
 	return admitted, rejected
 }
 
+func admitMemoryDecisions(decisions []memory.MemoryDecision, evidence EvidenceStatus) ([]memory.MemoryDecision, map[string]int) {
+	records := make([]memory.MemoryRecord, len(decisions))
+	for i := range decisions {
+		records[i] = decisions[i].Record
+	}
+	admittedRecords, rejected := admitExtractedMemories(records, evidence)
+	admittedKeys := make(map[string]struct{}, len(admittedRecords))
+	for _, record := range admittedRecords {
+		admittedKeys[record.FactKey] = struct{}{}
+	}
+	admitted := make([]memory.MemoryDecision, 0, len(admittedRecords))
+	for _, decision := range decisions {
+		if _, ok := admittedKeys[decision.Record.FactKey]; ok {
+			admitted = append(admitted, decision)
+		}
+	}
+	return admitted, rejected
+}
+
 func buildRagCtx(history []llm.Message) string {
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == "user" {

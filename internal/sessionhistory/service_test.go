@@ -58,13 +58,15 @@ func TestFindFusesDenseAndLexicalThenRevalidatesMySQL(t *testing.T) {
 	sem := &recordingHistoryStore{Memory: contract.NewMemory()}
 	if err := sem.Upsert(t.Context(), []semantic.Record{
 		{ID: "cmp-dense", DenseVector: []float32{1, 0}, Metadata: map[string]any{"kind": "session_turn", "ref": "cmp-dense", "user_id": int64(42), "session_id": "session-1"}},
+		{ID: "cmp-lexical", DenseVector: []float32{1, 0}, Metadata: map[string]any{"kind": "session_turn", "ref": "cmp-lexical", "user_id": int64(42), "session_id": "session-1"}},
 		{ID: "cmp-stale", DenseVector: []float32{1, 0}, Metadata: map[string]any{"kind": "session_turn", "ref": "cmp-stale", "user_id": int64(42), "session_id": "session-1"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	mock.ExpectQuery(`SELECT ref.*qa_session_history_terms`).
-		WithArgs(int64(42), "session-1", "createcart", 64).
-		WillReturnRows(sqlmock.NewRows([]string{"ref"}).AddRow("cmp-lexical"))
+		WithArgs(int64(42), "session-1", "createcart", "checkout", 64).
+		WillReturnRows(sqlmock.NewRows([]string{"ref", "weight", "matched_terms"}).
+			AddRow("cmp-lexical", 8, 2))
 	mock.ExpectQuery(`SELECT t\.context_ref,t\.turn_no,t\.context_summary_text,t\.context_summary_tokens.*FROM qa_turns t.*JOIN qa_sessions s`).
 		WithArgs(int64(42), "session-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"ref", "turn_number", "summary_text", "summary_tokens"}).
@@ -75,8 +77,8 @@ func TestFindFusesDenseAndLexicalThenRevalidatesMySQL(t *testing.T) {
 	if err := service.EnableBM25(filepath.Join(t.TempDir(), "history_bm25_vocab.json")); err != nil {
 		t.Fatal(err)
 	}
-	service.bm25.AddDoc("createCart")
-	result, err := service.find(t.Context(), 42, "session-1", "createCart", 8, 256, false)
+	service.bm25.AddDoc("createCart checkout")
+	result, err := service.find(t.Context(), 42, "session-1", "createCart checkout", 8, 256, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +86,7 @@ func TestFindFusesDenseAndLexicalThenRevalidatesMySQL(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Mode != "hybrid" || len(payload.Turns) != 2 {
+	if payload.Mode != "dense_lexical" || len(payload.Turns) != 2 {
 		t.Fatalf("payload = %+v", payload)
 	}
 	for _, turn := range payload.Turns {
@@ -92,11 +94,29 @@ func TestFindFusesDenseAndLexicalThenRevalidatesMySQL(t *testing.T) {
 			t.Fatal("stale vector record survived MySQL revalidation")
 		}
 	}
-	if sem.lastQuery.SparseVector == nil || len(sem.lastQuery.SparseVector.Indices) == 0 {
-		t.Fatalf("semantic query missing BM25 sparse vector: %+v", sem.lastQuery)
+	if sem.lastQuery.SparseVector != nil {
+		t.Fatalf("history relevance query must be dense-only: %+v", sem.lastQuery)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFilterRelevantUsesStricterDenseOnlyGate(t *testing.T) {
+	service := &Service{relevance: defaultRelevancePolicy()}
+	candidates := []historyCandidate{
+		{ref: "dense-low", denseRank: 1, denseScore: 0.79},
+		{ref: "dense-high", denseRank: 2, denseScore: 0.81},
+		{ref: "agreed", denseRank: 3, lexicalRank: 1, denseScore: 0.71, lexicalCoverage: 0.5},
+		{ref: "weak-lexical", denseRank: 4, lexicalRank: 2, denseScore: 0.75, lexicalCoverage: 0.2},
+	}
+	accepted, filtered, denseOnly := service.filterRelevant(candidates)
+	if filtered != 2 || denseOnly != 1 {
+		t.Fatalf("filtered=%d denseOnly=%d accepted=%+v", filtered, denseOnly, accepted)
+	}
+	got := []string{accepted[0].ref, accepted[1].ref}
+	if !slices.Equal(got, []string{"dense-high", "agreed"}) {
+		t.Fatalf("accepted refs = %v", got)
 	}
 }
 

@@ -1,4 +1,4 @@
-# Flow: <English Name> (<Chinese Name>)
+# Flow: <Name from supplied content>
 
 ## Format
 
@@ -10,15 +10,16 @@ trigger to completion.
 ```yaml
 ---
 scope: event-driven                    # fixed value
-tags: [flow, <service>, <domain>, ...] # at least 3 tags for semantic recall
+tags: [flow, event-driven, troubleshooting, ...] # add only source-backed identifiers
 ---
 ```
 
 ### Title
 
-`# Flow: <English Name> (<Chinese Name>)`
+`# Flow: <Name from supplied content>`
 
-Example: `# Flow: Device Provisioning & SN Lifecycle`
+Use the source content's natural language. Do not require or invent a translated
+second name.
 
 ### Required Sections (in order)
 
@@ -29,7 +30,9 @@ Example: `# Flow: Device Provisioning & SN Lifecycle`
 3. **Full Chain** (`## Full Chain`) — ASCII diagram or nested list, from
    trigger to terminal state.
 4. **Key Services** (`## Key Services`) — table: Service | Responsibility |
-   Database | Kibana Index.
+   Data Store | Log/Search Index. Populate physical resource columns only when
+   the supplied content names them verbatim; otherwise write `Not established
+   from supplied content` in the source content's natural language.
 5. **Troubleshooting** (`## Troubleshooting`) — table: Common Problem →
    Resolution Steps.
 6. **Dependencies** (`## Dependencies`) — external services this chain
@@ -44,10 +47,10 @@ Example: `# Flow: Device Provisioning & SN Lifecycle`
 ### Notes
 
 - Do not add id or doc_id to frontmatter; the platform assigns the canonical document ID.
-- All service names, API paths, and Feign interface names must come from real
-  code — never invent them. Verify against codegraph before writing.
-- Kibana index uses the `hs-iot-<service>-*` format, derived from existing
-  indices.
-- Prefer tables over prose. Troubleshooting must be operational ("query the Y
-  index of service X, search keyword Z").
-- Cross-reference other documents via their `flow-xxx.md` filename.
+- Preserve service names, API paths, Feign interface names, data stores, and
+  log/search indices exactly as supplied. This template has no codegraph or
+  lookup capability, so never claim an external verification was performed.
+- Prefer tables over prose. Troubleshooting steps must be supported by supplied
+  operational content. Otherwise state what evidence must be collected; do not
+  invent an index, keyword, dashboard, command, or endpoint.
+- Cross-reference another document only when its exact filename is supplied.

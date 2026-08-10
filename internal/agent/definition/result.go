@@ -122,6 +122,25 @@ func joinedContextContent(blocks []agentapi.ContextBlock) string {
 	return content.String()
 }
 
+func contextEvidenceUnits(blocks []agentapi.ContextBlock) []tool.EvidenceUnit {
+	count := 0
+	for _, block := range blocks {
+		count += len(block.Evidence)
+	}
+	if count == 0 {
+		return nil
+	}
+	units := make([]tool.EvidenceUnit, 0, count)
+	for _, block := range blocks {
+		for _, unit := range block.Evidence {
+			unit.Sections = append([]string(nil), unit.Sections...)
+			unit.Facets = append([]string(nil), unit.Facets...)
+			units = append(units, unit)
+		}
+	}
+	return units
+}
+
 func hashMessages(messages []llm.Message) string {
 	raw, _ := json.Marshal(messages)
 	return hashBytes(raw)

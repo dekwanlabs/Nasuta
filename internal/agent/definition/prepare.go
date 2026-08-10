@@ -253,6 +253,7 @@ func compileDefinitionRequest(
 			Web:             request.Policy.WebResearch,
 			ReferenceTypes:  contextReferenceTypes(request.Context),
 			EvidenceContent: joinedContextContent(request.Context),
+			EvidenceUnits:   contextEvidenceUnits(request.Context),
 		}
 	}
 	messages := []llm.Message{{Role: "system", Content: definition.Prompt.System}}
@@ -282,6 +283,7 @@ func compileDefinitionRequest(
 		Web:             request.Policy.WebResearch,
 		ReferenceTypes:  contextReferenceTypes(request.Context),
 		EvidenceContent: joinedContextContent(request.Context),
+		EvidenceUnits:   contextEvidenceUnits(request.Context),
 	}
 }
 
@@ -317,6 +319,31 @@ func validateDefinitionContext(blocks []agentapi.ContextBlock) (string, error) {
 		}
 		if hashString(block.Content) != block.ContentHash {
 			return "", fmt.Errorf("context block %d content_hash does not match content", index)
+		}
+		for unitIndex, unit := range block.Evidence {
+			if unit.SourceKind == "" || unit.SourceKind != strings.TrimSpace(unit.SourceKind) ||
+				unit.Target == "" || unit.Target != strings.TrimSpace(unit.Target) {
+				return "", fmt.Errorf("context block %d evidence unit %d source_kind and target are required and canonical", index, unitIndex)
+			}
+			if unit.Coverage.Complete && unit.Coverage.Partial {
+				return "", fmt.Errorf("context block %d evidence unit %d coverage is contradictory", index, unitIndex)
+			}
+			if unit.TokenCost < 0 {
+				return "", fmt.Errorf("context block %d evidence unit %d token_cost is invalid", index, unitIndex)
+			}
+			if unit.ContentHash != "" && (len(unit.ContentHash) != sha256.Size*2 || !validHex(unit.ContentHash)) {
+				return "", fmt.Errorf("context block %d evidence unit %d content_hash is invalid", index, unitIndex)
+			}
+			seenSections := make(map[string]struct{}, len(unit.Sections))
+			for sectionIndex, section := range unit.Sections {
+				if section == "" || section != strings.TrimSpace(section) {
+					return "", fmt.Errorf("context block %d evidence unit %d section %d is invalid", index, unitIndex, sectionIndex)
+				}
+				if _, duplicate := seenSections[section]; duplicate {
+					return "", fmt.Errorf("context block %d evidence unit %d section %q is duplicated", index, unitIndex, section)
+				}
+				seenSections[section] = struct{}{}
+			}
 		}
 	}
 	raw, err := json.Marshal(blocks)

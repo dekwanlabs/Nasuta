@@ -22,11 +22,7 @@ type LongTermRecord = MemoryRecord
 const memorySelectColumns = `id,user_id,fact_key,kind,content,source_type,authority,status,
 	superseded_by,source_session,confidence,expires_at,created_at,updated_at,last_used,use_count`
 
-const (
-	memoryBM25RebuildBatch = 64
-	supersededHistoryLimit = 5
-	supersededPruneBatch   = 64
-)
+const memoryBM25RebuildBatch = 64
 
 // MemoryStore keeps durable state in MySQL and candidates in the selected semantic store.
 type MemoryStore struct {
@@ -100,6 +96,20 @@ func (memory *MemoryStore) EnableBM25(ctx context.Context, vocabPath string) err
 
 // Write applies authority-based replacement and then refreshes vector candidates.
 func (memory *MemoryStore) Write(ctx context.Context, incoming MemoryRecord) (WriteResult, error) {
+	return memory.write(ctx, incoming, nil)
+}
+
+type writeExpectation struct {
+	activeID         string
+	requireAbsent    bool
+	requireAuthority bool
+}
+
+func (memory *MemoryStore) write(
+	ctx context.Context,
+	incoming MemoryRecord,
+	expectation *writeExpectation,
+) (WriteResult, error) {
 	now := memory.now().UTC()
 	rec, err := canonicalizeRecord(incoming)
 	if err != nil {
@@ -119,9 +129,8 @@ func (memory *MemoryStore) Write(ctx context.Context, incoming MemoryRecord) (Wr
 	var result WriteResult
 	var stored MemoryRecord
 	var replaced *MemoryRecord
-	var prunedIDs []string
 	for attempt := 0; attempt < 2; attempt++ {
-		result, stored, replaced, prunedIDs, err = memory.writeTransaction(ctx, rec)
+		result, stored, replaced, err = memory.writeTransaction(ctx, rec, expectation)
 		if err == nil || !isDuplicateKey(err) {
 			break
 		}
@@ -131,10 +140,6 @@ func (memory *MemoryStore) Write(ctx context.Context, incoming MemoryRecord) (Wr
 	}
 
 	vectorSynced := true
-	if err := memory.deleteVectors(ctx, prunedIDs); err != nil {
-		log.WarnfCtx(ctx, "[memory] pruned vector cleanup failed fact_key=%s count=%d: %v", rec.FactKey, len(prunedIDs), err)
-		vectorSynced = false
-	}
 	if replaced != nil {
 		vectorSynced = memory.syncVector(ctx, *replaced) && vectorSynced
 	}
@@ -143,26 +148,40 @@ func (memory *MemoryStore) Write(ctx context.Context, incoming MemoryRecord) (Wr
 	return result, nil
 }
 
-func (memory *MemoryStore) writeTransaction(ctx context.Context, rec MemoryRecord) (WriteResult, MemoryRecord, *MemoryRecord, []string, error) {
+func (memory *MemoryStore) writeTransaction(
+	ctx context.Context,
+	rec MemoryRecord,
+	expectation *writeExpectation,
+) (WriteResult, MemoryRecord, *MemoryRecord, error) {
 	tx, err := memory.db.BeginTx(ctx, nil)
 	if err != nil {
-		return WriteResult{}, MemoryRecord{}, nil, nil, fmt.Errorf("memory: begin write: %w", err)
+		return WriteResult{}, MemoryRecord{}, nil, fmt.Errorf("memory: begin write: %w", err)
 	}
 	defer tx.Rollback()
 
 	active, err := getActiveFact(ctx, tx, rec.UserID, rec.FactKey)
 	if err != nil {
-		return WriteResult{}, MemoryRecord{}, nil, nil, err
+		return WriteResult{}, MemoryRecord{}, nil, err
+	}
+	if expectation != nil {
+		if expectation.requireAbsent && active != nil {
+			return WriteResult{}, MemoryRecord{}, nil, fmt.Errorf("%w for fact %q", ErrStaleMemoryDecision, rec.FactKey)
+		}
+		if expectation.activeID != "" && (active == nil || active.ID != expectation.activeID) {
+			return WriteResult{}, MemoryRecord{}, nil, fmt.Errorf("%w for fact %q", ErrStaleMemoryDecision, rec.FactKey)
+		}
+		if expectation.requireAuthority && active != nil && rec.Authority < active.Authority {
+			return WriteResult{}, MemoryRecord{}, nil, fmt.Errorf("%w for fact %q", ErrRejectedMemoryDecision, rec.FactKey)
+		}
 	}
 
 	var result WriteResult
 	stored := rec
 	var replaced *MemoryRecord
-	addedSuperseded := false
 	switch {
 	case active == nil:
 		if err := insertMemory(ctx, tx, rec); err != nil {
-			return WriteResult{}, MemoryRecord{}, nil, nil, err
+			return WriteResult{}, MemoryRecord{}, nil, err
 		}
 		result = WriteResult{ID: rec.ID, Outcome: WriteInserted}
 
@@ -190,7 +209,7 @@ func (memory *MemoryStore) writeTransaction(ctx context.Context, rec MemoryRecor
 			active.ID, rec.UserID,
 		)
 		if err != nil {
-			return WriteResult{}, MemoryRecord{}, nil, nil, fmt.Errorf("memory: refresh fact %q: %w", rec.FactKey, err)
+			return WriteResult{}, MemoryRecord{}, nil, fmt.Errorf("memory: refresh fact %q: %w", rec.FactKey, err)
 		}
 		active.Kind = kind
 		active.SourceType = sourceType
@@ -206,34 +225,11 @@ func (memory *MemoryStore) writeTransaction(ctx context.Context, rec MemoryRecor
 	case rec.Authority < active.Authority:
 		rec.Status = StatusSuperseded
 		rec.SupersededBy = active.ID
-		duplicate, err := getSupersededFact(ctx, tx, rec.UserID, rec.FactKey, rec.Content)
-		if err != nil {
-			return WriteResult{}, MemoryRecord{}, nil, nil, err
+		if err := insertMemory(ctx, tx, rec); err != nil {
+			return WriteResult{}, MemoryRecord{}, nil, err
 		}
-		if duplicate == nil {
-			if err := insertMemory(ctx, tx, rec); err != nil {
-				return WriteResult{}, MemoryRecord{}, nil, nil, err
-			}
-			stored = rec
-			addedSuperseded = true
-		} else {
-			if rec.Authority >= duplicate.Authority {
-				duplicate.Kind = rec.Kind
-				duplicate.SourceType = rec.SourceType
-				duplicate.Authority = rec.Authority
-				duplicate.SourceSession = rec.SourceSession
-				duplicate.Confidence = max(duplicate.Confidence, rec.Confidence)
-				duplicate.ExpiresAt = rec.ExpiresAt
-			}
-			duplicate.SupersededBy = active.ID
-			duplicate.UpdatedAt = rec.UpdatedAt
-			duplicate.UseCount++
-			if err := refreshSupersededFact(ctx, tx, *duplicate); err != nil {
-				return WriteResult{}, MemoryRecord{}, nil, nil, err
-			}
-			stored = *duplicate
-		}
-		result = WriteResult{ID: stored.ID, Outcome: WriteRejected, SupersededRecord: active.ID}
+		stored = rec
+		result = WriteResult{ID: rec.ID, Outcome: WriteRejected, SupersededRecord: active.ID}
 
 	default:
 		res, err := tx.ExecContext(ctx,
@@ -243,37 +239,29 @@ func (memory *MemoryStore) writeTransaction(ctx context.Context, rec MemoryRecor
 			rec.ID, rec.UpdatedAt, active.ID, rec.UserID,
 		)
 		if err != nil {
-			return WriteResult{}, MemoryRecord{}, nil, nil, fmt.Errorf("memory: supersede fact %q: %w", rec.FactKey, err)
+			return WriteResult{}, MemoryRecord{}, nil, fmt.Errorf("memory: supersede fact %q: %w", rec.FactKey, err)
 		}
 		affected, err := res.RowsAffected()
 		if err != nil {
-			return WriteResult{}, MemoryRecord{}, nil, nil, fmt.Errorf("memory: inspect supersede fact %q: %w", rec.FactKey, err)
+			return WriteResult{}, MemoryRecord{}, nil, fmt.Errorf("memory: inspect supersede fact %q: %w", rec.FactKey, err)
 		}
 		if affected != 1 {
-			return WriteResult{}, MemoryRecord{}, nil, nil, fmt.Errorf("memory: active fact %q changed during write", rec.FactKey)
+			return WriteResult{}, MemoryRecord{}, nil, fmt.Errorf("memory: active fact %q changed during write", rec.FactKey)
 		}
 		if err := insertMemory(ctx, tx, rec); err != nil {
-			return WriteResult{}, MemoryRecord{}, nil, nil, err
+			return WriteResult{}, MemoryRecord{}, nil, err
 		}
 		active.Status = StatusSuperseded
 		active.SupersededBy = rec.ID
 		active.UpdatedAt = rec.UpdatedAt
 		replaced = active
-		addedSuperseded = true
 		result = WriteResult{ID: rec.ID, Outcome: WriteSuperseded, SupersededRecord: active.ID}
 	}
 
-	var prunedIDs []string
-	if addedSuperseded {
-		prunedIDs, err = pruneSupersededHistory(ctx, tx, rec.UserID, rec.FactKey)
-		if err != nil {
-			return WriteResult{}, MemoryRecord{}, nil, nil, err
-		}
-	}
 	if err := tx.Commit(); err != nil {
-		return WriteResult{}, MemoryRecord{}, nil, nil, fmt.Errorf("memory: commit fact %q: %w", rec.FactKey, err)
+		return WriteResult{}, MemoryRecord{}, nil, fmt.Errorf("memory: commit fact %q: %w", rec.FactKey, err)
 	}
-	return result, stored, replaced, prunedIDs, nil
+	return result, stored, replaced, nil
 }
 
 func getActiveFact(ctx context.Context, tx *sql.Tx, userID int64, factKey string) (*MemoryRecord, error) {
@@ -289,101 +277,6 @@ func getActiveFact(ctx context.Context, tx *sql.Tx, userID int64, factKey string
 		return nil, fmt.Errorf("memory: load active fact %q: %w", factKey, err)
 	}
 	return rec, nil
-}
-
-func getSupersededFact(ctx context.Context, tx *sql.Tx, userID int64, factKey, content string) (*MemoryRecord, error) {
-	row := tx.QueryRowContext(ctx,
-		`SELECT `+memorySelectColumns+`
-		 FROM qa_memories
-		 WHERE user_id=? AND fact_key=? AND content=? AND status='superseded'
-		 ORDER BY updated_at DESC,id DESC
-		 LIMIT 1
-		 FOR UPDATE`,
-		userID, factKey, content,
-	)
-	rec, err := scanMemory(row.Scan)
-	if err != nil {
-		return nil, fmt.Errorf("memory: load superseded fact %q: %w", factKey, err)
-	}
-	return rec, nil
-}
-
-func refreshSupersededFact(ctx context.Context, tx *sql.Tx, rec MemoryRecord) error {
-	_, err := tx.ExecContext(ctx,
-		`UPDATE qa_memories
-		 SET kind=?,source_type=?,authority=?,source_session=?,confidence=?,
-		     expires_at=?,superseded_by=?,updated_at=?,use_count=?
-		 WHERE id=? AND user_id=? AND status='superseded'`,
-		rec.Kind, rec.SourceType, rec.Authority, rec.SourceSession, rec.Confidence,
-		rec.ExpiresAt, rec.SupersededBy, rec.UpdatedAt, rec.UseCount, rec.ID, rec.UserID,
-	)
-	if err != nil {
-		return fmt.Errorf("memory: refresh superseded fact %q: %w", rec.FactKey, err)
-	}
-	return nil
-}
-
-func pruneSupersededHistory(ctx context.Context, tx *sql.Tx, userID int64, factKey string) ([]string, error) {
-	pruned := make([]string, 0)
-	for {
-		rows, err := tx.QueryContext(ctx,
-			`SELECT id
-			 FROM qa_memories
-			 WHERE user_id=? AND fact_key=? AND status='superseded'
-			 ORDER BY updated_at DESC,id DESC
-			 LIMIT ? OFFSET ?
-			 FOR UPDATE`,
-			userID, factKey, supersededPruneBatch, supersededHistoryLimit,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("memory: list superseded history %q: %w", factKey, err)
-		}
-		ids := make([]string, 0, supersededPruneBatch)
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("memory: scan superseded history %q: %w", factKey, err)
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("memory: iterate superseded history %q: %w", factKey, err)
-		}
-		if err := rows.Close(); err != nil {
-			return nil, fmt.Errorf("memory: close superseded history %q: %w", factKey, err)
-		}
-		if len(ids) == 0 {
-			return pruned, nil
-		}
-
-		args := make([]any, 0, len(ids)+2)
-		args = append(args, userID, factKey)
-		for _, id := range ids {
-			args = append(args, id)
-		}
-		result, err := tx.ExecContext(ctx,
-			`DELETE FROM qa_memories
-			 WHERE user_id=? AND fact_key=? AND status='superseded'
-			   AND id IN (`+placeholders(len(ids))+`)`,
-			args...,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("memory: prune superseded history %q: %w", factKey, err)
-		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return nil, fmt.Errorf("memory: inspect pruned history %q: %w", factKey, err)
-		}
-		if affected != int64(len(ids)) {
-			return nil, fmt.Errorf("memory: expected to prune %d histories for %q, pruned %d", len(ids), factKey, affected)
-		}
-		pruned = append(pruned, ids...)
-		if len(ids) < supersededPruneBatch {
-			return pruned, nil
-		}
-	}
 }
 
 func insertMemory(ctx context.Context, tx *sql.Tx, rec MemoryRecord) error {

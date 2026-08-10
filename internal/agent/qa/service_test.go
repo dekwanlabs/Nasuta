@@ -1138,9 +1138,8 @@ func TestAskAgentRouterInvalidOutputFallsBackInternal(t *testing.T) {
 	if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
 		t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
 	}
-	// One original router call plus one reprompt: the model omitted the route
-	// object, so ChatJSON re-prompts once before giving up and falling back.
-	if routerCalls != 2 || agentCalls != 1 {
+	// Planner failures fall back immediately without another model request.
+	if routerCalls != 1 || agentCalls != 1 {
 		t.Fatalf("routerCalls=%d agentCalls=%d", routerCalls, agentCalls)
 	}
 	if result.Context == nil {
@@ -1272,6 +1271,10 @@ func TestMergePreloadedContextDedupesContentAndReferences(t *testing.T) {
 			{Type: "code", Target: "svc/Foo.go"},
 			{Type: "trace", Target: "trace-1"},
 		},
+		Evidence: []tool.EvidenceUnit{{
+			SourceKind: "runtime", Target: "trace-1",
+			Coverage: tool.EvidenceCoverage{Complete: true},
+		}},
 	}
 	mergePreloadedContext(context, []ContextBlock{block, block}, 48000)
 	if strings.Count(context.Text, "trace failed") != 1 {
@@ -1279,6 +1282,30 @@ func TestMergePreloadedContextDedupesContentAndReferences(t *testing.T) {
 	}
 	if len(context.References) != 2 || context.HitCount != 2 {
 		t.Fatalf("references = %#v hitCount=%d", context.References, context.HitCount)
+	}
+	if len(context.EvidenceUnits) != 1 || context.EvidenceUnits[0].Target != "trace-1" ||
+		context.EvidenceUnits[0].ContentHash == "" || context.EvidenceUnits[0].TokenCost == 0 {
+		t.Fatalf("evidence units = %#v", context.EvidenceUnits)
+	}
+}
+
+func TestMergePreloadedContextKeepsDeliveredEvidenceWhenExistingContextIsTruncated(t *testing.T) {
+	unit := tool.EvidenceUnit{
+		SourceKind: "runbook", Target: "doc-a",
+		Coverage: tool.EvidenceCoverage{Complete: true},
+	}
+	context := &retrieval.RetrievedContext{
+		Text:          "workspace evidence that will be truncated",
+		EvidenceUnits: []tool.EvidenceUnit{unit},
+	}
+	mergePreloadedContext(context, []ContextBlock{{
+		Title:    "Runtime",
+		Content:  "trace",
+		Evidence: []tool.EvidenceUnit{unit},
+	}}, 20)
+	if len(context.EvidenceUnits) != 1 || context.EvidenceUnits[0].Target != "doc-a" ||
+		context.EvidenceUnits[0].ContentHash != hashString("## Runtime\ntrace\n") {
+		t.Fatalf("evidence units = %#v", context.EvidenceUnits)
 	}
 }
 
@@ -1313,8 +1340,12 @@ func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 				t.Fatalf("arguments = %#v", arguments)
 			}
 			return tool.Result{
-				Content:        "evidence",
-				References:     []tool.Reference{{Type: "trace", Target: "trace-1"}},
+				Content:    "evidence",
+				References: []tool.Reference{{Type: "trace", Target: "trace-1"}},
+				EvidenceUnits: []tool.EvidenceUnit{{
+					SourceKind: "runtime", Target: "trace-1",
+					Coverage: tool.EvidenceCoverage{Complete: true},
+				}},
 				Coverage:       tool.EvidenceCoverage{Partial: true, OmittedItems: 2},
 				AnswerContract: tool.AnswerContract{RequiredLiterals: []string{"TRACE-1"}},
 			}, nil
@@ -1339,7 +1370,8 @@ func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(blocks) != 1 || blocks[0].Content != "evidence" || len(blocks[0].References) != 1 {
+	if len(blocks) != 1 || blocks[0].Content != "evidence" || len(blocks[0].References) != 1 ||
+		len(blocks[0].Evidence) != 1 || blocks[0].Evidence[0].Target != "trace-1" {
 		t.Fatalf("blocks = %#v", blocks)
 	}
 	if len(recorder.steps) != 2 {

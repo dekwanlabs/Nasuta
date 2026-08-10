@@ -23,17 +23,19 @@ func buildClassifyPrompt(filesCtx string) string {
 }
 
 // buildGeneratePrompt builds a targeted generation prompt with a single template.
-func buildGeneratePrompt(filesCtx, templateName string) string {
+func buildGeneratePrompt(projectName, filesCtx, templateName string) string {
 	templateID, ok := docgenTemplateIDs[templateName]
 	if !ok {
 		templateID = prompts.DocgenTemplateGeneric
 	}
 	return prompts.MustRender(prompts.DocgenGenerate, struct {
-		Template string
-		Files    string
+		ProjectName string
+		Template    string
+		Files       string
 	}{
-		Template: prompts.Text(templateID),
-		Files:    filesCtx,
+		ProjectName: projectName,
+		Template:    prompts.Text(templateID),
+		Files:       filesCtx,
 	})
 }
 

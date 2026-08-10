@@ -55,7 +55,6 @@ func (prepared *qaPreparation) finishPreparationFailure(
 	}); finishErr != nil {
 		log.ErrorfCtx(ctx, "[qa] finish failed preparation %s: %v", prepared.request.RunID, finishErr)
 	}
-	prepared.closeTrace()
 }
 
 func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation, error) {
@@ -157,7 +156,7 @@ func (svc *QA) routeQAExecution(prepared *qaPreparation) {
 		)
 	}
 	if planning.PlanningError != nil {
-		log.WarnfCtx(prepared.ctx, "[qa] evidence planning degraded: %v", planning.PlanningError)
+		logEvidencePlannerFailure(prepared.ctx, planning.PlanningTime, planning.PlanningError)
 		planning.RoutedToolIDs = nil
 		prepared.planning.RoutedToolIDs = nil
 	}
@@ -196,15 +195,48 @@ func (svc *QA) routeQAExecution(prepared *qaPreparation) {
 	}
 }
 
+func logEvidencePlannerFailure(ctx context.Context, duration time.Duration, err error) {
+	if errors.Is(err, llm.ErrInvalidJSON) {
+		log.WarnfCtx(ctx,
+			"[qa] evidence planner failed duration=%s error_kind=invalid_json retry_disabled=true error=%v",
+			duration, err,
+		)
+		return
+	}
+
+	var callErr *llm.CallError
+	if !errors.As(err, &callErr) {
+		log.WarnfCtx(ctx,
+			"[qa] evidence planner failed duration=%s error_kind=other retry_disabled=true error=%v",
+			duration, err,
+		)
+		return
+	}
+
+	kind := "unknown"
+	switch callErr.Kind {
+	case llm.ErrKindNetwork:
+		kind = "network"
+	case llm.ErrKindStatus:
+		kind = "status"
+	case llm.ErrKindEmpty:
+		kind = "empty"
+	case llm.ErrKindEnvelope:
+		kind = "envelope"
+	}
+	log.WarnfCtx(ctx,
+		"[qa] evidence planner failed duration=%s error_kind=%s status=%d retryable=%t retry_disabled=true error=%v",
+		duration, kind, callErr.Status, callErr.Retryable(), err,
+	)
+}
+
 func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error) {
 	definition, selection, err := svc.resolveAgentDefinition(prepared)
 	if err != nil {
-		prepared.closeTrace()
 		return nil, err
 	}
 	run, err := svc.beginSingleAgentRun(prepared, definition, selection)
 	if err != nil {
-		prepared.closeTrace()
 		return nil, err
 	}
 	runCtx := run.Context(prepared.ctx)

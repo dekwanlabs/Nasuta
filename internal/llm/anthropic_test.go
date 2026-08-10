@@ -89,6 +89,27 @@ func TestAnthropicChat_NonStreaming(term2 *testing.T) {
 	}
 }
 
+func TestAnthropicChatAcceptsVersionedBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Errorf("path = %q, want /v1/messages", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": "answer"}},
+		})
+	}))
+	defer server.Close()
+
+	client := newAnthropicClient(t, server.URL+"/v1")
+	answer, err := client.Chat(t.Context(), "system", "user")
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if answer != "answer" {
+		t.Fatalf("answer = %q", answer)
+	}
+}
+
 func TestAnthropicChatJSONUsesProviderAndReprompt(t *testing.T) {
 	var requests []anthropicRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -339,6 +360,22 @@ func TestAnthropicMessageTranslation(term7 *testing.T) {
 	}
 	if merged.Content[0].ToolUseID != "toolu_1" || merged.Content[1].ToolUseID != "toolu_2" {
 		term7.Fatalf("merged tool_use_ids = %q/%q", merged.Content[0].ToolUseID, merged.Content[1].ToolUseID)
+	}
+	if merged.Content[0].Content != "sunny" || merged.Content[1].Content != "noon" {
+		term7.Fatalf("merged tool-result content = %q/%q", merged.Content[0].Content, merged.Content[1].Content)
+	}
+	for idx, block := range merged.Content {
+		encoded, err := json.Marshal(block)
+		if err != nil {
+			term7.Fatalf("marshal block %d: %v", idx, err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &fields); err != nil {
+			term7.Fatalf("unmarshal block %d: %v", idx, err)
+		}
+		if _, exists := fields["text"]; exists {
+			term7.Fatalf("tool-result block %d contains forbidden text field: %s", idx, encoded)
+		}
 	}
 }
 

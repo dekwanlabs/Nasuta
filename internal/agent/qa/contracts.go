@@ -58,6 +58,7 @@ type ContextBlock struct {
 	Title      string
 	Content    string
 	References []retrieval.Reference
+	Evidence   []tool.EvidenceUnit
 }
 
 type PlannedToolCall struct {

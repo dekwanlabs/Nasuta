@@ -9,14 +9,10 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
-const runtimeFeaturePromptLocale = "en"
-
-var generationSystemPrompts = map[ArtifactKind]string{
-	KindRequirementAnalysis: prompts.Text(prompts.FeatureDeliveryRequirementAnalysis),
-	KindTechnicalProposal:   prompts.Text(prompts.FeatureDeliveryTechnicalProposal),
-	KindSystemDesign:        prompts.Text(prompts.FeatureDeliverySystemDesign),
-	KindImplementationPlan:  prompts.Text(prompts.FeatureDeliveryImplementationPlan),
-}
+// runtimeFeatureInstructionLocale selects the language used to instruct the
+// model. The generation request independently requires Simplified Chinese
+// natural-language output.
+const runtimeFeatureInstructionLocale = "en"
 
 var featurePromptIDs = map[string]map[string]prompts.ID{
 	"en": {
@@ -35,6 +31,13 @@ var featurePromptIDs = map[string]map[string]prompts.ID{
 		"generation_request.md":   prompts.FeatureDeliveryZHCNGenerationRequest,
 		"coding_task.md":          prompts.FeatureDeliveryZHCNCodingTask,
 	},
+}
+
+var generationSystemPrompts = map[ArtifactKind]string{
+	KindRequirementAnalysis: mustReadFeaturePrompt("requirement_analysis.md"),
+	KindTechnicalProposal:   mustReadFeaturePrompt("technical_proposal.md"),
+	KindSystemDesign:        mustReadFeaturePrompt("system_design.md"),
+	KindImplementationPlan:  mustReadFeaturePrompt("implementation_plan.md"),
 }
 
 type generationPromptData struct {
@@ -72,7 +75,7 @@ func generationPrompt(parent Artifact, kind ArtifactKind, evidence []EvidenceRef
 
 func renderGenerationPrompt(kind ArtifactKind, input any) string {
 	payload, _ := json.Marshal(input)
-	rendered, err := prompts.Render(prompts.FeatureDeliveryGenerationRequest, generationPromptData{
+	rendered, err := prompts.Render(mustFeaturePromptID(runtimeFeatureInstructionLocale, "generation_request.md"), generationPromptData{
 		Contract: generationDocumentContract(kind),
 		Kind:     kind,
 		Input:    string(payload),
@@ -204,7 +207,7 @@ func buildCodingTaskPrompt(run ImplementationRun, repositoryPlan RepositoryPlan,
 	for index := range chain {
 		artifacts[len(chain)-1-index] = chain[index]
 	}
-	return prompts.Render(prompts.FeatureDeliveryCodingTask, codingTaskPromptData{
+	return prompts.Render(mustFeaturePromptID(runtimeFeatureInstructionLocale, "coding_task.md"), codingTaskPromptData{
 		Run:               run,
 		RepositoryPlan:    repositoryPlan,
 		ApprovedArtifacts: artifacts,
@@ -220,10 +223,14 @@ func renderFeaturePrompt(prompt *template.Template, data any) (string, error) {
 }
 
 func mustReadFeaturePrompt(name string) string {
-	return mustReadLocalizedFeaturePrompt(runtimeFeaturePromptLocale, name)
+	return mustReadLocalizedFeaturePrompt(runtimeFeatureInstructionLocale, name)
 }
 
 func mustReadLocalizedFeaturePrompt(locale, name string) string {
+	return prompts.Text(mustFeaturePromptID(locale, name))
+}
+
+func mustFeaturePromptID(locale, name string) prompts.ID {
 	localized, ok := featurePromptIDs[locale]
 	if !ok {
 		panic(fmt.Sprintf("delivery: unknown prompt locale %q", locale))
@@ -232,5 +239,5 @@ func mustReadLocalizedFeaturePrompt(locale, name string) string {
 	if !ok {
 		panic(fmt.Sprintf("delivery: unknown %s prompt %q", locale, name))
 	}
-	return prompts.Text(id)
+	return id
 }

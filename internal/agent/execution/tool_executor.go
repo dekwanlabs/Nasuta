@@ -26,6 +26,7 @@ type ToolExecution struct {
 	PromptContent        string
 	Notices              []string
 	References           []tool.Reference
+	EvidenceUnits        []tool.EvidenceUnit
 	Evidence             bool
 	Failed               bool
 	Coverage             tool.EvidenceCoverage
@@ -115,6 +116,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 		AuthoritativeContent: result,
 		PromptContent:        result,
 		References:           cloneReferences(toolResult.References),
+		EvidenceUnits:        cloneEvidenceUnits(toolResult.EvidenceUnits),
 		Evidence:             true,
 		Coverage:             toolResult.Coverage,
 		AnswerContract:       toolResult.AnswerContract,

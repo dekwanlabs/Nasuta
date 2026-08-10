@@ -22,6 +22,13 @@ type HistorySummary struct {
 	SummaryTokens int    `json:"-"`
 }
 
+// HistoryLexicalCandidate is one bounded lexical match without loading summary text.
+type HistoryLexicalCandidate struct {
+	Ref          string
+	Weight       int
+	MatchedTerms int
+}
+
 // HistoryIndexTask is one pending vector index mutation.
 type HistoryIndexTask struct {
 	ID        int64
@@ -44,8 +51,8 @@ func (ss *SessionStore) HasPendingHistoryUpserts(ctx context.Context, userID int
 	return pending == 1, nil
 }
 
-// FindHistoryRefs returns a bounded lexical ranking for canonical query terms.
-func (ss *SessionStore) FindHistoryRefs(ctx context.Context, userID int64, sessionID string, terms []string, limit int) ([]string, error) {
+// FindHistoryRefs returns bounded lexical evidence without loading summary text.
+func (ss *SessionStore) FindHistoryRefs(ctx context.Context, userID int64, sessionID string, terms []string, limit int) ([]HistoryLexicalCandidate, error) {
 	if len(terms) == 0 || sessionID == "" || userID <= 0 {
 		return nil, nil
 	}
@@ -61,7 +68,7 @@ func (ss *SessionStore) FindHistoryRefs(ctx context.Context, userID int64, sessi
 		args = append(args, term)
 	}
 	args = append(args, limit)
-	rows, err := ss.db.QueryContext(ctx, `SELECT ref
+	rows, err := ss.db.QueryContext(ctx, `SELECT ref,SUM(weight),COUNT(DISTINCT term)
 		FROM qa_session_history_terms
 		WHERE user_id=? AND session_id=? AND term IN (`+placeholders(len(terms))+`)
 		GROUP BY ref
@@ -71,15 +78,15 @@ func (ss *SessionStore) FindHistoryRefs(ctx context.Context, userID int64, sessi
 		return nil, fmt.Errorf("memory/session history: lexical candidates: %w", err)
 	}
 	defer rows.Close()
-	refs := make([]string, 0, limit)
+	candidates := make([]HistoryLexicalCandidate, 0, limit)
 	for rows.Next() {
-		var ref string
-		if err := rows.Scan(&ref); err != nil {
+		var candidate HistoryLexicalCandidate
+		if err := rows.Scan(&candidate.Ref, &candidate.Weight, &candidate.MatchedTerms); err != nil {
 			return nil, err
 		}
-		refs = append(refs, ref)
+		candidates = append(candidates, candidate)
 	}
-	return refs, rows.Err()
+	return candidates, rows.Err()
 }
 
 // LoadHistorySummaries batch-revalidates refs against the current owner and session.

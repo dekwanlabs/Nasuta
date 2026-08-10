@@ -53,6 +53,7 @@ const (
 	RetrievalHistory     ID = "retrieval.history"
 	RetrievalExecution   ID = "retrieval.execution"
 
+	MemoryProbe         ID = "memory.probe"
 	MemoryExtract       ID = "memory.extract"
 	MemoryRecallWrapper ID = "memory.recall_wrapper"
 	LLMJSONRepair       ID = "llm.json_repair"
@@ -134,6 +135,7 @@ var idFiles = map[ID]string{
 	RetrievalTime:                          "retrieval/time.txt",
 	RetrievalHistory:                       "retrieval/history.txt",
 	RetrievalExecution:                     "retrieval/execution.txt",
+	MemoryProbe:                            "memory/probe.txt",
 	MemoryExtract:                          "memory/extract.txt",
 	MemoryRecallWrapper:                    "memory/recall_wrapper.txt",
 	LLMJSONRepair:                          "llm/json_repair.txt",

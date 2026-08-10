@@ -238,6 +238,34 @@ func TestDefinitionRuntimeRejectsUnpinnedOrUnsupportedExecution(t *testing.T) {
 			},
 			want: "content_hash does not match content",
 		},
+		{
+			name: "evidence identity",
+			mutateReq: func(request *agentapi.RunRequest) {
+				request.Context[0].Evidence = []tool.EvidenceUnit{{
+					SourceKind: "runbook",
+				}}
+			},
+			want: "source_kind and target are required and canonical",
+		},
+		{
+			name: "evidence hash",
+			mutateReq: func(request *agentapi.RunRequest) {
+				request.Context[0].Evidence = []tool.EvidenceUnit{{
+					SourceKind: "runbook", Target: "doc-a", ContentHash: "invalid",
+				}}
+			},
+			want: "evidence unit 0 content_hash is invalid",
+		},
+		{
+			name: "duplicate evidence section",
+			mutateReq: func(request *agentapi.RunRequest) {
+				request.Context[0].Evidence = []tool.EvidenceUnit{{
+					SourceKind: "runbook", Target: "doc-a",
+					Sections: []string{"overview", "overview"},
+				}}
+			},
+			want: `section "overview" is duplicated`,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

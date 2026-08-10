@@ -162,28 +162,6 @@ func TestHistoricalRecallAllowsEpisodeAndSuperseded(t *testing.T) {
 	}
 }
 
-func TestSelectDiverseMemoriesDeduplicatesHistoricalClaims(t *testing.T) {
-	candidates := []scoredMemory{
-		{record: MemoryRecord{
-			ID: "newer", FactKey: "workspace:user-center:owner",
-			Kind: KindAssistantInference, Content: "Possibly owns user center",
-		}, score: 0.9},
-		{record: MemoryRecord{
-			ID: "older", FactKey: "workspace:user-center:owner",
-			Kind: KindAssistantInference, Content: "Possibly owns user center",
-		}, score: 0.8},
-		{record: MemoryRecord{
-			ID: "other", FactKey: "user:response-language",
-			Kind: KindPreference, Content: "Use Chinese",
-		}, score: 0.7},
-	}
-
-	selected := selectDiverseMemories(candidates, 3, recallCharacterBudget)
-	if len(selected) != 2 || selected[0].ID != "newer" || selected[1].ID != "other" {
-		t.Fatalf("selected = %#v", selected)
-	}
-}
-
 func TestRecallUsesBM25SparseVectorWhenVocabularyMatches(t *testing.T) {
 	memory, semanticStore, _, closeDB := newMemoryTestStore(t)
 	defer closeDB()

@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"unicode/utf8"
+	"strings"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
@@ -31,38 +32,82 @@ func chatJSONWith(ctx context.Context, call chatCaller, system, user string, out
 	maxAttempts := opts.maxAttempts()
 	backoff := opts.backoff()
 	maxRepair := opts.repairAttempts()
+	logicalCallSeq := beginLogicalCall(ctx)
 	msgs := []Message{{Role: "system", Content: system}, {Role: "user", Content: user}}
 	repairs := 0
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		started := time.Now()
 		raw, err := call(ctx, msgs, opts.MaxTokens)
 		if err != nil {
-			if ce, retryable := retryableCallError(err); retryable {
-				if attempt == maxAttempts {
+			kind, status, retryable, ce := callErrorDetails(err)
+			retryScheduled := retryable && attempt < maxAttempts
+			delay := time.Duration(0)
+			if retryScheduled {
+				delay = retryDelay(ce, backoff)
+			}
+			observeAttempt(ctx, Attempt{
+				LogicalCallSeq: logicalCallSeq, Kind: "transport", Attempt: attempt,
+				MaxAttempts: maxAttempts, Duration: time.Since(started), ErrorKind: kind,
+				StatusCode: status, Retryable: retryable, RetryScheduled: retryScheduled,
+				Backoff: delay, Outcome: "failed",
+			})
+			if !retryScheduled {
+				if retryable && attempt == maxAttempts {
 					return fmt.Errorf("%w: %w", ErrMaxAttempts, err)
 				}
-				if !sleepFor(ctx, ce, backoff) {
-					return ctx.Err()
-				}
-				backoff = doubleBackoff(backoff)
-				continue
+				return err
 			}
-			return err
+			if !sleepCtx(ctx, delay) {
+				return ctx.Err()
+			}
+			backoff = doubleBackoff(backoff)
+			continue
 		}
 		ok, problem := parseRepairValidate(raw, out, opts.Validate, opts.DisallowUnknownFields)
 		if ok {
+			observeAttempt(ctx, Attempt{
+				LogicalCallSeq: logicalCallSeq, Kind: "transport", Attempt: attempt,
+				MaxAttempts: maxAttempts, Duration: time.Since(started), Outcome: "succeeded",
+			})
 			return nil
 		}
+		observeAttempt(ctx, Attempt{
+			LogicalCallSeq: logicalCallSeq, Kind: "transport", Attempt: attempt,
+			MaxAttempts: maxAttempts, Duration: time.Since(started), Outcome: "invalid_response",
+		})
 		if repairs < maxRepair && attempt < maxAttempts {
+			repairs++
+			observeAttempt(ctx, Attempt{
+				LogicalCallSeq: logicalCallSeq, Kind: "json_repair", Attempt: attempt,
+				MaxAttempts: maxAttempts, RepairRound: repairs,
+				ValidationErrorKind: validationProblemKind(problem),
+				RetryScheduled:      true, Outcome: "scheduled",
+			})
 			msgs = append(msgs,
 				Message{Role: "assistant", Content: raw},
 				Message{Role: "user", Content: repairPrompt(problem)},
 			)
-			repairs++
 			continue
 		}
-		return fmt.Errorf("%w: %s; response=%s", ErrInvalidJSON, problem, truncateForErr(raw))
+		observeAttempt(ctx, Attempt{
+			LogicalCallSeq: logicalCallSeq, Kind: "json_repair", Attempt: attempt,
+			MaxAttempts: maxAttempts, RepairRound: repairs,
+			ValidationErrorKind: validationProblemKind(problem), Outcome: "exhausted",
+		})
+		return fmt.Errorf("%w: %s", ErrInvalidJSON, problem)
 	}
 	return ErrMaxAttempts
+}
+
+func validationProblemKind(problem string) string {
+	switch {
+	case strings.HasPrefix(problem, "malformed JSON"):
+		return "malformed_json"
+	case strings.HasPrefix(problem, "schema validation"):
+		return "schema_validation"
+	default:
+		return "invalid_output"
+	}
 }
 
 // parseRepairValidate decodes raw into out (a pointer), running RepairJSON first
@@ -95,16 +140,4 @@ func repairPrompt(problem string) string {
 	return prompts.MustRender(prompts.LLMJSONRepair, struct {
 		Problem string
 	}{Problem: problem})
-}
-
-func truncateForErr(s string) string {
-	const max = 400
-	if len(s) <= max {
-		return s
-	}
-	s = s[:max]
-	for !utf8.ValidString(s) {
-		s = s[:len(s)-1]
-	}
-	return s + "…"
 }

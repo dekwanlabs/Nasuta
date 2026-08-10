@@ -40,9 +40,6 @@ func (svc *QA) submitInvestigation(
 		SessionID: conversation.SessionID, Question: question, Mode: "multi_agent",
 	})
 	if err != nil {
-		if ownsTrace {
-			trace.Close()
-		}
 		return nil, fmt.Errorf("begin QA parent run %q: %w", runID, err)
 	}
 	runCtx := context.WithoutCancel(scenario.Context(ctx))
@@ -172,16 +169,37 @@ func (svc *QA) submitRun(
 			memCtx, memCancel := context.WithTimeout(memCtx, 60*time.Second)
 			memoryQuestion := tooloutput.TruncateContent(question, 1000)
 			memoryAnswer := tooloutput.TruncateContent(result.Text, 2000)
+			probe, probeErr := buildMemoryProbe(memCtx, memoryProbeInput{
+				Client: svc.helperLLM, Question: memoryQuestion,
+			})
+			if probeErr != nil {
+				log.ErrorfCtx(ctx, "[qa] memory probe error: %v", probeErr)
+				memCancel()
+				return
+			}
+			if len(probe.Probes) == 0 {
+				memCancel()
+				return
+			}
+			recalled, recallErr := recallMemoriesForWrite(memCtx, memoryRecallForWriteInput{
+				Store: svc.memory, UserID: userID, Probes: probe.Probes,
+			})
+			if recallErr != nil {
+				log.ErrorfCtx(ctx, "[qa] memory write recall error: %v", recallErr)
+				memCancel()
+				return
+			}
 			extraction, err := extractMemories(memCtx, memoryExtractInput{
 				Client: svc.helperLLM, Question: memoryQuestion, Answer: memoryAnswer,
+				Existing:       recalled.Result.Matches,
 				EvidenceStatus: EvidenceStatus(result.Evidence.Status),
 			})
 			if err == nil {
 				_, _ = writeMemories(memCtx, memoryWriteInput{
-					Store: svc.memory, Records: extraction.Records, UserID: userID, SessionID: conversation.SessionID,
+					Store: svc.memory, Decisions: extraction.Decisions, UserID: userID, SessionID: conversation.SessionID,
 				})
-				if len(extraction.Records) > 0 {
-					log.InfofCtx(ctx, "[qa] extracted %d memories for user %d", len(extraction.Records), userID)
+				if len(extraction.Decisions) > 0 {
+					log.InfofCtx(ctx, "[qa] consolidated %d memories for user %d", len(extraction.Decisions), userID)
 				}
 			} else {
 				log.ErrorfCtx(ctx, "[qa] memory extraction error: %v", err)
@@ -243,8 +261,22 @@ func qaContextBlocks(rc *retrieval.RetrievedContext) []agentapi.ContextBlock {
 	}
 	return []agentapi.ContextBlock{{
 		Source: "qa.evidence", Title: "QA Evidence", Content: rc.Text,
-		References: references, Complete: true, ContentHash: hashString(rc.Text),
+		References: references, Evidence: cloneEvidenceUnits(rc.EvidenceUnits),
+		Complete: false, ContentHash: hashString(rc.Text),
 	}}
+}
+
+func cloneEvidenceUnits(units []tool.EvidenceUnit) []tool.EvidenceUnit {
+	if len(units) == 0 {
+		return nil
+	}
+	out := make([]tool.EvidenceUnit, len(units))
+	for i, unit := range units {
+		out[i] = unit
+		out[i].Sections = append([]string(nil), unit.Sections...)
+		out[i].Facets = append([]string(nil), unit.Facets...)
+	}
+	return out
 }
 
 func orderedToolIDs(tools []tool.Tool, selected map[tool.ToolID]struct{}) []string {

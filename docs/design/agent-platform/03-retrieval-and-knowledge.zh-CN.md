@@ -1574,7 +1574,7 @@ tags: [event, cookbook, architecture]
 不得再出现：
 
 ```text
-search_code -> check_docs -> get_symbol -> query_relations
+search_code -> check_docs -> get_symbol -> trace_relations
 ```
 
 这种连续换工具但没有获得同类型新证据的路径。

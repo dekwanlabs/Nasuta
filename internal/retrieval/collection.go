@@ -10,6 +10,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type dependencyEdge struct {
@@ -71,7 +72,14 @@ func (retrieve *Retriever) collectServices(ctx context.Context, services []strin
 		refs = append(refs, Reference{Type: "service", Label: name, Target: name})
 	}
 	log.InfofCtx(ctx, "[qa] collect services: %d services, %d refs", len(services), len(refs))
-	addPart(partial{text: sb.String(), refs: refs, priority: partialPriorityService})
+	text := sb.String()
+	units := make([]tool.EvidenceUnit, 0, len(services))
+	for _, service := range services {
+		units = append(units, evidenceUnitForPart("service", service, text, tool.EvidenceCoverage{
+			Complete: true, Included: 1,
+		}))
+	}
+	addPart(partial{text: text, refs: refs, units: units, priority: partialPriorityService})
 }
 
 // collectCode converts code search hits into the code pool.
@@ -123,6 +131,7 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 	type chunk struct {
 		docID       string
 		title       string
+		index       int
 		section     string
 		text        string
 		scope       string
@@ -163,7 +172,8 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 				docOrder = append(docOrder, docID)
 			}
 			byDocID[docID] = append(byDocID[docID], chunk{
-				docID: docID, title: title, section: matched.SectionHeader, text: text, scope: hit.DocKind,
+				docID: docID, title: title, index: matched.ChunkIndex,
+				section: matched.SectionHeader, text: text, scope: hit.DocKind,
 				score: matched.SemanticScore, evidenceCls: hit.EvidenceClass, trust: hit.TrustTier,
 			})
 		}
@@ -206,6 +216,19 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 		if len(chunks) == 1 && chunks[0].section != "" {
 			label = title + " › " + chunks[0].section
 		}
+		sections := make([]string, 0, len(chunks))
+		seenSections := make(map[string]struct{}, len(chunks))
+		for _, chunk := range chunks {
+			section := chunk.section
+			if section == "" {
+				section = fmt.Sprintf("chunk:%d", chunk.index)
+			}
+			if _, duplicate := seenSections[section]; duplicate {
+				continue
+			}
+			seenSections[section] = struct{}{}
+			sections = append(sections, section)
+		}
 
 		titles = append(titles, title)
 		addCode(codeDoc{
@@ -215,6 +238,8 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 			funcName:      label,
 			docID:         chunks[0].docID,
 			kind:          chunks[0].scope,
+			sections:      sections,
+			coverage:      tool.EvidenceCoverage{Partial: true, Included: len(chunks)},
 			text:          text,
 			chars:         len(text),
 			denseScore:    bestScore,
@@ -266,7 +291,16 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 	}
 	log.InfofCtx(ctx, "[qa] collect deps: services=%d/%d edges=%d omitted_edges=%d",
 		result.queried, len(services), len(result.edges), result.omittedEdges)
-	addPart(partial{text: sb.String(), refs: refs, priority: partialPriorityDependency})
+	text := sb.String()
+	units := make([]tool.EvidenceUnit, 0, result.queried)
+	for _, service := range services[:result.queried] {
+		units = append(units, evidenceUnitForPart("dependency", service, text, tool.EvidenceCoverage{
+			Complete: result.omittedEdges == 0 && result.unqueried == 0,
+			Partial:  result.omittedEdges > 0 || result.unqueried > 0,
+			Included: len(result.edges), OmittedItems: result.omittedEdges,
+		}))
+	}
+	addPart(partial{text: text, refs: refs, units: units, priority: partialPriorityDependency})
 }
 
 func (retrieve *Retriever) collectDependencyEdges(ctx context.Context, services []string) dependencyCollection {

@@ -1381,7 +1381,7 @@ indexing.Build
 → Publisher 精确注入 indexing.Service
 → Repository 注入 ontology.Service
 → ontology.Service 注入 agent.NewTools
-→ 根据 Enabled 注册 query_relations
+→ 根据 Enabled 注册 trace_relations
 ```
 
 建议状态：
@@ -1392,7 +1392,7 @@ indexing.Build
 | 显式 Neo4j 正常 | 本体能力启用，只访问 Neo4j |
 | 显式 Neo4j 配置缺失 | 返回清晰构造错误或禁用本体能力并 Error 日志 |
 | 显式 Neo4j 运行中失败 | 当前请求返回 unavailable，健康状态异常，不改查 SQLite |
-| 本体能力不可用 | 现有专用工具继续工作，`query_relations` 不注册或明确不可用 |
+| 本体能力不可用 | 现有专用工具继续工作，`trace_relations` 不注册或明确不可用 |
 
 是否因本体 Provider 失败终止进程由能力级别决定：第一阶段本体属于可选能力，推荐禁用本体能力并保持现有 QA 可用；但配置失败必须进入健康检查和错误日志，不能只输出 Debug/Warn 后伪装正常。
 
@@ -1403,7 +1403,7 @@ indexing.Build
 建议新增内部构建工具：
 
 ```text
-query_relations
+trace_relations
 ```
 
 输入：
@@ -1492,13 +1492,13 @@ query_relations
 | `trace_deps` | ontology.Service | 已迁移，复用同代际 `depends_on` 路径查询 |
 | `trace_calls` | ontology.Service + codegraph/callchain | API 入口由本体解析，方法遍历仍由 CodeGraph 完成 |
 | `search_code` | Semantic + BM25 | 保持不变 |
-| `query_relations` | ontology.Service | 新增 |
+| `trace_relations` | ontology.Service | 新增 |
 
 专用工具只迁移本体能够完整表达的部分。Service/API 完整详情、语义内容和方法调用边不复制进通用关系查询。
 
 ##### 13.3 Retrieval 集成
 
-第一阶段只把 `query_relations` 作为 Agent read tool，不把全量本体内容注入 Prompt。查询路由可以根据以下信号选择它：
+第一阶段只把 `trace_relations` 作为 Agent read tool，不把全量本体内容注入 Prompt。查询路由可以根据以下信号选择它：
 
 ```text
 “有哪些关系/关联”
@@ -1523,7 +1523,7 @@ query_relations
 | `internal/platform/graph` | 删除 | `depends_on` 已由 Ontology Repository 统一查询，不保留第二份运行时图 |
 | `internal/platform/store/codegraph` | 第一阶段不改 | 完整调用图仍由专用存储拥有 |
 | `internal/agent/tools.go` | 精确注入 ontology.Service | 不保留泛型依赖容器 |
-| `internal/agent/registry.go` | 条件注册 query_relations | 能力不可用时不伪装可用 |
+| `internal/agent/registry.go` | 条件注册 trace_relations | 能力不可用时不伪装可用 |
 | `app/platform.go` | 构造并组合 ontology | 根组合点可以知道具体实现 |
 | `config`/`.env.example` | 增加 Ontology Provider 配置 | 配置在入口规范化 |
 | `knowledge/api.go` | 第一阶段不改 | 不提前固化公开契约 |
@@ -1569,7 +1569,7 @@ query_relations
 - OntologyConfig；
 - Provider 分发；
 - `ontology.Service`；
-- `query_relations` 条件注册；
+- `trace_relations` 条件注册；
 - Stats/Health。
 
 默认仍使用 SQLite。
@@ -1779,7 +1779,7 @@ SQLite 在普通测试中运行。Neo4j 合同测试需要显式环境开关和�
 #### 20. 安全与权限
 
 - 本体查询只读；
-- `query_relations` 进入现有 read tool 权限体系；
+- `trace_relations` 进入现有 read tool 权限体系；
 - Neo4j 使用最小权限账户；
 - 凭证只从配置入口读取，不写入 Platform Settings 返回对象之外的日志；
 - 查询不接受任意 SQL/Cypher；
@@ -1815,7 +1815,7 @@ SQLite 在普通测试中运行。Neo4j 合同测试需要显式环境开关和�
 8. 结构数据和本体数据在同一个 SQLite 快照原子发布。
 9. Resolve/Neighbors 有存储层 Limit，FindBoundedPaths 有服务层深度、节点和 Fanout 预算。
 10. 多跳结果携带深度和基础事实，不伪装为直接事实。
-11. `query_relations` 返回 Evidence、Confidence 和 truncated。
+11. `trace_relations` 返回 Evidence、Confidence 和 truncated。
 12. Provider 配置只有一个显式分发点，无静默后端替换。
 13. 本体不可用时现有 QA 专用工具继续工作，状态可观察。
 14. `get_service`、`list_apis`、`trace_deps`、`trace_calls` 行为不回归。
@@ -1854,7 +1854,7 @@ Nasuta 的本体化应从“统一现有确定性知识的语义和证据”开�
 行为基线
 → 本体 Schema/Identity/Projection
 → SQLite 原子快照和 Repository
-→ query_relations
+→ trace_relations
 → 影子对比
 → 专用工具逐个迁移
 → 真实需求驱动 Neo4j Adapter

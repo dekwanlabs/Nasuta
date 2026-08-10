@@ -29,6 +29,22 @@ const (
 	rrfK           = 60.0
 )
 
+// RelevancePolicy defines score-kind-aware history admission thresholds.
+type RelevancePolicy struct {
+	DenseOnlyMin         float32
+	DenseLexicalMin      float32
+	DenseLexicalCoverage float64
+	LexicalOnlyCoverage  float64
+	LexicalOnlyMinTerms  int
+}
+
+func defaultRelevancePolicy() RelevancePolicy {
+	return RelevancePolicy{
+		DenseOnlyMin: 0.80, DenseLexicalMin: 0.70, DenseLexicalCoverage: 0.35,
+		LexicalOnlyCoverage: 0.70, LexicalOnlyMinTerms: 2,
+	}
+}
+
 // Service owns current-session history recall and eventual vector indexing.
 type Service struct {
 	sessions      *memory.SessionStore
@@ -36,6 +52,7 @@ type Service struct {
 	embedder      embed.Embedder
 	bm25          *retrieval.BM25Builder
 	bm25VocabPath string
+	relevance     RelevancePolicy
 	syncMu        sync.Mutex
 }
 
@@ -44,7 +61,33 @@ func New(sessions *memory.SessionStore, sem semantic.Store, emb embed.Embedder) 
 	if sessions == nil {
 		return nil
 	}
-	return &Service{sessions: sessions, semantic: sem, embedder: emb}
+	return &Service{
+		sessions: sessions, semantic: sem, embedder: emb,
+		relevance: defaultRelevancePolicy(),
+	}
+}
+
+// WithRelevancePolicy overrides calibrated thresholds for this embedding model.
+func (service *Service) WithRelevancePolicy(policy RelevancePolicy) *Service {
+	if service == nil {
+		return nil
+	}
+	if policy.DenseOnlyMin > 0 {
+		service.relevance.DenseOnlyMin = policy.DenseOnlyMin
+	}
+	if policy.DenseLexicalMin > 0 {
+		service.relevance.DenseLexicalMin = policy.DenseLexicalMin
+	}
+	if policy.DenseLexicalCoverage > 0 {
+		service.relevance.DenseLexicalCoverage = policy.DenseLexicalCoverage
+	}
+	if policy.LexicalOnlyCoverage > 0 {
+		service.relevance.LexicalOnlyCoverage = policy.LexicalOnlyCoverage
+	}
+	if policy.LexicalOnlyMinTerms > 0 {
+		service.relevance.LexicalOnlyMinTerms = policy.LexicalOnlyMinTerms
+	}
+	return service
 }
 
 // EnableBM25 binds sparse coordinates to the dedicated history collection.
@@ -90,9 +133,15 @@ func (service *Service) Find(ctx context.Context, userID int64, sessionID, query
 	return `{"version":1,"mode":"no_history_hit","turns":[]}`, nil
 }
 
-type rankedRef struct {
-	ref   string
-	score float64
+type historyCandidate struct {
+	ref             string
+	denseRank       int
+	lexicalRank     int
+	denseScore      float32
+	lexicalWeight   int
+	matchedTerms    int
+	lexicalCoverage float64
+	rankScore       float64
 }
 
 type historyPayload struct {
@@ -111,16 +160,20 @@ type recallInput struct {
 }
 
 type recallOutput struct {
-	Payload           string
-	Mode              string
-	DenseCandidates   int
-	LexicalCandidates int
-	FusedCandidates   int
-	StaleCandidates   int
-	SelectedItems     int
-	SelectedTokens    int
-	NeighborItems     int
-	Record            bool
+	Payload            string
+	Mode               string
+	DenseCandidates    int
+	LexicalCandidates  int
+	FusedCandidates    int
+	ScoreFiltered      int
+	AcceptedCandidates int
+	LoadedRecords      int
+	DenseOnlyAccepted  int
+	StaleCandidates    int
+	SelectedItems      int
+	SelectedTokens     int
+	NeighborItems      int
+	Record             bool
 }
 
 var sessionHistoryRecallSpec = executiontrace.Spec[recallInput, recallOutput]{
@@ -129,7 +182,9 @@ var sessionHistoryRecallSpec = executiontrace.Spec[recallInput, recallOutput]{
 	Output: func(input recallInput, output recallOutput, _ error) map[string]any {
 		return map[string]any{
 			"mode": output.Mode, "dense_candidates": output.DenseCandidates, "lexical_candidates": output.LexicalCandidates,
-			"fused_candidates": output.FusedCandidates, "stale_candidates": output.StaleCandidates,
+			"fused_candidates": output.FusedCandidates, "score_filtered": output.ScoreFiltered,
+			"accepted_candidates": output.AcceptedCandidates, "loaded_records": output.LoadedRecords,
+			"dense_only_accepted": output.DenseOnlyAccepted, "stale_candidates": output.StaleCandidates,
 			"selected_items": output.SelectedItems, "selected_tokens": output.SelectedTokens,
 			"neighbor_items": output.NeighborItems, "query_tokens": tooloutput.EstimateTokens(input.Query),
 		}
@@ -169,7 +224,7 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 	}
 
 	mode := "lexical_only_unavailable_dense"
-	dense := []string(nil)
+	dense := []semantic.Hit(nil)
 	if service.semantic != nil && service.embedder != nil && service.embedder.Enabled() {
 		vectors, embedErr := service.embedder.Embed(ctx, []string{query})
 		if embedErr != nil {
@@ -187,21 +242,21 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 				},
 				Limit: candidateLimit,
 			}
-			if service.bm25 != nil {
-				indices, values := retrieval.SparseToSorted(service.bm25.QuerySparse(query))
-				if len(indices) > 0 {
-					searchQuery.SparseVector = &semantic.SparseVector{Indices: indices, Values: values}
-				}
-			}
 			hits, searchErr := service.semantic.Search(ctx, searchQuery)
 			if searchErr != nil {
 				mode = "lexical_only_dense_error"
 				log.ErrorfCtx(ctx, "[qa] session history hybrid search failed: %v", searchErr)
 			} else {
-				mode = "hybrid"
-				dense = make([]string, 0, len(hits))
+				mode = "dense_only"
+				dense = make([]semantic.Hit, 0, len(hits))
 				seen := make(map[string]struct{}, len(hits))
 				for _, hit := range hits {
+					if hit.ScoreKind != semantic.ScoreDense {
+						mode = "lexical_only_dense_score_kind_error"
+						log.ErrorfCtx(ctx, "[qa] session history dense query returned score kind %q", hit.ScoreKind)
+						dense = nil
+						break
+					}
 					ref, _ := hit.Metadata["ref"].(string)
 					if ref == "" {
 						ref = hit.ID
@@ -213,12 +268,17 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 						continue
 					}
 					seen[ref] = struct{}{}
-					dense = append(dense, ref)
+					hit.Metadata = map[string]any{"ref": ref}
+					dense = append(dense, hit)
+				}
+				if len(dense) > 0 && len(lexical) > 0 {
+					mode = "dense_lexical"
 				}
 			}
 		}
 	}
-	if mode == "hybrid" && len(dense) == 0 && len(lexical) > 0 {
+	if mode == "dense_only" && len(dense) == 0 && len(lexical) > 0 {
+		mode = "lexical_only"
 		pending, pendingErr := service.sessions.HasPendingHistoryUpserts(ctx, userID, sessionID)
 		if pendingErr != nil {
 			return recallOutput{}, pendingErr
@@ -228,15 +288,24 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 		}
 	}
 
-	ranked := fuseRanks(dense, lexical)
+	ranked := mergeHistoryCandidates(dense, lexical, len(queryTerms))
 	if len(ranked) == 0 {
 		log.InfofCtx(ctx, "[qa] session history recall session=%s mode=no_history_hit dense=%d lexical=%d", sessionID, len(dense), len(lexical))
 		return recallOutput{
 			Mode: "no_history_hit", DenseCandidates: len(dense), LexicalCandidates: len(lexical), Record: true,
 		}, nil
 	}
-	refs := make([]string, 0, min(len(ranked), candidateLimit))
-	for _, candidate := range ranked {
+	accepted, filtered, denseOnlyAccepted := service.filterRelevant(ranked)
+	if len(accepted) == 0 {
+		log.InfofCtx(ctx, "[qa] session history recall session=%s mode=no_relevant_history dense=%d lexical=%d fused=%d filtered=%d",
+			sessionID, len(dense), len(lexical), len(ranked), filtered)
+		return recallOutput{
+			Mode: "no_relevant_history", DenseCandidates: len(dense), LexicalCandidates: len(lexical),
+			FusedCandidates: len(ranked), ScoreFiltered: filtered, Record: true,
+		}, nil
+	}
+	refs := make([]string, 0, min(len(accepted), candidateLimit))
+	for _, candidate := range accepted {
 		refs = append(refs, candidate.ref)
 	}
 	records, err := service.sessions.LoadHistorySummaries(ctx, userID, sessionID, refs)
@@ -247,9 +316,9 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 	for _, record := range records {
 		byRef[record.Ref] = record
 	}
-	scores := make(map[string]float64, len(ranked))
-	for _, candidate := range ranked {
-		scores[candidate.ref] = candidate.score
+	scores := make(map[string]float64, len(accepted))
+	for _, candidate := range accepted {
+		scores[candidate.ref] = candidate.rankScore
 	}
 	ordered := make([]memory.HistorySummary, 0, len(records))
 	for ref, record := range byRef {
@@ -317,33 +386,89 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 		return recallOutput{}, err
 	}
 	selectedTokens := tooloutput.EstimateTokens(selected)
-	log.InfofCtx(ctx, "[qa] session history recall session=%s mode=%s dense=%d lexical=%d fused=%d revalidated=%d selected_tokens=%d",
-		sessionID, mode, len(dense), len(lexical), len(ranked), len(records), selectedTokens)
+	log.InfofCtx(ctx, "[qa] session history recall session=%s mode=%s dense=%d lexical=%d fused=%d filtered=%d accepted=%d loaded_records=%d selected_tokens=%d",
+		sessionID, mode, len(dense), len(lexical), len(ranked), filtered, len(accepted), len(records), selectedTokens)
 	return recallOutput{
 		Payload: selected, Mode: mode, DenseCandidates: len(dense), LexicalCandidates: len(lexical),
-		FusedCandidates: len(ranked), StaleCandidates: len(ranked) - len(records),
-		SelectedItems: selectedItems, SelectedTokens: selectedTokens, NeighborItems: neighborItems, Record: true,
+		FusedCandidates: len(ranked), ScoreFiltered: filtered, AcceptedCandidates: len(accepted),
+		LoadedRecords: len(records), DenseOnlyAccepted: denseOnlyAccepted,
+		StaleCandidates: len(accepted) - len(records),
+		SelectedItems:   selectedItems, SelectedTokens: selectedTokens, NeighborItems: neighborItems, Record: true,
 	}, nil
 }
 
-func fuseRanks(dense, lexical []string) []rankedRef {
-	scores := make(map[string]float64, len(dense)+len(lexical))
-	for _, ranking := range [][]string{dense, lexical} {
-		for i, ref := range ranking {
-			scores[ref] += 1 / (rrfK + float64(i+1))
+func mergeHistoryCandidates(dense []semantic.Hit, lexical []memory.HistoryLexicalCandidate, queryTerms int) []historyCandidate {
+	result := make([]historyCandidate, 0, len(dense)+len(lexical))
+	byRef := make(map[string]int, len(dense)+len(lexical))
+	ensure := func(ref string) int {
+		if index, ok := byRef[ref]; ok {
+			return index
 		}
+		index := len(result)
+		byRef[ref] = index
+		result = append(result, historyCandidate{ref: ref})
+		return index
 	}
-	result := make([]rankedRef, 0, len(scores))
-	for ref, score := range scores {
-		result = append(result, rankedRef{ref: ref, score: score})
+	for rank, hit := range dense {
+		ref, _ := hit.Metadata["ref"].(string)
+		if ref == "" {
+			continue
+		}
+		index := ensure(ref)
+		result[index].denseRank = rank + 1
+		result[index].denseScore = hit.DenseScore
+		result[index].rankScore += 1 / (rrfK + float64(rank+1))
+	}
+	for rank, lexicalCandidate := range lexical {
+		if lexicalCandidate.Ref == "" {
+			continue
+		}
+		index := ensure(lexicalCandidate.Ref)
+		result[index].lexicalRank = rank + 1
+		result[index].lexicalWeight = lexicalCandidate.Weight
+		result[index].matchedTerms = lexicalCandidate.MatchedTerms
+		if queryTerms > 0 {
+			result[index].lexicalCoverage = min(1, float64(lexicalCandidate.MatchedTerms)/float64(queryTerms))
+		}
+		result[index].rankScore += 1 / (rrfK + float64(rank+1))
 	}
 	sort.Slice(result, func(i, j int) bool {
-		if result[i].score != result[j].score {
-			return result[i].score > result[j].score
+		if result[i].rankScore != result[j].rankScore {
+			return result[i].rankScore > result[j].rankScore
+		}
+		if result[i].denseScore != result[j].denseScore {
+			return result[i].denseScore > result[j].denseScore
 		}
 		return result[i].ref < result[j].ref
 	})
 	return result
+}
+
+func (service *Service) filterRelevant(candidates []historyCandidate) ([]historyCandidate, int, int) {
+	accepted := make([]historyCandidate, 0, len(candidates))
+	denseOnlyAccepted := 0
+	for _, candidate := range candidates {
+		hasDense := candidate.denseRank > 0
+		hasLexical := candidate.lexicalRank > 0
+		pass := false
+		switch {
+		case hasDense && hasLexical:
+			pass = candidate.denseScore >= service.relevance.DenseLexicalMin &&
+				candidate.lexicalCoverage >= service.relevance.DenseLexicalCoverage
+		case hasDense:
+			pass = candidate.denseScore >= service.relevance.DenseOnlyMin
+			if pass {
+				denseOnlyAccepted++
+			}
+		case hasLexical:
+			pass = candidate.lexicalCoverage >= service.relevance.LexicalOnlyCoverage &&
+				candidate.matchedTerms >= service.relevance.LexicalOnlyMinTerms
+		}
+		if pass {
+			accepted = append(accepted, candidate)
+		}
+	}
+	return accepted, len(candidates) - len(accepted), denseOnlyAccepted
 }
 
 func selectPayload(mode string, candidates []memory.HistorySummary, limit, tokenBudget int) (string, error) {

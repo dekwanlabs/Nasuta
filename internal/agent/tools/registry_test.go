@@ -63,13 +63,12 @@ func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
 	checks := map[string][]string{
 		"get_service":     {"metadata", "does not establish dependencies"},
 		"trace_deps":      {"service-level", "does not establish method-level"},
-		"list_apis":       {"complete API routes", "get_symbol must resolve that target uniquely first", "class-level and method-level", "does not establish caller or callee"},
+		"list_apis":       {"complete API routes", "reuse an exact unique definition already present", "get_symbol must resolve the target uniquely first", "class-level and method-level", "does not establish caller or callee"},
 		"search_code":     {"fallback", "not as proof", "complete API route"},
-		"get_symbol":      {"exact definitions", "first and only tool call", "including when the user ultimately asks for APIs", "does not establish its callers"},
+		"get_symbol":      {"exact definitions", "no exact unique definition already present", "first and only tool call", "including when the user ultimately asks for APIs", "does not establish its callers"},
 		"trace_calls":     {"method-level callers and callees", "upstream controller candidates", "not proof of complete service dependencies"},
 		"search_runbooks": {"operational runbooks", "copy matches[].docId exactly", "do not prove current runtime state"},
 		"check_docs":      {"documentation coverage", "does not establish runtime"},
-		"index_stats":     {"health and summary counts", "does not establish business behavior"},
 	}
 	for name, fragments := range checks {
 		description := descriptions[name]
@@ -166,11 +165,11 @@ func TestSessionTurnDetailsToolIsPrivateAndRequiresCurrentReference(t *testing.T
 	}
 }
 
-func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
+func TestTraceRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
 	without := builtinTools(&Service{}, config.Config{}, nil, nil)
 	for _, candidate := range without {
-		if candidate.ID == "query_relations" {
-			t.Fatal("query_relations registered without ontology service")
+		if candidate.ID == "trace_relations" {
+			t.Fatal("trace_relations registered without ontology service")
 		}
 	}
 
@@ -178,13 +177,26 @@ func TestQueryRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
 	tools := builtinTools(svc, config.Config{}, nil, nil)
 	var relation *Tool
 	for i := range tools {
-		if tools[i].ID == "query_relations" {
+		if tools[i].ID == "trace_relations" {
 			relation = &tools[i]
 			break
 		}
 	}
 	if relation == nil {
-		t.Fatal("query_relations was not registered")
+		t.Fatal("trace_relations was not registered")
+	}
+	// The description is the only place the model learns when to prefer relation
+	// evidence and where the ontology stops, so keep both halves asserted.
+	for _, fragment := range []string{
+		"before free-text search",
+		"set direction to incoming",
+		"covers only those five relations",
+		"require call tracing",
+		"no matching evidence",
+	} {
+		if !strings.Contains(relation.Description, fragment) {
+			t.Errorf("trace_relations description missing %q", fragment)
+		}
 	}
 	result, err := relation.Handler.Execute(context.Background(), map[string]any{
 		"entity": "orders", "relations": []any{"depends_on"}, "max_depth": 2, "max_nodes": 20, "max_fanout": 10,

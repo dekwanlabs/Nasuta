@@ -145,7 +145,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 	}
 	wantTools := map[string][]string{
 		"investigator.code":    {"search_code", "get_symbol", "trace_calls", "list_apis"},
-		"investigator.runtime": {"get_service", "trace_deps", "list_apis", "trace_calls", "index_stats"},
+		"investigator.runtime": {"get_service", "trace_deps", "list_apis", "trace_calls"},
 		"investigator.docs":    {"get_service", "search_runbooks", "check_docs"},
 		"synthesizer":          {},
 	}

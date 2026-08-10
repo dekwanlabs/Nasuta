@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -109,7 +110,9 @@ func TestAnalyzeEvidenceReturnsUnavailableError(t *testing.T) {
 }
 
 func TestAnalyzeEvidenceReturnsInvalidOutputError(t *testing.T) {
+	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"preprocess\":{}}"}}]}`))
 	}))
@@ -118,6 +121,26 @@ func TestAnalyzeEvidenceReturnsInvalidOutputError(t *testing.T) {
 
 	if _, err := AnalyzeEvidence(context.Background(), client, "question", "", "question", RoutingCapabilities{}, nil, 512); err == nil {
 		t.Fatal("missing route must return an error")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("planner requests = %d, want 1", got)
+	}
+}
+
+func TestAnalyzeEvidenceDoesNotRetryTransportFailure(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+
+	if _, err := AnalyzeEvidence(context.Background(), client, "question", "", "question", RoutingCapabilities{}, nil, 512); err == nil {
+		t.Fatal("transport failure must return an error")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("planner requests = %d, want 1", got)
 	}
 }
 

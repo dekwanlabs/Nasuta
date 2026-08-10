@@ -121,6 +121,7 @@ type Input struct {
 	Question           string
 	Messages           []llm.Message
 	EvidenceContent    string
+	EvidenceUnits      []tool.EvidenceUnit
 	ReferenceTypes     map[string]tool.ReferenceType
 	EvidenceSeeded     bool
 	Direct             bool
@@ -218,6 +219,7 @@ func (agent *Agent) runWithSnapshot(
 	}
 	if retrieved != nil {
 		input.EvidenceContent = retrieved.Text
+		input.EvidenceUnits = cloneEvidenceUnits(retrieved.EvidenceUnits)
 	}
 	return agent.RunCompiled(ctx, runID, input, toolSnapshot)
 }

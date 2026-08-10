@@ -37,6 +37,20 @@ func TestFeaturePromptLocalesHaveMatchingFiles(t *testing.T) {
 	}
 }
 
+func TestGenerationRequestOutputLanguageIsIndependentOfInstructionLocale(t *testing.T) {
+	for locale, required := range map[string]string{
+		"en":    "Write every natural-language field in Simplified Chinese.",
+		"zh-CN": "所有自然语言字段必须使用简体中文。",
+	} {
+		t.Run(locale, func(t *testing.T) {
+			content := mustReadLocalizedFeaturePrompt(locale, "generation_request.md")
+			if !strings.Contains(content, required) {
+				t.Fatalf("%s generation request is missing output-language rule %q", locale, required)
+			}
+		})
+	}
+}
+
 func TestRequirementAnalysisPromptsRejectTechnicalInputs(t *testing.T) {
 	for _, locale := range []string{"en", "zh-CN"} {
 		t.Run(locale, func(t *testing.T) {

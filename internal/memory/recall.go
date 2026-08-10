@@ -221,22 +221,16 @@ func selectDiverseMemories(candidates []scoredMemory, limit, characterBudget int
 	}
 	selected := make([]MemoryRecord, 0, min(limit, len(candidates)))
 	selectedIDs := make(map[string]struct{}, cap(selected))
-	selectedClaims := make(map[string]struct{}, cap(selected))
 	seenKinds := make(map[MemoryKind]struct{}, 5)
 	remaining := characterBudget
 
 	add := func(candidate scoredMemory) bool {
-		claimKey := candidate.record.FactKey + "\x00" + candidate.record.Content
-		if _, exists := selectedClaims[claimKey]; exists {
-			return false
-		}
 		size := len([]rune(candidate.record.Content))
 		if size > remaining {
 			return false
 		}
 		selected = append(selected, candidate.record)
 		selectedIDs[candidate.record.ID] = struct{}{}
-		selectedClaims[claimKey] = struct{}{}
 		remaining -= size
 		return true
 	}

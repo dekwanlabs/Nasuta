@@ -25,6 +25,13 @@ type anthropicProvider struct {
 
 const anthropicVersion = "2023-06-01"
 
+func anthropicMessagesURL(baseURL string) string {
+	if strings.HasSuffix(baseURL, "/v1") {
+		return baseURL + "/messages"
+	}
+	return baseURL + "/v1/messages"
+}
+
 type anthropicRequest struct {
 	Model         string               `json:"model"`
 	System        json.RawMessage      `json:"system,omitempty"`
@@ -47,6 +54,7 @@ type anthropicMessage struct {
 type anthropicContentBlock struct {
 	Type      string         `json:"type"`
 	Text      string         `json:"text,omitempty"`
+	Content   string         `json:"content,omitempty"`
 	ID        string         `json:"id,omitempty"`
 	Name      string         `json:"name,omitempty"`
 	Input     map[string]any `json:"input,omitempty"`
@@ -117,7 +125,7 @@ func isToolResultTurn(item1 anthropicMessage) bool {
 }
 
 func toolResultBlock(item2 Message) anthropicContentBlock {
-	return anthropicContentBlock{Type: "tool_result", ToolUseID: item2.ToolCallID, Text: item2.Content}
+	return anthropicContentBlock{Type: "tool_result", ToolUseID: item2.ToolCallID, Content: item2.Content}
 }
 
 func assistantBlocks(item3 Message) []anthropicContentBlock {
@@ -211,7 +219,7 @@ func (anthropic anthropicProvider) chatMessages(ctx context.Context, messages []
 		SetHeader("anthropic-version", anthropicVersion).
 		SetHeader("Content-Type", "application/json").
 		SetBody(body).
-		Post(anthropic.baseURL + "/v1/messages")
+		Post(anthropicMessagesURL(anthropic.baseURL))
 	if err != nil {
 		return "", Usage{}, &CallError{Kind: ErrKindNetwork, Err: fmt.Errorf("http request: %w", err)}
 	}
@@ -304,7 +312,7 @@ func (anthropic anthropicProvider) ChatWithToolsMaxWithParameters(
 			SetHeader("Accept", "text/event-stream").
 			SetBody(body).
 			SetDoNotParseResponse(true).
-			Post(anthropic.baseURL + "/v1/messages")
+			Post(anthropicMessagesURL(anthropic.baseURL))
 	}, func(duration time.Duration, attemptErr error) {
 		recordCallUsageWithDuration(ctx, "anthropic", anthropic.model, maxTokens, duration, Usage{}, attemptErr)
 	})

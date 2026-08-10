@@ -10,8 +10,13 @@ Definitions:
 - module: communication module firmware (WiFi/BLE/4G/NB-IoT modem, AT commands)
 - generic: none of the above
 
-Rules: prefer specific types. Mobile apps use mobile platform SDKs. MCU has no OS.
-Analyze file extensions, build files, framework imports, and README.
+Rules: prefer specific types. Mobile apps use mobile platform SDKs. MCU includes
+bare-metal and RTOS microcontroller firmware; embedded requires an embedded Linux,
+Buildroot, Yocto, or kernel-space signal.
+Inspect only the supplied file paths and filenames. Use extensions, directory
+layout, and recognizable build/config filenames as signals; do not claim to have
+read file contents or imports. Choose generic with low confidence when the tree
+does not establish a more specific type.
 
 {{ .Files }}
 Return ONLY valid JSON (no fences):

@@ -35,6 +35,8 @@ type compiledLoop struct {
 	stepSeq              int
 	answered             bool
 	seenTools            map[string]bool
+	evidenceLedger       *runEvidenceLedger
+	remainingToolTokens  int
 	webEvidence          webEvidenceState
 	evidenceTurnExtended bool
 	stepLimit            int
@@ -86,6 +88,8 @@ func (agent *Agent) prepareCompiledLoop(
 		answerToolSources:   make(map[int]string),
 		result:              result,
 		seenTools:           map[string]bool{},
+		evidenceLedger:      newRunEvidenceLedger(input.EvidenceUnits),
+		remainingToolTokens: initialToolTokenBudget(agent, messages, tools),
 		stepLimit:           maxSteps,
 	}
 	state.recordSeedEvidence(agent.observer)

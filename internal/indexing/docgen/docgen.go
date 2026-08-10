@@ -175,7 +175,7 @@ func (g *Generator) generateModule(ctx context.Context, group, name, dir string)
 
 	// Phase 2: send only the matching template + project files.
 	templateName := "docgen_" + projectType
-	generatePrompt := buildGeneratePrompt(filesCtx, templateName)
+	generatePrompt := buildGeneratePrompt(name, filesCtx, templateName)
 	log.Infof("[docgen] generating %s/%s (type=%s template=%s)...", group, name, projectType, templateName)
 
 	genCtx, genCancel := context.WithTimeout(ctx, 300*time.Second)

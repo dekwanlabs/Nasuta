@@ -172,14 +172,21 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	var result *AskResult
 	if prepared.execution.Strategy == retrieval.ExecutionMultiAgent {
-		return svc.submitInvestigation(
+		result, err = svc.submitInvestigation(
 			prepared.ctx, prepared.request, prepared.request.Question,
 			prepared.request.Conversation, prepared.request.UserID,
 			prepared.request.RunID, prepared.trace, prepared.ownsTrace,
 		)
+	} else {
+		result, err = svc.prepareSingleAgentRun(prepared)
 	}
-	return svc.prepareSingleAgentRun(prepared)
+	if err != nil {
+		prepared.closeTrace()
+	}
+	return result, err
 }
 
 func standardQARequest(request QARequest, defaultAgent agentapi.DefinitionRef) bool {

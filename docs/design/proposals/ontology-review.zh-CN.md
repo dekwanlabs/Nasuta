@@ -59,7 +59,7 @@
 | 场景 | 调用方 | 走了什么 |
 |---|---|---|
 | Agent 依赖工具 `trace_deps` | `internal/agent/registry.go:75-90` → `tools.go:702` | 查一个服务，上/下游各跑一遍 `depends_on` 遍历，转成证据型 `DependencyTrace`（含 `Truncated`） |
-| Agent 跨类型关系工具 `query_relations` | `internal/agent/registry.go:310` | `service -> api -> symbol -> runbook` 这类跨类型多跳查询，用 `implemented_by / exposes / documented_by` |
+| Agent 跨类型关系工具 `trace_relations` | `internal/agent/registry.go:310` | `service -> api -> symbol -> runbook` 这类跨类型多跳查询，用 `implemented_by / exposes / documented_by` |
 | API 定位辅助 | `internal/agent/tools.go:1249` | `resolveAPICallTarget` 用 `QueryRelations(implemented_by)` 把 controller 名解析成 API 入口 |
 | QA 依赖证据 | `internal/retrieval/collection.go:219` `collectDeps` | 对每个候选服务调 `TraceDeps`，去重+预算后拼进模型上下文 |
 | 离线文档/项目生成 | `internal/feature/delivery/generation.go:214` | 对每个服务并发 `TraceDependencies`，把依赖边作为证据源 |

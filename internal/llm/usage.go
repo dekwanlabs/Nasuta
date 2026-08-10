@@ -89,6 +89,11 @@ type ExecutionObserver interface {
 	OnLLMExecution(context.Context, Execution)
 }
 
+// AttemptObserver receives retry and repair decisions for one logical call.
+type AttemptObserver interface {
+	OnLLMAttempt(context.Context, Attempt)
+}
+
 // Execution describes one model request without prescribing an export protocol.
 type Execution struct {
 	CallSeq         int
@@ -101,10 +106,28 @@ type Execution struct {
 	Panic           any
 }
 
+// Attempt describes one transport execution or structured-output repair decision.
+type Attempt struct {
+	LogicalCallSeq      int
+	Kind                string
+	Attempt             int
+	MaxAttempts         int
+	RepairRound         int
+	Duration            time.Duration
+	ErrorKind           string
+	StatusCode          int
+	ValidationErrorKind string
+	Retryable           bool
+	RetryScheduled      bool
+	Backoff             time.Duration
+	Outcome             string
+}
+
 type callLifecycleState struct {
 	runID    string
 	observer CallLifecycleObserver
 	next     atomic.Int64
+	logical  atomic.Int64
 }
 
 type usageContext struct {
@@ -113,6 +136,7 @@ type usageContext struct {
 	recorder  UsageRecorder
 	lifecycle *callLifecycleState
 	execution ExecutionObserver
+	attempt   AttemptObserver
 }
 
 type usageContextKey struct{}
@@ -140,10 +164,37 @@ func WithExecutionObserver(ctx context.Context, observer ExecutionObserver) cont
 	}
 	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
 	metadata.execution = observer
+	if attempt, ok := observer.(AttemptObserver); ok {
+		metadata.attempt = attempt
+	}
 	if metadata.lifecycle == nil {
 		metadata.lifecycle = &callLifecycleState{}
 	}
 	return context.WithValue(ctx, usageContextKey{}, metadata)
+}
+
+func beginLogicalCall(ctx context.Context) int {
+	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
+	if metadata.lifecycle == nil {
+		return 0
+	}
+	return int(metadata.lifecycle.logical.Add(1))
+}
+
+func observeAttempt(ctx context.Context, attempt Attempt) {
+	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
+	if metadata.attempt == nil {
+		return
+	}
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.ErrorfCtx(ctx, "[llm] attempt observer logical_call=%d attempt=%d: %v",
+					attempt.LogicalCallSeq, attempt.Attempt, recovered)
+			}
+		}()
+		metadata.attempt.OnLLMAttempt(context.WithoutCancel(ctx), attempt)
+	}()
 }
 
 // WithUsagePhase identifies why the next model call is being made.

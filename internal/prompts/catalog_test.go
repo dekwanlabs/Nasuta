@@ -67,3 +67,16 @@ func TestRenderSupportsFeatureDeliveryHelpers(t *testing.T) {
 		}
 	}
 }
+
+func TestIncidentPromptDoesNotForceUnsupportedRootCause(t *testing.T) {
+	prompt := Text(IncidentSystem)
+	for _, required := range []string{
+		"Use only evidence supplied in the incident input",
+		"Logs, traces, and code hints are optional",
+		"state that the root cause is not established",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("incident prompt missing evidence boundary %q", required)
+		}
+	}
+}

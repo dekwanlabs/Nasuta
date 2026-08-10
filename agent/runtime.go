@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type Actor struct {
@@ -19,12 +21,13 @@ type Correlation struct {
 }
 
 type ContextBlock struct {
-	Source      string      `json:"source"`
-	Title       string      `json:"title"`
-	Content     string      `json:"content"`
-	References  []Reference `json:"references,omitempty"`
-	Complete    bool        `json:"complete"`
-	ContentHash string      `json:"content_hash"`
+	Source      string              `json:"source"`
+	Title       string              `json:"title"`
+	Content     string              `json:"content"`
+	References  []Reference         `json:"references,omitempty"`
+	Evidence    []tool.EvidenceUnit `json:"evidence,omitempty"`
+	Complete    bool                `json:"complete"`
+	ContentHash string              `json:"content_hash"`
 }
 
 type Reference struct {
@@ -82,55 +85,55 @@ type DefinitionSelection struct {
 }
 
 type RunRequest struct {
-	RunID          string           `json:"run_id"`
-	Agent          DefinitionRef    `json:"agent"`
-	DefinitionHash string           `json:"definition_hash"`
+	RunID          string              `json:"run_id"`
+	Agent          DefinitionRef       `json:"agent"`
+	DefinitionHash string              `json:"definition_hash"`
 	Selection      DefinitionSelection `json:"selection,omitempty"`
-	Input          json.RawMessage  `json:"input"`
-	Messages       []Message        `json:"messages,omitempty"`
-	Context        []ContextBlock   `json:"context,omitempty"`
-	Permissions    PermissionPolicy `json:"permissions"`
-	ToolScope      ToolScope        `json:"tool_scope"`
-	Policy         RunPolicy        `json:"policy"`
-	Actor          Actor            `json:"actor"`
-	Correlation    Correlation      `json:"correlation"`
+	Input          json.RawMessage     `json:"input"`
+	Messages       []Message           `json:"messages,omitempty"`
+	Context        []ContextBlock      `json:"context,omitempty"`
+	Permissions    PermissionPolicy    `json:"permissions"`
+	ToolScope      ToolScope           `json:"tool_scope"`
+	Policy         RunPolicy           `json:"policy"`
+	Actor          Actor               `json:"actor"`
+	Correlation    Correlation         `json:"correlation"`
 }
 
 // RunStart fixes the identity and capability ceiling before scenario preparation.
 type RunStart struct {
-	RunID          string           `json:"run_id"`
-	Agent          DefinitionRef    `json:"agent"`
-	DefinitionHash string           `json:"definition_hash"`
+	RunID          string              `json:"run_id"`
+	Agent          DefinitionRef       `json:"agent"`
+	DefinitionHash string              `json:"definition_hash"`
 	Selection      DefinitionSelection `json:"selection,omitempty"`
-	Input          json.RawMessage  `json:"input"`
-	Permissions    PermissionPolicy `json:"permissions"`
-	ToolScope      ToolScope        `json:"tool_scope"`
-	Policy         RunPolicy        `json:"policy"`
-	Actor          Actor            `json:"actor"`
-	Correlation    Correlation      `json:"correlation"`
+	Input          json.RawMessage     `json:"input"`
+	Permissions    PermissionPolicy    `json:"permissions"`
+	ToolScope      ToolScope           `json:"tool_scope"`
+	Policy         RunPolicy           `json:"policy"`
+	Actor          Actor               `json:"actor"`
+	Correlation    Correlation         `json:"correlation"`
 }
 
 // RunSnapshot pins all mutable control-plane choices before execution starts.
 type RunSnapshot struct {
-	RunID               string           `json:"run_id"`
-	AgentID             string           `json:"agent_id"`
-	DefinitionVersion   int64            `json:"definition_version"`
-	DefinitionHash      string           `json:"definition_hash"`
+	RunID               string              `json:"run_id"`
+	AgentID             string              `json:"agent_id"`
+	DefinitionVersion   int64               `json:"definition_version"`
+	DefinitionHash      string              `json:"definition_hash"`
 	Selection           DefinitionSelection `json:"selection,omitempty"`
-	Provider            string           `json:"provider"`
-	Model               string           `json:"model"`
-	ModelParameters     map[string]any   `json:"model_parameters,omitempty"`
-	ToolSnapshotID      string           `json:"tool_snapshot_id"`
-	VisibleToolIDs      []string         `json:"visible_tool_ids"`
-	InputSchemaVersion  int64            `json:"input_schema_version"`
-	OutputSchemaVersion int64            `json:"output_schema_version"`
-	PromptHash          string           `json:"prompt_hash"`
-	ContextHash         string           `json:"context_hash"`
-	Budget              BudgetPolicy     `json:"budget"`
-	Permissions         PermissionPolicy `json:"permissions"`
-	Actor               Actor            `json:"actor"`
-	Correlation         Correlation      `json:"correlation"`
-	CreatedAt           time.Time        `json:"created_at"`
+	Provider            string              `json:"provider"`
+	Model               string              `json:"model"`
+	ModelParameters     map[string]any      `json:"model_parameters,omitempty"`
+	ToolSnapshotID      string              `json:"tool_snapshot_id"`
+	VisibleToolIDs      []string            `json:"visible_tool_ids"`
+	InputSchemaVersion  int64               `json:"input_schema_version"`
+	OutputSchemaVersion int64               `json:"output_schema_version"`
+	PromptHash          string              `json:"prompt_hash"`
+	ContextHash         string              `json:"context_hash"`
+	Budget              BudgetPolicy        `json:"budget"`
+	Permissions         PermissionPolicy    `json:"permissions"`
+	Actor               Actor               `json:"actor"`
+	Correlation         Correlation         `json:"correlation"`
+	CreatedAt           time.Time           `json:"created_at"`
 }
 
 type RunStatus string

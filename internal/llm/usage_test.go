@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestOpenAIEmptyResponseReportsTokenExhaustion(t *testing.T) {
@@ -47,6 +48,16 @@ type panicExecutionObserver struct{}
 
 func (panicExecutionObserver) OnLLMExecution(context.Context, Execution) {
 	panic("observer failed")
+}
+
+type attemptRecorder struct {
+	attempts []Attempt
+}
+
+func (recorder *attemptRecorder) OnLLMExecution(context.Context, Execution) {}
+
+func (recorder *attemptRecorder) OnLLMAttempt(_ context.Context, attempt Attempt) {
+	recorder.attempts = append(recorder.attempts, attempt)
 }
 
 func (observer *captureLifecycleObserver) OnLLMCall(_ context.Context, _ string, event CallLifecycle) {
@@ -104,6 +115,34 @@ func TestExecutionObserverPanicDoesNotReplaceModelResult(t *testing.T) {
 	answer, err := client.ChatMax(ctx, "system", "user", 40)
 	if err != nil || answer != "answer" {
 		t.Fatalf("answer = %q, error = %v", answer, err)
+	}
+}
+
+func TestChatTextRecordsRetryDecisionPerAttempt(t *testing.T) {
+	recorder := &attemptRecorder{}
+	ctx := WithExecutionObserver(t.Context(), recorder)
+	calls := 0
+	result, err := chatTextWith(ctx, func(context.Context, []Message, int) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", &CallError{Kind: ErrKindStatus, Status: 503}
+		}
+		return "ok", nil
+	}, "", "", CallOptions{MaxAttempts: 2, Backoff: time.Nanosecond})
+	if err != nil || result != "ok" {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+	if len(recorder.attempts) != 2 {
+		t.Fatalf("attempts = %+v", recorder.attempts)
+	}
+	first, second := recorder.attempts[0], recorder.attempts[1]
+	if first.Attempt != 1 || first.ErrorKind != "status" || first.StatusCode != 503 ||
+		!first.Retryable || !first.RetryScheduled {
+		t.Fatalf("first attempt = %+v", first)
+	}
+	if second.Attempt != 2 || second.Outcome != "succeeded" ||
+		second.LogicalCallSeq != first.LogicalCallSeq {
+		t.Fatalf("second attempt = %+v", second)
 	}
 }
 

@@ -162,8 +162,36 @@ type Reference struct {
 
 // EvidenceCoverage reports bounded omissions made by the tool owner.
 type EvidenceCoverage struct {
-	Partial      bool `json:"partial,omitempty"`
-	OmittedItems int  `json:"omitted_items,omitempty"`
+	Complete     bool   `json:"complete,omitempty"`
+	Partial      bool   `json:"partial,omitempty"`
+	Included     int    `json:"included,omitempty"`
+	OmittedItems int    `json:"omitted_items,omitempty"`
+	NextCursor   string `json:"next_cursor,omitempty"`
+}
+
+// EvidenceScope is the canonical request identity used by run-local admission.
+type EvidenceScope struct {
+	SourceKind string   `json:"source_kind"`
+	Target     string   `json:"target"`
+	Sections   []string `json:"sections,omitempty"`
+	Cursor     string   `json:"cursor,omitempty"`
+	Version    string   `json:"version,omitempty"`
+	TimeRange  string   `json:"time_range,omitempty"`
+}
+
+// EvidenceUnit describes authoritative evidence without depending on body matching.
+type EvidenceUnit struct {
+	SourceKind    string           `json:"source_kind"`
+	Target        string           `json:"target"`
+	Sections      []string         `json:"sections,omitempty"`
+	ContentHash   string           `json:"content_hash,omitempty"`
+	Coverage      EvidenceCoverage `json:"coverage"`
+	Facets        []string         `json:"facets,omitempty"`
+	TrustTier     int              `json:"trust_tier,omitempty"`
+	EvidenceClass string           `json:"evidence_class,omitempty"`
+	TokenCost     int              `json:"token_cost,omitempty"`
+	Version       string           `json:"version,omitempty"`
+	TimeRange     string           `json:"time_range,omitempty"`
 }
 
 // AnswerContract declares opaque values that a final answer must copy exactly.
@@ -175,6 +203,7 @@ type AnswerContract struct {
 type Result struct {
 	Content        string           `json:"content"`
 	References     []Reference      `json:"references,omitempty"`
+	EvidenceUnits  []EvidenceUnit   `json:"evidence_units,omitempty"`
 	Coverage       EvidenceCoverage `json:"coverage,omitempty"`
 	AnswerContract AnswerContract   `json:"answer_contract,omitempty"`
 }
@@ -203,6 +232,13 @@ type RoutingSpec struct {
 	Temporal bool
 }
 
+// AdmissionSpec declares deterministic pre-execution scope and result bounds.
+type AdmissionSpec struct {
+	ResolveScope    func(Arguments) (EvidenceScope, error)
+	MaxResultTokens func(Arguments) int
+	Narrow          func(Arguments, int) (Arguments, bool)
+}
+
 // Tool is the single contract consumed by Agent and MCP.
 type Tool struct {
 	ID              ToolID
@@ -212,6 +248,7 @@ type Tool struct {
 	ReferenceInputs []ReferenceInput
 	Routing         *RoutingSpec
 	Prefetch        *PrefetchSpec
+	Admission       *AdmissionSpec
 	Handler         Handler
 	MCPHidden       bool
 }
@@ -224,6 +261,7 @@ type ReadTool struct {
 	ReferenceInputs []ReferenceInput
 	Routing         *RoutingSpec
 	Prefetch        *PrefetchSpec
+	Admission       *AdmissionSpec
 	Handler         Handler
 	MCPHidden       bool
 }
@@ -238,7 +276,7 @@ func (candidate ReadTool) tool() Tool {
 	return Tool{
 		ID: candidate.ID, Description: candidate.Description, Kind: KindRead,
 		InputSchema: candidate.InputSchema, ReferenceInputs: candidate.ReferenceInputs,
-		Routing: candidate.Routing, Prefetch: candidate.Prefetch,
+		Routing: candidate.Routing, Prefetch: candidate.Prefetch, Admission: candidate.Admission,
 		Handler: candidate.Handler, MCPHidden: candidate.MCPHidden,
 	}
 }

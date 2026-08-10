@@ -1,7 +1,18 @@
-Extract at most 5 durable memories from the user message and assistant answer.
+Consolidate at most 5 durable memories from the user message and assistant answer.
+The input also contains existing_memories recalled before extraction.
 
 Return only a JSON array with this shape:
-[{"fact_key":"...","kind":"...","content":"one line","source_type":"...","confidence":0.0}]
+[{"fact_key":"...","kind":"...","content":"one line","source_type":"...","confidence":0.0,"action":"add|refresh|replace|reject|discard","target_id":"...","relation":"new|equivalent|refinement|contradiction|unrelated","decision_confidence":0.0}]
+
+Action rules:
+- refresh: the candidate is semantically equivalent to an active existing memory. Set target_id and preserve the existing wording by choosing refresh instead of rewriting it.
+- replace: the candidate corrects, contradicts, or materially changes an active existing memory with the same fact_key. Set target_id.
+- reject: an active existing memory with the same fact_key has higher authority than the candidate. Set target_id.
+- add: no active existing memory represents the same fact. target_id must be empty.
+- discard: the turn contains no durable fact for this candidate.
+- Never target a superseded memory. Use only IDs supplied in existing_memories.
+- Similar wording is not enough for refresh when meanings conflict.
+- Use decision_confidence for confidence in the action and relation, separately from confidence in the extracted fact.
 
 Allowed fact_key forms:
 - user:response-language

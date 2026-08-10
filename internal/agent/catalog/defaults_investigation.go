@@ -23,7 +23,7 @@ func DefaultInvestigatorsVersion(settings *config.PlatformSettings, version int6
 		{
 			id: "investigator.runtime", name: "Runtime Topology Investigator", focus: "runtime",
 			purpose: "Investigate indexed service topology, dependencies, and exposed runtime entrypoints.",
-			tools:   []string{"get_service", "trace_deps", "list_apis", "trace_calls", "index_stats"},
+			tools:   []string{"get_service", "trace_deps", "list_apis", "trace_calls"},
 		},
 		{
 			id: "investigator.docs", name: "Documentation Investigator", focus: "docs",

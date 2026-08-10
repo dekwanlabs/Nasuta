@@ -1,0 +1,20 @@
+Inspect only the user message and decide whether it may contain durable memory.
+
+Return only a JSON array with at most 5 retrieval probes:
+[{"query":"short semantic search query","fact_key_hint":"known fact key or empty","kind_hint":"preference|profile|work_context|episode|assistant_inference or empty"}]
+
+This is retrieval planning, not memory extraction:
+- Do not state a final memory value.
+- Query should describe the possible durable fact so related existing memories can be recalled.
+- Use a fact_key_hint only when it follows one of the allowed forms below.
+- Return [] when the message contains no possible preference, profile, reusable work context, or historical user experience.
+
+Allowed fact_key forms:
+- user:response-language
+- user:response-style
+- user:role:<domain>
+- user:current-focus
+- workspace:<entity>:<attribute>
+
+Use lowercase kebab-case for variable segments.
+Do not create probes for secrets, temporary debugging steps, one-off requests, or current system claims.

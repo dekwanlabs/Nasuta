@@ -435,6 +435,49 @@ func (recorder *correlatedRecorder) OnLLMExecution(_ context.Context, execution 
 	}
 }
 
+// OnLLMAttempt records retry and repair decisions without prompt content.
+func (scope *Scope) OnLLMAttempt(_ context.Context, attempt llm.Attempt) {
+	scope.recordLLMAttempt(Correlation{}, attempt)
+}
+
+func (recorder *correlatedRecorder) OnLLMAttempt(_ context.Context, attempt llm.Attempt) {
+	if recorder != nil {
+		recorder.scope.recordLLMAttempt(recorder.correlation, attempt)
+	}
+}
+
+func (scope *Scope) recordLLMAttempt(correlation Correlation, attempt llm.Attempt) {
+	output := map[string]any{
+		"logical_call_seq": attempt.LogicalCallSeq, "kind": attempt.Kind,
+		"attempt": attempt.Attempt, "max_attempts": attempt.MaxAttempts,
+		"outcome": attempt.Outcome, "retryable": attempt.Retryable,
+		"retry_scheduled": attempt.RetryScheduled,
+	}
+	if attempt.RepairRound > 0 {
+		output["repair_round"] = attempt.RepairRound
+	}
+	if attempt.ErrorKind != "" {
+		output["error_kind"] = attempt.ErrorKind
+	}
+	if attempt.StatusCode > 0 {
+		output["status_code"] = attempt.StatusCode
+	}
+	if attempt.ValidationErrorKind != "" {
+		output["validation_error_kind"] = attempt.ValidationErrorKind
+	}
+	if attempt.Backoff > 0 {
+		output["backoff_ms"] = attempt.Backoff.Milliseconds()
+	}
+	status := "completed"
+	if attempt.Outcome == "failed" || attempt.Outcome == "exhausted" {
+		status = "failed"
+	}
+	scope.record(correlation, domain.EvaluationTrace{
+		Node: "llm_attempt", Status: status, DurationMS: attempt.Duration.Milliseconds(),
+		Output: output,
+	})
+}
+
 func (scope *Scope) recordLLM(correlation Correlation, execution llm.Execution) {
 	output := map[string]any{
 		"call_seq": execution.CallSeq, "provider": execution.Provider,

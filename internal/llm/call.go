@@ -43,11 +43,14 @@ type chatCaller func(ctx context.Context, msgs []Message, maxTokens int) (string
 
 // sleepFor honors a server-advised Retry-After over exponential backoff.
 func sleepFor(ctx context.Context, ce *CallError, backoff time.Duration) bool {
-	d := backoff
-	if ce.RetryAfter > 0 {
-		d = ce.RetryAfter
+	return sleepCtx(ctx, retryDelay(ce, backoff))
+}
+
+func retryDelay(ce *CallError, backoff time.Duration) time.Duration {
+	if ce != nil && ce.RetryAfter > 0 {
+		return ce.RetryAfter
 	}
-	return sleepCtx(ctx, d)
+	return backoff
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
@@ -78,4 +81,23 @@ func retryableCallError(err error) (*CallError, bool) {
 		return nil, false
 	}
 	return ce, true
+}
+
+func callErrorDetails(err error) (kind string, status int, retryable bool, ce *CallError) {
+	if !errors.As(err, &ce) {
+		return "other", 0, false, nil
+	}
+	switch ce.Kind {
+	case ErrKindNetwork:
+		kind = "network"
+	case ErrKindStatus:
+		kind = "status"
+	case ErrKindEmpty:
+		kind = "empty"
+	case ErrKindEnvelope:
+		kind = "envelope"
+	default:
+		kind = "unknown"
+	}
+	return kind, ce.Status, ce.Retryable(), ce
 }
