@@ -360,6 +360,51 @@ func TestFeatureChangeSetMigrationMergesIntoImplementationRun(t *testing.T) {
 	}
 }
 
+func TestCompactSchemaAlignmentMigrationPreservesLegacySources(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_align_schema_20260810.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read compact schema alignment migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN selection_json JSON NULL",
+		"SET selection_json = JSON_OBJECT()",
+		"agent_tool_result_artifacts",
+		"UPDATE agent_steps target",
+		"feature_artifact_reviews",
+		"UPDATE feature_artifacts target",
+		"feature_change_sets",
+		"feature_change_reviews",
+		"UPDATE feature_implementation_runs target",
+		"feature_run_events",
+		"INSERT IGNORE INTO runtime_events",
+		"qa_turn_contexts",
+		"UPDATE qa_turns target",
+		"CREATE UNIQUE INDEX uniq_workflow_node_attempt",
+		"SIGNAL SQLSTATE '45000'",
+		"legacy source tables retained",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("compact schema alignment migration missing %q", required)
+		}
+	}
+	if strings.Contains(script, "DROP TABLE ") {
+		t.Fatal("compact schema alignment migration drops a legacy source table")
+	}
+
+	artifactValidation := strings.Index(script, "artifact migration did not copy every legacy artifact")
+	artifactIndex := strings.Index(script, "CREATE UNIQUE INDEX uniq_agent_step_artifact")
+	qaValidation := strings.Index(script, "QA context migration did not copy every context")
+	qaIndex := strings.Index(script, "CREATE UNIQUE INDEX uniq_session_run")
+	if artifactValidation < 0 || artifactIndex < artifactValidation {
+		t.Fatal("artifact uniqueness is applied before legacy data validation")
+	}
+	if qaValidation < 0 || qaIndex < qaValidation {
+		t.Fatal("QA uniqueness is applied before legacy context validation")
+	}
+}
+
 func TestReviewReportReuseMigrationMergesIntoReport(t *testing.T) {
 	statements := strings.Join(mysqlSchema[GroupFeatureDelivery], "\n")
 	for _, required := range []string{
