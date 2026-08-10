@@ -47,6 +47,7 @@ type contextAssembleInput struct {
 	Relation     retrieval.HistoryRelation
 	Origin       string
 	Upgrade      string
+	Candidates   *HistoryCandidates
 }
 
 type contextAssembleOutput struct {
@@ -99,9 +100,25 @@ func (svc *QA) assembleContext(ctx context.Context, input contextAssembleInput) 
 			return output, nil
 		}
 		historyBudget := min(int(float64(svc.contextWindow)*0.08), 32768)
-		recalled, err := svc.history.Recall(ctx, input.UserID, conversation.SessionID, input.Question, continuity, historyBudget)
-		if err != nil {
-			return output, fmt.Errorf("recall current session history: %w", err)
+		var recalled string
+		var recallErr error
+		materialized := false
+		if input.Candidates != nil && !historyNeedsContinuity(input.Relation) {
+			if discovery, ok := svc.history.(CandidateDiscovery); ok {
+				recalled, recallErr = discovery.Materialize(
+					ctx, input.UserID, conversation.SessionID, *input.Candidates,
+					activeHistoryTopK, historyBudget, true,
+				)
+				materialized = true
+			}
+		}
+		if !materialized {
+			recalled, recallErr = svc.history.Recall(
+				ctx, input.UserID, conversation.SessionID, input.Question, continuity, historyBudget,
+			)
+		}
+		if recallErr != nil {
+			return output, fmt.Errorf("recall current session history: %w", recallErr)
 		}
 		output.Conversation.RetrievedHistory = recalled
 		return output, nil

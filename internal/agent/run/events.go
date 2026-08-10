@@ -26,7 +26,9 @@ const (
 )
 
 type TextEvent struct {
-	Text string `json:"text"`
+	Text      string `json:"text"`
+	Code      string `json:"code,omitempty"`
+	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
 }
 
 type ToolStartedEvent struct {

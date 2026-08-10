@@ -123,6 +123,24 @@ func (svc *QA) emitStep(runID, text string) {
 	}
 }
 
+func (svc *QA) emitStatus(runID, text, code string, started time.Time) {
+	elapsed := int64(0)
+	if !started.IsZero() {
+		elapsed = time.Since(started).Milliseconds()
+	}
+	svc.emitStatusElapsed(runID, text, code, elapsed)
+}
+
+func (svc *QA) emitStatusElapsed(runID, text, code string, elapsedMS int64) {
+	if emitter, ok := svc.phaseEmitter.(interface {
+		EmitStatus(string, string, string, int64)
+	}); ok {
+		emitter.EmitStatus(runID, text, code, elapsedMS)
+		return
+	}
+	svc.emitStep(runID, text)
+}
+
 func (svc *QA) updateSessionCompaction(runID, sessionID, status, text string, fromTurn, toTurn int) {
 	event := SessionStatusEvent{
 		Status: status, Text: text, FromTurn: fromTurn, ToTurn: toTurn,

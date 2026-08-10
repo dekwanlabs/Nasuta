@@ -15,8 +15,9 @@ import (
 func TestRetrievePlanWebOnlySkipsInternalFanout(t *testing.T) {
 	r := New(nil, config.Config{})
 	rc, err := r.RetrievePlan(
-		context.Background(), "external docs", "external docs", QueryTerms{},
+		context.Background(), "external docs", QueryTerms{},
 		domain.EvidencePlan{Sources: domain.Web},
+		domain.RetrievalIntent{Kind: domain.RetrievalFocusedFact},
 	)
 	if err != nil {
 		t.Fatalf("RetrievePlan: %v", err)
@@ -26,13 +27,58 @@ func TestRetrievePlanWebOnlySkipsInternalFanout(t *testing.T) {
 	}
 }
 
+func TestRetrievePlanReportsStructuredProgress(t *testing.T) {
+	var events []ProgressEvent
+	ctx := WithProgress(t.Context(), func(event ProgressEvent) {
+		events = append(events, event)
+	})
+	r := New(servicePathFakeTools{}, config.Config{})
+	_, err := r.RetrievePlan(
+		ctx, "checkout timeout", QueryTerms{},
+		domain.EvidencePlan{Sources: domain.Internal},
+		domain.RetrievalIntent{Kind: domain.RetrievalFocusedFact},
+	)
+	if err != nil {
+		t.Fatalf("RetrievePlan: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, event := range events {
+		seen[event.Code] = true
+	}
+	for _, code := range []string{
+		"retrieval.embedding", "retrieval.discover", "retrieval.expand", "retrieval.rerank",
+	} {
+		if !seen[code] {
+			t.Fatalf("progress codes = %#v, missing %q", events, code)
+		}
+	}
+}
+
+func TestBudgetForIntent(t *testing.T) {
+	tests := []struct {
+		intent domain.RetrievalIntentKind
+		want   retrievalBudget
+	}{
+		{domain.RetrievalFocusedFact, retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20}},
+		{domain.RetrievalRuntimeDiagnosis, retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}},
+		{domain.RetrievalInventory, retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}},
+		{domain.RetrievalFlow, retrievalBudget{code: 16, runbook: 8, service: 6, rerank: 24}},
+		{domain.RetrievalOverview, retrievalBudget{code: 16, runbook: 16, service: 8, rerank: 24}},
+	}
+	for _, test := range tests {
+		if got := budgetForIntent(domain.RetrievalIntent{Kind: test.intent}); got != test.want {
+			t.Fatalf("budgetForIntent(%q) = %+v, want %+v", test.intent, got, test.want)
+		}
+	}
+}
+
 func TestDiscoverPreservesRetrievalSourcesTraceContract(t *testing.T) {
 	var events []domain.EvaluationTrace
 	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	}))
 	retrieve := New(servicePathFakeTools{}, config.Config{})
-	retrieve.discover(ctx, "checkout", nil, false)
+	retrieve.discover(ctx, "checkout", nil, false, nil, false, domain.RetrievalIntent{Kind: domain.RetrievalFocusedFact})
 	if len(events) != 1 || events[0].Node != "retrieval_sources" {
 		t.Fatalf("events = %#v", events)
 	}

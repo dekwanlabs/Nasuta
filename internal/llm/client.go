@@ -481,7 +481,7 @@ func (lc *LLMClient) ChatWithToolsMaxWithParameters(
 
 func (lc *LLMClient) logPrompt(ctx context.Context, messages []Message, toolCount, maxTokens int) {
 	log.InfofCtx(ctx, "[llm] request provider=%s model=%s max_tokens=%d messages=%d tools=%d dynamic_prompt:\n%s",
-		lc.provider, lc.model, maxTokens, len(messages), toolCount, joinDynamicPromptMessages(messages))
+		lc.provider, lc.model, maxTokens, len(messages), toolCount, messages)
 }
 
 func joinDynamicPromptMessages(messages []Message) string {

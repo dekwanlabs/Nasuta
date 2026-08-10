@@ -31,6 +31,11 @@ func TokenizeQuery(text string) []string {
 	return tokenize(text)
 }
 
+// WarmTokenizer loads the process-wide tokenizer before the first user query.
+func WarmTokenizer() {
+	_ = TokenizeQuery("预热 tokenizer")
+}
+
 // tokenizeDocument preserves duplicates so document sparse vectors retain
 // term-frequency information. Query tokenization deduplicates the same output.
 func tokenizeDocument(text string) []string {

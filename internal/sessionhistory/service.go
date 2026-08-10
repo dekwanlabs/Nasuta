@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode"
 
+	agentsession "github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -121,16 +122,55 @@ func (service *Service) PrepareRecords(records []memory.TurnContextRecord) {
 // Recall returns token-bounded archived summaries relevant to the current question.
 func (service *Service) Recall(ctx context.Context, userID int64, sessionID, query, continuity string, tokenBudget int) (string, error) {
 	combined := strings.TrimSpace(strings.TrimSpace(query) + "\n" + strings.TrimSpace(continuity))
-	return service.find(ctx, userID, sessionID, combined, selectedLimit, tokenBudget, true)
+	candidates, err := service.Discover(ctx, userID, sessionID, combined)
+	if err != nil {
+		return "", err
+	}
+	return service.Materialize(ctx, userID, sessionID, candidates, selectedLimit, tokenBudget, true)
 }
 
 // Find performs an explicit current-session history search for the private tool.
 func (service *Service) Find(ctx context.Context, userID int64, sessionID, query string, limit, tokenBudget int) (string, error) {
-	result, err := service.find(ctx, userID, sessionID, query, limit, tokenBudget, true)
+	candidates, err := service.Discover(ctx, userID, sessionID, query)
+	if err != nil {
+		return "", err
+	}
+	result, err := service.Materialize(ctx, userID, sessionID, candidates, limit, tokenBudget, true)
 	if err != nil || result != "" {
 		return result, err
 	}
 	return `{"version":1,"mode":"no_history_hit","turns":[]}`, nil
+}
+
+// Discover performs the remote and lexical candidate phase without loading
+// summary text. It is safe to start before query analysis has completed.
+func (service *Service) Discover(ctx context.Context, userID int64, sessionID, query string) (agentsession.HistoryCandidates, error) {
+	output, err := executiontrace.Invoke(ctx, sessionHistoryDiscoverySpec, recallInput{
+		UserID: userID, SessionID: sessionID, Query: query, Limit: selectedLimit,
+	}, service.discoverHistory)
+	if err != nil {
+		return agentsession.HistoryCandidates{}, err
+	}
+	return agentsession.HistoryCandidates{Mode: output.Mode, Refs: output.Refs}, nil
+}
+
+// Materialize loads authoritative summaries for discovered candidates and
+// applies neighbor expansion and the final token budget.
+func (service *Service) Materialize(
+	ctx context.Context,
+	userID int64,
+	sessionID string,
+	candidates agentsession.HistoryCandidates,
+	limit, tokenBudget int,
+	neighbors bool,
+) (string, error) {
+	result, err := executiontrace.Invoke(ctx, sessionHistoryMaterializeSpec, recallInput{
+		UserID: userID, SessionID: sessionID, Query: strings.Join(candidates.Refs, ","),
+		Limit: limit, TokenBudget: tokenBudget, Neighbors: neighbors,
+	}, func(ctx context.Context, input recallInput) (recallOutput, error) {
+		return service.materializeHistory(ctx, input, candidates)
+	})
+	return result.Payload, err
 }
 
 type historyCandidate struct {
@@ -162,6 +202,7 @@ type recallInput struct {
 type recallOutput struct {
 	Payload            string
 	Mode               string
+	Refs               []string
 	DenseCandidates    int
 	LexicalCandidates  int
 	FusedCandidates    int
@@ -194,6 +235,38 @@ var sessionHistoryRecallSpec = executiontrace.Spec[recallInput, recallOutput]{
 	},
 }
 
+var sessionHistoryDiscoverySpec = executiontrace.Spec[recallInput, recallOutput]{
+	Operation: "session_history.discover",
+	Node:      "session_history_discover",
+	Output: func(input recallInput, output recallOutput, _ error) map[string]any {
+		return map[string]any{
+			"mode": output.Mode, "dense_candidates": output.DenseCandidates,
+			"lexical_candidates": output.LexicalCandidates, "fused_candidates": output.FusedCandidates,
+			"score_filtered": output.ScoreFiltered, "accepted_candidates": output.AcceptedCandidates,
+			"query_tokens": tooloutput.EstimateTokens(input.Query),
+		}
+	},
+	Record: func(output recallOutput, err error) bool {
+		return err == nil && output.Record
+	},
+}
+
+var sessionHistoryMaterializeSpec = executiontrace.Spec[recallInput, recallOutput]{
+	Operation: "session_history.materialize",
+	Node:      "session_history_materialize",
+	Output: func(input recallInput, output recallOutput, _ error) map[string]any {
+		return map[string]any{
+			"mode": output.Mode, "accepted_candidates": output.AcceptedCandidates,
+			"loaded_records": output.LoadedRecords, "stale_candidates": output.StaleCandidates,
+			"selected_items": output.SelectedItems, "selected_tokens": output.SelectedTokens,
+			"neighbor_items": output.NeighborItems, "query_tokens": tooloutput.EstimateTokens(input.Query),
+		}
+	},
+	Record: func(output recallOutput, err error) bool {
+		return err == nil && output.Record
+	},
+}
+
 func (service *Service) find(ctx context.Context, userID int64, sessionID, query string, limit, tokenBudget int, neighbors bool) (string, error) {
 	result, err := executiontrace.Invoke(ctx, sessionHistoryRecallSpec, recallInput{
 		UserID: userID, SessionID: sessionID, Query: query, Limit: limit, TokenBudget: tokenBudget, Neighbors: neighbors,
@@ -203,7 +276,7 @@ func (service *Service) find(ctx context.Context, userID int64, sessionID, query
 
 func (service *Service) findHistory(ctx context.Context, input recallInput) (recallOutput, error) {
 	userID, sessionID, query := input.UserID, input.SessionID, input.Query
-	limit, tokenBudget, neighbors := input.Limit, input.TokenBudget, input.Neighbors
+	limit, tokenBudget := input.Limit, input.TokenBudget
 	if userID <= 0 || sessionID == "" || strings.TrimSpace(query) == "" {
 		return recallOutput{}, nil
 	}
@@ -213,69 +286,107 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 	if tokenBudget <= 0 {
 		return recallOutput{}, nil
 	}
+	discovered, err := service.discoverHistory(ctx, input)
+	if err != nil {
+		return recallOutput{}, err
+	}
+	candidates := agentsession.HistoryCandidates{Mode: discovered.Mode, Refs: discovered.Refs}
+	return service.materializeHistory(ctx, input, candidates)
+}
+
+func (service *Service) discoverHistory(ctx context.Context, input recallInput) (recallOutput, error) {
+	userID, sessionID, query := input.UserID, input.SessionID, input.Query
+	if userID <= 0 || sessionID == "" || strings.TrimSpace(query) == "" {
+		return recallOutput{}, nil
+	}
 	queryTerms := extractTerms(query, 16)
 	canonicalTerms := make([]string, 0, len(queryTerms))
 	for _, term := range queryTerms {
 		canonicalTerms = append(canonicalTerms, term.value)
 	}
-	lexical, err := service.sessions.FindHistoryRefs(ctx, userID, sessionID, canonicalTerms, candidateLimit)
-	if err != nil {
-		return recallOutput{}, err
+	type lexicalResult struct {
+		refs []memory.HistoryLexicalCandidate
+		err  error
 	}
-
-	mode := "lexical_only_unavailable_dense"
-	dense := []semantic.Hit(nil)
-	if service.semantic != nil && service.embedder != nil && service.embedder.Enabled() {
-		vectors, embedErr := service.embedder.Embed(ctx, []string{query})
-		if embedErr != nil {
-			mode = "lexical_only_dense_error"
-			log.ErrorfCtx(ctx, "[qa] session history dense query embedding failed: %v", embedErr)
-		} else if len(vectors) != 1 {
-			mode = "lexical_only_dense_error"
-			log.ErrorfCtx(ctx, "[qa] session history dense query returned %d vectors, want 1", len(vectors))
-		} else {
-			searchQuery := semantic.Query{
-				DenseVector: vectors[0],
-				Filter: semantic.Filter{
-					Keywords:   map[string]string{"kind": "session_turn", "session_id": sessionID},
-					AnyInteger: map[string][]int64{"user_id": {userID}},
-				},
-				Limit: candidateLimit,
-			}
-			hits, searchErr := service.semantic.Search(ctx, searchQuery)
-			if searchErr != nil {
-				mode = "lexical_only_dense_error"
-				log.ErrorfCtx(ctx, "[qa] session history hybrid search failed: %v", searchErr)
-			} else {
-				mode = "dense_only"
-				dense = make([]semantic.Hit, 0, len(hits))
-				seen := make(map[string]struct{}, len(hits))
-				for _, hit := range hits {
-					if hit.ScoreKind != semantic.ScoreDense {
-						mode = "lexical_only_dense_score_kind_error"
-						log.ErrorfCtx(ctx, "[qa] session history dense query returned score kind %q", hit.ScoreKind)
-						dense = nil
-						break
-					}
-					ref, _ := hit.Metadata["ref"].(string)
-					if ref == "" {
-						ref = hit.ID
-					}
-					if ref == "" {
-						continue
-					}
-					if _, exists := seen[ref]; exists {
-						continue
-					}
-					seen[ref] = struct{}{}
-					hit.Metadata = map[string]any{"ref": ref}
-					dense = append(dense, hit)
-				}
-				if len(dense) > 0 && len(lexical) > 0 {
-					mode = "dense_lexical"
-				}
-			}
+	type denseResult struct {
+		hits []semantic.Hit
+		mode string
+	}
+	lexicalCh := make(chan lexicalResult, 1)
+	go func() {
+		refs, err := service.sessions.FindHistoryRefs(ctx, userID, sessionID, canonicalTerms, candidateLimit)
+		lexicalCh <- lexicalResult{refs: refs, err: err}
+	}()
+	denseCh := make(chan denseResult, 1)
+	go func() {
+		result := denseResult{mode: "lexical_only_unavailable_dense"}
+		if service.semantic == nil || service.embedder == nil || !service.embedder.Enabled() {
+			denseCh <- result
+			return
 		}
+		vectors, embedErr := service.embedder.Embed(ctx, []string{query})
+		if embedErr != nil || len(vectors) != 1 || len(vectors[0]) == 0 {
+			result.mode = "lexical_only_dense_error"
+			if embedErr != nil {
+				log.ErrorfCtx(ctx, "[qa] session history dense query embedding failed: %v", embedErr)
+			} else {
+				log.ErrorfCtx(ctx, "[qa] session history dense query returned %d vectors, want one non-empty vector", len(vectors))
+			}
+			denseCh <- result
+			return
+		}
+		searchQuery := semantic.Query{
+			DenseVector: vectors[0],
+			Filter: semantic.Filter{
+				Keywords:   map[string]string{"kind": "session_turn", "session_id": sessionID},
+				AnyInteger: map[string][]int64{"user_id": {userID}},
+			},
+			Limit: candidateLimit,
+		}
+		hits, searchErr := service.semantic.Search(ctx, searchQuery)
+		if searchErr != nil {
+			result.mode = "lexical_only_dense_error"
+			log.ErrorfCtx(ctx, "[qa] session history hybrid search failed: %v", searchErr)
+			denseCh <- result
+			return
+		}
+		result.mode = "dense_only"
+		seen := make(map[string]struct{}, len(hits))
+		for _, hit := range hits {
+			if hit.ScoreKind != semantic.ScoreDense {
+				result.mode = "lexical_only_dense_score_kind_error"
+				log.ErrorfCtx(ctx, "[qa] session history dense query returned score kind %q", hit.ScoreKind)
+				result.hits = nil
+				denseCh <- result
+				return
+			}
+			ref, _ := hit.Metadata["ref"].(string)
+			if ref == "" {
+				ref = hit.ID
+			}
+			if ref == "" {
+				continue
+			}
+			if _, exists := seen[ref]; exists {
+				continue
+			}
+			seen[ref] = struct{}{}
+			hit.Metadata = map[string]any{"ref": ref}
+			result.hits = append(result.hits, hit)
+		}
+		denseCh <- result
+	}()
+
+	lexicalResultValue := <-lexicalCh
+	if lexicalResultValue.err != nil {
+		return recallOutput{}, lexicalResultValue.err
+	}
+	lexical := lexicalResultValue.refs
+	denseResultValue := <-denseCh
+	mode := denseResultValue.mode
+	dense := denseResultValue.hits
+	if len(dense) > 0 && len(lexical) > 0 && mode == "dense_only" {
+		mode = "dense_lexical"
 	}
 	if mode == "dense_only" && len(dense) == 0 && len(lexical) > 0 {
 		mode = "lexical_only"
@@ -308,6 +419,33 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 	for _, candidate := range accepted {
 		refs = append(refs, candidate.ref)
 	}
+	return recallOutput{
+		Mode: acceptedMode(mode, len(accepted)), DenseCandidates: len(dense), LexicalCandidates: len(lexical),
+		FusedCandidates: len(ranked), ScoreFiltered: filtered, AcceptedCandidates: len(accepted),
+		DenseOnlyAccepted: denseOnlyAccepted, Refs: refs, Record: true,
+	}, nil
+}
+
+func acceptedMode(mode string, accepted int) string {
+	if accepted == 0 {
+		return "no_relevant_history"
+	}
+	return mode
+}
+
+func (service *Service) materializeHistory(ctx context.Context, input recallInput, candidates agentsession.HistoryCandidates) (recallOutput, error) {
+	userID, sessionID := input.UserID, input.SessionID
+	limit, tokenBudget, neighbors := input.Limit, input.TokenBudget, input.Neighbors
+	if userID <= 0 || sessionID == "" || len(candidates.Refs) == 0 {
+		return recallOutput{Mode: candidates.Mode, Record: true}, nil
+	}
+	if limit <= 0 || limit > selectedLimit {
+		limit = selectedLimit
+	}
+	if tokenBudget <= 0 {
+		return recallOutput{}, nil
+	}
+	refs := candidates.Refs
 	records, err := service.sessions.LoadHistorySummaries(ctx, userID, sessionID, refs)
 	if err != nil {
 		return recallOutput{}, err
@@ -316,23 +454,12 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 	for _, record := range records {
 		byRef[record.Ref] = record
 	}
-	scores := make(map[string]float64, len(accepted))
-	for _, candidate := range accepted {
-		scores[candidate.ref] = candidate.rankScore
-	}
 	ordered := make([]memory.HistorySummary, 0, len(records))
-	for ref, record := range byRef {
-		if _, ok := scores[ref]; ok {
+	for _, ref := range refs {
+		if record, ok := byRef[ref]; ok {
 			ordered = append(ordered, record)
 		}
 	}
-	sort.Slice(ordered, func(i, j int) bool {
-		left, right := scores[ordered[i].Ref], scores[ordered[j].Ref]
-		if left != right {
-			return left > right
-		}
-		return ordered[i].TurnNumber > ordered[j].TurnNumber
-	})
 	neighborItems := 0
 	if neighbors && len(ordered) > 0 {
 		turns := make([]int, 0, min(len(ordered), limit))
@@ -381,19 +508,17 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 			}
 		}
 	}
-	selected, selectedItems, err := selectPayloadWithCount(mode, ordered, limit, tokenBudget)
+	selected, selectedItems, err := selectPayloadWithCount(candidates.Mode, ordered, limit, tokenBudget)
 	if err != nil {
 		return recallOutput{}, err
 	}
 	selectedTokens := tooloutput.EstimateTokens(selected)
 	log.InfofCtx(ctx, "[qa] session history recall session=%s mode=%s dense=%d lexical=%d fused=%d filtered=%d accepted=%d loaded_records=%d selected_tokens=%d",
-		sessionID, mode, len(dense), len(lexical), len(ranked), filtered, len(accepted), len(records), selectedTokens)
+		sessionID, candidates.Mode, 0, 0, 0, 0, len(refs), len(records), selectedTokens)
 	return recallOutput{
-		Payload: selected, Mode: mode, DenseCandidates: len(dense), LexicalCandidates: len(lexical),
-		FusedCandidates: len(ranked), ScoreFiltered: filtered, AcceptedCandidates: len(accepted),
-		LoadedRecords: len(records), DenseOnlyAccepted: denseOnlyAccepted,
-		StaleCandidates: len(accepted) - len(records),
-		SelectedItems:   selectedItems, SelectedTokens: selectedTokens, NeighborItems: neighborItems, Record: true,
+		Payload: selected, Mode: candidates.Mode, AcceptedCandidates: len(refs),
+		LoadedRecords: len(records), StaleCandidates: len(refs) - len(records),
+		SelectedItems: selectedItems, SelectedTokens: selectedTokens, NeighborItems: neighborItems, Record: true,
 	}, nil
 }
 

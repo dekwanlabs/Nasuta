@@ -139,7 +139,15 @@ func (hub *RunHub) OnLLMCall(_ context.Context, runID string, call llm.CallLifec
 
 // EmitPhase publishes transient UI status without creating a persisted step.
 func (hub *RunHub) EmitPhase(runID, text string) {
-	hub.broadcast(runID, SSEEvent{Type: EventStatus, Data: TextEvent{Text: text}})
+	hub.EmitStatus(runID, text, "", 0)
+}
+
+// EmitStatus publishes a structured transient phase while preserving the
+// legacy EmitPhase contract used by existing observers.
+func (hub *RunHub) EmitStatus(runID, text, code string, elapsedMS int64) {
+	hub.broadcast(runID, SSEEvent{Type: EventStatus, Data: TextEvent{
+		Text: text, Code: code, ElapsedMS: elapsedMS,
+	}})
 }
 
 func (hub *RunHub) EmitSessionStatus(runID string, event SessionStatusEvent) {

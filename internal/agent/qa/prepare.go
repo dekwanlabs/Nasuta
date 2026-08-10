@@ -20,16 +20,30 @@ import (
 )
 
 type qaPreparation struct {
-	request          QARequest
-	ctx              context.Context
-	trace            *executiontrace.Scope
-	ownsTrace        bool
-	toolPolicy       ToolPolicy
-	candidateToolSet ScenarioToolSet
-	toolCandidates   []retrieval.ToolRouteCandidate
-	planning         evidencePlanningOutput
-	analysis         queryAnalysisOutput
-	execution        executionRouteDecision
+	request           QARequest
+	ctx               context.Context
+	trace             *executiontrace.Scope
+	ownsTrace         bool
+	toolPolicy        ToolPolicy
+	candidateToolSet  ScenarioToolSet
+	toolCandidates    []retrieval.ToolRouteCandidate
+	planning          evidencePlanningOutput
+	analysis          queryAnalysisOutput
+	responseMode      domain.ResponseMode
+	retrievalIntent   domain.RetrievalIntent
+	intentOrigin      domain.IntentOrigin
+	execution         executionRouteDecision
+	historyCandidates *HistoryCandidates
+}
+
+type historyDiscoveryResult struct {
+	candidates HistoryCandidates
+	err        error
+}
+
+type historyDiscoveryTask struct {
+	result <-chan historyDiscoveryResult
+	cancel context.CancelFunc
 }
 
 type qaEvidence struct {
@@ -79,11 +93,15 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 	}
 	prepared.toolCandidates = routingCandidates(prepared.candidateToolSet.Tools())
 
-	svc.emitStep(request.RunID, "嗯...让我先琢磨一下你在问什么 ✨")
+	svc.emitStatus(request.RunID, "嗯...让我先琢磨一下你在问什么 ✨", "prepare.planning", time.Time{})
 	routeContext := buildHistoryRouteContext(request.Conversation)
 	if routeContext == "" {
 		routeContext = buildRagCtx(request.Conversation.Recent)
 	}
+
+	historyDiscovery := startHistoryCandidateDiscovery(
+		ctx, svc.history, request.UserID, request.Conversation, request.Question,
+	)
 
 	requestAnchor := time.Now()
 	hctx, cancelPlanning := context.WithTimeout(
@@ -96,22 +114,51 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 		UserID:         request.UserID,
 	})
 	cancelPlanning()
+	svc.emitStatus(request.RunID, "问题规划完成，正在整理会话上下文", "prepare.history", time.Time{})
 
+	historyStarted := time.Now()
 	prepared.analysis, _ = analyzeQuery(ctx, queryAnalysisInput{
 		Question: request.Question, CleanQuestion: prepared.planning.CleanQuestion,
 		Terms: prepared.planning.Terms, Time: prepared.planning.Time,
 		Anchor: requestAnchor, RecentTurns: request.Conversation.RecentTurns,
 		History: prepared.planning.History, HistoryValid: prepared.planning.HistoryValid,
 	})
+	intent := domain.ResolveRetrievalIntent(request.Question, domain.RetrievalIntentSignals{
+		Identifiers: prepared.planning.Terms.Identifiers,
+		DomainTerms: prepared.planning.Terms.DomainTerms,
+	})
+	prepared.responseMode = intent.ResponseMode
+	prepared.retrievalIntent = intent.Intent
+	prepared.intentOrigin = intent.Origin
+	log.InfofCtx(ctx,
+		"[qa] canonical retrieval intent response_mode=%s retrieval_intent=%s intent_origin=%s required_facets=%d target_entities=%d",
+		intent.ResponseMode, intent.Intent.Kind, intent.Origin,
+		len(intent.Intent.RequiredFacets), len(intent.Intent.TargetEntities),
+	)
+	if historyDiscovery != nil {
+		if historyNeedsContinuity(prepared.analysis.History) {
+			historyDiscovery.cancel()
+		} else {
+			discovered := <-historyDiscovery.result
+			historyDiscovery.cancel()
+			if discovered.err != nil {
+				log.WarnfCtx(ctx, "[qa] session history candidate discovery degraded: %v", discovered.err)
+			} else {
+				prepared.historyCandidates = &discovered.candidates
+			}
+		}
+	}
 	assembled, err := svc.assembleContext(ctx, contextAssembleInput{
 		Question: request.Question, UserID: request.UserID, Conversation: request.Conversation,
 		Relation: prepared.analysis.History, Origin: prepared.analysis.HistoryOrigin,
-		Upgrade: prepared.analysis.HistoryUpdate,
+		Upgrade:    prepared.analysis.HistoryUpdate,
+		Candidates: prepared.historyCandidates,
 	})
 	if err != nil {
 		prepared.closeTrace()
 		return nil, err
 	}
+	svc.emitStatus(request.RunID, "上下文整理完成，正在准备检索", "prepare.routing", historyStarted)
 	prepared.request.Conversation = assembled.Conversation
 	if prepared.analysis.TimeError != nil {
 		prepared.planning.PlanningError = errors.Join(
@@ -129,6 +176,33 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 
 	svc.routeQAExecution(prepared)
 	return prepared, nil
+}
+
+func startHistoryCandidateDiscovery(
+	ctx context.Context,
+	history SessionHistory,
+	userID int64,
+	conversation ConversationContext,
+	question string,
+) *historyDiscoveryTask {
+	if history == nil || conversation.CompactedThroughTurn <= 0 {
+		return nil
+	}
+	discovery, ok := history.(CandidateDiscovery)
+	if !ok {
+		return nil
+	}
+	discoveryCtx, cancel := context.WithCancel(ctx)
+	resultCh := make(chan historyDiscoveryResult, 1)
+	go func() {
+		candidates, err := discovery.Discover(discoveryCtx, userID, conversation.SessionID, question)
+		resultCh <- historyDiscoveryResult{candidates: candidates, err: err}
+	}()
+	return &historyDiscoveryTask{result: resultCh, cancel: cancel}
+}
+
+func historyNeedsContinuity(relation retrieval.HistoryRelation) bool {
+	return relation.NeedsPriorEntities || relation.NeedsPriorConclusion || relation.NeedsPriorEvidence
 }
 
 func normalizeQARequest(request QARequest) (QARequest, error) {
@@ -412,9 +486,15 @@ func (svc *QA) prepareEvidence(
 		return &qaEvidence{retrieved: rc, recalled: recalled}, nil
 	}
 
-	svc.emitStep(prepared.request.RunID, "好嘞，关键词到手了，我去查一下资料~ 📚")
+	retrievalStarted := time.Now()
+	svc.emitStatus(prepared.request.RunID, "正在准备查询向量和召回资料", "retrieval.embedding", time.Time{})
+	ctx = retrieval.WithProgress(ctx, func(event retrieval.ProgressEvent) {
+		svc.emitStatusElapsed(
+			prepared.request.RunID, event.Text, event.Code, event.ElapsedMS,
+		)
+	})
 	rc, err := svc.retriever.RetrievePlan(
-		ctx, canonicalQuery, prepared.request.Question, prepared.planning.Terms, evidencePlan,
+		ctx, canonicalQuery, prepared.planning.Terms, evidencePlan, prepared.retrievalIntent,
 	)
 	if err != nil {
 		runErr := fmt.Errorf("retrieve internal evidence: %w", err)
@@ -422,6 +502,7 @@ func (svc *QA) prepareEvidence(
 		return nil, runErr
 	}
 	rc.OriginalQuestion = prepared.request.Question
+	svc.emitStatus(prepared.request.RunID, "资料查询完成，正在生成答案", "retrieval.ready", retrievalStarted)
 	mergePreloadedContext(rc, preloadedContext, svc.contextBudget())
 	appendUnavailableWeb(rc, webUnavailable)
 	log.InfofCtx(ctx, "[qa] agent pre-retrieve done: hitCount=%d contextLen=%d,question=%v",

@@ -73,6 +73,24 @@ func TestHub_BroadcastDeliversToSubscriber(t *testing.T) {
 	}
 }
 
+func TestHub_BroadcastsStructuredStatus(t *testing.T) {
+	hub := NewRunHub(nil)
+	ch := hub.Subscribe("status-run")
+	hub.EmitStatus("status-run", "正在检索", "retrieval.discover", 820)
+	select {
+	case event := <-ch:
+		status, ok := event.Data.(TextEvent)
+		if event.Type != EventStatus || !ok {
+			t.Fatalf("event = %#v", event)
+		}
+		if status.Text != "正在检索" || status.Code != "retrieval.discover" || status.ElapsedMS != 820 {
+			t.Fatalf("status = %#v", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("structured status event was not broadcast")
+	}
+}
+
 func TestHub_UnsubscribeVsBroadcast_NoPanic(t *testing.T) {
 	t.Parallel()
 	h := NewRunHub(nil)

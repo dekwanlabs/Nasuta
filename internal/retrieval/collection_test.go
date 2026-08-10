@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -13,6 +14,16 @@ import (
 type dependencyTraceTools struct {
 	servicePathFakeTools
 	trace domain.DependencyTrace
+}
+
+type slowDependencyTraceTools struct {
+	servicePathFakeTools
+	delay time.Duration
+}
+
+func (tools slowDependencyTraceTools) TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error) {
+	time.Sleep(tools.delay)
+	return domain.DependencyTrace{}, nil
 }
 
 func (tools dependencyTraceTools) TraceDeps(context.Context, string, string, int) (domain.DependencyTrace, error) {
@@ -110,6 +121,19 @@ func TestCollectDepsPreservesConditionalTraceContract(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCollectDependencyEdgesReturnsAtBudgetWhenBackendIgnoresContext(t *testing.T) {
+	retrieve := New(slowDependencyTraceTools{delay: time.Second}, config.Config{})
+	started := time.Now()
+	result := retrieve.collectDependencyEdges(t.Context(), []string{"svc-a", "svc-b", "svc-c", "svc-d"})
+	elapsed := time.Since(started)
+	if elapsed > 750*time.Millisecond {
+		t.Fatalf("dependency collection elapsed = %s, want bounded near 500ms", elapsed)
+	}
+	if result.queried != 0 || result.unqueried != 4 {
+		t.Fatalf("result = %+v, want all services unqueried after timeout", result)
 	}
 }
 

@@ -42,7 +42,7 @@ type DefinitionSelectionResolver interface {
 }
 
 type contextRetriever interface {
-	RetrievePlan(context.Context, string, string, retrieval.QueryTerms, domain.EvidencePlan) (*retrieval.RetrievedContext, error)
+	RetrievePlan(context.Context, string, retrieval.QueryTerms, domain.EvidencePlan, domain.RetrievalIntent) (*retrieval.RetrievedContext, error)
 	ContextBudget() int
 }
 

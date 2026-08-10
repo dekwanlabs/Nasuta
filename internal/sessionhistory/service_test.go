@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -32,6 +33,64 @@ type recordingHistoryStore struct {
 	lastQuery semantic.Query
 	upserts   []semantic.Record
 	deletes   []semantic.DeleteQuery
+}
+
+type parallelHistoryStore struct {
+	*contract.Memory
+	searchStarted chan struct{}
+}
+
+func (store *parallelHistoryStore) Search(context.Context, semantic.Query) ([]semantic.Hit, error) {
+	select {
+	case <-store.searchStarted:
+	default:
+		close(store.searchStarted)
+	}
+	return []semantic.Hit{{
+		ID:         "dense-1",
+		Score:      0.9,
+		DenseScore: 0.9,
+		ScoreKind:  semantic.ScoreDense,
+		Metadata:   map[string]any{"ref": "dense-1"},
+	}}, nil
+}
+
+func TestDiscoverStartsDenseSearchBeforeSlowLexicalQueryCompletes(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT ref,SUM\(weight\),COUNT\(DISTINCT term\)`).
+		WithArgs(int64(42), "session-1", "createcart", "checkout", 64).
+		WillDelayFor(100 * time.Millisecond).
+		WillReturnRows(sqlmock.NewRows([]string{"ref", "weight", "matched_terms"}).
+			AddRow("dense-1", 8, 2))
+
+	sem := &parallelHistoryStore{
+		Memory:        contract.NewMemory(),
+		searchStarted: make(chan struct{}),
+	}
+	service := New(memory.NewSessionStore(db), sem, historyEmbedder{})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Discover(t.Context(), 42, "session-1", "createCart checkout")
+		done <- err
+	}()
+
+	select {
+	case <-sem.searchStarted:
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("dense search did not start while lexical query was still delayed")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (store *recordingHistoryStore) Search(ctx context.Context, query semantic.Query) ([]semantic.Hit, error) {

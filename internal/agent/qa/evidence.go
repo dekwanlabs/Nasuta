@@ -46,10 +46,6 @@ var evidencePlanningSpec = executiontrace.Spec[evidencePlanningInput, evidencePl
 			}
 		}
 		return map[string]any{
-			"response_mode": classifyResponseMode(input.Question),
-			"retrieval_intent": domain.RetrievalIntentFor(
-				domain.ClassifyResponseMode(input.Question),
-			).Kind,
 			"proposed_plan": output.Decision.Plan.String(), "proposed_sources": output.Decision.Plan.SourceNames(),
 			"proposed_confidence": output.Decision.Confidence, "proposed_origin": output.Decision.Origin,
 			"effective_plan": output.Effective.Plan.String(), "effective_sources": output.Effective.Plan.SourceNames(),

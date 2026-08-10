@@ -1,6 +1,6 @@
 # QA Retrieval 首屏时延与进度反馈治理提案
 
-> 状态：提案，待实现
+> 状态：实施中，核心链路已实现，生产校准与端到端门禁待完成
 > 创建日期：2026-08-10
 > 最近更新：2026-08-10
 > 范围：QA 请求准备、意图解析、会话历史召回、内部 Retrieval、Rerank、Dependency Expansion 与 Dashboard 实时状态反馈
@@ -22,6 +22,22 @@
 6. 最终实现与本文重新核对，并将稳定合同归并到模块 03 和 08。
 
 在完成上述工作前，本文保持活动 proposal 状态，不进入 `archive/`。
+
+### 0.1 当前实施状态（2026-08-10）
+
+已完成：
+
+- Canonical `RetrievalIntent`、`flow` 收敛、Facet/TargetEntities 有界化，并在 QA Preparation 唯一解析后传入 Retrieval；
+- 请求级 Query Embedding 复用、Intent 召回预算、Session History lexical/dense 并发；
+- Retrieval 共享向量失败时不再回退到会重复 Embedding 的兼容入口，Runbook/Service 使用显式降级路径；
+- Session History Candidate Discovery 与 Evidence Planner 并发，普通历史路径复用候选，强历史依赖保留完整 Recall 语义；
+- Rerank、Dependency、GSE tokenizer 和结构化 `status` 阶段治理。
+
+仍待完成：
+
+- 生产 P50/P95/P99、首个状态和最长静默区间的端到端采集；
+- 固定评估集质量回归、浏览器 SSE 可见性测试和跨仓库集成验证；
+- 全量 Race Test 与既有全仓测试失败项复核。
 
 ## 1. 背景与问题定义
 
@@ -84,15 +100,15 @@
 
 ### 3.1 请求准备
 
-`internal/agent/qa/prepare.go` 当前按以下顺序执行：
+`internal/agent/qa/prepare.go` 当前按以下关键路径执行：
 
 ```text
 emit status: 分析问题
-  -> planEvidence
+  -> History Candidate Discovery || planEvidence
   -> analyzeQuery
   -> assembleContext
        -> assembleActiveHistory
-       -> sessionhistory.Recall
+       -> sessionhistory.Materialize
   -> routeQAExecution
   -> executePrefetch
   -> recallMemory
@@ -103,7 +119,7 @@ emit status: 分析问题
 
 `planEvidence` 是一次带 12 秒 helper timeout 的 LLM 网络调用。`assembleContext` 必须等 Planner 和 Query Analysis 返回后才开始，其中 Session History Recall 又包含 lexical 查询、Query Embedding 和 dense search。
 
-当前链路没有把“不依赖 Planner 最终结果的历史候选发现”提前执行，也没有让 Session History 的 lexical 与 dense 两路并行。
+当最终历史关系需要 prior entities、conclusion、evidence 或显式 continuity 时，`assembleContext` 会保守地回到带 continuity 的完整 `Recall`，避免提前候选改变历史语义。
 
 ### 3.2 Retrieval
 
@@ -241,16 +257,16 @@ Evidence Planner（唯一一次 LLM）
 
 ### 5.1 P0：Planner 与历史召回形成串行关键路径
 
-当前 Planner 完成后才执行 Query Analysis 和 Context Assemble，Session History Recall 位于 Context Assemble 内部。
+改造前 Planner 完成后才执行 Query Analysis 和 Context Assemble，Session History Recall 位于 Context Assemble 内部。当前已将其中可提前的 Candidate Discovery 从 `Recall` 拆出，并在 QA Preparation 启动时与 Planner 并发。
 
-影响：
+改造前影响：
 
 - Planner Provider 的网络波动直接推迟历史召回开始时间；
 - Planner 重试、JSON 修复或接近 helper timeout 时，后续所有步骤一起等待；
 - 历史候选发现本可使用原始问题，却被 Planner 的最终结构化输出阻塞；
 - 两个独立的远程耗时无法重叠。
 
-目标不是简单地把整个 `assembleContext` 与 Planner 并发，因为 History Relation、continuity 和最终选择仍依赖分析结果。应把历史召回拆为两个阶段：
+目标不是简单地把整个 `assembleContext` 与 Planner 并发，因为 History Relation、continuity 和最终选择仍依赖分析结果。当前实现把历史召回拆为两个阶段：
 
 ```text
 history candidate discovery

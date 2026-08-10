@@ -59,9 +59,16 @@ type Reranker interface {
 	Enabled() bool
 }
 
-func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeDoc, query string) []codeDoc {
+func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeDoc, query string, intents ...domain.RetrievalIntent) []codeDoc {
 	log.InfofCtx(ctx, "[qa] code pool input: %d docs\n%s", len(pool), poolSummary(pool, "input"))
 
+	rerankLimit := retrieve.platform.RerankPool
+	if len(intents) > 0 {
+		budget := budgetForIntent(intents[0]).rerank
+		if rerankLimit <= 0 || rerankLimit > budget {
+			rerankLimit = budget
+		}
+	}
 	before := len(pool)
 	pool, _ = executiontrace.Invoke(ctx, candidateDedupSpec, candidateDedupInput{Docs: pool}, func(_ context.Context, input candidateDedupInput) ([]codeDoc, error) {
 		return dedupBySource(input.Docs), nil
@@ -70,7 +77,7 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 
 	before = len(pool)
 	pool, _ = executiontrace.Invoke(ctx, candidateTruncateSpec, candidateTruncateInput{
-		Docs: pool, Limit: retrieve.platform.RerankPool, MinimumPerSource: 2,
+		Docs: pool, Limit: rerankLimit, MinimumPerSource: 2,
 	}, func(_ context.Context, input candidateTruncateInput) ([]codeDoc, error) {
 		return selectRerankCandidates(input.Docs, input.Limit, input.MinimumPerSource), nil
 	})
@@ -316,7 +323,7 @@ func dedupBySource(docs []codeDoc) []codeDoc {
 	return out
 }
 
-const rerankMaxWait = 8 * time.Second
+const rerankMaxWait = 2 * time.Second
 
 // Trust is a tie-breaker here, not a hard veto on relevance.
 const bandBonusStep = 0.04

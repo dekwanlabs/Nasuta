@@ -50,7 +50,16 @@ func (srv *Service) RunbookSearchResult(ctx context.Context, query knowledge.Run
 // FindRunbooks returns typed runbook matches for internal consumers.
 func (srv *Service) FindRunbooks(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
 	return executiontrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
-		return srv.findRunbooks(ctx, query)
+		return srv.findRunbooks(ctx, query, nil)
+	})
+}
+
+func (srv *Service) FindRunbooksWithVector(ctx context.Context, query knowledge.RunbookQuery, vector []float32) (domain.RunbookSearchResult, error) {
+	return executiontrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+		if len(vector) == 0 {
+			return srv.findRunbooksByKeyword(query)
+		}
+		return srv.findRunbooks(ctx, query, vector)
 	})
 }
 
@@ -73,12 +82,12 @@ var runbookSearchSpec = executiontrace.Spec[knowledge.RunbookQuery, domain.Runbo
 	},
 }
 
-func (srv *Service) findRunbooks(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+func (srv *Service) findRunbooks(ctx context.Context, query knowledge.RunbookQuery, vector []float32) (domain.RunbookSearchResult, error) {
 	if srv.docStore == nil {
 		return emptyRunbookResult(query), nil
 	}
 	if srv.semanticEnabled() {
-		return srv.findRunbooksSemantically(ctx, query)
+		return srv.findRunbooksSemantically(ctx, query, vector)
 	}
 	log.InfofCtx(
 		ctx,
@@ -92,6 +101,7 @@ func (srv *Service) findRunbooks(ctx context.Context, query knowledge.RunbookQue
 func (srv *Service) findRunbooksSemantically(
 	ctx context.Context,
 	query knowledge.RunbookQuery,
+	vector []float32,
 ) (domain.RunbookSearchResult, error) {
 	var meta domain.RunbookRecord
 	if query.DocID != "" {
@@ -101,21 +111,24 @@ func (srv *Service) findRunbooksSemantically(
 			return domain.RunbookSearchResult{}, fmt.Errorf("runbook_not_found: doc_id %q: %w", query.DocID, err)
 		}
 	}
-	vectors, err := srv.embedder.Embed(ctx, []string{query.Query})
-	if err != nil {
-		return domain.RunbookSearchResult{}, fmt.Errorf("embed runbook query: %w", err)
-	}
-	if len(vectors) == 0 {
-		return domain.RunbookSearchResult{}, fmt.Errorf("embed runbook query: empty vector")
+	if len(vector) == 0 {
+		vectors, err := srv.embedder.Embed(ctx, []string{query.Query})
+		if err != nil {
+			return domain.RunbookSearchResult{}, fmt.Errorf("embed runbook query: %w", err)
+		}
+		if len(vectors) == 0 {
+			return domain.RunbookSearchResult{}, fmt.Errorf("embed runbook query: empty vector")
+		}
+		vector = vectors[0]
 	}
 	keywords := map[string]string{"kind": "runbook"}
-	fetchLimit := max(query.Limit*4, 12)
+	fetchLimit := max(query.Limit*3, 12)
 	if query.DocID != "" {
 		keywords["doc_id"] = query.DocID
 		fetchLimit = query.Limit + 1
 	}
 	hits, err := srv.semantic.Search(ctx, semantic.Query{
-		DenseVector: vectors[0],
+		DenseVector: vector,
 		Filter:      semantic.Filter{Keywords: keywords},
 		Limit:       fetchLimit,
 	})

@@ -194,31 +194,51 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 	if !srv.semanticEnabled() {
 		return domain.SearchResult[domain.CodeSearchHit]{}, fmt.Errorf("search_code requires semantic search and embedding configuration")
 	}
+	vector, err := srv.EmbedQuery(ctx, query)
+	if err != nil {
+		return domain.SearchResult[domain.CodeSearchHit]{}, err
+	}
+	return srv.FindCodeWithVector(ctx, query, lang, limit, vector)
+}
+
+func (srv *Service) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
+	if !srv.semanticEnabled() {
+		return nil, fmt.Errorf("query embedding requires semantic search and embedding configuration")
+	}
 	embedding, err := executiontrace.Invoke(ctx, queryEmbeddingSpec, query, func(ctx context.Context, query string) (queryEmbeddingOutput, error) {
 		vectors, embedErr := srv.embedder.Embed(ctx, []string{query})
 		output := queryEmbeddingOutput{Vectors: vectors, EmbedErr: embedErr}
 		if embedErr != nil {
 			return output, embedErr
 		}
-		if len(vectors) == 0 {
+		if len(vectors) == 0 || len(vectors[0]) == 0 {
 			return output, errEmptyQueryEmbedding
 		}
 		return output, nil
 	})
 	if err != nil {
-		log.ErrorfCtx(ctx, "[search_code] embed failed: err=%v vecs=%d", err, len(embedding.Vectors))
-		return domain.SearchResult[domain.CodeSearchHit]{}, fmt.Errorf("embed query: %w", err)
+		log.ErrorfCtx(ctx, "[query_embedding] embed failed: err=%v vecs=%d", err, len(embedding.Vectors))
+		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	vecs := embedding.Vectors
+	return embedding.Vectors[0], nil
+}
+
+func (srv *Service) FindCodeWithVector(ctx context.Context, query, lang string, limit int, vector []float32) (domain.SearchResult[domain.CodeSearchHit], error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if len(vector) == 0 {
+		return domain.SearchResult[domain.CodeSearchHit]{}, errEmptyQueryEmbedding
+	}
 	filters := map[string]string{"kind": "code_chunk"}
 	if lang != "" {
 		filters["lang"] = lang
 	}
-	fetchLimit := min(max(limit*8, 40), 200)
+	fetchLimit := min(max(limit*4, 40), 64)
 	mode := "dense"
 	sparseTerms := 0
 	searchQuery := semantic.Query{
-		DenseVector: vecs[0], Filter: semantic.Filter{Keywords: filters},
+		DenseVector: vector, Filter: semantic.Filter{Keywords: filters},
 		Limit: fetchLimit, GroupBy: "path",
 	}
 	if bm := srv.BM25View(); bm != nil {
@@ -229,17 +249,17 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 		})
 		sparseTerms = len(sparse.Indices)
 		if sparseTerms == 0 {
-			log.InfofCtx(ctx, "[search_code] dense fallback: query has no known BM25 terms, dim=%d", len(vecs[0]))
+			log.InfofCtx(ctx, "[search_code] dense fallback: query has no known BM25 terms, dim=%d", len(vector))
 		} else {
 			mode = "hybrid"
-			log.InfofCtx(ctx, "[search_code] hybrid: dim=%d sparseTerms=%d", len(vecs[0]), sparseTerms)
+			log.InfofCtx(ctx, "[search_code] hybrid: dim=%d sparseTerms=%d", len(vector), sparseTerms)
 			searchQuery.SparseVector = &semantic.SparseVector{Indices: sparse.Indices, Values: sparse.Values}
 		}
 	} else {
 		srv.denseWarnOnce.Do(func() {
 			log.WarnfCtx(ctx, "[search_code] hybrid search disabled (BM25 nil) — running dense-only; run the full code embedding operation to enable it")
 		})
-		log.InfofCtx(ctx, "[search_code] dense-only: dim=%d (BM25 nil)", len(vecs[0]))
+		log.InfofCtx(ctx, "[search_code] dense-only: dim=%d (BM25 nil)", len(vector))
 	}
 	hits, err := executiontrace.Invoke(ctx, vectorSearchSpec, vectorSearchInput{
 		Query: searchQuery, Mode: mode, FetchLimit: fetchLimit, SparseTerms: sparseTerms, Filters: filters,

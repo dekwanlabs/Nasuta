@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
@@ -18,10 +19,11 @@ type dependencyEdge struct {
 }
 
 type dependencyCollection struct {
-	edges        []dependencyEdge
-	queried      int
-	unqueried    int
-	omittedEdges int
+	edges           []dependencyEdge
+	queried         int
+	queriedServices []string
+	unqueried       int
+	omittedEdges    int
 }
 
 var dependencyCollectSpec = executiontrace.Spec[[]string, dependencyCollection]{
@@ -285,15 +287,15 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 	if result.omittedEdges > 0 || result.unqueried > 0 {
 		sb.WriteString("- ...(additional edges omitted)\n")
 	}
-	refs := make([]Reference, 0, result.queried)
-	for _, service := range services[:result.queried] {
+	refs := make([]Reference, 0, len(result.queriedServices))
+	for _, service := range result.queriedServices {
 		refs = append(refs, Reference{Type: "service", Label: service, Target: service})
 	}
 	log.InfofCtx(ctx, "[qa] collect deps: services=%d/%d edges=%d omitted_edges=%d",
 		result.queried, len(services), len(result.edges), result.omittedEdges)
 	text := sb.String()
-	units := make([]tool.EvidenceUnit, 0, result.queried)
-	for _, service := range services[:result.queried] {
+	units := make([]tool.EvidenceUnit, 0, len(result.queriedServices))
+	for _, service := range result.queriedServices {
 		units = append(units, evidenceUnitForPart("dependency", service, text, tool.EvidenceCoverage{
 			Complete: result.omittedEdges == 0 && result.unqueried == 0,
 			Partial:  result.omittedEdges > 0 || result.unqueried > 0,
@@ -305,18 +307,55 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 
 func (retrieve *Retriever) collectDependencyEdges(ctx context.Context, services []string) dependencyCollection {
 	const maxDependencyEdges = 30
+	const maxDependencyServices = 3
+	const dependencyBudget = 500 * time.Millisecond
+	totalServices := len(services)
+	if len(services) > maxDependencyServices {
+		services = services[:maxDependencyServices]
+	}
+	ctx, cancel := context.WithTimeout(ctx, dependencyBudget)
+	defer cancel()
+
+	type traceResult struct {
+		service string
+		trace   domain.DependencyTrace
+		err     error
+	}
+	results := make(chan traceResult, len(services))
+	for _, service := range services {
+		go func(service string) {
+			trace, err := retrieve.tools.TraceDeps(ctx, service, "both", 2)
+			results <- traceResult{service: service, trace: trace, err: err}
+		}(service)
+	}
+
 	edges := make([]dependencyEdge, 0, maxDependencyEdges)
 	seen := make(map[string]struct{}, maxDependencyEdges)
-	queried := 0
 	omittedEdges := 0
-	for _, service := range services {
-		if len(edges) >= maxDependencyEdges {
-			break
+	traces := make(map[string]traceResult, len(services))
+	completed := 0
+	for completed < len(services) {
+		select {
+		case result := <-results:
+			completed++
+			traces[result.service] = result
+		case <-ctx.Done():
+			completed = len(services)
 		}
-		res, err := retrieve.tools.TraceDeps(ctx, service, "both", 2)
-		queried++
-		if err != nil {
-			log.WarnfCtx(ctx, "[qa] collect deps for %s: %v", service, err)
+	}
+	queriedServices := make([]string, 0, len(traces))
+	for _, service := range services {
+		if _, ok := traces[service]; ok {
+			queriedServices = append(queriedServices, service)
+		}
+	}
+	for _, service := range services {
+		result, ok := traces[service]
+		if !ok {
+			continue
+		}
+		if result.err != nil {
+			log.WarnfCtx(ctx, "[qa] collect deps for %s: %v", service, result.err)
 			continue
 		}
 		appendEdges := func(direction string, candidates []domain.DependencyEdge) {
@@ -333,11 +372,13 @@ func (retrieve *Retriever) collectDependencyEdges(ctx context.Context, services 
 				edges = append(edges, dependencyEdge{from: edge.From, to: edge.To, direction: direction})
 			}
 		}
-		appendEdges("upstream", res.Upstream)
-		appendEdges("downstream", res.Downstream)
+		appendEdges("upstream", result.trace.Upstream)
+		appendEdges("downstream", result.trace.Downstream)
 	}
-	unqueried := len(services) - queried
-	return dependencyCollection{edges: edges, queried: queried, unqueried: unqueried, omittedEdges: omittedEdges}
+	return dependencyCollection{
+		edges: edges, queried: len(queriedServices), queriedServices: queriedServices,
+		unqueried: totalServices - len(queriedServices), omittedEdges: omittedEdges,
+	}
 }
 
 // collectCodeGraph performs one scoped FTS query, then fetches selected bodies.

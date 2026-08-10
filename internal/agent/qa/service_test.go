@@ -600,9 +600,9 @@ func (recorder *executionEventRecorder) Snapshot() []executionEventRecord {
 func (retriever failingContextRetriever) RetrievePlan(
 	context.Context,
 	string,
-	string,
 	retrieval.QueryTerms,
 	domain.EvidencePlan,
+	domain.RetrievalIntent,
 ) (*retrieval.RetrievedContext, error) {
 	return nil, retriever.err
 }
