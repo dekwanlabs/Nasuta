@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"strings"
 
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func (agent *Agent) buildAgentMessages(question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan) []llm.Message {
@@ -199,12 +201,34 @@ func estimateInputTokens(messages []llm.Message, tools []llm.ToolDef) (int, erro
 	return inputTokens + tooloutput.EstimateTokens(string(encoded)), nil
 }
 
+// EstimateInputTokens exposes the same request estimator used by execution
+// admission so higher-level session budgeting can use an identical token basis.
+func EstimateInputTokens(messages []llm.Message, tools []llm.ToolDef) (int, error) {
+	return estimateInputTokens(messages, tools)
+}
+
+// ToolDefinitions builds the provider-visible schema for a concrete tool set.
+func ToolDefinitions(tools []tool.Tool) []llm.ToolDef {
+	definitions := make([]llm.ToolDef, 0, len(tools))
+	for _, candidate := range tools {
+		definitions = append(definitions, llm.ToolDef{
+			Type: "function",
+			Function: llm.ToolFunctionDef{
+				Name:        string(candidate.ID),
+				Description: candidate.Description,
+				Parameters:  candidate.InputSchema,
+			},
+		})
+	}
+	return definitions
+}
+
 func (agent *Agent) outputTokenReserve() int {
 	return max(agent.cfg.AnswerMaxTokens, agent.cfg.ConclusionMaxTokens)
 }
 
 func contextSafetyTokens(window int) int {
-	return max(window/20, 1024)
+	return agentrun.ContextSafetyTokens(window)
 }
 
 func (agent *Agent) ensureInputBudget(messages []llm.Message, tools []llm.ToolDef) error {

@@ -28,3 +28,28 @@ func TestPrunedDefinitionsPreservesOrderAndMembership(t *testing.T) {
 		t.Fatalf("removed = %v, want search_config", removed)
 	}
 }
+
+func TestPrepareToolDefinitionsHonorsAppliedEmptyToolSet(t *testing.T) {
+	registry := testRegistry(t,
+		testAgentTool("inspect_service", ToolKindRead, noopTool),
+		testAgentTool("inspect_runbook", ToolKindRead, noopTool),
+	)
+	executor := NewToolExecutor(registry)
+	agent := NewAgent(nil, executor, AgentConfig{}, nil, nil)
+	snapshot := executor.Snapshot(ToolPolicyForRun(false))
+
+	pruned := agent.prepareToolDefinitions(t.Context(), "run-pruned-empty", Input{
+		OfferedToolIDs:     map[tool.ToolID]struct{}{},
+		ToolPruningApplied: true,
+	}, snapshot)
+	if len(pruned) != 0 {
+		t.Fatalf("applied empty tool set restored definitions: %v", toolDefNames(pruned))
+	}
+
+	unpruned := agent.prepareToolDefinitions(t.Context(), "run-unpruned-empty", Input{
+		OfferedToolIDs: map[tool.ToolID]struct{}{},
+	}, snapshot)
+	if got := strings.Join(toolDefNames(unpruned), ","); got != "inspect_service,inspect_runbook" {
+		t.Fatalf("unpruned definitions = %q", got)
+	}
+}

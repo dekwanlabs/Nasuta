@@ -20,20 +20,21 @@ import (
 )
 
 type qaPreparation struct {
-	request           QARequest
-	ctx               context.Context
-	trace             *executiontrace.Scope
-	ownsTrace         bool
-	toolPolicy        ToolPolicy
-	candidateToolSet  ScenarioToolSet
-	toolCandidates    []retrieval.ToolRouteCandidate
-	planning          evidencePlanningOutput
-	analysis          queryAnalysisOutput
-	responseMode      domain.ResponseMode
-	retrievalIntent   domain.RetrievalIntent
-	intentOrigin      domain.IntentOrigin
-	execution         executionRouteDecision
-	historyCandidates *HistoryCandidates
+	request            QARequest
+	sourceConversation ConversationContext
+	ctx                context.Context
+	trace              *executiontrace.Scope
+	ownsTrace          bool
+	toolPolicy         ToolPolicy
+	candidateToolSet   ScenarioToolSet
+	toolCandidates     []retrieval.ToolRouteCandidate
+	planning           evidencePlanningOutput
+	analysis           queryAnalysisOutput
+	responseMode       domain.ResponseMode
+	retrievalIntent    domain.RetrievalIntent
+	intentOrigin       domain.IntentOrigin
+	execution          executionRouteDecision
+	historyCandidates  *HistoryCandidates
 }
 
 type historyDiscoveryResult struct {
@@ -83,7 +84,8 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 		RunID: request.RunID, ParentRunID: request.ParentRunID,
 	})
 	prepared := &qaPreparation{
-		request: request, ctx: ctx, trace: trace, ownsTrace: ownsTrace,
+		request: request, sourceConversation: request.Conversation,
+		ctx: ctx, trace: trace, ownsTrace: ownsTrace,
 	}
 
 	prepared.toolPolicy = toolPolicyForRun(svc.writeAvailable && request.AllowWrite)
@@ -309,6 +311,16 @@ func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error
 	if err != nil {
 		return nil, err
 	}
+	contextWindow, outputReserve := svc.contextLimits(
+		definition.Budget.ContextTokens, definition.Model.MaxOutputTokens,
+	)
+	if contextWindow != svc.contextWindow || outputReserve != svc.outputReserve {
+		if err := svc.reassemblePreparedConversation(
+			prepared.ctx, prepared, contextWindow, outputReserve,
+		); err != nil {
+			return nil, err
+		}
+	}
 	run, err := svc.beginSingleAgentRun(prepared, definition, selection)
 	if err != nil {
 		return nil, err
@@ -339,6 +351,7 @@ func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error
 	)
 	conversation, err = svc.compactBeforeAnswer(
 		runCtx, prepared, conversation, evidence.retrieved, evidencePlan,
+		contextWindow, outputReserve,
 	)
 	if err != nil {
 		prepared.finishPreparationFailure(runCtx, run, err)
@@ -350,6 +363,30 @@ func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error
 		prepared.request.RunID, evidencePlan, prepared.toolPolicy,
 		prepared.candidateToolSet, prepared.trace, prepared.ownsTrace,
 	)
+}
+
+func (svc *QA) reassemblePreparedConversation(
+	ctx context.Context,
+	prepared *qaPreparation,
+	contextWindow int,
+	outputReserve int,
+) error {
+	assembled, err := svc.assembleContext(ctx, contextAssembleInput{
+		Question:      prepared.request.Question,
+		UserID:        prepared.request.UserID,
+		Conversation:  prepared.sourceConversation,
+		Relation:      prepared.analysis.History,
+		Origin:        prepared.analysis.HistoryOrigin,
+		Upgrade:       prepared.analysis.HistoryUpdate,
+		Candidates:    prepared.historyCandidates,
+		ContextWindow: contextWindow,
+		OutputReserve: outputReserve,
+	})
+	if err != nil {
+		return fmt.Errorf("reassemble context for agent definition: %w", err)
+	}
+	prepared.request.Conversation = assembled.Conversation
+	return nil
 }
 
 func (svc *QA) prepareRunConversation(prepared *qaPreparation) ConversationContext {

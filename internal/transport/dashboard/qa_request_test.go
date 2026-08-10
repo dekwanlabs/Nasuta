@@ -10,6 +10,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
@@ -117,17 +118,48 @@ func TestQARuntimeStatusFormatting(t *testing.T) {
 		t.Fatalf("empty cache percent = %d, want 0", got)
 	}
 
-	handler := &Handler{platform: &config.PlatformSettings{
+	settings := &config.PlatformSettings{
 		LLMBaseURL:       "https://api.example.com/v1",
 		LLMAPIKey:        "test-key",
 		LLMModel:         "gpt-test",
-		LLMContextWindow: 128000,
-	}}
+		LLMContextWindow: 256000,
+	}
+	hub := agentrun.NewRunHub(nil)
+	hub.OnContextUsage(t.Context(), "run-1", agentrun.ContextUsageEvent{
+		Phase:                 "session_pre_answer",
+		ProjectedBeforeTokens: 104000,
+		ProjectedAfterTokens:  76000,
+		ContextWindow:         128000,
+		HighWaterTokens:       102400,
+		SafetyTokens:          6400,
+		SafeLimitTokens:       121600,
+		OutputReserveTokens:   8000,
+		CompactionTriggered:   true,
+		CompactionApplied:     true,
+	})
+	handler := &Handler{
+		platform: settings,
+		qaRuntimeFn: func() QARuntime {
+			return QARuntime{Hub: hub, Settings: settings}
+		},
+	}
 	recorder := httptest.NewRecorder()
-	handler.APIQARuntimeStatus(recorder, httptest.NewRequest("GET", "/api/qa/runtime?session_id=session-1", nil))
+	handler.APIQARuntimeStatus(recorder, httptest.NewRequest(
+		"GET", "/api/qa/runtime?session_id=session-1&run_id=run-1", nil,
+	))
 	var response struct {
 		Data struct {
-			Model string `json:"model"`
+			Model                    string `json:"model"`
+			TokenUsageAvailable      bool   `json:"token_usage_available"`
+			RoundCurrentTokens       int    `json:"round_current_tokens"`
+			RoundProjectedTokens     int    `json:"round_projected_tokens"`
+			RoundProjectedAfter      int    `json:"round_projected_after_tokens"`
+			RoundHighWaterTokens     int    `json:"round_high_water_tokens"`
+			RoundSafeLimitTokens     int    `json:"round_safe_limit_tokens"`
+			RoundSafetyTokens        int    `json:"round_safety_tokens"`
+			RoundOutputReserveTokens int    `json:"round_output_reserve_tokens"`
+			RoundMaxTokens           int    `json:"round_max_tokens"`
+			ContextWindowSource      string `json:"round_context_window_source"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
@@ -135,6 +167,18 @@ func TestQARuntimeStatusFormatting(t *testing.T) {
 	}
 	if response.Data.Model != "gpt-test" {
 		t.Fatalf("model = %q", response.Data.Model)
+	}
+	if !response.Data.TokenUsageAvailable ||
+		response.Data.RoundCurrentTokens != 104000 ||
+		response.Data.RoundProjectedTokens != 104000 ||
+		response.Data.RoundProjectedAfter != 76000 ||
+		response.Data.RoundMaxTokens != 128000 ||
+		response.Data.ContextWindowSource != "run" ||
+		response.Data.RoundHighWaterTokens != 102400 ||
+		response.Data.RoundSafeLimitTokens != 121600 ||
+		response.Data.RoundSafetyTokens != 6400 ||
+		response.Data.RoundOutputReserveTokens != 8000 {
+		t.Fatalf("context runtime = %+v", response.Data)
 	}
 }
 

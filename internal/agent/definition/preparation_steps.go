@@ -63,6 +63,16 @@ func (observer stepOffsetObserver) OnReasoning(ctx context.Context, runID, token
 	observer.next.OnReasoning(ctx, runID, token)
 }
 
+func (observer stepOffsetObserver) OnContextUsage(
+	ctx context.Context,
+	runID string,
+	event agentrun.ContextUsageEvent,
+) {
+	if next, ok := observer.next.(agentrun.ContextUsageObserver); ok {
+		next.OnContextUsage(ctx, runID, event)
+	}
+}
+
 func (observer stepOffsetObserver) EmitPhase(runID, text string) {
 	emitter, ok := observer.next.(interface {
 		EmitPhase(string, string)

@@ -105,6 +105,12 @@ type Observer interface {
 	OnReasoning(ctx context.Context, runID, token string)
 }
 
+// ContextUsageObserver is optional so existing observer implementations remain
+// source-compatible while context-budget telemetry evolves independently.
+type ContextUsageObserver interface {
+	OnContextUsage(ctx context.Context, runID string, event ContextUsageEvent)
+}
+
 // Controller delivers out-of-band control signals to a running loop.
 type Controller interface {
 	Poll(runID string) ControlSignal

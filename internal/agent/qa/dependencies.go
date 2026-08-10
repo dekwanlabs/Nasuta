@@ -40,6 +40,7 @@ type EvidenceMetrics = agentrun.EvidenceMetrics
 type ExecutionEvent = agentrun.ExecutionEvent
 type ExecutionEventEmitter = agentrun.ExecutionEventEmitter
 type SessionStatusEvent = agentrun.SessionStatusEvent
+type ContextUsageEvent = agentrun.ContextUsageEvent
 type EventType = agentrun.EventType
 type ToolPolicy = tool.Policy
 type Tool = tool.Tool

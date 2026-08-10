@@ -91,6 +91,57 @@ func TestHub_BroadcastsStructuredStatus(t *testing.T) {
 	}
 }
 
+func TestHub_ContextUsageRetainsProjectedPeak(t *testing.T) {
+	hub := NewRunHub(nil)
+	const runID = "context-run"
+	channel := hub.Subscribe(runID)
+
+	hub.OnContextUsage(t.Context(), runID, ContextUsageEvent{
+		Phase:                 "session_pre_answer",
+		ProjectedBeforeTokens: 810,
+		ProjectedAfterTokens:  600,
+		ContextWindow:         1000,
+		HighWaterTokens:       800,
+	})
+	first := <-channel
+	firstUsage, ok := first.Data.(ContextUsageEvent)
+	if first.Type != EventContextUsage || !ok || firstUsage.PeakProjectedTokens != 810 {
+		t.Fatalf("first event = %#v", first)
+	}
+
+	hub.OnContextUsage(t.Context(), runID, ContextUsageEvent{
+		Phase:                 "post_tool",
+		ProjectedBeforeTokens: 700,
+		ProjectedAfterTokens:  650,
+		ContextWindow:         1000,
+		HighWaterTokens:       800,
+	})
+	second := <-channel
+	secondUsage, ok := second.Data.(ContextUsageEvent)
+	if second.Type != EventContextUsage || !ok || secondUsage.PeakProjectedTokens != 810 {
+		t.Fatalf("second event = %#v", second)
+	}
+	snapshot, ok := hub.ContextUsage(runID)
+	if !ok || snapshot.Phase != "post_tool" || snapshot.PeakProjectedTokens != 810 {
+		t.Fatalf("snapshot = %+v, available=%t", snapshot, ok)
+	}
+	hub.Complete(runID, RunOutcome{Status: RunStatusDone})
+	<-channel
+	hub.Unsubscribe(runID, channel)
+	if snapshot, ok := hub.ContextUsage(runID); !ok || snapshot.PeakProjectedTokens != 810 {
+		t.Fatalf("context usage was lost after the completed run unsubscribed: %+v, available=%t", snapshot, ok)
+	}
+	hub.mu.Lock()
+	hub.context[runID] = contextUsageState{
+		event:     snapshot,
+		expiresAt: time.Now().Add(-time.Second),
+	}
+	hub.mu.Unlock()
+	if _, ok := hub.ContextUsage(runID); ok {
+		t.Fatal("expired context usage was not removed")
+	}
+}
+
 func TestHub_UnsubscribeVsBroadcast_NoPanic(t *testing.T) {
 	t.Parallel()
 	h := NewRunHub(nil)

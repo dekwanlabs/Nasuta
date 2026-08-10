@@ -103,7 +103,7 @@ func (agent *Agent) prepareToolDefinitions(
 	toolSnapshot tool.Snapshot,
 ) []llm.ToolDef {
 	tools := agent.executor.Definitions(toolSnapshot)
-	if len(input.OfferedToolIDs) == 0 {
+	if len(input.OfferedToolIDs) == 0 && !input.ToolPruningApplied {
 		return tools
 	}
 	pruning, _ := executiontrace.Invoke(

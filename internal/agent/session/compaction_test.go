@@ -71,6 +71,34 @@ func TestSessionCompactionUsesMeasuredIncomingTokens(t *testing.T) {
 	}
 }
 
+func TestSessionCompactionUsesProjectedRequestTokens(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(`SELECT s\.archived_summary_tokens,s\.compacted_through_turn`).
+		WithArgs("session-1", int64(42)).
+		WillReturnRows(compactionStatsRow(0, 0, 90, 6))
+
+	result, err := CompactSessionIfNeeded(
+		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
+		"session-1", 42,
+		SessionCompactionUsage{ContextWindow: 100, ProjectedTokens: 10},
+		"",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ProjectedBeforeTokens != 10 || result.Triggered || result.Applied {
+		t.Fatalf("result = %+v, want the complete request projection to drive the decision", result)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSessionCompactionBatchesOldestTurnsToLowWater(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {

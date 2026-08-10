@@ -68,10 +68,7 @@ func NewQA(d QADeps) *QA {
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
 		toolPruningEnabled: platformSettings.ToolPruningEnabled,
 		history:            d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
-		outputReserve: max(
-			platformSettings.LLMMaxTokens,
-			max(platformSettings.LLMAnswerMaxTokens, platformSettings.LLMConclusionMaxTokens),
-		),
+		outputReserve:   platformSettings.LLMAnswerMaxTokens,
 		domainKnowledge: platformSettings.DomainKnowledge,
 		definitions:     d.Definitions, agentRef: d.Agent,
 		runtime: d.Runtime, runtimeTools: d.RuntimeTools,
@@ -139,6 +136,14 @@ func (svc *QA) emitStatusElapsed(runID, text, code string, elapsedMS int64) {
 		return
 	}
 	svc.emitStep(runID, text)
+}
+
+func (svc *QA) emitContextUsage(runID string, event ContextUsageEvent) {
+	if emitter, ok := svc.phaseEmitter.(interface {
+		EmitContextUsage(string, ContextUsageEvent)
+	}); ok {
+		emitter.EmitContextUsage(runID, event)
+	}
 }
 
 func (svc *QA) updateSessionCompaction(runID, sessionID, status, text string, fromTurn, toTurn int) {

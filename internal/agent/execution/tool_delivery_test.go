@@ -27,7 +27,7 @@ func TestPrepareToolDeliveryRejectsMissingRequiredLiteral(t *testing.T) {
 		AnswerContract:       tool.AnswerContract{RequiredLiterals: []string{literal}},
 	}
 
-	got := agent.prepareToolDelivery("run-1", nil, nil, call, execution)
+	got := agent.prepareToolDelivery("run-1", nil, nil, call, nil, execution)
 	if !got.Failed || got.DeliveryError != "answer_contract_missing_from_prompt" || got.Evidence {
 		t.Fatalf("delivery = %+v", got)
 	}
@@ -71,6 +71,7 @@ func TestPrepareToolDeliveryPersistsOversizedResultAsArtifactReference(t *testin
 		[]llm.Message{{Role: "system", Content: "system"}, {Role: "user", Content: "list all"}},
 		nil,
 		call,
+		nil,
 		execution,
 	)
 	if !got.Failed || got.DeliveryError != "tool_result_exceeds_context_budget" || got.ArtifactID == "" || got.Evidence {
@@ -110,6 +111,7 @@ func TestToolDeliveryBudgetClampsNegativeAvailability(t *testing.T) {
 		[]llm.Message{{Role: "system", Content: strings.Repeat("context ", 100)}},
 		nil,
 		llm.ToolCall{ID: "call", Function: llm.ToolFunction{Name: "lookup"}},
+		nil,
 		ToolExecution{PromptContent: "result"},
 	)
 	if err != nil {
@@ -117,6 +119,100 @@ func TestToolDeliveryBudgetClampsNegativeAvailability(t *testing.T) {
 	}
 	if available != 0 || required <= 0 {
 		t.Fatalf("available=%d required=%d", available, required)
+	}
+}
+
+func TestToolDeliveryBudgetIncludesNoticesAndAccumulatedAnswerContract(t *testing.T) {
+	const (
+		previousLiteral = "SN-previous"
+		currentLiteral  = "SN-current"
+	)
+	previousContract := &exactAnswerContract{}
+	previousContract.Add(tool.AnswerContract{RequiredLiterals: []string{previousLiteral}})
+	previousMessage, ok := answerContractMessage(tool.AnswerContract{
+		RequiredLiterals: []string{previousLiteral},
+	})
+	if !ok {
+		t.Fatal("answerContractMessage returned no previous contract")
+	}
+	messages := []llm.Message{
+		{Role: "system", Content: "system policy"},
+		{Role: "user", Content: "find the current device"},
+		previousMessage,
+	}
+	call := llm.ToolCall{
+		ID:       "call-current",
+		Function: llm.ToolFunction{Name: "lookup", Arguments: `{"id":"current"}`},
+	}
+	execution := ToolExecution{
+		PromptContent: "current result payload",
+		Notices: []string{
+			"the result is paginated",
+			"the answer must preserve exact identifiers",
+		},
+		AnswerContract: tool.AnswerContract{RequiredLiterals: []string{currentLiteral}},
+	}
+	agent := &Agent{cfg: AgentConfig{
+		ContextWindow:       20_000,
+		AnswerMaxTokens:     500,
+		ConclusionMaxTokens: 700,
+	}}
+
+	available, required, err := agent.toolDeliveryBudget(
+		messages,
+		nil,
+		call,
+		previousContract,
+		execution,
+	)
+	if err != nil {
+		t.Fatalf("toolDeliveryBudget: %v", err)
+	}
+	currentInput, err := estimateInputTokens(messages, nil)
+	if err != nil {
+		t.Fatalf("estimate current input: %v", err)
+	}
+	candidateInput, err := estimateInputTokens(
+		toolDeliveryMessages(messages, call, previousContract, execution),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("estimate candidate input: %v", err)
+	}
+	if required != candidateInput-currentInput {
+		t.Fatalf("required=%d, want complete candidate delta %d", required, candidateInput-currentInput)
+	}
+	wantAvailable := max(0, agent.cfg.ContextWindow-currentInput-agent.outputTokenReserve()-contextSafetyTokens(agent.cfg.ContextWindow))
+	if available != wantAvailable {
+		t.Fatalf("available=%d, want %d", available, wantAvailable)
+	}
+
+	withoutNotices := execution
+	withoutNotices.Notices = nil
+	withoutNoticeInput, err := estimateInputTokens(
+		toolDeliveryMessages(messages, call, previousContract, withoutNotices),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("estimate candidate without notices: %v", err)
+	}
+	if required <= withoutNoticeInput-currentInput {
+		t.Fatalf("required=%d did not include notice overhead beyond %d", required, withoutNoticeInput-currentInput)
+	}
+
+	combined := toolDeliveryMessages(messages, call, previousContract, execution)
+	var contractCount int
+	for _, message := range combined {
+		if message.Role == "system" && strings.HasPrefix(message.Content, exactAnswerContractPrefix) {
+			contractCount++
+			if !strings.Contains(message.Content, previousLiteral) ||
+				!strings.Contains(message.Content, currentLiteral) {
+				t.Fatalf("combined contract lost a literal: %q", message.Content)
+			}
+		}
+	}
+	if contractCount != 1 {
+		t.Fatalf("combined contract messages=%d, want 1", contractCount)
 	}
 }
 

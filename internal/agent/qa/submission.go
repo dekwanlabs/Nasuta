@@ -68,7 +68,10 @@ func (svc *QA) submitInvestigation(
 			}
 		}
 		if outcome.Status == RunStatusDone {
-			svc.archiveSessionHistoryAsync(runCtx, runID, conversation.SessionID, userID)
+			svc.archiveSessionHistoryAsync(
+				runCtx, runID, conversation.SessionID, userID,
+				svc.contextWindow, svc.outputReserve,
+			)
 		}
 		if finishErr := scenario.Finish(outcome); finishErr != nil {
 			log.ErrorfCtx(runCtx, "[qa] finish parent run %s: %v", runID, finishErr)
@@ -157,7 +160,10 @@ func (svc *QA) submitRun(
 			}
 		}
 		if outcome.Status == RunStatusDone {
-			svc.archiveSessionHistoryAsync(ctx, runID, conversation.SessionID, userID)
+			svc.archiveSessionHistoryAsync(
+				ctx, runID, conversation.SessionID, userID,
+				definition.Budget.ContextTokens, definition.Model.MaxOutputTokens,
+			)
 		}
 		if finishErr := run.Finish(nil); finishErr != nil {
 			log.ErrorfCtx(ctx, "[qa] finish run %s: %v", runID, finishErr)
@@ -329,8 +335,15 @@ func (svc *QA) persistSessionTurn(ctx context.Context, runID, sessionID string, 
 	return nil
 }
 
-func (svc *QA) archiveSessionHistoryAsync(ctx context.Context, runID, sessionID string, userID int64) {
-	if svc.sessions == nil || sessionID == "" || svc.contextWindow <= 0 {
+func (svc *QA) archiveSessionHistoryAsync(
+	ctx context.Context,
+	runID string,
+	sessionID string,
+	userID int64,
+	contextWindow int,
+	outputReserve int,
+) {
+	if svc.sessions == nil || sessionID == "" || contextWindow <= 0 {
 		return
 	}
 	archiveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionArchiveTimeout)
@@ -341,8 +354,8 @@ func (svc *QA) archiveSessionHistoryAsync(ctx context.Context, runID, sessionID 
 		result, err := agentsession.ArchiveSessionHistoryIfNeededWithStatus(
 			archiveCtx, svc.helperLLM, svc.sessions, sessionID, userID,
 			agentsession.SessionCompactionUsage{
-				ContextWindow:       svc.contextWindow,
-				OutputReserveTokens: svc.outputReserve,
+				ContextWindow:       contextWindow,
+				OutputReserveTokens: outputReserve,
 			},
 			func(from, to int) {
 				started = true

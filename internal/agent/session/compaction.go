@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -14,7 +15,6 @@ import (
 )
 
 const (
-	sessionHighWaterRatio       = 0.80
 	sessionSelectionTargetRatio = 0.60
 	sessionLowWaterRatio        = 0.65
 	sessionCriticalWaterRatio   = 0.95
@@ -28,7 +28,12 @@ type SessionCompactionUsage struct {
 	ContextWindow int
 	// IncomingTokens is the current request prompt outside session-owned history.
 	// When unset, the compactor estimates it from incomingText for compatibility.
-	IncomingTokens      int
+	IncomingTokens int
+	// ProjectedTokens is the complete model request projection, including the
+	// selected session history and output reservation. When present, it is the
+	// authoritative high-water decision value; persisted history totals remain
+	// useful only for choosing which old turns to archive.
+	ProjectedTokens     int
 	OutputReserveTokens int
 }
 
@@ -36,11 +41,17 @@ type SessionCompactionUsage struct {
 type SessionCompactionResult struct {
 	Applied               bool
 	Stale                 bool
+	Triggered             bool
 	FromTurn              int
 	ToTurn                int
 	References            []string
 	ProjectedBeforeTokens int
 	ProjectedAfterTokens  int
+	ContextWindow         int
+	HighWaterTokens       int
+	SafetyTokens          int
+	SafeLimitTokens       int
+	OutputReserveTokens   int
 	ArchivedTurnCount     int
 	RestartTurnThreshold  int
 	CriticalWaterReached  bool
@@ -84,10 +95,19 @@ func compactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 	historyTokens := stats.UncompactedTokens
 	outputReserve := max(0, usage.OutputReserveTokens)
 	projectedBefore := historyTokens + incomingTokens + outputReserve
+	if usage.ProjectedTokens > 0 {
+		projectedBefore = usage.ProjectedTokens
+	}
 	result.ProjectedBeforeTokens = projectedBefore
+	result.ProjectedAfterTokens = projectedBefore
+	result.ContextWindow = usage.ContextWindow
+	result.HighWaterTokens = agentrun.ContextHighWaterTokens(usage.ContextWindow)
+	result.SafetyTokens = agentrun.ContextSafetyTokens(usage.ContextWindow)
+	result.SafeLimitTokens = agentrun.ContextSafeLimitTokens(usage.ContextWindow)
+	result.OutputReserveTokens = outputReserve
 	result.RestartTurnThreshold = restartTurnThreshold(usage.ContextWindow)
 
-	highWater := int(float64(usage.ContextWindow) * sessionHighWaterRatio)
+	highWater := result.HighWaterTokens
 	selectionTarget := int(float64(usage.ContextWindow) * sessionSelectionTargetRatio)
 	lowWater := int(float64(usage.ContextWindow) * sessionLowWaterRatio)
 	criticalWater := int(float64(usage.ContextWindow) * sessionCriticalWaterRatio)
@@ -109,6 +129,7 @@ func compactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 	if projectedBefore < highWater {
 		return result, nil
 	}
+	result.Triggered = true
 	return compactSessionTurns(ctx, client, sessions, sessionID, userID, stats, result, sessionCompactionPlan{
 		trigger: trigger, targetReduction: projectedBefore - selectionTarget,
 		incomingTokens: incomingTokens, outputReserve: outputReserve,

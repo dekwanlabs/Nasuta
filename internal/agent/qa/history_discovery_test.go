@@ -10,16 +10,19 @@ import (
 )
 
 type candidateDiscoveryHistoryStub struct {
-	started          chan struct{}
-	release          chan struct{}
-	recallCalls      int
-	materializeCalls int
+	started           chan struct{}
+	release           chan struct{}
+	recallCalls       int
+	materializeCalls  int
+	recallBudget      int
+	materializeBudget int
 }
 
 func (stub *candidateDiscoveryHistoryStub) PrepareRecords([]memory.TurnContextRecord) {}
 
-func (stub *candidateDiscoveryHistoryStub) Recall(context.Context, int64, string, string, string, int) (string, error) {
+func (stub *candidateDiscoveryHistoryStub) Recall(_ context.Context, _ int64, _ string, _ string, _ string, budget int) (string, error) {
 	stub.recallCalls++
+	stub.recallBudget = budget
 	return "recall", nil
 }
 
@@ -33,8 +36,9 @@ func (stub *candidateDiscoveryHistoryStub) Discover(context.Context, int64, stri
 	return HistoryCandidates{Mode: "dense_lexical", Refs: []string{"turn-1"}}, nil
 }
 
-func (stub *candidateDiscoveryHistoryStub) Materialize(context.Context, int64, string, HistoryCandidates, int, int, bool) (string, error) {
+func (stub *candidateDiscoveryHistoryStub) Materialize(_ context.Context, _ int64, _ string, _ HistoryCandidates, _ int, budget int, _ bool) (string, error) {
 	stub.materializeCalls++
+	stub.materializeBudget = budget
 	return "materialized", nil
 }
 
@@ -70,6 +74,42 @@ func TestHistoryCandidateDiscoveryStartsAsynchronously(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("candidate discovery did not complete")
+	}
+}
+
+func TestReassemblePreparedConversationUsesDefinitionHistoryBudget(t *testing.T) {
+	stub := &candidateDiscoveryHistoryStub{}
+	svc := &QA{
+		history:       stub,
+		contextWindow: 128000,
+		outputReserve: 16000,
+	}
+	source := ConversationContext{
+		SessionID: "session-1", CompactedThroughTurn: 3,
+	}
+	prepared := &qaPreparation{
+		request: QARequest{
+			Question: "继续看刚才的证据", UserID: 42,
+			Conversation: ConversationContext{RetrievedHistory: "assembled-with-platform-default"},
+		},
+		sourceConversation: source,
+		analysis: queryAnalysisOutput{
+			History: retrieval.HistoryRelation{NeedsPriorEvidence: true},
+		},
+	}
+
+	if err := svc.reassemblePreparedConversation(
+		t.Context(), prepared, 8192, 2048,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if stub.recallCalls != 1 || stub.recallBudget != 655 {
+		t.Fatalf("recall calls=%d budget=%d, want one call with definition budget 655",
+			stub.recallCalls, stub.recallBudget)
+	}
+	if prepared.request.Conversation.RetrievedHistory != "recall" {
+		t.Fatalf("conversation was not rebuilt from source snapshot: %+v",
+			prepared.request.Conversation)
 	}
 }
 

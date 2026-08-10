@@ -42,13 +42,15 @@ type contextAssembleStats struct {
 }
 
 type contextAssembleInput struct {
-	Question     string
-	UserID       int64
-	Conversation ConversationContext
-	Relation     retrieval.HistoryRelation
-	Origin       string
-	Upgrade      string
-	Candidates   *HistoryCandidates
+	Question      string
+	UserID        int64
+	Conversation  ConversationContext
+	Relation      retrieval.HistoryRelation
+	Origin        string
+	Upgrade       string
+	Candidates    *HistoryCandidates
+	ContextWindow int
+	OutputReserve int
 }
 
 type contextAssembleOutput struct {
@@ -85,8 +87,12 @@ var contextAssembleSpec = executiontrace.Spec[contextAssembleInput, contextAssem
 
 func (svc *QA) assembleContext(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
 	return executiontrace.Invoke(ctx, contextAssembleSpec, input, func(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
+		contextWindow, outputReserve := svc.contextLimits(
+			input.ContextWindow, input.OutputReserve,
+		)
 		conversation, stats, err := svc.assembleActiveHistory(
 			ctx, input.Question, input.UserID, input.Conversation, input.Relation, input.Origin, input.Upgrade,
+			contextWindow, outputReserve,
 		)
 		output := contextAssembleOutput{Conversation: conversation, Stats: stats}
 		if err != nil {
@@ -100,7 +106,7 @@ func (svc *QA) assembleContext(ctx context.Context, input contextAssembleInput) 
 		if svc.history == nil || conversation.CompactedThroughTurn <= 0 || conversation.SessionID == "" {
 			return output, nil
 		}
-		historyBudget := min(int(float64(svc.contextWindow)*0.08), 32768)
+		historyBudget := min(int(float64(contextWindow)*0.08), 32768)
 		var recalled string
 		var recallErr error
 		materialized := false
@@ -124,6 +130,16 @@ func (svc *QA) assembleContext(ctx context.Context, input contextAssembleInput) 
 		output.Conversation.RetrievedHistory = recalled
 		return output, nil
 	})
+}
+
+func (svc *QA) contextLimits(contextWindow, outputReserve int) (int, int) {
+	if contextWindow <= 0 {
+		contextWindow = svc.contextWindow
+	}
+	if outputReserve <= 0 {
+		outputReserve = svc.outputReserve
+	}
+	return contextWindow, outputReserve
 }
 
 type scoredTurn struct {
@@ -240,7 +256,17 @@ func resolveHistoryRelation(question string, recent []memory.TurnMetadata, model
 	return relation, origin, upgrade
 }
 
-func (svc *QA) assembleActiveHistory(ctx context.Context, question string, userID int64, conversation ConversationContext, relation retrieval.HistoryRelation, origin, upgrade string) (ConversationContext, contextAssembleStats, error) {
+func (svc *QA) assembleActiveHistory(
+	ctx context.Context,
+	question string,
+	userID int64,
+	conversation ConversationContext,
+	relation retrieval.HistoryRelation,
+	origin string,
+	upgrade string,
+	contextWindow int,
+	outputReserve int,
+) (ConversationContext, contextAssembleStats, error) {
 	stats := contextAssembleStats{
 		Relation: relation, RelationOrigin: origin, UpgradeReason: upgrade,
 		CandidateCount: len(conversation.RecentTurns),
@@ -282,9 +308,9 @@ func (svc *QA) assembleActiveHistory(ctx context.Context, question string, userI
 	}
 	_ = ctx
 	budget := activeHistoryMaxTokens
-	if svc.contextWindow > 0 {
-		safety := max(svc.contextWindow/20, 1024)
-		budget = min(activeHistoryMaxTokens, max(0, svc.contextWindow-svc.outputReserve-safety)/4)
+	if contextWindow > 0 {
+		safety := max(contextWindow/20, 1024)
+		budget = min(activeHistoryMaxTokens, max(0, contextWindow-outputReserve-safety)/4)
 	}
 	stats.HistoryBudgetTokens = budget
 	historical := make([]historicalTurn, 0, len(selected))

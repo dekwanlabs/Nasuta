@@ -188,6 +188,12 @@ func (runtime *DefinitionRuntime) EmitSessionStatus(runID string, event agentrun
 	}
 }
 
+func (runtime *DefinitionRuntime) EmitContextUsage(runID string, event agentrun.ContextUsageEvent) {
+	if runtime != nil && runtime.hub != nil {
+		runtime.hub.OnContextUsage(context.Background(), runID, event)
+	}
+}
+
 // EmitExecutionEvent publishes scenario progress through the shared QA stream.
 func (runtime *DefinitionRuntime) EmitExecutionEvent(
 	eventType agentrun.EventType,

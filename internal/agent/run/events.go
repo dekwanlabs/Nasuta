@@ -22,6 +22,7 @@ const (
 	EventAgentStarted      EventType = "agent.started"
 	EventAgentCompleted    EventType = "agent.completed"
 	EventEvidenceJoined    EventType = "evidence.joined"
+	EventContextUsage      EventType = "context.usage"
 	EventRunFinished       EventType = "run.finished"
 )
 
@@ -57,6 +58,23 @@ type SessionStatusEvent struct {
 	FromTurn    int    `json:"from_turn,omitempty"`
 	ToTurn      int    `json:"to_turn,omitempty"`
 	UpdatedAtMs int64  `json:"updated_at_ms"`
+}
+
+// ContextUsageEvent is the unified context-budget projection for one run.
+// ProjectedBeforeTokens is the value used by compaction and hard admission;
+// actual provider usage is reported separately by the run usage aggregate.
+type ContextUsageEvent struct {
+	Phase                 string `json:"phase"`
+	ProjectedBeforeTokens int    `json:"projected_before_tokens"`
+	ProjectedAfterTokens  int    `json:"projected_after_tokens"`
+	PeakProjectedTokens   int    `json:"peak_projected_tokens"`
+	ContextWindow         int    `json:"context_window"`
+	HighWaterTokens       int    `json:"high_water_tokens"`
+	SafetyTokens          int    `json:"safety_tokens"`
+	SafeLimitTokens       int    `json:"safe_limit_tokens"`
+	OutputReserveTokens   int    `json:"output_reserve_tokens"`
+	CompactionTriggered   bool   `json:"compaction_triggered"`
+	CompactionApplied     bool   `json:"compaction_applied"`
 }
 
 // ExecutionEvent is the stable product projection for routed QA work.

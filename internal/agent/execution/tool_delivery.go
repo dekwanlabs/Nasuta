@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -26,7 +27,14 @@ type toolDeliveryError struct {
 	Retry           map[string]any `json:"retry"`
 }
 
-func (agent *Agent) prepareToolDelivery(runID string, messages []llm.Message, tools []llm.ToolDef, call llm.ToolCall, execution ToolExecution) ToolExecution {
+func (agent *Agent) prepareToolDelivery(
+	runID string,
+	messages []llm.Message,
+	tools []llm.ToolDef,
+	call llm.ToolCall,
+	currentContract *exactAnswerContract,
+	execution ToolExecution,
+) ToolExecution {
 	if execution.Failed {
 		return execution
 	}
@@ -40,7 +48,7 @@ func (agent *Agent) prepareToolDelivery(runID string, messages []llm.Message, to
 			Retry:           map[string]any{"action": "restore_authoritative_content_or_retry_with_pagination"},
 		})
 	}
-	available, required, err := agent.toolDeliveryBudget(messages, tools, call, execution)
+	available, required, err := agent.toolDeliveryBudget(messages, tools, call, currentContract, execution)
 	if err != nil {
 		log.WarnfCtx(
 			log.WithTraceID(context.Background(), runID),
@@ -70,22 +78,70 @@ func (agent *Agent) prepareToolDelivery(runID string, messages []llm.Message, to
 	return execution
 }
 
-func (agent *Agent) toolDeliveryBudget(messages []llm.Message, tools []llm.ToolDef, call llm.ToolCall, execution ToolExecution) (int, int, error) {
+func (agent *Agent) toolDeliveryBudget(
+	messages []llm.Message,
+	tools []llm.ToolDef,
+	call llm.ToolCall,
+	currentContract *exactAnswerContract,
+	execution ToolExecution,
+) (int, int, error) {
 	if agent.cfg.ContextWindow <= 0 {
 		return -1, 0, nil
 	}
-	inputTokens, err := estimateInputTokens(messages, tools)
+	currentInputTokens, err := estimateInputTokens(messages, tools)
 	if err != nil {
 		return 0, 0, err
 	}
 	outputReserve := agent.outputTokenReserve()
 	safety := contextSafetyTokens(agent.cfg.ContextWindow)
-	available := agent.cfg.ContextWindow - inputTokens - outputReserve - safety
-	candidate := []llm.Message{toolMessage(call.ID, call.Function.Name, execution.PromptContent)}
-	if contractMessage, ok := answerContractMessage(execution.AnswerContract); ok {
-		candidate = append(candidate, contractMessage)
+	available := agent.cfg.ContextWindow - currentInputTokens - outputReserve - safety
+	candidate := toolDeliveryMessages(messages, call, currentContract, execution)
+	candidateInputTokens, err := estimateInputTokens(candidate, tools)
+	if err != nil {
+		return 0, 0, err
 	}
-	return max(0, available), estimateMessagesTokens(candidate), nil
+	return max(0, available), max(0, candidateInputTokens-currentInputTokens), nil
+}
+
+func toolDeliveryMessages(
+	messages []llm.Message,
+	call llm.ToolCall,
+	currentContract *exactAnswerContract,
+	execution ToolExecution,
+) []llm.Message {
+	candidate := append([]llm.Message(nil), messages...)
+	candidate = append(candidate, toolMessage(call.ID, call.Function.Name, execution.PromptContent))
+	for _, notice := range execution.Notices {
+		candidate = append(candidate, toolDeliveryNoticeMessage(notice))
+	}
+	if contractMessage, ok := combinedAnswerContractMessage(currentContract, execution.AnswerContract); ok {
+		candidate = append(withoutAnswerContractMessages(candidate), contractMessage)
+	}
+	return candidate
+}
+
+func toolDeliveryNoticeMessage(notice string) llm.Message {
+	return llm.Message{
+		Role: "system",
+		Content: prompts.MustRender(prompts.AgentQAToolDeliveryNotice, struct {
+			Notice string
+		}{Notice: notice}),
+	}
+}
+
+func combinedAnswerContractMessage(
+	current *exactAnswerContract,
+	addition tool.AnswerContract,
+) (llm.Message, bool) {
+	combined := &exactAnswerContract{}
+	if current != nil {
+		combined.Add(tool.AnswerContract{RequiredLiterals: current.required})
+	}
+	combined.Add(addition)
+	if !combined.Active() {
+		return llm.Message{}, false
+	}
+	return answerContractMessage(tool.AnswerContract{RequiredLiterals: combined.required})
 }
 
 func failedToolDelivery(name string, execution ToolExecution, failure toolDeliveryError) ToolExecution {

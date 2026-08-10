@@ -9,7 +9,6 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -294,6 +293,7 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 			state.messages,
 			state.tools,
 			executionCall,
+			state.answerContract,
 			execution,
 		)
 		if execution.Failed {
@@ -341,12 +341,7 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 			continue
 		}
 		for _, notice := range execution.Notices {
-			state.messages = append(state.messages, llm.Message{
-				Role: "system",
-				Content: prompts.MustRender(prompts.AgentQAToolDeliveryNotice, struct {
-					Notice string
-				}{Notice: notice}),
-			})
+			state.messages = append(state.messages, toolDeliveryNoticeMessage(notice))
 		}
 		if _, ok := answerContractMessage(execution.AnswerContract); ok {
 			state.answerContract.Add(execution.AnswerContract)

@@ -48,19 +48,7 @@ func (te *ToolExecutor) Snapshot(policy ToolPolicy) tool.Snapshot {
 
 // Definitions returns model schemas from one immutable snapshot.
 func (te *ToolExecutor) Definitions(snapshot tool.Snapshot) []llm.ToolDef {
-	all := snapshot.Tools()
-	defs := make([]llm.ToolDef, 0, len(all))
-	for _, candidate := range all {
-		defs = append(defs, llm.ToolDef{
-			Type: "function",
-			Function: llm.ToolFunctionDef{
-				Name:        string(candidate.ID),
-				Description: candidate.Description,
-				Parameters:  candidate.InputSchema,
-			},
-		})
-	}
-	return defs
+	return ToolDefinitions(snapshot.Tools())
 }
 
 // DefinitionsFor snapshots current tools for one-shot callers.

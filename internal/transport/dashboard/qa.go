@@ -387,10 +387,22 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 		usageAvailable = true
 	}
 
+	runtime := handler.currentQARuntime()
+	contextUsage := agentrun.ContextUsageEvent{}
+	contextUsageAvailable := false
+	contextRunID := runID
+	if contextRunID == "" {
+		contextRunID = usage.RunID
+	}
+	if runtime.Hub != nil && contextRunID != "" {
+		contextUsage, contextUsageAvailable = runtime.Hub.ContextUsage(contextRunID)
+	}
+
 	status := "deactive"
 	endpointDomain := ""
 	model := ""
 	roundMaxTokens := 0
+	roundContextWindowSource := "platform"
 	settings := handler.platformSettings()
 	if settings != nil {
 		endpointDomain = qaEndpointDomain(settings.LLMBaseURL)
@@ -400,24 +412,57 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 			status = "active"
 		}
 	}
+	if contextUsageAvailable && contextUsage.ContextWindow > 0 {
+		roundMaxTokens = contextUsage.ContextWindow
+		roundContextWindowSource = "run"
+	}
 	var compactionStatus agentrun.SessionStatusEvent
-	if runtime := handler.currentQARuntime(); runtime.QA != nil {
+	if runtime.QA != nil {
 		compactionStatus = runtime.QA.SessionCompactionStatus(sessionID)
 	}
-	roundCurrentTokens := max(usage.RoundPeakInputTokens, usage.RoundPeakReservedTokens)
+	roundActualInputTokens := usage.RoundPeakInputTokens
+	roundActualReservedTokens := max(usage.RoundPeakInputTokens, usage.RoundPeakReservedTokens)
+	roundProjectedTokens := contextUsage.PeakProjectedTokens
+	roundProjectedAfterTokens := contextUsage.ProjectedAfterTokens
+	roundHighWaterTokens := contextUsage.HighWaterTokens
+	roundSafetyTokens := contextUsage.SafetyTokens
+	roundSafeLimitTokens := contextUsage.SafeLimitTokens
+	roundOutputReserveTokens := contextUsage.OutputReserveTokens
+	if roundHighWaterTokens == 0 {
+		roundHighWaterTokens = agentrun.ContextHighWaterTokens(roundMaxTokens)
+	}
+	if roundSafetyTokens == 0 {
+		roundSafetyTokens = agentrun.ContextSafetyTokens(roundMaxTokens)
+	}
+	if roundSafeLimitTokens == 0 {
+		roundSafeLimitTokens = agentrun.ContextSafeLimitTokens(roundMaxTokens)
+	}
+	roundCurrentTokens := int64(roundProjectedTokens)
+	if roundCurrentTokens == 0 {
+		roundCurrentTokens = roundActualReservedTokens
+	}
 	httputil.WriteJSON(w, map[string]any{
-		"endpoint_domain":           endpointDomain,
-		"endpoint_status":           status,
-		"model":                     model,
-		"token_usage_available":     usageAvailable,
-		"cache_percent":             cachePercent(usage.RoundCachedInputTokens, usage.RoundInputTokens),
-		"session_total_tokens":      usage.SessionTotalTokens,
-		"round_total_tokens":        usage.RoundTotalTokens,
-		"round_current_tokens":      roundCurrentTokens,
-		"round_max_tokens":          roundMaxTokens,
-		"round_input_tokens":        usage.RoundInputTokens,
-		"round_cached_input_tokens": usage.RoundCachedInputTokens,
-		"session_compaction":        compactionStatus,
+		"endpoint_domain":              endpointDomain,
+		"endpoint_status":              status,
+		"model":                        model,
+		"token_usage_available":        usageAvailable || contextUsageAvailable,
+		"cache_percent":                cachePercent(usage.RoundCachedInputTokens, usage.RoundInputTokens),
+		"session_total_tokens":         usage.SessionTotalTokens,
+		"round_total_tokens":           usage.RoundTotalTokens,
+		"round_current_tokens":         roundCurrentTokens,
+		"round_max_tokens":             roundMaxTokens,
+		"round_context_window_source":  roundContextWindowSource,
+		"round_input_tokens":           usage.RoundInputTokens,
+		"round_cached_input_tokens":    usage.RoundCachedInputTokens,
+		"round_projected_tokens":       roundProjectedTokens,
+		"round_projected_after_tokens": roundProjectedAfterTokens,
+		"round_actual_input_tokens":    roundActualInputTokens,
+		"round_actual_reserved_tokens": roundActualReservedTokens,
+		"round_high_water_tokens":      roundHighWaterTokens,
+		"round_safe_limit_tokens":      roundSafeLimitTokens,
+		"round_safety_tokens":          roundSafetyTokens,
+		"round_output_reserve_tokens":  roundOutputReserveTokens,
+		"session_compaction":           compactionStatus,
 	})
 }
 

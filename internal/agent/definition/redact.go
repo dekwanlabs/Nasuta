@@ -37,6 +37,16 @@ func (observer redactingDefinitionObserver) OnReasoning(
 	observer.next.OnReasoning(ctx, runID, platform.RedactSensitiveText(token))
 }
 
+func (observer redactingDefinitionObserver) OnContextUsage(
+	ctx context.Context,
+	runID string,
+	event agentrun.ContextUsageEvent,
+) {
+	if next, ok := observer.next.(agentrun.ContextUsageObserver); ok {
+		next.OnContextUsage(ctx, runID, event)
+	}
+}
+
 func (observer redactingDefinitionObserver) EmitPhase(runID, text string) {
 	emitter, ok := observer.next.(interface {
 		EmitPhase(string, string)

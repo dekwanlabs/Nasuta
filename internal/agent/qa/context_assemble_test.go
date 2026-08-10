@@ -126,6 +126,7 @@ func TestAssembleActiveHistoryLoadsOneCompleteAtomicTurn(t *testing.T) {
 		ConversationContext{SessionID: "session-1", RecentTurns: []memory.TurnMetadata{metadata}},
 		retrieval.HistoryRelation{NeedsPriorEntities: true, NeedsPriorConclusion: true, NeedsPriorEvidence: true},
 		"model", "",
+		128000, 4000,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -163,6 +164,7 @@ func TestAssembleActiveHistoryUsesRecentAnswerWithoutReloadingToolTurn(t *testin
 		},
 		retrieval.HistoryRelation{NeedsPriorEntities: true, NeedsPriorConclusion: true},
 		"model", "selection_reference",
+		128000, 4000,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -175,6 +177,39 @@ func TestAssembleActiveHistoryUsesRecentAnswerWithoutReloadingToolTurn(t *testin
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAssembleContextUsesDefinitionLimitsForActiveHistory(t *testing.T) {
+	metadata := turnMetadataForQuestion(8, "列出 UserController 选项")
+	svc := &QA{
+		contextWindow: 128000,
+		outputReserve: 4000,
+	}
+
+	output, err := svc.assembleContext(t.Context(), contextAssembleInput{
+		Question: "2",
+		UserID:   42,
+		Conversation: ConversationContext{
+			RecentTurns: []memory.TurnMetadata{metadata},
+			RecentDialogue: []memory.RecentDialogueTurn{{
+				TurnNumber: 8,
+				User:       "列出 UserController 选项",
+				Assistant:  "1. alpha\n2. hsas-backstage-user",
+			}},
+		},
+		Relation:      retrieval.HistoryRelation{NeedsPriorEntities: true, NeedsPriorConclusion: true},
+		Origin:        "model",
+		Upgrade:       "selection_reference",
+		ContextWindow: 8192,
+		OutputReserve: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Stats.HistoryBudgetTokens != 768 {
+		t.Fatalf("history budget = %d, want definition-scoped budget 768",
+			output.Stats.HistoryBudgetTokens)
 	}
 }
 

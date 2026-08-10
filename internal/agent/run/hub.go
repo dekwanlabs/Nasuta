@@ -20,9 +20,20 @@ type RunHub struct {
 	paused    map[string]chan struct{}
 	completed map[string]struct{}
 	stepErrs  map[string]error
+	context   map[string]contextUsageState
 	stepStore runStepStore
 	completer runCompleter
 	control   runControlStore
+}
+
+const (
+	contextUsageRetention    = 30 * time.Minute
+	maxContextUsageSnapshots = 1024
+)
+
+type contextUsageState struct {
+	event     ContextUsageEvent
+	expiresAt time.Time
 }
 
 func NewRunHub(runStore *RunStore) *RunHub {
@@ -32,6 +43,7 @@ func NewRunHub(runStore *RunStore) *RunHub {
 		paused:    map[string]chan struct{}{},
 		completed: map[string]struct{}{},
 		stepErrs:  map[string]error{},
+		context:   map[string]contextUsageState{},
 	}
 	if runStore != nil {
 		hub.stepStore = runStore
@@ -135,6 +147,67 @@ func (hub *RunHub) OnReasoning(_ context.Context, runID, token string) {
 // OnLLMCall publishes model request boundaries without duplicating persistence.
 func (hub *RunHub) OnLLMCall(_ context.Context, runID string, call llm.CallLifecycle) {
 	hub.broadcast(runID, SSEEvent{Type: EventLLMCall, Data: call})
+}
+
+// OnContextUsage publishes and retains the largest projected context footprint
+// observed during a run. The peak stays independent of provider input usage
+// because compaction can reduce the payload before the provider sees it.
+func (hub *RunHub) OnContextUsage(_ context.Context, runID string, event ContextUsageEvent) {
+	hub.mu.Lock()
+	now := time.Now()
+	hub.cleanupContextUsageLocked(now)
+	if previous, ok := hub.context[runID]; ok {
+		event.PeakProjectedTokens = max(event.PeakProjectedTokens, previous.event.PeakProjectedTokens)
+	}
+	event.PeakProjectedTokens = max(
+		event.PeakProjectedTokens,
+		event.ProjectedBeforeTokens,
+		event.ProjectedAfterTokens,
+	)
+	hub.context[runID] = contextUsageState{
+		event:     event,
+		expiresAt: now.Add(contextUsageRetention),
+	}
+	hub.trimContextUsageLocked()
+	hub.mu.Unlock()
+	hub.broadcast(runID, SSEEvent{Type: EventContextUsage, Data: event})
+}
+
+// ContextUsage returns the latest projected context snapshot for a run.
+func (hub *RunHub) ContextUsage(runID string) (ContextUsageEvent, bool) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	hub.cleanupContextUsageLocked(time.Now())
+	state, ok := hub.context[runID]
+	if !ok {
+		return ContextUsageEvent{}, false
+	}
+	return state.event, true
+}
+
+func (hub *RunHub) cleanupContextUsageLocked(now time.Time) {
+	for runID, state := range hub.context {
+		if !state.expiresAt.After(now) {
+			delete(hub.context, runID)
+		}
+	}
+}
+
+func (hub *RunHub) trimContextUsageLocked() {
+	for len(hub.context) > maxContextUsageSnapshots {
+		oldestRunID := ""
+		var oldest time.Time
+		for runID, state := range hub.context {
+			if oldestRunID == "" || state.expiresAt.Before(oldest) {
+				oldestRunID = runID
+				oldest = state.expiresAt
+			}
+		}
+		if oldestRunID == "" {
+			return
+		}
+		delete(hub.context, oldestRunID)
+	}
 }
 
 // EmitPhase publishes transient UI status without creating a persisted step.

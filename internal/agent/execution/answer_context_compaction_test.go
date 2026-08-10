@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -17,6 +18,8 @@ import (
 
 func TestCompactRunContextBeforeAnswerWaitsForHighWater(t *testing.T) {
 	agent, state, _, _, _ := answerCompactionFixture(t)
+	observer := &answerCompactionObserver{}
+	agent.observer = observer
 	projected := estimateMessagesTokens(state.messages) + agent.outputTokenReserve()
 	agent.cfg.ContextWindow = projected * 2
 	before := append([]llm.Message(nil), state.messages...)
@@ -30,6 +33,11 @@ func TestCompactRunContextBeforeAnswerWaitsForHighWater(t *testing.T) {
 	}
 	if !reflect.DeepEqual(state.messages, before) {
 		t.Fatal("messages changed below high water")
+	}
+	if len(observer.contextUsage) != 1 ||
+		observer.contextUsage[0].ProjectedBeforeTokens != projected ||
+		observer.contextUsage[0].CompactionTriggered {
+		t.Fatalf("context usage events = %+v", observer.contextUsage)
 	}
 }
 
@@ -68,6 +76,12 @@ func TestEnsureTurnBudgetCompactsBeforePostToolModelCall(t *testing.T) {
 	if len(observer.phases) != 1 ||
 		observer.phases[0] != "上下文已压缩，正在继续处理问题" {
 		t.Fatalf("compaction phases = %#v", observer.phases)
+	}
+	if len(observer.contextUsage) != 1 ||
+		!observer.contextUsage[0].CompactionTriggered ||
+		!observer.contextUsage[0].CompactionApplied ||
+		observer.contextUsage[0].ProjectedAfterTokens >= observer.contextUsage[0].ProjectedBeforeTokens {
+		t.Fatalf("context usage events = %+v", observer.contextUsage)
 	}
 }
 
@@ -256,7 +270,8 @@ func answerCompactionFixture(
 }
 
 type answerCompactionObserver struct {
-	phases []string
+	phases       []string
+	contextUsage []agentrun.ContextUsageEvent
 }
 
 func (*answerCompactionObserver) OnStep(
@@ -273,6 +288,14 @@ func (*answerCompactionObserver) OnReasoning(context.Context, string, string) {}
 
 func (observer *answerCompactionObserver) EmitPhase(_ string, text string) {
 	observer.phases = append(observer.phases, text)
+}
+
+func (observer *answerCompactionObserver) OnContextUsage(
+	_ context.Context,
+	_ string,
+	event agentrun.ContextUsageEvent,
+) {
+	observer.contextUsage = append(observer.contextUsage, event)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
