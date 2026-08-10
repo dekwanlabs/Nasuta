@@ -108,6 +108,84 @@ func TestAllAgentPromptsExplainPartialToolCoverage(t *testing.T) {
 	}
 }
 
+func TestAllAgentPromptsShareUserVisibleAnswerContract(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"core":   systemPrompt,
+		"direct": directAgentSystemPrompt,
+		"web":    webAgentSystemPrompt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := strings.Count(prompt, "## User-Visible Answer Contract"); got != 1 {
+				t.Fatalf("prompt contains %d user-visible answer contracts, want 1", got)
+			}
+			for _, required := range []string{
+				"Do not name or cite internal knowledge documents",
+				"Never expose capability names",
+				"no more than two to four question-driven sections",
+				"Do not repeat the same information",
+				"concise impact and tradeoff first",
+			} {
+				if !strings.Contains(prompt, required) {
+					t.Fatalf("prompt missing user-visible answer rule %q", required)
+				}
+			}
+		})
+	}
+}
+
+func TestCorePromptDoesNotInviteInternalSourceIdentifiers(t *testing.T) {
+	if strings.Contains(systemPrompt, "concise source identifiers") {
+		t.Fatal("systemPrompt still permits internal source identifiers")
+	}
+	for _, required := range []string{
+		"internal evidence metadata",
+		"rather than naming it as a source",
+	} {
+		if !strings.Contains(systemPrompt, required) {
+			t.Fatalf("systemPrompt missing internal attribution boundary %q", required)
+		}
+	}
+}
+
+func TestEvidenceAndRepairPromptsKeepInternalMetadataPrivate(t *testing.T) {
+	evidence := prompts.MustRender(prompts.AgentQAPreRetrievedEvidence, struct {
+		HitCount int
+		Evidence string
+	}{HitCount: 3, Evidence: "internal evidence"})
+	for _, required := range []string{
+		"INTERNAL, NOT USER-FACING",
+		"Do not expose this header",
+		"document or runbook titles",
+		"retrieval metadata",
+	} {
+		if !strings.Contains(evidence, required) {
+			t.Fatalf("pre-retrieved evidence prompt missing %q", required)
+		}
+	}
+
+	repair := answerContractRepairInstruction([]string{"TRACE-1"})
+	for _, required := range []string{
+		"user-visible answer contract",
+		"non-repetitive structure",
+		"internal document attribution",
+		"retrieval metadata",
+	} {
+		if !strings.Contains(repair, required) {
+			t.Fatalf("answer repair prompt missing %q", required)
+		}
+	}
+
+	for _, required := range []string{
+		"capability or tool names",
+		"internal document titles or paths",
+		"Describe useful actions in natural language",
+	} {
+		if !strings.Contains(protocolRepairInstruction, required) {
+			t.Fatalf("protocol repair prompt missing %q", required)
+		}
+	}
+}
+
 func TestAllAgentPromptsRequireEfficientImplementations(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"core":   systemPrompt,

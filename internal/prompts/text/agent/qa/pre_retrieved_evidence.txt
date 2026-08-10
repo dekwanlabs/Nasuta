@@ -1,3 +1,3 @@
-[PRE-RETRIEVED EVIDENCE — {{ .HitCount }} candidate references. This count measures recall breadth, not proof that every requested path is covered. Use this as your primary evidence. For a behavior or flow question, check every requested path for concrete hops; investigate one specific missing critical hop before answering.]
+[PRE-RETRIEVED EVIDENCE — INTERNAL, NOT USER-FACING. {{ .HitCount }} candidate references are available. This count measures recall breadth, not proof that every requested path is covered. Use this as primary reasoning evidence. For a behavior or flow question, check every requested path for concrete hops; investigate one specific missing critical hop before answering. Do not expose this header, the count, document or runbook titles, document paths, source labels, evidence metadata, retrieval metadata, or raw fields in the final answer.]
 
 {{ .Evidence }}

@@ -18,6 +18,7 @@ const (
 	AgentQADirect                 ID = "agent.qa.direct"
 	AgentQAToolPolicy             ID = "agent.qa.tool_policy"
 	AgentQAWeb                    ID = "agent.qa.web"
+	AgentQAUserVisibleAnswer      ID = "agent.qa.user_visible_answer"
 	AgentQADefaultIdentity        ID = "agent.qa.default_identity"
 	AgentQAResponseMode           ID = "agent.qa.response_mode"
 	AgentQAForceConclusion        ID = "agent.qa.force_conclusion"
@@ -104,6 +105,7 @@ var idFiles = map[ID]string{
 	AgentQADirect:                          "agent/qa/direct.txt",
 	AgentQAToolPolicy:                      "agent/qa/tool_policy.txt",
 	AgentQAWeb:                             "agent/qa/web.txt",
+	AgentQAUserVisibleAnswer:               "agent/qa/user_visible_answer.txt",
 	AgentQADefaultIdentity:                 "agent/qa/default_identity.txt",
 	AgentQAResponseMode:                    "agent/qa/response_mode.txt",
 	AgentQAForceConclusion:                 "agent/qa/force_conclusion.txt",

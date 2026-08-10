@@ -89,7 +89,7 @@ func evidencePlanInstruction(plan domain.EvidencePlan) string {
 	}{Direct: plan.Direct(), Plan: plan.String()})
 }
 
-var directAgentSystemPrompt = promptWithRolePlaceholder(prompts.AgentQADirect)
+var directAgentSystemPrompt = withUserVisibleAnswer(promptWithRolePlaceholder(prompts.AgentQADirect))
 
 // replayableTailMessages keeps only provider-valid tool call/result groups.
 func ReplayableTailMessages(msgs []llm.Message, n int) []llm.Message {
@@ -230,5 +230,5 @@ func (agent *Agent) ensureInputBudget(messages []llm.Message, tools []llm.ToolDe
 var (
 	agentToolPrompt      = prompts.Text(prompts.AgentQAToolPolicy)
 	agentSystemPrompt    = systemPrompt + "\n\n" + agentToolPrompt
-	webAgentSystemPrompt = promptWithRolePlaceholder(prompts.AgentQAWeb)
+	webAgentSystemPrompt = withUserVisibleAnswer(promptWithRolePlaceholder(prompts.AgentQAWeb))
 )

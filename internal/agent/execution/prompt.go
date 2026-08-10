@@ -14,9 +14,14 @@ const (
 // These compatibility variables keep the established agent prompt surface while
 // the source text lives in the central embedded catalog.
 var (
-	systemPrompt    = promptWithRolePlaceholder(prompts.AgentQACore)
-	defaultIdentity = prompts.Text(prompts.AgentQADefaultIdentity)
+	userVisibleAnswerPrompt = prompts.Text(prompts.AgentQAUserVisibleAnswer)
+	systemPrompt            = withUserVisibleAnswer(promptWithRolePlaceholder(prompts.AgentQACore))
+	defaultIdentity         = prompts.Text(prompts.AgentQADefaultIdentity)
 )
+
+func withUserVisibleAnswer(prompt string) string {
+	return prompt + "\n\n" + userVisibleAnswerPrompt
+}
 
 func promptWithRolePlaceholder(id prompts.ID) string {
 	content := prompts.Text(id)
