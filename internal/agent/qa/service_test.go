@@ -16,7 +16,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -224,7 +224,7 @@ func TestRunStoreCompleteTransitionsOnlyActiveRun(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := agentrun.BindStore(db)
+	store := run.BindStore(db)
 	outcome := RunOutcome{
 		Status: RunStatusDone, StepCount: 2, TokenUsed: 12,
 		Evidence: EvidenceMetrics{
@@ -252,7 +252,7 @@ func TestRunStoreCreatePersistsAgentAndWorkflowSnapshot(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := agentrun.BindStore(db)
+	store := run.BindStore(db)
 	record := RunRecord{
 		ID: "run-1", UserID: 42, SessionID: "session-1",
 		AgentID: "qa.answerer", DefinitionVersion: 3,
@@ -297,7 +297,7 @@ func TestRunStoreEvidenceByIDsIsBoundToUserAndSession(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := agentrun.BindStore(db)
+	store := run.BindStore(db)
 	mock.ExpectQuery(`SELECT id,evidence_status.*FROM agent_runs WHERE user_id=\? AND session_id=\? AND id IN \(\?,\?\)`).
 		WithArgs(int64(42), "session-1", "run-1", "run-2").
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -327,7 +327,7 @@ func TestRunStoreRecordLLMCallUpdatesDetailAndAggregateAtomically(t *testing.T) 
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := agentrun.BindStore(db)
+	store := run.BindStore(db)
 	call := llm.CallUsage{
 		RunID: "run", Phase: llm.PhaseAgentStep, Provider: "openai", Model: "model",
 		MaxOutputTokens: 50, Duration: 12 * time.Millisecond, Status: llm.CallStatusSucceeded,
@@ -363,7 +363,7 @@ func TestRunStoreUsageSummaryUsesSessionAggregateAndLatestRound(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := agentrun.BindStore(db)
+	store := run.BindStore(db)
 
 	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(total_tokens\\),0\\) FROM agent_runs").
 		WithArgs(int64(7), "session-1").
@@ -397,7 +397,7 @@ func TestRunStoreLatestContextUsageReturnsBothPeaks(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := agentrun.BindStore(db)
+	store := run.BindStore(db)
 	mock.ExpectQuery(`SELECT peak_input_tokens,peak_reserved_tokens.*ORDER BY started_at DESC,id DESC LIMIT 1`).
 		WithArgs(int64(7), "session-1").
 		WillReturnRows(sqlmock.NewRows([]string{"peak_input_tokens", "peak_reserved_tokens"}).AddRow(86000, 118000))
@@ -420,7 +420,7 @@ func TestRunStoreRejectsTerminalOverwrite(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := agentrun.BindStore(db)
+	store := run.BindStore(db)
 	mock.ExpectExec("UPDATE agent_runs").
 		WithArgs(
 			RunStatusFailed, "", 0, 0, EvidenceUnavailable, false, 0, 0, 0, 0, 0,
@@ -442,7 +442,7 @@ func TestRunStoreControlTransitionIsConditional(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := agentrun.BindStore(db)
+	store := run.BindStore(db)
 	mock.ExpectExec("UPDATE agent_runs SET status=\\? WHERE id=\\? AND status=\\?").
 		WithArgs(RunStatusPaused, "run", RunStatusRunning).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -460,7 +460,7 @@ func TestRunStoreRecoversInterruptedRuns(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := agentrun.BindStore(db)
+	store := run.BindStore(db)
 	mock.ExpectExec("UPDATE agent_runs SET status=\\?,ended_at=\\? WHERE status IN \\(\\?,\\?\\)").
 		WithArgs(RunStatusAborted, sqlmock.AnyArg(), RunStatusRunning, RunStatusPaused).
 		WillReturnResult(sqlmock.NewResult(0, 2))
@@ -1064,7 +1064,7 @@ func TestAskSessionPersistenceFailureCompletesRunAsFailed(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "review-model", 256, server.Client())
 	qa, runtime := newQARuntimeFixtureWithStore(
-		t, client, server.URL, tool.NewRegistry(), nil, false, agentrun.BindStore(runDB),
+		t, client, server.URL, tool.NewRegistry(), nil, false, run.BindStore(runDB),
 	)
 	qa.sessions = memory.NewSessionStore(sessionDB)
 	events := runtime.Hub().Subscribe(runID)
@@ -1112,7 +1112,7 @@ func TestAskRetrievalFailureCompletesStartedRunAsFailed(t *testing.T) {
 	qa, runtime := newQARuntimeFixtureWithStore(
 		t, nil, "http://unused", tool.NewRegistry(),
 		failingContextRetriever{err: errors.New("retrieval backend unavailable")},
-		false, agentrun.BindStore(db),
+		false, run.BindStore(db),
 	)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
 	events := runtime.Hub().Subscribe(runID)
@@ -1414,12 +1414,12 @@ func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 	}
 	call, result := recorder.steps[0], recorder.steps[1]
 	wantCallID := prefetchToolCallID(runID, 0, "prefetch")
-	if call.Kind != agentrun.StepKindToolCall || call.ToolCallID != wantCallID ||
+	if call.Kind != run.StepKindToolCall || call.ToolCallID != wantCallID ||
 		call.Tool != "prefetch" || call.Args != `{"query":"checkout"}` ||
 		call.CreatedAt.IsZero() {
 		t.Fatalf("tool call step = %#v", call)
 	}
-	if result.Kind != agentrun.StepKindToolResult || result.ToolCallID != call.ToolCallID ||
+	if result.Kind != run.StepKindToolResult || result.ToolCallID != call.ToolCallID ||
 		result.TraceID != prefetchToolResultTraceID(runID, wantCallID) ||
 		result.Content != "evidence" || result.PromptContent != "evidence" ||
 		result.AuthoritativeSHA256 != hashString("evidence") ||

@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -57,14 +57,14 @@ func (srv *Service) ServiceLookupResult(ctx context.Context, query string, limit
 // FindServices returns typed service matches for internal consumers.
 func (srv *Service) FindServices(ctx context.Context, query string, limit int) (domain.SearchResult[domain.ServiceRecord], error) {
 	input := serviceSearchInput{Query: query, Limit: limit}
-	return executiontrace.Invoke(ctx, serviceSearchSpec, input, func(ctx context.Context, input serviceSearchInput) (domain.SearchResult[domain.ServiceRecord], error) {
+	return runtrace.Invoke(ctx, serviceSearchSpec, input, func(ctx context.Context, input serviceSearchInput) (domain.SearchResult[domain.ServiceRecord], error) {
 		return srv.findServices(ctx, input, nil)
 	})
 }
 
 func (srv *Service) FindServicesWithVector(ctx context.Context, query string, limit int, vector []float32) (domain.SearchResult[domain.ServiceRecord], error) {
 	input := serviceSearchInput{Query: query, Limit: limit}
-	return executiontrace.Invoke(ctx, serviceSearchSpec, input, func(ctx context.Context, input serviceSearchInput) (domain.SearchResult[domain.ServiceRecord], error) {
+	return runtrace.Invoke(ctx, serviceSearchSpec, input, func(ctx context.Context, input serviceSearchInput) (domain.SearchResult[domain.ServiceRecord], error) {
 		return srv.findServicesWithSharedVector(ctx, input, vector)
 	})
 }
@@ -74,7 +74,7 @@ type serviceSearchInput struct {
 	Limit int
 }
 
-var serviceSearchSpec = executiontrace.Spec[serviceSearchInput, domain.SearchResult[domain.ServiceRecord]]{
+var serviceSearchSpec = runtrace.Spec[serviceSearchInput, domain.SearchResult[domain.ServiceRecord]]{
 	Operation: "knowledge.service_search",
 	Node:      "service_search",
 	Input: func(input serviceSearchInput) map[string]any {

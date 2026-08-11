@@ -6,8 +6,8 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -37,7 +37,7 @@ type toolAdmissionDecision struct {
 	EvidenceKeys    []evidenceKey
 }
 
-var toolAdmissionSpec = executiontrace.Spec[toolAdmissionInput, toolAdmissionDecision]{
+var toolAdmissionSpec = runtrace.Spec[toolAdmissionInput, toolAdmissionDecision]{
 	Operation: "agent.tool_admission",
 	Node:      "tool_admission",
 	Input: func(input toolAdmissionInput) map[string]any {
@@ -79,7 +79,7 @@ func (agent *Agent) admitToolCall(state *compiledLoop, call llm.ToolCall) (llm.T
 		Tool: call.Function.Name, Scope: scope,
 		RemainingTokens: remaining, DeclaredTokens: declared,
 	}
-	decision, _ := executiontrace.Invoke(state.ctx, toolAdmissionSpec, input, func(
+	decision, _ := runtrace.Invoke(state.ctx, toolAdmissionSpec, input, func(
 		_ context.Context,
 		input toolAdmissionInput,
 	) (toolAdmissionDecision, error) {

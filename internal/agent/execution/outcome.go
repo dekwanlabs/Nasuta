@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -15,20 +15,20 @@ func OutcomeFor(
 	result *RunResult,
 	preRetrieved []agentapi.Reference,
 	runErr error,
-) agentrun.RunOutcome {
+) run.RunOutcome {
 	if result == nil {
 		if runErr == nil {
 			runErr = errors.New("agent: run returned no result")
 		}
-		return agentrun.RunOutcome{
-			Status: agentrun.RunStatusFailed,
+		return run.RunOutcome{
+			Status: run.RunStatusFailed,
 			Err:    runErr,
-			Evidence: agentrun.EvidenceMetrics{
-				Status: agentrun.EvidenceUnavailable,
+			Evidence: run.EvidenceMetrics{
+				Status: run.EvidenceUnavailable,
 			},
 		}
 	}
-	outcome := agentrun.RunOutcome{
+	outcome := run.RunOutcome{
 		StepCount:       result.Steps,
 		TokenUsed:       len(result.Answer),
 		Answer:          result.Answer,
@@ -38,27 +38,27 @@ func OutcomeFor(
 	}
 	outcome.HitCount = len(outcome.References)
 	if outcome.Evidence.Status == "" {
-		outcome.Evidence.Status = agentrun.EvidenceUnavailable
+		outcome.Evidence.Status = run.EvidenceUnavailable
 	}
 	switch {
 	case result.Aborted:
-		outcome.Status = agentrun.RunStatusAborted
+		outcome.Status = run.RunStatusAborted
 		outcome.ErrorCode = "cancelled"
 		outcome.Err = runErr
 	case runErr != nil:
-		outcome.Status = agentrun.RunStatusFailed
+		outcome.Status = run.RunStatusFailed
 		outcome.ErrorCode = "runtime_failed"
 		outcome.Err = runErr
 	case result.Err != nil:
-		outcome.Status = agentrun.RunStatusFailed
+		outcome.Status = run.RunStatusFailed
 		outcome.ErrorCode = "agent_failed"
 		outcome.Err = result.Err
 	case strings.TrimSpace(result.Answer) == "":
-		outcome.Status = agentrun.RunStatusFailed
+		outcome.Status = run.RunStatusFailed
 		outcome.ErrorCode = "empty_output"
-		outcome.Err = agentrun.ErrEmptyAnswer
+		outcome.Err = run.ErrEmptyAnswer
 	default:
-		outcome.Status = agentrun.RunStatusDone
+		outcome.Status = run.RunStatusDone
 	}
 	return outcome
 }

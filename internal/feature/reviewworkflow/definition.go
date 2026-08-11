@@ -6,7 +6,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 // Definition derives the fixed panel represented directly by a published Policy.
@@ -42,7 +42,7 @@ func definitionForReviewers(
 	if err != nil {
 		return workflow.WorkflowDefinition{}, err
 	}
-	permission := agentapi.PermissionPolicy{Scopes: []string{platformscope.FeatureDelivery}}
+	permission := agentapi.PermissionPolicy{Scopes: []string{scope.FeatureDelivery}}
 	nodes := make([]workflow.NodeDefinition, 0, len(reviewers)+3)
 	edges := make([]workflow.EdgeDefinition, 0, len(reviewers)+2)
 	seenNodes := make(map[string]string, len(reviewers))

@@ -10,10 +10,10 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
-	agentdefinition "github.com/dekwanlabs/nasuta/internal/agent/definition"
-	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
-	agenttools "github.com/dekwanlabs/nasuta/internal/agent/tools"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -23,38 +23,38 @@ import (
 // Test-only type aliases into the agent subpackages. These are needed by the
 // migrated fixtures but not by production QA code, so they live in the test
 // helper file instead of polluting dependencies.go.
-type DefinitionRuntime = agentdefinition.DefinitionRuntime
-type ScenarioRun = agentdefinition.ScenarioRun
-type AgentConfig = agentexecution.AgentConfig
-type ToolExecutor = agentexecution.ToolExecutor
-type Observer = agentexecution.Observer
-type Controller = agentexecution.Controller
+type DefinitionRuntime = definition.DefinitionRuntime
+type ScenarioRun = definition.ScenarioRun
+type AgentConfig = execution.AgentConfig
+type ToolExecutor = execution.ToolExecutor
+type Observer = execution.Observer
+type Controller = execution.Controller
 type Registry = tool.Registry
-type RunStore = agentrun.RunStore
-type RunStatus = agentrun.RunStatus
-type RunRecord = agentrun.RunRecord
-type RunUsageSummary = agentrun.RunUsageSummary
-type RunTerminal = agentrun.RunTerminal
-type SSEEvent = agentrun.SSEEvent
+type RunStore = run.RunStore
+type RunStatus = run.RunStatus
+type RunRecord = run.RunRecord
+type RunUsageSummary = run.RunUsageSummary
+type RunTerminal = run.RunTerminal
+type SSEEvent = run.SSEEvent
 
 const (
-	RunStatusRunning = agentrun.RunStatusRunning
-	RunStatusPaused  = agentrun.RunStatusPaused
-	RunKindAgent     = agentrun.RunKindAgent
-	ToolKindRead     = tool.KindRead
-	ToolKindWrite    = tool.KindWrite
-	EvidenceNotRequired = agentrun.EvidenceNotRequired
-	EventRunFinished     = agentrun.EventRunFinished
+	RunStatusRunning    = run.RunStatusRunning
+	RunStatusPaused     = run.RunStatusPaused
+	RunKindAgent        = run.RunKindAgent
+	ToolKindRead        = tool.KindRead
+	ToolKindWrite       = tool.KindWrite
+	EvidenceNotRequired = run.EvidenceNotRequired
+	EventRunFinished    = run.EventRunFinished
 )
 
-var ErrRunNotActive = agentrun.ErrRunNotActive
+var ErrRunNotActive = run.ErrRunNotActive
 
 func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config AgentConfig, observer Observer, controller Controller) *Agent {
-	return agentexecution.NewAgent(client, executor, config, observer, controller)
+	return execution.NewAgent(client, executor, config, observer, controller)
 }
 
 func NewToolExecutor(registry *Registry) *ToolExecutor {
-	return agentexecution.NewToolExecutor(registry)
+	return execution.NewToolExecutor(registry)
 }
 
 func NewDefinitionRuntime(
@@ -62,17 +62,17 @@ func NewDefinitionRuntime(
 	schemas *agentapi.SchemaRegistry,
 	registry *tool.Registry,
 	settings *config.PlatformSettings,
-	runStore *agentrun.RunStore,
+	runStore *run.RunStore,
 ) (*DefinitionRuntime, error) {
-	return agentdefinition.NewDefinitionRuntime(definitions, schemas, registry, settings, runStore)
+	return definition.NewDefinitionRuntime(definitions, schemas, registry, settings, runStore)
 }
 
 func TerminalFromEvent(event SSEEvent) *RunTerminal {
-	return agentrun.TerminalFromEvent(event)
+	return run.TerminalFromEvent(event)
 }
 
 func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore, history SessionHistory) *Registry {
-	return agenttools.NewRegistry(svc, cfg, sessions, history)
+	return tools.NewRegistry(svc, cfg, sessions, history)
 }
 
 // ---- definition runtime fixtures (mirror of definition/runtime_test.go) ----

@@ -9,8 +9,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -57,7 +57,7 @@ func (agent *Agent) prepareCompiledLoop(
 		agent.cfg.Timeout, agent.cfg.AnswerReserve)
 
 	historyStarted := time.Now()
-	messages, _ := executiontrace.Invoke(
+	messages, _ := runtrace.Invoke(
 		ctx,
 		historyCompileSpec,
 		historyCompileInput{Messages: input.Messages},
@@ -106,7 +106,7 @@ func (agent *Agent) prepareToolDefinitions(
 	if len(input.OfferedToolIDs) == 0 && !input.ToolPruningApplied {
 		return tools
 	}
-	pruning, _ := executiontrace.Invoke(
+	pruning, _ := runtrace.Invoke(
 		ctx,
 		toolPruningSpec,
 		toolPruningInput{

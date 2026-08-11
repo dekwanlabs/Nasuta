@@ -248,7 +248,7 @@ context, err := svc.retriever.RetrievePlan(ctx, plan)
 Decorator 内部可使用统一 Invoke Helper：
 
 ```go
-return executiontrace.Invoke(ctx, EvidencePlanSpec, request, next.Execute)
+return runtrace.Invoke(ctx, EvidencePlanSpec, request, next.Execute)
 ```
 
 计时、Panic、默认状态、错误分类和 Recorder 调用都由 `Invoke` 负责。
@@ -388,7 +388,7 @@ Execution Trace 不与 `slog` 合并门面。
 建议新增一个边界清晰的包：
 
 ```text
-internal/executiontrace/
+internal/runtrace/
   scope.go
   recorder.go
   invoke.go
@@ -444,7 +444,7 @@ CodeLoom 通过 Nasuta 公共 Surface 使用能力，原则上不应引入 Execu
 工作内容：
 
 - 固定 Trace v1 节点和字段；
-- 建立 `internal/executiontrace`；
+- 建立 `internal/runtrace`；
 - 合并 QA/MCP Recorder 的 Sequence、Elapsed、并发和缓冲逻辑；
 - 保持 SSE 与 MCP 输出不变。
 
@@ -558,12 +558,12 @@ CodeLoom 通过 Nasuta 公共 Surface 使用能力，原则上不应引入 Execu
 
 | 验收项 | 实现位置 | 结果 |
 |---|---|---|
-| 统一 Scope 生命周期与 Trace ID | `internal/executiontrace/scope.go`、`internal/executiontrace/capture.go`、`internal/agent/definition_runtime.go`、`internal/agent/workflow/executor.go` | 已完成 |
+| 统一 Scope 生命周期与 Trace ID | `internal/runtrace/scope.go`、`internal/runtrace/capture.go`、`internal/agent/definition_runtime.go`、`internal/agent/workflow/executor.go` | 已完成 |
 | Tool、LLM、Workflow 与多 Agent 执行边界自动记录 | `tool/execution.go`、`internal/llm/client.go`、`internal/agent/workflow/executor.go` | 已完成 |
 | QA、Retrieval、Memory、Feature Delivery 节点迁移 | `internal/agent/`、`internal/retrieval/`、`internal/sessionhistory/`、`internal/feature/pipeline/`、`internal/feature/reviewworkflow/` | 已完成 |
-| 父子 Run、Workflow Node 与并行顺序关联 | `internal/executiontrace/scope.go`、`internal/agent/workflow/execution_trace.go` | 已完成 |
+| 父子 Run、Workflow Node 与并行顺序关联 | `internal/runtrace/scope.go`、`internal/agent/workflow/execution_trace.go` | 已完成 |
 | QA SSE `event: trace` 与 MCP `_trace` 兼容 | `internal/transport/dashboard/qa.go`、`internal/transport/mcp/server.go` | 已完成 |
-| Trace 字段投影、错误/Panic/取消状态与容量截断 | `internal/executiontrace/invoke.go`、`internal/executiontrace/scope.go` | 已完成 |
-| 旧业务 Trace 调用收敛 | `internal/executiontrace/invoke.go` 保留唯一兼容桥，其余业务包不直接调用 | 已完成 |
+| Trace 字段投影、错误/Panic/取消状态与容量截断 | `internal/runtrace/invoke.go`、`internal/runtrace/scope.go` | 已完成 |
+| 旧业务 Trace 调用收敛 | `internal/runtrace/invoke.go` 保留唯一兼容桥，其余业务包不直接调用 | 已完成 |
 
-实现阶段保留 `domain.EvaluationTrace`、`domain.TraceEnabled` 和 `domain.RecordTrace` 作为 Trace v1 兼容合同；它们不再承担各业务线的生命周期管理。后续若要移除兼容桥，应先完成协议 v2 或所有外部消费者迁移，再删除 `internal/executiontrace/invoke.go` 中的桥接。
+实现阶段保留 `domain.EvaluationTrace`、`domain.TraceEnabled` 和 `domain.RecordTrace` 作为 Trace v1 兼容合同；它们不再承担各业务线的生命周期管理。后续若要移除兼容桥，应先完成协议 v2 或所有外部消费者迁移，再删除 `internal/runtrace/invoke.go` 中的桥接。

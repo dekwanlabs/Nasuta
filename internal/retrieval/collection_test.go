@@ -8,7 +8,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 type dependencyTraceTools struct {
@@ -104,7 +104,7 @@ func TestCollectDepsPreservesConditionalTraceContract(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var events []domain.EvaluationTrace
-			ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+			ctx := runtrace.WithScope(t.Context(), runtrace.NewScope(runtrace.Evaluation, func(event domain.EvaluationTrace) {
 				events = append(events, event)
 			}))
 			retrieve := New(dependencyTraceTools{trace: test.trace}, config.Config{})
@@ -139,7 +139,7 @@ func TestCollectDependencyEdgesReturnsAtBudgetWhenBackendIgnoresContext(t *testi
 
 func TestCollectCodeGraphPreservesSearchTraceContract(t *testing.T) {
 	var events []domain.EvaluationTrace
-	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithScope(t.Context(), runtrace.NewScope(runtrace.Evaluation, func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	}))
 	retrieve := New(nil, config.Config{})

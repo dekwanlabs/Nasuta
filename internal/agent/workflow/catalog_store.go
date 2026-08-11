@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	platformstore "github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
 func (workflowStore *Store) PublishDefinitions(
@@ -115,7 +115,7 @@ func publishWorkflowDefinitionTx(
 		VALUES(?,?,?,?,1,?,?,?)`,
 		definition.ID, definition.Version, raw, definition.ContentHash,
 		makeDefault, actorUserID,
-		platformstore.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
+		store.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
 	); err != nil {
 		return DefinitionRecord{}, false, fmt.Errorf(
 			"save workflow %q version %d: %w",
@@ -370,7 +370,7 @@ func (workflowStore *Store) SetDefinitionRollout(
 			rule.WorkflowID, rule.RuleVersion, rule.WorkflowID, rule.CandidateVersion,
 			rule.PercentageBPS, rule.Salt, rule.RuleHash, rule.Active,
 			actorUserID,
-			platformstore.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
+			store.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
 		)
 	} else {
 		_, err = tx.ExecContext(ctx, `UPDATE catalog_rollouts SET
@@ -379,7 +379,7 @@ func (workflowStore *Store) SetDefinitionRollout(
 			WHERE catalog_kind='workflow' AND subject_id=?`,
 			rule.RuleVersion, rule.WorkflowID, rule.CandidateVersion, rule.PercentageBPS,
 			rule.Salt, rule.RuleHash, rule.Active, actorUserID,
-			platformstore.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
+			store.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
 			rule.WorkflowID,
 		)
 	}
@@ -498,7 +498,7 @@ func appendWorkflowDefinitionAuditTx(
 		catalog_kind,event_kind,subject_id,version,action,actor_user_id,created_at)
 		VALUES('workflow','definition',?,?,?,?,?)`,
 		id, version, action, actorUserID,
-		platformstore.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)),
+		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)),
 	); err != nil {
 		return fmt.Errorf(
 			"append workflow %q version %d audit: %w",
@@ -521,7 +521,7 @@ func appendWorkflowDefinitionRolloutAuditTx(
 		VALUES('workflow','rollout',?,?,?,?,?,?,?,?,?)`,
 		rule.WorkflowID, rule.RuleVersion, rule.WorkflowID, rule.CandidateVersion,
 		rule.PercentageBPS, rule.RuleHash, action, actorUserID,
-		platformstore.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)),
+		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)),
 	); err != nil {
 		return fmt.Errorf(
 			"append workflow rollout %q version %d audit: %w",

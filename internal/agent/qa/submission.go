@@ -10,13 +10,13 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	agentsession "github.com/dekwanlabs/nasuta/internal/agent/session"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -31,7 +31,7 @@ func (svc *QA) submitInvestigation(
 	conversation ConversationContext,
 	userID int64,
 	runID string,
-	trace *executiontrace.Scope,
+	trace *runtrace.Scope,
 	ownsTrace bool,
 ) (*AskResult, error) {
 	workflowRunID := "workflow_" + strings.TrimPrefix(NewRunID(), "run_")
@@ -95,7 +95,7 @@ func (svc *QA) submitRun(
 	plan domain.EvidencePlan,
 	policy ToolPolicy,
 	prepared ScenarioToolSet,
-	trace *executiontrace.Scope,
+	trace *runtrace.Scope,
 	ownsTrace bool,
 ) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", runID, definition.ID, definition.Version)
@@ -226,7 +226,7 @@ func (svc *QA) prepareAnswerConversation(
 ) ConversationContext {
 	instructions := append([]llm.Message{}, conversation.Instructions...)
 	if len(recalled) > 0 {
-		formatted, _ := executiontrace.Invoke(ctx, memoryInjectSpec, recalled, func(
+		formatted, _ := runtrace.Invoke(ctx, memoryInjectSpec, recalled, func(
 			_ context.Context,
 			records []memory.MemoryRecord,
 		) (string, error) {
@@ -351,9 +351,9 @@ func (svc *QA) archiveSessionHistoryAsync(
 		defer cancel()
 		started := false
 		fromTurn, toTurn := 0, 0
-		result, err := agentsession.ArchiveSessionHistoryIfNeededWithStatus(
+		result, err := session.ArchiveSessionHistoryIfNeededWithStatus(
 			archiveCtx, svc.helperLLM, svc.sessions, sessionID, userID,
-			agentsession.SessionCompactionUsage{
+			session.SessionCompactionUsage{
 				ContextWindow:       contextWindow,
 				OutputReserveTokens: outputReserve,
 			},

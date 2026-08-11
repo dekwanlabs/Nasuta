@@ -9,10 +9,10 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -22,7 +22,7 @@ type qaPreparation struct {
 	request            QARequest
 	sourceConversation ConversationContext
 	ctx                context.Context
-	trace              *executiontrace.Scope
+	trace              *runtrace.Scope
 	ownsTrace          bool
 	toolPolicy         ToolPolicy
 	candidateToolSet   ScenarioToolSet
@@ -101,8 +101,8 @@ func (svc *QA) initializePreparation(
 	}
 
 	trace, ownsTrace := beginExecutionTrace(ctx)
-	ctx = executiontrace.WithScope(ctx, trace)
-	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+	ctx = runtrace.WithScope(ctx, trace)
+	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: request.RunID, ParentRunID: request.ParentRunID,
 	})
 	prepared := &qaPreparation{
@@ -490,7 +490,7 @@ func (svc *QA) recallMemory(
 	memoryInput := &memoryRecallInput{
 		Store: svc.memory, UserID: userID, Query: question, Limit: 3,
 	}
-	memoryResult, _ := executiontrace.Invoke(ctx, memoryRecallSpec, memoryInput, func(
+	memoryResult, _ := runtrace.Invoke(ctx, memoryRecallSpec, memoryInput, func(
 		ctx context.Context, input *memoryRecallInput,
 	) (memoryRecallOutput, error) {
 		if input.Store == nil || !input.Store.Enabled() || input.UserID == 0 {

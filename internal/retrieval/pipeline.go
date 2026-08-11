@@ -14,8 +14,8 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
@@ -113,7 +113,7 @@ type retrievalSourcesResult struct {
 	service retrievalSourceOutcome
 }
 
-var retrievalSourcesSpec = executiontrace.Spec[retrievalDiscoverInput, retrievalSourcesResult]{
+var retrievalSourcesSpec = runtrace.Spec[retrievalDiscoverInput, retrievalSourcesResult]{
 	Operation: "retrieval.sources",
 	Node:      "retrieval_sources",
 	Output: func(_ retrievalDiscoverInput, result retrievalSourcesResult, _ error) map[string]any {
@@ -242,7 +242,7 @@ func (retrieve *Retriever) RetrievePlan(
 		reportProgress(ctx, "retrieval.embedding", "查询向量准备完成", embeddingStarted)
 		discoverStarted := time.Now()
 		reportProgress(ctx, "retrieval.discover", "正在查找相关代码、文档和服务", discoverStarted)
-		a, _ = executiontrace.Invoke(ctx, retrievalDiscoverSpec, retrievalDiscoverInput{
+		a, _ = runtrace.Invoke(ctx, retrievalDiscoverSpec, retrievalDiscoverInput{
 			Query: searchQuery, QueryVector: queryVector, QueryVectorAttempted: queryVectorAttempted,
 			Intent: intent, ServiceScoped: false,
 		}, func(ctx context.Context, input retrievalDiscoverInput) (anchor, error) {
@@ -255,7 +255,7 @@ func (retrieve *Retriever) RetrievePlan(
 	}
 	expandStarted := time.Now()
 	reportProgress(ctx, "retrieval.expand", "正在展开证据和依赖关系", expandStarted)
-	expanded, _ := executiontrace.Invoke(ctx, retrievalExpandSpec, retrievalExpandInput{
+	expanded, _ := runtrace.Invoke(ctx, retrievalExpandSpec, retrievalExpandInput{
 		Anchor: a, Terms: terms, EvidencePlan: evidencePlan, Intent: intent,
 	}, func(ctx context.Context, input retrievalExpandInput) (retrievalExpandOutput, error) {
 		parts, codePool := retrieve.expand(ctx, input.Anchor, input.Terms, input.EvidencePlan, input.Intent)
@@ -264,7 +264,7 @@ func (retrieve *Retriever) RetrievePlan(
 	reportProgress(ctx, "retrieval.expand", "证据展开完成", expandStarted)
 	rerankStarted := time.Now()
 	reportProgress(ctx, "retrieval.rerank", "正在整理候选证据", rerankStarted)
-	result, _ := executiontrace.Invoke(ctx, retrievalAssembleSpec, retrievalAssembleInput{
+	result, _ := runtrace.Invoke(ctx, retrievalAssembleSpec, retrievalAssembleInput{
 		Parts: expanded.Parts, CodePool: expanded.CodePool, SearchQuery: searchQuery, Intent: intent,
 	}, func(ctx context.Context, input retrievalAssembleInput) (*RetrievedContext, error) {
 		return retrieve.assemble(ctx, input.Parts, input.CodePool, input.SearchQuery, input.Intent), nil
@@ -282,7 +282,7 @@ type retrievalDiscoverInput struct {
 	Intent               domain.RetrievalIntent
 }
 
-var retrievalDiscoverSpec = executiontrace.Spec[retrievalDiscoverInput, anchor]{
+var retrievalDiscoverSpec = runtrace.Spec[retrievalDiscoverInput, anchor]{
 	Operation: "retrieval.discover",
 	Node:      "retrieval_discover",
 	Input: func(input retrievalDiscoverInput) map[string]any {
@@ -305,7 +305,7 @@ type retrievalExpandOutput struct {
 	CodePool []codeDoc
 }
 
-var retrievalExpandSpec = executiontrace.Spec[retrievalExpandInput, retrievalExpandOutput]{
+var retrievalExpandSpec = runtrace.Spec[retrievalExpandInput, retrievalExpandOutput]{
 	Operation: "retrieval.expand",
 	Node:      "retrieval_expand",
 	Output: func(input retrievalExpandInput, result retrievalExpandOutput, _ error) map[string]any {
@@ -323,7 +323,7 @@ type retrievalAssembleInput struct {
 	Intent      domain.RetrievalIntent
 }
 
-var retrievalAssembleSpec = executiontrace.Spec[retrievalAssembleInput, *RetrievedContext]{
+var retrievalAssembleSpec = runtrace.Spec[retrievalAssembleInput, *RetrievedContext]{
 	Operation: "retrieval.assemble",
 	Node:      "retrieval_assemble",
 	Output: func(_ retrievalAssembleInput, result *RetrievedContext, _ error) map[string]any {
@@ -349,7 +349,7 @@ func (retrieve *Retriever) discover(
 	queryVectorAttempted bool,
 	intent domain.RetrievalIntent,
 ) anchor {
-	result, _ := executiontrace.Invoke(ctx, retrievalSourcesSpec, retrievalDiscoverInput{
+	result, _ := runtrace.Invoke(ctx, retrievalSourcesSpec, retrievalDiscoverInput{
 		Query: searchQuery, QueryVector: queryVector, ServicePatterns: servicePatterns,
 		QueryVectorAttempted: queryVectorAttempted, ServiceScoped: serviceScoped, Intent: intent,
 	}, retrieve.discoverSources)

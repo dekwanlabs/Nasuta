@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -128,8 +128,8 @@ func (svc *QA) executePrefetch(
 		}
 		callID := prefetchToolCallID(runID, index, call.ToolID)
 		startedAt := time.Now()
-		if err := recordPrefetchStep(ctx, stepRecorder, agentrun.StepRecord{
-			Kind:       agentrun.StepKindToolCall,
+		if err := recordPrefetchStep(ctx, stepRecorder, run.StepRecord{
+			Kind:       run.StepKindToolCall,
 			ToolCallID: callID,
 			Tool:       string(call.ToolID),
 			Args:       string(args),
@@ -201,7 +201,7 @@ func (svc *QA) executePrefetch(
 func recordPrefetchStep(
 	ctx context.Context,
 	recorder preparationStepRecorder,
-	step agentrun.StepRecord,
+	step run.StepRecord,
 ) error {
 	if recorder == nil {
 		return nil
@@ -227,8 +227,8 @@ func recordPrefetchResult(
 	if executionErr != nil {
 		content = "error: " + executionErr.Error()
 	}
-	step := agentrun.StepRecord{
-		Kind:                agentrun.StepKindToolResult,
+	step := run.StepRecord{
+		Kind:                run.StepKindToolResult,
 		TraceID:             prefetchToolResultTraceID(runID, callID),
 		ToolCallID:          callID,
 		Tool:                string(toolID),

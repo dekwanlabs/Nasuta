@@ -7,64 +7,64 @@ import (
 	"encoding/json"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	agentdefinition "github.com/dekwanlabs/nasuta/internal/agent/definition"
-	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
-	agentsession "github.com/dekwanlabs/nasuta/internal/agent/session"
-	agenttools "github.com/dekwanlabs/nasuta/internal/agent/tools"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
+	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-type ConversationContext = agentexecution.ConversationContext
-type RunResult = agentexecution.RunResult
-type Service = agenttools.Service
-type SessionHistory = agentsession.SessionHistory
-type HistoryCandidates = agentsession.HistoryCandidates
-type CandidateDiscovery = agentsession.CandidateDiscovery
-type DefinitionResolver = agentdefinition.DefinitionResolver
-type ScenarioRunStart = agentdefinition.ScenarioRunStart
-type ScenarioLifecycle = agentdefinition.ScenarioLifecycle
-type ScenarioToolSet = agentdefinition.ScenarioToolSet
-type ScenarioToolSource = agentdefinition.ScenarioToolSource
-type Agent = agentexecution.Agent
+type ConversationContext = execution.ConversationContext
+type RunResult = execution.RunResult
+type Service = tools.Service
+type SessionHistory = session.SessionHistory
+type HistoryCandidates = session.HistoryCandidates
+type CandidateDiscovery = session.CandidateDiscovery
+type DefinitionResolver = definition.DefinitionResolver
+type ScenarioRunStart = definition.ScenarioRunStart
+type ScenarioLifecycle = definition.ScenarioLifecycle
+type ScenarioToolSet = definition.ScenarioToolSet
+type ScenarioToolSource = definition.ScenarioToolSource
+type Agent = execution.Agent
 
-type RunOutcome = agentrun.RunOutcome
-type RunStepRecord = agentrun.StepRecord
-type EvidenceStatus = agentrun.EvidenceStatus
-type EvidenceMetrics = agentrun.EvidenceMetrics
-type ExecutionEvent = agentrun.ExecutionEvent
-type ExecutionEventEmitter = agentrun.ExecutionEventEmitter
-type SessionStatusEvent = agentrun.SessionStatusEvent
-type ContextUsageEvent = agentrun.ContextUsageEvent
-type EventType = agentrun.EventType
+type RunOutcome = run.RunOutcome
+type RunStepRecord = run.StepRecord
+type EvidenceStatus = run.EvidenceStatus
+type EvidenceMetrics = run.EvidenceMetrics
+type ExecutionEvent = run.ExecutionEvent
+type ExecutionEventEmitter = run.ExecutionEventEmitter
+type SessionStatusEvent = run.SessionStatusEvent
+type ContextUsageEvent = run.ContextUsageEvent
+type EventType = run.EventType
 type ToolPolicy = tool.Policy
 type Tool = tool.Tool
 
 const (
-	RunStatusDone    = agentrun.RunStatusDone
-	RunStatusFailed  = agentrun.RunStatusFailed
-	RunStatusAborted = agentrun.RunStatusAborted
+	RunStatusDone    = run.RunStatusDone
+	RunStatusFailed  = run.RunStatusFailed
+	RunStatusAborted = run.RunStatusAborted
 
-	EvidenceComplete    = agentrun.EvidenceComplete
-	EvidencePartial     = agentrun.EvidencePartial
-	EvidenceUnavailable = agentrun.EvidenceUnavailable
+	EvidenceComplete    = run.EvidenceComplete
+	EvidencePartial     = run.EvidencePartial
+	EvidenceUnavailable = run.EvidenceUnavailable
 
-	EventExecutionRouted   = agentrun.EventExecutionRouted
-	EventExecutionDegraded = agentrun.EventExecutionDegraded
+	EventExecutionRouted   = run.EventExecutionRouted
+	EventExecutionDegraded = run.EventExecutionDegraded
 
-	knowledgeReadScope  = platformscope.KnowledgeRead
-	knowledgeWriteScope = platformscope.KnowledgeWrite
+	knowledgeReadScope  = scope.KnowledgeRead
+	knowledgeWriteScope = scope.KnowledgeWrite
 )
 
-var ErrEmptyAnswer = agentrun.ErrEmptyAnswer
+var ErrEmptyAnswer = run.ErrEmptyAnswer
 
 type preparationStepRecorder interface {
-	RecordPreparationStep(context.Context, agentrun.StepRecord) error
+	RecordPreparationStep(context.Context, run.StepRecord) error
 }
 
 func toolPolicyForRun(allowWrite bool) ToolPolicy {
@@ -74,9 +74,9 @@ func toolPolicyForRun(allowWrite bool) ToolPolicy {
 	}
 }
 
-func beginExecutionTrace(ctx context.Context) (*executiontrace.Scope, bool) {
-	inherited := executiontrace.FromContext(ctx)
-	trace := executiontrace.Begin(ctx)
+func beginExecutionTrace(ctx context.Context) (*runtrace.Scope, bool) {
+	inherited := runtrace.FromContext(ctx)
+	trace := runtrace.Begin(ctx)
 	return trace, trace != nil && inherited == nil
 }
 
@@ -93,25 +93,25 @@ func buildAgentMessages(
 	domainKnowledge string,
 	historyLimit int,
 ) []llm.Message {
-	return agentexecution.BuildAgentMessages(
+	return execution.BuildAgentMessages(
 		question, conversation, rc, plan, domainKnowledge, historyLimit,
 	)
 }
 
 func replayableTailMessages(messages []llm.Message, limit int) []llm.Message {
-	return agentexecution.ReplayableTailMessages(messages, limit)
+	return execution.ReplayableTailMessages(messages, limit)
 }
 
 func classifyResponseMode(question string) domain.ResponseMode {
-	return agentexecution.ClassifyResponseMode(question)
+	return execution.ClassifyResponseMode(question)
 }
 
 func shouldShortCircuitMeta(question string) bool {
-	return agentexecution.ShouldShortCircuitMeta(question)
+	return execution.ShouldShortCircuitMeta(question)
 }
 
 func compressTurnDetail(turnNumber int, messages []llm.Message) (json.RawMessage, error) {
-	return agentsession.CompressTurnDetail(turnNumber, messages)
+	return session.CompressTurnDetail(turnNumber, messages)
 }
 
 func internalMessage(message agentapi.Message) llm.Message {
@@ -165,7 +165,7 @@ func withSessionToolScope(
 	conversation ConversationContext,
 	userID int64,
 ) context.Context {
-	return agentsession.WithToolScope(
+	return session.WithToolScope(
 		ctx,
 		conversation.SessionID,
 		conversation.CompactedThroughTurn,

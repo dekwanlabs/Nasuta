@@ -9,7 +9,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 func testDefinition(version int64, prompt string) agentapi.Definition {
@@ -187,7 +187,7 @@ func TestCatalogRejectsUnknownDefinitionSchemas(t *testing.T) {
 func TestCatalogRejectsNonRuntimePermissionScope(t *testing.T) {
 	catalog := testCatalog(t)
 	definition := testDefinition(1, "first")
-	definition.Permissions.Scopes = []string{platformscope.FeatureDelivery}
+	definition.Permissions.Scopes = []string{scope.FeatureDelivery}
 	err := catalog.Publish([]agentapi.Definition{definition})
 	if err == nil || !strings.Contains(err.Error(), "not supported by the agent runtime") {
 		t.Fatalf("Publish error = %v, want non-runtime scope rejection", err)

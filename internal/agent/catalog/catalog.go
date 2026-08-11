@@ -11,7 +11,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 var (
@@ -173,7 +173,7 @@ func (catalog *Catalog) prepare(
 		if err != nil {
 			return nil, fmt.Errorf("%v: %w", err, ErrInvalid)
 		}
-		if err := platformscope.ValidateAgentRuntime(canonical.Permissions.Scopes); err != nil {
+		if err := scope.ValidateAgentRuntime(canonical.Permissions.Scopes); err != nil {
 			return nil, fmt.Errorf(
 				"publish agent definition %q permissions: %v: %w",
 				canonical.ID, err, ErrInvalid,

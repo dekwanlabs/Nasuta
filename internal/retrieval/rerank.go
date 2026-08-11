@@ -11,7 +11,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/platform/httpclient"
@@ -70,13 +70,13 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 		}
 	}
 	before := len(pool)
-	pool, _ = executiontrace.Invoke(ctx, candidateDedupSpec, candidateDedupInput{Docs: pool}, func(_ context.Context, input candidateDedupInput) ([]codeDoc, error) {
+	pool, _ = runtrace.Invoke(ctx, candidateDedupSpec, candidateDedupInput{Docs: pool}, func(_ context.Context, input candidateDedupInput) ([]codeDoc, error) {
 		return dedupBySource(input.Docs), nil
 	})
 	log.InfofCtx(ctx, "[qa] code pool dedup: → %d\n%s", len(pool), poolSummary(pool, "dedup"))
 
 	before = len(pool)
-	pool, _ = executiontrace.Invoke(ctx, candidateTruncateSpec, candidateTruncateInput{
+	pool, _ = runtrace.Invoke(ctx, candidateTruncateSpec, candidateTruncateInput{
 		Docs: pool, Limit: rerankLimit, MinimumPerSource: 2,
 	}, func(_ context.Context, input candidateTruncateInput) ([]codeDoc, error) {
 		return selectRerankCandidates(input.Docs, input.Limit, input.MinimumPerSource), nil
@@ -84,7 +84,7 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 	log.InfofCtx(ctx, "[qa] code pool coarse-truncate: → %d", len(pool))
 
 	poolBeforeRerank := append([]codeDoc(nil), pool...)
-	reranked, _ := executiontrace.Invoke(ctx, candidateRerankSpec, candidateRerankInput{
+	reranked, _ := runtrace.Invoke(ctx, candidateRerankSpec, candidateRerankInput{
 		Docs: pool, Query: query, Reranker: retrieve.reranker, MinDensePreflight: retrieve.platform.RerankMinDensePreflight,
 	}, func(ctx context.Context, input candidateRerankInput) (rerankResult, error) {
 		result := rerankPool(ctx, input.Reranker, input.Query, input.Docs, input.MinDensePreflight)
@@ -103,7 +103,7 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 	}
 
 	before = len(pool)
-	pool, _ = executiontrace.Invoke(ctx, candidateThresholdSpec, candidateThresholdInput{
+	pool, _ = runtrace.Invoke(ctx, candidateThresholdSpec, candidateThresholdInput{
 		Docs: pool, MinScore: retrieve.platform.RerankMinScore,
 	}, func(_ context.Context, input candidateThresholdInput) ([]codeDoc, error) {
 		return filterByScore(input.Docs, input.MinScore), nil
@@ -111,7 +111,7 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 	log.InfofCtx(ctx, "[qa] code pool threshold(%.2f): %d → %d", retrieve.platform.RerankMinScore, before, len(pool))
 
 	before = len(pool)
-	pool, _ = executiontrace.Invoke(ctx, candidateDiversitySpec, candidateDiversityInput{
+	pool, _ = runtrace.Invoke(ctx, candidateDiversitySpec, candidateDiversityInput{
 		Docs: pool, TopK: retrieve.platform.RerankTopK, MaxPerService: retrieve.platform.RerankMaxPerService,
 		MaxPerServiceLowBand: retrieve.platform.RerankMaxPerServiceLowBand,
 	}, func(_ context.Context, input candidateDiversityInput) ([]codeDoc, error) {
@@ -123,7 +123,7 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 
 type candidateDedupInput struct{ Docs []codeDoc }
 
-var candidateDedupSpec = executiontrace.Spec[candidateDedupInput, []codeDoc]{
+var candidateDedupSpec = runtrace.Spec[candidateDedupInput, []codeDoc]{
 	Operation: "retrieval.candidate_dedup", Node: "candidate_dedup",
 	Input: func(input candidateDedupInput) map[string]any { return map[string]any{"candidates": len(input.Docs)} },
 	Output: func(_ candidateDedupInput, result []codeDoc, _ error) map[string]any {
@@ -137,7 +137,7 @@ type candidateTruncateInput struct {
 	MinimumPerSource int
 }
 
-var candidateTruncateSpec = executiontrace.Spec[candidateTruncateInput, []codeDoc]{
+var candidateTruncateSpec = runtrace.Spec[candidateTruncateInput, []codeDoc]{
 	Operation: "retrieval.candidate_truncate", Node: "candidate_truncate",
 	Input: func(input candidateTruncateInput) map[string]any {
 		return map[string]any{"candidates": len(input.Docs), "limit": input.Limit, "minimum_per_source": input.MinimumPerSource}
@@ -154,7 +154,7 @@ type candidateRerankInput struct {
 	MinDensePreflight float64
 }
 
-var candidateRerankSpec = executiontrace.Spec[candidateRerankInput, rerankResult]{
+var candidateRerankSpec = runtrace.Spec[candidateRerankInput, rerankResult]{
 	Operation: "retrieval.candidate_rerank", Node: "candidate_rerank",
 	Input: func(input candidateRerankInput) map[string]any {
 		return map[string]any{"candidates": len(input.Docs), "enabled": input.Reranker.Enabled()}
@@ -178,7 +178,7 @@ type candidateThresholdInput struct {
 	MinScore float64
 }
 
-var candidateThresholdSpec = executiontrace.Spec[candidateThresholdInput, []codeDoc]{
+var candidateThresholdSpec = runtrace.Spec[candidateThresholdInput, []codeDoc]{
 	Operation: "retrieval.candidate_threshold", Node: "candidate_threshold",
 	Input: func(input candidateThresholdInput) map[string]any {
 		return map[string]any{"candidates": len(input.Docs), "min_score": input.MinScore}
@@ -198,7 +198,7 @@ type candidateDiversityInput struct {
 	MaxPerServiceLowBand int
 }
 
-var candidateDiversitySpec = executiontrace.Spec[candidateDiversityInput, []codeDoc]{
+var candidateDiversitySpec = runtrace.Spec[candidateDiversityInput, []codeDoc]{
 	Operation: "retrieval.candidate_diversity", Node: "candidate_diversity",
 	Input: func(input candidateDiversityInput) map[string]any {
 		return map[string]any{"candidates": len(input.Docs), "top_k": input.TopK, "max_per_service": input.MaxPerService}

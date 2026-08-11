@@ -6,19 +6,19 @@ import (
 	"errors"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
 type redactingDefinitionObserver struct {
-	next agentrun.Observer
+	next run.Observer
 }
 
 func (observer redactingDefinitionObserver) OnStep(
 	ctx context.Context,
 	runID string,
-	step agentrun.StepRecord,
+	step run.StepRecord,
 ) error {
 	return observer.next.OnStep(ctx, runID, redactDefinitionStep(step))
 }
@@ -40,9 +40,9 @@ func (observer redactingDefinitionObserver) OnReasoning(
 func (observer redactingDefinitionObserver) OnContextUsage(
 	ctx context.Context,
 	runID string,
-	event agentrun.ContextUsageEvent,
+	event run.ContextUsageEvent,
 ) {
-	if next, ok := observer.next.(agentrun.ContextUsageObserver); ok {
+	if next, ok := observer.next.(run.ContextUsageObserver); ok {
 		next.OnContextUsage(ctx, runID, event)
 	}
 }
@@ -87,7 +87,7 @@ func redactDefinitionResult(result agentapi.RunResult) agentapi.RunResult {
 	return result
 }
 
-func redactDefinitionOutcome(outcome agentrun.RunOutcome) agentrun.RunOutcome {
+func redactDefinitionOutcome(outcome run.RunOutcome) run.RunOutcome {
 	outcome.Answer = platform.RedactSensitiveText(outcome.Answer)
 	outcome.SessionMessages = redactLLMMessages(outcome.SessionMessages)
 	outcome.References = redactPublicReferences(outcome.References)
@@ -97,7 +97,7 @@ func redactDefinitionOutcome(outcome agentrun.RunOutcome) agentrun.RunOutcome {
 	return outcome
 }
 
-func redactDefinitionStep(step agentrun.StepRecord) agentrun.StepRecord {
+func redactDefinitionStep(step run.StepRecord) run.StepRecord {
 	content := platform.RedactSensitiveText(step.Content)
 	if content != step.Content {
 		step.Content = content

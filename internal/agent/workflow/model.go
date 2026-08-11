@@ -11,7 +11,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 var canonicalID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
@@ -212,7 +212,7 @@ func Prepare(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (W
 	}
 	for index := range prepared.Nodes {
 		node := prepared.Nodes[index]
-		if err := platformscope.EnsureSubset(
+		if err := scope.EnsureSubset(
 			node.Permissions.Scopes,
 			prepared.Permissions.Scopes,
 		); err != nil {
@@ -596,7 +596,7 @@ func validateSchema(
 }
 
 func validatePermissions(label string, policy agentapi.PermissionPolicy) error {
-	if err := platformscope.Validate(policy.Scopes); err != nil {
+	if err := scope.Validate(policy.Scopes); err != nil {
 		return fmt.Errorf("%s permissions: %w", label, err)
 	}
 	return nil

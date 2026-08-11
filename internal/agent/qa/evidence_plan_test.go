@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 func TestEvidencePlanningTraceContract(t *testing.T) {
@@ -50,8 +50,8 @@ func TestEvidencePlanningTraceContract(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			scope := executiontrace.NewScope(executiontrace.Evaluation, nil)
-			ctx := executiontrace.WithScope(t.Context(), scope)
+			scope := runtrace.NewScope(runtrace.Evaluation, nil)
+			ctx := runtrace.WithScope(t.Context(), scope)
 			svc := &QA{routerConfidence: 0.9}
 
 			result, err := svc.planEvidence(ctx, test.input)

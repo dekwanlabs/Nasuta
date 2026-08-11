@@ -12,7 +12,7 @@ import (
 	"github.com/dekwanlabs/nasuta/incident"
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
@@ -62,7 +62,7 @@ type qaState struct {
 	mu       sync.RWMutex
 	sessions *memory.SessionStore
 	memory   *memory.MemoryStore
-	runs     *agentrun.RunStore
+	runs     *run.RunStore
 	current  dashboard.QARuntime
 }
 
@@ -186,7 +186,7 @@ func (p *Platform) initCatalogs() error {
 		"[agent] catalog persistence enabled (restored_max_version=%d)",
 		p.agents.version,
 	)
-	runStore, err := agentrun.NewRunStore(p.db)
+	runStore, err := run.NewRunStore(p.db)
 	if err != nil {
 		log.Warnf("[qa] agent run store disabled: %v", err)
 		return nil

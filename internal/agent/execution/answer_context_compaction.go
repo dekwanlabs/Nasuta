@@ -4,15 +4,15 @@ import (
 	"context"
 	"fmt"
 
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
 const (
-	answerContextHighWaterPercent = agentrun.ContextHighWaterPercent
+	answerContextHighWaterPercent = run.ContextHighWaterPercent
 	answerContextTargetPercent    = 60
 	oldToolResultFloorTokens      = 96
 	recentToolResultFloorTokens   = 256
@@ -56,7 +56,7 @@ type answerContextCompactionInput struct {
 	Phase string
 }
 
-var answerContextCompactionSpec = executiontrace.Spec[
+var answerContextCompactionSpec = runtrace.Spec[
 	answerContextCompactionInput,
 	answerContextCompactionResult,
 ]{
@@ -99,7 +99,7 @@ func (agent *Agent) compactRunContextBeforeAnswer(
 	phase string,
 ) (answerContextCompactionResult, error) {
 	input := answerContextCompactionInput{State: state, Tools: tools, Phase: phase}
-	return executiontrace.Invoke(
+	return runtrace.Invoke(
 		stateContext(state),
 		answerContextCompactionSpec,
 		input,
@@ -129,17 +129,17 @@ func (agent *Agent) compactRunContext(
 	result.ProjectedAfterTokens = projectedBefore
 
 	window := agent.cfg.ContextWindow
-	highWater := agentrun.ContextHighWaterTokens(window)
-	safety := agentrun.ContextSafetyTokens(window)
+	highWater := run.ContextHighWaterTokens(window)
+	safety := run.ContextSafetyTokens(window)
 	defer func() {
-		emitContextUsage(agent.observer, state.runID, agentrun.ContextUsageEvent{
+		emitContextUsage(agent.observer, state.runID, run.ContextUsageEvent{
 			Phase:                 phase,
 			ProjectedBeforeTokens: result.ProjectedBeforeTokens,
 			ProjectedAfterTokens:  result.ProjectedAfterTokens,
 			ContextWindow:         window,
 			HighWaterTokens:       highWater,
 			SafetyTokens:          safety,
-			SafeLimitTokens:       agentrun.ContextSafeLimitTokens(window),
+			SafeLimitTokens:       run.ContextSafeLimitTokens(window),
 			OutputReserveTokens:   outputReserve,
 			CompactionTriggered:   result.Triggered,
 			CompactionApplied:     result.Applied,
@@ -315,8 +315,8 @@ func emitAnswerContextCompacted(observer Observer, runID, phase string) {
 	}
 }
 
-func emitContextUsage(observer Observer, runID string, event agentrun.ContextUsageEvent) {
-	if emitter, ok := observer.(agentrun.ContextUsageObserver); ok {
+func emitContextUsage(observer Observer, runID string, event run.ContextUsageEvent) {
+	if emitter, ok := observer.(run.ContextUsageObserver); ok {
 		emitter.OnContextUsage(context.Background(), runID, event)
 	}
 }

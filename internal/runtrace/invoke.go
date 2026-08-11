@@ -1,4 +1,4 @@
-package executiontrace
+package runtrace
 
 import (
 	"context"

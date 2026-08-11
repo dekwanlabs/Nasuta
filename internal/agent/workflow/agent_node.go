@@ -7,8 +7,8 @@ import (
 	"fmt"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 // AgentNodeExecutor binds Workflow nodes to the shared immutable Agent Runtime.
@@ -74,7 +74,7 @@ func (executor *AgentNodeExecutor) Execute(
 		RunID: runID, Agent: request.Node.Agent, DefinitionHash: definition.ContentHash,
 		Input: request.Inputs[0].Payload, Permissions: permissions,
 		ToolScope: agentapi.ToolScope{
-			AllowWrite: platformscope.Has(permissions.Scopes, platformscope.KnowledgeWrite),
+			AllowWrite: scope.Has(permissions.Scopes, scope.KnowledgeWrite),
 		},
 		Policy: agentapi.RunPolicy{MaxToolCalls: request.Node.Budget.MaxToolCalls},
 		Actor:  request.Actor,
@@ -84,12 +84,12 @@ func (executor *AgentNodeExecutor) Execute(
 			NodeID:        request.Node.ID,
 		},
 	}
-	childCtx := executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+	childCtx := runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: runID, ParentRunID: request.WorkflowRunID,
 		WorkflowRunID: request.WorkflowRunID, AgentRunID: runID,
 		WorkflowNodeID: request.Node.ID,
 	})
-	result, err := executiontrace.Invoke(
+	result, err := runtrace.Invoke(
 		childCtx,
 		multiAgentChildRunTraceSpec,
 		runRequest,
@@ -138,7 +138,7 @@ func (executor *AgentNodeExecutor) Execute(
 	return nodeResult, nil
 }
 
-var multiAgentChildRunTraceSpec = executiontrace.Spec[agentapi.RunRequest, agentapi.RunResult]{
+var multiAgentChildRunTraceSpec = runtrace.Spec[agentapi.RunRequest, agentapi.RunResult]{
 	Operation: "multi_agent.child_run",
 	Node:      "multi_agent_child_run",
 	Input: func(request agentapi.RunRequest) map[string]any {

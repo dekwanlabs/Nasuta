@@ -10,7 +10,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -193,13 +193,13 @@ func prepareWorkflowRun(
 	if orchestrator == nil || orchestrator.schemas == nil {
 		return preparedRun{}, ErrUnavailable
 	}
-	if err := platformscope.Validate(request.ActorPermissions.Scopes); err != nil {
+	if err := scope.Validate(request.ActorPermissions.Scopes); err != nil {
 		return preparedRun{}, fmt.Errorf("workflow actor permissions: %v: %w", err, ErrInvalid)
 	}
-	if err := platformscope.Validate(request.ScenarioPermissions.Scopes); err != nil {
+	if err := scope.Validate(request.ScenarioPermissions.Scopes); err != nil {
 		return preparedRun{}, fmt.Errorf("workflow scenario permissions: %v: %w", err, ErrInvalid)
 	}
-	if err := platformscope.EnsureSubset(
+	if err := scope.EnsureSubset(
 		definition.Permissions.Scopes,
 		request.ActorPermissions.Scopes,
 	); err != nil {
@@ -210,7 +210,7 @@ func prepareWorkflowRun(
 			ErrForbidden,
 		)
 	}
-	if err := platformscope.EnsureSubset(
+	if err := scope.EnsureSubset(
 		definition.Permissions.Scopes,
 		request.ScenarioPermissions.Scopes,
 	); err != nil {
@@ -286,8 +286,8 @@ func definitionIsKnowledgeReadOnly(definition WorkflowDefinition) bool {
 
 func permissionIsKnowledgeReadOnly(policy agentapi.PermissionPolicy) bool {
 	return len(policy.Scopes) > 0 &&
-		!platformscope.HasSideEffect(policy.Scopes) &&
-		platformscope.Has(policy.Scopes, platformscope.KnowledgeRead)
+		!scope.HasSideEffect(policy.Scopes) &&
+		scope.Has(policy.Scopes, scope.KnowledgeRead)
 }
 
 func clonePermissionPolicy(policy agentapi.PermissionPolicy) agentapi.PermissionPolicy {

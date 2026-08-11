@@ -9,7 +9,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 func TestRetryPolicyNormalizesAndAffectsDefinitionHash(t *testing.T) {
@@ -290,7 +290,7 @@ func TestOrchestratorRetriesOnlyExplicitlySafeTransformFailure(t *testing.T) {
 func TestOrchestratorDoesNotRetrySideEffectingDomainTransform(t *testing.T) {
 	definition := singleNodeWorkflow()
 	permission := agentapi.PermissionPolicy{
-		Scopes: []string{platformscope.FeatureDelivery},
+		Scopes: []string{scope.FeatureDelivery},
 	}
 	definition.ID = "transform.retry.domain-write"
 	definition.Permissions = permission

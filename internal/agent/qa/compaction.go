@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
-	agentsession "github.com/dekwanlabs/nasuta/internal/agent/session"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -37,13 +37,13 @@ func (svc *QA) compactBeforeAnswer(
 	if err != nil {
 		return conversation, fmt.Errorf("estimate session compaction context: %w", err)
 	}
-	result := agentsession.SessionCompactionResult{
+	result := session.SessionCompactionResult{
 		ProjectedBeforeTokens: projectedTokens,
 		ProjectedAfterTokens:  projectedTokens,
 		ContextWindow:         contextWindow,
-		HighWaterTokens:       agentrun.ContextHighWaterTokens(contextWindow),
-		SafetyTokens:          agentrun.ContextSafetyTokens(contextWindow),
-		SafeLimitTokens:       agentrun.ContextSafeLimitTokens(contextWindow),
+		HighWaterTokens:       run.ContextHighWaterTokens(contextWindow),
+		SafetyTokens:          run.ContextSafetyTokens(contextWindow),
+		SafeLimitTokens:       run.ContextSafeLimitTokens(contextWindow),
 		OutputReserveTokens:   outputReserve,
 	}
 	defer func() {
@@ -56,9 +56,9 @@ func (svc *QA) compactBeforeAnswer(
 
 	started := false
 	fromTurn, toTurn := 0, 0
-	result, err = agentsession.CompactSessionIfNeeded(
+	result, err = session.CompactSessionIfNeeded(
 		ctx, svc.helperLLM, svc.sessions, conversation.SessionID, prepared.request.UserID,
-		agentsession.SessionCompactionUsage{
+		session.SessionCompactionUsage{
 			ContextWindow:       contextWindow,
 			IncomingTokens:      incomingTokens,
 			ProjectedTokens:     projectedTokens,
@@ -135,8 +135,8 @@ func sessionCompactionTokenProjection(
 	tools []tool.Tool,
 	outputReserve int,
 ) (int, int, error) {
-	definitions := agentexecution.ToolDefinitions(tools)
-	projectedInput, err := agentexecution.EstimateInputTokens(buildAgentMessages(
+	definitions := execution.ToolDefinitions(tools)
+	projectedInput, err := execution.EstimateInputTokens(buildAgentMessages(
 		question, conversation, rc, plan, domainKnowledge, 0,
 	), definitions)
 	if err != nil {
@@ -147,7 +147,7 @@ func sessionCompactionTokenProjection(
 	withoutSessionHistory.RecentTurns = nil
 	withoutSessionHistory.RecentDialogue = nil
 	withoutSessionHistory.HistoricalContext = ""
-	incomingTokens, err := agentexecution.EstimateInputTokens(buildAgentMessages(
+	incomingTokens, err := execution.EstimateInputTokens(buildAgentMessages(
 		question, withoutSessionHistory, rc, plan, domainKnowledge, 0,
 	), definitions)
 	if err != nil {
@@ -173,7 +173,7 @@ func sessionCompactionTools(prepared ScenarioToolSet, conversation ConversationC
 	return selected
 }
 
-func contextUsageFromSessionCompaction(result agentsession.SessionCompactionResult) ContextUsageEvent {
+func contextUsageFromSessionCompaction(result session.SessionCompactionResult) ContextUsageEvent {
 	return ContextUsageEvent{
 		Phase:                 "session_pre_answer",
 		ProjectedBeforeTokens: result.ProjectedBeforeTokens,

@@ -14,7 +14,7 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 func TestDefaultDelegatedInvestigationPinsStableReadOnlyDAG(t *testing.T) {
@@ -87,7 +87,7 @@ func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *te
 		t.Fatal(err)
 	}
 	var traces []domain.EvaluationTrace
-	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		traces = append(traces, event)
 	})
 	actor := agentapi.Actor{UserID: 23, TenantID: "tenant-a"}

@@ -8,7 +8,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dekwanlabs/nasuta/config"
-	agentsession "github.com/dekwanlabs/nasuta/internal/agent/session"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -152,7 +152,7 @@ func TestSessionTurnDetailsToolIsPrivateAndRequiresCurrentReference(t *testing.T
 	if _, err := candidate.Handler.Execute(context.Background(), tool.Arguments{"ref": "cmp-1"}); err == nil {
 		t.Fatal("detail tool accepted a call without session scope")
 	}
-	ctx := agentsession.WithToolScope(context.Background(), "session-1", 1, 42)
+	ctx := session.WithToolScope(context.Background(), "session-1", 1, 42)
 	mock.ExpectQuery(`SELECT t\.context_ref,t\.session_id,s\.user_id,t\.run_id,t\.context_detail_json.*FROM qa_turns t.*JOIN qa_sessions s`).
 		WithArgs("cmp-current", "session-1", int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"ref", "session_id", "user_id", "run_id", "detail_json", "turn_number", "summary_text", "summary_tokens", "source_tokens", "retained_tokens"}).

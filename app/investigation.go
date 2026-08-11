@@ -8,13 +8,13 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
 
 type platformQAInvestigationRunner struct {
 	platform *Platform
-	events   agentrun.ExecutionEventEmitter
+	events   run.ExecutionEventEmitter
 }
 
 func (runner platformQAInvestigationRunner) Available() bool {
@@ -90,7 +90,7 @@ func (runner platformQAInvestigationRunner) Run(
 func bridgeInvestigationEvents(
 	events <-chan workflow.Event,
 	stop <-chan struct{},
-	emitter agentrun.ExecutionEventEmitter,
+	emitter run.ExecutionEventEmitter,
 	parentRunID string,
 ) {
 	for {
@@ -111,7 +111,7 @@ func bridgeInvestigationEvents(
 }
 
 func emitInvestigationEvent(
-	emitter agentrun.ExecutionEventEmitter,
+	emitter run.ExecutionEventEmitter,
 	parentRunID string,
 	event workflow.Event,
 ) {
@@ -127,37 +127,37 @@ func emitInvestigationEvent(
 func projectInvestigationEvent(
 	parentRunID string,
 	event workflow.Event,
-) (agentrun.EventType, agentrun.ExecutionEvent, bool) {
-	projected := agentrun.ExecutionEvent{
+) (run.EventType, run.ExecutionEvent, bool) {
+	projected := run.ExecutionEvent{
 		RunID: parentRunID, WorkflowRunID: event.WorkflowRunID,
 		NodeID: event.NodeID, Strategy: "multi_agent",
 	}
 	switch event.Kind {
 	case "workflow_started":
 		projected.Status = "running"
-		return agentrun.EventWorkflowStarted, projected, true
+		return run.EventWorkflowStarted, projected, true
 	case "node_started":
 		if investigationAgentNode(event.NodeID) {
 			projected.Status = "running"
-			return agentrun.EventAgentStarted, projected, true
+			return run.EventAgentStarted, projected, true
 		}
 	case "node_succeeded":
 		switch {
 		case investigationAgentNode(event.NodeID):
 			projected.Status = "completed"
-			return agentrun.EventAgentCompleted, projected, true
+			return run.EventAgentCompleted, projected, true
 		case event.NodeID == "evidence.join":
 			projected.Status = "completed"
-			return agentrun.EventEvidenceJoined, projected, true
+			return run.EventEvidenceJoined, projected, true
 		}
 	case "node_failed":
 		if investigationAgentNode(event.NodeID) {
 			projected.Status = "failed"
 			projected.Reason = event.Summary
-			return agentrun.EventAgentCompleted, projected, true
+			return run.EventAgentCompleted, projected, true
 		}
 	}
-	return "", agentrun.ExecutionEvent{}, false
+	return "", run.ExecutionEvent{}, false
 }
 
 func investigationAgentNode(nodeID string) bool {

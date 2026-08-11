@@ -7,10 +7,10 @@ import (
 	"reflect"
 	"testing"
 
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/tracecontract"
 )
 
@@ -41,18 +41,18 @@ func (writer *failingSSEWriter) FlushError() error {
 }
 
 func TestQATraceExporterStreamsScopeEvents(t *testing.T) {
-	hub := agentrun.NewRunHub(nil)
+	hub := run.NewRunHub(nil)
 	channel := hub.Subscribe("run")
-	scope := executiontrace.Begin(executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+	scope := runtrace.Begin(runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		hub.EmitTrace("run", event)
 	}))
-	ctx := executiontrace.WithScope(t.Context(), scope)
+	ctx := runtrace.WithScope(t.Context(), scope)
 	domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "evidence_plan"})
 	domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "agent_model_turn"})
 	for sequence := 1; sequence <= 2; sequence++ {
 		live := <-channel
 		trace, ok := live.Data.(domain.EvaluationTrace)
-		if live.Type != agentrun.EventTrace || !ok || trace.Sequence != sequence {
+		if live.Type != run.EventTrace || !ok || trace.Sequence != sequence {
 			t.Fatalf("live event = %#v", live)
 		}
 	}
@@ -80,13 +80,13 @@ func TestQATraceUsesV1WireContract(t *testing.T) {
 // The QA stream loop forwards every hub event and stops only on the terminal
 // one, so a trace event queued ahead of run.finished must still reach the client.
 func TestStreamLoopDrainsTraceBeforeTerminal(t *testing.T) {
-	terminal := &agentrun.RunTerminal{Status: agentrun.RunStatusDone, Answer: "answer"}
-	events := []agentrun.SSEEvent{
-		{Type: agentrun.EventTrace, Data: domain.EvaluationTrace{Node: "retrieval_assemble"}},
-		{Type: agentrun.EventRunFinished, Data: terminal},
+	terminal := &run.RunTerminal{Status: run.RunStatusDone, Answer: "answer"}
+	events := []run.SSEEvent{
+		{Type: run.EventTrace, Data: domain.EvaluationTrace{Node: "retrieval_assemble"}},
+		{Type: run.EventRunFinished, Data: terminal},
 	}
 	var names []string
-	var got *agentrun.RunTerminal
+	var got *run.RunTerminal
 	for _, ev := range events {
 		if got != nil {
 			t.Fatalf("kept forwarding after terminal event %q", ev.Type)
@@ -97,7 +97,7 @@ func TestStreamLoopDrainsTraceBeforeTerminal(t *testing.T) {
 		}) {
 			t.Fatalf("emit %q failed", ev.Type)
 		}
-		got = agentrun.TerminalFromEvent(ev)
+		got = run.TerminalFromEvent(ev)
 	}
 	if got != terminal || len(names) != 2 || names[0] != "trace" || names[1] != "run.finished" {
 		t.Fatalf("terminal=%+v events=%v", got, names)
@@ -108,7 +108,7 @@ func TestEmitHubEventForwardsTaggedEvent(t *testing.T) {
 	var eventName string
 	var data any
 	timing := llm.CallLifecycle{CallSeq: 2, Phase: llm.PhaseAgentStep, Status: llm.CallLifecycleFinished, DurationMs: 1200}
-	emitHubEvent(agentrun.SSEEvent{Type: agentrun.EventLLMCall, Data: timing}, func(name string, value any) bool {
+	emitHubEvent(run.SSEEvent{Type: run.EventLLMCall, Data: timing}, func(name string, value any) bool {
 		eventName, data = name, value
 		return true
 	})
@@ -120,8 +120,8 @@ func TestEmitHubEventForwardsTaggedEvent(t *testing.T) {
 func TestEmitHubEventUsesToolSummary(t *testing.T) {
 	var eventName string
 	var data any
-	payload := agentrun.ToolFinishedEvent{Step: 4, Tool: "observe_logs", Summary: "matched logs", Failed: true, DurationMs: 1543}
-	emitHubEvent(agentrun.SSEEvent{Type: agentrun.EventToolFinished, Data: payload}, func(name string, value any) bool {
+	payload := run.ToolFinishedEvent{Step: 4, Tool: "observe_logs", Summary: "matched logs", Failed: true, DurationMs: 1543}
+	emitHubEvent(run.SSEEvent{Type: run.EventToolFinished, Data: payload}, func(name string, value any) bool {
 		eventName, data = name, value
 		return true
 	})
@@ -131,26 +131,26 @@ func TestEmitHubEventUsesToolSummary(t *testing.T) {
 }
 
 func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
-	payload := agentrun.ExecutionEvent{
+	payload := run.ExecutionEvent{
 		RunID: "qa-parent", WorkflowRunID: "workflow-1", NodeID: "investigate.code",
 		Strategy: "multi_agent", Status: "completed", Reason: "evidence joined",
 		Complexity: 0.95, Confidence: 0.91,
 	}
 	tests := []struct {
-		eventType agentrun.EventType
+		eventType run.EventType
 	}{
-		{eventType: agentrun.EventExecutionRouted},
-		{eventType: agentrun.EventExecutionDegraded},
-		{eventType: agentrun.EventWorkflowStarted},
-		{eventType: agentrun.EventAgentStarted},
-		{eventType: agentrun.EventAgentCompleted},
-		{eventType: agentrun.EventEvidenceJoined},
+		{eventType: run.EventExecutionRouted},
+		{eventType: run.EventExecutionDegraded},
+		{eventType: run.EventWorkflowStarted},
+		{eventType: run.EventAgentStarted},
+		{eventType: run.EventAgentCompleted},
+		{eventType: run.EventEvidenceJoined},
 	}
 	for _, test := range tests {
 		t.Run(string(test.eventType), func(t *testing.T) {
 			var eventName string
 			var data any
-			emitHubEvent(agentrun.SSEEvent{Type: test.eventType, Data: payload}, func(name string, value any) bool {
+			emitHubEvent(run.SSEEvent{Type: test.eventType, Data: payload}, func(name string, value any) bool {
 				eventName, data = name, value
 				return true
 			})
@@ -162,9 +162,9 @@ func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
 }
 
 func TestRunFinishedIsTheOnlyTerminalEvent(t *testing.T) {
-	for _, status := range []agentrun.RunStatus{agentrun.RunStatusDone, agentrun.RunStatusFailed, agentrun.RunStatusAborted} {
+	for _, status := range []run.RunStatus{run.RunStatusDone, run.RunStatusFailed, run.RunStatusAborted} {
 		var names []string
-		emitHubEvent(agentrun.SSEEvent{Type: agentrun.EventRunFinished, Data: &agentrun.RunTerminal{Status: status}}, func(name string, _ any) bool {
+		emitHubEvent(run.SSEEvent{Type: run.EventRunFinished, Data: &run.RunTerminal{Status: status}}, func(name string, _ any) bool {
 			names = append(names, name)
 			return true
 		})

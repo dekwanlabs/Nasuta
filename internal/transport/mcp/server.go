@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -83,7 +83,7 @@ func BuildMCP(registry *tool.Registry) (*server.MCPServer, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("mcp: registry is required")
 	}
-	mcpServer := server.NewMCPServer("codeloom", "1.0.0",
+	mcpServer := server.NewMCPServer("nasuta", "1.0.0",
 		server.WithToolCapabilities(true),
 	)
 
@@ -100,9 +100,9 @@ func BuildMCP(registry *tool.Registry) (*server.MCPServer, error) {
 			traceEnabled := args.Bool("_trace")
 			delete(args, "_trace")
 			if traceEnabled {
-				ctx = executiontrace.WithEvaluation(ctx, nil)
+				ctx = runtrace.WithEvaluation(ctx, nil)
 			}
-			result, traceEvents, err := executiontrace.Capture(ctx, executiontrace.Correlation{}, func(ctx context.Context) (tool.Result, error) {
+			result, traceEvents, err := runtrace.Capture(ctx, runtrace.Correlation{}, func(ctx context.Context) (tool.Result, error) {
 				return executor.Execute(ctx, snapshot, toolID, args)
 			})
 			if err != nil {

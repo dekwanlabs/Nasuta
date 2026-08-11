@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 func (orchestrator *Orchestrator) runPrepared(
@@ -126,7 +126,7 @@ func (orchestrator *Orchestrator) dispatchWave(
 	account *workflowBudgetAccount,
 	observer RunObserver,
 ) ([]nodeOutcome, error) {
-	result, err := executiontrace.Invoke(
+	result, err := runtrace.Invoke(
 		ctx,
 		multiAgentDispatchTraceSpec,
 		dispatchInput{definition: definition, ready: ready},

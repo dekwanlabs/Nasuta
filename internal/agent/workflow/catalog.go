@@ -10,7 +10,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 type DefinitionRef struct {
@@ -213,7 +213,7 @@ func (catalog *Catalog) validateAgents(definition WorkflowDefinition) error {
 		if agentDefinition.ID != node.Agent.ID || agentDefinition.Version != node.Agent.Version {
 			return fmt.Errorf("publish workflow %q node %q agent is not pinned", definition.ID, node.ID)
 		}
-		if err := platformscope.ValidateAgentRuntime(agentDefinition.Permissions.Scopes); err != nil {
+		if err := scope.ValidateAgentRuntime(agentDefinition.Permissions.Scopes); err != nil {
 			return fmt.Errorf(
 				"publish workflow %q node %q agent permissions: %w",
 				definition.ID,
@@ -221,7 +221,7 @@ func (catalog *Catalog) validateAgents(definition WorkflowDefinition) error {
 				err,
 			)
 		}
-		if err := platformscope.EnsureSubset(
+		if err := scope.EnsureSubset(
 			node.Permissions.Scopes,
 			agentDefinition.Permissions.Scopes,
 		); err != nil {

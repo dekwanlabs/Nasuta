@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 func workflowProgressFromState(
@@ -160,5 +160,5 @@ func recoveryRetryAllowed(
 		definition.Permissions,
 		node.Permissions,
 	)
-	return !platformscope.HasSideEffect(effective.Scopes)
+	return !scope.HasSideEffect(effective.Scopes)
 }

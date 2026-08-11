@@ -10,7 +10,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 type workflowService interface {
@@ -187,7 +187,7 @@ func (coordinator *Coordinator) executeNew(
 	if err != nil {
 		return nil, fmt.Errorf("marshal feature review request: %w", err)
 	}
-	permissions := agentapi.PermissionPolicy{Scopes: []string{platformscope.FeatureDelivery}}
+	permissions := agentapi.PermissionPolicy{Scopes: []string{scope.FeatureDelivery}}
 	_, runErr := coordinator.workflows.Execute(ctx, workflow.ExecuteRequest{
 		RunID:               runID,
 		Workflow:            workflow.DefinitionRef{ID: definition.ID, Version: definition.Version},
