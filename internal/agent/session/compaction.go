@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -101,9 +101,9 @@ func compactSessionIfNeeded(ctx context.Context, client *llm.LLMClient, sessions
 	result.ProjectedBeforeTokens = projectedBefore
 	result.ProjectedAfterTokens = projectedBefore
 	result.ContextWindow = usage.ContextWindow
-	result.HighWaterTokens = agentrun.ContextHighWaterTokens(usage.ContextWindow)
-	result.SafetyTokens = agentrun.ContextSafetyTokens(usage.ContextWindow)
-	result.SafeLimitTokens = agentrun.ContextSafeLimitTokens(usage.ContextWindow)
+	result.HighWaterTokens = run.ContextHighWaterTokens(usage.ContextWindow)
+	result.SafetyTokens = run.ContextSafetyTokens(usage.ContextWindow)
+	result.SafeLimitTokens = run.ContextSafeLimitTokens(usage.ContextWindow)
 	result.OutputReserveTokens = outputReserve
 	result.RestartTurnThreshold = restartTurnThreshold(usage.ContextWindow)
 

@@ -3,18 +3,18 @@ package tools
 import (
 	"context"
 
-	agentweb "github.com/dekwanlabs/nasuta/internal/agent/web"
+	"github.com/dekwanlabs/nasuta/internal/agent/web"
 )
 
-type WebSearchResult = agentweb.WebSearchResult
-type WebSearchProvider = agentweb.WebSearchProvider
-type WebFetchedEvidence = agentweb.WebFetchedEvidence
-type WebSearchResponse = agentweb.WebSearchResponse
+type WebSearchResult = web.WebSearchResult
+type WebSearchProvider = web.WebSearchProvider
+type WebFetchedEvidence = web.WebFetchedEvidence
+type WebSearchResponse = web.WebSearchResponse
 
-func (srv *Service) webService() *agentweb.Service {
+func (srv *Service) webService() *web.Service {
 	srv.webOnce.Do(func() {
 		if srv.web == nil {
-			srv.web = agentweb.New()
+			srv.web = web.New()
 		}
 	})
 	return srv.web

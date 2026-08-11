@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -36,7 +36,7 @@ type evidencePlanningOutput struct {
 	PlanningTime  time.Duration
 }
 
-var evidencePlanningSpec = executiontrace.Spec[evidencePlanningInput, evidencePlanningOutput]{
+var evidencePlanningSpec = runtrace.Spec[evidencePlanningInput, evidencePlanningOutput]{
 	Operation: "agent.evidence_plan",
 	Node:      "evidence_plan",
 	Output: func(input evidencePlanningInput, output evidencePlanningOutput, _ error) map[string]any {
@@ -66,7 +66,7 @@ var evidencePlanningSpec = executiontrace.Spec[evidencePlanningInput, evidencePl
 }
 
 func (svc *QA) planEvidence(ctx context.Context, input evidencePlanningInput) (evidencePlanningOutput, error) {
-	return executiontrace.Invoke(ctx, evidencePlanningSpec, input, func(ctx context.Context, input evidencePlanningInput) (evidencePlanningOutput, error) {
+	return runtrace.Invoke(ctx, evidencePlanningSpec, input, func(ctx context.Context, input evidencePlanningInput) (evidencePlanningOutput, error) {
 		output := evidencePlanningOutput{
 			CleanQuestion: strings.TrimSpace(input.Question),
 			Decision:      domain.InternalFallbackDecision(),

@@ -11,8 +11,8 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -91,8 +91,8 @@ func (runtime *DefinitionRuntime) BeginScenario(
 }
 
 func (run *scenarioManagedRun) Context(ctx context.Context) context.Context {
-	ctx = executiontrace.WithScope(ctx, run.trace)
-	return executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+	ctx = runtrace.WithScope(ctx, run.trace)
+	return runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: run.start.RunID, ParentRunID: run.start.ParentRunID,
 	})
 }
@@ -112,16 +112,16 @@ func (run *scenarioManagedRun) Finish(outcome agentrun.RunOutcome) error {
 	return nil
 }
 
-func beginExecutionTrace(ctx context.Context) (*executiontrace.Scope, bool) {
-	inherited := executiontrace.FromContext(ctx)
-	trace := executiontrace.Begin(ctx)
+func beginExecutionTrace(ctx context.Context) (*runtrace.Scope, bool) {
+	inherited := runtrace.FromContext(ctx)
+	trace := runtrace.Begin(ctx)
 	return trace, trace != nil && inherited == nil
 }
 
 func (runtime *DefinitionRuntime) beginPrepared(
 	start agentapi.RunStart,
 	execution definitionExecution,
-	trace *executiontrace.Scope,
+	trace *runtrace.Scope,
 	ownsTrace bool,
 ) (*definitionManagedRun, error) {
 	recorder := &definitionUsageRecorder{
@@ -176,8 +176,8 @@ func (runtime *DefinitionRuntime) createRun(
 }
 
 func (run *definitionManagedRun) Context(ctx context.Context) context.Context {
-	ctx = executiontrace.WithScope(ctx, run.trace)
-	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+	ctx = runtrace.WithScope(ctx, run.trace)
+	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: run.start.RunID, ParentRunID: run.start.Correlation.ParentRunID,
 		WorkflowRunID: run.start.Correlation.WorkflowRunID, AgentRunID: run.start.RunID,
 		WorkflowNodeID: run.start.Correlation.NodeID,

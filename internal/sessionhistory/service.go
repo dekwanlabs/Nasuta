@@ -12,12 +12,12 @@ import (
 	"time"
 	"unicode"
 
-	agentsession "github.com/dekwanlabs/nasuta/internal/agent/session"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -144,14 +144,14 @@ func (service *Service) Find(ctx context.Context, userID int64, sessionID, query
 
 // Discover performs the remote and lexical candidate phase without loading
 // summary text. It is safe to start before query analysis has completed.
-func (service *Service) Discover(ctx context.Context, userID int64, sessionID, query string) (agentsession.HistoryCandidates, error) {
-	output, err := executiontrace.Invoke(ctx, sessionHistoryDiscoverySpec, recallInput{
+func (service *Service) Discover(ctx context.Context, userID int64, sessionID, query string) (session.HistoryCandidates, error) {
+	output, err := runtrace.Invoke(ctx, sessionHistoryDiscoverySpec, recallInput{
 		UserID: userID, SessionID: sessionID, Query: query, Limit: selectedLimit,
 	}, service.discoverHistory)
 	if err != nil {
-		return agentsession.HistoryCandidates{}, err
+		return session.HistoryCandidates{}, err
 	}
-	return agentsession.HistoryCandidates{Mode: output.Mode, Refs: output.Refs}, nil
+	return session.HistoryCandidates{Mode: output.Mode, Refs: output.Refs}, nil
 }
 
 // Materialize loads authoritative summaries for discovered candidates and
@@ -160,11 +160,11 @@ func (service *Service) Materialize(
 	ctx context.Context,
 	userID int64,
 	sessionID string,
-	candidates agentsession.HistoryCandidates,
+	candidates session.HistoryCandidates,
 	limit, tokenBudget int,
 	neighbors bool,
 ) (string, error) {
-	result, err := executiontrace.Invoke(ctx, sessionHistoryMaterializeSpec, recallInput{
+	result, err := runtrace.Invoke(ctx, sessionHistoryMaterializeSpec, recallInput{
 		UserID: userID, SessionID: sessionID, Query: strings.Join(candidates.Refs, ","),
 		Limit: limit, TokenBudget: tokenBudget, Neighbors: neighbors,
 	}, func(ctx context.Context, input recallInput) (recallOutput, error) {
@@ -217,7 +217,7 @@ type recallOutput struct {
 	Record             bool
 }
 
-var sessionHistoryRecallSpec = executiontrace.Spec[recallInput, recallOutput]{
+var sessionHistoryRecallSpec = runtrace.Spec[recallInput, recallOutput]{
 	Operation: "session_history.recall",
 	Node:      "session_history_recall",
 	Output: func(input recallInput, output recallOutput, _ error) map[string]any {
@@ -235,7 +235,7 @@ var sessionHistoryRecallSpec = executiontrace.Spec[recallInput, recallOutput]{
 	},
 }
 
-var sessionHistoryDiscoverySpec = executiontrace.Spec[recallInput, recallOutput]{
+var sessionHistoryDiscoverySpec = runtrace.Spec[recallInput, recallOutput]{
 	Operation: "session_history.discover",
 	Node:      "session_history_discover",
 	Output: func(input recallInput, output recallOutput, _ error) map[string]any {
@@ -251,7 +251,7 @@ var sessionHistoryDiscoverySpec = executiontrace.Spec[recallInput, recallOutput]
 	},
 }
 
-var sessionHistoryMaterializeSpec = executiontrace.Spec[recallInput, recallOutput]{
+var sessionHistoryMaterializeSpec = runtrace.Spec[recallInput, recallOutput]{
 	Operation: "session_history.materialize",
 	Node:      "session_history_materialize",
 	Output: func(input recallInput, output recallOutput, _ error) map[string]any {
@@ -268,7 +268,7 @@ var sessionHistoryMaterializeSpec = executiontrace.Spec[recallInput, recallOutpu
 }
 
 func (service *Service) find(ctx context.Context, userID int64, sessionID, query string, limit, tokenBudget int, neighbors bool) (string, error) {
-	result, err := executiontrace.Invoke(ctx, sessionHistoryRecallSpec, recallInput{
+	result, err := runtrace.Invoke(ctx, sessionHistoryRecallSpec, recallInput{
 		UserID: userID, SessionID: sessionID, Query: query, Limit: limit, TokenBudget: tokenBudget, Neighbors: neighbors,
 	}, service.findHistory)
 	return result.Payload, err
@@ -290,7 +290,7 @@ func (service *Service) findHistory(ctx context.Context, input recallInput) (rec
 	if err != nil {
 		return recallOutput{}, err
 	}
-	candidates := agentsession.HistoryCandidates{Mode: discovered.Mode, Refs: discovered.Refs}
+	candidates := session.HistoryCandidates{Mode: discovered.Mode, Refs: discovered.Refs}
 	return service.materializeHistory(ctx, input, candidates)
 }
 
@@ -433,7 +433,7 @@ func acceptedMode(mode string, accepted int) string {
 	return mode
 }
 
-func (service *Service) materializeHistory(ctx context.Context, input recallInput, candidates agentsession.HistoryCandidates) (recallOutput, error) {
+func (service *Service) materializeHistory(ctx context.Context, input recallInput, candidates session.HistoryCandidates) (recallOutput, error) {
 	userID, sessionID := input.UserID, input.SessionID
 	limit, tokenBudget, neighbors := input.Limit, input.TokenBudget, input.Neighbors
 	if userID <= 0 || sessionID == "" || len(candidates.Refs) == 0 {

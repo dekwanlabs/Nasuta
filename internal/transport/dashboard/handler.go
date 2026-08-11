@@ -7,7 +7,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
@@ -47,7 +47,7 @@ type Handler struct {
 	embedder           embed.Embedder
 	tools              *agent.Service
 	qa                 *agent.QA
-	persistentRunStore *agentrun.RunStore
+	persistentRunStore *run.RunStore
 	registry           *agent.Registry
 	writeAvailable     bool
 	codegraphDB        *codegraph.DB
@@ -65,9 +65,9 @@ type Handler struct {
 
 type QARuntime struct {
 	QA             *agent.QA
-	Hub            *agentrun.RunHub
+	Hub            *run.RunHub
 	CompactionLLM  *llm.LLMClient
-	RunStore       *agentrun.RunStore
+	RunStore       *run.RunStore
 	Sessions       *memory.SessionStore
 	History        agent.SessionHistory
 	Settings       *config.PlatformSettings

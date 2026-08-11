@@ -8,10 +8,10 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -218,7 +218,7 @@ func permissionSet(policy agentapi.PermissionPolicy) (map[string]struct{}, error
 	if len(policy.Scopes) == 0 {
 		return nil, fmt.Errorf("at least one permission scope is required")
 	}
-	if err := platformscope.ValidateAgentRuntime(policy.Scopes); err != nil {
+	if err := scope.ValidateAgentRuntime(policy.Scopes); err != nil {
 		return nil, err
 	}
 	set := make(map[string]struct{}, len(policy.Scopes))
@@ -235,7 +235,7 @@ func clonePermissions(policy agentapi.PermissionPolicy) agentapi.PermissionPolic
 func compileDefinitionRequest(
 	definition agentapi.Definition,
 	request agentapi.RunRequest,
-) agentexecution.Input {
+) execution.Input {
 	if len(request.Messages) > 0 {
 		messages := make([]llm.Message, 0, len(request.Messages))
 		question := string(request.Input)
@@ -246,7 +246,7 @@ func compileDefinitionRequest(
 				question = compiled.Content
 			}
 		}
-		return agentexecution.Input{
+		return execution.Input{
 			Question: question, Messages: messages,
 			EvidenceSeeded:  request.Policy.EvidenceSeeded || len(request.Context) > 0,
 			Direct:          !request.Policy.EvidenceRequired,
@@ -276,7 +276,7 @@ func compileDefinitionRequest(
 		Input:         string(request.Input),
 	})
 	messages = append(messages, llm.Message{Role: "user", Content: question})
-	return agentexecution.Input{
+	return execution.Input{
 		Question: question, Messages: messages,
 		EvidenceSeeded:  request.Policy.EvidenceSeeded || len(request.Context) > 0,
 		Direct:          !request.Policy.EvidenceRequired,

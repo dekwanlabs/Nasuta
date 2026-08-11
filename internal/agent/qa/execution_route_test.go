@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 func TestDecideExecutionRoute(t *testing.T) {
@@ -72,8 +72,8 @@ func TestDecideExecutionRoute(t *testing.T) {
 }
 
 func TestExecutionRouteTraceContract(t *testing.T) {
-	scope := executiontrace.NewScope(executiontrace.Evaluation, nil)
-	ctx := executiontrace.WithScope(t.Context(), scope)
+	scope := runtrace.NewScope(runtrace.Evaluation, nil)
+	ctx := runtrace.WithScope(t.Context(), scope)
 	decision := routeExecution(ctx, executionRouteInput{
 		Suggestion: retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent, Complexity: 0.9, Confidence: 0.9,

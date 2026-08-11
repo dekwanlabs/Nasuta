@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
-	agentsession "github.com/dekwanlabs/nasuta/internal/agent/session"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -21,7 +21,7 @@ import (
 type Tool = tool.Tool
 type Registry = tool.Registry
 type ToolPolicy = tool.Policy
-type SessionHistory = agentsession.SessionHistory
+type SessionHistory = session.SessionHistory
 
 const (
 	ToolKindRead  = tool.KindRead
@@ -275,7 +275,7 @@ func sessionTurnDetailsTool(sessions *memory.SessionStore) Tool {
 			"ref": propString("One ref shown in session state or recalled history, for example cmp_xxx."),
 		}, []string{"ref"}),
 		Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-			scope, ok := agentsession.ScopeFromContext(ctx)
+			scope, ok := session.ScopeFromContext(ctx)
 			if !ok {
 				return "", fmt.Errorf("session turn details are unavailable without a current compressed conversation")
 			}
@@ -299,7 +299,7 @@ func findTurnsTool(history SessionHistory) Tool {
 			"limit": propInt("Maximum summaries to return (default 8, max 24)."),
 		}, []string{"query"}),
 		Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-			scope, ok := agentsession.ScopeFromContext(ctx)
+			scope, ok := session.ScopeFromContext(ctx)
 			if !ok {
 				return "", fmt.Errorf("session history is unavailable without a current compressed conversation")
 			}

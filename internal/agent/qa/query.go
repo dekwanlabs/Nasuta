@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -34,7 +34,7 @@ type queryAnalysisOutput struct {
 	IntentOrigin    domain.IntentOrigin
 }
 
-var queryAnalysisSpec = executiontrace.Spec[queryAnalysisInput, queryAnalysisOutput]{
+var queryAnalysisSpec = runtrace.Spec[queryAnalysisInput, queryAnalysisOutput]{
 	Operation: "agent.query_analysis",
 	Node:      "query_analysis",
 	Input: func(input queryAnalysisInput) map[string]any {
@@ -62,7 +62,7 @@ var queryAnalysisSpec = executiontrace.Spec[queryAnalysisInput, queryAnalysisOut
 }
 
 func analyzeQuery(ctx context.Context, input queryAnalysisInput) (queryAnalysisOutput, error) {
-	return executiontrace.Invoke(ctx, queryAnalysisSpec, input, func(_ context.Context, input queryAnalysisInput) (queryAnalysisOutput, error) {
+	return runtrace.Invoke(ctx, queryAnalysisSpec, input, func(_ context.Context, input queryAnalysisInput) (queryAnalysisOutput, error) {
 		history, origin, update := resolveHistoryRelation(input.Question, input.RecentTurns, input.History, input.HistoryValid)
 		timeRange, hasTimeRange, timeErr := retrieval.ResolveTime(input.Time, input.Anchor)
 		intent := domain.ResolveRetrievalIntent(input.Question, domain.RetrievalIntentSignals{
@@ -82,7 +82,7 @@ type queryRewriteInput struct {
 	ContextTerms  string
 }
 
-var queryRewriteSpec = executiontrace.Spec[queryRewriteInput, string]{
+var queryRewriteSpec = runtrace.Spec[queryRewriteInput, string]{
 	Operation: "agent.query_rewrite",
 	Node:      "query_rewrite",
 	Input: func(input queryRewriteInput) map[string]any {
@@ -94,7 +94,7 @@ var queryRewriteSpec = executiontrace.Spec[queryRewriteInput, string]{
 }
 
 func rewriteQuery(ctx context.Context, input queryRewriteInput) (string, error) {
-	return executiontrace.Invoke(ctx, queryRewriteSpec, input, func(_ context.Context, input queryRewriteInput) (string, error) {
+	return runtrace.Invoke(ctx, queryRewriteSpec, input, func(_ context.Context, input queryRewriteInput) (string, error) {
 		return canonicalRetrievalQuery(input.CleanQuestion, input.ContextTerms), nil
 	})
 }
@@ -107,7 +107,7 @@ type retrievalDispatchInput struct {
 	WebDown  bool
 }
 
-var retrievalDispatchSpec = executiontrace.Spec[retrievalDispatchInput, *retrieval.RetrievedContext]{
+var retrievalDispatchSpec = runtrace.Spec[retrievalDispatchInput, *retrieval.RetrievedContext]{
 	Operation: "agent.retrieval_dispatch",
 	Node:      "retrieval_dispatch",
 	Output: func(input retrievalDispatchInput, _ *retrieval.RetrievedContext, _ error) map[string]any {
@@ -116,7 +116,7 @@ var retrievalDispatchSpec = executiontrace.Spec[retrievalDispatchInput, *retriev
 }
 
 func skipRetrieval(ctx context.Context, input retrievalDispatchInput) (*retrieval.RetrievedContext, error) {
-	return executiontrace.Invoke(ctx, retrievalDispatchSpec, input, func(_ context.Context, input retrievalDispatchInput) (*retrieval.RetrievedContext, error) {
+	return runtrace.Invoke(ctx, retrievalDispatchSpec, input, func(_ context.Context, input retrievalDispatchInput) (*retrieval.RetrievedContext, error) {
 		result := &retrieval.RetrievedContext{OriginalQuestion: input.Question}
 		mergePreloadedContext(result, input.Blocks, input.Budget)
 		appendUnavailableWeb(result, input.WebDown)

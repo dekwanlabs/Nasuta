@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
@@ -20,7 +20,7 @@ type queryEmbeddingOutput struct {
 	EmbedErr error
 }
 
-var queryEmbeddingSpec = executiontrace.Spec[string, queryEmbeddingOutput]{
+var queryEmbeddingSpec = runtrace.Spec[string, queryEmbeddingOutput]{
 	Operation: "knowledge.query_embedding",
 	Node:      "query_embedding",
 	Input: func(query string) map[string]any {
@@ -39,7 +39,7 @@ type sparseQueryOutput struct {
 	Values  []float32
 }
 
-var sparseQuerySpec = executiontrace.Spec[string, sparseQueryOutput]{
+var sparseQuerySpec = runtrace.Spec[string, sparseQueryOutput]{
 	Operation: "knowledge.sparse_query",
 	Node:      "sparse_query",
 	Input: func(query string) map[string]any {
@@ -58,7 +58,7 @@ type vectorSearchInput struct {
 	Filters     map[string]string
 }
 
-var vectorSearchSpec = executiontrace.Spec[vectorSearchInput, []semantic.Hit]{
+var vectorSearchSpec = runtrace.Spec[vectorSearchInput, []semantic.Hit]{
 	Operation: "knowledge.vector_search",
 	Node:      "vector_search",
 	Input: func(input vectorSearchInput) map[string]any {
@@ -81,7 +81,7 @@ type fileDedupInput struct {
 	FetchLimit int
 }
 
-var fileDedupSpec = executiontrace.Spec[fileDedupInput, []semantic.Hit]{
+var fileDedupSpec = runtrace.Spec[fileDedupInput, []semantic.Hit]{
 	Operation: "knowledge.file_dedup",
 	Node:      "file_dedup",
 	Input: func(input fileDedupInput) map[string]any {
@@ -103,7 +103,7 @@ type codeRankOutput struct {
 	Matches []domain.CodeSearchHit
 }
 
-var codeRankSpec = executiontrace.Spec[codeRankInput, codeRankOutput]{
+var codeRankSpec = runtrace.Spec[codeRankInput, codeRankOutput]{
 	Operation: "knowledge.code_rank",
 	Node:      "code_rank",
 	Input: func(input codeRankInput) map[string]any {
@@ -205,7 +205,7 @@ func (srv *Service) EmbedQuery(ctx context.Context, query string) ([]float32, er
 	if !srv.semanticEnabled() {
 		return nil, fmt.Errorf("query embedding requires semantic search and embedding configuration")
 	}
-	embedding, err := executiontrace.Invoke(ctx, queryEmbeddingSpec, query, func(ctx context.Context, query string) (queryEmbeddingOutput, error) {
+	embedding, err := runtrace.Invoke(ctx, queryEmbeddingSpec, query, func(ctx context.Context, query string) (queryEmbeddingOutput, error) {
 		vectors, embedErr := srv.embedder.Embed(ctx, []string{query})
 		output := queryEmbeddingOutput{Vectors: vectors, EmbedErr: embedErr}
 		if embedErr != nil {
@@ -242,7 +242,7 @@ func (srv *Service) FindCodeWithVector(ctx context.Context, query, lang string, 
 		Limit: fetchLimit, GroupBy: "path",
 	}
 	if bm := srv.BM25View(); bm != nil {
-		sparse, _ := executiontrace.Invoke(ctx, sparseQuerySpec, query, func(_ context.Context, query string) (sparseQueryOutput, error) {
+		sparse, _ := runtrace.Invoke(ctx, sparseQuerySpec, query, func(_ context.Context, query string) (sparseQueryOutput, error) {
 			vector := bm.QuerySparse(query)
 			indices, values := retrieval.SparseToSorted(vector)
 			return sparseQueryOutput{Indices: indices, Values: values}, nil
@@ -261,7 +261,7 @@ func (srv *Service) FindCodeWithVector(ctx context.Context, query, lang string, 
 		})
 		log.InfofCtx(ctx, "[search_code] dense-only: dim=%d (BM25 nil)", len(vector))
 	}
-	hits, err := executiontrace.Invoke(ctx, vectorSearchSpec, vectorSearchInput{
+	hits, err := runtrace.Invoke(ctx, vectorSearchSpec, vectorSearchInput{
 		Query: searchQuery, Mode: mode, FetchLimit: fetchLimit, SparseTerms: sparseTerms, Filters: filters,
 	}, func(ctx context.Context, input vectorSearchInput) ([]semantic.Hit, error) {
 		return srv.semantic.Search(ctx, input.Query)
@@ -271,7 +271,7 @@ func (srv *Service) FindCodeWithVector(ctx context.Context, query, lang string, 
 		return domain.SearchResult[domain.CodeSearchHit]{}, err
 	}
 	log.InfofCtx(ctx, "[search_code] semantic backend returned %d hits before filtering", len(hits))
-	candidates, _ := executiontrace.Invoke(ctx, fileDedupSpec, fileDedupInput{
+	candidates, _ := runtrace.Invoke(ctx, fileDedupSpec, fileDedupInput{
 		Hits: hits, FetchLimit: fetchLimit,
 	}, func(_ context.Context, input fileDedupInput) ([]semantic.Hit, error) {
 		sort.SliceStable(input.Hits, func(i, j int) bool {
@@ -294,7 +294,7 @@ func (srv *Service) FindCodeWithVector(ctx context.Context, query, lang string, 
 	})
 	log.InfofCtx(ctx, "[search_code] dedup by file: %d hits -> %d files", len(hits), len(candidates))
 
-	ranked, _ := executiontrace.Invoke(ctx, codeRankSpec, codeRankInput{
+	ranked, _ := runtrace.Invoke(ctx, codeRankSpec, codeRankInput{
 		Query: query, Candidates: candidates, Limit: limit,
 	}, func(_ context.Context, input codeRankInput) (codeRankOutput, error) {
 		ranked := rankCodeHits(input.Query, input.Candidates, input.Limit)

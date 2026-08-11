@@ -7,8 +7,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -89,7 +89,7 @@ func (agent *Agent) ensureTurnBudget(state *compiledLoop, step int) error {
 	); err != nil {
 		return err
 	}
-	_, err := executiontrace.Invoke(
+	_, err := runtrace.Invoke(
 		state.ctx,
 		contextBudgetSpec,
 		contextBudgetInput{Step: step, Messages: state.messages, Tools: state.tools},
@@ -104,7 +104,7 @@ func (agent *Agent) callModelTurn(state *compiledLoop, step int) (modelTurn, err
 	started := time.Now()
 	stream := newStreamPipe(agent.observer, state.runID, step, started, agent.onFirstAnswerToken)
 	callCtx := llm.WithUsagePhase(state.loopCtx, llm.PhaseAgentStep)
-	output, err := executiontrace.Invoke(
+	output, err := runtrace.Invoke(
 		callCtx,
 		agentModelTurnSpec,
 		agentModelTurnInput{

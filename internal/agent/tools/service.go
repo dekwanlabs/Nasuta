@@ -5,7 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	agentweb "github.com/dekwanlabs/nasuta/internal/agent/web"
+	"github.com/dekwanlabs/nasuta/internal/agent/web"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
@@ -39,7 +39,7 @@ type Service struct {
 	mergedSvcCache atomic.Pointer[[]domain.ServiceRecord]
 	denseWarnOnce  sync.Once
 	webOnce        sync.Once
-	web            *agentweb.Service
+	web            *web.Service
 }
 
 func New(deps Deps) *Service {
@@ -51,7 +51,7 @@ func New(deps Deps) *Service {
 		docStore:      deps.DocStore,
 		callChain:     deps.CallChain,
 		ontology:      deps.Ontology,
-		web:           agentweb.New(),
+		web:           web.New(),
 	}
 }
 

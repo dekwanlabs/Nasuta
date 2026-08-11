@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 func (orchestrator *Orchestrator) executeNodeAttempt(
@@ -19,11 +19,11 @@ func (orchestrator *Orchestrator) executeNodeAttempt(
 	account *workflowBudgetAccount,
 	observer RunObserver,
 ) nodeOutcome {
-	nodeCtx = executiontrace.WithCorrelation(nodeCtx, executiontrace.Correlation{
+	nodeCtx = runtrace.WithCorrelation(nodeCtx, runtrace.Correlation{
 		RunID: nodeRequest.WorkflowRunID, WorkflowRunID: nodeRequest.WorkflowRunID,
 		WorkflowNodeID: nodeRequest.Node.ID,
 	})
-	outcome, err := executiontrace.Invoke(nodeCtx, workflowNodeTraceSpec, nodeRequest, func(nodeCtx context.Context, _ NodeRequest) (nodeOutcome, error) {
+	outcome, err := runtrace.Invoke(nodeCtx, workflowNodeTraceSpec, nodeRequest, func(nodeCtx context.Context, _ NodeRequest) (nodeOutcome, error) {
 		outcome := orchestrator.executeNodeAttemptUntraced(nodeCtx, definition, request, nodeRequest, account, observer)
 		return outcome, outcome.err
 	})
@@ -169,7 +169,7 @@ func retryableNodeFailure(request NodeRequest, runErr error) bool {
 	if request.Attempt <= 0 ||
 		(request.Node.Kind != NodeAgent &&
 			!(request.Node.Kind == NodeTransform && request.Node.RetrySafe)) ||
-		platformscope.HasSideEffect(request.EffectivePermissions.Scopes) ||
+		scope.HasSideEffect(request.EffectivePermissions.Scopes) ||
 		errors.Is(runErr, ErrWorkflowBudgetExhausted) ||
 		errors.Is(runErr, context.Canceled) ||
 		errors.Is(runErr, context.DeadlineExceeded) {

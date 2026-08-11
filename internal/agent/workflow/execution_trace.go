@@ -3,7 +3,7 @@ package workflow
 import (
 	"context"
 
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 type aggregateInput struct {
@@ -13,7 +13,7 @@ type aggregateInput struct {
 	maxBytes      int64
 }
 
-var multiAgentAggregateTraceSpec = executiontrace.Spec[aggregateInput, Handoff]{
+var multiAgentAggregateTraceSpec = runtrace.Spec[aggregateInput, Handoff]{
 	Operation: "multi_agent.aggregate",
 	Node:      "multi_agent_aggregate",
 	Input: func(input aggregateInput) map[string]any {
@@ -43,8 +43,8 @@ func (orchestrator *Orchestrator) aggregateHandoffs(
 	inputs []Handoff,
 	maxBytes int64,
 ) (Handoff, error) {
-	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{WorkflowNodeID: node.ID})
-	return executiontrace.Invoke(
+	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{WorkflowNodeID: node.ID})
+	return runtrace.Invoke(
 		ctx,
 		multiAgentAggregateTraceSpec,
 		aggregateInput{

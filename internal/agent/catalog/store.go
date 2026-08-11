@@ -9,7 +9,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	platformstore "github.com/dekwanlabs/nasuta/internal/platform/store"
+	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
 // Store persists immutable definitions and mutable rollout metadata.
@@ -126,7 +126,7 @@ func publishDefinitionTx(
 		VALUES(?,?,?,?,1,?,?,?)`,
 		definition.ID, definition.Version, raw, definition.ContentHash,
 		makeDefault, actorUserID,
-		platformstore.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
+		store.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
 	); err != nil {
 		return DefinitionRecord{}, false, fmt.Errorf(
 			"save agent definition %q version %d: %w",
@@ -373,7 +373,7 @@ func (catalogStore *Store) SetRollout(
 			VALUES('agent',?,?,?,?,?,?,?,?,?,?)`,
 			rule.AgentID, rule.RuleVersion, rule.AgentID, rule.CandidateVersion, rule.PercentageBPS,
 			rule.Salt, rule.RuleHash, rule.Active, actorUserID,
-			platformstore.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
+			store.DatabaseTime(createdAt.Format(time.RFC3339Nano)),
 		)
 	} else {
 		_, err = tx.ExecContext(ctx, `UPDATE catalog_rollouts SET
@@ -382,7 +382,7 @@ func (catalogStore *Store) SetRollout(
 			WHERE catalog_kind='agent' AND subject_id=?`,
 			rule.RuleVersion, rule.AgentID, rule.CandidateVersion, rule.PercentageBPS, rule.Salt,
 			rule.RuleHash, rule.Active, actorUserID,
-			platformstore.DatabaseTime(createdAt.Format(time.RFC3339Nano)), rule.AgentID,
+			store.DatabaseTime(createdAt.Format(time.RFC3339Nano)), rule.AgentID,
 		)
 	}
 	if err != nil {
@@ -496,7 +496,7 @@ func appendAuditTx(
 		catalog_kind,event_kind,subject_id,version,action,actor_user_id,created_at)
 		VALUES('agent','definition',?,?,?,?,?)`,
 		id, version, action, actorUserID,
-		platformstore.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)),
+		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)),
 	); err != nil {
 		return fmt.Errorf(
 			"append agent definition %q version %d audit: %w",
@@ -519,7 +519,7 @@ func appendRolloutAuditTx(
 		VALUES('agent','rollout',?,?,?,?,?,?,?,?,?)`,
 		rule.AgentID, rule.RuleVersion, rule.AgentID, rule.CandidateVersion, rule.PercentageBPS,
 		rule.RuleHash, action, actorUserID,
-		platformstore.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)),
+		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)),
 	); err != nil {
 		return fmt.Errorf(
 			"append agent rollout %q version %d audit: %w",

@@ -1,9 +1,9 @@
 package qa
 
 import (
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"strings"
 )
 
@@ -21,7 +21,7 @@ type memoryRecallOutput struct {
 	Error  string
 }
 
-var memoryRecallSpec = executiontrace.Spec[*memoryRecallInput, memoryRecallOutput]{
+var memoryRecallSpec = runtrace.Spec[*memoryRecallInput, memoryRecallOutput]{
 	Operation: "memory.recall",
 	Node:      "memory_recall",
 	Input: func(input *memoryRecallInput) map[string]any {
@@ -46,7 +46,7 @@ var memoryRecallSpec = executiontrace.Spec[*memoryRecallInput, memoryRecallOutpu
 	Status: func(output memoryRecallOutput, _ error) string { return output.Status },
 }
 
-var memoryInjectSpec = executiontrace.Spec[[]memory.MemoryRecord, string]{
+var memoryInjectSpec = runtrace.Spec[[]memory.MemoryRecord, string]{
 	Operation: "memory.inject",
 	Node:      "memory_inject",
 	Output: func(records []memory.MemoryRecord, formatted string, _ error) map[string]any {

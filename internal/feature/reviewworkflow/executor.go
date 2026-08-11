@@ -8,9 +8,9 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 type reviewExecutionService interface {
@@ -62,10 +62,10 @@ func (executor *Executor) Execute(
 	ctx context.Context,
 	request workflow.NodeRequest,
 ) (workflow.NodeResult, error) {
-	return executiontrace.Invoke(ctx, reviewStageTraceSpec, request, executor.execute)
+	return runtrace.Invoke(ctx, reviewStageTraceSpec, request, executor.execute)
 }
 
-var reviewStageTraceSpec = executiontrace.Spec[workflow.NodeRequest, workflow.NodeResult]{
+var reviewStageTraceSpec = runtrace.Spec[workflow.NodeRequest, workflow.NodeResult]{
 	Operation: "feature_delivery.review_stage",
 	Node:      "feature_delivery_stage",
 	Input: func(request workflow.NodeRequest) map[string]any {
@@ -102,21 +102,21 @@ func (executor *Executor) execute(
 			request.Node.TransformID, delivery.ErrUnavailable,
 		)
 	}
-	if err := platformscope.Validate(request.EffectivePermissions.Scopes); err != nil {
+	if err := scope.Validate(request.EffectivePermissions.Scopes); err != nil {
 		return workflow.NodeResult{}, fmt.Errorf(
 			"feature review transform %q permissions: %w",
 			request.Node.TransformID,
 			err,
 		)
 	}
-	if !platformscope.Has(
+	if !scope.Has(
 		request.EffectivePermissions.Scopes,
-		platformscope.FeatureDelivery,
+		scope.FeatureDelivery,
 	) {
 		return workflow.NodeResult{}, fmt.Errorf(
 			"feature review transform %q requires %q permission",
 			request.Node.TransformID,
-			platformscope.FeatureDelivery,
+			scope.FeatureDelivery,
 		)
 	}
 	switch request.Node.TransformID {
@@ -168,12 +168,12 @@ func (executor *Executor) assignment(
 	if err != nil {
 		return workflow.NodeResult{}, err
 	}
-	childCtx := executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+	childCtx := runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: runID, ParentRunID: request.WorkflowRunID,
 		WorkflowRunID: request.WorkflowRunID, AgentRunID: runID,
 		WorkflowNodeID: request.Node.ID,
 	})
-	child, runErr := executiontrace.Invoke(
+	child, runErr := runtrace.Invoke(
 		childCtx,
 		reviewChildRunTraceSpec,
 		reviewChildRunInput{
@@ -210,7 +210,7 @@ type reviewChildRunOutput struct {
 	usage  delivery.ReviewUsage
 }
 
-var reviewChildRunTraceSpec = executiontrace.Spec[reviewChildRunInput, reviewChildRunOutput]{
+var reviewChildRunTraceSpec = runtrace.Spec[reviewChildRunInput, reviewChildRunOutput]{
 	Operation: "multi_agent.child_run",
 	Node:      "multi_agent_child_run",
 	Input: func(input reviewChildRunInput) map[string]any {

@@ -12,8 +12,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
 )
 
@@ -295,10 +295,10 @@ func TestExecutorRequiresFeatureDeliveryPermission(t *testing.T) {
 
 func TestExecutorEmitsFeatureDeliveryStageTrace(t *testing.T) {
 	var events []domain.EvaluationTrace
-	scope := executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+	scope := runtrace.NewScope(runtrace.Evaluation, func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	})
-	ctx := executiontrace.WithScope(t.Context(), scope)
+	ctx := runtrace.WithScope(t.Context(), scope)
 	_, err := NewExecutor(&reviewExecutionStub{}).Execute(ctx, workflow.NodeRequest{
 		WorkflowRunID: "review.round-1",
 		Node: workflow.NodeDefinition{
@@ -327,11 +327,11 @@ func TestReviewAssignmentEmitsCorrelatedChildRunTrace(t *testing.T) {
 		report: &delivery.ReviewReport{ReviewerID: reviewer.ID},
 	}
 	var events []domain.EvaluationTrace
-	scope := executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+	scope := runtrace.NewScope(runtrace.Evaluation, func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	})
-	ctx := executiontrace.WithScope(t.Context(), scope)
-	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+	ctx := runtrace.WithScope(t.Context(), scope)
+	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: "review.round-1", WorkflowRunID: "review.round-1", WorkflowNodeID: nodeID,
 	})
 	result, err := NewExecutor(stub).Execute(ctx, workflow.NodeRequest{

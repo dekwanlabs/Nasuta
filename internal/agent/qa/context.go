@@ -11,10 +11,10 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 const (
@@ -58,7 +58,7 @@ type contextAssembleOutput struct {
 	Stats        contextAssembleStats
 }
 
-var contextAssembleSpec = executiontrace.Spec[contextAssembleInput, contextAssembleOutput]{
+var contextAssembleSpec = runtrace.Spec[contextAssembleInput, contextAssembleOutput]{
 	Operation: "agent.context_assemble",
 	Node:      "context_assemble",
 	Output: func(_ contextAssembleInput, output contextAssembleOutput, err error) map[string]any {
@@ -86,7 +86,7 @@ var contextAssembleSpec = executiontrace.Spec[contextAssembleInput, contextAssem
 }
 
 func (svc *QA) assembleContext(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
-	return executiontrace.Invoke(ctx, contextAssembleSpec, input, func(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
+	return runtrace.Invoke(ctx, contextAssembleSpec, input, func(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
 		contextWindow, outputReserve := svc.contextLimits(
 			input.ContextWindow, input.OutputReserve,
 		)

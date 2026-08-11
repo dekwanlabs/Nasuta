@@ -18,9 +18,9 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -220,7 +220,7 @@ func TestDefinitionRuntimeRejectsUnpinnedOrUnsupportedExecution(t *testing.T) {
 		{
 			name: "domain permission scope",
 			mutateDef: func(definition *agentapi.Definition) {
-				definition.Permissions.Scopes = []string{platformscope.FeatureDelivery}
+				definition.Permissions.Scopes = []string{scope.FeatureDelivery}
 			},
 			want: "not supported by the agent runtime",
 		},
@@ -596,15 +596,15 @@ func TestDefinitionRuntimeManagesScenarioParentLifecycle(t *testing.T) {
 	runtime := newTestDefinitionRuntime(
 		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), bindRunStore(db),
 	)
-	trace := executiontrace.NewScope(executiontrace.Evaluation, nil)
-	root := executiontrace.WithScope(t.Context(), trace)
+	trace := runtrace.NewScope(runtrace.Evaluation, nil)
+	root := runtrace.WithScope(t.Context(), trace)
 	events := runtime.Hub().Subscribe(start.RunID)
 	managed, err := runtime.BeginScenario(root, start)
 	if err != nil {
 		t.Fatalf("BeginScenario: %v", err)
 	}
 	ctx := managed.Context(t.Context())
-	if executiontrace.FromContext(ctx) != trace {
+	if runtrace.FromContext(ctx) != trace {
 		t.Fatal("scenario context did not inherit trace scope")
 	}
 	domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "scenario_test"})
@@ -987,7 +987,7 @@ func TestDefinitionManagedRunAttachesRequestedTraceScope(t *testing.T) {
 	request := testQARequest(definition)
 	request.RunID = "managed-trace-run"
 	var events []domain.EvaluationTrace
-	traceCtx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+	traceCtx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	})
 	managed, err := runtime.Begin(traceCtx, runStart(request))

@@ -3,8 +3,8 @@ package execution
 import (
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -37,7 +37,7 @@ type historyCompileInput struct {
 	Messages []llm.Message
 }
 
-var historyCompileSpec = executiontrace.Spec[historyCompileInput, []llm.Message]{
+var historyCompileSpec = runtrace.Spec[historyCompileInput, []llm.Message]{
 	Operation: "agent.history_compile",
 	Node:      "history_compile",
 	Input: func(input historyCompileInput) map[string]any {
@@ -67,7 +67,7 @@ type toolPruningOutput struct {
 	RemovedIDs   []string
 }
 
-var toolPruningSpec = executiontrace.Spec[toolPruningInput, toolPruningOutput]{
+var toolPruningSpec = runtrace.Spec[toolPruningInput, toolPruningOutput]{
 	Operation: "agent.tool_pruning",
 	Node:      "tool_pruning",
 	Input: func(input toolPruningInput) map[string]any {
@@ -91,7 +91,7 @@ type contextBudgetInput struct {
 	Tools    []llm.ToolDef
 }
 
-var contextBudgetSpec = executiontrace.Spec[contextBudgetInput, struct{}]{
+var contextBudgetSpec = runtrace.Spec[contextBudgetInput, struct{}]{
 	Operation: "agent.context_budget",
 	Node:      "context_budget",
 	Input: func(input contextBudgetInput) map[string]any {
@@ -109,7 +109,7 @@ var contextBudgetSpec = executiontrace.Spec[contextBudgetInput, struct{}]{
 	},
 }
 
-var agentModelTurnSpec = executiontrace.Spec[agentModelTurnInput, agentModelTurnOutput]{
+var agentModelTurnSpec = runtrace.Spec[agentModelTurnInput, agentModelTurnOutput]{
 	Operation: "agent.model_turn",
 	Node:      "agent_model_turn",
 	Input: func(input agentModelTurnInput) map[string]any {
@@ -141,7 +141,7 @@ var agentModelTurnSpec = executiontrace.Spec[agentModelTurnInput, agentModelTurn
 	},
 }
 
-var forceConclusionSpec = executiontrace.Spec[*forceConclusionInput, forceConclusionOutput]{
+var forceConclusionSpec = runtrace.Spec[*forceConclusionInput, forceConclusionOutput]{
 	Operation: "agent.force_conclusion",
 	Node:      "force_conclusion",
 	Input: func(input *forceConclusionInput) map[string]any {
@@ -171,7 +171,7 @@ type firstAnswerTokenTraceInput struct {
 	RunElapsedMS int64
 }
 
-var firstAnswerTokenTraceSpec = executiontrace.Spec[firstAnswerTokenTraceInput, struct{}]{
+var firstAnswerTokenTraceSpec = runtrace.Spec[firstAnswerTokenTraceInput, struct{}]{
 	Operation: "agent.first_answer_token",
 	Node:      "first_answer_token",
 	Output: func(input firstAnswerTokenTraceInput, _ struct{}, _ error) map[string]any {

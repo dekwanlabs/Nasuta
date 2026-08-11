@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -26,7 +26,7 @@ type dependencyCollection struct {
 	omittedEdges    int
 }
 
-var dependencyCollectSpec = executiontrace.Spec[[]string, dependencyCollection]{
+var dependencyCollectSpec = runtrace.Spec[[]string, dependencyCollection]{
 	Operation: "retrieval.dependency_collect",
 	Node:      "dependency_collect",
 	Output: func(_ []string, result dependencyCollection, _ error) map[string]any {
@@ -45,7 +45,7 @@ type codeGraphSearchInput struct {
 	services []string
 }
 
-var codeGraphSearchSpec = executiontrace.Spec[codeGraphSearchInput, []codegraph.Node]{
+var codeGraphSearchSpec = runtrace.Spec[codeGraphSearchInput, []codegraph.Node]{
 	Operation: "retrieval.codegraph_search",
 	Node:      "codegraph_search",
 	Input: func(input codeGraphSearchInput) map[string]any {
@@ -272,7 +272,7 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 	if len(services) == 0 {
 		return
 	}
-	result, _ := executiontrace.Invoke(ctx, dependencyCollectSpec, services,
+	result, _ := runtrace.Invoke(ctx, dependencyCollectSpec, services,
 		func(ctx context.Context, services []string) (dependencyCollection, error) {
 			return retrieve.collectDependencyEdges(ctx, services), nil
 		})
@@ -383,7 +383,7 @@ func (retrieve *Retriever) collectDependencyEdges(ctx context.Context, services 
 
 // collectCodeGraph performs one scoped FTS query, then fetches selected bodies.
 func (retrieve *Retriever) collectCodeGraph(ctx context.Context, keywords, services []string, terms QueryTerms, addCode func(codeDoc)) {
-	allHits, _ := executiontrace.Invoke(ctx, codeGraphSearchSpec, codeGraphSearchInput{
+	allHits, _ := runtrace.Invoke(ctx, codeGraphSearchSpec, codeGraphSearchInput{
 		keywords: keywords, services: services,
 	}, func(ctx context.Context, input codeGraphSearchInput) ([]codegraph.Node, error) {
 		return retrieve.codeGraphQuery(ctx, input.keywords, input.services, 20), nil

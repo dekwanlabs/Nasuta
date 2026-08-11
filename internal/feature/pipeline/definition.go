@@ -7,7 +7,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 const (
@@ -20,7 +20,7 @@ func DefaultDefinition(version int64) (workflow.WorkflowDefinition, error) {
 	if version <= 0 {
 		return workflow.WorkflowDefinition{}, fmt.Errorf("feature pipeline version must be positive")
 	}
-	permission := agentapi.PermissionPolicy{Scopes: []string{platformscope.FeatureDelivery}}
+	permission := agentapi.PermissionPolicy{Scopes: []string{scope.FeatureDelivery}}
 	nodes := []workflow.NodeDefinition{
 		generationNode(NodeGenerateRequirementAnalysis, TransformRequirementAnalysis, requestSchema, stateSchema),
 		approvalNode(NodeApproveRequirementAnalysis),

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 )
@@ -19,9 +19,9 @@ func TestQAHistoryPageRestoresEvidenceOnFinalAnswer(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectExec(`UPDATE agent_runs SET status=\?,ended_at=\? WHERE status IN \(\?,\?\)`).
-		WithArgs(agentrun.RunStatusAborted, sqlmock.AnyArg(), agentrun.RunStatusRunning, agentrun.RunStatusPaused).
+		WithArgs(run.RunStatusAborted, sqlmock.AnyArg(), run.RunStatusRunning, run.RunStatusPaused).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	runStore, err := agentrun.NewRunStore(db)
+	runStore, err := run.NewRunStore(db)
 	if err != nil {
 		t.Fatalf("NewRunStore: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestQAHistoryPageRestoresEvidenceOnFinalAnswer(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "evidence_status", "forced_conclusion", "evidence_result_count", "tool_call_count",
 			"tool_failure_count", "partial_result_count", "omitted_evidence_count",
-		}).AddRow("run-1", agentrun.EvidencePartial, true, 2, 3, 1, 1, 4))
+		}).AddRow("run-1", run.EvidencePartial, true, 2, 3, 1, 1, 4))
 
 	page, err := handler.qaHistoryPage(context.Background(), 42, "session-1", &memory.MessagePage{
 		Messages: []memory.SessionMessage{

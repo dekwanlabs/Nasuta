@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -131,8 +131,8 @@ func TestCompactRunContextBeforeAnswerCanTightenExistingProjection(t *testing.T)
 
 func TestCompactRunContextBeforeAnswerRecordsTraceDetails(t *testing.T) {
 	agent, state, _, _, _ := answerCompactionFixture(t)
-	scope := executiontrace.NewScope(executiontrace.Evaluation, nil)
-	state.ctx = executiontrace.WithScope(t.Context(), scope)
+	scope := runtrace.NewScope(runtrace.Evaluation, nil)
+	state.ctx = runtrace.WithScope(t.Context(), scope)
 
 	result, err := agent.compactRunContextBeforeAnswer(state, nil, "trace_test")
 	if err != nil {
@@ -271,7 +271,7 @@ func answerCompactionFixture(
 
 type answerCompactionObserver struct {
 	phases       []string
-	contextUsage []agentrun.ContextUsageEvent
+	contextUsage []run.ContextUsageEvent
 }
 
 func (*answerCompactionObserver) OnStep(
@@ -293,7 +293,7 @@ func (observer *answerCompactionObserver) EmitPhase(_ string, text string) {
 func (observer *answerCompactionObserver) OnContextUsage(
 	_ context.Context,
 	_ string,
-	event agentrun.ContextUsageEvent,
+	event run.ContextUsageEvent,
 ) {
 	observer.contextUsage = append(observer.contextUsage, event)
 }

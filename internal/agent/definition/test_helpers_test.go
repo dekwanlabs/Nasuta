@@ -7,41 +7,41 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type Registry = tool.Registry
-type RunStore = agentrun.RunStore
-type StepRecord = agentrun.StepRecord
-type RunOutcome = agentrun.RunOutcome
-type EvidenceMetrics = agentrun.EvidenceMetrics
-type SSEEvent = agentrun.SSEEvent
-type RunTerminal = agentrun.RunTerminal
-type RunResult = agentexecution.RunResult
+type RunStore = run.RunStore
+type StepRecord = run.StepRecord
+type RunOutcome = run.RunOutcome
+type EvidenceMetrics = run.EvidenceMetrics
+type SSEEvent = run.SSEEvent
+type RunTerminal = run.RunTerminal
+type RunResult = execution.RunResult
 
 const (
 	ToolKindRead  = tool.KindRead
 	ToolKindWrite = tool.KindWrite
 
-	RunKindAgent    = agentrun.RunKindAgent
-	RunKindQAParent = agentrun.RunKindQAParent
+	RunKindAgent    = run.RunKindAgent
+	RunKindQAParent = run.RunKindQAParent
 
-	RunStatusRunning = agentrun.RunStatusRunning
-	RunStatusDone    = agentrun.RunStatusDone
-	RunStatusFailed  = agentrun.RunStatusFailed
-	RunStatusPaused  = agentrun.RunStatusPaused
+	RunStatusRunning = run.RunStatusRunning
+	RunStatusDone    = run.RunStatusDone
+	RunStatusFailed  = run.RunStatusFailed
+	RunStatusPaused  = run.RunStatusPaused
 
-	EvidenceComplete    = agentrun.EvidenceComplete
-	EvidenceUnavailable = agentrun.EvidenceUnavailable
+	EvidenceComplete    = run.EvidenceComplete
+	EvidenceUnavailable = run.EvidenceUnavailable
 
-	EventRunFinished = agentrun.EventRunFinished
+	EventRunFinished = run.EventRunFinished
 )
 
 func bindRunStore(db *sql.DB) *RunStore {
-	return agentrun.BindStore(db)
+	return run.BindStore(db)
 }
 
 func testRegistry(t *testing.T, tools ...tool.Tool) *Registry {
@@ -92,7 +92,7 @@ func waitForTerminal(t *testing.T, events chan SSEEvent) *RunTerminal {
 	for {
 		select {
 		case event := <-events:
-			if terminal := agentrun.TerminalFromEvent(event); terminal != nil {
+			if terminal := run.TerminalFromEvent(event); terminal != nil {
 				return terminal
 			}
 		case <-timer.C:
@@ -101,4 +101,4 @@ func waitForTerminal(t *testing.T, events chan SSEEvent) *RunTerminal {
 	}
 }
 
-var NewToolExecutor = agentexecution.NewToolExecutor
+var NewToolExecutor = execution.NewToolExecutor

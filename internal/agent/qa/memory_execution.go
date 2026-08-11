@@ -3,9 +3,9 @@ package qa
 import (
 	"context"
 
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -18,7 +18,7 @@ type memoryProbeOutput struct {
 	Probes []memory.MemoryProbe
 }
 
-var memoryProbeSpec = executiontrace.Spec[memoryProbeInput, memoryProbeOutput]{
+var memoryProbeSpec = runtrace.Spec[memoryProbeInput, memoryProbeOutput]{
 	Operation: "memory.probe",
 	Node:      "memory_probe",
 	Output: func(_ memoryProbeInput, output memoryProbeOutput, _ error) map[string]any {
@@ -27,7 +27,7 @@ var memoryProbeSpec = executiontrace.Spec[memoryProbeInput, memoryProbeOutput]{
 }
 
 func buildMemoryProbe(ctx context.Context, input memoryProbeInput) (memoryProbeOutput, error) {
-	return executiontrace.Invoke(ctx, memoryProbeSpec, input, func(ctx context.Context, input memoryProbeInput) (memoryProbeOutput, error) {
+	return runtrace.Invoke(ctx, memoryProbeSpec, input, func(ctx context.Context, input memoryProbeInput) (memoryProbeOutput, error) {
 		probes, err := memory.PlanMemoryProbes(ctx, input.Client, input.Question)
 		return memoryProbeOutput{Probes: probes}, err
 	})
@@ -43,7 +43,7 @@ type memoryRecallForWriteOutput struct {
 	Result memory.ConsolidationRecallResult
 }
 
-var memoryRecallForWriteSpec = executiontrace.Spec[memoryRecallForWriteInput, memoryRecallForWriteOutput]{
+var memoryRecallForWriteSpec = runtrace.Spec[memoryRecallForWriteInput, memoryRecallForWriteOutput]{
 	Operation: "memory.recall_for_write",
 	Node:      "memory_recall_for_write",
 	Output: func(_ memoryRecallForWriteInput, output memoryRecallForWriteOutput, err error) map[string]any {
@@ -63,7 +63,7 @@ var memoryRecallForWriteSpec = executiontrace.Spec[memoryRecallForWriteInput, me
 }
 
 func recallMemoriesForWrite(ctx context.Context, input memoryRecallForWriteInput) (memoryRecallForWriteOutput, error) {
-	return executiontrace.Invoke(ctx, memoryRecallForWriteSpec, input, func(
+	return runtrace.Invoke(ctx, memoryRecallForWriteSpec, input, func(
 		ctx context.Context,
 		input memoryRecallForWriteInput,
 	) (memoryRecallForWriteOutput, error) {
@@ -86,7 +86,7 @@ type memoryExtractOutput struct {
 	Rejected  map[string]int
 }
 
-var memoryExtractSpec = executiontrace.Spec[memoryExtractInput, memoryExtractOutput]{
+var memoryExtractSpec = runtrace.Spec[memoryExtractInput, memoryExtractOutput]{
 	Operation: "memory.extract",
 	Node:      "memory_extract",
 	Output: func(_ memoryExtractInput, output memoryExtractOutput, err error) map[string]any {
@@ -102,7 +102,7 @@ var memoryExtractSpec = executiontrace.Spec[memoryExtractInput, memoryExtractOut
 }
 
 func extractMemories(ctx context.Context, input memoryExtractInput) (memoryExtractOutput, error) {
-	return executiontrace.Invoke(ctx, memoryExtractSpec, input, func(ctx context.Context, input memoryExtractInput) (memoryExtractOutput, error) {
+	return runtrace.Invoke(ctx, memoryExtractSpec, input, func(ctx context.Context, input memoryExtractInput) (memoryExtractOutput, error) {
 		extracted, err := memory.ConsolidateMemories(ctx, input.Client, input.Question, input.Answer, input.Existing)
 		if err != nil {
 			return memoryExtractOutput{}, err
@@ -125,7 +125,7 @@ type memoryWriteOutput struct {
 	VectorSynced int
 }
 
-var memoryWriteSpec = executiontrace.Spec[memoryWriteInput, memoryWriteOutput]{
+var memoryWriteSpec = runtrace.Spec[memoryWriteInput, memoryWriteOutput]{
 	Operation: "memory.write",
 	Node:      "memory_write",
 	Output: func(input memoryWriteInput, output memoryWriteOutput, _ error) map[string]any {
@@ -141,7 +141,7 @@ var memoryWriteSpec = executiontrace.Spec[memoryWriteInput, memoryWriteOutput]{
 }
 
 func writeMemories(ctx context.Context, input memoryWriteInput) (memoryWriteOutput, error) {
-	return executiontrace.Invoke(ctx, memoryWriteSpec, input, func(ctx context.Context, input memoryWriteInput) (memoryWriteOutput, error) {
+	return runtrace.Invoke(ctx, memoryWriteSpec, input, func(ctx context.Context, input memoryWriteInput) (memoryWriteOutput, error) {
 		output := memoryWriteOutput{
 			Outcomes: make(map[memory.WriteOutcome]int, 4),
 			Actions:  make(map[memory.ConsolidationAction]int, 5),

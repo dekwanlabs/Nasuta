@@ -10,7 +10,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
@@ -124,8 +124,8 @@ func TestQARuntimeStatusFormatting(t *testing.T) {
 		LLMModel:         "gpt-test",
 		LLMContextWindow: 256000,
 	}
-	hub := agentrun.NewRunHub(nil)
-	hub.OnContextUsage(t.Context(), "run-1", agentrun.ContextUsageEvent{
+	hub := run.NewRunHub(nil)
+	hub.OnContextUsage(t.Context(), "run-1", run.ContextUsageEvent{
 		Phase:                 "session_pre_answer",
 		ProjectedBeforeTokens: 104000,
 		ProjectedAfterTokens:  76000,

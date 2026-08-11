@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -38,7 +38,7 @@ type executionRouteDecision struct {
 	DowngradeReason string
 }
 
-var executionRouteSpec = executiontrace.Spec[executionRouteInput, executionRouteDecision]{
+var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecision]{
 	Operation: "agent.execution_route",
 	Node:      "execution_route",
 	Output: func(input executionRouteInput, output executionRouteDecision, _ error) map[string]any {
@@ -109,7 +109,7 @@ func (svc *QA) routeQAExecution(prepared *qaPreparation) {
 }
 
 func routeExecution(ctx context.Context, input executionRouteInput) executionRouteDecision {
-	decision, _ := executiontrace.Invoke(ctx, executionRouteSpec, input, func(_ context.Context, input executionRouteInput) (executionRouteDecision, error) {
+	decision, _ := runtrace.Invoke(ctx, executionRouteSpec, input, func(_ context.Context, input executionRouteInput) (executionRouteDecision, error) {
 		return decideExecutionRoute(input), nil
 	})
 	return decision

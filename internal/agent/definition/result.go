@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -60,7 +60,7 @@ func publicMessages(messages []llm.Message) []agentapi.Message {
 	return out
 }
 
-func publicEvidence(evidence agentrun.EvidenceMetrics) agentapi.EvidenceSummary {
+func publicEvidence(evidence run.EvidenceMetrics) agentapi.EvidenceSummary {
 	return agentapi.EvidenceSummary{
 		Status: string(evidence.Status), ForcedConclusion: evidence.ForcedConclusion,
 		ToolCallCount: evidence.ToolCallCount, ResultCount: evidence.ResultCount,
@@ -148,28 +148,28 @@ func hashMessages(messages []llm.Message) string {
 
 func mapDefinitionResult(
 	runID string,
-	result *agentexecution.RunResult,
+	result *execution.RunResult,
 	runErr error,
 	cancelCause error,
 	usage agentapi.Usage,
 	preRetrieved []agentapi.Reference,
 	schemas *agentapi.SchemaRegistry,
 	outputSchema agentapi.SchemaRef,
-) (agentapi.RunResult, agentrun.RunOutcome) {
+) (agentapi.RunResult, run.RunOutcome) {
 	if cancelCause != nil {
-		outcome := agentexecution.OutcomeFor(result, preRetrieved, cancelCause)
-		outcome.Status = agentrun.RunStatusAborted
+		outcome := execution.OutcomeFor(result, preRetrieved, cancelCause)
+		outcome.Status = run.RunStatusAborted
 		outcome.ErrorCode = "cancelled"
 		return agentapi.RunResult{
 			RunID: runID, Status: agentapi.RunCancelled, Usage: usage,
 			Error: &agentapi.RunError{Code: "cancelled", Message: cancelCause.Error()},
 		}, outcome
 	}
-	outcome := agentexecution.OutcomeFor(result, preRetrieved, runErr)
-	if errors.Is(outcome.Err, agentexecution.ErrToolCallBudgetExhausted) {
+	outcome := execution.OutcomeFor(result, preRetrieved, runErr)
+	if errors.Is(outcome.Err, execution.ErrToolCallBudgetExhausted) {
 		outcome.ErrorCode = "tool_call_budget_exhausted"
 	}
-	if outcome.Status != agentrun.RunStatusDone {
+	if outcome.Status != run.RunStatusDone {
 		runError := outcome.Err
 		if runError == nil {
 			runError = errors.New("definition run failed")
@@ -191,7 +191,7 @@ func mapDefinitionResult(
 	}
 	output, err := validatedDefinitionOutput(schemas, outputSchema, outcome.Answer)
 	if err != nil {
-		outcome.Status = agentrun.RunStatusFailed
+		outcome.Status = run.RunStatusFailed
 		outcome.ErrorCode = "invalid_output"
 		outcome.Err = err
 		return agentapi.RunResult{

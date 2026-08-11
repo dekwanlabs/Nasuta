@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -38,10 +38,10 @@ func outcomeFromPublicResult(result agentapi.RunResult) RunOutcome {
 }
 
 func outcomeFor(result *RunResult, preRetrieved []agentapi.Reference, runErr error) RunOutcome {
-	return agentexecution.OutcomeFor(result, preRetrieved, runErr)
+	return execution.OutcomeFor(result, preRetrieved, runErr)
 }
 
 // mergeOutcomeReferences keeps one canonical public reference set across sources.
 func mergeOutcomeReferences(preRetrieved []agentapi.Reference, dynamic []tool.Reference) []agentapi.Reference {
-	return agentexecution.MergeOutcomeReferences(preRetrieved, dynamic)
+	return execution.MergeOutcomeReferences(preRetrieved, dynamic)
 }

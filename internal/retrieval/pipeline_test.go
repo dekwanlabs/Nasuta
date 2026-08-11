@@ -8,7 +8,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 )
 
@@ -74,7 +74,7 @@ func TestBudgetForIntent(t *testing.T) {
 
 func TestDiscoverPreservesRetrievalSourcesTraceContract(t *testing.T) {
 	var events []domain.EvaluationTrace
-	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithScope(t.Context(), runtrace.NewScope(runtrace.Evaluation, func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	}))
 	retrieve := New(servicePathFakeTools{}, config.Config{})

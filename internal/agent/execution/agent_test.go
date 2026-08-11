@@ -15,9 +15,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -110,7 +110,7 @@ func TestAgentModelTurnTraceContract(t *testing.T) {
 	defer server.Close()
 
 	var events []domain.EvaluationTrace
-	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithScope(t.Context(), runtrace.NewScope(runtrace.Evaluation, func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	}))
 	result, err := newTestAgent(t, server.URL).RunWithPlan(ctx, "trace_model_turn", "问题", nil, nil, domain.EvidencePlan{}, false)
@@ -151,11 +151,11 @@ func TestAgentModelTurnTraceContract(t *testing.T) {
 
 func TestAgentModelTurnTraceClassifiesCancellation(t *testing.T) {
 	var events []domain.EvaluationTrace
-	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithScope(t.Context(), runtrace.NewScope(runtrace.Evaluation, func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	}))
 	stream := newStreamPipe(NoopObserver(), "cancelled_turn", 1, time.Now(), nil)
-	_, err := executiontrace.Invoke(ctx, agentModelTurnSpec, agentModelTurnInput{Step: 1, Stream: stream},
+	_, err := runtrace.Invoke(ctx, agentModelTurnSpec, agentModelTurnInput{Step: 1, Stream: stream},
 		func(context.Context, agentModelTurnInput) (agentModelTurnOutput, error) {
 			return agentModelTurnOutput{Timing: stream.Timings()}, context.Canceled
 		})
@@ -173,7 +173,7 @@ func TestForceConclusionTraceContractAndTokenOrder(t *testing.T) {
 	defer server.Close()
 
 	var events []domain.EvaluationTrace
-	ctx := executiontrace.WithScope(t.Context(), executiontrace.NewScope(executiontrace.Evaluation, func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithScope(t.Context(), runtrace.NewScope(runtrace.Evaluation, func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	}))
 	agent := newTestAgent(t, server.URL)

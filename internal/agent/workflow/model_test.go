@@ -11,7 +11,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 func TestPrepareRejectsCyclesAndSchemaMismatches(t *testing.T) {
@@ -128,7 +128,7 @@ func TestOrchestratorRunsParallelWaveAndJoinsByProducerNodeID(t *testing.T) {
 
 func TestOrchestratorTracesMultipleTerminalAggregation(t *testing.T) {
 	var events []domain.EvaluationTrace
-	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	})
 	definition := testWorkflow()
@@ -163,7 +163,7 @@ func TestOrchestratorTracesMultipleTerminalAggregation(t *testing.T) {
 
 func TestOrchestratorAggregatesParallelChildRunTrace(t *testing.T) {
 	var events []domain.EvaluationTrace
-	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	})
 	agentExecutor, err := NewAgentNodeExecutor(
@@ -242,7 +242,7 @@ func TestOrchestratorAggregatesParallelChildRunTrace(t *testing.T) {
 
 func TestOrchestratorEmitsWorkflowNodeTraceFromSharedScope(t *testing.T) {
 	var events []domain.EvaluationTrace
-	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	})
 	orchestrator := NewOrchestrator(testSchemaRegistry(t), staticOutputExecutor{}, nil)
@@ -272,7 +272,7 @@ func TestOrchestratorTracesWaitingHumanStatus(t *testing.T) {
 	definition.Nodes[0].OutputSchema = definition.InputSchema
 	definition.OutputSchema = definition.InputSchema
 	var events []domain.EvaluationTrace
-	ctx := executiontrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	})
 	_, err := NewOrchestrator(testSchemaRegistry(t), nil, nil).Run(ctx, definition, RunRequest{

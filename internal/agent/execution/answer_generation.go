@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -18,7 +18,7 @@ import (
 func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages []llm.Message, answerContract *exactAnswerContract, stepSeq *int, runStarted time.Time) (*llm.ChatStreamResult, error) {
 	ctx = llm.WithUsagePhase(ctx, llm.PhaseForcedConclusion)
 	input := &forceConclusionInput{RunID: runID, Messages: messages, AnswerContract: answerContract}
-	conclusion, err := executiontrace.Invoke(ctx, forceConclusionSpec, input, func(ctx context.Context, input *forceConclusionInput) (forceConclusionOutput, error) {
+	conclusion, err := runtrace.Invoke(ctx, forceConclusionSpec, input, func(ctx context.Context, input *forceConclusionInput) (forceConclusionOutput, error) {
 		input.Messages = append(input.Messages, llm.Message{
 			Role:    "user",
 			Content: forceConclusionInstruction,
@@ -86,7 +86,7 @@ func recordFirstAnswerToken(ctx context.Context, step any, turnTTFT, runElapsed 
 	if turnTTFT <= 0 {
 		return
 	}
-	_, _ = executiontrace.Invoke(
+	_, _ = runtrace.Invoke(
 		ctx,
 		firstAnswerTokenTraceSpec,
 		firstAnswerTokenTraceInput{

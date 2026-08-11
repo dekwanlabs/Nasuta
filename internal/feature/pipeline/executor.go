@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 const defaultPollInterval = 250 * time.Millisecond
@@ -35,10 +35,10 @@ func (executor *Executor) Execute(
 	ctx context.Context,
 	request workflow.NodeRequest,
 ) (workflow.NodeResult, error) {
-	return executiontrace.Invoke(ctx, featureStageTraceSpec, request, executor.execute)
+	return runtrace.Invoke(ctx, featureStageTraceSpec, request, executor.execute)
 }
 
-var featureStageTraceSpec = executiontrace.Spec[workflow.NodeRequest, workflow.NodeResult]{
+var featureStageTraceSpec = runtrace.Spec[workflow.NodeRequest, workflow.NodeResult]{
 	Operation: "feature_delivery.stage",
 	Node:      "feature_delivery_stage",
 	Input: func(request workflow.NodeRequest) map[string]any {
@@ -73,21 +73,21 @@ func (executor *Executor) execute(
 			request.Node.TransformID, delivery.ErrUnavailable,
 		)
 	}
-	if err := platformscope.Validate(request.EffectivePermissions.Scopes); err != nil {
+	if err := scope.Validate(request.EffectivePermissions.Scopes); err != nil {
 		return workflow.NodeResult{}, fmt.Errorf(
 			"feature pipeline transform %q permissions: %w",
 			request.Node.TransformID,
 			err,
 		)
 	}
-	if !platformscope.Has(
+	if !scope.Has(
 		request.EffectivePermissions.Scopes,
-		platformscope.FeatureDelivery,
+		scope.FeatureDelivery,
 	) {
 		return workflow.NodeResult{}, fmt.Errorf(
 			"feature pipeline transform %q requires %q permission",
 			request.Node.TransformID,
-			platformscope.FeatureDelivery,
+			scope.FeatureDelivery,
 		)
 	}
 	switch request.Node.TransformID {

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 var (
@@ -154,8 +154,8 @@ func (orchestrator *Orchestrator) RunObserved(
 	if ownsTrace {
 		defer trace.Close()
 	}
-	ctx = executiontrace.WithScope(ctx, trace)
-	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+	ctx = runtrace.WithScope(ctx, trace)
+	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: request.RunID, ParentRunID: request.ParentRunID,
 		WorkflowRunID: request.RunID,
 	})
@@ -192,8 +192,8 @@ func (orchestrator *Orchestrator) ResumeObserved(
 	if ownsTrace {
 		defer trace.Close()
 	}
-	ctx = executiontrace.WithScope(ctx, trace)
-	ctx = executiontrace.WithCorrelation(ctx, executiontrace.Correlation{
+	ctx = runtrace.WithScope(ctx, trace)
+	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: request.RunID, ParentRunID: request.ParentRunID,
 		WorkflowRunID: request.RunID,
 	})
@@ -216,9 +216,9 @@ func (orchestrator *Orchestrator) ResumeObserved(
 	return orchestrator.runPrepared(ctx, prepared, metadata, request, progress, observer)
 }
 
-func workflowExecutionTrace(ctx context.Context) (*executiontrace.Scope, bool) {
-	inherited := executiontrace.FromContext(ctx)
-	trace := executiontrace.Begin(ctx)
+func workflowExecutionTrace(ctx context.Context) (*runtrace.Scope, bool) {
+	inherited := runtrace.FromContext(ctx)
+	trace := runtrace.Begin(ctx)
 	return trace, trace != nil && inherited == nil
 }
 
@@ -252,7 +252,7 @@ type dispatchOutput struct {
 	outcomes []nodeOutcome
 }
 
-var multiAgentDispatchTraceSpec = executiontrace.Spec[dispatchInput, dispatchOutput]{
+var multiAgentDispatchTraceSpec = runtrace.Spec[dispatchInput, dispatchOutput]{
 	Operation: "multi_agent.dispatch",
 	Node:      "multi_agent_dispatch",
 	Input: func(input dispatchInput) map[string]any {
@@ -292,7 +292,7 @@ type nodeOutcome struct {
 	retryable  bool
 }
 
-var workflowNodeTraceSpec = executiontrace.Spec[NodeRequest, nodeOutcome]{
+var workflowNodeTraceSpec = runtrace.Spec[NodeRequest, nodeOutcome]{
 	Operation: "workflow.node.execute",
 	Node:      "workflow_node",
 	Input: func(request NodeRequest) map[string]any {

@@ -18,9 +18,9 @@ import (
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 )
@@ -293,7 +293,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		return
 	}
 	if traceEnabled && hub != nil {
-		runCtx = executiontrace.WithEvaluation(runCtx, func(event domain.EvaluationTrace) {
+		runCtx = runtrace.WithEvaluation(runCtx, func(event domain.EvaluationTrace) {
 			hub.EmitTrace(runID, event)
 		})
 	}

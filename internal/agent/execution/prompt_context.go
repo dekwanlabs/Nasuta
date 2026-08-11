@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -228,7 +228,7 @@ func (agent *Agent) outputTokenReserve() int {
 }
 
 func contextSafetyTokens(window int) int {
-	return agentrun.ContextSafetyTokens(window)
+	return run.ContextSafetyTokens(window)
 }
 
 func (agent *Agent) ensureInputBudget(messages []llm.Message, tools []llm.ToolDef) error {

@@ -8,17 +8,17 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
-	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
-	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	platformscope "github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
 const (
-	knowledgeReadScope  = platformscope.KnowledgeRead
-	knowledgeWriteScope = platformscope.KnowledgeWrite
+	knowledgeReadScope  = scope.KnowledgeRead
+	knowledgeWriteScope = scope.KnowledgeWrite
 )
 
 // DefinitionRuntime executes immutable definitions through the shared loop.
@@ -26,11 +26,11 @@ type DefinitionRuntime struct {
 	definitions DefinitionResolver
 	schemas     *agentapi.SchemaRegistry
 	registry    *tool.Registry
-	executor    *agentexecution.ToolExecutor
+	executor    *execution.ToolExecutor
 	settings    definitionRuntimeSettings
 	runStore    runCreator
 	usageStore  llm.UsageRecorder
-	hub         *agentrun.RunHub
+	hub         *run.RunHub
 }
 
 // DefinitionResolver resolves one exact immutable definition version.
@@ -70,16 +70,16 @@ type definitionManagedRun struct {
 	start     agentapi.RunStart
 	execution definitionExecution
 	recorder  *definitionUsageRecorder
-	trace     *executiontrace.Scope
+	trace     *runtrace.Scope
 	ownsTrace bool
 
 	mu                   sync.Mutex
 	executed             bool
 	finished             bool
 	preparationStepCount int
-	preparationEvidence  agentrun.EvidenceMetrics
+	preparationEvidence  run.EvidenceMetrics
 	outcomeSet           bool
-	outcome              agentrun.RunOutcome
+	outcome              run.RunOutcome
 }
 
 // ScenarioRunStart carries business-run identity without an agent snapshot.
@@ -95,7 +95,7 @@ type ScenarioRunStart struct {
 // ScenarioRun owns one non-agent parent lifecycle.
 type ScenarioRun interface {
 	Context(context.Context) context.Context
-	Finish(agentrun.RunOutcome) error
+	Finish(run.RunOutcome) error
 }
 
 // ScenarioLifecycle keeps parent persistence behind the Runtime boundary.
@@ -106,7 +106,7 @@ type ScenarioLifecycle interface {
 type scenarioManagedRun struct {
 	runtime   *DefinitionRuntime
 	start     ScenarioRunStart
-	trace     *executiontrace.Scope
+	trace     *runtrace.Scope
 	ownsTrace bool
 
 	mu       sync.Mutex
@@ -119,7 +119,7 @@ func NewDefinitionRuntime(
 	schemas *agentapi.SchemaRegistry,
 	registry *tool.Registry,
 	settings *config.PlatformSettings,
-	runStore *agentrun.RunStore,
+	runStore *run.RunStore,
 ) (*DefinitionRuntime, error) {
 	if definitions == nil {
 		return nil, fmt.Errorf("definition runtime: definition resolver is required")
@@ -155,7 +155,7 @@ func NewDefinitionRuntime(
 		definitions: definitions,
 		schemas:     schemas,
 		registry:    registry,
-		executor:    agentexecution.NewToolExecutor(registry),
+		executor:    execution.NewToolExecutor(registry),
 		settings: definitionRuntimeSettings{
 			baseURL: settings.LLMBaseURL, apiKey: settings.LLMAPIKey,
 			provider: settings.LLMProvider, model: settings.LLMModel,
@@ -163,12 +163,12 @@ func NewDefinitionRuntime(
 		},
 		runStore:   creator,
 		usageStore: usageStore,
-		hub:        agentrun.NewRunHub(runStore),
+		hub:        run.NewRunHub(runStore),
 	}, nil
 }
 
 // Hub exposes the Runtime-owned event and control boundary.
-func (runtime *DefinitionRuntime) Hub() *agentrun.RunHub {
+func (runtime *DefinitionRuntime) Hub() *run.RunHub {
 	if runtime == nil {
 		return nil
 	}
@@ -182,13 +182,13 @@ func (runtime *DefinitionRuntime) EmitPhase(runID, text string) {
 	}
 }
 
-func (runtime *DefinitionRuntime) EmitSessionStatus(runID string, event agentrun.SessionStatusEvent) {
+func (runtime *DefinitionRuntime) EmitSessionStatus(runID string, event run.SessionStatusEvent) {
 	if runtime != nil && runtime.hub != nil {
 		runtime.hub.EmitSessionStatus(runID, event)
 	}
 }
 
-func (runtime *DefinitionRuntime) EmitContextUsage(runID string, event agentrun.ContextUsageEvent) {
+func (runtime *DefinitionRuntime) EmitContextUsage(runID string, event run.ContextUsageEvent) {
 	if runtime != nil && runtime.hub != nil {
 		runtime.hub.OnContextUsage(context.Background(), runID, event)
 	}
@@ -196,8 +196,8 @@ func (runtime *DefinitionRuntime) EmitContextUsage(runID string, event agentrun.
 
 // EmitExecutionEvent publishes scenario progress through the shared QA stream.
 func (runtime *DefinitionRuntime) EmitExecutionEvent(
-	eventType agentrun.EventType,
-	event agentrun.ExecutionEvent,
+	eventType run.EventType,
+	event run.ExecutionEvent,
 ) {
 	if runtime != nil && runtime.hub != nil {
 		runtime.hub.EmitExecutionEvent(eventType, event)
@@ -218,7 +218,7 @@ type ScenarioToolSource interface {
 
 type preparedScenarioTools struct {
 	snapshot tool.Snapshot
-	executor *agentexecution.ToolExecutor
+	executor *execution.ToolExecutor
 }
 
 func (prepared preparedScenarioTools) Tools() []tool.Tool {
@@ -246,7 +246,7 @@ func (runtime *DefinitionRuntime) PrepareTools(policy tool.Policy) ScenarioToolS
 }
 
 type runCreator interface {
-	Create(agentrun.RunRecord) error
+	Create(run.RunRecord) error
 }
 
 type definitionUsageRecorder struct {

@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
@@ -49,13 +49,13 @@ func (srv *Service) RunbookSearchResult(ctx context.Context, query knowledge.Run
 
 // FindRunbooks returns typed runbook matches for internal consumers.
 func (srv *Service) FindRunbooks(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
-	return executiontrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+	return runtrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
 		return srv.findRunbooks(ctx, query, nil)
 	})
 }
 
 func (srv *Service) FindRunbooksWithVector(ctx context.Context, query knowledge.RunbookQuery, vector []float32) (domain.RunbookSearchResult, error) {
-	return executiontrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+	return runtrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
 		if len(vector) == 0 {
 			return srv.findRunbooksByKeyword(query)
 		}
@@ -63,7 +63,7 @@ func (srv *Service) FindRunbooksWithVector(ctx context.Context, query knowledge.
 	})
 }
 
-var runbookSearchSpec = executiontrace.Spec[knowledge.RunbookQuery, domain.RunbookSearchResult]{
+var runbookSearchSpec = runtrace.Spec[knowledge.RunbookQuery, domain.RunbookSearchResult]{
 	Operation: "knowledge.runbook_search",
 	Node:      "runbook_search",
 	Input: func(query knowledge.RunbookQuery) map[string]any {
