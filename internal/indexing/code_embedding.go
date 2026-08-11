@@ -107,7 +107,6 @@ func (svc *Service) buildCodeDocuments(
 				"start_line":       chunk.StartLine,
 				"end_line":         chunk.EndLine,
 				"text":             text,
-				"preview":          trimText(chunk.Text),
 				"evidence_class":   evidenceClass,
 				"trust_tier":       trustTier,
 				"index_generation": generation,

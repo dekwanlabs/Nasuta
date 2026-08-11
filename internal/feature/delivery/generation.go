@@ -168,7 +168,7 @@ func (generator *Generator) collectEvidence(ctx context.Context, parent Artifact
 		for _, hit := range boundedSlice(result.Matches, plan.Code[index].Limit) {
 			appendEvidence(EvidenceRef{
 				Kind: "code", Repo: hit.Repo, Path: hit.Path,
-				StartLine: hit.StartLine, EndLine: hit.EndLine, Summary: hit.Preview,
+				StartLine: hit.StartLine, EndLine: hit.EndLine, Summary: hit.Text,
 			})
 		}
 	}

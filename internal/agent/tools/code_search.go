@@ -135,7 +135,7 @@ func (srv *Service) CodeSearchResult(ctx context.Context, query, lang string, li
 	for _, hit := range result.Matches {
 		match := map[string]any{
 			"path": hit.Path, "lang": hit.Lang, "repo": hit.Repo, "layer": hit.Layer,
-			"startLine": hit.StartLine, "endLine": hit.EndLine, "text": hit.Text, "preview": hit.Preview,
+			"startLine": hit.StartLine, "endLine": hit.EndLine, "text": hit.Text,
 			"score": hit.Score, "scoreKind": hit.ScoreKind,
 			"evidenceClass": hit.EvidenceClass, "trustTier": hit.TrustTier,
 		}
@@ -170,7 +170,6 @@ func toCodeSearchResult(found domain.SearchResult[domain.CodeSearchHit]) knowled
 			StartLine:     hit.StartLine,
 			EndLine:       hit.EndLine,
 			Text:          hit.Text,
-			Preview:       hit.Preview,
 			Score:         hit.Score,
 			ScoreKind:     hit.ScoreKind,
 			EvidenceClass: hit.EvidenceClass,
@@ -307,7 +306,7 @@ func (srv *Service) FindCodeWithVector(ctx context.Context, query, lang string, 
 				Path: payloadString(hit.Metadata, "path"), Lang: payloadString(hit.Metadata, "lang"),
 				Repo: payloadString(hit.Metadata, "repo"), Layer: payloadString(hit.Metadata, "layer"),
 				StartLine: payloadInt(hit.Metadata["start_line"]), EndLine: payloadInt(hit.Metadata["end_line"]),
-				Text: payloadString(hit.Metadata, "text"), Preview: payloadString(hit.Metadata, "preview"),
+				Text: payloadString(hit.Metadata, "text"),
 				Score: adjusted, ScoreKind: string(hit.ScoreKind), EvidenceClass: evidenceClass, TrustTier: trustTier,
 			}
 			if hit.ScoreKind == semantic.ScoreFusion {

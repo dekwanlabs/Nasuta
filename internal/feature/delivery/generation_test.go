@@ -37,7 +37,7 @@ func (source *evidenceKnowledge) SearchCode(_ context.Context, query knowledge.C
 	for index := range matches {
 		matches[index] = knowledge.CodeSearchHit{
 			Repo: "team/repo", Path: fmt.Sprintf("%s-%02d.go", prefix, index),
-			StartLine: index + 1, EndLine: index + 2, Preview: fmt.Sprintf("code %s %d", prefix, index),
+			StartLine: index + 1, EndLine: index + 2, Text: fmt.Sprintf("code %s %d", prefix, index),
 		}
 	}
 	return knowledge.CodeSearchResult{Matches: matches}, nil

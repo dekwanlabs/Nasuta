@@ -130,7 +130,7 @@ func (manager *Manager) buildLLMPrompt(ctx context.Context, inc *Incident, from,
 		result, err := manager.knowledge.SearchCode(ctx, knowledge.CodeSearchQuery{Query: query, Limit: 8})
 		if err == nil {
 			for _, match := range result.Matches[:min(len(result.Matches), 8)] {
-				fmt.Fprintf(&sb, "- %s L%d-L%d: %s\n", match.Path, match.StartLine, match.EndLine, truncate(sanitizeOneLine(match.Preview), 360))
+				fmt.Fprintf(&sb, "- %s L%d-L%d: %s\n", match.Path, match.StartLine, match.EndLine, truncate(sanitizeOneLine(match.Text), 360))
 			}
 		}
 	}

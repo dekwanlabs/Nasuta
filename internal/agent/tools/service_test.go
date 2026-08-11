@@ -70,7 +70,7 @@ func (s *searchFallbackSemantic) Search(ctx context.Context, query semantic.Quer
 	s.searchCalls++
 	return []semantic.Hit{{Score: 0.9, Metadata: map[string]any{
 		"path": "repos/team/orders/main.go", "lang": "go", "repo": "team/orders",
-		"start_line": 1, "end_line": 2, "text": "func order() {}", "preview": "func order() {}",
+		"start_line": 1, "end_line": 2, "text": "func order() {}",
 	}}}, nil
 }
 func (s *searchFallbackSemantic) SearchHybrid(_ context.Context, query semantic.Query) ([]semantic.Hit, error) {

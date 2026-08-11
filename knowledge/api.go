@@ -29,7 +29,6 @@ type CodeSearchHit struct {
 	StartLine     int      `json:"startLine"`
 	EndLine       int      `json:"endLine"`
 	Text          string   `json:"text"`
-	Preview       string   `json:"preview"`
 	Score         float64  `json:"score"`
 	ScoreKind     string   `json:"scoreKind"`
 	FusionScore   *float64 `json:"fusionScore,omitempty"`

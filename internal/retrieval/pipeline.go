@@ -424,9 +424,6 @@ func (retrieve *Retriever) discoverSources(ctx context.Context, input retrievalD
 				continue
 			}
 			snippet := m.Text
-			if snippet == "" {
-				snippet = m.Preview
-			}
 			serviceName := retrieve.serviceForRepoMapped(ctx, modules, m.Repo, m.Path)
 			if serviceScoped && (serviceName == "" || !matchesConfiguredService(serviceName, servicePatterns)) {
 				continue
