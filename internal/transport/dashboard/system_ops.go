@@ -187,12 +187,13 @@ func (h *Handler) APIEmbedRepo(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceUnavailable(w, "embed repo not configured")
 		return
 	}
-	log.Infof("[ops] starting embed_repo for %q", repo)
-	if err := h.idx.EmbedRepoCode(r.Context(), repo); err != nil {
-		httputil.WriteErr(w, err)
-		return
-	}
-	httputil.WriteJSON(w, map[string]string{"status": "completed"})
+	log.Infof("[ops] submitting embed_repo for %q (async)", repo)
+	go func() {
+		if err := h.idx.EmbedRepoCode(context.Background(), repo); err != nil {
+			log.Errorf("[ops] embed_repo %s failed: %v", repo, err)
+		}
+	}()
+	httputil.WriteJSON(w, map[string]string{"status": "submitted"})
 }
 
 func (h *Handler) APIGendocsRepo(w http.ResponseWriter, r *http.Request) {
