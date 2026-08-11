@@ -2,12 +2,15 @@ package qa
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/executiontrace"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 type evidencePlanningInput struct {
@@ -121,4 +124,39 @@ func (svc *QA) planEvidence(ctx context.Context, input evidencePlanningInput) (e
 		}
 		return output, nil
 	})
+}
+
+func logEvidencePlannerFailure(ctx context.Context, duration time.Duration, err error) {
+	if errors.Is(err, llm.ErrInvalidJSON) {
+		log.WarnfCtx(ctx,
+			"[qa] evidence planner failed duration=%s error_kind=invalid_json retry_disabled=true error=%v",
+			duration, err,
+		)
+		return
+	}
+
+	var callErr *llm.CallError
+	if !errors.As(err, &callErr) {
+		log.WarnfCtx(ctx,
+			"[qa] evidence planner failed duration=%s error_kind=other retry_disabled=true error=%v",
+			duration, err,
+		)
+		return
+	}
+
+	kind := "unknown"
+	switch callErr.Kind {
+	case llm.ErrKindNetwork:
+		kind = "network"
+	case llm.ErrKindStatus:
+		kind = "status"
+	case llm.ErrKindEmpty:
+		kind = "empty"
+	case llm.ErrKindEnvelope:
+		kind = "envelope"
+	}
+	log.WarnfCtx(ctx,
+		"[qa] evidence planner failed duration=%s error_kind=%s status=%d retryable=%t retry_disabled=true error=%v",
+		duration, kind, callErr.Status, callErr.Retryable(), err,
+	)
 }

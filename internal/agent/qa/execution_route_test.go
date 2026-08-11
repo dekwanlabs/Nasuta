@@ -47,8 +47,10 @@ func TestDecideExecutionRoute(t *testing.T) {
 			input.ToolCandidates = []retrieval.ToolRouteCandidate{{ID: "logs", Temporal: true}}
 			input.RoutedToolIDs = []string{"logs"}
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "runtime_evidence_required"},
+		{name: "time resolution failed", mutate: func(input *executionRouteInput) {
+			input.TimeResolutionFailed = true
+		}, want: retrieval.ExecutionSingleAgent, wantReason: "time_resolution_failed"},
 		{name: "history dependency", mutate: func(input *executionRouteInput) {
-			input.HistoryValid = true
 			input.History.NeedsPriorEvidence = true
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "history_dependency_required"},
 		{name: "workflow unavailable", mutate: func(input *executionRouteInput) {

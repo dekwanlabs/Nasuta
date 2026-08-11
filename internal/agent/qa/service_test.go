@@ -133,6 +133,41 @@ func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
 	}
 }
 
+func TestExecutionRoutingUsesResolvedHistoryRelation(t *testing.T) {
+	svc := &QA{}
+	prepared := &qaPreparation{
+		ctx:     context.Background(),
+		request: QARequest{RunID: "resolved-history-route"},
+		planning: evidencePlanningOutput{
+			Decision: domain.PlanDecision{
+				Plan:       domain.EvidencePlan{Sources: domain.Internal},
+				Confidence: 0.99,
+				Origin:     domain.Model,
+			},
+			Effective: domain.PlanDecision{
+				Plan:       domain.EvidencePlan{Sources: domain.Internal},
+				Confidence: 0.99,
+				Origin:     domain.Model,
+			},
+			Execution: retrieval.ExecutionSuggestion{
+				Strategy:   retrieval.ExecutionMultiAgent,
+				Complexity: 0.95,
+				Confidence: 0.95,
+			},
+		},
+		analysis: queryAnalysisOutput{
+			History: retrieval.HistoryRelation{NeedsPriorEvidence: true},
+		},
+	}
+
+	svc.routeQAExecution(prepared)
+
+	if prepared.execution.DowngradeReason != "history_dependency_required" {
+		t.Fatalf("downgrade reason = %q, want history_dependency_required",
+			prepared.execution.DowngradeReason)
+	}
+}
+
 func TestNormalizeQARequestCanonicalizesWithoutMutatingConversationInstructions(t *testing.T) {
 	request := QARequest{
 		Question: "  explain the checkout flow  ",

@@ -2,7 +2,6 @@ package qa
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -30,21 +29,8 @@ type qaPreparation struct {
 	toolCandidates     []retrieval.ToolRouteCandidate
 	planning           evidencePlanningOutput
 	analysis           queryAnalysisOutput
-	responseMode       domain.ResponseMode
-	retrievalIntent    domain.RetrievalIntent
-	intentOrigin       domain.IntentOrigin
 	execution          executionRouteDecision
 	historyCandidates  *HistoryCandidates
-}
-
-type historyDiscoveryResult struct {
-	candidates HistoryCandidates
-	err        error
-}
-
-type historyDiscoveryTask struct {
-	result <-chan historyDiscoveryResult
-	cancel context.CancelFunc
 }
 
 type qaEvidence struct {
@@ -73,6 +59,42 @@ func (prepared *qaPreparation) finishPreparationFailure(
 }
 
 func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation, error) {
+	prepared, err := svc.initializePreparation(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+
+	historyDiscovery := startHistoryCandidateDiscovery(
+		prepared.ctx, svc.history, prepared.request.UserID,
+		prepared.request.Conversation, prepared.request.Question,
+	)
+	if historyDiscovery != nil {
+		defer historyDiscovery.cancel()
+	}
+
+	requestAnchor, err := svc.planPreparedQuestion(prepared)
+	if err != nil {
+		prepared.closeTrace()
+		return nil, err
+	}
+	if err := svc.analyzePreparedQuestion(prepared, requestAnchor); err != nil {
+		prepared.closeTrace()
+		return nil, err
+	}
+	if err := svc.prepareConversation(prepared, historyDiscovery); err != nil {
+		prepared.closeTrace()
+		return nil, err
+	}
+
+	svc.applyTimeConstraint(prepared)
+	svc.routeQAExecution(prepared)
+	return prepared, nil
+}
+
+func (svc *QA) initializePreparation(
+	ctx context.Context,
+	request QARequest,
+) (*qaPreparation, error) {
 	request, err := normalizeQARequest(request)
 	if err != nil {
 		return nil, err
@@ -94,117 +116,97 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 		prepared.candidateToolSet = withoutSessionHistoryTools(prepared.candidateToolSet)
 	}
 	prepared.toolCandidates = routingCandidates(prepared.candidateToolSet.Tools())
+	return prepared, nil
+}
 
+func (svc *QA) planPreparedQuestion(prepared *qaPreparation) (time.Time, error) {
+	request := prepared.request
 	svc.emitStatus(request.RunID, "嗯...让我先琢磨一下你在问什么 ✨", "prepare.planning", time.Time{})
 	routeContext := buildHistoryRouteContext(request.Conversation)
 	if routeContext == "" {
 		routeContext = buildRagCtx(request.Conversation.Recent)
 	}
 
-	historyDiscovery := startHistoryCandidateDiscovery(
-		ctx, svc.history, request.UserID, request.Conversation, request.Question,
-	)
-
 	requestAnchor := time.Now()
 	hctx, cancelPlanning := context.WithTimeout(
-		llm.WithUsagePhase(ctx, llm.PhaseRoute), helperTimeout,
+		llm.WithUsagePhase(prepared.ctx, llm.PhaseRoute), helperTimeout,
 	)
-	prepared.planning, _ = svc.planEvidence(hctx, evidencePlanningInput{
+	planning, err := svc.planEvidence(hctx, evidencePlanningInput{
 		Question: request.Question, RouteContext: routeContext, ExplicitPlan: request.EvidencePlan,
 		ToolCandidates: prepared.toolCandidates,
 		AvailableTools: scenarioToolIDs(prepared.candidateToolSet.Tools()),
 		UserID:         request.UserID,
 	})
 	cancelPlanning()
+	if err != nil {
+		return requestAnchor, fmt.Errorf("plan QA evidence: %w", err)
+	}
+	prepared.planning = planning
 	svc.emitStatus(request.RunID, "问题规划完成，正在整理会话上下文", "prepare.history", time.Time{})
+	return requestAnchor, nil
+}
 
-	historyStarted := time.Now()
-	prepared.analysis, _ = analyzeQuery(ctx, queryAnalysisInput{
+func (svc *QA) analyzePreparedQuestion(
+	prepared *qaPreparation,
+	requestAnchor time.Time,
+) error {
+	request := prepared.request
+	analysis, err := analyzeQuery(prepared.ctx, queryAnalysisInput{
 		Question: request.Question, CleanQuestion: prepared.planning.CleanQuestion,
 		Terms: prepared.planning.Terms, Time: prepared.planning.Time,
 		Anchor: requestAnchor, RecentTurns: request.Conversation.RecentTurns,
 		History: prepared.planning.History, HistoryValid: prepared.planning.HistoryValid,
 	})
-	intent := domain.ResolveRetrievalIntent(request.Question, domain.RetrievalIntentSignals{
-		Identifiers: prepared.planning.Terms.Identifiers,
-		DomainTerms: prepared.planning.Terms.DomainTerms,
-	})
-	prepared.responseMode = intent.ResponseMode
-	prepared.retrievalIntent = intent.Intent
-	prepared.intentOrigin = intent.Origin
-	log.InfofCtx(ctx,
-		"[qa] canonical retrieval intent response_mode=%s retrieval_intent=%s intent_origin=%s required_facets=%d target_entities=%d",
-		intent.ResponseMode, intent.Intent.Kind, intent.Origin,
-		len(intent.Intent.RequiredFacets), len(intent.Intent.TargetEntities),
-	)
-	if historyDiscovery != nil {
-		if historyNeedsContinuity(prepared.analysis.History) {
-			historyDiscovery.cancel()
-		} else {
-			discovered := <-historyDiscovery.result
-			historyDiscovery.cancel()
-			if discovered.err != nil {
-				log.WarnfCtx(ctx, "[qa] session history candidate discovery degraded: %v", discovered.err)
-			} else {
-				prepared.historyCandidates = &discovered.candidates
-			}
-		}
+	if err != nil {
+		return fmt.Errorf("analyze QA query: %w", err)
 	}
-	assembled, err := svc.assembleContext(ctx, contextAssembleInput{
+	prepared.analysis = analysis
+	log.InfofCtx(prepared.ctx,
+		"[qa] canonical retrieval intent response_mode=%s retrieval_intent=%s intent_origin=%s required_facets=%d target_entities=%d",
+		analysis.ResponseMode, analysis.RetrievalIntent.Kind, analysis.IntentOrigin,
+		len(analysis.RetrievalIntent.RequiredFacets), len(analysis.RetrievalIntent.TargetEntities),
+	)
+	return nil
+}
+
+func (svc *QA) prepareConversation(
+	prepared *qaPreparation,
+	historyDiscovery *historyDiscoveryTask,
+) error {
+	historyStarted := time.Now()
+	prepared.historyCandidates = resolveHistoryCandidates(
+		prepared.ctx, historyDiscovery, prepared.analysis.History,
+	)
+	request := prepared.request
+	assembled, err := svc.assembleContext(prepared.ctx, contextAssembleInput{
 		Question: request.Question, UserID: request.UserID, Conversation: request.Conversation,
 		Relation: prepared.analysis.History, Origin: prepared.analysis.HistoryOrigin,
 		Upgrade:    prepared.analysis.HistoryUpdate,
 		Candidates: prepared.historyCandidates,
 	})
 	if err != nil {
-		prepared.closeTrace()
-		return nil, err
+		return err
 	}
 	svc.emitStatus(request.RunID, "上下文整理完成，正在准备检索", "prepare.routing", historyStarted)
 	prepared.request.Conversation = assembled.Conversation
+	return nil
+}
+
+func (svc *QA) applyTimeConstraint(prepared *qaPreparation) {
 	if prepared.analysis.TimeError != nil {
-		prepared.planning.PlanningError = errors.Join(
-			prepared.planning.PlanningError,
-			fmt.Errorf("resolve relative time: %w", prepared.analysis.TimeError),
-		)
-	} else if prepared.analysis.HasTimeRange {
-		prepared.ctx = tool.WithTimeRange(prepared.ctx, prepared.analysis.TimeRange)
-		log.InfofCtx(prepared.ctx, "[qa] relative time resolved raw=%q from=%s to=%s",
-			prepared.analysis.TimeRange.Raw,
-			prepared.analysis.TimeRange.From.Format(time.RFC3339),
-			prepared.analysis.TimeRange.To.Format(time.RFC3339),
-		)
+		log.WarnfCtx(prepared.ctx, "[qa] resolve relative time degraded: %v", prepared.analysis.TimeError)
+		return
+	}
+	if !prepared.analysis.HasTimeRange {
+		return
 	}
 
-	svc.routeQAExecution(prepared)
-	return prepared, nil
-}
-
-func startHistoryCandidateDiscovery(
-	ctx context.Context,
-	history SessionHistory,
-	userID int64,
-	conversation ConversationContext,
-	question string,
-) *historyDiscoveryTask {
-	if history == nil || conversation.CompactedThroughTurn <= 0 {
-		return nil
-	}
-	discovery, ok := history.(CandidateDiscovery)
-	if !ok {
-		return nil
-	}
-	discoveryCtx, cancel := context.WithCancel(ctx)
-	resultCh := make(chan historyDiscoveryResult, 1)
-	go func() {
-		candidates, err := discovery.Discover(discoveryCtx, userID, conversation.SessionID, question)
-		resultCh <- historyDiscoveryResult{candidates: candidates, err: err}
-	}()
-	return &historyDiscoveryTask{result: resultCh, cancel: cancel}
-}
-
-func historyNeedsContinuity(relation retrieval.HistoryRelation) bool {
-	return relation.NeedsPriorEntities || relation.NeedsPriorConclusion || relation.NeedsPriorEvidence
+	prepared.ctx = tool.WithTimeRange(prepared.ctx, prepared.analysis.TimeRange)
+	log.InfofCtx(prepared.ctx, "[qa] relative time resolved raw=%q from=%s to=%s",
+		prepared.analysis.TimeRange.Raw,
+		prepared.analysis.TimeRange.From.Format(time.RFC3339),
+		prepared.analysis.TimeRange.To.Format(time.RFC3339),
+	)
 }
 
 func normalizeQARequest(request QARequest) (QARequest, error) {
@@ -220,90 +222,6 @@ func normalizeQARequest(request QARequest) (QARequest, error) {
 		request.RunID = NewRunID()
 	}
 	return request, nil
-}
-
-func (svc *QA) routeQAExecution(prepared *qaPreparation) {
-	planning := prepared.planning
-	decision, effectiveDecision := planning.Decision, planning.Effective
-	if decision.Origin == domain.Model &&
-		decision.Plan.Direct() && decision.Confidence < svc.routerConfidence {
-		log.WarnfCtx(prepared.ctx, "[qa] evidence planner direct confidence %.2f below %.2f; using internal fallback",
-			decision.Confidence, svc.routerConfidence,
-		)
-	}
-	if planning.PlanningError != nil {
-		logEvidencePlannerFailure(prepared.ctx, planning.PlanningTime, planning.PlanningError)
-		planning.RoutedToolIDs = nil
-		prepared.planning.RoutedToolIDs = nil
-	}
-
-	policy := ExecutionPolicy{
-		AllowMultiAgent: standardQARequest(prepared.request, svc.agentRef),
-		MinComplexity:   defaultMultiAgentMinComplexity,
-		MinConfidence:   defaultMultiAgentMinConfidence,
-	}
-	workflowAvailable := false
-	if policy.AllowMultiAgent && svc.investigation != nil && svc.scenarios != nil {
-		workflowAvailable = svc.investigation.Available()
-	}
-	prepared.execution = routeExecution(prepared.ctx, executionRouteInput{
-		Suggestion: planning.Execution, Policy: policy,
-		EvidencePlan: effectiveDecision.Plan, AllowWrite: prepared.request.AllowWrite,
-		WorkflowAvailable: workflowAvailable,
-		History:           planning.History, HistoryValid: planning.HistoryValid,
-		ToolCandidates: prepared.toolCandidates, RoutedToolIDs: planning.RoutedToolIDs,
-	})
-
-	svc.emitExecutionEvent(EventExecutionRouted, ExecutionEvent{
-		RunID: prepared.request.RunID, Strategy: string(prepared.execution.Strategy), Status: "completed",
-		Complexity: planning.Execution.Complexity, Confidence: planning.Execution.Confidence,
-	})
-	degradedReason := prepared.execution.DowngradeReason
-	if degradedReason == "" && planning.PlanningError != nil {
-		degradedReason = "route_degraded"
-	}
-	if degradedReason != "" {
-		svc.emitExecutionEvent(EventExecutionDegraded, ExecutionEvent{
-			RunID: prepared.request.RunID, Strategy: string(prepared.execution.Strategy), Status: "degraded",
-			Reason: degradedReason, Complexity: planning.Execution.Complexity,
-			Confidence: planning.Execution.Confidence,
-		})
-	}
-}
-
-func logEvidencePlannerFailure(ctx context.Context, duration time.Duration, err error) {
-	if errors.Is(err, llm.ErrInvalidJSON) {
-		log.WarnfCtx(ctx,
-			"[qa] evidence planner failed duration=%s error_kind=invalid_json retry_disabled=true error=%v",
-			duration, err,
-		)
-		return
-	}
-
-	var callErr *llm.CallError
-	if !errors.As(err, &callErr) {
-		log.WarnfCtx(ctx,
-			"[qa] evidence planner failed duration=%s error_kind=other retry_disabled=true error=%v",
-			duration, err,
-		)
-		return
-	}
-
-	kind := "unknown"
-	switch callErr.Kind {
-	case llm.ErrKindNetwork:
-		kind = "network"
-	case llm.ErrKindStatus:
-		kind = "status"
-	case llm.ErrKindEmpty:
-		kind = "empty"
-	case llm.ErrKindEnvelope:
-		kind = "envelope"
-	}
-	log.WarnfCtx(ctx,
-		"[qa] evidence planner failed duration=%s error_kind=%s status=%d retryable=%t retry_disabled=true error=%v",
-		duration, kind, callErr.Status, callErr.Retryable(), err,
-	)
 }
 
 func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error) {
@@ -531,7 +449,7 @@ func (svc *QA) prepareEvidence(
 		)
 	})
 	rc, err := svc.retriever.RetrievePlan(
-		ctx, canonicalQuery, prepared.planning.Terms, evidencePlan, prepared.retrievalIntent,
+		ctx, canonicalQuery, prepared.planning.Terms, evidencePlan, prepared.analysis.RetrievalIntent,
 	)
 	if err != nil {
 		runErr := fmt.Errorf("retrieve internal evidence: %w", err)

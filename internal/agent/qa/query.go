@@ -23,12 +23,15 @@ type queryAnalysisInput struct {
 }
 
 type queryAnalysisOutput struct {
-	History       retrieval.HistoryRelation
-	HistoryOrigin string
-	HistoryUpdate string
-	TimeRange     tool.TimeRange
-	HasTimeRange  bool
-	TimeError     error
+	History         retrieval.HistoryRelation
+	HistoryOrigin   string
+	HistoryUpdate   string
+	TimeRange       tool.TimeRange
+	HasTimeRange    bool
+	TimeError       error
+	ResponseMode    domain.ResponseMode
+	RetrievalIntent domain.RetrievalIntent
+	IntentOrigin    domain.IntentOrigin
 }
 
 var queryAnalysisSpec = executiontrace.Spec[queryAnalysisInput, queryAnalysisOutput]{
@@ -45,7 +48,7 @@ var queryAnalysisSpec = executiontrace.Spec[queryAnalysisInput, queryAnalysisOut
 		}
 		return map[string]any{
 			"clean_question": input.CleanQuestion, "domain_terms": input.Terms.DomainTerms,
-			"identifiers": input.Terms.Identifiers, "response_mode": classifyResponseMode(input.Question),
+			"identifiers": input.Terms.Identifiers, "response_mode": output.ResponseMode,
 			"time_kind": input.Time.Kind, "time_raw": input.Time.Raw,
 			"time_from": timeFrom, "time_to": timeTo,
 		}
@@ -62,9 +65,14 @@ func analyzeQuery(ctx context.Context, input queryAnalysisInput) (queryAnalysisO
 	return executiontrace.Invoke(ctx, queryAnalysisSpec, input, func(_ context.Context, input queryAnalysisInput) (queryAnalysisOutput, error) {
 		history, origin, update := resolveHistoryRelation(input.Question, input.RecentTurns, input.History, input.HistoryValid)
 		timeRange, hasTimeRange, timeErr := retrieval.ResolveTime(input.Time, input.Anchor)
+		intent := domain.ResolveRetrievalIntent(input.Question, domain.RetrievalIntentSignals{
+			Identifiers: input.Terms.Identifiers,
+			DomainTerms: input.Terms.DomainTerms,
+		})
 		return queryAnalysisOutput{
 			History: history, HistoryOrigin: origin, HistoryUpdate: update,
 			TimeRange: timeRange, HasTimeRange: hasTimeRange, TimeError: timeErr,
+			ResponseMode: intent.ResponseMode, RetrievalIntent: intent.Intent, IntentOrigin: intent.Origin,
 		}, nil
 	})
 }
