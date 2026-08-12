@@ -62,6 +62,7 @@
 | 15 | QA 与研发任务多 Agent 路由 | [15-qa-and-feature-delivery-multi-agent-routing-proposal.zh-CN.md](15-qa-and-feature-delivery-multi-agent-routing-proposal.zh-CN.md) |
 | 16 | QA、研发任务与多 Agent 统一 Execution Trace | [16-unified-execution-trace-proposal.zh-CN.md](16-unified-execution-trace-proposal.zh-CN.md) |
 | 17 | Nasuta Core、Feature 与 CodeLoom 拆分 | [17-nasuta-core-feature-codeloom-split-proposal.zh-CN.md](17-nasuta-core-feature-codeloom-split-proposal.zh-CN.md) |
+| 18 | 任务驱动多 Agent 架构 | [18-task-driven-multi-agent-architecture.zh-CN.md](18-task-driven-multi-agent-architecture.zh-CN.md) |
 
 截至 2026-08-07，差距审计剩余 12 项：P1 已清零，P2 9 项，后置分布式能力 3 项。具体证据、边界和建议顺序以方案 14 为准。
 
