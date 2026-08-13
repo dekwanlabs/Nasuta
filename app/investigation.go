@@ -31,6 +31,35 @@ func (runner platformQAInvestigationRunner) Start(
 	if err != nil {
 		return err
 	}
+	workflowRef := workflow.DefinitionRef{
+		ID: workflow.DelegatedInvestigationID, Version: version,
+	}
+	if len(request.Contract.EvidenceGoals) > 0 {
+		definition, err := runner.platform.delegatedInvestigationWorkflowForGoals(
+			ctx,
+			version,
+			request.Contract.EvidenceGoals,
+		)
+		if err != nil {
+			return fmt.Errorf("prepare QA investigation workflow: %w", err)
+		}
+		if err := service.PublishDefinitionsAs(
+			ctx,
+			[]workflow.WorkflowDefinition{definition},
+			request.Actor.UserID,
+			true,
+		); err != nil {
+			return fmt.Errorf(
+				"publish QA investigation workflow %q version %d: %w",
+				definition.ID,
+				definition.Version,
+				err,
+			)
+		}
+		workflowRef = workflow.DefinitionRef{
+			ID: definition.ID, Version: definition.Version,
+		}
+	}
 	input, err := json.Marshal(request.Contract)
 	if err != nil {
 		return fmt.Errorf("marshal QA task contract: %w", err)
@@ -61,10 +90,8 @@ func (runner platformQAInvestigationRunner) Start(
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	_, startErr := service.Start(ctx, workflow.StartRequest{
 		RunID: request.WorkflowRunID, ParentRunID: request.Contract.TaskID,
-		Workflow: workflow.DefinitionRef{
-			ID: workflow.DelegatedInvestigationID, Version: version,
-		},
-		Input: input, Actor: request.Actor, ActorPermissions: readOnly,
+		Workflow: workflowRef,
+		Input:    input, Actor: request.Actor, ActorPermissions: readOnly,
 		SeedEvidence: request.Contract.Context.SeedEvidence,
 		Scenario:     workflow.DelegatedInvestigationID, ScenarioPermissions: readOnly,
 	})
@@ -93,6 +120,69 @@ func (runner platformQAInvestigationRunner) Start(
 		version,
 		startErr,
 	)
+}
+
+func (p *Platform) delegatedInvestigationWorkflowForGoals(
+	ctx context.Context,
+	version int64,
+	goals []agent.EvidenceGoal,
+) (workflow.WorkflowDefinition, error) {
+	if p == nil || p.agents.catalog == nil ||
+		p.agents.schemas == nil || p.agents.capabilities == nil {
+		return workflow.WorkflowDefinition{}, workflow.ErrUnavailable
+	}
+	ids := []string{
+		"investigator.code",
+		"investigator.runtime",
+		"investigator.docs",
+		"synthesizer",
+	}
+	definitions := make([]agentapi.Definition, 0, len(ids))
+	for _, id := range ids {
+		definition, err := p.agents.catalog.Resolve(agentapi.DefinitionRef{
+			ID: id, Version: version,
+		})
+		if err != nil {
+			return workflow.WorkflowDefinition{}, fmt.Errorf(
+				"resolve delegated investigation agent %q version %d: %w",
+				id,
+				version,
+				err,
+			)
+		}
+		definitions = append(definitions, definition)
+	}
+	budgets, err := delegatedInvestigationBudgetPolicy(definitions)
+	if err != nil {
+		return workflow.WorkflowDefinition{}, err
+	}
+	workflowGoals := make([]workflow.DelegatedInvestigationGoal, 0, len(goals))
+	for _, goal := range goals {
+		workflowGoals = append(workflowGoals, workflow.DelegatedInvestigationGoal{
+			Facet: goal.Facet, Required: goal.Required,
+		})
+	}
+	proposal, err := workflow.DelegatedInvestigationProposalForGoals(workflowGoals)
+	if err != nil {
+		return workflow.WorkflowDefinition{}, err
+	}
+	policy, err := workflow.DelegatedInvestigationCompilationPolicyForGoals(
+		version,
+		definitions[0].Budget.Timeout,
+		budgets,
+		workflowGoals,
+	)
+	if err != nil {
+		return workflow.WorkflowDefinition{}, err
+	}
+	compiler, err := workflow.NewProposalCompiler(
+		p.agents.schemas,
+		p.agents.capabilities,
+	)
+	if err != nil {
+		return workflow.WorkflowDefinition{}, err
+	}
+	return compiler.CompileContext(ctx, proposal, policy)
 }
 
 func (runner platformQAInvestigationRunner) AwaitTerminal(

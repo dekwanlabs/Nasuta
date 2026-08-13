@@ -61,13 +61,14 @@ func (compiler *ProposalCompiler) validate(
 	if err := validateParallelGroups(tasks, successors); err != nil {
 		return validatedProposal{}, err
 	}
+	joinTargets := compiler.compiledJoinTargets(byID, predecessors)
 	joinCount := 0
-	for _, task := range tasks {
-		if len(predecessors[task.spec.ID]) > 1 {
+	for _, required := range joinTargets {
+		if required {
 			joinCount++
 		}
 	}
-	compiledDepth := compiledProposalDepth(order, predecessors)
+	compiledDepth := compiledProposalDepth(order, predecessors, joinTargets)
 	if compiledDepth > limits.maxDepth {
 		return validatedProposal{}, fmt.Errorf(
 			"compiled task graph depth %d exceeds limit %d",
@@ -90,6 +91,7 @@ func (compiler *ProposalCompiler) validate(
 		maxParallelism: limits.maxParallelism,
 		maxDepth:       limits.maxDepth,
 		workflowBudget: budget,
+		joinTargets:    joinTargets,
 	}, nil
 }
 
@@ -164,6 +166,17 @@ func (compiler *ProposalCompiler) validatePolicy(policy CompilationPolicy) error
 			return err
 		}
 	}
+	for capabilityID, version := range policy.CapabilityVersions {
+		if !canonicalID.MatchString(capabilityID) {
+			return fmt.Errorf("proposal capability version id %q is not canonical", capabilityID)
+		}
+		if version <= 0 {
+			return fmt.Errorf(
+				"proposal capability %q version must be positive",
+				capabilityID,
+			)
+		}
+	}
 	return nil
 }
 
@@ -201,7 +214,10 @@ func (compiler *ProposalCompiler) validateTask(
 	if err := validateEvidenceRefs(task.ID, task.InputRefs); err != nil {
 		return validatedTask{}, err
 	}
-	capability, err := compiler.capabilities.Resolve(agentapi.CapabilityRef{ID: task.Capability})
+	capability, err := compiler.capabilities.Resolve(agentapi.CapabilityRef{
+		ID:      task.Capability,
+		Version: policy.CapabilityVersions[task.Capability],
+	})
 	if err != nil {
 		return validatedTask{}, fmt.Errorf("task %q capability: %w", task.ID, err)
 	}
@@ -485,9 +501,35 @@ func pathExists(from, to string, successors map[string][]string) bool {
 	return false
 }
 
+func (compiler *ProposalCompiler) compiledJoinTargets(
+	tasks map[string]validatedTask,
+	predecessors map[string][]string,
+) map[string]bool {
+	targets := make(map[string]bool, len(tasks))
+	for targetID, sources := range predecessors {
+		if len(sources) > 1 {
+			targets[targetID] = true
+			continue
+		}
+		if len(sources) != 1 {
+			continue
+		}
+		source := tasks[sources[0]]
+		target := tasks[targetID]
+		if err := compiler.schemas.ValidateCompatibility(
+			source.capability.OutputSchema,
+			target.capability.InputSchema,
+		); err != nil {
+			targets[targetID] = true
+		}
+	}
+	return targets
+}
+
 func compiledProposalDepth(
 	order []string,
 	predecessors map[string][]string,
+	joinTargets map[string]bool,
 ) int {
 	depths := make(map[string]int, len(order))
 	maxDepth := 0
@@ -498,7 +540,7 @@ func compiledProposalDepth(
 				depth = depths[predecessor] + 1
 			}
 		}
-		if len(predecessors[id]) > 1 {
+		if joinTargets[id] {
 			depth++
 		}
 		depths[id] = depth

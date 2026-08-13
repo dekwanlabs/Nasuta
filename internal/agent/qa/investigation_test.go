@@ -46,7 +46,7 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 		},
 	}
 
-	contract := taskContractFromPreparation(prepared)
+	contract := taskContractFromPreparation(prepared, prepared.request.PreloadedContext)
 	if contract.TaskID != "qa_1" ||
 		contract.Question != "Why is checkout failing?" ||
 		contract.Objective != "Trace the checkout failure" {

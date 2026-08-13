@@ -30,18 +30,31 @@ func DefaultInvestigationCapabilities(
 	}{
 		{
 			id: "knowledge.code.inspect", agentID: "investigator.code",
-			purpose:     "Inspect source implementation, symbols, APIs, and call paths.",
-			inputFacets: []string{"implementation"},
+			purpose: "Inspect source implementation, symbols, APIs, and call paths.",
+			inputFacets: []string{
+				"implementation",
+				"entrypoint",
+				"core_flow",
+				"data_and_state",
+			},
 		},
 		{
 			id: "knowledge.service.trace", agentID: "investigator.runtime",
-			purpose:     "Trace service topology, dependencies, APIs, and runtime entrypoints.",
-			inputFacets: []string{"service.topology"},
+			purpose: "Trace service topology, dependencies, APIs, and runtime entrypoints.",
+			inputFacets: []string{
+				"service.topology",
+				"system_boundary",
+				"external_dependency",
+				"runtime_and_operations",
+			},
 		},
 		{
 			id: "knowledge.docs.verify", agentID: "investigator.docs",
-			purpose:     "Verify runbooks, system documentation, and documentation coverage.",
-			inputFacets: []string{"documentation"},
+			purpose: "Verify runbooks, system documentation, and documentation coverage.",
+			inputFacets: []string{
+				"documentation",
+				"business_domain",
+			},
 		},
 		{
 			id: "evidence.synthesize", agentID: "synthesizer",

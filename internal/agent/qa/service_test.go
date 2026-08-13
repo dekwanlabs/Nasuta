@@ -135,7 +135,7 @@ func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
 	}
 }
 
-func TestExecutionRoutingUsesResolvedHistoryRelation(t *testing.T) {
+func TestExecutionRoutingDoesNotUseResolvedHistoryRelation(t *testing.T) {
 	svc := &QA{}
 	prepared := &qaPreparation{
 		ctx:     context.Background(),
@@ -164,9 +164,30 @@ func TestExecutionRoutingUsesResolvedHistoryRelation(t *testing.T) {
 
 	svc.routeQAExecution(prepared)
 
-	if prepared.execution.DowngradeReason != "history_dependency_required" {
-		t.Fatalf("downgrade reason = %q, want history_dependency_required",
+	if prepared.execution.DowngradeReason != "workflow_unavailable" {
+		t.Fatalf("downgrade reason = %q, want workflow_unavailable",
 			prepared.execution.DowngradeReason)
+	}
+}
+
+func TestStandardQARequestAllowsSeedContextPrefetchAndParentReference(t *testing.T) {
+	defaultAgent := agentapi.DefinitionRef{ID: "qa.answerer", Version: 3}
+	request := QARequest{
+		PreloadedContext: []ContextBlock{{
+			Source: "scenario", Content: "trusted seed context",
+		}},
+		ToolPlan: ToolPlan{Prefetch: []PlannedToolCall{{
+			ToolID: "search_code",
+		}}},
+		ParentRunID: "qa-parent-run",
+	}
+	if !standardQARequest(request, defaultAgent) {
+		t.Fatal("seed context, prefetch, and parent reference disabled multi-agent routing")
+	}
+	request.WorkflowRunID = "workflow-parent"
+	request.WorkflowNodeID = "answer"
+	if standardQARequest(request, defaultAgent) {
+		t.Fatal("nested workflow node was accepted as a standard QA request")
 	}
 }
 
@@ -645,6 +666,13 @@ func (recorder *scenarioRunRecorder) Context(ctx context.Context) context.Contex
 	return ctx
 }
 
+func (recorder *scenarioRunRecorder) RecordPreparationStep(
+	context.Context,
+	RunStepRecord,
+) error {
+	return nil
+}
+
 func (recorder *scenarioRunRecorder) Release() {
 	if recorder.released != nil {
 		recorder.released <- struct{}{}
@@ -1008,8 +1036,10 @@ func TestAskExecutionEventsOrderDegradedRouteBeforeSingleAgent(t *testing.T) {
 		PreloadedContext: []ContextBlock{{
 			Source: "scenario", Content: "supplied scenario context",
 		}},
-		UserID: 42,
-		RunID:  runID,
+		UserID:         42,
+		RunID:          runID,
+		WorkflowRunID:  "parent-workflow",
+		WorkflowNodeID: "child-node",
 	})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)

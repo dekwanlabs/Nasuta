@@ -89,6 +89,8 @@ func (orchestrator *Orchestrator) approvalHandoff(
 			node.OutputSchema,
 			JoinPayloadList,
 			inputs,
+			nil,
+			false,
 			definition.Budget.MaxHandoffBytes,
 			orchestrator.schemas,
 		)
@@ -121,12 +123,29 @@ func predecessorHandoffs(nodeID string, predecessors map[string][]string, output
 	return handoffs
 }
 
+func unavailablePredecessors(
+	nodeID string,
+	predecessors map[string][]string,
+	failedOptional map[string]struct{},
+) []string {
+	ids := predecessors[nodeID]
+	unavailable := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, failed := failedOptional[id]; failed {
+			unavailable = append(unavailable, id)
+		}
+	}
+	return unavailable
+}
+
 func joinHandoffs(
 	runID,
 	producer string,
 	schema agentapi.SchemaRef,
 	mode JoinMode,
 	inputs []Handoff,
+	unavailablePredecessors []string,
+	rejectEvidenceConflicts bool,
 	maxBytes int64,
 	schemas *agentapi.SchemaRegistry,
 ) (Handoff, error) {
@@ -141,9 +160,17 @@ func joinHandoffs(
 			completeness = Partial
 		}
 	}
+	if len(unavailablePredecessors) > 0 {
+		if len(inputs) == 0 {
+			completeness = Unavailable
+		} else {
+			completeness = Partial
+		}
+	}
 	payload, err := joinedPayload(
 		mode,
 		inputs,
+		unavailablePredecessors,
 		evidenceUnits,
 		evidenceConflicts,
 		completeness,
@@ -151,12 +178,39 @@ func joinHandoffs(
 	if err != nil {
 		return Handoff{}, err
 	}
-	return PrepareHandoff(Handoff{
+	handoff, err := PrepareHandoff(Handoff{
 		WorkflowRunID: runID, ProducerNodeID: producer, Schema: schema,
 		Payload: payload, References: references,
 		EvidenceUnits: evidenceUnits, EvidenceConflicts: evidenceConflicts,
 		Completeness: completeness,
 	}, maxBytes, schemas)
+	if err != nil {
+		return Handoff{}, err
+	}
+	if rejectEvidenceConflicts && len(evidenceConflicts) > 0 {
+		return handoff, evidenceConflictRejectionError{
+			producer: producer,
+			count:    len(evidenceConflicts),
+		}
+	}
+	return handoff, nil
+}
+
+type evidenceConflictRejectionError struct {
+	producer string
+	count    int
+}
+
+func (err evidenceConflictRejectionError) Error() string {
+	return fmt.Sprintf(
+		"join %q rejected %d evidence conflict(s)",
+		err.producer,
+		err.count,
+	)
+}
+
+func (err evidenceConflictRejectionError) Is(target error) bool {
+	return target == ErrEvidenceConflict
 }
 
 func contains(values []string, target string) bool {

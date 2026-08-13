@@ -15,6 +15,7 @@ import (
 var (
 	ErrHumanApprovalRequired   = errors.New("workflow requires human approval")
 	ErrWorkflowBudgetExhausted = errors.New("workflow budget exhausted")
+	ErrEvidenceConflict        = errors.New("workflow evidence conflict")
 )
 
 type RunRequest struct {
@@ -29,12 +30,13 @@ type RunRequest struct {
 }
 
 type NodeRequest struct {
-	WorkflowRunID        string
-	Node                 NodeDefinition
-	Inputs               []Handoff
-	Attempt              int
-	Actor                agentapi.Actor
-	EffectivePermissions agentapi.PermissionPolicy
+	WorkflowRunID           string
+	Node                    NodeDefinition
+	Inputs                  []Handoff
+	UnavailablePredecessors []string
+	Attempt                 int
+	Actor                   agentapi.Actor
+	EffectivePermissions    agentapi.PermissionPolicy
 }
 
 type NodeExecutor interface {

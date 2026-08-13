@@ -72,37 +72,33 @@ investigate.docs
   -> synthesize
 ```
 
-四条边全部 `Required: true`，五个节点均未设 `Optional`（`internal/agent/workflow/
-investigation.go:35,51-56`），配合 `FailurePolicy{Mode: FailFast}`，任一节点失败即
-整体失败。三个节点只接受同一个 `investigation.request`。这会产生以下结构性问题：
+该图目前仍作为兼容 fallback 存在，但已改为 `task.contract` 输入、
+`CollectAvailable`、Optional Investigator、Evidence Ledger Join、显式预算与受限重试；
+请求级编译还会按 canonical Evidence Goal 选择实际需要的 Capability。当前遗留问题
+已从“固定图无法降级”收敛为“能力集合、验证粒度和运行期扩展仍不完整”：
 
 | 问题 | 后果 |
 |---|---|
-| 角色按来源预先固定 | 问题需要日志或 Web 时只能整体降级，而不是增加相应能力节点 |
-| 三个节点均非 Optional + FailFast | 与当前问题无关的 Agent 也会消耗预算和延迟；`CollectAvailable` 降级对该图不可达 |
-| 子 Agent 只收到 `question` | `investigation.request` 为 `required:["question"]` 且 `additionalProperties:false`，历史实体、时间范围、证据目标**在 Schema 层就无法传入** |
+| Capability 集合仍局限于 code / service topology / docs | 请求级图已能裁剪节点，但 Web、Memory、实时 Runtime Observe 等能力尚未注册到该编译路径 |
+| canonical entity 尚未完全统一 | Task Contract 已能传实体、时间、ConversationRefs 和 SeedEvidence，但上游仍有多条实体抽取路径 |
 | Synthesizer 无工具 | 发现证据缺口后不能补查，只能接受缺口或幻觉补全 |
 | 路由依赖模型的 `complexity` 和 `confidence` | “是否值得并行”没有可计算的任务计划作为依据 |
-| QA 与 Workflow 准备链路分叉 | Single-Agent 的预检索、工具准入和证据账本没有自然复用到 Workflow |
-| Join 以报告为中心 | 结果可以重复、互相矛盾，但缺少统一 identity、coverage 和版本收敛 |
-| 固定工作流预算实际全零 | `investigation.go:31-34` 仅设 `MaxNodes/MaxParallelism/Timeout/MaxHandoffBytes`，token、工具调用、费用、重试上限全为零；节点无 `Retry`，`MaxAttempts` 归一化为 1 |
-| 证据去重实现了两遍且语义冲突 | 执行层 `evidence_ledger.go` 用工具原始 `ContentHash`；QA 层 `qa/tools.go:363-372` 覆写为投递文本哈希。identity 五元组相同但哈希语义不同，同一份证据经不同路径会被误判为版本冲突 |
-| 冲突记录是死代码 | `runEvidenceLedger.conflicts` 被写入但在非测试代码中从未被读取，异 hash 的 incoming 既不入 `items` 也无人消费——冲突当前是静默丢弃的 |
+| QA 与 Workflow 准备链路仍未完全合并 | Prefetch、PreloadedContext、ParentRunID 已进入 Task Contract，但 Single-Agent 与 Workflow 仍有独立执行入口 |
+| Ledger 只有 identity 级收敛 | 已支持去重、版本冲突、partial/unavailable 和确定性冲突拒绝，但尚无 goal/claim-level coverage |
+| 验证只覆盖确定性版本冲突 | `RejectEvidenceConflicts` 可在 Join 阻断 Synthesizer；专用 Verifier、claim 支持关系和风险分级尚未实现 |
 
-三处硬约束决定了任务图不能简单“动态化”，必须在阶段 1 显式处理：
+阶段 1 原有三处硬约束中，固定三元组 Schema 和双去重已完成收敛；当前真正阻断
+Adaptive Expansion 的是执行器仍绑定静态节点集：
 
 1. **执行器绑定静态节点集**：`executor_orchestration.go:32` 的主循环终止条件是
    `len(outputs)+len(failedOptional) < len(definition.Nodes)`，`readyNodes` 也只
    遍历该集合；`model.go:201` 在 prepare 期校验 `len(Nodes) <= Budget.MaxNodes`。
    `WorkflowDefinition` 是预注册、带 version 与 `ContentHash` 的不可变定义，**当前
    没有任何“运行中新增节点”的通路**。
-2. **`investigation.bundle` 是硬编码三元组**：`catalog/schema.go:78-89` 定死
-   `minItems:3, maxItems:3, items:false`，`prefixItems` 用 `focus` const 固定为
-   code / docs / runtime；而 `joinHandoffs` 按 `ProducerNodeID` 字母序排序
-   （`executor_handoff.go:130-132`）恰好产出同一顺序——这是**偶然耦合**，节点改名
-   即静默失配。任何可变任务数方案都会立刻撞上该 Schema。
-3. **双去重必须先合并**：在 Ledger 升格到 Workflow 作用域之前合并上表所述的两处
-   实现，否则跨 Agent 合并会放大 hash 误判。
+2. **已解除固定三元组约束**：`investigation.bundle` 现为 1 到 50 个 Handoff 的
+   Ledger View，并显式携带 `unavailable_tasks`、证据、冲突和 completeness。
+3. **已统一主要证据合并语义**：QA 和 Workflow 合并路径复用 canonical identity，
+   保留来源 `ContentHash`，冲突会进入 Handoff、Ledger、Trace 和确定性拒绝策略。
 
 ### 2.2 对业内实现的抽象
 
@@ -679,18 +675,17 @@ Verifier 的输出必须说明：
 - 必需任务失败且没有替代覆盖：Workflow failed 或 needs clarification；
 - 一个 identity 多版本冲突：进入 Verifier 或 human gate，不能静默选择。
 
-这比当前四条边全部 `Required: true`、五个节点均非 `Optional`、任一失败即整体失败
-更符合实际调查任务。
+这比改造前四条边全部 `Required: true`、五个节点均非 `Optional`、任一失败即整体失败
+更符合实际调查任务；当前固定调查图已按该规则启用部分失败收敛。
 
-**机制已存在，本节只需改配置与 Schema**：`CollectAvailable` 与
-`NodeDefinition.Optional` 已在执行器中生效
+**本节主链路已落地**：`CollectAvailable` 与 `NodeDefinition.Optional` 已在执行器中生效
 （`executor_orchestration.go:57-60`：降级要求节点 `Optional` **且** 工作流为
 `CollectAvailable`），`readyNodes` 也已实现“失败的 Optional 前驱位于 `Required` 边上
 则后继不可运行”（`executor_handoff.go:53-58`）。`Handoff.Completeness` 已有
 `complete/partial/unavailable` 三态并在 Join 处按 `Unavailable > Partial > Complete`
-折叠。因此本节的落地动作是：把固定工作流的 `FailurePolicy.Mode` 改为
-`CollectAvailable`、为可选节点设 `Optional: true`、并把 `investigation.bundle` 从
-固定三元组改为可变长度——不是新建部分失败机制。
+折叠。固定工作流已使用 `CollectAvailable`、Optional Investigator 和可变长度
+`investigation.bundle`；后续只需让 goal/claim-level Evidence Policy 决定 partial
+是否足以进入最终合成。
 
 ## 10. 预算、停止和可靠性
 
@@ -894,10 +889,25 @@ workflow.converged
 
 这些 span 应通过既有的 `runtrace.Spec`/`runtrace.Invoke` 机制注册，与现有 49 个
 operation 共用同一 trace 合同（`internal/tracecontract`，当前为 `v1`），不另建通道。
-当前**不存在 `evidence.*` span 族**：证据决策只能通过 `agent.tool_admission`
-的 payload 与 `evidence.joined` SSE 事件间接观测，这是 12 节第 4 问在今天无法回答的
-直接原因。多 Agent 侧已有 `workflow.node.execute`、`multi_agent.dispatch`、
-`multi_agent.child_run`、`multi_agent.aggregate` 四个 span 可以挂接。
+当前已落地 `evidence.candidate`、`evidence.merged`、`evidence.rejected`、
+`evidence.delivered` 和 `workflow.converged`：Join 边界可观测候选、Ledger 合并、
+冲突拒绝与聚合交付，Workflow 执行边界在最后记录统一终态。`workflow.converged`
+投影不可变 definition 标识、节点完成/不可用/等待计数、usage、completeness 和稳定
+outcome；当前覆盖 `complete`、`partial`、`unavailable`、`waiting_human`、
+`evidence_conflict`、`failed`、`cancelled` 和 `timed_out`。其中 `partial` /
+`unavailable` 使用 `degraded` Trace status，避免与真正失败混淆。
+
+Evidence Trace 只投影 canonical identity、content hash、origin、数量和 completeness，
+不记录证据正文或 Handoff payload；每类事件最多投影 50 条 identity，避免挤占现有
+Trace 上限。启用 `RejectEvidenceConflicts` 的 Join 还会记录
+`verification.completed`，明确投影 `pass` 或 `reject` 及 conflict count；这只是
+确定性版本冲突检查，不等同于专用 Verifier。尚未落地的是 goal/claim-level coverage、
+专用 Verifier 结果和最终 claim 到 evidence identity 的支持关系，因此第 5、7 问仍不能
+完整回答。多 Agent 侧已有 `workflow.node.execute`、`multi_agent.dispatch`、
+`multi_agent.child_run`、`multi_agent.aggregate` 四个 span。请求级 Proposal 编译还会记录
+`task_graph.proposed` 与 `task_graph.accepted`：前者投影任务 ID、Capability、facet、
+依赖和 StopPolicy，并记录服务端拒绝；后者记录不可变 Workflow ID/version/hash、节点
+绑定和收紧后的预算。两者均不记录 Task purpose 等 Planner 自由文本。
 
 离线评估至少比较：
 
@@ -940,24 +950,22 @@ partial / failed / clarification rate
 
 ### 阶段 1：统一证据事实并引入 Task Contract
 
-前两项是后续所有阶段的阻塞前置条件，必须先于 Ledger 升格完成：
+本阶段的 Ledger、Schema 和 Task Contract 主链路已完成，剩余工作集中在 canonical
+entity 的统一和更细粒度 coverage：
 
-1. **合并双去重实现**：统一 `internal/agent/execution/evidence_ledger.go` 与
-   `internal/agent/qa/tools.go:363-409` 的 `ContentHash` 语义与 identity 构造，
-   共用一套实现；并让 `conflicts` 真正被消费（当前写入后从未读取）。
-2. **放开 `investigation.bundle` 的固定三元组**（`minItems/maxItems: 3`、
-   `items:false`、`prefixItems` 固定 focus 顺序），改为可变长度 Ledger View；
-   同时消除 Join 顺序对 `ProducerNodeID` 字母序的偶然依赖。
-3. 在 QA preparation 完成 canonical entity、history ref、time range、Evidence Goal。
+1. **已完成**：统一主要证据 identity / `ContentHash` 合并语义，并让冲突进入
+   Handoff、Ledger、Trace 和拒绝策略。
+2. **已完成**：`investigation.bundle` 改为可变长度 Ledger View，显式表达
+   `unavailable_tasks`、证据冲突和 completeness。
+3. **部分完成**：QA preparation 已生成 history ref、time range 和 Evidence Goal；
    注意当前实体解析是两条互不相通的字符串抽取路径
    （`domain.RetrievalIntent.TargetEntities` 上限 8，与
    `memory.CanonicalQuestionMetadata`），需先统一为 canonical entity。
-4. 将 `investigation.request` 升级为 `task.contract`——当前该 Schema 为
-   `required:["question"]` 且 `additionalProperties:false`，必须先改 Schema 才能传入
-   实体与时间范围；保留旧 Schema 适配器。
-5. 将 Evidence Ledger 从单 Agent 机制提升为 Workflow 作用域（依赖第 1 项）。
-6. 现有三个 Investigator 继续作为三个 Capability Adapter，先不改变节点数量。
-7. Join 改为 Ledger View，而不是简单拼接三个 report。
+4. **已完成**：新增 `task.contract`，可传实体、时间范围、ConversationRefs、
+   SeedEvidence 和 Evidence Goals；保留 `investigation.request` 兼容 Schema。
+5. **已完成**：Evidence Ledger 提升到 Workflow Join 作用域。
+6. **已完成**：三个 Investigator 作为 Capability Adapter，并可按请求目标裁剪。
+7. **已完成**：Join 使用 Ledger View，不再简单拼接固定三个 report。
 
 验收：多 Agent 与 Single-Agent 使用同一 evidence identity 和预算事实；不同 query
 返回同一证据时不会重复交付；同一份证据经不同投递路径不再被判为版本冲突。
@@ -986,15 +994,21 @@ partial / failed / clarification rate
 
 ### 阶段 3：验证、冲突和自适应扩展
 
-1. 增加 Verifier、Conflict Gate 和 claim-level evidence view。`NodeGate`、
-   `NodeHumanApproval`、`NodeTransform` 与 `GateDecision{ReasonCodes, FindingIDs}`
-   均已存在，本项复用而非新建节点类型。
-2. 增加 `max_depth`、`max_rounds`、duplicate ratio 和 no-progress 停止条件。
+1. **Conflict Gate 部分完成**：`NodeDefinition.RejectEvidenceConflicts` 已在
+   delegated investigation 的 Evidence Join 启用；相同 identity 的异 hash 证据会在
+   Join 边界确定性拒绝，Synthesizer 不会执行，并记录 `evidence.rejected` 与
+   `verification.completed`。尚缺通用独立 `NodeGate` 策略、专用 Verifier 和
+   claim-level evidence view。
+2. 完善停止条件。静态 Proposal 编译已校验 `max_depth`，`max_rounds` 已进入
+   `StopPolicy` 和服务端上限，但当前固定为单轮且没有运行期扩展；仍需补 duplicate ratio、
+   no-progress，以及真正多轮执行时的 round/depth 终止判定。
 3. 按 7.2 的决策落地受限 Adaptive Expansion，且只允许在 Ledger 发现新 Goal 或冲突时
    启动。**这是本方案工作量最大的一项**：现有执行器绑定静态节点集，需在“每轮生成新
    不可变定义 + checkpoint 续跑”与“改造执行器支持可增长节点集”之间先行选定路径。
-4. 补齐 `evidence.*` Trace span 族——当前证据决策仅能通过
-   `agent.tool_admission` 与 `evidence.joined` 事件间接观测。
+4. `evidence.candidate/merged/rejected/delivered`、确定性冲突检查的
+   `verification.completed` 和统一终态 `workflow.converged` 已完成；继续补
+   goal/claim-level evidence view、专用 Verifier Trace，并把最终 claim 支持关系纳入
+   同一 trace 合同。
 
 验收：任务失败、证据冲突、无新证据和部分完成均有明确终态；不存在无限 spawn。
 
@@ -1021,9 +1035,10 @@ partial / failed / clarification rate
 
 - `internal/agent/workflow` 的确定性编排、DAG 校验、Handoff、预算、事件，以及
   checkpoint 恢复（`LoadFullRunState`/`workflowProgressFromState`/`Service.Resume`）；
-- 已存在但尚未在固定工作流中启用的机制：`CollectAvailable` + `NodeDefinition.Optional`、
-  `NodeGate`/`NodeHumanApproval`/`NodeTransform`、`GateDecision`、`NodeBudget`、
-  `Handoff.Completeness` 三态、`executionReasonCodes` 白名单；
+- 已在调查工作流启用的机制：`CollectAvailable` + `NodeDefinition.Optional`、
+  `NodeBudget`、`Handoff.Completeness` 三态和 Evidence Join 冲突拒绝；
+- 已存在但尚未用于调查图通用验证的机制：`NodeGate`、`NodeHumanApproval`、
+  `NodeTransform`、`GateDecision`；
 - Agent Definition、Schema Registry、Tool Snapshot 和权限交集；
 - Parent/Child Run 关系和统一 QA Outcome；
 - 固定 Workflow 作为 Policy fallback 和离线评估基线。
@@ -1036,12 +1051,11 @@ partial / failed / clarification rate
 - `ExecutionSuggestion{Strategy, Complexity, Confidence}` 替换为
   `ExecutionAssessment + TaskGraphProposal`；
 - `investigator.code/runtime/docs` 来源角色替换为 Capability 实现；
-- `investigation.request` 只保留兼容适配，不再作为长期输入合同；
-- `investigation.bundle` 固定三元组替换为可变长度 Ledger View；
-- `evidence.join` 从报告拼接升级为 Ledger merge + coverage calculation；
-- 固定工作流的 `FailurePolicy{Mode: FailFast}` 替换为 `CollectAvailable` 配合
-  按 Evidence Goal 分类的 `Optional` 节点标记（机制已存在，属配置变更）；
-- QA 层与执行层的两套证据去重合并为一套。
+- `investigation.request` 已只保留兼容用途，长期输入已切换为 `task.contract`；
+- `investigation.bundle` 已从固定三元组替换为可变长度 Ledger View；
+- `evidence.join` 已升级为 Ledger merge，coverage calculation 仍待 goal/claim 模型；
+- 固定工作流已使用 `CollectAvailable` 配合 Optional Investigator；
+- QA 与 Workflow 已复用 canonical evidence merge，仍需继续统一上游实体与 claim coverage。
 
 ### 不采用
 

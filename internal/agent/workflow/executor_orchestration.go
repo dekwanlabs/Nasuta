@@ -21,6 +21,70 @@ type capabilityLimiter struct {
 	tokens chan struct{}
 }
 
+type workflowConvergedTraceInput struct {
+	definition WorkflowDefinition
+}
+
+type workflowConvergedTraceOutput struct {
+	result               Result
+	completedNodeCount   int
+	unavailableNodeCount int
+	waitingHumanCount    int
+	usage                WorkflowUsage
+}
+
+var workflowConvergedTraceSpec = runtrace.Spec[
+	workflowConvergedTraceInput,
+	workflowConvergedTraceOutput,
+]{
+	Operation: "workflow.converged",
+	Node:      "workflow.converged",
+	Input: func(input workflowConvergedTraceInput) map[string]any {
+		return map[string]any{
+			"workflow_id":      input.definition.ID,
+			"workflow_version": input.definition.Version,
+			"workflow_hash":    input.definition.ContentHash,
+			"node_count":       len(input.definition.Nodes),
+		}
+	},
+	Output: func(
+		_ workflowConvergedTraceInput,
+		output workflowConvergedTraceOutput,
+		err error,
+	) map[string]any {
+		outcome, errorCode := workflowConvergenceOutcome(output, err)
+		fields := map[string]any{
+			"outcome":                outcome,
+			"completed_node_count":   output.completedNodeCount,
+			"unavailable_node_count": output.unavailableNodeCount,
+			"waiting_human_count":    output.waitingHumanCount,
+			"usage":                  output.usage,
+		}
+		if output.result.Output.Completeness != "" {
+			fields["completeness"] = output.result.Output.Completeness
+		}
+		if errorCode != "" {
+			fields["error_code"] = errorCode
+		}
+		return fields
+	},
+	Status: func(output workflowConvergedTraceOutput, err error) string {
+		outcome, _ := workflowConvergenceOutcome(output, err)
+		switch outcome {
+		case string(Complete):
+			return "completed"
+		case string(Partial), string(Unavailable):
+			return "degraded"
+		case "waiting_human":
+			return "waiting_human"
+		case "cancelled", "timed_out":
+			return "cancelled"
+		default:
+			return "failed"
+		}
+	},
+}
+
 func (orchestrator *Orchestrator) runPrepared(
 	ctx context.Context,
 	definition WorkflowDefinition,
@@ -29,6 +93,35 @@ func (orchestrator *Orchestrator) runPrepared(
 	progress WorkflowProgress,
 	observer RunObserver,
 ) (Result, error) {
+	output, err := runtrace.Invoke(
+		ctx,
+		workflowConvergedTraceSpec,
+		workflowConvergedTraceInput{definition: definition},
+		func(
+			ctx context.Context,
+			_ workflowConvergedTraceInput,
+		) (workflowConvergedTraceOutput, error) {
+			return orchestrator.executePrepared(
+				ctx,
+				definition,
+				metadata,
+				request,
+				progress,
+				observer,
+			)
+		},
+	)
+	return output.result, err
+}
+
+func (orchestrator *Orchestrator) executePrepared(
+	ctx context.Context,
+	definition WorkflowDefinition,
+	metadata graphMetadata,
+	request RunRequest,
+	progress WorkflowProgress,
+	observer RunObserver,
+) (traceOutput workflowConvergedTraceOutput, runErr error) {
 	runCtx, cancel := context.WithDeadline(ctx, progress.StartedAt.Add(definition.Budget.Timeout))
 	defer cancel()
 	outputs := cloneHandoffMap(progress.NodeOutputs)
@@ -36,26 +129,35 @@ func (orchestrator *Orchestrator) runPrepared(
 	failedOptional := cloneStringSet(progress.FailedOptional)
 	waitingHuman := cloneStringSet(progress.WaitingHuman)
 	account, err := newWorkflowBudgetAccount(definition.Budget, progress.Usage)
+	defer func() {
+		traceOutput.completedNodeCount = len(outputs)
+		traceOutput.unavailableNodeCount = len(failedOptional)
+		traceOutput.waitingHumanCount = len(waitingHuman)
+		if account != nil {
+			traceOutput.usage = account.Usage()
+		}
+	}()
 	if err != nil {
-		return Result{}, err
+		return traceOutput, err
 	}
 
 	for len(outputs)+len(failedOptional) < len(definition.Nodes) {
 		if err := runCtx.Err(); err != nil {
-			return Result{}, err
+			return traceOutput, err
 		}
 		ready := readyNodes(metadata, outputs, failedOptional, waitingHuman)
 		if len(ready) == 0 {
 			if len(waitingHuman) > 0 {
-				return Result{}, ErrHumanApprovalRequired
+				return traceOutput, ErrHumanApprovalRequired
 			}
-			return Result{}, fmt.Errorf("workflow %q cannot make progress", definition.ID)
+			return traceOutput, fmt.Errorf("workflow %q cannot make progress", definition.ID)
 		}
 		wave, err := orchestrator.dispatchWave(
-			runCtx, definition, metadata, request, progress, outputs, ready, account, observer,
+			runCtx, definition, metadata, request, progress, outputs, failedOptional,
+			ready, account, observer,
 		)
 		if err != nil {
-			return Result{}, err
+			return traceOutput, err
 		}
 		var waveErr error
 		for index, outcome := range wave {
@@ -81,7 +183,7 @@ func (orchestrator *Orchestrator) runPrepared(
 			}
 		}
 		if waveErr != nil {
-			return Result{}, waveErr
+			return traceOutput, waveErr
 		}
 	}
 	terminals := make([]Handoff, 0)
@@ -93,7 +195,7 @@ func (orchestrator *Orchestrator) runPrepared(
 		}
 	}
 	if len(terminals) == 0 {
-		return Result{}, fmt.Errorf("workflow %q produced no terminal output", definition.ID)
+		return traceOutput, fmt.Errorf("workflow %q produced no terminal output", definition.ID)
 	}
 	output := terminals[0]
 	if len(terminals) > 1 {
@@ -102,14 +204,15 @@ func (orchestrator *Orchestrator) runPrepared(
 			request.RunID,
 			NodeDefinition{ID: "workflow.output", OutputSchema: definition.OutputSchema},
 			terminals,
+			nil,
 			definition.Budget.MaxHandoffBytes,
 		)
 		if err != nil {
-			return Result{}, err
+			return traceOutput, err
 		}
 	} else {
 		if err := orchestrator.schemas.ValidateCompatibility(output.Schema, definition.OutputSchema); err != nil {
-			return Result{}, fmt.Errorf("workflow %q terminal output schema: %w", definition.ID, err)
+			return traceOutput, fmt.Errorf("workflow %q terminal output schema: %w", definition.ID, err)
 		}
 		output, err = PrepareHandoff(Handoff{
 			WorkflowRunID: request.RunID, ProducerNodeID: "workflow.output",
@@ -119,13 +222,45 @@ func (orchestrator *Orchestrator) runPrepared(
 			Completeness:      output.Completeness,
 		}, definition.Budget.MaxHandoffBytes, orchestrator.schemas)
 		if err != nil {
-			return Result{}, fmt.Errorf("workflow %q output: %w", definition.ID, err)
+			return traceOutput, fmt.Errorf("workflow %q output: %w", definition.ID, err)
 		}
 	}
-	return Result{
+	traceEvidenceDelivered(ctx, "workflow_output", output)
+	traceOutput.result = Result{
 		RunID: request.RunID, Output: output, NodeOutputs: outputs, Gates: gates,
 		Usage: account.Usage(),
-	}, nil
+	}
+	return traceOutput, nil
+}
+
+func workflowConvergenceOutcome(
+	output workflowConvergedTraceOutput,
+	err error,
+) (string, string) {
+	if err == nil {
+		switch output.result.Output.Completeness {
+		case Partial:
+			return string(Partial), ""
+		case Unavailable:
+			return string(Unavailable), ""
+		default:
+			return string(Complete), ""
+		}
+	}
+	switch {
+	case errors.Is(err, ErrHumanApprovalRequired):
+		return "waiting_human", "human_approval_required"
+	case errors.Is(err, ErrEvidenceConflict):
+		return "evidence_conflict", "evidence_conflict"
+	case errors.Is(err, ErrWorkflowBudgetExhausted):
+		return "failed", "workflow_budget_exhausted"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timed_out", "workflow_timeout"
+	case errors.Is(err, context.Canceled):
+		return "cancelled", "workflow_cancelled"
+	default:
+		return "failed", "workflow_failed"
+	}
 }
 
 func (orchestrator *Orchestrator) dispatchWave(
@@ -135,6 +270,7 @@ func (orchestrator *Orchestrator) dispatchWave(
 	request RunRequest,
 	progress WorkflowProgress,
 	outputs map[string]Handoff,
+	failedOptional map[string]struct{},
 	ready []string,
 	account *workflowBudgetAccount,
 	observer RunObserver,
@@ -176,12 +312,18 @@ func (orchestrator *Orchestrator) dispatchWave(
 						return
 					}
 					inputs := predecessorHandoffs(node.ID, metadata.predecessors, outputs, progress.Input)
+					unavailable := unavailablePredecessors(
+						node.ID,
+						metadata.predecessors,
+						failedOptional,
+					)
 					wave[index] = orchestrator.executeNode(
 						ctx,
 						definition,
 						request,
 						node,
 						inputs,
+						unavailable,
 						progress.NodeAttempts[node.ID],
 						account,
 						observer,
@@ -259,6 +401,7 @@ func (orchestrator *Orchestrator) executeNode(
 	request RunRequest,
 	node NodeDefinition,
 	inputs []Handoff,
+	unavailablePredecessors []string,
 	attemptProgress NodeAttemptProgress,
 	account *workflowBudgetAccount,
 	observer RunObserver,
@@ -287,7 +430,9 @@ func (orchestrator *Orchestrator) executeNode(
 		return nodeOutcome{err: nodeCtx.Err()}
 	}
 	baseRequest := NodeRequest{
-		WorkflowRunID: request.RunID, Node: node, Inputs: inputs, Actor: request.Actor,
+		WorkflowRunID: request.RunID, Node: node, Inputs: inputs,
+		UnavailablePredecessors: append([]string(nil), unavailablePredecessors...),
+		Actor:                   request.Actor,
 		EffectivePermissions: IntersectPermissions(
 			request.ActorPermissions, request.ScenarioPermissions,
 			definition.Permissions, node.Permissions,

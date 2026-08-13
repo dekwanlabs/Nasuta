@@ -75,9 +75,17 @@ func (executor *AgentNodeExecutor) Execute(
 	if err != nil {
 		return NodeResult{}, fmt.Errorf("agent node %q context: %w", request.Node.ID, err)
 	}
+	contextBlocks := []agentapi.ContextBlock{contextBlock}
+	if request.Node.Task != nil {
+		taskBlock, err := contextBlockFromTaskDirective(*request.Node.Task)
+		if err != nil {
+			return NodeResult{}, fmt.Errorf("agent node %q task context: %w", request.Node.ID, err)
+		}
+		contextBlocks = append(contextBlocks, taskBlock)
+	}
 	runRequest := agentapi.RunRequest{
 		RunID: runID, Agent: request.Node.Agent, DefinitionHash: definition.ContentHash,
-		Input: input.Payload, Context: []agentapi.ContextBlock{contextBlock},
+		Input: input.Payload, Context: contextBlocks,
 		Permissions: permissions,
 		ToolScope: agentapi.ToolScope{
 			AllowWrite:      scope.Has(permissions.Scopes, scope.KnowledgeWrite),

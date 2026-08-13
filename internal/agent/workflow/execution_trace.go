@@ -3,14 +3,20 @@ package workflow
 import (
 	"context"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
+const maxEvidenceTraceItems = 50
+
 type aggregateInput struct {
-	workflowRunID string
-	node          NodeDefinition
-	inputs        []Handoff
-	maxBytes      int64
+	workflowRunID           string
+	node                    NodeDefinition
+	inputs                  []Handoff
+	unavailablePredecessors []string
+	maxBytes                int64
 }
 
 var multiAgentAggregateTraceSpec = runtrace.Spec[aggregateInput, Handoff]{
@@ -25,6 +31,10 @@ var multiAgentAggregateTraceSpec = runtrace.Spec[aggregateInput, Handoff]{
 			"node_id":           input.node.ID,
 			"input_count":       len(input.inputs),
 			"producer_node_ids": producers,
+			"unavailable_predecessor_ids": append(
+				[]string(nil),
+				input.unavailablePredecessors...,
+			),
 		}
 	},
 	Output: func(_ aggregateInput, output Handoff, err error) map[string]any {
@@ -36,22 +46,210 @@ var multiAgentAggregateTraceSpec = runtrace.Spec[aggregateInput, Handoff]{
 	},
 }
 
+type evidenceTraceItem struct {
+	SourceKind  string `json:"source_kind"`
+	Target      string `json:"target"`
+	Section     string `json:"section,omitempty"`
+	Version     string `json:"version,omitempty"`
+	TimeRange   string `json:"time_range,omitempty"`
+	ContentHash string `json:"content_hash,omitempty"`
+	Origin      string `json:"origin,omitempty"`
+}
+
+type evidenceCandidateTraceInput struct {
+	nodeID string
+	inputs []Handoff
+}
+
+type evidenceCandidateTraceOutput struct {
+	items          []evidenceTraceItem
+	candidateCount int
+	omittedCount   int
+}
+
+var evidenceCandidateTraceSpec = runtrace.Spec[
+	evidenceCandidateTraceInput,
+	evidenceCandidateTraceOutput,
+]{
+	Operation: "evidence.candidate",
+	Node:      "evidence.candidate",
+	Input: func(input evidenceCandidateTraceInput) map[string]any {
+		producers := make([]string, 0, len(input.inputs))
+		for _, handoff := range input.inputs {
+			producers = append(producers, handoff.ProducerNodeID)
+		}
+		return map[string]any{
+			"node_id":           input.nodeID,
+			"producer_node_ids": producers,
+		}
+	},
+	Output: func(
+		_ evidenceCandidateTraceInput,
+		output evidenceCandidateTraceOutput,
+		_ error,
+	) map[string]any {
+		return map[string]any{
+			"candidate_count": output.candidateCount,
+			"candidates":      output.items,
+			"omitted_count":   output.omittedCount,
+		}
+	},
+	Record: func(output evidenceCandidateTraceOutput, _ error) bool {
+		return output.candidateCount > 0
+	},
+}
+
+type evidenceMergedTraceInput struct {
+	nodeID         string
+	candidateCount int
+	handoff        Handoff
+}
+
+type evidenceTraceOutput struct {
+	items         []evidenceTraceItem
+	evidenceCount int
+	conflictCount int
+}
+
+var evidenceMergedTraceSpec = runtrace.Spec[evidenceMergedTraceInput, evidenceTraceOutput]{
+	Operation: "evidence.merged",
+	Node:      "evidence.merged",
+	Input: func(input evidenceMergedTraceInput) map[string]any {
+		return map[string]any{
+			"node_id":         input.nodeID,
+			"candidate_count": input.candidateCount,
+		}
+	},
+	Output: func(_ evidenceMergedTraceInput, output evidenceTraceOutput, _ error) map[string]any {
+		return map[string]any{
+			"merged_count":  output.evidenceCount,
+			"evidence":      output.items,
+			"omitted_count": max(0, output.evidenceCount-len(output.items)),
+		}
+	},
+	Record: func(output evidenceTraceOutput, _ error) bool {
+		return output.evidenceCount > 0
+	},
+}
+
+type evidenceRejectedTraceInput struct {
+	nodeID    string
+	conflicts []agentapi.EvidenceConflict
+}
+
+var evidenceRejectedTraceSpec = runtrace.Spec[evidenceRejectedTraceInput, []map[string]any]{
+	Operation: "evidence.rejected",
+	Node:      "evidence.rejected",
+	Input: func(input evidenceRejectedTraceInput) map[string]any {
+		return map[string]any{"node_id": input.nodeID}
+	},
+	Output: func(input evidenceRejectedTraceInput, conflicts []map[string]any, _ error) map[string]any {
+		return map[string]any{
+			"conflict_count": len(input.conflicts),
+			"conflicts":      conflicts,
+			"omitted_count":  max(0, len(input.conflicts)-len(conflicts)),
+		}
+	},
+	Record: func(conflicts []map[string]any, _ error) bool {
+		return len(conflicts) > 0
+	},
+}
+
+type evidenceDeliveredTraceInput struct {
+	phase   string
+	handoff Handoff
+}
+
+var evidenceDeliveredTraceSpec = runtrace.Spec[evidenceDeliveredTraceInput, evidenceTraceOutput]{
+	Operation: "evidence.delivered",
+	Node:      "evidence.delivered",
+	Input: func(input evidenceDeliveredTraceInput) map[string]any {
+		return map[string]any{
+			"phase":            input.phase,
+			"producer_node_id": input.handoff.ProducerNodeID,
+		}
+	},
+	Output: func(input evidenceDeliveredTraceInput, output evidenceTraceOutput, _ error) map[string]any {
+		return map[string]any{
+			"evidence_count": output.evidenceCount,
+			"evidence":       output.items,
+			"conflict_count": output.conflictCount,
+			"completeness":   input.handoff.Completeness,
+			"omitted_count":  max(0, output.evidenceCount-len(output.items)),
+		}
+	},
+	Record: func(output evidenceTraceOutput, _ error) bool {
+		return output.evidenceCount > 0 || output.conflictCount > 0
+	},
+}
+
+type verificationTraceInput struct {
+	nodeID         string
+	conflicts      []agentapi.EvidenceConflict
+	rejectionError string
+}
+
+var verificationCompletedTraceSpec = runtrace.Spec[
+	verificationTraceInput,
+	[]agentapi.EvidenceConflict,
+]{
+	Operation: "verification.completed",
+	Node:      "verification.completed",
+	Input: func(input verificationTraceInput) map[string]any {
+		return map[string]any{
+			"node_id":        input.nodeID,
+			"conflict_count": len(input.conflicts),
+		}
+	},
+	Output: func(
+		input verificationTraceInput,
+		_ []agentapi.EvidenceConflict,
+		err error,
+	) map[string]any {
+		output := map[string]any{
+			"node_id":        input.nodeID,
+			"conflict_count": len(input.conflicts),
+			"decision":       "pass",
+		}
+		if len(input.conflicts) > 0 {
+			output["decision"] = "reject"
+		}
+		if input.rejectionError != "" {
+			output["error"] = input.rejectionError
+		}
+		return output
+	},
+	Record: func(_ []agentapi.EvidenceConflict, _ error) bool {
+		return true
+	},
+}
+
 func (orchestrator *Orchestrator) aggregateHandoffs(
 	ctx context.Context,
 	workflowRunID string,
 	node NodeDefinition,
 	inputs []Handoff,
+	unavailablePredecessors []string,
 	maxBytes int64,
 ) (Handoff, error) {
 	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{WorkflowNodeID: node.ID})
-	return runtrace.Invoke(
+	candidates, _ := runtrace.Invoke(
+		ctx,
+		evidenceCandidateTraceSpec,
+		evidenceCandidateTraceInput{nodeID: node.ID, inputs: inputs},
+		func(_ context.Context, input evidenceCandidateTraceInput) (evidenceCandidateTraceOutput, error) {
+			return candidateTraceOutput(input.inputs), nil
+		},
+	)
+	handoff, err := runtrace.Invoke(
 		ctx,
 		multiAgentAggregateTraceSpec,
 		aggregateInput{
-			workflowRunID: workflowRunID,
-			node:          node,
-			inputs:        inputs,
-			maxBytes:      maxBytes,
+			workflowRunID:           workflowRunID,
+			node:                    node,
+			inputs:                  inputs,
+			unavailablePredecessors: append([]string(nil), unavailablePredecessors...),
+			maxBytes:                maxBytes,
 		},
 		func(_ context.Context, input aggregateInput) (Handoff, error) {
 			return joinHandoffs(
@@ -60,9 +258,178 @@ func (orchestrator *Orchestrator) aggregateHandoffs(
 				input.node.OutputSchema,
 				input.node.JoinMode,
 				input.inputs,
+				input.unavailablePredecessors,
+				input.node.RejectEvidenceConflicts,
 				input.maxBytes,
 				orchestrator.schemas,
 			)
 		},
 	)
+	if err != nil {
+		if len(handoff.EvidenceConflicts) > 0 {
+			_, _ = runtrace.Invoke(
+				ctx,
+				evidenceRejectedTraceSpec,
+				evidenceRejectedTraceInput{
+					nodeID: node.ID, conflicts: handoff.EvidenceConflicts,
+				},
+				func(
+					_ context.Context,
+					input evidenceRejectedTraceInput,
+				) ([]map[string]any, error) {
+					return traceEvidenceConflicts(input.conflicts), nil
+				},
+			)
+			_, _ = runtrace.Invoke(
+				ctx,
+				verificationCompletedTraceSpec,
+				verificationTraceInput{
+					nodeID: node.ID, conflicts: handoff.EvidenceConflicts,
+					rejectionError: err.Error(),
+				},
+				func(
+					_ context.Context,
+					input verificationTraceInput,
+				) ([]agentapi.EvidenceConflict, error) {
+					return input.conflicts, nil
+				},
+			)
+		}
+		return Handoff{}, err
+	}
+	_, _ = runtrace.Invoke(
+		ctx,
+		evidenceMergedTraceSpec,
+		evidenceMergedTraceInput{
+			nodeID: node.ID, candidateCount: candidates.candidateCount,
+			handoff: handoff,
+		},
+		func(_ context.Context, input evidenceMergedTraceInput) (evidenceTraceOutput, error) {
+			items, count := traceEvidenceUnits(input.handoff.EvidenceUnits, "")
+			return evidenceTraceOutput{
+				items: items, evidenceCount: count,
+			}, nil
+		},
+	)
+	_, _ = runtrace.Invoke(
+		ctx,
+		evidenceRejectedTraceSpec,
+		evidenceRejectedTraceInput{
+			nodeID: node.ID, conflicts: handoff.EvidenceConflicts,
+		},
+		func(_ context.Context, input evidenceRejectedTraceInput) ([]map[string]any, error) {
+			return traceEvidenceConflicts(input.conflicts), nil
+		},
+	)
+	if node.RejectEvidenceConflicts {
+		_, _ = runtrace.Invoke(
+			ctx,
+			verificationCompletedTraceSpec,
+			verificationTraceInput{nodeID: node.ID},
+			func(
+				_ context.Context,
+				input verificationTraceInput,
+			) ([]agentapi.EvidenceConflict, error) {
+				return input.conflicts, nil
+			},
+		)
+	}
+	traceEvidenceDelivered(ctx, "aggregation_output", handoff)
+	return handoff, nil
+}
+
+func traceEvidenceDelivered(ctx context.Context, phase string, handoff Handoff) {
+	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
+		WorkflowNodeID: handoff.ProducerNodeID,
+	})
+	_, _ = runtrace.Invoke(
+		ctx,
+		evidenceDeliveredTraceSpec,
+		evidenceDeliveredTraceInput{phase: phase, handoff: handoff},
+		func(_ context.Context, input evidenceDeliveredTraceInput) (evidenceTraceOutput, error) {
+			items, count := traceEvidenceUnits(
+				input.handoff.EvidenceUnits,
+				input.handoff.ProducerNodeID,
+			)
+			return evidenceTraceOutput{
+				items: items, evidenceCount: count,
+				conflictCount: len(input.handoff.EvidenceConflicts),
+			}, nil
+		},
+	)
+}
+
+func candidateTraceOutput(inputs []Handoff) evidenceCandidateTraceOutput {
+	output := evidenceCandidateTraceOutput{}
+	for _, input := range inputs {
+		units := evidence.Expand(input.EvidenceUnits)
+		for _, unit := range units {
+			if _, ok := evidence.UnitKey(unit); !ok {
+				continue
+			}
+			output.candidateCount++
+			if len(output.items) < maxEvidenceTraceItems {
+				output.items = append(
+					output.items,
+					traceEvidenceUnit(unit, input.ProducerNodeID),
+				)
+			}
+		}
+	}
+	output.omittedCount = max(0, output.candidateCount-len(output.items))
+	return output
+}
+
+func traceEvidenceUnits(
+	units []tool.EvidenceUnit,
+	origin string,
+) ([]evidenceTraceItem, int) {
+	expanded := evidence.Expand(units)
+	items := make([]evidenceTraceItem, 0, min(len(expanded), maxEvidenceTraceItems))
+	count := 0
+	for _, unit := range expanded {
+		if _, ok := evidence.UnitKey(unit); !ok {
+			continue
+		}
+		count++
+		if len(items) < maxEvidenceTraceItems {
+			items = append(items, traceEvidenceUnit(unit, origin))
+		}
+	}
+	return items, count
+}
+
+func traceEvidenceUnit(
+	unit tool.EvidenceUnit,
+	origin string,
+) evidenceTraceItem {
+	key, _ := evidence.UnitKey(unit)
+	return evidenceTraceItem{
+		SourceKind: key.SourceKind, Target: key.Target, Section: key.Section,
+		Version: key.Version, TimeRange: key.TimeRange,
+		ContentHash: unit.ContentHash, Origin: origin,
+	}
+}
+
+func traceEvidenceConflicts(
+	conflicts []agentapi.EvidenceConflict,
+) []map[string]any {
+	items := make([]map[string]any, 0, min(len(conflicts), maxEvidenceTraceItems))
+	for _, conflict := range conflicts {
+		items = append(items, map[string]any{
+			"source_kind":     conflict.Identity.SourceKind,
+			"target":          conflict.Identity.Target,
+			"section":         conflict.Identity.Section,
+			"version":         conflict.Identity.Version,
+			"time_range":      conflict.Identity.TimeRange,
+			"current_hash":    conflict.Current.ContentHash,
+			"incoming_hash":   conflict.Incoming.ContentHash,
+			"current_origin":  conflict.CurrentOrigin,
+			"incoming_origin": conflict.IncomingOrigin,
+		})
+		if len(items) == maxEvidenceTraceItems {
+			break
+		}
+	}
+	return items
 }

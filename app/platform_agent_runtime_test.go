@@ -179,6 +179,101 @@ func TestDelegatedInvestigationWorkflowCompilesPublishedCapabilities(t *testing.
 	}
 }
 
+func TestDelegatedInvestigationWorkflowForGoalsPinsRequestedVersion(t *testing.T) {
+	const requestedVersion int64 = 14
+	settings := enabledAgentSettings()
+	schemas := agentapi.NewSchemaRegistry()
+	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	agents := catalog.New(schemas)
+	capabilities := agentapi.NewCapabilityRegistry(schemas, agents)
+	for _, version := range []int64{requestedVersion, requestedVersion + 1} {
+		definitions, err := defaultAgentDefinitions(settings, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := agents.Publish(definitions); err != nil {
+			t.Fatal(err)
+		}
+		values, err := catalog.DefaultInvestigationCapabilities(
+			definitions,
+			version,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := capabilities.Publish(values); err != nil {
+			t.Fatal(err)
+		}
+	}
+	platform := &Platform{
+		agents: agentRuntime{
+			schemas: schemas, catalog: agents, capabilities: capabilities,
+		},
+	}
+	goals := []platformagent.EvidenceGoal{
+		{ID: "core_flow", Facet: "core_flow", Required: true},
+		{ID: "entrypoint", Facet: "entrypoint", Required: true},
+	}
+	definition, err := platform.delegatedInvestigationWorkflowForGoals(
+		t.Context(),
+		requestedVersion,
+		goals,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if definition.ID == workflow.DelegatedInvestigationID ||
+		definition.Version != requestedVersion ||
+		len(definition.Nodes) != 3 {
+		t.Fatalf("request workflow = %+v", definition)
+	}
+	for _, node := range definition.Nodes {
+		if node.Kind != workflow.NodeAgent {
+			continue
+		}
+		if node.Agent.Version != requestedVersion ||
+			node.Capability.Version != requestedVersion {
+			t.Fatalf("node %q version binding = %+v", node.ID, node)
+		}
+	}
+	again, err := platform.delegatedInvestigationWorkflowForGoals(
+		t.Context(),
+		requestedVersion,
+		[]platformagent.EvidenceGoal{
+			{ID: "entrypoint", Facet: "entrypoint", Required: true},
+			{ID: "core_flow", Facet: "core_flow", Required: true},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != definition.ID || again.ContentHash != definition.ContentHash {
+		t.Fatalf(
+			"equivalent request workflows differ: %q/%q and %q/%q",
+			definition.ID,
+			definition.ContentHash,
+			again.ID,
+			again.ContentHash,
+		)
+	}
+
+	workflows := workflow.NewCatalog(schemas, agents)
+	if err := workflows.Publish([]workflow.WorkflowDefinition{definition}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := workflows.Resolve(workflow.DefinitionRef{
+		ID: definition.ID, Version: definition.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ContentHash != definition.ContentHash {
+		t.Fatalf("resolved request workflow hash = %q", resolved.ContentHash)
+	}
+}
+
 func TestDelegatedInvestigationWorkflowFallsBackWithoutCapabilityRegistry(t *testing.T) {
 	const version int64 = 15
 	settings := enabledAgentSettings()

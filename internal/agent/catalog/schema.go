@@ -195,6 +195,11 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"maxItems":50,
 						"items":{"$ref":"#/$defs/handoff"}
 					},
+					"unavailable_tasks":{
+						"type":"array",
+						"maxItems":50,
+						"items":{"$ref":"#/$defs/unavailable_task"}
+					},
 					"evidence_units":{
 						"type":"array",
 						"maxItems":200,
@@ -226,6 +231,14 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"schema":{"$ref":"#/$defs/schema_ref"},
 							"payload":{"$ref":"#/$defs/report"},
 							"completeness":{"enum":["complete","partial","unavailable"]}
+						},
+						"additionalProperties":false
+					},
+					"unavailable_task":{
+						"type":"object",
+						"required":["producer_node_id"],
+						"properties":{
+							"producer_node_id":{"type":"string","minLength":1}
 						},
 						"additionalProperties":false
 					},

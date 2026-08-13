@@ -1,11 +1,15 @@
 package workflow
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
 func TestProposalCompilerPinsCapabilitiesAndInsertsJoin(t *testing.T) {
@@ -28,6 +32,11 @@ func TestProposalCompilerPinsCapabilitiesAndInsertsJoin(t *testing.T) {
 	code := nodes["inspect.code"]
 	if code.Agent != (agentapi.DefinitionRef{ID: "proposal.code", Version: 1}) ||
 		code.Capability != (agentapi.CapabilityRef{ID: "knowledge.code.inspect", Version: 1}) ||
+		code.Task == nil ||
+		code.Task.Purpose != "Planner text must not become an agent prompt." ||
+		len(code.Task.RequiredFacets) != 1 ||
+		code.Task.RequiredFacets[0] != "implementation" ||
+		code.Task.ParallelGroup != "investigation" ||
 		code.CapabilityMaxConcurrency != 2 || !code.RestrictVisibleTools ||
 		len(code.VisibleToolIDs) != 1 || code.VisibleToolIDs[0] != "search_code" ||
 		code.Budget.MaxOutputTokens != 40 || code.Retry.MaxAttempts != 2 ||
@@ -36,6 +45,7 @@ func TestProposalCompilerPinsCapabilitiesAndInsertsJoin(t *testing.T) {
 	}
 	join := nodes["evidence.join"]
 	if join.Kind != NodeJoin ||
+		join.RejectEvidenceConflicts ||
 		join.InputSchema != (agentapi.SchemaRef{ID: "review.report", Version: 1}) ||
 		join.OutputSchema != (agentapi.SchemaRef{ID: "review.report.list", Version: 1}) {
 		t.Fatalf("compiled join = %+v", join)
@@ -56,6 +66,67 @@ func TestProposalCompilerPinsCapabilitiesAndInsertsJoin(t *testing.T) {
 	}
 	if err := NewCatalog(schemas, agents).Publish([]WorkflowDefinition{definition}); err != nil {
 		t.Fatalf("publish compiled workflow: %v", err)
+	}
+}
+
+func TestProposalCompilerTracesProposedAndAcceptedGraphWithoutPurposeText(t *testing.T) {
+	compiler, _, _, _ := proposalTestCompiler(t)
+	proposal := proposalTestGraph()
+	proposal.Tasks[0].Purpose = "planner-private-purpose"
+	var traces []domain.EvaluationTrace
+	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		traces = append(traces, event)
+	})
+	scope := runtrace.Begin(ctx)
+	ctx = runtrace.WithScope(ctx, scope)
+	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{RunID: "qa-parent"})
+	definition, err := compiler.CompileContext(
+		ctx,
+		proposal,
+		proposalTestPolicy(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope.Close()
+	if len(traces) != 2 ||
+		traces[0].Node != "task_graph.proposed" ||
+		traces[1].Node != "task_graph.accepted" {
+		t.Fatalf("task graph traces = %#v", traces)
+	}
+	if traces[0].Output["accepted"] != true ||
+		traces[1].Input["workflow_hash"] != definition.ContentHash {
+		t.Fatalf("task graph trace outputs = %#v", traces)
+	}
+	encoded, err := json.Marshal(traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("planner-private-purpose")) {
+		t.Fatalf("task graph trace leaked planner purpose: %s", encoded)
+	}
+}
+
+func TestProposalCompilerTracesRejectedGraph(t *testing.T) {
+	compiler, _, _, _ := proposalTestCompiler(t)
+	proposal := proposalTestGraph()
+	proposal.Tasks[0].Capability = "unknown.capability"
+	var traces []domain.EvaluationTrace
+	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		traces = append(traces, event)
+	})
+	scope := runtrace.Begin(ctx)
+	ctx = runtrace.WithScope(ctx, scope)
+	_, err := compiler.CompileContext(ctx, proposal, proposalTestPolicy())
+	scope.Close()
+	if err == nil {
+		t.Fatal("rejected proposal unexpectedly compiled")
+	}
+	if len(traces) != 1 ||
+		traces[0].Node != "task_graph.proposed" ||
+		traces[0].Status != "failed" ||
+		traces[0].Output["accepted"] != false {
+		t.Fatalf("rejected task graph traces = %#v", traces)
 	}
 }
 

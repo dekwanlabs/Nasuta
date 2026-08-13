@@ -63,7 +63,12 @@ func (orchestrator *Orchestrator) executeNodeAttemptUntraced(
 	switch node.Kind {
 	case NodeJoin:
 		handoff, executeErr = orchestrator.aggregateHandoffs(
-			nodeCtx, request.RunID, node, inputs, definition.Budget.MaxHandoffBytes,
+			nodeCtx,
+			request.RunID,
+			node,
+			inputs,
+			nodeRequest.UnavailablePredecessors,
+			definition.Budget.MaxHandoffBytes,
 		)
 	case NodeGate:
 		evaluator := orchestrator.gates[node.Gate.ID]

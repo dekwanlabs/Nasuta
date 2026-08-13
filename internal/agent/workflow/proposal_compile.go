@@ -25,6 +25,12 @@ func (compiler *ProposalCompiler) compile(
 				ID:      task.capability.ID,
 				Version: task.capability.Version,
 			},
+			Task: &TaskDirective{
+				Purpose:        task.spec.Purpose,
+				RequiredFacets: append([]string(nil), task.spec.RequiredFacets...),
+				InputRefs:      append([]agentapi.EvidenceRef(nil), task.spec.InputRefs...),
+				ParallelGroup:  task.spec.ParallelGroup,
+			},
 			CapabilityMaxConcurrency: task.capability.MaxConcurrency,
 			RestrictVisibleTools:     true,
 			VisibleToolIDs: append(
@@ -50,7 +56,7 @@ func (compiler *ProposalCompiler) compile(
 	}
 	joinTargets := make([]string, 0)
 	for _, task := range proposal.tasks {
-		if len(predecessors[task.spec.ID]) > 1 {
+		if proposal.joinTargets[task.spec.ID] {
 			joinTargets = append(joinTargets, task.spec.ID)
 		}
 	}
@@ -75,8 +81,9 @@ func (compiler *ProposalCompiler) compile(
 		joinIDs[target] = joinID
 		nodes = append(nodes, NodeDefinition{
 			ID: joinID, Kind: NodeJoin,
-			JoinMode:    policy.JoinMode,
-			InputSchema: policy.JoinInputSchema, OutputSchema: policy.JoinOutputSchema,
+			JoinMode:                policy.JoinMode,
+			RejectEvidenceConflicts: policy.RejectEvidenceConflicts,
+			InputSchema:             policy.JoinInputSchema, OutputSchema: policy.JoinOutputSchema,
 			Permissions: agentapi.PermissionPolicy{
 				Scopes: append([]string(nil), policy.Permissions.Scopes...),
 			},

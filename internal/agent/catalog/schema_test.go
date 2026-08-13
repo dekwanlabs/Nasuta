@@ -140,6 +140,10 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 				"handoffs":[
 					{"producer_node_id":"investigate.docs","schema":{"id":"investigation.report","version":1},"payload":{"focus":"docs","summary":"docs report","findings":[],"gaps":[]},"completeness":"partial"}
 				],
+				"unavailable_tasks":[
+					{"producer_node_id":"investigate.code"},
+					{"producer_node_id":"investigate.runtime"}
+				],
 				"evidence_units":[],
 				"evidence_conflicts":[],
 				"completeness":"partial"
@@ -169,6 +173,20 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 				],
 				"evidence_units":[],
 				"completeness":"complete"
+			}`,
+		},
+		{
+			name: "invalid unavailable task",
+			payload: `{
+				"handoffs":[
+					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"report","findings":[],"gaps":[]},"completeness":"complete"}
+				],
+				"unavailable_tasks":[
+					{"producer_node_id":"investigate.runtime","reason":"timeout"}
+				],
+				"evidence_units":[],
+				"evidence_conflicts":[],
+				"completeness":"partial"
 			}`,
 		},
 	}

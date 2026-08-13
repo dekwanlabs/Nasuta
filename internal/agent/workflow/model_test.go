@@ -207,12 +207,12 @@ func TestOrchestratorAggregatesParallelChildRunTrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 7 {
+	if len(events) != 8 {
 		t.Fatalf("events = %#v", events)
 	}
 	traceID := events[0].TraceID
 	childRuns := make(map[string]string, 2)
-	var dispatch, aggregate *domain.EvaluationTrace
+	var dispatch, aggregate, converged *domain.EvaluationTrace
 	for index := range events {
 		event := &events[index]
 		if event.Sequence != index+1 || event.TraceID == "" || event.TraceID != traceID {
@@ -231,10 +231,18 @@ func TestOrchestratorAggregatesParallelChildRunTrace(t *testing.T) {
 			dispatch = event
 		case "multi_agent_aggregate":
 			aggregate = event
+		case "workflow.converged":
+			converged = event
 		}
 	}
-	if len(childRuns) != 2 || dispatch == nil || aggregate == nil {
-		t.Fatalf("child runs=%v dispatch=%#v aggregate=%#v", childRuns, dispatch, aggregate)
+	if len(childRuns) != 2 || dispatch == nil || aggregate == nil || converged == nil {
+		t.Fatalf(
+			"child runs=%v dispatch=%#v aggregate=%#v converged=%#v",
+			childRuns,
+			dispatch,
+			aggregate,
+			converged,
+		)
 	}
 	if dispatch.RunID != "workflow_trace_parallel" || dispatch.WorkflowRunID != "workflow_trace_parallel" ||
 		dispatch.Output["dispatched"] != 2 || dispatch.Output["failed"] != 0 {
@@ -254,6 +262,14 @@ func TestOrchestratorAggregatesParallelChildRunTrace(t *testing.T) {
 		aggregate.WorkflowNodeID != "synthesize" {
 		t.Fatalf("aggregate = %#v", aggregate)
 	}
+	if converged.Status != "completed" ||
+		converged.Output["outcome"] != "complete" ||
+		converged.Output["completeness"] != Complete ||
+		converged.Output["completed_node_count"] != 3 ||
+		converged.Output["unavailable_node_count"] != 0 ||
+		converged.Output["waiting_human_count"] != 0 {
+		t.Fatalf("converged = %#v", converged)
+	}
 }
 
 func TestOrchestratorEmitsWorkflowNodeTraceFromSharedScope(t *testing.T) {
@@ -269,7 +285,7 @@ func TestOrchestratorEmitsWorkflowNodeTraceFromSharedScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 {
+	if len(events) != 2 {
 		t.Fatalf("events = %#v", events)
 	}
 	event := events[0]
@@ -279,6 +295,14 @@ func TestOrchestratorEmitsWorkflowNodeTraceFromSharedScope(t *testing.T) {
 		event.WorkflowRunID != "workflow_trace_1" || event.WorkflowNodeID != "review.a" ||
 		event.Output["workflow_run_id"] != "workflow_trace_1" || event.Output["node_id"] != "review.a" {
 		t.Fatalf("event = %#v", event)
+	}
+	converged := events[1]
+	if converged.Sequence != 2 || converged.Node != "workflow.converged" ||
+		converged.Status != "completed" ||
+		converged.Output["outcome"] != "complete" ||
+		converged.Output["completeness"] != Complete ||
+		converged.Output["completed_node_count"] != 1 {
+		t.Fatalf("converged = %#v", converged)
 	}
 }
 
@@ -297,8 +321,91 @@ func TestOrchestratorTracesWaitingHumanStatus(t *testing.T) {
 	if !errors.Is(err, ErrHumanApprovalRequired) {
 		t.Fatalf("error = %v", err)
 	}
-	if len(events) != 1 || events[0].Status != "waiting_human" || events[0].Output["node_id"] != "review.a" {
+	if len(events) != 2 ||
+		events[0].Status != "waiting_human" ||
+		events[0].Output["node_id"] != "review.a" {
 		t.Fatalf("events = %#v", events)
+	}
+	converged := events[1]
+	if converged.Node != "workflow.converged" ||
+		converged.Status != "waiting_human" ||
+		converged.Output["outcome"] != "waiting_human" ||
+		converged.Output["error_code"] != "human_approval_required" ||
+		converged.Output["completed_node_count"] != 0 ||
+		converged.Output["waiting_human_count"] != 1 {
+		t.Fatalf("converged = %#v", converged)
+	}
+}
+
+func TestOrchestratorTracesPartialAndUnavailableConvergence(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		completeness Completeness
+		wantStatus   string
+	}{
+		{name: "partial", completeness: Partial, wantStatus: "degraded"},
+		{name: "unavailable", completeness: Unavailable, wantStatus: "degraded"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var events []domain.EvaluationTrace
+			ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+				events = append(events, event)
+			})
+			orchestrator := NewOrchestrator(
+				testSchemaRegistry(t),
+				completenessOutputExecutor{completeness: test.completeness},
+				nil,
+			)
+			result, err := orchestrator.Run(ctx, singleNodeWorkflow(), RunRequest{
+				RunID: "workflow_trace_" + test.name,
+				Input: json.RawMessage(`{"subject":"x"}`),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Output.Completeness != test.completeness {
+				t.Fatalf("completeness = %q", result.Output.Completeness)
+			}
+			if len(events) != 2 {
+				t.Fatalf("events = %#v", events)
+			}
+			converged := events[1]
+			if converged.Node != "workflow.converged" ||
+				converged.Status != test.wantStatus ||
+				converged.Output["outcome"] != string(test.completeness) ||
+				converged.Output["completeness"] != test.completeness {
+				t.Fatalf("converged = %#v", converged)
+			}
+		})
+	}
+}
+
+func TestOrchestratorTracesFailedConvergence(t *testing.T) {
+	var events []domain.EvaluationTrace
+	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		events = append(events, event)
+	})
+	_, err := NewOrchestrator(
+		testSchemaRegistry(t),
+		invalidOutputExecutor{},
+		nil,
+	).Run(ctx, singleNodeWorkflow(), RunRequest{
+		RunID: "workflow_trace_failed",
+		Input: json.RawMessage(`{"subject":"x"}`),
+	})
+	if err == nil {
+		t.Fatal("expected workflow failure")
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %#v", events)
+	}
+	converged := events[1]
+	if converged.Node != "workflow.converged" ||
+		converged.Status != "failed" ||
+		converged.Output["outcome"] != "failed" ||
+		converged.Output["error_code"] != "workflow_failed" ||
+		converged.Output["completed_node_count"] != 0 {
+		t.Fatalf("converged = %#v", converged)
 	}
 }
 
@@ -386,6 +493,10 @@ func (invalidOutputExecutor) Execute(context.Context, NodeRequest) (NodeResult, 
 
 type staticOutputExecutor struct{}
 
+type completenessOutputExecutor struct {
+	completeness Completeness
+}
+
 type agentRuntimeFunc func(context.Context, agentapi.RunRequest) (agentapi.RunResult, error)
 
 func (run agentRuntimeFunc) Run(ctx context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
@@ -395,6 +506,16 @@ func (run agentRuntimeFunc) Run(ctx context.Context, request agentapi.RunRequest
 func (staticOutputExecutor) Execute(_ context.Context, request NodeRequest) (NodeResult, error) {
 	payload, _ := json.Marshal(map[string]string{"node": request.Node.ID})
 	return NodeResult{Handoff: Handoff{Payload: payload, Completeness: Complete}}, nil
+}
+
+func (executor completenessOutputExecutor) Execute(
+	_ context.Context,
+	request NodeRequest,
+) (NodeResult, error) {
+	payload, _ := json.Marshal(map[string]string{"node": request.Node.ID})
+	return NodeResult{
+		Handoff: Handoff{Payload: payload, Completeness: executor.completeness},
+	}, nil
 }
 
 func (executor *recordingExecutor) Execute(ctx context.Context, request NodeRequest) (NodeResult, error) {

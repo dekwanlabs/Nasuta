@@ -25,8 +25,13 @@ type workflowEvidenceHandoffView struct {
 	Completeness   Completeness       `json:"completeness"`
 }
 
+type workflowUnavailableTaskView struct {
+	ProducerNodeID string `json:"producer_node_id"`
+}
+
 type workflowEvidenceLedgerView struct {
 	Handoffs          []workflowEvidenceHandoffView `json:"handoffs"`
+	UnavailableTasks  []workflowUnavailableTaskView `json:"unavailable_tasks"`
 	EvidenceUnits     []tool.EvidenceUnit           `json:"evidence_units"`
 	EvidenceConflicts []agentapi.EvidenceConflict   `json:"evidence_conflicts"`
 	Completeness      Completeness                  `json:"completeness"`
@@ -35,6 +40,7 @@ type workflowEvidenceLedgerView struct {
 func joinedPayload(
 	mode JoinMode,
 	inputs []Handoff,
+	unavailablePredecessors []string,
 	evidenceUnits []tool.EvidenceUnit,
 	evidenceConflicts []agentapi.EvidenceConflict,
 	completeness Completeness,
@@ -57,6 +63,16 @@ func joinedPayload(
 				Completeness:   input.Completeness,
 			})
 		}
+		unavailableTasks := make(
+			[]workflowUnavailableTaskView,
+			0,
+			len(unavailablePredecessors),
+		)
+		for _, producerNodeID := range unavailablePredecessors {
+			unavailableTasks = append(unavailableTasks, workflowUnavailableTaskView{
+				ProducerNodeID: producerNodeID,
+			})
+		}
 		if evidenceUnits == nil {
 			evidenceUnits = []tool.EvidenceUnit{}
 		}
@@ -64,7 +80,8 @@ func joinedPayload(
 			evidenceConflicts = []agentapi.EvidenceConflict{}
 		}
 		value = workflowEvidenceLedgerView{
-			Handoffs: handoffs, EvidenceUnits: evidenceUnits,
+			Handoffs: handoffs, UnavailableTasks: unavailableTasks,
+			EvidenceUnits:     evidenceUnits,
 			EvidenceConflicts: evidenceConflicts, Completeness: completeness,
 		}
 	default:
@@ -102,6 +119,21 @@ func contextBlockFromHandoff(handoff Handoff) (agentapi.ContextBlock, error) {
 		EvidenceConflicts: cloneEvidenceConflicts(handoff.EvidenceConflicts),
 		Complete:          handoff.Completeness == Complete,
 		ContentHash:       hex.EncodeToString(sum[:]),
+	}, nil
+}
+
+func contextBlockFromTaskDirective(task TaskDirective) (agentapi.ContextBlock, error) {
+	content, err := json.Marshal(task)
+	if err != nil {
+		return agentapi.ContextBlock{}, fmt.Errorf("marshal workflow task directive: %w", err)
+	}
+	sum := sha256.Sum256(content)
+	return agentapi.ContextBlock{
+		Source:      "workflow.task",
+		Title:       "Workflow task directive",
+		Content:     string(content),
+		Complete:    true,
+		ContentHash: hex.EncodeToString(sum[:]),
 	}, nil
 }
 

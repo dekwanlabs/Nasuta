@@ -69,12 +69,14 @@ type NodeDefinition struct {
 	Kind                     NodeKind                  `json:"kind"`
 	Agent                    agentapi.DefinitionRef    `json:"agent,omitempty"`
 	Capability               agentapi.CapabilityRef    `json:"capability,omitempty"`
+	Task                     *TaskDirective            `json:"task,omitempty"`
 	CapabilityMaxConcurrency int                       `json:"capability_max_concurrency,omitempty"`
 	RestrictVisibleTools     bool                      `json:"restrict_visible_tools,omitempty"`
 	VisibleToolIDs           []string                  `json:"visible_tool_ids,omitempty"`
 	InputSchema              agentapi.SchemaRef        `json:"input_schema"`
 	OutputSchema             agentapi.SchemaRef        `json:"output_schema"`
 	JoinMode                 JoinMode                  `json:"join_mode,omitempty"`
+	RejectEvidenceConflicts  bool                      `json:"reject_evidence_conflicts,omitempty"`
 	Gate                     *GateSpec                 `json:"gate,omitempty"`
 	TransformID              string                    `json:"transform_id,omitempty"`
 	Permissions              agentapi.PermissionPolicy `json:"permissions"`
@@ -83,6 +85,14 @@ type NodeDefinition struct {
 	RetrySafe                bool                      `json:"retry_safe"`
 	Timeout                  time.Duration             `json:"timeout"`
 	Optional                 bool                      `json:"optional"`
+}
+
+// TaskDirective preserves the validated task semantics bound to an agent node.
+type TaskDirective struct {
+	Purpose        string                 `json:"purpose"`
+	RequiredFacets []string               `json:"required_facets,omitempty"`
+	InputRefs      []agentapi.EvidenceRef `json:"input_refs,omitempty"`
+	ParallelGroup  string                 `json:"parallel_group,omitempty"`
 }
 
 // RetryPolicy bounds repeated execution of a node after a classified transient failure.
@@ -594,7 +604,13 @@ func validateNode(
 		); err != nil {
 			return err
 		}
+		if err := validateTaskDirective(workflowID, node); err != nil {
+			return err
+		}
 	case NodeGate:
+		if node.Task != nil {
+			return fmt.Errorf("workflow %q non-agent node %q cannot have a task directive", workflowID, node.ID)
+		}
 		if node.Gate == nil || !canonicalID.MatchString(node.Gate.ID) || len(node.Gate.AllowedDecisions) == 0 {
 			return fmt.Errorf("workflow %q gate node %q requires a gate policy", workflowID, node.ID)
 		}
@@ -602,10 +618,16 @@ func validateNode(
 			return err
 		}
 	case NodeTransform:
+		if node.Task != nil {
+			return fmt.Errorf("workflow %q non-agent node %q cannot have a task directive", workflowID, node.ID)
+		}
 		if !canonicalID.MatchString(node.TransformID) {
 			return fmt.Errorf("workflow %q transform node %q requires a registered transform", workflowID, node.ID)
 		}
 	case NodeJoin:
+		if node.Task != nil {
+			return fmt.Errorf("workflow %q non-agent node %q cannot have a task directive", workflowID, node.ID)
+		}
 		if node.JoinMode != JoinPayloadList && node.JoinMode != JoinEvidenceView {
 			return fmt.Errorf(
 				"workflow %q join node %q mode %q is invalid",
@@ -614,9 +636,46 @@ func validateNode(
 				node.JoinMode,
 			)
 		}
+		if node.RejectEvidenceConflicts && node.JoinMode != JoinEvidenceView {
+			return fmt.Errorf(
+				"workflow %q join node %q can reject evidence conflicts only in evidence view mode",
+				workflowID,
+				node.ID,
+			)
+		}
 	case NodeHumanApproval:
+		if node.Task != nil {
+			return fmt.Errorf("workflow %q non-agent node %q cannot have a task directive", workflowID, node.ID)
+		}
 	default:
 		return fmt.Errorf("workflow %q node %q kind %q is invalid", workflowID, node.ID, node.Kind)
+	}
+	return nil
+}
+
+func validateTaskDirective(workflowID string, node NodeDefinition) error {
+	if node.Task == nil {
+		return nil
+	}
+	if strings.TrimSpace(node.Task.Purpose) == "" {
+		return fmt.Errorf("workflow %q agent node %q task purpose is required", workflowID, node.ID)
+	}
+	if err := validateCanonicalValues(
+		"node "+node.ID+" task required facet",
+		node.Task.RequiredFacets,
+	); err != nil {
+		return err
+	}
+	if node.Task.ParallelGroup != "" && !canonicalID.MatchString(node.Task.ParallelGroup) {
+		return fmt.Errorf(
+			"workflow %q agent node %q task parallel group %q is not canonical",
+			workflowID,
+			node.ID,
+			node.Task.ParallelGroup,
+		)
+	}
+	if err := validateEvidenceRefs(node.ID, node.Task.InputRefs); err != nil {
+		return err
 	}
 	return nil
 }
@@ -703,6 +762,12 @@ func cloneDefinition(definition WorkflowDefinition) WorkflowDefinition {
 		node := &definition.Nodes[index]
 		node.Permissions.Scopes = append([]string(nil), node.Permissions.Scopes...)
 		node.VisibleToolIDs = append([]string(nil), node.VisibleToolIDs...)
+		if node.Task != nil {
+			task := *node.Task
+			task.RequiredFacets = append([]string(nil), task.RequiredFacets...)
+			task.InputRefs = append([]agentapi.EvidenceRef(nil), task.InputRefs...)
+			node.Task = &task
+		}
 		if node.Gate != nil {
 			gate := *node.Gate
 			gate.AllowedDecisions = append([]string(nil), gate.AllowedDecisions...)

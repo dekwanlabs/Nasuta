@@ -3,7 +3,6 @@ package qa
 import (
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
@@ -15,7 +14,6 @@ func TestDecideExecutionRoute(t *testing.T) {
 			Reasons: []string{"requires_multiple_subproblems", "supports_parallel_investigation"},
 		},
 		Policy:            ExecutionPolicy{AllowMultiAgent: true, MinComplexity: 0.7, MinConfidence: 0.8},
-		EvidencePlan:      domain.EvidencePlan{Sources: domain.Internal},
 		WorkflowAvailable: true,
 	}
 	tests := []struct {
@@ -40,19 +38,6 @@ func TestDecideExecutionRoute(t *testing.T) {
 		{name: "write request", mutate: func(input *executionRouteInput) {
 			input.AllowWrite = true
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "write_requested"},
-		{name: "mixed evidence", mutate: func(input *executionRouteInput) {
-			input.EvidencePlan.Sources = domain.Internal | domain.Web
-		}, want: retrieval.ExecutionSingleAgent, wantReason: "evidence_not_internal_only"},
-		{name: "temporal tool", mutate: func(input *executionRouteInput) {
-			input.ToolCandidates = []retrieval.ToolRouteCandidate{{ID: "logs", Temporal: true}}
-			input.RoutedToolIDs = []string{"logs"}
-		}, want: retrieval.ExecutionSingleAgent, wantReason: "runtime_evidence_required"},
-		{name: "time resolution failed", mutate: func(input *executionRouteInput) {
-			input.TimeResolutionFailed = true
-		}, want: retrieval.ExecutionSingleAgent, wantReason: "time_resolution_failed"},
-		{name: "history dependency", mutate: func(input *executionRouteInput) {
-			input.History.NeedsPriorEvidence = true
-		}, want: retrieval.ExecutionSingleAgent, wantReason: "history_dependency_required"},
 		{name: "workflow unavailable", mutate: func(input *executionRouteInput) {
 			input.WorkflowAvailable = false
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "workflow_unavailable"},
@@ -79,8 +64,7 @@ func TestExecutionRouteTraceContract(t *testing.T) {
 			Strategy: retrieval.ExecutionMultiAgent, Complexity: 0.9, Confidence: 0.9,
 			Reasons: []string{"supports_parallel_investigation"},
 		},
-		Policy:       ExecutionPolicy{AllowMultiAgent: true, MinComplexity: 0.7, MinConfidence: 0.8},
-		EvidencePlan: domain.EvidencePlan{Sources: domain.Internal},
+		Policy: ExecutionPolicy{AllowMultiAgent: true, MinComplexity: 0.7, MinConfidence: 0.8},
 	})
 	if decision.DowngradeReason != "workflow_unavailable" {
 		t.Fatalf("decision = %+v", decision)
@@ -89,7 +73,7 @@ func TestExecutionRouteTraceContract(t *testing.T) {
 	if event.Output["proposed_strategy"] != retrieval.ExecutionMultiAgent ||
 		event.Output["effective_strategy"] != retrieval.ExecutionSingleAgent ||
 		event.Output["downgrade_reason"] != "workflow_unavailable" ||
-		event.Output["internal_only"] != true || event.Output["read_only"] != true {
+		event.Output["workflow_available"] != false || event.Output["read_only"] != true {
 		t.Fatalf("output = %#v", event.Output)
 	}
 }

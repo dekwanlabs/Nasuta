@@ -199,6 +199,19 @@ func TestDefaultInvestigationCapabilitiesPinAgentContracts(t *testing.T) {
 		"knowledge.docs.verify":   "investigator.docs",
 		"evidence.synthesize":     "synthesizer",
 	}
+	wantFacets := map[string][]string{
+		"knowledge.code.inspect": {
+			"implementation", "entrypoint", "core_flow", "data_and_state",
+		},
+		"knowledge.service.trace": {
+			"service.topology", "system_boundary", "external_dependency",
+			"runtime_and_operations",
+		},
+		"knowledge.docs.verify": {
+			"documentation", "business_domain",
+		},
+		"evidence.synthesize": nil,
+	}
 	byAgent := make(map[string]agentapi.Definition, len(definitions))
 	for _, definition := range definitions {
 		byAgent[definition.ID] = definition
@@ -219,7 +232,8 @@ func TestDefaultInvestigationCapabilitiesPinAgentContracts(t *testing.T) {
 		definition := byAgent[agentID]
 		if capability.InputSchema != definition.InputSchema ||
 			capability.OutputSchema != definition.OutputSchema ||
-			!slices.Equal(capability.ToolIDs, definition.Tools.VisibleToolIDs) {
+			!slices.Equal(capability.ToolIDs, definition.Tools.VisibleToolIDs) ||
+			!slices.Equal(capability.InputFacets, wantFacets[capability.ID]) {
 			t.Fatalf(
 				"capability %q does not match agent %q: %+v / %+v",
 				capability.ID,

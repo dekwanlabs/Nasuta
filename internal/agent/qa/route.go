@@ -54,7 +54,7 @@ var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecisi
 
 func (svc *QA) routeQAExecution(prepared *qaPreparation) {
 	planning := prepared.planning
-	decision, effectiveDecision := planning.Decision, planning.Effective
+	decision := planning.Decision
 	if decision.Origin == domain.Model &&
 		decision.Plan.Direct() && decision.Confidence < svc.routerConfidence {
 		log.WarnfCtx(prepared.ctx, "[qa] evidence planner direct confidence %.2f below %.2f; using internal fallback",

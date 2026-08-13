@@ -39,6 +39,14 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 	}
 	node := singleNodeWorkflow().Nodes[0]
 	node.Budget.MaxToolCalls = 4
+	node.Task = &TaskDirective{
+		Purpose:        "Review the implementation evidence.",
+		RequiredFacets: []string{"implementation"},
+		InputRefs: []agentapi.EvidenceRef{{
+			SourceKind: "code", Target: "repo/file.go", Section: "implementation",
+		}},
+		ParallelGroup: "review",
+	}
 	result, err := executor.Execute(t.Context(), NodeRequest{
 		WorkflowRunID: "workflow_run_1", Node: node, Inputs: []Handoff{input},
 		Actor: agentapi.Actor{UserID: 7, TenantID: "tenant-a"},
@@ -63,6 +71,24 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 		runtime.request.Permissions.Scopes[0] != "knowledge.read" ||
 		runtime.request.ToolScope.AllowWrite {
 		t.Fatalf("effective runtime permissions = %+v", runtime.request)
+	}
+	if len(runtime.request.Context) != 2 ||
+		runtime.request.Context[0].Source != "workflow.handoff" ||
+		runtime.request.Context[1].Source != "workflow.task" ||
+		runtime.request.Context[1].ContentHash == "" {
+		t.Fatalf("runtime context = %+v", runtime.request.Context)
+	}
+	var directive TaskDirective
+	if err := json.Unmarshal([]byte(runtime.request.Context[1].Content), &directive); err != nil {
+		t.Fatalf("decode task directive: %v", err)
+	}
+	if directive.Purpose != node.Task.Purpose ||
+		len(directive.RequiredFacets) != 1 ||
+		directive.RequiredFacets[0] != "implementation" ||
+		len(directive.InputRefs) != 1 ||
+		directive.InputRefs[0].Target != "repo/file.go" ||
+		directive.ParallelGroup != "review" {
+		t.Fatalf("task directive = %+v", directive)
 	}
 	if len(result.Handoff.References) != 1 || result.Handoff.References[0].Target != "repo/file.go" {
 		t.Fatalf("handoff references = %+v", result.Handoff.References)
