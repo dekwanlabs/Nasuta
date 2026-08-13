@@ -24,12 +24,26 @@ func (p *Platform) buildQARuntime(
 	snapshot.VCSExcludeProjects = append([]string(nil), settings.VCSExcludeProjects...)
 	snapshot.CodingEnabledProviders = append([]string(nil), settings.CodingEnabledProviders...)
 	writeAvailable := p.incident.manager != nil
+	investigationRunner := platformQAInvestigationRunner{platform: p}
 	if !snapshot.LLMEnabled() {
-		return dashboard.QARuntime{
-			RunStore: p.qa.runs, Sessions: p.qa.sessions,
-			History: p.history, Settings: &snapshot,
+		scenarios := agent.NewScenarioRuntime(p.qa.runs)
+		runtime := dashboard.QARuntime{
+			Hub: scenarios.Hub(), RunStore: p.qa.runs,
+			Sessions: p.qa.sessions,
+			History:  p.history, Settings: &snapshot,
 			WriteAvailable: writeAvailable,
-		}, nil, nil, nil
+		}
+		if p.qa.runs != nil && p.flow.service != nil {
+			coordinator := agent.NewInvestigationCoordinator(
+				investigationRunner,
+				scenarios,
+				p.qa.runs,
+				p.qa.sessions,
+			)
+			runtime.InvestigationCanceller = coordinator
+			runtime.InvestigationReconciler = coordinator
+		}
+		return runtime, nil, nil, nil
 	}
 	if err := snapshot.ValidateAgentSettings(); err != nil {
 		return dashboard.QARuntime{}, nil, nil, err
@@ -56,9 +70,15 @@ func (p *Platform) buildQARuntime(
 		return dashboard.QARuntime{}, nil, nil, fmt.Errorf("configure definition runtime: %w", err)
 	}
 	models := agent.NewQAModels(&snapshot)
-	investigationRunner := platformQAInvestigationRunner{
-		platform: p,
-		events:   definitionRuntime,
+	investigationRunner.events = definitionRuntime
+	var coordinator *agent.InvestigationCoordinator
+	if p.qa.runs != nil && p.flow.service != nil {
+		coordinator = agent.NewInvestigationCoordinator(
+			investigationRunner,
+			definitionRuntime,
+			p.qa.runs,
+			p.qa.sessions,
+		)
 	}
 	qa := agent.NewQA(agent.QADeps{
 		Tools: p.tools, Cfg: p.cfg, Platform: &snapshot,
@@ -72,15 +92,22 @@ func (p *Platform) buildQARuntime(
 		PhaseEmitter:      definitionRuntime,
 		Investigation:     investigationRunner,
 		ScenarioLifecycle: definitionRuntime,
+		Coordinator:       coordinator,
 		ExecutionEvents:   definitionRuntime,
 		WriteAvailable:    writeAvailable,
 	})
-	return dashboard.QARuntime{
-		QA: qa, RunStore: p.qa.runs, Sessions: p.qa.sessions,
-		History: p.history, Settings: &snapshot,
+	runtime := dashboard.QARuntime{
+		QA: qa, RunStore: p.qa.runs,
+		Sessions: p.qa.sessions,
+		History:  p.history, Settings: &snapshot,
 		WriteAvailable: writeAvailable, Hub: definitionRuntime.Hub(),
 		CompactionLLM: models.Primary(),
-	}, definitions, definitionRuntime, nil
+	}
+	if coordinator != nil {
+		runtime.InvestigationCanceller = coordinator
+		runtime.InvestigationReconciler = coordinator
+	}
+	return runtime, definitions, definitionRuntime, nil
 }
 
 func defaultAgentDefinitions(
@@ -126,9 +153,24 @@ func (p *Platform) reloadQARuntime(graph *codegraph.DB) error {
 		if err := p.agents.catalog.Publish(definitions); err != nil {
 			return fmt.Errorf("publish agent definitions: %w", err)
 		}
-		workflowDefinition, err := workflow.DefaultDelegatedInvestigation(
+		capabilities, err := catalog.DefaultInvestigationCapabilities(
+			definitions,
+			version,
+		)
+		if err != nil {
+			return fmt.Errorf("prepare investigation capabilities: %w", err)
+		}
+		if err := p.agents.capabilities.Publish(capabilities); err != nil {
+			return fmt.Errorf("publish investigation capabilities: %w", err)
+		}
+		investigationBudgets, err := delegatedInvestigationBudgetPolicy(definitions)
+		if err != nil {
+			return fmt.Errorf("prepare delegated investigation budgets: %w", err)
+		}
+		workflowDefinition, err := p.delegatedInvestigationWorkflow(
 			version,
 			time.Duration(candidate.Settings.AgentTimeout),
+			investigationBudgets,
 		)
 		if err != nil {
 			return fmt.Errorf("prepare delegated investigation workflow: %w", err)
@@ -158,6 +200,56 @@ func (p *Platform) reloadQARuntime(graph *codegraph.DB) error {
 		p.agents.version, candidate.Settings.LLMModel,
 		time.Duration(candidate.Settings.AgentTimeout), candidate.Settings.AgentMaxSteps)
 	return nil
+}
+
+func (p *Platform) delegatedInvestigationWorkflow(
+	version int64,
+	nodeTimeout time.Duration,
+	budgets workflow.DelegatedInvestigationBudgetPolicy,
+) (workflow.WorkflowDefinition, error) {
+	fallback, err := workflow.DefaultDelegatedInvestigation(
+		version,
+		nodeTimeout,
+		budgets,
+	)
+	if err != nil {
+		return workflow.WorkflowDefinition{}, err
+	}
+	policy, err := workflow.DelegatedInvestigationCompilationPolicy(
+		version,
+		nodeTimeout,
+		budgets,
+	)
+	if err != nil {
+		log.Warnf(
+			"[workflow] delegated investigation proposal policy unavailable; using fixed fallback: %v",
+			err,
+		)
+		return fallback, nil
+	}
+	compiler, err := workflow.NewProposalCompiler(
+		p.agents.schemas,
+		p.agents.capabilities,
+	)
+	if err != nil {
+		log.Warnf(
+			"[workflow] delegated investigation proposal compiler unavailable; using fixed fallback: %v",
+			err,
+		)
+		return fallback, nil
+	}
+	compiled, err := compiler.Compile(
+		workflow.DefaultDelegatedInvestigationProposal(),
+		policy,
+	)
+	if err != nil {
+		log.Warnf(
+			"[workflow] delegated investigation proposal rejected; using fixed fallback: %v",
+			err,
+		)
+		return fallback, nil
+	}
+	return compiled, nil
 }
 
 func (p *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime) error {

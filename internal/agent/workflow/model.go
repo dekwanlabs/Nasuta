@@ -11,7 +11,9 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 var canonicalID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
@@ -24,6 +26,13 @@ const (
 	NodeHumanApproval NodeKind = "human_approval"
 	NodeJoin          NodeKind = "join"
 	NodeTransform     NodeKind = "transform"
+)
+
+type JoinMode string
+
+const (
+	JoinPayloadList  JoinMode = ""
+	JoinEvidenceView JoinMode = "evidence_view"
 )
 
 type FailureMode string
@@ -56,19 +65,24 @@ type WorkflowDefinition struct {
 }
 
 type NodeDefinition struct {
-	ID           string                    `json:"id"`
-	Kind         NodeKind                  `json:"kind"`
-	Agent        agentapi.DefinitionRef    `json:"agent,omitempty"`
-	InputSchema  agentapi.SchemaRef        `json:"input_schema"`
-	OutputSchema agentapi.SchemaRef        `json:"output_schema"`
-	Gate         *GateSpec                 `json:"gate,omitempty"`
-	TransformID  string                    `json:"transform_id,omitempty"`
-	Permissions  agentapi.PermissionPolicy `json:"permissions"`
-	Budget       NodeBudget                `json:"budget"`
-	Retry        RetryPolicy               `json:"retry"`
-	RetrySafe    bool                      `json:"retry_safe"`
-	Timeout      time.Duration             `json:"timeout"`
-	Optional     bool                      `json:"optional"`
+	ID                       string                    `json:"id"`
+	Kind                     NodeKind                  `json:"kind"`
+	Agent                    agentapi.DefinitionRef    `json:"agent,omitempty"`
+	Capability               agentapi.CapabilityRef    `json:"capability,omitempty"`
+	CapabilityMaxConcurrency int                       `json:"capability_max_concurrency,omitempty"`
+	RestrictVisibleTools     bool                      `json:"restrict_visible_tools,omitempty"`
+	VisibleToolIDs           []string                  `json:"visible_tool_ids,omitempty"`
+	InputSchema              agentapi.SchemaRef        `json:"input_schema"`
+	OutputSchema             agentapi.SchemaRef        `json:"output_schema"`
+	JoinMode                 JoinMode                  `json:"join_mode,omitempty"`
+	Gate                     *GateSpec                 `json:"gate,omitempty"`
+	TransformID              string                    `json:"transform_id,omitempty"`
+	Permissions              agentapi.PermissionPolicy `json:"permissions"`
+	Budget                   NodeBudget                `json:"budget"`
+	Retry                    RetryPolicy               `json:"retry"`
+	RetrySafe                bool                      `json:"retry_safe"`
+	Timeout                  time.Duration             `json:"timeout"`
+	Optional                 bool                      `json:"optional"`
 }
 
 // RetryPolicy bounds repeated execution of a node after a classified transient failure.
@@ -125,16 +139,18 @@ type WorkflowFailurePolicy struct {
 }
 
 type Handoff struct {
-	ID             string               `json:"id"`
-	WorkflowRunID  string               `json:"workflow_run_id"`
-	ProducerNodeID string               `json:"producer_node_id"`
-	ProducerRunID  string               `json:"producer_run_id,omitempty"`
-	Schema         agentapi.SchemaRef   `json:"schema"`
-	Payload        json.RawMessage      `json:"payload"`
-	References     []agentapi.Reference `json:"references,omitempty"`
-	Completeness   Completeness         `json:"completeness"`
-	ContentHash    string               `json:"content_hash"`
-	CreatedAt      time.Time            `json:"created_at"`
+	ID                string                      `json:"id"`
+	WorkflowRunID     string                      `json:"workflow_run_id"`
+	ProducerNodeID    string                      `json:"producer_node_id"`
+	ProducerRunID     string                      `json:"producer_run_id,omitempty"`
+	Schema            agentapi.SchemaRef          `json:"schema"`
+	Payload           json.RawMessage             `json:"payload"`
+	References        []agentapi.Reference        `json:"references,omitempty"`
+	EvidenceUnits     []tool.EvidenceUnit         `json:"evidence_units,omitempty"`
+	EvidenceConflicts []agentapi.EvidenceConflict `json:"evidence_conflicts,omitempty"`
+	Completeness      Completeness                `json:"completeness"`
+	ContentHash       string                      `json:"content_hash"`
+	CreatedAt         time.Time                   `json:"created_at"`
 }
 
 type GateDecision struct {
@@ -277,8 +293,6 @@ func validateNodeBudget(
 		return fmt.Errorf("workflow %q agent node %q output token budget is required", workflowID, node.ID)
 	case workflowBudget.MaxTotalTokens > 0 && budget.MaxTotalTokens <= 0:
 		return fmt.Errorf("workflow %q agent node %q total token budget is required", workflowID, node.ID)
-	case workflowBudget.MaxToolCalls > 0 && budget.MaxToolCalls <= 0:
-		return fmt.Errorf("workflow %q agent node %q tool call budget is required", workflowID, node.ID)
 	case workflowBudget.MaxCostMicros > 0 && budget.MaxCostMicros <= 0:
 		return fmt.Errorf("workflow %q agent node %q cost budget is required", workflowID, node.ID)
 	}
@@ -314,6 +328,8 @@ func PrepareHandoff(
 	prepared := handoff
 	prepared.Payload = append(json.RawMessage(nil), handoff.Payload...)
 	prepared.References = append([]agentapi.Reference(nil), handoff.References...)
+	prepared.EvidenceUnits = evidence.CloneUnits(handoff.EvidenceUnits)
+	prepared.EvidenceConflicts = cloneEvidenceConflicts(handoff.EvidenceConflicts)
 	if strings.TrimSpace(prepared.WorkflowRunID) == "" || !canonicalID.MatchString(prepared.ProducerNodeID) {
 		return Handoff{}, fmt.Errorf("handoff workflow run and producer node are required")
 	}
@@ -424,7 +440,6 @@ func graph(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (gra
 		successors[edge.From] = append(successors[edge.From], edge.To)
 	}
 	for id := range nodes {
-		sort.Strings(predecessors[id])
 		sort.Strings(successors[id])
 	}
 	entries := make([]string, 0)
@@ -539,10 +554,45 @@ func validateNode(
 	if _, err := normalizeRetryPolicy(node.Retry); err != nil {
 		return fmt.Errorf("workflow %q node %q retry policy: %w", workflowID, node.ID, err)
 	}
+	if node.Kind != NodeJoin && node.JoinMode != JoinPayloadList {
+		return fmt.Errorf(
+			"workflow %q node %q kind %q cannot use join mode %q",
+			workflowID,
+			node.ID,
+			node.Kind,
+			node.JoinMode,
+		)
+	}
 	switch node.Kind {
 	case NodeAgent:
 		if !canonicalID.MatchString(node.Agent.ID) || node.Agent.Version <= 0 {
 			return fmt.Errorf("workflow %q agent node %q requires an exact agent definition", workflowID, node.ID)
+		}
+		if node.Capability.ID != "" {
+			if !canonicalID.MatchString(node.Capability.ID) ||
+				node.Capability.Version <= 0 ||
+				node.CapabilityMaxConcurrency <= 0 {
+				return fmt.Errorf(
+					"workflow %q agent node %q requires an exact capability binding",
+					workflowID,
+					node.ID,
+				)
+			}
+			if !node.RestrictVisibleTools {
+				return fmt.Errorf(
+					"workflow %q capability node %q must restrict visible tools",
+					workflowID,
+					node.ID,
+				)
+			}
+		} else if node.Capability.Version != 0 || node.CapabilityMaxConcurrency != 0 {
+			return fmt.Errorf("workflow %q agent node %q capability binding is incomplete", workflowID, node.ID)
+		}
+		if err := validateCanonicalValues(
+			"node "+node.ID+" visible tool",
+			node.VisibleToolIDs,
+		); err != nil {
+			return err
 		}
 	case NodeGate:
 		if node.Gate == nil || !canonicalID.MatchString(node.Gate.ID) || len(node.Gate.AllowedDecisions) == 0 {
@@ -555,7 +605,16 @@ func validateNode(
 		if !canonicalID.MatchString(node.TransformID) {
 			return fmt.Errorf("workflow %q transform node %q requires a registered transform", workflowID, node.ID)
 		}
-	case NodeHumanApproval, NodeJoin:
+	case NodeJoin:
+		if node.JoinMode != JoinPayloadList && node.JoinMode != JoinEvidenceView {
+			return fmt.Errorf(
+				"workflow %q join node %q mode %q is invalid",
+				workflowID,
+				node.ID,
+				node.JoinMode,
+			)
+		}
+	case NodeHumanApproval:
 	default:
 		return fmt.Errorf("workflow %q node %q kind %q is invalid", workflowID, node.ID, node.Kind)
 	}
@@ -643,6 +702,7 @@ func cloneDefinition(definition WorkflowDefinition) WorkflowDefinition {
 	for index := range definition.Nodes {
 		node := &definition.Nodes[index]
 		node.Permissions.Scopes = append([]string(nil), node.Permissions.Scopes...)
+		node.VisibleToolIDs = append([]string(nil), node.VisibleToolIDs...)
 		if node.Gate != nil {
 			gate := *node.Gate
 			gate.AllowedDecisions = append([]string(nil), gate.AllowedDecisions...)

@@ -15,6 +15,8 @@ import (
 )
 
 const (
+	// ScenarioID identifies persisted Feature Review workflow runs.
+	ScenarioID         = "feature.review"
 	RequestSchemaID    = "feature.review.request"
 	ReportSchemaID     = "feature.review.report"
 	ReportListSchemaID = "feature.review.report_list"

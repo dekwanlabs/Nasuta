@@ -86,6 +86,44 @@ func TestCatalogRejectsNodePermissionsOutsideAgentDefinition(t *testing.T) {
 	}
 }
 
+func TestCatalogValidatesToolBudgetAgainstAgentCapability(t *testing.T) {
+	t.Run("tool capable agent requires reservation", func(t *testing.T) {
+		definition := singleNodeWorkflow()
+		definition.Budget.MaxToolCalls = 2
+		catalog := NewCatalog(testSchemaRegistry(t), testAgentDefinitions(t))
+		err := catalog.Publish([]WorkflowDefinition{definition})
+		if err == nil || !strings.Contains(err.Error(), "tool budget is required") {
+			t.Fatalf("Publish error = %v, want tool budget rejection", err)
+		}
+	})
+
+	t.Run("tool disabled agent requires zero reservation", func(t *testing.T) {
+		definition := singleNodeWorkflow()
+		definition.Budget.MaxToolCalls = 2
+		definition.Nodes[0].Budget.MaxToolCalls = 2
+		agents := testAgentDefinitions(t)
+		ref := definition.Nodes[0].Agent
+		agentDefinition := agents.definitions[ref]
+		agentDefinition.ContentHash = ""
+		agentDefinition.Tools = agentapi.ToolPolicy{RestrictVisible: true}
+		prepared, err := agentapi.Prepare(agentDefinition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		agents.definitions[ref] = prepared
+		catalog := NewCatalog(testSchemaRegistry(t), agents)
+		err = catalog.Publish([]WorkflowDefinition{definition})
+		if err == nil || !strings.Contains(err.Error(), "tool budget must be zero") {
+			t.Fatalf("Publish error = %v, want zero tool budget rejection", err)
+		}
+
+		definition.Nodes[0].Budget.MaxToolCalls = 0
+		if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+			t.Fatalf("Publish zero-tool workflow: %v", err)
+		}
+	})
+}
+
 func TestCatalogRequiresPinnedModelPricesForCostBudget(t *testing.T) {
 	definition := singleNodeWorkflow()
 	definition.Budget.MaxCostMicros = 100

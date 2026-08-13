@@ -285,7 +285,21 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 				state.seenTools,
 			)
 			if !execution.Failed {
-				state.evidenceLedger.add(execution.EvidenceUnits, "tool")
+				conflicts := state.evidenceLedger.add(execution.EvidenceUnits, "tool")
+				if len(conflicts) > 0 {
+					notices, err := marshalEvidenceConflictNotices(conflicts)
+					if err != nil {
+						state.result.Err = fmt.Errorf(
+							"prepare evidence conflict notice for tool %q: %w",
+							executionCall.Function.Name,
+							err,
+						)
+						return outcome
+					}
+					execution.Notices = append(execution.Notices, notices...)
+					execution.Coverage.Complete = false
+					execution.Coverage.Partial = true
+				}
 			}
 		}
 		execution = agent.prepareToolDelivery(

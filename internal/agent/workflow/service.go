@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 const (
@@ -22,6 +23,7 @@ type ExecuteRequest struct {
 	ParentRunID         string
 	Workflow            DefinitionRef
 	Input               json.RawMessage
+	SeedEvidence        []tool.EvidenceUnit
 	Actor               agentapi.Actor
 	ActorPermissions    agentapi.PermissionPolicy
 	Scenario            string
@@ -29,11 +31,16 @@ type ExecuteRequest struct {
 }
 
 type StartRequest struct {
-	RunID    string
-	Workflow DefinitionRef
-	Input    json.RawMessage
-	Actor    agentapi.Actor
-	Admin    bool
+	RunID               string
+	ParentRunID         string
+	Workflow            DefinitionRef
+	Input               json.RawMessage
+	SeedEvidence        []tool.EvidenceUnit
+	Actor               agentapi.Actor
+	ActorPermissions    agentapi.PermissionPolicy
+	Scenario            string
+	ScenarioPermissions agentapi.PermissionPolicy
+	Admin               bool
 }
 
 type ApprovalRequest struct {
@@ -80,6 +87,7 @@ type workflowPersistence interface {
 	FailNode(context.Context, string, string, int, string, RunStatus, string, WorkflowUsage, time.Time) error
 	FinishWorkflow(context.Context, string, RunStatus, string, *Handoff, time.Time) error
 	LoadFullRunState(context.Context, string) (*WorkflowRunState, error)
+	LoadTerminalResult(context.Context, string) (TerminalResult, error)
 	GetRun(context.Context, string) (*WorkflowRunRecord, error)
 	ListNodeRuns(context.Context, string, NodeRunCursor, int) ([]NodeRunRecord, error)
 	ListEvents(context.Context, string, int64, int) ([]Event, error)
@@ -94,6 +102,11 @@ type resumeCall struct {
 	done   chan struct{}
 	result ResumeResult
 	err    error
+}
+
+type activeRun struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // RunEventReader scopes repeated event reads to one authorized Run.
@@ -125,7 +138,7 @@ type Service struct {
 	resumes  map[string]*resumeCall
 
 	activeMu sync.Mutex
-	active   map[string]context.CancelFunc
+	active   map[string]*activeRun
 	activeWG sync.WaitGroup
 	closed   bool
 }
@@ -144,7 +157,7 @@ func NewService(
 	return &Service{
 		catalog: catalog, store: store, orchestrator: orchestrator,
 		resumes: make(map[string]*resumeCall),
-		active:  make(map[string]context.CancelFunc),
+		active:  make(map[string]*activeRun),
 	}, nil
 }
 

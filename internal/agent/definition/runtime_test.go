@@ -579,18 +579,25 @@ func TestDefinitionRuntimeManagesScenarioParentLifecycle(t *testing.T) {
 
 	start := ScenarioRunStart{
 		RunID: "qa-parent-1", ParentRunID: "outer-parent", UserID: 42,
-		SessionID: "session-1", Question: "trace dependencies", Mode: "multi_agent",
+		WorkflowRunID: "workflow-1", SessionID: "session-1",
+		Question: "trace dependencies", Mode: "multi_agent",
 	}
 	mock.ExpectExec("INSERT INTO agent_runs").WithArgs(
 		start.RunID, RunKindQAParent, start.UserID, start.SessionID,
 		"", int64(0), "", []byte(`{}`), "", int64(0), int64(0),
-		start.ParentRunID, "", "", start.Question, RunStatusRunning, "",
+		start.ParentRunID, start.WorkflowRunID, "", start.Question, RunStatusRunning, "",
 		start.Mode, 0, 0, 0, sqlmock.AnyArg(),
 	).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE agent_runs").WithArgs(
 		RunStatusDone, "", 0, 18, EvidenceComplete, false, 2, 0, 0, 0, 0,
-		sqlmock.AnyArg(), start.RunID, RunStatusRunning, RunStatusPaused,
+		sqlmock.AnyArg(), start.RunID, RunKindQAParent, RunStatusRunning, RunStatusPaused,
 	).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO runtime_events").WithArgs(
+		"qa_parent", start.RunID, int64(1), "run_finished", "",
+		string(RunStatusDone), sqlmock.AnyArg(), sqlmock.AnyArg(),
+	).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
 	definition := testQADefinition(t, nil)
 	runtime := newTestDefinitionRuntime(
@@ -617,15 +624,101 @@ func TestDefinitionRuntimeManagesScenarioParentLifecycle(t *testing.T) {
 		Status: RunStatusDone, TokenUsed: 18, HitCount: 2,
 		Evidence: EvidenceMetrics{Status: EvidenceComplete, ResultCount: 2},
 	}
-	if err := managed.Finish(outcome); err != nil {
-		t.Fatalf("Finish: %v", err)
-	}
-	if err := managed.Finish(outcome); err == nil || !strings.Contains(err.Error(), "already finished") {
-		t.Fatalf("second Finish error = %v", err)
+	managed.Release()
+	managed.Release()
+	if err := runtime.CompleteScenario(t.Context(), start.RunID, outcome); err != nil {
+		t.Fatalf("CompleteScenario: %v", err)
 	}
 	terminal := waitForTerminal(t, events)
 	if terminal.RunID != start.RunID || terminal.Status != RunStatusDone || terminal.TokenUsed != 18 {
 		t.Fatalf("terminal = %+v", terminal)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDefinitionRuntimeAcceptsMatchingScenarioTerminalReplay(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	runID := "qa-parent-replay"
+	outcome := RunOutcome{
+		Status:   RunStatusDone,
+		Answer:   "caller answer",
+		Evidence: EvidenceMetrics{Status: EvidenceComplete},
+	}
+	persisted := RunTerminal{
+		RunID: runID, Status: RunStatusDone, Answer: "persisted answer",
+		ErrorCode: "persisted_code", TokenUsed: 23,
+		Evidence: EvidenceMetrics{Status: EvidenceComplete, ResultCount: 2},
+	}
+	detail, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE agent_runs").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT r.status,e.detail_json").
+		WithArgs("qa_parent", int64(1), "run_finished", runID, RunKindQAParent).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "detail_json"}).
+			AddRow(RunStatusDone, detail))
+	mock.ExpectRollback()
+
+	definition := testQADefinition(t, nil)
+	runtime := newTestDefinitionRuntime(
+		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), bindRunStore(db),
+	)
+	events := runtime.Hub().Subscribe(runID)
+	if err := runtime.CompleteScenario(t.Context(), runID, outcome); err != nil {
+		t.Fatalf("CompleteScenario replay: %v", err)
+	}
+	if terminal := waitForTerminal(t, events); terminal.Status != RunStatusDone ||
+		terminal.Answer != persisted.Answer || terminal.ErrorCode != persisted.ErrorCode ||
+		terminal.TokenUsed != persisted.TokenUsed {
+		t.Fatalf("terminal = %+v", terminal)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDefinitionRuntimeRejectsConflictingScenarioTerminalReplay(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	runID := "qa-parent-conflict"
+	persisted := RunTerminal{RunID: runID, Status: RunStatusFailed}
+	detail, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE agent_runs").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT r.status,e.detail_json").
+		WithArgs("qa_parent", int64(1), "run_finished", runID, RunKindQAParent).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "detail_json"}).
+			AddRow(RunStatusFailed, detail))
+	mock.ExpectRollback()
+
+	definition := testQADefinition(t, nil)
+	runtime := newTestDefinitionRuntime(
+		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), bindRunStore(db),
+	)
+	err = runtime.CompleteScenario(t.Context(), runID, RunOutcome{
+		Status:   RunStatusDone,
+		Evidence: EvidenceMetrics{Status: EvidenceComplete},
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflicts with persisted status") {
+		t.Fatalf("CompleteScenario conflict error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

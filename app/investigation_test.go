@@ -2,10 +2,30 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
+
+type investigationEventProjection struct {
+	eventType run.EventType
+	event     run.ExecutionEvent
+}
+
+type investigationEventRecorder struct {
+	projected chan investigationEventProjection
+}
+
+func (recorder *investigationEventRecorder) EmitExecutionEvent(
+	eventType run.EventType,
+	event run.ExecutionEvent,
+) {
+	recorder.projected <- investigationEventProjection{
+		eventType: eventType,
+		event:     event,
+	}
+}
 
 func TestProjectInvestigationEvent(t *testing.T) {
 	tests := []struct {
@@ -32,5 +52,47 @@ func TestProjectInvestigationEvent(t *testing.T) {
 				t.Fatalf("correlation = %+v", event)
 			}
 		})
+	}
+}
+
+func TestBridgeInvestigationEventsStopsOnDurableCompletion(t *testing.T) {
+	events := make(chan workflow.Event, 1)
+	stop := make(chan struct{})
+	completed := make(chan struct{})
+	recorder := &investigationEventRecorder{
+		projected: make(chan investigationEventProjection, 1),
+	}
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		bridgeInvestigationEvents(
+			events,
+			stop,
+			completed,
+			recorder,
+			"qa_parent_1",
+		)
+	}()
+
+	events <- workflow.Event{
+		WorkflowRunID: "workflow_1",
+		Kind:          "workflow_started",
+	}
+	select {
+	case projected := <-recorder.projected:
+		if projected.eventType != run.EventWorkflowStarted ||
+			projected.event.RunID != "qa_parent_1" ||
+			projected.event.WorkflowRunID != "workflow_1" {
+			t.Fatalf("projection = %+v", projected)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("workflow event was not projected")
+	}
+
+	close(completed)
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("event bridge did not stop after durable workflow completion")
 	}
 }

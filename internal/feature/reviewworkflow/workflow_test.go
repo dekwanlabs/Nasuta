@@ -84,6 +84,12 @@ func TestDefinitionBuildsStableParallelPanel(t *testing.T) {
 		len(definition.Edges) != len(policy.Reviewers)+2 {
 		t.Fatalf("nodes = %d, edges = %d", len(definition.Nodes), len(definition.Edges))
 	}
+	reportsJoin := definition.Nodes[len(policy.Reviewers)]
+	if reportsJoin.ID != NodeReportsJoin ||
+		reportsJoin.Kind != workflow.NodeJoin ||
+		reportsJoin.JoinMode != workflow.JoinPayloadList {
+		t.Fatalf("reports join = %+v", reportsJoin)
+	}
 	for index, reviewer := range policy.Reviewers {
 		node := definition.Nodes[index]
 		if node.ID != reviewerNodeID(reviewer.ID) ||
@@ -590,53 +596,52 @@ func TestCoordinatorReconcilesRecoveredTerminalRuns(t *testing.T) {
 		name         string
 		runID        string
 		status       workflow.RunStatus
-		wantHandled  bool
+		wantErr      error
 		wantComplete int
 		wantFail     int
 		wantCancel   int
 	}{
 		{
 			name: "succeeded", runID: "review.round-1",
-			status: workflow.RunSucceeded, wantHandled: true, wantComplete: 1,
+			status: workflow.RunSucceeded, wantComplete: 1,
 		},
 		{
 			name: "failed", runID: "review.round-1",
-			status: workflow.RunFailed, wantHandled: true, wantFail: 1,
+			status: workflow.RunFailed, wantFail: 1,
 		},
 		{
 			name: "timed out", runID: "review.round-1",
-			status: workflow.RunTimedOut, wantHandled: true, wantFail: 1,
+			status: workflow.RunTimedOut, wantFail: 1,
 		},
 		{
 			name: "cancelled", runID: "review.round-1",
-			status: workflow.RunCancelled, wantHandled: true, wantCancel: 1,
+			status: workflow.RunCancelled, wantCancel: 1,
 		},
 		{
 			name: "waiting", runID: "review.round-1",
 			status: workflow.RunWaitingHuman,
 		},
 		{
-			name: "other workflow", runID: "delivery.round-1",
-			status: workflow.RunFailed,
+			name: "invalid review binding", runID: "delivery.round-1",
+			status: workflow.RunFailed, wantErr: delivery.ErrConflict,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reviews := &reviewCoordinatorStub{}
 			coordinator := NewCoordinator(reviews, &workflowCoordinatorStub{})
-			handled, err := coordinator.ReconcileRecoveredRun(
+			err := coordinator.ReconcileRecoveredRun(
 				t.Context(),
 				test.runID,
 				test.status,
 				errors.New("recovery failed"),
 			)
-			if err != nil {
-				t.Fatal(err)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("error = %v, want %v", err, test.wantErr)
 			}
-			if handled != test.wantHandled ||
-				reviews.completeCalls != test.wantComplete ||
+			if reviews.completeCalls != test.wantComplete ||
 				reviews.failCalls != test.wantFail ||
 				reviews.cancelCalls != test.wantCancel {
-				t.Fatalf("handled = %t, reviews = %+v", handled, reviews)
+				t.Fatalf("reviews = %+v", reviews)
 			}
 		})
 	}

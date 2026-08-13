@@ -58,6 +58,7 @@ func (orchestrator *Orchestrator) aggregateHandoffs(
 				input.workflowRunID,
 				input.node.ID,
 				input.node.OutputSchema,
+				input.node.JoinMode,
 				input.inputs,
 				input.maxBytes,
 				orchestrator.schemas,

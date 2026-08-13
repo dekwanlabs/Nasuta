@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -25,58 +27,93 @@ import (
 const sessionArchiveTimeout = 2 * time.Minute
 
 func (svc *QA) submitInvestigation(
-	ctx context.Context,
-	request QARequest,
-	question string,
-	conversation ConversationContext,
-	userID int64,
-	runID string,
-	trace *runtrace.Scope,
-	ownsTrace bool,
+	prepared *qaPreparation,
 ) (*AskResult, error) {
+	request := prepared.request
+	ctx := prepared.ctx
+	runID := request.RunID
+	question := request.Question
+	conversation := request.Conversation
+	userID := request.UserID
 	workflowRunID := "workflow_" + strings.TrimPrefix(NewRunID(), "run_")
 	scenario, err := svc.scenarios.BeginScenario(ctx, ScenarioRunStart{
 		RunID: runID, ParentRunID: request.ParentRunID, UserID: userID,
-		SessionID: conversation.SessionID, Question: question, Mode: "multi_agent",
+		WorkflowRunID: workflowRunID, SessionID: conversation.SessionID,
+		Question: question, Mode: "multi_agent",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("begin QA parent run %q: %w", runID, err)
 	}
-	runCtx := context.WithoutCancel(scenario.Context(ctx))
-	go func() {
-		if ownsTrace {
-			defer trace.Close()
+	runCtx := scenario.Context(ctx)
+	prefetched, err := svc.executePrefetch(
+		runCtx,
+		runID,
+		prepared.candidateToolSet,
+		request.ToolPlan,
+		scenario,
+	)
+	if err != nil {
+		scenario.Release()
+		prepared.closeTrace()
+		outcome := RunOutcome{
+			Status: RunStatusFailed, ErrorCode: "preparation_failed", Err: err,
+			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
 		}
-		result, runErr := svc.investigation.Run(runCtx, InvestigationRequest{
-			WorkflowRunID: workflowRunID, ParentRunID: runID,
-			Question: question, Actor: agentapi.Actor{UserID: userID},
-		})
-		outcome := investigationOutcome(result, runErr)
-		if outcome.Status == RunStatusDone {
-			if err := svc.persistSessionTurn(
-				runCtx,
-				runID,
-				conversation.SessionID,
-				userID,
-				question,
-				outcome,
-			); err != nil {
-				log.ErrorfCtx(runCtx, "[qa] persist completed parent run %s session turn: %v", runID, err)
-				outcome.Status = RunStatusFailed
-				outcome.ErrorCode = "session_persistence_failed"
-				outcome.Err = err
-			}
-		}
-		if outcome.Status == RunStatusDone {
-			svc.archiveSessionHistoryAsync(
-				runCtx, runID, conversation.SessionID, userID,
-				svc.contextWindow, svc.outputReserve,
+		completeErr := svc.scenarios.CompleteScenario(
+			context.WithoutCancel(runCtx),
+			runID,
+			outcome,
+		)
+		if completeErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("prepare QA investigation workflow %q: %w", workflowRunID, err),
+				completeErr,
 			)
 		}
-		if finishErr := scenario.Finish(outcome); finishErr != nil {
-			log.ErrorfCtx(runCtx, "[qa] finish parent run %s: %v", runID, finishErr)
+		return nil, fmt.Errorf("prepare QA investigation workflow %q: %w", workflowRunID, err)
+	}
+	seedBlocks := make([]ContextBlock, 0, len(prefetched)+len(request.PreloadedContext))
+	seedBlocks = append(seedBlocks, prefetched...)
+	seedBlocks = append(seedBlocks, request.PreloadedContext...)
+	startErr := svc.investigation.Start(runCtx, InvestigationRequest{
+		WorkflowRunID: workflowRunID,
+		Contract:      taskContractFromPreparation(prepared, seedBlocks),
+		Actor:         agentapi.Actor{UserID: userID},
+	})
+	scenario.Release()
+	prepared.closeTrace()
+	if startErr != nil {
+		outcome := RunOutcome{
+			Status: RunStatusFailed, ErrorCode: "investigation_start_failed", Err: startErr,
+			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
+		}
+		completeErr := svc.scenarios.CompleteScenario(
+			context.WithoutCancel(runCtx),
+			runID,
+			outcome,
+		)
+		if completeErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("start QA investigation workflow %q: %w", workflowRunID, startErr),
+				completeErr,
+			)
+		}
+		return nil, fmt.Errorf("start QA investigation workflow %q: %w", workflowRunID, startErr)
+	}
+	waitCtx := context.WithoutCancel(runCtx)
+	go func() {
+		if err := svc.coordinator.Await(waitCtx, runID, workflowRunID); err != nil {
+			log.ErrorfCtx(waitCtx, "[qa] converge parent run %s: %v", runID, err)
 			return
 		}
+		svc.archiveSessionHistoryAsync(
+			waitCtx,
+			runID,
+			conversation.SessionID,
+			userID,
+			svc.contextWindow,
+			svc.outputReserve,
+		)
 	}()
 	return &AskResult{RunID: runID}, nil
 }
@@ -268,19 +305,36 @@ func qaContextBlocks(rc *retrieval.RetrievedContext) []agentapi.ContextBlock {
 	return []agentapi.ContextBlock{{
 		Source: "qa.evidence", Title: "QA Evidence", Content: rc.Text,
 		References: references, Evidence: cloneEvidenceUnits(rc.EvidenceUnits),
-		Complete: false, ContentHash: hashString(rc.Text),
+		EvidenceConflicts: publicEvidenceConflicts(rc.EvidenceConflicts),
+		Complete:          false, ContentHash: hashString(rc.Text),
 	}}
 }
 
 func cloneEvidenceUnits(units []tool.EvidenceUnit) []tool.EvidenceUnit {
-	if len(units) == 0 {
+	return evidence.CloneUnits(units)
+}
+
+func publicEvidenceConflicts(
+	conflicts []evidence.Conflict,
+) []agentapi.EvidenceConflict {
+	if len(conflicts) == 0 {
 		return nil
 	}
-	out := make([]tool.EvidenceUnit, len(units))
-	for i, unit := range units {
-		out[i] = unit
-		out[i].Sections = append([]string(nil), unit.Sections...)
-		out[i].Facets = append([]string(nil), unit.Facets...)
+	out := make([]agentapi.EvidenceConflict, len(conflicts))
+	for index, conflict := range conflicts {
+		out[index] = agentapi.EvidenceConflict{
+			Identity: agentapi.EvidenceIdentity{
+				SourceKind: conflict.Key.SourceKind,
+				Target:     conflict.Key.Target,
+				Section:    conflict.Key.Section,
+				Version:    conflict.Key.Version,
+				TimeRange:  conflict.Key.TimeRange,
+			},
+			Current:        evidence.CloneUnit(conflict.Current),
+			Incoming:       evidence.CloneUnit(conflict.Incoming),
+			CurrentOrigin:  conflict.CurrentOrigin,
+			IncomingOrigin: conflict.IncomingOrigin,
+		}
 	}
 	return out
 }
@@ -317,17 +371,35 @@ func publicResultMessages(messages []agentapi.Message) []llm.Message {
 }
 
 func (svc *QA) persistSessionTurn(ctx context.Context, runID, sessionID string, userID int64, question string, outcome RunOutcome) error {
-	if svc.sessions == nil || sessionID == "" {
+	if svc.sessions == nil {
 		return nil
 	}
-	if err := svc.sessions.EnsureSession(sessionID, userID, platform.TruncateForLog(question, 256)); err != nil {
+	return persistSessionTurn(ctx, svc.sessions, runID, sessionID, userID, question, outcome)
+}
+
+func persistSessionTurn(
+	ctx context.Context,
+	sessions sessionTurnStore,
+	runID string,
+	sessionID string,
+	userID int64,
+	question string,
+	outcome RunOutcome,
+) error {
+	if sessionID == "" {
+		return nil
+	}
+	if sessions == nil {
+		return fmt.Errorf("session store is unavailable for session %q", sessionID)
+	}
+	if err := sessions.EnsureSession(sessionID, userID, platform.TruncateForLog(question, 256)); err != nil {
 		return fmt.Errorf("ensure session %q: %w", sessionID, err)
 	}
 	messages := make([]llm.Message, 0, len(outcome.SessionMessages)+2)
 	messages = append(messages, llm.Message{Role: "user", Content: question})
 	messages = append(messages, outcome.SessionMessages...)
 	messages = append(messages, llm.Message{Role: "assistant", Content: outcome.Answer})
-	turnNo, err := svc.sessions.AppendTurn(sessionID, runID, userID, messages)
+	turnNo, err := sessions.AppendTurn(sessionID, runID, userID, messages)
 	if err != nil {
 		return fmt.Errorf("append run %q to session %q: %w", runID, sessionID, err)
 	}

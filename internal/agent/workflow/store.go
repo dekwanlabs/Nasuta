@@ -16,6 +16,7 @@ var (
 	ErrForbidden        = errors.New("workflow operation forbidden")
 	ErrConflict         = errors.New("workflow conflict")
 	ErrUnavailable      = errors.New("workflow capability unavailable")
+	ErrInvariant        = errors.New("workflow invariant violated")
 	ErrApprovalConflict = fmt.Errorf(
 		"workflow approval decision conflicts with existing fact: %w",
 		ErrConflict,
@@ -88,6 +89,12 @@ type WorkflowRunState struct {
 	NodeOutputs map[string]Handoff
 	Gates       map[string]GateDecision
 	Approvals   map[string]WorkflowApproval
+}
+
+// TerminalResult contains the durable facts used by owning domains to converge.
+type TerminalResult struct {
+	Run    WorkflowRunRecord
+	Output *Handoff
 }
 
 type ApprovalTransition struct {

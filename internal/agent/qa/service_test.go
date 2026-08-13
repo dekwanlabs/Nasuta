@@ -17,7 +17,9 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -461,8 +463,14 @@ func TestRunStoreRecoversInterruptedRuns(t *testing.T) {
 	}
 	defer db.Close()
 	store := run.BindStore(db)
-	mock.ExpectExec("UPDATE agent_runs SET status=\\?,ended_at=\\? WHERE status IN \\(\\?,\\?\\)").
-		WithArgs(RunStatusAborted, sqlmock.AnyArg(), RunStatusRunning, RunStatusPaused).
+	mock.ExpectExec("UPDATE agent_runs SET status=\\?,ended_at=\\? WHERE run_kind=\\? AND status IN \\(\\?,\\?\\)").
+		WithArgs(
+			RunStatusAborted,
+			sqlmock.AnyArg(),
+			run.RunKindAgent,
+			RunStatusRunning,
+			RunStatusPaused,
+		).
 		WillReturnResult(sqlmock.NewResult(0, 2))
 	recovered, err := store.RecoverInterrupted()
 	if err != nil {
@@ -575,19 +583,61 @@ type failingContextRetriever struct {
 	err error
 }
 
-type investigationRunnerFunc func(context.Context, InvestigationRequest) (InvestigationResult, error)
+type investigationRunnerRecorder struct {
+	start  func(context.Context, InvestigationRequest) error
+	await  func(context.Context, string) (InvestigationTerminal, error)
+	load   func(context.Context, string) (InvestigationTerminal, error)
+	cancel func(context.Context, string, int64) error
+}
 
-func (runner investigationRunnerFunc) Available() bool {
+func (*investigationRunnerRecorder) Available() bool {
 	return true
 }
 
-func (runner investigationRunnerFunc) Run(ctx context.Context, request InvestigationRequest) (InvestigationResult, error) {
-	return runner(ctx, request)
+func (runner *investigationRunnerRecorder) Start(
+	ctx context.Context,
+	request InvestigationRequest,
+) error {
+	if runner.start == nil {
+		panic("unexpected InvestigationRunner.Start")
+	}
+	return runner.start(ctx, request)
+}
+
+func (runner *investigationRunnerRecorder) AwaitTerminal(
+	ctx context.Context,
+	workflowRunID string,
+) (InvestigationTerminal, error) {
+	if runner.await == nil {
+		panic("unexpected InvestigationRunner.AwaitTerminal")
+	}
+	return runner.await(ctx, workflowRunID)
+}
+
+func (runner *investigationRunnerRecorder) LoadTerminal(
+	ctx context.Context,
+	workflowRunID string,
+) (InvestigationTerminal, error) {
+	if runner.load == nil {
+		panic("unexpected InvestigationRunner.LoadTerminal")
+	}
+	return runner.load(ctx, workflowRunID)
+}
+
+func (runner *investigationRunnerRecorder) Cancel(
+	ctx context.Context,
+	workflowRunID string,
+	userID int64,
+) error {
+	if runner.cancel == nil {
+		panic("unexpected InvestigationRunner.Cancel")
+	}
+	return runner.cancel(ctx, workflowRunID, userID)
 }
 
 type scenarioRunRecorder struct {
 	context  context.Context
-	finished chan RunOutcome
+	released chan struct{}
 }
 
 func (recorder *scenarioRunRecorder) Context(ctx context.Context) context.Context {
@@ -595,19 +645,55 @@ func (recorder *scenarioRunRecorder) Context(ctx context.Context) context.Contex
 	return ctx
 }
 
-func (recorder *scenarioRunRecorder) Finish(outcome RunOutcome) error {
-	recorder.finished <- outcome
-	return nil
+func (recorder *scenarioRunRecorder) Release() {
+	if recorder.released != nil {
+		recorder.released <- struct{}{}
+	}
 }
 
 type scenarioLifecycleRecorder struct {
-	start    chan ScenarioRunStart
-	scenario *scenarioRunRecorder
+	mu        sync.Mutex
+	start     chan ScenarioRunStart
+	completed chan RunOutcome
+	scenario  *scenarioRunRecorder
+	parent    QAParentRecord
+	complete  func(context.Context, string, RunOutcome) error
 }
 
 func (recorder *scenarioLifecycleRecorder) BeginScenario(_ context.Context, start ScenarioRunStart) (ScenarioRun, error) {
+	recorder.mu.Lock()
+	recorder.parent = QAParentRecord{
+		ID: start.RunID, WorkflowRunID: start.WorkflowRunID,
+		UserID: start.UserID, SessionID: start.SessionID,
+		Question: start.Question, Status: RunStatusRunning,
+	}
+	recorder.mu.Unlock()
 	recorder.start <- start
 	return recorder.scenario, nil
+}
+
+func (recorder *scenarioLifecycleRecorder) CompleteScenario(
+	ctx context.Context,
+	runID string,
+	outcome RunOutcome,
+) error {
+	if recorder.complete != nil {
+		return recorder.complete(ctx, runID, outcome)
+	}
+	recorder.mu.Lock()
+	recorder.parent.Status = outcome.Status
+	recorder.mu.Unlock()
+	recorder.completed <- outcome
+	return nil
+}
+
+func (recorder *scenarioLifecycleRecorder) GetQAParent(runID string) (QAParentRecord, error) {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if recorder.parent.ID != runID {
+		return QAParentRecord{}, fmt.Errorf("QA parent %q not found", runID)
+	}
+	return recorder.parent, nil
 }
 
 type executionEventRecord struct {
@@ -648,26 +734,41 @@ func (failingContextRetriever) ContextBudget() int {
 
 func TestSubmitInvestigationSurvivesCallerCancellation(t *testing.T) {
 	const runID = "qa-parent-run"
-	started := make(chan context.Context, 1)
+	requests := make(chan InvestigationRequest, 1)
+	awaited := make(chan context.Context, 1)
 	release := make(chan struct{})
-	scenario := &scenarioRunRecorder{finished: make(chan RunOutcome, 1)}
+	scenario := &scenarioRunRecorder{released: make(chan struct{}, 1)}
 	lifecycle := &scenarioLifecycleRecorder{
-		start:    make(chan ScenarioRunStart, 1),
-		scenario: scenario,
+		start:     make(chan ScenarioRunStart, 1),
+		completed: make(chan RunOutcome, 1),
+		scenario:  scenario,
 	}
-	runner := investigationRunnerFunc(func(ctx context.Context, request InvestigationRequest) (InvestigationResult, error) {
-		if request.ParentRunID != runID || !strings.HasPrefix(request.WorkflowRunID, "workflow_") ||
-			request.Actor.UserID != 42 {
-			t.Errorf("investigation request = %+v", request)
-		}
-		started <- ctx
-		<-release
-		if err := ctx.Err(); err != nil {
-			return InvestigationResult{}, err
-		}
-		return InvestigationResult{Answer: "multi-agent answer"}, nil
-	})
-	qa := &QA{investigation: runner, scenarios: lifecycle}
+	runner := &investigationRunnerRecorder{
+		start: func(_ context.Context, request InvestigationRequest) error {
+			requests <- request
+			return nil
+		},
+		await: func(ctx context.Context, workflowRunID string) (InvestigationTerminal, error) {
+			awaited <- ctx
+			<-release
+			result := InvestigationResult{Answer: "multi-agent answer"}
+			return InvestigationTerminal{
+				WorkflowRunID: workflowRunID,
+				Status:        InvestigationSucceeded,
+				Output:        &result,
+			}, nil
+		},
+	}
+	qa := &QA{
+		investigation: runner,
+		scenarios:     lifecycle,
+		coordinator: &InvestigationCoordinator{
+			investigation: runner,
+			scenarios:     lifecycle,
+			parentRuns:    lifecycle,
+			sessions:      &coordinatorSessionStore{turnByRun: make(map[string]int)},
+		},
+	}
 	request := QARequest{
 		Question:     "trace the checkout flow",
 		Conversation: ConversationContext{SessionID: "session-1"},
@@ -675,7 +776,7 @@ func TestSubmitInvestigationSurvivesCallerCancellation(t *testing.T) {
 		RunID:        runID,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	result, err := qa.submitInvestigation(ctx, request, request.Question, request.Conversation, request.UserID, runID, nil, false)
+	result, err := qa.submitInvestigation(&qaPreparation{ctx: ctx, request: request})
 	if err != nil {
 		t.Fatalf("submitInvestigation: %v", err)
 	}
@@ -691,11 +792,21 @@ func TestSubmitInvestigationSurvivesCallerCancellation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("scenario did not start")
 	}
-	runContext := <-started
+	select {
+	case investigation := <-requests:
+		if investigation.Contract.TaskID != runID ||
+			!strings.HasPrefix(investigation.WorkflowRunID, "workflow_") ||
+			investigation.Actor.UserID != 42 {
+			t.Fatalf("investigation request = %+v", investigation)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("investigation did not start")
+	}
+	runContext := <-awaited
 	cancel()
 	close(release)
 	select {
-	case outcome := <-scenario.finished:
+	case outcome := <-lifecycle.completed:
 		if outcome.Status != RunStatusDone || outcome.Answer != "multi-agent answer" {
 			t.Fatalf("outcome = %+v", outcome)
 		}
@@ -717,26 +828,43 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 
 	registry := tool.NewRegistry()
 	qa, _ := newQARuntimeFixture(t, client, server.URL, registry, nil, false)
-	scenario := &scenarioRunRecorder{finished: make(chan RunOutcome, 1)}
+	scenario := &scenarioRunRecorder{released: make(chan struct{}, 1)}
 	lifecycle := &scenarioLifecycleRecorder{
-		start:    make(chan ScenarioRunStart, 1),
-		scenario: scenario,
+		start:     make(chan ScenarioRunStart, 1),
+		completed: make(chan RunOutcome, 1),
+		scenario:  scenario,
 	}
 	investigationRequests := make(chan InvestigationRequest, 1)
 	qa.scenarios = lifecycle
-	qa.investigation = investigationRunnerFunc(func(_ context.Context, request InvestigationRequest) (InvestigationResult, error) {
-		investigationRequests <- request
-		return InvestigationResult{
-			Answer: "  grounded multi-agent answer  ",
-			Citations: []InvestigationCitation{{
-				Claim: "checkout calls inventory",
-				Evidence: []InvestigationEvidence{{
-					Kind: "call", Reference: "Checkout.Place", Summary: "calls inventory",
+	qa.investigation = &investigationRunnerRecorder{
+		start: func(_ context.Context, request InvestigationRequest) error {
+			investigationRequests <- request
+			return nil
+		},
+		await: func(_ context.Context, workflowRunID string) (InvestigationTerminal, error) {
+			result := InvestigationResult{
+				Answer: "  grounded multi-agent answer  ",
+				Citations: []InvestigationCitation{{
+					Claim: "checkout calls inventory",
+					Evidence: []InvestigationEvidence{{
+						Kind: "call", Reference: "Checkout.Place", Summary: "calls inventory",
+					}},
 				}},
-			}},
-			Usage: InvestigationUsage{TotalTokens: 91, ToolCalls: 4},
-		}, nil
-	})
+			}
+			return InvestigationTerminal{
+				WorkflowRunID: workflowRunID,
+				Status:        InvestigationSucceeded,
+				Output:        &result,
+				Usage:         InvestigationUsage{TotalTokens: 91, ToolCalls: 4},
+			}, nil
+		},
+	}
+	qa.coordinator = &InvestigationCoordinator{
+		investigation: qa.investigation,
+		scenarios:     lifecycle,
+		parentRuns:    lifecycle,
+		sessions:      &coordinatorSessionStore{turnByRun: make(map[string]int)},
+	}
 	events := &executionEventRecorder{}
 	qa.executionEvents = events
 
@@ -756,6 +884,7 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 	select {
 	case start := <-lifecycle.start:
 		if start.RunID != runID || start.ParentRunID != "" || start.UserID != 42 ||
+			!strings.HasPrefix(start.WorkflowRunID, "workflow_") ||
 			start.SessionID != "session-1" || start.Mode != "multi_agent" {
 			t.Fatalf("scenario start = %+v", start)
 		}
@@ -765,8 +894,10 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 
 	select {
 	case request := <-investigationRequests:
-		if request.ParentRunID != runID || !strings.HasPrefix(request.WorkflowRunID, "workflow_") ||
-			request.Question != "trace the checkout flow" || request.Actor.UserID != 42 {
+		if request.Contract.TaskID != runID || !strings.HasPrefix(request.WorkflowRunID, "workflow_") ||
+			request.Contract.Question != "trace the checkout flow" ||
+			request.Contract.Objective != "trace the checkout flow" ||
+			request.Actor.UserID != 42 {
 			t.Fatalf("investigation request = %+v", request)
 		}
 	case <-time.After(2 * time.Second):
@@ -774,7 +905,7 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 	}
 
 	select {
-	case outcome := <-scenario.finished:
+	case outcome := <-lifecycle.completed:
 		if outcome.Status != RunStatusDone || outcome.Answer != "grounded multi-agent answer" ||
 			outcome.TokenUsed != 91 || outcome.HitCount != 1 ||
 			outcome.Evidence.Status != EvidenceComplete ||
@@ -805,15 +936,31 @@ func TestAskMultiAgentInvestigationFailureCompletesParentAsFailed(t *testing.T) 
 	defer server.Close()
 
 	qa, _ := newQARuntimeFixture(t, client, server.URL, tool.NewRegistry(), nil, false)
-	runErr := errors.New("workflow unavailable during execution")
-	scenario := &scenarioRunRecorder{finished: make(chan RunOutcome, 1)}
-	qa.scenarios = &scenarioLifecycleRecorder{
-		start:    make(chan ScenarioRunStart, 1),
-		scenario: scenario,
+	scenario := &scenarioRunRecorder{released: make(chan struct{}, 1)}
+	lifecycle := &scenarioLifecycleRecorder{
+		start:     make(chan ScenarioRunStart, 1),
+		completed: make(chan RunOutcome, 1),
+		scenario:  scenario,
 	}
-	qa.investigation = investigationRunnerFunc(func(context.Context, InvestigationRequest) (InvestigationResult, error) {
-		return InvestigationResult{}, runErr
-	})
+	qa.scenarios = lifecycle
+	qa.investigation = &investigationRunnerRecorder{
+		start: func(context.Context, InvestigationRequest) error {
+			return nil
+		},
+		await: func(_ context.Context, workflowRunID string) (InvestigationTerminal, error) {
+			return InvestigationTerminal{
+				WorkflowRunID: workflowRunID,
+				Status:        InvestigationFailed,
+				ErrorCode:     "provider_failed",
+			}, nil
+		},
+	}
+	qa.coordinator = NewInvestigationCoordinator(
+		qa.investigation,
+		lifecycle,
+		lifecycle,
+		nil,
+	)
 
 	if _, err := qa.Ask(context.Background(), QARequest{
 		Question: "trace the checkout flow", UserID: 42, RunID: runID,
@@ -822,9 +969,8 @@ func TestAskMultiAgentInvestigationFailureCompletesParentAsFailed(t *testing.T) 
 	}
 
 	select {
-	case outcome := <-scenario.finished:
-		if outcome.Status != RunStatusFailed || outcome.ErrorCode != "investigation_failed" ||
-			!errors.Is(outcome.Err, runErr) {
+	case outcome := <-lifecycle.completed:
+		if outcome.Status != RunStatusFailed || outcome.ErrorCode != "provider_failed" {
 			t.Fatalf("parent outcome = %+v", outcome)
 		}
 	case <-time.After(2 * time.Second):
@@ -839,15 +985,20 @@ func TestAskExecutionEventsOrderDegradedRouteBeforeSingleAgent(t *testing.T) {
 
 	retriever := retrieval.New(emptyRetrievalTools{}, config.Config{})
 	qa, runtime := newQARuntimeFixture(t, client, server.URL, tool.NewRegistry(), retriever, false)
-	scenario := &scenarioRunRecorder{finished: make(chan RunOutcome, 1)}
+	scenario := &scenarioRunRecorder{}
 	lifecycle := &scenarioLifecycleRecorder{
-		start:    make(chan ScenarioRunStart, 1),
-		scenario: scenario,
+		start:     make(chan ScenarioRunStart, 1),
+		completed: make(chan RunOutcome, 1),
+		scenario:  scenario,
 	}
 	qa.scenarios = lifecycle
-	qa.investigation = investigationRunnerFunc(func(context.Context, InvestigationRequest) (InvestigationResult, error) {
-		return InvestigationResult{}, errors.New("scenario should not run")
-	})
+	qa.investigation = &investigationRunnerRecorder{}
+	qa.coordinator = NewInvestigationCoordinator(
+		qa.investigation,
+		lifecycle,
+		lifecycle,
+		nil,
+	)
 	events := &executionEventRecorder{}
 	qa.executionEvents = events
 	terminalEvents := runtime.Hub().Subscribe(runID)
@@ -902,15 +1053,20 @@ func TestAskSingleAgentRouteDoesNotStartScenario(t *testing.T) {
 
 	retriever := retrieval.New(emptyRetrievalTools{}, config.Config{})
 	qa, runtime := newQARuntimeFixture(t, client, server.URL, tool.NewRegistry(), retriever, false)
-	scenario := &scenarioRunRecorder{finished: make(chan RunOutcome, 1)}
+	scenario := &scenarioRunRecorder{}
 	lifecycle := &scenarioLifecycleRecorder{
-		start:    make(chan ScenarioRunStart, 1),
-		scenario: scenario,
+		start:     make(chan ScenarioRunStart, 1),
+		completed: make(chan RunOutcome, 1),
+		scenario:  scenario,
 	}
 	qa.scenarios = lifecycle
-	qa.investigation = investigationRunnerFunc(func(context.Context, InvestigationRequest) (InvestigationResult, error) {
-		return InvestigationResult{}, errors.New("scenario should not run")
-	})
+	qa.investigation = &investigationRunnerRecorder{}
+	qa.coordinator = NewInvestigationCoordinator(
+		qa.investigation,
+		lifecycle,
+		lifecycle,
+		nil,
+	)
 	terminalEvents := runtime.Hub().Subscribe(runID)
 
 	if _, err := qa.Ask(context.Background(), QARequest{
@@ -1295,6 +1451,7 @@ func TestCanonicalRetrievalQueryAugmentsWithContextTerms(t *testing.T) {
 }
 
 func TestMergePreloadedContextDedupesContentAndReferences(t *testing.T) {
+	const sourceHash = "trace-version-1"
 	context := &retrieval.RetrievedContext{
 		Text:       "## Workspace\ncode",
 		References: []retrieval.Reference{{Type: "code", Target: "svc/Foo.go"}},
@@ -1308,7 +1465,8 @@ func TestMergePreloadedContextDedupesContentAndReferences(t *testing.T) {
 		},
 		Evidence: []tool.EvidenceUnit{{
 			SourceKind: "runtime", Target: "trace-1",
-			Coverage: tool.EvidenceCoverage{Complete: true},
+			ContentHash: sourceHash,
+			Coverage:    tool.EvidenceCoverage{Complete: true},
 		}},
 	}
 	mergePreloadedContext(context, []ContextBlock{block, block}, 48000)
@@ -1319,14 +1477,15 @@ func TestMergePreloadedContextDedupesContentAndReferences(t *testing.T) {
 		t.Fatalf("references = %#v hitCount=%d", context.References, context.HitCount)
 	}
 	if len(context.EvidenceUnits) != 1 || context.EvidenceUnits[0].Target != "trace-1" ||
-		context.EvidenceUnits[0].ContentHash == "" || context.EvidenceUnits[0].TokenCost == 0 {
+		context.EvidenceUnits[0].ContentHash != sourceHash || context.EvidenceUnits[0].TokenCost == 0 {
 		t.Fatalf("evidence units = %#v", context.EvidenceUnits)
 	}
 }
 
 func TestMergePreloadedContextKeepsDeliveredEvidenceWhenExistingContextIsTruncated(t *testing.T) {
+	const sourceHash = "runbook-version-1"
 	unit := tool.EvidenceUnit{
-		SourceKind: "runbook", Target: "doc-a",
+		SourceKind: "runbook", Target: "doc-a", ContentHash: sourceHash,
 		Coverage: tool.EvidenceCoverage{Complete: true},
 	}
 	context := &retrieval.RetrievedContext{
@@ -1339,8 +1498,91 @@ func TestMergePreloadedContextKeepsDeliveredEvidenceWhenExistingContextIsTruncat
 		Evidence: []tool.EvidenceUnit{unit},
 	}}, 20)
 	if len(context.EvidenceUnits) != 1 || context.EvidenceUnits[0].Target != "doc-a" ||
-		context.EvidenceUnits[0].ContentHash != hashString("## Runtime\ntrace\n") {
+		context.EvidenceUnits[0].ContentHash != sourceHash {
 		t.Fatalf("evidence units = %#v", context.EvidenceUnits)
+	}
+}
+
+func TestMergePreloadedContextRecordsTruncatedEvidenceAsPartial(t *testing.T) {
+	const sourceHash = "trace-version-1"
+	context := &retrieval.RetrievedContext{}
+	mergePreloadedContext(context, []ContextBlock{{
+		Title:   "Runtime",
+		Content: "trace content beyond the available preload budget",
+		Evidence: []tool.EvidenceUnit{{
+			SourceKind: "runtime", Target: "trace-1", ContentHash: sourceHash,
+			Coverage: tool.EvidenceCoverage{Complete: true},
+		}},
+	}}, 16)
+	if len(context.EvidenceUnits) != 1 {
+		t.Fatalf("evidence units = %#v", context.EvidenceUnits)
+	}
+	unit := context.EvidenceUnits[0]
+	if unit.ContentHash != sourceHash || unit.Coverage.Complete || !unit.Coverage.Partial ||
+		unit.TokenCost != tooloutput.EstimateTokens(context.Text) {
+		t.Fatalf("evidence unit = %#v text=%q", unit, context.Text)
+	}
+}
+
+func TestMergePreloadedContextPropagatesOneEvidenceConflict(t *testing.T) {
+	retrievalUnit := tool.EvidenceUnit{
+		SourceKind: "runtime", Target: "trace-1", ContentHash: "version-a",
+		Coverage: tool.EvidenceCoverage{Complete: true},
+	}
+	context := &retrieval.RetrievedContext{
+		Text:          "retrieved trace",
+		EvidenceUnits: []tool.EvidenceUnit{retrievalUnit},
+	}
+	mergePreloadedContext(context, []ContextBlock{{
+		Title:   "Runtime",
+		Content: "preloaded trace",
+		Evidence: []tool.EvidenceUnit{{
+			SourceKind: "runtime", Target: "trace-1", ContentHash: "version-b",
+			Coverage: tool.EvidenceCoverage{Complete: true},
+		}},
+	}}, 48000)
+	if len(context.EvidenceUnits) != 1 ||
+		context.EvidenceUnits[0].ContentHash != "version-a" {
+		t.Fatalf("evidence units = %#v", context.EvidenceUnits)
+	}
+	if len(context.EvidenceConflicts) != 1 ||
+		context.EvidenceConflicts[0].Current.ContentHash != "version-a" ||
+		context.EvidenceConflicts[0].Incoming.ContentHash != "version-b" {
+		t.Fatalf("evidence conflicts = %#v", context.EvidenceConflicts)
+	}
+
+	mergePreloadedContext(context, []ContextBlock{{
+		Title:   "Runtime duplicate",
+		Content: "preloaded trace duplicate",
+		Evidence: []tool.EvidenceUnit{{
+			SourceKind: "runtime", Target: "trace-1", ContentHash: "version-b",
+		}},
+	}}, 48000)
+	if len(context.EvidenceConflicts) != 1 {
+		t.Fatalf("duplicate evidence conflicts = %#v", context.EvidenceConflicts)
+	}
+}
+
+func TestQAContextBlockHashesDeliveredTextAndPropagatesConflicts(t *testing.T) {
+	rc := &retrieval.RetrievedContext{
+		Text: "final delivered evidence",
+		EvidenceConflicts: []evidence.Conflict{{
+			Key: evidence.Key{SourceKind: "runtime", Target: "trace-1"},
+			Current: tool.EvidenceUnit{
+				SourceKind: "runtime", Target: "trace-1", ContentHash: "version-a",
+			},
+			Incoming: tool.EvidenceUnit{
+				SourceKind: "runtime", Target: "trace-1", ContentHash: "version-b",
+			},
+		}},
+	}
+	blocks := qaContextBlocks(rc)
+	if len(blocks) != 1 || blocks[0].ContentHash != hashString(rc.Text) {
+		t.Fatalf("context blocks = %#v", blocks)
+	}
+	if len(blocks[0].EvidenceConflicts) != 1 ||
+		blocks[0].EvidenceConflicts[0].Incoming.ContentHash != "version-b" {
+		t.Fatalf("context conflicts = %#v", blocks[0].EvidenceConflicts)
 	}
 }
 

@@ -166,12 +166,81 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		if !slices.Equal(definition.Tools.VisibleToolIDs, wantTools[definition.ID]) {
 			t.Fatalf("definition %q tools = %v, want %v", definition.ID, definition.Tools.VisibleToolIDs, wantTools[definition.ID])
 		}
+		if strings.HasPrefix(definition.ID, "investigator.") &&
+			definition.InputSchema.ID != "task.contract" {
+			t.Fatalf("definition %q input schema = %+v", definition.ID, definition.InputSchema)
+		}
 	}
 	synthesizer := definitions[len(definitions)-1]
 	if synthesizer.InputSchema.ID != "investigation.bundle" ||
 		synthesizer.OutputSchema.ID != "investigation.answer" ||
 		len(synthesizer.Tools.VisibleToolIDs) != 0 || !synthesizer.Tools.RestrictVisible {
 		t.Fatalf("synthesizer contract = %+v", synthesizer)
+	}
+}
+
+func TestDefaultInvestigationCapabilitiesPinAgentContracts(t *testing.T) {
+	settings := &config.PlatformSettings{
+		LLMProvider: "openai", LLMModel: "investigation-model",
+		LLMAnswerMaxTokens: 2048, LLMContextWindow: 32000,
+		AgentTimeout: config.Duration(time.Minute), AgentMaxSteps: 4,
+	}
+	definitions, err := DefaultInvestigatorsVersion(settings, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := DefaultInvestigationCapabilities(definitions, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAgents := map[string]string{
+		"knowledge.code.inspect":  "investigator.code",
+		"knowledge.service.trace": "investigator.runtime",
+		"knowledge.docs.verify":   "investigator.docs",
+		"evidence.synthesize":     "synthesizer",
+	}
+	byAgent := make(map[string]agentapi.Definition, len(definitions))
+	for _, definition := range definitions {
+		byAgent[definition.ID] = definition
+	}
+	if len(capabilities) != len(wantAgents) {
+		t.Fatalf("capabilities = %d, want %d", len(capabilities), len(wantAgents))
+	}
+	for _, capability := range capabilities {
+		agentID, ok := wantAgents[capability.ID]
+		if !ok || capability.Version != 12 || !capability.Enabled ||
+			!capability.RetrySafe ||
+			capability.SideEffects != agentapi.SideEffectNone ||
+			capability.MaxConcurrency != 3 ||
+			capability.Agent != (agentapi.DefinitionRef{ID: agentID, Version: 12}) ||
+			!slices.Equal(capability.PermissionScope, []string{"knowledge.read"}) {
+			t.Fatalf("capability = %+v", capability)
+		}
+		definition := byAgent[agentID]
+		if capability.InputSchema != definition.InputSchema ||
+			capability.OutputSchema != definition.OutputSchema ||
+			!slices.Equal(capability.ToolIDs, definition.Tools.VisibleToolIDs) {
+			t.Fatalf(
+				"capability %q does not match agent %q: %+v / %+v",
+				capability.ID,
+				agentID,
+				capability,
+				definition,
+			)
+		}
+	}
+
+	schemas := agentapi.NewSchemaRegistry()
+	if err := schemas.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	agents := New(schemas)
+	if err := agents.Publish(definitions); err != nil {
+		t.Fatal(err)
+	}
+	registry := agentapi.NewCapabilityRegistry(schemas, agents)
+	if err := registry.Publish(capabilities); err != nil {
+		t.Fatalf("publish default capabilities: %v", err)
 	}
 }
 

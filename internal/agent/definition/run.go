@@ -68,26 +68,86 @@ func (runtime *DefinitionRuntime) BeginScenario(
 	ctx context.Context,
 	start ScenarioRunStart,
 ) (ScenarioRun, error) {
+	if runtime == nil || runtime.scenarios == nil {
+		return nil, fmt.Errorf("create scenario run %q: runtime is unavailable", start.RunID)
+	}
+	return runtime.scenarios.BeginScenario(ctx, start)
+}
+
+// BeginScenario persists a parent Run without requiring model execution.
+func (runtime *ScenarioRuntime) BeginScenario(
+	ctx context.Context,
+	start ScenarioRunStart,
+) (ScenarioRun, error) {
 	trace, ownsTrace := beginExecutionTrace(ctx)
-	if runtime.runStore != nil {
-		if err := runtime.runStore.Create(agentrun.RunRecord{
-			ID: start.RunID, RunKind: agentrun.RunKindQAParent, UserID: start.UserID,
-			SessionID: start.SessionID, ParentRunID: start.ParentRunID,
-			Question: start.Question, Mode: start.Mode,
-		}); err != nil {
-			if ownsTrace {
-				trace.Close()
-			}
-			runtime.hub.CompleteTransient(start.RunID, agentrun.RunOutcome{
-				Status: agentrun.RunStatusFailed, ErrorCode: "persistence_failed", Err: err,
-				Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidenceUnavailable},
-			})
-			return nil, fmt.Errorf("create scenario run %q: %w", start.RunID, err)
+	if runtime.runStore == nil {
+		if ownsTrace {
+			trace.Close()
 		}
+		return nil, fmt.Errorf("create scenario run %q: run store is unavailable", start.RunID)
+	}
+	if err := runtime.runStore.Create(agentrun.RunRecord{
+		ID: start.RunID, RunKind: agentrun.RunKindQAParent, UserID: start.UserID,
+		SessionID: start.SessionID, ParentRunID: start.ParentRunID,
+		WorkflowRunID: start.WorkflowRunID,
+		Question:      start.Question, Mode: start.Mode,
+	}); err != nil {
+		if ownsTrace {
+			trace.Close()
+		}
+		runtime.hub.CompleteTransient(start.RunID, agentrun.RunOutcome{
+			Status: agentrun.RunStatusFailed, ErrorCode: "persistence_failed", Err: err,
+			Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidenceUnavailable},
+		})
+		return nil, fmt.Errorf("create scenario run %q: %w", start.RunID, err)
 	}
 	return &scenarioManagedRun{
 		runtime: runtime, start: start, trace: trace, ownsTrace: ownsTrace,
 	}, nil
+}
+
+// CompleteScenario commits a durable terminal fact before projecting it.
+func (runtime *DefinitionRuntime) CompleteScenario(
+	ctx context.Context,
+	runID string,
+	outcome agentrun.RunOutcome,
+) error {
+	if runtime == nil || runtime.scenarios == nil {
+		return fmt.Errorf("complete scenario run %q: runtime is unavailable", runID)
+	}
+	return runtime.scenarios.CompleteScenario(ctx, runID, outcome)
+}
+
+// CompleteScenario commits a durable terminal fact before projecting it.
+func (runtime *ScenarioRuntime) CompleteScenario(
+	ctx context.Context,
+	runID string,
+	outcome agentrun.RunOutcome,
+) error {
+	if runtime.runStore == nil {
+		return fmt.Errorf("complete scenario run %q: run store is unavailable", runID)
+	}
+	if !outcome.Status.Terminal() {
+		return fmt.Errorf(
+			"complete scenario run %q with non-terminal status %q",
+			runID,
+			outcome.Status,
+		)
+	}
+	persisted, err := runtime.runStore.CompleteQAParent(ctx, runID, outcome)
+	if err != nil {
+		return fmt.Errorf("complete scenario run %q: %w", runID, err)
+	}
+	if persisted.Status != outcome.Status {
+		return fmt.Errorf(
+			"complete scenario run %q as %q conflicts with persisted status %q",
+			runID,
+			outcome.Status,
+			persisted.Status,
+		)
+	}
+	runtime.hub.ProjectTerminal(runID, persisted)
+	return nil
 }
 
 func (run *scenarioManagedRun) Context(ctx context.Context) context.Context {
@@ -97,19 +157,12 @@ func (run *scenarioManagedRun) Context(ctx context.Context) context.Context {
 	})
 }
 
-func (run *scenarioManagedRun) Finish(outcome agentrun.RunOutcome) error {
-	run.mu.Lock()
-	if run.finished {
-		run.mu.Unlock()
-		return fmt.Errorf("scenario run %q is already finished", run.start.RunID)
-	}
-	run.finished = true
-	run.mu.Unlock()
-	if run.ownsTrace {
-		run.trace.Close()
-	}
-	run.runtime.hub.Complete(run.start.RunID, outcome)
-	return nil
+func (run *scenarioManagedRun) Release() {
+	run.release.Do(func() {
+		if run.ownsTrace {
+			run.trace.Close()
+		}
+	})
 }
 
 func beginExecutionTrace(ctx context.Context) (*runtrace.Scope, bool) {
@@ -148,14 +201,14 @@ func (runtime *DefinitionRuntime) createRun(
 	start agentapi.RunStart,
 	execution definitionExecution,
 ) error {
-	if runtime.runStore == nil {
+	if runtime.scenarios == nil || runtime.scenarios.runStore == nil {
 		return nil
 	}
 	mode := "single"
 	if start.Correlation.WorkflowRunID != "" {
 		mode = "workflow"
 	}
-	if err := runtime.runStore.Create(agentrun.RunRecord{
+	if err := runtime.scenarios.runStore.Create(agentrun.RunRecord{
 		ID: start.RunID, RunKind: agentrun.RunKindAgent, UserID: start.Actor.UserID,
 		SessionID: start.Correlation.SessionID,
 		AgentID:   execution.snapshot.AgentID, DefinitionVersion: execution.snapshot.DefinitionVersion,
@@ -235,7 +288,7 @@ func (run *definitionManagedRun) Execute(
 		AnswerMaxTokens:     execution.definition.Model.MaxOutputTokens,
 		ConclusionMaxTokens: execution.definition.Model.MaxOutputTokens,
 		ContextWindow:       execution.snapshot.Budget.ContextTokens,
-		MaxContinueRounds:   run.runtime.settings.maxContinueRounds,
+		MaxContinueRounds:   execution.definition.Budget.MaxContinueRounds,
 		ModelParameters:     execution.modelParameters,
 	}, observer, run.runtime.hub)
 	loop.SetOnFirstAnswerToken(func(runID string) {

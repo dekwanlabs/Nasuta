@@ -65,6 +65,22 @@ func TestPrepareRejectsUnknownAndExpandedPermissionScopes(t *testing.T) {
 	}
 }
 
+func TestPrepareValidatesJoinModeOwnership(t *testing.T) {
+	definition := testWorkflow()
+	definition.Nodes[0].JoinMode = JoinEvidenceView
+	if _, err := Prepare(definition, testSchemaRegistry(t)); err == nil ||
+		!strings.Contains(err.Error(), "cannot use join mode") {
+		t.Fatalf("non-join mode error = %v", err)
+	}
+
+	definition = testWorkflow()
+	definition.Nodes[2].JoinMode = JoinMode("unsupported")
+	if _, err := Prepare(definition, testSchemaRegistry(t)); err == nil ||
+		!strings.Contains(err.Error(), "join node") {
+		t.Fatalf("unsupported join mode error = %v", err)
+	}
+}
+
 func TestTopologicalOrderIsStableByNodeID(t *testing.T) {
 	order, err := TopologicalOrder(testWorkflow(), testSchemaRegistry(t))
 	if err != nil {
@@ -93,7 +109,7 @@ func TestIntersectPermissionsNeverExpandsScopes(t *testing.T) {
 	}
 }
 
-func TestOrchestratorRunsParallelWaveAndJoinsByProducerNodeID(t *testing.T) {
+func TestOrchestratorRunsParallelWaveAndJoinsByDeclaredEdgeOrder(t *testing.T) {
 	executor := &recordingExecutor{started: make(chan string, 2), release: make(chan struct{})}
 	orchestrator := NewOrchestrator(testSchemaRegistry(t), executor, nil)
 	done := make(chan struct{})
@@ -121,7 +137,7 @@ func TestOrchestratorRunsParallelWaveAndJoinsByProducerNodeID(t *testing.T) {
 	if err := json.Unmarshal(result.Output.Payload, &payloads); err != nil {
 		t.Fatal(err)
 	}
-	if payloads[0]["node"] != "review.a" || payloads[1]["node"] != "review.b" {
+	if payloads[0]["node"] != "review.b" || payloads[1]["node"] != "review.a" {
 		t.Fatalf("join order=%v", payloads)
 	}
 }
@@ -234,7 +250,7 @@ func TestOrchestratorAggregatesParallelChildRunTrace(t *testing.T) {
 		}
 	}
 	producers, ok := aggregate.Input["producer_node_ids"].([]string)
-	if !ok || !reflect.DeepEqual(producers, []string{"review.a", "review.b"}) ||
+	if !ok || !reflect.DeepEqual(producers, []string{"review.b", "review.a"}) ||
 		aggregate.WorkflowNodeID != "synthesize" {
 		t.Fatalf("aggregate = %#v", aggregate)
 	}

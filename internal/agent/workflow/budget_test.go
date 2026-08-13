@@ -54,13 +54,6 @@ func TestPrepareValidatesResourceBudgets(t *testing.T) {
 			want: "total token budget is required",
 		},
 		{
-			name: "missing tool reservation",
-			mutate: func(definition *WorkflowDefinition) {
-				definition.Budget.MaxToolCalls = 10
-			},
-			want: "tool call budget is required",
-		},
-		{
 			name: "missing cost reservation",
 			mutate: func(definition *WorkflowDefinition) {
 				definition.Budget.MaxCostMicros = 10

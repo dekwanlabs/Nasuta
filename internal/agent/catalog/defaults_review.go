@@ -52,12 +52,15 @@ func DefaultReviewersVersion(settings *config.PlatformSettings, version int64) (
 			OutputSchema: agentapi.SchemaRef{ID: spec.outputSchema, Version: 1},
 			Model: agentapi.ModelPolicy{
 				Provider: settings.LLMProvider, Model: settings.LLMModel,
-				MaxOutputTokens: settings.LLMAnswerMaxTokens,
+				MaxOutputTokens:                   settings.LLMAnswerMaxTokens,
+				InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
+				OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
 			},
 			Budget: agentapi.BudgetPolicy{
-				Timeout:       time.Duration(settings.AgentTimeout),
-				MaxSteps:      settings.AgentMaxSteps,
-				ContextTokens: settings.LLMContextWindow,
+				Timeout:           time.Duration(settings.AgentTimeout),
+				MaxSteps:          settings.AgentMaxSteps,
+				ContextTokens:     settings.LLMContextWindow,
+				MaxContinueRounds: settings.LLMMaxContinueRounds,
 			},
 			Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
 		})

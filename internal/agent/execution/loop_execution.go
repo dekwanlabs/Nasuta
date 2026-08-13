@@ -88,7 +88,7 @@ func (agent *Agent) prepareCompiledLoop(
 		answerToolSources:   make(map[int]string),
 		result:              result,
 		seenTools:           map[string]bool{},
-		evidenceLedger:      newRunEvidenceLedger(input.EvidenceUnits),
+		evidenceLedger:      newRunEvidenceLedger(input.EvidenceUnits, input.EvidenceConflicts),
 		remainingToolTokens: initialToolTokenBudget(agent, messages, tools),
 		stepLimit:           maxSteps,
 	}
@@ -156,6 +156,11 @@ func (agent *Agent) finishCompiledLoop(state *compiledLoop) {
 			state.runID, state.result.Steps)
 		agent.concludeCompiledLoop(state)
 	}
+	agent.finalizeCompiledLoop(state)
+}
+
+func (agent *Agent) finalizeCompiledLoop(state *compiledLoop) {
+	state.result.EvidenceUnits, state.result.EvidenceConflicts = state.evidenceLedger.snapshot()
 	state.result.Evidence.Finalize(state.input.Direct)
 	log.InfofCtx(state.ctx, "[agent] run %s end: steps=%d answerLen=%d aborted=%v err=%v",
 		state.runID, state.result.Steps, len(state.result.Answer), state.result.Aborted, state.result.Err)

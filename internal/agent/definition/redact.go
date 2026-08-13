@@ -9,6 +9,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type redactingDefinitionObserver struct {
@@ -79,6 +80,8 @@ func redactDefinitionResult(result agentapi.RunResult) agentapi.RunResult {
 	result.Text = platform.RedactSensitiveText(result.Text)
 	result.References = redactPublicReferences(result.References)
 	result.Messages = redactPublicMessages(result.Messages)
+	result.EvidenceUnits = redactEvidenceUnits(result.EvidenceUnits)
+	result.EvidenceConflicts = redactEvidenceConflicts(result.EvidenceConflicts)
 	if result.Error != nil {
 		copied := *result.Error
 		copied.Message = platform.RedactSensitiveText(copied.Message)
@@ -143,7 +146,54 @@ func redactContextBlocks(blocks []agentapi.ContextBlock) []agentapi.ContextBlock
 		block.Content = platform.RedactSensitiveText(block.Content)
 		block.ContentHash = hashString(block.Content)
 		block.References = redactPublicReferences(block.References)
+		block.Evidence = redactEvidenceUnits(block.Evidence)
+		block.EvidenceConflicts = redactEvidenceConflicts(block.EvidenceConflicts)
 		redacted[index] = block
+	}
+	return redacted
+}
+
+func redactEvidenceConflicts(conflicts []agentapi.EvidenceConflict) []agentapi.EvidenceConflict {
+	redacted := make([]agentapi.EvidenceConflict, len(conflicts))
+	for index, conflict := range conflicts {
+		conflict.Identity.SourceKind = platform.RedactSensitiveText(conflict.Identity.SourceKind)
+		conflict.Identity.Target = platform.RedactSensitiveText(conflict.Identity.Target)
+		conflict.Identity.Section = platform.RedactSensitiveText(conflict.Identity.Section)
+		conflict.Identity.Version = platform.RedactSensitiveText(conflict.Identity.Version)
+		conflict.Identity.TimeRange = platform.RedactSensitiveText(conflict.Identity.TimeRange)
+		conflict.Current = redactEvidenceUnit(conflict.Current)
+		conflict.Incoming = redactEvidenceUnit(conflict.Incoming)
+		conflict.CurrentOrigin = platform.RedactSensitiveText(conflict.CurrentOrigin)
+		conflict.IncomingOrigin = platform.RedactSensitiveText(conflict.IncomingOrigin)
+		redacted[index] = conflict
+	}
+	return redacted
+}
+
+func redactEvidenceUnits(units []tool.EvidenceUnit) []tool.EvidenceUnit {
+	redacted := make([]tool.EvidenceUnit, len(units))
+	for index, unit := range units {
+		redacted[index] = redactEvidenceUnit(unit)
+	}
+	return redacted
+}
+
+func redactEvidenceUnit(unit tool.EvidenceUnit) tool.EvidenceUnit {
+	unit.SourceKind = platform.RedactSensitiveText(unit.SourceKind)
+	unit.Target = platform.RedactSensitiveText(unit.Target)
+	unit.Sections = redactStrings(unit.Sections)
+	unit.Facets = redactStrings(unit.Facets)
+	unit.EvidenceClass = platform.RedactSensitiveText(unit.EvidenceClass)
+	unit.Version = platform.RedactSensitiveText(unit.Version)
+	unit.TimeRange = platform.RedactSensitiveText(unit.TimeRange)
+	unit.Coverage.NextCursor = platform.RedactSensitiveText(unit.Coverage.NextCursor)
+	return unit
+}
+
+func redactStrings(values []string) []string {
+	redacted := make([]string, len(values))
+	for index, value := range values {
+		redacted[index] = platform.RedactSensitiveText(value)
 	}
 	return redacted
 }

@@ -457,6 +457,8 @@ var mysqlSchema = map[MySQLGroup][]string{
 				schema_version       BIGINT NOT NULL,
 				payload_json         JSON NOT NULL,
 				references_json      JSON NOT NULL,
+				evidence_units_json  JSON NOT NULL,
+				evidence_conflicts_json JSON NOT NULL,
 				completeness         VARCHAR(16) NOT NULL,
 				content_hash         CHAR(64) NOT NULL,
 				created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

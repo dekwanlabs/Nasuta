@@ -41,19 +41,22 @@ func DefaultInvestigatorsVersion(settings *config.PlatformSettings, version int6
 			Prompt: agentapi.PromptSpec{
 				System: investigationReportPrompt(spec.focus, rolePrompt), Version: "investigation-report-v1",
 			},
-			InputSchema:  agentapi.SchemaRef{ID: "investigation.request", Version: 1},
+			InputSchema:  agentapi.SchemaRef{ID: "task.contract", Version: 1},
 			OutputSchema: agentapi.SchemaRef{ID: "investigation.report", Version: 1},
 			Model: agentapi.ModelPolicy{
 				Provider: settings.LLMProvider, Model: settings.LLMModel,
-				MaxOutputTokens: settings.LLMAnswerMaxTokens,
+				MaxOutputTokens:                   settings.LLMAnswerMaxTokens,
+				InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
+				OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
 			},
 			Tools: agentapi.ToolPolicy{
 				VisibleToolIDs: append([]string(nil), spec.tools...), RestrictVisible: true,
 			},
 			Budget: agentapi.BudgetPolicy{
-				Timeout:       time.Duration(settings.AgentTimeout),
-				MaxSteps:      settings.AgentMaxSteps,
-				ContextTokens: settings.LLMContextWindow,
+				Timeout:           time.Duration(settings.AgentTimeout),
+				MaxSteps:          settings.AgentMaxSteps,
+				ContextTokens:     settings.LLMContextWindow,
+				MaxContinueRounds: settings.LLMMaxContinueRounds,
 			},
 			Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
 		})
@@ -73,13 +76,16 @@ func DefaultInvestigatorsVersion(settings *config.PlatformSettings, version int6
 		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
 		Model: agentapi.ModelPolicy{
 			Provider: settings.LLMProvider, Model: settings.LLMModel,
-			MaxOutputTokens: settings.LLMAnswerMaxTokens,
+			MaxOutputTokens:                   settings.LLMAnswerMaxTokens,
+			InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
+			OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
 		},
 		Tools: agentapi.ToolPolicy{VisibleToolIDs: []string{}, RestrictVisible: true},
 		Budget: agentapi.BudgetPolicy{
-			Timeout:       time.Duration(settings.AgentTimeout),
-			MaxSteps:      settings.AgentMaxSteps,
-			ContextTokens: settings.LLMContextWindow,
+			Timeout:           time.Duration(settings.AgentTimeout),
+			MaxSteps:          settings.AgentMaxSteps,
+			ContextTokens:     settings.LLMContextWindow,
+			MaxContinueRounds: settings.LLMMaxContinueRounds,
 		},
 		Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
 	})

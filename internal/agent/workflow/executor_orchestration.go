@@ -7,8 +7,19 @@ import (
 	"sync"
 	"time"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
+
+type capabilityLimitKey struct {
+	id      string
+	version int64
+}
+
+type capabilityLimiter struct {
+	max    int
+	tokens chan struct{}
+}
 
 func (orchestrator *Orchestrator) runPrepared(
 	ctx context.Context,
@@ -103,7 +114,9 @@ func (orchestrator *Orchestrator) runPrepared(
 		output, err = PrepareHandoff(Handoff{
 			WorkflowRunID: request.RunID, ProducerNodeID: "workflow.output",
 			Schema: definition.OutputSchema, Payload: output.Payload,
-			References: output.References, Completeness: output.Completeness,
+			References: output.References, EvidenceUnits: output.EvidenceUnits,
+			EvidenceConflicts: output.EvidenceConflicts,
+			Completeness:      output.Completeness,
 		}, definition.Budget.MaxHandoffBytes, orchestrator.schemas)
 		if err != nil {
 			return Result{}, fmt.Errorf("workflow %q output: %w", definition.ID, err)
@@ -132,6 +145,13 @@ func (orchestrator *Orchestrator) dispatchWave(
 		dispatchInput{definition: definition, ready: ready},
 		func(ctx context.Context, _ dispatchInput) (dispatchOutput, error) {
 			wave := make([]nodeOutcome, len(ready))
+			capabilityLimiters, err := orchestrator.limitersForWave(
+				ready,
+				metadata.nodes,
+			)
+			if err != nil {
+				return dispatchOutput{}, err
+			}
 			var waitGroup sync.WaitGroup
 			semaphore := make(chan struct{}, definition.Budget.MaxParallelism)
 			for index, nodeID := range ready {
@@ -139,6 +159,15 @@ func (orchestrator *Orchestrator) dispatchWave(
 				waitGroup.Add(1)
 				go func() {
 					defer waitGroup.Done()
+					if limiter := capabilityLimiters[capabilityKey(node.Capability)]; limiter != nil {
+						select {
+						case limiter.tokens <- struct{}{}:
+							defer func() { <-limiter.tokens }()
+						case <-ctx.Done():
+							wave[index].err = ctx.Err()
+							return
+						}
+					}
 					select {
 					case semaphore <- struct{}{}:
 						defer func() { <-semaphore }()
@@ -164,6 +193,64 @@ func (orchestrator *Orchestrator) dispatchWave(
 		},
 	)
 	return result.outcomes, err
+}
+
+func (orchestrator *Orchestrator) limitersForWave(
+	ready []string,
+	nodes map[string]NodeDefinition,
+) (map[capabilityLimitKey]*capabilityLimiter, error) {
+	limits := make(map[capabilityLimitKey]int)
+	for _, nodeID := range ready {
+		node := nodes[nodeID]
+		if node.Capability.ID == "" {
+			continue
+		}
+		key := capabilityKey(node.Capability)
+		if published, exists := limits[key]; exists &&
+			published != node.CapabilityMaxConcurrency {
+			return nil, fmt.Errorf(
+				"capability %q version %d concurrency limit changed from %d to %d",
+				key.id,
+				key.version,
+				published,
+				node.CapabilityMaxConcurrency,
+			)
+		}
+		limits[key] = node.CapabilityMaxConcurrency
+	}
+	orchestrator.capabilityMu.Lock()
+	defer orchestrator.capabilityMu.Unlock()
+	if orchestrator.capabilityLimiters == nil {
+		orchestrator.capabilityLimiters = make(
+			map[capabilityLimitKey]*capabilityLimiter,
+		)
+	}
+	resolved := make(map[capabilityLimitKey]*capabilityLimiter, len(limits))
+	for key, maxConcurrency := range limits {
+		limiter, exists := orchestrator.capabilityLimiters[key]
+		if exists && limiter.max != maxConcurrency {
+			return nil, fmt.Errorf(
+				"capability %q version %d concurrency limit changed from %d to %d",
+				key.id,
+				key.version,
+				limiter.max,
+				maxConcurrency,
+			)
+		}
+		if !exists {
+			limiter = &capabilityLimiter{
+				max:    maxConcurrency,
+				tokens: make(chan struct{}, maxConcurrency),
+			}
+			orchestrator.capabilityLimiters[key] = limiter
+		}
+		resolved[key] = limiter
+	}
+	return resolved, nil
+}
+
+func capabilityKey(ref agentapi.CapabilityRef) capabilityLimitKey {
+	return capabilityLimitKey{id: ref.ID, version: ref.Version}
 }
 
 func (orchestrator *Orchestrator) executeNode(

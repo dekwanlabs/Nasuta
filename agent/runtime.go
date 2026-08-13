@@ -21,13 +21,14 @@ type Correlation struct {
 }
 
 type ContextBlock struct {
-	Source      string              `json:"source"`
-	Title       string              `json:"title"`
-	Content     string              `json:"content"`
-	References  []Reference         `json:"references,omitempty"`
-	Evidence    []tool.EvidenceUnit `json:"evidence,omitempty"`
-	Complete    bool                `json:"complete"`
-	ContentHash string              `json:"content_hash"`
+	Source            string              `json:"source"`
+	Title             string              `json:"title"`
+	Content           string              `json:"content"`
+	References        []Reference         `json:"references,omitempty"`
+	Evidence          []tool.EvidenceUnit `json:"evidence,omitempty"`
+	EvidenceConflicts []EvidenceConflict  `json:"evidence_conflicts,omitempty"`
+	Complete          bool                `json:"complete"`
+	ContentHash       string              `json:"content_hash"`
 }
 
 type Reference struct {
@@ -168,16 +169,36 @@ type EvidenceSummary struct {
 	OmittedItemCount   int    `json:"omitted_item_count"`
 }
 
+// EvidenceIdentity identifies one independently coverable evidence unit.
+type EvidenceIdentity struct {
+	SourceKind string `json:"source_kind"`
+	Target     string `json:"target"`
+	Section    string `json:"section,omitempty"`
+	Version    string `json:"version,omitempty"`
+	TimeRange  string `json:"time_range,omitempty"`
+}
+
+// EvidenceConflict preserves competing authoritative versions for one identity.
+type EvidenceConflict struct {
+	Identity       EvidenceIdentity  `json:"identity"`
+	Current        tool.EvidenceUnit `json:"current"`
+	Incoming       tool.EvidenceUnit `json:"incoming"`
+	CurrentOrigin  string            `json:"current_origin,omitempty"`
+	IncomingOrigin string            `json:"incoming_origin,omitempty"`
+}
+
 type RunResult struct {
-	RunID      string          `json:"run_id"`
-	Status     RunStatus       `json:"status"`
-	Output     json.RawMessage `json:"output,omitempty"`
-	Text       string          `json:"text,omitempty"`
-	Evidence   EvidenceSummary `json:"evidence"`
-	References []Reference     `json:"references,omitempty"`
-	Messages   []Message       `json:"messages,omitempty"`
-	Usage      Usage           `json:"usage"`
-	Error      *RunError       `json:"error,omitempty"`
+	RunID             string              `json:"run_id"`
+	Status            RunStatus           `json:"status"`
+	Output            json.RawMessage     `json:"output,omitempty"`
+	Text              string              `json:"text,omitempty"`
+	Evidence          EvidenceSummary     `json:"evidence"`
+	EvidenceUnits     []tool.EvidenceUnit `json:"evidence_units,omitempty"`
+	EvidenceConflicts []EvidenceConflict  `json:"evidence_conflicts,omitempty"`
+	References        []Reference         `json:"references,omitempty"`
+	Messages          []Message           `json:"messages,omitempty"`
+	Usage             Usage               `json:"usage"`
+	Error             *RunError           `json:"error,omitempty"`
 }
 
 // Runtime executes one already-compiled request against a pinned definition.

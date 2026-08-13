@@ -3,10 +3,10 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 )
 
 func (orchestrator *Orchestrator) validateNodeInputs(
@@ -87,6 +87,7 @@ func (orchestrator *Orchestrator) approvalHandoff(
 			runID,
 			node.ID,
 			node.OutputSchema,
+			JoinPayloadList,
 			inputs,
 			definition.Budget.MaxHandoffBytes,
 			orchestrator.schemas,
@@ -101,6 +102,7 @@ func (orchestrator *Orchestrator) approvalHandoff(
 	return PrepareHandoff(Handoff{
 		WorkflowRunID: runID, ProducerNodeID: node.ID, Schema: node.OutputSchema,
 		Payload: input.Payload, References: input.References,
+		EvidenceUnits: input.EvidenceUnits, EvidenceConflicts: input.EvidenceConflicts,
 		Completeness: input.Completeness, CreatedAt: decidedAt,
 	}, definition.Budget.MaxHandoffBytes, orchestrator.schemas)
 }
@@ -123,19 +125,15 @@ func joinHandoffs(
 	runID,
 	producer string,
 	schema agentapi.SchemaRef,
+	mode JoinMode,
 	inputs []Handoff,
 	maxBytes int64,
 	schemas *agentapi.SchemaRegistry,
 ) (Handoff, error) {
-	ordered := append([]Handoff(nil), inputs...)
-	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].ProducerNodeID < ordered[j].ProducerNodeID
-	})
-	payloads := make([]json.RawMessage, 0, len(ordered))
 	references := make([]agentapi.Reference, 0)
+	evidenceUnits, evidenceConflicts := mergeHandoffEvidence(inputs)
 	completeness := Complete
-	for _, input := range ordered {
-		payloads = append(payloads, append(json.RawMessage(nil), input.Payload...))
+	for _, input := range inputs {
 		references = append(references, input.References...)
 		if input.Completeness == Unavailable {
 			completeness = Unavailable
@@ -143,13 +141,21 @@ func joinHandoffs(
 			completeness = Partial
 		}
 	}
-	payload, err := json.Marshal(payloads)
+	payload, err := joinedPayload(
+		mode,
+		inputs,
+		evidenceUnits,
+		evidenceConflicts,
+		completeness,
+	)
 	if err != nil {
-		return Handoff{}, fmt.Errorf("marshal joined handoffs: %w", err)
+		return Handoff{}, err
 	}
 	return PrepareHandoff(Handoff{
 		WorkflowRunID: runID, ProducerNodeID: producer, Schema: schema,
-		Payload: payload, References: references, Completeness: completeness,
+		Payload: payload, References: references,
+		EvidenceUnits: evidenceUnits, EvidenceConflicts: evidenceConflicts,
+		Completeness: completeness,
 	}, maxBytes, schemas)
 }
 
@@ -167,6 +173,8 @@ func cloneHandoffMap(source map[string]Handoff) map[string]Handoff {
 	for nodeID, handoff := range source {
 		handoff.Payload = append(json.RawMessage(nil), handoff.Payload...)
 		handoff.References = append([]agentapi.Reference(nil), handoff.References...)
+		handoff.EvidenceUnits = evidence.CloneUnits(handoff.EvidenceUnits)
+		handoff.EvidenceConflicts = cloneEvidenceConflicts(handoff.EvidenceConflicts)
 		cloned[nodeID] = handoff
 	}
 	return cloned

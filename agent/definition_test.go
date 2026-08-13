@@ -40,6 +40,15 @@ func TestPrepareDefinitionIsDeterministicAndDetached(t *testing.T) {
 	if first.ContentHash == preparedPriced.ContentHash {
 		t.Fatal("model prices did not change the definition content hash")
 	}
+	continued := definition
+	continued.Budget.MaxContinueRounds = 1
+	preparedContinued, err := Prepare(continued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ContentHash == preparedContinued.ContentHash {
+		t.Fatal("continuation policy did not change the definition content hash")
+	}
 	definition.Tools.VisibleToolIDs[0] = "changed"
 	if first.Tools.VisibleToolIDs[0] != "search_code" {
 		t.Fatal("prepared definition retained caller-owned tool slice")

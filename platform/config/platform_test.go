@@ -118,6 +118,19 @@ func TestCanonicalLLMContextWindow(t *testing.T) {
 	}
 }
 
+func TestAgentModelPricesMustBeConfiguredTogether(t *testing.T) {
+	settings := PlatformSettings{AgentTimeout: Duration(time.Minute)}
+	settings.Apply(nil)
+	settings.LLMInputPriceMicrosPerMillionTokens = 1
+	if err := settings.ValidateAgentSettings(); err == nil {
+		t.Fatal("input-only model pricing was accepted")
+	}
+	settings.LLMOutputPriceMicrosPerMillionTokens = 2
+	if err := settings.ValidateAgentSettings(); err != nil {
+		t.Fatalf("complete model pricing: %v", err)
+	}
+}
+
 func TestCanonicalAgentAnswerReserveRequiresPositiveDuration(t *testing.T) {
 	got, err := CanonicalPlatformSetting("agent_answer_reserve", "30s")
 	if err != nil || got != "30s" {
@@ -184,10 +197,12 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"llm_provider": "openai", "llm_max_tokens": "0", "llm_api_key": "key",
 		"llm_answer_max_tokens": "1", "agent_conclusion_max_tokens": "1",
 		"llm_max_continue_rounds": "0", "llm_context_window": "128000", "agent_answer_reserve": "30s",
+		"llm_input_price_micros_per_million_tokens":  "0",
+		"llm_output_price_micros_per_million_tokens": "0",
 		"agent_timeout": "5m", "agent_max_steps": "1", "context_budget": "1", "domain_knowledge": "domain",
 		"retrieval_router_direct_min_confidence": "0.9", "retrieval_router_max_tokens": "512",
 		"tool_pruning_enabled": "false",
-		"rerank_enabled": "true", "rerank_pool": "1", "rerank_topk": "1", "rerank_min_score": "0.1",
+		"rerank_enabled":       "true", "rerank_pool": "1", "rerank_topk": "1", "rerank_min_score": "0.1",
 		"rerank_min_dense_preflight": "0", "runbook_min_score": "0.2", "code_min_score": "1",
 		"rerank_max_per_service": "1", "rerank_max_per_service_low_band": "1", "rerank_provider": "provider",
 		"rerank_api_key": "key", "rerank_model": "model", "rerank_base_url": "https://example.test",
@@ -211,6 +226,7 @@ func TestCanonicalPlatformSettingRejectsInvalidTypedValues(t *testing.T) {
 	invalid := map[string]string{
 		"llm_provider": "other", "rerank_enabled": "yes", "agent_timeout": "soon",
 		"agent_max_steps": "zero", "rerank_min_score": "1.1", "vcs_clone_concurrency": "-1",
+		"llm_input_price_micros_per_million_tokens": "-1",
 	}
 	for key, value := range invalid {
 		if _, err := CanonicalPlatformSetting(key, value); err == nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
@@ -88,6 +89,95 @@ func (rs *RunStore) Get(id string) (*RunDetail, error) {
 	return rs.get(id, nil)
 }
 
+// GetControlForUser enforces ownership without loading execution history.
+func (rs *RunStore) GetControlForUser(id string, userID int64) (RunControlRecord, error) {
+	var record RunControlRecord
+	err := rs.db.QueryRow(
+		`SELECT id,run_kind,status,workflow_run_id,user_id
+		 FROM agent_runs WHERE id=? AND user_id=? LIMIT 1`,
+		id,
+		userID,
+	).Scan(
+		&record.ID,
+		&record.RunKind,
+		&record.Status,
+		&record.WorkflowRunID,
+		&record.UserID,
+	)
+	return record, err
+}
+
+// GetQAParent loads one parent without loading child steps or model calls.
+func (rs *RunStore) GetQAParent(id string) (QAParentRecord, error) {
+	return rs.getQAParent(id, nil)
+}
+
+// GetQAParentForUser enforces ownership at the parent read boundary.
+func (rs *RunStore) GetQAParentForUser(id string, userID int64) (QAParentRecord, error) {
+	return rs.getQAParent(id, &userID)
+}
+
+func (rs *RunStore) getQAParent(id string, userID *int64) (QAParentRecord, error) {
+	query := `SELECT id,workflow_run_id,user_id,session_id,question,status,started_at,ended_at
+		FROM agent_runs WHERE id=? AND run_kind=?`
+	args := []any{id, RunKindQAParent}
+	if userID != nil {
+		query += " AND user_id=?"
+		args = append(args, *userID)
+	}
+	return scanQAParent(rs.db.QueryRow(query, args...))
+}
+
+// ListActiveQAParents returns one bounded page ordered by a stable keyset.
+func (rs *RunStore) ListActiveQAParents(
+	startedBefore time.Time,
+	cursor QAParentCursor,
+	limit int,
+) ([]QAParentRecord, error) {
+	if startedBefore.IsZero() {
+		return nil, fmt.Errorf("list active QA parents: startup cutoff is required")
+	}
+	if limit <= 0 || limit > 200 {
+		return nil, fmt.Errorf("list active QA parents: limit must be between 1 and 200")
+	}
+	query := `SELECT id,workflow_run_id,user_id,session_id,question,status,started_at,ended_at
+		FROM agent_runs
+		WHERE run_kind=? AND status IN (?,?) AND started_at<?`
+	args := []any{
+		RunKindQAParent,
+		RunStatusRunning,
+		RunStatusPaused,
+		store.DatabaseTime(startedBefore.UTC().Format(time.RFC3339Nano)),
+	}
+	if cursor.StartedAt != "" || cursor.ID != "" {
+		if cursor.StartedAt == "" || cursor.ID == "" {
+			return nil, fmt.Errorf("list active QA parents: incomplete cursor")
+		}
+		query += ` AND (started_at>? OR (started_at=? AND id>?))`
+		startedAt := store.DatabaseTime(cursor.StartedAt)
+		args = append(args, startedAt, startedAt, cursor.ID)
+	}
+	query += ` ORDER BY started_at,id LIMIT ?`
+	args = append(args, limit)
+	rows, err := rs.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	parents := make([]QAParentRecord, 0, limit)
+	for rows.Next() {
+		parent, err := scanQAParent(rows)
+		if err != nil {
+			return nil, err
+		}
+		parents = append(parents, parent)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return parents, nil
+}
+
 // GetForUser loads one run only when it belongs to the requested user.
 func (rs *RunStore) GetForUser(id string, userID int64) (*RunDetail, error) {
 	return rs.get(id, &userID)
@@ -109,6 +199,17 @@ func (rs *RunStore) get(id string, userID *int64) (*RunDetail, error) {
 	r, err := scanRunRecord(rs.db.QueryRow(query, args...))
 	if err != nil {
 		return nil, err
+	}
+	if r.RunKind == RunKindQAParent {
+		detail := &RunDetail{RunRecord: r}
+		if r.Status.Terminal() {
+			terminal, err := loadQAParentTerminal(rs.db, id)
+			if err != nil {
+				return nil, fmt.Errorf("load QA parent %q terminal result: %w", id, err)
+			}
+			detail.Terminal = &terminal
+		}
+		return detail, nil
 	}
 
 	rows, err := rs.db.Query(
@@ -234,4 +335,24 @@ func scanRunRecord(row rowScanner) (RunRecord, error) {
 	record.StartedAt = store.FormatDatabaseTime(startedAt)
 	record.EndedAt = store.FormatDatabaseTime(endedAt)
 	return record, nil
+}
+
+func scanQAParent(row rowScanner) (QAParentRecord, error) {
+	var parent QAParentRecord
+	var startedAt, endedAt sql.NullTime
+	if err := row.Scan(
+		&parent.ID,
+		&parent.WorkflowRunID,
+		&parent.UserID,
+		&parent.SessionID,
+		&parent.Question,
+		&parent.Status,
+		&startedAt,
+		&endedAt,
+	); err != nil {
+		return parent, err
+	}
+	parent.StartedAt = store.FormatDatabaseTime(startedAt)
+	parent.EndedAt = store.FormatDatabaseTime(endedAt)
+	return parent, nil
 }

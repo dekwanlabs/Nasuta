@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 )
 
 func TestServiceExecutionAvailableTracksOrchestrator(t *testing.T) {
@@ -224,6 +225,196 @@ func TestServiceValidatesActorAndScenarioPermissionContracts(t *testing.T) {
 	}
 }
 
+func TestServiceStartPersistsExplicitDetachedContract(t *testing.T) {
+	schemas := testSchemaRegistry(t)
+	catalog := NewCatalog(schemas, testAgentDefinitions(t))
+	definition := singleNodeWorkflow()
+	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
+	definition.Permissions = readOnly
+	definition.Nodes[0].Permissions = readOnly
+	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+		t.Fatal(err)
+	}
+	persistence := &recordingWorkflowPersistence{}
+	service, err := NewService(
+		catalog,
+		persistence,
+		NewOrchestrator(schemas, staticOutputExecutor{}, nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := service.Start(t.Context(), StartRequest{
+		RunID:               "workflow_detached_1",
+		ParentRunID:         "qa_parent_1",
+		Workflow:            DefinitionRef{ID: definition.ID, Version: definition.Version},
+		Input:               json.RawMessage(`{"subject":"x"}`),
+		Actor:               agentapi.Actor{UserID: 9, TenantID: "tenant-a"},
+		ActorPermissions:    readOnly,
+		Scenario:            DelegatedInvestigationID,
+		ScenarioPermissions: readOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := service.AwaitTerminal(t.Context(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Run.Status != RunSucceeded || terminal.Output == nil {
+		t.Fatalf("terminal = %+v", terminal)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	started := persistence.startedRun
+	if started.ParentRunID != "qa_parent_1" ||
+		started.Scenario != DelegatedInvestigationID ||
+		started.ActorUserID != 9 ||
+		started.ActorTenantID != "tenant-a" ||
+		len(started.ActorPermissions.Scopes) != 1 ||
+		started.ActorPermissions.Scopes[0] != "knowledge.read" ||
+		len(started.ScenarioPermissions.Scopes) != 1 ||
+		started.ScenarioPermissions.Scopes[0] != "knowledge.read" {
+		t.Fatalf("started run = %+v", started)
+	}
+}
+
+func TestServiceStartPersistsWithDetachedContext(t *testing.T) {
+	schemas := testSchemaRegistry(t)
+	catalog := NewCatalog(schemas, testAgentDefinitions(t))
+	definition := singleNodeWorkflow()
+	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
+	definition.Permissions = readOnly
+	definition.Nodes[0].Permissions = readOnly
+	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+		t.Fatal(err)
+	}
+	persistence := &recordingWorkflowPersistence{}
+	service, err := NewService(
+		catalog,
+		persistence,
+		NewOrchestrator(schemas, staticOutputExecutor{}, nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	run, err := service.Start(ctx, StartRequest{
+		RunID:               "workflow_detached_persist",
+		Workflow:            DefinitionRef{ID: definition.ID, Version: definition.Version},
+		Input:               json.RawMessage(`{"subject":"x"}`),
+		Actor:               agentapi.Actor{UserID: 9},
+		ActorPermissions:    readOnly,
+		Scenario:            DelegatedInvestigationID,
+		ScenarioPermissions: readOnly,
+	})
+	if err != nil {
+		t.Fatalf("Start with cancelled caller context: %v", err)
+	}
+	if _, err := service.AwaitTerminal(t.Context(), run.ID); err != nil {
+		t.Fatalf("AwaitTerminal: %v", err)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if persistence.startContextErr != nil {
+		t.Fatalf("StartWorkflow received cancelled context: %v", persistence.startContextErr)
+	}
+}
+
+func TestServiceStartSurvivesCallerCancellationAndAwaitJoinsPersistence(t *testing.T) {
+	schemas := testSchemaRegistry(t)
+	catalog := NewCatalog(schemas, testAgentDefinitions(t))
+	definition := singleNodeWorkflow()
+	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
+	definition.Permissions = readOnly
+	definition.Nodes[0].Permissions = readOnly
+	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+		t.Fatal(err)
+	}
+	executor := &blockingServiceExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	persistence := &recordingWorkflowPersistence{}
+	service, err := NewService(
+		catalog,
+		persistence,
+		NewOrchestrator(schemas, executor, nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	run, err := service.Start(ctx, StartRequest{
+		RunID:               "workflow_detached_2",
+		Workflow:            DefinitionRef{ID: definition.ID, Version: definition.Version},
+		Input:               json.RawMessage(`{"subject":"x"}`),
+		Actor:               agentapi.Actor{UserID: 9},
+		ActorPermissions:    readOnly,
+		Scenario:            DelegatedInvestigationID,
+		ScenarioPermissions: readOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-executor.started
+	cancel()
+
+	awaited := make(chan TerminalResult, 1)
+	awaitErrors := make(chan error, 1)
+	go func() {
+		terminal, awaitErr := service.AwaitTerminal(t.Context(), run.ID)
+		awaited <- terminal
+		awaitErrors <- awaitErr
+	}()
+	select {
+	case <-awaited:
+		t.Fatal("AwaitTerminal returned before execution completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(executor.release)
+	terminal := <-awaited
+	if err := <-awaitErrors; err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Run.Status != RunSucceeded || terminal.Output == nil {
+		t.Fatalf("terminal = %+v", terminal)
+	}
+}
+
+func TestServiceAwaitTerminalLoadsDurableResultWithoutLocalExecution(t *testing.T) {
+	output := Handoff{
+		ID: "handoff_output", WorkflowRunID: "workflow_recovered_1",
+		ProducerNodeID: "workflow.output", Payload: json.RawMessage(`{"node":"answer"}`),
+	}
+	persistence := &recordingWorkflowPersistence{
+		state: WorkflowRunState{Run: WorkflowRunRecord{
+			ID: "workflow_recovered_1", Status: RunSucceeded,
+		}},
+		finishedOutput: &output,
+	}
+	service, err := NewService(
+		NewCatalog(testSchemaRegistry(t), testAgentDefinitions(t)),
+		persistence,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := service.AwaitTerminal(t.Context(), "workflow_recovered_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Run.Status != RunSucceeded ||
+		terminal.Output == nil ||
+		terminal.Output.ID != "handoff_output" ||
+		persistence.terminalLoads != 1 {
+		t.Fatalf("terminal = %+v loads=%d", terminal, persistence.terminalLoads)
+	}
+}
+
 func TestServicePersistsHumanApprovalAsWaiting(t *testing.T) {
 	schemas := testSchemaRegistry(t)
 	catalog := NewCatalog(schemas, testAgentDefinitions(t))
@@ -333,32 +524,56 @@ type nodeTerminalTransition struct {
 	usage         WorkflowUsage
 }
 
+type blockingServiceExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (executor *blockingServiceExecutor) Execute(
+	ctx context.Context,
+	request NodeRequest,
+) (NodeResult, error) {
+	close(executor.started)
+	select {
+	case <-executor.release:
+		payload, _ := json.Marshal(map[string]string{"node": request.Node.ID})
+		return NodeResult{
+			Handoff: Handoff{Payload: payload, Completeness: Complete},
+		}, nil
+	case <-ctx.Done():
+		return NodeResult{}, ctx.Err()
+	}
+}
+
 type recordingWorkflowPersistence struct {
 	mu sync.Mutex
 
-	startedRun     WorkflowRunRecord
-	startedInput   Handoff
-	activeRuns     []ActiveRunRef
-	startedNodes   []NodeRunRecord
-	succeededNodes []nodeTerminalTransition
-	failedNodes    []nodeTerminalTransition
-	finishedStatus RunStatus
-	finishedOutput *Handoff
-	finishedError  string
-	succeedNodeErr error
-	loadStateErrs  []error
-	loadStateCalls int
-	events         []Event
-	state          WorkflowRunState
+	startedRun      WorkflowRunRecord
+	startedInput    Handoff
+	startContextErr error
+	activeRuns      []ActiveRunRef
+	startedNodes    []NodeRunRecord
+	succeededNodes  []nodeTerminalTransition
+	failedNodes     []nodeTerminalTransition
+	finishedStatus  RunStatus
+	finishedOutput  *Handoff
+	finishedError   string
+	succeedNodeErr  error
+	loadStateErrs   []error
+	loadStateCalls  int
+	terminalLoads   int
+	events          []Event
+	state           WorkflowRunState
 }
 
 func (persistence *recordingWorkflowPersistence) StartWorkflow(
-	_ context.Context,
+	ctx context.Context,
 	run WorkflowRunRecord,
 	input Handoff,
 ) error {
 	persistence.mu.Lock()
 	defer persistence.mu.Unlock()
+	persistence.startContextErr = ctx.Err()
 	persistence.startedRun = cloneWorkflowRunRecord(run)
 	persistence.startedInput = cloneHandoff(input)
 	persistence.state = WorkflowRunState{
@@ -510,6 +725,30 @@ func (persistence *recordingWorkflowPersistence) LoadFullRunState(
 	}
 	state := cloneWorkflowRunState(persistence.state)
 	return &state, nil
+}
+
+func (persistence *recordingWorkflowPersistence) LoadTerminalResult(
+	_ context.Context,
+	workflowRunID string,
+) (TerminalResult, error) {
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	persistence.terminalLoads++
+	if persistence.state.Run.ID != workflowRunID {
+		return TerminalResult{}, ErrNotFound
+	}
+	result := TerminalResult{Run: cloneWorkflowRunRecord(persistence.state.Run)}
+	switch result.Run.Status {
+	case RunRunning, RunWaitingHuman:
+		return TerminalResult{}, ErrConflict
+	case RunSucceeded:
+		if persistence.finishedOutput == nil {
+			return TerminalResult{}, ErrInvariant
+		}
+		output := cloneHandoff(*persistence.finishedOutput)
+		result.Output = &output
+	}
+	return result, nil
 }
 
 func (persistence *recordingWorkflowPersistence) GetRun(
@@ -776,6 +1015,8 @@ func cloneNodeRunRecord(run NodeRunRecord) NodeRunRecord {
 func cloneHandoff(handoff Handoff) Handoff {
 	handoff.Payload = append(json.RawMessage(nil), handoff.Payload...)
 	handoff.References = append([]agentapi.Reference(nil), handoff.References...)
+	handoff.EvidenceUnits = evidence.CloneUnits(handoff.EvidenceUnits)
+	handoff.EvidenceConflicts = cloneEvidenceConflicts(handoff.EvidenceConflicts)
 	return handoff
 }
 

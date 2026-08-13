@@ -152,13 +152,21 @@ func (p *Platform) configureFeatureReviewRuntime(
 ) error {
 	service := p.delivery.service
 	if service == nil {
+		p.flow.coordinator = nil
 		return nil
+	}
+	if p.flow.service != nil {
+		p.flow.coordinator = reviewworkflow.NewCoordinator(
+			service,
+			p.flow.service,
+		)
+	} else {
+		p.flow.coordinator = nil
 	}
 	if settings == nil || !settings.LLMEnabled() {
 		service.SetReviewConfiguration(nil, nil)
 		service.SetAdjudicationRunner(nil)
 		p.flow.review = nil
-		p.flow.coordinator = nil
 		if p.delivery.api != nil {
 			p.delivery.api.SetReviewCoordinator(nil)
 		}
@@ -192,10 +200,6 @@ func (p *Platform) configureFeatureReviewRuntime(
 	service.SetReviewConfiguration(delivery.NewRuntimeReviewRunner(runtime), defaults)
 	service.SetAdjudicationRunner(delivery.NewRuntimeAdjudicationRunner(runtime))
 	p.flow.review = reviewworkflow.NewExecutor(service)
-	p.flow.coordinator = reviewworkflow.NewCoordinator(
-		service,
-		p.flow.service,
-	)
 	if p.delivery.api != nil {
 		p.delivery.api.SetReviewCoordinator(p.flow.coordinator)
 	}

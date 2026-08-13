@@ -407,6 +407,8 @@ create table if not exists Nasuta.handoff_artifacts
     schema_version   bigint                                not null,
     payload_json     json                                  not null,
     references_json  json                                  not null,
+    evidence_units_json json                                not null,
+    evidence_conflicts_json json                            not null,
     completeness     varchar(16)                           not null,
     content_hash     char(64)                              not null,
     created_at       timestamp   default CURRENT_TIMESTAMP not null,

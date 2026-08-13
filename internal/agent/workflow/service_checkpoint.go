@@ -160,5 +160,6 @@ func recoveryRetryAllowed(
 		definition.Permissions,
 		node.Permissions,
 	)
-	return !scope.HasSideEffect(effective.Scopes)
+	return !scope.HasSideEffect(effective.Scopes) ||
+		node.Kind == NodeAgent && node.RetrySafe
 }

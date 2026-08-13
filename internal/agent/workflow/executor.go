@@ -21,6 +21,7 @@ type RunRequest struct {
 	RunID               string
 	ParentRunID         string
 	Input               json.RawMessage
+	InputHandoff        *Handoff
 	Actor               agentapi.Actor
 	ActorPermissions    agentapi.PermissionPolicy
 	ScenarioPermissions agentapi.PermissionPolicy
@@ -123,9 +124,11 @@ type NodeAttemptProgress struct {
 
 // Orchestrator executes stable DAG waves while each node retains an independent context.
 type Orchestrator struct {
-	schemas *agentapi.SchemaRegistry
-	nodes   NodeExecutor
-	gates   map[string]GateEvaluator
+	schemas            *agentapi.SchemaRegistry
+	nodes              NodeExecutor
+	gates              map[string]GateEvaluator
+	capabilityMu       sync.Mutex
+	capabilityLimiters map[capabilityLimitKey]*capabilityLimiter
 }
 
 func NewOrchestrator(
@@ -137,7 +140,12 @@ func NewOrchestrator(
 	for id, gate := range gates {
 		cloned[id] = gate
 	}
-	return &Orchestrator{schemas: schemas, nodes: nodes, gates: cloned}
+	return &Orchestrator{
+		schemas:            schemas,
+		nodes:              nodes,
+		gates:              cloned,
+		capabilityLimiters: make(map[capabilityLimitKey]*capabilityLimiter),
+	}
 }
 
 func (orchestrator *Orchestrator) Run(ctx context.Context, definition WorkflowDefinition, request RunRequest) (Result, error) {
@@ -163,10 +171,7 @@ func (orchestrator *Orchestrator) RunObserved(
 	if err != nil {
 		return Result{}, err
 	}
-	input, err := PrepareHandoff(Handoff{
-		WorkflowRunID: request.RunID, ProducerNodeID: "workflow.input",
-		Schema: prepared.InputSchema, Payload: request.Input, Completeness: Complete,
-	}, prepared.Budget.MaxHandoffBytes, orchestrator.schemas)
+	input, err := orchestrator.prepareInputHandoff(prepared, request)
 	if err != nil {
 		return Result{}, fmt.Errorf("workflow %q input: %w", prepared.ID, err)
 	}
@@ -179,6 +184,32 @@ func (orchestrator *Orchestrator) RunObserved(
 		NodeOutputs: make(map[string]Handoff, len(prepared.Nodes)),
 		Gates:       make(map[string]GateDecision),
 	}, observer)
+}
+
+func (orchestrator *Orchestrator) prepareInputHandoff(
+	definition WorkflowDefinition,
+	request RunRequest,
+) (Handoff, error) {
+	if request.InputHandoff == nil {
+		return PrepareHandoff(Handoff{
+			WorkflowRunID: request.RunID, ProducerNodeID: "workflow.input",
+			Schema: definition.InputSchema, Payload: request.Input, Completeness: Complete,
+		}, definition.Budget.MaxHandoffBytes, orchestrator.schemas)
+	}
+	input, err := PrepareHandoff(
+		*request.InputHandoff,
+		definition.Budget.MaxHandoffBytes,
+		orchestrator.schemas,
+	)
+	if err != nil {
+		return Handoff{}, err
+	}
+	if input.WorkflowRunID != request.RunID ||
+		input.ProducerNodeID != "workflow.input" ||
+		input.Schema != definition.InputSchema {
+		return Handoff{}, fmt.Errorf("prepared workflow input identity does not match the run")
+	}
+	return input, nil
 }
 
 func (orchestrator *Orchestrator) ResumeObserved(

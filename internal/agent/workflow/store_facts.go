@@ -70,21 +70,40 @@ func (workflowStore *Store) CreateNodeRun(ctx context.Context, run NodeRunRecord
 }
 
 func (workflowStore *Store) SaveHandoff(ctx context.Context, handoff Handoff) error {
-	references, err := json.Marshal(handoff.References)
+	references, evidenceUnits, evidenceConflicts, err := marshalHandoffJSON(handoff)
 	if err != nil {
-		return fmt.Errorf("marshal handoff references: %w", err)
+		return err
 	}
 	_, err = workflowStore.db.ExecContext(ctx, `INSERT INTO handoff_artifacts(
 		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-		payload_json,references_json,completeness,content_hash,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		handoff.ID, handoff.WorkflowRunID, handoff.ProducerNodeID, handoff.ProducerRunID,
 		handoff.Schema.ID, handoff.Schema.Version, handoff.Payload, references,
-		handoff.Completeness, handoff.ContentHash,
+		evidenceUnits, evidenceConflicts, handoff.Completeness, handoff.ContentHash,
 		store.DatabaseTime(handoff.CreatedAt.UTC().Format(time.RFC3339)),
 	)
 	if err != nil {
 		return fmt.Errorf("save handoff %q: %w", handoff.ID, err)
 	}
 	return nil
+}
+
+func marshalHandoffJSON(
+	handoff Handoff,
+) ([]byte, []byte, []byte, error) {
+	references, err := json.Marshal(handoff.References)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal handoff references: %w", err)
+	}
+	evidenceUnits, err := json.Marshal(handoff.EvidenceUnits)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal handoff evidence units: %w", err)
+	}
+	evidenceConflicts, err := json.Marshal(handoff.EvidenceConflicts)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal handoff evidence conflicts: %w", err)
+	}
+	return references, evidenceUnits, evidenceConflicts, nil
 }

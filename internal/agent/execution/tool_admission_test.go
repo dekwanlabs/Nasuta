@@ -3,9 +3,11 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -41,7 +43,7 @@ func TestExecuteToolTurnShortCircuitsFullyCoveredSeedScope(t *testing.T) {
 		evidenceLedger: newRunEvidenceLedger([]tool.EvidenceUnit{{
 			SourceKind: "runbook", Target: "doc-a",
 			Coverage: tool.EvidenceCoverage{Complete: true},
-		}}),
+		}}, nil),
 		answerContract: &exactAnswerContract{},
 	}
 	agent.executeToolTurn(state, []llm.ToolCall{{
@@ -68,13 +70,108 @@ func TestEvidenceLedgerFullTargetCoversSectionRequest(t *testing.T) {
 	ledger := newRunEvidenceLedger([]tool.EvidenceUnit{{
 		SourceKind: "runbook", Target: "doc-a",
 		Coverage: tool.EvidenceCoverage{Complete: true},
-	}})
+	}}, nil)
 	keys, covered := ledger.fullyCovers(tool.EvidenceScope{
 		SourceKind: "runbook", Target: "doc-a",
 		Sections: []string{"overview"},
 	})
-	if !covered || len(keys) != 1 || keys[0].section != "" {
+	if !covered || len(keys) != 1 || keys[0].Section != "" {
 		t.Fatalf("keys = %#v covered=%t", keys, covered)
+	}
+}
+
+func TestFinalizeCompiledLoopPropagatesSeedConflictOnce(t *testing.T) {
+	seed := tool.EvidenceUnit{
+		SourceKind: "runtime", Target: "trace-1", ContentHash: "version-a",
+	}
+	conflict := evidence.Conflict{
+		Key:     evidence.Key{SourceKind: "runtime", Target: "trace-1"},
+		Current: seed,
+		Incoming: tool.EvidenceUnit{
+			SourceKind: "runtime", Target: "trace-1", ContentHash: "version-b",
+		},
+		CurrentOrigin: "retrieval", IncomingOrigin: "preload",
+	}
+	ledger := newRunEvidenceLedger(
+		[]tool.EvidenceUnit{seed},
+		[]evidence.Conflict{conflict, conflict},
+	)
+	if conflicts := ledger.add([]tool.EvidenceUnit{conflict.Incoming}, "tool"); len(conflicts) != 0 {
+		t.Fatalf("propagated conflict was reported again: %#v", conflicts)
+	}
+	state := &compiledLoop{
+		ctx:            t.Context(),
+		input:          Input{Direct: true},
+		result:         &RunResult{},
+		evidenceLedger: ledger,
+	}
+	NewAgent(nil, nil, AgentConfig{}, nil, nil).finalizeCompiledLoop(state)
+	if len(state.result.EvidenceConflicts) != 1 ||
+		state.result.EvidenceConflicts[0].Incoming.ContentHash != "version-b" {
+		t.Fatalf("run result conflicts = %#v", state.result.EvidenceConflicts)
+	}
+}
+
+func TestExecuteToolTurnSurfacesEvidenceConflictAsPartial(t *testing.T) {
+	registry := tool.NewRegistry()
+	if err := registry.Register(tool.Tool{
+		ID: "read_trace", Kind: tool.KindRead,
+		Description: "read one trace",
+		InputSchema: objectSchema(map[string]any{
+			"trace_id": propString("trace id"),
+		}, []string{"trace_id"}),
+		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
+			return tool.Result{
+				Content: "incoming trace",
+				EvidenceUnits: []tool.EvidenceUnit{{
+					SourceKind: "runtime", Target: "trace-1", ContentHash: "hash-b",
+					Coverage: tool.EvidenceCoverage{Complete: true},
+				}},
+				Coverage: tool.EvidenceCoverage{Complete: true},
+			}, nil
+		}),
+	}); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	snapshot := registry.Snapshot(tool.ReadPolicy())
+	observer := &captureObserver{}
+	agent := NewAgent(nil, NewToolExecutor(registry), AgentConfig{}, observer, nil)
+	ledger := newRunEvidenceLedger([]tool.EvidenceUnit{{
+		SourceKind: "runtime", Target: "trace-1", ContentHash: "hash-a",
+		Coverage: tool.EvidenceCoverage{Complete: true},
+	}}, nil)
+	state := &compiledLoop{
+		ctx: t.Context(), runCtx: t.Context(), loopCtx: t.Context(), runID: "run-conflict",
+		toolSnapshot: snapshot, tools: agent.executor.Definitions(snapshot),
+		result: &RunResult{}, seenTools: map[string]bool{}, remainingToolTokens: -1,
+		evidenceLedger: ledger, answerContract: &exactAnswerContract{},
+	}
+	agent.executeToolTurn(state, []llm.ToolCall{{
+		ID: "call-1", Function: llm.ToolFunction{
+			Name: "read_trace", Arguments: `{"trace_id":"trace-1"}`,
+		},
+	}})
+
+	if state.result.Err != nil {
+		t.Fatalf("execute tool turn: %v", state.result.Err)
+	}
+	if len(state.messages) != 2 || !strings.Contains(state.messages[1].Content, `"type":"evidence_conflict"`) ||
+		!strings.Contains(state.messages[1].Content, `"content_hash":"hash-a"`) ||
+		!strings.Contains(state.messages[1].Content, `"content_hash":"hash-b"`) {
+		t.Fatalf("messages = %#v", state.messages)
+	}
+	if state.result.Evidence.PartialResultCount != 1 {
+		t.Fatalf("partial result count = %d", state.result.Evidence.PartialResultCount)
+	}
+	if len(observer.steps) != 2 || !observer.steps[1].Coverage.Partial ||
+		observer.steps[1].Coverage.Complete {
+		t.Fatalf("steps = %#v", observer.steps)
+	}
+	if conflicts := ledger.add([]tool.EvidenceUnit{{
+		SourceKind: "runtime", Target: "trace-1", ContentHash: "hash-a",
+		Coverage: tool.EvidenceCoverage{Complete: true},
+	}}, "verification"); len(conflicts) != 0 {
+		t.Fatalf("conflicting evidence replaced canonical version: %#v", conflicts)
 	}
 }
 
@@ -108,7 +205,7 @@ func TestAdmitToolCallNarrowsLimitBeforeExecution(t *testing.T) {
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 	agent := NewAgent(nil, NewToolExecutor(registry), AgentConfig{ContextWindow: 10000}, NoopObserver(), nil)
 	state := &compiledLoop{
-		ctx: t.Context(), toolSnapshot: snapshot, evidenceLedger: newRunEvidenceLedger(nil),
+		ctx: t.Context(), toolSnapshot: snapshot, evidenceLedger: newRunEvidenceLedger(nil, nil),
 		remainingToolTokens: 250,
 	}
 	call, decision := agent.admitToolCall(state, llm.ToolCall{

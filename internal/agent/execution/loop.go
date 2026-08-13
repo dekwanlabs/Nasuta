@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
@@ -106,15 +107,17 @@ func (agent *Agent) SetOnFirstAnswerToken(fn func(runID string)) {
 }
 
 type RunResult struct {
-	RunID            string
-	Answer           string
-	Steps            int
-	Evidence         EvidenceMetrics
-	References       []tool.Reference
-	ForcedConclusion bool
-	Aborted          bool
-	Err              error
-	SessionMessages  []llm.Message
+	RunID             string
+	Answer            string
+	Steps             int
+	Evidence          EvidenceMetrics
+	EvidenceUnits     []tool.EvidenceUnit
+	EvidenceConflicts []evidence.Conflict
+	References        []tool.Reference
+	ForcedConclusion  bool
+	Aborted           bool
+	Err               error
+	SessionMessages   []llm.Message
 }
 
 // Input is a fully compiled request for the execution loop.
@@ -123,6 +126,7 @@ type Input struct {
 	Messages           []llm.Message
 	EvidenceContent    string
 	EvidenceUnits      []tool.EvidenceUnit
+	EvidenceConflicts  []evidence.Conflict
 	ReferenceTypes     map[string]tool.ReferenceType
 	EvidenceSeeded     bool
 	Direct             bool
@@ -221,6 +225,7 @@ func (agent *Agent) runWithSnapshot(
 	if retrieved != nil {
 		input.EvidenceContent = retrieved.Text
 		input.EvidenceUnits = cloneEvidenceUnits(retrieved.EvidenceUnits)
+		input.EvidenceConflicts = evidence.CloneConflicts(retrieved.EvidenceConflicts)
 	}
 	return agent.RunCompiled(ctx, runID, input, toolSnapshot)
 }
@@ -248,6 +253,7 @@ func (agent *Agent) RunCompiled(
 		runStarted,
 	)
 	if err := agent.runTurns(state); err != nil {
+		agent.finalizeCompiledLoop(state)
 		return state.result, err
 	}
 	agent.finishCompiledLoop(state)

@@ -2,13 +2,16 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/internal/feature/reviewworkflow"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
 	"github.com/dekwanlabs/nasuta/internal/transport/mcp"
 	"github.com/dekwanlabs/nasuta/internal/transport/routes"
@@ -17,6 +20,25 @@ import (
 )
 
 const workflowRecoveryPageSize = 100
+
+type activeQAParentStore interface {
+	ListActiveQAParents(time.Time, run.QAParentCursor, int) ([]run.QAParentRecord, error)
+}
+
+type recoveredWorkflowReader interface {
+	GetRun(context.Context, string, int64, bool) (*workflow.WorkflowRunRecord, error)
+}
+
+type recoveredReviewReconciler interface {
+	ReconcileRecoveredRun(context.Context, string, workflow.RunStatus, error) error
+}
+
+type qaParentRecoveryReport struct {
+	Scanned   int
+	Converged int
+	Active    int
+	Errors    int
+}
 
 // RegisterCommonRoutes attaches only reusable platform routes to mux.
 func (p *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
@@ -65,9 +87,7 @@ func (p *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 	if p.history != nil {
 		go p.history.Run(ctx)
 	}
-	if p.flow.service.ExecutionAvailable() {
-		go p.recoverActiveWorkflows(ctx, workflowRecoveryCutoff)
-	}
+	go p.recoverStartupRuns(ctx, workflowRecoveryCutoff)
 	log.Infof("[server] listening on %s (MCP: /mcp, webhook: /internal/vcs-hook, api: /api)", p.cfg.HTTPAddr)
 	if p.cfg.AuthToken == "" && p.auth.keyAuth == nil {
 		log.Warnf("[server] WARNING: no MCP authentication configured, /mcp is unauthenticated")
@@ -78,7 +98,25 @@ func (p *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 	return nil
 }
 
-func (p *Platform) recoverActiveWorkflows(ctx context.Context, startedBefore time.Time) {
+func (p *Platform) recoverStartupRuns(ctx context.Context, startedBefore time.Time) {
+	p.qa.reload.RLock()
+	qa := p.currentQARuntime().InvestigationReconciler
+	reviews := p.flow.coordinator
+	p.qa.reload.RUnlock()
+	if p.flow.service != nil && p.flow.service.ExecutionAvailable() {
+		p.recoverActiveWorkflows(ctx, startedBefore, qa, reviews)
+	} else if p.flow.service != nil {
+		log.WarnfCtx(ctx, "[workflow] startup execution recovery skipped (execution unavailable)")
+	}
+	p.recoverActiveQAParents(ctx, startedBefore, qa)
+}
+
+func (p *Platform) recoverActiveWorkflows(
+	ctx context.Context,
+	startedBefore time.Time,
+	qa dashboard.QAInvestigationReconciler,
+	reviews recoveredReviewReconciler,
+) {
 	report, err := p.flow.service.RecoverActiveWithObserver(
 		ctx,
 		startedBefore,
@@ -89,16 +127,14 @@ func (p *Platform) recoverActiveWorkflows(ctx context.Context, startedBefore tim
 			result workflow.ResumeResult,
 			resumeErr error,
 		) error {
-			if p.flow.coordinator == nil {
-				return nil
-			}
-			_, err := p.flow.coordinator.ReconcileRecoveredRun(
+			return reconcileRecoveredWorkflow(
 				ctx,
+				p.flow.service,
+				qa,
+				reviews,
 				runID,
-				result.Status,
 				resumeErr,
 			)
-			return err
 		},
 	)
 	if err != nil {
@@ -128,6 +164,166 @@ func (p *Platform) recoverActiveWorkflows(ctx context.Context, startedBefore tim
 		report.Cancelled,
 		report.TimedOut,
 	)
+}
+
+func reconcileRecoveredWorkflow(
+	ctx context.Context,
+	workflows recoveredWorkflowReader,
+	qa dashboard.QAInvestigationReconciler,
+	reviews recoveredReviewReconciler,
+	runID string,
+	resumeErr error,
+) error {
+	if workflows == nil {
+		return fmt.Errorf("reconcile recovered workflow %q: workflow reader is unavailable", runID)
+	}
+	record, err := workflows.GetRun(ctx, runID, 0, true)
+	if err != nil {
+		return fmt.Errorf("load recovered workflow %q metadata: %w", runID, err)
+	}
+	switch record.Scenario {
+	case workflow.DelegatedInvestigationID:
+		if record.ParentRunID == "" {
+			return fmt.Errorf(
+				"recovered QA workflow %q has no parent run",
+				runID,
+			)
+		}
+		terminal, err := recoveredWorkflowTerminal(record.Status)
+		if err != nil {
+			return fmt.Errorf("recovered QA workflow %q: %w", runID, err)
+		}
+		if !terminal {
+			return nil
+		}
+		if qa == nil {
+			return fmt.Errorf("reconcile recovered QA workflow %q: coordinator is unavailable", runID)
+		}
+		if err := qa.ReconcileInvestigation(ctx, record.ParentRunID); err != nil {
+			return fmt.Errorf(
+				"reconcile recovered QA workflow %q parent %q: %w",
+				runID,
+				record.ParentRunID,
+				err,
+			)
+		}
+		return nil
+	case reviewworkflow.ScenarioID:
+		if reviews == nil {
+			return fmt.Errorf("reconcile recovered review workflow %q: coordinator is unavailable", runID)
+		}
+		return reviews.ReconcileRecoveredRun(ctx, runID, record.Status, resumeErr)
+	default:
+		return fmt.Errorf(
+			"recovered workflow %q has unsupported scenario %q",
+			runID,
+			record.Scenario,
+		)
+	}
+}
+
+func recoveredWorkflowTerminal(status workflow.RunStatus) (bool, error) {
+	switch status {
+	case workflow.RunRunning, workflow.RunWaitingHuman:
+		return false, nil
+	case workflow.RunSucceeded, workflow.RunFailed, workflow.RunCancelled, workflow.RunTimedOut:
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported persisted status %q", status)
+	}
+}
+
+func (p *Platform) recoverActiveQAParents(
+	ctx context.Context,
+	startedBefore time.Time,
+	reconciler dashboard.QAInvestigationReconciler,
+) {
+	if p.qa.runs == nil {
+		return
+	}
+	report, err := reconcileActiveQAParents(
+		ctx,
+		startedBefore,
+		workflowRecoveryPageSize,
+		p.qa.runs,
+		reconciler,
+	)
+	if err != nil {
+		log.ErrorfCtx(
+			ctx,
+			"[qa] startup parent recovery incomplete scanned=%d converged=%d active=%d errors=%d: %v",
+			report.Scanned,
+			report.Converged,
+			report.Active,
+			report.Errors,
+			err,
+		)
+		return
+	}
+	log.InfofCtx(
+		ctx,
+		"[qa] startup parent recovery complete scanned=%d converged=%d active=%d",
+		report.Scanned,
+		report.Converged,
+		report.Active,
+	)
+}
+
+func reconcileActiveQAParents(
+	ctx context.Context,
+	startedBefore time.Time,
+	pageSize int,
+	parents activeQAParentStore,
+	reconciler dashboard.QAInvestigationReconciler,
+) (qaParentRecoveryReport, error) {
+	var report qaParentRecoveryReport
+	if parents == nil {
+		return report, fmt.Errorf("QA parent store is unavailable")
+	}
+	if reconciler == nil {
+		return report, fmt.Errorf("QA investigation coordinator is unavailable")
+	}
+	var (
+		cursor   run.QAParentCursor
+		firstErr error
+	)
+	for {
+		page, err := parents.ListActiveQAParents(startedBefore, cursor, pageSize)
+		if err != nil {
+			return report, errors.Join(firstErr, fmt.Errorf("list active QA parents: %w", err))
+		}
+		for _, parent := range page {
+			report.Scanned++
+			err := reconciler.ReconcileInvestigation(ctx, parent.ID)
+			switch {
+			case err == nil:
+				report.Converged++
+			case errors.Is(err, workflow.ErrConflict):
+				report.Active++
+			default:
+				report.Errors++
+				if firstErr == nil {
+					firstErr = fmt.Errorf("reconcile QA parent %q: %w", parent.ID, err)
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				return report, errors.Join(firstErr, err)
+			}
+		}
+		if len(page) < pageSize {
+			break
+		}
+		last := page[len(page)-1]
+		cursor = run.QAParentCursor{StartedAt: last.StartedAt, ID: last.ID}
+	}
+	if report.Errors > 0 {
+		return report, fmt.Errorf(
+			"%d QA parent recoveries failed; first failure: %w",
+			report.Errors,
+			firstErr,
+		)
+	}
+	return report, nil
 }
 
 func (p *Platform) startDailySyncTicker(ctx context.Context) {

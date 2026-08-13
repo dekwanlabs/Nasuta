@@ -267,6 +267,32 @@ func TestHub_CompletePublishesOneTerminalEvent(t *testing.T) {
 	}
 }
 
+func TestHub_ProjectTerminalDoesNotPersistAgain(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	hub := NewRunHub(&RunStore{db: db})
+	const runID = "recovered-parent"
+	channel := hub.Subscribe(runID)
+
+	hub.ProjectTerminal(runID, RunOutcome{Status: RunStatusDone, Answer: "recovered"})
+
+	select {
+	case event := <-channel:
+		terminal := TerminalFromEvent(event)
+		if terminal == nil || terminal.Status != RunStatusDone || terminal.Answer != "recovered" {
+			t.Fatalf("event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing projected terminal event")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHub_CompletePreservesTerminalWhenSubscriberBufferIsFull(t *testing.T) {
 	hub := NewRunHub(nil)
 	const runID = "full-buffer"

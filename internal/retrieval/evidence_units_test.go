@@ -72,23 +72,62 @@ func TestAssemblePreservesOnlyIncludedEvidenceUnits(t *testing.T) {
 	}
 }
 
-func TestAssembleHashesDeliveredCleanEvidence(t *testing.T) {
+func TestAssemblePreservesAuthoritativeSourceHash(t *testing.T) {
 	retrieve := &Retriever{}
 	retrieve.serviceModules.Store([]domain.ServiceRecord{{
 		ServiceName: "svc-a",
 		Repo:        "repo-a",
 	}})
+	const sourceHash = "source-version-1"
 	result := retrieve.assemble(t.Context(), []partial{{
 		text: "repos/repo-a/file.go",
 		units: []tool.EvidenceUnit{{
-			SourceKind: "code", Target: "repos/repo-a/file.go",
+			SourceKind: "code", Target: "repos/repo-a/file.go", ContentHash: sourceHash,
 		}},
 	}}, nil, "query")
 	if result.Text != "svc-a/file.go\n" {
 		t.Fatalf("text = %q", result.Text)
 	}
 	if len(result.EvidenceUnits) != 1 ||
-		result.EvidenceUnits[0].ContentHash != evidenceHash("svc-a/file.go") {
+		result.EvidenceUnits[0].ContentHash != sourceHash {
 		t.Fatalf("evidence units = %#v", result.EvidenceUnits)
+	}
+}
+
+func TestAssembleDeduplicatesMatchingEvidenceVersions(t *testing.T) {
+	retrieve := &Retriever{}
+	unit := tool.EvidenceUnit{
+		SourceKind: "runbook", Target: "doc-a", ContentHash: "version-a",
+	}
+	result := retrieve.assemble(t.Context(), []partial{
+		{text: "first", units: []tool.EvidenceUnit{unit}},
+		{text: "second", units: []tool.EvidenceUnit{unit}},
+	}, nil, "query")
+	if len(result.EvidenceUnits) != 1 {
+		t.Fatalf("evidence units = %#v", result.EvidenceUnits)
+	}
+	if len(result.EvidenceConflicts) != 0 {
+		t.Fatalf("evidence conflicts = %#v", result.EvidenceConflicts)
+	}
+}
+
+func TestAssemblePreservesConflictingEvidenceVersions(t *testing.T) {
+	retrieve := &Retriever{}
+	result := retrieve.assemble(t.Context(), []partial{
+		{text: "first", units: []tool.EvidenceUnit{{
+			SourceKind: "runbook", Target: "doc-a", ContentHash: "version-a",
+		}}},
+		{text: "second", units: []tool.EvidenceUnit{{
+			SourceKind: "runbook", Target: "doc-a", ContentHash: "version-b",
+		}}},
+	}, nil, "query")
+	if len(result.EvidenceUnits) != 1 ||
+		result.EvidenceUnits[0].ContentHash != "version-a" {
+		t.Fatalf("evidence units = %#v", result.EvidenceUnits)
+	}
+	if len(result.EvidenceConflicts) != 1 ||
+		result.EvidenceConflicts[0].Current.ContentHash != "version-a" ||
+		result.EvidenceConflicts[0].Incoming.ContentHash != "version-b" {
+		t.Fatalf("evidence conflicts = %#v", result.EvidenceConflicts)
 	}
 }

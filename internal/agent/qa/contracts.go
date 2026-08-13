@@ -29,6 +29,7 @@ type QADeps struct {
 	PhaseEmitter      interface{ EmitPhase(string, string) }
 	Investigation     InvestigationRunner
 	ScenarioLifecycle ScenarioLifecycle
+	Coordinator       *InvestigationCoordinator
 	ExecutionEvents   ExecutionEventEmitter
 	WriteAvailable    bool
 }

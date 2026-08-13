@@ -28,9 +28,15 @@ type DefinitionRuntime struct {
 	registry    *tool.Registry
 	executor    *execution.ToolExecutor
 	settings    definitionRuntimeSettings
-	runStore    runCreator
+	scenarios   *ScenarioRuntime
 	usageStore  llm.UsageRecorder
 	hub         *run.RunHub
+}
+
+// ScenarioRuntime owns durable non-agent Run lifecycles without requiring model execution.
+type ScenarioRuntime struct {
+	runStore *run.RunStore
+	hub      *run.RunHub
 }
 
 // DefinitionResolver resolves one exact immutable definition version.
@@ -39,12 +45,11 @@ type DefinitionResolver interface {
 }
 
 type definitionRuntimeSettings struct {
-	baseURL           string
-	apiKey            string
-	provider          string
-	model             string
-	answerReserve     time.Duration
-	maxContinueRounds int
+	baseURL       string
+	apiKey        string
+	provider      string
+	model         string
+	answerReserve time.Duration
 }
 
 type definitionExecution struct {
@@ -84,33 +89,37 @@ type definitionManagedRun struct {
 
 // ScenarioRunStart carries business-run identity without an agent snapshot.
 type ScenarioRunStart struct {
-	RunID       string
-	ParentRunID string
-	UserID      int64
-	SessionID   string
-	Question    string
-	Mode        string
+	RunID         string
+	ParentRunID   string
+	WorkflowRunID string
+	UserID        int64
+	SessionID     string
+	Question      string
+	Mode          string
 }
 
 // ScenarioRun owns one non-agent parent lifecycle.
 type ScenarioRun interface {
 	Context(context.Context) context.Context
-	Finish(run.RunOutcome) error
+	RecordPreparationStep(context.Context, run.StepRecord) error
+	Release()
 }
 
 // ScenarioLifecycle keeps parent persistence behind the Runtime boundary.
 type ScenarioLifecycle interface {
 	BeginScenario(context.Context, ScenarioRunStart) (ScenarioRun, error)
+	CompleteScenario(context.Context, string, run.RunOutcome) error
 }
 
 type scenarioManagedRun struct {
-	runtime   *DefinitionRuntime
+	runtime   *ScenarioRuntime
 	start     ScenarioRunStart
 	trace     *runtrace.Scope
 	ownsTrace bool
 
-	mu       sync.Mutex
-	finished bool
+	mu                   sync.Mutex
+	preparationStepCount int
+	release              sync.Once
 }
 
 // NewDefinitionRuntime pins one configured model endpoint for definition execution.
@@ -145,12 +154,11 @@ func NewDefinitionRuntime(
 	if registry == nil {
 		registry = tool.NewRegistry()
 	}
-	var creator runCreator
 	var usageStore llm.UsageRecorder
 	if runStore != nil {
-		creator = runStore
 		usageStore = runStore
 	}
+	scenarios := NewScenarioRuntime(runStore)
 	return &DefinitionRuntime{
 		definitions: definitions,
 		schemas:     schemas,
@@ -159,16 +167,32 @@ func NewDefinitionRuntime(
 		settings: definitionRuntimeSettings{
 			baseURL: settings.LLMBaseURL, apiKey: settings.LLMAPIKey,
 			provider: settings.LLMProvider, model: settings.LLMModel,
-			answerReserve: answerReserve, maxContinueRounds: settings.LLMMaxContinueRounds,
+			answerReserve: answerReserve,
 		},
-		runStore:   creator,
+		scenarios:  scenarios,
 		usageStore: usageStore,
-		hub:        run.NewRunHub(runStore),
+		hub:        scenarios.Hub(),
 	}, nil
+}
+
+// NewScenarioRuntime binds Parent persistence and terminal projection.
+func NewScenarioRuntime(runStore *run.RunStore) *ScenarioRuntime {
+	return &ScenarioRuntime{
+		runStore: runStore,
+		hub:      run.NewRunHub(runStore),
+	}
 }
 
 // Hub exposes the Runtime-owned event and control boundary.
 func (runtime *DefinitionRuntime) Hub() *run.RunHub {
+	if runtime == nil {
+		return nil
+	}
+	return runtime.hub
+}
+
+// Hub exposes Parent lifecycle events independently of model execution.
+func (runtime *ScenarioRuntime) Hub() *run.RunHub {
 	if runtime == nil {
 		return nil
 	}
@@ -243,10 +267,6 @@ func (runtime *DefinitionRuntime) PrepareTools(policy tool.Policy) ScenarioToolS
 		snapshot: runtime.registry.Snapshot(policy),
 		executor: runtime.executor,
 	}
-}
-
-type runCreator interface {
-	Create(run.RunRecord) error
 }
 
 type definitionUsageRecorder struct {

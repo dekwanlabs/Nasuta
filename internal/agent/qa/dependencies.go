@@ -41,6 +41,7 @@ type ExecutionEvent = run.ExecutionEvent
 type ExecutionEventEmitter = run.ExecutionEventEmitter
 type SessionStatusEvent = run.SessionStatusEvent
 type ContextUsageEvent = run.ContextUsageEvent
+type QAParentRecord = run.QAParentRecord
 type EventType = run.EventType
 type ToolPolicy = tool.Policy
 type Tool = tool.Tool
@@ -62,6 +63,10 @@ const (
 )
 
 var ErrEmptyAnswer = run.ErrEmptyAnswer
+
+type ParentRunReader interface {
+	GetQAParent(string) (run.QAParentRecord, error)
+}
 
 type preparationStepRecorder interface {
 	RecordPreparationStep(context.Context, run.StepRecord) error

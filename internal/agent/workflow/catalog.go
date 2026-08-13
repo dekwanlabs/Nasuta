@@ -232,11 +232,45 @@ func (catalog *Catalog) validateAgents(definition WorkflowDefinition) error {
 				err,
 			)
 		}
+		if node.RestrictVisibleTools {
+			if err := ensureToolSubset(
+				node.VisibleToolIDs,
+				agentDefinition.Tools.VisibleToolIDs,
+				agentDefinition.Tools.RestrictVisible ||
+					len(agentDefinition.Tools.VisibleToolIDs) > 0,
+			); err != nil {
+				return fmt.Errorf(
+					"publish workflow %q node %q tools exceed agent definition: %w",
+					definition.ID,
+					node.ID,
+					err,
+				)
+			}
+		}
 		if err := catalog.schemas.ValidateCompatibility(node.InputSchema, agentDefinition.InputSchema); err != nil {
 			return fmt.Errorf("publish workflow %q node %q agent input: %w", definition.ID, node.ID, err)
 		}
 		if err := catalog.schemas.ValidateCompatibility(agentDefinition.OutputSchema, node.OutputSchema); err != nil {
 			return fmt.Errorf("publish workflow %q node %q agent output: %w", definition.ID, node.ID, err)
+		}
+		toolsDisabled := node.RestrictVisibleTools && len(node.VisibleToolIDs) == 0 ||
+			!node.RestrictVisibleTools &&
+				agentDefinition.Tools.RestrictVisible &&
+				len(agentDefinition.Tools.VisibleToolIDs) == 0
+		switch {
+		case toolsDisabled && node.Budget.MaxToolCalls != 0:
+			return fmt.Errorf(
+				"publish workflow %q node %q tool budget must be zero because its agent disables tools",
+				definition.ID,
+				node.ID,
+			)
+		case !toolsDisabled && definition.Budget.MaxToolCalls > 0 &&
+			node.Budget.MaxToolCalls <= 0:
+			return fmt.Errorf(
+				"publish workflow %q node %q tool budget is required",
+				definition.ID,
+				node.ID,
+			)
 		}
 		if definition.Budget.MaxCostMicros > 0 &&
 			(agentDefinition.Model.InputPriceMicrosPerMillionTokens <= 0 ||
@@ -246,6 +280,22 @@ func (catalog *Catalog) validateAgents(definition WorkflowDefinition) error {
 				definition.ID,
 				node.ID,
 			)
+		}
+	}
+	return nil
+}
+
+func ensureToolSubset(subset, superset []string, restricted bool) error {
+	if !restricted {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(superset))
+	for _, id := range superset {
+		allowed[id] = struct{}{}
+	}
+	for _, id := range subset {
+		if _, ok := allowed[id]; !ok {
+			return fmt.Errorf("tool %q is outside the allowed set", id)
 		}
 	}
 	return nil

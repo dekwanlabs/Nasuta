@@ -1,123 +1,102 @@
 package execution
 
-import "github.com/dekwanlabs/nasuta/tool"
+import (
+	"encoding/json"
+	"fmt"
 
-type evidenceKey struct {
-	sourceKind string
-	target     string
-	section    string
-	version    string
-	timeRange  string
-}
-
-type evidenceLedgerItem struct {
-	key           evidenceKey
-	coverage      tool.EvidenceCoverage
-	contentHash   string
-	trustTier     int
-	evidenceClass string
-	tokenCost     int
-	origin        string
-}
+	"github.com/dekwanlabs/nasuta/internal/evidence"
+	"github.com/dekwanlabs/nasuta/tool"
+)
 
 type runEvidenceLedger struct {
-	items     map[evidenceKey]evidenceLedgerItem
-	conflicts map[evidenceKey][]evidenceLedgerItem
+	ledger    *evidence.Ledger
+	conflicts []evidence.Conflict
 }
 
-func newRunEvidenceLedger(seed []tool.EvidenceUnit) *runEvidenceLedger {
-	ledger := &runEvidenceLedger{
-		items: make(map[evidenceKey]evidenceLedgerItem, len(seed)),
-	}
+func newRunEvidenceLedger(
+	seed []tool.EvidenceUnit,
+	propagatedConflicts []evidence.Conflict,
+) *runEvidenceLedger {
+	ledger := &runEvidenceLedger{ledger: evidence.New(nil, "")}
+	ledger.remember(propagatedConflicts)
 	ledger.add(seed, "seed")
 	return ledger
 }
 
-func (ledger *runEvidenceLedger) add(units []tool.EvidenceUnit, origin string) {
+func (ledger *runEvidenceLedger) add(units []tool.EvidenceUnit, origin string) []evidence.Conflict {
 	if ledger == nil {
+		return nil
+	}
+	conflicts := ledger.ledger.Add(units, origin)
+	ledger.conflicts = append(ledger.conflicts, conflicts...)
+	return conflicts
+}
+
+func (ledger *runEvidenceLedger) remember(conflicts []evidence.Conflict) {
+	if ledger == nil || len(conflicts) == 0 {
 		return
 	}
-	for _, unit := range units {
-		sections := unit.Sections
-		if len(sections) == 0 {
-			sections = []string{""}
+	ledger.ledger.RememberConflicts(conflicts)
+	seen := make(map[string]struct{}, len(ledger.conflicts)+len(conflicts))
+	for _, conflict := range ledger.conflicts {
+		seen[evidence.ConflictFingerprint(conflict)] = struct{}{}
+	}
+	for _, conflict := range conflicts {
+		fingerprint := evidence.ConflictFingerprint(conflict)
+		if _, duplicate := seen[fingerprint]; duplicate {
+			continue
 		}
-		for _, section := range sections {
-			key := evidenceKey{
-				sourceKind: unit.SourceKind,
-				target:     unit.Target,
-				section:    section,
-				version:    unit.Version,
-				timeRange:  unit.TimeRange,
-			}
-			if key.sourceKind == "" || key.target == "" {
-				continue
-			}
-			next := evidenceLedgerItem{
-				key: key, coverage: unit.Coverage, contentHash: unit.ContentHash,
-				trustTier: unit.TrustTier, evidenceClass: unit.EvidenceClass,
-				tokenCost: unit.TokenCost, origin: origin,
-			}
-			current, exists := ledger.items[key]
-			if exists && current.coverage.Complete && !next.coverage.Complete {
-				continue
-			}
-			if exists && current.contentHash == next.contentHash {
-				if next.coverage.Complete {
-					current.coverage = next.coverage
-					ledger.items[key] = current
-				}
-				continue
-			}
-			if exists && current.contentHash != "" && next.contentHash != "" {
-				if ledger.conflicts == nil {
-					ledger.conflicts = make(map[evidenceKey][]evidenceLedgerItem)
-				}
-				ledger.conflicts[key] = append(ledger.conflicts[key], next)
-				continue
-			}
-			ledger.items[key] = next
-		}
+		seen[fingerprint] = struct{}{}
+		ledger.conflicts = append(ledger.conflicts, evidence.CloneConflict(conflict))
 	}
 }
 
-func (ledger *runEvidenceLedger) fullyCovers(scope tool.EvidenceScope) ([]evidenceKey, bool) {
-	if ledger == nil || scope.SourceKind == "" || scope.Target == "" {
+func (ledger *runEvidenceLedger) fullyCovers(scope tool.EvidenceScope) ([]evidence.Key, bool) {
+	if ledger == nil {
 		return nil, false
 	}
-	targetKey := evidenceKey{
-		sourceKind: scope.SourceKind, target: scope.Target,
-		version: scope.Version, timeRange: scope.TimeRange,
+	return ledger.ledger.FullyCovers(scope)
+}
+
+func (ledger *runEvidenceLedger) snapshot() ([]tool.EvidenceUnit, []evidence.Conflict) {
+	if ledger == nil {
+		return nil, nil
 	}
-	if item, exists := ledger.items[targetKey]; exists && item.coverage.Complete {
-		return []evidenceKey{targetKey}, true
-	}
-	if len(scope.Sections) == 0 {
-		return nil, false
-	}
-	keys := make([]evidenceKey, 0, len(scope.Sections))
-	for _, section := range scope.Sections {
-		key := evidenceKey{
-			sourceKind: scope.SourceKind, target: scope.Target, section: section,
-			version: scope.Version, timeRange: scope.TimeRange,
-		}
-		if _, exists := ledger.items[key]; !exists {
-			return nil, false
-		}
-		keys = append(keys, key)
-	}
-	return keys, true
+	return ledger.ledger.Units(), evidence.CloneConflicts(ledger.conflicts)
 }
 
 func cloneEvidenceUnits(units []tool.EvidenceUnit) []tool.EvidenceUnit {
-	if len(units) == 0 {
-		return nil
+	return evidence.CloneUnits(units)
+}
+
+type evidenceConflictVersion struct {
+	ContentHash string `json:"content_hash"`
+	Origin      string `json:"origin"`
+}
+
+type evidenceConflictNotice struct {
+	Type     string                  `json:"type"`
+	Identity evidence.Key            `json:"identity"`
+	Current  evidenceConflictVersion `json:"current"`
+	Incoming evidenceConflictVersion `json:"incoming"`
+}
+
+func marshalEvidenceConflictNotices(conflicts []evidence.Conflict) ([]string, error) {
+	notices := make([]string, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		encoded, err := json.Marshal(evidenceConflictNotice{
+			Type: "evidence_conflict", Identity: conflict.Key,
+			Current: evidenceConflictVersion{
+				ContentHash: conflict.Current.ContentHash, Origin: conflict.CurrentOrigin,
+			},
+			Incoming: evidenceConflictVersion{
+				ContentHash: conflict.Incoming.ContentHash, Origin: conflict.IncomingOrigin,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("marshal evidence conflict %q: %w", conflict.Key.String(), err)
+		}
+		notices = append(notices, string(encoded))
 	}
-	out := make([]tool.EvidenceUnit, len(units))
-	for i, unit := range units {
-		out[i] = unit
-		out[i].Sections = append([]string(nil), unit.Sections...)
-		out[i].Facets = append([]string(nil), unit.Facets...)
-	}
-	return out
+	return notices, nil
 }

@@ -1,6 +1,8 @@
 package run
 
 import (
+	"errors"
+
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 )
@@ -104,6 +106,7 @@ type RunTerminal struct {
 	RunID           string               `json:"run_id"`
 	Status          RunStatus            `json:"status"`
 	Answer          string               `json:"answer,omitempty"`
+	ErrorCode       string               `json:"error_code,omitempty"`
 	StepCount       int                  `json:"step_count"`
 	TokenUsed       int                  `json:"token_used"`
 	References      []agentapi.Reference `json:"references,omitempty"`
@@ -113,10 +116,54 @@ type RunTerminal struct {
 	SessionMessages []llm.Message        `json:"-"`
 }
 
+// QAParentEvent is the durable counterpart of a Parent Run projection.
+type QAParentEvent struct {
+	RunID     string      `json:"run_id"`
+	Seq       int64       `json:"seq"`
+	Kind      string      `json:"kind"`
+	Summary   string      `json:"summary"`
+	Detail    RunTerminal `json:"detail"`
+	CreatedAt string      `json:"created_at"`
+}
+
 func TerminalFromEvent(event SSEEvent) *RunTerminal {
 	if event.Type != EventRunFinished {
 		return nil
 	}
 	terminal, _ := event.Data.(*RunTerminal)
 	return terminal
+}
+
+func terminalFromOutcome(runID string, outcome RunOutcome) RunTerminal {
+	terminal := RunTerminal{
+		RunID: runID, Status: outcome.Status, Answer: outcome.Answer,
+		ErrorCode: outcome.ErrorCode, StepCount: outcome.StepCount,
+		TokenUsed:  outcome.TokenUsed,
+		References: append([]agentapi.Reference(nil), outcome.References...),
+		HitCount:   outcome.HitCount,
+		Evidence:   outcome.Evidence,
+		SessionMessages: append(
+			[]llm.Message(nil),
+			outcome.SessionMessages...,
+		),
+	}
+	if outcome.Err != nil {
+		terminal.Error = outcome.Err.Error()
+	}
+	return terminal
+}
+
+func outcomeFromTerminal(terminal RunTerminal) RunOutcome {
+	outcome := RunOutcome{
+		Status: terminal.Status, ErrorCode: terminal.ErrorCode,
+		StepCount: terminal.StepCount, TokenUsed: terminal.TokenUsed,
+		Answer:     terminal.Answer,
+		Evidence:   terminal.Evidence,
+		References: append([]agentapi.Reference(nil), terminal.References...),
+		HitCount:   terminal.HitCount,
+	}
+	if terminal.Error != "" {
+		outcome.Err = errors.New(terminal.Error)
+	}
+	return outcome
 }

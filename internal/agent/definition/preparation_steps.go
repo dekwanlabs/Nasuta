@@ -41,6 +41,21 @@ func (run *definitionManagedRun) RecordPreparationStep(
 	return nil
 }
 
+// RecordPreparationStep persists trusted work performed before child workflows start.
+func (run *scenarioManagedRun) RecordPreparationStep(
+	ctx context.Context,
+	step agentrun.StepRecord,
+) error {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	step.StepNo = run.preparationStepCount + 1
+	if err := run.runtime.hub.OnStep(ctx, run.start.RunID, step); err != nil {
+		return err
+	}
+	run.preparationStepCount = step.StepNo
+	return nil
+}
+
 type stepOffsetObserver struct {
 	next   agentrun.Observer
 	offset int

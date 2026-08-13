@@ -31,6 +31,7 @@ type qaPreparation struct {
 	analysis           queryAnalysisOutput
 	execution          executionRouteDecision
 	historyCandidates  *HistoryCandidates
+	conversationRefs   []ConversationRef
 }
 
 type qaEvidence struct {
@@ -189,7 +190,38 @@ func (svc *QA) prepareConversation(
 	}
 	svc.emitStatus(request.RunID, "上下文整理完成，正在准备检索", "prepare.routing", historyStarted)
 	prepared.request.Conversation = assembled.Conversation
+	prepared.conversationRefs = conversationReferences(
+		request.ParentRunID,
+		assembled.Conversation.SessionID,
+		assembled.Stats.SelectedTurnNumbers,
+		request.Conversation.RecentTurns,
+	)
 	return nil
+}
+
+func conversationReferences(
+	parentRunID,
+	sessionID string,
+	selectedTurns []int,
+	turns []memory.TurnMetadata,
+) []ConversationRef {
+	refs := make([]ConversationRef, 0, len(selectedTurns)+1)
+	if parentRunID != "" || sessionID != "" {
+		refs = append(refs, ConversationRef{SessionID: sessionID, RunID: parentRunID})
+	}
+	if len(selectedTurns) == 0 {
+		return refs
+	}
+	byTurn := make(map[int]string, len(turns))
+	for _, turn := range turns {
+		byTurn[turn.TurnNumber] = turn.RunID
+	}
+	for _, turn := range selectedTurns {
+		refs = append(refs, ConversationRef{
+			SessionID: sessionID, RunID: byTurn[turn], Turn: turn,
+		})
+	}
+	return refs
 }
 
 func (svc *QA) applyTimeConstraint(prepared *qaPreparation) {

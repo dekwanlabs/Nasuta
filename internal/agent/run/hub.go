@@ -244,24 +244,21 @@ func (hub *RunHub) CompleteTransient(runID string, outcome RunOutcome) {
 	hub.complete(runID, outcome, false)
 }
 
+// ProjectTerminal publishes a terminal outcome already committed by another owner.
+func (hub *RunHub) ProjectTerminal(runID string, outcome RunOutcome) {
+	hub.complete(runID, outcome, false)
+}
+
 func (hub *RunHub) complete(runID string, outcome RunOutcome, persist bool) {
 	if !outcome.Status.Terminal() {
 		outcome.Status = RunStatusFailed
 		outcome.Err = fmt.Errorf("agent: non-terminal outcome")
 	}
 
-	hub.mu.Lock()
-	if _, done := hub.completed[runID]; done {
-		hub.mu.Unlock()
+	stepErr, paused, accepted := hub.beginTerminal(runID)
+	if !accepted {
 		return
 	}
-	hub.completed[runID] = struct{}{}
-	delete(hub.signals, runID)
-	paused := hub.paused[runID]
-	delete(hub.paused, runID)
-	stepErr := hub.stepErrs[runID]
-	delete(hub.stepErrs, runID)
-	hub.mu.Unlock()
 	if paused != nil {
 		close(paused)
 	}
@@ -281,18 +278,27 @@ func (hub *RunHub) complete(runID string, outcome RunOutcome, persist bool) {
 			outcome.Err = fmt.Errorf("persist run outcome: %w", err)
 		}
 	}
-	terminal := &RunTerminal{
-		RunID: runID, Status: outcome.Status, Answer: outcome.Answer,
-		StepCount: outcome.StepCount, TokenUsed: outcome.TokenUsed,
-		References:      outcome.References,
-		HitCount:        outcome.HitCount,
-		Evidence:        outcome.Evidence,
-		SessionMessages: append([]llm.Message(nil), outcome.SessionMessages...),
+	hub.projectTerminal(runID, outcome)
+}
+
+func (hub *RunHub) beginTerminal(runID string) (error, chan struct{}, bool) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if _, done := hub.completed[runID]; done {
+		return nil, nil, false
 	}
-	if outcome.Err != nil {
-		terminal.Error = outcome.Err.Error()
-	}
-	hub.broadcast(runID, SSEEvent{Type: EventRunFinished, Data: terminal})
+	hub.completed[runID] = struct{}{}
+	delete(hub.signals, runID)
+	paused := hub.paused[runID]
+	delete(hub.paused, runID)
+	stepErr := hub.stepErrs[runID]
+	delete(hub.stepErrs, runID)
+	return stepErr, paused, true
+}
+
+func (hub *RunHub) projectTerminal(runID string, outcome RunOutcome) {
+	terminal := terminalFromOutcome(runID, outcome)
+	hub.broadcast(runID, SSEEvent{Type: EventRunFinished, Data: &terminal})
 	hub.mu.Lock()
 	if len(hub.subs[runID]) == 0 {
 		delete(hub.completed, runID)

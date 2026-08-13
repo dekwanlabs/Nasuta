@@ -22,15 +22,10 @@ type ExecutionPolicy struct {
 }
 
 type executionRouteInput struct {
-	Suggestion           retrieval.ExecutionSuggestion
-	Policy               ExecutionPolicy
-	EvidencePlan         domain.EvidencePlan
-	AllowWrite           bool
-	WorkflowAvailable    bool
-	History              retrieval.HistoryRelation
-	TimeResolutionFailed bool
-	ToolCandidates       []retrieval.ToolRouteCandidate
-	RoutedToolIDs        []string
+	Suggestion        retrieval.ExecutionSuggestion
+	Policy            ExecutionPolicy
+	AllowWrite        bool
+	WorkflowAvailable bool
 }
 
 type executionRouteDecision struct {
@@ -43,18 +38,16 @@ var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecisi
 	Node:      "execution_route",
 	Output: func(input executionRouteInput, output executionRouteDecision, _ error) map[string]any {
 		return map[string]any{
-			"proposed_strategy":      input.Suggestion.Strategy,
-			"effective_strategy":     output.Strategy,
-			"complexity":             input.Suggestion.Complexity,
-			"confidence":             input.Suggestion.Confidence,
-			"min_complexity":         input.Policy.MinComplexity,
-			"min_confidence":         input.Policy.MinConfidence,
-			"reason_codes":           append([]string(nil), input.Suggestion.Reasons...),
-			"downgrade_reason":       output.DowngradeReason,
-			"workflow_available":     input.WorkflowAvailable,
-			"read_only":              !input.AllowWrite,
-			"internal_only":          input.EvidencePlan.Sources == domain.Internal,
-			"time_resolution_failed": input.TimeResolutionFailed,
+			"proposed_strategy":  input.Suggestion.Strategy,
+			"effective_strategy": output.Strategy,
+			"complexity":         input.Suggestion.Complexity,
+			"confidence":         input.Suggestion.Confidence,
+			"min_complexity":     input.Policy.MinComplexity,
+			"min_confidence":     input.Policy.MinConfidence,
+			"reason_codes":       append([]string(nil), input.Suggestion.Reasons...),
+			"downgrade_reason":   output.DowngradeReason,
+			"workflow_available": input.WorkflowAvailable,
+			"read_only":          !input.AllowWrite,
 		}
 	},
 }
@@ -80,15 +73,14 @@ func (svc *QA) routeQAExecution(prepared *qaPreparation) {
 		MinConfidence:   defaultMultiAgentMinConfidence,
 	}
 	workflowAvailable := false
-	if policy.AllowMultiAgent && svc.investigation != nil && svc.scenarios != nil {
+	if policy.AllowMultiAgent && svc.investigation != nil &&
+		svc.scenarios != nil && svc.coordinator != nil {
 		workflowAvailable = svc.investigation.Available()
 	}
 	prepared.execution = routeExecution(prepared.ctx, executionRouteInput{
 		Suggestion: planning.Execution, Policy: policy,
-		EvidencePlan: effectiveDecision.Plan, AllowWrite: prepared.request.AllowWrite,
+		AllowWrite:        prepared.request.AllowWrite,
 		WorkflowAvailable: workflowAvailable,
-		History:           prepared.analysis.History, TimeResolutionFailed: prepared.analysis.TimeError != nil,
-		ToolCandidates: prepared.toolCandidates, RoutedToolIDs: planning.RoutedToolIDs,
 	})
 
 	svc.emitExecutionEvent(EventExecutionRouted, ExecutionEvent{
@@ -119,9 +111,6 @@ func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 	single := func(reason string) executionRouteDecision {
 		return executionRouteDecision{Strategy: retrieval.ExecutionSingleAgent, DowngradeReason: reason}
 	}
-	if input.TimeResolutionFailed {
-		return single("time_resolution_failed")
-	}
 	if input.Suggestion.Strategy != retrieval.ExecutionMultiAgent {
 		return single("")
 	}
@@ -137,35 +126,8 @@ func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 	if input.AllowWrite {
 		return single("write_requested")
 	}
-	if input.EvidencePlan.Sources != domain.Internal {
-		return single("evidence_not_internal_only")
-	}
-	if routedTemporalTool(input.ToolCandidates, input.RoutedToolIDs) {
-		return single("runtime_evidence_required")
-	}
-	if historyNeedsContinuity(input.History) {
-		return single("history_dependency_required")
-	}
 	if !input.WorkflowAvailable {
 		return single("workflow_unavailable")
 	}
 	return executionRouteDecision{Strategy: retrieval.ExecutionMultiAgent}
-}
-
-func routedTemporalTool(candidates []retrieval.ToolRouteCandidate, selected []string) bool {
-	if len(selected) == 0 {
-		return false
-	}
-	temporal := make(map[string]struct{}, len(candidates))
-	for _, candidate := range candidates {
-		if candidate.Temporal {
-			temporal[candidate.ID] = struct{}{}
-		}
-	}
-	for _, id := range selected {
-		if _, ok := temporal[id]; ok {
-			return true
-		}
-	}
-	return false
 }

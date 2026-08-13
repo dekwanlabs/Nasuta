@@ -63,15 +63,25 @@ type Handler struct {
 	reloadQAFn         func(*codegraph.DB) error
 }
 
+type QAInvestigationCanceller interface {
+	CancelInvestigation(context.Context, string, int64) error
+}
+
+type QAInvestigationReconciler interface {
+	ReconcileInvestigation(context.Context, string) error
+}
+
 type QARuntime struct {
-	QA             *agent.QA
-	Hub            *run.RunHub
-	CompactionLLM  *llm.LLMClient
-	RunStore       *run.RunStore
-	Sessions       *memory.SessionStore
-	History        agent.SessionHistory
-	Settings       *config.PlatformSettings
-	WriteAvailable bool
+	QA                      *agent.QA
+	Hub                     *run.RunHub
+	CompactionLLM           *llm.LLMClient
+	RunStore                *run.RunStore
+	InvestigationCanceller  QAInvestigationCanceller
+	InvestigationReconciler QAInvestigationReconciler
+	Sessions                *memory.SessionStore
+	History                 agent.SessionHistory
+	Settings                *config.PlatformSettings
+	WriteAvailable          bool
 }
 
 // SetRolePrompt wires a function that returns the combined RBAC-role

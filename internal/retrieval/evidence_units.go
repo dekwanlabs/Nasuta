@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -82,31 +83,16 @@ func evidenceUnitForPart(source, target, content string, coverage tool.EvidenceC
 	}
 }
 
-func cloneEvidenceUnit(unit tool.EvidenceUnit) tool.EvidenceUnit {
-	unit.Sections = append([]string(nil), unit.Sections...)
-	unit.Facets = append([]string(nil), unit.Facets...)
-	return unit
-}
-
-func expandEvidenceUnit(unit tool.EvidenceUnit) []tool.EvidenceUnit {
-	if len(unit.Sections) <= 1 {
-		return []tool.EvidenceUnit{unit}
-	}
-	out := make([]tool.EvidenceUnit, 0, len(unit.Sections))
-	for _, section := range unit.Sections {
-		item := cloneEvidenceUnit(unit)
-		item.Sections = []string{section}
-		out = append(out, item)
-	}
-	return out
-}
-
 func evidenceUnitKey(unit tool.EvidenceUnit) string {
-	section := ""
-	if len(unit.Sections) > 0 {
-		section = unit.Sections[0]
+	expanded := evidence.Expand([]tool.EvidenceUnit{unit})
+	if len(expanded) == 0 {
+		return ""
 	}
-	return unit.SourceKind + "\x00" + unit.Target + "\x00" + section + "\x00" + unit.Version + "\x00" + unit.TimeRange
+	key, ok := evidence.UnitKey(expanded[0])
+	if !ok {
+		return ""
+	}
+	return key.String()
 }
 
 func selectOverviewEvidence(parts []partial, required []domain.EvidenceFacet) []partial {

@@ -169,7 +169,8 @@ func retryableNodeFailure(request NodeRequest, runErr error) bool {
 	if request.Attempt <= 0 ||
 		(request.Node.Kind != NodeAgent &&
 			!(request.Node.Kind == NodeTransform && request.Node.RetrySafe)) ||
-		scope.HasSideEffect(request.EffectivePermissions.Scopes) ||
+		(scope.HasSideEffect(request.EffectivePermissions.Scopes) &&
+			!(request.Node.Kind == NodeAgent && request.Node.RetrySafe)) ||
 		errors.Is(runErr, ErrWorkflowBudgetExhausted) ||
 		errors.Is(runErr, context.Canceled) ||
 		errors.Is(runErr, context.DeadlineExceeded) {

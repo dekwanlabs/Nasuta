@@ -236,6 +236,7 @@ func compileDefinitionRequest(
 	definition agentapi.Definition,
 	request agentapi.RunRequest,
 ) execution.Input {
+	evidenceSeeded := definitionEvidenceSeeded(request.Policy, request.Context)
 	if len(request.Messages) > 0 {
 		messages := make([]llm.Message, 0, len(request.Messages))
 		question := string(request.Input)
@@ -248,12 +249,13 @@ func compileDefinitionRequest(
 		}
 		return execution.Input{
 			Question: question, Messages: messages,
-			EvidenceSeeded:  request.Policy.EvidenceSeeded || len(request.Context) > 0,
-			Direct:          !request.Policy.EvidenceRequired,
-			Web:             request.Policy.WebResearch,
-			ReferenceTypes:  contextReferenceTypes(request.Context),
-			EvidenceContent: joinedContextContent(request.Context),
-			EvidenceUnits:   contextEvidenceUnits(request.Context),
+			EvidenceSeeded:    evidenceSeeded,
+			Direct:            !request.Policy.EvidenceRequired,
+			Web:               request.Policy.WebResearch,
+			ReferenceTypes:    contextReferenceTypes(request.Context),
+			EvidenceContent:   joinedContextContent(request.Context),
+			EvidenceUnits:     contextEvidenceUnits(request.Context),
+			EvidenceConflicts: contextEvidenceConflicts(request.Context),
 		}
 	}
 	messages := []llm.Message{{Role: "system", Content: definition.Prompt.System}}
@@ -278,13 +280,29 @@ func compileDefinitionRequest(
 	messages = append(messages, llm.Message{Role: "user", Content: question})
 	return execution.Input{
 		Question: question, Messages: messages,
-		EvidenceSeeded:  request.Policy.EvidenceSeeded || len(request.Context) > 0,
-		Direct:          !request.Policy.EvidenceRequired,
-		Web:             request.Policy.WebResearch,
-		ReferenceTypes:  contextReferenceTypes(request.Context),
-		EvidenceContent: joinedContextContent(request.Context),
-		EvidenceUnits:   contextEvidenceUnits(request.Context),
+		EvidenceSeeded:    evidenceSeeded,
+		Direct:            !request.Policy.EvidenceRequired,
+		Web:               request.Policy.WebResearch,
+		ReferenceTypes:    contextReferenceTypes(request.Context),
+		EvidenceContent:   joinedContextContent(request.Context),
+		EvidenceUnits:     contextEvidenceUnits(request.Context),
+		EvidenceConflicts: contextEvidenceConflicts(request.Context),
 	}
+}
+
+func definitionEvidenceSeeded(
+	policy agentapi.RunPolicy,
+	blocks []agentapi.ContextBlock,
+) bool {
+	if policy.EvidenceSeeded {
+		return true
+	}
+	for _, block := range blocks {
+		if block.Source != "workflow.handoff" || len(block.Evidence) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func validateDefinitionMessages(messages []agentapi.Message) error {
@@ -321,28 +339,36 @@ func validateDefinitionContext(blocks []agentapi.ContextBlock) (string, error) {
 			return "", fmt.Errorf("context block %d content_hash does not match content", index)
 		}
 		for unitIndex, unit := range block.Evidence {
-			if unit.SourceKind == "" || unit.SourceKind != strings.TrimSpace(unit.SourceKind) ||
-				unit.Target == "" || unit.Target != strings.TrimSpace(unit.Target) {
-				return "", fmt.Errorf("context block %d evidence unit %d source_kind and target are required and canonical", index, unitIndex)
+			if err := validateContextEvidenceUnit(index, fmt.Sprintf("evidence unit %d", unitIndex), unit); err != nil {
+				return "", err
 			}
-			if unit.Coverage.Complete && unit.Coverage.Partial {
-				return "", fmt.Errorf("context block %d evidence unit %d coverage is contradictory", index, unitIndex)
+		}
+		for conflictIndex, conflict := range block.EvidenceConflicts {
+			label := fmt.Sprintf("evidence conflict %d", conflictIndex)
+			identity := conflict.Identity
+			if identity.SourceKind == "" ||
+				identity.SourceKind != strings.TrimSpace(identity.SourceKind) ||
+				identity.Target == "" ||
+				identity.Target != strings.TrimSpace(identity.Target) {
+				return "", fmt.Errorf(
+					"context block %d %s identity source_kind and target are required and canonical",
+					index,
+					label,
+				)
 			}
-			if unit.TokenCost < 0 {
-				return "", fmt.Errorf("context block %d evidence unit %d token_cost is invalid", index, unitIndex)
+			if err := validateContextEvidenceUnit(index, label+" current", conflict.Current); err != nil {
+				return "", err
 			}
-			if unit.ContentHash != "" && (len(unit.ContentHash) != sha256.Size*2 || !validHex(unit.ContentHash)) {
-				return "", fmt.Errorf("context block %d evidence unit %d content_hash is invalid", index, unitIndex)
+			if err := validateContextEvidenceUnit(index, label+" incoming", conflict.Incoming); err != nil {
+				return "", err
 			}
-			seenSections := make(map[string]struct{}, len(unit.Sections))
-			for sectionIndex, section := range unit.Sections {
-				if section == "" || section != strings.TrimSpace(section) {
-					return "", fmt.Errorf("context block %d evidence unit %d section %d is invalid", index, unitIndex, sectionIndex)
-				}
-				if _, duplicate := seenSections[section]; duplicate {
-					return "", fmt.Errorf("context block %d evidence unit %d section %q is duplicated", index, unitIndex, section)
-				}
-				seenSections[section] = struct{}{}
+			if !evidenceIdentityMatches(identity, conflict.Current) ||
+				!evidenceIdentityMatches(identity, conflict.Incoming) {
+				return "", fmt.Errorf(
+					"context block %d %s identity does not match current and incoming evidence",
+					index,
+					label,
+				)
 			}
 		}
 	}
@@ -351,6 +377,68 @@ func validateDefinitionContext(blocks []agentapi.ContextBlock) (string, error) {
 		return "", fmt.Errorf("marshal context snapshot: %w", err)
 	}
 	return hashBytes(raw), nil
+}
+
+func validateContextEvidenceUnit(
+	blockIndex int,
+	label string,
+	unit tool.EvidenceUnit,
+) error {
+	if unit.SourceKind == "" || unit.SourceKind != strings.TrimSpace(unit.SourceKind) ||
+		unit.Target == "" || unit.Target != strings.TrimSpace(unit.Target) {
+		return fmt.Errorf(
+			"context block %d %s source_kind and target are required and canonical",
+			blockIndex,
+			label,
+		)
+	}
+	if unit.Coverage.Complete && unit.Coverage.Partial {
+		return fmt.Errorf("context block %d %s coverage is contradictory", blockIndex, label)
+	}
+	if unit.TokenCost < 0 {
+		return fmt.Errorf("context block %d %s token_cost is invalid", blockIndex, label)
+	}
+	if unit.ContentHash != "" &&
+		(len(unit.ContentHash) != sha256.Size*2 || !validHex(unit.ContentHash)) {
+		return fmt.Errorf("context block %d %s content_hash is invalid", blockIndex, label)
+	}
+	seenSections := make(map[string]struct{}, len(unit.Sections))
+	for sectionIndex, section := range unit.Sections {
+		if section == "" || section != strings.TrimSpace(section) {
+			return fmt.Errorf(
+				"context block %d %s section %d is invalid",
+				blockIndex,
+				label,
+				sectionIndex,
+			)
+		}
+		if _, duplicate := seenSections[section]; duplicate {
+			return fmt.Errorf(
+				"context block %d %s section %q is duplicated",
+				blockIndex,
+				label,
+				section,
+			)
+		}
+		seenSections[section] = struct{}{}
+	}
+	return nil
+}
+
+func evidenceIdentityMatches(
+	identity agentapi.EvidenceIdentity,
+	unit tool.EvidenceUnit,
+) bool {
+	if identity.SourceKind != unit.SourceKind ||
+		identity.Target != unit.Target ||
+		identity.Version != unit.Version ||
+		identity.TimeRange != unit.TimeRange {
+		return false
+	}
+	if identity.Section == "" {
+		return len(unit.Sections) == 0
+	}
+	return len(unit.Sections) == 1 && unit.Sections[0] == identity.Section
 }
 
 func canonicalToolIDSet(ids []string) (map[tool.ToolID]struct{}, error) {

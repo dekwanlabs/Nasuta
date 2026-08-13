@@ -70,14 +70,25 @@ func (executor *AgentNodeExecutor) Execute(
 	if err != nil {
 		return NodeResult{}, err
 	}
+	input := request.Inputs[0]
+	contextBlock, err := contextBlockFromHandoff(input)
+	if err != nil {
+		return NodeResult{}, fmt.Errorf("agent node %q context: %w", request.Node.ID, err)
+	}
 	runRequest := agentapi.RunRequest{
 		RunID: runID, Agent: request.Node.Agent, DefinitionHash: definition.ContentHash,
-		Input: request.Inputs[0].Payload, Permissions: permissions,
+		Input: input.Payload, Context: []agentapi.ContextBlock{contextBlock},
+		Permissions: permissions,
 		ToolScope: agentapi.ToolScope{
-			AllowWrite: scope.Has(permissions.Scopes, scope.KnowledgeWrite),
+			AllowWrite:      scope.Has(permissions.Scopes, scope.KnowledgeWrite),
+			RestrictVisible: request.Node.RestrictVisibleTools,
+			VisibleToolIDs:  append([]string(nil), request.Node.VisibleToolIDs...),
 		},
-		Policy: agentapi.RunPolicy{MaxToolCalls: request.Node.Budget.MaxToolCalls},
-		Actor:  request.Actor,
+		Policy: agentapi.RunPolicy{
+			EvidenceSeeded: len(input.EvidenceUnits) > 0,
+			MaxToolCalls:   request.Node.Budget.MaxToolCalls,
+		},
+		Actor: request.Actor,
 		Correlation: agentapi.Correlation{
 			ParentRunID:   request.WorkflowRunID,
 			WorkflowRunID: request.WorkflowRunID,
@@ -133,9 +144,25 @@ func (executor *AgentNodeExecutor) Execute(
 		Schema:         request.Node.OutputSchema,
 		Payload:        append([]byte(nil), result.Output...),
 		References:     append([]agentapi.Reference(nil), result.References...),
-		Completeness:   Complete,
+		EvidenceUnits:  result.EvidenceUnits,
+		EvidenceConflicts: appendUniqueEvidenceConflicts(
+			cloneEvidenceConflicts(input.EvidenceConflicts),
+			result.EvidenceConflicts,
+			evidenceConflictSet(input.EvidenceConflicts),
+		),
+		Completeness: Complete,
 	}
 	return nodeResult, nil
+}
+
+func evidenceConflictSet(
+	conflicts []agentapi.EvidenceConflict,
+) map[string]struct{} {
+	seen := make(map[string]struct{}, len(conflicts))
+	for _, conflict := range conflicts {
+		seen[evidenceConflictKey(conflict)] = struct{}{}
+	}
+	return seen
 }
 
 var multiAgentChildRunTraceSpec = runtrace.Spec[agentapi.RunRequest, agentapi.RunResult]{

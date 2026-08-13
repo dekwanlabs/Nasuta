@@ -10,6 +10,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 type platformQAInvestigationRunner struct {
@@ -18,71 +19,200 @@ type platformQAInvestigationRunner struct {
 }
 
 func (runner platformQAInvestigationRunner) Available() bool {
-	if runner.platform == nil {
-		return false
-	}
-	p := runner.platform
-	p.qa.reload.RLock()
-	defer p.qa.reload.RUnlock()
-	return p.flow.service.ExecutionAvailable() &&
-		p.agents.runtime != nil && p.agents.version > 0
+	_, _, err := runner.startCapability()
+	return err == nil
 }
 
-func (runner platformQAInvestigationRunner) Run(
+func (runner platformQAInvestigationRunner) Start(
 	ctx context.Context,
 	request agent.InvestigationRequest,
-) (agent.InvestigationResult, error) {
-	if runner.platform == nil {
-		return agent.InvestigationResult{}, workflow.ErrUnavailable
-	}
-	p := runner.platform
-	p.qa.reload.RLock()
-	defer p.qa.reload.RUnlock()
-	if !p.flow.service.ExecutionAvailable() ||
-		p.agents.runtime == nil || p.agents.version <= 0 {
-		return agent.InvestigationResult{}, workflow.ErrUnavailable
-	}
-	input, err := json.Marshal(struct {
-		Question string `json:"question"`
-	}{Question: request.Question})
+) error {
+	service, version, err := runner.startCapability()
 	if err != nil {
-		return agent.InvestigationResult{}, fmt.Errorf("marshal QA investigation request: %w", err)
+		return err
 	}
-	events, unsubscribe, err := p.flow.service.SubscribeEvents(request.WorkflowRunID)
+	input, err := json.Marshal(request.Contract)
 	if err != nil {
-		return agent.InvestigationResult{}, fmt.Errorf("subscribe QA investigation workflow %q: %w", request.WorkflowRunID, err)
+		return fmt.Errorf("marshal QA task contract: %w", err)
+	}
+	events, unsubscribe, err := service.SubscribeEvents(request.WorkflowRunID)
+	if err != nil {
+		return fmt.Errorf(
+			"subscribe QA investigation workflow %q: %w",
+			request.WorkflowRunID,
+			err,
+		)
 	}
 	stop := make(chan struct{})
+	completed := make(chan struct{})
 	var bridge sync.WaitGroup
 	bridge.Add(1)
 	go func() {
 		defer bridge.Done()
-		bridgeInvestigationEvents(events, stop, runner.events, request.ParentRunID)
+		defer unsubscribe()
+		bridgeInvestigationEvents(
+			events,
+			stop,
+			completed,
+			runner.events,
+			request.Contract.TaskID,
+		)
 	}()
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
-	workflowResult, executeErr := p.flow.service.Execute(ctx, workflow.ExecuteRequest{
-		RunID: request.WorkflowRunID, ParentRunID: request.ParentRunID,
+	_, startErr := service.Start(ctx, workflow.StartRequest{
+		RunID: request.WorkflowRunID, ParentRunID: request.Contract.TaskID,
 		Workflow: workflow.DefinitionRef{
-			ID: workflow.DelegatedInvestigationID, Version: p.agents.version,
+			ID: workflow.DelegatedInvestigationID, Version: version,
 		},
 		Input: input, Actor: request.Actor, ActorPermissions: readOnly,
-		Scenario: workflow.DelegatedInvestigationID, ScenarioPermissions: readOnly,
+		SeedEvidence: request.Contract.Context.SeedEvidence,
+		Scenario:     workflow.DelegatedInvestigationID, ScenarioPermissions: readOnly,
 	})
-	unsubscribe()
+	if startErr == nil {
+		awaitCtx := context.WithoutCancel(ctx)
+		go func() {
+			defer close(completed)
+			if _, err := service.AwaitTerminal(
+				awaitCtx,
+				request.WorkflowRunID,
+			); err != nil {
+				log.ErrorfCtx(
+					awaitCtx,
+					"[qa] await workflow %s event projection completion: %v",
+					request.WorkflowRunID,
+					err,
+				)
+			}
+		}()
+		return nil
+	}
 	close(stop)
 	bridge.Wait()
-	if executeErr != nil {
-		return agent.InvestigationResult{}, fmt.Errorf("execute QA investigation workflow version %d: %w", p.agents.version, executeErr)
+	return fmt.Errorf(
+		"start QA investigation workflow version %d: %w",
+		version,
+		startErr,
+	)
+}
+
+func (runner platformQAInvestigationRunner) AwaitTerminal(
+	ctx context.Context,
+	workflowRunID string,
+) (agent.InvestigationTerminal, error) {
+	service, err := runner.workflowService()
+	if err != nil {
+		return agent.InvestigationTerminal{}, err
 	}
-	var result agent.InvestigationResult
-	if err := json.Unmarshal(workflowResult.Output.Payload, &result); err != nil {
-		return agent.InvestigationResult{}, fmt.Errorf("decode QA investigation answer: %w", err)
+	terminal, err := service.AwaitTerminal(ctx, workflowRunID)
+	if err != nil {
+		return agent.InvestigationTerminal{}, err
 	}
-	result.WorkflowRunID = workflowResult.RunID
-	result.Usage = agent.InvestigationUsage{
-		InputTokens: workflowResult.Usage.InputTokens, OutputTokens: workflowResult.Usage.OutputTokens,
-		ReasoningTokens: workflowResult.Usage.ReasoningTokens, TotalTokens: workflowResult.Usage.TotalTokens,
-		ToolCalls: workflowResult.Usage.ToolCalls, CostMicros: workflowResult.Usage.CostMicros,
+	return investigationTerminal(terminal)
+}
+
+func (runner platformQAInvestigationRunner) LoadTerminal(
+	ctx context.Context,
+	workflowRunID string,
+) (agent.InvestigationTerminal, error) {
+	service, err := runner.workflowService()
+	if err != nil {
+		return agent.InvestigationTerminal{}, err
+	}
+	terminal, err := service.LoadTerminalResult(ctx, workflowRunID)
+	if err != nil {
+		return agent.InvestigationTerminal{}, err
+	}
+	return investigationTerminal(terminal)
+}
+
+func (runner platformQAInvestigationRunner) Cancel(
+	ctx context.Context,
+	workflowRunID string,
+	userID int64,
+) error {
+	service, err := runner.workflowService()
+	if err != nil {
+		return err
+	}
+	if _, err := service.Cancel(ctx, workflowRunID, userID, false); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (runner platformQAInvestigationRunner) startCapability() (
+	*workflow.Service,
+	int64,
+	error,
+) {
+	if runner.platform == nil {
+		return nil, 0, workflow.ErrUnavailable
+	}
+	p := runner.platform
+	p.qa.reload.RLock()
+	defer p.qa.reload.RUnlock()
+	if p.flow.service == nil ||
+		!p.flow.service.ExecutionAvailable() ||
+		p.agents.runtime == nil ||
+		p.agents.version <= 0 ||
+		p.qa.runs == nil {
+		return nil, 0, workflow.ErrUnavailable
+	}
+	return p.flow.service, p.agents.version, nil
+}
+
+func (runner platformQAInvestigationRunner) workflowService() (*workflow.Service, error) {
+	if runner.platform == nil || runner.platform.flow.service == nil {
+		return nil, workflow.ErrUnavailable
+	}
+	return runner.platform.flow.service, nil
+}
+
+func investigationTerminal(
+	terminal workflow.TerminalResult,
+) (agent.InvestigationTerminal, error) {
+	result := agent.InvestigationTerminal{
+		WorkflowRunID: terminal.Run.ID,
+		ErrorCode:     terminal.Run.ErrorCode,
+		Usage: agent.InvestigationUsage{
+			InputTokens:     terminal.Run.Usage.InputTokens,
+			OutputTokens:    terminal.Run.Usage.OutputTokens,
+			ReasoningTokens: terminal.Run.Usage.ReasoningTokens,
+			TotalTokens:     terminal.Run.Usage.TotalTokens,
+			ToolCalls:       terminal.Run.Usage.ToolCalls,
+			CostMicros:      terminal.Run.Usage.CostMicros,
+		},
+	}
+	switch terminal.Run.Status {
+	case workflow.RunSucceeded:
+		result.Status = agent.InvestigationSucceeded
+		if terminal.Output == nil {
+			return agent.InvestigationTerminal{}, fmt.Errorf(
+				"QA investigation workflow %q succeeded without output",
+				terminal.Run.ID,
+			)
+		}
+		var output agent.InvestigationResult
+		if err := json.Unmarshal(terminal.Output.Payload, &output); err != nil {
+			return agent.InvestigationTerminal{}, fmt.Errorf(
+				"decode QA investigation workflow %q output: %w",
+				terminal.Run.ID,
+				err,
+			)
+		}
+		result.Output = &output
+	case workflow.RunFailed:
+		result.Status = agent.InvestigationFailed
+	case workflow.RunCancelled:
+		result.Status = agent.InvestigationCancelled
+	case workflow.RunTimedOut:
+		result.Status = agent.InvestigationTimedOut
+	default:
+		return agent.InvestigationTerminal{}, fmt.Errorf(
+			"QA investigation workflow %q has non-terminal status %q",
+			terminal.Run.ID,
+			terminal.Run.Status,
+		)
 	}
 	return result, nil
 }
@@ -90,6 +220,7 @@ func (runner platformQAInvestigationRunner) Run(
 func bridgeInvestigationEvents(
 	events <-chan workflow.Event,
 	stop <-chan struct{},
+	completed <-chan struct{},
 	emitter run.ExecutionEventEmitter,
 	parentRunID string,
 ) {
@@ -97,16 +228,24 @@ func bridgeInvestigationEvents(
 		select {
 		case event := <-events:
 			emitInvestigationEvent(emitter, parentRunID, event)
-		case <-stop:
-			for {
-				select {
-				case event := <-events:
-					emitInvestigationEvent(emitter, parentRunID, event)
-				default:
-					return
-				}
+			if investigationTerminalEvent(event.Kind) {
+				return
 			}
+		case <-completed:
+			return
+		case <-stop:
+			return
 		}
+	}
+}
+
+func investigationTerminalEvent(kind string) bool {
+	switch kind {
+	case "workflow_succeeded", "workflow_failed",
+		"workflow_cancelled", "workflow_timed_out":
+		return true
+	default:
+		return false
 	}
 }
 

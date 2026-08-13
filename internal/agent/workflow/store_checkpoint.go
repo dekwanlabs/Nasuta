@@ -97,7 +97,8 @@ func (workflowStore *Store) loadFullHandoffs(
 ) ([]Handoff, error) {
 	rows, err := workflowStore.db.QueryContext(ctx, `SELECT
 		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-		payload_json,references_json,completeness,content_hash,created_at
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at
 		FROM handoff_artifacts
 		WHERE workflow_run_id=?
 		ORDER BY created_at,id`, workflowRunID)
@@ -107,21 +108,9 @@ func (workflowStore *Store) loadFullHandoffs(
 	defer rows.Close()
 	handoffs := make([]Handoff, 0)
 	for rows.Next() {
-		var handoff Handoff
-		var references []byte
-		if err := rows.Scan(
-			&handoff.ID, &handoff.WorkflowRunID, &handoff.ProducerNodeID,
-			&handoff.ProducerRunID, &handoff.Schema.ID, &handoff.Schema.Version,
-			&handoff.Payload, &references, &handoff.Completeness,
-			&handoff.ContentHash, &handoff.CreatedAt,
-		); err != nil {
+		handoff, err := scanHandoff(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan full workflow handoff %q: %w", workflowRunID, err)
-		}
-		if err := json.Unmarshal(references, &handoff.References); err != nil {
-			return nil, fmt.Errorf(
-				"decode full workflow handoff %q references: %w",
-				handoff.ID, err,
-			)
 		}
 		handoffs = append(handoffs, handoff)
 	}

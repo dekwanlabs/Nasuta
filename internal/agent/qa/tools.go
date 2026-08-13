@@ -9,6 +9,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -286,8 +287,8 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 	}
 	seenContent := make(map[string]struct{}, len(blocks))
 	seenRefs := make(map[string]struct{}, len(context.References)+len(blocks))
-	seenEvidence := make(map[string]struct{}, len(blocks))
-	existingEvidenceCount := len(context.EvidenceUnits)
+	preloadedEvidence := evidence.New(nil, "")
+	var preloadedConflicts []evidence.Conflict
 	for _, ref := range context.References {
 		seenRefs[ref.Type+"\x00"+ref.Target] = struct{}{}
 	}
@@ -330,9 +331,13 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 			seenRefs[key] = struct{}{}
 			context.References = append(context.References, ref)
 		}
-		if !truncated {
-			appendQAEvidenceUnits(context, block.Evidence, delivered, seenEvidence)
-		}
+		preloadedConflicts = appendUniqueEvidenceConflicts(
+			preloadedConflicts,
+			preloadedEvidence.Add(
+				deliveredQAEvidenceUnits(block.Evidence, delivered, truncated),
+				"preload",
+			),
+		)
 		if budget == 0 {
 			break
 		}
@@ -340,6 +345,7 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 	if text.Len() == 0 {
 		return
 	}
+	existingComplete := true
 	if context.Text != "" {
 		remaining := totalBudget - (preloadedLimit - budget)
 		if remaining > 0 {
@@ -350,90 +356,69 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 			existing := []rune(context.Text)
 			if len(existing) > remaining {
 				existing = existing[:remaining]
-				context.EvidenceUnits = context.EvidenceUnits[existingEvidenceCount:]
+				existingComplete = false
 			}
 			text.WriteString(string(existing))
+		} else {
+			existingComplete = false
 		}
 	}
 	context.Text = text.String()
-	context.EvidenceUnits = dedupeQAEvidenceUnits(context.EvidenceUnits)
+	mergedEvidence := evidence.New(nil, "")
+	conflicts := appendUniqueEvidenceConflicts(nil, context.EvidenceConflicts)
+	if existingComplete {
+		mergedEvidence.Add(context.EvidenceUnits, "retrieval")
+	}
+	mergedEvidence.RememberConflicts(conflicts)
+	mergedEvidence.RememberConflicts(preloadedConflicts)
+	conflicts = appendUniqueEvidenceConflicts(conflicts, preloadedConflicts)
+	conflicts = appendUniqueEvidenceConflicts(
+		conflicts,
+		mergedEvidence.Add(preloadedEvidence.Units(), "preload"),
+	)
+	context.EvidenceUnits = mergedEvidence.Units()
+	context.EvidenceConflicts = evidence.CloneConflicts(conflicts)
 	context.HitCount = len(context.References)
 }
 
-func appendQAEvidenceUnits(
-	context *retrieval.RetrievedContext,
+func appendUniqueEvidenceConflicts(
+	target []evidence.Conflict,
+	incoming []evidence.Conflict,
+) []evidence.Conflict {
+	if len(incoming) == 0 {
+		return target
+	}
+	seen := make(map[string]struct{}, len(target)+len(incoming))
+	for _, conflict := range target {
+		seen[evidence.ConflictFingerprint(conflict)] = struct{}{}
+	}
+	for _, conflict := range incoming {
+		fingerprint := evidence.ConflictFingerprint(conflict)
+		if _, duplicate := seen[fingerprint]; duplicate {
+			continue
+		}
+		seen[fingerprint] = struct{}{}
+		target = append(target, evidence.CloneConflict(conflict))
+	}
+	return target
+}
+
+func deliveredQAEvidenceUnits(
 	units []tool.EvidenceUnit,
 	delivered string,
-	seen map[string]struct{},
-) {
-	for _, unit := range units {
-		unit.ContentHash = hashString(delivered)
-		unit.TokenCost = tooloutput.EstimateTokens(delivered)
-		sections := unit.Sections
-		if len(sections) == 0 {
-			sections = []string{""}
+	truncated bool,
+) []tool.EvidenceUnit {
+	deliveredUnits := evidence.CloneUnits(units)
+	tokenCost := tooloutput.EstimateTokens(delivered)
+	for index := range deliveredUnits {
+		unit := &deliveredUnits[index]
+		if truncated {
+			unit.Coverage.Complete = false
+			unit.Coverage.Partial = true
 		}
-		for _, section := range sections {
-			key := qaEvidenceUnitKey(unit, section)
-			if _, duplicate := seen[key]; duplicate {
-				continue
-			}
-			seen[key] = struct{}{}
-			item := unit
-			if section == "" {
-				item.Sections = nil
-			} else {
-				item.Sections = []string{section}
-			}
-			item.Facets = append([]string(nil), unit.Facets...)
-			context.EvidenceUnits = append(context.EvidenceUnits, item)
-		}
+		unit.TokenCost = tokenCost
 	}
-}
-
-func qaEvidenceUnitKeys(unit tool.EvidenceUnit) []string {
-	if len(unit.Sections) == 0 {
-		return []string{qaEvidenceUnitKey(unit, "")}
-	}
-	keys := make([]string, 0, len(unit.Sections))
-	for _, section := range unit.Sections {
-		keys = append(keys, qaEvidenceUnitKey(unit, section))
-	}
-	return keys
-}
-
-func qaEvidenceUnitKey(unit tool.EvidenceUnit, section string) string {
-	return unit.SourceKind + "\x00" + unit.Target + "\x00" + section + "\x00" + unit.Version + "\x00" + unit.TimeRange
-}
-
-func dedupeQAEvidenceUnits(units []tool.EvidenceUnit) []tool.EvidenceUnit {
-	if len(units) < 2 {
-		return units
-	}
-	seen := make(map[string]struct{}, len(units))
-	out := units[:0]
-	for _, unit := range units {
-		keys := qaEvidenceUnitKeys(unit)
-		if len(keys) != 1 {
-			for _, section := range unit.Sections {
-				item := unit
-				item.Sections = []string{section}
-				key := qaEvidenceUnitKey(item, section)
-				if _, duplicate := seen[key]; duplicate {
-					continue
-				}
-				seen[key] = struct{}{}
-				out = append(out, item)
-			}
-			continue
-		}
-		if _, duplicate := seen[keys[0]]; duplicate {
-			continue
-		}
-		seen[keys[0]] = struct{}{}
-		out = append(out, unit)
-	}
-	return out
+	return deliveredUnits
 }
 
 func canonicalRetrievalQuery(cleanQuestion, contextTerms string) string {

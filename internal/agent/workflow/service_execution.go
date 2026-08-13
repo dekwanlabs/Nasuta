@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/log"
 )
@@ -60,7 +61,7 @@ func (service *Service) Start(
 	if err != nil {
 		return nil, err
 	}
-	const scenario = "workflow.api"
+	scenario, actorPermissions, scenarioPermissions, enforceReadOnly := startPolicy(request)
 	definition, selection, err := service.resolveDefinitionFor(
 		request.Workflow,
 		request.Actor,
@@ -69,18 +70,23 @@ func (service *Service) Start(
 	if err != nil {
 		return nil, err
 	}
-	if !request.Admin && !definitionIsKnowledgeReadOnly(definition) {
+	if enforceReadOnly && !request.Admin && !definitionIsKnowledgeReadOnly(definition) {
 		return nil, ErrForbidden
 	}
-	permissions := clonePermissionPolicy(definition.Permissions)
+	if enforceReadOnly {
+		actorPermissions = clonePermissionPolicy(definition.Permissions)
+		scenarioPermissions = clonePermissionPolicy(definition.Permissions)
+	}
 	prepared, err := prepareWorkflowRun(orchestrator, definition, selection, ExecuteRequest{
 		RunID:               request.RunID,
+		ParentRunID:         request.ParentRunID,
 		Workflow:            request.Workflow,
 		Input:               request.Input,
+		SeedEvidence:        request.SeedEvidence,
 		Actor:               request.Actor,
-		ActorPermissions:    permissions,
+		ActorPermissions:    actorPermissions,
 		Scenario:            scenario,
-		ScenarioPermissions: permissions,
+		ScenarioPermissions: scenarioPermissions,
 	})
 	if err != nil {
 		return nil, err
@@ -89,7 +95,7 @@ func (service *Service) Start(
 	if err != nil {
 		return nil, err
 	}
-	if err := service.store.StartWorkflow(ctx, prepared.record, prepared.input); err != nil {
+	if err := service.store.StartWorkflow(runCtx, prepared.record, prepared.input); err != nil {
 		release()
 		return nil, err
 	}
@@ -110,6 +116,17 @@ func (service *Service) Start(
 	return &run, nil
 }
 
+func startPolicy(
+	request StartRequest,
+) (string, agentapi.PermissionPolicy, agentapi.PermissionPolicy, bool) {
+	if request.Scenario == "" &&
+		len(request.ActorPermissions.Scopes) == 0 &&
+		len(request.ScenarioPermissions.Scopes) == 0 {
+		return "workflow.api", agentapi.PermissionPolicy{}, agentapi.PermissionPolicy{}, true
+	}
+	return request.Scenario, request.ActorPermissions, request.ScenarioPermissions, false
+}
+
 func (service *Service) executePrepared(
 	ctx context.Context,
 	orchestrator *Orchestrator,
@@ -118,7 +135,7 @@ func (service *Service) executePrepared(
 	observer := &storeRunObserver{store: service.store}
 	result, runErr := orchestrator.RunObserved(ctx, prepared.definition, RunRequest{
 		RunID: prepared.record.ID, ParentRunID: prepared.record.ParentRunID,
-		Input: prepared.input.Payload,
+		InputHandoff: &prepared.input,
 		Actor: agentapi.Actor{
 			UserID:   prepared.record.ActorUserID,
 			TenantID: prepared.record.ActorTenantID,
@@ -241,6 +258,7 @@ func prepareWorkflowRun(
 		ProducerNodeID: "workflow.input",
 		Schema:         definition.InputSchema,
 		Payload:        request.Input,
+		EvidenceUnits:  evidence.CloneUnits(request.SeedEvidence),
 		Completeness:   Complete,
 		CreatedAt:      startedAt,
 	}, definition.Budget.MaxHandoffBytes, orchestrator.schemas)

@@ -60,9 +60,10 @@ type ToolPolicy struct {
 }
 
 type BudgetPolicy struct {
-	Timeout       time.Duration `json:"timeout"`
-	MaxSteps      int           `json:"max_steps"`
-	ContextTokens int           `json:"context_tokens"`
+	Timeout           time.Duration `json:"timeout"`
+	MaxSteps          int           `json:"max_steps"`
+	ContextTokens     int           `json:"context_tokens"`
+	MaxContinueRounds int           `json:"max_continue_rounds"`
 }
 
 type PermissionPolicy struct {
@@ -108,8 +109,15 @@ func Prepare(definition Definition) (Definition, error) {
 		prepared.Model.OutputPriceMicrosPerMillionTokens < 0 {
 		return Definition{}, fmt.Errorf("agent definition %q model prices cannot be negative", prepared.ID)
 	}
+	if (prepared.Model.InputPriceMicrosPerMillionTokens == 0) !=
+		(prepared.Model.OutputPriceMicrosPerMillionTokens == 0) {
+		return Definition{}, fmt.Errorf("agent definition %q model prices must be configured together", prepared.ID)
+	}
 	if prepared.Budget.Timeout <= 0 || prepared.Budget.MaxSteps <= 0 || prepared.Budget.ContextTokens <= 0 {
 		return Definition{}, fmt.Errorf("agent definition %q budgets must be positive", prepared.ID)
+	}
+	if prepared.Budget.MaxContinueRounds < 0 {
+		return Definition{}, fmt.Errorf("agent definition %q continuation rounds cannot be negative", prepared.ID)
 	}
 	if prepared.FailurePolicy.MaxInfrastructureRetries < 0 {
 		return Definition{}, fmt.Errorf("agent definition %q retries cannot be negative", prepared.ID)

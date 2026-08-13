@@ -28,6 +28,55 @@ func (workflowStore *Store) GetRun(ctx context.Context, id string) (*WorkflowRun
 	return &run, nil
 }
 
+// LoadTerminalResult reads only the Run and its canonical output artifact.
+func (workflowStore *Store) LoadTerminalResult(
+	ctx context.Context,
+	workflowRunID string,
+) (TerminalResult, error) {
+	run, err := workflowStore.GetRun(ctx, workflowRunID)
+	if err != nil {
+		return TerminalResult{}, err
+	}
+	result := TerminalResult{Run: *run}
+	switch run.Status {
+	case RunRunning, RunWaitingHuman:
+		return TerminalResult{}, fmt.Errorf(
+			"workflow run %q is %q: %w",
+			workflowRunID, run.Status, ErrConflict,
+		)
+	case RunFailed, RunCancelled, RunTimedOut:
+		return result, nil
+	case RunSucceeded:
+	default:
+		return TerminalResult{}, fmt.Errorf(
+			"workflow run %q has unknown status %q: %w",
+			workflowRunID, run.Status, ErrInvariant,
+		)
+	}
+	row := workflowStore.db.QueryRowContext(ctx, `SELECT
+		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at
+		FROM handoff_artifacts
+		WHERE workflow_run_id=? AND producer_node_id='workflow.output'
+		LIMIT 1`, workflowRunID)
+	output, err := scanHandoff(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return TerminalResult{}, fmt.Errorf(
+				"workflow run %q succeeded without workflow.output: %w",
+				workflowRunID, ErrInvariant,
+			)
+		}
+		return TerminalResult{}, fmt.Errorf(
+			"load workflow run %q output: %w",
+			workflowRunID, err,
+		)
+	}
+	result.Output = &output
+	return result, nil
+}
+
 // ListNodeRuns returns all Attempts in stable keyset order.
 func (workflowStore *Store) ListNodeRuns(
 	ctx context.Context,
@@ -154,7 +203,8 @@ func (workflowStore *Store) ListHandoffs(ctx context.Context, workflowRunID stri
 	if cursor.ID == "" {
 		rows, err = workflowStore.db.QueryContext(ctx, `SELECT
 			id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-			payload_json,references_json,completeness,content_hash,created_at
+			payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+			completeness,content_hash,created_at
 			FROM handoff_artifacts
 			WHERE workflow_run_id=?
 			ORDER BY created_at,id LIMIT ?`,
@@ -163,7 +213,8 @@ func (workflowStore *Store) ListHandoffs(ctx context.Context, workflowRunID stri
 	} else {
 		rows, err = workflowStore.db.QueryContext(ctx, `SELECT
 			id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-			payload_json,references_json,completeness,content_hash,created_at
+			payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+			completeness,content_hash,created_at
 			FROM handoff_artifacts
 			WHERE workflow_run_id=? AND (created_at>? OR (created_at=? AND id>?))
 			ORDER BY created_at,id LIMIT ?`,
@@ -180,18 +231,9 @@ func (workflowStore *Store) ListHandoffs(ctx context.Context, workflowRunID stri
 	defer rows.Close()
 	handoffs := make([]Handoff, 0, limit)
 	for rows.Next() {
-		var handoff Handoff
-		var references []byte
-		if err := rows.Scan(
-			&handoff.ID, &handoff.WorkflowRunID, &handoff.ProducerNodeID,
-			&handoff.ProducerRunID, &handoff.Schema.ID, &handoff.Schema.Version,
-			&handoff.Payload, &references, &handoff.Completeness,
-			&handoff.ContentHash, &handoff.CreatedAt,
-		); err != nil {
+		handoff, err := scanHandoff(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan handoff: %w", err)
-		}
-		if err := json.Unmarshal(references, &handoff.References); err != nil {
-			return nil, fmt.Errorf("decode handoff references: %w", err)
 		}
 		handoffs = append(handoffs, handoff)
 	}
@@ -199,6 +241,29 @@ func (workflowStore *Store) ListHandoffs(ctx context.Context, workflowRunID stri
 		return nil, fmt.Errorf("iterate handoffs: %w", err)
 	}
 	return handoffs, nil
+}
+
+func scanHandoff(row rowScanner) (Handoff, error) {
+	var handoff Handoff
+	var references, evidenceUnits, evidenceConflicts []byte
+	if err := row.Scan(
+		&handoff.ID, &handoff.WorkflowRunID, &handoff.ProducerNodeID,
+		&handoff.ProducerRunID, &handoff.Schema.ID, &handoff.Schema.Version,
+		&handoff.Payload, &references, &evidenceUnits, &evidenceConflicts,
+		&handoff.Completeness, &handoff.ContentHash, &handoff.CreatedAt,
+	); err != nil {
+		return Handoff{}, err
+	}
+	if err := json.Unmarshal(references, &handoff.References); err != nil {
+		return Handoff{}, fmt.Errorf("decode handoff references: %w", err)
+	}
+	if err := json.Unmarshal(evidenceUnits, &handoff.EvidenceUnits); err != nil {
+		return Handoff{}, fmt.Errorf("decode handoff evidence units: %w", err)
+	}
+	if err := json.Unmarshal(evidenceConflicts, &handoff.EvidenceConflicts); err != nil {
+		return Handoff{}, fmt.Errorf("decode handoff evidence conflicts: %w", err)
+	}
+	return handoff, nil
 }
 
 func scanNodeRun(row rowScanner) (NodeRunRecord, error) {

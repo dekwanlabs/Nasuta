@@ -28,6 +28,7 @@ type QA struct {
 	phaseEmitter       interface{ EmitPhase(string, string) }
 	investigation      InvestigationRunner
 	scenarios          ScenarioLifecycle
+	coordinator        *InvestigationCoordinator
 	executionEvents    ExecutionEventEmitter
 	memory             *memory.MemoryStore
 	sessions           *memory.SessionStore
@@ -73,8 +74,9 @@ func NewQA(d QADeps) *QA {
 		definitions:     d.Definitions, agentRef: d.Agent,
 		runtime: d.Runtime, runtimeTools: d.RuntimeTools,
 		phaseEmitter: d.PhaseEmitter, investigation: d.Investigation,
-		scenarios: d.ScenarioLifecycle, executionEvents: d.ExecutionEvents,
-		writeAvailable: d.WriteAvailable, memory: d.Memory,
+		scenarios: d.ScenarioLifecycle, coordinator: d.Coordinator,
+		executionEvents: d.ExecutionEvents,
+		writeAvailable:  d.WriteAvailable, memory: d.Memory,
 		compactionStatus: make(map[string]SessionStatusEvent),
 	}
 	if svc.agentRef.ID == "" {
@@ -198,11 +200,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 
 	var result *AskResult
 	if prepared.execution.Strategy == retrieval.ExecutionMultiAgent {
-		result, err = svc.submitInvestigation(
-			prepared.ctx, prepared.request, prepared.request.Question,
-			prepared.request.Conversation, prepared.request.UserID,
-			prepared.request.RunID, prepared.trace, prepared.ownsTrace,
-		)
+		result, err = svc.submitInvestigation(prepared)
 	} else {
 		result, err = svc.prepareSingleAgentRun(prepared)
 	}
@@ -213,9 +211,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 }
 
 func standardQARequest(request QARequest, defaultAgent agentapi.DefinitionRef) bool {
-	if len(request.PreloadedContext) > 0 || len(request.ToolPlan.Prefetch) > 0 ||
-		request.ParentRunID != "" ||
-		request.WorkflowRunID != "" || request.WorkflowNodeID != "" {
+	if request.WorkflowRunID != "" || request.WorkflowNodeID != "" {
 		return false
 	}
 	if request.Agent.ID == "" {

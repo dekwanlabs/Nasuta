@@ -186,6 +186,34 @@ type RunDetail struct {
 	RunRecord
 	Steps    []StepRow    `json:"steps"`
 	LLMCalls []LLMCallRow `json:"llm_calls"`
+	Terminal *RunTerminal `json:"terminal,omitempty"`
 }
 
 type RunPage = domain.Page[RunRecord]
+
+// RunControlRecord carries only the persisted facts needed to dispatch control.
+type RunControlRecord struct {
+	ID            string
+	RunKind       RunKind
+	Status        RunStatus
+	WorkflowRunID string
+	UserID        int64
+}
+
+// QAParentRecord is the durable identity and state needed for parent reconciliation.
+type QAParentRecord struct {
+	ID            string
+	WorkflowRunID string
+	UserID        int64
+	SessionID     string
+	Question      string
+	Status        RunStatus
+	StartedAt     string
+	EndedAt       string
+}
+
+// QAParentCursor is a stable keyset cursor over parent creation order.
+type QAParentCursor struct {
+	StartedAt string
+	ID        string
+}

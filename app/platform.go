@@ -50,11 +50,12 @@ type incidentRuntime struct {
 }
 
 type agentRuntime struct {
-	version int64
-	schemas *agentapi.SchemaRegistry
-	catalog *catalog.Catalog
-	runtime agentapi.Runtime
-	api     *agenthttp.Handler
+	version      int64
+	schemas      *agentapi.SchemaRegistry
+	catalog      *catalog.Catalog
+	capabilities *agentapi.CapabilityRegistry
+	runtime      agentapi.Runtime
+	api          *agenthttp.Handler
 }
 
 type qaState struct {
@@ -169,6 +170,10 @@ func (p *Platform) initCatalogs() error {
 	}
 	p.agents.schemas = schemas
 	p.agents.catalog = catalog.New(schemas)
+	p.agents.capabilities = agentapi.NewCapabilityRegistry(
+		schemas,
+		p.agents.catalog,
+	)
 	p.agents.api = agenthttp.New(p.agents.catalog)
 	p.flow.catalog = workflow.NewCatalog(schemas, p.agents.catalog)
 	if p.db == nil {

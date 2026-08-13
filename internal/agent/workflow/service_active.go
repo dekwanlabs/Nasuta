@@ -18,6 +18,7 @@ func (service *Service) registerActive(
 		ctx = context.WithoutCancel(ctx)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
+	active := &activeRun{cancel: cancel, done: make(chan struct{})}
 	service.activeMu.Lock()
 	if service.closed {
 		service.activeMu.Unlock()
@@ -33,7 +34,7 @@ func (service *Service) registerActive(
 			ErrConflict,
 		)
 	}
-	service.active[runID] = cancel
+	service.active[runID] = active
 	service.activeWG.Add(1)
 	service.activeMu.Unlock()
 
@@ -42,7 +43,10 @@ func (service *Service) registerActive(
 		once.Do(func() {
 			cancel()
 			service.activeMu.Lock()
-			delete(service.active, runID)
+			if service.active[runID] == active {
+				delete(service.active, runID)
+			}
+			close(active.done)
 			service.activeMu.Unlock()
 			service.activeWG.Done()
 		})
@@ -52,11 +56,49 @@ func (service *Service) registerActive(
 
 func (service *Service) cancelActive(runID string) {
 	service.activeMu.Lock()
-	cancel := service.active[runID]
+	active := service.active[runID]
 	service.activeMu.Unlock()
-	if cancel != nil {
-		cancel()
+	if active != nil {
+		active.cancel()
 	}
+}
+
+// AwaitTerminal joins local execution when present, then reads durable terminal facts.
+func (service *Service) AwaitTerminal(
+	ctx context.Context,
+	runID string,
+) (TerminalResult, error) {
+	if service == nil || service.store == nil {
+		return TerminalResult{}, ErrUnavailable
+	}
+	if err := validateRunID(runID); err != nil {
+		return TerminalResult{}, err
+	}
+	service.activeMu.Lock()
+	active := service.active[runID]
+	service.activeMu.Unlock()
+	if active != nil {
+		select {
+		case <-ctx.Done():
+			return TerminalResult{}, ctx.Err()
+		case <-active.done:
+		}
+	}
+	return service.store.LoadTerminalResult(ctx, runID)
+}
+
+// LoadTerminalResult reads durable terminal facts without joining local execution.
+func (service *Service) LoadTerminalResult(
+	ctx context.Context,
+	runID string,
+) (TerminalResult, error) {
+	if service == nil || service.store == nil {
+		return TerminalResult{}, ErrUnavailable
+	}
+	if err := validateRunID(runID); err != nil {
+		return TerminalResult{}, err
+	}
+	return service.store.LoadTerminalResult(ctx, runID)
 }
 
 // Close prevents new Runs, cancels active execution, and waits for persistence cleanup.
@@ -72,8 +114,8 @@ func (service *Service) Close() {
 	}
 	service.closed = true
 	cancels := make([]context.CancelFunc, 0, len(service.active))
-	for _, cancel := range service.active {
-		cancels = append(cancels, cancel)
+	for _, active := range service.active {
+		cancels = append(cancels, active.cancel)
 	}
 	service.activeMu.Unlock()
 	for _, cancel := range cancels {

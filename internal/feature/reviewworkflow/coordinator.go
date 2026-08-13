@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
@@ -42,22 +41,19 @@ func NewCoordinator(
 	return &Coordinator{reviews: reviews, workflows: workflows}
 }
 
-// ReconcileRecoveredRun mirrors one recovered Workflow terminal state into Review.
+// ReconcileRecoveredRun mirrors one persisted Workflow state into its Review Round.
 func (coordinator *Coordinator) ReconcileRecoveredRun(
 	ctx context.Context,
 	runID string,
 	status workflow.RunStatus,
 	cause error,
-) (bool, error) {
-	if !strings.HasPrefix(strings.TrimSpace(runID), runIDPrefix) {
-		return false, nil
-	}
+) error {
 	if coordinator == nil || coordinator.reviews == nil {
-		return true, delivery.ErrUnavailable
+		return delivery.ErrUnavailable
 	}
 	roundID, err := roundIDFromRunID(runID)
 	if err != nil {
-		return true, err
+		return err
 	}
 	switch status {
 	case workflow.RunSucceeded:
@@ -82,10 +78,17 @@ func (coordinator *Coordinator) ReconcileRecoveredRun(
 			cause,
 			true,
 		)
+	case workflow.RunRunning, workflow.RunWaitingHuman:
+		return nil
 	default:
-		return false, nil
+		return fmt.Errorf(
+			"review workflow run %q has unsupported status %q: %w",
+			runID,
+			status,
+			delivery.ErrConflict,
+		)
 	}
-	return true, err
+	return err
 }
 
 func (coordinator *Coordinator) Execute(
@@ -194,7 +197,7 @@ func (coordinator *Coordinator) executeNew(
 		Input:               input,
 		Actor:               actor,
 		ActorPermissions:    permissions,
-		Scenario:            "feature.review",
+		Scenario:            ScenarioID,
 		ScenarioPermissions: permissions,
 	})
 	if runErr != nil {

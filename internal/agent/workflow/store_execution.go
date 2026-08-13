@@ -440,17 +440,18 @@ func getNodeRunStatusTx(
 }
 
 func saveHandoffTx(ctx context.Context, tx *sql.Tx, handoff Handoff) error {
-	references, err := json.Marshal(handoff.References)
+	references, evidenceUnits, evidenceConflicts, err := marshalHandoffJSON(handoff)
 	if err != nil {
-		return fmt.Errorf("marshal handoff references: %w", err)
+		return err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO handoff_artifacts(
 		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-		payload_json,references_json,completeness,content_hash,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		handoff.ID, handoff.WorkflowRunID, handoff.ProducerNodeID, handoff.ProducerRunID,
 		handoff.Schema.ID, handoff.Schema.Version, handoff.Payload, references,
-		handoff.Completeness, handoff.ContentHash,
+		evidenceUnits, evidenceConflicts, handoff.Completeness, handoff.ContentHash,
 		store.DatabaseTime(handoff.CreatedAt.UTC().Format(time.RFC3339Nano)),
 	)
 	if err != nil {

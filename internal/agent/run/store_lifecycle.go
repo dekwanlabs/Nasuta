@@ -1,19 +1,28 @@
 package run
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-// RecoverInterrupted closes process-local Runs left active by a prior process.
+const (
+	qaParentStreamKind        = "qa_parent"
+	qaParentTerminalEventKind = "run_finished"
+	qaParentTerminalEventSeq  = int64(1)
+)
+
+// RecoverInterrupted closes process-local Agent Runs left active by a prior process.
 func (rs *RunStore) RecoverInterrupted() (int64, error) {
 	result, err := rs.db.Exec(
-		`UPDATE agent_runs SET status=?,ended_at=? WHERE status IN (?,?)`,
+		`UPDATE agent_runs SET status=?,ended_at=? WHERE run_kind=? AND status IN (?,?)`,
 		RunStatusAborted, store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)),
-		RunStatusRunning, RunStatusPaused,
+		RunKindAgent, RunStatusRunning, RunStatusPaused,
 	)
 	if err != nil {
 		return 0, err
@@ -77,6 +86,126 @@ func (rs *RunStore) Complete(id string, outcome RunOutcome) error {
 		return ErrRunNotActive
 	}
 	return nil
+}
+
+// CompleteQAParent commits the Parent state and its recoverable result together.
+func (rs *RunStore) CompleteQAParent(
+	ctx context.Context,
+	id string,
+	outcome RunOutcome,
+) (RunOutcome, error) {
+	if !outcome.Status.Terminal() {
+		return RunOutcome{}, fmt.Errorf(
+			"agent: complete QA parent with non-terminal status %q",
+			outcome.Status,
+		)
+	}
+	terminal := terminalFromOutcome(id, outcome)
+	detail, err := json.Marshal(terminal)
+	if err != nil {
+		return RunOutcome{}, fmt.Errorf("marshal QA parent %q terminal result: %w", id, err)
+	}
+	completedAt := time.Now().UTC()
+	tx, err := rs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RunOutcome{}, fmt.Errorf("begin QA parent %q completion: %w", id, err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE agent_runs
+		 SET status=?,error_code=?,step_count=?,token_used=?,evidence_status=?,forced_conclusion=?,
+			evidence_result_count=?,tool_call_count=?,tool_failure_count=?,partial_result_count=?,
+			omitted_evidence_count=?,ended_at=?
+		 WHERE id=? AND run_kind=? AND status IN (?,?)`,
+		outcome.Status, outcome.ErrorCode, outcome.StepCount, outcome.TokenUsed, outcome.Evidence.Status,
+		outcome.Evidence.ForcedConclusion, outcome.Evidence.ResultCount,
+		outcome.Evidence.ToolCallCount, outcome.Evidence.ToolFailureCount,
+		outcome.Evidence.PartialResultCount, outcome.Evidence.OmittedItemCount,
+		store.DatabaseTime(completedAt.Format(time.RFC3339Nano)), id, RunKindQAParent,
+		RunStatusRunning, RunStatusPaused,
+	)
+	if err != nil {
+		return RunOutcome{}, fmt.Errorf("complete QA parent %q: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return RunOutcome{}, fmt.Errorf("read QA parent %q completion result: %w", id, err)
+	}
+	if affected == 0 {
+		persisted, err := loadPersistedQAParentTerminal(ctx, tx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return RunOutcome{}, ErrRunNotActive
+		}
+		if err != nil {
+			return RunOutcome{}, err
+		}
+		return outcomeFromTerminal(persisted), nil
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO runtime_events(
+			stream_kind,stream_id,seq,kind,node_id,summary,detail_json,created_at)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		qaParentStreamKind, id, qaParentTerminalEventSeq, qaParentTerminalEventKind,
+		"", string(outcome.Status), detail,
+		store.DatabaseTime(completedAt.Format(time.RFC3339Nano)),
+	); err != nil {
+		return RunOutcome{}, fmt.Errorf("append QA parent %q terminal event: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return RunOutcome{}, fmt.Errorf("commit QA parent %q completion: %w", id, err)
+	}
+	return outcomeFromTerminal(terminal), nil
+}
+
+func loadPersistedQAParentTerminal(
+	ctx context.Context,
+	tx *sql.Tx,
+	runID string,
+) (RunTerminal, error) {
+	var (
+		status RunStatus
+		detail []byte
+	)
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT r.status,e.detail_json
+		 FROM agent_runs r
+		 LEFT JOIN runtime_events e
+		   ON e.stream_kind=? AND e.stream_id=r.id AND e.seq=? AND e.kind=?
+		 WHERE r.id=? AND r.run_kind=? LIMIT 1`,
+		qaParentStreamKind,
+		qaParentTerminalEventSeq,
+		qaParentTerminalEventKind,
+		runID,
+		RunKindQAParent,
+	).Scan(&status, &detail)
+	if err != nil {
+		return RunTerminal{}, err
+	}
+	if !status.Terminal() {
+		return RunTerminal{}, ErrRunNotActive
+	}
+	if len(detail) == 0 {
+		return RunTerminal{}, fmt.Errorf(
+			"QA parent %q is terminal without a durable terminal event",
+			runID,
+		)
+	}
+	terminal, err := decodeQAParentTerminal(runID, detail)
+	if err != nil {
+		return RunTerminal{}, err
+	}
+	if terminal.Status != status {
+		return RunTerminal{}, fmt.Errorf(
+			"QA parent %q event status %q does not match run status %q",
+			runID,
+			terminal.Status,
+			status,
+		)
+	}
+	return terminal, nil
 }
 
 // TransitionControl updates the persisted pause state without changing terminal fields.

@@ -10,6 +10,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -68,6 +69,29 @@ func publicEvidence(evidence run.EvidenceMetrics) agentapi.EvidenceSummary {
 		PartialResultCount: evidence.PartialResultCount,
 		OmittedItemCount:   evidence.OmittedItemCount,
 	}
+}
+
+func publicEvidenceConflicts(conflicts []evidence.Conflict) []agentapi.EvidenceConflict {
+	if len(conflicts) == 0 {
+		return nil
+	}
+	out := make([]agentapi.EvidenceConflict, len(conflicts))
+	for index, conflict := range conflicts {
+		out[index] = agentapi.EvidenceConflict{
+			Identity: agentapi.EvidenceIdentity{
+				SourceKind: conflict.Key.SourceKind,
+				Target:     conflict.Key.Target,
+				Section:    conflict.Key.Section,
+				Version:    conflict.Key.Version,
+				TimeRange:  conflict.Key.TimeRange,
+			},
+			Current:        evidence.CloneUnit(conflict.Current),
+			Incoming:       evidence.CloneUnit(conflict.Incoming),
+			CurrentOrigin:  conflict.CurrentOrigin,
+			IncomingOrigin: conflict.IncomingOrigin,
+		}
+	}
+	return out
 }
 
 func contextReferencesFromRequest(blocks []agentapi.ContextBlock) []agentapi.Reference {
@@ -141,6 +165,37 @@ func contextEvidenceUnits(blocks []agentapi.ContextBlock) []tool.EvidenceUnit {
 	return units
 }
 
+func contextEvidenceConflicts(
+	blocks []agentapi.ContextBlock,
+) []evidence.Conflict {
+	count := 0
+	for _, block := range blocks {
+		count += len(block.EvidenceConflicts)
+	}
+	if count == 0 {
+		return nil
+	}
+	conflicts := make([]evidence.Conflict, 0, count)
+	for _, block := range blocks {
+		for _, conflict := range block.EvidenceConflicts {
+			conflicts = append(conflicts, evidence.Conflict{
+				Key: evidence.Key{
+					SourceKind: conflict.Identity.SourceKind,
+					Target:     conflict.Identity.Target,
+					Section:    conflict.Identity.Section,
+					Version:    conflict.Identity.Version,
+					TimeRange:  conflict.Identity.TimeRange,
+				},
+				Current:        evidence.CloneUnit(conflict.Current),
+				Incoming:       evidence.CloneUnit(conflict.Incoming),
+				CurrentOrigin:  conflict.CurrentOrigin,
+				IncomingOrigin: conflict.IncomingOrigin,
+			})
+		}
+	}
+	return conflicts
+}
+
 func hashMessages(messages []llm.Message) string {
 	raw, _ := json.Marshal(messages)
 	return hashBytes(raw)
@@ -160,10 +215,12 @@ func mapDefinitionResult(
 		outcome := execution.OutcomeFor(result, preRetrieved, cancelCause)
 		outcome.Status = run.RunStatusAborted
 		outcome.ErrorCode = "cancelled"
-		return agentapi.RunResult{
-			RunID: runID, Status: agentapi.RunCancelled, Usage: usage,
-			Error: &agentapi.RunError{Code: "cancelled", Message: cancelCause.Error()},
-		}, outcome
+		publicResult := publicTerminalEvidence(runID, result, outcome, usage)
+		publicResult.Status = agentapi.RunCancelled
+		publicResult.Error = &agentapi.RunError{
+			Code: "cancelled", Message: cancelCause.Error(),
+		}
+		return publicResult, outcome
 	}
 	outcome := execution.OutcomeFor(result, preRetrieved, runErr)
 	if errors.Is(outcome.Err, execution.ErrToolCallBudgetExhausted) {
@@ -174,34 +231,51 @@ func mapDefinitionResult(
 		if runError == nil {
 			runError = errors.New("definition run failed")
 		}
-		return agentapi.RunResult{
-			RunID: runID, Status: agentapi.RunFailed, Usage: usage,
-			Error: &agentapi.RunError{
-				Code: outcome.ErrorCode, Message: runError.Error(),
-				Retryable: retryableError(runError),
-			},
-		}, outcome
+		publicResult := publicTerminalEvidence(runID, result, outcome, usage)
+		publicResult.Status = agentapi.RunFailed
+		publicResult.Error = &agentapi.RunError{
+			Code: outcome.ErrorCode, Message: runError.Error(),
+			Retryable: retryableError(runError),
+		}
+		return publicResult, outcome
 	}
-	publicResult := agentapi.RunResult{
-		RunID: runID, Status: agentapi.RunSucceeded,
-		Text: outcome.Answer, Usage: usage,
-		Evidence:   publicEvidence(outcome.Evidence),
-		References: append([]agentapi.Reference(nil), outcome.References...),
-		Messages:   publicMessages(outcome.SessionMessages),
-	}
+	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
+	publicResult.Status = agentapi.RunSucceeded
+	publicResult.Text = outcome.Answer
+	publicResult.References = append([]agentapi.Reference(nil), outcome.References...)
+	publicResult.Messages = publicMessages(outcome.SessionMessages)
 	output, err := validatedDefinitionOutput(schemas, outputSchema, outcome.Answer)
 	if err != nil {
 		outcome.Status = run.RunStatusFailed
 		outcome.ErrorCode = "invalid_output"
 		outcome.Err = err
-		return agentapi.RunResult{
-			RunID: runID, Status: agentapi.RunFailed, Usage: usage,
-			Evidence: publicEvidence(outcome.Evidence),
-			Error:    &agentapi.RunError{Code: "invalid_output", Message: err.Error()},
-		}, outcome
+		publicResult.Status = agentapi.RunFailed
+		publicResult.Text = ""
+		publicResult.References = nil
+		publicResult.Messages = nil
+		publicResult.Error = &agentapi.RunError{Code: "invalid_output", Message: err.Error()}
+		return publicResult, outcome
 	}
 	publicResult.Output = output
 	return publicResult, outcome
+}
+
+func publicTerminalEvidence(
+	runID string,
+	result *execution.RunResult,
+	outcome run.RunOutcome,
+	usage agentapi.Usage,
+) agentapi.RunResult {
+	publicResult := agentapi.RunResult{
+		RunID: runID, Usage: usage,
+		Evidence: publicEvidence(outcome.Evidence),
+	}
+	if result == nil {
+		return publicResult
+	}
+	publicResult.EvidenceUnits = evidence.CloneUnits(result.EvidenceUnits)
+	publicResult.EvidenceConflicts = publicEvidenceConflicts(result.EvidenceConflicts)
+	return publicResult
 }
 
 func retryableError(err error) bool {

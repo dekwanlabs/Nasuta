@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -736,6 +737,64 @@ func (handler *Handler) APIQARunGet(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, detail)
 }
 
+// APIQARunEvents returns a bounded durable Parent event page.
+func (handler *Handler) APIQARunEvents(w http.ResponseWriter, r *http.Request) {
+	runs := handler.runStore()
+	if runs == nil {
+		httputil.WriteServiceUnavailable(w, "run store not available")
+		return
+	}
+	afterSeq, err := parseQAEventCursor(r.URL.Query().Get("after_seq"))
+	if err != nil {
+		httputil.WriteBadRequest(w, err.Error())
+		return
+	}
+	query := httputil.Query(r)
+	limit := query.Int("limit", 50)
+	if query.Err() != nil || limit <= 0 || limit > 200 {
+		if query.Err() != nil {
+			httputil.WriteBadRequest(w, query.Err().Error())
+		} else {
+			httputil.WriteBadRequest(w, "limit must be between 1 and 200")
+		}
+		return
+	}
+	items, err := runs.ListQAParentEventsForUser(
+		r.Context(),
+		r.PathValue("id"),
+		currentUserID(r),
+		afterSeq,
+		limit,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		httputil.WriteErrStatus(w, http.StatusNotFound, errors.New("run not found"))
+		return
+	}
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	nextAfterSeq := afterSeq
+	if len(items) > 0 {
+		nextAfterSeq = items[len(items)-1].Seq
+	}
+	httputil.WriteJSON(w, map[string]any{
+		"items": items, "next_after_seq": nextAfterSeq,
+	})
+}
+
+func parseQAEventCursor(value string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	sequence, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || sequence < 0 {
+		return 0, fmt.Errorf("after_seq must be a non-negative integer")
+	}
+	return sequence, nil
+}
+
 // APIQAToolResultArtifact reads a bounded chunk of one authoritative tool result.
 func (handler *Handler) APIQAToolResultArtifact(w http.ResponseWriter, r *http.Request) {
 	runs := handler.runStore()
@@ -769,9 +828,8 @@ func (handler *Handler) APIQAToolResultArtifact(w http.ResponseWriter, r *http.R
 }
 
 func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) {
-	hub := handler.qaHub()
-	runs := handler.runStore()
-	if hub == nil || runs == nil {
+	runtime := handler.currentQARuntime()
+	if runtime.RunStore == nil {
 		httputil.WriteServiceUnavailable(w, "run control not available")
 		return
 	}
@@ -781,7 +839,8 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	runID := r.PathValue("id")
-	run, err := runs.GetForUser(runID, currentUserID(r))
+	userID := currentUserID(r)
+	record, err := runtime.RunStore.GetControlForUser(runID, userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		httputil.WriteErrStatus(w, http.StatusNotFound, errors.New("run not found"))
 		return
@@ -790,39 +849,86 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 		httputil.WriteErr(w, err)
 		return
 	}
-	switch req.Action {
-	case "pause":
-		if run.Status != agentrun.RunStatusRunning {
-			httputil.WriteBadRequest(w, "only a running run can be paused")
+	switch record.RunKind {
+	case agentrun.RunKindAgent:
+		if runtime.Hub == nil {
+			httputil.WriteServiceUnavailable(w, "agent run control not available")
 			return
 		}
-		hub.Send(runID, agentrun.ControlSignal{Kind: agentrun.CtrlPause})
-	case "resume":
-		if run.Status != agentrun.RunStatusRunning && run.Status != agentrun.RunStatusPaused {
-			httputil.WriteBadRequest(w, "only an active run can be resumed")
+		if !controlAgentRun(runtime.Hub, record, req, w) {
 			return
 		}
-		if err := hub.Resume(runID); err != nil {
-			httputil.WriteErr(w, err)
+	case agentrun.RunKindQAParent:
+		if req.Action != "abort" {
+			httputil.WriteBadRequest(w, "QA parent runs only support abort")
 			return
 		}
-	case "abort":
-		if run.Status != agentrun.RunStatusRunning && run.Status != agentrun.RunStatusPaused {
+		if !activeRunStatus(record.Status) {
 			httputil.WriteBadRequest(w, "only an active run can be aborted")
 			return
 		}
-		hub.Send(runID, agentrun.ControlSignal{Kind: agentrun.CtrlAbort})
-	case "nudge":
-		if run.Status != agentrun.RunStatusRunning && run.Status != agentrun.RunStatusPaused {
-			httputil.WriteBadRequest(w, "only an active run can be nudged")
+		if runtime.InvestigationCanceller == nil {
+			httputil.WriteServiceUnavailable(w, "QA investigation cancellation not available")
 			return
 		}
-		hub.Send(runID, agentrun.ControlSignal{Kind: agentrun.CtrlNudge, Message: req.Message})
+		if err := runtime.InvestigationCanceller.CancelInvestigation(r.Context(), runID, userID); err != nil {
+			httputil.WriteErr(w, err)
+			return
+		}
 	default:
-		httputil.WriteBadRequest(w, "unknown action: "+req.Action)
+		httputil.WriteErr(w, fmt.Errorf(
+			"run %q has unsupported kind %q",
+			record.ID,
+			record.RunKind,
+		))
 		return
 	}
 	httputil.WriteJSON(w, map[string]string{"status": "sent"})
+}
+
+func controlAgentRun(
+	hub *agentrun.RunHub,
+	record agentrun.RunControlRecord,
+	req qaRunControlReq,
+	w http.ResponseWriter,
+) bool {
+	switch req.Action {
+	case "pause":
+		if record.Status != agentrun.RunStatusRunning {
+			httputil.WriteBadRequest(w, "only a running run can be paused")
+			return false
+		}
+		hub.Send(record.ID, agentrun.ControlSignal{Kind: agentrun.CtrlPause})
+	case "resume":
+		if !activeRunStatus(record.Status) {
+			httputil.WriteBadRequest(w, "only an active run can be resumed")
+			return false
+		}
+		if err := hub.Resume(record.ID); err != nil {
+			httputil.WriteErr(w, err)
+			return false
+		}
+	case "abort":
+		if !activeRunStatus(record.Status) {
+			httputil.WriteBadRequest(w, "only an active run can be aborted")
+			return false
+		}
+		hub.Send(record.ID, agentrun.ControlSignal{Kind: agentrun.CtrlAbort})
+	case "nudge":
+		if !activeRunStatus(record.Status) {
+			httputil.WriteBadRequest(w, "only an active run can be nudged")
+			return false
+		}
+		hub.Send(record.ID, agentrun.ControlSignal{Kind: agentrun.CtrlNudge, Message: req.Message})
+	default:
+		httputil.WriteBadRequest(w, "unknown action: "+req.Action)
+		return false
+	}
+	return true
+}
+
+func activeRunStatus(status agentrun.RunStatus) bool {
+	return status == agentrun.RunStatusRunning || status == agentrun.RunStatusPaused
 }
 
 func emitHubEvent(ev agentrun.SSEEvent, sseEvent func(string, any) bool) bool {

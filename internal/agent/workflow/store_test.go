@@ -90,11 +90,13 @@ func TestStartWorkflowCommitsRunInputAndEventsAtomically(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO handoff_artifacts(
 		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-		payload_json,references_json,completeness,content_hash,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`)).
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
 		WithArgs(
 			"handoff_input", "run_1", "workflow.input", "", "review.subject", int64(1),
-			input.Payload, []byte("null"), Complete, "input_handoff_hash", sqlmock.AnyArg(),
+			input.Payload, []byte("null"), []byte("null"), []byte("null"),
+			Complete, "input_handoff_hash", sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery(regexp.QuoteMeta(
@@ -251,11 +253,13 @@ func TestSucceedNodeCommitsHandoffTransitionAndEventsAtomically(t *testing.T) {
 	)
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO handoff_artifacts(
 		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-		payload_json,references_json,completeness,content_hash,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`)).
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
 		WithArgs(
 			"handoff_1", "run_1", "review.a", "agent_run_1", "review.report", int64(1),
-			handoff.Payload, []byte("null"), Complete, "handoff_hash", sqlmock.AnyArg(),
+			handoff.Payload, []byte("null"), []byte("null"), []byte("null"),
+			Complete, "handoff_hash", sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_node_runs
@@ -464,11 +468,13 @@ func TestFinishWorkflowCommitsOutputAndTerminalTransition(t *testing.T) {
 	)
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO handoff_artifacts(
 		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-		payload_json,references_json,completeness,content_hash,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`)).
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
 		WithArgs(
 			"handoff_output", "run_1", "workflow.output", "", "review.report", int64(1),
-			output.Payload, []byte("null"), Complete, "output_hash", sqlmock.AnyArg(),
+			output.Payload, []byte("null"), []byte("null"), []byte("null"),
+			Complete, "output_hash", sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_runs
@@ -643,11 +649,13 @@ func TestDecideHumanApprovalCommitsApprovalAndResumeAtomically(t *testing.T) {
 			AddRow(2, NodeHumanApproval, RunWaitingHuman))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO handoff_artifacts(
 		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-		payload_json,references_json,completeness,content_hash,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`)).
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
 		WithArgs(
 			"handoff_approved", "run_1", "approve", "", "review.report", int64(1),
-			handoff.Payload, references, Complete, "approved_hash", sqlmock.AnyArg(),
+			handoff.Payload, references, []byte("null"), []byte("null"),
+			Complete, "approved_hash", sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_node_runs
@@ -1007,6 +1015,144 @@ func TestDecideHumanApprovalClassifiesLockedStateErrors(t *testing.T) {
 	}
 }
 
+func TestLoadTerminalResultReadsCanonicalOutput(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	workflowStore, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().UTC().Add(-time.Minute)
+	endedAt := time.Now().UTC()
+	budgetJSON, _ := json.Marshal(WorkflowBudget{MaxNodes: 1})
+	permissionsJSON, _ := json.Marshal(agentapi.PermissionPolicy{
+		Scopes: []string{"knowledge.read"},
+	})
+	selectionJSON, _ := json.Marshal(DefinitionSelection{})
+	expectWorkflowRunQuery(
+		mock,
+		"run_1",
+		RunSucceeded,
+		startedAt,
+		endedAt,
+		budgetJSON,
+		permissionsJSON,
+		selectionJSON,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
+		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at
+		FROM handoff_artifacts
+		WHERE workflow_run_id=? AND producer_node_id='workflow.output'
+		LIMIT 1`)).
+		WithArgs("run_1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "workflow_run_id", "producer_node_id", "producer_run_id",
+			"schema_id", "schema_version", "payload_json", "references_json",
+			"evidence_units_json", "evidence_conflicts_json",
+			"completeness", "content_hash", "created_at",
+		}).AddRow(
+			"handoff_output", "run_1", "workflow.output", "",
+			"review.report", int64(1), []byte(`{"result":"ok"}`), []byte(`[]`),
+			[]byte(`[]`), []byte(`[]`), Complete, "output_hash", endedAt,
+		))
+	result, err := workflowStore.LoadTerminalResult(t.Context(), "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Run.Status != RunSucceeded ||
+		result.Output == nil ||
+		result.Output.ID != "handoff_output" ||
+		string(result.Output.Payload) != `{"result":"ok"}` {
+		t.Fatalf("terminal result = %+v", result)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadTerminalResultRejectsSucceededRunWithoutOutput(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	workflowStore, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().UTC().Add(-time.Minute)
+	endedAt := time.Now().UTC()
+	budgetJSON, _ := json.Marshal(WorkflowBudget{MaxNodes: 1})
+	permissionsJSON, _ := json.Marshal(agentapi.PermissionPolicy{
+		Scopes: []string{"knowledge.read"},
+	})
+	selectionJSON, _ := json.Marshal(DefinitionSelection{})
+	expectWorkflowRunQuery(
+		mock,
+		"run_1",
+		RunSucceeded,
+		startedAt,
+		endedAt,
+		budgetJSON,
+		permissionsJSON,
+		selectionJSON,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
+		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at
+		FROM handoff_artifacts
+		WHERE workflow_run_id=? AND producer_node_id='workflow.output'
+		LIMIT 1`)).
+		WithArgs("run_1").
+		WillReturnError(sql.ErrNoRows)
+	_, err = workflowStore.LoadTerminalResult(t.Context(), "run_1")
+	if !errors.Is(err, ErrInvariant) {
+		t.Fatalf("LoadTerminalResult error = %v, want invariant violation", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func expectWorkflowRunQuery(
+	mock sqlmock.Sqlmock,
+	runID string,
+	status RunStatus,
+	startedAt time.Time,
+	endedAt time.Time,
+	budgetJSON []byte,
+	permissionsJSON []byte,
+	selectionJSON []byte,
+) {
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
+		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
+		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
+		tool_call_count,cost_micros,retry_count,error_code,started_at,ended_at
+		FROM workflow_runs WHERE id=? LIMIT 1`)).
+		WithArgs(runID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "parent_run_id", "workflow_id", "workflow_version", "workflow_hash",
+			"selection_json", "input_hash", "actor_user_id", "actor_tenant_id",
+			"actor_permissions_json", "scenario", "scenario_permissions_json", "status",
+			"budget_json", "input_tokens", "output_tokens", "reasoning_tokens",
+			"total_tokens", "tool_call_count", "cost_micros", "retry_count", "error_code",
+			"started_at", "ended_at",
+		}).AddRow(
+			runID, "qa_parent_1", "delivery.review", int64(1), "workflow_hash",
+			selectionJSON, "input_hash", int64(7), "tenant-a", permissionsJSON,
+			"qa.investigation", permissionsJSON, status, budgetJSON,
+			int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0),
+			"", startedAt, endedAt,
+		))
+}
+
 func TestLoadFullRunStateRestoresDurableCheckpoint(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -1124,7 +1270,8 @@ func TestLoadFullRunStateRestoresDurableCheckpoint(t *testing.T) {
 			))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
 		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
-		payload_json,references_json,completeness,content_hash,created_at
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at
 		FROM handoff_artifacts
 		WHERE workflow_run_id=?
 		ORDER BY created_at,id`)).
@@ -1132,27 +1279,28 @@ func TestLoadFullRunStateRestoresDurableCheckpoint(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "workflow_run_id", "producer_node_id", "producer_run_id",
 			"schema_id", "schema_version", "payload_json", "references_json",
+			"evidence_units_json", "evidence_conflicts_json",
 			"completeness", "content_hash", "created_at",
 		}).
 			AddRow(
 				"handoff_input", "run_1", "workflow.input", "",
 				"review.subject", int64(1), []byte(`{"subject":"x"}`), []byte(`[]`),
-				Complete, "input_hash", startedAt,
+				[]byte(`[]`), []byte(`[]`), Complete, "input_hash", startedAt,
 			).
 			AddRow(
 				"handoff_review", "run_1", "review.before", "agent_run_1",
 				"review.report", int64(1), []byte(`{"result":"reviewed"}`), []byte(`[]`),
-				Complete, "review_hash", startedAt.Add(20*time.Second),
+				[]byte(`[]`), []byte(`[]`), Complete, "review_hash", startedAt.Add(20*time.Second),
 			).
 			AddRow(
 				"handoff_gate", "run_1", "gate.check", "",
 				"review.report", int64(1), []byte(`{"decision":"pass"}`), []byte(`[]`),
-				Complete, "gate_hash", succeededAt,
+				[]byte(`[]`), []byte(`[]`), Complete, "gate_hash", succeededAt,
 			).
 			AddRow(
 				"handoff_approved", "run_1", "approve", "",
 				"review.report", int64(1), []byte(`{"decision":"pass"}`), []byte(`[]`),
-				Complete, "approved_hash", approvedAt,
+				[]byte(`[]`), []byte(`[]`), Complete, "approved_hash", approvedAt,
 			))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
 		node_id,gate_id,gate_subject_hash,gate_decision,gate_reason_codes_json,

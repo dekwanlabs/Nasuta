@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -34,7 +35,7 @@ type toolAdmissionDecision struct {
 	Arguments       tool.Arguments
 	RemainingTokens int
 	DeclaredTokens  int
-	EvidenceKeys    []evidenceKey
+	EvidenceKeys    []evidence.Key
 }
 
 var toolAdmissionSpec = runtrace.Spec[toolAdmissionInput, toolAdmissionDecision]{
@@ -169,8 +170,8 @@ func toolAdmissionExecution(decision toolAdmissionDecision) ToolExecution {
 	keys := make([]map[string]string, 0, len(decision.EvidenceKeys))
 	for _, key := range decision.EvidenceKeys {
 		keys = append(keys, map[string]string{
-			"sourceKind": key.sourceKind, "target": key.target, "section": key.section,
-			"version": key.version, "timeRange": key.timeRange,
+			"sourceKind": key.SourceKind, "target": key.Target, "section": key.Section,
+			"version": key.Version, "timeRange": key.TimeRange,
 		})
 	}
 	payload := map[string]any{

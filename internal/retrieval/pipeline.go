@@ -14,6 +14,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
@@ -32,13 +33,14 @@ type Reference struct {
 
 // RetrievedContext is the assembled retrieval payload passed to the agent.
 type RetrievedContext struct {
-	Text             string              `json:"text"`
-	References       []Reference         `json:"references"`
-	EvidenceUnits    []tool.EvidenceUnit `json:"evidenceUnits,omitempty"`
-	HitCount         int                 `json:"hitCount"`
-	OriginalQuestion string
-	Intent           domain.RetrievalIntent
-	selection        selectionStats
+	Text              string              `json:"text"`
+	References        []Reference         `json:"references"`
+	EvidenceUnits     []tool.EvidenceUnit `json:"evidenceUnits,omitempty"`
+	EvidenceConflicts []evidence.Conflict `json:"evidenceConflicts,omitempty"`
+	HitCount          int                 `json:"hitCount"`
+	OriginalQuestion  string
+	Intent            domain.RetrievalIntent
+	selection         selectionStats
 }
 
 type selectionStats struct {
@@ -654,9 +656,9 @@ func (retrieve *Retriever) assemble(
 
 	var allText strings.Builder
 	var allRefs []Reference
-	var evidenceUnits []tool.EvidenceUnit
+	evidenceLedger := evidence.New(nil, "")
+	var evidenceConflicts []evidence.Conflict
 	seenRefs := map[string]struct{}{}
-	seenUnits := map[string]struct{}{}
 	budget := retrieve.ContextBudget()
 	stats := selectionStats{Selected: len(parts)}
 	for _, p := range parts {
@@ -696,20 +698,21 @@ func (retrieve *Retriever) assemble(
 			allRefs = append(allRefs, ref)
 		}
 		for _, unit := range p.units {
-			unit = cloneEvidenceUnit(unit)
+			unit = evidence.CloneUnit(unit)
 			if truncated {
 				unit.Coverage.Complete = false
 				unit.Coverage.Partial = true
 			}
-			unit.ContentHash = evidenceHash(deliveredText)
 			unit.TokenCost = tokenestimate.Count(deliveredText)
-			for _, expanded := range expandEvidenceUnit(unit) {
-				key := evidenceUnitKey(expanded)
-				if _, duplicate := seenUnits[key]; duplicate {
-					continue
+			if conflicts := evidenceLedger.Add([]tool.EvidenceUnit{unit}, "retrieval"); len(conflicts) > 0 {
+				evidenceConflicts = append(evidenceConflicts, conflicts...)
+				for _, conflict := range conflicts {
+					log.WarnfCtx(ctx,
+						"[qa] conflicting retrieval evidence source=%s target=%s section=%s version=%s time_range=%s",
+						conflict.Key.SourceKind, conflict.Key.Target, conflict.Key.Section,
+						conflict.Key.Version, conflict.Key.TimeRange,
+					)
 				}
-				seenUnits[key] = struct{}{}
-				evidenceUnits = append(evidenceUnits, expanded)
 			}
 		}
 		if truncated {
@@ -723,12 +726,13 @@ func (retrieve *Retriever) assemble(
 	stats.Chars = len([]rune(contextText))
 
 	return &RetrievedContext{
-		Text:          contextText,
-		References:    allRefs,
-		EvidenceUnits: evidenceUnits,
-		HitCount:      len(allRefs),
-		Intent:        intent,
-		selection:     stats,
+		Text:              contextText,
+		References:        allRefs,
+		EvidenceUnits:     evidenceLedger.Units(),
+		EvidenceConflicts: evidence.CloneConflicts(evidenceConflicts),
+		HitCount:          len(allRefs),
+		Intent:            intent,
+		selection:         stats,
 	}
 }
 
