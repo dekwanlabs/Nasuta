@@ -269,9 +269,29 @@ func TestQAMessageSchemaStoresToolProtocol(t *testing.T) {
 		"tool_calls_json MEDIUMTEXT NULL",
 		"tool_call_id VARCHAR(128) NOT NULL DEFAULT ''",
 		"tool_name   VARCHAR(128) NOT NULL DEFAULT ''",
+		"feedback    VARCHAR(8) NOT NULL DEFAULT ''",
 	} {
 		if !strings.Contains(statements[1], required) {
 			t.Fatalf("qa_messages schema missing %q", required)
+		}
+	}
+}
+
+func TestQAMessageFeedbackMigrationAddsExistingTableColumn(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_add_qa_message_feedback_20260812.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read QA message feedback migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"information_schema.columns",
+		"table_name = 'qa_messages'",
+		"column_name = 'feedback'",
+		"ADD COLUMN feedback VARCHAR(8) NOT NULL DEFAULT ''",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("QA message feedback migration missing %q", required)
 		}
 	}
 }

@@ -40,6 +40,12 @@ type qaRunControlReq struct {
 	Message string `json:"message"`
 }
 
+type qaMessageFeedbackRequest struct {
+	MessageSeq int    `json:"message_seq"`
+	RunID      string `json:"run_id"`
+	Feedback   string `json:"feedback"`
+}
+
 type qaHistoryMessage struct {
 	memory.SessionMessage
 	Evidence *agentrun.EvidenceMetrics `json:"evidence,omitempty"`
@@ -602,6 +608,44 @@ func (handler *Handler) APIQASessionMessages(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	httputil.WriteJSON(w, historyPage)
+}
+
+func (handler *Handler) APIQAMessageFeedback(w http.ResponseWriter, r *http.Request) {
+	if !handler.ensureQASessions(w) {
+		httputil.WriteServiceUnavailable(w, "qa session store not available")
+		return
+	}
+	var req qaMessageFeedbackRequest
+	if err := httputil.DecodeJSON(r, &req); err != nil {
+		httputil.WriteBadRequest(w, err.Error())
+		return
+	}
+	req.RunID = strings.TrimSpace(req.RunID)
+	req.Feedback = strings.TrimSpace(req.Feedback)
+	if req.MessageSeq <= 0 && req.RunID == "" {
+		httputil.WriteBadRequest(w, "message_seq or run_id is required")
+		return
+	}
+	if req.MessageSeq > 0 && req.RunID != "" {
+		httputil.WriteBadRequest(w, "message_seq and run_id are mutually exclusive")
+		return
+	}
+	if req.Feedback != "" && req.Feedback != "like" && req.Feedback != "dislike" {
+		httputil.WriteBadRequest(w, "feedback must be like, dislike, or empty")
+		return
+	}
+	updated, err := handler.qaSessionStore().SetMessageFeedback(
+		r.PathValue("id"), currentUserID(r), req.MessageSeq, req.RunID, req.Feedback,
+	)
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	if !updated {
+		httputil.WriteErrStatus(w, http.StatusNotFound, fmt.Errorf("assistant answer not found"))
+		return
+	}
+	httputil.WriteJSON(w, map[string]string{"feedback": req.Feedback})
 }
 
 func (handler *Handler) qaHistoryPage(ctx context.Context, userID int64, sessionID string, page *memory.MessagePage) (*qaHistoryPage, error) {

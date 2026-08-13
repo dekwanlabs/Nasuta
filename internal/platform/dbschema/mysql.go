@@ -152,6 +152,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 				tool_calls_json MEDIUMTEXT NULL,
 				tool_call_id VARCHAR(128) NOT NULL DEFAULT '',
 				tool_name   VARCHAR(128) NOT NULL DEFAULT '',
+				feedback    VARCHAR(8) NOT NULL DEFAULT '',
 				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				UNIQUE KEY uniq_session_seq (session_id, seq),
 				KEY idx_session (session_id),

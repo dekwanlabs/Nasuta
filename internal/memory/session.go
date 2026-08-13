@@ -97,7 +97,9 @@ type MessagePage struct {
 // SessionMessage adds persistence metadata needed by history views.
 type SessionMessage struct {
 	llm.Message
+	Seq       int    `json:"seq"`
 	CreatedAt string `json:"created_at"`
+	Feedback  string `json:"feedback,omitempty"`
 	RunID     string `json:"-"`
 }
 
@@ -288,7 +290,7 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	query := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.created_at,
+	query := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.feedback, m.created_at,
 	                 COALESCE(CASE WHEN m.seq=t.last_seq AND m.role='assistant' THEN t.run_id ELSE '' END,'')
 	          FROM qa_messages m
 	          JOIN qa_sessions s ON s.id = m.session_id
@@ -315,9 +317,10 @@ func (ss *SessionStore) ListMessagesBefore(id string, userID int64, beforeSeq, l
 		var item sequencedMessage
 		var toolCalls string
 		var createdAt sql.NullTime
-		if err := rows.Scan(&item.seq, &item.msg.Role, &item.msg.Content, &toolCalls, &item.msg.ToolCallID, &item.msg.Name, &createdAt, &item.msg.RunID); err != nil {
+		if err := rows.Scan(&item.seq, &item.msg.Role, &item.msg.Content, &toolCalls, &item.msg.ToolCallID, &item.msg.Name, &item.msg.Feedback, &createdAt, &item.msg.RunID); err != nil {
 			return nil, err
 		}
+		item.msg.Seq = item.seq
 		item.msg.CreatedAt = store.FormatDatabaseTime(createdAt)
 		if err := unmarshalToolCalls(toolCalls, &item.msg.Message); err != nil {
 			return nil, err
@@ -390,7 +393,7 @@ func (ss *SessionStore) ListTurnsBefore(id string, userID int64, beforeSeq, limi
 		bounds = bounds[:limit]
 	}
 	firstSeq := bounds[len(bounds)-1].firstSeq
-	messageQuery := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.created_at,
+	messageQuery := `SELECT m.seq, m.role, m.content, COALESCE(m.tool_calls_json,''), m.tool_call_id, m.tool_name, m.feedback, m.created_at,
 	                        COALESCE(CASE WHEN m.seq=t.last_seq AND m.role='assistant' THEN t.run_id ELSE '' END,'')
 	                 FROM qa_messages m
 	                 JOIN qa_sessions s ON s.id = m.session_id
@@ -417,9 +420,10 @@ func (ss *SessionStore) ListTurnsBefore(id string, userID int64, beforeSeq, limi
 		var msg SessionMessage
 		var toolCalls string
 		var createdAt sql.NullTime
-		if err := messageRows.Scan(&seq, &msg.Role, &msg.Content, &toolCalls, &msg.ToolCallID, &msg.Name, &createdAt, &msg.RunID); err != nil {
+		if err := messageRows.Scan(&seq, &msg.Role, &msg.Content, &toolCalls, &msg.ToolCallID, &msg.Name, &msg.Feedback, &createdAt, &msg.RunID); err != nil {
 			return nil, err
 		}
+		msg.Seq = seq
 		msg.CreatedAt = store.FormatDatabaseTime(createdAt)
 		if err := unmarshalToolCalls(toolCalls, &msg.Message); err != nil {
 			return nil, err
@@ -430,6 +434,47 @@ func (ss *SessionStore) ListTurnsBefore(id string, userID int64, beforeSeq, limi
 		return nil, err
 	}
 	return page, nil
+}
+
+// SetMessageFeedback updates only an owned final assistant answer.
+func (ss *SessionStore) SetMessageFeedback(sessionID string, userID int64, seq int, runID, feedback string) (bool, error) {
+	tx, err := ss.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	query := `SELECT m.id, m.feedback
+	          FROM qa_messages m
+	          JOIN qa_sessions s ON s.id=m.session_id
+	          JOIN qa_turns t ON t.session_id=m.session_id AND t.last_seq=m.seq
+	          WHERE m.session_id=? AND s.user_id=? AND m.role='assistant'`
+	args := []any{sessionID, userID}
+	if seq > 0 {
+		query += ` AND m.seq=?`
+		args = append(args, seq)
+	} else {
+		query += ` AND t.run_id=?`
+		args = append(args, runID)
+	}
+	query += ` FOR UPDATE`
+
+	var messageID int64
+	var current string
+	if err := tx.QueryRow(query, args...).Scan(&messageID, &current); errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("memory/session: find answer feedback target: %w", err)
+	}
+	if current != feedback {
+		if _, err := tx.Exec(`UPDATE qa_messages SET feedback=? WHERE id=?`, feedback, messageID); err != nil {
+			return false, fmt.Errorf("memory/session: update answer feedback: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // AppendTurn atomically records the model-visible protocol for audit and replay.

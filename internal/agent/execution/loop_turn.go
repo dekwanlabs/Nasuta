@@ -247,6 +247,7 @@ func (agent *Agent) recordThinkTurn(state *compiledLoop, turn modelTurn) error {
 
 func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) toolTurnOutcome {
 	var outcome toolTurnOutcome
+	var notices []string
 	for _, call := range calls {
 		if agent.cfg.MaxToolCalls > 0 &&
 			int64(state.result.Evidence.ToolCallCount) >= agent.cfg.MaxToolCalls {
@@ -305,6 +306,7 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 		execution = agent.prepareToolDelivery(
 			state.runID,
 			state.messages,
+			notices,
 			state.tools,
 			executionCall,
 			state.answerContract,
@@ -354,18 +356,26 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 		if execution.Failed {
 			continue
 		}
-		for _, notice := range execution.Notices {
-			state.messages = append(state.messages, toolDeliveryNoticeMessage(notice))
-		}
-		if _, ok := answerContractMessage(execution.AnswerContract); ok {
-			state.answerContract.Add(execution.AnswerContract)
-			contractMessage, _ := answerContractMessage(tool.AnswerContract{
-				RequiredLiterals: state.answerContract.required,
-			})
-			state.messages = append(withoutAnswerContractMessages(state.messages), contractMessage)
-		}
+		notices = append(notices, execution.Notices...)
+		state.answerContract.Add(execution.AnswerContract)
 	}
+	// Provider protocols forbid non-tool messages inside a parallel result group.
+	state.messages = appendToolTurnPostlude(state.messages, notices, state.answerContract)
 	return outcome
+}
+
+func appendToolTurnPostlude(messages []llm.Message, notices []string, contract *exactAnswerContract) []llm.Message {
+	postlude := make([]llm.Message, 0, len(notices)+1)
+	for _, notice := range notices {
+		postlude = append(postlude, toolDeliveryNoticeMessage(notice))
+	}
+	contractMessage, ok := combinedAnswerContractMessage(contract, tool.AnswerContract{})
+	if !ok {
+		return append(messages, postlude...)
+	}
+	messages = withoutAnswerContractMessages(messages)
+	messages = append(messages, postlude...)
+	return append(messages, contractMessage)
 }
 
 func (agent *Agent) advanceTurn(state *compiledLoop, step int, outcome toolTurnOutcome) {

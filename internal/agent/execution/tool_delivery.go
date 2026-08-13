@@ -30,6 +30,7 @@ type toolDeliveryError struct {
 func (agent *Agent) prepareToolDelivery(
 	runID string,
 	messages []llm.Message,
+	pendingNotices []string,
 	tools []llm.ToolDef,
 	call llm.ToolCall,
 	currentContract *exactAnswerContract,
@@ -48,7 +49,7 @@ func (agent *Agent) prepareToolDelivery(
 			Retry:           map[string]any{"action": "restore_authoritative_content_or_retry_with_pagination"},
 		})
 	}
-	available, required, err := agent.toolDeliveryBudget(messages, tools, call, currentContract, execution)
+	available, required, err := agent.toolDeliveryBudget(messages, pendingNotices, tools, call, currentContract, execution)
 	if err != nil {
 		log.WarnfCtx(
 			log.WithTraceID(context.Background(), runID),
@@ -80,6 +81,7 @@ func (agent *Agent) prepareToolDelivery(
 
 func (agent *Agent) toolDeliveryBudget(
 	messages []llm.Message,
+	pendingNotices []string,
 	tools []llm.ToolDef,
 	call llm.ToolCall,
 	currentContract *exactAnswerContract,
@@ -88,14 +90,15 @@ func (agent *Agent) toolDeliveryBudget(
 	if agent.cfg.ContextWindow <= 0 {
 		return -1, 0, nil
 	}
-	currentInputTokens, err := estimateInputTokens(messages, tools)
+	current := toolDeliveryContextMessages(messages, pendingNotices, currentContract)
+	currentInputTokens, err := estimateInputTokens(current, tools)
 	if err != nil {
 		return 0, 0, err
 	}
 	outputReserve := agent.outputTokenReserve()
 	safety := contextSafetyTokens(agent.cfg.ContextWindow)
 	available := agent.cfg.ContextWindow - currentInputTokens - outputReserve - safety
-	candidate := toolDeliveryMessages(messages, call, currentContract, execution)
+	candidate := toolDeliveryMessages(messages, pendingNotices, call, currentContract, execution)
 	candidateInputTokens, err := estimateInputTokens(candidate, tools)
 	if err != nil {
 		return 0, 0, err
@@ -105,12 +108,34 @@ func (agent *Agent) toolDeliveryBudget(
 
 func toolDeliveryMessages(
 	messages []llm.Message,
+	pendingNotices []string,
 	call llm.ToolCall,
 	currentContract *exactAnswerContract,
 	execution ToolExecution,
 ) []llm.Message {
-	candidate := append([]llm.Message(nil), messages...)
-	candidate = append(candidate, toolMessage(call.ID, call.Function.Name, execution.PromptContent))
+	candidate := append(append([]llm.Message(nil), messages...), toolMessage(call.ID, call.Function.Name, execution.PromptContent))
+	return appendToolDeliveryContext(candidate, pendingNotices, currentContract, execution)
+}
+
+func toolDeliveryContextMessages(
+	messages []llm.Message,
+	pendingNotices []string,
+	currentContract *exactAnswerContract,
+) []llm.Message {
+	return appendToolDeliveryContext(
+		append([]llm.Message(nil), messages...), pendingNotices, currentContract, ToolExecution{},
+	)
+}
+
+func appendToolDeliveryContext(
+	candidate []llm.Message,
+	pendingNotices []string,
+	currentContract *exactAnswerContract,
+	execution ToolExecution,
+) []llm.Message {
+	for _, notice := range pendingNotices {
+		candidate = append(candidate, toolDeliveryNoticeMessage(notice))
+	}
 	for _, notice := range execution.Notices {
 		candidate = append(candidate, toolDeliveryNoticeMessage(notice))
 	}
