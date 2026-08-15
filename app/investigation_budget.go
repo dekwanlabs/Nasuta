@@ -5,8 +5,12 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
+
+const investigationRuntimeEnvelopeTokens = 1024
 
 func investigationBudgets(
 	definitions []agentapi.Definition,
@@ -20,6 +24,17 @@ func investigationBudgets(
 			)
 		}
 		byID[definition.ID] = definition
+	}
+	investigatorPayloadTokens := 0
+	registerInvestigatorPayload := func(definition agentapi.Definition) error {
+		payloadTokens, err := agentPayloadBudget(definition)
+		if err != nil {
+			return err
+		}
+		if investigatorPayloadTokens == 0 || payloadTokens < investigatorPayloadTokens {
+			investigatorPayloadTokens = payloadTokens
+		}
+		return nil
 	}
 	investigatorBudget := func(id string, requireTools bool) (workflow.NodeBudget, error) {
 		definition, ok := byID[id]
@@ -38,6 +53,9 @@ func investigationBudgets(
 		maxToolCalls := int64(0)
 		if requireTools {
 			maxToolCalls = int64(definition.Budget.MaxSteps)
+		}
+		if err := registerInvestigatorPayload(definition); err != nil {
+			return workflow.NodeBudget{}, err
 		}
 		return agentNodeBudget(definition, maxToolCalls)
 	}
@@ -77,10 +95,32 @@ func investigationBudgets(
 	if err != nil {
 		return workflow.Budgets{}, err
 	}
+	synthesizerPayloadTokens, err := agentPayloadBudget(synthesizer)
+	if err != nil {
+		return workflow.Budgets{}, err
+	}
 	return workflow.Budgets{
 		Code: code, Runtime: runtime, Docs: docs, Web: web, Memory: memory,
-		Synthesizer: synthesis,
+		Synthesizer: synthesis, InvestigatorPayloadTokens: investigatorPayloadTokens,
+		SynthesizerPayloadTokens: synthesizerPayloadTokens,
 	}, nil
+}
+
+func agentPayloadBudget(definition agentapi.Definition) (int, error) {
+	safeLimit := run.ContextSafeLimitTokens(definition.Budget.ContextTokens)
+	reserved := tooloutput.EstimateTokens(definition.Prompt.System) +
+		definition.Model.MaxOutputTokens + investigationRuntimeEnvelopeTokens
+	available := safeLimit - reserved
+	if available <= 0 {
+		return 0, fmt.Errorf(
+			"agent definition %q has no positive payload budget: context=%d safe_limit=%d reserved=%d",
+			definition.ID,
+			definition.Budget.ContextTokens,
+			safeLimit,
+			reserved,
+		)
+	}
+	return available, nil
 }
 
 func agentNodeBudget(

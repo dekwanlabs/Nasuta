@@ -12,10 +12,11 @@ import (
 )
 
 type evidencePayload struct {
-	ProducerNodeID    string                      `json:"producer_node_id"`
-	Completeness      Completeness                `json:"completeness"`
-	EvidenceUnits     []tool.EvidenceUnit         `json:"evidence_units"`
-	EvidenceConflicts []agentapi.EvidenceConflict `json:"evidence_conflicts"`
+	ProducerNodeID string       `json:"producer_node_id"`
+	Completeness   Completeness `json:"completeness"`
+	ReferenceCount int          `json:"reference_count"`
+	EvidenceCount  int          `json:"evidence_count"`
+	ConflictCount  int          `json:"conflict_count"`
 }
 
 type handoffView struct {
@@ -142,10 +143,11 @@ func measureConvergence(
 
 func contextFromHandoff(handoff Handoff) (agentapi.ContextBlock, error) {
 	view := evidencePayload{
-		ProducerNodeID:    handoff.ProducerNodeID,
-		Completeness:      handoff.Completeness,
-		EvidenceUnits:     evidence.CloneUnits(handoff.EvidenceUnits),
-		EvidenceConflicts: cloneConflicts(handoff.EvidenceConflicts),
+		ProducerNodeID: handoff.ProducerNodeID,
+		Completeness:   handoff.Completeness,
+		ReferenceCount: len(handoff.References),
+		EvidenceCount:  len(handoff.EvidenceUnits),
+		ConflictCount:  len(handoff.EvidenceConflicts),
 	}
 	content, err := json.Marshal(view)
 	if err != nil {
@@ -157,14 +159,11 @@ func contextFromHandoff(handoff Handoff) (agentapi.ContextBlock, error) {
 	}
 	sum := sha256.Sum256(content)
 	return agentapi.ContextBlock{
-		Source:            "workflow.handoff",
-		Title:             "Workflow evidence ledger",
-		Content:           string(content),
-		References:        append([]agentapi.Reference(nil), handoff.References...),
-		Evidence:          evidence.CloneUnits(handoff.EvidenceUnits),
-		EvidenceConflicts: cloneConflicts(handoff.EvidenceConflicts),
-		Complete:          handoff.Completeness == Complete,
-		ContentHash:       hex.EncodeToString(sum[:]),
+		Source:      "workflow.handoff",
+		Title:       "Workflow handoff metadata",
+		Content:     string(content),
+		Complete:    handoff.Completeness == Complete,
+		ContentHash: hex.EncodeToString(sum[:]),
 	}, nil
 }
 

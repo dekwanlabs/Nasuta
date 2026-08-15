@@ -12,6 +12,16 @@ func TestDecideExecutionRoute(t *testing.T) {
 	base := executionRouteInput{
 		Suggestion: retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent, Complexity: 0.9, Confidence: 0.9,
+			Tasks: []retrieval.ExecutionTask{
+				{
+					ID: "design", Objective: "Establish the intended behavior.",
+					IndependentlyUseful: true,
+				},
+				{
+					ID: "implementation", Objective: "Verify the implementation behavior.",
+					IndependentlyUseful: true,
+				},
+			},
 			Reasons: []string{"requires_multiple_subproblems", "supports_parallel_investigation"},
 		},
 		Assessment: ExecutionAssessment{
@@ -43,15 +53,20 @@ func TestDecideExecutionRoute(t *testing.T) {
 		}, want: retrieval.ExecutionMultiAgent},
 		{name: "one independent task", mutate: func(input *executionRouteInput) {
 			input.Assessment.IndependentTaskCount = 1
-			input.Assessment.RequiredCapabilities = 1
 			input.Assessment.Parallelizable = false
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "insufficient_independent_tasks"},
+		{name: "one investigation capability", mutate: func(input *executionRouteInput) {
+			input.Assessment.RequiredCapabilities = 1
+		}, want: retrieval.ExecutionSingleAgent, wantReason: "insufficient_investigation_capabilities"},
 		{name: "sequential tasks", mutate: func(input *executionRouteInput) {
 			input.Assessment.Parallelizable = false
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "tasks_not_parallelizable"},
 		{name: "write request", mutate: func(input *executionRouteInput) {
-			input.AllowWrite = true
+			input.WriteRequested = true
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "write_requested"},
+		{name: "write authorization remains eligible", mutate: func(input *executionRouteInput) {
+			input.WriteAuthorized = true
+		}, want: retrieval.ExecutionMultiAgent},
 		{name: "workflow unavailable", mutate: func(input *executionRouteInput) {
 			input.WorkflowAvailable = false
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "workflow_unavailable"},
@@ -76,6 +91,16 @@ func TestExecutionRouteTraceContract(t *testing.T) {
 	decision := routeExecution(ctx, executionRouteInput{
 		Suggestion: retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent, Complexity: 0.9, Confidence: 0.9,
+			Tasks: []retrieval.ExecutionTask{
+				{
+					ID: "design", Objective: "Establish the intended behavior.",
+					IndependentlyUseful: true,
+				},
+				{
+					ID: "implementation", Objective: "Verify the implementation behavior.",
+					IndependentlyUseful: true,
+				},
+			},
 			Reasons: []string{"supports_parallel_investigation"},
 		},
 		Assessment: ExecutionAssessment{
@@ -99,12 +124,37 @@ func TestExecutionRouteTraceContract(t *testing.T) {
 		event.Output["independent_tasks"] != 2 ||
 		event.Output["required_capabilities"] != 2 ||
 		event.Output["estimated_agent_runs"] != 3 ||
-		event.Output["read_only"] != true {
+		event.Output["read_only"] != true ||
+		event.Output["write_authorized"] != false ||
+		event.Output["write_requested"] != false {
 		t.Fatalf("output = %#v", event.Output)
 	}
 }
 
-func TestAssessExecutionUsesTaskContractCapabilities(t *testing.T) {
+func TestExecutionRouteTraceKeepsUnauthorizedWriteRequestReadOnly(t *testing.T) {
+	scope := runtrace.NewScope(runtrace.Evaluation, nil)
+	ctx := runtrace.WithScope(t.Context(), scope)
+	routeExecution(ctx, executionRouteInput{
+		Suggestion: retrieval.ExecutionSuggestion{
+			Strategy: retrieval.ExecutionMultiAgent,
+		},
+		Assessment: ExecutionAssessment{
+			IndependentTaskCount: 2, RequiredCapabilities: 2,
+			Parallelizable: true,
+		},
+		Policy:         ExecutionPolicy{AllowMultiAgent: true},
+		WriteRequested: true, WorkflowAvailable: true,
+	})
+
+	event := traceEventByNode(t, scope.Snapshot(), "execution_route")
+	if event.Output["read_only"] != true ||
+		event.Output["write_authorized"] != false ||
+		event.Output["write_requested"] != true {
+		t.Fatalf("output = %#v", event.Output)
+	}
+}
+
+func TestAssessExecutionSeparatesGoalsFromCapabilities(t *testing.T) {
 	assessment := assessExecution(
 		retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent,
@@ -112,6 +162,16 @@ func TestAssessExecutionUsesTaskContractCapabilities(t *testing.T) {
 		},
 		TaskContract{
 			Entities: []EntityRef{{ID: "Checkout.Place"}, {ID: "Inventory.Reserve"}},
+			InvestigationGoals: []InvestigationGoal{
+				{
+					ID: "design", Objective: "Establish the intended behavior.",
+					IndependentlyUseful: true,
+				},
+				{
+					ID: "implementation", Objective: "Verify the implementation behavior.",
+					IndependentlyUseful: true,
+				},
+			},
 			EvidenceGoals: []EvidenceGoal{
 				{
 					ID: "core_flow", Facet: "core_flow", Required: true,
@@ -128,12 +188,41 @@ func TestAssessExecutionUsesTaskContractCapabilities(t *testing.T) {
 		},
 	)
 	if assessment.Strategy != retrieval.ExecutionMultiAgent ||
-		assessment.IndependentTaskCount != 3 ||
+		assessment.IndependentTaskCount != 2 ||
 		assessment.RequiredCapabilities != 3 ||
 		!assessment.Parallelizable ||
 		!assessment.SharedContextPressure ||
-		assessment.EstimatedCoordination.AgentRuns != 4 ||
-		assessment.EstimatedCoordination.JoinInputs != 3 {
+		assessment.EstimatedCoordination.AgentRuns != 3 ||
+		assessment.EstimatedCoordination.JoinInputs != 2 {
+		t.Fatalf("assessment = %+v", assessment)
+	}
+}
+
+func TestAssessExecutionDoesNotTreatCapabilityFanoutAsIndependentTasks(t *testing.T) {
+	assessment := assessExecution(
+		retrieval.ExecutionSuggestion{
+			Strategy: retrieval.ExecutionMultiAgent,
+			Reasons:  []string{"requires_cross_source_analysis"},
+		},
+		TaskContract{
+			InvestigationGoals: []InvestigationGoal{{
+				ID: "flow", Objective: "Verify the end-to-end flow.",
+				IndependentlyUseful: true,
+			}},
+			EvidenceGoals: []EvidenceGoal{{
+				ID: "core_flow", Facet: "core_flow", Required: true,
+				Sources: []agentapi.EvidenceSource{
+					agentapi.EvidenceSourceInternal,
+					agentapi.EvidenceSourceRuntime,
+					agentapi.EvidenceSourceWeb,
+				},
+			}},
+		},
+	)
+	if assessment.IndependentTaskCount != 1 ||
+		assessment.RequiredCapabilities != 3 ||
+		assessment.Parallelizable ||
+		assessment.Strategy != retrieval.ExecutionSingleAgent {
 		t.Fatalf("assessment = %+v", assessment)
 	}
 }

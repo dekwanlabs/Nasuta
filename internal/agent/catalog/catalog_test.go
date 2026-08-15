@@ -177,10 +177,11 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 	synthesizer := definitions[len(definitions)-1]
 	if synthesizer.InputSchema.ID != "investigation.verified_bundle" ||
 		synthesizer.OutputSchema.ID != "investigation.answer" ||
-		synthesizer.Prompt.Version != "investigation-synthesis-v3" ||
+		synthesizer.Prompt.Version != "investigation-synthesis-v4" ||
 		!strings.Contains(synthesizer.Prompt.System, `"supported_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"partial_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"unsupported_claims"`) ||
+		!strings.Contains(synthesizer.Prompt.System, `"omissions"`) ||
 		strings.Contains(synthesizer.Prompt.System, `"handoffs[].payload"`) ||
 		strings.Contains(synthesizer.Prompt.System, `"unavailable_tasks"`) ||
 		len(synthesizer.Tools.VisibleToolIDs) != 0 || !synthesizer.Tools.RestrictVisible {

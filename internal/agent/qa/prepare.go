@@ -112,7 +112,9 @@ func (svc *Service) initializePreparation(
 		ctx: ctx, trace: trace, ownsTrace: ownsTrace,
 	}
 
-	prepared.toolPolicy = toolPolicyForRun(svc.writeAvailable && request.AllowWrite)
+	prepared.toolPolicy = toolPolicyForRun(
+		svc.writeAvailable && request.WriteAuthorized && request.WriteRequested,
+	)
 	prepared.candidateToolSet = svc.runtimeTools.ToolsFor(prepared.toolPolicy)
 	if request.Conversation.CompactedThroughTurn <= 0 || svc.history == nil {
 		prepared.candidateToolSet = withoutHistoryTools(prepared.candidateToolSet)

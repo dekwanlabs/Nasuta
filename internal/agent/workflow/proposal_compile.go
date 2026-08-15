@@ -107,6 +107,7 @@ func (compiler *ProposalCompiler) compile(
 				HighRiskGoals:            append([]string(nil), policy.HighRiskGoals...),
 				HighRiskMinimumTrustTier: policy.HighRiskMinimumTrustTier,
 				RejectEvidenceConflicts:  policy.RejectEvidenceConflicts,
+				MaxPayloadTokens:         policy.VerifierPayloadTokens,
 			},
 			Permissions: agentapi.PermissionPolicy{
 				Scopes: append([]string(nil), policy.Permissions.Scopes...),

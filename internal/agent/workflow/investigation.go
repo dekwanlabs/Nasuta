@@ -42,6 +42,10 @@ type Budgets struct {
 	Memory      NodeBudget
 	Observe     NodeBudget
 	Synthesizer NodeBudget
+	// InvestigatorPayloadTokens bounds the shared task contract sent to each investigator.
+	InvestigatorPayloadTokens int
+	// SynthesizerPayloadTokens bounds the verified evidence view sent to synthesis.
+	SynthesizerPayloadTokens int
 }
 
 // DefaultFlow builds the standard read-only investigation DAG.
@@ -88,6 +92,7 @@ func DefaultFlow(
 				InputSchema: bundle, OutputSchema: verified,
 				Verifier: &VerifierSpec{
 					HighRiskMinimumTrustTier: minTrustTier,
+					MaxPayloadTokens:         budgets.SynthesizerPayloadTokens,
 				},
 				Permissions: readOnly, Timeout: nodeTimeout,
 			},
@@ -267,6 +272,7 @@ func DefaultPolicy(
 			ID: "investigation.verified_bundle", Version: 1,
 		},
 		HighRiskMinimumTrustTier: minTrustTier,
+		VerifierPayloadTokens:    budgets.SynthesizerPayloadTokens,
 		RiskGateID:               "evidence.risk",
 		FailureMode:              CollectAvailable,
 	}, nil
@@ -357,8 +363,9 @@ func GoalPolicy(
 		VerifierOutputSchema: agentapi.SchemaRef{
 			ID: "investigation.verified_bundle", Version: 1,
 		},
-		RiskGateID:  "evidence.risk",
-		FailureMode: CollectAvailable,
+		VerifierPayloadTokens: budgets.SynthesizerPayloadTokens,
+		RiskGateID:            "evidence.risk",
+		FailureMode:           CollectAvailable,
 	}, nil
 }
 

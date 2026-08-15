@@ -35,6 +35,19 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 			Effective: domain.PlanDecision{
 				Plan: domain.EvidencePlan{Sources: domain.Internal | domain.Web},
 			},
+			Execution: retrieval.ExecutionSuggestion{
+				Strategy: retrieval.ExecutionMultiAgent,
+				Tasks: []retrieval.ExecutionTask{
+					{
+						ID: "failure_path", Objective: "Trace the failure path.",
+						IndependentlyUseful: true,
+					},
+					{
+						ID: "runtime_impact", Objective: "Assess the runtime impact.",
+						IndependentlyUseful: true,
+					},
+				},
+			},
 			RoutedToolIDs: []string{"observe_logs"},
 		},
 		analysis: queryAnalysisOutput{
@@ -77,6 +90,19 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 	if !reflect.DeepEqual(contract.Entities, []EntityRef{{ID: "checkout.place"}}) {
 		t.Fatalf("entities = %+v", contract.Entities)
 	}
+	wantInvestigationGoals := []InvestigationGoal{
+		{
+			ID: "failure_path", Objective: "Trace the failure path.",
+			IndependentlyUseful: true,
+		},
+		{
+			ID: "runtime_impact", Objective: "Assess the runtime impact.",
+			IndependentlyUseful: true,
+		},
+	}
+	if !reflect.DeepEqual(contract.InvestigationGoals, wantInvestigationGoals) {
+		t.Fatalf("investigation goals = %+v", contract.InvestigationGoals)
+	}
 	wantGoals := []EvidenceGoal{
 		{
 			ID: "entrypoint", Facet: "entrypoint", Required: true,
@@ -111,10 +137,6 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 	}
 	if !reflect.DeepEqual(contract.Context.ConversationRefs, prepared.conversationRefs) {
 		t.Fatalf("conversation refs = %+v", contract.Context.ConversationRefs)
-	}
-	if len(contract.Context.SeedEvidence) != 1 ||
-		contract.Context.SeedEvidence[0].Target != "Checkout.Place" {
-		t.Fatalf("seed evidence = %+v", contract.Context.SeedEvidence)
 	}
 	if !reflect.DeepEqual(contract.Context.SeedMaterial, seedMaterial) {
 		t.Fatalf("seed material = %+v", contract.Context.SeedMaterial)

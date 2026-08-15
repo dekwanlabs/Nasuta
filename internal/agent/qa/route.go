@@ -37,7 +37,8 @@ type executionRouteInput struct {
 	Suggestion        retrieval.ExecutionSuggestion
 	Assessment        ExecutionAssessment
 	Policy            ExecutionPolicy
-	AllowWrite        bool
+	WriteAuthorized   bool
+	WriteRequested    bool
 	WorkflowAvailable bool
 }
 
@@ -50,6 +51,14 @@ var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecisi
 	Operation: "agent.execution_route",
 	Node:      "execution_route",
 	Output: func(input executionRouteInput, output executionRouteDecision, _ error) map[string]any {
+		tasks := make([]map[string]any, 0, len(input.Suggestion.Tasks))
+		for _, task := range input.Suggestion.Tasks {
+			tasks = append(tasks, map[string]any{
+				"id": task.ID, "objective": task.Objective,
+				"independently_useful": task.IndependentlyUseful,
+				"depends_on":           append([]string(nil), task.DependsOn...),
+			})
+		}
 		return map[string]any{
 			"proposed_strategy":       input.Suggestion.Strategy,
 			"effective_strategy":      output.Strategy,
@@ -64,7 +73,10 @@ var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecisi
 			"estimated_join_inputs":   input.Assessment.EstimatedCoordination.JoinInputs,
 			"downgrade_reason":        output.DowngradeReason,
 			"workflow_available":      input.WorkflowAvailable,
-			"read_only":               !input.AllowWrite,
+			"read_only":               !(input.WriteAuthorized && input.WriteRequested),
+			"write_authorized":        input.WriteAuthorized,
+			"write_requested":         input.WriteRequested,
+			"investigation_tasks":     tasks,
 		}
 	},
 }
@@ -98,9 +110,20 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	)
 	prepared.execution = routeExecution(prepared.ctx, executionRouteInput{
 		Suggestion: planning.Execution, Assessment: assessment, Policy: policy,
-		AllowWrite:        prepared.request.AllowWrite,
+		WriteAuthorized:   prepared.request.WriteAuthorized,
+		WriteRequested:    prepared.request.WriteRequested,
 		WorkflowAvailable: workflowAvailable,
 	})
+	log.InfofCtx(
+		prepared.ctx,
+		"[qa] execution route proposed=%s effective=%s independent_tasks=%d capabilities=%d parallelizable=%t downgrade=%s",
+		planning.Execution.Strategy,
+		prepared.execution.Strategy,
+		assessment.IndependentTaskCount,
+		assessment.RequiredCapabilities,
+		assessment.Parallelizable,
+		prepared.execution.DowngradeReason,
+	)
 	if prepared.execution.Strategy == retrieval.ExecutionMultiAgent {
 		planningCtx, cancel := context.WithTimeout(
 			llm.WithUsagePhase(prepared.ctx, llm.PhaseRoute),
@@ -156,7 +179,7 @@ func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 	if !input.Policy.AllowMultiAgent {
 		return single("policy_disallows_multi_agent")
 	}
-	if input.AllowWrite {
+	if input.WriteRequested {
 		return single("write_requested")
 	}
 	if !input.WorkflowAvailable {
@@ -164,6 +187,9 @@ func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 	}
 	if input.Assessment.IndependentTaskCount < 2 {
 		return single("insufficient_independent_tasks")
+	}
+	if input.Assessment.RequiredCapabilities < 2 {
+		return single("insufficient_investigation_capabilities")
 	}
 	if !input.Assessment.Parallelizable {
 		return single("tasks_not_parallelizable")
@@ -175,6 +201,7 @@ func assessExecution(
 	suggestion retrieval.ExecutionSuggestion,
 	contract TaskContract,
 ) ExecutionAssessment {
+	independentTasks := len(contract.InvestigationGoals)
 	capabilities := make(map[string]struct{}, len(contract.EvidenceGoals))
 	for _, goal := range contract.EvidenceGoals {
 		sources := goal.Sources
@@ -188,7 +215,6 @@ func assessExecution(
 			}
 		}
 	}
-	independentTasks := len(capabilities)
 	parallelizable := independentTasks >= 2 &&
 		!hasExecutionReason(suggestion.Reasons, "subproblems_are_sequential")
 	strategy := retrieval.ExecutionSingleAgent
@@ -198,7 +224,7 @@ func assessExecution(
 	return ExecutionAssessment{
 		Strategy:             strategy,
 		IndependentTaskCount: independentTasks,
-		RequiredCapabilities: independentTasks,
+		RequiredCapabilities: len(capabilities),
 		Parallelizable:       parallelizable,
 		SharedContextPressure: len(contract.EvidenceGoals) >= 3 ||
 			len(contract.Entities) >= 2,

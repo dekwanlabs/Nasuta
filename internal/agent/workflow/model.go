@@ -138,6 +138,8 @@ type VerifierSpec struct {
 	HighRiskGoals            []string `json:"high_risk_goals,omitempty"`
 	HighRiskMinimumTrustTier int      `json:"high_risk_minimum_trust_tier,omitempty"`
 	RejectEvidenceConflicts  bool     `json:"reject_evidence_conflicts"`
+	// MaxPayloadTokens bounds one verified bundle passed to the next agent.
+	MaxPayloadTokens int `json:"max_payload_tokens,omitempty"`
 }
 
 type Budget struct {
@@ -771,6 +773,13 @@ func validateNode(
 			node.Verifier.HighRiskMinimumTrustTier > 100 {
 			return fmt.Errorf(
 				"workflow %q verifier node %q high-risk minimum trust tier must be between 0 and 100",
+				workflowID,
+				node.ID,
+			)
+		}
+		if node.Verifier.MaxPayloadTokens < 0 {
+			return fmt.Errorf(
+				"workflow %q verifier node %q payload token budget cannot be negative",
 				workflowID,
 				node.ID,
 			)

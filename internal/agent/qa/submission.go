@@ -85,6 +85,7 @@ func (svc *Service) submitInvestigation(
 		WorkflowRunID: workflowRunID,
 		Contract:      contractFromPreparation(prepared, seedMaterial),
 		Proposal:      cloneTaskGraphProposal(prepared.taskGraphProposal),
+		SeedEvidence:  contextBlockEvidence(seedMaterial),
 		Actor:         agentapi.Actor{UserID: userID},
 	})
 	scenario.Release()

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -38,7 +40,16 @@ type ExecutionSuggestion struct {
 	Strategy   ExecutionStrategy `json:"strategy"`
 	Complexity float64           `json:"complexity"`
 	Confidence float64           `json:"confidence"`
+	Tasks      []ExecutionTask   `json:"tasks"`
 	Reasons    []string          `json:"reasons"`
+}
+
+// ExecutionTask describes one independently useful investigation deliverable.
+type ExecutionTask struct {
+	ID                  string   `json:"id"`
+	Objective           string   `json:"objective"`
+	IndependentlyUseful bool     `json:"independently_useful"`
+	DependsOn           []string `json:"depends_on"`
 }
 
 // HistoryRelation separates continuous topical affinity from concrete history dependencies.
@@ -70,8 +81,10 @@ const (
 	queryTermsExampleJSON = `{"query_terms":{"domain_terms":[],"identifiers":[]}}`
 	timeExampleJSON       = `{"time":{"kind":"none","n":0,"unit":"","raw":""}}`
 	historyExampleJSON    = `{"history_relation":{"topic_affinity":0.0,"confidence":0.0,"needs_prior_entities":false,"needs_prior_conclusion":false,"needs_prior_evidence":false,"explicit_turn_refs":[]}}`
-	executionExampleJSON  = `{"execution":{"strategy":"single_agent","complexity":0.2,"confidence":0.9,"reasons":["single_focused_question"]}}`
+	executionExampleJSON  = `{"execution":{"strategy":"single_agent","complexity":0.2,"confidence":0.9,"tasks":[],"reasons":["single_focused_question"]}}`
 )
+
+var executionTaskID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 
 var executionReasonCodes = map[string]struct{}{
 	"requires_multiple_subproblems":            {},
@@ -298,6 +311,14 @@ func analyzeQuestion(
 }
 
 func bindExecutionSuggestion(raw map[string]any) (ExecutionSuggestion, error) {
+	allowedFields := map[string]struct{}{
+		"strategy": {}, "complexity": {}, "confidence": {}, "tasks": {}, "reasons": {},
+	}
+	for field := range raw {
+		if _, ok := allowedFields[field]; !ok {
+			return ExecutionSuggestion{}, fmt.Errorf("execution field %q is unknown", field)
+		}
+	}
 	strategy, ok := raw["strategy"].(string)
 	if !ok || ExecutionStrategy(strategy) != ExecutionSingleAgent && ExecutionStrategy(strategy) != ExecutionMultiAgent {
 		return ExecutionSuggestion{}, fmt.Errorf("execution.strategy must be single_agent or multi_agent")
@@ -309,6 +330,29 @@ func bindExecutionSuggestion(raw map[string]any) (ExecutionSuggestion, error) {
 	confidence, ok := raw["confidence"].(float64)
 	if !ok || confidence < 0 || confidence > 1 {
 		return ExecutionSuggestion{}, fmt.Errorf("execution.confidence must be between 0 and 1")
+	}
+	tasks, err := bindExecutionTasks(raw["tasks"])
+	if err != nil {
+		return ExecutionSuggestion{}, err
+	}
+	executionStrategy := ExecutionStrategy(strategy)
+	switch executionStrategy {
+	case ExecutionSingleAgent:
+		if len(tasks) != 0 {
+			return ExecutionSuggestion{}, fmt.Errorf("single_agent execution.tasks must be empty")
+		}
+	case ExecutionMultiAgent:
+		if len(tasks) < 2 || len(tasks) > 4 {
+			return ExecutionSuggestion{}, fmt.Errorf("multi_agent execution.tasks must contain 2 to 4 tasks")
+		}
+		for _, task := range tasks {
+			if !task.IndependentlyUseful {
+				return ExecutionSuggestion{}, fmt.Errorf("multi_agent task %q must be independently useful", task.ID)
+			}
+			if len(task.DependsOn) != 0 {
+				return ExecutionSuggestion{}, fmt.Errorf("multi_agent task %q must be independently runnable", task.ID)
+			}
+		}
 	}
 	items, ok := raw["reasons"].([]any)
 	if !ok {
@@ -340,8 +384,104 @@ func bindExecutionSuggestion(raw map[string]any) (ExecutionSuggestion, error) {
 		return ExecutionSuggestion{}, fmt.Errorf("execution must state complexity, confidence, and at least one reason")
 	}
 	return ExecutionSuggestion{
-		Strategy: ExecutionStrategy(strategy), Complexity: complexity,
-		Confidence: confidence, Reasons: reasons,
+		Strategy: executionStrategy, Complexity: complexity,
+		Confidence: confidence, Tasks: tasks, Reasons: reasons,
+	}, nil
+}
+
+func bindExecutionTasks(value any) ([]ExecutionTask, error) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("execution.tasks must be an array")
+	}
+	if len(items) > 4 {
+		return nil, fmt.Errorf("execution.tasks exceeds 4 items")
+	}
+	tasks := make([]ExecutionTask, 0, len(items))
+	ids := make(map[string]struct{}, len(items))
+	objectives := make(map[string]struct{}, len(items))
+	for index, item := range items {
+		raw, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("execution.tasks[%d] must be an object", index)
+		}
+		task, err := bindExecutionTask(raw, index)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := ids[task.ID]; duplicate {
+			return nil, fmt.Errorf("execution task id %q is duplicated", task.ID)
+		}
+		ids[task.ID] = struct{}{}
+		objectiveKey := strings.ToLower(task.Objective)
+		if _, duplicate := objectives[objectiveKey]; duplicate {
+			return nil, fmt.Errorf("execution task objective %q is duplicated", task.Objective)
+		}
+		objectives[objectiveKey] = struct{}{}
+		tasks = append(tasks, task)
+	}
+	for _, task := range tasks {
+		for _, dependency := range task.DependsOn {
+			if _, exists := ids[dependency]; !exists {
+				return nil, fmt.Errorf("execution task %q depends on unknown task %q", task.ID, dependency)
+			}
+			if dependency == task.ID {
+				return nil, fmt.Errorf("execution task %q cannot depend on itself", task.ID)
+			}
+		}
+	}
+	return tasks, nil
+}
+
+func bindExecutionTask(raw map[string]any, index int) (ExecutionTask, error) {
+	allowedFields := map[string]struct{}{
+		"id": {}, "objective": {}, "independently_useful": {}, "depends_on": {},
+	}
+	for field := range raw {
+		if _, ok := allowedFields[field]; !ok {
+			return ExecutionTask{}, fmt.Errorf("execution.tasks[%d] field %q is unknown", index, field)
+		}
+	}
+	id, ok := raw["id"].(string)
+	if !ok || !executionTaskID.MatchString(id) {
+		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].id must be canonical", index)
+	}
+	objective, ok := raw["objective"].(string)
+	objective = strings.TrimSpace(objective)
+	if !ok || objective == "" || utf8.RuneCountInString(objective) > 500 {
+		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].objective must contain 1 to 500 characters", index)
+	}
+	independent, ok := raw["independently_useful"].(bool)
+	if !ok {
+		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].independently_useful must be a boolean", index)
+	}
+	dependencyItems, ok := raw["depends_on"].([]any)
+	if !ok {
+		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].depends_on must be an array", index)
+	}
+	if len(dependencyItems) > 3 {
+		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].depends_on exceeds 3 items", index)
+	}
+	dependencies := make([]string, 0, len(dependencyItems))
+	seen := make(map[string]struct{}, len(dependencyItems))
+	for dependencyIndex, item := range dependencyItems {
+		dependency, ok := item.(string)
+		if !ok || !executionTaskID.MatchString(dependency) {
+			return ExecutionTask{}, fmt.Errorf(
+				"execution.tasks[%d].depends_on[%d] must be a canonical task id",
+				index,
+				dependencyIndex,
+			)
+		}
+		if _, duplicate := seen[dependency]; duplicate {
+			continue
+		}
+		seen[dependency] = struct{}{}
+		dependencies = append(dependencies, dependency)
+	}
+	return ExecutionTask{
+		ID: id, Objective: objective, IndependentlyUseful: independent,
+		DependsOn: dependencies,
 	}, nil
 }
 

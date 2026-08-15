@@ -6,16 +6,17 @@ import (
 	"fmt"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type findingView struct {
-	Claim      string                      `json:"claim"`
-	GoalIDs    []string                    `json:"goal_ids"`
+	Claim      string                `json:"claim"`
+	GoalIDs    []string              `json:"goal_ids"`
 	Evidence   []findingEvidenceView `json:"evidence"`
-	Confidence float64                     `json:"confidence"`
+	Confidence float64               `json:"confidence"`
 }
 
 type findingEvidenceView struct {
@@ -27,9 +28,9 @@ type findingEvidenceView struct {
 
 type reportView struct {
 	Findings        []findingView `json:"findings"`
-	Gaps            []string                   `json:"gaps"`
-	CoveredGoals    []string                   `json:"covered_goals"`
-	UnresolvedGoals []string                   `json:"unresolved_goals"`
+	Gaps            []string      `json:"gaps"`
+	CoveredGoals    []string      `json:"covered_goals"`
+	UnresolvedGoals []string      `json:"unresolved_goals"`
 }
 
 type claimSupport string
@@ -45,7 +46,7 @@ type verifiedClaimView struct {
 	FindingIndex       int                         `json:"finding_index"`
 	Claim              string                      `json:"claim"`
 	GoalIDs            []string                    `json:"goal_ids"`
-	Evidence           []findingEvidenceView `json:"evidence"`
+	Evidence           []findingEvidenceView       `json:"evidence"`
 	EvidenceIdentities []agentapi.EvidenceIdentity `json:"evidence_identities"`
 	Confidence         float64                     `json:"confidence"`
 	Support            claimSupport                `json:"support"`
@@ -66,6 +67,14 @@ type verificationView struct {
 	StopReason StopReason   `json:"stop_reason"`
 }
 
+type omissionView struct {
+	Claims            int `json:"claims"`
+	Goals             int `json:"goals"`
+	Limitations       int `json:"limitations"`
+	EvidenceUnits     int `json:"evidence_units"`
+	EvidenceConflicts int `json:"evidence_conflicts"`
+}
+
 type verifiedEvidenceView struct {
 	SupportedClaims   []verifiedClaimView         `json:"supported_claims"`
 	PartialClaims     []verifiedClaimView         `json:"partial_claims"`
@@ -75,8 +84,10 @@ type verifiedEvidenceView struct {
 	Limitations       []string                    `json:"limitations"`
 	EvidenceUnits     []tool.EvidenceUnit         `json:"evidence_units"`
 	EvidenceConflicts []agentapi.EvidenceConflict `json:"evidence_conflicts"`
-	Verification      verificationView    `json:"verification"`
+	Verification      verificationView            `json:"verification"`
 	Completeness      Completeness                `json:"completeness"`
+	// Omissions makes payload compaction visible to the synthesizer.
+	Omissions omissionView `json:"omissions"`
 }
 
 type verificationRunInput struct {
@@ -364,7 +375,7 @@ func verifyBundle(
 	if evidenceConflicts == nil {
 		evidenceConflicts = []agentapi.EvidenceConflict{}
 	}
-	payload, err := json.Marshal(verifiedEvidenceView{
+	view := verifiedEvidenceView{
 		SupportedClaims:   claims,
 		PartialClaims:     partialClaims,
 		UnsupportedClaims: unsupportedClaims,
@@ -377,7 +388,20 @@ func verifyBundle(
 			Decision: completeness, StopReason: stopReason,
 		},
 		Completeness: completeness,
-	})
+	}
+	view, err := trimVerifiedEvidence(
+		view,
+		input.node.Verifier.MaxPayloadTokens,
+		required,
+	)
+	if err != nil {
+		return verificationRunOutput{}, fmt.Errorf(
+			"bound verifier node %q evidence view: %w",
+			input.node.ID,
+			err,
+		)
+	}
+	payload, err := json.Marshal(view)
 	if err != nil {
 		return verificationRunOutput{}, fmt.Errorf(
 			"marshal verifier node %q evidence view: %w",
@@ -408,6 +432,247 @@ func verifyBundle(
 		unresolvedGoalCount: len(unresolved),
 		conflictCount:       len(ledger.EvidenceConflicts),
 	}, nil
+}
+
+type verifiedSlotKind uint8
+
+const (
+	verifiedSupportedSlot verifiedSlotKind = iota
+	verifiedPartialSlot
+	verifiedUnsupportedSlot
+	verifiedPartialGoalSlot
+	verifiedUnresolvedGoalSlot
+	verifiedLimitationSlot
+	verifiedConflictSlot
+)
+
+type verifiedSlot struct {
+	kind  verifiedSlotKind
+	index int
+}
+
+// trimVerifiedEvidence keeps the highest-value verified data within one payload budget.
+// It preserves source order inside each category and leaves the full ledger untouched.
+// A deterministic omission ledger tells synthesis which verified data was excluded.
+func trimVerifiedEvidence(
+	view verifiedEvidenceView,
+	maxTokens int,
+	required map[string]struct{},
+) (verifiedEvidenceView, error) {
+	if maxTokens <= 0 {
+		return view, nil
+	}
+	view.Omissions = omissionView{}
+	if verifiedViewTokens(view) <= maxTokens {
+		return view, nil
+	}
+	slots := verifiedSlots(view, required)
+	minimum := viewAtVerifiedSlot(view, slots, 0)
+	if verifiedViewTokens(minimum) > maxTokens {
+		return verifiedEvidenceView{}, fmt.Errorf(
+			"minimum verified evidence view exceeds %d tokens",
+			maxTokens,
+		)
+	}
+	low, high := 0, len(slots)
+	for low < high {
+		middle := low + (high-low+1)/2
+		candidate := viewAtVerifiedSlot(view, slots, middle)
+		if verifiedViewTokens(candidate) <= maxTokens {
+			low = middle
+			continue
+		}
+		high = middle - 1
+	}
+	return viewAtVerifiedSlot(view, slots, low), nil
+}
+
+func verifiedSlots(
+	view verifiedEvidenceView,
+	required map[string]struct{},
+) []verifiedSlot {
+	slots := make([]verifiedSlot, 0,
+		len(view.SupportedClaims)+len(view.PartialClaims)+
+			len(view.UnsupportedClaims)+len(view.PartialGoals)+
+			len(view.UnresolvedGoals)+len(view.Limitations)+
+			len(view.EvidenceConflicts),
+	)
+	for index, claim := range view.SupportedClaims {
+		if claim.HighRisk || claimHasGoal(claim, required) {
+			slots = append(slots, verifiedSlot{
+				kind: verifiedSupportedSlot, index: index,
+			})
+		}
+	}
+	for index, claim := range view.SupportedClaims {
+		if claim.HighRisk || claimHasGoal(claim, required) {
+			continue
+		}
+		slots = append(slots, verifiedSlot{
+			kind: verifiedSupportedSlot, index: index,
+		})
+	}
+	for index := range view.PartialClaims {
+		slots = append(slots, verifiedSlot{
+			kind: verifiedPartialSlot, index: index,
+		})
+	}
+	for index := range view.PartialGoals {
+		slots = append(slots, verifiedSlot{
+			kind: verifiedPartialGoalSlot, index: index,
+		})
+	}
+	for index := range view.UnresolvedGoals {
+		slots = append(slots, verifiedSlot{
+			kind: verifiedUnresolvedGoalSlot, index: index,
+		})
+	}
+	for index := range view.Limitations {
+		slots = append(slots, verifiedSlot{
+			kind: verifiedLimitationSlot, index: index,
+		})
+	}
+	for index := range view.UnsupportedClaims {
+		slots = append(slots, verifiedSlot{
+			kind: verifiedUnsupportedSlot, index: index,
+		})
+	}
+	for index := range view.EvidenceConflicts {
+		slots = append(slots, verifiedSlot{
+			kind: verifiedConflictSlot, index: index,
+		})
+	}
+	return slots
+}
+
+func claimHasGoal(claim verifiedClaimView, required map[string]struct{}) bool {
+	for _, goal := range claim.GoalIDs {
+		if _, ok := required[goal]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func viewAtVerifiedSlot(
+	full verifiedEvidenceView,
+	slots []verifiedSlot,
+	count int,
+) verifiedEvidenceView {
+	view := verifiedEvidenceView{
+		SupportedClaims:   []verifiedClaimView{},
+		PartialClaims:     []verifiedClaimView{},
+		UnsupportedClaims: []unsupportedClaimView{},
+		PartialGoals:      []string{},
+		UnresolvedGoals:   []string{},
+		Limitations:       []string{},
+		EvidenceUnits:     []tool.EvidenceUnit{},
+		EvidenceConflicts: []agentapi.EvidenceConflict{},
+		Verification:      full.Verification,
+		Completeness:      full.Completeness,
+	}
+	selectedEvidence := make(map[evidence.Key]struct{})
+	for _, slot := range slots[:min(count, len(slots))] {
+		switch slot.kind {
+		case verifiedSupportedSlot:
+			claim := full.SupportedClaims[slot.index]
+			view.SupportedClaims = append(view.SupportedClaims, claim)
+			addClaimEvidence(selectedEvidence, claim)
+		case verifiedPartialSlot:
+			claim := full.PartialClaims[slot.index]
+			view.PartialClaims = append(view.PartialClaims, claim)
+			addClaimEvidence(selectedEvidence, claim)
+		case verifiedUnsupportedSlot:
+			view.UnsupportedClaims = append(
+				view.UnsupportedClaims,
+				full.UnsupportedClaims[slot.index],
+			)
+		case verifiedPartialGoalSlot:
+			view.PartialGoals = append(
+				view.PartialGoals,
+				full.PartialGoals[slot.index],
+			)
+		case verifiedUnresolvedGoalSlot:
+			view.UnresolvedGoals = append(
+				view.UnresolvedGoals,
+				full.UnresolvedGoals[slot.index],
+			)
+		case verifiedLimitationSlot:
+			view.Limitations = append(
+				view.Limitations,
+				full.Limitations[slot.index],
+			)
+		case verifiedConflictSlot:
+			view.EvidenceConflicts = append(
+				view.EvidenceConflicts,
+				full.EvidenceConflicts[slot.index],
+			)
+		}
+	}
+	view.EvidenceUnits = selectedEvidenceUnits(full.EvidenceUnits, selectedEvidence)
+	view.Omissions = omissionView{
+		Claims: len(full.SupportedClaims) + len(full.PartialClaims) +
+			len(full.UnsupportedClaims) - len(view.SupportedClaims) -
+			len(view.PartialClaims) - len(view.UnsupportedClaims),
+		Goals: len(full.PartialGoals) + len(full.UnresolvedGoals) -
+			len(view.PartialGoals) - len(view.UnresolvedGoals),
+		Limitations:   len(full.Limitations) - len(view.Limitations),
+		EvidenceUnits: len(full.EvidenceUnits) - len(view.EvidenceUnits),
+		EvidenceConflicts: len(full.EvidenceConflicts) -
+			len(view.EvidenceConflicts),
+	}
+	return view
+}
+
+func addClaimEvidence(
+	selected map[evidence.Key]struct{},
+	claim verifiedClaimView,
+) {
+	for _, identity := range claim.EvidenceIdentities {
+		selected[keyFromIdentity(identity)] = struct{}{}
+	}
+}
+
+func selectedEvidenceUnits(
+	units []tool.EvidenceUnit,
+	selected map[evidence.Key]struct{},
+) []tool.EvidenceUnit {
+	if len(selected) == 0 {
+		return []tool.EvidenceUnit{}
+	}
+	out := make([]tool.EvidenceUnit, 0, len(selected))
+	for _, unit := range units {
+		matched := false
+		sections := unit.Sections
+		if len(sections) == 0 {
+			sections = []string{""}
+		}
+		for _, section := range sections {
+			key := evidence.Key{
+				SourceKind: unit.SourceKind,
+				Target:     unit.Target,
+				Section:    section,
+				Version:    unit.Version,
+				TimeRange:  unit.TimeRange,
+			}
+			if _, ok := selected[key]; ok {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			out = append(out, evidence.CloneUnit(unit))
+		}
+	}
+	return out
+}
+
+func verifiedViewTokens(view verifiedEvidenceView) int {
+	payload, err := json.Marshal(view)
+	if err != nil {
+		return int(^uint(0) >> 1)
+	}
+	return tooloutput.EstimateTokens(string(payload))
 }
 
 func verifiedCompleteness(

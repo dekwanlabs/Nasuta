@@ -35,8 +35,9 @@ func (runner qaInvestigator) Start(
 		ID: workflow.FlowID, Version: version,
 	}
 	agentNodes := defaultAgentNodes()
+	payloadBudget := 0
 	if len(request.Contract.EvidenceGoals) > 0 {
-		definition, err := runner.platform.investigationFlow(
+		definition, flowPayloadBudget, err := runner.platform.investigationFlowWithBudget(
 			ctx,
 			version,
 			request.Contract.EvidenceGoals,
@@ -62,8 +63,17 @@ func (runner qaInvestigator) Start(
 			ID: definition.ID, Version: definition.Version,
 		}
 		agentNodes = agentNodeIDs(definition)
+		payloadBudget = flowPayloadBudget
+	} else {
+		payloadBudget, err = runner.platform.investigatorPayloadBudget(version)
+		if err != nil {
+			return err
+		}
 	}
-	input, err := json.Marshal(request.Contract)
+	input, err := marshalInvestigationContract(
+		request.Contract,
+		payloadBudget,
+	)
 	if err != nil {
 		return fmt.Errorf("marshal QA task contract: %w", err)
 	}
@@ -96,7 +106,7 @@ func (runner qaInvestigator) Start(
 		RunID: request.WorkflowRunID, ParentRunID: request.Contract.TaskID,
 		Workflow: workflowRef,
 		Input:    input, Actor: request.Actor, ActorPermissions: readOnly,
-		SeedEvidence: request.Contract.Context.SeedEvidence,
+		SeedEvidence: request.SeedEvidence,
 		Scenario:     workflow.FlowID, ScenarioPermissions: readOnly,
 	})
 	if startErr == nil {
@@ -132,9 +142,24 @@ func (p *Platform) investigationFlow(
 	goals []agent.EvidenceGoal,
 	plan *agentapi.TaskGraphProposal,
 ) (workflow.Definition, error) {
+	definition, _, err := p.investigationFlowWithBudget(
+		ctx,
+		version,
+		goals,
+		plan,
+	)
+	return definition, err
+}
+
+func (p *Platform) investigationFlowWithBudget(
+	ctx context.Context,
+	version int64,
+	goals []agent.EvidenceGoal,
+	plan *agentapi.TaskGraphProposal,
+) (workflow.Definition, int, error) {
 	if p == nil || p.agents.catalog == nil ||
 		p.agents.schemas == nil || p.agents.capabilities == nil {
-		return workflow.Definition{}, workflow.ErrUnavailable
+		return workflow.Definition{}, 0, workflow.ErrUnavailable
 	}
 	ids := []string{
 		"investigator.code",
@@ -150,7 +175,7 @@ func (p *Platform) investigationFlow(
 			ID: id, Version: version,
 		})
 		if err != nil {
-			return workflow.Definition{}, fmt.Errorf(
+			return workflow.Definition{}, 0, fmt.Errorf(
 				"resolve investigation agent %q version %d: %w",
 				id,
 				version,
@@ -161,27 +186,27 @@ func (p *Platform) investigationFlow(
 	}
 	budgets, err := investigationBudgets(definitions)
 	if err != nil {
-		return workflow.Definition{}, err
+		return workflow.Definition{}, 0, err
 	}
 	if goalsNeedSource(goals, agentapi.EvidenceSourceRuntime) {
 		observe, err := p.agents.capabilities.Resolve(agentapi.CapabilityRef{
 			ID: "knowledge.runtime.observe", Version: version,
 		})
 		if err != nil {
-			return workflow.Definition{}, fmt.Errorf(
+			return workflow.Definition{}, 0, fmt.Errorf(
 				"resolve live runtime investigation capability version %d: %w",
 				version,
 				err,
 			)
 		}
 		if len(observe.ToolIDs) == 0 {
-			return workflow.Definition{}, fmt.Errorf(
+			return workflow.Definition{}, 0, fmt.Errorf(
 				"live runtime investigation capability has no tools",
 			)
 		}
 		definition, err := p.agents.catalog.Resolve(observe.Agent)
 		if err != nil {
-			return workflow.Definition{}, fmt.Errorf(
+			return workflow.Definition{}, 0, fmt.Errorf(
 				"resolve live runtime investigator: %w",
 				err,
 			)
@@ -191,7 +216,14 @@ func (p *Platform) investigationFlow(
 			int64(definition.Budget.MaxSteps),
 		)
 		if err != nil {
-			return workflow.Definition{}, err
+			return workflow.Definition{}, 0, err
+		}
+		observePayloadTokens, err := agentPayloadBudget(definition)
+		if err != nil {
+			return workflow.Definition{}, 0, err
+		}
+		if observePayloadTokens < budgets.InvestigatorPayloadTokens {
+			budgets.InvestigatorPayloadTokens = observePayloadTokens
 		}
 	}
 	flowGoals := make([]workflow.Goal, 0, len(goals))
@@ -212,7 +244,7 @@ func (p *Platform) investigationFlow(
 		p.agents.capabilities,
 	)
 	if err != nil {
-		return workflow.Definition{}, err
+		return workflow.Definition{}, 0, err
 	}
 	if plan != nil {
 		policy, err := workflow.PlanPolicy(
@@ -223,7 +255,7 @@ func (p *Platform) investigationFlow(
 			*plan,
 		)
 		if err != nil {
-			return workflow.Definition{}, err
+			return workflow.Definition{}, 0, err
 		}
 		definition, compileErr := compiler.CompileContext(
 			ctx,
@@ -231,7 +263,7 @@ func (p *Platform) investigationFlow(
 			policy,
 		)
 		if compileErr == nil {
-			return definition, nil
+			return definition, budgets.InvestigatorPayloadTokens, nil
 		}
 		log.WarnfCtx(
 			ctx,
@@ -241,7 +273,7 @@ func (p *Platform) investigationFlow(
 	}
 	fallbackPlan, err := workflow.BuildPlan(flowGoals)
 	if err != nil {
-		return workflow.Definition{}, err
+		return workflow.Definition{}, 0, err
 	}
 	policy, err := workflow.GoalPolicy(
 		version,
@@ -250,9 +282,10 @@ func (p *Platform) investigationFlow(
 		flowGoals,
 	)
 	if err != nil {
-		return workflow.Definition{}, err
+		return workflow.Definition{}, 0, err
 	}
-	return compiler.CompileContext(ctx, fallbackPlan, policy)
+	definition, err := compiler.CompileContext(ctx, fallbackPlan, policy)
+	return definition, budgets.InvestigatorPayloadTokens, err
 }
 
 func goalsNeedSource(

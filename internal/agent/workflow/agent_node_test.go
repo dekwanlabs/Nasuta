@@ -78,6 +78,14 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 		runtime.request.Context[1].ContentHash == "" {
 		t.Fatalf("runtime context = %+v", runtime.request.Context)
 	}
+	if len(runtime.request.Context[0].Evidence) != 0 ||
+		len(runtime.request.Context[0].EvidenceConflicts) != 0 ||
+		len(runtime.request.Context[0].References) != 0 {
+		t.Fatalf(
+			"handoff ledger leaked into model context = %+v",
+			runtime.request.Context[0],
+		)
+	}
 	var directive TaskDirective
 	if err := json.Unmarshal([]byte(runtime.request.Context[1].Content), &directive); err != nil {
 		t.Fatalf("decode task directive: %v", err)

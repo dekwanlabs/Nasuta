@@ -84,6 +84,7 @@ func TestParseQAAskRequestSourceMode(t *testing.T) {
 		wantErr     bool
 	}{
 		{name: "default auto", body: `{"question":" q "}`, wantMode: "auto"},
+		{name: "write intent", body: `{"question":"q","write_requested":true}`, wantMode: "auto"},
 		{name: "explicit web", body: `{"question":"q","source_mode":" WEB "}`, wantMode: "web", wantSources: domain.Web, wantPlan: true},
 		{name: "explicit direct", body: `{"question":"q","source_mode":"direct"}`, wantMode: "direct", wantPlan: true},
 		{name: "invalid", body: `{"question":"q","source_mode":"database"}`, wantErr: true},
@@ -99,6 +100,9 @@ func TestParseQAAskRequestSourceMode(t *testing.T) {
 			}
 			if req.SourceMode != tt.wantMode || (req.EvidencePlan != nil) != tt.wantPlan {
 				t.Fatalf("request = %+v", req)
+			}
+			if tt.name == "write intent" && !req.WriteRequested {
+				t.Fatal("write_requested was not preserved")
 			}
 			if req.EvidencePlan != nil && req.EvidencePlan.Sources != tt.wantSources {
 				t.Fatalf("sources = %08b, want %08b", req.EvidencePlan.Sources, tt.wantSources)

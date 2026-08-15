@@ -82,7 +82,8 @@ type Request struct {
 	RunID            string
 	EvidencePlan     *domain.EvidencePlan
 	ToolPlan         ToolPlan
-	AllowWrite       bool
+	WriteAuthorized  bool
+	WriteRequested   bool
 	Agent            agentapi.DefinitionRef
 	ParentRunID      string
 	WorkflowRunID    string

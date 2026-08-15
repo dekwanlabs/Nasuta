@@ -79,7 +79,7 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		Purpose: "Synthesize delegated investigation handoffs without gathering new evidence.",
 		Prompt: agentapi.PromptSpec{
 			System:  prompts.Text(prompts.AgentCatalogSynthesizer),
-			Version: "investigation-synthesis-v3",
+			Version: "investigation-synthesis-v4",
 		},
 		InputSchema:  agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 1},
 		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 1},

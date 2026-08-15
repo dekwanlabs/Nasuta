@@ -27,12 +27,13 @@ import (
 )
 
 type qaAskRequest struct {
-	Question     string               `json:"question"`
-	History      []llm.Message        `json:"history"`
-	SessionID    string               `json:"session_id"`
-	SourceMode   string               `json:"source_mode"`
-	Trace        bool                 `json:"trace"`
-	EvidencePlan *domain.EvidencePlan `json:"-"`
+	Question       string               `json:"question"`
+	History        []llm.Message        `json:"history"`
+	SessionID      string               `json:"session_id"`
+	SourceMode     string               `json:"source_mode"`
+	Trace          bool                 `json:"trace"`
+	WriteRequested bool                 `json:"write_requested"`
+	EvidencePlan   *domain.EvidencePlan `json:"-"`
 }
 
 type qaRunControlReq struct {
@@ -98,7 +99,10 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conversation.SessionID = req.SessionID
-	handler.serveAgentSSE(r.Context(), req.Question, conversation, req.SessionID, req.Trace, req.EvidencePlan, stream.emit, r)
+	handler.serveAgentSSE(
+		r.Context(), req.Question, conversation, req.SessionID, req.Trace,
+		req.EvidencePlan, req.WriteRequested, stream.emit, r,
+	)
 }
 
 func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, sseEvent func(string, any) error,
@@ -264,7 +268,7 @@ func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string
 	}, nil
 }
 
-func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, allowEmit func(string, any) error, r *http.Request) {
+func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, writeRequested bool, allowEmit func(string, any) error, r *http.Request) {
 	runtime := handler.currentQARuntime()
 	if runtime.QA == nil {
 		_ = allowEmit("run.finished", agentrun.Terminal{Status: agentrun.StatusFailed, Error: "QA service not initialized"})
@@ -301,14 +305,19 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	}
 
 	user := auth.UserFromContext(r.Context())
-	allowWrite := runtime.WriteAvailable && user != nil && user.IsAdmin
+	writeAuthorized := runtime.WriteAvailable && user != nil && user.IsAdmin
 	type askResponse struct {
 		result *agent.AskResult
 		err    error
 	}
 	askDone := make(chan askResponse, 1)
 	go func() {
-		result, err := runtime.QA.AskWithContext(runCtx, question, conversation, userID, handler.rolePromptFor(userID), runID, evidencePlan, allowWrite)
+		result, err := runtime.QA.Ask(runCtx, agent.QARequest{
+			Question: question, Conversation: conversation, UserID: userID,
+			RolePrompt: handler.rolePromptFor(userID), RunID: runID,
+			EvidencePlan: evidencePlan, WriteAuthorized: writeAuthorized,
+			WriteRequested: writeRequested,
+		})
 		askDone <- askResponse{result: result, err: err}
 	}()
 

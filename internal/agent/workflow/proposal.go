@@ -37,9 +37,11 @@ type CompilationPolicy struct {
 	VerifierID               string
 	VerifierInputSchema      agentapi.SchemaRef
 	VerifierOutputSchema     agentapi.SchemaRef
-	RejectEvidenceConflicts  bool
-	RiskGateID               string
-	FailureMode              FailureMode
+	// VerifierPayloadTokens bounds the synthesized evidence view for one call.
+	VerifierPayloadTokens   int
+	RejectEvidenceConflicts bool
+	RiskGateID              string
+	FailureMode             FailureMode
 }
 
 // ProposalCompiler resolves planner choices through immutable server registries.

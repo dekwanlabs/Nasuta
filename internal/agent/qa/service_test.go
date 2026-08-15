@@ -1179,7 +1179,7 @@ func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *http
 }
 
 func multiAgentRouteBody() string {
-	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[\"call chain\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.95,\"confidence\":0.95,\"reasons\":[\"requires_multiple_subproblems\"]}}"}}]}`
+	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[\"call chain\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.95,\"confidence\":0.95,\"tasks\":[{\"id\":\"design\",\"objective\":\"Establish the intended behavior.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"implementation\",\"objective\":\"Verify the implementation behavior.\",\"independently_useful\":true,\"depends_on\":[]}],\"reasons\":[\"requires_multiple_subproblems\",\"supports_parallel_investigation\"]}}"}}]}`
 }
 
 func multiAgentTaskGraphBody() string {
@@ -1187,7 +1187,7 @@ func multiAgentTaskGraphBody() string {
 }
 
 func singleAgentRouteBody() string {
-	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.1,\"confidence\":0.99,\"reasons\":[\"single_focused_question\"]}}"}}]}`
+	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.1,\"confidence\":0.99,\"tasks\":[],\"reasons\":[\"single_focused_question\"]}}"}}]}`
 }
 
 func waitForTerminal(t *testing.T, ch chan SSEEvent) *RunTerminal {
@@ -1220,7 +1220,7 @@ func TestAskDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 		if !request.Stream {
 			routerCalls++
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.1,\"confidence\":0.99,\"reasons\":[\"single_focused_question\"]}}"}}]}`))
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.1,\"confidence\":0.99,\"tasks\":[],\"reasons\":[\"single_focused_question\"]}}"}}]}`))
 			return
 		}
 		agentCalls++
@@ -1297,7 +1297,7 @@ func TestAskSessionPersistenceFailureCompletesRunAsFailed(t *testing.T) {
 	events := runtime.Hub().Subscribe(runID)
 	_, err = qa.AskWithContext(
 		context.Background(), "你能做什么？",
-		ConversationContext{SessionID: "session-1"}, 42, "", runID, nil, false,
+		ConversationContext{SessionID: "session-1"}, 42, "", runID, nil,
 	)
 	if err != nil {
 		t.Fatalf("AskWithContext: %v", err)
@@ -1345,7 +1345,7 @@ func TestAskRetrievalFailureCompletesStartedRunAsFailed(t *testing.T) {
 	events := runtime.Hub().Subscribe(runID)
 	_, err = qa.AskWithContext(
 		context.Background(), "find the implementation", ConversationContext{},
-		42, "", runID, &plan, false,
+		42, "", runID, &plan,
 	)
 	if err == nil || !strings.Contains(err.Error(), "retrieve internal evidence") {
 		t.Fatalf("error = %v", err)
@@ -1468,7 +1468,7 @@ func TestAskPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
 
 	// Router selects observe_logs only; the router requires the query_terms
 	// object to accompany the route and tools objects.
-	routeBody := `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"tools\":{\"tool_ids\":[\"observe_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.4,\"confidence\":0.9,\"reasons\":[\"single_source_sufficient\"]}}"}}]}`
+	routeBody := `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"tools\":{\"tool_ids\":[\"observe_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.4,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]}}"}}]}`
 
 	t.Run("live pruning keeps base plus routed", func(t *testing.T) {
 		names, _ := run(true, routeBody)

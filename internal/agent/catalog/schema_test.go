@@ -25,23 +25,14 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 				"question":"Why is checkout failing?",
 				"objective":"Trace the checkout failure",
 				"entities":[{"id":"Checkout.Place"}],
+				"investigation_goals":[
+					{"id":"failure_path","objective":"Trace the failure path.","independently_useful":true,"depends_on":[]},
+					{"id":"runtime_impact","objective":"Assess the runtime impact.","independently_useful":true,"depends_on":[]}
+				],
 				"evidence_goals":[{"id":"core_flow","facet":"core_flow","required":true,"sources":["internal","web"],"freshness":"bounded_live","minimum_coverage":1}],
 				"context":{
 					"conversation_refs":[{"session_id":"session-1","run_id":"qa_0"},{"session_id":"session-1","turn":2}],
 					"time_range":{"from":"2026-08-11T00:00:00Z","to":"2026-08-12T00:00:00Z","to_exclusive":true,"raw":"yesterday"},
-					"seed_evidence":[{
-						"source_kind":"code",
-						"target":"Checkout.Place",
-						"sections":["implementation"],
-						"content_hash":"sha256:source",
-						"coverage":{"complete":true,"included":1},
-						"facets":["core_flow"],
-						"trust_tier":2,
-						"evidence_class":"source",
-						"token_cost":20,
-						"version":"abc123",
-						"time_range":""
-					}],
 					"seed_material":[{
 						"source":"qa.evidence",
 						"title":"QA Evidence",
@@ -54,6 +45,20 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 				}
 			}`,
 			valid: true,
+		},
+		{
+			name: "invalid investigation goal id",
+			payload: `{
+				"task_id":"qa_1",
+				"question":"Why is checkout failing?",
+				"objective":"Trace the checkout failure",
+				"entities":[],
+				"investigation_goals":[
+					{"id":"Invalid Goal","objective":"Trace the failure path.","independently_useful":true,"depends_on":[]}
+				],
+				"evidence_goals":[],
+				"context":{}
+			}`,
 		},
 		{
 			name: "minimal canonical contract",
@@ -352,6 +357,13 @@ func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
 					"version":"commit-123"
 				}],
 				"evidence_conflicts":[],
+				"omissions":{
+					"claims":0,
+					"goals":0,
+					"limitations":0,
+					"evidence_units":0,
+					"evidence_conflicts":0
+				},
 				"verification":{
 					"decision":"complete",
 					"stop_reason":"required_goals_covered"

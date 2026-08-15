@@ -177,14 +177,14 @@ const helperTimeout = 12 * time.Second
 
 // AskWithHistory starts a run with verbatim recent history and no explicit evidence plan.
 func (svc *Service) AskWithHistory(ctx context.Context, question string, history []llm.Message, userID int64, rolePrompt, runID string) (*AskResult, error) {
-	return svc.AskWithContext(ctx, question, ConversationContext{Recent: history}, userID, rolePrompt, runID, nil, false)
+	return svc.AskWithContext(ctx, question, ConversationContext{Recent: history}, userID, rolePrompt, runID, nil)
 }
 
 // AskWithContext preserves bounded session state and recalled history.
-func (svc *Service) AskWithContext(ctx context.Context, question string, conversation ConversationContext, userID int64, rolePrompt, runID string, explicitPlan *domain.EvidencePlan, allowWrite bool) (*AskResult, error) {
+func (svc *Service) AskWithContext(ctx context.Context, question string, conversation ConversationContext, userID int64, rolePrompt, runID string, explicitPlan *domain.EvidencePlan) (*AskResult, error) {
 	return svc.Ask(ctx, Request{
 		Question: question, Conversation: conversation, UserID: userID,
-		RolePrompt: rolePrompt, RunID: runID, EvidencePlan: explicitPlan, AllowWrite: allowWrite,
+		RolePrompt: rolePrompt, RunID: runID, EvidencePlan: explicitPlan,
 	})
 }
 

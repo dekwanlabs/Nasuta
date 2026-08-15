@@ -57,6 +57,26 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"additionalProperties":false
 						}
 					},
+					"investigation_goals":{
+						"type":"array",
+						"maxItems":4,
+						"items":{
+							"type":"object",
+							"required":["id","objective","independently_useful","depends_on"],
+							"properties":{
+								"id":{"type":"string","pattern":"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"},
+								"objective":{"type":"string","minLength":1,"maxLength":500},
+								"independently_useful":{"type":"boolean"},
+								"depends_on":{
+									"type":"array",
+									"maxItems":3,
+									"uniqueItems":true,
+									"items":{"type":"string","pattern":"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"}
+								}
+							},
+							"additionalProperties":false
+						}
+					},
 					"evidence_goals":{
 						"type":"array",
 						"maxItems":50,
@@ -93,11 +113,6 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 								"items":{"$ref":"#/$defs/conversation_ref"}
 							},
 							"time_range":{"$ref":"#/$defs/time_range"},
-							"seed_evidence":{
-								"type":"array",
-								"maxItems":200,
-								"items":{"$ref":"#/$defs/evidence"}
-							},
 							"seed_material":{
 								"type":"array",
 								"maxItems":20,
@@ -495,6 +510,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					"limitations",
 					"evidence_units",
 					"evidence_conflicts",
+					"omissions",
 					"verification",
 					"completeness"
 				],
@@ -541,6 +557,24 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"type":"array",
 						"maxItems":100,
 						"items":{"$ref":"#/$defs/evidence_conflict"}
+					},
+					"omissions":{
+						"type":"object",
+						"required":[
+							"claims",
+							"goals",
+							"limitations",
+							"evidence_units",
+							"evidence_conflicts"
+						],
+						"properties":{
+							"claims":{"type":"integer","minimum":0},
+							"goals":{"type":"integer","minimum":0},
+							"limitations":{"type":"integer","minimum":0},
+							"evidence_units":{"type":"integer","minimum":0},
+							"evidence_conflicts":{"type":"integer","minimum":0}
+						},
+						"additionalProperties":false
 					},
 					"verification":{
 						"type":"object",

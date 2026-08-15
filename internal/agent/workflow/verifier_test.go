@@ -7,10 +7,104 @@ import (
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
 )
+
+func TestTrimVerifiedEvidencePrioritizesClaimsAndTracksOmissions(t *testing.T) {
+	claim := func(name, goal, target string, highRisk bool) verifiedClaimView {
+		return verifiedClaimView{
+			Claim: name, GoalIDs: []string{goal}, Support: claimSupported,
+			HighRisk: highRisk,
+			EvidenceIdentities: []agentapi.EvidenceIdentity{{
+				SourceKind: "source", Target: target,
+			}},
+		}
+	}
+	view := verifiedEvidenceView{
+		SupportedClaims: []verifiedClaimView{
+			claim("regular", "optional", "regular", false),
+			claim("required", "required", "required", false),
+			claim("high risk", "risk", "risk", true),
+		},
+		PartialClaims: []verifiedClaimView{
+			claim("partial", "partial", "partial", false),
+		},
+		UnsupportedClaims: []unsupportedClaimView{{
+			GoalIDs: []string{"unsupported"}, Support: claimUnsupported,
+		}},
+		PartialGoals:    []string{"partial"},
+		UnresolvedGoals: []string{"missing"},
+		Limitations:     []string{"runtime evidence unavailable"},
+		EvidenceUnits: []tool.EvidenceUnit{
+			verifiedEvidenceUnit("regular"),
+			verifiedEvidenceUnit("required"),
+			verifiedEvidenceUnit("risk"),
+			verifiedEvidenceUnit("partial"),
+		},
+		EvidenceConflicts: []agentapi.EvidenceConflict{{
+			Identity: agentapi.EvidenceIdentity{
+				SourceKind: "source", Target: "conflict",
+			},
+		}},
+		Verification: verificationView{
+			Decision: Partial, StopReason: StopCapabilityUnavailable,
+		},
+		Completeness: Partial,
+	}
+	original := view
+	required := map[string]struct{}{"required": {}}
+	slots := verifiedSlots(view, required)
+	budget := verifiedViewTokens(viewAtVerifiedSlot(view, slots, 1))
+
+	got, err := trimVerifiedEvidence(view, budget, required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens := verifiedViewTokens(got); tokens > budget {
+		t.Fatalf("verified payload tokens = %d, budget = %d", tokens, budget)
+	}
+	if len(got.SupportedClaims) != 1 || got.SupportedClaims[0].Claim != "required" {
+		t.Fatalf("retained claims = %+v", got.SupportedClaims)
+	}
+	if len(got.EvidenceUnits) != 1 || got.EvidenceUnits[0].Target != "required" {
+		t.Fatalf("retained evidence = %+v", got.EvidenceUnits)
+	}
+	wantOmissions := omissionView{
+		Claims: 4, Goals: 2, Limitations: 1,
+		EvidenceUnits: 3, EvidenceConflicts: 1,
+	}
+	if got.Omissions != wantOmissions {
+		t.Fatalf("omissions = %+v, want %+v", got.Omissions, wantOmissions)
+	}
+	if !reflect.DeepEqual(view, original) {
+		t.Fatal("full verified evidence ledger was modified")
+	}
+
+	full, err := trimVerifiedEvidence(
+		view,
+		tooloutput.EstimateTokens(mustMarshalJSON(t, view)),
+		required,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.EvidenceUnits) != len(view.EvidenceUnits) ||
+		full.Omissions != (omissionView{}) {
+		t.Fatalf("unbounded verified view = %+v", full)
+	}
+}
+
+func mustMarshalJSON(t *testing.T, value any) string {
+	t.Helper()
+	payload, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
+}
 
 func TestVerifyInvestigationEvidenceClassifiesRequiredGoalCoverage(t *testing.T) {
 	schemas, _ := investigationCatalogs(t, 21)

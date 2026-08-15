@@ -56,7 +56,7 @@ func TestBindPlanDecisionAllowsDirect(t *testing.T) {
 func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"web\"],\"confidence\":0.96},\"query_terms\":{\"domain_terms\":[\"设备删除\"],\"identifiers\":[\"question\"]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.82,\"confidence\":0.91,\"reasons\":[\"requires_cross_source_analysis\",\"requires_independent_evidence_validation\"]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"web\"],\"confidence\":0.96},\"query_terms\":{\"domain_terms\":[\"设备删除\"],\"identifiers\":[\"question\"]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.82,\"confidence\":0.91,\"tasks\":[{\"id\":\"design\",\"objective\":\"Establish the intended behavior.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"implementation\",\"objective\":\"Verify the implementation behavior.\",\"independently_useful\":true,\"depends_on\":[]}],\"reasons\":[\"requires_multiple_subproblems\",\"supports_parallel_investigation\"]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -71,7 +71,8 @@ func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	if len(result.Terms.DomainTerms) != 1 || result.Terms.DomainTerms[0] != "设备删除" || len(result.Terms.Identifiers) != 1 {
 		t.Fatalf("terms = %+v", result.Terms)
 	}
-	if result.Execution.Strategy != ExecutionMultiAgent || result.Execution.Complexity != 0.82 || len(result.Execution.Reasons) != 2 {
+	if result.Execution.Strategy != ExecutionMultiAgent || result.Execution.Complexity != 0.82 ||
+		len(result.Execution.Tasks) != 2 || len(result.Execution.Reasons) != 2 {
 		t.Fatalf("execution = %+v", result.Execution)
 	}
 }
@@ -85,7 +86,7 @@ func TestAnalyzeEvidenceDerivesHistoryRelationInSameCall(t *testing.T) {
 			t.Fatalf("request missing bounded history metadata: %s", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.2,\"confidence\":0.9,\"reasons\":[\"single_focused_question\"]},\"history_relation\":{\"topic_affinity\":0.7,\"confidence\":0.8,\"needs_prior_entities\":true,\"needs_prior_conclusion\":false,\"needs_prior_evidence\":false,\"explicit_turn_refs\":[]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.2,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_focused_question\"]},\"history_relation\":{\"topic_affinity\":0.7,\"confidence\":0.8,\"needs_prior_entities\":true,\"needs_prior_conclusion\":false,\"needs_prior_evidence\":false,\"explicit_turn_refs\":[]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -158,7 +159,7 @@ func TestAnalyzeForPlanSkipsRouterWhenNoHelpersConfigured(t *testing.T) {
 func TestAnalyzeEvidenceSelectsRegisteredToolIntent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[\"runtime failure\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"reasons\":[\"single_source_sufficient\"]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[\"runtime failure\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -178,7 +179,7 @@ func TestAnalyzeEvidenceSelectsRegisteredToolIntent(t *testing.T) {
 func TestAnalyzeEvidenceExtractsGroundedMultilingualTime(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"reasons\":[\"single_source_sufficient\"]},\"time\":{\"kind\":\"last\",\"n\":0,\"unit\":\"day\",\"raw\":\"últimos días\"}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]},\"time\":{\"kind\":\"last\",\"n\":0,\"unit\":\"day\",\"raw\":\"últimos días\"}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -358,13 +359,35 @@ func TestRoutingExamplesValidateAgainstSchema(t *testing.T) {
 }
 
 func TestBindExecutionSuggestionRejectsUnknownAndUnboundedValues(t *testing.T) {
+	validTasks := []any{
+		map[string]any{
+			"id": "design", "objective": "Establish the intended behavior.",
+			"independently_useful": true, "depends_on": []any{},
+		},
+		map[string]any{
+			"id": "implementation", "objective": "Verify the implementation behavior.",
+			"independently_useful": true, "depends_on": []any{},
+		},
+	}
 	tests := []map[string]any{
-		{"strategy": "dynamic_team", "complexity": 0.8, "confidence": 0.9, "reasons": []any{}},
-		{"strategy": "multi_agent", "complexity": 1.1, "confidence": 0.9, "reasons": []any{}},
-		{"strategy": "multi_agent", "complexity": 0.8, "confidence": 0.9, "reasons": []any{"specific_keyword_rule"}},
+		{
+			"strategy": "dynamic_team", "complexity": 0.8, "confidence": 0.9,
+			"tasks": []any{}, "reasons": []any{"single_focused_question"},
+		},
+		{
+			"strategy": "multi_agent", "complexity": 1.1, "confidence": 0.9,
+			"tasks": validTasks, "reasons": []any{"requires_multiple_subproblems"},
+		},
+		{
+			"strategy": "multi_agent", "complexity": 0.8, "confidence": 0.9,
+			"tasks": validTasks, "reasons": []any{"specific_keyword_rule"},
+		},
 		// The blank signature (all template defaults) means the model echoed the
 		// example verbatim instead of judging the request.
-		{"strategy": "single_agent", "complexity": 0.0, "confidence": 0.0, "reasons": []any{}},
+		{
+			"strategy": "single_agent", "complexity": 0.0, "confidence": 0.0,
+			"tasks": []any{}, "reasons": []any{},
+		},
 	}
 	for _, raw := range tests {
 		if _, err := bindExecutionSuggestion(raw); err == nil {
@@ -373,9 +396,43 @@ func TestBindExecutionSuggestionRejectsUnknownAndUnboundedValues(t *testing.T) {
 	}
 }
 
+func TestBindExecutionSuggestionCountsObjectiveLengthInCharacters(t *testing.T) {
+	tasks := []any{
+		map[string]any{
+			"id": "design", "objective": strings.Repeat("界", 500),
+			"independently_useful": true, "depends_on": []any{},
+		},
+		map[string]any{
+			"id": "implementation", "objective": "Verify the implementation behavior.",
+			"independently_useful": true, "depends_on": []any{},
+		},
+	}
+	raw := map[string]any{
+		"strategy": "multi_agent", "complexity": 0.8, "confidence": 0.9,
+		"tasks": tasks, "reasons": []any{"requires_multiple_subproblems"},
+	}
+	if _, err := bindExecutionSuggestion(raw); err != nil {
+		t.Fatalf("500-character objective rejected: %v", err)
+	}
+	tasks[0].(map[string]any)["objective"] = strings.Repeat("界", 501)
+	if _, err := bindExecutionSuggestion(raw); err == nil {
+		t.Fatal("501-character objective accepted")
+	}
+}
+
 func TestBindExecutionSuggestionDeduplicatesStableReasons(t *testing.T) {
 	suggestion, err := bindExecutionSuggestion(map[string]any{
 		"strategy": "multi_agent", "complexity": 0.8, "confidence": 0.9,
+		"tasks": []any{
+			map[string]any{
+				"id": "design", "objective": "Establish the intended behavior.",
+				"independently_useful": true, "depends_on": []any{},
+			},
+			map[string]any{
+				"id": "implementation", "objective": "Verify the implementation behavior.",
+				"independently_useful": true, "depends_on": []any{},
+			},
+		},
 		"reasons": []any{"requires_multiple_subproblems", "requires_multiple_subproblems"},
 	})
 	if err != nil {
@@ -383,6 +440,68 @@ func TestBindExecutionSuggestionDeduplicatesStableReasons(t *testing.T) {
 	}
 	if len(suggestion.Reasons) != 1 || suggestion.Reasons[0] != "requires_multiple_subproblems" {
 		t.Fatalf("suggestion = %+v", suggestion)
+	}
+}
+
+func TestBindExecutionSuggestionRejectsNonIndependentMultiAgentTasks(t *testing.T) {
+	validTasks := []any{
+		map[string]any{
+			"id": "design", "objective": "Establish the intended behavior.",
+			"independently_useful": true, "depends_on": []any{},
+		},
+		map[string]any{
+			"id": "implementation", "objective": "Verify the implementation behavior.",
+			"independently_useful": true, "depends_on": []any{},
+		},
+	}
+	tests := []struct {
+		name     string
+		strategy string
+		tasks    []any
+	}{
+		{name: "single agent has tasks", strategy: "single_agent", tasks: validTasks},
+		{name: "multi agent has one task", strategy: "multi_agent", tasks: validTasks[:1]},
+		{
+			name: "task is not independently useful", strategy: "multi_agent",
+			tasks: []any{
+				validTasks[0],
+				map[string]any{
+					"id": "implementation", "objective": "Verify the implementation behavior.",
+					"independently_useful": false, "depends_on": []any{},
+				},
+			},
+		},
+		{
+			name: "tasks are sequential", strategy: "multi_agent",
+			tasks: []any{
+				validTasks[0],
+				map[string]any{
+					"id": "implementation", "objective": "Verify the implementation behavior.",
+					"independently_useful": true, "depends_on": []any{"design"},
+				},
+			},
+		},
+		{
+			name: "duplicate objectives", strategy: "multi_agent",
+			tasks: []any{
+				validTasks[0],
+				map[string]any{
+					"id": "implementation", "objective": "Establish the intended behavior.",
+					"independently_useful": true, "depends_on": []any{},
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := bindExecutionSuggestion(map[string]any{
+				"strategy": test.strategy, "complexity": 0.8, "confidence": 0.9,
+				"tasks": test.tasks, "reasons": []any{"requires_multiple_subproblems"},
+			})
+			if err == nil {
+				t.Fatalf("invalid execution tasks accepted: %#v", test.tasks)
+			}
+		})
 	}
 }
 

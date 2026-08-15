@@ -311,7 +311,9 @@ func TestInvestigationFlowBindsObserveAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer, observeCapability := observeCatalog(t, settings, version)
+	observerSettings := *settings
+	observerSettings.LLMContextWindow = 12000
+	observer, observeCapability := observeCatalog(t, &observerSettings, version)
 	definitions = append(definitions, observer)
 	schemas := agentapi.NewSchemaRegistry()
 	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
@@ -335,7 +337,7 @@ func TestInvestigationFlowBindsObserveAgent(t *testing.T) {
 			schemas: schemas, catalog: agents, capabilities: capabilities,
 		},
 	}
-	definition, err := platform.investigationFlow(
+	definition, payloadBudget, err := platform.investigationFlowWithBudget(
 		t.Context(),
 		version,
 		[]platformagent.EvidenceGoal{{
@@ -348,6 +350,13 @@ func TestInvestigationFlowBindsObserveAgent(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	observerBudget, err := agentPayloadBudget(observer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payloadBudget != observerBudget {
+		t.Fatalf("investigator payload budget = %d, want %d", payloadBudget, observerBudget)
 	}
 	if len(definition.Nodes) != 5 {
 		t.Fatalf("runtime observation workflow = %+v", definition)

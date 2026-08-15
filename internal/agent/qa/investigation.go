@@ -25,21 +25,31 @@ type InvestigationRequest struct {
 	WorkflowRunID string
 	Contract      TaskContract
 	Proposal      *agentapi.TaskGraphProposal
+	SeedEvidence  []tool.EvidenceUnit
 	Actor         agentapi.Actor
 }
 
 // TaskContract is the canonical input shared by every delegated investigator.
 type TaskContract struct {
-	TaskID        string         `json:"task_id"`
-	Question      string         `json:"question"`
-	Objective     string         `json:"objective"`
-	Entities      []EntityRef    `json:"entities"`
-	EvidenceGoals []EvidenceGoal `json:"evidence_goals"`
-	Context       TaskContext    `json:"context"`
+	TaskID             string              `json:"task_id"`
+	Question           string              `json:"question"`
+	Objective          string              `json:"objective"`
+	Entities           []EntityRef         `json:"entities"`
+	InvestigationGoals []InvestigationGoal `json:"investigation_goals,omitempty"`
+	EvidenceGoals      []EvidenceGoal      `json:"evidence_goals"`
+	Context            TaskContext         `json:"context"`
 }
 
 type EntityRef struct {
 	ID string `json:"id"`
+}
+
+// InvestigationGoal is one distinct deliverable admitted by execution routing.
+type InvestigationGoal struct {
+	ID                  string   `json:"id"`
+	Objective           string   `json:"objective"`
+	IndependentlyUseful bool     `json:"independently_useful"`
+	DependsOn           []string `json:"depends_on"`
 }
 
 type EvidenceGoal struct {
@@ -55,7 +65,6 @@ type EvidenceGoal struct {
 type TaskContext struct {
 	ConversationRefs []ConversationRef       `json:"conversation_refs,omitempty"`
 	TimeRange        *TaskTimeRange          `json:"time_range,omitempty"`
-	SeedEvidence     []tool.EvidenceUnit     `json:"seed_evidence,omitempty"`
 	SeedMaterial     []agentapi.ContextBlock `json:"seed_material,omitempty"`
 }
 
@@ -147,9 +156,20 @@ func contractFromPreparation(
 			HighRisk: freshness == agentapi.FreshnessBoundedLive,
 		})
 	}
+	investigationGoals := make(
+		[]InvestigationGoal,
+		0,
+		len(prepared.planning.Execution.Tasks),
+	)
+	for _, task := range prepared.planning.Execution.Tasks {
+		investigationGoals = append(investigationGoals, InvestigationGoal{
+			ID: task.ID, Objective: task.Objective,
+			IndependentlyUseful: task.IndependentlyUseful,
+			DependsOn:           append([]string(nil), task.DependsOn...),
+		})
+	}
 	taskContext := TaskContext{
 		ConversationRefs: append([]ConversationRef(nil), prepared.conversationRefs...),
-		SeedEvidence:     contextBlockEvidence(seedMaterial),
 		SeedMaterial:     cloneContextBlocks(seedMaterial),
 	}
 	if prepared.analysis.HasTimeRange {
@@ -162,7 +182,9 @@ func contractFromPreparation(
 	return TaskContract{
 		TaskID: prepared.request.RunID, Question: prepared.request.Question,
 		Objective: prepared.planning.CleanQuestion, Entities: entities,
-		EvidenceGoals: goals, Context: taskContext,
+		InvestigationGoals: investigationGoals,
+		EvidenceGoals:      goals,
+		Context:            taskContext,
 	}
 }
 

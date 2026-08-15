@@ -20,6 +20,7 @@ Return JSON only with this exact shape:
 Rules:
 - Emit exactly one task for every allowed capability and no other tasks.
 - Copy each capability's required_facets exactly.
+- Each purpose must support one or more admitted investigation_goals without inventing a new deliverable.
 - Task ids must be unique canonical lowercase ids.
 - Purpose must be specific to the question and no longer than 500 characters.
 - This is one parallel investigation round, so depends_on must be empty.
@@ -36,6 +37,7 @@ type taskGraphPlannerRequest struct {
 	Question            string                `json:"question"`
 	Objective           string                `json:"objective"`
 	Entities            []EntityRef           `json:"entities,omitempty"`
+	InvestigationGoals  []InvestigationGoal   `json:"investigation_goals"`
 	EvidenceGoals       []EvidenceGoal        `json:"evidence_goals"`
 	AllowedCapabilities []taskGraphCapability `json:"allowed_capabilities"`
 }
@@ -70,6 +72,7 @@ var taskGraphPlanningSpec = runtrace.Spec[taskGraphPlanningInput, taskGraphPlann
 			capabilities = append(capabilities, capability.ID)
 		}
 		return map[string]any{
+			"investigation_goals":  len(input.Contract.InvestigationGoals),
 			"evidence_goals":       len(input.Contract.EvidenceGoals),
 			"allowed_capabilities": capabilities,
 		}
@@ -129,6 +132,10 @@ func (svc *Service) planTaskGraph(
 			request, err := json.Marshal(taskGraphPlannerRequest{
 				Question: contract.Question, Objective: contract.Objective,
 				Entities: append([]EntityRef(nil), contract.Entities...),
+				InvestigationGoals: append(
+					[]InvestigationGoal(nil),
+					contract.InvestigationGoals...,
+				),
 				EvidenceGoals: append(
 					[]EvidenceGoal(nil),
 					contract.EvidenceGoals...,
