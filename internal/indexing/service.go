@@ -89,6 +89,7 @@ func (svc *Service) SetTools(tools ToolsSink) {
 	}
 }
 
+// SetOntologyPublisher connects completed structural rebuilds to the shared ontology snapshot.
 func (svc *Service) SetOntologyPublisher(publisher ontology.Publisher) {
 	svc.publisher = publisher
 }
@@ -105,6 +106,7 @@ func (svc *Service) SetPlatform(settings *config.PlatformSettings) {
 	}
 }
 
+// Close releases configured backends without assuming every optional capability exists.
 func (svc *Service) Close() {
 	if svc.Semantic != nil {
 		if err := svc.Semantic.Close(); err != nil {

@@ -52,6 +52,7 @@ type TaskSpec struct {
 	Budget         TaskBudget    `json:"budget"`
 }
 
+// TaskEdge declares that To may consume output from From.
 type TaskEdge struct {
 	From     string `json:"from"`
 	To       string `json:"to"`

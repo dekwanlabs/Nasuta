@@ -18,6 +18,7 @@ const (
 	nodeRestartedRetryableErrorCode = "workflow_restarted_retryable"
 )
 
+// ExecuteRequest describes a synchronous Workflow execution.
 type ExecuteRequest struct {
 	RunID               string
 	ParentRunID         string
@@ -32,6 +33,7 @@ type ExecuteRequest struct {
 	ScenarioPermissions agentapi.PermissionPolicy
 }
 
+// StartRequest describes a durable Workflow execution that may outlive its caller.
 type StartRequest struct {
 	RunID               string
 	ParentRunID         string
@@ -147,6 +149,7 @@ type Service struct {
 	closed   bool
 }
 
+// NewService binds catalog resolution and durable transitions around an Orchestrator.
 func NewService(
 	catalog *Catalog,
 	store persistence,

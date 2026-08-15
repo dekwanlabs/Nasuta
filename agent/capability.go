@@ -68,6 +68,7 @@ type CapabilityRegistry struct {
 	agents  DefinitionResolver
 }
 
+// NewCapabilityRegistry creates an empty registry bound to schema and Agent catalogs.
 func NewCapabilityRegistry(
 	schemas *SchemaRegistry,
 	agents DefinitionResolver,
@@ -158,6 +159,7 @@ func (registry *CapabilityRegistry) Resolve(ref CapabilityRef) (Capability, erro
 	return cloneCapability(capability), nil
 }
 
+// Revision changes only after an atomic capability publication.
 func (registry *CapabilityRegistry) Revision() uint64 {
 	if registry == nil || registry.state.Load() == nil {
 		return 0

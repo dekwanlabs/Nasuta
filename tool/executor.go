@@ -15,6 +15,7 @@ func NewExecutor(timeout time.Duration) *Executor {
 	return &Executor{DefaultTimeout: timeout}
 }
 
+// Execute resolves from the caller's snapshot so one Run cannot observe registry changes mid-flight.
 func (executor *Executor) Execute(ctx context.Context, snapshot Snapshot, id ToolID, args Arguments) (Result, error) {
 	finish := beginExecution(ctx, id, args)
 	var result Result

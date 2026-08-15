@@ -20,6 +20,7 @@ var (
 	ErrEvidenceConflict      = errors.New("workflow evidence conflict")
 )
 
+// RunRequest carries the immutable identity and authorization context for one Workflow Run.
 type RunRequest struct {
 	RunID               string
 	ParentRunID         string
@@ -33,6 +34,7 @@ type RunRequest struct {
 	StartedAt           time.Time
 }
 
+// NodeRequest contains one attempt's resolved inputs and effective permissions.
 type NodeRequest struct {
 	WorkflowRunID           string
 	Round                   int
@@ -47,6 +49,7 @@ type NodeRequest struct {
 	EffectivePermissions    agentapi.PermissionPolicy
 }
 
+// NodeExecutor executes one node without owning Workflow scheduling or persistence.
 type NodeExecutor interface {
 	Execute(context.Context, NodeRequest) (NodeResult, error)
 }
@@ -57,6 +60,7 @@ type NodeDispatcher struct {
 	transform NodeExecutor
 }
 
+// NewNodeDispatcher keeps Agent and deterministic transform execution separate.
 func NewNodeDispatcher(agent, transform NodeExecutor) *NodeDispatcher {
 	if agent == nil && transform == nil {
 		return nil
@@ -96,16 +100,19 @@ type NodeResult struct {
 	Usage      Usage
 }
 
+// RunObserver persists or projects node transitions without controlling scheduling.
 type RunObserver interface {
 	NodeStarted(context.Context, NodeRequest) error
 	NodeSucceeded(context.Context, NodeRequest, NodeResult, *GateDecision) error
 	NodeFailed(context.Context, NodeRequest, NodeResult, error) error
 }
 
+// GateEvaluator decides a named gate from the same immutable node request.
 type GateEvaluator interface {
 	Evaluate(context.Context, NodeRequest) (GateDecision, error)
 }
 
+// Result contains the converged Workflow output and aggregate resource usage.
 type Result struct {
 	RunID       string
 	Output      Handoff
@@ -115,6 +122,7 @@ type Result struct {
 	StopReason  StopReason
 }
 
+// Progress is the resumable execution projection rebuilt from durable facts.
 type Progress struct {
 	StartedAt             time.Time
 	Input                 Handoff
@@ -143,6 +151,7 @@ type Orchestrator struct {
 	capabilityLimiters map[capabilityLimitKey]*capabilityLimiter
 }
 
+// NewOrchestrator builds a scheduler over immutable schemas and explicit node executors.
 func NewOrchestrator(
 	schemas *agentapi.SchemaRegistry,
 	nodes NodeExecutor,
@@ -164,6 +173,7 @@ func (orchestrator *Orchestrator) Run(ctx context.Context, definition Definition
 	return orchestrator.RunObserved(ctx, definition, request, nil)
 }
 
+// RunObserved executes stable DAG waves and reports transitions at their commit boundary.
 func (orchestrator *Orchestrator) RunObserved(
 	ctx context.Context,
 	definition Definition,

@@ -8,11 +8,13 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
+// Actor identifies the principal whose permissions and ownership apply to a Run.
 type Actor struct {
 	UserID   int64  `json:"user_id"`
 	TenantID string `json:"tenant_id,omitempty"`
 }
 
+// Correlation links an Agent Run to its session, parent, and Workflow node.
 type Correlation struct {
 	SessionID     string `json:"session_id,omitempty"`
 	ParentRunID   string `json:"parent_run_id,omitempty"`
@@ -20,6 +22,7 @@ type Correlation struct {
 	NodeID        string `json:"node_id,omitempty"`
 }
 
+// ContextBlock carries admitted context together with its evidence provenance.
 type ContextBlock struct {
 	Source            string              `json:"source"`
 	Title             string              `json:"title"`
@@ -85,6 +88,7 @@ type DefinitionSelection struct {
 	Reason                string `json:"reason,omitempty"`
 }
 
+// RunRequest contains the fully prepared, execution-ready input for one Agent Run.
 type RunRequest struct {
 	RunID          string              `json:"run_id"`
 	Agent          DefinitionRef       `json:"agent"`
@@ -137,6 +141,7 @@ type RunSnapshot struct {
 	CreatedAt           time.Time           `json:"created_at"`
 }
 
+// RunStatus is terminal because in-progress lifecycle state is owned by the runtime.
 type RunStatus string
 
 const (
@@ -187,6 +192,7 @@ type EvidenceConflict struct {
 	IncomingOrigin string            `json:"incoming_origin,omitempty"`
 }
 
+// RunResult is the durable public outcome of one Agent Run.
 type RunResult struct {
 	RunID             string              `json:"run_id"`
 	Status            RunStatus           `json:"status"`

@@ -146,6 +146,7 @@ var verificationTraceSpec = runtrace.Spec[
 	},
 }
 
+// verifyEvidence converts joined findings into a bounded, schema-valid verification handoff.
 func (orchestrator *Orchestrator) verifyEvidence(
 	ctx context.Context,
 	workflowRunID string,
@@ -174,6 +175,7 @@ func (orchestrator *Orchestrator) verifyEvidence(
 	return output.handoff, err
 }
 
+// verifyBundle accepts claims only when their evidence identities survive canonical binding.
 func verifyBundle(
 	input verificationRunInput,
 ) (verificationRunOutput, error) {

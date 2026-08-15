@@ -45,6 +45,7 @@ type SchemaRegistry struct {
 	state   atomic.Pointer[schemaState]
 }
 
+// NewSchemaRegistry creates an empty registry whose readers observe immutable snapshots.
 func NewSchemaRegistry() *SchemaRegistry {
 	registry := &SchemaRegistry{}
 	registry.state.Store(&schemaState{schemas: make(map[schemaKey]compiledSchema)})
@@ -159,6 +160,7 @@ func (registry *SchemaRegistry) ValidateCompatibility(producer, consumer SchemaR
 	)
 }
 
+// Revision changes only after an atomic schema publication.
 func (registry *SchemaRegistry) Revision() uint64 {
 	if registry == nil || registry.state.Load() == nil {
 		return 0

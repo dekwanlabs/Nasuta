@@ -24,6 +24,7 @@ type DynamicHandler struct {
 	handler  http.Handler
 }
 
+// NewDynamicHandler serves the latest valid Registry revision and retains the last good surface.
 func NewDynamicHandler(registry *tool.Registry) *DynamicHandler {
 	if registry == nil {
 		panic("mcp: registry is required")
@@ -38,6 +39,7 @@ func NewDynamicHandler(registry *tool.Registry) *DynamicHandler {
 	return handler
 }
 
+// ServeHTTP refreshes lazily so tool publication never interrupts active requests.
 func (handler *DynamicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	handler.refresh()
 	handler.mu.RLock()

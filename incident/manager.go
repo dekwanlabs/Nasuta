@@ -62,6 +62,7 @@ type Incident struct {
 	FixedAt      *time.Time     `json:"fixed_at,omitempty"`
 }
 
+// Manager coordinates durable incident analysis while leaving the shared database lifecycle to the application.
 type Manager struct {
 	db            *sql.DB
 	cfg           Config
@@ -94,6 +95,7 @@ func (manager *Manager) Close() error {
 	return nil
 }
 
+// CreateFromAlert reuses an active incident with the same canonical alert identity.
 func (manager *Manager) CreateFromAlert(ctx context.Context, source string, alert AlertPayload) (*Incident, error) {
 	now := time.Now()
 	if alert.Title == "" {

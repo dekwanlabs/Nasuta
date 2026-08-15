@@ -104,6 +104,7 @@ var taskGraphPlanningSpec = runtrace.Spec[taskGraphPlanningInput, taskGraphPlann
 	},
 }
 
+// planTaskGraph constrains model planning to server-selected capabilities and validates the result.
 func (svc *Service) planTaskGraph(
 	ctx context.Context,
 	contract TaskContract,

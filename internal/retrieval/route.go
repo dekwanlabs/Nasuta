@@ -96,6 +96,7 @@ var (
 	routingContract         = prompts.Text(prompts.RetrievalRouting)
 )
 
+// AnalyzeEvidence produces one validated decision across evidence, tools, history, and execution strategy.
 func AnalyzeEvidence(
 	ctx context.Context,
 	client *llm.LLMClient,
