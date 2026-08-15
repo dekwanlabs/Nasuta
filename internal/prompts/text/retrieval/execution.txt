@@ -1,12 +1,14 @@
-Suggest whether the current request benefits from one agent or a fixed read-only multi-agent investigation workflow.
+Identify the user-level investigation deliverables first, then suggest whether the current request benefits from one agent or a fixed read-only multi-agent investigation workflow.
 - strategy must be single_agent or multi_agent.
 - complexity measures structural complexity from 0 to 1.
 - confidence measures confidence in the execution suggestion from 0 to 1.
 - Recommend multi_agent only when at least two distinct investigation deliverables can start immediately, remain useful if the other tasks fail, and be merged deterministically.
 - A task is a user-visible investigation objective, not an evidence source, service, repository, tool, facet, retrieval branch, or result hit.
 - Multiple sources, services, repositories, tools, facets, or retrieval hits for one objective are still one task.
-- For single_agent, tasks must be [].
-- For multi_agent, tasks must contain 2 to 4 unique tasks. Every task must set independently_useful=true and depends_on=[].
+- Tasks are candidate investigation deliverables; the server owns the final strategy decision.
+- For a focused request, tasks may be [].
+- For a decomposable request, tasks must contain 2 to 4 candidate tasks even if strategy is single_agent.
+- Candidate tasks may be sequential. Only tasks with independently_useful=true and depends_on=[] can run in the parallel round.
 - Task ids must be unique canonical lowercase ids. Objectives must be distinct and no longer than 500 characters.
 - Consider distinct deliverables, uncertainty, risk, independent validation, and whether work can begin in parallel.
 - Do not recommend multi_agent merely because a request is technical, long, or asks for internal evidence.

@@ -171,7 +171,8 @@ type retrievalBudget struct {
 
 func budgetForIntent(intent domain.RetrievalIntent) retrievalBudget {
 	switch intent.Kind {
-	case domain.RetrievalRuntimeDiagnosis, domain.RetrievalInventory:
+	case domain.RetrievalRuntimeDiagnosis, domain.RetrievalInventory,
+		domain.RetrievalComparison:
 		return retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}
 	case domain.RetrievalFlow:
 		return retrievalBudget{code: 16, runbook: 8, service: 6, rerank: 24}

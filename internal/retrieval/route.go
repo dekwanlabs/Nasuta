@@ -336,24 +336,6 @@ func bindExecutionSuggestion(raw map[string]any) (ExecutionSuggestion, error) {
 		return ExecutionSuggestion{}, err
 	}
 	executionStrategy := ExecutionStrategy(strategy)
-	switch executionStrategy {
-	case ExecutionSingleAgent:
-		if len(tasks) != 0 {
-			return ExecutionSuggestion{}, fmt.Errorf("single_agent execution.tasks must be empty")
-		}
-	case ExecutionMultiAgent:
-		if len(tasks) < 2 || len(tasks) > 4 {
-			return ExecutionSuggestion{}, fmt.Errorf("multi_agent execution.tasks must contain 2 to 4 tasks")
-		}
-		for _, task := range tasks {
-			if !task.IndependentlyUseful {
-				return ExecutionSuggestion{}, fmt.Errorf("multi_agent task %q must be independently useful", task.ID)
-			}
-			if len(task.DependsOn) != 0 {
-				return ExecutionSuggestion{}, fmt.Errorf("multi_agent task %q must be independently runnable", task.ID)
-			}
-		}
-	}
 	items, ok := raw["reasons"].([]any)
 	if !ok {
 		return ExecutionSuggestion{}, fmt.Errorf("execution.reasons must be an array")

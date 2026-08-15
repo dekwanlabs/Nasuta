@@ -871,7 +871,7 @@ func TestSubmitInvestigationSurvivesCallerCancellation(t *testing.T) {
 
 func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 	const runID = "qa-multi-agent-run"
-	client, server := newQATestLLM(t, multiAgentRouteBody(), "")
+	client, server := newQATestLLM(t, serverPromotableRouteBody(), "")
 	defer server.Close()
 
 	registry := tool.NewRegistry()
@@ -950,8 +950,8 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 			t.Fatalf("investigation request = %+v", request)
 		}
 		if request.Proposal == nil || len(request.Proposal.Tasks) != 3 ||
-			request.Proposal.Tasks[0].ID != "inspect.flow" ||
-			request.Proposal.Tasks[1].ID != "trace.dependencies" ||
+			request.Proposal.Tasks[0].ID != "design" ||
+			request.Proposal.Tasks[1].ID != "implementation" ||
 			request.Proposal.Tasks[2].ID != "synthesize" {
 			t.Fatalf("task graph proposal = %+v", request.Proposal)
 		}
@@ -987,7 +987,7 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 
 func TestAskMultiAgentInvestigationFailureCompletesParentAsFailed(t *testing.T) {
 	const runID = "qa-multi-agent-failed-run"
-	client, server := newQATestLLM(t, multiAgentRouteBody(), "")
+	client, server := newQATestLLM(t, serverPromotableRouteBody(), "")
 	defer server.Close()
 
 	qa, _ := newQARuntimeFixture(t, client, server.URL, tool.NewRegistry(), nil, false)
@@ -1035,7 +1035,7 @@ func TestAskMultiAgentInvestigationFailureCompletesParentAsFailed(t *testing.T) 
 
 func TestAskExecutionEventsOrderDegradedRouteBeforeSingleAgent(t *testing.T) {
 	const runID = "qa-policy-downgrade-run"
-	client, server := newQATestLLM(t, multiAgentRouteBody(), "single-agent answer")
+	client, server := newQATestLLM(t, serverPromotableRouteBody(), "single-agent answer")
 	defer server.Close()
 
 	retriever := retrieval.New(emptyRetrievalTools{}, config.Config{})
@@ -1178,12 +1178,12 @@ func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *http
 	return llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client()), server
 }
 
-func multiAgentRouteBody() string {
-	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[\"call chain\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.95,\"confidence\":0.95,\"tasks\":[{\"id\":\"design\",\"objective\":\"Establish the intended behavior.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"implementation\",\"objective\":\"Verify the implementation behavior.\",\"independently_useful\":true,\"depends_on\":[]}],\"reasons\":[\"requires_multiple_subproblems\",\"supports_parallel_investigation\"]}}"}}]}`
+func serverPromotableRouteBody() string {
+	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[\"call chain\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.95,\"confidence\":0.95,\"tasks\":[{\"id\":\"design\",\"objective\":\"Establish the intended behavior.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"implementation\",\"objective\":\"Verify the implementation behavior.\",\"independently_useful\":true,\"depends_on\":[]}],\"reasons\":[\"requires_multiple_subproblems\",\"supports_parallel_investigation\"]}}"}}]}`
 }
 
 func multiAgentTaskGraphBody() string {
-	return `{"choices":[{"message":{"content":"{\"tasks\":[{\"id\":\"inspect.flow\",\"purpose\":\"Inspect the entrypoint, core flow, and state transitions.\",\"capability\":\"knowledge.code.inspect\",\"required_facets\":[\"entrypoint\",\"core_flow\",\"data_and_state\"],\"depends_on\":[]},{\"id\":\"trace.dependencies\",\"purpose\":\"Trace the external service dependencies.\",\"capability\":\"knowledge.service.trace\",\"required_facets\":[\"external_dependency\"],\"depends_on\":[]}]}"}}]}`
+	return `{"choices":[{"message":{"content":"{\"tasks\":[{\"id\":\"design\",\"purpose\":\"Establish the intended behavior.\",\"capability\":\"knowledge.code.inspect\",\"required_facets\":[\"entrypoint\",\"core_flow\",\"data_and_state\"],\"depends_on\":[]},{\"id\":\"implementation\",\"purpose\":\"Verify the implementation behavior.\",\"capability\":\"knowledge.service.trace\",\"required_facets\":[\"external_dependency\"],\"depends_on\":[]}]}"}}]}`
 }
 
 func singleAgentRouteBody() string {

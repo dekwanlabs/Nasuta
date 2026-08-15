@@ -20,6 +20,7 @@ import (
 const (
 	activeHistoryTopK      = 4
 	activeHistoryMaxTokens = 32_000
+	routeHistoryTextTokens = 512
 )
 
 var explicitHistoryRefPattern = regexp.MustCompile(`(?i)(?:\b(?:turn|run)[-_: #]?[a-z0-9-]+\b|第[[:space:]]*[0-9]+[[:space:]]*轮)`)
@@ -180,26 +181,85 @@ type historyEnvelope struct {
 	Turns []historicalTurn `json:"turns"`
 }
 
+type routeHistoryTurn struct {
+	TurnNumber     int      `json:"turn"`
+	RunID          string   `json:"run_id,omitempty"`
+	Question       string   `json:"question"`
+	TopicKey       string   `json:"topic_key,omitempty"`
+	Entities       []string `json:"entities,omitempty"`
+	EvidenceStatus string   `json:"evidence_status,omitempty"`
+}
+
+type routeDialogueTurn struct {
+	TurnNumber int    `json:"turn"`
+	User       string `json:"user"`
+	Assistant  string `json:"assistant,omitempty"`
+}
+
 func buildHistoryContext(conversation ConversationContext) string {
 	if len(conversation.RecentTurns) == 0 && len(conversation.RecentDialogue) == 0 {
 		return ""
 	}
 	payload := struct {
-		SessionTitle   string                      `json:"session_title,omitempty"`
-		PreviousTurn   *memory.TurnMetadata        `json:"previous_turn,omitempty"`
-		RecentDialogue []memory.RecentDialogueTurn `json:"recent_dialogue,omitempty"`
+		SessionTitle   string              `json:"session_title,omitempty"`
+		PreviousTurn   *routeHistoryTurn   `json:"previous_turn,omitempty"`
+		RecentDialogue []routeDialogueTurn `json:"recent_dialogue,omitempty"`
 	}{
-		SessionTitle:   conversation.SessionTitle,
-		RecentDialogue: conversation.RecentDialogue,
+		SessionTitle: tooloutput.TruncateContent(
+			conversation.SessionTitle,
+			routeHistoryTextTokens/4,
+		),
 	}
 	if len(conversation.RecentTurns) > 0 {
-		payload.PreviousTurn = &conversation.RecentTurns[0]
+		previous := conversation.RecentTurns[0]
+		payload.PreviousTurn = &routeHistoryTurn{
+			TurnNumber: previous.TurnNumber,
+			RunID:      previous.RunID,
+			Question: tooloutput.TruncateContent(
+				previous.Question,
+				routeHistoryTextTokens,
+			),
+			TopicKey: tooloutput.TruncateContent(
+				previous.TopicKey,
+				routeHistoryTextTokens/4,
+			),
+			Entities:       boundedRouteEntities(previous.Entities),
+			EvidenceStatus: previous.EvidenceStatus,
+		}
+	}
+	if len(conversation.RecentDialogue) > 0 {
+		latest := conversation.RecentDialogue[len(conversation.RecentDialogue)-1]
+		payload.RecentDialogue = []routeDialogueTurn{{
+			TurnNumber: latest.TurnNumber,
+			User: tooloutput.TruncateContent(
+				latest.User,
+				routeHistoryTextTokens,
+			),
+			Assistant: tooloutput.TruncateContent(
+				latest.Assistant,
+				routeHistoryTextTokens,
+			),
+		}}
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return ""
 	}
 	return string(raw)
+}
+
+func boundedRouteEntities(entities []string) []string {
+	bounded := make([]string, 0, min(len(entities), 8))
+	for _, entity := range entities {
+		if len(bounded) == 8 {
+			break
+		}
+		value := tooloutput.TruncateContent(entity, routeHistoryTextTokens/8)
+		if value != "" {
+			bounded = append(bounded, value)
+		}
+	}
+	return bounded
 }
 
 func resolveHistoryRelation(question string, recent []memory.TurnMetadata, model retrieval.HistoryRelation, modelValid bool) (retrieval.HistoryRelation, string, string) {

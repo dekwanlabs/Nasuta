@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
+	"unicode/utf8"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -18,9 +18,10 @@ Return JSON only with this exact shape:
 {"tasks":[{"id":"canonical.id","purpose":"specific investigation objective","capability":"allowed.capability","required_facets":["allowed_facet"],"depends_on":[]}]}
 
 Rules:
-- Emit exactly one task for every allowed capability and no other tasks.
-- Copy each capability's required_facets exactly.
-- Each purpose must support one or more admitted investigation_goals without inventing a new deliverable.
+- Emit exactly one investigator task for every admitted investigation goal and no other tasks.
+- Preserve each investigation goal's id and objective in the corresponding task.
+- Choose one allowed capability for each goal; multiple goals may use the same capability.
+- Required facets must be selected from the capability's allowed facets.
 - Task ids must be unique canonical lowercase ids.
 - Purpose must be specific to the question and no longer than 500 characters.
 - This is one parallel investigation round, so depends_on must be empty.
@@ -71,8 +72,13 @@ var taskGraphPlanningSpec = runtrace.Spec[taskGraphPlanningInput, taskGraphPlann
 		for _, capability := range input.Capabilities {
 			capabilities = append(capabilities, capability.ID)
 		}
+		goals := make([]string, 0, len(input.Contract.InvestigationGoals))
+		for _, goal := range input.Contract.InvestigationGoals {
+			goals = append(goals, goal.ID)
+		}
 		return map[string]any{
 			"investigation_goals":  len(input.Contract.InvestigationGoals),
+			"goal_ids":             goals,
 			"evidence_goals":       len(input.Contract.EvidenceGoals),
 			"allowed_capabilities": capabilities,
 		}
@@ -167,13 +173,17 @@ func (svc *Service) planTaskGraph(
 						if !ok {
 							return fmt.Errorf("unexpected task graph planner output %T", parsed)
 						}
-						return validateTaskGraphDraft(*value, input.Capabilities)
+						return validateTaskGraphDraft(
+							*value, input.Capabilities, input.Contract.InvestigationGoals...,
+						)
 					},
 				},
 			); err != nil {
 				return taskGraphPlanningOutput{}, fmt.Errorf("plan task graph: %w", err)
 			}
-			proposal, err := bindTaskGraphDraft(draft, input.Capabilities)
+			proposal, err := bindTaskGraphDraft(
+				draft, input.Capabilities, input.Contract.InvestigationGoals...,
+			)
 			if err != nil {
 				return taskGraphPlanningOutput{}, err
 			}
@@ -217,19 +227,21 @@ func taskGraphCapabilities(contract TaskContract) ([]taskGraphCapability, error)
 			}
 		}
 	}
-	if len(capabilities) < 2 {
-		return nil, fmt.Errorf(
-			"task graph planner requires at least two investigation capabilities",
-		)
-	}
 	return capabilities, nil
 }
 
 func validateTaskGraphDraft(
 	draft taskGraphDraft,
 	allowed []taskGraphCapability,
+	goals ...InvestigationGoal,
 ) error {
-	if len(draft.Tasks) != len(allowed) {
+	if len(goals) > 0 && len(draft.Tasks) != len(goals) {
+		return fmt.Errorf(
+			"task graph has %d investigator tasks, expected %d investigation goals",
+			len(draft.Tasks), len(goals),
+		)
+	}
+	if len(goals) == 0 && len(draft.Tasks) != len(allowed) {
 		return fmt.Errorf(
 			"task graph has %d investigator tasks, expected %d",
 			len(draft.Tasks),
@@ -241,7 +253,10 @@ func validateTaskGraphDraft(
 		allowedByID[capability.ID] = capability.RequiredFacets
 	}
 	taskIDs := make(map[string]struct{}, len(draft.Tasks))
-	selected := make(map[string]struct{}, len(draft.Tasks))
+	goalByID := make(map[string]InvestigationGoal, len(goals))
+	for _, goal := range goals {
+		goalByID[goal.ID] = goal
+	}
 	for _, task := range draft.Tasks {
 		if !taskGraphCanonicalID.MatchString(task.ID) ||
 			task.ID == "synthesize" ||
@@ -253,9 +268,14 @@ func validateTaskGraphDraft(
 			return fmt.Errorf("task id %q is duplicated", task.ID)
 		}
 		taskIDs[task.ID] = struct{}{}
+		if len(goals) > 0 {
+			if _, ok := goalByID[task.ID]; !ok {
+				return fmt.Errorf("task %q does not match an investigation goal", task.ID)
+			}
+		}
 		purpose := strings.TrimSpace(task.Purpose)
-		if purpose == "" || len(purpose) > 500 {
-			return fmt.Errorf("task %q purpose must contain 1 to 500 bytes", task.ID)
+		if purpose == "" || utf8.RuneCountInString(purpose) > 500 {
+			return fmt.Errorf("task %q purpose must contain 1 to 500 characters", task.ID)
 		}
 		facets, ok := allowedByID[task.Capability]
 		if !ok {
@@ -265,13 +285,9 @@ func validateTaskGraphDraft(
 				task.Capability,
 			)
 		}
-		if _, duplicate := selected[task.Capability]; duplicate {
-			return fmt.Errorf("capability %q is selected more than once", task.Capability)
-		}
-		selected[task.Capability] = struct{}{}
-		if !sameStringSet(task.RequiredFacets, facets) {
+		if len(task.RequiredFacets) == 0 || !subsetStringSet(task.RequiredFacets, facets) {
 			return fmt.Errorf(
-				"task %q facets do not match capability %q",
+				"task %q facets are not allowed for capability %q",
 				task.ID,
 				task.Capability,
 			)
@@ -283,36 +299,151 @@ func validateTaskGraphDraft(
 			)
 		}
 	}
-	for capabilityID := range allowedByID {
-		if _, ok := selected[capabilityID]; !ok {
-			return fmt.Errorf("required capability %q is missing", capabilityID)
+	if len(goals) == 0 {
+		for capabilityID := range allowedByID {
+			found := false
+			for _, task := range draft.Tasks {
+				if task.Capability == capabilityID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("required capability %q is missing", capabilityID)
+			}
+		}
+	} else {
+		requiredFacets := make(map[string]struct{})
+		for _, capability := range allowed {
+			for _, facet := range capability.RequiredFacets {
+				requiredFacets[facet] = struct{}{}
+			}
+		}
+		for _, task := range draft.Tasks {
+			for _, facet := range task.RequiredFacets {
+				delete(requiredFacets, facet)
+			}
+		}
+		if len(requiredFacets) > 0 {
+			return fmt.Errorf("task graph does not cover every required evidence facet")
 		}
 	}
 	return nil
 }
 
+func buildTaskGraphFallback(contract TaskContract) (agentapi.TaskGraphProposal, error) {
+	capabilities, err := taskGraphCapabilities(contract)
+	if err != nil {
+		return agentapi.TaskGraphProposal{}, err
+	}
+	goals := contract.InvestigationGoals
+	if len(goals) < 2 || len(goals) > 4 {
+		return agentapi.TaskGraphProposal{}, fmt.Errorf(
+			"deterministic task graph requires 2 to 4 investigation goals",
+		)
+	}
+	selected, err := selectFallbackCapabilities(capabilities, len(goals))
+	if err != nil {
+		return agentapi.TaskGraphProposal{}, fmt.Errorf(
+			"select deterministic task capabilities: %w",
+			err,
+		)
+	}
+	draft := taskGraphDraft{Tasks: make([]taskGraphDraftTask, 0, len(goals))}
+	for index, goal := range goals {
+		capability := selected[index%len(selected)]
+		draft.Tasks = append(draft.Tasks, taskGraphDraftTask{
+			ID: goal.ID, Purpose: goal.Objective,
+			Capability: capability.ID,
+			RequiredFacets: append(
+				[]string(nil),
+				capability.RequiredFacets...,
+			),
+		})
+	}
+	return bindTaskGraphDraft(draft, capabilities, goals...)
+}
+
+func selectFallbackCapabilities(
+	capabilities []taskGraphCapability,
+	limit int,
+) ([]taskGraphCapability, error) {
+	uncovered := make(map[string]struct{})
+	for _, capability := range capabilities {
+		for _, facet := range capability.RequiredFacets {
+			uncovered[facet] = struct{}{}
+		}
+	}
+	selected := make([]taskGraphCapability, 0, min(limit, len(capabilities)))
+	used := make(map[string]struct{}, len(capabilities))
+	for len(uncovered) > 0 && len(selected) < limit {
+		bestIndex := -1
+		bestCoverage := 0
+		for index, capability := range capabilities {
+			if _, ok := used[capability.ID]; ok {
+				continue
+			}
+			coverage := 0
+			for _, facet := range capability.RequiredFacets {
+				if _, ok := uncovered[facet]; ok {
+					coverage++
+				}
+			}
+			if coverage > bestCoverage {
+				bestIndex = index
+				bestCoverage = coverage
+			}
+		}
+		if bestIndex < 0 {
+			break
+		}
+		capability := capabilities[bestIndex]
+		selected = append(selected, capability)
+		used[capability.ID] = struct{}{}
+		for _, facet := range capability.RequiredFacets {
+			delete(uncovered, facet)
+		}
+	}
+	if len(selected) == 0 || len(uncovered) > 0 {
+		return nil, fmt.Errorf(
+			"cannot cover evidence facets with %d investigation tasks",
+			limit,
+		)
+	}
+	return selected, nil
+}
+
 func bindTaskGraphDraft(
 	draft taskGraphDraft,
 	allowed []taskGraphCapability,
+	goals ...InvestigationGoal,
 ) (agentapi.TaskGraphProposal, error) {
-	if err := validateTaskGraphDraft(draft, allowed); err != nil {
+	if err := validateTaskGraphDraft(draft, allowed, goals...); err != nil {
 		return agentapi.TaskGraphProposal{}, err
 	}
+	report := agentapi.SchemaRef{ID: "investigation.report", Version: 1}
 	facetsByCapability := make(map[string][]string, len(allowed))
 	for _, capability := range allowed {
 		facetsByCapability[capability.ID] = capability.RequiredFacets
 	}
-	report := agentapi.SchemaRef{ID: "investigation.report", Version: 1}
 	proposal := agentapi.TaskGraphProposal{
 		Tasks: make([]agentapi.TaskSpec, 0, len(draft.Tasks)+1),
 		Edges: make([]agentapi.TaskEdge, 0, len(draft.Tasks)),
 	}
+	goalByID := make(map[string]InvestigationGoal, len(goals))
+	for _, goal := range goals {
+		goalByID[goal.ID] = goal
+	}
 	for _, task := range draft.Tasks {
+		purpose := strings.TrimSpace(task.Purpose)
+		if goal, ok := goalByID[task.ID]; ok {
+			purpose = goal.Objective
+		}
 		proposal.Tasks = append(proposal.Tasks, agentapi.TaskSpec{
-			ID: task.ID, Purpose: strings.TrimSpace(task.Purpose),
-			RequiredFacets: append(
-				[]string(nil),
-				facetsByCapability[task.Capability]...,
+			ID: task.ID, Purpose: purpose,
+			RequiredFacets: orderedTaskFacets(
+				task.RequiredFacets,
+				facetsByCapability[task.Capability],
 			),
 			Capability: task.Capability, OutputSchema: report,
 			Optional: true, MaxAttempts: 2,
@@ -330,19 +461,34 @@ func bindTaskGraphDraft(
 	return proposal, nil
 }
 
-func sameStringSet(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
+func orderedTaskFacets(selected, allowed []string) []string {
+	selectedSet := make(map[string]struct{}, len(selected))
+	for _, facet := range selected {
+		selectedSet[facet] = struct{}{}
 	}
-	leftCopy := append([]string(nil), left...)
-	rightCopy := append([]string(nil), right...)
-	sort.Strings(leftCopy)
-	sort.Strings(rightCopy)
-	for index := range leftCopy {
-		if leftCopy[index] != rightCopy[index] ||
-			index > 0 && leftCopy[index] == leftCopy[index-1] {
+	ordered := make([]string, 0, len(selected))
+	for _, facet := range allowed {
+		if _, ok := selectedSet[facet]; ok {
+			ordered = append(ordered, facet)
+		}
+	}
+	return ordered
+}
+
+func subsetStringSet(values, allowed []string) bool {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, value := range allowed {
+		allowedSet[value] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, ok := allowedSet[value]; !ok {
 			return false
 		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
 	}
 	return true
 }

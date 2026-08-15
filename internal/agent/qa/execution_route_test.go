@@ -41,7 +41,7 @@ func TestDecideExecutionRoute(t *testing.T) {
 		{name: "eligible", want: retrieval.ExecutionMultiAgent},
 		{name: "model selects single", mutate: func(input *executionRouteInput) {
 			input.Suggestion.Strategy = retrieval.ExecutionSingleAgent
-		}, want: retrieval.ExecutionSingleAgent},
+		}, want: retrieval.ExecutionMultiAgent},
 		{name: "policy disabled", mutate: func(input *executionRouteInput) {
 			input.Policy.AllowMultiAgent = false
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "policy_disallows_multi_agent"},
@@ -57,7 +57,7 @@ func TestDecideExecutionRoute(t *testing.T) {
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "insufficient_independent_tasks"},
 		{name: "one investigation capability", mutate: func(input *executionRouteInput) {
 			input.Assessment.RequiredCapabilities = 1
-		}, want: retrieval.ExecutionSingleAgent, wantReason: "insufficient_investigation_capabilities"},
+		}, want: retrieval.ExecutionMultiAgent},
 		{name: "sequential tasks", mutate: func(input *executionRouteInput) {
 			input.Assessment.Parallelizable = false
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "tasks_not_parallelizable"},
@@ -126,8 +126,25 @@ func TestExecutionRouteTraceContract(t *testing.T) {
 		event.Output["estimated_agent_runs"] != 3 ||
 		event.Output["read_only"] != true ||
 		event.Output["write_authorized"] != false ||
-		event.Output["write_requested"] != false {
+		event.Output["write_requested"] != false ||
+		event.Output["decision_origin"] != "server_policy" {
 		t.Fatalf("output = %#v", event.Output)
+	}
+}
+
+func TestDecideExecutionRoutePromotesModelSingleSuggestion(t *testing.T) {
+	decision := decideExecutionRoute(executionRouteInput{
+		Suggestion: retrieval.ExecutionSuggestion{Strategy: retrieval.ExecutionSingleAgent},
+		Assessment: ExecutionAssessment{
+			IndependentTaskCount: 2, RequiredCapabilities: 1,
+			Parallelizable: true,
+		},
+		Policy: ExecutionPolicy{AllowMultiAgent: true}, WorkflowAvailable: true,
+	})
+	if decision.Strategy != retrieval.ExecutionMultiAgent ||
+		decision.DecisionOrigin != "server_assessment" ||
+		decision.PromotionReason != "independent_task_decomposition" {
+		t.Fatalf("decision = %+v", decision)
 	}
 }
 
@@ -222,6 +239,21 @@ func TestAssessExecutionDoesNotTreatCapabilityFanoutAsIndependentTasks(t *testin
 	if assessment.IndependentTaskCount != 1 ||
 		assessment.RequiredCapabilities != 3 ||
 		assessment.Parallelizable ||
+		assessment.Strategy != retrieval.ExecutionSingleAgent {
+		t.Fatalf("assessment = %+v", assessment)
+	}
+}
+
+func TestAssessExecutionExcludesDependentAndNonUsefulGoals(t *testing.T) {
+	assessment := assessExecution(
+		retrieval.ExecutionSuggestion{Strategy: retrieval.ExecutionMultiAgent},
+		TaskContract{InvestigationGoals: []InvestigationGoal{
+			{ID: "independent", IndependentlyUseful: true},
+			{ID: "dependent", IndependentlyUseful: true, DependsOn: []string{"independent"}},
+			{ID: "partial", IndependentlyUseful: false},
+		}},
+	)
+	if assessment.IndependentTaskCount != 1 || assessment.Parallelizable ||
 		assessment.Strategy != retrieval.ExecutionSingleAgent {
 		t.Fatalf("assessment = %+v", assessment)
 	}

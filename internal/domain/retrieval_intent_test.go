@@ -44,3 +44,17 @@ func TestResolveRetrievalIntentBoundsTargetEntities(t *testing.T) {
 		t.Fatalf("target entities = %v, want 8 unique bounded entries", resolution.Intent.TargetEntities)
 	}
 }
+
+func TestResolveRetrievalIntentRecognizesComparisonShape(t *testing.T) {
+	resolution := ResolveRetrievalIntent(
+		"分别比较两个设备控制链路的业务、实现和依赖有什么差异",
+		RetrievalIntentSignals{Identifiers: []string{"Domestic.Control", "Overseas.Control"}},
+	)
+	if resolution.Intent.Kind != RetrievalComparison || resolution.Origin != IntentOriginRule {
+		t.Fatalf("resolution = %+v", resolution)
+	}
+	if len(resolution.Intent.RequiredFacets) != 4 ||
+		len(resolution.Intent.TargetEntities) != 2 {
+		t.Fatalf("intent = %+v", resolution.Intent)
+	}
+}

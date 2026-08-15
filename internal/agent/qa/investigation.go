@@ -162,6 +162,9 @@ func contractFromPreparation(
 		len(prepared.planning.Execution.Tasks),
 	)
 	for _, task := range prepared.planning.Execution.Tasks {
+		if !task.IndependentlyUseful || len(task.DependsOn) != 0 {
+			continue
+		}
 		investigationGoals = append(investigationGoals, InvestigationGoal{
 			ID: task.ID, Objective: task.Objective,
 			IndependentlyUseful: task.IndependentlyUseful,

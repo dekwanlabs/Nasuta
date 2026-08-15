@@ -443,7 +443,7 @@ func TestBindExecutionSuggestionDeduplicatesStableReasons(t *testing.T) {
 	}
 }
 
-func TestBindExecutionSuggestionRejectsNonIndependentMultiAgentTasks(t *testing.T) {
+func TestBindExecutionSuggestionAcceptsCandidateTasksIndependentOfStrategy(t *testing.T) {
 	validTasks := []any{
 		map[string]any{
 			"id": "design", "objective": "Establish the intended behavior.",
@@ -481,27 +481,37 @@ func TestBindExecutionSuggestionRejectsNonIndependentMultiAgentTasks(t *testing.
 				},
 			},
 		},
-		{
-			name: "duplicate objectives", strategy: "multi_agent",
-			tasks: []any{
-				validTasks[0],
-				map[string]any{
-					"id": "implementation", "objective": "Establish the intended behavior.",
-					"independently_useful": true, "depends_on": []any{},
-				},
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := bindExecutionSuggestion(map[string]any{
+			suggestion, err := bindExecutionSuggestion(map[string]any{
 				"strategy": test.strategy, "complexity": 0.8, "confidence": 0.9,
 				"tasks": test.tasks, "reasons": []any{"requires_multiple_subproblems"},
 			})
-			if err == nil {
-				t.Fatalf("invalid execution tasks accepted: %#v", test.tasks)
+			if err != nil || len(suggestion.Tasks) != len(test.tasks) {
+				t.Fatalf("candidate tasks rejected: suggestion=%+v err=%v", suggestion, err)
 			}
 		})
+	}
+}
+
+func TestBindExecutionSuggestionRejectsDuplicateObjectives(t *testing.T) {
+	_, err := bindExecutionSuggestion(map[string]any{
+		"strategy": "single_agent", "complexity": 0.8, "confidence": 0.9,
+		"tasks": []any{
+			map[string]any{
+				"id": "design", "objective": "Establish the intended behavior.",
+				"independently_useful": true, "depends_on": []any{},
+			},
+			map[string]any{
+				"id": "implementation", "objective": "Establish the intended behavior.",
+				"independently_useful": true, "depends_on": []any{},
+			},
+		},
+		"reasons": []any{"requires_multiple_subproblems"},
+	})
+	if err == nil {
+		t.Fatal("duplicate task objectives accepted")
 	}
 }
 

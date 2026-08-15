@@ -386,6 +386,43 @@ func PlanPolicy(
 	if err != nil {
 		return CompilationPolicy{}, err
 	}
+	investigatorBudgets := make([]NodeBudget, 0, len(plan.Tasks))
+	synthesizerCount := 0
+	for _, task := range plan.Tasks {
+		if task.Capability == "evidence.synthesize" {
+			synthesizerCount++
+			continue
+		}
+		budget := capabilityBudget(task.Capability, budgets)
+		if budget == (NodeBudget{}) {
+			return CompilationPolicy{}, fmt.Errorf(
+				"investigation capability %q has no budget",
+				task.Capability,
+			)
+		}
+		investigatorBudgets = append(investigatorBudgets, budget)
+		policy.CapabilityBudgets[task.Capability] = budget
+		policy.CapabilityVersions[task.Capability] = version
+	}
+	if len(investigatorBudgets) == 0 || synthesizerCount != 1 {
+		return CompilationPolicy{}, fmt.Errorf(
+			"investigation plan requires investigators and one synthesizer",
+		)
+	}
+	flowBudgets := append(
+		append([]NodeBudget(nil), investigatorBudgets...),
+		budgets.Synthesizer,
+	)
+	policy.Budget, err = flowBudget(
+		nodeTimeout,
+		flowBudgets,
+		len(investigatorBudgets),
+	)
+	if err != nil {
+		return CompilationPolicy{}, err
+	}
+	policy.MaxTasks = len(plan.Tasks)
+	policy.MaxParallelism = len(investigatorBudgets)
 	payload, err := json.Marshal(plan)
 	if err != nil {
 		return CompilationPolicy{}, fmt.Errorf(

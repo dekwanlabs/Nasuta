@@ -45,6 +45,8 @@ type executionRouteInput struct {
 type executionRouteDecision struct {
 	Strategy        retrieval.ExecutionStrategy
 	DowngradeReason string
+	DecisionOrigin  string
+	PromotionReason string
 }
 
 var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecision]{
@@ -72,6 +74,8 @@ var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecisi
 			"estimated_agent_runs":    input.Assessment.EstimatedCoordination.AgentRuns,
 			"estimated_join_inputs":   input.Assessment.EstimatedCoordination.JoinInputs,
 			"downgrade_reason":        output.DowngradeReason,
+			"decision_origin":         output.DecisionOrigin,
+			"promotion_reason":        output.PromotionReason,
 			"workflow_available":      input.WorkflowAvailable,
 			"read_only":               !(input.WriteAuthorized && input.WriteRequested),
 			"write_authorized":        input.WriteAuthorized,
@@ -99,6 +103,7 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	policy := ExecutionPolicy{
 		AllowMultiAgent: standardRequest(prepared.request, svc.agentRef),
 	}
+	contract := contractFromPreparation(prepared, nil)
 	workflowAvailable := false
 	if policy.AllowMultiAgent && svc.investigation != nil &&
 		svc.scenarios != nil && svc.coordinator != nil {
@@ -106,7 +111,7 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	}
 	assessment := assessExecution(
 		planning.Execution,
-		contractFromPreparation(prepared, nil),
+		contract,
 	)
 	prepared.execution = routeExecution(prepared.ctx, executionRouteInput{
 		Suggestion: planning.Execution, Assessment: assessment, Policy: policy,
@@ -116,12 +121,14 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	})
 	log.InfofCtx(
 		prepared.ctx,
-		"[qa] execution route proposed=%s effective=%s independent_tasks=%d capabilities=%d parallelizable=%t downgrade=%s",
+		"[qa] execution route proposed=%s effective=%s independent_tasks=%d capabilities=%d parallelizable=%t origin=%s promotion=%s downgrade=%s",
 		planning.Execution.Strategy,
 		prepared.execution.Strategy,
 		assessment.IndependentTaskCount,
 		assessment.RequiredCapabilities,
 		assessment.Parallelizable,
+		prepared.execution.DecisionOrigin,
+		prepared.execution.PromotionReason,
 		prepared.execution.DowngradeReason,
 	)
 	if prepared.execution.Strategy == retrieval.ExecutionMultiAgent {
@@ -131,16 +138,25 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 		)
 		proposal, err := svc.planTaskGraph(
 			planningCtx,
-			contractFromPreparation(prepared, nil),
+			contract,
 		)
 		cancel()
 		if err != nil {
 			log.WarnfCtx(
 				prepared.ctx,
-				"[qa] task graph planner degraded; using deterministic goal mapping: %v",
+				"[qa] task graph planner degraded; building deterministic goal mapping: %v",
 				err,
 			)
-		} else {
+			proposal, err = buildTaskGraphFallback(contract)
+			if err != nil {
+				log.WarnfCtx(
+					prepared.ctx,
+					"[qa] deterministic goal mapping unavailable; workflow will use capability mapping: %v",
+					err,
+				)
+			}
+		}
+		if err == nil {
 			prepared.taskGraphProposal = &proposal
 		}
 	}
@@ -170,38 +186,46 @@ func routeExecution(ctx context.Context, input executionRouteInput) executionRou
 }
 
 func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
-	single := func(reason string) executionRouteDecision {
-		return executionRouteDecision{Strategy: retrieval.ExecutionSingleAgent, DowngradeReason: reason}
-	}
-	if input.Suggestion.Strategy != retrieval.ExecutionMultiAgent {
-		return single("")
+	single := func(reason, origin string) executionRouteDecision {
+		return executionRouteDecision{
+			Strategy: retrieval.ExecutionSingleAgent, DowngradeReason: reason,
+			DecisionOrigin: origin,
+		}
 	}
 	if !input.Policy.AllowMultiAgent {
-		return single("policy_disallows_multi_agent")
+		return single("policy_disallows_multi_agent", "server_policy")
 	}
 	if input.WriteRequested {
-		return single("write_requested")
+		return single("write_requested", "server_policy")
 	}
 	if !input.WorkflowAvailable {
-		return single("workflow_unavailable")
+		return single("workflow_unavailable", "server_policy")
 	}
 	if input.Assessment.IndependentTaskCount < 2 {
-		return single("insufficient_independent_tasks")
-	}
-	if input.Assessment.RequiredCapabilities < 2 {
-		return single("insufficient_investigation_capabilities")
+		return single("insufficient_independent_tasks", "server_assessment")
 	}
 	if !input.Assessment.Parallelizable {
-		return single("tasks_not_parallelizable")
+		return single("tasks_not_parallelizable", "server_assessment")
 	}
-	return executionRouteDecision{Strategy: retrieval.ExecutionMultiAgent}
+	decision := executionRouteDecision{
+		Strategy: retrieval.ExecutionMultiAgent, DecisionOrigin: "server_assessment",
+	}
+	if input.Suggestion.Strategy != retrieval.ExecutionMultiAgent {
+		decision.PromotionReason = "independent_task_decomposition"
+	}
+	return decision
 }
 
 func assessExecution(
 	suggestion retrieval.ExecutionSuggestion,
 	contract TaskContract,
 ) ExecutionAssessment {
-	independentTasks := len(contract.InvestigationGoals)
+	independentTasks := 0
+	for _, goal := range contract.InvestigationGoals {
+		if goal.IndependentlyUseful && len(goal.DependsOn) == 0 {
+			independentTasks++
+		}
+	}
 	capabilities := make(map[string]struct{}, len(contract.EvidenceGoals))
 	for _, goal := range contract.EvidenceGoals {
 		sources := goal.Sources
@@ -215,10 +239,9 @@ func assessExecution(
 			}
 		}
 	}
-	parallelizable := independentTasks >= 2 &&
-		!hasExecutionReason(suggestion.Reasons, "subproblems_are_sequential")
+	parallelizable := independentTasks >= 2
 	strategy := retrieval.ExecutionSingleAgent
-	if suggestion.Strategy == retrieval.ExecutionMultiAgent && parallelizable {
+	if parallelizable {
 		strategy = retrieval.ExecutionMultiAgent
 	}
 	return ExecutionAssessment{
@@ -262,13 +285,4 @@ func executionCapability(
 	default:
 		return ""
 	}
-}
-
-func hasExecutionReason(reasons []string, target string) bool {
-	for _, reason := range reasons {
-		if reason == target {
-			return true
-		}
-	}
-	return false
 }

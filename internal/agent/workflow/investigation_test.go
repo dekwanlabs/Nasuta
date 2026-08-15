@@ -387,6 +387,89 @@ func TestGoalSetsPublishWithoutVersionConflict(t *testing.T) {
 	}
 }
 
+func TestPlanPolicyBudgetsRepeatedInvestigatorCapabilities(t *testing.T) {
+	plan := repeatedCodeInvestigationPlan()
+	policy, err := PlanPolicy(
+		7,
+		time.Second,
+		investigationBudgetPolicy(),
+		[]Goal{{Facet: "core_flow", Required: true}},
+		plan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.MaxTasks != 3 || policy.MaxParallelism != 2 ||
+		policy.Budget.MaxNodes != 6 || policy.Budget.MaxParallelism != 2 ||
+		policy.Budget.MaxToolCalls != 12 {
+		t.Fatalf("policy = %+v", policy)
+	}
+}
+
+func TestPlanPolicyCompilesRepeatedInvestigatorCapabilities(t *testing.T) {
+	const version int64 = 7
+	schemas, agents := investigationCatalogs(t, version)
+	definitions, err := defaultInvestigationDefinitionsForCapabilities(agents, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities := agentapi.NewCapabilityRegistry(schemas, agents)
+	values, err := catalog.DefaultCapabilities(definitions, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := capabilities.Publish(values); err != nil {
+		t.Fatal(err)
+	}
+	compiler, err := NewProposalCompiler(schemas, capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goals := []Goal{{Facet: "core_flow", Required: true}}
+	plan := repeatedCodeInvestigationPlan()
+	policy, err := PlanPolicy(
+		version, time.Second, investigationBudgetPolicy(), goals, plan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := compiler.Compile(plan, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definition.Nodes) != 6 || definition.Budget.MaxParallelism != 2 {
+		t.Fatalf("definition = %+v", definition)
+	}
+}
+
+func repeatedCodeInvestigationPlan() agentapi.TaskGraphProposal {
+	report := agentapi.SchemaRef{ID: "investigation.report", Version: 1}
+	return agentapi.TaskGraphProposal{
+		Tasks: []agentapi.TaskSpec{
+			{
+				ID: "first", Purpose: "Inspect the first behavior.",
+				Capability: "knowledge.code.inspect", RequiredFacets: []string{"core_flow"},
+				OutputSchema: report, Optional: true, MaxAttempts: 2,
+			},
+			{
+				ID: "second", Purpose: "Inspect the second behavior.",
+				Capability: "knowledge.code.inspect", RequiredFacets: []string{"core_flow"},
+				OutputSchema: report, Optional: true, MaxAttempts: 2,
+			},
+			{
+				ID: "synthesize", Purpose: "Synthesize evidence.",
+				Capability:   "evidence.synthesize",
+				OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
+				MaxAttempts:  2,
+			},
+		},
+		Edges: []agentapi.TaskEdge{
+			{From: "first", To: "synthesize"},
+			{From: "second", To: "synthesize"},
+		},
+	}
+}
+
 func TestGoalsRejectUnknownFacet(t *testing.T) {
 	goals := []Goal{
 		{Facet: "live_database_mutation", Required: true},

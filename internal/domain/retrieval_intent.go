@@ -9,6 +9,7 @@ const (
 	RetrievalFocusedFact      RetrievalIntentKind = "focused_fact"
 	RetrievalOverview         RetrievalIntentKind = "overview"
 	RetrievalFlow             RetrievalIntentKind = "flow"
+	RetrievalComparison       RetrievalIntentKind = "comparison"
 	RetrievalInventory        RetrievalIntentKind = "inventory"
 	RetrievalRuntimeDiagnosis RetrievalIntentKind = "runtime_diagnosis"
 )
@@ -97,6 +98,22 @@ func RetrievalIntentFor(mode ResponseMode) RetrievalIntent {
 // Planner output may enrich signals, but intent resolution never performs I/O.
 func ResolveRetrievalIntent(question string, signals RetrievalIntentSignals) IntentResolution {
 	mode := ClassifyResponseMode(question)
+	if hasComparisonSignal(question, signals) {
+		return IntentResolution{
+			ResponseMode: mode,
+			Intent: RetrievalIntent{
+				Kind: RetrievalComparison,
+				RequiredFacets: []EvidenceFacet{
+					FacetBusinessDomain,
+					FacetCoreFlow,
+					FacetDataAndState,
+					FacetExternalDependency,
+				},
+				TargetEntities: CanonicalEntityIDs(signals.Identifiers),
+			},
+			Origin: IntentOriginRule,
+		}
+	}
 	if hasFlowSignal(question, signals) {
 		return IntentResolution{
 			ResponseMode: mode,
@@ -120,6 +137,26 @@ func ResolveRetrievalIntent(question string, signals RetrievalIntentSignals) Int
 		origin = IntentOriginFallback
 	}
 	return IntentResolution{ResponseMode: mode, Intent: intent, Origin: origin}
+}
+
+func hasComparisonSignal(question string, signals RetrievalIntentSignals) bool {
+	q := strings.ToLower(question)
+	for _, signal := range []string{
+		"对比", "比较", "区别", "差异", "共性", "异同", "各自", "分别",
+		"compare", "comparison", "difference", "differences", "versus", " vs ",
+	} {
+		if strings.Contains(q, signal) {
+			return true
+		}
+	}
+	for _, term := range signals.DomainTerms {
+		term = strings.ToLower(strings.TrimSpace(term))
+		if term == "对比" || term == "比较" || term == "区别" || term == "差异" ||
+			term == "共性" || term == "异同" || term == "compare" || term == "comparison" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasFlowSignal(question string, signals RetrievalIntentSignals) bool {

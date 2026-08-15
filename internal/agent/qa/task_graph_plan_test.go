@@ -146,3 +146,80 @@ func TestTaskGraphCapabilitiesRequireExactContractSources(t *testing.T) {
 		t.Fatalf("capabilities = %+v", capabilities)
 	}
 }
+
+func TestTaskGraphAllowsMultipleGoalsToShareCapability(t *testing.T) {
+	allowed := []taskGraphCapability{
+		{ID: "knowledge.code.inspect", RequiredFacets: []string{"core_flow", "data_and_state"}},
+	}
+	goals := []InvestigationGoal{
+		{ID: "business", Objective: "Verify the business behavior."},
+		{ID: "implementation", Objective: "Verify the implementation behavior."},
+	}
+	proposal, err := bindTaskGraphDraft(taskGraphDraft{Tasks: []taskGraphDraftTask{
+		{ID: "business", Purpose: "Business", Capability: "knowledge.code.inspect", RequiredFacets: []string{"core_flow"}},
+		{ID: "implementation", Purpose: "Implementation", Capability: "knowledge.code.inspect", RequiredFacets: []string{"data_and_state"}},
+	}}, allowed, goals...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.Tasks) != 3 ||
+		proposal.Tasks[0].Capability != proposal.Tasks[1].Capability ||
+		proposal.Tasks[0].Purpose != goals[0].Objective ||
+		proposal.Tasks[1].Purpose != goals[1].Objective {
+		t.Fatalf("proposal = %+v", proposal)
+	}
+}
+
+func TestBuildTaskGraphFallbackPreservesGoalsWithSharedCapability(t *testing.T) {
+	contract := TaskContract{
+		InvestigationGoals: []InvestigationGoal{
+			{ID: "first", Objective: "Inspect the first behavior."},
+			{ID: "second", Objective: "Inspect the second behavior."},
+		},
+		EvidenceGoals: []EvidenceGoal{{
+			Facet:   "core_flow",
+			Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
+		}},
+	}
+	proposal, err := buildTaskGraphFallback(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.Tasks) != 3 ||
+		proposal.Tasks[0].ID != "first" || proposal.Tasks[1].ID != "second" ||
+		proposal.Tasks[0].Capability != "knowledge.code.inspect" ||
+		proposal.Tasks[1].Capability != "knowledge.code.inspect" {
+		t.Fatalf("proposal = %+v", proposal)
+	}
+}
+
+func TestBuildTaskGraphFallbackIgnoresRedundantSourceCapabilities(t *testing.T) {
+	contract := TaskContract{
+		InvestigationGoals: []InvestigationGoal{
+			{ID: "flow", Objective: "Inspect the flow."},
+			{ID: "dependency", Objective: "Inspect the dependency."},
+		},
+		EvidenceGoals: []EvidenceGoal{
+			{
+				Facet: "core_flow",
+				Sources: []agentapi.EvidenceSource{
+					agentapi.EvidenceSourceInternal,
+					agentapi.EvidenceSourceWeb,
+				},
+			},
+			{
+				Facet:   "external_dependency",
+				Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
+			},
+		},
+	}
+	proposal, err := buildTaskGraphFallback(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.Tasks) != 3 ||
+		proposal.Tasks[0].Capability != "knowledge.code.inspect" ||
+		proposal.Tasks[1].Capability != "knowledge.service.trace" {
+		t.Fatalf("proposal = %+v", proposal)
+	}
+}

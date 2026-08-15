@@ -26,15 +26,40 @@ func TestBuildHistoryRouteContextContainsMetadataAndRecentDialogue(t *testing.T)
 		}},
 	}
 	got := buildHistoryContext(conversation)
-	for _, want := range []string{"runtime investigation", "继续 trace-123", "observe_logs", "partial", "hsas-backstage-user", "recent_dialogue"} {
+	for _, want := range []string{"runtime investigation", "继续 trace-123", "hsas-backstage-user", "recent_dialogue"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("route context missing %q: %s", want, got)
 		}
+	}
+	if strings.Contains(got, "observe_logs") || strings.Contains(got, "partial") {
+		t.Fatalf("route context included unbounded evidence details: %s", got)
 	}
 	for _, forbidden := range []string{"assistant_answer", "tool_payload", "request_body", "response_body", "SECRET_TOOL_PAYLOAD"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("route context leaked %q: %s", forbidden, got)
 		}
+	}
+}
+
+func TestBuildHistoryRouteContextBoundsDialogueAndEntities(t *testing.T) {
+	conversation := ConversationContext{
+		SessionTitle: strings.Repeat("title ", 500),
+		RecentTurns: []memory.TurnMetadata{{
+			TurnNumber: 9, Question: strings.Repeat("question ", 500),
+			TopicKey: strings.Repeat("topic ", 100),
+			Entities: []string{strings.Repeat("entity ", 100), "second"},
+		}},
+		RecentDialogue: []memory.RecentDialogueTurn{
+			{TurnNumber: 8, User: strings.Repeat("old ", 500), Assistant: strings.Repeat("old answer ", 500)},
+			{TurnNumber: 9, User: strings.Repeat("current ", 500), Assistant: strings.Repeat("current answer ", 500)},
+		},
+	}
+	got := buildHistoryContext(conversation)
+	if len(got) > 12_000 {
+		t.Fatalf("route context length = %d, want bounded context", len(got))
+	}
+	if strings.Contains(got, "old answer old answer") {
+		t.Fatal("route context retained an older dialogue turn")
 	}
 }
 
