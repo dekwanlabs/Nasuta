@@ -622,7 +622,7 @@ func TestAdministrativeMutationsRejectRegularUsers(t *testing.T) {
 	}
 }
 
-func TestStartPipelineCanonicalizesFixedAdminRequest(t *testing.T) {
+func TestStartPipelineForwardsFixedAdminRequest(t *testing.T) {
 	starter := &pipelineStarterRecorder{}
 	handler := New(nil)
 	handler.SetPipelineStarter(starter)
@@ -655,11 +655,11 @@ func TestStartPipelineCanonicalizesFixedAdminRequest(t *testing.T) {
 	}
 	if starter.calls != 1 ||
 		starter.request.FeatureID != "feat-1" ||
-		starter.request.ClientRequestID != "client-1" ||
-		starter.request.Repository != "team/repo" ||
-		starter.request.BaseRef != "HEAD" ||
-		starter.request.Provider != "openai" ||
-		starter.request.Model != "gpt-5" ||
+		starter.request.ClientRequestID != "  client-1  " ||
+		starter.request.Repository != " team/repo/ " ||
+		starter.request.BaseRef != " " ||
+		starter.request.Provider != " OpenAI " ||
+		starter.request.Model != " gpt-5 " ||
 		!starter.request.NetworkEnabled ||
 		starter.actor.UserID != 41 {
 		t.Fatalf(

@@ -27,9 +27,6 @@ func (starter *Starter) Start(
 	if starter == nil || starter.workflow == nil {
 		return nil, fmt.Errorf("feature pipeline workflow is unavailable: %w", delivery.ErrUnavailable)
 	}
-	if actor.UserID <= 0 {
-		return nil, fmt.Errorf("pipeline actor identity is required: %w", delivery.ErrInvalid)
-	}
 	request, err := normalizeRequest(request)
 	if err != nil {
 		return nil, err

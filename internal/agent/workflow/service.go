@@ -118,7 +118,12 @@ type activeRun struct {
 	done   chan struct{}
 }
 
-// RunEventReader scopes repeated event reads to one authorized Run.
+// EventReader scopes repeated event reads to one authorized Run.
+type EventReader interface {
+	List(context.Context, int64, int) ([]Event, error)
+}
+
+// RunEventReader is the store-backed EventReader used by Service.
 type RunEventReader struct {
 	store persistence
 	runID string

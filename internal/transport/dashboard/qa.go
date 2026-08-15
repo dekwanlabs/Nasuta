@@ -89,7 +89,7 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	stopHeartbeat := stream.startHeartbeat(r.Context(), qaSSEHeartbeatInterval)
 	defer stopHeartbeat()
-	conversation, err := handler.prepareSessionContext(
+	conversation, err := handler.loadSessionContext(
 		r.Context(), req.SessionID, currentUserID(r), req.History,
 	)
 	if err != nil {
@@ -99,11 +99,6 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	conversation.SessionID = req.SessionID
 	handler.serveAgentSSE(r.Context(), req.Question, conversation, req.SessionID, req.Trace, req.EvidencePlan, stream.emit, r)
-}
-
-func (handler *Handler) prepareSessionContext(ctx context.Context, sessionID string, userID int64,
-	fallback []llm.Message) (agent.ConversationContext, error) {
-	return handler.loadSessionContext(ctx, sessionID, userID, fallback)
 }
 
 func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, sseEvent func(string, any) error,

@@ -620,7 +620,7 @@ type recordingService struct {
 	nodes        []workflow.NodeRunRecord
 	events       []workflow.Event
 	handoffs     []workflow.Handoff
-	reader       eventReader
+	reader       workflow.EventReader
 	live         chan workflow.Event
 
 	writeWorkflow bool
@@ -877,7 +877,7 @@ func (service *recordingService) OpenRunEvents(
 	runID string,
 	userID int64,
 	admin bool,
-) (*workflow.RunRecord, eventReader, error) {
+) (*workflow.RunRecord, workflow.EventReader, error) {
 	service.mu.Lock()
 	service.openCalls++
 	service.mu.Unlock()

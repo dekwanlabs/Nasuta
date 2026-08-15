@@ -21,10 +21,6 @@ const (
 	maxPageSize     = 100
 )
 
-type eventReader interface {
-	List(context.Context, int64, int) ([]workflow.Event, error)
-}
-
 type service interface {
 	PublishAs(context.Context, []workflow.Definition, int64, bool) error
 	ListRecords(context.Context, workflow.DefinitionCursor, int) ([]workflow.DefinitionRecord, error)
@@ -38,181 +34,11 @@ type service interface {
 	GetRun(context.Context, string, int64, bool) (*workflow.RunRecord, error)
 	ListNodeRuns(context.Context, string, workflow.NodeRunCursor, int, int64, bool) ([]workflow.NodeRunRecord, error)
 	ListEvents(context.Context, string, int64, int, int64, bool) ([]workflow.Event, error)
-	OpenRunEvents(context.Context, string, int64, bool) (*workflow.RunRecord, eventReader, error)
+	OpenRunEvents(context.Context, string, int64, bool) (*workflow.RunRecord, workflow.EventReader, error)
 	SubscribeEvents(string) (<-chan workflow.Event, func(), error)
 	ListHandoffs(context.Context, string, workflow.HandoffCursor, int, int64, bool) ([]workflow.Handoff, error)
 	Cancel(context.Context, string, int64, bool) (workflow.CancelTransition, error)
 	DecideHumanApproval(context.Context, workflow.ApprovalRequest) (workflow.ApprovalResult, error)
-}
-
-type serviceAdapter struct {
-	service *workflow.Service
-}
-
-func (adapter serviceAdapter) PublishAs(
-	ctx context.Context,
-	definitions []workflow.Definition,
-	actorUserID int64,
-	admin bool,
-) error {
-	return adapter.service.PublishAs(ctx, definitions, actorUserID, admin)
-}
-
-func (adapter serviceAdapter) ListRecords(
-	ctx context.Context,
-	cursor workflow.DefinitionCursor,
-	limit int,
-) ([]workflow.DefinitionRecord, error) {
-	return adapter.service.ListRecords(ctx, cursor, limit)
-}
-
-func (adapter serviceAdapter) SetDefault(
-	ctx context.Context,
-	id string,
-	version int64,
-	actorUserID int64,
-	admin bool,
-) error {
-	return adapter.service.SetDefault(
-		ctx, id, version, actorUserID, admin,
-	)
-}
-
-func (adapter serviceAdapter) SetActive(
-	ctx context.Context,
-	id string,
-	version int64,
-	active bool,
-	actorUserID int64,
-	admin bool,
-) error {
-	return adapter.service.SetActive(
-		ctx, id, version, active, actorUserID, admin,
-	)
-}
-
-func (adapter serviceAdapter) ListAudit(
-	ctx context.Context,
-	id string,
-	afterSeq int64,
-	limit int,
-	admin bool,
-) ([]workflow.DefinitionAuditEvent, error) {
-	return adapter.service.ListAudit(ctx, id, afterSeq, limit, admin)
-}
-
-func (adapter serviceAdapter) GetRollout(
-	id string,
-) (workflow.RolloutRule, bool, error) {
-	return adapter.service.GetRollout(id)
-}
-
-func (adapter serviceAdapter) SetRollout(
-	ctx context.Context,
-	id string,
-	candidateVersion int64,
-	percentageBPS int,
-	salt string,
-	active bool,
-	actorUserID int64,
-	admin bool,
-) (workflow.RolloutRule, error) {
-	return adapter.service.SetRollout(
-		ctx, id, candidateVersion, percentageBPS, salt, active, actorUserID, admin,
-	)
-}
-
-func (adapter serviceAdapter) ListRolloutAudit(
-	ctx context.Context,
-	id string,
-	afterSeq int64,
-	limit int,
-	admin bool,
-) ([]workflow.RolloutAuditEvent, error) {
-	return adapter.service.ListRolloutAudit(
-		ctx, id, afterSeq, limit, admin,
-	)
-}
-
-func (adapter serviceAdapter) Start(
-	ctx context.Context,
-	request workflow.StartRequest,
-) (*workflow.RunRecord, error) {
-	return adapter.service.Start(ctx, request)
-}
-
-func (adapter serviceAdapter) GetRun(
-	ctx context.Context,
-	runID string,
-	userID int64,
-	admin bool,
-) (*workflow.RunRecord, error) {
-	return adapter.service.GetRun(ctx, runID, userID, admin)
-}
-
-func (adapter serviceAdapter) ListNodeRuns(
-	ctx context.Context,
-	runID string,
-	cursor workflow.NodeRunCursor,
-	limit int,
-	userID int64,
-	admin bool,
-) ([]workflow.NodeRunRecord, error) {
-	return adapter.service.ListNodeRuns(ctx, runID, cursor, limit, userID, admin)
-}
-
-func (adapter serviceAdapter) ListEvents(
-	ctx context.Context,
-	runID string,
-	afterSeq int64,
-	limit int,
-	userID int64,
-	admin bool,
-) ([]workflow.Event, error) {
-	return adapter.service.ListEvents(ctx, runID, afterSeq, limit, userID, admin)
-}
-
-func (adapter serviceAdapter) OpenRunEvents(
-	ctx context.Context,
-	runID string,
-	userID int64,
-	admin bool,
-) (*workflow.RunRecord, eventReader, error) {
-	run, reader, err := adapter.service.OpenRunEvents(ctx, runID, userID, admin)
-	return run, reader, err
-}
-
-func (adapter serviceAdapter) SubscribeEvents(
-	runID string,
-) (<-chan workflow.Event, func(), error) {
-	return adapter.service.SubscribeEvents(runID)
-}
-
-func (adapter serviceAdapter) ListHandoffs(
-	ctx context.Context,
-	runID string,
-	cursor workflow.HandoffCursor,
-	limit int,
-	userID int64,
-	admin bool,
-) ([]workflow.Handoff, error) {
-	return adapter.service.ListHandoffs(ctx, runID, cursor, limit, userID, admin)
-}
-
-func (adapter serviceAdapter) Cancel(
-	ctx context.Context,
-	runID string,
-	userID int64,
-	admin bool,
-) (workflow.CancelTransition, error) {
-	return adapter.service.Cancel(ctx, runID, userID, admin)
-}
-
-func (adapter serviceAdapter) DecideHumanApproval(
-	ctx context.Context,
-	request workflow.ApprovalRequest,
-) (workflow.ApprovalResult, error) {
-	return adapter.service.DecideHumanApproval(ctx, request)
 }
 
 type Handler struct {
@@ -231,7 +57,7 @@ func New(workflows *workflow.Service) *Handler {
 	if workflows == nil {
 		return &Handler{}
 	}
-	return &Handler{service: serviceAdapter{service: workflows}}
+	return &Handler{service: workflows}
 }
 
 func (handler *Handler) SetApprovalDecider(decider approvalDecider) {
@@ -720,10 +546,6 @@ func (handler *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 	approvals := handler.approvals
 	if approvals == nil {
 		approvals = handler.service
-	}
-	if approvals == nil {
-		writeDomainError(w, workflow.ErrUnavailable)
-		return
 	}
 	result, err := approvals.DecideHumanApproval(
 		r.Context(),

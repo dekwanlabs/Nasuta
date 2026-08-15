@@ -282,6 +282,35 @@ func TestValidateReimplementationParent(t *testing.T) {
 	}
 }
 
+func TestNormalizeImplementationOptions(t *testing.T) {
+	options, err := normalizeImplementationOptions(ImplementationOptions{
+		ClientRequestID:  "  client-1  ",
+		DesignArtifactID: "  design-1  ",
+		PlanArtifactID:   "  plan-1  ",
+		ParentRunID:      "  parent-1  ",
+		Repository:       " team/service/ ",
+		BaseRef:          " ",
+		Provider:         " OpenAI ",
+		Model:            " gpt-5 ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ImplementationOptions{
+		ClientRequestID:  "client-1",
+		DesignArtifactID: "design-1",
+		PlanArtifactID:   "plan-1",
+		ParentRunID:      "parent-1",
+		Repository:       "team/service",
+		BaseRef:          "HEAD",
+		Provider:         "openai",
+		Model:            "gpt-5",
+	}
+	if options != want {
+		t.Fatalf("options = %+v, want %+v", options, want)
+	}
+}
+
 func TestCanTransitionRun(t *testing.T) {
 	allowed := map[[2]RunStatus]struct{}{
 		{RunQueued, RunPreparing}:       {},

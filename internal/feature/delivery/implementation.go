@@ -95,6 +95,10 @@ func (manager *ImplementationManager) Create(ctx context.Context, feature Featur
 	if manager == nil || manager.git == nil || manager.runner == nil {
 		return nil, false, ErrUnavailable
 	}
+	options, err := normalizeImplementationOptions(options)
+	if err != nil {
+		return nil, false, err
+	}
 	if options.ClientRequestID == "" || len(options.ClientRequestID) > maxClientRequestIDBytes {
 		return nil, false, fmt.Errorf("client_request_id must be between 1 and %d bytes: %w", maxClientRequestIDBytes, ErrInvalid)
 	}
@@ -102,10 +106,7 @@ func (manager *ImplementationManager) Create(ctx context.Context, feature Featur
 		lineage.SystemDesign.ID != options.DesignArtifactID || lineage.ImplementationPlan.ID != options.PlanArtifactID {
 		return nil, false, ErrConflict
 	}
-	repo, err := NormalizeRepository(options.Repository)
-	if err != nil {
-		return nil, false, err
-	}
+	repo := options.Repository
 	if !planContainsRepository(*lineage.ImplementationPlan, repo) {
 		return nil, false, ErrConflict
 	}
@@ -132,7 +133,7 @@ func (manager *ImplementationManager) Create(ctx context.Context, feature Featur
 	if options.NetworkEnabled && !manager.config.AllowNetwork {
 		return nil, false, fmt.Errorf("network is disabled by platform policy: %w", ErrInvalid)
 	}
-	model := strings.TrimSpace(options.Model)
+	model := options.Model
 	if model == "" {
 		model = manager.config.DefaultModels[options.Provider]
 	}
@@ -171,6 +172,25 @@ func (manager *ImplementationManager) Create(ctx context.Context, feature Featur
 		_, _ = manager.appendEvent(context.WithoutCancel(ctx), saved.ID, EventRunQueued, "implementation queued", nil)
 	}
 	return saved, created, nil
+}
+
+func normalizeImplementationOptions(options ImplementationOptions) (ImplementationOptions, error) {
+	options.ClientRequestID = strings.TrimSpace(options.ClientRequestID)
+	options.DesignArtifactID = strings.TrimSpace(options.DesignArtifactID)
+	options.PlanArtifactID = strings.TrimSpace(options.PlanArtifactID)
+	options.ParentRunID = strings.TrimSpace(options.ParentRunID)
+	options.BaseRef = strings.TrimSpace(options.BaseRef)
+	if options.BaseRef == "" {
+		options.BaseRef = "HEAD"
+	}
+	options.Provider = strings.ToLower(strings.TrimSpace(options.Provider))
+	options.Model = strings.TrimSpace(options.Model)
+	repository, err := NormalizeRepository(options.Repository)
+	if err != nil {
+		return ImplementationOptions{}, err
+	}
+	options.Repository = repository
+	return options, nil
 }
 
 func (manager *ImplementationManager) Cancel(ctx context.Context, runID string) error {

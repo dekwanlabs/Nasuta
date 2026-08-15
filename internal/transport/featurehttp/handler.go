@@ -140,10 +140,14 @@ func (handler *Handler) StartPipeline(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
-	request, err := normalizePipelineInput(r.PathValue("id"), input)
-	if err != nil {
-		httputil.WriteBadRequest(w, err.Error())
-		return
+	request := pipeline.Request{
+		FeatureID:       r.PathValue("id"),
+		ClientRequestID: input.ClientRequestID,
+		Repository:      input.Repository,
+		BaseRef:         input.BaseRef,
+		Provider:        input.Provider,
+		Model:           input.Model,
+		NetworkEnabled:  input.NetworkEnabled,
 	}
 	if handler.pipelineStarter == nil {
 		writeDomainError(w, delivery.ErrUnavailable)
@@ -160,12 +164,10 @@ func (handler *Handler) StartPipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	log.InfofCtx(
 		r.Context(),
-		"[feature-delivery] user %d started pipeline %s for feature %s provider=%s repo=%s",
+		"[feature-delivery] user %d started pipeline %s for feature %s",
 		user.ID,
 		run.ID,
-		request.FeatureID,
-		request.Provider,
-		request.Repository,
+		r.PathValue("id"),
 	)
 	httputil.WriteJSON(w, run)
 }
@@ -453,10 +455,6 @@ func (handler *Handler) CreateImplementation(w http.ResponseWriter, r *http.Requ
 	}
 	var options delivery.ImplementationOptions
 	if err := httputil.DecodeStrictJSON(r, &options); err != nil {
-		httputil.WriteBadRequest(w, err.Error())
-		return
-	}
-	if err := normalizeImplementationOptions(&options); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}

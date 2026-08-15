@@ -206,7 +206,7 @@ func (service *Service) OpenRunEvents(
 	runID string,
 	userID int64,
 	admin bool,
-) (*RunRecord, *RunEventReader, error) {
+) (*RunRecord, EventReader, error) {
 	run, err := service.GetRun(ctx, runID, userID, admin)
 	if err != nil {
 		return nil, nil, err

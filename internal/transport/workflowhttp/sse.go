@@ -111,7 +111,7 @@ func (handler *Handler) StreamEvents(w http.ResponseWriter, r *http.Request) {
 func (handler *Handler) emitLiveEvent(
 	ctx context.Context,
 	writer *eventWriter,
-	reader eventReader,
+	reader workflow.EventReader,
 	lastSeq int64,
 	event workflow.Event,
 ) (int64, bool, error) {
@@ -137,7 +137,7 @@ func (handler *Handler) emitLiveEvent(
 func (handler *Handler) replayEvents(
 	ctx context.Context,
 	writer *eventWriter,
-	reader eventReader,
+	reader workflow.EventReader,
 	afterSeq int64,
 ) (int64, bool, error) {
 	lastSeq := afterSeq

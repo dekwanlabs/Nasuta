@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
-	"github.com/dekwanlabs/nasuta/internal/feature/pipeline"
 )
 
 const (
@@ -80,39 +79,6 @@ func normalizeReviewPolicyRolloutInput(
 		return "", 0, 0, "", false, fmt.Errorf("salt is required and must not exceed 255 bytes")
 	}
 	return candidateID, input.CandidatePolicyVersion, input.PercentageBPS, salt, input.Active, nil
-}
-
-func normalizePipelineInput(featureID string, input pipelineInput) (pipeline.Request, error) {
-	request := pipeline.Request{
-		FeatureID:       strings.TrimSpace(featureID),
-		ClientRequestID: strings.TrimSpace(input.ClientRequestID),
-		Repository:      input.Repository,
-		BaseRef:         strings.TrimSpace(input.BaseRef),
-		Provider:        strings.ToLower(strings.TrimSpace(input.Provider)),
-		Model:           strings.TrimSpace(input.Model),
-		NetworkEnabled:  input.NetworkEnabled,
-	}
-	if request.FeatureID == "" {
-		return pipeline.Request{}, fmt.Errorf("feature id is required")
-	}
-	if request.ClientRequestID == "" {
-		return pipeline.Request{}, fmt.Errorf("client_request_id is required")
-	}
-	if len(request.ClientRequestID) > 128 {
-		return pipeline.Request{}, fmt.Errorf("client_request_id exceeds 128 bytes")
-	}
-	repository, err := delivery.NormalizeRepository(input.Repository)
-	if err != nil {
-		return pipeline.Request{}, err
-	}
-	request.Repository = repository
-	if request.BaseRef == "" {
-		request.BaseRef = "HEAD"
-	}
-	if request.Provider == "" {
-		return pipeline.Request{}, fmt.Errorf("provider is required")
-	}
-	return request, nil
 }
 
 func normalizeReviewPolicyInput(input reviewPolicyInput) (delivery.ReviewPolicy, error) {
@@ -323,25 +289,6 @@ func normalizeTextList(name string, values []string) ([]string, error) {
 		out = append(out, value)
 	}
 	return out, nil
-}
-
-func normalizeImplementationOptions(options *delivery.ImplementationOptions) error {
-	options.ClientRequestID = strings.TrimSpace(options.ClientRequestID)
-	options.DesignArtifactID = strings.TrimSpace(options.DesignArtifactID)
-	options.PlanArtifactID = strings.TrimSpace(options.PlanArtifactID)
-	options.ParentRunID = strings.TrimSpace(options.ParentRunID)
-	options.BaseRef = strings.TrimSpace(options.BaseRef)
-	if options.BaseRef == "" {
-		options.BaseRef = "HEAD"
-	}
-	options.Provider = strings.ToLower(strings.TrimSpace(options.Provider))
-	options.Model = strings.TrimSpace(options.Model)
-	repository, err := delivery.NormalizeRepository(options.Repository)
-	if err != nil {
-		return err
-	}
-	options.Repository = repository
-	return nil
 }
 
 func requestLimit(r *http.Request, defaultLimit, maxLimit int) (int, error) {
