@@ -152,7 +152,9 @@ type Service struct {
 	closed   bool
 }
 
-// NewService binds catalog resolution and durable transitions around an Orchestrator.
+// NewService creates the durable Workflow application boundary.
+// Catalog resolution and persistence remain available across orchestrator reloads.
+// New execution is unavailable until an Orchestrator is configured.
 func NewService(
 	catalog *Catalog,
 	store persistence,

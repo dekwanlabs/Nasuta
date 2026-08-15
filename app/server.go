@@ -98,7 +98,9 @@ func (p *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 	return nil
 }
 
-// recoverStartupRuns resumes durable work first, then reconciles owning domain records.
+// recoverStartupRuns resumes work left active by an earlier process.
+// Durable Workflow state is recovered before domain projections are reconciled.
+// This ordering prevents owners from observing a stale terminal outcome.
 func (p *Platform) recoverStartupRuns(ctx context.Context, startedBefore time.Time) {
 	p.qa.reload.RLock()
 	qa := p.currentQARuntime().InvestigationReconciler

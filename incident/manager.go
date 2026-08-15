@@ -95,7 +95,9 @@ func (manager *Manager) Close() error {
 	return nil
 }
 
-// CreateFromAlert reuses an active incident with the same canonical alert identity.
+// CreateFromAlert persists an incident derived from one alert.
+// Canonical service identities contribute to its deduplication key.
+// An existing non-terminal incident is returned instead of starting duplicate analysis.
 func (manager *Manager) CreateFromAlert(ctx context.Context, source string, alert AlertPayload) (*Incident, error) {
 	now := time.Now()
 	if alert.Title == "" {

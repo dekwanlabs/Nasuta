@@ -15,7 +15,9 @@ func NewExecutor(timeout time.Duration) *Executor {
 	return &Executor{DefaultTimeout: timeout}
 }
 
-// Execute resolves from the caller's snapshot so one Run cannot observe registry changes mid-flight.
+// Execute validates and invokes one tool from the caller's snapshot.
+// Snapshot resolution prevents Registry changes from affecting an active Run.
+// The selected handler executes under its configured or default timeout.
 func (executor *Executor) Execute(ctx context.Context, snapshot Snapshot, id ToolID, args Arguments) (Result, error) {
 	finish := beginExecution(ctx, id, args)
 	var result Result

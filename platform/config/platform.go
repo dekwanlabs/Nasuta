@@ -173,7 +173,9 @@ func (p *PlatformSettings) Values() map[string]any {
 	}
 }
 
-// Apply establishes canonical runtime defaults while decoding persisted settings.
+// Apply decodes persisted platform settings into runtime configuration.
+// Missing values receive the canonical defaults owned by this boundary.
+// Downstream consumers can rely on the resulting normalized representation.
 func (p *PlatformSettings) Apply(m map[string]string) {
 	if p.LLMContextWindow == 0 {
 		p.LLMContextWindow = DefaultLLMContextWindow

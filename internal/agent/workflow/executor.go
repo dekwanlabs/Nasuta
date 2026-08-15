@@ -65,7 +65,9 @@ type NodeDispatcher struct {
 	transform NodeExecutor
 }
 
-// NewNodeDispatcher keeps Agent and deterministic transform execution separate.
+// NewNodeDispatcher routes nodes to their specialized executors.
+// Agent and deterministic transform lifecycles remain independently owned.
+// A nil result means neither execution capability is available.
 func NewNodeDispatcher(agent, transform NodeExecutor) *NodeDispatcher {
 	if agent == nil && transform == nil {
 		return nil
@@ -160,7 +162,9 @@ type Orchestrator struct {
 	capabilityLimiters map[capabilityLimitKey]*capabilityLimiter
 }
 
-// NewOrchestrator builds a scheduler over immutable schemas and explicit node executors.
+// NewOrchestrator builds a Workflow DAG scheduler.
+// Schema validation and node execution remain explicit dependencies.
+// Gate evaluators are copied so caller mutation cannot alter scheduling.
 func NewOrchestrator(
 	schemas *agentapi.SchemaRegistry,
 	nodes NodeExecutor,
@@ -182,7 +186,9 @@ func (orchestrator *Orchestrator) Run(ctx context.Context, definition Definition
 	return orchestrator.RunObserved(ctx, definition, request, nil)
 }
 
-// RunObserved executes stable DAG waves and reports transitions at their commit boundary.
+// RunObserved executes one prepared Workflow as stable DAG waves.
+// Node contexts remain independent while shared budgets converge centrally.
+// Observer callbacks run at transition boundaries suitable for persistence.
 func (orchestrator *Orchestrator) RunObserved(
 	ctx context.Context,
 	definition Definition,

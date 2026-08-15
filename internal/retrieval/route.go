@@ -96,7 +96,9 @@ var (
 	routingContract         = prompts.Text(prompts.RetrievalRouting)
 )
 
-// AnalyzeEvidence produces one validated decision across evidence, tools, history, and execution strategy.
+// AnalyzeEvidence performs the model-backed preprocessing for one question.
+// Evidence routing, tool selection, history relation, and execution strategy share one call.
+// Every requested section is validated before the combined decision is returned.
 func AnalyzeEvidence(
 	ctx context.Context,
 	client *llm.LLMClient,

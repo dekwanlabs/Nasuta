@@ -73,7 +73,9 @@ type CapabilityRegistry struct {
 	agents  DefinitionResolver
 }
 
-// NewCapabilityRegistry creates an empty registry bound to schema and Agent catalogs.
+// NewCapabilityRegistry creates an empty capability registry.
+// Published capabilities remain bound to exact Schema and Agent versions.
+// Readers observe each completed publication as one immutable snapshot.
 func NewCapabilityRegistry(
 	schemas *SchemaRegistry,
 	agents DefinitionResolver,
@@ -164,7 +166,9 @@ func (registry *CapabilityRegistry) Resolve(ref CapabilityRef) (Capability, erro
 	return cloneCapability(capability), nil
 }
 
-// Revision changes only after an atomic capability publication.
+// Revision identifies the currently published capability snapshot.
+// It advances only after an entire publication batch is accepted.
+// Callers can use it to refresh derived surfaces without partial reads.
 func (registry *CapabilityRegistry) Revision() uint64 {
 	if registry == nil || registry.state.Load() == nil {
 		return 0

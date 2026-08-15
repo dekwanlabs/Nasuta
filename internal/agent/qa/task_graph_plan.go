@@ -104,7 +104,9 @@ var taskGraphPlanningSpec = runtrace.Spec[taskGraphPlanningInput, taskGraphPlann
 	},
 }
 
-// planTaskGraph constrains model planning to server-selected capabilities and validates the result.
+// planTaskGraph asks the model for a bounded task decomposition.
+// Only capabilities selected by the server are exposed to planning.
+// The proposal is validated before it can reach Workflow execution.
 func (svc *Service) planTaskGraph(
 	ctx context.Context,
 	contract TaskContract,

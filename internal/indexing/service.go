@@ -89,7 +89,9 @@ func (svc *Service) SetTools(tools ToolsSink) {
 	}
 }
 
-// SetOntologyPublisher connects completed structural rebuilds to the shared ontology snapshot.
+// SetOntologyPublisher configures publication of rebuilt structural knowledge.
+// A completed index rebuild replaces the shared ontology snapshot atomically.
+// Leaving it unset disables publication without disabling indexing.
 func (svc *Service) SetOntologyPublisher(publisher ontology.Publisher) {
 	svc.publisher = publisher
 }
@@ -106,7 +108,9 @@ func (svc *Service) SetPlatform(settings *config.PlatformSettings) {
 	}
 }
 
-// Close releases configured backends without assuming every optional capability exists.
+// Close releases the backends owned by the indexing service.
+// Optional backends are closed only when they were configured.
+// Individual close failures remain observable through logging.
 func (svc *Service) Close() {
 	if svc.Semantic != nil {
 		if err := svc.Semantic.Close(); err != nil {
