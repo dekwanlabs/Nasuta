@@ -84,23 +84,23 @@ func TestRoutedTemporalToolUsesFullInvestigationBudget(t *testing.T) {
 		{ID: "search_code", Temporal: false},
 		{ID: "observe_logs", Temporal: true},
 	}
-	if !routedToolsNeedFullInvestigation(candidates, []string{"observe_logs"}) {
+	if !toolsNeedInvestigation(candidates, []string{"observe_logs"}) {
 		t.Fatal("selected temporal tool did not enable full investigation")
 	}
-	agent := NewAgent(nil, nil, AgentConfig{MaxSteps: 8}, nil, nil)
+	agent := NewAgent(nil, nil, Config{MaxSteps: 8}, nil, nil)
 	if got := agent.MaxStepsForContext("查一下问题", domain.EvidencePlan{}, true); got != 8 {
 		t.Fatalf("max steps = %d, want 8", got)
 	}
-	if routedToolsNeedFullInvestigation(candidates, []string{"search_code"}) {
+	if toolsNeedInvestigation(candidates, []string{"search_code"}) {
 		t.Fatal("non-temporal tool enabled full investigation")
 	}
 }
 
 func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
-	svc := &QA{}
-	prepared := &qaPreparation{
+	svc := &Service{}
+	prepared := &preparation{
 		ctx:     context.Background(),
-		request: QARequest{RunID: "degraded-route"},
+		request: Request{RunID: "degraded-route"},
 		planning: evidencePlanningOutput{
 			Decision: domain.PlanDecision{
 				Plan:       domain.EvidencePlan{Sources: domain.Internal},
@@ -125,7 +125,7 @@ func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
 		},
 	}
 
-	svc.routeQAExecution(prepared)
+	svc.applyExecutionRoute(prepared)
 
 	if prepared.execution.DowngradeReason != "workflow_unavailable" {
 		t.Fatalf("downgrade reason = %q, want workflow_unavailable", prepared.execution.DowngradeReason)
@@ -136,10 +136,10 @@ func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
 }
 
 func TestExecutionRoutingDoesNotUseResolvedHistoryRelation(t *testing.T) {
-	svc := &QA{}
-	prepared := &qaPreparation{
+	svc := &Service{}
+	prepared := &preparation{
 		ctx:     context.Background(),
-		request: QARequest{RunID: "resolved-history-route"},
+		request: Request{RunID: "resolved-history-route"},
 		planning: evidencePlanningOutput{
 			Decision: domain.PlanDecision{
 				Plan:       domain.EvidencePlan{Sources: domain.Internal},
@@ -162,7 +162,7 @@ func TestExecutionRoutingDoesNotUseResolvedHistoryRelation(t *testing.T) {
 		},
 	}
 
-	svc.routeQAExecution(prepared)
+	svc.applyExecutionRoute(prepared)
 
 	if prepared.execution.DowngradeReason != "workflow_unavailable" {
 		t.Fatalf("downgrade reason = %q, want workflow_unavailable",
@@ -172,7 +172,7 @@ func TestExecutionRoutingDoesNotUseResolvedHistoryRelation(t *testing.T) {
 
 func TestStandardQARequestAllowsSeedContextPrefetchAndParentReference(t *testing.T) {
 	defaultAgent := agentapi.DefinitionRef{ID: "qa.answerer", Version: 3}
-	request := QARequest{
+	request := Request{
 		PreloadedContext: []ContextBlock{{
 			Source: "scenario", Content: "trusted seed context",
 		}},
@@ -181,18 +181,18 @@ func TestStandardQARequestAllowsSeedContextPrefetchAndParentReference(t *testing
 		}}},
 		ParentRunID: "qa-parent-run",
 	}
-	if !standardQARequest(request, defaultAgent) {
+	if !standardRequest(request, defaultAgent) {
 		t.Fatal("seed context, prefetch, and parent reference disabled multi-agent routing")
 	}
 	request.WorkflowRunID = "workflow-parent"
 	request.WorkflowNodeID = "answer"
-	if standardQARequest(request, defaultAgent) {
+	if standardRequest(request, defaultAgent) {
 		t.Fatal("nested workflow node was accepted as a standard QA request")
 	}
 }
 
 func TestNormalizeQARequestCanonicalizesWithoutMutatingConversationInstructions(t *testing.T) {
-	request := QARequest{
+	request := Request{
 		Question: "  explain the checkout flow  ",
 		RunID:    "normalized-run",
 		Conversation: ConversationContext{
@@ -200,9 +200,9 @@ func TestNormalizeQARequestCanonicalizesWithoutMutatingConversationInstructions(
 		},
 	}
 
-	normalized, err := normalizeQARequest(request)
+	normalized, err := normalizeRequest(request)
 	if err != nil {
-		t.Fatalf("normalizeQARequest: %v", err)
+		t.Fatalf("normalizeRequest: %v", err)
 	}
 	if normalized.Question != "explain the checkout flow" {
 		t.Fatalf("question = %q", normalized.Question)
@@ -247,7 +247,7 @@ func TestRunStoreCompleteTransitionsOnlyActiveRun(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := run.BindStore(db)
+	store := run.Bind(db)
 	outcome := RunOutcome{
 		Status: RunStatusDone, StepCount: 2, TokenUsed: 12,
 		Evidence: EvidenceMetrics{
@@ -275,7 +275,7 @@ func TestRunStoreCreatePersistsAgentAndWorkflowSnapshot(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := run.BindStore(db)
+	store := run.Bind(db)
 	record := RunRecord{
 		ID: "run-1", UserID: 42, SessionID: "session-1",
 		AgentID: "qa.answerer", DefinitionVersion: 3,
@@ -320,7 +320,7 @@ func TestRunStoreEvidenceByIDsIsBoundToUserAndSession(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := run.BindStore(db)
+	store := run.Bind(db)
 	mock.ExpectQuery(`SELECT id,evidence_status.*FROM agent_runs WHERE user_id=\? AND session_id=\? AND id IN \(\?,\?\)`).
 		WithArgs(int64(42), "session-1", "run-1", "run-2").
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -350,7 +350,7 @@ func TestRunStoreRecordLLMCallUpdatesDetailAndAggregateAtomically(t *testing.T) 
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := run.BindStore(db)
+	store := run.Bind(db)
 	call := llm.CallUsage{
 		RunID: "run", Phase: llm.PhaseAgentStep, Provider: "openai", Model: "model",
 		MaxOutputTokens: 50, Duration: 12 * time.Millisecond, Status: llm.CallStatusSucceeded,
@@ -386,7 +386,7 @@ func TestRunStoreUsageSummaryUsesSessionAggregateAndLatestRound(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := run.BindStore(db)
+	store := run.Bind(db)
 
 	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(total_tokens\\),0\\) FROM agent_runs").
 		WithArgs(int64(7), "session-1").
@@ -414,20 +414,20 @@ func TestRunStoreUsageSummaryUsesSessionAggregateAndLatestRound(t *testing.T) {
 	}
 }
 
-func TestRunStoreLatestContextUsageReturnsBothPeaks(t *testing.T) {
+func TestStoreLatestUsageReturnsBothPeaks(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := run.BindStore(db)
+	store := run.Bind(db)
 	mock.ExpectQuery(`SELECT peak_input_tokens,peak_reserved_tokens.*ORDER BY started_at DESC,id DESC LIMIT 1`).
 		WithArgs(int64(7), "session-1").
 		WillReturnRows(sqlmock.NewRows([]string{"peak_input_tokens", "peak_reserved_tokens"}).AddRow(86000, 118000))
 
-	usage, err := store.LatestContextUsage(7, "session-1")
+	usage, err := store.LatestUsage(7, "session-1")
 	if err != nil {
-		t.Fatalf("LatestContextUsage: %v", err)
+		t.Fatalf("LatestUsage: %v", err)
 	}
 	if usage.PeakInputTokens != 86000 || usage.PeakReservedTokens != 118000 {
 		t.Fatalf("usage = %+v", usage)
@@ -443,7 +443,7 @@ func TestRunStoreRejectsTerminalOverwrite(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := run.BindStore(db)
+	store := run.Bind(db)
 	mock.ExpectExec("UPDATE agent_runs").
 		WithArgs(
 			RunStatusFailed, "", 0, 0, EvidenceUnavailable, false, 0, 0, 0, 0, 0,
@@ -465,7 +465,7 @@ func TestRunStoreControlTransitionIsConditional(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := run.BindStore(db)
+	store := run.Bind(db)
 	mock.ExpectExec("UPDATE agent_runs SET status=\\? WHERE id=\\? AND status=\\?").
 		WithArgs(RunStatusPaused, "run", RunStatusRunning).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -483,12 +483,12 @@ func TestRunStoreRecoversInterruptedRuns(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := run.BindStore(db)
+	store := run.Bind(db)
 	mock.ExpectExec("UPDATE agent_runs SET status=\\?,ended_at=\\? WHERE run_kind=\\? AND status IN \\(\\?,\\?\\)").
 		WithArgs(
 			RunStatusAborted,
 			sqlmock.AnyArg(),
-			run.RunKindAgent,
+			run.KindAgent,
 			RunStatusRunning,
 			RunStatusPaused,
 		).
@@ -561,7 +561,7 @@ func newQARuntimeFixture(
 	registry *Registry,
 	retriever contextRetriever,
 	pruningEnabled bool,
-) (*QA, *DefinitionRuntime) {
+) (*Service, *DefinitionRuntime) {
 	return newQARuntimeFixtureWithStore(
 		t, client, baseURL, registry, retriever, pruningEnabled, nil,
 	)
@@ -575,7 +575,7 @@ func newQARuntimeFixtureWithStore(
 	retriever contextRetriever,
 	pruningEnabled bool,
 	store *RunStore,
-) (*QA, *DefinitionRuntime) {
+) (*Service, *DefinitionRuntime) {
 	t.Helper()
 	definition := testQADefinition(t, func(definition *agentapi.Definition) {
 		definition.Budget.ContextTokens = 32768
@@ -583,7 +583,10 @@ func newQARuntimeFixtureWithStore(
 	runtime := newTestDefinitionRuntime(
 		t, definition, registry, testRuntimeSettings(baseURL), store,
 	)
-	qa := &QA{
+	if retriever == nil {
+		retriever = emptyContextRetriever{}
+	}
+	qa := &Service{
 		helperLLM: client, fastLLM: client,
 		retriever: retriever,
 		runtime:   runtime, runtimeTools: runtime, phaseEmitter: runtime,
@@ -602,6 +605,22 @@ func newQARuntimeFixtureWithStore(
 
 type failingContextRetriever struct {
 	err error
+}
+
+type emptyContextRetriever struct{}
+
+func (emptyContextRetriever) RetrievePlan(
+	context.Context,
+	string,
+	retrieval.QueryTerms,
+	domain.EvidencePlan,
+	domain.RetrievalIntent,
+) (*retrieval.RetrievedContext, error) {
+	return &retrieval.RetrievedContext{}, nil
+}
+
+func (emptyContextRetriever) ContextBudget() int {
+	return 48000
 }
 
 type investigationRunnerRecorder struct {
@@ -666,7 +685,7 @@ func (recorder *scenarioRunRecorder) Context(ctx context.Context) context.Contex
 	return ctx
 }
 
-func (recorder *scenarioRunRecorder) RecordPreparationStep(
+func (recorder *scenarioRunRecorder) RecordStep(
 	context.Context,
 	RunStepRecord,
 ) error {
@@ -688,7 +707,7 @@ type scenarioLifecycleRecorder struct {
 	complete  func(context.Context, string, RunOutcome) error
 }
 
-func (recorder *scenarioLifecycleRecorder) BeginScenario(_ context.Context, start ScenarioRunStart) (ScenarioRun, error) {
+func (recorder *scenarioLifecycleRecorder) Start(_ context.Context, start ScenarioRunStart) (ScenarioRun, error) {
 	recorder.mu.Lock()
 	recorder.parent = QAParentRecord{
 		ID: start.RunID, WorkflowRunID: start.WorkflowRunID,
@@ -700,7 +719,7 @@ func (recorder *scenarioLifecycleRecorder) BeginScenario(_ context.Context, star
 	return recorder.scenario, nil
 }
 
-func (recorder *scenarioLifecycleRecorder) CompleteScenario(
+func (recorder *scenarioLifecycleRecorder) Complete(
 	ctx context.Context,
 	runID string,
 	outcome RunOutcome,
@@ -734,7 +753,7 @@ type executionEventRecorder struct {
 	events []executionEventRecord
 }
 
-func (recorder *executionEventRecorder) EmitExecutionEvent(eventType EventType, event ExecutionEvent) {
+func (recorder *executionEventRecorder) EmitEvent(eventType EventType, event ExecutionEvent) {
 	recorder.mu.Lock()
 	recorder.events = append(recorder.events, executionEventRecord{eventType: eventType, event: event})
 	recorder.mu.Unlock()
@@ -783,28 +802,29 @@ func TestSubmitInvestigationSurvivesCallerCancellation(t *testing.T) {
 			return InvestigationTerminal{
 				WorkflowRunID: workflowRunID,
 				Status:        InvestigationSucceeded,
+				Completeness:  InvestigationComplete,
 				Output:        &result,
 			}, nil
 		},
 	}
-	qa := &QA{
+	qa := &Service{
 		investigation: runner,
 		scenarios:     lifecycle,
-		coordinator: &InvestigationCoordinator{
+		coordinator: &Coordinator{
 			investigation: runner,
 			scenarios:     lifecycle,
 			parentRuns:    lifecycle,
 			sessions:      &coordinatorSessionStore{turnByRun: make(map[string]int)},
 		},
 	}
-	request := QARequest{
+	request := Request{
 		Question:     "trace the checkout flow",
 		Conversation: ConversationContext{SessionID: "session-1"},
 		UserID:       42,
 		RunID:        runID,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	result, err := qa.submitInvestigation(&qaPreparation{ctx: ctx, request: request})
+	result, err := qa.submitInvestigation(&preparation{ctx: ctx, request: request})
 	if err != nil {
 		t.Fatalf("submitInvestigation: %v", err)
 	}
@@ -882,12 +902,13 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 			return InvestigationTerminal{
 				WorkflowRunID: workflowRunID,
 				Status:        InvestigationSucceeded,
+				Completeness:  InvestigationComplete,
 				Output:        &result,
 				Usage:         InvestigationUsage{TotalTokens: 91, ToolCalls: 4},
 			}, nil
 		},
 	}
-	qa.coordinator = &InvestigationCoordinator{
+	qa.coordinator = &Coordinator{
 		investigation: qa.investigation,
 		scenarios:     lifecycle,
 		parentRuns:    lifecycle,
@@ -896,7 +917,7 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 	events := &executionEventRecorder{}
 	qa.executionEvents = events
 
-	result, err := qa.Ask(context.Background(), QARequest{
+	result, err := qa.Ask(context.Background(), Request{
 		Question:     "trace the checkout flow",
 		Conversation: ConversationContext{SessionID: "session-1"},
 		UserID:       42,
@@ -927,6 +948,12 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 			request.Contract.Objective != "trace the checkout flow" ||
 			request.Actor.UserID != 42 {
 			t.Fatalf("investigation request = %+v", request)
+		}
+		if request.Proposal == nil || len(request.Proposal.Tasks) != 3 ||
+			request.Proposal.Tasks[0].ID != "inspect.flow" ||
+			request.Proposal.Tasks[1].ID != "trace.dependencies" ||
+			request.Proposal.Tasks[2].ID != "synthesize" {
+			t.Fatalf("task graph proposal = %+v", request.Proposal)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("investigation did not start")
@@ -983,14 +1010,14 @@ func TestAskMultiAgentInvestigationFailureCompletesParentAsFailed(t *testing.T) 
 			}, nil
 		},
 	}
-	qa.coordinator = NewInvestigationCoordinator(
+	qa.coordinator = NewCoordinator(
 		qa.investigation,
 		lifecycle,
 		lifecycle,
 		nil,
 	)
 
-	if _, err := qa.Ask(context.Background(), QARequest{
+	if _, err := qa.Ask(context.Background(), Request{
 		Question: "trace the checkout flow", UserID: 42, RunID: runID,
 	}); err != nil {
 		t.Fatalf("Ask: %v", err)
@@ -1021,7 +1048,7 @@ func TestAskExecutionEventsOrderDegradedRouteBeforeSingleAgent(t *testing.T) {
 	}
 	qa.scenarios = lifecycle
 	qa.investigation = &investigationRunnerRecorder{}
-	qa.coordinator = NewInvestigationCoordinator(
+	qa.coordinator = NewCoordinator(
 		qa.investigation,
 		lifecycle,
 		lifecycle,
@@ -1031,7 +1058,7 @@ func TestAskExecutionEventsOrderDegradedRouteBeforeSingleAgent(t *testing.T) {
 	qa.executionEvents = events
 	terminalEvents := runtime.Hub().Subscribe(runID)
 
-	result, err := qa.Ask(context.Background(), QARequest{
+	result, err := qa.Ask(context.Background(), Request{
 		Question: "trace the checkout flow",
 		PreloadedContext: []ContextBlock{{
 			Source: "scenario", Content: "supplied scenario context",
@@ -1091,7 +1118,7 @@ func TestAskSingleAgentRouteDoesNotStartScenario(t *testing.T) {
 	}
 	qa.scenarios = lifecycle
 	qa.investigation = &investigationRunnerRecorder{}
-	qa.coordinator = NewInvestigationCoordinator(
+	qa.coordinator = NewCoordinator(
 		qa.investigation,
 		lifecycle,
 		lifecycle,
@@ -1099,7 +1126,7 @@ func TestAskSingleAgentRouteDoesNotStartScenario(t *testing.T) {
 	)
 	terminalEvents := runtime.Hub().Subscribe(runID)
 
-	if _, err := qa.Ask(context.Background(), QARequest{
+	if _, err := qa.Ask(context.Background(), Request{
 		Question: "what causes a rainbow?", UserID: 42, RunID: runID,
 	}); err != nil {
 		t.Fatalf("Ask: %v", err)
@@ -1117,6 +1144,8 @@ func TestAskSingleAgentRouteDoesNotStartScenario(t *testing.T) {
 
 func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *httptest.Server) {
 	t.Helper()
+	var nonStreamMu sync.Mutex
+	nonStreamCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var payload struct {
 			Stream bool `json:"stream"`
@@ -1126,8 +1155,16 @@ func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *http
 			return
 		}
 		if !payload.Stream {
+			nonStreamMu.Lock()
+			nonStreamCalls++
+			call := nonStreamCalls
+			nonStreamMu.Unlock()
 			writer.Header().Set("Content-Type", "application/json")
-			_, _ = writer.Write([]byte(routeBody))
+			if call == 1 {
+				_, _ = writer.Write([]byte(routeBody))
+			} else {
+				_, _ = writer.Write([]byte(multiAgentTaskGraphBody()))
+			}
 			return
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
@@ -1142,7 +1179,11 @@ func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *http
 }
 
 func multiAgentRouteBody() string {
-	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.95,\"confidence\":0.95,\"reasons\":[\"requires_multiple_subproblems\"]}}"}}]}`
+	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[\"call chain\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.95,\"confidence\":0.95,\"reasons\":[\"requires_multiple_subproblems\"]}}"}}]}`
+}
+
+func multiAgentTaskGraphBody() string {
+	return `{"choices":[{"message":{"content":"{\"tasks\":[{\"id\":\"inspect.flow\",\"purpose\":\"Inspect the entrypoint, core flow, and state transitions.\",\"capability\":\"knowledge.code.inspect\",\"required_facets\":[\"entrypoint\",\"core_flow\",\"data_and_state\"],\"depends_on\":[]},{\"id\":\"trace.dependencies\",\"purpose\":\"Trace the external service dependencies.\",\"capability\":\"knowledge.service.trace\",\"required_facets\":[\"external_dependency\"],\"depends_on\":[]}]}"}}]}`
 }
 
 func singleAgentRouteBody() string {
@@ -1165,7 +1206,7 @@ func waitForTerminal(t *testing.T, ch chan SSEEvent) *RunTerminal {
 	}
 }
 
-func TestAskAgentDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
+func TestAskDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 	var routerCalls, agentCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -1196,9 +1237,9 @@ func TestAskAgentDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 	qa, runtime := newQARuntimeFixture(t, client, server.URL, registry, nil, false)
 
 	terminalCh := runtime.Hub().Subscribe("direct-run")
-	result, err := qa.AskAgent(context.Background(), "What causes a rainbow?", nil, 0, "", "direct-run")
+	result, err := qa.AskWithHistory(context.Background(), "What causes a rainbow?", nil, 0, "", "direct-run")
 	if err != nil {
-		t.Fatalf("AskAgent: %v", err)
+		t.Fatalf("Ask: %v", err)
 	}
 	if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
 		t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
@@ -1250,16 +1291,16 @@ func TestAskSessionPersistenceFailureCompletesRunAsFailed(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "review-model", 256, server.Client())
 	qa, runtime := newQARuntimeFixtureWithStore(
-		t, client, server.URL, tool.NewRegistry(), nil, false, run.BindStore(runDB),
+		t, client, server.URL, tool.NewRegistry(), nil, false, run.Bind(runDB),
 	)
 	qa.sessions = memory.NewSessionStore(sessionDB)
 	events := runtime.Hub().Subscribe(runID)
-	_, err = qa.AskAgentWithContext(
+	_, err = qa.AskWithContext(
 		context.Background(), "你能做什么？",
 		ConversationContext{SessionID: "session-1"}, 42, "", runID, nil, false,
 	)
 	if err != nil {
-		t.Fatalf("AskAgentWithContext: %v", err)
+		t.Fatalf("AskWithContext: %v", err)
 	}
 	terminal := waitForTerminal(t, events)
 	if terminal.Status != RunStatusFailed || !strings.Contains(terminal.Error, "session database unavailable") {
@@ -1298,11 +1339,11 @@ func TestAskRetrievalFailureCompletesStartedRunAsFailed(t *testing.T) {
 	qa, runtime := newQARuntimeFixtureWithStore(
 		t, nil, "http://unused", tool.NewRegistry(),
 		failingContextRetriever{err: errors.New("retrieval backend unavailable")},
-		false, run.BindStore(db),
+		false, run.Bind(db),
 	)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
 	events := runtime.Hub().Subscribe(runID)
-	_, err = qa.AskAgentWithContext(
+	_, err = qa.AskWithContext(
 		context.Background(), "find the implementation", ConversationContext{},
 		42, "", runID, &plan, false,
 	)
@@ -1318,7 +1359,7 @@ func TestAskRetrievalFailureCompletesStartedRunAsFailed(t *testing.T) {
 	}
 }
 
-func TestAskAgentRouterInvalidOutputFallsBackInternal(t *testing.T) {
+func TestAskRouterInvalidOutputFallsBackInternal(t *testing.T) {
 	var routerCalls, agentCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -1352,9 +1393,9 @@ func TestAskAgentRouterInvalidOutputFallsBackInternal(t *testing.T) {
 	)
 
 	terminalCh := runtime.Hub().Subscribe("invalid-route-run")
-	result, err := qa.AskAgent(context.Background(), "What causes a rainbow?", nil, 0, "", "invalid-route-run")
+	result, err := qa.AskWithHistory(context.Background(), "What causes a rainbow?", nil, 0, "", "invalid-route-run")
 	if err != nil {
-		t.Fatalf("AskAgent: %v", err)
+		t.Fatalf("Ask: %v", err)
 	}
 	if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
 		t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
@@ -1368,10 +1409,10 @@ func TestAskAgentRouterInvalidOutputFallsBackInternal(t *testing.T) {
 	}
 }
 
-// TestAskAgentPrunesScenarioToolsWhenRoutingSaysSo drives the full AskAgent path
+// TestAskPrunesScenarioToolsWhenRoutingSaysSo drives the full Ask path
 // with two base read tools and two routing-gated scenario tools, asserting the
 // offered tool set shrinks when pruning is live and stays full in dry-run.
-func TestAskAgentPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
+func TestAskPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
 	run := func(pruningEnabled bool, routeBody string) (toolNames []string, traces []domain.EvaluationTrace) {
 		var agentToolNames []string
 		recorder := &toolTraceRecorder{}
@@ -1412,9 +1453,9 @@ func TestAskAgentPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
 		ctx := domain.WithTraceRecorder(context.Background(), recorder)
 		runID := fmt.Sprintf("prune-run-%t", pruningEnabled)
 		terminalCh := runtime.Hub().Subscribe(runID)
-		result, err := qa.AskAgent(ctx, "how many requests failed?", nil, 0, "", runID)
+		result, err := qa.AskWithHistory(ctx, "how many requests failed?", nil, 0, "", runID)
 		if err != nil {
-			t.Fatalf("AskAgent: %v", err)
+			t.Fatalf("Ask: %v", err)
 		}
 		if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
 			t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
@@ -1606,7 +1647,7 @@ func TestQAContextBlockHashesDeliveredTextAndPropagatesConflicts(t *testing.T) {
 			},
 		}},
 	}
-	blocks := qaContextBlocks(rc)
+	blocks := contextBlocks(rc)
 	if len(blocks) != 1 || blocks[0].ContentHash != hashString(rc.Text) {
 		t.Fatalf("context blocks = %#v", blocks)
 	}
@@ -1621,7 +1662,7 @@ type preparationStepCapture struct {
 	failAt int
 }
 
-func (capture *preparationStepCapture) RecordPreparationStep(
+func (capture *preparationStepCapture) RecordStep(
 	_ context.Context,
 	step RunStepRecord,
 ) error {
@@ -1658,7 +1699,7 @@ func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 			}, nil
 		}),
 	})
-	qa := &QA{}
+	qa := &Service{}
 	prepared := preparedScenarioTools{
 		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
 		executor: NewToolExecutor(registry),
@@ -1692,7 +1733,7 @@ func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 		t.Fatalf("tool call step = %#v", call)
 	}
 	if result.Kind != run.StepKindToolResult || result.ToolCallID != call.ToolCallID ||
-		result.TraceID != prefetchToolResultTraceID(runID, wantCallID) ||
+		result.TraceID != prefetchTraceID(runID, wantCallID) ||
 		result.Content != "evidence" || result.PromptContent != "evidence" ||
 		result.AuthoritativeSHA256 != hashString("evidence") ||
 		result.PromptSHA256 != hashString("evidence") ||
@@ -1721,7 +1762,7 @@ func TestExecutePrefetchRecordsFailedToolResult(t *testing.T) {
 		executor: NewToolExecutor(registry),
 	}
 	recorder := &preparationStepCapture{}
-	blocks, err := (&QA{}).executePrefetch(
+	blocks, err := (&Service{}).executePrefetch(
 		context.Background(),
 		"run-prefetch-failed",
 		prepared,
@@ -1762,7 +1803,7 @@ func TestExecutePrefetchStopsWhenToolCallCannotBeRecorded(t *testing.T) {
 		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
 		executor: NewToolExecutor(registry),
 	}
-	_, err := (&QA{}).executePrefetch(
+	_, err := (&Service{}).executePrefetch(
 		context.Background(),
 		"run-prefetch-persist-failed",
 		prepared,

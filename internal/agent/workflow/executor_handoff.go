@@ -7,6 +7,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func (orchestrator *Orchestrator) validateNodeInputs(
@@ -67,7 +68,7 @@ func readyNodes(
 }
 
 func (orchestrator *Orchestrator) approvalHandoff(
-	definition WorkflowDefinition,
+	definition Definition,
 	runID string,
 	node NodeDefinition,
 	inputs []Handoff,
@@ -90,6 +91,8 @@ func (orchestrator *Orchestrator) approvalHandoff(
 			JoinPayloadList,
 			inputs,
 			nil,
+			nil,
+			0,
 			false,
 			definition.Budget.MaxHandoffBytes,
 			orchestrator.schemas,
@@ -144,7 +147,9 @@ func joinHandoffs(
 	schema agentapi.SchemaRef,
 	mode JoinMode,
 	inputs []Handoff,
-	unavailablePredecessors []string,
+	unavailableTasks []unavailableTaskView,
+	baselineEvidence []tool.EvidenceUnit,
+	maxDuplicateRatio float64,
 	rejectEvidenceConflicts bool,
 	maxBytes int64,
 	schemas *agentapi.SchemaRegistry,
@@ -160,19 +165,29 @@ func joinHandoffs(
 			completeness = Partial
 		}
 	}
-	if len(unavailablePredecessors) > 0 {
+	if len(unavailableTasks) > 0 {
 		if len(inputs) == 0 {
 			completeness = Unavailable
 		} else {
 			completeness = Partial
 		}
 	}
+	var convergence *convergenceView
+	if mode == JoinEvidenceView {
+		measured := measureConvergence(
+			inputs,
+			baselineEvidence,
+			maxDuplicateRatio,
+		)
+		convergence = &measured
+	}
 	payload, err := joinedPayload(
 		mode,
 		inputs,
-		unavailablePredecessors,
+		unavailableTasks,
 		evidenceUnits,
 		evidenceConflicts,
+		convergence,
 		completeness,
 	)
 	if err != nil {
@@ -188,7 +203,7 @@ func joinHandoffs(
 		return Handoff{}, err
 	}
 	if rejectEvidenceConflicts && len(evidenceConflicts) > 0 {
-		return handoff, evidenceConflictRejectionError{
+		return handoff, conflictRejectionError{
 			producer: producer,
 			count:    len(evidenceConflicts),
 		}
@@ -196,12 +211,26 @@ func joinHandoffs(
 	return handoff, nil
 }
 
-type evidenceConflictRejectionError struct {
+func unavailableTaskViews(
+	nodeIDs []string,
+	reasons map[string]StopReason,
+) []unavailableTaskView {
+	tasks := make([]unavailableTaskView, 0, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		tasks = append(tasks, unavailableTaskView{
+			ProducerNodeID: nodeID,
+			StopReason:     reasons[nodeID],
+		})
+	}
+	return tasks
+}
+
+type conflictRejectionError struct {
 	producer string
 	count    int
 }
 
-func (err evidenceConflictRejectionError) Error() string {
+func (err conflictRejectionError) Error() string {
 	return fmt.Sprintf(
 		"join %q rejected %d evidence conflict(s)",
 		err.producer,
@@ -209,7 +238,7 @@ func (err evidenceConflictRejectionError) Error() string {
 	)
 }
 
-func (err evidenceConflictRejectionError) Is(target error) bool {
+func (err conflictRejectionError) Is(target error) bool {
 	return target == ErrEvidenceConflict
 }
 
@@ -228,7 +257,7 @@ func cloneHandoffMap(source map[string]Handoff) map[string]Handoff {
 		handoff.Payload = append(json.RawMessage(nil), handoff.Payload...)
 		handoff.References = append([]agentapi.Reference(nil), handoff.References...)
 		handoff.EvidenceUnits = evidence.CloneUnits(handoff.EvidenceUnits)
-		handoff.EvidenceConflicts = cloneEvidenceConflicts(handoff.EvidenceConflicts)
+		handoff.EvidenceConflicts = cloneConflicts(handoff.EvidenceConflicts)
 		cloned[nodeID] = handoff
 	}
 	return cloned
@@ -248,6 +277,14 @@ func cloneStringSet(source map[string]struct{}) map[string]struct{} {
 	cloned := make(map[string]struct{}, len(source))
 	for value := range source {
 		cloned[value] = struct{}{}
+	}
+	return cloned
+}
+
+func cloneStopReasonMap(source map[string]StopReason) map[string]StopReason {
+	cloned := make(map[string]StopReason, len(source))
+	for nodeID, reason := range source {
+		cloned[nodeID] = reason
 	}
 	return cloned
 }

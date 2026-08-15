@@ -2,13 +2,16 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type capabilityLimitKey struct {
@@ -21,38 +24,45 @@ type capabilityLimiter struct {
 	tokens chan struct{}
 }
 
-type workflowConvergedTraceInput struct {
-	definition WorkflowDefinition
+type convergedTraceInput struct {
+	definition Definition
+	round      int
+	baseDepth  int
 }
 
-type workflowConvergedTraceOutput struct {
+type convergedTraceOutput struct {
 	result               Result
 	completedNodeCount   int
 	unavailableNodeCount int
 	waitingHumanCount    int
-	usage                WorkflowUsage
+	usage                Usage
 }
 
-var workflowConvergedTraceSpec = runtrace.Spec[
-	workflowConvergedTraceInput,
-	workflowConvergedTraceOutput,
+var convergedTraceSpec = runtrace.Spec[
+	convergedTraceInput,
+	convergedTraceOutput,
 ]{
 	Operation: "workflow.converged",
 	Node:      "workflow.converged",
-	Input: func(input workflowConvergedTraceInput) map[string]any {
+	Input: func(input convergedTraceInput) map[string]any {
+		maxRounds, maxDepth := executionLimits(input.definition)
 		return map[string]any{
 			"workflow_id":      input.definition.ID,
 			"workflow_version": input.definition.Version,
 			"workflow_hash":    input.definition.ContentHash,
 			"node_count":       len(input.definition.Nodes),
+			"round":            input.round,
+			"base_depth":       input.baseDepth,
+			"max_rounds":       maxRounds,
+			"max_depth":        maxDepth,
 		}
 	},
 	Output: func(
-		_ workflowConvergedTraceInput,
-		output workflowConvergedTraceOutput,
+		_ convergedTraceInput,
+		output convergedTraceOutput,
 		err error,
 	) map[string]any {
-		outcome, errorCode := workflowConvergenceOutcome(output, err)
+		outcome, errorCode := convergenceOutcome(output, err)
 		fields := map[string]any{
 			"outcome":                outcome,
 			"completed_node_count":   output.completedNodeCount,
@@ -63,13 +73,16 @@ var workflowConvergedTraceSpec = runtrace.Spec[
 		if output.result.Output.Completeness != "" {
 			fields["completeness"] = output.result.Output.Completeness
 		}
+		if stopReason := traceStopReason(output, err); stopReason != "" {
+			fields["stop_reason"] = stopReason
+		}
 		if errorCode != "" {
 			fields["error_code"] = errorCode
 		}
 		return fields
 	},
-	Status: func(output workflowConvergedTraceOutput, err error) string {
-		outcome, _ := workflowConvergenceOutcome(output, err)
+	Status: func(output convergedTraceOutput, err error) string {
+		outcome, _ := convergenceOutcome(output, err)
 		switch outcome {
 		case string(Complete):
 			return "completed"
@@ -87,20 +100,28 @@ var workflowConvergedTraceSpec = runtrace.Spec[
 
 func (orchestrator *Orchestrator) runPrepared(
 	ctx context.Context,
-	definition WorkflowDefinition,
+	definition Definition,
 	metadata graphMetadata,
 	request RunRequest,
-	progress WorkflowProgress,
+	progress Progress,
 	observer RunObserver,
 ) (Result, error) {
+	request.Round, request.BaseDepth = normalizePosition(
+		request.Round,
+		request.BaseDepth,
+	)
 	output, err := runtrace.Invoke(
 		ctx,
-		workflowConvergedTraceSpec,
-		workflowConvergedTraceInput{definition: definition},
+		convergedTraceSpec,
+		convergedTraceInput{
+			definition: definition,
+			round:      request.Round,
+			baseDepth:  request.BaseDepth,
+		},
 		func(
 			ctx context.Context,
-			_ workflowConvergedTraceInput,
-		) (workflowConvergedTraceOutput, error) {
+			_ convergedTraceInput,
+		) (convergedTraceOutput, error) {
 			return orchestrator.executePrepared(
 				ctx,
 				definition,
@@ -116,29 +137,46 @@ func (orchestrator *Orchestrator) runPrepared(
 
 func (orchestrator *Orchestrator) executePrepared(
 	ctx context.Context,
-	definition WorkflowDefinition,
+	definition Definition,
 	metadata graphMetadata,
 	request RunRequest,
-	progress WorkflowProgress,
+	progress Progress,
 	observer RunObserver,
-) (traceOutput workflowConvergedTraceOutput, runErr error) {
+) (traceOutput convergedTraceOutput, runErr error) {
 	runCtx, cancel := context.WithDeadline(ctx, progress.StartedAt.Add(definition.Budget.Timeout))
 	defer cancel()
 	outputs := cloneHandoffMap(progress.NodeOutputs)
 	gates := cloneGateMap(progress.Gates)
 	failedOptional := cloneStringSet(progress.FailedOptional)
+	failedOptionalReasons := cloneStopReasonMap(progress.FailedOptionalReasons)
 	waitingHuman := cloneStringSet(progress.WaitingHuman)
-	account, err := newWorkflowBudgetAccount(definition.Budget, progress.Usage)
+	account, err := newBudgetAccount(definition.Budget, progress.Usage)
 	defer func() {
 		traceOutput.completedNodeCount = len(outputs)
 		traceOutput.unavailableNodeCount = len(failedOptional)
 		traceOutput.waitingHumanCount = len(waitingHuman)
+		if traceOutput.result.RunID == "" {
+			traceOutput.result.RunID = request.RunID
+		}
 		if account != nil {
 			traceOutput.usage = account.Usage()
+			traceOutput.result.Usage = traceOutput.usage
+		}
+		if runErr != nil && traceOutput.result.StopReason == "" {
+			traceOutput.result.StopReason = errorStopReason(runErr)
 		}
 	}()
 	if err != nil {
 		return traceOutput, err
+	}
+	if err := admitPosition(definition, metadata, request); err != nil {
+		return traceOutput, err
+	}
+	if hasClarificationGate(gates) {
+		return traceOutput, convergenceError{
+			reason:  StopNeedsClarification,
+			message: fmt.Sprintf("workflow %q requires clarification", definition.ID),
+		}
 	}
 
 	for len(outputs)+len(failedOptional) < len(definition.Nodes) {
@@ -150,11 +188,19 @@ func (orchestrator *Orchestrator) executePrepared(
 			if len(waitingHuman) > 0 {
 				return traceOutput, ErrHumanApprovalRequired
 			}
-			return traceOutput, fmt.Errorf("workflow %q cannot make progress", definition.ID)
+			return traceOutput, convergenceError{
+				reason: blockedStopReason(
+					metadata,
+					outputs,
+					failedOptional,
+					failedOptionalReasons,
+				),
+				message: fmt.Sprintf("workflow %q cannot make progress", definition.ID),
+			}
 		}
 		wave, err := orchestrator.dispatchWave(
-			runCtx, definition, metadata, request, progress, outputs, failedOptional,
-			ready, account, observer,
+			runCtx, definition, metadata, request, progress, outputs,
+			failedOptional, failedOptionalReasons, ready, account, observer,
 		)
 		if err != nil {
 			return traceOutput, err
@@ -169,6 +215,9 @@ func (orchestrator *Orchestrator) executePrepared(
 				}
 				if node.Optional && definition.FailurePolicy.Mode == CollectAvailable {
 					failedOptional[node.ID] = struct{}{}
+					failedOptionalReasons[node.ID] = optionalStopReason(
+						outcome.err,
+					)
 					continue
 				}
 				if waveErr == nil {
@@ -177,6 +226,7 @@ func (orchestrator *Orchestrator) executePrepared(
 				continue
 			}
 			outputs[node.ID] = outcome.handoff
+			delete(failedOptionalReasons, node.ID)
 			delete(waitingHuman, node.ID)
 			if outcome.gate != nil {
 				gates[node.ID] = *outcome.gate
@@ -184,6 +234,12 @@ func (orchestrator *Orchestrator) executePrepared(
 		}
 		if waveErr != nil {
 			return traceOutput, waveErr
+		}
+		if hasClarificationGate(gates) {
+			return traceOutput, convergenceError{
+				reason:  StopNeedsClarification,
+				message: fmt.Sprintf("workflow %q requires clarification", definition.ID),
+			}
 		}
 	}
 	terminals := make([]Handoff, 0)
@@ -205,6 +261,8 @@ func (orchestrator *Orchestrator) executePrepared(
 			NodeDefinition{ID: "workflow.output", OutputSchema: definition.OutputSchema},
 			terminals,
 			nil,
+			nil,
+			0,
 			definition.Budget.MaxHandoffBytes,
 		)
 		if err != nil {
@@ -225,16 +283,67 @@ func (orchestrator *Orchestrator) executePrepared(
 			return traceOutput, fmt.Errorf("workflow %q output: %w", definition.ID, err)
 		}
 	}
-	traceEvidenceDelivered(ctx, "workflow_output", output)
+	traceDelivered(ctx, "workflow_output", output)
 	traceOutput.result = Result{
 		RunID: request.RunID, Output: output, NodeOutputs: outputs, Gates: gates,
-		Usage: account.Usage(),
+		Usage:      account.Usage(),
+		StopReason: resultStopReason(metadata, outputs, output.Completeness),
 	}
 	return traceOutput, nil
 }
 
-func workflowConvergenceOutcome(
-	output workflowConvergedTraceOutput,
+func normalizePosition(round, baseDepth int) (int, int) {
+	if round == 0 {
+		round = 1
+	}
+	return round, baseDepth
+}
+
+func admitPosition(
+	definition Definition,
+	metadata graphMetadata,
+	request RunRequest,
+) error {
+	if request.Round <= 0 || request.BaseDepth < 0 {
+		return fmt.Errorf(
+			"workflow %q execution position round=%d base_depth=%d is invalid",
+			definition.ID,
+			request.Round,
+			request.BaseDepth,
+		)
+	}
+	maxRounds, maxDepth := executionLimits(definition)
+	if request.Round > maxRounds {
+		return fmt.Errorf(
+			"%w: workflow %q round %d exceeds limit %d",
+			ErrBudgetExhausted,
+			definition.ID,
+			request.Round,
+			maxRounds,
+		)
+	}
+	if request.BaseDepth > maxDepth-metadata.maxDepth {
+		return fmt.Errorf(
+			"%w: workflow %q base depth %d plus graph depth %d exceeds limit %d",
+			ErrBudgetExhausted,
+			definition.ID,
+			request.BaseDepth,
+			metadata.maxDepth,
+			maxDepth,
+		)
+	}
+	return nil
+}
+
+func executionLimits(definition Definition) (int, int) {
+	if definition.legacyExecutionBudget {
+		return 1, definition.Budget.MaxNodes
+	}
+	return definition.Budget.MaxRounds, definition.Budget.MaxDepth
+}
+
+func convergenceOutcome(
+	output convergedTraceOutput,
 	err error,
 ) (string, string) {
 	if err == nil {
@@ -247,12 +356,20 @@ func workflowConvergenceOutcome(
 			return string(Complete), ""
 		}
 	}
+	switch errorStopReason(err) {
+	case StopNeedsClarification:
+		return string(StopNeedsClarification), "needs_clarification"
+	case StopNoAffordableTask:
+		return string(StopNoAffordableTask), "no_affordable_task"
+	case StopCapabilityUnavailable:
+		return string(StopCapabilityUnavailable), "capability_unavailable"
+	}
 	switch {
 	case errors.Is(err, ErrHumanApprovalRequired):
 		return "waiting_human", "human_approval_required"
 	case errors.Is(err, ErrEvidenceConflict):
 		return "evidence_conflict", "evidence_conflict"
-	case errors.Is(err, ErrWorkflowBudgetExhausted):
+	case errors.Is(err, ErrBudgetExhausted):
 		return "failed", "workflow_budget_exhausted"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timed_out", "workflow_timeout"
@@ -263,21 +380,128 @@ func workflowConvergenceOutcome(
 	}
 }
 
-func (orchestrator *Orchestrator) dispatchWave(
-	ctx context.Context,
-	definition WorkflowDefinition,
+func traceStopReason(
+	output convergedTraceOutput,
+	err error,
+) StopReason {
+	if err == nil {
+		return output.result.StopReason
+	}
+	return errorStopReason(err)
+}
+
+func errorStopReason(err error) StopReason {
+	var convergence convergenceError
+	if errors.As(err, &convergence) {
+		return convergence.reason
+	}
+	switch {
+	case errors.Is(err, ErrNoAffordableTask):
+		return StopNoAffordableTask
+	case errors.Is(err, ErrEvidenceConflict):
+		return StopVerificationFailed
+	case errors.Is(err, ErrBudgetExhausted):
+		return StopBudgetExhausted
+	case errors.Is(err, context.DeadlineExceeded):
+		return StopDeadlineExceeded
+	default:
+		return ""
+	}
+}
+
+type convergenceError struct {
+	reason  StopReason
+	message string
+}
+
+func (err convergenceError) Error() string {
+	return err.message
+}
+
+func hasClarificationGate(gates map[string]GateDecision) bool {
+	for _, decision := range gates {
+		if decision.Decision == string(StopNeedsClarification) {
+			return true
+		}
+	}
+	return false
+}
+
+func optionalStopReason(err error) StopReason {
+	switch {
+	case errors.Is(err, ErrNoAffordableTask):
+		return StopNoAffordableTask
+	case errors.Is(err, ErrBudgetExhausted):
+		return StopBudgetExhausted
+	default:
+		return StopCapabilityUnavailable
+	}
+}
+
+func blockedStopReason(
 	metadata graphMetadata,
-	request RunRequest,
-	progress WorkflowProgress,
 	outputs map[string]Handoff,
 	failedOptional map[string]struct{},
+	reasons map[string]StopReason,
+) StopReason {
+	for _, nodeID := range metadata.order {
+		if _, complete := outputs[nodeID]; complete {
+			continue
+		}
+		for _, predecessor := range metadata.predecessors[nodeID] {
+			if !metadata.required[predecessor+"\x00"+nodeID] {
+				continue
+			}
+			if _, failed := failedOptional[predecessor]; !failed {
+				continue
+			}
+			if reason := reasons[predecessor]; reason != "" {
+				return reason
+			}
+			return StopCapabilityUnavailable
+		}
+	}
+	return StopCapabilityUnavailable
+}
+
+func resultStopReason(
+	metadata graphMetadata,
+	outputs map[string]Handoff,
+	completeness Completeness,
+) StopReason {
+	for _, nodeID := range metadata.order {
+		if metadata.nodes[nodeID].Kind != NodeVerifier {
+			continue
+		}
+		handoff, ok := outputs[nodeID]
+		if !ok {
+			continue
+		}
+		var verified verifiedEvidenceView
+		if json.Unmarshal(handoff.Payload, &verified) == nil &&
+			verified.Verification.StopReason != "" {
+			return verified.Verification.StopReason
+		}
+	}
+	return stopForCompleteness(completeness)
+}
+
+func (orchestrator *Orchestrator) dispatchWave(
+	ctx context.Context,
+	definition Definition,
+	metadata graphMetadata,
+	request RunRequest,
+	progress Progress,
+	outputs map[string]Handoff,
+	failedOptional map[string]struct{},
+	failedOptionalReasons map[string]StopReason,
 	ready []string,
-	account *workflowBudgetAccount,
+	account *budgetAccount,
 	observer RunObserver,
 ) ([]nodeOutcome, error) {
 	result, err := runtrace.Invoke(
 		ctx,
-		multiAgentDispatchTraceSpec,
+		dispatchTraceSpec,
 		dispatchInput{definition: definition, ready: ready},
 		func(ctx context.Context, _ dispatchInput) (dispatchOutput, error) {
 			wave := make([]nodeOutcome, len(ready))
@@ -322,8 +546,11 @@ func (orchestrator *Orchestrator) dispatchWave(
 						definition,
 						request,
 						node,
+						request.BaseDepth+metadata.depths[node.ID],
 						inputs,
 						unavailable,
+						failedOptionalReasons,
+						progress.Input.EvidenceUnits,
 						progress.NodeAttempts[node.ID],
 						account,
 						observer,
@@ -397,13 +624,16 @@ func capabilityKey(ref agentapi.CapabilityRef) capabilityLimitKey {
 
 func (orchestrator *Orchestrator) executeNode(
 	ctx context.Context,
-	definition WorkflowDefinition,
+	definition Definition,
 	request RunRequest,
 	node NodeDefinition,
+	depth int,
 	inputs []Handoff,
 	unavailablePredecessors []string,
+	unavailableReasons map[string]StopReason,
+	baselineEvidence []tool.EvidenceUnit,
 	attemptProgress NodeAttemptProgress,
-	account *workflowBudgetAccount,
+	account *budgetAccount,
 	observer RunObserver,
 ) nodeOutcome {
 	firstAttempt := 1
@@ -430,8 +660,14 @@ func (orchestrator *Orchestrator) executeNode(
 		return nodeOutcome{err: nodeCtx.Err()}
 	}
 	baseRequest := NodeRequest{
-		WorkflowRunID: request.RunID, Node: node, Inputs: inputs,
+		WorkflowRunID:           request.RunID,
+		Round:                   request.Round,
+		Depth:                   depth,
+		Node:                    node,
+		Inputs:                  inputs,
 		UnavailablePredecessors: append([]string(nil), unavailablePredecessors...),
+		UnavailableReasons:      cloneStopReasonMap(unavailableReasons),
+		BaselineEvidence:        evidence.CloneUnits(baselineEvidence),
 		Actor:                   request.Actor,
 		EffectivePermissions: IntersectPermissions(
 			request.ActorPermissions, request.ScenarioPermissions,

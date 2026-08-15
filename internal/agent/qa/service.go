@@ -16,8 +16,8 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-// QA is the agent-facing runtime facade.
-type QA struct {
+// Service is the agent-facing runtime facade.
+type Service struct {
 	// helperLLM handles session maintenance and memory extraction outside Runs.
 	helperLLM *llm.LLMClient
 	// fastLLM handles cheap structured preparation and falls back to helperLLM.
@@ -28,7 +28,7 @@ type QA struct {
 	phaseEmitter       interface{ EmitPhase(string, string) }
 	investigation      InvestigationRunner
 	scenarios          ScenarioLifecycle
-	coordinator        *InvestigationCoordinator
+	coordinator        *Coordinator
 	executionEvents    ExecutionEventEmitter
 	memory             *memory.MemoryStore
 	sessions           *memory.SessionStore
@@ -49,8 +49,8 @@ type QA struct {
 	compactionStatus   map[string]SessionStatusEvent
 }
 
-// NewQA wires retrieval, agent, memory, and write tools together.
-func NewQA(d QADeps) *QA {
+// New wires retrieval, agent, memory, and write tools together.
+func New(d Deps) *Service {
 	platformSettings := d.Platform
 	ret := retrieval.New(d.Tools, d.Cfg).WithPlatform(platformSettings)
 	if d.CodeGraphDB != nil {
@@ -64,7 +64,7 @@ func NewQA(d QADeps) *QA {
 	if routerMaxTokens == 0 {
 		routerMaxTokens = config.DefaultRetrievalRouterMaxTokens
 	}
-	svc := &QA{
+	svc := &Service{
 		retriever: ret, cfg: d.Cfg,
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
 		toolPruningEnabled: platformSettings.ToolPruningEnabled,
@@ -113,16 +113,16 @@ func NewQA(d QADeps) *QA {
 	return svc
 }
 
-func (svc *QA) Memory() *memory.MemoryStore { return svc.memory }
+func (svc *Service) Memory() *memory.MemoryStore { return svc.memory }
 
 // emitStep pushes a lightweight phase hint to the run hub.
-func (svc *QA) emitStep(runID, text string) {
+func (svc *Service) emitStep(runID, text string) {
 	if svc.phaseEmitter != nil {
 		svc.phaseEmitter.EmitPhase(runID, text)
 	}
 }
 
-func (svc *QA) emitStatus(runID, text, code string, started time.Time) {
+func (svc *Service) emitStatus(runID, text, code string, started time.Time) {
 	elapsed := int64(0)
 	if !started.IsZero() {
 		elapsed = time.Since(started).Milliseconds()
@@ -130,7 +130,7 @@ func (svc *QA) emitStatus(runID, text, code string, started time.Time) {
 	svc.emitStatusElapsed(runID, text, code, elapsed)
 }
 
-func (svc *QA) emitStatusElapsed(runID, text, code string, elapsedMS int64) {
+func (svc *Service) emitStatusElapsed(runID, text, code string, elapsedMS int64) {
 	if emitter, ok := svc.phaseEmitter.(interface {
 		EmitStatus(string, string, string, int64)
 	}); ok {
@@ -140,7 +140,7 @@ func (svc *QA) emitStatusElapsed(runID, text, code string, elapsedMS int64) {
 	svc.emitStep(runID, text)
 }
 
-func (svc *QA) emitContextUsage(runID string, event ContextUsageEvent) {
+func (svc *Service) emitContextUsage(runID string, event ContextUsageEvent) {
 	if emitter, ok := svc.phaseEmitter.(interface {
 		EmitContextUsage(string, ContextUsageEvent)
 	}); ok {
@@ -148,7 +148,7 @@ func (svc *QA) emitContextUsage(runID string, event ContextUsageEvent) {
 	}
 }
 
-func (svc *QA) updateSessionCompaction(runID, sessionID, status, text string, fromTurn, toTurn int) {
+func (svc *Service) updateCompaction(runID, sessionID, status, text string, fromTurn, toTurn int) {
 	event := SessionStatusEvent{
 		Status: status, Text: text, FromTurn: fromTurn, ToTurn: toTurn,
 		UpdatedAtMs: time.Now().UnixMilli(),
@@ -163,8 +163,8 @@ func (svc *QA) updateSessionCompaction(runID, sessionID, status, text string, fr
 	}
 }
 
-// SessionCompactionStatus returns the latest transient archive status for one session.
-func (svc *QA) SessionCompactionStatus(sessionID string) SessionStatusEvent {
+// CompactionStatus returns the latest transient archive status for one session.
+func (svc *Service) CompactionStatus(sessionID string) SessionStatusEvent {
 	svc.compactionMu.RLock()
 	defer svc.compactionMu.RUnlock()
 	return svc.compactionStatus[sessionID]
@@ -175,25 +175,25 @@ func (svc *QA) SessionCompactionStatus(sessionID string) SessionStatusEvent {
 // stalling retrieval until the request deadline. The parent ctx caps it lower.
 const helperTimeout = 12 * time.Second
 
-// AskAgent starts a run with verbatim recent history and no explicit evidence plan.
-func (svc *QA) AskAgent(ctx context.Context, question string, history []llm.Message, userID int64, rolePrompt, runID string) (*AskResult, error) {
-	return svc.AskAgentWithContext(ctx, question, ConversationContext{Recent: history}, userID, rolePrompt, runID, nil, false)
+// AskWithHistory starts a run with verbatim recent history and no explicit evidence plan.
+func (svc *Service) AskWithHistory(ctx context.Context, question string, history []llm.Message, userID int64, rolePrompt, runID string) (*AskResult, error) {
+	return svc.AskWithContext(ctx, question, ConversationContext{Recent: history}, userID, rolePrompt, runID, nil, false)
 }
 
-// AskAgentWithContext preserves bounded session state and recalled history.
-func (svc *QA) AskAgentWithContext(ctx context.Context, question string, conversation ConversationContext, userID int64, rolePrompt, runID string, explicitPlan *domain.EvidencePlan, allowWrite bool) (*AskResult, error) {
-	return svc.Ask(ctx, QARequest{
+// AskWithContext preserves bounded session state and recalled history.
+func (svc *Service) AskWithContext(ctx context.Context, question string, conversation ConversationContext, userID int64, rolePrompt, runID string, explicitPlan *domain.EvidencePlan, allowWrite bool) (*AskResult, error) {
+	return svc.Ask(ctx, Request{
 		Question: question, Conversation: conversation, UserID: userID,
 		RolePrompt: rolePrompt, RunID: runID, EvidencePlan: explicitPlan, AllowWrite: allowWrite,
 	})
 }
 
 // Ask starts one QA run with optional trusted scenario context.
-func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
+func (svc *Service) Ask(ctx context.Context, request Request) (*AskResult, error) {
 	if svc.runtimeErr != nil {
 		return nil, svc.runtimeErr
 	}
-	prepared, err := svc.prepareQA(ctx, request)
+	prepared, err := svc.prepare(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +202,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	if prepared.execution.Strategy == retrieval.ExecutionMultiAgent {
 		result, err = svc.submitInvestigation(prepared)
 	} else {
-		result, err = svc.prepareSingleAgentRun(prepared)
+		result, err = svc.prepareSingleRun(prepared)
 	}
 	if err != nil {
 		prepared.closeTrace()
@@ -210,7 +210,7 @@ func (svc *QA) Ask(ctx context.Context, request QARequest) (*AskResult, error) {
 	return result, err
 }
 
-func standardQARequest(request QARequest, defaultAgent agentapi.DefinitionRef) bool {
+func standardRequest(request Request, defaultAgent agentapi.DefinitionRef) bool {
 	if request.WorkflowRunID != "" || request.WorkflowNodeID != "" {
 		return false
 	}
@@ -221,8 +221,8 @@ func standardQARequest(request QARequest, defaultAgent agentapi.DefinitionRef) b
 		(request.Agent.Version == 0 || request.Agent.Version == defaultAgent.Version)
 }
 
-func (svc *QA) emitExecutionEvent(eventType EventType, event ExecutionEvent) {
+func (svc *Service) emitEvent(eventType EventType, event ExecutionEvent) {
 	if svc.executionEvents != nil {
-		svc.executionEvents.EmitExecutionEvent(eventType, event)
+		svc.executionEvents.EmitEvent(eventType, event)
 	}
 }

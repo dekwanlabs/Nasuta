@@ -12,7 +12,7 @@ import (
 
 const userAgent = "Mozilla/5.0 (compatible; Nasuta/1.0)"
 
-func (srv *Service) dispatchSearch(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
+func (srv *Service) dispatchSearch(ctx context.Context, query string, limit int) ([]SearchResult, error) {
 	name := srv.searchEngine
 	if name == "" {
 		name = "duckduckgo"
@@ -29,7 +29,7 @@ func (srv *Service) dispatchSearch(ctx context.Context, query string, limit int)
 
 func (srv *Service) ensureProviders() {
 	srv.providerOnce.Do(func() {
-		srv.providers = map[string]WebSearchProvider{
+		srv.providers = map[string]SearchProvider{
 			"duckduckgo": websearch.ProviderFunc(srv.searchDuckDuckGo),
 			"brave":      websearch.ProviderFunc(srv.searchBrave),
 			"bing":       websearch.ProviderFunc(srv.searchBing),

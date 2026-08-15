@@ -11,7 +11,7 @@ import (
 
 const braveEndpoint = "https://api.search.brave.com/res/v1/web/search"
 
-func (srv *Service) searchBrave(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
+func (srv *Service) searchBrave(ctx context.Context, query string, limit int) ([]SearchResult, error) {
 	if srv.apiKey == "" {
 		return nil, fmt.Errorf("brave search requires NASUTA_WEB_SEARCH_API_KEY")
 	}
@@ -51,9 +51,9 @@ func (srv *Service) searchBrave(ctx context.Context, query string, limit int) ([
 		return nil, fmt.Errorf("brave: parse response: %w", err)
 	}
 
-	results := make([]WebSearchResult, 0, min(limit, len(data.Web.Results)))
+	results := make([]SearchResult, 0, min(limit, len(data.Web.Results)))
 	for _, result := range data.Web.Results {
-		results = append(results, WebSearchResult{
+		results = append(results, SearchResult{
 			Title:   result.Title,
 			URL:     result.URL,
 			Snippet: result.Description,

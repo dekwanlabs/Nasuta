@@ -9,28 +9,28 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-type RunStatus string
+type Status string
 
 const (
-	RunStatusRunning RunStatus = "running"
-	RunStatusDone    RunStatus = "done"
-	RunStatusFailed  RunStatus = "failed"
-	RunStatusAborted RunStatus = "aborted"
-	RunStatusPaused  RunStatus = "paused"
+	StatusRunning Status = "running"
+	StatusDone    Status = "done"
+	StatusFailed  Status = "failed"
+	StatusAborted Status = "aborted"
+	StatusPaused  Status = "paused"
 )
 
-func (status RunStatus) Terminal() bool {
+func (status Status) Terminal() bool {
 	switch status {
-	case RunStatusDone, RunStatusFailed, RunStatusAborted:
+	case StatusDone, StatusFailed, StatusAborted:
 		return true
 	default:
 		return false
 	}
 }
 
-func validControlTransition(from, to RunStatus) bool {
-	return from == RunStatusRunning && to == RunStatusPaused ||
-		from == RunStatusPaused && to == RunStatusRunning
+func validControlTransition(from, to Status) bool {
+	return from == StatusRunning && to == StatusPaused ||
+		from == StatusPaused && to == StatusRunning
 }
 
 var ErrEmptyAnswer = errors.New("agent: completed without a visible answer")
@@ -69,9 +69,9 @@ func (metrics *EvidenceMetrics) Finalize(direct bool) {
 	}
 }
 
-// RunOutcome is the single terminal fact consumed by persistence and streaming.
-type RunOutcome struct {
-	Status          RunStatus
+// Outcome is the single terminal fact consumed by persistence and streaming.
+type Outcome struct {
+	Status          Status
 	ErrorCode       string
 	StepCount       int
 	TokenUsed       int

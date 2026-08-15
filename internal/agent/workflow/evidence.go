@@ -11,38 +11,49 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-type workflowEvidenceView struct {
+type evidencePayload struct {
 	ProducerNodeID    string                      `json:"producer_node_id"`
 	Completeness      Completeness                `json:"completeness"`
 	EvidenceUnits     []tool.EvidenceUnit         `json:"evidence_units"`
 	EvidenceConflicts []agentapi.EvidenceConflict `json:"evidence_conflicts"`
 }
 
-type workflowEvidenceHandoffView struct {
+type handoffView struct {
 	ProducerNodeID string             `json:"producer_node_id"`
 	Schema         agentapi.SchemaRef `json:"schema"`
 	Payload        json.RawMessage    `json:"payload"`
 	Completeness   Completeness       `json:"completeness"`
 }
 
-type workflowUnavailableTaskView struct {
-	ProducerNodeID string `json:"producer_node_id"`
+type unavailableTaskView struct {
+	ProducerNodeID string     `json:"producer_node_id"`
+	StopReason     StopReason `json:"stop_reason,omitempty"`
 }
 
-type workflowEvidenceLedgerView struct {
-	Handoffs          []workflowEvidenceHandoffView `json:"handoffs"`
-	UnavailableTasks  []workflowUnavailableTaskView `json:"unavailable_tasks"`
-	EvidenceUnits     []tool.EvidenceUnit           `json:"evidence_units"`
-	EvidenceConflicts []agentapi.EvidenceConflict   `json:"evidence_conflicts"`
-	Completeness      Completeness                  `json:"completeness"`
+type convergenceView struct {
+	CandidateCount    int     `json:"candidate_count"`
+	NewIdentityCount  int     `json:"new_identity_count"`
+	DuplicateCount    int     `json:"duplicate_count"`
+	DuplicateRatio    float64 `json:"duplicate_ratio"`
+	MaxDuplicateRatio float64 `json:"max_duplicate_ratio,omitempty"`
+}
+
+type ledgerView struct {
+	Handoffs          []handoffView               `json:"handoffs"`
+	UnavailableTasks  []unavailableTaskView       `json:"unavailable_tasks"`
+	EvidenceUnits     []tool.EvidenceUnit         `json:"evidence_units"`
+	EvidenceConflicts []agentapi.EvidenceConflict `json:"evidence_conflicts"`
+	Convergence       *convergenceView            `json:"convergence,omitempty"`
+	Completeness      Completeness                `json:"completeness"`
 }
 
 func joinedPayload(
 	mode JoinMode,
 	inputs []Handoff,
-	unavailablePredecessors []string,
+	unavailableTasks []unavailableTaskView,
 	evidenceUnits []tool.EvidenceUnit,
 	evidenceConflicts []agentapi.EvidenceConflict,
+	convergence *convergenceView,
 	completeness Completeness,
 ) (json.RawMessage, error) {
 	var value any
@@ -54,23 +65,13 @@ func joinedPayload(
 		}
 		value = payloads
 	case JoinEvidenceView:
-		handoffs := make([]workflowEvidenceHandoffView, 0, len(inputs))
+		handoffs := make([]handoffView, 0, len(inputs))
 		for _, input := range inputs {
-			handoffs = append(handoffs, workflowEvidenceHandoffView{
+			handoffs = append(handoffs, handoffView{
 				ProducerNodeID: input.ProducerNodeID,
 				Schema:         input.Schema,
 				Payload:        append(json.RawMessage(nil), input.Payload...),
 				Completeness:   input.Completeness,
-			})
-		}
-		unavailableTasks := make(
-			[]workflowUnavailableTaskView,
-			0,
-			len(unavailablePredecessors),
-		)
-		for _, producerNodeID := range unavailablePredecessors {
-			unavailableTasks = append(unavailableTasks, workflowUnavailableTaskView{
-				ProducerNodeID: producerNodeID,
 			})
 		}
 		if evidenceUnits == nil {
@@ -79,10 +80,14 @@ func joinedPayload(
 		if evidenceConflicts == nil {
 			evidenceConflicts = []agentapi.EvidenceConflict{}
 		}
-		value = workflowEvidenceLedgerView{
+		if unavailableTasks == nil {
+			unavailableTasks = []unavailableTaskView{}
+		}
+		value = ledgerView{
 			Handoffs: handoffs, UnavailableTasks: unavailableTasks,
 			EvidenceUnits:     evidenceUnits,
-			EvidenceConflicts: evidenceConflicts, Completeness: completeness,
+			EvidenceConflicts: evidenceConflicts, Convergence: convergence,
+			Completeness: completeness,
 		}
 	default:
 		return nil, fmt.Errorf("join mode %q is invalid", mode)
@@ -94,12 +99,53 @@ func joinedPayload(
 	return payload, nil
 }
 
-func contextBlockFromHandoff(handoff Handoff) (agentapi.ContextBlock, error) {
-	view := workflowEvidenceView{
+func measureConvergence(
+	inputs []Handoff,
+	baseline []tool.EvidenceUnit,
+	maxDuplicateRatio float64,
+) convergenceView {
+	baselineKeys := make(map[evidence.Key]struct{})
+	for _, unit := range evidence.Expand(baseline) {
+		key, ok := evidence.UnitKey(unit)
+		if ok {
+			baselineKeys[key] = struct{}{}
+		}
+	}
+	seen := make(map[evidence.Key]struct{})
+	view := convergenceView{
+		MaxDuplicateRatio: maxDuplicateRatio,
+	}
+	for _, input := range inputs {
+		for _, unit := range evidence.Expand(input.EvidenceUnits) {
+			key, ok := evidence.UnitKey(unit)
+			if !ok {
+				continue
+			}
+			if _, existed := baselineKeys[key]; existed {
+				continue
+			}
+			view.CandidateCount++
+			if _, duplicate := seen[key]; duplicate {
+				view.DuplicateCount++
+				continue
+			}
+			seen[key] = struct{}{}
+			view.NewIdentityCount++
+		}
+	}
+	if view.CandidateCount > 0 {
+		view.DuplicateRatio = float64(view.DuplicateCount) /
+			float64(view.CandidateCount)
+	}
+	return view
+}
+
+func contextFromHandoff(handoff Handoff) (agentapi.ContextBlock, error) {
+	view := evidencePayload{
 		ProducerNodeID:    handoff.ProducerNodeID,
 		Completeness:      handoff.Completeness,
 		EvidenceUnits:     evidence.CloneUnits(handoff.EvidenceUnits),
-		EvidenceConflicts: cloneEvidenceConflicts(handoff.EvidenceConflicts),
+		EvidenceConflicts: cloneConflicts(handoff.EvidenceConflicts),
 	}
 	content, err := json.Marshal(view)
 	if err != nil {
@@ -116,13 +162,13 @@ func contextBlockFromHandoff(handoff Handoff) (agentapi.ContextBlock, error) {
 		Content:           string(content),
 		References:        append([]agentapi.Reference(nil), handoff.References...),
 		Evidence:          evidence.CloneUnits(handoff.EvidenceUnits),
-		EvidenceConflicts: cloneEvidenceConflicts(handoff.EvidenceConflicts),
+		EvidenceConflicts: cloneConflicts(handoff.EvidenceConflicts),
 		Complete:          handoff.Completeness == Complete,
 		ContentHash:       hex.EncodeToString(sum[:]),
 	}, nil
 }
 
-func contextBlockFromTaskDirective(task TaskDirective) (agentapi.ContextBlock, error) {
+func contextFromDirective(task TaskDirective) (agentapi.ContextBlock, error) {
 	content, err := json.Marshal(task)
 	if err != nil {
 		return agentapi.ContextBlock{}, fmt.Errorf("marshal workflow task directive: %w", err)
@@ -144,22 +190,22 @@ func mergeHandoffEvidence(
 	conflicts := make([]agentapi.EvidenceConflict, 0)
 	seenConflicts := make(map[string]struct{})
 	for _, input := range inputs {
-		conflicts = appendUniqueEvidenceConflicts(
+		conflicts = appendEvidenceConflicts(
 			conflicts,
 			input.EvidenceConflicts,
 			seenConflicts,
 		)
 		observed := ledger.Add(input.EvidenceUnits, input.ProducerNodeID)
-		conflicts = appendUniqueEvidenceConflicts(
+		conflicts = appendEvidenceConflicts(
 			conflicts,
-			publicEvidenceConflicts(observed),
+			publicConflicts(observed),
 			seenConflicts,
 		)
 	}
 	return ledger.Units(), conflicts
 }
 
-func appendUniqueEvidenceConflicts(
+func appendEvidenceConflicts(
 	target []agentapi.EvidenceConflict,
 	incoming []agentapi.EvidenceConflict,
 	seen map[string]struct{},
@@ -188,7 +234,7 @@ func evidenceConflictKey(conflict agentapi.EvidenceConflict) string {
 		conflict.IncomingOrigin
 }
 
-func publicEvidenceConflicts(
+func publicConflicts(
 	conflicts []evidence.Conflict,
 ) []agentapi.EvidenceConflict {
 	if len(conflicts) == 0 {
@@ -213,7 +259,7 @@ func publicEvidenceConflicts(
 	return out
 }
 
-func cloneEvidenceConflicts(
+func cloneConflicts(
 	conflicts []agentapi.EvidenceConflict,
 ) []agentapi.EvidenceConflict {
 	if len(conflicts) == 0 {

@@ -35,7 +35,7 @@ func TestExecuteToolTurnShortCircuitsFullyCoveredSeedScope(t *testing.T) {
 		t.Fatalf("register tool: %v", err)
 	}
 	snapshot := registry.Snapshot(tool.ReadPolicy())
-	agent := NewAgent(nil, NewToolExecutor(registry), AgentConfig{}, NoopObserver(), nil)
+	agent := NewAgent(nil, NewToolExecutor(registry), Config{}, NoopObserver(), nil)
 	state := &compiledLoop{
 		ctx: t.Context(), runCtx: t.Context(), loopCtx: t.Context(), runID: "run-test",
 		toolSnapshot: snapshot, tools: agent.executor.Definitions(snapshot),
@@ -105,7 +105,7 @@ func TestFinalizeCompiledLoopPropagatesSeedConflictOnce(t *testing.T) {
 		result:         &RunResult{},
 		evidenceLedger: ledger,
 	}
-	NewAgent(nil, nil, AgentConfig{}, nil, nil).finalizeCompiledLoop(state)
+	NewAgent(nil, nil, Config{}, nil, nil).finalizeLoop(state)
 	if len(state.result.EvidenceConflicts) != 1 ||
 		state.result.EvidenceConflicts[0].Incoming.ContentHash != "version-b" {
 		t.Fatalf("run result conflicts = %#v", state.result.EvidenceConflicts)
@@ -135,7 +135,7 @@ func TestExecuteToolTurnSurfacesEvidenceConflictAsPartial(t *testing.T) {
 	}
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 	observer := &captureObserver{}
-	agent := NewAgent(nil, NewToolExecutor(registry), AgentConfig{}, observer, nil)
+	agent := NewAgent(nil, NewToolExecutor(registry), Config{}, observer, nil)
 	ledger := newRunEvidenceLedger([]tool.EvidenceUnit{{
 		SourceKind: "runtime", Target: "trace-1", ContentHash: "hash-a",
 		Coverage: tool.EvidenceCoverage{Complete: true},
@@ -203,7 +203,7 @@ func TestAdmitToolCallNarrowsLimitBeforeExecution(t *testing.T) {
 		t.Fatalf("register tool: %v", err)
 	}
 	snapshot := registry.Snapshot(tool.ReadPolicy())
-	agent := NewAgent(nil, NewToolExecutor(registry), AgentConfig{ContextWindow: 10000}, NoopObserver(), nil)
+	agent := NewAgent(nil, NewToolExecutor(registry), Config{ContextWindow: 10000}, NoopObserver(), nil)
 	state := &compiledLoop{
 		ctx: t.Context(), toolSnapshot: snapshot, evidenceLedger: newRunEvidenceLedger(nil, nil),
 		remainingToolTokens: 250,

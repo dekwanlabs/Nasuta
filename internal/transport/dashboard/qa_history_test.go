@@ -20,16 +20,16 @@ func TestQAHistoryPageRestoresEvidenceOnFinalAnswer(t *testing.T) {
 	defer db.Close()
 	mock.ExpectExec(`UPDATE agent_runs SET status=\?,ended_at=\? WHERE run_kind=\? AND status IN \(\?,\?\)`).
 		WithArgs(
-			run.RunStatusAborted,
+			run.StatusAborted,
 			sqlmock.AnyArg(),
-			run.RunKindAgent,
-			run.RunStatusRunning,
-			run.RunStatusPaused,
+			run.KindAgent,
+			run.StatusRunning,
+			run.StatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	runStore, err := run.NewRunStore(db)
+	runStore, err := run.NewStore(db)
 	if err != nil {
-		t.Fatalf("NewRunStore: %v", err)
+		t.Fatalf("NewStore: %v", err)
 	}
 	handler := &Handler{persistentRunStore: runStore}
 	mock.ExpectQuery(`SELECT id,evidence_status.*FROM agent_runs WHERE user_id=\? AND session_id=\? AND id IN \(\?\)`).

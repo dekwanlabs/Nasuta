@@ -1,19 +1,22 @@
 package workflow
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
 func TestCatalogRetainsPublishedVersionsDuringConcurrentReads(t *testing.T) {
 	catalog := NewCatalog(testSchemaRegistry(t), testAgentDefinitions(t))
 	version1 := testWorkflow()
-	if err := catalog.Publish([]WorkflowDefinition{version1}); err != nil {
+	if err := catalog.Publish([]Definition{version1}); err != nil {
 		t.Fatal(err)
 	}
 	version2 := testWorkflow()
@@ -34,7 +37,7 @@ func TestCatalogRetainsPublishedVersionsDuringConcurrentReads(t *testing.T) {
 			}
 		}()
 	}
-	if err := catalog.Publish([]WorkflowDefinition{version2}); err != nil {
+	if err := catalog.Publish([]Definition{version2}); err != nil {
 		t.Fatal(err)
 	}
 	wg.Wait()
@@ -47,11 +50,57 @@ func TestCatalogRetainsPublishedVersionsDuringConcurrentReads(t *testing.T) {
 	}
 }
 
+func TestCatalogAttachStoreRestoresLegacyExecutionBudget(t *testing.T) {
+	schemas := testSchemaRegistry(t)
+	definition := legacyDefinition(t, schemas)
+	raw, err := json.Marshal(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	createdAt := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(`(?s)SELECT\s+definition_json,content_hash,active,is_default,created_by,created_at\s+FROM workflow_definitions ORDER BY id,version`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"definition_json", "content_hash", "active", "is_default",
+			"created_by", "created_at",
+		}).AddRow(raw, definition.ContentHash, true, true, int64(7), createdAt))
+	mock.ExpectQuery(`(?s)SELECT\s+subject_id,rule_version,candidate_version,percentage_bps,salt,rule_hash,\s+active,created_by,created_at\s+FROM catalog_rollouts\s+WHERE catalog_kind='workflow'\s+ORDER BY subject_id`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"subject_id", "rule_version", "candidate_version", "percentage_bps",
+			"salt", "rule_hash", "active", "created_by", "created_at",
+		}))
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := NewCatalog(schemas, testAgentDefinitions(t))
+	if err := catalog.AttachStore(context.Background(), store); err != nil {
+		t.Fatalf("AttachStore: %v", err)
+	}
+	resolved, err := catalog.Resolve(DefinitionRef{
+		ID: definition.ID, Version: definition.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.legacyExecutionBudget ||
+		resolved.ContentHash != definition.ContentHash {
+		t.Fatalf("resolved legacy workflow = %+v", resolved)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
 func TestCatalogRejectsUnknownWorkflowSchema(t *testing.T) {
 	catalog := NewCatalog(testSchemaRegistry(t), testAgentDefinitions(t))
 	definition := testWorkflow()
 	definition.OutputSchema.ID = "review.report.missing"
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err == nil {
+	if err := catalog.Publish([]Definition{definition}); err == nil {
 		t.Fatal("catalog accepted an unknown workflow schema")
 	}
 }
@@ -68,7 +117,7 @@ func TestCatalogRejectsAgentSchemaMismatch(t *testing.T) {
 	agents.definitions[agentapi.DefinitionRef{ID: prepared.ID, Version: prepared.Version}] = prepared
 
 	catalog := NewCatalog(testSchemaRegistry(t), agents)
-	if err := catalog.Publish([]WorkflowDefinition{testWorkflow()}); err == nil {
+	if err := catalog.Publish([]Definition{testWorkflow()}); err == nil {
 		t.Fatal("catalog accepted an agent output incompatible with its node")
 	}
 }
@@ -80,7 +129,7 @@ func TestCatalogRejectsNodePermissionsOutsideAgentDefinition(t *testing.T) {
 	}
 	definition.Nodes[0].Permissions = definition.Permissions
 	catalog := NewCatalog(testSchemaRegistry(t), testAgentDefinitions(t))
-	err := catalog.Publish([]WorkflowDefinition{definition})
+	err := catalog.Publish([]Definition{definition})
 	if err == nil || !strings.Contains(err.Error(), "exceed agent definition") {
 		t.Fatalf("Publish error = %v, want agent permission rejection", err)
 	}
@@ -91,7 +140,7 @@ func TestCatalogValidatesToolBudgetAgainstAgentCapability(t *testing.T) {
 		definition := singleNodeWorkflow()
 		definition.Budget.MaxToolCalls = 2
 		catalog := NewCatalog(testSchemaRegistry(t), testAgentDefinitions(t))
-		err := catalog.Publish([]WorkflowDefinition{definition})
+		err := catalog.Publish([]Definition{definition})
 		if err == nil || !strings.Contains(err.Error(), "tool budget is required") {
 			t.Fatalf("Publish error = %v, want tool budget rejection", err)
 		}
@@ -112,13 +161,13 @@ func TestCatalogValidatesToolBudgetAgainstAgentCapability(t *testing.T) {
 		}
 		agents.definitions[ref] = prepared
 		catalog := NewCatalog(testSchemaRegistry(t), agents)
-		err = catalog.Publish([]WorkflowDefinition{definition})
+		err = catalog.Publish([]Definition{definition})
 		if err == nil || !strings.Contains(err.Error(), "tool budget must be zero") {
 			t.Fatalf("Publish error = %v, want zero tool budget rejection", err)
 		}
 
 		definition.Nodes[0].Budget.MaxToolCalls = 0
-		if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+		if err := catalog.Publish([]Definition{definition}); err != nil {
 			t.Fatalf("Publish zero-tool workflow: %v", err)
 		}
 	})
@@ -130,7 +179,7 @@ func TestCatalogRequiresPinnedModelPricesForCostBudget(t *testing.T) {
 	definition.Nodes[0].Budget.MaxCostMicros = 100
 	agents := testAgentDefinitions(t)
 	catalog := NewCatalog(testSchemaRegistry(t), agents)
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err == nil ||
+	if err := catalog.Publish([]Definition{definition}); err == nil ||
 		!strings.Contains(err.Error(), "model prices are required") {
 		t.Fatalf("Publish error = %v, want model price validation", err)
 	}
@@ -145,7 +194,7 @@ func TestCatalogRequiresPinnedModelPricesForCostBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	agents.definitions[ref] = prepared
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatalf("Publish priced workflow: %v", err)
 	}
 }

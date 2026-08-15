@@ -11,15 +11,15 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-func (workflowStore *Store) GetRun(ctx context.Context, id string) (*WorkflowRunRecord, error) {
-	var run WorkflowRunRecord
+func (workflowStore *Store) GetRun(ctx context.Context, id string) (*RunRecord, error) {
+	var run RunRecord
 	row := workflowStore.db.QueryRowContext(ctx, `SELECT
-		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,round_number,base_depth,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
-		tool_call_count,cost_micros,retry_count,error_code,started_at,ended_at
+		tool_call_count,cost_micros,retry_count,error_code,stop_reason,started_at,ended_at
 		FROM workflow_runs WHERE id=? LIMIT 1`, id)
-	if err := scanWorkflowRun(row, &run); err != nil {
+	if err := scanRecord(row, &run); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("get workflow run %q: %w", id, ErrNotFound)
 		}
@@ -303,16 +303,17 @@ func scanNodeRun(row rowScanner) (NodeRunRecord, error) {
 	return run, nil
 }
 
-func scanWorkflowRun(row rowScanner, run *WorkflowRunRecord) error {
+func scanRecord(row rowScanner, run *RunRecord) error {
 	var selection, budget, actorPermissions, scenarioPermissions []byte
 	var endedAt sql.NullTime
 	if err := row.Scan(
-		&run.ID, &run.ParentRunID, &run.WorkflowID, &run.WorkflowVersion, &run.WorkflowHash,
+		&run.ID, &run.ParentRunID, &run.Round, &run.BaseDepth,
+		&run.WorkflowID, &run.WorkflowVersion, &run.WorkflowHash,
 		&selection, &run.InputHash, &run.ActorUserID, &run.ActorTenantID, &actorPermissions,
 		&run.Scenario, &scenarioPermissions, &run.Status, &budget,
 		&run.Usage.InputTokens, &run.Usage.OutputTokens, &run.Usage.ReasoningTokens,
 		&run.Usage.TotalTokens, &run.Usage.ToolCalls, &run.Usage.CostMicros,
-		&run.Usage.Retries, &run.ErrorCode,
+		&run.Usage.Retries, &run.ErrorCode, &run.StopReason,
 		&run.StartedAt, &endedAt,
 	); err != nil {
 		return err

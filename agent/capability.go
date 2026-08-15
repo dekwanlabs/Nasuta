@@ -28,6 +28,7 @@ type Capability struct {
 	OutputSchema    SchemaRef       `json:"output_schema"`
 	ToolIDs         []string        `json:"tool_ids,omitempty"`
 	PermissionScope []string        `json:"permission_scope,omitempty"`
+	Freshness       FreshnessPolicy `json:"freshness"`
 	SideEffects     SideEffectClass `json:"side_effects"`
 	RetrySafe       bool            `json:"retry_safe"`
 	MaxConcurrency  int             `json:"max_concurrency"`
@@ -196,6 +197,15 @@ func (registry *CapabilityRegistry) prepare(capability Capability) (Capability, 
 	}
 	if err := validateCapabilityList(prepared.ID, "permission", prepared.PermissionScope); err != nil {
 		return Capability{}, err
+	}
+	switch prepared.Freshness {
+	case FreshnessStable, FreshnessCurrent, FreshnessBoundedLive:
+	default:
+		return Capability{}, fmt.Errorf(
+			"capability %q freshness policy %q is invalid",
+			prepared.ID,
+			prepared.Freshness,
+		)
 	}
 	if prepared.MaxConcurrency <= 0 {
 		return Capability{}, fmt.Errorf("capability %q max concurrency must be positive", prepared.ID)

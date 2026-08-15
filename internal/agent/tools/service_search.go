@@ -62,10 +62,10 @@ func (srv *Service) FindServices(ctx context.Context, query string, limit int) (
 	})
 }
 
-func (srv *Service) FindServicesWithVector(ctx context.Context, query string, limit int, vector []float32) (domain.SearchResult[domain.ServiceRecord], error) {
+func (srv *Service) FindServicesByVector(ctx context.Context, query string, limit int, vector []float32) (domain.SearchResult[domain.ServiceRecord], error) {
 	input := serviceSearchInput{Query: query, Limit: limit}
 	return runtrace.Invoke(ctx, serviceSearchSpec, input, func(ctx context.Context, input serviceSearchInput) (domain.SearchResult[domain.ServiceRecord], error) {
-		return srv.findServicesWithSharedVector(ctx, input, vector)
+		return srv.findServicesByVector(ctx, input, vector)
 	})
 }
 
@@ -104,7 +104,7 @@ func (srv *Service) findServices(ctx context.Context, input serviceSearchInput, 
 	if srv.semanticEnabled() {
 		var names []string
 		if len(vector) > 0 {
-			names, err = srv.semanticServiceNamesWithVector(ctx, input.Limit, vector)
+			names, err = srv.serviceNamesByVector(ctx, input.Limit, vector)
 		} else {
 			names, err = srv.semanticServiceNames(ctx, input.Query, input.Limit)
 		}
@@ -117,7 +117,7 @@ func (srv *Service) findServices(ctx context.Context, input serviceSearchInput, 
 	return domain.SearchResult[domain.ServiceRecord]{Matches: matches, Semantic: semanticSearch}, nil
 }
 
-func (srv *Service) findServicesWithSharedVector(
+func (srv *Service) findServicesByVector(
 	ctx context.Context,
 	input serviceSearchInput,
 	vector []float32,
@@ -130,7 +130,7 @@ func (srv *Service) findServicesWithSharedVector(
 	if !srv.semanticEnabled() || len(vector) == 0 {
 		return domain.SearchResult[domain.ServiceRecord]{Matches: matches}, nil
 	}
-	names, err := srv.semanticServiceNamesWithVector(ctx, input.Limit, vector)
+	names, err := srv.serviceNamesByVector(ctx, input.Limit, vector)
 	if err != nil {
 		return domain.SearchResult[domain.ServiceRecord]{}, fmt.Errorf("semantic service search: %w", err)
 	}
@@ -157,10 +157,10 @@ func (srv *Service) semanticServiceNames(ctx context.Context, query string, limi
 	if len(vectors) == 0 {
 		return nil, fmt.Errorf("embed query: empty vector")
 	}
-	return srv.semanticServiceNamesWithVector(ctx, limit, vectors[0])
+	return srv.serviceNamesByVector(ctx, limit, vectors[0])
 }
 
-func (srv *Service) semanticServiceNamesWithVector(ctx context.Context, limit int, vector []float32) ([]string, error) {
+func (srv *Service) serviceNamesByVector(ctx context.Context, limit int, vector []float32) ([]string, error) {
 	hits, err := srv.semantic.Search(ctx, semantic.Query{
 		DenseVector: vector,
 		Filter:      semantic.Filter{Keywords: map[string]string{"kind": "service"}},

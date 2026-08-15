@@ -23,17 +23,17 @@ func (recorder *compactionStatusRecorder) EmitContextUsage(runID string, event C
 
 func TestUpdateSessionCompactionStoresAndPublishesLatestStatus(t *testing.T) {
 	recorder := &compactionStatusRecorder{}
-	svc := &QA{
+	svc := &Service{
 		phaseEmitter:     recorder,
 		compactionStatus: make(map[string]SessionStatusEvent),
 	}
 
-	svc.updateSessionCompaction(
+	svc.updateCompaction(
 		"run-1", "session-1", "start",
 		"正在压缩第 1–3 轮历史上下文…", 1, 3,
 	)
 
-	status := svc.SessionCompactionStatus("session-1")
+	status := svc.CompactionStatus("session-1")
 	if status.Status != "start" || status.FromTurn != 1 || status.ToTurn != 3 ||
 		status.UpdatedAtMs == 0 {
 		t.Fatalf("stored status = %+v", status)
@@ -45,7 +45,7 @@ func TestUpdateSessionCompactionStoresAndPublishesLatestStatus(t *testing.T) {
 
 func TestEmitContextUsagePublishesProjection(t *testing.T) {
 	recorder := &compactionStatusRecorder{}
-	svc := &QA{phaseEmitter: recorder}
+	svc := &Service{phaseEmitter: recorder}
 	event := ContextUsageEvent{
 		Phase:                 "session_pre_answer",
 		ProjectedBeforeTokens: 82000,

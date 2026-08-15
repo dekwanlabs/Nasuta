@@ -53,9 +53,10 @@ type HistoryRelation struct {
 
 // ToolRouteCandidate is trusted routing metadata from a registered read tool.
 type ToolRouteCandidate struct {
-	ID       string `json:"id"`
-	Intent   string `json:"intent"`
-	Temporal bool   `json:"temporal,omitempty"`
+	ID             string `json:"id"`
+	Intent         string `json:"intent"`
+	Temporal       bool   `json:"temporal,omitempty"`
+	EvidenceSource string `json:"evidence_source,omitempty"`
 }
 
 // routeExampleJSON and toolExampleJSON are the exact shapes the routing contract

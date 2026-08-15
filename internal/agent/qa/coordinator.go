@@ -13,26 +13,26 @@ type sessionTurnStore interface {
 	AppendTurn(string, string, int64, []llm.Message) (int, error)
 }
 
-// InvestigationCoordinator converges durable Workflow facts into QA Parents.
-type InvestigationCoordinator struct {
+// Coordinator converges durable Workflow facts into QA Parents.
+type Coordinator struct {
 	investigation InvestigationRunner
 	scenarios     ScenarioLifecycle
 	parentRuns    ParentRunReader
 	sessions      sessionTurnStore
 }
 
-// NewInvestigationCoordinator binds the durable stores used by recovery and control.
-func NewInvestigationCoordinator(
+// NewCoordinator binds the durable stores used by recovery and control.
+func NewCoordinator(
 	investigation InvestigationRunner,
 	scenarios ScenarioLifecycle,
 	parentRuns ParentRunReader,
 	sessions *memory.SessionStore,
-) *InvestigationCoordinator {
+) *Coordinator {
 	var sessionTurns sessionTurnStore
 	if sessions != nil {
 		sessionTurns = sessions
 	}
-	return &InvestigationCoordinator{
+	return &Coordinator{
 		investigation: investigation,
 		scenarios:     scenarios,
 		parentRuns:    parentRuns,
@@ -41,7 +41,7 @@ func NewInvestigationCoordinator(
 }
 
 // Await joins local execution when present before converging durable terminal facts.
-func (coordinator *InvestigationCoordinator) Await(
+func (coordinator *Coordinator) Await(
 	ctx context.Context,
 	parentRunID string,
 	workflowRunID string,
@@ -58,7 +58,7 @@ func (coordinator *InvestigationCoordinator) Await(
 			workflowRunID,
 		)
 	}
-	investigation, err := coordinator.investigationRunner()
+	investigation, err := coordinator.runner()
 	if err != nil {
 		return err
 	}
@@ -69,8 +69,8 @@ func (coordinator *InvestigationCoordinator) Await(
 	return coordinator.converge(ctx, parent, terminal)
 }
 
-// ReconcileInvestigation converges one Parent from durable Workflow facts.
-func (coordinator *InvestigationCoordinator) ReconcileInvestigation(
+// Reconcile converges one Parent from durable Workflow facts.
+func (coordinator *Coordinator) Reconcile(
 	ctx context.Context,
 	parentRunID string,
 ) error {
@@ -78,7 +78,7 @@ func (coordinator *InvestigationCoordinator) ReconcileInvestigation(
 	if err != nil {
 		return err
 	}
-	investigation, err := coordinator.investigationRunner()
+	investigation, err := coordinator.runner()
 	if err != nil {
 		return err
 	}
@@ -93,8 +93,8 @@ func (coordinator *InvestigationCoordinator) ReconcileInvestigation(
 	return coordinator.converge(ctx, parent, terminal)
 }
 
-// CancelInvestigation propagates an owned Parent cancellation to its Workflow.
-func (coordinator *InvestigationCoordinator) CancelInvestigation(
+// Cancel propagates an owned Parent cancellation to its Workflow.
+func (coordinator *Coordinator) Cancel(
 	ctx context.Context,
 	parentRunID string,
 	userID int64,
@@ -106,7 +106,7 @@ func (coordinator *InvestigationCoordinator) CancelInvestigation(
 	if parent.UserID != userID {
 		return fmt.Errorf("QA parent run %q is not owned by user %d", parentRunID, userID)
 	}
-	investigation, err := coordinator.investigationRunner()
+	investigation, err := coordinator.runner()
 	if err != nil {
 		return err
 	}
@@ -117,17 +117,17 @@ func (coordinator *InvestigationCoordinator) CancelInvestigation(
 			err,
 		)
 	}
-	return coordinator.ReconcileInvestigation(context.WithoutCancel(ctx), parentRunID)
+	return coordinator.Reconcile(context.WithoutCancel(ctx), parentRunID)
 }
 
-func (coordinator *InvestigationCoordinator) investigationRunner() (InvestigationRunner, error) {
+func (coordinator *Coordinator) runner() (InvestigationRunner, error) {
 	if coordinator == nil || coordinator.investigation == nil {
 		return nil, fmt.Errorf("QA investigation workflow service is unavailable")
 	}
 	return coordinator.investigation, nil
 }
 
-func (coordinator *InvestigationCoordinator) loadParent(
+func (coordinator *Coordinator) loadParent(
 	parentRunID string,
 ) (QAParentRecord, error) {
 	if coordinator == nil || coordinator.parentRuns == nil {
@@ -146,7 +146,7 @@ func (coordinator *InvestigationCoordinator) loadParent(
 	return parent, nil
 }
 
-func (coordinator *InvestigationCoordinator) converge(
+func (coordinator *Coordinator) converge(
 	ctx context.Context,
 	parent QAParentRecord,
 	terminal InvestigationTerminal,
@@ -167,7 +167,7 @@ func (coordinator *InvestigationCoordinator) converge(
 		return fmt.Errorf("QA parent lifecycle is unavailable")
 	}
 	if outcome.Status == RunStatusDone {
-		if err := persistSessionTurn(
+		if err := persistTurn(
 			ctx,
 			coordinator.sessions,
 			parent.ID,
@@ -183,7 +183,7 @@ func (coordinator *InvestigationCoordinator) converge(
 			)
 		}
 	}
-	if err := coordinator.scenarios.CompleteScenario(ctx, parent.ID, outcome); err != nil {
+	if err := coordinator.scenarios.Complete(ctx, parent.ID, outcome); err != nil {
 		return err
 	}
 	return nil

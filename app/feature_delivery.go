@@ -66,7 +66,7 @@ func (p *Platform) initFeatureDelivery() error {
 	if err != nil {
 		return fmt.Errorf("prepare feature pipeline workflow: %w", err)
 	}
-	if err := p.flow.catalog.Publish([]workflow.WorkflowDefinition{pipelineDefinition}); err != nil {
+	if err := p.flow.catalog.Publish([]workflow.Definition{pipelineDefinition}); err != nil {
 		return fmt.Errorf("publish feature pipeline workflow: %w", err)
 	}
 	p.delivery.service = service
@@ -186,7 +186,7 @@ func (p *Platform) configureFeatureReviewRuntime(
 	if p.flow.service == nil {
 		return fmt.Errorf("configure agent review runtime: workflow service is unavailable")
 	}
-	workflowDefinitions := make([]workflow.WorkflowDefinition, 0, len(policies))
+	workflowDefinitions := make([]workflow.Definition, 0, len(policies))
 	for _, policy := range policies {
 		definition, err := reviewworkflow.Definition(policy)
 		if err != nil {
@@ -194,7 +194,7 @@ func (p *Platform) configureFeatureReviewRuntime(
 		}
 		workflowDefinitions = append(workflowDefinitions, definition)
 	}
-	if err := p.flow.service.PublishDefinitions(workflowDefinitions, true); err != nil {
+	if err := p.flow.service.Publish(workflowDefinitions, true); err != nil {
 		return fmt.Errorf("publish default review workflows: %w", err)
 	}
 	service.SetReviewConfiguration(delivery.NewRuntimeReviewRunner(runtime), defaults)

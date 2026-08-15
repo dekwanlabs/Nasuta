@@ -18,8 +18,8 @@ import (
 
 var ErrToolCallBudgetExhausted = errors.New("agent tool call budget exhausted")
 
-// AgentConfig tunes the agent loop and answer generation limits.
-type AgentConfig struct {
+// Config tunes the agent loop and answer generation limits.
+type Config struct {
 	MaxSteps            int
 	MaxToolCalls        int64
 	HistoryLimit        int
@@ -53,7 +53,7 @@ type ConversationContext struct {
 	PruneApplied         bool
 }
 
-func (config AgentConfig) withDefaults() AgentConfig {
+func (config Config) withDefaults() Config {
 	if config.ConclusionMaxTokens <= 0 {
 		config.ConclusionMaxTokens = config.AnswerMaxTokens
 	}
@@ -66,12 +66,12 @@ type Agent struct {
 	executor           *ToolExecutor
 	observer           Observer
 	controller         Controller
-	cfg                AgentConfig
+	cfg                Config
 	onFirstAnswerToken func(runID string)
 }
 
 // NewAgent builds an Agent with optional observer/controller hooks.
-func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config AgentConfig, observer Observer, controller Controller) *Agent {
+func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config Config, observer Observer, controller Controller) *Agent {
 	if executor == nil {
 		executor = NewToolExecutor(tool.NewRegistry())
 	}
@@ -214,7 +214,7 @@ func (agent *Agent) runWithSnapshot(
 ) (*RunResult, error) {
 	input := Input{
 		Question:           question,
-		Messages:           agent.buildAgentMessages(question, conversation, retrieved, plan),
+		Messages:           agent.buildMessages(question, conversation, retrieved, plan),
 		ReferenceTypes:     referenceTypeIndex(retrieved),
 		EvidenceSeeded:     conversation.EvidenceSeeded || retrieved != nil && retrieved.Text != "",
 		Direct:             plan.Direct(),
@@ -243,7 +243,7 @@ func (agent *Agent) RunCompiled(
 	loopCtx, loopCancel := context.WithTimeout(runCtx, agent.cfg.Timeout-agent.cfg.AnswerReserve)
 	defer loopCancel()
 
-	state := agent.prepareCompiledLoop(
+	state := agent.prepareLoop(
 		ctx,
 		runCtx,
 		loopCtx,
@@ -253,10 +253,10 @@ func (agent *Agent) RunCompiled(
 		runStarted,
 	)
 	if err := agent.runTurns(state); err != nil {
-		agent.finalizeCompiledLoop(state)
+		agent.finalizeLoop(state)
 		return state.result, err
 	}
-	agent.finishCompiledLoop(state)
+	agent.finishLoop(state)
 	return state.result, nil
 }
 

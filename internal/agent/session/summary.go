@@ -30,8 +30,8 @@ type turnSummaryItem struct {
 	Text string `json:"text"`
 }
 
-// GenerateTurnCompactionSummaries creates one short, ref-bound summary per turn.
-func GenerateTurnCompactionSummaries(ctx context.Context, client *llm.LLMClient, records []memory.TurnContextRecord) (map[string]string, error) {
+// GenerateSummaries creates one short, ref-bound summary per turn.
+func GenerateSummaries(ctx context.Context, client *llm.LLMClient, records []memory.TurnContextRecord) (map[string]string, error) {
 	if client == nil || len(records) == 0 {
 		return nil, nil
 	}
@@ -44,7 +44,7 @@ func GenerateTurnCompactionSummaries(ctx context.Context, client *llm.LLMClient,
 		end := min(start+turnSummaryBatchSize, len(records))
 		group.Go(func() error {
 			batch := records[start:end]
-			summaries, err := generateTurnSummaryBatch(groupCtx, client, batch)
+			summaries, err := generateSummaryBatch(groupCtx, client, batch)
 			if err != nil {
 				return fmt.Errorf("summarize turn batch %d-%d: %w",
 					batch[0].TurnNumber, batch[len(batch)-1].TurnNumber, err)
@@ -65,7 +65,7 @@ func GenerateTurnCompactionSummaries(ctx context.Context, client *llm.LLMClient,
 	return out, nil
 }
 
-func generateTurnSummaryBatch(ctx context.Context, client *llm.LLMClient, records []memory.TurnContextRecord) (map[string]string, error) {
+func generateSummaryBatch(ctx context.Context, client *llm.LLMClient, records []memory.TurnContextRecord) (map[string]string, error) {
 	transcript, err := turnSummaryTranscript(records)
 	if err != nil {
 		return nil, err
@@ -83,7 +83,7 @@ func generateTurnSummaryBatch(ctx context.Context, client *llm.LLMClient, record
 			if !ok {
 				return fmt.Errorf("unexpected turn summary response type %T", parsed)
 			}
-			return validateTurnSummaryItems(value.Items, len(records))
+			return validateSummaryItems(value.Items, len(records))
 		},
 	})
 	if err != nil {
@@ -118,13 +118,13 @@ func parseTurnSummaries(raw string, records []memory.TurnContextRecord) (map[str
 	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &response); err != nil {
 		return nil, fmt.Errorf("parse turn summary JSON: %w", err)
 	}
-	if err := validateTurnSummaryItems(response.Items, len(records)); err != nil {
+	if err := validateSummaryItems(response.Items, len(records)); err != nil {
 		return nil, err
 	}
 	return mapTurnSummaries(response.Items, records), nil
 }
 
-func validateTurnSummaryItems(items []turnSummaryItem, recordCount int) error {
+func validateSummaryItems(items []turnSummaryItem, recordCount int) error {
 	if len(items) != recordCount {
 		return fmt.Errorf("turn summary item count mismatch: got %d want %d", len(items), recordCount)
 	}
@@ -159,7 +159,7 @@ func mapTurnSummaries(items []turnSummaryItem, records []memory.TurnContextRecor
 	return out
 }
 
-func persistentSummaryTranscript(messages []llm.Message) string {
+func summaryTranscript(messages []llm.Message) string {
 	var sb strings.Builder
 	for _, m := range messages {
 		switch {

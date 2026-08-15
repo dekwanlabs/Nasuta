@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,8 @@ func TestDefaultAgentDefinitionsShareOneSettingsVersion(t *testing.T) {
 		"investigator.code",
 		"investigator.runtime",
 		"investigator.docs",
+		"investigator.web",
+		"investigator.memory",
 		"synthesizer",
 	}
 	if len(definitions) != len(wantIDs) {
@@ -70,24 +73,32 @@ func TestDefaultAgentDefinitionsShareOneSettingsVersion(t *testing.T) {
 	}
 }
 
-func TestDelegatedInvestigationBudgetPolicyUsesImmutableAgentDefinitions(t *testing.T) {
+func TestInvestigationBudgetsUsesImmutableAgentDefinitions(t *testing.T) {
 	settings := enabledAgentSettings()
 	definitions, err := defaultAgentDefinitions(settings, 9)
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := delegatedInvestigationBudgetPolicy(definitions)
+	policy, err := investigationBudgets(definitions)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for name, budget := range map[string]workflow.NodeBudget{
 		"code": policy.Code, "runtime": policy.Runtime, "docs": policy.Docs,
+		"web": policy.Web,
 	} {
 		if budget.MaxInputTokens <= 0 || budget.MaxOutputTokens <= 0 ||
 			budget.MaxTotalTokens <= 0 || budget.MaxToolCalls != int64(settings.AgentMaxSteps) ||
 			budget.MaxCostMicros != 0 {
 			t.Fatalf("%s budget = %+v", name, budget)
 		}
+	}
+	if policy.Memory.MaxInputTokens <= 0 ||
+		policy.Memory.MaxOutputTokens <= 0 ||
+		policy.Memory.MaxTotalTokens <= 0 ||
+		policy.Memory.MaxToolCalls != 0 ||
+		policy.Memory.MaxCostMicros != 0 {
+		t.Fatalf("memory budget = %+v", policy.Memory)
 	}
 	if policy.Synthesizer.MaxInputTokens <= 0 ||
 		policy.Synthesizer.MaxOutputTokens <= 0 ||
@@ -103,19 +114,21 @@ func TestDelegatedInvestigationBudgetPolicyUsesImmutableAgentDefinitions(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	priced, err := delegatedInvestigationBudgetPolicy(pricedDefinitions)
+	priced, err := investigationBudgets(pricedDefinitions)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if priced.Code.MaxCostMicros <= 0 ||
 		priced.Runtime.MaxCostMicros <= 0 ||
 		priced.Docs.MaxCostMicros <= 0 ||
+		priced.Web.MaxCostMicros <= 0 ||
+		priced.Memory.MaxCostMicros <= 0 ||
 		priced.Synthesizer.MaxCostMicros <= 0 {
 		t.Fatalf("priced budgets = %+v", priced)
 	}
 }
 
-func TestDelegatedInvestigationWorkflowCompilesPublishedCapabilities(t *testing.T) {
+func TestInvestigationFlowCompilesPublishedCapabilities(t *testing.T) {
 	const version int64 = 14
 	settings := enabledAgentSettings()
 	definitions, err := defaultAgentDefinitions(settings, version)
@@ -131,7 +144,7 @@ func TestDelegatedInvestigationWorkflowCompilesPublishedCapabilities(t *testing.
 		t.Fatal(err)
 	}
 	capabilities := agentapi.NewCapabilityRegistry(schemas, agents)
-	values, err := catalog.DefaultInvestigationCapabilities(definitions, version)
+	values, err := catalog.DefaultCapabilities(definitions, version)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,11 +158,11 @@ func TestDelegatedInvestigationWorkflowCompilesPublishedCapabilities(t *testing.
 			capabilities: capabilities,
 		},
 	}
-	budgets, err := delegatedInvestigationBudgetPolicy(definitions)
+	budgets, err := investigationBudgets(definitions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflowDefinition, err := platform.delegatedInvestigationWorkflow(
+	workflowDefinition, err := platform.defaultInvestigationFlow(
 		version,
 		time.Minute,
 		budgets,
@@ -179,7 +192,7 @@ func TestDelegatedInvestigationWorkflowCompilesPublishedCapabilities(t *testing.
 	}
 }
 
-func TestDelegatedInvestigationWorkflowForGoalsPinsRequestedVersion(t *testing.T) {
+func TestInvestigationFlowForGoalsPinsRequestedVersion(t *testing.T) {
 	const requestedVersion int64 = 14
 	settings := enabledAgentSettings()
 	schemas := agentapi.NewSchemaRegistry()
@@ -196,7 +209,7 @@ func TestDelegatedInvestigationWorkflowForGoalsPinsRequestedVersion(t *testing.T
 		if err := agents.Publish(definitions); err != nil {
 			t.Fatal(err)
 		}
-		values, err := catalog.DefaultInvestigationCapabilities(
+		values, err := catalog.DefaultCapabilities(
 			definitions,
 			version,
 		)
@@ -216,20 +229,23 @@ func TestDelegatedInvestigationWorkflowForGoalsPinsRequestedVersion(t *testing.T
 		{ID: "core_flow", Facet: "core_flow", Required: true},
 		{ID: "entrypoint", Facet: "entrypoint", Required: true},
 	}
-	definition, err := platform.delegatedInvestigationWorkflowForGoals(
+	definition, err := platform.investigationFlow(
 		t.Context(),
 		requestedVersion,
 		goals,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if definition.ID == workflow.DelegatedInvestigationID ||
+	if definition.ID == workflow.FlowID ||
 		definition.Version != requestedVersion ||
-		len(definition.Nodes) != 3 {
+		len(definition.Nodes) != 5 {
 		t.Fatalf("request workflow = %+v", definition)
 	}
+	nodes := make(map[string]workflow.NodeDefinition, len(definition.Nodes))
 	for _, node := range definition.Nodes {
+		nodes[node.ID] = node
 		if node.Kind != workflow.NodeAgent {
 			continue
 		}
@@ -238,13 +254,27 @@ func TestDelegatedInvestigationWorkflowForGoalsPinsRequestedVersion(t *testing.T
 			t.Fatalf("node %q version binding = %+v", node.ID, node)
 		}
 	}
-	again, err := platform.delegatedInvestigationWorkflowForGoals(
+	verifier := nodes["evidence.verify"]
+	if verifier.Kind != workflow.NodeVerifier ||
+		verifier.InputSchema.ID != "investigation.bundle" ||
+		verifier.OutputSchema.ID != "investigation.verified_bundle" {
+		t.Fatalf("request verifier = %+v", verifier)
+	}
+	riskGate := nodes["evidence.risk"]
+	if riskGate.Kind != workflow.NodeGate ||
+		riskGate.Gate == nil ||
+		riskGate.Gate.ID != workflow.EvidenceRiskGateID ||
+		!riskGate.Gate.ForwardInput {
+		t.Fatalf("request risk gate = %+v", riskGate)
+	}
+	again, err := platform.investigationFlow(
 		t.Context(),
 		requestedVersion,
 		[]platformagent.EvidenceGoal{
 			{ID: "entrypoint", Facet: "entrypoint", Required: true},
 			{ID: "core_flow", Facet: "core_flow", Required: true},
 		},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +290,7 @@ func TestDelegatedInvestigationWorkflowForGoalsPinsRequestedVersion(t *testing.T
 	}
 
 	workflows := workflow.NewCatalog(schemas, agents)
-	if err := workflows.Publish([]workflow.WorkflowDefinition{definition}); err != nil {
+	if err := workflows.Publish([]workflow.Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := workflows.Resolve(workflow.DefinitionRef{
@@ -274,7 +304,177 @@ func TestDelegatedInvestigationWorkflowForGoalsPinsRequestedVersion(t *testing.T
 	}
 }
 
-func TestDelegatedInvestigationWorkflowFallsBackWithoutCapabilityRegistry(t *testing.T) {
+func TestInvestigationFlowBindsObserveAgent(t *testing.T) {
+	const version int64 = 16
+	settings := enabledAgentSettings()
+	definitions, err := defaultAgentDefinitions(settings, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, observeCapability := observeCatalog(t, settings, version)
+	definitions = append(definitions, observer)
+	schemas := agentapi.NewSchemaRegistry()
+	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	agents := catalog.New(schemas)
+	if err := agents.Publish(definitions); err != nil {
+		t.Fatal(err)
+	}
+	capabilities := agentapi.NewCapabilityRegistry(schemas, agents)
+	values, err := catalog.DefaultCapabilities(definitions, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values = append(values, observeCapability)
+	if err := capabilities.Publish(values); err != nil {
+		t.Fatal(err)
+	}
+	platform := &Platform{
+		agents: agentRuntime{
+			schemas: schemas, catalog: agents, capabilities: capabilities,
+		},
+	}
+	definition, err := platform.investigationFlow(
+		t.Context(),
+		version,
+		[]platformagent.EvidenceGoal{{
+			ID: "core_flow", Facet: "core_flow", Required: true,
+			Sources:         []agentapi.EvidenceSource{agentapi.EvidenceSourceRuntime},
+			Freshness:       agentapi.FreshnessBoundedLive,
+			MinimumCoverage: 1,
+		}},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definition.Nodes) != 5 {
+		t.Fatalf("runtime observation workflow = %+v", definition)
+	}
+	var observeNode workflow.NodeDefinition
+	for _, node := range definition.Nodes {
+		if node.ID == "investigate.observe" {
+			observeNode = node
+			break
+		}
+	}
+	if observeNode.ID == "" ||
+		observeNode.Agent.ID != observer.ID ||
+		observeNode.Agent.Version != version ||
+		observeNode.Capability.ID != observeCapability.ID ||
+		observeNode.Capability.Version != version ||
+		observeNode.Budget.MaxToolCalls != int64(settings.AgentMaxSteps) ||
+		!observeNode.Optional {
+		t.Fatalf("runtime observation node = %+v", observeNode)
+	}
+}
+
+func TestInvestigationFlowUsesPlanAndFallsBackOnRejection(t *testing.T) {
+	const version int64 = 17
+	settings := enabledAgentSettings()
+	definitions, err := defaultAgentDefinitions(settings, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := agentapi.NewSchemaRegistry()
+	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	agents := catalog.New(schemas)
+	if err := agents.Publish(definitions); err != nil {
+		t.Fatal(err)
+	}
+	capabilities := agentapi.NewCapabilityRegistry(schemas, agents)
+	values, err := catalog.DefaultCapabilities(definitions, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := capabilities.Publish(values); err != nil {
+		t.Fatal(err)
+	}
+	platform := &Platform{
+		agents: agentRuntime{
+			schemas: schemas, catalog: agents, capabilities: capabilities,
+		},
+	}
+	goals := []platformagent.EvidenceGoal{
+		{ID: "core_flow", Facet: "core_flow", Required: true},
+		{
+			ID: "external_dependency", Facet: "external_dependency",
+			Required: true,
+		},
+	}
+	report := agentapi.SchemaRef{ID: "investigation.report", Version: 1}
+	answer := agentapi.SchemaRef{ID: "investigation.answer", Version: 1}
+	proposal := agentapi.TaskGraphProposal{
+		Tasks: []agentapi.TaskSpec{
+			{
+				ID: "planner.code", Purpose: "Inspect the requested core flow.",
+				Capability: "knowledge.code.inspect", RequiredFacets: []string{"core_flow"},
+				OutputSchema: report, Optional: true, MaxAttempts: 2,
+			},
+			{
+				ID: "planner.runtime", Purpose: "Trace the requested external dependencies.",
+				Capability:     "knowledge.service.trace",
+				RequiredFacets: []string{"external_dependency"},
+				OutputSchema:   report, Optional: true, MaxAttempts: 2,
+			},
+			{
+				ID: "synthesize", Purpose: "Synthesize the available evidence.",
+				Capability: "evidence.synthesize", OutputSchema: answer, MaxAttempts: 2,
+			},
+		},
+		Edges: []agentapi.TaskEdge{
+			{From: "planner.code", To: "synthesize"},
+			{From: "planner.runtime", To: "synthesize"},
+		},
+	}
+	definition, err := platform.investigationFlow(
+		t.Context(),
+		version,
+		goals,
+		&proposal,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(definition.ID, ".plan.") ||
+		!hasWorkflowNode(definition, "planner.code") ||
+		!hasWorkflowNode(definition, "planner.runtime") {
+		t.Fatalf("planner workflow = %+v", definition)
+	}
+
+	rejected := proposal
+	rejected.Tasks = append([]agentapi.TaskSpec(nil), proposal.Tasks...)
+	rejected.Tasks[0].OutputSchema = answer
+	fallback, err := platform.investigationFlow(
+		t.Context(),
+		version,
+		goals,
+		&rejected,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(fallback.ID, ".plan.") ||
+		!hasWorkflowNode(fallback, "investigate.code") ||
+		!hasWorkflowNode(fallback, "investigate.runtime") ||
+		hasWorkflowNode(fallback, "planner.code") {
+		t.Fatalf("fallback workflow = %+v", fallback)
+	}
+}
+
+func hasWorkflowNode(definition workflow.Definition, id string) bool {
+	for _, node := range definition.Nodes {
+		if node.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func TestInvestigationFlowFallsBackWithoutCapabilityRegistry(t *testing.T) {
 	const version int64 = 15
 	settings := enabledAgentSettings()
 	definitions, err := defaultAgentDefinitions(settings, version)
@@ -295,11 +495,11 @@ func TestDelegatedInvestigationWorkflowFallsBackWithoutCapabilityRegistry(t *tes
 			catalog: agents,
 		},
 	}
-	budgets, err := delegatedInvestigationBudgetPolicy(definitions)
+	budgets, err := investigationBudgets(definitions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflowDefinition, err := platform.delegatedInvestigationWorkflow(
+	workflowDefinition, err := platform.defaultInvestigationFlow(
 		version,
 		time.Minute,
 		budgets,
@@ -320,12 +520,23 @@ func TestBuildQARuntimeDisablesDefinitionRuntimeWithoutLLM(t *testing.T) {
 	settings := &config.PlatformSettings{}
 	settings.Apply(nil)
 
-	qa, definitions, runtime, err := platform.buildQARuntime(settings, nil, 1)
+	qa, definitions, capabilities, runtime, err := platform.buildQARuntime(
+		settings,
+		nil,
+		1,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if qa.QA != nil || len(definitions) != 0 || runtime != nil {
-		t.Fatalf("disabled runtime = (qa=%p definitions=%d runtime=%v)", qa.QA, len(definitions), runtime)
+	if qa.QA != nil || len(definitions) != 0 ||
+		len(capabilities) != 0 || runtime != nil {
+		t.Fatalf(
+			"disabled runtime = (qa=%p definitions=%d capabilities=%d runtime=%v)",
+			qa.QA,
+			len(definitions),
+			len(capabilities),
+			runtime,
+		)
 	}
 }
 
@@ -350,7 +561,7 @@ func TestBuildQARuntimeKeepsInvestigationControlWithAndWithoutLLM(t *testing.T) 
 		t.Run(test.name, func(t *testing.T) {
 			platform := qaRuntimeTestPlatform(t)
 
-			runtime, definitions, definitionRuntime, err := platform.buildQARuntime(
+			runtime, definitions, capabilities, definitionRuntime, err := platform.buildQARuntime(
 				test.settings,
 				nil,
 				1,
@@ -369,6 +580,9 @@ func TestBuildQARuntimeKeepsInvestigationControlWithAndWithoutLLM(t *testing.T) 
 			if test.wantRuntime && len(definitions) == 0 {
 				t.Fatal("enabled LLM produced no definitions")
 			}
+			if len(capabilities) != 0 {
+				t.Fatalf("runtime without extension produced %d extension capabilities", len(capabilities))
+			}
 			if !test.wantRuntime && len(definitions) != 0 {
 				t.Fatalf("disabled LLM produced %d definitions", len(definitions))
 			}
@@ -384,8 +598,8 @@ func TestBuildQARuntimeKeepsInvestigationControlWithAndWithoutLLM(t *testing.T) 
 					runtime.InvestigationReconciler,
 				)
 			}
-			canceller, cancelOK := runtime.InvestigationCanceller.(*platformagent.InvestigationCoordinator)
-			reconciler, reconcileOK := runtime.InvestigationReconciler.(*platformagent.InvestigationCoordinator)
+			canceller, cancelOK := runtime.InvestigationCanceller.(*platformagent.QACoordinator)
+			reconciler, reconcileOK := runtime.InvestigationReconciler.(*platformagent.QACoordinator)
 			if !cancelOK || !reconcileOK || canceller != reconciler {
 				t.Fatal("cancellation and recovery use different coordinators")
 			}
@@ -424,13 +638,13 @@ func TestConfigureAgentWorkflowRuntimeTracksLLMAvailability(t *testing.T) {
 	if err := platform.configureAgentWorkflowRuntime(runtime); err != nil {
 		t.Fatal(err)
 	}
-	if !platform.flow.service.ExecutionAvailable() {
+	if !platform.flow.service.Available() {
 		t.Fatal("workflow runtime was not assembled")
 	}
 	if err := platform.configureAgentWorkflowRuntime(nil); err != nil {
 		t.Fatal(err)
 	}
-	if platform.flow.service.ExecutionAvailable() {
+	if platform.flow.service.Available() {
 		t.Fatal("workflow runtime remained enabled without an LLM runtime")
 	}
 }
@@ -477,7 +691,7 @@ func qaRuntimeTestPlatform(t *testing.T) *Platform {
 			catalog: agents,
 		},
 		qa: qaState{
-			runs:     agentrun.BindStore(db),
+			runs:     agentrun.Bind(db),
 			sessions: memory.NewSessionStore(db),
 			memory:   memory.NewMemoryStore(db, nil, nil, 0),
 		},
@@ -505,4 +719,55 @@ func enabledAgentSettings() *config.PlatformSettings {
 	}
 	settings.Apply(nil)
 	return settings
+}
+
+func observeCatalog(
+	t *testing.T,
+	settings *config.PlatformSettings,
+	version int64,
+) (agentapi.Definition, agentapi.Capability) {
+	t.Helper()
+	definition, err := agentapi.Prepare(agentapi.Definition{
+		ID: "investigator.observe", Version: version,
+		DisplayName: "Live Runtime Investigator",
+		Purpose:     "Investigate bounded live runtime evidence.",
+		Prompt: agentapi.PromptSpec{
+			System: "Investigate runtime evidence and return the required report.", Version: "1",
+		},
+		InputSchema:  agentapi.SchemaRef{ID: "task.contract", Version: 1},
+		OutputSchema: agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		Model: agentapi.ModelPolicy{
+			Provider: settings.LLMProvider, Model: settings.LLMModel,
+			MaxOutputTokens: settings.LLMAnswerMaxTokens,
+		},
+		Tools: agentapi.ToolPolicy{
+			VisibleToolIDs: []string{"observe_logs"}, RestrictVisible: true,
+		},
+		Budget: agentapi.BudgetPolicy{
+			Timeout:       time.Duration(settings.AgentTimeout),
+			MaxSteps:      settings.AgentMaxSteps,
+			ContextTokens: settings.LLMContextWindow,
+		},
+		Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return definition, agentapi.Capability{
+		ID: "knowledge.runtime.observe", Version: version,
+		Purpose:         "Investigate bounded live runtime evidence.",
+		InputFacets:     []string{"core_flow"},
+		InputSchema:     definition.InputSchema,
+		OutputSchema:    definition.OutputSchema,
+		ToolIDs:         []string{"observe_logs"},
+		PermissionScope: []string{"knowledge.read"},
+		Freshness:       agentapi.FreshnessBoundedLive,
+		SideEffects:     agentapi.SideEffectNone,
+		RetrySafe:       true,
+		MaxConcurrency:  3,
+		Enabled:         true,
+		Agent: agentapi.DefinitionRef{
+			ID: definition.ID, Version: definition.Version,
+		},
+	}
 }

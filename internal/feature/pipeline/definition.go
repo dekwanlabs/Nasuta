@@ -16,9 +16,9 @@ const (
 )
 
 // DefaultDefinition fixes the business stages and human checkpoints.
-func DefaultDefinition(version int64) (workflow.WorkflowDefinition, error) {
+func DefaultDefinition(version int64) (workflow.Definition, error) {
 	if version <= 0 {
-		return workflow.WorkflowDefinition{}, fmt.Errorf("feature pipeline version must be positive")
+		return workflow.Definition{}, fmt.Errorf("feature pipeline version must be positive")
 	}
 	permission := agentapi.PermissionPolicy{Scopes: []string{scope.FeatureDelivery}}
 	nodes := []workflow.NodeDefinition{
@@ -42,20 +42,22 @@ func DefaultDefinition(version int64) (workflow.WorkflowDefinition, error) {
 			From: nodes[index].ID, To: nodes[index+1].ID, Required: true,
 		})
 	}
-	return workflow.WorkflowDefinition{
+	return workflow.Definition{
 		ID:           WorkflowID,
 		Version:      version,
 		Purpose:      "Generate, review, implement, and validate one Feature Delivery artifact chain.",
 		InputSchema:  requestSchema,
 		OutputSchema: resultSchema,
 		Permissions:  permission,
-		Budget: workflow.WorkflowBudget{
+		Budget: workflow.Budget{
 			MaxNodes:        len(nodes),
 			MaxParallelism:  1,
+			MaxRounds:       1,
+			MaxDepth:        len(nodes),
 			Timeout:         pipelineTimeout,
 			MaxHandoffBytes: 2 << 20,
 		},
-		FailurePolicy: workflow.WorkflowFailurePolicy{Mode: workflow.FailFast},
+		FailurePolicy: workflow.FailurePolicy{Mode: workflow.FailFast},
 		Nodes:         nodes,
 		Edges:         edges,
 	}, nil

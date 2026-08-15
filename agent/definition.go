@@ -63,7 +63,7 @@ type BudgetPolicy struct {
 	Timeout           time.Duration `json:"timeout"`
 	MaxSteps          int           `json:"max_steps"`
 	ContextTokens     int           `json:"context_tokens"`
-	MaxContinueRounds int           `json:"max_continue_rounds"`
+	MaxContinueRounds int           `json:"max_continue_rounds,omitempty"`
 }
 
 type PermissionPolicy struct {

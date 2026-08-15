@@ -10,7 +10,7 @@ import (
 func (compiler *ProposalCompiler) compile(
 	proposal validatedProposal,
 	policy CompilationPolicy,
-) (WorkflowDefinition, error) {
+) (Definition, error) {
 	nodes := make([]NodeDefinition, 0, len(proposal.tasks))
 	tasks := make(map[string]validatedTask, len(proposal.tasks))
 	for _, task := range proposal.tasks {
@@ -72,7 +72,7 @@ func (compiler *ProposalCompiler) compile(
 			joinID += "." + target
 		}
 		if _, conflict := nodeIDs[joinID]; conflict {
-			return WorkflowDefinition{}, fmt.Errorf(
+			return Definition{}, fmt.Errorf(
 				"compiled join id %q conflicts with a task",
 				joinID,
 			)
@@ -81,9 +81,59 @@ func (compiler *ProposalCompiler) compile(
 		joinIDs[target] = joinID
 		nodes = append(nodes, NodeDefinition{
 			ID: joinID, Kind: NodeJoin,
-			JoinMode:                policy.JoinMode,
-			RejectEvidenceConflicts: policy.RejectEvidenceConflicts,
-			InputSchema:             policy.JoinInputSchema, OutputSchema: policy.JoinOutputSchema,
+			JoinMode: policy.JoinMode,
+			RejectEvidenceConflicts: policy.RejectEvidenceConflicts &&
+				policy.VerifierID == "",
+			InputSchema: policy.JoinInputSchema, OutputSchema: policy.JoinOutputSchema,
+			Permissions: agentapi.PermissionPolicy{
+				Scopes: append([]string(nil), policy.Permissions.Scopes...),
+			},
+			Timeout: policy.NodeTimeout,
+		})
+	}
+	if policy.VerifierID != "" {
+		if _, conflict := nodeIDs[policy.VerifierID]; conflict {
+			return Definition{}, fmt.Errorf(
+				"compiled verifier id %q conflicts with a task or join",
+				policy.VerifierID,
+			)
+		}
+		nodeIDs[policy.VerifierID] = struct{}{}
+		nodes = append(nodes, NodeDefinition{
+			ID: policy.VerifierID, Kind: NodeVerifier,
+			InputSchema: policy.VerifierInputSchema, OutputSchema: policy.VerifierOutputSchema,
+			Verifier: &VerifierSpec{
+				RequiredGoals:            append([]string(nil), policy.RequiredGoals...),
+				HighRiskGoals:            append([]string(nil), policy.HighRiskGoals...),
+				HighRiskMinimumTrustTier: policy.HighRiskMinimumTrustTier,
+				RejectEvidenceConflicts:  policy.RejectEvidenceConflicts,
+			},
+			Permissions: agentapi.PermissionPolicy{
+				Scopes: append([]string(nil), policy.Permissions.Scopes...),
+			},
+			Timeout: policy.NodeTimeout,
+		})
+	}
+	if policy.RiskGateID != "" {
+		if _, conflict := nodeIDs[policy.RiskGateID]; conflict {
+			return Definition{}, fmt.Errorf(
+				"compiled evidence risk gate id %q conflicts with a task, join, or verifier",
+				policy.RiskGateID,
+			)
+		}
+		nodeIDs[policy.RiskGateID] = struct{}{}
+		nodes = append(nodes, NodeDefinition{
+			ID: policy.RiskGateID, Kind: NodeGate,
+			InputSchema:  policy.VerifierOutputSchema,
+			OutputSchema: policy.VerifierOutputSchema,
+			Gate: &GateSpec{
+				ID: EvidenceRiskGateID,
+				AllowedDecisions: []string{
+					EvidenceRiskPassDecision,
+					string(StopNeedsClarification),
+				},
+				ForwardInput: true,
+			},
 			Permissions: agentapi.PermissionPolicy{
 				Scopes: append([]string(nil), policy.Permissions.Scopes...),
 			},
@@ -91,7 +141,11 @@ func (compiler *ProposalCompiler) compile(
 		})
 	}
 
-	edges := make([]EdgeDefinition, 0, len(proposal.edges)+len(joinTargets))
+	edges := make(
+		[]EdgeDefinition,
+		0,
+		len(proposal.edges)+len(joinTargets)+2,
+	)
 	for _, edge := range proposal.edges {
 		target := edge.To
 		if joinID := joinIDs[target]; joinID != "" {
@@ -102,11 +156,31 @@ func (compiler *ProposalCompiler) compile(
 		})
 	}
 	for _, target := range joinTargets {
+		if policy.VerifierID != "" && target == proposal.terminalID {
+			edges = append(edges, EdgeDefinition{
+				From: joinIDs[target], To: policy.VerifierID, Required: true,
+			})
+			continue
+		}
 		edges = append(edges, EdgeDefinition{
 			From: joinIDs[target], To: target, Required: true,
 		})
 	}
-	return WorkflowDefinition{
+	if policy.VerifierID != "" {
+		target := proposal.terminalID
+		if policy.RiskGateID != "" {
+			target = policy.RiskGateID
+		}
+		edges = append(edges, EdgeDefinition{
+			From: policy.VerifierID, To: target, Required: true,
+		})
+	}
+	if policy.RiskGateID != "" {
+		edges = append(edges, EdgeDefinition{
+			From: policy.RiskGateID, To: proposal.terminalID, Required: true,
+		})
+	}
+	return Definition{
 		ID: policy.WorkflowID, Version: policy.WorkflowVersion,
 		Purpose:      policy.Purpose,
 		InputSchema:  policy.InputSchema,
@@ -117,6 +191,6 @@ func (compiler *ProposalCompiler) compile(
 			Scopes: append([]string(nil), policy.Permissions.Scopes...),
 		},
 		Budget:        proposal.workflowBudget,
-		FailurePolicy: WorkflowFailurePolicy{Mode: policy.FailureMode},
+		FailurePolicy: FailurePolicy{Mode: policy.FailureMode},
 	}, nil
 }

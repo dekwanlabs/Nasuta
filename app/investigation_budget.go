@@ -8,79 +8,92 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
 
-func delegatedInvestigationBudgetPolicy(
+func investigationBudgets(
 	definitions []agentapi.Definition,
-) (workflow.DelegatedInvestigationBudgetPolicy, error) {
+) (workflow.Budgets, error) {
 	byID := make(map[string]agentapi.Definition, len(definitions))
 	for _, definition := range definitions {
 		if _, exists := byID[definition.ID]; exists {
-			return workflow.DelegatedInvestigationBudgetPolicy{}, fmt.Errorf(
-				"delegated investigation agent definition %q is duplicated",
+			return workflow.Budgets{}, fmt.Errorf(
+				"investigation agent definition %q is duplicated",
 				definition.ID,
 			)
 		}
 		byID[definition.ID] = definition
 	}
-	investigatorBudget := func(id string) (workflow.NodeBudget, error) {
+	investigatorBudget := func(id string, requireTools bool) (workflow.NodeBudget, error) {
 		definition, ok := byID[id]
 		if !ok {
 			return workflow.NodeBudget{}, fmt.Errorf(
-				"delegated investigation agent definition %q is required",
+				"investigation agent definition %q is required",
 				id,
 			)
 		}
-		if len(definition.Tools.VisibleToolIDs) == 0 {
+		if requireTools && len(definition.Tools.VisibleToolIDs) == 0 {
 			return workflow.NodeBudget{}, fmt.Errorf(
-				"delegated investigation agent definition %q requires visible tools",
+				"investigation agent definition %q requires visible tools",
 				id,
 			)
 		}
-		return delegatedAgentNodeBudget(definition, int64(definition.Budget.MaxSteps))
+		maxToolCalls := int64(0)
+		if requireTools {
+			maxToolCalls = int64(definition.Budget.MaxSteps)
+		}
+		return agentNodeBudget(definition, maxToolCalls)
 	}
 	synthesizer, ok := byID["synthesizer"]
 	if !ok {
-		return workflow.DelegatedInvestigationBudgetPolicy{}, fmt.Errorf(
-			"delegated investigation agent definition %q is required",
+		return workflow.Budgets{}, fmt.Errorf(
+			"investigation agent definition %q is required",
 			"synthesizer",
 		)
 	}
 	if !synthesizer.Tools.RestrictVisible || len(synthesizer.Tools.VisibleToolIDs) != 0 {
-		return workflow.DelegatedInvestigationBudgetPolicy{}, fmt.Errorf(
-			"delegated investigation synthesizer must explicitly disable tools",
+		return workflow.Budgets{}, fmt.Errorf(
+			"investigation synthesizer must explicitly disable tools",
 		)
 	}
-	code, err := investigatorBudget("investigator.code")
+	code, err := investigatorBudget("investigator.code", true)
 	if err != nil {
-		return workflow.DelegatedInvestigationBudgetPolicy{}, err
+		return workflow.Budgets{}, err
 	}
-	runtime, err := investigatorBudget("investigator.runtime")
+	runtime, err := investigatorBudget("investigator.runtime", true)
 	if err != nil {
-		return workflow.DelegatedInvestigationBudgetPolicy{}, err
+		return workflow.Budgets{}, err
 	}
-	docs, err := investigatorBudget("investigator.docs")
+	docs, err := investigatorBudget("investigator.docs", true)
 	if err != nil {
-		return workflow.DelegatedInvestigationBudgetPolicy{}, err
+		return workflow.Budgets{}, err
 	}
-	synthesis, err := delegatedAgentNodeBudget(synthesizer, 0)
+	web, err := investigatorBudget("investigator.web", true)
 	if err != nil {
-		return workflow.DelegatedInvestigationBudgetPolicy{}, err
+		return workflow.Budgets{}, err
 	}
-	return workflow.DelegatedInvestigationBudgetPolicy{
-		Code: code, Runtime: runtime, Docs: docs, Synthesizer: synthesis,
+	memory, err := investigatorBudget("investigator.memory", false)
+	if err != nil {
+		return workflow.Budgets{}, err
+	}
+	synthesis, err := agentNodeBudget(synthesizer, 0)
+	if err != nil {
+		return workflow.Budgets{}, err
+	}
+	return workflow.Budgets{
+		Code: code, Runtime: runtime, Docs: docs, Web: web, Memory: memory,
+		Synthesizer: synthesis,
 	}, nil
 }
 
-func delegatedAgentNodeBudget(
+func agentNodeBudget(
 	definition agentapi.Definition,
 	maxToolCalls int64,
 ) (workflow.NodeBudget, error) {
-	ceiling, err := execution.CalculateModelUsageCeiling(
+	ceiling, err := execution.UsageCeiling(
 		definition.Budget,
 		definition.Model,
 	)
 	if err != nil {
 		return workflow.NodeBudget{}, fmt.Errorf(
-			"calculate delegated investigation agent %q budget: %w",
+			"calculate investigation agent %q budget: %w",
 			definition.ID,
 			err,
 		)

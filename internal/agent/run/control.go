@@ -7,7 +7,7 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-func (hub *RunHub) Send(runID string, signal ControlSignal) {
+func (hub *Hub) Send(runID string, signal ControlSignal) {
 	hub.mu.Lock()
 	hub.signals[runID] = append(hub.signals[runID], signal)
 	var paused chan struct{}
@@ -21,7 +21,7 @@ func (hub *RunHub) Send(runID string, signal ControlSignal) {
 	}
 }
 
-func (hub *RunHub) Resume(runID string) error {
+func (hub *Hub) Resume(runID string) error {
 	hub.mu.Lock()
 	resume := hub.paused[runID]
 	if resume == nil {
@@ -38,7 +38,7 @@ func (hub *RunHub) Resume(runID string) error {
 	}
 	hub.mu.Unlock()
 	if hub.control != nil {
-		if err := hub.control.TransitionControl(runID, RunStatusPaused, RunStatusRunning); err != nil {
+		if err := hub.control.TransitionControl(runID, StatusPaused, StatusRunning); err != nil {
 			return fmt.Errorf("resume run: %w", err)
 		}
 	}
@@ -53,7 +53,7 @@ func (hub *RunHub) Resume(runID string) error {
 	return nil
 }
 
-func (hub *RunHub) Poll(runID string) ControlSignal {
+func (hub *Hub) Poll(runID string) ControlSignal {
 	hub.mu.Lock()
 	queue := hub.signals[runID]
 	if len(queue) == 0 {
@@ -68,7 +68,7 @@ func (hub *RunHub) Poll(runID string) ControlSignal {
 	hub.mu.Unlock()
 
 	if signal.Kind == CtrlPause && hub.control != nil {
-		if err := hub.control.TransitionControl(runID, RunStatusRunning, RunStatusPaused); err != nil {
+		if err := hub.control.TransitionControl(runID, StatusRunning, StatusPaused); err != nil {
 			log.WarnfCtx(ctxWithRunID(runID), "[hub] pause transition rejected: %v", err)
 			hub.mu.Lock()
 			paused := hub.paused[runID]
@@ -83,7 +83,7 @@ func (hub *RunHub) Poll(runID string) ControlSignal {
 	return signal
 }
 
-func (hub *RunHub) WaitResume(ctx context.Context, runID string) error {
+func (hub *Hub) WaitResume(ctx context.Context, runID string) error {
 	hub.mu.Lock()
 	resume := hub.paused[runID]
 	hub.mu.Unlock()

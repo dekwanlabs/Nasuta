@@ -93,7 +93,7 @@ type streamEvent struct {
 func newTestAgent(t *testing.T, serverURL string) *Agent {
 	t.Helper()
 	client := llm.NewLLMClientWithHTTP(serverURL, "k", "test", 100, &http.Client{})
-	return NewAgent(client, nil, AgentConfig{
+	return NewAgent(client, nil, Config{
 		MaxSteps:          5,
 		AnswerMaxTokens:   100,
 		MaxContinueRounds: 2,
@@ -208,7 +208,7 @@ func traceEventByNode(t *testing.T, events []domain.EvaluationTrace, node string
 }
 
 func TestMaxStepsForQuestion(t *testing.T) {
-	agent := &Agent{cfg: AgentConfig{MaxSteps: 5}}
+	agent := &Agent{cfg: Config{MaxSteps: 5}}
 	for _, question := range []string{
 		"what does this service do",
 		"review this architecture",
@@ -222,7 +222,7 @@ func TestMaxStepsForQuestion(t *testing.T) {
 }
 
 func TestMaxStepsForWebPlanUsesConfiguredLimit(t *testing.T) {
-	agent := &Agent{cfg: AgentConfig{MaxSteps: 5}}
+	agent := &Agent{cfg: Config{MaxSteps: 5}}
 	plan := domain.EvidencePlan{Sources: domain.Web}
 	if got := agent.MaxStepsForPlan("school information", plan); got != 5 {
 		t.Fatalf("MaxStepsForPlan() = %d, want 5", got)
@@ -294,7 +294,7 @@ func TestRunExtendsOneToolCapableTurnAfterBoundaryEvidence(t *testing.T) {
 		Handler:     stringHandler(func(context.Context, tool.Arguments) (string, error) { return `{"found":true}`, nil }),
 	})
 	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{})
-	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+	agent := NewAgent(client, NewToolExecutor(registry), Config{
 		MaxSteps: 3, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
 	}, nil, nil)
 	result, err := agent.RunWithPlan(t.Context(), "run_evidence_extension", "这个服务做什么？", nil, nil,
@@ -327,7 +327,7 @@ func TestRunAllowsDirectAnswerWithoutPreferredTool(t *testing.T) {
 		}),
 	})
 	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{})
-	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+	agent := NewAgent(client, NewToolExecutor(registry), Config{
 		MaxSteps: 2, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
 	}, nil, nil)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
@@ -368,7 +368,7 @@ func TestRunStopsBeforeToolExecutionWhenToolCallBudgetIsExhausted(t *testing.T) 
 		}),
 	})
 	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{})
-	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+	agent := NewAgent(client, NewToolExecutor(registry), Config{
 		MaxSteps: 2, MaxToolCalls: 1, AnswerMaxTokens: 100,
 		Timeout: 5 * time.Second, AnswerReserve: time.Second,
 	}, nil, nil)
@@ -426,7 +426,7 @@ func TestRunForcesConclusionAfterToolFailure(t *testing.T) {
 	})
 	client := llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, server.Client())
 	observer := &captureObserver{}
-	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+	agent := NewAgent(client, NewToolExecutor(registry), Config{
 		MaxSteps: 1, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
 	}, observer, nil)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
@@ -674,7 +674,7 @@ func TestRunRecoversFromEmptyStopWithForcedConclusion(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, &http.Client{})
-	agent := NewAgent(client, nil, AgentConfig{
+	agent := NewAgent(client, nil, Config{
 		MaxSteps: 2, AnswerMaxTokens: 100, Timeout: 5 * time.Second, AnswerReserve: time.Second,
 	}, nil, nil)
 	result, err := agent.RunWithPlan(t.Context(), "run_empty_stop", "请分析当前问题", nil, nil, domain.EvidencePlan{}, false)
@@ -933,7 +933,7 @@ func TestRunDeliversFreshToolOutputWithoutLoss(t *testing.T) {
 	}))
 	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, &http.Client{})
 	observer := &captureObserver{}
-	agent := NewAgent(client, NewToolExecutor(registry), AgentConfig{
+	agent := NewAgent(client, NewToolExecutor(registry), Config{
 		MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0,
 		Timeout: 5 * time.Second, AnswerReserve: time.Second,
 	}, observer, nil)
@@ -992,7 +992,7 @@ func TestForceConclusion_StreamsLiveAndRecordsAnswer(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, &http.Client{})
 	obs := &captureObserver{}
-	agent := NewAgent(client, nil, AgentConfig{
+	agent := NewAgent(client, nil, Config{
 		MaxSteps: 1, AnswerMaxTokens: 100, MaxContinueRounds: 2,
 		Timeout: 5 * time.Second, AnswerReserve: 4 * time.Second,
 	}, obs, nil)
@@ -1039,7 +1039,7 @@ func TestForceConclusion_RetriesToolProtocolWithoutStreamingIt(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, &http.Client{})
 	obs := &captureObserver{}
-	agent := NewAgent(client, nil, AgentConfig{
+	agent := NewAgent(client, nil, Config{
 		MaxSteps: 1, AnswerMaxTokens: 100, MaxContinueRounds: 0,
 		Timeout: 5 * time.Second, AnswerReserve: 4 * time.Second,
 	}, obs, nil)
@@ -1061,21 +1061,21 @@ func TestForceConclusion_RetriesToolProtocolWithoutStreamingIt(t *testing.T) {
 }
 
 func TestWithDefaults_DoesNotRewriteInvalidAnswerReserve(t *testing.T) {
-	cfg := AgentConfig{Timeout: 10 * time.Second, AnswerReserve: 30 * time.Second}.withDefaults()
+	cfg := Config{Timeout: 10 * time.Second, AnswerReserve: 30 * time.Second}.withDefaults()
 	if cfg.AnswerReserve != 30*time.Second {
 		t.Fatalf("reserve = %s, want configured value preserved", cfg.AnswerReserve)
 	}
 
 	// ConclusionMaxTokens falls back to AnswerMaxTokens when unset (0). Timeout
 	// and AnswerReserve are NOT defaulted here — config.Config provides those at
-	// the call site (see AgentConfig doc comment).
-	cfg = AgentConfig{AnswerMaxTokens: 6000}.withDefaults()
+	// the call site (see Config doc comment).
+	cfg = Config{AnswerMaxTokens: 6000}.withDefaults()
 	if cfg.ConclusionMaxTokens != 6000 {
 		t.Fatalf("ConclusionMaxTokens = %d, want 6000 (fallback to AnswerMaxTokens)", cfg.ConclusionMaxTokens)
 	}
 
 	// An explicit ConclusionMaxTokens is preserved.
-	cfg = AgentConfig{AnswerMaxTokens: 6000, ConclusionMaxTokens: 8000}.withDefaults()
+	cfg = Config{AnswerMaxTokens: 6000, ConclusionMaxTokens: 8000}.withDefaults()
 	if cfg.ConclusionMaxTokens != 8000 {
 		t.Fatalf("ConclusionMaxTokens = %d, want 8000 (explicit value preserved)", cfg.ConclusionMaxTokens)
 	}
@@ -1111,7 +1111,7 @@ func TestRun_LoopExhaustedFallsThroughToConclusion(t *testing.T) {
 	obs := &captureObserver{}
 	// Timeout 1.2s with 1.0s reserved → the loop gets only ~0.2s before its ctx
 	// expires, then the conclusion has ~1.0s to finish.
-	agent := NewAgent(client, NewToolExecutor(tool.NewRegistry()), AgentConfig{
+	agent := NewAgent(client, NewToolExecutor(tool.NewRegistry()), Config{
 		MaxSteps: 3, AnswerMaxTokens: 100, MaxContinueRounds: 0,
 		Timeout: 1200 * time.Millisecond, AnswerReserve: 1000 * time.Millisecond,
 	}, obs, nil)
@@ -1138,7 +1138,7 @@ func TestRun_PreservesPartialAnswerWhenLoopDeadlineExpires(t *testing.T) {
 
 	observer := &captureObserver{}
 	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, srv.Client())
-	agent := NewAgent(client, nil, AgentConfig{
+	agent := NewAgent(client, nil, Config{
 		MaxSteps: 1, AnswerMaxTokens: 100, MaxContinueRounds: 0,
 		Timeout: 800 * time.Millisecond, AnswerReserve: 500 * time.Millisecond,
 	}, observer, nil)
@@ -1168,7 +1168,7 @@ func TestRun_PreservesPartialForcedConclusionWhenDeadlineExpires(t *testing.T) {
 
 	observer := &captureObserver{}
 	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, srv.Client())
-	agent := NewAgent(client, nil, AgentConfig{
+	agent := NewAgent(client, nil, Config{
 		MaxSteps: 0, AnswerMaxTokens: 100, MaxContinueRounds: 0,
 		Timeout: 300 * time.Millisecond, AnswerReserve: 100 * time.Millisecond,
 	}, observer, nil)
@@ -1249,12 +1249,12 @@ func TestRunRetriesOnlyCurrentRunAnswerContract(t *testing.T) {
 	agent := NewAgent(
 		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
 		NewToolExecutor(registry),
-		AgentConfig{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
+		Config{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
 		observer,
 		nil,
 	)
 
-	priorMessage, ok := answerContractMessage(tool.AnswerContract{RequiredLiterals: []string{priorSerial}})
+	priorMessage, ok := contractMessage(tool.AnswerContract{RequiredLiterals: []string{priorSerial}})
 	if !ok {
 		t.Fatal("prior answer contract was empty")
 	}
@@ -1312,7 +1312,7 @@ func TestRunFailsWhenRequiredLiteralStillMissing(t *testing.T) {
 	agent := NewAgent(
 		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
 		NewToolExecutor(registry),
-		AgentConfig{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
+		Config{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
 		observer,
 		nil,
 	)
@@ -1333,12 +1333,12 @@ func TestRunFailsWhenRequiredLiteralStillMissing(t *testing.T) {
 }
 
 func TestBuildAgentMessagesDropsHistoricalAnswerContract(t *testing.T) {
-	message, ok := answerContractMessage(tool.AnswerContract{RequiredLiterals: []string{"SN-history"}})
+	message, ok := contractMessage(tool.AnswerContract{RequiredLiterals: []string{"SN-history"}})
 	if !ok {
 		t.Fatal("answerContractMessage() returned no message")
 	}
 	agent := &Agent{}
-	messages := agent.buildAgentMessages("current question", ConversationContext{Recent: []llm.Message{message}}, nil, domain.EvidencePlan{})
+	messages := agent.buildMessages("current question", ConversationContext{Recent: []llm.Message{message}}, nil, domain.EvidencePlan{})
 	for _, candidate := range messages {
 		if strings.HasPrefix(candidate.Content, exactAnswerContractPrefix) {
 			t.Fatalf("historical answer contract leaked into current run: %#v", candidate)
@@ -1367,7 +1367,7 @@ func TestForceConclusionRejectsAnswerContractViolation(t *testing.T) {
 	agent := NewAgent(
 		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
 		nil,
-		AgentConfig{ConclusionMaxTokens: 100, MaxContinueRounds: 0},
+		Config{ConclusionMaxTokens: 100, MaxContinueRounds: 0},
 		observer,
 		nil,
 	)

@@ -137,13 +137,13 @@ func newTestDefinitionRuntime(
 	registry *Registry,
 	settings *config.PlatformSettings,
 	store *RunStore,
-) *DefinitionRuntime {
+) *Runtime {
 	t.Helper()
 	schemas := agentapi.NewSchemaRegistry()
 	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
 		t.Fatalf("publish schemas: %v", err)
 	}
-	runtime, err := NewDefinitionRuntime(
+	runtime, err := NewRuntime(
 		definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
 			if ref.ID != definition.ID || ref.Version != definition.Version {
 				return agentapi.Definition{}, fmt.Errorf("definition not found")
@@ -156,7 +156,7 @@ func newTestDefinitionRuntime(
 		store,
 	)
 	if err != nil {
-		t.Fatalf("NewDefinitionRuntime: %v", err)
+		t.Fatalf("NewRuntime: %v", err)
 	}
 	return runtime
 }
@@ -496,7 +496,7 @@ func TestDefinitionRuntimePinsSelectionAcrossManagedRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	managed := managedRun.(*definitionManagedRun)
+	managed := managedRun.(*activeRun)
 	if managed.execution.snapshot.Selection != request.Selection {
 		t.Fatalf(
 			"snapshot selection = %+v, want %+v",
@@ -606,9 +606,9 @@ func TestDefinitionRuntimeManagesScenarioParentLifecycle(t *testing.T) {
 	trace := runtrace.NewScope(runtrace.Evaluation, nil)
 	root := runtrace.WithScope(t.Context(), trace)
 	events := runtime.Hub().Subscribe(start.RunID)
-	managed, err := runtime.BeginScenario(root, start)
+	managed, err := runtime.Start(root, start)
 	if err != nil {
-		t.Fatalf("BeginScenario: %v", err)
+		t.Fatalf("Start: %v", err)
 	}
 	ctx := managed.Context(t.Context())
 	if runtrace.FromContext(ctx) != trace {
@@ -626,8 +626,8 @@ func TestDefinitionRuntimeManagesScenarioParentLifecycle(t *testing.T) {
 	}
 	managed.Release()
 	managed.Release()
-	if err := runtime.CompleteScenario(t.Context(), start.RunID, outcome); err != nil {
-		t.Fatalf("CompleteScenario: %v", err)
+	if err := runtime.Complete(t.Context(), start.RunID, outcome); err != nil {
+		t.Fatalf("Complete: %v", err)
 	}
 	terminal := waitForTerminal(t, events)
 	if terminal.RunID != start.RunID || terminal.Status != RunStatusDone || terminal.TokenUsed != 18 {
@@ -674,8 +674,8 @@ func TestDefinitionRuntimeAcceptsMatchingScenarioTerminalReplay(t *testing.T) {
 		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), bindRunStore(db),
 	)
 	events := runtime.Hub().Subscribe(runID)
-	if err := runtime.CompleteScenario(t.Context(), runID, outcome); err != nil {
-		t.Fatalf("CompleteScenario replay: %v", err)
+	if err := runtime.Complete(t.Context(), runID, outcome); err != nil {
+		t.Fatalf("Complete replay: %v", err)
 	}
 	if terminal := waitForTerminal(t, events); terminal.Status != RunStatusDone ||
 		terminal.Answer != persisted.Answer || terminal.ErrorCode != persisted.ErrorCode ||
@@ -713,12 +713,12 @@ func TestDefinitionRuntimeRejectsConflictingScenarioTerminalReplay(t *testing.T)
 	runtime := newTestDefinitionRuntime(
 		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), bindRunStore(db),
 	)
-	err = runtime.CompleteScenario(t.Context(), runID, RunOutcome{
+	err = runtime.Complete(t.Context(), runID, RunOutcome{
 		Status:   RunStatusDone,
 		Evidence: EvidenceMetrics{Status: EvidenceComplete},
 	})
 	if err == nil || !strings.Contains(err.Error(), "conflicts with persisted status") {
-		t.Fatalf("CompleteScenario conflict error = %v", err)
+		t.Fatalf("Complete conflict error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -740,7 +740,7 @@ func TestDefinitionRuntimeBroadcastsTerminalWhenScenarioCreationFails(t *testing
 	start := ScenarioRunStart{RunID: "scenario-create-fail", Question: "question", Mode: "multi_agent"}
 	events := runtime.Hub().Subscribe(start.RunID)
 
-	managed, err := runtime.BeginScenario(t.Context(), start)
+	managed, err := runtime.Start(t.Context(), start)
 	if managed != nil || err == nil || !strings.Contains(err.Error(), "create scenario run") {
 		t.Fatalf("managed=%v error=%v, want scenario creation failure", managed, err)
 	}
@@ -937,7 +937,7 @@ func TestDefinitionManagedRunFailureFinishesOnce(t *testing.T) {
 }
 
 func TestMapDefinitionResultPreservesRetryableFailure(t *testing.T) {
-	result, outcome := mapDefinitionResult(
+	result, outcome := mapResult(
 		"retryable-run",
 		&RunResult{Err: retryableDefinitionError{}},
 		nil,
@@ -997,7 +997,7 @@ func TestDefinitionUsageRecorderPersistsAndAggregates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	recorder := &definitionUsageRecorder{store: bindRunStore(db)}
+	recorder := &usageRecorder{store: bindRunStore(db)}
 	call := llm.CallUsage{
 		RunID: "run-usage", Phase: llm.PhaseAgentStep,
 		Provider: "openai", Model: "review-model", MaxOutputTokens: 256,
@@ -1036,7 +1036,7 @@ func TestDefinitionUsageRecorderPersistsAndAggregates(t *testing.T) {
 }
 
 func TestDefinitionUsageRecorderRoundsEachTokenClassUp(t *testing.T) {
-	recorder := &definitionUsageRecorder{
+	recorder := &usageRecorder{
 		inputPriceMicrosPerMillionTokens:  1,
 		outputPriceMicrosPerMillionTokens: 1,
 	}
@@ -1058,7 +1058,7 @@ func TestDefinitionUsageRecorderRejectsCostOverflow(t *testing.T) {
 		t.Fatal("tokenCostMicros accepted multiplication overflow")
 	}
 
-	recorder := &definitionUsageRecorder{
+	recorder := &usageRecorder{
 		inputPriceMicrosPerMillionTokens: 1,
 		usage: agentapi.Usage{
 			CostMicros: math.MaxInt64,

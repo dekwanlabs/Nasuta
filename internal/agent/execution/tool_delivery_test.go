@@ -27,7 +27,7 @@ func TestPrepareToolDeliveryRejectsMissingRequiredLiteral(t *testing.T) {
 		AnswerContract:       tool.AnswerContract{RequiredLiterals: []string{literal}},
 	}
 
-	got := agent.prepareToolDelivery("run-1", nil, nil, nil, call, nil, execution)
+	got := agent.prepareDelivery("run-1", nil, nil, nil, call, nil, execution)
 	if !got.Failed || got.DeliveryError != "answer_contract_missing_from_prompt" || got.Evidence {
 		t.Fatalf("delivery = %+v", got)
 	}
@@ -52,7 +52,7 @@ func TestPrepareToolDeliveryRejectsMissingRequiredLiteral(t *testing.T) {
 
 func TestPrepareToolDeliveryPersistsOversizedResultAsArtifactReference(t *testing.T) {
 	const literal = "SN-kept-in-authoritative-result"
-	agent := &Agent{cfg: AgentConfig{
+	agent := &Agent{cfg: Config{
 		ContextWindow:       1400,
 		AnswerMaxTokens:     100,
 		ConclusionMaxTokens: 100,
@@ -66,7 +66,7 @@ func TestPrepareToolDeliveryPersistsOversizedResultAsArtifactReference(t *testin
 		AnswerContract:       tool.AnswerContract{RequiredLiterals: []string{literal}},
 	}
 
-	got := agent.prepareToolDelivery(
+	got := agent.prepareDelivery(
 		"run-large",
 		[]llm.Message{{Role: "system", Content: "system"}, {Role: "user", Content: "list all"}},
 		nil,
@@ -103,12 +103,12 @@ func TestPrepareToolDeliveryPersistsOversizedResultAsArtifactReference(t *testin
 }
 
 func TestToolDeliveryBudgetClampsNegativeAvailability(t *testing.T) {
-	agent := &Agent{cfg: AgentConfig{
+	agent := &Agent{cfg: Config{
 		ContextWindow:       1000,
 		AnswerMaxTokens:     200,
 		ConclusionMaxTokens: 200,
 	}}
-	available, required, err := agent.toolDeliveryBudget(
+	available, required, err := agent.deliveryBudget(
 		[]llm.Message{{Role: "system", Content: strings.Repeat("context ", 100)}},
 		nil,
 		nil,
@@ -131,7 +131,7 @@ func TestToolDeliveryBudgetIncludesNoticesAndAccumulatedAnswerContract(t *testin
 	)
 	previousContract := &exactAnswerContract{}
 	previousContract.Add(tool.AnswerContract{RequiredLiterals: []string{previousLiteral}})
-	previousMessage, ok := answerContractMessage(tool.AnswerContract{
+	previousMessage, ok := contractMessage(tool.AnswerContract{
 		RequiredLiterals: []string{previousLiteral},
 	})
 	if !ok {
@@ -154,13 +154,13 @@ func TestToolDeliveryBudgetIncludesNoticesAndAccumulatedAnswerContract(t *testin
 		},
 		AnswerContract: tool.AnswerContract{RequiredLiterals: []string{currentLiteral}},
 	}
-	agent := &Agent{cfg: AgentConfig{
+	agent := &Agent{cfg: Config{
 		ContextWindow:       20_000,
 		AnswerMaxTokens:     500,
 		ConclusionMaxTokens: 700,
 	}}
 
-	available, required, err := agent.toolDeliveryBudget(
+	available, required, err := agent.deliveryBudget(
 		messages,
 		nil,
 		nil,
@@ -176,7 +176,7 @@ func TestToolDeliveryBudgetIncludesNoticesAndAccumulatedAnswerContract(t *testin
 		t.Fatalf("estimate current input: %v", err)
 	}
 	candidateInput, err := estimateInputTokens(
-		toolDeliveryMessages(messages, nil, call, previousContract, execution),
+		deliveryMessages(messages, nil, call, previousContract, execution),
 		nil,
 	)
 	if err != nil {
@@ -185,7 +185,7 @@ func TestToolDeliveryBudgetIncludesNoticesAndAccumulatedAnswerContract(t *testin
 	if required != candidateInput-currentInput {
 		t.Fatalf("required=%d, want complete candidate delta %d", required, candidateInput-currentInput)
 	}
-	wantAvailable := max(0, agent.cfg.ContextWindow-currentInput-agent.outputTokenReserve()-contextSafetyTokens(agent.cfg.ContextWindow))
+	wantAvailable := max(0, agent.cfg.ContextWindow-currentInput-agent.outputReserve()-contextSafetyTokens(agent.cfg.ContextWindow))
 	if available != wantAvailable {
 		t.Fatalf("available=%d, want %d", available, wantAvailable)
 	}
@@ -193,7 +193,7 @@ func TestToolDeliveryBudgetIncludesNoticesAndAccumulatedAnswerContract(t *testin
 	withoutNotices := execution
 	withoutNotices.Notices = nil
 	withoutNoticeInput, err := estimateInputTokens(
-		toolDeliveryMessages(messages, nil, call, previousContract, withoutNotices),
+		deliveryMessages(messages, nil, call, previousContract, withoutNotices),
 		nil,
 	)
 	if err != nil {
@@ -203,7 +203,7 @@ func TestToolDeliveryBudgetIncludesNoticesAndAccumulatedAnswerContract(t *testin
 		t.Fatalf("required=%d did not include notice overhead beyond %d", required, withoutNoticeInput-currentInput)
 	}
 
-	combined := toolDeliveryMessages(messages, nil, call, previousContract, execution)
+	combined := deliveryMessages(messages, nil, call, previousContract, execution)
 	var contractCount int
 	for _, message := range combined {
 		if message.Role == "system" && strings.HasPrefix(message.Content, exactAnswerContractPrefix) {
@@ -220,7 +220,7 @@ func TestToolDeliveryBudgetIncludesNoticesAndAccumulatedAnswerContract(t *testin
 }
 
 func TestToolDeliveryBudgetIncludesDeferredPostlude(t *testing.T) {
-	agent := &Agent{cfg: AgentConfig{
+	agent := &Agent{cfg: Config{
 		ContextWindow:       20_000,
 		AnswerMaxTokens:     500,
 		ConclusionMaxTokens: 700,
@@ -236,17 +236,17 @@ func TestToolDeliveryBudgetIncludesDeferredPostlude(t *testing.T) {
 	call := llm.ToolCall{ID: "call-second", Function: llm.ToolFunction{Name: "second_read"}}
 	execution := ToolExecution{PromptContent: "second result"}
 
-	available, required, err := agent.toolDeliveryBudget(messages, pendingNotices, nil, call, nil, execution)
+	available, required, err := agent.deliveryBudget(messages, pendingNotices, nil, call, nil, execution)
 	if err != nil {
 		t.Fatalf("toolDeliveryBudget: %v", err)
 	}
-	current := toolDeliveryContextMessages(messages, pendingNotices, nil)
+	current := deliveryContextMessages(messages, pendingNotices, nil)
 	currentInput, err := estimateInputTokens(current, nil)
 	if err != nil {
 		t.Fatalf("estimate current input: %v", err)
 	}
 	candidateInput, err := estimateInputTokens(
-		toolDeliveryMessages(messages, pendingNotices, call, nil, execution),
+		deliveryMessages(messages, pendingNotices, call, nil, execution),
 		nil,
 	)
 	if err != nil {
@@ -255,7 +255,7 @@ func TestToolDeliveryBudgetIncludesDeferredPostlude(t *testing.T) {
 	if required != candidateInput-currentInput {
 		t.Fatalf("required=%d, want deferred-postlude delta %d", required, candidateInput-currentInput)
 	}
-	wantAvailable := max(0, agent.cfg.ContextWindow-currentInput-agent.outputTokenReserve()-contextSafetyTokens(agent.cfg.ContextWindow))
+	wantAvailable := max(0, agent.cfg.ContextWindow-currentInput-agent.outputReserve()-contextSafetyTokens(agent.cfg.ContextWindow))
 	if available != wantAvailable {
 		t.Fatalf("available=%d, want %d", available, wantAvailable)
 	}
@@ -308,7 +308,7 @@ func TestRunKeepsParallelToolResultsContiguousBeforePostlude(t *testing.T) {
 	agent := NewAgent(
 		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, server.Client()),
 		NewToolExecutor(registry),
-		AgentConfig{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
+		Config{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
 		&captureObserver{},
 		nil,
 	)
@@ -439,7 +439,7 @@ func TestRunPreservesFiftyNineRequiredLiteralsAcrossModelSessionAndReplay(t *tes
 	agent := NewAgent(
 		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
 		NewToolExecutor(registry),
-		AgentConfig{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
+		Config{MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0, Timeout: 5 * time.Second, AnswerReserve: time.Second},
 		&captureObserver{},
 		nil,
 	)
@@ -474,7 +474,7 @@ func TestRunPreservesFiftyNineRequiredLiteralsAcrossModelSessionAndReplay(t *tes
 	recent := []llm.Message{{Role: "user", Content: "列出全部 59 个完整 SN"}}
 	recent = append(recent, result.SessionMessages...)
 	recent = append(recent, llm.Message{Role: "assistant", Content: result.Answer})
-	nextMessages := agent.buildAgentMessages(
+	nextMessages := agent.buildMessages(
 		"上一轮第 59 个 SN 是什么？",
 		ConversationContext{Recent: recent},
 		nil,

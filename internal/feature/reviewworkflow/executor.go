@@ -369,8 +369,8 @@ func (executor *Executor) failRound(
 	return cause
 }
 
-func toWorkflowUsage(usage delivery.ReviewUsage) workflow.WorkflowUsage {
-	return workflow.WorkflowUsage{
+func toWorkflowUsage(usage delivery.ReviewUsage) workflow.Usage {
+	return workflow.Usage{
 		InputTokens:     usage.InputTokens,
 		OutputTokens:    usage.OutputTokens,
 		ReasoningTokens: usage.ReasoningTokens,

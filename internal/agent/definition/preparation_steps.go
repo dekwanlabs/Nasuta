@@ -7,9 +7,9 @@ import (
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 )
 
-// RecordPreparationStep attaches trusted scenario work to the Run created
+// RecordStep attaches trusted scenario work to the Run created
 // before execution starts. Runtime steps are offset by this count later.
-func (run *definitionManagedRun) RecordPreparationStep(
+func (run *activeRun) RecordStep(
 	ctx context.Context,
 	step agentrun.StepRecord,
 ) error {
@@ -23,7 +23,7 @@ func (run *definitionManagedRun) RecordPreparationStep(
 	}
 	step.StepNo = run.preparationStepCount + 1
 	if run.start.Policy.RedactSensitive {
-		step = redactDefinitionStep(step)
+		step = redactStep(step)
 	}
 	if err := run.runtime.hub.OnStep(ctx, run.start.RunID, step); err != nil {
 		return err
@@ -41,8 +41,8 @@ func (run *definitionManagedRun) RecordPreparationStep(
 	return nil
 }
 
-// RecordPreparationStep persists trusted work performed before child workflows start.
-func (run *scenarioManagedRun) RecordPreparationStep(
+// RecordStep persists trusted work performed before child workflows start.
+func (run *scenarioManagedRun) RecordStep(
 	ctx context.Context,
 	step agentrun.StepRecord,
 ) error {
@@ -97,7 +97,7 @@ func (observer stepOffsetObserver) EmitPhase(runID, text string) {
 	}
 }
 
-func (run *definitionManagedRun) observer() agentrun.Observer {
+func (run *activeRun) observer() agentrun.Observer {
 	observer := agentrun.Observer(run.runtime.hub)
 	run.mu.Lock()
 	offset := run.preparationStepCount
@@ -106,14 +106,14 @@ func (run *definitionManagedRun) observer() agentrun.Observer {
 		observer = stepOffsetObserver{next: observer, offset: offset}
 	}
 	if run.start.Policy.RedactSensitive {
-		observer = redactingDefinitionObserver{next: observer}
+		observer = redactingObserver{next: observer}
 	}
 	return observer
 }
 
-func (run *definitionManagedRun) mergePreparationOutcome(
-	outcome agentrun.RunOutcome,
-) agentrun.RunOutcome {
+func (run *activeRun) mergePreparationOutcome(
+	outcome agentrun.Outcome,
+) agentrun.Outcome {
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	return mergePreparationOutcome(
@@ -123,9 +123,9 @@ func (run *definitionManagedRun) mergePreparationOutcome(
 }
 
 func mergePreparationOutcome(
-	outcome agentrun.RunOutcome,
+	outcome agentrun.Outcome,
 	evidence agentrun.EvidenceMetrics,
-) agentrun.RunOutcome {
+) agentrun.Outcome {
 	outcome.Evidence.ToolCallCount += evidence.ToolCallCount
 	outcome.Evidence.ToolFailureCount += evidence.ToolFailureCount
 	if evidence.ToolCallCount > 0 {

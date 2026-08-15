@@ -77,7 +77,7 @@ func TestDefinitionBuildsStableParallelPanel(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog := workflow.NewCatalog(registry, catalog.New(registry))
-	if err := catalog.Publish([]workflow.WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]workflow.Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	if len(definition.Nodes) != len(policy.Reviewers)+3 ||
@@ -431,7 +431,7 @@ func (stub *reviewCoordinatorStub) CancelReviewRound(
 }
 
 type workflowCoordinatorStub struct {
-	run            workflow.WorkflowRunRecord
+	run            workflow.RunRecord
 	resume         workflow.ResumeResult
 	executeCalls   int
 	resumeCalls    int
@@ -460,7 +460,7 @@ func (stub *workflowCoordinatorStub) GetRun(
 	string,
 	int64,
 	bool,
-) (*workflow.WorkflowRunRecord, error) {
+) (*workflow.RunRecord, error) {
 	run := stub.run
 	return &run, nil
 }
@@ -475,8 +475,8 @@ func (stub *workflowCoordinatorStub) Cancel(
 	return workflow.CancelTransition{}, nil
 }
 
-func (stub *workflowCoordinatorStub) PublishDefinitions(
-	[]workflow.WorkflowDefinition,
+func (stub *workflowCoordinatorStub) Publish(
+	[]workflow.Definition,
 	bool,
 ) error {
 	stub.publishedCalls++
@@ -518,7 +518,7 @@ func TestCoordinatorExecutesResumesAndCancels(t *testing.T) {
 				gate: gate,
 			}
 			workflows := &workflowCoordinatorStub{
-				run: workflow.WorkflowRunRecord{
+				run: workflow.RunRecord{
 					ID: "review.round-1", Status: test.runStatus,
 				},
 				resume: workflow.ResumeResult{

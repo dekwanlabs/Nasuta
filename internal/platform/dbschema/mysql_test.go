@@ -151,6 +151,9 @@ func TestWorkflowSchemaStoresApprovalSnapshots(t *testing.T) {
 	for _, required := range []string{
 		"actor_permissions_json JSON NOT NULL",
 		"scenario_permissions_json JSON NOT NULL",
+		"round_number         INT NOT NULL DEFAULT 1",
+		"base_depth          INT NOT NULL DEFAULT 0",
+		"stop_reason          VARCHAR(64) NOT NULL DEFAULT ''",
 		"approval_decision   VARCHAR(16) NULL",
 		"approver_user_id    BIGINT NULL",
 		"approver_tenant_id  VARCHAR(128) NULL",

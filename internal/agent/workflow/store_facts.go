@@ -9,7 +9,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-func (workflowStore *Store) CreateRun(ctx context.Context, run WorkflowRunRecord) error {
+func (workflowStore *Store) CreateRun(ctx context.Context, run RunRecord) error {
 	budget, err := json.Marshal(run.Budget)
 	if err != nil {
 		return fmt.Errorf("marshal workflow budget: %w", err)
@@ -27,17 +27,18 @@ func (workflowStore *Store) CreateRun(ctx context.Context, run WorkflowRunRecord
 		return fmt.Errorf("marshal workflow scenario permissions: %w", err)
 	}
 	_, err = workflowStore.db.ExecContext(ctx, `INSERT INTO workflow_runs(
-		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,round_number,base_depth,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
-		tool_call_count,cost_micros,retry_count,error_code,started_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		run.ID, run.ParentRunID, run.WorkflowID, run.WorkflowVersion, run.WorkflowHash, selection, run.InputHash,
+		tool_call_count,cost_micros,retry_count,error_code,stop_reason,started_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		run.ID, run.ParentRunID, run.Round, run.BaseDepth,
+		run.WorkflowID, run.WorkflowVersion, run.WorkflowHash, selection, run.InputHash,
 		run.ActorUserID, run.ActorTenantID, actorPermissions, run.Scenario,
 		scenarioPermissions, run.Status, budget,
 		run.Usage.InputTokens, run.Usage.OutputTokens, run.Usage.ReasoningTokens,
 		run.Usage.TotalTokens, run.Usage.ToolCalls, run.Usage.CostMicros,
-		run.Usage.Retries, run.ErrorCode,
+		run.Usage.Retries, run.ErrorCode, run.StopReason,
 		store.DatabaseTime(run.StartedAt.UTC().Format(time.RFC3339)),
 	)
 	if err != nil {

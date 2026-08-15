@@ -17,7 +17,7 @@ func publishWorkflowRolloutDefinitions(t *testing.T, catalog *Catalog) {
 	version2 := testWorkflow()
 	version2.Version = 2
 	version2.Purpose = "Run the default review workflow."
-	if err := catalog.Publish([]WorkflowDefinition{version1, version2}); err != nil {
+	if err := catalog.Publish([]Definition{version1, version2}); err != nil {
 		t.Fatalf("publish workflow definitions: %v", err)
 	}
 }

@@ -10,12 +10,14 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
+	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
-func TestServiceExecutionAvailableTracksOrchestrator(t *testing.T) {
+func TestServiceAvailableTracksOrchestrator(t *testing.T) {
 	var unavailable *Service
-	if unavailable.ExecutionAvailable() {
+	if unavailable.Available() {
 		t.Fatal("nil service reported execution available")
 	}
 
@@ -28,15 +30,15 @@ func TestServiceExecutionAvailableTracksOrchestrator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if service.ExecutionAvailable() {
+	if service.Available() {
 		t.Fatal("service without an orchestrator reported execution available")
 	}
 	service.SetOrchestrator(NewOrchestrator(schemas, staticOutputExecutor{}, nil))
-	if !service.ExecutionAvailable() {
+	if !service.Available() {
 		t.Fatal("service with an orchestrator reported execution unavailable")
 	}
 	service.Close()
-	if service.ExecutionAvailable() {
+	if service.Available() {
 		t.Fatal("closed service reported execution available")
 	}
 }
@@ -47,7 +49,9 @@ func TestServicePersistsSuccessfulWorkflowLifecycle(t *testing.T) {
 	definition := singleNodeWorkflow()
 	definition.Permissions = agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	definition.Nodes[0].Permissions = agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	definition.Budget.MaxRounds = 2
+	definition.Budget.MaxDepth = 3
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}
@@ -60,10 +64,10 @@ func TestServicePersistsSuccessfulWorkflowLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := service.Execute(t.Context(), ExecuteRequest{
-		ParentRunID: "qa_parent_1",
-		Workflow:    DefinitionRef{ID: definition.ID, Version: definition.Version},
-		Input:       json.RawMessage(`{"subject":"x"}`),
-		Actor:       agentapi.Actor{UserID: 9, TenantID: "tenant-a"},
+		ParentRunID: "qa_parent_1", Round: 2, BaseDepth: 2,
+		Workflow: DefinitionRef{ID: definition.ID, Version: definition.Version},
+		Input:    json.RawMessage(`{"subject":"x"}`),
+		Actor:    agentapi.Actor{UserID: 9, TenantID: "tenant-a"},
 		ActorPermissions: agentapi.PermissionPolicy{
 			Scopes: []string{"knowledge.read"},
 		},
@@ -84,6 +88,8 @@ func TestServicePersistsSuccessfulWorkflowLifecycle(t *testing.T) {
 		persistence.startedRun.WorkflowHash == "" ||
 		persistence.startedRun.InputHash == "" ||
 		persistence.startedRun.ParentRunID != "qa_parent_1" ||
+		persistence.startedRun.Round != 2 ||
+		persistence.startedRun.BaseDepth != 2 ||
 		persistence.startedRun.ActorUserID != 9 ||
 		persistence.startedRun.Scenario != "test.review" {
 		t.Fatalf("started run = %+v", persistence.startedRun)
@@ -97,9 +103,133 @@ func TestServicePersistsSuccessfulWorkflowLifecycle(t *testing.T) {
 			len(persistence.failedNodes),
 		)
 	}
-	if persistence.finishedStatus != RunSucceeded || persistence.finishedOutput == nil ||
+	if persistence.finishedStatus != RunSucceeded ||
+		persistence.finishedStopReason != result.StopReason ||
+		persistence.finishedOutput == nil ||
 		persistence.finishedOutput.ID != result.Output.ID {
-		t.Fatalf("workflow terminal = %s output=%+v", persistence.finishedStatus, persistence.finishedOutput)
+		t.Fatalf(
+			"workflow terminal = %s stop=%q output=%+v",
+			persistence.finishedStatus,
+			persistence.finishedStopReason,
+			persistence.finishedOutput,
+		)
+	}
+}
+
+func TestServicePersistsNoAffordableTaskConvergence(t *testing.T) {
+	schemas := testSchemaRegistry(t)
+	catalog := NewCatalog(schemas, testAgentDefinitions(t))
+	definition := singleNodeWorkflow()
+	definition.Budget.MaxInputTokens = 5
+	definition.Nodes[0].Budget.MaxInputTokens = 10
+	if err := catalog.Publish([]Definition{definition}); err != nil {
+		t.Fatal(err)
+	}
+	persistence := &recordingWorkflowPersistence{}
+	service, err := NewService(
+		catalog,
+		persistence,
+		NewOrchestrator(schemas, staticOutputExecutor{}, nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var traces []domain.EvaluationTrace
+	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
+		traces = append(traces, event)
+	})
+	result, err := service.Execute(ctx, ExecuteRequest{
+		RunID:    "workflow_no_affordable_task",
+		Workflow: DefinitionRef{ID: definition.ID, Version: definition.Version},
+		Input:    json.RawMessage(`{"subject":"x"}`),
+	})
+	if !errors.Is(err, ErrNoAffordableTask) {
+		t.Fatalf("Execute error = %v, want no affordable task", err)
+	}
+	if result.RunID != "workflow_no_affordable_task" ||
+		result.StopReason != StopNoAffordableTask {
+		t.Fatalf("result = %+v", result)
+	}
+	var converged *domain.EvaluationTrace
+	for index := range traces {
+		if traces[index].Node == "workflow.converged" {
+			converged = &traces[index]
+			break
+		}
+	}
+	if converged == nil ||
+		converged.Status != "failed" ||
+		converged.Output["outcome"] != string(StopNoAffordableTask) ||
+		converged.Output["error_code"] != "no_affordable_task" ||
+		converged.Output["stop_reason"] != StopNoAffordableTask {
+		t.Fatalf("convergence trace = %#v", converged)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if len(persistence.startedNodes) != 0 ||
+		persistence.finishedStatus != RunFailed ||
+		persistence.finishedError != "no_affordable_task" ||
+		persistence.finishedStopReason != StopNoAffordableTask {
+		t.Fatalf(
+			"persisted convergence = nodes:%d status:%q error:%q stop:%q",
+			len(persistence.startedNodes),
+			persistence.finishedStatus,
+			persistence.finishedError,
+			persistence.finishedStopReason,
+		)
+	}
+}
+
+func TestServicePersistsNeedsClarificationGate(t *testing.T) {
+	schemas := testSchemaRegistry(t)
+	catalog := NewCatalog(schemas, testAgentDefinitions(t))
+	definition := clarificationGateWorkflow()
+	if err := catalog.Publish([]Definition{definition}); err != nil {
+		t.Fatal(err)
+	}
+	persistence := &recordingWorkflowPersistence{}
+	service, err := NewService(
+		catalog,
+		persistence,
+		NewOrchestrator(schemas, nil, map[string]GateEvaluator{
+			"clarity.check": fixedGateEvaluator{decision: GateDecision{
+				SubjectHash: "subject-hash",
+				Decision:    string(StopNeedsClarification),
+				ReasonCodes: []string{"missing_scope"},
+			}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Execute(t.Context(), ExecuteRequest{
+		RunID:    "workflow_needs_clarification",
+		Workflow: DefinitionRef{ID: definition.ID, Version: definition.Version},
+		Input:    json.RawMessage(`{"subject":"x"}`),
+	})
+	if err == nil || errorStopReason(err) != StopNeedsClarification {
+		t.Fatalf("Execute error = %v, want needs clarification", err)
+	}
+	if result.RunID != "workflow_needs_clarification" ||
+		result.StopReason != StopNeedsClarification {
+		t.Fatalf("result = %+v", result)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	decision := persistence.state.Gates["clarity.check"]
+	if len(persistence.succeededNodes) != 1 ||
+		decision.Decision != string(StopNeedsClarification) ||
+		persistence.finishedStatus != RunFailed ||
+		persistence.finishedError != "needs_clarification" ||
+		persistence.finishedStopReason != StopNeedsClarification {
+		t.Fatalf(
+			"persisted gate = succeeded:%d decision:%+v status:%q error:%q stop:%q",
+			len(persistence.succeededNodes),
+			decision,
+			persistence.finishedStatus,
+			persistence.finishedError,
+			persistence.finishedStopReason,
+		)
 	}
 }
 
@@ -109,7 +239,7 @@ func TestServiceUsesRequestedWorkflowRunID(t *testing.T) {
 	definition := singleNodeWorkflow()
 	definition.Permissions = agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	definition.Nodes[0].Permissions = agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}
@@ -144,7 +274,7 @@ func TestServiceRejectsInvalidRequestedWorkflowRunID(t *testing.T) {
 	schemas := testSchemaRegistry(t)
 	catalog := NewCatalog(schemas, testAgentDefinitions(t))
 	definition := singleNodeWorkflow()
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	service, err := NewService(
@@ -172,7 +302,7 @@ func TestServiceValidatesActorAndScenarioPermissionContracts(t *testing.T) {
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	definition.Permissions = readOnly
 	definition.Nodes[0].Permissions = readOnly
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}
@@ -232,7 +362,7 @@ func TestServiceStartPersistsExplicitDetachedContract(t *testing.T) {
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	definition.Permissions = readOnly
 	definition.Nodes[0].Permissions = readOnly
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}
@@ -251,7 +381,7 @@ func TestServiceStartPersistsExplicitDetachedContract(t *testing.T) {
 		Input:               json.RawMessage(`{"subject":"x"}`),
 		Actor:               agentapi.Actor{UserID: 9, TenantID: "tenant-a"},
 		ActorPermissions:    readOnly,
-		Scenario:            DelegatedInvestigationID,
+		Scenario:            FlowID,
 		ScenarioPermissions: readOnly,
 	})
 	if err != nil {
@@ -268,7 +398,7 @@ func TestServiceStartPersistsExplicitDetachedContract(t *testing.T) {
 	defer persistence.mu.Unlock()
 	started := persistence.startedRun
 	if started.ParentRunID != "qa_parent_1" ||
-		started.Scenario != DelegatedInvestigationID ||
+		started.Scenario != FlowID ||
 		started.ActorUserID != 9 ||
 		started.ActorTenantID != "tenant-a" ||
 		len(started.ActorPermissions.Scopes) != 1 ||
@@ -286,7 +416,7 @@ func TestServiceStartPersistsWithDetachedContext(t *testing.T) {
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	definition.Permissions = readOnly
 	definition.Nodes[0].Permissions = readOnly
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}
@@ -307,7 +437,7 @@ func TestServiceStartPersistsWithDetachedContext(t *testing.T) {
 		Input:               json.RawMessage(`{"subject":"x"}`),
 		Actor:               agentapi.Actor{UserID: 9},
 		ActorPermissions:    readOnly,
-		Scenario:            DelegatedInvestigationID,
+		Scenario:            FlowID,
 		ScenarioPermissions: readOnly,
 	})
 	if err != nil {
@@ -319,7 +449,7 @@ func TestServiceStartPersistsWithDetachedContext(t *testing.T) {
 	persistence.mu.Lock()
 	defer persistence.mu.Unlock()
 	if persistence.startContextErr != nil {
-		t.Fatalf("StartWorkflow received cancelled context: %v", persistence.startContextErr)
+		t.Fatalf("StartRun received cancelled context: %v", persistence.startContextErr)
 	}
 }
 
@@ -330,7 +460,7 @@ func TestServiceStartSurvivesCallerCancellationAndAwaitJoinsPersistence(t *testi
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	definition.Permissions = readOnly
 	definition.Nodes[0].Permissions = readOnly
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	executor := &blockingServiceExecutor{
@@ -353,7 +483,7 @@ func TestServiceStartSurvivesCallerCancellationAndAwaitJoinsPersistence(t *testi
 		Input:               json.RawMessage(`{"subject":"x"}`),
 		Actor:               agentapi.Actor{UserID: 9},
 		ActorPermissions:    readOnly,
-		Scenario:            DelegatedInvestigationID,
+		Scenario:            FlowID,
 		ScenarioPermissions: readOnly,
 	})
 	if err != nil {
@@ -390,7 +520,7 @@ func TestServiceAwaitTerminalLoadsDurableResultWithoutLocalExecution(t *testing.
 		ProducerNodeID: "workflow.output", Payload: json.RawMessage(`{"node":"answer"}`),
 	}
 	persistence := &recordingWorkflowPersistence{
-		state: WorkflowRunState{Run: WorkflowRunRecord{
+		state: RunState{Run: RunRecord{
 			ID: "workflow_recovered_1", Status: RunSucceeded,
 		}},
 		finishedOutput: &output,
@@ -428,7 +558,7 @@ func TestServicePersistsHumanApprovalAsWaiting(t *testing.T) {
 	}
 	definition.OutputSchema = definition.InputSchema
 	definition.Permissions = agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}
@@ -453,11 +583,13 @@ func TestServicePersistsHumanApprovalAsWaiting(t *testing.T) {
 	defer persistence.mu.Unlock()
 	if len(persistence.failedNodes) != 1 ||
 		persistence.failedNodes[0].status != RunWaitingHuman ||
-		persistence.finishedStatus != RunWaitingHuman {
+		persistence.finishedStatus != RunWaitingHuman ||
+		persistence.finishedStopReason != "" {
 		t.Fatalf(
-			"waiting transitions = nodes:%+v workflow:%s",
+			"waiting transitions = nodes:%+v workflow:%s stop:%q",
 			persistence.failedNodes,
 			persistence.finishedStatus,
+			persistence.finishedStopReason,
 		)
 	}
 }
@@ -468,7 +600,7 @@ func TestServiceClosesNodeWhenSuccessPersistenceFails(t *testing.T) {
 	definition := singleNodeWorkflow()
 	definition.Permissions = agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	definition.Nodes[0].Permissions = agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{succeedNodeErr: errors.New("write unavailable")}
@@ -521,12 +653,53 @@ type nodeTerminalTransition struct {
 	errorCode     string
 	agentRunID    string
 	handoff       Handoff
-	usage         WorkflowUsage
+	usage         Usage
 }
 
 type blockingServiceExecutor struct {
 	started chan struct{}
 	release chan struct{}
+}
+
+type fixedGateEvaluator struct {
+	decision GateDecision
+}
+
+func (evaluator fixedGateEvaluator) Evaluate(
+	context.Context,
+	NodeRequest,
+) (GateDecision, error) {
+	return cloneGateDecision(evaluator.decision), nil
+}
+
+func clarificationGateWorkflow() Definition {
+	input := agentapi.SchemaRef{ID: "review.subject", Version: 1}
+	output := agentapi.SchemaRef{ID: "gate.decision", Version: 1}
+	return Definition{
+		ID:           "delivery.clarification",
+		Version:      1,
+		Purpose:      "Request clarification from structured evidence.",
+		InputSchema:  input,
+		OutputSchema: output,
+		Budget: Budget{
+			MaxNodes: 1, MaxParallelism: 1, MaxRounds: 1, MaxDepth: 1,
+			Timeout:         10 * time.Second,
+			MaxHandoffBytes: 4096,
+		},
+		FailurePolicy: FailurePolicy{Mode: FailFast},
+		Nodes: []NodeDefinition{{
+			ID: "clarity.check", Kind: NodeGate,
+			InputSchema: input, OutputSchema: output,
+			Gate: &GateSpec{
+				ID: "clarity.check",
+				AllowedDecisions: []string{
+					"pass",
+					string(StopNeedsClarification),
+				},
+			},
+			Timeout: time.Second,
+		}},
+	}
 }
 
 func (executor *blockingServiceExecutor) Execute(
@@ -548,42 +721,43 @@ func (executor *blockingServiceExecutor) Execute(
 type recordingWorkflowPersistence struct {
 	mu sync.Mutex
 
-	startedRun      WorkflowRunRecord
-	startedInput    Handoff
-	startContextErr error
-	activeRuns      []ActiveRunRef
-	startedNodes    []NodeRunRecord
-	succeededNodes  []nodeTerminalTransition
-	failedNodes     []nodeTerminalTransition
-	finishedStatus  RunStatus
-	finishedOutput  *Handoff
-	finishedError   string
-	succeedNodeErr  error
-	loadStateErrs   []error
-	loadStateCalls  int
-	terminalLoads   int
-	events          []Event
-	state           WorkflowRunState
+	startedRun         RunRecord
+	startedInput       Handoff
+	startContextErr    error
+	activeRuns         []ActiveRunRef
+	startedNodes       []NodeRunRecord
+	succeededNodes     []nodeTerminalTransition
+	failedNodes        []nodeTerminalTransition
+	finishedStatus     RunStatus
+	finishedOutput     *Handoff
+	finishedError      string
+	finishedStopReason StopReason
+	succeedNodeErr     error
+	loadStateErrs      []error
+	loadStateCalls     int
+	terminalLoads      int
+	events             []Event
+	state              RunState
 }
 
-func (persistence *recordingWorkflowPersistence) StartWorkflow(
+func (persistence *recordingWorkflowPersistence) StartRun(
 	ctx context.Context,
-	run WorkflowRunRecord,
+	run RunRecord,
 	input Handoff,
 ) error {
 	persistence.mu.Lock()
 	defer persistence.mu.Unlock()
 	persistence.startContextErr = ctx.Err()
-	persistence.startedRun = cloneWorkflowRunRecord(run)
+	persistence.startedRun = cloneRunRecord(run)
 	persistence.startedInput = cloneHandoff(input)
-	persistence.state = WorkflowRunState{
-		Run:         cloneWorkflowRunRecord(run),
+	persistence.state = RunState{
+		Run:         cloneRunRecord(run),
 		Input:       cloneHandoff(input),
 		Nodes:       make(map[string]NodeRunRecord),
 		Handoffs:    map[string]Handoff{input.ID: cloneHandoff(input)},
 		NodeOutputs: make(map[string]Handoff),
 		Gates:       make(map[string]GateDecision),
-		Approvals:   make(map[string]WorkflowApproval),
+		Approvals:   make(map[string]Approval),
 	}
 	return nil
 }
@@ -614,7 +788,7 @@ func (persistence *recordingWorkflowPersistence) SucceedNode(
 	agentRunID string,
 	handoff Handoff,
 	decision *GateDecision,
-	usage WorkflowUsage,
+	usage Usage,
 	endedAt time.Time,
 ) error {
 	persistence.mu.Lock()
@@ -639,7 +813,7 @@ func (persistence *recordingWorkflowPersistence) SucceedNode(
 	ended := endedAt
 	node.EndedAt = &ended
 	persistence.state.Nodes[nodeID] = node
-	persistence.state.Run.Usage = addWorkflowUsage(persistence.state.Run.Usage, usage)
+	persistence.state.Run.Usage = addUsage(persistence.state.Run.Usage, usage)
 	persistence.state.Handoffs[handoff.ID] = handoff
 	persistence.state.NodeOutputs[nodeID] = handoff
 	if decision != nil {
@@ -656,7 +830,7 @@ func (persistence *recordingWorkflowPersistence) FailNode(
 	agentRunID string,
 	status RunStatus,
 	errorCode string,
-	usage WorkflowUsage,
+	usage Usage,
 	endedAt time.Time,
 ) error {
 	persistence.mu.Lock()
@@ -676,15 +850,16 @@ func (persistence *recordingWorkflowPersistence) FailNode(
 	ended := endedAt
 	node.EndedAt = &ended
 	persistence.state.Nodes[nodeID] = node
-	persistence.state.Run.Usage = addWorkflowUsage(persistence.state.Run.Usage, usage)
+	persistence.state.Run.Usage = addUsage(persistence.state.Run.Usage, usage)
 	return nil
 }
 
-func (persistence *recordingWorkflowPersistence) FinishWorkflow(
+func (persistence *recordingWorkflowPersistence) FinishRun(
 	_ context.Context,
 	workflowRunID string,
 	status RunStatus,
 	errorCode string,
+	stopReason StopReason,
 	output *Handoff,
 	endedAt time.Time,
 ) error {
@@ -692,9 +867,11 @@ func (persistence *recordingWorkflowPersistence) FinishWorkflow(
 	defer persistence.mu.Unlock()
 	persistence.finishedStatus = status
 	persistence.finishedError = errorCode
+	persistence.finishedStopReason = stopReason
 	persistence.state.Run.ID = workflowRunID
 	persistence.state.Run.Status = status
 	persistence.state.Run.ErrorCode = errorCode
+	persistence.state.Run.StopReason = stopReason
 	ended := endedAt
 	persistence.state.Run.EndedAt = &ended
 	persistence.finishedOutput = nil
@@ -709,7 +886,7 @@ func (persistence *recordingWorkflowPersistence) FinishWorkflow(
 func (persistence *recordingWorkflowPersistence) LoadFullRunState(
 	_ context.Context,
 	workflowRunID string,
-) (*WorkflowRunState, error) {
+) (*RunState, error) {
 	persistence.mu.Lock()
 	defer persistence.mu.Unlock()
 	persistence.loadStateCalls++
@@ -723,7 +900,7 @@ func (persistence *recordingWorkflowPersistence) LoadFullRunState(
 	if persistence.state.Run.ID != workflowRunID {
 		return nil, errors.New("workflow run not found")
 	}
-	state := cloneWorkflowRunState(persistence.state)
+	state := cloneRunState(persistence.state)
 	return &state, nil
 }
 
@@ -737,7 +914,7 @@ func (persistence *recordingWorkflowPersistence) LoadTerminalResult(
 	if persistence.state.Run.ID != workflowRunID {
 		return TerminalResult{}, ErrNotFound
 	}
-	result := TerminalResult{Run: cloneWorkflowRunRecord(persistence.state.Run)}
+	result := TerminalResult{Run: cloneRunRecord(persistence.state.Run)}
 	switch result.Run.Status {
 	case RunRunning, RunWaitingHuman:
 		return TerminalResult{}, ErrConflict
@@ -754,13 +931,13 @@ func (persistence *recordingWorkflowPersistence) LoadTerminalResult(
 func (persistence *recordingWorkflowPersistence) GetRun(
 	_ context.Context,
 	workflowRunID string,
-) (*WorkflowRunRecord, error) {
+) (*RunRecord, error) {
 	persistence.mu.Lock()
 	defer persistence.mu.Unlock()
 	if persistence.state.Run.ID != workflowRunID {
 		return nil, ErrNotFound
 	}
-	run := cloneWorkflowRunRecord(persistence.state.Run)
+	run := cloneRunRecord(persistence.state.Run)
 	return &run, nil
 }
 
@@ -849,7 +1026,7 @@ func (persistence *recordingWorkflowPersistence) ListHandoffs(
 	return handoffs, nil
 }
 
-func (persistence *recordingWorkflowPersistence) CancelWorkflow(
+func (persistence *recordingWorkflowPersistence) CancelRun(
 	_ context.Context,
 	workflowRunID string,
 	endedAt time.Time,
@@ -910,9 +1087,9 @@ func (persistence *recordingWorkflowPersistence) ListActiveRuns(
 	return runs, nil
 }
 
-func (persistence *recordingWorkflowPersistence) DecideHumanApproval(
+func (persistence *recordingWorkflowPersistence) DecideApproval(
 	_ context.Context,
-	approval WorkflowApproval,
+	approval Approval,
 	approvedHandoff *Handoff,
 ) (ApprovalTransition, error) {
 	persistence.mu.Lock()
@@ -965,15 +1142,15 @@ func (persistence *recordingWorkflowPersistence) DecideHumanApproval(
 	}, nil
 }
 
-func cloneWorkflowRunState(state WorkflowRunState) WorkflowRunState {
-	cloned := WorkflowRunState{
-		Run:         cloneWorkflowRunRecord(state.Run),
+func cloneRunState(state RunState) RunState {
+	cloned := RunState{
+		Run:         cloneRunRecord(state.Run),
 		Input:       cloneHandoff(state.Input),
 		Nodes:       make(map[string]NodeRunRecord, len(state.Nodes)),
 		Handoffs:    make(map[string]Handoff, len(state.Handoffs)),
 		NodeOutputs: make(map[string]Handoff, len(state.NodeOutputs)),
 		Gates:       make(map[string]GateDecision, len(state.Gates)),
-		Approvals:   make(map[string]WorkflowApproval, len(state.Approvals)),
+		Approvals:   make(map[string]Approval, len(state.Approvals)),
 	}
 	for nodeID, node := range state.Nodes {
 		cloned.Nodes[nodeID] = cloneNodeRunRecord(node)
@@ -993,7 +1170,7 @@ func cloneWorkflowRunState(state WorkflowRunState) WorkflowRunState {
 	return cloned
 }
 
-func cloneWorkflowRunRecord(run WorkflowRunRecord) WorkflowRunRecord {
+func cloneRunRecord(run RunRecord) RunRecord {
 	run.ActorPermissions.Scopes = append([]string(nil), run.ActorPermissions.Scopes...)
 	run.ScenarioPermissions.Scopes = append([]string(nil), run.ScenarioPermissions.Scopes...)
 	if run.EndedAt != nil {
@@ -1016,7 +1193,7 @@ func cloneHandoff(handoff Handoff) Handoff {
 	handoff.Payload = append(json.RawMessage(nil), handoff.Payload...)
 	handoff.References = append([]agentapi.Reference(nil), handoff.References...)
 	handoff.EvidenceUnits = evidence.CloneUnits(handoff.EvidenceUnits)
-	handoff.EvidenceConflicts = cloneEvidenceConflicts(handoff.EvidenceConflicts)
+	handoff.EvidenceConflicts = cloneConflicts(handoff.EvidenceConflicts)
 	return handoff
 }
 

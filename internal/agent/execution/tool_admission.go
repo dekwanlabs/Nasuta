@@ -74,7 +74,7 @@ func (agent *Agent) admitToolCall(state *compiledLoop, call llm.ToolCall) (llm.T
 			scope = resolved
 		}
 	}
-	remaining := agent.remainingToolTokens(state)
+	remaining := agent.availableToolTokens(state)
 	declared := declaredToolTokens(candidate, args)
 	input := toolAdmissionInput{
 		Tool: call.Function.Name, Scope: scope,
@@ -134,7 +134,7 @@ func declaredToolTokens(candidate tool.Tool, args tool.Arguments) int {
 	return max(1, candidate.Admission.MaxResultTokens(args))
 }
 
-func (agent *Agent) remainingToolTokens(state *compiledLoop) int {
+func (agent *Agent) availableToolTokens(state *compiledLoop) int {
 	if agent.cfg.ContextWindow <= 0 {
 		return -1
 	}
@@ -144,7 +144,7 @@ func (agent *Agent) remainingToolTokens(state *compiledLoop) int {
 	}
 	contextRemaining := max(
 		0,
-		agent.cfg.ContextWindow-inputTokens-agent.outputTokenReserve()-contextSafetyTokens(agent.cfg.ContextWindow),
+		agent.cfg.ContextWindow-inputTokens-agent.outputReserve()-contextSafetyTokens(agent.cfg.ContextWindow),
 	)
 	if state.remainingToolTokens < 0 {
 		return contextRemaining
@@ -162,7 +162,7 @@ func initialToolTokenBudget(agent *Agent, messages []llm.Message, tools []llm.To
 	}
 	return max(
 		0,
-		agent.cfg.ContextWindow-inputTokens-agent.outputTokenReserve()-contextSafetyTokens(agent.cfg.ContextWindow),
+		agent.cfg.ContextWindow-inputTokens-agent.outputReserve()-contextSafetyTokens(agent.cfg.ContextWindow),
 	)
 }
 

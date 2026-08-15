@@ -237,13 +237,13 @@ func extendEvidenceStepLimit(step, current, configured int, produced, alreadyExt
 	return current + 1
 }
 
-const sessionToolArgumentLimit = 8_000
+const toolArgumentLimit = 8_000
 
-func canonicalSessionToolCalls(calls []llm.ToolCall) []llm.ToolCall {
+func canonicalToolCalls(calls []llm.ToolCall) []llm.ToolCall {
 	out := make([]llm.ToolCall, len(calls))
 	for i, call := range calls {
 		out[i] = call
-		if len(call.Function.Arguments) > sessionToolArgumentLimit {
+		if len(call.Function.Arguments) > toolArgumentLimit {
 			out[i].Function.Arguments = `{"_nasuta_omitted":"arguments exceeded session limit"}`
 			continue
 		}

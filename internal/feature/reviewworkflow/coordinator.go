@@ -15,9 +15,9 @@ import (
 type workflowService interface {
 	Execute(context.Context, workflow.ExecuteRequest) (workflow.Result, error)
 	Resume(context.Context, string) (workflow.ResumeResult, error)
-	GetRun(context.Context, string, int64, bool) (*workflow.WorkflowRunRecord, error)
+	GetRun(context.Context, string, int64, bool) (*workflow.RunRecord, error)
 	Cancel(context.Context, string, int64, bool) (workflow.CancelTransition, error)
-	PublishDefinitions([]workflow.WorkflowDefinition, bool) error
+	Publish([]workflow.Definition, bool) error
 }
 
 type reviewCoordinatorService interface {
@@ -117,8 +117,8 @@ func (coordinator *Coordinator) Execute(
 	if err != nil {
 		return nil, err
 	}
-	if err := coordinator.workflows.PublishDefinitions(
-		[]workflow.WorkflowDefinition{definition},
+	if err := coordinator.workflows.Publish(
+		[]workflow.Definition{definition},
 		true,
 	); err != nil {
 		return nil, err
@@ -182,7 +182,7 @@ func (coordinator *Coordinator) Cancel(
 
 func (coordinator *Coordinator) executeNew(
 	ctx context.Context,
-	definition workflow.WorkflowDefinition,
+	definition workflow.Definition,
 	roundID, runID string,
 	actor agentapi.Actor,
 ) (*delivery.ReviewGateResult, error) {
@@ -208,7 +208,7 @@ func (coordinator *Coordinator) executeNew(
 
 func (coordinator *Coordinator) resume(
 	ctx context.Context,
-	definition workflow.WorkflowDefinition,
+	definition workflow.Definition,
 	roundID, runID string,
 	actor agentapi.Actor,
 ) (*delivery.ReviewGateResult, error) {

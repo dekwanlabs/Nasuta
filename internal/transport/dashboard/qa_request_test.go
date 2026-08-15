@@ -124,7 +124,7 @@ func TestQARuntimeStatusFormatting(t *testing.T) {
 		LLMModel:         "gpt-test",
 		LLMContextWindow: 256000,
 	}
-	hub := run.NewRunHub(nil)
+	hub := run.NewHub(nil)
 	hub.OnContextUsage(t.Context(), "run-1", run.ContextUsageEvent{
 		Phase:                 "session_pre_answer",
 		ProjectedBeforeTokens: 104000,

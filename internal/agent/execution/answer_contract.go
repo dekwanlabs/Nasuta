@@ -25,7 +25,7 @@ type exactAnswerContract struct {
 	seen     map[string]struct{}
 }
 
-func withoutAnswerContractMessages(messages []llm.Message) []llm.Message {
+func withoutContractMessages(messages []llm.Message) []llm.Message {
 	out := make([]llm.Message, 0, len(messages))
 	for _, message := range messages {
 		if message.Role == "system" && strings.HasPrefix(message.Content, exactAnswerContractPrefix) {
@@ -72,7 +72,7 @@ func (contract *exactAnswerContract) Missing(answer string) []string {
 	return missing
 }
 
-func answerContractMessage(candidate tool.AnswerContract) (llm.Message, bool) {
+func contractMessage(candidate tool.AnswerContract) (llm.Message, bool) {
 	contract := &exactAnswerContract{}
 	contract.Add(candidate)
 	if !contract.Active() {
@@ -91,18 +91,18 @@ func answerContractMessage(candidate tool.AnswerContract) (llm.Message, bool) {
 	}, true
 }
 
-func answerContractRepairInstruction(missing []string) string {
+func repairInstruction(missing []string) string {
 	encoded, _ := json.Marshal(missing)
 	return prompts.MustRender(prompts.AgentQAAnswerRepair, struct {
 		Missing string
 	}{Missing: string(encoded)})
 }
 
-func answerContractError(missing []string) error {
+func contractError(missing []string) error {
 	return fmt.Errorf("%w: %d required values missing", ErrAnswerContractViolation, len(missing))
 }
 
-func (agent *Agent) validateOrRepairAnswer(ctx context.Context, messages []llm.Message, initial *llm.ChatStreamResult, contract *exactAnswerContract, maxTokens int, stream *StreamPipe) (*llm.ChatStreamResult, error) {
+func (agent *Agent) enforceContract(ctx context.Context, messages []llm.Message, initial *llm.ChatStreamResult, contract *exactAnswerContract, maxTokens int, stream *StreamPipe) (*llm.ChatStreamResult, error) {
 	if !contract.Active() || initial == nil {
 		return initial, nil
 	}
@@ -112,7 +112,7 @@ func (agent *Agent) validateOrRepairAnswer(ctx context.Context, messages []llm.M
 		log.WarnfCtx(ctx, "[agent] exact-answer validation rejected candidate: missing=%d retry=%d/%d", len(missing), attempt, maxAnswerContractRetries)
 		repairMessages := append(append([]llm.Message{}, messages...),
 			llm.Message{Role: "assistant", Content: candidate.Content},
-			llm.Message{Role: "user", Content: answerContractRepairInstruction(missing)},
+			llm.Message{Role: "user", Content: repairInstruction(missing)},
 		)
 		repaired, err := agent.generateWithContinue(ctx, repairMessages, maxTokens, stream)
 		if err != nil {
@@ -123,7 +123,7 @@ func (agent *Agent) validateOrRepairAnswer(ctx context.Context, messages []llm.M
 	}
 	if len(missing) > 0 {
 		log.ErrorfCtx(ctx, "[agent] exact-answer validation failed after %d retries: missing=%d", maxAnswerContractRetries, len(missing))
-		return candidate, answerContractError(missing)
+		return candidate, contractError(missing)
 	}
 	return candidate, nil
 }

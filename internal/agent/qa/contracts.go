@@ -12,9 +12,9 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-// QADeps bundles the services needed by the QA scenario.
-type QADeps struct {
-	Tools             *Service
+// Deps bundles the services needed by the QA scenario.
+type Deps struct {
+	Tools             *ToolService
 	Cfg               config.Config
 	Platform          *config.PlatformSettings
 	CodeGraphDB       *codegraph.DB
@@ -25,16 +25,16 @@ type QADeps struct {
 	Agent             agentapi.DefinitionRef
 	Runtime           agentapi.ManagedRuntime
 	RuntimeTools      ScenarioToolSource
-	Models            *QAModels
+	Models            *Models
 	PhaseEmitter      interface{ EmitPhase(string, string) }
 	Investigation     InvestigationRunner
 	ScenarioLifecycle ScenarioLifecycle
-	Coordinator       *InvestigationCoordinator
+	Coordinator       *Coordinator
 	ExecutionEvents   ExecutionEventEmitter
 	WriteAvailable    bool
 }
 
-type DefinitionSelectionResolver interface {
+type SelectionResolver interface {
 	ResolveFor(agentapi.DefinitionRef, string) (
 		agentapi.Definition,
 		agentapi.DefinitionSelection,
@@ -72,8 +72,8 @@ type ToolPlan struct {
 	Prefetch []PlannedToolCall
 }
 
-// QARequest is the stable use-case input for standard and scenario handlers.
-type QARequest struct {
+// Request is the stable use-case input for standard and scenario handlers.
+type Request struct {
 	Question         string
 	Conversation     ConversationContext
 	PreloadedContext []ContextBlock

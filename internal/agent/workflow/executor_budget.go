@@ -4,21 +4,21 @@ import (
 	"fmt"
 )
 
-func newWorkflowBudgetAccount(
-	budget WorkflowBudget,
-	usage WorkflowUsage,
-) (*workflowBudgetAccount, error) {
-	if err := validateWorkflowUsage(usage); err != nil {
+func newBudgetAccount(
+	budget Budget,
+	usage Usage,
+) (*budgetAccount, error) {
+	if err := validateUsage(usage); err != nil {
 		return nil, fmt.Errorf("restore workflow usage: %w", err)
 	}
-	return &workflowBudgetAccount{budget: budget, usage: usage}, nil
+	return &budgetAccount{budget: budget, usage: usage}, nil
 }
 
-func (account *workflowBudgetAccount) Reserve(
+func (account *budgetAccount) Reserve(
 	node NodeDefinition,
 	attempt int,
-) (WorkflowUsage, error) {
-	reservation := WorkflowUsage{
+) (Usage, error) {
+	reservation := Usage{
 		InputTokens:  node.Budget.MaxInputTokens,
 		OutputTokens: node.Budget.MaxOutputTokens,
 		TotalTokens:  node.Budget.MaxTotalTokens,
@@ -31,50 +31,50 @@ func (account *workflowBudgetAccount) Reserve(
 	account.mu.Lock()
 	defer account.mu.Unlock()
 	if err := account.checkCapacity(reservation); err != nil {
-		return WorkflowUsage{}, fmt.Errorf(
+		return Usage{}, fmt.Errorf(
 			"%w for node %q attempt %d: %v",
-			ErrWorkflowBudgetExhausted,
+			ErrNoAffordableTask,
 			node.ID,
 			attempt,
 			err,
 		)
 	}
-	account.reserved = addWorkflowUsage(account.reserved, reservation)
+	account.reserved = addUsage(account.reserved, reservation)
 	return reservation, nil
 }
 
-func (account *workflowBudgetAccount) Release(reservation WorkflowUsage) {
+func (account *budgetAccount) Release(reservation Usage) {
 	account.mu.Lock()
-	account.reserved = subtractWorkflowUsage(account.reserved, reservation)
+	account.reserved = subtractUsage(account.reserved, reservation)
 	account.mu.Unlock()
 }
 
-func (account *workflowBudgetAccount) Settle(
-	reservation WorkflowUsage,
-	actual *WorkflowUsage,
+func (account *budgetAccount) Settle(
+	reservation Usage,
+	actual *Usage,
 	nodeBudget NodeBudget,
 ) error {
 	account.mu.Lock()
 	defer account.mu.Unlock()
-	account.reserved = subtractWorkflowUsage(account.reserved, reservation)
+	account.reserved = subtractUsage(account.reserved, reservation)
 	actual.Retries = reservation.Retries
-	account.usage = addWorkflowUsage(account.usage, *actual)
+	account.usage = addUsage(account.usage, *actual)
 	if err := nodeUsageWithinBudget(*actual, nodeBudget); err != nil {
-		return fmt.Errorf("%w: %v", ErrWorkflowBudgetExhausted, err)
+		return fmt.Errorf("%w: %v", ErrBudgetExhausted, err)
 	}
 	if err := account.checkUsage(); err != nil {
-		return fmt.Errorf("%w: %v", ErrWorkflowBudgetExhausted, err)
+		return fmt.Errorf("%w: %v", ErrBudgetExhausted, err)
 	}
 	return nil
 }
 
-func (account *workflowBudgetAccount) Usage() WorkflowUsage {
+func (account *budgetAccount) Usage() Usage {
 	account.mu.Lock()
 	defer account.mu.Unlock()
 	return account.usage
 }
 
-func (account *workflowBudgetAccount) checkCapacity(additional WorkflowUsage) error {
+func (account *budgetAccount) checkCapacity(additional Usage) error {
 	checks := []struct {
 		name     string
 		limit    int64
@@ -97,14 +97,14 @@ func (account *workflowBudgetAccount) checkCapacity(additional WorkflowUsage) er
 	return nil
 }
 
-func (account *workflowBudgetAccount) checkUsage() error {
-	return (&workflowBudgetAccount{
+func (account *budgetAccount) checkUsage() error {
+	return (&budgetAccount{
 		budget: account.budget,
 		usage:  account.usage,
-	}).checkCapacity(WorkflowUsage{})
+	}).checkCapacity(Usage{})
 }
 
-func nodeUsageWithinBudget(usage WorkflowUsage, budget NodeBudget) error {
+func nodeUsageWithinBudget(usage Usage, budget NodeBudget) error {
 	checks := []struct {
 		name  string
 		limit int64
@@ -124,7 +124,7 @@ func nodeUsageWithinBudget(usage WorkflowUsage, budget NodeBudget) error {
 	return nil
 }
 
-func validateWorkflowUsage(usage WorkflowUsage) error {
+func validateUsage(usage Usage) error {
 	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.ReasoningTokens < 0 ||
 		usage.TotalTokens < 0 || usage.ToolCalls < 0 || usage.CostMicros < 0 ||
 		usage.Retries < 0 {
@@ -143,8 +143,8 @@ func exceedsBudget(limit, used, reserved, additional int64) bool {
 	return additional > limit-used-reserved
 }
 
-func addWorkflowUsage(left, right WorkflowUsage) WorkflowUsage {
-	return WorkflowUsage{
+func addUsage(left, right Usage) Usage {
+	return Usage{
 		InputTokens:     left.InputTokens + right.InputTokens,
 		OutputTokens:    left.OutputTokens + right.OutputTokens,
 		ReasoningTokens: left.ReasoningTokens + right.ReasoningTokens,
@@ -155,8 +155,8 @@ func addWorkflowUsage(left, right WorkflowUsage) WorkflowUsage {
 	}
 }
 
-func subtractWorkflowUsage(left, right WorkflowUsage) WorkflowUsage {
-	return WorkflowUsage{
+func subtractUsage(left, right Usage) Usage {
+	return Usage{
 		InputTokens:     left.InputTokens - right.InputTokens,
 		OutputTokens:    left.OutputTokens - right.OutputTokens,
 		ReasoningTokens: left.ReasoningTokens - right.ReasoningTokens,

@@ -19,17 +19,17 @@ const (
 	emergencyToolResultFloor      = 16
 )
 
-type answerContextCompactionResult struct {
+type answerCompactionResult struct {
 	Triggered              bool
 	Applied                bool
 	ProjectedBeforeTokens  int
 	ProjectedAfterTokens   int
 	AssistantTokensRemoved int
 	ToolResultsCompressed  int
-	ToolResults            []answerToolResultCompaction
+	ToolResults            []toolResultCompaction
 }
 
-type answerToolResultCompaction struct {
+type toolResultCompaction struct {
 	ToolCallID     string `json:"tool_call_id"`
 	Tool           string `json:"tool"`
 	Strategy       string `json:"strategy"`
@@ -41,7 +41,7 @@ type answerToolResultCompaction struct {
 	FieldCoverage  string `json:"field_coverage"`
 }
 
-type answerToolResultCandidate struct {
+type toolResultCandidate struct {
 	index          int
 	toolCallID     string
 	tool           string
@@ -50,24 +50,24 @@ type answerToolResultCandidate struct {
 	budgetTokens   int
 }
 
-type answerContextCompactionInput struct {
+type answerCompactionInput struct {
 	State *compiledLoop
 	Tools []llm.ToolDef
 	Phase string
 }
 
-var answerContextCompactionSpec = runtrace.Spec[
-	answerContextCompactionInput,
-	answerContextCompactionResult,
+var answerCompactionSpec = runtrace.Spec[
+	answerCompactionInput,
+	answerCompactionResult,
 ]{
 	Operation: "agent.answer_context_compaction",
 	Node:      "answer_context_compaction",
-	Input: func(input answerContextCompactionInput) map[string]any {
+	Input: func(input answerCompactionInput) map[string]any {
 		return map[string]any{"phase": input.Phase}
 	},
 	Output: func(
-		input answerContextCompactionInput,
-		output answerContextCompactionResult,
+		input answerCompactionInput,
+		output answerCompactionResult,
 		err error,
 	) map[string]any {
 		projected := map[string]any{
@@ -85,36 +85,36 @@ var answerContextCompactionSpec = runtrace.Spec[
 		}
 		return projected
 	},
-	Record: func(output answerContextCompactionResult, err error) bool {
+	Record: func(output answerCompactionResult, err error) bool {
 		return output.Triggered || err != nil
 	},
 }
 
-// compactRunContextBeforeAnswer bounds transient tool-loop context before the
+// compactAnswerContext bounds transient tool-loop context before the
 // next model call. It changes only the model-side copy; session and trace
 // records continue to retain the authoritative tool output.
-func (agent *Agent) compactRunContextBeforeAnswer(
+func (agent *Agent) compactAnswerContext(
 	state *compiledLoop,
 	tools []llm.ToolDef,
 	phase string,
-) (answerContextCompactionResult, error) {
-	input := answerContextCompactionInput{State: state, Tools: tools, Phase: phase}
+) (answerCompactionResult, error) {
+	input := answerCompactionInput{State: state, Tools: tools, Phase: phase}
 	return runtrace.Invoke(
 		stateContext(state),
-		answerContextCompactionSpec,
+		answerCompactionSpec,
 		input,
-		func(_ context.Context, input answerContextCompactionInput) (answerContextCompactionResult, error) {
-			return agent.compactRunContext(input.State, input.Tools, input.Phase)
+		func(_ context.Context, input answerCompactionInput) (answerCompactionResult, error) {
+			return agent.compactContext(input.State, input.Tools, input.Phase)
 		},
 	)
 }
 
-func (agent *Agent) compactRunContext(
+func (agent *Agent) compactContext(
 	state *compiledLoop,
 	tools []llm.ToolDef,
 	phase string,
-) (answerContextCompactionResult, error) {
-	var result answerContextCompactionResult
+) (answerCompactionResult, error) {
+	var result answerCompactionResult
 	if state == nil || agent.cfg.ContextWindow <= 0 {
 		return result, nil
 	}
@@ -123,7 +123,7 @@ func (agent *Agent) compactRunContext(
 	if err != nil {
 		return result, fmt.Errorf("measure %s context: %w", phase, err)
 	}
-	outputReserve := agent.outputTokenReserve()
+	outputReserve := agent.outputReserve()
 	projectedBefore := inputTokens + outputReserve
 	result.ProjectedBeforeTokens = projectedBefore
 	result.ProjectedAfterTokens = projectedBefore
@@ -175,24 +175,24 @@ func (agent *Agent) compactRunContext(
 	if err != nil {
 		return result, fmt.Errorf("remeasure %s context: %w", phase, err)
 	}
-	candidates := answerToolResultCandidates(
+	candidates := toolResultCandidates(
 		messages,
 		start,
 		state.answerToolSources,
 	)
 	needed = max(0, currentInputTokens+outputReserve-target)
-	allocateAnswerToolBudgets(
+	allocateToolBudgets(
 		candidates,
 		needed,
 		oldToolResultFloorTokens,
 		recentToolResultFloorTokens,
 	)
 
-	plannedReduction := answerToolPlannedReduction(candidates)
+	plannedReduction := plannedToolReduction(candidates)
 	hardInputLimit := window - outputReserve - contextSafetyTokens(window)
 	hardOverflow := max(0, currentInputTokens-plannedReduction-hardInputLimit)
 	if hardOverflow > 0 {
-		allocateAnswerToolBudgets(
+		allocateToolBudgets(
 			candidates,
 			hardOverflow,
 			emergencyToolResultFloor,
@@ -219,7 +219,7 @@ func (agent *Agent) compactRunContext(
 			state.answerToolSources[candidate.index] = candidate.sourceContent
 		}
 		result.ToolResultsCompressed++
-		result.ToolResults = append(result.ToolResults, answerToolResultCompaction{
+		result.ToolResults = append(result.ToolResults, toolResultCompaction{
 			ToolCallID:     candidate.toolCallID,
 			Tool:           candidate.tool,
 			Strategy:       compressed.Strategy,
@@ -255,7 +255,7 @@ func (agent *Agent) compactRunContext(
 	result.Applied = result.AssistantTokensRemoved > 0 || result.ToolResultsCompressed > 0
 	if result.Applied {
 		state.messages = messages
-		emitAnswerContextCompacted(agent.observer, state.runID, phase)
+		emitAnswerCompacted(agent.observer, state.runID, phase)
 		log.InfofCtx(
 			state.ctx,
 			"[agent] run %s final-answer context compacted phase=%s projected=%d->%d window=%d high=%d target=%d assistant_tokens_removed=%d tool_results_compressed=%d",
@@ -302,7 +302,7 @@ func stateContext(state *compiledLoop) context.Context {
 	return state.ctx
 }
 
-func emitAnswerContextCompacted(observer Observer, runID, phase string) {
+func emitAnswerCompacted(observer Observer, runID, phase string) {
 	emitter, ok := observer.(interface {
 		EmitPhase(string, string)
 	})
@@ -321,12 +321,12 @@ func emitContextUsage(observer Observer, runID string, event run.ContextUsageEve
 	}
 }
 
-func answerToolResultCandidates(
+func toolResultCandidates(
 	messages []llm.Message,
 	start int,
 	sources map[int]string,
-) []answerToolResultCandidate {
-	candidates := make([]answerToolResultCandidate, 0)
+) []toolResultCandidate {
+	candidates := make([]toolResultCandidate, 0)
 	for index := start; index < len(messages); index++ {
 		message := messages[index]
 		if message.Role != "tool" || message.Content == "" {
@@ -340,7 +340,7 @@ func answerToolResultCandidates(
 		if original, exists := sources[index]; exists {
 			sourceContent = original
 		}
-		candidates = append(candidates, answerToolResultCandidate{
+		candidates = append(candidates, toolResultCandidate{
 			index: index, toolCallID: message.ToolCallID, tool: message.Name,
 			sourceContent: sourceContent, originalTokens: tokens, budgetTokens: tokens,
 		})
@@ -348,8 +348,8 @@ func answerToolResultCandidates(
 	return candidates
 }
 
-func allocateAnswerToolBudgets(
-	candidates []answerToolResultCandidate,
+func allocateToolBudgets(
+	candidates []toolResultCandidate,
 	needed int,
 	oldFloor int,
 	recentFloor int,
@@ -370,7 +370,7 @@ func allocateAnswerToolBudgets(
 	return needed
 }
 
-func answerToolPlannedReduction(candidates []answerToolResultCandidate) int {
+func plannedToolReduction(candidates []toolResultCandidate) int {
 	reduction := 0
 	for _, candidate := range candidates {
 		reduction += candidate.originalTokens - candidate.budgetTokens

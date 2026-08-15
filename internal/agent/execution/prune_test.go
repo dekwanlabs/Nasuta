@@ -35,10 +35,10 @@ func TestPrepareToolDefinitionsHonorsAppliedEmptyToolSet(t *testing.T) {
 		testAgentTool("inspect_runbook", ToolKindRead, noopTool),
 	)
 	executor := NewToolExecutor(registry)
-	agent := NewAgent(nil, executor, AgentConfig{}, nil, nil)
+	agent := NewAgent(nil, executor, Config{}, nil, nil)
 	snapshot := executor.Snapshot(ToolPolicyForRun(false))
 
-	pruned := agent.prepareToolDefinitions(t.Context(), "run-pruned-empty", Input{
+	pruned := agent.prepareTools(t.Context(), "run-pruned-empty", Input{
 		OfferedToolIDs:     map[tool.ToolID]struct{}{},
 		ToolPruningApplied: true,
 	}, snapshot)
@@ -46,7 +46,7 @@ func TestPrepareToolDefinitionsHonorsAppliedEmptyToolSet(t *testing.T) {
 		t.Fatalf("applied empty tool set restored definitions: %v", toolDefNames(pruned))
 	}
 
-	unpruned := agent.prepareToolDefinitions(t.Context(), "run-unpruned-empty", Input{
+	unpruned := agent.prepareTools(t.Context(), "run-unpruned-empty", Input{
 		OfferedToolIDs: map[tool.ToolID]struct{}{},
 	}, snapshot)
 	if got := strings.Join(toolDefNames(unpruned), ","); got != "inspect_service,inspect_runbook" {

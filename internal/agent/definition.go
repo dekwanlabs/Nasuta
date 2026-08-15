@@ -8,9 +8,9 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-type DefinitionRuntime = definition.DefinitionRuntime
+type DefinitionRuntime = definition.Runtime
 type ScenarioRuntime = definition.ScenarioRuntime
-type DefinitionResolver = definition.DefinitionResolver
+type DefinitionResolver = definition.Resolver
 type ScenarioRunStart = definition.ScenarioRunStart
 type ScenarioRun = definition.ScenarioRun
 type ScenarioLifecycle = definition.ScenarioLifecycle
@@ -23,9 +23,9 @@ func NewDefinitionRuntime(
 	schemas *agentapi.SchemaRegistry,
 	registry *tool.Registry,
 	settings *config.PlatformSettings,
-	runStore *run.RunStore,
+	runStore *run.Store,
 ) (*DefinitionRuntime, error) {
-	return definition.NewDefinitionRuntime(
+	return definition.NewRuntime(
 		definitions,
 		schemas,
 		registry,
@@ -35,6 +35,6 @@ func NewDefinitionRuntime(
 }
 
 // NewScenarioRuntime preserves the Parent lifecycle facade for application wiring.
-func NewScenarioRuntime(runStore *run.RunStore) *ScenarioRuntime {
+func NewScenarioRuntime(runStore *run.Store) *ScenarioRuntime {
 	return definition.NewScenarioRuntime(runStore)
 }

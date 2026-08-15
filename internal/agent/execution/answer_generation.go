@@ -48,7 +48,7 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 			}
 		}
 		if callErr == nil {
-			res, callErr = agent.validateOrRepairAnswer(ctx, input.Messages, res, input.AnswerContract, agent.cfg.ConclusionMaxTokens, stream)
+			res, callErr = agent.enforceContract(ctx, input.Messages, res, input.AnswerContract, agent.cfg.ConclusionMaxTokens, stream)
 		}
 		return forceConclusionOutput{
 			Result: res, Stream: stream, Timing: stream.Timings(), AttemptStarted: attemptStarted,
@@ -88,13 +88,13 @@ func recordFirstAnswerToken(ctx context.Context, step any, turnTTFT, runElapsed 
 	}
 	_, _ = runtrace.Invoke(
 		ctx,
-		firstAnswerTokenTraceSpec,
-		firstAnswerTokenTraceInput{
+		firstTokenTraceSpec,
+		firstTokenTraceInput{
 			Step:         step,
 			TurnTTFTMS:   turnTTFT.Milliseconds(),
 			RunElapsedMS: runElapsed.Milliseconds(),
 		},
-		func(context.Context, firstAnswerTokenTraceInput) (struct{}, error) {
+		func(context.Context, firstTokenTraceInput) (struct{}, error) {
 			return struct{}{}, nil
 		},
 	)
@@ -115,7 +115,7 @@ func hasDeliverableAnswer(res *llm.ChatStreamResult) bool {
 	return res != nil && strings.TrimSpace(res.Content) != "" && len(res.ToolCalls) == 0 && !hasLeakedToolProtocol(res)
 }
 
-func (agent *Agent) preserveInterruptedAnswer(ctx context.Context, runID string, stepSeq *int, result *RunResult, res *llm.ChatStreamResult, stream *StreamPipe, started time.Time, duration time.Duration) bool {
+func (agent *Agent) preservePartialAnswer(ctx context.Context, runID string, stepSeq *int, result *RunResult, res *llm.ChatStreamResult, stream *StreamPipe, started time.Time, duration time.Duration) bool {
 	if stream.HasToolCallDelta() || !hasDeliverableAnswer(res) {
 		return false
 	}

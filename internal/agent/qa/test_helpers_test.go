@@ -23,33 +23,33 @@ import (
 // Test-only type aliases into the agent subpackages. These are needed by the
 // migrated fixtures but not by production QA code, so they live in the test
 // helper file instead of polluting dependencies.go.
-type DefinitionRuntime = definition.DefinitionRuntime
+type DefinitionRuntime = definition.Runtime
 type ScenarioRun = definition.ScenarioRun
-type AgentConfig = execution.AgentConfig
+type Config = execution.Config
 type ToolExecutor = execution.ToolExecutor
 type Observer = execution.Observer
 type Controller = execution.Controller
 type Registry = tool.Registry
-type RunStore = run.RunStore
-type RunStatus = run.RunStatus
-type RunRecord = run.RunRecord
-type RunUsageSummary = run.RunUsageSummary
-type RunTerminal = run.RunTerminal
+type RunStore = run.Store
+type RunStatus = run.Status
+type RunRecord = run.Record
+type RunUsageSummary = run.UsageSummary
+type RunTerminal = run.Terminal
 type SSEEvent = run.SSEEvent
 
 const (
-	RunStatusRunning    = run.RunStatusRunning
-	RunStatusPaused     = run.RunStatusPaused
-	RunKindAgent        = run.RunKindAgent
+	RunStatusRunning    = run.StatusRunning
+	RunStatusPaused     = run.StatusPaused
+	RunKindAgent        = run.KindAgent
 	ToolKindRead        = tool.KindRead
 	ToolKindWrite       = tool.KindWrite
 	EvidenceNotRequired = run.EvidenceNotRequired
 	EventRunFinished    = run.EventRunFinished
 )
 
-var ErrRunNotActive = run.ErrRunNotActive
+var ErrRunNotActive = run.ErrNotActive
 
-func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config AgentConfig, observer Observer, controller Controller) *Agent {
+func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config Config, observer Observer, controller Controller) *Agent {
 	return execution.NewAgent(client, executor, config, observer, controller)
 }
 
@@ -57,21 +57,21 @@ func NewToolExecutor(registry *Registry) *ToolExecutor {
 	return execution.NewToolExecutor(registry)
 }
 
-func NewDefinitionRuntime(
+func NewRuntime(
 	definitions DefinitionResolver,
 	schemas *agentapi.SchemaRegistry,
 	registry *tool.Registry,
 	settings *config.PlatformSettings,
-	runStore *run.RunStore,
+	runStore *run.Store,
 ) (*DefinitionRuntime, error) {
-	return definition.NewDefinitionRuntime(definitions, schemas, registry, settings, runStore)
+	return definition.NewRuntime(definitions, schemas, registry, settings, runStore)
 }
 
 func TerminalFromEvent(event SSEEvent) *RunTerminal {
 	return run.TerminalFromEvent(event)
 }
 
-func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore, history SessionHistory) *Registry {
+func NewRegistry(svc *ToolService, cfg config.Config, sessions *memory.SessionStore, history SessionHistory) *Registry {
 	return tools.NewRegistry(svc, cfg, sessions, history)
 }
 
@@ -182,7 +182,7 @@ func newTestDefinitionRuntime(
 	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
 		t.Fatalf("publish schemas: %v", err)
 	}
-	runtime, err := NewDefinitionRuntime(
+	runtime, err := NewRuntime(
 		definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
 			if ref.ID != definition.ID || ref.Version != definition.Version {
 				return agentapi.Definition{}, fmt.Errorf("definition not found")
@@ -195,7 +195,7 @@ func newTestDefinitionRuntime(
 		store,
 	)
 	if err != nil {
-		t.Fatalf("NewDefinitionRuntime: %v", err)
+		t.Fatalf("NewRuntime: %v", err)
 	}
 	return runtime
 }
@@ -295,7 +295,7 @@ func (prepared preparedScenarioTools) Get(id tool.ToolID) (tool.Tool, bool) {
 	return prepared.snapshot.Get(id)
 }
 
-func (prepared preparedScenarioTools) ExecuteArguments(
+func (prepared preparedScenarioTools) Execute(
 	ctx context.Context,
 	id tool.ToolID,
 	arguments tool.Arguments,

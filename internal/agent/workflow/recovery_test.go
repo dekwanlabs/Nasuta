@@ -47,6 +47,76 @@ func TestServiceResumesRetryableCheckpointAtNextAttempt(t *testing.T) {
 	}
 }
 
+func TestServiceResumeUsesPersistedExecutionPosition(t *testing.T) {
+	definition := recoveryWorkflow()
+	definition.Budget.MaxRounds = 2
+	definition.Budget.MaxDepth = 3
+	executor := &recoveryPositionExecutor{}
+	service, persistence := newRecoveryService(
+		t,
+		"workflow_recovery_position",
+		definition,
+		executor,
+	)
+	persistence.state.Run.Round = 2
+	persistence.state.Run.BaseDepth = 2
+
+	result, err := service.Resume(t.Context(), "workflow_recovery_position")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Applied || result.Status != RunSucceeded {
+		t.Fatalf("resume result = %+v", result)
+	}
+	requests := executor.Requests()
+	if len(requests) != 1 ||
+		requests[0].Round != 2 ||
+		requests[0].Depth != 3 {
+		t.Fatalf("executor requests = %+v", requests)
+	}
+}
+
+func TestServiceResumePreservesExecutionPositionBudgetFailure(t *testing.T) {
+	definition := recoveryWorkflow()
+	executor := &recoveryPositionExecutor{}
+	service, persistence := newRecoveryService(
+		t,
+		"workflow_recovery_round_exhausted",
+		definition,
+		executor,
+	)
+	persistence.state.Run.Round = 2
+
+	result, err := service.Resume(
+		t.Context(),
+		"workflow_recovery_round_exhausted",
+	)
+	if !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("Resume error = %v, want workflow budget exhausted", err)
+	}
+	if !result.Applied ||
+		result.Status != RunFailed ||
+		result.Result == nil ||
+		result.Result.StopReason != StopBudgetExhausted {
+		t.Fatalf("resume result = %+v", result)
+	}
+	if requests := executor.Requests(); len(requests) != 0 {
+		t.Fatalf("executor requests = %+v, want none", requests)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if len(persistence.startedNodes) != 0 ||
+		persistence.finishedError != "workflow_budget_exhausted" ||
+		persistence.finishedStopReason != StopBudgetExhausted {
+		t.Fatalf(
+			"persisted resume = nodes:%d error:%q stop:%q",
+			len(persistence.startedNodes),
+			persistence.finishedError,
+			persistence.finishedStopReason,
+		)
+	}
+}
+
 func TestServiceResumeHonorsPersistedWorkflowUsage(t *testing.T) {
 	definition := recoveryWorkflow()
 	definition.Budget.MaxInputTokens = 10
@@ -62,8 +132,8 @@ func TestServiceResumeHonorsPersistedWorkflowUsage(t *testing.T) {
 	persistence.state.Run.Usage.TotalTokens = 10
 
 	result, err := service.Resume(t.Context(), "workflow_recovery_budget")
-	if !errors.Is(err, ErrWorkflowBudgetExhausted) {
-		t.Fatalf("Resume error = %v, want workflow budget exhaustion", err)
+	if !errors.Is(err, ErrNoAffordableTask) {
+		t.Fatalf("Resume error = %v, want no affordable task", err)
 	}
 	if result.Status != RunFailed {
 		t.Fatalf("resume status = %s, want failed", result.Status)
@@ -74,11 +144,80 @@ func TestServiceResumeHonorsPersistedWorkflowUsage(t *testing.T) {
 	persistence.mu.Lock()
 	defer persistence.mu.Unlock()
 	if len(persistence.startedNodes) != 0 ||
-		persistence.finishedError != "workflow_budget_exhausted" {
+		persistence.finishedError != "no_affordable_task" ||
+		persistence.finishedStopReason != StopNoAffordableTask {
 		t.Fatalf(
-			"started nodes=%d finished error=%q",
+			"started nodes=%d finished error=%q stop=%q",
 			len(persistence.startedNodes),
 			persistence.finishedError,
+			persistence.finishedStopReason,
+		)
+	}
+}
+
+func TestServiceResumePreservesNeedsClarificationGate(t *testing.T) {
+	definition := clarificationGateWorkflow()
+	service, persistence := newRecoveryService(
+		t,
+		"workflow_recovery_clarification",
+		definition,
+		nil,
+	)
+	decision := GateDecision{
+		GateID:      "clarity.check",
+		SubjectHash: "subject-hash",
+		Decision:    string(StopNeedsClarification),
+		ReasonCodes: []string{"missing_scope"},
+		EvaluatedAt: time.Now().UTC().Add(-time.Second),
+	}
+	payload, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := PrepareHandoff(Handoff{
+		WorkflowRunID:  "workflow_recovery_clarification",
+		ProducerNodeID: "clarity.check",
+		Schema:         definition.OutputSchema,
+		Payload:        payload,
+		Completeness:   Complete,
+	}, definition.Budget.MaxHandoffBytes, testSchemaRegistry(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	endedAt := time.Now().UTC().Add(-time.Second)
+	persistence.state.Nodes["clarity.check"] = NodeRunRecord{
+		WorkflowRunID:   "workflow_recovery_clarification",
+		NodeID:          "clarity.check",
+		Attempt:         1,
+		Kind:            NodeGate,
+		OutputHandoffID: handoff.ID,
+		Status:          RunSucceeded,
+		StartedAt:       endedAt.Add(-time.Second),
+		FirstStartedAt:  endedAt.Add(-time.Second),
+		EndedAt:         &endedAt,
+	}
+	persistence.state.Handoffs[handoff.ID] = handoff
+	persistence.state.NodeOutputs["clarity.check"] = handoff
+	persistence.state.Gates["clarity.check"] = decision
+
+	result, err := service.Resume(t.Context(), "workflow_recovery_clarification")
+	if err == nil || errorStopReason(err) != StopNeedsClarification {
+		t.Fatalf("Resume error = %v, want needs clarification", err)
+	}
+	if !result.Applied || result.Status != RunFailed || result.Result == nil ||
+		result.Result.StopReason != StopNeedsClarification {
+		t.Fatalf("resume result = %+v", result)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if len(persistence.startedNodes) != 0 ||
+		persistence.finishedError != "needs_clarification" ||
+		persistence.finishedStopReason != StopNeedsClarification {
+		t.Fatalf(
+			"persisted resume = nodes:%d error:%q stop:%q",
+			len(persistence.startedNodes),
+			persistence.finishedError,
+			persistence.finishedStopReason,
 		)
 	}
 }
@@ -125,12 +264,12 @@ func TestServiceTakesOverRunningReadOnlyAgentAttempt(t *testing.T) {
 	if len(persistence.failedNodes) != 1 ||
 		persistence.failedNodes[0].attempt != 1 ||
 		persistence.failedNodes[0].errorCode != nodeRestartedRetryableErrorCode ||
-		persistence.failedNodes[0].usage != (WorkflowUsage{
+		persistence.failedNodes[0].usage != (Usage{
 			InputTokens: 10, OutputTokens: 5, TotalTokens: 15, ToolCalls: 2,
 		}) {
 		t.Fatalf("takeover transitions = %+v", persistence.failedNodes)
 	}
-	if persistence.state.Run.Usage != (WorkflowUsage{
+	if persistence.state.Run.Usage != (Usage{
 		InputTokens: 10, OutputTokens: 5, TotalTokens: 15, ToolCalls: 2, Retries: 1,
 	}) {
 		t.Fatalf("restored workflow usage = %+v", persistence.state.Run.Usage)
@@ -184,11 +323,11 @@ func TestServiceTakesOverRunningRetrySafeTransformAttempt(t *testing.T) {
 func TestServiceDoesNotRetryUnsafeRunningAttempt(t *testing.T) {
 	tests := []struct {
 		name       string
-		definition func() WorkflowDefinition
+		definition func() Definition
 	}{
 		{
 			name: "write agent",
-			definition: func() WorkflowDefinition {
+			definition: func() Definition {
 				definition := recoveryWorkflow()
 				write := agentapi.PermissionPolicy{
 					Scopes: []string{"knowledge.read", "knowledge.write"},
@@ -200,7 +339,7 @@ func TestServiceDoesNotRetryUnsafeRunningAttempt(t *testing.T) {
 		},
 		{
 			name: "transform",
-			definition: func() WorkflowDefinition {
+			definition: func() Definition {
 				definition := recoveryWorkflow()
 				definition.Nodes[0].Kind = NodeTransform
 				definition.Nodes[0].Agent = agentapi.DefinitionRef{}
@@ -493,7 +632,7 @@ func TestServiceRecoverActiveStreamsObserverErrors(t *testing.T) {
 		ID: runID, StartedAt: persistence.state.Run.StartedAt,
 	}}
 	var observed ResumeResult
-	report, err := service.RecoverActiveWithObserver(
+	report, err := service.RecoverWithObserver(
 		t.Context(),
 		time.Now().UTC(),
 		10,
@@ -506,7 +645,7 @@ func TestServiceRecoverActiveStreamsObserverErrors(t *testing.T) {
 		},
 	)
 	if err == nil || !strings.Contains(err.Error(), "domain reconciliation failed") {
-		t.Fatalf("RecoverActiveWithObserver error = %v", err)
+		t.Fatalf("RecoverWithObserver error = %v", err)
 	}
 	if observed.RunID != runID || observed.Status != RunSucceeded {
 		t.Fatalf("observed result = %+v", observed)
@@ -517,7 +656,7 @@ func TestServiceRecoverActiveStreamsObserverErrors(t *testing.T) {
 	}
 }
 
-func recoveryWorkflow() WorkflowDefinition {
+func recoveryWorkflow() Definition {
 	definition := singleNodeWorkflow()
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	definition.ID = "delivery.recovery"
@@ -532,7 +671,7 @@ func recoveryWorkflow() WorkflowDefinition {
 func newRecoveryService(
 	t *testing.T,
 	runID string,
-	definition WorkflowDefinition,
+	definition Definition,
 	executor NodeExecutor,
 ) (*Service, *recordingWorkflowPersistence) {
 	t.Helper()
@@ -548,14 +687,14 @@ func newRecoveryService(
 func newRecoveryServiceWithAgents(
 	t *testing.T,
 	runID string,
-	definition WorkflowDefinition,
+	definition Definition,
 	executor NodeExecutor,
-	agents AgentDefinitionResolver,
+	agents AgentResolver,
 ) (*Service, *recordingWorkflowPersistence) {
 	t.Helper()
 	schemas := testSchemaRegistry(t)
 	catalog := NewCatalog(schemas, agents)
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	prepared, err := catalog.Resolve(DefinitionRef{
@@ -577,8 +716,8 @@ func newRecoveryServiceWithAgents(
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{
-		state: WorkflowRunState{
-			Run: WorkflowRunRecord{
+		state: RunState{
+			Run: RunRecord{
 				ID: runID, WorkflowID: prepared.ID, WorkflowVersion: prepared.Version,
 				WorkflowHash: prepared.ContentHash,
 				ActorUserID:  41, ActorTenantID: "tenant-a",
@@ -593,7 +732,7 @@ func newRecoveryServiceWithAgents(
 			Handoffs:    map[string]Handoff{input.ID: input},
 			NodeOutputs: make(map[string]Handoff),
 			Gates:       make(map[string]GateDecision),
-			Approvals:   make(map[string]WorkflowApproval),
+			Approvals:   make(map[string]Approval),
 		},
 	}
 	service, err := NewService(
@@ -613,6 +752,30 @@ type blockingRecoveryExecutor struct {
 	attempts int
 	started  chan struct{}
 	release  chan struct{}
+}
+
+type recoveryPositionExecutor struct {
+	mu       sync.Mutex
+	requests []NodeRequest
+}
+
+func (executor *recoveryPositionExecutor) Execute(
+	_ context.Context,
+	request NodeRequest,
+) (NodeResult, error) {
+	executor.mu.Lock()
+	executor.requests = append(executor.requests, request)
+	executor.mu.Unlock()
+	payload, _ := json.Marshal(map[string]string{"node": request.Node.ID})
+	return NodeResult{
+		Handoff: Handoff{Payload: payload, Completeness: Complete},
+	}, nil
+}
+
+func (executor *recoveryPositionExecutor) Requests() []NodeRequest {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	return append([]NodeRequest(nil), executor.requests...)
 }
 
 func (executor *blockingRecoveryExecutor) Execute(

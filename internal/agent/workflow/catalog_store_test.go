@@ -10,7 +10,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-func TestWorkflowStoreLoadDefinitionRollouts(t *testing.T) {
+func TestStoreLoadDefinitionRollouts(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -30,9 +30,9 @@ func TestWorkflowStoreLoadDefinitionRollouts(t *testing.T) {
 			"stable", "rule-hash", true, int64(7), createdAt,
 		))
 
-	rules, err := workflowStore.LoadDefinitionRollouts(context.Background())
+	rules, err := workflowStore.LoadRollouts(context.Background())
 	if err != nil {
-		t.Fatalf("LoadDefinitionRollouts: %v", err)
+		t.Fatalf("LoadRollouts: %v", err)
 	}
 	if len(rules) != 1 || rules[0].WorkflowID != "delivery.review" ||
 		rules[0].RuleVersion != 2 || rules[0].CandidateVersion != 3 ||
@@ -44,7 +44,7 @@ func TestWorkflowStoreLoadDefinitionRollouts(t *testing.T) {
 	}
 }
 
-func TestWorkflowStoreSetDefinitionRolloutInsertsInitialRuleAndAudit(t *testing.T) {
+func TestStoreSetRolloutInsertsInitialRuleAndAudit(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -71,17 +71,17 @@ func TestWorkflowStoreSetDefinitionRolloutInsertsInitialRuleAndAudit(t *testing.
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
-	if err := workflowStore.SetDefinitionRollout(
+	if err := workflowStore.SetRollout(
 		context.Background(), rule, 9,
 	); err != nil {
-		t.Fatalf("SetDefinitionRollout: %v", err)
+		t.Fatalf("SetRollout: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
 	}
 }
 
-func TestWorkflowStoreSetDefinitionRolloutUpdatesNextRuleAndAudit(t *testing.T) {
+func TestStoreSetRolloutUpdatesNextRuleAndAudit(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -108,17 +108,17 @@ func TestWorkflowStoreSetDefinitionRolloutUpdatesNextRuleAndAudit(t *testing.T) 
 		WillReturnResult(sqlmock.NewResult(2, 1))
 	mock.ExpectCommit()
 
-	if err := workflowStore.SetDefinitionRollout(
+	if err := workflowStore.SetRollout(
 		context.Background(), rule, 10,
 	); err != nil {
-		t.Fatalf("SetDefinitionRollout: %v", err)
+		t.Fatalf("SetRollout: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
 	}
 }
 
-func TestWorkflowStoreSetDefinitionRolloutRejectsStaleRuleVersion(t *testing.T) {
+func TestStoreSetRolloutRejectsStaleRuleVersion(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -136,16 +136,16 @@ func TestWorkflowStoreSetDefinitionRolloutRejectsStaleRuleVersion(t *testing.T) 
 		WillReturnRows(sqlmock.NewRows([]string{"rule_version"}).AddRow(int64(2)))
 	mock.ExpectRollback()
 
-	err = workflowStore.SetDefinitionRollout(context.Background(), rule, 9)
+	err = workflowStore.SetRollout(context.Background(), rule, 9)
 	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("SetDefinitionRollout error = %v, want ErrConflict", err)
+		t.Fatalf("SetRollout error = %v, want ErrConflict", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
 	}
 }
 
-func TestWorkflowStoreSetDefinitionRolloutRollsBackWhenAuditFails(t *testing.T) {
+func TestStoreSetRolloutRollsBackWhenAuditFails(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -173,16 +173,16 @@ func TestWorkflowStoreSetDefinitionRolloutRollsBackWhenAuditFails(t *testing.T) 
 		WillReturnError(auditErr)
 	mock.ExpectRollback()
 
-	err = workflowStore.SetDefinitionRollout(context.Background(), rule, 9)
+	err = workflowStore.SetRollout(context.Background(), rule, 9)
 	if !errors.Is(err, auditErr) {
-		t.Fatalf("SetDefinitionRollout error = %v, want audit error", err)
+		t.Fatalf("SetRollout error = %v, want audit error", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
 	}
 }
 
-func TestWorkflowStoreListDefinitionRolloutAuditUsesBoundedCursor(t *testing.T) {
+func TestStoreListRolloutAuditUsesBoundedCursor(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -203,11 +203,11 @@ func TestWorkflowStoreListDefinitionRolloutAuditUsesBoundedCursor(t *testing.T) 
 			2500, "rule-hash", "rollout_enabled", int64(9), createdAt,
 		))
 
-	events, err := workflowStore.ListDefinitionRolloutAudit(
+	events, err := workflowStore.ListRolloutAudit(
 		context.Background(), "delivery.review", 20, 5,
 	)
 	if err != nil {
-		t.Fatalf("ListDefinitionRolloutAudit: %v", err)
+		t.Fatalf("ListRolloutAudit: %v", err)
 	}
 	if len(events) != 1 || events[0].Seq != 21 ||
 		events[0].RuleVersion != 3 || events[0].ActorUserID != 9 {

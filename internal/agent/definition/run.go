@@ -18,14 +18,14 @@ import (
 )
 
 // Run resolves and executes one exact immutable definition version.
-func (runtime *DefinitionRuntime) Run(
+func (runtime *Runtime) Run(
 	ctx context.Context,
 	request agentapi.RunRequest,
 ) (agentapi.RunResult, error) {
-	request = redactDefinitionRequest(request)
+	request = redactRequest(request)
 	execution, err := runtime.prepare(request)
 	if err != nil {
-		return failedDefinitionRun(request.RunID, "invalid_request", err), nil
+		return failedRun(request.RunID, "invalid_request", err), nil
 	}
 	trace, ownsTrace := beginExecutionTrace(ctx)
 	managed, err := runtime.beginPrepared(runStart(request), execution, trace, ownsTrace)
@@ -45,11 +45,11 @@ func (runtime *DefinitionRuntime) Run(
 }
 
 // Begin creates a Run before model-backed scenario preparation starts.
-func (runtime *DefinitionRuntime) Begin(
+func (runtime *Runtime) Begin(
 	ctx context.Context,
 	start agentapi.RunStart,
 ) (agentapi.ManagedRun, error) {
-	start = redactDefinitionStart(start)
+	start = redactStart(start)
 	execution, err := runtime.prepare(agentapi.RunRequest{
 		RunID: start.RunID, Agent: start.Agent, DefinitionHash: start.DefinitionHash,
 		Selection: start.Selection, Input: start.Input, Permissions: start.Permissions,
@@ -63,19 +63,19 @@ func (runtime *DefinitionRuntime) Begin(
 	return runtime.beginPrepared(start, execution, trace, ownsTrace)
 }
 
-// BeginScenario persists a parent Run without inventing an agent definition snapshot.
-func (runtime *DefinitionRuntime) BeginScenario(
+// Start persists a parent Run without inventing an agent definition snapshot.
+func (runtime *Runtime) Start(
 	ctx context.Context,
 	start ScenarioRunStart,
 ) (ScenarioRun, error) {
 	if runtime == nil || runtime.scenarios == nil {
 		return nil, fmt.Errorf("create scenario run %q: runtime is unavailable", start.RunID)
 	}
-	return runtime.scenarios.BeginScenario(ctx, start)
+	return runtime.scenarios.Start(ctx, start)
 }
 
-// BeginScenario persists a parent Run without requiring model execution.
-func (runtime *ScenarioRuntime) BeginScenario(
+// Start persists a parent Run without requiring model execution.
+func (runtime *ScenarioRuntime) Start(
 	ctx context.Context,
 	start ScenarioRunStart,
 ) (ScenarioRun, error) {
@@ -86,8 +86,8 @@ func (runtime *ScenarioRuntime) BeginScenario(
 		}
 		return nil, fmt.Errorf("create scenario run %q: run store is unavailable", start.RunID)
 	}
-	if err := runtime.runStore.Create(agentrun.RunRecord{
-		ID: start.RunID, RunKind: agentrun.RunKindQAParent, UserID: start.UserID,
+	if err := runtime.runStore.Create(agentrun.Record{
+		ID: start.RunID, RunKind: agentrun.KindQAParent, UserID: start.UserID,
 		SessionID: start.SessionID, ParentRunID: start.ParentRunID,
 		WorkflowRunID: start.WorkflowRunID,
 		Question:      start.Question, Mode: start.Mode,
@@ -95,8 +95,8 @@ func (runtime *ScenarioRuntime) BeginScenario(
 		if ownsTrace {
 			trace.Close()
 		}
-		runtime.hub.CompleteTransient(start.RunID, agentrun.RunOutcome{
-			Status: agentrun.RunStatusFailed, ErrorCode: "persistence_failed", Err: err,
+		runtime.hub.CompleteTransient(start.RunID, agentrun.Outcome{
+			Status: agentrun.StatusFailed, ErrorCode: "persistence_failed", Err: err,
 			Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidenceUnavailable},
 		})
 		return nil, fmt.Errorf("create scenario run %q: %w", start.RunID, err)
@@ -106,23 +106,23 @@ func (runtime *ScenarioRuntime) BeginScenario(
 	}, nil
 }
 
-// CompleteScenario commits a durable terminal fact before projecting it.
-func (runtime *DefinitionRuntime) CompleteScenario(
+// Complete commits a durable terminal fact before projecting it.
+func (runtime *Runtime) Complete(
 	ctx context.Context,
 	runID string,
-	outcome agentrun.RunOutcome,
+	outcome agentrun.Outcome,
 ) error {
 	if runtime == nil || runtime.scenarios == nil {
 		return fmt.Errorf("complete scenario run %q: runtime is unavailable", runID)
 	}
-	return runtime.scenarios.CompleteScenario(ctx, runID, outcome)
+	return runtime.scenarios.Complete(ctx, runID, outcome)
 }
 
-// CompleteScenario commits a durable terminal fact before projecting it.
-func (runtime *ScenarioRuntime) CompleteScenario(
+// Complete commits a durable terminal fact before projecting it.
+func (runtime *ScenarioRuntime) Complete(
 	ctx context.Context,
 	runID string,
-	outcome agentrun.RunOutcome,
+	outcome agentrun.Outcome,
 ) error {
 	if runtime.runStore == nil {
 		return fmt.Errorf("complete scenario run %q: run store is unavailable", runID)
@@ -171,13 +171,13 @@ func beginExecutionTrace(ctx context.Context) (*runtrace.Scope, bool) {
 	return trace, trace != nil && inherited == nil
 }
 
-func (runtime *DefinitionRuntime) beginPrepared(
+func (runtime *Runtime) beginPrepared(
 	start agentapi.RunStart,
-	execution definitionExecution,
+	execution preparedExecution,
 	trace *runtrace.Scope,
 	ownsTrace bool,
-) (*definitionManagedRun, error) {
-	recorder := &definitionUsageRecorder{
+) (*activeRun, error) {
+	recorder := &usageRecorder{
 		store:                             runtime.usageStore,
 		inputPriceMicrosPerMillionTokens:  execution.definition.Model.InputPriceMicrosPerMillionTokens,
 		outputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
@@ -186,20 +186,20 @@ func (runtime *DefinitionRuntime) beginPrepared(
 		if ownsTrace {
 			trace.Close()
 		}
-		runtime.hub.CompleteTransient(start.RunID, agentrun.RunOutcome{
-			Status: agentrun.RunStatusFailed, ErrorCode: "persistence_failed", Err: err,
+		runtime.hub.CompleteTransient(start.RunID, agentrun.Outcome{
+			Status: agentrun.StatusFailed, ErrorCode: "persistence_failed", Err: err,
 			Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidenceUnavailable},
 		})
 		return nil, err
 	}
-	return &definitionManagedRun{
+	return &activeRun{
 		runtime: runtime, start: start, execution: execution, recorder: recorder, trace: trace, ownsTrace: ownsTrace,
 	}, nil
 }
 
-func (runtime *DefinitionRuntime) createRun(
+func (runtime *Runtime) createRun(
 	start agentapi.RunStart,
-	execution definitionExecution,
+	execution preparedExecution,
 ) error {
 	if runtime.scenarios == nil || runtime.scenarios.runStore == nil {
 		return nil
@@ -208,8 +208,8 @@ func (runtime *DefinitionRuntime) createRun(
 	if start.Correlation.WorkflowRunID != "" {
 		mode = "workflow"
 	}
-	if err := runtime.scenarios.runStore.Create(agentrun.RunRecord{
-		ID: start.RunID, RunKind: agentrun.RunKindAgent, UserID: start.Actor.UserID,
+	if err := runtime.scenarios.runStore.Create(agentrun.Record{
+		ID: start.RunID, RunKind: agentrun.KindAgent, UserID: start.Actor.UserID,
 		SessionID: start.Correlation.SessionID,
 		AgentID:   execution.snapshot.AgentID, DefinitionVersion: execution.snapshot.DefinitionVersion,
 		DefinitionHash:      execution.snapshot.DefinitionHash,
@@ -228,7 +228,7 @@ func (runtime *DefinitionRuntime) createRun(
 	return nil
 }
 
-func (run *definitionManagedRun) Context(ctx context.Context) context.Context {
+func (run *activeRun) Context(ctx context.Context) context.Context {
 	ctx = runtrace.WithScope(ctx, run.trace)
 	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: run.start.RunID, ParentRunID: run.start.Correlation.ParentRunID,
@@ -239,7 +239,7 @@ func (run *definitionManagedRun) Context(ctx context.Context) context.Context {
 	return llm.WithCallLifecycleObserver(ctx, run.start.RunID, run.runtime.hub)
 }
 
-func (run *definitionManagedRun) Execute(
+func (run *activeRun) Execute(
 	ctx context.Context,
 	request agentapi.RunRequest,
 ) (agentapi.RunResult, error) {
@@ -255,18 +255,18 @@ func (run *definitionManagedRun) Execute(
 	run.executed = true
 	run.mu.Unlock()
 
-	request = redactDefinitionRequest(request)
+	request = redactRequest(request)
 	execution, err := run.validateRequest(request)
 	if err != nil {
-		outcome := agentrun.RunOutcome{
-			Status: agentrun.RunStatusFailed, ErrorCode: "invalid_request", Err: err,
+		outcome := agentrun.Outcome{
+			Status: agentrun.StatusFailed, ErrorCode: "invalid_request", Err: err,
 			Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidenceUnavailable},
 		}
 		outcome = run.mergePreparationOutcome(outcome)
 		run.setOutcome(outcome)
-		return failedDefinitionRun(request.RunID, "invalid_request", err), nil
+		return failedRun(request.RunID, "invalid_request", err), nil
 	}
-	input := compileDefinitionRequest(execution.definition, request)
+	input := compileRequest(execution.definition, request)
 	input.OfferedToolIDs = execution.offeredTools
 	input.ToolPruningApplied = execution.pruneApplied
 	execution.snapshot.PromptHash = hashMessages(input.Messages)
@@ -280,7 +280,7 @@ func (run *definitionManagedRun) Execute(
 		nil,
 	)
 	observer := run.observer()
-	loop := agentexecution.NewAgent(client, run.runtime.executor, agentexecution.AgentConfig{
+	loop := agentexecution.NewAgent(client, run.runtime.executor, agentexecution.Config{
 		MaxSteps:            execution.snapshot.Budget.MaxSteps,
 		MaxToolCalls:        request.Policy.MaxToolCalls,
 		Timeout:             execution.snapshot.Budget.Timeout,
@@ -296,27 +296,27 @@ func (run *definitionManagedRun) Execute(
 	})
 	runCtx := llm.WithUsageRecorder(ctx, request.RunID, run.recorder)
 	result, runErr := loop.RunCompiled(runCtx, request.RunID, input, execution.toolSnapshot)
-	publicResult, outcome := mapDefinitionResult(
+	publicResult, outcome := mapResult(
 		request.RunID,
 		result,
 		runErr,
 		context.Cause(ctx),
 		run.recorder.Usage(),
-		contextReferencesFromRequest(request.Context),
+		referencesFromRequest(request.Context),
 		run.runtime.schemas,
 		execution.definition.OutputSchema,
 	)
 	outcome = run.mergePreparationOutcome(outcome)
 	publicResult.Evidence = publicEvidence(outcome.Evidence)
 	if request.Policy.RedactSensitive {
-		publicResult = redactDefinitionResult(publicResult)
-		outcome = redactDefinitionOutcome(outcome)
+		publicResult = redactResult(publicResult)
+		outcome = redactOutcome(outcome)
 	}
 	run.setOutcome(outcome)
 	return publicResult, nil
 }
 
-func (run *definitionManagedRun) Finish(runError *agentapi.RunError) error {
+func (run *activeRun) Finish(runError *agentapi.RunError) error {
 	run.mu.Lock()
 	if run.finished {
 		run.mu.Unlock()
@@ -345,7 +345,7 @@ func (run *definitionManagedRun) Finish(runError *agentapi.RunError) error {
 		if run.start.Policy.RedactSensitive {
 			message = platform.RedactSensitiveText(message)
 		}
-		outcome.Status = agentrun.RunStatusFailed
+		outcome.Status = agentrun.StatusFailed
 		outcome.ErrorCode = code
 		outcome.Err = errors.New(message)
 		if outcome.Evidence.Status == "" {
@@ -361,16 +361,16 @@ func (run *definitionManagedRun) Finish(runError *agentapi.RunError) error {
 	return nil
 }
 
-func (run *definitionManagedRun) setOutcome(outcome agentrun.RunOutcome) {
+func (run *activeRun) setOutcome(outcome agentrun.Outcome) {
 	run.mu.Lock()
 	run.outcome = outcome
 	run.outcomeSet = true
 	run.mu.Unlock()
 }
 
-func (run *definitionManagedRun) validateRequest(
+func (run *activeRun) validateRequest(
 	request agentapi.RunRequest,
-) (definitionExecution, error) {
+) (preparedExecution, error) {
 	start := runStart(request)
 	if start.RunID != run.start.RunID || start.Agent != run.start.Agent ||
 		start.DefinitionHash != run.start.DefinitionHash ||
@@ -379,21 +379,21 @@ func (run *definitionManagedRun) validateRequest(
 		start.Correlation != run.start.Correlation ||
 		start.Policy.RedactSensitive != run.start.Policy.RedactSensitive ||
 		!samePermissions(start.Permissions, run.start.Permissions) ||
-		!sameExecutionToolScope(start.ToolScope, run.start.ToolScope) {
-		return definitionExecution{}, fmt.Errorf("run request does not match the prepared run")
+		!sameToolScope(start.ToolScope, run.start.ToolScope) {
+		return preparedExecution{}, fmt.Errorf("run request does not match the prepared run")
 	}
-	if err := validateDefinitionMessages(request.Messages); err != nil {
-		return definitionExecution{}, err
+	if err := validateMessages(request.Messages); err != nil {
+		return preparedExecution{}, err
 	}
-	contextHash, err := validateDefinitionContext(request.Context)
+	contextHash, err := validateContext(request.Context)
 	if err != nil {
-		return definitionExecution{}, err
+		return preparedExecution{}, err
 	}
 	execution := run.execution
 	execution.snapshot.ContextHash = contextHash
 	offeredTools, err := canonicalToolIDSet(request.ToolScope.OfferedToolIDs)
 	if err != nil {
-		return definitionExecution{}, fmt.Errorf("offered tools: %w", err)
+		return preparedExecution{}, fmt.Errorf("offered tools: %w", err)
 	}
 	available := make(map[tool.ToolID]struct{}, len(execution.snapshot.VisibleToolIDs))
 	for _, id := range execution.snapshot.VisibleToolIDs {
@@ -401,7 +401,7 @@ func (run *definitionManagedRun) validateRequest(
 	}
 	for id := range offeredTools {
 		if _, ok := available[id]; !ok {
-			return definitionExecution{}, fmt.Errorf("offered tool %q is outside the run snapshot", id)
+			return preparedExecution{}, fmt.Errorf("offered tool %q is outside the run snapshot", id)
 		}
 	}
 	execution.offeredTools = offeredTools
@@ -430,7 +430,7 @@ func jsonBytesEqual(left, right json.RawMessage) bool {
 	return reflect.DeepEqual(leftValue, rightValue)
 }
 
-func sameExecutionToolScope(left, right agentapi.ToolScope) bool {
+func sameToolScope(left, right agentapi.ToolScope) bool {
 	if left.AllowWrite != right.AllowWrite || left.RestrictVisible != right.RestrictVisible {
 		return false
 	}

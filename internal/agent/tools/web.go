@@ -6,10 +6,10 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/web"
 )
 
-type WebSearchResult = web.WebSearchResult
-type WebSearchProvider = web.WebSearchProvider
-type WebFetchedEvidence = web.WebFetchedEvidence
-type WebSearchResponse = web.WebSearchResponse
+type WebSearchResult = web.SearchResult
+type WebSearchProvider = web.SearchProvider
+type WebFetchedEvidence = web.FetchedEvidence
+type WebSearchResponse = web.SearchResponse
 
 func (srv *Service) webService() *web.Service {
 	srv.webOnce.Do(func() {
@@ -28,22 +28,22 @@ func (srv *Service) SetWebSearchAPIKey(apiKey string) {
 	srv.webService().SetAPIKey(apiKey)
 }
 
-func (srv *Service) RegisterWebSearchProvider(name string, provider WebSearchProvider) error {
+func (srv *Service) RegisterWebProvider(name string, provider WebSearchProvider) error {
 	return srv.webService().RegisterProvider(name, provider)
 }
 
 func (srv *Service) WebSearch(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
-	return srv.webService().WebSearch(ctx, query, limit)
+	return srv.webService().Search(ctx, query, limit)
 }
 
 func (srv *Service) WebSearchWithFetch(ctx context.Context, query string, limit int) (WebSearchResponse, error) {
-	return srv.webService().WebSearchWithFetch(ctx, query, limit)
+	return srv.webService().SearchWithFetch(ctx, query, limit)
 }
 
 func (srv *Service) WebFetch(ctx context.Context, rawURL string) (string, error) {
-	return srv.webService().WebFetch(ctx, rawURL)
+	return srv.webService().Fetch(ctx, rawURL)
 }
 
 func (srv *Service) WebFetchRelevant(ctx context.Context, rawURL, query string) (string, error) {
-	return srv.webService().WebFetchRelevant(ctx, rawURL, query)
+	return srv.webService().FetchRelevant(ctx, rawURL, query)
 }

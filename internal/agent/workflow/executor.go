@@ -10,17 +10,21 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 var (
-	ErrHumanApprovalRequired   = errors.New("workflow requires human approval")
-	ErrWorkflowBudgetExhausted = errors.New("workflow budget exhausted")
-	ErrEvidenceConflict        = errors.New("workflow evidence conflict")
+	ErrHumanApprovalRequired = errors.New("workflow requires human approval")
+	ErrNoAffordableTask      = errors.New("workflow has no affordable task")
+	ErrBudgetExhausted       = errors.New("workflow budget exhausted")
+	ErrEvidenceConflict      = errors.New("workflow evidence conflict")
 )
 
 type RunRequest struct {
 	RunID               string
 	ParentRunID         string
+	Round               int
+	BaseDepth           int
 	Input               json.RawMessage
 	InputHandoff        *Handoff
 	Actor               agentapi.Actor
@@ -31,9 +35,13 @@ type RunRequest struct {
 
 type NodeRequest struct {
 	WorkflowRunID           string
+	Round                   int
+	Depth                   int
 	Node                    NodeDefinition
 	Inputs                  []Handoff
 	UnavailablePredecessors []string
+	UnavailableReasons      map[string]StopReason
+	BaselineEvidence        []tool.EvidenceUnit
 	Attempt                 int
 	Actor                   agentapi.Actor
 	EffectivePermissions    agentapi.PermissionPolicy
@@ -85,7 +93,7 @@ func (dispatcher *NodeDispatcher) Execute(
 type NodeResult struct {
 	Handoff    Handoff
 	AgentRunID string
-	Usage      WorkflowUsage
+	Usage      Usage
 }
 
 type RunObserver interface {
@@ -103,18 +111,20 @@ type Result struct {
 	Output      Handoff
 	NodeOutputs map[string]Handoff
 	Gates       map[string]GateDecision
-	Usage       WorkflowUsage
+	Usage       Usage
+	StopReason  StopReason
 }
 
-type WorkflowProgress struct {
-	StartedAt      time.Time
-	Input          Handoff
-	NodeOutputs    map[string]Handoff
-	Gates          map[string]GateDecision
-	FailedOptional map[string]struct{}
-	WaitingHuman   map[string]struct{}
-	NodeAttempts   map[string]NodeAttemptProgress
-	Usage          WorkflowUsage
+type Progress struct {
+	StartedAt             time.Time
+	Input                 Handoff
+	NodeOutputs           map[string]Handoff
+	Gates                 map[string]GateDecision
+	FailedOptional        map[string]struct{}
+	FailedOptionalReasons map[string]StopReason
+	WaitingHuman          map[string]struct{}
+	NodeAttempts          map[string]NodeAttemptProgress
+	Usage                 Usage
 }
 
 // NodeAttemptProgress preserves retry timing across a durable resume.
@@ -150,17 +160,17 @@ func NewOrchestrator(
 	}
 }
 
-func (orchestrator *Orchestrator) Run(ctx context.Context, definition WorkflowDefinition, request RunRequest) (Result, error) {
+func (orchestrator *Orchestrator) Run(ctx context.Context, definition Definition, request RunRequest) (Result, error) {
 	return orchestrator.RunObserved(ctx, definition, request, nil)
 }
 
 func (orchestrator *Orchestrator) RunObserved(
 	ctx context.Context,
-	definition WorkflowDefinition,
+	definition Definition,
 	request RunRequest,
 	observer RunObserver,
 ) (Result, error) {
-	trace, ownsTrace := workflowExecutionTrace(ctx)
+	trace, ownsTrace := executionTrace(ctx)
 	if ownsTrace {
 		defer trace.Close()
 	}
@@ -181,15 +191,16 @@ func (orchestrator *Orchestrator) RunObserved(
 	if startedAt.IsZero() {
 		startedAt = time.Now().UTC()
 	}
-	return orchestrator.runPrepared(ctx, prepared, metadata, request, WorkflowProgress{
+	return orchestrator.runPrepared(ctx, prepared, metadata, request, Progress{
 		StartedAt: startedAt, Input: input,
-		NodeOutputs: make(map[string]Handoff, len(prepared.Nodes)),
-		Gates:       make(map[string]GateDecision),
+		NodeOutputs:           make(map[string]Handoff, len(prepared.Nodes)),
+		Gates:                 make(map[string]GateDecision),
+		FailedOptionalReasons: make(map[string]StopReason),
 	}, observer)
 }
 
 func (orchestrator *Orchestrator) prepareInputHandoff(
-	definition WorkflowDefinition,
+	definition Definition,
 	request RunRequest,
 ) (Handoff, error) {
 	if request.InputHandoff == nil {
@@ -216,12 +227,12 @@ func (orchestrator *Orchestrator) prepareInputHandoff(
 
 func (orchestrator *Orchestrator) ResumeObserved(
 	ctx context.Context,
-	definition WorkflowDefinition,
+	definition Definition,
 	request RunRequest,
-	progress WorkflowProgress,
+	progress Progress,
 	observer RunObserver,
 ) (Result, error) {
-	trace, ownsTrace := workflowExecutionTrace(ctx)
+	trace, ownsTrace := executionTrace(ctx)
 	if ownsTrace {
 		defer trace.Close()
 	}
@@ -249,35 +260,35 @@ func (orchestrator *Orchestrator) ResumeObserved(
 	return orchestrator.runPrepared(ctx, prepared, metadata, request, progress, observer)
 }
 
-func workflowExecutionTrace(ctx context.Context) (*runtrace.Scope, bool) {
+func executionTrace(ctx context.Context) (*runtrace.Scope, bool) {
 	inherited := runtrace.FromContext(ctx)
 	trace := runtrace.Begin(ctx)
 	return trace, trace != nil && inherited == nil
 }
 
 func (orchestrator *Orchestrator) prepareRun(
-	definition WorkflowDefinition,
+	definition Definition,
 	request RunRequest,
-) (WorkflowDefinition, graphMetadata, error) {
+) (Definition, graphMetadata, error) {
 	if orchestrator == nil {
-		return WorkflowDefinition{}, graphMetadata{}, fmt.Errorf("workflow orchestrator is unavailable")
+		return Definition{}, graphMetadata{}, fmt.Errorf("workflow orchestrator is unavailable")
 	}
-	prepared, err := Prepare(definition, orchestrator.schemas)
+	prepared, err := prepareRuntime(definition, orchestrator.schemas)
 	if err != nil {
-		return WorkflowDefinition{}, graphMetadata{}, err
+		return Definition{}, graphMetadata{}, err
 	}
 	if request.RunID == "" {
-		return WorkflowDefinition{}, graphMetadata{}, fmt.Errorf("workflow run id is required")
+		return Definition{}, graphMetadata{}, fmt.Errorf("workflow run id is required")
 	}
 	metadata, err := graph(prepared, orchestrator.schemas)
 	if err != nil {
-		return WorkflowDefinition{}, graphMetadata{}, err
+		return Definition{}, graphMetadata{}, err
 	}
 	return prepared, metadata, nil
 }
 
 type dispatchInput struct {
-	definition WorkflowDefinition
+	definition Definition
 	ready      []string
 }
 
@@ -285,7 +296,7 @@ type dispatchOutput struct {
 	outcomes []nodeOutcome
 }
 
-var multiAgentDispatchTraceSpec = runtrace.Spec[dispatchInput, dispatchOutput]{
+var dispatchTraceSpec = runtrace.Spec[dispatchInput, dispatchOutput]{
 	Operation: "multi_agent.dispatch",
 	Node:      "multi_agent_dispatch",
 	Input: func(input dispatchInput) map[string]any {
@@ -325,7 +336,7 @@ type nodeOutcome struct {
 	retryable  bool
 }
 
-var workflowNodeTraceSpec = runtrace.Spec[NodeRequest, nodeOutcome]{
+var nodeTraceSpec = runtrace.Spec[NodeRequest, nodeOutcome]{
 	Operation: "workflow.node.execute",
 	Node:      "workflow_node",
 	Input: func(request NodeRequest) map[string]any {
@@ -334,6 +345,8 @@ var workflowNodeTraceSpec = runtrace.Spec[NodeRequest, nodeOutcome]{
 	Output: func(request NodeRequest, result nodeOutcome, err error) map[string]any {
 		output := map[string]any{
 			"workflow_run_id": request.WorkflowRunID,
+			"round":           request.Round,
+			"depth":           request.Depth,
 			"node_id":         request.Node.ID,
 			"node_kind":       request.Node.Kind,
 			"attempt":         request.Attempt,
@@ -341,6 +354,14 @@ var workflowNodeTraceSpec = runtrace.Spec[NodeRequest, nodeOutcome]{
 		}
 		if err != nil {
 			output["error"] = err.Error()
+		}
+		if result.gate != nil {
+			output["gate_decision"] = result.gate.Decision
+			output["gate_reason_codes"] = append(
+				[]string(nil),
+				result.gate.ReasonCodes...,
+			)
+			output["gate_finding_count"] = len(result.gate.FindingIDs)
 		}
 		return output
 	},
@@ -352,9 +373,9 @@ var workflowNodeTraceSpec = runtrace.Spec[NodeRequest, nodeOutcome]{
 	},
 }
 
-type workflowBudgetAccount struct {
+type budgetAccount struct {
 	mu       sync.Mutex
-	budget   WorkflowBudget
-	usage    WorkflowUsage
-	reserved WorkflowUsage
+	budget   Budget
+	usage    Usage
+	reserved Usage
 }

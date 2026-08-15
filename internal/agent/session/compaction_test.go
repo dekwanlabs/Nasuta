@@ -22,9 +22,9 @@ func TestSessionCompactionDoesNotStartBelowEightyPercent(t *testing.T) {
 		WithArgs("session-1", int64(42)).
 		WillReturnRows(compactionStatsRow(0, 0, 79, 6))
 
-	result, err := CompactSessionIfNeeded(
+	result, err := CompactIfNeeded(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
-		"session-1", 42, SessionCompactionUsage{ContextWindow: 100}, "",
+		"session-1", 42, CompactionUsage{ContextWindow: 100}, "",
 		nil,
 	)
 	if err != nil {
@@ -53,10 +53,10 @@ func TestSessionCompactionUsesMeasuredIncomingTokens(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
 			AddRow("session-1", 42, "title", 0, 0, now, now, 3))
 
-	result, err := CompactSessionIfNeeded(
+	result, err := CompactIfNeeded(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
 		"session-1", 42,
-		SessionCompactionUsage{ContextWindow: 100, IncomingTokens: 15, OutputReserveTokens: 5},
+		CompactionUsage{ContextWindow: 100, IncomingTokens: 15, OutputReserveTokens: 5},
 		"short question",
 		nil,
 	)
@@ -81,10 +81,10 @@ func TestSessionCompactionUsesProjectedRequestTokens(t *testing.T) {
 		WithArgs("session-1", int64(42)).
 		WillReturnRows(compactionStatsRow(0, 0, 90, 6))
 
-	result, err := CompactSessionIfNeeded(
+	result, err := CompactIfNeeded(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
 		"session-1", 42,
-		SessionCompactionUsage{ContextWindow: 100, ProjectedTokens: 10},
+		CompactionUsage{ContextWindow: 100, ProjectedTokens: 10},
 		"",
 		nil,
 	)
@@ -154,10 +154,10 @@ func TestSessionCompactionBatchesOldestTurnsToLowWater(t *testing.T) {
 	mock.ExpectCommit()
 
 	startedFrom, startedTo := 0, 0
-	result, err := CompactSessionIfNeeded(
+	result, err := CompactIfNeeded(
 		t.Context(), llm.NewLLMClientWithHTTP(server.URL, "key", "model", 100, server.Client()),
 		memory.NewSessionStore(db), "session-1", 42,
-		SessionCompactionUsage{ContextWindow: 2000}, "",
+		CompactionUsage{ContextWindow: 2000}, "",
 		func(fromTurn, toTurn int) { startedFrom, startedTo = fromTurn, toTurn },
 	)
 	if err != nil {
@@ -185,9 +185,9 @@ func TestSessionCompactionDoesNotStayActiveBelowHighWater(t *testing.T) {
 		WithArgs("session-1", int64(42)).
 		WillReturnRows(compactionStatsRow(20, 2, 10, 6))
 
-	result, err := CompactSessionIfNeeded(
+	result, err := CompactIfNeeded(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
-		"session-1", 42, SessionCompactionUsage{ContextWindow: 1000}, "",
+		"session-1", 42, CompactionUsage{ContextWindow: 1000}, "",
 		nil,
 	)
 	if err != nil {
@@ -211,10 +211,10 @@ func TestPostTurnArchiveDoesNotStartBelowHighWater(t *testing.T) {
 		WithArgs("session-1", int64(42)).
 		WillReturnRows(compactionStatsRow(0, 0, 20000, 4))
 
-	result, err := ArchiveSessionHistoryIfNeededWithStatus(
+	result, err := ArchiveWithStatus(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil),
 		memory.NewSessionStore(db), "session-1", 42,
-		SessionCompactionUsage{ContextWindow: 128000, OutputReserveTokens: 8000},
+		CompactionUsage{ContextWindow: 128000, OutputReserveTokens: 8000},
 		nil,
 	)
 	if err != nil {
@@ -243,10 +243,10 @@ func TestPostTurnArchiveUsesSameHighWaterThreshold(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
 			AddRow("session-1", 42, "title", 0, 0, now, now, 3))
 
-	result, err := ArchiveSessionHistoryIfNeededWithStatus(
+	result, err := ArchiveWithStatus(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil),
 		memory.NewSessionStore(db), "session-1", 42,
-		SessionCompactionUsage{ContextWindow: 2000, OutputReserveTokens: 100},
+		CompactionUsage{ContextWindow: 2000, OutputReserveTokens: 100},
 		nil,
 	)
 	if err != nil {
@@ -275,9 +275,9 @@ func TestSessionCompactionRecommendsNewSessionAtCriticalWater(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "title", "archived_summary_tokens", "compacted_through_turn", "created_at", "updated_at", "latest_turn"}).
 			AddRow("session-1", 42, "title", 3864, 21, now, now, 24))
 
-	result, err := CompactSessionIfNeeded(
+	result, err := CompactIfNeeded(
 		t.Context(), llm.NewLLMClientWithHTTP("", "", "", 0, nil), memory.NewSessionStore(db),
-		"session-1", 42, SessionCompactionUsage{ContextWindow: 32000}, "",
+		"session-1", 42, CompactionUsage{ContextWindow: 32000}, "",
 		nil,
 	)
 	if err != nil {
@@ -301,13 +301,13 @@ func TestNewSessionRecommendationTriggersAtEitherThreshold(t *testing.T) {
 		t.Fatalf("128K restart item threshold = %d, want 209", threshold)
 	}
 	criticalWater := 950
-	if !shouldRecommendNewSession(949, criticalWater, 210, 209) {
+	if !recommendNewSession(949, criticalWater, 210, 209) {
 		t.Fatal("recommendation did not trigger above the summary item threshold")
 	}
-	if !shouldRecommendNewSession(950, criticalWater, 209, 209) {
+	if !recommendNewSession(950, criticalWater, 209, 209) {
 		t.Fatal("recommendation did not trigger at critical water")
 	}
-	if shouldRecommendNewSession(949, criticalWater, 209, 209) {
+	if recommendNewSession(949, criticalWater, 209, 209) {
 		t.Fatal("recommendation triggered below both thresholds")
 	}
 }

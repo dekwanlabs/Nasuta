@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/incident"
 	"github.com/dekwanlabs/nasuta/knowledge"
@@ -26,13 +27,38 @@ type ExtensionDeps struct {
 // APIRegistrar attaches one authenticated application endpoint.
 type APIRegistrar = func(string, http.HandlerFunc)
 
+// AgentCatalogContribution adds application-owned agents and capabilities to one version.
+type AgentCatalogContribution struct {
+	Definitions  []agentapi.Definition
+	Capabilities []agentapi.Capability
+}
+
+// AgentCatalogProvider builds application-owned catalog entries from platform settings.
+type AgentCatalogProvider interface {
+	AgentCatalog(config.PlatformSettings, int64) (AgentCatalogContribution, error)
+}
+
+// AgentCatalogProviderFunc adapts a function to AgentCatalogProvider.
+type AgentCatalogProviderFunc func(
+	config.PlatformSettings,
+	int64,
+) (AgentCatalogContribution, error)
+
+func (provide AgentCatalogProviderFunc) AgentCatalog(
+	settings config.PlatformSettings,
+	version int64,
+) (AgentCatalogContribution, error) {
+	return provide(settings, version)
+}
+
 // Extension is the application-owned surface mounted onto one platform host.
 type Extension struct {
-	RegisterRoutes   func(APIRegistrar)
-	WebHandler       http.Handler
-	IncidentEvidence incident.EvidenceProvider
-	ConfigResolver   config.Resolver
-	Close            func() error
+	RegisterRoutes       func(APIRegistrar)
+	WebHandler           http.Handler
+	IncidentEvidence     incident.EvidenceProvider
+	ConfigResolver       config.Resolver
+	AgentCatalogProvider AgentCatalogProvider
+	Close                func() error
 }
 
 // ExtensionFactory constructs one application extension from stable platform ports.
@@ -64,11 +90,27 @@ func Run(ctx context.Context, factory ExtensionFactory) (runErr error) {
 	if err := platform.configureIncidents(extension.IncidentEvidence); err != nil {
 		return err
 	}
+	if err := platform.configureAgentCatalogProvider(extension.AgentCatalogProvider); err != nil {
+		return err
+	}
 
 	mux := http.NewServeMux()
 	platform.RegisterCommonRoutes(mux)
 	mountExtension(platform, mux, extension)
 	return platform.Serve(ctx, mux)
+}
+
+func (platform *Platform) configureAgentCatalogProvider(
+	provider AgentCatalogProvider,
+) error {
+	platform.agents.provider = provider
+	if provider == nil {
+		return nil
+	}
+	if err := platform.reloadQARuntime(platform.graph); err != nil {
+		return fmt.Errorf("reload QA runtime with application agent catalog: %w", err)
+	}
+	return nil
 }
 
 func mountExtension(platform *Platform, mux *http.ServeMux, extension Extension) {

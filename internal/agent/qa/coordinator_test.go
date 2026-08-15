@@ -32,14 +32,14 @@ type coordinatorScenarioLifecycle struct {
 	err      error
 }
 
-func (*coordinatorScenarioLifecycle) BeginScenario(
+func (*coordinatorScenarioLifecycle) Start(
 	context.Context,
 	ScenarioRunStart,
 ) (ScenarioRun, error) {
-	panic("unexpected BeginScenario")
+	panic("unexpected Start")
 }
 
-func (lifecycle *coordinatorScenarioLifecycle) CompleteScenario(
+func (lifecycle *coordinatorScenarioLifecycle) Complete(
 	_ context.Context,
 	_ string,
 	outcome RunOutcome,
@@ -87,7 +87,7 @@ func (store *coordinatorSessionStore) AppendTurn(
 	return turn, nil
 }
 
-func TestInvestigationCoordinatorPersistsSessionBeforeParent(t *testing.T) {
+func TestCoordinatorPersistsSessionBeforeParent(t *testing.T) {
 	order := make([]string, 0, 2)
 	parent := QAParentRecord{
 		ID: "parent-1", WorkflowRunID: "workflow-1", UserID: 42,
@@ -103,19 +103,20 @@ func TestInvestigationCoordinatorPersistsSessionBeforeParent(t *testing.T) {
 			return InvestigationTerminal{
 				WorkflowRunID: parent.WorkflowRunID,
 				Status:        InvestigationSucceeded,
+				Completeness:  InvestigationComplete,
 				Output:        &result,
 			}, nil
 		},
 	}
-	coordinator := &InvestigationCoordinator{
+	coordinator := &Coordinator{
 		investigation: runner,
 		scenarios:     scenarios,
 		parentRuns:    coordinatorParentStore{parent: parent},
 		sessions:      sessions,
 	}
 
-	if err := coordinator.ReconcileInvestigation(t.Context(), parent.ID); err != nil {
-		t.Fatalf("ReconcileInvestigation: %v", err)
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
 	}
 	if strings.Join(order, ",") != "session,parent" {
 		t.Fatalf("order = %v, want session before parent", order)
@@ -125,7 +126,7 @@ func TestInvestigationCoordinatorPersistsSessionBeforeParent(t *testing.T) {
 	}
 }
 
-func TestInvestigationCoordinatorLeavesParentActiveWhenSessionFails(t *testing.T) {
+func TestCoordinatorLeavesParentActiveWhenSessionFails(t *testing.T) {
 	parent := QAParentRecord{
 		ID: "parent-session-failed", WorkflowRunID: "workflow-1", UserID: 42,
 		SessionID: "session-1", Question: "question", Status: RunStatusRunning,
@@ -137,11 +138,12 @@ func TestInvestigationCoordinatorLeavesParentActiveWhenSessionFails(t *testing.T
 			return InvestigationTerminal{
 				WorkflowRunID: parent.WorkflowRunID,
 				Status:        InvestigationSucceeded,
+				Completeness:  InvestigationComplete,
 				Output:        &result,
 			}, nil
 		},
 	}
-	coordinator := &InvestigationCoordinator{
+	coordinator := &Coordinator{
 		investigation: runner,
 		scenarios:     scenarios,
 		parentRuns:    coordinatorParentStore{parent: parent},
@@ -151,16 +153,16 @@ func TestInvestigationCoordinatorLeavesParentActiveWhenSessionFails(t *testing.T
 		},
 	}
 
-	err := coordinator.ReconcileInvestigation(t.Context(), parent.ID)
+	err := coordinator.Reconcile(t.Context(), parent.ID)
 	if err == nil || !strings.Contains(err.Error(), "session unavailable") {
-		t.Fatalf("ReconcileInvestigation error = %v", err)
+		t.Fatalf("Reconcile error = %v", err)
 	}
 	if len(scenarios.outcomes) != 0 {
 		t.Fatalf("parent completed after session failure: %+v", scenarios.outcomes)
 	}
 }
 
-func TestInvestigationCoordinatorReplayUsesIdempotentSessionRunKey(t *testing.T) {
+func TestCoordinatorReplayUsesIdempotentSessionRunKey(t *testing.T) {
 	parent := QAParentRecord{
 		ID: "parent-replay", WorkflowRunID: "workflow-1", UserID: 42,
 		SessionID: "session-1", Question: "question", Status: RunStatusRunning,
@@ -173,11 +175,12 @@ func TestInvestigationCoordinatorReplayUsesIdempotentSessionRunKey(t *testing.T)
 			return InvestigationTerminal{
 				WorkflowRunID: parent.WorkflowRunID,
 				Status:        InvestigationSucceeded,
+				Completeness:  InvestigationComplete,
 				Output:        &result,
 			}, nil
 		},
 	}
-	coordinator := &InvestigationCoordinator{
+	coordinator := &Coordinator{
 		investigation: runner,
 		scenarios:     scenarios,
 		parentRuns:    coordinatorParentStore{parent: parent},
@@ -185,8 +188,8 @@ func TestInvestigationCoordinatorReplayUsesIdempotentSessionRunKey(t *testing.T)
 	}
 
 	for range 2 {
-		if err := coordinator.ReconcileInvestigation(t.Context(), parent.ID); err != nil {
-			t.Fatalf("ReconcileInvestigation: %v", err)
+		if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+			t.Fatalf("Reconcile: %v", err)
 		}
 	}
 	if len(sessions.turnByRun) != 1 || sessions.turnByRun[parent.ID] != 1 {
@@ -199,7 +202,7 @@ func TestInvestigationCoordinatorReplayUsesIdempotentSessionRunKey(t *testing.T)
 	}
 }
 
-func TestInvestigationCoordinatorPreservesActiveWorkflowConflict(t *testing.T) {
+func TestCoordinatorPreservesActiveWorkflowConflict(t *testing.T) {
 	parent := QAParentRecord{
 		ID: "parent-active", WorkflowRunID: "workflow-active", Status: RunStatusRunning,
 	}
@@ -208,19 +211,19 @@ func TestInvestigationCoordinatorPreservesActiveWorkflowConflict(t *testing.T) {
 			return InvestigationTerminal{}, workflow.ErrConflict
 		},
 	}
-	coordinator := &InvestigationCoordinator{
+	coordinator := &Coordinator{
 		investigation: runner,
 		scenarios:     &coordinatorScenarioLifecycle{},
 		parentRuns:    coordinatorParentStore{parent: parent},
 	}
 
-	err := coordinator.ReconcileInvestigation(t.Context(), parent.ID)
+	err := coordinator.Reconcile(t.Context(), parent.ID)
 	if !errors.Is(err, workflow.ErrConflict) {
-		t.Fatalf("ReconcileInvestigation error = %v, want workflow.ErrConflict", err)
+		t.Fatalf("Reconcile error = %v, want workflow.ErrConflict", err)
 	}
 }
 
-func TestInvestigationCoordinatorCancellationConvergesAfterWorkflow(t *testing.T) {
+func TestCoordinatorCancellationConvergesAfterWorkflow(t *testing.T) {
 	order := make([]string, 0, 2)
 	ctx, cancel := context.WithCancel(t.Context())
 	parent := QAParentRecord{
@@ -248,14 +251,14 @@ func TestInvestigationCoordinatorCancellationConvergesAfterWorkflow(t *testing.T
 		},
 	}
 	scenarios := &coordinatorScenarioLifecycle{order: &order}
-	coordinator := &InvestigationCoordinator{
+	coordinator := &Coordinator{
 		investigation: runner,
 		scenarios:     scenarios,
 		parentRuns:    coordinatorParentStore{parent: parent},
 	}
 
-	if err := coordinator.CancelInvestigation(ctx, parent.ID, parent.UserID); err != nil {
-		t.Fatalf("CancelInvestigation: %v", err)
+	if err := coordinator.Cancel(ctx, parent.ID, parent.UserID); err != nil {
+		t.Fatalf("Cancel: %v", err)
 	}
 	if strings.Join(order, ",") != "workflow,parent" {
 		t.Fatalf("order = %v, want workflow before parent", order)
@@ -267,13 +270,13 @@ func TestInvestigationCoordinatorCancellationConvergesAfterWorkflow(t *testing.T
 	}
 }
 
-func TestInvestigationCoordinatorCancellationStopsOnWorkflowFailure(t *testing.T) {
+func TestCoordinatorCancellationStopsOnWorkflowFailure(t *testing.T) {
 	parent := QAParentRecord{
 		ID: "parent-cancel-failed", WorkflowRunID: "workflow-cancel",
 		UserID: 42, Status: RunStatusRunning,
 	}
 	scenarios := &coordinatorScenarioLifecycle{}
-	coordinator := &InvestigationCoordinator{
+	coordinator := &Coordinator{
 		investigation: &investigationRunnerRecorder{
 			cancel: func(context.Context, string, int64) error {
 				return errors.New("cancel failed")
@@ -283,33 +286,33 @@ func TestInvestigationCoordinatorCancellationStopsOnWorkflowFailure(t *testing.T
 		parentRuns: coordinatorParentStore{parent: parent},
 	}
 
-	err := coordinator.CancelInvestigation(t.Context(), parent.ID, parent.UserID)
+	err := coordinator.Cancel(t.Context(), parent.ID, parent.UserID)
 	if err == nil || !strings.Contains(err.Error(), "cancel failed") {
-		t.Fatalf("CancelInvestigation error = %v", err)
+		t.Fatalf("Cancel error = %v", err)
 	}
 	if len(scenarios.outcomes) != 0 {
 		t.Fatalf("parent completed after cancellation failure: %+v", scenarios.outcomes)
 	}
 }
 
-func TestInvestigationCoordinatorRejectsInvalidParentBindings(t *testing.T) {
+func TestCoordinatorRejectsInvalidParentBindings(t *testing.T) {
 	tests := []struct {
 		name        string
-		coordinator *InvestigationCoordinator
+		coordinator *Coordinator
 		runID       string
 		userID      int64
 		want        string
 	}{
 		{
 			name: "store unavailable",
-			coordinator: &InvestigationCoordinator{
+			coordinator: &Coordinator{
 				investigation: &investigationRunnerRecorder{},
 			},
 			runID: "parent-1", want: "parent run store is unavailable",
 		},
 		{
 			name: "workflow missing",
-			coordinator: &InvestigationCoordinator{
+			coordinator: &Coordinator{
 				investigation: &investigationRunnerRecorder{},
 				parentRuns: coordinatorParentStore{
 					parent: QAParentRecord{ID: "parent-1", UserID: 42},
@@ -319,7 +322,7 @@ func TestInvestigationCoordinatorRejectsInvalidParentBindings(t *testing.T) {
 		},
 		{
 			name: "owner mismatch",
-			coordinator: &InvestigationCoordinator{
+			coordinator: &Coordinator{
 				investigation: &investigationRunnerRecorder{},
 				parentRuns: coordinatorParentStore{
 					parent: QAParentRecord{
@@ -333,19 +336,19 @@ func TestInvestigationCoordinatorRejectsInvalidParentBindings(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := test.coordinator.CancelInvestigation(
+			err := test.coordinator.Cancel(
 				t.Context(),
 				test.runID,
 				test.userID,
 			)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("CancelInvestigation error = %v, want %q", err, test.want)
+				t.Fatalf("Cancel error = %v, want %q", err, test.want)
 			}
 		})
 	}
 }
 
-func TestInvestigationCoordinatorRequiresSessionStoreForBoundSession(t *testing.T) {
+func TestCoordinatorRequiresSessionStoreForBoundSession(t *testing.T) {
 	parent := QAParentRecord{
 		ID: "parent-no-sessions", WorkflowRunID: "workflow-1", UserID: 42,
 		SessionID: "session-1", Question: "question", Status: RunStatusRunning,
@@ -356,23 +359,24 @@ func TestInvestigationCoordinatorRequiresSessionStoreForBoundSession(t *testing.
 			return InvestigationTerminal{
 				WorkflowRunID: parent.WorkflowRunID,
 				Status:        InvestigationSucceeded,
+				Completeness:  InvestigationComplete,
 				Output:        &result,
 			}, nil
 		},
 	}
-	coordinator := &InvestigationCoordinator{
+	coordinator := &Coordinator{
 		investigation: runner,
 		scenarios:     &coordinatorScenarioLifecycle{},
 		parentRuns:    coordinatorParentStore{parent: parent},
 	}
 
-	err := coordinator.ReconcileInvestigation(t.Context(), parent.ID)
+	err := coordinator.Reconcile(t.Context(), parent.ID)
 	if err == nil || !strings.Contains(err.Error(), "session store is unavailable") {
-		t.Fatalf("ReconcileInvestigation error = %v", err)
+		t.Fatalf("Reconcile error = %v", err)
 	}
 }
 
-func TestInvestigationCoordinatorAllowsParentWithoutSession(t *testing.T) {
+func TestCoordinatorAllowsParentWithoutSession(t *testing.T) {
 	parent := QAParentRecord{
 		ID: "parent-no-session", WorkflowRunID: "workflow-1",
 		Question: "question", Status: RunStatusRunning,
@@ -384,18 +388,19 @@ func TestInvestigationCoordinatorAllowsParentWithoutSession(t *testing.T) {
 			return InvestigationTerminal{
 				WorkflowRunID: parent.WorkflowRunID,
 				Status:        InvestigationSucceeded,
+				Completeness:  InvestigationComplete,
 				Output:        &result,
 			}, nil
 		},
 	}
-	coordinator := &InvestigationCoordinator{
+	coordinator := &Coordinator{
 		investigation: runner,
 		scenarios:     scenarios,
 		parentRuns:    coordinatorParentStore{parent: parent},
 	}
 
-	if err := coordinator.ReconcileInvestigation(t.Context(), parent.ID); err != nil {
-		t.Fatalf("ReconcileInvestigation: %v", err)
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
 	}
 	if len(scenarios.outcomes) != 1 {
 		t.Fatalf("outcomes = %+v", scenarios.outcomes)

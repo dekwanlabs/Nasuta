@@ -11,7 +11,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-func (rs *RunStore) List(userID int64, sessionID string, status RunStatus, limit int) ([]RunRecord, error) {
+func (rs *Store) List(userID int64, sessionID string, status Status, limit int) ([]Record, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -22,7 +22,7 @@ func (rs *RunStore) List(userID int64, sessionID string, status RunStatus, limit
 	return page.List, nil
 }
 
-func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, page, pageSize int) (*domain.Page[RunRecord], error) {
+func (rs *Store) ListPage(userID int64, sessionID string, status Status, page, pageSize int) (*domain.Page[Record], error) {
 	if page < 1 {
 		page = 1
 	}
@@ -71,9 +71,9 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]RunRecord, 0, pageSize)
+	out := make([]Record, 0, pageSize)
 	for rows.Next() {
-		r, err := scanRunRecord(rows)
+		r, err := scanRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -82,16 +82,16 @@ func (rs *RunStore) ListPage(userID int64, sessionID string, status RunStatus, p
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return &domain.Page[RunRecord]{Total: total, Page: page, PageSize: pageSize, List: out}, nil
+	return &domain.Page[Record]{Total: total, Page: page, PageSize: pageSize, List: out}, nil
 }
 
-func (rs *RunStore) Get(id string) (*RunDetail, error) {
+func (rs *Store) Get(id string) (*Detail, error) {
 	return rs.get(id, nil)
 }
 
 // GetControlForUser enforces ownership without loading execution history.
-func (rs *RunStore) GetControlForUser(id string, userID int64) (RunControlRecord, error) {
-	var record RunControlRecord
+func (rs *Store) GetControlForUser(id string, userID int64) (ControlRecord, error) {
+	var record ControlRecord
 	err := rs.db.QueryRow(
 		`SELECT id,run_kind,status,workflow_run_id,user_id
 		 FROM agent_runs WHERE id=? AND user_id=? LIMIT 1`,
@@ -108,19 +108,19 @@ func (rs *RunStore) GetControlForUser(id string, userID int64) (RunControlRecord
 }
 
 // GetQAParent loads one parent without loading child steps or model calls.
-func (rs *RunStore) GetQAParent(id string) (QAParentRecord, error) {
+func (rs *Store) GetQAParent(id string) (QAParentRecord, error) {
 	return rs.getQAParent(id, nil)
 }
 
-// GetQAParentForUser enforces ownership at the parent read boundary.
-func (rs *RunStore) GetQAParentForUser(id string, userID int64) (QAParentRecord, error) {
+// GetParentForUser enforces ownership at the parent read boundary.
+func (rs *Store) GetParentForUser(id string, userID int64) (QAParentRecord, error) {
 	return rs.getQAParent(id, &userID)
 }
 
-func (rs *RunStore) getQAParent(id string, userID *int64) (QAParentRecord, error) {
+func (rs *Store) getQAParent(id string, userID *int64) (QAParentRecord, error) {
 	query := `SELECT id,workflow_run_id,user_id,session_id,question,status,started_at,ended_at
 		FROM agent_runs WHERE id=? AND run_kind=?`
-	args := []any{id, RunKindQAParent}
+	args := []any{id, KindQAParent}
 	if userID != nil {
 		query += " AND user_id=?"
 		args = append(args, *userID)
@@ -129,7 +129,7 @@ func (rs *RunStore) getQAParent(id string, userID *int64) (QAParentRecord, error
 }
 
 // ListActiveQAParents returns one bounded page ordered by a stable keyset.
-func (rs *RunStore) ListActiveQAParents(
+func (rs *Store) ListActiveQAParents(
 	startedBefore time.Time,
 	cursor QAParentCursor,
 	limit int,
@@ -144,9 +144,9 @@ func (rs *RunStore) ListActiveQAParents(
 		FROM agent_runs
 		WHERE run_kind=? AND status IN (?,?) AND started_at<?`
 	args := []any{
-		RunKindQAParent,
-		RunStatusRunning,
-		RunStatusPaused,
+		KindQAParent,
+		StatusRunning,
+		StatusPaused,
 		store.DatabaseTime(startedBefore.UTC().Format(time.RFC3339Nano)),
 	}
 	if cursor.StartedAt != "" || cursor.ID != "" {
@@ -179,11 +179,11 @@ func (rs *RunStore) ListActiveQAParents(
 }
 
 // GetForUser loads one run only when it belongs to the requested user.
-func (rs *RunStore) GetForUser(id string, userID int64) (*RunDetail, error) {
+func (rs *Store) GetForUser(id string, userID int64) (*Detail, error) {
 	return rs.get(id, &userID)
 }
 
-func (rs *RunStore) get(id string, userID *int64) (*RunDetail, error) {
+func (rs *Store) get(id string, userID *int64) (*Detail, error) {
 	query := `SELECT id,run_kind,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
 		input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
 		question,status,error_code,mode,max_steps,step_count,token_used,
@@ -196,12 +196,12 @@ func (rs *RunStore) get(id string, userID *int64) (*RunDetail, error) {
 		query += " AND user_id=?"
 		args = append(args, *userID)
 	}
-	r, err := scanRunRecord(rs.db.QueryRow(query, args...))
+	r, err := scanRecord(rs.db.QueryRow(query, args...))
 	if err != nil {
 		return nil, err
 	}
-	if r.RunKind == RunKindQAParent {
-		detail := &RunDetail{RunRecord: r}
+	if r.RunKind == KindQAParent {
+		detail := &Detail{Record: r}
 		if r.Status.Terminal() {
 			terminal, err := loadQAParentTerminal(rs.db, id)
 			if err != nil {
@@ -272,11 +272,11 @@ func (rs *RunStore) get(id string, userID *int64) (*RunDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RunDetail{RunRecord: r, Steps: steps, LLMCalls: llmCalls}, nil
+	return &Detail{Record: r, Steps: steps, LLMCalls: llmCalls}, nil
 }
 
 // EvidenceByIDs loads one bounded page of persisted evidence summaries.
-func (rs *RunStore) EvidenceByIDs(userID int64, sessionID string, runIDs []string) (map[string]EvidenceMetrics, error) {
+func (rs *Store) EvidenceByIDs(userID int64, sessionID string, runIDs []string) (map[string]EvidenceMetrics, error) {
 	evidence := make(map[string]EvidenceMetrics, len(runIDs))
 	if len(runIDs) == 0 {
 		return evidence, nil
@@ -310,8 +310,8 @@ func (rs *RunStore) EvidenceByIDs(userID int64, sessionID string, runIDs []strin
 	return evidence, rows.Err()
 }
 
-func scanRunRecord(row rowScanner) (RunRecord, error) {
-	var record RunRecord
+func scanRecord(row rowScanner) (Record, error) {
+	var record Record
 	var selectionRaw []byte
 	var startedAt, endedAt sql.NullTime
 	if err := row.Scan(&record.ID, &record.RunKind, &record.UserID, &record.SessionID,

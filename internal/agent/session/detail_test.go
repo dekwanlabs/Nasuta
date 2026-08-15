@@ -11,7 +11,7 @@ import (
 )
 
 func TestCompressTurnDetailProducesBoundedStructuredJSON(t *testing.T) {
-	detailJSON, err := CompressTurnDetail(7, []llm.Message{
+	detailJSON, err := CompressDetail(7, []llm.Message{
 		{Role: "user", Content: "查一下设备订阅"},
 		{Role: "assistant", ToolCalls: []llm.ToolCall{{
 			ID: "call-1", Function: llm.ToolFunction{Name: "search_code", Arguments: `{"query":"subscription"}`},
@@ -45,7 +45,7 @@ func TestCompressTurnDetailProducesBoundedStructuredJSON(t *testing.T) {
 
 func TestCompressTurnDetailHonorsAggregateToolBudgets(t *testing.T) {
 	const toolCount = 20
-	detailJSON, err := CompressTurnDetail(34, toolHeavyTurnMessages(toolCount))
+	detailJSON, err := CompressDetail(34, toolHeavyTurnMessages(toolCount))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestCompressTurnDetailHonorsAggregateToolBudgets(t *testing.T) {
 
 func TestCompressTurnDetailOmitsMiddleToolEventsWhenMetadataExceedsBudget(t *testing.T) {
 	const toolCount = 40
-	detailJSON, err := CompressTurnDetail(35, toolHeavyTurnMessages(toolCount))
+	detailJSON, err := CompressDetail(35, toolHeavyTurnMessages(toolCount))
 	if err != nil {
 		t.Fatal(err)
 	}

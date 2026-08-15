@@ -19,7 +19,7 @@ type investigationCancellerRecorder struct {
 	err    error
 }
 
-func (recorder *investigationCancellerRecorder) CancelInvestigation(
+func (recorder *investigationCancellerRecorder) Cancel(
 	_ context.Context,
 	runID string,
 	userID int64,
@@ -44,8 +44,8 @@ func TestAPIQARunControlAbortsParentWithoutAgentHub(t *testing.T) {
 		mock,
 		"parent-1",
 		42,
-		agentrun.RunKindQAParent,
-		agentrun.RunStatusRunning,
+		agentrun.KindQAParent,
+		agentrun.StatusRunning,
 		"workflow-1",
 	)
 
@@ -76,8 +76,8 @@ func TestAPIQARunControlRejectsUnsupportedParentAction(t *testing.T) {
 		mock,
 		"parent-1",
 		42,
-		agentrun.RunKindQAParent,
-		agentrun.RunStatusRunning,
+		agentrun.KindQAParent,
+		agentrun.StatusRunning,
 		"workflow-1",
 	)
 
@@ -97,7 +97,7 @@ func TestAPIQARunControlRejectsUnsupportedParentAction(t *testing.T) {
 func TestAPIQARunControlRoutesAgentAbortToHub(t *testing.T) {
 	handler, mock, closeDB := newRunControlHandler(t)
 	defer closeDB()
-	hub := agentrun.NewRunHub(nil)
+	hub := agentrun.NewHub(nil)
 	canceller := &investigationCancellerRecorder{}
 	handler.qaRuntimeFn = func() QARuntime {
 		return QARuntime{
@@ -110,8 +110,8 @@ func TestAPIQARunControlRoutesAgentAbortToHub(t *testing.T) {
 		mock,
 		"agent-1",
 		42,
-		agentrun.RunKindAgent,
-		agentrun.RunStatusRunning,
+		agentrun.KindAgent,
+		agentrun.StatusRunning,
 		"",
 	)
 
@@ -145,8 +145,8 @@ func TestAPIQARunControlRejectsTerminalParentAbort(t *testing.T) {
 		mock,
 		"parent-1",
 		42,
-		agentrun.RunKindQAParent,
-		agentrun.RunStatusDone,
+		agentrun.KindQAParent,
+		agentrun.StatusDone,
 		"workflow-1",
 	)
 
@@ -185,7 +185,7 @@ func newRunControlHandler(
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	handler := &Handler{persistentRunStore: agentrun.BindStore(db)}
+	handler := &Handler{persistentRunStore: agentrun.Bind(db)}
 	return handler, mock, func() {
 		_ = db.Close()
 	}
@@ -195,8 +195,8 @@ func expectRunControlRecord(
 	mock sqlmock.Sqlmock,
 	runID string,
 	userID int64,
-	kind agentrun.RunKind,
-	status agentrun.RunStatus,
+	kind agentrun.Kind,
+	status agentrun.Status,
 	workflowRunID string,
 ) {
 	mock.ExpectQuery(

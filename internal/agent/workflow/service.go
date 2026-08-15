@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	workflowPersistenceTimeout      = 5 * time.Second
+	persistenceTimeout              = 5 * time.Second
 	nodeRetryableErrorCode          = "node_retryable"
 	nodeRestartedErrorCode          = "workflow_restarted"
 	nodeRestartedRetryableErrorCode = "workflow_restarted_retryable"
@@ -21,6 +21,8 @@ const (
 type ExecuteRequest struct {
 	RunID               string
 	ParentRunID         string
+	Round               int
+	BaseDepth           int
 	Workflow            DefinitionRef
 	Input               json.RawMessage
 	SeedEvidence        []tool.EvidenceUnit
@@ -33,6 +35,8 @@ type ExecuteRequest struct {
 type StartRequest struct {
 	RunID               string
 	ParentRunID         string
+	Round               int
+	BaseDepth           int
 	Workflow            DefinitionRef
 	Input               json.RawMessage
 	SeedEvidence        []tool.EvidenceUnit
@@ -53,7 +57,7 @@ type ApprovalRequest struct {
 }
 
 type ApprovalResult struct {
-	Approval WorkflowApproval
+	Approval Approval
 	Applied  bool
 	Status   RunStatus
 	Result   *Result
@@ -80,21 +84,21 @@ type RecoveryReport struct {
 // RecoveryObserver reconciles one resumed Run with its owning domain.
 type RecoveryObserver func(context.Context, string, ResumeResult, error) error
 
-type workflowPersistence interface {
-	StartWorkflow(context.Context, WorkflowRunRecord, Handoff) error
+type persistence interface {
+	StartRun(context.Context, RunRecord, Handoff) error
 	StartNode(context.Context, NodeRunRecord) error
-	SucceedNode(context.Context, string, string, int, string, Handoff, *GateDecision, WorkflowUsage, time.Time) error
-	FailNode(context.Context, string, string, int, string, RunStatus, string, WorkflowUsage, time.Time) error
-	FinishWorkflow(context.Context, string, RunStatus, string, *Handoff, time.Time) error
-	LoadFullRunState(context.Context, string) (*WorkflowRunState, error)
+	SucceedNode(context.Context, string, string, int, string, Handoff, *GateDecision, Usage, time.Time) error
+	FailNode(context.Context, string, string, int, string, RunStatus, string, Usage, time.Time) error
+	FinishRun(context.Context, string, RunStatus, string, StopReason, *Handoff, time.Time) error
+	LoadFullRunState(context.Context, string) (*RunState, error)
 	LoadTerminalResult(context.Context, string) (TerminalResult, error)
-	GetRun(context.Context, string) (*WorkflowRunRecord, error)
+	GetRun(context.Context, string) (*RunRecord, error)
 	ListNodeRuns(context.Context, string, NodeRunCursor, int) ([]NodeRunRecord, error)
 	ListEvents(context.Context, string, int64, int) ([]Event, error)
 	ListHandoffs(context.Context, string, HandoffCursor, int) ([]Handoff, error)
 	ListActiveRuns(context.Context, time.Time, ActiveRunCursor, int) ([]ActiveRunRef, error)
-	DecideHumanApproval(context.Context, WorkflowApproval, *Handoff) (ApprovalTransition, error)
-	CancelWorkflow(context.Context, string, time.Time) (CancelTransition, error)
+	DecideApproval(context.Context, Approval, *Handoff) (ApprovalTransition, error)
+	CancelRun(context.Context, string, time.Time) (CancelTransition, error)
 	SubscribeEvents(string) (<-chan Event, func())
 }
 
@@ -111,7 +115,7 @@ type activeRun struct {
 
 // RunEventReader scopes repeated event reads to one authorized Run.
 type RunEventReader struct {
-	store workflowPersistence
+	store persistence
 	runID string
 }
 
@@ -129,7 +133,7 @@ func (reader *RunEventReader) List(
 // Service fixes a Catalog snapshot and closes each execution transition in Store.
 type Service struct {
 	catalog *Catalog
-	store   workflowPersistence
+	store   persistence
 
 	mu           sync.RWMutex
 	orchestrator *Orchestrator
@@ -145,7 +149,7 @@ type Service struct {
 
 func NewService(
 	catalog *Catalog,
-	store workflowPersistence,
+	store persistence,
 	orchestrator *Orchestrator,
 ) (*Service, error) {
 	if catalog == nil {
@@ -171,8 +175,8 @@ func (service *Service) SetOrchestrator(orchestrator *Orchestrator) {
 	service.mu.Unlock()
 }
 
-// ExecutionAvailable reports whether new workflow runs can execute.
-func (service *Service) ExecutionAvailable() bool {
+// Available reports whether new workflow runs can execute.
+func (service *Service) Available() bool {
 	_, err := service.executionCapability()
 	return err == nil
 }

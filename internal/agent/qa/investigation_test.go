@@ -6,15 +6,18 @@ import (
 	"testing"
 	"time"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/memory"
+	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 	from := time.Date(2026, time.August, 11, 0, 0, 0, 0, time.UTC)
 	to := from.Add(24 * time.Hour)
-	prepared := &qaPreparation{
-		request: QARequest{
+	prepared := &preparation{
+		request: Request{
 			RunID: "qa_1", Question: "Why is checkout failing?",
 			PreloadedContext: []ContextBlock{
 				{Evidence: []tool.EvidenceUnit{{
@@ -27,7 +30,13 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 				}}},
 			},
 		},
-		planning: evidencePlanningOutput{CleanQuestion: "Trace the checkout failure"},
+		planning: evidencePlanningOutput{
+			CleanQuestion: "Trace the checkout failure",
+			Effective: domain.PlanDecision{
+				Plan: domain.EvidencePlan{Sources: domain.Internal | domain.Web},
+			},
+			RoutedToolIDs: []string{"observe_logs"},
+		},
 		analysis: queryAnalysisOutput{
 			HasTimeRange: true,
 			TimeRange: tool.TimeRange{
@@ -44,20 +53,51 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 			{SessionID: "session-1", RunID: "qa_0"},
 			{SessionID: "session-1", RunID: "qa_turn_2", Turn: 2},
 		},
+		toolCandidates: []retrieval.ToolRouteCandidate{{
+			ID: "observe_logs", Temporal: true,
+			EvidenceSource: string(tool.RoutingEvidenceRuntime),
+		}},
 	}
 
-	contract := taskContractFromPreparation(prepared, prepared.request.PreloadedContext)
+	seedMaterial := []agentapi.ContextBlock{{
+		Source: "qa.evidence", Title: "QA Evidence", Content: "checkout evidence",
+		Evidence: prepared.request.PreloadedContext[0].Evidence,
+		Complete: false, ContentHash: "context-v1",
+	}, {
+		Source: "qa.duplicate", Title: "Duplicate Evidence", Content: "same evidence",
+		Evidence: prepared.request.PreloadedContext[1].Evidence,
+		Complete: false, ContentHash: "context-v2",
+	}}
+	contract := contractFromPreparation(prepared, seedMaterial)
 	if contract.TaskID != "qa_1" ||
 		contract.Question != "Why is checkout failing?" ||
 		contract.Objective != "Trace the checkout failure" {
 		t.Fatalf("contract identity = %+v", contract)
 	}
-	if !reflect.DeepEqual(contract.Entities, []EntityRef{{ID: "Checkout.Place"}}) {
+	if !reflect.DeepEqual(contract.Entities, []EntityRef{{ID: "checkout.place"}}) {
 		t.Fatalf("entities = %+v", contract.Entities)
 	}
 	wantGoals := []EvidenceGoal{
-		{ID: "entrypoint", Facet: "entrypoint", Required: true},
-		{ID: "core_flow", Facet: "core_flow", Required: true},
+		{
+			ID: "entrypoint", Facet: "entrypoint", Required: true,
+			Sources: []agentapi.EvidenceSource{
+				agentapi.EvidenceSourceInternal,
+				agentapi.EvidenceSourceWeb,
+				agentapi.EvidenceSourceRuntime,
+			},
+			Freshness: agentapi.FreshnessBoundedLive, MinimumCoverage: 1,
+			HighRisk: true,
+		},
+		{
+			ID: "core_flow", Facet: "core_flow", Required: true,
+			Sources: []agentapi.EvidenceSource{
+				agentapi.EvidenceSourceInternal,
+				agentapi.EvidenceSourceWeb,
+				agentapi.EvidenceSourceRuntime,
+			},
+			Freshness: agentapi.FreshnessBoundedLive, MinimumCoverage: 1,
+			HighRisk: true,
+		},
 	}
 	if !reflect.DeepEqual(contract.EvidenceGoals, wantGoals) {
 		t.Fatalf("evidence goals = %+v", contract.EvidenceGoals)
@@ -75,6 +115,35 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 	if len(contract.Context.SeedEvidence) != 1 ||
 		contract.Context.SeedEvidence[0].Target != "Checkout.Place" {
 		t.Fatalf("seed evidence = %+v", contract.Context.SeedEvidence)
+	}
+	if !reflect.DeepEqual(contract.Context.SeedMaterial, seedMaterial) {
+		t.Fatalf("seed material = %+v", contract.Context.SeedMaterial)
+	}
+}
+
+func TestCanonicalEntityIdentityMatchesRetrievalMemoryAndTaskContract(t *testing.T) {
+	question := "继续检查 PaymentHandler.handle()"
+	resolution := domain.ResolveRetrievalIntent(
+		question,
+		domain.RetrievalIntentSignals{
+			Identifiers: []string{"PaymentHandler.handle()"},
+		},
+	)
+	_, remembered, _ := memory.CanonicalQuestionMetadata(question)
+	contract := contractFromPreparation(&preparation{
+		request:  Request{RunID: "qa_1", Question: question},
+		analysis: queryAnalysisOutput{RetrievalIntent: resolution.Intent},
+	}, nil)
+
+	want := "paymenthandler.handle"
+	if !reflect.DeepEqual(resolution.Intent.TargetEntities, []string{want}) {
+		t.Fatalf("retrieval entities = %v", resolution.Intent.TargetEntities)
+	}
+	if !reflect.DeepEqual(remembered, []string{want}) {
+		t.Fatalf("memory entities = %v", remembered)
+	}
+	if !reflect.DeepEqual(contract.Entities, []EntityRef{{ID: want}}) {
+		t.Fatalf("task contract entities = %+v", contract.Entities)
 	}
 }
 
@@ -98,6 +167,7 @@ func TestInvestigationOutcomeMapsGroundedAnswer(t *testing.T) {
 		Status:        InvestigationSucceeded,
 		Output:        &result,
 		Usage:         InvestigationUsage{TotalTokens: 91, ToolCalls: 4},
+		Completeness:  InvestigationComplete,
 	})
 	if err != nil {
 		t.Fatalf("investigationOutcome: %v", err)
@@ -116,7 +186,7 @@ func TestInvestigationOutcomeMapsGroundedAnswer(t *testing.T) {
 	}
 }
 
-func TestInvestigationOutcomeMarksLimitationsPartial(t *testing.T) {
+func TestInvestigationOutcomeUsesWorkflowCompleteness(t *testing.T) {
 	result := InvestigationResult{
 		Answer: "best available answer", Limitations: []string{"live logs unavailable"},
 	}
@@ -124,6 +194,7 @@ func TestInvestigationOutcomeMarksLimitationsPartial(t *testing.T) {
 		WorkflowRunID: "workflow_1",
 		Status:        InvestigationSucceeded,
 		Output:        &result,
+		Completeness:  InvestigationPartial,
 	})
 	if err != nil {
 		t.Fatalf("investigationOutcome: %v", err)
@@ -151,6 +222,7 @@ func TestInvestigationOutcomeMapsFailureAndRejectsEmptyAnswer(t *testing.T) {
 		WorkflowRunID: "workflow_2",
 		Status:        InvestigationSucceeded,
 		Output:        &result,
+		Completeness:  InvestigationComplete,
 	})
 	if err != nil {
 		t.Fatalf("investigationOutcome empty: %v", err)

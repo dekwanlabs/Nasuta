@@ -17,7 +17,7 @@ type historyDiscoveryTask struct {
 	cancel context.CancelFunc
 }
 
-func startHistoryCandidateDiscovery(
+func startHistoryDiscovery(
 	ctx context.Context,
 	history SessionHistory,
 	userID int64,
@@ -40,7 +40,7 @@ func startHistoryCandidateDiscovery(
 	return &historyDiscoveryTask{result: resultCh, cancel: cancel}
 }
 
-func resolveHistoryCandidates(
+func resolveCandidates(
 	ctx context.Context,
 	task *historyDiscoveryTask,
 	relation retrieval.HistoryRelation,

@@ -54,6 +54,7 @@ type agentRuntime struct {
 	schemas      *agentapi.SchemaRegistry
 	catalog      *catalog.Catalog
 	capabilities *agentapi.CapabilityRegistry
+	provider     AgentCatalogProvider
 	runtime      agentapi.Runtime
 	api          *agenthttp.Handler
 }
@@ -63,7 +64,7 @@ type qaState struct {
 	mu       sync.RWMutex
 	sessions *memory.SessionStore
 	memory   *memory.MemoryStore
-	runs     *run.RunStore
+	runs     *run.Store
 	current  dashboard.QARuntime
 }
 
@@ -191,7 +192,7 @@ func (p *Platform) initCatalogs() error {
 		"[agent] catalog persistence enabled (restored_max_version=%d)",
 		p.agents.version,
 	)
-	runStore, err := run.NewRunStore(p.db)
+	runStore, err := run.NewStore(p.db)
 	if err != nil {
 		log.Warnf("[qa] agent run store disabled: %v", err)
 		return nil

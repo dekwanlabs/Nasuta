@@ -94,7 +94,7 @@ func publicEvidenceConflicts(conflicts []evidence.Conflict) []agentapi.EvidenceC
 	return out
 }
 
-func contextReferencesFromRequest(blocks []agentapi.ContextBlock) []agentapi.Reference {
+func referencesFromRequest(blocks []agentapi.ContextBlock) []agentapi.Reference {
 	count := 0
 	for _, block := range blocks {
 		count += len(block.References)
@@ -165,7 +165,7 @@ func contextEvidenceUnits(blocks []agentapi.ContextBlock) []tool.EvidenceUnit {
 	return units
 }
 
-func contextEvidenceConflicts(
+func evidenceConflicts(
 	blocks []agentapi.ContextBlock,
 ) []evidence.Conflict {
 	count := 0
@@ -201,7 +201,7 @@ func hashMessages(messages []llm.Message) string {
 	return hashBytes(raw)
 }
 
-func mapDefinitionResult(
+func mapResult(
 	runID string,
 	result *execution.RunResult,
 	runErr error,
@@ -210,10 +210,10 @@ func mapDefinitionResult(
 	preRetrieved []agentapi.Reference,
 	schemas *agentapi.SchemaRegistry,
 	outputSchema agentapi.SchemaRef,
-) (agentapi.RunResult, run.RunOutcome) {
+) (agentapi.RunResult, run.Outcome) {
 	if cancelCause != nil {
 		outcome := execution.OutcomeFor(result, preRetrieved, cancelCause)
-		outcome.Status = run.RunStatusAborted
+		outcome.Status = run.StatusAborted
 		outcome.ErrorCode = "cancelled"
 		publicResult := publicTerminalEvidence(runID, result, outcome, usage)
 		publicResult.Status = agentapi.RunCancelled
@@ -226,7 +226,7 @@ func mapDefinitionResult(
 	if errors.Is(outcome.Err, execution.ErrToolCallBudgetExhausted) {
 		outcome.ErrorCode = "tool_call_budget_exhausted"
 	}
-	if outcome.Status != run.RunStatusDone {
+	if outcome.Status != run.StatusDone {
 		runError := outcome.Err
 		if runError == nil {
 			runError = errors.New("definition run failed")
@@ -244,9 +244,9 @@ func mapDefinitionResult(
 	publicResult.Text = outcome.Answer
 	publicResult.References = append([]agentapi.Reference(nil), outcome.References...)
 	publicResult.Messages = publicMessages(outcome.SessionMessages)
-	output, err := validatedDefinitionOutput(schemas, outputSchema, outcome.Answer)
+	output, err := validatedOutput(schemas, outputSchema, outcome.Answer)
 	if err != nil {
-		outcome.Status = run.RunStatusFailed
+		outcome.Status = run.StatusFailed
 		outcome.ErrorCode = "invalid_output"
 		outcome.Err = err
 		publicResult.Status = agentapi.RunFailed
@@ -263,7 +263,7 @@ func mapDefinitionResult(
 func publicTerminalEvidence(
 	runID string,
 	result *execution.RunResult,
-	outcome run.RunOutcome,
+	outcome run.Outcome,
 	usage agentapi.Usage,
 ) agentapi.RunResult {
 	publicResult := agentapi.RunResult{
@@ -286,7 +286,7 @@ func retryableError(err error) bool {
 	return errors.As(err, &classified) && classified.Retryable()
 }
 
-func validatedDefinitionOutput(
+func validatedOutput(
 	schemas *agentapi.SchemaRegistry,
 	ref agentapi.SchemaRef,
 	answer string,
@@ -311,7 +311,7 @@ func validatedDefinitionOutput(
 	return nil, fmt.Errorf("definition output does not match schema %q version %d: %w", ref.ID, ref.Version, rawErr)
 }
 
-func failedDefinitionRun(runID, code string, err error) agentapi.RunResult {
+func failedRun(runID, code string, err error) agentapi.RunResult {
 	return agentapi.RunResult{
 		RunID: runID, Status: agentapi.RunFailed,
 		Error: &agentapi.RunError{Code: code, Message: err.Error()},

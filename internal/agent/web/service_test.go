@@ -16,9 +16,9 @@ func TestDecodeWebBodyUsesHTMLMetaCharset(t *testing.T) {
 		[]byte{0xc8, 0xba, 0xd3, 0xf1, 0xb4, 0xe5}...)
 	body = append(body, []byte(`</body></html>`)...)
 
-	got, encoding, err := decodeWebBody(body, "text/html")
+	got, encoding, err := decodeBody(body, "text/html")
 	if err != nil {
-		t.Fatalf("decodeWebBody() error = %v", err)
+		t.Fatalf("decodeBody() error = %v", err)
 	}
 	if encoding != "gbk" {
 		t.Fatalf("encoding = %q, want gbk", encoding)
@@ -33,12 +33,12 @@ func TestDecodeWebBodyUsesHTMLMetaCharset(t *testing.T) {
 
 func TestDecodeWebBodyKeepsUndeclaredUTF8(t *testing.T) {
 	want := "<html><body>海南临高</body></html>"
-	got, encoding, err := decodeWebBody([]byte(want), "text/html")
+	got, encoding, err := decodeBody([]byte(want), "text/html")
 	if err != nil {
-		t.Fatalf("decodeWebBody() error = %v", err)
+		t.Fatalf("decodeBody() error = %v", err)
 	}
 	if encoding != "utf-8" || got != want {
-		t.Fatalf("decodeWebBody() = (%q, %q), want (%q, utf-8)", got, encoding, want)
+		t.Fatalf("decodeBody() = (%q, %q), want (%q, utf-8)", got, encoding, want)
 	}
 }
 
@@ -52,17 +52,17 @@ func TestTruncateRunesPreservesUTF8(t *testing.T) {
 	}
 }
 
-func TestWebSearchRejectsUnknownEngine(t *testing.T) {
+func TestSearchRejectsUnknownEngine(t *testing.T) {
 	srv := &Service{}
 	srv.SetSearchEngine(" SearXNG ")
 
-	_, err := srv.WebSearch(context.Background(), "query", 1)
+	_, err := srv.Search(context.Background(), "query", 1)
 	if err == nil || !strings.Contains(err.Error(), `unsupported web search provider "searxng"`) {
-		t.Fatalf("WebSearch error = %v, want unsupported-engine error", err)
+		t.Fatalf("Search error = %v, want unsupported-engine error", err)
 	}
 }
 
-func TestSetWebSearchEngineCanonicalizesValue(t *testing.T) {
+func TestSetSearchEngineCanonicalizesValue(t *testing.T) {
 	srv := &Service{}
 	srv.SetSearchEngine(" Bing ")
 	if srv.searchEngine != "bing" {
@@ -70,19 +70,19 @@ func TestSetWebSearchEngineCanonicalizesValue(t *testing.T) {
 	}
 }
 
-type stubWebSearchProvider struct{}
+type stubSearchProvider struct{}
 
-func (stubWebSearchProvider) Search(context.Context, string, int) ([]WebSearchResult, error) {
-	return []WebSearchResult{{Title: "stub", URL: "https://example.com"}}, nil
+func (stubSearchProvider) Search(context.Context, string, int) ([]SearchResult, error) {
+	return []SearchResult{{Title: "stub", URL: "https://example.com"}}, nil
 }
 
-type urlWebSearchProvider struct{ url string }
+type urlSearchProvider struct{ url string }
 
-func (p urlWebSearchProvider) Search(context.Context, string, int) ([]WebSearchResult, error) {
-	return []WebSearchResult{{Title: "source", URL: p.url, Snippet: "authoritative answer to the question"}}, nil
+func (p urlSearchProvider) Search(context.Context, string, int) ([]SearchResult, error) {
+	return []SearchResult{{Title: "source", URL: p.url, Snippet: "authoritative answer to the question"}}, nil
 }
 
-func TestWebSearchWithFetchCombinesSearchAndEvidence(t *testing.T) {
+func TestSearchWithFetchCombinesSearchAndEvidence(t *testing.T) {
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(`<html><body><h1>Source</h1><p>authoritative evidence</p></body></html>`))
@@ -90,33 +90,33 @@ func TestWebSearchWithFetchCombinesSearchAndEvidence(t *testing.T) {
 	defer page.Close()
 
 	srv := &Service{fetchClient: page.Client()}
-	if err := srv.RegisterProvider("test", urlWebSearchProvider{url: page.URL}); err != nil {
+	if err := srv.RegisterProvider("test", urlSearchProvider{url: page.URL}); err != nil {
 		t.Fatalf("RegisterProvider() error = %v", err)
 	}
 	srv.SetSearchEngine("test")
 
-	response, err := srv.WebSearchWithFetch(context.Background(), "question", 5)
+	response, err := srv.SearchWithFetch(context.Background(), "question", 5)
 	if err != nil {
-		t.Fatalf("WebSearchWithFetch() error = %v", err)
+		t.Fatalf("SearchWithFetch() error = %v", err)
 	}
 	if len(response.Results) != 1 || response.Fetched == nil || !strings.Contains(response.Fetched.Content, "authoritative evidence") {
 		t.Fatalf("response = %+v, want search result and fetched evidence", response)
 	}
 }
 
-func TestWebSearchDispatchesThroughRegisteredProvider(t *testing.T) {
+func TestSearchDispatchesThroughRegisteredProvider(t *testing.T) {
 	srv := &Service{}
-	if err := srv.RegisterProvider("internal-test", stubWebSearchProvider{}); err != nil {
+	if err := srv.RegisterProvider("internal-test", stubSearchProvider{}); err != nil {
 		t.Fatalf("RegisterProvider() error = %v", err)
 	}
 	srv.SetSearchEngine(" internal-test ")
 
-	results, err := srv.WebSearch(context.Background(), "query", 1)
+	results, err := srv.Search(context.Background(), "query", 1)
 	if err != nil {
-		t.Fatalf("WebSearch() error = %v", err)
+		t.Fatalf("Search() error = %v", err)
 	}
 	if len(results) != 1 || results[0].Title != "stub" {
-		t.Fatalf("WebSearch() = %+v, want stub result", results)
+		t.Fatalf("Search() = %+v, want stub result", results)
 	}
 }
 
@@ -143,7 +143,7 @@ func TestParseBingResultsDetectsChallenge(t *testing.T) {
 }
 
 func TestRelevantFetchCandidateRejectsBroadAndUnrelatedResults(t *testing.T) {
-	results := []WebSearchResult{
+	results := []SearchResult{
 		{Title: "海南", Snippet: "海南省旅游信息", URL: "https://example.com/hainan"},
 		{Title: "Kmart Australia", Snippet: "Store locations", URL: "https://example.com/kmart"},
 		{Title: "临高中学", Snippet: "学校介绍与招生信息", URL: "https://example.com/school"},
@@ -155,23 +155,23 @@ func TestRelevantFetchCandidateRejectsBroadAndUnrelatedResults(t *testing.T) {
 }
 
 func TestRelevantFetchCandidateSupportsLatinTerms(t *testing.T) {
-	results := []WebSearchResult{{Title: "PostgreSQL documentation", URL: "https://example.com/postgres"}}
+	results := []SearchResult{{Title: "PostgreSQL documentation", URL: "https://example.com/postgres"}}
 	got, ok := relevantFetchCandidate("How does PostgreSQL replication work?", results)
 	if !ok || got.URL != results[0].URL {
 		t.Fatalf("relevantFetchCandidate() = (%+v, %v), want PostgreSQL result", got, ok)
 	}
 }
 
-func TestWebFetchRelevantRejectsNonSuccessStatus(t *testing.T) {
+func TestFetchRelevantRejectsNonSuccessStatus(t *testing.T) {
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}))
 	defer page.Close()
 
 	srv := &Service{fetchClient: page.Client()}
-	_, err := srv.WebFetchRelevant(context.Background(), page.URL, "question")
+	_, err := srv.FetchRelevant(context.Background(), page.URL, "question")
 	if err == nil || !strings.Contains(err.Error(), "HTTP 403 Forbidden") {
-		t.Fatalf("WebFetchRelevant() error = %v, want HTTP status error", err)
+		t.Fatalf("FetchRelevant() error = %v, want HTTP status error", err)
 	}
 }
 
@@ -197,28 +197,28 @@ func TestBlockedFetchIP(t *testing.T) {
 	}
 }
 
-func TestWebFetchRejectsLoopback(t *testing.T) {
+func TestFetchRejectsLoopback(t *testing.T) {
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("internal"))
 	}))
 	defer page.Close()
 
-	_, err := (&Service{}).WebFetch(context.Background(), page.URL)
+	_, err := (&Service{}).Fetch(context.Background(), page.URL)
 	if err == nil || !strings.Contains(err.Error(), "refusing to fetch internal address") {
-		t.Fatalf("WebFetch() error = %v, want loopback rejection", err)
+		t.Fatalf("Fetch() error = %v, want loopback rejection", err)
 	}
 }
 
-func TestWebSearchWithFetchSkipsIrrelevantCandidate(t *testing.T) {
+func TestSearchWithFetchSkipsIrrelevantCandidate(t *testing.T) {
 	srv := &Service{}
-	if err := srv.RegisterProvider("test", urlWebSearchProvider{url: "https://example.invalid"}); err != nil {
+	if err := srv.RegisterProvider("test", urlSearchProvider{url: "https://example.invalid"}); err != nil {
 		t.Fatalf("RegisterProvider() error = %v", err)
 	}
 	srv.SetSearchEngine("test")
 
-	response, err := srv.WebSearchWithFetch(context.Background(), "unrelated target", 5)
+	response, err := srv.SearchWithFetch(context.Background(), "unrelated target", 5)
 	if err != nil {
-		t.Fatalf("WebSearchWithFetch() error = %v", err)
+		t.Fatalf("SearchWithFetch() error = %v", err)
 	}
 	if response.Fetched != nil || !strings.Contains(response.FetchNote, "skipped") {
 		t.Fatalf("response = %+v, want skipped automatic fetch", response)

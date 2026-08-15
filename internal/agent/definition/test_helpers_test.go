@@ -14,25 +14,25 @@ import (
 )
 
 type Registry = tool.Registry
-type RunStore = run.RunStore
+type RunStore = run.Store
 type StepRecord = run.StepRecord
-type RunOutcome = run.RunOutcome
+type RunOutcome = run.Outcome
 type EvidenceMetrics = run.EvidenceMetrics
 type SSEEvent = run.SSEEvent
-type RunTerminal = run.RunTerminal
+type RunTerminal = run.Terminal
 type RunResult = execution.RunResult
 
 const (
 	ToolKindRead  = tool.KindRead
 	ToolKindWrite = tool.KindWrite
 
-	RunKindAgent    = run.RunKindAgent
-	RunKindQAParent = run.RunKindQAParent
+	RunKindAgent    = run.KindAgent
+	RunKindQAParent = run.KindQAParent
 
-	RunStatusRunning = run.RunStatusRunning
-	RunStatusDone    = run.RunStatusDone
-	RunStatusFailed  = run.RunStatusFailed
-	RunStatusPaused  = run.RunStatusPaused
+	RunStatusRunning = run.StatusRunning
+	RunStatusDone    = run.StatusDone
+	RunStatusFailed  = run.StatusFailed
+	RunStatusPaused  = run.StatusPaused
 
 	EvidenceComplete    = run.EvidenceComplete
 	EvidenceUnavailable = run.EvidenceUnavailable
@@ -41,7 +41,7 @@ const (
 )
 
 func bindRunStore(db *sql.DB) *RunStore {
-	return run.BindStore(db)
+	return run.Bind(db)
 }
 
 func testRegistry(t *testing.T, tools ...tool.Tool) *Registry {

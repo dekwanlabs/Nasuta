@@ -25,7 +25,7 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 				"question":"Why is checkout failing?",
 				"objective":"Trace the checkout failure",
 				"entities":[{"id":"Checkout.Place"}],
-				"evidence_goals":[{"id":"core_flow","facet":"core_flow","required":true}],
+				"evidence_goals":[{"id":"core_flow","facet":"core_flow","required":true,"sources":["internal","web"],"freshness":"bounded_live","minimum_coverage":1}],
 				"context":{
 					"conversation_refs":[{"session_id":"session-1","run_id":"qa_0"},{"session_id":"session-1","turn":2}],
 					"time_range":{"from":"2026-08-11T00:00:00Z","to":"2026-08-12T00:00:00Z","to_exclusive":true,"raw":"yesterday"},
@@ -41,6 +41,15 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 						"token_cost":20,
 						"version":"abc123",
 						"time_range":""
+					}],
+					"seed_material":[{
+						"source":"qa.evidence",
+						"title":"QA Evidence",
+						"content":"bounded evidence",
+						"evidence":[],
+						"evidence_conflicts":[],
+						"complete":false,
+						"content_hash":"context-v1"
 					}]
 				}
 			}`,
@@ -53,7 +62,7 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 				"question":"Where is checkout implemented?",
 				"objective":"Locate the checkout implementation",
 				"entities":[],
-				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","required":true}],
+				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","required":true,"sources":["internal"],"freshness":"stable","minimum_coverage":1}],
 				"context":{}
 			}`,
 			valid: true,
@@ -91,7 +100,7 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 				"question":"Where is checkout implemented?",
 				"objective":"Locate the checkout implementation",
 				"entities":[],
-				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","required":true}],
+				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","required":true,"sources":["internal"],"freshness":"stable","minimum_coverage":1}],
 				"context":{"conversation_refs":[{"session_id":"session-1","content":"copied dialogue"}]}
 			}`,
 		},
@@ -124,9 +133,9 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			name: "multiple reports",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"code report","findings":[],"gaps":[]},"completeness":"complete"},
-					{"producer_node_id":"investigate.runtime","schema":{"id":"investigation.report","version":1},"payload":{"focus":"runtime","summary":"runtime report","findings":[],"gaps":[]},"completeness":"complete"},
-					{"producer_node_id":"investigate.docs","schema":{"id":"investigation.report","version":1},"payload":{"focus":"docs","summary":"docs report","findings":[],"gaps":[]},"completeness":"complete"}
+					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"code report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"},
+					{"producer_node_id":"investigate.runtime","schema":{"id":"investigation.report","version":1},"payload":{"focus":"runtime","summary":"runtime report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"},
+					{"producer_node_id":"investigate.docs","schema":{"id":"investigation.report","version":1},"payload":{"focus":"docs","summary":"docs report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"}
 				],
 				"evidence_units":[],
 				"evidence_conflicts":[],
@@ -138,7 +147,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			name: "one available report",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.docs","schema":{"id":"investigation.report","version":1},"payload":{"focus":"docs","summary":"docs report","findings":[],"gaps":[]},"completeness":"partial"}
+					{"producer_node_id":"investigate.docs","schema":{"id":"investigation.report","version":1},"payload":{"focus":"docs","summary":"docs report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"partial"}
 				],
 				"unavailable_tasks":[
 					{"producer_node_id":"investigate.code"},
@@ -151,14 +160,58 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			valid: true,
 		},
 		{
+			name: "report with canonical evidence identity",
+			payload: `{
+				"handoffs":[{
+					"producer_node_id":"investigate.code",
+					"schema":{"id":"investigation.report","version":1},
+					"payload":{
+						"focus":"code",
+						"summary":"code report",
+						"findings":[{
+							"claim":"Checkout validates the request.",
+							"goal_ids":["core_flow"],
+							"evidence":[{
+								"kind":"code",
+								"reference":"Checkout.PlaceOrder",
+								"summary":"validation branch",
+								"identity":{
+									"source_kind":"code",
+									"target":"Checkout.PlaceOrder",
+									"section":"validation",
+									"version":"commit-123"
+								}
+							}],
+							"confidence":0.9
+						}],
+						"gaps":[],
+						"covered_goals":["core_flow"],
+						"unresolved_goals":[]
+					},
+					"completeness":"complete"
+				}],
+				"evidence_units":[{
+					"source_kind":"code",
+					"target":"Checkout.PlaceOrder",
+					"sections":["validation"],
+					"coverage":{"complete":true},
+					"version":"commit-123"
+				}],
+				"evidence_conflicts":[],
+				"completeness":"complete"
+			}`,
+			valid: true,
+		},
+		{
 			name:    "no reports",
 			payload: `{"handoffs":[],"evidence_units":[],"evidence_conflicts":[],"completeness":"unavailable"}`,
+			valid:   true,
 		},
 		{
 			name: "invalid report",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"unknown","summary":"report","findings":[],"gaps":[]},"completeness":"complete"}
+					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"unknown","summary":"report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"}
 				],
 				"evidence_units":[],
 				"evidence_conflicts":[],
@@ -169,7 +222,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			name: "missing ledger field",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"report","findings":[],"gaps":[]},"completeness":"complete"}
+					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"}
 				],
 				"evidence_units":[],
 				"completeness":"complete"
@@ -179,7 +232,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			name: "invalid unavailable task",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"report","findings":[],"gaps":[]},"completeness":"complete"}
+					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"}
 				],
 				"unavailable_tasks":[
 					{"producer_node_id":"investigate.runtime","reason":"timeout"}
@@ -198,6 +251,119 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			}
 			if !test.valid && err == nil {
 				t.Fatal("invalid bundle accepted")
+			}
+		})
+	}
+}
+
+func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	ref := agentapi.SchemaRef{
+		ID: "investigation.verified_bundle", Version: 1,
+	}
+	tests := []struct {
+		name  string
+		claim string
+		valid bool
+	}{
+		{
+			name: "canonical claim support",
+			claim: `{
+				"producer_node_id":"investigate.code",
+				"finding_index":0,
+				"claim":"Checkout validates the request.",
+				"goal_ids":["core_flow"],
+				"evidence":[{
+					"kind":"code",
+					"reference":"Checkout.PlaceOrder",
+					"summary":"validation branch",
+					"identity":{
+						"source_kind":"code",
+						"target":"Checkout.PlaceOrder",
+						"section":"validation",
+						"version":"commit-123"
+					}
+				}],
+				"evidence_identities":[{
+					"source_kind":"code",
+					"target":"Checkout.PlaceOrder",
+					"section":"validation",
+					"version":"commit-123"
+				}],
+				"confidence":0.9,
+				"support":"supported",
+				"high_risk":false
+			}`,
+			valid: true,
+		},
+		{
+			name: "missing canonical identities",
+			claim: `{
+				"producer_node_id":"investigate.code",
+				"finding_index":0,
+				"claim":"Checkout validates the request.",
+				"goal_ids":["core_flow"],
+				"evidence":[{
+					"kind":"code",
+					"reference":"Checkout.PlaceOrder",
+					"summary":"validation branch"
+				}],
+				"confidence":0.9,
+				"support":"supported",
+				"high_risk":false
+			}`,
+		},
+		{
+			name: "empty canonical identities",
+			claim: `{
+				"producer_node_id":"investigate.code",
+				"finding_index":0,
+				"claim":"Checkout validates the request.",
+				"goal_ids":["core_flow"],
+				"evidence":[{
+					"kind":"code",
+					"reference":"Checkout.PlaceOrder",
+					"summary":"validation branch"
+				}],
+				"evidence_identities":[],
+				"confidence":0.9,
+				"support":"supported",
+				"high_risk":false
+			}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := json.RawMessage(`{
+				"supported_claims":[` + test.claim + `],
+				"partial_claims":[],
+				"unsupported_claims":[],
+				"partial_goals":[],
+				"unresolved_goals":[],
+				"limitations":[],
+				"evidence_units":[{
+					"source_kind":"code",
+					"target":"Checkout.PlaceOrder",
+					"sections":["validation"],
+					"coverage":{"complete":true},
+					"version":"commit-123"
+				}],
+				"evidence_conflicts":[],
+				"verification":{
+					"decision":"complete",
+					"stop_reason":"required_goals_covered"
+				},
+				"completeness":"complete"
+			}`)
+			err := registry.Validate(ref, payload)
+			if test.valid && err != nil {
+				t.Fatalf("valid verified bundle rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid verified bundle accepted")
 			}
 		})
 	}

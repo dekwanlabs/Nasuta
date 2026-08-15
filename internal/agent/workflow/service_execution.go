@@ -16,8 +16,8 @@ import (
 )
 
 type preparedRun struct {
-	definition WorkflowDefinition
-	record     WorkflowRunRecord
+	definition Definition
+	record     RunRecord
 	input      Handoff
 }
 
@@ -34,7 +34,7 @@ func (service *Service) Execute(ctx context.Context, request ExecuteRequest) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	prepared, err := prepareWorkflowRun(orchestrator, definition, selection, request)
+	prepared, err := prepareStart(orchestrator, definition, selection, request)
 	if err != nil {
 		return Result{}, err
 	}
@@ -43,7 +43,7 @@ func (service *Service) Execute(ctx context.Context, request ExecuteRequest) (Re
 		return Result{}, err
 	}
 	defer release()
-	if err := service.store.StartWorkflow(runCtx, prepared.record, prepared.input); err != nil {
+	if err := service.store.StartRun(runCtx, prepared.record, prepared.input); err != nil {
 		return Result{}, err
 	}
 	return service.executePrepared(runCtx, orchestrator, prepared)
@@ -53,7 +53,7 @@ func (service *Service) Execute(ctx context.Context, request ExecuteRequest) (Re
 func (service *Service) Start(
 	ctx context.Context,
 	request StartRequest,
-) (*WorkflowRunRecord, error) {
+) (*RunRecord, error) {
 	if request.Actor.UserID <= 0 {
 		return nil, fmt.Errorf("workflow actor identity is required: %w", ErrInvalid)
 	}
@@ -70,16 +70,18 @@ func (service *Service) Start(
 	if err != nil {
 		return nil, err
 	}
-	if enforceReadOnly && !request.Admin && !definitionIsKnowledgeReadOnly(definition) {
+	if enforceReadOnly && !request.Admin && !definitionReadOnly(definition) {
 		return nil, ErrForbidden
 	}
 	if enforceReadOnly {
 		actorPermissions = clonePermissionPolicy(definition.Permissions)
 		scenarioPermissions = clonePermissionPolicy(definition.Permissions)
 	}
-	prepared, err := prepareWorkflowRun(orchestrator, definition, selection, ExecuteRequest{
+	prepared, err := prepareStart(orchestrator, definition, selection, ExecuteRequest{
 		RunID:               request.RunID,
 		ParentRunID:         request.ParentRunID,
+		Round:               request.Round,
+		BaseDepth:           request.BaseDepth,
 		Workflow:            request.Workflow,
 		Input:               request.Input,
 		SeedEvidence:        request.SeedEvidence,
@@ -95,7 +97,7 @@ func (service *Service) Start(
 	if err != nil {
 		return nil, err
 	}
-	if err := service.store.StartWorkflow(runCtx, prepared.record, prepared.input); err != nil {
+	if err := service.store.StartRun(runCtx, prepared.record, prepared.input); err != nil {
 		release()
 		return nil, err
 	}
@@ -112,7 +114,7 @@ func (service *Service) Start(
 			)
 		}
 	}()
-	run := detachedWorkflowRunRecord(prepared.record)
+	run := detachedRunRecord(prepared.record)
 	return &run, nil
 }
 
@@ -135,6 +137,7 @@ func (service *Service) executePrepared(
 	observer := &storeRunObserver{store: service.store}
 	result, runErr := orchestrator.RunObserved(ctx, prepared.definition, RunRequest{
 		RunID: prepared.record.ID, ParentRunID: prepared.record.ParentRunID,
+		Round: prepared.record.Round, BaseDepth: prepared.record.BaseDepth,
 		InputHandoff: &prepared.input,
 		Actor: agentapi.Actor{
 			UserID:   prepared.record.ActorUserID,
@@ -144,34 +147,39 @@ func (service *Service) executePrepared(
 		ScenarioPermissions: prepared.record.ScenarioPermissions,
 		StartedAt:           prepared.record.StartedAt,
 	}, observer)
-	status, errorCode := workflowResultStatus(runErr)
+	status, errorCode := resultStatus(runErr)
+	stopReason := result.StopReason
+	if runErr != nil {
+		stopReason = errorStopReason(runErr)
+	}
 	var output *Handoff
 	if runErr == nil {
 		output = &result.Output
 	}
-	persistCtx, cancel := workflowPersistenceContext(ctx)
-	finishErr := service.store.FinishWorkflow(
+	persistCtx, cancel := persistenceContext(ctx)
+	finishErr := service.store.FinishRun(
 		persistCtx,
 		prepared.record.ID,
 		status,
 		errorCode,
+		stopReason,
 		output,
 		time.Now().UTC(),
 	)
 	cancel()
 	if finishErr != nil {
 		if runErr != nil {
-			return Result{}, errors.Join(runErr, finishErr)
+			return result, errors.Join(runErr, finishErr)
 		}
 		return Result{}, finishErr
 	}
 	if runErr != nil {
-		return Result{}, runErr
+		return result, runErr
 	}
 	return result, nil
 }
 
-func randomWorkflowRunID() (string, error) {
+func newRunID() (string, error) {
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return "", fmt.Errorf("generate workflow run id: %w", err)
@@ -183,10 +191,10 @@ func (service *Service) resolveDefinitionFor(
 	ref DefinitionRef,
 	actor agentapi.Actor,
 	scenario string,
-) (WorkflowDefinition, DefinitionSelection, error) {
+) (Definition, DefinitionSelection, error) {
 	ref.ID = strings.TrimSpace(ref.ID)
 	if !canonicalID.MatchString(ref.ID) || ref.Version < 0 {
-		return WorkflowDefinition{}, DefinitionSelection{}, fmt.Errorf(
+		return Definition{}, DefinitionSelection{}, fmt.Errorf(
 			"workflow reference is invalid: %w",
 			ErrInvalid,
 		)
@@ -196,14 +204,14 @@ func (service *Service) resolveDefinitionFor(
 		StableSelectionKey(actor, scenario),
 	)
 	if err != nil {
-		return WorkflowDefinition{}, DefinitionSelection{}, err
+		return Definition{}, DefinitionSelection{}, err
 	}
 	return definition, selection, nil
 }
 
-func prepareWorkflowRun(
+func prepareStart(
 	orchestrator *Orchestrator,
-	definition WorkflowDefinition,
+	definition Definition,
 	selection DefinitionSelection,
 	request ExecuteRequest,
 ) (preparedRun, error) {
@@ -241,7 +249,7 @@ func prepareWorkflowRun(
 	runID := strings.TrimSpace(request.RunID)
 	if runID == "" {
 		var err error
-		runID, err = randomWorkflowRunID()
+		runID, err = newRunID()
 		if err != nil {
 			return preparedRun{}, err
 		}
@@ -251,6 +259,15 @@ func prepareWorkflowRun(
 	parentRunID := strings.TrimSpace(request.ParentRunID)
 	if parentRunID != "" && !canonicalID.MatchString(parentRunID) {
 		return preparedRun{}, fmt.Errorf("workflow parent run id %q is invalid: %w", parentRunID, ErrInvalid)
+	}
+	round, baseDepth := normalizePosition(request.Round, request.BaseDepth)
+	if round <= 0 || baseDepth < 0 {
+		return preparedRun{}, fmt.Errorf(
+			"workflow execution position round=%d base_depth=%d is invalid: %w",
+			round,
+			baseDepth,
+			ErrInvalid,
+		)
 	}
 	startedAt := time.Now().UTC()
 	input, err := PrepareHandoff(Handoff{
@@ -270,9 +287,11 @@ func prepareWorkflowRun(
 			ErrInvalid,
 		)
 	}
-	record := WorkflowRunRecord{
+	record := RunRecord{
 		ID:                  runID,
 		ParentRunID:         parentRunID,
+		Round:               round,
+		BaseDepth:           baseDepth,
 		WorkflowID:          definition.ID,
 		WorkflowVersion:     definition.Version,
 		WorkflowHash:        definition.ContentHash,
@@ -290,19 +309,19 @@ func prepareWorkflowRun(
 	return preparedRun{definition: definition, record: record, input: input}, nil
 }
 
-func definitionIsKnowledgeReadOnly(definition WorkflowDefinition) bool {
-	if !permissionIsKnowledgeReadOnly(definition.Permissions) {
+func definitionReadOnly(definition Definition) bool {
+	if !permissionReadOnly(definition.Permissions) {
 		return false
 	}
 	for _, node := range definition.Nodes {
-		if !permissionIsKnowledgeReadOnly(node.Permissions) {
+		if !permissionReadOnly(node.Permissions) {
 			return false
 		}
 	}
 	return true
 }
 
-func permissionIsKnowledgeReadOnly(policy agentapi.PermissionPolicy) bool {
+func permissionReadOnly(policy agentapi.PermissionPolicy) bool {
 	return len(policy.Scopes) > 0 &&
 		!scope.HasSideEffect(policy.Scopes) &&
 		scope.Has(policy.Scopes, scope.KnowledgeRead)
@@ -313,7 +332,7 @@ func clonePermissionPolicy(policy agentapi.PermissionPolicy) agentapi.Permission
 	return policy
 }
 
-func detachedWorkflowRunRecord(run WorkflowRunRecord) WorkflowRunRecord {
+func detachedRunRecord(run RunRecord) RunRecord {
 	run.ActorPermissions = clonePermissionPolicy(run.ActorPermissions)
 	run.ScenarioPermissions = clonePermissionPolicy(run.ScenarioPermissions)
 	if run.EndedAt != nil {

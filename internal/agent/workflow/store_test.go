@@ -13,7 +13,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
-func TestStartWorkflowCommitsRunInputAndEventsAtomically(t *testing.T) {
+func TestStartRunCommitsRunInputAndEventsAtomically(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -24,8 +24,8 @@ func TestStartWorkflowCommitsRunInputAndEventsAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	run := WorkflowRunRecord{
-		ID: "run_1", ParentRunID: "qa_parent_1",
+	run := RunRecord{
+		ID: "run_1", ParentRunID: "qa_parent_1", Round: 1, BaseDepth: 2,
 		WorkflowID: "delivery.review", WorkflowVersion: 2,
 		WorkflowHash: "workflow_hash",
 		Selection: DefinitionSelection{
@@ -42,10 +42,11 @@ func TestStartWorkflowCommitsRunInputAndEventsAtomically(t *testing.T) {
 		ScenarioPermissions: agentapi.PermissionPolicy{
 			Scopes: []string{"knowledge.read"},
 		},
-		Budget: WorkflowBudget{
-			MaxNodes: 4, MaxParallelism: 2, Timeout: time.Minute, MaxHandoffBytes: 4096,
+		Budget: Budget{
+			MaxNodes: 4, MaxParallelism: 2, MaxRounds: 1, MaxDepth: 3,
+			Timeout: time.Minute, MaxHandoffBytes: 4096,
 		},
-		Usage: WorkflowUsage{
+		Usage: Usage{
 			InputTokens: 11, OutputTokens: 12, ReasoningTokens: 13, TotalTokens: 36,
 			ToolCalls: 14, CostMicros: 15, Retries: 16,
 		},
@@ -75,17 +76,18 @@ func TestStartWorkflowCommitsRunInputAndEventsAtomically(t *testing.T) {
 	}
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO workflow_runs(
-		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,round_number,base_depth,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
-		tool_call_count,cost_micros,retry_count,error_code,started_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
+		tool_call_count,cost_micros,retry_count,error_code,stop_reason,started_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
 		WithArgs(
-			"run_1", "qa_parent_1", "delivery.review", int64(2), "workflow_hash", selection, "input_hash",
+			"run_1", "qa_parent_1", 1, 2,
+			"delivery.review", int64(2), "workflow_hash", selection, "input_hash",
 			int64(7), "tenant-a", actorPermissions, "delivery.review", scenarioPermissions,
 			RunRunning, budget,
 			int64(11), int64(12), int64(13), int64(36), int64(14), int64(15), int64(16),
-			"", sqlmock.AnyArg(),
+			"", StopReason(""), sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO handoff_artifacts(
@@ -121,7 +123,7 @@ func TestStartWorkflowCommitsRunInputAndEventsAtomically(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(1, 1))
 	}
 	mock.ExpectCommit()
-	if err := workflowStore.StartWorkflow(context.Background(), run, input); err != nil {
+	if err := workflowStore.StartRun(context.Background(), run, input); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -241,7 +243,7 @@ func TestSucceedNodeCommitsHandoffTransitionAndEventsAtomically(t *testing.T) {
 		Payload:       json.RawMessage(`{"node":"review.a"}`),
 		Completeness:  Complete, ContentHash: "handoff_hash", CreatedAt: now,
 	}
-	usage := WorkflowUsage{
+	usage := Usage{
 		InputTokens: 101, OutputTokens: 23, ReasoningTokens: 7, TotalTokens: 131,
 		ToolCalls: 4, CostMicros: 29, Retries: 1,
 	}
@@ -386,7 +388,7 @@ func TestFailNodePersistsWaitingHumanTransition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	usage := WorkflowUsage{
+	usage := Usage{
 		InputTokens: 41, OutputTokens: 9, ReasoningTokens: 2, TotalTokens: 52,
 		ToolCalls: 3, CostMicros: 17, Retries: 1,
 	}
@@ -443,7 +445,7 @@ func TestFailNodePersistsWaitingHumanTransition(t *testing.T) {
 	}
 }
 
-func TestFinishWorkflowCommitsOutputAndTerminalTransition(t *testing.T) {
+func TestFinishRunCommitsOutputAndTerminalTransition(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -478,8 +480,15 @@ func TestFinishWorkflowCommitsOutputAndTerminalTransition(t *testing.T) {
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_runs
-		SET status=?,error_code=?,ended_at=? WHERE id=? AND status=?`)).
-		WithArgs(RunSucceeded, "", sqlmock.AnyArg(), "run_1", RunRunning).
+		SET status=?,error_code=?,stop_reason=?,ended_at=? WHERE id=? AND status=?`)).
+		WithArgs(
+			RunSucceeded,
+			"",
+			StopRequiredGoalsCovered,
+			sqlmock.AnyArg(),
+			"run_1",
+			RunRunning,
+		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta(
 		`SELECT COALESCE(MAX(seq),0)+1 FROM runtime_events
@@ -503,8 +512,14 @@ func TestFinishWorkflowCommitsOutputAndTerminalTransition(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(1, 1))
 	}
 	mock.ExpectCommit()
-	if err := workflowStore.FinishWorkflow(
-		context.Background(), "run_1", RunSucceeded, "", &output, now,
+	if err := workflowStore.FinishRun(
+		context.Background(),
+		"run_1",
+		RunSucceeded,
+		"",
+		StopRequiredGoalsCovered,
+		&output,
+		now,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -525,10 +540,11 @@ func TestGetRunUsesBoundedReadAndDecodesSnapshot(t *testing.T) {
 	}
 	startedAt := time.Now().UTC().Add(-time.Minute)
 	endedAt := time.Now().UTC()
-	budget := WorkflowBudget{
-		MaxNodes: 6, MaxParallelism: 3, Timeout: 2 * time.Minute, MaxHandoffBytes: 8192,
+	budget := Budget{
+		MaxNodes: 6, MaxParallelism: 3, MaxRounds: 2, MaxDepth: 5,
+		Timeout: 2 * time.Minute, MaxHandoffBytes: 8192,
 	}
-	usage := WorkflowUsage{
+	usage := Usage{
 		InputTokens: 120, OutputTokens: 30, ReasoningTokens: 5, TotalTokens: 155,
 		ToolCalls: 6, CostMicros: 44, Retries: 2,
 	}
@@ -556,31 +572,36 @@ func TestGetRunUsesBoundedReadAndDecodesSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
-		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,round_number,base_depth,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
-		tool_call_count,cost_micros,retry_count,error_code,started_at,ended_at
+		tool_call_count,cost_micros,retry_count,error_code,stop_reason,started_at,ended_at
 		FROM workflow_runs WHERE id=? LIMIT 1`)).
 		WithArgs("run_1").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "parent_run_id", "workflow_id", "workflow_version", "workflow_hash", "selection_json", "input_hash",
+			"id", "parent_run_id", "round_number", "base_depth",
+			"workflow_id", "workflow_version", "workflow_hash", "selection_json", "input_hash",
 			"actor_user_id", "actor_tenant_id", "actor_permissions_json", "scenario",
 			"scenario_permissions_json", "status", "budget_json", "input_tokens",
 			"output_tokens", "reasoning_tokens", "total_tokens", "tool_call_count",
-			"cost_micros", "retry_count", "error_code", "started_at", "ended_at",
+			"cost_micros", "retry_count", "error_code", "stop_reason", "started_at", "ended_at",
 		}).AddRow(
-			"run_1", "qa_parent_1", "delivery.review", int64(2), "workflow_hash", selectionJSON, "input_hash",
+			"run_1", "qa_parent_1", 2, 3,
+			"delivery.review", int64(2), "workflow_hash", selectionJSON, "input_hash",
 			int64(7), "tenant-a", actorPermissionsJSON, "delivery.review",
 			scenarioPermissionsJSON, RunSucceeded, budgetJSON,
 			usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.TotalTokens,
-			usage.ToolCalls, usage.CostMicros, usage.Retries, "", startedAt, endedAt,
+			usage.ToolCalls, usage.CostMicros, usage.Retries, "",
+			StopRequiredGoalsCovered, startedAt, endedAt,
 		))
 	run, err := workflowStore.GetRun(context.Background(), "run_1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if run.ID != "run_1" || run.ParentRunID != "qa_parent_1" ||
+		run.Round != 2 || run.BaseDepth != 3 ||
 		run.Status != RunSucceeded || run.Budget != budget ||
+		run.StopReason != StopRequiredGoalsCovered ||
 		run.Selection != selection ||
 		run.Usage != usage ||
 		run.EndedAt == nil || !run.EndedAt.Equal(endedAt) ||
@@ -606,7 +627,7 @@ func TestDecideHumanApprovalCommitsApprovalAndResumeAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	decidedAt := time.Now().UTC()
-	approval := WorkflowApproval{
+	approval := Approval{
 		WorkflowRunID: "run_1", NodeID: "approve",
 		Decision: ApprovalApproved, ApproverUserID: 99,
 		ApproverTenantID: "tenant-a", Comment: "approved",
@@ -699,7 +720,7 @@ func TestDecideHumanApprovalCommitsApprovalAndResumeAtomically(t *testing.T) {
 	}
 	mock.ExpectCommit()
 
-	transition, err := workflowStore.DecideHumanApproval(
+	transition, err := workflowStore.DecideApproval(
 		context.Background(), approval, &handoff,
 	)
 	if err != nil {
@@ -725,7 +746,7 @@ func TestDecideHumanApprovalCommitsRejectionAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	decidedAt := time.Now().UTC()
-	approval := WorkflowApproval{
+	approval := Approval{
 		WorkflowRunID: "run_1", NodeID: "approve",
 		Decision: ApprovalRejected, ApproverUserID: 99,
 		ApproverTenantID: "tenant-a", Comment: "rejected",
@@ -796,7 +817,7 @@ func TestDecideHumanApprovalCommitsRejectionAtomically(t *testing.T) {
 	}
 	mock.ExpectCommit()
 
-	transition, err := workflowStore.DecideHumanApproval(
+	transition, err := workflowStore.DecideApproval(
 		context.Background(), approval, nil,
 	)
 	if err != nil {
@@ -821,7 +842,7 @@ func TestDecideHumanApprovalReturnsExistingFactForSameDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	existing := WorkflowApproval{
+	existing := Approval{
 		WorkflowRunID: "run_1", NodeID: "approve",
 		Decision: ApprovalApproved, ApproverUserID: 42,
 		ApproverTenantID: "tenant-a", Comment: "original",
@@ -855,7 +876,7 @@ func TestDecideHumanApprovalReturnsExistingFactForSameDecision(t *testing.T) {
 		))
 	mock.ExpectCommit()
 
-	transition, err := workflowStore.DecideHumanApproval(
+	transition, err := workflowStore.DecideApproval(
 		context.Background(), requested, nil,
 	)
 	if err != nil {
@@ -904,7 +925,7 @@ func TestDecideHumanApprovalRejectsConflictingDecision(t *testing.T) {
 		))
 	mock.ExpectRollback()
 
-	_, err = workflowStore.DecideHumanApproval(context.Background(), WorkflowApproval{
+	_, err = workflowStore.DecideApproval(context.Background(), Approval{
 		WorkflowRunID: "run_1", NodeID: "approve",
 		Decision: ApprovalApproved, ApproverUserID: 99,
 		ApproverTenantID: "tenant-a", DecidedAt: time.Now().UTC(),
@@ -994,9 +1015,9 @@ func TestDecideHumanApprovalClassifiesLockedStateErrors(t *testing.T) {
 			}
 			mock.ExpectRollback()
 
-			_, err = workflowStore.DecideHumanApproval(
+			_, err = workflowStore.DecideApproval(
 				context.Background(),
-				WorkflowApproval{
+				Approval{
 					WorkflowRunID:  "run_1",
 					NodeID:         "approve",
 					Decision:       ApprovalRejected,
@@ -1027,7 +1048,7 @@ func TestLoadTerminalResultReadsCanonicalOutput(t *testing.T) {
 	}
 	startedAt := time.Now().UTC().Add(-time.Minute)
 	endedAt := time.Now().UTC()
-	budgetJSON, _ := json.Marshal(WorkflowBudget{MaxNodes: 1})
+	budgetJSON, _ := json.Marshal(Budget{MaxNodes: 1})
 	permissionsJSON, _ := json.Marshal(agentapi.PermissionPolicy{
 		Scopes: []string{"knowledge.read"},
 	})
@@ -1087,7 +1108,7 @@ func TestLoadTerminalResultRejectsSucceededRunWithoutOutput(t *testing.T) {
 	}
 	startedAt := time.Now().UTC().Add(-time.Minute)
 	endedAt := time.Now().UTC()
-	budgetJSON, _ := json.Marshal(WorkflowBudget{MaxNodes: 1})
+	budgetJSON, _ := json.Marshal(Budget{MaxNodes: 1})
 	permissionsJSON, _ := json.Marshal(agentapi.PermissionPolicy{
 		Scopes: []string{"knowledge.read"},
 	})
@@ -1131,25 +1152,27 @@ func expectWorkflowRunQuery(
 	selectionJSON []byte,
 ) {
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
-		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,round_number,base_depth,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
-		tool_call_count,cost_micros,retry_count,error_code,started_at,ended_at
+		tool_call_count,cost_micros,retry_count,error_code,stop_reason,started_at,ended_at
 		FROM workflow_runs WHERE id=? LIMIT 1`)).
 		WithArgs(runID).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "parent_run_id", "workflow_id", "workflow_version", "workflow_hash",
+			"id", "parent_run_id", "round_number", "base_depth",
+			"workflow_id", "workflow_version", "workflow_hash",
 			"selection_json", "input_hash", "actor_user_id", "actor_tenant_id",
 			"actor_permissions_json", "scenario", "scenario_permissions_json", "status",
 			"budget_json", "input_tokens", "output_tokens", "reasoning_tokens",
 			"total_tokens", "tool_call_count", "cost_micros", "retry_count", "error_code",
-			"started_at", "ended_at",
+			"stop_reason", "started_at", "ended_at",
 		}).AddRow(
-			runID, "qa_parent_1", "delivery.review", int64(1), "workflow_hash",
+			runID, "qa_parent_1", 1, 0,
+			"delivery.review", int64(1), "workflow_hash",
 			selectionJSON, "input_hash", int64(7), "tenant-a", permissionsJSON,
 			"qa.investigation", permissionsJSON, status, budgetJSON,
 			int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0),
-			"", startedAt, endedAt,
+			"", StopReason(""), startedAt, endedAt,
 		))
 }
 
@@ -1166,11 +1189,11 @@ func TestLoadFullRunStateRestoresDurableCheckpoint(t *testing.T) {
 	startedAt := time.Now().UTC().Add(-2 * time.Minute)
 	succeededAt := startedAt.Add(30 * time.Second)
 	approvedAt := startedAt.Add(time.Minute)
-	budget := WorkflowBudget{
-		MaxNodes: 3, MaxParallelism: 1,
+	budget := Budget{
+		MaxNodes: 3, MaxParallelism: 1, MaxRounds: 1, MaxDepth: 3,
 		Timeout: 5 * time.Minute, MaxHandoffBytes: 4096,
 	}
-	runUsage := WorkflowUsage{
+	runUsage := Usage{
 		InputTokens: 88, OutputTokens: 21, ReasoningTokens: 4, TotalTokens: 113,
 		ToolCalls: 5, CostMicros: 37, Retries: 1,
 	}
@@ -1204,25 +1227,27 @@ func TestLoadFullRunStateRestoresDurableCheckpoint(t *testing.T) {
 	}
 
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
-		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,round_number,base_depth,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
-		tool_call_count,cost_micros,retry_count,error_code,started_at,ended_at
+		tool_call_count,cost_micros,retry_count,error_code,stop_reason,started_at,ended_at
 		FROM workflow_runs WHERE id=? LIMIT 1`)).
 		WithArgs("run_1").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "parent_run_id", "workflow_id", "workflow_version", "workflow_hash", "selection_json", "input_hash",
+			"id", "parent_run_id", "round_number", "base_depth",
+			"workflow_id", "workflow_version", "workflow_hash", "selection_json", "input_hash",
 			"actor_user_id", "actor_tenant_id", "actor_permissions_json", "scenario",
 			"scenario_permissions_json", "status", "budget_json", "input_tokens",
 			"output_tokens", "reasoning_tokens", "total_tokens", "tool_call_count",
-			"cost_micros", "retry_count", "error_code", "started_at", "ended_at",
+			"cost_micros", "retry_count", "error_code", "stop_reason", "started_at", "ended_at",
 		}).AddRow(
-			"run_1", "qa_parent_1", "delivery.approval", int64(3), "workflow_hash", selectionJSON, "input_hash",
+			"run_1", "qa_parent_1", 1, 2,
+			"delivery.approval", int64(3), "workflow_hash", selectionJSON, "input_hash",
 			int64(41), "tenant-a", actorPermissionsJSON, "approval.test",
 			scenarioPermissionsJSON, RunRunning, budgetJSON,
 			runUsage.InputTokens, runUsage.OutputTokens, runUsage.ReasoningTokens,
 			runUsage.TotalTokens, runUsage.ToolCalls, runUsage.CostMicros, runUsage.Retries,
-			"", startedAt, nil,
+			"", StopReason(""), startedAt, nil,
 		))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT
 		current.workflow_run_id,current.node_id,current.attempt,current.kind,
@@ -1336,6 +1361,7 @@ func TestLoadFullRunStateRestoresDurableCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if state.Run.ParentRunID != "qa_parent_1" || state.Run.ActorUserID != 41 ||
+		state.Run.Round != 1 || state.Run.BaseDepth != 2 ||
 		state.Run.ActorTenantID != "tenant-a" ||
 		state.Run.Selection != selection ||
 		state.Run.Usage != runUsage ||

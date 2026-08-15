@@ -41,7 +41,7 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 		turn, err := agent.callModelTurn(state, step)
 		if err != nil {
 			if !state.answerContract.Active() &&
-				agent.preserveInterruptedAnswer(
+				agent.preservePartialAnswer(
 					state.runCtx,
 					state.runID,
 					&state.stepSeq,
@@ -84,7 +84,7 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 }
 
 func (agent *Agent) ensureTurnBudget(state *compiledLoop, step int) error {
-	if _, err := agent.compactRunContextBeforeAnswer(
+	if _, err := agent.compactAnswerContext(
 		state, state.tools, fmt.Sprintf("model_step_%d", step),
 	); err != nil {
 		return err
@@ -153,7 +153,7 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 	)
 	result = continued
 	if err != nil && !state.answerContract.Active() &&
-		agent.preserveInterruptedAnswer(
+		agent.preservePartialAnswer(
 			state.runCtx,
 			state.runID,
 			&state.stepSeq,
@@ -174,7 +174,7 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 		return
 	}
 	if err == nil {
-		result, err = agent.validateOrRepairAnswer(
+		result, err = agent.enforceContract(
 			state.loopCtx,
 			state.messages,
 			result,
@@ -238,7 +238,7 @@ func (agent *Agent) recordThinkTurn(state *compiledLoop, turn modelTurn) error {
 	message := llm.Message{
 		Role:      "assistant",
 		Content:   turn.result.Content,
-		ToolCalls: canonicalSessionToolCalls(turn.result.ToolCalls),
+		ToolCalls: canonicalToolCalls(turn.result.ToolCalls),
 	}
 	state.messages = append(state.messages, message)
 	state.result.SessionMessages = append(state.result.SessionMessages, message)
@@ -288,7 +288,7 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 			if !execution.Failed {
 				conflicts := state.evidenceLedger.add(execution.EvidenceUnits, "tool")
 				if len(conflicts) > 0 {
-					notices, err := marshalEvidenceConflictNotices(conflicts)
+					notices, err := marshalConflictNotices(conflicts)
 					if err != nil {
 						state.result.Err = fmt.Errorf(
 							"prepare evidence conflict notice for tool %q: %w",
@@ -303,7 +303,7 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 				}
 			}
 		}
-		execution = agent.prepareToolDelivery(
+		execution = agent.prepareDelivery(
 			state.runID,
 			state.messages,
 			notices,
@@ -367,13 +367,13 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 func appendToolTurnPostlude(messages []llm.Message, notices []string, contract *exactAnswerContract) []llm.Message {
 	postlude := make([]llm.Message, 0, len(notices)+1)
 	for _, notice := range notices {
-		postlude = append(postlude, toolDeliveryNoticeMessage(notice))
+		postlude = append(postlude, deliveryNoticeMessage(notice))
 	}
-	contractMessage, ok := combinedAnswerContractMessage(contract, tool.AnswerContract{})
+	contractMessage, ok := combinedContractMessage(contract, tool.AnswerContract{})
 	if !ok {
 		return append(messages, postlude...)
 	}
-	messages = withoutAnswerContractMessages(messages)
+	messages = withoutContractMessages(messages)
 	messages = append(messages, postlude...)
 	return append(messages, contractMessage)
 }

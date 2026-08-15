@@ -10,15 +10,15 @@ import (
 func (workflowStore *Store) LoadFullRunState(
 	ctx context.Context,
 	workflowRunID string,
-) (*WorkflowRunState, error) {
+) (*RunState, error) {
 	run, err := workflowStore.GetRun(ctx, workflowRunID)
 	if err != nil {
 		return nil, err
 	}
-	state := &WorkflowRunState{
+	state := &RunState{
 		Run: *run, Nodes: make(map[string]NodeRunRecord),
 		Handoffs: make(map[string]Handoff), NodeOutputs: make(map[string]Handoff),
-		Gates: make(map[string]GateDecision), Approvals: make(map[string]WorkflowApproval),
+		Gates: make(map[string]GateDecision), Approvals: make(map[string]Approval),
 	}
 	rows, err := workflowStore.db.QueryContext(ctx, `SELECT
 		current.workflow_run_id,current.node_id,current.attempt,current.kind,
@@ -165,7 +165,7 @@ func (workflowStore *Store) loadFullGateDecisions(
 func (workflowStore *Store) loadFullApprovals(
 	ctx context.Context,
 	workflowRunID string,
-	out map[string]WorkflowApproval,
+	out map[string]Approval,
 ) error {
 	rows, err := workflowStore.db.QueryContext(ctx, `SELECT
 		workflow_run_id,node_id,approval_decision,approver_user_id,
@@ -178,7 +178,7 @@ func (workflowStore *Store) loadFullApprovals(
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var approval WorkflowApproval
+		var approval Approval
 		if err := rows.Scan(
 			&approval.WorkflowRunID, &approval.NodeID, &approval.Decision,
 			&approval.ApproverUserID, &approval.ApproverTenantID,

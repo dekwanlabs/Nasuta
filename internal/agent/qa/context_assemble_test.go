@@ -25,7 +25,7 @@ func TestBuildHistoryRouteContextContainsMetadataAndRecentDialogue(t *testing.T)
 			Assistant: "1. alpha\n2. hsas-backstage-user",
 		}},
 	}
-	got := buildHistoryRouteContext(conversation)
+	got := buildHistoryContext(conversation)
 	for _, want := range []string{"runtime investigation", "继续 trace-123", "observe_logs", "partial", "hsas-backstage-user", "recent_dialogue"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("route context missing %q: %s", want, got)
@@ -117,7 +117,7 @@ func TestAssembleActiveHistoryLoadsOneCompleteAtomicTurn(t *testing.T) {
 			AddRow(8, "assistant", "answer", "", "", ""))
 	metadata := turnMetadataForQuestion(8, "查 trace-123")
 	metadata.EvidenceManifest = memory.EvidenceManifest{Status: "available", Items: []memory.EvidenceManifestItem{{Tool: "observe_logs", Coverage: "full"}}}
-	svc := &QA{
+	svc := &Service{
 		sessions: memory.NewSessionStore(db), contextWindow: 128000,
 		outputReserve: 4000,
 	}
@@ -149,7 +149,7 @@ func TestAssembleActiveHistoryUsesRecentAnswerWithoutReloadingToolTurn(t *testin
 	metadata.EvidenceManifest = memory.EvidenceManifest{
 		Status: "available", Items: []memory.EvidenceManifestItem{{Tool: "code_search", Coverage: "full"}},
 	}
-	svc := &QA{
+	svc := &Service{
 		sessions: memory.NewSessionStore(db), contextWindow: 128000,
 		outputReserve: 4000,
 	}
@@ -182,7 +182,7 @@ func TestAssembleActiveHistoryUsesRecentAnswerWithoutReloadingToolTurn(t *testin
 
 func TestAssembleContextUsesDefinitionLimitsForActiveHistory(t *testing.T) {
 	metadata := turnMetadataForQuestion(8, "列出 UserController 选项")
-	svc := &QA{
+	svc := &Service{
 		contextWindow: 128000,
 		outputReserve: 4000,
 	}

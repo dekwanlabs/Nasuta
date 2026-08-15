@@ -52,13 +52,14 @@ func (compiler *ProposalCompiler) validate(
 	if err != nil {
 		return validatedProposal{}, err
 	}
-	if err := validateUniqueTerminal(order, successors); err != nil {
+	terminalID, err := uniqueTerminal(order, successors)
+	if err != nil {
 		return validatedProposal{}, err
 	}
 	if err := validateRequiredGoals(policy.RequiredGoals, tasks); err != nil {
 		return validatedProposal{}, err
 	}
-	if err := validateParallelGroups(tasks, successors); err != nil {
+	if err := validateGroups(tasks, successors); err != nil {
 		return validatedProposal{}, err
 	}
 	joinTargets := compiler.compiledJoinTargets(byID, predecessors)
@@ -68,7 +69,36 @@ func (compiler *ProposalCompiler) validate(
 			joinCount++
 		}
 	}
-	compiledDepth := compiledProposalDepth(order, predecessors, joinTargets)
+	verifierCount := 0
+	verifierTarget := ""
+	if policy.VerifierID != "" {
+		if !joinTargets[terminalID] {
+			return validatedProposal{}, fmt.Errorf(
+				"compiled verifier %q requires a join before terminal %q",
+				policy.VerifierID,
+				terminalID,
+			)
+		}
+		verifierCount = 1
+		verifierTarget = terminalID
+	}
+	riskGateCount := 0
+	if policy.RiskGateID != "" {
+		if policy.VerifierID == "" {
+			return validatedProposal{}, fmt.Errorf(
+				"compiled evidence risk gate %q requires a verifier",
+				policy.RiskGateID,
+			)
+		}
+		riskGateCount = 1
+	}
+	compiledDepth := compiledProposalDepth(
+		order,
+		predecessors,
+		joinTargets,
+		verifierTarget,
+		riskGateCount,
+	)
 	if compiledDepth > limits.maxDepth {
 		return validatedProposal{}, fmt.Errorf(
 			"compiled task graph depth %d exceeds limit %d",
@@ -76,22 +106,26 @@ func (compiler *ProposalCompiler) validate(
 			limits.maxDepth,
 		)
 	}
-	if len(tasks)+joinCount > policy.Budget.MaxNodes {
+	compiledNodeCount := len(tasks) + joinCount + verifierCount + riskGateCount
+	if compiledNodeCount > policy.Budget.MaxNodes {
 		return validatedProposal{}, fmt.Errorf(
 			"compiled task graph has %d nodes, workflow limit is %d",
-			len(tasks)+joinCount,
+			compiledNodeCount,
 			policy.Budget.MaxNodes,
 		)
 	}
 	budget := limits.workflowBudget
-	budget.MaxNodes = len(tasks) + joinCount
+	budget.MaxNodes = compiledNodeCount
 	budget.MaxParallelism = min(limits.maxParallelism, budget.MaxNodes)
+	budget.MaxRounds = limits.maxRounds
+	budget.MaxDepth = limits.maxDepth
 	return validatedProposal{
 		tasks: tasks, edges: edges,
 		maxParallelism: limits.maxParallelism,
 		maxDepth:       limits.maxDepth,
 		workflowBudget: budget,
 		joinTargets:    joinTargets,
+		terminalID:     terminalID,
 	}, nil
 }
 
@@ -115,6 +149,12 @@ func (compiler *ProposalCompiler) validatePolicy(policy CompilationPolicy) error
 	if policy.MaxParallelism > policy.Budget.MaxParallelism {
 		return fmt.Errorf("proposal parallelism limit exceeds the workflow budget")
 	}
+	if policy.MaxRounds > policy.Budget.MaxRounds {
+		return fmt.Errorf("proposal round limit exceeds the workflow budget")
+	}
+	if policy.MaxDepth > policy.Budget.MaxDepth {
+		return fmt.Errorf("proposal depth limit exceeds the workflow budget")
+	}
 	if err := validateSchema("proposal workflow input", policy.InputSchema, compiler.schemas); err != nil {
 		return err
 	}
@@ -133,6 +173,52 @@ func (compiler *ProposalCompiler) validatePolicy(policy CompilationPolicy) error
 	if policy.JoinMode != JoinPayloadList && policy.JoinMode != JoinEvidenceView {
 		return fmt.Errorf("proposal join mode %q is invalid", policy.JoinMode)
 	}
+	verifierConfigured := policy.VerifierID != "" ||
+		policy.VerifierInputSchema != (agentapi.SchemaRef{}) ||
+		policy.VerifierOutputSchema != (agentapi.SchemaRef{}) ||
+		len(policy.HighRiskGoals) > 0 ||
+		policy.HighRiskMinimumTrustTier != 0 ||
+		policy.RiskGateID != ""
+	if verifierConfigured {
+		if !canonicalID.MatchString(policy.VerifierID) {
+			return fmt.Errorf(
+				"proposal verifier id %q is not canonical",
+				policy.VerifierID,
+			)
+		}
+		if err := validateSchema(
+			"proposal verifier input",
+			policy.VerifierInputSchema,
+			compiler.schemas,
+		); err != nil {
+			return err
+		}
+		if err := validateSchema(
+			"proposal verifier output",
+			policy.VerifierOutputSchema,
+			compiler.schemas,
+		); err != nil {
+			return err
+		}
+		if err := compiler.schemas.ValidateCompatibility(
+			policy.JoinOutputSchema,
+			policy.VerifierInputSchema,
+		); err != nil {
+			return fmt.Errorf("proposal join to verifier schema: %w", err)
+		}
+	}
+	if policy.RiskGateID != "" && !canonicalID.MatchString(policy.RiskGateID) {
+		return fmt.Errorf(
+			"proposal evidence risk gate id %q is not canonical",
+			policy.RiskGateID,
+		)
+	}
+	if policy.HighRiskMinimumTrustTier < 0 ||
+		policy.HighRiskMinimumTrustTier > 100 {
+		return fmt.Errorf(
+			"proposal high-risk minimum trust tier must be between 0 and 100",
+		)
+	}
 	if err := validatePermissions("proposal workflow", policy.Permissions); err != nil {
 		return err
 	}
@@ -148,21 +234,27 @@ func (compiler *ProposalCompiler) validatePolicy(policy CompilationPolicy) error
 	if policy.FailureMode != FailFast && policy.FailureMode != CollectAvailable {
 		return fmt.Errorf("proposal failure mode %q is invalid", policy.FailureMode)
 	}
-	if err := validateWorkflowBudget(policy.WorkflowID, policy.Budget); err != nil {
+	if err := validateBudget(policy.WorkflowID, policy.Budget); err != nil {
 		return err
 	}
 	if policy.Budget.MaxNodes <= 0 || policy.Budget.MaxParallelism <= 0 ||
 		policy.Budget.Timeout <= 0 || policy.Budget.MaxHandoffBytes <= 0 {
 		return fmt.Errorf("proposal workflow budgets must be positive")
 	}
-	if err := validateCanonicalValues("proposal required goal", policy.RequiredGoals); err != nil {
+	if err := validateCanonical("proposal required goal", policy.RequiredGoals); err != nil {
 		return err
+	}
+	if err := validateCanonical("proposal high-risk goal", policy.HighRiskGoals); err != nil {
+		return err
+	}
+	if err := ensureValuesSubset(policy.HighRiskGoals, policy.RequiredGoals); err != nil {
+		return fmt.Errorf("proposal high-risk goals: %w", err)
 	}
 	for capabilityID, budget := range policy.CapabilityBudgets {
 		if !canonicalID.MatchString(capabilityID) {
 			return fmt.Errorf("proposal capability budget id %q is not canonical", capabilityID)
 		}
-		if err := validateTaskBudgetValues(capabilityID, budget); err != nil {
+		if err := validateTaskBudgets(capabilityID, budget); err != nil {
 			return err
 		}
 	}
@@ -205,7 +297,7 @@ func (compiler *ProposalCompiler) validateTask(
 			task.ParallelGroup,
 		)
 	}
-	if err := validateCanonicalValues(
+	if err := validateCanonical(
 		"task "+task.ID+" required facet",
 		task.RequiredFacets,
 	); err != nil {
@@ -384,14 +476,17 @@ func proposalOrder(
 	return order, maxDepth, nil
 }
 
-func validateUniqueTerminal(order []string, successors map[string][]string) error {
+func uniqueTerminal(
+	order []string,
+	successors map[string][]string,
+) (string, error) {
 	terminal := ""
 	for _, id := range order {
 		if len(successors[id]) != 0 {
 			continue
 		}
 		if terminal != "" {
-			return fmt.Errorf(
+			return "", fmt.Errorf(
 				"task graph proposal has multiple terminals %q and %q",
 				terminal,
 				id,
@@ -400,9 +495,9 @@ func validateUniqueTerminal(order []string, successors map[string][]string) erro
 		terminal = id
 	}
 	if terminal == "" {
-		return fmt.Errorf("task graph proposal has no terminal")
+		return "", fmt.Errorf("task graph proposal has no terminal")
 	}
-	return nil
+	return terminal, nil
 }
 
 func validateRequiredGoals(goals []string, tasks []validatedTask) error {
@@ -412,7 +507,7 @@ func validateRequiredGoals(goals []string, tasks []validatedTask) error {
 	}
 	for _, task := range tasks {
 		for _, facet := range task.spec.RequiredFacets {
-			if _, tracked := required[facet]; tracked && !task.spec.Optional {
+			if _, tracked := required[facet]; tracked {
 				required[facet] = true
 			}
 		}
@@ -420,7 +515,7 @@ func validateRequiredGoals(goals []string, tasks []validatedTask) error {
 	for _, goal := range goals {
 		if !required[goal] {
 			return fmt.Errorf(
-				"required goal %q has no non-optional task",
+				"required goal %q has no assigned task",
 				goal,
 			)
 		}
@@ -428,7 +523,7 @@ func validateRequiredGoals(goals []string, tasks []validatedTask) error {
 	return nil
 }
 
-func validateParallelGroups(
+func validateGroups(
 	tasks []validatedTask,
 	successors map[string][]string,
 ) error {
@@ -530,6 +625,8 @@ func compiledProposalDepth(
 	order []string,
 	predecessors map[string][]string,
 	joinTargets map[string]bool,
+	verifierTarget string,
+	postVerifierDepth int,
 ) int {
 	depths := make(map[string]int, len(order))
 	maxDepth := 0
@@ -542,6 +639,9 @@ func compiledProposalDepth(
 		}
 		if joinTargets[id] {
 			depth++
+		}
+		if id == verifierTarget {
+			depth += 1 + postVerifierDepth
 		}
 		depths[id] = depth
 		if depth > maxDepth {
@@ -568,7 +668,7 @@ func validateEvidenceRefs(taskID string, refs []agentapi.EvidenceRef) error {
 	return nil
 }
 
-func validateTaskBudgetValues(id string, budget NodeBudget) error {
+func validateTaskBudgets(id string, budget NodeBudget) error {
 	if budget.MaxInputTokens < 0 || budget.MaxOutputTokens < 0 ||
 		budget.MaxTotalTokens < 0 || budget.MaxToolCalls < 0 ||
 		budget.MaxCostMicros < 0 {
@@ -647,7 +747,7 @@ type proposalLimits struct {
 	maxAttempts    int
 	maxRounds      int
 	maxDepth       int
-	workflowBudget WorkflowBudget
+	workflowBudget Budget
 }
 
 func validateStopPolicy(
@@ -683,6 +783,14 @@ func validateStopPolicy(
 		return proposalLimits{}, err
 	}
 	budget := policy.Budget
+	budget.MaxDuplicateRatio, err = tightenRatio(
+		"stop max duplicate ratio",
+		stop.MaxDuplicateRatio,
+		budget.MaxDuplicateRatio,
+	)
+	if err != nil {
+		return proposalLimits{}, err
+	}
 	budget.MaxInputTokens, err = tightenInt64(
 		"stop max input tokens",
 		stop.MaxInputTokens,
@@ -760,6 +868,27 @@ func tightenInt64(label string, requested, ceiling int64) (int64, error) {
 	}
 	if requested > ceiling {
 		return 0, fmt.Errorf("%s %d exceeds server limit %d", label, requested, ceiling)
+	}
+	return requested, nil
+}
+
+func tightenRatio(label string, requested, ceiling float64) (float64, error) {
+	if requested < 0 || requested > 1 {
+		return 0, fmt.Errorf("%s must be within [0,1]", label)
+	}
+	if ceiling < 0 || ceiling > 1 {
+		return 0, fmt.Errorf("%s server limit must be within [0,1]", label)
+	}
+	if requested == 0 {
+		return ceiling, nil
+	}
+	if ceiling == 0 || requested > ceiling {
+		return 0, fmt.Errorf(
+			"%s %.4f exceeds server limit %.4f",
+			label,
+			requested,
+			ceiling,
+		)
 	}
 	return requested, nil
 }

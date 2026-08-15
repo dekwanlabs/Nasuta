@@ -13,7 +13,7 @@ import (
 )
 
 type recoveredWorkflowStoreStub struct {
-	records map[string]workflow.WorkflowRunRecord
+	records map[string]workflow.RunRecord
 }
 
 func (store *recoveredWorkflowStoreStub) GetRun(
@@ -21,7 +21,7 @@ func (store *recoveredWorkflowStoreStub) GetRun(
 	runID string,
 	_ int64,
 	_ bool,
-) (*workflow.WorkflowRunRecord, error) {
+) (*workflow.RunRecord, error) {
 	record, ok := store.records[runID]
 	if !ok {
 		return nil, workflow.ErrNotFound
@@ -34,7 +34,7 @@ type qaRecoveryReconcilerStub struct {
 	errs         map[string]error
 }
 
-func (reconciler *qaRecoveryReconcilerStub) ReconcileInvestigation(
+func (reconciler *qaRecoveryReconcilerStub) Reconcile(
 	_ context.Context,
 	parentRunID string,
 ) error {
@@ -66,23 +66,23 @@ func TestReconcileRecoveredWorkflowDispatchesByPersistedScenario(t *testing.T) {
 	resumeErr := errors.New("resume failed")
 	for _, test := range []struct {
 		name           string
-		record         workflow.WorkflowRunRecord
+		record         workflow.RunRecord
 		resumeErr      error
 		wantQAParent   string
 		wantReviewCall bool
 	}{
 		{
 			name: "QA",
-			record: workflow.WorkflowRunRecord{
+			record: workflow.RunRecord{
 				ID: "workflow-qa", ParentRunID: "parent-1",
-				Scenario: workflow.DelegatedInvestigationID,
+				Scenario: workflow.FlowID,
 				Status:   workflow.RunSucceeded,
 			},
 			wantQAParent: "parent-1",
 		},
 		{
 			name: "review",
-			record: workflow.WorkflowRunRecord{
+			record: workflow.RunRecord{
 				ID:       "review.round-1",
 				Scenario: reviewworkflow.ScenarioID,
 				Status:   workflow.RunFailed,
@@ -93,7 +93,7 @@ func TestReconcileRecoveredWorkflowDispatchesByPersistedScenario(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workflows := &recoveredWorkflowStoreStub{
-				records: map[string]workflow.WorkflowRunRecord{
+				records: map[string]workflow.RunRecord{
 					test.record.ID: test.record,
 				},
 			}
@@ -132,10 +132,10 @@ func TestReconcileRecoveredWorkflowDispatchesByPersistedScenario(t *testing.T) {
 
 func TestReconcileRecoveredQAWorkflowWaitsForTerminalState(t *testing.T) {
 	workflows := &recoveredWorkflowStoreStub{
-		records: map[string]workflow.WorkflowRunRecord{
+		records: map[string]workflow.RunRecord{
 			"workflow-qa": {
 				ID: "workflow-qa", ParentRunID: "parent-1",
-				Scenario: workflow.DelegatedInvestigationID,
+				Scenario: workflow.FlowID,
 				Status:   workflow.RunRunning,
 			},
 		},

@@ -163,7 +163,7 @@ func TestEvidenceAndRepairPromptsKeepInternalMetadataPrivate(t *testing.T) {
 		}
 	}
 
-	repair := answerContractRepairInstruction([]string{"TRACE-1"})
+	repair := repairInstruction([]string{"TRACE-1"})
 	for _, required := range []string{
 		"user-visible answer contract",
 		"non-repetitive structure",

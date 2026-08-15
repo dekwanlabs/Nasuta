@@ -24,7 +24,7 @@ func NewStore(db *sql.DB) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-func (catalogStore *Store) PublishDefinitions(
+func (catalogStore *Store) Publish(
 	ctx context.Context,
 	definitions []agentapi.Definition,
 	actorUserID int64,

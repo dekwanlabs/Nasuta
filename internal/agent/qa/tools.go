@@ -23,13 +23,15 @@ func routingCandidates(tools []tool.Tool) []retrieval.ToolRouteCandidate {
 			continue
 		}
 		candidates = append(candidates, retrieval.ToolRouteCandidate{
-			ID: string(candidate.ID), Intent: candidate.Routing.Intent, Temporal: candidate.Routing.Temporal,
+			ID: string(candidate.ID), Intent: candidate.Routing.Intent,
+			Temporal:       candidate.Routing.Temporal,
+			EvidenceSource: string(candidate.Routing.EvidenceSource),
 		})
 	}
 	return candidates
 }
 
-func routedToolsNeedFullInvestigation(candidates []retrieval.ToolRouteCandidate, selected []string) bool {
+func toolsNeedInvestigation(candidates []retrieval.ToolRouteCandidate, selected []string) bool {
 	if len(selected) == 0 {
 		return false
 	}
@@ -55,7 +57,7 @@ func scenarioToolIDs(tools []tool.Tool) []string {
 	return ids
 }
 
-func (svc *QA) prunedToolIDSet(tools []tool.Tool, routed []string) map[tool.ToolID]struct{} {
+func (svc *Service) prunedToolIDSet(tools []tool.Tool, routed []string) map[tool.ToolID]struct{} {
 	candidates := routingCandidates(tools)
 	allowed := baseToolIDSet(tools, candidates)
 	for id := range pruneAllowance(routed, candidates) {
@@ -79,14 +81,14 @@ func (filtered filteredScenarioTools) Get(id tool.ToolID) (tool.Tool, bool) {
 	return candidate, ok
 }
 
-func (filtered filteredScenarioTools) ExecuteArguments(ctx context.Context, id tool.ToolID, arguments tool.Arguments) (tool.Result, error) {
+func (filtered filteredScenarioTools) Execute(ctx context.Context, id tool.ToolID, arguments tool.Arguments) (tool.Result, error) {
 	if _, ok := filtered.byID[id]; !ok {
 		return tool.Result{}, fmt.Errorf("tool %q is outside the prepared scenario tools", id)
 	}
-	return filtered.base.ExecuteArguments(ctx, id, arguments)
+	return filtered.base.Execute(ctx, id, arguments)
 }
 
-func withoutSessionHistoryTools(prepared ScenarioToolSet) ScenarioToolSet {
+func withoutHistoryTools(prepared ScenarioToolSet) ScenarioToolSet {
 	tools := prepared.Tools()
 	filtered := filteredScenarioTools{
 		base: prepared, tools: make([]tool.Tool, 0, len(tools)),
@@ -102,13 +104,13 @@ func withoutSessionHistoryTools(prepared ScenarioToolSet) ScenarioToolSet {
 	return filtered
 }
 
-func preferredToolsInstruction(ids []string) string {
+func preferenceInstruction(ids []string) string {
 	return prompts.MustRender(prompts.AgentPreferredTool, struct {
 		ToolIDs string
 	}{ToolIDs: strings.Join(ids, ", ")})
 }
 
-func (svc *QA) executePrefetch(
+func (svc *Service) executePrefetch(
 	ctx context.Context,
 	runID string,
 	prepared ScenarioToolSet,
@@ -164,7 +166,7 @@ func (svc *QA) executePrefetch(
 			}
 			return nil, fmt.Errorf("prefetch tool %q is not eligible", call.ToolID)
 		}
-		result, err := prepared.ExecuteArguments(ctx, call.ToolID, call.Arguments)
+		result, err := prepared.Execute(ctx, call.ToolID, call.Arguments)
 		if err != nil {
 			if recordErr := recordPrefetchResult(
 				ctx, stepRecorder, runID, callID, call.ToolID, string(args),
@@ -207,7 +209,7 @@ func recordPrefetchStep(
 	if recorder == nil {
 		return nil
 	}
-	return recorder.RecordPreparationStep(ctx, step)
+	return recorder.RecordStep(ctx, step)
 }
 
 func recordPrefetchResult(
@@ -230,7 +232,7 @@ func recordPrefetchResult(
 	}
 	step := run.StepRecord{
 		Kind:                run.StepKindToolResult,
-		TraceID:             prefetchToolResultTraceID(runID, callID),
+		TraceID:             prefetchTraceID(runID, callID),
 		ToolCallID:          callID,
 		Tool:                string(toolID),
 		Args:                args,
@@ -246,7 +248,7 @@ func recordPrefetchResult(
 		DurationMs:          int(time.Since(startedAt) / time.Millisecond),
 		CreatedAt:           time.Now(),
 	}
-	if err := recorder.RecordPreparationStep(ctx, step); err != nil {
+	if err := recorder.RecordStep(ctx, step); err != nil {
 		return fmt.Errorf("record prefetch tool %q result: %w", toolID, err)
 	}
 	return nil
@@ -257,7 +259,7 @@ func prefetchToolCallID(runID string, index int, toolID tool.ToolID) string {
 	return "call_" + platform.UUIDFromString(seed)
 }
 
-func prefetchToolResultTraceID(runID, callID string) string {
+func prefetchTraceID(runID, callID string) string {
 	return "trc_" + platform.UUIDFromString("prefetch_tool_result\x00"+runID+"\x00"+callID)
 }
 
@@ -271,7 +273,7 @@ func unavailableToolBlock(id tool.ToolID, reason string) ContextBlock {
 
 const preloadedContextBudget = 16000
 
-func (svc *QA) contextBudget() int {
+func (svc *Service) contextBudget() int {
 	if svc.retriever != nil {
 		return svc.retriever.ContextBudget()
 	}
@@ -331,10 +333,10 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 			seenRefs[key] = struct{}{}
 			context.References = append(context.References, ref)
 		}
-		preloadedConflicts = appendUniqueEvidenceConflicts(
+		preloadedConflicts = appendEvidenceConflicts(
 			preloadedConflicts,
 			preloadedEvidence.Add(
-				deliveredQAEvidenceUnits(block.Evidence, delivered, truncated),
+				deliveredEvidenceUnits(block.Evidence, delivered, truncated),
 				"preload",
 			),
 		)
@@ -365,14 +367,14 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 	}
 	context.Text = text.String()
 	mergedEvidence := evidence.New(nil, "")
-	conflicts := appendUniqueEvidenceConflicts(nil, context.EvidenceConflicts)
+	conflicts := appendEvidenceConflicts(nil, context.EvidenceConflicts)
 	if existingComplete {
 		mergedEvidence.Add(context.EvidenceUnits, "retrieval")
 	}
 	mergedEvidence.RememberConflicts(conflicts)
 	mergedEvidence.RememberConflicts(preloadedConflicts)
-	conflicts = appendUniqueEvidenceConflicts(conflicts, preloadedConflicts)
-	conflicts = appendUniqueEvidenceConflicts(
+	conflicts = appendEvidenceConflicts(conflicts, preloadedConflicts)
+	conflicts = appendEvidenceConflicts(
 		conflicts,
 		mergedEvidence.Add(preloadedEvidence.Units(), "preload"),
 	)
@@ -381,7 +383,7 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 	context.HitCount = len(context.References)
 }
 
-func appendUniqueEvidenceConflicts(
+func appendEvidenceConflicts(
 	target []evidence.Conflict,
 	incoming []evidence.Conflict,
 ) []evidence.Conflict {
@@ -403,7 +405,7 @@ func appendUniqueEvidenceConflicts(
 	return target
 }
 
-func deliveredQAEvidenceUnits(
+func deliveredEvidenceUnits(
 	units []tool.EvidenceUnit,
 	delivered string,
 	truncated bool,

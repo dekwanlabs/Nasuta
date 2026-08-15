@@ -15,30 +15,30 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-func (runtime *DefinitionRuntime) prepare(request agentapi.RunRequest) (definitionExecution, error) {
-	definition, modelParameters, err := runtime.resolveExecutionDefinition(request)
+func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution, error) {
+	definition, modelParameters, err := runtime.resolveExecution(request)
 	if err != nil {
-		return definitionExecution{}, err
+		return preparedExecution{}, err
 	}
-	policy, err := prepareExecutionPermissions(definition, request)
+	policy, err := preparePermissions(definition, request)
 	if err != nil {
-		return definitionExecution{}, err
+		return preparedExecution{}, err
 	}
 	if definition.Budget.Timeout <= runtime.settings.answerReserve {
-		return definitionExecution{}, fmt.Errorf("definition timeout must exceed the answer reserve")
+		return preparedExecution{}, fmt.Errorf("definition timeout must exceed the answer reserve")
 	}
-	if err := validateDefinitionMessages(request.Messages); err != nil {
-		return definitionExecution{}, err
+	if err := validateMessages(request.Messages); err != nil {
+		return preparedExecution{}, err
 	}
-	contextHash, err := validateDefinitionContext(request.Context)
+	contextHash, err := validateContext(request.Context)
 	if err != nil {
-		return definitionExecution{}, err
+		return preparedExecution{}, err
 	}
-	tools, err := runtime.prepareExecutionTools(definition, request.ToolScope, policy)
+	tools, err := runtime.prepareTools(definition, request.ToolScope, policy)
 	if err != nil {
-		return definitionExecution{}, err
+		return preparedExecution{}, err
 	}
-	return definitionExecution{
+	return preparedExecution{
 		definition: definition,
 		snapshot: agentapi.RunSnapshot{
 			RunID: request.RunID, AgentID: definition.ID,
@@ -61,7 +61,7 @@ func (runtime *DefinitionRuntime) prepare(request agentapi.RunRequest) (definiti
 	}, nil
 }
 
-func (runtime *DefinitionRuntime) resolveExecutionDefinition(
+func (runtime *Runtime) resolveExecution(
 	request agentapi.RunRequest,
 ) (agentapi.Definition, llm.ModelParameters, error) {
 	if runtime == nil || runtime.definitions == nil || runtime.registry == nil {
@@ -109,7 +109,7 @@ func (runtime *DefinitionRuntime) resolveExecutionDefinition(
 	return definition, modelParameters, nil
 }
 
-func prepareExecutionPermissions(
+func preparePermissions(
 	definition agentapi.Definition,
 	request agentapi.RunRequest,
 ) (tool.Policy, error) {
@@ -138,18 +138,18 @@ func prepareExecutionPermissions(
 	return tool.Policy{AllowRead: allowRead, AllowWrite: request.ToolScope.AllowWrite}, nil
 }
 
-func (runtime *DefinitionRuntime) prepareExecutionTools(
+func (runtime *Runtime) prepareTools(
 	definition agentapi.Definition,
 	request agentapi.ToolScope,
 	policy tool.Policy,
-) (definitionToolSelection, error) {
+) (toolSelection, error) {
 	definitionToolIDs, err := canonicalToolIDSet(definition.Tools.VisibleToolIDs)
 	if err != nil {
-		return definitionToolSelection{}, fmt.Errorf("definition tools: %w", err)
+		return toolSelection{}, fmt.Errorf("definition tools: %w", err)
 	}
 	requestedToolIDs, err := canonicalToolIDSet(request.VisibleToolIDs)
 	if err != nil {
-		return definitionToolSelection{}, fmt.Errorf("tool scope: %w", err)
+		return toolSelection{}, fmt.Errorf("tool scope: %w", err)
 	}
 	requestRestricted := request.RestrictVisible || request.VisibleToolIDs != nil
 	allowedToolIDs, restricted, err := intersectToolIDs(
@@ -159,7 +159,7 @@ func (runtime *DefinitionRuntime) prepareExecutionTools(
 		requestRestricted,
 	)
 	if err != nil {
-		return definitionToolSelection{}, err
+		return toolSelection{}, err
 	}
 	capabilitySnapshot := runtime.registry.Snapshot(tool.Policy{
 		AllowRead: true, AllowWrite: definition.Tools.AllowWrite,
@@ -171,7 +171,7 @@ func (runtime *DefinitionRuntime) prepareExecutionTools(
 	}
 	for _, id := range definition.Tools.VisibleToolIDs {
 		if _, ok := capabilityAvailable[tool.ToolID(id)]; !ok {
-			return definitionToolSelection{}, fmt.Errorf("tool %q is unavailable", id)
+			return toolSelection{}, fmt.Errorf("tool %q is unavailable", id)
 		}
 	}
 	baseSnapshot := runtime.registry.Snapshot(policy)
@@ -182,7 +182,7 @@ func (runtime *DefinitionRuntime) prepareExecutionTools(
 	}
 	for _, id := range request.VisibleToolIDs {
 		if _, ok := baseAvailable[tool.ToolID(id)]; !ok {
-			return definitionToolSelection{}, fmt.Errorf("requested tool %q is unavailable", id)
+			return toolSelection{}, fmt.Errorf("requested tool %q is unavailable", id)
 		}
 	}
 	toolSnapshot := baseSnapshot
@@ -198,14 +198,14 @@ func (runtime *DefinitionRuntime) prepareExecutionTools(
 	}
 	offeredTools, err := canonicalToolIDSet(request.OfferedToolIDs)
 	if err != nil {
-		return definitionToolSelection{}, fmt.Errorf("offered tools: %w", err)
+		return toolSelection{}, fmt.Errorf("offered tools: %w", err)
 	}
 	for id := range offeredTools {
 		if _, ok := available[id]; !ok {
-			return definitionToolSelection{}, fmt.Errorf("offered tool %q is outside the run snapshot", id)
+			return toolSelection{}, fmt.Errorf("offered tool %q is outside the run snapshot", id)
 		}
 	}
-	return definitionToolSelection{
+	return toolSelection{
 		policy:       policy,
 		snapshot:     toolSnapshot,
 		visibleIDs:   visibleToolIDs,
@@ -232,11 +232,11 @@ func clonePermissions(policy agentapi.PermissionPolicy) agentapi.PermissionPolic
 	return agentapi.PermissionPolicy{Scopes: append([]string(nil), policy.Scopes...)}
 }
 
-func compileDefinitionRequest(
+func compileRequest(
 	definition agentapi.Definition,
 	request agentapi.RunRequest,
 ) execution.Input {
-	evidenceSeeded := definitionEvidenceSeeded(request.Policy, request.Context)
+	evidenceSeeded := evidenceSeeded(request.Policy, request.Context)
 	if len(request.Messages) > 0 {
 		messages := make([]llm.Message, 0, len(request.Messages))
 		question := string(request.Input)
@@ -255,7 +255,7 @@ func compileDefinitionRequest(
 			ReferenceTypes:    contextReferenceTypes(request.Context),
 			EvidenceContent:   joinedContextContent(request.Context),
 			EvidenceUnits:     contextEvidenceUnits(request.Context),
-			EvidenceConflicts: contextEvidenceConflicts(request.Context),
+			EvidenceConflicts: evidenceConflicts(request.Context),
 		}
 	}
 	messages := []llm.Message{{Role: "system", Content: definition.Prompt.System}}
@@ -286,11 +286,11 @@ func compileDefinitionRequest(
 		ReferenceTypes:    contextReferenceTypes(request.Context),
 		EvidenceContent:   joinedContextContent(request.Context),
 		EvidenceUnits:     contextEvidenceUnits(request.Context),
-		EvidenceConflicts: contextEvidenceConflicts(request.Context),
+		EvidenceConflicts: evidenceConflicts(request.Context),
 	}
 }
 
-func definitionEvidenceSeeded(
+func evidenceSeeded(
 	policy agentapi.RunPolicy,
 	blocks []agentapi.ContextBlock,
 ) bool {
@@ -305,7 +305,7 @@ func definitionEvidenceSeeded(
 	return false
 }
 
-func validateDefinitionMessages(messages []agentapi.Message) error {
+func validateMessages(messages []agentapi.Message) error {
 	for index, message := range messages {
 		switch message.Role {
 		case "system", "user", "assistant", "tool":
@@ -327,7 +327,7 @@ func validateDefinitionMessages(messages []agentapi.Message) error {
 	return nil
 }
 
-func validateDefinitionContext(blocks []agentapi.ContextBlock) (string, error) {
+func validateContext(blocks []agentapi.ContextBlock) (string, error) {
 	for index, block := range blocks {
 		if block.Source == "" || block.Title == "" || block.Content == "" {
 			return "", fmt.Errorf("context block %d source, title, and content are required", index)
@@ -339,7 +339,7 @@ func validateDefinitionContext(blocks []agentapi.ContextBlock) (string, error) {
 			return "", fmt.Errorf("context block %d content_hash does not match content", index)
 		}
 		for unitIndex, unit := range block.Evidence {
-			if err := validateContextEvidenceUnit(index, fmt.Sprintf("evidence unit %d", unitIndex), unit); err != nil {
+			if err := validateEvidenceUnit(index, fmt.Sprintf("evidence unit %d", unitIndex), unit); err != nil {
 				return "", err
 			}
 		}
@@ -356,10 +356,10 @@ func validateDefinitionContext(blocks []agentapi.ContextBlock) (string, error) {
 					label,
 				)
 			}
-			if err := validateContextEvidenceUnit(index, label+" current", conflict.Current); err != nil {
+			if err := validateEvidenceUnit(index, label+" current", conflict.Current); err != nil {
 				return "", err
 			}
-			if err := validateContextEvidenceUnit(index, label+" incoming", conflict.Incoming); err != nil {
+			if err := validateEvidenceUnit(index, label+" incoming", conflict.Incoming); err != nil {
 				return "", err
 			}
 			if !evidenceIdentityMatches(identity, conflict.Current) ||
@@ -379,7 +379,7 @@ func validateDefinitionContext(blocks []agentapi.ContextBlock) (string, error) {
 	return hashBytes(raw), nil
 }
 
-func validateContextEvidenceUnit(
+func validateEvidenceUnit(
 	blockIndex int,
 	label string,
 	unit tool.EvidenceUnit,

@@ -10,10 +10,10 @@ import (
 )
 
 // Definition derives the fixed panel represented directly by a published Policy.
-func Definition(policy delivery.ReviewPolicy) (workflow.WorkflowDefinition, error) {
+func Definition(policy delivery.ReviewPolicy) (workflow.Definition, error) {
 	prepared, err := delivery.PrepareReviewPolicy(policy)
 	if err != nil {
-		return workflow.WorkflowDefinition{}, err
+		return workflow.Definition{}, err
 	}
 	return definitionForReviewers(prepared, prepared.Reviewers, "")
 }
@@ -22,13 +22,13 @@ func Definition(policy delivery.ReviewPolicy) (workflow.WorkflowDefinition, erro
 func DefinitionForRound(
 	policy delivery.ReviewPolicy,
 	round delivery.ReviewRound,
-) (workflow.WorkflowDefinition, error) {
+) (workflow.Definition, error) {
 	prepared, err := delivery.PrepareReviewPolicy(policy)
 	if err != nil {
-		return workflow.WorkflowDefinition{}, err
+		return workflow.Definition{}, err
 	}
 	if err := delivery.ValidateReviewRoundSnapshot(prepared, round); err != nil {
-		return workflow.WorkflowDefinition{}, err
+		return workflow.Definition{}, err
 	}
 	return definitionForReviewers(prepared, round.Reviewers, round.PanelHash)
 }
@@ -37,10 +37,10 @@ func definitionForReviewers(
 	prepared delivery.ReviewPolicy,
 	reviewers []delivery.ReviewerSpec,
 	panelHash string,
-) (workflow.WorkflowDefinition, error) {
+) (workflow.Definition, error) {
 	id, err := workflowID(prepared, panelHash)
 	if err != nil {
-		return workflow.WorkflowDefinition{}, err
+		return workflow.Definition{}, err
 	}
 	permission := agentapi.PermissionPolicy{Scopes: []string{scope.FeatureDelivery}}
 	nodes := make([]workflow.NodeDefinition, 0, len(reviewers)+3)
@@ -53,7 +53,7 @@ func definitionForReviewers(
 	for index, reviewer := range reviewers {
 		nodeID := reviewerNodeID(reviewer.ID)
 		if existing, duplicate := seenNodes[nodeID]; duplicate {
-			return workflow.WorkflowDefinition{}, fmt.Errorf(
+			return workflow.Definition{}, fmt.Errorf(
 				"reviewers %q and %q share workflow node %q: %w",
 				existing, reviewer.ID, nodeID, delivery.ErrConflict,
 			)
@@ -111,14 +111,16 @@ func definitionForReviewers(
 		workflow.EdgeDefinition{From: NodeReportsJoin, To: NodeAdjudicate, Required: true},
 		workflow.EdgeDefinition{From: NodeAdjudicate, To: NodeGate, Required: true},
 	)
-	return workflow.WorkflowDefinition{
+	return workflow.Definition{
 		ID: id, Version: prepared.Version,
 		Purpose:     "Run an immutable parallel Feature Delivery review panel, adjudication, and deterministic gate.",
 		InputSchema: requestSchema, OutputSchema: gateSchema,
 		Permissions: permission,
-		Budget: workflow.WorkflowBudget{
+		Budget: workflow.Budget{
 			MaxNodes:        len(nodes),
 			MaxParallelism:  min(prepared.MaxParallelism, len(reviewers)),
+			MaxRounds:       1,
+			MaxDepth:        4,
 			Timeout:         prepared.Timeout,
 			MaxHandoffBytes: 8 << 20,
 			MaxInputTokens:  prepared.MaxInputTokens,
@@ -128,7 +130,7 @@ func definitionForReviewers(
 			MaxCostMicros:   prepared.MaxCostMicros,
 			MaxRetries:      prepared.MaxRetries,
 		},
-		FailurePolicy: workflow.WorkflowFailurePolicy{Mode: workflow.CollectAvailable},
+		FailurePolicy: workflow.FailurePolicy{Mode: workflow.CollectAvailable},
 		Nodes:         nodes,
 		Edges:         edges,
 	}, nil

@@ -47,7 +47,7 @@ type Handler struct {
 	embedder           embed.Embedder
 	tools              *agent.Service
 	qa                 *agent.QA
-	persistentRunStore *run.RunStore
+	persistentRunStore *run.Store
 	registry           *agent.Registry
 	writeAvailable     bool
 	codegraphDB        *codegraph.DB
@@ -64,18 +64,18 @@ type Handler struct {
 }
 
 type QAInvestigationCanceller interface {
-	CancelInvestigation(context.Context, string, int64) error
+	Cancel(context.Context, string, int64) error
 }
 
 type QAInvestigationReconciler interface {
-	ReconcileInvestigation(context.Context, string) error
+	Reconcile(context.Context, string) error
 }
 
 type QARuntime struct {
 	QA                      *agent.QA
-	Hub                     *run.RunHub
+	Hub                     *run.Hub
 	CompactionLLM           *llm.LLMClient
-	RunStore                *run.RunStore
+	RunStore                *run.Store
 	InvestigationCanceller  QAInvestigationCanceller
 	InvestigationReconciler QAInvestigationReconciler
 	Sessions                *memory.SessionStore

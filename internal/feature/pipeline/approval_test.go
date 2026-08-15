@@ -82,7 +82,7 @@ func (service *approvalArtifactService) GetGenerationForArtifact(
 }
 
 type approvalWorkflowService struct {
-	run          workflow.WorkflowRunRecord
+	run          workflow.RunRecord
 	handoffs     []workflow.Handoff
 	artifacts    *approvalArtifactService
 	decideCalls  int
@@ -95,7 +95,7 @@ func (service *approvalWorkflowService) GetRun(
 	runID string,
 	_ int64,
 	_ bool,
-) (*workflow.WorkflowRunRecord, error) {
+) (*workflow.RunRecord, error) {
 	if runID != service.run.ID {
 		return nil, workflow.ErrNotFound
 	}
@@ -322,7 +322,7 @@ func pipelineApprovalFixture(
 	}
 	artifacts := &approvalArtifactService{artifact: artifact, generation: generation}
 	workflows := &approvalWorkflowService{
-		run: workflow.WorkflowRunRecord{
+		run: workflow.RunRecord{
 			ID: generation.WorkflowRunID, WorkflowID: WorkflowID,
 			WorkflowVersion: WorkflowVersion, Status: workflow.RunWaitingHuman,
 		},

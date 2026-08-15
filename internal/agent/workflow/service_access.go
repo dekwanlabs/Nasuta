@@ -6,18 +6,18 @@ import (
 	"strings"
 )
 
-func (service *Service) PublishDefinitions(
-	definitions []WorkflowDefinition,
+func (service *Service) Publish(
+	definitions []Definition,
 	admin bool,
 ) error {
-	return service.PublishDefinitionsAs(
+	return service.PublishAs(
 		context.Background(), definitions, 0, admin,
 	)
 }
 
-func (service *Service) PublishDefinitionsAs(
+func (service *Service) PublishAs(
 	ctx context.Context,
-	definitions []WorkflowDefinition,
+	definitions []Definition,
 	actorUserID int64,
 	admin bool,
 ) error {
@@ -36,14 +36,14 @@ func (service *Service) PublishDefinitionsAs(
 	return nil
 }
 
-func (service *Service) ListDefinitions() ([]WorkflowDefinition, error) {
+func (service *Service) ListDefinitions() ([]Definition, error) {
 	if service == nil || service.catalog == nil {
 		return nil, ErrUnavailable
 	}
 	return service.catalog.List(), nil
 }
 
-func (service *Service) ListDefinitionRecords(
+func (service *Service) ListRecords(
 	ctx context.Context,
 	cursor DefinitionCursor,
 	limit int,
@@ -54,7 +54,7 @@ func (service *Service) ListDefinitionRecords(
 	return service.catalog.ListRecords(ctx, cursor, limit)
 }
 
-func (service *Service) SetDefinitionDefault(
+func (service *Service) SetDefault(
 	ctx context.Context,
 	id string,
 	version int64,
@@ -70,7 +70,7 @@ func (service *Service) SetDefinitionDefault(
 	return service.catalog.SetDefault(ctx, id, version, actorUserID)
 }
 
-func (service *Service) SetDefinitionActive(
+func (service *Service) SetActive(
 	ctx context.Context,
 	id string,
 	version int64,
@@ -87,7 +87,7 @@ func (service *Service) SetDefinitionActive(
 	return service.catalog.SetActive(ctx, id, version, active, actorUserID)
 }
 
-func (service *Service) ListDefinitionAudit(
+func (service *Service) ListAudit(
 	ctx context.Context,
 	id string,
 	afterSeq int64,
@@ -103,7 +103,7 @@ func (service *Service) ListDefinitionAudit(
 	return service.catalog.ListAudit(ctx, id, afterSeq, limit)
 }
 
-func (service *Service) GetDefinitionRollout(
+func (service *Service) GetRollout(
 	id string,
 ) (RolloutRule, bool, error) {
 	if service == nil || service.catalog == nil {
@@ -113,7 +113,7 @@ func (service *Service) GetDefinitionRollout(
 	return rule, ok, nil
 }
 
-func (service *Service) SetDefinitionRollout(
+func (service *Service) SetRollout(
 	ctx context.Context,
 	id string,
 	candidateVersion int64,
@@ -134,7 +134,7 @@ func (service *Service) SetDefinitionRollout(
 	)
 }
 
-func (service *Service) ListDefinitionRolloutAudit(
+func (service *Service) ListRolloutAudit(
 	ctx context.Context,
 	id string,
 	afterSeq int64,
@@ -155,7 +155,7 @@ func (service *Service) GetRun(
 	runID string,
 	userID int64,
 	admin bool,
-) (*WorkflowRunRecord, error) {
+) (*RunRecord, error) {
 	if service == nil || service.store == nil {
 		return nil, ErrUnavailable
 	}
@@ -206,7 +206,7 @@ func (service *Service) OpenRunEvents(
 	runID string,
 	userID int64,
 	admin bool,
-) (*WorkflowRunRecord, *RunEventReader, error) {
+) (*RunRecord, *RunEventReader, error) {
 	run, err := service.GetRun(ctx, runID, userID, admin)
 	if err != nil {
 		return nil, nil, err

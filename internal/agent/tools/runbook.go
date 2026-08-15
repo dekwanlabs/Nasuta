@@ -54,10 +54,10 @@ func (srv *Service) FindRunbooks(ctx context.Context, query knowledge.RunbookQue
 	})
 }
 
-func (srv *Service) FindRunbooksWithVector(ctx context.Context, query knowledge.RunbookQuery, vector []float32) (domain.RunbookSearchResult, error) {
+func (srv *Service) FindRunbooksByVector(ctx context.Context, query knowledge.RunbookQuery, vector []float32) (domain.RunbookSearchResult, error) {
 	return runtrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
 		if len(vector) == 0 {
-			return srv.findRunbooksByKeyword(query)
+			return srv.findKeywordRunbooks(query)
 		}
 		return srv.findRunbooks(ctx, query, vector)
 	})
@@ -87,7 +87,7 @@ func (srv *Service) findRunbooks(ctx context.Context, query knowledge.RunbookQue
 		return emptyRunbookResult(query), nil
 	}
 	if srv.semanticEnabled() {
-		return srv.findRunbooksSemantically(ctx, query, vector)
+		return srv.findSemanticRunbooks(ctx, query, vector)
 	}
 	log.InfofCtx(
 		ctx,
@@ -95,10 +95,10 @@ func (srv *Service) findRunbooks(ctx context.Context, query knowledge.RunbookQue
 		srv.semantic != nil,
 		srv.embedder != nil,
 	)
-	return srv.findRunbooksByKeyword(query)
+	return srv.findKeywordRunbooks(query)
 }
 
-func (srv *Service) findRunbooksSemantically(
+func (srv *Service) findSemanticRunbooks(
 	ctx context.Context,
 	query knowledge.RunbookQuery,
 	vector []float32,
@@ -138,7 +138,7 @@ func (srv *Service) findRunbooksSemantically(
 	return runbookResultFromHits(hits, meta, query), nil
 }
 
-func (srv *Service) findRunbooksByKeyword(query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+func (srv *Service) findKeywordRunbooks(query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
 	var records []domain.RunbookRecord
 	if query.DocID != "" {
 		meta, err := srv.docStore.RunbookMetaByID(query.DocID)

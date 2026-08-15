@@ -32,7 +32,7 @@ func drainHub(ch chan SSEEvent, timeout time.Duration) []SSEEvent {
 }
 
 func TestHub_BroadcastsEvaluationTrace(t *testing.T) {
-	hub := NewRunHub(nil)
+	hub := NewHub(nil)
 	ch := hub.Subscribe("trace-run")
 	hub.EmitTrace("trace-run", domain.EvaluationTrace{Sequence: 1, Node: "evidence_plan", Status: "completed"})
 	select {
@@ -48,8 +48,8 @@ func TestHub_BroadcastsEvaluationTrace(t *testing.T) {
 
 func TestHub_BroadcastDeliversToSubscriber(t *testing.T) {
 	t.Parallel()
-	h := NewRunHub(nil)
-	defer h.Complete("r1", RunOutcome{Status: RunStatusDone})
+	h := NewHub(nil)
+	defer h.Complete("r1", Outcome{Status: StatusDone})
 
 	ch := h.Subscribe("r1")
 	h.OnToken(context.Background(), "r1", "hello")
@@ -74,7 +74,7 @@ func TestHub_BroadcastDeliversToSubscriber(t *testing.T) {
 }
 
 func TestHub_BroadcastsStructuredStatus(t *testing.T) {
-	hub := NewRunHub(nil)
+	hub := NewHub(nil)
 	ch := hub.Subscribe("status-run")
 	hub.EmitStatus("status-run", "正在检索", "retrieval.discover", 820)
 	select {
@@ -92,7 +92,7 @@ func TestHub_BroadcastsStructuredStatus(t *testing.T) {
 }
 
 func TestHub_ContextUsageRetainsProjectedPeak(t *testing.T) {
-	hub := NewRunHub(nil)
+	hub := NewHub(nil)
 	const runID = "context-run"
 	channel := hub.Subscribe(runID)
 
@@ -125,7 +125,7 @@ func TestHub_ContextUsageRetainsProjectedPeak(t *testing.T) {
 	if !ok || snapshot.Phase != "post_tool" || snapshot.PeakProjectedTokens != 810 {
 		t.Fatalf("snapshot = %+v, available=%t", snapshot, ok)
 	}
-	hub.Complete(runID, RunOutcome{Status: RunStatusDone})
+	hub.Complete(runID, Outcome{Status: StatusDone})
 	<-channel
 	hub.Unsubscribe(runID, channel)
 	if snapshot, ok := hub.ContextUsage(runID); !ok || snapshot.PeakProjectedTokens != 810 {
@@ -144,8 +144,8 @@ func TestHub_ContextUsageRetainsProjectedPeak(t *testing.T) {
 
 func TestHub_UnsubscribeVsBroadcast_NoPanic(t *testing.T) {
 	t.Parallel()
-	h := NewRunHub(nil)
-	defer h.Complete("r1", RunOutcome{Status: RunStatusDone})
+	h := NewHub(nil)
+	defer h.Complete("r1", Outcome{Status: StatusDone})
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -183,7 +183,7 @@ func TestHub_UnsubscribeVsBroadcast_NoPanic(t *testing.T) {
 
 func TestHub_PauseThenFinishUnblocksWaitResume(t *testing.T) {
 	t.Parallel()
-	h := NewRunHub(nil)
+	h := NewHub(nil)
 
 	const runID = "r1"
 	h.Send(runID, ControlSignal{Kind: CtrlPause})
@@ -201,7 +201,7 @@ func TestHub_PauseThenFinishUnblocksWaitResume(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	h.Complete(runID, RunOutcome{Status: RunStatusAborted})
+	h.Complete(runID, Outcome{Status: StatusAborted})
 
 	select {
 	case err := <-released:
@@ -215,12 +215,12 @@ func TestHub_PauseThenFinishUnblocksWaitResume(t *testing.T) {
 
 func TestHub_FinishCleansUpSignalsAndPause(t *testing.T) {
 	t.Parallel()
-	h := NewRunHub(nil)
+	h := NewHub(nil)
 
 	const runID = "r1"
 	h.Send(runID, ControlSignal{Kind: CtrlPause})
 	_ = h.Poll(runID)
-	h.Complete(runID, RunOutcome{Status: RunStatusDone})
+	h.Complete(runID, Outcome{Status: StatusDone})
 
 	h.mu.Lock()
 	_, hasSig := h.signals[runID]
@@ -238,11 +238,11 @@ func TestHub_FinishCleansUpSignalsAndPause(t *testing.T) {
 }
 
 func TestHub_CompletePublishesOneTerminalEvent(t *testing.T) {
-	hub := NewRunHub(nil)
+	hub := NewHub(nil)
 	const runID = "terminal-once"
 	ch := hub.Subscribe(runID)
-	outcome := RunOutcome{
-		Status: RunStatusDone, StepCount: 2, TokenUsed: 12, Answer: "answer",
+	outcome := Outcome{
+		Status: StatusDone, StepCount: 2, TokenUsed: 12, Answer: "answer",
 		SessionMessages: []llm.Message{{Role: "tool", ToolCallID: "call-1", Name: "observe", Content: "result"}},
 	}
 	hub.Complete(runID, outcome)
@@ -251,7 +251,7 @@ func TestHub_CompletePublishesOneTerminalEvent(t *testing.T) {
 	select {
 	case event := <-ch:
 		terminal := TerminalFromEvent(event)
-		if terminal == nil || terminal.Status != RunStatusDone || terminal.Answer != "answer" {
+		if terminal == nil || terminal.Status != StatusDone || terminal.Answer != "answer" {
 			t.Fatalf("event = %+v, want done terminal", event)
 		}
 		if len(terminal.SessionMessages) != 1 || terminal.SessionMessages[0].ToolCallID != "call-1" {
@@ -273,16 +273,16 @@ func TestHub_ProjectTerminalDoesNotPersistAgain(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	hub := NewRunHub(&RunStore{db: db})
+	hub := NewHub(&Store{db: db})
 	const runID = "recovered-parent"
 	channel := hub.Subscribe(runID)
 
-	hub.ProjectTerminal(runID, RunOutcome{Status: RunStatusDone, Answer: "recovered"})
+	hub.ProjectTerminal(runID, Outcome{Status: StatusDone, Answer: "recovered"})
 
 	select {
 	case event := <-channel:
 		terminal := TerminalFromEvent(event)
-		if terminal == nil || terminal.Status != RunStatusDone || terminal.Answer != "recovered" {
+		if terminal == nil || terminal.Status != StatusDone || terminal.Answer != "recovered" {
 			t.Fatalf("event = %+v", event)
 		}
 	case <-time.After(time.Second):
@@ -294,16 +294,16 @@ func TestHub_ProjectTerminalDoesNotPersistAgain(t *testing.T) {
 }
 
 func TestHub_CompletePreservesTerminalWhenSubscriberBufferIsFull(t *testing.T) {
-	hub := NewRunHub(nil)
+	hub := NewHub(nil)
 	const runID = "full-buffer"
 	ch := hub.Subscribe(runID)
 	defer hub.Unsubscribe(runID, ch)
 	for i := 0; i < subscriberDiagnosticLimit*2; i++ {
 		hub.EmitTrace(runID, domain.EvaluationTrace{Sequence: i + 1})
 	}
-	hub.Complete(runID, RunOutcome{Status: RunStatusDone, Answer: "answer"})
+	hub.Complete(runID, Outcome{Status: StatusDone, Answer: "answer"})
 
-	var terminal *RunTerminal
+	var terminal *Terminal
 	deadline := time.After(time.Second)
 	for terminal == nil {
 		select {
@@ -319,7 +319,7 @@ func TestHub_CompletePreservesTerminalWhenSubscriberBufferIsFull(t *testing.T) {
 }
 
 func TestRunSubscriberMergesAdjacentTextAndStatusEvents(t *testing.T) {
-	sub := &runSubscriber{
+	sub := &subscriber{
 		wake: make(chan struct{}, 1),
 		stop: make(chan struct{}),
 	}
@@ -350,7 +350,7 @@ func TestRunSubscriberMergesAdjacentTextAndStatusEvents(t *testing.T) {
 }
 
 func TestRunSubscriberQueueIsBoundedAndPreservesTerminal(t *testing.T) {
-	sub := &runSubscriber{
+	sub := &subscriber{
 		wake: make(chan struct{}, 1),
 		stop: make(chan struct{}),
 	}
@@ -361,7 +361,7 @@ func TestRunSubscriberQueueIsBoundedAndPreservesTerminal(t *testing.T) {
 			t.Fatalf("tool event %d was rejected before the queue reached its limit", index)
 		}
 	}
-	if !sub.enqueue(SSEEvent{Type: EventRunFinished, Data: &RunTerminal{RunID: "bounded"}}) {
+	if !sub.enqueue(SSEEvent{Type: EventRunFinished, Data: &Terminal{RunID: "bounded"}}) {
 		t.Fatal("terminal event was rejected by a full queue")
 	}
 
@@ -376,7 +376,7 @@ func TestRunSubscriberQueueIsBoundedAndPreservesTerminal(t *testing.T) {
 }
 
 func TestRunSubscriberCloseReleasesQueueAndRejectsLateEvents(t *testing.T) {
-	sub := &runSubscriber{
+	sub := &subscriber{
 		wake: make(chan struct{}, 1),
 		stop: make(chan struct{}),
 	}
@@ -396,7 +396,7 @@ func TestRunSubscriberCloseReleasesQueueAndRejectsLateEvents(t *testing.T) {
 }
 
 func TestHub_AbortReleasesPausedRunBeforeNextStep(t *testing.T) {
-	hub := NewRunHub(nil)
+	hub := NewHub(nil)
 	const runID = "abort-paused"
 	hub.Send(runID, ControlSignal{Kind: CtrlPause})
 	if signal := hub.Poll(runID); signal.Kind != CtrlPause {
@@ -420,7 +420,7 @@ func TestHub_AbortReleasesPausedRunBeforeNextStep(t *testing.T) {
 }
 
 func TestHub_ResumeCancelsQueuedPause(t *testing.T) {
-	hub := NewRunHub(nil)
+	hub := NewHub(nil)
 	const runID = "resume-before-pause"
 	hub.Send(runID, ControlSignal{Kind: CtrlPause})
 	if err := hub.Resume(runID); err != nil {
@@ -437,10 +437,10 @@ func TestHub_PersistsPauseAndResume(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	hub := NewRunHub(&RunStore{db: db})
+	hub := NewHub(&Store{db: db})
 	const runID = "persist-control"
 	mock.ExpectExec("UPDATE agent_runs SET status=\\? WHERE id=\\? AND status=\\?").
-		WithArgs(RunStatusPaused, runID, RunStatusRunning).
+		WithArgs(StatusPaused, runID, StatusRunning).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	hub.Send(runID, ControlSignal{Kind: CtrlPause})
 	if signal := hub.Poll(runID); signal.Kind != CtrlPause {
@@ -448,7 +448,7 @@ func TestHub_PersistsPauseAndResume(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE agent_runs SET status=\\? WHERE id=\\? AND status=\\?").
-		WithArgs(RunStatusRunning, runID, RunStatusPaused).
+		WithArgs(StatusRunning, runID, StatusPaused).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := hub.Resume(runID); err != nil {
 		t.Fatalf("Resume: %v", err)
@@ -459,7 +459,7 @@ func TestHub_PersistsPauseAndResume(t *testing.T) {
 }
 
 func TestHubBroadcastsOnlyTemporaryPreviewForToolResults(t *testing.T) {
-	hub := NewRunHub(nil)
+	hub := NewHub(nil)
 	const runID = "tool-preview"
 	channel := hub.Subscribe(runID)
 	content := strings.Repeat("authoritative-", 200)

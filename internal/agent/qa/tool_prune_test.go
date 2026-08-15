@@ -69,7 +69,7 @@ func TestPrunedToolIDSetIsBaseUnionRouted(t *testing.T) {
 		scenarioTool("observe_logs"),
 		scenarioTool("search_config"),
 	)
-	svc := &QA{}
+	svc := &Service{}
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 	allowed := svc.prunedToolIDSet(snapshot.Tools(), []string{"observe_logs"})
 

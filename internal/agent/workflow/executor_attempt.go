@@ -7,36 +7,38 @@ import (
 	"fmt"
 	"time"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
 func (orchestrator *Orchestrator) executeNodeAttempt(
 	nodeCtx context.Context,
-	definition WorkflowDefinition,
+	definition Definition,
 	request RunRequest,
 	nodeRequest NodeRequest,
-	account *workflowBudgetAccount,
+	account *budgetAccount,
 	observer RunObserver,
 ) nodeOutcome {
 	nodeCtx = runtrace.WithCorrelation(nodeCtx, runtrace.Correlation{
 		RunID: nodeRequest.WorkflowRunID, WorkflowRunID: nodeRequest.WorkflowRunID,
 		WorkflowNodeID: nodeRequest.Node.ID,
 	})
-	outcome, err := runtrace.Invoke(nodeCtx, workflowNodeTraceSpec, nodeRequest, func(nodeCtx context.Context, _ NodeRequest) (nodeOutcome, error) {
-		outcome := orchestrator.executeNodeAttemptUntraced(nodeCtx, definition, request, nodeRequest, account, observer)
+	outcome, err := runtrace.Invoke(nodeCtx, nodeTraceSpec, nodeRequest, func(nodeCtx context.Context, _ NodeRequest) (nodeOutcome, error) {
+		outcome := orchestrator.executeAttempt(nodeCtx, definition, request, nodeRequest, account, observer)
 		return outcome, outcome.err
 	})
 	outcome.err = err
 	return outcome
 }
 
-func (orchestrator *Orchestrator) executeNodeAttemptUntraced(
+func (orchestrator *Orchestrator) executeAttempt(
 	nodeCtx context.Context,
-	definition WorkflowDefinition,
+	definition Definition,
 	request RunRequest,
 	nodeRequest NodeRequest,
-	account *workflowBudgetAccount,
+	account *budgetAccount,
 	observer RunObserver,
 ) nodeOutcome {
 	node := nodeRequest.Node
@@ -67,7 +69,20 @@ func (orchestrator *Orchestrator) executeNodeAttemptUntraced(
 			request.RunID,
 			node,
 			inputs,
-			nodeRequest.UnavailablePredecessors,
+			unavailableTaskViews(
+				nodeRequest.UnavailablePredecessors,
+				nodeRequest.UnavailableReasons,
+			),
+			nodeRequest.BaselineEvidence,
+			definition.Budget.MaxDuplicateRatio,
+			definition.Budget.MaxHandoffBytes,
+		)
+	case NodeVerifier:
+		handoff, executeErr = orchestrator.verifyEvidence(
+			nodeCtx,
+			request.RunID,
+			node,
+			inputs,
 			definition.Budget.MaxHandoffBytes,
 		)
 	case NodeGate:
@@ -89,15 +104,26 @@ func (orchestrator *Orchestrator) executeNodeAttemptUntraced(
 		if gateDecision.EvaluatedAt.IsZero() {
 			gateDecision.EvaluatedAt = time.Now().UTC()
 		}
-		payload, err := json.Marshal(gateDecision)
-		if err != nil {
-			executeErr = fmt.Errorf("marshal gate decision: %w", err)
-			break
+		if node.Gate.ForwardInput {
+			source := inputs[0]
+			handoff = Handoff{
+				Schema:            node.OutputSchema,
+				Payload:           append(json.RawMessage(nil), source.Payload...),
+				References:        append([]agentapi.Reference(nil), source.References...),
+				EvidenceUnits:     evidence.CloneUnits(source.EvidenceUnits),
+				EvidenceConflicts: cloneConflicts(source.EvidenceConflicts),
+				Completeness:      source.Completeness,
+			}
+		} else {
+			payload, err := json.Marshal(gateDecision)
+			if err != nil {
+				executeErr = fmt.Errorf("marshal gate decision: %w", err)
+				break
+			}
+			handoff = Handoff{
+				Schema: node.OutputSchema, Payload: payload, Completeness: Complete,
+			}
 		}
-		handoff, executeErr = PrepareHandoff(Handoff{
-			WorkflowRunID: request.RunID, ProducerNodeID: node.ID,
-			Schema: node.OutputSchema, Payload: payload, Completeness: Complete,
-		}, definition.Budget.MaxHandoffBytes, orchestrator.schemas)
 		decision = &gateDecision
 	case NodeHumanApproval:
 		executeErr = ErrHumanApprovalRequired
@@ -176,7 +202,8 @@ func retryableNodeFailure(request NodeRequest, runErr error) bool {
 			!(request.Node.Kind == NodeTransform && request.Node.RetrySafe)) ||
 		(scope.HasSideEffect(request.EffectivePermissions.Scopes) &&
 			!(request.Node.Kind == NodeAgent && request.Node.RetrySafe)) ||
-		errors.Is(runErr, ErrWorkflowBudgetExhausted) ||
+		errors.Is(runErr, ErrNoAffordableTask) ||
+		errors.Is(runErr, ErrBudgetExhausted) ||
 		errors.Is(runErr, context.Canceled) ||
 		errors.Is(runErr, context.DeadlineExceeded) {
 		return false

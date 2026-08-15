@@ -11,29 +11,35 @@ import (
 
 // CompilationPolicy fixes every executable choice that a planner cannot make.
 type CompilationPolicy struct {
-	WorkflowID              string
-	WorkflowVersion         int64
-	Purpose                 string
-	InputSchema             agentapi.SchemaRef
-	OutputSchema            agentapi.SchemaRef
-	Permissions             agentapi.PermissionPolicy
-	CallerPermissions       agentapi.PermissionPolicy
-	Budget                  WorkflowBudget
-	NodeTimeout             time.Duration
-	CapabilityBudgets       map[string]NodeBudget
-	CapabilityVersions      map[string]int64
-	MaxTasks                int
-	MaxParallelism          int
-	MaxAttempts             int
-	MaxRounds               int
-	MaxDepth                int
-	RequiredGoals           []string
-	JoinID                  string
-	JoinMode                JoinMode
-	JoinInputSchema         agentapi.SchemaRef
-	JoinOutputSchema        agentapi.SchemaRef
-	RejectEvidenceConflicts bool
-	FailureMode             FailureMode
+	WorkflowID               string
+	WorkflowVersion          int64
+	Purpose                  string
+	InputSchema              agentapi.SchemaRef
+	OutputSchema             agentapi.SchemaRef
+	Permissions              agentapi.PermissionPolicy
+	CallerPermissions        agentapi.PermissionPolicy
+	Budget                   Budget
+	NodeTimeout              time.Duration
+	CapabilityBudgets        map[string]NodeBudget
+	CapabilityVersions       map[string]int64
+	MaxTasks                 int
+	MaxParallelism           int
+	MaxAttempts              int
+	MaxRounds                int
+	MaxDepth                 int
+	RequiredGoals            []string
+	HighRiskGoals            []string
+	HighRiskMinimumTrustTier int
+	JoinID                   string
+	JoinMode                 JoinMode
+	JoinInputSchema          agentapi.SchemaRef
+	JoinOutputSchema         agentapi.SchemaRef
+	VerifierID               string
+	VerifierInputSchema      agentapi.SchemaRef
+	VerifierOutputSchema     agentapi.SchemaRef
+	RejectEvidenceConflicts  bool
+	RiskGateID               string
+	FailureMode              FailureMode
 }
 
 // ProposalCompiler resolves planner choices through immutable server registries.
@@ -59,7 +65,7 @@ func NewProposalCompiler(
 func (compiler *ProposalCompiler) Compile(
 	proposal agentapi.TaskGraphProposal,
 	policy CompilationPolicy,
-) (WorkflowDefinition, error) {
+) (Definition, error) {
 	return compiler.CompileContext(context.Background(), proposal, policy)
 }
 
@@ -68,32 +74,32 @@ func (compiler *ProposalCompiler) CompileContext(
 	ctx context.Context,
 	proposal agentapi.TaskGraphProposal,
 	policy CompilationPolicy,
-) (WorkflowDefinition, error) {
+) (Definition, error) {
 	if compiler == nil || compiler.schemas == nil || compiler.capabilities == nil {
-		return WorkflowDefinition{}, fmt.Errorf("proposal compiler is unavailable")
+		return Definition{}, fmt.Errorf("proposal compiler is unavailable")
 	}
 	definition, err := runtrace.Invoke(
 		ctx,
-		taskGraphProposedTraceSpec,
+		proposalTraceSpec,
 		taskGraphTraceInput{proposal: proposal, policy: policy},
 		func(
 			_ context.Context,
 			input taskGraphTraceInput,
-		) (WorkflowDefinition, error) {
+		) (Definition, error) {
 			return compiler.compileUntraced(input.proposal, input.policy)
 		},
 	)
 	if err != nil {
-		return WorkflowDefinition{}, err
+		return Definition{}, err
 	}
 	_, _ = runtrace.Invoke(
 		ctx,
-		taskGraphAcceptedTraceSpec,
+		acceptanceTraceSpec,
 		definition,
 		func(
 			_ context.Context,
-			input WorkflowDefinition,
-		) (WorkflowDefinition, error) {
+			input Definition,
+		) (Definition, error) {
 			return input, nil
 		},
 	)
@@ -103,18 +109,18 @@ func (compiler *ProposalCompiler) CompileContext(
 func (compiler *ProposalCompiler) compileUntraced(
 	proposal agentapi.TaskGraphProposal,
 	policy CompilationPolicy,
-) (WorkflowDefinition, error) {
+) (Definition, error) {
 	validated, err := compiler.validate(proposal, policy)
 	if err != nil {
-		return WorkflowDefinition{}, err
+		return Definition{}, err
 	}
 	definition, err := compiler.compile(validated, policy)
 	if err != nil {
-		return WorkflowDefinition{}, err
+		return Definition{}, err
 	}
 	prepared, err := Prepare(definition, compiler.schemas)
 	if err != nil {
-		return WorkflowDefinition{}, fmt.Errorf("prepare compiled workflow: %w", err)
+		return Definition{}, fmt.Errorf("prepare compiled workflow: %w", err)
 	}
 	return prepared, nil
 }
@@ -124,9 +130,9 @@ type taskGraphTraceInput struct {
 	policy   CompilationPolicy
 }
 
-var taskGraphProposedTraceSpec = runtrace.Spec[
+var proposalTraceSpec = runtrace.Spec[
 	taskGraphTraceInput,
-	WorkflowDefinition,
+	Definition,
 ]{
 	Operation: "task_graph.proposed",
 	Node:      "task_graph.proposed",
@@ -153,17 +159,18 @@ var taskGraphProposedTraceSpec = runtrace.Spec[
 			"tasks":            tasks,
 			"edges":            edges,
 			"stop": map[string]any{
-				"max_tasks":       input.proposal.Stop.MaxTasks,
-				"max_parallelism": input.proposal.Stop.MaxParallelism,
-				"max_attempts":    input.proposal.Stop.MaxAttempts,
-				"max_rounds":      input.proposal.Stop.MaxRounds,
-				"max_depth":       input.proposal.Stop.MaxDepth,
+				"max_tasks":           input.proposal.Stop.MaxTasks,
+				"max_parallelism":     input.proposal.Stop.MaxParallelism,
+				"max_attempts":        input.proposal.Stop.MaxAttempts,
+				"max_rounds":          input.proposal.Stop.MaxRounds,
+				"max_depth":           input.proposal.Stop.MaxDepth,
+				"max_duplicate_ratio": input.proposal.Stop.MaxDuplicateRatio,
 			},
 		}
 	},
 	Output: func(
 		_ taskGraphTraceInput,
-		output WorkflowDefinition,
+		output Definition,
 		err error,
 	) map[string]any {
 		if err != nil {
@@ -177,13 +184,13 @@ var taskGraphProposedTraceSpec = runtrace.Spec[
 	},
 }
 
-var taskGraphAcceptedTraceSpec = runtrace.Spec[
-	WorkflowDefinition,
-	WorkflowDefinition,
+var acceptanceTraceSpec = runtrace.Spec[
+	Definition,
+	Definition,
 ]{
 	Operation: "task_graph.accepted",
 	Node:      "task_graph.accepted",
-	Input: func(input WorkflowDefinition) map[string]any {
+	Input: func(input Definition) map[string]any {
 		return map[string]any{
 			"workflow_id":      input.ID,
 			"workflow_version": input.Version,
@@ -191,8 +198,8 @@ var taskGraphAcceptedTraceSpec = runtrace.Spec[
 		}
 	},
 	Output: func(
-		_ WorkflowDefinition,
-		output WorkflowDefinition,
+		_ Definition,
+		output Definition,
 		_ error,
 	) map[string]any {
 		nodes := make([]map[string]any, 0, len(output.Nodes))
@@ -211,10 +218,11 @@ var taskGraphAcceptedTraceSpec = runtrace.Spec[
 		return map[string]any{
 			"nodes": nodes,
 			"budget": map[string]any{
-				"max_nodes":       output.Budget.MaxNodes,
-				"max_parallelism": output.Budget.MaxParallelism,
-				"max_tool_calls":  output.Budget.MaxToolCalls,
-				"max_retries":     output.Budget.MaxRetries,
+				"max_nodes":           output.Budget.MaxNodes,
+				"max_parallelism":     output.Budget.MaxParallelism,
+				"max_duplicate_ratio": output.Budget.MaxDuplicateRatio,
+				"max_tool_calls":      output.Budget.MaxToolCalls,
+				"max_retries":         output.Budget.MaxRetries,
 			},
 		}
 	},
@@ -225,8 +233,9 @@ type validatedProposal struct {
 	edges          []agentapi.TaskEdge
 	maxParallelism int
 	maxDepth       int
-	workflowBudget WorkflowBudget
+	workflowBudget Budget
 	joinTargets    map[string]bool
+	terminalID     string
 }
 
 type validatedTask struct {

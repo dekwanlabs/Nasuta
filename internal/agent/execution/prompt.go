@@ -15,7 +15,7 @@ const (
 // the source text lives in the central embedded catalog.
 var (
 	userVisibleAnswerPrompt = prompts.Text(prompts.AgentQAUserVisibleAnswer)
-	systemPrompt            = withUserVisibleAnswer(promptWithRolePlaceholder(prompts.AgentQACore))
+	systemPrompt            = withUserVisibleAnswer(withRolePlaceholder(prompts.AgentQACore))
 	defaultIdentity         = prompts.Text(prompts.AgentQADefaultIdentity)
 )
 
@@ -23,7 +23,7 @@ func withUserVisibleAnswer(prompt string) string {
 	return prompt + "\n\n" + userVisibleAnswerPrompt
 }
 
-func promptWithRolePlaceholder(id prompts.ID) string {
+func withRolePlaceholder(id prompts.ID) string {
 	content := prompts.Text(id)
 	if !strings.Contains(content, rolePromptAction) {
 		panic("agent: role-aware prompt is missing its role template action")

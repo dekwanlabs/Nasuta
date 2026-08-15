@@ -64,8 +64,78 @@ func TestProposalCompilerPinsCapabilitiesAndInsertsJoin(t *testing.T) {
 			t.Fatalf("compiled edge = %+v", edge)
 		}
 	}
-	if err := NewCatalog(schemas, agents).Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := NewCatalog(schemas, agents).Publish([]Definition{definition}); err != nil {
 		t.Fatalf("publish compiled workflow: %v", err)
+	}
+}
+
+func TestProposalCompilerOwnsVerifierBoundary(t *testing.T) {
+	compiler, _, _, _ := proposalTestCompiler(t)
+	proposal := proposalTestGraph()
+	proposal.Stop.MaxDepth = 4
+	policy := proposalTestPolicy()
+	policy.Budget.MaxNodes = 5
+	policy.Budget.MaxDepth = 4
+	policy.MaxDepth = 4
+	policy.VerifierID = "evidence.verify"
+	policy.VerifierInputSchema = agentapi.SchemaRef{
+		ID: "review.report.list", Version: 1,
+	}
+	policy.VerifierOutputSchema = agentapi.SchemaRef{
+		ID: "review.report.list", Version: 1,
+	}
+
+	definition, err := compiler.Compile(proposal, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definition.Nodes) != 5 || definition.Budget.MaxNodes != 5 {
+		t.Fatalf("compiled workflow = %+v", definition)
+	}
+	nodes := make(map[string]NodeDefinition, len(definition.Nodes))
+	edges := make(map[string]bool, len(definition.Edges))
+	for _, node := range definition.Nodes {
+		nodes[node.ID] = node
+	}
+	for _, edge := range definition.Edges {
+		edges[edge.From+"\x00"+edge.To] = edge.Required
+	}
+	verifier := nodes["evidence.verify"]
+	if verifier.Kind != NodeVerifier || verifier.Verifier == nil ||
+		verifier.Verifier.RejectEvidenceConflicts ||
+		!edges["evidence.join\x00evidence.verify"] ||
+		!edges["evidence.verify\x00synthesize"] {
+		t.Fatalf("server-owned verifier = node:%+v edges:%+v", verifier, definition.Edges)
+	}
+
+	tooShallow := policy
+	tooShallow.MaxDepth = 3
+	shallowProposal := proposal
+	shallowProposal.Stop.MaxDepth = 3
+	if _, err := compiler.Compile(shallowProposal, tooShallow); err == nil ||
+		!strings.Contains(err.Error(), "depth 4 exceeds limit 3") {
+		t.Fatalf("verifier depth error = %v", err)
+	}
+
+	tooSmall := policy
+	tooSmall.Budget.MaxNodes = 4
+	if _, err := compiler.Compile(proposal, tooSmall); err == nil ||
+		!strings.Contains(err.Error(), "has 5 nodes") {
+		t.Fatalf("verifier node budget error = %v", err)
+	}
+
+	conflicting := proposal
+	conflicting.Tasks = append([]agentapi.TaskSpec(nil), proposal.Tasks...)
+	conflicting.Edges = append([]agentapi.TaskEdge(nil), proposal.Edges...)
+	conflicting.Tasks[0].ID = policy.VerifierID
+	for index := range conflicting.Edges {
+		if conflicting.Edges[index].From == "inspect.code" {
+			conflicting.Edges[index].From = policy.VerifierID
+		}
+	}
+	if _, err := compiler.Compile(conflicting, policy); err == nil ||
+		!strings.Contains(err.Error(), `compiled verifier id "evidence.verify" conflicts`) {
+		t.Fatalf("planner-owned verifier error = %v", err)
 	}
 }
 
@@ -160,13 +230,6 @@ func TestProposalCompilerRejectsPlannerExpansion(t *testing.T) {
 			want: "must match capability",
 		},
 		{
-			name: "optional required goal",
-			change: func(proposal *agentapi.TaskGraphProposal, _ *CompilationPolicy) {
-				proposal.Tasks[0].Optional = true
-			},
-			want: "has no non-optional task",
-		},
-		{
 			name: "dependent parallel tasks",
 			change: func(proposal *agentapi.TaskGraphProposal, _ *CompilationPolicy) {
 				proposal.Tasks[2].ParallelGroup = "investigation"
@@ -192,6 +255,40 @@ func TestProposalCompilerRejectsPlannerExpansion(t *testing.T) {
 				t.Fatalf("Compile error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestProposalCompilerAllowsDuplicateRatioTightening(t *testing.T) {
+	compiler, _, _, _ := proposalTestCompiler(t)
+	proposal := proposalTestGraph()
+	proposal.Stop.MaxDuplicateRatio = 0.6
+	policy := proposalTestPolicy()
+	policy.Budget.MaxDuplicateRatio = 0.8
+
+	definition, err := compiler.Compile(proposal, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if definition.Budget.MaxDuplicateRatio != 0.6 {
+		t.Fatalf(
+			"compiled duplicate ratio = %v, want 0.6",
+			definition.Budget.MaxDuplicateRatio,
+		)
+	}
+
+	proposal.Stop.MaxDuplicateRatio = 0.9
+	if _, err := compiler.Compile(proposal, policy); err == nil ||
+		!strings.Contains(err.Error(), "exceeds server limit") {
+		t.Fatalf("expanded duplicate ratio error = %v", err)
+	}
+}
+
+func TestProposalCompilerAllowsOptionalTaskForRequiredGoal(t *testing.T) {
+	compiler, _, _, _ := proposalTestCompiler(t)
+	proposal := proposalTestGraph()
+	proposal.Tasks[0].Optional = true
+	if _, err := compiler.Compile(proposal, proposalTestPolicy()); err != nil {
+		t.Fatalf("Compile optional required-goal task: %v", err)
 	}
 }
 
@@ -247,6 +344,7 @@ func TestProposalCompilerRequiresRetrySafeWriteCapability(t *testing.T) {
 		PermissionScope: []string{
 			"knowledge.read", "knowledge.write",
 		},
+		Freshness:      agentapi.FreshnessStable,
 		SideEffects:    agentapi.SideEffectWrite,
 		RetrySafe:      false,
 		MaxConcurrency: 1,
@@ -350,6 +448,7 @@ func proposalTestCompiler(
 			OutputSchema:    agentapi.SchemaRef{ID: "review.report", Version: 1},
 			ToolIDs:         []string{"search_docs"},
 			PermissionScope: []string{"knowledge.read"},
+			Freshness:       agentapi.FreshnessStable,
 			SideEffects:     agentapi.SideEffectNone, RetrySafe: true,
 			MaxConcurrency: 1, Enabled: true,
 			Agent: agentapi.DefinitionRef{ID: "proposal.docs", Version: 1},
@@ -360,6 +459,7 @@ func proposalTestCompiler(
 			InputSchema:     agentapi.SchemaRef{ID: "review.report.list", Version: 1},
 			OutputSchema:    agentapi.SchemaRef{ID: "review.report", Version: 1},
 			PermissionScope: []string{"knowledge.read"},
+			Freshness:       agentapi.FreshnessStable,
 			SideEffects:     agentapi.SideEffectNone, RetrySafe: true,
 			MaxConcurrency: 1, Enabled: true,
 			Agent: agentapi.DefinitionRef{ID: "proposal.synthesizer", Version: 1},
@@ -384,6 +484,7 @@ func proposalCodeCapability() agentapi.Capability {
 		OutputSchema:    agentapi.SchemaRef{ID: "review.report", Version: 1},
 		ToolIDs:         []string{"search_code"},
 		PermissionScope: []string{"knowledge.read"},
+		Freshness:       agentapi.FreshnessStable,
 		SideEffects:     agentapi.SideEffectNone, RetrySafe: true,
 		MaxConcurrency: 2, Enabled: true,
 		Agent: agentapi.DefinitionRef{ID: "proposal.code", Version: 1},
@@ -437,8 +538,9 @@ func proposalTestPolicy() CompilationPolicy {
 		CallerPermissions: agentapi.PermissionPolicy{
 			Scopes: []string{"knowledge.read"},
 		},
-		Budget: WorkflowBudget{
-			MaxNodes: 4, MaxParallelism: 2, Timeout: time.Second,
+		Budget: Budget{
+			MaxNodes: 4, MaxParallelism: 2, MaxRounds: 1, MaxDepth: 3,
+			Timeout:         time.Second,
 			MaxHandoffBytes: 4096,
 			MaxInputTokens:  1000, MaxOutputTokens: 1000, MaxTotalTokens: 2000,
 			MaxToolCalls: 10, MaxRetries: 3,

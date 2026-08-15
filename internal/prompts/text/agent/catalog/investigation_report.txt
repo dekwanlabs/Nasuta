@@ -3,7 +3,9 @@
 Return exactly one JSON object with only:
 - "focus": "{{ .Focus }}"
 - "summary": concise evidence-based summary
-- "findings": array of {"claim": string, "evidence": [{"kind": string, "reference": string, "summary": string}], "confidence": number from 0 to 1}
+- "findings": array of {"claim": string, "goal_ids": [required facet strings], "evidence": [{"kind": string, "reference": string, "summary": string, "identity": optional {"source_kind": string, "target": string, "section": optional string, "version": optional string, "time_range": optional string}}], "confidence": number from 0 to 1}
 - "gaps": array of strings
+- "covered_goals": required facet strings supported by at least one concrete finding
+- "unresolved_goals": every remaining required facet string
 
-Every finding must cite concrete tool-returned evidence. Put unsupported conclusions and unavailable evidence in gaps. Do not return markdown or text outside the JSON object.
+The workflow task directive supplies the exact required facet strings. Partition every required facet into exactly one of covered_goals or unresolved_goals. Every covered goal must appear in goal_ids on a finding backed by concrete task-contract seed material or tool-returned evidence. Copy the canonical evidence identity exactly when the seed material or tool result provides one; never invent, normalize, or broaden an identity. Put unsupported conclusions and unavailable evidence in gaps. Do not return markdown or text outside the JSON object.

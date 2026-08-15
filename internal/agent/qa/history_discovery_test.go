@@ -47,7 +47,7 @@ func TestHistoryCandidateDiscoveryStartsAsynchronously(t *testing.T) {
 		started: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	task := startHistoryCandidateDiscovery(
+	task := startHistoryDiscovery(
 		context.Background(), stub, 42,
 		ConversationContext{SessionID: "session-1", CompactedThroughTurn: 3},
 		"继续看刚才的问题",
@@ -79,7 +79,7 @@ func TestHistoryCandidateDiscoveryStartsAsynchronously(t *testing.T) {
 
 func TestReassemblePreparedConversationUsesDefinitionHistoryBudget(t *testing.T) {
 	stub := &candidateDiscoveryHistoryStub{}
-	svc := &QA{
+	svc := &Service{
 		history:       stub,
 		contextWindow: 128000,
 		outputReserve: 16000,
@@ -87,8 +87,8 @@ func TestReassemblePreparedConversationUsesDefinitionHistoryBudget(t *testing.T)
 	source := ConversationContext{
 		SessionID: "session-1", CompactedThroughTurn: 3,
 	}
-	prepared := &qaPreparation{
-		request: QARequest{
+	prepared := &preparation{
+		request: Request{
 			Question: "继续看刚才的证据", UserID: 42,
 			Conversation: ConversationContext{RetrievedHistory: "assembled-with-platform-default"},
 		},
@@ -98,7 +98,7 @@ func TestReassemblePreparedConversationUsesDefinitionHistoryBudget(t *testing.T)
 		},
 	}
 
-	if err := svc.reassemblePreparedConversation(
+	if err := svc.reassembleConversation(
 		t.Context(), prepared, 8192, 2048,
 	); err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestReassemblePreparedConversationUsesDefinitionHistoryBudget(t *testing.T)
 
 func TestAssembleContextMaterializesEarlyCandidatesUnlessHistoryDependencyRequiresRecall(t *testing.T) {
 	stub := &candidateDiscoveryHistoryStub{}
-	svc := &QA{
+	svc := &Service{
 		history:       stub,
 		contextWindow: 4096,
 	}

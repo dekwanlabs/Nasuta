@@ -140,7 +140,7 @@ func TestWorkflowStreamReplaysThenSwitchesLiveWithOneAuthorization(t *testing.T)
 		Kind: "workflow_succeeded", Summary: "succeeded",
 	}
 	workflows := &recordingService{
-		run: workflow.WorkflowRunRecord{
+		run: workflow.RunRecord{
 			ID: "workflow_1", ActorUserID: 7, Status: workflow.RunRunning,
 		},
 		reader: reader,
@@ -183,7 +183,7 @@ func TestWorkflowStreamResumesAfterLastEventIDAndExitsAtTerminalRun(t *testing.T
 		},
 	}}
 	workflows := &recordingService{
-		run: workflow.WorkflowRunRecord{
+		run: workflow.RunRecord{
 			ID: "workflow_1", ActorUserID: 7, Status: workflow.RunSucceeded,
 		},
 		reader: reader,

@@ -42,7 +42,7 @@ type compiledLoop struct {
 	stepLimit            int
 }
 
-func (agent *Agent) prepareCompiledLoop(
+func (agent *Agent) prepareLoop(
 	ctx context.Context,
 	runCtx context.Context,
 	loopCtx context.Context,
@@ -68,7 +68,7 @@ func (agent *Agent) prepareCompiledLoop(
 	log.InfofCtx(ctx, "[agent] run %s request compiled in %s: messages=%d contextChars=%d",
 		runID, time.Since(historyStarted), len(messages), contextChars(messages))
 
-	tools := agent.prepareToolDefinitions(ctx, runID, input, toolSnapshot)
+	tools := agent.prepareTools(ctx, runID, input, toolSnapshot)
 	result := &RunResult{RunID: runID}
 	if input.EvidenceSeeded {
 		result.Evidence.ResultCount = 1
@@ -96,7 +96,7 @@ func (agent *Agent) prepareCompiledLoop(
 	return state
 }
 
-func (agent *Agent) prepareToolDefinitions(
+func (agent *Agent) prepareTools(
 	ctx context.Context,
 	runID string,
 	input Input,
@@ -148,26 +148,26 @@ func (state *compiledLoop) recordSeedEvidence(observer Observer) {
 	})
 }
 
-func (agent *Agent) finishCompiledLoop(state *compiledLoop) {
+func (agent *Agent) finishLoop(state *compiledLoop) {
 	if !state.answered && !state.result.Aborted && state.result.Err == nil {
 		state.result.ForcedConclusion = true
 		state.result.Evidence.ForcedConclusion = true
 		log.InfofCtx(state.ctx, "[agent] run %s forcing conclusion (steps=%d)",
 			state.runID, state.result.Steps)
-		agent.concludeCompiledLoop(state)
+		agent.concludeLoop(state)
 	}
-	agent.finalizeCompiledLoop(state)
+	agent.finalizeLoop(state)
 }
 
-func (agent *Agent) finalizeCompiledLoop(state *compiledLoop) {
+func (agent *Agent) finalizeLoop(state *compiledLoop) {
 	state.result.EvidenceUnits, state.result.EvidenceConflicts = state.evidenceLedger.snapshot()
 	state.result.Evidence.Finalize(state.input.Direct)
 	log.InfofCtx(state.ctx, "[agent] run %s end: steps=%d answerLen=%d aborted=%v err=%v",
 		state.runID, state.result.Steps, len(state.result.Answer), state.result.Aborted, state.result.Err)
 }
 
-func (agent *Agent) concludeCompiledLoop(state *compiledLoop) {
-	if _, err := agent.compactRunContextBeforeAnswer(state, nil, "forced_conclusion"); err != nil {
+func (agent *Agent) concludeLoop(state *compiledLoop) {
+	if _, err := agent.compactAnswerContext(state, nil, "forced_conclusion"); err != nil {
 		state.result.Err = fmt.Errorf("compact context before forced conclusion: %w", err)
 		log.ErrorfCtx(state.ctx, "[agent] run %s final-answer context compaction failed: %v",
 			state.runID, err)

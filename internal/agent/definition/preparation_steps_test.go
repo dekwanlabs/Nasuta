@@ -12,8 +12,8 @@ import (
 
 func TestDefinitionManagedRunRecordsPreparationStepsBeforeRuntimeSteps(t *testing.T) {
 	const runID = "run-with-prefetch"
-	runtime := &DefinitionRuntime{hub: agentrun.NewRunHub(nil)}
-	run := &definitionManagedRun{
+	runtime := &Runtime{hub: agentrun.NewHub(nil)}
+	run := &activeRun{
 		runtime: runtime,
 		start:   agentapi.RunStart{RunID: runID},
 	}
@@ -41,8 +41,8 @@ func TestDefinitionManagedRunRecordsPreparationStepsBeforeRuntimeSteps(t *testin
 		},
 	}
 	for _, step := range steps {
-		if err := run.RecordPreparationStep(t.Context(), step); err != nil {
-			t.Fatalf("RecordPreparationStep: %v", err)
+		if err := run.RecordStep(t.Context(), step); err != nil {
+			t.Fatalf("RecordStep: %v", err)
 		}
 	}
 
@@ -92,7 +92,7 @@ func TestDefinitionManagedRunRecordsPreparationStepsBeforeRuntimeSteps(t *testin
 		t.Fatal("missing offset runtime event")
 	}
 
-	merged := run.mergePreparationOutcome(agentrun.RunOutcome{
+	merged := run.mergePreparationOutcome(agentrun.Outcome{
 		StepCount: 3,
 		Evidence: agentrun.EvidenceMetrics{
 			Status:        agentrun.EvidenceComplete,

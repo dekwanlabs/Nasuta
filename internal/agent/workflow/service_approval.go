@@ -17,7 +17,7 @@ func (service *Service) Cancel(
 	if _, err := service.GetRun(ctx, runID, userID, admin); err != nil {
 		return CancelTransition{}, err
 	}
-	transition, err := service.store.CancelWorkflow(ctx, runID, time.Now().UTC())
+	transition, err := service.store.CancelRun(ctx, runID, time.Now().UTC())
 	if err != nil {
 		return CancelTransition{}, err
 	}
@@ -41,7 +41,7 @@ func (service *Service) DecideHumanApproval(
 	if orchestrator == nil {
 		return ApprovalResult{}, ErrUnavailable
 	}
-	prepared, err := prepareApprovalRequest(request)
+	prepared, err := prepareApproval(request)
 	if err != nil {
 		return ApprovalResult{}, err
 	}
@@ -116,7 +116,7 @@ func (service *Service) DecideHumanApproval(
 			)
 		}
 	}
-	approval := WorkflowApproval{
+	approval := Approval{
 		WorkflowRunID:    state.Run.ID,
 		NodeID:           node.ID,
 		Decision:         prepared.Decision,
@@ -147,7 +147,7 @@ func (service *Service) DecideHumanApproval(
 		}
 		approvedHandoff = &handoff
 	}
-	transition, err := service.store.DecideHumanApproval(ctx, approval, approvedHandoff)
+	transition, err := service.store.DecideApproval(ctx, approval, approvedHandoff)
 	if err != nil {
 		return ApprovalResult{}, err
 	}
@@ -170,7 +170,7 @@ func (service *Service) DecideHumanApproval(
 	return approvalResult, nil
 }
 
-func prepareApprovalRequest(request ApprovalRequest) (ApprovalRequest, error) {
+func prepareApproval(request ApprovalRequest) (ApprovalRequest, error) {
 	prepared := request
 	prepared.WorkflowRunID = strings.TrimSpace(prepared.WorkflowRunID)
 	prepared.NodeID = strings.TrimSpace(prepared.NodeID)

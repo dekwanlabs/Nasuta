@@ -11,7 +11,7 @@ import (
 )
 
 func TestBuildAgentMessagesUsesRecalledHistoryAndRecentTail(t *testing.T) {
-	agent := &Agent{cfg: AgentConfig{HistoryLimit: 2}}
+	agent := &Agent{cfg: Config{HistoryLimit: 2}}
 	conversation := ConversationContext{
 		RetrievedHistory:     `{"version":1,"mode":"hybrid","turns":[{"ref":"cmp-124","turn":2,"summary":"recalled finding"}]}`,
 		CompactedThroughTurn: 4,
@@ -28,7 +28,7 @@ func TestBuildAgentMessagesUsesRecalledHistoryAndRecentTail(t *testing.T) {
 		}},
 	}
 
-	got := agent.buildAgentMessages("current question", conversation, &retrieval.RetrievedContext{}, domain.DirectPlan())
+	got := agent.buildMessages("current question", conversation, &retrieval.RetrievedContext{}, domain.DirectPlan())
 	joined := ""
 	for _, message := range got {
 		joined += "\n" + message.Content
@@ -86,8 +86,8 @@ func TestReplayableTailMessagesDropsInvalidToolGroups(t *testing.T) {
 }
 
 func TestBuildAgentMessagesTreatsReferenceCountAsCandidates(t *testing.T) {
-	agent := &Agent{cfg: AgentConfig{HistoryLimit: 2}}
-	messages := agent.buildAgentMessages(
+	agent := &Agent{cfg: Config{HistoryLimit: 2}}
+	messages := agent.buildMessages(
 		"how does the complete flow work",
 		ConversationContext{},
 		&retrieval.RetrievedContext{Text: "seed evidence", HitCount: 22},

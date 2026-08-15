@@ -7,8 +7,8 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
-func TestCalculateModelUsageCeilingIncludesAllBoundedGenerationPaths(t *testing.T) {
-	ceiling, err := CalculateModelUsageCeiling(
+func TestUsageCeilingIncludesAllBoundedGenerationPaths(t *testing.T) {
+	ceiling, err := UsageCeiling(
 		agentapi.BudgetPolicy{
 			Timeout: time.Minute, MaxSteps: 4, ContextTokens: 32000,
 			MaxContinueRounds: 2,
@@ -35,8 +35,8 @@ func TestCalculateModelUsageCeilingIncludesAllBoundedGenerationPaths(t *testing.
 	}
 }
 
-func TestCalculateModelUsageCeilingRejectsIncompletePricing(t *testing.T) {
-	_, err := CalculateModelUsageCeiling(
+func TestUsageCeilingRejectsIncompletePricing(t *testing.T) {
+	_, err := UsageCeiling(
 		agentapi.BudgetPolicy{
 			Timeout: time.Minute, MaxSteps: 1, ContextTokens: 32000,
 		},

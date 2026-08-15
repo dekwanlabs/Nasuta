@@ -13,8 +13,8 @@ type HistoryCandidates struct {
 	Refs []string
 }
 
-// SessionHistory is the bounded current-session archive capability consumed by QA.
-type SessionHistory interface {
+// History is the bounded current-session archive capability consumed by QA.
+type History interface {
 	PrepareRecords([]memory.TurnContextRecord)
 	Recall(context.Context, int64, string, string, string, int) (string, error)
 	Find(context.Context, int64, string, string, int, int) (string, error)

@@ -260,7 +260,7 @@ func (handler *Handler) ListApis(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	result, err := handler.tools.ListApisResult(r.Context(), service, keyword, limit)
+	result, err := handler.tools.ListAPIsResult(r.Context(), service, keyword, limit)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
@@ -269,7 +269,7 @@ func (handler *Handler) ListApis(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) DocGapCheck(w http.ResponseWriter, r *http.Request) {
-	result, err := handler.tools.DocGapCheckResult(r.Context(), httputil.Query(r).Str("service"))
+	result, err := handler.tools.CheckDocsResult(r.Context(), httputil.Query(r).Str("service"))
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return

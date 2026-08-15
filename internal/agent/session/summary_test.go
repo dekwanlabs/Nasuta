@@ -84,7 +84,7 @@ func TestGenerateTurnCompactionSummariesBatchesLargeRanges(t *testing.T) {
 		}
 	}
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 100, server.Client())
-	summaries, err := GenerateTurnCompactionSummaries(t.Context(), client, records)
+	summaries, err := GenerateSummaries(t.Context(), client, records)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestGenerateTurnCompactionSummariesBatchesLargeRanges(t *testing.T) {
 }
 
 func TestPersistentSummaryTranscriptIncludesBoundedToolEvidence(t *testing.T) {
-	transcript := persistentSummaryTranscript([]llm.Message{
+	transcript := summaryTranscript([]llm.Message{
 		{Role: "user", Content: "查 trace abc123"},
 		{Role: "assistant", ToolCalls: []llm.ToolCall{{
 			ID: "call-1", Function: llm.ToolFunction{Name: "observe_logs", Arguments: `{"trace_id":"abc123"}`},

@@ -12,33 +12,33 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-type redactingDefinitionObserver struct {
+type redactingObserver struct {
 	next run.Observer
 }
 
-func (observer redactingDefinitionObserver) OnStep(
+func (observer redactingObserver) OnStep(
 	ctx context.Context,
 	runID string,
 	step run.StepRecord,
 ) error {
-	return observer.next.OnStep(ctx, runID, redactDefinitionStep(step))
+	return observer.next.OnStep(ctx, runID, redactStep(step))
 }
 
-func (observer redactingDefinitionObserver) OnToken(
+func (observer redactingObserver) OnToken(
 	ctx context.Context,
 	runID, token string,
 ) {
 	observer.next.OnToken(ctx, runID, platform.RedactSensitiveText(token))
 }
 
-func (observer redactingDefinitionObserver) OnReasoning(
+func (observer redactingObserver) OnReasoning(
 	ctx context.Context,
 	runID, token string,
 ) {
 	observer.next.OnReasoning(ctx, runID, platform.RedactSensitiveText(token))
 }
 
-func (observer redactingDefinitionObserver) OnContextUsage(
+func (observer redactingObserver) OnContextUsage(
 	ctx context.Context,
 	runID string,
 	event run.ContextUsageEvent,
@@ -48,7 +48,7 @@ func (observer redactingDefinitionObserver) OnContextUsage(
 	}
 }
 
-func (observer redactingDefinitionObserver) EmitPhase(runID, text string) {
+func (observer redactingObserver) EmitPhase(runID, text string) {
 	emitter, ok := observer.next.(interface {
 		EmitPhase(string, string)
 	})
@@ -57,7 +57,7 @@ func (observer redactingDefinitionObserver) EmitPhase(runID, text string) {
 	}
 }
 
-func redactDefinitionRequest(request agentapi.RunRequest) agentapi.RunRequest {
+func redactRequest(request agentapi.RunRequest) agentapi.RunRequest {
 	if !request.Policy.RedactSensitive {
 		return request
 	}
@@ -67,7 +67,7 @@ func redactDefinitionRequest(request agentapi.RunRequest) agentapi.RunRequest {
 	return request
 }
 
-func redactDefinitionStart(start agentapi.RunStart) agentapi.RunStart {
+func redactStart(start agentapi.RunStart) agentapi.RunStart {
 	if !start.Policy.RedactSensitive {
 		return start
 	}
@@ -75,7 +75,7 @@ func redactDefinitionStart(start agentapi.RunStart) agentapi.RunStart {
 	return start
 }
 
-func redactDefinitionResult(result agentapi.RunResult) agentapi.RunResult {
+func redactResult(result agentapi.RunResult) agentapi.RunResult {
 	result.Output = redactRawMessage(result.Output)
 	result.Text = platform.RedactSensitiveText(result.Text)
 	result.References = redactPublicReferences(result.References)
@@ -90,7 +90,7 @@ func redactDefinitionResult(result agentapi.RunResult) agentapi.RunResult {
 	return result
 }
 
-func redactDefinitionOutcome(outcome run.RunOutcome) run.RunOutcome {
+func redactOutcome(outcome run.Outcome) run.Outcome {
 	outcome.Answer = platform.RedactSensitiveText(outcome.Answer)
 	outcome.SessionMessages = redactLLMMessages(outcome.SessionMessages)
 	outcome.References = redactPublicReferences(outcome.References)
@@ -100,7 +100,7 @@ func redactDefinitionOutcome(outcome run.RunOutcome) run.RunOutcome {
 	return outcome
 }
 
-func redactDefinitionStep(step run.StepRecord) run.StepRecord {
+func redactStep(step run.StepRecord) run.StepRecord {
 	content := platform.RedactSensitiveText(step.Content)
 	if content != step.Content {
 		step.Content = content

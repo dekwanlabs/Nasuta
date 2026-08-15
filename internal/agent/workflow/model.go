@@ -25,6 +25,7 @@ const (
 	NodeGate          NodeKind = "gate"
 	NodeHumanApproval NodeKind = "human_approval"
 	NodeJoin          NodeKind = "join"
+	NodeVerifier      NodeKind = "verifier"
 	NodeTransform     NodeKind = "transform"
 )
 
@@ -50,7 +51,21 @@ const (
 	Unavailable Completeness = "unavailable"
 )
 
-type WorkflowDefinition struct {
+type StopReason string
+
+const (
+	StopRequiredGoalsCovered  StopReason = "required_goals_covered"
+	StopNoNewEvidence         StopReason = "no_new_evidence"
+	StopNoAffordableTask      StopReason = "no_affordable_task"
+	StopDuplicateEvidence     StopReason = "duplicate_evidence_limit"
+	StopVerificationFailed    StopReason = "verification_failed"
+	StopDeadlineExceeded      StopReason = "deadline_exceeded"
+	StopBudgetExhausted       StopReason = "budget_exhausted"
+	StopCapabilityUnavailable StopReason = "capability_unavailable"
+	StopNeedsClarification    StopReason = "needs_clarification"
+)
+
+type Definition struct {
 	ID            string                    `json:"id"`
 	Version       int64                     `json:"version"`
 	Purpose       string                    `json:"purpose"`
@@ -59,9 +74,12 @@ type WorkflowDefinition struct {
 	Nodes         []NodeDefinition          `json:"nodes"`
 	Edges         []EdgeDefinition          `json:"edges"`
 	Permissions   agentapi.PermissionPolicy `json:"permissions"`
-	Budget        WorkflowBudget            `json:"budget"`
-	FailurePolicy WorkflowFailurePolicy     `json:"failure_policy"`
+	Budget        Budget                    `json:"budget"`
+	FailurePolicy FailurePolicy             `json:"failure_policy"`
 	ContentHash   string                    `json:"content_hash"`
+
+	// Set only after a persisted pre-limit hash is verified.
+	legacyExecutionBudget bool
 }
 
 type NodeDefinition struct {
@@ -77,6 +95,7 @@ type NodeDefinition struct {
 	OutputSchema             agentapi.SchemaRef        `json:"output_schema"`
 	JoinMode                 JoinMode                  `json:"join_mode,omitempty"`
 	RejectEvidenceConflicts  bool                      `json:"reject_evidence_conflicts,omitempty"`
+	Verifier                 *VerifierSpec             `json:"verifier,omitempty"`
 	Gate                     *GateSpec                 `json:"gate,omitempty"`
 	TransformID              string                    `json:"transform_id,omitempty"`
 	Permissions              agentapi.PermissionPolicy `json:"permissions"`
@@ -110,19 +129,32 @@ type EdgeDefinition struct {
 type GateSpec struct {
 	ID               string   `json:"id"`
 	AllowedDecisions []string `json:"allowed_decisions"`
+	ForwardInput     bool     `json:"forward_input,omitempty"`
 }
 
-type WorkflowBudget struct {
-	MaxNodes        int           `json:"max_nodes"`
-	MaxParallelism  int           `json:"max_parallelism"`
-	Timeout         time.Duration `json:"timeout"`
-	MaxHandoffBytes int64         `json:"max_handoff_bytes"`
-	MaxInputTokens  int64         `json:"max_input_tokens"`
-	MaxOutputTokens int64         `json:"max_output_tokens"`
-	MaxTotalTokens  int64         `json:"max_total_tokens"`
-	MaxToolCalls    int64         `json:"max_tool_calls"`
-	MaxCostMicros   int64         `json:"max_cost_micros"`
-	MaxRetries      int64         `json:"max_retries"`
+// VerifierSpec fixes deterministic evidence acceptance policy.
+type VerifierSpec struct {
+	RequiredGoals            []string `json:"required_goals,omitempty"`
+	HighRiskGoals            []string `json:"high_risk_goals,omitempty"`
+	HighRiskMinimumTrustTier int      `json:"high_risk_minimum_trust_tier,omitempty"`
+	RejectEvidenceConflicts  bool     `json:"reject_evidence_conflicts"`
+}
+
+type Budget struct {
+	MaxNodes       int `json:"max_nodes"`
+	MaxParallelism int `json:"max_parallelism"`
+	// Zero omission preserves hashes published before orchestration limits.
+	MaxRounds         int           `json:"max_rounds,omitempty"`
+	MaxDepth          int           `json:"max_depth,omitempty"`
+	Timeout           time.Duration `json:"timeout"`
+	MaxHandoffBytes   int64         `json:"max_handoff_bytes"`
+	MaxDuplicateRatio float64       `json:"max_duplicate_ratio,omitempty"`
+	MaxInputTokens    int64         `json:"max_input_tokens"`
+	MaxOutputTokens   int64         `json:"max_output_tokens"`
+	MaxTotalTokens    int64         `json:"max_total_tokens"`
+	MaxToolCalls      int64         `json:"max_tool_calls"`
+	MaxCostMicros     int64         `json:"max_cost_micros"`
+	MaxRetries        int64         `json:"max_retries"`
 }
 
 // NodeBudget reserves one Attempt's maximum resource consumption.
@@ -134,7 +166,7 @@ type NodeBudget struct {
 	MaxCostMicros   int64 `json:"max_cost_micros"`
 }
 
-type WorkflowUsage struct {
+type Usage struct {
 	InputTokens     int64 `json:"input_tokens"`
 	OutputTokens    int64 `json:"output_tokens"`
 	ReasoningTokens int64 `json:"reasoning_tokens"`
@@ -144,7 +176,7 @@ type WorkflowUsage struct {
 	Retries         int64 `json:"retries"`
 }
 
-type WorkflowFailurePolicy struct {
+type FailurePolicy struct {
 	Mode FailureMode `json:"mode"`
 }
 
@@ -179,7 +211,7 @@ const (
 	ApprovalRejected ApprovalDecision = "rejected"
 )
 
-type WorkflowApproval struct {
+type Approval struct {
 	WorkflowRunID    string           `json:"workflow_run_id"`
 	NodeID           string           `json:"node_id"`
 	Decision         ApprovalDecision `json:"decision"`
@@ -196,45 +228,76 @@ const (
 )
 
 // Prepare validates and hashes one immutable workflow definition.
-func Prepare(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (WorkflowDefinition, error) {
+func Prepare(definition Definition, schemas *agentapi.SchemaRegistry) (Definition, error) {
+	return prepareDefinition(definition, schemas, false)
+}
+
+func prepareStored(
+	definition Definition,
+	schemas *agentapi.SchemaRegistry,
+) (Definition, error) {
+	return prepareDefinition(definition, schemas, true)
+}
+
+func prepareRuntime(
+	definition Definition,
+	schemas *agentapi.SchemaRegistry,
+) (Definition, error) {
+	return prepareDefinition(
+		definition,
+		schemas,
+		definition.legacyExecutionBudget,
+	)
+}
+
+func prepareDefinition(
+	definition Definition,
+	schemas *agentapi.SchemaRegistry,
+	allowLegacyExecutionBudget bool,
+) (Definition, error) {
 	if schemas == nil {
-		return WorkflowDefinition{}, fmt.Errorf("workflow schema registry is required")
+		return Definition{}, fmt.Errorf("workflow schema registry is required")
 	}
 	prepared := cloneDefinition(definition)
 	prepared.ID = strings.TrimSpace(prepared.ID)
 	if !canonicalID.MatchString(prepared.ID) {
-		return WorkflowDefinition{}, fmt.Errorf("workflow id %q is not canonical", definition.ID)
+		return Definition{}, fmt.Errorf("workflow id %q is not canonical", definition.ID)
 	}
 	if prepared.Version <= 0 {
-		return WorkflowDefinition{}, fmt.Errorf("workflow %q version must be positive", prepared.ID)
+		return Definition{}, fmt.Errorf("workflow %q version must be positive", prepared.ID)
 	}
 	if strings.TrimSpace(prepared.Purpose) == "" {
-		return WorkflowDefinition{}, fmt.Errorf("workflow %q purpose is required", prepared.ID)
+		return Definition{}, fmt.Errorf("workflow %q purpose is required", prepared.ID)
 	}
 	if err := validateSchema("workflow input", prepared.InputSchema, schemas); err != nil {
-		return WorkflowDefinition{}, err
+		return Definition{}, err
 	}
 	if err := validateSchema("workflow output", prepared.OutputSchema, schemas); err != nil {
-		return WorkflowDefinition{}, err
+		return Definition{}, err
 	}
+	legacyExecutionBudget := prepared.Budget.MaxRounds == 0 &&
+		prepared.Budget.MaxDepth == 0
 	if prepared.Budget.MaxNodes <= 0 || prepared.Budget.MaxParallelism <= 0 ||
+		(!legacyExecutionBudget &&
+			(prepared.Budget.MaxRounds <= 0 || prepared.Budget.MaxDepth <= 0)) ||
+		(legacyExecutionBudget && !allowLegacyExecutionBudget) ||
 		prepared.Budget.Timeout <= 0 || prepared.Budget.MaxHandoffBytes <= 0 {
-		return WorkflowDefinition{}, fmt.Errorf("workflow %q budgets must be positive", prepared.ID)
+		return Definition{}, fmt.Errorf("workflow %q budgets must be positive", prepared.ID)
 	}
-	if err := validateWorkflowBudget(prepared.ID, prepared.Budget); err != nil {
-		return WorkflowDefinition{}, err
+	if err := validateBudget(prepared.ID, prepared.Budget); err != nil {
+		return Definition{}, err
 	}
 	if len(prepared.Nodes) == 0 || len(prepared.Nodes) > prepared.Budget.MaxNodes {
-		return WorkflowDefinition{}, fmt.Errorf("workflow %q node count exceeds its budget", prepared.ID)
+		return Definition{}, fmt.Errorf("workflow %q node count exceeds its budget", prepared.ID)
 	}
 	if prepared.Budget.MaxParallelism > len(prepared.Nodes) {
-		return WorkflowDefinition{}, fmt.Errorf("workflow %q parallelism exceeds its node count", prepared.ID)
+		return Definition{}, fmt.Errorf("workflow %q parallelism exceeds its node count", prepared.ID)
 	}
 	if prepared.FailurePolicy.Mode != FailFast && prepared.FailurePolicy.Mode != CollectAvailable {
-		return WorkflowDefinition{}, fmt.Errorf("workflow %q failure mode %q is invalid", prepared.ID, prepared.FailurePolicy.Mode)
+		return Definition{}, fmt.Errorf("workflow %q failure mode %q is invalid", prepared.ID, prepared.FailurePolicy.Mode)
 	}
 	if err := validatePermissions("workflow "+prepared.ID, prepared.Permissions); err != nil {
-		return WorkflowDefinition{}, err
+		return Definition{}, err
 	}
 	for index := range prepared.Nodes {
 		node := prepared.Nodes[index]
@@ -242,7 +305,7 @@ func Prepare(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (W
 			node.Permissions.Scopes,
 			prepared.Permissions.Scopes,
 		); err != nil {
-			return WorkflowDefinition{}, fmt.Errorf(
+			return Definition{}, fmt.Errorf(
 				"workflow %q node %q permissions: %w",
 				prepared.ID,
 				node.ID,
@@ -250,35 +313,55 @@ func Prepare(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (W
 			)
 		}
 		if err := validateNodeBudget(prepared.ID, prepared.Nodes[index], prepared.Budget); err != nil {
-			return WorkflowDefinition{}, err
+			return Definition{}, err
 		}
 		retry, err := normalizeRetryPolicy(prepared.Nodes[index].Retry)
 		if err != nil {
-			return WorkflowDefinition{}, fmt.Errorf(
+			return Definition{}, fmt.Errorf(
 				"workflow %q node %q retry policy: %w",
 				prepared.ID, prepared.Nodes[index].ID, err,
 			)
 		}
 		prepared.Nodes[index].Retry = retry
 	}
-	if _, err := graph(prepared, schemas); err != nil {
-		return WorkflowDefinition{}, err
+	metadata, err := graph(prepared, schemas)
+	if err != nil {
+		return Definition{}, err
+	}
+	maxDepth := prepared.Budget.MaxDepth
+	if legacyExecutionBudget {
+		maxDepth = prepared.Budget.MaxNodes
+	}
+	if metadata.maxDepth > maxDepth {
+		return Definition{}, fmt.Errorf(
+			"workflow %q graph depth %d exceeds its budget %d",
+			prepared.ID,
+			metadata.maxDepth,
+			maxDepth,
+		)
 	}
 	hash, err := definitionHash(prepared)
 	if err != nil {
-		return WorkflowDefinition{}, err
+		return Definition{}, err
 	}
 	if prepared.ContentHash != "" && prepared.ContentHash != hash {
-		return WorkflowDefinition{}, fmt.Errorf("workflow %q content hash mismatch", prepared.ID)
+		return Definition{}, fmt.Errorf("workflow %q content hash mismatch", prepared.ID)
 	}
 	prepared.ContentHash = hash
+	prepared.legacyExecutionBudget = legacyExecutionBudget
 	return prepared, nil
 }
 
-func validateWorkflowBudget(workflowID string, budget WorkflowBudget) error {
+func validateBudget(workflowID string, budget Budget) error {
 	if budget.MaxInputTokens < 0 || budget.MaxOutputTokens < 0 || budget.MaxTotalTokens < 0 ||
 		budget.MaxToolCalls < 0 || budget.MaxCostMicros < 0 || budget.MaxRetries < 0 {
 		return fmt.Errorf("workflow %q resource budgets cannot be negative", workflowID)
+	}
+	if budget.MaxDuplicateRatio < 0 || budget.MaxDuplicateRatio > 1 {
+		return fmt.Errorf(
+			"workflow %q duplicate ratio must be within [0,1]",
+			workflowID,
+		)
 	}
 	return nil
 }
@@ -286,7 +369,7 @@ func validateWorkflowBudget(workflowID string, budget WorkflowBudget) error {
 func validateNodeBudget(
 	workflowID string,
 	node NodeDefinition,
-	workflowBudget WorkflowBudget,
+	workflowBudget Budget,
 ) error {
 	budget := node.Budget
 	if budget.MaxInputTokens < 0 || budget.MaxOutputTokens < 0 || budget.MaxTotalTokens < 0 ||
@@ -310,7 +393,7 @@ func validateNodeBudget(
 }
 
 // TopologicalOrder returns the stable Node ID order used by scheduling and joins.
-func TopologicalOrder(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) ([]NodeDefinition, error) {
+func TopologicalOrder(definition Definition, schemas *agentapi.SchemaRegistry) ([]NodeDefinition, error) {
 	prepared, err := Prepare(definition, schemas)
 	if err != nil {
 		return nil, err
@@ -339,7 +422,7 @@ func PrepareHandoff(
 	prepared.Payload = append(json.RawMessage(nil), handoff.Payload...)
 	prepared.References = append([]agentapi.Reference(nil), handoff.References...)
 	prepared.EvidenceUnits = evidence.CloneUnits(handoff.EvidenceUnits)
-	prepared.EvidenceConflicts = cloneEvidenceConflicts(handoff.EvidenceConflicts)
+	prepared.EvidenceConflicts = cloneConflicts(handoff.EvidenceConflicts)
 	if strings.TrimSpace(prepared.WorkflowRunID) == "" || !canonicalID.MatchString(prepared.ProducerNodeID) {
 		return Handoff{}, fmt.Errorf("handoff workflow run and producer node are required")
 	}
@@ -407,10 +490,12 @@ type graphMetadata struct {
 	predecessors map[string][]string
 	successors   map[string][]string
 	required     map[string]bool
+	depths       map[string]int
+	maxDepth     int
 	order        []string
 }
 
-func graph(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (graphMetadata, error) {
+func graph(definition Definition, schemas *agentapi.SchemaRegistry) (graphMetadata, error) {
 	nodes := make(map[string]NodeDefinition, len(definition.Nodes))
 	for _, node := range definition.Nodes {
 		if !canonicalID.MatchString(node.ID) {
@@ -476,7 +561,18 @@ func graph(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (gra
 		}
 	}
 	for nodeID, node := range nodes {
-		if node.Kind != NodeHumanApproval || len(predecessors[nodeID]) > 1 {
+		if node.Kind != NodeHumanApproval &&
+			(node.Kind != NodeGate || !node.Gate.ForwardInput) {
+			continue
+		}
+		if node.Kind == NodeGate && len(predecessors[nodeID]) != 1 {
+			return graphMetadata{}, fmt.Errorf(
+				"workflow %q input-forwarding node %q requires exactly one predecessor",
+				definition.ID,
+				nodeID,
+			)
+		}
+		if len(predecessors[nodeID]) > 1 {
 			continue
 		}
 		producerSchema := definition.InputSchema
@@ -485,7 +581,7 @@ func graph(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (gra
 		}
 		if err := schemas.ValidateCompatibility(producerSchema, node.OutputSchema); err != nil {
 			return graphMetadata{}, fmt.Errorf(
-				"workflow %q human approval node %q cannot pass through its input: %w",
+				"workflow %q input-forwarding node %q cannot pass through its input: %w",
 				definition.ID, nodeID, err,
 			)
 		}
@@ -500,16 +596,27 @@ func graph(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (gra
 		}
 	}
 	indegree := make(map[string]int, len(nodes))
+	depths := make(map[string]int, len(nodes))
 	for id := range nodes {
 		indegree[id] = len(predecessors[id])
+		if indegree[id] == 0 {
+			depths[id] = 1
+		}
 	}
 	ready := append([]string(nil), entries...)
 	order := make([]string, 0, len(nodes))
+	maxDepth := 0
 	for len(ready) > 0 {
 		id := ready[0]
 		ready = ready[1:]
 		order = append(order, id)
+		if depths[id] > maxDepth {
+			maxDepth = depths[id]
+		}
 		for _, next := range successors[id] {
+			if depths[next] < depths[id]+1 {
+				depths[next] = depths[id] + 1
+			}
 			indegree[next]--
 			if indegree[next] == 0 {
 				ready = append(ready, next)
@@ -525,7 +632,7 @@ func graph(definition WorkflowDefinition, schemas *agentapi.SchemaRegistry) (gra
 	}
 	return graphMetadata{
 		nodes: nodes, predecessors: predecessors, successors: successors,
-		required: required, order: order,
+		required: required, depths: depths, maxDepth: maxDepth, order: order,
 	}, nil
 }
 
@@ -598,7 +705,7 @@ func validateNode(
 		} else if node.Capability.Version != 0 || node.CapabilityMaxConcurrency != 0 {
 			return fmt.Errorf("workflow %q agent node %q capability binding is incomplete", workflowID, node.ID)
 		}
-		if err := validateCanonicalValues(
+		if err := validateCanonical(
 			"node "+node.ID+" visible tool",
 			node.VisibleToolIDs,
 		); err != nil {
@@ -614,7 +721,7 @@ func validateNode(
 		if node.Gate == nil || !canonicalID.MatchString(node.Gate.ID) || len(node.Gate.AllowedDecisions) == 0 {
 			return fmt.Errorf("workflow %q gate node %q requires a gate policy", workflowID, node.ID)
 		}
-		if err := validateCanonicalValues("gate "+node.Gate.ID+" decision", node.Gate.AllowedDecisions); err != nil {
+		if err := validateCanonical("gate "+node.Gate.ID+" decision", node.Gate.AllowedDecisions); err != nil {
 			return err
 		}
 	case NodeTransform:
@@ -623,6 +730,50 @@ func validateNode(
 		}
 		if !canonicalID.MatchString(node.TransformID) {
 			return fmt.Errorf("workflow %q transform node %q requires a registered transform", workflowID, node.ID)
+		}
+	case NodeVerifier:
+		if node.Task != nil {
+			return fmt.Errorf("workflow %q non-agent node %q cannot have a task directive", workflowID, node.ID)
+		}
+		if node.Verifier == nil {
+			return fmt.Errorf("workflow %q verifier node %q requires a verifier policy", workflowID, node.ID)
+		}
+		if err := validateCanonical(
+			"node "+node.ID+" verifier required goal",
+			node.Verifier.RequiredGoals,
+		); err != nil {
+			return err
+		}
+		if err := validateCanonical(
+			"node "+node.ID+" verifier high-risk goal",
+			node.Verifier.HighRiskGoals,
+		); err != nil {
+			return err
+		}
+		requiredGoals := make(
+			map[string]struct{},
+			len(node.Verifier.RequiredGoals),
+		)
+		for _, goal := range node.Verifier.RequiredGoals {
+			requiredGoals[goal] = struct{}{}
+		}
+		for _, goal := range node.Verifier.HighRiskGoals {
+			if _, required := requiredGoals[goal]; !required {
+				return fmt.Errorf(
+					"workflow %q verifier node %q high-risk goal %q must also be required",
+					workflowID,
+					node.ID,
+					goal,
+				)
+			}
+		}
+		if node.Verifier.HighRiskMinimumTrustTier < 0 ||
+			node.Verifier.HighRiskMinimumTrustTier > 100 {
+			return fmt.Errorf(
+				"workflow %q verifier node %q high-risk minimum trust tier must be between 0 and 100",
+				workflowID,
+				node.ID,
+			)
 		}
 	case NodeJoin:
 		if node.Task != nil {
@@ -660,7 +811,7 @@ func validateTaskDirective(workflowID string, node NodeDefinition) error {
 	if strings.TrimSpace(node.Task.Purpose) == "" {
 		return fmt.Errorf("workflow %q agent node %q task purpose is required", workflowID, node.ID)
 	}
-	if err := validateCanonicalValues(
+	if err := validateCanonical(
 		"node "+node.ID+" task required facet",
 		node.Task.RequiredFacets,
 	); err != nil {
@@ -720,7 +871,7 @@ func validatePermissions(label string, policy agentapi.PermissionPolicy) error {
 	return nil
 }
 
-func validateCanonicalValues(label string, values []string) error {
+func validateCanonical(label string, values []string) error {
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		if !canonicalID.MatchString(value) {
@@ -734,7 +885,7 @@ func validateCanonicalValues(label string, values []string) error {
 	return nil
 }
 
-func definitionHash(definition WorkflowDefinition) (string, error) {
+func definitionHash(definition Definition) (string, error) {
 	definition.ContentHash = ""
 	payload, err := json.Marshal(definition)
 	if err != nil {
@@ -756,7 +907,7 @@ func handoffHash(handoff Handoff) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func cloneDefinition(definition WorkflowDefinition) WorkflowDefinition {
+func cloneDefinition(definition Definition) Definition {
 	definition.Nodes = append([]NodeDefinition(nil), definition.Nodes...)
 	for index := range definition.Nodes {
 		node := &definition.Nodes[index]
@@ -772,6 +923,12 @@ func cloneDefinition(definition WorkflowDefinition) WorkflowDefinition {
 			gate := *node.Gate
 			gate.AllowedDecisions = append([]string(nil), gate.AllowedDecisions...)
 			node.Gate = &gate
+		}
+		if node.Verifier != nil {
+			verifier := *node.Verifier
+			verifier.RequiredGoals = append([]string(nil), verifier.RequiredGoals...)
+			verifier.HighRiskGoals = append([]string(nil), verifier.HighRiskGoals...)
+			node.Verifier = &verifier
 		}
 	}
 	definition.Edges = append([]EdgeDefinition(nil), definition.Edges...)

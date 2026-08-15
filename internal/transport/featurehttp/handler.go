@@ -41,7 +41,7 @@ func New(service *delivery.Service) *Handler {
 }
 
 type pipelineStarter interface {
-	Start(context.Context, pipeline.Request, agentapi.Actor) (*workflow.WorkflowRunRecord, error)
+	Start(context.Context, pipeline.Request, agentapi.Actor) (*workflow.RunRecord, error)
 }
 
 type artifactReviewer interface {

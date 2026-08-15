@@ -42,7 +42,7 @@ func TestRedactDefinitionRequestRehashesContext(t *testing.T) {
 		}},
 	}
 
-	redacted := redactDefinitionRequest(request)
+	redacted := redactRequest(request)
 
 	assertSensitiveValuesAbsent(t, redacted, []string{
 		"input-secret", "message-secret", "argument-secret", "source-secret",
@@ -79,7 +79,7 @@ func TestRedactDefinitionStepRehashesPersistedPayloads(t *testing.T) {
 		},
 	}
 
-	redacted := redactDefinitionStep(step)
+	redacted := redactStep(step)
 
 	assertSensitiveValuesAbsent(t, redacted, []string{
 		"content-secret", "prompt-secret", "argument-secret", "result-secret",
@@ -106,7 +106,7 @@ func TestRedactDefinitionStepRehashesPersistedPayloads(t *testing.T) {
 }
 
 func TestRedactDefinitionResultAndOutcome(t *testing.T) {
-	result := redactDefinitionResult(agentapi.RunResult{
+	result := redactResult(agentapi.RunResult{
 		Output: json.RawMessage(`{"summary":"Authorization: Bearer output-secret"}`),
 		Text:   "access_token=text-secret",
 		References: []agentapi.Reference{{
@@ -120,7 +120,7 @@ func TestRedactDefinitionResultAndOutcome(t *testing.T) {
 		}},
 		Error: &agentapi.RunError{Message: "client_secret=error-secret"},
 	})
-	outcome := redactDefinitionOutcome(RunOutcome{
+	outcome := redactOutcome(RunOutcome{
 		Answer: "Authorization: Bearer answer-secret",
 		SessionMessages: []llm.Message{{
 			Content: "password=session-secret",

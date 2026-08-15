@@ -7,7 +7,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
-const maxForcedConclusionGenerations = 3 + maxAnswerContractRetries
+const maxConclusionGenerations = 3 + maxAnswerContractRetries
 
 // ModelUsageCeiling bounds every model call the immutable execution policy permits.
 type ModelUsageCeiling struct {
@@ -18,8 +18,8 @@ type ModelUsageCeiling struct {
 	CostMicros   int64
 }
 
-// CalculateModelUsageCeiling includes continuation and bounded answer-repair calls.
-func CalculateModelUsageCeiling(
+// UsageCeiling includes continuation and bounded answer-repair calls.
+func UsageCeiling(
 	budget agentapi.BudgetPolicy,
 	model agentapi.ModelPolicy,
 ) (ModelUsageCeiling, error) {
@@ -48,7 +48,7 @@ func CalculateModelUsageCeiling(
 	}
 	conclusionCalls, err := checkedMultiply(
 		generationCalls,
-		maxForcedConclusionGenerations,
+		maxConclusionGenerations,
 		"forced conclusion call count",
 	)
 	if err != nil {

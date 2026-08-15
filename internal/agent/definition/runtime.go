@@ -21,30 +21,30 @@ const (
 	knowledgeWriteScope = scope.KnowledgeWrite
 )
 
-// DefinitionRuntime executes immutable definitions through the shared loop.
-type DefinitionRuntime struct {
-	definitions DefinitionResolver
+// Runtime executes immutable definitions through the shared loop.
+type Runtime struct {
+	definitions Resolver
 	schemas     *agentapi.SchemaRegistry
 	registry    *tool.Registry
 	executor    *execution.ToolExecutor
-	settings    definitionRuntimeSettings
+	settings    runtimeSettings
 	scenarios   *ScenarioRuntime
 	usageStore  llm.UsageRecorder
-	hub         *run.RunHub
+	hub         *run.Hub
 }
 
 // ScenarioRuntime owns durable non-agent Run lifecycles without requiring model execution.
 type ScenarioRuntime struct {
-	runStore *run.RunStore
-	hub      *run.RunHub
+	runStore *run.Store
+	hub      *run.Hub
 }
 
-// DefinitionResolver resolves one exact immutable definition version.
-type DefinitionResolver interface {
+// Resolver resolves one exact immutable definition version.
+type Resolver interface {
 	Resolve(agentapi.DefinitionRef) (agentapi.Definition, error)
 }
 
-type definitionRuntimeSettings struct {
+type runtimeSettings struct {
 	baseURL       string
 	apiKey        string
 	provider      string
@@ -52,7 +52,7 @@ type definitionRuntimeSettings struct {
 	answerReserve time.Duration
 }
 
-type definitionExecution struct {
+type preparedExecution struct {
 	definition      agentapi.Definition
 	modelParameters llm.ModelParameters
 	snapshot        agentapi.RunSnapshot
@@ -62,7 +62,7 @@ type definitionExecution struct {
 	pruneApplied    bool
 }
 
-type definitionToolSelection struct {
+type toolSelection struct {
 	policy       tool.Policy
 	snapshot     tool.Snapshot
 	visibleIDs   []string
@@ -70,11 +70,11 @@ type definitionToolSelection struct {
 	pruneApplied bool
 }
 
-type definitionManagedRun struct {
-	runtime   *DefinitionRuntime
+type activeRun struct {
+	runtime   *Runtime
 	start     agentapi.RunStart
-	execution definitionExecution
-	recorder  *definitionUsageRecorder
+	execution preparedExecution
+	recorder  *usageRecorder
 	trace     *runtrace.Scope
 	ownsTrace bool
 
@@ -84,7 +84,7 @@ type definitionManagedRun struct {
 	preparationStepCount int
 	preparationEvidence  run.EvidenceMetrics
 	outcomeSet           bool
-	outcome              run.RunOutcome
+	outcome              run.Outcome
 }
 
 // ScenarioRunStart carries business-run identity without an agent snapshot.
@@ -101,14 +101,14 @@ type ScenarioRunStart struct {
 // ScenarioRun owns one non-agent parent lifecycle.
 type ScenarioRun interface {
 	Context(context.Context) context.Context
-	RecordPreparationStep(context.Context, run.StepRecord) error
+	RecordStep(context.Context, run.StepRecord) error
 	Release()
 }
 
 // ScenarioLifecycle keeps parent persistence behind the Runtime boundary.
 type ScenarioLifecycle interface {
-	BeginScenario(context.Context, ScenarioRunStart) (ScenarioRun, error)
-	CompleteScenario(context.Context, string, run.RunOutcome) error
+	Start(context.Context, ScenarioRunStart) (ScenarioRun, error)
+	Complete(context.Context, string, run.Outcome) error
 }
 
 type scenarioManagedRun struct {
@@ -122,14 +122,14 @@ type scenarioManagedRun struct {
 	release              sync.Once
 }
 
-// NewDefinitionRuntime pins one configured model endpoint for definition execution.
-func NewDefinitionRuntime(
-	definitions DefinitionResolver,
+// NewRuntime pins one configured model endpoint for definition execution.
+func NewRuntime(
+	definitions Resolver,
 	schemas *agentapi.SchemaRegistry,
 	registry *tool.Registry,
 	settings *config.PlatformSettings,
-	runStore *run.RunStore,
-) (*DefinitionRuntime, error) {
+	runStore *run.Store,
+) (*Runtime, error) {
 	if definitions == nil {
 		return nil, fmt.Errorf("definition runtime: definition resolver is required")
 	}
@@ -159,12 +159,12 @@ func NewDefinitionRuntime(
 		usageStore = runStore
 	}
 	scenarios := NewScenarioRuntime(runStore)
-	return &DefinitionRuntime{
+	return &Runtime{
 		definitions: definitions,
 		schemas:     schemas,
 		registry:    registry,
 		executor:    execution.NewToolExecutor(registry),
-		settings: definitionRuntimeSettings{
+		settings: runtimeSettings{
 			baseURL: settings.LLMBaseURL, apiKey: settings.LLMAPIKey,
 			provider: settings.LLMProvider, model: settings.LLMModel,
 			answerReserve: answerReserve,
@@ -176,15 +176,15 @@ func NewDefinitionRuntime(
 }
 
 // NewScenarioRuntime binds Parent persistence and terminal projection.
-func NewScenarioRuntime(runStore *run.RunStore) *ScenarioRuntime {
+func NewScenarioRuntime(runStore *run.Store) *ScenarioRuntime {
 	return &ScenarioRuntime{
 		runStore: runStore,
-		hub:      run.NewRunHub(runStore),
+		hub:      run.NewHub(runStore),
 	}
 }
 
 // Hub exposes the Runtime-owned event and control boundary.
-func (runtime *DefinitionRuntime) Hub() *run.RunHub {
+func (runtime *Runtime) Hub() *run.Hub {
 	if runtime == nil {
 		return nil
 	}
@@ -192,7 +192,7 @@ func (runtime *DefinitionRuntime) Hub() *run.RunHub {
 }
 
 // Hub exposes Parent lifecycle events independently of model execution.
-func (runtime *ScenarioRuntime) Hub() *run.RunHub {
+func (runtime *ScenarioRuntime) Hub() *run.Hub {
 	if runtime == nil {
 		return nil
 	}
@@ -200,31 +200,31 @@ func (runtime *ScenarioRuntime) Hub() *run.RunHub {
 }
 
 // EmitPhase publishes QA preparation progress without exposing RunHub ownership.
-func (runtime *DefinitionRuntime) EmitPhase(runID, text string) {
+func (runtime *Runtime) EmitPhase(runID, text string) {
 	if runtime != nil && runtime.hub != nil {
 		runtime.hub.EmitPhase(runID, text)
 	}
 }
 
-func (runtime *DefinitionRuntime) EmitSessionStatus(runID string, event run.SessionStatusEvent) {
+func (runtime *Runtime) EmitSessionStatus(runID string, event run.SessionStatusEvent) {
 	if runtime != nil && runtime.hub != nil {
 		runtime.hub.EmitSessionStatus(runID, event)
 	}
 }
 
-func (runtime *DefinitionRuntime) EmitContextUsage(runID string, event run.ContextUsageEvent) {
+func (runtime *Runtime) EmitContextUsage(runID string, event run.ContextUsageEvent) {
 	if runtime != nil && runtime.hub != nil {
 		runtime.hub.OnContextUsage(context.Background(), runID, event)
 	}
 }
 
-// EmitExecutionEvent publishes scenario progress through the shared QA stream.
-func (runtime *DefinitionRuntime) EmitExecutionEvent(
+// EmitEvent publishes scenario progress through the shared QA stream.
+func (runtime *Runtime) EmitEvent(
 	eventType run.EventType,
 	event run.ExecutionEvent,
 ) {
 	if runtime != nil && runtime.hub != nil {
-		runtime.hub.EmitExecutionEvent(eventType, event)
+		runtime.hub.EmitEvent(eventType, event)
 	}
 }
 
@@ -232,12 +232,12 @@ func (runtime *DefinitionRuntime) EmitExecutionEvent(
 type ScenarioToolSet interface {
 	Tools() []tool.Tool
 	Get(tool.ToolID) (tool.Tool, bool)
-	ExecuteArguments(context.Context, tool.ToolID, tool.Arguments) (tool.Result, error)
+	Execute(context.Context, tool.ToolID, tool.Arguments) (tool.Result, error)
 }
 
 // ScenarioToolSource exposes a narrow preparation boundary over Runtime-owned tools.
 type ScenarioToolSource interface {
-	PrepareTools(tool.Policy) ScenarioToolSet
+	ToolsFor(tool.Policy) ScenarioToolSet
 }
 
 type preparedScenarioTools struct {
@@ -253,7 +253,7 @@ func (prepared preparedScenarioTools) Get(id tool.ToolID) (tool.Tool, bool) {
 	return prepared.snapshot.Get(id)
 }
 
-func (prepared preparedScenarioTools) ExecuteArguments(
+func (prepared preparedScenarioTools) Execute(
 	ctx context.Context,
 	id tool.ToolID,
 	arguments tool.Arguments,
@@ -261,15 +261,15 @@ func (prepared preparedScenarioTools) ExecuteArguments(
 	return prepared.executor.ExecuteArguments(ctx, prepared.snapshot, id, arguments)
 }
 
-// PrepareTools returns a pinned preparation view; execution Runs pin their own snapshot.
-func (runtime *DefinitionRuntime) PrepareTools(policy tool.Policy) ScenarioToolSet {
+// ToolsFor returns a pinned preparation view; execution Runs pin their own snapshot.
+func (runtime *Runtime) ToolsFor(policy tool.Policy) ScenarioToolSet {
 	return preparedScenarioTools{
 		snapshot: runtime.registry.Snapshot(policy),
 		executor: runtime.executor,
 	}
 }
 
-type definitionUsageRecorder struct {
+type usageRecorder struct {
 	mu                                sync.Mutex
 	store                             llm.UsageRecorder
 	inputPriceMicrosPerMillionTokens  int64

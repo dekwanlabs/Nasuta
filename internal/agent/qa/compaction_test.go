@@ -30,7 +30,7 @@ func (set compactionToolSet) Get(id tool.ToolID) (tool.Tool, bool) {
 	return tool.Tool{}, false
 }
 
-func (compactionToolSet) ExecuteArguments(context.Context, tool.ToolID, tool.Arguments) (tool.Result, error) {
+func (compactionToolSet) Execute(context.Context, tool.ToolID, tool.Arguments) (tool.Result, error) {
 	return tool.Result{}, nil
 }
 
@@ -44,19 +44,19 @@ func TestSessionCompactionIncomingTokensIncludesRetrievedContext(t *testing.T) {
 	withoutHistory.Recent = nil
 	retrieved := &retrieval.RetrievedContext{Text: strings.Repeat("retrieved evidence ", 1000), HitCount: 3}
 
-	got, _, err := sessionCompactionTokenProjection(
+	got, _, err := compactionProjection(
 		"current question", withHistory, retrieved, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("with history projection: %v", err)
 	}
-	want, _, err := sessionCompactionTokenProjection(
+	want, _, err := compactionProjection(
 		"current question", withoutHistory, retrieved, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("without history projection: %v", err)
 	}
-	withoutRetrieval, _, err := sessionCompactionTokenProjection(
+	withoutRetrieval, _, err := compactionProjection(
 		"current question", withoutHistory, nil, plan, "", nil, 0,
 	)
 	if err != nil {
@@ -79,13 +79,13 @@ func TestSessionCompactionProjectionKeepsRetrievedHistory(t *testing.T) {
 	withoutArchivedHistory := withArchivedHistory
 	withoutArchivedHistory.RetrievedHistory = ""
 
-	withTokens, _, err := sessionCompactionTokenProjection(
+	withTokens, _, err := compactionProjection(
 		"follow-up question", withArchivedHistory, nil, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("with archived history projection: %v", err)
 	}
-	withoutTokens, _, err := sessionCompactionTokenProjection(
+	withoutTokens, _, err := compactionProjection(
 		"follow-up question", withoutArchivedHistory, nil, plan, "", nil, 0,
 	)
 	if err != nil {
@@ -113,13 +113,13 @@ func TestSessionCompactionProjectionIncludesToolSchemas(t *testing.T) {
 		},
 	}
 
-	withoutTools, _, err := sessionCompactionTokenProjection(
+	withoutTools, _, err := compactionProjection(
 		"inspect the service", ConversationContext{}, nil, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("without tools projection: %v", err)
 	}
-	withTools, _, err := sessionCompactionTokenProjection(
+	withTools, _, err := compactionProjection(
 		"inspect the service", ConversationContext{}, nil, plan, "", []tool.Tool{candidate}, 0,
 	)
 	if err != nil {
@@ -158,7 +158,7 @@ func TestNewQAUsesAnswerLimitForDefaultOutputReserve(t *testing.T) {
 		LLMAnswerMaxTokens: 12000,
 		LLMContextWindow:   256000,
 	}
-	svc := NewQA(QADeps{
+	svc := New(Deps{
 		Platform: settings,
 		Definitions: definitionResolverFunc(func(agentapi.DefinitionRef) (agentapi.Definition, error) {
 			return agentapi.Definition{}, nil
@@ -172,16 +172,16 @@ func TestNewQAUsesAnswerLimitForDefaultOutputReserve(t *testing.T) {
 
 func TestCompactBeforeAnswerUsesResolvedDefinitionLimits(t *testing.T) {
 	recorder := &compactionStatusRecorder{}
-	svc := &QA{
+	svc := &Service{
 		contextWindow: 256000,
 		outputReserve: 24000,
 		phaseEmitter:  recorder,
 	}
-	prepared := &qaPreparation{
-		request: QARequest{RunID: "run-custom-limits", Question: "current question"},
+	prepared := &preparation{
+		request: Request{RunID: "run-custom-limits", Question: "current question"},
 	}
 
-	_, err := svc.compactBeforeAnswer(
+	_, err := svc.compactAnswer(
 		t.Context(),
 		prepared,
 		ConversationContext{},

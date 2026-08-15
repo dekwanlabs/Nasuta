@@ -51,11 +51,11 @@ func (service *Service) RecoverActive(
 	startedBefore time.Time,
 	pageSize int,
 ) (RecoveryReport, error) {
-	return service.RecoverActiveWithObserver(ctx, startedBefore, pageSize, nil)
+	return service.RecoverWithObserver(ctx, startedBefore, pageSize, nil)
 }
 
-// RecoverActiveWithObserver streams each recovery result to its owning domain.
-func (service *Service) RecoverActiveWithObserver(
+// RecoverWithObserver streams each recovery result to its owning domain.
+func (service *Service) RecoverWithObserver(
 	ctx context.Context,
 	startedBefore time.Time,
 	pageSize int,
@@ -156,11 +156,11 @@ func (service *Service) resumeRun(
 			state.Run.ID,
 		)
 	}
-	state, err = service.takeOverRunningAttempts(runCtx, definition, state)
+	state, err = service.takeOverAttempts(runCtx, definition, state)
 	if err != nil {
 		return result, err
 	}
-	progress, err := workflowProgressFromState(definition, state)
+	progress, err := progressFromState(definition, state)
 	if err != nil {
 		var terminal *checkpointTerminalError
 		if !errors.As(err, &terminal) {
@@ -170,6 +170,7 @@ func (service *Service) resumeRun(
 	}
 	observed, runErr := orchestrator.ResumeObserved(runCtx, definition, RunRequest{
 		RunID: workflowRunID, ParentRunID: state.Run.ParentRunID,
+		Round: state.Run.Round, BaseDepth: state.Run.BaseDepth,
 		Actor: agentapi.Actor{
 			UserID: state.Run.ActorUserID, TenantID: state.Run.ActorTenantID,
 		},
@@ -180,11 +181,11 @@ func (service *Service) resumeRun(
 	return service.finishResumedRun(runCtx, workflowRunID, observed, runErr)
 }
 
-func (service *Service) takeOverRunningAttempts(
+func (service *Service) takeOverAttempts(
 	ctx context.Context,
-	definition WorkflowDefinition,
-	state *WorkflowRunState,
-) (*WorkflowRunState, error) {
+	definition Definition,
+	state *RunState,
+) (*RunState, error) {
 	nodes := make(map[string]NodeDefinition, len(definition.Nodes))
 	for _, node := range definition.Nodes {
 		nodes[node.ID] = node
@@ -229,7 +230,7 @@ func (service *Service) takeOverRunningAttempts(
 		} else if recoveryRetryAllowed(definition, state.Run, node, run.Attempt) {
 			errorCode = nodeRestartedRetryableErrorCode
 		}
-		persistCtx, cancel := workflowPersistenceContext(ctx)
+		persistCtx, cancel := persistenceContext(ctx)
 		err := service.store.FailNode(
 			persistCtx,
 			state.Run.ID,
@@ -238,7 +239,7 @@ func (service *Service) takeOverRunningAttempts(
 			run.AgentRunID,
 			status,
 			errorCode,
-			interruptedAttemptUsage(node, run.Attempt),
+			interruptedUsage(node, run.Attempt),
 			time.Now().UTC(),
 		)
 		cancel()
@@ -258,7 +259,11 @@ func (service *Service) finishResumedRun(
 	result Result,
 	runErr error,
 ) (ResumeResult, error) {
-	status, errorCode := workflowResultStatus(runErr)
+	status, errorCode := resultStatus(runErr)
+	stopReason := result.StopReason
+	if runErr != nil {
+		stopReason = errorStopReason(runErr)
+	}
 	resumed := ResumeResult{
 		RunID:   workflowRunID,
 		Applied: true,
@@ -267,14 +272,17 @@ func (service *Service) finishResumedRun(
 	var output *Handoff
 	if runErr == nil {
 		output = &result.Output
+	}
+	if runErr == nil || result.StopReason != "" {
 		resumed.Result = &result
 	}
-	persistCtx, cancel := workflowPersistenceContext(ctx)
-	finishErr := service.store.FinishWorkflow(
+	persistCtx, cancel := persistenceContext(ctx)
+	finishErr := service.store.FinishRun(
 		persistCtx,
 		workflowRunID,
 		status,
 		errorCode,
+		stopReason,
 		output,
 		time.Now().UTC(),
 	)

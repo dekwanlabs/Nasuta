@@ -14,7 +14,7 @@ import (
 
 const bingEndpoint = "https://cn.bing.com/search"
 
-func (srv *Service) searchBing(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
+func (srv *Service) searchBing(ctx context.Context, query string, limit int) ([]SearchResult, error) {
 	endpoint := fmt.Sprintf("%s?q=%s", bingEndpoint, url.QueryEscape(query))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -41,10 +41,10 @@ func (srv *Service) searchBing(ctx context.Context, query string, limit int) ([]
 	return results, nil
 }
 
-func parseBingResults(reader io.Reader, limit int) []WebSearchResult {
-	var results []WebSearchResult
+func parseBingResults(reader io.Reader, limit int) []SearchResult {
+	var results []SearchResult
 	tokenizer := nethtml.NewTokenizer(reader)
-	var current WebSearchResult
+	var current SearchResult
 	var inResult, inTitle bool
 
 	for len(results) < limit {
@@ -57,7 +57,7 @@ func parseBingResults(reader io.Reader, limit int) []WebSearchResult {
 		switch tokenType {
 		case nethtml.StartTagToken:
 			if tagName == "li" && hasClass(tokenizer, "b_algo") {
-				current = WebSearchResult{}
+				current = SearchResult{}
 				inResult = true
 			}
 			if inResult && tagName == "h2" {

@@ -18,11 +18,11 @@ const (
 )
 
 // RecoverInterrupted closes process-local Agent Runs left active by a prior process.
-func (rs *RunStore) RecoverInterrupted() (int64, error) {
+func (rs *Store) RecoverInterrupted() (int64, error) {
 	result, err := rs.db.Exec(
 		`UPDATE agent_runs SET status=?,ended_at=? WHERE run_kind=? AND status IN (?,?)`,
-		RunStatusAborted, store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)),
-		RunKindAgent, RunStatusRunning, RunStatusPaused,
+		StatusAborted, store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)),
+		KindAgent, StatusRunning, StatusPaused,
 	)
 	if err != nil {
 		return 0, err
@@ -30,15 +30,15 @@ func (rs *RunStore) RecoverInterrupted() (int64, error) {
 	return result.RowsAffected()
 }
 
-func (rs *RunStore) Create(r RunRecord) error {
+func (rs *Store) Create(r Record) error {
 	if r.RunKind == "" {
-		r.RunKind = RunKindAgent
+		r.RunKind = KindAgent
 	}
 	if r.StartedAt == "" {
 		r.StartedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	if r.Status == "" {
-		r.Status = RunStatusRunning
+		r.Status = StatusRunning
 	}
 	selectionJSON, err := json.Marshal(r.Selection)
 	if err != nil {
@@ -58,7 +58,7 @@ func (rs *RunStore) Create(r RunRecord) error {
 }
 
 // Complete atomically moves an active Run to one terminal state.
-func (rs *RunStore) Complete(id string, outcome RunOutcome) error {
+func (rs *Store) Complete(id string, outcome Outcome) error {
 	if !outcome.Status.Terminal() {
 		return fmt.Errorf("agent: complete run with non-terminal status %q", outcome.Status)
 	}
@@ -73,7 +73,7 @@ func (rs *RunStore) Complete(id string, outcome RunOutcome) error {
 		outcome.Evidence.ToolCallCount, outcome.Evidence.ToolFailureCount,
 		outcome.Evidence.PartialResultCount, outcome.Evidence.OmittedItemCount,
 		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)), id,
-		RunStatusRunning, RunStatusPaused,
+		StatusRunning, StatusPaused,
 	)
 	if err != nil {
 		return err
@@ -83,19 +83,19 @@ func (rs *RunStore) Complete(id string, outcome RunOutcome) error {
 		return err
 	}
 	if affected != 1 {
-		return ErrRunNotActive
+		return ErrNotActive
 	}
 	return nil
 }
 
 // CompleteQAParent commits the Parent state and its recoverable result together.
-func (rs *RunStore) CompleteQAParent(
+func (rs *Store) CompleteQAParent(
 	ctx context.Context,
 	id string,
-	outcome RunOutcome,
-) (RunOutcome, error) {
+	outcome Outcome,
+) (Outcome, error) {
 	if !outcome.Status.Terminal() {
-		return RunOutcome{}, fmt.Errorf(
+		return Outcome{}, fmt.Errorf(
 			"agent: complete QA parent with non-terminal status %q",
 			outcome.Status,
 		)
@@ -103,12 +103,12 @@ func (rs *RunStore) CompleteQAParent(
 	terminal := terminalFromOutcome(id, outcome)
 	detail, err := json.Marshal(terminal)
 	if err != nil {
-		return RunOutcome{}, fmt.Errorf("marshal QA parent %q terminal result: %w", id, err)
+		return Outcome{}, fmt.Errorf("marshal QA parent %q terminal result: %w", id, err)
 	}
 	completedAt := time.Now().UTC()
 	tx, err := rs.db.BeginTx(ctx, nil)
 	if err != nil {
-		return RunOutcome{}, fmt.Errorf("begin QA parent %q completion: %w", id, err)
+		return Outcome{}, fmt.Errorf("begin QA parent %q completion: %w", id, err)
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(
@@ -122,23 +122,23 @@ func (rs *RunStore) CompleteQAParent(
 		outcome.Evidence.ForcedConclusion, outcome.Evidence.ResultCount,
 		outcome.Evidence.ToolCallCount, outcome.Evidence.ToolFailureCount,
 		outcome.Evidence.PartialResultCount, outcome.Evidence.OmittedItemCount,
-		store.DatabaseTime(completedAt.Format(time.RFC3339Nano)), id, RunKindQAParent,
-		RunStatusRunning, RunStatusPaused,
+		store.DatabaseTime(completedAt.Format(time.RFC3339Nano)), id, KindQAParent,
+		StatusRunning, StatusPaused,
 	)
 	if err != nil {
-		return RunOutcome{}, fmt.Errorf("complete QA parent %q: %w", id, err)
+		return Outcome{}, fmt.Errorf("complete QA parent %q: %w", id, err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return RunOutcome{}, fmt.Errorf("read QA parent %q completion result: %w", id, err)
+		return Outcome{}, fmt.Errorf("read QA parent %q completion result: %w", id, err)
 	}
 	if affected == 0 {
-		persisted, err := loadPersistedQAParentTerminal(ctx, tx, id)
+		persisted, err := loadParentTerminal(ctx, tx, id)
 		if errors.Is(err, sql.ErrNoRows) {
-			return RunOutcome{}, ErrRunNotActive
+			return Outcome{}, ErrNotActive
 		}
 		if err != nil {
-			return RunOutcome{}, err
+			return Outcome{}, err
 		}
 		return outcomeFromTerminal(persisted), nil
 	}
@@ -151,21 +151,21 @@ func (rs *RunStore) CompleteQAParent(
 		"", string(outcome.Status), detail,
 		store.DatabaseTime(completedAt.Format(time.RFC3339Nano)),
 	); err != nil {
-		return RunOutcome{}, fmt.Errorf("append QA parent %q terminal event: %w", id, err)
+		return Outcome{}, fmt.Errorf("append QA parent %q terminal event: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return RunOutcome{}, fmt.Errorf("commit QA parent %q completion: %w", id, err)
+		return Outcome{}, fmt.Errorf("commit QA parent %q completion: %w", id, err)
 	}
 	return outcomeFromTerminal(terminal), nil
 }
 
-func loadPersistedQAParentTerminal(
+func loadParentTerminal(
 	ctx context.Context,
 	tx *sql.Tx,
 	runID string,
-) (RunTerminal, error) {
+) (Terminal, error) {
 	var (
-		status RunStatus
+		status Status
 		detail []byte
 	)
 	err := tx.QueryRowContext(
@@ -179,26 +179,26 @@ func loadPersistedQAParentTerminal(
 		qaParentTerminalEventSeq,
 		qaParentTerminalEventKind,
 		runID,
-		RunKindQAParent,
+		KindQAParent,
 	).Scan(&status, &detail)
 	if err != nil {
-		return RunTerminal{}, err
+		return Terminal{}, err
 	}
 	if !status.Terminal() {
-		return RunTerminal{}, ErrRunNotActive
+		return Terminal{}, ErrNotActive
 	}
 	if len(detail) == 0 {
-		return RunTerminal{}, fmt.Errorf(
+		return Terminal{}, fmt.Errorf(
 			"QA parent %q is terminal without a durable terminal event",
 			runID,
 		)
 	}
 	terminal, err := decodeQAParentTerminal(runID, detail)
 	if err != nil {
-		return RunTerminal{}, err
+		return Terminal{}, err
 	}
 	if terminal.Status != status {
-		return RunTerminal{}, fmt.Errorf(
+		return Terminal{}, fmt.Errorf(
 			"QA parent %q event status %q does not match run status %q",
 			runID,
 			terminal.Status,
@@ -209,7 +209,7 @@ func loadPersistedQAParentTerminal(
 }
 
 // TransitionControl updates the persisted pause state without changing terminal fields.
-func (rs *RunStore) TransitionControl(id string, from, to RunStatus) error {
+func (rs *Store) TransitionControl(id string, from, to Status) error {
 	if !validControlTransition(from, to) {
 		return fmt.Errorf("agent: invalid run control transition %q -> %q", from, to)
 	}
@@ -222,18 +222,18 @@ func (rs *RunStore) TransitionControl(id string, from, to RunStatus) error {
 		return err
 	}
 	if affected != 1 {
-		return ErrRunNotActive
+		return ErrNotActive
 	}
 	return nil
 }
 
 // SetMaxSteps records the plan-specific loop bound resolved after routing.
-func (rs *RunStore) SetMaxSteps(id string, maxSteps int) error {
+func (rs *Store) SetMaxSteps(id string, maxSteps int) error {
 	_, err := rs.db.Exec(`UPDATE agent_runs SET max_steps=? WHERE id=?`, maxSteps, id)
 	return err
 }
 
-func (rs *RunStore) DeleteBySession(sessionID string, userID int64) error {
+func (rs *Store) DeleteBySession(sessionID string, userID int64) error {
 	tx, err := rs.db.Begin()
 	if err != nil {
 		return err

@@ -1,5 +1,24 @@
 package agent
 
+// EvidenceSource identifies a planner-visible evidence boundary.
+type EvidenceSource string
+
+const (
+	EvidenceSourceInternal EvidenceSource = "internal"
+	EvidenceSourceMemory   EvidenceSource = "memory"
+	EvidenceSourceWeb      EvidenceSource = "web"
+	EvidenceSourceRuntime  EvidenceSource = "runtime"
+)
+
+// FreshnessPolicy declares how current evidence must be for one goal or capability.
+type FreshnessPolicy string
+
+const (
+	FreshnessStable      FreshnessPolicy = "stable"
+	FreshnessCurrent     FreshnessPolicy = "current"
+	FreshnessBoundedLive FreshnessPolicy = "bounded_live"
+)
+
 // EvidenceRef points to evidence already admitted at the task boundary.
 type EvidenceRef struct {
 	SourceKind  string `json:"source_kind"`
@@ -41,17 +60,18 @@ type TaskEdge struct {
 
 // StopPolicy can only reduce server defaults; zero leaves the default unchanged.
 type StopPolicy struct {
-	MaxTasks        int   `json:"max_tasks,omitempty"`
-	MaxParallelism  int   `json:"max_parallelism,omitempty"`
-	MaxAttempts     int   `json:"max_attempts,omitempty"`
-	MaxRounds       int   `json:"max_rounds,omitempty"`
-	MaxDepth        int   `json:"max_depth,omitempty"`
-	MaxInputTokens  int64 `json:"max_input_tokens,omitempty"`
-	MaxOutputTokens int64 `json:"max_output_tokens,omitempty"`
-	MaxTotalTokens  int64 `json:"max_total_tokens,omitempty"`
-	MaxToolCalls    int64 `json:"max_tool_calls,omitempty"`
-	MaxCostMicros   int64 `json:"max_cost_micros,omitempty"`
-	MaxRetries      int64 `json:"max_retries,omitempty"`
+	MaxTasks          int     `json:"max_tasks,omitempty"`
+	MaxParallelism    int     `json:"max_parallelism,omitempty"`
+	MaxAttempts       int     `json:"max_attempts,omitempty"`
+	MaxRounds         int     `json:"max_rounds,omitempty"`
+	MaxDepth          int     `json:"max_depth,omitempty"`
+	MaxDuplicateRatio float64 `json:"max_duplicate_ratio,omitempty"`
+	MaxInputTokens    int64   `json:"max_input_tokens,omitempty"`
+	MaxOutputTokens   int64   `json:"max_output_tokens,omitempty"`
+	MaxTotalTokens    int64   `json:"max_total_tokens,omitempty"`
+	MaxToolCalls      int64   `json:"max_tool_calls,omitempty"`
+	MaxCostMicros     int64   `json:"max_cost_micros,omitempty"`
+	MaxRetries        int64   `json:"max_retries,omitempty"`
 }
 
 // TaskGraphProposal is planner output that requires server validation and compilation.

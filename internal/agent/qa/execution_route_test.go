@@ -3,6 +3,7 @@ package qa
 import (
 	"testing"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
@@ -13,7 +14,12 @@ func TestDecideExecutionRoute(t *testing.T) {
 			Strategy: retrieval.ExecutionMultiAgent, Complexity: 0.9, Confidence: 0.9,
 			Reasons: []string{"requires_multiple_subproblems", "supports_parallel_investigation"},
 		},
-		Policy:            ExecutionPolicy{AllowMultiAgent: true, MinComplexity: 0.7, MinConfidence: 0.8},
+		Assessment: ExecutionAssessment{
+			Strategy:             retrieval.ExecutionMultiAgent,
+			IndependentTaskCount: 2, RequiredCapabilities: 2,
+			Parallelizable: true,
+		},
+		Policy:            ExecutionPolicy{AllowMultiAgent: true},
 		WorkflowAvailable: true,
 	}
 	tests := []struct {
@@ -29,12 +35,20 @@ func TestDecideExecutionRoute(t *testing.T) {
 		{name: "policy disabled", mutate: func(input *executionRouteInput) {
 			input.Policy.AllowMultiAgent = false
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "policy_disallows_multi_agent"},
-		{name: "low complexity", mutate: func(input *executionRouteInput) {
+		{name: "low complexity remains eligible", mutate: func(input *executionRouteInput) {
 			input.Suggestion.Complexity = 0.69
-		}, want: retrieval.ExecutionSingleAgent, wantReason: "complexity_below_threshold"},
-		{name: "low confidence", mutate: func(input *executionRouteInput) {
+		}, want: retrieval.ExecutionMultiAgent},
+		{name: "low confidence remains eligible", mutate: func(input *executionRouteInput) {
 			input.Suggestion.Confidence = 0.79
-		}, want: retrieval.ExecutionSingleAgent, wantReason: "confidence_below_threshold"},
+		}, want: retrieval.ExecutionMultiAgent},
+		{name: "one independent task", mutate: func(input *executionRouteInput) {
+			input.Assessment.IndependentTaskCount = 1
+			input.Assessment.RequiredCapabilities = 1
+			input.Assessment.Parallelizable = false
+		}, want: retrieval.ExecutionSingleAgent, wantReason: "insufficient_independent_tasks"},
+		{name: "sequential tasks", mutate: func(input *executionRouteInput) {
+			input.Assessment.Parallelizable = false
+		}, want: retrieval.ExecutionSingleAgent, wantReason: "tasks_not_parallelizable"},
 		{name: "write request", mutate: func(input *executionRouteInput) {
 			input.AllowWrite = true
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "write_requested"},
@@ -64,7 +78,15 @@ func TestExecutionRouteTraceContract(t *testing.T) {
 			Strategy: retrieval.ExecutionMultiAgent, Complexity: 0.9, Confidence: 0.9,
 			Reasons: []string{"supports_parallel_investigation"},
 		},
-		Policy: ExecutionPolicy{AllowMultiAgent: true, MinComplexity: 0.7, MinConfidence: 0.8},
+		Assessment: ExecutionAssessment{
+			Strategy:             retrieval.ExecutionMultiAgent,
+			IndependentTaskCount: 2, RequiredCapabilities: 2,
+			Parallelizable: true,
+			EstimatedCoordination: CoordinationEstimate{
+				AgentRuns: 3, JoinInputs: 2,
+			},
+		},
+		Policy: ExecutionPolicy{AllowMultiAgent: true},
 	})
 	if decision.DowngradeReason != "workflow_unavailable" {
 		t.Fatalf("decision = %+v", decision)
@@ -73,7 +95,45 @@ func TestExecutionRouteTraceContract(t *testing.T) {
 	if event.Output["proposed_strategy"] != retrieval.ExecutionMultiAgent ||
 		event.Output["effective_strategy"] != retrieval.ExecutionSingleAgent ||
 		event.Output["downgrade_reason"] != "workflow_unavailable" ||
-		event.Output["workflow_available"] != false || event.Output["read_only"] != true {
+		event.Output["workflow_available"] != false ||
+		event.Output["independent_tasks"] != 2 ||
+		event.Output["required_capabilities"] != 2 ||
+		event.Output["estimated_agent_runs"] != 3 ||
+		event.Output["read_only"] != true {
 		t.Fatalf("output = %#v", event.Output)
+	}
+}
+
+func TestAssessExecutionUsesTaskContractCapabilities(t *testing.T) {
+	assessment := assessExecution(
+		retrieval.ExecutionSuggestion{
+			Strategy: retrieval.ExecutionMultiAgent,
+			Reasons:  []string{"requires_cross_source_analysis"},
+		},
+		TaskContract{
+			Entities: []EntityRef{{ID: "Checkout.Place"}, {ID: "Inventory.Reserve"}},
+			EvidenceGoals: []EvidenceGoal{
+				{
+					ID: "core_flow", Facet: "core_flow", Required: true,
+					Sources: []agentapi.EvidenceSource{
+						agentapi.EvidenceSourceInternal,
+						agentapi.EvidenceSourceRuntime,
+					},
+				},
+				{
+					ID: "documentation", Facet: "documentation", Required: true,
+					Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
+				},
+			},
+		},
+	)
+	if assessment.Strategy != retrieval.ExecutionMultiAgent ||
+		assessment.IndependentTaskCount != 3 ||
+		assessment.RequiredCapabilities != 3 ||
+		!assessment.Parallelizable ||
+		!assessment.SharedContextPressure ||
+		assessment.EstimatedCoordination.AgentRuns != 4 ||
+		assessment.EstimatedCoordination.JoinInputs != 3 {
+		t.Fatalf("assessment = %+v", assessment)
 	}
 }

@@ -8,7 +8,7 @@ import (
 )
 
 type storeRunObserver struct {
-	store workflowPersistence
+	store persistence
 }
 
 func (observer *storeRunObserver) NodeStarted(ctx context.Context, request NodeRequest) error {
@@ -16,7 +16,7 @@ func (observer *storeRunObserver) NodeStarted(ctx context.Context, request NodeR
 	for _, input := range request.Inputs {
 		inputIDs = append(inputIDs, input.ID)
 	}
-	persistCtx, cancel := workflowPersistenceContext(ctx)
+	persistCtx, cancel := persistenceContext(ctx)
 	defer cancel()
 	return observer.store.StartNode(persistCtx, NodeRunRecord{
 		WorkflowRunID: request.WorkflowRunID, NodeID: request.Node.ID, Attempt: request.Attempt,
@@ -31,7 +31,7 @@ func (observer *storeRunObserver) NodeSucceeded(
 	result NodeResult,
 	decision *GateDecision,
 ) error {
-	persistCtx, cancel := workflowPersistenceContext(ctx)
+	persistCtx, cancel := persistenceContext(ctx)
 	err := observer.store.SucceedNode(
 		persistCtx,
 		request.WorkflowRunID,
@@ -47,7 +47,7 @@ func (observer *storeRunObserver) NodeSucceeded(
 	if err == nil {
 		return nil
 	}
-	failCtx, failCancel := workflowPersistenceContext(ctx)
+	failCtx, failCancel := persistenceContext(ctx)
 	failErr := observer.store.FailNode(
 		failCtx,
 		request.WorkflowRunID,
@@ -73,7 +73,7 @@ func (observer *storeRunObserver) NodeFailed(
 	runErr error,
 ) error {
 	status, errorCode := nodeResultStatus(request, runErr)
-	persistCtx, cancel := workflowPersistenceContext(ctx)
+	persistCtx, cancel := persistenceContext(ctx)
 	defer cancel()
 	return observer.store.FailNode(
 		persistCtx,
@@ -88,18 +88,26 @@ func (observer *storeRunObserver) NodeFailed(
 	)
 }
 
-func workflowPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), workflowPersistenceTimeout)
+func persistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), persistenceTimeout)
 }
 
-func workflowResultStatus(runErr error) (RunStatus, string) {
+func resultStatus(runErr error) (RunStatus, string) {
 	if runErr == nil {
 		return RunSucceeded, ""
+	}
+	switch errorStopReason(runErr) {
+	case StopNeedsClarification:
+		return RunFailed, "needs_clarification"
+	case StopNoAffordableTask:
+		return RunFailed, "no_affordable_task"
+	case StopCapabilityUnavailable:
+		return RunFailed, "capability_unavailable"
 	}
 	if errors.Is(runErr, ErrHumanApprovalRequired) {
 		return RunWaitingHuman, "human_approval_required"
 	}
-	if errors.Is(runErr, ErrWorkflowBudgetExhausted) {
+	if errors.Is(runErr, ErrBudgetExhausted) {
 		return RunFailed, "workflow_budget_exhausted"
 	}
 	if errors.Is(runErr, context.DeadlineExceeded) {
@@ -115,7 +123,10 @@ func nodeResultStatus(request NodeRequest, runErr error) (RunStatus, string) {
 	if errors.Is(runErr, ErrHumanApprovalRequired) {
 		return RunWaitingHuman, "human_approval_required"
 	}
-	if errors.Is(runErr, ErrWorkflowBudgetExhausted) {
+	if errors.Is(runErr, ErrNoAffordableTask) {
+		return RunFailed, "no_affordable_task"
+	}
+	if errors.Is(runErr, ErrBudgetExhausted) {
 		return RunFailed, "workflow_budget_exhausted"
 	}
 	if errors.Is(runErr, context.DeadlineExceeded) {

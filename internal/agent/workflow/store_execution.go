@@ -11,10 +11,10 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-// StartWorkflow atomically fixes the run, its input artifact, and initial events.
-func (workflowStore *Store) StartWorkflow(
+// StartRun atomically fixes the run, its input artifact, and initial events.
+func (workflowStore *Store) StartRun(
 	ctx context.Context,
-	run WorkflowRunRecord,
+	run RunRecord,
 	input Handoff,
 ) error {
 	budget, err := json.Marshal(run.Budget)
@@ -39,17 +39,18 @@ func (workflowStore *Store) StartWorkflow(
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_runs(
-		id,parent_run_id,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
+		id,parent_run_id,round_number,base_depth,workflow_id,workflow_version,workflow_hash,selection_json,input_hash,actor_user_id,
 		actor_tenant_id,actor_permissions_json,scenario,scenario_permissions_json,
 		status,budget_json,input_tokens,output_tokens,reasoning_tokens,total_tokens,
-		tool_call_count,cost_micros,retry_count,error_code,started_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		run.ID, run.ParentRunID, run.WorkflowID, run.WorkflowVersion, run.WorkflowHash, selection, run.InputHash,
+		tool_call_count,cost_micros,retry_count,error_code,stop_reason,started_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		run.ID, run.ParentRunID, run.Round, run.BaseDepth,
+		run.WorkflowID, run.WorkflowVersion, run.WorkflowHash, selection, run.InputHash,
 		run.ActorUserID, run.ActorTenantID, actorPermissions, run.Scenario,
 		scenarioPermissions, RunRunning, budget,
 		run.Usage.InputTokens, run.Usage.OutputTokens, run.Usage.ReasoningTokens,
 		run.Usage.TotalTokens, run.Usage.ToolCalls, run.Usage.CostMicros,
-		run.Usage.Retries, "",
+		run.Usage.Retries, "", "",
 		store.DatabaseTime(run.StartedAt.UTC().Format(time.RFC3339Nano)),
 	); err != nil {
 		return fmt.Errorf("create workflow run %q: %w", run.ID, err)
@@ -88,7 +89,7 @@ func (workflowStore *Store) StartNode(ctx context.Context, run NodeRunRecord) er
 		return fmt.Errorf("begin workflow node %q/%q: %w", run.WorkflowRunID, run.NodeID, err)
 	}
 	defer tx.Rollback()
-	if err := lockRunningWorkflow(ctx, tx, run.WorkflowRunID); err != nil {
+	if err := lockRunningRun(ctx, tx, run.WorkflowRunID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_node_runs(
@@ -123,7 +124,7 @@ func (workflowStore *Store) SucceedNode(
 	agentRunID string,
 	handoff Handoff,
 	decision *GateDecision,
-	usage WorkflowUsage,
+	usage Usage,
 	endedAt time.Time,
 ) error {
 	tx, err := workflowStore.db.BeginTx(ctx, nil)
@@ -131,7 +132,7 @@ func (workflowStore *Store) SucceedNode(
 		return fmt.Errorf("begin workflow node %q/%q success: %w", workflowRunID, nodeID, err)
 	}
 	defer tx.Rollback()
-	if err := lockRunningWorkflow(ctx, tx, workflowRunID); err != nil {
+	if err := lockRunningRun(ctx, tx, workflowRunID); err != nil {
 		return err
 	}
 	if err := saveHandoffTx(ctx, tx, handoff); err != nil {
@@ -187,7 +188,7 @@ func (workflowStore *Store) SucceedNode(
 	if err := requireSingleTransition(result, workflowRunID+"/"+nodeID); err != nil {
 		return err
 	}
-	if err := accumulateWorkflowUsageTx(ctx, tx, workflowRunID, usage); err != nil {
+	if err := accumulateUsageTx(ctx, tx, workflowRunID, usage); err != nil {
 		return err
 	}
 	events := []Event{
@@ -225,7 +226,7 @@ func (workflowStore *Store) FailNode(
 	agentRunID string,
 	status RunStatus,
 	errorCode string,
-	usage WorkflowUsage,
+	usage Usage,
 	endedAt time.Time,
 ) error {
 	eventKind := "node_failed"
@@ -279,7 +280,7 @@ func (workflowStore *Store) FailNode(
 	if err := requireSingleTransition(result, workflowRunID+"/"+nodeID); err != nil {
 		return err
 	}
-	if err := accumulateWorkflowUsageTx(ctx, tx, workflowRunID, usage); err != nil {
+	if err := accumulateUsageTx(ctx, tx, workflowRunID, usage); err != nil {
 		return err
 	}
 	events := []Event{{
@@ -296,16 +297,17 @@ func (workflowStore *Store) FailNode(
 	return nil
 }
 
-// FinishWorkflow atomically records an optional final output and the Run terminal state.
-func (workflowStore *Store) FinishWorkflow(
+// FinishRun atomically records an optional final output and the Run terminal state.
+func (workflowStore *Store) FinishRun(
 	ctx context.Context,
 	workflowRunID string,
 	status RunStatus,
 	errorCode string,
+	stopReason StopReason,
 	output *Handoff,
 	endedAt time.Time,
 ) error {
-	eventKind, summary, err := workflowTerminalEvent(status)
+	eventKind, summary, err := terminalEvent(status)
 	if err != nil {
 		return err
 	}
@@ -338,8 +340,8 @@ func (workflowStore *Store) FinishWorkflow(
 		})
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE workflow_runs
-		SET status=?,error_code=?,ended_at=? WHERE id=? AND status=?`,
-		status, errorCode, store.DatabaseTime(endedAt.UTC().Format(time.RFC3339Nano)),
+		SET status=?,error_code=?,stop_reason=?,ended_at=? WHERE id=? AND status=?`,
+		status, errorCode, stopReason, store.DatabaseTime(endedAt.UTC().Format(time.RFC3339Nano)),
 		workflowRunID, RunRunning,
 	)
 	if err != nil {
@@ -361,11 +363,11 @@ func (workflowStore *Store) FinishWorkflow(
 	return nil
 }
 
-func accumulateWorkflowUsageTx(
+func accumulateUsageTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	workflowRunID string,
-	usage WorkflowUsage,
+	usage Usage,
 ) error {
 	result, err := tx.ExecContext(ctx, `UPDATE workflow_runs
 		SET input_tokens=input_tokens+?,output_tokens=output_tokens+?,
@@ -401,7 +403,7 @@ func lockWorkflow(
 	return status, nil
 }
 
-func lockRunningWorkflow(ctx context.Context, tx *sql.Tx, workflowRunID string) error {
+func lockRunningRun(ctx context.Context, tx *sql.Tx, workflowRunID string) error {
 	status, err := lockWorkflow(ctx, tx, workflowRunID)
 	if err != nil {
 		return err
@@ -460,7 +462,7 @@ func saveHandoffTx(ctx context.Context, tx *sql.Tx, handoff Handoff) error {
 	return nil
 }
 
-func workflowTerminalEvent(status RunStatus) (string, string, error) {
+func terminalEvent(status RunStatus) (string, string, error) {
 	switch status {
 	case RunSucceeded:
 		return "workflow_succeeded", "workflow succeeded", nil

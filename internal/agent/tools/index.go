@@ -7,16 +7,16 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
-func (srv *Service) ListApis(ctx context.Context, service, keyword string, limit int) map[string]any {
-	result, err := srv.ListApisResult(ctx, service, keyword, limit)
+func (srv *Service) ListAPIs(ctx context.Context, service, keyword string, limit int) map[string]any {
+	result, err := srv.ListAPIsResult(ctx, service, keyword, limit)
 	if err != nil {
 		return map[string]any{"matches": nil, "error": err.Error()}
 	}
 	return result
 }
 
-// ListApisResult returns indexed APIs without hiding storage failures.
-func (srv *Service) ListApisResult(ctx context.Context, service, keyword string, limit int) (map[string]any, error) {
+// ListAPIsResult returns indexed APIs without hiding storage failures.
+func (srv *Service) ListAPIsResult(ctx context.Context, service, keyword string, limit int) (map[string]any, error) {
 	limit = clampInt(limit, 1, 100)
 	matches, err := srv.FindAPIs(ctx, service, keyword, limit)
 	if err != nil {
@@ -37,16 +37,16 @@ func (srv *Service) FindAPIs(ctx context.Context, service, keyword string, limit
 	return page.List, nil
 }
 
-func (srv *Service) DocGapCheck(ctx context.Context, serviceName string) map[string]any {
-	result, err := srv.DocGapCheckResult(ctx, serviceName)
+func (srv *Service) CheckDocs(ctx context.Context, serviceName string) map[string]any {
+	result, err := srv.CheckDocsResult(ctx, serviceName)
 	if err != nil {
 		return map[string]any{"service": serviceName, "found": false, "error": err.Error()}
 	}
 	return result
 }
 
-// DocGapCheckResult reports documentation gaps without folding store failures into data.
-func (srv *Service) DocGapCheckResult(ctx context.Context, serviceName string) (map[string]any, error) {
+// CheckDocsResult reports documentation gaps without folding store failures into data.
+func (srv *Service) CheckDocsResult(ctx context.Context, serviceName string) (map[string]any, error) {
 	all, err := srv.services(ctx)
 	if err != nil {
 		return nil, err

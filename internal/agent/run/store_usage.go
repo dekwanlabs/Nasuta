@@ -10,7 +10,7 @@ import (
 )
 
 // RecordLLMCall stores one provider call and updates its Run aggregate atomically.
-func (rs *RunStore) RecordLLMCall(ctx context.Context, call llm.CallUsage) error {
+func (rs *Store) RecordLLMCall(ctx context.Context, call llm.CallUsage) error {
 	tx, err := rs.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -59,8 +59,8 @@ func (rs *RunStore) RecordLLMCall(ctx context.Context, call llm.CallUsage) error
 }
 
 // UsageSummary returns bounded token aggregates for one session and round.
-func (rs *RunStore) UsageSummary(ctx context.Context, userID int64, sessionID, runID string) (RunUsageSummary, error) {
-	var summary RunUsageSummary
+func (rs *Store) UsageSummary(ctx context.Context, userID int64, sessionID, runID string) (UsageSummary, error) {
+	var summary UsageSummary
 	if sessionID == "" {
 		return summary, nil
 	}
@@ -95,14 +95,14 @@ func (rs *RunStore) UsageSummary(ctx context.Context, userID int64, sessionID, r
 }
 
 // PeakInputTokens reads only the metric needed by session compaction.
-func (rs *RunStore) PeakInputTokens(id string) (int, error) {
+func (rs *Store) PeakInputTokens(id string) (int, error) {
 	var tokens int
 	err := rs.db.QueryRow(`SELECT peak_input_tokens FROM agent_runs WHERE id=?`, id).Scan(&tokens)
 	return tokens, err
 }
 
-// LatestContextUsage returns the latest round's observed input and reserved peaks.
-func (rs *RunStore) LatestContextUsage(userID int64, sessionID string) (ContextUsageSnapshot, error) {
+// LatestUsage returns the latest round's observed input and reserved peaks.
+func (rs *Store) LatestUsage(userID int64, sessionID string) (ContextUsageSnapshot, error) {
 	if sessionID == "" {
 		return ContextUsageSnapshot{}, nil
 	}
@@ -119,7 +119,7 @@ func (rs *RunStore) LatestContextUsage(userID int64, sessionID string) (ContextU
 	return usage, err
 }
 
-func (rs *RunStore) listLLMCalls(runID string, limit int) ([]LLMCallRow, error) {
+func (rs *Store) listLLMCalls(runID string, limit int) ([]LLMCallRow, error) {
 	rows, err := rs.db.Query(
 		`SELECT id,run_id,call_seq,phase,provider,model,input_tokens,cached_input_tokens,
 			output_tokens,reasoning_tokens,total_tokens,max_output_tokens,duration_ms,status,created_at

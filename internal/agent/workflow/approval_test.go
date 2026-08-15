@@ -384,7 +384,7 @@ func TestResumeObservedSkipsSucceededNodes(t *testing.T) {
 		RunID: runID, StartedAt: startedAt,
 		ActorPermissions:    agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
 		ScenarioPermissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
-	}, WorkflowProgress{
+	}, Progress{
 		StartedAt: startedAt,
 		Input:     input,
 		NodeOutputs: map[string]Handoff{
@@ -449,7 +449,7 @@ func TestResumeObservedDoesNotRestartWaitingHumanNode(t *testing.T) {
 		t.Context(),
 		definition,
 		RunRequest{RunID: runID, StartedAt: startedAt},
-		WorkflowProgress{
+		Progress{
 			StartedAt:   startedAt,
 			Input:       input,
 			NodeOutputs: map[string]Handoff{"approve.a": approved},
@@ -541,14 +541,14 @@ func (observer *approvalRecordingObserver) NodeFailed(
 
 func startApprovalWorkflow(
 	t *testing.T,
-	definition WorkflowDefinition,
+	definition Definition,
 	executor NodeExecutor,
 ) (*Service, *recordingWorkflowPersistence, string) {
 	t.Helper()
 	schemas := approvalTestSchemas(t)
 	agents := approvalTestAgentDefinitions(t)
 	catalog := NewCatalog(schemas, agents)
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}
@@ -580,18 +580,19 @@ func startApprovalWorkflow(
 	return service, persistence, runID
 }
 
-func approvalResumeWorkflow() WorkflowDefinition {
+func approvalResumeWorkflow() Definition {
 	subject := agentapi.SchemaRef{ID: "review.subject", Version: 1}
 	report := agentapi.SchemaRef{ID: "review.report", Version: 1}
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
-	return WorkflowDefinition{
+	return Definition{
 		ID: "delivery.approval.resume", Version: 1,
 		Purpose:     "Resume a review after an explicit approval.",
 		InputSchema: subject, OutputSchema: report, Permissions: readOnly,
-		Budget: WorkflowBudget{
-			MaxNodes: 3, MaxParallelism: 1, Timeout: 5 * time.Second, MaxHandoffBytes: 4096,
+		Budget: Budget{
+			MaxNodes: 3, MaxParallelism: 1, MaxRounds: 1, MaxDepth: 3,
+			Timeout: 5 * time.Second, MaxHandoffBytes: 4096,
 		},
-		FailurePolicy: WorkflowFailurePolicy{Mode: FailFast},
+		FailurePolicy: FailurePolicy{Mode: FailFast},
 		Nodes: []NodeDefinition{
 			{
 				ID: "review.before", Kind: NodeAgent,
@@ -618,19 +619,20 @@ func approvalResumeWorkflow() WorkflowDefinition {
 	}
 }
 
-func parallelApprovalWorkflow() WorkflowDefinition {
+func parallelApprovalWorkflow() Definition {
 	subject := agentapi.SchemaRef{ID: "review.subject", Version: 1}
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
-	return WorkflowDefinition{
+	return Definition{
 		ID: "delivery.approval.parallel", Version: 1,
 		Purpose:      "Wait for independent approvals in one stable wave.",
 		InputSchema:  subject,
 		OutputSchema: agentapi.SchemaRef{ID: "review.subject.list", Version: 1},
 		Permissions:  readOnly,
-		Budget: WorkflowBudget{
-			MaxNodes: 2, MaxParallelism: 2, Timeout: 5 * time.Second, MaxHandoffBytes: 4096,
+		Budget: Budget{
+			MaxNodes: 2, MaxParallelism: 2, MaxRounds: 1, MaxDepth: 1,
+			Timeout: 5 * time.Second, MaxHandoffBytes: 4096,
 		},
-		FailurePolicy: WorkflowFailurePolicy{Mode: FailFast},
+		FailurePolicy: FailurePolicy{Mode: FailFast},
 		Nodes: []NodeDefinition{
 			{
 				ID: "approve.a", Kind: NodeHumanApproval,
@@ -694,7 +696,7 @@ func approvalTestAgentDefinitions(t *testing.T) *testAgentResolver {
 func prepareTestHandoff(
 	t *testing.T,
 	schemas *agentapi.SchemaRegistry,
-	definition WorkflowDefinition,
+	definition Definition,
 	handoff Handoff,
 ) Handoff {
 	t.Helper()

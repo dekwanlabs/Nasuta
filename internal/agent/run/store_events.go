@@ -9,8 +9,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-// ListQAParentEventsForUser returns one ownership-checked event page.
-func (rs *RunStore) ListQAParentEventsForUser(
+// ListParentEvents returns one ownership-checked event page.
+func (rs *Store) ListParentEvents(
 	ctx context.Context,
 	runID string,
 	userID int64,
@@ -29,7 +29,7 @@ func (rs *RunStore) ListQAParentEventsForUser(
 		`SELECT id FROM agent_runs
 		 WHERE id=? AND run_kind=? AND user_id=? LIMIT 1`,
 		runID,
-		RunKindQAParent,
+		KindQAParent,
 		userID,
 	).Scan(&ownedRunID); err != nil {
 		return nil, err
@@ -79,7 +79,7 @@ func (rs *RunStore) ListQAParentEventsForUser(
 	return events, nil
 }
 
-func loadQAParentTerminal(db *sql.DB, runID string) (RunTerminal, error) {
+func loadQAParentTerminal(db *sql.DB, runID string) (Terminal, error) {
 	var detail []byte
 	err := db.QueryRow(
 		`SELECT detail_json FROM runtime_events
@@ -90,25 +90,25 @@ func loadQAParentTerminal(db *sql.DB, runID string) (RunTerminal, error) {
 		qaParentTerminalEventKind,
 	).Scan(&detail)
 	if err != nil {
-		return RunTerminal{}, err
+		return Terminal{}, err
 	}
 	return decodeQAParentTerminal(runID, detail)
 }
 
-func decodeQAParentTerminal(runID string, detail []byte) (RunTerminal, error) {
-	var terminal RunTerminal
+func decodeQAParentTerminal(runID string, detail []byte) (Terminal, error) {
+	var terminal Terminal
 	if err := json.Unmarshal(detail, &terminal); err != nil {
-		return RunTerminal{}, fmt.Errorf("decode QA parent %q terminal event: %w", runID, err)
+		return Terminal{}, fmt.Errorf("decode QA parent %q terminal event: %w", runID, err)
 	}
 	if terminal.RunID != runID {
-		return RunTerminal{}, fmt.Errorf(
+		return Terminal{}, fmt.Errorf(
 			"QA parent %q terminal event belongs to %q",
 			runID,
 			terminal.RunID,
 		)
 	}
 	if !terminal.Status.Terminal() {
-		return RunTerminal{}, fmt.Errorf(
+		return Terminal{}, fmt.Errorf(
 			"QA parent %q terminal event has non-terminal status %q",
 			runID,
 			terminal.Status,

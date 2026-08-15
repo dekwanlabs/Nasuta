@@ -8,10 +8,10 @@ import (
 type Deps = tools.Deps
 type Service = tools.Service
 
-type WebSearchResult = web.WebSearchResult
-type WebSearchProvider = web.WebSearchProvider
-type WebFetchedEvidence = web.WebFetchedEvidence
-type WebSearchResponse = web.WebSearchResponse
+type WebSearchResult = web.SearchResult
+type WebSearchProvider = web.SearchProvider
+type WebFetchedEvidence = web.FetchedEvidence
+type WebSearchResponse = web.SearchResponse
 
 func NewTools(deps Deps) *Service {
 	return tools.New(deps)

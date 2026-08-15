@@ -21,7 +21,7 @@ import (
 type Tool = tool.Tool
 type Registry = tool.Registry
 type ToolPolicy = tool.Policy
-type SessionHistory = session.SessionHistory
+type SessionHistory = session.History
 
 const (
 	ToolKindRead  = tool.KindRead
@@ -97,7 +97,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 			Kind:        ToolKindRead,
 			InputSchema: listAPISchema,
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.ListApisResult(ctx, args.String("service"), args.String("keyword"), args.Int("limit", 20))
+				result, err := svc.ListAPIsResult(ctx, args.String("service"), args.String("keyword"), args.Int("limit", 20))
 				if err != nil {
 					return "", err
 				}
@@ -221,7 +221,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 			}},
 			InputSchema: objectSchema(map[string]any{"service": propString("Service name to check.")}, []string{"service"}),
 			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.DocGapCheckResult(ctx, args.String("service"))
+				result, err := svc.CheckDocsResult(ctx, args.String("service"))
 				if err != nil {
 					return "", err
 				}

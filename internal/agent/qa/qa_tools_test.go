@@ -6,7 +6,7 @@ import (
 )
 
 func TestPreferredToolsInstructionIsAdvisory(t *testing.T) {
-	instruction := preferredToolsInstruction([]string{"runtime"})
+	instruction := preferenceInstruction([]string{"runtime"})
 	for _, want := range []string{"runtime", "advisory, not mandatory", "answer directly", "Other registered tools remain available"} {
 		if !strings.Contains(instruction, want) {
 			t.Fatalf("instruction missing %q: %s", want, instruction)

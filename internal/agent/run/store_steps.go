@@ -10,7 +10,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-func (rs *RunStore) AddStep(st StepRow) error {
+func (rs *Store) AddStep(st StepRow) error {
 	if st.CreatedAt == "" {
 		st.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -60,15 +60,15 @@ func (rs *RunStore) AddStep(st StepRow) error {
 	return nil
 }
 
-// GetToolResultArtifact reads one bounded slice after enforcing user/session ownership.
-func (rs *RunStore) GetToolResultArtifact(userID int64, sessionID, artifactID string, offset int64, limit int) (*ToolResultArtifactChunk, error) {
+// GetToolArtifact reads one bounded slice after enforcing user/session ownership.
+func (rs *Store) GetToolArtifact(userID int64, sessionID, artifactID string, offset int64, limit int) (*ToolResultArtifactChunk, error) {
 	if artifactID == "" {
 		return nil, fmt.Errorf("artifact id is required")
 	}
 	if offset < 0 {
 		return nil, fmt.Errorf("artifact offset must be non-negative")
 	}
-	limit = min(max(limit, utf8.UTFMax), maxToolResultArtifactChunkBytes)
+	limit = min(max(limit, utf8.UTFMax), maxArtifactChunkBytes)
 	var artifact ToolResultArtifactChunk
 	var content []byte
 	var coverageRaw string

@@ -62,6 +62,16 @@ func validateTool(candidate Tool) error {
 		if strings.TrimSpace(candidate.Routing.Intent) == "" {
 			return fmt.Errorf("tool %q routing intent is required", candidate.ID)
 		}
+		switch candidate.Routing.EvidenceSource {
+		case "", RoutingEvidenceInternal, RoutingEvidenceMemory,
+			RoutingEvidenceWeb, RoutingEvidenceRuntime:
+		default:
+			return fmt.Errorf(
+				"tool %q routing evidence source %q is invalid",
+				candidate.ID,
+				candidate.Routing.EvidenceSource,
+			)
+		}
 	}
 	return nil
 }

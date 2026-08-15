@@ -12,19 +12,19 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-type WebSearchResult = websearch.Result
-type WebSearchProvider = websearch.Provider
+type SearchResult = websearch.Result
+type SearchProvider = websearch.Provider
 
-type WebFetchedEvidence struct {
+type FetchedEvidence struct {
 	URL     string `json:"url"`
 	Title   string `json:"title,omitempty"`
 	Content string `json:"content"`
 }
 
-type WebSearchResponse struct {
-	Results   []WebSearchResult   `json:"results"`
-	Fetched   *WebFetchedEvidence `json:"fetched,omitempty"`
-	FetchNote string              `json:"fetch_note,omitempty"`
+type SearchResponse struct {
+	Results   []SearchResult   `json:"results"`
+	Fetched   *FetchedEvidence `json:"fetched,omitempty"`
+	FetchNote string           `json:"fetch_note,omitempty"`
 }
 
 // Service owns web search providers and bounded page fetching.
@@ -33,7 +33,7 @@ type Service struct {
 	apiKey       string
 	providerOnce sync.Once
 	providersMu  sync.RWMutex
-	providers    map[string]WebSearchProvider
+	providers    map[string]SearchProvider
 	fetchClient  *http.Client
 }
 
@@ -50,7 +50,7 @@ func (srv *Service) SetAPIKey(apiKey string) {
 }
 
 // RegisterProvider adds or replaces a provider during application wiring.
-func (srv *Service) RegisterProvider(name string, provider WebSearchProvider) error {
+func (srv *Service) RegisterProvider(name string, provider SearchProvider) error {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
 		return fmt.Errorf("web search provider name is empty")
@@ -65,8 +65,8 @@ func (srv *Service) RegisterProvider(name string, provider WebSearchProvider) er
 	return nil
 }
 
-// WebSearch dispatches to the configured provider.
-func (srv *Service) WebSearch(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
+// Search dispatches to the configured provider.
+func (srv *Service) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -84,13 +84,13 @@ func (srv *Service) WebSearch(ctx context.Context, query string, limit int) ([]W
 	return results, nil
 }
 
-// WebSearchWithFetch fetches the first query-relevant candidate without hiding the candidate set.
-func (srv *Service) WebSearchWithFetch(ctx context.Context, query string, limit int) (WebSearchResponse, error) {
-	results, err := srv.WebSearch(ctx, query, limit)
+// SearchWithFetch fetches the first query-relevant candidate without hiding the candidate set.
+func (srv *Service) SearchWithFetch(ctx context.Context, query string, limit int) (SearchResponse, error) {
+	results, err := srv.Search(ctx, query, limit)
 	if err != nil {
-		return WebSearchResponse{}, err
+		return SearchResponse{}, err
 	}
-	response := WebSearchResponse{Results: results}
+	response := SearchResponse{Results: results}
 	if len(results) == 0 {
 		return response, nil
 	}
@@ -100,31 +100,31 @@ func (srv *Service) WebSearchWithFetch(ctx context.Context, query string, limit 
 		log.WarnfCtx(ctx, "[web_search] automatic fetch skipped: no relevant candidate for query=%q", truncateForLog(query, 60))
 		return response, nil
 	}
-	content, err := srv.WebFetchRelevant(ctx, candidate.URL, query)
+	content, err := srv.FetchRelevant(ctx, candidate.URL, query)
 	if err != nil {
 		response.FetchNote = "automatic fetch failed: " + err.Error()
 		log.WarnfCtx(ctx, "[web_search] automatic fetch failed url=%q: %v", truncateForLog(candidate.URL, 100), err)
 		return response, nil
 	}
-	response.Fetched = &WebFetchedEvidence{URL: candidate.URL, Title: candidate.Title, Content: content}
+	response.Fetched = &FetchedEvidence{URL: candidate.URL, Title: candidate.Title, Content: content}
 	return response, nil
 }
 
-func relevantFetchCandidate(query string, results []WebSearchResult) (WebSearchResult, bool) {
+func relevantFetchCandidate(query string, results []SearchResult) (SearchResult, bool) {
 	for _, result := range results {
-		if webResultRelevant(query, result) {
+		if resultRelevant(query, result) {
 			return result, true
 		}
 	}
-	return WebSearchResult{}, false
+	return SearchResult{}, false
 }
 
-func webResultRelevant(query string, result WebSearchResult) bool {
-	queryLatin, queryCJK := webSearchSignals(query)
+func resultRelevant(query string, result SearchResult) bool {
+	queryLatin, queryCJK := searchSignals(query)
 	if len(queryLatin) == 0 && len(queryCJK) == 0 {
 		return false
 	}
-	candidateLatin, candidateCJK := webSearchSignals(result.Title + " " + result.Snippet)
+	candidateLatin, candidateCJK := searchSignals(result.Title + " " + result.Snippet)
 	for signal := range queryLatin {
 		if _, ok := candidateLatin[signal]; ok {
 			return true
@@ -145,12 +145,12 @@ func webResultRelevant(query string, result WebSearchResult) bool {
 	return false
 }
 
-var webSearchStopwords = map[string]struct{}{
+var searchStopwords = map[string]struct{}{
 	"a": {}, "an": {}, "and": {}, "are": {}, "for": {}, "how": {}, "is": {}, "of": {}, "or": {},
 	"the": {}, "to": {}, "what": {}, "when": {}, "where": {}, "which": {}, "who": {}, "why": {},
 }
 
-func webSearchSignals(value string) (map[string]struct{}, map[string]struct{}) {
+func searchSignals(value string) (map[string]struct{}, map[string]struct{}) {
 	latin := make(map[string]struct{})
 	cjk := make(map[string]struct{})
 	var word, han []rune
@@ -160,7 +160,7 @@ func webSearchSignals(value string) (map[string]struct{}, map[string]struct{}) {
 			return
 		}
 		token := strings.ToLower(string(word))
-		if _, skip := webSearchStopwords[token]; !skip {
+		if _, skip := searchStopwords[token]; !skip {
 			latin[token] = struct{}{}
 		}
 		word = word[:0]

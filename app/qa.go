@@ -18,13 +18,19 @@ func (p *Platform) buildQARuntime(
 	settings *config.PlatformSettings,
 	graph *codegraph.DB,
 	version int64,
-) (dashboard.QARuntime, []agentapi.Definition, agentapi.Runtime, error) {
+) (
+	dashboard.QARuntime,
+	[]agentapi.Definition,
+	[]agentapi.Capability,
+	agentapi.Runtime,
+	error,
+) {
 	snapshot := *settings
 	snapshot.VCSGroups = append([]string(nil), settings.VCSGroups...)
 	snapshot.VCSExcludeProjects = append([]string(nil), settings.VCSExcludeProjects...)
 	snapshot.CodingEnabledProviders = append([]string(nil), settings.CodingEnabledProviders...)
 	writeAvailable := p.incident.manager != nil
-	investigationRunner := platformQAInvestigationRunner{platform: p}
+	investigationRunner := qaInvestigator{platform: p}
 	if !snapshot.LLMEnabled() {
 		scenarios := agent.NewScenarioRuntime(p.qa.runs)
 		runtime := dashboard.QARuntime{
@@ -34,7 +40,7 @@ func (p *Platform) buildQARuntime(
 			WriteAvailable: writeAvailable,
 		}
 		if p.qa.runs != nil && p.flow.service != nil {
-			coordinator := agent.NewInvestigationCoordinator(
+			coordinator := agent.NewQACoordinator(
 				investigationRunner,
 				scenarios,
 				p.qa.runs,
@@ -43,10 +49,10 @@ func (p *Platform) buildQARuntime(
 			runtime.InvestigationCanceller = coordinator
 			runtime.InvestigationReconciler = coordinator
 		}
-		return runtime, nil, nil, nil
+		return runtime, nil, nil, nil, nil
 	}
 	if err := snapshot.ValidateAgentSettings(); err != nil {
-		return dashboard.QARuntime{}, nil, nil, err
+		return dashboard.QARuntime{}, nil, nil, nil, err
 	}
 	if p.qa.memory == nil {
 		p.qa.memory = buildLongTermMemory(
@@ -57,7 +63,25 @@ func (p *Platform) buildQARuntime(
 	}
 	definitions, err := defaultAgentDefinitions(&snapshot, version)
 	if err != nil {
-		return dashboard.QARuntime{}, nil, nil, err
+		return dashboard.QARuntime{}, nil, nil, nil, err
+	}
+	var extensionCapabilities []agentapi.Capability
+	if p.agents.provider != nil {
+		contribution, err := p.agents.provider.AgentCatalog(snapshot, version)
+		if err != nil {
+			return dashboard.QARuntime{}, nil, nil, nil, fmt.Errorf(
+				"prepare application agent catalog: %w",
+				err,
+			)
+		}
+		if err := validateAgentCatalogContribution(contribution, version); err != nil {
+			return dashboard.QARuntime{}, nil, nil, nil, err
+		}
+		definitions = append(definitions, contribution.Definitions...)
+		extensionCapabilities = append(
+			extensionCapabilities,
+			contribution.Capabilities...,
+		)
 	}
 	definitionRuntime, err := agent.NewDefinitionRuntime(
 		p.agents.catalog,
@@ -67,13 +91,16 @@ func (p *Platform) buildQARuntime(
 		p.qa.runs,
 	)
 	if err != nil {
-		return dashboard.QARuntime{}, nil, nil, fmt.Errorf("configure definition runtime: %w", err)
+		return dashboard.QARuntime{}, nil, nil, nil, fmt.Errorf(
+			"configure definition runtime: %w",
+			err,
+		)
 	}
 	models := agent.NewQAModels(&snapshot)
 	investigationRunner.events = definitionRuntime
-	var coordinator *agent.InvestigationCoordinator
+	var coordinator *agent.QACoordinator
 	if p.qa.runs != nil && p.flow.service != nil {
-		coordinator = agent.NewInvestigationCoordinator(
+		coordinator = agent.NewQACoordinator(
 			investigationRunner,
 			definitionRuntime,
 			p.qa.runs,
@@ -107,7 +134,7 @@ func (p *Platform) buildQARuntime(
 		runtime.InvestigationCanceller = coordinator
 		runtime.InvestigationReconciler = coordinator
 	}
-	return runtime, definitions, definitionRuntime, nil
+	return runtime, definitions, extensionCapabilities, definitionRuntime, nil
 }
 
 func defaultAgentDefinitions(
@@ -118,11 +145,11 @@ func defaultAgentDefinitions(
 	if err != nil {
 		return nil, fmt.Errorf("prepare QA definition: %w", err)
 	}
-	reviewers, err := catalog.DefaultReviewersVersion(settings, version)
+	reviewers, err := catalog.DefaultReviewers(settings, version)
 	if err != nil {
 		return nil, fmt.Errorf("prepare reviewer definitions: %w", err)
 	}
-	investigators, err := catalog.DefaultInvestigatorsVersion(settings, version)
+	investigators, err := catalog.DefaultInvestigators(settings, version)
 	if err != nil {
 		return nil, fmt.Errorf("prepare investigation definitions: %w", err)
 	}
@@ -145,38 +172,50 @@ func (p *Platform) reloadQARuntime(graph *codegraph.DB) error {
 
 	settings := loadPlatformSettings(p.auth.db)
 	version := p.agents.version + 1
-	candidate, definitions, definitionRuntime, err := p.buildQARuntime(settings, graph, version)
+	candidate, definitions, extensionCapabilities, definitionRuntime, err := p.buildQARuntime(
+		settings,
+		graph,
+		version,
+	)
 	if err != nil {
 		return err
 	}
 	if len(definitions) > 0 {
-		if err := p.agents.catalog.Publish(definitions); err != nil {
-			return fmt.Errorf("publish agent definitions: %w", err)
-		}
-		capabilities, err := catalog.DefaultInvestigationCapabilities(
+		capabilities, err := catalog.DefaultCapabilities(
 			definitions,
 			version,
 		)
 		if err != nil {
 			return fmt.Errorf("prepare investigation capabilities: %w", err)
 		}
+		capabilities = append(capabilities, extensionCapabilities...)
+		if err := validateAgentCatalogSnapshot(
+			p.agents.schemas,
+			definitions,
+			capabilities,
+		); err != nil {
+			return err
+		}
+		if err := p.agents.catalog.Publish(definitions); err != nil {
+			return fmt.Errorf("publish agent definitions: %w", err)
+		}
 		if err := p.agents.capabilities.Publish(capabilities); err != nil {
 			return fmt.Errorf("publish investigation capabilities: %w", err)
 		}
-		investigationBudgets, err := delegatedInvestigationBudgetPolicy(definitions)
+		investigationBudgets, err := investigationBudgets(definitions)
 		if err != nil {
-			return fmt.Errorf("prepare delegated investigation budgets: %w", err)
+			return fmt.Errorf("prepare investigation budgets: %w", err)
 		}
-		workflowDefinition, err := p.delegatedInvestigationWorkflow(
+		workflowDefinition, err := p.defaultInvestigationFlow(
 			version,
 			time.Duration(candidate.Settings.AgentTimeout),
 			investigationBudgets,
 		)
 		if err != nil {
-			return fmt.Errorf("prepare delegated investigation workflow: %w", err)
+			return fmt.Errorf("prepare investigation flow: %w", err)
 		}
-		if err := p.flow.catalog.Publish([]workflow.WorkflowDefinition{workflowDefinition}); err != nil {
-			return fmt.Errorf("publish delegated investigation workflow: %w", err)
+		if err := p.flow.catalog.Publish([]workflow.Definition{workflowDefinition}); err != nil {
+			return fmt.Errorf("publish investigation flow: %w", err)
 		}
 	}
 	if err := p.configureFeatureReviewRuntime(candidate.Settings, definitionRuntime, definitions); err != nil {
@@ -202,27 +241,73 @@ func (p *Platform) reloadQARuntime(graph *codegraph.DB) error {
 	return nil
 }
 
-func (p *Platform) delegatedInvestigationWorkflow(
+func validateAgentCatalogContribution(
+	contribution AgentCatalogContribution,
+	version int64,
+) error {
+	for _, definition := range contribution.Definitions {
+		if definition.Version != version {
+			return fmt.Errorf(
+				"application agent definition %q version %d does not match catalog version %d",
+				definition.ID,
+				definition.Version,
+				version,
+			)
+		}
+	}
+	for _, capability := range contribution.Capabilities {
+		if capability.Version != version {
+			return fmt.Errorf(
+				"application capability %q version %d does not match catalog version %d",
+				capability.ID,
+				capability.Version,
+				version,
+			)
+		}
+	}
+	return nil
+}
+
+func validateAgentCatalogSnapshot(
+	schemas *agentapi.SchemaRegistry,
+	definitions []agentapi.Definition,
+	capabilities []agentapi.Capability,
+) error {
+	stagedDefinitions := catalog.New(schemas)
+	if err := stagedDefinitions.Publish(definitions); err != nil {
+		return fmt.Errorf("validate agent definitions: %w", err)
+	}
+	stagedCapabilities := agentapi.NewCapabilityRegistry(
+		schemas,
+		stagedDefinitions,
+	)
+	if err := stagedCapabilities.Publish(capabilities); err != nil {
+		return fmt.Errorf("validate agent capabilities: %w", err)
+	}
+	return nil
+}
+
+func (p *Platform) defaultInvestigationFlow(
 	version int64,
 	nodeTimeout time.Duration,
-	budgets workflow.DelegatedInvestigationBudgetPolicy,
-) (workflow.WorkflowDefinition, error) {
-	fallback, err := workflow.DefaultDelegatedInvestigation(
+	budgets workflow.Budgets,
+) (workflow.Definition, error) {
+	fallback, err := workflow.DefaultFlow(
 		version,
 		nodeTimeout,
 		budgets,
 	)
 	if err != nil {
-		return workflow.WorkflowDefinition{}, err
+		return workflow.Definition{}, err
 	}
-	policy, err := workflow.DelegatedInvestigationCompilationPolicy(
+	policy, err := workflow.DefaultPolicy(
 		version,
 		nodeTimeout,
 		budgets,
 	)
 	if err != nil {
 		log.Warnf(
-			"[workflow] delegated investigation proposal policy unavailable; using fixed fallback: %v",
+			"[workflow] investigation plan policy unavailable; using fixed fallback: %v",
 			err,
 		)
 		return fallback, nil
@@ -233,18 +318,18 @@ func (p *Platform) delegatedInvestigationWorkflow(
 	)
 	if err != nil {
 		log.Warnf(
-			"[workflow] delegated investigation proposal compiler unavailable; using fixed fallback: %v",
+			"[workflow] investigation plan compiler unavailable; using fixed fallback: %v",
 			err,
 		)
 		return fallback, nil
 	}
 	compiled, err := compiler.Compile(
-		workflow.DefaultDelegatedInvestigationProposal(),
+		workflow.DefaultPlan(),
 		policy,
 	)
 	if err != nil {
 		log.Warnf(
-			"[workflow] delegated investigation proposal rejected; using fixed fallback: %v",
+			"[workflow] investigation plan rejected; using fixed fallback: %v",
 			err,
 		)
 		return fallback, nil
@@ -260,9 +345,9 @@ func (p *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime) error
 		p.flow.pipeline,
 		p.flow.review,
 	)
-	var agentNodes *workflow.AgentNodeExecutor
+	var agentNodes *workflow.AgentExecutor
 	if runtime != nil {
-		nodes, err := workflow.NewAgentNodeExecutor(
+		nodes, err := workflow.NewAgentExecutor(
 			p.agents.schemas,
 			p.agents.catalog,
 			runtime,
@@ -278,7 +363,13 @@ func (p *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime) error
 		return nil
 	}
 	nodes := workflow.NewNodeDispatcher(agentNodes, transforms)
-	runner := workflow.NewOrchestrator(p.agents.schemas, nodes, nil)
+	runner := workflow.NewOrchestrator(
+		p.agents.schemas,
+		nodes,
+		map[string]workflow.GateEvaluator{
+			workflow.EvidenceRiskGateID: workflow.RiskGateEvaluator{},
+		},
+	)
 	p.flow.service.SetOrchestrator(runner)
 	switch {
 	case agentNodes != nil && transforms != nil:

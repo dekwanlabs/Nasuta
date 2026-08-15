@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
@@ -99,9 +100,7 @@ func CanonicalQuestionMetadata(question string) (string, []string, []string) {
 
 func canonicalQuestionTerms(question string) ([]string, []string) {
 	terms := make([]string, 0, maxMetadataTerms)
-	entities := make([]string, 0, 8)
 	seenTerms := make(map[string]struct{}, maxMetadataTerms)
-	seenEntities := make(map[string]struct{}, 8)
 	add := func(raw string) {
 		value := strings.ToLower(strings.TrimSpace(raw))
 		if value == "" {
@@ -110,12 +109,6 @@ func canonicalQuestionTerms(question string) ([]string, []string) {
 		if _, exists := seenTerms[value]; !exists && len(terms) < maxMetadataTerms {
 			seenTerms[value] = struct{}{}
 			terms = append(terms, value)
-		}
-		if isEntityTerm(value) {
-			if _, exists := seenEntities[value]; !exists && len(entities) < maxMetadataTerms {
-				seenEntities[value] = struct{}{}
-				entities = append(entities, value)
-			}
 		}
 	}
 
@@ -142,20 +135,7 @@ func canonicalQuestionTerms(question string) ([]string, []string) {
 		flush()
 	}
 	flush()
-	return terms, entities
-}
-
-func isEntityTerm(value string) bool {
-	if len([]rune(value)) < 3 {
-		return false
-	}
-	hasDigit := false
-	hasSeparator := false
-	for _, r := range value {
-		hasDigit = hasDigit || unicode.IsDigit(r)
-		hasSeparator = hasSeparator || strings.ContainsRune("._/:@-", r)
-	}
-	return hasDigit || hasSeparator
+	return terms, domain.CanonicalQuestionEntities(question)
 }
 
 func buildEvidenceManifest(messages []llm.Message) EvidenceManifest {

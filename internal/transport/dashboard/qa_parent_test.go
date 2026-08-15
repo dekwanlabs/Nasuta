@@ -18,9 +18,9 @@ func TestAPIQARunGetReturnsDurableParentTerminal(t *testing.T) {
 	handler, mock, closeDB := newQAParentHandler(t)
 	defer closeDB()
 	startedAt := time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC)
-	expectQAParentDetailRecord(mock, "parent-1", 42, run.RunStatusDone, startedAt)
-	terminal := run.RunTerminal{
-		RunID: "parent-1", Status: run.RunStatusDone,
+	expectQAParentDetailRecord(mock, "parent-1", 42, run.StatusDone, startedAt)
+	terminal := run.Terminal{
+		RunID: "parent-1", Status: run.StatusDone,
 		Answer: "durable answer", ErrorCode: "completed",
 	}
 	raw, err := json.Marshal(terminal)
@@ -45,8 +45,8 @@ func TestAPIQARunGetReturnsDurableParentTerminal(t *testing.T) {
 	}
 	var payload struct {
 		Data struct {
-			RunKind  run.RunKind      `json:"run_kind"`
-			Terminal *run.RunTerminal `json:"terminal"`
+			RunKind  run.Kind         `json:"run_kind"`
+			Terminal *run.Terminal    `json:"terminal"`
 			Steps    []run.StepRow    `json:"steps"`
 			LLMCalls []run.LLMCallRow `json:"llm_calls"`
 		} `json:"data"`
@@ -54,7 +54,7 @@ func TestAPIQARunGetReturnsDurableParentTerminal(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Data.RunKind != run.RunKindQAParent ||
+	if payload.Data.RunKind != run.KindQAParent ||
 		payload.Data.Terminal == nil ||
 		payload.Data.Terminal.Answer != terminal.Answer {
 		t.Fatalf("response = %+v", payload.Data)
@@ -71,15 +71,15 @@ func TestAPIQARunEventsReturnsOwnedBoundedPage(t *testing.T) {
 	handler, mock, closeDB := newQAParentHandler(t)
 	defer closeDB()
 	createdAt := time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC)
-	terminal := run.RunTerminal{
-		RunID: "parent-1", Status: run.RunStatusDone, Answer: "answer",
+	terminal := run.Terminal{
+		RunID: "parent-1", Status: run.StatusDone, Answer: "answer",
 	}
 	raw, err := json.Marshal(terminal)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mock.ExpectQuery("SELECT id FROM agent_runs.*LIMIT 1").
-		WithArgs("parent-1", run.RunKindQAParent, int64(42)).
+		WithArgs("parent-1", run.KindQAParent, int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("parent-1"))
 	mock.ExpectQuery("SELECT stream_id,seq,kind,summary,detail_json,created_at.*ORDER BY seq LIMIT \\?").
 		WithArgs("qa_parent", "parent-1", int64(0), 25).
@@ -122,7 +122,7 @@ func TestAPIQARunEventsReturnsNotFoundForUnownedParent(t *testing.T) {
 	handler, mock, closeDB := newQAParentHandler(t)
 	defer closeDB()
 	mock.ExpectQuery("SELECT id FROM agent_runs.*LIMIT 1").
-		WithArgs("parent-1", run.RunKindQAParent, int64(42)).
+		WithArgs("parent-1", run.KindQAParent, int64(42)).
 		WillReturnError(sql.ErrNoRows)
 
 	response := serveQAParentRequest(
@@ -176,7 +176,7 @@ func TestAPIQARunEventsKeepsCursorOnEmptyPage(t *testing.T) {
 	handler, mock, closeDB := newQAParentHandler(t)
 	defer closeDB()
 	mock.ExpectQuery("SELECT id FROM agent_runs.*LIMIT 1").
-		WithArgs("parent-1", run.RunKindQAParent, int64(42)).
+		WithArgs("parent-1", run.KindQAParent, int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("parent-1"))
 	mock.ExpectQuery("SELECT stream_id,seq,kind,summary,detail_json,created_at.*ORDER BY seq LIMIT \\?").
 		WithArgs("qa_parent", "parent-1", int64(7), 50).
@@ -221,7 +221,7 @@ func newQAParentHandler(
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	handler := &Handler{persistentRunStore: run.BindStore(db)}
+	handler := &Handler{persistentRunStore: run.Bind(db)}
 	return handler, mock, func() {
 		_ = db.Close()
 	}
@@ -231,7 +231,7 @@ func expectQAParentDetailRecord(
 	mock sqlmock.Sqlmock,
 	runID string,
 	userID int64,
-	status run.RunStatus,
+	status run.Status,
 	startedAt time.Time,
 ) {
 	mock.ExpectQuery("FROM agent_runs WHERE id=\\? AND user_id=\\?").
@@ -248,7 +248,7 @@ func expectQAParentDetailRecord(
 			"tool_call_count", "tool_failure_count", "partial_result_count",
 			"omitted_evidence_count", "started_at", "ended_at",
 		}).AddRow(
-			runID, run.RunKindQAParent, userID, "session-1", "",
+			runID, run.KindQAParent, userID, "session-1", "",
 			int64(0), "", `{}`, "", int64(0), int64(0), "",
 			"workflow-1", "", "question", status, "", "multi_agent",
 			0, 0, 0, int64(0), int64(0), int64(0), int64(0), int64(0),

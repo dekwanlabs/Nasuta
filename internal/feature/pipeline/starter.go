@@ -23,7 +23,7 @@ func (starter *Starter) Start(
 	ctx context.Context,
 	request Request,
 	actor agentapi.Actor,
-) (*workflow.WorkflowRunRecord, error) {
+) (*workflow.RunRecord, error) {
 	if starter == nil || starter.workflow == nil {
 		return nil, fmt.Errorf("feature pipeline workflow is unavailable: %w", delivery.ErrUnavailable)
 	}
@@ -47,5 +47,5 @@ func (starter *Starter) Start(
 }
 
 var _ interface {
-	Start(context.Context, Request, agentapi.Actor) (*workflow.WorkflowRunRecord, error)
+	Start(context.Context, Request, agentapi.Actor) (*workflow.RunRecord, error)
 } = (*Starter)(nil)

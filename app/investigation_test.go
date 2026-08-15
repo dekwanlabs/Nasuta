@@ -17,7 +17,7 @@ type investigationEventRecorder struct {
 	projected chan investigationEventProjection
 }
 
-func (recorder *investigationEventRecorder) EmitExecutionEvent(
+func (recorder *investigationEventRecorder) EmitEvent(
 	eventType run.EventType,
 	event run.ExecutionEvent,
 ) {
@@ -28,6 +28,12 @@ func (recorder *investigationEventRecorder) EmitExecutionEvent(
 }
 
 func TestProjectInvestigationEvent(t *testing.T) {
+	agentNodeIDs := map[string]struct{}{
+		"investigate.code": {},
+		"investigate.docs": {},
+		"planner.runtime":  {},
+		"synthesize":       {},
+	}
 	tests := []struct {
 		name       string
 		event      workflow.Event
@@ -39,12 +45,17 @@ func TestProjectInvestigationEvent(t *testing.T) {
 		{name: "agent start", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "node_started", NodeID: "investigate.code"}, wantType: run.EventAgentStarted, wantStatus: "running", want: true},
 		{name: "agent complete", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "node_succeeded", NodeID: "synthesize"}, wantType: run.EventAgentCompleted, wantStatus: "completed", want: true},
 		{name: "agent failed", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "node_failed", NodeID: "investigate.docs", Summary: "node failed"}, wantType: run.EventAgentCompleted, wantStatus: "failed", want: true},
+		{name: "planner agent", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "node_started", NodeID: "planner.runtime"}, wantType: run.EventAgentStarted, wantStatus: "running", want: true},
 		{name: "evidence joined", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "node_succeeded", NodeID: "evidence.join"}, wantType: run.EventEvidenceJoined, wantStatus: "completed", want: true},
 		{name: "handoff ignored", event: workflow.Event{WorkflowRunID: "workflow_1", Kind: "handoff_created", NodeID: "synthesize"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			eventType, event, ok := projectInvestigationEvent("qa_parent_1", test.event)
+			eventType, event, ok := projectInvestigationEvent(
+				"qa_parent_1",
+				test.event,
+				agentNodeIDs,
+			)
 			if ok != test.want || eventType != test.wantType || event.Status != test.wantStatus {
 				t.Fatalf("projection = (%q, %+v, %t)", eventType, event, ok)
 			}
@@ -71,6 +82,7 @@ func TestBridgeInvestigationEventsStopsOnDurableCompletion(t *testing.T) {
 			completed,
 			recorder,
 			"qa_parent_1",
+			map[string]struct{}{"synthesize": {}},
 		)
 	}()
 

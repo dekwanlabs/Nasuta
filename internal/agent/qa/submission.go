@@ -26,8 +26,8 @@ import (
 
 const sessionArchiveTimeout = 2 * time.Minute
 
-func (svc *QA) submitInvestigation(
-	prepared *qaPreparation,
+func (svc *Service) submitInvestigation(
+	prepared *preparation,
 ) (*AskResult, error) {
 	request := prepared.request
 	ctx := prepared.ctx
@@ -36,7 +36,7 @@ func (svc *QA) submitInvestigation(
 	conversation := request.Conversation
 	userID := request.UserID
 	workflowRunID := "workflow_" + strings.TrimPrefix(NewRunID(), "run_")
-	scenario, err := svc.scenarios.BeginScenario(ctx, ScenarioRunStart{
+	scenario, err := svc.scenarios.Start(ctx, ScenarioRunStart{
 		RunID: runID, ParentRunID: request.ParentRunID, UserID: userID,
 		WorkflowRunID: workflowRunID, SessionID: conversation.SessionID,
 		Question: question, Mode: "multi_agent",
@@ -45,11 +45,16 @@ func (svc *QA) submitInvestigation(
 		return nil, fmt.Errorf("begin QA parent run %q: %w", runID, err)
 	}
 	runCtx := scenario.Context(ctx)
-	prefetched, err := svc.executePrefetch(
+	evidencePlan := prepared.planning.Effective.Plan
+	webUnavailable := evidencePlan.Has(domain.Web) && !svc.cfg.WebSearchEnabled
+	if webUnavailable {
+		log.WarnfCtx(runCtx, "[qa] retrieval source unavailable: web")
+	}
+	evidence, err := svc.prepareEvidence(
 		runCtx,
-		runID,
-		prepared.candidateToolSet,
-		request.ToolPlan,
+		prepared,
+		evidencePlan,
+		webUnavailable,
 		scenario,
 	)
 	if err != nil {
@@ -59,7 +64,7 @@ func (svc *QA) submitInvestigation(
 			Status: RunStatusFailed, ErrorCode: "preparation_failed", Err: err,
 			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
 		}
-		completeErr := svc.scenarios.CompleteScenario(
+		completeErr := svc.scenarios.Complete(
 			context.WithoutCancel(runCtx),
 			runID,
 			outcome,
@@ -72,12 +77,14 @@ func (svc *QA) submitInvestigation(
 		}
 		return nil, fmt.Errorf("prepare QA investigation workflow %q: %w", workflowRunID, err)
 	}
-	seedBlocks := make([]ContextBlock, 0, len(prefetched)+len(request.PreloadedContext))
-	seedBlocks = append(seedBlocks, prefetched...)
-	seedBlocks = append(seedBlocks, request.PreloadedContext...)
+	seedMaterial := contextBlocks(evidence.retrieved)
+	if recalled := memoryContextBlock(evidence.recalled); recalled != nil {
+		seedMaterial = append(seedMaterial, *recalled)
+	}
 	startErr := svc.investigation.Start(runCtx, InvestigationRequest{
 		WorkflowRunID: workflowRunID,
-		Contract:      taskContractFromPreparation(prepared, seedBlocks),
+		Contract:      contractFromPreparation(prepared, seedMaterial),
+		Proposal:      cloneTaskGraphProposal(prepared.taskGraphProposal),
 		Actor:         agentapi.Actor{UserID: userID},
 	})
 	scenario.Release()
@@ -87,7 +94,7 @@ func (svc *QA) submitInvestigation(
 			Status: RunStatusFailed, ErrorCode: "investigation_start_failed", Err: startErr,
 			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
 		}
-		completeErr := svc.scenarios.CompleteScenario(
+		completeErr := svc.scenarios.Complete(
 			context.WithoutCancel(runCtx),
 			runID,
 			outcome,
@@ -106,7 +113,7 @@ func (svc *QA) submitInvestigation(
 			log.ErrorfCtx(waitCtx, "[qa] converge parent run %s: %v", runID, err)
 			return
 		}
-		svc.archiveSessionHistoryAsync(
+		svc.archiveHistoryAsync(
 			waitCtx,
 			runID,
 			conversation.SessionID,
@@ -118,10 +125,38 @@ func (svc *QA) submitInvestigation(
 	return &AskResult{RunID: runID}, nil
 }
 
-func (svc *QA) submitRun(
+func cloneTaskGraphProposal(
+	proposal *agentapi.TaskGraphProposal,
+) *agentapi.TaskGraphProposal {
+	if proposal == nil {
+		return nil
+	}
+	cloned := *proposal
+	cloned.Tasks = make([]agentapi.TaskSpec, len(proposal.Tasks))
+	for index, task := range proposal.Tasks {
+		task.RequiredFacets = append([]string(nil), task.RequiredFacets...)
+		task.InputRefs = append([]agentapi.EvidenceRef(nil), task.InputRefs...)
+		cloned.Tasks[index] = task
+	}
+	cloned.Edges = append([]agentapi.TaskEdge(nil), proposal.Edges...)
+	return &cloned
+}
+
+func memoryContextBlock(records []memory.MemoryRecord) *agentapi.ContextBlock {
+	content := memory.FormatMemories(records)
+	if content == "" {
+		return nil
+	}
+	return &agentapi.ContextBlock{
+		Source: "qa.memory", Title: "Recalled Memory", Content: content,
+		Complete: false, ContentHash: hashString(content),
+	}
+}
+
+func (svc *Service) submitRun(
 	ctx context.Context,
 	run agentapi.ManagedRun,
-	scenario QARequest,
+	scenario Request,
 	definition agentapi.Definition,
 	selection agentapi.DefinitionSelection,
 	question string,
@@ -146,10 +181,10 @@ func (svc *QA) submitRun(
 		},
 		DefinitionHash: definition.ContentHash,
 		Selection:      selection,
-		Input:          qaRunInput(question),
+		Input:          runInput(question),
 		Messages:       publicMessages(messages),
-		Context:        qaContextBlocks(rc),
-		Permissions:    qaRunPermissions(policy.AllowWrite),
+		Context:        contextBlocks(rc),
+		Permissions:    runPermissions(policy.AllowWrite),
 		ToolScope: agentapi.ToolScope{
 			AllowWrite:      policy.AllowWrite,
 			RestrictVisible: true,
@@ -186,7 +221,7 @@ func (svc *QA) submitRun(
 		}
 		outcome := outcomeFromPublicResult(result)
 		if outcome.Status == RunStatusDone {
-			if err := svc.persistSessionTurn(context.WithoutCancel(ctx), runID, conversation.SessionID, userID, question, outcome); err != nil {
+			if err := svc.persistTurn(context.WithoutCancel(ctx), runID, conversation.SessionID, userID, question, outcome); err != nil {
 				log.ErrorfCtx(ctx, "[qa] persist completed run %s session turn: %v", runID, err)
 				if finishErr := run.Finish(&agentapi.RunError{
 					Code: "session_persistence_failed", Message: err.Error(),
@@ -197,7 +232,7 @@ func (svc *QA) submitRun(
 			}
 		}
 		if outcome.Status == RunStatusDone {
-			svc.archiveSessionHistoryAsync(
+			svc.archiveHistoryAsync(
 				ctx, runID, conversation.SessionID, userID,
 				definition.Budget.ContextTokens, definition.Model.MaxOutputTokens,
 			)
@@ -207,7 +242,7 @@ func (svc *QA) submitRun(
 			return
 		}
 
-		if memoryExtractionAllowed(outcome, internalResultFromPublic(result)) && svc.memory != nil && userID != 0 {
+		if memoryExtractionAllowed(outcome, resultFromPublic(result)) && svc.memory != nil && userID != 0 {
 			memCtx := llm.WithUsagePhase(context.WithoutCancel(ctx), llm.PhaseMemoryExtract)
 			memCtx, memCancel := context.WithTimeout(memCtx, 60*time.Second)
 			memoryQuestion := tooloutput.TruncateContent(question, 1000)
@@ -224,7 +259,7 @@ func (svc *QA) submitRun(
 				memCancel()
 				return
 			}
-			recalled, recallErr := recallMemoriesForWrite(memCtx, memoryRecallForWriteInput{
+			recalled, recallErr := recallMemoriesForWrite(memCtx, writeRecallInput{
 				Store: svc.memory, UserID: userID, Probes: probe.Probes,
 			})
 			if recallErr != nil {
@@ -254,7 +289,7 @@ func (svc *QA) submitRun(
 	return &AskResult{RunID: runID, Context: rc}, nil
 }
 
-func (svc *QA) prepareAnswerConversation(
+func (svc *Service) answerContext(
 	ctx context.Context,
 	conversation ConversationContext,
 	recalled []memory.MemoryRecord,
@@ -277,7 +312,7 @@ func (svc *QA) prepareAnswerConversation(
 	return conversation
 }
 
-func qaRunPermissions(allowWrite bool) agentapi.PermissionPolicy {
+func runPermissions(allowWrite bool) agentapi.PermissionPolicy {
 	scopes := []string{knowledgeReadScope}
 	if allowWrite {
 		scopes = append(scopes, knowledgeWriteScope)
@@ -285,14 +320,14 @@ func qaRunPermissions(allowWrite bool) agentapi.PermissionPolicy {
 	return agentapi.PermissionPolicy{Scopes: scopes}
 }
 
-func qaRunInput(question string) json.RawMessage {
+func runInput(question string) json.RawMessage {
 	payload, _ := json.Marshal(struct {
 		Question string `json:"question"`
 	}{Question: question})
 	return payload
 }
 
-func qaContextBlocks(rc *retrieval.RetrievedContext) []agentapi.ContextBlock {
+func contextBlocks(rc *retrieval.RetrievedContext) []agentapi.ContextBlock {
 	if rc == nil || rc.Text == "" {
 		return nil
 	}
@@ -352,7 +387,7 @@ func orderedToolIDs(tools []tool.Tool, selected map[tool.ToolID]struct{}) []stri
 	return ids
 }
 
-func internalResultFromPublic(result agentapi.RunResult) *RunResult {
+func resultFromPublic(result agentapi.RunResult) *RunResult {
 	return &RunResult{
 		Answer: result.Text, ForcedConclusion: result.Evidence.ForcedConclusion,
 		Evidence: EvidenceMetrics{Status: EvidenceStatus(result.Evidence.Status)},
@@ -370,14 +405,14 @@ func publicResultMessages(messages []agentapi.Message) []llm.Message {
 	return out
 }
 
-func (svc *QA) persistSessionTurn(ctx context.Context, runID, sessionID string, userID int64, question string, outcome RunOutcome) error {
+func (svc *Service) persistTurn(ctx context.Context, runID, sessionID string, userID int64, question string, outcome RunOutcome) error {
 	if svc.sessions == nil {
 		return nil
 	}
-	return persistSessionTurn(ctx, svc.sessions, runID, sessionID, userID, question, outcome)
+	return persistTurn(ctx, svc.sessions, runID, sessionID, userID, question, outcome)
 }
 
-func persistSessionTurn(
+func persistTurn(
 	ctx context.Context,
 	sessions sessionTurnStore,
 	runID string,
@@ -407,7 +442,7 @@ func persistSessionTurn(
 	return nil
 }
 
-func (svc *QA) archiveSessionHistoryAsync(
+func (svc *Service) archiveHistoryAsync(
 	ctx context.Context,
 	runID string,
 	sessionID string,
@@ -423,16 +458,16 @@ func (svc *QA) archiveSessionHistoryAsync(
 		defer cancel()
 		started := false
 		fromTurn, toTurn := 0, 0
-		result, err := session.ArchiveSessionHistoryIfNeededWithStatus(
+		result, err := session.ArchiveWithStatus(
 			archiveCtx, svc.helperLLM, svc.sessions, sessionID, userID,
-			session.SessionCompactionUsage{
+			session.CompactionUsage{
 				ContextWindow:       contextWindow,
 				OutputReserveTokens: outputReserve,
 			},
 			func(from, to int) {
 				started = true
 				fromTurn, toTurn = from, to
-				svc.updateSessionCompaction(
+				svc.updateCompaction(
 					runID, sessionID, "start",
 					fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", from, to),
 					fromTurn, toTurn,
@@ -443,7 +478,7 @@ func (svc *QA) archiveSessionHistoryAsync(
 		if err != nil {
 			log.ErrorfCtx(archiveCtx, "[qa] post-turn history archive failed for %s: %v", sessionID, err)
 			if started {
-				svc.updateSessionCompaction(
+				svc.updateCompaction(
 					runID, sessionID, "failed", "历史上下文压缩失败",
 					fromTurn, toTurn,
 				)
@@ -451,7 +486,7 @@ func (svc *QA) archiveSessionHistoryAsync(
 			return
 		}
 		if result.Applied {
-			svc.updateSessionCompaction(
+			svc.updateCompaction(
 				runID, sessionID, "done", "历史上下文压缩完成",
 				result.FromTurn, result.ToTurn,
 			)
@@ -459,7 +494,7 @@ func (svc *QA) archiveSessionHistoryAsync(
 				sessionID, result.FromTurn, result.ToTurn)
 		} else if result.Stale {
 			if started {
-				svc.updateSessionCompaction(
+				svc.updateCompaction(
 					runID, sessionID, "done", "历史上下文压缩完成",
 					result.FromTurn, result.ToTurn,
 				)

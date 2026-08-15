@@ -11,9 +11,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-func (workflowStore *Store) PublishDefinitions(
+func (workflowStore *Store) Publish(
 	ctx context.Context,
-	definitions []WorkflowDefinition,
+	definitions []Definition,
 	actorUserID int64,
 ) ([]DefinitionRecord, error) {
 	tx, err := workflowStore.db.BeginTx(ctx, nil)
@@ -23,7 +23,7 @@ func (workflowStore *Store) PublishDefinitions(
 	defer tx.Rollback()
 	records := make([]DefinitionRecord, 0, len(definitions))
 	for _, definition := range definitions {
-		record, created, err := publishWorkflowDefinitionTx(
+		record, created, err := publishDefinitionTx(
 			ctx, tx, definition, actorUserID,
 		)
 		if err != nil {
@@ -31,7 +31,7 @@ func (workflowStore *Store) PublishDefinitions(
 		}
 		records = append(records, record)
 		if created {
-			if err := appendWorkflowDefinitionAuditTx(
+			if err := appendDefinitionAuditTx(
 				ctx, tx, definition.ID, definition.Version, "published", actorUserID,
 			); err != nil {
 				return nil, err
@@ -44,10 +44,10 @@ func (workflowStore *Store) PublishDefinitions(
 	return records, nil
 }
 
-func publishWorkflowDefinitionTx(
+func publishDefinitionTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	definition WorkflowDefinition,
+	definition Definition,
 	actorUserID int64,
 ) (DefinitionRecord, bool, error) {
 	var existing DefinitionRecord
@@ -68,7 +68,7 @@ func publishWorkflowDefinitionTx(
 				definition.ID, definition.Version, ErrConflict,
 			)
 		}
-		if err := json.Unmarshal(raw, &existing.WorkflowDefinition); err != nil {
+		if err := json.Unmarshal(raw, &existing.Definition); err != nil {
 			return DefinitionRecord{}, false, fmt.Errorf(
 				"decode workflow %q version %d: %w",
 				definition.ID, definition.Version, err,
@@ -123,11 +123,11 @@ func publishWorkflowDefinitionTx(
 		)
 	}
 	return DefinitionRecord{
-		WorkflowDefinition: definition,
-		Active:             true,
-		Default:            makeDefault,
-		CreatedBy:          actorUserID,
-		CreatedAt:          createdAt,
+		Definition: definition,
+		Active:     true,
+		Default:    makeDefault,
+		CreatedBy:  actorUserID,
+		CreatedAt:  createdAt,
 	}, true, nil
 }
 
@@ -144,7 +144,7 @@ func (workflowStore *Store) LoadFullCatalog(
 	defer rows.Close()
 	records := make([]DefinitionRecord, 0)
 	for rows.Next() {
-		record, err := scanWorkflowDefinitionRecord(rows)
+		record, err := scanDefinitionRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -156,7 +156,7 @@ func (workflowStore *Store) LoadFullCatalog(
 	return records, nil
 }
 
-func (workflowStore *Store) LoadDefinitionRollouts(
+func (workflowStore *Store) LoadRollouts(
 	ctx context.Context,
 ) ([]RolloutRule, error) {
 	rows, err := workflowStore.db.QueryContext(ctx, `SELECT
@@ -205,7 +205,7 @@ func (workflowStore *Store) ListDefinitions(
 	defer rows.Close()
 	records := make([]DefinitionRecord, 0, limit)
 	for rows.Next() {
-		record, err := scanWorkflowDefinitionRecord(rows)
+		record, err := scanDefinitionRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -217,7 +217,7 @@ func (workflowStore *Store) ListDefinitions(
 	return records, nil
 }
 
-func (workflowStore *Store) SetDefinitionDefault(
+func (workflowStore *Store) SetDefault(
 	ctx context.Context,
 	id string,
 	version int64,
@@ -259,7 +259,7 @@ func (workflowStore *Store) SetDefinitionDefault(
 				id, version, err,
 			)
 		}
-		if err := appendWorkflowDefinitionAuditTx(
+		if err := appendDefinitionAuditTx(
 			ctx, tx, id, version, "default_set", actorUserID,
 		); err != nil {
 			return err
@@ -271,7 +271,7 @@ func (workflowStore *Store) SetDefinitionDefault(
 	return nil
 }
 
-func (workflowStore *Store) SetDefinitionActive(
+func (workflowStore *Store) SetActive(
 	ctx context.Context,
 	id string,
 	version int64,
@@ -314,7 +314,7 @@ func (workflowStore *Store) SetDefinitionActive(
 		if active {
 			action = "enabled"
 		}
-		if err := appendWorkflowDefinitionAuditTx(
+		if err := appendDefinitionAuditTx(
 			ctx, tx, id, version, action, actorUserID,
 		); err != nil {
 			return err
@@ -326,7 +326,7 @@ func (workflowStore *Store) SetDefinitionActive(
 	return nil
 }
 
-func (workflowStore *Store) SetDefinitionRollout(
+func (workflowStore *Store) SetRollout(
 	ctx context.Context,
 	rule RolloutRule,
 	actorUserID int64,
@@ -390,7 +390,7 @@ func (workflowStore *Store) SetDefinitionRollout(
 	if rule.Active {
 		action = "rollout_enabled"
 	}
-	if err := appendWorkflowDefinitionRolloutAuditTx(
+	if err := appendRolloutAuditTx(
 		ctx, tx, rule, action, actorUserID,
 	); err != nil {
 		return err
@@ -401,7 +401,7 @@ func (workflowStore *Store) SetDefinitionRollout(
 	return nil
 }
 
-func (workflowStore *Store) ListDefinitionAudit(
+func (workflowStore *Store) ListAudit(
 	ctx context.Context,
 	id string,
 	afterSeq int64,
@@ -434,7 +434,7 @@ func (workflowStore *Store) ListDefinitionAudit(
 	return events, nil
 }
 
-func (workflowStore *Store) ListDefinitionRolloutAudit(
+func (workflowStore *Store) ListRolloutAudit(
 	ctx context.Context,
 	id string,
 	afterSeq int64,
@@ -469,7 +469,7 @@ func (workflowStore *Store) ListDefinitionRolloutAudit(
 	return events, nil
 }
 
-func scanWorkflowDefinitionRecord(
+func scanDefinitionRecord(
 	row interface{ Scan(...any) error },
 ) (DefinitionRecord, error) {
 	var record DefinitionRecord
@@ -480,13 +480,13 @@ func scanWorkflowDefinitionRecord(
 	); err != nil {
 		return DefinitionRecord{}, fmt.Errorf("scan workflow definition: %w", err)
 	}
-	if err := json.Unmarshal(raw, &record.WorkflowDefinition); err != nil {
+	if err := json.Unmarshal(raw, &record.Definition); err != nil {
 		return DefinitionRecord{}, fmt.Errorf("decode workflow definition: %w", err)
 	}
 	return record, nil
 }
 
-func appendWorkflowDefinitionAuditTx(
+func appendDefinitionAuditTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	id string,
@@ -508,7 +508,7 @@ func appendWorkflowDefinitionAuditTx(
 	return nil
 }
 
-func appendWorkflowDefinitionRolloutAuditTx(
+func appendRolloutAuditTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	rule RolloutRule,

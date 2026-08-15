@@ -7,6 +7,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -23,6 +24,7 @@ type InvestigationRunner interface {
 type InvestigationRequest struct {
 	WorkflowRunID string
 	Contract      TaskContract
+	Proposal      *agentapi.TaskGraphProposal
 	Actor         agentapi.Actor
 }
 
@@ -41,15 +43,20 @@ type EntityRef struct {
 }
 
 type EvidenceGoal struct {
-	ID       string `json:"id"`
-	Facet    string `json:"facet"`
-	Required bool   `json:"required"`
+	ID              string                    `json:"id"`
+	Facet           string                    `json:"facet"`
+	Required        bool                      `json:"required"`
+	Sources         []agentapi.EvidenceSource `json:"sources"`
+	Freshness       agentapi.FreshnessPolicy  `json:"freshness"`
+	MinimumCoverage int                       `json:"minimum_coverage"`
+	HighRisk        bool                      `json:"high_risk"`
 }
 
 type TaskContext struct {
-	ConversationRefs []ConversationRef   `json:"conversation_refs,omitempty"`
-	TimeRange        *TaskTimeRange      `json:"time_range,omitempty"`
-	SeedEvidence     []tool.EvidenceUnit `json:"seed_evidence,omitempty"`
+	ConversationRefs []ConversationRef       `json:"conversation_refs,omitempty"`
+	TimeRange        *TaskTimeRange          `json:"time_range,omitempty"`
+	SeedEvidence     []tool.EvidenceUnit     `json:"seed_evidence,omitempty"`
+	SeedMaterial     []agentapi.ContextBlock `json:"seed_material,omitempty"`
 }
 
 type ConversationRef struct {
@@ -94,6 +101,14 @@ const (
 	InvestigationTimedOut  InvestigationStatus = "timed_out"
 )
 
+type InvestigationCompleteness string
+
+const (
+	InvestigationComplete    InvestigationCompleteness = "complete"
+	InvestigationPartial     InvestigationCompleteness = "partial"
+	InvestigationUnavailable InvestigationCompleteness = "unavailable"
+)
+
 // InvestigationTerminal carries only durable workflow terminal facts.
 type InvestigationTerminal struct {
 	WorkflowRunID string
@@ -101,6 +116,7 @@ type InvestigationTerminal struct {
 	ErrorCode     string
 	Output        *InvestigationResult
 	Usage         InvestigationUsage
+	Completeness  InvestigationCompleteness
 }
 
 type InvestigationResult struct {
@@ -109,23 +125,32 @@ type InvestigationResult struct {
 	Limitations []string                `json:"limitations"`
 }
 
-func taskContractFromPreparation(
-	prepared *qaPreparation,
-	seedBlocks []ContextBlock,
+func contractFromPreparation(
+	prepared *preparation,
+	seedMaterial []agentapi.ContextBlock,
 ) TaskContract {
 	intent := prepared.analysis.RetrievalIntent
-	entities := make([]EntityRef, 0, len(intent.TargetEntities))
-	for _, entity := range intent.TargetEntities {
+	canonicalEntities := domain.CanonicalEntityIDs(intent.TargetEntities)
+	entities := make([]EntityRef, 0, len(canonicalEntities))
+	for _, entity := range canonicalEntities {
 		entities = append(entities, EntityRef{ID: entity})
 	}
 	goals := make([]EvidenceGoal, 0, len(intent.RequiredFacets))
+	sources := evidenceGoalSources(prepared)
+	freshness := evidenceGoalFreshness(prepared)
 	for _, facet := range intent.RequiredFacets {
 		value := string(facet)
-		goals = append(goals, EvidenceGoal{ID: value, Facet: value, Required: true})
+		goals = append(goals, EvidenceGoal{
+			ID: value, Facet: value, Required: true,
+			Sources:   append([]agentapi.EvidenceSource(nil), sources...),
+			Freshness: freshness, MinimumCoverage: 1,
+			HighRisk: freshness == agentapi.FreshnessBoundedLive,
+		})
 	}
 	taskContext := TaskContext{
 		ConversationRefs: append([]ConversationRef(nil), prepared.conversationRefs...),
-		SeedEvidence:     preloadedEvidence(seedBlocks),
+		SeedEvidence:     contextBlockEvidence(seedMaterial),
+		SeedMaterial:     cloneContextBlocks(seedMaterial),
 	}
 	if prepared.analysis.HasTimeRange {
 		resolved := prepared.analysis.TimeRange
@@ -141,12 +166,85 @@ func taskContractFromPreparation(
 	}
 }
 
-func preloadedEvidence(blocks []ContextBlock) []tool.EvidenceUnit {
+func evidenceGoalSources(prepared *preparation) []agentapi.EvidenceSource {
+	plan := prepared.planning.Effective.Plan
+	sources := make([]agentapi.EvidenceSource, 0, 4)
+	seen := make(map[agentapi.EvidenceSource]struct{}, 4)
+	add := func(source agentapi.EvidenceSource) {
+		if _, exists := seen[source]; exists {
+			return
+		}
+		seen[source] = struct{}{}
+		sources = append(sources, source)
+	}
+	if plan.Has(domain.Memory) {
+		add(agentapi.EvidenceSourceMemory)
+	}
+	if plan.Has(domain.Internal) {
+		add(agentapi.EvidenceSourceInternal)
+	}
+	if plan.Has(domain.Web) {
+		add(agentapi.EvidenceSourceWeb)
+	}
+	selected := make(map[string]struct{}, len(prepared.planning.RoutedToolIDs))
+	for _, id := range prepared.planning.RoutedToolIDs {
+		selected[id] = struct{}{}
+	}
+	for _, candidate := range prepared.toolCandidates {
+		if _, ok := selected[candidate.ID]; !ok {
+			continue
+		}
+		switch candidate.EvidenceSource {
+		case string(tool.RoutingEvidenceInternal):
+			add(agentapi.EvidenceSourceInternal)
+		case string(tool.RoutingEvidenceMemory):
+			add(agentapi.EvidenceSourceMemory)
+		case string(tool.RoutingEvidenceWeb):
+			add(agentapi.EvidenceSourceWeb)
+		case string(tool.RoutingEvidenceRuntime):
+			add(agentapi.EvidenceSourceRuntime)
+		}
+	}
+	return sources
+}
+
+func evidenceGoalFreshness(prepared *preparation) agentapi.FreshnessPolicy {
+	if prepared.analysis.HasTimeRange || toolsNeedInvestigation(
+		prepared.toolCandidates,
+		prepared.planning.RoutedToolIDs,
+	) {
+		return agentapi.FreshnessBoundedLive
+	}
+	plan := prepared.planning.Effective.Plan
+	if plan.Has(domain.Web) || plan.Has(domain.Memory) {
+		return agentapi.FreshnessCurrent
+	}
+	return agentapi.FreshnessStable
+}
+
+func contextBlockEvidence(blocks []agentapi.ContextBlock) []tool.EvidenceUnit {
 	ledger := evidence.New(nil, "")
 	for _, block := range blocks {
 		ledger.Add(block.Evidence, "preloaded")
 	}
 	return ledger.Units()
+}
+
+func cloneContextBlocks(blocks []agentapi.ContextBlock) []agentapi.ContextBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	cloned := make([]agentapi.ContextBlock, len(blocks))
+	for index, block := range blocks {
+		block.References = append([]agentapi.Reference(nil), block.References...)
+		block.Evidence = cloneEvidenceUnits(block.Evidence)
+		block.EvidenceConflicts = append(
+			[]agentapi.EvidenceConflict(nil),
+			block.EvidenceConflicts...,
+		)
+		cloned[index] = block
+	}
+	return cloned
 }
 
 func investigationOutcome(terminal InvestigationTerminal) (RunOutcome, error) {
@@ -158,7 +256,11 @@ func investigationOutcome(terminal InvestigationTerminal) (RunOutcome, error) {
 				terminal.WorkflowRunID,
 			)
 		}
-		return successfulInvestigationOutcome(*terminal.Output, terminal.Usage), nil
+		return successfulOutcome(
+			*terminal.Output,
+			terminal.Usage,
+			terminal.Completeness,
+		), nil
 	case InvestigationFailed:
 		return RunOutcome{
 			Status: RunStatusFailed, ErrorCode: terminal.ErrorCode,
@@ -190,9 +292,10 @@ func investigationOutcome(terminal InvestigationTerminal) (RunOutcome, error) {
 	}
 }
 
-func successfulInvestigationOutcome(
+func successfulOutcome(
 	result InvestigationResult,
 	usage InvestigationUsage,
+	completeness InvestigationCompleteness,
 ) RunOutcome {
 	answer := strings.TrimSpace(result.Answer)
 	if answer == "" {
@@ -203,10 +306,22 @@ func successfulInvestigationOutcome(
 	}
 	references := investigationReferences(result.Citations)
 	evidenceStatus := EvidenceComplete
-	partialResults := 0
-	if len(result.Limitations) > 0 {
+	partialResults := len(result.Limitations)
+	switch completeness {
+	case InvestigationComplete:
+	case InvestigationPartial:
 		evidenceStatus = EvidencePartial
-		partialResults = len(result.Limitations)
+		if partialResults == 0 {
+			partialResults = 1
+		}
+	case InvestigationUnavailable:
+		evidenceStatus = EvidenceUnavailable
+	default:
+		return RunOutcome{
+			Status: RunStatusFailed, ErrorCode: "invalid_completeness",
+			Err:      fmt.Errorf("invalid investigation completeness %q", completeness),
+			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
+		}
 	}
 	return RunOutcome{
 		Status: RunStatusDone, Answer: answer, TokenUsed: int(usage.TotalTokens),

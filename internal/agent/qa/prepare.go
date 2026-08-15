@@ -18,8 +18,8 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-type qaPreparation struct {
-	request            QARequest
+type preparation struct {
+	request            Request
 	sourceConversation ConversationContext
 	ctx                context.Context
 	trace              *runtrace.Scope
@@ -30,16 +30,17 @@ type qaPreparation struct {
 	planning           evidencePlanningOutput
 	analysis           queryAnalysisOutput
 	execution          executionRouteDecision
+	taskGraphProposal  *agentapi.TaskGraphProposal
 	historyCandidates  *HistoryCandidates
 	conversationRefs   []ConversationRef
 }
 
-type qaEvidence struct {
+type preparedEvidence struct {
 	retrieved *retrieval.RetrievedContext
 	recalled  []memory.MemoryRecord
 }
 
-func (prepared *qaPreparation) closeTrace() {
+func (prepared *preparation) closeTrace() {
 	if !prepared.ownsTrace {
 		return
 	}
@@ -47,7 +48,7 @@ func (prepared *qaPreparation) closeTrace() {
 	prepared.ownsTrace = false
 }
 
-func (prepared *qaPreparation) finishPreparationFailure(
+func (prepared *preparation) failPreparation(
 	ctx context.Context,
 	run agentapi.ManagedRun,
 	err error,
@@ -59,13 +60,13 @@ func (prepared *qaPreparation) finishPreparationFailure(
 	}
 }
 
-func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation, error) {
+func (svc *Service) prepare(ctx context.Context, request Request) (*preparation, error) {
 	prepared, err := svc.initializePreparation(ctx, request)
 	if err != nil {
 		return nil, err
 	}
 
-	historyDiscovery := startHistoryCandidateDiscovery(
+	historyDiscovery := startHistoryDiscovery(
 		prepared.ctx, svc.history, prepared.request.UserID,
 		prepared.request.Conversation, prepared.request.Question,
 	)
@@ -73,12 +74,12 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 		defer historyDiscovery.cancel()
 	}
 
-	requestAnchor, err := svc.planPreparedQuestion(prepared)
+	anchor, err := svc.planQuestion(prepared)
 	if err != nil {
 		prepared.closeTrace()
 		return nil, err
 	}
-	if err := svc.analyzePreparedQuestion(prepared, requestAnchor); err != nil {
+	if err := svc.analyzeQuestion(prepared, anchor); err != nil {
 		prepared.closeTrace()
 		return nil, err
 	}
@@ -88,15 +89,15 @@ func (svc *QA) prepareQA(ctx context.Context, request QARequest) (*qaPreparation
 	}
 
 	svc.applyTimeConstraint(prepared)
-	svc.routeQAExecution(prepared)
+	svc.applyExecutionRoute(prepared)
 	return prepared, nil
 }
 
-func (svc *QA) initializePreparation(
+func (svc *Service) initializePreparation(
 	ctx context.Context,
-	request QARequest,
-) (*qaPreparation, error) {
-	request, err := normalizeQARequest(request)
+	request Request,
+) (*preparation, error) {
+	request, err := normalizeRequest(request)
 	if err != nil {
 		return nil, err
 	}
@@ -106,24 +107,24 @@ func (svc *QA) initializePreparation(
 	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: request.RunID, ParentRunID: request.ParentRunID,
 	})
-	prepared := &qaPreparation{
+	prepared := &preparation{
 		request: request, sourceConversation: request.Conversation,
 		ctx: ctx, trace: trace, ownsTrace: ownsTrace,
 	}
 
 	prepared.toolPolicy = toolPolicyForRun(svc.writeAvailable && request.AllowWrite)
-	prepared.candidateToolSet = svc.runtimeTools.PrepareTools(prepared.toolPolicy)
+	prepared.candidateToolSet = svc.runtimeTools.ToolsFor(prepared.toolPolicy)
 	if request.Conversation.CompactedThroughTurn <= 0 || svc.history == nil {
-		prepared.candidateToolSet = withoutSessionHistoryTools(prepared.candidateToolSet)
+		prepared.candidateToolSet = withoutHistoryTools(prepared.candidateToolSet)
 	}
 	prepared.toolCandidates = routingCandidates(prepared.candidateToolSet.Tools())
 	return prepared, nil
 }
 
-func (svc *QA) planPreparedQuestion(prepared *qaPreparation) (time.Time, error) {
+func (svc *Service) planQuestion(prepared *preparation) (time.Time, error) {
 	request := prepared.request
 	svc.emitStatus(request.RunID, "嗯...让我先琢磨一下你在问什么 ✨", "prepare.planning", time.Time{})
-	routeContext := buildHistoryRouteContext(request.Conversation)
+	routeContext := buildHistoryContext(request.Conversation)
 	if routeContext == "" {
 		routeContext = buildRagCtx(request.Conversation.Recent)
 	}
@@ -147,8 +148,8 @@ func (svc *QA) planPreparedQuestion(prepared *qaPreparation) (time.Time, error) 
 	return requestAnchor, nil
 }
 
-func (svc *QA) analyzePreparedQuestion(
-	prepared *qaPreparation,
+func (svc *Service) analyzeQuestion(
+	prepared *preparation,
 	requestAnchor time.Time,
 ) error {
 	request := prepared.request
@@ -170,12 +171,12 @@ func (svc *QA) analyzePreparedQuestion(
 	return nil
 }
 
-func (svc *QA) prepareConversation(
-	prepared *qaPreparation,
+func (svc *Service) prepareConversation(
+	prepared *preparation,
 	historyDiscovery *historyDiscoveryTask,
 ) error {
 	historyStarted := time.Now()
-	prepared.historyCandidates = resolveHistoryCandidates(
+	prepared.historyCandidates = resolveCandidates(
 		prepared.ctx, historyDiscovery, prepared.analysis.History,
 	)
 	request := prepared.request
@@ -224,7 +225,7 @@ func conversationReferences(
 	return refs
 }
 
-func (svc *QA) applyTimeConstraint(prepared *qaPreparation) {
+func (svc *Service) applyTimeConstraint(prepared *preparation) {
 	if prepared.analysis.TimeError != nil {
 		log.WarnfCtx(prepared.ctx, "[qa] resolve relative time degraded: %v", prepared.analysis.TimeError)
 		return
@@ -241,10 +242,10 @@ func (svc *QA) applyTimeConstraint(prepared *qaPreparation) {
 	)
 }
 
-func normalizeQARequest(request QARequest) (QARequest, error) {
+func normalizeRequest(request Request) (Request, error) {
 	request.Question = strings.TrimSpace(request.Question)
 	if request.Question == "" {
-		return QARequest{}, fmt.Errorf("question is required")
+		return Request{}, fmt.Errorf("question is required")
 	}
 
 	request.Conversation.Instructions = append(
@@ -256,7 +257,7 @@ func normalizeQARequest(request QARequest) (QARequest, error) {
 	return request, nil
 }
 
-func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error) {
+func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) {
 	definition, selection, err := svc.resolveAgentDefinition(prepared)
 	if err != nil {
 		return nil, err
@@ -265,13 +266,13 @@ func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error
 		definition.Budget.ContextTokens, definition.Model.MaxOutputTokens,
 	)
 	if contextWindow != svc.contextWindow || outputReserve != svc.outputReserve {
-		if err := svc.reassemblePreparedConversation(
+		if err := svc.reassembleConversation(
 			prepared.ctx, prepared, contextWindow, outputReserve,
 		); err != nil {
 			return nil, err
 		}
 	}
-	run, err := svc.beginSingleAgentRun(prepared, definition, selection)
+	run, err := svc.beginSingleRun(prepared, definition, selection)
 	if err != nil {
 		return nil, err
 	}
@@ -293,18 +294,18 @@ func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error
 		runCtx, prepared, evidencePlan, webUnavailable, stepRecorder,
 	)
 	if err != nil {
-		prepared.finishPreparationFailure(runCtx, run, err)
+		prepared.failPreparation(runCtx, run, err)
 		return nil, err
 	}
-	conversation = svc.prepareAnswerConversation(
+	conversation = svc.answerContext(
 		runCtx, conversation, evidence.recalled, prepared.request.RolePrompt, evidence.retrieved,
 	)
-	conversation, err = svc.compactBeforeAnswer(
+	conversation, err = svc.compactAnswer(
 		runCtx, prepared, conversation, evidence.retrieved, evidencePlan,
 		contextWindow, outputReserve,
 	)
 	if err != nil {
-		prepared.finishPreparationFailure(runCtx, run, err)
+		prepared.failPreparation(runCtx, run, err)
 		return nil, err
 	}
 	return svc.submitRun(
@@ -315,9 +316,9 @@ func (svc *QA) prepareSingleAgentRun(prepared *qaPreparation) (*AskResult, error
 	)
 }
 
-func (svc *QA) reassemblePreparedConversation(
+func (svc *Service) reassembleConversation(
 	ctx context.Context,
-	prepared *qaPreparation,
+	prepared *preparation,
 	contextWindow int,
 	outputReserve int,
 ) error {
@@ -339,15 +340,15 @@ func (svc *QA) reassemblePreparedConversation(
 	return nil
 }
 
-func (svc *QA) prepareRunConversation(prepared *qaPreparation) ConversationContext {
+func (svc *Service) prepareRunConversation(prepared *preparation) ConversationContext {
 	conversation := prepared.request.Conversation
 	routedToolIDs := prepared.planning.RoutedToolIDs
 	if len(routedToolIDs) > 0 {
 		conversation.Instructions = append(conversation.Instructions, llm.Message{
-			Role: "system", Content: preferredToolsInstruction(routedToolIDs),
+			Role: "system", Content: preferenceInstruction(routedToolIDs),
 		})
 	}
-	conversation.FullInvestigation = routedToolsNeedFullInvestigation(
+	conversation.FullInvestigation = toolsNeedInvestigation(
 		prepared.toolCandidates, routedToolIDs,
 	)
 	// Dry-run pruning still records the potential saving while keeping all tools visible.
@@ -360,8 +361,8 @@ func (svc *QA) prepareRunConversation(prepared *qaPreparation) ConversationConte
 	return conversation
 }
 
-func (svc *QA) resolveAgentDefinition(
-	prepared *qaPreparation,
+func (svc *Service) resolveAgentDefinition(
+	prepared *preparation,
 ) (agentapi.Definition, agentapi.DefinitionSelection, error) {
 	agentRef := prepared.request.Agent
 	if agentRef.ID == "" {
@@ -374,7 +375,7 @@ func (svc *QA) resolveAgentDefinition(
 	if svc.definitions == nil {
 		return agentapi.Definition{}, agentapi.DefinitionSelection{}, nil
 	}
-	if resolver, ok := svc.definitions.(DefinitionSelectionResolver); ok {
+	if resolver, ok := svc.definitions.(SelectionResolver); ok {
 		stableKey := catalog.StableSelectionKey(
 			prepared.request.UserID, prepared.request.Conversation.SessionID,
 		)
@@ -393,8 +394,8 @@ func (svc *QA) resolveAgentDefinition(
 	return definition, agentapi.DefinitionSelection{}, nil
 }
 
-func (svc *QA) beginSingleAgentRun(
-	prepared *qaPreparation,
+func (svc *Service) beginSingleRun(
+	prepared *preparation,
 	definition agentapi.Definition,
 	selection agentapi.DefinitionSelection,
 ) (agentapi.ManagedRun, error) {
@@ -405,8 +406,8 @@ func (svc *QA) beginSingleAgentRun(
 		},
 		DefinitionHash: definition.ContentHash,
 		Selection:      selection,
-		Input:          qaRunInput(prepared.request.Question),
-		Permissions:    qaRunPermissions(prepared.toolPolicy.AllowWrite),
+		Input:          runInput(prepared.request.Question),
+		Permissions:    runPermissions(prepared.toolPolicy.AllowWrite),
 		ToolScope: agentapi.ToolScope{
 			AllowWrite:      prepared.toolPolicy.AllowWrite,
 			RestrictVisible: true,
@@ -426,13 +427,13 @@ func (svc *QA) beginSingleAgentRun(
 	return run, nil
 }
 
-func (svc *QA) prepareEvidence(
+func (svc *Service) prepareEvidence(
 	ctx context.Context,
-	prepared *qaPreparation,
+	prepared *preparation,
 	evidencePlan domain.EvidencePlan,
 	webUnavailable bool,
 	stepRecorder preparationStepRecorder,
-) (*qaEvidence, error) {
+) (*preparedEvidence, error) {
 	prefetched, err := svc.executePrefetch(
 		ctx,
 		prepared.request.RunID,
@@ -470,7 +471,10 @@ func (svc *QA) prepareEvidence(
 			Question: prepared.request.Question, Plan: evidencePlan, Blocks: preloadedContext,
 			Budget: svc.contextBudget(), WebDown: webUnavailable,
 		})
-		return &qaEvidence{retrieved: rc, recalled: recalled}, nil
+		return &preparedEvidence{retrieved: rc, recalled: recalled}, nil
+	}
+	if svc.retriever == nil {
+		return nil, fmt.Errorf("retrieve internal evidence: retriever is unavailable")
 	}
 
 	retrievalStarted := time.Now()
@@ -507,10 +511,10 @@ func (svc *QA) prepareEvidence(
 	log.InfofCtx(ctx, "[qa] pre-retrieve context:\n%s",
 		platform.TruncateForLog(rc.Text, 4000),
 	)
-	return &qaEvidence{retrieved: rc, recalled: recalled}, nil
+	return &preparedEvidence{retrieved: rc, recalled: recalled}, nil
 }
 
-func (svc *QA) recallMemory(
+func (svc *Service) recallMemory(
 	ctx context.Context,
 	userID int64,
 	question string,

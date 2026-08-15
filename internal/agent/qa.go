@@ -8,18 +8,19 @@ import (
 )
 
 type ConversationContext = execution.ConversationContext
-type QA = agentqa.QA
-type QADeps = agentqa.QADeps
-type QAModels = agentqa.QAModels
-type QARequest = agentqa.QARequest
+type QA = agentqa.Service
+type QADeps = agentqa.Deps
+type QAModels = agentqa.Models
+type QARequest = agentqa.Request
 type AskResult = agentqa.AskResult
 type InvestigationRequest = agentqa.InvestigationRequest
 type InvestigationResult = agentqa.InvestigationResult
 type InvestigationTerminal = agentqa.InvestigationTerminal
 type InvestigationStatus = agentqa.InvestigationStatus
+type InvestigationCompleteness = agentqa.InvestigationCompleteness
 type InvestigationUsage = agentqa.InvestigationUsage
 type InvestigationRunner = agentqa.InvestigationRunner
-type InvestigationCoordinator = agentqa.InvestigationCoordinator
+type QACoordinator = agentqa.Coordinator
 type ParentRunReader = agentqa.ParentRunReader
 type TaskContract = agentqa.TaskContract
 type EntityRef = agentqa.EntityRef
@@ -33,19 +34,23 @@ const (
 	InvestigationFailed    = agentqa.InvestigationFailed
 	InvestigationCancelled = agentqa.InvestigationCancelled
 	InvestigationTimedOut  = agentqa.InvestigationTimedOut
+
+	InvestigationComplete    = agentqa.InvestigationComplete
+	InvestigationPartial     = agentqa.InvestigationPartial
+	InvestigationUnavailable = agentqa.InvestigationUnavailable
 )
 
 func NewQA(deps QADeps) *QA {
-	return agentqa.NewQA(deps)
+	return agentqa.New(deps)
 }
 
-func NewInvestigationCoordinator(
+func NewQACoordinator(
 	investigation InvestigationRunner,
 	scenarios ScenarioLifecycle,
 	parentRuns ParentRunReader,
 	sessions *memory.SessionStore,
-) *InvestigationCoordinator {
-	return agentqa.NewInvestigationCoordinator(
+) *QACoordinator {
+	return agentqa.NewCoordinator(
 		investigation,
 		scenarios,
 		parentRuns,
@@ -54,7 +59,7 @@ func NewInvestigationCoordinator(
 }
 
 func NewQAModels(settings *config.PlatformSettings) *QAModels {
-	return agentqa.NewQAModels(settings)
+	return agentqa.NewModels(settings)
 }
 
 func NewRunID() string {

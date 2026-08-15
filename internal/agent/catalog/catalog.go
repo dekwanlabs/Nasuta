@@ -50,7 +50,7 @@ type AuditEvent struct {
 }
 
 type catalogPersistence interface {
-	PublishDefinitions(context.Context, []agentapi.Definition, int64) ([]DefinitionRecord, error)
+	Publish(context.Context, []agentapi.Definition, int64) ([]DefinitionRecord, error)
 	LoadFullCatalog(context.Context) ([]DefinitionRecord, error)
 	LoadRollouts(context.Context) ([]RolloutRule, error)
 	ListDefinitions(context.Context, DefinitionCursor, int) ([]DefinitionRecord, error)
@@ -114,7 +114,7 @@ func (catalog *Catalog) PublishAs(
 	defer catalog.writeMu.Unlock()
 	records := make([]DefinitionRecord, 0, len(prepared))
 	if catalog.store != nil {
-		records, err = catalog.store.PublishDefinitions(ctx, prepared, actorUserID)
+		records, err = catalog.store.Publish(ctx, prepared, actorUserID)
 		if err != nil {
 			return err
 		}
@@ -590,7 +590,7 @@ func (catalog *Catalog) SetRollout(
 		if active {
 			action = "rollout_enabled"
 		}
-		appendMemoryRolloutAudit(next, prepared, action, actorUserID)
+		appendRolloutAudit(next, prepared, action, actorUserID)
 	}
 	next.revision++
 	catalog.state.Store(next)
@@ -744,7 +744,7 @@ func appendMemoryAudit(
 	})
 }
 
-func appendMemoryRolloutAudit(
+func appendRolloutAudit(
 	current *state,
 	rule RolloutRule,
 	action string,

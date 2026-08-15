@@ -13,17 +13,17 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-type platformQAInvestigationRunner struct {
+type qaInvestigator struct {
 	platform *Platform
 	events   run.ExecutionEventEmitter
 }
 
-func (runner platformQAInvestigationRunner) Available() bool {
+func (runner qaInvestigator) Available() bool {
 	_, _, err := runner.startCapability()
 	return err == nil
 }
 
-func (runner platformQAInvestigationRunner) Start(
+func (runner qaInvestigator) Start(
 	ctx context.Context,
 	request agent.InvestigationRequest,
 ) error {
@@ -32,20 +32,22 @@ func (runner platformQAInvestigationRunner) Start(
 		return err
 	}
 	workflowRef := workflow.DefinitionRef{
-		ID: workflow.DelegatedInvestigationID, Version: version,
+		ID: workflow.FlowID, Version: version,
 	}
+	agentNodes := defaultAgentNodes()
 	if len(request.Contract.EvidenceGoals) > 0 {
-		definition, err := runner.platform.delegatedInvestigationWorkflowForGoals(
+		definition, err := runner.platform.investigationFlow(
 			ctx,
 			version,
 			request.Contract.EvidenceGoals,
+			request.Proposal,
 		)
 		if err != nil {
 			return fmt.Errorf("prepare QA investigation workflow: %w", err)
 		}
-		if err := service.PublishDefinitionsAs(
+		if err := service.PublishAs(
 			ctx,
-			[]workflow.WorkflowDefinition{definition},
+			[]workflow.Definition{definition},
 			request.Actor.UserID,
 			true,
 		); err != nil {
@@ -59,6 +61,7 @@ func (runner platformQAInvestigationRunner) Start(
 		workflowRef = workflow.DefinitionRef{
 			ID: definition.ID, Version: definition.Version,
 		}
+		agentNodes = agentNodeIDs(definition)
 	}
 	input, err := json.Marshal(request.Contract)
 	if err != nil {
@@ -85,6 +88,7 @@ func (runner platformQAInvestigationRunner) Start(
 			completed,
 			runner.events,
 			request.Contract.TaskID,
+			agentNodes,
 		)
 	}()
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
@@ -93,7 +97,7 @@ func (runner platformQAInvestigationRunner) Start(
 		Workflow: workflowRef,
 		Input:    input, Actor: request.Actor, ActorPermissions: readOnly,
 		SeedEvidence: request.Contract.Context.SeedEvidence,
-		Scenario:     workflow.DelegatedInvestigationID, ScenarioPermissions: readOnly,
+		Scenario:     workflow.FlowID, ScenarioPermissions: readOnly,
 	})
 	if startErr == nil {
 		awaitCtx := context.WithoutCancel(ctx)
@@ -122,19 +126,22 @@ func (runner platformQAInvestigationRunner) Start(
 	)
 }
 
-func (p *Platform) delegatedInvestigationWorkflowForGoals(
+func (p *Platform) investigationFlow(
 	ctx context.Context,
 	version int64,
 	goals []agent.EvidenceGoal,
-) (workflow.WorkflowDefinition, error) {
+	plan *agentapi.TaskGraphProposal,
+) (workflow.Definition, error) {
 	if p == nil || p.agents.catalog == nil ||
 		p.agents.schemas == nil || p.agents.capabilities == nil {
-		return workflow.WorkflowDefinition{}, workflow.ErrUnavailable
+		return workflow.Definition{}, workflow.ErrUnavailable
 	}
 	ids := []string{
 		"investigator.code",
 		"investigator.runtime",
 		"investigator.docs",
+		"investigator.web",
+		"investigator.memory",
 		"synthesizer",
 	}
 	definitions := make([]agentapi.Definition, 0, len(ids))
@@ -143,8 +150,8 @@ func (p *Platform) delegatedInvestigationWorkflowForGoals(
 			ID: id, Version: version,
 		})
 		if err != nil {
-			return workflow.WorkflowDefinition{}, fmt.Errorf(
-				"resolve delegated investigation agent %q version %d: %w",
+			return workflow.Definition{}, fmt.Errorf(
+				"resolve investigation agent %q version %d: %w",
 				id,
 				version,
 				err,
@@ -152,40 +159,117 @@ func (p *Platform) delegatedInvestigationWorkflowForGoals(
 		}
 		definitions = append(definitions, definition)
 	}
-	budgets, err := delegatedInvestigationBudgetPolicy(definitions)
+	budgets, err := investigationBudgets(definitions)
 	if err != nil {
-		return workflow.WorkflowDefinition{}, err
+		return workflow.Definition{}, err
 	}
-	workflowGoals := make([]workflow.DelegatedInvestigationGoal, 0, len(goals))
-	for _, goal := range goals {
-		workflowGoals = append(workflowGoals, workflow.DelegatedInvestigationGoal{
-			Facet: goal.Facet, Required: goal.Required,
+	if goalsNeedSource(goals, agentapi.EvidenceSourceRuntime) {
+		observe, err := p.agents.capabilities.Resolve(agentapi.CapabilityRef{
+			ID: "knowledge.runtime.observe", Version: version,
 		})
+		if err != nil {
+			return workflow.Definition{}, fmt.Errorf(
+				"resolve live runtime investigation capability version %d: %w",
+				version,
+				err,
+			)
+		}
+		if len(observe.ToolIDs) == 0 {
+			return workflow.Definition{}, fmt.Errorf(
+				"live runtime investigation capability has no tools",
+			)
+		}
+		definition, err := p.agents.catalog.Resolve(observe.Agent)
+		if err != nil {
+			return workflow.Definition{}, fmt.Errorf(
+				"resolve live runtime investigator: %w",
+				err,
+			)
+		}
+		budgets.Observe, err = agentNodeBudget(
+			definition,
+			int64(definition.Budget.MaxSteps),
+		)
+		if err != nil {
+			return workflow.Definition{}, err
+		}
 	}
-	proposal, err := workflow.DelegatedInvestigationProposalForGoals(workflowGoals)
-	if err != nil {
-		return workflow.WorkflowDefinition{}, err
-	}
-	policy, err := workflow.DelegatedInvestigationCompilationPolicyForGoals(
-		version,
-		definitions[0].Budget.Timeout,
-		budgets,
-		workflowGoals,
-	)
-	if err != nil {
-		return workflow.WorkflowDefinition{}, err
+	flowGoals := make([]workflow.Goal, 0, len(goals))
+	for _, goal := range goals {
+		flowGoals = append(flowGoals, workflow.Goal{
+			Facet: goal.Facet, Required: goal.Required,
+			Sources: append(
+				[]agentapi.EvidenceSource(nil),
+				goal.Sources...,
+			),
+			Freshness:       goal.Freshness,
+			MinimumCoverage: goal.MinimumCoverage,
+			HighRisk:        goal.HighRisk,
+		})
 	}
 	compiler, err := workflow.NewProposalCompiler(
 		p.agents.schemas,
 		p.agents.capabilities,
 	)
 	if err != nil {
-		return workflow.WorkflowDefinition{}, err
+		return workflow.Definition{}, err
 	}
-	return compiler.CompileContext(ctx, proposal, policy)
+	if plan != nil {
+		policy, err := workflow.PlanPolicy(
+			version,
+			definitions[0].Budget.Timeout,
+			budgets,
+			flowGoals,
+			*plan,
+		)
+		if err != nil {
+			return workflow.Definition{}, err
+		}
+		definition, compileErr := compiler.CompileContext(
+			ctx,
+			*plan,
+			policy,
+		)
+		if compileErr == nil {
+			return definition, nil
+		}
+		log.WarnfCtx(
+			ctx,
+			"[qa] planner task graph rejected; using deterministic goal mapping: %v",
+			compileErr,
+		)
+	}
+	fallbackPlan, err := workflow.BuildPlan(flowGoals)
+	if err != nil {
+		return workflow.Definition{}, err
+	}
+	policy, err := workflow.GoalPolicy(
+		version,
+		definitions[0].Budget.Timeout,
+		budgets,
+		flowGoals,
+	)
+	if err != nil {
+		return workflow.Definition{}, err
+	}
+	return compiler.CompileContext(ctx, fallbackPlan, policy)
 }
 
-func (runner platformQAInvestigationRunner) AwaitTerminal(
+func goalsNeedSource(
+	goals []agent.EvidenceGoal,
+	source agentapi.EvidenceSource,
+) bool {
+	for _, goal := range goals {
+		for _, candidate := range goal.Sources {
+			if candidate == source {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (runner qaInvestigator) AwaitTerminal(
 	ctx context.Context,
 	workflowRunID string,
 ) (agent.InvestigationTerminal, error) {
@@ -200,7 +284,7 @@ func (runner platformQAInvestigationRunner) AwaitTerminal(
 	return investigationTerminal(terminal)
 }
 
-func (runner platformQAInvestigationRunner) LoadTerminal(
+func (runner qaInvestigator) LoadTerminal(
 	ctx context.Context,
 	workflowRunID string,
 ) (agent.InvestigationTerminal, error) {
@@ -215,7 +299,7 @@ func (runner platformQAInvestigationRunner) LoadTerminal(
 	return investigationTerminal(terminal)
 }
 
-func (runner platformQAInvestigationRunner) Cancel(
+func (runner qaInvestigator) Cancel(
 	ctx context.Context,
 	workflowRunID string,
 	userID int64,
@@ -230,7 +314,7 @@ func (runner platformQAInvestigationRunner) Cancel(
 	return nil
 }
 
-func (runner platformQAInvestigationRunner) startCapability() (
+func (runner qaInvestigator) startCapability() (
 	*workflow.Service,
 	int64,
 	error,
@@ -242,7 +326,7 @@ func (runner platformQAInvestigationRunner) startCapability() (
 	p.qa.reload.RLock()
 	defer p.qa.reload.RUnlock()
 	if p.flow.service == nil ||
-		!p.flow.service.ExecutionAvailable() ||
+		!p.flow.service.Available() ||
 		p.agents.runtime == nil ||
 		p.agents.version <= 0 ||
 		p.qa.runs == nil {
@@ -251,7 +335,7 @@ func (runner platformQAInvestigationRunner) startCapability() (
 	return p.flow.service, p.agents.version, nil
 }
 
-func (runner platformQAInvestigationRunner) workflowService() (*workflow.Service, error) {
+func (runner qaInvestigator) workflowService() (*workflow.Service, error) {
 	if runner.platform == nil || runner.platform.flow.service == nil {
 		return nil, workflow.ErrUnavailable
 	}
@@ -280,6 +364,20 @@ func investigationTerminal(
 			return agent.InvestigationTerminal{}, fmt.Errorf(
 				"QA investigation workflow %q succeeded without output",
 				terminal.Run.ID,
+			)
+		}
+		switch terminal.Output.Completeness {
+		case workflow.Complete:
+			result.Completeness = agent.InvestigationComplete
+		case workflow.Partial:
+			result.Completeness = agent.InvestigationPartial
+		case workflow.Unavailable:
+			result.Completeness = agent.InvestigationUnavailable
+		default:
+			return agent.InvestigationTerminal{}, fmt.Errorf(
+				"QA investigation workflow %q has invalid output completeness %q",
+				terminal.Run.ID,
+				terminal.Output.Completeness,
 			)
 		}
 		var output agent.InvestigationResult
@@ -313,12 +411,16 @@ func bridgeInvestigationEvents(
 	completed <-chan struct{},
 	emitter run.ExecutionEventEmitter,
 	parentRunID string,
+	agentNodes map[string]struct{},
 ) {
 	for {
 		select {
-		case event := <-events:
-			emitInvestigationEvent(emitter, parentRunID, event)
-			if investigationTerminalEvent(event.Kind) {
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			emitInvestigationEvent(emitter, parentRunID, event, agentNodes)
+			if isWorkflowTerminal(event.Kind) {
 				return
 			}
 		case <-completed:
@@ -329,7 +431,7 @@ func bridgeInvestigationEvents(
 	}
 }
 
-func investigationTerminalEvent(kind string) bool {
+func isWorkflowTerminal(kind string) bool {
 	switch kind {
 	case "workflow_succeeded", "workflow_failed",
 		"workflow_cancelled", "workflow_timed_out":
@@ -343,19 +445,25 @@ func emitInvestigationEvent(
 	emitter run.ExecutionEventEmitter,
 	parentRunID string,
 	event workflow.Event,
+	agentNodes map[string]struct{},
 ) {
 	if emitter == nil {
 		return
 	}
-	eventType, projected, ok := projectInvestigationEvent(parentRunID, event)
+	eventType, projected, ok := projectInvestigationEvent(
+		parentRunID,
+		event,
+		agentNodes,
+	)
 	if ok {
-		emitter.EmitExecutionEvent(eventType, projected)
+		emitter.EmitEvent(eventType, projected)
 	}
 }
 
 func projectInvestigationEvent(
 	parentRunID string,
 	event workflow.Event,
+	agentNodes map[string]struct{},
 ) (run.EventType, run.ExecutionEvent, bool) {
 	projected := run.ExecutionEvent{
 		RunID: parentRunID, WorkflowRunID: event.WorkflowRunID,
@@ -366,13 +474,13 @@ func projectInvestigationEvent(
 		projected.Status = "running"
 		return run.EventWorkflowStarted, projected, true
 	case "node_started":
-		if investigationAgentNode(event.NodeID) {
+		if isAgentNode(agentNodes, event.NodeID) {
 			projected.Status = "running"
 			return run.EventAgentStarted, projected, true
 		}
 	case "node_succeeded":
 		switch {
-		case investigationAgentNode(event.NodeID):
+		case isAgentNode(agentNodes, event.NodeID):
 			projected.Status = "completed"
 			return run.EventAgentCompleted, projected, true
 		case event.NodeID == "evidence.join":
@@ -380,7 +488,7 @@ func projectInvestigationEvent(
 			return run.EventEvidenceJoined, projected, true
 		}
 	case "node_failed":
-		if investigationAgentNode(event.NodeID) {
+		if isAgentNode(agentNodes, event.NodeID) {
 			projected.Status = "failed"
 			projected.Reason = event.Summary
 			return run.EventAgentCompleted, projected, true
@@ -389,11 +497,31 @@ func projectInvestigationEvent(
 	return "", run.ExecutionEvent{}, false
 }
 
-func investigationAgentNode(nodeID string) bool {
-	switch nodeID {
-	case "investigate.code", "investigate.runtime", "investigate.docs", "synthesize":
-		return true
-	default:
-		return false
+func isAgentNode(
+	agentNodes map[string]struct{},
+	nodeID string,
+) bool {
+	_, ok := agentNodes[nodeID]
+	return ok
+}
+
+func agentNodeIDs(
+	definition workflow.Definition,
+) map[string]struct{} {
+	ids := make(map[string]struct{}, len(definition.Nodes))
+	for _, node := range definition.Nodes {
+		if node.Kind == workflow.NodeAgent {
+			ids[node.ID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func defaultAgentNodes() map[string]struct{} {
+	return map[string]struct{}{
+		"investigate.code":    {},
+		"investigate.runtime": {},
+		"investigate.docs":    {},
+		"synthesize":          {},
 	}
 }

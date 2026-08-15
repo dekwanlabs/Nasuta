@@ -41,7 +41,7 @@ func (writer *failingSSEWriter) FlushError() error {
 }
 
 func TestQATraceExporterStreamsScopeEvents(t *testing.T) {
-	hub := run.NewRunHub(nil)
+	hub := run.NewHub(nil)
 	channel := hub.Subscribe("run")
 	scope := runtrace.Begin(runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		hub.EmitTrace("run", event)
@@ -80,13 +80,13 @@ func TestQATraceUsesV1WireContract(t *testing.T) {
 // The QA stream loop forwards every hub event and stops only on the terminal
 // one, so a trace event queued ahead of run.finished must still reach the client.
 func TestStreamLoopDrainsTraceBeforeTerminal(t *testing.T) {
-	terminal := &run.RunTerminal{Status: run.RunStatusDone, Answer: "answer"}
+	terminal := &run.Terminal{Status: run.StatusDone, Answer: "answer"}
 	events := []run.SSEEvent{
 		{Type: run.EventTrace, Data: domain.EvaluationTrace{Node: "retrieval_assemble"}},
 		{Type: run.EventRunFinished, Data: terminal},
 	}
 	var names []string
-	var got *run.RunTerminal
+	var got *run.Terminal
 	for _, ev := range events {
 		if got != nil {
 			t.Fatalf("kept forwarding after terminal event %q", ev.Type)
@@ -162,9 +162,9 @@ func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
 }
 
 func TestRunFinishedIsTheOnlyTerminalEvent(t *testing.T) {
-	for _, status := range []run.RunStatus{run.RunStatusDone, run.RunStatusFailed, run.RunStatusAborted} {
+	for _, status := range []run.Status{run.StatusDone, run.StatusFailed, run.StatusAborted} {
 		var names []string
-		emitHubEvent(run.SSEEvent{Type: run.EventRunFinished, Data: &run.RunTerminal{Status: status}}, func(name string, _ any) bool {
+		emitHubEvent(run.SSEEvent{Type: run.EventRunFinished, Data: &run.Terminal{Status: status}}, func(name string, _ any) bool {
 			names = append(names, name)
 			return true
 		})

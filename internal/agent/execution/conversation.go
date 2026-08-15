@@ -5,20 +5,20 @@ import (
 	"strings"
 )
 
-var conversationEntityPatterns = []*regexp.Regexp{
+var entityPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b[a-z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\b`),
 	regexp.MustCompile(`\b\d{15,20}\b`),
 	regexp.MustCompile(`(?i)\b[0-9a-f]{12,64}(?:\.\d+\.\d+)?\b`),
 	regexp.MustCompile(`(?i)\b[a-z0-9]{8,}-[a-z0-9-]{8,}:[a-z0-9:]+\b`),
 }
 
-// hasConflictingConversationEntity prevents an explicit entity switch from
+// hasEntityConflict prevents an explicit entity switch from
 // turning unrelated history into retrieval evidence.
-func hasConflictingConversationEntity(question, prior string) bool {
+func hasEntityConflict(question, prior string) bool {
 	if strings.TrimSpace(question) == "" || strings.TrimSpace(prior) == "" {
 		return false
 	}
-	for _, pattern := range conversationEntityPatterns {
+	for _, pattern := range entityPatterns {
 		current := entityMatches(pattern, question)
 		previous := entityMatches(pattern, prior)
 		if len(current) == 0 || len(previous) == 0 {

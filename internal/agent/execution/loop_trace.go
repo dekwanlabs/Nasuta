@@ -165,16 +165,16 @@ var forceConclusionSpec = runtrace.Spec[*forceConclusionInput, forceConclusionOu
 	},
 }
 
-type firstAnswerTokenTraceInput struct {
+type firstTokenTraceInput struct {
 	Step         any
 	TurnTTFTMS   int64
 	RunElapsedMS int64
 }
 
-var firstAnswerTokenTraceSpec = runtrace.Spec[firstAnswerTokenTraceInput, struct{}]{
+var firstTokenTraceSpec = runtrace.Spec[firstTokenTraceInput, struct{}]{
 	Operation: "agent.first_answer_token",
 	Node:      "first_answer_token",
-	Output: func(input firstAnswerTokenTraceInput, _ struct{}, _ error) map[string]any {
+	Output: func(input firstTokenTraceInput, _ struct{}, _ error) map[string]any {
 		return map[string]any{
 			"step":           input.Step,
 			"turn_ttft_ms":   input.TurnTTFTMS,

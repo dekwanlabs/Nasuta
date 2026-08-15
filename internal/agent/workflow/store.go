@@ -34,9 +34,11 @@ const (
 	RunWaitingHuman RunStatus = "waiting_human"
 )
 
-type WorkflowRunRecord struct {
+type RunRecord struct {
 	ID                  string                    `json:"id"`
 	ParentRunID         string                    `json:"parent_run_id,omitempty"`
+	Round               int                       `json:"round"`
+	BaseDepth           int                       `json:"base_depth"`
 	WorkflowID          string                    `json:"workflow_id"`
 	WorkflowVersion     int64                     `json:"workflow_version"`
 	WorkflowHash        string                    `json:"workflow_hash"`
@@ -48,27 +50,28 @@ type WorkflowRunRecord struct {
 	Scenario            string                    `json:"scenario"`
 	ScenarioPermissions agentapi.PermissionPolicy `json:"scenario_permissions"`
 	Status              RunStatus                 `json:"status"`
-	Budget              WorkflowBudget            `json:"budget"`
-	Usage               WorkflowUsage             `json:"usage"`
+	Budget              Budget                    `json:"budget"`
+	Usage               Usage                     `json:"usage"`
 	ErrorCode           string                    `json:"error_code,omitempty"`
+	StopReason          StopReason                `json:"stop_reason,omitempty"`
 	StartedAt           time.Time                 `json:"started_at"`
 	EndedAt             *time.Time                `json:"ended_at,omitempty"`
 }
 
 type NodeRunRecord struct {
-	WorkflowRunID   string        `json:"workflow_run_id"`
-	NodeID          string        `json:"node_id"`
-	Attempt         int           `json:"attempt"`
-	Kind            NodeKind      `json:"kind"`
-	AgentRunID      string        `json:"agent_run_id,omitempty"`
-	InputHandoffIDs []string      `json:"input_handoff_ids"`
-	OutputHandoffID string        `json:"output_handoff_id,omitempty"`
-	Status          RunStatus     `json:"status"`
-	Usage           WorkflowUsage `json:"usage"`
-	ErrorCode       string        `json:"error_code,omitempty"`
-	StartedAt       time.Time     `json:"started_at"`
-	FirstStartedAt  time.Time     `json:"first_started_at"`
-	EndedAt         *time.Time    `json:"ended_at,omitempty"`
+	WorkflowRunID   string     `json:"workflow_run_id"`
+	NodeID          string     `json:"node_id"`
+	Attempt         int        `json:"attempt"`
+	Kind            NodeKind   `json:"kind"`
+	AgentRunID      string     `json:"agent_run_id,omitempty"`
+	InputHandoffIDs []string   `json:"input_handoff_ids"`
+	OutputHandoffID string     `json:"output_handoff_id,omitempty"`
+	Status          RunStatus  `json:"status"`
+	Usage           Usage      `json:"usage"`
+	ErrorCode       string     `json:"error_code,omitempty"`
+	StartedAt       time.Time  `json:"started_at"`
+	FirstStartedAt  time.Time  `json:"first_started_at"`
+	EndedAt         *time.Time `json:"ended_at,omitempty"`
 }
 
 type Event struct {
@@ -81,24 +84,24 @@ type Event struct {
 	CreatedAt     time.Time       `json:"created_at"`
 }
 
-type WorkflowRunState struct {
-	Run         WorkflowRunRecord
+type RunState struct {
+	Run         RunRecord
 	Input       Handoff
 	Nodes       map[string]NodeRunRecord
 	Handoffs    map[string]Handoff
 	NodeOutputs map[string]Handoff
 	Gates       map[string]GateDecision
-	Approvals   map[string]WorkflowApproval
+	Approvals   map[string]Approval
 }
 
 // TerminalResult contains the durable facts used by owning domains to converge.
 type TerminalResult struct {
-	Run    WorkflowRunRecord
+	Run    RunRecord
 	Output *Handoff
 }
 
 type ApprovalTransition struct {
-	Approval  WorkflowApproval
+	Approval  Approval
 	Applied   bool
 	RunStatus RunStatus
 }

@@ -20,30 +20,31 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-func TestDefaultDelegatedInvestigationPinsStableReadOnlyDAG(t *testing.T) {
+func TestDefaultFlowPinsStableReadOnlyDAG(t *testing.T) {
 	schemas, agents := investigationCatalogs(t, 6)
 	nodeTimeout := 40 * time.Second
 	budgets := investigationBudgetPolicy()
-	definition, err := DefaultDelegatedInvestigation(6, nodeTimeout, budgets)
+	definition, err := DefaultFlow(6, nodeTimeout, budgets)
 	if err != nil {
 		t.Fatal(err)
 	}
 	catalog := NewCatalog(schemas, agents)
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := catalog.Resolve(DefinitionRef{ID: DelegatedInvestigationID, Version: 6})
+	resolved, err := catalog.Resolve(DefinitionRef{ID: FlowID, Version: 6})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.ID != DelegatedInvestigationID || resolved.Version != 6 ||
-		resolved.ContentHash == "" || resolved.Budget.MaxNodes != 5 ||
+	if resolved.ID != FlowID || resolved.Version != 6 ||
+		resolved.ContentHash == "" || resolved.Budget.MaxNodes != 7 ||
 		resolved.Budget.MaxParallelism != 3 || resolved.Budget.Timeout != 3*nodeTimeout ||
 		resolved.FailurePolicy.Mode != CollectAvailable {
 		t.Fatalf("workflow = %+v", resolved)
 	}
 	wantNodes := []string{
-		"investigate.code", "investigate.docs", "investigate.runtime", "evidence.join", "synthesize",
+		"investigate.code", "investigate.docs", "investigate.runtime",
+		"evidence.join", "evidence.verify", "evidence.risk", "synthesize",
 	}
 	order, err := TopologicalOrder(resolved, schemas)
 	if err != nil {
@@ -72,7 +73,7 @@ func TestDefaultDelegatedInvestigationPinsStableReadOnlyDAG(t *testing.T) {
 	if resolved.InputSchema.ID != "task.contract" {
 		t.Fatalf("workflow input schema = %+v", resolved.InputSchema)
 	}
-	if len(resolved.Edges) != 4 {
+	if len(resolved.Edges) != 6 {
 		t.Fatalf("edges = %v", resolved.Edges)
 	}
 	for _, edge := range resolved.Edges[:3] {
@@ -80,27 +81,31 @@ func TestDefaultDelegatedInvestigationPinsStableReadOnlyDAG(t *testing.T) {
 			t.Fatalf("investigator edge is required: %+v", edge)
 		}
 	}
-	if !resolved.Edges[3].Required {
-		t.Fatalf("synthesis edge is optional: %+v", resolved.Edges[3])
+	for _, edge := range resolved.Edges[3:] {
+		if !edge.Required {
+			t.Fatalf("verification edge is optional: %+v", edge)
+		}
 	}
-	if resolved.Nodes[4].Budget.MaxToolCalls != 0 {
-		t.Fatalf("synthesizer tool budget = %d, want zero", resolved.Nodes[4].Budget.MaxToolCalls)
+	if resolved.Nodes[6].Budget.MaxToolCalls != 0 {
+		t.Fatalf("synthesizer tool budget = %d, want zero", resolved.Nodes[6].Budget.MaxToolCalls)
 	}
-	wantBudget := WorkflowBudget{
-		MaxNodes: 5, MaxParallelism: 3, Timeout: 3 * nodeTimeout,
-		MaxHandoffBytes: 1 << 20,
-		MaxInputTokens:  80,
-		MaxOutputTokens: 40,
-		MaxTotalTokens:  120,
-		MaxToolCalls:    18,
-		MaxRetries:      4,
+	wantBudget := Budget{
+		MaxNodes: 7, MaxParallelism: 3, MaxRounds: 1, MaxDepth: 5,
+		Timeout:           3 * nodeTimeout,
+		MaxHandoffBytes:   1 << 20,
+		MaxDuplicateRatio: maxDuplicateRatio,
+		MaxInputTokens:    80,
+		MaxOutputTokens:   40,
+		MaxTotalTokens:    120,
+		MaxToolCalls:      18,
+		MaxRetries:        4,
 	}
 	if resolved.Budget != wantBudget {
 		t.Fatalf("workflow budget = %+v, want %+v", resolved.Budget, wantBudget)
 	}
 }
 
-func TestDefaultDelegatedInvestigationProposalCompilesCapabilityBindings(t *testing.T) {
+func TestDefaultPlanCompilesCapabilityBindings(t *testing.T) {
 	const version int64 = 7
 	schemas, agents := investigationCatalogs(t, version)
 	definitions, err := defaultInvestigationDefinitionsForCapabilities(agents, version)
@@ -108,7 +113,7 @@ func TestDefaultDelegatedInvestigationProposalCompilesCapabilityBindings(t *test
 		t.Fatal(err)
 	}
 	capabilities := agentapi.NewCapabilityRegistry(schemas, agents)
-	values, err := catalog.DefaultInvestigationCapabilities(definitions, version)
+	values, err := catalog.DefaultCapabilities(definitions, version)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +124,7 @@ func TestDefaultDelegatedInvestigationProposalCompilesCapabilityBindings(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := DelegatedInvestigationCompilationPolicy(
+	policy, err := DefaultPolicy(
 		version,
 		time.Second,
 		investigationBudgetPolicy(),
@@ -128,7 +133,7 @@ func TestDefaultDelegatedInvestigationProposalCompilesCapabilityBindings(t *test
 		t.Fatal(err)
 	}
 	definition, err := compiler.Compile(
-		DefaultDelegatedInvestigationProposal(),
+		DefaultPlan(),
 		policy,
 	)
 	if err != nil {
@@ -160,15 +165,32 @@ func TestDefaultDelegatedInvestigationProposalCompilesCapabilityBindings(t *test
 		join.OutputSchema != (agentapi.SchemaRef{ID: "investigation.bundle", Version: 1}) {
 		t.Fatalf("join = %+v", join)
 	}
-	if len(definition.Nodes) != 5 || len(definition.Edges) != 4 ||
-		definition.Budget.MaxNodes != 5 ||
+	verifier := nodes["evidence.verify"]
+	if verifier.Kind != NodeVerifier ||
+		verifier.InputSchema != (agentapi.SchemaRef{ID: "investigation.bundle", Version: 1}) ||
+		verifier.OutputSchema != (agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 1}) ||
+		verifier.Verifier == nil ||
+		verifier.Verifier.RejectEvidenceConflicts {
+		t.Fatalf("verifier = %+v", verifier)
+	}
+	riskGate := nodes["evidence.risk"]
+	if riskGate.Kind != NodeGate ||
+		riskGate.InputSchema != verifier.OutputSchema ||
+		riskGate.OutputSchema != verifier.OutputSchema ||
+		riskGate.Gate == nil ||
+		riskGate.Gate.ID != EvidenceRiskGateID ||
+		!riskGate.Gate.ForwardInput {
+		t.Fatalf("risk gate = %+v", riskGate)
+	}
+	if len(definition.Nodes) != 7 || len(definition.Edges) != 6 ||
+		definition.Budget.MaxNodes != 7 ||
 		definition.Budget.MaxParallelism != 3 ||
 		definition.FailurePolicy.Mode != CollectAvailable {
 		t.Fatalf("compiled workflow = %+v", definition)
 	}
 }
 
-func TestDelegatedInvestigationGoalsCompileMinimalStableWorkflow(t *testing.T) {
+func TestGoalsCompileMinimalStableWorkflow(t *testing.T) {
 	const version int64 = 7
 	schemas, agents := investigationCatalogs(t, version)
 	definitions, err := defaultInvestigationDefinitionsForCapabilities(agents, version)
@@ -176,7 +198,7 @@ func TestDelegatedInvestigationGoalsCompileMinimalStableWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	capabilities := agentapi.NewCapabilityRegistry(schemas, agents)
-	values, err := catalog.DefaultInvestigationCapabilities(definitions, version)
+	values, err := catalog.DefaultCapabilities(definitions, version)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,15 +209,15 @@ func TestDelegatedInvestigationGoalsCompileMinimalStableWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	goals := []DelegatedInvestigationGoal{
+	goals := []Goal{
 		{Facet: "core_flow", Required: true},
 		{Facet: "entrypoint", Required: true},
 	}
-	proposal, err := DelegatedInvestigationProposalForGoals(goals)
+	proposal, err := BuildPlan(goals)
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := DelegatedInvestigationCompilationPolicyForGoals(
+	policy, err := GoalPolicy(
 		version,
 		time.Second,
 		investigationBudgetPolicy(),
@@ -208,7 +230,7 @@ func TestDelegatedInvestigationGoalsCompileMinimalStableWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(definition.Nodes) != 3 || len(definition.Edges) != 2 {
+	if len(definition.Nodes) != 5 || len(definition.Edges) != 4 {
 		t.Fatalf("minimal workflow = %+v", definition)
 	}
 	nodes := make(map[string]NodeDefinition, len(definition.Nodes))
@@ -216,7 +238,7 @@ func TestDelegatedInvestigationGoalsCompileMinimalStableWorkflow(t *testing.T) {
 		nodes[node.ID] = node
 	}
 	code := nodes["investigate.code"]
-	if code.Optional ||
+	if !code.Optional ||
 		code.Capability != (agentapi.CapabilityRef{
 			ID: "knowledge.code.inspect", Version: version,
 		}) ||
@@ -237,23 +259,38 @@ func TestDelegatedInvestigationGoalsCompileMinimalStableWorkflow(t *testing.T) {
 	if join.Kind != NodeJoin || join.JoinMode != JoinEvidenceView {
 		t.Fatalf("single investigator workflow join = %+v", join)
 	}
-	if definition.Budget.MaxNodes != 3 ||
+	verifier := nodes["evidence.verify"]
+	if verifier.Kind != NodeVerifier ||
+		!reflect.DeepEqual(
+			verifier.Verifier.RequiredGoals,
+			[]string{"core_flow", "entrypoint"},
+		) {
+		t.Fatalf("single investigator workflow verifier = %+v", verifier)
+	}
+	riskGate := nodes["evidence.risk"]
+	if riskGate.Kind != NodeGate ||
+		riskGate.Gate == nil ||
+		riskGate.Gate.ID != EvidenceRiskGateID ||
+		!riskGate.Gate.ForwardInput {
+		t.Fatalf("single investigator workflow risk gate = %+v", riskGate)
+	}
+	if definition.Budget.MaxNodes != 5 ||
 		definition.Budget.MaxParallelism != 1 ||
 		definition.Budget.MaxToolCalls != 6 ||
 		definition.Budget.MaxRetries != 2 {
 		t.Fatalf("minimal workflow budget = %+v", definition.Budget)
 	}
 
-	reordered := []DelegatedInvestigationGoal{
+	reordered := []Goal{
 		{Facet: "entrypoint", Required: true},
 		{Facet: "core_flow", Required: true},
 		{Facet: "entrypoint", Required: false},
 	}
-	reorderedProposal, err := DelegatedInvestigationProposalForGoals(reordered)
+	reorderedProposal, err := BuildPlan(reordered)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reorderedPolicy, err := DelegatedInvestigationCompilationPolicyForGoals(
+	reorderedPolicy, err := GoalPolicy(
 		version,
 		time.Second,
 		investigationBudgetPolicy(),
@@ -281,7 +318,7 @@ func TestDelegatedInvestigationGoalsCompileMinimalStableWorkflow(t *testing.T) {
 	}
 }
 
-func TestDelegatedInvestigationGoalSetsPublishWithoutVersionConflict(t *testing.T) {
+func TestGoalSetsPublishWithoutVersionConflict(t *testing.T) {
 	const version int64 = 7
 	schemas, agents := investigationCatalogs(t, version)
 	definitions, err := defaultInvestigationDefinitionsForCapabilities(agents, version)
@@ -289,7 +326,7 @@ func TestDelegatedInvestigationGoalSetsPublishWithoutVersionConflict(t *testing.
 		t.Fatal(err)
 	}
 	capabilities := agentapi.NewCapabilityRegistry(schemas, agents)
-	values, err := catalog.DefaultInvestigationCapabilities(definitions, version)
+	values, err := catalog.DefaultCapabilities(definitions, version)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,13 +337,13 @@ func TestDelegatedInvestigationGoalSetsPublishWithoutVersionConflict(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	compile := func(goals []DelegatedInvestigationGoal) WorkflowDefinition {
+	compile := func(goals []Goal) Definition {
 		t.Helper()
-		proposal, err := DelegatedInvestigationProposalForGoals(goals)
+		proposal, err := BuildPlan(goals)
 		if err != nil {
 			t.Fatal(err)
 		}
-		policy, err := DelegatedInvestigationCompilationPolicyForGoals(
+		policy, err := GoalPolicy(
 			version,
 			time.Second,
 			investigationBudgetPolicy(),
@@ -321,23 +358,23 @@ func TestDelegatedInvestigationGoalSetsPublishWithoutVersionConflict(t *testing.
 		}
 		return definition
 	}
-	code := compile([]DelegatedInvestigationGoal{
+	code := compile([]Goal{
 		{Facet: "core_flow", Required: true},
 	})
-	runtime := compile([]DelegatedInvestigationGoal{
+	runtime := compile([]Goal{
 		{Facet: "runtime_and_operations", Required: true},
 	})
 	if code.ID == runtime.ID || code.ContentHash == runtime.ContentHash {
 		t.Fatalf("distinct goal sets share snapshot identity: %+v / %+v", code, runtime)
 	}
 	workflows := NewCatalog(schemas, agents)
-	if err := workflows.Publish([]WorkflowDefinition{code, runtime}); err != nil {
+	if err := workflows.Publish([]Definition{code, runtime}); err != nil {
 		t.Fatal(err)
 	}
-	if err := workflows.Publish([]WorkflowDefinition{code}); err != nil {
+	if err := workflows.Publish([]Definition{code}); err != nil {
 		t.Fatalf("republish stable snapshot: %v", err)
 	}
-	for _, definition := range []WorkflowDefinition{code, runtime} {
+	for _, definition := range []Definition{code, runtime} {
 		resolved, err := workflows.Resolve(DefinitionRef{
 			ID: definition.ID, Version: definition.Version,
 		})
@@ -350,15 +387,15 @@ func TestDelegatedInvestigationGoalSetsPublishWithoutVersionConflict(t *testing.
 	}
 }
 
-func TestDelegatedInvestigationGoalsRejectUnknownFacet(t *testing.T) {
-	goals := []DelegatedInvestigationGoal{
+func TestGoalsRejectUnknownFacet(t *testing.T) {
+	goals := []Goal{
 		{Facet: "live_database_mutation", Required: true},
 	}
-	if _, err := DelegatedInvestigationProposalForGoals(goals); err == nil ||
+	if _, err := BuildPlan(goals); err == nil ||
 		!strings.Contains(err.Error(), "has no registered capability") {
 		t.Fatalf("proposal error = %v", err)
 	}
-	if _, err := DelegatedInvestigationCompilationPolicyForGoals(
+	if _, err := GoalPolicy(
 		1,
 		time.Second,
 		investigationBudgetPolicy(),
@@ -368,25 +405,25 @@ func TestDelegatedInvestigationGoalsRejectUnknownFacet(t *testing.T) {
 	}
 }
 
-func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *testing.T) {
+func TestInvestigationFlowRunsFourIndependentAgentsAndSynthesizesJoin(t *testing.T) {
 	const version int64 = 8
 	const parentRunID = "qa_parent_1"
 	schemas, agents := investigationCatalogs(t, version)
-	workflow, err := DefaultDelegatedInvestigation(version, time.Second, investigationBudgetPolicy())
+	workflow, err := DefaultFlow(version, time.Second, investigationBudgetPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
 	workflows := NewCatalog(schemas, agents)
-	if err := workflows.Publish([]WorkflowDefinition{workflow}); err != nil {
+	if err := workflows.Publish([]Definition{workflow}); err != nil {
 		t.Fatal(err)
 	}
 	runtime := &investigationRuntime{}
-	nodes, err := NewAgentNodeExecutor(schemas, agents, runtime)
+	nodes, err := NewAgentExecutor(schemas, agents, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}
-	service, err := NewService(workflows, persistence, NewOrchestrator(schemas, nodes, nil))
+	service, err := NewService(workflows, persistence, newInvestigationOrchestrator(schemas, nodes))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +434,7 @@ func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *te
 	actor := agentapi.Actor{UserID: 23, TenantID: "tenant-a"}
 	result, err := service.Execute(ctx, ExecuteRequest{
 		ParentRunID: parentRunID,
-		Workflow:    DefinitionRef{ID: DelegatedInvestigationID, Version: version},
+		Workflow:    DefinitionRef{ID: FlowID, Version: version},
 		Input:       investigationTaskContract(),
 		Actor:       actor,
 		ActorPermissions: agentapi.PermissionPolicy{
@@ -443,10 +480,11 @@ func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *te
 		}
 	}
 	join := result.NodeOutputs["evidence.join"]
-	if !bytes.Equal(requests["synthesizer"].Input, join.Payload) {
-		t.Fatalf("synthesizer input = %s, join = %s", requests["synthesizer"].Input, join.Payload)
+	verified := result.NodeOutputs["evidence.verify"]
+	if !bytes.Equal(requests["synthesizer"].Input, verified.Payload) {
+		t.Fatalf("synthesizer input = %s, verified = %s", requests["synthesizer"].Input, verified.Payload)
 	}
-	var ledger workflowEvidenceLedgerView
+	var ledger ledgerView
 	if err := json.Unmarshal(join.Payload, &ledger); err != nil {
 		t.Fatal(err)
 	}
@@ -461,19 +499,40 @@ func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *te
 		ledger.Completeness != Complete {
 		t.Fatalf("ledger = %+v", ledger)
 	}
+	var evidenceView verifiedEvidenceView
+	if err := json.Unmarshal(verified.Payload, &evidenceView); err != nil {
+		t.Fatal(err)
+	}
+	if evidenceView.Completeness != Complete ||
+		evidenceView.Verification.Decision != Complete ||
+		evidenceView.Verification.StopReason != StopRequiredGoalsCovered ||
+		len(evidenceView.SupportedClaims) != 0 ||
+		len(evidenceView.UnresolvedGoals) != 0 ||
+		result.StopReason != StopRequiredGoalsCovered {
+		t.Fatalf("verified evidence = %+v, result stop = %q", evidenceView, result.StopReason)
+	}
 	persistence.mu.Lock()
 	startedRun := persistence.startedRun
 	startedNodes := len(persistence.startedNodes)
 	succeededNodes := len(persistence.succeededNodes)
 	finishedStatus := persistence.finishedStatus
+	finishedStopReason := persistence.finishedStopReason
 	persistence.mu.Unlock()
 	if startedRun.ParentRunID != parentRunID ||
-		startedNodes != 5 || succeededNodes != 5 ||
-		finishedStatus != RunSucceeded {
-		t.Fatalf("persisted lifecycle = run:%+v started:%d succeeded:%d status:%s", startedRun, startedNodes, succeededNodes, finishedStatus)
+		startedNodes != 7 || succeededNodes != 7 ||
+		finishedStatus != RunSucceeded ||
+		finishedStopReason != StopRequiredGoalsCovered {
+		t.Fatalf(
+			"persisted lifecycle = run:%+v started:%d succeeded:%d status:%s stop:%q",
+			startedRun,
+			startedNodes,
+			succeededNodes,
+			finishedStatus,
+			finishedStopReason,
+		)
 	}
 
-	workflowNodes := make(map[string]struct{}, 5)
+	workflowNodes := make(map[string]struct{}, 7)
 	childRuns := make(map[string]struct{}, 4)
 	verificationPasses := 0
 	traceID := ""
@@ -502,15 +561,16 @@ func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *te
 			childRuns[event.RunID] = struct{}{}
 		case "verification.completed":
 			if event.Status != "completed" ||
-				event.WorkflowNodeID != "evidence.join" ||
-				event.Output["decision"] != "pass" ||
+				event.WorkflowNodeID != "evidence.verify" ||
+				event.Output["decision"] != string(Complete) ||
+				event.Output["stop_reason"] != StopRequiredGoalsCovered ||
 				event.Output["conflict_count"] != 0 {
 				t.Fatalf("verification pass trace = %+v", event)
 			}
 			verificationPasses++
 		}
 	}
-	if len(workflowNodes) != 5 || len(childRuns) != 4 || verificationPasses != 1 {
+	if len(workflowNodes) != 7 || len(childRuns) != 4 || verificationPasses != 1 {
 		t.Fatalf(
 			"trace coverage = workflow_nodes:%v child_runs:%v verification_passes:%d",
 			workflowNodes,
@@ -520,31 +580,35 @@ func TestDelegatedInvestigationRunsFourIndependentAgentsAndSynthesizesJoin(t *te
 	}
 }
 
-func TestDelegatedInvestigationSynthesizesAvailableReport(t *testing.T) {
+func TestInvestigationFlowSynthesizesAvailableReport(t *testing.T) {
 	const version int64 = 9
 	schemas, agents := investigationCatalogs(t, version)
-	definition, err := DefaultDelegatedInvestigation(version, time.Second, investigationBudgetPolicy())
+	definition, err := DefaultFlow(version, time.Second, investigationBudgetPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
 	workflows := NewCatalog(schemas, agents)
-	if err := workflows.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := workflows.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	runtime := &investigationRuntime{failures: map[string]error{
 		"investigator.runtime": errors.New("runtime source unavailable"),
 		"investigator.docs":    errors.New("documentation source unavailable"),
 	}}
-	nodes, err := NewAgentNodeExecutor(schemas, agents, runtime)
+	nodes, err := NewAgentExecutor(schemas, agents, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(workflows, &recordingWorkflowPersistence{}, NewOrchestrator(schemas, nodes, nil))
+	service, err := NewService(
+		workflows,
+		&recordingWorkflowPersistence{},
+		newInvestigationOrchestrator(schemas, nodes),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	result, err := service.Execute(t.Context(), ExecuteRequest{
-		Workflow: DefinitionRef{ID: DelegatedInvestigationID, Version: version},
+		Workflow: DefinitionRef{ID: FlowID, Version: version},
 		Input:    investigationTaskContract(),
 		Actor:    agentapi.Actor{UserID: 23},
 		ActorPermissions: agentapi.PermissionPolicy{
@@ -558,7 +622,7 @@ func TestDelegatedInvestigationSynthesizesAvailableReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ledger workflowEvidenceLedgerView
+	var ledger ledgerView
 	if err := json.Unmarshal(result.NodeOutputs["evidence.join"].Payload, &ledger); err != nil {
 		t.Fatal(err)
 	}
@@ -580,12 +644,23 @@ func TestDelegatedInvestigationSynthesizesAvailableReport(t *testing.T) {
 	if !ok {
 		t.Fatal("synthesizer did not run with the available report")
 	}
-	if !bytes.Equal(synthesizer.Input, result.NodeOutputs["evidence.join"].Payload) {
+	verified := result.NodeOutputs["evidence.verify"]
+	if !bytes.Equal(synthesizer.Input, verified.Payload) {
 		t.Fatalf(
-			"synthesizer input = %s, join = %s",
+			"synthesizer input = %s, verified = %s",
 			synthesizer.Input,
-			result.NodeOutputs["evidence.join"].Payload,
+			verified.Payload,
 		)
+	}
+	var evidenceView verifiedEvidenceView
+	if err := json.Unmarshal(verified.Payload, &evidenceView); err != nil {
+		t.Fatal(err)
+	}
+	if evidenceView.Completeness != Partial ||
+		evidenceView.Verification.StopReason != StopCapabilityUnavailable ||
+		len(evidenceView.Limitations) != 2 ||
+		result.StopReason != StopCapabilityUnavailable {
+		t.Fatalf("verified evidence = %+v, result stop = %q", evidenceView, result.StopReason)
 	}
 }
 
@@ -600,12 +675,12 @@ func TestJoinEvidenceViewMergesEvidenceByIdentityAndPreservesEdgeOrder(t *testin
 	}
 	joined, err := joinHandoffs(
 		"run", "evidence.join", bundleSchema, JoinEvidenceView,
-		inputs, nil, false, 1<<20, schemas,
+		inputs, nil, nil, 0.8, false, 1<<20, schemas,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ledger workflowEvidenceLedgerView
+	var ledger ledgerView
 	if err := json.Unmarshal(joined.Payload, &ledger); err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +727,7 @@ func TestJoinEvidenceViewRejectsConflictsWhenConfigured(t *testing.T) {
 			investigationHandoff("run", "investigate.code", reportSchema, "code", "v1"),
 			investigationHandoff("run", "investigate.runtime", reportSchema, "runtime", "v2"),
 		},
-		nil, true, 1<<20, schemas,
+		nil, nil, 0.8, true, 1<<20, schemas,
 	)
 	if err == nil || !strings.Contains(err.Error(), "rejected 1 evidence conflict") {
 		t.Fatalf("conflict rejection = handoff:%#v error:%v", joined, err)
@@ -695,6 +770,8 @@ func TestAggregateHandoffsTracesEvidenceLifecycleWithoutPayloads(t *testing.T) {
 		},
 		inputs,
 		nil,
+		nil,
+		0.8,
 		1<<20,
 	)
 	if err != nil {
@@ -736,17 +813,18 @@ func TestAggregateHandoffsTracesEvidenceLifecycleWithoutPayloads(t *testing.T) {
 func TestOrchestratorTracesEvidenceDeliveredAtWorkflowOutput(t *testing.T) {
 	schemas, _ := investigationCatalogs(t, 12)
 	reportSchema := agentapi.SchemaRef{ID: "investigation.report", Version: 1}
-	definition := WorkflowDefinition{
+	definition := Definition{
 		ID:           "investigation.trace.output",
 		Version:      1,
 		Purpose:      "Trace evidence delivered by a workflow terminal.",
 		InputSchema:  reportSchema,
 		OutputSchema: reportSchema,
-		Budget: WorkflowBudget{
-			MaxNodes: 1, MaxParallelism: 1, Timeout: time.Second,
+		Budget: Budget{
+			MaxNodes: 1, MaxParallelism: 1, MaxRounds: 1, MaxDepth: 1,
+			Timeout:         time.Second,
 			MaxHandoffBytes: 1 << 20,
 		},
-		FailurePolicy: WorkflowFailurePolicy{Mode: FailFast},
+		FailurePolicy: FailurePolicy{Mode: FailFast},
 		Nodes: []NodeDefinition{{
 			ID: "investigate.code", Kind: NodeAgent,
 			Agent:       agentapi.DefinitionRef{ID: "investigator.code", Version: 12},
@@ -799,31 +877,35 @@ func TestOrchestratorTracesEvidenceDeliveredAtWorkflowOutput(t *testing.T) {
 	}
 }
 
-func TestDelegatedInvestigationRejectsEmptyBundle(t *testing.T) {
+func TestInvestigationFlowSynthesizesUnavailableBundle(t *testing.T) {
 	const version int64 = 10
 	schemas, agents := investigationCatalogs(t, version)
-	definition, err := DefaultDelegatedInvestigation(version, time.Second, investigationBudgetPolicy())
+	definition, err := DefaultFlow(version, time.Second, investigationBudgetPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
 	workflows := NewCatalog(schemas, agents)
-	if err := workflows.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := workflows.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	failure := errors.New("source unavailable")
 	runtime := &investigationRuntime{failures: map[string]error{
 		"investigator.code": failure, "investigator.runtime": failure, "investigator.docs": failure,
 	}}
-	nodes, err := NewAgentNodeExecutor(schemas, agents, runtime)
+	nodes, err := NewAgentExecutor(schemas, agents, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(workflows, &recordingWorkflowPersistence{}, NewOrchestrator(schemas, nodes, nil))
+	service, err := NewService(
+		workflows,
+		&recordingWorkflowPersistence{},
+		newInvestigationOrchestrator(schemas, nodes),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Execute(t.Context(), ExecuteRequest{
-		Workflow: DefinitionRef{ID: DelegatedInvestigationID, Version: version},
+	result, err := service.Execute(t.Context(), ExecuteRequest{
+		Workflow: DefinitionRef{ID: FlowID, Version: version},
 		Input:    investigationTaskContract(),
 		Actor:    agentapi.Actor{UserID: 23},
 		ActorPermissions: agentapi.PermissionPolicy{
@@ -834,23 +916,50 @@ func TestDelegatedInvestigationRejectsEmptyBundle(t *testing.T) {
 			Scopes: []string{"knowledge.read"},
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), `node "evidence.join"`) {
-		t.Fatalf("empty bundle error = %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := runtime.snapshot()["synthesizer"]; ok {
-		t.Fatal("synthesizer ran without investigation evidence")
+	var ledger ledgerView
+	if err := json.Unmarshal(result.NodeOutputs["evidence.join"].Payload, &ledger); err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger.Handoffs) != 0 ||
+		len(ledger.UnavailableTasks) != 3 ||
+		ledger.Completeness != Unavailable {
+		t.Fatalf("unavailable ledger = %#v", ledger)
+	}
+	synthesizer, ok := runtime.snapshot()["synthesizer"]
+	if !ok {
+		t.Fatal("synthesizer did not run with unavailable investigation evidence")
+	}
+	verified := result.NodeOutputs["evidence.verify"]
+	if !bytes.Equal(synthesizer.Input, verified.Payload) ||
+		result.Output.Completeness != Unavailable {
+		t.Fatalf(
+			"synthesis = input:%s output completeness:%s",
+			synthesizer.Input,
+			result.Output.Completeness,
+		)
+	}
+	var evidenceView verifiedEvidenceView
+	if err := json.Unmarshal(verified.Payload, &evidenceView); err != nil {
+		t.Fatal(err)
+	}
+	if evidenceView.Verification.StopReason != StopCapabilityUnavailable ||
+		result.StopReason != StopCapabilityUnavailable {
+		t.Fatalf("verified evidence = %+v, result stop = %q", evidenceView, result.StopReason)
 	}
 }
 
-func TestDelegatedInvestigationRejectsEvidenceConflictsBeforeSynthesis(t *testing.T) {
+func TestInvestigationFlowRequiresClarificationForEvidenceConflicts(t *testing.T) {
 	const version int64 = 12
 	schemas, agents := investigationCatalogs(t, version)
-	definition, err := DefaultDelegatedInvestigation(version, time.Second, investigationBudgetPolicy())
+	definition, err := DefaultFlow(version, time.Second, investigationBudgetPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
 	workflows := NewCatalog(schemas, agents)
-	if err := workflows.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := workflows.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	runtime := &investigationRuntime{
@@ -860,14 +969,15 @@ func TestDelegatedInvestigationRejectsEvidenceConflictsBeforeSynthesis(t *testin
 			"investigator.docs":    "v1",
 		},
 	}
-	nodes, err := NewAgentNodeExecutor(schemas, agents, runtime)
+	nodes, err := NewAgentExecutor(schemas, agents, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
+	persistence := &recordingWorkflowPersistence{}
 	service, err := NewService(
 		workflows,
-		&recordingWorkflowPersistence{},
-		NewOrchestrator(schemas, nodes, nil),
+		persistence,
+		newInvestigationOrchestrator(schemas, nodes),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -876,8 +986,8 @@ func TestDelegatedInvestigationRejectsEvidenceConflictsBeforeSynthesis(t *testin
 	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		traces = append(traces, event)
 	})
-	_, err = service.Execute(ctx, ExecuteRequest{
-		Workflow: DefinitionRef{ID: DelegatedInvestigationID, Version: version},
+	result, err := service.Execute(ctx, ExecuteRequest{
+		Workflow: DefinitionRef{ID: FlowID, Version: version},
 		Input:    investigationTaskContract(),
 		Actor:    agentapi.Actor{UserID: 23},
 		ActorPermissions: agentapi.PermissionPolicy{
@@ -888,15 +998,15 @@ func TestDelegatedInvestigationRejectsEvidenceConflictsBeforeSynthesis(t *testin
 			Scopes: []string{"knowledge.read"},
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), `node "evidence.join"`) ||
-		!strings.Contains(err.Error(), "rejected 1 evidence conflict") {
-		t.Fatalf("conflict rejection error = %v", err)
+	if err == nil || errorStopReason(err) != StopNeedsClarification ||
+		result.StopReason != StopNeedsClarification {
+		t.Fatalf("conflict clarification = result:%+v error:%v", result, err)
 	}
 	requests := runtime.snapshot()
 	if _, ok := requests["synthesizer"]; ok {
 		t.Fatal("synthesizer ran after evidence conflict rejection")
 	}
-	var rejected, verification, converged *domain.EvaluationTrace
+	var rejected, verification, riskGate, converged *domain.EvaluationTrace
 	for index := range traces {
 		event := &traces[index]
 		switch event.Node {
@@ -904,6 +1014,10 @@ func TestDelegatedInvestigationRejectsEvidenceConflictsBeforeSynthesis(t *testin
 			rejected = event
 		case "verification.completed":
 			verification = event
+		case "workflow_node":
+			if event.WorkflowNodeID == "evidence.risk" {
+				riskGate = event
+			}
 		case "workflow.converged":
 			converged = event
 		}
@@ -932,17 +1046,56 @@ func TestDelegatedInvestigationRejectsEvidenceConflictsBeforeSynthesis(t *testin
 	}
 	if verification == nil ||
 		verification.Status != "completed" ||
-		verification.Output["decision"] != "reject" ||
+		verification.Output["decision"] != string(Complete) ||
 		verification.Output["conflict_count"] != 1 ||
-		verification.Output["error"] == "" {
+		verification.Output["stop_reason"] != StopRequiredGoalsCovered {
 		t.Fatalf("verification trace = %#v", verification)
+	}
+	if riskGate == nil ||
+		riskGate.Output["gate_decision"] !=
+			string(StopNeedsClarification) ||
+		riskGate.Output["gate_finding_count"] != 0 ||
+		!reflect.DeepEqual(
+			riskGate.Output["gate_reason_codes"],
+			[]string{riskReasonEvidenceConflict},
+		) {
+		t.Fatalf("risk gate trace = %#v", riskGate)
 	}
 	if converged == nil ||
 		converged.Status != "failed" ||
-		converged.Output["outcome"] != "evidence_conflict" ||
-		converged.Output["error_code"] != "evidence_conflict" {
+		converged.Output["outcome"] != string(StopNeedsClarification) ||
+		converged.Output["error_code"] != "needs_clarification" ||
+		converged.Output["stop_reason"] != StopNeedsClarification {
 		t.Fatalf("workflow convergence trace = %#v", converged)
 	}
+	persistence.mu.Lock()
+	finishedStatus := persistence.finishedStatus
+	finishedError := persistence.finishedError
+	finishedStopReason := persistence.finishedStopReason
+	decision := persistence.state.Gates["evidence.risk"]
+	persistence.mu.Unlock()
+	if finishedStatus != RunFailed ||
+		finishedError != "needs_clarification" ||
+		finishedStopReason != StopNeedsClarification ||
+		decision.Decision != string(StopNeedsClarification) ||
+		!reflect.DeepEqual(decision.ReasonCodes, []string{riskReasonEvidenceConflict}) {
+		t.Fatalf(
+			"persisted conflict terminal = %s error=%q stop=%q gate=%+v",
+			finishedStatus,
+			finishedError,
+			finishedStopReason,
+			decision,
+		)
+	}
+}
+
+func newInvestigationOrchestrator(
+	schemas *agentapi.SchemaRegistry,
+	nodes NodeExecutor,
+) *Orchestrator {
+	return NewOrchestrator(schemas, nodes, map[string]GateEvaluator{
+		EvidenceRiskGateID: RiskGateEvaluator{},
+	})
 }
 
 type investigationRuntime struct {
@@ -983,6 +1136,7 @@ func (runtime *investigationRuntime) Run(
 	}
 	payload, err := json.Marshal(map[string]any{
 		"focus": focus, "summary": focus + " report", "findings": []any{}, "gaps": []any{},
+		"covered_goals": []any{}, "unresolved_goals": []any{},
 	})
 	if err != nil {
 		return agentapi.RunResult{}, err
@@ -1017,7 +1171,7 @@ func investigationCatalogs(t *testing.T, version int64) (*agentapi.SchemaRegistr
 		LLMProvider: "openai", LLMModel: "test-model", LLMAnswerMaxTokens: 1024,
 		LLMContextWindow: 16000, AgentTimeout: config.Duration(time.Minute), AgentMaxSteps: 3,
 	}
-	definitions, err := catalog.DefaultInvestigatorsVersion(settings, version)
+	definitions, err := catalog.DefaultInvestigators(settings, version)
 	if err != nil {
 		t.Fatalf("prepare agents: %v", err)
 	}
@@ -1034,7 +1188,14 @@ func investigationTaskContract() json.RawMessage {
 		"question":"Why is checkout failing?",
 		"objective":"Trace the checkout failure",
 		"entities":[{"id":"Checkout.Place"}],
-		"evidence_goals":[{"id":"core_flow","facet":"core_flow","required":true}],
+		"evidence_goals":[{
+			"id":"core_flow",
+			"facet":"core_flow",
+			"required":true,
+			"sources":["internal"],
+			"freshness":"stable",
+			"minimum_coverage":1
+		}],
 		"context":{}
 	}`)
 }
@@ -1058,6 +1219,7 @@ func investigationHandoff(
 func investigationHandoffPayload(focus string) json.RawMessage {
 	payload, err := json.Marshal(map[string]any{
 		"focus": focus, "summary": focus + " report", "findings": []any{}, "gaps": []any{},
+		"covered_goals": []any{}, "unresolved_goals": []any{},
 	})
 	if err != nil {
 		panic(err)
@@ -1085,13 +1247,16 @@ func reportFocus(t *testing.T, payload json.RawMessage) string {
 	return report.Focus
 }
 
-func investigationBudgetPolicy() DelegatedInvestigationBudgetPolicy {
+func investigationBudgetPolicy() Budgets {
 	investigator := NodeBudget{
 		MaxInputTokens: 10, MaxOutputTokens: 5, MaxTotalTokens: 15,
 		MaxToolCalls: 3,
 	}
-	return DelegatedInvestigationBudgetPolicy{
-		Code: investigator, Runtime: investigator, Docs: investigator,
+	return Budgets{
+		Code: investigator, Runtime: investigator, Docs: investigator, Web: investigator,
+		Memory: NodeBudget{
+			MaxInputTokens: 10, MaxOutputTokens: 5, MaxTotalTokens: 15,
+		},
 		Synthesizer: NodeBudget{
 			MaxInputTokens: 10, MaxOutputTokens: 5, MaxTotalTokens: 15,
 		},
@@ -1099,13 +1264,15 @@ func investigationBudgetPolicy() DelegatedInvestigationBudgetPolicy {
 }
 
 func defaultInvestigationDefinitionsForCapabilities(
-	agents AgentDefinitionResolver,
+	agents AgentResolver,
 	version int64,
 ) ([]agentapi.Definition, error) {
 	ids := []string{
 		"investigator.code",
 		"investigator.runtime",
 		"investigator.docs",
+		"investigator.web",
+		"investigator.memory",
 		"synthesizer",
 	}
 	definitions := make([]agentapi.Definition, 0, len(ids))

@@ -11,28 +11,28 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-type RunStore struct {
+type Store struct {
 	db *sql.DB
 }
 
-type runStepStore interface {
+type stepStore interface {
 	AddStep(StepRow) error
 }
 
-type runCompleter interface {
-	Complete(string, RunOutcome) error
+type completer interface {
+	Complete(string, Outcome) error
 }
 
-type runControlStore interface {
-	TransitionControl(string, RunStatus, RunStatus) error
+type controlStore interface {
+	TransitionControl(string, Status, Status) error
 }
 
-// NewRunStore binds agent run queries to the platform-owned MySQL pool.
-func NewRunStore(db *sql.DB) (*RunStore, error) {
+// NewStore binds agent run queries to the platform-owned MySQL pool.
+func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("agent/runstore: database is required")
 	}
-	runStore := &RunStore{db: db}
+	runStore := &Store{db: db}
 	recovered, err := runStore.RecoverInterrupted()
 	if err != nil {
 		return nil, fmt.Errorf("agent/runstore: recover interrupted runs: %w", err)
@@ -43,14 +43,14 @@ func NewRunStore(db *sql.DB) (*RunStore, error) {
 	return runStore, nil
 }
 
-// BindStore binds a database without running startup recovery.
-func BindStore(db *sql.DB) *RunStore {
-	return &RunStore{db: db}
+// Bind binds a database without running startup recovery.
+func Bind(db *sql.DB) *Store {
+	return &Store{db: db}
 }
 
-var ErrRunNotActive = errors.New("agent: run is missing or already terminal")
+var ErrNotActive = errors.New("agent: run is missing or already terminal")
 
-const maxToolResultArtifactChunkBytes = 256 << 10
+const maxArtifactChunkBytes = 256 << 10
 
 // ToolResultArtifactChunk is one bounded, tenant-scoped artifact read.
 type ToolResultArtifactChunk struct {
@@ -79,9 +79,9 @@ type rowScanner interface {
 	Scan(...any) error
 }
 
-type RunRecord struct {
+type Record struct {
 	ID                   string                       `json:"id"`
-	RunKind              RunKind                      `json:"run_kind"`
+	RunKind              Kind                         `json:"run_kind"`
 	UserID               int64                        `json:"user_id"`
 	SessionID            string                       `json:"session_id"`
 	AgentID              string                       `json:"agent_id"`
@@ -95,7 +95,7 @@ type RunRecord struct {
 	WorkflowRunID        string                       `json:"workflow_run_id"`
 	WorkflowNodeID       string                       `json:"workflow_node_id"`
 	Question             string                       `json:"question"`
-	Status               RunStatus                    `json:"status"`
+	Status               Status                       `json:"status"`
 	ErrorCode            string                       `json:"error_code"`
 	Mode                 string                       `json:"mode"`
 	MaxSteps             int                          `json:"max_steps"`
@@ -120,15 +120,15 @@ type RunRecord struct {
 	EndedAt              string                       `json:"ended_at"`
 }
 
-type RunKind string
+type Kind string
 
 const (
-	RunKindAgent    RunKind = "agent"
-	RunKindQAParent RunKind = "qa_parent"
+	KindAgent    Kind = "agent"
+	KindQAParent Kind = "qa_parent"
 )
 
-// RunUsageSummary is the token snapshot needed by the live QA composer.
-type RunUsageSummary struct {
+// UsageSummary is the token snapshot needed by the live QA composer.
+type UsageSummary struct {
 	RunID                   string `json:"run_id"`
 	SessionTotalTokens      int64  `json:"session_total_tokens"`
 	RoundInputTokens        int64  `json:"round_input_tokens"`
@@ -182,20 +182,20 @@ type StepRow struct {
 	CreatedAt           string                `json:"created_at"`
 }
 
-type RunDetail struct {
-	RunRecord
+type Detail struct {
+	Record
 	Steps    []StepRow    `json:"steps"`
 	LLMCalls []LLMCallRow `json:"llm_calls"`
-	Terminal *RunTerminal `json:"terminal,omitempty"`
+	Terminal *Terminal    `json:"terminal,omitempty"`
 }
 
-type RunPage = domain.Page[RunRecord]
+type Page = domain.Page[Record]
 
-// RunControlRecord carries only the persisted facts needed to dispatch control.
-type RunControlRecord struct {
+// ControlRecord carries only the persisted facts needed to dispatch control.
+type ControlRecord struct {
 	ID            string
-	RunKind       RunKind
-	Status        RunStatus
+	RunKind       Kind
+	Status        Status
 	WorkflowRunID string
 	UserID        int64
 }
@@ -207,7 +207,7 @@ type QAParentRecord struct {
 	UserID        int64
 	SessionID     string
 	Question      string
-	Status        RunStatus
+	Status        Status
 	StartedAt     string
 	EndedAt       string
 }

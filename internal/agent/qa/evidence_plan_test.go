@@ -52,7 +52,7 @@ func TestEvidencePlanningTraceContract(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			scope := runtrace.NewScope(runtrace.Evaluation, nil)
 			ctx := runtrace.WithScope(t.Context(), scope)
-			svc := &QA{routerConfidence: 0.9}
+			svc := &Service{routerConfidence: 0.9}
 
 			result, err := svc.planEvidence(ctx, test.input)
 			if err != nil {

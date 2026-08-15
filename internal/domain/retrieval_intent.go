@@ -108,13 +108,13 @@ func ResolveRetrievalIntent(question string, signals RetrievalIntentSignals) Int
 					FacetDataAndState,
 					FacetExternalDependency,
 				},
-				TargetEntities: boundedEntities(signals.Identifiers),
+				TargetEntities: CanonicalEntityIDs(signals.Identifiers),
 			},
 			Origin: IntentOriginRule,
 		}
 	}
 	intent := RetrievalIntentFor(mode)
-	intent.TargetEntities = boundedEntities(signals.Identifiers)
+	intent.TargetEntities = CanonicalEntityIDs(signals.Identifiers)
 	origin := IntentOriginRule
 	if mode == CodebaseQA && intent.Kind == RetrievalFocusedFact {
 		origin = IntentOriginFallback
@@ -142,25 +142,4 @@ func hasFlowSignal(question string, signals RetrievalIntentSignals) bool {
 		}
 	}
 	return false
-}
-
-func boundedEntities(identifiers []string) []string {
-	const maxTargetEntities = 8
-	entities := make([]string, 0, min(len(identifiers), maxTargetEntities))
-	seen := make(map[string]struct{}, len(identifiers))
-	for _, identifier := range identifiers {
-		identifier = strings.TrimSpace(identifier)
-		if identifier == "" {
-			continue
-		}
-		if _, ok := seen[identifier]; ok {
-			continue
-		}
-		seen[identifier] = struct{}{}
-		entities = append(entities, identifier)
-		if len(entities) == maxTargetEntities {
-			break
-		}
-	}
-	return entities
 }

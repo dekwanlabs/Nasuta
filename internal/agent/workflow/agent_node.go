@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -11,18 +12,18 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
-// AgentNodeExecutor binds Workflow nodes to the shared immutable Agent Runtime.
-type AgentNodeExecutor struct {
+// AgentExecutor binds Workflow nodes to the shared immutable Agent Runtime.
+type AgentExecutor struct {
 	schemas *agentapi.SchemaRegistry
-	agents  AgentDefinitionResolver
+	agents  AgentResolver
 	runtime agentapi.Runtime
 }
 
-func NewAgentNodeExecutor(
+func NewAgentExecutor(
 	schemas *agentapi.SchemaRegistry,
-	agents AgentDefinitionResolver,
+	agents AgentResolver,
 	runtime agentapi.Runtime,
-) (*AgentNodeExecutor, error) {
+) (*AgentExecutor, error) {
 	if schemas == nil {
 		return nil, fmt.Errorf("agent node executor: schema registry is required")
 	}
@@ -32,10 +33,10 @@ func NewAgentNodeExecutor(
 	if runtime == nil {
 		return nil, fmt.Errorf("agent node executor: runtime is required")
 	}
-	return &AgentNodeExecutor{schemas: schemas, agents: agents, runtime: runtime}, nil
+	return &AgentExecutor{schemas: schemas, agents: agents, runtime: runtime}, nil
 }
 
-func (executor *AgentNodeExecutor) Execute(
+func (executor *AgentExecutor) Execute(
 	ctx context.Context,
 	request NodeRequest,
 ) (NodeResult, error) {
@@ -71,13 +72,13 @@ func (executor *AgentNodeExecutor) Execute(
 		return NodeResult{}, err
 	}
 	input := request.Inputs[0]
-	contextBlock, err := contextBlockFromHandoff(input)
+	contextBlock, err := contextFromHandoff(input)
 	if err != nil {
 		return NodeResult{}, fmt.Errorf("agent node %q context: %w", request.Node.ID, err)
 	}
 	contextBlocks := []agentapi.ContextBlock{contextBlock}
 	if request.Node.Task != nil {
-		taskBlock, err := contextBlockFromTaskDirective(*request.Node.Task)
+		taskBlock, err := contextFromDirective(*request.Node.Task)
 		if err != nil {
 			return NodeResult{}, fmt.Errorf("agent node %q task context: %w", request.Node.ID, err)
 		}
@@ -110,7 +111,7 @@ func (executor *AgentNodeExecutor) Execute(
 	})
 	result, err := runtrace.Invoke(
 		childCtx,
-		multiAgentChildRunTraceSpec,
+		childRunTraceSpec,
 		runRequest,
 		func(ctx context.Context, runRequest agentapi.RunRequest) (agentapi.RunResult, error) {
 			return executor.runtime.Run(ctx, runRequest)
@@ -118,7 +119,7 @@ func (executor *AgentNodeExecutor) Execute(
 	)
 	nodeResult := NodeResult{
 		AgentRunID: runID,
-		Usage: WorkflowUsage{
+		Usage: Usage{
 			InputTokens:     result.Usage.InputTokens,
 			OutputTokens:    result.Usage.OutputTokens,
 			ReasoningTokens: result.Usage.ReasoningTokens,
@@ -145,35 +146,183 @@ func (executor *AgentNodeExecutor) Execute(
 			retryable: result.Error.Retryable,
 		}
 	}
+	completeness := input.Completeness
+	if request.Node.Task != nil &&
+		request.Node.OutputSchema.ID == "investigation.report" &&
+		len(request.Node.Task.RequiredFacets) > 0 {
+		reportCompleteness, err := reportCompleteness(
+			input.Payload,
+			result.Output,
+			request.Node.Task.RequiredFacets,
+		)
+		if err != nil {
+			return nodeResult, fmt.Errorf(
+				"agent node %q goal coverage: %w",
+				request.Node.ID,
+				err,
+			)
+		}
+		completeness = leastComplete(completeness, reportCompleteness)
+	}
+	evidenceUnits, evidenceConflicts := mergeHandoffEvidence([]Handoff{
+		input,
+		{
+			ProducerNodeID:    request.Node.ID,
+			EvidenceUnits:     result.EvidenceUnits,
+			EvidenceConflicts: result.EvidenceConflicts,
+		},
+	})
 	nodeResult.Handoff = Handoff{
 		WorkflowRunID:  request.WorkflowRunID,
 		ProducerNodeID: request.Node.ID,
 		ProducerRunID:  runID,
 		Schema:         request.Node.OutputSchema,
 		Payload:        append([]byte(nil), result.Output...),
-		References:     append([]agentapi.Reference(nil), result.References...),
-		EvidenceUnits:  result.EvidenceUnits,
-		EvidenceConflicts: appendUniqueEvidenceConflicts(
-			cloneEvidenceConflicts(input.EvidenceConflicts),
-			result.EvidenceConflicts,
-			evidenceConflictSet(input.EvidenceConflicts),
+		References: append(
+			append([]agentapi.Reference(nil), input.References...),
+			result.References...,
 		),
-		Completeness: Complete,
+		EvidenceUnits:     evidenceUnits,
+		EvidenceConflicts: evidenceConflicts,
+		Completeness:      completeness,
 	}
 	return nodeResult, nil
 }
 
-func evidenceConflictSet(
-	conflicts []agentapi.EvidenceConflict,
-) map[string]struct{} {
-	seen := make(map[string]struct{}, len(conflicts))
-	for _, conflict := range conflicts {
-		seen[evidenceConflictKey(conflict)] = struct{}{}
-	}
-	return seen
+type contractCoverage struct {
+	EvidenceGoals []struct {
+		ID              string `json:"id"`
+		Facet           string `json:"facet"`
+		MinimumCoverage int    `json:"minimum_coverage"`
+	} `json:"evidence_goals"`
 }
 
-var multiAgentChildRunTraceSpec = runtrace.Spec[agentapi.RunRequest, agentapi.RunResult]{
+type reportCoverage struct {
+	CoveredGoals    []string `json:"covered_goals"`
+	UnresolvedGoals []string `json:"unresolved_goals"`
+	Findings        []struct {
+		GoalIDs  []string          `json:"goal_ids"`
+		Evidence []json.RawMessage `json:"evidence"`
+	} `json:"findings"`
+}
+
+func reportCompleteness(
+	contractPayload json.RawMessage,
+	reportPayload json.RawMessage,
+	requiredFacets []string,
+) (Completeness, error) {
+	required := make(map[string]struct{}, len(requiredFacets))
+	for _, facet := range requiredFacets {
+		required[facet] = struct{}{}
+	}
+	var report reportCoverage
+	if err := json.Unmarshal(reportPayload, &report); err != nil {
+		return "", fmt.Errorf("decode investigation report: %w", err)
+	}
+	status := make(map[string]Completeness, len(required))
+	for _, goal := range report.CoveredGoals {
+		if _, ok := required[goal]; !ok {
+			return "", fmt.Errorf("covered goal %q was not requested", goal)
+		}
+		if _, duplicate := status[goal]; duplicate {
+			return "", fmt.Errorf("goal %q is reported more than once", goal)
+		}
+		status[goal] = Complete
+	}
+	for _, goal := range report.UnresolvedGoals {
+		if _, ok := required[goal]; !ok {
+			return "", fmt.Errorf("unresolved goal %q was not requested", goal)
+		}
+		if _, duplicate := status[goal]; duplicate {
+			return "", fmt.Errorf("goal %q is both covered and unresolved", goal)
+		}
+		status[goal] = Unavailable
+	}
+	for _, facet := range requiredFacets {
+		if _, ok := status[facet]; !ok {
+			return "", fmt.Errorf("required goal %q is not classified", facet)
+		}
+	}
+
+	minimum := minimumCoverage(contractPayload)
+	findingCounts := make(map[string]int, len(report.CoveredGoals))
+	for index, finding := range report.Findings {
+		if len(finding.Evidence) == 0 {
+			return "", fmt.Errorf("finding %d has no concrete evidence", index)
+		}
+		seen := make(map[string]struct{}, len(finding.GoalIDs))
+		for _, goal := range finding.GoalIDs {
+			if _, ok := required[goal]; !ok {
+				return "", fmt.Errorf("finding %d references unrequested goal %q", index, goal)
+			}
+			if status[goal] != Complete {
+				return "", fmt.Errorf("finding %d references unresolved goal %q", index, goal)
+			}
+			if _, duplicate := seen[goal]; duplicate {
+				continue
+			}
+			seen[goal] = struct{}{}
+			findingCounts[goal]++
+		}
+	}
+	covered := 0
+	for _, facet := range requiredFacets {
+		if status[facet] != Complete {
+			continue
+		}
+		needed := minimum[facet]
+		if needed <= 0 {
+			needed = 1
+		}
+		if findingCounts[facet] < needed {
+			return "", fmt.Errorf(
+				"covered goal %q has %d evidence-backed findings; minimum is %d",
+				facet,
+				findingCounts[facet],
+				needed,
+			)
+		}
+		covered++
+	}
+	switch {
+	case covered == len(requiredFacets):
+		return Complete, nil
+	case covered == 0:
+		return Unavailable, nil
+	default:
+		return Partial, nil
+	}
+}
+
+func minimumCoverage(payload json.RawMessage) map[string]int {
+	var contract contractCoverage
+	if err := json.Unmarshal(payload, &contract); err != nil {
+		return nil
+	}
+	minimum := make(map[string]int, len(contract.EvidenceGoals))
+	for _, goal := range contract.EvidenceGoals {
+		if goal.MinimumCoverage <= 0 {
+			continue
+		}
+		minimum[goal.Facet] = goal.MinimumCoverage
+		if goal.ID != "" {
+			minimum[goal.ID] = goal.MinimumCoverage
+		}
+	}
+	return minimum
+}
+
+func leastComplete(left, right Completeness) Completeness {
+	if left == Unavailable || right == Unavailable {
+		return Unavailable
+	}
+	if left == Partial || right == Partial {
+		return Partial
+	}
+	return Complete
+}
+
+var childRunTraceSpec = runtrace.Spec[agentapi.RunRequest, agentapi.RunResult]{
 	Operation: "multi_agent.child_run",
 	Node:      "multi_agent_child_run",
 	Input: func(request agentapi.RunRequest) map[string]any {

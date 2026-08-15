@@ -385,6 +385,8 @@ var mysqlSchema = map[MySQLGroup][]string{
 		`CREATE TABLE IF NOT EXISTS workflow_runs (
 				id                   VARCHAR(64) PRIMARY KEY,
 				parent_run_id        VARCHAR(64) NOT NULL DEFAULT '',
+				round_number         INT NOT NULL DEFAULT 1,
+				base_depth          INT NOT NULL DEFAULT 0,
 				workflow_id          VARCHAR(128) NOT NULL,
 				workflow_version     BIGINT NOT NULL,
 				workflow_hash        CHAR(64) NOT NULL,
@@ -405,6 +407,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 				cost_micros         BIGINT NOT NULL DEFAULT 0,
 				retry_count         BIGINT NOT NULL DEFAULT 0,
 				error_code           VARCHAR(64) NOT NULL DEFAULT '',
+				stop_reason          VARCHAR(64) NOT NULL DEFAULT '',
 				started_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				ended_at             TIMESTAMP NULL,
 				KEY idx_workflow_started (workflow_id, workflow_version, started_at, id),

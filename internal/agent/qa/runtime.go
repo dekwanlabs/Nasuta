@@ -6,28 +6,28 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-// QAModels owns model clients used by QA preparation and session maintenance.
-type QAModels struct {
+// Models owns model clients used by QA preparation and session maintenance.
+type Models struct {
 	primary *llm.LLMClient
 	fast    *llm.LLMClient
 }
 
-func (models *QAModels) Primary() *llm.LLMClient {
+func (models *Models) Primary() *llm.LLMClient {
 	if models == nil {
 		return nil
 	}
 	return models.primary
 }
 
-func (models *QAModels) Fast() *llm.LLMClient {
+func (models *Models) Fast() *llm.LLMClient {
 	if models == nil {
 		return nil
 	}
 	return models.fast
 }
 
-// NewQAModels pins helper-model choices used outside the execution loop.
-func NewQAModels(settings *config.PlatformSettings) *QAModels {
+// NewModels pins helper-model choices used outside the execution loop.
+func NewModels(settings *config.PlatformSettings) *Models {
 	client := llm.NewLLMClientWithHTTPAndProvider(
 		settings.LLMBaseURL,
 		settings.LLMAPIKey,
@@ -53,5 +53,5 @@ func NewQAModels(settings *config.PlatformSettings) *QAModels {
 		log.Infof("[qa] fast model enabled for preprocess/queryterms: %s @ %s (%s)",
 			settings.LLMFastModel, settings.LLMBaseURL, fastProvider)
 	}
-	return &QAModels{primary: client, fast: fastClient}
+	return &Models{primary: client, fast: fastClient}
 }

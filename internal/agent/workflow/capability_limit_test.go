@@ -191,7 +191,7 @@ func (executor *selectiveCapabilityBlockingExecutor) Execute(
 func capabilityWorkflow(
 	capabilityVersion int64,
 	maxConcurrency int,
-) WorkflowDefinition {
+) Definition {
 	definition := singleNodeWorkflow()
 	definition.Budget.Timeout = 2 * time.Second
 	definition.Nodes[0].Capability = agentapi.CapabilityRef{
@@ -203,7 +203,7 @@ func capabilityWorkflow(
 	return definition
 }
 
-func parallelCapabilityWorkflow() WorkflowDefinition {
+func parallelCapabilityWorkflow() Definition {
 	definition := testWorkflow()
 	definition.ID = "delivery.review.parallel"
 	definition.Budget.MaxParallelism = 1

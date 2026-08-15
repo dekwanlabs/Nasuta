@@ -226,10 +226,21 @@ type PrefetchSpec struct {
 	Timeout     time.Duration
 }
 
+// RoutingEvidenceSource identifies the evidence domain produced by a routed tool.
+type RoutingEvidenceSource string
+
+const (
+	RoutingEvidenceInternal RoutingEvidenceSource = "internal"
+	RoutingEvidenceMemory   RoutingEvidenceSource = "memory"
+	RoutingEvidenceWeb      RoutingEvidenceSource = "web"
+	RoutingEvidenceRuntime  RoutingEvidenceSource = "runtime"
+)
+
 // RoutingSpec makes a read tool visible only when its declared intent matches.
 type RoutingSpec struct {
-	Intent   string
-	Temporal bool
+	Intent         string
+	Temporal       bool
+	EvidenceSource RoutingEvidenceSource
 }
 
 // AdmissionSpec declares deterministic pre-execution scope and result bounds.

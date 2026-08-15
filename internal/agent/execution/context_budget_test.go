@@ -8,7 +8,7 @@ import (
 )
 
 func TestEnsureInputBudgetRejectsBeforeProviderCall(t *testing.T) {
-	agent := &Agent{cfg: AgentConfig{
+	agent := &Agent{cfg: Config{
 		ContextWindow: 2048, AnswerMaxTokens: 700, ConclusionMaxTokens: 800,
 	}}
 	err := agent.ensureInputBudget([]llm.Message{{Role: "user", Content: strings.Repeat("上下文", 2000)}}, nil)

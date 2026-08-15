@@ -1092,6 +1092,8 @@ create table if not exists Nasuta.workflow_runs
     id                        varchar(64)                            not null
         primary key,
     parent_run_id             varchar(64)  default ''                not null,
+    round_number              int          default 1                 not null,
+    base_depth                int          default 0                 not null,
     workflow_id               varchar(128)                           not null,
     workflow_version          bigint                                 not null,
     workflow_hash             char(64)                               not null,
@@ -1112,6 +1114,7 @@ create table if not exists Nasuta.workflow_runs
     cost_micros               bigint       default 0                 not null,
     retry_count               bigint       default 0                 not null,
     error_code                varchar(64)  default ''                not null,
+    stop_reason               varchar(64)  default ''                not null,
     started_at                timestamp    default CURRENT_TIMESTAMP not null,
     ended_at                  timestamp                              null
 );

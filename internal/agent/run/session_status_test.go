@@ -6,7 +6,7 @@ import (
 )
 
 func TestHubBroadcastsSessionStatus(t *testing.T) {
-	hub := NewRunHub(nil)
+	hub := NewHub(nil)
 	channel := hub.Subscribe("run-1")
 	want := SessionStatusEvent{
 		Status: "start", Text: "compacting",

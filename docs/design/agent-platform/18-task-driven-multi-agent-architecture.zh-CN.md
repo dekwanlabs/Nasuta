@@ -3,33 +3,89 @@
 [返回设计索引](README.zh-CN.md)
 
 > 状态：目标设计，分阶段实施中
-> 更新日期：2026-08-13
+> 更新日期：2026-08-14
 > 适用范围：Nasuta QA、Feature Delivery 和通用 Agent Workflow
 > 替代基线：[QA 与研发任务多 Agent 路由方案](15-qa-and-feature-delivery-multi-agent-routing-proposal.zh-CN.md)（该文状态为“目标设计，待实施”，但其路由部分已随 12 号文档第一阶段落地为 `internal/agent/qa/route.go`；实施本方案时应同步澄清两文的归属）
 > 相关基线：[Nasuta 多 Agent 平台方案](12-multi-agent-platform-proposal.zh-CN.md)（第一阶段已实现）
 > 证据 substrate：[QA 证据收敛与检索治理](../proposals/qa-evidence-convergence-and-retrieval-governance.zh-CN.md)（部分实现）
 
-## 1. 摘要
+## 实施进度
 
-当前 QA Multi-Agent 把三个实现细节绑定成了一件事：
+| 阶段 | 状态 | 已完成 | 剩余工作 |
+|---|---|---|---|
+| 阶段 0：观测与既有闭环 | 已完成 | QA Parent Run 收敛、取消与恢复；调查 Workflow/Node 的 token、tool、cost、retry 预算 | P1：补 single/multi 成本收益对照指标 |
+| 阶段 1：Task Contract 与证据事实 | 已完成 | `task.contract`、canonical entity、source/freshness/minimum coverage、可变长度 Ledger View、canonical evidence identity、Goal Coverage、冲突传播、按 Evidence Goal 裁剪调查节点 | 无 |
+| 阶段 2：Capability 与受约束计划 | 已完成 | `CapabilityRegistry`、Web/Memory/Runtime Capability、app 扩展注册、受限 Planner Proposal、服务端字段绑定与 Proposal Compiler、权限/预算/Schema/并发校验、`ExecutionAssessment`、确定性 fallback | 无；多轮修订归入阶段 3 |
+| 阶段 3：验证与自适应扩展 | 部分完成 | `CollectAvailable`、Optional Task、Required Goal Coverage、complete/partial/unavailable；独立确定性 Verifier 将 claim 分类为 supported/partial/unsupported，并按 coverage、canonical binding、trust tier 和 Evidence Goal 风险分级；固定调查图与 Proposal Compiler 已插入服务端 `evidence.risk` Gate，高风险 partial 或证据冲突确定性进入 `needs_clarification`，Synthesizer 不会启动；Evidence Join 基于输入 baseline 产出 new identity/duplicate ratio 快照；结构化停止原因一致进入 Result、Trace、Store 与恢复路径；`MaxRounds`/`MaxDepth` 已在节点派发前准入，Run 固化 `Round`/`BaseDepth` 并由 Store/恢复路径复用 | P0：Adaptive Coordinator、跨轮不可变收敛快照串联与累计资源账本 |
+| 阶段 4：Feature Delivery 复用 | 未开始 | 现有静态 Workflow、Human Approval 与 Worktree 隔离可复用 | P1：写 Capability、WriteSet 调度隔离、Change Set Review、Delivery Gate、动态任务图 |
+
+当前实现应描述为“**单轮受限任务规划、编译与确定性执行底座完成**”，而不是“完整
+任务驱动 Multi-Agent 闭环完成”。
+
+### 剩余功能优先级
+
+优先级定义：
+
+- **P0**：阻断只读 Multi-Agent 闭环正确性、安全性、有界执行或恢复一致性的功能。
+  P0 未完成前，不应宣称任务驱动 Multi-Agent 闭环完成，也不应启动动态写任务扩展。
+- **P1**：不阻断只读闭环，但影响入口统一、收益评估、兼容清理或 Feature Delivery
+  复用的功能。P1 在 P0 闭环稳定后实施。
+
+| 顺序 | 优先级 | 工作包 | 完成标准 |
+|---|---|---|---|
+| 1 | P0（已完成） | canonical entity 统一 | Task Contract、Retrieval Intent、Memory 使用同一实体标识与有界去重语义，多轮任务不因大小写、函数括号或不同抽取路径重复扩展 |
+| 2 | P0（单轮已完成） | 多轮收敛事实与终态 | 单轮 blocked dependency、needs_clarification、真实 no-progress、duplicate ratio、no-affordable 已由运行事实判定，并一致写入 Result、Trace、Store 和恢复路径；最终完成仍要求后续轮次复用同一不可变收敛快照 |
+| 3 | P0（运行时准入已完成） | 多轮预算与调度准入 | `MaxRounds` 与全局 `MaxDepth` 已在任何节点派发前生效，`Round`/`BaseDepth` 已持久化并在恢复时复用；`MaxDuplicateRatio` 已固化进收敛快照，Node Attempt 已预留并结算 token/tool/cost/retry 预算。真正跨轮的累计资源账本仍随 Adaptive Coordinator 实现 |
+| 4 | P0（已完成） | partial-support/risk policy 与 Gate | claim 已区分 supported/partial/unsupported；覆盖不完整、部分引用无法绑定或高风险证据低于 trust floor 时进入 partial；高风险 partial 或证据冲突由 `evidence.risk` Gate 转为 clarification，不能直接合成 |
+| 5 | P0 | Adaptive Expansion 与顺序细化 | 只在新增 Goal、可信实体或冲突时生成有界后续任务；采用新不可变 Workflow 定义与 checkpoint 续跑，并保持预算、取消、恢复和 Trace 语义 |
+| 6 | P1 | QA/Workflow preparation 统一 | Single-Agent 与 Workflow 共用 canonical context/evidence preparation，消除重复的 Prefetch、上下文组装和证据采集入口 |
+| 7 | P1 | Single/Multi 收益评估 | 提供 token、cost、latency、claim support precision、unsupported claim rate 和扩展轮次收益对照 |
+| 8 | P1 | Feature Delivery 复用 | 完成写 Capability、隔离 Worktree、WriteSet 冲突检测、Change Set Review、Delivery Gate 与受限动态写任务图 |
+| 9 | P1 | 兼容与文档清理 | 收敛 `investigation.request` 兼容入口，删除已过时的固定 Handoff、旧 ContentHash 和未消费冲突描述 |
+
+P0 的依赖顺序是：
 
 ```text
-问题 -> internal evidence -> code/runtime/docs 三个 Agent -> join -> synthesize
+canonical entity
+  -> 收敛事实
+  -> 预算准入
+  -> 风险策略 / Gate（已完成）
+  -> Adaptive Expansion
 ```
 
-这使得 `evidence_not_internal_only`、`runtime_evidence_required`、
-`history_dependency_required` 和 `time_resolution_failed` 成为多 Agent 的硬性
-排除条件。它们并不是多 Agent 的一般性要求，而是当前固定 Workflow 能力不足时的
-降级分支。结果是执行策略由证据来源和预先写死的角色决定，而不是由任务结构决定。
+Evidence 缺口补查由 Adaptive Expansion 的 Coordinator 创建新任务，不通过给
+Synthesizer 直接开放工具实现。
 
-`decideExecutionRoute`（`internal/agent/qa/route.go:118-153`）实际有九个降级出口，
-本方案重点处理其中由“能力不足”导致的四个；另外五个
-（`policy_disallows_multi_agent`、`complexity_below_threshold`、
-`confidence_below_threshold`、`write_requested`、`workflow_unavailable`）
-在 6.2 与 6.4 分别说明保留、演进或收紧的理由。此外
-`standardQARequest`（`internal/agent/qa/service.go:215`）还有一层前置门：
-`PreloadedContext`、`ToolPlan.Prefetch` 或 `ParentRunID` 非空即禁用多 Agent，
-它同样属于本方案要消除的“非任务结构排除条件”。
+## 1. 摘要
+
+QA Multi-Agent 已从固定五节点图演进为按 canonical Evidence Goal 编译请求级任务图。
+Task Contract 已携带 source/freshness/minimum coverage；Nasuta 提供
+code/service topology/docs/Web/Memory 能力，CodeLoom 可通过 app 扩展注入实时 Runtime
+Observe 能力。当前执行形态是：
+
+```text
+问题
+  -> Evidence Goal + source/freshness
+  -> 请求级 Capability 子集
+  -> 受限 Planner Proposal
+  -> 服务端字段绑定、校验或确定性 fallback
+  -> evidence ledger join
+  -> deterministic evidence verifier
+  -> evidence risk gate
+  -> synthesize
+```
+
+`evidence_not_internal_only`、`runtime_evidence_required`、
+`history_dependency_required`、`time_resolution_failed` 以及
+`PreloadedContext`/`ToolPlan.Prefetch`/`ParentRunID` 前置门已经从
+`decideExecutionRoute` 和 `standardQARequest` 移除。显式工具声明
+`RoutingEvidenceSource`，因此 temporal freshness 与 Runtime Observe 不再混为一谈。
+
+固定 complexity/confidence 阈值已经移除。服务端 `ExecutionAssessment` 根据 Task
+Contract 中可映射的独立 Capability 数量、并行性、共享上下文压力和预计协调规模做
+裁决；低 complexity/confidence 不再直接降级。当前保留 Policy、写请求和 Workflow
+不可用三类边界，并新增 `insufficient_independent_tasks` 与
+`tasks_not_parallelizable` 两个任务结构降级原因。
 
 本方案将 Nasuta 的多 Agent 重构为：
 
@@ -62,30 +118,31 @@
 
 ### 2.1 当前实现的问题
 
-当前固定 Investigation 定义了五个节点：
+当前固定 Investigation 定义了七个节点：
 
 ```text
 investigate.code
 investigate.runtime
 investigate.docs
   -> evidence.join
+  -> evidence.verify
+  -> evidence.risk
   -> synthesize
 ```
 
 该图目前仍作为兼容 fallback 存在，但已改为 `task.contract` 输入、
 `CollectAvailable`、Optional Investigator、Evidence Ledger Join、显式预算与受限重试；
-请求级编译还会按 canonical Evidence Goal 选择实际需要的 Capability。当前遗留问题
-已从“固定图无法降级”收敛为“能力集合、验证粒度和运行期扩展仍不完整”：
+请求级编译还会按 canonical Evidence Goal 选择实际需要的 Capability；受限 Planner
+为每个允许的 Capability 提出任务 ID、具体目的和 required facets，服务端固定绑定
+Schema、Optional、尝试次数、Synthesizer 和终止边。当前遗留问题已从“固定图无法降级”
+收敛为“跨轮运行期扩展和上游准备统一仍不完整”：
 
 | 问题 | 后果 |
 |---|---|
-| Capability 集合仍局限于 code / service topology / docs | 请求级图已能裁剪节点，但 Web、Memory、实时 Runtime Observe 等能力尚未注册到该编译路径 |
-| canonical entity 尚未完全统一 | Task Contract 已能传实体、时间、ConversationRefs 和 SeedEvidence，但上游仍有多条实体抽取路径 |
+| Planner 仍是单轮并行 fan-out | 当前 `depends_on` 必须为空；尚不能基于 Ledger 缺口修订 Proposal 或创建后续调查轮次 |
 | Synthesizer 无工具 | 发现证据缺口后不能补查，只能接受缺口或幻觉补全 |
-| 路由依赖模型的 `complexity` 和 `confidence` | “是否值得并行”没有可计算的任务计划作为依据 |
+| 运行期扩展仍是单轮 | `ExecutionAssessment` 已取代固定阈值，Join/Verifier 已有 baseline delta、no-progress 和 duplicate ratio 判定；执行器已能按持久化 `Round`/`BaseDepth` 执行 round/depth 准入，但尚无跨 round 快照串联和新增节点通路 |
 | QA 与 Workflow 准备链路仍未完全合并 | Prefetch、PreloadedContext、ParentRunID 已进入 Task Contract，但 Single-Agent 与 Workflow 仍有独立执行入口 |
-| Ledger 只有 identity 级收敛 | 已支持去重、版本冲突、partial/unavailable 和确定性冲突拒绝，但尚无 goal/claim-level coverage |
-| 验证只覆盖确定性版本冲突 | `RejectEvidenceConflicts` 可在 Join 阻断 Synthesizer；专用 Verifier、claim 支持关系和风险分级尚未实现 |
 
 阶段 1 原有三处硬约束中，固定三元组 Schema 和双去重已完成收敛；当前真正阻断
 Adaptive Expansion 的是执行器仍绑定静态节点集：
@@ -160,6 +217,13 @@ Adaptive Expansion 的是执行器仍绑定静态节点集：
 Task Contract 是一次调查或交付任务的 canonical 输入。它在 QA 准备阶段形成，之后
 所有 Agent 都使用同一版本，不再各自从原始问题猜测上下文。
 
+实体身份由 `internal/domain.CanonicalEntityIDs` 在领域入口统一：去除边界空白和函数
+括号、转为小写、按 canonical ID 去重并限制为 8 个。Retrieval Intent 使用该入口规范
+化 grounded identifiers；Memory 的 `CanonicalQuestionMetadata` 通过
+`domain.CanonicalQuestionEntities` 复用同一 identity 与去重规则抽取会话实体；
+Task Contract 构造再次建立该输入不变量。三条路径因此对
+`PaymentHandler.handle()`、`paymenthandler.handle` 等表示生成同一实体 ID。
+
 ```go
 type TaskContract struct {
     TaskID          string
@@ -229,10 +293,14 @@ evidence.verify
 Capability Contract。这样可以在不改任务模型的情况下，将内部拓扑和实时日志提供给
 不同的实现或不同权限域。
 
-当前代码中不存在任何 Agent 侧的 Capability 概念：角色仅由 `Definition.Purpose`、
-提示词和 `Tools.VisibleToolIDs` 白名单表达，外加一个 `focus` 枚举字符串
-（`"code"|"runtime"|"docs"`）同时出现在定义表、提示词与 `investigation.report`
-Schema 中。因此 `Capability` 是本方案新增的注册维度，而非对既有类型的重命名。
+当前已新增公共 `agent.Capability`、`CapabilityRegistry` 和服务端 Proposal Compiler，
+并把默认 Investigator 注册为 `knowledge.code.inspect`、
+`knowledge.service.trace`、`knowledge.docs.verify`、`knowledge.web.research`、
+`knowledge.memory.recall` 与 `evidence.synthesize`。`app.Extension` 可通过
+`AgentCatalogProvider` 原子注入 Definition 与 Capability；CodeLoom 仅在
+`observe_logs` 成功发布后注册 `knowledge.runtime.observe`，Provider 失败不会静默
+替换实现。`investigation.report` 已允许通用 focus 字符串，具体任务边界由 Capability
+与 `TaskDirective.RequiredFacets` 决定。
 （`semantic.Capabilities`、`retrieval.RoutingCapabilities`、
 `delivery.CodingCapabilityStatus` 与此无关，勿复用其命名空间。）
 
@@ -261,6 +329,15 @@ type TaskGraphProposal struct {
     Stop  StopPolicy
 }
 ```
+
+当前 QA Planner 使用已有的 fast preparation LLM，仅输出 Investigator 的 `id`、
+`purpose`、`capability`、`required_facets` 和空 `depends_on`。服务端要求 Planner
+恰好覆盖 Task Contract 推导出的 Capability/facet 集，随后固定添加
+`investigation.report`、Optional、最大尝试次数、`evidence.synthesize` 和终止边；
+Planner 不能控制 Output Schema、Agent/Provider、工具、权限、预算、并发组、重试或
+Stop Policy。结构化规划失败会记录 degraded `agent.task_graph_plan` 并回退到
+`DelegatedInvestigationProposalForGoals`；Proposal Compiler 拒绝模型计划时会记录
+rejected `task_graph.proposed`，再显式编译同一确定性 fallback。
 
 服务端验证：
 
@@ -451,20 +528,19 @@ Multi-Agent 只有在以下条件同时满足时触发：
 
 ### 6.3 保留或需要单独演进的降级条件
 
-以下五个降级出口不属于“能力不足”，处理方式各不相同，不应与 6.2 混为一谈：
+固定阈值出口已经删除；当前保留或新增的降级出口如下：
 
 | 降级条件 | 处理 |
 |---|---|
 | `policy_disallows_multi_agent` | 保留。这是显式 Policy 开关，属于 3.2 非目标中“不把所有请求强制转换成多 Agent” |
-| `complexity_below_threshold` | 替换。硬编码常量 `0.7`（`route.go:13`）由 `ExecutionAssessment` 的可审计字段取代 |
-| `confidence_below_threshold` | 替换。硬编码常量 `0.8`（`route.go:14`）同上 |
+| `insufficient_independent_tasks` | 新增。Task Contract 无法映射出至少两个独立 Capability 路径时使用 |
+| `tasks_not_parallelizable` | 新增。存在多个任务但 Planner 明确给出强顺序约束时使用 |
 | `workflow_unavailable` | 保留。属于 6.4 的 Provider/能力不可用类 |
 | `write_requested` | **需要单独设计，本方案不予放宽。** 当前只要 `AllowWrite` 即降级单 Agent；而 13 节阶段 4 要把 Feature Delivery 建在同一套任务图上，二者直接冲突。阶段 4 之前必须先明确：写任务的隔离 Worktree、非重叠写集合、Change Set Review 与 Delivery Gate 如何在动态任务图下保持现有强度。在该设计完成前，`write_requested` 保持为硬性降级 |
 
-`ExecutionAssessment.Reasons` 应复用现有的封闭白名单机制：`executionReasonCodes`
-（`internal/retrieval/route.go:75-87`）已限定 11 个合法 reason code 且最多 4 条，
-由 `bindExecutionSuggestion` 校验。新增 code 必须扩展该白名单，而不是让模型自由返回
-字符串——这正是 3.2 所要求的服务端裁决，无需另建机制。
+`ExecutionAssessment.Reasons` 复用现有的封闭白名单机制：
+`executionReasonCodes` 已限定 11 个合法 model reason code 且最多 4 条，由
+`bindExecutionSuggestion` 校验；服务端结构降级原因不接受模型输入。
 
 ### 6.4 仍然必须阻断或暂停的情况
 
@@ -644,6 +720,14 @@ remaining budget
 5. `needs_clarification`：继续执行会依赖用户未提供的语义；
 6. `failed`：Workflow 或必需能力发生不可恢复失败。
 
+**当前已完成单轮收敛事实层**：Evidence Join 以 Workflow 输入中的 canonical evidence
+identity 为 baseline，输出 `candidate_count`、`new_identity_count`、
+`duplicate_count`、`duplicate_ratio` 和服务端 `max_duplicate_ratio`。baseline 中已有的
+identity 不计为候选；多个 Investigator 重复提交同一新增 identity 才计入 duplicate。
+Verifier 只依据该结构化快照、Required Goal Coverage、冲突和 unavailable task 的停止原因
+收敛，不再把任意 `partial` 自动解释为 `no_new_evidence`。该快照当前只覆盖单轮 fan-out；
+跨轮快照串联和下一轮任务生成仍归 Adaptive Expansion。
+
 ### 9.2 Verifier 与 Synthesizer 分离
 
 Synthesizer 只负责把已经通过 Ledger 选择和验证的材料组织成 Result Contract。对于
@@ -652,7 +736,8 @@ Synthesizer 只负责把已经通过 Ledger 选择和验证的材料组织成 Re
 ```text
 evidence ledger
   -> claim extraction
-  -> verifier / conflict gate
+  -> verifier
+  -> evidence risk gate
   -> approved evidence view
   -> synthesizer
 ```
@@ -666,6 +751,29 @@ Verifier 的输出必须说明：
 
 不采用“多个 Agent 说得一样就算正确”的多数票方案。
 
+**当前确定性 Verifier 与风险 Gate 主链已落地**：Proposal Compiler 在最终 Evidence
+Join 与唯一 Synthesizer 之间自动插入服务端拥有的 `NodeVerifier` 和
+`evidence.risk` `NodeGate`，Planner 不能控制其 ID、Schema、权限、超时、trust floor
+或 Gate policy。Verifier 将 `investigation.bundle` 收敛为
+`investigation.verified_bundle`，输出 `supported_claims`、`partial_claims`、
+`unsupported_claims`、`partial_goals`、`unresolved_goals`、`limitations`、合并证据、
+冲突和 verification decision。
+
+每个 supported/partial claim 保留 producer node、finding index、goal IDs、过滤后的
+具体引用证据和去重后的 canonical `evidence_identities`。显式 identity 必须按
+`source_kind/target/section/version/time_range` 五元组精确命中 Ledger；兼容报告中没有
+identity 的引用只按 `kind/reference` 匹配同一 `source_kind/target`。覆盖不完整、部分
+引用无法绑定，或高风险 claim 的最低证据 trust tier 低于服务端 floor 时标为 partial。
+完全无法绑定 canonical evidence 的 finding 只进入不含 claim 文本的
+`unsupported_claims` metadata，不贡献 Required Goal Coverage。
+
+QA preparation 将 `bounded_live` Evidence Goal 标记为 high risk；当前调查策略的
+high-risk 最低 trust tier 为 1。`evidence.risk` 对低风险 partial 原样放行 verified
+bundle；发现任意证据冲突或 high-risk partial 时写入结构化 `GateDecision` 并以
+`needs_clarification` 收敛，Synthesizer 不启动。Gate 成功时原样转发 payload、
+references、canonical evidence、conflicts 和 completeness。通用 human approval policy
+仍可作为后续场景扩展，但不再阻断当前只读调查闭环。
+
 ### 9.3 部分失败
 
 默认使用 `CollectAvailable`，但是否允许形成最终答案由 Evidence Policy 决定：
@@ -673,7 +781,8 @@ Verifier 的输出必须说明：
 - 非必需任务失败：继续，并在 limitations 中保留缺口；
 - 必需任务失败但其他证据足够：返回 partial，不能返回 complete；
 - 必需任务失败且没有替代覆盖：Workflow failed 或 needs clarification；
-- 一个 identity 多版本冲突：进入 Verifier 或 human gate，不能静默选择。
+- 一个 identity 多版本冲突：由 Verifier 保留冲突事实，并由 risk Gate 转为
+  clarification，不能静默选择。
 
 这比改造前四条边全部 `Required: true`、五个节点均非 `Optional`、任一失败即整体失败
 更符合实际调查任务；当前固定调查图已按该规则启用部分失败收敛。
@@ -684,8 +793,11 @@ Verifier 的输出必须说明：
 则后继不可运行”（`executor_handoff.go:53-58`）。`Handoff.Completeness` 已有
 `complete/partial/unavailable` 三态并在 Join 处按 `Unavailable > Partial > Complete`
 折叠。固定工作流已使用 `CollectAvailable`、Optional Investigator 和可变长度
-`investigation.bundle`；后续只需让 goal/claim-level Evidence Policy 决定 partial
-是否足以进入最终合成。
+`investigation.bundle`；独立 Verifier 现已根据请求级 Required Goal Coverage 生成
+verified view，并允许 partial/unavailable 以明确 limitations 进入最终合成。后续仍需由
+场景 Evidence Policy 决定风险级别；当前 QA 已将 `bounded_live` Goal 标为 high risk，
+并由 `evidence.risk` Gate 把 high-risk partial 或证据冲突转为 clarification。低风险
+partial 仍可携带限制进入最终合成。
 
 ## 10. 预算、停止和可靠性
 
@@ -708,29 +820,32 @@ max_duplicate_ratio
 deadline
 ```
 
-类型层面，现有 `WorkflowBudget`（`internal/agent/workflow/model.go:91-102`）已有
-十个字段，覆盖 nodes、parallelism、timeout、handoff bytes、input/output/total
-tokens、tool calls、cost micros 和 retries；缺少的只有 `MaxDepth`、`MaxRounds` 和
-`MaxDuplicateRatio`，可新增或由场景 Policy 派生等价限制。
+类型层面，`WorkflowBudget` 已覆盖 nodes、parallelism、`MaxDepth`、`MaxRounds`、
+timeout、handoff bytes、`MaxDuplicateRatio`、input/output/total tokens、tool calls、
+cost micros 和 retries。`StopPolicy` 的 round/depth/duplicate 限制只能向下收紧服务端
+ceiling，固定调查场景也会从场景 Policy 派生这些值。
 
-**但运行层面存在更紧急的问题：固定工作流的既有预算维度实际未启用。**
-`investigation.go:31-34` 只设了 `MaxNodes/MaxParallelism/Timeout/MaxHandoffBytes`，
-七个 token/tool/cost/retry 字段全为零；由于 `validateNodeBudget` 仅在工作流预算
-大于零时才要求节点预算（`model.go:260-286`），零值可通过校验。结果是当前多 Agent
-调查**没有任何 token、工具调用、费用或重试上限**，且节点未设 `Retry`，
-`MaxAttempts` 归一化为 1（不重试）。因此本节的落地动作有两项，填充既有维度优先于
-新增维度：
+运行层面的既有预算维度已经启用：`DelegatedInvestigationBudgetPolicy` 从不可变 Agent
+Definition 派生 Node Budget，Workflow Budget 汇总 token、tool call、cost 与 retry
+上限，Agent 节点使用受限重试。Evidence Join 把 `MaxDuplicateRatio` 固化进 convergence
+snapshot，Verifier 在未满足 Required Goal 时据此产生
+`duplicate_evidence_limit`。`WorkflowDefinition.Prepare` 计算稳定拓扑深度；每个 Run
+固化 `Round`/`BaseDepth`，执行器在创建任何 Node Attempt 前校验
+`Round <= MaxRounds` 和 `BaseDepth + graphDepth <= MaxDepth`，并把全局 round/depth
+写入 Node trace。该位置同时进入 `workflow_runs`，恢复后重新执行同一准入。剩余工作是：
 
-1. 为 `delegated.investigation` 及后续任务图实际填充既有 token/tool/cost/retry 预算，
-   并为 agent 节点设置对应 `NodeBudget`（`NodeBudget` 类型已存在，为 5 字段子集，
-   不含 `Timeout` 与 `MaxRetries`）；
-2. 新增 `MaxDepth`、`MaxRounds`、`MaxDuplicateRatio` 支撑自适应扩展。
+1. 在跨轮 Coordinator 中将当前 new-identity/duplicate snapshot 用作下一轮派发准入；
+2. 为每轮扩展采用新的不可变定义和 checkpoint 续跑，保持恢复语义不变；
+3. 将各轮 token/tool/cost/retry 预留和实际用量汇入同一累计账本，不能让新 Run
+   重新获得完整 Workflow ceiling。
 
 预算在调度前预留，在结果入账后按实际使用结算；不能只在 Workflow 结束后统计。当前
-单 Agent 侧已有两级预留门（`tool_admission.go` 的上下文窗口准入、
-`tool_delivery.go` 的投递前模拟），结算由 `run/store_usage.go:RecordLLMCall` 在单事务
-内聚合；`peak_reserved_tokens` 是事后高水位，不是预留账本。Workflow 级预留需要沿用
-前者的语义，而非仅依赖后者。
+Workflow 已由并发安全的 budget account 在每个 Node Attempt 前执行 `Reserve`、结束后
+执行 `Settle`。派发前无法预留时产生 `no_affordable_task`，不会伪装成已执行后的预算
+耗尽；round/depth 准入失败，或实际用量超过节点预留或 Workflow ceiling 时产生
+`budget_exhausted`。并行 wave 共享同一预留账本，不能同时超卖。单 Agent 侧仍保留
+`tool_admission.go` 的上下文窗口准入、`tool_delivery.go` 的投递前模拟和
+`run/store_usage.go:RecordLLMCall` 的事务结算。
 
 注意区分两个易混概念：`AnswerReserve` 是 **wall-clock `time.Duration`**（默认 30s，
 `platform/config/platform.go:14`），唯一用途是
@@ -756,6 +871,33 @@ needs_clarification
 
 特别禁止通过不断改变 query 让 Agent 在没有新增 identity 或 coverage 的情况下继续
 搜索。
+
+`StopReason` 已使用上述封闭枚举。当前单轮执行会实际产生全部列出的结构化收敛原因：
+
+- `required_goals_covered`：Verifier 确认 Required Goal 全部有 canonical evidence；
+- `no_new_evidence`：存在 convergence snapshot，且相对输入 baseline 的
+  `new_identity_count == 0`；
+- `no_affordable_task`：Node Attempt 派发前无法完成预算预留；
+- `duplicate_evidence_limit`：未满足 Required Goal，且实际 duplicate ratio 超过服务端
+  ceiling；
+- `needs_clarification`：`GateDecision.Decision` 明确为 `needs_clarification`，不解析自由
+  文本；
+- `verification_failed`、`deadline_exceeded`、`budget_exhausted` 和
+  `capability_unavailable`：分别来自显式启用 verifier hard-reject 的场景、deadline、
+  round/depth 准入或执行后结算超限，以及能力/依赖事实；默认调查图的证据冲突由
+  `evidence.risk` 转为 `needs_clarification`。
+
+Required 边被失败的 Optional 前驱阻断时，会传播该前驱已持久化的真实停止原因；没有更
+具体事实时才归为 `capability_unavailable`。这些原因统一投影到 Verifier handoff、内存
+`Result`、`workflow.converged` Trace 和 `workflow_runs.stop_reason`。checkpoint 会恢复
+Optional failure reason 和 Gate decision，因此重启后保持相同终态；取消、等待人工审批和
+未分类内部失败不伪造收敛原因。已有安装需执行
+`docs/sql/migration_workflow_stop_reason_20260814.sql` 和
+`docs/sql/migration_workflow_execution_position_20260814.sql`。
+
+尚未完成的是把同一事实合同串联到真正的多轮 Coordinator：每一轮必须以上一轮不可变
+snapshot 为 baseline，并在创建下一轮定义前复用现有 round/depth 准入，同时执行
+duplicate、affordability 和跨轮累计资源准入。
 
 ### 10.3 重试与补偿
 
@@ -869,10 +1011,11 @@ effective permission
 6. 多 Agent 比 Single-Agent 多花了多少 token、费用和延迟；
 7. 最终答案中的每条重要 claim 由哪些证据支持。
 
-建议新增 Trace 节点：
+目标 Trace 节点：
 
 ```text
 task_contract.created
+agent.task_graph_plan
 task_graph.proposed
 task_graph.accepted
 task.dispatched
@@ -899,15 +1042,26 @@ outcome；当前覆盖 `complete`、`partial`、`unavailable`、`waiting_human`�
 
 Evidence Trace 只投影 canonical identity、content hash、origin、数量和 completeness，
 不记录证据正文或 Handoff payload；每类事件最多投影 50 条 identity，避免挤占现有
-Trace 上限。启用 `RejectEvidenceConflicts` 的 Join 还会记录
-`verification.completed`，明确投影 `pass` 或 `reject` 及 conflict count；这只是
-确定性版本冲突检查，不等同于专用 Verifier。尚未落地的是 goal/claim-level coverage、
-专用 Verifier 结果和最终 claim 到 evidence identity 的支持关系，因此第 5、7 问仍不能
-完整回答。多 Agent 侧已有 `workflow.node.execute`、`multi_agent.dispatch`、
+Trace 上限。独立 `NodeVerifier` 记录真正的 `verification.completed`，投影 decision、
+结构化 stop reason、supported/partial/unsupported claim、unresolved goal 和 conflict
+数量；显式 verifier hard-reject 时使用 failed，partial/unavailable 使用 degraded，且不
+记录 claim、引用正文或 Handoff payload。`evidence.risk` 的 `workflow_node` Trace 只投影
+`gate_decision`、去重后的 `gate_reason_codes` 和 `gate_finding_count`，不投影 verified
+bundle。
+Goal Coverage 已由 `covered_goals`/`unresolved_goals`、evidence-backed finding 和
+`minimum_coverage` 决定 Handoff completeness，最终 verified view 也可回答哪些 claim
+由哪些具体引用和 canonical Evidence Identity 支持。Verifier 绑定失败与部分绑定的
+limitation 只记录 producer node、finding index 和数量，不进入 claim、引用正文或
+Handoff payload。第 7 问已经同时具备 canonical identity 级归因和
+supported/partial/unsupported 支持强度。多 Agent 侧已有
+`workflow.node.execute`、`multi_agent.dispatch`、
 `multi_agent.child_run`、`multi_agent.aggregate` 四个 span。请求级 Proposal 编译还会记录
-`task_graph.proposed` 与 `task_graph.accepted`：前者投影任务 ID、Capability、facet、
-依赖和 StopPolicy，并记录服务端拒绝；后者记录不可变 Workflow ID/version/hash、节点
-绑定和收紧后的预算。两者均不记录 Task purpose 等 Planner 自由文本。
+`agent.task_graph_plan`、`task_graph.proposed` 与 `task_graph.accepted`：规划节点投影
+允许的 Capability、任务 ID/facet、接受状态和确定性 fallback，不记录问题、目的或
+SeedEvidence 正文；`task_graph.proposed` 投影任务 ID、Capability、facet、依赖和
+StopPolicy，并记录服务端拒绝；`task_graph.accepted` 记录不可变 Workflow
+ID/version/hash、节点绑定和收紧后的预算。三者均不记录 Task purpose 等 Planner
+自由文本。
 
 离线评估至少比较：
 
@@ -957,10 +1111,9 @@ entity 的统一和更细粒度 coverage：
    Handoff、Ledger、Trace 和拒绝策略。
 2. **已完成**：`investigation.bundle` 改为可变长度 Ledger View，显式表达
    `unavailable_tasks`、证据冲突和 completeness。
-3. **部分完成**：QA preparation 已生成 history ref、time range 和 Evidence Goal；
-   注意当前实体解析是两条互不相通的字符串抽取路径
-   （`domain.RetrievalIntent.TargetEntities` 上限 8，与
-   `memory.CanonicalQuestionMetadata`），需先统一为 canonical entity。
+3. **已完成**：QA preparation 已生成 history ref、time range 和 Evidence Goal；
+   `domain.CanonicalEntityIDs` 统一 Retrieval Intent、Memory 和 Task Contract 的
+   canonical ID、大小写、函数括号、有界去重语义，Memory 不再维护第二套实体 identity。
 4. **已完成**：新增 `task.contract`，可传实体、时间范围、ConversationRefs、
    SeedEvidence 和 Evidence Goals；保留 `investigation.request` 兼容 Schema。
 5. **已完成**：Evidence Ledger 提升到 Workflow Join 作用域。
@@ -976,39 +1129,50 @@ entity 的统一和更细粒度 coverage：
 `web_fetch`（`internal/agent/tools/registry.go:247`）、memory recall
 （`agent.memory_recall` 链路）、以及 CodeLoom 侧的 `observe_logs` 均已存在。
 
-1. 注册 `knowledge.web.research`、`knowledge.memory.recall`、
+1. **已完成**：注册 `knowledge.web.research`、`knowledge.memory.recall`、
    `knowledge.runtime.observe` 等能力。其中 `observe_logs` 注册在 **CodeLoom**
    而非 Nasuta，该能力必须由 app 层跨模块注入，Nasuta 不得内置其领域实现
    （与 3.2 “不让通用 Workflow 层解析领域私有格式”一致）。
-2. Planner 输出 Task Graph Proposal，不再只输出 `strategy/complexity/confidence`；
-   reason code 扩展现有 `executionReasonCodes` 白名单，而非自由字符串。
-3. 服务端校验 Task Graph，保留固定默认图作为 Planner 不可用时的显式 fallback。
-4. 启用 Optional Task 与 `CollectAvailable`——机制已在执行器中存在（见 9.3），
-   本项为配置与 Schema 变更：把固定工作流 `FailurePolicy.Mode` 改为
-   `CollectAvailable` 并为可选节点设 `Optional: true`。
-5. 解除 `standardQARequest` 前置门，将 `PreloadedContext` / `ToolPlan.Prefetch` /
+2. **已完成**：Planner 在 `ExecutionAssessment` 选中 Multi-Agent 后输出受限
+   Task Graph Proposal，不再只输出 `strategy/complexity/confidence`。模型只控制
+   Investigator 的任务 ID、目的、Capability 和 required facets；Capability/facet 必须
+   与 Task Contract 推导集合完全一致，当前单轮 fan-out 不接受非空 `depends_on`。
+   reason code 继续使用现有 `executionReasonCodes` 白名单，而非自由字符串。
+3. **已完成**：服务端校验 Task Graph，保留确定性目标到 Proposal 的显式 fallback。
+4. **已完成**：启用 Optional Task 与 `CollectAvailable`。
+5. **已完成**：解除 `standardQARequest` 前置门，将 `PreloadedContext` / `ToolPlan.Prefetch` /
    `ParentRunID` 改为 Task Contract 的 SeedEvidence 与 ConversationRefs 输入。
+6. **已完成**：以 `ExecutionAssessment` 取代固定 complexity/confidence 阈值。
 
 验收：Web、Memory、Runtime 不再作为 Multi-Agent 总体硬性排除条件；缺失能力会准确
 落在对应任务上，并且不会静默替换 Provider。
 
 ### 阶段 3：验证、冲突和自适应扩展
 
-1. **Conflict Gate 部分完成**：`NodeDefinition.RejectEvidenceConflicts` 已在
-   delegated investigation 的 Evidence Join 启用；相同 identity 的异 hash 证据会在
-   Join 边界确定性拒绝，Synthesizer 不会执行，并记录 `evidence.rejected` 与
-   `verification.completed`。尚缺通用独立 `NodeGate` 策略、专用 Verifier 和
-   claim-level evidence view。
-2. 完善停止条件。静态 Proposal 编译已校验 `max_depth`，`max_rounds` 已进入
-   `StopPolicy` 和服务端上限，但当前固定为单轮且没有运行期扩展；仍需补 duplicate ratio、
-   no-progress，以及真正多轮执行时的 round/depth 终止判定。
+1. **独立 Verifier 与风险 Gate 主链已完成**：delegated investigation 固定图与
+   Proposal Compiler 都在 Evidence Join 后插入服务端拥有的 `NodeVerifier` 和
+   `evidence.risk` `NodeGate`。Join 只负责 Ledger merge；Verifier 负责 Required Goal
+   Coverage、claim 到 canonical `EvidenceIdentity` 的绑定、coverage/trust 分级和
+   limitations，输出 supported/partial/unsupported。无法绑定 Ledger identity 的 finding
+   不再覆盖 Required Goal，且 unsupported metadata 不暴露 claim；部分绑定只保留已验证
+   引用。Gate 对低风险 partial 原样放行，对 high-risk partial 或证据冲突确定性产生
+   `needs_clarification`，此时 Synthesizer 不启动。Verifier 与 Gate 分别记录
+   `verification.completed` 和不含 payload 的节点决策 Trace。
+2. **单轮结构化收敛事实与终态已完成，多轮串联待实现**。Evidence Join 已相对 Workflow
+   输入 baseline 计算 new identity 和 duplicate ratio；Verifier 据此产生真实
+   `no_new_evidence` / `duplicate_evidence_limit`；预算预留失败产生
+   `no_affordable_task`；结构化 Gate 产生 `needs_clarification`。这些原因进入 Result、
+   `workflow.converged`、`workflow_runs.stop_reason` 和 checkpoint 恢复。静态 Proposal
+   编译与运行时均已校验 round/depth ceiling；Run 固化的 `Round`/`BaseDepth` 会持久化并
+   在恢复后复用，越界在任何节点派发前确定性收敛为 `budget_exhausted`。当前仍固定为
+   单轮且没有运行期扩展；后续需跨轮 snapshot、下一轮定义和累计资源账本。
 3. 按 7.2 的决策落地受限 Adaptive Expansion，且只允许在 Ledger 发现新 Goal 或冲突时
    启动。**这是本方案工作量最大的一项**：现有执行器绑定静态节点集，需在“每轮生成新
    不可变定义 + checkpoint 续跑”与“改造执行器支持可增长节点集”之间先行选定路径。
-4. `evidence.candidate/merged/rejected/delivered`、确定性冲突检查的
-   `verification.completed` 和统一终态 `workflow.converged` 已完成；继续补
-   goal/claim-level evidence view、专用 Verifier Trace，并把最终 claim 支持关系纳入
-   同一 trace 合同。
+4. `evidence.candidate/merged/rejected/delivered`、独立 Verifier 的
+   `verification.completed`、risk Gate decision 和统一终态 `workflow.converged` 已完成；
+   单轮 claim support、no-progress/duplicate/affordability/clarification 决策已进入同一
+   trace 合同。后续只需继续纳入跨 round 决策。
 
 验收：任务失败、证据冲突、无新证据和部分完成均有明确终态；不存在无限 spawn。
 
@@ -1036,9 +1200,10 @@ entity 的统一和更细粒度 coverage：
 - `internal/agent/workflow` 的确定性编排、DAG 校验、Handoff、预算、事件，以及
   checkpoint 恢复（`LoadFullRunState`/`workflowProgressFromState`/`Service.Resume`）；
 - 已在调查工作流启用的机制：`CollectAvailable` + `NodeDefinition.Optional`、
-  `NodeBudget`、`Handoff.Completeness` 三态和 Evidence Join 冲突拒绝；
-- 已存在但尚未用于调查图通用验证的机制：`NodeGate`、`NodeHumanApproval`、
-  `NodeTransform`、`GateDecision`；
+  `NodeBudget`、`Handoff.Completeness` 三态、Evidence Join、独立 Verifier 和
+  `evidence.risk` Gate；
+- 已存在但尚未用于调查图通用验证的机制：`NodeHumanApproval`、`NodeTransform`；
+- `NodeGate` 与 `GateDecision` 已用于调查图的 high-risk partial / conflict policy；
 - Agent Definition、Schema Registry、Tool Snapshot 和权限交集；
 - Parent/Child Run 关系和统一 QA Outcome；
 - 固定 Workflow 作为 Policy fallback 和离线评估基线。
@@ -1048,14 +1213,18 @@ entity 的统一和更细粒度 coverage：
 
 ### 逐步替换
 
-- `ExecutionSuggestion{Strategy, Complexity, Confidence}` 替换为
-  `ExecutionAssessment + TaskGraphProposal`；
-- `investigator.code/runtime/docs` 来源角色替换为 Capability 实现；
+- `ExecutionSuggestion{Strategy, Complexity, Confidence}` 的固定阈值已由
+  `ExecutionAssessment` 替换；选中 Multi-Agent 后由受限 Planner 直接生成
+  `TaskGraphProposal`，无效输出显式回退确定性 goal mapping；
+- `investigator.code/runtime/docs` 来源角色已替换为 Capability 实现，并支持
+  Web、Memory 和 app 扩展注入的 Runtime Observe；
 - `investigation.request` 已只保留兼容用途，长期输入已切换为 `task.contract`；
 - `investigation.bundle` 已从固定三元组替换为可变长度 Ledger View；
-- `evidence.join` 已升级为 Ledger merge，coverage calculation 仍待 goal/claim 模型；
+- `evidence.join` 已升级为 Ledger merge，`evidence.verify` 已生成 canonical identity
+  级 supported/partial/unsupported claim 支持视图，`evidence.risk` 已接管高风险
+  clarification；
 - 固定工作流已使用 `CollectAvailable` 配合 Optional Investigator；
-- QA 与 Workflow 已复用 canonical evidence merge，仍需继续统一上游实体与 claim coverage。
+- QA 与 Workflow 已复用 canonical evidence merge，仍需继续统一 preparation 入口。
 
 ### 不采用
 
@@ -1069,10 +1238,13 @@ entity 的统一和更细粒度 coverage：
 
 本设计需要在实现前确认以下平台决策：
 
-1. Task Planner 是使用现有 QA LLM，还是独立的低成本 Planner Definition；
+1. **已确认**：当前 Task Planner 使用现有 QA preparation fast LLM，调用失败或输出
+   非法时回退确定性 goal mapping；是否独立为低成本 Planner Definition 仅作为后续
+   成本优化项；
 2. 是否允许 Planner 在一次 Workflow 内提出第二轮任务，默认 `max_rounds` 取值；
 3. Runtime Capability 的 freshness、租户隔离和敏感字段策略；
-4. `partial` 是否允许直接写入 Session，还是必须用户确认；
+4. **已确认**：低风险 `partial` 可携带 limitations 进入合成并写入 Session；
+   high-risk `partial` 由 `evidence.risk` 转为 `needs_clarification`；
 5. 哪些 Evidence Goal 属于 QA 的 required facet，哪些属于 optional facet；
 6. Workflow Ledger 的存储粒度和最大正文保留策略；
 7. Feature Delivery 中哪些 Capability 可写，哪些只能产出 Change Set。

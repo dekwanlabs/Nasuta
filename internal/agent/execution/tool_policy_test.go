@@ -131,8 +131,8 @@ func TestReferenceMismatchUsesCompleteTokenBoundariesForStructuredReferences(t *
 
 func TestCanonicalSessionToolCallsPreservesInvalidAndMarksOversizedArguments(t *testing.T) {
 	invalid := `{"query":`
-	oversized := strings.Repeat("x", sessionToolArgumentLimit+1)
-	calls := canonicalSessionToolCalls([]llm.ToolCall{
+	oversized := strings.Repeat("x", toolArgumentLimit+1)
+	calls := canonicalToolCalls([]llm.ToolCall{
 		{Function: llm.ToolFunction{Name: "invalid", Arguments: invalid}},
 		{Function: llm.ToolFunction{Name: "oversized", Arguments: oversized}},
 		{Function: llm.ToolFunction{Name: "valid", Arguments: `{"b":2,"a":1}`}},

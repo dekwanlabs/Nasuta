@@ -33,20 +33,20 @@ func buildMemoryProbe(ctx context.Context, input memoryProbeInput) (memoryProbeO
 	})
 }
 
-type memoryRecallForWriteInput struct {
+type writeRecallInput struct {
 	Store  *memory.MemoryStore
 	UserID int64
 	Probes []memory.MemoryProbe
 }
 
-type memoryRecallForWriteOutput struct {
+type writeRecallOutput struct {
 	Result memory.ConsolidationRecallResult
 }
 
-var memoryRecallForWriteSpec = runtrace.Spec[memoryRecallForWriteInput, memoryRecallForWriteOutput]{
+var writeRecallSpec = runtrace.Spec[writeRecallInput, writeRecallOutput]{
 	Operation: "memory.recall_for_write",
 	Node:      "memory_recall_for_write",
-	Output: func(_ memoryRecallForWriteInput, output memoryRecallForWriteOutput, err error) map[string]any {
+	Output: func(_ writeRecallInput, output writeRecallOutput, err error) map[string]any {
 		if err != nil {
 			return map[string]any{"error": err.Error()}
 		}
@@ -62,13 +62,13 @@ var memoryRecallForWriteSpec = runtrace.Spec[memoryRecallForWriteInput, memoryRe
 	},
 }
 
-func recallMemoriesForWrite(ctx context.Context, input memoryRecallForWriteInput) (memoryRecallForWriteOutput, error) {
-	return runtrace.Invoke(ctx, memoryRecallForWriteSpec, input, func(
+func recallMemoriesForWrite(ctx context.Context, input writeRecallInput) (writeRecallOutput, error) {
+	return runtrace.Invoke(ctx, writeRecallSpec, input, func(
 		ctx context.Context,
-		input memoryRecallForWriteInput,
-	) (memoryRecallForWriteOutput, error) {
+		input writeRecallInput,
+	) (writeRecallOutput, error) {
 		result, err := input.Store.RecallForConsolidation(ctx, input.UserID, input.Probes)
-		return memoryRecallForWriteOutput{Result: result}, err
+		return writeRecallOutput{Result: result}, err
 	})
 }
 

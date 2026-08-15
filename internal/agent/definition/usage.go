@@ -11,7 +11,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
-func (recorder *definitionUsageRecorder) RecordLLMCall(
+func (recorder *usageRecorder) RecordLLMCall(
 	ctx context.Context,
 	call llm.CallUsage,
 ) error {
@@ -68,7 +68,7 @@ func tokenCostMicros(tokens, priceMicrosPerMillionTokens int64) (int64, error) {
 	return cost, nil
 }
 
-func (recorder *definitionUsageRecorder) Usage() agentapi.Usage {
+func (recorder *usageRecorder) Usage() agentapi.Usage {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	return recorder.usage

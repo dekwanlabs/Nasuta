@@ -71,11 +71,11 @@ func (starter *pipelineStarterRecorder) Start(
 	_ context.Context,
 	request pipeline.Request,
 	actor agentapi.Actor,
-) (*workflow.WorkflowRunRecord, error) {
+) (*workflow.RunRecord, error) {
 	starter.calls++
 	starter.request = request
 	starter.actor = actor
-	return &workflow.WorkflowRunRecord{
+	return &workflow.RunRecord{
 		ID:              "workflow_1",
 		WorkflowID:      pipeline.WorkflowID,
 		WorkflowVersion: pipeline.WorkflowVersion,

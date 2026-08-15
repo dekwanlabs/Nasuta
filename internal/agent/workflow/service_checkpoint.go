@@ -8,26 +8,27 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
-func workflowProgressFromState(
-	definition WorkflowDefinition,
-	state *WorkflowRunState,
-) (WorkflowProgress, error) {
+func progressFromState(
+	definition Definition,
+	state *RunState,
+) (Progress, error) {
 	if state == nil {
-		return WorkflowProgress{}, fmt.Errorf("workflow checkpoint is required")
+		return Progress{}, fmt.Errorf("workflow checkpoint is required")
 	}
 	nodes := make(map[string]NodeDefinition, len(definition.Nodes))
 	for _, node := range definition.Nodes {
 		nodes[node.ID] = node
 	}
-	progress := WorkflowProgress{
-		StartedAt:      state.Run.StartedAt,
-		Input:          state.Input,
-		NodeOutputs:    state.NodeOutputs,
-		Gates:          state.Gates,
-		FailedOptional: make(map[string]struct{}),
-		WaitingHuman:   make(map[string]struct{}),
-		NodeAttempts:   make(map[string]NodeAttemptProgress),
-		Usage:          state.Run.Usage,
+	progress := Progress{
+		StartedAt:             state.Run.StartedAt,
+		Input:                 state.Input,
+		NodeOutputs:           state.NodeOutputs,
+		Gates:                 state.Gates,
+		FailedOptional:        make(map[string]struct{}),
+		FailedOptionalReasons: make(map[string]StopReason),
+		WaitingHuman:          make(map[string]struct{}),
+		NodeAttempts:          make(map[string]NodeAttemptProgress),
+		Usage:                 state.Run.Usage,
 	}
 	nodeIDs := make([]string, 0, len(state.Nodes))
 	for nodeID := range state.Nodes {
@@ -38,13 +39,13 @@ func workflowProgressFromState(
 		run := state.Nodes[nodeID]
 		node, ok := nodes[nodeID]
 		if !ok {
-			return WorkflowProgress{}, fmt.Errorf(
+			return Progress{}, fmt.Errorf(
 				"workflow run %q checkpoint contains unknown node %q",
 				state.Run.ID, nodeID,
 			)
 		}
 		if run.Kind != node.Kind {
-			return WorkflowProgress{}, fmt.Errorf(
+			return Progress{}, fmt.Errorf(
 				"workflow run %q node %q kind changed from %q to %q",
 				state.Run.ID, nodeID, run.Kind, node.Kind,
 			)
@@ -53,7 +54,7 @@ func workflowProgressFromState(
 		case RunSucceeded:
 		case RunWaitingHuman:
 			if node.Kind != NodeHumanApproval {
-				return WorkflowProgress{}, fmt.Errorf(
+				return Progress{}, fmt.Errorf(
 					"workflow run %q non-human node %q is waiting for approval",
 					state.Run.ID, nodeID,
 				)
@@ -61,10 +62,10 @@ func workflowProgressFromState(
 			progress.WaitingHuman[nodeID] = struct{}{}
 		case RunFailed, RunCancelled, RunTimedOut:
 			if run.Status == RunFailed &&
-				retryableCheckpointFailure(run.ErrorCode) &&
+				retryableCheckpoint(run.ErrorCode) &&
 				recoveryRetryAllowed(definition, state.Run, node, run.Attempt) {
 				if run.EndedAt == nil || run.FirstStartedAt.IsZero() {
-					return WorkflowProgress{}, fmt.Errorf(
+					return Progress{}, fmt.Errorf(
 						"workflow run %q node %q retry timing is incomplete",
 						state.Run.ID, nodeID,
 					)
@@ -78,15 +79,18 @@ func workflowProgressFromState(
 			}
 			if node.Optional && definition.FailurePolicy.Mode == CollectAvailable {
 				progress.FailedOptional[nodeID] = struct{}{}
+				progress.FailedOptionalReasons[nodeID] = checkpointStopReason(
+					run.ErrorCode,
+				)
 				continue
 			}
-			return WorkflowProgress{}, &checkpointTerminalError{
+			return Progress{}, &checkpointTerminalError{
 				workflowRunID: state.Run.ID,
 				nodeID:        nodeID,
 				status:        run.Status,
 			}
 		default:
-			return WorkflowProgress{}, fmt.Errorf(
+			return Progress{}, fmt.Errorf(
 				"workflow run %q node %q checkpoint status %q cannot be resumed",
 				state.Run.ID, nodeID, run.Status,
 			)
@@ -95,12 +99,25 @@ func workflowProgressFromState(
 	return progress, nil
 }
 
-func interruptedAttemptUsage(node NodeDefinition, attempt int) WorkflowUsage {
+func checkpointStopReason(errorCode string) StopReason {
+	switch errorCode {
+	case "no_affordable_task":
+		return StopNoAffordableTask
+	case "workflow_budget_exhausted":
+		return StopBudgetExhausted
+	case "needs_clarification":
+		return StopNeedsClarification
+	default:
+		return StopCapabilityUnavailable
+	}
+}
+
+func interruptedUsage(node NodeDefinition, attempt int) Usage {
 	totalTokens := node.Budget.MaxTotalTokens
 	if totalTokens == 0 {
 		totalTokens = node.Budget.MaxInputTokens + node.Budget.MaxOutputTokens
 	}
-	usage := WorkflowUsage{
+	usage := Usage{
 		InputTokens:  node.Budget.MaxInputTokens,
 		OutputTokens: node.Budget.MaxOutputTokens,
 		TotalTokens:  totalTokens,
@@ -137,20 +154,21 @@ func (err *checkpointTerminalError) Unwrap() error {
 	}
 }
 
-func retryableCheckpointFailure(errorCode string) bool {
+func retryableCheckpoint(errorCode string) bool {
 	return errorCode == nodeRetryableErrorCode ||
 		errorCode == nodeRestartedRetryableErrorCode
 }
 
 func recoveryRetryAllowed(
-	definition WorkflowDefinition,
-	run WorkflowRunRecord,
+	definition Definition,
+	run RunRecord,
 	node NodeDefinition,
 	attempt int,
 ) bool {
 	if attempt <= 0 || attempt >= node.Retry.MaxAttempts ||
 		(node.Kind != NodeAgent &&
 			node.Kind != NodeJoin &&
+			node.Kind != NodeVerifier &&
 			!(node.Kind == NodeTransform && node.RetrySafe)) {
 		return false
 	}

@@ -6,8 +6,8 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
-// DefaultInvestigationCapabilities binds the standard investigation agents to planner capabilities.
-func DefaultInvestigationCapabilities(
+// DefaultCapabilities binds the standard investigation agents to planner capabilities.
+func DefaultCapabilities(
 	definitions []agentapi.Definition,
 	version int64,
 ) ([]agentapi.Capability, error) {
@@ -27,6 +27,7 @@ func DefaultInvestigationCapabilities(
 	specifications := []struct {
 		id, agentID, purpose string
 		inputFacets          []string
+		freshness            agentapi.FreshnessPolicy
 	}{
 		{
 			id: "knowledge.code.inspect", agentID: "investigator.code",
@@ -37,6 +38,7 @@ func DefaultInvestigationCapabilities(
 				"core_flow",
 				"data_and_state",
 			},
+			freshness: agentapi.FreshnessStable,
 		},
 		{
 			id: "knowledge.service.trace", agentID: "investigator.runtime",
@@ -47,6 +49,7 @@ func DefaultInvestigationCapabilities(
 				"external_dependency",
 				"runtime_and_operations",
 			},
+			freshness: agentapi.FreshnessStable,
 		},
 		{
 			id: "knowledge.docs.verify", agentID: "investigator.docs",
@@ -55,10 +58,46 @@ func DefaultInvestigationCapabilities(
 				"documentation",
 				"business_domain",
 			},
+			freshness: agentapi.FreshnessStable,
+		},
+		{
+			id: "knowledge.web.research", agentID: "investigator.web",
+			purpose: "Research current public evidence through the configured web provider.",
+			inputFacets: []string{
+				"implementation",
+				"entrypoint",
+				"core_flow",
+				"data_and_state",
+				"service.topology",
+				"system_boundary",
+				"external_dependency",
+				"runtime_and_operations",
+				"documentation",
+				"business_domain",
+			},
+			freshness: agentapi.FreshnessCurrent,
+		},
+		{
+			id: "knowledge.memory.recall", agentID: "investigator.memory",
+			purpose: "Evaluate bounded recalled memory admitted by the task contract.",
+			inputFacets: []string{
+				"implementation",
+				"entrypoint",
+				"core_flow",
+				"data_and_state",
+				"service.topology",
+				"system_boundary",
+				"external_dependency",
+				"runtime_and_operations",
+				"documentation",
+				"business_domain",
+			},
+			freshness: agentapi.FreshnessCurrent,
 		},
 		{
 			id: "evidence.synthesize", agentID: "synthesizer",
-			purpose: "Synthesize admitted investigation evidence without gathering new evidence.",
+			purpose:   "Synthesize admitted investigation evidence without gathering new evidence.",
+			freshness: agentapi.FreshnessStable,
 		},
 	}
 	capabilities := make([]agentapi.Capability, 0, len(specifications))
@@ -99,6 +138,7 @@ func DefaultInvestigationCapabilities(
 				[]string(nil),
 				definition.Permissions.Scopes...,
 			),
+			Freshness:      specification.freshness,
 			SideEffects:    agentapi.SideEffectNone,
 			RetrySafe:      true,
 			MaxConcurrency: 3,

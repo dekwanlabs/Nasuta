@@ -191,7 +191,7 @@ func (executor *Executor) generate(
 	}
 	return workflow.NodeResult{
 		Handoff: workflow.Handoff{Payload: payload, Completeness: workflow.Complete},
-		Usage: workflow.WorkflowUsage{
+		Usage: workflow.Usage{
 			InputTokens:  run.InputTokens,
 			OutputTokens: run.OutputTokens,
 			TotalTokens:  run.InputTokens + run.OutputTokens,

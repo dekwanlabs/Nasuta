@@ -19,13 +19,13 @@ import (
 
 const fetchMaxBytes = 1 << 20
 
-// WebFetch downloads a page and returns readable text.
-func (srv *Service) WebFetch(ctx context.Context, rawURL string) (string, error) {
-	return srv.WebFetchRelevant(ctx, rawURL, "")
+// Fetch downloads a page and returns readable text.
+func (srv *Service) Fetch(ctx context.Context, rawURL string) (string, error) {
+	return srv.FetchRelevant(ctx, rawURL, "")
 }
 
-// WebFetchRelevant keeps the model input bounded by selecting passages locally.
-func (srv *Service) WebFetchRelevant(ctx context.Context, rawURL, query string) (string, error) {
+// FetchRelevant keeps the model input bounded by selecting passages locally.
+func (srv *Service) FetchRelevant(ctx context.Context, rawURL, query string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid URL: %w", err)
@@ -62,7 +62,7 @@ func (srv *Service) WebFetchRelevant(ctx context.Context, rawURL, query string) 
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	out, encodingName, err := decodeWebBody(body, contentType)
+	out, encodingName, err := decodeBody(body, contentType)
 	if err != nil {
 		return "", fmt.Errorf("decode body from %s: %w", rawURL, err)
 	}
@@ -77,7 +77,7 @@ func (srv *Service) WebFetchRelevant(ctx context.Context, rawURL, query string) 
 
 	const modelBudget = 8000
 	if strings.TrimSpace(query) != "" {
-		out = formatWebPassages(retrieval.SelectWebPassages(out, query, modelBudget))
+		out = formatPassages(retrieval.SelectWebPassages(out, query, modelBudget))
 	} else {
 		out = truncateRunes(out, modelBudget)
 	}
@@ -99,7 +99,7 @@ func (srv *Service) WebFetchRelevant(ctx context.Context, rawURL, query string) 
 	return header + out, nil
 }
 
-func decodeWebBody(body []byte, contentType string) (string, string, error) {
+func decodeBody(body []byte, contentType string) (string, string, error) {
 	encoding, name, certain := charset.DetermineEncoding(body, contentType)
 	if utf8.Valid(body) && !certain && name == "windows-1252" {
 		return string(body), "utf-8", nil
@@ -114,7 +114,7 @@ func decodeWebBody(body []byte, contentType string) (string, string, error) {
 	return string(decoded), name, nil
 }
 
-func formatWebPassages(selection retrieval.WebPassageSelection) string {
+func formatPassages(selection retrieval.WebPassageSelection) string {
 	if len(selection.Passages) == 0 {
 		return truncateRunes(selection.Fallback, 8000)
 	}

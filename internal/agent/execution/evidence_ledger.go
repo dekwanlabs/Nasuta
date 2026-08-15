@@ -81,7 +81,7 @@ type evidenceConflictNotice struct {
 	Incoming evidenceConflictVersion `json:"incoming"`
 }
 
-func marshalEvidenceConflictNotices(conflicts []evidence.Conflict) ([]string, error) {
+func marshalConflictNotices(conflicts []evidence.Conflict) ([]string, error) {
 	notices := make([]string, 0, len(conflicts))
 	for _, conflict := range conflicts {
 		encoded, err := json.Marshal(evidenceConflictNotice{

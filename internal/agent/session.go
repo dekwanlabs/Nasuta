@@ -5,7 +5,7 @@ import (
 )
 
 // SessionHistory is the bounded current-session archive capability consumed by QA.
-type SessionHistory = session.SessionHistory
+type SessionHistory = session.History
 
 // SessionCompactionResult reports whether the monotonic archive boundary advanced.
-type SessionCompactionResult = session.SessionCompactionResult
+type SessionCompactionResult = session.CompactionResult

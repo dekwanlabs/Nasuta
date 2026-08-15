@@ -8,7 +8,7 @@ const (
 	subscriberTextMergeLimit  = 8 * 1024
 )
 
-type runSubscriber struct {
+type subscriber struct {
 	events       chan SSEEvent
 	wake         chan struct{}
 	stop         chan struct{}
@@ -19,8 +19,8 @@ type runSubscriber struct {
 	dropReported bool
 }
 
-func newRunSubscriber() *runSubscriber {
-	sub := &runSubscriber{
+func newSubscriber() *subscriber {
+	sub := &subscriber{
 		events: make(chan SSEEvent, subscriberEventBuffer),
 		wake:   make(chan struct{}, 1),
 		stop:   make(chan struct{}),
@@ -29,7 +29,7 @@ func newRunSubscriber() *runSubscriber {
 	return sub
 }
 
-func (sub *runSubscriber) enqueue(event SSEEvent) bool {
+func (sub *subscriber) enqueue(event SSEEvent) bool {
 	sub.mu.Lock()
 	if sub.closed || !sub.enqueueLocked(event) {
 		sub.mu.Unlock()
@@ -43,7 +43,7 @@ func (sub *runSubscriber) enqueue(event SSEEvent) bool {
 	return true
 }
 
-func (sub *runSubscriber) enqueueLocked(event SSEEvent) bool {
+func (sub *subscriber) enqueueLocked(event SSEEvent) bool {
 	if sub.mergeAdjacentLocked(event) {
 		return true
 	}
@@ -70,7 +70,7 @@ func (sub *runSubscriber) enqueueLocked(event SSEEvent) bool {
 	return false
 }
 
-func (sub *runSubscriber) mergeAdjacentLocked(event SSEEvent) bool {
+func (sub *subscriber) mergeAdjacentLocked(event SSEEvent) bool {
 	if len(sub.queue) == 0 {
 		return false
 	}
@@ -99,7 +99,7 @@ func (sub *runSubscriber) mergeAdjacentLocked(event SSEEvent) bool {
 	}
 }
 
-func (sub *runSubscriber) findDroppableLocked() int {
+func (sub *subscriber) findDroppableLocked() int {
 	for index, event := range sub.queue {
 		if isBestEffortEvent(event.Type) {
 			return index
@@ -108,7 +108,7 @@ func (sub *runSubscriber) findDroppableLocked() int {
 	return -1
 }
 
-func (sub *runSubscriber) findNonTerminalLocked() int {
+func (sub *subscriber) findNonTerminalLocked() int {
 	for index, event := range sub.queue {
 		if event.Type != EventRunFinished {
 			return index
@@ -117,13 +117,13 @@ func (sub *runSubscriber) findNonTerminalLocked() int {
 	return -1
 }
 
-func (sub *runSubscriber) removeAtLocked(index int) {
+func (sub *subscriber) removeAtLocked(index int) {
 	copy(sub.queue[index:], sub.queue[index+1:])
 	sub.queue[len(sub.queue)-1] = SSEEvent{}
 	sub.queue = sub.queue[:len(sub.queue)-1]
 }
 
-func (sub *runSubscriber) deliver() {
+func (sub *subscriber) deliver() {
 	for {
 		sub.mu.Lock()
 		if len(sub.queue) == 0 {
@@ -153,7 +153,7 @@ func (sub *runSubscriber) deliver() {
 	}
 }
 
-func (sub *runSubscriber) reportDrop() bool {
+func (sub *subscriber) reportDrop() bool {
 	sub.mu.Lock()
 	defer sub.mu.Unlock()
 	if sub.closed || sub.dropReported {
@@ -163,7 +163,7 @@ func (sub *runSubscriber) reportDrop() bool {
 	return true
 }
 
-func (sub *runSubscriber) close() {
+func (sub *subscriber) close() {
 	sub.once.Do(func() {
 		sub.mu.Lock()
 		sub.closed = true

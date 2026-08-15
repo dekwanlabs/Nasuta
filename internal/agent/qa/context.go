@@ -85,7 +85,7 @@ var contextAssembleSpec = runtrace.Spec[contextAssembleInput, contextAssembleOut
 	},
 }
 
-func (svc *QA) assembleContext(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
+func (svc *Service) assembleContext(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
 	return runtrace.Invoke(ctx, contextAssembleSpec, input, func(ctx context.Context, input contextAssembleInput) (contextAssembleOutput, error) {
 		contextWindow, outputReserve := svc.contextLimits(
 			input.ContextWindow, input.OutputReserve,
@@ -132,7 +132,7 @@ func (svc *QA) assembleContext(ctx context.Context, input contextAssembleInput) 
 	})
 }
 
-func (svc *QA) contextLimits(contextWindow, outputReserve int) (int, int) {
+func (svc *Service) contextLimits(contextWindow, outputReserve int) (int, int) {
 	if contextWindow <= 0 {
 		contextWindow = svc.contextWindow
 	}
@@ -175,12 +175,12 @@ type historicalTurn struct {
 	Detail         json.RawMessage         `json:"detail,omitempty"`
 }
 
-type historicalContextEnvelope struct {
+type historyEnvelope struct {
 	Label string           `json:"label"`
 	Turns []historicalTurn `json:"turns"`
 }
 
-func buildHistoryRouteContext(conversation ConversationContext) string {
+func buildHistoryContext(conversation ConversationContext) string {
 	if len(conversation.RecentTurns) == 0 && len(conversation.RecentDialogue) == 0 {
 		return ""
 	}
@@ -256,7 +256,7 @@ func resolveHistoryRelation(question string, recent []memory.TurnMetadata, model
 	return relation, origin, upgrade
 }
 
-func (svc *QA) assembleActiveHistory(
+func (svc *Service) assembleActiveHistory(
 	ctx context.Context,
 	question string,
 	userID int64,
@@ -281,7 +281,7 @@ func (svc *QA) assembleActiveHistory(
 		return conversation, stats, nil
 	}
 	latestTurn := conversation.RecentTurns[0].TurnNumber
-	latestHasAnswer := recentDialogueHasAssistant(conversation.RecentDialogue, latestTurn)
+	latestHasAnswer := hasAssistantDialogue(conversation.RecentDialogue, latestTurn)
 	turnNumbers := make([]int, 0, len(selected))
 	for _, item := range selected {
 		metadata := item.metadata
@@ -372,7 +372,7 @@ func (svc *QA) assembleActiveHistory(
 		stats.OmittedCount++
 	}
 	if len(historical) > 0 {
-		raw, err := json.Marshal(historicalContextEnvelope{Label: "HISTORICAL_CONTEXT", Turns: historical})
+		raw, err := json.Marshal(historyEnvelope{Label: "HISTORICAL_CONTEXT", Turns: historical})
 		if err != nil {
 			return ConversationContext{}, stats, fmt.Errorf("encode historical context: %w", err)
 		}
@@ -381,7 +381,7 @@ func (svc *QA) assembleActiveHistory(
 	return conversation, stats, nil
 }
 
-func recentDialogueHasAssistant(dialogue []memory.RecentDialogueTurn, turnNumber int) bool {
+func hasAssistantDialogue(dialogue []memory.RecentDialogueTurn, turnNumber int) bool {
 	for _, turn := range dialogue {
 		if turn.TurnNumber == turnNumber {
 			return strings.TrimSpace(turn.Assistant) != ""

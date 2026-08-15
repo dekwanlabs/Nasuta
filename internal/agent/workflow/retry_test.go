@@ -327,7 +327,7 @@ func TestServicePersistsRetryAttempts(t *testing.T) {
 	definition.Nodes[0].Permissions = definition.Permissions
 	definition.Nodes[0].Retry = RetryPolicy{MaxAttempts: 2}
 	catalog := NewCatalog(schemas, testAgentDefinitions(t))
-	if err := catalog.Publish([]WorkflowDefinition{definition}); err != nil {
+	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}

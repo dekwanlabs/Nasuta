@@ -15,47 +15,47 @@ import (
 func TestPrepareValidatesResourceBudgets(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*WorkflowDefinition)
+		mutate func(*Definition)
 		want   string
 	}{
 		{
 			name: "negative workflow budget",
-			mutate: func(definition *WorkflowDefinition) {
+			mutate: func(definition *Definition) {
 				definition.Budget.MaxInputTokens = -1
 			},
 			want: "resource budgets cannot be negative",
 		},
 		{
 			name: "negative node budget",
-			mutate: func(definition *WorkflowDefinition) {
+			mutate: func(definition *Definition) {
 				definition.Nodes[0].Budget.MaxToolCalls = -1
 			},
 			want: "budgets cannot be negative",
 		},
 		{
 			name: "missing input reservation",
-			mutate: func(definition *WorkflowDefinition) {
+			mutate: func(definition *Definition) {
 				definition.Budget.MaxInputTokens = 10
 			},
 			want: "input token budget is required",
 		},
 		{
 			name: "missing output reservation",
-			mutate: func(definition *WorkflowDefinition) {
+			mutate: func(definition *Definition) {
 				definition.Budget.MaxOutputTokens = 10
 			},
 			want: "output token budget is required",
 		},
 		{
 			name: "missing total reservation",
-			mutate: func(definition *WorkflowDefinition) {
+			mutate: func(definition *Definition) {
 				definition.Budget.MaxTotalTokens = 10
 			},
 			want: "total token budget is required",
 		},
 		{
 			name: "missing cost reservation",
-			mutate: func(definition *WorkflowDefinition) {
+			mutate: func(definition *Definition) {
 				definition.Budget.MaxCostMicros = 10
 			},
 			want: "cost budget is required",
@@ -150,8 +150,8 @@ func TestOrchestratorReservesParallelBudgetsAtomically(t *testing.T) {
 	}
 	close(executor.release)
 	err := <-done
-	if !errors.Is(err, ErrWorkflowBudgetExhausted) {
-		t.Fatalf("Run error = %v, want workflow budget exhaustion", err)
+	if !errors.Is(err, ErrNoAffordableTask) {
+		t.Fatalf("Run error = %v, want no affordable task", err)
 	}
 	if observer.StartedCount() != 1 {
 		t.Fatalf("started attempts = %d, want 1", observer.StartedCount())
@@ -160,17 +160,18 @@ func TestOrchestratorReservesParallelBudgetsAtomically(t *testing.T) {
 
 func TestOrchestratorSkipsOptionalNodeWhenBudgetUnavailable(t *testing.T) {
 	report := agentapi.SchemaRef{ID: "review.report", Version: 1}
-	definition := WorkflowDefinition{
+	definition := Definition{
 		ID:           "delivery.review.optional-budget",
 		Version:      1,
 		Purpose:      "Continue with available outputs when an optional review exceeds budget.",
 		InputSchema:  agentapi.SchemaRef{ID: "review.subject", Version: 1},
 		OutputSchema: agentapi.SchemaRef{ID: "review.report.list", Version: 1},
-		Budget: WorkflowBudget{
-			MaxNodes: 3, MaxParallelism: 1, Timeout: time.Second,
+		Budget: Budget{
+			MaxNodes: 3, MaxParallelism: 1, MaxRounds: 1, MaxDepth: 3,
+			Timeout:         time.Second,
 			MaxHandoffBytes: 4096, MaxInputTokens: 10,
 		},
-		FailurePolicy: WorkflowFailurePolicy{Mode: CollectAvailable},
+		FailurePolicy: FailurePolicy{Mode: CollectAvailable},
 		Nodes: []NodeDefinition{
 			{
 				ID: "review.required", Kind: NodeAgent,
@@ -199,7 +200,7 @@ func TestOrchestratorSkipsOptionalNodeWhenBudgetUnavailable(t *testing.T) {
 		},
 	}
 	executor := &usageWorkflowExecutor{
-		usage: map[string]WorkflowUsage{
+		usage: map[string]Usage{
 			"review.required": {InputTokens: 10, TotalTokens: 10},
 		},
 	}
@@ -239,7 +240,7 @@ func TestOrchestratorRejectsActualUsageBeyondNodeBudget(t *testing.T) {
 	definition.Budget.MaxInputTokens = 100
 	definition.Nodes[0].Budget.MaxInputTokens = 10
 	executor := &usageWorkflowExecutor{
-		usage: map[string]WorkflowUsage{
+		usage: map[string]Usage{
 			"review.a": {InputTokens: 11, TotalTokens: 11},
 		},
 	}
@@ -254,7 +255,7 @@ func TestOrchestratorRejectsActualUsageBeyondNodeBudget(t *testing.T) {
 		},
 		observer,
 	)
-	if !errors.Is(err, ErrWorkflowBudgetExhausted) {
+	if !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("Run error = %v, want workflow budget exhaustion", err)
 	}
 	failed := observer.FailedResults()
@@ -271,7 +272,7 @@ func TestOrchestratorEnforcesTotalTokenBudget(t *testing.T) {
 	definition.Budget.MaxTotalTokens = 10
 	definition.Nodes[0].Budget.MaxTotalTokens = 10
 	executor := &usageWorkflowExecutor{
-		usage: map[string]WorkflowUsage{
+		usage: map[string]Usage{
 			"review.a": {InputTokens: 6, OutputTokens: 3, TotalTokens: 11},
 		},
 	}
@@ -284,7 +285,7 @@ func TestOrchestratorEnforcesTotalTokenBudget(t *testing.T) {
 			Input: json.RawMessage(`{"subject":"x"}`),
 		},
 	)
-	if !errors.Is(err, ErrWorkflowBudgetExhausted) {
+	if !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("Run error = %v, want workflow budget exhaustion", err)
 	}
 }
@@ -310,8 +311,8 @@ func TestOrchestratorEnforcesWorkflowRetryBudgetBeforeStartingAttempt(t *testing
 		},
 		observer,
 	)
-	if !errors.Is(err, ErrWorkflowBudgetExhausted) {
-		t.Fatalf("Run error = %v, want workflow budget exhaustion", err)
+	if !errors.Is(err, ErrNoAffordableTask) {
+		t.Fatalf("Run error = %v, want no affordable task", err)
 	}
 	if attempts := executor.Attempts(); len(attempts) != 2 || attempts[0] != 1 || attempts[1] != 2 {
 		t.Fatalf("executor attempts = %v, want [1 2]", attempts)
@@ -345,7 +346,7 @@ func (executor *blockingBudgetExecutor) Execute(
 type usageWorkflowExecutor struct {
 	mu    sync.Mutex
 	calls []string
-	usage map[string]WorkflowUsage
+	usage map[string]Usage
 }
 
 func (executor *usageWorkflowExecutor) Execute(

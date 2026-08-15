@@ -20,11 +20,11 @@ func TestCompactRunContextBeforeAnswerWaitsForHighWater(t *testing.T) {
 	agent, state, _, _, _ := answerCompactionFixture(t)
 	observer := &answerCompactionObserver{}
 	agent.observer = observer
-	projected := estimateMessagesTokens(state.messages) + agent.outputTokenReserve()
+	projected := estimateMessagesTokens(state.messages) + agent.outputReserve()
 	agent.cfg.ContextWindow = projected * 2
 	before := append([]llm.Message(nil), state.messages...)
 
-	result, err := agent.compactRunContextBeforeAnswer(state, nil, "test")
+	result, err := agent.compactAnswerContext(state, nil, "test")
 	if err != nil {
 		t.Fatalf("compactRunContextBeforeAnswer: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestEnsureTurnBudgetCompactsBeforePostToolModelCall(t *testing.T) {
 func TestCompactRunContextBeforeAnswerCanTightenExistingProjection(t *testing.T) {
 	agent, state, _, _, _ := answerCompactionFixture(t)
 
-	first, err := agent.compactRunContextBeforeAnswer(state, nil, "first")
+	first, err := agent.compactAnswerContext(state, nil, "first")
 	if err != nil {
 		t.Fatalf("first compaction: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestCompactRunContextBeforeAnswerCanTightenExistingProjection(t *testing.T)
 		toolMessage(nextCall.ID, nextCall.Function.Name, thirdContent),
 	)
 
-	second, err := agent.compactRunContextBeforeAnswer(state, nil, "second")
+	second, err := agent.compactAnswerContext(state, nil, "second")
 	if err != nil {
 		t.Fatalf("second compaction: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestCompactRunContextBeforeAnswerRecordsTraceDetails(t *testing.T) {
 	scope := runtrace.NewScope(runtrace.Evaluation, nil)
 	state.ctx = runtrace.WithScope(t.Context(), scope)
 
-	result, err := agent.compactRunContextBeforeAnswer(state, nil, "trace_test")
+	result, err := agent.compactAnswerContext(state, nil, "trace_test")
 	if err != nil {
 		t.Fatalf("compactRunContextBeforeAnswer: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestCompactRunContextBeforeAnswerRecordsTraceDetails(t *testing.T) {
 	if got := events[0].Output["phase"]; got != "trace_test" {
 		t.Fatalf("trace phase = %#v", got)
 	}
-	details, ok := events[0].Output["tool_results"].([]answerToolResultCompaction)
+	details, ok := events[0].Output["tool_results"].([]toolResultCompaction)
 	if !ok || len(details) == 0 || details[0].ToolCallID != "call-old" ||
 		details[0].RetainedTokens >= details[0].BeforeTokens {
 		t.Fatalf("trace tool results = %#v", events[0].Output["tool_results"])
@@ -184,7 +184,7 @@ func TestFinishCompiledLoopCompactsBeforeForcedConclusion(t *testing.T) {
 		})},
 	)
 
-	agent.finishCompiledLoop(state)
+	agent.finishLoop(state)
 
 	if state.result.Err != nil {
 		t.Fatalf("finishCompiledLoop result error: %v", state.result.Err)
@@ -216,7 +216,7 @@ func answerCompactionFixture(
 	const requiredLiteral = "SN-required"
 	oldContent := strings.Repeat("old unrelated diagnostic payload\n", 5000) + requiredLiteral
 	recentContent := `{"status":"recent-target","value":"current evidence"}`
-	contractMessage, ok := answerContractMessage(tool.AnswerContract{
+	contractMessage, ok := contractMessage(tool.AnswerContract{
 		RequiredLiterals: []string{requiredLiteral},
 	})
 	if !ok {
@@ -248,7 +248,7 @@ func answerCompactionFixture(
 	sessionMessages := append([]llm.Message(nil), messages[2:6]...)
 	agent := &Agent{
 		observer: NoopObserver(),
-		cfg: AgentConfig{
+		cfg: Config{
 			AnswerMaxTokens:     reserve,
 			ConclusionMaxTokens: reserve,
 			ContextWindow:       window,

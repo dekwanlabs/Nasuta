@@ -9,8 +9,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
-// DefaultReviewersVersion builds the isolated read-only review agents shipped by Nasuta.
-func DefaultReviewersVersion(settings *config.PlatformSettings, version int64) ([]agentapi.Definition, error) {
+// DefaultReviewers builds the isolated read-only review agents shipped by Nasuta.
+func DefaultReviewers(settings *config.PlatformSettings, version int64) ([]agentapi.Definition, error) {
 	specs := []struct {
 		id, name, purpose, focus, inputSchema, outputSchema, promptVersion string
 	}{

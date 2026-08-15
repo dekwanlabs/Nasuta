@@ -12,14 +12,16 @@ import (
 const maxEvidenceTraceItems = 50
 
 type aggregateInput struct {
-	workflowRunID           string
-	node                    NodeDefinition
-	inputs                  []Handoff
-	unavailablePredecessors []string
-	maxBytes                int64
+	workflowRunID     string
+	node              NodeDefinition
+	inputs            []Handoff
+	unavailableTasks  []unavailableTaskView
+	baselineEvidence  []tool.EvidenceUnit
+	maxDuplicateRatio float64
+	maxBytes          int64
 }
 
-var multiAgentAggregateTraceSpec = runtrace.Spec[aggregateInput, Handoff]{
+var aggregateTraceSpec = runtrace.Spec[aggregateInput, Handoff]{
 	Operation: "multi_agent.aggregate",
 	Node:      "multi_agent_aggregate",
 	Input: func(input aggregateInput) map[string]any {
@@ -33,7 +35,7 @@ var multiAgentAggregateTraceSpec = runtrace.Spec[aggregateInput, Handoff]{
 			"producer_node_ids": producers,
 			"unavailable_predecessor_ids": append(
 				[]string(nil),
-				input.unavailablePredecessors...,
+				unavailableTaskIDs(input.unavailableTasks)...,
 			),
 		}
 	},
@@ -56,24 +58,24 @@ type evidenceTraceItem struct {
 	Origin      string `json:"origin,omitempty"`
 }
 
-type evidenceCandidateTraceInput struct {
+type candidateTraceInput struct {
 	nodeID string
 	inputs []Handoff
 }
 
-type evidenceCandidateTraceOutput struct {
+type candidateTraceResult struct {
 	items          []evidenceTraceItem
 	candidateCount int
 	omittedCount   int
 }
 
-var evidenceCandidateTraceSpec = runtrace.Spec[
-	evidenceCandidateTraceInput,
-	evidenceCandidateTraceOutput,
+var candidateTraceSpec = runtrace.Spec[
+	candidateTraceInput,
+	candidateTraceResult,
 ]{
 	Operation: "evidence.candidate",
 	Node:      "evidence.candidate",
-	Input: func(input evidenceCandidateTraceInput) map[string]any {
+	Input: func(input candidateTraceInput) map[string]any {
 		producers := make([]string, 0, len(input.inputs))
 		for _, handoff := range input.inputs {
 			producers = append(producers, handoff.ProducerNodeID)
@@ -84,8 +86,8 @@ var evidenceCandidateTraceSpec = runtrace.Spec[
 		}
 	},
 	Output: func(
-		_ evidenceCandidateTraceInput,
-		output evidenceCandidateTraceOutput,
+		_ candidateTraceInput,
+		output candidateTraceResult,
 		_ error,
 	) map[string]any {
 		return map[string]any{
@@ -94,12 +96,12 @@ var evidenceCandidateTraceSpec = runtrace.Spec[
 			"omitted_count":   output.omittedCount,
 		}
 	},
-	Record: func(output evidenceCandidateTraceOutput, _ error) bool {
+	Record: func(output candidateTraceResult, _ error) bool {
 		return output.candidateCount > 0
 	},
 }
 
-type evidenceMergedTraceInput struct {
+type mergedTraceInput struct {
 	nodeID         string
 	candidateCount int
 	handoff        Handoff
@@ -111,16 +113,16 @@ type evidenceTraceOutput struct {
 	conflictCount int
 }
 
-var evidenceMergedTraceSpec = runtrace.Spec[evidenceMergedTraceInput, evidenceTraceOutput]{
+var mergedTraceSpec = runtrace.Spec[mergedTraceInput, evidenceTraceOutput]{
 	Operation: "evidence.merged",
 	Node:      "evidence.merged",
-	Input: func(input evidenceMergedTraceInput) map[string]any {
+	Input: func(input mergedTraceInput) map[string]any {
 		return map[string]any{
 			"node_id":         input.nodeID,
 			"candidate_count": input.candidateCount,
 		}
 	},
-	Output: func(_ evidenceMergedTraceInput, output evidenceTraceOutput, _ error) map[string]any {
+	Output: func(_ mergedTraceInput, output evidenceTraceOutput, _ error) map[string]any {
 		return map[string]any{
 			"merged_count":  output.evidenceCount,
 			"evidence":      output.items,
@@ -132,18 +134,18 @@ var evidenceMergedTraceSpec = runtrace.Spec[evidenceMergedTraceInput, evidenceTr
 	},
 }
 
-type evidenceRejectedTraceInput struct {
+type rejectedTraceInput struct {
 	nodeID    string
 	conflicts []agentapi.EvidenceConflict
 }
 
-var evidenceRejectedTraceSpec = runtrace.Spec[evidenceRejectedTraceInput, []map[string]any]{
+var rejectedTraceSpec = runtrace.Spec[rejectedTraceInput, []map[string]any]{
 	Operation: "evidence.rejected",
 	Node:      "evidence.rejected",
-	Input: func(input evidenceRejectedTraceInput) map[string]any {
+	Input: func(input rejectedTraceInput) map[string]any {
 		return map[string]any{"node_id": input.nodeID}
 	},
-	Output: func(input evidenceRejectedTraceInput, conflicts []map[string]any, _ error) map[string]any {
+	Output: func(input rejectedTraceInput, conflicts []map[string]any, _ error) map[string]any {
 		return map[string]any{
 			"conflict_count": len(input.conflicts),
 			"conflicts":      conflicts,
@@ -155,21 +157,21 @@ var evidenceRejectedTraceSpec = runtrace.Spec[evidenceRejectedTraceInput, []map[
 	},
 }
 
-type evidenceDeliveredTraceInput struct {
+type deliveredTraceInput struct {
 	phase   string
 	handoff Handoff
 }
 
-var evidenceDeliveredTraceSpec = runtrace.Spec[evidenceDeliveredTraceInput, evidenceTraceOutput]{
+var deliveredTraceSpec = runtrace.Spec[deliveredTraceInput, evidenceTraceOutput]{
 	Operation: "evidence.delivered",
 	Node:      "evidence.delivered",
-	Input: func(input evidenceDeliveredTraceInput) map[string]any {
+	Input: func(input deliveredTraceInput) map[string]any {
 		return map[string]any{
 			"phase":            input.phase,
 			"producer_node_id": input.handoff.ProducerNodeID,
 		}
 	},
-	Output: func(input evidenceDeliveredTraceInput, output evidenceTraceOutput, _ error) map[string]any {
+	Output: func(input deliveredTraceInput, output evidenceTraceOutput, _ error) map[string]any {
 		return map[string]any{
 			"evidence_count": output.evidenceCount,
 			"evidence":       output.items,
@@ -183,73 +185,36 @@ var evidenceDeliveredTraceSpec = runtrace.Spec[evidenceDeliveredTraceInput, evid
 	},
 }
 
-type verificationTraceInput struct {
-	nodeID         string
-	conflicts      []agentapi.EvidenceConflict
-	rejectionError string
-}
-
-var verificationCompletedTraceSpec = runtrace.Spec[
-	verificationTraceInput,
-	[]agentapi.EvidenceConflict,
-]{
-	Operation: "verification.completed",
-	Node:      "verification.completed",
-	Input: func(input verificationTraceInput) map[string]any {
-		return map[string]any{
-			"node_id":        input.nodeID,
-			"conflict_count": len(input.conflicts),
-		}
-	},
-	Output: func(
-		input verificationTraceInput,
-		_ []agentapi.EvidenceConflict,
-		err error,
-	) map[string]any {
-		output := map[string]any{
-			"node_id":        input.nodeID,
-			"conflict_count": len(input.conflicts),
-			"decision":       "pass",
-		}
-		if len(input.conflicts) > 0 {
-			output["decision"] = "reject"
-		}
-		if input.rejectionError != "" {
-			output["error"] = input.rejectionError
-		}
-		return output
-	},
-	Record: func(_ []agentapi.EvidenceConflict, _ error) bool {
-		return true
-	},
-}
-
 func (orchestrator *Orchestrator) aggregateHandoffs(
 	ctx context.Context,
 	workflowRunID string,
 	node NodeDefinition,
 	inputs []Handoff,
-	unavailablePredecessors []string,
+	unavailableTasks []unavailableTaskView,
+	baselineEvidence []tool.EvidenceUnit,
+	maxDuplicateRatio float64,
 	maxBytes int64,
 ) (Handoff, error) {
 	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{WorkflowNodeID: node.ID})
 	candidates, _ := runtrace.Invoke(
 		ctx,
-		evidenceCandidateTraceSpec,
-		evidenceCandidateTraceInput{nodeID: node.ID, inputs: inputs},
-		func(_ context.Context, input evidenceCandidateTraceInput) (evidenceCandidateTraceOutput, error) {
+		candidateTraceSpec,
+		candidateTraceInput{nodeID: node.ID, inputs: inputs},
+		func(_ context.Context, input candidateTraceInput) (candidateTraceResult, error) {
 			return candidateTraceOutput(input.inputs), nil
 		},
 	)
 	handoff, err := runtrace.Invoke(
 		ctx,
-		multiAgentAggregateTraceSpec,
+		aggregateTraceSpec,
 		aggregateInput{
-			workflowRunID:           workflowRunID,
-			node:                    node,
-			inputs:                  inputs,
-			unavailablePredecessors: append([]string(nil), unavailablePredecessors...),
-			maxBytes:                maxBytes,
+			workflowRunID:     workflowRunID,
+			node:              node,
+			inputs:            inputs,
+			unavailableTasks:  append([]unavailableTaskView(nil), unavailableTasks...),
+			baselineEvidence:  evidence.CloneUnits(baselineEvidence),
+			maxDuplicateRatio: maxDuplicateRatio,
+			maxBytes:          maxBytes,
 		},
 		func(_ context.Context, input aggregateInput) (Handoff, error) {
 			return joinHandoffs(
@@ -258,7 +223,9 @@ func (orchestrator *Orchestrator) aggregateHandoffs(
 				input.node.OutputSchema,
 				input.node.JoinMode,
 				input.inputs,
-				input.unavailablePredecessors,
+				input.unavailableTasks,
+				input.baselineEvidence,
+				input.maxDuplicateRatio,
 				input.node.RejectEvidenceConflicts,
 				input.maxBytes,
 				orchestrator.schemas,
@@ -269,29 +236,15 @@ func (orchestrator *Orchestrator) aggregateHandoffs(
 		if len(handoff.EvidenceConflicts) > 0 {
 			_, _ = runtrace.Invoke(
 				ctx,
-				evidenceRejectedTraceSpec,
-				evidenceRejectedTraceInput{
+				rejectedTraceSpec,
+				rejectedTraceInput{
 					nodeID: node.ID, conflicts: handoff.EvidenceConflicts,
 				},
 				func(
 					_ context.Context,
-					input evidenceRejectedTraceInput,
+					input rejectedTraceInput,
 				) ([]map[string]any, error) {
-					return traceEvidenceConflicts(input.conflicts), nil
-				},
-			)
-			_, _ = runtrace.Invoke(
-				ctx,
-				verificationCompletedTraceSpec,
-				verificationTraceInput{
-					nodeID: node.ID, conflicts: handoff.EvidenceConflicts,
-					rejectionError: err.Error(),
-				},
-				func(
-					_ context.Context,
-					input verificationTraceInput,
-				) ([]agentapi.EvidenceConflict, error) {
-					return input.conflicts, nil
+					return traceConflicts(input.conflicts), nil
 				},
 			)
 		}
@@ -299,12 +252,12 @@ func (orchestrator *Orchestrator) aggregateHandoffs(
 	}
 	_, _ = runtrace.Invoke(
 		ctx,
-		evidenceMergedTraceSpec,
-		evidenceMergedTraceInput{
+		mergedTraceSpec,
+		mergedTraceInput{
 			nodeID: node.ID, candidateCount: candidates.candidateCount,
 			handoff: handoff,
 		},
-		func(_ context.Context, input evidenceMergedTraceInput) (evidenceTraceOutput, error) {
+		func(_ context.Context, input mergedTraceInput) (evidenceTraceOutput, error) {
 			items, count := traceEvidenceUnits(input.handoff.EvidenceUnits, "")
 			return evidenceTraceOutput{
 				items: items, evidenceCount: count,
@@ -313,40 +266,35 @@ func (orchestrator *Orchestrator) aggregateHandoffs(
 	)
 	_, _ = runtrace.Invoke(
 		ctx,
-		evidenceRejectedTraceSpec,
-		evidenceRejectedTraceInput{
+		rejectedTraceSpec,
+		rejectedTraceInput{
 			nodeID: node.ID, conflicts: handoff.EvidenceConflicts,
 		},
-		func(_ context.Context, input evidenceRejectedTraceInput) ([]map[string]any, error) {
-			return traceEvidenceConflicts(input.conflicts), nil
+		func(_ context.Context, input rejectedTraceInput) ([]map[string]any, error) {
+			return traceConflicts(input.conflicts), nil
 		},
 	)
-	if node.RejectEvidenceConflicts {
-		_, _ = runtrace.Invoke(
-			ctx,
-			verificationCompletedTraceSpec,
-			verificationTraceInput{nodeID: node.ID},
-			func(
-				_ context.Context,
-				input verificationTraceInput,
-			) ([]agentapi.EvidenceConflict, error) {
-				return input.conflicts, nil
-			},
-		)
-	}
-	traceEvidenceDelivered(ctx, "aggregation_output", handoff)
+	traceDelivered(ctx, "aggregation_output", handoff)
 	return handoff, nil
 }
 
-func traceEvidenceDelivered(ctx context.Context, phase string, handoff Handoff) {
+func unavailableTaskIDs(tasks []unavailableTaskView) []string {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ProducerNodeID)
+	}
+	return ids
+}
+
+func traceDelivered(ctx context.Context, phase string, handoff Handoff) {
 	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		WorkflowNodeID: handoff.ProducerNodeID,
 	})
 	_, _ = runtrace.Invoke(
 		ctx,
-		evidenceDeliveredTraceSpec,
-		evidenceDeliveredTraceInput{phase: phase, handoff: handoff},
-		func(_ context.Context, input evidenceDeliveredTraceInput) (evidenceTraceOutput, error) {
+		deliveredTraceSpec,
+		deliveredTraceInput{phase: phase, handoff: handoff},
+		func(_ context.Context, input deliveredTraceInput) (evidenceTraceOutput, error) {
 			items, count := traceEvidenceUnits(
 				input.handoff.EvidenceUnits,
 				input.handoff.ProducerNodeID,
@@ -359,8 +307,8 @@ func traceEvidenceDelivered(ctx context.Context, phase string, handoff Handoff) 
 	)
 }
 
-func candidateTraceOutput(inputs []Handoff) evidenceCandidateTraceOutput {
-	output := evidenceCandidateTraceOutput{}
+func candidateTraceOutput(inputs []Handoff) candidateTraceResult {
+	output := candidateTraceResult{}
 	for _, input := range inputs {
 		units := evidence.Expand(input.EvidenceUnits)
 		for _, unit := range units {
@@ -411,7 +359,7 @@ func traceEvidenceUnit(
 	}
 }
 
-func traceEvidenceConflicts(
+func traceConflicts(
 	conflicts []agentapi.EvidenceConflict,
 ) []map[string]any {
 	items := make([]map[string]any, 0, min(len(conflicts), maxEvidenceTraceItems))

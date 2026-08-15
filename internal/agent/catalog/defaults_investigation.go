@@ -9,8 +9,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
-// DefaultInvestigatorsVersion builds the fixed read-only delegated investigation panel.
-func DefaultInvestigatorsVersion(settings *config.PlatformSettings, version int64) ([]agentapi.Definition, error) {
+// DefaultInvestigators builds the fixed read-only delegated investigation panel.
+func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]agentapi.Definition, error) {
 	specs := []struct {
 		id, name, purpose, focus string
 		tools                    []string
@@ -30,6 +30,15 @@ func DefaultInvestigatorsVersion(settings *config.PlatformSettings, version int6
 			purpose: "Investigate runbooks, system documentation, and documentation coverage.",
 			tools:   []string{"get_service", "search_runbooks", "check_docs"},
 		},
+		{
+			id: "investigator.web", name: "Web Research Investigator", focus: "web",
+			purpose: "Investigate current public evidence through the configured web provider.",
+			tools:   []string{"web_search"},
+		},
+		{
+			id: "investigator.memory", name: "Memory Recall Investigator", focus: "memory",
+			purpose: "Evaluate bounded recalled memory already admitted by the task contract.",
+		},
 	}
 	definitions := make([]agentapi.Definition, 0, len(specs)+1)
 	for _, spec := range specs {
@@ -39,7 +48,7 @@ func DefaultInvestigatorsVersion(settings *config.PlatformSettings, version int6
 		definition, err := agentapi.Prepare(agentapi.Definition{
 			ID: spec.id, Version: version, DisplayName: spec.name, Purpose: spec.purpose,
 			Prompt: agentapi.PromptSpec{
-				System: investigationReportPrompt(spec.focus, rolePrompt), Version: "investigation-report-v1",
+				System: reportPrompt(spec.focus, rolePrompt), Version: "investigation-report-v1",
 			},
 			InputSchema:  agentapi.SchemaRef{ID: "task.contract", Version: 1},
 			OutputSchema: agentapi.SchemaRef{ID: "investigation.report", Version: 1},
@@ -70,9 +79,9 @@ func DefaultInvestigatorsVersion(settings *config.PlatformSettings, version int6
 		Purpose: "Synthesize delegated investigation handoffs without gathering new evidence.",
 		Prompt: agentapi.PromptSpec{
 			System:  prompts.Text(prompts.AgentCatalogSynthesizer),
-			Version: "investigation-synthesis-v1",
+			Version: "investigation-synthesis-v3",
 		},
-		InputSchema:  agentapi.SchemaRef{ID: "investigation.bundle", Version: 1},
+		InputSchema:  agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 1},
 		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
 		Model: agentapi.ModelPolicy{
 			Provider: settings.LLMProvider, Model: settings.LLMModel,
@@ -95,7 +104,7 @@ func DefaultInvestigatorsVersion(settings *config.PlatformSettings, version int6
 	return append(definitions, synthesizer), nil
 }
 
-func investigationReportPrompt(focus, rolePrompt string) string {
+func reportPrompt(focus, rolePrompt string) string {
 	return prompts.MustRender(prompts.AgentCatalogInvestigationReport, struct {
 		Focus      string
 		RolePrompt string

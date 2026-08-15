@@ -26,7 +26,7 @@ type activeQAParentStore interface {
 }
 
 type recoveredWorkflowReader interface {
-	GetRun(context.Context, string, int64, bool) (*workflow.WorkflowRunRecord, error)
+	GetRun(context.Context, string, int64, bool) (*workflow.RunRecord, error)
 }
 
 type recoveredReviewReconciler interface {
@@ -103,7 +103,7 @@ func (p *Platform) recoverStartupRuns(ctx context.Context, startedBefore time.Ti
 	qa := p.currentQARuntime().InvestigationReconciler
 	reviews := p.flow.coordinator
 	p.qa.reload.RUnlock()
-	if p.flow.service != nil && p.flow.service.ExecutionAvailable() {
+	if p.flow.service != nil && p.flow.service.Available() {
 		p.recoverActiveWorkflows(ctx, startedBefore, qa, reviews)
 	} else if p.flow.service != nil {
 		log.WarnfCtx(ctx, "[workflow] startup execution recovery skipped (execution unavailable)")
@@ -117,7 +117,7 @@ func (p *Platform) recoverActiveWorkflows(
 	qa dashboard.QAInvestigationReconciler,
 	reviews recoveredReviewReconciler,
 ) {
-	report, err := p.flow.service.RecoverActiveWithObserver(
+	report, err := p.flow.service.RecoverWithObserver(
 		ctx,
 		startedBefore,
 		workflowRecoveryPageSize,
@@ -182,7 +182,7 @@ func reconcileRecoveredWorkflow(
 		return fmt.Errorf("load recovered workflow %q metadata: %w", runID, err)
 	}
 	switch record.Scenario {
-	case workflow.DelegatedInvestigationID:
+	case workflow.FlowID:
 		if record.ParentRunID == "" {
 			return fmt.Errorf(
 				"recovered QA workflow %q has no parent run",
@@ -199,7 +199,7 @@ func reconcileRecoveredWorkflow(
 		if qa == nil {
 			return fmt.Errorf("reconcile recovered QA workflow %q: coordinator is unavailable", runID)
 		}
-		if err := qa.ReconcileInvestigation(ctx, record.ParentRunID); err != nil {
+		if err := qa.Reconcile(ctx, record.ParentRunID); err != nil {
 			return fmt.Errorf(
 				"reconcile recovered QA workflow %q parent %q: %w",
 				runID,
@@ -294,7 +294,7 @@ func reconcileActiveQAParents(
 		}
 		for _, parent := range page {
 			report.Scanned++
-			err := reconciler.ReconcileInvestigation(ctx, parent.ID)
+			err := reconciler.Reconcile(ctx, parent.ID)
 			switch {
 			case err == nil:
 				report.Converged++

@@ -14,12 +14,12 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-func (agent *Agent) buildAgentMessages(question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan) []llm.Message {
-	return BuildAgentMessages(question, conversation, rc, plan, agent.cfg.DomainKnowledge, agent.cfg.HistoryLimit)
+func (agent *Agent) buildMessages(question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan) []llm.Message {
+	return BuildMessages(question, conversation, rc, plan, agent.cfg.DomainKnowledge, agent.cfg.HistoryLimit)
 }
 
-// BuildAgentMessages compiles the request-scoped prompt and replayable history.
-func BuildAgentMessages(question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, domainKnowledge string, historyLimit int) []llm.Message {
+// BuildMessages compiles the request-scoped prompt and replayable history.
+func BuildMessages(question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, domainKnowledge string, historyLimit int) []llm.Message {
 	mode := ClassifyResponseMode(question)
 	hint := "\n\n---\n" + prompts.MustRender(prompts.AgentQAResponseMode, struct {
 		Mode string
@@ -58,7 +58,7 @@ func BuildAgentMessages(question string, conversation ConversationContext, rc *r
 			}{Context: conversation.HistoricalContext}),
 		})
 	}
-	recent := withoutAnswerContractMessages(conversation.Recent)
+	recent := withoutContractMessages(conversation.Recent)
 	msgs = append(msgs, ReplayableTailMessages(recent, historyLimit)...)
 
 	if rc != nil && rc.Text != "" {
@@ -91,7 +91,7 @@ func evidencePlanInstruction(plan domain.EvidencePlan) string {
 	}{Direct: plan.Direct(), Plan: plan.String()})
 }
 
-var directAgentSystemPrompt = withUserVisibleAnswer(promptWithRolePlaceholder(prompts.AgentQADirect))
+var directAgentSystemPrompt = withUserVisibleAnswer(withRolePlaceholder(prompts.AgentQADirect))
 
 // replayableTailMessages keeps only provider-valid tool call/result groups.
 func ReplayableTailMessages(msgs []llm.Message, n int) []llm.Message {
@@ -223,7 +223,7 @@ func ToolDefinitions(tools []tool.Tool) []llm.ToolDef {
 	return definitions
 }
 
-func (agent *Agent) outputTokenReserve() int {
+func (agent *Agent) outputReserve() int {
 	return max(agent.cfg.AnswerMaxTokens, agent.cfg.ConclusionMaxTokens)
 }
 
@@ -240,7 +240,7 @@ func (agent *Agent) ensureInputBudget(messages []llm.Message, tools []llm.ToolDe
 	if err != nil {
 		return fmt.Errorf("estimate context budget: %w", err)
 	}
-	outputReserve := agent.outputTokenReserve()
+	outputReserve := agent.outputReserve()
 	safety := contextSafetyTokens(window)
 	if inputTokens+outputReserve+safety > window {
 		return fmt.Errorf(
@@ -254,5 +254,5 @@ func (agent *Agent) ensureInputBudget(messages []llm.Message, tools []llm.ToolDe
 var (
 	agentToolPrompt      = prompts.Text(prompts.AgentQAToolPolicy)
 	agentSystemPrompt    = systemPrompt + "\n\n" + agentToolPrompt
-	webAgentSystemPrompt = withUserVisibleAnswer(promptWithRolePlaceholder(prompts.AgentQAWeb))
+	webAgentSystemPrompt = withUserVisibleAnswer(withRolePlaceholder(prompts.AgentQAWeb))
 )

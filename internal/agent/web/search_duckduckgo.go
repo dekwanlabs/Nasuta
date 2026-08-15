@@ -12,7 +12,7 @@ import (
 	nethtml "golang.org/x/net/html"
 )
 
-func (srv *Service) searchDuckDuckGo(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
+func (srv *Service) searchDuckDuckGo(ctx context.Context, query string, limit int) ([]SearchResult, error) {
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
@@ -36,10 +36,10 @@ func (srv *Service) searchDuckDuckGo(ctx context.Context, query string, limit in
 	return parseDDGResults(resp.Body, limit), nil
 }
 
-func parseDDGResults(reader io.Reader, limit int) []WebSearchResult {
-	var results []WebSearchResult
+func parseDDGResults(reader io.Reader, limit int) []SearchResult {
+	var results []SearchResult
 	tokenizer := nethtml.NewTokenizer(reader)
-	var current WebSearchResult
+	var current SearchResult
 	var inResult, inSnippet bool
 
 	for len(results) < limit {
@@ -51,7 +51,7 @@ func parseDDGResults(reader io.Reader, limit int) []WebSearchResult {
 		switch tokenType {
 		case nethtml.StartTagToken:
 			if isDiv(tag, tokenizer, "result__body") {
-				current = WebSearchResult{}
+				current = SearchResult{}
 				inResult = true
 			}
 			if inResult && isAnchor(tag, tokenizer, "result__a") {

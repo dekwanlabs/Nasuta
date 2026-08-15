@@ -21,7 +21,7 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 		},
 		Evidence: agentapi.EvidenceSummary{ToolCallCount: 3},
 	}}
-	executor, err := NewAgentNodeExecutor(
+	executor, err := NewAgentExecutor(
 		testSchemaRegistry(t),
 		testAgentDefinitions(t),
 		runtime,
@@ -94,7 +94,7 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 		t.Fatalf("handoff references = %+v", result.Handoff.References)
 	}
 	if runtime.request.Policy.MaxToolCalls != 4 ||
-		result.Usage != (WorkflowUsage{
+		result.Usage != (Usage{
 			InputTokens: 31, OutputTokens: 7, ReasoningTokens: 2,
 			TotalTokens: 38, ToolCalls: 3, CostMicros: 9,
 		}) {
@@ -104,7 +104,7 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 
 func TestAgentNodeExecutorRequiresExplicitJoinForMultipleInputs(t *testing.T) {
 	runtime := &capturingAgentRuntime{}
-	executor, err := NewAgentNodeExecutor(testSchemaRegistry(t), testAgentDefinitions(t), runtime)
+	executor, err := NewAgentExecutor(testSchemaRegistry(t), testAgentDefinitions(t), runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestAgentNodeExecutorRetainsAgentRunIDOnRuntimeFailure(t *testing.T) {
 		},
 		err: context.DeadlineExceeded,
 	}
-	executor, err := NewAgentNodeExecutor(testSchemaRegistry(t), testAgentDefinitions(t), runtime)
+	executor, err := NewAgentExecutor(testSchemaRegistry(t), testAgentDefinitions(t), runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestAgentNodeExecutorRetainsAgentRunIDOnRuntimeFailure(t *testing.T) {
 		EffectivePermissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
 	})
 	if err == nil || result.AgentRunID == "" ||
-		result.Usage != (WorkflowUsage{
+		result.Usage != (Usage{
 			InputTokens: 17, OutputTokens: 4, ReasoningTokens: 1,
 			TotalTokens: 21, ToolCalls: 2, CostMicros: 6,
 		}) {
@@ -157,7 +157,7 @@ func TestAgentNodeExecutorMapsRetryableRuntimeFailure(t *testing.T) {
 			Retryable: true,
 		},
 	}}
-	executor, err := NewAgentNodeExecutor(testSchemaRegistry(t), testAgentDefinitions(t), runtime)
+	executor, err := NewAgentExecutor(testSchemaRegistry(t), testAgentDefinitions(t), runtime)
 	if err != nil {
 		t.Fatal(err)
 	}

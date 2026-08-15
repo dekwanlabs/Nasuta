@@ -26,19 +26,19 @@ type eventReader interface {
 }
 
 type service interface {
-	PublishDefinitionsAs(context.Context, []workflow.WorkflowDefinition, int64, bool) error
-	ListDefinitionRecords(context.Context, workflow.DefinitionCursor, int) ([]workflow.DefinitionRecord, error)
-	SetDefinitionDefault(context.Context, string, int64, int64, bool) error
-	SetDefinitionActive(context.Context, string, int64, bool, int64, bool) error
-	ListDefinitionAudit(context.Context, string, int64, int, bool) ([]workflow.DefinitionAuditEvent, error)
-	GetDefinitionRollout(string) (workflow.RolloutRule, bool, error)
-	SetDefinitionRollout(context.Context, string, int64, int, string, bool, int64, bool) (workflow.RolloutRule, error)
-	ListDefinitionRolloutAudit(context.Context, string, int64, int, bool) ([]workflow.RolloutAuditEvent, error)
-	Start(context.Context, workflow.StartRequest) (*workflow.WorkflowRunRecord, error)
-	GetRun(context.Context, string, int64, bool) (*workflow.WorkflowRunRecord, error)
+	PublishAs(context.Context, []workflow.Definition, int64, bool) error
+	ListRecords(context.Context, workflow.DefinitionCursor, int) ([]workflow.DefinitionRecord, error)
+	SetDefault(context.Context, string, int64, int64, bool) error
+	SetActive(context.Context, string, int64, bool, int64, bool) error
+	ListAudit(context.Context, string, int64, int, bool) ([]workflow.DefinitionAuditEvent, error)
+	GetRollout(string) (workflow.RolloutRule, bool, error)
+	SetRollout(context.Context, string, int64, int, string, bool, int64, bool) (workflow.RolloutRule, error)
+	ListRolloutAudit(context.Context, string, int64, int, bool) ([]workflow.RolloutAuditEvent, error)
+	Start(context.Context, workflow.StartRequest) (*workflow.RunRecord, error)
+	GetRun(context.Context, string, int64, bool) (*workflow.RunRecord, error)
 	ListNodeRuns(context.Context, string, workflow.NodeRunCursor, int, int64, bool) ([]workflow.NodeRunRecord, error)
 	ListEvents(context.Context, string, int64, int, int64, bool) ([]workflow.Event, error)
-	OpenRunEvents(context.Context, string, int64, bool) (*workflow.WorkflowRunRecord, eventReader, error)
+	OpenRunEvents(context.Context, string, int64, bool) (*workflow.RunRecord, eventReader, error)
 	SubscribeEvents(string) (<-chan workflow.Event, func(), error)
 	ListHandoffs(context.Context, string, workflow.HandoffCursor, int, int64, bool) ([]workflow.Handoff, error)
 	Cancel(context.Context, string, int64, bool) (workflow.CancelTransition, error)
@@ -49,36 +49,36 @@ type serviceAdapter struct {
 	service *workflow.Service
 }
 
-func (adapter serviceAdapter) PublishDefinitionsAs(
+func (adapter serviceAdapter) PublishAs(
 	ctx context.Context,
-	definitions []workflow.WorkflowDefinition,
+	definitions []workflow.Definition,
 	actorUserID int64,
 	admin bool,
 ) error {
-	return adapter.service.PublishDefinitionsAs(ctx, definitions, actorUserID, admin)
+	return adapter.service.PublishAs(ctx, definitions, actorUserID, admin)
 }
 
-func (adapter serviceAdapter) ListDefinitionRecords(
+func (adapter serviceAdapter) ListRecords(
 	ctx context.Context,
 	cursor workflow.DefinitionCursor,
 	limit int,
 ) ([]workflow.DefinitionRecord, error) {
-	return adapter.service.ListDefinitionRecords(ctx, cursor, limit)
+	return adapter.service.ListRecords(ctx, cursor, limit)
 }
 
-func (adapter serviceAdapter) SetDefinitionDefault(
+func (adapter serviceAdapter) SetDefault(
 	ctx context.Context,
 	id string,
 	version int64,
 	actorUserID int64,
 	admin bool,
 ) error {
-	return adapter.service.SetDefinitionDefault(
+	return adapter.service.SetDefault(
 		ctx, id, version, actorUserID, admin,
 	)
 }
 
-func (adapter serviceAdapter) SetDefinitionActive(
+func (adapter serviceAdapter) SetActive(
 	ctx context.Context,
 	id string,
 	version int64,
@@ -86,28 +86,28 @@ func (adapter serviceAdapter) SetDefinitionActive(
 	actorUserID int64,
 	admin bool,
 ) error {
-	return adapter.service.SetDefinitionActive(
+	return adapter.service.SetActive(
 		ctx, id, version, active, actorUserID, admin,
 	)
 }
 
-func (adapter serviceAdapter) ListDefinitionAudit(
+func (adapter serviceAdapter) ListAudit(
 	ctx context.Context,
 	id string,
 	afterSeq int64,
 	limit int,
 	admin bool,
 ) ([]workflow.DefinitionAuditEvent, error) {
-	return adapter.service.ListDefinitionAudit(ctx, id, afterSeq, limit, admin)
+	return adapter.service.ListAudit(ctx, id, afterSeq, limit, admin)
 }
 
-func (adapter serviceAdapter) GetDefinitionRollout(
+func (adapter serviceAdapter) GetRollout(
 	id string,
 ) (workflow.RolloutRule, bool, error) {
-	return adapter.service.GetDefinitionRollout(id)
+	return adapter.service.GetRollout(id)
 }
 
-func (adapter serviceAdapter) SetDefinitionRollout(
+func (adapter serviceAdapter) SetRollout(
 	ctx context.Context,
 	id string,
 	candidateVersion int64,
@@ -117,19 +117,19 @@ func (adapter serviceAdapter) SetDefinitionRollout(
 	actorUserID int64,
 	admin bool,
 ) (workflow.RolloutRule, error) {
-	return adapter.service.SetDefinitionRollout(
+	return adapter.service.SetRollout(
 		ctx, id, candidateVersion, percentageBPS, salt, active, actorUserID, admin,
 	)
 }
 
-func (adapter serviceAdapter) ListDefinitionRolloutAudit(
+func (adapter serviceAdapter) ListRolloutAudit(
 	ctx context.Context,
 	id string,
 	afterSeq int64,
 	limit int,
 	admin bool,
 ) ([]workflow.RolloutAuditEvent, error) {
-	return adapter.service.ListDefinitionRolloutAudit(
+	return adapter.service.ListRolloutAudit(
 		ctx, id, afterSeq, limit, admin,
 	)
 }
@@ -137,7 +137,7 @@ func (adapter serviceAdapter) ListDefinitionRolloutAudit(
 func (adapter serviceAdapter) Start(
 	ctx context.Context,
 	request workflow.StartRequest,
-) (*workflow.WorkflowRunRecord, error) {
+) (*workflow.RunRecord, error) {
 	return adapter.service.Start(ctx, request)
 }
 
@@ -146,7 +146,7 @@ func (adapter serviceAdapter) GetRun(
 	runID string,
 	userID int64,
 	admin bool,
-) (*workflow.WorkflowRunRecord, error) {
+) (*workflow.RunRecord, error) {
 	return adapter.service.GetRun(ctx, runID, userID, admin)
 }
 
@@ -177,7 +177,7 @@ func (adapter serviceAdapter) OpenRunEvents(
 	runID string,
 	userID int64,
 	admin bool,
-) (*workflow.WorkflowRunRecord, eventReader, error) {
+) (*workflow.RunRecord, eventReader, error) {
 	run, reader, err := adapter.service.OpenRunEvents(ctx, runID, userID, admin)
 	return run, reader, err
 }
@@ -263,7 +263,7 @@ func (handler *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Definitions []workflow.WorkflowDefinition `json:"definitions"`
+		Definitions []workflow.Definition `json:"definitions"`
 	}
 	if err := httputil.DecodeStrictJSON(r, &request); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
@@ -273,7 +273,7 @@ func (handler *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
-	if err := handler.service.PublishDefinitionsAs(
+	if err := handler.service.PublishAs(
 		r.Context(), request.Definitions, user.ID, user.IsAdmin,
 	); err != nil {
 		writeDomainError(w, err)
@@ -300,7 +300,7 @@ func (handler *Handler) List(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
-	items, err := handler.service.ListDefinitionRecords(
+	items, err := handler.service.ListRecords(
 		r.Context(), cursor, limit,
 	)
 	if err != nil {
@@ -330,7 +330,7 @@ func (handler *Handler) SetDefault(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
-	if err := handler.service.SetDefinitionDefault(
+	if err := handler.service.SetDefault(
 		r.Context(), r.PathValue("workflow_id"), version, user.ID, user.IsAdmin,
 	); err != nil {
 		writeDomainError(w, err)
@@ -362,7 +362,7 @@ func (handler *Handler) SetStatus(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
-	if err := handler.service.SetDefinitionActive(
+	if err := handler.service.SetActive(
 		r.Context(), r.PathValue("workflow_id"), version, request.Active,
 		user.ID, user.IsAdmin,
 	); err != nil {
@@ -394,7 +394,7 @@ func (handler *Handler) ListAudit(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
-	items, err := handler.service.ListDefinitionAudit(
+	items, err := handler.service.ListAudit(
 		r.Context(), r.PathValue("workflow_id"), afterSeq, limit, user.IsAdmin,
 	)
 	if err != nil {
@@ -419,7 +419,7 @@ func (handler *Handler) GetRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("workflow_id"))
-	rule, ok, err := handler.service.GetDefinitionRollout(id)
+	rule, ok, err := handler.service.GetRollout(id)
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -453,7 +453,7 @@ func (handler *Handler) SetRollout(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
-	rule, err := handler.service.SetDefinitionRollout(
+	rule, err := handler.service.SetRollout(
 		r.Context(),
 		strings.TrimSpace(r.PathValue("workflow_id")),
 		request.CandidateVersion,
@@ -489,7 +489,7 @@ func (handler *Handler) ListRolloutAudit(w http.ResponseWriter, r *http.Request)
 		writeDomainError(w, workflow.ErrUnavailable)
 		return
 	}
-	items, err := handler.service.ListDefinitionRolloutAudit(
+	items, err := handler.service.ListRolloutAudit(
 		r.Context(),
 		strings.TrimSpace(r.PathValue("workflow_id")),
 		afterSeq,

@@ -14,11 +14,11 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-// compactBeforeAnswer runs after prefetch, memory recall, and evidence retrieval so
+// compactAnswer runs after prefetch, memory recall, and evidence retrieval so
 // the decision includes the request-scoped prompt that will reach the answer model.
-func (svc *QA) compactBeforeAnswer(
+func (svc *Service) compactAnswer(
 	ctx context.Context,
-	prepared *qaPreparation,
+	prepared *preparation,
 	conversation ConversationContext,
 	rc *retrieval.RetrievedContext,
 	plan domain.EvidencePlan,
@@ -30,14 +30,14 @@ func (svc *QA) compactBeforeAnswer(
 	}
 
 	tools := sessionCompactionTools(prepared.candidateToolSet, conversation)
-	incomingTokens, projectedTokens, err := sessionCompactionTokenProjection(
+	incomingTokens, projectedTokens, err := compactionProjection(
 		prepared.request.Question, conversation, rc, plan, svc.domainKnowledge,
 		tools, outputReserve,
 	)
 	if err != nil {
 		return conversation, fmt.Errorf("estimate session compaction context: %w", err)
 	}
-	result := session.SessionCompactionResult{
+	result := session.CompactionResult{
 		ProjectedBeforeTokens: projectedTokens,
 		ProjectedAfterTokens:  projectedTokens,
 		ContextWindow:         contextWindow,
@@ -47,7 +47,7 @@ func (svc *QA) compactBeforeAnswer(
 		OutputReserveTokens:   outputReserve,
 	}
 	defer func() {
-		svc.emitContextUsage(prepared.request.RunID, contextUsageFromSessionCompaction(result))
+		svc.emitContextUsage(prepared.request.RunID, usageFromCompaction(result))
 	}()
 	if projectedTokens < result.HighWaterTokens ||
 		svc.sessions == nil || svc.helperLLM == nil || conversation.SessionID == "" {
@@ -56,9 +56,9 @@ func (svc *QA) compactBeforeAnswer(
 
 	started := false
 	fromTurn, toTurn := 0, 0
-	result, err = session.CompactSessionIfNeeded(
+	result, err = session.CompactIfNeeded(
 		ctx, svc.helperLLM, svc.sessions, conversation.SessionID, prepared.request.UserID,
-		session.SessionCompactionUsage{
+		session.CompactionUsage{
 			ContextWindow:       contextWindow,
 			IncomingTokens:      incomingTokens,
 			ProjectedTokens:     projectedTokens,
@@ -68,7 +68,7 @@ func (svc *QA) compactBeforeAnswer(
 		func(from, to int) {
 			started = true
 			fromTurn, toTurn = from, to
-			svc.updateSessionCompaction(
+			svc.updateCompaction(
 				prepared.request.RunID, conversation.SessionID, "start",
 				fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", from, to),
 				from, to,
@@ -78,7 +78,7 @@ func (svc *QA) compactBeforeAnswer(
 	)
 	if err != nil {
 		if started {
-			svc.updateSessionCompaction(
+			svc.updateCompaction(
 				prepared.request.RunID, conversation.SessionID, "failed", "历史上下文压缩失败",
 				fromTurn, toTurn,
 			)
@@ -86,12 +86,12 @@ func (svc *QA) compactBeforeAnswer(
 		return conversation, fmt.Errorf("compact session %q after retrieval: %w", conversation.SessionID, err)
 	}
 	if result.Applied || result.Stale {
-		refreshed, refreshErr := svc.refreshCompactedConversation(
+		refreshed, refreshErr := svc.refreshConversation(
 			ctx, prepared, conversation, contextWindow, outputReserve,
 		)
 		if refreshErr != nil {
 			if started {
-				svc.updateSessionCompaction(
+				svc.updateCompaction(
 					prepared.request.RunID, conversation.SessionID, "failed", "历史上下文压缩失败",
 					fromTurn, toTurn,
 				)
@@ -99,7 +99,7 @@ func (svc *QA) compactBeforeAnswer(
 			return conversation, refreshErr
 		}
 		conversation = refreshed
-		_, projectedAfter, projectionErr := sessionCompactionTokenProjection(
+		_, projectedAfter, projectionErr := compactionProjection(
 			prepared.request.Question, conversation, rc, plan, svc.domainKnowledge,
 			sessionCompactionTools(prepared.candidateToolSet, conversation), outputReserve,
 		)
@@ -109,14 +109,14 @@ func (svc *QA) compactBeforeAnswer(
 		result.ProjectedAfterTokens = projectedAfter
 	}
 	if result.Applied {
-		svc.updateSessionCompaction(
+		svc.updateCompaction(
 			prepared.request.RunID, conversation.SessionID, "done", "历史上下文压缩完成",
 			result.FromTurn, result.ToTurn,
 		)
 		log.InfofCtx(ctx, "[qa] compacted session %s turns %d-%d after retrieval",
 			conversation.SessionID, result.FromTurn, result.ToTurn)
 	} else if result.Stale && started {
-		svc.updateSessionCompaction(
+		svc.updateCompaction(
 			prepared.request.RunID, conversation.SessionID, "done", "历史上下文压缩完成",
 			result.FromTurn, result.ToTurn,
 		)
@@ -126,7 +126,7 @@ func (svc *QA) compactBeforeAnswer(
 	return conversation, nil
 }
 
-func sessionCompactionTokenProjection(
+func compactionProjection(
 	question string,
 	conversation ConversationContext,
 	rc *retrieval.RetrievedContext,
@@ -173,7 +173,7 @@ func sessionCompactionTools(prepared ScenarioToolSet, conversation ConversationC
 	return selected
 }
 
-func contextUsageFromSessionCompaction(result session.SessionCompactionResult) ContextUsageEvent {
+func usageFromCompaction(result session.CompactionResult) ContextUsageEvent {
 	return ContextUsageEvent{
 		Phase:                 "session_pre_answer",
 		ProjectedBeforeTokens: result.ProjectedBeforeTokens,
@@ -188,9 +188,9 @@ func contextUsageFromSessionCompaction(result session.SessionCompactionResult) C
 	}
 }
 
-func (svc *QA) refreshCompactedConversation(
+func (svc *Service) refreshConversation(
 	ctx context.Context,
-	prepared *qaPreparation,
+	prepared *preparation,
 	conversation ConversationContext,
 	contextWindow int,
 	outputReserve int,

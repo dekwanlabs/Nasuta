@@ -15,20 +15,20 @@ func OutcomeFor(
 	result *RunResult,
 	preRetrieved []agentapi.Reference,
 	runErr error,
-) run.RunOutcome {
+) run.Outcome {
 	if result == nil {
 		if runErr == nil {
 			runErr = errors.New("agent: run returned no result")
 		}
-		return run.RunOutcome{
-			Status: run.RunStatusFailed,
+		return run.Outcome{
+			Status: run.StatusFailed,
 			Err:    runErr,
 			Evidence: run.EvidenceMetrics{
 				Status: run.EvidenceUnavailable,
 			},
 		}
 	}
-	outcome := run.RunOutcome{
+	outcome := run.Outcome{
 		StepCount:       result.Steps,
 		TokenUsed:       len(result.Answer),
 		Answer:          result.Answer,
@@ -42,23 +42,23 @@ func OutcomeFor(
 	}
 	switch {
 	case result.Aborted:
-		outcome.Status = run.RunStatusAborted
+		outcome.Status = run.StatusAborted
 		outcome.ErrorCode = "cancelled"
 		outcome.Err = runErr
 	case runErr != nil:
-		outcome.Status = run.RunStatusFailed
+		outcome.Status = run.StatusFailed
 		outcome.ErrorCode = "runtime_failed"
 		outcome.Err = runErr
 	case result.Err != nil:
-		outcome.Status = run.RunStatusFailed
+		outcome.Status = run.StatusFailed
 		outcome.ErrorCode = "agent_failed"
 		outcome.Err = result.Err
 	case strings.TrimSpace(result.Answer) == "":
-		outcome.Status = run.RunStatusFailed
+		outcome.Status = run.StatusFailed
 		outcome.ErrorCode = "empty_output"
 		outcome.Err = run.ErrEmptyAnswer
 	default:
-		outcome.Status = run.RunStatusDone
+		outcome.Status = run.StatusDone
 	}
 	return outcome
 }

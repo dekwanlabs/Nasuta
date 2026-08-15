@@ -58,8 +58,8 @@ type turnDetailBudgets struct {
 	toolItems                    int
 }
 
-// CompressTurnDetail preserves a bounded, structured representation of one turn.
-func CompressTurnDetail(turnNumber int, messages []llm.Message) (json.RawMessage, error) {
+// CompressDetail preserves a bounded, structured representation of one turn.
+func CompressDetail(turnNumber int, messages []llm.Message) (json.RawMessage, error) {
 	budgets := turnDetailBudgets{
 		user: turnUserTokenLimit, calls: turnCallsTokenLimit,
 		results: turnResultTokenLimit, answer: turnAnswerTokenLimit, toolItems: -1,

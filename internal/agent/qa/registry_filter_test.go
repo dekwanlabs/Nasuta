@@ -15,12 +15,12 @@ func TestWithoutToolRemovesSessionDetailsFromRunSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	registry := NewRegistry(&Service{}, config.Config{}, memory.NewSessionStore(db), nil)
+	registry := NewRegistry(&ToolService{}, config.Config{}, memory.NewSessionStore(db), nil)
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 	if _, ok := snapshot.Get("get_turn"); !ok {
 		t.Fatal("registered detail tool missing")
 	}
-	filtered := withoutSessionHistoryTools(preparedScenarioTools{
+	filtered := withoutHistoryTools(preparedScenarioTools{
 		snapshot: snapshot,
 		executor: NewToolExecutor(registry),
 	})

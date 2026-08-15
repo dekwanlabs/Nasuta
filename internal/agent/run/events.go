@@ -92,7 +92,7 @@ type ExecutionEvent struct {
 }
 
 type ExecutionEventEmitter interface {
-	EmitExecutionEvent(EventType, ExecutionEvent)
+	EmitEvent(EventType, ExecutionEvent)
 }
 
 // SSEEvent is the tagged event forwarded unchanged by the HTTP transport.
@@ -101,10 +101,10 @@ type SSEEvent struct {
 	Data any       `json:"data"`
 }
 
-// RunTerminal is the sole real-time projection of one persisted Run outcome.
-type RunTerminal struct {
+// Terminal is the sole real-time projection of one persisted Run outcome.
+type Terminal struct {
 	RunID           string               `json:"run_id"`
-	Status          RunStatus            `json:"status"`
+	Status          Status               `json:"status"`
 	Answer          string               `json:"answer,omitempty"`
 	ErrorCode       string               `json:"error_code,omitempty"`
 	StepCount       int                  `json:"step_count"`
@@ -118,24 +118,24 @@ type RunTerminal struct {
 
 // QAParentEvent is the durable counterpart of a Parent Run projection.
 type QAParentEvent struct {
-	RunID     string      `json:"run_id"`
-	Seq       int64       `json:"seq"`
-	Kind      string      `json:"kind"`
-	Summary   string      `json:"summary"`
-	Detail    RunTerminal `json:"detail"`
-	CreatedAt string      `json:"created_at"`
+	RunID     string   `json:"run_id"`
+	Seq       int64    `json:"seq"`
+	Kind      string   `json:"kind"`
+	Summary   string   `json:"summary"`
+	Detail    Terminal `json:"detail"`
+	CreatedAt string   `json:"created_at"`
 }
 
-func TerminalFromEvent(event SSEEvent) *RunTerminal {
+func TerminalFromEvent(event SSEEvent) *Terminal {
 	if event.Type != EventRunFinished {
 		return nil
 	}
-	terminal, _ := event.Data.(*RunTerminal)
+	terminal, _ := event.Data.(*Terminal)
 	return terminal
 }
 
-func terminalFromOutcome(runID string, outcome RunOutcome) RunTerminal {
-	terminal := RunTerminal{
+func terminalFromOutcome(runID string, outcome Outcome) Terminal {
+	terminal := Terminal{
 		RunID: runID, Status: outcome.Status, Answer: outcome.Answer,
 		ErrorCode: outcome.ErrorCode, StepCount: outcome.StepCount,
 		TokenUsed:  outcome.TokenUsed,
@@ -153,8 +153,8 @@ func terminalFromOutcome(runID string, outcome RunOutcome) RunTerminal {
 	return terminal
 }
 
-func outcomeFromTerminal(terminal RunTerminal) RunOutcome {
-	outcome := RunOutcome{
+func outcomeFromTerminal(terminal Terminal) Outcome {
+	outcome := Outcome{
 		Status: terminal.Status, ErrorCode: terminal.ErrorCode,
 		StepCount: terminal.StepCount, TokenUsed: terminal.TokenUsed,
 		Answer:     terminal.Answer,

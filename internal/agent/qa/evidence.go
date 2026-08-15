@@ -65,7 +65,7 @@ var evidencePlanningSpec = runtrace.Spec[evidencePlanningInput, evidencePlanning
 	},
 }
 
-func (svc *QA) planEvidence(ctx context.Context, input evidencePlanningInput) (evidencePlanningOutput, error) {
+func (svc *Service) planEvidence(ctx context.Context, input evidencePlanningInput) (evidencePlanningOutput, error) {
 	return runtrace.Invoke(ctx, evidencePlanningSpec, input, func(ctx context.Context, input evidencePlanningInput) (evidencePlanningOutput, error) {
 		output := evidencePlanningOutput{
 			CleanQuestion: strings.TrimSpace(input.Question),
@@ -126,7 +126,7 @@ func (svc *QA) planEvidence(ctx context.Context, input evidencePlanningInput) (e
 	})
 }
 
-func logEvidencePlannerFailure(ctx context.Context, duration time.Duration, err error) {
+func logPlannerFailure(ctx context.Context, duration time.Duration, err error) {
 	if errors.Is(err, llm.ErrInvalidJSON) {
 		log.WarnfCtx(ctx,
 			"[qa] evidence planner failed duration=%s error_kind=invalid_json retry_disabled=true error=%v",

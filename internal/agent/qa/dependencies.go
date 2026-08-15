@@ -22,18 +22,18 @@ import (
 
 type ConversationContext = execution.ConversationContext
 type RunResult = execution.RunResult
-type Service = tools.Service
-type SessionHistory = session.SessionHistory
+type ToolService = tools.Service
+type SessionHistory = session.History
 type HistoryCandidates = session.HistoryCandidates
 type CandidateDiscovery = session.CandidateDiscovery
-type DefinitionResolver = definition.DefinitionResolver
+type DefinitionResolver = definition.Resolver
 type ScenarioRunStart = definition.ScenarioRunStart
 type ScenarioLifecycle = definition.ScenarioLifecycle
 type ScenarioToolSet = definition.ScenarioToolSet
 type ScenarioToolSource = definition.ScenarioToolSource
 type Agent = execution.Agent
 
-type RunOutcome = run.RunOutcome
+type RunOutcome = run.Outcome
 type RunStepRecord = run.StepRecord
 type EvidenceStatus = run.EvidenceStatus
 type EvidenceMetrics = run.EvidenceMetrics
@@ -47,9 +47,9 @@ type ToolPolicy = tool.Policy
 type Tool = tool.Tool
 
 const (
-	RunStatusDone    = run.RunStatusDone
-	RunStatusFailed  = run.RunStatusFailed
-	RunStatusAborted = run.RunStatusAborted
+	RunStatusDone    = run.StatusDone
+	RunStatusFailed  = run.StatusFailed
+	RunStatusAborted = run.StatusAborted
 
 	EvidenceComplete    = run.EvidenceComplete
 	EvidencePartial     = run.EvidencePartial
@@ -69,7 +69,7 @@ type ParentRunReader interface {
 }
 
 type preparationStepRecorder interface {
-	RecordPreparationStep(context.Context, run.StepRecord) error
+	RecordStep(context.Context, run.StepRecord) error
 }
 
 func toolPolicyForRun(allowWrite bool) ToolPolicy {
@@ -98,7 +98,7 @@ func buildAgentMessages(
 	domainKnowledge string,
 	historyLimit int,
 ) []llm.Message {
-	return execution.BuildAgentMessages(
+	return execution.BuildMessages(
 		question, conversation, rc, plan, domainKnowledge, historyLimit,
 	)
 }
@@ -116,7 +116,7 @@ func shouldShortCircuitMeta(question string) bool {
 }
 
 func compressTurnDetail(turnNumber int, messages []llm.Message) (json.RawMessage, error) {
-	return session.CompressTurnDetail(turnNumber, messages)
+	return session.CompressDetail(turnNumber, messages)
 }
 
 func internalMessage(message agentapi.Message) llm.Message {

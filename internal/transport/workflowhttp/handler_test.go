@@ -58,9 +58,9 @@ func TestWorkflowRoutesRequireAuthenticationAndAdminPublication(t *testing.T) {
 
 func TestWorkflowListUsesBoundedStableCursor(t *testing.T) {
 	workflows := &recordingService{definitions: []workflow.DefinitionRecord{
-		{WorkflowDefinition: workflow.WorkflowDefinition{ID: "a.flow", Version: 1}},
-		{WorkflowDefinition: workflow.WorkflowDefinition{ID: "a.flow", Version: 2}},
-		{WorkflowDefinition: workflow.WorkflowDefinition{ID: "b.flow", Version: 1}},
+		{Definition: workflow.Definition{ID: "a.flow", Version: 1}},
+		{Definition: workflow.Definition{ID: "a.flow", Version: 2}},
+		{Definition: workflow.Definition{ID: "b.flow", Version: 1}},
 	}}
 	mux := workflowMux(&Handler{service: workflows})
 	cursor := encodeDefinitionCursor(workflows.definitions[0])
@@ -369,7 +369,7 @@ func TestWorkflowStartPreservesControlledReferenceAndReadOnlyBoundary(t *testing
 }
 
 func TestWorkflowRunAuthorizationAllowsOwnerAndAdmin(t *testing.T) {
-	workflows := &recordingService{run: workflow.WorkflowRunRecord{
+	workflows := &recordingService{run: workflow.RunRecord{
 		ID: "workflow_1", ActorUserID: 7, Status: workflow.RunRunning,
 	}}
 	mux := workflowMux(&Handler{service: workflows})
@@ -406,7 +406,7 @@ func TestWorkflowRunAuthorizationAllowsOwnerAndAdmin(t *testing.T) {
 func TestWorkflowNodeAndHandoffPaginationPassStableCursors(t *testing.T) {
 	now := time.Date(2026, 8, 6, 10, 0, 0, 0, time.UTC)
 	workflows := &recordingService{
-		run: workflow.WorkflowRunRecord{
+		run: workflow.RunRecord{
 			ID: "workflow_1", ActorUserID: 7, Status: workflow.RunRunning,
 		},
 		nodes: []workflow.NodeRunRecord{
@@ -467,7 +467,7 @@ func TestWorkflowNodeAndHandoffPaginationPassStableCursors(t *testing.T) {
 }
 
 func TestWorkflowCancelIsIdempotent(t *testing.T) {
-	workflows := &recordingService{run: workflow.WorkflowRunRecord{
+	workflows := &recordingService{run: workflow.RunRecord{
 		ID: "workflow_1", ActorUserID: 7, Status: workflow.RunRunning,
 	}}
 	mux := workflowMux(&Handler{service: workflows})
@@ -500,7 +500,7 @@ func TestWorkflowCancelIsIdempotent(t *testing.T) {
 }
 
 func TestWorkflowApprovalValidatesInputAndAuthorization(t *testing.T) {
-	workflows := &recordingService{run: workflow.WorkflowRunRecord{
+	workflows := &recordingService{run: workflow.RunRecord{
 		ID: "workflow_1", ActorUserID: 7, Status: workflow.RunWaitingHuman,
 	}}
 	mux := workflowMux(&Handler{service: workflows})
@@ -616,7 +616,7 @@ type recordingService struct {
 	rollout      workflow.RolloutRule
 	hasRollout   bool
 	rolloutAudit []workflow.RolloutAuditEvent
-	run          workflow.WorkflowRunRecord
+	run          workflow.RunRecord
 	nodes        []workflow.NodeRunRecord
 	events       []workflow.Event
 	handoffs     []workflow.Handoff
@@ -668,9 +668,9 @@ func (decider *recordingApprovalDecider) DecideHumanApproval(
 	}, nil
 }
 
-func (service *recordingService) PublishDefinitionsAs(
+func (service *recordingService) PublishAs(
 	_ context.Context,
-	_ []workflow.WorkflowDefinition,
+	_ []workflow.Definition,
 	actorUserID int64,
 	admin bool,
 ) error {
@@ -683,7 +683,7 @@ func (service *recordingService) PublishDefinitionsAs(
 	return nil
 }
 
-func (service *recordingService) ListDefinitionRecords(
+func (service *recordingService) ListRecords(
 	_ context.Context,
 	cursor workflow.DefinitionCursor,
 	limit int,
@@ -702,7 +702,7 @@ func (service *recordingService) ListDefinitionRecords(
 	return append([]workflow.DefinitionRecord(nil), service.definitions[start:end]...), nil
 }
 
-func (service *recordingService) SetDefinitionDefault(
+func (service *recordingService) SetDefault(
 	_ context.Context,
 	id string,
 	version int64,
@@ -719,7 +719,7 @@ func (service *recordingService) SetDefinitionDefault(
 	return nil
 }
 
-func (service *recordingService) SetDefinitionActive(
+func (service *recordingService) SetActive(
 	_ context.Context,
 	id string,
 	version int64,
@@ -738,7 +738,7 @@ func (service *recordingService) SetDefinitionActive(
 	return nil
 }
 
-func (service *recordingService) ListDefinitionAudit(
+func (service *recordingService) ListAudit(
 	_ context.Context,
 	id string,
 	afterSeq int64,
@@ -755,14 +755,14 @@ func (service *recordingService) ListDefinitionAudit(
 	return append([]workflow.DefinitionAuditEvent(nil), service.audit...), nil
 }
 
-func (service *recordingService) GetDefinitionRollout(
+func (service *recordingService) GetRollout(
 	id string,
 ) (workflow.RolloutRule, bool, error) {
 	service.lastDefinitionID = id
 	return service.rollout, service.hasRollout, nil
 }
 
-func (service *recordingService) SetDefinitionRollout(
+func (service *recordingService) SetRollout(
 	_ context.Context,
 	id string,
 	candidateVersion int64,
@@ -785,7 +785,7 @@ func (service *recordingService) SetDefinitionRollout(
 	return service.rollout, nil
 }
 
-func (service *recordingService) ListDefinitionRolloutAudit(
+func (service *recordingService) ListRolloutAudit(
 	_ context.Context,
 	id string,
 	afterSeq int64,
@@ -805,7 +805,7 @@ func (service *recordingService) ListDefinitionRolloutAudit(
 func (service *recordingService) Start(
 	_ context.Context,
 	request workflow.StartRequest,
-) (*workflow.WorkflowRunRecord, error) {
+) (*workflow.RunRecord, error) {
 	service.startCalls++
 	service.lastStart = request
 	service.lastStart.Input = append(json.RawMessage(nil), request.Input...)
@@ -814,7 +814,7 @@ func (service *recordingService) Start(
 	}
 	run := service.run
 	if run.ID == "" {
-		run = workflow.WorkflowRunRecord{
+		run = workflow.RunRecord{
 			ID:          "workflow_1",
 			WorkflowID:  request.Workflow.ID,
 			ActorUserID: request.Actor.UserID,
@@ -829,7 +829,7 @@ func (service *recordingService) GetRun(
 	runID string,
 	userID int64,
 	admin bool,
-) (*workflow.WorkflowRunRecord, error) {
+) (*workflow.RunRecord, error) {
 	if service.run.ID != runID {
 		return nil, workflow.ErrNotFound
 	}
@@ -877,7 +877,7 @@ func (service *recordingService) OpenRunEvents(
 	runID string,
 	userID int64,
 	admin bool,
-) (*workflow.WorkflowRunRecord, eventReader, error) {
+) (*workflow.RunRecord, eventReader, error) {
 	service.mu.Lock()
 	service.openCalls++
 	service.mu.Unlock()
@@ -952,7 +952,7 @@ func (service *recordingService) DecideHumanApproval(
 	}
 	return workflow.ApprovalResult{
 		Applied: true, Status: workflow.RunRunning,
-		Approval: workflow.WorkflowApproval{
+		Approval: workflow.Approval{
 			WorkflowRunID: request.WorkflowRunID,
 			NodeID:        request.NodeID,
 			Decision:      request.Decision,

@@ -28,7 +28,7 @@ type artifactApprovalService interface {
 }
 
 type workflowApprovalService interface {
-	GetRun(context.Context, string, int64, bool) (*workflow.WorkflowRunRecord, error)
+	GetRun(context.Context, string, int64, bool) (*workflow.RunRecord, error)
 	ListHandoffs(
 		context.Context,
 		string,
@@ -194,7 +194,7 @@ func (coordinator *ApprovalCoordinator) decideHumanApproval(
 }
 
 type pipelineApprovalBinding struct {
-	run        *workflow.WorkflowRunRecord
+	run        *workflow.RunRecord
 	stage      pipelineApprovalStage
 	artifact   *delivery.Artifact
 	generation *delivery.GenerationRun
@@ -280,7 +280,7 @@ func (coordinator *ApprovalCoordinator) bindingForArtifact(
 
 func (coordinator *ApprovalCoordinator) loadBinding(
 	ctx context.Context,
-	run *workflow.WorkflowRunRecord,
+	run *workflow.RunRecord,
 	stage pipelineApprovalStage,
 	userID int64,
 	admin bool,

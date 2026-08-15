@@ -18,7 +18,7 @@ func TestRunStoreAddStepPersistsInlineToolResultAtomically(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	step := StepRow{
 		RunID: "run-1", StepNo: 2, Kind: StepKindToolResult,
 		TraceID: "trace-1", ToolCallID: "call-1", Tool: "lookup", Args: `{}`,
@@ -56,7 +56,7 @@ func TestRunStoreAddStepPersistsArtifactWithReferenceAtomically(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	step := StepRow{
 		RunID: "run-large", StepNo: 4, Kind: StepKindToolResult,
 		TraceID: "trace-large", ArtifactID: "artifact-large", ToolCallID: "call-large",
@@ -96,7 +96,7 @@ func TestRunStoreAddStepRollsBackWhenMergedArtifactPersistenceFails(t *testing.T
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	step := StepRow{
 		RunID: "run-large", StepNo: 4, Kind: StepKindToolResult,
 		ArtifactID: "artifact-large", ToolCallID: "call-large",
@@ -117,13 +117,13 @@ func TestRunStoreAddStepRollsBackWhenMergedArtifactPersistenceFails(t *testing.T
 	}
 }
 
-func TestRunStoreGetToolResultArtifactUsesBoundedOwnedRead(t *testing.T) {
+func TestStoreGetToolArtifactUsesBoundedOwnedRead(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	createdAt := time.Date(2026, 7, 31, 1, 2, 3, 0, time.UTC)
 	mock.ExpectQuery("SELECT s\\.artifact_id,r\\.session_id,s\\.run_id,s\\.tool_call_id,.*SUBSTRING\\(s\\.artifact_content,\\?,\\?\\)").
 		WithArgs(int64(4), 4, "artifact-1", int64(42), "session-1", "session-1").
@@ -134,9 +134,9 @@ func TestRunStoreGetToolResultArtifactUsesBoundedOwnedRead(t *testing.T) {
 			`{"partial":true,"omitted_items":3}`, createdAt,
 		))
 
-	chunk, err := store.GetToolResultArtifact(42, "session-1", "artifact-1", 3, 4)
+	chunk, err := store.GetToolArtifact(42, "session-1", "artifact-1", 3, 4)
 	if err != nil {
-		t.Fatalf("GetToolResultArtifact: %v", err)
+		t.Fatalf("GetToolArtifact: %v", err)
 	}
 	if chunk.Content != "defg" || chunk.Offset != 3 || chunk.NextOffset != 7 || !chunk.HasMore {
 		t.Fatalf("chunk = %+v", chunk)
@@ -155,7 +155,7 @@ func TestRunStoreGetForUserConstrainsRunOwnershipBeforeLoadingSteps(t *testing.T
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	mock.ExpectQuery("FROM agent_runs WHERE id=\\? AND user_id=\\?").
 		WithArgs("run-1", int64(42)).
 		WillReturnError(sql.ErrNoRows)
@@ -175,7 +175,7 @@ func TestRunStoreGetForUserDoesNotTreatZeroAsOwnershipBypass(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	mock.ExpectQuery("FROM agent_runs WHERE id=\\? AND user_id=\\?").
 		WithArgs("run-1", int64(0)).
 		WillReturnError(sql.ErrNoRows)
@@ -195,25 +195,25 @@ func TestRunStoreGetQAParentUsesNarrowOwnedRead(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	startedAt := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	mock.ExpectQuery(
 		"SELECT id,workflow_run_id,user_id,session_id,question,status,started_at,ended_at.*FROM agent_runs WHERE id=\\? AND run_kind=\\? AND user_id=\\?",
 	).
-		WithArgs("parent-1", RunKindQAParent, int64(42)).
+		WithArgs("parent-1", KindQAParent, int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "workflow_run_id", "user_id", "session_id", "question", "status", "started_at", "ended_at",
 		}).AddRow(
 			"parent-1", "workflow-1", int64(42), "session-1", "question",
-			RunStatusRunning, startedAt, nil,
+			StatusRunning, startedAt, nil,
 		))
 
-	parent, err := store.GetQAParentForUser("parent-1", 42)
+	parent, err := store.GetParentForUser("parent-1", 42)
 	if err != nil {
-		t.Fatalf("GetQAParentForUser: %v", err)
+		t.Fatalf("GetParentForUser: %v", err)
 	}
 	if parent.ID != "parent-1" || parent.WorkflowRunID != "workflow-1" ||
-		parent.Status != RunStatusRunning || parent.StartedAt == "" {
+		parent.Status != StatusRunning || parent.StartedAt == "" {
 		t.Fatalf("parent = %+v", parent)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -227,7 +227,7 @@ func TestRunStoreGetControlForUserUsesNarrowOwnedRead(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	mock.ExpectQuery(
 		"SELECT id,run_kind,status,workflow_run_id,user_id.*"+
 			"FROM agent_runs WHERE id=\\? AND user_id=\\? LIMIT 1",
@@ -236,15 +236,15 @@ func TestRunStoreGetControlForUserUsesNarrowOwnedRead(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "run_kind", "status", "workflow_run_id", "user_id",
 		}).AddRow(
-			"parent-1", RunKindQAParent, RunStatusRunning, "workflow-1", int64(42),
+			"parent-1", KindQAParent, StatusRunning, "workflow-1", int64(42),
 		))
 
 	record, err := store.GetControlForUser("parent-1", 42)
 	if err != nil {
 		t.Fatalf("GetControlForUser: %v", err)
 	}
-	if record.ID != "parent-1" || record.RunKind != RunKindQAParent ||
-		record.Status != RunStatusRunning || record.WorkflowRunID != "workflow-1" ||
+	if record.ID != "parent-1" || record.RunKind != KindQAParent ||
+		record.Status != StatusRunning || record.WorkflowRunID != "workflow-1" ||
 		record.UserID != 42 {
 		t.Fatalf("record = %+v", record)
 	}
@@ -259,7 +259,7 @@ func TestRunStoreListActiveQAParentsUsesBoundedKeysetRead(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	startedBefore := time.Date(2026, 8, 12, 2, 0, 0, 0, time.UTC)
 	cursor := QAParentCursor{StartedAt: "2026-08-12T01:02:03Z", ID: "parent-1"}
 	mock.ExpectQuery(
@@ -269,7 +269,7 @@ func TestRunStoreListActiveQAParentsUsesBoundedKeysetRead(t *testing.T) {
 			"ORDER BY started_at,id LIMIT \\?",
 	).
 		WithArgs(
-			RunKindQAParent, RunStatusRunning, RunStatusPaused,
+			KindQAParent, StatusRunning, StatusPaused,
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), cursor.ID, 100,
 		).
@@ -295,7 +295,7 @@ func TestRunStoreListActiveQAParentsRejectsInvalidBounds(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	startedBefore := time.Date(2026, 8, 12, 2, 0, 0, 0, time.UTC)
 	if _, err := store.ListActiveQAParents(time.Time{}, QAParentCursor{}, 10); err == nil {
 		t.Fatal("ListActiveQAParents accepted a missing startup cutoff")
@@ -318,13 +318,13 @@ func TestRunStoreRecoverInterruptedExcludesQAParents(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	mock.ExpectExec(
 		"UPDATE agent_runs SET status=\\?,ended_at=\\? WHERE run_kind=\\? AND status IN \\(\\?,\\?\\)",
 	).
 		WithArgs(
-			RunStatusAborted, sqlmock.AnyArg(), RunKindAgent,
-			RunStatusRunning, RunStatusPaused,
+			StatusAborted, sqlmock.AnyArg(), KindAgent,
+			StatusRunning, StatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 3))
 
@@ -346,9 +346,9 @@ func TestRunStoreCompleteQAParentCommitsTerminalEventAtomically(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
-	outcome := RunOutcome{
-		Status: RunStatusDone, Answer: "persisted answer", ErrorCode: "completed",
+	store := &Store{db: db}
+	outcome := Outcome{
+		Status: StatusDone, Answer: "persisted answer", ErrorCode: "completed",
 		TokenUsed: 31, HitCount: 2,
 		Evidence: EvidenceMetrics{
 			Status: EvidenceComplete, ResultCount: 2, ToolCallCount: 3,
@@ -358,15 +358,15 @@ func TestRunStoreCompleteQAParentCommitsTerminalEventAtomically(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE agent_runs").
 		WithArgs(
-			RunStatusDone, "completed", 0, 31, EvidenceComplete, false,
-			2, 3, 0, 0, 0, sqlmock.AnyArg(), "parent-1", RunKindQAParent,
-			RunStatusRunning, RunStatusPaused,
+			StatusDone, "completed", 0, 31, EvidenceComplete, false,
+			2, 3, 0, 0, 0, sqlmock.AnyArg(), "parent-1", KindQAParent,
+			StatusRunning, StatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO runtime_events").
 		WithArgs(
 			qaParentStreamKind, "parent-1", qaParentTerminalEventSeq,
-			qaParentTerminalEventKind, "", string(RunStatusDone),
+			qaParentTerminalEventKind, "", string(StatusDone),
 			sqlmock.AnyArg(), sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -392,7 +392,7 @@ func TestRunStoreCompleteQAParentRollsBackWhenEventInsertFails(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE agent_runs").
@@ -401,8 +401,8 @@ func TestRunStoreCompleteQAParentRollsBackWhenEventInsertFails(t *testing.T) {
 		WillReturnError(errors.New("event storage unavailable"))
 	mock.ExpectRollback()
 
-	_, err = store.CompleteQAParent(t.Context(), "parent-1", RunOutcome{
-		Status: RunStatusDone, Answer: "answer",
+	_, err = store.CompleteQAParent(t.Context(), "parent-1", Outcome{
+		Status: StatusDone, Answer: "answer",
 		Evidence: EvidenceMetrics{Status: EvidenceComplete},
 	})
 	if err == nil || !strings.Contains(err.Error(), "append QA parent") ||
@@ -420,9 +420,9 @@ func TestRunStoreCompleteQAParentReplayReturnsPersistedTerminal(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
-	terminal := RunTerminal{
-		RunID: "parent-replay", Status: RunStatusDone,
+	store := &Store{db: db}
+	terminal := Terminal{
+		RunID: "parent-replay", Status: StatusDone,
 		Answer: "persisted answer", ErrorCode: "persisted_code", TokenUsed: 47,
 		Evidence: EvidenceMetrics{Status: EvidencePartial, ResultCount: 3},
 	}
@@ -437,14 +437,14 @@ func TestRunStoreCompleteQAParentReplayReturnsPersistedTerminal(t *testing.T) {
 	mock.ExpectQuery("SELECT r.status,e.detail_json").
 		WithArgs(
 			qaParentStreamKind, qaParentTerminalEventSeq,
-			qaParentTerminalEventKind, terminal.RunID, RunKindQAParent,
+			qaParentTerminalEventKind, terminal.RunID, KindQAParent,
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"status", "detail_json"}).
-			AddRow(RunStatusDone, detail))
+			AddRow(StatusDone, detail))
 	mock.ExpectRollback()
 
-	persisted, err := store.CompleteQAParent(t.Context(), terminal.RunID, RunOutcome{
-		Status: RunStatusDone, Answer: "caller answer",
+	persisted, err := store.CompleteQAParent(t.Context(), terminal.RunID, Outcome{
+		Status: StatusDone, Answer: "caller answer",
 		Evidence: EvidenceMetrics{Status: EvidenceComplete},
 	})
 	if err != nil {
@@ -467,18 +467,18 @@ func TestRunStoreCompleteQAParentRejectsTerminalRowWithoutEvent(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE agent_runs").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SELECT r.status,e.detail_json").
 		WillReturnRows(sqlmock.NewRows([]string{"status", "detail_json"}).
-			AddRow(RunStatusDone, nil))
+			AddRow(StatusDone, nil))
 	mock.ExpectRollback()
 
-	_, err = store.CompleteQAParent(t.Context(), "parent-missing-event", RunOutcome{
-		Status:   RunStatusDone,
+	_, err = store.CompleteQAParent(t.Context(), "parent-missing-event", Outcome{
+		Status:   StatusDone,
 		Evidence: EvidenceMetrics{Status: EvidenceComplete},
 	})
 	if err == nil || !strings.Contains(err.Error(), "terminal without a durable terminal event") {
@@ -495,9 +495,9 @@ func TestRunStoreListQAParentEventsUsesOwnedBoundedRead(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
-	terminal := RunTerminal{
-		RunID: "parent-events", Status: RunStatusDone, Answer: "answer",
+	store := &Store{db: db}
+	terminal := Terminal{
+		RunID: "parent-events", Status: StatusDone, Answer: "answer",
 		Evidence: EvidenceMetrics{Status: EvidenceComplete},
 	}
 	detail, err := json.Marshal(terminal)
@@ -507,7 +507,7 @@ func TestRunStoreListQAParentEventsUsesOwnedBoundedRead(t *testing.T) {
 	createdAt := time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC)
 
 	mock.ExpectQuery("SELECT id FROM agent_runs.*user_id=\\? LIMIT 1").
-		WithArgs("parent-events", RunKindQAParent, int64(42)).
+		WithArgs("parent-events", KindQAParent, int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("parent-events"))
 	mock.ExpectQuery(
 		"SELECT stream_id,seq,kind,summary,detail_json,created_at.*"+
@@ -518,14 +518,14 @@ func TestRunStoreListQAParentEventsUsesOwnedBoundedRead(t *testing.T) {
 			"stream_id", "seq", "kind", "summary", "detail_json", "created_at",
 		}).AddRow(
 			"parent-events", int64(1), qaParentTerminalEventKind,
-			string(RunStatusDone), detail, createdAt,
+			string(StatusDone), detail, createdAt,
 		))
 
-	events, err := store.ListQAParentEventsForUser(
+	events, err := store.ListParentEvents(
 		t.Context(), "parent-events", 42, 0, 25,
 	)
 	if err != nil {
-		t.Fatalf("ListQAParentEventsForUser: %v", err)
+		t.Fatalf("ListParentEvents: %v", err)
 	}
 	if len(events) != 1 || events[0].Seq != 1 ||
 		events[0].Detail.Answer != terminal.Answer ||
@@ -543,17 +543,17 @@ func TestRunStoreGetQAParentDetailLoadsOnlyDurableTerminal(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	createdAt := time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC)
 	expectQAParentRunRecord(
 		mock,
 		"parent-detail",
 		42,
-		RunStatusDone,
+		StatusDone,
 		createdAt,
 	)
-	terminal := RunTerminal{
-		RunID: "parent-detail", Status: RunStatusDone,
+	terminal := Terminal{
+		RunID: "parent-detail", Status: StatusDone,
 		Answer: "durable answer", ErrorCode: "completed",
 		Evidence: EvidenceMetrics{Status: EvidenceComplete},
 	}
@@ -588,7 +588,7 @@ func expectQAParentRunRecord(
 	mock sqlmock.Sqlmock,
 	runID string,
 	userID int64,
-	status RunStatus,
+	status Status,
 	createdAt time.Time,
 ) {
 	mock.ExpectQuery("FROM agent_runs WHERE id=\\? AND user_id=\\?").
@@ -605,7 +605,7 @@ func expectQAParentRunRecord(
 			"tool_call_count", "tool_failure_count", "partial_result_count",
 			"omitted_evidence_count", "started_at", "ended_at",
 		}).AddRow(
-			runID, RunKindQAParent, userID, "session-1", "",
+			runID, KindQAParent, userID, "session-1", "",
 			int64(0), "", `{}`, "", int64(0), int64(0), "",
 			"workflow-1", "", "question", status, "", "multi_agent",
 			0, 0, 0, int64(0), int64(0), int64(0), int64(0), int64(0),
@@ -620,7 +620,7 @@ func TestRunStoreDeleteBySessionDeletesStepsBeforeRuns(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 
 	mock.ExpectBegin()
 	mock.ExpectExec("DELETE c FROM agent_llm_calls").
@@ -642,13 +642,13 @@ func TestRunStoreDeleteBySessionDeletesStepsBeforeRuns(t *testing.T) {
 	}
 }
 
-func TestRunStoreGetToolResultArtifactKeepsUTF8ChunkBoundaries(t *testing.T) {
+func TestStoreGetToolArtifactKeepsUTF8ChunkBoundaries(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	partial := []byte("你好")[:5]
 	mock.ExpectQuery("SELECT s\\.artifact_id,r\\.session_id,s\\.run_id,s\\.tool_call_id,.*SUBSTRING\\(s\\.artifact_content,\\?,\\?\\)").
 		WithArgs(int64(1), 5, "artifact-utf8", int64(42), "session-1", "session-1").
@@ -659,9 +659,9 @@ func TestRunStoreGetToolResultArtifactKeepsUTF8ChunkBoundaries(t *testing.T) {
 			time.Date(2026, 7, 31, 1, 2, 3, 0, time.UTC),
 		))
 
-	chunk, err := store.GetToolResultArtifact(42, "session-1", "artifact-utf8", 0, 5)
+	chunk, err := store.GetToolArtifact(42, "session-1", "artifact-utf8", 0, 5)
 	if err != nil {
-		t.Fatalf("GetToolResultArtifact: %v", err)
+		t.Fatalf("GetToolArtifact: %v", err)
 	}
 	if chunk.Content != "你" || chunk.NextOffset != 3 || !chunk.HasMore {
 		t.Fatalf("chunk = %+v", chunk)
@@ -677,7 +677,7 @@ func TestRunStoreGetReturnsFullInlineTraceAndBoundedArtifactPreview(t *testing.T
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	store := &RunStore{db: db}
+	store := &Store{db: db}
 	createdAt := time.Date(2026, 7, 31, 1, 2, 3, 0, time.UTC)
 	mock.ExpectQuery("FROM agent_runs WHERE id=\\? AND user_id=\\?").
 		WithArgs("run-1", int64(42)).
@@ -689,10 +689,10 @@ func TestRunStoreGetReturnsFullInlineTraceAndBoundedArtifactPreview(t *testing.T
 			"peak_input_tokens", "peak_reserved_tokens", "evidence_status", "forced_conclusion", "evidence_result_count",
 			"tool_call_count", "tool_failure_count", "partial_result_count", "omitted_evidence_count", "started_at", "ended_at",
 		}).AddRow(
-			"run-1", RunKindAgent, int64(42), "session-1", "qa.answerer", int64(1), strings.Repeat("a", 64),
+			"run-1", KindAgent, int64(42), "session-1", "qa.answerer", int64(1), strings.Repeat("a", 64),
 			`{"rule_version":2,"reason":"rollout_default"}`, "tools_test",
 			int64(1), int64(1), "", "", "",
-			"question", RunStatusDone, "", "", 2, 2, 10,
+			"question", StatusDone, "", "", 2, 2, 10,
 			100, 20, 30, 5, 135, 2, 100, 120, EvidencePartial, false, 1, 2, 1, 1, 3, createdAt, createdAt,
 		))
 	mock.ExpectQuery("FROM agent_steps s").

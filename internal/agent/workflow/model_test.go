@@ -2,10 +2,13 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +43,39 @@ func TestPrepareRequiresPublishedSchemasAndAcceptsExplicitCompatibility(t *testi
 	definition.OutputSchema = agentapi.SchemaRef{ID: "review.report.missing", Version: 1}
 	if _, err := Prepare(definition, schemas); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("Prepare missing schema error = %v", err)
+	}
+}
+
+func TestPrepareStoredDefinitionRestoresLegacyExecutionBudget(t *testing.T) {
+	schemas := testSchemaRegistry(t)
+	definition := legacyDefinition(t, schemas)
+
+	if _, err := Prepare(definition, schemas); err == nil ||
+		!strings.Contains(err.Error(), "budgets must be positive") {
+		t.Fatalf("Prepare legacy workflow error = %v", err)
+	}
+	prepared, err := prepareStored(definition, schemas)
+	if err != nil {
+		t.Fatalf("prepareStoredDefinition: %v", err)
+	}
+	if !prepared.legacyExecutionBudget ||
+		prepared.ContentHash != definition.ContentHash {
+		t.Fatalf("prepared legacy workflow = %+v", prepared)
+	}
+	maxRounds, maxDepth := executionLimits(prepared)
+	if maxRounds != 1 || maxDepth != prepared.Budget.MaxNodes {
+		t.Fatalf(
+			"legacy execution limits = rounds %d depth %d",
+			maxRounds,
+			maxDepth,
+		)
+	}
+	orchestrator := NewOrchestrator(schemas, staticOutputExecutor{}, nil)
+	if _, _, err := orchestrator.prepareRun(
+		prepared,
+		RunRequest{RunID: "legacy_workflow_run"},
+	); err != nil {
+		t.Fatalf("prepareRun restored legacy workflow: %v", err)
 	}
 }
 
@@ -81,6 +117,39 @@ func TestPrepareValidatesJoinModeOwnership(t *testing.T) {
 	}
 }
 
+func TestValidateNodeRequiresHighRiskGoalsToBeRequired(t *testing.T) {
+	node := NodeDefinition{
+		ID:           "evidence.verify",
+		Kind:         NodeVerifier,
+		InputSchema:  agentapi.SchemaRef{ID: "review.subject", Version: 1},
+		OutputSchema: agentapi.SchemaRef{ID: "review.report", Version: 1},
+		Timeout:      time.Second,
+		Verifier: &VerifierSpec{
+			RequiredGoals: []string{"core_flow"},
+			HighRiskGoals: []string{"live_state"},
+		},
+	}
+	err := validateNode("delivery.review", node, testSchemaRegistry(t))
+	if err == nil || !strings.Contains(
+		err.Error(),
+		`high-risk goal "live_state" must also be required`,
+	) {
+		t.Fatalf("validateNode error = %v", err)
+	}
+
+	node.Verifier.RequiredGoals = append(
+		node.Verifier.RequiredGoals,
+		"live_state",
+	)
+	if err := validateNode(
+		"delivery.review",
+		node,
+		testSchemaRegistry(t),
+	); err != nil {
+		t.Fatalf("validateNode valid high-risk goals: %v", err)
+	}
+}
+
 func TestTopologicalOrderIsStableByNodeID(t *testing.T) {
 	order, err := TopologicalOrder(testWorkflow(), testSchemaRegistry(t))
 	if err != nil {
@@ -106,6 +175,92 @@ func TestIntersectPermissionsNeverExpandsScopes(t *testing.T) {
 	)
 	if len(got.Scopes) != 1 || got.Scopes[0] != "knowledge.read" {
 		t.Fatalf("permissions=%v", got.Scopes)
+	}
+}
+
+func TestOrchestratorRejectsExecutionPositionBeforeDispatch(t *testing.T) {
+	tests := []struct {
+		name       string
+		definition Definition
+		request    RunRequest
+	}{
+		{
+			name:       "round",
+			definition: singleNodeWorkflow(),
+			request: RunRequest{
+				RunID: "workflow_round_exhausted", Round: 2,
+				Input: json.RawMessage(`{"subject":"x"}`),
+			},
+		},
+		{
+			name:       "depth",
+			definition: testWorkflow(),
+			request: RunRequest{
+				RunID: "workflow_depth_exhausted", Round: 1, BaseDepth: 1,
+				Input: json.RawMessage(`{"subject":"x"}`),
+			},
+		},
+		{
+			name:       "depth overflow",
+			definition: singleNodeWorkflow(),
+			request: RunRequest{
+				RunID: "workflow_depth_overflow", Round: 1,
+				BaseDepth: int(^uint(0) >> 1),
+				Input:     json.RawMessage(`{"subject":"x"}`),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observer := &executionPositionObserver{}
+			result, err := NewOrchestrator(
+				testSchemaRegistry(t),
+				staticOutputExecutor{},
+				nil,
+			).RunObserved(t.Context(), test.definition, test.request, observer)
+			if !errors.Is(err, ErrBudgetExhausted) {
+				t.Fatalf("RunObserved error = %v, want workflow budget exhausted", err)
+			}
+			if result.RunID != test.request.RunID ||
+				result.StopReason != StopBudgetExhausted {
+				t.Fatalf("result = %+v", result)
+			}
+			if started := observer.Started(); len(started) != 0 {
+				t.Fatalf("started nodes = %v, want none", started)
+			}
+		})
+	}
+}
+
+func TestOrchestratorPropagatesRoundAndGlobalDepth(t *testing.T) {
+	definition := testWorkflow()
+	definition.Budget.MaxRounds = 2
+	definition.Budget.MaxDepth = 4
+	observer := &executionPositionObserver{}
+	_, err := NewOrchestrator(
+		testSchemaRegistry(t),
+		staticOutputExecutor{},
+		nil,
+	).RunObserved(t.Context(), definition, RunRequest{
+		RunID: "workflow_position", Round: 2, BaseDepth: 2,
+		Input: json.RawMessage(`{"subject":"x"}`),
+		ActorPermissions: agentapi.PermissionPolicy{
+			Scopes: []string{"knowledge.read"},
+		},
+		ScenarioPermissions: agentapi.PermissionPolicy{
+			Scopes: []string{"knowledge.read"},
+		},
+	}, observer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]executionPosition{
+		"review.a":   {round: 2, depth: 3},
+		"review.b":   {round: 2, depth: 3},
+		"synthesize": {round: 2, depth: 4},
+	}
+	if got := observer.Started(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("execution positions = %v, want %v", got, want)
 	}
 }
 
@@ -182,7 +337,7 @@ func TestOrchestratorAggregatesParallelChildRunTrace(t *testing.T) {
 	ctx := runtrace.WithEvaluation(t.Context(), func(event domain.EvaluationTrace) {
 		events = append(events, event)
 	})
-	agentExecutor, err := NewAgentNodeExecutor(
+	agentExecutor, err := NewAgentExecutor(
 		testSchemaRegistry(t),
 		testAgentDefinitions(t),
 		agentRuntimeFunc(func(_ context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
@@ -485,6 +640,60 @@ type recordingExecutor struct {
 	release chan struct{}
 }
 
+type executionPosition struct {
+	round int
+	depth int
+}
+
+type executionPositionObserver struct {
+	mu      sync.Mutex
+	started map[string]executionPosition
+}
+
+func (observer *executionPositionObserver) NodeStarted(
+	_ context.Context,
+	request NodeRequest,
+) error {
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	if observer.started == nil {
+		observer.started = make(map[string]executionPosition)
+	}
+	observer.started[request.Node.ID] = executionPosition{
+		round: request.Round,
+		depth: request.Depth,
+	}
+	return nil
+}
+
+func (*executionPositionObserver) NodeSucceeded(
+	context.Context,
+	NodeRequest,
+	NodeResult,
+	*GateDecision,
+) error {
+	return nil
+}
+
+func (*executionPositionObserver) NodeFailed(
+	context.Context,
+	NodeRequest,
+	NodeResult,
+	error,
+) error {
+	return nil
+}
+
+func (observer *executionPositionObserver) Started() map[string]executionPosition {
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	started := make(map[string]executionPosition, len(observer.started))
+	for nodeID, position := range observer.started {
+		started[nodeID] = position
+	}
+	return started
+}
+
 type invalidOutputExecutor struct{}
 
 func (invalidOutputExecutor) Execute(context.Context, NodeRequest) (NodeResult, error) {
@@ -531,18 +740,19 @@ func (executor *recordingExecutor) Execute(ctx context.Context, request NodeRequ
 	return NodeResult{Handoff: Handoff{Payload: payload, Completeness: Complete}}, nil
 }
 
-func testWorkflow() WorkflowDefinition {
+func testWorkflow() Definition {
 	report := agentapi.SchemaRef{ID: "review.report", Version: 1}
 	reportList := agentapi.SchemaRef{ID: "review.report.list", Version: 1}
-	return WorkflowDefinition{
+	return Definition{
 		ID: "delivery.review", Version: 1, Purpose: "Run independent reviewers.",
 		InputSchema:  agentapi.SchemaRef{ID: "review.subject", Version: 1},
 		OutputSchema: reportList,
 		Permissions:  agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
-		Budget: WorkflowBudget{
-			MaxNodes: 3, MaxParallelism: 2, Timeout: time.Second, MaxHandoffBytes: 4096,
+		Budget: Budget{
+			MaxNodes: 3, MaxParallelism: 2, MaxRounds: 1, MaxDepth: 2,
+			Timeout: time.Second, MaxHandoffBytes: 4096,
 		},
-		FailurePolicy: WorkflowFailurePolicy{Mode: FailFast},
+		FailurePolicy: FailurePolicy{Mode: FailFast},
 		Nodes: []NodeDefinition{
 			{
 				ID: "review.b", Kind: NodeAgent,
@@ -572,16 +782,83 @@ func testWorkflow() WorkflowDefinition {
 	}
 }
 
-func singleNodeWorkflow() WorkflowDefinition {
+func legacyDefinition(
+	t *testing.T,
+	schemas *agentapi.SchemaRegistry,
+) Definition {
+	t.Helper()
+	definition, err := Prepare(testWorkflow(), schemas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.ContentHash = ""
+	definition.Budget.MaxRounds = 0
+	definition.Budget.MaxDepth = 0
+	definition.Budget.MaxDuplicateRatio = 0
+	legacy := struct {
+		ID            string                    `json:"id"`
+		Version       int64                     `json:"version"`
+		Purpose       string                    `json:"purpose"`
+		InputSchema   agentapi.SchemaRef        `json:"input_schema"`
+		OutputSchema  agentapi.SchemaRef        `json:"output_schema"`
+		Nodes         []NodeDefinition          `json:"nodes"`
+		Edges         []EdgeDefinition          `json:"edges"`
+		Permissions   agentapi.PermissionPolicy `json:"permissions"`
+		Budget        legacyBudget              `json:"budget"`
+		FailurePolicy FailurePolicy             `json:"failure_policy"`
+		ContentHash   string                    `json:"content_hash"`
+	}{
+		ID: definition.ID, Version: definition.Version,
+		Purpose: definition.Purpose, InputSchema: definition.InputSchema,
+		OutputSchema: definition.OutputSchema, Nodes: definition.Nodes,
+		Edges: definition.Edges, Permissions: definition.Permissions,
+		Budget: legacyBudget{
+			MaxNodes:        definition.Budget.MaxNodes,
+			MaxParallelism:  definition.Budget.MaxParallelism,
+			Timeout:         definition.Budget.Timeout,
+			MaxHandoffBytes: definition.Budget.MaxHandoffBytes,
+			MaxInputTokens:  definition.Budget.MaxInputTokens,
+			MaxOutputTokens: definition.Budget.MaxOutputTokens,
+			MaxTotalTokens:  definition.Budget.MaxTotalTokens,
+			MaxToolCalls:    definition.Budget.MaxToolCalls,
+			MaxCostMicros:   definition.Budget.MaxCostMicros,
+			MaxRetries:      definition.Budget.MaxRetries,
+		},
+		FailurePolicy: definition.FailurePolicy,
+	}
+	payload, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(payload)
+	definition.ContentHash = hex.EncodeToString(sum[:])
+	return definition
+}
+
+type legacyBudget struct {
+	MaxNodes        int           `json:"max_nodes"`
+	MaxParallelism  int           `json:"max_parallelism"`
+	Timeout         time.Duration `json:"timeout"`
+	MaxHandoffBytes int64         `json:"max_handoff_bytes"`
+	MaxInputTokens  int64         `json:"max_input_tokens"`
+	MaxOutputTokens int64         `json:"max_output_tokens"`
+	MaxTotalTokens  int64         `json:"max_total_tokens"`
+	MaxToolCalls    int64         `json:"max_tool_calls"`
+	MaxCostMicros   int64         `json:"max_cost_micros"`
+	MaxRetries      int64         `json:"max_retries"`
+}
+
+func singleNodeWorkflow() Definition {
 	report := agentapi.SchemaRef{ID: "review.report", Version: 1}
-	return WorkflowDefinition{
+	return Definition{
 		ID: "delivery.review.single", Version: 1, Purpose: "Run one reviewer.",
 		InputSchema:  agentapi.SchemaRef{ID: "review.subject", Version: 1},
 		OutputSchema: report,
-		Budget: WorkflowBudget{
-			MaxNodes: 1, MaxParallelism: 1, Timeout: time.Second, MaxHandoffBytes: 4096,
+		Budget: Budget{
+			MaxNodes: 1, MaxParallelism: 1, MaxRounds: 1, MaxDepth: 1,
+			Timeout: time.Second, MaxHandoffBytes: 4096,
 		},
-		FailurePolicy: WorkflowFailurePolicy{Mode: FailFast},
+		FailurePolicy: FailurePolicy{Mode: FailFast},
 		Nodes: []NodeDefinition{{
 			ID: "review.a", Kind: NodeAgent,
 			Agent:        agentapi.DefinitionRef{ID: "review.correctness", Version: 1},
@@ -642,8 +919,24 @@ func testSchemaRegistry(t *testing.T) *agentapi.SchemaRegistry {
 					"required":["node"],
 					"properties":{"node":{"type":"string","minLength":1}},
 					"additionalProperties":false
-				}
-			}`),
+					}
+				}`),
+		},
+		{
+			ID: "gate.decision", Version: 1,
+			Document: json.RawMessage(`{
+					"type":"object",
+					"required":["gate_id","subject_hash","decision","evaluated_at"],
+					"properties":{
+						"gate_id":{"type":"string","minLength":1},
+						"subject_hash":{"type":"string"},
+						"decision":{"type":"string","minLength":1},
+						"reason_codes":{"type":"array","items":{"type":"string"}},
+						"finding_ids":{"type":"array","items":{"type":"string"}},
+						"evaluated_at":{"type":"string","minLength":1}
+					},
+					"additionalProperties":false
+				}`),
 		},
 		{
 			ID: "other.input", Version: 1,

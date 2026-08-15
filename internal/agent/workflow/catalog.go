@@ -23,13 +23,13 @@ type definitionKey struct {
 	version int64
 }
 
-type AgentDefinitionResolver interface {
+type AgentResolver interface {
 	Resolve(agentapi.DefinitionRef) (agentapi.Definition, error)
 }
 
 // DefinitionRecord adds rollout metadata without changing the immutable hash.
 type DefinitionRecord struct {
-	WorkflowDefinition
+	Definition
 	Active    bool      `json:"active"`
 	Default   bool      `json:"default"`
 	CreatedBy int64     `json:"created_by"`
@@ -51,15 +51,15 @@ type DefinitionAuditEvent struct {
 }
 
 type catalogPersistence interface {
-	PublishDefinitions(context.Context, []WorkflowDefinition, int64) ([]DefinitionRecord, error)
+	Publish(context.Context, []Definition, int64) ([]DefinitionRecord, error)
 	LoadFullCatalog(context.Context) ([]DefinitionRecord, error)
-	LoadDefinitionRollouts(context.Context) ([]RolloutRule, error)
+	LoadRollouts(context.Context) ([]RolloutRule, error)
 	ListDefinitions(context.Context, DefinitionCursor, int) ([]DefinitionRecord, error)
-	SetDefinitionDefault(context.Context, string, int64, int64) error
-	SetDefinitionActive(context.Context, string, int64, bool, int64) error
-	SetDefinitionRollout(context.Context, RolloutRule, int64) error
-	ListDefinitionAudit(context.Context, string, int64, int) ([]DefinitionAuditEvent, error)
-	ListDefinitionRolloutAudit(context.Context, string, int64, int) ([]RolloutAuditEvent, error)
+	SetDefault(context.Context, string, int64, int64) error
+	SetActive(context.Context, string, int64, bool, int64) error
+	SetRollout(context.Context, RolloutRule, int64) error
+	ListAudit(context.Context, string, int64, int) ([]DefinitionAuditEvent, error)
+	ListRolloutAudit(context.Context, string, int64, int) ([]RolloutAuditEvent, error)
 }
 
 type catalogState struct {
@@ -79,11 +79,11 @@ type Catalog struct {
 	writeMu sync.Mutex
 	state   atomic.Pointer[catalogState]
 	schemas *agentapi.SchemaRegistry
-	agents  AgentDefinitionResolver
+	agents  AgentResolver
 	store   catalogPersistence
 }
 
-func NewCatalog(schemas *agentapi.SchemaRegistry, agents AgentDefinitionResolver) *Catalog {
+func NewCatalog(schemas *agentapi.SchemaRegistry, agents AgentResolver) *Catalog {
 	catalog := &Catalog{schemas: schemas, agents: agents}
 	catalog.state.Store(&catalogState{
 		records:  make(map[definitionKey]DefinitionRecord),
@@ -94,13 +94,13 @@ func NewCatalog(schemas *agentapi.SchemaRegistry, agents AgentDefinitionResolver
 	return catalog
 }
 
-func (catalog *Catalog) Publish(definitions []WorkflowDefinition) error {
+func (catalog *Catalog) Publish(definitions []Definition) error {
 	return catalog.PublishAs(context.Background(), definitions, 0)
 }
 
 func (catalog *Catalog) PublishAs(
 	ctx context.Context,
-	definitions []WorkflowDefinition,
+	definitions []Definition,
 	actorUserID int64,
 ) error {
 	prepared, err := catalog.prepare(definitions)
@@ -111,7 +111,7 @@ func (catalog *Catalog) PublishAs(
 	defer catalog.writeMu.Unlock()
 	records := make([]DefinitionRecord, 0, len(prepared))
 	if catalog.store != nil {
-		records, err = catalog.store.PublishDefinitions(ctx, prepared, actorUserID)
+		records, err = catalog.store.Publish(ctx, prepared, actorUserID)
 		if err != nil {
 			return err
 		}
@@ -119,10 +119,10 @@ func (catalog *Catalog) PublishAs(
 		now := time.Now().UTC()
 		for _, definition := range prepared {
 			records = append(records, DefinitionRecord{
-				WorkflowDefinition: definition,
-				Active:             true,
-				CreatedBy:          actorUserID,
-				CreatedAt:          now,
+				Definition: definition,
+				Active:     true,
+				CreatedBy:  actorUserID,
+				CreatedAt:  now,
 			})
 		}
 	}
@@ -141,7 +141,7 @@ func (catalog *Catalog) PublishAs(
 		}
 		if record.Default ||
 			(catalog.store == nil && record.Version > next.defaults[record.ID]) {
-			clearWorkflowDefault(next, record.ID)
+			clearDefault(next, record.ID)
 			record.Default = true
 			next.defaults[record.ID] = record.Version
 		}
@@ -150,7 +150,7 @@ func (catalog *Catalog) PublishAs(
 			next.highest[record.ID] = record.Version
 		}
 		if catalog.store == nil {
-			appendWorkflowAudit(
+			appendAudit(
 				next, record.ID, record.Version, "published",
 				actorUserID, record.CreatedAt,
 			)
@@ -162,14 +162,30 @@ func (catalog *Catalog) PublishAs(
 }
 
 func (catalog *Catalog) prepare(
-	definitions []WorkflowDefinition,
-) ([]WorkflowDefinition, error) {
+	definitions []Definition,
+) ([]Definition, error) {
+	return catalog.prepareDefinitions(definitions, Prepare)
+}
+
+func (catalog *Catalog) prepareStored(
+	definitions []Definition,
+) ([]Definition, error) {
+	return catalog.prepareDefinitions(definitions, prepareStored)
+}
+
+func (catalog *Catalog) prepareDefinitions(
+	definitions []Definition,
+	prepare func(
+		Definition,
+		*agentapi.SchemaRegistry,
+	) (Definition, error),
+) ([]Definition, error) {
 	if len(definitions) == 0 {
 		return nil, fmt.Errorf("workflow definitions are required: %w", ErrInvalid)
 	}
-	incoming := make(map[definitionKey]WorkflowDefinition, len(definitions))
+	incoming := make(map[definitionKey]Definition, len(definitions))
 	for _, definition := range definitions {
-		prepared, err := Prepare(definition, catalog.schemas)
+		prepared, err := prepare(definition, catalog.schemas)
 		if err != nil {
 			return nil, fmt.Errorf("%v: %w", err, ErrInvalid)
 		}
@@ -185,7 +201,7 @@ func (catalog *Catalog) prepare(
 		}
 		incoming[key] = prepared
 	}
-	prepared := make([]WorkflowDefinition, 0, len(incoming))
+	prepared := make([]Definition, 0, len(incoming))
 	for _, definition := range incoming {
 		prepared = append(prepared, definition)
 	}
@@ -198,7 +214,7 @@ func (catalog *Catalog) prepare(
 	return prepared, nil
 }
 
-func (catalog *Catalog) validateAgents(definition WorkflowDefinition) error {
+func (catalog *Catalog) validateAgents(definition Definition) error {
 	if catalog.agents == nil {
 		return fmt.Errorf("publish workflow %q: agent definition resolver is required", definition.ID)
 	}
@@ -301,7 +317,7 @@ func ensureToolSubset(subset, superset []string, restricted bool) error {
 	return nil
 }
 
-func (catalog *Catalog) Resolve(ref DefinitionRef) (WorkflowDefinition, error) {
+func (catalog *Catalog) Resolve(ref DefinitionRef) (Definition, error) {
 	definition, _, err := catalog.resolve(ref, "", false)
 	return definition, err
 }
@@ -310,7 +326,7 @@ func (catalog *Catalog) Resolve(ref DefinitionRef) (WorkflowDefinition, error) {
 func (catalog *Catalog) ResolveFor(
 	ref DefinitionRef,
 	stableKey string,
-) (WorkflowDefinition, DefinitionSelection, error) {
+) (Definition, DefinitionSelection, error) {
 	return catalog.resolve(ref, stableKey, true)
 }
 
@@ -318,7 +334,7 @@ func (catalog *Catalog) resolve(
 	ref DefinitionRef,
 	stableKey string,
 	applyRollout bool,
-) (WorkflowDefinition, DefinitionSelection, error) {
+) (Definition, DefinitionSelection, error) {
 	current := catalog.state.Load()
 	version := ref.Version
 	selection := DefinitionSelection{Reason: "explicit_version"}
@@ -332,25 +348,25 @@ func (catalog *Catalog) resolve(
 					current, rule, stableKey, current.defaults[ref.ID],
 				)
 				if err != nil {
-					return WorkflowDefinition{}, DefinitionSelection{}, err
+					return Definition{}, DefinitionSelection{}, err
 				}
 			}
 		}
 	}
 	record, ok := current.records[definitionKey{id: ref.ID, version: version}]
 	if !ok {
-		return WorkflowDefinition{}, DefinitionSelection{}, fmt.Errorf(
+		return Definition{}, DefinitionSelection{}, fmt.Errorf(
 			"workflow %q version %d not found: %w",
 			ref.ID, version, ErrNotFound,
 		)
 	}
 	if ref.Version == 0 && version == current.defaults[ref.ID] && !record.Active {
-		return WorkflowDefinition{}, DefinitionSelection{}, fmt.Errorf(
+		return Definition{}, DefinitionSelection{}, fmt.Errorf(
 			"workflow %q default version %d is disabled: %w",
 			ref.ID, version, ErrConflict,
 		)
 	}
-	return cloneDefinition(record.WorkflowDefinition), selection, nil
+	return cloneDefinition(record.Definition), selection, nil
 }
 
 func (catalog *Catalog) rolloutSelection(
@@ -381,11 +397,11 @@ func (catalog *Catalog) rolloutSelection(
 	return selection, version, nil
 }
 
-func (catalog *Catalog) List() []WorkflowDefinition {
+func (catalog *Catalog) List() []Definition {
 	current := catalog.state.Load()
-	out := make([]WorkflowDefinition, 0, len(current.records))
+	out := make([]Definition, 0, len(current.records))
 	for _, record := range current.records {
-		out = append(out, cloneDefinition(record.WorkflowDefinition))
+		out = append(out, cloneDefinition(record.Definition))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].ID == out[j].ID {
@@ -430,8 +446,8 @@ func (catalog *Catalog) AttachStore(
 		rollouts: make(map[string]RolloutRule),
 	}
 	for _, record := range records {
-		prepared, prepareErr := catalog.prepare([]WorkflowDefinition{
-			record.WorkflowDefinition,
+		prepared, prepareErr := catalog.prepareStored([]Definition{
+			record.Definition,
 		})
 		if prepareErr != nil {
 			return fmt.Errorf(
@@ -439,7 +455,7 @@ func (catalog *Catalog) AttachStore(
 				record.ID, record.Version, prepareErr,
 			)
 		}
-		record.WorkflowDefinition = prepared[0]
+		record.Definition = prepared[0]
 		key := definitionKey{id: record.ID, version: record.Version}
 		next.records[key] = cloneDefinitionRecord(record)
 		if record.Version > next.highest[record.ID] {
@@ -461,7 +477,7 @@ func (catalog *Catalog) AttachStore(
 			next.defaults[record.ID] = record.Version
 		}
 	}
-	rollouts, err := store.LoadDefinitionRollouts(ctx)
+	rollouts, err := store.LoadRollouts(ctx)
 	if err != nil {
 		return err
 	}
@@ -541,18 +557,18 @@ func (catalog *Catalog) SetDefault(
 			)
 		}
 		if catalog.store != nil {
-			if err := catalog.store.SetDefinitionDefault(
+			if err := catalog.store.SetDefault(
 				ctx, id, version, actorUserID,
 			); err != nil {
 				return err
 			}
 		}
-		clearWorkflowDefault(next, id)
+		clearDefault(next, id)
 		record.Default = true
 		next.records[definitionKey{id: id, version: version}] = record
 		next.defaults[id] = version
 		if catalog.store == nil {
-			appendWorkflowAudit(
+			appendAudit(
 				next, id, version, "default_set", actorUserID, time.Now().UTC(),
 			)
 		}
@@ -578,7 +594,7 @@ func (catalog *Catalog) SetActive(
 			)
 		}
 		if catalog.store != nil {
-			if err := catalog.store.SetDefinitionActive(
+			if err := catalog.store.SetActive(
 				ctx, id, version, active, actorUserID,
 			); err != nil {
 				return err
@@ -591,7 +607,7 @@ func (catalog *Catalog) SetActive(
 			if active {
 				action = "enabled"
 			}
-			appendWorkflowAudit(
+			appendAudit(
 				next, id, version, action, actorUserID, time.Now().UTC(),
 			)
 		}
@@ -655,7 +671,7 @@ func (catalog *Catalog) SetRollout(
 		return RolloutRule{}, err
 	}
 	if catalog.store != nil {
-		if err := catalog.store.SetDefinitionRollout(ctx, prepared, actorUserID); err != nil {
+		if err := catalog.store.SetRollout(ctx, prepared, actorUserID); err != nil {
 			return RolloutRule{}, err
 		}
 	}
@@ -666,7 +682,7 @@ func (catalog *Catalog) SetRollout(
 		if active {
 			action = "rollout_enabled"
 		}
-		appendWorkflowRolloutAudit(next, prepared, action, actorUserID)
+		appendRolloutAudit(next, prepared, action, actorUserID)
 	}
 	next.revision++
 	catalog.state.Store(next)
@@ -725,7 +741,7 @@ func (catalog *Catalog) ListAudit(
 		return nil, fmt.Errorf("invalid workflow audit cursor or limit: %w", ErrInvalid)
 	}
 	if catalog.store != nil {
-		return catalog.store.ListDefinitionAudit(ctx, id, afterSeq, limit)
+		return catalog.store.ListAudit(ctx, id, afterSeq, limit)
 	}
 	current := catalog.state.Load()
 	events := make([]DefinitionAuditEvent, 0, min(limit, len(current.audit)))
@@ -751,7 +767,7 @@ func (catalog *Catalog) ListRolloutAudit(
 		return nil, fmt.Errorf("invalid workflow rollout audit cursor or limit: %w", ErrInvalid)
 	}
 	if catalog.store != nil {
-		return catalog.store.ListDefinitionRolloutAudit(ctx, id, afterSeq, limit)
+		return catalog.store.ListRolloutAudit(ctx, id, afterSeq, limit)
 	}
 	current := catalog.state.Load()
 	events := make([]RolloutAuditEvent, 0, min(limit, len(current.rolloutAudit)))
@@ -794,7 +810,7 @@ func cloneCatalogState(current *catalogState) *catalogState {
 	return next
 }
 
-func clearWorkflowDefault(current *catalogState, id string) {
+func clearDefault(current *catalogState, id string) {
 	version := current.defaults[id]
 	if version == 0 {
 		return
@@ -806,7 +822,7 @@ func clearWorkflowDefault(current *catalogState, id string) {
 	delete(current.defaults, id)
 }
 
-func appendWorkflowAudit(
+func appendAudit(
 	current *catalogState,
 	id string,
 	version int64,
@@ -821,7 +837,7 @@ func appendWorkflowAudit(
 	})
 }
 
-func appendWorkflowRolloutAudit(
+func appendRolloutAudit(
 	current *catalogState,
 	rule RolloutRule,
 	action string,
@@ -837,6 +853,6 @@ func appendWorkflowRolloutAudit(
 }
 
 func cloneDefinitionRecord(record DefinitionRecord) DefinitionRecord {
-	record.WorkflowDefinition = cloneDefinition(record.WorkflowDefinition)
+	record.Definition = cloneDefinition(record.Definition)
 	return record
 }

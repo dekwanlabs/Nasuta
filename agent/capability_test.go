@@ -190,6 +190,7 @@ func capabilityTestValue(version int64) Capability {
 		OutputSchema:    SchemaRef{ID: "capability.output", Version: 1},
 		ToolIDs:         []string{"search_code"},
 		PermissionScope: []string{"knowledge.read"},
+		Freshness:       FreshnessStable,
 		SideEffects:     SideEffectNone,
 		RetrySafe:       true,
 		MaxConcurrency:  2,

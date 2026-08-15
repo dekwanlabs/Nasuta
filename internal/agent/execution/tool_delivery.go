@@ -27,7 +27,7 @@ type toolDeliveryError struct {
 	Retry           map[string]any `json:"retry"`
 }
 
-func (agent *Agent) prepareToolDelivery(
+func (agent *Agent) prepareDelivery(
 	runID string,
 	messages []llm.Message,
 	pendingNotices []string,
@@ -41,7 +41,7 @@ func (agent *Agent) prepareToolDelivery(
 	}
 	missing := missingRequiredLiterals(execution.PromptContent, execution.AnswerContract)
 	if len(missing) > 0 {
-		return failedToolDelivery(call.Function.Name, execution, toolDeliveryError{
+		return failedDelivery(call.Function.Name, execution, toolDeliveryError{
 			Error:           "answer_contract_missing_from_prompt",
 			Tool:            call.Function.Name,
 			ResultBytes:     len(execution.AuthoritativeContent),
@@ -49,7 +49,7 @@ func (agent *Agent) prepareToolDelivery(
 			Retry:           map[string]any{"action": "restore_authoritative_content_or_retry_with_pagination"},
 		})
 	}
-	available, required, err := agent.toolDeliveryBudget(messages, pendingNotices, tools, call, currentContract, execution)
+	available, required, err := agent.deliveryBudget(messages, pendingNotices, tools, call, currentContract, execution)
 	if err != nil {
 		log.WarnfCtx(
 			log.WithTraceID(context.Background(), runID),
@@ -57,7 +57,7 @@ func (agent *Agent) prepareToolDelivery(
 			call.Function.Name,
 			err,
 		)
-		return failedToolDelivery(call.Function.Name, execution, toolDeliveryError{
+		return failedDelivery(call.Function.Name, execution, toolDeliveryError{
 			Error:       "tool_result_budget_calculation_failed",
 			Tool:        call.Function.Name,
 			ResultBytes: len(execution.AuthoritativeContent),
@@ -66,7 +66,7 @@ func (agent *Agent) prepareToolDelivery(
 	}
 	if available >= 0 && required > available {
 		execution.ArtifactID = toolResultArtifactID(runID, call.ID)
-		return failedToolDelivery(call.Function.Name, execution, toolDeliveryError{
+		return failedDelivery(call.Function.Name, execution, toolDeliveryError{
 			Error:           "tool_result_exceeds_context_budget",
 			Tool:            call.Function.Name,
 			ResultBytes:     len(execution.AuthoritativeContent),
@@ -79,7 +79,7 @@ func (agent *Agent) prepareToolDelivery(
 	return execution
 }
 
-func (agent *Agent) toolDeliveryBudget(
+func (agent *Agent) deliveryBudget(
 	messages []llm.Message,
 	pendingNotices []string,
 	tools []llm.ToolDef,
@@ -90,15 +90,15 @@ func (agent *Agent) toolDeliveryBudget(
 	if agent.cfg.ContextWindow <= 0 {
 		return -1, 0, nil
 	}
-	current := toolDeliveryContextMessages(messages, pendingNotices, currentContract)
+	current := deliveryContextMessages(messages, pendingNotices, currentContract)
 	currentInputTokens, err := estimateInputTokens(current, tools)
 	if err != nil {
 		return 0, 0, err
 	}
-	outputReserve := agent.outputTokenReserve()
+	outputReserve := agent.outputReserve()
 	safety := contextSafetyTokens(agent.cfg.ContextWindow)
 	available := agent.cfg.ContextWindow - currentInputTokens - outputReserve - safety
-	candidate := toolDeliveryMessages(messages, pendingNotices, call, currentContract, execution)
+	candidate := deliveryMessages(messages, pendingNotices, call, currentContract, execution)
 	candidateInputTokens, err := estimateInputTokens(candidate, tools)
 	if err != nil {
 		return 0, 0, err
@@ -106,7 +106,7 @@ func (agent *Agent) toolDeliveryBudget(
 	return max(0, available), max(0, candidateInputTokens-currentInputTokens), nil
 }
 
-func toolDeliveryMessages(
+func deliveryMessages(
 	messages []llm.Message,
 	pendingNotices []string,
 	call llm.ToolCall,
@@ -114,38 +114,38 @@ func toolDeliveryMessages(
 	execution ToolExecution,
 ) []llm.Message {
 	candidate := append(append([]llm.Message(nil), messages...), toolMessage(call.ID, call.Function.Name, execution.PromptContent))
-	return appendToolDeliveryContext(candidate, pendingNotices, currentContract, execution)
+	return appendDeliveryContext(candidate, pendingNotices, currentContract, execution)
 }
 
-func toolDeliveryContextMessages(
+func deliveryContextMessages(
 	messages []llm.Message,
 	pendingNotices []string,
 	currentContract *exactAnswerContract,
 ) []llm.Message {
-	return appendToolDeliveryContext(
+	return appendDeliveryContext(
 		append([]llm.Message(nil), messages...), pendingNotices, currentContract, ToolExecution{},
 	)
 }
 
-func appendToolDeliveryContext(
+func appendDeliveryContext(
 	candidate []llm.Message,
 	pendingNotices []string,
 	currentContract *exactAnswerContract,
 	execution ToolExecution,
 ) []llm.Message {
 	for _, notice := range pendingNotices {
-		candidate = append(candidate, toolDeliveryNoticeMessage(notice))
+		candidate = append(candidate, deliveryNoticeMessage(notice))
 	}
 	for _, notice := range execution.Notices {
-		candidate = append(candidate, toolDeliveryNoticeMessage(notice))
+		candidate = append(candidate, deliveryNoticeMessage(notice))
 	}
-	if contractMessage, ok := combinedAnswerContractMessage(currentContract, execution.AnswerContract); ok {
-		candidate = append(withoutAnswerContractMessages(candidate), contractMessage)
+	if contractMessage, ok := combinedContractMessage(currentContract, execution.AnswerContract); ok {
+		candidate = append(withoutContractMessages(candidate), contractMessage)
 	}
 	return candidate
 }
 
-func toolDeliveryNoticeMessage(notice string) llm.Message {
+func deliveryNoticeMessage(notice string) llm.Message {
 	return llm.Message{
 		Role: "system",
 		Content: prompts.MustRender(prompts.AgentQAToolDeliveryNotice, struct {
@@ -154,7 +154,7 @@ func toolDeliveryNoticeMessage(notice string) llm.Message {
 	}
 }
 
-func combinedAnswerContractMessage(
+func combinedContractMessage(
 	current *exactAnswerContract,
 	addition tool.AnswerContract,
 ) (llm.Message, bool) {
@@ -166,10 +166,10 @@ func combinedAnswerContractMessage(
 	if !combined.Active() {
 		return llm.Message{}, false
 	}
-	return answerContractMessage(tool.AnswerContract{RequiredLiterals: combined.required})
+	return contractMessage(tool.AnswerContract{RequiredLiterals: combined.required})
 }
 
-func failedToolDelivery(name string, execution ToolExecution, failure toolDeliveryError) ToolExecution {
+func failedDelivery(name string, execution ToolExecution, failure toolDeliveryError) ToolExecution {
 	encoded, err := json.Marshal(failure)
 	if err != nil {
 		encoded = []byte(fmt.Sprintf(`{"error":%q,"tool":%q}`, ErrToolResultDelivery.Error(), name))

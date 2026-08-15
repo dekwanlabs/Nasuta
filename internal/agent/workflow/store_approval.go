@@ -10,8 +10,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-// CancelWorkflow atomically closes active node Attempts before the Run.
-func (workflowStore *Store) CancelWorkflow(
+// CancelRun atomically closes active node Attempts before the Run.
+func (workflowStore *Store) CancelRun(
 	ctx context.Context,
 	workflowRunID string,
 	endedAt time.Time,
@@ -126,10 +126,10 @@ func (workflowStore *Store) CancelWorkflow(
 	return CancelTransition{Applied: true, Status: RunCancelled}, nil
 }
 
-// DecideHumanApproval atomically records the immutable decision and its state transition.
-func (workflowStore *Store) DecideHumanApproval(
+// DecideApproval atomically records the immutable decision and its state transition.
+func (workflowStore *Store) DecideApproval(
 	ctx context.Context,
-	approval WorkflowApproval,
+	approval Approval,
 	approvedHandoff *Handoff,
 ) (ApprovalTransition, error) {
 	tx, err := workflowStore.db.BeginTx(ctx, nil)
@@ -338,8 +338,8 @@ func getApprovalTx(
 	tx *sql.Tx,
 	workflowRunID string,
 	nodeID string,
-) (*WorkflowApproval, error) {
-	var approval WorkflowApproval
+) (*Approval, error) {
+	var approval Approval
 	if err := tx.QueryRowContext(ctx, `SELECT
 		workflow_run_id,node_id,approval_decision,approver_user_id,approver_tenant_id,
 		approval_comment,approval_decided_at

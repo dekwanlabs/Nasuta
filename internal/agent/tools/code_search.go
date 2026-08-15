@@ -197,7 +197,7 @@ func (srv *Service) FindCode(ctx context.Context, query, lang string, limit int)
 	if err != nil {
 		return domain.SearchResult[domain.CodeSearchHit]{}, err
 	}
-	return srv.FindCodeWithVector(ctx, query, lang, limit, vector)
+	return srv.FindCodeByVector(ctx, query, lang, limit, vector)
 }
 
 func (srv *Service) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
@@ -222,7 +222,7 @@ func (srv *Service) EmbedQuery(ctx context.Context, query string) ([]float32, er
 	return embedding.Vectors[0], nil
 }
 
-func (srv *Service) FindCodeWithVector(ctx context.Context, query, lang string, limit int, vector []float32) (domain.SearchResult[domain.CodeSearchHit], error) {
+func (srv *Service) FindCodeByVector(ctx context.Context, query, lang string, limit int, vector []float32) (domain.SearchResult[domain.CodeSearchHit], error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -306,7 +306,7 @@ func (srv *Service) FindCodeWithVector(ctx context.Context, query, lang string, 
 				Path: payloadString(hit.Metadata, "path"), Lang: payloadString(hit.Metadata, "lang"),
 				Repo: payloadString(hit.Metadata, "repo"), Layer: payloadString(hit.Metadata, "layer"),
 				StartLine: payloadInt(hit.Metadata["start_line"]), EndLine: payloadInt(hit.Metadata["end_line"]),
-				Text: payloadString(hit.Metadata, "text"),
+				Text:  payloadString(hit.Metadata, "text"),
 				Score: adjusted, ScoreKind: string(hit.ScoreKind), EvidenceClass: evidenceClass, TrustTier: trustTier,
 			}
 			if hit.ScoreKind == semantic.ScoreFusion {

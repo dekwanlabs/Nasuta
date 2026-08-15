@@ -55,7 +55,7 @@ func TestDefinitionEvidenceSeeded(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := definitionEvidenceSeeded(test.policy, test.blocks); got != test.want {
+			if got := evidenceSeeded(test.policy, test.blocks); got != test.want {
 				t.Fatalf("definitionEvidenceSeeded() = %t, want %t", got, test.want)
 			}
 		})
@@ -63,7 +63,7 @@ func TestDefinitionEvidenceSeeded(t *testing.T) {
 }
 
 func TestContextEvidenceConflictsPreservesIdentityAndVersions(t *testing.T) {
-	conflicts := contextEvidenceConflicts([]agentapi.ContextBlock{{
+	conflicts := evidenceConflicts([]agentapi.ContextBlock{{
 		EvidenceConflicts: []agentapi.EvidenceConflict{{
 			Identity: agentapi.EvidenceIdentity{
 				SourceKind: "runtime", Target: "trace-1", Section: "events",

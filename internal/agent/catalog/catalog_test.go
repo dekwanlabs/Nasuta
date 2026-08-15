@@ -101,7 +101,7 @@ func TestDefaultReviewersArePinnedReadOnlyDefinitions(t *testing.T) {
 		LLMAnswerMaxTokens: 2048, LLMContextWindow: 32000,
 		AgentTimeout: config.Duration(time.Minute), AgentMaxSteps: 4,
 	}
-	definitions, err := DefaultReviewersVersion(settings, 7)
+	definitions, err := DefaultReviewers(settings, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		LLMAnswerMaxTokens: 2048, LLMContextWindow: 32000,
 		AgentTimeout: config.Duration(time.Minute), AgentMaxSteps: 4,
 	}
-	definitions, err := DefaultInvestigatorsVersion(settings, 11)
+	definitions, err := DefaultInvestigators(settings, 11)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,10 +147,13 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		"investigator.code":    {"search_code", "get_symbol", "trace_calls", "list_apis"},
 		"investigator.runtime": {"get_service", "trace_deps", "list_apis", "trace_calls"},
 		"investigator.docs":    {"get_service", "search_runbooks", "check_docs"},
+		"investigator.web":     {"web_search"},
+		"investigator.memory":  {},
 		"synthesizer":          {},
 	}
 	wantIDs := []string{
-		"investigator.code", "investigator.runtime", "investigator.docs", "synthesizer",
+		"investigator.code", "investigator.runtime", "investigator.docs",
+		"investigator.web", "investigator.memory", "synthesizer",
 	}
 	if len(definitions) != len(wantIDs) {
 		t.Fatalf("definitions = %d, want %d", len(definitions), len(wantIDs))
@@ -172,24 +175,30 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		}
 	}
 	synthesizer := definitions[len(definitions)-1]
-	if synthesizer.InputSchema.ID != "investigation.bundle" ||
+	if synthesizer.InputSchema.ID != "investigation.verified_bundle" ||
 		synthesizer.OutputSchema.ID != "investigation.answer" ||
+		synthesizer.Prompt.Version != "investigation-synthesis-v3" ||
+		!strings.Contains(synthesizer.Prompt.System, `"supported_claims"`) ||
+		!strings.Contains(synthesizer.Prompt.System, `"partial_claims"`) ||
+		!strings.Contains(synthesizer.Prompt.System, `"unsupported_claims"`) ||
+		strings.Contains(synthesizer.Prompt.System, `"handoffs[].payload"`) ||
+		strings.Contains(synthesizer.Prompt.System, `"unavailable_tasks"`) ||
 		len(synthesizer.Tools.VisibleToolIDs) != 0 || !synthesizer.Tools.RestrictVisible {
 		t.Fatalf("synthesizer contract = %+v", synthesizer)
 	}
 }
 
-func TestDefaultInvestigationCapabilitiesPinAgentContracts(t *testing.T) {
+func TestDefaultCapabilitiesPinAgentContracts(t *testing.T) {
 	settings := &config.PlatformSettings{
 		LLMProvider: "openai", LLMModel: "investigation-model",
 		LLMAnswerMaxTokens: 2048, LLMContextWindow: 32000,
 		AgentTimeout: config.Duration(time.Minute), AgentMaxSteps: 4,
 	}
-	definitions, err := DefaultInvestigatorsVersion(settings, 12)
+	definitions, err := DefaultInvestigators(settings, 12)
 	if err != nil {
 		t.Fatal(err)
 	}
-	capabilities, err := DefaultInvestigationCapabilities(definitions, 12)
+	capabilities, err := DefaultCapabilities(definitions, 12)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,6 +206,8 @@ func TestDefaultInvestigationCapabilitiesPinAgentContracts(t *testing.T) {
 		"knowledge.code.inspect":  "investigator.code",
 		"knowledge.service.trace": "investigator.runtime",
 		"knowledge.docs.verify":   "investigator.docs",
+		"knowledge.web.research":  "investigator.web",
+		"knowledge.memory.recall": "investigator.memory",
 		"evidence.synthesize":     "synthesizer",
 	}
 	wantFacets := map[string][]string{
@@ -210,7 +221,25 @@ func TestDefaultInvestigationCapabilitiesPinAgentContracts(t *testing.T) {
 		"knowledge.docs.verify": {
 			"documentation", "business_domain",
 		},
+		"knowledge.web.research": {
+			"implementation", "entrypoint", "core_flow", "data_and_state",
+			"service.topology", "system_boundary", "external_dependency",
+			"runtime_and_operations", "documentation", "business_domain",
+		},
+		"knowledge.memory.recall": {
+			"implementation", "entrypoint", "core_flow", "data_and_state",
+			"service.topology", "system_boundary", "external_dependency",
+			"runtime_and_operations", "documentation", "business_domain",
+		},
 		"evidence.synthesize": nil,
+	}
+	wantFreshness := map[string]agentapi.FreshnessPolicy{
+		"knowledge.code.inspect":  agentapi.FreshnessStable,
+		"knowledge.service.trace": agentapi.FreshnessStable,
+		"knowledge.docs.verify":   agentapi.FreshnessStable,
+		"knowledge.web.research":  agentapi.FreshnessCurrent,
+		"knowledge.memory.recall": agentapi.FreshnessCurrent,
+		"evidence.synthesize":     agentapi.FreshnessStable,
 	}
 	byAgent := make(map[string]agentapi.Definition, len(definitions))
 	for _, definition := range definitions {
@@ -225,6 +254,7 @@ func TestDefaultInvestigationCapabilitiesPinAgentContracts(t *testing.T) {
 			!capability.RetrySafe ||
 			capability.SideEffects != agentapi.SideEffectNone ||
 			capability.MaxConcurrency != 3 ||
+			capability.Freshness != wantFreshness[capability.ID] ||
 			capability.Agent != (agentapi.DefinitionRef{ID: agentID, Version: 12}) ||
 			!slices.Equal(capability.PermissionScope, []string{"knowledge.read"}) {
 			t.Fatalf("capability = %+v", capability)
