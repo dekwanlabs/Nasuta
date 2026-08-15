@@ -46,7 +46,8 @@ type StartRequest struct {
 	ActorPermissions    agentapi.PermissionPolicy
 	Scenario            string
 	ScenarioPermissions agentapi.PermissionPolicy
-	Admin               bool
+	// Admin permits starting write-capable Workflows through the external start boundary.
+	Admin bool
 }
 
 type ApprovalRequest struct {
@@ -60,13 +61,15 @@ type ApprovalRequest struct {
 
 type ApprovalResult struct {
 	Approval Approval
-	Applied  bool
-	Status   RunStatus
-	Result   *Result
+	// Applied is false when the same persisted decision was already present.
+	Applied bool
+	Status  RunStatus
+	Result  *Result
 }
 
 type ResumeResult struct {
-	RunID   string
+	RunID string
+	// Applied distinguishes an executed resume from a terminal no-op.
 	Applied bool
 	Status  RunStatus
 	Result  *Result

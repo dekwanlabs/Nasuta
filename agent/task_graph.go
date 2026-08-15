@@ -40,23 +40,26 @@ type TaskBudget struct {
 
 // TaskSpec requests one registered capability without selecting its implementation.
 type TaskSpec struct {
-	ID             string        `json:"id"`
-	Purpose        string        `json:"purpose"`
-	RequiredFacets []string      `json:"required_facets,omitempty"`
-	Capability     string        `json:"capability"`
-	InputRefs      []EvidenceRef `json:"input_refs,omitempty"`
-	OutputSchema   SchemaRef     `json:"output_schema"`
-	ParallelGroup  string        `json:"parallel_group,omitempty"`
-	Optional       bool          `json:"optional"`
-	MaxAttempts    int           `json:"max_attempts,omitempty"`
-	Budget         TaskBudget    `json:"budget"`
+	ID             string   `json:"id"`
+	Purpose        string   `json:"purpose"`
+	RequiredFacets []string `json:"required_facets,omitempty"`
+	Capability     string   `json:"capability"`
+	// InputRefs limits the task to evidence already admitted by the server.
+	InputRefs     []EvidenceRef `json:"input_refs,omitempty"`
+	OutputSchema  SchemaRef     `json:"output_schema"`
+	ParallelGroup string        `json:"parallel_group,omitempty"`
+	// Optional allows downstream scheduling to continue after terminal failure.
+	Optional    bool       `json:"optional"`
+	MaxAttempts int        `json:"max_attempts,omitempty"`
+	Budget      TaskBudget `json:"budget"`
 }
 
 // TaskEdge declares that To may consume output from From.
 type TaskEdge struct {
-	From     string `json:"from"`
-	To       string `json:"to"`
-	Required bool   `json:"required"`
+	From string `json:"from"`
+	To   string `json:"to"`
+	// Required blocks To when From cannot produce a valid handoff.
+	Required bool `json:"required"`
 }
 
 // StopPolicy can only reduce server defaults; zero leaves the default unchanged.

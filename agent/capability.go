@@ -20,22 +20,27 @@ const (
 
 // Capability binds one planner-visible capability to a pinned Agent Definition.
 type Capability struct {
-	ID              string          `json:"id"`
-	Version         int64           `json:"version"`
-	Purpose         string          `json:"purpose"`
-	InputFacets     []string        `json:"input_facets,omitempty"`
-	InputSchema     SchemaRef       `json:"input_schema"`
-	OutputSchema    SchemaRef       `json:"output_schema"`
-	ToolIDs         []string        `json:"tool_ids,omitempty"`
+	ID           string    `json:"id"`
+	Version      int64     `json:"version"`
+	Purpose      string    `json:"purpose"`
+	InputFacets  []string  `json:"input_facets,omitempty"`
+	InputSchema  SchemaRef `json:"input_schema"`
+	OutputSchema SchemaRef `json:"output_schema"`
+	ToolIDs      []string  `json:"tool_ids,omitempty"`
+	// PermissionScope is an upper bound further narrowed by actor and scenario policy.
 	PermissionScope []string        `json:"permission_scope,omitempty"`
 	Freshness       FreshnessPolicy `json:"freshness"`
 	SideEffects     SideEffectClass `json:"side_effects"`
-	RetrySafe       bool            `json:"retry_safe"`
-	MaxConcurrency  int             `json:"max_concurrency"`
-	Enabled         bool            `json:"enabled"`
-	Agent           DefinitionRef   `json:"agent"`
-	WriteSet        []string        `json:"write_set,omitempty"`
-	ContentHash     string          `json:"content_hash"`
+	// RetrySafe permits automatic replay after a retryable execution failure.
+	RetrySafe bool `json:"retry_safe"`
+	// MaxConcurrency is enforced per capability version.
+	MaxConcurrency int           `json:"max_concurrency"`
+	Enabled        bool          `json:"enabled"`
+	Agent          DefinitionRef `json:"agent"`
+	// WriteSet declares the domain resources a write capability may mutate.
+	WriteSet []string `json:"write_set,omitempty"`
+	// ContentHash makes a published version immutable.
+	ContentHash string `json:"content_hash"`
 }
 
 // CapabilityRef selects one immutable version; zero selects the latest published version.

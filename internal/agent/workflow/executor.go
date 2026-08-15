@@ -22,13 +22,15 @@ var (
 
 // RunRequest carries the immutable identity and authorization context for one Workflow Run.
 type RunRequest struct {
-	RunID               string
-	ParentRunID         string
-	Round               int
-	BaseDepth           int
-	Input               json.RawMessage
-	InputHandoff        *Handoff
-	Actor               agentapi.Actor
+	RunID       string
+	ParentRunID string
+	Round       int
+	// BaseDepth carries nesting depth across parent Workflow invocations.
+	BaseDepth    int
+	Input        json.RawMessage
+	InputHandoff *Handoff
+	Actor        agentapi.Actor
+	// ActorPermissions and ScenarioPermissions are intersected before node execution.
 	ActorPermissions    agentapi.PermissionPolicy
 	ScenarioPermissions agentapi.PermissionPolicy
 	StartedAt           time.Time
@@ -36,17 +38,20 @@ type RunRequest struct {
 
 // NodeRequest contains one attempt's resolved inputs and effective permissions.
 type NodeRequest struct {
-	WorkflowRunID           string
-	Round                   int
-	Depth                   int
-	Node                    NodeDefinition
-	Inputs                  []Handoff
+	WorkflowRunID string
+	Round         int
+	Depth         int
+	Node          NodeDefinition
+	Inputs        []Handoff
+	// UnavailablePredecessors preserves optional dependency failures for downstream decisions.
 	UnavailablePredecessors []string
 	UnavailableReasons      map[string]StopReason
-	BaselineEvidence        []tool.EvidenceUnit
-	Attempt                 int
-	Actor                   agentapi.Actor
-	EffectivePermissions    agentapi.PermissionPolicy
+	// BaselineEvidence prevents a node from presenting seeded evidence as newly discovered.
+	BaselineEvidence []tool.EvidenceUnit
+	Attempt          int
+	Actor            agentapi.Actor
+	// EffectivePermissions is final and must not be widened by a node executor.
+	EffectivePermissions agentapi.PermissionPolicy
 }
 
 // NodeExecutor executes one node without owning Workflow scheduling or persistence.
@@ -119,20 +124,24 @@ type Result struct {
 	NodeOutputs map[string]Handoff
 	Gates       map[string]GateDecision
 	Usage       Usage
-	StopReason  StopReason
+	// StopReason explains a successful early stop as well as a terminal failure boundary.
+	StopReason StopReason
 }
 
 // Progress is the resumable execution projection rebuilt from durable facts.
 type Progress struct {
-	StartedAt             time.Time
-	Input                 Handoff
-	NodeOutputs           map[string]Handoff
-	Gates                 map[string]GateDecision
-	FailedOptional        map[string]struct{}
+	StartedAt      time.Time
+	Input          Handoff
+	NodeOutputs    map[string]Handoff
+	Gates          map[string]GateDecision
+	FailedOptional map[string]struct{}
+	// FailedOptionalReasons restores dependency availability without rerunning failed nodes.
 	FailedOptionalReasons map[string]StopReason
-	WaitingHuman          map[string]struct{}
-	NodeAttempts          map[string]NodeAttemptProgress
-	Usage                 Usage
+	// WaitingHuman prevents approval-gated nodes from being scheduled during resume.
+	WaitingHuman map[string]struct{}
+	// NodeAttempts preserves retry counters and backoff deadlines across process restarts.
+	NodeAttempts map[string]NodeAttemptProgress
+	Usage        Usage
 }
 
 // NodeAttemptProgress preserves retry timing across a durable resume.

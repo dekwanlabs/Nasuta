@@ -21,11 +21,13 @@ type schemaKey struct {
 
 // SchemaDefinition is one immutable JSON Schema contract and its explicit compatibility claims.
 type SchemaDefinition struct {
-	ID             string          `json:"id"`
-	Version        int64           `json:"version"`
-	Document       json.RawMessage `json:"document"`
-	CompatibleFrom []SchemaRef     `json:"compatible_from,omitempty"`
-	ContentHash    string          `json:"content_hash"`
+	ID       string          `json:"id"`
+	Version  int64           `json:"version"`
+	Document json.RawMessage `json:"document"`
+	// CompatibleFrom is an explicit consumer claim, never inferred structurally.
+	CompatibleFrom []SchemaRef `json:"compatible_from,omitempty"`
+	// ContentHash prevents a published version from being redefined.
+	ContentHash string `json:"content_hash"`
 }
 
 type compiledSchema struct {

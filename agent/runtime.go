@@ -30,8 +30,10 @@ type ContextBlock struct {
 	References        []Reference         `json:"references,omitempty"`
 	Evidence          []tool.EvidenceUnit `json:"evidence,omitempty"`
 	EvidenceConflicts []EvidenceConflict  `json:"evidence_conflicts,omitempty"`
-	Complete          bool                `json:"complete"`
-	ContentHash       string              `json:"content_hash"`
+	// Complete distinguishes authoritative context from a partial retrieval result.
+	Complete bool `json:"complete"`
+	// ContentHash binds the admitted content to its provenance metadata.
+	ContentHash string `json:"content_hash"`
 }
 
 type Reference struct {
@@ -61,20 +63,26 @@ type ToolFunction struct {
 
 // ToolScope narrows one run below the immutable Definition capability ceiling.
 type ToolScope struct {
-	AllowWrite      bool     `json:"allow_write"`
+	// AllowWrite cannot grant writes beyond the Definition permission ceiling.
+	AllowWrite bool `json:"allow_write"`
+	// RestrictVisible makes VisibleToolIDs an allowlist instead of descriptive metadata.
 	RestrictVisible bool     `json:"restrict_visible"`
 	VisibleToolIDs  []string `json:"visible_tool_ids,omitempty"`
-	OfferedToolIDs  []string `json:"offered_tool_ids,omitempty"`
-	PruneApplied    bool     `json:"prune_applied"`
+	// OfferedToolIDs records the pre-pruning surface for auditability.
+	OfferedToolIDs []string `json:"offered_tool_ids,omitempty"`
+	// PruneApplied records that runtime selection narrowed the offered tool surface.
+	PruneApplied bool `json:"prune_applied"`
 }
 
 // RunPolicy carries execution semantics that are independent of a scenario's planner types.
 type RunPolicy struct {
-	EvidenceRequired bool  `json:"evidence_required"`
-	EvidenceSeeded   bool  `json:"evidence_seeded"`
-	WebResearch      bool  `json:"web_research"`
-	MaxToolCalls     int64 `json:"max_tool_calls"`
-	RedactSensitive  bool  `json:"redact_sensitive"`
+	// EvidenceRequired forbids an unsupported successful conclusion.
+	EvidenceRequired bool `json:"evidence_required"`
+	// EvidenceSeeded records that admitted evidence existed before tool execution.
+	EvidenceSeeded  bool  `json:"evidence_seeded"`
+	WebResearch     bool  `json:"web_research"`
+	MaxToolCalls    int64 `json:"max_tool_calls"`
+	RedactSensitive bool  `json:"redact_sensitive"`
 }
 
 // DefinitionSelection records the rollout decision that selected a definition.
@@ -84,24 +92,27 @@ type DefinitionSelection struct {
 	CandidateVersion      int64  `json:"candidate_version,omitempty"`
 	BucketBasisPoints     int    `json:"bucket_basis_points,omitempty"`
 	PercentageBasisPoints int    `json:"percentage_basis_points,omitempty"`
-	StableKeyHash         string `json:"stable_key_hash,omitempty"`
-	Reason                string `json:"reason,omitempty"`
+	// StableKeyHash permits rollout auditing without persisting the raw routing key.
+	StableKeyHash string `json:"stable_key_hash,omitempty"`
+	Reason        string `json:"reason,omitempty"`
 }
 
 // RunRequest contains the fully prepared, execution-ready input for one Agent Run.
 type RunRequest struct {
-	RunID          string              `json:"run_id"`
-	Agent          DefinitionRef       `json:"agent"`
+	RunID string        `json:"run_id"`
+	Agent DefinitionRef `json:"agent"`
+	// DefinitionHash rejects execution if the pinned version no longer matches its content.
 	DefinitionHash string              `json:"definition_hash"`
 	Selection      DefinitionSelection `json:"selection,omitempty"`
 	Input          json.RawMessage     `json:"input"`
 	Messages       []Message           `json:"messages,omitempty"`
 	Context        []ContextBlock      `json:"context,omitempty"`
-	Permissions    PermissionPolicy    `json:"permissions"`
-	ToolScope      ToolScope           `json:"tool_scope"`
-	Policy         RunPolicy           `json:"policy"`
-	Actor          Actor               `json:"actor"`
-	Correlation    Correlation         `json:"correlation"`
+	// Permissions is the already-intersected effective policy for this Run.
+	Permissions PermissionPolicy `json:"permissions"`
+	ToolScope   ToolScope        `json:"tool_scope"`
+	Policy      RunPolicy        `json:"policy"`
+	Actor       Actor            `json:"actor"`
+	Correlation Correlation      `json:"correlation"`
 }
 
 // RunStart fixes the identity and capability ceiling before scenario preparation.
@@ -120,25 +131,27 @@ type RunStart struct {
 
 // RunSnapshot pins all mutable control-plane choices before execution starts.
 type RunSnapshot struct {
-	RunID               string              `json:"run_id"`
-	AgentID             string              `json:"agent_id"`
-	DefinitionVersion   int64               `json:"definition_version"`
-	DefinitionHash      string              `json:"definition_hash"`
-	Selection           DefinitionSelection `json:"selection,omitempty"`
-	Provider            string              `json:"provider"`
-	Model               string              `json:"model"`
-	ModelParameters     map[string]any      `json:"model_parameters,omitempty"`
-	ToolSnapshotID      string              `json:"tool_snapshot_id"`
-	VisibleToolIDs      []string            `json:"visible_tool_ids"`
-	InputSchemaVersion  int64               `json:"input_schema_version"`
-	OutputSchemaVersion int64               `json:"output_schema_version"`
-	PromptHash          string              `json:"prompt_hash"`
-	ContextHash         string              `json:"context_hash"`
-	Budget              BudgetPolicy        `json:"budget"`
-	Permissions         PermissionPolicy    `json:"permissions"`
-	Actor               Actor               `json:"actor"`
-	Correlation         Correlation         `json:"correlation"`
-	CreatedAt           time.Time           `json:"created_at"`
+	RunID             string              `json:"run_id"`
+	AgentID           string              `json:"agent_id"`
+	DefinitionVersion int64               `json:"definition_version"`
+	DefinitionHash    string              `json:"definition_hash"`
+	Selection         DefinitionSelection `json:"selection,omitempty"`
+	Provider          string              `json:"provider"`
+	Model             string              `json:"model"`
+	ModelParameters   map[string]any      `json:"model_parameters,omitempty"`
+	// ToolSnapshotID pins tool definitions and handlers for the lifetime of the Run.
+	ToolSnapshotID      string   `json:"tool_snapshot_id"`
+	VisibleToolIDs      []string `json:"visible_tool_ids"`
+	InputSchemaVersion  int64    `json:"input_schema_version"`
+	OutputSchemaVersion int64    `json:"output_schema_version"`
+	// PromptHash and ContextHash make replay drift observable.
+	PromptHash  string           `json:"prompt_hash"`
+	ContextHash string           `json:"context_hash"`
+	Budget      BudgetPolicy     `json:"budget"`
+	Permissions PermissionPolicy `json:"permissions"`
+	Actor       Actor            `json:"actor"`
+	Correlation Correlation      `json:"correlation"`
+	CreatedAt   time.Time        `json:"created_at"`
 }
 
 // RunStatus is terminal because in-progress lifecycle state is owned by the runtime.
@@ -165,13 +178,14 @@ type RunError struct {
 }
 
 type EvidenceSummary struct {
-	Status             string `json:"status"`
-	ForcedConclusion   bool   `json:"forced_conclusion"`
-	ToolCallCount      int    `json:"tool_call_count"`
-	ResultCount        int    `json:"result_count"`
-	ToolFailureCount   int    `json:"tool_failure_count"`
-	PartialResultCount int    `json:"partial_result_count"`
-	OmittedItemCount   int    `json:"omitted_item_count"`
+	Status string `json:"status"`
+	// ForcedConclusion marks an answer produced outside the normal completion path.
+	ForcedConclusion   bool `json:"forced_conclusion"`
+	ToolCallCount      int  `json:"tool_call_count"`
+	ResultCount        int  `json:"result_count"`
+	ToolFailureCount   int  `json:"tool_failure_count"`
+	PartialResultCount int  `json:"partial_result_count"`
+	OmittedItemCount   int  `json:"omitted_item_count"`
 }
 
 // EvidenceIdentity identifies one independently coverable evidence unit.
