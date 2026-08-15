@@ -362,6 +362,9 @@ func TestBindExecutionSuggestionRejectsUnknownAndUnboundedValues(t *testing.T) {
 		{"strategy": "dynamic_team", "complexity": 0.8, "confidence": 0.9, "reasons": []any{}},
 		{"strategy": "multi_agent", "complexity": 1.1, "confidence": 0.9, "reasons": []any{}},
 		{"strategy": "multi_agent", "complexity": 0.8, "confidence": 0.9, "reasons": []any{"specific_keyword_rule"}},
+		// The blank signature (all template defaults) means the model echoed the
+		// example verbatim instead of judging the request.
+		{"strategy": "single_agent", "complexity": 0.0, "confidence": 0.0, "reasons": []any{}},
 	}
 	for _, raw := range tests {
 		if _, err := bindExecutionSuggestion(raw); err == nil {

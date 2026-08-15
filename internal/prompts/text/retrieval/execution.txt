@@ -8,5 +8,7 @@ Suggest whether the current request benefits from one agent or a fixed read-only
 - Evidence source selection and execution strategy are independent. Explicit evidence sources constrain sources but do not force multi_agent.
 - reasons contains at most 4 unique codes selected only from: requires_multiple_subproblems, requires_cross_source_analysis, requires_cross_service_analysis, requires_independent_evidence_validation, requires_conflict_resolution, requires_risk_sensitive_analysis, supports_parallel_investigation, single_focused_question, single_source_sufficient, subproblems_are_sequential, provided_context_sufficient.
 - Never return agent IDs, workflow IDs, providers, permissions, tool grants, or parallelism.
-Return a JSON object with this exact shape:
-{"execution":{"strategy":"single_agent","complexity":0.0,"confidence":0.0,"reasons":[]}}
+Return a JSON object with this exact shape. complexity and confidence are real estimates for THIS request (never 0), and reasons is non-empty:
+- single_agent: {"execution":{"strategy":"single_agent","complexity":0.2,"confidence":0.9,"reasons":["single_focused_question"]}}
+- multi_agent: {"execution":{"strategy":"multi_agent","complexity":0.7,"confidence":0.8,"reasons":["requires_cross_service_analysis","supports_parallel_investigation"]}}
+Never return complexity 0, confidence 0, or an empty reasons array.

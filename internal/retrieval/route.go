@@ -70,7 +70,7 @@ const (
 	queryTermsExampleJSON = `{"query_terms":{"domain_terms":[],"identifiers":[]}}`
 	timeExampleJSON       = `{"time":{"kind":"none","n":0,"unit":"","raw":""}}`
 	historyExampleJSON    = `{"history_relation":{"topic_affinity":0.0,"confidence":0.0,"needs_prior_entities":false,"needs_prior_conclusion":false,"needs_prior_evidence":false,"explicit_turn_refs":[]}}`
-	executionExampleJSON  = `{"execution":{"strategy":"single_agent","complexity":0.0,"confidence":0.0,"reasons":[]}}`
+	executionExampleJSON  = `{"execution":{"strategy":"single_agent","complexity":0.2,"confidence":0.9,"reasons":["single_focused_question"]}}`
 )
 
 var executionReasonCodes = map[string]struct{}{
@@ -332,6 +332,12 @@ func bindExecutionSuggestion(raw map[string]any) (ExecutionSuggestion, error) {
 		}
 		seen[reason] = struct{}{}
 		reasons = append(reasons, reason)
+	}
+	// A blank suggestion (all template defaults) is the signature of the model
+	// echoing the example verbatim rather than judging the request. Reject it so
+	// the router reprompts instead of silently anchoring every query to single_agent.
+	if complexity == 0 && confidence == 0 && len(reasons) == 0 {
+		return ExecutionSuggestion{}, fmt.Errorf("execution must state complexity, confidence, and at least one reason")
 	}
 	return ExecutionSuggestion{
 		Strategy: ExecutionStrategy(strategy), Complexity: complexity,
