@@ -55,11 +55,8 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 			TimeRange: tool.TimeRange{
 				From: from, To: to, ToExclusive: true, Raw: "yesterday",
 			},
-			RetrievalIntent: domain.RetrievalIntent{
-				TargetEntities: []string{"Checkout.Place"},
-				RequiredFacets: []domain.EvidenceFacet{
-					domain.FacetEntrypoint, domain.FacetCoreFlow,
-				},
+			QueryPlan: domain.QueryPlan{
+				Kind: domain.QueryRuntimeDiagnosis, Entities: []string{"Checkout.Place"},
 			},
 		},
 		conversationRefs: []ConversationRef{
@@ -93,19 +90,21 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 	wantInvestigationGoals := []InvestigationGoal{
 		{
 			ID: "failure_path", Objective: "Trace the failure path.",
-			IndependentlyUseful: true,
+			IndependentlyUseful: true, DependsOn: []string{},
 		},
 		{
 			ID: "runtime_impact", Objective: "Assess the runtime impact.",
-			IndependentlyUseful: true,
+			IndependentlyUseful: true, DependsOn: []string{},
 		},
 	}
 	if !reflect.DeepEqual(contract.InvestigationGoals, wantInvestigationGoals) {
 		t.Fatalf("investigation goals = %+v", contract.InvestigationGoals)
 	}
-	wantGoals := []EvidenceGoal{
-		{
-			ID: "entrypoint", Facet: "entrypoint", Required: true,
+	wantGoals := make([]EvidenceGoal, 0, len(domain.RequiredFacetsFor(domain.QueryRuntimeDiagnosis)))
+	for _, facet := range domain.RequiredFacetsFor(domain.QueryRuntimeDiagnosis) {
+		value := string(facet)
+		wantGoals = append(wantGoals, EvidenceGoal{
+			ID: value, Facet: value, Required: true,
 			Sources: []agentapi.EvidenceSource{
 				agentapi.EvidenceSourceInternal,
 				agentapi.EvidenceSourceWeb,
@@ -113,17 +112,7 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 			},
 			Freshness: agentapi.FreshnessBoundedLive, MinimumCoverage: 1,
 			HighRisk: true,
-		},
-		{
-			ID: "core_flow", Facet: "core_flow", Required: true,
-			Sources: []agentapi.EvidenceSource{
-				agentapi.EvidenceSourceInternal,
-				agentapi.EvidenceSourceWeb,
-				agentapi.EvidenceSourceRuntime,
-			},
-			Freshness: agentapi.FreshnessBoundedLive, MinimumCoverage: 1,
-			HighRisk: true,
-		},
+		})
 	}
 	if !reflect.DeepEqual(contract.EvidenceGoals, wantGoals) {
 		t.Fatalf("evidence goals = %+v", contract.EvidenceGoals)
@@ -145,21 +134,21 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 
 func TestCanonicalEntityIdentityMatchesRetrievalMemoryAndTaskContract(t *testing.T) {
 	question := "继续检查 PaymentHandler.handle()"
-	resolution := domain.ResolveRetrievalIntent(
+	resolution := domain.ResolveQueryPlan(
 		question,
-		domain.RetrievalIntentSignals{
+		domain.QuerySignals{
 			Identifiers: []string{"PaymentHandler.handle()"},
 		},
 	)
 	_, remembered, _ := memory.CanonicalQuestionMetadata(question)
 	contract := contractFromPreparation(&preparation{
 		request:  Request{RunID: "qa_1", Question: question},
-		analysis: queryAnalysisOutput{RetrievalIntent: resolution.Intent},
+		analysis: queryAnalysisOutput{QueryPlan: resolution.Plan},
 	}, nil)
 
 	want := "paymenthandler.handle"
-	if !reflect.DeepEqual(resolution.Intent.TargetEntities, []string{want}) {
-		t.Fatalf("retrieval entities = %v", resolution.Intent.TargetEntities)
+	if !reflect.DeepEqual(resolution.Plan.Entities, []string{want}) {
+		t.Fatalf("query entities = %v", resolution.Plan.Entities)
 	}
 	if !reflect.DeepEqual(remembered, []string{want}) {
 		t.Fatalf("memory entities = %v", remembered)

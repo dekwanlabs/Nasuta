@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
@@ -54,7 +55,7 @@ func (runtime *Runtime) Begin(
 		RunID: start.RunID, Agent: start.Agent, DefinitionHash: start.DefinitionHash,
 		Selection: start.Selection, Input: start.Input, Permissions: start.Permissions,
 		ToolScope: start.ToolScope, Policy: start.Policy, Actor: start.Actor,
-		Correlation: start.Correlation,
+		Limits: start.Limits, Delegation: start.Delegation, Correlation: start.Correlation,
 	})
 	if err != nil {
 		return nil, err
@@ -91,6 +92,7 @@ func (runtime *ScenarioRuntime) Start(
 		SessionID: start.SessionID, ParentRunID: start.ParentRunID,
 		WorkflowRunID: start.WorkflowRunID,
 		Question:      start.Question, Mode: start.Mode,
+		RunLimits: start.Limits,
 	}); err != nil {
 		if ownsTrace {
 			trace.Close()
@@ -157,6 +159,22 @@ func (run *scenarioManagedRun) Context(ctx context.Context) context.Context {
 	})
 }
 
+func (run *scenarioManagedRun) RecordEvidence(
+	ctx context.Context,
+	units []tool.EvidenceUnit,
+) error {
+	if run == nil || run.runtime == nil || run.runtime.runStore == nil ||
+		len(units) == 0 {
+		return nil
+	}
+	_, err := run.runtime.runStore.PutEvidenceLedger(
+		ctx,
+		run.start.RunID,
+		units,
+	)
+	return err
+}
+
 func (run *scenarioManagedRun) Release() {
 	run.release.Do(func() {
 		if run.ownsTrace {
@@ -181,6 +199,7 @@ func (runtime *Runtime) beginPrepared(
 		store:                             runtime.usageStore,
 		inputPriceMicrosPerMillionTokens:  execution.definition.Model.InputPriceMicrosPerMillionTokens,
 		outputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
+		limits:                            execution.snapshot.Limits,
 	}
 	if err := runtime.createRun(start, execution); err != nil {
 		if ownsTrace {
@@ -218,10 +237,17 @@ func (runtime *Runtime) createRun(
 		InputSchemaVersion:  execution.snapshot.InputSchemaVersion,
 		OutputSchemaVersion: execution.snapshot.OutputSchemaVersion,
 		ParentRunID:         start.Correlation.ParentRunID,
+		CapabilityID:        start.Delegation.Capability.ID,
+		CapabilityVersion:   start.Delegation.Capability.Version,
+		CapabilityHash:      start.Delegation.CapabilityContentHash,
+		DelegationID:        start.Delegation.DelegationID,
+		DelegationDepth:     start.Delegation.Depth,
+		RunLimits:           execution.snapshot.Limits,
+		CapabilityRevision:  start.Delegation.CapabilityRegistryRevision,
 		WorkflowRunID:       start.Correlation.WorkflowRunID,
 		WorkflowNodeID:      start.Correlation.NodeID,
 		Question:            string(start.Input), Mode: mode,
-		MaxSteps: execution.snapshot.Budget.MaxSteps,
+		MaxSteps: execution.snapshot.Limits.MaxSteps,
 	}); err != nil {
 		return fmt.Errorf("create definition run %q: %w", start.RunID, err)
 	}
@@ -237,6 +263,22 @@ func (run *activeRun) Context(ctx context.Context) context.Context {
 	})
 	ctx = llm.WithUsageRecorder(ctx, run.start.RunID, run.recorder)
 	return llm.WithCallLifecycleObserver(ctx, run.start.RunID, run.runtime.hub)
+}
+
+func (run *activeRun) RecordEvidence(
+	ctx context.Context,
+	units []tool.EvidenceUnit,
+) error {
+	if run == nil || run.runtime == nil || run.runtime.scenarios == nil ||
+		run.runtime.scenarios.runStore == nil || len(units) == 0 {
+		return nil
+	}
+	_, err := run.runtime.scenarios.runStore.PutEvidenceLedger(
+		ctx,
+		run.start.RunID,
+		units,
+	)
+	return err
 }
 
 func (run *activeRun) Execute(
@@ -281,15 +323,16 @@ func (run *activeRun) Execute(
 	)
 	observer := run.observer()
 	loop := agentexecution.NewAgent(client, run.runtime.executor, agentexecution.Config{
-		MaxSteps:            execution.snapshot.Budget.MaxSteps,
-		MaxToolCalls:        request.Policy.MaxToolCalls,
-		Timeout:             execution.snapshot.Budget.Timeout,
+		MaxSteps:            execution.snapshot.Limits.MaxSteps,
+		MaxToolCalls:        execution.snapshot.Limits.MaxToolCalls,
+		Timeout:             time.Until(execution.snapshot.Limits.Deadline),
 		AnswerReserve:       run.runtime.settings.answerReserve,
 		AnswerMaxTokens:     execution.definition.Model.MaxOutputTokens,
 		ConclusionMaxTokens: execution.definition.Model.MaxOutputTokens,
 		ContextWindow:       execution.snapshot.Budget.ContextTokens,
 		MaxContinueRounds:   execution.definition.Budget.MaxContinueRounds,
 		ModelParameters:     execution.modelParameters,
+		BudgetCheck:         run.recorder.CheckLimits,
 	}, observer, run.runtime.hub)
 	loop.SetOnFirstAnswerToken(func(runID string) {
 		run.runtime.hub.EmitPhase(runID, "找到啦，我来把答案写出来 ✍️")
@@ -312,8 +355,32 @@ func (run *activeRun) Execute(
 		publicResult = redactResult(publicResult)
 		outcome = redactOutcome(outcome)
 	}
+	run.emitDelegationAdoptions(request.RunID, publicResult.DelegationAdoptions)
 	run.setOutcome(outcome)
 	return publicResult, nil
+}
+
+func (run *activeRun) emitDelegationAdoptions(
+	runID string,
+	adoptions []agentapi.DelegationAdoption,
+) {
+	if run == nil || run.runtime == nil || run.runtime.hub == nil {
+		return
+	}
+	for _, adoption := range adoptions {
+		run.runtime.hub.EmitEvent(
+			agentrun.EventDelegationAdoptionEvaluated,
+			agentrun.ExecutionEvent{
+				RunID:          runID,
+				ParentRunID:    runID,
+				DelegationID:   adoption.DelegationID,
+				ReportIDs:      append([]string(nil), adoption.AdoptedReportIDs...),
+				Status:         string(adoption.Status),
+				AdoptionStatus: string(adoption.Status),
+				Reason:         adoption.Reason,
+			},
+		)
+	}
 }
 
 func (run *activeRun) Finish(runError *agentapi.RunError) error {
@@ -378,6 +445,8 @@ func (run *activeRun) validateRequest(
 		!jsonBytesEqual(start.Input, run.start.Input) || start.Actor != run.start.Actor ||
 		start.Correlation != run.start.Correlation ||
 		start.Policy.RedactSensitive != run.start.Policy.RedactSensitive ||
+		!sameRunLimits(start.Limits, run.start.Limits) ||
+		start.Delegation != run.start.Delegation ||
 		!samePermissions(start.Permissions, run.start.Permissions) ||
 		!sameToolScope(start.ToolScope, run.start.ToolScope) {
 		return preparedExecution{}, fmt.Errorf("run request does not match the prepared run")
@@ -418,8 +487,17 @@ func runStart(request agentapi.RunRequest) agentapi.RunStart {
 			AllowWrite: request.ToolScope.AllowWrite, RestrictVisible: request.ToolScope.RestrictVisible,
 			VisibleToolIDs: append([]string(nil), request.ToolScope.VisibleToolIDs...),
 		},
-		Policy: request.Policy, Actor: request.Actor, Correlation: request.Correlation,
+		Policy: request.Policy, Limits: request.Limits, Delegation: request.Delegation,
+		Actor: request.Actor, Correlation: request.Correlation,
 	}
+}
+
+func sameRunLimits(left, right agentapi.RunLimits) bool {
+	return left.Deadline.Equal(right.Deadline) &&
+		left.MaxSteps == right.MaxSteps &&
+		left.MaxToolCalls == right.MaxToolCalls &&
+		left.MaxTotalTokens == right.MaxTotalTokens &&
+		left.MaxCostMicros == right.MaxCostMicros
 }
 
 func jsonBytesEqual(left, right json.RawMessage) bool {

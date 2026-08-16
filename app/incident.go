@@ -11,6 +11,8 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
+// configureIncidents enables incident and approval workflows when the
+// platform has a MySQL database available.
 func (p *Platform) configureIncidents(evidence incident.EvidenceProvider) error {
 	if p.db == nil {
 		log.Warnf("[server] incident and approval disabled (MySQL unavailable)")
@@ -19,6 +21,8 @@ func (p *Platform) configureIncidents(evidence incident.EvidenceProvider) error 
 	return p.configureIncidentsWithDB(p.db, evidence)
 }
 
+// configureIncidentsWithDB creates incident services and write actions for the
+// supplied database, then enables write actions on the existing QA service.
 func (p *Platform) configureIncidentsWithDB(db *sql.DB, evidence incident.EvidenceProvider) error {
 	if p.incident.manager != nil {
 		return fmt.Errorf("incident workflows are already configured")
@@ -53,11 +57,7 @@ func (p *Platform) configureIncidentsWithDB(db *sql.DB, evidence incident.Eviden
 	}
 	p.incident.manager = manager
 	p.incident.api = incidenthttp.New(manager, actions, p.cfg.AlertWebhookSecret)
-	if p.agents.catalog != nil {
-		if err := p.reloadQARuntime(p.graph); err != nil {
-			return fmt.Errorf("reload QA runtime with write actions: %w", err)
-		}
-	}
+	p.setQARuntimeWriteAvailable(true)
 	log.Infof("[server] incident and approval workflows enabled")
 	return nil
 }

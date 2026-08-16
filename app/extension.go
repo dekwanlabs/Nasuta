@@ -29,8 +29,16 @@ type APIRegistrar = func(string, http.HandlerFunc)
 
 // AgentCatalogContribution adds application-owned agents and capabilities to one version.
 type AgentCatalogContribution struct {
-	Definitions  []agentapi.Definition
-	Capabilities []agentapi.Capability
+	Definitions      []agentapi.Definition
+	Capabilities     []agentapi.Capability
+	WorkflowBindings []WorkflowBindingContribution
+}
+
+// WorkflowBindingContribution binds one exact application capability to a
+// durable Workflow and its server-owned input builder.
+type WorkflowBindingContribution struct {
+	Binding agentapi.WorkflowBinding
+	Builder agentapi.WorkflowEscalationInputBuilder
 }
 
 // AgentCatalogProvider builds application-owned catalog entries from platform settings.
@@ -93,6 +101,9 @@ func Run(ctx context.Context, factory ExtensionFactory) (runErr error) {
 	if err := platform.configureAgentCatalogProvider(extension.AgentCatalogProvider); err != nil {
 		return err
 	}
+	if err := platform.initializePlatformRuntime(); err != nil {
+		return fmt.Errorf("initialize platform runtime: %w", err)
+	}
 
 	mux := http.NewServeMux()
 	platform.RegisterCommonRoutes(mux)
@@ -100,15 +111,28 @@ func Run(ctx context.Context, factory ExtensionFactory) (runErr error) {
 	return platform.Serve(ctx, mux)
 }
 
+// configureAgentCatalogProvider records an extension catalog provider before
+// startup or rebuilds the active QA runtime after startup.
 func (platform *Platform) configureAgentCatalogProvider(
 	provider AgentCatalogProvider,
 ) error {
+	platform.qa.reload.Lock()
+	defer platform.qa.reload.Unlock()
+
+	platform.qa.mu.RLock()
+	initialized := platform.qa.current.Settings != nil
+	settings := platform.settings
+	graph := platform.graph
+	platform.qa.mu.RUnlock()
+
+	previous := platform.agents.provider
 	platform.agents.provider = provider
-	if provider == nil {
+	if !initialized {
 		return nil
 	}
-	if err := platform.reloadQARuntime(platform.graph); err != nil {
-		return fmt.Errorf("reload QA runtime with application agent catalog: %w", err)
+	if err := platform.rebuildQARuntimeLocked(settings, graph); err != nil {
+		platform.agents.provider = previous
+		return fmt.Errorf("rebuild QA runtime with application agent catalog: %w", err)
 	}
 	return nil
 }

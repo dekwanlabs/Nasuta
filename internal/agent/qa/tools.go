@@ -57,6 +57,14 @@ func scenarioToolIDs(tools []tool.Tool) []string {
 	return ids
 }
 
+func scenarioToolsContain(prepared ScenarioToolSet, id tool.ToolID) bool {
+	if prepared == nil {
+		return false
+	}
+	_, ok := prepared.Get(id)
+	return ok
+}
+
 func (svc *Service) prunedToolIDSet(tools []tool.Tool, routed []string) map[tool.ToolID]struct{} {
 	candidates := routingCandidates(tools)
 	allowed := baseToolIDSet(tools, candidates)

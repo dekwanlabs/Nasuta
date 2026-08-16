@@ -132,7 +132,15 @@ func TestEmitHubEventUsesToolSummary(t *testing.T) {
 
 func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
 	payload := run.ExecutionEvent{
-		RunID: "qa-parent", WorkflowRunID: "workflow-1", NodeID: "investigate.code",
+		RunID: "qa-parent", ParentRunID: "qa-parent", ChildRunID: "child-1",
+		WorkflowRunID: "workflow-1", NodeID: "investigate.code",
+		DelegationID: "del-1", Capability: "knowledge.code.inspect",
+		ObjectiveSummary: "inspect the code path", ReportID: "report-1",
+		ToolCalls: 3, ReportBytes: 512, Completeness: "complete",
+		CitationCoverage: 1, StructuredClaimCoverage: 0.5,
+		ConflictCount: 1, RequiresVerification: true,
+		VerificationReasons: []string{"critical_structured_conflict"},
+		QueryKind:           "code_review", Shadow: true, ReferenceCount: 4,
 		Strategy: "multi_agent", Status: "completed", Reason: "evidence joined",
 		Complexity: 0.95, Confidence: 0.91,
 	}
@@ -145,6 +153,19 @@ func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
 		{eventType: run.EventAgentStarted},
 		{eventType: run.EventAgentCompleted},
 		{eventType: run.EventEvidenceJoined},
+		{eventType: run.EventDelegationCreated},
+		{eventType: run.EventDelegationStarted},
+		{eventType: run.EventDelegationDone},
+		{eventType: run.EventDelegationFailed},
+		{eventType: run.EventDelegationCancelled},
+		{eventType: run.EventDelegationRejected},
+		{eventType: run.EventDelegationValidated},
+		{eventType: run.EventDelegationShadow},
+		{eventType: run.EventDelegationVerificationStarted},
+		{eventType: run.EventDelegationVerificationDone},
+		{eventType: run.EventDelegationVerificationFailed},
+		{eventType: run.EventDelegationVerificationRejected},
+		{eventType: run.EventDelegationAdoptionEvaluated},
 	}
 	for _, test := range tests {
 		t.Run(string(test.eventType), func(t *testing.T) {
@@ -154,7 +175,7 @@ func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
 				eventName, data = name, value
 				return true
 			})
-			if eventName != string(test.eventType) || data != payload {
+			if eventName != string(test.eventType) || !reflect.DeepEqual(data, payload) {
 				t.Fatalf("event=%q data=%#v", eventName, data)
 			}
 		})

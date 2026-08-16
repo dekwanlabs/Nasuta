@@ -37,10 +37,12 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_session_history_terms", "qa_session_history_index_outbox"}},
 		{group: GroupCatalogControl, tables: []string{"catalog_rollouts", "catalog_audit"}},
 		{group: GroupQARun, tables: []string{
-			"agent_definitions", "agent_runs", "agent_steps", "agent_llm_calls",
+			"agent_definitions", "agent_runs", "agent_delegation_tasks",
+			"agent_run_artifacts", "agent_steps", "agent_llm_calls",
 		}},
 		{group: GroupWorkflow, tables: []string{
-			"workflow_definitions", "workflow_runs", "workflow_node_runs", "handoff_artifacts",
+			"workflow_definitions", "workflow_runs", "workflow_escalations",
+			"workflow_node_runs", "handoff_artifacts",
 		}},
 		{group: GroupRuntimeEvents, tables: []string{"runtime_events"}},
 		{group: GroupQAMemory, tables: []string{"qa_memories"}},
@@ -72,13 +74,23 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 	}
 }
 
-func TestManagedSchemaContainsFortyOneTables(t *testing.T) {
+func TestManagedSchemaContainsFortyFourTables(t *testing.T) {
 	total := 0
 	for _, statements := range mysqlSchema {
 		total += len(statements)
 	}
-	if total != 41 {
-		t.Fatalf("managed schema table count=%d want=41", total)
+	if total != 44 {
+		t.Fatalf("managed schema table count=%d want=44", total)
+	}
+}
+
+func TestAgentStepSchemaStoresDelegationAdoptions(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupQARun], "\n")
+	if !strings.Contains(
+		statements,
+		"delegation_adoptions_json JSON NULL",
+	) {
+		t.Fatal("agent step schema is missing delegation adoption metadata")
 	}
 }
 
@@ -154,6 +166,9 @@ func TestWorkflowSchemaStoresApprovalSnapshots(t *testing.T) {
 		"round_number         INT NOT NULL DEFAULT 1",
 		"base_depth          INT NOT NULL DEFAULT 0",
 		"stop_reason          VARCHAR(64) NOT NULL DEFAULT ''",
+		"CREATE TABLE IF NOT EXISTS workflow_escalations",
+		"PRIMARY KEY (parent_run_id, request_id)",
+		"UNIQUE KEY uniq_workflow_escalation_run (workflow_run_id)",
 		"approval_decision   VARCHAR(16) NULL",
 		"approver_user_id    BIGINT NULL",
 		"approver_tenant_id  VARCHAR(128) NULL",

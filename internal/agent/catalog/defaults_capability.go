@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 // DefaultCapabilities binds the standard investigation agents to planner capabilities.
@@ -26,76 +27,63 @@ func DefaultCapabilities(
 	}
 	specifications := []struct {
 		id, agentID, purpose string
+		role                 agentapi.CapabilityRole
 		inputFacets          []string
 		freshness            agentapi.FreshnessPolicy
 	}{
 		{
 			id: "knowledge.code.inspect", agentID: "investigator.code",
+			role:    agentapi.RoleInvestigator,
 			purpose: "Inspect source implementation, symbols, APIs, and call paths.",
 			inputFacets: []string{
-				"implementation",
-				"entrypoint",
-				"core_flow",
-				"data_and_state",
+				string(domain.FacetEntrypoint),
+				string(domain.FacetCoreFlow),
+				string(domain.FacetDataAndState),
+				string(domain.FacetExternalDependency),
 			},
 			freshness: agentapi.FreshnessStable,
 		},
 		{
 			id: "knowledge.service.trace", agentID: "investigator.runtime",
+			role:    agentapi.RoleInvestigator,
 			purpose: "Trace service topology, dependencies, APIs, and runtime entrypoints.",
 			inputFacets: []string{
-				"service.topology",
-				"system_boundary",
-				"external_dependency",
-				"runtime_and_operations",
+				string(domain.FacetSystemBoundary),
+				string(domain.FacetExternalDependency),
+				string(domain.FacetRuntimeOperations),
 			},
 			freshness: agentapi.FreshnessStable,
 		},
 		{
 			id: "knowledge.docs.verify", agentID: "investigator.docs",
-			purpose: "Verify runbooks, system documentation, and documentation coverage.",
-			inputFacets: []string{
-				"documentation",
-				"business_domain",
-			},
-			freshness: agentapi.FreshnessStable,
+			role:        agentapi.RoleInvestigator,
+			purpose:     "Verify runbooks, system documentation, and documentation coverage.",
+			inputFacets: canonicalFacetValues(),
+			freshness:   agentapi.FreshnessStable,
 		},
 		{
 			id: "knowledge.web.research", agentID: "investigator.web",
-			purpose: "Research current public evidence through the configured web provider.",
-			inputFacets: []string{
-				"implementation",
-				"entrypoint",
-				"core_flow",
-				"data_and_state",
-				"service.topology",
-				"system_boundary",
-				"external_dependency",
-				"runtime_and_operations",
-				"documentation",
-				"business_domain",
-			},
-			freshness: agentapi.FreshnessCurrent,
+			role:        agentapi.RoleInvestigator,
+			purpose:     "Research current public evidence through the configured web provider.",
+			inputFacets: canonicalFacetValues(),
+			freshness:   agentapi.FreshnessCurrent,
 		},
 		{
 			id: "knowledge.memory.recall", agentID: "investigator.memory",
-			purpose: "Evaluate bounded recalled memory admitted by the task contract.",
-			inputFacets: []string{
-				"implementation",
-				"entrypoint",
-				"core_flow",
-				"data_and_state",
-				"service.topology",
-				"system_boundary",
-				"external_dependency",
-				"runtime_and_operations",
-				"documentation",
-				"business_domain",
-			},
-			freshness: agentapi.FreshnessCurrent,
+			role:        agentapi.RoleInvestigator,
+			purpose:     "Evaluate bounded recalled memory admitted by the task contract.",
+			inputFacets: canonicalFacetValues(),
+			freshness:   agentapi.FreshnessCurrent,
+		},
+		{
+			id: "evidence.semantic.verify", agentID: "delegation.verifier",
+			role:      agentapi.RoleVerifier,
+			purpose:   "Resolve bounded semantic claim conflicts using cited evidence.",
+			freshness: agentapi.FreshnessStable,
 		},
 		{
 			id: "evidence.synthesize", agentID: "synthesizer",
+			role:      agentapi.RoleSynthesizer,
 			purpose:   "Synthesize admitted investigation evidence without gathering new evidence.",
 			freshness: agentapi.FreshnessStable,
 		},
@@ -123,9 +111,13 @@ func DefaultCapabilities(
 				definition.ID,
 			)
 		}
+		if err := validateFacetValues(specification.inputFacets); err != nil {
+			return nil, fmt.Errorf("default capability %q: %w", specification.id, err)
+		}
 		capabilities = append(capabilities, agentapi.Capability{
 			ID:           specification.id,
 			Version:      version,
+			Role:         specification.role,
 			Purpose:      specification.purpose,
 			InputFacets:  append([]string(nil), specification.inputFacets...),
 			InputSchema:  definition.InputSchema,
@@ -150,4 +142,21 @@ func DefaultCapabilities(
 		})
 	}
 	return capabilities, nil
+}
+
+func canonicalFacetValues() []string {
+	specs := domain.FacetCatalog()
+	values := make([]string, len(specs))
+	for i, spec := range specs {
+		values[i] = string(spec.ID)
+	}
+	return values
+}
+
+func validateFacetValues(values []string) error {
+	facets := make([]domain.EvidenceFacet, len(values))
+	for i, value := range values {
+		facets[i] = domain.EvidenceFacet(value)
+	}
+	return domain.ValidateFacets(facets)
 }

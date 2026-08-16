@@ -4,9 +4,9 @@
 
 > 状态：已实现
 >
-> 更新：2026-08-09
+> 更新：2026-08-16
 >
-> 实现：新鲜工具结果无损交付、动态预算、Artifact、Trace、AnswerContract 双向校验与有界读取 API
+> 实现：新鲜工具结果无损交付、动态预算、Artifact、Trace、AnswerContract 双向校验、有界读取 API 与 Dynamic Delegation 上下文隔离
 > 来源：Session Summary、Context Pollution Control、Session History Retrieval、Turn Compaction、Structured Tool-output Compression
 
 ## 1. 结论
@@ -23,6 +23,7 @@ Nasuta 不会默认截断或压缩新鲜工具证据。只有回答前运行时�
 6. 历史压缩只在真实上下文压力下处理旧轮次，不能删除权威原文；
 7. 精确回答合同同时校验模型输入和最终答案；
 8. 回答前压缩优先删除工具调用叙述、压缩较早工具结果，并为最新证据保留更高预算。
+9. child 只接收窄 objective、facets 和 evidence refs；parent 只接收已持久化的 bounded report。
 
 实现已删除 `sessionToolResultLimit = 1_200` 和新鲜结果默认 `tooloutput.Compress` 路径。历史摘要仍可生成有损投影，但完整工具原文已先保存在 Trace 或 Artifact 中。
 
@@ -169,6 +170,36 @@ available tool budget =
 ```
 
 不能用固定的每工具 1,200 rune 或 10,000 token 代替这个计算。
+
+### 4.4 Dynamic Delegation 上下文边界
+
+一次 child Run 的输入由服务端构造，只包含：
+
+```text
+capability-bound instructions
+objective
+focus facets
+authorized evidence refs
+exact RunLimits
+```
+
+parent 的完整会话、完整 Task Contract、其他 child 报告、隐藏推理和未授权工具结果
+不会广播给 child。child 需要正文时，通过自己的有界 ledger view 或允许的只读工具
+解析 evidence refs。
+
+child 的完整消息、工具调用、工具结果和 Trace 保存到独立 Run。parent 下一轮只收到
+`delegation.report@1` 的有界投影；报告超限时标记 partial/truncated 并保留 artifact
+引用，不能把 child 全轨迹回填到 parent context。
+
+report artifact、child evidence ledger artifact 和 reservation settlement 都是恢复
+事实。delegate executor 必须先持久化它们再返回 tool result；启动恢复可以用稳定
+report/artifact identity 重建 interrupted 投影，而不复制或丢失证据。
+
+semantic verifier 使用更窄的独立输入：question、decision question、被选 claims、
+validator conflicts、可解析 evidence refs 和 trigger reasons。完整 report summary、
+child Trace、tool transcript、parent 会话和隐藏推理都不会进入 verifier input；
+verifier 的可见工具为空且 `MaxToolCalls=0`。verification result 作为独立 durable
+artifact 保存，不回填为 report，也不进入可采用 report allowlist。
 
 ## 5. 超大工具结果
 
@@ -379,6 +410,9 @@ current run
 
 工具注册表不持有跨请求的全局 RequiredLiterals。
 
+delegate tool 还会为本次 Run 登记每个 delegation 的 allowed report IDs。rejected
+report 和 verifier ID 不进入 allowlist；同一 delegation/report ID 在合同聚合时去重。
+
 ### 8.3 模型输入预检
 
 在把工具消息加入成功执行链路前：
@@ -408,6 +442,23 @@ for every required literal:
 4. 残缺答案不能作为成功响应交付。
 
 合同错误不是通过再次压缩、掩码或猜测修复。
+
+### 8.5 Delegation 采用后检
+
+存在 delegation 合同时，模型候选答案的最后一行必须包含：
+
+```text
+[NASUTA_DELEGATION_ADOPTION] {"delegations":[{"delegation_id":"del_...","adopted_report_ids":["report_..."]}]}
+```
+
+Runtime 使用 unknown-field rejection 的严格 JSON 解码，并校验每个 delegation 恰好一项、
+report ID 无重复且属于 allowlist。空数组投影 `not_adopted`，非空投影 `adopted`。
+marker 缺失、重复、越权或结构无效与 RequiredLiteral 缺失共用有界修复流程。
+
+校验成功后 marker 在任何 token 发布、answer Step 写入和 Session 保存前剥离；
+`DelegationAdoptions` 作为结构化字段写入 Step、Outcome/Terminal 和 public RunResult。
+parent 失败、取消、无最终答案或 output schema validation 失败时，不保留候选 adopted
+判断，而分别投影稳定 reason 的 `unknown`。
 
 ## 9. 历史上下文维护
 
@@ -475,7 +526,7 @@ Summary 不承担大规模精确列表的唯一存储。需要完整证据时，
 
 ## 10. 实现状态
 
-截至 2026-07-31，当前实现如下：
+截至 2026-08-16，当前实现如下：
 
 | 位置 | 已实现行为 |
 |---|---|
@@ -485,13 +536,17 @@ Summary 不承担大规模精确列表的唯一存储。需要完整证据时，
 | `agent_steps` | 保存权威内容、实际模型输入、两个哈希、coverage、AnswerContract、失败原因和 Artifact 引用；不再持久化 `ResultSummary` |
 | `agent_tool_result_artifacts` | Artifact 先于 Step 引用在同一事务内写入；内容使用 `LONGBLOB`，按用户和可选 Session 隔离 |
 | `internal/agent/answer_contract.go` | RequiredLiteral 先在 `PromptContent` 中预检；最终答案缺失时最多重试两次，仍失败则返回 `ErrAnswerContractViolation`；合同只聚合当前 Run 成功交付的结果 |
+| `internal/agent/execution/answer_contract.go` | 严格校验 delegation adoption marker、delegation/report allowlist 和唯一性；成功后剥离 marker，失败/取消/无答案时生成 typed unknown |
+| `agent_steps.delegation_adoptions_json` | answer Step 独立保存 adopted/not_adopted/unknown，visible content 不含隐藏 marker；Terminal/Outcome/public result 使用同一投影 |
 | `internal/agent/execution/answer_context_compaction.go` | 每次后工具模型调用及强制结论前检查 80% 高水位；只改写运行时消息副本，优先保留最新证据、协议配对和精确回答合同，并输出逐工具 Trace 与页面状态 |
 | `formatToolResultForLLM` | 当前为恒等转换，不删除字段、数组元素、JSON 尾部或精确标识符 |
 | `summary.go` / `turn_detail.go` | 只生成旧历史的有损召回投影；权威原文已由 Trace/Artifact 独立保留，投影不是详情数据源 |
 | Run/Artifact API | Run 详情先校验用户归属；普通 Trace 返回完整内容，Artifact 返回临时预览并通过有界 API 分片读取；单次最多 256 KiB |
 | SSE 与日志 | SSE 只广播临时 `result_preview` 和 Trace 元数据；进程日志记录 Trace ID、Tool Call ID、大小、SHA256、Artifact ID 和失败原因，不把预览当作权威内容 |
 
-数据库升级脚本位于 `docs/sql/migration_agent_tool_result_trace.sql`。它移除 `result_summary`，回填已有 Step 的模型输入与哈希，并创建 Artifact 表。
+工具结果数据库升级脚本位于 `docs/sql/migration_agent_tool_result_trace.sql`。它移除
+`result_summary`，回填已有 Step 的模型输入与哈希，并创建 Artifact 表。delegation
+采用事实升级脚本位于 `docs/sql/migration_delegation_adoptions_20260816.sql`。
 
 ## 11. 实施结果
 
@@ -561,4 +616,7 @@ Summary 不承担大规模精确列表的唯一存储。需要完整证据时，
 - 超大结果不会被伪装成完整成功；
 - AnswerContract 能同时阻止输入侧和输出侧的精确值丢失；
 - 历史维护只影响模型投影，不删除可审计原文；
-- 所有压缩、归档、恢复和合同失败均可观测。
+- 所有压缩、归档、恢复和合同失败均可观测；
+- child 输入不包含 parent 全量上下文，parent 输入不包含 child 完整执行轨迹；
+- delegation report/evidence/verification artifact 在工具结果返回前可恢复，ID 在重试和启动恢复后稳定；
+- delegation adoption marker 不进入可见答案、Session 或 answer Step content，结构化采用事实可从 Step/terminal/event 还原。

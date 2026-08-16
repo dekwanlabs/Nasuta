@@ -2,7 +2,8 @@
 
 [English](02-evidence-and-tooling.md) | [中文](02-evidence-and-tooling.zh-CN.md)
 
-> 状态：主体已实现，精确答案合同与运行时调查质量正在补强
+> 状态：主体已实现；Dynamic Delegation 证据账本、报告校验与 Workflow handoff 已落地
+> 更新：2026-08-16
 > 来源：Evidence Planning、Runtime Evidence、Runtime Investigation、Web Evidence、Required Evidence Incident、Tool Selection and Multi-turn Evidence
 
 ## 1. 核心模型
@@ -80,7 +81,9 @@ tool.Result{
 }
 ```
 
-`AnswerContract` 是本次调用结果专属的最终输出要求。没有精确输出要求的工具可以不注册。
+`AnswerContract` 是本次调用结果专属的最终输出要求。除精确 literal 外，delegate tool
+还可登记 `delegation_id -> allowed report_ids`，要求 parent 最终答案显式声明采用的
+report 子集。没有精确输出或 delegation 采用要求的工具可以不注册。
 
 ## 5. 运行时证据
 
@@ -136,6 +139,40 @@ assistant(final)
 
 工具 call/result 必须成对回放；有界窗口不能从孤立 tool result 开始。
 
+### 7.1 Parent/Child 证据账本
+
+Dynamic Delegation 复用统一 `EvidenceUnit`，但 parent 和 child 各自维护有界 ledger
+artifact。parent 传给 child 的不是完整上下文，而是已授权的稳定 evidence refs；
+ref 由 canonical source identity 派生，内容完整性继续由 ledger 中的 content hash
+约束。child 新取得的证据写入 child ledger，报告 citation 只能引用该 child 可解析的
+权威 ref，不能引用模型生成的临时编号。
+
+完整 child 轨迹和工具原文留在 child Run。返回 parent 的
+`delegation.report@1` 只包含 bounded summary、findings、structured claims、
+conflicts、uncertainties、usage 和 citations。report 与 artifact ID 由 child Run
+稳定派生，重试、恢复和历史读取不会产生新的证据身份。
+
+Batch report 在交给 parent 前执行确定性 validator：
+
+- 校验 report 大小、findings/conflicts/uncertainties 数量和完整度状态；
+- 解析 citations 并计算 citation coverage；
+- 只有报告显式声明的冲突，以及注册 `ClaimPolicy` comparator 覆盖的结构化 claim，
+  才能确定性判定冲突；
+- 多报告自由文本重叠、未知 comparator、关键 claim 缺 citation、报告截断或高风险
+  policy 只会设置 `requires_verification` 和原因，不能把 `has_conflicts=false`
+  解释为语义一致；
+- semantic verifier 是按 validator 风险和原因码自动触发的条件步骤，不是普通委派固定
+  尾部。它使用 `evidence.semantic.verify` 的 tool-free/read-only Capability，只接收
+  bounded claims、conflicts、evidence refs、判定问题和原因，不接收完整 reports、
+  child traces 或 tool transcripts；
+- verifier 与 investigator 共用 admission、预算、settlement、artifact、重放、恢复和
+  生命周期事件；verification artifact durable 后才返回 parent，verifier ID 不属于
+  report ID，不能被记录为 adopted report。
+
+升级到 Durable Workflow 时，handoff 只传递 bounded report/evidence refs。
+Workflow 将这些事实作为带原 parent/child/artifact provenance 的 seed evidence，
+不得把它们冒充为 Workflow node 新发现的证据，也不得重新广播完整 child 轨迹。
+
 ## 8. Required Evidence 空答案事故结论
 
 历史实现曾把路由候选误当 required tool：模型已经生成回答，但因为工具未调用而丢弃答案，步数耗尽后又跳过最终总结，最终返回空答案。
@@ -175,6 +212,10 @@ Tool result
 5. 工具错误、partial 和 omitted 状态进入最终答案约束；
 6. 多轮回放保持 call/result 配对；
 7. 精确合同失败时不会交付缩写或残缺答案。
+8. delegation citation 可解析到 parent/child 权威 ledger，且 ref identity 在恢复后稳定；
+9. deterministic validator 不对自由文本做语义推断，风险信号会显式触发 verifier；
+10. Workflow handoff 保留原始 evidence/report provenance，且输入保持有界；
+11. parent 只能采用 delegate tool 登记的 report ID，采用事实与可见答案分离持久化。
 
 ## 详细归并材料
 

@@ -51,6 +51,7 @@ type incidentRuntime struct {
 
 type agentRuntime struct {
 	version      int64
+	maxVersion   int64
 	schemas      *agentapi.SchemaRegistry
 	catalog      *catalog.Catalog
 	capabilities *agentapi.CapabilityRegistry
@@ -70,10 +71,13 @@ type qaState struct {
 
 type workflowRuntime struct {
 	catalog     *workflow.Catalog
+	bindings    *workflow.WorkflowBindingRegistry
 	pipeline    *pipeline.Executor
 	review      *reviewworkflow.Executor
 	coordinator *reviewworkflow.Coordinator
 	service     *workflow.Service
+	escalations *workflow.EscalationStore
+	escalator   *workflow.ServerWorkflowEscalator
 	api         *workflowhttp.Handler
 }
 
@@ -151,19 +155,30 @@ func New() (_ *Platform, err error) {
 	if err := p.initCatalogs(); err != nil {
 		return nil, err
 	}
+	if err := p.initRunStore(); err != nil {
+		return nil, err
+	}
 	if err := p.initAgentWorkflow(); err != nil {
 		return nil, fmt.Errorf("configure agent workflow: %w", err)
 	}
-	if err := p.reloadQARuntime(p.graph); err != nil {
-		return nil, fmt.Errorf("configure QA runtime: %w", err)
-	}
 	p.initRBAC()
-	if err := p.initFeatureDelivery(); err != nil {
-		return nil, fmt.Errorf("configure feature delivery: %w", err)
-	}
 	return p, nil
 }
 
+// initializePlatformRuntime starts the runtime components that are intentionally
+// deferred until the platform has finished constructing its infrastructure.
+func (p *Platform) initializePlatformRuntime() error {
+	if err := p.initializeQARuntime(p.graph); err != nil {
+		return fmt.Errorf("configure QA runtime: %w", err)
+	}
+	if err := p.initFeatureDelivery(); err != nil {
+		return fmt.Errorf("configure feature delivery: %w", err)
+	}
+	return nil
+}
+
+// initCatalogs creates the schema, Agent, Capability, and Workflow registries,
+// then restores the persisted Agent working set when MySQL is available.
 func (p *Platform) initCatalogs() error {
 	schemas, err := newSchemaRegistry()
 	if err != nil {
@@ -177,6 +192,10 @@ func (p *Platform) initCatalogs() error {
 	)
 	p.agents.api = agenthttp.New(p.agents.catalog)
 	p.flow.catalog = workflow.NewCatalog(schemas, p.agents.catalog)
+	p.flow.bindings = workflow.NewWorkflowBindingRegistry(
+		p.agents.capabilities,
+		p.flow.catalog,
+	)
 	if p.db == nil {
 		return nil
 	}
@@ -187,15 +206,26 @@ func (p *Platform) initCatalogs() error {
 	if err := p.agents.catalog.AttachStore(context.Background(), agentStore); err != nil {
 		return fmt.Errorf("restore agent catalog: %w", err)
 	}
-	p.agents.version = p.agents.catalog.MaxVersion()
+	p.agents.maxVersion = p.agents.catalog.MaxVersion()
 	log.Infof(
 		"[agent] catalog persistence enabled (restored_max_version=%d)",
-		p.agents.version,
+		p.agents.maxVersion,
 	)
+	return nil
+}
+
+// initRunStore creates the durable Agent/QA run store and reconciles
+// process-local runs left active by a prior process.
+func (p *Platform) initRunStore() error {
+	if p.db == nil {
+		return nil
+	}
 	runStore, err := run.NewStore(p.db)
 	if err != nil {
-		log.Warnf("[qa] agent run store disabled: %v", err)
-		return nil
+		return fmt.Errorf(
+			"configure agent run store (apply pending docs/sql migrations): %w",
+			err,
+		)
 	}
 	p.qa.runs = runStore
 	log.Infof("[qa] agent run store enabled (MySQL)")
@@ -220,6 +250,8 @@ func newSchemaRegistry() (*agentapi.SchemaRegistry, error) {
 	return schemas, nil
 }
 
+// initAgentWorkflow restores the Workflow working set, preloads definitions
+// pinned by unfinished runs, and creates durable Workflow services.
 func (p *Platform) initAgentWorkflow() error {
 	if p.db == nil {
 		log.Warnf("[workflow] persistence and execution disabled (MySQL unavailable)")
@@ -235,8 +267,21 @@ func (p *Platform) initAgentWorkflow() error {
 	); err != nil {
 		return fmt.Errorf("restore workflow catalog: %w", err)
 	}
-	p.agents.version = max(
-		p.agents.version,
+	unfinished, err := workflowStore.ListUnfinishedDefinitionRefs(context.Background())
+	if err != nil {
+		return fmt.Errorf("list unfinished workflow definitions: %w", err)
+	}
+	if err := p.flow.catalog.Preload(context.Background(), unfinished); err != nil {
+		return fmt.Errorf("preload unfinished workflow definitions: %w", err)
+	}
+	if len(unfinished) > 0 {
+		log.Infof(
+			"[workflow] preloaded %d definitions referenced by unfinished runs",
+			len(unfinished),
+		)
+	}
+	p.agents.maxVersion = max(
+		p.agents.maxVersion,
 		p.flow.catalog.MaxVersion(),
 	)
 	service, err := workflow.NewService(p.flow.catalog, workflowStore, nil)
@@ -245,6 +290,29 @@ func (p *Platform) initAgentWorkflow() error {
 	}
 	p.flow.service = service
 	p.flow.api = workflowhttp.New(service)
+	if p.qa.runs != nil {
+		escalations, err := workflow.NewEscalationStore(p.db)
+		if err != nil {
+			return fmt.Errorf("configure workflow escalation store: %w", err)
+		}
+		escalator, err := workflow.NewWorkflowEscalator(
+			p.flow.bindings,
+			service,
+			escalations,
+			workflowEscalationParentLoader{runs: p.qa.runs},
+			workflowEscalationHandoffResolver{
+				runs: p.qa.runs, schemas: p.agents.schemas,
+			},
+			p.agents.schemas,
+			workflow.DefaultWorkflowEscalatorConfig(),
+		)
+		if err != nil {
+			return fmt.Errorf("configure workflow escalator: %w", err)
+		}
+		p.flow.escalations = escalations
+		p.flow.escalator = escalator
+		log.Infof("[workflow] durable QA escalation enabled")
+	}
 	log.Infof("[workflow] persistence enabled (MySQL)")
 	return nil
 }
@@ -266,6 +334,7 @@ func (p *Platform) Settings() config.PlatformSettings {
 	settings.VCSGroups = append([]string(nil), p.settings.VCSGroups...)
 	settings.VCSExcludeProjects = append([]string(nil), p.settings.VCSExcludeProjects...)
 	settings.CodingEnabledProviders = append([]string(nil), p.settings.CodingEnabledProviders...)
+	settings.DelegationCapabilities = append([]string(nil), p.settings.DelegationCapabilities...)
 	return settings
 }
 

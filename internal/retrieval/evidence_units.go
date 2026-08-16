@@ -17,26 +17,7 @@ func evidenceHash(content string) string {
 }
 
 func evidenceFacets(source, kind string) []string {
-	var facets []domain.EvidenceFacet
-	switch source {
-	case "service":
-		facets = []domain.EvidenceFacet{domain.FacetSystemBoundary, domain.FacetBusinessDomain}
-	case "dependency":
-		facets = []domain.EvidenceFacet{domain.FacetExternalDependency}
-	case "code", "codegraph":
-		facets = []domain.EvidenceFacet{domain.FacetEntrypoint, domain.FacetRuntimeOperations}
-	case "runbook":
-		switch kind {
-		case domain.DocKindFlow:
-			facets = []domain.EvidenceFacet{domain.FacetSystemBoundary, domain.FacetCoreFlow}
-		case domain.DocKindSchema:
-			facets = []domain.EvidenceFacet{domain.FacetDataAndState}
-		case domain.DocKindModule:
-			facets = []domain.EvidenceFacet{domain.FacetBusinessDomain, domain.FacetEntrypoint}
-		default:
-			facets = []domain.EvidenceFacet{domain.FacetSystemBoundary}
-		}
-	}
+	facets := domain.ProvidedFacetsFor(source, kind)
 	out := make([]string, len(facets))
 	for i, facet := range facets {
 		out[i] = string(facet)

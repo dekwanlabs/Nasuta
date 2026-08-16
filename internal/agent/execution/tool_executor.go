@@ -86,7 +86,13 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 	}
 
 	t0 := time.Now()
-	toolResult, err := te.runtime.Execute(ctx, snapshot, tool.ToolID(name), arguments)
+	executionCtx := tool.WithInvocationID(ctx, call.ID)
+	toolResult, err := te.runtime.Execute(
+		executionCtx,
+		snapshot,
+		tool.ToolID(name),
+		arguments,
+	)
 	duration := time.Since(t0)
 	if err != nil {
 		result := fmt.Sprintf("error: %v", err)

@@ -59,15 +59,13 @@ type Reranker interface {
 	Enabled() bool
 }
 
-func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeDoc, query string, intents ...domain.RetrievalIntent) []codeDoc {
+func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeDoc, query string, plan domain.QueryPlan) []codeDoc {
 	log.InfofCtx(ctx, "[qa] code pool input: %d docs\n%s", len(pool), poolSummary(pool, "input"))
 
 	rerankLimit := retrieve.platform.RerankPool
-	if len(intents) > 0 {
-		budget := budgetForIntent(intents[0]).rerank
-		if rerankLimit <= 0 || rerankLimit > budget {
-			rerankLimit = budget
-		}
+	budget := retrievalPolicyFor(plan.Kind).budget.rerank
+	if rerankLimit <= 0 || rerankLimit > budget {
+		rerankLimit = budget
 	}
 	before := len(pool)
 	pool, _ = runtrace.Invoke(ctx, candidateDedupSpec, candidateDedupInput{Docs: pool}, func(_ context.Context, input candidateDedupInput) ([]codeDoc, error) {

@@ -77,6 +77,17 @@ func TestCapabilityRegistryRequiresPinnedAgentDefinition(t *testing.T) {
 	}
 }
 
+func TestCapabilityRegistryRejectsOversizedID(t *testing.T) {
+	schemas, definitions := capabilityTestDependencies(t)
+	registry := NewCapabilityRegistry(schemas, definitions)
+	capability := capabilityTestValue(1)
+	capability.ID = strings.Repeat("a", MaxCapabilityIDBytes+1)
+	if err := registry.Publish([]Capability{capability}); err == nil ||
+		!strings.Contains(err.Error(), "exceeds 128 bytes") {
+		t.Fatalf("Publish error = %v, want oversized ID rejection", err)
+	}
+}
+
 func TestCapabilityRegistryRejectsContractExpansion(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -184,6 +195,7 @@ func capabilityTestDependencies(
 func capabilityTestValue(version int64) Capability {
 	return Capability{
 		ID: "knowledge.code.inspect", Version: version,
+		Role:            RoleInvestigator,
 		Purpose:         "Inspect source implementation.",
 		InputFacets:     []string{"implementation"},
 		InputSchema:     SchemaRef{ID: "capability.input", Version: 1},

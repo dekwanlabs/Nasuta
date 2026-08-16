@@ -35,6 +35,9 @@ func OutcomeFor(
 		SessionMessages: append([]llm.Message(nil), result.SessionMessages...),
 		Evidence:        result.Evidence,
 		References:      MergeOutcomeReferences(preRetrieved, result.References),
+		DelegationAdoptions: cloneDelegationAdoptions(
+			result.DelegationAdoptions,
+		),
 	}
 	outcome.HitCount = len(outcome.References)
 	if outcome.Evidence.Status == "" {

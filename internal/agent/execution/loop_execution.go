@@ -160,6 +160,22 @@ func (agent *Agent) finishLoop(state *compiledLoop) {
 }
 
 func (agent *Agent) finalizeLoop(state *compiledLoop) {
+	switch {
+	case state.result.Aborted:
+		state.result.DelegationAdoptions = state.answerContract.UnknownAdoptions(
+			"parent_cancelled",
+		)
+	case state.result.Err != nil:
+		state.result.DelegationAdoptions = state.answerContract.UnknownAdoptions(
+			"parent_run_failed",
+		)
+	case state.answerContract != nil &&
+		len(state.answerContract.delegationOrder) > 0 &&
+		len(state.result.DelegationAdoptions) == 0:
+		state.result.DelegationAdoptions = state.answerContract.UnknownAdoptions(
+			"final_answer_unavailable",
+		)
+	}
 	state.result.EvidenceUnits, state.result.EvidenceConflicts = state.evidenceLedger.snapshot()
 	state.result.Evidence.Finalize(state.input.Direct)
 	log.InfofCtx(state.ctx, "[agent] run %s end: steps=%d answerLen=%d aborted=%v err=%v",
@@ -182,10 +198,11 @@ func (agent *Agent) concludeLoop(state *compiledLoop) {
 		state.runStarted,
 	)
 	if err != nil {
-		validPartial := !state.answerContract.Active() ||
-			final != nil && len(state.answerContract.Missing(final.Content)) == 0
+		validPartial := final != nil &&
+			state.answerContract.Satisfied(final.Content)
 		if hasDeliverableAnswer(final) && validPartial && !errors.Is(err, ErrAnswerContractViolation) {
 			state.result.Answer += final.Content
+			state.result.DelegationAdoptions = state.answerContract.Adoptions()
 			state.result.Err = err
 			log.WarnfCtx(state.ctx, "[agent] run %s preserving partial force-conclusion answer: %v",
 				state.runID, err)
@@ -195,5 +212,6 @@ func (agent *Agent) concludeLoop(state *compiledLoop) {
 		}
 	} else if final != nil {
 		state.result.Answer += final.Content
+		state.result.DelegationAdoptions = state.answerContract.Adoptions()
 	}
 }

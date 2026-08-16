@@ -138,16 +138,17 @@ func contractFromPreparation(
 	prepared *preparation,
 	seedMaterial []agentapi.ContextBlock,
 ) TaskContract {
-	intent := prepared.analysis.RetrievalIntent
-	canonicalEntities := domain.CanonicalEntityIDs(intent.TargetEntities)
+	query := prepared.analysis.QueryPlan
+	canonicalEntities := domain.CanonicalEntityIDs(query.Entities)
 	entities := make([]EntityRef, 0, len(canonicalEntities))
 	for _, entity := range canonicalEntities {
 		entities = append(entities, EntityRef{ID: entity})
 	}
-	goals := make([]EvidenceGoal, 0, len(intent.RequiredFacets))
+	requiredFacets := domain.RequiredFacetsFor(query.Kind)
+	goals := make([]EvidenceGoal, 0, len(requiredFacets))
 	sources := evidenceGoalSources(prepared)
 	freshness := evidenceGoalFreshness(prepared)
-	for _, facet := range intent.RequiredFacets {
+	for _, facet := range requiredFacets {
 		value := string(facet)
 		goals = append(goals, EvidenceGoal{
 			ID: value, Facet: value, Required: true,
@@ -168,7 +169,10 @@ func contractFromPreparation(
 		investigationGoals = append(investigationGoals, InvestigationGoal{
 			ID: task.ID, Objective: task.Objective,
 			IndependentlyUseful: task.IndependentlyUseful,
-			DependsOn:           append([]string(nil), task.DependsOn...),
+			// The filter above guarantees task.DependsOn is empty here; emit a
+			// non-nil slice so JSON renders [] rather than null, which the
+			// task.contract schema requires.
+			DependsOn: []string{},
 		})
 	}
 	taskContext := TaskContext{

@@ -35,6 +35,30 @@ func TestExtensionDepsDetachSettingsAndExposeStablePorts(t *testing.T) {
 	}
 }
 
+func TestConfigureAgentCatalogProviderBeforeInitializationOnlyRecordsProvider(t *testing.T) {
+	calls := 0
+	provider := AgentCatalogProviderFunc(func(
+		config.PlatformSettings,
+		int64,
+	) (AgentCatalogContribution, error) {
+		calls++
+		return AgentCatalogContribution{}, nil
+	})
+	platform := &Platform{
+		settings: &config.PlatformSettings{},
+	}
+
+	if err := platform.configureAgentCatalogProvider(provider); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("provider was invoked %d times before runtime initialization", calls)
+	}
+	if platform.agents.provider == nil {
+		t.Fatal("provider was not recorded for runtime initialization")
+	}
+}
+
 func TestMountExtensionRegistersAPIAndWebHandler(t *testing.T) {
 	platform := &Platform{}
 	mux := http.NewServeMux()

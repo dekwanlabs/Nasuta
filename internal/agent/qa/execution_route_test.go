@@ -29,8 +29,8 @@ func TestDecideExecutionRoute(t *testing.T) {
 			IndependentTaskCount: 2, RequiredCapabilities: 2,
 			Parallelizable: true,
 		},
-		Policy:            ExecutionPolicy{AllowMultiAgent: true},
-		WorkflowAvailable: true,
+		Policy:                  ExecutionPolicy{AllowMultiAgent: true},
+		LegacyWorkflowAvailable: true,
 	}
 	tests := []struct {
 		name       string
@@ -55,6 +55,11 @@ func TestDecideExecutionRoute(t *testing.T) {
 			input.Assessment.IndependentTaskCount = 1
 			input.Assessment.Parallelizable = false
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "insufficient_independent_tasks"},
+		{name: "model single with insufficient tasks is not degraded", mutate: func(input *executionRouteInput) {
+			input.Suggestion.Strategy = retrieval.ExecutionSingleAgent
+			input.Assessment.IndependentTaskCount = 0
+			input.Assessment.Parallelizable = false
+		}, want: retrieval.ExecutionSingleAgent},
 		{name: "one investigation capability", mutate: func(input *executionRouteInput) {
 			input.Assessment.RequiredCapabilities = 1
 		}, want: retrieval.ExecutionMultiAgent},
@@ -68,7 +73,7 @@ func TestDecideExecutionRoute(t *testing.T) {
 			input.WriteAuthorized = true
 		}, want: retrieval.ExecutionMultiAgent},
 		{name: "workflow unavailable", mutate: func(input *executionRouteInput) {
-			input.WorkflowAvailable = false
+			input.LegacyWorkflowAvailable = false
 		}, want: retrieval.ExecutionSingleAgent, wantReason: "workflow_unavailable"},
 	}
 	for _, test := range tests {
@@ -80,6 +85,157 @@ func TestDecideExecutionRoute(t *testing.T) {
 			got := decideExecutionRoute(input)
 			if got.Strategy != test.want || got.DowngradeReason != test.wantReason {
 				t.Fatalf("decision = %+v, want strategy=%q reason=%q", got, test.want, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestDecideExecutionRouteWithDynamicDelegation(t *testing.T) {
+	base := executionRouteInput{
+		Suggestion: retrieval.ExecutionSuggestion{
+			Strategy: retrieval.ExecutionMultiAgent,
+		},
+		Assessment: ExecutionAssessment{
+			Strategy:             retrieval.ExecutionMultiAgent,
+			TaskCount:            2,
+			IndependentTaskCount: 2,
+			Parallelizable:       true,
+		},
+		Policy:                      ExecutionPolicy{AllowMultiAgent: true},
+		LegacyWorkflowAvailable:     true,
+		EscalationWorkflowAvailable: true,
+		DelegationEnabled:           true,
+		DelegationAvailable:         true,
+		DelegationMaxChildren:       3,
+	}
+	tests := []struct {
+		name           string
+		mutate         func(*executionRouteInput)
+		wantStrategy   retrieval.ExecutionStrategy
+		wantPath       executionPath
+		wantShadowPath executionPath
+		wantReason     string
+		wantDowngrade  string
+	}{
+		{
+			name:         "eligible bounded tasks use parent delegation",
+			wantStrategy: retrieval.ExecutionSingleAgent,
+			wantPath:     executionPathDelegation,
+			wantReason:   "independent_bounded_investigations",
+		},
+		{
+			name: "shadow keeps workflow authoritative",
+			mutate: func(input *executionRouteInput) {
+				input.DelegationShadow = true
+				input.EscalationWorkflowAvailable = false
+			},
+			wantStrategy:   retrieval.ExecutionMultiAgent,
+			wantPath:       executionPathWorkflow,
+			wantShadowPath: executionPathDelegation,
+			wantReason:     "independent_bounded_investigations",
+		},
+		{
+			name: "shadow keeps legacy workflow for escalation-only candidate",
+			mutate: func(input *executionRouteInput) {
+				input.DelegationShadow = true
+				input.EscalationWorkflowAvailable = false
+				input.Assessment.HighRisk = true
+			},
+			wantStrategy: retrieval.ExecutionMultiAgent,
+			wantPath:     executionPathWorkflow,
+		},
+		{
+			name: "strong dependency stays workflow",
+			mutate: func(input *executionRouteInput) {
+				input.Assessment.StrongTaskDependencies = true
+				input.Assessment.IndependentTaskCount = 1
+			},
+			wantStrategy: retrieval.ExecutionMultiAgent,
+			wantPath:     executionPathWorkflow,
+			wantReason:   string(agentapi.EscalationStrongTaskDependencies),
+		},
+		{
+			name: "high risk stays workflow",
+			mutate: func(input *executionRouteInput) {
+				input.Assessment.HighRisk = true
+			},
+			wantStrategy: retrieval.ExecutionMultiAgent,
+			wantPath:     executionPathWorkflow,
+			wantReason:   string(agentapi.EscalationHighRiskVerificationRequired),
+		},
+		{
+			name: "live runtime stays workflow",
+			mutate: func(input *executionRouteInput) {
+				input.Assessment.RequiresLiveRuntime = true
+			},
+			wantStrategy: retrieval.ExecutionMultiAgent,
+			wantPath:     executionPathWorkflow,
+			wantReason:   string(agentapi.EscalationHighRiskVerificationRequired),
+		},
+		{
+			name: "child overflow stays workflow",
+			mutate: func(input *executionRouteInput) {
+				input.Assessment.TaskCount = 4
+				input.Assessment.IndependentTaskCount = 4
+			},
+			wantStrategy: retrieval.ExecutionMultiAgent,
+			wantPath:     executionPathWorkflow,
+			wantReason:   string(agentapi.EscalationChildLimitExceeded),
+		},
+		{
+			name: "write does not use read only delegation",
+			mutate: func(input *executionRouteInput) {
+				input.WriteRequested = true
+			},
+			wantStrategy:  retrieval.ExecutionSingleAgent,
+			wantPath:      executionPathSingle,
+			wantDowngrade: "write_requested",
+		},
+		{
+			name: "missing delegate is decided before execution",
+			mutate: func(input *executionRouteInput) {
+				input.DelegationAvailable = false
+			},
+			wantStrategy: retrieval.ExecutionMultiAgent,
+			wantPath:     executionPathWorkflow,
+			wantReason:   string(agentapi.EscalationScenarioRequiresWorkflow),
+		},
+		{
+			name: "workflow unavailable reports intended risk route",
+			mutate: func(input *executionRouteInput) {
+				input.EscalationWorkflowAvailable = false
+				input.Assessment.HighRisk = true
+			},
+			wantStrategy:  retrieval.ExecutionSingleAgent,
+			wantPath:      executionPathSingle,
+			wantReason:    string(agentapi.EscalationHighRiskVerificationRequired),
+			wantDowngrade: "workflow_unavailable",
+		},
+		{
+			name: "missing delegate cannot fall back to legacy workflow",
+			mutate: func(input *executionRouteInput) {
+				input.DelegationAvailable = false
+				input.EscalationWorkflowAvailable = false
+			},
+			wantStrategy:  retrieval.ExecutionSingleAgent,
+			wantPath:      executionPathSingle,
+			wantReason:    string(agentapi.EscalationScenarioRequiresWorkflow),
+			wantDowngrade: "workflow_unavailable",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := base
+			if test.mutate != nil {
+				test.mutate(&input)
+			}
+			got := decideExecutionRoute(input)
+			if got.Strategy != test.wantStrategy ||
+				got.Path != test.wantPath ||
+				got.ShadowPath != test.wantShadowPath ||
+				got.RouteReason != test.wantReason ||
+				got.DowngradeReason != test.wantDowngrade {
+				t.Fatalf("decision = %+v", got)
 			}
 		})
 	}
@@ -139,7 +295,8 @@ func TestDecideExecutionRoutePromotesModelSingleSuggestion(t *testing.T) {
 			IndependentTaskCount: 2, RequiredCapabilities: 1,
 			Parallelizable: true,
 		},
-		Policy: ExecutionPolicy{AllowMultiAgent: true}, WorkflowAvailable: true,
+		Policy:                  ExecutionPolicy{AllowMultiAgent: true},
+		LegacyWorkflowAvailable: true,
 	})
 	if decision.Strategy != retrieval.ExecutionMultiAgent ||
 		decision.DecisionOrigin != "server_assessment" ||
@@ -159,8 +316,9 @@ func TestExecutionRouteTraceKeepsUnauthorizedWriteRequestReadOnly(t *testing.T) 
 			IndependentTaskCount: 2, RequiredCapabilities: 2,
 			Parallelizable: true,
 		},
-		Policy:         ExecutionPolicy{AllowMultiAgent: true},
-		WriteRequested: true, WorkflowAvailable: true,
+		Policy:                  ExecutionPolicy{AllowMultiAgent: true},
+		WriteRequested:          true,
+		LegacyWorkflowAvailable: true,
 	})
 
 	event := traceEventByNode(t, scope.Snapshot(), "execution_route")
@@ -171,15 +329,46 @@ func TestExecutionRouteTraceKeepsUnauthorizedWriteRequestReadOnly(t *testing.T) 
 	}
 }
 
+func TestWorkflowEscalatorModeKeepsShadowOnLegacyRunner(t *testing.T) {
+	tests := []struct {
+		name string
+		svc  Service
+		want bool
+	}{
+		{
+			name: "dynamic workflow escalation",
+			svc: Service{
+				delegationEnabled: true, workflowEscalation: true,
+			},
+			want: true,
+		},
+		{
+			name: "shadow remains legacy authoritative",
+			svc: Service{
+				delegationEnabled: true, delegationShadow: true,
+				workflowEscalation: true,
+			},
+		},
+		{
+			name: "feature disabled",
+			svc:  Service{workflowEscalation: true},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.svc.usesWorkflowEscalator(); got != test.want {
+				t.Fatalf("usesWorkflowEscalator() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestAssessExecutionSeparatesGoalsFromCapabilities(t *testing.T) {
 	assessment := assessExecution(
 		retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent,
 			Reasons:  []string{"requires_cross_source_analysis"},
-		},
-		TaskContract{
-			Entities: []EntityRef{{ID: "Checkout.Place"}, {ID: "Inventory.Reserve"}},
-			InvestigationGoals: []InvestigationGoal{
+			Tasks: []retrieval.ExecutionTask{
 				{
 					ID: "design", Objective: "Establish the intended behavior.",
 					IndependentlyUseful: true,
@@ -189,6 +378,9 @@ func TestAssessExecutionSeparatesGoalsFromCapabilities(t *testing.T) {
 					IndependentlyUseful: true,
 				},
 			},
+		},
+		TaskContract{
+			Entities: []EntityRef{{ID: "Checkout.Place"}, {ID: "Inventory.Reserve"}},
 			EvidenceGoals: []EvidenceGoal{
 				{
 					ID: "core_flow", Facet: "core_flow", Required: true,
@@ -220,12 +412,12 @@ func TestAssessExecutionDoesNotTreatCapabilityFanoutAsIndependentTasks(t *testin
 		retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent,
 			Reasons:  []string{"requires_cross_source_analysis"},
-		},
-		TaskContract{
-			InvestigationGoals: []InvestigationGoal{{
+			Tasks: []retrieval.ExecutionTask{{
 				ID: "flow", Objective: "Verify the end-to-end flow.",
 				IndependentlyUseful: true,
 			}},
+		},
+		TaskContract{
 			EvidenceGoals: []EvidenceGoal{{
 				ID: "core_flow", Facet: "core_flow", Required: true,
 				Sources: []agentapi.EvidenceSource{
@@ -246,15 +438,39 @@ func TestAssessExecutionDoesNotTreatCapabilityFanoutAsIndependentTasks(t *testin
 
 func TestAssessExecutionExcludesDependentAndNonUsefulGoals(t *testing.T) {
 	assessment := assessExecution(
-		retrieval.ExecutionSuggestion{Strategy: retrieval.ExecutionMultiAgent},
-		TaskContract{InvestigationGoals: []InvestigationGoal{
-			{ID: "independent", IndependentlyUseful: true},
-			{ID: "dependent", IndependentlyUseful: true, DependsOn: []string{"independent"}},
-			{ID: "partial", IndependentlyUseful: false},
-		}},
+		retrieval.ExecutionSuggestion{
+			Strategy: retrieval.ExecutionMultiAgent,
+			Tasks: []retrieval.ExecutionTask{
+				{ID: "independent", IndependentlyUseful: true},
+				{ID: "dependent", IndependentlyUseful: true, DependsOn: []string{"independent"}},
+				{ID: "partial", IndependentlyUseful: false},
+			},
+		},
+		TaskContract{},
 	)
 	if assessment.IndependentTaskCount != 1 || assessment.Parallelizable ||
-		assessment.Strategy != retrieval.ExecutionSingleAgent {
+		assessment.Strategy != retrieval.ExecutionSingleAgent ||
+		!assessment.StrongTaskDependencies ||
+		assessment.TaskCount != 3 {
+		t.Fatalf("assessment = %+v", assessment)
+	}
+}
+
+func TestAssessExecutionDetectsRiskAndLiveRuntime(t *testing.T) {
+	assessment := assessExecution(
+		retrieval.ExecutionSuggestion{
+			Strategy: retrieval.ExecutionMultiAgent,
+			Tasks: []retrieval.ExecutionTask{{
+				ID: "runtime", IndependentlyUseful: true,
+			}},
+		},
+		TaskContract{EvidenceGoals: []EvidenceGoal{{
+			ID: "runtime", Facet: "runtime_and_operations",
+			HighRisk: true, Freshness: agentapi.FreshnessBoundedLive,
+			Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceRuntime},
+		}}},
+	)
+	if !assessment.HighRisk || !assessment.RequiresLiveRuntime {
 		t.Fatalf("assessment = %+v", assessment)
 	}
 }

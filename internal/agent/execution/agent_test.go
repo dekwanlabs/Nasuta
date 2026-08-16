@@ -1222,7 +1222,7 @@ func TestRunRetriesOnlyCurrentRunAnswerContract(t *testing.T) {
 		}
 		if call == 3 {
 			for _, message := range request.Messages {
-				if message.Role == "user" && strings.Contains(message.Content, "exact-output validator") {
+				if message.Role == "user" && strings.Contains(message.Content, "final-answer validator") {
 					repairPrompt = message.Content
 				}
 			}
@@ -1338,7 +1338,7 @@ func TestBuildAgentMessagesDropsHistoricalAnswerContract(t *testing.T) {
 		t.Fatal("answerContractMessage() returned no message")
 	}
 	agent := &Agent{}
-	messages := agent.buildMessages("current question", ConversationContext{Recent: []llm.Message{message}}, nil, domain.EvidencePlan{})
+	messages := agent.buildMessages("current question", domain.QueryPlan{Kind: domain.QueryFocusedFact}, ConversationContext{Recent: []llm.Message{message}}, nil, domain.EvidencePlan{})
 	for _, candidate := range messages {
 		if strings.HasPrefix(candidate.Content, exactAnswerContractPrefix) {
 			t.Fatalf("historical answer contract leaked into current run: %#v", candidate)

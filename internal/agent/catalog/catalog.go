@@ -51,7 +51,9 @@ type AuditEvent struct {
 
 type catalogPersistence interface {
 	Publish(context.Context, []agentapi.Definition, int64) ([]DefinitionRecord, error)
-	LoadFullCatalog(context.Context) ([]DefinitionRecord, error)
+	LoadDefaultDefinitions(context.Context) ([]DefinitionRecord, error)
+	LoadDefinition(context.Context, string, int64) (DefinitionRecord, error)
+	LoadHighestVersions(context.Context) (map[string]int64, error)
 	LoadRollouts(context.Context) ([]RolloutRule, error)
 	ListDefinitions(context.Context, DefinitionCursor, int) ([]DefinitionRecord, error)
 	SetDefault(context.Context, string, int64, int64) error
@@ -237,6 +239,12 @@ func (catalog *Catalog) resolve(
 	stableKey string,
 	applyRollout bool,
 ) (agentapi.Definition, agentapi.DefinitionSelection, error) {
+	if ref.Version > 0 {
+		if err := catalog.loadDefinition(context.Background(), ref); err != nil &&
+			!errors.Is(err, ErrNotFound) {
+			return agentapi.Definition{}, agentapi.DefinitionSelection{}, err
+		}
+	}
 	current := catalog.state.Load()
 	version := ref.Version
 	selection := agentapi.DefinitionSelection{Reason: "explicit_version"}
@@ -345,7 +353,8 @@ func (catalog *Catalog) MaxVersion() int64 {
 	return version
 }
 
-// AttachStore loads persisted definitions before the catalog becomes observable.
+// AttachStore restores defaults, rollout candidates, and version watermarks.
+// Historical versions remain in the store until a pinned lookup needs them.
 func (catalog *Catalog) AttachStore(
 	ctx context.Context,
 	store catalogPersistence,
@@ -353,27 +362,57 @@ func (catalog *Catalog) AttachStore(
 	if store == nil {
 		return fmt.Errorf("agent catalog store is required: %w", ErrUnavailable)
 	}
-	records, err := store.LoadFullCatalog(ctx)
+	records, err := store.LoadDefaultDefinitions(ctx)
 	if err != nil {
 		return err
 	}
+	highest, err := store.LoadHighestVersions(ctx)
+	if err != nil {
+		return err
+	}
+	rollouts, err := store.LoadRollouts(ctx)
+	if err != nil {
+		return err
+	}
+	loaded := make(map[key]DefinitionRecord, len(records)+len(rollouts))
+	for _, record := range records {
+		loaded[key{id: record.ID, version: record.Version}] = record
+	}
+	for _, rule := range rollouts {
+		candidateKey := key{id: rule.AgentID, version: rule.CandidateVersion}
+		if _, ok := loaded[candidateKey]; ok {
+			continue
+		}
+		record, loadErr := store.LoadDefinition(
+			ctx,
+			rule.AgentID,
+			rule.CandidateVersion,
+		)
+		if loadErr != nil {
+			return fmt.Errorf(
+				"load agent rollout %q candidate version %d: %w",
+				rule.AgentID, rule.CandidateVersion, loadErr,
+			)
+		}
+		loaded[candidateKey] = record
+	}
 	next := &state{
-		records:  make(map[key]DefinitionRecord, len(records)),
-		highest:  make(map[string]int64),
+		records:  make(map[key]DefinitionRecord, len(loaded)),
+		highest:  highest,
 		defaults: make(map[string]int64),
 		rollouts: make(map[string]RolloutRule),
 	}
-	for _, record := range records {
-		prepared, prepareErr := catalog.prepare([]agentapi.Definition{record.Definition})
+	for _, record := range loaded {
+		preparedRecord, prepareErr := catalog.prepareStoredRecord(record)
 		if prepareErr != nil {
 			return fmt.Errorf(
 				"load agent definition %q version %d: %w",
 				record.ID, record.Version, prepareErr,
 			)
 		}
-		record.Definition = prepared[0]
-		id := key{id: record.ID, version: record.Version}
-		next.records[id] = cloneRecord(record)
+		record = preparedRecord
+		recordKey := key{id: record.ID, version: record.Version}
+		next.records[recordKey] = cloneRecord(record)
 		if record.Version > next.highest[record.ID] {
 			next.highest[record.ID] = record.Version
 		}
@@ -392,10 +431,6 @@ func (catalog *Catalog) AttachStore(
 			}
 			next.defaults[record.ID] = record.Version
 		}
-	}
-	rollouts, err := store.LoadRollouts(ctx)
-	if err != nil {
-		return err
 	}
 	for _, rule := range rollouts {
 		preparedRule, prepareErr := prepareRolloutRule(rule)
@@ -425,6 +460,83 @@ func (catalog *Catalog) AttachStore(
 	next.revision = catalog.state.Load().revision + 1
 	catalog.state.Store(next)
 	return nil
+}
+
+// Preload hydrates pinned versions needed by startup recovery before work resumes.
+func (catalog *Catalog) Preload(
+	ctx context.Context,
+	refs []agentapi.DefinitionRef,
+) error {
+	for _, ref := range refs {
+		if ref.Version <= 0 {
+			continue
+		}
+		if err := catalog.loadDefinition(ctx, ref); err != nil {
+			return fmt.Errorf(
+				"preload agent definition %q version %d: %w",
+				ref.ID, ref.Version, err,
+			)
+		}
+	}
+	return nil
+}
+
+// loadDefinition reads and caches one historical version on a pinned cache miss.
+func (catalog *Catalog) loadDefinition(
+	ctx context.Context,
+	ref agentapi.DefinitionRef,
+) error {
+	recordKey := key{id: ref.ID, version: ref.Version}
+	if _, ok := catalog.state.Load().records[recordKey]; ok {
+		return nil
+	}
+	if catalog.store == nil {
+		return fmt.Errorf(
+			"agent definition %q version %d not found: %w",
+			ref.ID, ref.Version, ErrNotFound,
+		)
+	}
+	record, err := catalog.store.LoadDefinition(ctx, ref.ID, ref.Version)
+	if err != nil {
+		return err
+	}
+	record, err = catalog.prepareStoredRecord(record)
+	if err != nil {
+		return fmt.Errorf(
+			"load agent definition %q version %d: %w",
+			ref.ID, ref.Version, err,
+		)
+	}
+
+	catalog.writeMu.Lock()
+	defer catalog.writeMu.Unlock()
+	current := catalog.state.Load()
+	if _, ok := current.records[recordKey]; ok {
+		return nil
+	}
+	next := cloneState(current)
+	if record.Default {
+		clearDefault(next, record.ID)
+		next.defaults[record.ID] = record.Version
+	}
+	next.records[recordKey] = cloneRecord(record)
+	if record.Version > next.highest[record.ID] {
+		next.highest[record.ID] = record.Version
+	}
+	catalog.state.Store(next)
+	return nil
+}
+
+// prepareStoredRecord validates one persisted definition before caching it.
+func (catalog *Catalog) prepareStoredRecord(
+	record DefinitionRecord,
+) (DefinitionRecord, error) {
+	prepared, err := catalog.prepare([]agentapi.Definition{record.Definition})
+	if err != nil {
+		return DefinitionRecord{}, err
+	}
+	record.Definition = prepared[0]
+	return record, nil
 }
 
 func (catalog *Catalog) ListRecords(
@@ -465,6 +577,12 @@ func (catalog *Catalog) SetDefault(
 	version int64,
 	actorUserID int64,
 ) error {
+	if err := catalog.loadDefinition(
+		ctx,
+		agentapi.DefinitionRef{ID: id, Version: version},
+	); err != nil {
+		return err
+	}
 	return catalog.updateControl(ctx, id, version, actorUserID, func(next *state, record DefinitionRecord) error {
 		if !record.Active {
 			return fmt.Errorf(
@@ -495,6 +613,12 @@ func (catalog *Catalog) SetActive(
 	active bool,
 	actorUserID int64,
 ) error {
+	if err := catalog.loadDefinition(
+		ctx,
+		agentapi.DefinitionRef{ID: id, Version: version},
+	); err != nil {
+		return err
+	}
 	return catalog.updateControl(ctx, id, version, actorUserID, func(next *state, record DefinitionRecord) error {
 		if record.Active == active {
 			return nil
@@ -533,9 +657,6 @@ func (catalog *Catalog) SetRollout(
 	active bool,
 	actorUserID int64,
 ) (RolloutRule, error) {
-	catalog.writeMu.Lock()
-	defer catalog.writeMu.Unlock()
-	current := catalog.state.Load()
 	id = strings.TrimSpace(id)
 	salt = strings.TrimSpace(salt)
 	if id == "" {
@@ -556,6 +677,15 @@ func (catalog *Catalog) SetRollout(
 	if salt == "" {
 		return RolloutRule{}, fmt.Errorf("agent rollout salt is required: %w", ErrInvalid)
 	}
+	if err := catalog.loadDefinition(
+		ctx,
+		agentapi.DefinitionRef{ID: id, Version: candidateVersion},
+	); err != nil {
+		return RolloutRule{}, err
+	}
+	catalog.writeMu.Lock()
+	defer catalog.writeMu.Unlock()
+	current := catalog.state.Load()
 	if _, ok := current.records[key{id: id, version: candidateVersion}]; !ok {
 		return RolloutRule{}, fmt.Errorf(
 			"agent definition %q version %d not found: %w",

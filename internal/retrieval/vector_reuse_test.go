@@ -77,7 +77,7 @@ func TestRetrievePlanReusesQueryEmbeddingAcrossSources(t *testing.T) {
 		"checkout timeout",
 		QueryTerms{},
 		domain.EvidencePlan{Sources: domain.Internal},
-		domain.RetrievalIntent{Kind: domain.RetrievalRuntimeDiagnosis},
+		domain.QueryPlan{Kind: domain.QueryRuntimeDiagnosis},
 	)
 	if err != nil {
 		t.Fatalf("RetrievePlan: %v", err)
@@ -101,7 +101,7 @@ func TestRetrievePlanDoesNotRetryEmbeddingAcrossSources(t *testing.T) {
 		"checkout timeout",
 		QueryTerms{},
 		domain.EvidencePlan{Sources: domain.Internal},
-		domain.RetrievalIntent{Kind: domain.RetrievalRuntimeDiagnosis},
+		domain.QueryPlan{Kind: domain.QueryRuntimeDiagnosis},
 	)
 	if err != nil {
 		t.Fatalf("RetrievePlan: %v", err)

@@ -28,7 +28,7 @@ func TestBuildAgentMessagesUsesRecalledHistoryAndRecentTail(t *testing.T) {
 		}},
 	}
 
-	got := agent.buildMessages("current question", conversation, &retrieval.RetrievedContext{}, domain.DirectPlan())
+	got := agent.buildMessages("current question", domain.QueryPlan{Kind: domain.QueryFocusedFact}, conversation, &retrieval.RetrievedContext{}, domain.DirectPlan())
 	joined := ""
 	for _, message := range got {
 		joined += "\n" + message.Content
@@ -89,6 +89,7 @@ func TestBuildAgentMessagesTreatsReferenceCountAsCandidates(t *testing.T) {
 	agent := &Agent{cfg: Config{HistoryLimit: 2}}
 	messages := agent.buildMessages(
 		"how does the complete flow work",
+		domain.QueryPlan{Kind: domain.QueryFlow},
 		ConversationContext{},
 		&retrieval.RetrievedContext{Text: "seed evidence", HitCount: 22},
 		domain.EvidencePlan{Sources: domain.Internal},

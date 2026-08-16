@@ -47,7 +47,9 @@ func (p *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 		p.index.Semantic, p.index.Embedder,
 		p.tools, p.cfg, p.index,
 		p.graph, p.calls,
-		p.currentQARuntime, p.reloadQARuntime,
+		p.currentQARuntime,
+		p.applyStoredPlatformSettings,
+		p.replaceQACodeGraph,
 	)
 	if p.auth.prompt != nil {
 		dashboardHandler.SetRolePrompt(p.auth.prompt)

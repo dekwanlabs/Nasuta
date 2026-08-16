@@ -14,7 +14,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/internal/indexing"
 	"github.com/dekwanlabs/nasuta/internal/memory"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestDefaultAgentDefinitionsShareOneSettingsVersion(t *testing.T) {
@@ -34,6 +36,7 @@ func TestDefaultAgentDefinitionsShareOneSettingsVersion(t *testing.T) {
 		"investigator.docs",
 		"investigator.web",
 		"investigator.memory",
+		"delegation.verifier",
 		"synthesizer",
 	}
 	if len(definitions) != len(wantIDs) {
@@ -529,7 +532,7 @@ func TestBuildQARuntimeDisablesDefinitionRuntimeWithoutLLM(t *testing.T) {
 	settings := &config.PlatformSettings{}
 	settings.Apply(nil)
 
-	qa, definitions, capabilities, runtime, err := platform.buildQARuntime(
+	qa, definitions, capabilities, bindings, runtime, err := platform.buildQARuntime(
 		settings,
 		nil,
 		1,
@@ -538,12 +541,13 @@ func TestBuildQARuntimeDisablesDefinitionRuntimeWithoutLLM(t *testing.T) {
 		t.Fatal(err)
 	}
 	if qa.QA != nil || len(definitions) != 0 ||
-		len(capabilities) != 0 || runtime != nil {
+		len(capabilities) != 0 || len(bindings) != 0 || runtime != nil {
 		t.Fatalf(
-			"disabled runtime = (qa=%p definitions=%d capabilities=%d runtime=%v)",
+			"disabled runtime = (qa=%p definitions=%d capabilities=%d bindings=%d runtime=%v)",
 			qa.QA,
 			len(definitions),
 			len(capabilities),
+			len(bindings),
 			runtime,
 		)
 	}
@@ -570,7 +574,7 @@ func TestBuildQARuntimeKeepsInvestigationControlWithAndWithoutLLM(t *testing.T) 
 		t.Run(test.name, func(t *testing.T) {
 			platform := qaRuntimeTestPlatform(t)
 
-			runtime, definitions, capabilities, definitionRuntime, err := platform.buildQARuntime(
+			runtime, definitions, capabilities, bindings, definitionRuntime, err := platform.buildQARuntime(
 				test.settings,
 				nil,
 				1,
@@ -591,6 +595,9 @@ func TestBuildQARuntimeKeepsInvestigationControlWithAndWithoutLLM(t *testing.T) 
 			}
 			if len(capabilities) != 0 {
 				t.Fatalf("runtime without extension produced %d extension capabilities", len(capabilities))
+			}
+			if !test.wantRuntime && len(bindings) != 0 {
+				t.Fatalf("disabled LLM produced %d workflow bindings", len(bindings))
 			}
 			if !test.wantRuntime && len(definitions) != 0 {
 				t.Fatalf("disabled LLM produced %d definitions", len(definitions))
@@ -613,6 +620,88 @@ func TestBuildQARuntimeKeepsInvestigationControlWithAndWithoutLLM(t *testing.T) 
 				t.Fatal("cancellation and recovery use different coordinators")
 			}
 		})
+	}
+}
+
+func TestRebuildQARuntimeReusesPublishedCatalogOnStartup(t *testing.T) {
+	const (
+		version    int64 = 7
+		maxVersion int64 = 9
+	)
+	settings := enabledAgentSettings()
+	platform := qaRuntimeTestPlatform(t)
+	platform.settings = settings
+	platform.index = &indexing.Service{}
+	platform.registry = tool.NewRegistry()
+	platform.reads = tool.NewReadRegistry(platform.registry)
+	platform.agents.capabilities = agentapi.NewCapabilityRegistry(
+		platform.agents.schemas,
+		platform.agents.catalog,
+	)
+	platform.flow.bindings = workflow.NewWorkflowBindingRegistry(
+		platform.agents.capabilities,
+		platform.flow.catalog,
+	)
+
+	definitions, err := defaultAgentDefinitions(settings, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := platform.prepareQACatalogSnapshot(
+		settings,
+		version,
+		definitions,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.agents.catalog.Publish(snapshot.definitions); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.flow.catalog.Publish(
+		[]workflow.Definition{snapshot.workflowDefinition},
+	); err != nil {
+		t.Fatal(err)
+	}
+	agentRevision := platform.agents.catalog.Revision()
+	workflowRevision := platform.flow.catalog.Revision()
+	platform.agents.maxVersion = maxVersion
+
+	if err := platform.rebuildQARuntimeLocked(settings, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if platform.agents.version != version ||
+		platform.agents.maxVersion != maxVersion {
+		t.Fatalf(
+			"catalog versions = active:%d max:%d, want active:%d max:%d",
+			platform.agents.version,
+			platform.agents.maxVersion,
+			version,
+			maxVersion,
+		)
+	}
+	if next := platform.nextQACatalogVersion(); next != maxVersion+1 {
+		t.Fatalf("next catalog version = %d, want %d", next, maxVersion+1)
+	}
+	if platform.agents.catalog.Revision() != agentRevision {
+		t.Fatalf(
+			"agent catalog revision = %d, want unchanged %d",
+			platform.agents.catalog.Revision(),
+			agentRevision,
+		)
+	}
+	if platform.flow.catalog.Revision() != workflowRevision {
+		t.Fatalf(
+			"workflow catalog revision = %d, want unchanged %d",
+			platform.flow.catalog.Revision(),
+			workflowRevision,
+		)
+	}
+	if platform.agents.capabilities.Revision() == 0 {
+		t.Fatal("startup did not restore the in-memory capability registry")
 	}
 }
 
@@ -764,6 +853,7 @@ func observeCatalog(
 	}
 	return definition, agentapi.Capability{
 		ID: "knowledge.runtime.observe", Version: version,
+		Role:            agentapi.RoleInvestigator,
 		Purpose:         "Investigate bounded live runtime evidence.",
 		InputFacets:     []string{"core_flow"},
 		InputSchema:     definition.InputSchema,

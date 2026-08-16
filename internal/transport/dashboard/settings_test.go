@@ -104,6 +104,16 @@ func TestFilterSettingsKeepsExplicitEmptyValues(t *testing.T) {
 	}
 }
 
+func TestChangedSettingsTreatsCanonicalEquivalentValuesAsUnchanged(t *testing.T) {
+	got := changedSettings(
+		map[string]string{"coding_allow_network": "1"},
+		map[string]string{"coding_allow_network": "true"},
+	)
+	if len(got) != 0 {
+		t.Fatalf("changed settings = %v, want none", got)
+	}
+}
+
 func TestCodingSettingsRelationshipValidation(t *testing.T) {
 	settings := &config.PlatformSettings{}
 	settings.Apply(nil)
@@ -141,6 +151,102 @@ func TestSettingsPutRejectsCodingDefaultOutsideEnabledProviders(t *testing.T) {
 	handler.APISettingsPut(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSettingsPutPassesChangedKeysToPlatformPort(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT k, v FROM settings`).WillReturnRows(
+		sqlmock.NewRows([]string{"k", "v"}).
+			AddRow("vcs_url", "https://old.example"),
+	)
+	mock.ExpectExec(`INSERT INTO settings \(k, v\) VALUES \(\?, \?\) ON DUPLICATE KEY UPDATE v=VALUES\(v\)`).
+		WithArgs("vcs_url", "https://new.example").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	platformSettings := &config.PlatformSettings{
+		AgentTimeout:       config.Duration(5 * time.Minute),
+		AgentAnswerReserve: config.Duration(30 * time.Second),
+	}
+	platformSettings.Apply(nil)
+	var gotKeys []string
+	handler := &Handler{
+		authDB:   auth.NewDB(db),
+		platform: platformSettings,
+		settingsChangedFn: func(keys []string) error {
+			gotKeys = append([]string(nil), keys...)
+			return nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(
+		`{"vcs_url":"https://new.example"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.APISettingsPut(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if len(gotKeys) != 1 || gotKeys[0] != "vcs_url" {
+		t.Fatalf("changed keys = %v, want [vcs_url]", gotKeys)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSettingsPutSkipsPersistenceAndReloadWhenValuesAreUnchanged(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT k, v FROM settings`).WillReturnRows(
+		sqlmock.NewRows([]string{"k", "v"}).
+			AddRow("vcs_url", "https://same.example"),
+	)
+
+	platformSettings := &config.PlatformSettings{
+		AgentTimeout:       config.Duration(5 * time.Minute),
+		AgentAnswerReserve: config.Duration(30 * time.Second),
+	}
+	platformSettings.Apply(nil)
+	reloads := 0
+	handler := &Handler{
+		authDB:   auth.NewDB(db),
+		platform: platformSettings,
+		settingsChangedFn: func([]string) error {
+			reloads++
+			return nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(
+		`{"vcs_url":"https://same.example"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.APISettingsPut(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if reloads != 0 {
+		t.Fatalf("runtime reloads = %d, want 0", reloads)
+	}
+	if !strings.Contains(response.Body.String(), `"updated":0`) {
+		t.Fatalf("response = %s, want updated=0", response.Body.String())
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

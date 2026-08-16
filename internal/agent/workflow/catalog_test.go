@@ -63,11 +63,15 @@ func TestCatalogAttachStoreRestoresLegacyExecutionBudget(t *testing.T) {
 	}
 	defer db.Close()
 	createdAt := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	mock.ExpectQuery(`(?s)SELECT\s+definition_json,content_hash,active,is_default,created_by,created_at\s+FROM workflow_definitions ORDER BY id,version`).
+	mock.ExpectQuery(`(?s)SELECT\s+definition_json,content_hash,active,is_default,created_by,created_at\s+FROM workflow_definitions WHERE is_default=1 ORDER BY id`).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"definition_json", "content_hash", "active", "is_default",
 			"created_by", "created_at",
 		}).AddRow(raw, definition.ContentHash, true, true, int64(7), createdAt))
+	mock.ExpectQuery(`(?s)SELECT id,MAX\(version\)\s+FROM workflow_definitions GROUP BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "version",
+		}).AddRow(definition.ID, definition.Version))
 	mock.ExpectQuery(`(?s)SELECT\s+subject_id,rule_version,candidate_version,percentage_bps,salt,rule_hash,\s+active,created_by,created_at\s+FROM catalog_rollouts\s+WHERE catalog_kind='workflow'\s+ORDER BY subject_id`).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"subject_id", "rule_version", "candidate_version", "percentage_bps",

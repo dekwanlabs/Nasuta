@@ -34,6 +34,8 @@ func miniWorkspace(t *testing.T) string {
 	writeFile(t, root, base+"/src/main/java/com/demo/DemoApplication.java",
 		"package com.demo;\n@SpringBootApplication\npublic class DemoApplication {}\n")
 	writeFile(t, root, base+"/src/main/java/com/demo/DemoController.java", `package com.demo;
+import org.springframework.web.bind.annotation.*;
+
 @RestController
 @RequestMapping("/demo")
 public class DemoController {
@@ -154,6 +156,9 @@ func multiModuleWorkspace(t *testing.T) string {
   <artifactId>lib-module</artifactId>
 </project>`)
 	writeFile(t, root, base+"/lib-module/src/main/java/com/lib/LibController.java", `package com.lib;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
 @RestController
 public class LibController {
     @GetMapping("/items")
@@ -359,6 +364,8 @@ func TestScanJavaEndpointsPreservesSpringMappingSemantics(t *testing.T) {
 	writeFile(t, root, base+"/src/main/java/com/demo/RoutingApplication.java",
 		"package com.demo;\n@SpringBootApplication\npublic class RoutingApplication {}\n")
 	writeFile(t, root, base+"/src/main/java/com/demo/RoutingController.java", `package com.demo;
+import org.springframework.web.bind.annotation.*;
+
 @RestController
 @RequestMapping(path = {"/v1", "/legacy"})
 public class RoutingController {

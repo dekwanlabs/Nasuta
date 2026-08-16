@@ -17,7 +17,7 @@ func TestRetrievePlanWebOnlySkipsInternalFanout(t *testing.T) {
 	rc, err := r.RetrievePlan(
 		context.Background(), "external docs", QueryTerms{},
 		domain.EvidencePlan{Sources: domain.Web},
-		domain.RetrievalIntent{Kind: domain.RetrievalFocusedFact},
+		domain.QueryPlan{Kind: domain.QueryFocusedFact},
 	)
 	if err != nil {
 		t.Fatalf("RetrievePlan: %v", err)
@@ -36,7 +36,7 @@ func TestRetrievePlanReportsStructuredProgress(t *testing.T) {
 	_, err := r.RetrievePlan(
 		ctx, "checkout timeout", QueryTerms{},
 		domain.EvidencePlan{Sources: domain.Internal},
-		domain.RetrievalIntent{Kind: domain.RetrievalFocusedFact},
+		domain.QueryPlan{Kind: domain.QueryFocusedFact},
 	)
 	if err != nil {
 		t.Fatalf("RetrievePlan: %v", err)
@@ -54,20 +54,32 @@ func TestRetrievePlanReportsStructuredProgress(t *testing.T) {
 	}
 }
 
-func TestBudgetForIntent(t *testing.T) {
+func TestRetrievalPolicyForQueryKind(t *testing.T) {
+	base := queryRetrievalPolicy{
+		budget: retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20},
+	}
 	tests := []struct {
-		intent domain.RetrievalIntentKind
-		want   retrievalBudget
+		kind domain.QueryKind
+		want queryRetrievalPolicy
 	}{
-		{domain.RetrievalFocusedFact, retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20}},
-		{domain.RetrievalRuntimeDiagnosis, retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}},
-		{domain.RetrievalInventory, retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}},
-		{domain.RetrievalFlow, retrievalBudget{code: 16, runbook: 8, service: 6, rerank: 24}},
-		{domain.RetrievalOverview, retrievalBudget{code: 16, runbook: 16, service: 8, rerank: 24}},
+		{domain.QueryFocusedFact, base},
+		{domain.QueryCodeReview, base},
+		{domain.QueryRuntimeDiagnosis, queryRetrievalPolicy{budget: retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}}},
+		{domain.QueryInventory, queryRetrievalPolicy{budget: retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}}},
+		{domain.QueryComparison, queryRetrievalPolicy{budget: retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}}},
+		{domain.QueryFlow, queryRetrievalPolicy{
+			budget:          retrievalBudget{code: 16, runbook: 8, service: 6, rerank: 24},
+			expandCodeGraph: true,
+		}},
+		{domain.QueryOverview, queryRetrievalPolicy{
+			budget:              retrievalBudget{code: 16, runbook: 16, service: 8, rerank: 24},
+			maxExpandedServices: 4,
+			coverageSelection:   true,
+		}},
 	}
 	for _, test := range tests {
-		if got := budgetForIntent(domain.RetrievalIntent{Kind: test.intent}); got != test.want {
-			t.Fatalf("budgetForIntent(%q) = %+v, want %+v", test.intent, got, test.want)
+		if got := retrievalPolicyFor(test.kind); got != test.want {
+			t.Fatalf("retrievalPolicyFor(%q) = %+v, want %+v", test.kind, got, test.want)
 		}
 	}
 }
@@ -78,7 +90,7 @@ func TestDiscoverPreservesRetrievalSourcesTraceContract(t *testing.T) {
 		events = append(events, event)
 	}))
 	retrieve := New(servicePathFakeTools{}, config.Config{})
-	retrieve.discover(ctx, "checkout", nil, false, nil, false, domain.RetrievalIntent{Kind: domain.RetrievalFocusedFact})
+	retrieve.discover(ctx, "checkout", nil, false, nil, false, domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	if len(events) != 1 || events[0].Node != "retrieval_sources" {
 		t.Fatalf("events = %#v", events)
 	}
@@ -123,7 +135,7 @@ func TestAssembleRuneSafeTruncation(t *testing.T) {
 		{text: big, priority: partialPriorityService},
 		{text: "## Code Evidence\n关键代码证据", priority: partialPriorityEvidence},
 	}
-	rc := r.assemble(context.TODO(), parts, nil, "q")
+	rc := r.assemble(context.TODO(), parts, nil, "q", domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	if !utf8.ValidString(rc.Text) {
 		t.Fatal("assembled context is not valid UTF-8 — truncation cut a multi-byte rune")
 	}
@@ -174,7 +186,7 @@ func TestAssembleCountsReferenceForTruncatedEvidence(t *testing.T) {
 		refs:     []Reference{{Type: "runbook", Label: "flow", Target: "flow"}},
 		priority: partialPriorityEvidence,
 	}}
-	rc := r.assemble(context.Background(), parts, nil, "query")
+	rc := r.assemble(context.Background(), parts, nil, "query", domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	if got := tokenestimate.Count(rc.Text); got > 24 {
 		t.Fatalf("context tokens = %d, want <= 24", got)
 	}

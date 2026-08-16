@@ -14,16 +14,13 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-func (agent *Agent) buildMessages(question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan) []llm.Message {
-	return BuildMessages(question, conversation, rc, plan, agent.cfg.DomainKnowledge, agent.cfg.HistoryLimit)
+func (agent *Agent) buildMessages(question string, query domain.QueryPlan, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan) []llm.Message {
+	return BuildMessages(question, query, conversation, rc, plan, agent.cfg.DomainKnowledge, agent.cfg.HistoryLimit)
 }
 
 // BuildMessages compiles the request-scoped prompt and replayable history.
-func BuildMessages(question string, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, domainKnowledge string, historyLimit int) []llm.Message {
-	mode := ClassifyResponseMode(question)
-	hint := "\n\n---\n" + prompts.MustRender(prompts.AgentQAResponseMode, struct {
-		Mode string
-	}{Mode: string(mode)})
+func BuildMessages(question string, query domain.QueryPlan, conversation ConversationContext, rc *retrieval.RetrievedContext, plan domain.EvidencePlan, domainKnowledge string, historyLimit int) []llm.Message {
+	hint := "\n\n---\n" + AnswerInstructionFor(query.Kind)
 	sysPrompt := composeSystemPrompt(agentPromptForPlan(plan), conversation.RolePrompt) + hint
 	if dk := strings.TrimSpace(domainKnowledge); dk != "" && plan.Has(domain.Internal) {
 		sysPrompt += "\n\n## Domain Knowledge\n" + dk

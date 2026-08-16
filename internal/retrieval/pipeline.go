@@ -39,7 +39,7 @@ type RetrievedContext struct {
 	EvidenceConflicts []evidence.Conflict `json:"evidenceConflicts,omitempty"`
 	HitCount          int                 `json:"hitCount"`
 	OriginalQuestion  string
-	Intent            domain.RetrievalIntent
+	Query             domain.QueryPlan
 	selection         selectionStats
 }
 
@@ -169,18 +169,31 @@ type retrievalBudget struct {
 	rerank  int
 }
 
-func budgetForIntent(intent domain.RetrievalIntent) retrievalBudget {
-	switch intent.Kind {
-	case domain.RetrievalRuntimeDiagnosis, domain.RetrievalInventory,
-		domain.RetrievalComparison:
-		return retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}
-	case domain.RetrievalFlow:
-		return retrievalBudget{code: 16, runbook: 8, service: 6, rerank: 24}
-	case domain.RetrievalOverview:
-		return retrievalBudget{code: 16, runbook: 16, service: 8, rerank: 24}
-	default:
-		return retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20}
+type queryRetrievalPolicy struct {
+	budget              retrievalBudget
+	maxExpandedServices int
+	expandCodeGraph     bool
+	coverageSelection   bool
+}
+
+func retrievalPolicyFor(kind domain.QueryKind) queryRetrievalPolicy {
+	base := queryRetrievalPolicy{
+		budget: retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20},
 	}
+	switch kind {
+	case domain.QueryFocusedFact, domain.QueryCodeReview:
+		return base
+	case domain.QueryRuntimeDiagnosis, domain.QueryInventory, domain.QueryComparison:
+		base.budget = retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}
+	case domain.QueryFlow:
+		base.budget = retrievalBudget{code: 16, runbook: 8, service: 6, rerank: 24}
+		base.expandCodeGraph = true
+	case domain.QueryOverview:
+		base.budget = retrievalBudget{code: 16, runbook: 16, service: 8, rerank: 24}
+		base.maxExpandedServices = 4
+		base.coverageSelection = true
+	}
+	return base
 }
 
 // New builds a Retriever with dense fallback reranking enabled.
@@ -227,7 +240,7 @@ func (retrieve *Retriever) RetrievePlan(
 	searchQuery string,
 	terms QueryTerms,
 	evidencePlan domain.EvidencePlan,
-	intent domain.RetrievalIntent,
+	query domain.QueryPlan,
 ) (*RetrievedContext, error) {
 	if !evidencePlan.Valid() {
 		return nil, fmt.Errorf("retrieval: invalid source bits %08b", evidencePlan.Sources)
@@ -246,12 +259,12 @@ func (retrieve *Retriever) RetrievePlan(
 		discoverStarted := time.Now()
 		reportProgress(ctx, "retrieval.discover", "正在查找相关代码、文档和服务", discoverStarted)
 		a, _ = runtrace.Invoke(ctx, retrievalDiscoverSpec, retrievalDiscoverInput{
-			Query: searchQuery, QueryVector: queryVector, QueryVectorAttempted: queryVectorAttempted,
-			Intent: intent, ServiceScoped: false,
+			SearchQuery: searchQuery, QueryVector: queryVector, QueryVectorAttempted: queryVectorAttempted,
+			Plan: query, ServiceScoped: false,
 		}, func(ctx context.Context, input retrievalDiscoverInput) (anchor, error) {
 			return retrieve.discover(
-				ctx, input.Query, input.ServicePatterns, input.ServiceScoped,
-				input.QueryVector, input.QueryVectorAttempted, input.Intent,
+				ctx, input.SearchQuery, input.ServicePatterns, input.ServiceScoped,
+				input.QueryVector, input.QueryVectorAttempted, input.Plan,
 			), nil
 		})
 		reportProgress(ctx, "retrieval.discover", "代码、文档和服务召回完成", discoverStarted)
@@ -259,37 +272,37 @@ func (retrieve *Retriever) RetrievePlan(
 	expandStarted := time.Now()
 	reportProgress(ctx, "retrieval.expand", "正在展开证据和依赖关系", expandStarted)
 	expanded, _ := runtrace.Invoke(ctx, retrievalExpandSpec, retrievalExpandInput{
-		Anchor: a, Terms: terms, EvidencePlan: evidencePlan, Intent: intent,
+		Anchor: a, Terms: terms, EvidencePlan: evidencePlan, Plan: query,
 	}, func(ctx context.Context, input retrievalExpandInput) (retrievalExpandOutput, error) {
-		parts, codePool := retrieve.expand(ctx, input.Anchor, input.Terms, input.EvidencePlan, input.Intent)
+		parts, codePool := retrieve.expand(ctx, input.Anchor, input.Terms, input.EvidencePlan, input.Plan)
 		return retrievalExpandOutput{Parts: parts, CodePool: codePool}, nil
 	})
 	reportProgress(ctx, "retrieval.expand", "证据展开完成", expandStarted)
 	rerankStarted := time.Now()
 	reportProgress(ctx, "retrieval.rerank", "正在整理候选证据", rerankStarted)
 	result, _ := runtrace.Invoke(ctx, retrievalAssembleSpec, retrievalAssembleInput{
-		Parts: expanded.Parts, CodePool: expanded.CodePool, SearchQuery: searchQuery, Intent: intent,
+		Parts: expanded.Parts, CodePool: expanded.CodePool, SearchQuery: searchQuery, Plan: query,
 	}, func(ctx context.Context, input retrievalAssembleInput) (*RetrievedContext, error) {
-		return retrieve.assemble(ctx, input.Parts, input.CodePool, input.SearchQuery, input.Intent), nil
+		return retrieve.assemble(ctx, input.Parts, input.CodePool, input.SearchQuery, input.Plan), nil
 	})
 	reportProgress(ctx, "retrieval.rerank", "候选证据整理完成", rerankStarted)
 	return result, nil
 }
 
 type retrievalDiscoverInput struct {
-	Query                string
+	SearchQuery          string
 	QueryVector          []float32
 	QueryVectorAttempted bool
 	ServicePatterns      []string
 	ServiceScoped        bool
-	Intent               domain.RetrievalIntent
+	Plan                 domain.QueryPlan
 }
 
 var retrievalDiscoverSpec = runtrace.Spec[retrievalDiscoverInput, anchor]{
 	Operation: "retrieval.discover",
 	Node:      "retrieval_discover",
 	Input: func(input retrievalDiscoverInput) map[string]any {
-		return map[string]any{"query": input.Query, "service_scoped": input.ServiceScoped}
+		return map[string]any{"query": input.SearchQuery, "service_scoped": input.ServiceScoped}
 	},
 	Output: func(_ retrievalDiscoverInput, result anchor, _ error) map[string]any {
 		return map[string]any{"services": len(result.services), "code_hits": len(result.codeHits), "runbooks": len(result.runbooks)}
@@ -300,7 +313,7 @@ type retrievalExpandInput struct {
 	Anchor       anchor
 	Terms        QueryTerms
 	EvidencePlan domain.EvidencePlan
-	Intent       domain.RetrievalIntent
+	Plan         domain.QueryPlan
 }
 
 type retrievalExpandOutput struct {
@@ -314,7 +327,7 @@ var retrievalExpandSpec = runtrace.Spec[retrievalExpandInput, retrievalExpandOut
 	Output: func(input retrievalExpandInput, result retrievalExpandOutput, _ error) map[string]any {
 		return map[string]any{
 			"parts": len(result.Parts), "code_pool": len(result.CodePool),
-			"sources": input.EvidencePlan.SourceNames(), "intent": input.Intent.Kind,
+			"sources": input.EvidencePlan.SourceNames(), "query_kind": input.Plan.Kind,
 		}
 	},
 }
@@ -323,7 +336,7 @@ type retrievalAssembleInput struct {
 	Parts       []partial
 	CodePool    []codeDoc
 	SearchQuery string
-	Intent      domain.RetrievalIntent
+	Plan        domain.QueryPlan
 }
 
 var retrievalAssembleSpec = runtrace.Spec[retrievalAssembleInput, *RetrievedContext]{
@@ -337,7 +350,7 @@ var retrievalAssembleSpec = runtrace.Spec[retrievalAssembleInput, *RetrievedCont
 			"hit_count": result.HitCount, "references": len(result.References), "context_chars": result.selection.Chars,
 			"selected": result.selection.Selected, "included": result.selection.Included,
 			"dropped": result.selection.Dropped, "truncated": result.selection.Truncated,
-			"intent": result.Intent.Kind, "evidence_units": len(result.EvidenceUnits),
+			"query_kind": result.Query.Kind, "evidence_units": len(result.EvidenceUnits),
 		}
 	},
 }
@@ -350,11 +363,11 @@ func (retrieve *Retriever) discover(
 	serviceScoped bool,
 	queryVector []float32,
 	queryVectorAttempted bool,
-	intent domain.RetrievalIntent,
+	query domain.QueryPlan,
 ) anchor {
 	result, _ := runtrace.Invoke(ctx, retrievalSourcesSpec, retrievalDiscoverInput{
-		Query: searchQuery, QueryVector: queryVector, ServicePatterns: servicePatterns,
-		QueryVectorAttempted: queryVectorAttempted, ServiceScoped: serviceScoped, Intent: intent,
+		SearchQuery: searchQuery, QueryVector: queryVector, ServicePatterns: servicePatterns,
+		QueryVectorAttempted: queryVectorAttempted, ServiceScoped: serviceScoped, Plan: query,
 	}, retrieve.discoverSources)
 	a := result.anchor
 	log.InfofCtx(ctx, "[qa] retrieval sources: code=%s runbook=%s service=%s",
@@ -370,10 +383,10 @@ func (retrieve *Retriever) discover(
 }
 
 func (retrieve *Retriever) discoverSources(ctx context.Context, input retrievalDiscoverInput) (retrievalSourcesResult, error) {
-	searchQuery := input.Query
+	searchQuery := input.SearchQuery
 	servicePatterns := input.ServicePatterns
 	serviceScoped := input.ServiceScoped
-	budget := budgetForIntent(input.Intent)
+	budget := retrievalPolicyFor(input.Plan.Kind).budget
 	vectorTools, vectorCapable := retrieve.tools.(vectorToolset)
 	useSharedVectorPath := vectorCapable && input.QueryVectorAttempted
 	var a anchor
@@ -586,7 +599,7 @@ func (retrieve *Retriever) configuredServiceMatches(ctx context.Context, pattern
 // expand fans anchor hits into formatted parts plus the unified code pool.
 func (retrieve *Retriever) expand(
 	ctx context.Context, a anchor, terms QueryTerms, evidencePlan domain.EvidencePlan,
-	intent domain.RetrievalIntent,
+	query domain.QueryPlan,
 ) (parts []partial, codePool []codeDoc) {
 	var mu sync.Mutex
 	addPart := func(p partial) { mu.Lock(); parts = append(parts, p); mu.Unlock() }
@@ -594,9 +607,10 @@ func (retrieve *Retriever) expand(
 	var wg sync.WaitGroup
 
 	if evidencePlan.Has(domain.Internal) {
+		policy := retrievalPolicyFor(query.Kind)
 		services := a.services
-		if intent.Kind == domain.RetrievalOverview && len(services) > 4 {
-			services = services[:4]
+		if policy.maxExpandedServices > 0 && len(services) > policy.maxExpandedServices {
+			services = services[:policy.maxExpandedServices]
 		}
 		wg.Add(1)
 		go func() { defer wg.Done(); retrieve.collectServices(ctx, services, a.svcMatches, addPart) }()
@@ -608,7 +622,7 @@ func (retrieve *Retriever) expand(
 		go func() { defer wg.Done(); retrieve.collectDeps(ctx, services, addPart) }()
 
 		cgKeywords := []string(nil)
-		if intent.Kind == domain.RetrievalFlow {
+		if policy.expandCodeGraph {
 			cgKeywords = retrieve.buildCodeGraphKeywords(a.services, terms)
 		}
 		log.InfofCtx(ctx, "[qa] codegraph keywords (cleaned): %d %v", len(cgKeywords), cgKeywords)
@@ -630,22 +644,17 @@ func (retrieve *Retriever) assemble(
 	parts []partial,
 	codePool []codeDoc,
 	searchQuery string,
-	intents ...domain.RetrievalIntent,
+	query domain.QueryPlan,
 ) *RetrievedContext {
-	intent := domain.RetrievalIntent{Kind: domain.RetrievalFocusedFact}
-	if len(intents) > 0 {
-		intent = intents[0]
-	}
-
 	if len(codePool) > 0 && retrieve.platform.RerankEnabled {
-		codePool = retrieve.postProcessCodePool(ctx, codePool, searchQuery, intent)
+		codePool = retrieve.postProcessCodePool(ctx, codePool, searchQuery, query)
 		parts = append(parts, retrieve.formatCodePool(ctx, codePool)...)
 	} else if len(codePool) > 0 {
 		log.InfofCtx(ctx, "[qa] code pool final (rerank disabled): %d docs\n%s", len(codePool), poolSummary(codePool, "rerank-disabled"))
 		parts = append(parts, retrieve.formatCodePool(ctx, codePool)...)
 	}
-	if intent.Kind == domain.RetrievalOverview {
-		parts = selectOverviewEvidence(parts, intent.RequiredFacets)
+	if retrievalPolicyFor(query.Kind).coverageSelection {
+		parts = selectOverviewEvidence(parts, domain.RequiredFacetsFor(query.Kind))
 	}
 
 	log.InfofCtx(ctx, "[qa] retrieve parts: %d sources", len(parts))
@@ -732,7 +741,7 @@ func (retrieve *Retriever) assemble(
 		EvidenceUnits:     evidenceLedger.Units(),
 		EvidenceConflicts: evidence.CloneConflicts(evidenceConflicts),
 		HitCount:          len(allRefs),
-		Intent:            intent,
+		Query:             query,
 		selection:         stats,
 	}
 }

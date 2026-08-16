@@ -66,7 +66,7 @@ func TestAssemblePreservesOnlyIncludedEvidenceUnits(t *testing.T) {
 			units: []tool.EvidenceUnit{{SourceKind: "service", Target: "svc-b"}},
 		},
 	}
-	result := retrieve.assemble(t.Context(), parts, nil, "query")
+	result := retrieve.assemble(t.Context(), parts, nil, "query", domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	if len(result.EvidenceUnits) != 1 || result.EvidenceUnits[0].Target != "doc-a" {
 		t.Fatalf("evidence units = %#v", result.EvidenceUnits)
 	}
@@ -84,7 +84,7 @@ func TestAssemblePreservesAuthoritativeSourceHash(t *testing.T) {
 		units: []tool.EvidenceUnit{{
 			SourceKind: "code", Target: "repos/repo-a/file.go", ContentHash: sourceHash,
 		}},
-	}}, nil, "query")
+	}}, nil, "query", domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	if result.Text != "svc-a/file.go\n" {
 		t.Fatalf("text = %q", result.Text)
 	}
@@ -102,7 +102,7 @@ func TestAssembleDeduplicatesMatchingEvidenceVersions(t *testing.T) {
 	result := retrieve.assemble(t.Context(), []partial{
 		{text: "first", units: []tool.EvidenceUnit{unit}},
 		{text: "second", units: []tool.EvidenceUnit{unit}},
-	}, nil, "query")
+	}, nil, "query", domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	if len(result.EvidenceUnits) != 1 {
 		t.Fatalf("evidence units = %#v", result.EvidenceUnits)
 	}
@@ -120,7 +120,7 @@ func TestAssemblePreservesConflictingEvidenceVersions(t *testing.T) {
 		{text: "second", units: []tool.EvidenceUnit{{
 			SourceKind: "runbook", Target: "doc-a", ContentHash: "version-b",
 		}}},
-	}, nil, "query")
+	}, nil, "query", domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	if len(result.EvidenceUnits) != 1 ||
 		result.EvidenceUnits[0].ContentHash != "version-a" {
 		t.Fatalf("evidence units = %#v", result.EvidenceUnits)

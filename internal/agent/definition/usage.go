@@ -11,6 +11,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
+var errRunLimitExceeded = fmt.Errorf("run usage limit exceeded")
+
 func (recorder *usageRecorder) RecordLLMCall(
 	ctx context.Context,
 	call llm.CallUsage,
@@ -45,6 +47,7 @@ func (recorder *usageRecorder) RecordLLMCall(
 	recorder.usage.CostMicros += callCost
 	recorder.mu.Unlock()
 	if recorder.store != nil {
+		call.CostMicros = callCost
 		return recorder.store.RecordLLMCall(ctx, call)
 	}
 	return nil
@@ -72,6 +75,30 @@ func (recorder *usageRecorder) Usage() agentapi.Usage {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	return recorder.usage
+}
+
+func (recorder *usageRecorder) CheckLimits() error {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if recorder.limits.MaxTotalTokens > 0 &&
+		recorder.usage.TotalTokens > recorder.limits.MaxTotalTokens {
+		return fmt.Errorf(
+			"%w: total tokens %d exceed %d",
+			errRunLimitExceeded,
+			recorder.usage.TotalTokens,
+			recorder.limits.MaxTotalTokens,
+		)
+	}
+	if recorder.limits.MaxCostMicros > 0 &&
+		recorder.usage.CostMicros > recorder.limits.MaxCostMicros {
+		return fmt.Errorf(
+			"%w: cost %d exceeds %d micros",
+			errRunLimitExceeded,
+			recorder.usage.CostMicros,
+			recorder.limits.MaxCostMicros,
+		)
+	}
+	return nil
 }
 
 func hashString(value string) string {

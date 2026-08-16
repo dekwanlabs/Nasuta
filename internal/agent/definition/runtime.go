@@ -96,6 +96,7 @@ type ScenarioRunStart struct {
 	SessionID     string
 	Question      string
 	Mode          string
+	Limits        agentapi.RunLimits
 }
 
 // ScenarioRun owns one non-agent parent lifecycle.
@@ -275,4 +276,5 @@ type usageRecorder struct {
 	inputPriceMicrosPerMillionTokens  int64
 	outputPriceMicrosPerMillionTokens int64
 	usage                             agentapi.Usage
+	limits                            agentapi.RunLimits
 }

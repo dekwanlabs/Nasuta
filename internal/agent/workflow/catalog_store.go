@@ -131,7 +131,87 @@ func publishDefinitionTx(
 	}, true, nil
 }
 
-// LoadFullCatalog is reserved for startup recovery of immutable definitions.
+// LoadDefaultDefinitions returns the active working set selected as default.
+func (workflowStore *Store) LoadDefaultDefinitions(
+	ctx context.Context,
+) ([]DefinitionRecord, error) {
+	rows, err := workflowStore.db.QueryContext(ctx, `SELECT
+		definition_json,content_hash,active,is_default,created_by,created_at
+		FROM workflow_definitions WHERE is_default=1 ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("load default workflow definitions: %w", err)
+	}
+	defer rows.Close()
+	records := make([]DefinitionRecord, 0)
+	for rows.Next() {
+		record, err := scanDefinitionRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate default workflow definitions: %w", err)
+	}
+	return records, nil
+}
+
+// LoadDefinition returns one immutable version for lazy catalog hydration.
+func (workflowStore *Store) LoadDefinition(
+	ctx context.Context,
+	id string,
+	version int64,
+) (DefinitionRecord, error) {
+	row := workflowStore.db.QueryRowContext(ctx, `SELECT
+		definition_json,content_hash,active,is_default,created_by,created_at
+		FROM workflow_definitions WHERE id=? AND version=? LIMIT 1`,
+		id,
+		version,
+	)
+	record, err := scanDefinitionRecord(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DefinitionRecord{}, fmt.Errorf(
+				"workflow %q version %d not found: %w",
+				id, version, ErrNotFound,
+			)
+		}
+		return DefinitionRecord{}, fmt.Errorf(
+			"load workflow %q version %d: %w",
+			id, version, err,
+		)
+	}
+	return record, nil
+}
+
+// LoadHighestVersions returns version watermarks without loading definition bodies.
+func (workflowStore *Store) LoadHighestVersions(
+	ctx context.Context,
+) (map[string]int64, error) {
+	rows, err := workflowStore.db.QueryContext(ctx, `SELECT id,MAX(version)
+		FROM workflow_definitions GROUP BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("load workflow version watermarks: %w", err)
+	}
+	defer rows.Close()
+	versions := make(map[string]int64)
+	for rows.Next() {
+		var (
+			id      string
+			version int64
+		)
+		if err := rows.Scan(&id, &version); err != nil {
+			return nil, fmt.Errorf("scan workflow version watermark: %w", err)
+		}
+		versions[id] = version
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate workflow version watermarks: %w", err)
+	}
+	return versions, nil
+}
+
+// LoadFullCatalog reads every historical version for explicit offline operations.
 func (workflowStore *Store) LoadFullCatalog(
 	ctx context.Context,
 ) ([]DefinitionRecord, error) {

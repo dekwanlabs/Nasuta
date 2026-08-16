@@ -313,7 +313,7 @@ func TestPostProcessCodePipeline(t *testing.T) {
 	}
 	recorder := &rerankTraceRecorder{}
 	ctx := domain.WithTraceRecorder(context.Background(), recorder)
-	out := r.postProcessCodePool(ctx, docs, "q")
+	out := r.postProcessCodePool(ctx, docs, "q", domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	// Expect: 3 after dedup (a/1 once, b/1, c/1), c/1 dropped by threshold → 2.
 	if len(out) != 2 {
 		t.Fatalf("expected 2 after full pipeline, got %d", len(out))
@@ -341,7 +341,7 @@ func TestPostProcessCodePipelineHonorsThresholdWhenAllCandidatesFail(t *testing.
 	out := r.postProcessCodePool(context.Background(), []codeDoc{
 		doc("svc-a", "a/1.java", "m", "aaaa", 0.95),
 		doc("svc-b", "b/1.java", "m", "bbbb", 0.80),
-	}, "q")
+	}, "q", domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	if len(out) != 0 {
 		t.Fatalf("threshold returned %d candidates, want none", len(out))
 	}
@@ -351,7 +351,7 @@ func TestPostProcessCodePipelineMarksRerankerFallbackDegraded(t *testing.T) {
 	r := &Retriever{reranker: errorReranker{}, platform: rerankTestCfg()}
 	recorder := &rerankTraceRecorder{}
 	ctx := domain.WithTraceRecorder(t.Context(), recorder)
-	r.postProcessCodePool(ctx, []codeDoc{doc("svc-a", "a/1.java", "m", "aaaa", 0.95)}, "q")
+	r.postProcessCodePool(ctx, []codeDoc{doc("svc-a", "a/1.java", "m", "aaaa", 0.95)}, "q", domain.QueryPlan{Kind: domain.QueryFocusedFact})
 	for _, event := range recorder.events {
 		if event.Node == "candidate_rerank" {
 			if event.Status != "degraded" || event.Output["mode"] != "recall_after_error" || event.Output["error"] != errReranker.Error() {

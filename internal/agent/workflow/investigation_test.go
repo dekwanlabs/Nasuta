@@ -475,7 +475,7 @@ func TestGoalsRejectUnknownFacet(t *testing.T) {
 		{Facet: "live_database_mutation", Required: true},
 	}
 	if _, err := BuildPlan(goals); err == nil ||
-		!strings.Contains(err.Error(), "has no registered capability") {
+		!strings.Contains(err.Error(), "is not registered") {
 		t.Fatalf("proposal error = %v", err)
 	}
 	if _, err := GoalPolicy(
@@ -483,7 +483,7 @@ func TestGoalsRejectUnknownFacet(t *testing.T) {
 		time.Second,
 		investigationBudgetPolicy(),
 		goals,
-	); err == nil || !strings.Contains(err.Error(), "has no registered capability") {
+	); err == nil || !strings.Contains(err.Error(), "is not registered") {
 		t.Fatalf("policy error = %v", err)
 	}
 }
@@ -1356,6 +1356,7 @@ func defaultInvestigationDefinitionsForCapabilities(
 		"investigator.docs",
 		"investigator.web",
 		"investigator.memory",
+		"delegation.verifier",
 		"synthesizer",
 	}
 	definitions := make([]agentapi.Definition, 0, len(ids))

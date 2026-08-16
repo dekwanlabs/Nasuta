@@ -82,6 +82,9 @@ func redactResult(result agentapi.RunResult) agentapi.RunResult {
 	result.Messages = redactPublicMessages(result.Messages)
 	result.EvidenceUnits = redactEvidenceUnits(result.EvidenceUnits)
 	result.EvidenceConflicts = redactEvidenceConflicts(result.EvidenceConflicts)
+	result.DelegationAdoptions = cloneDelegationAdoptions(
+		result.DelegationAdoptions,
+	)
 	if result.Error != nil {
 		copied := *result.Error
 		copied.Message = platform.RedactSensitiveText(copied.Message)
@@ -94,6 +97,9 @@ func redactOutcome(outcome run.Outcome) run.Outcome {
 	outcome.Answer = platform.RedactSensitiveText(outcome.Answer)
 	outcome.SessionMessages = redactLLMMessages(outcome.SessionMessages)
 	outcome.References = redactPublicReferences(outcome.References)
+	outcome.DelegationAdoptions = cloneDelegationAdoptions(
+		outcome.DelegationAdoptions,
+	)
 	if outcome.Err != nil {
 		outcome.Err = errors.New(platform.RedactSensitiveText(outcome.Err.Error()))
 	}
@@ -128,7 +134,27 @@ func redactStep(step run.StepRecord) run.StepRecord {
 			step.AnswerContract.RequiredLiterals[index],
 		)
 	}
+	step.AnswerContract.Delegations = cloneAnswerContractDelegations(
+		step.AnswerContract.Delegations,
+	)
+	step.DelegationAdoptions = cloneDelegationAdoptions(
+		step.DelegationAdoptions,
+	)
 	return step
+}
+
+func cloneAnswerContractDelegations(
+	delegations []tool.DelegationAdoptionContract,
+) []tool.DelegationAdoptionContract {
+	if len(delegations) == 0 {
+		return nil
+	}
+	cloned := make([]tool.DelegationAdoptionContract, len(delegations))
+	for index, delegation := range delegations {
+		delegation.ReportIDs = append([]string(nil), delegation.ReportIDs...)
+		cloned[index] = delegation
+	}
+	return cloned
 }
 
 func redactRawMessage(raw json.RawMessage) json.RawMessage {

@@ -1,2 +1,6 @@
 {{ .Prefix }}{{ .Contract }}
-Internal validation contract: the final answer must contain every required_literals value verbatim. Never abbreviate, truncate, mask, summarize, or replace any part with ... or …. Do not expose this marker.
+Internal validation contract:
+- The final answer must contain every required_literals value verbatim. Never abbreviate, truncate, mask, summarize, or replace any part with ... or ….
+- When delegations is non-empty, append exactly one final line using this form: {{ .AdoptionMarker }}{"delegations":[{"delegation_id":"...","adopted_report_ids":["..."]}]}.
+- Include every registered delegation_id exactly once. adopted_report_ids must be a subset of that delegation's report_ids. Use an empty array when no report contributed to the final answer.
+- This metadata is internal. Do not explain it, quote it, or expose either internal marker to the user.

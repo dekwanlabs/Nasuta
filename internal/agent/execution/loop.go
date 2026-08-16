@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -31,6 +32,7 @@ type Config struct {
 	MaxContinueRounds   int
 	DomainKnowledge     string
 	ModelParameters     llm.ModelParameters
+	BudgetCheck         func() error
 }
 
 // ConversationContext carries recalled archived history and recent turns.
@@ -107,17 +109,18 @@ func (agent *Agent) SetOnFirstAnswerToken(fn func(runID string)) {
 }
 
 type RunResult struct {
-	RunID             string
-	Answer            string
-	Steps             int
-	Evidence          EvidenceMetrics
-	EvidenceUnits     []tool.EvidenceUnit
-	EvidenceConflicts []evidence.Conflict
-	References        []tool.Reference
-	ForcedConclusion  bool
-	Aborted           bool
-	Err               error
-	SessionMessages   []llm.Message
+	RunID               string
+	Answer              string
+	Steps               int
+	Evidence            EvidenceMetrics
+	EvidenceUnits       []tool.EvidenceUnit
+	EvidenceConflicts   []evidence.Conflict
+	References          []tool.Reference
+	DelegationAdoptions []agentapi.DelegationAdoption
+	ForcedConclusion    bool
+	Aborted             bool
+	Err                 error
+	SessionMessages     []llm.Message
 }
 
 // Input is a fully compiled request for the execution loop.
@@ -212,9 +215,16 @@ func (agent *Agent) runWithSnapshot(
 	policy ToolPolicy,
 	toolSnapshot tool.Snapshot,
 ) (*RunResult, error) {
+	query := domain.QueryPlan{}
+	if retrieved != nil {
+		query = retrieved.Query
+	}
+	if query.Kind == "" {
+		query = domain.ResolveQueryPlan(question, domain.QuerySignals{}).Plan
+	}
 	input := Input{
 		Question:           question,
-		Messages:           agent.buildMessages(question, conversation, retrieved, plan),
+		Messages:           agent.buildMessages(question, query, conversation, retrieved, plan),
 		ReferenceTypes:     referenceTypeIndex(retrieved),
 		EvidenceSeeded:     conversation.EvidenceSeeded || retrieved != nil && retrieved.Text != "",
 		Direct:             plan.Direct(),
@@ -253,6 +263,9 @@ func (agent *Agent) RunCompiled(
 		runStarted,
 	)
 	if err := agent.runTurns(state); err != nil {
+		state.result.DelegationAdoptions = state.answerContract.UnknownAdoptions(
+			"parent_run_failed",
+		)
 		agent.finalizeLoop(state)
 		return state.result, err
 	}

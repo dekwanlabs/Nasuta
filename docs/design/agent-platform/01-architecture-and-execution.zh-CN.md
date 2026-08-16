@@ -2,7 +2,8 @@
 
 [English](01-architecture-and-execution.md) | [中文](01-architecture-and-execution.zh-CN.md)
 
-> 状态：统一基线；主体已实现，状态表达仍需持续收敛
+> 状态：统一基线；Single、Dynamic Delegation 与 Durable Workflow 三路径已实现
+> 更新：2026-08-16
 > 来源：Agent End-to-End Execution Flow、QA Run State Convergence
 
 ## 1. 模块职责
@@ -15,7 +16,10 @@ HTTP/SSE request
   -> question analysis and evidence plan
   -> bounded context assembly
   -> immutable tool snapshot
-  -> reason -> act -> observe loop
+  -> execution route
+       -> single Agent reason -> act -> observe loop
+       -> parent loop + bounded dynamic delegation
+       -> durable Workflow
   -> reserved final-answer phase
   -> stream, persist, trace
 ```
@@ -42,7 +46,39 @@ HTTP/SSE request
 
 Run 内不得因为路由结果、某次工具失败或上一轮工具选择而改变工具定义。配置热更新只影响下一次 Run。
 
-## 4. 问题分析
+## 4. 三条执行路径与控制权
+
+QA 共享同一套准备、权限、证据和 Run Runtime，但执行控制权分为三条互斥路径：
+
+| 路径 | 适用场景 | 控制权 |
+|---|---|---|
+| Single Agent | 简单、低成本、无需独立调查 | Parent 拥有工具选择、证据收敛和最终回答 |
+| Dynamic Delegation | 普通交互式调查；目标可隔离、可并行、可验证 | Parent 在自己的工具循环中按实际证据调用 `delegate_investigation`，并拥有最终综合 |
+| Durable Workflow | 长任务、强依赖、高风险、人工审批或必须恢复续跑 | Workflow Definition 拥有节点依赖、验证、综合、取消和恢复 |
+
+入口不得为同一目标同时隐式启动 Dynamic Delegation 和 Workflow。Workflow escalation
+必须通过应用拥有的 immutable `WorkflowBinding` 和幂等 `WorkflowEscalator` 显式提交，
+记录原因码；未知 capability、权限拒绝、Provider 失败或 child timeout 不会静默切换路径。
+
+Dynamic Delegation 的运行不变量：
+
+- 模型只能选择服务端 allowlist 中 `enabled + read-only + investigator` 的 Capability；
+- Capability、Agent Definition、Tool ID 与 WorkflowBinding 分别负责能力身份、执行模板、
+  工具身份和持久化场景绑定，不能互相推导；
+- child 使用完整 Agent Run 生命周期，但只接收 objective、facets 和已授权 evidence refs；
+- parent 拥有 `RunLimits` 和总账，在启动 child 前原子 reservation，结束后按权威
+  token、tool-call 和 cost usage settlement，并始终保护最终回答预算；
+- 一个 delegate tool call 可在 `MaxConcurrent` 内批量并发，普通工具调用的顺序语义不变；
+- child 不得继续 delegate；完整 child 轨迹留在自己的 Run，parent 只接收已持久化的
+  bounded report 和稳定引用；
+- report artifact 与 settlement durable 后，delegate tool result 才能返回 parent；
+- deterministic validator 仅发现合同、引用、显式冲突和注册 comparator 覆盖的结构化
+  冲突；高风险或需要跨报告自由文本合并时自动启动 tool-free semantic verifier child；
+- delegate tool 为最终 `AnswerContract` 登记 delegation/report allowlist，parent
+  候选答案显式声明 adopted report 子集；Runtime 校验后从可见答案剥离 metadata，并将
+  adopted/not_adopted/unknown 写入 answer Step、terminal/public result 和事件。
+
+## 5. 问题分析
 
 问题分析产生两个独立结果：
 
@@ -53,7 +89,7 @@ EvidencePlan: 允许获取哪些证据来源
 
 ResponseMode 只提供结构提示，不能授予工具权限。EvidencePlan 描述 Memory、Internal、Runtime、Web 等来源的可用性和优先级，不保证一定调用某个工具。
 
-## 5. 上下文装配
+## 6. 上下文装配
 
 模型输入按优先级单次装配：
 
@@ -66,7 +102,7 @@ ResponseMode 只提供结构提示，不能授予工具权限。EvidencePlan 描
 
 装配必须使用 Provider 感知的 token 预算。每个分区有独立上限，总预算只递减一次，不通过反复扫描和裁剪碰运气。
 
-## 6. 工具循环
+## 7. 工具循环
 
 标准循环是：
 
@@ -87,7 +123,7 @@ LLM response
 - Step 上限是执行预算，不是跳过最终答案的理由；
 - 当前 Run 中取得的工具结果优先于历史摘要。
 
-## 7. 超时与最终回答
+## 8. 超时与最终回答
 
 总超时拆成两个区间：
 
@@ -105,7 +141,7 @@ Final-answer deadline = reserved remainder
 - 接受精确输出合同校验；
 - 在长度截断时通过 continuation 恢复，无法恢复时返回明确错误。
 
-## 8. Run 状态模型
+## 9. Run 状态模型
 
 Run 状态应从事实推导，不建立独立持久化状态机。
 
@@ -116,20 +152,30 @@ Run 状态应从事实推导，不建立独立持久化状态机。
 - 是否存在未完成 tool call；
 - 最终 Provider `finish_reason`；
 - 是否通过答案合同；
+- 是否为每个 delegation 形成合法的最终采用事实；
 - 是否持久化成功。
 
 可展示状态可以是 `running`、`completed`、`failed`、`aborted`，但它们是上述事实的投影。禁止为“计划中”“正在总结”“等待工具”等线性步骤增加不可恢复的持久状态。
 
-## 9. Streaming 与持久化
+Dynamic Delegation 不建立第二套 child 生命周期状态机。对外
+`completed/partial/failed/timeout/cancelled/rejected/interrupted` 状态由 admission、
+child Run 终态和 report completeness 统一投影。进程启动恢复时，活动 Agent child
+标记为 `aborted/interrupted`；未结算 delegation 在同一事务内根据 child Run 的权威
+usage 写入 partial interrupted report artifact 并释放 reservation。QA parent 不由该
+child 恢复流程误终止，普通 delegation 也不会跨进程续跑。
+
+## 10. Streaming 与持久化
 
 - 推理文本、工具调用和最终答案使用不同事件类型；
 - 模型开始输出 tool call 后，之前的候选回答不得继续流给用户；
 - 只有通过最终校验的答案才作为 deliverable answer 持久化；
+- delegation adoption marker 只存在于待校验候选答案，不能进入可见 token stream、
+  answer Step content 或 Session；结构化采用事实单独持久化；
 - 一次逻辑轮次按 `user -> assistant(tool_calls) -> tool results -> assistant final` 原子保存；
 - 取消时已完成的工具结果仍保存，避免协议配对断裂；
 - Session 读取在存储边界有 `LIMIT`，不得全量加载后内存裁剪。
 
-## 10. 失败语义
+## 11. 失败语义
 
 | 失败 | 行为 |
 |---|---|
@@ -140,9 +186,13 @@ Run 状态应从事实推导，不建立独立持久化状态机。
 | 模型空响应 | 有界重试；仍为空则明确错误 |
 | 模型输出截断 | continuation；不可恢复则错误 |
 | 答案合同失败 | 修复重试；仍失败则不交付残缺答案 |
+| Delegation adoption metadata 无效 | 按答案合同有界修复；失败/取消/无答案时投影为 `unknown` |
 | Session 持久化失败 | 返回可观察错误，不声称已保存 |
+| Dynamic child 中断 | 投影 `interrupted`，持久化 partial report 并按权威 usage 结算 |
+| Semantic verifier 被预算拒绝或失败 | 返回 typed verification 结果并保留不确定性，不伪装成成功验证 |
+| Workflow escalation 不可用 | 返回稳定原因，不猜测 binding 或静默 fallback |
 
-## 11. 验收标准
+## 12. 验收标准
 
 1. 同一 Run 的工具 schema 和权限快照保持不变；
 2. 工具失败和步数耗尽都不会绕过最终回答阶段；
@@ -151,6 +201,11 @@ Run 状态应从事实推导，不建立独立持久化状态机。
 5. Run 状态可由持久化事实重建；
 6. Session 在线读取保持有界；
 7. Trace 可以还原入口、规划、工具、总结和持久化阶段。
+8. Dynamic child 的权限、预算、深度和并发不超过 parent 与服务端 policy 的交集；
+9. child report 和 reservation 在返回 parent 前已持久化，启动恢复不会重复结算或丢失权威 usage；
+10. Single、Dynamic Delegation 和 Workflow 的路由、升级原因与终态可区分、可审计。
+11. 高风险和多报告自由文本合并按稳定原因触发 semantic verifier，低风险单报告不新增固定 verifier 调用；
+12. adopted/not_adopted/unknown 可从 answer Step、terminal/public result 和事件还原，隐藏 marker 不进入可见答案或 Session。
 
 ## 详细归并材料
 

@@ -63,6 +63,11 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 			}
 			return fmt.Errorf("agent step %d: %w", step, err)
 		}
+		if agent.cfg.BudgetCheck != nil {
+			if err := agent.cfg.BudgetCheck(); err != nil {
+				return err
+			}
+		}
 		if len(turn.result.ToolCalls) == 0 {
 			agent.handleAnswerTurn(state, turn)
 			break
@@ -84,6 +89,11 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 }
 
 func (agent *Agent) ensureTurnBudget(state *compiledLoop, step int) error {
+	if agent.cfg.BudgetCheck != nil {
+		if err := agent.cfg.BudgetCheck(); err != nil {
+			return err
+		}
+	}
 	if _, err := agent.compactAnswerContext(
 		state, state.tools, fmt.Sprintf("model_step_%d", step),
 	); err != nil {
@@ -168,6 +178,33 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 			state.runID, turn.step, err)
 		return
 	}
+	if errors.Is(err, ErrAnswerTruncated) &&
+		state.answerContract.Active() &&
+		validateAndStripContractPartial(result, state.answerContract) {
+		state.result.DelegationAdoptions = state.answerContract.Adoptions()
+		turn.stream.Publish(result.Content)
+		state.result.Answer += result.Content
+		state.stepSeq++
+		_ = agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
+			StepNo:              state.stepSeq,
+			Kind:                StepKindAnswer,
+			Content:             result.Content,
+			DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions),
+			TokenDelta:          utf8.RuneCountInString(result.Content),
+			ReasoningTokens:     result.ReasoningTokens,
+			DurationMs:          int(turn.duration / time.Millisecond),
+			CreatedAt:           turn.started,
+		})
+		state.result.Err = err
+		log.WarnfCtx(
+			state.ctx,
+			"[agent] run %s preserving contract-valid partial final answer at step %d: %v",
+			state.runID,
+			turn.step,
+			err,
+		)
+		return
+	}
 	if errors.Is(err, ErrReasoningTruncated) || errors.Is(err, ErrEmptyModelResponse) {
 		log.WarnfCtx(state.ctx, "[agent] run %s final-answer generation produced no visible content; forcing conclusion: %v",
 			state.runID, err)
@@ -190,17 +227,19 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 		return
 	}
 
+	state.result.DelegationAdoptions = state.answerContract.Adoptions()
 	turn.stream.Publish(result.Content)
 	state.result.Answer += result.Content
 	state.stepSeq++
 	_ = agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
-		StepNo:          state.stepSeq,
-		Kind:            StepKindAnswer,
-		Content:         result.Content,
-		TokenDelta:      utf8.RuneCountInString(result.Content),
-		ReasoningTokens: result.ReasoningTokens,
-		DurationMs:      int(turn.duration / time.Millisecond),
-		CreatedAt:       turn.started,
+		StepNo:              state.stepSeq,
+		Kind:                StepKindAnswer,
+		Content:             result.Content,
+		DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions),
+		TokenDelta:          utf8.RuneCountInString(result.Content),
+		ReasoningTokens:     result.ReasoningTokens,
+		DurationMs:          int(turn.duration / time.Millisecond),
+		CreatedAt:           turn.started,
 	})
 	if err != nil {
 		state.result.Err = err

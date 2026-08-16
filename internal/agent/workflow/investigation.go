@@ -11,6 +11,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 const FlowID = "delegated.investigation"
@@ -137,7 +138,7 @@ func DefaultPlan() agentapi.TaskGraphProposal {
 		Tasks: []agentapi.TaskSpec{
 			{
 				ID: "investigate.code", Purpose: "Inspect implementation evidence.",
-				RequiredFacets: []string{"implementation"},
+				RequiredFacets: []string{"core_flow"},
 				Capability:     "knowledge.code.inspect",
 				OutputSchema:   report,
 				ParallelGroup:  "investigation",
@@ -146,7 +147,7 @@ func DefaultPlan() agentapi.TaskGraphProposal {
 			},
 			{
 				ID: "investigate.runtime", Purpose: "Trace service topology evidence.",
-				RequiredFacets: []string{"service.topology"},
+				RequiredFacets: []string{"external_dependency"},
 				Capability:     "knowledge.service.trace",
 				OutputSchema:   report,
 				ParallelGroup:  "investigation",
@@ -155,7 +156,7 @@ func DefaultPlan() agentapi.TaskGraphProposal {
 			},
 			{
 				ID: "investigate.docs", Purpose: "Verify documentation evidence.",
-				RequiredFacets: []string{"documentation"},
+				RequiredFacets: []string{"business_domain"},
 				Capability:     "knowledge.docs.verify",
 				OutputSchema:   report,
 				ParallelGroup:  "investigation",
@@ -614,6 +615,9 @@ func normalizeGoals(
 				goal.Facet,
 			)
 		}
+		if !domain.IsKnownFacet(domain.EvidenceFacet(goal.Facet)) {
+			return nil, fmt.Errorf("investigation facet %q is not registered", goal.Facet)
+		}
 		current := byFacet[goal.Facet]
 		if current == nil {
 			current = &normalizedGoal{
@@ -704,12 +708,12 @@ func capabilityForFacet(
 	facet string,
 ) (capabilityID, nodeID, focus string, ok bool) {
 	switch facet {
-	case "implementation", "entrypoint", "core_flow", "data_and_state":
+	case "entrypoint", "core_flow", "data_and_state":
 		return "knowledge.code.inspect", "investigate.code", "code", true
-	case "service.topology", "system_boundary", "external_dependency",
+	case "system_boundary", "external_dependency",
 		"runtime_and_operations":
 		return "knowledge.service.trace", "investigate.runtime", "runtime", true
-	case "documentation", "business_domain":
+	case "business_domain":
 		return "knowledge.docs.verify", "investigate.docs", "documentation", true
 	default:
 		return "", "", "", false

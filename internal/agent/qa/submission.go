@@ -3,6 +3,7 @@ package qa
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,11 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
+	agentworkflow "github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -25,6 +29,7 @@ import (
 )
 
 const sessionArchiveTimeout = 2 * time.Minute
+const qaWorkflowEscalationRequestID = "qa.workflow.escalation"
 
 func (svc *Service) submitInvestigation(
 	prepared *preparation,
@@ -35,11 +40,24 @@ func (svc *Service) submitInvestigation(
 	question := request.Question
 	conversation := request.Conversation
 	userID := request.UserID
+	definition, selection, err := svc.resolveAgentDefinition(prepared)
+	if err != nil {
+		return nil, err
+	}
+	prepared.runLimits = svc.parentRunLimits(prepared, definition)
+	useEscalator := svc.usesWorkflowEscalator()
 	workflowRunID := "workflow_" + strings.TrimPrefix(NewRunID(), "run_")
+	if useEscalator {
+		workflowRunID = agentworkflow.StableWorkflowEscalationRunID(
+			runID,
+			qaWorkflowEscalationRequestID,
+		)
+	}
 	scenario, err := svc.scenarios.Start(ctx, ScenarioRunStart{
 		RunID: runID, ParentRunID: request.ParentRunID, UserID: userID,
 		WorkflowRunID: workflowRunID, SessionID: conversation.SessionID,
 		Question: question, Mode: "multi_agent",
+		Limits: prepared.runLimits,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("begin QA parent run %q: %w", runID, err)
@@ -81,18 +99,111 @@ func (svc *Service) submitInvestigation(
 	if recalled := memoryContextBlock(evidence.recalled); recalled != nil {
 		seedMaterial = append(seedMaterial, *recalled)
 	}
-	startErr := svc.investigation.Start(runCtx, InvestigationRequest{
-		WorkflowRunID: workflowRunID,
-		Contract:      contractFromPreparation(prepared, seedMaterial),
-		Proposal:      cloneTaskGraphProposal(prepared.taskGraphProposal),
-		SeedEvidence:  contextBlockEvidence(seedMaterial),
-		Actor:         agentapi.Actor{UserID: userID},
-	})
+	seedEvidence := contextBlockEvidence(seedMaterial)
+	if err := recordEvidenceLedger(
+		runCtx,
+		scenario,
+		seedEvidence,
+	); err != nil {
+		scenario.Release()
+		prepared.closeTrace()
+		outcome := RunOutcome{
+			Status: RunStatusFailed, ErrorCode: "preparation_failed", Err: err,
+			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
+		}
+		completeErr := svc.scenarios.Complete(
+			context.WithoutCancel(runCtx),
+			runID,
+			outcome,
+		)
+		if completeErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("persist QA evidence ledger for %q: %w", workflowRunID, err),
+				completeErr,
+			)
+		}
+		return nil, fmt.Errorf(
+			"persist QA evidence ledger for %q: %w",
+			workflowRunID,
+			err,
+		)
+	}
+	objective := strings.TrimSpace(prepared.planning.CleanQuestion)
+	if objective == "" {
+		objective = strings.TrimSpace(question)
+	}
+	var (
+		startErr       error
+		startErrorCode = "investigation_start_failed"
+	)
+	if useEscalator {
+		if svc.workflowEscalator == nil {
+			startErrorCode = agentapi.WorkflowUnavailable
+			startErr = errors.New("workflow escalator is unavailable")
+		} else {
+			receipt, escalationErr := svc.workflowEscalator.Escalate(
+				runCtx,
+				agentapi.WorkflowEscalationRequest{
+					RequestID:      qaWorkflowEscalationRequestID,
+					ParentRunID:    runID,
+					Capability:     prepared.execution.EscalationCapability,
+					CapabilityHash: prepared.execution.EscalationCapabilityHash,
+					Reason: agentapi.WorkflowEscalationReason(
+						prepared.execution.RouteReason,
+					),
+					Objective: objective,
+					FocusFacets: append(
+						[]string(nil),
+						prepared.execution.EscalationFocusFacets...,
+					),
+					EvidenceRefs: workflowEvidenceRefs(seedEvidence),
+				},
+			)
+			startErr = escalationErr
+			if receipt.ErrorCode != "" {
+				startErrorCode = receipt.ErrorCode
+			}
+			if startErr == nil &&
+				(receipt.Status != agentapi.EscalationAccepted &&
+					receipt.Status != agentapi.EscalationAlreadyStarted) {
+				startErrorCode = agentapi.WorkflowStartFailed
+				startErr = fmt.Errorf(
+					"workflow escalation returned status %q",
+					receipt.Status,
+				)
+			}
+			if startErr == nil && receipt.WorkflowRunID != workflowRunID {
+				startErrorCode = agentapi.WorkflowStartConflict
+				startErr = fmt.Errorf(
+					"workflow escalation returned run %q, want %q",
+					receipt.WorkflowRunID,
+					workflowRunID,
+				)
+			}
+		}
+	} else {
+		startErr = svc.investigation.Start(runCtx, InvestigationRequest{
+			WorkflowRunID: workflowRunID,
+			Contract:      contractFromPreparation(prepared, seedMaterial),
+			Proposal:      cloneTaskGraphProposal(prepared.taskGraphProposal),
+			SeedEvidence:  seedEvidence,
+			Actor:         agentapi.Actor{UserID: userID},
+		})
+	}
+	if startErr == nil &&
+		prepared.execution.ShadowPath == executionPathDelegation {
+		svc.startDelegationShadow(
+			prepared,
+			definition,
+			selection,
+			evidence,
+		)
+	}
 	scenario.Release()
 	prepared.closeTrace()
 	if startErr != nil {
 		outcome := RunOutcome{
-			Status: RunStatusFailed, ErrorCode: "investigation_start_failed", Err: startErr,
+			Status: RunStatusFailed, ErrorCode: startErrorCode, Err: startErr,
 			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
 		}
 		completeErr := svc.scenarios.Complete(
@@ -124,6 +235,190 @@ func (svc *Service) submitInvestigation(
 		)
 	}()
 	return &AskResult{RunID: runID}, nil
+}
+
+func (svc *Service) startDelegationShadow(
+	prepared *preparation,
+	definition agentapi.Definition,
+	selection agentapi.DefinitionSelection,
+	evidence *preparedEvidence,
+) {
+	if svc == nil || svc.runtime == nil || prepared == nil || evidence == nil ||
+		prepared.execution.ShadowPath != executionPathDelegation {
+		return
+	}
+	request := prepared.request
+	shadowRunID := delegationShadowRunID(request.RunID)
+	blocks := contextBlocks(evidence.retrieved)
+	conversation := svc.answerContext(
+		context.Background(),
+		request.Conversation,
+		evidence.recalled,
+		request.RolePrompt,
+		evidence.retrieved,
+	)
+	messages := buildAgentMessages(
+		request.Question,
+		prepared.analysis.QueryPlan,
+		conversation,
+		evidence.retrieved,
+		prepared.planning.Effective.Plan,
+		svc.domainKnowledge,
+		0,
+	)
+	tools := prepared.candidateToolSet.Tools()
+	runRequest := agentapi.RunRequest{
+		RunID: shadowRunID,
+		Agent: agentapi.DefinitionRef{
+			ID: definition.ID, Version: definition.Version,
+		},
+		DefinitionHash: definition.ContentHash,
+		Selection:      selection,
+		Input:          runInput(request.Question),
+		Messages:       publicMessages(messages),
+		Context:        blocks,
+		Permissions:    runPermissions(false),
+		ToolScope: agentapi.ToolScope{
+			RestrictVisible: true,
+			VisibleToolIDs:  scenarioToolIDs(tools),
+			OfferedToolIDs: orderedToolIDs(
+				tools,
+				conversation.PrunedToolIDs,
+			),
+			PruneApplied: conversation.PruneApplied,
+		},
+		Policy: agentapi.RunPolicy{
+			EvidenceRequired: !prepared.planning.Effective.Plan.Direct(),
+			EvidenceSeeded:   len(blocks) > 0,
+			WebResearch: prepared.planning.Effective.Plan.Has(
+				domain.Web,
+			),
+		},
+		Limits: prepared.runLimits,
+		Actor:  agentapi.Actor{UserID: request.UserID},
+		Correlation: agentapi.Correlation{
+			SessionID:   request.Conversation.SessionID,
+			ParentRunID: request.RunID,
+		},
+	}
+	evidenceIndex, contextIndex := delegation.IndexContext(blocks)
+	shadowCtx := context.Background()
+	if prepared.analysis.HasTimeRange {
+		shadowCtx = tool.WithTimeRange(
+			shadowCtx,
+			prepared.analysis.TimeRange,
+		)
+	}
+	shadowCtx = withSessionToolScope(
+		shadowCtx,
+		request.Conversation,
+		request.UserID,
+	)
+	shadowCtx = delegation.WithParentContext(
+		shadowCtx,
+		delegation.ParentContext{
+			RunID: shadowRunID,
+			QuestionSummary: tooloutput.TruncateContent(
+				request.Question,
+				2000,
+			),
+			HighRisk:    prepared.execution.HighRisk,
+			Actor:       runRequest.Actor,
+			Permissions: runRequest.Permissions,
+			Correlation: runRequest.Correlation,
+			Limits:      runRequest.Limits,
+			Depth:       0,
+			Evidence:    evidenceIndex,
+			Context:     contextIndex,
+		},
+	)
+	var cancel context.CancelFunc
+	if !runRequest.Limits.Deadline.IsZero() {
+		shadowCtx, cancel = context.WithDeadline(
+			shadowCtx,
+			runRequest.Limits.Deadline,
+		)
+	} else {
+		shadowCtx, cancel = context.WithCancel(shadowCtx)
+	}
+	go func() {
+		defer cancel()
+		started := time.Now()
+		result, err := svc.runtime.Run(shadowCtx, runRequest)
+		durationMS := time.Since(started).Milliseconds()
+		if err != nil {
+			svc.emitEvent(
+				agentrun.EventDelegationShadow,
+				ExecutionEvent{
+					RunID: request.RunID, ParentRunID: request.RunID,
+					ChildRunID: shadowRunID, Strategy: string(executionPathDelegation),
+					Status: "failed", ErrorCode: "shadow_execution_failed",
+					Reason:    string(prepared.analysis.QueryPlan.Kind),
+					QueryKind: string(prepared.analysis.QueryPlan.Kind),
+					Shadow:    true, DurationMS: durationMS,
+				},
+			)
+			log.ErrorfCtx(
+				shadowCtx,
+				"[qa] delegation shadow run %s for parent %s failed after %s: %v",
+				shadowRunID,
+				request.RunID,
+				time.Since(started),
+				err,
+			)
+			return
+		}
+		errorCode := ""
+		if result.Error != nil {
+			errorCode = result.Error.Code
+		}
+		svc.emitEvent(
+			agentrun.EventDelegationShadow,
+			ExecutionEvent{
+				RunID: request.RunID, ParentRunID: request.RunID,
+				ChildRunID: shadowRunID, Strategy: string(executionPathDelegation),
+				Status:    shadowEvaluationStatus(result.Status),
+				ErrorCode: errorCode,
+				Reason:    string(prepared.analysis.QueryPlan.Kind),
+				QueryKind: string(prepared.analysis.QueryPlan.Kind),
+				Shadow:    true, DurationMS: durationMS, Usage: result.Usage,
+				ReferenceCount: len(result.References),
+				ConflictCount:  len(result.EvidenceConflicts),
+			},
+		)
+		log.InfofCtx(
+			shadowCtx,
+			"[qa] delegation shadow completed parent=%s run=%s query_kind=%s status=%s error=%s duration_ms=%d tokens=%d cost_micros=%d references=%d conflicts=%d",
+			request.RunID,
+			shadowRunID,
+			prepared.analysis.QueryPlan.Kind,
+			result.Status,
+			errorCode,
+			durationMS,
+			result.Usage.TotalTokens,
+			result.Usage.CostMicros,
+			len(result.References),
+			len(result.EvidenceConflicts),
+		)
+	}()
+}
+
+func shadowEvaluationStatus(status agentapi.RunStatus) string {
+	switch status {
+	case agentapi.RunSucceeded:
+		return "completed"
+	case agentapi.RunCancelled:
+		return "cancelled"
+	default:
+		return "failed"
+	}
+}
+
+func delegationShadowRunID(parentRunID string) string {
+	sum := sha256.Sum256([]byte(
+		"qa_delegation_shadow\x00" + parentRunID,
+	))
+	return "shadow_" + hex.EncodeToString(sum[:24])
 }
 
 func cloneTaskGraphProposal(
@@ -165,15 +460,18 @@ func (svc *Service) submitRun(
 	userID int64,
 	rc *retrieval.RetrievedContext,
 	runID string,
+	query domain.QueryPlan,
 	plan domain.EvidencePlan,
 	policy ToolPolicy,
 	prepared ScenarioToolSet,
+	highRisk bool,
+	limits agentapi.RunLimits,
 	trace *runtrace.Scope,
 	ownsTrace bool,
 ) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", runID, definition.ID, definition.Version)
 	messages := buildAgentMessages(
-		question, conversation, rc, plan, svc.domainKnowledge, 0,
+		question, query, conversation, rc, plan, svc.domainKnowledge, 0,
 	)
 	request := agentapi.RunRequest{
 		RunID: runID,
@@ -198,11 +496,27 @@ func (svc *Service) submitRun(
 			EvidenceSeeded:   conversation.EvidenceSeeded,
 			WebResearch:      plan.Has(domain.Web),
 		},
-		Actor: agentapi.Actor{UserID: userID},
+		Limits: limits,
+		Actor:  agentapi.Actor{UserID: userID},
 		Correlation: agentapi.Correlation{
 			SessionID: conversation.SessionID, ParentRunID: scenario.ParentRunID,
 			WorkflowRunID: scenario.WorkflowRunID, NodeID: scenario.WorkflowNodeID,
 		},
+	}
+	if scenarioToolsContain(prepared, delegation.DelegateToolID) {
+		evidenceIndex, contextIndex := delegation.IndexContext(request.Context)
+		ctx = delegation.WithParentContext(ctx, delegation.ParentContext{
+			RunID:           runID,
+			QuestionSummary: tooloutput.TruncateContent(question, 2000),
+			HighRisk:        highRisk,
+			Actor:           request.Actor,
+			Permissions:     request.Permissions,
+			Correlation:     request.Correlation,
+			Limits:          limits,
+			Depth:           0,
+			Evidence:        evidenceIndex,
+			Context:         contextIndex,
+		})
 	}
 	ctx = withSessionToolScope(ctx, conversation, userID)
 
@@ -326,6 +640,17 @@ func runInput(question string) json.RawMessage {
 		Question string `json:"question"`
 	}{Question: question})
 	return payload
+}
+
+func workflowEvidenceRefs(units []tool.EvidenceUnit) []string {
+	if len(units) == 0 {
+		return nil
+	}
+	refs := make([]string, len(units))
+	for index, unit := range units {
+		refs[index] = agentrun.EvidenceReferenceID(unit)
+	}
+	return refs
 }
 
 func contextBlocks(rc *retrieval.RetrievedContext) []agentapi.ContextBlock {

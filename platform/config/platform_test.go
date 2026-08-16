@@ -80,6 +80,29 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 	if time.Duration(settings.CodingWorktreeTTL) != DefaultCodingWorktreeTTL {
 		t.Fatalf("coding worktree TTL = %s", time.Duration(settings.CodingWorktreeTTL))
 	}
+	if settings.DelegationEnabled || settings.DelegationShadowEnabled ||
+		settings.DelegationWorkflowEscalationEnabled {
+		t.Fatal("delegation feature flags must default off")
+	}
+	if settings.DelegationMaxChildren != DefaultDelegationMaxChildren ||
+		settings.DelegationMaxConcurrent != DefaultDelegationMaxConcurrent {
+		t.Fatalf(
+			"delegation concurrency = %d/%d",
+			settings.DelegationMaxConcurrent,
+			settings.DelegationMaxChildren,
+		)
+	}
+	if time.Duration(settings.DelegationChildTimeout) != DefaultDelegationChildTimeout {
+		t.Fatalf("delegation child timeout = %s", time.Duration(settings.DelegationChildTimeout))
+	}
+	if settings.DelegationMaxTotalTokens != DefaultDelegationMaxTotalTokens ||
+		settings.DelegationParentAnswerReserve != DefaultDelegationParentAnswerReserve {
+		t.Fatalf(
+			"delegation token budget = %d reserve=%d",
+			settings.DelegationMaxTotalTokens,
+			settings.DelegationParentAnswerReserve,
+		)
+	}
 }
 
 func TestToolPruningDefaultsOffAndAppliesToggle(t *testing.T) {
@@ -191,6 +214,94 @@ func TestCanonicalCodingLimits(t *testing.T) {
 	}
 }
 
+func TestCanonicalDelegationSettings(t *testing.T) {
+	valid := map[string]string{
+		"delegation_enabled":                     "true",
+		"delegation_shadow_enabled":              "false",
+		"delegation_capabilities":                " knowledge.docs.verify,knowledge.code.inspect,knowledge.docs.verify ",
+		"delegation_max_children":                "3",
+		"delegation_max_concurrent":              "2",
+		"delegation_workflow_escalation_enabled": "false",
+		"delegation_child_timeout":               "90s",
+		"delegation_max_child_turns":             "4",
+		"delegation_max_child_tool_calls":        "8",
+		"delegation_max_child_input_tokens":      "12000",
+		"delegation_max_child_output_tokens":     "1200",
+		"delegation_max_report_tokens":           "1000",
+		"delegation_max_total_tokens":            "48000",
+		"delegation_max_total_cost_micros":       "0",
+		"delegation_parent_answer_reserve":       "4000",
+	}
+	for key, value := range valid {
+		if _, err := CanonicalPlatformSetting(key, value); err != nil {
+			t.Fatalf("CanonicalPlatformSetting(%q): %v", key, err)
+		}
+	}
+	got, err := CanonicalPlatformSetting(
+		"delegation_capabilities",
+		valid["delegation_capabilities"],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "knowledge.code.inspect,knowledge.docs.verify" {
+		t.Fatalf("capabilities = %q", got)
+	}
+	for key, value := range map[string]string{
+		"delegation_capabilities":           "Not Canonical",
+		"delegation_max_children":           "0",
+		"delegation_child_timeout":          "0s",
+		"delegation_max_child_tool_calls":   "-1",
+		"delegation_max_total_cost_micros":  "-1",
+		"delegation_parent_answer_reserve":  "-1",
+		"delegation_max_child_input_tokens": "invalid",
+	} {
+		if _, err := CanonicalPlatformSetting(key, value); err == nil {
+			t.Fatalf("CanonicalPlatformSetting(%q, %q) accepted invalid value", key, value)
+		}
+	}
+}
+
+func TestValidateAgentSettingsChecksDelegationRelationships(t *testing.T) {
+	var settings PlatformSettings
+	settings.Apply(map[string]string{
+		"agent_timeout":                          "5m",
+		"agent_answer_reserve":                   "30s",
+		"delegation_enabled":                     "true",
+		"delegation_max_children":                "3",
+		"delegation_max_concurrent":              "2",
+		"delegation_child_timeout":               "90s",
+		"delegation_max_child_input_tokens":      "12000",
+		"delegation_max_child_output_tokens":     "1200",
+		"delegation_max_total_tokens":            "48000",
+		"delegation_parent_answer_reserve":       "4000",
+		"delegation_max_child_turns":             "4",
+		"delegation_max_child_tool_calls":        "8",
+		"delegation_max_report_tokens":           "1000",
+		"delegation_max_total_cost_micros":       "0",
+		"delegation_shadow_enabled":              "false",
+		"delegation_workflow_escalation_enabled": "false",
+	})
+	if err := settings.ValidateAgentSettings(); err != nil {
+		t.Fatalf("valid delegation settings: %v", err)
+	}
+	settings.DelegationMaxConcurrent = settings.DelegationMaxChildren + 1
+	if err := settings.ValidateAgentSettings(); err == nil {
+		t.Fatal("delegation concurrency above child count was accepted")
+	}
+	settings.DelegationMaxConcurrent = 2
+	settings.DelegationMaxTotalTokens = 100
+	if err := settings.ValidateAgentSettings(); err == nil {
+		t.Fatal("insufficient aggregate delegation token budget was accepted")
+	}
+	settings.DelegationMaxTotalTokens = DefaultDelegationMaxTotalTokens
+	settings.DelegationShadowEnabled = true
+	settings.DelegationEnabled = false
+	if err := settings.ValidateAgentSettings(); err == nil {
+		t.Fatal("delegation shadow without delegation was accepted")
+	}
+}
+
 func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 	valid := map[string]string{
 		"llm_model": "model", "llm_fast_model": "fast", "llm_base_url": "https://example.test",
@@ -202,7 +313,15 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"agent_timeout": "5m", "agent_max_steps": "1", "context_budget": "1", "domain_knowledge": "domain",
 		"retrieval_router_direct_min_confidence": "0.9", "retrieval_router_max_tokens": "512",
 		"tool_pruning_enabled": "false",
-		"rerank_enabled":       "true", "rerank_pool": "1", "rerank_topk": "1", "rerank_min_score": "0.1",
+		"delegation_enabled":   "false", "delegation_shadow_enabled": "false",
+		"delegation_capabilities": "knowledge.code.inspect", "delegation_max_children": "3",
+		"delegation_max_concurrent": "2", "delegation_workflow_escalation_enabled": "false",
+		"delegation_child_timeout": "90s", "delegation_max_child_turns": "4",
+		"delegation_max_child_tool_calls": "8", "delegation_max_child_input_tokens": "12000",
+		"delegation_max_child_output_tokens": "1200", "delegation_max_report_tokens": "1000",
+		"delegation_max_total_tokens": "48000", "delegation_max_total_cost_micros": "0",
+		"delegation_parent_answer_reserve": "4000",
+		"rerank_enabled":                   "true", "rerank_pool": "1", "rerank_topk": "1", "rerank_min_score": "0.1",
 		"rerank_min_dense_preflight": "0", "runbook_min_score": "0.2", "code_min_score": "1",
 		"rerank_max_per_service": "1", "rerank_max_per_service_low_band": "1", "rerank_provider": "provider",
 		"rerank_api_key": "key", "rerank_model": "model", "rerank_base_url": "https://example.test",
@@ -227,6 +346,7 @@ func TestCanonicalPlatformSettingRejectsInvalidTypedValues(t *testing.T) {
 		"llm_provider": "other", "rerank_enabled": "yes", "agent_timeout": "soon",
 		"agent_max_steps": "zero", "rerank_min_score": "1.1", "vcs_clone_concurrency": "-1",
 		"llm_input_price_micros_per_million_tokens": "-1",
+		"delegation_enabled":                        "yes", "delegation_max_total_tokens": "0",
 	}
 	for key, value := range invalid {
 		if _, err := CanonicalPlatformSetting(key, value); err == nil {

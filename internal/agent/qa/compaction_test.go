@@ -45,19 +45,19 @@ func TestSessionCompactionIncomingTokensIncludesRetrievedContext(t *testing.T) {
 	retrieved := &retrieval.RetrievedContext{Text: strings.Repeat("retrieved evidence ", 1000), HitCount: 3}
 
 	got, _, err := compactionProjection(
-		"current question", withHistory, retrieved, plan, "", nil, 0,
+		"current question", domain.QueryPlan{Kind: domain.QueryFocusedFact}, withHistory, retrieved, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("with history projection: %v", err)
 	}
 	want, _, err := compactionProjection(
-		"current question", withoutHistory, retrieved, plan, "", nil, 0,
+		"current question", domain.QueryPlan{Kind: domain.QueryFocusedFact}, withoutHistory, retrieved, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("without history projection: %v", err)
 	}
 	withoutRetrieval, _, err := compactionProjection(
-		"current question", withoutHistory, nil, plan, "", nil, 0,
+		"current question", domain.QueryPlan{Kind: domain.QueryFocusedFact}, withoutHistory, nil, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("without retrieval projection: %v", err)
@@ -80,13 +80,13 @@ func TestSessionCompactionProjectionKeepsRetrievedHistory(t *testing.T) {
 	withoutArchivedHistory.RetrievedHistory = ""
 
 	withTokens, _, err := compactionProjection(
-		"follow-up question", withArchivedHistory, nil, plan, "", nil, 0,
+		"follow-up question", domain.QueryPlan{Kind: domain.QueryFocusedFact}, withArchivedHistory, nil, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("with archived history projection: %v", err)
 	}
 	withoutTokens, _, err := compactionProjection(
-		"follow-up question", withoutArchivedHistory, nil, plan, "", nil, 0,
+		"follow-up question", domain.QueryPlan{Kind: domain.QueryFocusedFact}, withoutArchivedHistory, nil, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("without archived history projection: %v", err)
@@ -114,13 +114,13 @@ func TestSessionCompactionProjectionIncludesToolSchemas(t *testing.T) {
 	}
 
 	withoutTools, _, err := compactionProjection(
-		"inspect the service", ConversationContext{}, nil, plan, "", nil, 0,
+		"inspect the service", domain.QueryPlan{Kind: domain.QueryFocusedFact}, ConversationContext{}, nil, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("without tools projection: %v", err)
 	}
 	withTools, _, err := compactionProjection(
-		"inspect the service", ConversationContext{}, nil, plan, "", []tool.Tool{candidate}, 0,
+		"inspect the service", domain.QueryPlan{Kind: domain.QueryFocusedFact}, ConversationContext{}, nil, plan, "", []tool.Tool{candidate}, 0,
 	)
 	if err != nil {
 		t.Fatalf("with tools projection: %v", err)

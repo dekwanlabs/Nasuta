@@ -160,13 +160,13 @@ func combinedContractMessage(
 ) (llm.Message, bool) {
 	combined := &exactAnswerContract{}
 	if current != nil {
-		combined.Add(tool.AnswerContract{RequiredLiterals: current.required})
+		combined.Add(current.snapshot())
 	}
 	combined.Add(addition)
 	if !combined.Active() {
 		return llm.Message{}, false
 	}
-	return contractMessage(tool.AnswerContract{RequiredLiterals: combined.required})
+	return contractMessage(combined.snapshot())
 }
 
 func failedDelivery(name string, execution ToolExecution, failure toolDeliveryError) ToolExecution {

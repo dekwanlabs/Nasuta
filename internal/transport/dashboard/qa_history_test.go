@@ -18,15 +18,25 @@ func TestQAHistoryPageRestoresEvidenceOnFinalAnswer(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	mock.ExpectExec(`UPDATE agent_runs SET status=\?,ended_at=\? WHERE run_kind=\? AND status IN \(\?,\?\)`).
+	mock.ExpectBegin()
+	mock.ExpectQuery(`FROM agent_delegation_tasks t.*FOR UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"parent_run_id", "delegation_id", "task_index", "child_run_id",
+			"capability_id", "input_tokens", "output_tokens", "reasoning_tokens",
+			"total_tokens", "cost_micros", "tool_call_count",
+		}))
+	mock.ExpectExec(`UPDATE agent_runs SET status=\?,error_code=\?,ended_at=\?.*`+
+		`WHERE run_kind=\? AND status IN \(\?,\?\)`).
 		WithArgs(
 			run.StatusAborted,
+			"interrupted",
 			sqlmock.AnyArg(),
 			run.KindAgent,
 			run.StatusRunning,
 			run.StatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
 	runStore, err := run.NewStore(db)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)

@@ -23,6 +23,9 @@ func Main() {
 		if err := platform.configureIncidents(nil); err != nil {
 			log.Fatalf("configure incident workflows: %v", err)
 		}
+		if err := platform.initializePlatformRuntime(); err != nil {
+			log.Fatalf("initialize platform runtime: %v", err)
+		}
 		mux := http.NewServeMux()
 		platform.RegisterCommonRoutes(mux)
 		if err := platform.Serve(ctx, mux); err != nil {

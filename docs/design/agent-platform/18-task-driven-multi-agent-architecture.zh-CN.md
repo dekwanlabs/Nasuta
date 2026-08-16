@@ -2,8 +2,8 @@
 
 [返回设计索引](README.zh-CN.md)
 
-> 状态：目标设计，分阶段实施中
-> 更新日期：2026-08-14
+> 状态：分阶段实施；Dynamic Delegation 已实现，Durable Workflow 跨轮扩展仍待完成
+> 更新日期：2026-08-16
 > 适用范围：Nasuta QA、Feature Delivery 和通用 Agent Workflow
 > 替代基线：[QA 与研发任务多 Agent 路由方案](15-qa-and-feature-delivery-multi-agent-routing-proposal.zh-CN.md)（该文状态为“目标设计，待实施”，但其路由部分已随 12 号文档第一阶段落地为 `internal/agent/qa/route.go`；实施本方案时应同步澄清两文的归属）
 > 相关基线：[Nasuta 多 Agent 平台方案](12-multi-agent-platform-proposal.zh-CN.md)（第一阶段已实现）
@@ -13,21 +13,25 @@
 
 | 阶段 | 状态 | 已完成 | 剩余工作 |
 |---|---|---|---|
+| 交互式 QA Dynamic Delegation | 已完成，默认关闭 | Parent 工具循环内按需批量委派、Capability allowlist、run-level limits、reservation/settlement、parent/child evidence ledger、bounded report、deterministic validator、按风险自动 semantic verifier、最终 report adoption facts、显式 Workflow escalation、恢复与 SSE/shadow 事件 | 生产灰度、分桶基线与收益门槛验证 |
 | 阶段 0：观测与既有闭环 | 已完成 | QA Parent Run 收敛、取消与恢复；调查 Workflow/Node 的 token、tool、cost、retry 预算 | P1：补 single/multi 成本收益对照指标 |
 | 阶段 1：Task Contract 与证据事实 | 已完成 | `task.contract`、canonical entity、source/freshness/minimum coverage、可变长度 Ledger View、canonical evidence identity、Goal Coverage、冲突传播、按 Evidence Goal 裁剪调查节点 | 无 |
 | 阶段 2：Capability 与受约束计划 | 已完成 | `CapabilityRegistry`、Web/Memory/Runtime Capability、app 扩展注册、受限 Planner Proposal、服务端字段绑定与 Proposal Compiler、权限/预算/Schema/并发校验、`ExecutionAssessment`、确定性 fallback | 无；多轮修订归入阶段 3 |
 | 阶段 3：验证与自适应扩展 | 部分完成 | `CollectAvailable`、Optional Task、Required Goal Coverage、complete/partial/unavailable；独立确定性 Verifier 将 claim 分类为 supported/partial/unsupported，并按 coverage、canonical binding、trust tier 和 Evidence Goal 风险分级；固定调查图与 Proposal Compiler 已插入服务端 `evidence.risk` Gate，高风险 partial 或证据冲突确定性进入 `needs_clarification`，Synthesizer 不会启动；Evidence Join 基于输入 baseline 产出 new identity/duplicate ratio 快照；结构化停止原因一致进入 Result、Trace、Store 与恢复路径；`MaxRounds`/`MaxDepth` 已在节点派发前准入，Run 固化 `Round`/`BaseDepth` 并由 Store/恢复路径复用 | P0：Adaptive Coordinator、跨轮不可变收敛快照串联与累计资源账本 |
 | 阶段 4：Feature Delivery 复用 | 未开始 | 现有静态 Workflow、Human Approval 与 Worktree 隔离可复用 | P1：写 Capability、WriteSet 调度隔离、Change Set Review、Delivery Gate、动态任务图 |
 
-当前实现应描述为“**单轮受限任务规划、编译与确定性执行底座完成**”，而不是“完整
-任务驱动 Multi-Agent 闭环完成”。
+当前实现应描述为“**普通交互式 QA 的 Dynamic Delegation 闭环已完成；Durable
+Workflow 的单轮受限任务规划、编译与确定性执行底座完成**”。下文
+`Adaptive Coordinator`、跨轮不可变收敛快照和累计资源账本只限制 Durable Workflow
+的跨轮扩展，不阻断已实现的 parent 工具循环动态委派。
 
 ### 剩余功能优先级
 
 优先级定义：
 
-- **P0**：阻断只读 Multi-Agent 闭环正确性、安全性、有界执行或恢复一致性的功能。
-  P0 未完成前，不应宣称任务驱动 Multi-Agent 闭环完成，也不应启动动态写任务扩展。
+- **P0**：阻断 Durable Workflow 跨轮扩展正确性、安全性、有界执行或恢复一致性的功能。
+  P0 未完成前，不应宣称 Durable Workflow 的自适应跨轮闭环完成，也不应启动动态写任务扩展；
+  它不表示普通 QA Dynamic Delegation 未实现。
 - **P1**：不阻断只读闭环，但影响入口统一、收益评估、兼容清理或 Feature Delivery
   复用的功能。P1 在 P0 闭环稳定后实施。
 
@@ -37,7 +41,7 @@
 | 2 | P0（单轮已完成） | 多轮收敛事实与终态 | 单轮 blocked dependency、needs_clarification、真实 no-progress、duplicate ratio、no-affordable 已由运行事实判定，并一致写入 Result、Trace、Store 和恢复路径；最终完成仍要求后续轮次复用同一不可变收敛快照 |
 | 3 | P0（运行时准入已完成） | 多轮预算与调度准入 | `MaxRounds` 与全局 `MaxDepth` 已在任何节点派发前生效，`Round`/`BaseDepth` 已持久化并在恢复时复用；`MaxDuplicateRatio` 已固化进收敛快照，Node Attempt 已预留并结算 token/tool/cost/retry 预算。真正跨轮的累计资源账本仍随 Adaptive Coordinator 实现 |
 | 4 | P0（已完成） | partial-support/risk policy 与 Gate | claim 已区分 supported/partial/unsupported；覆盖不完整、部分引用无法绑定或高风险证据低于 trust floor 时进入 partial；高风险 partial 或证据冲突由 `evidence.risk` Gate 转为 clarification，不能直接合成 |
-| 5 | P0 | Adaptive Expansion 与顺序细化 | 只在新增 Goal、可信实体或冲突时生成有界后续任务；采用新不可变 Workflow 定义与 checkpoint 续跑，并保持预算、取消、恢复和 Trace 语义 |
+| 5 | P0 | Durable Workflow Adaptive Expansion 与顺序细化 | 只在新增 Goal、可信实体或冲突时生成有界后续任务；采用新不可变 Workflow 定义与 checkpoint 续跑，并保持预算、取消、恢复和 Trace 语义 |
 | 6 | P1 | QA/Workflow preparation 统一 | Single-Agent 与 Workflow 共用 canonical context/evidence preparation，消除重复的 Prefetch、上下文组装和证据采集入口 |
 | 7 | P1 | Single/Multi 收益评估 | 提供 token、cost、latency、claim support precision、unsupported claim rate 和扩展轮次收益对照 |
 | 8 | P1 | Feature Delivery 复用 | 完成写 Capability、隔离 Worktree、WriteSet 冲突检测、Change Set Review、Delivery Gate 与受限动态写任务图 |
@@ -58,13 +62,45 @@ Synthesizer 直接开放工具实现。
 
 ## 1. 摘要
 
-QA Multi-Agent 已从固定五节点图演进为按 canonical Evidence Goal 编译请求级任务图。
-Task Contract 已携带 source/freshness/minimum coverage；Nasuta 提供
-code/service topology/docs/Web/Memory 能力，CodeLoom 可通过 app 扩展注入实时 Runtime
-Observe 能力。当前执行形态是：
+QA Multi-Agent 现在有两种互补执行形态。普通交互式调查由 parent 保持
+reason-act-observe 工具循环，在看到实际检索结果后按需调用
+`delegate_investigation`；child 只接收窄 objective/facets/evidence refs，并向 parent
+返回 bounded report。长任务、强依赖、高风险、人工审批或必须恢复续跑的场景继续使用
+Durable Workflow。
 
 ```text
-问题
+普通交互式 QA
+  -> parent 工具循环
+  -> 按需 batch dynamic delegation
+  -> bounded reports + deterministic validation
+  -> conditional tool-free semantic verifier
+  -> parent 综合 + explicit report adoption facts
+
+Durable/high-risk QA
+  -> explicit route or Workflow escalation
+  -> immutable WorkflowBinding
+  -> constrained durable task graph
+  -> workflow evidence ledger / verifier / risk gate / synthesizer
+```
+
+Dynamic Delegation 的 semantic verifier 与 Durable Workflow 固定 verifier/risk gate
+职责不同。前者只在 validator 产生稳定风险原因时启动
+`evidence.semantic.verify` child，输入限定为 selected claims、conflicts、evidence refs
+和 decision question，不接收完整 reports 或 child traces；它复用 delegation admission、
+预算、artifact、settlement、重放、恢复和事件。低风险单报告不会承担固定 verifier 尾部。
+
+parent 综合后必须为每个 delegation 显式声明 adopted report ID 子集。Runtime 只接受
+delegate tool 登记的 report allowlist，verifier ID 不属于 report；校验后的隐藏 metadata
+在对用户交付前剥离，typed adopted/not_adopted/unknown 独立写入 answer Step、
+Terminal/public result 和 `delegation.adoption_evaluated` 事件。
+
+Durable Workflow 已从固定五节点图演进为按 canonical Evidence Goal 编译请求级任务图。
+Task Contract 已携带 source/freshness/minimum coverage；Nasuta 提供
+code/service topology/docs/Web/Memory 能力，CodeLoom 可通过 app 扩展注入实时 Runtime
+Observe 能力。其当前执行形态是：
+
+```text
+Workflow 请求
   -> Evidence Goal + source/freshness
   -> 请求级 Capability 子集
   -> 受限 Planner Proposal
@@ -109,16 +145,18 @@ Contract 中可映射的独立 Capability 数量、并行性、共享上下文�
    绕过 Gate 或无限生成任务。
 4. 编排采用“模型规划、服务端校验、确定性执行”的混合方式：规划可以动态，执行
    边界必须固定、可审计、可恢复。
-5. 所有子 Agent 共享 Workflow 级 Evidence Ledger；子 Agent 只交付结构化的新增
-   证据和结论，不把独立上下文重新拼成一段无界对话。
-6. 当前 `internal/agent/workflow`、Agent Catalog、Schema Registry、权限交集、
-   Handoff、预算和恢复机制继续复用；重构重点在 QA planner、任务合同和证据收敛。
+5. Dynamic child 通过 parent/child evidence ledger 交换稳定引用；Workflow child
+   共享 Workflow ledger。两者都只交付结构化新增证据和结论，不拼接无界对话。
+6. Capability、Agent Definition、Tool ID 和 WorkflowBinding 分离：分别描述能力身份、
+   执行模板、工具身份和应用拥有的 Durable Workflow 绑定，不能相互推导。
+7. 当前 `internal/agent/workflow`、Agent Catalog、Schema Registry、权限交集、
+   Handoff、预算和恢复机制继续复用；普通委派复用 Agent Runtime，Durable 路径复用 Workflow。
 
 ## 2. 设计问题
 
-### 2.1 当前实现的问题
+### 2.1 Durable Workflow 当前实现的问题
 
-当前固定 Investigation 定义了七个节点：
+Durable Workflow 的兼容 Investigation 定义了七个节点：
 
 ```text
 investigate.code
@@ -292,6 +330,19 @@ evidence.verify
 一个 Agent Definition 可以实现一个或多个能力，但每次 Node Run 只绑定一个明确的
 Capability Contract。这样可以在不改任务模型的情况下，将内部拓扑和实时日志提供给
 不同的实现或不同权限域。
+
+四个身份必须分离：
+
+| 概念 | 唯一职责 |
+|---|---|
+| Capability | 对外可请求的能力、角色、副作用和输出合同 |
+| Agent Definition | Provider、prompt、默认预算与执行模板 |
+| Tool ID | Registry 中可执行的具体工具 |
+| WorkflowBinding | 应用拥有的 Capability 到 immutable Durable Workflow builder/definition 的绑定 |
+
+Dynamic Delegation 由 Capability 解析到受限 Definition 和 Tool Snapshot，不需要
+WorkflowBinding。Workflow escalation 必须显式解析 exact binding version；
+没有 binding 时返回 `workflow_unavailable`，不得从 Capability 或 Tool ID 猜测 node。
 
 当前已新增公共 `agent.Capability`、`CapabilityRegistry` 和服务端 Proposal Compiler，
 并把默认 Investigator 注册为 `knowledge.code.inspect`、
@@ -774,7 +825,20 @@ bundle；发现任意证据冲突或 high-risk partial 时写入结构化 `GateD
 references、canonical evidence、conflicts 和 completeness。通用 human approval policy
 仍可作为后续场景扩展，但不再阻断当前只读调查闭环。
 
-### 9.3 部分失败
+### 9.3 Dynamic Delegation 的按需验证与采用事实
+
+Dynamic Delegation 先运行 deterministic validator。高风险 policy、关键显式/结构化
+冲突、多报告自由文本合并、关键 citation/comparator 缺失或 report truncation 会设置
+`requires_verification`，随后自动启动一个 tool-free semantic verifier child。预算不足
+产生 typed rejected verification；已 settlement 的 verification artifact 在重试时直接
+重放；admitted 但未 settlement 的 verifier 在启动恢复中结算为 interrupted failure。
+
+semantic verification 不替代 parent 综合，也不是可采用 report。parent 最终候选答案
+通过严格 AnswerContract metadata 记录每个 delegation 的 adopted report 子集；空集是
+`not_adopted`，非空是 `adopted`。parent 失败、取消、无答案或 output schema validation
+失败时投影 `unknown`，不能把未交付候选答案中的采用判断当成完成事实。
+
+### 9.4 部分失败
 
 默认使用 `CollectAvailable`，但是否允许形成最终答案由 Evidence Policy 决定：
 

@@ -80,3 +80,16 @@ func TestIncidentPromptDoesNotForceUnsupportedRootCause(t *testing.T) {
 		}
 	}
 }
+
+func TestRetrievalExecutionPromptDecomposesIndependentComparisons(t *testing.T) {
+	prompt := Text(RetrievalExecution)
+	for _, required := range []string{
+		"do not collapse all named alternatives into one generic comparison task",
+		"one task per alternative or coherent mechanism",
+		"do not model final synthesis as a parallel investigation task",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("retrieval execution prompt missing comparison rule %q", required)
+		}
+	}
+}

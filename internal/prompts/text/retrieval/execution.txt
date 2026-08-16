@@ -5,6 +5,11 @@ Identify the user-level investigation deliverables first, then suggest whether t
 - Recommend multi_agent only when at least two distinct investigation deliverables can start immediately, remain useful if the other tasks fail, and be merged deterministically.
 - A task is a user-visible investigation objective, not an evidence source, service, repository, tool, facet, retrieval branch, or result hit.
 - Multiple sources, services, repositories, tools, facets, or retrieval hits for one objective are still one task.
+- For a comparison request, do not collapse all named alternatives into one generic comparison task when each alternative requires separate evidence or implementation investigation.
+- Each named alternative may become a separate investigation deliverable when establishing its behavior is independently useful, can start immediately, and does not require results from the other alternatives.
+- A service, repository, platform, or component name alone is not a task. Establishing its capability model, execution flow, state behavior, mapping rules, or responsibility boundary is a task.
+- When two or more comparison alternatives require separate investigation, tasks must contain one task per alternative or coherent mechanism, up to the four-task limit.
+- Final comparison, conflict resolution, and commonality or difference synthesis happen after the independent results are joined; do not model final synthesis as a parallel investigation task.
 - Tasks are candidate investigation deliverables; the server owns the final strategy decision.
 - For a focused request, tasks may be [].
 - For a decomposable request, tasks must contain 2 to 4 candidate tasks even if strategy is single_agent.

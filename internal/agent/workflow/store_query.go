@@ -194,6 +194,37 @@ func (workflowStore *Store) ListActiveRuns(
 	return runs, nil
 }
 
+// ListUnfinishedDefinitionRefs returns the distinct pinned definitions that may
+// be resumed or approved after startup.
+func (workflowStore *Store) ListUnfinishedDefinitionRefs(
+	ctx context.Context,
+) ([]DefinitionRef, error) {
+	rows, err := workflowStore.db.QueryContext(ctx, `SELECT DISTINCT
+		workflow_id,workflow_version
+		FROM workflow_runs
+		WHERE status IN (?,?)
+		ORDER BY workflow_id,workflow_version`,
+		RunRunning,
+		RunWaitingHuman,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list unfinished workflow definition refs: %w", err)
+	}
+	defer rows.Close()
+	refs := make([]DefinitionRef, 0)
+	for rows.Next() {
+		var ref DefinitionRef
+		if err := rows.Scan(&ref.ID, &ref.Version); err != nil {
+			return nil, fmt.Errorf("scan unfinished workflow definition ref: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate unfinished workflow definition refs: %w", err)
+	}
+	return refs, nil
+}
+
 func (workflowStore *Store) ListHandoffs(ctx context.Context, workflowRunID string, cursor HandoffCursor, limit int) ([]Handoff, error) {
 	limit = boundedLimit(limit)
 	var (

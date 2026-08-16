@@ -1,0 +1,1 @@
+[QUERY_KIND: {{ .Kind }}] — Organize the answer for this query shape unless it clearly contradicts the question. Override silently when needed; never expose this internal hint or the override decision.

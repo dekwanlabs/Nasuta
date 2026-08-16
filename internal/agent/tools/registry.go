@@ -492,24 +492,19 @@ func runbookEvidenceUnits(result knowledge.RunbookSearchResult) []tool.EvidenceU
 				Partial: true, Included: len(hit.Chunks),
 				OmittedItems: boolInt(result.Truncated),
 			},
-			Facets: runbookFacets(hit.DocKind), TrustTier: hit.TrustTier,
+			Facets: evidenceFacetValues(domain.ProvidedFacetsFor("runbook", hit.DocKind)), TrustTier: hit.TrustTier,
 			EvidenceClass: hit.EvidenceClass, TokenCost: tokenestimate.Count(string(raw)),
 		})
 	}
 	return units
 }
 
-func runbookFacets(kind string) []string {
-	switch kind {
-	case domain.DocKindFlow:
-		return []string{string(domain.FacetSystemBoundary), string(domain.FacetCoreFlow)}
-	case domain.DocKindSchema:
-		return []string{string(domain.FacetDataAndState)}
-	case domain.DocKindModule:
-		return []string{string(domain.FacetBusinessDomain), string(domain.FacetEntrypoint)}
-	default:
-		return []string{string(domain.FacetSystemBoundary)}
+func evidenceFacetValues(facets []domain.EvidenceFacet) []string {
+	values := make([]string, len(facets))
+	for i, facet := range facets {
+		values[i] = string(facet)
 	}
+	return values
 }
 
 func boolInt(value bool) int {

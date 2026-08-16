@@ -106,10 +106,13 @@ func (hub *Hub) OnStep(ctx context.Context, runID string, step StepRecord) error
 			SizeBytes:           step.SizeBytes,
 			Coverage:            step.Coverage,
 			AnswerContract:      step.AnswerContract,
-			TokenDelta:          step.TokenDelta,
-			ReasoningTokens:     step.ReasoningTokens,
-			DurationMs:          step.DurationMs,
-			CreatedAt:           step.CreatedAt.UTC().Format(time.RFC3339),
+			DelegationAdoptions: cloneDelegationAdoptions(
+				step.DelegationAdoptions,
+			),
+			TokenDelta:      step.TokenDelta,
+			ReasoningTokens: step.ReasoningTokens,
+			DurationMs:      step.DurationMs,
+			CreatedAt:       step.CreatedAt.UTC().Format(time.RFC3339),
 		})
 		if persistErr != nil {
 			log.ErrorfCtx(ctx, "[hub] persist step error: %v", persistErr)

@@ -2,12 +2,14 @@ package run
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
@@ -15,19 +17,249 @@ const (
 	qaParentStreamKind        = "qa_parent"
 	qaParentTerminalEventKind = "run_finished"
 	qaParentTerminalEventSeq  = int64(1)
+	interruptedErrorCode      = "interrupted"
 )
 
-// RecoverInterrupted closes process-local Agent Runs left active by a prior process.
+type interruptedDelegationTask struct {
+	ParentRunID  string
+	DelegationID string
+	TaskIndex    int
+	ChildRunID   string
+	CapabilityID string
+	Usage        agentapi.Usage
+	ToolCalls    int64
+}
+
+// RecoverInterrupted closes process-local Agent Runs and settles delegation
+// reservations left active by a prior process.
 func (rs *Store) RecoverInterrupted() (int64, error) {
-	result, err := rs.db.Exec(
-		`UPDATE agent_runs SET status=?,ended_at=? WHERE run_kind=? AND status IN (?,?)`,
-		StatusAborted, store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)),
-		KindAgent, StatusRunning, StatusPaused,
+	ctx := context.Background()
+	tx, err := rs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	tasks, err := loadInterruptedDelegationTasks(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	recoveredAt := store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano))
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE agent_runs SET status=?,error_code=?,ended_at=?
+		 WHERE run_kind=? AND status IN (?,?)`,
+		StatusAborted,
+		interruptedErrorCode,
+		recoveredAt,
+		KindAgent,
+		StatusRunning,
+		StatusPaused,
 	)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	recovered, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	for _, task := range tasks {
+		artifact, err := interruptedDelegationReportArtifact(task)
+		if err != nil {
+			return 0, err
+		}
+		if err := insertRunArtifact(ctx, tx, artifact); err != nil {
+			return 0, fmt.Errorf(
+				"persist interrupted delegation report for child %q: %w",
+				task.ChildRunID,
+				err,
+			)
+		}
+		usageRaw, err := json.Marshal(task.Usage)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"marshal interrupted delegation usage for child %q: %w",
+				task.ChildRunID,
+				err,
+			)
+		}
+		settled, err := tx.ExecContext(
+			ctx,
+			`UPDATE agent_delegation_tasks
+			 SET settled_usage_json=?,report_artifact_id=?,settled_at=?
+			 WHERE parent_run_id=? AND delegation_id=? AND task_index=?
+			   AND child_run_id=? AND admitted=TRUE
+			   AND settled_usage_json IS NULL`,
+			usageRaw,
+			artifact.ID,
+			recoveredAt,
+			task.ParentRunID,
+			task.DelegationID,
+			task.TaskIndex,
+			task.ChildRunID,
+		)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"settle interrupted delegation child %q: %w",
+				task.ChildRunID,
+				err,
+			)
+		}
+		affected, err := settled.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if affected != 1 {
+			return 0, ErrDelegationTaskConflict
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return recovered, nil
+}
+
+func loadInterruptedDelegationTasks(
+	ctx context.Context,
+	tx *sql.Tx,
+) ([]interruptedDelegationTask, error) {
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT
+			t.parent_run_id,t.delegation_id,t.task_index,t.child_run_id,t.capability_id,
+			COALESCE(r.input_tokens,0),COALESCE(r.output_tokens,0),
+			COALESCE(r.reasoning_tokens,0),COALESCE(r.total_tokens,0),
+			COALESCE(r.cost_micros,0),COALESCE(r.tool_call_count,0)
+		 FROM agent_delegation_tasks t
+		 LEFT JOIN agent_runs r ON r.id=t.child_run_id
+		 WHERE t.admitted=TRUE AND t.settled_usage_json IS NULL
+		 FOR UPDATE`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []interruptedDelegationTask
+	for rows.Next() {
+		var task interruptedDelegationTask
+		if err := rows.Scan(
+			&task.ParentRunID,
+			&task.DelegationID,
+			&task.TaskIndex,
+			&task.ChildRunID,
+			&task.CapabilityID,
+			&task.Usage.InputTokens,
+			&task.Usage.OutputTokens,
+			&task.Usage.ReasoningTokens,
+			&task.Usage.TotalTokens,
+			&task.Usage.CostMicros,
+			&task.ToolCalls,
+		); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func interruptedDelegationReportArtifact(
+	task interruptedDelegationTask,
+) (DelegationArtifact, error) {
+	if task.ChildRunID == "" || task.CapabilityID == "" {
+		return DelegationArtifact{}, fmt.Errorf(
+			"invalid interrupted delegation task %q/%q/%d",
+			task.ParentRunID,
+			task.DelegationID,
+			task.TaskIndex,
+		)
+	}
+	if task.CapabilityID == "evidence.semantic.verify" {
+		return interruptedDelegationVerificationArtifact(task)
+	}
+	reportID := stableDelegationReportID(task.ChildRunID)
+	report := agentapi.DelegationReport{
+		RunID:        task.ChildRunID,
+		ReportID:     reportID,
+		Capability:   task.CapabilityID,
+		Status:       agentapi.DelegationInterrupted,
+		Completeness: agentapi.DelegationIncomplete,
+		Usage: agentapi.DelegationUsage{
+			ToolCalls:       task.ToolCalls,
+			InputTokens:     task.Usage.InputTokens,
+			OutputTokens:    task.Usage.OutputTokens,
+			ReasoningTokens: task.Usage.ReasoningTokens,
+			TotalTokens:     task.Usage.TotalTokens,
+			CostMicros:      task.Usage.CostMicros,
+		},
+		Error: &agentapi.RunError{
+			Code:    interruptedErrorCode,
+			Message: "delegation execution was interrupted before a durable report was available",
+		},
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return DelegationArtifact{}, err
+	}
+	sum := sha256.Sum256(raw)
+	return DelegationArtifact{
+		ID:          delegationReportArtifactID(reportID),
+		RunID:       task.ChildRunID,
+		Kind:        DelegationReportArtifactKind,
+		Schema:      agentapi.SchemaRef{ID: "delegation.report", Version: 1},
+		ContentHash: fmt.Sprintf("%x", sum[:]),
+		Content:     raw,
+	}, nil
+}
+
+func interruptedDelegationVerificationArtifact(
+	task interruptedDelegationTask,
+) (DelegationArtifact, error) {
+	verificationID := stableDelegationVerificationID(task.ChildRunID)
+	verification := agentapi.DelegationVerification{
+		RunID: task.ChildRunID, VerificationID: verificationID,
+		Status: agentapi.DelegationInterrupted,
+		Usage: agentapi.DelegationUsage{
+			ToolCalls:       task.ToolCalls,
+			InputTokens:     task.Usage.InputTokens,
+			OutputTokens:    task.Usage.OutputTokens,
+			ReasoningTokens: task.Usage.ReasoningTokens,
+			TotalTokens:     task.Usage.TotalTokens,
+			CostMicros:      task.Usage.CostMicros,
+		},
+		Error: &agentapi.RunError{
+			Code:    interruptedErrorCode,
+			Message: "semantic verification was interrupted before a durable result was available",
+		},
+	}
+	raw, err := json.Marshal(verification)
+	if err != nil {
+		return DelegationArtifact{}, err
+	}
+	sum := sha256.Sum256(raw)
+	return DelegationArtifact{
+		ID:          stableDelegationArtifactID(verificationID),
+		RunID:       task.ChildRunID,
+		Kind:        DelegationVerificationArtifactKind,
+		Schema:      agentapi.SchemaRef{ID: "delegation.verification.artifact", Version: 1},
+		ContentHash: fmt.Sprintf("%x", sum[:]),
+		Content:     raw,
+	}, nil
+}
+
+func stableDelegationReportID(childRunID string) string {
+	sum := sha256.Sum256([]byte(childRunID))
+	return "report_" + fmt.Sprintf("%x", sum[:12])
+}
+
+func stableDelegationVerificationID(childRunID string) string {
+	sum := sha256.Sum256([]byte(childRunID))
+	return "verification_" + fmt.Sprintf("%x", sum[:12])
+}
+
+func stableDelegationArtifactID(referenceID string) string {
+	sum := sha256.Sum256([]byte(referenceID))
+	return "artifact_" + fmt.Sprintf("%x", sum[:12])
 }
 
 func (rs *Store) Create(r Record) error {
@@ -44,15 +276,24 @@ func (rs *Store) Create(r Record) error {
 	if err != nil {
 		return fmt.Errorf("marshal run %q selection: %w", r.ID, err)
 	}
+	limitsJSON, err := json.Marshal(r.RunLimits)
+	if err != nil {
+		return fmt.Errorf("marshal run %q limits: %w", r.ID, err)
+	}
 	_, err = rs.db.Exec(
 		`INSERT INTO agent_runs(
 			id,run_kind,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
-			input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
+			input_schema_version,output_schema_version,parent_run_id,capability_id,capability_version,
+			capability_content_hash,delegation_id,delegation_depth,run_limits_json,capability_registry_revision,
+			workflow_run_id,workflow_node_id,
 			question,status,error_code,mode,max_steps,step_count,token_used,started_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.RunKind, r.UserID, r.SessionID, r.AgentID, r.DefinitionVersion, r.DefinitionHash,
 		selectionJSON, r.ToolSnapshotID,
-		r.InputSchemaVersion, r.OutputSchemaVersion, r.ParentRunID, r.WorkflowRunID, r.WorkflowNodeID,
+		r.InputSchemaVersion, r.OutputSchemaVersion, r.ParentRunID,
+		r.CapabilityID, r.CapabilityVersion, r.CapabilityHash,
+		r.DelegationID, r.DelegationDepth, limitsJSON, r.CapabilityRevision,
+		r.WorkflowRunID, r.WorkflowNodeID,
 		r.Question, r.Status, r.ErrorCode, r.Mode, r.MaxSteps, 0, 0, store.DatabaseTime(r.StartedAt))
 	return err
 }

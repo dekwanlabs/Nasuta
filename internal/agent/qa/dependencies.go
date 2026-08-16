@@ -72,6 +72,22 @@ type preparationStepRecorder interface {
 	RecordStep(context.Context, run.StepRecord) error
 }
 
+type evidenceLedgerRecorder interface {
+	RecordEvidence(context.Context, []tool.EvidenceUnit) error
+}
+
+func recordEvidenceLedger(
+	ctx context.Context,
+	owner any,
+	units []tool.EvidenceUnit,
+) error {
+	recorder, ok := owner.(evidenceLedgerRecorder)
+	if !ok || len(units) == 0 {
+		return nil
+	}
+	return recorder.RecordEvidence(ctx, units)
+}
+
 func toolPolicyForRun(allowWrite bool) ToolPolicy {
 	return ToolPolicy{
 		AllowRead:  true,
@@ -92,6 +108,7 @@ func hashString(value string) string {
 
 func buildAgentMessages(
 	question string,
+	query domain.QueryPlan,
 	conversation ConversationContext,
 	rc *retrieval.RetrievedContext,
 	plan domain.EvidencePlan,
@@ -99,16 +116,12 @@ func buildAgentMessages(
 	historyLimit int,
 ) []llm.Message {
 	return execution.BuildMessages(
-		question, conversation, rc, plan, domainKnowledge, historyLimit,
+		question, query, conversation, rc, plan, domainKnowledge, historyLimit,
 	)
 }
 
 func replayableTailMessages(messages []llm.Message, limit int) []llm.Message {
 	return execution.ReplayableTailMessages(messages, limit)
-}
-
-func classifyResponseMode(question string) domain.ResponseMode {
-	return execution.ClassifyResponseMode(question)
 }
 
 func shouldShortCircuitMeta(question string) bool {

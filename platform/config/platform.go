@@ -2,7 +2,10 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +20,19 @@ const (
 	DefaultCodingTimeout                   = 30 * time.Minute
 	DefaultCodingMaxConcurrency            = 1
 	DefaultCodingWorktreeTTL               = 72 * time.Hour
+	DefaultDelegationMaxChildren           = 3
+	DefaultDelegationMaxConcurrent         = 2
+	DefaultDelegationChildTimeout          = 90 * time.Second
+	DefaultDelegationMaxChildTurns         = 4
+	DefaultDelegationMaxChildToolCalls     = 8
+	DefaultDelegationMaxChildInputTokens   = 12000
+	DefaultDelegationMaxChildOutputTokens  = 1200
+	DefaultDelegationMaxReportTokens       = 1000
+	DefaultDelegationMaxTotalTokens        = 48000
+	DefaultDelegationParentAnswerReserve   = 4000
 )
+
+var canonicalCapabilityID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 
 // PlatformSettings holds runtime settings managed from the platform UI.
 type PlatformSettings struct {
@@ -62,6 +77,22 @@ type PlatformSettings struct {
 	RetrievalRouterMaxTokens   int
 	ToolPruningEnabled         bool
 
+	DelegationEnabled                   bool
+	DelegationShadowEnabled             bool
+	DelegationCapabilities              []string
+	DelegationMaxChildren               int
+	DelegationMaxConcurrent             int
+	DelegationWorkflowEscalationEnabled bool
+	DelegationChildTimeout              Duration
+	DelegationMaxChildTurns             int
+	DelegationMaxChildToolCalls         int64
+	DelegationMaxChildInputTokens       int64
+	DelegationMaxChildOutputTokens      int64
+	DelegationMaxReportTokens           int64
+	DelegationMaxTotalTokens            int64
+	DelegationMaxTotalCostMicros        int64
+	DelegationParentAnswerReserve       int64
+
 	CodingEnabledProviders   []string
 	CodingDefaultProvider    string
 	CodingCodexModel         string
@@ -85,7 +116,15 @@ var platformSettingKeys = map[string]bool{
 	"agent_timeout": true, "agent_max_steps": true, "context_budget": false, "domain_knowledge": true,
 	"retrieval_router_direct_min_confidence": false, "retrieval_router_max_tokens": false,
 	"tool_pruning_enabled": false,
-	"rerank_enabled":       false, "rerank_pool": false, "rerank_topk": false,
+	"delegation_enabled":   true, "delegation_shadow_enabled": true,
+	"delegation_capabilities": true, "delegation_max_children": true,
+	"delegation_max_concurrent": true, "delegation_workflow_escalation_enabled": true,
+	"delegation_child_timeout": true, "delegation_max_child_turns": true,
+	"delegation_max_child_tool_calls": true, "delegation_max_child_input_tokens": true,
+	"delegation_max_child_output_tokens": true, "delegation_max_report_tokens": true,
+	"delegation_max_total_tokens": true, "delegation_max_total_cost_micros": true,
+	"delegation_parent_answer_reserve": true,
+	"rerank_enabled":                   false, "rerank_pool": false, "rerank_topk": false,
 	"rerank_min_score": false, "rerank_min_dense_preflight": false,
 	"runbook_min_score": false, "code_min_score": false,
 	"rerank_max_per_service": false, "rerank_max_per_service_low_band": false,
@@ -140,6 +179,21 @@ func (p *PlatformSettings) Values() map[string]any {
 		"retrieval_router_direct_min_confidence":     p.routerConfidence(),
 		"retrieval_router_max_tokens":                p.routerMaxTokens(),
 		"tool_pruning_enabled":                       p.ToolPruningEnabled,
+		"delegation_enabled":                         strconv.FormatBool(p.DelegationEnabled),
+		"delegation_shadow_enabled":                  strconv.FormatBool(p.DelegationShadowEnabled),
+		"delegation_capabilities":                    strings.Join(p.DelegationCapabilities, ","),
+		"delegation_max_children":                    strconv.Itoa(p.DelegationMaxChildren),
+		"delegation_max_concurrent":                  strconv.Itoa(p.DelegationMaxConcurrent),
+		"delegation_workflow_escalation_enabled":     strconv.FormatBool(p.DelegationWorkflowEscalationEnabled),
+		"delegation_child_timeout":                   time.Duration(p.DelegationChildTimeout).String(),
+		"delegation_max_child_turns":                 strconv.Itoa(p.DelegationMaxChildTurns),
+		"delegation_max_child_tool_calls":            strconv.FormatInt(p.DelegationMaxChildToolCalls, 10),
+		"delegation_max_child_input_tokens":          strconv.FormatInt(p.DelegationMaxChildInputTokens, 10),
+		"delegation_max_child_output_tokens":         strconv.FormatInt(p.DelegationMaxChildOutputTokens, 10),
+		"delegation_max_report_tokens":               strconv.FormatInt(p.DelegationMaxReportTokens, 10),
+		"delegation_max_total_tokens":                strconv.FormatInt(p.DelegationMaxTotalTokens, 10),
+		"delegation_max_total_cost_micros":           strconv.FormatInt(p.DelegationMaxTotalCostMicros, 10),
+		"delegation_parent_answer_reserve":           strconv.FormatInt(p.DelegationParentAnswerReserve, 10),
 		"context_budget":                             p.ContextBudget,
 		"domain_knowledge":                           p.DomainKnowledge,
 		"rerank_enabled":                             p.RerankEnabled,
@@ -198,7 +252,40 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	if p.CodingWorktreeTTL <= 0 {
 		p.CodingWorktreeTTL = Duration(DefaultCodingWorktreeTTL)
 	}
+	if p.DelegationMaxChildren <= 0 {
+		p.DelegationMaxChildren = DefaultDelegationMaxChildren
+	}
+	if p.DelegationMaxConcurrent <= 0 {
+		p.DelegationMaxConcurrent = DefaultDelegationMaxConcurrent
+	}
+	if p.DelegationChildTimeout <= 0 {
+		p.DelegationChildTimeout = Duration(DefaultDelegationChildTimeout)
+	}
+	if p.DelegationMaxChildTurns <= 0 {
+		p.DelegationMaxChildTurns = DefaultDelegationMaxChildTurns
+	}
+	if p.DelegationMaxChildToolCalls <= 0 {
+		p.DelegationMaxChildToolCalls = DefaultDelegationMaxChildToolCalls
+	}
+	if p.DelegationMaxChildInputTokens <= 0 {
+		p.DelegationMaxChildInputTokens = DefaultDelegationMaxChildInputTokens
+	}
+	if p.DelegationMaxChildOutputTokens <= 0 {
+		p.DelegationMaxChildOutputTokens = DefaultDelegationMaxChildOutputTokens
+	}
+	if p.DelegationMaxReportTokens <= 0 {
+		p.DelegationMaxReportTokens = DefaultDelegationMaxReportTokens
+	}
+	if p.DelegationMaxTotalTokens <= 0 {
+		p.DelegationMaxTotalTokens = DefaultDelegationMaxTotalTokens
+	}
+	if p.DelegationParentAnswerReserve <= 0 {
+		p.DelegationParentAnswerReserve = DefaultDelegationParentAnswerReserve
+	}
 	p.ToolPruningEnabled = false // default off; dry-run measurement logs what pruning would save
+	p.DelegationEnabled = false
+	p.DelegationShadowEnabled = false
+	p.DelegationWorkflowEscalationEnabled = false
 	if v := strings.TrimSpace(m["llm_model"]); v != "" {
 		p.LLMModel = v
 	}
@@ -344,6 +431,78 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 			p.RetrievalRouterMaxTokens = tokens
 		}
 	}
+	if raw, ok := m["delegation_enabled"]; ok {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		p.DelegationEnabled = value == "1" || value == "true"
+	}
+	if raw, ok := m["delegation_shadow_enabled"]; ok {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		p.DelegationShadowEnabled = value == "1" || value == "true"
+	}
+	if raw, ok := m["delegation_workflow_escalation_enabled"]; ok {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		p.DelegationWorkflowEscalationEnabled = value == "1" || value == "true"
+	}
+	if raw, ok := m["delegation_capabilities"]; ok {
+		if value, err := canonicalCapabilityList(raw); err == nil {
+			p.DelegationCapabilities = splitList(value)
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_max_children"]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			p.DelegationMaxChildren = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_max_concurrent"]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			p.DelegationMaxConcurrent = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_child_timeout"]); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			p.DelegationChildTimeout = Duration(d)
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_max_child_turns"]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			p.DelegationMaxChildTurns = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_max_child_tool_calls"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			p.DelegationMaxChildToolCalls = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_max_child_input_tokens"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			p.DelegationMaxChildInputTokens = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_max_child_output_tokens"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			p.DelegationMaxChildOutputTokens = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_max_report_tokens"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			p.DelegationMaxReportTokens = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_max_total_tokens"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			p.DelegationMaxTotalTokens = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_max_total_cost_micros"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			p.DelegationMaxTotalCostMicros = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_parent_answer_reserve"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			p.DelegationParentAnswerReserve = n
+		}
+	}
 	if v := strings.TrimSpace(m["vcs_url"]); v != "" {
 		p.VCSURL = v
 	}
@@ -433,7 +592,9 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 			return "", fmt.Errorf("llm_provider must be empty, openai, or anthropic")
 		}
 		return value, nil
-	case "rerank_enabled", "coding_allow_network", "tool_pruning_enabled":
+	case "rerank_enabled", "coding_allow_network", "tool_pruning_enabled",
+		"delegation_enabled", "delegation_shadow_enabled",
+		"delegation_workflow_escalation_enabled":
 		return canonicalBoolSetting(key, value)
 	case "llm_max_tokens", "llm_answer_max_tokens", "agent_conclusion_max_tokens", "llm_max_continue_rounds":
 		return canonicalNonNegativeIntSetting(key, value)
@@ -441,12 +602,23 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 		return canonicalNonNegativeInt64Setting(key, value)
 	case "agent_max_steps", "context_budget", "rerank_pool",
 		"rerank_topk", "rerank_max_per_service", "rerank_max_per_service_low_band",
-		"vcs_clone_concurrency":
+		"vcs_clone_concurrency", "delegation_max_children",
+		"delegation_max_concurrent", "delegation_max_child_turns":
 		return canonicalPositiveIntSetting(key, value)
+	case "delegation_max_child_tool_calls", "delegation_max_child_input_tokens",
+		"delegation_max_child_output_tokens", "delegation_max_report_tokens",
+		"delegation_max_total_tokens":
+		return canonicalPositiveInt64Setting(key, value)
+	case "delegation_max_total_cost_micros", "delegation_parent_answer_reserve":
+		return canonicalNonNegativeInt64Setting(key, value)
 	case "rerank_min_score", "rerank_min_dense_preflight", "runbook_min_score", "code_min_score":
 		return canonicalScoreSetting(key, value)
 	case "agent_timeout":
 		return canonicalDurationSetting(key, value, time.Second, 24*time.Hour)
+	case "delegation_child_timeout":
+		return canonicalDurationSetting(key, value, time.Second, 24*time.Hour)
+	case "delegation_capabilities":
+		return canonicalCapabilityList(value)
 	case "coding_enabled_providers":
 		return canonicalCodingProviders(value)
 	case "coding_default_provider":
@@ -533,6 +705,14 @@ func canonicalNonNegativeInt64Setting(key, value string) (string, error) {
 	return strconv.FormatInt(n, 10), nil
 }
 
+func canonicalPositiveInt64Setting(key, value string) (string, error) {
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n <= 0 {
+		return "", fmt.Errorf("%s must be a positive integer", key)
+	}
+	return strconv.FormatInt(n, 10), nil
+}
+
 func canonicalScoreSetting(key, value string) (string, error) {
 	score, err := strconv.ParseFloat(value, 64)
 	if err != nil || score < 0 || score > 1 {
@@ -558,6 +738,22 @@ func canonicalCodingProviders(value string) (string, error) {
 		}
 	}
 	return strings.Join(ordered, ","), nil
+}
+
+func canonicalCapabilityList(value string) (string, error) {
+	requested := make(map[string]struct{})
+	for _, capability := range splitList(strings.ToLower(value)) {
+		if !canonicalCapabilityID.MatchString(capability) {
+			return "", fmt.Errorf("delegation capability %q is not canonical", capability)
+		}
+		requested[capability] = struct{}{}
+	}
+	capabilities := make([]string, 0, len(requested))
+	for capability := range requested {
+		capabilities = append(capabilities, capability)
+	}
+	sort.Strings(capabilities)
+	return strings.Join(capabilities, ","), nil
 }
 
 func canonicalDurationSetting(key, value string, min, max time.Duration) (string, error) {
@@ -605,6 +801,36 @@ func (p *PlatformSettings) ValidateAgentSettings() error {
 	if (p.LLMInputPriceMicrosPerMillionTokens == 0) !=
 		(p.LLMOutputPriceMicrosPerMillionTokens == 0) {
 		return fmt.Errorf("LLM input and output model prices must be configured together")
+	}
+	if p.DelegationShadowEnabled && !p.DelegationEnabled {
+		return fmt.Errorf("delegation_shadow_enabled requires delegation_enabled")
+	}
+	if p.DelegationWorkflowEscalationEnabled && !p.DelegationEnabled {
+		return fmt.Errorf("delegation_workflow_escalation_enabled requires delegation_enabled")
+	}
+	if !p.DelegationEnabled {
+		return nil
+	}
+	if p.DelegationMaxConcurrent > p.DelegationMaxChildren {
+		return fmt.Errorf("delegation_max_concurrent must not exceed delegation_max_children")
+	}
+	if time.Duration(p.DelegationChildTimeout) <= reserve {
+		return fmt.Errorf("delegation_child_timeout must exceed agent_answer_reserve")
+	}
+	childTokens := p.DelegationMaxChildInputTokens + p.DelegationMaxChildOutputTokens
+	if childTokens < p.DelegationMaxChildInputTokens {
+		return fmt.Errorf("delegation child token limit overflow")
+	}
+	if childTokens > 0 && int64(p.DelegationMaxChildren) >
+		(math.MaxInt64-p.DelegationParentAnswerReserve)/childTokens {
+		return fmt.Errorf("delegation aggregate token limit overflow")
+	}
+	requiredTokens := int64(p.DelegationMaxChildren)*childTokens +
+		p.DelegationParentAnswerReserve
+	if p.DelegationMaxTotalTokens < requiredTokens {
+		return fmt.Errorf(
+			"delegation_max_total_tokens must cover all child grants and parent answer reserve",
+		)
 	}
 	return nil
 }

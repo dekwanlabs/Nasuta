@@ -45,12 +45,12 @@ func (rs *Store) RecordLLMCall(ctx context.Context, call llm.CallUsage) error {
 		`UPDATE agent_runs SET
 			input_tokens=input_tokens+?,cached_input_tokens=cached_input_tokens+?,
 			output_tokens=output_tokens+?,reasoning_tokens=reasoning_tokens+?,
-			total_tokens=total_tokens+?,llm_call_count=?,
+			total_tokens=total_tokens+?,cost_micros=cost_micros+?,llm_call_count=?,
 			peak_input_tokens=GREATEST(peak_input_tokens,?),
 			peak_reserved_tokens=GREATEST(peak_reserved_tokens,?)
 		 WHERE id=?`,
 		usage.InputTokens, usage.CachedInputTokens, usage.OutputTokens,
-		usage.ReasoningTokens, usage.TotalTokens, callSeq,
+		usage.ReasoningTokens, usage.TotalTokens, call.CostMicros, callSeq,
 		usage.InputTokens, reservedTokens, call.RunID,
 	); err != nil {
 		return err

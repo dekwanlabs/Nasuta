@@ -6,11 +6,14 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
-// ClassifyResponseMode selects answer structure without affecting evidence access.
-func ClassifyResponseMode(question string) domain.ResponseMode {
-	return domain.ClassifyResponseMode(question)
+// AnswerInstructionFor derives answer organization without changing evidence access.
+func AnswerInstructionFor(kind domain.QueryKind) string {
+	return prompts.MustRender(prompts.AgentQAQueryKind, struct {
+		Kind string
+	}{Kind: string(kind)})
 }
 
 var metaCapabilityPhrases = []string{

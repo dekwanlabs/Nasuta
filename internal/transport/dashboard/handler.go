@@ -60,7 +60,8 @@ type Handler struct {
 	rolePromptFn       func(userID int64) string
 	featureStatusFn    func(context.Context) delivery.FeatureDeliveryStatus
 	qaRuntimeFn        func() QARuntime
-	reloadQAFn         func(*codegraph.DB) error
+	settingsChangedFn  func([]string) error
+	codeGraphChangedFn func(*codegraph.DB) error
 }
 
 type QAInvestigationCanceller interface {
@@ -104,19 +105,34 @@ func (handler *Handler) rolePromptFor(userID int64) string {
 }
 
 // NewHandler builds the dashboard HTTP handler.
-func NewHandler(db *store.SQLite, docDB *store.DocStore, authDB *auth.DB, sem semantic.Store, emb embed.Embedder, t *agent.Service, cfg config.Config, idx IndexingOps, cgDB *codegraph.DB, chain *callchain.Service, qaRuntime func() QARuntime, reloadQA func(*codegraph.DB) error) *Handler {
+func NewHandler(
+	db *store.SQLite,
+	docDB *store.DocStore,
+	authDB *auth.DB,
+	sem semantic.Store,
+	emb embed.Embedder,
+	t *agent.Service,
+	cfg config.Config,
+	idx IndexingOps,
+	cgDB *codegraph.DB,
+	chain *callchain.Service,
+	qaRuntime func() QARuntime,
+	settingsChanged func([]string) error,
+	codeGraphChanged func(*codegraph.DB) error,
+) *Handler {
 	h := &Handler{
-		db:          db,
-		docDB:       docDB,
-		authDB:      authDB,
-		semantic:    sem,
-		embedder:    emb,
-		tools:       t,
-		cfg:         cfg,
-		idx:         idx,
-		callChain:   chain,
-		qaRuntimeFn: qaRuntime,
-		reloadQAFn:  reloadQA,
+		db:                 db,
+		docDB:              docDB,
+		authDB:             authDB,
+		semantic:           sem,
+		embedder:           emb,
+		tools:              t,
+		cfg:                cfg,
+		idx:                idx,
+		callChain:          chain,
+		qaRuntimeFn:        qaRuntime,
+		settingsChangedFn:  settingsChanged,
+		codeGraphChangedFn: codeGraphChanged,
 	}
 	h.codegraphDB = cgDB
 	return h
@@ -142,8 +158,8 @@ func (handler *Handler) refreshCodeGraph() error {
 	if handler.callChain != nil {
 		handler.callChain.SetGraph(cgDB)
 	}
-	if err := handler.reloadQA(cgDB); err != nil {
-		return fmt.Errorf("reload QA after codegraph rebuild: %w", err)
+	if err := handler.replaceCodeGraph(cgDB); err != nil {
+		return fmt.Errorf("replace QA codegraph after rebuild: %w", err)
 	}
 	log.Infof("[dashboard] codegraph connection enabled after rebuild")
 	return nil

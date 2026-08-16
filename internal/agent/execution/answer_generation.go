@@ -49,6 +49,14 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		}
 		if callErr == nil {
 			res, callErr = agent.enforceContract(ctx, input.Messages, res, input.AnswerContract, agent.cfg.ConclusionMaxTokens, stream)
+		} else if errors.Is(callErr, ErrAnswerTruncated) &&
+			input.AnswerContract.Active() &&
+			validateAndStripContractPartial(res, input.AnswerContract) {
+			log.WarnfCtx(
+				ctx,
+				"[agent] run %s preserving contract-valid truncated force-conclusion candidate",
+				input.RunID,
+			)
 		}
 		return forceConclusionOutput{
 			Result: res, Stream: stream, Timing: stream.Timings(), AttemptStarted: attemptStarted,
@@ -66,17 +74,18 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		recordFirstAnswerToken(ctx, "force_conclusion", timing.FirstContent, time.Duration(elapsed)*time.Millisecond)
 	}
 	*stepSeq++
-	validAnswer := !answerContract.Active() || res != nil && len(answerContract.Missing(res.Content)) == 0
+	validAnswer := res != nil && answerContract.Satisfied(res.Content)
 	if hasDeliverableAnswer(res) && validAnswer && !errors.Is(err, ErrAnswerContractViolation) {
 		stream.Publish(res.Content)
 		agent.observer.OnStep(ctx, runID, StepRecord{
-			StepNo:          *stepSeq,
-			Kind:            StepKindAnswer,
-			Content:         res.Content,
-			TokenDelta:      utf8.RuneCountInString(res.Content),
-			ReasoningTokens: res.ReasoningTokens,
-			DurationMs:      int(time.Since(t0) / time.Millisecond),
-			CreatedAt:       t0,
+			StepNo:              *stepSeq,
+			Kind:                StepKindAnswer,
+			Content:             res.Content,
+			DelegationAdoptions: answerContract.Adoptions(),
+			TokenDelta:          utf8.RuneCountInString(res.Content),
+			ReasoningTokens:     res.ReasoningTokens,
+			DurationMs:          int(time.Since(t0) / time.Millisecond),
+			CreatedAt:           t0,
 		})
 	}
 	return res, err
@@ -113,6 +122,21 @@ func hasLeakedToolProtocol(res *llm.ChatStreamResult) bool {
 
 func hasDeliverableAnswer(res *llm.ChatStreamResult) bool {
 	return res != nil && strings.TrimSpace(res.Content) != "" && len(res.ToolCalls) == 0 && !hasLeakedToolProtocol(res)
+}
+
+func validateAndStripContractPartial(
+	res *llm.ChatStreamResult,
+	contract *exactAnswerContract,
+) bool {
+	if res == nil || contract == nil {
+		return false
+	}
+	clean, violations := contract.ValidateAndStrip(res.Content)
+	if len(violations) > 0 {
+		return false
+	}
+	res.Content = clean
+	return true
 }
 
 func (agent *Agent) preservePartialAnswer(ctx context.Context, runID string, stepSeq *int, result *RunResult, res *llm.ChatStreamResult, stream *StreamPipe, started time.Time, duration time.Duration) bool {

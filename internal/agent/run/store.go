@@ -92,6 +92,13 @@ type Record struct {
 	InputSchemaVersion   int64                        `json:"input_schema_version"`
 	OutputSchemaVersion  int64                        `json:"output_schema_version"`
 	ParentRunID          string                       `json:"parent_run_id"`
+	CapabilityID         string                       `json:"capability_id"`
+	CapabilityVersion    int64                        `json:"capability_version"`
+	CapabilityHash       string                       `json:"capability_content_hash"`
+	DelegationID         string                       `json:"delegation_id"`
+	DelegationDepth      int                          `json:"delegation_depth"`
+	RunLimits            agentapi.RunLimits           `json:"run_limits"`
+	CapabilityRevision   uint64                       `json:"capability_registry_revision"`
 	WorkflowRunID        string                       `json:"workflow_run_id"`
 	WorkflowNodeID       string                       `json:"workflow_node_id"`
 	Question             string                       `json:"question"`
@@ -106,6 +113,7 @@ type Record struct {
 	OutputTokens         int64                        `json:"output_tokens"`
 	ReasoningTokens      int64                        `json:"reasoning_tokens"`
 	TotalTokens          int64                        `json:"total_tokens"`
+	CostMicros           int64                        `json:"cost_micros"`
 	LLMCallCount         int                          `json:"llm_call_count"`
 	PeakInputTokens      int                          `json:"peak_input_tokens"`
 	PeakReservedTokens   int                          `json:"peak_reserved_tokens"`
@@ -157,29 +165,30 @@ type LLMCallRow struct {
 }
 
 type StepRow struct {
-	ID                  int64                 `json:"id"`
-	RunID               string                `json:"run_id"`
-	StepNo              int                   `json:"step_no"`
-	Kind                StepKind              `json:"kind"`
-	TraceID             string                `json:"trace_id,omitempty"`
-	ArtifactID          string                `json:"artifact_id,omitempty"`
-	ToolCallID          string                `json:"tool_call_id,omitempty"`
-	Tool                string                `json:"tool,omitempty"`
-	Args                string                `json:"args,omitempty"`
-	ResultPreview       string                `json:"result_preview,omitempty"`
-	Failed              bool                  `json:"failed,omitempty"`
-	DeliveryError       string                `json:"delivery_error,omitempty"`
-	Content             string                `json:"content,omitempty"`
-	PromptContent       string                `json:"prompt_content,omitempty"`
-	AuthoritativeSHA256 string                `json:"authoritative_sha256,omitempty"`
-	PromptSHA256        string                `json:"prompt_sha256,omitempty"`
-	SizeBytes           int64                 `json:"size_bytes,omitempty"`
-	Coverage            tool.EvidenceCoverage `json:"coverage,omitempty"`
-	AnswerContract      tool.AnswerContract   `json:"answer_contract,omitempty"`
-	TokenDelta          int                   `json:"token_delta"`
-	ReasoningTokens     int                   `json:"reasoning_tokens"`
-	DurationMs          int                   `json:"duration_ms"`
-	CreatedAt           string                `json:"created_at"`
+	ID                  int64                         `json:"id"`
+	RunID               string                        `json:"run_id"`
+	StepNo              int                           `json:"step_no"`
+	Kind                StepKind                      `json:"kind"`
+	TraceID             string                        `json:"trace_id,omitempty"`
+	ArtifactID          string                        `json:"artifact_id,omitempty"`
+	ToolCallID          string                        `json:"tool_call_id,omitempty"`
+	Tool                string                        `json:"tool,omitempty"`
+	Args                string                        `json:"args,omitempty"`
+	ResultPreview       string                        `json:"result_preview,omitempty"`
+	Failed              bool                          `json:"failed,omitempty"`
+	DeliveryError       string                        `json:"delivery_error,omitempty"`
+	Content             string                        `json:"content,omitempty"`
+	PromptContent       string                        `json:"prompt_content,omitempty"`
+	AuthoritativeSHA256 string                        `json:"authoritative_sha256,omitempty"`
+	PromptSHA256        string                        `json:"prompt_sha256,omitempty"`
+	SizeBytes           int64                         `json:"size_bytes,omitempty"`
+	Coverage            tool.EvidenceCoverage         `json:"coverage,omitempty"`
+	AnswerContract      tool.AnswerContract           `json:"answer_contract,omitempty"`
+	DelegationAdoptions []agentapi.DelegationAdoption `json:"delegation_adoptions,omitempty"`
+	TokenDelta          int                           `json:"token_delta"`
+	ReasoningTokens     int                           `json:"reasoning_tokens"`
+	DurationMs          int                           `json:"duration_ms"`
+	CreatedAt           string                        `json:"created_at"`
 }
 
 type Detail struct {
@@ -210,6 +219,22 @@ type QAParentRecord struct {
 	Status        Status
 	StartedAt     string
 	EndedAt       string
+}
+
+// WorkflowEscalationParentRecord carries only authoritative parent facts needed
+// to validate and budget one durable Workflow escalation.
+type WorkflowEscalationParentRecord struct {
+	ID            string
+	RunKind       Kind
+	Status        Status
+	UserID        int64
+	SessionID     string
+	Question      string
+	ParentRunID   string
+	WorkflowRunID string
+	RunLimits     agentapi.RunLimits
+	TotalTokens   int64
+	CostMicros    int64
 }
 
 // QAParentCursor is a stable keyset cursor over parent creation order.

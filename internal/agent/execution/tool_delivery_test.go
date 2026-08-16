@@ -476,6 +476,7 @@ func TestRunPreservesFiftyNineRequiredLiteralsAcrossModelSessionAndReplay(t *tes
 	recent = append(recent, llm.Message{Role: "assistant", Content: result.Answer})
 	nextMessages := agent.buildMessages(
 		"上一轮第 59 个 SN 是什么？",
+		domain.QueryPlan{Kind: domain.QueryFocusedFact},
 		ConversationContext{Recent: recent},
 		nil,
 		domain.EvidencePlan{Sources: domain.Internal},

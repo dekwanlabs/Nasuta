@@ -149,11 +149,13 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		"investigator.docs":    {"get_service", "search_runbooks", "check_docs"},
 		"investigator.web":     {"web_search"},
 		"investigator.memory":  {},
+		"delegation.verifier":  {},
 		"synthesizer":          {},
 	}
 	wantIDs := []string{
 		"investigator.code", "investigator.runtime", "investigator.docs",
-		"investigator.web", "investigator.memory", "synthesizer",
+		"investigator.web", "investigator.memory", "delegation.verifier",
+		"synthesizer",
 	}
 	if len(definitions) != len(wantIDs) {
 		t.Fatalf("definitions = %d, want %d", len(definitions), len(wantIDs))
@@ -187,6 +189,15 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		len(synthesizer.Tools.VisibleToolIDs) != 0 || !synthesizer.Tools.RestrictVisible {
 		t.Fatalf("synthesizer contract = %+v", synthesizer)
 	}
+	verifier := definitions[len(definitions)-2]
+	if verifier.InputSchema.ID != "delegation.verification.request" ||
+		verifier.OutputSchema.ID != "delegation.verification.result" ||
+		verifier.Prompt.Version != "delegation-verification-v1" ||
+		!strings.Contains(verifier.Prompt.System, `"unresolved"`) ||
+		len(verifier.Tools.VisibleToolIDs) != 0 ||
+		!verifier.Tools.RestrictVisible {
+		t.Fatalf("delegation verifier contract = %+v", verifier)
+	}
 }
 
 func TestDefaultCapabilitiesPinAgentContracts(t *testing.T) {
@@ -204,43 +215,35 @@ func TestDefaultCapabilitiesPinAgentContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantAgents := map[string]string{
-		"knowledge.code.inspect":  "investigator.code",
-		"knowledge.service.trace": "investigator.runtime",
-		"knowledge.docs.verify":   "investigator.docs",
-		"knowledge.web.research":  "investigator.web",
-		"knowledge.memory.recall": "investigator.memory",
-		"evidence.synthesize":     "synthesizer",
+		"knowledge.code.inspect":   "investigator.code",
+		"knowledge.service.trace":  "investigator.runtime",
+		"knowledge.docs.verify":    "investigator.docs",
+		"knowledge.web.research":   "investigator.web",
+		"knowledge.memory.recall":  "investigator.memory",
+		"evidence.semantic.verify": "delegation.verifier",
+		"evidence.synthesize":      "synthesizer",
 	}
 	wantFacets := map[string][]string{
 		"knowledge.code.inspect": {
-			"implementation", "entrypoint", "core_flow", "data_and_state",
+			"entrypoint", "core_flow", "data_and_state", "external_dependency",
 		},
 		"knowledge.service.trace": {
-			"service.topology", "system_boundary", "external_dependency",
-			"runtime_and_operations",
+			"system_boundary", "external_dependency", "runtime_and_operations",
 		},
-		"knowledge.docs.verify": {
-			"documentation", "business_domain",
-		},
-		"knowledge.web.research": {
-			"implementation", "entrypoint", "core_flow", "data_and_state",
-			"service.topology", "system_boundary", "external_dependency",
-			"runtime_and_operations", "documentation", "business_domain",
-		},
-		"knowledge.memory.recall": {
-			"implementation", "entrypoint", "core_flow", "data_and_state",
-			"service.topology", "system_boundary", "external_dependency",
-			"runtime_and_operations", "documentation", "business_domain",
-		},
-		"evidence.synthesize": nil,
+		"knowledge.docs.verify":    canonicalFacetValues(),
+		"knowledge.web.research":   canonicalFacetValues(),
+		"knowledge.memory.recall":  canonicalFacetValues(),
+		"evidence.semantic.verify": nil,
+		"evidence.synthesize":      nil,
 	}
 	wantFreshness := map[string]agentapi.FreshnessPolicy{
-		"knowledge.code.inspect":  agentapi.FreshnessStable,
-		"knowledge.service.trace": agentapi.FreshnessStable,
-		"knowledge.docs.verify":   agentapi.FreshnessStable,
-		"knowledge.web.research":  agentapi.FreshnessCurrent,
-		"knowledge.memory.recall": agentapi.FreshnessCurrent,
-		"evidence.synthesize":     agentapi.FreshnessStable,
+		"knowledge.code.inspect":   agentapi.FreshnessStable,
+		"knowledge.service.trace":  agentapi.FreshnessStable,
+		"knowledge.docs.verify":    agentapi.FreshnessStable,
+		"knowledge.web.research":   agentapi.FreshnessCurrent,
+		"knowledge.memory.recall":  agentapi.FreshnessCurrent,
+		"evidence.semantic.verify": agentapi.FreshnessStable,
+		"evidence.synthesize":      agentapi.FreshnessStable,
 	}
 	byAgent := make(map[string]agentapi.Definition, len(definitions))
 	for _, definition := range definitions {

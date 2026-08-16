@@ -215,6 +215,10 @@ func mapResult(
 		outcome := execution.OutcomeFor(result, preRetrieved, cancelCause)
 		outcome.Status = run.StatusAborted
 		outcome.ErrorCode = "cancelled"
+		outcome.DelegationAdoptions = unknownDelegationAdoptions(
+			outcome.DelegationAdoptions,
+			"parent_cancelled",
+		)
 		publicResult := publicTerminalEvidence(runID, result, outcome, usage)
 		publicResult.Status = agentapi.RunCancelled
 		publicResult.Error = &agentapi.RunError{
@@ -226,7 +230,14 @@ func mapResult(
 	if errors.Is(outcome.Err, execution.ErrToolCallBudgetExhausted) {
 		outcome.ErrorCode = "tool_call_budget_exhausted"
 	}
+	if errors.Is(outcome.Err, errRunLimitExceeded) {
+		outcome.ErrorCode = "run_limit_exceeded"
+	}
 	if outcome.Status != run.StatusDone {
+		outcome.DelegationAdoptions = unknownDelegationAdoptions(
+			outcome.DelegationAdoptions,
+			"parent_run_failed",
+		)
 		runError := outcome.Err
 		if runError == nil {
 			runError = errors.New("definition run failed")
@@ -249,10 +260,17 @@ func mapResult(
 		outcome.Status = run.StatusFailed
 		outcome.ErrorCode = "invalid_output"
 		outcome.Err = err
+		outcome.DelegationAdoptions = unknownDelegationAdoptions(
+			outcome.DelegationAdoptions,
+			"invalid_output",
+		)
 		publicResult.Status = agentapi.RunFailed
 		publicResult.Text = ""
 		publicResult.References = nil
 		publicResult.Messages = nil
+		publicResult.DelegationAdoptions = cloneDelegationAdoptions(
+			outcome.DelegationAdoptions,
+		)
 		publicResult.Error = &agentapi.RunError{Code: "invalid_output", Message: err.Error()}
 		return publicResult, outcome
 	}
@@ -269,6 +287,9 @@ func publicTerminalEvidence(
 	publicResult := agentapi.RunResult{
 		RunID: runID, Usage: usage,
 		Evidence: publicEvidence(outcome.Evidence),
+		DelegationAdoptions: cloneDelegationAdoptions(
+			outcome.DelegationAdoptions,
+		),
 	}
 	if result == nil {
 		return publicResult
@@ -276,6 +297,36 @@ func publicTerminalEvidence(
 	publicResult.EvidenceUnits = evidence.CloneUnits(result.EvidenceUnits)
 	publicResult.EvidenceConflicts = publicEvidenceConflicts(result.EvidenceConflicts)
 	return publicResult
+}
+
+func cloneDelegationAdoptions(
+	adoptions []agentapi.DelegationAdoption,
+) []agentapi.DelegationAdoption {
+	if len(adoptions) == 0 {
+		return nil
+	}
+	cloned := make([]agentapi.DelegationAdoption, len(adoptions))
+	for index, adoption := range adoptions {
+		adoption.AdoptedReportIDs = append(
+			[]string(nil),
+			adoption.AdoptedReportIDs...,
+		)
+		cloned[index] = adoption
+	}
+	return cloned
+}
+
+func unknownDelegationAdoptions(
+	adoptions []agentapi.DelegationAdoption,
+	reason string,
+) []agentapi.DelegationAdoption {
+	unknown := cloneDelegationAdoptions(adoptions)
+	for index := range unknown {
+		unknown[index].AdoptedReportIDs = nil
+		unknown[index].Status = agentapi.DelegationUnknown
+		unknown[index].Reason = reason
+	}
+	return unknown
 }
 
 func retryableError(err error) bool {

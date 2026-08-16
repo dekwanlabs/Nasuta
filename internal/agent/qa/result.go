@@ -20,6 +20,9 @@ func outcomeFromPublicResult(result agentapi.RunResult) RunOutcome {
 			OmittedItemCount:   result.Evidence.OmittedItemCount,
 		},
 		References: append([]agentapi.Reference(nil), result.References...),
+		DelegationAdoptions: clonePublicDelegationAdoptions(
+			result.DelegationAdoptions,
+		),
 	}
 	outcome.HitCount = len(outcome.References)
 	switch result.Status {
@@ -35,6 +38,23 @@ func outcomeFromPublicResult(result agentapi.RunResult) RunOutcome {
 		outcome.Err = errors.New(result.Error.Message)
 	}
 	return outcome
+}
+
+func clonePublicDelegationAdoptions(
+	adoptions []agentapi.DelegationAdoption,
+) []agentapi.DelegationAdoption {
+	if len(adoptions) == 0 {
+		return nil
+	}
+	cloned := make([]agentapi.DelegationAdoption, len(adoptions))
+	for index, adoption := range adoptions {
+		adoption.AdoptedReportIDs = append(
+			[]string(nil),
+			adoption.AdoptedReportIDs...,
+		)
+		cloned[index] = adoption
+	}
+	return cloned
 }
 
 func outcomeFor(result *RunResult, preRetrieved []agentapi.Reference, runErr error) RunOutcome {

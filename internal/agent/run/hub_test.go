@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 )
@@ -244,6 +245,11 @@ func TestHub_CompletePublishesOneTerminalEvent(t *testing.T) {
 	outcome := Outcome{
 		Status: StatusDone, StepCount: 2, TokenUsed: 12, Answer: "answer",
 		SessionMessages: []llm.Message{{Role: "tool", ToolCallID: "call-1", Name: "observe", Content: "result"}},
+		DelegationAdoptions: []agentapi.DelegationAdoption{{
+			DelegationID:     "del-1",
+			AdoptedReportIDs: []string{"report-1"},
+			Status:           agentapi.DelegationAdopted,
+		}},
 	}
 	hub.Complete(runID, outcome)
 	hub.Complete(runID, outcome)
@@ -256,6 +262,10 @@ func TestHub_CompletePublishesOneTerminalEvent(t *testing.T) {
 		}
 		if len(terminal.SessionMessages) != 1 || terminal.SessionMessages[0].ToolCallID != "call-1" {
 			t.Fatalf("terminal lost session tool messages: %+v", terminal)
+		}
+		if len(terminal.DelegationAdoptions) != 1 ||
+			terminal.DelegationAdoptions[0].Status != agentapi.DelegationAdopted {
+			t.Fatalf("terminal lost delegation adoptions: %+v", terminal)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("missing terminal event")

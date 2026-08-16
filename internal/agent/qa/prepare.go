@@ -33,6 +33,7 @@ type preparation struct {
 	taskGraphProposal  *agentapi.TaskGraphProposal
 	historyCandidates  *HistoryCandidates
 	conversationRefs   []ConversationRef
+	runLimits          agentapi.RunLimits
 }
 
 type preparedEvidence struct {
@@ -113,7 +114,7 @@ func (svc *Service) initializePreparation(
 	}
 
 	prepared.toolPolicy = toolPolicyForRun(
-		svc.writeAvailable && request.WriteAuthorized && request.WriteRequested,
+		svc.writeAvailable.Load() && request.WriteAuthorized && request.WriteRequested,
 	)
 	prepared.candidateToolSet = svc.runtimeTools.ToolsFor(prepared.toolPolicy)
 	if request.Conversation.CompactedThroughTurn <= 0 || svc.history == nil {
@@ -165,10 +166,10 @@ func (svc *Service) analyzeQuestion(
 		return fmt.Errorf("analyze QA query: %w", err)
 	}
 	prepared.analysis = analysis
+	requiredFacets := domain.RequiredFacetsFor(analysis.QueryPlan.Kind)
 	log.InfofCtx(prepared.ctx,
-		"[qa] canonical retrieval intent response_mode=%s retrieval_intent=%s intent_origin=%s required_facets=%d target_entities=%d",
-		analysis.ResponseMode, analysis.RetrievalIntent.Kind, analysis.IntentOrigin,
-		len(analysis.RetrievalIntent.RequiredFacets), len(analysis.RetrievalIntent.TargetEntities),
+		"[qa] canonical query plan kind=%s required_facets=%d entities=%d",
+		analysis.QueryPlan.Kind, len(requiredFacets), len(analysis.QueryPlan.Entities),
 	)
 	return nil
 }
@@ -274,6 +275,7 @@ func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) 
 			return nil, err
 		}
 	}
+	prepared.runLimits = svc.parentRunLimits(prepared, definition)
 	run, err := svc.beginSingleRun(prepared, definition, selection)
 	if err != nil {
 		return nil, err
@@ -299,6 +301,14 @@ func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) 
 		prepared.failPreparation(runCtx, run, err)
 		return nil, err
 	}
+	if err := recordEvidenceLedger(
+		runCtx,
+		run,
+		contextBlockEvidence(contextBlocks(evidence.retrieved)),
+	); err != nil {
+		prepared.failPreparation(runCtx, run, err)
+		return nil, fmt.Errorf("persist QA evidence ledger: %w", err)
+	}
 	conversation = svc.answerContext(
 		runCtx, conversation, evidence.recalled, prepared.request.RolePrompt, evidence.retrieved,
 	)
@@ -313,9 +323,28 @@ func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) 
 	return svc.submitRun(
 		runCtx, run, prepared.request, definition, selection, prepared.request.Question,
 		conversation, prepared.request.UserID, evidence.retrieved,
-		prepared.request.RunID, evidencePlan, prepared.toolPolicy,
-		prepared.candidateToolSet, prepared.trace, prepared.ownsTrace,
+		prepared.request.RunID, prepared.analysis.QueryPlan, evidencePlan, prepared.toolPolicy,
+		prepared.candidateToolSet, prepared.execution.HighRisk, prepared.runLimits,
+		prepared.trace, prepared.ownsTrace,
 	)
+}
+
+func (svc *Service) parentRunLimits(
+	prepared *preparation,
+	definition agentapi.Definition,
+) agentapi.RunLimits {
+	limits := agentapi.RunLimits{
+		Deadline: time.Now().UTC().Add(definition.Budget.Timeout),
+		MaxSteps: definition.Budget.MaxSteps,
+	}
+	if !svc.delegationEnabled ||
+		!standardRequest(prepared.request, svc.agentRef) ||
+		!scenarioToolsContain(prepared.candidateToolSet, "delegate_investigation") {
+		return limits
+	}
+	limits.MaxTotalTokens = svc.delegationTokens
+	limits.MaxCostMicros = svc.delegationCost
+	return limits
 }
 
 func (svc *Service) reassembleConversation(
@@ -415,7 +444,8 @@ func (svc *Service) beginSingleRun(
 			RestrictVisible: true,
 			VisibleToolIDs:  scenarioToolIDs(prepared.candidateToolSet.Tools()),
 		},
-		Actor: agentapi.Actor{UserID: prepared.request.UserID},
+		Limits: prepared.runLimits,
+		Actor:  agentapi.Actor{UserID: prepared.request.UserID},
 		Correlation: agentapi.Correlation{
 			SessionID:     prepared.request.Conversation.SessionID,
 			ParentRunID:   prepared.request.ParentRunID,
@@ -487,7 +517,7 @@ func (svc *Service) prepareEvidence(
 		)
 	})
 	rc, err := svc.retriever.RetrievePlan(
-		ctx, canonicalQuery, prepared.planning.Terms, evidencePlan, prepared.analysis.RetrievalIntent,
+		ctx, canonicalQuery, prepared.planning.Terms, evidencePlan, prepared.analysis.QueryPlan,
 	)
 	if err != nil {
 		runErr := fmt.Errorf("retrieve internal evidence: %w", err)

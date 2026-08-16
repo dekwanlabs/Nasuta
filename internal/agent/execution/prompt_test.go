@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
@@ -248,17 +249,35 @@ func TestAllToolCapableAgentPromptsRequireStepRationale(t *testing.T) {
 	}
 }
 
-func TestResponseModeOverrideStaysInternal(t *testing.T) {
-	instruction := prompts.MustRender(prompts.AgentQAResponseMode, struct {
-		Mode string
-	}{Mode: "codebase_qa"})
+func TestBuildMessagesUsesResolvedQueryKind(t *testing.T) {
+	messages := BuildMessages(
+		"why did this request fail",
+		domain.QueryPlan{Kind: domain.QueryComparison},
+		ConversationContext{},
+		nil,
+		domain.EvidencePlan{},
+		"",
+		0,
+	)
+	if len(messages) == 0 || !strings.Contains(messages[0].Content, "[QUERY_KIND: comparison]") {
+		t.Fatalf("system prompt did not use the prepared query kind: %#v", messages)
+	}
+	if strings.Contains(messages[0].Content, "[QUERY_KIND: runtime_diagnosis]") {
+		t.Fatal("BuildMessages reclassified the raw question instead of using QueryPlan")
+	}
+}
+
+func TestQueryKindOverrideStaysInternal(t *testing.T) {
+	instruction := prompts.MustRender(prompts.AgentQAQueryKind, struct {
+		Kind string
+	}{Kind: "focused_fact"})
 	for _, required := range []string{"Override silently", "never expose this internal hint"} {
 		if !strings.Contains(instruction, required) {
-			t.Fatalf("response mode instruction missing %q: %s", required, instruction)
+			t.Fatalf("query kind instruction missing %q: %s", required, instruction)
 		}
 	}
 	if strings.Contains(instruction, "brief justification") {
-		t.Fatalf("response mode asks the model to expose an internal override: %s", instruction)
+		t.Fatalf("query kind instruction asks the model to expose an internal override: %s", instruction)
 	}
 }
 

@@ -85,6 +85,26 @@ type RunPolicy struct {
 	RedactSensitive bool  `json:"redact_sensitive"`
 }
 
+// RunLimits contains the final effective limits for one prepared Run.
+// Callers may only narrow the pinned Definition ceiling.
+type RunLimits struct {
+	Deadline       time.Time `json:"deadline,omitempty"`
+	MaxSteps       int       `json:"max_steps,omitempty"`
+	MaxToolCalls   int64     `json:"max_tool_calls,omitempty"`
+	MaxTotalTokens int64     `json:"max_total_tokens,omitempty"`
+	MaxCostMicros  int64     `json:"max_cost_micros,omitempty"`
+}
+
+// RunDelegation pins the immutable capability identity and parent relation for
+// one dynamic child Run.
+type RunDelegation struct {
+	DelegationID               string        `json:"delegation_id"`
+	Depth                      int           `json:"depth"`
+	Capability                 CapabilityRef `json:"capability"`
+	CapabilityContentHash      string        `json:"capability_content_hash"`
+	CapabilityRegistryRevision uint64        `json:"capability_registry_revision"`
+}
+
 // DefinitionSelection records the rollout decision that selected a definition.
 type DefinitionSelection struct {
 	RuleVersion           int64  `json:"rule_version,omitempty"`
@@ -111,6 +131,8 @@ type RunRequest struct {
 	Permissions PermissionPolicy `json:"permissions"`
 	ToolScope   ToolScope        `json:"tool_scope"`
 	Policy      RunPolicy        `json:"policy"`
+	Limits      RunLimits        `json:"limits"`
+	Delegation  RunDelegation    `json:"delegation,omitempty"`
 	Actor       Actor            `json:"actor"`
 	Correlation Correlation      `json:"correlation"`
 }
@@ -125,6 +147,8 @@ type RunStart struct {
 	Permissions    PermissionPolicy    `json:"permissions"`
 	ToolScope      ToolScope           `json:"tool_scope"`
 	Policy         RunPolicy           `json:"policy"`
+	Limits         RunLimits           `json:"limits"`
+	Delegation     RunDelegation       `json:"delegation,omitempty"`
 	Actor          Actor               `json:"actor"`
 	Correlation    Correlation         `json:"correlation"`
 }
@@ -148,6 +172,8 @@ type RunSnapshot struct {
 	PromptHash  string           `json:"prompt_hash"`
 	ContextHash string           `json:"context_hash"`
 	Budget      BudgetPolicy     `json:"budget"`
+	Limits      RunLimits        `json:"limits"`
+	Delegation  RunDelegation    `json:"delegation,omitempty"`
 	Permissions PermissionPolicy `json:"permissions"`
 	Actor       Actor            `json:"actor"`
 	Correlation Correlation      `json:"correlation"`
@@ -208,17 +234,18 @@ type EvidenceConflict struct {
 
 // RunResult is the durable public outcome of one Agent Run.
 type RunResult struct {
-	RunID             string              `json:"run_id"`
-	Status            RunStatus           `json:"status"`
-	Output            json.RawMessage     `json:"output,omitempty"`
-	Text              string              `json:"text,omitempty"`
-	Evidence          EvidenceSummary     `json:"evidence"`
-	EvidenceUnits     []tool.EvidenceUnit `json:"evidence_units,omitempty"`
-	EvidenceConflicts []EvidenceConflict  `json:"evidence_conflicts,omitempty"`
-	References        []Reference         `json:"references,omitempty"`
-	Messages          []Message           `json:"messages,omitempty"`
-	Usage             Usage               `json:"usage"`
-	Error             *RunError           `json:"error,omitempty"`
+	RunID               string               `json:"run_id"`
+	Status              RunStatus            `json:"status"`
+	Output              json.RawMessage      `json:"output,omitempty"`
+	Text                string               `json:"text,omitempty"`
+	Evidence            EvidenceSummary      `json:"evidence"`
+	EvidenceUnits       []tool.EvidenceUnit  `json:"evidence_units,omitempty"`
+	EvidenceConflicts   []EvidenceConflict   `json:"evidence_conflicts,omitempty"`
+	References          []Reference          `json:"references,omitempty"`
+	Messages            []Message            `json:"messages,omitempty"`
+	DelegationAdoptions []DelegationAdoption `json:"delegation_adoptions,omitempty"`
+	Usage               Usage                `json:"usage"`
+	Error               *RunError            `json:"error,omitempty"`
 }
 
 // Runtime executes one already-compiled request against a pinned definition.

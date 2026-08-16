@@ -141,6 +141,7 @@ type TimeRange struct {
 }
 
 type timeRangeKey struct{}
+type invocationIDKey struct{}
 
 // WithTimeRange pins one resolved interval to a tool execution context.
 func WithTimeRange(ctx context.Context, value TimeRange) context.Context {
@@ -151,6 +152,17 @@ func WithTimeRange(ctx context.Context, value TimeRange) context.Context {
 func TimeRangeFromContext(ctx context.Context) (TimeRange, bool) {
 	value, ok := ctx.Value(timeRangeKey{}).(TimeRange)
 	return value, ok
+}
+
+// WithInvocationID binds the immutable model tool-call identity to a handler context.
+func WithInvocationID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, invocationIDKey{}, strings.TrimSpace(id))
+}
+
+// InvocationIDFromContext returns the current model tool-call identity.
+func InvocationIDFromContext(ctx context.Context) (string, bool) {
+	value, ok := ctx.Value(invocationIDKey{}).(string)
+	return value, ok && value != ""
 }
 
 // Reference identifies evidence returned by a tool.
@@ -194,9 +206,17 @@ type EvidenceUnit struct {
 	TimeRange     string           `json:"time_range,omitempty"`
 }
 
-// AnswerContract declares opaque values that a final answer must copy exactly.
+// DelegationAdoptionContract declares the reports that a final answer may
+// explicitly record as adopted for one delegation.
+type DelegationAdoptionContract struct {
+	DelegationID string   `json:"delegation_id"`
+	ReportIDs    []string `json:"report_ids,omitempty"`
+}
+
+// AnswerContract declares exact final-answer requirements owned by tools.
 type AnswerContract struct {
-	RequiredLiterals []string `json:"required_literals,omitempty"`
+	RequiredLiterals []string                     `json:"required_literals,omitempty"`
+	Delegations      []DelegationAdoptionContract `json:"delegations,omitempty"`
 }
 
 // Result is the bounded content passed back to the caller.

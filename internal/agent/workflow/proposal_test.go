@@ -337,6 +337,7 @@ func TestProposalCompilerRequiresRetrySafeWriteCapability(t *testing.T) {
 	}] = writeAgent
 	writeCapability := agentapi.Capability{
 		ID: "change.write", Version: 1, Purpose: "Write one artifact.",
+		Role:         agentapi.RoleInvestigator,
 		InputFacets:  []string{"implementation"},
 		InputSchema:  writeAgent.InputSchema,
 		OutputSchema: writeAgent.OutputSchema,
@@ -442,6 +443,7 @@ func proposalTestCompiler(
 		proposalCodeCapability(),
 		{
 			ID: "knowledge.docs.verify", Version: 1,
+			Role:            agentapi.RoleInvestigator,
 			Purpose:         "Verify documentation.",
 			InputFacets:     []string{"documentation"},
 			InputSchema:     agentapi.SchemaRef{ID: "review.subject", Version: 1},
@@ -455,6 +457,7 @@ func proposalTestCompiler(
 		},
 		{
 			ID: "evidence.synthesize", Version: 1,
+			Role:            agentapi.RoleSynthesizer,
 			Purpose:         "Synthesize evidence.",
 			InputSchema:     agentapi.SchemaRef{ID: "review.report.list", Version: 1},
 			OutputSchema:    agentapi.SchemaRef{ID: "review.report", Version: 1},
@@ -478,6 +481,7 @@ func proposalTestCompiler(
 func proposalCodeCapability() agentapi.Capability {
 	return agentapi.Capability{
 		ID: "knowledge.code.inspect", Version: 1,
+		Role:            agentapi.RoleInvestigator,
 		Purpose:         "Inspect code.",
 		InputFacets:     []string{"implementation"},
 		InputSchema:     agentapi.SchemaRef{ID: "review.subject", Version: 1},

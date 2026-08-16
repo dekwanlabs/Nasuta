@@ -27,6 +27,16 @@ func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution,
 	if definition.Budget.Timeout <= runtime.settings.answerReserve {
 		return preparedExecution{}, fmt.Errorf("definition timeout must exceed the answer reserve")
 	}
+	limits, err := prepareRunLimits(
+		definition,
+		request.Policy,
+		request.Limits,
+		runtime.settings.answerReserve,
+		time.Now().UTC(),
+	)
+	if err != nil {
+		return preparedExecution{}, err
+	}
 	if err := validateMessages(request.Messages); err != nil {
 		return preparedExecution{}, err
 	}
@@ -50,14 +60,56 @@ func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution,
 			InputSchemaVersion:  definition.InputSchema.Version,
 			OutputSchemaVersion: definition.OutputSchema.Version,
 			PromptHash:          hashString(definition.Prompt.System), ContextHash: contextHash,
-			Budget: definition.Budget, Permissions: clonePermissions(request.Permissions),
-			Actor: request.Actor, Correlation: request.Correlation, CreatedAt: time.Now().UTC(),
+			Budget: definition.Budget, Limits: limits, Delegation: request.Delegation,
+			Permissions: clonePermissions(request.Permissions),
+			Actor:       request.Actor, Correlation: request.Correlation, CreatedAt: time.Now().UTC(),
 		},
 		modelParameters: modelParameters,
 		toolPolicy:      tools.policy,
 		toolSnapshot:    tools.snapshot,
 		offeredTools:    tools.offeredIDs,
 		pruneApplied:    tools.pruneApplied,
+	}, nil
+}
+
+func prepareRunLimits(
+	definition agentapi.Definition,
+	policy agentapi.RunPolicy,
+	requested agentapi.RunLimits,
+	answerReserve time.Duration,
+	now time.Time,
+) (agentapi.RunLimits, error) {
+	if requested.MaxSteps < 0 || requested.MaxToolCalls < 0 ||
+		requested.MaxTotalTokens < 0 || requested.MaxCostMicros < 0 {
+		return agentapi.RunLimits{}, fmt.Errorf("run limits cannot be negative")
+	}
+	maxDeadline := now.Add(definition.Budget.Timeout)
+	deadline := requested.Deadline
+	if deadline.IsZero() {
+		deadline = maxDeadline
+	} else if deadline.After(maxDeadline) {
+		return agentapi.RunLimits{}, fmt.Errorf("run deadline exceeds the definition timeout")
+	}
+	if !deadline.After(now.Add(answerReserve)) {
+		return agentapi.RunLimits{}, fmt.Errorf("run deadline must exceed the answer reserve")
+	}
+	maxSteps := requested.MaxSteps
+	if maxSteps == 0 {
+		maxSteps = definition.Budget.MaxSteps
+	} else if maxSteps > definition.Budget.MaxSteps {
+		return agentapi.RunLimits{}, fmt.Errorf("run max_steps exceeds the definition budget")
+	}
+	maxToolCalls := requested.MaxToolCalls
+	if policy.MaxToolCalls > 0 &&
+		(maxToolCalls == 0 || policy.MaxToolCalls < maxToolCalls) {
+		maxToolCalls = policy.MaxToolCalls
+	}
+	return agentapi.RunLimits{
+		Deadline:       deadline,
+		MaxSteps:       maxSteps,
+		MaxToolCalls:   maxToolCalls,
+		MaxTotalTokens: requested.MaxTotalTokens,
+		MaxCostMicros:  requested.MaxCostMicros,
 	}, nil
 }
 
@@ -75,6 +127,9 @@ func (runtime *Runtime) resolveExecution(
 	}
 	if len(request.DefinitionHash) != sha256.Size*2 || !validHex(request.DefinitionHash) {
 		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition_hash must be a SHA-256 hex digest")
+	}
+	if err := validateDelegationSnapshot(request.Delegation); err != nil {
+		return agentapi.Definition{}, llm.ModelParameters{}, err
 	}
 	definition, err := runtime.definitions.Resolve(request.Agent)
 	if err != nil {
@@ -107,6 +162,35 @@ func (runtime *Runtime) resolveExecution(
 		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition model parameters: %w", err)
 	}
 	return definition, modelParameters, nil
+}
+
+func validateDelegationSnapshot(value agentapi.RunDelegation) error {
+	empty := value.DelegationID == "" &&
+		value.Depth == 0 &&
+		value.Capability.ID == "" &&
+		value.Capability.Version == 0 &&
+		value.CapabilityContentHash == "" &&
+		value.CapabilityRegistryRevision == 0
+	if empty {
+		return nil
+	}
+	if strings.TrimSpace(value.DelegationID) == "" {
+		return fmt.Errorf("delegation_id is required for a delegated run")
+	}
+	if value.Depth <= 0 {
+		return fmt.Errorf("delegation depth must be positive")
+	}
+	if value.Capability.ID == "" || value.Capability.Version <= 0 {
+		return fmt.Errorf("delegation requires an exact capability version")
+	}
+	if len(value.CapabilityContentHash) != sha256.Size*2 ||
+		!validHex(value.CapabilityContentHash) {
+		return fmt.Errorf("capability_content_hash must be a SHA-256 hex digest")
+	}
+	if value.CapabilityRegistryRevision == 0 {
+		return fmt.Errorf("capability registry revision is required")
+	}
+	return nil
 }
 
 func preparePermissions(

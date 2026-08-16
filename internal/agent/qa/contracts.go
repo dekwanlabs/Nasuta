@@ -31,7 +31,13 @@ type Deps struct {
 	ScenarioLifecycle ScenarioLifecycle
 	Coordinator       *Coordinator
 	ExecutionEvents   ExecutionEventEmitter
+	WorkflowEscalator agentapi.WorkflowEscalator
+	Capabilities      WorkflowCapabilityResolver
 	WriteAvailable    bool
+}
+
+type WorkflowCapabilityResolver interface {
+	Resolve(agentapi.CapabilityRef) (agentapi.Capability, error)
 }
 
 type SelectionResolver interface {
@@ -43,7 +49,7 @@ type SelectionResolver interface {
 }
 
 type contextRetriever interface {
-	RetrievePlan(context.Context, string, retrieval.QueryTerms, domain.EvidencePlan, domain.RetrievalIntent) (*retrieval.RetrievedContext, error)
+	RetrievePlan(context.Context, string, retrieval.QueryTerms, domain.EvidencePlan, domain.QueryPlan) (*retrieval.RetrievedContext, error)
 	ContextBudget() int
 }
 

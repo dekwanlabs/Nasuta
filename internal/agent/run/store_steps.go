@@ -22,6 +22,10 @@ func (rs *Store) AddStep(st StepRow) error {
 	if err != nil {
 		return fmt.Errorf("marshal tool result answer contract: %w", err)
 	}
+	adoptionsJSON, err := json.Marshal(st.DelegationAdoptions)
+	if err != nil {
+		return fmt.Errorf("marshal delegation adoptions: %w", err)
+	}
 	tx, err := rs.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin agent step: %w", err)
@@ -43,14 +47,16 @@ func (rs *Store) AddStep(st StepRow) error {
 	_, err = tx.Exec(
 		`INSERT INTO agent_steps(
 			run_id,step_no,kind,trace_id,artifact_id,tool_call_id,tool,args,content,prompt_content,
-			authoritative_sha256,prompt_sha256,content_bytes,coverage_json,answer_contract_json,failed,
+			authoritative_sha256,prompt_sha256,content_bytes,coverage_json,answer_contract_json,
+			delegation_adoptions_json,failed,
 			delivery_error,token_delta,reasoning_tokens,duration_ms,artifact_content,
 			artifact_content_type,created_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		st.RunID, st.StepNo, st.Kind, st.TraceID, st.ArtifactID, st.ToolCallID, st.Tool, st.Args,
 		content, st.PromptContent, st.AuthoritativeSHA256, st.PromptSHA256, st.SizeBytes,
-		coverageJSON, contractJSON, st.Failed, st.DeliveryError, st.TokenDelta, st.ReasoningTokens,
-		st.DurationMs, artifactContent, artifactContentType, store.DatabaseTime(st.CreatedAt))
+		coverageJSON, contractJSON, adoptionsJSON, st.Failed, st.DeliveryError, st.TokenDelta,
+		st.ReasoningTokens, st.DurationMs, artifactContent, artifactContentType,
+		store.DatabaseTime(st.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("persist agent step %d: %w", st.StepNo, err)
 	}

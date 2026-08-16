@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -77,6 +78,32 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 			payload: `{"question":"Where is checkout implemented?"}`,
 		},
 		{
+			name: "narrow delegation task",
+			payload: `{
+				"capability":"knowledge.code.inspect",
+				"objective":"Confirm the reachable failure path",
+				"parent_question_summary":"Why is checkout failing?",
+				"focus_facets":["core_flow","data_and_state"],
+				"evidence_refs":["ev-code-1"],
+				"delegation_id":"del-1",
+				"parent_run_id":"run-parent",
+				"task_index":0
+			}`,
+			valid: true,
+		},
+		{
+			name: "incomplete delegation task",
+			payload: `{
+				"capability":"knowledge.code.inspect",
+				"objective":"Confirm the reachable failure path",
+				"parent_question_summary":"Why is checkout failing?",
+				"focus_facets":[],
+				"evidence_refs":[],
+				"delegation_id":"del-1",
+				"parent_run_id":"run-parent"
+			}`,
+		},
+		{
 			name: "no structured evidence goals",
 			payload: `{
 				"task_id":"qa_1",
@@ -118,6 +145,115 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 			}
 			if !test.valid && err == nil {
 				t.Fatal("invalid task contract accepted")
+			}
+		})
+	}
+}
+
+func TestDelegationReportSchema(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	ref := agentapi.SchemaRef{ID: "delegation.report", Version: 1}
+	tests := []struct {
+		name    string
+		payload string
+		valid   bool
+	}{
+		{
+			name: "complete report",
+			payload: `{
+				"run_id":"run_child_1",
+				"report_id":"report_1",
+				"capability":"knowledge.code.inspect",
+				"status":"completed",
+				"completeness":"complete",
+				"summary":"A reachable nil path exists.",
+				"findings":[{
+					"id":"claim_1",
+					"statement":"UpdateStatus dereferences a nil order.",
+					"structured_claim":{
+						"schema":"knowledge.code.assertion.v1",
+						"subject":"symbol:UpdateStatus",
+						"predicate":"reachable_null_dereference",
+						"value":true,
+						"scope":{"revision":"commit_abc"}
+					},
+					"confidence":"high",
+					"citations":["ev_1"],
+					"facets":["core_flow"],
+					"critical":true
+				}],
+				"conflicts":[],
+				"uncertainties":[],
+				"usage":{
+					"tool_calls":2,
+					"input_tokens":300,
+					"output_tokens":100,
+					"reasoning_tokens":20,
+					"total_tokens":420,
+					"cost_micros":7
+				}
+			}`,
+			valid: true,
+		},
+		{
+			name: "failed report",
+			payload: `{
+				"capability":"knowledge.docs.verify",
+				"status":"failed",
+				"completeness":"partial",
+				"usage":{"tool_calls":0,"input_tokens":0,"output_tokens":0,"total_tokens":0},
+				"error":{"code":"child_execution_failed","message":"provider failed","retryable":false}
+			}`,
+			valid: true,
+		},
+		{
+			name: "completed partial",
+			payload: `{
+				"capability":"knowledge.code.inspect",
+				"status":"completed",
+				"completeness":"partial",
+				"usage":{"tool_calls":0,"input_tokens":0,"output_tokens":0,"total_tokens":0}
+			}`,
+		},
+		{
+			name: "finding without citation",
+			payload: `{
+				"capability":"knowledge.code.inspect",
+				"status":"partial",
+				"completeness":"partial",
+				"findings":[{
+					"id":"claim_1",
+					"statement":"Unsupported claim.",
+					"confidence":"medium",
+					"citations":[]
+				}],
+				"usage":{"tool_calls":0,"input_tokens":0,"output_tokens":0,"total_tokens":0}
+			}`,
+		},
+		{
+			name: "oversized capability",
+			payload: `{
+				"capability":"` + strings.Repeat(
+				"a",
+				agentapi.MaxCapabilityIDBytes+1,
+			) + `",
+				"status":"failed",
+				"completeness":"partial",
+				"usage":{"tool_calls":0,"input_tokens":0,"output_tokens":0,"total_tokens":0}
+			}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := registry.Validate(ref, json.RawMessage(test.payload))
+			if test.valid && err != nil {
+				t.Fatalf("valid delegation report rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid delegation report accepted")
 			}
 		})
 	}

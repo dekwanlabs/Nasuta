@@ -20,7 +20,7 @@ const (
 	AgentQAWeb                    ID = "agent.qa.web"
 	AgentQAUserVisibleAnswer      ID = "agent.qa.user_visible_answer"
 	AgentQADefaultIdentity        ID = "agent.qa.default_identity"
-	AgentQAResponseMode           ID = "agent.qa.response_mode"
+	AgentQAQueryKind              ID = "agent.qa.query_kind"
 	AgentQAForceConclusion        ID = "agent.qa.force_conclusion"
 	AgentQAForceConclusionNoThink ID = "agent.qa.force_conclusion_no_think"
 	AgentQAProtocolRepair         ID = "agent.qa.protocol_repair"
@@ -43,6 +43,7 @@ const (
 	AgentCatalogFallbackQA          ID = "agent.catalog.fallback_qa"
 	AgentCatalogInvestigator        ID = "agent.catalog.investigator"
 	AgentCatalogInvestigationReport ID = "agent.catalog.investigation_report"
+	AgentCatalogDelegationVerifier  ID = "agent.catalog.delegation_verifier"
 	AgentCatalogSynthesizer         ID = "agent.catalog.synthesizer"
 	AgentCatalogReviewer            ID = "agent.catalog.reviewer"
 	AgentCatalogAdjudicator         ID = "agent.catalog.adjudicator"
@@ -107,7 +108,7 @@ var idFiles = map[ID]string{
 	AgentQAWeb:                             "agent/qa/web.txt",
 	AgentQAUserVisibleAnswer:               "agent/qa/user_visible_answer.txt",
 	AgentQADefaultIdentity:                 "agent/qa/default_identity.txt",
-	AgentQAResponseMode:                    "agent/qa/response_mode.txt",
+	AgentQAQueryKind:                       "agent/qa/query_kind.txt",
 	AgentQAForceConclusion:                 "agent/qa/force_conclusion.txt",
 	AgentQAForceConclusionNoThink:          "agent/qa/force_conclusion_no_think.txt",
 	AgentQAProtocolRepair:                  "agent/qa/protocol_repair.txt",
@@ -129,6 +130,7 @@ var idFiles = map[ID]string{
 	AgentCatalogFallbackQA:                 "agent/catalog/fallback_qa.txt",
 	AgentCatalogInvestigator:               "agent/catalog/investigator.txt",
 	AgentCatalogInvestigationReport:        "agent/catalog/investigation_report.txt",
+	AgentCatalogDelegationVerifier:         "agent/catalog/delegation_verifier.txt",
 	AgentCatalogSynthesizer:                "agent/catalog/synthesizer.txt",
 	AgentCatalogReviewer:                   "agent/catalog/reviewer.txt",
 	AgentCatalogAdjudicator:                "agent/catalog/adjudicator.txt",

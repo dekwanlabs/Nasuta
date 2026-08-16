@@ -5,9 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 // SideEffectClass declares whether one capability can mutate domain state.
@@ -18,15 +21,29 @@ const (
 	SideEffectWrite SideEffectClass = "write"
 )
 
+// CapabilityRole is a server-owned policy classification.
+type CapabilityRole string
+
+const (
+	RoleInvestigator CapabilityRole = "investigator"
+	RoleVerifier     CapabilityRole = "verifier"
+	RoleSynthesizer  CapabilityRole = "synthesizer"
+
+	// MaxCapabilityIDBytes keeps capability identity bounded wherever it is
+	// projected into delegated child reports and durable artifacts.
+	MaxCapabilityIDBytes = 128
+)
+
 // Capability binds one planner-visible capability to a pinned Agent Definition.
 type Capability struct {
-	ID           string    `json:"id"`
-	Version      int64     `json:"version"`
-	Purpose      string    `json:"purpose"`
-	InputFacets  []string  `json:"input_facets,omitempty"`
-	InputSchema  SchemaRef `json:"input_schema"`
-	OutputSchema SchemaRef `json:"output_schema"`
-	ToolIDs      []string  `json:"tool_ids,omitempty"`
+	ID           string         `json:"id"`
+	Version      int64          `json:"version"`
+	Role         CapabilityRole `json:"role"`
+	Purpose      string         `json:"purpose"`
+	InputFacets  []string       `json:"input_facets,omitempty"`
+	InputSchema  SchemaRef      `json:"input_schema"`
+	OutputSchema SchemaRef      `json:"output_schema"`
+	ToolIDs      []string       `json:"tool_ids,omitempty"`
 	// PermissionScope is an upper bound further narrowed by actor and scenario policy.
 	PermissionScope []string        `json:"permission_scope,omitempty"`
 	Freshness       FreshnessPolicy `json:"freshness"`
@@ -100,6 +117,7 @@ func (registry *CapabilityRegistry) Publish(capabilities []Capability) error {
 	for _, capability := range capabilities {
 		prepared, err := registry.prepare(capability)
 		if err != nil {
+			log.Errorf("Failed to prepare capability %s: %v", capability.ID, err)
 			return err
 		}
 		key := capabilityKey{id: prepared.ID, version: prepared.Version}
@@ -176,17 +194,58 @@ func (registry *CapabilityRegistry) Revision() uint64 {
 	return registry.state.Load().revision
 }
 
+// DelegatableInvestigators returns the latest enabled, read-only investigator
+// versions in canonical capability-ID order.
+func (registry *CapabilityRegistry) DelegatableInvestigators() []Capability {
+	if registry == nil || registry.state.Load() == nil {
+		return nil
+	}
+	current := registry.state.Load()
+	ids := make([]string, 0, len(current.latest))
+	for id := range current.latest {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]Capability, 0, len(ids))
+	for _, id := range ids {
+		version := current.latest[id]
+		capability, ok := current.capabilities[capabilityKey{id: id, version: version}]
+		if !ok || !capability.Enabled || capability.Role != RoleInvestigator ||
+			capability.SideEffects != SideEffectNone {
+			continue
+		}
+		out = append(out, cloneCapability(capability))
+	}
+	return out
+}
+
 func (registry *CapabilityRegistry) prepare(capability Capability) (Capability, error) {
 	prepared := cloneCapability(capability)
 	prepared.ID = strings.TrimSpace(prepared.ID)
 	if prepared.ID != capability.ID || !canonicalID.MatchString(prepared.ID) {
 		return Capability{}, fmt.Errorf("capability id %q is not canonical", capability.ID)
 	}
+	if len(prepared.ID) > MaxCapabilityIDBytes {
+		return Capability{}, fmt.Errorf(
+			"capability id %q exceeds %d bytes",
+			prepared.ID,
+			MaxCapabilityIDBytes,
+		)
+	}
 	if prepared.Version <= 0 {
 		return Capability{}, fmt.Errorf("capability %q version must be positive", prepared.ID)
 	}
 	if strings.TrimSpace(prepared.Purpose) == "" {
 		return Capability{}, fmt.Errorf("capability %q purpose is required", prepared.ID)
+	}
+	switch prepared.Role {
+	case RoleInvestigator, RoleVerifier, RoleSynthesizer:
+	default:
+		return Capability{}, fmt.Errorf(
+			"capability %q role %q is invalid",
+			prepared.ID,
+			prepared.Role,
+		)
 	}
 	if err := validateSchemaRef("capability input", prepared.InputSchema); err != nil {
 		return Capability{}, fmt.Errorf("capability %q: %w", prepared.ID, err)

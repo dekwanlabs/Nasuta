@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -31,9 +32,11 @@ func (rs *Store) ListPage(userID int64, sessionID string, status Status, page, p
 	}
 
 	q := `SELECT id,run_kind,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
-		input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
+		input_schema_version,output_schema_version,parent_run_id,
+		capability_id,capability_version,capability_content_hash,delegation_id,delegation_depth,
+		run_limits_json,capability_registry_revision,workflow_run_id,workflow_node_id,
 		question,status,error_code,mode,max_steps,step_count,token_used,
-		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
+		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,cost_micros,llm_call_count,
 		peak_input_tokens,peak_reserved_tokens,evidence_status,forced_conclusion,evidence_result_count,
 		tool_call_count,tool_failure_count,partial_result_count,omitted_evidence_count,started_at,ended_at FROM agent_runs`
 	countQ := `SELECT COUNT(*) FROM agent_runs`
@@ -112,6 +115,49 @@ func (rs *Store) GetQAParent(id string) (QAParentRecord, error) {
 	return rs.getQAParent(id, nil)
 }
 
+// GetWorkflowEscalationParent loads one narrow, server-owned parent snapshot.
+func (rs *Store) GetWorkflowEscalationParent(
+	ctx context.Context,
+	id string,
+) (WorkflowEscalationParentRecord, error) {
+	var (
+		record    WorkflowEscalationParentRecord
+		limitsRaw []byte
+	)
+	err := rs.db.QueryRowContext(
+		ctx,
+		`SELECT id,run_kind,status,user_id,session_id,question,parent_run_id,
+			workflow_run_id,run_limits_json,total_tokens,cost_micros
+		 FROM agent_runs WHERE id=? AND run_kind=?`,
+		id,
+		KindQAParent,
+	).Scan(
+		&record.ID,
+		&record.RunKind,
+		&record.Status,
+		&record.UserID,
+		&record.SessionID,
+		&record.Question,
+		&record.ParentRunID,
+		&record.WorkflowRunID,
+		&limitsRaw,
+		&record.TotalTokens,
+		&record.CostMicros,
+	)
+	if err != nil {
+		return WorkflowEscalationParentRecord{}, err
+	}
+	if len(limitsRaw) > 0 {
+		if err := json.Unmarshal(limitsRaw, &record.RunLimits); err != nil {
+			return WorkflowEscalationParentRecord{}, fmt.Errorf(
+				"decode workflow escalation parent limits: %w",
+				err,
+			)
+		}
+	}
+	return record, nil
+}
+
 // GetParentForUser enforces ownership at the parent read boundary.
 func (rs *Store) GetParentForUser(id string, userID int64) (QAParentRecord, error) {
 	return rs.getQAParent(id, &userID)
@@ -185,9 +231,11 @@ func (rs *Store) GetForUser(id string, userID int64) (*Detail, error) {
 
 func (rs *Store) get(id string, userID *int64) (*Detail, error) {
 	query := `SELECT id,run_kind,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
-		input_schema_version,output_schema_version,parent_run_id,workflow_run_id,workflow_node_id,
+		input_schema_version,output_schema_version,parent_run_id,
+		capability_id,capability_version,capability_content_hash,delegation_id,delegation_depth,
+		run_limits_json,capability_registry_revision,workflow_run_id,workflow_node_id,
 		question,status,error_code,mode,max_steps,step_count,token_used,
-		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,llm_call_count,
+		input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,cost_micros,llm_call_count,
 		peak_input_tokens,peak_reserved_tokens,evidence_status,forced_conclusion,evidence_result_count,
 		tool_call_count,tool_failure_count,partial_result_count,omitted_evidence_count,started_at,ended_at
 		FROM agent_runs WHERE id=?`
@@ -215,7 +263,8 @@ func (rs *Store) get(id string, userID *int64) (*Detail, error) {
 	rows, err := rs.db.Query(
 		`SELECT s.id,s.run_id,s.step_no,s.kind,s.trace_id,s.artifact_id,s.tool_call_id,s.tool,s.args,
 			s.content,s.prompt_content,s.authoritative_sha256,s.prompt_sha256,s.content_bytes,
-			s.coverage_json,s.answer_contract_json,s.failed,s.delivery_error,s.token_delta,
+			s.coverage_json,s.answer_contract_json,s.delegation_adoptions_json,s.failed,
+			s.delivery_error,s.token_delta,
 			s.reasoning_tokens,s.duration_ms,s.created_at,
 			CASE WHEN s.artifact_id<>'' THEN CAST(SUBSTRING(s.artifact_content,1,4096) AS CHAR CHARACTER SET utf8mb4) ELSE NULL END
 		 FROM agent_steps s
@@ -228,13 +277,14 @@ func (rs *Store) get(id string, userID *int64) (*Detail, error) {
 	for rows.Next() {
 		var st StepRow
 		var traceID, artifactID, toolCallID, args, content, promptContent sql.NullString
-		var authoritativeSHA, promptSHA, coverageRaw, contractRaw, deliveryError, artifactPreview sql.NullString
+		var authoritativeSHA, promptSHA, coverageRaw, contractRaw, adoptionsRaw sql.NullString
+		var deliveryError, artifactPreview sql.NullString
 		var createdAt sql.NullTime
 		if err := rows.Scan(
 			&st.ID, &st.RunID, &st.StepNo, &st.Kind, &traceID, &artifactID, &toolCallID, &st.Tool, &args,
 			&content, &promptContent, &authoritativeSHA, &promptSHA, &st.SizeBytes, &coverageRaw,
-			&contractRaw, &st.Failed, &deliveryError, &st.TokenDelta, &st.ReasoningTokens,
-			&st.DurationMs, &createdAt, &artifactPreview,
+			&contractRaw, &adoptionsRaw, &st.Failed, &deliveryError, &st.TokenDelta,
+			&st.ReasoningTokens, &st.DurationMs, &createdAt, &artifactPreview,
 		); err != nil {
 			return nil, err
 		}
@@ -255,6 +305,18 @@ func (rs *Store) get(id string, userID *int64) (*Detail, error) {
 		if contractRaw.Valid && contractRaw.String != "" {
 			if err := json.Unmarshal([]byte(contractRaw.String), &st.AnswerContract); err != nil {
 				return nil, fmt.Errorf("decode step %d answer contract: %w", st.StepNo, err)
+			}
+		}
+		if adoptionsRaw.Valid && adoptionsRaw.String != "" {
+			if err := json.Unmarshal(
+				[]byte(adoptionsRaw.String),
+				&st.DelegationAdoptions,
+			); err != nil {
+				return nil, fmt.Errorf(
+					"decode step %d delegation adoptions: %w",
+					st.StepNo,
+					err,
+				)
 			}
 		}
 		previewSource := st.Content
@@ -312,15 +374,17 @@ func (rs *Store) EvidenceByIDs(userID int64, sessionID string, runIDs []string) 
 
 func scanRecord(row rowScanner) (Record, error) {
 	var record Record
-	var selectionRaw []byte
+	var selectionRaw, limitsRaw []byte
 	var startedAt, endedAt sql.NullTime
 	if err := row.Scan(&record.ID, &record.RunKind, &record.UserID, &record.SessionID,
 		&record.AgentID, &record.DefinitionVersion, &record.DefinitionHash, &selectionRaw, &record.ToolSnapshotID,
 		&record.InputSchemaVersion, &record.OutputSchemaVersion, &record.ParentRunID,
+		&record.CapabilityID, &record.CapabilityVersion, &record.CapabilityHash,
+		&record.DelegationID, &record.DelegationDepth, &limitsRaw, &record.CapabilityRevision,
 		&record.WorkflowRunID, &record.WorkflowNodeID, &record.Question, &record.Status,
 		&record.ErrorCode, &record.Mode, &record.MaxSteps, &record.StepCount, &record.TokenUsed,
 		&record.InputTokens, &record.CachedInputTokens, &record.OutputTokens,
-		&record.ReasoningTokens, &record.TotalTokens, &record.LLMCallCount,
+		&record.ReasoningTokens, &record.TotalTokens, &record.CostMicros, &record.LLMCallCount,
 		&record.PeakInputTokens, &record.PeakReservedTokens, &record.EvidenceStatus,
 		&record.ForcedConclusion, &record.EvidenceResultCount, &record.ToolCallCount,
 		&record.ToolFailureCount, &record.PartialResultCount, &record.OmittedEvidenceCount,
@@ -330,6 +394,11 @@ func scanRecord(row rowScanner) (Record, error) {
 	if len(selectionRaw) > 0 {
 		if err := json.Unmarshal(selectionRaw, &record.Selection); err != nil {
 			return record, fmt.Errorf("decode run %q selection: %w", record.ID, err)
+		}
+	}
+	if len(limitsRaw) > 0 {
+		if err := json.Unmarshal(limitsRaw, &record.RunLimits); err != nil {
+			return record, fmt.Errorf("decode run %q limits: %w", record.ID, err)
 		}
 	}
 	record.StartedAt = store.FormatDatabaseTime(startedAt)

@@ -10,22 +10,35 @@ import (
 type EventType string
 
 const (
-	EventAnswerDelta       EventType = "answer.delta"
-	EventToolStarted       EventType = "tool.started"
-	EventToolFinished      EventType = "tool.finished"
-	EventStatus            EventType = "status"
-	EventReasoningDelta    EventType = "reasoning.delta"
-	EventTrace             EventType = "trace"
-	EventLLMCall           EventType = "llm.call"
-	EventSessionStatus     EventType = "session.status"
-	EventExecutionRouted   EventType = "execution.routed"
-	EventExecutionDegraded EventType = "execution.degraded"
-	EventWorkflowStarted   EventType = "workflow.started"
-	EventAgentStarted      EventType = "agent.started"
-	EventAgentCompleted    EventType = "agent.completed"
-	EventEvidenceJoined    EventType = "evidence.joined"
-	EventContextUsage      EventType = "context.usage"
-	EventRunFinished       EventType = "run.finished"
+	EventAnswerDelta                    EventType = "answer.delta"
+	EventToolStarted                    EventType = "tool.started"
+	EventToolFinished                   EventType = "tool.finished"
+	EventStatus                         EventType = "status"
+	EventReasoningDelta                 EventType = "reasoning.delta"
+	EventTrace                          EventType = "trace"
+	EventLLMCall                        EventType = "llm.call"
+	EventSessionStatus                  EventType = "session.status"
+	EventExecutionRouted                EventType = "execution.routed"
+	EventExecutionDegraded              EventType = "execution.degraded"
+	EventWorkflowStarted                EventType = "workflow.started"
+	EventAgentStarted                   EventType = "agent.started"
+	EventAgentCompleted                 EventType = "agent.completed"
+	EventEvidenceJoined                 EventType = "evidence.joined"
+	EventContextUsage                   EventType = "context.usage"
+	EventDelegationCreated              EventType = "delegation.created"
+	EventDelegationStarted              EventType = "delegation.started"
+	EventDelegationDone                 EventType = "delegation.completed"
+	EventDelegationFailed               EventType = "delegation.failed"
+	EventDelegationCancelled            EventType = "delegation.cancelled"
+	EventDelegationRejected             EventType = "delegation.rejected"
+	EventDelegationValidated            EventType = "delegation.validated"
+	EventDelegationShadow               EventType = "delegation.shadow_evaluated"
+	EventDelegationVerificationStarted  EventType = "delegation.verification_started"
+	EventDelegationVerificationDone     EventType = "delegation.verification_completed"
+	EventDelegationVerificationFailed   EventType = "delegation.verification_failed"
+	EventDelegationVerificationRejected EventType = "delegation.verification_rejected"
+	EventDelegationAdoptionEvaluated    EventType = "delegation.adoption_evaluated"
+	EventRunFinished                    EventType = "run.finished"
 )
 
 type TextEvent struct {
@@ -81,14 +94,37 @@ type ContextUsageEvent struct {
 
 // ExecutionEvent is the stable product projection for routed QA work.
 type ExecutionEvent struct {
-	RunID         string  `json:"run_id"`
-	WorkflowRunID string  `json:"workflow_run_id,omitempty"`
-	NodeID        string  `json:"node_id,omitempty"`
-	Strategy      string  `json:"strategy,omitempty"`
-	Status        string  `json:"status"`
-	Reason        string  `json:"reason,omitempty"`
-	Complexity    float64 `json:"complexity,omitempty"`
-	Confidence    float64 `json:"confidence,omitempty"`
+	RunID                   string         `json:"run_id"`
+	ParentRunID             string         `json:"parent_run_id,omitempty"`
+	ChildRunID              string         `json:"child_run_id,omitempty"`
+	WorkflowRunID           string         `json:"workflow_run_id,omitempty"`
+	NodeID                  string         `json:"node_id,omitempty"`
+	DelegationID            string         `json:"delegation_id,omitempty"`
+	Capability              string         `json:"capability,omitempty"`
+	ObjectiveSummary        string         `json:"objective_summary,omitempty"`
+	Strategy                string         `json:"strategy,omitempty"`
+	Status                  string         `json:"status"`
+	Reason                  string         `json:"reason,omitempty"`
+	ErrorCode               string         `json:"error_code,omitempty"`
+	ReportID                string         `json:"report_id,omitempty"`
+	ReportIDs               []string       `json:"report_ids,omitempty"`
+	AdoptionStatus          string         `json:"adoption_status,omitempty"`
+	DurationMS              int64          `json:"duration_ms,omitempty"`
+	Usage                   agentapi.Usage `json:"usage,omitempty"`
+	ToolCalls               int64          `json:"tool_calls,omitempty"`
+	ReportBytes             int            `json:"report_bytes,omitempty"`
+	Completeness            string         `json:"completeness,omitempty"`
+	CitationCoverage        float64        `json:"citation_coverage,omitempty"`
+	StructuredClaimCoverage float64        `json:"structured_claim_coverage,omitempty"`
+	ConflictCount           int            `json:"conflict_count,omitempty"`
+	RequiresVerification    bool           `json:"requires_verification,omitempty"`
+	VerificationReasons     []string       `json:"verification_reasons,omitempty"`
+	VerificationID          string         `json:"verification_id,omitempty"`
+	QueryKind               string         `json:"query_kind,omitempty"`
+	Shadow                  bool           `json:"shadow,omitempty"`
+	ReferenceCount          int            `json:"reference_count,omitempty"`
+	Complexity              float64        `json:"complexity,omitempty"`
+	Confidence              float64        `json:"confidence,omitempty"`
 }
 
 type ExecutionEventEmitter interface {
@@ -103,17 +139,18 @@ type SSEEvent struct {
 
 // Terminal is the sole real-time projection of one persisted Run outcome.
 type Terminal struct {
-	RunID           string               `json:"run_id"`
-	Status          Status               `json:"status"`
-	Answer          string               `json:"answer,omitempty"`
-	ErrorCode       string               `json:"error_code,omitempty"`
-	StepCount       int                  `json:"step_count"`
-	TokenUsed       int                  `json:"token_used"`
-	References      []agentapi.Reference `json:"references,omitempty"`
-	HitCount        int                  `json:"hit_count"`
-	Error           string               `json:"error,omitempty"`
-	Evidence        EvidenceMetrics      `json:"evidence"`
-	SessionMessages []llm.Message        `json:"-"`
+	RunID               string                        `json:"run_id"`
+	Status              Status                        `json:"status"`
+	Answer              string                        `json:"answer,omitempty"`
+	ErrorCode           string                        `json:"error_code,omitempty"`
+	StepCount           int                           `json:"step_count"`
+	TokenUsed           int                           `json:"token_used"`
+	References          []agentapi.Reference          `json:"references,omitempty"`
+	DelegationAdoptions []agentapi.DelegationAdoption `json:"delegation_adoptions,omitempty"`
+	HitCount            int                           `json:"hit_count"`
+	Error               string                        `json:"error,omitempty"`
+	Evidence            EvidenceMetrics               `json:"evidence"`
+	SessionMessages     []llm.Message                 `json:"-"`
 }
 
 // QAParentEvent is the durable counterpart of a Parent Run projection.
@@ -140,8 +177,11 @@ func terminalFromOutcome(runID string, outcome Outcome) Terminal {
 		ErrorCode: outcome.ErrorCode, StepCount: outcome.StepCount,
 		TokenUsed:  outcome.TokenUsed,
 		References: append([]agentapi.Reference(nil), outcome.References...),
-		HitCount:   outcome.HitCount,
-		Evidence:   outcome.Evidence,
+		DelegationAdoptions: cloneDelegationAdoptions(
+			outcome.DelegationAdoptions,
+		),
+		HitCount: outcome.HitCount,
+		Evidence: outcome.Evidence,
 		SessionMessages: append(
 			[]llm.Message(nil),
 			outcome.SessionMessages...,
@@ -160,10 +200,30 @@ func outcomeFromTerminal(terminal Terminal) Outcome {
 		Answer:     terminal.Answer,
 		Evidence:   terminal.Evidence,
 		References: append([]agentapi.Reference(nil), terminal.References...),
-		HitCount:   terminal.HitCount,
+		DelegationAdoptions: cloneDelegationAdoptions(
+			terminal.DelegationAdoptions,
+		),
+		HitCount: terminal.HitCount,
 	}
 	if terminal.Error != "" {
 		outcome.Err = errors.New(terminal.Error)
 	}
 	return outcome
+}
+
+func cloneDelegationAdoptions(
+	adoptions []agentapi.DelegationAdoption,
+) []agentapi.DelegationAdoption {
+	if len(adoptions) == 0 {
+		return nil
+	}
+	cloned := make([]agentapi.DelegationAdoption, len(adoptions))
+	for index, adoption := range adoptions {
+		adoption.AdoptedReportIDs = append(
+			[]string(nil),
+			adoption.AdoptedReportIDs...,
+		)
+		cloned[index] = adoption
+	}
+	return cloned
 }

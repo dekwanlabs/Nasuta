@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -30,13 +31,14 @@ func TestRunStoreAddStepPersistsInlineToolResultAtomically(t *testing.T) {
 	}
 	coverageJSON, _ := json.Marshal(step.Coverage)
 	contractJSON, _ := json.Marshal(step.AnswerContract)
+	adoptionsJSON, _ := json.Marshal(step.DelegationAdoptions)
 
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO agent_steps").
 		WithArgs(
 			step.RunID, step.StepNo, step.Kind, step.TraceID, "", step.ToolCallID, step.Tool, step.Args,
 			step.Content, step.PromptContent, step.AuthoritativeSHA256, step.PromptSHA256, step.SizeBytes,
-			coverageJSON, contractJSON, false, "", 0, 0, step.DurationMs,
+			coverageJSON, contractJSON, adoptionsJSON, false, "", 0, 0, step.DurationMs,
 			nil, nil, sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -70,13 +72,14 @@ func TestRunStoreAddStepPersistsArtifactWithReferenceAtomically(t *testing.T) {
 	}
 	coverageJSON, _ := json.Marshal(step.Coverage)
 	contractJSON, _ := json.Marshal(step.AnswerContract)
+	adoptionsJSON, _ := json.Marshal(step.DelegationAdoptions)
 
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO agent_steps").
 		WithArgs(
 			step.RunID, step.StepNo, step.Kind, step.TraceID, step.ArtifactID, step.ToolCallID, step.Tool, step.Args,
 			nil, step.PromptContent, step.AuthoritativeSHA256, step.PromptSHA256, step.SizeBytes,
-			coverageJSON, contractJSON, true, step.DeliveryError, 0, 0, 0,
+			coverageJSON, contractJSON, adoptionsJSON, true, step.DeliveryError, 0, 0, 0,
 			[]byte(step.Content), "application/json", sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -319,14 +322,19 @@ func TestRunStoreRecoverInterruptedExcludesQAParents(t *testing.T) {
 	}
 	defer db.Close()
 	store := &Store{db: db}
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM agent_delegation_tasks t.*FOR UPDATE").
+		WillReturnRows(interruptedDelegationTaskRows())
 	mock.ExpectExec(
-		"UPDATE agent_runs SET status=\\?,ended_at=\\? WHERE run_kind=\\? AND status IN \\(\\?,\\?\\)",
+		"UPDATE agent_runs SET status=\\?,error_code=\\?,ended_at=\\?.*"+
+			"WHERE run_kind=\\? AND status IN \\(\\?,\\?\\)",
 	).
 		WithArgs(
-			StatusAborted, sqlmock.AnyArg(), KindAgent,
+			StatusAborted, interruptedErrorCode, sqlmock.AnyArg(), KindAgent,
 			StatusRunning, StatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectCommit()
 
 	recovered, err := store.RecoverInterrupted()
 	if err != nil {
@@ -338,6 +346,251 @@ func TestRunStoreRecoverInterruptedExcludesQAParents(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRunStoreRecoverInterruptedSettlesDelegationWithAuthoritativeUsage(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+	task := interruptedDelegationTask{
+		ParentRunID:  "parent-1",
+		DelegationID: "del-1",
+		TaskIndex:    2,
+		ChildRunID:   "child-2",
+		CapabilityID: "knowledge.code.inspect",
+		Usage: agentapi.Usage{
+			InputTokens: 11, OutputTokens: 7, ReasoningTokens: 3,
+			TotalTokens: 21, CostMicros: 250,
+		},
+		ToolCalls: 4,
+	}
+	artifact, err := interruptedDelegationReportArtifact(task)
+	if err != nil {
+		t.Fatalf("interruptedDelegationReportArtifact: %v", err)
+	}
+	var report agentapi.DelegationReport
+	if err := json.Unmarshal(artifact.Content, &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if report.Status != agentapi.DelegationInterrupted ||
+		report.Error == nil ||
+		report.Error.Code != interruptedErrorCode ||
+		report.Usage.TotalTokens != task.Usage.TotalTokens ||
+		report.Usage.ToolCalls != task.ToolCalls ||
+		artifact.ID != delegationReportArtifactID(stableDelegationReportID(task.ChildRunID)) {
+		t.Fatalf("recovery report = %+v, artifact = %+v", report, artifact)
+	}
+	usageRaw, err := json.Marshal(task.Usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM agent_delegation_tasks t.*FOR UPDATE").
+		WillReturnRows(interruptedDelegationTaskRows().AddRow(
+			task.ParentRunID,
+			task.DelegationID,
+			task.TaskIndex,
+			task.ChildRunID,
+			task.CapabilityID,
+			task.Usage.InputTokens,
+			task.Usage.OutputTokens,
+			task.Usage.ReasoningTokens,
+			task.Usage.TotalTokens,
+			task.Usage.CostMicros,
+			task.ToolCalls,
+		))
+	mock.ExpectExec("UPDATE agent_runs SET status=\\?,error_code=\\?,ended_at=\\?").
+		WithArgs(
+			StatusAborted,
+			interruptedErrorCode,
+			sqlmock.AnyArg(),
+			KindAgent,
+			StatusRunning,
+			StatusPaused,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO agent_run_artifacts").
+		WithArgs(
+			artifact.ID,
+			artifact.RunID,
+			artifact.Kind,
+			artifact.Schema.ID,
+			artifact.Schema.Version,
+			artifact.ContentHash,
+			artifact.Content,
+			sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE agent_delegation_tasks").
+		WithArgs(
+			usageRaw,
+			artifact.ID,
+			sqlmock.AnyArg(),
+			task.ParentRunID,
+			task.DelegationID,
+			task.TaskIndex,
+			task.ChildRunID,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	recovered, err := store.RecoverInterrupted()
+	if err != nil {
+		t.Fatalf("RecoverInterrupted: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("recovered = %d, want 1", recovered)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunStoreRecoverInterruptedSettlesMissingChildWithZeroUsage(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+	task := interruptedDelegationTask{
+		ParentRunID:  "parent-1",
+		DelegationID: "del-1",
+		TaskIndex:    0,
+		ChildRunID:   "child-not-created",
+		CapabilityID: "knowledge.code.inspect",
+	}
+	artifact, err := interruptedDelegationReportArtifact(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageRaw, _ := json.Marshal(agentapi.Usage{})
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM agent_delegation_tasks t.*FOR UPDATE").
+		WillReturnRows(interruptedDelegationTaskRows().AddRow(
+			task.ParentRunID,
+			task.DelegationID,
+			task.TaskIndex,
+			task.ChildRunID,
+			task.CapabilityID,
+			int64(0),
+			int64(0),
+			int64(0),
+			int64(0),
+			int64(0),
+			int64(0),
+		))
+	mock.ExpectExec("UPDATE agent_runs SET status=\\?,error_code=\\?,ended_at=\\?").
+		WithArgs(
+			StatusAborted,
+			interruptedErrorCode,
+			sqlmock.AnyArg(),
+			KindAgent,
+			StatusRunning,
+			StatusPaused,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO agent_run_artifacts").
+		WithArgs(
+			artifact.ID,
+			artifact.RunID,
+			artifact.Kind,
+			artifact.Schema.ID,
+			artifact.Schema.Version,
+			artifact.ContentHash,
+			artifact.Content,
+			sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE agent_delegation_tasks").
+		WithArgs(
+			usageRaw,
+			artifact.ID,
+			sqlmock.AnyArg(),
+			task.ParentRunID,
+			task.DelegationID,
+			task.TaskIndex,
+			task.ChildRunID,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	recovered, err := store.RecoverInterrupted()
+	if err != nil {
+		t.Fatalf("RecoverInterrupted: %v", err)
+	}
+	if recovered != 0 {
+		t.Fatalf("recovered = %d, want 0", recovered)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunStoreRecoverInterruptedRollsBackOnArtifactFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM agent_delegation_tasks t.*FOR UPDATE").
+		WillReturnRows(interruptedDelegationTaskRows().AddRow(
+			"parent-1",
+			"del-1",
+			0,
+			"child-0",
+			"knowledge.code.inspect",
+			int64(0),
+			int64(0),
+			int64(0),
+			int64(0),
+			int64(0),
+			int64(0),
+		))
+	mock.ExpectExec("UPDATE agent_runs SET status=\\?,error_code=\\?,ended_at=\\?").
+		WithArgs(
+			StatusAborted,
+			interruptedErrorCode,
+			sqlmock.AnyArg(),
+			KindAgent,
+			StatusRunning,
+			StatusPaused,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO agent_run_artifacts").
+		WillReturnError(errors.New("artifact unavailable"))
+	mock.ExpectRollback()
+
+	if _, err := store.RecoverInterrupted(); err == nil {
+		t.Fatal("RecoverInterrupted succeeded after artifact failure")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func interruptedDelegationTaskRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"parent_run_id",
+		"delegation_id",
+		"task_index",
+		"child_run_id",
+		"capability_id",
+		"input_tokens",
+		"output_tokens",
+		"reasoning_tokens",
+		"total_tokens",
+		"cost_micros",
+		"tool_call_count",
+	})
 }
 
 func TestRunStoreCompleteQAParentCommitsTerminalEventAtomically(t *testing.T) {
@@ -597,19 +850,22 @@ func expectQAParentRunRecord(
 			"id", "run_kind", "user_id", "session_id", "agent_id",
 			"definition_version", "definition_hash", "selection_json", "tool_snapshot_id",
 			"input_schema_version", "output_schema_version", "parent_run_id",
+			"capability_id", "capability_version", "capability_content_hash",
+			"delegation_id", "delegation_depth", "run_limits_json", "capability_registry_revision",
 			"workflow_run_id", "workflow_node_id", "question", "status", "error_code",
 			"mode", "max_steps", "step_count", "token_used", "input_tokens",
 			"cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens",
-			"llm_call_count", "peak_input_tokens", "peak_reserved_tokens",
+			"cost_micros", "llm_call_count", "peak_input_tokens", "peak_reserved_tokens",
 			"evidence_status", "forced_conclusion", "evidence_result_count",
 			"tool_call_count", "tool_failure_count", "partial_result_count",
 			"omitted_evidence_count", "started_at", "ended_at",
 		}).AddRow(
 			runID, KindQAParent, userID, "session-1", "",
 			int64(0), "", `{}`, "", int64(0), int64(0), "",
+			"", int64(0), "", "", 0, `{}`, uint64(0),
 			"workflow-1", "", "question", status, "", "multi_agent",
 			0, 0, 0, int64(0), int64(0), int64(0), int64(0), int64(0),
-			0, 0, 0, EvidenceComplete, false, 1, 0, 0, 0, 0,
+			int64(0), 0, 0, 0, EvidenceComplete, false, 1, 0, 0, 0, 0,
 			createdAt, createdAt,
 		))
 }
@@ -683,35 +939,42 @@ func TestRunStoreGetReturnsFullInlineTraceAndBoundedArtifactPreview(t *testing.T
 		WithArgs("run-1", int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "run_kind", "user_id", "session_id", "agent_id", "definition_version", "definition_hash", "selection_json", "tool_snapshot_id",
-			"input_schema_version", "output_schema_version", "parent_run_id", "workflow_run_id", "workflow_node_id",
+			"input_schema_version", "output_schema_version", "parent_run_id",
+			"capability_id", "capability_version", "capability_content_hash",
+			"delegation_id", "delegation_depth", "run_limits_json", "capability_registry_revision",
+			"workflow_run_id", "workflow_node_id",
 			"question", "status", "error_code", "mode", "max_steps", "step_count", "token_used",
-			"input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens", "llm_call_count",
+			"input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens", "cost_micros", "llm_call_count",
 			"peak_input_tokens", "peak_reserved_tokens", "evidence_status", "forced_conclusion", "evidence_result_count",
 			"tool_call_count", "tool_failure_count", "partial_result_count", "omitted_evidence_count", "started_at", "ended_at",
 		}).AddRow(
 			"run-1", KindAgent, int64(42), "session-1", "qa.answerer", int64(1), strings.Repeat("a", 64),
 			`{"rule_version":2,"reason":"rollout_default"}`, "tools_test",
-			int64(1), int64(1), "", "", "",
+			int64(1), int64(1), "",
+			"knowledge.code.inspect", int64(3), strings.Repeat("b", 64),
+			"del-1", 1, `{"max_steps":2,"max_total_tokens":500}`, uint64(9), "", "",
 			"question", StatusDone, "", "", 2, 2, 10,
-			100, 20, 30, 5, 135, 2, 100, 120, EvidencePartial, false, 1, 2, 1, 1, 3, createdAt, createdAt,
+			100, 20, 30, 5, 135, int64(77), 2, 100, 120, EvidencePartial, false, 1, 2, 1, 1, 3, createdAt, createdAt,
 		))
 	mock.ExpectQuery("FROM agent_steps s").
 		WithArgs("run-1").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "run_id", "step_no", "kind", "trace_id", "artifact_id", "tool_call_id", "tool", "args",
 			"content", "prompt_content", "authoritative_sha256", "prompt_sha256", "content_bytes",
-			"coverage_json", "answer_contract_json", "failed", "delivery_error", "token_delta",
+			"coverage_json", "answer_contract_json", "delegation_adoptions_json", "failed", "delivery_error", "token_delta",
 			"reasoning_tokens", "duration_ms", "created_at", "artifact_preview",
 		}).
 			AddRow(
 				int64(1), "run-1", 1, StepKindToolResult, "trace-inline", "", "call-inline", "lookup", `{}`,
 				`{"sn":"SN-inline"}`, `{"sn":"SN-inline"}`, "same-sha", "same-sha", 18,
-				`{}`, `{"required_literals":["SN-inline"]}`, false, "", 0, 0, 10, createdAt, nil,
+				`{}`, `{"required_literals":["SN-inline"]}`,
+				`[{"delegation_id":"del-1","adopted_report_ids":["report-1"],"status":"adopted"}]`,
+				false, "", 0, 0, 10, createdAt, nil,
 			).
 			AddRow(
 				int64(2), "run-1", 2, StepKindToolResult, "trace-artifact", "artifact-1", "call-artifact", "lookup", `{}`,
 				nil, `{"error":"tool_result_exceeds_context_budget"}`, "authoritative-sha", "prompt-sha", 900000,
-				`{"partial":true,"omitted_items":3}`, `{}`, true, "tool_result_exceeds_context_budget", 0, 0, 20, createdAt, "authoritative artifact preview",
+				`{"partial":true,"omitted_items":3}`, `{}`, nil, true, "tool_result_exceeds_context_budget", 0, 0, 20, createdAt, "authoritative artifact preview",
 			))
 	mock.ExpectQuery("FROM agent_llm_calls WHERE run_id=\\?").
 		WithArgs("run-1", 1000).
@@ -727,6 +990,13 @@ func TestRunStoreGetReturnsFullInlineTraceAndBoundedArtifactPreview(t *testing.T
 	if detail.Selection.RuleVersion != 2 || detail.Selection.Reason != "rollout_default" {
 		t.Fatalf("selection = %+v", detail.Selection)
 	}
+	if detail.CapabilityID != "knowledge.code.inspect" ||
+		detail.CapabilityVersion != 3 ||
+		detail.DelegationID != "del-1" ||
+		detail.RunLimits.MaxTotalTokens != 500 ||
+		detail.CostMicros != 77 {
+		t.Fatalf("delegation snapshot = %+v", detail.Record)
+	}
 	if len(detail.Steps) != 2 {
 		t.Fatalf("steps = %+v", detail.Steps)
 	}
@@ -736,6 +1006,13 @@ func TestRunStoreGetReturnsFullInlineTraceAndBoundedArtifactPreview(t *testing.T
 	}
 	if len(inline.AnswerContract.RequiredLiterals) != 1 || inline.AnswerContract.RequiredLiterals[0] != "SN-inline" {
 		t.Fatalf("inline contract = %+v", inline.AnswerContract)
+	}
+	if len(inline.DelegationAdoptions) != 1 ||
+		inline.DelegationAdoptions[0].DelegationID != "del-1" ||
+		inline.DelegationAdoptions[0].Status != agentapi.DelegationAdopted ||
+		len(inline.DelegationAdoptions[0].AdoptedReportIDs) != 1 ||
+		inline.DelegationAdoptions[0].AdoptedReportIDs[0] != "report-1" {
+		t.Fatalf("inline delegation adoptions = %+v", inline.DelegationAdoptions)
 	}
 	artifact := detail.Steps[1]
 	if artifact.Content != "" || artifact.ArtifactID != "artifact-1" || artifact.ResultPreview != "authoritative artifact preview" {

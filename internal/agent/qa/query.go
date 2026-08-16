@@ -23,38 +23,51 @@ type queryAnalysisInput struct {
 }
 
 type queryAnalysisOutput struct {
-	History         retrieval.HistoryRelation
-	HistoryOrigin   string
-	HistoryUpdate   string
-	TimeRange       tool.TimeRange
-	HasTimeRange    bool
-	TimeError       error
-	ResponseMode    domain.ResponseMode
-	RetrievalIntent domain.RetrievalIntent
-	IntentOrigin    domain.IntentOrigin
+	History       retrieval.HistoryRelation
+	HistoryOrigin string
+	HistoryUpdate string
+	TimeRange     tool.TimeRange
+	HasTimeRange  bool
+	TimeError     error
+	QueryPlan     domain.QueryPlan
 }
 
-var queryAnalysisSpec = runtrace.Spec[queryAnalysisInput, queryAnalysisOutput]{
+type queryAnalysisResult struct {
+	Analysis         queryAnalysisOutput
+	ResolutionOrigin domain.QueryResolutionOrigin
+	MatchedRuleKind  domain.QueryKind
+}
+
+var queryAnalysisSpec = runtrace.Spec[queryAnalysisInput, queryAnalysisResult]{
 	Operation: "agent.query_analysis",
 	Node:      "query_analysis",
 	Input: func(input queryAnalysisInput) map[string]any {
 		return map[string]any{"question": input.Question, "history_candidates": len(input.RecentTurns)}
 	},
-	Output: func(input queryAnalysisInput, output queryAnalysisOutput, _ error) map[string]any {
+	Output: func(input queryAnalysisInput, result queryAnalysisResult, _ error) map[string]any {
+		output := result.Analysis
 		timeFrom, timeTo := "", ""
 		if output.HasTimeRange {
 			timeFrom = output.TimeRange.From.Format(time.RFC3339)
 			timeTo = output.TimeRange.To.Format(time.RFC3339)
 		}
+		required := domain.RequiredFacetsFor(output.QueryPlan.Kind)
+		requiredFacets := make([]string, len(required))
+		for index, facet := range required {
+			requiredFacets[index] = string(facet)
+		}
 		return map[string]any{
 			"clean_question": input.CleanQuestion, "domain_terms": input.Terms.DomainTerms,
-			"identifiers": input.Terms.Identifiers, "response_mode": output.ResponseMode,
-			"time_kind": input.Time.Kind, "time_raw": input.Time.Raw,
+			"identifiers": input.Terms.Identifiers, "query_kind": output.QueryPlan.Kind,
+			"query_entities": output.QueryPlan.Entities, "entity_count": len(output.QueryPlan.Entities),
+			"required_facets": requiredFacets, "resolution_origin": result.ResolutionOrigin,
+			"matched_rule_kind": result.MatchedRuleKind,
+			"time_kind":         input.Time.Kind, "time_raw": input.Time.Raw,
 			"time_from": timeFrom, "time_to": timeTo,
 		}
 	},
-	Status: func(output queryAnalysisOutput, _ error) string {
-		if output.TimeError != nil {
+	Status: func(result queryAnalysisResult, _ error) string {
+		if result.Analysis.TimeError != nil {
 			return "degraded"
 		}
 		return ""
@@ -62,19 +75,24 @@ var queryAnalysisSpec = runtrace.Spec[queryAnalysisInput, queryAnalysisOutput]{
 }
 
 func analyzeQuery(ctx context.Context, input queryAnalysisInput) (queryAnalysisOutput, error) {
-	return runtrace.Invoke(ctx, queryAnalysisSpec, input, func(_ context.Context, input queryAnalysisInput) (queryAnalysisOutput, error) {
+	result, err := runtrace.Invoke(ctx, queryAnalysisSpec, input, func(_ context.Context, input queryAnalysisInput) (queryAnalysisResult, error) {
 		history, origin, update := resolveHistoryRelation(input.Question, input.RecentTurns, input.History, input.HistoryValid)
 		timeRange, hasTimeRange, timeErr := retrieval.ResolveTime(input.Time, input.Anchor)
-		intent := domain.ResolveRetrievalIntent(input.Question, domain.RetrievalIntentSignals{
+		resolution := domain.ResolveQueryPlan(input.Question, domain.QuerySignals{
 			Identifiers: input.Terms.Identifiers,
 			DomainTerms: input.Terms.DomainTerms,
 		})
-		return queryAnalysisOutput{
-			History: history, HistoryOrigin: origin, HistoryUpdate: update,
-			TimeRange: timeRange, HasTimeRange: hasTimeRange, TimeError: timeErr,
-			ResponseMode: intent.ResponseMode, RetrievalIntent: intent.Intent, IntentOrigin: intent.Origin,
+		return queryAnalysisResult{
+			Analysis: queryAnalysisOutput{
+				History: history, HistoryOrigin: origin, HistoryUpdate: update,
+				TimeRange: timeRange, HasTimeRange: hasTimeRange, TimeError: timeErr,
+				QueryPlan: resolution.Plan,
+			},
+			ResolutionOrigin: resolution.Origin,
+			MatchedRuleKind:  resolution.MatchedRuleKind,
 		}, nil
 	})
+	return result.Analysis, err
 }
 
 type queryRewriteInput struct {

@@ -64,6 +64,7 @@ type CallUsage struct {
 	Duration        time.Duration
 	Status          string
 	Usage           Usage
+	CostMicros      int64
 }
 
 // UsageRecorder persists usage without coupling the LLM transport to Agent storage.

@@ -31,8 +31,8 @@ func (svc *Service) compactAnswer(
 
 	tools := sessionCompactionTools(prepared.candidateToolSet, conversation)
 	incomingTokens, projectedTokens, err := compactionProjection(
-		prepared.request.Question, conversation, rc, plan, svc.domainKnowledge,
-		tools, outputReserve,
+		prepared.request.Question, prepared.analysis.QueryPlan, conversation, rc, plan,
+		svc.domainKnowledge, tools, outputReserve,
 	)
 	if err != nil {
 		return conversation, fmt.Errorf("estimate session compaction context: %w", err)
@@ -100,8 +100,8 @@ func (svc *Service) compactAnswer(
 		}
 		conversation = refreshed
 		_, projectedAfter, projectionErr := compactionProjection(
-			prepared.request.Question, conversation, rc, plan, svc.domainKnowledge,
-			sessionCompactionTools(prepared.candidateToolSet, conversation), outputReserve,
+			prepared.request.Question, prepared.analysis.QueryPlan, conversation, rc, plan,
+			svc.domainKnowledge, sessionCompactionTools(prepared.candidateToolSet, conversation), outputReserve,
 		)
 		if projectionErr != nil {
 			return conversation, fmt.Errorf("estimate compacted session context: %w", projectionErr)
@@ -128,6 +128,7 @@ func (svc *Service) compactAnswer(
 
 func compactionProjection(
 	question string,
+	query domain.QueryPlan,
 	conversation ConversationContext,
 	rc *retrieval.RetrievedContext,
 	plan domain.EvidencePlan,
@@ -137,7 +138,7 @@ func compactionProjection(
 ) (int, int, error) {
 	definitions := execution.ToolDefinitions(tools)
 	projectedInput, err := execution.EstimateInputTokens(buildAgentMessages(
-		question, conversation, rc, plan, domainKnowledge, 0,
+		question, query, conversation, rc, plan, domainKnowledge, 0,
 	), definitions)
 	if err != nil {
 		return 0, 0, err
@@ -148,7 +149,7 @@ func compactionProjection(
 	withoutSessionHistory.RecentDialogue = nil
 	withoutSessionHistory.HistoricalContext = ""
 	incomingTokens, err := execution.EstimateInputTokens(buildAgentMessages(
-		question, withoutSessionHistory, rc, plan, domainKnowledge, 0,
+		question, query, withoutSessionHistory, rc, plan, domainKnowledge, 0,
 	), definitions)
 	if err != nil {
 		return 0, 0, err

@@ -3,7 +3,6 @@ package dashboard
 import (
 	"context"
 	"fmt"
-	"github.com/dekwanlabs/nasuta/platform/httputil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,6 +15,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
 type projectInfo struct {
@@ -69,54 +69,88 @@ func (handler *Handler) APISettingsPut(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteErr(w, fmt.Errorf("no valid setting keys provided"))
 		return
 	}
-	if err := handler.validatePlatformSettingsUpdate(filtered); err != nil {
+	stored, err := handler.authDB.GetSettings()
+	if err != nil {
+		httputil.WriteErr(w, fmt.Errorf("load settings for update: %w", err))
+		return
+	}
+	if err := handler.validatePlatformSettingsUpdate(stored, filtered); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
 	if _, providersChanged := filtered["coding_enabled_providers"]; providersChanged {
-		if err := handler.validateCodingSettingsUpdate(filtered); err != nil {
+		if err := handler.validateCodingSettingsUpdate(stored, filtered); err != nil {
 			httputil.WriteBadRequest(w, err.Error())
 			return
 		}
 	} else if _, defaultChanged := filtered["coding_default_provider"]; defaultChanged {
-		if err := handler.validateCodingSettingsUpdate(filtered); err != nil {
+		if err := handler.validateCodingSettingsUpdate(stored, filtered); err != nil {
 			httputil.WriteBadRequest(w, err.Error())
 			return
 		}
 	}
 
-	if err := handler.authDB.SetSettings(filtered); err != nil {
+	changed := changedSettings(stored, filtered)
+	changedKeys := keysOf(changed)
+	if len(changed) == 0 {
+		httputil.WriteJSON(w, map[string]any{"updated": 0, "keys": changedKeys})
+		return
+	}
+	if err := handler.authDB.SetSettings(changed); err != nil {
 		httputil.WriteErr(w, err)
 		return
 	}
-	if err := handler.reloadQA(handler.codegraphDB); err != nil {
+	if err := handler.applySettings(changedKeys); err != nil {
 		httputil.WriteErr(w, err)
 		return
 	}
-	httputil.WriteJSON(w, map[string]any{"updated": len(filtered), "keys": keysOf(filtered)})
+	httputil.WriteJSON(w, map[string]any{"updated": len(changed), "keys": changedKeys})
 }
 
-func (handler *Handler) validatePlatformSettingsUpdate(update map[string]string) error {
-	stored, err := handler.authDB.GetSettings()
-	if err != nil {
-		return fmt.Errorf("load settings for validation: %w", err)
-	}
+// validatePlatformSettingsUpdate validates the merged platform settings
+// without rereading or mutating persisted values.
+func (handler *Handler) validatePlatformSettingsUpdate(
+	stored map[string]string,
+	update map[string]string,
+) error {
 	settings := *handler.platformSettings()
 	settings.Apply(stored)
 	settings.Apply(update)
 	return settings.ValidateAgentSettings()
 }
 
-func (handler *Handler) validateCodingSettingsUpdate(update map[string]string) error {
-	stored, err := handler.authDB.GetSettings()
-	if err != nil {
-		return fmt.Errorf("load settings for coding validation: %w", err)
-	}
+// validateCodingSettingsUpdate validates provider relationships against the
+// same persisted snapshot used to calculate the actual changes.
+func (handler *Handler) validateCodingSettingsUpdate(
+	stored map[string]string,
+	update map[string]string,
+) error {
 	settings := &config.PlatformSettings{}
 	settings.Apply(nil)
 	settings.Apply(stored)
 	settings.Apply(update)
 	return settings.ValidateCodingSettings()
+}
+
+// changedSettings returns only canonical values that differ from persistence.
+func changedSettings(
+	stored map[string]string,
+	update map[string]string,
+) map[string]string {
+	changed := make(map[string]string, len(update))
+	for key, value := range update {
+		if storedValue, exists := stored[key]; exists {
+			canonicalStored, err := config.CanonicalPlatformSetting(
+				key,
+				storedValue,
+			)
+			if err == nil && canonicalStored == value {
+				continue
+			}
+		}
+		changed[key] = value
+	}
+	return changed
 }
 
 func filterSettings(body map[string]string) (map[string]string, error) {

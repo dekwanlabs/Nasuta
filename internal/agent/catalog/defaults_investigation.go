@@ -40,7 +40,7 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 			purpose: "Evaluate bounded recalled memory already admitted by the task contract.",
 		},
 	}
-	definitions := make([]agentapi.Definition, 0, len(specs)+1)
+	definitions := make([]agentapi.Definition, 0, len(specs)+2)
 	for _, spec := range specs {
 		rolePrompt := prompts.MustRender(prompts.AgentCatalogInvestigator, struct {
 			Focus string
@@ -74,6 +74,41 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		}
 		definitions = append(definitions, definition)
 	}
+	verifier, err := agentapi.Prepare(agentapi.Definition{
+		ID: "delegation.verifier", Version: version,
+		DisplayName: "Delegation Evidence Verifier",
+		Purpose:     "Resolve bounded semantic claim conflicts using only cited evidence.",
+		Prompt: agentapi.PromptSpec{
+			System:  prompts.Text(prompts.AgentCatalogDelegationVerifier),
+			Version: "delegation-verification-v1",
+		},
+		InputSchema: agentapi.SchemaRef{
+			ID: "delegation.verification.request", Version: 1,
+		},
+		OutputSchema: agentapi.SchemaRef{
+			ID: "delegation.verification.result", Version: 1,
+		},
+		Model: agentapi.ModelPolicy{
+			Provider: settings.LLMProvider, Model: settings.LLMModel,
+			MaxOutputTokens:                   settings.LLMAnswerMaxTokens,
+			InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
+			OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
+		},
+		Tools: agentapi.ToolPolicy{
+			VisibleToolIDs: []string{}, RestrictVisible: true,
+		},
+		Budget: agentapi.BudgetPolicy{
+			Timeout:           time.Duration(settings.AgentTimeout),
+			MaxSteps:          settings.AgentMaxSteps,
+			ContextTokens:     settings.LLMContextWindow,
+			MaxContinueRounds: settings.LLMMaxContinueRounds,
+		},
+		Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("prepare delegation verifier: %w", err)
+	}
+	definitions = append(definitions, verifier)
 	synthesizer, err := agentapi.Prepare(agentapi.Definition{
 		ID: "synthesizer", Version: version, DisplayName: "Evidence Synthesizer",
 		Purpose: "Synthesize delegated investigation handoffs without gathering new evidence.",

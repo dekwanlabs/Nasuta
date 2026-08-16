@@ -585,7 +585,8 @@ func TestDefinitionRuntimeManagesScenarioParentLifecycle(t *testing.T) {
 	mock.ExpectExec("INSERT INTO agent_runs").WithArgs(
 		start.RunID, RunKindQAParent, start.UserID, start.SessionID,
 		"", int64(0), "", []byte(`{}`), "", int64(0), int64(0),
-		start.ParentRunID, start.WorkflowRunID, "", start.Question, RunStatusRunning, "",
+		start.ParentRunID, "", int64(0), "", "", 0, sqlmock.AnyArg(), uint64(0),
+		start.WorkflowRunID, "", start.Question, RunStatusRunning, "",
 		start.Mode, 0, 0, 0, sqlmock.AnyArg(),
 	).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectBegin()
@@ -1018,7 +1019,7 @@ func TestDefinitionUsageRecorderPersistsAndAggregates(t *testing.T) {
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("UPDATE agent_runs SET").
-		WithArgs(11, 3, 7, 2, 18, 1, 11, 267, call.RunID).
+		WithArgs(11, 3, 7, 2, 18, int64(0), 1, 11, 267, call.RunID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 

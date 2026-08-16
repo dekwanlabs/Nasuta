@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -33,7 +34,7 @@ type Service struct {
 	memory             *memory.MemoryStore
 	sessions           *memory.SessionStore
 	history            SessionHistory
-	writeAvailable     bool
+	writeAvailable     atomic.Bool
 	cfg                config.Config
 	routerConfidence   float64
 	routerMaxTokens    int
@@ -41,6 +42,14 @@ type Service struct {
 	outputReserve      int
 	domainKnowledge    string
 	toolPruningEnabled bool
+	delegationEnabled  bool
+	delegationShadow   bool
+	workflowEscalation bool
+	delegationChildren int
+	delegationTokens   int64
+	delegationCost     int64
+	workflowEscalator  agentapi.WorkflowEscalator
+	capabilities       WorkflowCapabilityResolver
 	definitions        DefinitionResolver
 	agentRef           agentapi.DefinitionRef
 	definitionErr      error
@@ -68,6 +77,12 @@ func New(d Deps) *Service {
 		retriever: ret, cfg: d.Cfg,
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
 		toolPruningEnabled: platformSettings.ToolPruningEnabled,
+		delegationEnabled:  platformSettings.DelegationEnabled,
+		delegationShadow:   platformSettings.DelegationShadowEnabled,
+		workflowEscalation: platformSettings.DelegationWorkflowEscalationEnabled,
+		delegationChildren: platformSettings.DelegationMaxChildren,
+		delegationTokens:   platformSettings.DelegationMaxTotalTokens,
+		delegationCost:     platformSettings.DelegationMaxTotalCostMicros,
 		history:            d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
 		outputReserve:   platformSettings.LLMAnswerMaxTokens,
 		domainKnowledge: platformSettings.DomainKnowledge,
@@ -75,10 +90,13 @@ func New(d Deps) *Service {
 		runtime: d.Runtime, runtimeTools: d.RuntimeTools,
 		phaseEmitter: d.PhaseEmitter, investigation: d.Investigation,
 		scenarios: d.ScenarioLifecycle, coordinator: d.Coordinator,
-		executionEvents: d.ExecutionEvents,
-		writeAvailable:  d.WriteAvailable, memory: d.Memory,
-		compactionStatus: make(map[string]SessionStatusEvent),
+		executionEvents:   d.ExecutionEvents,
+		workflowEscalator: d.WorkflowEscalator,
+		capabilities:      d.Capabilities,
+		memory:            d.Memory,
+		compactionStatus:  make(map[string]SessionStatusEvent),
 	}
+	svc.writeAvailable.Store(d.WriteAvailable)
 	if svc.agentRef.ID == "" {
 		svc.agentRef = agentapi.DefinitionRef{ID: "qa.answerer"}
 	}
@@ -114,6 +132,12 @@ func New(d Deps) *Service {
 }
 
 func (svc *Service) Memory() *memory.MemoryStore { return svc.memory }
+
+// SetWriteAvailable updates write-action availability without replacing the
+// service or any of the runtime dependencies it already holds.
+func (svc *Service) SetWriteAvailable(available bool) {
+	svc.writeAvailable.Store(available)
+}
 
 // emitStep pushes a lightweight phase hint to the run hub.
 func (svc *Service) emitStep(runID, text string) {

@@ -2,7 +2,8 @@
 
 [English](08-observability-and-evaluation.md) | [中文](08-observability-and-evaluation.zh-CN.md)
 
-> 状态：统一设计；可观测性已部分实现，Provider 精确 Token 统计是统一后的指标合同
+> 状态：统一设计；Run、Delegation、Shadow 与 Provider Usage 事件合同已实现
+> 更新：2026-08-16
 > 来源：Agent Observability Design；QA LLM Token 使用量记录设计
 
 ## 1. 定位
@@ -37,6 +38,47 @@ terminal    唯一 Run 终态，包含状态或错误
 ```
 
 `phase` 是瞬时提示，不持久化。慢订阅者在有界缓冲策略下可能丢失瞬时流，但持久化步骤和终态仍可查询。一次 Run 只能产生一个 terminal 结果。用户取消、连接断开、Provider 失败、工具失败和超时必须分类记录。
+
+### 3.1 Delegation、Validation、Verification、Adoption 与 Shadow 事件
+
+Dynamic Delegation 通过现有 `ExecutionEvent`/RunHub 广播统一事件，不伪装成 Workflow
+node：
+
+```text
+delegation.created
+delegation.started
+delegation.completed
+delegation.failed
+delegation.cancelled
+delegation.rejected
+delegation.validated
+delegation.verification_started
+delegation.verification_done
+delegation.verification_failed
+delegation.verification_rejected
+delegation.adoption_evaluated
+delegation.shadow_evaluated
+```
+
+`interrupted` 使用 terminal failure 事件类型传输，但 payload 的 delegation status
+保持 `interrupted`。每个 child 的 terminal 事件包含 parent/delegation/child identity、
+capability、duration、tool calls、report bytes、completeness、token 和 cost usage。
+`delegation.validated` 包含 citation coverage、structured claim coverage、冲突数量、
+`requires_verification` 和原因。verification 生命周期事件包含 parent/delegation/child
+identity、verification ID、trigger reasons、status、error code、duration 和 usage；
+预算 admission 被拒绝使用独立 rejected 事件，不伪装成未启动的 failed Run。
+
+`delegation.adoption_evaluated` 在 public result 完成映射后按 delegation 单独发布，
+包含 adopted report IDs、`adopted/not_adopted/unknown` 和 unknown reason。隐藏 adoption
+marker 不进入 token、Session 或 answer Step content；同一结构化 adoption facts 还写入
+answer Step 的 `delegation_adoptions_json`、Terminal/Outcome 和 public RunResult，使
+临时 SSE 丢包时仍可查询。
+
+Shadow 始终异步隔离，不改变 authoritative Workflow/Single 结果。
+`delegation.shadow_evaluated` 记录 query kind、duration、usage、reference count、
+conflict count 和成功/失败状态；它可以通过 parent Run 与 route event 中的
+capability/risk 上下文关联。route 选择和显式 Workflow escalation 还必须记录稳定
+reason code，使 Single、Delegate、Workflow 及降级原因可区分。
 
 ## 4. Evaluation Trace
 
@@ -92,10 +134,19 @@ Run 列表只读聚合列。Run 详情只按 Call Sequence 读取指定 Run 的�
 - 输入、输出、推理、缓存、总 Token 与峰值预留；
 - 工具结果大小、遗漏数量、归档/重取比例和 AnswerContract 重试；
 - EvidencePlan 覆盖率和 Required Evidence 失败率；
+- delegation admission/rejection、child status、并发、report completeness、citation/
+  structured claim coverage、verification reason/status/usage、adoption status/reason
+  和 Workflow escalation reason；
+- 按 QueryKind、capability 与风险等级分桶的 Single/Delegate/Workflow latency、
+  LLM calls、token、cost、citation 与质量对照；
 - 订阅丢包与 terminal 事件交付；
 - 后台摘要和 Memory 成本，且与同步回答延迟分开统计。
 
 指标只能描述系统行为。除非通过有权限的证据工具取得，否则指标不能作为客户、代码、配置或运行时事实引用。
+
+Dynamic Delegation 的性能和质量目标属于生产 rollout gate，不是代码完成事实。
+P95 延迟下降 20%、平均输入 token 下降 25%、LLM 调用减少，以及 citation/质量不退化，
+都必须在真实基线和分桶 shadow 数据上验证后才能声明达标或淘汰旧 Workflow stage。
 
 ## 9. 用户控制与审计
 
@@ -113,6 +164,9 @@ Pause 在 Agent 步骤之间消费，不能中断正在进行的 Provider 或工
 6. Trace 与指标不改变证据、权限和最终回答事实；
 7. 工具结果截断、遗漏、归档和合同重试均可观察；
 8. 在线列表和详情在存储边界执行有界读取。
+9. delegation lifecycle、validator、verifier、adoption、shadow、route 和 escalation reason 可由 SSE/Trace 或持久 Step/terminal 还原；
+10. adoption marker 不进入可见流和 Session，失败/取消/invalid-output 不沿用候选 adopted 结论；
+11. 性能与质量结论使用 QueryKind/capability/risk 分桶的生产基线，不以全局平均或设计目标代替。
 
 ## 详细归并材料
 
