@@ -23,17 +23,19 @@ type evidencePlanningInput struct {
 }
 
 type evidencePlanningOutput struct {
-	CleanQuestion string
-	Terms         retrieval.QueryTerms
-	Time          retrieval.TimeExpr
-	Decision      domain.PlanDecision
-	Effective     domain.PlanDecision
-	Execution     retrieval.ExecutionSuggestion
-	History       retrieval.HistoryRelation
-	HistoryValid  bool
-	RoutedToolIDs []string
-	PlanningError error
-	PlanningTime  time.Duration
+	CleanQuestion       string
+	Terms               retrieval.QueryTerms
+	QuerySemantics      *domain.QuerySemantics
+	QuerySemanticsError error
+	Time                retrieval.TimeExpr
+	Decision            domain.PlanDecision
+	Effective           domain.PlanDecision
+	Execution           retrieval.ExecutionSuggestion
+	History             retrieval.HistoryRelation
+	HistoryValid        bool
+	RoutedToolIDs       []string
+	PlanningError       error
+	PlanningTime        time.Duration
 }
 
 var evidencePlanningSpec = runtrace.Spec[evidencePlanningInput, evidencePlanningOutput]{
@@ -41,7 +43,11 @@ var evidencePlanningSpec = runtrace.Spec[evidencePlanningInput, evidencePlanning
 	Node:      "evidence_plan",
 	Output: func(input evidencePlanningInput, output evidencePlanningOutput, _ error) map[string]any {
 		planningError := ""
+		semanticsError := ""
 		fallbackError := ""
+		if output.QuerySemanticsError != nil {
+			semanticsError = output.QuerySemanticsError.Error()
+		}
 		if output.PlanningError != nil {
 			planningError = output.PlanningError.Error()
 			if output.Effective.Origin == domain.Fallback {
@@ -54,11 +60,12 @@ var evidencePlanningSpec = runtrace.Spec[evidencePlanningInput, evidencePlanning
 			"effective_plan": output.Effective.Plan.String(), "effective_sources": output.Effective.Plan.SourceNames(),
 			"effective_confidence": output.Effective.Confidence, "effective_origin": output.Effective.Origin,
 			"preferred_tool_ids": output.RoutedToolIDs, "available_tool_ids": input.AvailableTools,
-			"planning_error": planningError, "fallback_error": fallbackError,
+			"planning_error": planningError, "query_semantics_error": semanticsError,
+			"fallback_error": fallbackError,
 		}
 	},
 	Status: func(output evidencePlanningOutput, _ error) string {
-		if output.PlanningError != nil {
+		if output.PlanningError != nil || output.QuerySemanticsError != nil {
 			return "degraded"
 		}
 		return ""
@@ -89,6 +96,7 @@ func (svc *Service) planEvidence(ctx context.Context, input evidencePlanningInpu
 				return output, nil
 			}
 			output.CleanQuestion, output.Terms, output.Time, output.Decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
+			output.QuerySemantics, output.QuerySemanticsError = analysis.QuerySemantics, analysis.QuerySemanticsError
 			output.Execution = analysis.Execution
 			output.History, output.HistoryValid = analysis.History, input.RouteContext != ""
 			output.RoutedToolIDs = analysis.ToolIDs
@@ -113,6 +121,7 @@ func (svc *Service) planEvidence(ctx context.Context, input evidencePlanningInpu
 				return output, nil
 			}
 			output.CleanQuestion, output.Terms, output.Time, output.Decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
+			output.QuerySemantics, output.QuerySemanticsError = analysis.QuerySemantics, analysis.QuerySemanticsError
 			output.Execution = analysis.Execution
 			output.History, output.HistoryValid = analysis.History, input.RouteContext != ""
 			output.RoutedToolIDs = analysis.ToolIDs
@@ -129,7 +138,7 @@ func (svc *Service) planEvidence(ctx context.Context, input evidencePlanningInpu
 func logPlannerFailure(ctx context.Context, duration time.Duration, err error) {
 	if errors.Is(err, llm.ErrInvalidJSON) {
 		log.WarnfCtx(ctx,
-			"[qa] evidence planner failed duration=%s error_kind=invalid_json retry_disabled=true error=%v",
+			"[qa] evidence planner failed duration=%s error_kind=invalid_json retry_policy=chat_json error=%v",
 			duration, err,
 		)
 		return
@@ -138,7 +147,7 @@ func logPlannerFailure(ctx context.Context, duration time.Duration, err error) {
 	var callErr *llm.CallError
 	if !errors.As(err, &callErr) {
 		log.WarnfCtx(ctx,
-			"[qa] evidence planner failed duration=%s error_kind=other retry_disabled=true error=%v",
+			"[qa] evidence planner failed duration=%s error_kind=other retry_policy=chat_json error=%v",
 			duration, err,
 		)
 		return
@@ -156,7 +165,7 @@ func logPlannerFailure(ctx context.Context, duration time.Duration, err error) {
 		kind = "envelope"
 	}
 	log.WarnfCtx(ctx,
-		"[qa] evidence planner failed duration=%s error_kind=%s status=%d retryable=%t retry_disabled=true error=%v",
+		"[qa] evidence planner failed duration=%s error_kind=%s status=%d retryable=%t retry_policy=chat_json error=%v",
 		duration, kind, callErr.Status, callErr.Retryable(), err,
 	)
 }

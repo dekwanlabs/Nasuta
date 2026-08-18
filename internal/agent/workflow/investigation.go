@@ -11,12 +11,15 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 const FlowID = "delegated.investigation"
 
 const maxAttempts = 2
+
+const maxGoalInvestigationTasks = 3
 
 const maxDuplicateRatio = 0.8
 
@@ -29,6 +32,7 @@ type Goal struct {
 	Facet           string
 	Required        bool
 	Sources         []agentapi.EvidenceSource
+	RequiredSources []agentapi.EvidenceSource
 	Freshness       agentapi.FreshnessPolicy
 	MinimumCoverage int
 	HighRisk        bool
@@ -68,8 +72,8 @@ func DefaultFlow(
 	contract := agentapi.SchemaRef{ID: "task.contract", Version: 1}
 	report := agentapi.SchemaRef{ID: "investigation.report", Version: 1}
 	bundle := agentapi.SchemaRef{ID: "investigation.bundle", Version: 1}
-	verified := agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 1}
-	answer := agentapi.SchemaRef{ID: "investigation.answer", Version: 1}
+	verified := agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2}
+	answer := agentapi.SchemaRef{ID: "investigation.answer", Version: 3}
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
 	definition := Definition{
 		ID: FlowID, Version: version,
@@ -166,7 +170,7 @@ func DefaultPlan() agentapi.TaskGraphProposal {
 			{
 				ID: "synthesize", Purpose: "Synthesize the available evidence.",
 				Capability:   "evidence.synthesize",
-				OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
+				OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
 				MaxAttempts:  maxAttempts,
 			},
 		},
@@ -214,7 +218,7 @@ func BuildPlan(
 	plan.Tasks = append(plan.Tasks, agentapi.TaskSpec{
 		ID: "synthesize", Purpose: "Synthesize the available evidence.",
 		Capability:   "evidence.synthesize",
-		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
+		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
 		MaxAttempts:  maxAttempts,
 	})
 	return plan, nil
@@ -236,7 +240,7 @@ func DefaultPolicy(
 		WorkflowVersion:   version,
 		Purpose:           defaultPurpose,
 		InputSchema:       agentapi.SchemaRef{ID: "task.contract", Version: 1},
-		OutputSchema:      agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
+		OutputSchema:      agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
 		Permissions:       readOnly,
 		CallerPermissions: readOnly,
 		Budget:            workflowBudget,
@@ -270,7 +274,7 @@ func DefaultPolicy(
 			ID: "investigation.bundle", Version: 1,
 		},
 		VerifierOutputSchema: agentapi.SchemaRef{
-			ID: "investigation.verified_bundle", Version: 1,
+			ID: "investigation.verified_bundle", Version: 2,
 		},
 		HighRiskMinimumTrustTier: minTrustTier,
 		VerifierPayloadTokens:    budgets.SynthesizerPayloadTokens,
@@ -335,7 +339,7 @@ func GoalPolicy(
 		WorkflowVersion:          version,
 		Purpose:                  defaultPurpose,
 		InputSchema:              agentapi.SchemaRef{ID: "task.contract", Version: 1},
-		OutputSchema:             agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
+		OutputSchema:             agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
 		Permissions:              readOnly,
 		CallerPermissions:        readOnly,
 		Budget:                   workflowBudget,
@@ -362,7 +366,7 @@ func GoalPolicy(
 			ID: "investigation.bundle", Version: 1,
 		},
 		VerifierOutputSchema: agentapi.SchemaRef{
-			ID: "investigation.verified_bundle", Version: 1,
+			ID: "investigation.verified_bundle", Version: 2,
 		},
 		VerifierPayloadTokens: budgets.SynthesizerPayloadTokens,
 		RiskGateID:            "evidence.risk",
@@ -518,6 +522,7 @@ type investigatorSelection struct {
 	nodeID       string
 	focus        string
 	facets       []string
+	coverageKeys []string
 }
 
 func selectInvestigators(
@@ -527,71 +532,145 @@ func selectInvestigators(
 	if err != nil {
 		return nil, nil, err
 	}
-	selections := make([]investigatorSelection, 0, 5)
-	selected := make(map[string]int, 5)
-	add := func(capabilityID, nodeID, focus, facet string) {
-		index, exists := selected[capabilityID]
+	targets := normalized
+	hasRequired := false
+	for _, goal := range normalized {
+		if goal.Required {
+			hasRequired = true
+			break
+		}
+	}
+	if hasRequired {
+		targets = make([]Goal, 0, len(normalized))
+		for _, goal := range normalized {
+			if goal.Required {
+				targets = append(targets, goal)
+			}
+		}
+	}
+
+	candidates := make([]investigatorSelection, 0, 6)
+	byCapability := make(map[string]int, 6)
+	addCandidate := func(capabilityID, nodeID, focus, facet, coverageKey string) {
+		index, exists := byCapability[capabilityID]
 		if !exists {
-			index = len(selections)
-			selected[capabilityID] = index
-			selections = append(selections, investigatorSelection{
+			index = len(candidates)
+			byCapability[capabilityID] = index
+			candidates = append(candidates, investigatorSelection{
 				capabilityID: capabilityID,
 				nodeID:       nodeID,
 				focus:        focus,
 			})
 		}
-		if !contains(selections[index].facets, facet) {
-			selections[index].facets = append(selections[index].facets, facet)
+		if !contains(candidates[index].facets, facet) {
+			candidates[index].facets = append(candidates[index].facets, facet)
+		}
+		if !contains(candidates[index].coverageKeys, coverageKey) {
+			candidates[index].coverageKeys = append(candidates[index].coverageKeys, coverageKey)
 		}
 	}
-	for _, goal := range normalized {
+	requiredKeys := make([]string, 0, len(targets))
+	for _, goal := range targets {
 		sources := goal.Sources
 		if len(sources) == 0 {
 			sources = []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}
 		}
-		for _, source := range sources {
-			switch source {
-			case agentapi.EvidenceSourceInternal:
-				capabilityID, nodeID, focus, ok := capabilityForFacet(
-					goal.Facet,
-				)
-				if !ok {
-					return nil, nil, fmt.Errorf(
-						"investigation facet %q has no registered capability",
-						goal.Facet,
-					)
-				}
-				add(capabilityID, nodeID, focus, goal.Facet)
-			case agentapi.EvidenceSourceWeb:
-				add(
-					"knowledge.web.research",
-					"investigate.web",
-					"web",
-					goal.Facet,
-				)
-			case agentapi.EvidenceSourceMemory:
-				add(
-					"knowledge.memory.recall",
-					"investigate.memory",
-					"memory",
-					goal.Facet,
-				)
-			case agentapi.EvidenceSourceRuntime:
-				add(
-					"knowledge.runtime.observe",
-					"investigate.observe",
-					"runtime",
-					goal.Facet,
-				)
-			default:
-				return nil, nil, fmt.Errorf(
-					"investigation evidence source %q is invalid",
-					source,
-				)
+		requiredSources := goal.RequiredSources
+		if len(requiredSources) == 0 {
+			requiredKeys = append(requiredKeys, goal.Facet+"\x00*")
+		} else {
+			for _, source := range requiredSources {
+				requiredKeys = append(requiredKeys, goal.Facet+"\x00"+string(source))
 			}
+		}
+		covered := false
+		for _, source := range sources {
+			selection, ok := investigation.Select(source, goal.Facet)
+			if !ok {
+				continue
+			}
+			coverageKey := goal.Facet + "\x00*"
+			if len(requiredSources) > 0 {
+				if !containsEvidenceSource(requiredSources, source) {
+					continue
+				}
+				coverageKey = goal.Facet + "\x00" + string(source)
+			}
+			covered = true
+			addCandidate(
+				selection.CapabilityID,
+				selection.NodeID,
+				selection.Focus,
+				goal.Facet,
+				coverageKey,
+			)
+		}
+		if !covered {
+			return nil, nil, fmt.Errorf(
+				"no investigation capability covers facet %q",
+				goal.Facet,
+			)
+		}
+	}
+
+	uncovered := make(map[string]struct{}, len(requiredKeys))
+	for _, key := range requiredKeys {
+		uncovered[key] = struct{}{}
+	}
+	selections := make([]investigatorSelection, 0, min(maxGoalInvestigationTasks, len(candidates)))
+	used := make(map[string]struct{}, len(candidates))
+	for len(uncovered) > 0 && len(selections) < maxGoalInvestigationTasks {
+		best := -1
+		bestCoverage := 0
+		for index, candidate := range candidates {
+			if _, ok := used[candidate.capabilityID]; ok {
+				continue
+			}
+			coverage := 0
+			for _, key := range candidate.coverageKeys {
+				if _, ok := uncovered[key]; ok {
+					coverage++
+				}
+			}
+			if coverage > bestCoverage {
+				best = index
+				bestCoverage = coverage
+			}
+		}
+		if best < 0 {
+			break
+		}
+		candidate := candidates[best]
+		selected := investigatorSelection{
+			capabilityID: candidate.capabilityID,
+			nodeID:       candidate.nodeID,
+			focus:        candidate.focus,
+			facets:       append([]string(nil), candidate.facets...),
+		}
+		for _, key := range candidate.coverageKeys {
+			delete(uncovered, key)
+		}
+		selections = append(selections, selected)
+		used[candidate.capabilityID] = struct{}{}
+	}
+	if len(selections) == 0 {
+		return nil, nil, fmt.Errorf("no investigation capability covers required evidence goals")
+	}
+	for key := range uncovered {
+		if !strings.HasSuffix(key, "\x00*") {
+			return nil, nil, fmt.Errorf("investigation task budget leaves required source/facet coverage unresolved")
 		}
 	}
 	return selections, normalized, nil
+}
+
+func containsEvidenceSource(values []agentapi.EvidenceSource, target agentapi.EvidenceSource) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeGoals(
@@ -604,6 +683,7 @@ func normalizeGoals(
 		required        bool
 		highRisk        bool
 		sources         map[agentapi.EvidenceSource]struct{}
+		requiredSources map[agentapi.EvidenceSource]struct{}
 		freshness       agentapi.FreshnessPolicy
 		minimumCoverage int
 	}
@@ -621,7 +701,8 @@ func normalizeGoals(
 		current := byFacet[goal.Facet]
 		if current == nil {
 			current = &normalizedGoal{
-				sources: make(map[agentapi.EvidenceSource]struct{}, len(goal.Sources)),
+				sources:         make(map[agentapi.EvidenceSource]struct{}, len(goal.Sources)),
+				requiredSources: make(map[agentapi.EvidenceSource]struct{}, len(goal.RequiredSources)),
 			}
 			byFacet[goal.Facet] = current
 		}
@@ -637,6 +718,16 @@ func normalizeGoals(
 					"investigation evidence source %q is invalid",
 					source,
 				)
+			}
+		}
+		for _, source := range goal.RequiredSources {
+			switch source {
+			case agentapi.EvidenceSourceInternal, agentapi.EvidenceSourceMemory,
+				agentapi.EvidenceSourceWeb, agentapi.EvidenceSourceRuntime:
+				current.requiredSources[source] = struct{}{}
+				current.sources[source] = struct{}{}
+			default:
+				return nil, fmt.Errorf("investigation required evidence source %q is invalid", source)
 			}
 		}
 		freshness := goal.Freshness
@@ -684,11 +775,27 @@ func normalizeGoals(
 		}
 		normalized = append(normalized, Goal{
 			Facet: facet, Required: current.required, Sources: sources,
-			Freshness: current.freshness, MinimumCoverage: current.minimumCoverage,
+			RequiredSources: orderedEvidenceSources(current.requiredSources),
+			Freshness:       current.freshness, MinimumCoverage: current.minimumCoverage,
 			HighRisk: current.highRisk,
 		})
 	}
 	return normalized, nil
+}
+
+func orderedEvidenceSources(values map[agentapi.EvidenceSource]struct{}) []agentapi.EvidenceSource {
+	result := make([]agentapi.EvidenceSource, 0, len(values))
+	for _, source := range []agentapi.EvidenceSource{
+		agentapi.EvidenceSourceInternal,
+		agentapi.EvidenceSourceMemory,
+		agentapi.EvidenceSourceWeb,
+		agentapi.EvidenceSourceRuntime,
+	} {
+		if _, ok := values[source]; ok {
+			result = append(result, source)
+		}
+	}
+	return result
 }
 
 func freshnessRank(freshness agentapi.FreshnessPolicy) int {
@@ -701,22 +808,6 @@ func freshnessRank(freshness agentapi.FreshnessPolicy) int {
 		return 1
 	default:
 		return 0
-	}
-}
-
-func capabilityForFacet(
-	facet string,
-) (capabilityID, nodeID, focus string, ok bool) {
-	switch facet {
-	case "entrypoint", "core_flow", "data_and_state":
-		return "knowledge.code.inspect", "investigate.code", "code", true
-	case "system_boundary", "external_dependency",
-		"runtime_and_operations":
-		return "knowledge.service.trace", "investigate.runtime", "runtime", true
-	case "business_domain":
-		return "knowledge.docs.verify", "investigate.docs", "documentation", true
-	default:
-		return "", "", "", false
 	}
 }
 

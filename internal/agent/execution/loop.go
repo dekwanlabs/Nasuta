@@ -29,10 +29,13 @@ type Config struct {
 	AnswerMaxTokens     int
 	ConclusionMaxTokens int
 	ContextWindow       int
-	MaxContinueRounds   int
-	DomainKnowledge     string
-	ModelParameters     llm.ModelParameters
-	BudgetCheck         func() error
+	// MaxToolResultBytes bounds the model-facing copy of one tool result.
+	// The authoritative result remains available to observers and trace storage.
+	MaxToolResultBytes int
+	MaxContinueRounds  int
+	DomainKnowledge    string
+	ModelParameters    llm.ModelParameters
+	BudgetCheck        func() error
 }
 
 // ConversationContext carries recalled archived history and recent turns.
@@ -220,7 +223,7 @@ func (agent *Agent) runWithSnapshot(
 		query = retrieved.Query
 	}
 	if query.Kind == "" {
-		query = domain.ResolveQueryPlan(question, domain.QuerySignals{}).Plan
+		query = domain.ResolveQueryPlan(question, nil, nil).Plan
 	}
 	input := Input{
 		Question:           question,

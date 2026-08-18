@@ -107,6 +107,8 @@ func checkpointStopReason(errorCode string) StopReason {
 		return StopBudgetExhausted
 	case "needs_clarification":
 		return StopNeedsClarification
+	case "evidence_insufficient":
+		return StopEvidenceInsufficient
 	default:
 		return StopCapabilityUnavailable
 	}

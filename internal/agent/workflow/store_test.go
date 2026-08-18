@@ -2,7 +2,9 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -322,6 +324,90 @@ func TestSucceedNodeCommitsHandoffTransitionAndEventsAtomically(t *testing.T) {
 	}
 }
 
+func TestSucceedNodeSkipsZeroUsageForMySQLChangedRowsSemantics(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	workflowStore, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	handoff := Handoff{
+		ID: "handoff_zero", WorkflowRunID: "run_1", ProducerNodeID: "evidence.join",
+		Schema:  agentapi.SchemaRef{ID: "review.report", Version: 1},
+		Payload: json.RawMessage(`{"joined":true}`), Completeness: Complete,
+		ContentHash: "handoff_zero_hash", CreatedAt: now,
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT status FROM workflow_runs WHERE id=? LIMIT 1 FOR UPDATE`,
+	)).WithArgs("run_1").WillReturnRows(
+		sqlmock.NewRows([]string{"status"}).AddRow(RunRunning),
+	)
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO handoff_artifacts(
+		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
+		WithArgs(
+			"handoff_zero", "run_1", "evidence.join", "", "review.report", int64(1),
+			handoff.Payload, []byte("null"), []byte("null"), []byte("null"),
+			Complete, "handoff_zero_hash", sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_node_runs
+		SET agent_run_id=?,output_handoff_id=?,status=?,error_code='',
+			input_tokens=?,output_tokens=?,reasoning_tokens=?,total_tokens=?,
+			tool_call_count=?,cost_micros=?,retry_count=?,
+			gate_decision_id=?,gate_id=?,gate_subject_hash=?,gate_decision=?,
+			gate_reason_codes_json=?,gate_finding_ids_json=?,gate_evaluated_at=?,
+			ended_at=?
+		WHERE workflow_run_id=? AND node_id=? AND attempt=? AND status=?`)).
+		WithArgs(
+			"", "handoff_zero", RunSucceeded,
+			int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0),
+			nil, nil, nil, nil, nil, nil, nil,
+			sqlmock.AnyArg(),
+			"run_1", "evidence.join", 1, RunRunning,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT COALESCE(MAX(seq),0)+1 FROM runtime_events
+		 WHERE stream_kind='workflow' AND stream_id=?`,
+	)).WithArgs("run_1").WillReturnRows(sqlmock.NewRows([]string{"next_seq"}).AddRow(3))
+	for seq, kind := range []string{"handoff_created", "node_succeeded"} {
+		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO runtime_events(
+			stream_kind,stream_id,seq,kind,node_id,summary,detail_json,created_at)
+			VALUES('workflow',?,?,?,?,?,?,?)`)).
+			WithArgs(
+				"run_1", int64(seq+3), kind, "evidence.join",
+				sqlmock.AnyArg(), nil, sqlmock.AnyArg(),
+			).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+	}
+	mock.ExpectCommit()
+
+	if err := workflowStore.SucceedNode(
+		t.Context(),
+		"run_1",
+		"evidence.join",
+		1,
+		"",
+		handoff,
+		nil,
+		Usage{},
+		now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStartNodePersistsSecondAttempt(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -445,6 +531,107 @@ func TestFailNodePersistsWaitingHumanTransition(t *testing.T) {
 	}
 }
 
+func TestFailNodeSkipsZeroUsageForMySQLChangedRowsSemantics(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	workflowStore, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT status FROM workflow_runs WHERE id=? LIMIT 1 FOR UPDATE`,
+	)).WithArgs("run_1").WillReturnRows(
+		sqlmock.NewRows([]string{"status"}).AddRow(RunRunning),
+	)
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_node_runs
+		SET agent_run_id=?,status=?,error_code=?,
+			input_tokens=?,output_tokens=?,reasoning_tokens=?,total_tokens=?,
+			tool_call_count=?,cost_micros=?,retry_count=?,ended_at=?
+		WHERE workflow_run_id=? AND node_id=? AND attempt=? AND status=?`)).
+		WithArgs(
+			"", RunFailed, "node_failed",
+			int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0),
+			sqlmock.AnyArg(),
+			"run_1", "evidence.join", 1, RunRunning,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT COALESCE(MAX(seq),0)+1 FROM runtime_events
+		 WHERE stream_kind='workflow' AND stream_id=?`,
+	)).WithArgs("run_1").WillReturnRows(sqlmock.NewRows([]string{"next_seq"}).AddRow(4))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO runtime_events(
+		stream_kind,stream_id,seq,kind,node_id,summary,detail_json,created_at)
+		VALUES('workflow',?,?,?,?,?,?,?)`)).
+		WithArgs(
+			"run_1", int64(4), "node_failed", "evidence.join",
+			"workflow node failed", nil, sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if err := workflowStore.FailNode(
+		t.Context(),
+		"run_1",
+		"evidence.join",
+		1,
+		"",
+		RunFailed,
+		"node_failed",
+		Usage{},
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAccumulateNonZeroUsageStillRejectsMySQLNoChangedRows(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_runs
+		SET input_tokens=input_tokens+?,output_tokens=output_tokens+?,
+			reasoning_tokens=reasoning_tokens+?,total_tokens=total_tokens+?,
+			tool_call_count=tool_call_count+?,cost_micros=cost_micros+?,
+			retry_count=retry_count+?
+		WHERE id=? AND status=?`)).
+		WithArgs(
+			int64(1), int64(0), int64(0), int64(1), int64(0), int64(0), int64(0),
+			"run_1", RunRunning,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err = accumulateUsageTx(
+		t.Context(),
+		tx,
+		"run_1",
+		Usage{InputTokens: 1, TotalTokens: 1},
+	)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("accumulateUsageTx error = %v, want ErrConflict", err)
+	}
+	mock.ExpectRollback()
+	if rollbackErr := tx.Rollback(); rollbackErr != nil {
+		t.Fatal(rollbackErr)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFinishRunCommitsOutputAndTerminalTransition(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -459,7 +646,7 @@ func TestFinishRunCommitsOutputAndTerminalTransition(t *testing.T) {
 	output := Handoff{
 		ID: "handoff_output", WorkflowRunID: "run_1", ProducerNodeID: "workflow.output",
 		Schema:  agentapi.SchemaRef{ID: "review.report", Version: 1},
-		Payload: json.RawMessage(`{"result":"ok"}`), Completeness: Complete,
+		Payload: json.RawMessage(`{"result":"ok"}`), Completeness: Partial,
 		ContentHash: "output_hash", CreatedAt: now,
 	}
 	mock.ExpectBegin()
@@ -476,7 +663,7 @@ func TestFinishRunCommitsOutputAndTerminalTransition(t *testing.T) {
 		WithArgs(
 			"handoff_output", "run_1", "workflow.output", "", "review.report", int64(1),
 			output.Payload, []byte("null"), []byte("null"), []byte("null"),
-			Complete, "output_hash", sqlmock.AnyArg(),
+			Partial, "output_hash", sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_runs
@@ -494,20 +681,28 @@ func TestFinishRunCommitsOutputAndTerminalTransition(t *testing.T) {
 		`SELECT COALESCE(MAX(seq),0)+1 FROM runtime_events
 		 WHERE stream_kind='workflow' AND stream_id=?`,
 	)).WithArgs("run_1").WillReturnRows(sqlmock.NewRows([]string{"next_seq"}).AddRow(7))
+	terminalDetail, err := json.Marshal(TerminalEventDetail{
+		RunStatus: RunSucceeded, Completeness: Partial,
+		StopReason: StopRequiredGoalsCovered,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, expected := range []struct {
 		seq    int64
 		kind   string
 		nodeID string
+		detail any
 	}{
 		{seq: 7, kind: "handoff_created", nodeID: "workflow.output"},
-		{seq: 8, kind: "workflow_succeeded"},
+		{seq: 8, kind: "workflow_succeeded", detail: terminalDetail},
 	} {
 		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO runtime_events(
 			stream_kind,stream_id,seq,kind,node_id,summary,detail_json,created_at)
 			VALUES('workflow',?,?,?,?,?,?,?)`)).
 			WithArgs(
 				"run_1", expected.seq, expected.kind, expected.nodeID,
-				sqlmock.AnyArg(), nil, sqlmock.AnyArg(),
+				sqlmock.AnyArg(), expected.detail, sqlmock.AnyArg(),
 			).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 	}
@@ -520,6 +715,80 @@ func TestFinishRunCommitsOutputAndTerminalTransition(t *testing.T) {
 		StopRequiredGoalsCovered,
 		&output,
 		now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFinishRunClosesRunningNodesOnFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	workflowStore, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT status FROM workflow_runs WHERE id=? LIMIT 1 FOR UPDATE`,
+	)).WithArgs("run_1").WillReturnRows(
+		sqlmock.NewRows([]string{"status"}).AddRow(RunRunning),
+	)
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_node_runs
+		SET status=?,error_code=?,ended_at=?
+		WHERE workflow_run_id=? AND status=?`)).
+		WithArgs(
+			RunFailed,
+			"node_persistence_failed",
+			sqlmock.AnyArg(),
+			"run_1",
+			RunRunning,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE workflow_runs
+		SET status=?,error_code=?,stop_reason=?,ended_at=? WHERE id=? AND status=?`)).
+		WithArgs(
+			RunFailed,
+			"node_persistence_failed",
+			StopReason(""),
+			sqlmock.AnyArg(),
+			"run_1",
+			RunRunning,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT COALESCE(MAX(seq),0)+1 FROM runtime_events
+		 WHERE stream_kind='workflow' AND stream_id=?`,
+	)).WithArgs("run_1").WillReturnRows(sqlmock.NewRows([]string{"next_seq"}).AddRow(7))
+	failureDetail, err := json.Marshal(TerminalEventDetail{
+		RunStatus: RunFailed, ErrorCode: "node_persistence_failed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO runtime_events(
+		stream_kind,stream_id,seq,kind,node_id,summary,detail_json,created_at)
+		VALUES('workflow',?,?,?,?,?,?,?)`)).
+		WithArgs(
+			"run_1", int64(7), "workflow_failed", "",
+			"workflow failed", failureDetail, sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if err := workflowStore.FinishRun(
+		t.Context(),
+		"run_1",
+		RunFailed,
+		"node_persistence_failed",
+		"",
+		nil,
+		time.Now().UTC(),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1406,4 +1675,108 @@ func TestLoadFullRunStateRestoresDurableCheckpoint(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestPutWorkflowArtifactValidatesAndPersistsIdempotently(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	workflowStore, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	artifact := WorkflowArtifact{
+		ID:             "art_00000000-0000-0000-0000-000000000001",
+		WorkflowRunID:  "run_1",
+		ProducerNodeID: "evidence.verify",
+		Kind:           LimitationsDetailArtifactKind,
+		Schema:         agentapi.SchemaRef{ID: LimitationsDetailArtifactKind, Version: 1},
+		Content:        json.RawMessage(`{"schema_id":"investigation.limitations.detail"}`),
+	}
+	hash := sha256Hex(artifact.Content)
+
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT content_hash FROM handoff_artifacts WHERE id=? LIMIT 1`,
+	)).WithArgs(artifact.ID).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO handoff_artifacts(
+		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)).WithArgs(
+		artifact.ID, artifact.WorkflowRunID, artifact.ProducerNodeID, "",
+		artifact.Schema.ID, artifact.Schema.Version, artifact.Content,
+		[]byte("null"), []byte("null"), []byte("null"), Partial,
+		hash, sqlmock.AnyArg(),
+	).WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := workflowStore.PutWorkflowArtifact(t.Context(), artifact); err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT content_hash FROM handoff_artifacts WHERE id=? LIMIT 1`,
+	)).WithArgs(artifact.ID).WillReturnRows(
+		sqlmock.NewRows([]string{"content_hash"}).AddRow(hash),
+	)
+	if err := workflowStore.PutWorkflowArtifact(t.Context(), artifact); err != nil {
+		t.Fatalf("idempotent write error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPutWorkflowArtifactRejectsInvalidAndConflictingContent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	workflowStore, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := WorkflowArtifact{
+		ID:             "art_00000000-0000-0000-0000-000000000002",
+		WorkflowRunID:  "run_1",
+		ProducerNodeID: "evidence.verify",
+		Kind:           LimitationsDetailArtifactKind,
+		Schema:         agentapi.SchemaRef{ID: LimitationsDetailArtifactKind, Version: 1},
+		Content:        json.RawMessage(`{"valid":true}`),
+	}
+	if err := workflowStore.PutWorkflowArtifact(t.Context(), WorkflowArtifact{
+		ID: base.ID, WorkflowRunID: base.WorkflowRunID,
+		ProducerNodeID: base.ProducerNodeID, Kind: base.Kind, Schema: base.Schema,
+		Content: []byte(`not-json`),
+	}); err == nil {
+		t.Fatal("invalid JSON unexpectedly succeeded")
+	}
+	if err := workflowStore.PutWorkflowArtifact(t.Context(), WorkflowArtifact{
+		ID: base.ID, WorkflowRunID: base.WorkflowRunID,
+		ProducerNodeID: base.ProducerNodeID, Kind: base.Kind, Schema: base.Schema,
+		Content: base.Content, ContentHash: "wrong",
+	}); err == nil {
+		t.Fatal("hash mismatch unexpectedly succeeded")
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT content_hash FROM handoff_artifacts WHERE id=? LIMIT 1`,
+	)).WithArgs(base.ID).WillReturnRows(
+		sqlmock.NewRows([]string{"content_hash"}).AddRow("different-hash"),
+	)
+	err = workflowStore.PutWorkflowArtifact(t.Context(), base)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting artifact error = %v, want ErrConflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sha256Hex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
 }

@@ -74,6 +74,51 @@ func TestHub_BroadcastDeliversToSubscriber(t *testing.T) {
 	}
 }
 
+func TestHubProjectsChildToolLifecycleToParentRun(t *testing.T) {
+	hub := NewHub(nil)
+	parent := hub.Subscribe("qa_parent")
+	stop := hub.ProjectToolEvents(
+		"agent_child",
+		"qa_parent",
+		"workflow_1",
+		"inspect.runtime",
+	)
+	defer stop()
+
+	if err := hub.OnStep(t.Context(), "agent_child", StepRecord{
+		StepNo: 3, Kind: StepKindToolCall, ToolCallID: "call-1",
+		Tool: "observe_logs", Args: `{"trace_id":"trace-1"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.OnStep(t.Context(), "agent_child", StepRecord{
+		StepNo: 4, Kind: StepKindToolResult, ToolCallID: "call-1",
+		Tool: "observe_logs", Content: "matched logs", DurationMs: 125,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	startedEvent := <-parent
+	started, ok := startedEvent.Data.(ToolStartedEvent)
+	if startedEvent.Type != EventToolStarted || !ok ||
+		started.ToolCallID != "call-1" ||
+		started.AgentRunID != "agent_child" ||
+		started.WorkflowRunID != "workflow_1" ||
+		started.NodeID != "inspect.runtime" {
+		t.Fatalf("started event = %#v", startedEvent)
+	}
+	finishedEvent := <-parent
+	finished, ok := finishedEvent.Data.(ToolFinishedEvent)
+	if finishedEvent.Type != EventToolFinished || !ok ||
+		finished.ToolCallID != "call-1" ||
+		finished.AgentRunID != "agent_child" ||
+		finished.WorkflowRunID != "workflow_1" ||
+		finished.NodeID != "inspect.runtime" ||
+		finished.Summary != "matched logs" {
+		t.Fatalf("finished event = %#v", finishedEvent)
+	}
+}
+
 func TestHub_BroadcastsStructuredStatus(t *testing.T) {
 	hub := NewHub(nil)
 	ch := hub.Subscribe("status-run")
@@ -382,6 +427,34 @@ func TestRunSubscriberQueueIsBoundedAndPreservesTerminal(t *testing.T) {
 	}
 	if sub.queue[len(sub.queue)-1].Type != EventRunFinished {
 		t.Fatalf("last event = %s, want %s", sub.queue[len(sub.queue)-1].Type, EventRunFinished)
+	}
+}
+
+func TestRunSubscriberQueuePreservesWorkflowTerminalProjection(t *testing.T) {
+	sub := &subscriber{
+		wake: make(chan struct{}, 1),
+		stop: make(chan struct{}),
+	}
+	defer sub.close()
+
+	for index := 0; index < subscriberDiagnosticLimit; index++ {
+		if !sub.enqueue(SSEEvent{Type: EventTrace}) {
+			t.Fatalf("trace event %d was rejected before the queue reached its limit", index)
+		}
+	}
+	if !sub.enqueue(SSEEvent{Type: EventWorkflowCompleted, Data: ExecutionEvent{
+		RunID: "bounded", Status: "succeeded", Completeness: "partial",
+	}}) {
+		t.Fatal("workflow terminal projection was rejected by a full queue")
+	}
+
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	if len(sub.queue) != subscriberDiagnosticLimit {
+		t.Fatalf("queue length = %d, want %d", len(sub.queue), subscriberDiagnosticLimit)
+	}
+	if sub.queue[len(sub.queue)-1].Type != EventWorkflowCompleted {
+		t.Fatalf("last event = %s, want %s", sub.queue[len(sub.queue)-1].Type, EventWorkflowCompleted)
 	}
 }
 

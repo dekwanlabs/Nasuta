@@ -10,6 +10,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	platformagent "github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/scope"
@@ -191,6 +192,12 @@ func (builder qaWorkflowEscalationBuilder) BuildWorkflowEscalation(
 			"workflow escalation requires between 1 and 10 focus facets",
 		)
 	}
+	objective := investigation.BoundedSummary(request.Request.Objective)
+	if objective == "" {
+		return agentapi.WorkflowEscalationBuildResult{}, fmt.Errorf(
+			"workflow escalation objective is required",
+		)
+	}
 	source := workflowEscalationEvidenceSource(request.Capability.ID)
 	if source == "" {
 		return agentapi.WorkflowEscalationBuildResult{}, fmt.Errorf(
@@ -226,8 +233,7 @@ func (builder qaWorkflowEscalationBuilder) BuildWorkflowEscalation(
 	}
 	contract := platformagent.TaskContract{
 		TaskID:        request.Parent.RunID,
-		Question:      request.Parent.Question,
-		Objective:     request.Request.Objective,
+		Objective:     objective,
 		Entities:      []platformagent.EntityRef{},
 		EvidenceGoals: goals,
 		Context: platformagent.TaskContext{

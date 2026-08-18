@@ -1334,14 +1334,13 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 	select {
 	case request := <-investigationRequests:
 		if request.Contract.TaskID != runID || !strings.HasPrefix(request.WorkflowRunID, "workflow_") ||
-			request.Contract.Question != "trace the checkout flow" ||
 			request.Contract.Objective != "trace the checkout flow" ||
 			request.Actor.UserID != 42 {
 			t.Fatalf("investigation request = %+v", request)
 		}
 		if request.Proposal == nil || len(request.Proposal.Tasks) != 3 ||
-			request.Proposal.Tasks[0].ID != "design" ||
-			request.Proposal.Tasks[1].ID != "implementation" ||
+			request.Proposal.Tasks[0].ID != "investigate.code.1" ||
+			request.Proposal.Tasks[1].ID != "investigate.service.1" ||
 			request.Proposal.Tasks[2].ID != "synthesize" {
 			t.Fatalf("task graph proposal = %+v", request.Proposal)
 		}
@@ -1568,7 +1567,8 @@ func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *http
 			return
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
-		content, _ := json.Marshal(answer)
+		structured, _ := json.Marshal(answer)
+		content, _ := json.Marshal(string(structured))
 		_, _ = fmt.Fprintf(writer,
 			"data: {\"choices\":[{\"delta\":{\"content\":%s},\"finish_reason\":\"stop\"}]}\n\n",
 			content,
@@ -1579,15 +1579,15 @@ func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *http
 }
 
 func serverPromotableRouteBody() string {
-	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[\"call chain\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.95,\"confidence\":0.95,\"tasks\":[{\"id\":\"design\",\"objective\":\"Establish the intended behavior.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"implementation\",\"objective\":\"Verify the implementation behavior.\",\"independently_useful\":true,\"depends_on\":[]}],\"reasons\":[\"requires_multiple_subproblems\",\"supports_parallel_investigation\"]}}"}}]}`
+	return `{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"flow\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[\"call chain\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.95,\"confidence\":0.95,\"tasks\":[{\"id\":\"design\",\"objective\":\"Establish the intended behavior.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"implementation\",\"objective\":\"Verify the implementation behavior.\",\"independently_useful\":true,\"depends_on\":[]}],\"reasons\":[\"requires_multiple_subproblems\",\"supports_parallel_investigation\"]}}"}}]}`
 }
 
 func multiAgentTaskGraphBody() string {
-	return `{"choices":[{"message":{"content":"{\"tasks\":[{\"id\":\"design\",\"purpose\":\"Establish the intended behavior.\",\"capability\":\"knowledge.code.inspect\",\"required_facets\":[\"entrypoint\",\"core_flow\",\"data_and_state\"],\"depends_on\":[]},{\"id\":\"implementation\",\"purpose\":\"Verify the implementation behavior.\",\"capability\":\"knowledge.service.trace\",\"required_facets\":[\"external_dependency\"],\"depends_on\":[]}]}"}}]}`
+	return `{"choices":[{"message":{"content":"{\"tasks\":[{\"purpose\":\"Inspect the implementation flow.\",\"capability\":\"knowledge.code.inspect\",\"evidence_goal_ids\":[\"entrypoint\",\"core_flow\",\"data_and_state\"],\"depends_on\":[]},{\"purpose\":\"Trace service dependencies.\",\"capability\":\"knowledge.service.trace\",\"evidence_goal_ids\":[\"external_dependency\"],\"depends_on\":[]}] }"}}]}`
 }
 
 func singleAgentRouteBody() string {
-	return `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.1,\"confidence\":0.99,\"tasks\":[],\"reasons\":[\"single_focused_question\"]}}"}}]}`
+	return `{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"focused_fact\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.1,\"confidence\":0.99,\"tasks\":[],\"reasons\":[\"single_focused_question\"]}}"}}]}`
 }
 
 func waitForTerminal(t *testing.T, ch chan SSEEvent) *RunTerminal {
@@ -1620,7 +1620,7 @@ func TestAskDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 		if !request.Stream {
 			routerCalls++
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.1,\"confidence\":0.99,\"tasks\":[],\"reasons\":[\"single_focused_question\"]}}"}}]}`))
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"focused_fact\"},\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.1,\"confidence\":0.99,\"tasks\":[],\"reasons\":[\"single_focused_question\"]}}"}}]}`))
 			return
 		}
 		agentCalls++
@@ -1628,7 +1628,7 @@ func TestAskDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 			t.Errorf("direct request exposed %d tools, want 1 registered read tool", len(request.Tools))
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"direct answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"\\\"direct answer\\\"\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer server.Close()
 
@@ -1666,7 +1666,7 @@ func TestAskSessionPersistenceFailureCompletesRunAsFailed(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"\\\"answer\\\"\"},\"finish_reason\":\"stop\"}]}\n\n")
 		fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
@@ -1683,7 +1683,7 @@ func TestAskSessionPersistenceFailureCompletesRunAsFailed(t *testing.T) {
 	runMock.ExpectExec("INSERT INTO agent_steps").WillReturnResult(sqlmock.NewResult(1, 1))
 	runMock.ExpectCommit()
 	runMock.ExpectExec("UPDATE agent_runs").WithArgs(
-		RunStatusFailed, "session_persistence_failed", 1, len("answer"),
+		RunStatusFailed, "session_persistence_failed", 1, len(`"answer"`),
 		EvidenceNotRequired, false, 0, 0, 0, 0, 0,
 		sqlmock.AnyArg(), runID, RunStatusRunning, RunStatusPaused,
 	).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -1781,7 +1781,7 @@ func TestAskRouterInvalidOutputFallsBackInternal(t *testing.T) {
 			t.Errorf("internal fallback exposed %d tools, want 1", len(request.Tools))
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"direct answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"\\\"direct answer\\\"\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer server.Close()
 
@@ -1800,8 +1800,9 @@ func TestAskRouterInvalidOutputFallsBackInternal(t *testing.T) {
 	if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
 		t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
 	}
-	// Planner failures fall back immediately without another model request.
-	if routerCalls != 1 || agentCalls != 1 {
+	// A malformed planner response gets one schema-aware repair request before
+	// the internal fallback is used.
+	if routerCalls != 2 || agentCalls != 1 {
 		t.Fatalf("routerCalls=%d agentCalls=%d", routerCalls, agentCalls)
 	}
 	if result.Context == nil {
@@ -1835,7 +1836,7 @@ func TestAskPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
 				agentToolNames = append(agentToolNames, name)
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"direct answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"\\\"direct answer\\\"\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
 		}))
 		defer server.Close()
 
@@ -1868,7 +1869,7 @@ func TestAskPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
 
 	// Router selects observe_logs only; the router requires the query_terms
 	// object to accompany the route and tools objects.
-	routeBody := `{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"tools\":{\"tool_ids\":[\"observe_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.4,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]}}"}}]}`
+	routeBody := `{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"focused_fact\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"tools\":{\"tool_ids\":[\"observe_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.4,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]}}"}}]}`
 
 	t.Run("live pruning keeps base plus routed", func(t *testing.T) {
 		names, _ := run(true, routeBody)

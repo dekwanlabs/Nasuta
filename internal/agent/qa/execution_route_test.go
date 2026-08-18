@@ -1,12 +1,34 @@
 package qa
 
 import (
+	"fmt"
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
+
+type routeCapabilityResolver map[string]agentapi.Capability
+
+func (resolver routeCapabilityResolver) Resolve(
+	ref agentapi.CapabilityRef,
+) (agentapi.Capability, error) {
+	capability, ok := resolver[ref.ID]
+	if !ok {
+		return agentapi.Capability{}, fmt.Errorf("capability %q not found", ref.ID)
+	}
+	return capability, nil
+}
+
+type routeWorkflowBindingChecker map[string]bool
+
+func (checker routeWorkflowBindingChecker) SupportsWorkflowEscalation(
+	ref agentapi.CapabilityRef,
+	contentHash string,
+) bool {
+	return checker[ref.ID+"@"+fmt.Sprint(ref.Version)+"#"+contentHash]
+}
 
 func TestDecideExecutionRoute(t *testing.T) {
 	base := executionRouteInput{
@@ -354,12 +376,47 @@ func TestWorkflowEscalatorModeKeepsShadowOnLegacyRunner(t *testing.T) {
 			svc:  Service{workflowEscalation: true},
 		},
 	}
-	for _, test := range tests {
+	for index := range tests {
+		test := &tests[index]
 		t.Run(test.name, func(t *testing.T) {
 			if got := test.svc.usesWorkflowEscalator(); got != test.want {
 				t.Fatalf("usesWorkflowEscalator() = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestResolveWorkflowEscalationCapabilitySkipsUnboundCandidate(t *testing.T) {
+	resolver := routeCapabilityResolver{
+		"knowledge.web.research": {
+			ID: "knowledge.web.research", Version: 1, ContentHash: "web-hash",
+			Enabled: true, Role: agentapi.RoleInvestigator, SideEffects: agentapi.SideEffectNone,
+		},
+		"knowledge.service.trace": {
+			ID: "knowledge.service.trace", Version: 1, ContentHash: "service-hash",
+			Enabled: true, Role: agentapi.RoleInvestigator, SideEffects: agentapi.SideEffectNone,
+		},
+	}
+	contract := TaskContract{EvidenceGoals: []EvidenceGoal{{
+		ID: "external_dependency", Facet: "external_dependency", Required: true,
+		Sources: []agentapi.EvidenceSource{
+			agentapi.EvidenceSourceWeb,
+			agentapi.EvidenceSourceInternal,
+		},
+	}}}
+	capability, facets, err := resolveWorkflowEscalationCapability(
+		contract,
+		resolver,
+		routeWorkflowBindingChecker{
+			"knowledge.service.trace@1#service-hash": true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capability.ID != "knowledge.service.trace" ||
+		len(facets) != 1 || facets[0] != "external_dependency" {
+		t.Fatalf("capability=%+v facets=%v", capability, facets)
 	}
 }
 
@@ -398,7 +455,7 @@ func TestAssessExecutionSeparatesGoalsFromCapabilities(t *testing.T) {
 	)
 	if assessment.Strategy != retrieval.ExecutionMultiAgent ||
 		assessment.IndependentTaskCount != 2 ||
-		assessment.RequiredCapabilities != 3 ||
+		assessment.RequiredCapabilities != 2 ||
 		!assessment.Parallelizable ||
 		!assessment.SharedContextPressure ||
 		assessment.EstimatedCoordination.AgentRuns != 3 ||
@@ -429,7 +486,7 @@ func TestAssessExecutionDoesNotTreatCapabilityFanoutAsIndependentTasks(t *testin
 		},
 	)
 	if assessment.IndependentTaskCount != 1 ||
-		assessment.RequiredCapabilities != 3 ||
+		assessment.RequiredCapabilities != 2 ||
 		assessment.Parallelizable ||
 		assessment.Strategy != retrieval.ExecutionSingleAgent {
 		t.Fatalf("assessment = %+v", assessment)

@@ -53,6 +53,11 @@ func TestSearchCodePublishesLowerCamelPayload(t *testing.T) {
 	if len(result.References) != 1 || result.References[0].Target != "repos/team/orders/main.go" {
 		t.Fatalf("search_code references = %#v", result.References)
 	}
+	if len(result.EvidenceUnits) != 1 || result.EvidenceUnits[0].SourceKind != "code" ||
+		result.EvidenceUnits[0].Target != "repos/team/orders/main.go" ||
+		len(result.EvidenceUnits[0].Sections) != 1 || result.EvidenceUnits[0].Sections[0] != "L1-L2" {
+		t.Fatalf("search_code evidence units = %#v", result.EvidenceUnits)
+	}
 }
 
 func TestBuiltinToolDescriptionsKeepEvidenceBoundariesDistinct(t *testing.T) {
@@ -231,6 +236,44 @@ func TestTraceDepsUsesOntologyFacts(t *testing.T) {
 		if !strings.Contains(result.Content, want) {
 			t.Fatalf("trace_deps output missing %s: %s", want, result.Content)
 		}
+	}
+	if len(result.EvidenceUnits) != 1 || result.EvidenceUnits[0].SourceKind != "dependency" ||
+		result.EvidenceUnits[0].Target != "orders" || !result.EvidenceUnits[0].Coverage.Complete {
+		t.Fatalf("trace_deps evidence units = %#v", result.EvidenceUnits)
+	}
+}
+
+func TestGetSymbolPublishesDynamicCanonicalEvidence(t *testing.T) {
+	workspace := writeSymbolTestWorkspace(t)
+	svc := New(Deps{WorkspaceRoot: workspace})
+	var symbol *Tool
+	for _, candidate := range builtinTools(svc, config.Config{}, nil, nil) {
+		if candidate.ID == "get_symbol" {
+			symbol = &candidate
+			break
+		}
+	}
+	if symbol == nil {
+		t.Fatal("get_symbol was not registered")
+	}
+	result, err := symbol.Handler.Execute(context.Background(), tool.Arguments{
+		"query": "UserController", "qualified_name": "app::UserController",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.EvidenceUnits) != 1 {
+		t.Fatalf("evidence units = %#v", result.EvidenceUnits)
+	}
+	unit := result.EvidenceUnits[0]
+	if unit.SourceKind != "codegraph" || unit.Target != "repos/team/app/UserController.java" ||
+		len(unit.Sections) != 1 || unit.Sections[0] != "L1-L2" || unit.ContentHash == "" ||
+		unit.EvidenceClass != "code_runtime" || unit.TrustTier != 100 {
+		t.Fatalf("symbol evidence unit = %#v", unit)
+	}
+	if len(result.References) != 1 || result.References[0].Type != tool.ReferenceSymbol ||
+		result.References[0].Target != "app::UserController" {
+		t.Fatalf("symbol references = %#v", result.References)
 	}
 }
 

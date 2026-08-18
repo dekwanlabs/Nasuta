@@ -196,6 +196,19 @@ func NewWorkflowEscalator(
 	}, nil
 }
 
+// SupportsWorkflowEscalation reports whether an exact Capability snapshot has
+// a registered Workflow binding before the parent Run is escalated.
+func (escalator *ServerWorkflowEscalator) SupportsWorkflowEscalation(
+	ref agentapi.CapabilityRef,
+	contentHash string,
+) bool {
+	if escalator == nil || escalator.bindings == nil {
+		return false
+	}
+	_, _, _, err := escalator.bindings.Resolve(ref, contentHash)
+	return err == nil
+}
+
 func StableWorkflowEscalationRunID(parentRunID, requestID string) string {
 	sum := sha256.Sum256([]byte(
 		"workflow_escalation\x00" + parentRunID + "\x00" + requestID,

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -29,10 +30,11 @@ type InvestigationRequest struct {
 	Actor         agentapi.Actor
 }
 
-// TaskContract is the canonical input shared by every delegated investigator.
+// TaskContract is the bounded task projection shared by delegated investigators.
+// The parent Run retains the original user question; child agents receive only
+// the objective, admitted evidence goals, and admitted context.
 type TaskContract struct {
 	TaskID             string              `json:"task_id"`
-	Question           string              `json:"question"`
 	Objective          string              `json:"objective"`
 	Entities           []EntityRef         `json:"entities"`
 	InvestigationGoals []InvestigationGoal `json:"investigation_goals,omitempty"`
@@ -41,7 +43,10 @@ type TaskContract struct {
 }
 
 type EntityRef struct {
-	ID string `json:"id"`
+	ID      string   `json:"id"`
+	Label   string   `json:"label,omitempty"`
+	Role    string   `json:"role,omitempty"`
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 // InvestigationGoal is one distinct deliverable admitted by execution routing.
@@ -57,6 +62,7 @@ type EvidenceGoal struct {
 	Facet           string                    `json:"facet"`
 	Required        bool                      `json:"required"`
 	Sources         []agentapi.EvidenceSource `json:"sources"`
+	RequiredSources []agentapi.EvidenceSource `json:"required_sources,omitempty"`
 	Freshness       agentapi.FreshnessPolicy  `json:"freshness"`
 	MinimumCoverage int                       `json:"minimum_coverage"`
 	HighRisk        bool                      `json:"high_risk"`
@@ -139,21 +145,37 @@ func contractFromPreparation(
 	seedMaterial []agentapi.ContextBlock,
 ) TaskContract {
 	query := prepared.analysis.QueryPlan
-	canonicalEntities := domain.CanonicalEntityIDs(query.Entities)
-	entities := make([]EntityRef, 0, len(canonicalEntities))
-	for _, entity := range canonicalEntities {
-		entities = append(entities, EntityRef{ID: entity})
+	entitySpecs := query.EntitySpecs
+	if len(entitySpecs) == 0 {
+		entitySpecs = make([]domain.EntitySpec, 0, len(query.Entities))
+		for _, entity := range query.Entities {
+			entitySpecs = append(entitySpecs, domain.EntitySpec{ID: entity})
+		}
+	}
+	entities := make([]EntityRef, 0, len(entitySpecs))
+	for _, entity := range domain.CanonicalEntitySpecs(entitySpecs) {
+		entities = append(entities, EntityRef{
+			ID: entity.ID, Label: entity.Label, Role: entity.Role,
+			Aliases: append([]string(nil), entity.Aliases...),
+		})
 	}
 	requiredFacets := domain.RequiredFacetsFor(query.Kind)
 	goals := make([]EvidenceGoal, 0, len(requiredFacets))
 	sources := evidenceGoalSources(prepared)
 	freshness := evidenceGoalFreshness(prepared)
+	minimumCoverage := 1
+	if query.Kind == domain.QueryComparison {
+		minimumCoverage = max(2, len(entities))
+	}
 	for _, facet := range requiredFacets {
 		value := string(facet)
 		goals = append(goals, EvidenceGoal{
 			ID: value, Facet: value, Required: true,
-			Sources:   append([]agentapi.EvidenceSource(nil), sources...),
-			Freshness: freshness, MinimumCoverage: 1,
+			Sources: append([]agentapi.EvidenceSource(nil), sources...),
+			RequiredSources: requiredEvidenceSources(
+				prepared.analysis.QueryPlan.Kind, sources,
+			),
+			Freshness: freshness, MinimumCoverage: minimumCoverage,
 			HighRisk: freshness == agentapi.FreshnessBoundedLive,
 		})
 	}
@@ -187,12 +209,36 @@ func contractFromPreparation(
 		}
 	}
 	return TaskContract{
-		TaskID: prepared.request.RunID, Question: prepared.request.Question,
-		Objective: prepared.planning.CleanQuestion, Entities: entities,
+		TaskID: prepared.request.RunID, Objective: taskContractObjective(prepared),
+		Entities:           entities,
 		InvestigationGoals: investigationGoals,
 		EvidenceGoals:      goals,
 		Context:            taskContext,
 	}
+}
+
+func requiredEvidenceSources(kind domain.QueryKind, sources []agentapi.EvidenceSource) []agentapi.EvidenceSource {
+	if kind != domain.QueryComparison {
+		return nil
+	}
+	for _, source := range sources {
+		if source == agentapi.EvidenceSourceInternal {
+			return []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}
+		}
+	}
+	return nil
+}
+
+func taskContractObjective(prepared *preparation) string {
+	if prepared == nil {
+		return ""
+	}
+	if objective := investigation.BoundedSummary(
+		prepared.planning.CleanQuestion,
+	); objective != "" {
+		return objective
+	}
+	return investigation.BoundedSummary(prepared.request.Question)
 }
 
 func evidenceGoalSources(prepared *preparation) []agentapi.EvidenceSource {

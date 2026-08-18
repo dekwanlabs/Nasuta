@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
@@ -67,6 +69,14 @@ type verificationView struct {
 	StopReason StopReason   `json:"stop_reason"`
 }
 
+type subjectCoverageView struct {
+	EntityID      string   `json:"entity_id"`
+	CoveredFacets []string `json:"covered_facets"`
+	MissingFacets []string `json:"missing_facets"`
+	Sources       []string `json:"sources"`
+	Complete      bool     `json:"complete"`
+}
+
 type omissionView struct {
 	Claims            int `json:"claims"`
 	Goals             int `json:"goals"`
@@ -82,8 +92,10 @@ type verifiedEvidenceView struct {
 	PartialGoals      []string                    `json:"partial_goals"`
 	UnresolvedGoals   []string                    `json:"unresolved_goals"`
 	Limitations       []string                    `json:"limitations"`
+	LimitationsDetail *limitationsDetailRef       `json:"limitations_detail,omitempty"`
 	EvidenceUnits     []tool.EvidenceUnit         `json:"evidence_units"`
 	EvidenceConflicts []agentapi.EvidenceConflict `json:"evidence_conflicts"`
+	SubjectCoverage   []subjectCoverageView       `json:"subject_coverage,omitempty"`
 	Verification      verificationView            `json:"verification"`
 	Completeness      Completeness                `json:"completeness"`
 	// Omissions makes payload compaction visible to the synthesizer.
@@ -242,8 +254,10 @@ func verifyBundle(
 	unsupportedClaims := make([]unsupportedClaimView, 0)
 	limitations := make([]string, 0)
 	seenLimitations := make(map[string]struct{})
-	evidenceIndex := newEvidenceIndex(source.EvidenceUnits)
-	appendLimitation := func(value string) {
+	rawLimitations := make([]rawLimitation, 0)
+	rawLimitationIndex := 0
+	appendLegacyLimitation := func(value string) {
+		value = strings.TrimSpace(value)
 		if value == "" {
 			return
 		}
@@ -253,6 +267,30 @@ func verifyBundle(
 		seenLimitations[value] = struct{}{}
 		limitations = append(limitations, value)
 	}
+	appendLimitation := func(value string) {
+		appendLegacyLimitation(value)
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		rawLimitations = append(rawLimitations, rawLimitation{
+			Text: value, FirstSeen: rawLimitationIndex,
+		})
+		rawLimitationIndex++
+	}
+	appendLimitationFor := func(value, producerNodeID string, evidenceRefs []string) {
+		appendLegacyLimitation(value)
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		rawLimitations = append(rawLimitations, rawLimitation{
+			Text: value, ProducerNodeIDs: []string{producerNodeID},
+			EvidenceRefs: append([]string(nil), evidenceRefs...), FirstSeen: rawLimitationIndex,
+		})
+		rawLimitationIndex++
+	}
+	evidenceIndex := newEvidenceIndex(source.EvidenceUnits)
 
 	for _, handoff := range ledger.Handoffs {
 		var report reportView
@@ -277,20 +315,20 @@ func verifyBundle(
 					HighRisk:       findingHighRisk,
 					ReasonCode:     "canonical_evidence_unbound",
 				})
-				appendLimitation(fmt.Sprintf(
+				appendLimitationFor(fmt.Sprintf(
 					"Finding %d from investigation node %q was excluded because its evidence did not match the canonical ledger.",
 					index,
 					handoff.ProducerNodeID,
-				))
+				), handoff.ProducerNodeID, nil)
 				continue
 			}
 			if supportFacts.unboundCount > 0 {
-				appendLimitation(fmt.Sprintf(
+				appendLimitationFor(fmt.Sprintf(
 					"Finding %d from investigation node %q omitted %d evidence reference(s) that did not match the canonical ledger.",
 					index,
 					handoff.ProducerNodeID,
 					supportFacts.unboundCount,
-				))
+				), handoff.ProducerNodeID, evidenceReferences(boundEvidence))
 			}
 			support := claimSupported
 			if supportFacts.incompleteCoverage ||
@@ -298,11 +336,11 @@ func verifyBundle(
 					supportFacts.minimumTrustTier <
 						input.node.Verifier.HighRiskMinimumTrustTier {
 				support = claimPartial
-				appendLimitation(fmt.Sprintf(
+				appendLimitationFor(fmt.Sprintf(
 					"Finding %d from investigation node %q has partial evidence support.",
 					index,
 					handoff.ProducerNodeID,
-				))
+				), handoff.ProducerNodeID, evidenceReferences(boundEvidence))
 			}
 			claim := verifiedClaimView{
 				ProducerNodeID:     handoff.ProducerNodeID,
@@ -330,14 +368,14 @@ func verifyBundle(
 			}
 		}
 		for _, gap := range report.Gaps {
-			appendLimitation(gap)
+			appendLimitationFor(gap, handoff.ProducerNodeID, nil)
 		}
 	}
 	for _, task := range ledger.UnavailableTasks {
-		appendLimitation(fmt.Sprintf(
+		appendLimitationFor(fmt.Sprintf(
 			"Investigation task %q was unavailable.",
 			task.ProducerNodeID,
-		))
+		), task.ProducerNodeID, nil)
 	}
 
 	unresolved := make([]string, 0, len(required))
@@ -360,13 +398,24 @@ func verifyBundle(
 			goal,
 		))
 	}
+	subjectCoverage, subjectEvidenceInsufficient := verifySubjectCoverage(
+		input.node.Verifier.SubjectRequirements,
+		claims,
+		partialClaims,
+		appendLimitation,
+	)
 	completeness := verifiedCompleteness(
 		len(required),
 		len(required)-len(unresolved),
 		len(supported),
 		source.Completeness,
 	)
-	stopReason := stopForVerification(completeness, ledger)
+	completeness = subjectCompleteness(completeness, subjectCoverage)
+	stopReason := stopForVerification(
+		completeness,
+		ledger,
+		subjectEvidenceInsufficient,
+	)
 	evidenceUnits := evidence.CloneUnits(source.EvidenceUnits)
 	if evidenceUnits == nil {
 		evidenceUnits = []tool.EvidenceUnit{}
@@ -375,6 +424,17 @@ func verifyBundle(
 	if evidenceConflicts == nil {
 		evidenceConflicts = []agentapi.EvidenceConflict{}
 	}
+	var limitationsDetail *limitationsDetailRef
+	var artifacts []WorkflowArtifact
+	if input.node.OutputSchema.Version >= 2 {
+		normalized, err := normalizeLimitations(input.workflowRunID, rawLimitations)
+		if err != nil {
+			return verificationRunOutput{}, err
+		}
+		limitations = normalized.Primary
+		limitationsDetail = &normalized.Ref
+		artifacts = []WorkflowArtifact{normalized.Detail}
+	}
 	view := verifiedEvidenceView{
 		SupportedClaims:   claims,
 		PartialClaims:     partialClaims,
@@ -382,8 +442,10 @@ func verifyBundle(
 		PartialGoals:      partialGoals,
 		UnresolvedGoals:   unresolved,
 		Limitations:       limitations,
+		LimitationsDetail: limitationsDetail,
 		EvidenceUnits:     evidenceUnits,
 		EvidenceConflicts: evidenceConflicts,
+		SubjectCoverage:   subjectCoverage,
 		Verification: verificationView{
 			Decision: completeness, StopReason: stopReason,
 		},
@@ -418,6 +480,7 @@ func verifyBundle(
 		EvidenceUnits:     evidenceUnits,
 		EvidenceConflicts: evidenceConflicts,
 		Completeness:      completeness,
+		Artifacts:         artifacts,
 	}, input.maxBytes, input.schemas)
 	if err != nil {
 		return verificationRunOutput{}, err
@@ -566,8 +629,10 @@ func viewAtVerifiedSlot(
 		PartialGoals:      []string{},
 		UnresolvedGoals:   []string{},
 		Limitations:       []string{},
+		LimitationsDetail: full.LimitationsDetail,
 		EvidenceUnits:     []tool.EvidenceUnit{},
 		EvidenceConflicts: []agentapi.EvidenceConflict{},
+		SubjectCoverage:   append([]subjectCoverageView(nil), full.SubjectCoverage...),
 		Verification:      full.Verification,
 		Completeness:      full.Completeness,
 	}
@@ -667,12 +732,224 @@ func selectedEvidenceUnits(
 	return out
 }
 
+func evidenceReferences(items []findingEvidenceView) []string {
+	refs := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Reference != "" {
+			refs = append(refs, item.Reference)
+		}
+	}
+	return unionStrings(nil, refs)
+}
+
 func verifiedViewTokens(view verifiedEvidenceView) int {
 	payload, err := json.Marshal(view)
 	if err != nil {
 		return int(^uint(0) >> 1)
 	}
 	return tooloutput.EstimateTokens(string(payload))
+}
+
+func verifySubjectCoverage(
+	requirements []SubjectRequirement,
+	supportedClaims []verifiedClaimView,
+	partialClaims []verifiedClaimView,
+	appendLimitation func(string),
+) ([]subjectCoverageView, bool) {
+	if len(requirements) == 0 {
+		return nil, false
+	}
+	claims := make([]verifiedClaimView, 0, len(supportedClaims)+len(partialClaims))
+	claims = append(claims, supportedClaims...)
+	claims = append(claims, partialClaims...)
+	coverage := make([]subjectCoverageView, 0, len(requirements))
+	insufficient := false
+	for _, requirement := range requirements {
+		terms := subjectEntityTerms(requirement)
+		requiredFacets := stringSet(requirement.RequiredFacets)
+		coveredFacets := make(map[string]struct{}, len(requirement.RequiredFacets))
+		sources := make(map[agentapi.EvidenceSource]struct{}, len(requirement.RequiredSources))
+		for _, claim := range claims {
+			matched, matchedSources := subjectClaimSources(claim, terms)
+			if !matched {
+				continue
+			}
+			for _, facet := range claim.GoalIDs {
+				if _, required := requiredFacets[facet]; required {
+					coveredFacets[facet] = struct{}{}
+				}
+			}
+			for source := range matchedSources {
+				sources[source] = struct{}{}
+			}
+		}
+		covered := orderedSetValues(requirement.RequiredFacets, coveredFacets)
+		missingFacets := missingSetValues(requirement.RequiredFacets, coveredFacets)
+		missingSources := missingEvidenceSources(requirement.RequiredSources, sources)
+		availableSources := evidenceSourceStrings(sources)
+		complete := len(missingFacets) == 0 && len(missingSources) == 0
+		coverage = append(coverage, subjectCoverageView{
+			EntityID: requirement.EntityID, CoveredFacets: covered,
+			MissingFacets: missingFacets, Sources: availableSources,
+			Complete: complete,
+		})
+		if complete {
+			continue
+		}
+		insufficient = true
+		clauses := make([]string, 0, 2)
+		if len(missingFacets) > 0 {
+			clauses = append(clauses, "facets: "+strings.Join(missingFacets, ", "))
+		}
+		if len(missingSources) > 0 {
+			clauses = append(clauses, "sources: "+strings.Join(missingSources, ", "))
+		}
+		appendLimitation(fmt.Sprintf(
+			"Required entity %q is missing evidence for %s.",
+			requirement.EntityID,
+			strings.Join(clauses, "; "),
+		))
+	}
+	return coverage, insufficient
+}
+
+func subjectEntityTerms(requirement SubjectRequirement) []string {
+	terms := make([]string, 0, len(requirement.Aliases)+2)
+	terms = appendProjectionEntityTerm(terms, requirement.EntityID)
+	terms = appendProjectionEntityTerm(terms, requirement.Label)
+	for _, alias := range requirement.Aliases {
+		terms = appendProjectionEntityTerm(terms, alias)
+	}
+	return terms
+}
+
+func subjectClaimSources(
+	claim verifiedClaimView,
+	entityTerms []string,
+) (bool, map[agentapi.EvidenceSource]struct{}) {
+	sources := make(map[agentapi.EvidenceSource]struct{})
+	matched := false
+	for _, identity := range claim.EvidenceIdentities {
+		if !subjectIdentityMatches(identity, entityTerms) {
+			continue
+		}
+		matched = true
+		for _, source := range evidenceSourcesForIdentity(claim.ProducerNodeID, identity.SourceKind) {
+			sources[source] = struct{}{}
+		}
+	}
+	return matched, sources
+}
+
+func subjectIdentityMatches(
+	identity agentapi.EvidenceIdentity,
+	entityTerms []string,
+) bool {
+	if len(entityTerms) == 0 {
+		return false
+	}
+	haystack := canonicalProjectionEntityText(identity.Target + " " + identity.Section)
+	for _, term := range entityTerms {
+		if strings.Contains(haystack, term) {
+			return true
+		}
+	}
+	return false
+}
+
+func evidenceSourcesForIdentity(
+	producerNodeID string,
+	sourceKind string,
+) []agentapi.EvidenceSource {
+	nodeID := strings.ToLower(strings.TrimSpace(producerNodeID))
+	switch {
+	case strings.Contains(nodeID, ".runtime"):
+		return []agentapi.EvidenceSource{agentapi.EvidenceSourceRuntime}
+	case strings.Contains(nodeID, ".web"):
+		return []agentapi.EvidenceSource{agentapi.EvidenceSourceWeb}
+	case strings.Contains(nodeID, ".memory"):
+		return []agentapi.EvidenceSource{agentapi.EvidenceSourceMemory}
+	case strings.Contains(nodeID, ".code"), strings.Contains(nodeID, ".docs"),
+		strings.Contains(nodeID, ".service"):
+		return []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}
+	}
+	switch strings.ToLower(strings.TrimSpace(sourceKind)) {
+	case "runtime":
+		return []agentapi.EvidenceSource{agentapi.EvidenceSourceRuntime}
+	case "web", "external":
+		return []agentapi.EvidenceSource{agentapi.EvidenceSourceWeb}
+	case "memory":
+		return []agentapi.EvidenceSource{agentapi.EvidenceSourceMemory}
+	case "code", "codegraph", "service", "dependency", "runbook",
+		"generated_doc", "doc", "docs":
+		return []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}
+	default:
+		return nil
+	}
+}
+
+func orderedSetValues(order []string, values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range order {
+		if _, ok := values[value]; ok {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func missingSetValues(required []string, covered map[string]struct{}) []string {
+	out := make([]string, 0, len(required))
+	for _, value := range required {
+		if _, ok := covered[value]; !ok {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func missingEvidenceSources(
+	required []agentapi.EvidenceSource,
+	covered map[agentapi.EvidenceSource]struct{},
+) []string {
+	out := make([]string, 0, len(required))
+	for _, source := range required {
+		if _, ok := covered[source]; !ok {
+			out = append(out, string(source))
+		}
+	}
+	return out
+}
+
+func evidenceSourceStrings(values map[agentapi.EvidenceSource]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, string(value))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func subjectCompleteness(
+	base Completeness,
+	coverage []subjectCoverageView,
+) Completeness {
+	if len(coverage) == 0 {
+		return base
+	}
+	allComplete := true
+	coveredFacetCount := 0
+	for _, subject := range coverage {
+		allComplete = allComplete && subject.Complete
+		coveredFacetCount += len(subject.CoveredFacets)
+	}
+	if allComplete {
+		return base
+	}
+	if coveredFacetCount == 0 {
+		return Unavailable
+	}
+	return Partial
 }
 
 func verifiedCompleteness(
@@ -715,22 +992,26 @@ func stopForCompleteness(completeness Completeness) StopReason {
 func stopForVerification(
 	completeness Completeness,
 	ledger ledgerView,
+	evidenceInsufficient ...bool,
 ) StopReason {
+	insufficient := len(evidenceInsufficient) > 0 && evidenceInsufficient[0]
 	if completeness == Complete {
 		return StopRequiredGoalsCovered
 	}
 	if reason := unavailableStopReason(ledger.UnavailableTasks); reason != "" {
 		return reason
 	}
-	if ledger.Convergence == nil {
-		return StopCapabilityUnavailable
+	if ledger.Convergence != nil {
+		if ledger.Convergence.NewIdentityCount == 0 {
+			return StopNoNewEvidence
+		}
+		if ledger.Convergence.MaxDuplicateRatio > 0 &&
+			ledger.Convergence.DuplicateRatio > ledger.Convergence.MaxDuplicateRatio {
+			return StopDuplicateEvidence
+		}
 	}
-	if ledger.Convergence.NewIdentityCount == 0 {
-		return StopNoNewEvidence
-	}
-	if ledger.Convergence.MaxDuplicateRatio > 0 &&
-		ledger.Convergence.DuplicateRatio > ledger.Convergence.MaxDuplicateRatio {
-		return StopDuplicateEvidence
+	if insufficient {
+		return StopEvidenceInsufficient
 	}
 	return StopCapabilityUnavailable
 }

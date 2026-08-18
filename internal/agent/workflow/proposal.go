@@ -30,6 +30,7 @@ type CompilationPolicy struct {
 	RequiredGoals            []string
 	HighRiskGoals            []string
 	HighRiskMinimumTrustTier int
+	SubjectRequirements      []SubjectRequirement
 	JoinID                   string
 	JoinMode                 JoinMode
 	JoinInputSchema          agentapi.SchemaRef

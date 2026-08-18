@@ -63,17 +63,22 @@ func DefaultCapabilities(
 		},
 		{
 			id: "knowledge.web.research", agentID: "investigator.web",
-			role:        agentapi.RoleInvestigator,
-			purpose:     "Research current public evidence through the configured web provider.",
-			inputFacets: canonicalFacetValues(),
-			freshness:   agentapi.FreshnessCurrent,
+			role:    agentapi.RoleInvestigator,
+			purpose: "Research current public evidence through the configured web provider.",
+			inputFacets: []string{
+				string(domain.FacetExternalDependency),
+				string(domain.FacetBusinessDomain),
+			},
+			freshness: agentapi.FreshnessCurrent,
 		},
 		{
 			id: "knowledge.memory.recall", agentID: "investigator.memory",
-			role:        agentapi.RoleInvestigator,
-			purpose:     "Evaluate bounded recalled memory admitted by the task contract.",
-			inputFacets: canonicalFacetValues(),
-			freshness:   agentapi.FreshnessCurrent,
+			role:    agentapi.RoleInvestigator,
+			purpose: "Evaluate bounded recalled memory admitted by the task contract.",
+			inputFacets: []string{
+				string(domain.FacetBusinessDomain),
+			},
+			freshness: agentapi.FreshnessCurrent,
 		},
 		{
 			id: "evidence.semantic.verify", agentID: "delegation.verifier",

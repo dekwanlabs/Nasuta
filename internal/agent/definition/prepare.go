@@ -48,6 +48,12 @@ func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution,
 	if err != nil {
 		return preparedExecution{}, err
 	}
+	if len(tools.visibleIDs) > 0 && limits.MaxToolCalls <= 0 {
+		return preparedExecution{}, fmt.Errorf(
+			"agent definition %q requires a positive max_tool_calls budget",
+			definition.ID,
+		)
+	}
 	return preparedExecution{
 		definition: definition,
 		snapshot: agentapi.RunSnapshot{
@@ -99,10 +105,20 @@ func prepareRunLimits(
 	} else if maxSteps > definition.Budget.MaxSteps {
 		return agentapi.RunLimits{}, fmt.Errorf("run max_steps exceeds the definition budget")
 	}
-	maxToolCalls := requested.MaxToolCalls
-	if policy.MaxToolCalls > 0 &&
-		(maxToolCalls == 0 || policy.MaxToolCalls < maxToolCalls) {
-		maxToolCalls = policy.MaxToolCalls
+	maxToolCalls := definition.Budget.MaxToolCalls
+	if requested.MaxToolCalls > 0 {
+		if requested.MaxToolCalls > maxToolCalls {
+			return agentapi.RunLimits{}, fmt.Errorf("run max_tool_calls exceeds the definition budget")
+		}
+		maxToolCalls = requested.MaxToolCalls
+	}
+	if policy.MaxToolCalls > 0 {
+		if policy.MaxToolCalls > definition.Budget.MaxToolCalls {
+			return agentapi.RunLimits{}, fmt.Errorf("run policy max_tool_calls exceeds the definition budget")
+		}
+		if maxToolCalls == 0 || policy.MaxToolCalls < maxToolCalls {
+			maxToolCalls = policy.MaxToolCalls
+		}
 	}
 	return agentapi.RunLimits{
 		Deadline:       deadline,

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
@@ -15,7 +16,9 @@ import (
 )
 
 type dependencyEdge struct {
-	from, to, direction string
+	service   string
+	direction string
+	edge      domain.DependencyEdge
 }
 
 type dependencyCollection struct {
@@ -77,9 +80,11 @@ func (retrieve *Retriever) collectServices(ctx context.Context, services []strin
 	text := sb.String()
 	units := make([]tool.EvidenceUnit, 0, len(services))
 	for _, service := range services {
-		units = append(units, evidenceUnitForPart("service", service, text, tool.EvidenceCoverage{
-			Complete: true, Included: 1,
-		}))
+		match := svcMatches[service]
+		unit, ok := evidence.ServiceMetadataUnit(service, match.layer, match.lang, match.summary)
+		if ok {
+			units = append(units, unit)
+		}
 	}
 	addPart(partial{text: text, refs: refs, units: units, priority: partialPriorityService})
 }
@@ -218,18 +223,16 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 		if len(chunks) == 1 && chunks[0].section != "" {
 			label = title + " › " + chunks[0].section
 		}
-		sections := make([]string, 0, len(chunks))
-		seenSections := make(map[string]struct{}, len(chunks))
+		evidenceUnits := make([]tool.EvidenceUnit, 0, len(chunks))
 		for _, chunk := range chunks {
-			section := chunk.section
-			if section == "" {
-				section = fmt.Sprintf("chunk:%d", chunk.index)
+			unit, ok := evidence.RunbookChunkUnit(
+				chunk.docID, chunk.index, chunk.text, chunk.scope,
+				chunk.evidenceCls, chunk.trust,
+				tool.EvidenceCoverage{Partial: true, Included: 1},
+			)
+			if ok {
+				evidenceUnits = append(evidenceUnits, unit)
 			}
-			if _, duplicate := seenSections[section]; duplicate {
-				continue
-			}
-			seenSections[section] = struct{}{}
-			sections = append(sections, section)
 		}
 
 		titles = append(titles, title)
@@ -240,8 +243,8 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 			funcName:      label,
 			docID:         chunks[0].docID,
 			kind:          chunks[0].scope,
-			sections:      sections,
 			coverage:      tool.EvidenceCoverage{Partial: true, Included: len(chunks)},
+			evidenceUnits: evidenceUnits,
 			text:          text,
 			chars:         len(text),
 			denseScore:    bestScore,
@@ -282,7 +285,7 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 	var sb strings.Builder
 	sb.WriteString("## Dependency Chain\n")
 	for _, edge := range result.edges {
-		fmt.Fprintf(&sb, "- %s → %s (%s)\n", edge.from, edge.to, edge.direction)
+		fmt.Fprintf(&sb, "- %s → %s (%s)\n", edge.edge.From, edge.edge.To, edge.direction)
 	}
 	if result.omittedEdges > 0 || result.unqueried > 0 {
 		sb.WriteString("- ...(additional edges omitted)\n")
@@ -294,13 +297,17 @@ func (retrieve *Retriever) collectDeps(ctx context.Context, services []string, a
 	log.InfofCtx(ctx, "[qa] collect deps: services=%d/%d edges=%d omitted_edges=%d",
 		result.queried, len(services), len(result.edges), result.omittedEdges)
 	text := sb.String()
-	units := make([]tool.EvidenceUnit, 0, len(result.queriedServices))
-	for _, service := range result.queriedServices {
-		units = append(units, evidenceUnitForPart("dependency", service, text, tool.EvidenceCoverage{
-			Complete: result.omittedEdges == 0 && result.unqueried == 0,
-			Partial:  result.omittedEdges > 0 || result.unqueried > 0,
-			Included: len(result.edges), OmittedItems: result.omittedEdges,
-		}))
+	coverage := tool.EvidenceCoverage{
+		Complete: result.omittedEdges == 0 && result.unqueried == 0,
+		Partial:  result.omittedEdges > 0 || result.unqueried > 0,
+		Included: 1, OmittedItems: result.omittedEdges,
+	}
+	units := make([]tool.EvidenceUnit, 0, len(result.edges))
+	for _, item := range result.edges {
+		unit, ok := evidence.DependencyUnit(item.service, item.direction, item.edge, coverage)
+		if ok {
+			units = append(units, unit)
+		}
 	}
 	addPart(partial{text: text, refs: refs, units: units, priority: partialPriorityDependency})
 }
@@ -360,7 +367,7 @@ func (retrieve *Retriever) collectDependencyEdges(ctx context.Context, services 
 		}
 		appendEdges := func(direction string, candidates []domain.DependencyEdge) {
 			for _, edge := range candidates {
-				key := direction + "\x00" + edge.From + "\x00" + edge.To
+				key := service + "\x00" + direction + "\x00" + edge.From + "\x00" + edge.To + "\x00" + string(edge.Type)
 				if _, duplicate := seen[key]; duplicate {
 					continue
 				}
@@ -369,7 +376,7 @@ func (retrieve *Retriever) collectDependencyEdges(ctx context.Context, services 
 					continue
 				}
 				seen[key] = struct{}{}
-				edges = append(edges, dependencyEdge{from: edge.From, to: edge.To, direction: direction})
+				edges = append(edges, dependencyEdge{service: service, direction: direction, edge: edge})
 			}
 		}
 		appendEdges("upstream", result.trace.Upstream)

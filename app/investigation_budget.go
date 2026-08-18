@@ -52,7 +52,13 @@ func investigationBudgets(
 		}
 		maxToolCalls := int64(0)
 		if requireTools {
-			maxToolCalls = int64(definition.Budget.MaxSteps)
+			if definition.Budget.MaxToolCalls <= 0 {
+				return workflow.NodeBudget{}, fmt.Errorf(
+					"investigation agent definition %q requires max_tool_calls",
+					definition.ID,
+				)
+			}
+			maxToolCalls = definition.Budget.MaxToolCalls
 		}
 		if err := registerInvestigatorPayload(definition); err != nil {
 			return workflow.NodeBudget{}, err

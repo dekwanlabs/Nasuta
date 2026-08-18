@@ -288,6 +288,12 @@ func (service *Service) finishResumedRun(
 	)
 	cancel()
 	if finishErr != nil {
+		finishErr = fmt.Errorf(
+			"%w: finish resumed workflow run %q: %w",
+			ErrRunPersistence,
+			workflowRunID,
+			finishErr,
+		)
 		if runErr != nil {
 			return resumed, errors.Join(runErr, finishErr)
 		}

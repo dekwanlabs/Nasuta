@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
@@ -155,7 +158,12 @@ func mountExtension(platform *Platform, mux *http.ServeMux, extension Extension)
 
 // MustRun starts one extension host and terminates on construction or serving failure.
 func MustRun(factory ExtensionFactory) {
-	if err := Run(context.Background(), factory); err != nil {
+	// Keep the process lifecycle tied to the host signals used by terminals,
+	// IDEs, and debuggers. Run can then shut down the HTTP server and release
+	// the configured port instead of leaving a stale service behind.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := Run(ctx, factory); err != nil {
 		log.Fatalf("run application: %v", err)
 	}
 }

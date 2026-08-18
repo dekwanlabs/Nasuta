@@ -1,3 +1,5 @@
-Complete the configured analyses in one response. Return JSON only with exactly these top-level properties: {{ .Properties }}.
+Complete the configured analyses in one response.
+Return exactly one JSON object with exactly these top-level properties: {{ .Properties }}.
+Merge every requested section into that one object. Do not return one JSON object per contract, multiple adjacent JSON values, a JSON array, Markdown fences, comments, or explanatory text.
 
 {{ .Contracts }}

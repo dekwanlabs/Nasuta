@@ -797,9 +797,8 @@ func (retrieve *Retriever) formatCodePool(ctx context.Context, pool []codeDoc) [
 			continue
 		}
 		partText := text.String()
-		unit := evidenceUnitForCodeDoc(d, partText)
 		parts = append(parts, partial{
-			text: partText, refs: []Reference{ref}, units: []tool.EvidenceUnit{unit},
+			text: partText, refs: []Reference{ref}, units: evidenceUnitsForCodeDoc(d, partText),
 			priority: partialPriorityEvidence, score: d.candidateScore(),
 		})
 	}

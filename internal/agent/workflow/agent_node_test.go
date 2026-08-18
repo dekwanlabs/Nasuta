@@ -48,7 +48,8 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 		ParallelGroup: "review",
 	}
 	result, err := executor.Execute(t.Context(), NodeRequest{
-		WorkflowRunID: "workflow_run_1", Node: node, Inputs: []Handoff{input},
+		WorkflowRunID: "workflow_run_1", ParentRunID: "qa_parent_1",
+		Node: node, Inputs: []Handoff{input},
 		Actor: agentapi.Actor{UserID: 7, TenantID: "tenant-a"},
 		EffectivePermissions: agentapi.PermissionPolicy{
 			Scopes: []string{"knowledge.read", "knowledge.write"},
@@ -66,6 +67,13 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 		runtime.request.Correlation.NodeID != "review.a" ||
 		runtime.request.Actor.UserID != 7 {
 		t.Fatalf("runtime request = %+v", runtime.request)
+	}
+	if runtime.projectedChildRunID != result.AgentRunID ||
+		runtime.projectedParentRunID != "qa_parent_1" ||
+		runtime.projectedWorkflowRunID != "workflow_run_1" ||
+		runtime.projectedNodeID != "review.a" ||
+		!runtime.projectionStopped {
+		t.Fatalf("tool projection = %+v", runtime)
 	}
 	if len(runtime.request.Permissions.Scopes) != 1 ||
 		runtime.request.Permissions.Scopes[0] != "knowledge.read" ||
@@ -187,10 +195,15 @@ func TestAgentNodeExecutorMapsRetryableRuntimeFailure(t *testing.T) {
 }
 
 type capturingAgentRuntime struct {
-	request agentapi.RunRequest
-	result  agentapi.RunResult
-	err     error
-	called  bool
+	request                agentapi.RunRequest
+	result                 agentapi.RunResult
+	err                    error
+	called                 bool
+	projectedChildRunID    string
+	projectedParentRunID   string
+	projectedWorkflowRunID string
+	projectedNodeID        string
+	projectionStopped      bool
 }
 
 func (runtime *capturingAgentRuntime) Run(
@@ -200,4 +213,20 @@ func (runtime *capturingAgentRuntime) Run(
 	runtime.called = true
 	runtime.request = request
 	return runtime.result, runtime.err
+}
+
+// ProjectToolEvents records the child-to-parent projection requested by the executor.
+func (runtime *capturingAgentRuntime) ProjectToolEvents(
+	childRunID string,
+	parentRunID string,
+	workflowRunID string,
+	nodeID string,
+) func() {
+	runtime.projectedChildRunID = childRunID
+	runtime.projectedParentRunID = parentRunID
+	runtime.projectedWorkflowRunID = workflowRunID
+	runtime.projectedNodeID = nodeID
+	return func() {
+		runtime.projectionStopped = true
+	}
 }

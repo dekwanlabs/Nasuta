@@ -12,6 +12,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -201,6 +202,11 @@ func hashMessages(messages []llm.Message) string {
 	return hashBytes(raw)
 }
 
+type outputRecoveryContext struct {
+	AgentID string
+	Input   json.RawMessage
+}
+
 func mapResult(
 	runID string,
 	result *execution.RunResult,
@@ -210,6 +216,7 @@ func mapResult(
 	preRetrieved []agentapi.Reference,
 	schemas *agentapi.SchemaRegistry,
 	outputSchema agentapi.SchemaRef,
+	recovery ...outputRecoveryContext,
 ) (agentapi.RunResult, run.Outcome) {
 	if cancelCause != nil {
 		outcome := execution.OutcomeFor(result, preRetrieved, cancelCause)
@@ -256,6 +263,22 @@ func mapResult(
 	publicResult.References = append([]agentapi.Reference(nil), outcome.References...)
 	publicResult.Messages = publicMessages(outcome.SessionMessages)
 	output, err := validatedOutput(schemas, outputSchema, outcome.Answer)
+	if err != nil && outputSchema.ID == "investigation.report" && len(recovery) > 0 {
+		if fallback, fallbackErr := recoverInvestigationReport(
+			schemas, outputSchema, recovery[0], err,
+		); fallbackErr == nil {
+			validationErr := err
+			output = fallback
+			err = nil
+			outcome.Answer = string(fallback)
+			publicResult.Text = outcome.Answer
+			log.WarnfCtx(
+				log.WithTraceID(context.Background(), runID),
+				"[agent] run %s recovered invalid %s output for %s as unavailable report: %v",
+				runID, outputSchema.ID, recovery[0].AgentID, validationErr,
+			)
+		}
+	}
 	if err != nil {
 		outcome.Status = run.StatusFailed
 		outcome.ErrorCode = "invalid_output"
@@ -275,6 +298,11 @@ func mapResult(
 		return publicResult, outcome
 	}
 	publicResult.Output = output
+	var text string
+	if err := json.Unmarshal(output, &text); err == nil {
+		publicResult.Text = text
+		outcome.Answer = text
+	}
 	return publicResult, outcome
 }
 
@@ -337,17 +365,54 @@ func retryableError(err error) bool {
 	return errors.As(err, &classified) && classified.Retryable()
 }
 
+func canonicalStructuredOutput(answer string) (json.RawMessage, error) {
+	value := strings.TrimSpace(answer)
+	if json.Valid([]byte(value)) {
+		return json.RawMessage(value), nil
+	}
+
+	lines := strings.Split(value, "\n")
+	if len(lines) < 3 || strings.TrimSpace(lines[len(lines)-1]) != "```" {
+		return nil, errors.New("structured output must be JSON or one JSON fence")
+	}
+	opener := strings.ToLower(strings.TrimSpace(lines[0]))
+	if opener != "```" && opener != "```json" {
+		return nil, fmt.Errorf("unsupported structured output fence %q", opener)
+	}
+	for _, line := range lines[1 : len(lines)-1] {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			return nil, errors.New("structured output contains multiple fences")
+		}
+	}
+	payload := strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+	if !json.Valid([]byte(payload)) {
+		return nil, errors.New("fenced structured output is not valid JSON")
+	}
+	return json.RawMessage(payload), nil
+}
+
 func validatedOutput(
 	schemas *agentapi.SchemaRegistry,
 	ref agentapi.SchemaRef,
 	answer string,
 ) (json.RawMessage, error) {
-	raw := json.RawMessage(strings.TrimSpace(answer))
-	var rawErr error
-	if json.Valid(raw) {
-		rawErr = schemas.Validate(ref, raw)
-		if rawErr == nil {
+	raw, rawErr := canonicalStructuredOutput(answer)
+	if rawErr == nil {
+		if err := schemas.Validate(ref, raw); err == nil {
 			return append(json.RawMessage(nil), raw...), nil
+		} else {
+			rawErr = err
+		}
+	}
+	// RepairJSON covers the common truncation/fence/trailing-comma defects
+	// without altering valid string contents. Schema validation remains the
+	// final arbiter, so a repair can never silently widen the contract.
+	repaired := llm.RepairJSON(answer)
+	if repaired != strings.TrimSpace(answer) && json.Valid([]byte(repaired)) {
+		if err := schemas.Validate(ref, json.RawMessage(repaired)); err == nil {
+			return json.RawMessage(repaired), nil
+		} else {
+			rawErr = err
 		}
 	}
 	encoded, err := json.Marshal(answer)
@@ -356,10 +421,71 @@ func validatedOutput(
 	}
 	if err := schemas.Validate(ref, encoded); err == nil {
 		return encoded, nil
-	} else if rawErr == nil {
-		rawErr = err
 	}
-	return nil, fmt.Errorf("definition output does not match schema %q version %d: %w", ref.ID, ref.Version, rawErr)
+	return nil, fmt.Errorf(
+		"definition output does not match schema %q version %d: %w",
+		ref.ID, ref.Version, rawErr,
+	)
+}
+
+func recoverInvestigationReport(
+	schemas *agentapi.SchemaRegistry,
+	ref agentapi.SchemaRef,
+	context outputRecoveryContext,
+	validationErr error,
+) (json.RawMessage, error) {
+	if context.AgentID == "" || len(context.Input) == 0 {
+		return nil, fmt.Errorf("investigation report recovery context is incomplete: %w", validationErr)
+	}
+	focus := map[string]string{
+		"investigator.code":    "code",
+		"investigator.runtime": "runtime",
+		"investigator.docs":    "docs",
+		"investigator.web":     "web",
+		"investigator.memory":  "memory",
+	}[context.AgentID]
+	if focus == "" {
+		return nil, fmt.Errorf("unsupported investigation agent %q: %w", context.AgentID, validationErr)
+	}
+	var contract struct {
+		EvidenceGoals []struct {
+			Facet string `json:"facet"`
+		} `json:"evidence_goals"`
+	}
+	if err := json.Unmarshal(context.Input, &contract); err != nil {
+		return nil, fmt.Errorf("decode investigation contract for recovery: %w", err)
+	}
+	unresolved := make([]string, 0, len(contract.EvidenceGoals))
+	seen := make(map[string]struct{}, len(contract.EvidenceGoals))
+	for _, goal := range contract.EvidenceGoals {
+		facet := strings.TrimSpace(goal.Facet)
+		if facet == "" {
+			continue
+		}
+		if _, ok := seen[facet]; ok {
+			continue
+		}
+		seen[facet] = struct{}{}
+		unresolved = append(unresolved, facet)
+	}
+	fallback := map[string]any{
+		"focus":    focus,
+		"summary":  "The investigator could not produce a schema-valid report; no unsupported claim was accepted.",
+		"findings": []any{},
+		"gaps": []string{
+			"The model output failed investigation.report validation and was downgraded to an unavailable report.",
+		},
+		"covered_goals":    []string{},
+		"unresolved_goals": unresolved,
+	}
+	encoded, err := json.Marshal(fallback)
+	if err != nil {
+		return nil, fmt.Errorf("encode recovered investigation report: %w", err)
+	}
+	if err := schemas.Validate(ref, encoded); err != nil {
+		return nil, fmt.Errorf("validate recovered investigation report: %w", err)
+	}
+	return encoded, nil
 }
 
 func failedRun(runID, code string, err error) agentapi.RunResult {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -179,9 +180,14 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	prepared.execution.HighRisk = assessment.HighRisk
 	if prepared.execution.Path == executionPathWorkflow &&
 		svc.usesWorkflowEscalator() {
+		var bindingChecker workflowEscalationBindingChecker
+		if checker, ok := svc.workflowEscalator.(workflowEscalationBindingChecker); ok {
+			bindingChecker = checker
+		}
 		capability, facets, err := resolveWorkflowEscalationCapability(
 			contract,
 			svc.capabilities,
+			bindingChecker,
 		)
 		if err != nil {
 			log.WarnfCtx(
@@ -267,9 +273,14 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	}
 }
 
+type workflowEscalationBindingChecker interface {
+	SupportsWorkflowEscalation(agentapi.CapabilityRef, string) bool
+}
+
 func resolveWorkflowEscalationCapability(
 	contract TaskContract,
 	resolver WorkflowCapabilityResolver,
+	bindingChecker workflowEscalationBindingChecker,
 ) (agentapi.Capability, []string, error) {
 	if resolver == nil {
 		return agentapi.Capability{}, nil, fmt.Errorf(
@@ -322,6 +333,16 @@ func resolveWorkflowEscalationCapability(
 			resolutionErrors = append(
 				resolutionErrors,
 				fmt.Sprintf("%s: capability is not an enabled read-only investigator", candidate.id),
+			)
+			continue
+		}
+		if bindingChecker != nil && !bindingChecker.SupportsWorkflowEscalation(
+			agentapi.CapabilityRef{ID: capability.ID, Version: capability.Version},
+			capability.ContentHash,
+		) {
+			resolutionErrors = append(
+				resolutionErrors,
+				fmt.Sprintf("%s: workflow binding is unavailable", candidate.id),
 			)
 			continue
 		}
@@ -569,26 +590,9 @@ func executionCapability(
 	source agentapi.EvidenceSource,
 	facet string,
 ) string {
-	switch source {
-	case agentapi.EvidenceSourceMemory:
-		return "knowledge.memory.recall"
-	case agentapi.EvidenceSourceWeb:
-		return "knowledge.web.research"
-	case agentapi.EvidenceSourceRuntime:
-		return "knowledge.runtime.observe"
-	case agentapi.EvidenceSourceInternal:
-		switch facet {
-		case "entrypoint", "core_flow", "data_and_state":
-			return "knowledge.code.inspect"
-		case "system_boundary", "external_dependency",
-			"runtime_and_operations":
-			return "knowledge.service.trace"
-		case "business_domain":
-			return "knowledge.docs.verify"
-		default:
-			return "knowledge.internal.inspect"
-		}
-	default:
-		return ""
+	selection, ok := investigation.Select(source, facet)
+	if ok {
+		return selection.CapabilityID
 	}
+	return ""
 }

@@ -7,6 +7,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	platformagent "github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -40,9 +41,8 @@ func TestMarshalInvestigationContractBoundsSeedMaterial(t *testing.T) {
 		)
 	}
 	contract := platformagent.TaskContract{
-		TaskID: "qa_1", Question: "Why is checkout failing?",
-		Objective: "Trace the checkout failure.",
-		Entities:  []platformagent.EntityRef{{ID: "Checkout.Place"}},
+		TaskID: "qa_1", Objective: "Trace the checkout failure.",
+		Entities: []platformagent.EntityRef{{ID: "Checkout.Place"}},
 		EvidenceGoals: []platformagent.EvidenceGoal{{
 			ID: "core_flow", Facet: "core_flow", Required: true,
 			Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
@@ -59,6 +59,13 @@ func TestMarshalInvestigationContractBoundsSeedMaterial(t *testing.T) {
 	}
 	if tokens := tooloutput.EstimateTokens(string(input)); tokens > budget {
 		t.Fatalf("payload tokens = %d, budget = %d", tokens, budget)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(input, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := fields["question"]; exists {
+		t.Fatal("child task contract contains parent question")
 	}
 
 	var prepared platformagent.TaskContract
@@ -103,13 +110,21 @@ func TestMarshalInvestigationContractBoundsSeedMaterial(t *testing.T) {
 	}
 }
 
-func TestMarshalInvestigationContractRejectsOversizedBase(t *testing.T) {
+func TestMarshalInvestigationContractBoundsObjective(t *testing.T) {
 	contract := platformagent.TaskContract{
-		TaskID: "qa_1", Question: strings.Repeat("question ", 1000),
-		Objective: "Investigate the request.",
+		TaskID:    "qa_1",
+		Objective: strings.Repeat("investigate checkout failure ", 1000),
 	}
-	_, err := marshalInvestigationContract(contract, 32)
-	if err == nil || !strings.Contains(err.Error(), "base=") {
-		t.Fatalf("error = %v", err)
+	input, err := marshalInvestigationContract(contract, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prepared platformagent.TaskContract
+	if err := json.Unmarshal(input, &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Objective == contract.Objective ||
+		tooloutput.EstimateTokens(prepared.Objective) > investigation.MaxTaskSummaryTokens {
+		t.Fatalf("objective was not bounded: %d tokens", tooloutput.EstimateTokens(prepared.Objective))
 	}
 }

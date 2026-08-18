@@ -780,6 +780,12 @@ func (persistence *recordingWorkflowPersistence) StartNode(
 	return nil
 }
 
+func (persistence *recordingWorkflowPersistence) PutWorkflowArtifact(
+	_ context.Context, _ WorkflowArtifact,
+) error {
+	return nil
+}
+
 func (persistence *recordingWorkflowPersistence) SucceedNode(
 	_ context.Context,
 	workflowRunID string,
@@ -1201,4 +1207,19 @@ func cloneGateDecision(decision GateDecision) GateDecision {
 	decision.ReasonCodes = append([]string(nil), decision.ReasonCodes...)
 	decision.FindingIDs = append([]string(nil), decision.FindingIDs...)
 	return decision
+}
+
+func TestEvidenceInsufficientStatusSurvivesWorkflowBoundaries(t *testing.T) {
+	runErr := convergenceError{
+		reason: StopEvidenceInsufficient, message: "required subject evidence is incomplete",
+	}
+	if status, code := resultStatus(runErr); status != RunFailed || code != "evidence_insufficient" {
+		t.Fatalf("resultStatus() = %s/%q", status, code)
+	}
+	if status, code := nodeResultStatus(NodeRequest{}, runErr); status != RunFailed || code != "evidence_insufficient" {
+		t.Fatalf("nodeResultStatus() = %s/%q", status, code)
+	}
+	if reason := checkpointStopReason("evidence_insufficient"); reason != StopEvidenceInsufficient {
+		t.Fatalf("checkpointStopReason() = %q", reason)
+	}
 }

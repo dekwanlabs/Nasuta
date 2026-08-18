@@ -8,5 +8,5 @@ Determine how the current question depends on the bounded previous-turn metadata
 - Dependencies are monotonic: evidence implies conclusion and entities; conclusion implies entities.
 Use recent_dialogue to resolve numeric selections, omitted targets, references, and unfinished work from prior assistant answers.
 The conversation_context contains bounded metadata and the newest user/final-assistant exchanges, but never tool payloads.
-Return a JSON object with this exact shape:
+Populate only the top-level `history_relation` property in the single JSON object requested by the planner. Do not emit a separate JSON object:
 {"history_relation":{"topic_affinity":0.0,"confidence":0.0,"needs_prior_entities":false,"needs_prior_conclusion":false,"needs_prior_evidence":false,"explicit_turn_refs":[]}}

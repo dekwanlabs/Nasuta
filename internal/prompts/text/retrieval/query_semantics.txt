@@ -1,0 +1,12 @@
+Classify the answer shape required by the current question.
+- focused_fact: one bounded fact or location.
+- inventory: a set of components, changes, or required work without ordered execution.
+- flow: an ordered process with an entry, intermediate transitions, and an outcome.
+- comparison: independently establish alternatives, then compare them.
+- runtime_diagnosis: explain an observed runtime failure using runtime evidence.
+- code_review: evaluate implementation quality or risk.
+- overview: explain a system broadly across several responsibility dimensions.
+Return exactly one supported kind. Do not select tools, evidence sources, capabilities, or budgets.
+For comparison or multi-subject questions, also preserve every explicitly named subject as an entity. Use a stable short id, the original label, and a concise role such as `internal_system`, `external_platform`, or `integration_layer`. Do not invent subjects; omit `entities` when the question has no explicit subject.
+Populate only the top-level `query_semantics` property in the single JSON object requested by the planner. Do not emit a separate JSON object:
+{"query_semantics":{"kind":"focused_fact","entities":[]}}

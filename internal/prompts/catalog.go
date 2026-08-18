@@ -48,13 +48,14 @@ const (
 	AgentCatalogReviewer            ID = "agent.catalog.reviewer"
 	AgentCatalogAdjudicator         ID = "agent.catalog.adjudicator"
 
-	RetrievalPlanner     ID = "retrieval.planner"
-	RetrievalRouting     ID = "retrieval.routing"
-	RetrievalToolRouting ID = "retrieval.tool_routing"
-	RetrievalQueryTerms  ID = "retrieval.query_terms"
-	RetrievalTime        ID = "retrieval.time"
-	RetrievalHistory     ID = "retrieval.history"
-	RetrievalExecution   ID = "retrieval.execution"
+	RetrievalPlanner        ID = "retrieval.planner"
+	RetrievalRouting        ID = "retrieval.routing"
+	RetrievalToolRouting    ID = "retrieval.tool_routing"
+	RetrievalQueryTerms     ID = "retrieval.query_terms"
+	RetrievalQuerySemantics ID = "retrieval.query_semantics"
+	RetrievalTime           ID = "retrieval.time"
+	RetrievalHistory        ID = "retrieval.history"
+	RetrievalExecution      ID = "retrieval.execution"
 
 	MemoryProbe         ID = "memory.probe"
 	MemoryExtract       ID = "memory.extract"
@@ -138,6 +139,7 @@ var idFiles = map[ID]string{
 	RetrievalRouting:                       "retrieval/routing.txt",
 	RetrievalToolRouting:                   "retrieval/tool_routing.txt",
 	RetrievalQueryTerms:                    "retrieval/query_terms.txt",
+	RetrievalQuerySemantics:                "retrieval/query_semantics.txt",
 	RetrievalTime:                          "retrieval/time.txt",
 	RetrievalHistory:                       "retrieval/history.txt",
 	RetrievalExecution:                     "retrieval/execution.txt",

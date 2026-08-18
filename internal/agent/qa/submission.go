@@ -128,10 +128,7 @@ func (svc *Service) submitInvestigation(
 			err,
 		)
 	}
-	objective := strings.TrimSpace(prepared.planning.CleanQuestion)
-	if objective == "" {
-		objective = strings.TrimSpace(question)
-	}
+	objective := taskContractObjective(prepared)
 	var (
 		startErr       error
 		startErrorCode = "investigation_start_failed"

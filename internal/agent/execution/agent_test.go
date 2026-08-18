@@ -348,13 +348,25 @@ func TestRunAllowsDirectAnswerWithoutPreferredTool(t *testing.T) {
 	}
 }
 
-func TestRunStopsBeforeToolExecutionWhenToolCallBudgetIsExhausted(t *testing.T) {
+func TestRunForcesConclusionWhenParallelToolCallsExceedBudget(t *testing.T) {
 	var modelCalls int32
+	var conclusionUsedTools atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		drainRequestBody(r)
-		atomic.AddInt32(&modelCalls, 1)
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		call := atomic.AddInt32(&modelCalls, 1)
 		w.Header().Set("Content-Type", "text/event-stream")
-		writeTestSSE(t, w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"evidence","arguments":"{}"}},{"index":1,"id":"call-2","type":"function","function":{"name":"evidence","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+		if call == 1 {
+			writeTestSSE(t, w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"evidence","arguments":"{}"}},{"index":1,"id":"call-2","type":"function","function":{"name":"evidence","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+			return
+		}
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Errorf("decode conclusion request: %v", err)
+		}
+		_, conclusionUsedToolsValue := request["tools"]
+		conclusionUsedTools.Store(conclusionUsedToolsValue)
+		writeTestSSE(t, w, `{"choices":[{"delta":{"content":"已根据现有证据完成总结。"},"finish_reason":"stop"}]}`)
 	}))
 	defer server.Close()
 
@@ -384,18 +396,32 @@ func TestRunStopsBeforeToolExecutionWhenToolCallBudgetIsExhausted(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !errors.Is(result.Err, ErrToolCallBudgetExhausted) {
-		t.Fatalf("result error = %v, want tool call budget exhaustion", result.Err)
+	if result.Err != nil || result.Answer != "已根据现有证据完成总结。" ||
+		!result.ForcedConclusion || !result.Evidence.ForcedConclusion {
+		t.Fatalf("result = %#v", result)
 	}
-	if result.Evidence.ToolCallCount != 1 || atomic.LoadInt32(&toolCalls) != 1 {
+	if result.Evidence.ToolCallCount != 1 ||
+		result.Evidence.ResultCount != 1 ||
+		atomic.LoadInt32(&toolCalls) != 1 {
 		t.Fatalf(
-			"evidence calls=%d executed calls=%d",
+			"evidence calls=%d results=%d executed calls=%d",
 			result.Evidence.ToolCallCount,
+			result.Evidence.ResultCount,
 			atomic.LoadInt32(&toolCalls),
 		)
 	}
-	if atomic.LoadInt32(&modelCalls) != 1 {
-		t.Fatalf("model calls = %d, want 1", atomic.LoadInt32(&modelCalls))
+	if atomic.LoadInt32(&modelCalls) != 2 || conclusionUsedTools.Load() {
+		t.Fatalf(
+			"model calls = %d, conclusion used tools = %t",
+			atomic.LoadInt32(&modelCalls),
+			conclusionUsedTools.Load(),
+		)
+	}
+	if len(result.SessionMessages) != 3 ||
+		result.SessionMessages[1].ToolCallID != "call-1" ||
+		result.SessionMessages[2].ToolCallID != "call-2" ||
+		!strings.Contains(result.SessionMessages[2].Content, "tool_call_budget_exhausted") {
+		t.Fatalf("session messages = %#v", result.SessionMessages)
 	}
 }
 
@@ -1388,5 +1414,35 @@ func TestForceConclusionRejectsAnswerContractViolation(t *testing.T) {
 		if step.Kind == StepKindAnswer {
 			t.Fatalf("invalid answer step was recorded: %#v", step)
 		}
+	}
+}
+
+func TestContinueIfNeededPreservesPartialContentOnProviderError(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			writeTestSSE(t, w, `{"choices":[{"delta":{"content":"partial answer"},"finish_reason":"length"}]}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"continuation rejected"}}`))
+	}))
+	defer srv.Close()
+
+	agent := newTestAgent(t, srv.URL)
+	agent.cfg.MaxContinueRounds = 1
+	res, err := agent.llm.ChatWithToolsMax(t.Context(), nil, nil, nil, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, continuationErr := agent.continueIfNeeded(t.Context(), nil, res, 100, nil)
+	if continuationErr == nil || !strings.Contains(continuationErr.Error(), "continuation round 1") {
+		t.Fatalf("continuation error = %v", continuationErr)
+	}
+	if got != res || got.Content != "partial answer" || got.FinishReason != llm.FinishLength {
+		t.Fatalf("partial result = %+v", got)
 	}
 }

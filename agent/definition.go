@@ -60,10 +60,12 @@ type ToolPolicy struct {
 }
 
 type BudgetPolicy struct {
-	Timeout           time.Duration `json:"timeout"`
-	MaxSteps          int           `json:"max_steps"`
-	ContextTokens     int           `json:"context_tokens"`
-	MaxContinueRounds int           `json:"max_continue_rounds,omitempty"`
+	Timeout            time.Duration `json:"timeout"`
+	MaxSteps           int           `json:"max_steps"`
+	MaxToolCalls       int64         `json:"max_tool_calls,omitempty"`
+	ContextTokens      int           `json:"context_tokens"`
+	MaxToolResultBytes int           `json:"max_tool_result_bytes,omitempty"`
+	MaxContinueRounds  int           `json:"max_continue_rounds,omitempty"`
 }
 
 type PermissionPolicy struct {
@@ -115,6 +117,12 @@ func Prepare(definition Definition) (Definition, error) {
 	}
 	if prepared.Budget.Timeout <= 0 || prepared.Budget.MaxSteps <= 0 || prepared.Budget.ContextTokens <= 0 {
 		return Definition{}, fmt.Errorf("agent definition %q budgets must be positive", prepared.ID)
+	}
+	if prepared.Budget.MaxToolCalls < 0 {
+		return Definition{}, fmt.Errorf("agent definition %q max tool calls cannot be negative", prepared.ID)
+	}
+	if prepared.Budget.MaxToolResultBytes < 0 {
+		return Definition{}, fmt.Errorf("agent definition %q max tool result bytes cannot be negative", prepared.ID)
 	}
 	if prepared.Budget.MaxContinueRounds < 0 {
 		return Definition{}, fmt.Errorf("agent definition %q continuation rounds cannot be negative", prepared.ID)

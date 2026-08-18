@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -90,14 +91,44 @@ func (p *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 		go p.history.Run(ctx)
 	}
 	go p.recoverStartupRuns(ctx, workflowRecoveryCutoff)
+	// Bind the socket before reporting that the server is listening. This makes
+	// address conflicts deterministic and prevents a misleading startup log.
+	listener, err := net.Listen("tcp", p.cfg.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("http server: listen tcp %s: %w", p.cfg.HTTPAddr, err)
+	}
+
+	server := &http.Server{
+		Addr:    p.cfg.HTTPAddr,
+		Handler: routes.TraceMiddleware(mux),
+	}
 	log.Infof("[server] listening on %s (MCP: /mcp, webhook: /internal/vcs-hook, api: /api)", p.cfg.HTTPAddr)
 	if p.cfg.AuthToken == "" && p.auth.keyAuth == nil {
 		log.Warnf("[server] WARNING: no MCP authentication configured, /mcp is unauthenticated")
 	}
-	if err := http.ListenAndServe(p.cfg.HTTPAddr, routes.TraceMiddleware(mux)); err != nil {
-		return fmt.Errorf("http server: %w", err)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(listener)
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("http server shutdown: %w", err)
+		}
+		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("http server: %w", err)
+		}
+		return nil
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("http server: %w", err)
+		}
+		return nil
 	}
-	return nil
 }
 
 // recoverStartupRuns resumes work left active by an earlier process.

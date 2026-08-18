@@ -283,7 +283,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 				capability_registry_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
 				workflow_run_id VARCHAR(64) NOT NULL DEFAULT '',
 				workflow_node_id VARCHAR(128) NOT NULL DEFAULT '',
-				question   TEXT NOT NULL,
+				question   MEDIUMTEXT NOT NULL,
 				status     VARCHAR(16) NOT NULL,
 				error_code VARCHAR(64) NOT NULL DEFAULT '',
 				mode       VARCHAR(16) NOT NULL DEFAULT 'single',

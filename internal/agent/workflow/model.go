@@ -62,6 +62,7 @@ const (
 	StopDeadlineExceeded      StopReason = "deadline_exceeded"
 	StopBudgetExhausted       StopReason = "budget_exhausted"
 	StopCapabilityUnavailable StopReason = "capability_unavailable"
+	StopEvidenceInsufficient  StopReason = "evidence_insufficient"
 	StopNeedsClarification    StopReason = "needs_clarification"
 )
 
@@ -132,12 +133,37 @@ type GateSpec struct {
 	ForwardInput     bool     `json:"forward_input,omitempty"`
 }
 
+// SubjectRequirement describes the evidence contract for one comparison entity.
+type SubjectRequirement struct {
+	EntityID        string                    `json:"entity_id"`
+	Label           string                    `json:"label,omitempty"`
+	Role            string                    `json:"role,omitempty"`
+	Aliases         []string                  `json:"aliases,omitempty"`
+	RequiredFacets  []string                  `json:"required_facets"`
+	RequiredSources []agentapi.EvidenceSource `json:"required_sources,omitempty"`
+}
+
+func cloneSubjectRequirements(values []SubjectRequirement) []SubjectRequirement {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]SubjectRequirement, len(values))
+	for index, value := range values {
+		out[index] = value
+		out[index].Aliases = append([]string(nil), value.Aliases...)
+		out[index].RequiredFacets = append([]string(nil), value.RequiredFacets...)
+		out[index].RequiredSources = append([]agentapi.EvidenceSource(nil), value.RequiredSources...)
+	}
+	return out
+}
+
 // VerifierSpec fixes deterministic evidence acceptance policy.
 type VerifierSpec struct {
-	RequiredGoals            []string `json:"required_goals,omitempty"`
-	HighRiskGoals            []string `json:"high_risk_goals,omitempty"`
-	HighRiskMinimumTrustTier int      `json:"high_risk_minimum_trust_tier,omitempty"`
-	RejectEvidenceConflicts  bool     `json:"reject_evidence_conflicts"`
+	RequiredGoals            []string             `json:"required_goals,omitempty"`
+	HighRiskGoals            []string             `json:"high_risk_goals,omitempty"`
+	HighRiskMinimumTrustTier int                  `json:"high_risk_minimum_trust_tier,omitempty"`
+	RejectEvidenceConflicts  bool                 `json:"reject_evidence_conflicts"`
+	SubjectRequirements      []SubjectRequirement `json:"subject_requirements,omitempty"`
 	// MaxPayloadTokens bounds one verified bundle passed to the next agent.
 	MaxPayloadTokens int `json:"max_payload_tokens,omitempty"`
 }
@@ -178,8 +204,26 @@ type Usage struct {
 	Retries         int64 `json:"retries"`
 }
 
+// IsZero reports whether this usage contributes nothing to the Workflow total.
+func (usage Usage) IsZero() bool {
+	return usage == (Usage{})
+}
+
 type FailurePolicy struct {
 	Mode FailureMode `json:"mode"`
+}
+
+// WorkflowArtifact is an immutable secondary artifact emitted alongside a node handoff.
+// It is kept out of the handoff payload/hash so large audit details do not enter
+// downstream model context.
+type WorkflowArtifact struct {
+	ID             string             `json:"id"`
+	WorkflowRunID  string             `json:"workflow_run_id"`
+	ProducerNodeID string             `json:"producer_node_id"`
+	Kind           string             `json:"kind"`
+	Schema         agentapi.SchemaRef `json:"schema"`
+	ContentHash    string             `json:"content_hash"`
+	Content        []byte             `json:"content"`
 }
 
 type Handoff struct {
@@ -195,6 +239,7 @@ type Handoff struct {
 	Completeness      Completeness                `json:"completeness"`
 	ContentHash       string                      `json:"content_hash"`
 	CreatedAt         time.Time                   `json:"created_at"`
+	Artifacts         []WorkflowArtifact          `json:"-"`
 }
 
 type GateDecision struct {
@@ -425,6 +470,7 @@ func PrepareHandoff(
 	prepared.References = append([]agentapi.Reference(nil), handoff.References...)
 	prepared.EvidenceUnits = evidence.CloneUnits(handoff.EvidenceUnits)
 	prepared.EvidenceConflicts = cloneConflicts(handoff.EvidenceConflicts)
+	prepared.Artifacts = cloneWorkflowArtifacts(handoff.Artifacts)
 	if strings.TrimSpace(prepared.WorkflowRunID) == "" || !canonicalID.MatchString(prepared.ProducerNodeID) {
 		return Handoff{}, fmt.Errorf("handoff workflow run and producer node are required")
 	}
@@ -457,6 +503,18 @@ func PrepareHandoff(
 		prepared.CreatedAt = time.Now().UTC()
 	}
 	return prepared, nil
+}
+
+func cloneWorkflowArtifacts(artifacts []WorkflowArtifact) []WorkflowArtifact {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	out := make([]WorkflowArtifact, len(artifacts))
+	for index, artifact := range artifacts {
+		out[index] = artifact
+		out[index].Content = append([]byte(nil), artifact.Content...)
+	}
+	return out
 }
 
 // IntersectPermissions ensures delegation never expands any caller scope.
@@ -769,6 +827,45 @@ func validateNode(
 				)
 			}
 		}
+		seenSubjects := make(map[string]struct{}, len(node.Verifier.SubjectRequirements))
+		for _, subject := range node.Verifier.SubjectRequirements {
+			if !canonicalID.MatchString(subject.EntityID) {
+				return fmt.Errorf(
+					"workflow %q verifier node %q subject entity %q is not canonical",
+					workflowID, node.ID, subject.EntityID,
+				)
+			}
+			if _, duplicate := seenSubjects[subject.EntityID]; duplicate {
+				return fmt.Errorf(
+					"workflow %q verifier node %q subject entity %q is duplicated",
+					workflowID, node.ID, subject.EntityID,
+				)
+			}
+			seenSubjects[subject.EntityID] = struct{}{}
+			if len(subject.RequiredFacets) == 0 {
+				return fmt.Errorf(
+					"workflow %q verifier node %q subject entity %q requires facets",
+					workflowID, node.ID, subject.EntityID,
+				)
+			}
+			if err := validateCanonical(
+				"node "+node.ID+" verifier subject facet",
+				subject.RequiredFacets,
+			); err != nil {
+				return err
+			}
+			for _, source := range subject.RequiredSources {
+				switch source {
+				case agentapi.EvidenceSourceInternal, agentapi.EvidenceSourceMemory,
+					agentapi.EvidenceSourceWeb, agentapi.EvidenceSourceRuntime:
+				default:
+					return fmt.Errorf(
+						"workflow %q verifier node %q subject entity %q has invalid evidence source %q",
+						workflowID, node.ID, subject.EntityID, source,
+					)
+				}
+			}
+		}
 		if node.Verifier.HighRiskMinimumTrustTier < 0 ||
 			node.Verifier.HighRiskMinimumTrustTier > 100 {
 			return fmt.Errorf(
@@ -937,6 +1034,7 @@ func cloneDefinition(definition Definition) Definition {
 			verifier := *node.Verifier
 			verifier.RequiredGoals = append([]string(nil), verifier.RequiredGoals...)
 			verifier.HighRiskGoals = append([]string(nil), verifier.HighRiskGoals...)
+			verifier.SubjectRequirements = cloneSubjectRequirements(verifier.SubjectRequirements)
 			node.Verifier = &verifier
 		}
 	}

@@ -58,6 +58,13 @@ func (te *ToolExecutor) DefinitionsFor(policy ToolPolicy) []llm.ToolDef {
 
 // Execute runs against the same snapshot used to publish model definitions.
 func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, call llm.ToolCall, referenceTypes map[string]tool.ReferenceType, seen map[string]bool) ToolExecution {
+	return te.ExecuteLimited(ctx, snapshot, call, referenceTypes, seen, "", 0)
+}
+
+// ExecuteLimited keeps the authoritative tool result intact while bounding the
+// copy delivered to the next model turn. Large results remain available in the
+// trace/observer path through AuthoritativeContent.
+func (te *ToolExecutor) ExecuteLimited(ctx context.Context, snapshot tool.Snapshot, call llm.ToolCall, referenceTypes map[string]tool.ReferenceType, seen map[string]bool, runID string, maxPromptBytes int) ToolExecution {
 	name := call.Function.Name
 	args, err := parseArgs(ctx, call.Function.Arguments)
 	if err != nil {
@@ -116,7 +123,132 @@ func (te *ToolExecutor) Execute(ctx context.Context, snapshot tool.Snapshot, cal
 		AnswerContract:       toolResult.AnswerContract,
 		DurationMs:           int(duration / time.Millisecond),
 	}
+	if maxPromptBytes > 0 {
+		execution.PromptContent, execution.ArtifactID = boundedToolPrompt(
+			runID, call.ID, execution.AuthoritativeContent, execution.AnswerContract, maxPromptBytes,
+		)
+		if execution.ArtifactID != "" {
+			log.InfofCtx(ctx,
+				"[agent] tool %s result shortened for model context: authoritativeBytes=%d promptBytes=%d artifact=%s",
+				name, len(execution.AuthoritativeContent), len(execution.PromptContent), execution.ArtifactID,
+			)
+		}
+	}
 	return execution
+}
+
+// boundedToolPrompt is deliberately deterministic. It keeps a compact prefix,
+// suffix, and any exact literals required by the answer contract. The full
+// payload is still retained as AuthoritativeContent for audit/replay.
+func boundedToolPrompt(
+	runID, toolCallID, content string, contract tool.AnswerContract, limit int,
+) (string, string) {
+	if limit <= 0 || len(content) <= limit {
+		return content, ""
+	}
+	artifactID := toolResultArtifactID(runID, toolCallID)
+	const envelopeOverhead = 256
+	previewBudget := max(64, limit-envelopeOverhead)
+	preview := boundedPreview(content, previewBudget, contract.RequiredLiterals)
+	envelope := map[string]any{
+		"_nasuta_truncated": true,
+		"artifact_id":       artifactID,
+		"original_bytes":    len(content),
+		"preview":           preview,
+		"notice":            "The complete tool result is retained in the trace artifact; only this preview is in the model context.",
+	}
+	if len(contract.RequiredLiterals) > 0 {
+		envelope["required_literals"] = append([]string(nil), contract.RequiredLiterals...)
+	}
+	encoded, err := json.Marshal(envelope)
+	if err == nil && len(encoded) <= limit {
+		return string(encoded), artifactID
+	}
+	// A pathological contract with very long literals can consume the envelope
+	// budget. Keep the model-facing payload bounded even in that case.
+	minimal := map[string]any{
+		"_nasuta_truncated": true,
+		"artifact_id":       artifactID,
+		"original_bytes":    len(content),
+		"preview":           boundedPreview(content, max(32, limit/2), nil),
+	}
+	encoded, _ = json.Marshal(minimal)
+	if len(encoded) > limit {
+		return string(encoded[:limit]), artifactID
+	}
+	return string(encoded), artifactID
+}
+
+func boundedPreview(content string, limit int, required []string) string {
+	if limit <= 0 {
+		return ""
+	}
+	// Reserve room for exact literals so delivery validation cannot discard a
+	// result merely because its preview omitted a contract-owned identifier.
+	literalText := ""
+	for _, literal := range required {
+		if literal == "" || strings.Contains(literalText, literal) {
+			continue
+		}
+		if literalText != "" {
+			literalText += "\n"
+		}
+		literalText += literal
+	}
+	separator := "\n...<truncated>...\n"
+	literalReserve := len(literalText)
+	if literalReserve > 0 {
+		literalReserve += len("\nrequired literals:\n")
+	}
+	mainBudget := max(0, limit-literalReserve)
+	if len(content) <= mainBudget {
+		return content + literalSuffix(literalText)
+	}
+	if mainBudget <= len(separator)+2 {
+		return truncateUTF8(literalText, limit)
+	}
+	front := (mainBudget - len(separator)) * 2 / 3
+	back := mainBudget - len(separator) - front
+	preview := truncateUTF8(content, front) + separator + truncateTailUTF8(content, back)
+	return preview + literalSuffix(literalText)
+}
+
+func literalSuffix(literals string) string {
+	if literals == "" {
+		return ""
+	}
+	return "\nrequired literals:\n" + literals
+}
+
+func truncateUTF8(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	for limit > 0 && !isUTF8Boundary(value[limit]) {
+		limit--
+	}
+	return value[:limit]
+}
+
+func truncateTailUTF8(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	start := len(value) - limit
+	for start < len(value) && !isUTF8Boundary(value[start]) {
+		start++
+	}
+	return value[start:]
+}
+
+func isUTF8Boundary(b byte) bool {
+	return b < 0x80 || b >= 0xc0
 }
 
 func cloneReferences(refs []tool.Reference) []tool.Reference {

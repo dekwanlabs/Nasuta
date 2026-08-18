@@ -21,6 +21,7 @@ type Hub struct {
 	completed map[string]struct{}
 	stepErrs  map[string]error
 	context   map[string]contextUsageState
+	toolViews map[string]toolEventProjection
 	stepStore stepStore
 	completer completer
 	control   controlStore
@@ -36,6 +37,15 @@ type contextUsageState struct {
 	expiresAt time.Time
 }
 
+// toolEventProjection identifies the parent QA stream and Workflow node that
+// own one child Agent run.
+type toolEventProjection struct {
+	parentRunID   string
+	agentRunID    string
+	workflowRunID string
+	nodeID        string
+}
+
 func NewHub(runStore *Store) *Hub {
 	hub := &Hub{
 		subs:      map[string][]*subscriber{},
@@ -44,6 +54,7 @@ func NewHub(runStore *Store) *Hub {
 		completed: map[string]struct{}{},
 		stepErrs:  map[string]error{},
 		context:   map[string]contextUsageState{},
+		toolViews: map[string]toolEventProjection{},
 	}
 	if runStore != nil {
 		hub.stepStore = runStore
@@ -125,18 +136,84 @@ func (hub *Hub) OnStep(ctx context.Context, runID string, step StepRecord) error
 	}
 	switch step.Kind {
 	case StepKindToolCall:
-		hub.broadcast(runID, SSEEvent{Type: EventToolStarted, Data: ToolStartedEvent{
+		event := ToolStartedEvent{
 			Step: step.StepNo, ToolCallID: step.ToolCallID, Name: step.Tool, Args: step.Args,
-		}})
+			AgentRunID: runID,
+		}
+		hub.broadcast(runID, SSEEvent{Type: EventToolStarted, Data: event})
+		hub.projectToolEvent(runID, EventToolStarted, event)
 	case StepKindToolResult:
-		hub.broadcast(runID, SSEEvent{Type: EventToolFinished, Data: ToolFinishedEvent{
+		event := ToolFinishedEvent{
 			Step: step.StepNo, ToolCallID: step.ToolCallID,
 			Tool: step.Tool, Summary: toolResultPreview(step.Content),
 			TraceID: step.TraceID, ArtifactID: step.ArtifactID, Failed: step.Failed,
 			DeliveryError: step.DeliveryError, DurationMs: step.DurationMs, SizeBytes: step.SizeBytes,
-		}})
+			AgentRunID: runID,
+		}
+		hub.broadcast(runID, SSEEvent{Type: EventToolFinished, Data: event})
+		hub.projectToolEvent(runID, EventToolFinished, event)
 	}
 	return persistErr
+}
+
+// ProjectToolEvents mirrors one child Agent's tool lifecycle onto its parent
+// QA Run and returns an idempotent function that removes the projection.
+func (hub *Hub) ProjectToolEvents(
+	childRunID string,
+	parentRunID string,
+	workflowRunID string,
+	nodeID string,
+) func() {
+	if hub == nil || childRunID == "" || parentRunID == "" {
+		return func() {}
+	}
+	projection := toolEventProjection{
+		parentRunID: parentRunID, agentRunID: childRunID,
+		workflowRunID: workflowRunID, nodeID: nodeID,
+	}
+	hub.mu.Lock()
+	hub.toolViews[childRunID] = projection
+	hub.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			hub.mu.Lock()
+			if hub.toolViews[childRunID] == projection {
+				delete(hub.toolViews, childRunID)
+			}
+			hub.mu.Unlock()
+		})
+	}
+}
+
+// projectToolEvent enriches a child tool event with Workflow ownership before
+// broadcasting it to the subscribed parent QA Run.
+func (hub *Hub) projectToolEvent(
+	childRunID string,
+	eventType EventType,
+	data any,
+) {
+	hub.mu.Lock()
+	projection, ok := hub.toolViews[childRunID]
+	hub.mu.Unlock()
+	if !ok {
+		return
+	}
+	switch event := data.(type) {
+	case ToolStartedEvent:
+		event.AgentRunID = projection.agentRunID
+		event.WorkflowRunID = projection.workflowRunID
+		event.NodeID = projection.nodeID
+		data = event
+	case ToolFinishedEvent:
+		event.AgentRunID = projection.agentRunID
+		event.WorkflowRunID = projection.workflowRunID
+		event.NodeID = projection.nodeID
+		data = event
+	default:
+		return
+	}
+	hub.broadcast(projection.parentRunID, SSEEvent{Type: eventType, Data: data})
 }
 
 func (hub *Hub) OnToken(_ context.Context, runID, token string) {

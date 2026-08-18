@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -780,4 +781,162 @@ func verifiedEvidenceUnit(reference string) tool.EvidenceUnit {
 		Target:     reference,
 		Coverage:   tool.EvidenceCoverage{Complete: true},
 	}
+}
+
+func TestVerifyBundleRequiresFacetCoveragePerComparisonSubject(t *testing.T) {
+	tests := []struct {
+		name             string
+		targets          []string
+		wantCompleteness Completeness
+		wantStopReason   StopReason
+		wantComplete     []bool
+		wantMissing      [][]string
+	}{
+		{
+			name:             "all subjects covered",
+			targets:          []string{"our-agent/handler.go", "google/handler.go"},
+			wantCompleteness: Complete,
+			wantStopReason:   StopRequiredGoalsCovered,
+			wantComplete:     []bool{true, true},
+			wantMissing:      [][]string{{}, {}},
+		},
+		{
+			name:             "second subject missing",
+			targets:          []string{"our-agent/handler.go"},
+			wantCompleteness: Partial,
+			wantStopReason:   StopEvidenceInsufficient,
+			wantComplete:     []bool{true, false},
+			wantMissing:      [][]string{{}, {"core_flow"}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verified := verifySubjectBundle(t, "investigate.code.1", test.targets, []agentapi.EvidenceSource{
+				agentapi.EvidenceSourceInternal,
+			})
+			if verified.Completeness != test.wantCompleteness ||
+				verified.Verification.StopReason != test.wantStopReason {
+				t.Fatalf("verification = %+v", verified.Verification)
+			}
+			if len(verified.SubjectCoverage) != len(test.wantComplete) {
+				t.Fatalf("subject coverage = %+v", verified.SubjectCoverage)
+			}
+			for index, subject := range verified.SubjectCoverage {
+				if subject.Complete != test.wantComplete[index] ||
+					!reflect.DeepEqual(subject.MissingFacets, test.wantMissing[index]) {
+					t.Fatalf("subject coverage[%d] = %+v", index, subject)
+				}
+			}
+		})
+	}
+}
+
+func TestVerifyBundleDoesNotLetWebEvidenceSatisfyRequiredInternalSource(t *testing.T) {
+	verified := verifySubjectBundle(
+		t,
+		"investigate.web.1",
+		[]string{"our-agent/handler.go", "google/handler.go"},
+		[]agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
+	)
+	if verified.Completeness != Partial ||
+		verified.Verification.StopReason != StopEvidenceInsufficient {
+		t.Fatalf("verification = %+v", verified.Verification)
+	}
+	for _, subject := range verified.SubjectCoverage {
+		if subject.Complete ||
+			!reflect.DeepEqual(subject.CoveredFacets, []string{"core_flow"}) ||
+			!reflect.DeepEqual(subject.Sources, []string{"web"}) {
+			t.Fatalf("subject coverage = %+v", subject)
+		}
+	}
+}
+
+func verifySubjectBundle(
+	t *testing.T,
+	producerNodeID string,
+	targets []string,
+	requiredSources []agentapi.EvidenceSource,
+) verifiedEvidenceView {
+	t.Helper()
+	schemas, _ := investigationCatalogs(t, 31)
+	units := make([]tool.EvidenceUnit, 0, len(targets))
+	findings := make([]map[string]any, 0, len(targets))
+	for _, target := range targets {
+		sourceKind := "code"
+		if strings.Contains(producerNodeID, ".web") {
+			sourceKind = "web"
+		}
+		unit := tool.EvidenceUnit{
+			SourceKind: sourceKind,
+			Target:     target,
+			Sections:   []string{"core_flow"},
+			Coverage:   tool.EvidenceCoverage{Complete: true},
+		}
+		units = append(units, unit)
+		finding := verifiedFinding(target+" handles device control.", "core_flow", target)
+		finding["evidence"] = []map[string]any{{
+			"kind": sourceKind, "reference": target, "summary": "Concrete support.",
+			"identity": map[string]any{
+				"source_kind": sourceKind,
+				"target":      target,
+				"section":     "core_flow",
+			},
+		}}
+		findings = append(findings, finding)
+	}
+	payload, err := json.Marshal(ledgerView{
+		Handoffs: []handoffView{verifiedReportHandoff(
+			producerNodeID,
+			"comparison",
+			findings,
+			nil,
+		)},
+		UnavailableTasks:  []unavailableTaskView{},
+		EvidenceUnits:     units,
+		EvidenceConflicts: []agentapi.EvidenceConflict{},
+		Completeness:      Complete,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := verifyBundle(verificationRunInput{
+		workflowRunID: "subject-verification-run",
+		node: NodeDefinition{
+			ID: "evidence.verify", Kind: NodeVerifier,
+			OutputSchema: agentapi.SchemaRef{
+				ID: "investigation.verified_bundle", Version: 2,
+			},
+			Verifier: &VerifierSpec{
+				RequiredGoals: []string{"core_flow"},
+				SubjectRequirements: []SubjectRequirement{
+					{
+						EntityID: "our_agent", Label: "Our Agent",
+						RequiredFacets:  []string{"core_flow"},
+						RequiredSources: append([]agentapi.EvidenceSource(nil), requiredSources...),
+					},
+					{
+						EntityID: "google", Label: "Google",
+						RequiredFacets:  []string{"core_flow"},
+						RequiredSources: append([]agentapi.EvidenceSource(nil), requiredSources...),
+					},
+				},
+			},
+		},
+		inputs: []Handoff{{
+			ProducerNodeID: "evidence.join",
+			Payload:        payload,
+			EvidenceUnits:  units,
+			Completeness:   Complete,
+		}},
+		maxBytes: 1 << 20,
+		schemas:  schemas,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var verified verifiedEvidenceView
+	if err := json.Unmarshal(output.handoff.Payload, &verified); err != nil {
+		t.Fatal(err)
+	}
+	return verified
 }

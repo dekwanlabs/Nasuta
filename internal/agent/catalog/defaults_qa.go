@@ -35,6 +35,7 @@ func DefaultQAVersion(settings *config.PlatformSettings, version int64) (agentap
 		Budget: agentapi.BudgetPolicy{
 			Timeout:           time.Duration(settings.AgentTimeout),
 			MaxSteps:          settings.AgentMaxSteps,
+			MaxToolCalls:      settings.AgentMaxToolCalls,
 			ContextTokens:     settings.LLMContextWindow,
 			MaxContinueRounds: settings.LLMMaxContinueRounds,
 		},

@@ -21,10 +21,18 @@ type FetchedEvidence struct {
 	Content string `json:"content"`
 }
 
+type SourceStatus string
+
+const (
+	SourceUsable   SourceStatus = "source_usable"
+	SourceUnusable SourceStatus = "source_unusable"
+)
+
 type SearchResponse struct {
-	Results   []SearchResult   `json:"results"`
-	Fetched   *FetchedEvidence `json:"fetched,omitempty"`
-	FetchNote string           `json:"fetch_note,omitempty"`
+	Results      []SearchResult   `json:"results"`
+	Fetched      *FetchedEvidence `json:"fetched,omitempty"`
+	SourceStatus SourceStatus     `json:"source_status"`
+	FetchNote    string           `json:"fetch_note,omitempty"`
 }
 
 // Service owns web search providers and bounded page fetching.
@@ -90,8 +98,10 @@ func (srv *Service) SearchWithFetch(ctx context.Context, query string, limit int
 	if err != nil {
 		return SearchResponse{}, err
 	}
-	response := SearchResponse{Results: results}
+	response := SearchResponse{Results: results, SourceStatus: SourceUnusable}
 	if len(results) == 0 {
+		response.FetchNote = "automatic fetch skipped: search returned no candidates"
+		log.WarnfCtx(ctx, "[web_search] automatic fetch skipped: no candidates for query=%q", truncateForLog(query, 60))
 		return response, nil
 	}
 	candidate, ok := relevantFetchCandidate(query, results)
@@ -107,6 +117,7 @@ func (srv *Service) SearchWithFetch(ctx context.Context, query string, limit int
 		return response, nil
 	}
 	response.Fetched = &FetchedEvidence{URL: candidate.URL, Title: candidate.Title, Content: content}
+	response.SourceStatus = SourceUsable
 	return response, nil
 }
 

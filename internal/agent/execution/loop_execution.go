@@ -40,6 +40,7 @@ type compiledLoop struct {
 	webEvidence          webEvidenceState
 	evidenceTurnExtended bool
 	stepLimit            int
+	toolBudgetExhausted  bool
 }
 
 func (agent *Agent) prepareLoop(

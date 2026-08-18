@@ -10,6 +10,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/scope"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 // AgentExecutor binds Workflow nodes to the shared immutable Agent Runtime.
@@ -17,6 +18,12 @@ type AgentExecutor struct {
 	schemas *agentapi.SchemaRegistry
 	agents  AgentResolver
 	runtime agentapi.Runtime
+}
+
+// toolEventProjector exposes the narrow runtime hook used to mirror child
+// Agent tool events onto the parent QA stream.
+type toolEventProjector interface {
+	ProjectToolEvents(string, string, string, string) func()
 }
 
 func NewAgentExecutor(
@@ -72,7 +79,19 @@ func (executor *AgentExecutor) Execute(
 		return NodeResult{}, err
 	}
 	input := request.Inputs[0]
-	contextBlock, err := contextFromHandoff(input)
+	projected, err := projectInvestigatorHandoff(
+		input, request.Node.Task, request.Node.ID, request.Node.Budget.MaxInputTokens,
+	)
+	if err != nil {
+		return NodeResult{}, fmt.Errorf("agent node %q scoped context: %w", request.Node.ID, err)
+	}
+	nodeInput := projected.Input
+	log.InfofCtx(ctx, "[workflow] node %s scoped context: version=%s status=%s inputTokens=%d projectedTokens=%d matchedSeeds=%d droppedSeeds=%d duplicateSeeds=%d missingEntities=%v missingFacets=%v projectionHash=%s",
+		request.Node.ID, projectionVersion, projected.Status, projected.InputTokens,
+		projected.ProjectedTokens, projected.MatchedSeedCount, projected.DroppedSeedCount,
+		projected.DuplicateSeedCount, projected.MissingEntities, projected.MissingFacets,
+		projected.ProjectionHash)
+	contextBlock, err := contextFromHandoff(nodeInput)
 	if err != nil {
 		return NodeResult{}, fmt.Errorf("agent node %q context: %w", request.Node.ID, err)
 	}
@@ -86,7 +105,7 @@ func (executor *AgentExecutor) Execute(
 	}
 	runRequest := agentapi.RunRequest{
 		RunID: runID, Agent: request.Node.Agent, DefinitionHash: definition.ContentHash,
-		Input: input.Payload, Context: contextBlocks,
+		Input: nodeInput.Payload, Context: contextBlocks,
 		Permissions: permissions,
 		ToolScope: agentapi.ToolScope{
 			AllowWrite:      scope.Has(permissions.Scopes, scope.KnowledgeWrite),
@@ -94,7 +113,7 @@ func (executor *AgentExecutor) Execute(
 			VisibleToolIDs:  append([]string(nil), request.Node.VisibleToolIDs...),
 		},
 		Policy: agentapi.RunPolicy{
-			EvidenceSeeded: len(input.EvidenceUnits) > 0,
+			EvidenceSeeded: len(nodeInput.EvidenceUnits) > 0,
 			MaxToolCalls:   request.Node.Budget.MaxToolCalls,
 		},
 		Actor: request.Actor,
@@ -109,6 +128,16 @@ func (executor *AgentExecutor) Execute(
 		WorkflowRunID: request.WorkflowRunID, AgentRunID: runID,
 		WorkflowNodeID: request.Node.ID,
 	})
+	stopToolProjection := func() {}
+	if projector, ok := executor.runtime.(toolEventProjector); ok {
+		stopToolProjection = projector.ProjectToolEvents(
+			runID,
+			request.ParentRunID,
+			request.WorkflowRunID,
+			request.Node.ID,
+		)
+	}
+	defer stopToolProjection()
 	result, err := runtrace.Invoke(
 		childCtx,
 		childRunTraceSpec,
@@ -146,12 +175,12 @@ func (executor *AgentExecutor) Execute(
 			retryable: result.Error.Retryable,
 		}
 	}
-	completeness := input.Completeness
+	completeness := nodeInput.Completeness
 	if request.Node.Task != nil &&
 		request.Node.OutputSchema.ID == "investigation.report" &&
 		len(request.Node.Task.RequiredFacets) > 0 {
 		reportCompleteness, err := reportCompleteness(
-			input.Payload,
+			nodeInput.Payload,
 			result.Output,
 			request.Node.Task.RequiredFacets,
 		)
@@ -165,7 +194,7 @@ func (executor *AgentExecutor) Execute(
 		completeness = leastComplete(completeness, reportCompleteness)
 	}
 	evidenceUnits, evidenceConflicts := mergeHandoffEvidence([]Handoff{
-		input,
+		nodeInput,
 		{
 			ProducerNodeID:    request.Node.ID,
 			EvidenceUnits:     result.EvidenceUnits,
@@ -179,7 +208,7 @@ func (executor *AgentExecutor) Execute(
 		Schema:         request.Node.OutputSchema,
 		Payload:        append([]byte(nil), result.Output...),
 		References: append(
-			append([]agentapi.Reference(nil), input.References...),
+			append([]agentapi.Reference(nil), nodeInput.References...),
 			result.References...,
 		),
 		EvidenceUnits:     evidenceUnits,

@@ -105,7 +105,7 @@ func testReviewerDefinition(t *testing.T, mutate func(*agentapi.Definition)) age
 			Provider: "openai", Model: "review-model", MaxOutputTokens: 256,
 		},
 		Budget: agentapi.BudgetPolicy{
-			Timeout: time.Second, MaxSteps: 2, ContextTokens: 4096,
+			Timeout: time.Second, MaxSteps: 2, MaxToolCalls: 24, ContextTokens: 4096,
 		},
 		Permissions: agentapi.PermissionPolicy{Scopes: []string{knowledgeReadScope}},
 	}
@@ -133,7 +133,7 @@ func testQADefinition(t *testing.T, mutate func(*agentapi.Definition)) agentapi.
 			Provider: "openai", Model: "review-model", MaxOutputTokens: 256,
 		},
 		Budget: agentapi.BudgetPolicy{
-			Timeout: time.Second, MaxSteps: 2, ContextTokens: 4096,
+			Timeout: time.Second, MaxSteps: 2, MaxToolCalls: 24, ContextTokens: 4096,
 		},
 		Permissions: agentapi.PermissionPolicy{Scopes: []string{knowledgeReadScope}},
 	}

@@ -3,7 +3,6 @@ package domain
 import (
 	"fmt"
 	"regexp"
-	"strings"
 )
 
 // QueryKind is the canonical shape of one QA request.
@@ -21,20 +20,22 @@ const (
 
 // QueryPlan retains only request semantics that cannot be derived from the kind.
 type QueryPlan struct {
-	Kind     QueryKind
-	Entities []string
+	Kind        QueryKind
+	Entities    []string
+	EntitySpecs []EntitySpec
 }
 
-// QuerySignals are planner-derived hints consumed by the local resolver.
-type QuerySignals struct {
-	Identifiers []string
-	DomainTerms []string
+// QuerySemantics is the planner-owned answer shape for one request.
+type QuerySemantics struct {
+	Kind        QueryKind
+	EntitySpecs []EntitySpec
 }
 
 type QueryResolutionOrigin string
 
 const (
 	QueryResolutionRule     QueryResolutionOrigin = "rule"
+	QueryResolutionPlanner  QueryResolutionOrigin = "planner"
 	QueryResolutionFallback QueryResolutionOrigin = "fallback"
 )
 
@@ -126,94 +127,62 @@ var requiredFacetsByQueryKind = map[QueryKind][]EvidenceFacet{
 	},
 }
 
-var queryKindOrder = []QueryKind{
-	QueryRuntimeDiagnosis,
-	QueryInventory,
-	QueryOverview,
-	QueryCodeReview,
-}
+var traceIDFieldRe = regexp.MustCompile(`(?i)\btrace(?:[_-]?id)?\s*[:=：]\s*[0-9a-f-]{12,64}\b`)
+var traceparentRe = regexp.MustCompile(`(?i)\b[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\b`)
+var kibanaTraceURLRe = regexp.MustCompile(`(?i)https?://[^\s]*kibana[^\s]*(?:trace|discover)[^\s]*`)
 
-var queryKindSignals = map[QueryKind][]string{
-	QueryRuntimeDiagnosis: {
-		"error", "exception", "bug", "failed", "failure", "crash", "incident",
-		"timeout", "nullpointer", "npe", "stacktrace", "trace id", "traceid",
-		"kibana", "5xx", "unavailable",
-		"500", "502", "503", "504",
-		"panic", "oom", "deadlock",
-		"什么原因", "报错", "出错", "异常", "失败", "超时", "挂了", "不可用",
-		"崩了", "重启", "打不开", "不响应", "内存溢出",
-		"エラー", "バグ", "落ちた", "タイムアウト", "障害",
-		"오류", "버그", "장애", "타임아웃",
-		"erreur", "panne", "plantage", "indisponible",
-		"fehler", "absturz", "ausgefallen", "nicht verfügbar",
-	},
-	QueryInventory: {
-		"implement", "add a", "add an", "new feature", "new endpoint", "new api",
-		"what's needed", "what is needed", "how to build", "how to implement",
-		"how would you", "how to add", "how to create",
-		"能不能", "可以加", "可以做个", "能否", "需求", "实现", "开发", "新增",
-		"增加一个", "做一个", "想加", "能加吗", "新建",
-		"追加", "作って", "実装", "機能",
-		"추가", "구현", "만들어", "기능",
-		"ajouter", "implémenter", "créer", "fonctionnalité",
-		"implementieren", "hinzufügen", "funktionalität",
-	},
-	QueryOverview: {
-		"architecture", "design pattern", "system design",
-		"data source", "datasource", "dual datasource",
-		"trade-off", "tradeoff", "topology", "why is",
-		"scalability", "coupling", "bottleneck", "data flow",
-		"为什么", "架构", "设计", "数据源", "双数据源", "双写",
-		"解耦", "瓶颈", "数据流",
-		"構造", "なぜ", "アーキテクチャ",
-		"아키텍처", "구조", "설계",
-		"conception", "pourquoi",
-		"architektur", "entwurf", "warum",
-	},
-	QueryCodeReview: {
-		"review", "code quality", "best practice", "refactor",
-		"code smell", "anti-pattern",
-		"有问题", "这段代码", "这个写法", "代码审查",
-		"コードレビュー", "リファクタリング",
-		"코드 리뷰", "리팩토링",
-		"revue de code",
-		"refaktorisierung",
-	},
-}
-
-var traceIDRe = regexp.MustCompile(`(?i)(?:trace[_\-\s]?id|traceid|trace)\s*[=:：]?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
-var uuidRe = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
-var kibanaURLRe = regexp.MustCompile(`(?i)https?://[^\s]*kibana[^\s]*`)
-
-// ResolveQueryPlan classifies request semantics once without performing I/O.
-func ResolveQueryPlan(question string, signals QuerySignals) QueryResolution {
-	entities := CanonicalEntityIDs(signals.Identifiers)
-	if hasComparisonSignal(question, signals) {
+// ResolveQueryPlan applies only closed-format overrides around planner semantics.
+func ResolveQueryPlan(
+	question string,
+	semantics *QuerySemantics,
+	identifiers []string,
+) QueryResolution {
+	entities := CanonicalEntityIDs(identifiers)
+	entitySpecs := canonicalQueryEntitySpecs(semantics, entities)
+	entities = entitySpecIDs(entitySpecs)
+	if hasTypedRuntimeLocator(question) {
 		return QueryResolution{
-			Plan:            QueryPlan{Kind: QueryComparison, Entities: entities},
+			Plan:            QueryPlan{Kind: QueryRuntimeDiagnosis, Entities: entities, EntitySpecs: entitySpecs},
 			Origin:          QueryResolutionRule,
-			MatchedRuleKind: QueryComparison,
+			MatchedRuleKind: QueryRuntimeDiagnosis,
 		}
 	}
-	if hasFlowSignal(question, signals) {
+	if semantics != nil {
 		return QueryResolution{
-			Plan:            QueryPlan{Kind: QueryFlow, Entities: entities},
-			Origin:          QueryResolutionRule,
-			MatchedRuleKind: QueryFlow,
-		}
-	}
-	kind := classifyQueryKind(question)
-	if kind == QueryFocusedFact {
-		return QueryResolution{
-			Plan:   QueryPlan{Kind: kind, Entities: entities},
-			Origin: QueryResolutionFallback,
+			Plan:   QueryPlan{Kind: semantics.Kind, Entities: entities, EntitySpecs: entitySpecs},
+			Origin: QueryResolutionPlanner,
 		}
 	}
 	return QueryResolution{
-		Plan:            QueryPlan{Kind: kind, Entities: entities},
-		Origin:          QueryResolutionRule,
-		MatchedRuleKind: kind,
+		Plan:   QueryPlan{Kind: QueryFocusedFact, Entities: entities, EntitySpecs: entitySpecs},
+		Origin: QueryResolutionFallback,
 	}
+}
+
+func canonicalQueryEntitySpecs(semantics *QuerySemantics, identifiers []string) []EntitySpec {
+	specs := make([]EntitySpec, 0, len(identifiers)+MaxCanonicalEntities)
+	if semantics != nil {
+		specs = append(specs, semantics.EntitySpecs...)
+	}
+	ids := CanonicalEntityIDs(identifiers)
+	for _, id := range ids {
+		specs = append(specs, EntitySpec{ID: id})
+	}
+	return CanonicalEntitySpecs(specs)
+}
+
+func entitySpecIDs(specs []EntitySpec) []string {
+	ids := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		ids = append(ids, spec.ID)
+	}
+	return ids
+}
+
+func hasTypedRuntimeLocator(question string) bool {
+	return traceIDFieldRe.MatchString(question) ||
+		traceparentRe.MatchString(question) ||
+		kibanaTraceURLRe.MatchString(question)
 }
 
 // RequiredFacetsFor derives stable coverage goals from the canonical query kind.
@@ -243,63 +212,6 @@ func ValidateFacets(facets []EvidenceFacet) error {
 		seen[facet] = struct{}{}
 	}
 	return nil
-}
-
-func classifyQueryKind(question string) QueryKind {
-	q := strings.ToLower(question)
-	if traceIDRe.MatchString(q) || uuidRe.MatchString(q) || kibanaURLRe.MatchString(q) {
-		return QueryRuntimeDiagnosis
-	}
-	for _, kind := range queryKindOrder {
-		for _, signal := range queryKindSignals[kind] {
-			if strings.Contains(q, signal) {
-				return kind
-			}
-		}
-	}
-	return QueryFocusedFact
-}
-
-func hasComparisonSignal(question string, signals QuerySignals) bool {
-	q := strings.ToLower(question)
-	for _, signal := range []string{
-		"对比", "比较", "区别", "差异", "共性", "异同", "各自", "分别",
-		"compare", "comparison", "difference", "differences", "versus", " vs ",
-	} {
-		if strings.Contains(q, signal) {
-			return true
-		}
-	}
-	for _, term := range signals.DomainTerms {
-		term = strings.ToLower(strings.TrimSpace(term))
-		if term == "对比" || term == "比较" || term == "区别" || term == "差异" ||
-			term == "共性" || term == "异同" || term == "compare" || term == "comparison" {
-			return true
-		}
-	}
-	return false
-}
-
-func hasFlowSignal(question string, signals QuerySignals) bool {
-	q := strings.ToLower(question)
-	for _, signal := range []string{
-		"调用链", "调用关系", "谁调用", "被谁调用", "调用方", "被调用方",
-		"写入路径", "落库路径", "方法实现", "函数实现", "类定义", "符号定义",
-		"call chain", "caller", "callee", "callers", "callees", "implementation",
-		"method body", "function body", "write path",
-	} {
-		if strings.Contains(q, signal) {
-			return true
-		}
-	}
-	for _, term := range signals.DomainTerms {
-		term = strings.ToLower(strings.TrimSpace(term))
-		if term == "调用链" || term == "调用关系" || term == "call chain" ||
-			term == "caller" || term == "callee" || term == "implementation" {
-			return true
-		}
-	}
-	return false
 }
 
 // ProvidedFacetsFor derives conservative content coverage from an evidence kind.

@@ -13,8 +13,9 @@ import (
 
 const (
 	DefaultRetrievalRouterDirectConfidence = 0.90
-	DefaultRetrievalRouterMaxTokens        = 512
+	DefaultRetrievalRouterMaxTokens        = 1024
 	DefaultAgentAnswerReserve              = 30 * time.Second
+	DefaultAgentMaxToolCalls               = 24
 	DefaultLLMContextWindow                = 128000
 	DefaultFeatureGenerationTimeout        = 5 * time.Minute
 	DefaultCodingTimeout                   = 30 * time.Minute
@@ -72,6 +73,7 @@ type PlatformSettings struct {
 	RerankBaseURL              string
 	AgentTimeout               Duration
 	AgentMaxSteps              int
+	AgentMaxToolCalls          int64
 	AgentAnswerReserve         Duration
 	RetrievalRouterConfidence  float64
 	RetrievalRouterMaxTokens   int
@@ -113,7 +115,7 @@ var platformSettingKeys = map[string]bool{
 	"llm_max_continue_rounds": true, "llm_context_window": false, "agent_answer_reserve": true,
 	"llm_input_price_micros_per_million_tokens":  true,
 	"llm_output_price_micros_per_million_tokens": true,
-	"agent_timeout": true, "agent_max_steps": true, "context_budget": false, "domain_knowledge": true,
+	"agent_timeout": true, "agent_max_steps": true, "agent_max_tool_calls": true, "context_budget": false, "domain_knowledge": true,
 	"retrieval_router_direct_min_confidence": false, "retrieval_router_max_tokens": false,
 	"tool_pruning_enabled": false,
 	"delegation_enabled":   true, "delegation_shadow_enabled": true,
@@ -176,6 +178,7 @@ func (p *PlatformSettings) Values() map[string]any {
 		"agent_timeout":                              time.Duration(p.AgentTimeout).String(),
 		"agent_answer_reserve":                       time.Duration(p.AgentAnswerReserve).String(),
 		"agent_max_steps":                            p.AgentMaxSteps,
+		"agent_max_tool_calls":                       strconv.FormatInt(p.AgentMaxToolCalls, 10),
 		"retrieval_router_direct_min_confidence":     p.routerConfidence(),
 		"retrieval_router_max_tokens":                p.routerMaxTokens(),
 		"tool_pruning_enabled":                       p.ToolPruningEnabled,
@@ -233,6 +236,9 @@ func (p *PlatformSettings) Values() map[string]any {
 func (p *PlatformSettings) Apply(m map[string]string) {
 	if p.LLMContextWindow == 0 {
 		p.LLMContextWindow = DefaultLLMContextWindow
+	}
+	if p.AgentMaxToolCalls <= 0 {
+		p.AgentMaxToolCalls = DefaultAgentMaxToolCalls
 	}
 	if p.RetrievalRouterConfidence == 0 {
 		p.RetrievalRouterConfidence = DefaultRetrievalRouterDirectConfidence
@@ -421,6 +427,11 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 			p.AgentMaxSteps = n
 		}
 	}
+	if v := strings.TrimSpace(m["agent_max_tool_calls"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			p.AgentMaxToolCalls = n
+		}
+	}
 	if v := strings.TrimSpace(m["retrieval_router_direct_min_confidence"]); v != "" {
 		if confidence, err := strconv.ParseFloat(v, 64); err == nil {
 			p.RetrievalRouterConfidence = confidence
@@ -605,7 +616,7 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 		"vcs_clone_concurrency", "delegation_max_children",
 		"delegation_max_concurrent", "delegation_max_child_turns":
 		return canonicalPositiveIntSetting(key, value)
-	case "delegation_max_child_tool_calls", "delegation_max_child_input_tokens",
+	case "agent_max_tool_calls", "delegation_max_child_tool_calls", "delegation_max_child_input_tokens",
 		"delegation_max_child_output_tokens", "delegation_max_report_tokens",
 		"delegation_max_total_tokens":
 		return canonicalPositiveInt64Setting(key, value)

@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -41,7 +42,6 @@ const (
 
 const (
 	maxObjectiveBytes = 2000
-	maxSummaryBytes   = 4000
 	maxEvidenceRefs   = 20
 )
 
@@ -905,7 +905,7 @@ func childInput(
 		TaskIndex             int      `json:"task_index"`
 	}{
 		Capability: task.capability.ID, Objective: task.request.Objective,
-		ParentQuestionSummary: truncateText(parent.QuestionSummary, maxSummaryBytes),
+		ParentQuestionSummary: investigation.BoundedSummary(parent.QuestionSummary),
 		FocusFacets:           append([]string(nil), task.request.FocusFacets...),
 		EvidenceRefs:          append([]string(nil), task.request.EvidenceRefs...),
 		DelegationID:          delegationID, ParentRunID: parent.RunID, TaskIndex: task.index,

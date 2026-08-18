@@ -21,6 +21,7 @@ const (
 	EventExecutionRouted                EventType = "execution.routed"
 	EventExecutionDegraded              EventType = "execution.degraded"
 	EventWorkflowStarted                EventType = "workflow.started"
+	EventWorkflowCompleted              EventType = "workflow.completed"
 	EventAgentStarted                   EventType = "agent.started"
 	EventAgentCompleted                 EventType = "agent.completed"
 	EventEvidenceJoined                 EventType = "evidence.joined"
@@ -48,10 +49,13 @@ type TextEvent struct {
 }
 
 type ToolStartedEvent struct {
-	Step       int    `json:"step"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	Name       string `json:"name"`
-	Args       string `json:"args"`
+	Step          int    `json:"step"`
+	ToolCallID    string `json:"tool_call_id,omitempty"`
+	Name          string `json:"name"`
+	Args          string `json:"args"`
+	AgentRunID    string `json:"agent_run_id,omitempty"`
+	WorkflowRunID string `json:"workflow_run_id,omitempty"`
+	NodeID        string `json:"node_id,omitempty"`
 }
 
 type ToolFinishedEvent struct {
@@ -65,6 +69,9 @@ type ToolFinishedEvent struct {
 	DeliveryError string `json:"delivery_error,omitempty"`
 	DurationMs    int    `json:"duration_ms"`
 	SizeBytes     int64  `json:"size_bytes"`
+	AgentRunID    string `json:"agent_run_id,omitempty"`
+	WorkflowRunID string `json:"workflow_run_id,omitempty"`
+	NodeID        string `json:"node_id,omitempty"`
 }
 
 type SessionStatusEvent struct {

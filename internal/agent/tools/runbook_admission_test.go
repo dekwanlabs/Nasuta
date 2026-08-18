@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -28,25 +29,46 @@ func TestRunbookAdmissionScopeAndBound(t *testing.T) {
 	}
 }
 
-func TestRunbookEvidenceUnitsKeepCanonicalDocumentAndSections(t *testing.T) {
-	units := runbookEvidenceUnits(knowledge.RunbookSearchResult{
+func TestRunbookEvidenceUnitsUseStableChunkIdentity(t *testing.T) {
+	result := knowledge.RunbookSearchResult{
 		Matches: []knowledge.RunbookSearchHit{{
 			DocID: "doc-a", DocKind: domain.DocKindFlow,
 			EvidenceClass: domain.EvidenceClassCuratedRunbook,
 			TrustTier:     domain.TrustCuratedRunbook,
 			Chunks: []knowledge.RunbookChunk{
-				{ChunkIndex: 1, SectionHeader: "Overview", ChunkText: "a"},
-				{ChunkIndex: 2, ChunkText: "b"},
+				{ChunkIndex: 1, SectionHeader: "Overview", ChunkText: "a", SemanticScore: 0.5},
+				{ChunkIndex: 2, SectionHeader: "Overview", ChunkText: "b", SemanticScore: 0.4},
 			},
 		}},
-	})
-	if len(units) != 1 || units[0].Target != "doc-a" {
+	}
+	units := runbookEvidenceUnits(result)
+	if len(units) != 2 || units[0].Target != "doc-a" || units[1].Target != "doc-a" {
 		t.Fatalf("units = %#v", units)
 	}
-	if len(units[0].Sections) != 2 || units[0].Sections[0] != "Overview" || units[0].Sections[1] != "chunk:2" {
-		t.Fatalf("sections = %#v", units[0].Sections)
+	if units[0].Sections[0] != "chunk:1" || units[1].Sections[0] != "chunk:2" {
+		t.Fatalf("sections = %#v, %#v", units[0].Sections, units[1].Sections)
 	}
-	if units[0].Coverage.Complete || !units[0].Coverage.Partial {
-		t.Fatalf("coverage = %#v, want partial document scope", units[0].Coverage)
+	if units[0].Coverage.Complete || !units[0].Coverage.Partial || units[0].Coverage.Included != 1 {
+		t.Fatalf("coverage = %#v, want one partial chunk", units[0].Coverage)
+	}
+
+	variant := result
+	variant.Matches = []knowledge.RunbookSearchHit{{
+		DocID: "doc-a", Title: "query-specific title", DocKind: domain.DocKindFlow,
+		EvidenceClass: domain.EvidenceClassCuratedRunbook,
+		TrustTier:     domain.TrustCuratedRunbook,
+		Chunks: []knowledge.RunbookChunk{{
+			ChunkIndex: 1, SectionHeader: "renamed presentation header",
+			ChunkText: "a", SemanticScore: 0.99,
+		}},
+	}}
+	ledger := evidence.New(units, "first-query")
+	if conflicts := ledger.Add(runbookEvidenceUnits(variant), "second-query"); len(conflicts) != 0 {
+		t.Fatalf("retrieval variant conflicts = %#v", conflicts)
+	}
+
+	variant.Matches[0].Chunks[0].ChunkText = "changed authoritative content"
+	if conflicts := ledger.Add(runbookEvidenceUnits(variant), "changed-source"); len(conflicts) != 1 {
+		t.Fatalf("changed chunk conflicts = %#v, want one", conflicts)
 	}
 }

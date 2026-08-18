@@ -339,6 +339,16 @@ func (workflowStore *Store) FinishRun(
 			Summary: "workflow output created", CreatedAt: endedAt,
 		})
 	}
+	if err := closeRunningNodesTx(
+		ctx,
+		tx,
+		workflowRunID,
+		status,
+		errorCode,
+		endedAt,
+	); err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE workflow_runs
 		SET status=?,error_code=?,stop_reason=?,ended_at=? WHERE id=? AND status=?`,
 		status, errorCode, stopReason, store.DatabaseTime(endedAt.UTC().Format(time.RFC3339Nano)),
@@ -350,8 +360,19 @@ func (workflowStore *Store) FinishRun(
 	if err := requireSingleTransition(result, workflowRunID); err != nil {
 		return err
 	}
+	terminalDetail := TerminalEventDetail{
+		RunStatus: status, StopReason: stopReason, ErrorCode: errorCode,
+	}
+	if output != nil {
+		terminalDetail.Completeness = output.Completeness
+	}
+	detail, err := json.Marshal(terminalDetail)
+	if err != nil {
+		return fmt.Errorf("marshal workflow %q terminal event: %w", workflowRunID, err)
+	}
 	events = append(events, Event{
-		WorkflowRunID: workflowRunID, Kind: eventKind, Summary: summary, CreatedAt: endedAt,
+		WorkflowRunID: workflowRunID, Kind: eventKind, Summary: summary,
+		Detail: detail, CreatedAt: endedAt,
 	})
 	if err := appendEventsTx(ctx, tx, workflowRunID, events); err != nil {
 		return err
@@ -363,12 +384,60 @@ func (workflowStore *Store) FinishRun(
 	return nil
 }
 
+// closeRunningNodesTx closes attempts left running when their owning Workflow
+// reaches an abnormal terminal state. A successful Workflow must have closed
+// every node through its normal single-attempt transition.
+func closeRunningNodesTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	workflowRunID string,
+	status RunStatus,
+	errorCode string,
+	endedAt time.Time,
+) error {
+	if status != RunFailed && status != RunCancelled && status != RunTimedOut {
+		return nil
+	}
+	if errorCode == "" {
+		switch status {
+		case RunCancelled:
+			errorCode = "workflow_cancelled"
+		case RunTimedOut:
+			errorCode = "workflow_timeout"
+		default:
+			errorCode = "workflow_failed"
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_node_runs
+		SET status=?,error_code=?,ended_at=?
+		WHERE workflow_run_id=? AND status=?`,
+		status,
+		errorCode,
+		store.DatabaseTime(endedAt.UTC().Format(time.RFC3339Nano)),
+		workflowRunID,
+		RunRunning,
+	); err != nil {
+		return fmt.Errorf(
+			"close running workflow nodes for run %q: %w",
+			workflowRunID,
+			err,
+		)
+	}
+	return nil
+}
+
+// accumulateUsageTx adds non-zero node usage to its running Workflow.
+// Skipping the all-zero update preserves strict transition checks under
+// MySQL's changed-row RowsAffected semantics.
 func accumulateUsageTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	workflowRunID string,
 	usage Usage,
 ) error {
+	if usage.IsZero() {
+		return nil
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE workflow_runs
 		SET input_tokens=input_tokens+?,output_tokens=output_tokens+?,
 			reasoning_tokens=reasoning_tokens+?,total_tokens=total_tokens+?,

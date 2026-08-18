@@ -363,10 +363,18 @@ func convergenceOutcome(
 		return string(StopNoAffordableTask), "no_affordable_task"
 	case StopCapabilityUnavailable:
 		return string(StopCapabilityUnavailable), "capability_unavailable"
+	case StopEvidenceInsufficient:
+		return string(StopEvidenceInsufficient), "evidence_insufficient"
 	}
 	switch {
 	case errors.Is(err, ErrHumanApprovalRequired):
 		return "waiting_human", "human_approval_required"
+	case errors.Is(err, ErrNodePersistence):
+		return "failed", persistenceFailureCode(err)
+	case errors.Is(err, ErrRunPersistence):
+		return "failed", "workflow_persistence_failed"
+	case errors.Is(err, ErrConflict):
+		return "failed", "workflow_conflict"
 	case errors.Is(err, ErrEvidenceConflict):
 		return "evidence_conflict", "evidence_conflict"
 	case errors.Is(err, ErrBudgetExhausted):
@@ -661,6 +669,7 @@ func (orchestrator *Orchestrator) executeNode(
 	}
 	baseRequest := NodeRequest{
 		WorkflowRunID:           request.RunID,
+		ParentRunID:             request.ParentRunID,
 		Round:                   request.Round,
 		Depth:                   depth,
 		Node:                    node,

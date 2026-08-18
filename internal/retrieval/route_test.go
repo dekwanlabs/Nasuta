@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -56,7 +57,7 @@ func TestBindPlanDecisionAllowsDirect(t *testing.T) {
 func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"web\"],\"confidence\":0.96},\"query_terms\":{\"domain_terms\":[\"设备删除\"],\"identifiers\":[\"question\"]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.82,\"confidence\":0.91,\"tasks\":[{\"id\":\"design\",\"objective\":\"Establish the intended behavior.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"implementation\",\"objective\":\"Verify the implementation behavior.\",\"independently_useful\":true,\"depends_on\":[]}],\"reasons\":[\"requires_multiple_subproblems\",\"supports_parallel_investigation\"]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"focused_fact\"},\"route\":{\"sources\":[\"web\"],\"confidence\":0.96},\"query_terms\":{\"domain_terms\":[\"设备删除\"],\"identifiers\":[\"question\"]},\"execution\":{\"strategy\":\"multi_agent\",\"complexity\":0.82,\"confidence\":0.91,\"tasks\":[{\"id\":\"design\",\"objective\":\"Establish the intended behavior.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"implementation\",\"objective\":\"Verify the implementation behavior.\",\"independently_useful\":true,\"depends_on\":[]}],\"reasons\":[\"requires_multiple_subproblems\",\"supports_parallel_investigation\"]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -86,7 +87,7 @@ func TestAnalyzeEvidenceDerivesHistoryRelationInSameCall(t *testing.T) {
 			t.Fatalf("request missing bounded history metadata: %s", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.2,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_focused_question\"]},\"history_relation\":{\"topic_affinity\":0.7,\"confidence\":0.8,\"needs_prior_entities\":true,\"needs_prior_conclusion\":false,\"needs_prior_evidence\":false,\"explicit_turn_refs\":[]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"focused_fact\"},\"route\":{\"sources\":[],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.2,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_focused_question\"]},\"history_relation\":{\"topic_affinity\":0.7,\"confidence\":0.8,\"needs_prior_entities\":true,\"needs_prior_conclusion\":false,\"needs_prior_evidence\":false,\"explicit_turn_refs\":[]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -123,12 +124,12 @@ func TestAnalyzeEvidenceReturnsInvalidOutputError(t *testing.T) {
 	if _, err := AnalyzeEvidence(context.Background(), client, "question", "", "question", RoutingCapabilities{}, nil, 512); err == nil {
 		t.Fatal("missing route must return an error")
 	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("planner requests = %d, want 1", got)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("planner requests = %d, want 2", got)
 	}
 }
 
-func TestAnalyzeEvidenceDoesNotRetryTransportFailure(t *testing.T) {
+func TestAnalyzeEvidenceRetriesTransportFailure(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
@@ -140,26 +141,65 @@ func TestAnalyzeEvidenceDoesNotRetryTransportFailure(t *testing.T) {
 	if _, err := AnalyzeEvidence(context.Background(), client, "question", "", "question", RoutingCapabilities{}, nil, 512); err == nil {
 		t.Fatal("transport failure must return an error")
 	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("planner requests = %d, want 1", got)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("planner requests = %d, want 2", got)
 	}
 }
 
-func TestAnalyzeForPlanSkipsRouterWhenNoHelpersConfigured(t *testing.T) {
+func TestAnalyzeEvidenceRepromptsAfterMultipleJSONValues(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"comparison\"}}{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.9}}"}}]}`))
+			return
+		}
+		if !strings.Contains(string(body), "multiple JSON values") {
+			t.Fatalf("repair request missing parse failure: %s", body)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"comparison\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.9},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.4,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]}}"}}]}`))
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+
+	result, err := AnalyzeEvidence(context.Background(), client, "compare", "", "compare", RoutingCapabilities{}, nil, 512)
+	if err != nil {
+		t.Fatalf("AnalyzeEvidence: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("planner requests = %d, want 2", got)
+	}
+	if result.QuerySemantics == nil || result.QuerySemantics.Kind != domain.QueryComparison {
+		t.Fatalf("query semantics = %+v", result.QuerySemantics)
+	}
+}
+
+func TestAnalyzeForPlanStillClassifiesQuerySemantics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"flow\"},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.2,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_focused_question\"]}}"}}]}`))
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
 	plan := domain.EvidencePlan{Sources: domain.Web}
-	result, err := AnalyzeForPlan(context.Background(), nil, "question", "", "question", nil, 128, plan)
+	result, err := AnalyzeForPlan(context.Background(), client, "question", "", "question", nil, 128, plan)
 	if err != nil {
 		t.Fatalf("AnalyzeForPlan: %v", err)
 	}
 	if result.Decision.Plan.Sources != domain.Web || result.Decision.Origin != domain.Explicit {
 		t.Fatalf("decision = %+v", result.Decision)
 	}
+	if result.QuerySemantics == nil || result.QuerySemantics.Kind != domain.QueryFlow {
+		t.Fatalf("query semantics = %+v", result.QuerySemantics)
+	}
 }
 
 func TestAnalyzeEvidenceSelectsRegisteredToolIntent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[\"runtime failure\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"focused_fact\"},\"route\":{\"sources\":[],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[\"runtime failure\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -179,7 +219,7 @@ func TestAnalyzeEvidenceSelectsRegisteredToolIntent(t *testing.T) {
 func TestAnalyzeEvidenceExtractsGroundedMultilingualTime(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]},\"time\":{\"kind\":\"last\",\"n\":0,\"unit\":\"day\",\"raw\":\"últimos días\"}}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"focused_fact\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.98},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]},\"time\":{\"kind\":\"last\",\"n\":0,\"unit\":\"day\",\"raw\":\"últimos días\"}}"}}]}`))
 	}))
 	defer server.Close()
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
@@ -328,6 +368,15 @@ func TestRoutingExamplesValidateAgainstSchema(t *testing.T) {
 	}
 	if _, err := bindQueryTerms(termsRaw); err != nil {
 		t.Fatalf("queryTermsExampleJSON does not validate: %v", err)
+	}
+
+	semanticsTop := mustParseJSON(t, querySemanticsExampleJSON)
+	semanticsRaw, ok := semanticsTop["query_semantics"].(map[string]any)
+	if !ok {
+		t.Fatalf("querySemanticsExampleJSON missing top-level query_semantics object: %s", querySemanticsExampleJSON)
+	}
+	if _, err := bindQuerySemantics(semanticsRaw); err != nil {
+		t.Fatalf("querySemanticsExampleJSON does not validate: %v", err)
 	}
 
 	timeTop := mustParseJSON(t, timeExampleJSON)
@@ -529,4 +578,60 @@ func mustParseJSON(t *testing.T, raw string) map[string]any {
 		t.Fatalf("example is not valid JSON %q: %v", raw, err)
 	}
 	return m
+}
+
+func TestAnalyzeEvidenceKeepsValidSectionsWhenQuerySemanticsIsInvalid(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"unknown_shape\"},\"route\":{\"sources\":[\"web\"],\"confidence\":0.96},\"tools\":{\"tool_ids\":[\"runtime_logs\"]},\"query_terms\":{\"domain_terms\":[\"checkout\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.3,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]},\"time\":{\"kind\":\"last\",\"n\":1,\"unit\":\"day\",\"raw\":\"last day\"},\"history_relation\":{\"topic_affinity\":0.7,\"confidence\":0.8,\"needs_prior_entities\":true,\"needs_prior_conclusion\":false,\"needs_prior_evidence\":false,\"explicit_turn_refs\":[]}}"}}]}`))
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+
+	result, err := AnalyzeEvidence(
+		context.Background(),
+		client,
+		"checkout failures in the last day",
+		"previous checkout discussion",
+		"checkout failures in the last day",
+		RoutingCapabilities{Web: true},
+		[]ToolRouteCandidate{{ID: "runtime_logs", Intent: "runtime evidence", Temporal: true}},
+		512,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.QuerySemantics != nil || result.QuerySemanticsError == nil {
+		t.Fatalf("query semantics = %+v error = %v", result.QuerySemantics, result.QuerySemanticsError)
+	}
+	if !result.Decision.Plan.Has(domain.Web) || result.Terms.DomainTerms[0] != "checkout" ||
+		len(result.ToolIDs) != 1 || result.ToolIDs[0] != "runtime_logs" ||
+		result.Execution.Strategy != ExecutionSingleAgent || result.Time.Kind != "last" ||
+		!result.History.NeedsPriorEntities {
+		t.Fatalf("valid planner sections were not preserved: %+v", result)
+	}
+}
+
+func TestBindQuerySemanticsBindsTypedEntities(t *testing.T) {
+	semantics, err := bindQuerySemantics(map[string]any{
+		"kind": "comparison",
+		"entities": []any{
+			map[string]any{
+				"id": "our_agent", "label": "Our Agent", "role": "first_party_agent",
+				"aliases": []any{"自有 Agent", "our-agent"},
+			},
+			map[string]any{"id": "google", "role": "external_adapter"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if semantics.Kind != domain.QueryComparison || len(semantics.EntitySpecs) != 2 {
+		t.Fatalf("semantics = %+v", semantics)
+	}
+	first := semantics.EntitySpecs[0]
+	if first.ID != "our_agent" || first.Label != "Our Agent" || first.Role != "first_party_agent" ||
+		!reflect.DeepEqual(first.Aliases, []string{"自有 Agent", "our-agent"}) {
+		t.Fatalf("first entity = %+v", first)
+	}
 }

@@ -89,7 +89,8 @@ func (srv *Service) GetSymbolResult(ctx context.Context, query, file, qualifiedN
 	}
 	match := map[string]any{
 		"id": n.ID, "function": n.Name, "qualifiedName": n.QualifiedName,
-		"kind": n.Kind, "file": n.FilePath, "line": n.StartLine, "source": source,
+		"kind": n.Kind, "file": n.FilePath, "language": n.Language,
+		"line": n.StartLine, "endLine": n.EndLine, "source": source,
 	}
 	return map[string]any{"resolution": "unique", "matches": []any{match}}, nil
 }
@@ -192,7 +193,8 @@ func callChainResult(root string, requested, resolved callchain.Request, result 
 			}
 			nodes = append(nodes, map[string]any{
 				"id": node.ID, "function": node.Name, "qualifiedName": node.QualifiedName,
-				"kind": node.Kind, "file": node.FilePath, "line": node.StartLine,
+				"kind": node.Kind, "file": node.FilePath, "language": node.Language,
+				"line": node.StartLine, "endLine": node.EndLine,
 				"service": node.ServiceName, "depth": hop.Depth, "source": source,
 				"callSite":   map[string]any{"line": hop.Edge.Line, "col": hop.Edge.Col},
 				"confidence": hop.Edge.Confidence, "provenance": hop.Edge.Provenance, "bridge": hop.Bridge,

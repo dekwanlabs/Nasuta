@@ -81,6 +81,14 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 		if state.result.Err != nil {
 			break
 		}
+		if state.toolBudgetExhausted {
+			log.InfofCtx(
+				state.ctx,
+				"[agent] run %s tool-call budget exhausted; forcing conclusion with collected evidence",
+				state.runID,
+			)
+			break
+		}
 		agent.advanceTurn(state, step, outcome)
 		log.InfofCtx(state.ctx, "[agent] run %s context size after step %d: %d chars",
 			state.runID, step, contextChars(state.messages))
@@ -287,15 +295,12 @@ func (agent *Agent) recordThinkTurn(state *compiledLoop, turn modelTurn) error {
 func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) toolTurnOutcome {
 	var outcome toolTurnOutcome
 	var notices []string
-	for _, call := range calls {
+	for index, call := range calls {
 		if agent.cfg.MaxToolCalls > 0 &&
 			int64(state.result.Evidence.ToolCallCount) >= agent.cfg.MaxToolCalls {
-			state.result.Err = fmt.Errorf(
-				"%w: maximum %d calls",
-				ErrToolCallBudgetExhausted,
-				agent.cfg.MaxToolCalls,
-			)
-			return outcome
+			agent.appendBudgetSkippedToolResults(state, calls[index:])
+			state.toolBudgetExhausted = true
+			break
 		}
 		state.result.Evidence.ToolCallCount++
 		state.stepSeq++
@@ -317,12 +322,14 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 		case toolAdmissionAlreadyAvailable, toolAdmissionDenyBudget:
 			execution = toolAdmissionExecution(admission)
 		default:
-			execution = agent.executor.Execute(
+			execution = agent.executor.ExecuteLimited(
 				state.loopCtx,
 				state.toolSnapshot,
 				executionCall,
 				state.input.ReferenceTypes,
 				state.seenTools,
+				state.runID,
+				agent.cfg.MaxToolResultBytes,
 			)
 			if !execution.Failed {
 				conflicts := state.evidenceLedger.add(execution.EvidenceUnits, "tool")
@@ -398,9 +405,34 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 		notices = append(notices, execution.Notices...)
 		state.answerContract.Add(execution.AnswerContract)
 	}
+	if agent.cfg.MaxToolCalls > 0 &&
+		int64(state.result.Evidence.ToolCallCount) >= agent.cfg.MaxToolCalls {
+		state.toolBudgetExhausted = true
+		notices = append(
+			notices,
+			fmt.Sprintf(
+				"Tool-call budget exhausted after %d calls. Do not request more tools; summarize the evidence already available.",
+				agent.cfg.MaxToolCalls,
+			),
+		)
+	}
 	// Provider protocols forbid non-tool messages inside a parallel result group.
 	state.messages = appendToolTurnPostlude(state.messages, notices, state.answerContract)
 	return outcome
+}
+
+// appendBudgetSkippedToolResults closes every omitted call in a parallel tool
+// group so the next provider request still satisfies tool-call protocol.
+func (agent *Agent) appendBudgetSkippedToolResults(
+	state *compiledLoop,
+	calls []llm.ToolCall,
+) {
+	const content = `{"error":"tool_call_budget_exhausted","message":"Tool call skipped because the run tool-call budget is exhausted."}`
+	for _, call := range calls {
+		message := toolMessage(call.ID, call.Function.Name, content)
+		state.messages = append(state.messages, message)
+		state.result.SessionMessages = append(state.result.SessionMessages, message)
+	}
 }
 
 func appendToolTurnPostlude(messages []llm.Message, notices []string, contract *exactAnswerContract) []llm.Message {

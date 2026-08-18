@@ -229,6 +229,25 @@ func (runtime *Runtime) EmitEvent(
 	}
 }
 
+// ProjectToolEvents mirrors a child Agent's tool lifecycle onto the parent QA
+// stream without exposing Hub ownership to Workflow execution.
+func (runtime *Runtime) ProjectToolEvents(
+	childRunID string,
+	parentRunID string,
+	workflowRunID string,
+	nodeID string,
+) func() {
+	if runtime == nil || runtime.hub == nil {
+		return func() {}
+	}
+	return runtime.hub.ProjectToolEvents(
+		childRunID,
+		parentRunID,
+		workflowRunID,
+		nodeID,
+	)
+}
+
 // ScenarioToolSet pins tools used while a scenario prepares one RunRequest.
 type ScenarioToolSet interface {
 	Tools() []tool.Tool

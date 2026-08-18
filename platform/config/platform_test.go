@@ -310,7 +310,7 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"llm_max_continue_rounds": "0", "llm_context_window": "128000", "agent_answer_reserve": "30s",
 		"llm_input_price_micros_per_million_tokens":  "0",
 		"llm_output_price_micros_per_million_tokens": "0",
-		"agent_timeout": "5m", "agent_max_steps": "1", "context_budget": "1", "domain_knowledge": "domain",
+		"agent_timeout": "5m", "agent_max_steps": "1", "agent_max_tool_calls": "24", "context_budget": "1", "domain_knowledge": "domain",
 		"retrieval_router_direct_min_confidence": "0.9", "retrieval_router_max_tokens": "512",
 		"tool_pruning_enabled": "false",
 		"delegation_enabled":   "false", "delegation_shadow_enabled": "false",
@@ -344,7 +344,7 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 func TestCanonicalPlatformSettingRejectsInvalidTypedValues(t *testing.T) {
 	invalid := map[string]string{
 		"llm_provider": "other", "rerank_enabled": "yes", "agent_timeout": "soon",
-		"agent_max_steps": "zero", "rerank_min_score": "1.1", "vcs_clone_concurrency": "-1",
+		"agent_max_steps": "zero", "agent_max_tool_calls": "0", "rerank_min_score": "1.1", "vcs_clone_concurrency": "-1",
 		"llm_input_price_micros_per_million_tokens": "-1",
 		"delegation_enabled":                        "yes", "delegation_max_total_tokens": "0",
 	}

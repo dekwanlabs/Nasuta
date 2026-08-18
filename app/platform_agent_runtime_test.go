@@ -91,7 +91,7 @@ func TestInvestigationBudgetsUsesImmutableAgentDefinitions(t *testing.T) {
 		"web": policy.Web,
 	} {
 		if budget.MaxInputTokens <= 0 || budget.MaxOutputTokens <= 0 ||
-			budget.MaxTotalTokens <= 0 || budget.MaxToolCalls != int64(settings.AgentMaxSteps) ||
+			budget.MaxTotalTokens <= 0 || budget.MaxToolCalls != settings.AgentMaxToolCalls ||
 			budget.MaxCostMicros != 0 {
 			t.Fatalf("%s budget = %+v", name, budget)
 		}
@@ -263,6 +263,30 @@ func TestInvestigationFlowForGoalsPinsRequestedVersion(t *testing.T) {
 		verifier.OutputSchema.ID != "investigation.verified_bundle" {
 		t.Fatalf("request verifier = %+v", verifier)
 	}
+	subjectDefinition, _, err := platform.investigationFlowWithEvidenceSubjects(
+		t.Context(),
+		requestedVersion,
+		goals,
+		[]workflow.SubjectRequirement{{
+			EntityID: "our_agent", RequiredFacets: []string{"core_flow"},
+		}},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var subjectVerifier workflow.NodeDefinition
+	for _, node := range subjectDefinition.Nodes {
+		if node.ID == "evidence.verify" {
+			subjectVerifier = node
+			break
+		}
+	}
+	if subjectVerifier.Verifier == nil ||
+		len(subjectVerifier.Verifier.SubjectRequirements) != 1 ||
+		subjectVerifier.Verifier.SubjectRequirements[0].EntityID != "our_agent" {
+		t.Fatalf("subject verifier = %+v", subjectVerifier.Verifier)
+	}
 	riskGate := nodes["evidence.risk"]
 	if riskGate.Kind != workflow.NodeGate ||
 		riskGate.Gate == nil ||
@@ -376,7 +400,7 @@ func TestInvestigationFlowBindsObserveAgent(t *testing.T) {
 		observeNode.Agent.Version != version ||
 		observeNode.Capability.ID != observeCapability.ID ||
 		observeNode.Capability.Version != version ||
-		observeNode.Budget.MaxToolCalls != int64(settings.AgentMaxSteps) ||
+		observeNode.Budget.MaxToolCalls != settings.AgentMaxToolCalls ||
 		!observeNode.Optional {
 		t.Fatalf("runtime observation node = %+v", observeNode)
 	}
@@ -418,7 +442,7 @@ func TestInvestigationFlowUsesPlanAndFallsBackOnRejection(t *testing.T) {
 		},
 	}
 	report := agentapi.SchemaRef{ID: "investigation.report", Version: 1}
-	answer := agentapi.SchemaRef{ID: "investigation.answer", Version: 1}
+	answer := agentapi.SchemaRef{ID: "investigation.answer", Version: 3}
 	proposal := agentapi.TaskGraphProposal{
 		Tasks: []agentapi.TaskSpec{
 			{
@@ -474,6 +498,26 @@ func TestInvestigationFlowUsesPlanAndFallsBackOnRejection(t *testing.T) {
 		!hasWorkflowNode(fallback, "investigate.runtime") ||
 		hasWorkflowNode(fallback, "planner.code") {
 		t.Fatalf("fallback workflow = %+v", fallback)
+	}
+
+	alternative, err := platform.investigationFlow(
+		t.Context(),
+		version,
+		[]platformagent.EvidenceGoal{{
+			ID: "core_flow", Facet: "core_flow", Required: true,
+			Sources: []agentapi.EvidenceSource{
+				agentapi.EvidenceSourceInternal,
+				agentapi.EvidenceSourceRuntime,
+			},
+		}},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWorkflowNode(alternative, "investigate.code") ||
+		hasWorkflowNode(alternative, "investigate.observe") {
+		t.Fatalf("alternative-source workflow = %+v", alternative)
 	}
 }
 
@@ -705,6 +749,96 @@ func TestRebuildQARuntimeReusesPublishedCatalogOnStartup(t *testing.T) {
 	}
 }
 
+func TestRebuildQARuntimeDoesNotReuseCatalogWhenSynthesizerContractChanges(t *testing.T) {
+	const (
+		staleVersion int64 = 7
+		maxVersion   int64 = 9
+	)
+	settings := enabledAgentSettings()
+	platform := qaRuntimeTestPlatform(t)
+	platform.settings = settings
+	platform.index = &indexing.Service{}
+	platform.registry = tool.NewRegistry()
+	platform.reads = tool.NewReadRegistry(platform.registry)
+	platform.agents.capabilities = agentapi.NewCapabilityRegistry(
+		platform.agents.schemas,
+		platform.agents.catalog,
+	)
+	platform.flow.bindings = workflow.NewWorkflowBindingRegistry(
+		platform.agents.capabilities,
+		platform.flow.catalog,
+	)
+
+	definitions, err := defaultAgentDefinitions(settings, staleVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSynthesizer := false
+	for index := range definitions {
+		if definitions[index].ID != "synthesizer" {
+			continue
+		}
+		foundSynthesizer = true
+		definitions[index].Prompt.Version = "investigation-synthesis-v5"
+		definitions[index].OutputSchema = agentapi.SchemaRef{
+			ID: "investigation.answer", Version: 3,
+		}
+		definitions[index].ContentHash = ""
+		definitions[index], err = agentapi.Prepare(definitions[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !foundSynthesizer {
+		t.Fatal("default catalog did not contain synthesizer")
+	}
+	staleSnapshot, err := platform.prepareQACatalogSnapshot(
+		settings,
+		staleVersion,
+		definitions,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.agents.catalog.Publish(staleSnapshot.definitions); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.flow.catalog.Publish(
+		[]workflow.Definition{staleSnapshot.workflowDefinition},
+	); err != nil {
+		t.Fatal(err)
+	}
+	platform.agents.maxVersion = maxVersion
+
+	if err := platform.rebuildQARuntimeLocked(settings, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	wantVersion := maxVersion + 1
+	if platform.agents.version != wantVersion ||
+		platform.agents.maxVersion != wantVersion {
+		t.Fatalf(
+			"catalog versions = active:%d max:%d, want %d",
+			platform.agents.version,
+			platform.agents.maxVersion,
+			wantVersion,
+		)
+	}
+	synthesizer, err := platform.agents.catalog.Resolve(agentapi.DefinitionRef{
+		ID: "synthesizer", Version: wantVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if synthesizer.OutputSchema != (agentapi.SchemaRef{
+		ID: "investigation.answer", Version: 3,
+	}) || synthesizer.Prompt.Version != "investigation-synthesis-v6" {
+		t.Fatalf("published synthesizer contract = %+v", synthesizer)
+	}
+}
+
 func TestConfigureAgentWorkflowRuntimeTracksLLMAvailability(t *testing.T) {
 	db, _, err := sqlmock.New()
 	if err != nil {
@@ -844,6 +978,7 @@ func observeCatalog(
 		Budget: agentapi.BudgetPolicy{
 			Timeout:       time.Duration(settings.AgentTimeout),
 			MaxSteps:      settings.AgentMaxSteps,
+			MaxToolCalls:  settings.AgentMaxToolCalls,
 			ContextTokens: settings.LLMContextWindow,
 		},
 		Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},

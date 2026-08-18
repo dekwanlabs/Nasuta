@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -355,6 +356,7 @@ func TestDefinitionRuntimePinsToolSnapshotAcrossRegistryMutation(t *testing.T) {
 	}
 	definition := testReviewerDefinition(t, func(definition *agentapi.Definition) {
 		definition.Tools.VisibleToolIDs = []string{"lookup"}
+		definition.Budget.MaxToolCalls = 4
 	})
 	runtime := newTestDefinitionRuntime(t, definition, registry, testRuntimeSettings("http://unused"), nil)
 	execution, err := runtime.prepare(testDefinitionRequest(definition))
@@ -390,6 +392,7 @@ func TestDefinitionRuntimeNarrowsDefinitionToolsByRunPermission(t *testing.T) {
 			AllowWrite: true, VisibleToolIDs: []string{"read", "write"},
 		}
 		definition.Permissions.Scopes = []string{knowledgeReadScope, knowledgeWriteScope}
+		definition.Budget.MaxToolCalls = 4
 	})
 	runtime := newTestDefinitionRuntime(
 		t, definition, registry, testRuntimeSettings("http://unused"), nil,
@@ -782,7 +785,7 @@ func TestDefinitionRuntimeExecutesStructuredOutput(t *testing.T) {
 	}
 }
 
-func TestDefinitionRuntimeEncodesTextOutputAsJSONString(t *testing.T) {
+func TestDefinitionRuntimeEncodesPlainTextStringOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		defer request.Body.Close()
 		writer.Header().Set("Content-Type", "text/event-stream")
@@ -799,10 +802,10 @@ func TestDefinitionRuntimeEncodesTextOutputAsJSONString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	want := `"A rainbow forms when light is refracted and reflected."`
-	if result.Status != agentapi.RunSucceeded || string(result.Output) != want ||
+	if result.Status != agentapi.RunSucceeded || result.Error != nil ||
+		string(result.Output) != `"A rainbow forms when light is refracted and reflected."` ||
 		result.Text != "A rainbow forms when light is refracted and reflected." {
-		t.Fatalf("result = %+v, want output %s", result, want)
+		t.Fatalf("result = %+v, want encoded string output", result)
 	}
 }
 
@@ -1103,5 +1106,123 @@ func TestDefinitionManagedRunAttachesRequestedTraceScope(t *testing.T) {
 	domain.RecordTrace(ctx, domain.EvaluationTrace{Node: "late_event"})
 	if len(events) != 1 {
 		t.Fatalf("managed run accepted a late trace event: %#v", events)
+	}
+}
+
+func TestPrepareRunLimitsAppliesDefinitionToolCallCeiling(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	definition := testReviewerDefinition(t, func(definition *agentapi.Definition) {
+		definition.Budget.MaxSteps = 8
+		definition.Budget.MaxToolCalls = 24
+	})
+	tests := []struct {
+		name      string
+		policy    int64
+		requested int64
+		want      int64
+		wantErr   string
+	}{
+		{name: "definition default", want: 24},
+		{name: "request narrows", requested: 12, want: 12},
+		{name: "policy narrows", policy: 8, want: 8},
+		{name: "request exceeds definition", requested: 25, wantErr: "run max_tool_calls exceeds"},
+		{name: "policy exceeds definition", policy: 25, wantErr: "run policy max_tool_calls exceeds"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limits, err := prepareRunLimits(
+				definition,
+				agentapi.RunPolicy{MaxToolCalls: tt.policy},
+				agentapi.RunLimits{MaxToolCalls: tt.requested},
+				100*time.Millisecond,
+				now,
+			)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if limits.MaxToolCalls != tt.want {
+				t.Fatalf("max tool calls = %d, want %d", limits.MaxToolCalls, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefinitionRuntimeKeepsStepAndToolCallLimitsIndependent(t *testing.T) {
+	definition := testReviewerDefinition(t, func(definition *agentapi.Definition) {
+		definition.Budget.MaxSteps = 8
+		definition.Budget.MaxToolCalls = 24
+	})
+	runtime := newTestDefinitionRuntime(
+		t,
+		definition,
+		tool.NewRegistry(),
+		testRuntimeSettings("http://unused"),
+		nil,
+	)
+	execution, err := runtime.prepare(testDefinitionRequest(definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.snapshot.Limits.MaxSteps != 8 || execution.snapshot.Limits.MaxToolCalls != 24 {
+		t.Fatalf("run limits = %+v", execution.snapshot.Limits)
+	}
+}
+
+func TestDefinitionRuntimeRejectsVisibleToolsWithoutToolCallBudget(t *testing.T) {
+	registry := testRegistry(t, testAgentTool("read", ToolKindRead, noopTool))
+	definition := testReviewerDefinition(t, func(definition *agentapi.Definition) {
+		definition.Tools.VisibleToolIDs = []string{"read"}
+		definition.Budget.MaxToolCalls = 0
+	})
+	runtime := newTestDefinitionRuntime(
+		t,
+		definition,
+		registry,
+		testRuntimeSettings("http://unused"),
+		nil,
+	)
+	_, err := runtime.prepare(testDefinitionRequest(definition))
+	if err == nil || !strings.Contains(err.Error(), "requires a positive max_tool_calls budget") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDefinitionRuntimeDoesNotRepairSchemaAfterContinuation(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		defer request.Body.Close()
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&calls, 1) == 1 {
+			fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"summary\\\":\\\"continued\\\",\"},\"finish_reason\":\"length\"}]}\n\n")
+		} else {
+			fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"\\\"unexpected\\\":true}\"},\"finish_reason\":\"stop\"}]}\n\n")
+		}
+		fmt.Fprint(writer, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	definition := testReviewerDefinition(t, func(definition *agentapi.Definition) {
+		definition.Budget.MaxContinueRounds = 1
+	})
+	runtime := newTestDefinitionRuntime(
+		t,
+		definition,
+		tool.NewRegistry(),
+		testRuntimeSettings(server.URL),
+		nil,
+	)
+	result, err := runtime.Run(t.Context(), testDefinitionRequest(definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || result.Status != agentapi.RunFailed || result.Error == nil ||
+		result.Error.Code != "invalid_output" || len(result.Output) != 0 {
+		t.Fatalf("calls=%d result=%+v", calls, result)
 	}
 }

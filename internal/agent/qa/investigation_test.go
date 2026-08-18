@@ -3,10 +3,13 @@ package qa
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -80,7 +83,6 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 	}}
 	contract := contractFromPreparation(prepared, seedMaterial)
 	if contract.TaskID != "qa_1" ||
-		contract.Question != "Why is checkout failing?" ||
 		contract.Objective != "Trace the checkout failure" {
 		t.Fatalf("contract identity = %+v", contract)
 	}
@@ -132,13 +134,23 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 	}
 }
 
+func TestTaskContractObjectiveBoundsParentQuestionFallback(t *testing.T) {
+	question := strings.Repeat("investigate the checkout failure path ", 1000)
+	objective := taskContractObjective(&preparation{
+		request: Request{Question: question},
+	})
+	if objective == question ||
+		tooloutput.EstimateTokens(objective) > investigation.MaxTaskSummaryTokens {
+		t.Fatalf("task objective was not bounded: %d tokens", tooloutput.EstimateTokens(objective))
+	}
+}
+
 func TestCanonicalEntityIdentityMatchesRetrievalMemoryAndTaskContract(t *testing.T) {
 	question := "继续检查 PaymentHandler.handle()"
 	resolution := domain.ResolveQueryPlan(
 		question,
-		domain.QuerySignals{
-			Identifiers: []string{"PaymentHandler.handle()"},
-		},
+		nil,
+		[]string{"PaymentHandler.handle()"},
 	)
 	_, remembered, _ := memory.CanonicalQuestionMetadata(question)
 	contract := contractFromPreparation(&preparation{
@@ -252,5 +264,52 @@ func TestInvestigationOutcomeRejectsInvalidTerminalFacts(t *testing.T) {
 		if _, err := investigationOutcome(terminal); err == nil {
 			t.Fatalf("terminal %+v was accepted", terminal)
 		}
+	}
+}
+
+func TestComparisonContractCarriesEntityRolesMinimumCoverageAndRequiredInternalSource(t *testing.T) {
+	prepared := &preparation{
+		request: Request{RunID: "qa_compare", Question: "Compare the systems."},
+		planning: evidencePlanningOutput{Effective: domain.PlanDecision{
+			Plan: domain.EvidencePlan{Sources: domain.Internal | domain.Web},
+		}},
+		analysis: queryAnalysisOutput{QueryPlan: domain.QueryPlan{
+			Kind: domain.QueryComparison,
+			EntitySpecs: []domain.EntitySpec{
+				{ID: "our_agent", Label: "Our Agent", Role: "first_party_agent"},
+				{ID: "google", Label: "Google", Role: "external_adapter"},
+				{ID: "alexa", Label: "Alexa", Role: "external_adapter"},
+			},
+		}},
+	}
+
+	contract := contractFromPreparation(prepared, nil)
+	if len(contract.Entities) != 3 || contract.Entities[0].Role != "first_party_agent" {
+		t.Fatalf("entities = %+v", contract.Entities)
+	}
+	for _, goal := range contract.EvidenceGoals {
+		if goal.MinimumCoverage != 3 {
+			t.Fatalf("goal %q minimum coverage = %d, want 3", goal.ID, goal.MinimumCoverage)
+		}
+		if !reflect.DeepEqual(goal.RequiredSources, []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}) {
+			t.Fatalf("goal %q required sources = %v", goal.ID, goal.RequiredSources)
+		}
+		if !reflect.DeepEqual(goal.Sources, []agentapi.EvidenceSource{
+			agentapi.EvidenceSourceInternal, agentapi.EvidenceSourceWeb,
+		}) {
+			t.Fatalf("goal %q sources = %v", goal.ID, goal.Sources)
+		}
+	}
+}
+
+func TestComparisonContractWithoutTwoEntitiesIsExplicitlyInvalidForCoverage(t *testing.T) {
+	contract := TaskContract{
+		Entities: []EntityRef{{ID: "only-one"}},
+		EvidenceGoals: []EvidenceGoal{{
+			ID: "core_flow", Facet: "core_flow", Required: true, MinimumCoverage: 2,
+		}},
+	}
+	if err := validateContractEntityCoverage(contract); err == nil || !strings.Contains(err.Error(), "requires 2 subjects") {
+		t.Fatalf("coverage error = %v", err)
 	}
 }

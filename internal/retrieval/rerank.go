@@ -40,6 +40,7 @@ type codeDoc struct {
 	rerankScore   float64
 	evidenceClass string
 	trustTier     int
+	evidenceUnits []tool.EvidenceUnit
 }
 
 func (d codeDoc) candidateScore() float64 {

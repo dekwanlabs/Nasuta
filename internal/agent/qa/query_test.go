@@ -14,8 +14,9 @@ func TestQueryAnalysisTraceCarriesDerivedDiagnostics(t *testing.T) {
 		events = append(events, event)
 	}))
 	analysis, err := analyzeQuery(ctx, queryAnalysisInput{
-		Question:      "分别比较 Domestic.Control 和 Overseas.Control 的差异",
-		CleanQuestion: "分别比较 Domestic.Control 和 Overseas.Control 的差异",
+		Question:       "分别比较 Domestic.Control 和 Overseas.Control 的差异",
+		CleanQuestion:  "分别比较 Domestic.Control 和 Overseas.Control 的差异",
+		QuerySemantics: &domain.QuerySemantics{Kind: domain.QueryComparison},
 		Terms: retrieval.QueryTerms{
 			Identifiers: []string{"Domestic.Control", "Overseas.Control"},
 			DomainTerms: []string{"比较"},
@@ -32,8 +33,8 @@ func TestQueryAnalysisTraceCarriesDerivedDiagnostics(t *testing.T) {
 	}
 	output := events[0].Output
 	if output["query_kind"] != domain.QueryComparison ||
-		output["resolution_origin"] != domain.QueryResolutionRule ||
-		output["matched_rule_kind"] != domain.QueryComparison ||
+		output["resolution_origin"] != domain.QueryResolutionPlanner ||
+		output["matched_rule_kind"] != domain.QueryKind("") ||
 		output["entity_count"] != 2 {
 		t.Fatalf("query analysis trace = %#v", output)
 	}

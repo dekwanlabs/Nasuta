@@ -25,32 +25,36 @@ func evidenceFacets(source, kind string) []string {
 	return out
 }
 
-func evidenceUnitForCodeDoc(doc codeDoc, content string) tool.EvidenceUnit {
-	target := doc.filePath
-	sections := append([]string(nil), doc.sections...)
+func evidenceUnitsForCodeDoc(doc codeDoc, content string) []tool.EvidenceUnit {
+	if len(doc.evidenceUnits) > 0 {
+		return evidence.CloneUnits(doc.evidenceUnits)
+	}
 	coverage := doc.coverage
 	if coverage.Included == 0 {
 		coverage.Included = 1
 	}
-	switch doc.source {
-	case "runbook":
-		target = doc.docID
-		if !coverage.Complete {
-			coverage.Partial = true
+	if doc.source == "code" || doc.source == "codegraph" {
+		coverage.Partial = true
+		unit, ok := evidence.CodeUnit(
+			doc.source, doc.filePath, doc.startLine, doc.endLine, doc.text, "", "",
+			doc.evidenceClass, doc.trustTier, coverage,
+		)
+		if !ok {
+			return nil
 		}
-	case "code", "codegraph":
-		if doc.startLine > 0 {
-			sections = []string{fmt.Sprintf("L%d-L%d", doc.startLine, doc.endLine)}
-		}
+		return []tool.EvidenceUnit{unit}
+	}
+	if !coverage.Complete {
 		coverage.Partial = true
 	}
-	return tool.EvidenceUnit{
-		SourceKind: doc.source, Target: target, Sections: sections,
+	return []tool.EvidenceUnit{{
+		SourceKind: doc.source, Target: doc.docID,
+		Sections:    append([]string(nil), doc.sections...),
 		ContentHash: evidenceHash(content), Coverage: coverage,
 		Facets:    evidenceFacets(doc.source, doc.kind),
 		TrustTier: doc.trustTier, EvidenceClass: doc.evidenceClass,
 		TokenCost: tokenestimate.Count(content),
-	}
+	}}
 }
 
 func evidenceUnitForPart(source, target, content string, coverage tool.EvidenceCoverage) tool.EvidenceUnit {

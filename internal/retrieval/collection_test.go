@@ -34,9 +34,9 @@ func TestCollectRunbooksUsesMatchedChunksAndDeduplicates(t *testing.T) {
 	retrieve := New(nil, config.Config{})
 	hits := []domain.RunbookSearchHit{
 		{DocID: "flow-1", Title: "flow", DocKind: "event", Chunks: []domain.RunbookChunk{
-			{ChunkText: "matched section", SectionHeader: "main", SemanticScore: 0.9},
-			{ChunkText: "matched section", SectionHeader: "main", SemanticScore: 0.8},
-			{ChunkText: "branch section", SectionHeader: "branch", SemanticScore: 0.7},
+			{ChunkIndex: 1, ChunkText: "matched section", SectionHeader: "main", SemanticScore: 0.9},
+			{ChunkIndex: 2, ChunkText: "matched section", SectionHeader: "main", SemanticScore: 0.8},
+			{ChunkIndex: 3, ChunkText: "branch section", SectionHeader: "branch", SemanticScore: 0.7},
 		}},
 	}
 	var docs []codeDoc
@@ -49,6 +49,15 @@ func TestCollectRunbooksUsesMatchedChunksAndDeduplicates(t *testing.T) {
 	}
 	if strings.Count(docs[0].text, "matched section") != 1 || !strings.Contains(docs[0].text, "branch section") {
 		t.Fatalf("chunk merge = %q", docs[0].text)
+	}
+	if len(docs[0].evidenceUnits) != 2 ||
+		docs[0].evidenceUnits[0].Sections[0] != "chunk:1" ||
+		docs[0].evidenceUnits[1].Sections[0] != "chunk:3" {
+		t.Fatalf("runbook evidence units = %#v", docs[0].evidenceUnits)
+	}
+	parts := retrieve.formatCodePool(context.Background(), docs)
+	if len(parts) != 1 || len(parts[0].units) != 2 {
+		t.Fatalf("formatted runbook evidence = %#v", parts)
 	}
 }
 

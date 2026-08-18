@@ -150,6 +150,7 @@ func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
 		{eventType: run.EventExecutionRouted},
 		{eventType: run.EventExecutionDegraded},
 		{eventType: run.EventWorkflowStarted},
+		{eventType: run.EventWorkflowCompleted},
 		{eventType: run.EventAgentStarted},
 		{eventType: run.EventAgentCompleted},
 		{eventType: run.EventEvidenceJoined},

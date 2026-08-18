@@ -8,6 +8,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -31,6 +32,10 @@ func marshalInvestigationContract(
 	}
 
 	prepared := cloneInvestigationContract(contract)
+	prepared.Objective = investigation.BoundedSummary(prepared.Objective)
+	if prepared.Objective == "" {
+		return nil, fmt.Errorf("investigation task objective is required")
+	}
 	originalBlocks := prepared.Context.SeedMaterial
 	prepared.Context.SeedMaterial = nil
 	base, err := json.Marshal(prepared)

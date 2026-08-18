@@ -168,7 +168,7 @@ func TestDefaultPlanCompilesCapabilityBindings(t *testing.T) {
 	verifier := nodes["evidence.verify"]
 	if verifier.Kind != NodeVerifier ||
 		verifier.InputSchema != (agentapi.SchemaRef{ID: "investigation.bundle", Version: 1}) ||
-		verifier.OutputSchema != (agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 1}) ||
+		verifier.OutputSchema != (agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2}) ||
 		verifier.Verifier == nil ||
 		verifier.Verifier.RejectEvidenceConflicts {
 		t.Fatalf("verifier = %+v", verifier)
@@ -459,7 +459,7 @@ func repeatedCodeInvestigationPlan() agentapi.TaskGraphProposal {
 			{
 				ID: "synthesize", Purpose: "Synthesize evidence.",
 				Capability:   "evidence.synthesize",
-				OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
+				OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
 				MaxAttempts:  2,
 			},
 		},
@@ -531,7 +531,7 @@ func TestInvestigationFlowRunsFourIndependentAgentsAndSynthesizesJoin(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(result.Output.Payload) != `{"answer":"grounded answer","citations":[],"limitations":["live logs unavailable"]}` {
+	if string(result.Output.Payload) != `{"answer":"grounded answer","citations":[],"limitations":["live logs unavailable"],"limitations_detail":{"artifact_id":"art_00000000-0000-0000-0000-000000000000","total_count":1,"displayed_count":1,"omitted_count":0,"normalization_version":"limitations-v1"}}` {
 		t.Fatalf("output = %s", result.Output.Payload)
 	}
 	requests := runtime.snapshot()
@@ -1208,7 +1208,7 @@ func (runtime *investigationRuntime) Run(
 	if request.Agent.ID == "synthesizer" {
 		return agentapi.RunResult{
 			Status: agentapi.RunSucceeded,
-			Output: json.RawMessage(`{"answer":"grounded answer","citations":[],"limitations":["live logs unavailable"]}`),
+			Output: json.RawMessage(`{"answer":"grounded answer","citations":[],"limitations":["live logs unavailable"],"limitations_detail":{"artifact_id":"art_00000000-0000-0000-0000-000000000000","total_count":1,"displayed_count":1,"omitted_count":0,"normalization_version":"limitations-v1"}}`),
 		}, nil
 	}
 	focus := map[string]string{
@@ -1370,4 +1370,54 @@ func defaultInvestigationDefinitionsForCapabilities(
 		definitions = append(definitions, definition)
 	}
 	return definitions, nil
+}
+
+func TestBuildPlanTreatsEvidenceSourcesAsAlternatives(t *testing.T) {
+	proposal, err := BuildPlan([]Goal{{
+		Facet: "core_flow", Required: true,
+		Sources: []agentapi.EvidenceSource{
+			agentapi.EvidenceSourceInternal,
+			agentapi.EvidenceSourceWeb,
+			agentapi.EvidenceSourceRuntime,
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.Tasks) != 2 || proposal.Tasks[0].Capability != "knowledge.code.inspect" {
+		t.Fatalf("proposal = %+v, want one internal investigator plus synthesizer", proposal)
+	}
+}
+
+func TestBuildPlanRejectsSourceThatCannotCoverFacet(t *testing.T) {
+	_, err := BuildPlan([]Goal{{
+		Facet: "entrypoint", Required: true,
+		Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceWeb},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "no investigation capability") {
+		t.Fatalf("proposal error = %v", err)
+	}
+}
+
+func TestBuildPlanCapsComplementaryEvidenceGoals(t *testing.T) {
+	goals := []Goal{
+		{Facet: "entrypoint", Required: true, Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}},
+		{Facet: "external_dependency", Required: true, Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}},
+		{Facet: "business_domain", Required: true, Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}},
+		{Facet: "runtime_and_operations", Required: true, Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceRuntime}},
+	}
+	proposal, err := BuildPlan(goals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.Tasks) != maxGoalInvestigationTasks+1 {
+		t.Fatalf("tasks = %+v, want bounded investigators plus synthesizer", proposal.Tasks)
+	}
+	policy, err := GoalPolicy(1, time.Second, investigationBudgetPolicy(), goals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.RequiredGoals) != len(goals) {
+		t.Fatalf("required goals = %v, want all requested goals retained for completeness", policy.RequiredGoals)
+	}
 }

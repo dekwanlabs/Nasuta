@@ -23,7 +23,6 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 			name: "full contract",
 			payload: `{
 				"task_id":"qa_1",
-				"question":"Why is checkout failing?",
 				"objective":"Trace the checkout failure",
 				"entities":[{"id":"Checkout.Place"}],
 				"investigation_goals":[
@@ -51,7 +50,6 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 			name: "invalid investigation goal id",
 			payload: `{
 				"task_id":"qa_1",
-				"question":"Why is checkout failing?",
 				"objective":"Trace the checkout failure",
 				"entities":[],
 				"investigation_goals":[
@@ -65,7 +63,6 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 			name: "minimal canonical contract",
 			payload: `{
 				"task_id":"qa_1",
-				"question":"Where is checkout implemented?",
 				"objective":"Locate the checkout implementation",
 				"entities":[],
 				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","required":true,"sources":["internal"],"freshness":"stable","minimum_coverage":1}],
@@ -107,7 +104,6 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 			name: "no structured evidence goals",
 			payload: `{
 				"task_id":"qa_1",
-				"question":"Where is checkout implemented?",
 				"objective":"Locate the checkout implementation",
 				"entities":[],
 				"evidence_goals":[],
@@ -119,7 +115,6 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 			name: "missing evidence goals field",
 			payload: `{
 				"task_id":"qa_1",
-				"question":"Where is checkout implemented?",
 				"objective":"Locate the checkout implementation",
 				"entities":[],
 				"context":{}
@@ -129,7 +124,6 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 			name: "copied conversation body",
 			payload: `{
 				"task_id":"qa_1",
-				"question":"Where is checkout implemented?",
 				"objective":"Locate the checkout implementation",
 				"entities":[],
 				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","required":true,"sources":["internal"],"freshness":"stable","minimum_coverage":1}],
@@ -403,7 +397,7 @@ func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := agentapi.SchemaRef{
-		ID: "investigation.verified_bundle", Version: 1,
+		ID: "investigation.verified_bundle", Version: 2,
 	}
 	tests := []struct {
 		name  string
@@ -504,7 +498,12 @@ func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
 					"decision":"complete",
 					"stop_reason":"required_goals_covered"
 				},
-				"completeness":"complete"
+				"completeness":"complete",
+				"limitations_detail":{
+					"artifact_id":"art_00000000-0000-0000-0000-000000000000",
+					"total_count":0,"displayed_count":0,"omitted_count":0,
+					"normalization_version":"limitations-v1"
+				}
 			}`)
 			err := registry.Validate(ref, payload)
 			if test.valid && err != nil {
@@ -514,5 +513,84 @@ func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
 				t.Fatal("invalid verified bundle accepted")
 			}
 		})
+	}
+}
+
+func TestInvestigationAnswerV2AcceptsAllVerifiedLimitations(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	limitations := make([]string, 28)
+	for index := range limitations {
+		limitations[index] = "verified limitation"
+	}
+	payload, err := json.Marshal(map[string]any{
+		"answer":      "The evidence is partial.",
+		"citations":   []any{},
+		"limitations": limitations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Validate(
+		agentapi.SchemaRef{ID: "investigation.answer", Version: 2},
+		payload,
+	); err != nil {
+		t.Fatalf("v2 rejected 28 verified limitations: %v", err)
+	}
+	if err := registry.Validate(
+		agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
+		payload,
+	); err == nil {
+		t.Fatal("v1 accepted a payload beyond its immutable 20-item limit")
+	}
+}
+
+func TestVerifiedBundleSubjectCoverageSchema(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	ref := agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2}
+	base := func(subject string) json.RawMessage {
+		return json.RawMessage(`{
+			"supported_claims":[],
+			"partial_claims":[],
+			"unsupported_claims":[],
+			"partial_goals":[],
+			"unresolved_goals":[],
+			"limitations":["One comparison subject is missing internal evidence."],
+			"evidence_units":[],
+			"evidence_conflicts":[],
+			"subject_coverage":[` + subject + `],
+			"omissions":{"claims":0,"goals":0,"limitations":0,"evidence_units":0,"evidence_conflicts":0},
+			"verification":{"decision":"partial","stop_reason":"evidence_insufficient"},
+			"completeness":"partial",
+			"limitations_detail":{
+				"artifact_id":"art_00000000-0000-0000-0000-000000000000",
+				"total_count":1,"displayed_count":1,"omitted_count":0,
+				"normalization_version":"limitations-v1"
+			}
+		}`)
+	}
+	valid := base(`{
+		"entity_id":"our_agent",
+		"covered_facets":["core_flow"],
+		"missing_facets":[],
+		"sources":["internal"],
+		"complete":true
+	}`)
+	if err := registry.Validate(ref, valid); err != nil {
+		t.Fatalf("valid subject coverage rejected: %v", err)
+	}
+	invalid := base(`{
+		"entity_id":"our_agent",
+		"covered_facets":["core_flow"],
+		"missing_facets":[],
+		"complete":true
+	}`)
+	if err := registry.Validate(ref, invalid); err == nil {
+		t.Fatal("subject coverage without sources was accepted")
 	}
 }

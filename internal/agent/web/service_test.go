@@ -99,8 +99,10 @@ func TestSearchWithFetchCombinesSearchAndEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchWithFetch() error = %v", err)
 	}
-	if len(response.Results) != 1 || response.Fetched == nil || !strings.Contains(response.Fetched.Content, "authoritative evidence") {
-		t.Fatalf("response = %+v, want search result and fetched evidence", response)
+	if len(response.Results) != 1 || response.Fetched == nil ||
+		response.SourceStatus != SourceUsable ||
+		!strings.Contains(response.Fetched.Content, "authoritative evidence") {
+		t.Fatalf("response = %+v, want usable fetched evidence", response)
 	}
 }
 
@@ -220,7 +222,8 @@ func TestSearchWithFetchSkipsIrrelevantCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchWithFetch() error = %v", err)
 	}
-	if response.Fetched != nil || !strings.Contains(response.FetchNote, "skipped") {
-		t.Fatalf("response = %+v, want skipped automatic fetch", response)
+	if response.Fetched != nil || response.SourceStatus != SourceUnusable ||
+		!strings.Contains(response.FetchNote, "skipped") {
+		t.Fatalf("response = %+v, want unusable source classification", response)
 	}
 }

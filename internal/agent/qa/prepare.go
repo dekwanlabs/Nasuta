@@ -158,7 +158,8 @@ func (svc *Service) analyzeQuestion(
 	request := prepared.request
 	analysis, err := analyzeQuery(prepared.ctx, queryAnalysisInput{
 		Question: request.Question, CleanQuestion: prepared.planning.CleanQuestion,
-		Terms: prepared.planning.Terms, Time: prepared.planning.Time,
+		Terms: prepared.planning.Terms, QuerySemantics: prepared.planning.QuerySemantics,
+		Time:   prepared.planning.Time,
 		Anchor: requestAnchor, RecentTurns: request.Conversation.RecentTurns,
 		History: prepared.planning.History, HistoryValid: prepared.planning.HistoryValid,
 	})
@@ -334,8 +335,9 @@ func (svc *Service) parentRunLimits(
 	definition agentapi.Definition,
 ) agentapi.RunLimits {
 	limits := agentapi.RunLimits{
-		Deadline: time.Now().UTC().Add(definition.Budget.Timeout),
-		MaxSteps: definition.Budget.MaxSteps,
+		Deadline:     time.Now().UTC().Add(definition.Budget.Timeout),
+		MaxSteps:     definition.Budget.MaxSteps,
+		MaxToolCalls: definition.Budget.MaxToolCalls,
 	}
 	if !svc.delegationEnabled ||
 		!standardRequest(prepared.request, svc.agentRef) ||

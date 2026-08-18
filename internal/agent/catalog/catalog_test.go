@@ -138,6 +138,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		LLMProvider: "openai", LLMModel: "investigation-model",
 		LLMAnswerMaxTokens: 2048, LLMContextWindow: 32000,
 		AgentTimeout: config.Duration(time.Minute), AgentMaxSteps: 4,
+		AgentMaxToolCalls: 24, LLMMaxContinueRounds: 5,
 	}
 	definitions, err := DefaultInvestigators(settings, 11)
 	if err != nil {
@@ -175,15 +176,31 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 			definition.InputSchema.ID != "task.contract" {
 			t.Fatalf("definition %q input schema = %+v", definition.ID, definition.InputSchema)
 		}
+		if strings.HasPrefix(definition.ID, "investigator.") &&
+			definition.Budget.MaxContinueRounds != 1 {
+			t.Fatalf("definition %q continuation rounds = %d, want 1", definition.ID, definition.Budget.MaxContinueRounds)
+		}
+		wantToolCalls := int64(0)
+		if len(wantTools[definition.ID]) > 0 {
+			wantToolCalls = settings.AgentMaxToolCalls
+		}
+		if definition.Budget.MaxToolCalls != wantToolCalls {
+			t.Fatalf("definition %q max tool calls = %d, want %d", definition.ID, definition.Budget.MaxToolCalls, wantToolCalls)
+		}
 	}
 	synthesizer := definitions[len(definitions)-1]
 	if synthesizer.InputSchema.ID != "investigation.verified_bundle" ||
 		synthesizer.OutputSchema.ID != "investigation.answer" ||
-		synthesizer.Prompt.Version != "investigation-synthesis-v4" ||
+		synthesizer.OutputSchema.Version != 3 ||
+		synthesizer.Prompt.Version != "investigation-synthesis-v6" ||
 		!strings.Contains(synthesizer.Prompt.System, `"supported_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"partial_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"unsupported_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"omissions"`) ||
+		!strings.Contains(synthesizer.Prompt.System, `"producer_node_id"`) ||
+		!strings.Contains(synthesizer.Prompt.System, `canonical "evidence_identities"`) ||
+		!strings.Contains(synthesizer.Prompt.System, "same canonical target") ||
+		!strings.Contains(synthesizer.Prompt.System, "must not be inserted into a main path") ||
 		strings.Contains(synthesizer.Prompt.System, `"handoffs[].payload"`) ||
 		strings.Contains(synthesizer.Prompt.System, `"unavailable_tasks"`) ||
 		len(synthesizer.Tools.VisibleToolIDs) != 0 || !synthesizer.Tools.RestrictVisible {
@@ -230,9 +247,13 @@ func TestDefaultCapabilitiesPinAgentContracts(t *testing.T) {
 		"knowledge.service.trace": {
 			"system_boundary", "external_dependency", "runtime_and_operations",
 		},
-		"knowledge.docs.verify":    canonicalFacetValues(),
-		"knowledge.web.research":   canonicalFacetValues(),
-		"knowledge.memory.recall":  canonicalFacetValues(),
+		"knowledge.docs.verify": canonicalFacetValues(),
+		"knowledge.web.research": {
+			"external_dependency", "business_domain",
+		},
+		"knowledge.memory.recall": {
+			"business_domain",
+		},
 		"evidence.semantic.verify": nil,
 		"evidence.synthesize":      nil,
 	}

@@ -20,13 +20,15 @@ type RoutingCapabilities struct {
 }
 
 type AnalysisResult struct {
-	Decision  domain.PlanDecision
-	Execution ExecutionSuggestion
-	Question  string
-	Terms     QueryTerms
-	ToolIDs   []string
-	Time      TimeExpr
-	History   HistoryRelation
+	Decision            domain.PlanDecision
+	Execution           ExecutionSuggestion
+	Question            string
+	Terms               QueryTerms
+	QuerySemantics      *domain.QuerySemantics
+	QuerySemanticsError error
+	ToolIDs             []string
+	Time                TimeExpr
+	History             HistoryRelation
 }
 
 type ExecutionStrategy string
@@ -76,12 +78,13 @@ type ToolRouteCandidate struct {
 // "route"/"tools" wrappers). A prior flat form silently failed validation
 // ("missing route object") and degraded every routed query to the internal fallback.
 const (
-	routeExampleJSON      = `{"route":{"sources":["internal","web"],"confidence":0.0}}`
-	toolExampleJSON       = `{"tools":{"tool_ids":[]}}`
-	queryTermsExampleJSON = `{"query_terms":{"domain_terms":[],"identifiers":[]}}`
-	timeExampleJSON       = `{"time":{"kind":"none","n":0,"unit":"","raw":""}}`
-	historyExampleJSON    = `{"history_relation":{"topic_affinity":0.0,"confidence":0.0,"needs_prior_entities":false,"needs_prior_conclusion":false,"needs_prior_evidence":false,"explicit_turn_refs":[]}}`
-	executionExampleJSON  = `{"execution":{"strategy":"single_agent","complexity":0.2,"confidence":0.9,"tasks":[],"reasons":["single_focused_question"]}}`
+	routeExampleJSON          = `{"route":{"sources":["internal","web"],"confidence":0.0}}`
+	toolExampleJSON           = `{"tools":{"tool_ids":[]}}`
+	queryTermsExampleJSON     = `{"query_terms":{"domain_terms":[],"identifiers":[]}}`
+	querySemanticsExampleJSON = `{"query_semantics":{"kind":"focused_fact","entities":[]}}`
+	timeExampleJSON           = `{"time":{"kind":"none","n":0,"unit":"","raw":""}}`
+	historyExampleJSON        = `{"history_relation":{"topic_affinity":0.0,"confidence":0.0,"needs_prior_entities":false,"needs_prior_conclusion":false,"needs_prior_evidence":false,"explicit_turn_refs":[]}}`
+	executionExampleJSON      = `{"execution":{"strategy":"single_agent","complexity":0.2,"confidence":0.9,"tasks":[],"reasons":["single_focused_question"]}}`
 )
 
 var executionTaskID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
@@ -104,6 +107,7 @@ var (
 	executionContract       = prompts.Text(prompts.RetrievalExecution)
 	historyRelationContract = prompts.Text(prompts.RetrievalHistory)
 	queryTermsContract      = prompts.Text(prompts.RetrievalQueryTerms)
+	querySemanticsContract  = prompts.Text(prompts.RetrievalQuerySemantics)
 	toolRoutingContract     = prompts.Text(prompts.RetrievalToolRouting)
 	timeContract            = prompts.Text(prompts.RetrievalTime)
 	routingContract         = prompts.Text(prompts.RetrievalRouting)
@@ -151,8 +155,8 @@ func analyzeQuestion(
 		Execution: ExecutionSuggestion{Strategy: ExecutionSingleAgent},
 	}
 
-	var contracts []string
-	var properties []string
+	contracts := []string{"Query semantics contract:\n" + querySemanticsContract}
+	properties := []string{"\"query_semantics\""}
 	decision := domain.PlanDecision{}
 	temporal := hasTemporalCandidate(toolCandidates)
 	if fixedPlan == nil {
@@ -215,17 +219,29 @@ func analyzeQuestion(
 		maxTokens = helperMaxTokens
 	}
 	var raw map[string]any
+	var semantics *domain.QuerySemantics
+	var semanticsErr error
 	var toolIDs []string
 	var timeExpr TimeExpr
 	var historyRelation HistoryRelation
 	execution := ExecutionSuggestion{Strategy: ExecutionSingleAgent}
 	opts := llm.CallOptions{
-		MaxTokens:   maxTokens,
-		MaxAttempts: 1,
+		MaxTokens: maxTokens,
+		// Keep one repair/reprompt attempt available. The planner is a
+		// protocol boundary: a single malformed response must not silently
+		// degrade a decomposable question to the single-agent fallback.
+		MaxAttempts: 2,
 		Validate: func(p any) error {
 			m, _ := p.(*map[string]any)
 			if m == nil || *m == nil {
 				return fmt.Errorf("missing analysis object")
+			}
+			semanticsRaw, ok := (*m)["query_semantics"].(map[string]any)
+			if !ok {
+				semanticsErr = errors.New("missing query_semantics object")
+				semantics = nil
+			} else {
+				semantics, semanticsErr = bindQuerySemantics(semanticsRaw)
 			}
 			if fixedPlan == nil {
 				routeRaw, ok := (*m)["route"].(map[string]any)
@@ -305,9 +321,82 @@ func analyzeQuestion(
 	}
 
 	return AnalysisResult{
-		Decision: decision, Question: clean, Terms: terms, ToolIDs: toolIDs,
-		Time: timeExpr, History: historyRelation, Execution: execution,
+		Decision: decision, Question: clean, Terms: terms, QuerySemantics: semantics,
+		QuerySemanticsError: semanticsErr, ToolIDs: toolIDs, Time: timeExpr,
+		History: historyRelation, Execution: execution,
 	}, nil
+}
+
+func bindQuerySemantics(raw map[string]any) (*domain.QuerySemantics, error) {
+	value, ok := raw["kind"].(string)
+	if !ok {
+		return nil, errors.New("query_semantics.kind must be a string")
+	}
+	kind := domain.QueryKind(value)
+	switch kind {
+	case domain.QueryFocusedFact,
+		domain.QueryOverview,
+		domain.QueryFlow,
+		domain.QueryComparison,
+		domain.QueryInventory,
+		domain.QueryRuntimeDiagnosis,
+		domain.QueryCodeReview:
+	default:
+		return nil, fmt.Errorf("unsupported query kind %q", value)
+	}
+	entitySpecs, err := bindQueryEntitySpecs(raw["entities"])
+	if err != nil {
+		return nil, err
+	}
+	return &domain.QuerySemantics{Kind: kind, EntitySpecs: entitySpecs}, nil
+}
+
+func bindQueryEntitySpecs(raw any) ([]domain.EntitySpec, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	values, ok := raw.([]any)
+	if !ok {
+		return nil, errors.New("query_semantics.entities must be an array")
+	}
+	specs := make([]domain.EntitySpec, 0, len(values))
+	for index, value := range values {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("query_semantics.entities[%d] must be an object", index)
+		}
+		id, _ := object["id"].(string)
+		label, _ := object["label"].(string)
+		role, _ := object["role"].(string)
+		aliases, err := bindStringList(object["aliases"])
+		if err != nil {
+			return nil, fmt.Errorf("query_semantics.entities[%d].aliases: %w", index, err)
+		}
+		if strings.TrimSpace(id) == "" && strings.TrimSpace(label) == "" {
+			return nil, fmt.Errorf("query_semantics.entities[%d] requires id or label", index)
+		}
+		specs = append(specs, domain.EntitySpec{ID: id, Label: label, Role: role, Aliases: aliases})
+	}
+	return domain.CanonicalEntitySpecs(specs), nil
+}
+
+func bindStringList(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	values, ok := raw.([]any)
+	if !ok {
+		return nil, errors.New("must be an array")
+	}
+	result := make([]string, 0, len(values))
+	for index, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("item %d must be a string", index)
+		}
+		result = append(result, text)
+	}
+	return result, nil
 }
 
 func bindExecutionSuggestion(raw map[string]any) (ExecutionSuggestion, error) {

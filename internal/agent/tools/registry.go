@@ -2,17 +2,15 @@ package tools
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
-	"github.com/dekwanlabs/nasuta/internal/domain"
+	canonicalevidence "github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
-	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -61,12 +59,20 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"query": propString("Service name, module path, owner, or keyword."),
 				"limit": propInt("Max results (default 10)."),
 			}, []string{"query"}),
-			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.ServiceLookupResult(ctx, args.String("query"), args.Int("limit", 10))
+			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
+				result, err := svc.FindServices(ctx, args.String("query"), clampInt(args.Int("limit", 10), 1, 100))
 				if err != nil {
-					return "", err
+					return tool.Result{}, err
 				}
-				return marshalResult(result)
+				payload := map[string]any{"matches": result.Matches, "semantic": result.Semantic}
+				content, err := marshalResult(payload)
+				if err != nil {
+					return tool.Result{}, err
+				}
+				return tool.Result{
+					Content: content, References: serviceRefs(result.Matches),
+					EvidenceUnits: serviceEvidenceUnits(result.Matches),
+				}, nil
 			}),
 		},
 		{
@@ -79,13 +85,20 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"direction": propString("upstream | downstream | both (default both)."),
 				"depth":     propInt("Traversal depth 1-5 (default 2)."),
 			}, []string{"service"}),
-			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
+			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
 				depth := args.BoundedInt("depth", 2, 1, 5)
 				result, err := svc.TraceDeps(ctx, args.String("service"), args.StringDefault("direction", "both"), depth)
 				if err != nil {
-					return "", err
+					return tool.Result{}, err
 				}
-				return marshalResult(result)
+				content, err := marshalResult(result)
+				if err != nil {
+					return tool.Result{}, err
+				}
+				return tool.Result{
+					Content: content, References: dependencyRefs(result),
+					EvidenceUnits: dependencyEvidenceUnits(result),
+				}, nil
 			}),
 		},
 		{
@@ -96,12 +109,19 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"This endpoint inventory does not establish caller or callee relationships. Trace callers to find an upstream controller, then use this lookup again to resolve that controller's complete route. Do not compose a route from partial code annotations.",
 			Kind:        ToolKindRead,
 			InputSchema: listAPISchema,
-			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				result, err := svc.ListAPIsResult(ctx, args.String("service"), args.String("keyword"), args.Int("limit", 20))
+			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
+				matches, err := svc.FindAPIs(ctx, args.String("service"), args.String("keyword"), clampInt(args.Int("limit", 20), 1, 100))
 				if err != nil {
-					return "", err
+					return tool.Result{}, err
 				}
-				return marshalResult(result)
+				content, err := marshalResult(map[string]any{"matches": matches})
+				if err != nil {
+					return tool.Result{}, err
+				}
+				return tool.Result{
+					Content: content, References: apiRefs(matches),
+					EvidenceUnits: apiEvidenceUnits(matches),
+				}, nil
 			}),
 		},
 		{
@@ -126,7 +146,10 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				if err != nil {
 					return tool.Result{}, err
 				}
-				return tool.Result{Content: content, References: codeRefs(result.Matches)}, nil
+				return tool.Result{
+					Content: content, References: codeRefs(result.Matches),
+					EvidenceUnits: codeEvidenceUnits(result),
+				}, nil
 			}),
 		},
 		{
@@ -137,13 +160,20 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"A definition does not establish its callers or callees; use call tracing for those edges.",
 			Kind:        ToolKindRead,
 			InputSchema: symbolSchema,
-			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
+			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
 				result, err := svc.GetSymbolResult(ctx, args.String("query"),
 					args.String("file"), args.String("qualified_name"), args.Int("limit", 5))
 				if err != nil {
-					return "", err
+					return tool.Result{}, err
 				}
-				return marshalResult(result)
+				content, err := marshalResult(result)
+				if err != nil {
+					return tool.Result{}, err
+				}
+				return tool.Result{
+					Content: content, References: symbolRefs(result),
+					EvidenceUnits: symbolEvidenceUnits(result),
+				}, nil
 			}),
 		},
 		{
@@ -162,7 +192,7 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"max_nodes":      propInt("Distinct node budget 1-200 (default 40)."),
 				"max_fanout":     propInt("Per-node call-edge budget 1-100 (default 20)."),
 			}, nil),
-			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
+			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
 				result, err := svc.TraceCallsResult(ctx, callchain.Request{
 					Query: args.String("query"), File: args.String("file"),
 					Line: args.Int("line", 0), QualifiedName: args.String("qualified_name"),
@@ -170,9 +200,16 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 					MaxNodes: args.Int("max_nodes", 40), MaxFanout: args.Int("max_fanout", 20),
 				})
 				if err != nil {
-					return "", err
+					return tool.Result{}, err
 				}
-				return marshalResult(result)
+				content, err := marshalResult(result)
+				if err != nil {
+					return tool.Result{}, err
+				}
+				return tool.Result{
+					Content: content, References: callChainRefs(result),
+					EvidenceUnits: callChainEvidenceUnits(result),
+				}, nil
 			}),
 		},
 		{
@@ -253,12 +290,12 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				"query": propString("Search query string."),
 				"limit": propInt("Max results (default 5, max 10)."),
 			}, []string{"query"}),
-			Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-				results, err := svc.WebSearchWithFetch(ctx, args.String("query"), args.Int("limit", 5))
+			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
+				response, err := svc.WebSearchWithFetch(ctx, args.String("query"), args.Int("limit", 5))
 				if err != nil {
-					return "", err
+					return tool.Result{}, err
 				}
-				return marshalResult(results)
+				return webSearchToolResult(response)
 			}),
 		},
 	)
@@ -341,6 +378,19 @@ func relationTool(svc *Service) Tool {
 			return marshalResult(result)
 		}),
 	}
+}
+
+func webSearchToolResult(response WebSearchResponse) (tool.Result, error) {
+	content, err := marshalResult(response)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	units := webEvidenceUnits(response)
+	coverage := tool.EvidenceCoverage{Partial: true}
+	if len(units) > 0 {
+		coverage = units[0].Coverage
+	}
+	return tool.Result{Content: content, EvidenceUnits: units, Coverage: coverage}, nil
 }
 
 func stringHandler(run func(context.Context, tool.Arguments) (string, error)) tool.Handler {
@@ -462,49 +512,20 @@ func runbookAdmissionSpec() *tool.AdmissionSpec {
 }
 
 func runbookEvidenceUnits(result knowledge.RunbookSearchResult) []tool.EvidenceUnit {
-	if len(result.Matches) == 0 {
-		return nil
-	}
-	units := make([]tool.EvidenceUnit, 0, len(result.Matches))
+	var units []tool.EvidenceUnit
 	for _, hit := range result.Matches {
-		if hit.DocID == "" {
-			continue
-		}
-		sections := make([]string, 0, len(hit.Chunks))
-		seen := make(map[string]struct{}, len(hit.Chunks))
 		for _, chunk := range hit.Chunks {
-			section := chunk.SectionHeader
-			if section == "" {
-				section = fmt.Sprintf("chunk:%d", chunk.ChunkIndex)
+			unit, ok := canonicalevidence.RunbookChunkUnit(
+				hit.DocID, chunk.ChunkIndex, chunk.ChunkText, hit.DocKind,
+				hit.EvidenceClass, hit.TrustTier,
+				tool.EvidenceCoverage{Partial: true, Included: 1, OmittedItems: boolInt(result.Truncated)},
+			)
+			if ok {
+				units = append(units, unit)
 			}
-			if _, duplicate := seen[section]; duplicate {
-				continue
-			}
-			seen[section] = struct{}{}
-			sections = append(sections, section)
 		}
-		raw, _ := json.Marshal(hit)
-		sum := sha256.Sum256(raw)
-		units = append(units, tool.EvidenceUnit{
-			SourceKind: "runbook", Target: hit.DocID, Sections: sections,
-			ContentHash: fmt.Sprintf("%x", sum),
-			Coverage: tool.EvidenceCoverage{
-				Partial: true, Included: len(hit.Chunks),
-				OmittedItems: boolInt(result.Truncated),
-			},
-			Facets: evidenceFacetValues(domain.ProvidedFacetsFor("runbook", hit.DocKind)), TrustTier: hit.TrustTier,
-			EvidenceClass: hit.EvidenceClass, TokenCost: tokenestimate.Count(string(raw)),
-		})
 	}
 	return units
-}
-
-func evidenceFacetValues(facets []domain.EvidenceFacet) []string {
-	values := make([]string, len(facets))
-	for i, facet := range facets {
-		values[i] = string(facet)
-	}
-	return values
 }
 
 func boolInt(value bool) int {

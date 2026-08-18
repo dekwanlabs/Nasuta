@@ -10,6 +10,12 @@ type WebSearchResult = web.SearchResult
 type WebSearchProvider = web.SearchProvider
 type WebFetchedEvidence = web.FetchedEvidence
 type WebSearchResponse = web.SearchResponse
+type WebSourceStatus = web.SourceStatus
+
+const (
+	WebSourceUsable   = web.SourceUsable
+	WebSourceUnusable = web.SourceUnusable
+)
 
 func (srv *Service) webService() *web.Service {
 	srv.webOnce.Do(func() {

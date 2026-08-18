@@ -2,12 +2,73 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
+
+// PutWorkflowArtifact stores an immutable secondary artifact idempotently.
+// A repeated write is accepted only when the content hash is identical.
+func (workflowStore *Store) PutWorkflowArtifact(
+	ctx context.Context,
+	artifact WorkflowArtifact,
+) error {
+	if artifact.ID == "" || artifact.WorkflowRunID == "" || artifact.ProducerNodeID == "" ||
+		artifact.Kind == "" || artifact.Schema.ID == "" || len(artifact.Content) == 0 {
+		return fmt.Errorf("workflow artifact fields are required")
+	}
+	if !json.Valid(artifact.Content) {
+		return fmt.Errorf("workflow artifact %q content is not valid JSON", artifact.ID)
+	}
+	sum := sha256.Sum256(artifact.Content)
+	hash := hex.EncodeToString(sum[:])
+	if artifact.ContentHash != "" && artifact.ContentHash != hash {
+		return fmt.Errorf("workflow artifact %q content hash mismatch", artifact.ID)
+	}
+	artifact.ContentHash = hash
+
+	var existingHash string
+	err := workflowStore.db.QueryRowContext(ctx,
+		`SELECT content_hash FROM handoff_artifacts WHERE id=? LIMIT 1`, artifact.ID,
+	).Scan(&existingHash)
+	switch {
+	case err == nil:
+		if existingHash != artifact.ContentHash {
+			return fmt.Errorf("workflow artifact %q content conflicts: %w", artifact.ID, ErrConflict)
+		}
+		return nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("check workflow artifact %q: %w", artifact.ID, err)
+	}
+
+	_, err = workflowStore.db.ExecContext(ctx, `INSERT INTO handoff_artifacts(
+		id,workflow_run_id,producer_node_id,producer_run_id,schema_id,schema_version,
+		payload_json,references_json,evidence_units_json,evidence_conflicts_json,
+		completeness,content_hash,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		artifact.ID, artifact.WorkflowRunID, artifact.ProducerNodeID, "",
+		artifact.Schema.ID, artifact.Schema.Version, artifact.Content,
+		[]byte("null"), []byte("null"), []byte("null"), Partial,
+		artifact.ContentHash, store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)),
+	)
+	if err != nil {
+		// A concurrent identical insert is safe; verify the resulting row.
+		var concurrentHash string
+		if queryErr := workflowStore.db.QueryRowContext(ctx,
+			`SELECT content_hash FROM handoff_artifacts WHERE id=? LIMIT 1`, artifact.ID,
+		).Scan(&concurrentHash); queryErr == nil && concurrentHash == artifact.ContentHash {
+			return nil
+		}
+		return fmt.Errorf("save workflow artifact %q: %w", artifact.ID, err)
+	}
+	return nil
+}
 
 func (workflowStore *Store) CreateRun(ctx context.Context, run RunRecord) error {
 	budget, err := json.Marshal(run.Budget)

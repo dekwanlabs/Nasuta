@@ -2,86 +2,62 @@ package domain
 
 import "testing"
 
-func TestResolveQueryPlanPreservesClassificationPriority(t *testing.T) {
-	tests := []struct {
-		name string
-		q    string
-		want QueryKind
-	}{
-		{"en error", "why does the service error out", QueryRuntimeDiagnosis},
-		{"cn 报错", "欧区服务半夜报错", QueryRuntimeDiagnosis},
-		{"pasted trace id", "trace id: 12345678-1234-1234-1234-1234567890ab", QueryRuntimeDiagnosis},
-		{"kibana url", "https://kibana.example.com/app/discover", QueryRuntimeDiagnosis},
-		{"cn 能不能", "能不能加重试", QueryInventory},
-		{"en implement", "how to implement a retry", QueryInventory},
-		{"cn 架构", "为什么用这个架构", QueryOverview},
-		{"en tradeoff", "tradeoff between consistency and availability", QueryOverview},
-		{"cn 这段代码", "这段代码有什么问题", QueryCodeReview},
-		{"en refactor", "should I refactor this method", QueryCodeReview},
-		{"general", "这个服务是干什么的", QueryFocusedFact},
-		{"empty", "", QueryFocusedFact},
-		{"bug+req", "报错了能不能加个重试", QueryRuntimeDiagnosis},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got := ResolveQueryPlan(test.q, QuerySignals{}).Plan.Kind
-			if got != test.want {
-				t.Fatalf("ResolveQueryPlan(%q) = %q, want %q", test.q, got, test.want)
-			}
-		})
-	}
-}
-
-func TestResolveQueryPlanPrioritizesComparisonThenFlow(t *testing.T) {
-	comparison := ResolveQueryPlan(
-		"分别比较两个设备控制链路的业务、实现和依赖有什么差异",
-		QuerySignals{Identifiers: []string{"Domestic.Control", "Overseas.Control"}},
-	)
-	if comparison.Plan.Kind != QueryComparison {
-		t.Fatalf("comparison kind = %q, want %q", comparison.Plan.Kind, QueryComparison)
-	}
-	if len(comparison.Plan.Entities) != 2 {
-		t.Fatalf("comparison entities = %v", comparison.Plan.Entities)
-	}
-	if comparison.MatchedRuleKind != QueryComparison {
-		t.Fatalf("comparison matched rule = %q, want %q", comparison.MatchedRuleKind, QueryComparison)
-	}
-
-	flow := ResolveQueryPlan(
-		"这个方法的调用链是什么",
-		QuerySignals{Identifiers: []string{"PaymentHandler.handle"}},
-	)
-	if flow.Plan.Kind != QueryFlow {
-		t.Fatalf("flow kind = %q, want %q", flow.Plan.Kind, QueryFlow)
-	}
-	if len(flow.Plan.Entities) != 1 || flow.Plan.Entities[0] != "paymenthandler.handle" {
-		t.Fatalf("flow entities = %v", flow.Plan.Entities)
-	}
-	if flow.MatchedRuleKind != QueryFlow {
-		t.Fatalf("flow matched rule = %q, want %q", flow.MatchedRuleKind, QueryFlow)
-	}
-}
-
-func TestResolveQueryPlanDoesNotTreatEveryIdentifierAsFlow(t *testing.T) {
+func TestResolveQueryPlanUsesPlannerSemantics(t *testing.T) {
+	semantics := &QuerySemantics{Kind: QueryFlow}
 	resolution := ResolveQueryPlan(
-		"PaymentHandler 这个类负责什么",
-		QuerySignals{Identifiers: []string{"PaymentHandler"}},
+		"任意自然语言表述",
+		semantics,
+		[]string{"PaymentHandler.handle"},
 	)
-	if resolution.Plan.Kind != QueryFocusedFact {
-		t.Fatalf("kind = %q, want %q", resolution.Plan.Kind, QueryFocusedFact)
+	if resolution.Plan.Kind != QueryFlow || resolution.Origin != QueryResolutionPlanner {
+		t.Fatalf("resolution = %+v", resolution)
 	}
-	if resolution.Origin != QueryResolutionFallback {
-		t.Fatalf("origin = %q, want %q", resolution.Origin, QueryResolutionFallback)
+	if len(resolution.Plan.Entities) != 1 || resolution.Plan.Entities[0] != "paymenthandler.handle" {
+		t.Fatalf("entities = %v", resolution.Plan.Entities)
 	}
 	if resolution.MatchedRuleKind != "" {
-		t.Fatalf("matched rule = %q, want empty fallback diagnostic", resolution.MatchedRuleKind)
+		t.Fatalf("matched rule = %q, want empty", resolution.MatchedRuleKind)
+	}
+}
+
+func TestResolveQueryPlanTypedRuntimeLocatorOverridesPlanner(t *testing.T) {
+	for _, question := range []string{
+		"trace_id: 12345678-1234-1234-1234-1234567890ab",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"https://kibana.example.com/app/discover#/?trace=abc",
+	} {
+		resolution := ResolveQueryPlan(question, &QuerySemantics{Kind: QueryOverview}, nil)
+		if resolution.Plan.Kind != QueryRuntimeDiagnosis ||
+			resolution.Origin != QueryResolutionRule ||
+			resolution.MatchedRuleKind != QueryRuntimeDiagnosis {
+			t.Fatalf("ResolveQueryPlan(%q) = %+v", question, resolution)
+		}
+	}
+}
+
+func TestResolveQueryPlanDoesNotTreatBareUUIDAsRuntimeLocator(t *testing.T) {
+	resolution := ResolveQueryPlan(
+		"12345678-1234-1234-1234-1234567890ab",
+		&QuerySemantics{Kind: QueryFocusedFact},
+		nil,
+	)
+	if resolution.Plan.Kind != QueryFocusedFact || resolution.Origin != QueryResolutionPlanner {
+		t.Fatalf("resolution = %+v", resolution)
+	}
+}
+
+func TestResolveQueryPlanFallsBackWithoutPlannerSemantics(t *testing.T) {
+	resolution := ResolveQueryPlan("这个服务如何一路完成状态变更", nil, nil)
+	if resolution.Plan.Kind != QueryFocusedFact || resolution.Origin != QueryResolutionFallback {
+		t.Fatalf("resolution = %+v", resolution)
 	}
 }
 
 func TestResolveQueryPlanBoundsEntities(t *testing.T) {
 	resolution := ResolveQueryPlan(
 		"这些符号分别做什么",
-		QuerySignals{Identifiers: []string{"A", "a", "B", "C", "D", "E", "F", "G", "H", "I", "J"}},
+		&QuerySemantics{Kind: QueryComparison},
+		[]string{"A", "a", "B", "C", "D", "E", "F", "G", "H", "I", "J"},
 	)
 	if len(resolution.Plan.Entities) != MaxCanonicalEntities {
 		t.Fatalf("entities = %v, want %d unique bounded entries", resolution.Plan.Entities, MaxCanonicalEntities)
@@ -209,5 +185,32 @@ func TestEveryRequiredFacetHasEvidenceProvider(t *testing.T) {
 				t.Fatalf("query kind %q requires facet %q without an evidence provider", kind, facet)
 			}
 		}
+	}
+}
+
+func TestResolveQueryPlanPreservesTypedSemanticEntitiesAndMergesIdentifiers(t *testing.T) {
+	resolution := ResolveQueryPlan(
+		"compare the systems",
+		&QuerySemantics{
+			Kind: QueryComparison,
+			EntitySpecs: []EntitySpec{
+				{ID: "our_agent", Label: "Our Agent", Role: "first_party_agent", Aliases: []string{"自有 Agent"}},
+				{ID: "google", Label: "Google", Role: "external_adapter"},
+			},
+		},
+		[]string{"Google", "Alexa"},
+	)
+
+	if resolution.Plan.Kind != QueryComparison || resolution.Origin != QueryResolutionPlanner {
+		t.Fatalf("resolution = %+v", resolution)
+	}
+	if len(resolution.Plan.EntitySpecs) != 3 {
+		t.Fatalf("entity specs = %+v, want three distinct entities", resolution.Plan.EntitySpecs)
+	}
+	if got := resolution.Plan.EntitySpecs[0]; got.ID != "our_agent" || got.Role != "first_party_agent" || len(got.Aliases) != 1 {
+		t.Fatalf("first entity = %+v", got)
+	}
+	if got := resolution.Plan.Entities; len(got) != 3 || got[0] != "our_agent" || got[1] != "google" || got[2] != "alexa" {
+		t.Fatalf("entity ids = %v", got)
 	}
 }

@@ -7,6 +7,68 @@ import (
 
 const MaxCanonicalEntities = 8
 
+// EntitySpec carries the planner's bounded description of one comparison
+// subject. ID is the stable join key; the other fields preserve disambiguation
+// context without making downstream code infer a role from prose.
+type EntitySpec struct {
+	ID      string
+	Label   string
+	Role    string
+	Aliases []string
+}
+
+// CanonicalEntitySpecs normalizes planner-provided subjects and merges
+// duplicate aliases onto the first occurrence.
+func CanonicalEntitySpecs(specs []EntitySpec) []EntitySpec {
+	result := make([]EntitySpec, 0, min(len(specs), MaxCanonicalEntities))
+	byID := make(map[string]int, min(len(specs), MaxCanonicalEntities))
+	for _, spec := range specs {
+		id := canonicalEntityID(spec.ID)
+		if id == "" {
+			id = canonicalEntityID(spec.Label)
+		}
+		if id == "" {
+			continue
+		}
+		index, exists := byID[id]
+		if !exists {
+			if len(result) == MaxCanonicalEntities {
+				break
+			}
+			byID[id] = len(result)
+			result = append(result, EntitySpec{ID: id})
+			index = len(result) - 1
+		}
+		current := &result[index]
+		if current.Label == "" {
+			current.Label = strings.TrimSpace(spec.Label)
+		}
+		if current.Role == "" {
+			current.Role = strings.TrimSpace(spec.Role)
+		}
+		current.Aliases = mergeEntityAliases(current.Aliases, spec.Aliases, current.Label)
+	}
+	return result
+}
+
+func mergeEntityAliases(existing, candidates []string, label string) []string {
+	seen := make(map[string]struct{}, len(existing)+len(candidates)+1)
+	aliases := make([]string, 0, len(existing)+len(candidates))
+	for _, candidate := range append(append([]string(nil), existing...), candidates...) {
+		value := strings.TrimSpace(candidate)
+		key := strings.ToLower(value)
+		if value == "" || key == strings.ToLower(strings.TrimSpace(label)) {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		aliases = append(aliases, value)
+	}
+	return aliases
+}
+
 // CanonicalEntityIDs establishes the stable identity used across QA boundaries.
 func CanonicalEntityIDs(candidates []string) []string {
 	entities := make([]string, 0, min(len(candidates), MaxCanonicalEntities))

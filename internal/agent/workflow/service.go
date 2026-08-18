@@ -92,6 +92,7 @@ type RecoveryObserver func(context.Context, string, ResumeResult, error) error
 type persistence interface {
 	StartRun(context.Context, RunRecord, Handoff) error
 	StartNode(context.Context, NodeRunRecord) error
+	PutWorkflowArtifact(context.Context, WorkflowArtifact) error
 	SucceedNode(context.Context, string, string, int, string, Handoff, *GateDecision, Usage, time.Time) error
 	FailNode(context.Context, string, string, int, string, RunStatus, string, Usage, time.Time) error
 	FinishRun(context.Context, string, RunStatus, string, StopReason, *Handoff, time.Time) error

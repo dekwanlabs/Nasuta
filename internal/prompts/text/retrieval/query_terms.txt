@@ -4,5 +4,5 @@ Extract compact retrieval terms from the current question.
 - The current question dominates. Use conversation_context only to resolve a genuinely omitted or pronominal target.
 - When the current question names its target, do not copy unrelated targets or terms from earlier turns.
 - Do not classify identifiers and do not return actions, resources, services, or inferred values.
-Return a JSON object with this exact shape:
+Populate only the top-level `query_terms` property in the single JSON object requested by the planner. Do not emit a separate JSON object:
 {"query_terms":{"domain_terms":[],"identifiers":[]}}

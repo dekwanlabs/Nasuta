@@ -49,6 +49,12 @@
 | 9 | 写工具、审批与安全 | [09-write-safety-and-approval.zh-CN.md](09-write-safety-and-approval.zh-CN.md) | [09-write-safety-and-approval.md](09-write-safety-and-approval.md) |
 | 10 | Feature Delivery Agent | [10-feature-delivery.zh-CN.md](10-feature-delivery.zh-CN.md) | [10-feature-delivery.md](10-feature-delivery.md) |
 
+### 跨模块导读
+
+| 文档 | 范围 |
+|---|---|
+| [Agent 编排、协作与契约（当前实现总览）](20-agent-orchestration-current-implementation.zh-CN.md) | 从 CodeLoom 入口到 Nasuta Runtime，串联单 Agent、委派调查、多 Agent DAG、Catalog、Schema/Capability/Task Contract、Workflow 与 Feature Delivery 的职责边界。 |
+
 ## 2.1 专项实施方案
 
 以下文档基于 01–10 的统一设计基线，面向后续 Agent 平台演进和 Feature Delivery 落地。当前先提供中文版本，不改变上述双语模块的规范地位。

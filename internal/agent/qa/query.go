@@ -12,14 +12,15 @@ import (
 )
 
 type queryAnalysisInput struct {
-	Question      string
-	CleanQuestion string
-	Terms         retrieval.QueryTerms
-	Time          retrieval.TimeExpr
-	Anchor        time.Time
-	RecentTurns   []memory.TurnMetadata
-	History       retrieval.HistoryRelation
-	HistoryValid  bool
+	Question       string
+	CleanQuestion  string
+	Terms          retrieval.QueryTerms
+	QuerySemantics *domain.QuerySemantics
+	Time           retrieval.TimeExpr
+	Anchor         time.Time
+	RecentTurns    []memory.TurnMetadata
+	History        retrieval.HistoryRelation
+	HistoryValid   bool
 }
 
 type queryAnalysisOutput struct {
@@ -60,6 +61,7 @@ var queryAnalysisSpec = runtrace.Spec[queryAnalysisInput, queryAnalysisResult]{
 			"clean_question": input.CleanQuestion, "domain_terms": input.Terms.DomainTerms,
 			"identifiers": input.Terms.Identifiers, "query_kind": output.QueryPlan.Kind,
 			"query_entities": output.QueryPlan.Entities, "entity_count": len(output.QueryPlan.Entities),
+			"entity_specs":    queryEntityTrace(output.QueryPlan.EntitySpecs),
 			"required_facets": requiredFacets, "resolution_origin": result.ResolutionOrigin,
 			"matched_rule_kind": result.MatchedRuleKind,
 			"time_kind":         input.Time.Kind, "time_raw": input.Time.Raw,
@@ -74,14 +76,26 @@ var queryAnalysisSpec = runtrace.Spec[queryAnalysisInput, queryAnalysisResult]{
 	},
 }
 
+func queryEntityTrace(specs []domain.EntitySpec) []map[string]any {
+	result := make([]map[string]any, 0, len(specs))
+	for _, spec := range specs {
+		result = append(result, map[string]any{
+			"id": spec.ID, "label": spec.Label, "role": spec.Role,
+			"aliases": append([]string(nil), spec.Aliases...),
+		})
+	}
+	return result
+}
+
 func analyzeQuery(ctx context.Context, input queryAnalysisInput) (queryAnalysisOutput, error) {
 	result, err := runtrace.Invoke(ctx, queryAnalysisSpec, input, func(_ context.Context, input queryAnalysisInput) (queryAnalysisResult, error) {
 		history, origin, update := resolveHistoryRelation(input.Question, input.RecentTurns, input.History, input.HistoryValid)
 		timeRange, hasTimeRange, timeErr := retrieval.ResolveTime(input.Time, input.Anchor)
-		resolution := domain.ResolveQueryPlan(input.Question, domain.QuerySignals{
-			Identifiers: input.Terms.Identifiers,
-			DomainTerms: input.Terms.DomainTerms,
-		})
+		resolution := domain.ResolveQueryPlan(
+			input.Question,
+			input.QuerySemantics,
+			input.Terms.Identifiers,
+		)
 		return queryAnalysisResult{
 			Analysis: queryAnalysisOutput{
 				History: history, HistoryOrigin: origin, HistoryUpdate: update,

@@ -168,6 +168,12 @@ func (service *Service) executePrepared(
 	)
 	cancel()
 	if finishErr != nil {
+		finishErr = fmt.Errorf(
+			"%w: finish workflow run %q: %w",
+			ErrRunPersistence,
+			prepared.record.ID,
+			finishErr,
+		)
 		if runErr != nil {
 			return result, errors.Join(runErr, finishErr)
 		}

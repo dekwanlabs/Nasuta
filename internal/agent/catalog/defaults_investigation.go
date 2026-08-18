@@ -42,6 +42,10 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 	}
 	definitions := make([]agentapi.Definition, 0, len(specs)+2)
 	for _, spec := range specs {
+		maxToolCalls := int64(0)
+		if len(spec.tools) > 0 {
+			maxToolCalls = settings.AgentMaxToolCalls
+		}
 		rolePrompt := prompts.MustRender(prompts.AgentCatalogInvestigator, struct {
 			Focus string
 		}{Focus: spec.focus})
@@ -62,10 +66,12 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 				VisibleToolIDs: append([]string(nil), spec.tools...), RestrictVisible: true,
 			},
 			Budget: agentapi.BudgetPolicy{
-				Timeout:           time.Duration(settings.AgentTimeout),
-				MaxSteps:          settings.AgentMaxSteps,
-				ContextTokens:     settings.LLMContextWindow,
-				MaxContinueRounds: settings.LLMMaxContinueRounds,
+				Timeout:            time.Duration(settings.AgentTimeout),
+				MaxSteps:           settings.AgentMaxSteps,
+				MaxToolCalls:       maxToolCalls,
+				ContextTokens:      settings.LLMContextWindow,
+				MaxToolResultBytes: 24 * 1024,
+				MaxContinueRounds:  1,
 			},
 			Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
 		})
@@ -114,10 +120,10 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		Purpose: "Synthesize delegated investigation handoffs without gathering new evidence.",
 		Prompt: agentapi.PromptSpec{
 			System:  prompts.Text(prompts.AgentCatalogSynthesizer),
-			Version: "investigation-synthesis-v4",
+			Version: "investigation-synthesis-v6",
 		},
-		InputSchema:  agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 1},
-		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
+		InputSchema:  agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2},
+		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
 		Model: agentapi.ModelPolicy{
 			Provider: settings.LLMProvider, Model: settings.LLMModel,
 			MaxOutputTokens:                   settings.LLMAnswerMaxTokens,

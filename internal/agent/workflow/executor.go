@@ -39,6 +39,7 @@ type RunRequest struct {
 // NodeRequest contains one attempt's resolved inputs and effective permissions.
 type NodeRequest struct {
 	WorkflowRunID string
+	ParentRunID   string
 	Round         int
 	Depth         int
 	Node          NodeDefinition

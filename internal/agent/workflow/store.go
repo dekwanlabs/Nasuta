@@ -17,6 +17,8 @@ var (
 	ErrConflict         = errors.New("workflow conflict")
 	ErrUnavailable      = errors.New("workflow capability unavailable")
 	ErrInvariant        = errors.New("workflow invariant violated")
+	ErrNodePersistence  = errors.New("workflow node persistence failed")
+	ErrRunPersistence   = errors.New("workflow run persistence failed")
 	ErrApprovalConflict = fmt.Errorf(
 		"workflow approval decision conflicts with existing fact: %w",
 		ErrConflict,
@@ -82,6 +84,15 @@ type Event struct {
 	Summary       string          `json:"summary"`
 	Detail        json.RawMessage `json:"detail,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
+}
+
+// TerminalEventDetail projects the two independent terminal facts without
+// introducing another persisted completion state.
+type TerminalEventDetail struct {
+	RunStatus    RunStatus    `json:"run_status"`
+	Completeness Completeness `json:"completeness,omitempty"`
+	StopReason   StopReason   `json:"stop_reason,omitempty"`
+	ErrorCode    string       `json:"error_code,omitempty"`
 }
 
 type RunState struct {

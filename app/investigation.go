@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -37,10 +38,11 @@ func (runner qaInvestigator) Start(
 	agentNodes := defaultAgentNodes()
 	payloadBudget := 0
 	if len(request.Contract.EvidenceGoals) > 0 {
-		definition, flowPayloadBudget, err := runner.platform.investigationFlowWithBudget(
+		definition, flowPayloadBudget, err := runner.platform.investigationFlowWithEvidenceSubjects(
 			ctx,
 			version,
 			request.Contract.EvidenceGoals,
+			investigationSubjectRequirements(request.Contract),
 			request.Proposal,
 		)
 		if err != nil {
@@ -157,6 +159,16 @@ func (p *Platform) investigationFlowWithBudget(
 	goals []agent.EvidenceGoal,
 	plan *agentapi.TaskGraphProposal,
 ) (workflow.Definition, int, error) {
+	return p.investigationFlowWithEvidenceSubjects(ctx, version, goals, nil, plan)
+}
+
+func (p *Platform) investigationFlowWithEvidenceSubjects(
+	ctx context.Context,
+	version int64,
+	goals []agent.EvidenceGoal,
+	subjects []workflow.SubjectRequirement,
+	plan *agentapi.TaskGraphProposal,
+) (workflow.Definition, int, error) {
 	if p == nil || p.agents.catalog == nil ||
 		p.agents.schemas == nil || p.agents.capabilities == nil {
 		return workflow.Definition{}, 0, workflow.ErrUnavailable
@@ -184,47 +196,9 @@ func (p *Platform) investigationFlowWithBudget(
 		}
 		definitions = append(definitions, definition)
 	}
-	budgets, err := investigationBudgets(definitions)
+	baseBudgets, err := investigationBudgets(definitions)
 	if err != nil {
 		return workflow.Definition{}, 0, err
-	}
-	if goalsNeedSource(goals, agentapi.EvidenceSourceRuntime) {
-		observe, err := p.agents.capabilities.Resolve(agentapi.CapabilityRef{
-			ID: "knowledge.runtime.observe", Version: version,
-		})
-		if err != nil {
-			return workflow.Definition{}, 0, fmt.Errorf(
-				"resolve live runtime investigation capability version %d: %w",
-				version,
-				err,
-			)
-		}
-		if len(observe.ToolIDs) == 0 {
-			return workflow.Definition{}, 0, fmt.Errorf(
-				"live runtime investigation capability has no tools",
-			)
-		}
-		definition, err := p.agents.catalog.Resolve(observe.Agent)
-		if err != nil {
-			return workflow.Definition{}, 0, fmt.Errorf(
-				"resolve live runtime investigator: %w",
-				err,
-			)
-		}
-		budgets.Observe, err = agentNodeBudget(
-			definition,
-			int64(definition.Budget.MaxSteps),
-		)
-		if err != nil {
-			return workflow.Definition{}, 0, err
-		}
-		observePayloadTokens, err := agentPayloadBudget(definition)
-		if err != nil {
-			return workflow.Definition{}, 0, err
-		}
-		if observePayloadTokens < budgets.InvestigatorPayloadTokens {
-			budgets.InvestigatorPayloadTokens = observePayloadTokens
-		}
 	}
 	flowGoals := make([]workflow.Goal, 0, len(goals))
 	for _, goal := range goals {
@@ -233,6 +207,10 @@ func (p *Platform) investigationFlowWithBudget(
 			Sources: append(
 				[]agentapi.EvidenceSource(nil),
 				goal.Sources...,
+			),
+			RequiredSources: append(
+				[]agentapi.EvidenceSource(nil),
+				goal.RequiredSources...,
 			),
 			Freshness:       goal.Freshness,
 			MinimumCoverage: goal.MinimumCoverage,
@@ -247,31 +225,44 @@ func (p *Platform) investigationFlowWithBudget(
 		return workflow.Definition{}, 0, err
 	}
 	if plan != nil {
-		policy, err := workflow.PlanPolicy(
+		budgets, err := p.investigationBudgetsForPlan(
 			version,
-			definitions[0].Budget.Timeout,
-			budgets,
-			flowGoals,
+			baseBudgets,
 			*plan,
 		)
-		if err != nil {
-			return workflow.Definition{}, 0, err
-		}
-		definition, compileErr := compiler.CompileContext(
-			ctx,
-			*plan,
-			policy,
-		)
-		if compileErr == nil {
-			return definition, budgets.InvestigatorPayloadTokens, nil
+		if err == nil {
+			var policy workflow.CompilationPolicy
+			policy, err = workflow.PlanPolicy(
+				version,
+				definitions[0].Budget.Timeout,
+				budgets,
+				flowGoals,
+				*plan,
+			)
+			if err == nil {
+				policy.SubjectRequirements = cloneSubjectRequirements(subjects)
+				var definition workflow.Definition
+				definition, err = compiler.CompileContext(ctx, *plan, policy)
+				if err == nil {
+					return definition, budgets.InvestigatorPayloadTokens, nil
+				}
+			}
 		}
 		log.WarnfCtx(
 			ctx,
 			"[qa] planner task graph rejected; using deterministic goal mapping: %v",
-			compileErr,
+			err,
 		)
 	}
 	fallbackPlan, err := workflow.BuildPlan(flowGoals)
+	if err != nil {
+		return workflow.Definition{}, 0, err
+	}
+	budgets, err := p.investigationBudgetsForPlan(
+		version,
+		baseBudgets,
+		fallbackPlan,
+	)
 	if err != nil {
 		return workflow.Definition{}, 0, err
 	}
@@ -284,19 +275,129 @@ func (p *Platform) investigationFlowWithBudget(
 	if err != nil {
 		return workflow.Definition{}, 0, err
 	}
+	policy.SubjectRequirements = cloneSubjectRequirements(subjects)
 	definition, err := compiler.CompileContext(ctx, fallbackPlan, policy)
 	return definition, budgets.InvestigatorPayloadTokens, err
 }
 
-func goalsNeedSource(
-	goals []agent.EvidenceGoal,
-	source agentapi.EvidenceSource,
+func investigationSubjectRequirements(contract agent.TaskContract) []workflow.SubjectRequirement {
+	if len(contract.Entities) < 2 {
+		return nil
+	}
+	facets := make([]string, 0, len(contract.EvidenceGoals))
+	sources := make(map[agentapi.EvidenceSource]struct{})
+	for _, goal := range contract.EvidenceGoals {
+		if !goal.Required || goal.MinimumCoverage < len(contract.Entities) {
+			continue
+		}
+		facets = appendUniqueString(facets, goal.Facet)
+		for _, source := range goal.RequiredSources {
+			sources[source] = struct{}{}
+		}
+	}
+	if len(facets) == 0 {
+		return nil
+	}
+	requiredSources := make([]agentapi.EvidenceSource, 0, len(sources))
+	for source := range sources {
+		requiredSources = append(requiredSources, source)
+	}
+	sort.Slice(requiredSources, func(i, j int) bool { return requiredSources[i] < requiredSources[j] })
+	requirements := make([]workflow.SubjectRequirement, 0, len(contract.Entities))
+	for _, entity := range contract.Entities {
+		requirements = append(requirements, workflow.SubjectRequirement{
+			EntityID: entity.ID, Label: entity.Label, Role: entity.Role,
+			Aliases:         append([]string(nil), entity.Aliases...),
+			RequiredFacets:  append([]string(nil), facets...),
+			RequiredSources: append([]agentapi.EvidenceSource(nil), requiredSources...),
+		})
+	}
+	return requirements
+}
+
+func cloneSubjectRequirements(values []workflow.SubjectRequirement) []workflow.SubjectRequirement {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]workflow.SubjectRequirement, len(values))
+	for index, value := range values {
+		out[index] = value
+		out[index].Aliases = append([]string(nil), value.Aliases...)
+		out[index].RequiredFacets = append([]string(nil), value.RequiredFacets...)
+		out[index].RequiredSources = append([]agentapi.EvidenceSource(nil), value.RequiredSources...)
+	}
+	return out
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func (p *Platform) investigationBudgetsForPlan(
+	version int64,
+	budgets workflow.Budgets,
+	plan agentapi.TaskGraphProposal,
+) (workflow.Budgets, error) {
+	if !planUsesCapability(plan, "knowledge.runtime.observe") {
+		return budgets, nil
+	}
+	observe, err := p.agents.capabilities.Resolve(agentapi.CapabilityRef{
+		ID: "knowledge.runtime.observe", Version: version,
+	})
+	if err != nil {
+		return workflow.Budgets{}, fmt.Errorf(
+			"resolve live runtime investigation capability version %d: %w",
+			version,
+			err,
+		)
+	}
+	if len(observe.ToolIDs) == 0 {
+		return workflow.Budgets{}, fmt.Errorf(
+			"live runtime investigation capability has no tools",
+		)
+	}
+	definition, err := p.agents.catalog.Resolve(observe.Agent)
+	if err != nil {
+		return workflow.Budgets{}, fmt.Errorf(
+			"resolve live runtime investigator: %w",
+			err,
+		)
+	}
+	if definition.Budget.MaxToolCalls <= 0 {
+		return workflow.Budgets{}, fmt.Errorf(
+			"live runtime investigator %q requires max_tool_calls",
+			definition.ID,
+		)
+	}
+	budgets.Observe, err = agentNodeBudget(
+		definition,
+		definition.Budget.MaxToolCalls,
+	)
+	if err != nil {
+		return workflow.Budgets{}, err
+	}
+	observePayloadTokens, err := agentPayloadBudget(definition)
+	if err != nil {
+		return workflow.Budgets{}, err
+	}
+	if observePayloadTokens < budgets.InvestigatorPayloadTokens {
+		budgets.InvestigatorPayloadTokens = observePayloadTokens
+	}
+	return budgets, nil
+}
+
+func planUsesCapability(
+	plan agentapi.TaskGraphProposal,
+	capabilityID string,
 ) bool {
-	for _, goal := range goals {
-		for _, candidate := range goal.Sources {
-			if candidate == source {
-				return true
-			}
+	for _, task := range plan.Tasks {
+		if task.Capability == capabilityID {
+			return true
 		}
 	}
 	return false
@@ -526,8 +627,52 @@ func projectInvestigationEvent(
 			projected.Reason = event.Summary
 			return run.EventAgentCompleted, projected, true
 		}
+	case "workflow_succeeded", "workflow_failed",
+		"workflow_cancelled", "workflow_timed_out":
+		status, ok := investigationTerminalStatus(event.Kind)
+		if !ok {
+			break
+		}
+		projected.Status = string(status)
+		projected.Reason = event.Summary
+		var detail workflow.TerminalEventDetail
+		if len(event.Detail) > 0 && json.Unmarshal(event.Detail, &detail) == nil &&
+			(detail.RunStatus == "" || detail.RunStatus == status) {
+			projected.ErrorCode = detail.ErrorCode
+			if detail.StopReason != "" {
+				projected.Reason = string(detail.StopReason)
+			}
+			if validInvestigationCompleteness(detail.Completeness) {
+				projected.Completeness = string(detail.Completeness)
+			}
+		}
+		return run.EventWorkflowCompleted, projected, true
 	}
 	return "", run.ExecutionEvent{}, false
+}
+
+func investigationTerminalStatus(kind string) (workflow.RunStatus, bool) {
+	switch kind {
+	case "workflow_succeeded":
+		return workflow.RunSucceeded, true
+	case "workflow_failed":
+		return workflow.RunFailed, true
+	case "workflow_cancelled":
+		return workflow.RunCancelled, true
+	case "workflow_timed_out":
+		return workflow.RunTimedOut, true
+	default:
+		return "", false
+	}
+}
+
+func validInvestigationCompleteness(value workflow.Completeness) bool {
+	switch value {
+	case workflow.Complete, workflow.Partial, workflow.Unavailable:
+		return true
+	default:
+		return false
+	}
 }
 
 func isAgentNode(

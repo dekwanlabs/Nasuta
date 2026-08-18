@@ -330,6 +330,7 @@ func TestWorkflowEscalationHandoffResolverRejectsUntrustedReports(t *testing.T) 
 
 func TestQAWorkflowEscalationBuilderPreservesProvenanceWithinBudget(t *testing.T) {
 	const payloadTokens = 480
+	parentQuestion := strings.Repeat("why did the checkout request fail? ", 1000)
 	reportPayload := json.RawMessage(fmt.Sprintf(
 		`{"summary":%q}`,
 		strings.Repeat("trace evidence ", 600),
@@ -355,7 +356,7 @@ func TestQAWorkflowEscalationBuilderPreservesProvenanceWithinBudget(t *testing.T
 				},
 			},
 			Parent: agentapi.WorkflowEscalationParent{
-				RunID: "parent-1", Question: "why did it fail?",
+				RunID: "parent-1", Question: parentQuestion,
 				Correlation: agentapi.Correlation{SessionID: "session-1"},
 			},
 			Capability: agentapi.Capability{
@@ -379,6 +380,9 @@ func TestQAWorkflowEscalationBuilderPreservesProvenanceWithinBudget(t *testing.T
 	if tokens := tooloutput.EstimateTokens(string(result.Input)); tokens > payloadTokens {
 		t.Fatalf("input uses %d tokens, want <= %d", tokens, payloadTokens)
 	}
+	if strings.Contains(string(result.Input), parentQuestion) {
+		t.Fatal("workflow escalation input contains the parent question")
+	}
 	if len(result.SeedEvidence) != 1 ||
 		result.SeedEvidence[0].ContentHash != evidence[0].ContentHash {
 		t.Fatalf("seed evidence = %+v", result.SeedEvidence)
@@ -393,7 +397,6 @@ func TestQAWorkflowEscalationBuilderPreservesProvenanceWithinBudget(t *testing.T
 		t.Fatalf("decode task contract: %v", err)
 	}
 	if contract.TaskID != "parent-1" ||
-		contract.Question != "why did it fail?" ||
 		contract.Objective != "verify the runtime failure" ||
 		len(contract.Context.ConversationRefs) != 1 ||
 		contract.Context.ConversationRefs[0].SessionID != "session-1" {
