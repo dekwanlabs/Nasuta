@@ -20,6 +20,10 @@ func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution,
 	if err != nil {
 		return preparedExecution{}, err
 	}
+	outputSchema, err := runtime.schemas.Resolve(definition.OutputSchema)
+	if err != nil {
+		return preparedExecution{}, fmt.Errorf("definition output schema: %w", err)
+	}
 	policy, err := preparePermissions(definition, request)
 	if err != nil {
 		return preparedExecution{}, err
@@ -70,11 +74,12 @@ func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution,
 			Permissions: clonePermissions(request.Permissions),
 			Actor:       request.Actor, Correlation: request.Correlation, CreatedAt: time.Now().UTC(),
 		},
-		modelParameters: modelParameters,
-		toolPolicy:      tools.policy,
-		toolSnapshot:    tools.snapshot,
-		offeredTools:    tools.offeredIDs,
-		pruneApplied:    tools.pruneApplied,
+		modelParameters:  modelParameters,
+		toolPolicy:       tools.policy,
+		toolSnapshot:     tools.snapshot,
+		offeredTools:     tools.offeredIDs,
+		pruneApplied:     tools.pruneApplied,
+		structuredOutput: schemaHasStructuredRoot(outputSchema.Document),
 	}, nil
 }
 
@@ -178,6 +183,16 @@ func (runtime *Runtime) resolveExecution(
 		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition model parameters: %w", err)
 	}
 	return definition, modelParameters, nil
+}
+
+func schemaHasStructuredRoot(document json.RawMessage) bool {
+	var schema struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(document, &schema); err != nil {
+		return false
+	}
+	return schema.Type == "object" || schema.Type == "array"
 }
 
 func validateDelegationSnapshot(value agentapi.RunDelegation) error {

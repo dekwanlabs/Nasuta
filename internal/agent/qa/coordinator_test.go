@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type coordinatorParentStore struct {
@@ -30,6 +32,27 @@ type coordinatorScenarioLifecycle struct {
 	order    *[]string
 	outcomes []RunOutcome
 	err      error
+}
+
+type coordinatorPlannerStub struct {
+	calls    int
+	contract TaskContract
+	result   InvestigationResult
+	seed     []tool.EvidenceUnit
+	proposal *agentapi.TaskGraphProposal
+}
+
+func (planner *coordinatorPlannerStub) PlanInvestigation(
+	_ context.Context,
+	contract TaskContract,
+	result InvestigationResult,
+	seed []tool.EvidenceUnit,
+) (*agentapi.TaskGraphProposal, error) {
+	planner.calls++
+	planner.contract = contract
+	planner.result = result
+	planner.seed = cloneEvidenceUnits(seed)
+	return planner.proposal, nil
 }
 
 func (*coordinatorScenarioLifecycle) Start(
@@ -404,5 +427,345 @@ func TestCoordinatorAllowsParentWithoutSession(t *testing.T) {
 	}
 	if len(scenarios.outcomes) != 1 {
 		t.Fatalf("outcomes = %+v", scenarios.outcomes)
+	}
+}
+
+type coordinatorContinuationRunner struct {
+	*investigationRunnerRecorder
+	snapshots      map[string]InvestigationRoundSnapshot
+	startSnapshots map[string]InvestigationRoundSnapshot
+	loadRoundErr   map[string]error
+	loadRoundIDs   []string
+	startRequests  []InvestigationContinuationRequest
+	awaitIDs       []string
+}
+
+func (runner *coordinatorContinuationRunner) LoadRound(
+	_ context.Context,
+	workflowRunID string,
+) (InvestigationRoundSnapshot, error) {
+	runner.loadRoundIDs = append(runner.loadRoundIDs, workflowRunID)
+	if snapshot, ok := runner.snapshots[workflowRunID]; ok {
+		return snapshot, nil
+	}
+	if err, ok := runner.loadRoundErr[workflowRunID]; ok {
+		return InvestigationRoundSnapshot{}, err
+	}
+	return InvestigationRoundSnapshot{}, workflow.ErrNotFound
+}
+
+func (runner *coordinatorContinuationRunner) StartNextRound(
+	_ context.Context,
+	request InvestigationContinuationRequest,
+) error {
+	runner.startRequests = append(runner.startRequests, request)
+	if snapshot, ok := runner.startSnapshots[request.WorkflowRunID]; ok {
+		runner.snapshots[request.WorkflowRunID] = snapshot
+	}
+	return nil
+}
+
+func (runner *coordinatorContinuationRunner) AwaitTerminal(
+	_ context.Context,
+	workflowRunID string,
+) (InvestigationTerminal, error) {
+	runner.awaitIDs = append(runner.awaitIDs, workflowRunID)
+	snapshot, ok := runner.snapshots[workflowRunID]
+	if !ok {
+		return InvestigationTerminal{}, workflow.ErrNotFound
+	}
+	return snapshot.Terminal, nil
+}
+
+func coordinatorEvidenceUnit(
+	sourceKind, target, section, contentHash string,
+) tool.EvidenceUnit {
+	return tool.EvidenceUnit{
+		SourceKind: sourceKind, Target: target,
+		Sections: []string{section}, ContentHash: contentHash,
+	}
+}
+
+func coordinatorContinuationContract() TaskContract {
+	return TaskContract{
+		TaskID: "parent-dynamic", Objective: "investigate the system",
+		EvidenceGoals: []EvidenceGoal{
+			{ID: "business_domain", Facet: "business_domain", Required: true},
+			{ID: "core_flow", Facet: "core_flow", Required: true},
+		},
+		InvestigationGoals: []InvestigationGoal{{
+			ID: "core_flow", Objective: "trace the core flow",
+			IndependentlyUseful: true, DependsOn: []string{"business_domain"},
+		}},
+		TaskEvidenceAssignments: []TaskEvidenceAssignment{{
+			TaskID: "investigator.code",
+			InputRefs: []agentapi.EvidenceRef{{
+				SourceKind: "code", Target: "seed.Service", Section: "overview",
+			}},
+		}},
+		Context: TaskContext{SeedMaterial: []agentapi.ContextBlock{{
+			Source: "qa.seed", Content: "seed context",
+		}}},
+	}
+}
+
+func TestCoordinatorContinuationStartsStableBoundedRound(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-dynamic", WorkflowRunID: "workflow-1", UserID: 42,
+		Status: RunStatusRunning,
+	}
+	seed := coordinatorEvidenceUnit("code", "seed.Service", "overview", "seed-v1")
+	first := coordinatorEvidenceUnit("code", "first.Service", "implementation", "first-v1")
+	second := coordinatorEvidenceUnit("runtime", "first-service", "logs", "second-v1")
+	firstTerminal := InvestigationTerminal{
+		WorkflowRunID: parent.WorkflowRunID, Status: InvestigationSucceeded,
+		Completeness: InvestigationPartial, Round: 1, BaseDepth: 2,
+		Output: &InvestigationResult{
+			Answer: "round one", Round: 1,
+			EvidenceUnits:   []tool.EvidenceUnit{first},
+			PartialGoals:    []string{"core_flow"},
+			UnresolvedGoals: []string{"core_flow"},
+		},
+	}
+	childID := StableRoundWorkflowID(parent.ID, 2)
+	childTerminal := InvestigationTerminal{
+		WorkflowRunID: childID, Status: InvestigationSucceeded,
+		Completeness: InvestigationComplete, Round: 2, BaseDepth: 2,
+		Output: &InvestigationResult{
+			Answer: "round two", Round: 2,
+			EvidenceUnits: []tool.EvidenceUnit{second},
+		},
+	}
+	runner := &coordinatorContinuationRunner{
+		investigationRunnerRecorder: &investigationRunnerRecorder{
+			load: func(context.Context, string) (InvestigationTerminal, error) {
+				return firstTerminal, nil
+			},
+		},
+		snapshots: map[string]InvestigationRoundSnapshot{
+			parent.WorkflowRunID: {
+				Terminal:     firstTerminal,
+				Contract:     coordinatorContinuationContract(),
+				SeedEvidence: []tool.EvidenceUnit{seed},
+				Actor:        agentapi.Actor{UserID: parent.UserID, TenantID: "tenant-1"},
+			},
+		},
+		loadRoundErr: make(map[string]error),
+		startSnapshots: map[string]InvestigationRoundSnapshot{
+			childID: {
+				Terminal:     childTerminal,
+				Contract:     coordinatorContinuationContract(),
+				SeedEvidence: []tool.EvidenceUnit{seed, first},
+				Actor:        agentapi.Actor{UserID: parent.UserID, TenantID: "tenant-1"},
+			},
+		},
+	}
+	scenarios := &coordinatorScenarioLifecycle{}
+	planner := &coordinatorPlannerStub{
+		proposal: &agentapi.TaskGraphProposal{
+			Tasks: []agentapi.TaskSpec{{
+				ID: "dynamic.task", Capability: "knowledge.code.inspect",
+				OutputSchema: agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+			}},
+		},
+	}
+	coordinator := &Coordinator{
+		investigation: runner, scenarios: scenarios,
+		parentRuns: coordinatorParentStore{parent: parent},
+		planner:    planner,
+	}
+
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(runner.startRequests) != 1 {
+		t.Fatalf("start requests = %d, want 1", len(runner.startRequests))
+	}
+	request := runner.startRequests[0]
+	if request.ParentRunID != parent.ID ||
+		request.PreviousWorkflowRunID != parent.WorkflowRunID ||
+		request.WorkflowRunID != childID || request.Round != 2 ||
+		request.Actor.TenantID != "tenant-1" {
+		t.Fatalf("continuation request = %+v", request)
+	}
+	if len(request.Contract.EvidenceGoals) != 1 ||
+		request.Contract.EvidenceGoals[0].ID != "core_flow" {
+		t.Fatalf("next evidence goals = %+v", request.Contract.EvidenceGoals)
+	}
+	if len(request.Contract.InvestigationGoals) != 1 ||
+		request.Contract.InvestigationGoals[0].ID != "core_flow" ||
+		len(request.Contract.InvestigationGoals[0].DependsOn) != 0 {
+		t.Fatalf("next investigation goals = %+v", request.Contract.InvestigationGoals)
+	}
+	if request.Contract.TaskEvidenceAssignments != nil {
+		t.Fatalf("next task evidence assignments = %+v, want nil", request.Contract.TaskEvidenceAssignments)
+	}
+	if len(request.SeedEvidence) != 2 ||
+		request.SeedEvidence[0].Target != seed.Target ||
+		request.SeedEvidence[1].Target != first.Target {
+		t.Fatalf("next seed evidence = %+v", request.SeedEvidence)
+	}
+	if planner.calls != 1 || planner.contract.EvidenceGoals[0].ID != "core_flow" ||
+		planner.result.UnresolvedGoals[0] != "core_flow" || len(planner.seed) != 2 {
+		t.Fatalf("planner input = calls:%d contract:%+v result:%+v seed:%+v", planner.calls, planner.contract, planner.result, planner.seed)
+	}
+	if request.Proposal == nil || len(request.Proposal.Tasks) != 1 ||
+		request.Proposal.Tasks[0].ID != "dynamic.task" {
+		t.Fatalf("continuation proposal = %+v", request.Proposal)
+	}
+	if len(scenarios.outcomes) != 1 ||
+		scenarios.outcomes[0].Status != RunStatusDone ||
+		scenarios.outcomes[0].Answer != "round two" {
+		t.Fatalf("parent outcomes = %+v", scenarios.outcomes)
+	}
+}
+
+func TestCoordinatorContinuationStopsWithoutNewEvidence(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-no-progress", WorkflowRunID: "workflow-1", UserID: 42,
+		Status: RunStatusRunning,
+	}
+	unit := coordinatorEvidenceUnit("code", "same.Service", "implementation", "v1")
+	terminal := InvestigationTerminal{
+		WorkflowRunID: parent.WorkflowRunID, Status: InvestigationSucceeded,
+		Completeness: InvestigationPartial, Round: 1,
+		Output: &InvestigationResult{
+			Answer: "partial", Round: 1,
+			EvidenceUnits:   []tool.EvidenceUnit{unit},
+			UnresolvedGoals: []string{"core_flow"},
+		},
+	}
+	runner := &coordinatorContinuationRunner{
+		investigationRunnerRecorder: &investigationRunnerRecorder{
+			load: func(context.Context, string) (InvestigationTerminal, error) {
+				return terminal, nil
+			},
+		},
+		snapshots: map[string]InvestigationRoundSnapshot{
+			parent.WorkflowRunID: {
+				Terminal: terminal, Contract: coordinatorContinuationContract(),
+				SeedEvidence: []tool.EvidenceUnit{unit},
+			},
+		},
+		loadRoundErr: make(map[string]error),
+	}
+	scenarios := &coordinatorScenarioLifecycle{}
+	coordinator := &Coordinator{
+		investigation: runner, scenarios: scenarios,
+		parentRuns: coordinatorParentStore{parent: parent},
+	}
+
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(runner.startRequests) != 0 {
+		t.Fatalf("unexpected continuation starts = %+v", runner.startRequests)
+	}
+	if len(scenarios.outcomes) != 1 || scenarios.outcomes[0].Answer != "partial" {
+		t.Fatalf("parent outcomes = %+v", scenarios.outcomes)
+	}
+}
+
+func TestCoordinatorContinuationReusesExistingStableChild(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-replay-round", WorkflowRunID: "workflow-1", UserID: 42,
+		Status: RunStatusRunning,
+	}
+	seed := coordinatorEvidenceUnit("code", "seed.Service", "overview", "seed-v1")
+	first := coordinatorEvidenceUnit("code", "first.Service", "implementation", "v1")
+	second := coordinatorEvidenceUnit("runtime", "first-service", "logs", "v2")
+	firstTerminal := InvestigationTerminal{
+		WorkflowRunID: parent.WorkflowRunID, Status: InvestigationSucceeded,
+		Completeness: InvestigationPartial, Round: 1,
+		Output: &InvestigationResult{
+			Answer: "round one", Round: 1, EvidenceUnits: []tool.EvidenceUnit{first},
+			UnresolvedGoals: []string{"core_flow"},
+		},
+	}
+	childID := StableRoundWorkflowID(parent.ID, 2)
+	childTerminal := InvestigationTerminal{
+		WorkflowRunID: childID, Status: InvestigationSucceeded,
+		Completeness: InvestigationComplete, Round: 2,
+		Output: &InvestigationResult{
+			Answer: "replayed round two", Round: 2,
+			EvidenceUnits: []tool.EvidenceUnit{second},
+		},
+	}
+	runner := &coordinatorContinuationRunner{
+		investigationRunnerRecorder: &investigationRunnerRecorder{
+			load: func(context.Context, string) (InvestigationTerminal, error) {
+				return firstTerminal, nil
+			},
+		},
+		snapshots: map[string]InvestigationRoundSnapshot{
+			parent.WorkflowRunID: {
+				Terminal: firstTerminal, Contract: coordinatorContinuationContract(),
+				SeedEvidence: []tool.EvidenceUnit{seed},
+			},
+			childID: {
+				Terminal: childTerminal, Contract: coordinatorContinuationContract(),
+				SeedEvidence: []tool.EvidenceUnit{seed, first},
+			},
+		},
+		loadRoundErr: make(map[string]error),
+	}
+	scenarios := &coordinatorScenarioLifecycle{}
+	coordinator := &Coordinator{
+		investigation: runner, scenarios: scenarios,
+		parentRuns: coordinatorParentStore{parent: parent},
+	}
+
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(runner.startRequests) != 0 {
+		t.Fatalf("stable child was started again: %+v", runner.startRequests)
+	}
+	if len(scenarios.outcomes) != 1 ||
+		scenarios.outcomes[0].Answer != "replayed round two" {
+		t.Fatalf("parent outcomes = %+v", scenarios.outcomes)
+	}
+}
+
+func TestCoordinatorContinuationStopsAtRoundLimit(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-round-limit", WorkflowRunID: "workflow-1", UserID: 42,
+		Status: RunStatusRunning,
+	}
+	terminal := InvestigationTerminal{
+		WorkflowRunID: parent.WorkflowRunID, Status: InvestigationSucceeded,
+		Completeness: InvestigationPartial, Round: defaultInvestigationMaxRounds,
+		Output: &InvestigationResult{
+			Answer: "bounded answer", Round: defaultInvestigationMaxRounds,
+			EvidenceUnits: []tool.EvidenceUnit{
+				coordinatorEvidenceUnit("code", "new.Service", "implementation", "v1"),
+			},
+			UnresolvedGoals: []string{"core_flow"},
+		},
+	}
+	runner := &coordinatorContinuationRunner{
+		investigationRunnerRecorder: &investigationRunnerRecorder{
+			load: func(context.Context, string) (InvestigationTerminal, error) {
+				return terminal, nil
+			},
+		},
+		snapshots: map[string]InvestigationRoundSnapshot{
+			parent.WorkflowRunID: {
+				Terminal: terminal, Contract: coordinatorContinuationContract(),
+			},
+		},
+		loadRoundErr: make(map[string]error),
+	}
+	scenarios := &coordinatorScenarioLifecycle{}
+	coordinator := &Coordinator{
+		investigation: runner, scenarios: scenarios,
+		parentRuns: coordinatorParentStore{parent: parent},
+	}
+
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(runner.startRequests) != 0 {
+		t.Fatalf("continuation started past round limit: %+v", runner.startRequests)
 	}
 }

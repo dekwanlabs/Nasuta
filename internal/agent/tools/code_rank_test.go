@@ -64,6 +64,58 @@ func TestRankCodeHitsFallsBackToBackendOrderWithoutLexicalEvidence(t *testing.T)
 	}
 }
 
+func TestRankCodeHitsDropsWeakSparseOnlyMatchForMultiTermQuery(t *testing.T) {
+	hits := []semantic.Hit{
+		{
+			ID: "dense", Score: 0.75, FusionScore: 0.75, DenseScore: 0.7,
+			DenseRank: 1, ScoreKind: semantic.ScoreFusion,
+			Metadata: map[string]any{"path": "repos/team/semantic.go", "repo": "team", "text": "unrelated implementation"},
+		},
+		{
+			ID: "weak-sparse", Score: 0.25, FusionScore: 0.25, SparseScore: 9,
+			SparseRank: 1, ScoreKind: semantic.ScoreFusion,
+			Metadata: map[string]any{"path": "repos/team/noise.go", "repo": "team", "text": "generic retry helper"},
+		},
+	}
+
+	ranked := rankCodeHits("checkout timeout retry policy", hits, 5)
+	if len(ranked) != 1 || ranked[0].hit.ID != "dense" {
+		t.Fatalf("ranked hits = %#v, want weak sparse-only hit removed", traceRankedCodeHits(ranked))
+	}
+}
+
+func TestRankCodeHitsKeepsSparseOnlyIdentityMatch(t *testing.T) {
+	hits := []semantic.Hit{
+		{
+			ID: "identity", Score: 0.25, FusionScore: 0.25, SparseScore: 9,
+			SparseRank: 1, ScoreKind: semantic.ScoreFusion,
+			Metadata: map[string]any{
+				"path": "repos/team/CheckoutCoordinator.java",
+				"repo": "team",
+				"text": "class CheckoutCoordinator {}",
+			},
+		},
+	}
+
+	ranked := rankCodeHits("find CheckoutCoordinator timeout behavior", hits, 5)
+	if len(ranked) != 1 || ranked[0].hit.ID != "identity" {
+		t.Fatalf("identity hit was removed: %#v", traceRankedCodeHits(ranked))
+	}
+}
+
+func TestRankCodeHitsKeepsDenseCandidateWithoutLexicalOverlap(t *testing.T) {
+	hit := semantic.Hit{
+		ID: "semantic", Score: 0.75, FusionScore: 0.75, DenseScore: 0.84,
+		DenseRank: 1, ScoreKind: semantic.ScoreFusion,
+		Metadata: map[string]any{"path": "repos/team/semantic.go", "repo": "team", "text": "different vocabulary"},
+	}
+
+	ranked := rankCodeHits("checkout timeout retry policy", []semantic.Hit{hit}, 5)
+	if len(ranked) != 1 || ranked[0].hit.ID != "semantic" {
+		t.Fatalf("dense semantic hit was removed: %#v", traceRankedCodeHits(ranked))
+	}
+}
+
 func codeRankTestHit(score float32, path, text string) semantic.Hit {
 	return semantic.Hit{
 		Score: score,

@@ -3,6 +3,7 @@ package indexing
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/indexing/indexer"
@@ -14,10 +15,19 @@ const serviceRepoBucket = "_services"
 
 func (svc *Service) embedServices(ctx context.Context, services []domain.ServiceRecord) error {
 	docs := make([]semanticDocument, 0, len(services))
+	skipped := 0
 	for _, service := range services {
+		if strings.TrimSpace(service.Summary) == "" {
+			skipped++
+			continue
+		}
 		docs = append(docs, serviceDocument(service))
 	}
-	return svc.embedBatch(ctx, "services", docs)
+	if err := svc.embedBatch(ctx, "services", docs); err != nil {
+		return err
+	}
+	log.Infof("[embed] service vectors: included=%d skipped_without_summary=%d", len(docs), skipped)
+	return nil
 }
 
 func serviceDocument(service domain.ServiceRecord) semanticDocument {

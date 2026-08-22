@@ -137,9 +137,8 @@ func ResolveQueryPlan(
 	semantics *QuerySemantics,
 	identifiers []string,
 ) QueryResolution {
-	entities := CanonicalEntityIDs(identifiers)
-	entitySpecs := canonicalQueryEntitySpecs(semantics, entities)
-	entities = entitySpecIDs(entitySpecs)
+	entitySpecs := canonicalQueryEntitySpecs(semantics, identifiers)
+	entities := entitySpecIDs(entitySpecs)
 	if hasTypedRuntimeLocator(question) {
 		return QueryResolution{
 			Plan:            QueryPlan{Kind: QueryRuntimeDiagnosis, Entities: entities, EntitySpecs: entitySpecs},
@@ -164,9 +163,8 @@ func canonicalQueryEntitySpecs(semantics *QuerySemantics, identifiers []string) 
 	if semantics != nil {
 		specs = append(specs, semantics.EntitySpecs...)
 	}
-	ids := CanonicalEntityIDs(identifiers)
-	for _, id := range ids {
-		specs = append(specs, EntitySpec{ID: id})
+	for _, identifier := range identifiers {
+		specs = append(specs, EntitySpec{ID: identifier})
 	}
 	return CanonicalEntitySpecs(specs)
 }

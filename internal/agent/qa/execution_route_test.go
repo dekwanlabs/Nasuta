@@ -311,18 +311,30 @@ func TestExecutionRouteTraceContract(t *testing.T) {
 }
 
 func TestDecideExecutionRoutePromotesModelSingleSuggestion(t *testing.T) {
-	decision := decideExecutionRoute(executionRouteInput{
-		Suggestion: retrieval.ExecutionSuggestion{Strategy: retrieval.ExecutionSingleAgent},
-		Assessment: ExecutionAssessment{
-			IndependentTaskCount: 2, RequiredCapabilities: 1,
-			Parallelizable: true,
+	suggestion := retrieval.ExecutionSuggestion{
+		Strategy: retrieval.ExecutionSingleAgent,
+		Tasks: []retrieval.ExecutionTask{
+			{
+				ID: "integration", Objective: "Establish the integration architecture.",
+				IndependentlyUseful: true,
+			},
+			{
+				ID: "applicability", Objective: "Assess applicability to the target system.",
+				IndependentlyUseful: true,
+			},
 		},
+	}
+	assessment := assessExecution(suggestion, TaskContract{})
+	decision := decideExecutionRoute(executionRouteInput{
+		Suggestion:              suggestion,
+		Assessment:              assessment,
 		Policy:                  ExecutionPolicy{AllowMultiAgent: true},
 		LegacyWorkflowAvailable: true,
 	})
 	if decision.Strategy != retrieval.ExecutionMultiAgent ||
 		decision.DecisionOrigin != "server_assessment" ||
-		decision.PromotionReason != "independent_task_decomposition" {
+		decision.PromotionReason != "independent_task_decomposition" ||
+		assessment.IndependentTaskCount != 2 || !assessment.Parallelizable {
 		t.Fatalf("decision = %+v", decision)
 	}
 }

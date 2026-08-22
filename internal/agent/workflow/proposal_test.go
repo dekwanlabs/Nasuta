@@ -17,6 +17,7 @@ func TestProposalCompilerPinsCapabilitiesAndInsertsJoin(t *testing.T) {
 	proposal := proposalTestGraph()
 	proposal.Tasks[0].Budget.MaxOutputTokens = 40
 	proposal.Tasks[0].Purpose = "Planner text must not become an agent prompt."
+	proposal.Tasks[0].InvestigationGoalIDs = []string{"implementation_review"}
 	definition, err := compiler.Compile(proposal, proposalTestPolicy())
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +35,8 @@ func TestProposalCompilerPinsCapabilitiesAndInsertsJoin(t *testing.T) {
 		code.Capability != (agentapi.CapabilityRef{ID: "knowledge.code.inspect", Version: 1}) ||
 		code.Task == nil ||
 		code.Task.Purpose != "Planner text must not become an agent prompt." ||
+		len(code.Task.InvestigationGoalIDs) != 1 ||
+		code.Task.InvestigationGoalIDs[0] != "implementation_review" ||
 		len(code.Task.RequiredFacets) != 1 ||
 		code.Task.RequiredFacets[0] != "implementation" ||
 		code.Task.ParallelGroup != "investigation" ||

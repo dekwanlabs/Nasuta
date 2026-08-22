@@ -214,6 +214,7 @@ func Setup(mux *http.ServeMux, rc Config) {
 	api("GET /api/tool/index_stats", dash.IndexSummary)
 	api("GET /api/tool/get_symbol", dash.GetSymbol)
 	api("GET /api/tool/trace_calls", dash.TraceCalls)
+	api("GET /api/tool/trace_relations", dash.TraceRelations)
 
 	api("GET /api/codegraph/endpoint", dash.APICodeGraphEndpoint)
 	api("GET /api/codegraph/source", dash.APICodeGraphSource)

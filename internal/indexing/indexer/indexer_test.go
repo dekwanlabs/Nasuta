@@ -63,6 +63,12 @@ public interface UserFeign {
     @GetMapping("/info")
     Object info();
 }`)
+	writeFile(t, root, base+"/src/main/java/com/demo/UserService.java", `package com.demo;
+public class UserService {
+    private final UserFeign userFeign;
+    public UserService(UserFeign userFeign) { this.userFeign = userFeign; }
+    public Object user() { return userFeign.info(); }
+}`)
 
 	return root
 }
@@ -104,7 +110,7 @@ func TestBuildBundleEndToEnd(t *testing.T) {
 		t.Errorf("long-annotation handlerMethod = %q, want annotated", got.HandlerMethod)
 	}
 
-	// Feign is represented by the generic dependency model with symbol evidence.
+	// Feign is represented only after a typed client method is actually called.
 	if len(b.Dependencies) != 1 {
 		t.Errorf("dependencies = %d, want 1", len(b.Dependencies))
 	} else {
@@ -115,7 +121,9 @@ func TestBuildBundleEndToEnd(t *testing.T) {
 		if dependency.CallerServiceKey != svc.ServiceKey || dependency.TargetKind != domain.DependencyTargetExternal {
 			t.Errorf("dependency identity = %+v", dependency)
 		}
-		if len(dependency.Evidence) != 1 || dependency.Evidence[0].Symbol != "UserFeign" {
+		if len(dependency.Evidence) < 2 ||
+			dependency.Evidence[0].Symbol != "userFeign.info" ||
+			dependency.Evidence[1].Symbol != "UserFeign.info" {
 			t.Errorf("dependency evidence = %+v", dependency.Evidence)
 		}
 	}
@@ -718,4 +726,60 @@ func containsInt(s []int, v int) bool {
 		}
 	}
 	return false
+}
+
+func TestCSharpRefitRequiresActualMethodCall(t *testing.T) {
+	root := t.TempDir()
+	base := "repos/dotnet/client"
+	writeFile(t, root, base+"/Client.csproj", `<Project Sdk="Microsoft.NET.Sdk"></Project>`)
+	writeFile(t, root, base+"/IUsersApi.cs", `using Refit;
+[BaseAddress("https://users.example.com")]
+public interface IUsersApi {
+    [Get("/users")] Task<string> GetUsers();
+}`)
+	writeFile(t, root, base+"/Consumer.cs", `public class Consumer {
+    private readonly IUsersApi api;
+    public Consumer(IUsersApi api) { this.api = api; }
+}`)
+	if edges := scanCSharpRefits(root, mustDiscoverScanDirs(t, root)); len(edges) != 0 {
+		t.Fatalf("unused Refit client produced dependencies: %+v", edges)
+	}
+	writeFile(t, root, base+"/Consumer.cs", `public class Consumer {
+    private readonly IUsersApi api;
+    public Consumer(IUsersApi api) { this.api = api; }
+    public Task<string> Run() { return api.GetUsers(); }
+}`)
+	edges := scanCSharpRefits(root, mustDiscoverScanDirs(t, root))
+	if len(edges) != 1 || edges[0].To != "users.example.com" {
+		t.Fatalf("actual Refit call = %+v, want one dependency", edges)
+	}
+	if len(edges[0].Evidence) < 2 || edges[0].Evidence[0].Line <= 0 {
+		t.Fatalf("Refit evidence = %+v, want call and declaration evidence", edges[0].Evidence)
+	}
+}
+
+func TestAndroidRetrofitRequiresActualMethodCall(t *testing.T) {
+	root := t.TempDir()
+	base := "repos/mobile/client"
+	writeFile(t, root, base+"/build.gradle.kts", `android { namespace = "com.example.client" }`)
+	writeFile(t, root, base+"/src/main/AndroidManifest.xml", `<manifest package="com.example.client"></manifest>`)
+	writeFile(t, root, base+"/src/main/kotlin/UsersApi.kt", `import retrofit2.http.GET
+interface UsersApi {
+    @GET("https://users.example.com/users")
+    suspend fun getUsers(): String
+}`)
+	writeFile(t, root, base+"/src/main/kotlin/Consumer.kt", `class Consumer(private val api: UsersApi)`)
+	if edges := scanAndroidDependencies(root, mustDiscoverScanDirs(t, root)); len(edges) != 0 {
+		t.Fatalf("unused Retrofit client produced dependencies: %+v", edges)
+	}
+	writeFile(t, root, base+"/src/main/kotlin/Consumer.kt", `class Consumer(private val api: UsersApi) {
+    suspend fun run() = api.getUsers()
+}`)
+	edges := scanAndroidDependencies(root, mustDiscoverScanDirs(t, root))
+	if len(edges) != 1 || edges[0].To != "users.example.com" {
+		t.Fatalf("actual Retrofit call = %+v, want one dependency", edges)
+	}
+	if len(edges[0].Evidence) < 2 || edges[0].Evidence[0].Line <= 0 {
+		t.Fatalf("Retrofit evidence = %+v, want call and declaration evidence", edges[0].Evidence)
+	}
 }

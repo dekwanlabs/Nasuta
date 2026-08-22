@@ -54,6 +54,9 @@ func rankCodeHits(query string, hits []semantic.Hit, limit int) []rankedCodeHit 
 	for _, candidate := range candidates {
 		lexicalCoverage := weightedCoverage(candidate.covered, termWeights, totalTermWeight)
 		identityCoverage := weightedCoverage(candidate.identity, termWeights, totalTermWeight)
+		if !admitCodeRankCandidate(candidate, lexicalCoverage, identityCoverage, len(terms)) {
+			continue
+		}
 		baseScore := float64(candidate.hit.Score) / maxScore
 		ranked = append(ranked, rankedCodeHit{
 			hit:              candidate.hit,
@@ -70,6 +73,16 @@ func rankCodeHits(query string, hits []semantic.Hit, limit int) []rankedCodeHit 
 		return ranked[i].rankScore > ranked[j].rankScore
 	})
 	return selectCodeCoverage(ranked, termWeights, totalTermWeight, limit)
+}
+
+func admitCodeRankCandidate(candidate codeRankCandidate, lexicalCoverage, identityCoverage float64, queryTerms int) bool {
+	if candidate.hit.DenseRank > 0 || candidate.hit.SparseRank == 0 {
+		return true
+	}
+	if queryTerms <= 1 || identityCoverage > 0 || len(candidate.covered) >= 2 {
+		return true
+	}
+	return lexicalCoverage >= 0.5
 }
 
 func codeQueryTerms(query string) []string {
@@ -98,6 +111,9 @@ func codeQueryTerms(query string) []string {
 func collectCodeRankSignals(hits []semantic.Hit, terms []string) ([]codeRankCandidate, map[string]int) {
 	candidates := make([]codeRankCandidate, 0, len(hits))
 	docFreq := make(map[string]int, len(terms))
+	for _, term := range terms {
+		docFreq[term] = 0
+	}
 	for _, hit := range hits {
 		content := normalizeCodeText(payloadString(hit.Metadata, "text"))
 		identity := normalizeCodeText(payloadString(hit.Metadata, "path") + "\n" + payloadString(hit.Metadata, "repo"))
@@ -125,9 +141,6 @@ func codeTermWeights(docFreq map[string]int, candidateCount int) (map[string]flo
 	weights := make(map[string]float64, len(docFreq))
 	total := 0.0
 	for term, frequency := range docFreq {
-		if frequency == 0 {
-			continue
-		}
 		weight := math.Log(float64(candidateCount+1)/float64(frequency+1)) + 1
 		weights[term] = weight
 		total += weight

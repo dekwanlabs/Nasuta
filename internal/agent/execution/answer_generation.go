@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -34,7 +35,7 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 			})
 			attemptStarted = time.Now()
 			stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
-			res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
+			res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionRetryMaxTokens, stream)
 		}
 		if callErr == nil && hasLeakedToolProtocol(res) {
 			log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", input.RunID)
@@ -173,8 +174,8 @@ func (agent *Agent) generateWithContinue(ctx context.Context, messages []llm.Mes
 }
 
 // ErrReasoningTruncated means the model used the full token budget before
-// emitting any visible content.
-var ErrReasoningTruncated = errors.New("turn truncated during reasoning: max_tokens exhausted before any visible content; retry with a larger budget")
+// emitting any visible content; callers may try a direct-answer retry.
+var ErrReasoningTruncated = errors.New("turn truncated during reasoning: max_tokens exhausted before any visible content")
 
 // ErrAnswerTruncated means continuation rounds ended before the visible answer completed.
 var ErrAnswerTruncated = errors.New("answer remained truncated after continuation limit")
@@ -191,6 +192,9 @@ func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message
 			return res, ErrReasoningTruncated
 		}
 		return res, ErrEmptyModelResponse
+	}
+	if agent.cfg.StructuredOutput {
+		return agent.continueStructuredIfNeeded(ctx, messages, res, maxTokens, h)
 	}
 
 	rounds := 0
@@ -224,9 +228,80 @@ func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message
 	return res, nil
 }
 
+func (agent *Agent) continueStructuredIfNeeded(
+	ctx context.Context,
+	messages []llm.Message,
+	res *llm.ChatStreamResult,
+	maxTokens int,
+	h llm.StreamHandler,
+) (*llm.ChatStreamResult, error) {
+	if res.FinishReason != llm.FinishLength {
+		return res, nil
+	}
+	if candidate, complete := completeJSONValue(res.Content); complete {
+		res.Content = candidate
+		return res, nil
+	}
+
+	rounds := 0
+	for res.FinishReason == llm.FinishLength && rounds < agent.cfg.MaxContinueRounds {
+		rounds++
+		log.WarnfCtx(ctx, "[agent] structured output truncated by max_tokens, continuing (round %d/%d)",
+			rounds, agent.cfg.MaxContinueRounds)
+		msgs := append(append([]llm.Message{}, messages...),
+			llm.Message{Role: "assistant", Content: res.Content},
+			llm.Message{Role: "user", Content: structuredContinuationInstruction},
+		)
+		continuationCtx := llm.WithUsagePhase(ctx, llm.PhaseContinuation)
+		if err := agent.ensureInputBudget(msgs, nil); err != nil {
+			return nil, err
+		}
+		cont, err := agent.llm.ChatWithToolsMaxWithParameters(
+			continuationCtx, msgs, nil, h, maxTokens, agent.cfg.ModelParameters,
+		)
+		if err != nil {
+			log.ErrorfCtx(ctx, "[agent] structured continuation round %d failed: %v", rounds, err)
+			return res, fmt.Errorf("structured continuation round %d: %w", rounds, err)
+		}
+		res.Content = mergeStructuredContinuation(res.Content, cont.Content)
+		res.ReasoningTokens += cont.ReasoningTokens
+		res.Usage = res.Usage.Add(cont.Usage)
+		res.FinishReason = cont.FinishReason
+		if _, complete := completeJSONValue(res.Content); complete {
+			return res, nil
+		}
+	}
+	if res.FinishReason == llm.FinishLength {
+		log.WarnfCtx(ctx, "[agent] structured output still truncated after %d continuation rounds", agent.cfg.MaxContinueRounds)
+	}
+	return res, ErrAnswerTruncated
+}
+
+func completeJSONValue(value string) (string, bool) {
+	candidate := strings.TrimSpace(llm.StripFences(value))
+	if candidate == "" || !json.Valid([]byte(candidate)) {
+		return "", false
+	}
+	return candidate, true
+}
+
+func mergeStructuredContinuation(prefix, suffix string) string {
+	if strings.TrimSpace(suffix) == "" {
+		return prefix
+	}
+	if merged, complete := completeJSONValue(prefix + suffix); complete {
+		return merged
+	}
+	if candidate, complete := completeJSONValue(suffix); complete {
+		return candidate
+	}
+	return prefix + suffix
+}
+
 var (
 	forceConclusionInstruction            = prompts.Text(prompts.AgentQAForceConclusion)
 	forceConclusionNoReasoningInstruction = prompts.Text(prompts.AgentQAForceConclusionNoThink)
 	protocolRepairInstruction             = prompts.Text(prompts.AgentQAProtocolRepair)
 	continuationInstruction               = prompts.Text(prompts.AgentQAContinuation)
+	structuredContinuationInstruction     = prompts.Text(prompts.AgentQAStructuredContinuation)
 )

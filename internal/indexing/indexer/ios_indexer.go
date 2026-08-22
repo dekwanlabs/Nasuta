@@ -102,6 +102,10 @@ func scanIOSDependencies(root string, dirs []string) []domain.DependencyEdge {
 		// Alamofire: AF.request("https://api.example.com/path")
 		for _, m := range iosAlamofireRe.FindAllStringSubmatch(text, -1) {
 			if len(m) > 1 {
+				start := strings.Index(text, m[1])
+				if start < 0 || !iosHTTPURLUsage(text, start, start+len(m[1])) {
+					continue
+				}
 				target := extractIOSHost(m[1])
 				if target != "" {
 					edges = append(edges, domain.DependencyEdge{
@@ -119,6 +123,10 @@ func scanIOSDependencies(root string, dirs []string) []domain.DependencyEdge {
 		// Swift URLSession: URL(string: "https://api.example.com/path")
 		for _, m := range iosURLRe.FindAllStringSubmatch(text, -1) {
 			if len(m) > 1 {
+				start := strings.Index(text, m[1])
+				if start < 0 || !iosHTTPURLUsage(text, start, start+len(m[1])) {
+					continue
+				}
 				target := extractIOSHost(m[1])
 				if target != "" {
 					edges = append(edges, domain.DependencyEdge{
@@ -248,3 +256,65 @@ func extractIOSHost(url string) string {
 var iosAlamofireRe = regexp.MustCompile(`AF\.request\s*\(\s*"(https?://[^"]+)"`)
 
 var iosURLRe = regexp.MustCompile(`(?:URL|url)\s*\(\s*(?:string\s*:\s*)?["'](https?://[^"']+)["']`)
+
+var iosClientCallRe = regexp.MustCompile(`(?i)(?:AF\.request|dataTaskWithURL|uploadTaskWithRequest|downloadTaskWithRequest|URLSession[^\n{]*\.(?:dataTask|uploadTask|downloadTask))\s*\(`)
+
+func iosHTTPURLUsage(text string, start, end int) bool {
+	if httpURLIsComment(text, start, end) {
+		return false
+	}
+	// AF.request(url) and URLSession dataTaskWithURL(url) put the literal
+	// directly in the request expression.
+	for _, call := range iosClientCallRe.FindAllStringIndex(text, -1) {
+		open := strings.IndexByte(text[call[0]:call[1]], '(')
+		if open < 0 {
+			continue
+		}
+		open += call[0]
+		close := matchingParen(text, open)
+		if close > end && start >= open && start < close {
+			return true
+		}
+	}
+	// URL(string:) is commonly assigned to a URLRequest before the session
+	// starts. Require that the assigned variable is subsequently consumed by a
+	// concrete URLSession/Alamofire request; the URL declaration alone is not a
+	// service dependency.
+	variable := iosURLBindingName(text, start)
+	if variable == "" {
+		return false
+	}
+	for _, call := range iosClientCallRe.FindAllStringIndex(text, -1) {
+		open := strings.IndexByte(text[call[0]:call[1]], '(')
+		if open < 0 {
+			continue
+		}
+		open += call[0]
+		close := matchingParen(text, open)
+		if close <= start {
+			continue
+		}
+		if regexp.MustCompile(`\b` + regexp.QuoteMeta(variable) + `\b`).MatchString(text[open+1 : close]) {
+			return true
+		}
+		// URLSession commonly receives a URLRequest built from the URL value:
+		// let request = URLRequest(url: endpoint)
+		// URLSession.shared.dataTask(with: request) ...
+		requestRe := regexp.MustCompile(`(?m)\b(?:let|var)\s+(\w+)\s*=\s*URLRequest\s*\(\s*url\s*:\s*` + regexp.QuoteMeta(variable) + `\b`)
+		request := requestRe.FindStringSubmatch(text[start:])
+		if len(request) > 1 && regexp.MustCompile(`\b`+regexp.QuoteMeta(request[1])+`\b`).MatchString(text[open+1:close]) {
+			return true
+		}
+	}
+	return false
+}
+
+func iosURLBindingName(text string, literalStart int) string {
+	lineStart := strings.LastIndexByte(text[:literalStart], '\n') + 1
+	left := strings.TrimRight(text[lineStart:literalStart], "\"'` \t")
+	match := regexp.MustCompile(`\b(?:let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*URL\s*\(\s*(?:string\s*:\s*)?$`).FindStringSubmatch(left)
+	if len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}

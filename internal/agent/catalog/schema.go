@@ -131,6 +131,11 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"additionalProperties":false
 						}
 					},
+					"task_evidence_assignments":{
+						"type":"array",
+						"maxItems":5,
+						"items":{"$ref":"#/$defs/task_evidence_assignment"}
+					},
 					"context":{"$ref":"#/$defs/context"}
 				},
 				"allOf":[{
@@ -238,6 +243,52 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						},
 						"additionalProperties":false
 					},
+					"evidence_ref":{
+						"type":"object",
+						"required":["source_kind","target"],
+						"properties":{
+							"source_kind":{"type":"string","minLength":1},
+							"target":{"type":"string","minLength":1},
+							"section":{"type":"string"},
+							"version":{"type":"string"},
+							"time_range":{"type":"string"},
+							"content_hash":{"type":"string"}
+						},
+						"additionalProperties":false
+					},
+					"task_context_ref":{
+						"type":"object",
+						"required":["source","content_hash"],
+						"properties":{
+							"source":{"type":"string","minLength":1},
+							"content_hash":{"type":"string","minLength":1}
+						},
+						"additionalProperties":false
+					},
+					"task_evidence_assignment":{
+						"type":"object",
+						"required":["task_id","input_refs","context_refs"],
+						"properties":{
+							"task_id":{"type":"string","pattern":"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"},
+							"required_facets":{
+								"type":"array",
+								"maxItems":50,
+								"uniqueItems":true,
+								"items":{"type":"string","minLength":1}
+							},
+							"input_refs":{
+								"type":"array",
+								"maxItems":200,
+								"items":{"$ref":"#/$defs/evidence_ref"}
+							},
+							"context_refs":{
+								"type":"array",
+								"maxItems":20,
+								"items":{"$ref":"#/$defs/task_context_ref"}
+							}
+						},
+						"additionalProperties":false
+					},
 					"evidence_conflict":{
 						"type":"object",
 						"required":["identity","current","incoming"],
@@ -325,6 +376,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"kind":{"type":"string","minLength":1},
 							"reference":{"type":"string","minLength":1},
 							"summary":{"type":"string","minLength":1},
+							"evidence_id":{"type":"string","pattern":"^ev_[a-f0-9]{64}$"},
 							"identity":{"$ref":"#/$defs/evidence_identity"}
 						},
 						"additionalProperties":false
@@ -334,6 +386,12 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"required":["claim","goal_ids","evidence","confidence"],
 						"properties":{
 							"claim":{"type":"string","minLength":1},
+							"entity_ids":{
+								"type":"array",
+								"maxItems":50,
+								"uniqueItems":true,
+								"items":{"type":"string","minLength":1}
+							},
 							"goal_ids":{
 								"type":"array",
 								"minItems":1,
@@ -671,9 +729,15 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					},
 					"evidence_units":{
 						"type":"array",
-						"maxItems":200,
 						"items":{"$ref":"#/$defs/evidence_unit"}
 					},
+					"baseline_evidence_identities":{
+						"type":"array",
+						"uniqueItems":true,
+						"items":{"$ref":"#/$defs/evidence_identity"}
+					},
+					"evidence_units_total":{"type":"integer","minimum":1},
+					"evidence_units_omitted":{"type":"integer","minimum":1},
 					"evidence_conflicts":{
 						"type":"array",
 						"maxItems":100,
@@ -715,7 +779,8 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 								"duplicate_evidence_limit",
 								"budget_exhausted",
 								"capability_unavailable",
-								"needs_clarification"
+								"needs_clarification",
+								"evidence_insufficient"
 							]}
 						},
 						"additionalProperties":false
@@ -767,6 +832,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"kind":{"type":"string","minLength":1},
 							"reference":{"type":"string","minLength":1},
 							"summary":{"type":"string","minLength":1},
+							"evidence_id":{"type":"string","pattern":"^ev_[a-f0-9]{64}$"},
 							"identity":{"$ref":"#/$defs/evidence_identity"}
 						},
 						"additionalProperties":false
@@ -829,6 +895,12 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"required":["claim","goal_ids","evidence","confidence"],
 						"properties":{
 							"claim":{"type":"string","minLength":1},
+							"entity_ids":{
+								"type":"array",
+								"maxItems":50,
+								"uniqueItems":true,
+								"items":{"type":"string","minLength":1}
+							},
 							"goal_ids":{
 								"type":"array",
 								"minItems":1,

@@ -243,7 +243,7 @@ func TestDefinitionRuntimeRedactsPublicAndTerminalResults(t *testing.T) {
 	}
 	assertSensitiveValuesAbsent(t, result, []string{"result-secret"})
 	terminal := waitForTerminal(t, events)
-	assertSensitiveValuesAbsent(t, terminal, []string{"result-secret"})
+	assertSecretsAbsent(t, terminal, []string{"result-secret"})
 }
 
 func assertSensitiveValuesAbsent(t *testing.T, value any, secrets []string) {
@@ -259,5 +259,18 @@ func assertSensitiveValuesAbsent(t *testing.T, value any, secrets []string) {
 	}
 	if !strings.Contains(string(encoded), platform.RedactedValue) {
 		t.Fatalf("redaction marker missing: %s", encoded)
+	}
+}
+
+func assertSecretsAbsent(t *testing.T, value any, secrets []string) {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal value: %v", err)
+	}
+	for _, secret := range secrets {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("secret %q leaked: %s", secret, encoded)
+		}
 	}
 }

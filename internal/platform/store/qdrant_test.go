@@ -60,6 +60,59 @@ func TestDeduplicateHitsKeepsBestHitPerGroup(t *testing.T) {
 	}
 }
 
+func TestFuseHybridHitsPreservesBranchSignals(t *testing.T) {
+	dense := []semantic.Hit{
+		{ID: "dense-only", Score: 0.91, Metadata: map[string]any{"path": "dense.go"}},
+		{ID: "both", Score: 0.82, Metadata: map[string]any{"path": "both.go"}},
+	}
+	sparse := []semantic.Hit{
+		{ID: "sparse-only", Score: 12, Metadata: map[string]any{"path": "sparse.go"}},
+		{ID: "both", Score: 8, Metadata: map[string]any{"path": "both.go"}},
+	}
+
+	hits := fuseHybridHits(dense, sparse, 3, "")
+	if len(hits) != 3 {
+		t.Fatalf("fused hits = %d, want 3", len(hits))
+	}
+	if hits[0].ID != "both" {
+		t.Fatalf("top hit = %q, want dual-branch hit", hits[0].ID)
+	}
+	both := hits[0]
+	if both.DenseScore != 0.82 || both.SparseScore != 8 || both.DenseRank != 2 || both.SparseRank != 2 {
+		t.Fatalf("dual-branch signals = %#v", both)
+	}
+	if both.ScoreKind != semantic.ScoreFusion || both.Score != both.FusionScore {
+		t.Fatalf("fusion metadata = %#v", both)
+	}
+	if hits[1].ID != "dense-only" || hits[2].ID != "sparse-only" {
+		t.Fatalf("single-branch order = [%s %s], want dense before sparse", hits[1].ID, hits[2].ID)
+	}
+}
+
+func TestFuseHybridHitsGroupsAfterFusion(t *testing.T) {
+	dense := []semantic.Hit{
+		{ID: "a-dense", Score: 0.9, Metadata: map[string]any{"path": "a.go"}},
+		{ID: "b", Score: 0.8, Metadata: map[string]any{"path": "b.go"}},
+	}
+	sparse := []semantic.Hit{
+		{ID: "a-sparse", Score: 9, Metadata: map[string]any{"path": "a.go"}},
+		{ID: "c", Score: 8, Metadata: map[string]any{"path": "c.go"}},
+	}
+
+	hits := fuseHybridHits(dense, sparse, 3, "path")
+	if len(hits) != 3 {
+		t.Fatalf("grouped fused hits = %d, want 3", len(hits))
+	}
+	seen := make(map[string]struct{}, len(hits))
+	for _, hit := range hits {
+		path := hit.Metadata["path"].(string)
+		if _, duplicate := seen[path]; duplicate {
+			t.Fatalf("duplicate group %q in %#v", path, hits)
+		}
+		seen[path] = struct{}{}
+	}
+}
+
 func TestQdrantAddressAcceptsURLAndHostPort(t *testing.T) {
 	tests := []struct {
 		endpoint string

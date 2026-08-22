@@ -143,8 +143,12 @@ var proposalTraceSpec = runtrace.Spec[
 		tasks := make([]map[string]any, 0, len(input.proposal.Tasks))
 		for _, task := range input.proposal.Tasks {
 			tasks = append(tasks, map[string]any{
-				"id":              task.ID,
-				"capability":      task.Capability,
+				"id":         task.ID,
+				"capability": task.Capability,
+				"investigation_goal_ids": append(
+					[]string(nil),
+					task.InvestigationGoalIDs...,
+				),
 				"required_facets": append([]string(nil), task.RequiredFacets...),
 				"optional":        task.Optional,
 				"parallel_group":  task.ParallelGroup,

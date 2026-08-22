@@ -1,6 +1,7 @@
 package qa
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -80,6 +81,22 @@ func TestEvidencePlanningTraceContract(t *testing.T) {
 				t.Fatalf("planning_error = %q, fallback_error = %q", planningError, fallbackError)
 			}
 		})
+	}
+}
+
+func TestEvidencePlanningTraceMarksAuditFailureDegraded(t *testing.T) {
+	output := evidencePlanningOutput{
+		ExecutionAuditTried: true,
+		ExecutionAuditError: errors.New("invalid audit output"),
+	}
+	if got := evidencePlanningSpec.Status(output, nil); got != "degraded" {
+		t.Fatalf("status = %q, want degraded", got)
+	}
+	fields := evidencePlanningSpec.Output(evidencePlanningInput{}, output, nil)
+	if fields["execution_audit_tried"] != true ||
+		fields["execution_audit_used"] != false ||
+		fields["execution_audit_error"] != "invalid audit output" {
+		t.Fatalf("trace fields = %#v", fields)
 	}
 }
 

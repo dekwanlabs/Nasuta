@@ -14,6 +14,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/indexing"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -129,6 +130,24 @@ func TestInvestigationBudgetsUsesImmutableAgentDefinitions(t *testing.T) {
 		priced.Synthesizer.MaxCostMicros <= 0 {
 		t.Fatalf("priced budgets = %+v", priced)
 	}
+
+	largeBudgetSettings := *enabledAgentSettings()
+	largeBudgetSettings.LLMAnswerMaxTokens = 12_000
+	largeDefinitions, err := defaultAgentDefinitions(&largeBudgetSettings, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	largePolicy, err := investigationBudgets(largeDefinitions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if largePolicy.SynthesizerPayloadTokens != investigationSynthesisPayloadMaxTokens {
+		t.Fatalf(
+			"synthesizer payload budget = %d, want hard cap %d",
+			largePolicy.SynthesizerPayloadTokens,
+			investigationSynthesisPayloadMaxTokens,
+		)
+	}
 }
 
 func TestInvestigationFlowCompilesPublishedCapabilities(t *testing.T) {
@@ -192,6 +211,17 @@ func TestInvestigationFlowCompilesPublishedCapabilities(t *testing.T) {
 	}
 	if workflowDefinition.Nodes[0].Capability.ID == "" {
 		t.Fatal("compiled investigation workflow did not bind capabilities")
+	}
+	var verifier *workflow.NodeDefinition
+	for index := range workflowDefinition.Nodes {
+		if workflowDefinition.Nodes[index].ID == "evidence.verify" {
+			verifier = &workflowDefinition.Nodes[index]
+			break
+		}
+	}
+	if verifier == nil || verifier.Verifier == nil ||
+		verifier.Verifier.MaxPayloadTokens > investigationSynthesisPayloadMaxTokens {
+		t.Fatalf("compiled verifier payload budget = %+v", verifier)
 	}
 }
 
@@ -263,13 +293,33 @@ func TestInvestigationFlowForGoalsPinsRequestedVersion(t *testing.T) {
 		verifier.OutputSchema.ID != "investigation.verified_bundle" {
 		t.Fatalf("request verifier = %+v", verifier)
 	}
+	nonCanonicalSubjects := domain.CanonicalEntitySpecs([]domain.EntitySpec{
+		{ID: "本系统ai集成", Label: "我们AI", Role: "first_party_agent"},
+		{ID: "多agent系统", Label: "多agent", Role: "orchestration"},
+	})
+	comparisonContract := platformagent.TaskContract{
+		Entities: []platformagent.EntityRef{
+			{
+				ID: nonCanonicalSubjects[0].ID, Label: nonCanonicalSubjects[0].Label,
+				Role:    nonCanonicalSubjects[0].Role,
+				Aliases: append([]string(nil), nonCanonicalSubjects[0].Aliases...),
+			},
+			{
+				ID: nonCanonicalSubjects[1].ID, Label: nonCanonicalSubjects[1].Label,
+				Role:    nonCanonicalSubjects[1].Role,
+				Aliases: append([]string(nil), nonCanonicalSubjects[1].Aliases...),
+			},
+		},
+		EvidenceGoals: []platformagent.EvidenceGoal{{
+			ID: "core_flow", Facet: "core_flow", Required: true,
+			MinimumCoverage: 2,
+		}},
+	}
 	subjectDefinition, _, err := platform.investigationFlowWithEvidenceSubjects(
 		t.Context(),
 		requestedVersion,
 		goals,
-		[]workflow.SubjectRequirement{{
-			EntityID: "our_agent", RequiredFacets: []string{"core_flow"},
-		}},
+		investigationSubjectRequirements(comparisonContract),
 		nil,
 	)
 	if err != nil {
@@ -283,8 +333,11 @@ func TestInvestigationFlowForGoalsPinsRequestedVersion(t *testing.T) {
 		}
 	}
 	if subjectVerifier.Verifier == nil ||
-		len(subjectVerifier.Verifier.SubjectRequirements) != 1 ||
-		subjectVerifier.Verifier.SubjectRequirements[0].EntityID != "our_agent" {
+		len(subjectVerifier.Verifier.SubjectRequirements) != 2 ||
+		subjectVerifier.Verifier.SubjectRequirements[0].EntityID != nonCanonicalSubjects[0].ID ||
+		subjectVerifier.Verifier.SubjectRequirements[0].Label != "我们AI" ||
+		len(subjectVerifier.Verifier.SubjectRequirements[0].Aliases) != 1 ||
+		subjectVerifier.Verifier.SubjectRequirements[1].EntityID != nonCanonicalSubjects[1].ID {
 		t.Fatalf("subject verifier = %+v", subjectVerifier.Verifier)
 	}
 	riskGate := nodes["evidence.risk"]
@@ -834,7 +887,7 @@ func TestRebuildQARuntimeDoesNotReuseCatalogWhenSynthesizerContractChanges(t *te
 	}
 	if synthesizer.OutputSchema != (agentapi.SchemaRef{
 		ID: "investigation.answer", Version: 3,
-	}) || synthesizer.Prompt.Version != "investigation-synthesis-v6" {
+	}) || synthesizer.Prompt.Version != "investigation-synthesis-v7" {
 		t.Fatalf("published synthesizer contract = %+v", synthesizer)
 	}
 }

@@ -78,6 +78,149 @@ func TestAnalyzeEvidenceParsesModelDecision(t *testing.T) {
 	}
 }
 
+func TestAnalyzeEvidenceAuditsMissingExecutionTasks(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"overview\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.95},\"query_terms\":{\"domain_terms\":[\"AI integration\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.6,\"confidence\":0.8,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]}}"}}]}`))
+			return
+		}
+		if !strings.Contains(string(body), "query_kind") ||
+			!strings.Contains(string(body), "execution_task_audit") {
+			t.Fatalf("audit request missing narrow task contract: %s", body)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"tasks\":[{\"id\":\"integration\",\"objective\":\"Establish how AI is integrated and which technologies are used.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"knowledge_graph\",\"objective\":\"Assess how the technologies support a backend knowledge graph.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"agent_stack\",\"objective\":\"Derive multi-agent design lessons and a suitable technology stack.\",\"independently_useful\":true,\"depends_on\":[]}]}"}}]}`))
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+
+	result, err := AnalyzeEvidence(
+		t.Context(), client, "analyze the integration, knowledge graph impact, and agent stack",
+		"", "analyze the integration, knowledge graph impact, and agent stack",
+		RoutingCapabilities{}, nil, 512,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("planner and audit requests = %d, want 2", got)
+	}
+	if !result.ExecutionAuditTried || !result.ExecutionAuditUsed ||
+		result.ExecutionAuditError != nil || len(result.Execution.Tasks) != 3 {
+		t.Fatalf("analysis = %+v", result)
+	}
+	if result.Execution.Strategy != ExecutionSingleAgent {
+		t.Fatalf("audit changed model strategy = %q", result.Execution.Strategy)
+	}
+	if !reflect.DeepEqual(result.Execution.Reasons, []string{
+		"requires_multiple_subproblems",
+		"supports_parallel_investigation",
+	}) {
+		t.Fatalf("reasons = %v", result.Execution.Reasons)
+	}
+}
+
+func TestAnalyzeEvidenceAuditsInsufficientIndependentTasks(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"overview\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.95},\"query_terms\":{\"domain_terms\":[\"architecture\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.8,\"confidence\":0.7,\"tasks\":[{\"id\":\"integration\",\"objective\":\"Establish the integration architecture.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"knowledge_graph\",\"objective\":\"Assess the knowledge graph implications.\",\"independently_useful\":false,\"depends_on\":[\"integration\"]},{\"id\":\"agent_stack\",\"objective\":\"Derive the agent technology stack.\",\"independently_useful\":false,\"depends_on\":[\"integration\"]}],\"reasons\":[\"requires_multiple_subproblems\",\"subproblems_are_sequential\"]}}"}}]}`))
+			return
+		}
+		if !strings.Contains(string(body), "candidate_tasks") ||
+			!strings.Contains(string(body), "execution_task_audit") {
+			t.Fatalf("audit request missing candidate task context: %s", body)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"tasks\":[{\"id\":\"integration\",\"objective\":\"Establish the integration architecture.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"knowledge_graph\",\"objective\":\"Assess the knowledge graph implications.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"agent_stack\",\"objective\":\"Derive the agent technology stack.\",\"independently_useful\":true,\"depends_on\":[]}]}"}}]}`))
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+
+	result, err := AnalyzeEvidence(
+		t.Context(), client, "analyze the architecture, knowledge graph implications, and agent stack",
+		"", "analyze the architecture, knowledge graph implications, and agent stack",
+		RoutingCapabilities{}, nil, 512,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("planner and audit requests = %d, want 2", got)
+	}
+	if !result.ExecutionAuditTried || !result.ExecutionAuditUsed ||
+		result.ExecutionAuditError != nil || len(result.Execution.Tasks) != 3 {
+		t.Fatalf("analysis = %+v", result)
+	}
+	if got := countIndependentExecutionTasks(result.Execution.Tasks); got != 3 {
+		t.Fatalf("independent tasks = %d, want 3", got)
+	}
+}
+
+func TestAnalyzeEvidenceDoesNotAuditFocusedFact(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"focused_fact\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.95},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.2,\"confidence\":0.9,\"tasks\":[],\"reasons\":[\"single_focused_question\"]}}"}}]}`))
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+
+	result, err := AnalyzeEvidence(
+		t.Context(), client, "which port does the service use", "",
+		"which port does the service use", RoutingCapabilities{}, nil, 512,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+	if result.ExecutionAuditTried || result.ExecutionAuditUsed ||
+		result.ExecutionAuditError != nil || len(result.Execution.Tasks) != 0 {
+		t.Fatalf("analysis = %+v", result)
+	}
+}
+
+func TestAnalyzeEvidenceKeepsPlannerResultWhenExecutionAuditFails(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"overview\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.95},\"query_terms\":{\"domain_terms\":[],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.5,\"confidence\":0.8,\"tasks\":[],\"reasons\":[\"single_source_sufficient\"]}}"}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"strategy\":\"multi_agent\"}"}}]}`))
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+
+	result, err := AnalyzeEvidence(
+		t.Context(), client, "give an overview with several deliverables", "",
+		"give an overview with several deliverables", RoutingCapabilities{}, nil, 512,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("planner and audit requests = %d, want 3", got)
+	}
+	if !result.ExecutionAuditTried || result.ExecutionAuditUsed ||
+		result.ExecutionAuditError == nil || len(result.Execution.Tasks) != 0 {
+		t.Fatalf("analysis = %+v", result)
+	}
+	if !result.Decision.Plan.Has(domain.Internal) {
+		t.Fatalf("planner decision was lost: %+v", result.Decision)
+	}
+}
+
 func TestAnalyzeEvidenceDerivesHistoryRelationInSameCall(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +299,10 @@ func TestAnalyzeEvidenceRepromptsAfterMultipleJSONValues(t *testing.T) {
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"comparison\"}}{\"route\":{\"sources\":[\"internal\"],\"confidence\":0.9}}"}}]}`))
 			return
 		}
+		if strings.Contains(string(body), "query_kind") {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"tasks\":[]}"}}]}`))
+			return
+		}
 		if !strings.Contains(string(body), "multiple JSON values") {
 			t.Fatalf("repair request missing parse failure: %s", body)
 		}
@@ -168,8 +315,8 @@ func TestAnalyzeEvidenceRepromptsAfterMultipleJSONValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AnalyzeEvidence: %v", err)
 	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("planner requests = %d, want 2", got)
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("planner and audit requests = %d, want 3", got)
 	}
 	if result.QuerySemantics == nil || result.QuerySemantics.Kind != domain.QueryComparison {
 		t.Fatalf("query semantics = %+v", result.QuerySemantics)

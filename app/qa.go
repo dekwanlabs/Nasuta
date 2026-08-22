@@ -147,6 +147,9 @@ func (p *Platform) buildQARuntime(
 		Capabilities:      p.agents.capabilities,
 		WriteAvailable:    writeAvailable,
 	})
+	if coordinator != nil {
+		coordinator.SetInvestigationPlanner(qa)
+	}
 	runtime := dashboard.QARuntime{
 		QA: qa, RunStore: p.qa.runs,
 		Sessions: p.qa.sessions,

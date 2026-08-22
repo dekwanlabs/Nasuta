@@ -214,6 +214,23 @@ func TestTraceRelationsRegistersOnlyWhenOntologyIsAvailable(t *testing.T) {
 	}
 }
 
+func TestTraceRelationsResultSharesBoundedOntologyContract(t *testing.T) {
+	svc := &Service{ontology: ontology.NewService(staticOntologyRepository{})}
+	result, err := svc.TraceRelationsResult(context.Background(), ontology.RelationQuery{
+		Entity:    "orders",
+		Direction: ontology.DirectionOutgoing,
+		MaxDepth:  99,
+		MaxNodes:  9999,
+		MaxFanout: 9999,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Facts) != 1 || result.Facts[0].Object.Name != "payments" {
+		t.Fatalf("relation result = %#v", result)
+	}
+}
+
 func TestTraceDepsUsesOntologyFacts(t *testing.T) {
 	svc := &Service{ontology: ontology.NewService(staticOntologyRepository{})}
 	var trace *Tool

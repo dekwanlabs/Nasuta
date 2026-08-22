@@ -66,10 +66,18 @@ const (
 	maxMethodLines    = 200        // methods larger than this are sub-windowed
 )
 
+// These versions are part of the reuse contract. Bump them when scan policy
+// or chunk boundaries change in a way that invalidates existing points.
+const (
+	CodePolicyVersion  = "code-policy-v1"
+	CodeChunkerVersion = "code-chunker-v1"
+)
+
 // noiseDirSegments are path segments whose files are test or fixture noise.
 var noiseDirSegments = []string{
 	"/src/test/", "/test/", "/tests/", "/__tests__/", "/testdata/",
 	"/fixtures/", "/fixture/", "/mock/", "/mocks/", "/e2e/", "/snapshots/",
+	"/vendor/", "/third_party/", "/thirdparty/",
 }
 
 // noiseNamePatterns are filename substrings indicating generated/derived files.
@@ -163,12 +171,13 @@ func loadCodegraphRanges(root string) map[string][]codegraph.Node {
 	return m
 }
 
-// chunkByNodes emits one chunk per method/function and sub-windows oversized
-// methods.
+// chunkByNodes emits method/function chunks plus one file-context chunk when
+// package/import/type-level lines would otherwise be lost.
 func chunkByNodes(path, repo, lang, text string, nodes []codegraph.Node) []domain.CodeChunk {
 	lines := strings.Split(text, "\n")
 	n := len(lines)
 	var out []domain.CodeChunk
+	covered := make([]bool, n)
 	for _, node := range nodes {
 		s, e := node.StartLine, node.EndLine
 		if s < 1 {
@@ -179,6 +188,9 @@ func chunkByNodes(path, repo, lang, text string, nodes []codegraph.Node) []domai
 		}
 		if e < s {
 			continue
+		}
+		for line := s; line <= e; line++ {
+			covered[line-1] = true
 		}
 		header := codeHeader(lang, node, path)
 		if e-s+1 > maxMethodLines {
@@ -204,6 +216,30 @@ func chunkByNodes(path, repo, lang, text string, nodes []codegraph.Node) []domai
 				StartLine: s, EndLine: e, Text: header + body})
 		}
 	}
+	contextLines := make([]string, n)
+	hasContext := false
+	for i, line := range lines {
+		if covered[i] {
+			continue
+		}
+		contextLines[i] = line
+		if strings.TrimSpace(line) != "" {
+			hasContext = true
+		}
+	}
+	if hasContext {
+		context := strings.TrimSpace(strings.Join(contextLines, "\n"))
+		if context != "" {
+			out = append(out, domain.CodeChunk{
+				Path:      path,
+				Repo:      repo,
+				Lang:      lang,
+				StartLine: 1,
+				EndLine:   n,
+				Text:      fileContextHeader(lang, path, n) + context,
+			})
+		}
+	}
 	return out
 }
 
@@ -218,6 +254,10 @@ func codeHeader(lang string, node codegraph.Node, path string) string {
 		h += "// " + sig + "\n"
 	}
 	return h
+}
+
+func fileContextHeader(lang, path string, endLine int) string {
+	return fmt.Sprintf("// %s file context\n// %s:1-%d\n", lang, path, endLine)
 }
 
 func chunkFile(path, repo, lang, text string) []domain.CodeChunk {

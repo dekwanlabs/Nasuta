@@ -3,13 +3,16 @@ package workflow
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	agentcatalog "github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -58,9 +61,9 @@ func TestTrimVerifiedEvidencePrioritizesClaimsAndTracksOmissions(t *testing.T) {
 	original := view
 	required := map[string]struct{}{"required": {}}
 	slots := verifiedSlots(view, required)
-	budget := verifiedViewTokens(viewAtVerifiedSlot(view, slots, 1))
+	budget := verifiedViewTokens(viewAtVerifiedSlot(view, slots, 1, nil))
 
-	got, err := trimVerifiedEvidence(view, budget, required)
+	got, err := trimVerifiedEvidence(view, budget, required, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +91,7 @@ func TestTrimVerifiedEvidencePrioritizesClaimsAndTracksOmissions(t *testing.T) {
 		view,
 		tooloutput.EstimateTokens(mustMarshalJSON(t, view)),
 		required,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -95,6 +99,124 @@ func TestTrimVerifiedEvidencePrioritizesClaimsAndTracksOmissions(t *testing.T) {
 	if len(full.EvidenceUnits) != len(view.EvidenceUnits) ||
 		full.Omissions != (omissionView{}) {
 		t.Fatalf("unbounded verified view = %+v", full)
+	}
+}
+
+func TestTrimVerifiedEvidencePreservesProtectedBaseline(t *testing.T) {
+	baseline := verifiedEvidenceUnit("baseline")
+	view := verifiedEvidenceView{
+		SupportedClaims: []verifiedClaimView{{
+			Claim: "derived", GoalIDs: []string{"optional"},
+			EvidenceIdentities: []agentapi.EvidenceIdentity{{
+				SourceKind: "source", Target: "derived",
+			}},
+		}},
+		EvidenceUnits: []tool.EvidenceUnit{
+			baseline,
+			verifiedEvidenceUnit("derived"),
+		},
+		Verification: verificationView{
+			Decision: Partial, StopReason: StopEvidenceInsufficient,
+		},
+		Completeness: Partial,
+	}
+	protected := map[evidence.Key]struct{}{{
+		SourceKind: baseline.SourceKind,
+		Target:     baseline.Target,
+	}: {}}
+	slots := verifiedSlots(view, nil)
+	budget := verifiedViewTokens(
+		viewAtVerifiedSlot(view, slots, 0, protected),
+	)
+	got, err := trimVerifiedEvidence(view, budget, nil, protected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.SupportedClaims) != 0 ||
+		len(got.EvidenceUnits) != 1 ||
+		got.EvidenceUnits[0].Target != baseline.Target {
+		t.Fatalf("protected baseline view = %+v", got)
+	}
+}
+
+func TestTrimVerifiedEvidenceBoundsLargeSynthesisPayload(t *testing.T) {
+	const maxTokens = 8192
+	view := verifiedEvidenceView{
+		SupportedClaims:   make([]verifiedClaimView, 0, 80),
+		PartialClaims:     []verifiedClaimView{},
+		UnsupportedClaims: []unsupportedClaimView{},
+		PartialGoals:      []string{},
+		UnresolvedGoals:   []string{},
+		Limitations:       []string{},
+		LimitationsDetail: &limitationsDetailRef{
+			ArtifactID:           "art_00000000-0000-0000-0000-000000000000",
+			NormalizationVersion: LimitationsNormalizationVersion,
+		},
+		EvidenceUnits:     make([]tool.EvidenceUnit, 0, 80),
+		EvidenceConflicts: []agentapi.EvidenceConflict{},
+		Verification: verificationView{
+			Decision:   Partial,
+			StopReason: StopEvidenceInsufficient,
+		},
+		Completeness: Partial,
+	}
+	for index := range 80 {
+		target := fmt.Sprintf("source-%03d", index)
+		identity := agentapi.EvidenceIdentity{
+			SourceKind: "code", Target: target, Section: "flow",
+		}
+		view.SupportedClaims = append(view.SupportedClaims, verifiedClaimView{
+			ProducerNodeID: fmt.Sprintf("investigate.%d", index%3),
+			FindingIndex:   index,
+			Claim:          fmt.Sprintf("%s %s", target, strings.Repeat("grounded detail ", 32)),
+			GoalIDs:        []string{"optional"},
+			Evidence: []findingEvidenceView{{
+				Kind: "code", Reference: target,
+				Summary:  strings.Repeat("concrete support ", 16),
+				Identity: &identity,
+			}},
+			EvidenceIdentities: []agentapi.EvidenceIdentity{identity},
+			Confidence:         0.9,
+			Support:            claimSupported,
+			HighRisk:           index == 0,
+		})
+		view.EvidenceUnits = append(view.EvidenceUnits, tool.EvidenceUnit{
+			SourceKind: "code", Target: target, Sections: []string{"flow"},
+			Coverage: tool.EvidenceCoverage{Complete: true},
+		})
+	}
+	view.SupportedClaims[1].GoalIDs = []string{"required"}
+
+	required := map[string]struct{}{"required": {}}
+	got, err := trimVerifiedEvidence(view, maxTokens, required, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens := verifiedViewTokens(got); tokens > maxTokens {
+		t.Fatalf("trimmed payload tokens = %d, budget = %d", tokens, maxTokens)
+	}
+	if got.Omissions.Claims == 0 || got.Omissions.EvidenceUnits == 0 {
+		t.Fatalf("large payload was not compacted: omissions = %+v", got.Omissions)
+	}
+	if len(got.SupportedClaims) < 2 ||
+		!got.SupportedClaims[0].HighRisk ||
+		!reflect.DeepEqual(got.SupportedClaims[1].GoalIDs, []string{"required"}) {
+		t.Fatalf("priority claims were not retained: %+v", got.SupportedClaims[:min(2, len(got.SupportedClaims))])
+	}
+
+	payload, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := agentapi.NewSchemaRegistry()
+	if err := schemas.Publish(agentcatalog.DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	if err := schemas.Validate(
+		agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2},
+		payload,
+	); err != nil {
+		t.Fatalf("trimmed verified bundle failed schema validation: %v", err)
 	}
 }
 
@@ -273,7 +395,7 @@ func TestStopReasonForVerificationUsesConvergenceFacts(t *testing.T) {
 		{
 			name:         "missing convergence snapshot",
 			completeness: Partial,
-			want:         StopCapabilityUnavailable,
+			want:         StopEvidenceInsufficient,
 		},
 		{
 			name:         "no new evidence",
@@ -939,4 +1061,107 @@ func verifySubjectBundle(
 		t.Fatal(err)
 	}
 	return verified
+}
+
+func TestVerificationIndexBindsStableEvidenceHandle(t *testing.T) {
+	unit := tool.EvidenceUnit{
+		SourceKind: "code", Target: "repos/voice/Controller.java",
+		Sections: []string{"L10-L20"}, Coverage: tool.EvidenceCoverage{Complete: true},
+	}
+	index := newEvidenceIndex([]tool.EvidenceUnit{unit})
+	key, ok := evidence.UnitKey(unit)
+	if !ok {
+		t.Fatal("unit has no canonical key")
+	}
+	matches := index.match(findingEvidenceView{
+		Kind: "code", Reference: "Controller.java", Summary: "support",
+		EvidenceID: key.Handle(),
+	})
+	if len(matches) != 1 || matches[0].identity.Target != unit.Target ||
+		matches[0].identity.Section != "L10-L20" {
+		t.Fatalf("matches = %+v", matches)
+	}
+}
+
+func TestSubjectCoverageUsesExplicitFindingEntityIDs(t *testing.T) {
+	unit := tool.EvidenceUnit{
+		SourceKind: "code", Target: "repos/hsds/hsds-aiot-agent/main.py",
+		Coverage: tool.EvidenceCoverage{Complete: true},
+	}
+	key, ok := evidence.UnitKey(unit)
+	if !ok {
+		t.Fatal("unit has no canonical key")
+	}
+	finding := map[string]any{
+		"claim":      "The first-party agent sends device commands.",
+		"entity_ids": []string{"our_agent"},
+		"goal_ids":   []string{"core_flow"},
+		"evidence": []map[string]any{{
+			"kind": "code", "reference": unit.Target, "summary": "support",
+			"evidence_id": key.Handle(),
+		}},
+		"confidence": 0.9,
+	}
+	payload, err := json.Marshal(ledgerView{
+		Handoffs: []handoffView{verifiedReportHandoff(
+			"investigate.code.1", "code", []map[string]any{finding}, nil,
+		)},
+		EvidenceUnits: []tool.EvidenceUnit{unit}, Completeness: Complete,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas, _ := investigationCatalogs(t, 21)
+	output, err := verifyBundle(verificationRunInput{
+		workflowRunID: "subject-handle-run",
+		node: NodeDefinition{
+			ID: "evidence.verify", Kind: NodeVerifier,
+			OutputSchema: agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2},
+			Verifier: &VerifierSpec{
+				RequiredGoals: []string{"core_flow"},
+				SubjectRequirements: []SubjectRequirement{{
+					EntityID: "our_agent", Label: "我们的agent",
+					RequiredFacets:  []string{"core_flow"},
+					RequiredSources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
+				}},
+			},
+		},
+		inputs: []Handoff{{
+			ProducerNodeID: "evidence.join", Payload: payload,
+			EvidenceUnits: []tool.EvidenceUnit{unit}, Completeness: Complete,
+		}},
+		maxBytes: 1 << 20, schemas: schemas,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var verified verifiedEvidenceView
+	if err := json.Unmarshal(output.handoff.Payload, &verified); err != nil {
+		t.Fatal(err)
+	}
+	if len(verified.SupportedClaims) != 1 || len(verified.SubjectCoverage) != 1 ||
+		!verified.SubjectCoverage[0].Complete {
+		t.Fatalf("verified = %+v", verified)
+	}
+}
+
+func TestVerificationIndexAcceptsCanonicalFileLineReference(t *testing.T) {
+	unit := tool.EvidenceUnit{
+		SourceKind: "code", Target: "repos/voice/Controller.java",
+		Sections: []string{"L10-L20"}, Coverage: tool.EvidenceCoverage{Complete: true},
+	}
+	index := newEvidenceIndex([]tool.EvidenceUnit{unit})
+	for _, reference := range []string{
+		"repos/voice/Controller.java:L10-L20",
+		"repos/voice/Controller.java#L10-L20",
+		"repos/voice/Controller.java (L10-L20)",
+	} {
+		matches := index.match(findingEvidenceView{
+			Kind: "code", Reference: reference, Summary: "support",
+		})
+		if len(matches) != 1 || matches[0].identity.Target != unit.Target ||
+			matches[0].identity.Section != "L10-L20" {
+			t.Fatalf("reference %q matches = %+v", reference, matches)
+		}
+	}
 }

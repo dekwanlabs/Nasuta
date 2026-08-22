@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	qdrantclient "github.com/qdrant/go-client/qdrant"
+	"golang.org/x/sync/errgroup"
 )
 
 type Qdrant struct {
@@ -316,64 +318,201 @@ func (q *Qdrant) searchHybrid(ctx context.Context, query semantic.Query) ([]sema
 		return nil, fmt.Errorf("qdrant: invalid sparse vector")
 	}
 	filter := buildSemanticFilter(query.Filter)
-	limU := uint64(query.Limit)
-	denseLim := uint64(query.Limit * 3)
+	branchLimit := min(query.Limit*3, maxSemanticSearchLimit)
+	var denseHits, sparseHits []semantic.Hit
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		var err error
+		denseHits, err = q.searchHybridBranch(groupCtx, qdrantclient.NewQueryDense(query.DenseVector), nil, filter, branchLimit, query.GroupBy, hybridDense)
+		return err
+	})
+	group.Go(func() error {
+		var err error
+		sparseHits, err = q.searchHybridBranch(groupCtx, qdrantclient.NewQuerySparse(sparse.Indices, sparse.Values), stringPtr(codeSparseVector), filter, branchLimit, query.GroupBy, hybridSparse)
+		return err
+	})
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return fuseHybridHits(denseHits, sparseHits, query.Limit, query.GroupBy), nil
+}
+
+type hybridBranch uint8
+
+const (
+	hybridDense hybridBranch = iota
+	hybridSparse
+)
+
+func (q *Qdrant) searchHybridBranch(
+	ctx context.Context,
+	vectorQuery *qdrantclient.Query,
+	using *string,
+	filter *qdrantclient.Filter,
+	limit int,
+	groupKey string,
+	branch hybridBranch,
+) ([]semantic.Hit, error) {
+	fetchLimit := limit
 	groupFallback := false
-	denseQuery := &qdrantclient.PrefetchQuery{
-		Query: qdrantclient.NewQueryDense(query.DenseVector),
-		Using: stringPtr(""),
-		Limit: &denseLim,
-	}
-	sparseQuery := &qdrantclient.PrefetchQuery{
-		Query: qdrantclient.NewQuerySparse(sparse.Indices, sparse.Values),
-		Using: stringPtr(codeSparseVector),
-		Limit: &denseLim,
-	}
-	if filter != nil {
-		denseQuery.Filter = filter
-		sparseQuery.Filter = filter
-	}
-	prefetch := []*qdrantclient.PrefetchQuery{denseQuery, sparseQuery}
-	fusion := qdrantclient.NewQueryFusion(qdrantclient.Fusion_RRF)
-	withPayload := qdrantclient.NewWithPayload(true)
-	if query.GroupBy != "" {
+	if groupKey != "" {
+		limU := uint64(limit)
 		groupSize := uint64(1)
 		groups, err := q.client.QueryGroups(ctx, &qdrantclient.QueryPointGroups{
 			CollectionName: q.collection,
-			Prefetch:       prefetch,
-			Query:          fusion,
+			Query:          vectorQuery,
+			Using:          using,
+			Filter:         filter,
 			Limit:          &limU,
-			GroupBy:        query.GroupBy,
+			GroupBy:        groupKey,
 			GroupSize:      &groupSize,
-			WithPayload:    withPayload,
+			WithPayload:    qdrantclient.NewWithPayload(true),
 		})
 		if err != nil {
-			log.WarnfCtx(ctx, "[qdrant] hybrid query groups (field=%q) failed, using bounded client grouping: %v", query.GroupBy, err)
-			fallbackLimit := min(query.Limit*6, 1000)
-			limU = uint64(fallbackLimit)
-			denseLim = uint64(min(fallbackLimit*3, 3000))
-			denseQuery.Limit = &denseLim
-			sparseQuery.Limit = &denseLim
+			log.WarnfCtx(ctx, "[qdrant] hybrid branch query groups (field=%q branch=%s) failed, using bounded client grouping: %v", groupKey, branch, err)
+			fetchLimit = min(limit*6, maxSemanticSearchLimit)
 			groupFallback = true
 		} else {
-			return groupsToHits(groups, semantic.ScoreFusion), nil
+			return groupsToBranchHits(groups, branch), nil
 		}
 	}
+	limU := uint64(fetchLimit)
 	res, err := q.client.Query(ctx, &qdrantclient.QueryPoints{
 		CollectionName: q.collection,
-		Prefetch:       prefetch,
-		Query:          fusion,
+		Query:          vectorQuery,
+		Using:          using,
+		Filter:         filter,
 		Limit:          &limU,
-		WithPayload:    withPayload,
+		WithPayload:    qdrantclient.NewWithPayload(true),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("qdrant: hybrid search collection %q: %w", q.collection, err)
+		return nil, fmt.Errorf("qdrant: %s branch search collection %q: %w", branch, q.collection, err)
 	}
-	hits := pointsToHits(res, semantic.ScoreFusion)
+	hits := pointsToBranchHits(res, branch)
 	if groupFallback {
-		hits = deduplicateHits(hits, query.GroupBy, query.Limit)
+		hits = deduplicateHits(hits, groupKey, limit)
 	}
 	return hits, nil
+}
+
+func pointsToBranchHits(res []*qdrantclient.ScoredPoint, branch hybridBranch) []semantic.Hit {
+	hits := make([]semantic.Hit, 0, len(res))
+	for _, point := range res {
+		hits = append(hits, branchHit(point.GetId().GetUuid(), point.GetScore(), payloadToMap(point.GetPayload()), branch))
+	}
+	return hits
+}
+
+func groupsToBranchHits(groups []*qdrantclient.PointGroup, branch hybridBranch) []semantic.Hit {
+	hits := make([]semantic.Hit, 0, len(groups))
+	for _, group := range groups {
+		for _, point := range group.GetHits() {
+			hits = append(hits, branchHit(point.GetId().GetUuid(), point.GetScore(), payloadToMap(point.GetPayload()), branch))
+		}
+	}
+	return hits
+}
+
+func branchHit(id string, score float32, metadata map[string]any, branch hybridBranch) semantic.Hit {
+	hit := semantic.Hit{ID: id, Score: score, Metadata: metadata}
+	if branch == hybridDense {
+		hit.ScoreKind = semantic.ScoreDense
+		hit.DenseScore = score
+	} else {
+		hit.SparseScore = score
+	}
+	return hit
+}
+
+const (
+	hybridDenseWeight  = 0.75
+	hybridSparseWeight = 0.25
+	hybridRankOffset   = 10
+)
+
+func fuseHybridHits(denseHits, sparseHits []semantic.Hit, limit int, groupKey string) []semantic.Hit {
+	if limit <= 0 {
+		return nil
+	}
+	fused := make([]semantic.Hit, 0, len(denseHits)+len(sparseHits))
+	byID := make(map[string]int, len(denseHits)+len(sparseHits))
+	for rank, hit := range denseHits {
+		if _, exists := byID[hit.ID]; exists {
+			continue
+		}
+		hit.DenseRank = rank + 1
+		hit.DenseScore = hit.Score
+		hit.SparseScore = 0
+		hit.SparseRank = 0
+		hit.FusionScore = 0
+		hit.ScoreKind = semantic.ScoreFusion
+		byID[hit.ID] = len(fused)
+		fused = append(fused, hit)
+	}
+	for rank, hit := range sparseHits {
+		sparseRank := rank + 1
+		if index, exists := byID[hit.ID]; exists {
+			if fused[index].SparseRank == 0 {
+				fused[index].SparseScore = hit.Score
+				fused[index].SparseRank = sparseRank
+			}
+			continue
+		}
+		hit.DenseScore = 0
+		hit.DenseRank = 0
+		hit.SparseScore = hit.Score
+		hit.SparseRank = sparseRank
+		hit.FusionScore = 0
+		hit.ScoreKind = semantic.ScoreFusion
+		byID[hit.ID] = len(fused)
+		fused = append(fused, hit)
+	}
+	for i := range fused {
+		score := hybridDenseWeight*hybridRankScore(fused[i].DenseRank) +
+			hybridSparseWeight*hybridRankScore(fused[i].SparseRank)
+		fused[i].Score = score
+		fused[i].FusionScore = score
+	}
+	sort.SliceStable(fused, func(i, j int) bool {
+		if fused[i].FusionScore != fused[j].FusionScore {
+			return fused[i].FusionScore > fused[j].FusionScore
+		}
+		if fused[i].DenseRank != fused[j].DenseRank {
+			return rankBefore(fused[i].DenseRank, fused[j].DenseRank)
+		}
+		if fused[i].SparseRank != fused[j].SparseRank {
+			return rankBefore(fused[i].SparseRank, fused[j].SparseRank)
+		}
+		return fused[i].ID < fused[j].ID
+	})
+	if groupKey != "" {
+		return deduplicateHits(fused, groupKey, limit)
+	}
+	if len(fused) > limit {
+		fused = fused[:limit]
+	}
+	return fused
+}
+
+func hybridRankScore(rank int) float32 {
+	if rank <= 0 {
+		return 0
+	}
+	return float32(hybridRankOffset+1) / float32(hybridRankOffset+rank)
+}
+
+func rankBefore(left, right int) bool {
+	if left == 0 {
+		return false
+	}
+	return right == 0 || left < right
+}
+
+func (branch hybridBranch) String() string {
+	if branch == hybridSparse {
+		return "sparse"
+	}
+	return "dense"
 }
 
 func deduplicateHits(hits []semantic.Hit, field string, limit int) []semantic.Hit {

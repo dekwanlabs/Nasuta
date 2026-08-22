@@ -1339,8 +1339,10 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 			t.Fatalf("investigation request = %+v", request)
 		}
 		if request.Proposal == nil || len(request.Proposal.Tasks) != 3 ||
-			request.Proposal.Tasks[0].ID != "investigate.code.1" ||
-			request.Proposal.Tasks[1].ID != "investigate.service.1" ||
+			request.Proposal.Tasks[0].ID != "investigate.design.code.1" ||
+			!reflect.DeepEqual(request.Proposal.Tasks[0].InvestigationGoalIDs, []string{"design"}) ||
+			request.Proposal.Tasks[1].ID != "investigate.implementation.service.1" ||
+			!reflect.DeepEqual(request.Proposal.Tasks[1].InvestigationGoalIDs, []string{"implementation"}) ||
 			request.Proposal.Tasks[2].ID != "synthesize" {
 			t.Fatalf("task graph proposal = %+v", request.Proposal)
 		}
@@ -1583,7 +1585,7 @@ func serverPromotableRouteBody() string {
 }
 
 func multiAgentTaskGraphBody() string {
-	return `{"choices":[{"message":{"content":"{\"tasks\":[{\"purpose\":\"Inspect the implementation flow.\",\"capability\":\"knowledge.code.inspect\",\"evidence_goal_ids\":[\"entrypoint\",\"core_flow\",\"data_and_state\"],\"depends_on\":[]},{\"purpose\":\"Trace service dependencies.\",\"capability\":\"knowledge.service.trace\",\"evidence_goal_ids\":[\"external_dependency\"],\"depends_on\":[]}] }"}}]}`
+	return `{"choices":[{"message":{"content":"{\"tasks\":[{\"purpose\":\"Establish the intended behavior from implementation evidence.\",\"capability\":\"knowledge.code.inspect\",\"investigation_goal_ids\":[\"design\"],\"evidence_goal_ids\":[\"entrypoint\",\"core_flow\",\"data_and_state\"],\"depends_on\":[]},{\"purpose\":\"Verify the implementation behavior across service dependencies.\",\"capability\":\"knowledge.service.trace\",\"investigation_goal_ids\":[\"implementation\"],\"evidence_goal_ids\":[\"external_dependency\"],\"depends_on\":[]}] }"}}]}`
 }
 
 func singleAgentRouteBody() string {

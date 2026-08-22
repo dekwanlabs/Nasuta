@@ -53,13 +53,14 @@ type runtimeSettings struct {
 }
 
 type preparedExecution struct {
-	definition      agentapi.Definition
-	modelParameters llm.ModelParameters
-	snapshot        agentapi.RunSnapshot
-	toolPolicy      tool.Policy
-	toolSnapshot    tool.Snapshot
-	offeredTools    map[tool.ToolID]struct{}
-	pruneApplied    bool
+	definition       agentapi.Definition
+	modelParameters  llm.ModelParameters
+	snapshot         agentapi.RunSnapshot
+	toolPolicy       tool.Policy
+	toolSnapshot     tool.Snapshot
+	offeredTools     map[tool.ToolID]struct{}
+	pruneApplied     bool
+	structuredOutput bool
 }
 
 type toolSelection struct {

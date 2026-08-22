@@ -109,10 +109,11 @@ type NodeDefinition struct {
 
 // TaskDirective preserves the validated task semantics bound to an agent node.
 type TaskDirective struct {
-	Purpose        string                 `json:"purpose"`
-	RequiredFacets []string               `json:"required_facets,omitempty"`
-	InputRefs      []agentapi.EvidenceRef `json:"input_refs,omitempty"`
-	ParallelGroup  string                 `json:"parallel_group,omitempty"`
+	Purpose              string                 `json:"purpose"`
+	InvestigationGoalIDs []string               `json:"investigation_goal_ids,omitempty"`
+	RequiredFacets       []string               `json:"required_facets,omitempty"`
+	InputRefs            []agentapi.EvidenceRef `json:"input_refs"`
+	ParallelGroup        string                 `json:"parallel_group,omitempty"`
 }
 
 // RetryPolicy bounds repeated execution of a node after a classified transient failure.
@@ -918,6 +919,12 @@ func validateTaskDirective(workflowID string, node NodeDefinition) error {
 		return fmt.Errorf("workflow %q agent node %q task purpose is required", workflowID, node.ID)
 	}
 	if err := validateCanonical(
+		"node "+node.ID+" task investigation goal",
+		node.Task.InvestigationGoalIDs,
+	); err != nil {
+		return err
+	}
+	if err := validateCanonical(
 		"node "+node.ID+" task required facet",
 		node.Task.RequiredFacets,
 	); err != nil {
@@ -1021,8 +1028,12 @@ func cloneDefinition(definition Definition) Definition {
 		node.VisibleToolIDs = append([]string(nil), node.VisibleToolIDs...)
 		if node.Task != nil {
 			task := *node.Task
+			task.InvestigationGoalIDs = append(
+				[]string(nil),
+				task.InvestigationGoalIDs...,
+			)
 			task.RequiredFacets = append([]string(nil), task.RequiredFacets...)
-			task.InputRefs = append([]agentapi.EvidenceRef(nil), task.InputRefs...)
+			task.InputRefs = cloneEvidenceRefs(task.InputRefs)
 			node.Task = &task
 		}
 		if node.Gate != nil {
@@ -1041,4 +1052,13 @@ func cloneDefinition(definition Definition) Definition {
 	definition.Edges = append([]EdgeDefinition(nil), definition.Edges...)
 	definition.Permissions.Scopes = append([]string(nil), definition.Permissions.Scopes...)
 	return definition
+}
+
+func cloneEvidenceRefs(
+	refs []agentapi.EvidenceRef,
+) []agentapi.EvidenceRef {
+	if refs == nil {
+		return nil
+	}
+	return append(make([]agentapi.EvidenceRef, 0, len(refs)), refs...)
 }

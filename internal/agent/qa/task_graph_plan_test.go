@@ -8,7 +8,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
-func TestBuildTaskGraphFallbackUsesEvidenceGoalCoverNotInvestigationGoalCount(t *testing.T) {
+func TestBuildTaskGraphFallbackBindsDeliverablesWithoutLosingEvidenceCover(t *testing.T) {
 	contract := TaskContract{
 		InvestigationGoals: []InvestigationGoal{
 			{ID: "business", Objective: "Explain the business behavior."},
@@ -27,14 +27,60 @@ func TestBuildTaskGraphFallbackUsesEvidenceGoalCoverNotInvestigationGoalCount(t 
 	if len(proposal.Tasks) != 4 {
 		t.Fatalf("tasks = %+v, want three investigators plus synthesizer", proposal.Tasks)
 	}
-	wantIDs := []string{"investigate.code.1", "investigate.service.1", "investigate.docs.1", "synthesize"}
-	for index, want := range wantIDs {
-		if proposal.Tasks[index].ID != want {
-			t.Fatalf("task ids = %+v, want %v", proposal.Tasks, wantIDs)
+	coveredGoals := make(map[string]struct{})
+	for _, task := range proposal.Tasks[:3] {
+		if len(task.InvestigationGoalIDs) == 0 {
+			t.Fatalf("investigator has no deliverable binding: %+v", task)
+		}
+		for _, goalID := range task.InvestigationGoalIDs {
+			coveredGoals[goalID] = struct{}{}
+			if !strings.Contains(task.ID, goalID) {
+				t.Fatalf("task id %q does not preserve deliverable identity %q", task.ID, goalID)
+			}
 		}
 	}
-	if proposal.Tasks[0].ID == contract.InvestigationGoals[0].ID || proposal.Tasks[1].ID == contract.InvestigationGoals[1].ID {
-		t.Fatal("task identity reused investigation goal identity")
+	if len(coveredGoals) != 2 {
+		t.Fatalf("covered investigation goals = %v", coveredGoals)
+	}
+	wantCapabilities := []string{
+		"knowledge.code.inspect",
+		"knowledge.service.trace",
+		"knowledge.docs.verify",
+	}
+	for index, want := range wantCapabilities {
+		if proposal.Tasks[index].Capability != want {
+			t.Fatalf("tasks = %+v, missing evidence capability %q", proposal.Tasks, want)
+		}
+	}
+	if proposal.Tasks[3].ID != "synthesize" {
+		t.Fatalf("terminal task = %+v", proposal.Tasks[3])
+	}
+}
+
+func TestBuildTaskGraphFallbackRepeatsCapabilityForDistinctDeliverables(t *testing.T) {
+	contract := TaskContract{
+		InvestigationGoals: []InvestigationGoal{
+			{ID: "business", Objective: "Explain the business behavior."},
+			{ID: "implementation", Objective: "Explain the implementation."},
+		},
+		EvidenceGoals: []EvidenceGoal{{
+			ID: "core_flow", Facet: "core_flow", Required: true,
+			Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
+		}},
+	}
+	proposal, err := buildTaskGraphFallback(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.Tasks) != 3 {
+		t.Fatalf("tasks = %+v, want two investigators plus synthesizer", proposal.Tasks)
+	}
+	for index, goal := range contract.InvestigationGoals {
+		task := proposal.Tasks[index]
+		if task.Capability != "knowledge.code.inspect" ||
+			!reflect.DeepEqual(task.InvestigationGoalIDs, []string{goal.ID}) {
+			t.Fatalf("task %d = %+v", index, task)
+		}
 	}
 }
 
@@ -157,6 +203,60 @@ func TestValidateTaskGraphCoverageRejectsMissingRequiredGoal(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "does not cover") {
 		t.Fatalf("coverage error = %v", err)
+	}
+}
+
+func TestValidateTaskGraphContractCoverageAllowsRepeatedCapabilityByDeliverable(t *testing.T) {
+	contract := TaskContract{
+		InvestigationGoals: []InvestigationGoal{
+			{ID: "business", Objective: "Explain the business behavior."},
+			{ID: "implementation", Objective: "Explain the implementation."},
+		},
+		EvidenceGoals: []EvidenceGoal{{
+			ID: "core_flow", Facet: "core_flow", Required: true,
+			Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
+		}},
+	}
+	allowed, err := taskGraphCapabilities(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := taskGraphDraft{Tasks: []taskGraphDraftTask{
+		{
+			Purpose: "Explain the business behavior.", Capability: "knowledge.code.inspect",
+			InvestigationGoalIDs: []string{"business"}, EvidenceGoalIDs: []string{"core_flow"},
+		},
+		{
+			Purpose: "Explain the implementation.", Capability: "knowledge.code.inspect",
+			InvestigationGoalIDs: []string{"implementation"}, EvidenceGoalIDs: []string{"core_flow"},
+		},
+	}}
+	if err := validateTaskGraphContractCoverage(draft, allowed, contract, 3); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateTaskGraphContractCoverageRejectsUnboundDeliverable(t *testing.T) {
+	contract := TaskContract{
+		InvestigationGoals: []InvestigationGoal{{
+			ID: "business", Objective: "Explain the business behavior.",
+		}},
+		EvidenceGoals: []EvidenceGoal{{
+			ID: "core_flow", Facet: "core_flow", Required: true,
+			Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
+		}},
+	}
+	allowed, err := taskGraphCapabilities(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := taskGraphDraft{Tasks: []taskGraphDraftTask{{
+		Purpose: "Inspect code.", Capability: "knowledge.code.inspect",
+		EvidenceGoalIDs: []string{"core_flow"},
+	}}}
+	err = validateTaskGraphContractCoverage(draft, allowed, contract, 3)
+	if err == nil || !strings.Contains(err.Error(), "must bind") {
+		t.Fatalf("binding error = %v", err)
 	}
 }
 

@@ -295,6 +295,19 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			valid: true,
 		},
 		{
+			name: "evidence insufficient unavailable task",
+			payload: `{
+				"handoffs":[],
+				"unavailable_tasks":[
+					{"producer_node_id":"investigate.web","stop_reason":"evidence_insufficient"}
+				],
+				"evidence_units":[],
+				"evidence_conflicts":[],
+				"completeness":"unavailable"
+			}`,
+			valid: true,
+		},
+		{
 			name: "report with canonical evidence identity",
 			payload: `{
 				"handoffs":[{
@@ -331,6 +344,44 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 					"sections":["validation"],
 					"coverage":{"complete":true},
 					"version":"commit-123"
+				}],
+				"evidence_conflicts":[],
+				"completeness":"complete"
+			}`,
+			valid: true,
+		},
+		{
+			name: "report with evidence handle and entity IDs",
+			payload: `{
+				"handoffs":[{
+					"producer_node_id":"investigate.code",
+					"schema":{"id":"investigation.report","version":1},
+					"payload":{
+						"focus":"code",
+						"summary":"code report",
+						"findings":[{
+							"claim":"Checkout validates the request.",
+							"entity_ids":["Checkout.Place"],
+							"goal_ids":["core_flow"],
+							"evidence":[{
+								"kind":"code",
+								"reference":"Checkout.PlaceOrder",
+								"summary":"validation branch",
+								"evidence_id":"ev_0000000000000000000000000000000000000000000000000000000000000000"
+							}],
+							"confidence":0.9
+						}],
+						"gaps":[],
+						"covered_goals":["core_flow"],
+						"unresolved_goals":[]
+					},
+					"completeness":"complete"
+				}],
+				"evidence_units":[{
+					"source_kind":"code",
+					"target":"Checkout.PlaceOrder",
+					"sections":["validation"],
+					"coverage":{"complete":true}
 				}],
 				"evidence_conflicts":[],
 				"completeness":"complete"

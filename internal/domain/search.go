@@ -19,6 +19,7 @@ type CodeSearchHit struct {
 	ScoreKind     string  `json:"scoreKind"`
 	FusionScore   float64 `json:"fusionScore,omitempty"`
 	SemanticScore float64 `json:"semanticScore,omitempty"`
+	HasDenseScore bool    `json:"-"`
 	EvidenceClass string  `json:"evidenceClass"`
 	TrustTier     int     `json:"trustTier"`
 }

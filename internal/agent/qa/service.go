@@ -15,6 +15,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 // Service is the agent-facing runtime facade.
@@ -132,6 +133,20 @@ func New(d Deps) *Service {
 }
 
 func (svc *Service) Memory() *memory.MemoryStore { return svc.memory }
+
+// PlanInvestigation replans only the evidence goals that remain unresolved.
+func (svc *Service) PlanInvestigation(
+	ctx context.Context,
+	contract TaskContract,
+	previous InvestigationResult,
+	seedEvidence []tool.EvidenceUnit,
+) (*agentapi.TaskGraphProposal, error) {
+	proposal, err := svc.planTaskGraphWithResult(ctx, contract, previous)
+	if err != nil {
+		return nil, err
+	}
+	return prepareInvestigationProposal(&proposal, contract, seedEvidence)
+}
 
 // SetWriteAvailable updates write-action availability without replacing the
 // service or any of the runtime dependencies it already holds.

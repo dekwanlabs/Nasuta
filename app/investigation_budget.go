@@ -10,7 +10,10 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 )
 
-const investigationRuntimeEnvelopeTokens = 1024
+const (
+	investigationRuntimeEnvelopeTokens     = 1024
+	investigationSynthesisPayloadMaxTokens = 8192
+)
 
 func investigationBudgets(
 	definitions []agentapi.Definition,
@@ -104,6 +107,9 @@ func investigationBudgets(
 	synthesizerPayloadTokens, err := agentPayloadBudget(synthesizer)
 	if err != nil {
 		return workflow.Budgets{}, err
+	}
+	if synthesizerPayloadTokens > investigationSynthesisPayloadMaxTokens {
+		synthesizerPayloadTokens = investigationSynthesisPayloadMaxTokens
 	}
 	return workflow.Budgets{
 		Code: code, Runtime: runtime, Docs: docs, Web: web, Memory: memory,

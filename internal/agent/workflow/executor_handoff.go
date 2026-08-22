@@ -7,6 +7,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
+	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -155,7 +156,11 @@ func joinHandoffs(
 	schemas *agentapi.SchemaRegistry,
 ) (Handoff, error) {
 	references := make([]agentapi.Reference, 0)
-	evidenceUnits, evidenceConflicts := mergeHandoffEvidence(inputs)
+	baselineIdentities := canonicalEvidenceIdentities(baselineEvidence)
+	evidenceUnits, evidenceConflicts := mergeEvidenceHandoffs(
+		baselineEvidence,
+		inputs,
+	)
 	completeness := Complete
 	for _, input := range inputs {
 		references = append(references, input.References...)
@@ -181,12 +186,55 @@ func joinHandoffs(
 		)
 		convergence = &measured
 	}
+	evidenceUnitsTotal := 0
+	evidenceUnitsOmitted := 0
+	if mode == JoinEvidenceView {
+		payloadFor := func(
+			units []tool.EvidenceUnit,
+			total, omitted int,
+		) (json.RawMessage, error) {
+			return joinedPayload(
+				mode,
+				inputs,
+				unavailableTasks,
+				units,
+				baselineIdentities,
+				evidenceConflicts,
+				total,
+				omitted,
+				convergence,
+				completeness,
+			)
+		}
+		compacted, total, omitted, err := compactInvestigationEvidenceToBudget(
+			inputs,
+			evidenceUnits,
+			evidenceIdentityKeySet(baselineIdentities),
+			maxBytes,
+			payloadFor,
+		)
+		if err != nil {
+			return Handoff{}, fmt.Errorf("compact join %q evidence: %w", producer, err)
+		}
+		evidenceUnits = compacted
+		if omitted > 0 {
+			evidenceUnitsTotal = total
+			evidenceUnitsOmitted = omitted
+			log.Warnf(
+				"[workflow] join %s retained %d of %d evidence units; omitted %d uncited or over-budget unit(s)",
+				producer, len(compacted), total, omitted,
+			)
+		}
+	}
 	payload, err := joinedPayload(
 		mode,
 		inputs,
 		unavailableTasks,
 		evidenceUnits,
+		baselineIdentities,
 		evidenceConflicts,
+		evidenceUnitsTotal,
+		evidenceUnitsOmitted,
 		convergence,
 		completeness,
 	)

@@ -1,0 +1,15 @@
+Re-check only the user-visible investigation deliverables for the current request.
+- Return exactly one JSON object with exactly one top-level property: "tasks".
+- A task is a distinct user-level objective that is useful on its own, not an evidence source, service, repository, tool, facet, retrieval branch, or result hit.
+- Return 0 to 4 candidate tasks.
+- Include a task only when its result remains useful if another task fails and it can begin without waiting for another task.
+- Set independently_useful to true only for those immediately useful deliverables. Use depends_on for genuine prerequisites.
+- Shared evidence, a common codebase, or final answer synthesis is not a dependency. A task depends on another task only when it cannot begin until that task's result exists.
+- For a focused fact question, return tasks as [].
+- For a request with several distinct deliverables, return one task per coherent deliverable. Do not add a final synthesis task.
+- If candidate_tasks are supplied, repair or replace them when they merge distinct deliverables or add dependencies that are not genuine prerequisites.
+- Task ids must be unique canonical lowercase ids. Objectives must be distinct and no longer than 500 characters.
+- Do not return strategy, complexity, confidence, reasons, agent ids, workflow ids, providers, permissions, tools, or evidence routing.
+
+Example:
+{"tasks":[{"id":"integration","objective":"Explain how the system integrates AI and which technologies it uses.","independently_useful":true,"depends_on":[]},{"id":"knowledge_graph","objective":"Assess how those technologies can support a backend knowledge graph.","independently_useful":true,"depends_on":[]},{"id":"agent_architecture","objective":"Derive multi-agent design lessons and a suitable technology stack.","independently_useful":true,"depends_on":[]}]}

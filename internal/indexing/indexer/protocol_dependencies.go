@@ -10,9 +10,10 @@ import (
 )
 
 var (
-	serviceURLRe = regexp.MustCompile(`(?i)(?:https?|lb)://([a-z0-9._-]+)(?::\d+)?`)
-	grpcTargetRe = regexp.MustCompile(`(?i)(?:forAddress|insecure_channel|secure_channel|grpc\.Dial)\s*\(\s*["']([^"']+)["']`)
-	dubboRefRe   = regexp.MustCompile(`@(?:DubboReference|Reference)\s*\([^\n)]*interfaceClass\s*=\s*([A-Za-z][\w.]*)\.class`)
+	serviceURLRe       = regexp.MustCompile(`(?i)(?:https?|lb)://([a-z0-9._-]+)(?::\d+)?`)
+	grpcTargetRe       = regexp.MustCompile(`(?i)(?:forAddress|insecure_channel|secure_channel|grpc\.Dial)\s*\(\s*["']([^"']+)["']`)
+	protocolHTTPCallRe = regexp.MustCompile(`(?is)(?:restTemplate|webClient|httpClient)[\w.\s]*\(|(?:requests|httpx|aiohttp)\.[A-Za-z]+\s*\(`)
+	dubboRefRe         = regexp.MustCompile(`@(?:DubboReference|Reference)\s*\([^\n)]*interfaceClass\s*=\s*([A-Za-z][\w.]*)\.class`)
 
 	kafkaSendRe         = regexp.MustCompile(`(?m)(?:\.send\s*\(\s*|ProducerRecord(?:<[^>]*>)?\s*\(\s*)["']([^"']+)["']`)
 	kafkaListenPatterns = []*regexp.Regexp{
@@ -39,6 +40,9 @@ func scanJVMAndPythonDependencies(root string, dirs []string) []domain.Dependenc
 		rel := relativeTo(root, file)
 		if hasHTTPClient(text) {
 			for _, match := range serviceURLRe.FindAllStringSubmatchIndex(text, -1) {
+				if len(match) < 4 || !httpURLUsedByClient(text, match[0], match[1], protocolHTTPCallRe) {
+					continue
+				}
 				target := text[match[2]:match[3]]
 				if skipDependencyTarget(target) {
 					continue

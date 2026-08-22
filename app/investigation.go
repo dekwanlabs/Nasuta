@@ -3,14 +3,17 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
@@ -104,8 +107,17 @@ func (runner qaInvestigator) Start(
 		)
 	}()
 	readOnly := agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}}
+	parentRunID := request.ParentRunID
+	if strings.TrimSpace(parentRunID) == "" {
+		parentRunID = request.Contract.TaskID
+	}
+	round := request.Round
+	if round <= 0 {
+		round = 1
+	}
 	_, startErr := service.Start(ctx, workflow.StartRequest{
-		RunID: request.WorkflowRunID, ParentRunID: request.Contract.TaskID,
+		RunID: request.WorkflowRunID, ParentRunID: parentRunID,
+		Round: round, BaseDepth: request.BaseDepth,
 		Workflow: workflowRef,
 		Input:    input, Actor: request.Actor, ActorPermissions: readOnly,
 		SeedEvidence: request.SeedEvidence,
@@ -258,6 +270,7 @@ func (p *Platform) investigationFlowWithEvidenceSubjects(
 	if err != nil {
 		return workflow.Definition{}, 0, err
 	}
+	isolateFallbackInvestigatorInputs(&fallbackPlan)
 	budgets, err := p.investigationBudgetsForPlan(
 		version,
 		baseBudgets,
@@ -278,6 +291,20 @@ func (p *Platform) investigationFlowWithEvidenceSubjects(
 	policy.SubjectRequirements = cloneSubjectRequirements(subjects)
 	definition, err := compiler.CompileContext(ctx, fallbackPlan, policy)
 	return definition, budgets.InvestigatorPayloadTokens, err
+}
+
+func isolateFallbackInvestigatorInputs(
+	plan *agentapi.TaskGraphProposal,
+) {
+	if plan == nil {
+		return
+	}
+	for index := range plan.Tasks {
+		task := &plan.Tasks[index]
+		if task.OutputSchema.ID == "investigation.report" {
+			task.InputRefs = []agentapi.EvidenceRef{}
+		}
+	}
 }
 
 func investigationSubjectRequirements(contract agent.TaskContract) []workflow.SubjectRequirement {
@@ -411,11 +438,13 @@ func (runner qaInvestigator) AwaitTerminal(
 	if err != nil {
 		return agent.InvestigationTerminal{}, err
 	}
-	terminal, err := service.AwaitTerminal(ctx, workflowRunID)
+	terminal, verifiedPayload, err := runner.awaitWorkflowTerminal(
+		ctx, service, workflowRunID,
+	)
 	if err != nil {
 		return agent.InvestigationTerminal{}, err
 	}
-	return investigationTerminal(terminal)
+	return investigationTerminal(terminal, verifiedPayload)
 }
 
 func (runner qaInvestigator) LoadTerminal(
@@ -426,11 +455,277 @@ func (runner qaInvestigator) LoadTerminal(
 	if err != nil {
 		return agent.InvestigationTerminal{}, err
 	}
-	terminal, err := service.LoadTerminalResult(ctx, workflowRunID)
+	terminal, verifiedPayload, err := runner.loadWorkflowTerminal(
+		ctx, service, workflowRunID,
+	)
 	if err != nil {
 		return agent.InvestigationTerminal{}, err
 	}
-	return investigationTerminal(terminal)
+	return investigationTerminal(terminal, verifiedPayload)
+}
+
+func (runner qaInvestigator) LoadRound(
+	ctx context.Context,
+	workflowRunID string,
+) (agent.InvestigationRoundSnapshot, error) {
+	service, err := runner.workflowService()
+	if err != nil {
+		return agent.InvestigationRoundSnapshot{}, err
+	}
+	state, err := service.LoadFullRunState(ctx, workflowRunID)
+	if err != nil {
+		return agent.InvestigationRoundSnapshot{}, err
+	}
+	if state.Run.Status == workflow.RunRunning ||
+		state.Run.Status == workflow.RunWaitingHuman {
+		return agent.InvestigationRoundSnapshot{}, fmt.Errorf(
+			"workflow run %q is %q: %w",
+			workflowRunID,
+			state.Run.Status,
+			workflow.ErrConflict,
+		)
+	}
+	terminal, verifiedPayload := terminalFromWorkflowState(state)
+	investigationTerminal, err := investigationTerminal(terminal, verifiedPayload)
+	if err != nil {
+		return agent.InvestigationRoundSnapshot{}, err
+	}
+	contract := agent.TaskContract{}
+	if len(state.Input.Payload) == 0 {
+		return agent.InvestigationRoundSnapshot{}, fmt.Errorf(
+			"workflow run %q input contract is empty",
+			workflowRunID,
+		)
+	}
+	if err := json.Unmarshal(state.Input.Payload, &contract); err != nil {
+		return agent.InvestigationRoundSnapshot{}, fmt.Errorf(
+			"decode QA investigation workflow %q contract: %w",
+			workflowRunID,
+			err,
+		)
+	}
+	return agent.InvestigationRoundSnapshot{
+		Terminal:     investigationTerminal,
+		Contract:     contract,
+		SeedEvidence: evidence.CloneUnits(state.Input.EvidenceUnits),
+		Actor: agentapi.Actor{
+			UserID: state.Run.ActorUserID, TenantID: state.Run.ActorTenantID,
+		},
+	}, nil
+}
+
+func (runner qaInvestigator) StartNextRound(
+	ctx context.Context,
+	request agent.InvestigationContinuationRequest,
+) error {
+	return runner.Start(ctx, agent.InvestigationRequest{
+		WorkflowRunID: request.WorkflowRunID,
+		ParentRunID:   request.ParentRunID,
+		Round:         request.Round,
+		BaseDepth:     request.BaseDepth,
+		Contract:      request.Contract,
+		Proposal:      request.Proposal,
+		SeedEvidence:  request.SeedEvidence,
+		Actor:         request.Actor,
+	})
+}
+
+func (runner qaInvestigator) awaitWorkflowTerminal(
+	ctx context.Context,
+	service *workflow.Service,
+	workflowRunID string,
+) (workflow.TerminalResult, json.RawMessage, error) {
+	terminal, err := service.AwaitTerminal(ctx, workflowRunID)
+	if err == nil {
+		if shouldRecoverWorkflowEvidence(terminal) {
+			return runner.recoverWorkflowTerminal(ctx, service, workflowRunID, nil)
+		}
+		return terminal, nil, nil
+	}
+	if !errors.Is(err, workflow.ErrInvariant) {
+		return workflow.TerminalResult{}, nil, err
+	}
+	return runner.recoverWorkflowTerminal(ctx, service, workflowRunID, err)
+}
+
+func (runner qaInvestigator) loadWorkflowTerminal(
+	ctx context.Context,
+	service *workflow.Service,
+	workflowRunID string,
+) (workflow.TerminalResult, json.RawMessage, error) {
+	terminal, err := service.LoadTerminalResult(ctx, workflowRunID)
+	if err == nil {
+		if shouldRecoverWorkflowEvidence(terminal) {
+			return runner.recoverWorkflowTerminal(ctx, service, workflowRunID, nil)
+		}
+		return terminal, nil, nil
+	}
+	if !errors.Is(err, workflow.ErrInvariant) {
+		return workflow.TerminalResult{}, nil, err
+	}
+	return runner.recoverWorkflowTerminal(ctx, service, workflowRunID, err)
+}
+
+func (runner qaInvestigator) recoverWorkflowTerminal(
+	ctx context.Context,
+	service *workflow.Service,
+	workflowRunID string,
+	terminalErr error,
+) (workflow.TerminalResult, json.RawMessage, error) {
+	state, err := service.LoadFullRunState(ctx, workflowRunID)
+	if err != nil {
+		return workflow.TerminalResult{}, nil, errors.Join(terminalErr, err)
+	}
+	terminal, verifiedPayload := terminalFromWorkflowState(state)
+	return terminal, verifiedPayload, nil
+}
+
+func shouldRecoverWorkflowEvidence(terminal workflow.TerminalResult) bool {
+	if terminal.Run.Status != workflow.RunSucceeded ||
+		terminal.Output == nil || len(terminal.Output.Payload) == 0 {
+		return true
+	}
+	var result agent.InvestigationResult
+	if err := json.Unmarshal(terminal.Output.Payload, &result); err != nil {
+		return true
+	}
+	return !investigationResultHasStructuredEvidence(result)
+}
+
+func investigationResultHasStructuredEvidence(result agent.InvestigationResult) bool {
+	return len(result.Citations) > 0 || len(result.EvidenceUnits) > 0 ||
+		len(result.SupportedClaims) > 0 || len(result.PartialClaims) > 0
+}
+
+func terminalFromWorkflowState(
+	state *workflow.RunState,
+) (workflow.TerminalResult, json.RawMessage) {
+	if state == nil {
+		return workflow.TerminalResult{}, nil
+	}
+	terminal := workflow.TerminalResult{Run: state.Run}
+	if output, ok := state.NodeOutputs["workflow.output"]; ok {
+		outputCopy := output
+		terminal.Output = &outputCopy
+	}
+	verified, ok := state.NodeOutputs["evidence.verify"]
+	if !ok || len(verified.Payload) == 0 {
+		return terminal, nil
+	}
+	return terminal, append(json.RawMessage(nil), verified.Payload...)
+}
+
+func investigationTerminal(
+	terminal workflow.TerminalResult,
+	verifiedPayload json.RawMessage,
+) (agent.InvestigationTerminal, error) {
+	result := agent.InvestigationTerminal{
+		WorkflowRunID: terminal.Run.ID,
+		ErrorCode:     terminal.Run.ErrorCode,
+		Round:         terminal.Run.Round,
+		BaseDepth:     terminal.Run.BaseDepth,
+		StopReason:    string(terminal.Run.StopReason),
+		Usage: agent.InvestigationUsage{
+			InputTokens:     terminal.Run.Usage.InputTokens,
+			OutputTokens:    terminal.Run.Usage.OutputTokens,
+			ReasoningTokens: terminal.Run.Usage.ReasoningTokens,
+			TotalTokens:     terminal.Run.Usage.TotalTokens,
+			ToolCalls:       terminal.Run.Usage.ToolCalls,
+			CostMicros:      terminal.Run.Usage.CostMicros,
+		},
+	}
+	var output *agent.InvestigationResult
+	if terminal.Output != nil && len(terminal.Output.Payload) > 0 {
+		decoded := new(agent.InvestigationResult)
+		if err := json.Unmarshal(terminal.Output.Payload, decoded); err != nil {
+			return agent.InvestigationTerminal{}, fmt.Errorf(
+				"decode QA investigation workflow %q output: %w",
+				terminal.Run.ID,
+				err,
+			)
+		}
+		output = decoded
+	}
+	if len(verifiedPayload) > 0 {
+		verified := new(agent.InvestigationResult)
+		if err := json.Unmarshal(verifiedPayload, verified); err != nil {
+			return agent.InvestigationTerminal{}, fmt.Errorf(
+				"decode QA investigation workflow %q verified evidence: %w",
+				terminal.Run.ID,
+				err,
+			)
+		}
+		output = mergeInvestigationResults(output, verified)
+	}
+	if output != nil {
+		output.Round = result.Round
+		output.BaseDepth = result.BaseDepth
+		output.StopReason = result.StopReason
+		result.Output = output
+	}
+	switch terminal.Run.Status {
+	case workflow.RunSucceeded:
+		result.Status = agent.InvestigationSucceeded
+	case workflow.RunFailed:
+		result.Status = agent.InvestigationFailed
+	case workflow.RunCancelled:
+		result.Status = agent.InvestigationCancelled
+	case workflow.RunTimedOut:
+		result.Status = agent.InvestigationTimedOut
+	default:
+		return agent.InvestigationTerminal{}, fmt.Errorf(
+			"QA investigation workflow %q has non-terminal status %q",
+			terminal.Run.ID,
+			terminal.Run.Status,
+		)
+	}
+	if terminal.Output != nil {
+		result.Completeness = investigationCompleteness(terminal.Output.Completeness)
+	} else if output != nil {
+		result.Completeness = investigationCompletenessFromResult(*output)
+	}
+	if result.Output != nil && result.Completeness == "" {
+		result.Completeness = agent.InvestigationPartial
+	}
+	return result, nil
+}
+
+func investigationCompleteness(value workflow.Completeness) agent.InvestigationCompleteness {
+	switch value {
+	case workflow.Complete:
+		return agent.InvestigationComplete
+	case workflow.Partial:
+		return agent.InvestigationPartial
+	case workflow.Unavailable:
+		return agent.InvestigationUnavailable
+	default:
+		return ""
+	}
+}
+
+func investigationCompletenessFromResult(
+	result agent.InvestigationResult,
+) agent.InvestigationCompleteness {
+	switch strings.TrimSpace(result.WorkflowCompleteness) {
+	case string(agent.InvestigationComplete):
+		return agent.InvestigationComplete
+	case string(agent.InvestigationUnavailable):
+		return agent.InvestigationUnavailable
+	default:
+		return agent.InvestigationPartial
+	}
+}
+
+func mergeInvestigationResults(
+	answer *agent.InvestigationResult,
+	verified *agent.InvestigationResult,
+) *agent.InvestigationResult {
+	if answer == nil {
+		clone := *verified
+		return &clone
+	}
+	merged := agent.MergeInvestigationResults(*answer, *verified)
+	return &merged
 }
 
 func (runner qaInvestigator) Cancel(
@@ -474,69 +769,6 @@ func (runner qaInvestigator) workflowService() (*workflow.Service, error) {
 		return nil, workflow.ErrUnavailable
 	}
 	return runner.platform.flow.service, nil
-}
-
-func investigationTerminal(
-	terminal workflow.TerminalResult,
-) (agent.InvestigationTerminal, error) {
-	result := agent.InvestigationTerminal{
-		WorkflowRunID: terminal.Run.ID,
-		ErrorCode:     terminal.Run.ErrorCode,
-		Usage: agent.InvestigationUsage{
-			InputTokens:     terminal.Run.Usage.InputTokens,
-			OutputTokens:    terminal.Run.Usage.OutputTokens,
-			ReasoningTokens: terminal.Run.Usage.ReasoningTokens,
-			TotalTokens:     terminal.Run.Usage.TotalTokens,
-			ToolCalls:       terminal.Run.Usage.ToolCalls,
-			CostMicros:      terminal.Run.Usage.CostMicros,
-		},
-	}
-	switch terminal.Run.Status {
-	case workflow.RunSucceeded:
-		result.Status = agent.InvestigationSucceeded
-		if terminal.Output == nil {
-			return agent.InvestigationTerminal{}, fmt.Errorf(
-				"QA investigation workflow %q succeeded without output",
-				terminal.Run.ID,
-			)
-		}
-		switch terminal.Output.Completeness {
-		case workflow.Complete:
-			result.Completeness = agent.InvestigationComplete
-		case workflow.Partial:
-			result.Completeness = agent.InvestigationPartial
-		case workflow.Unavailable:
-			result.Completeness = agent.InvestigationUnavailable
-		default:
-			return agent.InvestigationTerminal{}, fmt.Errorf(
-				"QA investigation workflow %q has invalid output completeness %q",
-				terminal.Run.ID,
-				terminal.Output.Completeness,
-			)
-		}
-		var output agent.InvestigationResult
-		if err := json.Unmarshal(terminal.Output.Payload, &output); err != nil {
-			return agent.InvestigationTerminal{}, fmt.Errorf(
-				"decode QA investigation workflow %q output: %w",
-				terminal.Run.ID,
-				err,
-			)
-		}
-		result.Output = &output
-	case workflow.RunFailed:
-		result.Status = agent.InvestigationFailed
-	case workflow.RunCancelled:
-		result.Status = agent.InvestigationCancelled
-	case workflow.RunTimedOut:
-		result.Status = agent.InvestigationTimedOut
-	default:
-		return agent.InvestigationTerminal{}, fmt.Errorf(
-			"QA investigation workflow %q has non-terminal status %q",
-			terminal.Run.ID,
-			terminal.Run.Status,
-		)
-	}
-	return result, nil
 }
 
 func bridgeInvestigationEvents(

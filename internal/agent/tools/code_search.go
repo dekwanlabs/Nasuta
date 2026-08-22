@@ -141,7 +141,8 @@ func (srv *Service) CodeSearchResult(ctx context.Context, query, lang string, li
 		}
 		if hit.ScoreKind == string(semantic.ScoreFusion) {
 			match["fusionScore"] = hit.FusionScore
-		} else {
+		}
+		if hit.HasDenseScore {
 			match["semanticScore"] = hit.SemanticScore
 		}
 		matches = append(matches, match)
@@ -177,7 +178,8 @@ func toCodeSearchResult(found domain.SearchResult[domain.CodeSearchHit]) knowled
 		}
 		if hit.ScoreKind == string(semantic.ScoreFusion) {
 			match.FusionScore = &hit.FusionScore
-		} else {
+		}
+		if hit.HasDenseScore {
 			match.SemanticScore = &hit.SemanticScore
 		}
 		matches = append(matches, match)
@@ -307,11 +309,13 @@ func (srv *Service) FindCodeByVector(ctx context.Context, query, lang string, li
 				Repo: payloadString(hit.Metadata, "repo"), Layer: payloadString(hit.Metadata, "layer"),
 				StartLine: payloadInt(hit.Metadata["start_line"]), EndLine: payloadInt(hit.Metadata["end_line"]),
 				Text:  payloadString(hit.Metadata, "text"),
-				Score: adjusted, ScoreKind: string(hit.ScoreKind), EvidenceClass: evidenceClass, TrustTier: trustTier,
+				Score: adjusted, ScoreKind: string(hit.ScoreKind), HasDenseScore: hit.ScoreKind != semantic.ScoreFusion || hit.DenseRank > 0,
+				EvidenceClass: evidenceClass, TrustTier: trustTier,
 			}
 			if hit.ScoreKind == semantic.ScoreFusion {
 				match.FusionScore = float64(hit.FusionScore)
-			} else {
+			}
+			if match.HasDenseScore {
 				match.SemanticScore = float64(hit.DenseScore)
 			}
 			matches = append(matches, match)
@@ -327,7 +331,8 @@ func traceSemanticHits(hits []semantic.Hit) []map[string]any {
 	for _, hit := range hits[:limit] {
 		items = append(items, map[string]any{
 			"path": payloadString(hit.Metadata, "path"), "score": hit.Score,
-			"dense_score": hit.DenseScore, "fusion_score": hit.FusionScore, "score_kind": hit.ScoreKind,
+			"dense_score": hit.DenseScore, "sparse_score": hit.SparseScore, "fusion_score": hit.FusionScore,
+			"dense_rank": hit.DenseRank, "sparse_rank": hit.SparseRank, "score_kind": hit.ScoreKind,
 		})
 	}
 	return items

@@ -26,9 +26,13 @@ func (compiler *ProposalCompiler) compile(
 				Version: task.capability.Version,
 			},
 			Task: &TaskDirective{
-				Purpose:        task.spec.Purpose,
+				Purpose: task.spec.Purpose,
+				InvestigationGoalIDs: append(
+					[]string(nil),
+					task.spec.InvestigationGoalIDs...,
+				),
 				RequiredFacets: append([]string(nil), task.spec.RequiredFacets...),
-				InputRefs:      append([]agentapi.EvidenceRef(nil), task.spec.InputRefs...),
+				InputRefs:      cloneEvidenceRefs(task.spec.InputRefs),
 				ParallelGroup:  task.spec.ParallelGroup,
 			},
 			CapabilityMaxConcurrency: task.capability.MaxConcurrency,

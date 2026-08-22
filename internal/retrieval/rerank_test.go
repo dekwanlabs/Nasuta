@@ -484,6 +484,17 @@ func TestRerankPoolDoesNotApplyDensePreflightToRRF(t *testing.T) {
 	}
 }
 
+func TestRerankPoolDoesNotApplyDensePreflightToRRFWithDenseSignal(t *testing.T) {
+	docs := []codeDoc{
+		{filePath: "a.go", recallScore: 0.9, denseScore: 0.2, hasDense: true, scoreKind: "rrf"},
+		{filePath: "b.go", recallScore: 0.1, denseScore: 0.1, hasDense: true, scoreKind: "rrf"},
+	}
+	out := rerankPool(context.Background(), fixedReranker{scores: []float64{0, 1}}, "q", docs, 0.5).docs
+	if out[0].filePath != "b.go" {
+		t.Fatalf("hybrid candidates incorrectly used dense preflight; top=%s", out[0].filePath)
+	}
+}
+
 func rerankTestCfg() *config.PlatformSettings {
 	return &config.PlatformSettings{
 		RerankEnabled:       true,

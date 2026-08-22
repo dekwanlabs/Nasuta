@@ -10,6 +10,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
+	"github.com/dekwanlabs/nasuta/knowledge"
 )
 
 func TestRetrievePlanWebOnlySkipsInternalFanout(t *testing.T) {
@@ -56,23 +57,52 @@ func TestRetrievePlanReportsStructuredProgress(t *testing.T) {
 
 func TestRetrievalPolicyForQueryKind(t *testing.T) {
 	base := queryRetrievalPolicy{
-		budget: retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20},
+		budget:        retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20},
+		searchCode:    true,
+		searchRunbook: true,
+		searchService: true,
 	}
 	tests := []struct {
 		kind domain.QueryKind
 		want queryRetrievalPolicy
 	}{
 		{domain.QueryFocusedFact, base},
-		{domain.QueryCodeReview, base},
-		{domain.QueryRuntimeDiagnosis, queryRetrievalPolicy{budget: retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}}},
-		{domain.QueryInventory, queryRetrievalPolicy{budget: retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}}},
-		{domain.QueryComparison, queryRetrievalPolicy{budget: retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}}},
+		{domain.QueryCodeReview, queryRetrievalPolicy{
+			budget:        retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20},
+			searchCode:    true,
+			searchRunbook: false,
+			searchService: true,
+		}},
+		{domain.QueryRuntimeDiagnosis, queryRetrievalPolicy{
+			budget:        retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24},
+			searchCode:    true,
+			searchRunbook: true,
+			searchService: true,
+		}},
+		{domain.QueryInventory, queryRetrievalPolicy{
+			budget:        retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24},
+			searchCode:    true,
+			searchRunbook: true,
+			searchService: true,
+		}},
+		{domain.QueryComparison, queryRetrievalPolicy{
+			budget:        retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24},
+			searchCode:    true,
+			searchRunbook: true,
+			searchService: true,
+		}},
 		{domain.QueryFlow, queryRetrievalPolicy{
 			budget:          retrievalBudget{code: 16, runbook: 8, service: 6, rerank: 24},
+			searchCode:      true,
+			searchRunbook:   true,
+			searchService:   true,
 			expandCodeGraph: true,
 		}},
 		{domain.QueryOverview, queryRetrievalPolicy{
 			budget:              retrievalBudget{code: 16, runbook: 16, service: 8, rerank: 24},
+			searchCode:          true,
+			searchRunbook:       true,
+			searchService:       true,
 			maxExpandedServices: 4,
 			coverageSelection:   true,
 		}},
@@ -81,6 +111,34 @@ func TestRetrievalPolicyForQueryKind(t *testing.T) {
 		if got := retrievalPolicyFor(test.kind); got != test.want {
 			t.Fatalf("retrievalPolicyFor(%q) = %+v, want %+v", test.kind, got, test.want)
 		}
+	}
+}
+
+type retrievalSourceCallTools struct {
+	servicePathFakeTools
+	runbookCalls int
+}
+
+func (tools *retrievalSourceCallTools) FindRunbooks(context.Context, knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
+	tools.runbookCalls++
+	return domain.RunbookSearchResult{}, nil
+}
+
+func TestCodeReviewSkipsRunbookRetrieval(t *testing.T) {
+	tools := &retrievalSourceCallTools{}
+	retrieve := New(tools, config.Config{})
+	result, err := retrieve.discoverSources(context.Background(), retrievalDiscoverInput{
+		SearchQuery: "review checkout",
+		Plan:        domain.QueryPlan{Kind: domain.QueryCodeReview},
+	})
+	if err != nil {
+		t.Fatalf("discoverSources: %v", err)
+	}
+	if tools.runbookCalls != 0 {
+		t.Fatalf("runbook search calls = %d, want 0", tools.runbookCalls)
+	}
+	if result.runbook.status != "skipped" || result.runbook.count != 0 {
+		t.Fatalf("runbook outcome = %+v, want skipped/0", result.runbook)
 	}
 }
 
@@ -218,5 +276,18 @@ func TestFusionRecallDoesNotUseDenseScoreFloor(t *testing.T) {
 	})
 	if kept != 1 {
 		t.Fatal("RRF candidate was incorrectly filtered by cosine threshold")
+	}
+}
+
+func TestFusionRecallUsesDenseScoreFloorWhenAvailable(t *testing.T) {
+	r := &Retriever{platform: &config.PlatformSettings{CodeMinScore: 0.5}}
+	kept := 0
+	r.collectCode(context.Background(), []codeHit{{
+		path: "svc/Foo.go", recallScore: 0.8, denseScore: 0.2, hasDenseScore: true, scoreKind: "rrf",
+	}}, func(codeDoc) {
+		kept++
+	})
+	if kept != 0 {
+		t.Fatal("hybrid candidate with a weak known dense score bypassed the cosine threshold")
 	}
 }

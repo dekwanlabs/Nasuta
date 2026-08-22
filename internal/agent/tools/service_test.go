@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,6 +190,22 @@ func TestCodeSearchKeepsRRFSeparateFromCosine(t *testing.T) {
 	}
 }
 
+func TestCodeSearchExposesDenseSignalFromHybridRecall(t *testing.T) {
+	svc := New(Deps{Semantic: &hybridSignalSemantic{}, Embedder: testEmbedder{}})
+	bm25 := retrieval.NewBM25Builder()
+	bm25.AddDoc("checkout timeout")
+	svc.SetBM25(bm25)
+
+	result := svc.CodeSearch(context.Background(), "checkout", "", 5)
+	matches := result["matches"].([]any)
+	match := matches[0].(map[string]any)
+	fusionScore := match["fusionScore"].(float64)
+	semanticScore := match["semanticScore"].(float64)
+	if math.Abs(fusionScore-0.9) > 1e-6 || math.Abs(semanticScore-0.81) > 1e-6 {
+		t.Fatalf("hybrid branch scores = %#v", match)
+	}
+}
+
 func TestRunbookResultFromHitsDeduplicatesDocumentsByBestChunk(t *testing.T) {
 	hits := []semantic.Hit{
 		runbookHit("doc-a", 3, 0.7),
@@ -250,6 +267,22 @@ func (s *fusionSemantic) SearchHybrid(context.Context, semantic.Query) ([]semant
 	return []semantic.Hit{{Score: s.score, FusionScore: s.score, ScoreKind: semantic.ScoreFusion, Metadata: map[string]any{
 		"path": "repos/team/orders/main.go", "lang": "go", "repo": "team/orders", "text": "checkout timeout",
 	}}}, nil
+}
+
+type hybridSignalSemantic struct{ semanticTestBase }
+
+func (*hybridSignalSemantic) Capabilities() semantic.Capabilities {
+	return semantic.RequiredCapabilities()
+}
+
+func (*hybridSignalSemantic) Search(context.Context, semantic.Query) ([]semantic.Hit, error) {
+	return []semantic.Hit{{
+		ID: "hybrid", Score: 0.9, FusionScore: 0.9, DenseScore: 0.81,
+		DenseRank: 1, SparseRank: 2, ScoreKind: semantic.ScoreFusion,
+		Metadata: map[string]any{
+			"path": "repos/team/orders/main.go", "lang": "go", "repo": "team/orders", "text": "checkout timeout",
+		},
+	}}, nil
 }
 
 func TestReadNodeSourceHandlesGitlabPrefixedPath(t *testing.T) {

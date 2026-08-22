@@ -231,11 +231,18 @@ func (builder qaWorkflowEscalationBuilder) BuildWorkflowEscalation(
 			ContentHash: hashInvestigationContent(""),
 		})
 	}
+	assignments := workflowEscalationTaskAssignments(
+		request.Request.FocusFacets,
+		request.Capability.ID,
+		request.Evidence,
+		seedMaterial,
+	)
 	contract := platformagent.TaskContract{
-		TaskID:        request.Parent.RunID,
-		Objective:     objective,
-		Entities:      []platformagent.EntityRef{},
-		EvidenceGoals: goals,
+		TaskID:                  request.Parent.RunID,
+		Objective:               objective,
+		Entities:                []platformagent.EntityRef{},
+		EvidenceGoals:           goals,
+		TaskEvidenceAssignments: assignments,
 		Context: platformagent.TaskContext{
 			SeedMaterial: seedMaterial,
 		},
@@ -253,6 +260,194 @@ func (builder qaWorkflowEscalationBuilder) BuildWorkflowEscalation(
 		Input:        input,
 		SeedEvidence: cloneWorkflowEscalationEvidence(request.Evidence),
 	}, nil
+}
+
+type workflowEscalationTaskScope struct {
+	taskID      string
+	sourceKinds map[string]struct{}
+}
+
+func workflowEscalationTaskAssignments(
+	facets []string,
+	capabilityID string,
+	units []tool.EvidenceUnit,
+	seedMaterial []agentapi.ContextBlock,
+) []platformagent.TaskEvidenceAssignment {
+	scopes := []workflowEscalationTaskScope{
+		{
+			taskID: "investigate.code",
+			sourceKinds: map[string]struct{}{
+				"code": {}, "codegraph": {},
+			},
+		},
+		{
+			taskID: "investigate.runtime",
+			sourceKinds: map[string]struct{}{
+				"service": {}, "dependency": {}, "runtime": {}, "codegraph": {},
+			},
+		},
+		{
+			taskID: "investigate.docs",
+			sourceKinds: map[string]struct{}{
+				"runbook": {}, "generated_doc": {}, "doc": {}, "docs": {},
+			},
+		},
+	}
+	assignments := make(
+		[]platformagent.TaskEvidenceAssignment,
+		len(scopes),
+	)
+	refSets := make([]map[agentapi.EvidenceRef]struct{}, len(scopes))
+	for index, scope := range scopes {
+		assignments[index] = platformagent.TaskEvidenceAssignment{
+			TaskID: scope.taskID, InputRefs: []agentapi.EvidenceRef{},
+			ContextRefs: []platformagent.TaskContextRef{},
+		}
+		refSets[index] = make(map[agentapi.EvidenceRef]struct{})
+	}
+
+	loads := make([]int, len(scopes))
+	for _, group := range groupWorkflowEscalationEvidence(units) {
+		owner := selectWorkflowEscalationEvidenceOwner(
+			scopes,
+			facets,
+			group,
+			loads,
+		)
+		if owner < 0 {
+			continue
+		}
+		for _, unit := range group {
+			for _, ref := range workflowEscalationEvidenceRefs(unit) {
+				if _, duplicate := refSets[owner][ref]; duplicate {
+					continue
+				}
+				refSets[owner][ref] = struct{}{}
+				assignments[owner].InputRefs = append(
+					assignments[owner].InputRefs,
+					ref,
+				)
+			}
+		}
+		loads[owner]++
+	}
+
+	capabilityOwner := workflowEscalationCapabilityTask(capabilityID)
+	for _, block := range seedMaterial {
+		if block.Source != "delegation.report" || block.ContentHash == "" {
+			continue
+		}
+		for index := range assignments {
+			if assignments[index].TaskID != capabilityOwner {
+				continue
+			}
+			assignments[index].ContextRefs = append(
+				assignments[index].ContextRefs,
+				platformagent.TaskContextRef{
+					Source: block.Source, ContentHash: block.ContentHash,
+				},
+			)
+			break
+		}
+	}
+	compacted := assignments[:0]
+	for _, assignment := range assignments {
+		if assignment.TaskID != capabilityOwner &&
+			len(assignment.InputRefs) == 0 &&
+			len(assignment.ContextRefs) == 0 {
+			continue
+		}
+		compacted = append(compacted, assignment)
+	}
+	return compacted
+}
+
+func groupWorkflowEscalationEvidence(
+	units []tool.EvidenceUnit,
+) [][]tool.EvidenceUnit {
+	groups := make([][]tool.EvidenceUnit, 0, len(units))
+	groupByIdentity := make(map[string]int, len(units))
+	for _, unit := range units {
+		key := unit.SourceKind + "\x00" + unit.Target + "\x00" +
+			unit.Version + "\x00" + unit.TimeRange
+		index, ok := groupByIdentity[key]
+		if !ok {
+			index = len(groups)
+			groupByIdentity[key] = index
+			groups = append(groups, nil)
+		}
+		groups[index] = append(groups[index], unit)
+	}
+	return groups
+}
+
+func selectWorkflowEscalationEvidenceOwner(
+	scopes []workflowEscalationTaskScope,
+	requiredFacets []string,
+	group []tool.EvidenceUnit,
+	loads []int,
+) int {
+	if len(group) == 0 {
+		return -1
+	}
+	groupFacets := make(map[string]struct{})
+	for _, unit := range group {
+		for _, facet := range unit.Facets {
+			groupFacets[facet] = struct{}{}
+		}
+	}
+	facetMatch := false
+	for _, facet := range requiredFacets {
+		if _, ok := groupFacets[facet]; ok {
+			facetMatch = true
+			break
+		}
+	}
+	if !facetMatch {
+		return -1
+	}
+	best := -1
+	for index, scope := range scopes {
+		if _, ok := scope.sourceKinds[group[0].SourceKind]; !ok {
+			continue
+		}
+		if best < 0 || loads[index] < loads[best] {
+			best = index
+		}
+	}
+	return best
+}
+
+func workflowEscalationEvidenceRefs(
+	unit tool.EvidenceUnit,
+) []agentapi.EvidenceRef {
+	ref := agentapi.EvidenceRef{
+		SourceKind: unit.SourceKind, Target: unit.Target,
+		Version: unit.Version, TimeRange: unit.TimeRange,
+		ContentHash: unit.ContentHash,
+	}
+	if len(unit.Sections) == 0 {
+		return []agentapi.EvidenceRef{ref}
+	}
+	refs := make([]agentapi.EvidenceRef, 0, len(unit.Sections))
+	for _, section := range unit.Sections {
+		ref.Section = section
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+func workflowEscalationCapabilityTask(capabilityID string) string {
+	switch capabilityID {
+	case "knowledge.code.inspect":
+		return "investigate.code"
+	case "knowledge.service.trace":
+		return "investigate.runtime"
+	case "knowledge.docs.verify":
+		return "investigate.docs"
+	default:
+		return ""
+	}
 }
 
 func escalationReportBlocks(

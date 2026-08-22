@@ -564,6 +564,95 @@ func TestContinueIfNeeded_LengthTruncation(t *testing.T) {
 	}
 }
 
+func TestContinueIfNeeded_StructuredOutputUsesJSONSuffix(t *testing.T) {
+	var calls int32
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		_ = r.Body.Close()
+		requests = append(requests, string(body))
+		call := atomic.AddInt32(&calls, 1)
+		content := `{"summary":"partial","findings":[`
+		finish := llm.FinishLength
+		if call > 1 {
+			content = `{"claim":"ok"}],"gaps":[]}`
+			finish = llm.FinishStop
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk, _ := json.Marshal(streamChunkJS{
+			Choices: []streamChoiceJS{{
+				Delta:        streamDeltaJS{Content: content},
+				FinishReason: finish,
+			}},
+		})
+		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+	}))
+	defer server.Close()
+
+	agent := newTestAgent(t, server.URL)
+	agent.cfg.StructuredOutput = true
+	res, err := agent.llm.ChatWithToolsMax(t.Context(), nil, nil, nil, 100)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	res, err = agent.continueIfNeeded(t.Context(), nil, res, 100, nil)
+	if err != nil {
+		t.Fatalf("structured continuation: %v", err)
+	}
+	if want := `{"summary":"partial","findings":[{"claim":"ok"}],"gaps":[]}`; res.Content != want {
+		t.Fatalf("structured content = %q, want %q", res.Content, want)
+	}
+	if !json.Valid([]byte(res.Content)) {
+		t.Fatalf("structured content is not valid JSON: %q", res.Content)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("LLM calls = %d, want 2", got)
+	}
+	if len(requests) != 2 ||
+		!strings.Contains(requests[1], "Return only the missing JSON suffix") ||
+		strings.Contains(requests[1], "Continue from where you left off") {
+		t.Fatalf("continuation request did not use the structured instruction: %q", requests)
+	}
+}
+
+func TestContinueIfNeeded_StructuredOutputDoesNotContinueCompleteJSON(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk, _ := json.Marshal(streamChunkJS{Choices: []streamChoiceJS{{
+			Delta:        streamDeltaJS{Content: `{"summary":"complete","findings":[]}`},
+			FinishReason: llm.FinishLength,
+		}}})
+		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+	}))
+	defer server.Close()
+
+	agent := newTestAgent(t, server.URL)
+	agent.cfg.StructuredOutput = true
+	res, err := agent.llm.ChatWithToolsMax(t.Context(), nil, nil, nil, 100)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	res, err = agent.continueIfNeeded(t.Context(), nil, res, 100, nil)
+	if err != nil {
+		t.Fatalf("structured continuation: %v", err)
+	}
+	if res.Content != `{"summary":"complete","findings":[]}` {
+		t.Fatalf("content = %q", res.Content)
+	}
+	if res.FinishReason != llm.FinishLength {
+		t.Fatalf("finish reason = %q, want original length marker", res.FinishReason)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("LLM calls = %d, want 1", got)
+	}
+}
+
 func TestContinueIfNeeded_MaxRoundsCap(t *testing.T) {
 	// Simulate a model that always truncates (never reaches stop).
 	// After MaxContinueRounds, continueIfNeeded should give up.
@@ -1099,11 +1188,132 @@ func TestWithDefaults_DoesNotRewriteInvalidAnswerReserve(t *testing.T) {
 	if cfg.ConclusionMaxTokens != 6000 {
 		t.Fatalf("ConclusionMaxTokens = %d, want 6000 (fallback to AnswerMaxTokens)", cfg.ConclusionMaxTokens)
 	}
+	if cfg.ConclusionRetryMaxTokens != 1024 {
+		t.Fatalf("ConclusionRetryMaxTokens = %d, want 1024 (capped quarter-budget retry)", cfg.ConclusionRetryMaxTokens)
+	}
 
 	// An explicit ConclusionMaxTokens is preserved.
 	cfg = Config{AnswerMaxTokens: 6000, ConclusionMaxTokens: 8000}.withDefaults()
 	if cfg.ConclusionMaxTokens != 8000 {
 		t.Fatalf("ConclusionMaxTokens = %d, want 8000 (explicit value preserved)", cfg.ConclusionMaxTokens)
+	}
+	if cfg.ConclusionRetryMaxTokens != 1024 {
+		t.Fatalf("ConclusionRetryMaxTokens = %d, want 1024 (capped retry budget)", cfg.ConclusionRetryMaxTokens)
+	}
+
+	cfg = Config{
+		ConclusionMaxTokens:      100,
+		ConclusionRetryMaxTokens: 200,
+	}.withDefaults()
+	if cfg.ConclusionRetryMaxTokens != 100 {
+		t.Fatalf("ConclusionRetryMaxTokens = %d, want 100 (bounded by conclusion budget)", cfg.ConclusionRetryMaxTokens)
+	}
+}
+
+func TestForceConclusion_UsesSmallBudgetForReasoningRetry(t *testing.T) {
+	var calls int32
+	var budgets []int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		_ = r.Body.Close()
+		var request struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		budgets = append(budgets, request.MaxTokens)
+		n := atomic.AddInt32(&calls, 1)
+		content := ""
+		reasoning := "继续分析"
+		finish := llm.FinishLength
+		if n == 2 {
+			content = "直接结论"
+			reasoning = ""
+			finish = llm.FinishStop
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk, _ := json.Marshal(streamChunkJS{Choices: []streamChoiceJS{{
+			Delta:        streamDeltaJS{Content: content, ReasoningContent: reasoning},
+			FinishReason: finish,
+		}}})
+		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+	}))
+	defer server.Close()
+
+	agent := NewAgent(
+		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
+		nil,
+		Config{ConclusionMaxTokens: 12000, MaxContinueRounds: 0},
+		nil,
+		nil,
+	)
+	seq := 0
+	res, err := agent.forceConclusion(t.Context(), "run_small_retry", nil, nil, &seq, time.Now())
+	if err != nil {
+		t.Fatalf("forceConclusion() error = %v", err)
+	}
+	if res == nil || res.Content != "直接结论" {
+		t.Fatalf("result = %#v", res)
+	}
+	if got, want := atomic.LoadInt32(&calls), int32(2); got != want {
+		t.Fatalf("LLM calls = %d, want %d", got, want)
+	}
+	if len(budgets) != 2 || budgets[0] != 12000 || budgets[1] != 1024 {
+		t.Fatalf("max_tokens = %v, want [12000 1024]", budgets)
+	}
+}
+
+func TestForceConclusion_ReasoningRetryRunsOnlyOnce(t *testing.T) {
+	var calls int32
+	var budgets []int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		_ = r.Body.Close()
+		var request struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		budgets = append(budgets, request.MaxTokens)
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk, _ := json.Marshal(streamChunkJS{Choices: []streamChoiceJS{{
+			Delta:        streamDeltaJS{ReasoningContent: "思考"},
+			FinishReason: llm.FinishLength,
+		}}})
+		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+	}))
+	defer server.Close()
+
+	agent := NewAgent(
+		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
+		nil,
+		Config{ConclusionMaxTokens: 800, MaxContinueRounds: 0},
+		nil,
+		nil,
+	)
+	seq := 0
+	_, err := agent.forceConclusion(t.Context(), "run_retry_once", nil, nil, &seq, time.Now())
+	if !errors.Is(err, ErrReasoningTruncated) {
+		t.Fatalf("forceConclusion() error = %v, want ErrReasoningTruncated", err)
+	}
+	if got, want := atomic.LoadInt32(&calls), int32(2); got != want {
+		t.Fatalf("LLM calls = %d, want %d", got, want)
+	}
+	if len(budgets) != 2 || budgets[0] != 800 || budgets[1] != 200 {
+		t.Fatalf("max_tokens = %v, want [800 200]", budgets)
 	}
 }
 

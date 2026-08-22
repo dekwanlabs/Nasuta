@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -341,6 +343,83 @@ ORDER BY abs(r.start_line-?) LIMIT 1`, []any{node.ID, node.FilePath, start, node
 	return parseRouteName(name)
 }
 
+// HTTPClientRouteAt extracts a literal outbound HTTP route from a client call site.
+// It intentionally reports only routes that are statically provable from source;
+// configured or computed URLs remain unresolved rather than being guessed.
+func (d *DB) HTTPClientRouteAt(filePath string, line int) (httpMethod, path string, ok bool) {
+	text, err := d.readWorkspaceFile(filePath)
+	if err != nil || text == "" {
+		return "", "", false
+	}
+	lines := strings.Split(text, "\n")
+	if line < 1 || line > len(lines) {
+		return "", "", false
+	}
+	start := max(line-4, 1)
+	end := min(line+4, len(lines))
+	window := strings.Join(lines[start-1:end], "\n")
+
+	urlRE := regexp.MustCompile(`(?i)(?:https?://[^"'\s)]+|\.uri\s*\(\s*["']([^"']+)["'])`)
+	matches := urlRE.FindAllStringSubmatch(window, -1)
+	if len(matches) == 0 {
+		return "", "", false
+	}
+	for _, match := range matches {
+		candidate := match[0]
+		if match[1] != "" {
+			candidate = match[1]
+		} else {
+			candidate = strings.Trim(candidate, `"'`)
+		}
+		parsed, err := url.Parse(candidate)
+		if err != nil || parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") {
+			continue
+		}
+		method := httpMethodForClientWindow(window)
+		if method == "" {
+			continue
+		}
+		return method, parsed.Path, true
+	}
+	return "", "", false
+}
+
+func (d *DB) readWorkspaceFile(filePath string) (string, error) {
+	path := filePath
+	if !filepath.IsAbs(path) {
+		workspace := filepath.Dir(filepath.Dir(d.dbPath))
+		path = filepath.Join(workspace, filepath.FromSlash(filePath))
+	}
+	data, err := os.ReadFile(path)
+	return string(data), err
+}
+
+func httpMethodForClientWindow(window string) string {
+	lower := strings.ToLower(window)
+	switch {
+	case strings.Contains(lower, "postforobject"), strings.Contains(lower, "postforentity"),
+		strings.Contains(lower, "postforlocation"), strings.Contains(lower, "httppost"),
+		strings.Contains(lower, ".post()"), strings.Contains(lower, "httpmethod.post"):
+		return "POST"
+	case strings.Contains(lower, "putforobject"), strings.Contains(lower, "putforentity"),
+		strings.Contains(lower, "httpput"), strings.Contains(lower, ".put()"),
+		strings.Contains(lower, "httpmethod.put"):
+		return "PUT"
+	case strings.Contains(lower, "delete"), strings.Contains(lower, "httpdelete"),
+		strings.Contains(lower, ".delete()"), strings.Contains(lower, "httpmethod.delete"):
+		return "DELETE"
+	case strings.Contains(lower, "patch"), strings.Contains(lower, "httppatch"),
+		strings.Contains(lower, ".patch()"), strings.Contains(lower, "httpmethod.patch"):
+		return "PATCH"
+	case strings.Contains(lower, "getforobject"), strings.Contains(lower, "getforentity"),
+		strings.Contains(lower, "httpget"), strings.Contains(lower, ".get()"),
+		strings.Contains(lower, "httpmethod.get"):
+		return "GET"
+	default:
+		return ""
+	}
+}
+
 func parseRouteName(name string) (httpMethod, path string, ok bool) {
 	parts := strings.SplitN(name, " ", 2)
 	if len(parts) != 2 {
@@ -370,6 +449,13 @@ func (d *DB) ResolveDownstreamMethod(targetService, httpMethod, path string) (*N
 
 // ResolveDownstreamMethodInPath restricts route resolution to one canonical module prefix.
 func (d *DB) ResolveDownstreamMethodInPath(pathPrefix, httpMethod, path string) (*Node, error) {
+	return d.ResolveRouteMethodInPath(pathPrefix, httpMethod, path)
+}
+
+// ResolveRouteMethodInPath resolves a route implementation anywhere below one
+// normalized repository or module prefix. It is used for runtime applications
+// whose HTTP controllers and Feign clients live in sibling Maven modules.
+func (d *DB) ResolveRouteMethodInPath(pathPrefix, httpMethod, path string) (*Node, error) {
 	pathPrefix = strings.Trim(strings.ReplaceAll(pathPrefix, "\\", "/"), "/")
 	return d.resolveDownstreamMethod("(file_path=? OR (file_path>=? AND file_path<?))", []any{pathPrefix, pathPrefix + "/", pathPrefix + "0"}, httpMethod, path)
 }
@@ -464,6 +550,30 @@ FROM nodes_fts JOIN nodes n ON n.rowid=nodes_fts.rowid WHERE nodes_fts MATCH ?`)
 		nodes = nodes[:query.Limit]
 	}
 	return nodes, nil
+}
+
+// FindCallableNear resolves a callable whose declaration is at or immediately
+// after an endpoint annotation. This is needed for Python decorators, where
+// the endpoint line precedes the function declaration.
+func (d *DB) FindCallableNear(ctx context.Context, filePath string, line int) (*Node, error) {
+	filePath = strings.Trim(strings.ReplaceAll(filePath, "\\", "/"), "/")
+	node := &Node{}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.db == nil {
+		return nil, sql.ErrConnDone
+	}
+	err := d.db.QueryRowContext(ctx, `SELECT id,name,kind,qualified_name,file_path,language,start_line,end_line,COALESCE(signature,'')
+FROM nodes WHERE file_path=? AND kind IN ('method','function')
+AND ((start_line<=? AND end_line>=?) OR (start_line>? AND start_line<=?))
+ORDER BY CASE WHEN start_line<=? AND end_line>=? THEN 0 ELSE 1 END,abs(start_line-?) LIMIT 1`,
+		filePath, line, line, line, line+8, line, line, line).Scan(
+		&node.ID, &node.Name, &node.Kind, &node.QualifiedName, &node.FilePath,
+		&node.Language, &node.StartLine, &node.EndLine, &node.Signature)
+	if err != nil {
+		return nil, err
+	}
+	return node, nil
 }
 
 // FindNodeAt finds the narrowest callable symbol containing an exact location.

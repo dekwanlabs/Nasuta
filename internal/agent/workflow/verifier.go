@@ -16,16 +16,18 @@ import (
 
 type findingView struct {
 	Claim      string                `json:"claim"`
+	EntityIDs  []string              `json:"entity_ids,omitempty"`
 	GoalIDs    []string              `json:"goal_ids"`
 	Evidence   []findingEvidenceView `json:"evidence"`
 	Confidence float64               `json:"confidence"`
 }
 
 type findingEvidenceView struct {
-	Kind      string                     `json:"kind"`
-	Reference string                     `json:"reference"`
-	Summary   string                     `json:"summary"`
-	Identity  *agentapi.EvidenceIdentity `json:"identity,omitempty"`
+	Kind       string                     `json:"kind"`
+	Reference  string                     `json:"reference"`
+	Summary    string                     `json:"summary"`
+	EvidenceID string                     `json:"evidence_id,omitempty"`
+	Identity   *agentapi.EvidenceIdentity `json:"identity,omitempty"`
 }
 
 type reportView struct {
@@ -48,6 +50,7 @@ type verifiedClaimView struct {
 	FindingIndex       int                         `json:"finding_index"`
 	Claim              string                      `json:"claim"`
 	GoalIDs            []string                    `json:"goal_ids"`
+	EntityIDs          []string                    `json:"-"`
 	Evidence           []findingEvidenceView       `json:"evidence"`
 	EvidenceIdentities []agentapi.EvidenceIdentity `json:"evidence_identities"`
 	Confidence         float64                     `json:"confidence"`
@@ -347,6 +350,7 @@ func verifyBundle(
 				FindingIndex:       index,
 				Claim:              finding.Claim,
 				GoalIDs:            append([]string(nil), finding.GoalIDs...),
+				EntityIDs:          append([]string(nil), finding.EntityIDs...),
 				Evidence:           boundEvidence,
 				EvidenceIdentities: identities,
 				Confidence:         finding.Confidence,
@@ -416,6 +420,10 @@ func verifyBundle(
 		ledger,
 		subjectEvidenceInsufficient,
 	)
+	stopReason = compatibleVerificationStopReason(
+		input.node.OutputSchema,
+		stopReason,
+	)
 	evidenceUnits := evidence.CloneUnits(source.EvidenceUnits)
 	if evidenceUnits == nil {
 		evidenceUnits = []tool.EvidenceUnit{}
@@ -455,6 +463,7 @@ func verifyBundle(
 		view,
 		input.node.Verifier.MaxPayloadTokens,
 		required,
+		evidenceIdentityKeySet(ledger.BaselineEvidenceIdentities),
 	)
 	if err != nil {
 		return verificationRunOutput{}, fmt.Errorf(
@@ -521,6 +530,7 @@ func trimVerifiedEvidence(
 	view verifiedEvidenceView,
 	maxTokens int,
 	required map[string]struct{},
+	protectedEvidence map[evidence.Key]struct{},
 ) (verifiedEvidenceView, error) {
 	if maxTokens <= 0 {
 		return view, nil
@@ -530,7 +540,7 @@ func trimVerifiedEvidence(
 		return view, nil
 	}
 	slots := verifiedSlots(view, required)
-	minimum := viewAtVerifiedSlot(view, slots, 0)
+	minimum := viewAtVerifiedSlot(view, slots, 0, protectedEvidence)
 	if verifiedViewTokens(minimum) > maxTokens {
 		return verifiedEvidenceView{}, fmt.Errorf(
 			"minimum verified evidence view exceeds %d tokens",
@@ -540,14 +550,19 @@ func trimVerifiedEvidence(
 	low, high := 0, len(slots)
 	for low < high {
 		middle := low + (high-low+1)/2
-		candidate := viewAtVerifiedSlot(view, slots, middle)
+		candidate := viewAtVerifiedSlot(
+			view,
+			slots,
+			middle,
+			protectedEvidence,
+		)
 		if verifiedViewTokens(candidate) <= maxTokens {
 			low = middle
 			continue
 		}
 		high = middle - 1
 	}
-	return viewAtVerifiedSlot(view, slots, low), nil
+	return viewAtVerifiedSlot(view, slots, low, protectedEvidence), nil
 }
 
 func verifiedSlots(
@@ -621,6 +636,7 @@ func viewAtVerifiedSlot(
 	full verifiedEvidenceView,
 	slots []verifiedSlot,
 	count int,
+	protectedEvidence map[evidence.Key]struct{},
 ) verifiedEvidenceView {
 	view := verifiedEvidenceView{
 		SupportedClaims:   []verifiedClaimView{},
@@ -636,7 +652,7 @@ func viewAtVerifiedSlot(
 		Verification:      full.Verification,
 		Completeness:      full.Completeness,
 	}
-	selectedEvidence := make(map[evidence.Key]struct{})
+	selectedEvidence := cloneEvidenceKeySet(protectedEvidence)
 	for _, slot := range slots[:min(count, len(slots))] {
 		switch slot.kind {
 		case verifiedSupportedSlot:
@@ -762,6 +778,10 @@ func verifySubjectCoverage(
 	claims := make([]verifiedClaimView, 0, len(supportedClaims)+len(partialClaims))
 	claims = append(claims, supportedClaims...)
 	claims = append(claims, partialClaims...)
+	claimEntities := make([]map[string]struct{}, len(claims))
+	for index, claim := range claims {
+		claimEntities[index] = stringSet(claim.EntityIDs)
+	}
 	coverage := make([]subjectCoverageView, 0, len(requirements))
 	insufficient := false
 	for _, requirement := range requirements {
@@ -769,8 +789,10 @@ func verifySubjectCoverage(
 		requiredFacets := stringSet(requirement.RequiredFacets)
 		coveredFacets := make(map[string]struct{}, len(requirement.RequiredFacets))
 		sources := make(map[agentapi.EvidenceSource]struct{}, len(requirement.RequiredSources))
-		for _, claim := range claims {
-			matched, matchedSources := subjectClaimSources(claim, terms)
+		for claimIndex, claim := range claims {
+			matched, matchedSources := subjectClaimSources(
+				claim, claimEntities[claimIndex], requirement.EntityID, terms,
+			)
 			if !matched {
 				continue
 			}
@@ -825,12 +847,15 @@ func subjectEntityTerms(requirement SubjectRequirement) []string {
 
 func subjectClaimSources(
 	claim verifiedClaimView,
+	claimEntities map[string]struct{},
+	entityID string,
 	entityTerms []string,
 ) (bool, map[agentapi.EvidenceSource]struct{}) {
 	sources := make(map[agentapi.EvidenceSource]struct{})
+	_, explicitlyMatched := claimEntities[entityID]
 	matched := false
 	for _, identity := range claim.EvidenceIdentities {
-		if !subjectIdentityMatches(identity, entityTerms) {
+		if !explicitlyMatched && !subjectIdentityMatches(identity, entityTerms) {
 			continue
 		}
 		matched = true
@@ -965,6 +990,9 @@ func verifiedCompleteness(
 	case fullySupportedGoalCount == requiredGoalCount:
 		return Complete
 	case coveredGoalCount == 0:
+		if inputCompleteness == Partial {
+			return Partial
+		}
 		return Unavailable
 	default:
 		return Partial
@@ -1013,7 +1041,19 @@ func stopForVerification(
 	if insufficient {
 		return StopEvidenceInsufficient
 	}
-	return StopCapabilityUnavailable
+	return StopEvidenceInsufficient
+}
+
+func compatibleVerificationStopReason(
+	ref agentapi.SchemaRef,
+	reason StopReason,
+) StopReason {
+	if ref == (agentapi.SchemaRef{
+		ID: "investigation.verified_bundle", Version: 1,
+	}) && reason == StopEvidenceInsufficient {
+		return StopCapabilityUnavailable
+	}
+	return reason
 }
 
 func unavailableStopReason(
@@ -1040,6 +1080,7 @@ func unavailableStopReason(
 
 type verificationIndex struct {
 	byIdentity  map[evidence.Key]evidenceMatch
+	byHandle    map[string]evidenceMatch
 	byReference map[string][]evidenceMatch
 }
 
@@ -1061,6 +1102,7 @@ func newEvidenceIndex(
 	expanded := evidence.Expand(units)
 	index := verificationIndex{
 		byIdentity:  make(map[evidence.Key]evidenceMatch, len(expanded)),
+		byHandle:    make(map[string]evidenceMatch, len(expanded)),
 		byReference: make(map[string][]evidenceMatch, len(expanded)),
 	}
 	for _, unit := range expanded {
@@ -1076,6 +1118,7 @@ func newEvidenceIndex(
 			identity: identity, coverage: unit.Coverage, trustTier: unit.TrustTier,
 		}
 		index.byIdentity[key] = match
+		index.byHandle[key.Handle()] = match
 		referenceKey := referenceKey(key.SourceKind, key.Target)
 		index.byReference[referenceKey] = append(
 			index.byReference[referenceKey],
@@ -1130,6 +1173,13 @@ func (index verificationIndex) bind(
 func (index verificationIndex) match(
 	item findingEvidenceView,
 ) []evidenceMatch {
+	if item.EvidenceID != "" {
+		match, ok := index.byHandle[item.EvidenceID]
+		if !ok {
+			return nil
+		}
+		return []evidenceMatch{match}
+	}
 	if item.Identity != nil {
 		match, ok := index.byIdentity[keyFromIdentity(*item.Identity)]
 		if !ok {
@@ -1137,11 +1187,69 @@ func (index verificationIndex) match(
 		}
 		return []evidenceMatch{match}
 	}
-	return index.byReference[referenceKey(item.Kind, item.Reference)]
+	matches := index.byReference[referenceKey(item.Kind, item.Reference)]
+	target, section, ok := parseEvidenceReference(item.Reference)
+	if !ok {
+		return matches
+	}
+	kind := normalizeEvidencePart(item.Kind)
+	if section != "" {
+		if match, exists := index.byIdentity[evidence.Key{
+			SourceKind: kind, Target: target, Section: section,
+		}]; exists {
+			return []evidenceMatch{match}
+		}
+		return matches
+	}
+	if targetMatches := index.byReference[referenceKey(kind, target)]; len(targetMatches) > 0 {
+		return targetMatches
+	}
+	return matches
 }
 
 func referenceKey(kind, reference string) string {
-	return kind + "\x00" + reference
+	return normalizeEvidencePart(kind) + "\x00" + strings.TrimSpace(reference)
+}
+
+func normalizeEvidencePart(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func parseEvidenceReference(reference string) (string, string, bool) {
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return "", "", false
+	}
+	for _, marker := range []string{"#L", ":L", " (L"} {
+		index := strings.LastIndex(reference, marker)
+		if index <= 0 {
+			continue
+		}
+		target := strings.TrimSpace(reference[:index])
+		sectionStart := index + 1
+		if marker == " (L" {
+			sectionStart = index + 2
+		}
+		section := strings.TrimSpace(reference[sectionStart:])
+		section = strings.TrimSuffix(section, ")")
+		if target == "" || !validEvidenceSection(section) {
+			continue
+		}
+		return target, section, true
+	}
+	return reference, "", true
+}
+
+func validEvidenceSection(section string) bool {
+	if len(section) < 2 || section[0] != 'L' {
+		return false
+	}
+	for _, value := range section[1:] {
+		if (value < '0' || value > '9') && value != '-' && value != 'L' {
+			return false
+		}
+	}
+	return true
 }
 
 func keyFromIdentity(identity agentapi.EvidenceIdentity) evidence.Key {
@@ -1167,6 +1275,9 @@ func identityFromKey(key evidence.Key) agentapi.EvidenceIdentity {
 func cloneFindingEvidence(
 	item findingEvidenceView,
 ) findingEvidenceView {
+	// The handle is an investigation transport detail; verified output carries
+	// the resolved canonical identity instead.
+	item.EvidenceID = ""
 	if item.Identity == nil {
 		return item
 	}

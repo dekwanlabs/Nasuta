@@ -362,14 +362,11 @@ func relationTool(svc *Service) Tool {
 			"max_fanout":   propInt("Per-node fact budget 1-100 (default 20)."),
 		}, []string{"entity"}),
 		Handler: stringHandler(func(ctx context.Context, args tool.Arguments) (string, error) {
-			predicates := make([]ontology.Predicate, 0)
-			for _, value := range args.Strings("relations") {
-				predicates = append(predicates, ontology.Predicate(value))
-			}
-			result, err := svc.ontology.QueryRelations(ctx, ontology.RelationQuery{
+			result, err := svc.TraceRelationsResult(ctx, ontology.RelationQuery{
 				Entity: args.String("entity"), EntityClass: ontology.Class(args.String("entity_class")),
-				Predicates: predicates, Direction: ontology.Direction(args.StringDefault("direction", "outgoing")),
-				MaxDepth: args.Int("max_depth", 2), MaxNodes: args.Int("max_nodes", 50),
+				Predicates: relationPredicates(args.Strings("relations")),
+				Direction:  ontology.Direction(args.StringDefault("direction", "outgoing")),
+				MaxDepth:   args.Int("max_depth", 2), MaxNodes: args.Int("max_nodes", 50),
 				MaxFanout: args.Int("max_fanout", 20),
 			})
 			if err != nil {
@@ -378,6 +375,14 @@ func relationTool(svc *Service) Tool {
 			return marshalResult(result)
 		}),
 	}
+}
+
+func relationPredicates(values []string) []ontology.Predicate {
+	predicates := make([]ontology.Predicate, 0, len(values))
+	for _, value := range values {
+		predicates = append(predicates, ontology.Predicate(value))
+	}
+	return predicates
 }
 
 func webSearchToolResult(response WebSearchResponse) (tool.Result, error) {

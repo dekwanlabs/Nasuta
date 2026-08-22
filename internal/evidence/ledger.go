@@ -1,6 +1,9 @@
 package evidence
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -16,6 +19,21 @@ type Key struct {
 // String returns a stable identity suitable for deterministic ordering.
 func (key Key) String() string {
 	return key.SourceKind + "\x00" + key.Target + "\x00" + key.Section + "\x00" + key.Version + "\x00" + key.TimeRange
+}
+
+// Handle is the stable citation token for one canonical evidence identity.
+func (key Key) Handle() string {
+	digest := sha256.Sum256([]byte("evidence-handle-v1\x00" + key.String()))
+	return "ev_" + hex.EncodeToString(digest[:])
+}
+
+// UnitHandle returns the stable citation token for one single-section unit.
+func UnitHandle(unit tool.EvidenceUnit) (string, bool) {
+	key, ok := UnitKey(unit)
+	if !ok {
+		return "", false
+	}
+	return key.Handle(), true
 }
 
 // Conflict records two authoritative versions observed for one identity.

@@ -22,8 +22,49 @@ type InvestigationRunner interface {
 	Cancel(context.Context, string, int64) error
 }
 
+// InvestigationPlanner replans a continuation from its verified gaps.
+// Implementations must keep the returned proposal within the supplied contract.
+type InvestigationPlanner interface {
+	PlanInvestigation(
+		context.Context,
+		TaskContract,
+		InvestigationResult,
+		[]tool.EvidenceUnit,
+	) (*agentapi.TaskGraphProposal, error)
+}
+
+// InvestigationContinuationRunner is optional so older runners remain valid.
+// The Coordinator uses it only when durable round recovery is available.
+type InvestigationContinuationRunner interface {
+	InvestigationRunner
+	LoadRound(context.Context, string) (InvestigationRoundSnapshot, error)
+	StartNextRound(context.Context, InvestigationContinuationRequest) error
+}
+
+type InvestigationContinuationRequest struct {
+	ParentRunID           string
+	PreviousWorkflowRunID string
+	WorkflowRunID         string
+	Contract              TaskContract
+	Proposal              *agentapi.TaskGraphProposal
+	SeedEvidence          []tool.EvidenceUnit
+	Actor                 agentapi.Actor
+	Round                 int
+	BaseDepth             int
+}
+
+type InvestigationRoundSnapshot struct {
+	Terminal     InvestigationTerminal
+	Contract     TaskContract
+	SeedEvidence []tool.EvidenceUnit
+	Actor        agentapi.Actor
+}
+
 type InvestigationRequest struct {
 	WorkflowRunID string
+	ParentRunID   string
+	Round         int
+	BaseDepth     int
 	Contract      TaskContract
 	Proposal      *agentapi.TaskGraphProposal
 	SeedEvidence  []tool.EvidenceUnit
@@ -34,12 +75,13 @@ type InvestigationRequest struct {
 // The parent Run retains the original user question; child agents receive only
 // the objective, admitted evidence goals, and admitted context.
 type TaskContract struct {
-	TaskID             string              `json:"task_id"`
-	Objective          string              `json:"objective"`
-	Entities           []EntityRef         `json:"entities"`
-	InvestigationGoals []InvestigationGoal `json:"investigation_goals,omitempty"`
-	EvidenceGoals      []EvidenceGoal      `json:"evidence_goals"`
-	Context            TaskContext         `json:"context"`
+	TaskID                  string                   `json:"task_id"`
+	Objective               string                   `json:"objective"`
+	Entities                []EntityRef              `json:"entities"`
+	InvestigationGoals      []InvestigationGoal      `json:"investigation_goals,omitempty"`
+	EvidenceGoals           []EvidenceGoal           `json:"evidence_goals"`
+	TaskEvidenceAssignments []TaskEvidenceAssignment `json:"task_evidence_assignments,omitempty"`
+	Context                 TaskContext              `json:"context"`
 }
 
 type EntityRef struct {
@@ -66,6 +108,20 @@ type EvidenceGoal struct {
 	Freshness       agentapi.FreshnessPolicy  `json:"freshness"`
 	MinimumCoverage int                       `json:"minimum_coverage"`
 	HighRisk        bool                      `json:"high_risk"`
+}
+
+// TaskEvidenceAssignment binds admitted seed material to one workflow task.
+type TaskEvidenceAssignment struct {
+	TaskID         string                 `json:"task_id"`
+	RequiredFacets []string               `json:"required_facets,omitempty"`
+	InputRefs      []agentapi.EvidenceRef `json:"input_refs"`
+	ContextRefs    []TaskContextRef       `json:"context_refs"`
+}
+
+// TaskContextRef identifies one non-evidence seed block without copying it.
+type TaskContextRef struct {
+	Source      string `json:"source"`
+	ContentHash string `json:"content_hash"`
 }
 
 type TaskContext struct {
@@ -132,12 +188,61 @@ type InvestigationTerminal struct {
 	Output        *InvestigationResult
 	Usage         InvestigationUsage
 	Completeness  InvestigationCompleteness
+	Round         int
+	BaseDepth     int
+	StopReason    string
+}
+
+// InvestigationClaim is a verifier-approved finding that can survive a
+// missing synthesizer answer and be carried into a later investigation round.
+type InvestigationClaim struct {
+	ProducerNodeID     string                      `json:"producer_node_id"`
+	FindingIndex       int                         `json:"finding_index"`
+	Claim              string                      `json:"claim"`
+	GoalIDs            []string                    `json:"goal_ids"`
+	EntityIDs          []string                    `json:"entity_ids,omitempty"`
+	Evidence           []InvestigationEvidence     `json:"evidence"`
+	EvidenceIdentities []agentapi.EvidenceIdentity `json:"evidence_identities,omitempty"`
+	Confidence         float64                     `json:"confidence"`
+	Support            string                      `json:"support"`
+	HighRisk           bool                        `json:"high_risk"`
+}
+
+type InvestigationUnsupportedClaim struct {
+	ProducerNodeID string   `json:"producer_node_id"`
+	FindingIndex   int      `json:"finding_index"`
+	GoalIDs        []string `json:"goal_ids"`
+	Support        string   `json:"support"`
+	HighRisk       bool     `json:"high_risk"`
+	ReasonCode     string   `json:"reason_code"`
+}
+
+type InvestigationVerification struct {
+	Decision   string `json:"decision"`
+	StopReason string `json:"stop_reason"`
 }
 
 type InvestigationResult struct {
-	Answer      string                  `json:"answer"`
-	Citations   []InvestigationCitation `json:"citations"`
-	Limitations []string                `json:"limitations"`
+	Answer               string                          `json:"answer"`
+	Citations            []InvestigationCitation         `json:"citations"`
+	Limitations          []string                        `json:"limitations"`
+	SupportedClaims      []InvestigationClaim            `json:"supported_claims,omitempty"`
+	PartialClaims        []InvestigationClaim            `json:"partial_claims,omitempty"`
+	UnsupportedClaims    []InvestigationUnsupportedClaim `json:"unsupported_claims,omitempty"`
+	PartialGoals         []string                        `json:"partial_goals,omitempty"`
+	UnresolvedGoals      []string                        `json:"unresolved_goals,omitempty"`
+	EvidenceUnits        []tool.EvidenceUnit             `json:"evidence_units,omitempty"`
+	EvidenceConflicts    []agentapi.EvidenceConflict     `json:"evidence_conflicts,omitempty"`
+	Verification         InvestigationVerification       `json:"verification,omitempty"`
+	ExecutionStatus      string                          `json:"execution_status,omitempty"`
+	EvidenceStatus       string                          `json:"evidence_status,omitempty"`
+	ClaimStatus          string                          `json:"claim_status,omitempty"`
+	VerificationStatus   string                          `json:"verification_status,omitempty"`
+	WorkflowCompleteness string                          `json:"workflow_completeness,omitempty"`
+	FailureReason        string                          `json:"failure_reason,omitempty"`
+	Round                int                             `json:"round,omitempty"`
+	BaseDepth            int                             `json:"base_depth,omitempty"`
+	StopReason           string                          `json:"stop_reason,omitempty"`
 }
 
 func contractFromPreparation(
@@ -337,15 +442,14 @@ func investigationOutcome(terminal InvestigationTerminal) (RunOutcome, error) {
 			terminal.Completeness,
 		), nil
 	case InvestigationFailed:
-		return RunOutcome{
-			Status: RunStatusFailed, ErrorCode: terminal.ErrorCode,
-			Err: fmt.Errorf(
+		return failedInvestigationOutcome(
+			terminal,
+			fmt.Errorf(
 				"investigation workflow %q failed with code %q",
 				terminal.WorkflowRunID,
 				terminal.ErrorCode,
 			),
-			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
-		}, nil
+		), nil
 	case InvestigationCancelled:
 		return RunOutcome{
 			Status: RunStatusAborted, ErrorCode: terminal.ErrorCode,
@@ -353,11 +457,10 @@ func investigationOutcome(terminal InvestigationTerminal) (RunOutcome, error) {
 			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
 		}, nil
 	case InvestigationTimedOut:
-		return RunOutcome{
-			Status: RunStatusFailed, ErrorCode: terminal.ErrorCode,
-			Err:      fmt.Errorf("investigation workflow %q timed out", terminal.WorkflowRunID),
-			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
-		}, nil
+		return failedInvestigationOutcome(
+			terminal,
+			fmt.Errorf("investigation workflow %q timed out", terminal.WorkflowRunID),
+		), nil
 	default:
 		return RunOutcome{}, fmt.Errorf(
 			"investigation workflow %q has unknown terminal status %q",
@@ -367,19 +470,53 @@ func investigationOutcome(terminal InvestigationTerminal) (RunOutcome, error) {
 	}
 }
 
+func failedInvestigationOutcome(
+	terminal InvestigationTerminal,
+	err error,
+) RunOutcome {
+	outcome := RunOutcome{
+		Status: RunStatusFailed, ErrorCode: terminal.ErrorCode, Err: err,
+		Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
+	}
+	if terminal.Output == nil || !investigationResultHasEvidence(*terminal.Output) {
+		return outcome
+	}
+	partial := successfulOutcome(
+		*terminal.Output,
+		terminal.Usage,
+		InvestigationPartial,
+	)
+	if partial.Status != RunStatusDone {
+		return outcome
+	}
+	partial.Status = RunStatusFailed
+	partial.ErrorCode = terminal.ErrorCode
+	partial.Err = err
+	return partial
+}
+
+func investigationResultHasEvidence(result InvestigationResult) bool {
+	return len(investigationResultReferences(result)) > 0 ||
+		len(result.EvidenceUnits) > 0 ||
+		len(result.SupportedClaims) > 0 ||
+		len(result.PartialClaims) > 0
+}
+
 func successfulOutcome(
 	result InvestigationResult,
 	usage InvestigationUsage,
 	completeness InvestigationCompleteness,
 ) RunOutcome {
 	answer := strings.TrimSpace(result.Answer)
-	if answer == "" {
+	references := investigationResultReferences(result)
+	hasEvidence := len(references) > 0 || len(result.EvidenceUnits) > 0 ||
+		len(result.SupportedClaims) > 0 || len(result.PartialClaims) > 0
+	if answer == "" && !hasEvidence {
 		return RunOutcome{
 			Status: RunStatusFailed, ErrorCode: "empty_output", Err: ErrEmptyAnswer,
 			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
 		}
 	}
-	references := investigationReferences(result.Citations)
 	evidenceStatus := EvidenceComplete
 	partialResults := len(result.Limitations)
 	switch completeness {
@@ -398,6 +535,12 @@ func successfulOutcome(
 			Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
 		}
 	}
+	if answer == "" {
+		evidenceStatus = EvidencePartial
+		if partialResults == 0 {
+			partialResults = 1
+		}
+	}
 	return RunOutcome{
 		Status: RunStatusDone, Answer: answer, TokenUsed: int(usage.TotalTokens),
 		References: references, HitCount: len(references),
@@ -406,6 +549,44 @@ func successfulOutcome(
 			ToolCallCount: int(usage.ToolCalls), PartialResultCount: partialResults,
 		},
 	}
+}
+
+func investigationResultReferences(result InvestigationResult) []agentapi.Reference {
+	if references := investigationReferences(result.Citations); len(references) > 0 {
+		return references
+	}
+	count := 0
+	for _, claim := range append(append([]InvestigationClaim{}, result.SupportedClaims...), result.PartialClaims...) {
+		count += len(claim.Evidence)
+	}
+	references := make([]agentapi.Reference, 0, count)
+	seen := make(map[string]struct{}, count)
+	appendEvidence := func(evidence InvestigationEvidence) {
+		kind := strings.TrimSpace(evidence.Kind)
+		reference := strings.TrimSpace(evidence.Reference)
+		if kind == "" || reference == "" {
+			return
+		}
+		key := kind + "\x00" + reference
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		references = append(references, agentapi.Reference{
+			Type: kind, Label: strings.TrimSpace(evidence.Summary), Target: reference,
+		})
+	}
+	for _, claim := range result.SupportedClaims {
+		for _, evidence := range claim.Evidence {
+			appendEvidence(evidence)
+		}
+	}
+	for _, claim := range result.PartialClaims {
+		for _, evidence := range claim.Evidence {
+			appendEvidence(evidence)
+		}
+	}
+	return references
 }
 
 func investigationReferences(citations []InvestigationCitation) []agentapi.Reference {

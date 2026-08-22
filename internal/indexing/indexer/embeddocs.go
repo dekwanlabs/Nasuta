@@ -2,7 +2,10 @@ package indexer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
@@ -13,11 +16,12 @@ import (
 // It is shared by all embedding entry points so payload schema lives in one place.
 // That prevents embed paths from silently dropping fields.
 type EmbedDocMeta struct {
-	ID    string // doc id; written as both "id" and "doc_id"
-	Title string // document title (H1) per chunk (chunk title overrides)
-	Path  string // workspace-relative filename (payload "path")
-	Scope string // payload "scope": mirrors DocStore kind — flow | schema | module | document
-	Repo  string // payload "repo": "docs" for KB/user docs
+	ID          string // doc id; written as both "id" and "doc_id"
+	Title       string // document title (H1) per chunk (chunk title overrides)
+	Path        string // workspace-relative filename (payload "path")
+	Scope       string // payload "scope": mirrors DocStore kind — flow | schema | module | document
+	Repo        string // payload "repo": "docs" for KB/user docs
+	ContentHash string // exact canonical document body hash
 }
 
 // EmbedDocInput is the whole document unit for chunk-and-embed.
@@ -39,11 +43,19 @@ func EmbedDocsCanonical(ctx context.Context, emb embed.Embedder, sem semantic.St
 	if len(inputs) == 0 {
 		return 0, nil
 	}
+	inputs = deduplicateEmbedInputs(inputs)
 	cfg := DefaultDocChunkConfig()
 	total := 0
 	for _, in := range inputs {
 		chunks := ChunkMarkdown(in.ID, in.Title, in.Content, cfg)
-		meta := EmbedDocMeta{ID: in.ID, Title: in.Title, Path: in.Path, Scope: in.Scope, Repo: in.Repo}
+		meta := EmbedDocMeta{
+			ID:          in.ID,
+			Title:       in.Title,
+			Path:        in.Path,
+			Scope:       in.Scope,
+			Repo:        in.Repo,
+			ContentHash: documentContentHash(in.Content),
+		}
 		n, err := EmbedChunksCanonical(ctx, emb, sem, meta, chunks, batchSize)
 		if err != nil {
 			return total, fmt.Errorf("embed doc %q: %w", in.ID, err)
@@ -77,8 +89,15 @@ func EmbedChunksCanonical(ctx context.Context, emb embed.Embedder, sem semantic.
 		if err != nil {
 			return 0, fmt.Errorf("embed batch [%d:%d]: %w", start, end, err)
 		}
+		if len(vecs) != len(batch) {
+			return 0, fmt.Errorf("embed batch [%d:%d]: got %d vectors for %d chunks", start, end, len(vecs), len(batch))
+		}
 		points := make([]semantic.Record, 0, len(vecs))
 		evidenceClass, trustTier := domain.EvidenceForRunbookScope(meta.Scope)
+		contentHash := meta.ContentHash
+		if contentHash == "" {
+			contentHash = documentContentHashFromChunks(chunks)
+		}
 		for i, v := range vecs {
 			c := batch[i]
 			points = append(points, semantic.Record{
@@ -95,6 +114,7 @@ func EmbedChunksCanonical(ctx context.Context, emb embed.Embedder, sem semantic.
 					"section_header": c.SectionHeader,
 					"chunk_index":    c.ChunkIndex,
 					"text":           c.Text,
+					"content_hash":   contentHash,
 					"evidence_class": evidenceClass,
 					"trust_tier":     trustTier,
 				},
@@ -105,4 +125,58 @@ func EmbedChunksCanonical(ctx context.Context, emb embed.Embedder, sem semantic.
 		}
 	}
 	return len(chunks), nil
+}
+
+func deduplicateEmbedInputs(inputs []EmbedDocInput) []EmbedDocInput {
+	type selectedInput struct {
+		index int
+		input EmbedDocInput
+	}
+	selected := make(map[string]selectedInput, len(inputs))
+	out := make([]EmbedDocInput, 0, len(inputs))
+	for _, input := range inputs {
+		hash := documentContentHash(input.Content)
+		current, ok := selected[hash]
+		if !ok {
+			selected[hash] = selectedInput{index: len(out), input: input}
+			out = append(out, input)
+			continue
+		}
+		if docScopePriority(input.Scope) > docScopePriority(current.input.Scope) {
+			out[current.index] = input
+			selected[hash] = selectedInput{index: current.index, input: input}
+		}
+	}
+	return out
+}
+
+func docScopePriority(scope string) int {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "schema":
+		return 4
+	case "flow":
+		return 3
+	case "module":
+		return 2
+	case "document":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func documentContentHash(content string) string {
+	content = strings.TrimSpace(strings.ToValidUTF8(content, ""))
+	content = strings.TrimSpace(parseFrontmatter(content).content)
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+func documentContentHashFromChunks(chunks []DocChunk) string {
+	var content strings.Builder
+	for _, chunk := range chunks {
+		content.WriteString(chunk.Text)
+		content.WriteByte('\n')
+	}
+	return documentContentHash(content.String())
 }

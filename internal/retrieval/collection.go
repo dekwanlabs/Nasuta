@@ -96,7 +96,7 @@ func (retrieve *Retriever) collectCode(ctx context.Context, codeHits []codeHit, 
 		if h.path == "" {
 			continue
 		}
-		if h.scoreKind != "rrf" && !codeHitPassesFloor(h.denseScore, retrieve.platform.CodeMinScore) {
+		if (h.hasDenseScore || h.scoreKind != "rrf") && !codeHitPassesFloor(h.denseScore, retrieve.platform.CodeMinScore) {
 			dropped = append(dropped, retrieve.shortPath(ctx, h.path))
 			continue
 		}
@@ -113,6 +113,7 @@ func (retrieve *Retriever) collectCode(ctx context.Context, codeHits []codeHit, 
 			chars:         len(h.snippet),
 			recallScore:   h.recallScore,
 			denseScore:    h.denseScore,
+			hasDense:      h.hasDenseScore,
 			scoreKind:     h.scoreKind,
 			evidenceClass: evidenceClass,
 			trustTier:     trustTier,

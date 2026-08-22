@@ -9,8 +9,47 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
+const (
+	investigatorOutputDenominator = 4
+	investigatorOutputMinimum     = 1024
+	investigatorOutputMaximum     = 4096
+	verifierOutputDenominator     = 6
+	verifierOutputMinimum         = 768
+	verifierOutputMaximum         = 3072
+	synthesizerOutputDenominator  = 2
+	synthesizerOutputMinimum      = 2048
+	synthesizerOutputMaximum      = 6144
+	investigatorMaxSteps          = 3
+	convergenceMaxSteps           = 1
+	roleMaxContinueRounds         = 1
+)
+
 // DefaultInvestigators builds the fixed read-only delegated investigation panel.
 func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]agentapi.Definition, error) {
+	investigatorOutput := roleOutputBudget(
+		settings.LLMAnswerMaxTokens,
+		investigatorOutputDenominator,
+		investigatorOutputMinimum,
+		investigatorOutputMaximum,
+	)
+	verifierOutput := roleOutputBudget(
+		settings.LLMAnswerMaxTokens,
+		verifierOutputDenominator,
+		verifierOutputMinimum,
+		verifierOutputMaximum,
+	)
+	synthesizerOutput := roleOutputBudget(
+		settings.LLMAnswerMaxTokens,
+		synthesizerOutputDenominator,
+		synthesizerOutputMinimum,
+		synthesizerOutputMaximum,
+	)
+	investigatorSteps := boundedRoleLimit(settings.AgentMaxSteps, investigatorMaxSteps)
+	convergenceSteps := boundedRoleLimit(settings.AgentMaxSteps, convergenceMaxSteps)
+	continueRounds := boundedRoleLimit(
+		settings.LLMMaxContinueRounds,
+		roleMaxContinueRounds,
+	)
 	specs := []struct {
 		id, name, purpose, focus string
 		tools                    []string
@@ -52,13 +91,13 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		definition, err := agentapi.Prepare(agentapi.Definition{
 			ID: spec.id, Version: version, DisplayName: spec.name, Purpose: spec.purpose,
 			Prompt: agentapi.PromptSpec{
-				System: reportPrompt(spec.focus, rolePrompt), Version: "investigation-report-v1",
+				System: reportPrompt(spec.focus, rolePrompt), Version: "investigation-report-v2",
 			},
 			InputSchema:  agentapi.SchemaRef{ID: "task.contract", Version: 1},
 			OutputSchema: agentapi.SchemaRef{ID: "investigation.report", Version: 1},
 			Model: agentapi.ModelPolicy{
 				Provider: settings.LLMProvider, Model: settings.LLMModel,
-				MaxOutputTokens:                   settings.LLMAnswerMaxTokens,
+				MaxOutputTokens:                   investigatorOutput,
 				InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
 				OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
 			},
@@ -67,11 +106,11 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 			},
 			Budget: agentapi.BudgetPolicy{
 				Timeout:            time.Duration(settings.AgentTimeout),
-				MaxSteps:           settings.AgentMaxSteps,
+				MaxSteps:           investigatorSteps,
 				MaxToolCalls:       maxToolCalls,
 				ContextTokens:      settings.LLMContextWindow,
 				MaxToolResultBytes: 24 * 1024,
-				MaxContinueRounds:  1,
+				MaxContinueRounds:  continueRounds,
 			},
 			Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
 		})
@@ -96,7 +135,7 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		},
 		Model: agentapi.ModelPolicy{
 			Provider: settings.LLMProvider, Model: settings.LLMModel,
-			MaxOutputTokens:                   settings.LLMAnswerMaxTokens,
+			MaxOutputTokens:                   verifierOutput,
 			InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
 			OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
 		},
@@ -105,9 +144,9 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		},
 		Budget: agentapi.BudgetPolicy{
 			Timeout:           time.Duration(settings.AgentTimeout),
-			MaxSteps:          settings.AgentMaxSteps,
+			MaxSteps:          convergenceSteps,
 			ContextTokens:     settings.LLMContextWindow,
-			MaxContinueRounds: settings.LLMMaxContinueRounds,
+			MaxContinueRounds: continueRounds,
 		},
 		Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
 	})
@@ -120,22 +159,22 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		Purpose: "Synthesize delegated investigation handoffs without gathering new evidence.",
 		Prompt: agentapi.PromptSpec{
 			System:  prompts.Text(prompts.AgentCatalogSynthesizer),
-			Version: "investigation-synthesis-v6",
+			Version: "investigation-synthesis-v7",
 		},
 		InputSchema:  agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2},
 		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
 		Model: agentapi.ModelPolicy{
 			Provider: settings.LLMProvider, Model: settings.LLMModel,
-			MaxOutputTokens:                   settings.LLMAnswerMaxTokens,
+			MaxOutputTokens:                   synthesizerOutput,
 			InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
 			OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
 		},
 		Tools: agentapi.ToolPolicy{VisibleToolIDs: []string{}, RestrictVisible: true},
 		Budget: agentapi.BudgetPolicy{
 			Timeout:           time.Duration(settings.AgentTimeout),
-			MaxSteps:          settings.AgentMaxSteps,
+			MaxSteps:          convergenceSteps,
 			ContextTokens:     settings.LLMContextWindow,
-			MaxContinueRounds: settings.LLMMaxContinueRounds,
+			MaxContinueRounds: continueRounds,
 		},
 		Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
 	})
@@ -143,6 +182,30 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		return nil, fmt.Errorf("prepare synthesizer: %w", err)
 	}
 	return append(definitions, synthesizer), nil
+}
+
+func roleOutputBudget(global, denominator, minimum, maximum int) int {
+	if global <= 0 {
+		return global
+	}
+	budget := global / denominator
+	if budget < minimum {
+		budget = minimum
+	}
+	if budget > maximum {
+		budget = maximum
+	}
+	if budget > global {
+		return global
+	}
+	return budget
+}
+
+func boundedRoleLimit(global, maximum int) int {
+	if global <= 0 || global <= maximum {
+		return global
+	}
+	return maximum
 }
 
 func reportPrompt(focus, rolePrompt string) string {

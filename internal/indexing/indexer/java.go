@@ -118,6 +118,7 @@ func entrypointService(root, rel, moduleRoot string) domain.ServiceRecord {
 // scanFeignClients preserves Feign configuration until dependency resolution.
 func scanFeignClients(root string, dirs []string) []feignReference {
 	files := walkFiles(root, dirs, hasSuffix(".java"))
+	constants := scanJVMStringConstants(root, dirs)
 	var records []feignReference
 	for _, file := range files {
 		if isTestSourcePath(relativeTo(root, file)) {
@@ -128,6 +129,7 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 			continue
 		}
 		source := scanJVMSource(text)
+		packageName := jvmPackageName(source.tokens)
 		rel := relativeTo(root, file)
 		caller := inferJavaServiceName(root, file)
 		modulePath := ""
@@ -150,11 +152,11 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 			if !ok || declaration.kind != javaTypeDeclaration {
 				continue
 			}
-			clientName, nameResolved := strictFeignClientName(annotation)
+			clientName, nameResolved := feignClientName(annotation, source, constants)
 			if !nameResolved {
 				clientName = ""
 			}
-			targetURL, urlPresent, urlResolved := strictFeignStringArgument(annotation, "url")
+			targetURL, urlPresent, urlResolved := feignStringArgument(annotation, "url", source, constants)
 			if urlPresent && !urlResolved {
 				targetURL = ""
 			}
@@ -167,7 +169,10 @@ func scanFeignClients(root string, dirs []string) []feignReference {
 			}
 			records = append(records, feignReference{
 				From: caller, CallerServiceKey: callerServiceKey, ModulePath: modulePath,
-				ClientName: clientName, URL: targetURL,
+				PackageName: packageName, InterfaceName: declaration.name,
+				QualifiedName: strings.Trim(strings.Join([]string{packageName, declaration.name}, "."), "."),
+				ClientName:    clientName, URL: targetURL,
+				Methods: javaFeignMethods(source, declaration, declaration.name, rel),
 				Evidence: []domain.Evidence{{
 					Path: rel, Line: annotation.line, Symbol: declaration.name, Kind: domain.SourceCodeScan,
 				}},

@@ -22,6 +22,9 @@ type RoutingCapabilities struct {
 type AnalysisResult struct {
 	Decision            domain.PlanDecision
 	Execution           ExecutionSuggestion
+	ExecutionAuditTried bool
+	ExecutionAuditUsed  bool
+	ExecutionAuditError error
 	Question            string
 	Terms               QueryTerms
 	QuerySemantics      *domain.QuerySemantics
@@ -87,6 +90,8 @@ const (
 	executionExampleJSON      = `{"execution":{"strategy":"single_agent","complexity":0.2,"confidence":0.9,"tasks":[],"reasons":["single_focused_question"]}}`
 )
 
+const executionAuditMaxTokens = 512
+
 var executionTaskID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 
 var executionReasonCodes = map[string]struct{}{
@@ -105,6 +110,7 @@ var executionReasonCodes = map[string]struct{}{
 
 var (
 	executionContract       = prompts.Text(prompts.RetrievalExecution)
+	executionAuditContract  = prompts.Text(prompts.RetrievalExecutionAudit)
 	historyRelationContract = prompts.Text(prompts.RetrievalHistory)
 	queryTermsContract      = prompts.Text(prompts.RetrievalQueryTerms)
 	querySemanticsContract  = prompts.Text(prompts.RetrievalQuerySemantics)
@@ -319,12 +325,136 @@ func analyzeQuestion(
 		}
 		return empty, fmt.Errorf("evidence router failed: %w", err)
 	}
+	auditTried, auditUsed, auditErr := auditInsufficientExecutionTasks(
+		ctx, client, question, routeContext, semantics, &execution,
+	)
 
 	return AnalysisResult{
 		Decision: decision, Question: clean, Terms: terms, QuerySemantics: semantics,
 		QuerySemanticsError: semanticsErr, ToolIDs: toolIDs, Time: timeExpr,
 		History: historyRelation, Execution: execution,
+		ExecutionAuditTried: auditTried, ExecutionAuditUsed: auditUsed,
+		ExecutionAuditError: auditErr,
 	}, nil
+}
+
+func auditInsufficientExecutionTasks(
+	ctx context.Context,
+	client *llm.LLMClient,
+	question, routeContext string,
+	semantics *domain.QuerySemantics,
+	execution *ExecutionSuggestion,
+) (tried, used bool, err error) {
+	if client == nil || semantics == nil || semantics.Kind == domain.QueryFocusedFact ||
+		execution == nil || countIndependentExecutionTasks(execution.Tasks) >= 2 {
+		return false, false, nil
+	}
+	tried = true
+	tasks, err := requestExecutionTaskAudit(
+		ctx, client, question, routeContext, semantics, execution.Tasks,
+	)
+	if err != nil {
+		return tried, false, fmt.Errorf("execution task audit failed: %w", err)
+	}
+	if countIndependentExecutionTasks(tasks) < 2 {
+		return tried, false, nil
+	}
+	execution.Tasks = tasks
+	reasons := make([]string, 0, 4)
+	seenReasons := make(map[string]struct{}, len(execution.Reasons)+2)
+	for _, reason := range execution.Reasons {
+		if reason == "single_focused_question" || reason == "single_source_sufficient" {
+			continue
+		}
+		if _, exists := seenReasons[reason]; exists {
+			continue
+		}
+		seenReasons[reason] = struct{}{}
+		reasons = append(reasons, reason)
+	}
+	for _, reason := range []string{
+		"requires_multiple_subproblems",
+		"supports_parallel_investigation",
+	} {
+		if _, exists := seenReasons[reason]; exists || len(reasons) >= 4 {
+			continue
+		}
+		seenReasons[reason] = struct{}{}
+		reasons = append(reasons, reason)
+	}
+	execution.Reasons = reasons
+	return tried, true, nil
+}
+
+func requestExecutionTaskAudit(
+	ctx context.Context,
+	client *llm.LLMClient,
+	question, routeContext string,
+	semantics *domain.QuerySemantics,
+	candidateTasks []ExecutionTask,
+) ([]ExecutionTask, error) {
+	if client == nil {
+		return nil, errors.New("execution task audit unavailable: LLM client is nil")
+	}
+	entities := make([]map[string]any, 0, len(semantics.EntitySpecs))
+	for _, entity := range semantics.EntitySpecs {
+		entities = append(entities, map[string]any{
+			"id": entity.ID, "label": entity.Label, "role": entity.Role,
+		})
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"mode":                 "execution_task_audit",
+		"question":             question,
+		"conversation_context": routeContext,
+		"query_kind":           semantics.Kind,
+		"entities":             entities,
+		"candidate_tasks":      candidateTasks,
+	})
+	var raw map[string]any
+	var tasks []ExecutionTask
+	err := client.ChatJSON(ctx, executionAuditContract, string(payload), &raw, llm.CallOptions{
+		MaxTokens:   executionAuditMaxTokens,
+		MaxAttempts: 2,
+		Validate: func(parsed any) error {
+			value, ok := parsed.(*map[string]any)
+			if !ok || value == nil || *value == nil {
+				return errors.New("missing execution task audit object")
+			}
+			bound, err := bindExecutionAudit(*value)
+			if err != nil {
+				return err
+			}
+			tasks = bound
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func bindExecutionAudit(raw map[string]any) ([]ExecutionTask, error) {
+	for field := range raw {
+		if field != "tasks" {
+			return nil, fmt.Errorf("execution task audit field %q is unknown", field)
+		}
+	}
+	tasks, err := bindExecutionTasks(raw["tasks"])
+	if err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func countIndependentExecutionTasks(tasks []ExecutionTask) int {
+	count := 0
+	for _, task := range tasks {
+		if task.IndependentlyUseful && len(task.DependsOn) == 0 {
+			count++
+		}
+	}
+	return count
 }
 
 func bindQuerySemantics(raw map[string]any) (*domain.QuerySemantics, error) {

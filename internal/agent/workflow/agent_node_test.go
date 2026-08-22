@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T) {
@@ -40,8 +41,9 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 	node := singleNodeWorkflow().Nodes[0]
 	node.Budget.MaxToolCalls = 4
 	node.Task = &TaskDirective{
-		Purpose:        "Review the implementation evidence.",
-		RequiredFacets: []string{"implementation"},
+		Purpose:              "Review the implementation evidence.",
+		InvestigationGoalIDs: []string{"implementation_review"},
+		RequiredFacets:       []string{"implementation"},
 		InputRefs: []agentapi.EvidenceRef{{
 			SourceKind: "code", Target: "repo/file.go", Section: "implementation",
 		}},
@@ -99,6 +101,8 @@ func TestAgentNodeExecutorPinsRunAndIntersectsDefinitionPermissions(t *testing.T
 		t.Fatalf("decode task directive: %v", err)
 	}
 	if directive.Purpose != node.Task.Purpose ||
+		len(directive.InvestigationGoalIDs) != 1 ||
+		directive.InvestigationGoalIDs[0] != "implementation_review" ||
 		len(directive.RequiredFacets) != 1 ||
 		directive.RequiredFacets[0] != "implementation" ||
 		len(directive.InputRefs) != 1 ||
@@ -194,11 +198,188 @@ func TestAgentNodeExecutorMapsRetryableRuntimeFailure(t *testing.T) {
 	}
 }
 
+func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T) {
+	const version int64 = 41
+	schemas, agents := investigationCatalogs(t, version)
+	runtimeEvidence := tool.EvidenceUnit{
+		SourceKind: "log",
+		Target:     "checkout-runtime",
+		Coverage:   tool.EvidenceCoverage{Complete: true},
+	}
+	runtime := &capturingAgentRuntime{result: agentapi.RunResult{
+		Status: agentapi.RunSucceeded,
+		Output: json.RawMessage(`{
+			"focus":"runtime",
+			"summary":"Evidence collection completed, but report generation was incomplete.",
+			"findings":[],
+			"gaps":["The collected runtime evidence could not be converted into a schema-backed finding."],
+			"covered_goals":[],
+			"unresolved_goals":["runtime_and_operations"]
+		}`),
+		Evidence: agentapi.EvidenceSummary{ForcedConclusion: true},
+		EvidenceUnits: []tool.EvidenceUnit{
+			runtimeEvidence,
+		},
+	}}
+	executor, err := NewAgentExecutor(schemas, agents, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := json.RawMessage(`{
+		"task_id":"task-1",
+		"question":"Why is checkout failing?",
+		"objective":"Trace the checkout failure",
+		"entities":[],
+		"investigation_goals":[],
+		"evidence_goals":[
+			{
+				"id":"core_flow",
+				"facet":"core_flow",
+				"required":true,
+				"sources":["internal"],
+				"freshness":"stable",
+				"minimum_coverage":1
+			},
+			{
+				"id":"runtime_and_operations",
+				"facet":"runtime_and_operations",
+				"required":true,
+				"sources":["internal"],
+				"freshness":"current",
+				"minimum_coverage":1
+			}
+		],
+		"context":{}
+	}`)
+	input, err := PrepareHandoff(Handoff{
+		WorkflowRunID:  "workflow-run",
+		ProducerNodeID: "workflow.input",
+		Schema:         agentapi.SchemaRef{ID: "task.contract", Version: 1},
+		Payload:        contract,
+		Completeness:   Complete,
+	}, 1<<20, schemas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeResult, err := executor.Execute(t.Context(), NodeRequest{
+		WorkflowRunID: "workflow-run",
+		Node: NodeDefinition{
+			ID:   "investigate.runtime",
+			Kind: NodeAgent,
+			Agent: agentapi.DefinitionRef{
+				ID: "investigator.runtime", Version: version,
+			},
+			InputSchema:  agentapi.SchemaRef{ID: "task.contract", Version: 1},
+			OutputSchema: agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+			Task: &TaskDirective{
+				Purpose:        "Inspect runtime evidence.",
+				RequiredFacets: []string{"runtime_and_operations"},
+			},
+			Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
+		},
+		Inputs:        []Handoff{input},
+		WorkflowInput: input,
+		EffectivePermissions: agentapi.PermissionPolicy{
+			Scopes: []string{"knowledge.read"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.callCount != 1 ||
+		nodeResult.Handoff.Completeness != Partial ||
+		len(nodeResult.Handoff.EvidenceUnits) != 1 ||
+		nodeResult.Handoff.EvidenceUnits[0].Target != runtimeEvidence.Target {
+		t.Fatalf("node result=%+v runtime calls=%d", nodeResult, runtime.callCount)
+	}
+
+	codeEvidence := tool.EvidenceUnit{
+		SourceKind: "code",
+		Target:     "checkout.go",
+		Coverage:   tool.EvidenceCoverage{Complete: true},
+	}
+	codeReport := Handoff{
+		WorkflowRunID:  "workflow-run",
+		ProducerNodeID: "investigate.code",
+		Schema:         agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		Payload: json.RawMessage(`{
+			"focus":"code",
+			"summary":"code report",
+			"findings":[{
+				"claim":"The checkout route reaches the placement handler.",
+				"goal_ids":["core_flow"],
+				"evidence":[{"kind":"code","reference":"checkout.go","summary":"Route registration"}],
+				"confidence":0.9
+			}],
+			"gaps":[],
+			"covered_goals":["core_flow"],
+			"unresolved_goals":[]
+		}`),
+		EvidenceUnits: []tool.EvidenceUnit{codeEvidence},
+		Completeness:  Complete,
+	}
+	joined, err := joinHandoffs(
+		"workflow-run",
+		"evidence.join",
+		agentapi.SchemaRef{ID: "investigation.bundle", Version: 1},
+		JoinEvidenceView,
+		[]Handoff{codeReport, nodeResult.Handoff},
+		nil,
+		nil,
+		0.8,
+		false,
+		1<<20,
+		schemas,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ledger ledgerView
+	if err := json.Unmarshal(joined.Payload, &ledger); err != nil {
+		t.Fatal(err)
+	}
+	if joined.Completeness != Partial ||
+		len(ledger.UnavailableTasks) != 0 ||
+		len(ledger.EvidenceUnits) != 2 {
+		t.Fatalf("joined evidence = %+v", ledger)
+	}
+
+	verifiedOutput, err := verifyBundle(verificationRunInput{
+		workflowRunID: "workflow-run",
+		node: NodeDefinition{
+			ID:           "evidence.verify",
+			Kind:         NodeVerifier,
+			OutputSchema: agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2},
+			Verifier: &VerifierSpec{
+				RequiredGoals: []string{"core_flow", "runtime_and_operations"},
+			},
+		},
+		inputs:   []Handoff{joined},
+		maxBytes: 1 << 20,
+		schemas:  schemas,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var verified verifiedEvidenceView
+	if err := json.Unmarshal(verifiedOutput.handoff.Payload, &verified); err != nil {
+		t.Fatal(err)
+	}
+	if verified.Completeness != Partial ||
+		verified.Verification.StopReason != StopEvidenceInsufficient ||
+		len(verified.SupportedClaims) != 1 ||
+		verified.SupportedClaims[0].Claim != "The checkout route reaches the placement handler." ||
+		len(verified.EvidenceUnits) != 2 {
+		t.Fatalf("verified evidence = %+v", verified)
+	}
+}
+
 type capturingAgentRuntime struct {
 	request                agentapi.RunRequest
 	result                 agentapi.RunResult
 	err                    error
 	called                 bool
+	callCount              int
 	projectedChildRunID    string
 	projectedParentRunID   string
 	projectedWorkflowRunID string
@@ -211,6 +392,7 @@ func (runtime *capturingAgentRuntime) Run(
 	request agentapi.RunRequest,
 ) (agentapi.RunResult, error) {
 	runtime.called = true
+	runtime.callCount++
 	runtime.request = request
 	return runtime.result, runtime.err
 }

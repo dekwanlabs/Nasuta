@@ -28,11 +28,15 @@ type Config struct {
 	AnswerReserve       time.Duration
 	AnswerMaxTokens     int
 	ConclusionMaxTokens int
-	ContextWindow       int
+	// ConclusionRetryMaxTokens bounds the one-shot direct-answer retry after
+	// reasoning truncation or an empty model response.
+	ConclusionRetryMaxTokens int
+	ContextWindow            int
 	// MaxToolResultBytes bounds the model-facing copy of one tool result.
 	// The authoritative result remains available to observers and trace storage.
 	MaxToolResultBytes int
 	MaxContinueRounds  int
+	StructuredOutput   bool
 	DomainKnowledge    string
 	ModelParameters    llm.ModelParameters
 	BudgetCheck        func() error
@@ -61,6 +65,18 @@ type ConversationContext struct {
 func (config Config) withDefaults() Config {
 	if config.ConclusionMaxTokens <= 0 {
 		config.ConclusionMaxTokens = config.AnswerMaxTokens
+	}
+	if config.ConclusionRetryMaxTokens <= 0 && config.ConclusionMaxTokens > 0 {
+		config.ConclusionRetryMaxTokens = config.ConclusionMaxTokens / 4
+		if config.ConclusionRetryMaxTokens <= 0 {
+			config.ConclusionRetryMaxTokens = 1
+		}
+		if config.ConclusionRetryMaxTokens > 1024 {
+			config.ConclusionRetryMaxTokens = 1024
+		}
+	}
+	if config.ConclusionRetryMaxTokens > config.ConclusionMaxTokens {
+		config.ConclusionRetryMaxTokens = config.ConclusionMaxTokens
 	}
 	return config
 }

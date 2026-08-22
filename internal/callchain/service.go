@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -170,6 +171,14 @@ func (service *Service) resolve(ctx context.Context, request Request) (*codegrap
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve call-chain location %s:%d: %w", request.File, request.Line, err)
 		}
+		// Decorator/annotation lines in Python often belong to the file node;
+		// anchor them to the callable immediately below the declaration so
+		// upstream endpoint traversal can continue into the function body.
+		if node != nil && node.Kind == "file" {
+			if callable, callableErr := service.graphDB().FindCallableNear(ctx, request.File, request.Line); callableErr == nil {
+				node = callable
+			}
+		}
 		return node, nil, nil
 	}
 	query := request.Query
@@ -285,6 +294,15 @@ func (service *Service) traceDirection(ctx context.Context, root codegraph.Node,
 	bridged := make(map[string]struct{})
 	frontierSeen := make(map[string]struct{})
 	queue := []frontierNode{{node: root}}
+	// A controller method can perform a direct WebClient/RestTemplate/HTTP
+	// call without a codegraph "calls" edge for the fluent client chain. Seed
+	// the bridge from the requested root so those outbound calls are not lost.
+	if direction == "callees" {
+		service.addDownstreamBridge(ctx, root, 0, request, &result, visited, bridged, &queue, frontierSeen)
+	}
+	if direction == "callers" {
+		service.addUpstreamBridges(ctx, frontierNode{node: root}, request, &result, visited, bridged, &queue, frontierSeen)
+	}
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
@@ -367,6 +385,13 @@ func (service *Service) addDownstreamBridge(ctx context.Context, caller codegrap
 			targetPrefix += "/" + targetService.ModulePath
 		}
 		implementation, err := service.graphDB().ResolveDownstreamMethodInPath(targetPrefix, method, path)
+		// The codegraph route adapter is intentionally language-specific. Python
+		// FastAPI routers, for example, have endpoint metadata in the structure
+		// index but no synthetic route node. Use the same canonical endpoint
+		// record as the dashboard and anchor the bridge to its function node.
+		if err != nil && dependency.Type == domain.EdgeHTTP {
+			implementation, err = service.resolveEndpointMethod(ctx, targetService.ServiceKey, method, path)
+		}
 		if err != nil {
 			result.Unresolved = append(result.Unresolved, fmt.Sprintf("%s %s -> %s: %v", method, path, dependency.To, err))
 			continue
@@ -381,6 +406,27 @@ func (service *Service) addDownstreamBridge(ctx context.Context, caller codegrap
 		result.Hops = append(result.Hops, service.ownedHop(ctx, bridge, depth+1, true))
 		*queue = append(*queue, frontierNode{node: *implementation, depth: depth + 1})
 	}
+}
+
+func (service *Service) resolveEndpointMethod(ctx context.Context, serviceKey, method, path string) (*codegraph.Node, error) {
+	owner, err := service.structure.ServiceByKey(ctx, serviceKey)
+	if err != nil {
+		return nil, err
+	}
+	page, err := service.structure.ListApis(ctx, owner.ServiceName, path, 1, 100)
+	if err != nil {
+		return nil, err
+	}
+	for _, endpoint := range page.List {
+		if !strings.EqualFold(endpoint.Method, method) || endpoint.Path != path {
+			continue
+		}
+		node, err := service.graphDB().FindCallableNear(ctx, endpoint.File, endpoint.Line)
+		if err == nil && (node.Kind == "function" || node.Kind == "method") {
+			return node, nil
+		}
+	}
+	return nil, sql.ErrNoRows
 }
 
 func (service *Service) addUpstreamBridges(ctx context.Context, current frontierNode, request Request, result *DirectionResult, visited, bridged map[string]struct{}, queue *[]frontierNode, frontierSeen map[string]struct{}) {
@@ -408,27 +454,111 @@ func (service *Service) addUpstreamBridges(ctx context.Context, current frontier
 		result.Truncated = true
 		addString(&result.NextFrontier, frontierSeen, current.node.ID)
 	}
+	// Prefer an exact static HTTP route over a coarse Feign dependency when
+	// both mechanisms point at the same target service. Otherwise a Feign
+	// repository fallback can incorrectly claim a WebClient proxy controller.
+	sort.SliceStable(dependencies, func(i, j int) bool {
+		return dependencies[i].Type == domain.EdgeHTTP && dependencies[j].Type != domain.EdgeHTTP
+	})
 	for _, dependency := range dependencies {
-		for _, evidence := range dependency.Evidence {
-			caller, err := service.graphDB().ResolveRouteMethodInFile(evidence.Path, endpoint.Method, endpoint.Path)
-			if err != nil {
-				result.Unresolved = append(result.Unresolved, fmt.Sprintf("upstream route %s %s in %s: %v", endpoint.Method, endpoint.Path, evidence.Path, err))
-				continue
-			}
-			if !service.reserveNode(current.node.ID, caller.ID, request.MaxNodes, visited, result, frontierSeen) {
-				continue
-			}
-			bridge := codegraph.CallHop{Source: *caller, Target: current.node, Depth: current.depth + 1, Edge: codegraph.Edge{
-				Source: caller.ID, Target: current.node.ID, Kind: "service_route", Line: evidence.Line,
-				Confidence: dependency.Confidence, Provenance: string(dependency.Type),
-			}}
-			result.Hops = append(result.Hops, service.ownedHop(ctx, bridge, current.depth+1, true))
-			*queue = append(*queue, frontierNode{node: *caller, depth: current.depth + 1})
+		if dependency.TargetKind != domain.DependencyTargetService ||
+			dependency.CallerServiceKey == owner.ServiceKey {
+			continue
 		}
+		callerService, err := service.structure.ServiceByKey(ctx, dependency.CallerServiceKey)
+		if err != nil {
+			addString(&result.Unresolved, frontierSeen, fmt.Sprintf("caller service %s: %v", dependency.From, err))
+			continue
+		}
+
+		// Prefer an exact evidence file when it is itself an HTTP controller.
+		// Maven-expanded Feign dependencies normally point at a shared API
+		// interface instead; in that case resolve the matching proxy route in
+		// the caller application's repository (including sibling modules).
+		var caller *codegraph.Node
+		bridgeLine := 0
+		if dependency.Type == domain.EdgeHTTP {
+			for _, evidence := range dependency.Evidence {
+				outboundMethod, outboundPath, routeOK := service.graphDB().HTTPClientRouteAt(evidence.Path, evidence.Line)
+				if !routeOK || !strings.EqualFold(outboundMethod, endpoint.Method) || outboundPath != endpoint.Path {
+					continue
+				}
+				candidate, candidateErr := service.graphDB().FindCallableNear(ctx, evidence.Path, evidence.Line)
+				if candidateErr == nil && (candidate.Kind == "function" || candidate.Kind == "method") {
+					caller = candidate
+					bridgeLine = evidence.Line
+					break
+				}
+			}
+		}
+		if caller == nil {
+			for _, evidence := range dependency.Evidence {
+				caller, err = service.graphDB().ResolveRouteMethodInFile(evidence.Path, endpoint.Method, endpoint.Path)
+				if err == nil {
+					bridgeLine = evidence.Line
+					break
+				}
+			}
+		}
+		if caller == nil {
+			repoPrefix := "repos/" + callerService.Repo
+			caller, err = service.graphDB().ResolveRouteMethodInPath(repoPrefix, endpoint.Method, endpoint.Path)
+		}
+		if err != nil || caller == nil {
+			// A dependency may be a background consumer with no upstream HTTP
+			// proxy. That is not a broken call-chain and should not flood the
+			// dashboard with one unresolved item per shared interface file.
+			continue
+		}
+		if !service.reserveNode(current.node.ID, caller.ID, request.MaxNodes, visited, result, frontierSeen) {
+			continue
+		}
+		if bridgeLine == 0 {
+			bridgeLine = caller.StartLine
+		}
+		bridge := codegraph.CallHop{Source: *caller, Target: current.node, Depth: current.depth + 1, Edge: codegraph.Edge{
+			Source: caller.ID, Target: current.node.ID, Kind: "service_route", Line: bridgeLine,
+			Confidence: dependency.Confidence, Provenance: string(dependency.Type),
+		}}
+		hop := service.ownedHop(ctx, bridge, current.depth+1, true)
+		// The source file can belong to a library/controller module, while the
+		// dependency caller is the deployable Spring Boot application. Keep the
+		// source location but expose the canonical runtime owner to consumers.
+		hop.Source.ServiceKey = callerService.ServiceKey
+		hop.Source.ServiceName = callerService.ServiceName
+		result.Hops = append(result.Hops, hop)
+		*queue = append(*queue, frontierNode{node: *caller, depth: current.depth + 1})
 	}
 }
 
 func (service *Service) routeForDependency(node codegraph.Node, dependency domain.DependencyEdge) (string, string, bool) {
+	// A Feign dependency carries two different source locations: the real
+	// caller invocation and the Feign method declaration. The caller's route is
+	// its inbound API and must never be used as the downstream route. Resolve
+	// the declared client method first; ResolveDownstreamMethod intentionally
+	// accepts a path suffix, so a Feign method path such as /message can still
+	// match the provider's /system/welcome/message route.
+	if dependency.Type == domain.EdgeFeign {
+		for _, evidence := range dependency.Evidence {
+			if method, path, ok := service.graphDB().RouteAt(evidence.Path, evidence.Line); ok {
+				return method, path, true
+			}
+		}
+	}
+	// HTTP client evidence describes the outbound route, which is different
+	// from the caller controller's inbound route. Prefer it before looking at
+	// the node route so WebClient/RestTemplate calls do not resolve against the
+	// proxy endpoint by mistake.
+	if dependency.Type == domain.EdgeHTTP {
+		for _, evidence := range dependency.Evidence {
+			if evidence.Path != node.FilePath {
+				continue
+			}
+			if method, path, ok := service.graphDB().HTTPClientRouteAt(evidence.Path, evidence.Line); ok {
+				return method, path, true
+			}
+		}
+	}
 	if method, path, ok := service.graphDB().RouteForNode(node); ok {
 		return method, path, true
 	}

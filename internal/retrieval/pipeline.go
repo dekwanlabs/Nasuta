@@ -17,6 +17,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/internal/tokenestimate"
 	"github.com/dekwanlabs/nasuta/knowledge"
 	"github.com/dekwanlabs/nasuta/log"
@@ -74,6 +75,7 @@ type codeHit struct {
 	snippet       string
 	recallScore   float64
 	denseScore    float64
+	hasDenseScore bool
 	scoreKind     string
 	evidenceClass string
 	trustTier     int
@@ -171,6 +173,9 @@ type retrievalBudget struct {
 
 type queryRetrievalPolicy struct {
 	budget              retrievalBudget
+	searchCode          bool
+	searchRunbook       bool
+	searchService       bool
 	maxExpandedServices int
 	expandCodeGraph     bool
 	coverageSelection   bool
@@ -178,10 +183,16 @@ type queryRetrievalPolicy struct {
 
 func retrievalPolicyFor(kind domain.QueryKind) queryRetrievalPolicy {
 	base := queryRetrievalPolicy{
-		budget: retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20},
+		budget:        retrievalBudget{code: 12, runbook: 8, service: 6, rerank: 20},
+		searchCode:    true,
+		searchRunbook: true,
+		searchService: true,
 	}
 	switch kind {
-	case domain.QueryFocusedFact, domain.QueryCodeReview:
+	case domain.QueryFocusedFact:
+		return base
+	case domain.QueryCodeReview:
+		base.searchRunbook = false
 		return base
 	case domain.QueryRuntimeDiagnosis, domain.QueryInventory, domain.QueryComparison:
 		base.budget = retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}
@@ -386,7 +397,8 @@ func (retrieve *Retriever) discoverSources(ctx context.Context, input retrievalD
 	searchQuery := input.SearchQuery
 	servicePatterns := input.ServicePatterns
 	serviceScoped := input.ServiceScoped
-	budget := retrievalPolicyFor(input.Plan.Kind).budget
+	policy := retrievalPolicyFor(input.Plan.Kind)
+	budget := policy.budget
 	vectorTools, vectorCapable := retrieve.tools.(vectorToolset)
 	useSharedVectorPath := vectorCapable && input.QueryVectorAttempted
 	var a anchor
@@ -410,135 +422,144 @@ func (retrieve *Retriever) discoverSources(ctx context.Context, input retrievalD
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(3)
-	codeStatus := retrievalSourceOutcome{}
-	runbookStatus := retrievalSourceOutcome{}
-	serviceStatus := retrievalSourceOutcome{}
+	codeStatus := retrievalSourceOutcome{status: "skipped"}
+	runbookStatus := retrievalSourceOutcome{status: "skipped"}
+	serviceStatus := retrievalSourceOutcome{status: "skipped"}
 
-	go func() {
-		defer wg.Done()
-		var result domain.SearchResult[domain.CodeSearchHit]
-		var err error
-		if useSharedVectorPath {
-			result, err = vectorTools.FindCodeWithVector(ctx, searchQuery, "", budget.code, input.QueryVector)
-		} else {
-			result, err = retrieve.tools.FindCode(ctx, searchQuery, "", budget.code)
-		}
-		if err != nil {
-			codeStatus.status, codeStatus.err = "failed", err
-			log.InfofCtx(ctx, "[qa] semantic code search error: %v", err)
-			return
-		}
-		codeMatches := result.Matches
-		log.InfofCtx(ctx, "[qa] semantic code search selected:\n%s", codeMatchSummary(codeMatches, "code-search"))
-		// Resolve repo → service in one batch so discover stays cheap on large indexes.
-		uniqueRepos := uniqueRepoStrings(codeMatches)
-		modules := retrieve.resolveServiceModules(ctx, uniqueRepos)
-		var localHits []codeHit
-		for _, m := range codeMatches {
-			if m.Path == "" {
-				continue
-			}
-			snippet := m.Text
-			serviceName := retrieve.serviceForRepoMapped(ctx, modules, m.Repo, m.Path)
-			if serviceScoped && (serviceName == "" || !matchesConfiguredService(serviceName, servicePatterns)) {
-				continue
-			}
-			recallScore := m.SemanticScore
-			if m.FusionScore != 0 {
-				recallScore = m.FusionScore
-			} else if recallScore == 0 {
-				recallScore = m.Score
-			}
-			localHits = append(localHits, codeHit{
-				path:          m.Path,
-				lang:          m.Lang,
-				repo:          m.Repo,
-				layer:         m.Layer,
-				snippet:       snippet,
-				recallScore:   recallScore,
-				denseScore:    m.SemanticScore,
-				scoreKind:     m.ScoreKind,
-				evidenceClass: m.EvidenceClass,
-				trustTier:     m.TrustTier,
-				startLine:     m.StartLine,
-				endLine:       m.EndLine,
-			})
-			addSvc(serviceName)
-		}
-		mu.Lock()
-		a.codeHits = localHits
-		mu.Unlock()
-		codeStatus.count = len(localHits)
-		codeStatus.status = retrievalSourceStatus(len(localHits))
-		log.InfofCtx(ctx, "[qa] semantic code search raw hits: %d", len(localHits))
-	}()
-
-	go func() {
-		defer wg.Done()
-		query := knowledge.RunbookQuery{Query: searchQuery, Limit: budget.runbook}
-		var result domain.RunbookSearchResult
-		var err error
-		if useSharedVectorPath {
-			result, err = vectorTools.FindRunbooksWithVector(ctx, query, input.QueryVector)
-		} else {
-			result, err = retrieve.tools.FindRunbooks(ctx, query)
-		}
-		if err != nil {
-			runbookStatus.status, runbookStatus.err = "failed", err
-			log.InfofCtx(ctx, "[qa] runbook search error: %v", err)
-			return
-		}
-		matches := result.Matches
-		mu.Lock()
-		a.runbooks = matches
-		mu.Unlock()
-		runbookStatus.count = len(matches)
-		runbookStatus.status = retrievalSourceStatus(len(matches))
-		log.InfofCtx(ctx, "[qa] runbook hits: %d %v", len(matches), runbookTitles(matches))
-	}()
-
-	go func() {
-		defer wg.Done()
-		var matches []domain.ServiceRecord
-		if serviceScoped {
-			matches = retrieve.configuredServiceMatches(ctx, servicePatterns, 8)
-		} else {
-			var result domain.SearchResult[domain.ServiceRecord]
+	if policy.searchCode {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var result domain.SearchResult[domain.CodeSearchHit]
 			var err error
 			if useSharedVectorPath {
-				result, err = vectorTools.FindServicesWithVector(ctx, searchQuery, budget.service, input.QueryVector)
+				result, err = vectorTools.FindCodeWithVector(ctx, searchQuery, "", budget.code, input.QueryVector)
 			} else {
-				result, err = retrieve.tools.FindServices(ctx, searchQuery, budget.service)
+				result, err = retrieve.tools.FindCode(ctx, searchQuery, "", budget.code)
 			}
 			if err != nil {
-				serviceStatus.status, serviceStatus.err = "failed", err
-				log.InfofCtx(ctx, "[qa] service search error: %v", err)
+				codeStatus.status, codeStatus.err = "failed", err
+				log.InfofCtx(ctx, "[qa] semantic code search error: %v", err)
 				return
 			}
-			matches = result.Matches
-		}
-		mu.Lock()
-		for _, svc := range matches {
-			if svc.ServiceName == "" {
-				continue
+			codeMatches := result.Matches
+			log.InfofCtx(ctx, "[qa] semantic code search selected:\n%s", codeMatchSummary(codeMatches, "code-search"))
+			// Resolve repo → service in one batch so discover stays cheap on large indexes.
+			uniqueRepos := uniqueRepoStrings(codeMatches)
+			modules := retrieve.resolveServiceModules(ctx, uniqueRepos)
+			var localHits []codeHit
+			for _, m := range codeMatches {
+				if m.Path == "" {
+					continue
+				}
+				snippet := m.Text
+				serviceName := retrieve.serviceForRepoMapped(ctx, modules, m.Repo, m.Path)
+				if serviceScoped && (serviceName == "" || !matchesConfiguredService(serviceName, servicePatterns)) {
+					continue
+				}
+				recallScore := m.SemanticScore
+				if m.FusionScore != 0 {
+					recallScore = m.FusionScore
+				} else if recallScore == 0 {
+					recallScore = m.Score
+				}
+				localHits = append(localHits, codeHit{
+					path:          m.Path,
+					lang:          m.Lang,
+					repo:          m.Repo,
+					layer:         m.Layer,
+					snippet:       snippet,
+					recallScore:   recallScore,
+					denseScore:    m.SemanticScore,
+					hasDenseScore: m.HasDenseScore || m.ScoreKind != string(semantic.ScoreFusion),
+					scoreKind:     m.ScoreKind,
+					evidenceClass: m.EvidenceClass,
+					trustTier:     m.TrustTier,
+					startLine:     m.StartLine,
+					endLine:       m.EndLine,
+				})
+				addSvc(serviceName)
 			}
-			if _, ok := a.svcMatches[svc.ServiceName]; !ok {
-				a.svcMatches[svc.ServiceName] = serviceMatch{
-					name:    svc.ServiceName,
-					layer:   svc.Layer,
-					lang:    svc.Language,
-					summary: svc.Summary,
+			mu.Lock()
+			a.codeHits = localHits
+			mu.Unlock()
+			codeStatus.count = len(localHits)
+			codeStatus.status = retrievalSourceStatus(len(localHits))
+			log.InfofCtx(ctx, "[qa] semantic code search raw hits: %d", len(localHits))
+		}()
+	}
+
+	if policy.searchRunbook {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			query := knowledge.RunbookQuery{Query: searchQuery, Limit: budget.runbook}
+			var result domain.RunbookSearchResult
+			var err error
+			if useSharedVectorPath {
+				result, err = vectorTools.FindRunbooksWithVector(ctx, query, input.QueryVector)
+			} else {
+				result, err = retrieve.tools.FindRunbooks(ctx, query)
+			}
+			if err != nil {
+				runbookStatus.status, runbookStatus.err = "failed", err
+				log.InfofCtx(ctx, "[qa] runbook search error: %v", err)
+				return
+			}
+			matches := result.Matches
+			mu.Lock()
+			a.runbooks = matches
+			mu.Unlock()
+			runbookStatus.count = len(matches)
+			runbookStatus.status = retrievalSourceStatus(len(matches))
+			log.InfofCtx(ctx, "[qa] runbook hits: %d %v", len(matches), runbookTitles(matches))
+		}()
+	}
+
+	if policy.searchService {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var matches []domain.ServiceRecord
+			if serviceScoped {
+				matches = retrieve.configuredServiceMatches(ctx, servicePatterns, 8)
+			} else {
+				var result domain.SearchResult[domain.ServiceRecord]
+				var err error
+				if useSharedVectorPath {
+					result, err = vectorTools.FindServicesWithVector(ctx, searchQuery, budget.service, input.QueryVector)
+				} else {
+					result, err = retrieve.tools.FindServices(ctx, searchQuery, budget.service)
+				}
+				if err != nil {
+					serviceStatus.status, serviceStatus.err = "failed", err
+					log.InfofCtx(ctx, "[qa] service search error: %v", err)
+					return
+				}
+				matches = result.Matches
+			}
+			mu.Lock()
+			for _, svc := range matches {
+				if svc.ServiceName == "" {
+					continue
+				}
+				if _, ok := a.svcMatches[svc.ServiceName]; !ok {
+					a.svcMatches[svc.ServiceName] = serviceMatch{
+						name:    svc.ServiceName,
+						layer:   svc.Layer,
+						lang:    svc.Language,
+						summary: svc.Summary,
+					}
 				}
 			}
-		}
-		mu.Unlock()
-		for _, svc := range matches {
-			addSvc(svc.ServiceName)
-		}
-		serviceStatus.count = len(matches)
-		serviceStatus.status = retrievalSourceStatus(len(matches))
-	}()
+			mu.Unlock()
+			for _, svc := range matches {
+				addSvc(svc.ServiceName)
+			}
+			serviceStatus.count = len(matches)
+			serviceStatus.status = retrievalSourceStatus(len(matches))
+		}()
+	}
 
 	wg.Wait()
 	return retrievalSourcesResult{

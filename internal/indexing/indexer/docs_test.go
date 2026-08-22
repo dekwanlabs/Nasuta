@@ -81,3 +81,26 @@ func TestLoadKnowledgeBaseDoesNotTurnReadFailureIntoEmptySnapshot(t *testing.T) 
 		t.Fatal("knowledge-base read failure was treated as an empty snapshot")
 	}
 }
+
+func TestDeduplicateEmbedInputsPrefersCanonicalScope(t *testing.T) {
+	inputs := []EmbedDocInput{
+		{ID: "document-copy", Scope: "document", Content: "# Same\n\nshared body"},
+		{ID: "module-copy", Scope: "module", Content: "---\nlegacy: true\n---\n# Same\n\nshared body"},
+		{ID: "schema-copy", Scope: "schema", Content: "# Same\n\nshared body"},
+		{ID: "unique", Scope: "flow", Content: "# Other\n\nunique body"},
+	}
+
+	got := deduplicateEmbedInputs(inputs)
+	if len(got) != 2 {
+		t.Fatalf("deduplicated inputs = %d, want 2: %#v", len(got), got)
+	}
+	if got[0].ID != "schema-copy" || got[0].Scope != "schema" {
+		t.Fatalf("canonical duplicate = %+v, want schema copy", got[0])
+	}
+	if got[1].ID != "unique" {
+		t.Fatalf("unique input moved or dropped: %+v", got)
+	}
+	if documentContentHash(inputs[0].Content) != documentContentHash(inputs[1].Content) {
+		t.Fatal("frontmatter changed the exact-body hash")
+	}
+}

@@ -1,11 +1,16 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"regexp"
 	"strings"
 	"unicode"
 )
 
 const MaxCanonicalEntities = 8
+
+var canonicalEntityIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 
 // EntitySpec carries the planner's bounded description of one comparison
 // subject. ID is the stable join key; the other fields preserve disambiguation
@@ -40,13 +45,23 @@ func CanonicalEntitySpecs(specs []EntitySpec) []EntitySpec {
 			index = len(result) - 1
 		}
 		current := &result[index]
+		label := strings.TrimSpace(spec.Label)
+		aliases := append([]string(nil), spec.Aliases...)
+		if opaqueEntityID(spec.ID) {
+			original := canonicalEntityLiteral(spec.ID)
+			if label == "" {
+				label = original
+			} else {
+				aliases = append(aliases, original)
+			}
+		}
 		if current.Label == "" {
-			current.Label = strings.TrimSpace(spec.Label)
+			current.Label = label
 		}
 		if current.Role == "" {
 			current.Role = strings.TrimSpace(spec.Role)
 		}
-		current.Aliases = mergeEntityAliases(current.Aliases, spec.Aliases, current.Label)
+		current.Aliases = mergeEntityAliases(current.Aliases, aliases, current.Label)
 	}
 	return result
 }
@@ -114,12 +129,29 @@ func CanonicalQuestionEntities(question string) []string {
 }
 
 func canonicalEntityID(candidate string) string {
+	value := strings.ToLower(canonicalEntityLiteral(candidate))
+	if value == "" {
+		return ""
+	}
+	if canonicalEntityIDPattern.MatchString(value) {
+		return value
+	}
+	digest := sha256.Sum256([]byte(value))
+	return "entity_" + hex.EncodeToString(digest[:])
+}
+
+func opaqueEntityID(candidate string) bool {
+	value := strings.ToLower(canonicalEntityLiteral(candidate))
+	return value != "" && !canonicalEntityIDPattern.MatchString(value)
+}
+
+func canonicalEntityLiteral(candidate string) string {
 	value := strings.TrimSpace(candidate)
 	value = strings.Trim(value, "`'\"")
 	value = strings.TrimSpace(value)
 	value = strings.TrimRight(value, ".,;!?，。；！？")
 	value = strings.TrimSuffix(value, "()")
-	return strings.ToLower(strings.TrimSpace(value))
+	return strings.TrimSpace(value)
 }
 
 func isQuestionEntity(value string) bool {

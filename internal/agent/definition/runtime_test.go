@@ -776,7 +776,9 @@ func TestDefinitionRuntimeExecutesStructuredOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if result.Status != agentapi.RunSucceeded || string(result.Output) != result.Text {
+	if result.Status != agentapi.RunSucceeded ||
+		string(result.Output) != `{"coverage":[],"findings":[],"uncertainties":[],"summary":"pass"}` ||
+		result.Text != "" {
 		t.Fatalf("result = %+v", result)
 	}
 	if result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 7 ||

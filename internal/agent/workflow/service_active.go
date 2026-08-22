@@ -101,6 +101,21 @@ func (service *Service) LoadTerminalResult(
 	return service.store.LoadTerminalResult(ctx, runID)
 }
 
+// LoadFullRunState reads the durable checkpoint needed to recover intermediate
+// evidence when the canonical workflow output is absent or incomplete.
+func (service *Service) LoadFullRunState(
+	ctx context.Context,
+	runID string,
+) (*RunState, error) {
+	if service == nil || service.store == nil {
+		return nil, ErrUnavailable
+	}
+	if err := validateRunID(runID); err != nil {
+		return nil, err
+	}
+	return service.store.LoadFullRunState(ctx, runID)
+}
+
 // Close prevents new Runs, cancels active execution, and waits for persistence cleanup.
 func (service *Service) Close() {
 	if service == nil {

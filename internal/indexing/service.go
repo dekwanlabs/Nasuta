@@ -1,6 +1,7 @@
 package indexing
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -67,6 +68,16 @@ func Build(cfg config.Config, docDB *store.DocStore, docStoreErr error) (*Servic
 	svc := &Service{
 		Cfg: cfg, DB: db, Semantic: semanticBackend, Embedder: embed.New(cfg),
 		docDB: docDB, docStoreErr: docStoreErr, Platform: &config.PlatformSettings{},
+	}
+	// Ensure the configured collection exists up front so read paths (dashboard
+	// counts, search) never hit "collection not found" before the first index.
+	// The dense dimension comes from config so the collection exists even before
+	// an embedding key is set; Ensure is idempotent on a matching collection.
+	if err := svc.Semantic.Ensure(context.Background(), semantic.Schema{
+		Collection: cfg.Semantic.Collection,
+		DenseDim:   cfg.EmbeddingDim,
+	}); err != nil {
+		log.Warnf("[indexing] ensure semantic collection %q: %v", cfg.Semantic.Collection, err)
 	}
 	svc.loadBM25()
 	svc.ScanDirs, err = svc.LoadScanDirs()
@@ -136,11 +147,13 @@ func (svc *Service) loadBM25() {
 			log.Warnf("[indexing] legacy BM25 vocabulary at %s - run the full Embed Code operation once before repository-only embedding", vocabPath)
 			return
 		} else {
-			log.Errorf("[indexing] BM25 vocab at %s failed to load: %v - search is dense-only until rebuilt", vocabPath, err)
+			svc.bm25MigrationRequired.Store(true)
+			log.Errorf("[indexing] BM25 vocab at %s failed to load: %v - full code embedding is required before repository-only embedding", vocabPath, err)
 			return
 		}
 	}
-	log.Warnf("[indexing] BM25 vocab missing at %s - hybrid search disabled (dense-only). Trigger the \"Embed Code\" platform action to rebuild it; it is no longer auto-rebuilt on startup.", vocabPath)
+	svc.bm25MigrationRequired.Store(true)
+	log.Warnf("[indexing] BM25 vocab missing at %s - hybrid search disabled (dense-only). Trigger the \"Embed Code\" platform action to rebuild it before repository-only embedding.", vocabPath)
 }
 
 func (svc *Service) setBM25(builder *retrieval.BM25Builder) {

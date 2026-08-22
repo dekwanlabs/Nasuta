@@ -20,6 +20,22 @@ func TestResolveQueryPlanUsesPlannerSemantics(t *testing.T) {
 	}
 }
 
+func TestResolveQueryPlanPreservesNonCanonicalIdentifierForEntityMatching(t *testing.T) {
+	resolution := ResolveQueryPlan(
+		"比较系统",
+		&QuerySemantics{Kind: QueryComparison},
+		[]string{"本系统ai集成"},
+	)
+	if len(resolution.Plan.Entities) != 1 ||
+		resolution.Plan.Entities[0] != "entity_75cbe4e1e8cee1d5879f90a9f477396b94d02f27a61407c4230618ddd2d16869" {
+		t.Fatalf("entities = %#v", resolution.Plan.Entities)
+	}
+	if len(resolution.Plan.EntitySpecs) != 1 ||
+		resolution.Plan.EntitySpecs[0].Label != "本系统ai集成" {
+		t.Fatalf("entity specs = %#v", resolution.Plan.EntitySpecs)
+	}
+}
+
 func TestResolveQueryPlanTypedRuntimeLocatorOverridesPlanner(t *testing.T) {
 	for _, question := range []string{
 		"trace_id: 12345678-1234-1234-1234-1234567890ab",

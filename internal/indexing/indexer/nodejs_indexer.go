@@ -108,28 +108,22 @@ func scanNodeJSDependencies(root string, dirs []string) []domain.DependencyEdge 
 			continue
 		}
 		text := readFile(file)
-		if !strings.Contains(text, "axios") && !strings.Contains(text, "fetch(") &&
-			!strings.Contains(text, "request(") {
+		if !strings.Contains(text, "axios") && !strings.Contains(text, "fetch(") && !strings.Contains(text, "request(") {
 			continue
 		}
 		rel := relativeTo(root, file)
 		caller := dependencyIdentity(root, file)
-		for _, m := range nodejsHTTPCallRe.FindAllStringSubmatch(text, -1) {
-			if len(m) > 1 {
-				target := strings.TrimPrefix(m[1], "http://")
-				target = strings.TrimPrefix(target, "https://")
-				target, _, _ = strings.Cut(target, "/")
-				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
-					edges = append(edges, domain.DependencyEdge{
-						CallerServiceKey: caller.Key,
-						From:             caller.Name,
-						To:               target,
-						Type:             domain.EdgeHTTP,
-						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence:       0.5,
-					})
-				}
+		for _, match := range nodejsHTTPCallRe.FindAllStringSubmatchIndex(text, -1) {
+			if len(match) < 4 || !httpURLUsedByClient(text, match[0], match[1], nodejsClientCallRe) {
+				continue
 			}
+			target := text[match[2]:match[3]]
+			target = strings.TrimPrefix(strings.TrimPrefix(target, "http://"), "https://")
+			target, _, _ = strings.Cut(target, "/")
+			if skipDependencyTarget(target) {
+				continue
+			}
+			edges = append(edges, protocolEdge(caller, target, domain.EdgeHTTP, rel, lineAt(text, match[0]), 0.5))
 		}
 	}
 	return edges
@@ -259,3 +253,4 @@ func nodejsHandlerName(lines []string, index int) string {
 }
 
 var nodejsHTTPCallRe = regexp.MustCompile(`https?://([^\s"'\)]+)`)
+var nodejsClientCallRe = regexp.MustCompile(`(?i)(?:fetch|axios(?:\.[A-Za-z]+)?|request)\s*\(`)

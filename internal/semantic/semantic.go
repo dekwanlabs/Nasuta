@@ -66,7 +66,10 @@ type Hit struct {
 	Score       float32
 	ScoreKind   ScoreKind
 	DenseScore  float32
+	SparseScore float32
 	FusionScore float32
+	DenseRank   int
+	SparseRank  int
 	Metadata    map[string]any
 }
 

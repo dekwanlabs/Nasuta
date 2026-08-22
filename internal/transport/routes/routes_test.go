@@ -257,6 +257,10 @@ func TestCommonRoutesExcludeApplicationObserveEndpoints(t *testing.T) {
 	if pattern == "" {
 		t.Fatal("QA runtime status route is not registered")
 	}
+	_, pattern = mux.Handler(&http.Request{Method: http.MethodGet, URL: mustURL(t, "/api/tool/trace_relations")})
+	if pattern == "" {
+		t.Fatal("trace_relations HTTP fallback route is not registered")
+	}
 	_, pattern = mux.Handler(&http.Request{Method: http.MethodGet, URL: mustURL(t, "/api/qdrant/stats")})
 	if pattern != "" {
 		t.Fatalf("removed Qdrant status route is still registered via %q", pattern)

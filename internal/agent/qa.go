@@ -15,19 +15,37 @@ type QARequest = agentqa.Request
 type AskResult = agentqa.AskResult
 type InvestigationRequest = agentqa.InvestigationRequest
 type InvestigationResult = agentqa.InvestigationResult
+type InvestigationClaim = agentqa.InvestigationClaim
+type InvestigationUnsupportedClaim = agentqa.InvestigationUnsupportedClaim
+type InvestigationVerification = agentqa.InvestigationVerification
+type InvestigationCitation = agentqa.InvestigationCitation
 type InvestigationTerminal = agentqa.InvestigationTerminal
 type InvestigationStatus = agentqa.InvestigationStatus
 type InvestigationCompleteness = agentqa.InvestigationCompleteness
 type InvestigationUsage = agentqa.InvestigationUsage
 type InvestigationRunner = agentqa.InvestigationRunner
+type InvestigationPlanner = agentqa.InvestigationPlanner
+type InvestigationContinuationRunner = agentqa.InvestigationContinuationRunner
+type InvestigationContinuationRequest = agentqa.InvestigationContinuationRequest
+type InvestigationRoundSnapshot = agentqa.InvestigationRoundSnapshot
 type QACoordinator = agentqa.Coordinator
 type ParentRunReader = agentqa.ParentRunReader
 type TaskContract = agentqa.TaskContract
 type EntityRef = agentqa.EntityRef
 type EvidenceGoal = agentqa.EvidenceGoal
+type TaskEvidenceAssignment = agentqa.TaskEvidenceAssignment
+type TaskContextRef = agentqa.TaskContextRef
 type TaskContext = agentqa.TaskContext
 type ConversationRef = agentqa.ConversationRef
 type TaskTimeRange = agentqa.TaskTimeRange
+
+// MergeInvestigationResults combines a partial answer with verified facts.
+// The verifier's explicit empty goal lists are authoritative.
+func MergeInvestigationResults(
+	previous, current InvestigationResult,
+) InvestigationResult {
+	return agentqa.MergeRoundResult(previous, current)
+}
 
 const (
 	InvestigationSucceeded = agentqa.InvestigationSucceeded

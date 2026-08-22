@@ -127,34 +127,112 @@ func scanCSharpEndpoints(root string, dirs []string) []domain.EndpointRecord {
 
 // scanCSharpRefits finds Refit interfaces (C# equivalent of @FeignClient).
 func scanCSharpRefits(root string, dirs []string) []domain.DependencyEdge {
+	type refitMethod struct {
+		name string
+		line int
+	}
+	type refitClient struct {
+		interfaceName string
+		target        string
+		methods       map[string]refitMethod
+		path          string
+	}
+	var clients []refitClient
 	files := walkFiles(root, dirs, hasSuffix(".cs"))
+	interfaceRe := regexp.MustCompile(`(?s)\binterface\s+(\w+)\s*(?:\([^)]*\))?\s*\{(.*?)\}`)
+	methodRe := regexp.MustCompile(`(?m)\[(?:Get|Post|Put|Delete|Patch|Head)\s*\([^)]*\)\][\s\r\n]*(?:public\s+)?(?:static\s+)?(?:[\w<>,.?\[\]\s]+\s+)?(\w+)\s*\(`)
+	for _, file := range files {
+		if isTestSourcePath(relativeTo(root, file)) {
+			continue
+		}
+		text := readFile(file)
+		if !strings.Contains(text, "interface") ||
+			(!strings.Contains(text, "[Get") && !strings.Contains(text, "[Post") &&
+				!strings.Contains(text, "[Put") && !strings.Contains(text, "[Delete")) {
+			continue
+		}
+		rel := relativeTo(root, file)
+		matches := interfaceRe.FindAllStringSubmatchIndex(text, -1)
+		for _, match := range matches {
+			if len(match) < 6 {
+				continue
+			}
+			name := text[match[2]:match[3]]
+			body := text[match[4]:match[5]]
+			methods := make(map[string]refitMethod)
+			for _, method := range methodRe.FindAllStringSubmatchIndex(body, -1) {
+				if len(method) < 4 {
+					continue
+				}
+				methodName := body[method[2]:method[3]]
+				line := 1 + strings.Count(text[:match[4]+method[0]], "\n")
+				methods[methodName] = refitMethod{name: methodName, line: line}
+			}
+			if len(methods) == 0 {
+				continue
+			}
+			target := extractRefitTarget(text)
+			if target == "" {
+				target = refitRegistrationTarget(files, name)
+			}
+			if target == "" {
+				// A Refit interface without a resolvable base address is still
+				// a declaration candidate, but cannot become a service edge.
+				continue
+			}
+			clients = append(clients, refitClient{
+				interfaceName: name, target: target, methods: methods, path: rel,
+			})
+		}
+	}
+
 	var records []domain.DependencyEdge
 	for _, file := range files {
 		if isTestSourcePath(relativeTo(root, file)) {
 			continue
 		}
 		text := readFile(file)
-		// Refit interfaces use [Get("/path")], [Post("/path")] on interface methods
-		if !strings.Contains(text, "interface") || !strings.Contains(text, "[Get") && !strings.Contains(text, "[Post") {
+		if strings.Contains(text, "interface") && strings.Contains(text, "[Get") {
+			// Interface declarations describe capability, not usage. They are
+			// inspected above but can never activate their own dependency.
 			continue
 		}
 		rel := relativeTo(root, file)
 		caller := dependencyIdentity(root, file)
-		// Extract base URL from [BaseAddress("https://api.example.com")] or interface name
-		target := extractRefitTarget(text)
-		if target == "" {
-			target = strings.TrimSuffix(filepath.Base(file), ".cs")
+		for _, client := range clients {
+			if !strings.Contains(text, client.interfaceName) {
+				continue
+			}
+			bindings := make(map[string]struct{})
+			bindingRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(client.interfaceName) + `\s+(\w+)`)
+			for _, match := range bindingRe.FindAllStringSubmatch(text, -1) {
+				if len(match) > 1 {
+					bindings[match[1]] = struct{}{}
+				}
+			}
+			if len(bindings) == 0 {
+				continue
+			}
+			for receiver := range bindings {
+				for methodName, method := range client.methods {
+					callRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(receiver) + `\s*\.\s*` + regexp.QuoteMeta(methodName) + `\s*\(`)
+					for _, call := range callRe.FindAllStringIndex(text, -1) {
+						line := 1 + strings.Count(text[:call[0]], "\n")
+						records = append(records, domain.DependencyEdge{
+							CallerServiceKey: caller.Key,
+							From:             caller.Name,
+							To:               client.target,
+							Type:             domain.EdgeHTTP,
+							Evidence: []domain.Evidence{
+								{Path: rel, Line: line, Symbol: receiver + "." + methodName, Kind: domain.SourceCodeScan},
+								{Path: client.path, Line: method.line, Symbol: client.interfaceName + "." + methodName, Kind: domain.SourceCodeScan},
+							},
+							Confidence: 0.75,
+						})
+					}
+				}
+			}
 		}
-		records = append(records, domain.DependencyEdge{
-			CallerServiceKey: caller.Key,
-			From:             caller.Name,
-			To:               target,
-			Type:             domain.EdgeHTTP,
-			Evidence: []domain.Evidence{{
-				Path: rel, Symbol: strings.TrimSuffix(filepath.Base(file), ".cs"), Kind: domain.SourceCodeScan,
-			}},
-			Confidence: 0.7,
-		})
 	}
 	return records
 }
@@ -173,22 +251,17 @@ func scanCSharpDependencies(root string, dirs []string) []domain.DependencyEdge 
 		}
 		rel := relativeTo(root, file)
 		caller := dependencyIdentity(root, file)
-		for _, m := range csharpHTTPCallRe.FindAllStringSubmatch(text, -1) {
-			if len(m) > 1 {
-				target := strings.TrimPrefix(m[1], "http://")
-				target = strings.TrimPrefix(target, "https://")
-				target, _, _ = strings.Cut(target, "/")
-				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
-					edges = append(edges, domain.DependencyEdge{
-						CallerServiceKey: caller.Key,
-						From:             caller.Name,
-						To:               target,
-						Type:             domain.EdgeHTTP,
-						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence:       0.5,
-					})
-				}
+		for _, match := range csharpHTTPCallRe.FindAllStringSubmatchIndex(text, -1) {
+			if len(match) < 4 || !httpURLUsedByClient(text, match[0], match[1], csharpClientCallRe) {
+				continue
 			}
+			target := text[match[2]:match[3]]
+			target = strings.TrimPrefix(strings.TrimPrefix(target, "http://"), "https://")
+			target, _, _ = strings.Cut(target, "/")
+			if skipDependencyTarget(target) {
+				continue
+			}
+			edges = append(edges, protocolEdge(caller, target, domain.EdgeHTTP, rel, lineAt(text, match[0]), 0.5))
 		}
 	}
 	return edges
@@ -293,8 +366,19 @@ func readCSharpPorts(dir string) []int {
 }
 
 var csharpHTTPCallRe = regexp.MustCompile(`https?://([^\s"'\)]+)`)
+var csharpClientCallRe = regexp.MustCompile(`(?i)(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStringAsync|GetByteArrayAsync)\s*\(`)
 
 var serviceStackRouteRe = regexp.MustCompile(`\[Route\s*\(\s*"([^"]+)"\s*,\s*"([A-Za-z]+)"\s*\)\]`)
+
+func refitRegistrationTarget(files []string, interfaceName string) string {
+	pattern := regexp.MustCompile(`(?s)RestService\.For\s*<\s*` + regexp.QuoteMeta(interfaceName) + `\s*>\s*\(\s*["']https?://([^"'/]+)`)
+	for _, file := range files {
+		if match := pattern.FindStringSubmatch(readFile(file)); len(match) > 1 {
+			return match[1]
+		}
+	}
+	return ""
+}
 
 func extractRefitTarget(text string) string {
 	// Try to find base URL from Refit attributes

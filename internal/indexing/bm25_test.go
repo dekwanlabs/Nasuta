@@ -2,15 +2,18 @@ package indexing
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	ontologysqlite "github.com/dekwanlabs/nasuta/internal/platform/ontologystore/sqlite"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
@@ -32,6 +35,43 @@ func (f fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, err
 }
 func (fakeEmbedder) Dim() int      { return 8 }
 func (fakeEmbedder) Enabled() bool { return true }
+
+type countingEmbedder struct {
+	dim       int
+	failAfter int
+	short     bool
+
+	mu    sync.Mutex
+	calls []int
+}
+
+func (e *countingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	e.mu.Lock()
+	call := len(e.calls)
+	e.calls = append(e.calls, len(texts))
+	e.mu.Unlock()
+	if e.failAfter >= 0 && call >= e.failAfter {
+		return nil, errors.New("embedding provider unavailable")
+	}
+	count := len(texts)
+	if e.short && count > 0 {
+		count--
+	}
+	out := make([][]float32, count)
+	for i := range out {
+		out[i] = make([]float32, e.dim)
+	}
+	return out, nil
+}
+
+func (e *countingEmbedder) Dim() int      { return e.dim }
+func (e *countingEmbedder) Enabled() bool { return true }
+
+func (e *countingEmbedder) callCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.calls)
+}
 
 type recordingSemantic struct {
 	mu     sync.Mutex
@@ -261,6 +301,191 @@ func TestEmbedRepoCodeKeepsOtherRepoSparseCoordinates(t *testing.T) {
 	}
 	if got := semantic.repoPoints("team/payments"); len(got) == 0 {
 		t.Fatal("incremental payment generation was not stored")
+	}
+}
+
+func TestEmbedRepoCodeReusesUnchangedAndCleansDeletedChunks(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repos", "team", "orders")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(repoDir, "main.go")
+	if err := os.WriteFile(file, []byte("package orders\n\nfunc orderWorkflow() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.Open(filepath.Join(root, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	semantic := newRecordingSemantic()
+	embedder := &countingEmbedder{dim: 8, failAfter: -1}
+	svc := &Service{
+		Cfg: config.Config{
+			WorkspaceRoot: root, SQLitePath: filepath.Join(root, "index.db"),
+			EmbeddingBatch: 4, EmbeddingConcurrency: 1, IndexCode: true,
+		},
+		DB: db, Semantic: semantic, Embedder: embedder,
+	}
+
+	if err := svc.EmbedCodeChunks(context.Background(), []string{"repos/team/orders"}); err != nil {
+		t.Fatal(err)
+	}
+	initialCalls := embedder.callCount()
+	initialPoints := semantic.repoPoints("team/orders")
+	if initialCalls == 0 || len(initialPoints) == 0 {
+		t.Fatalf("initial index missing calls=%d points=%d", initialCalls, len(initialPoints))
+	}
+
+	if err := svc.EmbedRepoCode(context.Background(), "team/orders"); err != nil {
+		t.Fatal(err)
+	}
+	if got := embedder.callCount(); got != initialCalls {
+		t.Fatalf("unchanged repo embed calls = %d, want %d", got, initialCalls)
+	}
+
+	if err := os.WriteFile(file, []byte("package orders\n\nfunc settlementWorkflow() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.EmbedRepoCode(context.Background(), "team/orders"); err != nil {
+		t.Fatal(err)
+	}
+	if got := embedder.callCount(); got <= initialCalls {
+		t.Fatalf("changed repo did not call embedder: calls=%d initial=%d", got, initialCalls)
+	}
+
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.EmbedRepoCode(context.Background(), "team/orders"); err != nil {
+		t.Fatal(err)
+	}
+	if got := semantic.repoPoints("team/orders"); len(got) != 0 {
+		t.Fatalf("deleted repo chunks remain: %v", got)
+	}
+	state, err := loadCodeIndexState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.repoChunkIDs("team/orders")) != 0 || !state.Repositories["team/orders"] {
+		t.Fatalf("deleted repo state = %+v", state)
+	}
+}
+
+func TestEmbedRepoCodeRebuildsWhenStateIsMissing(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repos", "team", "orders")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "main.go"), []byte("package orders\nfunc orderWorkflow() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(root, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	semantic := newRecordingSemantic()
+	embedder := &countingEmbedder{dim: 8, failAfter: -1}
+	svc := &Service{
+		Cfg: config.Config{
+			WorkspaceRoot: root, SQLitePath: filepath.Join(root, "index.db"),
+			EmbeddingBatch: 4, EmbeddingConcurrency: 1,
+		},
+		DB: db, Semantic: semantic, Embedder: embedder,
+	}
+	if err := svc.EmbedCodeChunks(context.Background(), []string{"repos/team/orders"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(codeIndexStatePath(root)); err != nil {
+		t.Fatal(err)
+	}
+	before := embedder.callCount()
+	if err := svc.EmbedRepoCode(context.Background(), "team/orders"); err != nil {
+		t.Fatal(err)
+	}
+	if got := embedder.callCount(); got <= before {
+		t.Fatalf("missing state did not trigger full repo rebuild: before=%d after=%d", before, got)
+	}
+}
+
+func TestEmbedCodeChunksDoesNotPublishStateAfterPartialFailure(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repos", "team", "orders")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "package orders\n" + strings.Repeat("var orderValue = 1\n", 100)
+	if err := os.WriteFile(filepath.Join(repoDir, "main.go"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(root, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	svc := &Service{
+		Cfg: config.Config{
+			WorkspaceRoot: root, SQLitePath: filepath.Join(root, "index.db"),
+			EmbeddingBatch: 1, EmbeddingConcurrency: 1,
+		},
+		DB: db, Semantic: newRecordingSemantic(),
+		Embedder: &countingEmbedder{dim: 8, failAfter: 1},
+	}
+	if err := svc.EmbedCodeChunks(context.Background(), []string{"repos/team/orders"}); err == nil {
+		t.Fatal("partial embedding failure was treated as success")
+	}
+	if _, err := os.Stat(codeIndexStatePath(root)); !os.IsNotExist(err) {
+		t.Fatalf("code index state after partial failure: err=%v", err)
+	}
+}
+
+func TestEmbedBatchRejectsPartialProviderResult(t *testing.T) {
+	semantic := newRecordingSemantic()
+	svc := &Service{
+		Cfg:      config.Config{EmbeddingBatch: 2, EmbeddingConcurrency: 1},
+		Semantic: semantic,
+		Embedder: &countingEmbedder{dim: 8, failAfter: -1, short: true},
+	}
+	err := svc.embedBatch(context.Background(), "partial-result", []semanticDocument{
+		{id: "one", text: "one"},
+		{id: "two", text: "two"},
+	})
+	if err == nil {
+		t.Fatal("partial provider result was treated as success")
+	}
+	if got := len(semantic.points); got != 0 {
+		t.Fatalf("partial provider result upserted %d points", got)
+	}
+}
+
+func TestLoadBM25MarksMissingVocabularyAsMigrationRequired(t *testing.T) {
+	svc := &Service{Cfg: config.Config{WorkspaceRoot: t.TempDir()}}
+	svc.loadBM25()
+	if !svc.bm25MigrationRequired.Load() {
+		t.Fatal("missing BM25 vocabulary did not require a full migration")
+	}
+}
+
+func TestEmbedServicesSkipsSummarylessServices(t *testing.T) {
+	semantic := newRecordingSemantic()
+	svc := &Service{
+		Cfg:      config.Config{EmbeddingBatch: 4, EmbeddingConcurrency: 1},
+		Semantic: semantic,
+		Embedder: fakeEmbedder{dim: 8},
+	}
+	err := svc.embedServices(context.Background(), []domain.ServiceRecord{
+		{ServiceName: "orders"},
+		{ServiceName: "payments", Summary: "payment processing service"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(semantic.repoPoints(serviceRepoBucket)); got != 1 {
+		t.Fatalf("service vector count = %d, want 1", got)
 	}
 }
 

@@ -224,15 +224,32 @@ func (b *BM25Builder) AddDoc(text string) []string {
 	tokens := tokenizeDocument(text)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, token := range tokens {
-		if _, ok := b.vocab[token]; !ok {
-			id := b.nextID
-			b.vocab[token] = id
-			b.nextID++
-		}
-	}
+	b.addTokensLocked(tokens)
 	b.docCount++
 	return tokens
+}
+
+// ObserveDoc adds tokens without changing the document count. Incremental code
+// indexing uses this because the existing corpus already owns unchanged docs;
+// sparse coordinates are append-only while full corpus statistics are rebuilt
+// by EmbedCodeChunks.
+func (b *BM25Builder) ObserveDoc(text string) []string {
+	tokens := tokenizeDocument(text)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.addTokensLocked(tokens)
+	return tokens
+}
+
+func (b *BM25Builder) addTokensLocked(tokens []string) {
+	for _, token := range tokens {
+		if _, ok := b.vocab[token]; ok {
+			continue
+		}
+		id := b.nextID
+		b.vocab[token] = id
+		b.nextID++
+	}
 }
 
 func (b *BM25Builder) TotalDocs() int {

@@ -31,6 +31,9 @@ type evidencePlanningOutput struct {
 	Decision            domain.PlanDecision
 	Effective           domain.PlanDecision
 	Execution           retrieval.ExecutionSuggestion
+	ExecutionAuditTried bool
+	ExecutionAuditUsed  bool
+	ExecutionAuditError error
 	History             retrieval.HistoryRelation
 	HistoryValid        bool
 	RoutedToolIDs       []string
@@ -61,11 +64,15 @@ var evidencePlanningSpec = runtrace.Spec[evidencePlanningInput, evidencePlanning
 			"effective_confidence": output.Effective.Confidence, "effective_origin": output.Effective.Origin,
 			"preferred_tool_ids": output.RoutedToolIDs, "available_tool_ids": input.AvailableTools,
 			"planning_error": planningError, "query_semantics_error": semanticsError,
-			"fallback_error": fallbackError,
+			"fallback_error":        fallbackError,
+			"execution_audit_tried": output.ExecutionAuditTried,
+			"execution_audit_used":  output.ExecutionAuditUsed,
+			"execution_audit_error": errorString(output.ExecutionAuditError),
 		}
 	},
 	Status: func(output evidencePlanningOutput, _ error) string {
-		if output.PlanningError != nil || output.QuerySemanticsError != nil {
+		if output.PlanningError != nil || output.QuerySemanticsError != nil ||
+			output.ExecutionAuditError != nil {
 			return "degraded"
 		}
 		return ""
@@ -98,6 +105,9 @@ func (svc *Service) planEvidence(ctx context.Context, input evidencePlanningInpu
 			output.CleanQuestion, output.Terms, output.Time, output.Decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
 			output.QuerySemantics, output.QuerySemanticsError = analysis.QuerySemantics, analysis.QuerySemanticsError
 			output.Execution = analysis.Execution
+			output.ExecutionAuditTried = analysis.ExecutionAuditTried
+			output.ExecutionAuditUsed = analysis.ExecutionAuditUsed
+			output.ExecutionAuditError = analysis.ExecutionAuditError
 			output.History, output.HistoryValid = analysis.History, input.RouteContext != ""
 			output.RoutedToolIDs = analysis.ToolIDs
 		} else if shouldShortCircuitMeta(input.Question) {
@@ -123,16 +133,37 @@ func (svc *Service) planEvidence(ctx context.Context, input evidencePlanningInpu
 			output.CleanQuestion, output.Terms, output.Time, output.Decision = analysis.Question, analysis.Terms, analysis.Time, analysis.Decision
 			output.QuerySemantics, output.QuerySemanticsError = analysis.QuerySemantics, analysis.QuerySemanticsError
 			output.Execution = analysis.Execution
+			output.ExecutionAuditTried = analysis.ExecutionAuditTried
+			output.ExecutionAuditUsed = analysis.ExecutionAuditUsed
+			output.ExecutionAuditError = analysis.ExecutionAuditError
 			output.History, output.HistoryValid = analysis.History, input.RouteContext != ""
 			output.RoutedToolIDs = analysis.ToolIDs
 		}
 
+		if output.ExecutionAuditTried {
+			if output.ExecutionAuditError != nil {
+				log.WarnfCtx(ctx, "[qa] execution task audit degraded recovered=%t error=%v",
+					output.ExecutionAuditUsed, output.ExecutionAuditError,
+				)
+			} else {
+				log.InfofCtx(ctx, "[qa] execution task audit completed recovered=%t tasks=%d",
+					output.ExecutionAuditUsed, len(output.Execution.Tasks),
+				)
+			}
+		}
 		output.Effective = output.Decision
 		if output.Decision.Origin == domain.Model && output.Decision.Plan.Direct() && output.Decision.Confidence < svc.routerConfidence {
 			output.Effective = domain.InternalFallbackDecision()
 		}
 		return output, nil
 	})
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func logPlannerFailure(ctx context.Context, duration time.Duration, err error) {

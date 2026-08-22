@@ -133,6 +133,19 @@ func (svc *Service) submitInvestigation(
 		startErr       error
 		startErrorCode = "investigation_start_failed"
 	)
+	contract := contractFromPreparation(prepared, seedMaterial)
+	proposal := cloneTaskGraphProposal(prepared.taskGraphProposal)
+	if !useEscalator {
+		proposal, err = prepareInvestigationProposal(
+			proposal,
+			contract,
+			seedEvidence,
+		)
+		if err != nil {
+			startErrorCode = "investigation_plan_failed"
+			startErr = err
+		}
+	}
 	if useEscalator {
 		if svc.workflowEscalator == nil {
 			startErrorCode = agentapi.WorkflowUnavailable
@@ -178,11 +191,11 @@ func (svc *Service) submitInvestigation(
 				)
 			}
 		}
-	} else {
+	} else if startErr == nil {
 		startErr = svc.investigation.Start(runCtx, InvestigationRequest{
 			WorkflowRunID: workflowRunID,
-			Contract:      contractFromPreparation(prepared, seedMaterial),
-			Proposal:      cloneTaskGraphProposal(prepared.taskGraphProposal),
+			Contract:      contract,
+			Proposal:      proposal,
 			SeedEvidence:  seedEvidence,
 			Actor:         agentapi.Actor{UserID: userID},
 		})
@@ -427,12 +440,25 @@ func cloneTaskGraphProposal(
 	cloned := *proposal
 	cloned.Tasks = make([]agentapi.TaskSpec, len(proposal.Tasks))
 	for index, task := range proposal.Tasks {
+		task.InvestigationGoalIDs = append(
+			[]string(nil),
+			task.InvestigationGoalIDs...,
+		)
 		task.RequiredFacets = append([]string(nil), task.RequiredFacets...)
-		task.InputRefs = append([]agentapi.EvidenceRef(nil), task.InputRefs...)
+		task.InputRefs = cloneProposalEvidenceRefs(task.InputRefs)
 		cloned.Tasks[index] = task
 	}
 	cloned.Edges = append([]agentapi.TaskEdge(nil), proposal.Edges...)
 	return &cloned
+}
+
+func cloneProposalEvidenceRefs(
+	refs []agentapi.EvidenceRef,
+) []agentapi.EvidenceRef {
+	if refs == nil {
+		return nil
+	}
+	return append(make([]agentapi.EvidenceRef, 0, len(refs)), refs...)
 }
 
 func memoryContextBlock(records []memory.MemoryRecord) *agentapi.ContextBlock {

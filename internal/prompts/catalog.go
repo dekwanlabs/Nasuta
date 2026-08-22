@@ -25,6 +25,7 @@ const (
 	AgentQAForceConclusionNoThink ID = "agent.qa.force_conclusion_no_think"
 	AgentQAProtocolRepair         ID = "agent.qa.protocol_repair"
 	AgentQAContinuation           ID = "agent.qa.continuation"
+	AgentQAStructuredContinuation ID = "agent.qa.structured_continuation"
 	AgentQAEvidencePlan           ID = "agent.qa.evidence_plan"
 	AgentQARetrievedHistory       ID = "agent.qa.retrieved_history"
 	AgentQAHistoricalContext      ID = "agent.qa.historical_context"
@@ -56,6 +57,7 @@ const (
 	RetrievalTime           ID = "retrieval.time"
 	RetrievalHistory        ID = "retrieval.history"
 	RetrievalExecution      ID = "retrieval.execution"
+	RetrievalExecutionAudit ID = "retrieval.execution_audit"
 
 	MemoryProbe         ID = "memory.probe"
 	MemoryExtract       ID = "memory.extract"
@@ -114,6 +116,7 @@ var idFiles = map[ID]string{
 	AgentQAForceConclusionNoThink:          "agent/qa/force_conclusion_no_think.txt",
 	AgentQAProtocolRepair:                  "agent/qa/protocol_repair.txt",
 	AgentQAContinuation:                    "agent/qa/continuation.txt",
+	AgentQAStructuredContinuation:          "agent/qa/structured_continuation.txt",
 	AgentQAEvidencePlan:                    "agent/qa/evidence_plan.txt",
 	AgentQARetrievedHistory:                "agent/qa/retrieved_history.txt",
 	AgentQAHistoricalContext:               "agent/qa/historical_context.txt",
@@ -143,6 +146,7 @@ var idFiles = map[ID]string{
 	RetrievalTime:                          "retrieval/time.txt",
 	RetrievalHistory:                       "retrieval/history.txt",
 	RetrievalExecution:                     "retrieval/execution.txt",
+	RetrievalExecutionAudit:                "retrieval/execution_audit.txt",
 	MemoryProbe:                            "memory/probe.txt",
 	MemoryExtract:                          "memory/extract.txt",
 	MemoryRecallWrapper:                    "memory/recall_wrapper.txt",

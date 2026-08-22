@@ -10,6 +10,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/knowledge"
@@ -321,6 +322,55 @@ func (handler *Handler) TraceCalls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, result)
+}
+
+// TraceRelations mirrors the MCP trace_relations tool for dashboard/API
+// consumers. Relation traversal is delegated to the same agent service so
+// both transports share one ontology contract.
+func (handler *Handler) TraceRelations(w http.ResponseWriter, r *http.Request) {
+	q := httputil.Query(r)
+	entity := q.Required("entity")
+	relations := splitQueryList(q.Str("relations"))
+	result, err := handler.tools.TraceRelationsResult(r.Context(), ontology.RelationQuery{
+		Entity:      entity,
+		EntityClass: ontology.Class(q.Str("entity_class")),
+		Predicates:  relationPredicates(relations),
+		Direction:   ontology.Direction(q.StrDefault("direction", "outgoing")),
+		MaxDepth:    q.Int("max_depth", 2),
+		MaxNodes:    q.Int("max_nodes", 50),
+		MaxFanout:   q.Int("max_fanout", 20),
+	})
+	if q.Err() != nil {
+		httputil.WriteBadRequest(w, q.Err().Error())
+		return
+	}
+	if err != nil {
+		httputil.WriteErr(w, err)
+		return
+	}
+	httputil.WriteJSON(w, result)
+}
+
+func splitQueryList(value string) []string {
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func relationPredicates(values []string) []ontology.Predicate {
+	out := make([]ontology.Predicate, 0, len(values))
+	for _, value := range values {
+		out = append(out, ontology.Predicate(value))
+	}
+	return out
 }
 
 func (handler *Handler) APICodeGraphEndpoint(w http.ResponseWriter, r *http.Request) {

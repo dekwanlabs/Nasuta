@@ -28,6 +28,9 @@ func TestIsNoiseFile(t *testing.T) {
 		"repo/templates/email.vm",
 		"repo/templates/page.ftl",
 		"repo/web/index.html",
+		"repo/vendor/github.com/example/lib/lib.go",
+		"repo/third_party/lib/index.ts",
+		"repo/thirdparty/lib/main.py",
 	}
 	for _, p := range noise {
 		if !isNoiseFile(p) {
@@ -95,20 +98,32 @@ func TestCanonicalDependenciesNormalizeExternalTargetOnce(t *testing.T) {
 }
 
 func TestChunkByNodes(t *testing.T) {
-	text := "package x\n\nfunc A() {\n  doA()\n}\n\nfunc B() {\n  doB()\n}\n"
+	text := "package x\n\nimport \"fmt\"\n\ntype Service struct {\n\tname string\n}\n\nfunc A() {\n  doA()\n}\n\nfunc B() {\n  doB()\n}\n"
 	nodes := []codegraph.Node{
-		{Kind: "function", Name: "A", QualifiedName: "x.A", StartLine: 3, EndLine: 5, Signature: "func A()"},
-		{Kind: "function", Name: "B", QualifiedName: "x.B", StartLine: 7, EndLine: 9},
+		{Kind: "function", Name: "A", QualifiedName: "x.A", StartLine: 9, EndLine: 11, Signature: "func A()"},
+		{Kind: "function", Name: "B", QualifiedName: "x.B", StartLine: 13, EndLine: 15},
 	}
 	chunks := chunkByNodes("repo/x.go", "repo", "go", text, nodes)
-	if len(chunks) != 2 {
-		t.Fatalf("want 2 chunks, got %d", len(chunks))
+	if len(chunks) != 3 {
+		t.Fatalf("want 3 chunks, got %d", len(chunks))
 	}
 	if !strings.Contains(chunks[0].Text, "func A()") || !strings.Contains(chunks[0].Text, "x.A") {
 		t.Errorf("chunk A missing body/header: %q", chunks[0].Text)
 	}
-	if chunks[0].StartLine != 3 || chunks[0].EndLine != 5 {
+	if chunks[0].StartLine != 9 || chunks[0].EndLine != 11 {
 		t.Errorf("chunk A wrong range: %d-%d", chunks[0].StartLine, chunks[0].EndLine)
+	}
+	context := chunks[2]
+	if context.StartLine != 1 || context.EndLine != len(strings.Split(text, "\n")) {
+		t.Fatalf("file context range = %d-%d", context.StartLine, context.EndLine)
+	}
+	if !strings.Contains(context.Text, "package x") ||
+		!strings.Contains(context.Text, `import "fmt"`) ||
+		!strings.Contains(context.Text, "type Service struct") {
+		t.Fatalf("file context missing top-level context: %q", context.Text)
+	}
+	if strings.Contains(context.Text, "doA()") || strings.Contains(context.Text, "doB()") {
+		t.Fatalf("file context duplicated method body: %q", context.Text)
 	}
 }
 

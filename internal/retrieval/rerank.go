@@ -36,6 +36,7 @@ type codeDoc struct {
 	refs          int
 	recallScore   float64
 	denseScore    float64
+	hasDense      bool
 	scoreKind     string
 	rerankScore   float64
 	evidenceClass string
@@ -50,7 +51,7 @@ func (d codeDoc) candidateScore() float64 {
 	return d.denseScore
 }
 
-func (d codeDoc) hasDenseScore() bool { return d.scoreKind != "rrf" }
+func (d codeDoc) supportsDensePreflight() bool { return d.scoreKind != "rrf" }
 
 // W_REFS nudges codegraph-heavy hits upward during dedupe.
 const W_REFS = 30
@@ -346,10 +347,10 @@ func rerankPool(ctx context.Context, rr Reranker, query string, docs []codeDoc, 
 		return rerankResult{docs: docs, mode: "empty"}
 	}
 	maxDense := 0.0
-	allHaveDense := true
+	allSupportDensePreflight := true
 	for _, d := range docs {
-		if !d.hasDenseScore() {
-			allHaveDense = false
+		if !d.supportsDensePreflight() {
+			allSupportDensePreflight = false
 		} else if d.denseScore > maxDense {
 			maxDense = d.denseScore
 		}
@@ -368,7 +369,7 @@ func rerankPool(ctx context.Context, rr Reranker, query string, docs []codeDoc, 
 		return rerankWeight*rerank + (1-rerankWeight)*normalized
 	}
 	if rr != nil && rr.Enabled() {
-		if minDensePreflight > 0 && allHaveDense && maxDense < minDensePreflight {
+		if minDensePreflight > 0 && allSupportDensePreflight && maxDense < minDensePreflight {
 			// Skip external rerank when recall itself is too weak to justify the latency.
 			log.InfofCtx(ctx, "[qa] rerank preflight skip: best dense=%.2f < %.2f", maxDense, minDensePreflight)
 		} else {

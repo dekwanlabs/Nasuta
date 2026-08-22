@@ -302,6 +302,37 @@ func TestComparisonContractCarriesEntityRolesMinimumCoverageAndRequiredInternalS
 	}
 }
 
+func TestComparisonContractUsesWorkflowSafeIDsForNonCanonicalEntities(t *testing.T) {
+	prepared := &preparation{
+		request: Request{RunID: "qa_compare", Question: "比较这些系统。"},
+		planning: evidencePlanningOutput{Effective: domain.PlanDecision{
+			Plan: domain.EvidencePlan{Sources: domain.Internal},
+		}},
+		analysis: queryAnalysisOutput{QueryPlan: domain.QueryPlan{
+			Kind: domain.QueryComparison,
+			EntitySpecs: []domain.EntitySpec{
+				{ID: "本系统ai集成", Label: "我们AI", Role: "first_party_agent"},
+				{ID: "多agent系统", Label: "多agent", Role: "orchestration"},
+			},
+		}},
+	}
+
+	contract := contractFromPreparation(prepared, nil)
+	want := []EntityRef{
+		{
+			ID:    "entity_75cbe4e1e8cee1d5879f90a9f477396b94d02f27a61407c4230618ddd2d16869",
+			Label: "我们AI", Role: "first_party_agent", Aliases: []string{"本系统ai集成"},
+		},
+		{
+			ID:    "entity_3155bfec203beb057468cc60152f8af7e017d531cc734ad9f6ff0d93e410d667",
+			Label: "多agent", Role: "orchestration", Aliases: []string{"多agent系统"},
+		},
+	}
+	if !reflect.DeepEqual(contract.Entities, want) {
+		t.Fatalf("entities = %#v, want %#v", contract.Entities, want)
+	}
+}
+
 func TestComparisonContractWithoutTwoEntitiesIsExplicitlyInvalidForCoverage(t *testing.T) {
 	contract := TaskContract{
 		Entities: []EntityRef{{ID: "only-one"}},

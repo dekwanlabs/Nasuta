@@ -69,45 +69,27 @@ func scanGoDependencies(root string, dirs []string) []domain.DependencyEdge {
 		}
 		text := readFile(file)
 		if !strings.Contains(text, "http.NewRequest") && !strings.Contains(text, "resty.") &&
-			!strings.Contains(text, "http.Client") && !strings.Contains(text, "pb.New") &&
-			!strings.Contains(text, "grpc.Dial") {
+			!strings.Contains(text, "http.Client") && !strings.Contains(text, "pb.New") && !strings.Contains(text, "grpc.Dial") {
 			continue
 		}
 		rel := relativeTo(root, file)
 		caller := dependencyIdentity(root, file)
-		// HTTP URL-based dependencies
-		for _, m := range goHTTPCallRe.FindAllStringSubmatch(text, -1) {
-			if len(m) > 1 {
-				target := strings.TrimPrefix(m[1], "http://")
-				target = strings.TrimPrefix(target, "https://")
-				target, _, _ = strings.Cut(target, "/")
-				target = strings.TrimSuffix(target, ":8080")
-				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
-					edges = append(edges, domain.DependencyEdge{
-						CallerServiceKey: caller.Key,
-						From:             caller.Name,
-						To:               target,
-						Type:             domain.EdgeHTTP,
-						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence:       0.5,
-					})
-				}
+		for _, match := range goHTTPCallRe.FindAllStringSubmatchIndex(text, -1) {
+			if len(match) < 4 || !httpURLUsedByClient(text, match[0], match[1], goClientCallRe) {
+				continue
 			}
+			target := text[match[2]:match[3]]
+			target = strings.TrimPrefix(strings.TrimPrefix(target, "http://"), "https://")
+			target, _, _ = strings.Cut(target, "/")
+			target = strings.TrimSuffix(target, ":8080")
+			if skipDependencyTarget(target) {
+				continue
+			}
+			edges = append(edges, protocolEdge(caller, target, domain.EdgeHTTP, rel, lineAt(text, match[0]), 0.5))
 		}
-		// gRPC client connections: pb.NewXxxClient(conn) or grpc.Dial("target")
 		for _, m := range goGRPCClientRe.FindAllStringSubmatch(text, -1) {
-			if len(m) > 1 {
-				target := m[1]
-				if target != "" && !strings.Contains(target, "localhost") && !strings.Contains(target, "127.0.0.1") {
-					edges = append(edges, domain.DependencyEdge{
-						CallerServiceKey: caller.Key,
-						From:             caller.Name,
-						To:               target,
-						Type:             domain.EdgeGRPC,
-						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence:       0.55,
-					})
-				}
+			if len(m) > 1 && !skipDependencyTarget(m[1]) {
+				edges = append(edges, protocolEdge(caller, m[1], domain.EdgeGRPC, rel, lineAt(text, strings.Index(text, m[0])), 0.55))
 			}
 		}
 	}
@@ -186,5 +168,6 @@ func parseInts(s string) []int {
 
 var goHandlerRe = regexp.MustCompile(`func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(`)
 var goHTTPCallRe = regexp.MustCompile(`https?://([^\s"'\)]+)`)
+var goClientCallRe = regexp.MustCompile(`(?i)(?:http\.(?:NewRequest|Get|Post|Put|Patch)|client\.Do|resty\.[A-Za-z]+)\s*\(`)
 
 var goGRPCClientRe = regexp.MustCompile(`pb\.New(\w+)Client|grpc\.Dial\s*\(\s*"([^"]+)"`)

@@ -176,10 +176,6 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 			definition.InputSchema.ID != "task.contract" {
 			t.Fatalf("definition %q input schema = %+v", definition.ID, definition.InputSchema)
 		}
-		if strings.HasPrefix(definition.ID, "investigator.") &&
-			definition.Budget.MaxContinueRounds != 1 {
-			t.Fatalf("definition %q continuation rounds = %d, want 1", definition.ID, definition.Budget.MaxContinueRounds)
-		}
 		wantToolCalls := int64(0)
 		if len(wantTools[definition.ID]) > 0 {
 			wantToolCalls = settings.AgentMaxToolCalls
@@ -188,11 +184,20 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 			t.Fatalf("definition %q max tool calls = %d, want %d", definition.ID, definition.Budget.MaxToolCalls, wantToolCalls)
 		}
 	}
+	for _, definition := range definitions[:len(wantTools)-2] {
+		if definition.Model.MaxOutputTokens != 1024 ||
+			definition.Budget.MaxSteps != 3 ||
+			definition.Budget.MaxContinueRounds != 1 {
+			t.Fatalf("investigator %q budget = model=%d steps=%d continuation=%d",
+				definition.ID, definition.Model.MaxOutputTokens,
+				definition.Budget.MaxSteps, definition.Budget.MaxContinueRounds)
+		}
+	}
 	synthesizer := definitions[len(definitions)-1]
 	if synthesizer.InputSchema.ID != "investigation.verified_bundle" ||
 		synthesizer.OutputSchema.ID != "investigation.answer" ||
 		synthesizer.OutputSchema.Version != 3 ||
-		synthesizer.Prompt.Version != "investigation-synthesis-v6" ||
+		synthesizer.Prompt.Version != "investigation-synthesis-v7" ||
 		!strings.Contains(synthesizer.Prompt.System, `"supported_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"partial_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"unsupported_claims"`) ||
@@ -201,10 +206,23 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		!strings.Contains(synthesizer.Prompt.System, `canonical "evidence_identities"`) ||
 		!strings.Contains(synthesizer.Prompt.System, "same canonical target") ||
 		!strings.Contains(synthesizer.Prompt.System, "must not be inserted into a main path") ||
+		!strings.Contains(synthesizer.Prompt.System, `"workflow.synthesis_objective"`) ||
+		!strings.Contains(synthesizer.Prompt.System, `"investigation_goals"`) ||
+		!strings.Contains(synthesizer.Prompt.System, `Use short "##" headings`) ||
+		!strings.Contains(synthesizer.Prompt.System, "one dense paragraph") ||
+		!strings.Contains(synthesizer.Prompt.System, "final evidence-boundary section") ||
+		!strings.Contains(synthesizer.Prompt.System, `Do not lead with "verification"`) ||
 		strings.Contains(synthesizer.Prompt.System, `"handoffs[].payload"`) ||
 		strings.Contains(synthesizer.Prompt.System, `"unavailable_tasks"`) ||
 		len(synthesizer.Tools.VisibleToolIDs) != 0 || !synthesizer.Tools.RestrictVisible {
 		t.Fatalf("synthesizer contract = %+v", synthesizer)
+	}
+	if synthesizer.Model.MaxOutputTokens != 2048 ||
+		synthesizer.Budget.MaxSteps != 1 ||
+		synthesizer.Budget.MaxContinueRounds != 1 {
+		t.Fatalf("synthesizer budget = model=%d steps=%d continuation=%d",
+			synthesizer.Model.MaxOutputTokens, synthesizer.Budget.MaxSteps,
+			synthesizer.Budget.MaxContinueRounds)
 	}
 	verifier := definitions[len(definitions)-2]
 	if verifier.InputSchema.ID != "delegation.verification.request" ||
@@ -214,6 +232,67 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		len(verifier.Tools.VisibleToolIDs) != 0 ||
 		!verifier.Tools.RestrictVisible {
 		t.Fatalf("delegation verifier contract = %+v", verifier)
+	}
+	if verifier.Model.MaxOutputTokens != 768 ||
+		verifier.Budget.MaxSteps != 1 ||
+		verifier.Budget.MaxContinueRounds != 1 {
+		t.Fatalf("verifier budget = model=%d steps=%d continuation=%d",
+			verifier.Model.MaxOutputTokens, verifier.Budget.MaxSteps,
+			verifier.Budget.MaxContinueRounds)
+	}
+}
+
+func TestDefaultInvestigatorsRoleBudgetsRespectGlobalCeilings(t *testing.T) {
+	settings := &config.PlatformSettings{
+		LLMProvider: "openai", LLMModel: "investigation-model",
+		LLMAnswerMaxTokens: 512, LLMContextWindow: 32000,
+		AgentTimeout: config.Duration(time.Minute), AgentMaxSteps: 1,
+		LLMMaxContinueRounds: 0,
+	}
+	definitions, err := DefaultInvestigators(settings, 13)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range definitions {
+		if definition.Model.MaxOutputTokens != 512 ||
+			definition.Budget.MaxSteps != 1 ||
+			definition.Budget.MaxContinueRounds != 0 {
+			t.Fatalf("definition %q exceeded global ceilings: model=%d steps=%d continuation=%d",
+				definition.ID, definition.Model.MaxOutputTokens,
+				definition.Budget.MaxSteps, definition.Budget.MaxContinueRounds)
+		}
+	}
+}
+
+func TestDefaultInvestigatorsBudgetsFollowGlobalConfiguration(t *testing.T) {
+	settings := &config.PlatformSettings{
+		LLMProvider: "openai", LLMModel: "investigation-model",
+		LLMAnswerMaxTokens: 12000, LLMContextWindow: 32000,
+		AgentTimeout: config.Duration(time.Minute), AgentMaxSteps: 4,
+		AgentMaxToolCalls: 24, LLMMaxContinueRounds: 5,
+	}
+	definitions, err := DefaultInvestigators(settings, 14)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range definitions {
+		wantOutput, wantSteps, wantRounds := 0, 0, 0
+		switch {
+		case strings.HasPrefix(definition.ID, "investigator."):
+			wantOutput, wantSteps, wantRounds = 3000, 3, 1
+		case definition.ID == "delegation.verifier":
+			wantOutput, wantSteps, wantRounds = 2000, 1, 1
+		case definition.ID == "synthesizer":
+			wantOutput, wantSteps, wantRounds = 6000, 1, 1
+		}
+		if definition.Model.MaxOutputTokens != wantOutput ||
+			definition.Budget.MaxSteps != wantSteps ||
+			definition.Budget.MaxContinueRounds != wantRounds {
+			t.Fatalf("definition %q budget = model:%d steps:%d continuation:%d, want %d/%d/%d",
+				definition.ID, definition.Model.MaxOutputTokens,
+				definition.Budget.MaxSteps, definition.Budget.MaxContinueRounds,
+				wantOutput, wantSteps, wantRounds)
+		}
 	}
 }
 

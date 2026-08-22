@@ -96,12 +96,24 @@ func (executor *AgentExecutor) Execute(
 		return NodeResult{}, fmt.Errorf("agent node %q context: %w", request.Node.ID, err)
 	}
 	contextBlocks := []agentapi.ContextBlock{contextBlock}
-	if request.Node.Task != nil {
-		taskBlock, err := contextFromDirective(*request.Node.Task)
+	if projected.Task != nil {
+		taskBlock, err := contextFromDirective(*projected.Task)
 		if err != nil {
 			return NodeResult{}, fmt.Errorf("agent node %q task context: %w", request.Node.ID, err)
 		}
 		contextBlocks = append(contextBlocks, taskBlock)
+	}
+	if request.Node.Agent.ID == "synthesizer" &&
+		request.WorkflowInput.Schema.ID == "task.contract" {
+		objectiveBlock, err := contextFromSynthesisObjective(request.WorkflowInput)
+		if err != nil {
+			return NodeResult{}, fmt.Errorf(
+				"agent node %q synthesis objective context: %w",
+				request.Node.ID,
+				err,
+			)
+		}
+		contextBlocks = append(contextBlocks, objectiveBlock)
 	}
 	runRequest := agentapi.RunRequest{
 		RunID: runID, Agent: request.Node.Agent, DefinitionHash: definition.ContentHash,
@@ -176,13 +188,13 @@ func (executor *AgentExecutor) Execute(
 		}
 	}
 	completeness := nodeInput.Completeness
-	if request.Node.Task != nil &&
+	if projected.Task != nil &&
 		request.Node.OutputSchema.ID == "investigation.report" &&
-		len(request.Node.Task.RequiredFacets) > 0 {
+		len(projected.Task.RequiredFacets) > 0 {
 		reportCompleteness, err := reportCompleteness(
 			nodeInput.Payload,
 			result.Output,
-			request.Node.Task.RequiredFacets,
+			projected.Task.RequiredFacets,
 		)
 		if err != nil {
 			return nodeResult, fmt.Errorf(
@@ -201,6 +213,30 @@ func (executor *AgentExecutor) Execute(
 			EvidenceConflicts: result.EvidenceConflicts,
 		},
 	})
+	if request.Node.OutputSchema.ID == "investigation.report" &&
+		completeness == Unavailable &&
+		len(evidenceUnits) > 0 {
+		completeness = Partial
+	}
+	if request.Node.OutputSchema.ID == "investigation.report" {
+		retained, omitted, err := retainReportedEvidence([]Handoff{{
+			ProducerNodeID: request.Node.ID,
+			Schema:         request.Node.OutputSchema,
+			Payload:        result.Output,
+			EvidenceUnits:  evidenceUnits,
+		}}, evidenceUnits)
+		if err != nil {
+			return nodeResult, fmt.Errorf(
+				"agent node %q reported evidence: %w",
+				request.Node.ID,
+				err,
+			)
+		}
+		evidenceUnits = retained
+		if omitted > 0 {
+			log.InfofCtx(ctx, "[workflow] node %s omitted %d uncited exploration evidence unit(s)", request.Node.ID, omitted)
+		}
+	}
 	nodeResult.Handoff = Handoff{
 		WorkflowRunID:  request.WorkflowRunID,
 		ProducerNodeID: request.Node.ID,

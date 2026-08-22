@@ -83,11 +83,18 @@ func (svc *Service) embedBatch(ctx context.Context, label string, docs []semanti
 				mu.Unlock()
 				return
 			}
+			if len(vectors) != len(group) {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf(
+					"embed batch [%d:%d]: got %d vectors for %d texts",
+					batch.start, batch.end, len(vectors), len(group),
+				))
+				skipped += int64(len(group))
+				mu.Unlock()
+				return
+			}
 			points := make([]semantic.Record, 0, len(group))
 			for i, doc := range group {
-				if i >= len(vectors) {
-					break
-				}
 				points = append(points, semantic.Record{
 					ID: doc.id, DenseVector: vectors[i], Metadata: doc.payload,
 					SparseVector: &semantic.SparseVector{Indices: doc.sparseIndices, Values: doc.sparseValues},
@@ -111,15 +118,19 @@ func (svc *Service) embedBatch(ctx context.Context, label string, docs []semanti
 	}
 	wg.Wait()
 
+	missing := int64(len(docs)) - done - skipped
+	if missing > 0 {
+		mu.Lock()
+		errs = append(errs, fmt.Sprintf("embedding interrupted before scheduling %d documents", missing))
+		skipped += missing
+		mu.Unlock()
+	}
 	if len(errs) > 0 {
 		log.Warnf("[semantic] %s: %d/%d embedded, %d skipped (%d errors: %v)",
 			label, done, len(docs), skipped, len(errs), errs[0])
-	} else {
-		log.Infof("[semantic] embedded %d %s (concurrency %d)", done, label, concurrency)
+		return fmt.Errorf("%s: %d/%d embedded; %d batch errors: %s", label, done, len(docs), len(errs), errs[0])
 	}
-	if done == 0 && len(errs) > 0 {
-		return fmt.Errorf("all %d batches failed: %s", len(errs), errs[0])
-	}
+	log.Infof("[semantic] embedded %d %s (concurrency %d)", done, label, concurrency)
 	return nil
 }
 

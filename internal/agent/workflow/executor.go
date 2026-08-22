@@ -44,6 +44,9 @@ type NodeRequest struct {
 	Depth         int
 	Node          NodeDefinition
 	Inputs        []Handoff
+	// WorkflowInput preserves the immutable root contract for nodes whose
+	// output must answer the original request rather than only a predecessor.
+	WorkflowInput Handoff
 	// UnavailablePredecessors preserves optional dependency failures for downstream decisions.
 	UnavailablePredecessors []string
 	UnavailableReasons      map[string]StopReason

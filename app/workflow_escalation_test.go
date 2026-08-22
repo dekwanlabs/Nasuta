@@ -329,7 +329,7 @@ func TestWorkflowEscalationHandoffResolverRejectsUntrustedReports(t *testing.T) 
 }
 
 func TestQAWorkflowEscalationBuilderPreservesProvenanceWithinBudget(t *testing.T) {
-	const payloadTokens = 480
+	const payloadTokens = 640
 	parentQuestion := strings.Repeat("why did the checkout request fail? ", 1000)
 	reportPayload := json.RawMessage(fmt.Sprintf(
 		`{"summary":%q}`,
@@ -412,6 +412,35 @@ func TestQAWorkflowEscalationBuilderPreservesProvenanceWithinBudget(t *testing.T
 			!goal.HighRisk {
 			t.Fatalf("evidence goal = %+v", goal)
 		}
+	}
+	assignments := make(
+		map[string]platformagent.TaskEvidenceAssignment,
+		len(contract.TaskEvidenceAssignments),
+	)
+	for _, assignment := range contract.TaskEvidenceAssignments {
+		assignments[assignment.TaskID] = assignment
+	}
+	if len(assignments) != 1 {
+		t.Fatalf(
+			"task evidence assignments = %+v",
+			contract.TaskEvidenceAssignments,
+		)
+	}
+	runtimeAssignment := assignments["investigate.runtime"]
+	if len(runtimeAssignment.InputRefs) != 1 ||
+		runtimeAssignment.InputRefs[0].Target != evidence[0].Target ||
+		len(runtimeAssignment.ContextRefs) != 1 ||
+		runtimeAssignment.ContextRefs[0].ContentHash != reportHash {
+		t.Fatalf("runtime assignment = %+v", runtimeAssignment)
+	}
+	if len(assignments["investigate.code"].InputRefs) != 0 ||
+		len(assignments["investigate.docs"].InputRefs) != 0 ||
+		len(assignments["investigate.code"].ContextRefs) != 0 ||
+		len(assignments["investigate.docs"].ContextRefs) != 0 {
+		t.Fatalf(
+			"sibling assignments received runtime seed = %+v",
+			contract.TaskEvidenceAssignments,
+		)
 	}
 	if len(contract.Context.SeedMaterial) != 2 {
 		t.Fatalf("seed material = %+v", contract.Context.SeedMaterial)

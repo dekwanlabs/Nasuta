@@ -26,19 +26,19 @@ var javaJAXRSAdapter = endpointAdapter{
 	language:  "java",
 	framework: "jax-rs",
 	applies: func(source endpointSource) bool {
-	syntax, ok := source.syntax.(jvmSource)
-	if !ok {
-		return false
-	}
-	if hasJAXRSImport(syntax) {
-		return true
-	}
-	for _, annotation := range syntax.annotations {
-		if isJAXRSNamespace(annotation.qualifiedName) {
+		syntax, ok := source.syntax.(jvmSource)
+		if !ok {
+			return false
+		}
+		if hasJAXRSImport(syntax) {
 			return true
 		}
-	}
-	return false
+		for _, annotation := range syntax.annotations {
+			if isJAXRSNamespace(annotation.qualifiedName) {
+				return true
+			}
+		}
+		return false
 	},
 	scan: scanJAXRS,
 }

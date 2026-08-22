@@ -111,11 +111,30 @@ func TestFeignDependenciesDegradeConfiguredResolverFailureWithWarning(t *testing
 	root := feignWorkspace(t, "")
 	writeFile(t, root, "repos/hsds/hsds-offline-cookbook/src/main/java/com/hesung/hsds/feign/StaticFeign.java", `package com.hesung.hsds.feign;
 @FeignClient(name = "hsds-online-service")
-public interface StaticFeign {}
+public interface StaticFeign {
+    @GetMapping("/static")
+    Object get();
+}
 `)
 	writeFile(t, root, "repos/hsds/hsds-offline-cookbook/src/main/java/com/hesung/hsds/feign/DefaultFeign.java", `package com.hesung.hsds.feign;
 @FeignClient(name = "${optional.service:hsds-offline-service}")
-public interface DefaultFeign {}
+public interface DefaultFeign {
+    @GetMapping("/default")
+    Object get();
+}
+`)
+	writeFile(t, root, "repos/hsds/hsds-offline-cookbook/src/main/java/com/hesung/hsds/FeignCaller.java", `package com.hesung.hsds;
+import com.hesung.hsds.feign.StaticFeign;
+import com.hesung.hsds.feign.DefaultFeign;
+import com.hesung.hsds.feign.OpenAiFeign;
+public class FeignCaller {
+    private StaticFeign staticFeign;
+    private DefaultFeign defaultFeign;
+    private OpenAiFeign openAiFeign;
+    Object callStatic() { return staticFeign.get(); }
+    Object callDefault() { return defaultFeign.get(); }
+    Object callConfigured() { return openAiFeign.chat(); }
+}
 `)
 	var logs bytes.Buffer
 	previous := slog.Default()
@@ -253,7 +272,10 @@ func TestFeignDependenciesResolveAgainstRuntimeConsumers(t *testing.T) {
 </project>`)
 	writeFile(t, root, base+"/client-lib/src/main/java/com/example/SharedFeign.java", `package com.example;
 @FeignClient(name = "shared", url = "${shared.url}")
-public interface SharedFeign {}
+public interface SharedFeign {
+  @GetMapping("/shared")
+  Object get();
+}
 `)
 	writeFile(t, root, base+"/middle-lib/pom.xml", `<project>
   <groupId>com.example</groupId>
@@ -277,6 +299,11 @@ public interface SharedFeign {}
 </project>`)
 	writeFile(t, root, base+"/service-a/src/main/java/com/example/ServiceAApplication.java",
 		"package com.example;\n@SpringBootApplication\npublic class ServiceAApplication {}\n")
+	writeFile(t, root, base+"/service-a/src/main/java/com/example/ServiceA.java", `package com.example;
+public class ServiceA {
+  private SharedFeign sharedFeign;
+  Object call() { return sharedFeign.get(); }
+}`)
 	writeFile(t, root, base+"/service-b/pom.xml", `<project>
   <groupId>com.example</groupId>
   <artifactId>service-b</artifactId>
@@ -289,6 +316,11 @@ public interface SharedFeign {}
 </project>`)
 	writeFile(t, root, base+"/service-b/src/main/java/com/example/ServiceBApplication.java",
 		"package com.example;\n@SpringBootApplication\npublic class ServiceBApplication {}\n")
+	writeFile(t, root, base+"/service-b/src/main/java/com/example/ServiceB.java", `package com.example;
+public class ServiceB {
+  private SharedFeign sharedFeign;
+  Object call() { return sharedFeign.get(); }
+}`)
 
 	var requested []config.Ref
 	resolver := configResolverFunc(func(
@@ -343,15 +375,37 @@ func feignWorkspace(t *testing.T, applicationYAML string) string {
 	}
 	writeFile(t, root, source+"/src/main/java/com/hesung/hsds/feign/APIFeignOnline.java", `package com.hesung.hsds.feign;
 @FeignClient(value = "${api.url-online-service-name}")
-public interface APIFeignOnline {}
+public interface APIFeignOnline {
+    @GetMapping("/online")
+    Object get();
+}
 `)
 	writeFile(t, root, source+"/src/main/java/com/hesung/hsds/feign/APIFeignOffline.java", `package com.hesung.hsds.feign;
 @FeignClient(value = "${api.url-offline-service-name}")
-public interface APIFeignOffline {}
+public interface APIFeignOffline {
+    @GetMapping("/offline")
+    Object get();
+}
 `)
 	writeFile(t, root, source+"/src/main/java/com/hesung/hsds/feign/OpenAiFeign.java", `package com.hesung.hsds.feign;
 @FeignClient(name = "openai-client", url = "${openai.url}")
-public interface OpenAiFeign {}
+public interface OpenAiFeign {
+    @PostMapping("/chat")
+    Object chat();
+}
+`)
+	writeFile(t, root, source+"/src/main/java/com/hesung/hsds/FeignCaller.java", `package com.hesung.hsds;
+import com.hesung.hsds.feign.APIFeignOnline;
+import com.hesung.hsds.feign.APIFeignOffline;
+import com.hesung.hsds.feign.OpenAiFeign;
+public class FeignCaller {
+    private APIFeignOnline online;
+    private APIFeignOffline offline;
+    private OpenAiFeign openAi;
+    Object online() { return online.get(); }
+    Object offline() { return offline.get(); }
+    Object chat() { return openAi.chat(); }
+}
 `)
 	writeJavaService(t, root, "repos/hsds/hsds-online-service", "hsds-online-service")
 	writeJavaService(t, root, "repos/hsds/hsds-offline-service", "hsds-offline-service")
@@ -404,7 +458,15 @@ func TestFeignConsumersKeepCallerIdentityAcrossSameNamedModules(t *testing.T) {
 </project>`)
 		writeFile(t, root, base+"/hsas-sync-cookbook/src/main/java/com/example/SyncFeign.java", `package com.example;
 @FeignClient(name = "hsas-file-application")
-public interface SyncFeign {}`)
+public interface SyncFeign {
+  @GetMapping("/sync")
+  Object sync();
+}`)
+		writeFile(t, root, base+"/hsas-sync-cookbook/src/main/java/com/example/SyncService.java", `package com.example;
+public class SyncService {
+  private SyncFeign syncFeign;
+  Object sync() { return syncFeign.sync(); }
+}`)
 		writeFile(t, root, base+"/hsas-sync-application/pom.xml", `<project>
   <groupId>com.example</groupId>
   <artifactId>hsas-sync-application</artifactId>

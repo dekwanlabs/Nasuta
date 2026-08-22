@@ -332,6 +332,7 @@ func (run *activeRun) Execute(
 		ContextWindow:       execution.snapshot.Budget.ContextTokens,
 		MaxToolResultBytes:  execution.definition.Budget.MaxToolResultBytes,
 		MaxContinueRounds:   execution.definition.Budget.MaxContinueRounds,
+		StructuredOutput:    execution.structuredOutput,
 		ModelParameters:     execution.modelParameters,
 		BudgetCheck:         run.recorder.CheckLimits,
 	}, observer, run.runtime.hub)
@@ -349,7 +350,11 @@ func (run *activeRun) Execute(
 		referencesFromRequest(request.Context),
 		run.runtime.schemas,
 		execution.definition.OutputSchema,
-		outputRecoveryContext{AgentID: request.Agent.ID, Input: request.Input},
+		outputRecoveryContext{
+			AgentID: request.Agent.ID,
+			Input:   request.Input,
+			Context: request.Context,
+		},
 	)
 	outcome = run.mergePreparationOutcome(outcome)
 	publicResult.Evidence = publicEvidence(outcome.Evidence)

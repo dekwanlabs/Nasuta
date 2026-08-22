@@ -40,12 +40,13 @@ type TaskBudget struct {
 
 // TaskSpec requests one registered capability without selecting its implementation.
 type TaskSpec struct {
-	ID             string   `json:"id"`
-	Purpose        string   `json:"purpose"`
-	RequiredFacets []string `json:"required_facets,omitempty"`
-	Capability     string   `json:"capability"`
+	ID                   string   `json:"id"`
+	Purpose              string   `json:"purpose"`
+	InvestigationGoalIDs []string `json:"investigation_goal_ids,omitempty"`
+	RequiredFacets       []string `json:"required_facets,omitempty"`
+	Capability           string   `json:"capability"`
 	// InputRefs limits the task to evidence already admitted by the server.
-	InputRefs     []EvidenceRef `json:"input_refs,omitempty"`
+	InputRefs     []EvidenceRef `json:"input_refs"`
 	OutputSchema  SchemaRef     `json:"output_schema"`
 	ParallelGroup string        `json:"parallel_group,omitempty"`
 	// Optional allows downstream scheduling to continue after terminal failure.

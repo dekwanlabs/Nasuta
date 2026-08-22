@@ -115,7 +115,6 @@ func (te *ToolExecutor) ExecuteLimited(ctx context.Context, snapshot tool.Snapsh
 		platform.TruncateForLog(argSummary(args), 600), platform.TruncateForLog(result, 1200))
 	execution := ToolExecution{
 		AuthoritativeContent: result,
-		PromptContent:        result,
 		References:           cloneReferences(toolResult.References),
 		EvidenceUnits:        cloneEvidenceUnits(toolResult.EvidenceUnits),
 		Evidence:             true,
@@ -123,16 +122,15 @@ func (te *ToolExecutor) ExecuteLimited(ctx context.Context, snapshot tool.Snapsh
 		AnswerContract:       toolResult.AnswerContract,
 		DurationMs:           int(duration / time.Millisecond),
 	}
-	if maxPromptBytes > 0 {
-		execution.PromptContent, execution.ArtifactID = boundedToolPrompt(
-			runID, call.ID, execution.AuthoritativeContent, execution.AnswerContract, maxPromptBytes,
+	execution.PromptContent, execution.ArtifactID = modelFacingToolContent(
+		runID, call.ID, execution.AuthoritativeContent, execution.AnswerContract,
+		execution.EvidenceUnits, maxPromptBytes,
+	)
+	if execution.ArtifactID != "" {
+		log.InfofCtx(ctx,
+			"[agent] tool %s result shortened for model context: authoritativeBytes=%d promptBytes=%d artifact=%s",
+			name, len(execution.AuthoritativeContent), len(execution.PromptContent), execution.ArtifactID,
 		)
-		if execution.ArtifactID != "" {
-			log.InfofCtx(ctx,
-				"[agent] tool %s result shortened for model context: authoritativeBytes=%d promptBytes=%d artifact=%s",
-				name, len(execution.AuthoritativeContent), len(execution.PromptContent), execution.ArtifactID,
-			)
-		}
 	}
 	return execution
 }

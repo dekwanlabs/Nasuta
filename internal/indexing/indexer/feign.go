@@ -21,8 +21,12 @@ type feignReference struct {
 	From             string
 	CallerServiceKey string
 	ModulePath       string
+	PackageName      string
+	InterfaceName    string
+	QualifiedName    string
 	ClientName       string
 	URL              string
+	Methods          map[string]domain.Evidence
 	Evidence         []domain.Evidence
 	Confidence       float64
 }

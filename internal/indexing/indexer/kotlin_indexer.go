@@ -68,6 +68,7 @@ func scanKotlinServices(root string, dirs []string) []domain.ServiceRecord {
 // scanKotlinFeigns preserves Feign configuration until dependency resolution.
 func scanKotlinFeigns(root string, dirs []string) []feignReference {
 	files := walkFiles(root, dirs, hasSuffix(".kt"))
+	constants := scanJVMStringConstants(root, dirs)
 	var records []feignReference
 	for _, file := range files {
 		if isTestSourcePath(relativeTo(root, file)) {
@@ -77,7 +78,9 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 		if !strings.Contains(text, "@FeignClient") {
 			continue
 		}
-		text = stripJVMComments(text)
+		source := scanJVMSource(text)
+		packageName := jvmPackageName(source.tokens)
+		cleanText := stripJVMComments(text)
 		rel := relativeTo(root, file)
 		caller := inferKotlinServiceName(root, file)
 		modulePath := ""
@@ -87,17 +90,33 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 			callerServiceKey = serviceIdentityForModule(root, moduleRoot, caller).Key
 		}
 		iface := strings.TrimSuffix(filepath.Base(file), ".kt")
-		lines := strings.Split(text, "\n")
+		if match := kotlinInterfaceRe.FindStringSubmatch(cleanText); match != nil {
+			iface = match[1]
+		}
+		lines := strings.Split(cleanText, "\n")
 		for i, line := range lines {
 			if !strings.Contains(line, "@FeignClient") {
 				continue
 			}
-			annotation := collectAnnotation(lines, i)
-			clientName := extractAnnotationValue(annotation, "value", "name")
-			if clientName == "" {
-				clientName = extractFirstString(annotation)
+			var parsed *jvmAnnotation
+			for index := range source.annotations {
+				if source.annotations[index].name == "FeignClient" &&
+					source.annotations[index].line == i+1 {
+					parsed = &source.annotations[index]
+					break
+				}
 			}
-			targetURL := extractAnnotationValue(annotation, "url")
+			if parsed == nil {
+				continue
+			}
+			clientName, nameResolved := feignClientName(*parsed, source, constants)
+			if !nameResolved {
+				clientName = ""
+			}
+			targetURL, urlPresent, urlResolved := feignStringArgument(*parsed, "url", source, constants)
+			if urlPresent && !urlResolved {
+				targetURL = ""
+			}
 			if clientName == "" && targetURL == "" {
 				continue
 			}
@@ -107,7 +126,10 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 			}
 			records = append(records, feignReference{
 				From: caller, CallerServiceKey: callerServiceKey, ModulePath: modulePath,
-				ClientName: clientName, URL: targetURL,
+				PackageName: packageName, InterfaceName: iface,
+				QualifiedName: strings.Trim(strings.Join([]string{packageName, iface}, "."), "."),
+				ClientName:    clientName, URL: targetURL,
+				Methods: kotlinFeignMethods(cleanText, iface, rel),
 				Evidence: []domain.Evidence{{
 					Path: rel, Line: i + 1, Symbol: iface, Kind: domain.SourceCodeScan,
 				}},

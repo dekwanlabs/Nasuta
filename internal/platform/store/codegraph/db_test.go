@@ -213,3 +213,44 @@ func assertPaths(t *testing.T, db *DB, want []string) {
 		}
 	}
 }
+
+func TestResolveRouteMethodInPathFindsSiblingModule(t *testing.T) {
+	workspace := t.TempDir()
+	dbPath := filepath.Join(workspace, ".codegraph", "codegraph.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`
+CREATE TABLE nodes (
+ id TEXT PRIMARY KEY,kind TEXT NOT NULL,name TEXT NOT NULL,qualified_name TEXT NOT NULL,
+ file_path TEXT NOT NULL,language TEXT NOT NULL,start_line INTEGER NOT NULL,end_line INTEGER NOT NULL,
+ signature TEXT
+);
+CREATE TABLE edges (source TEXT,target TEXT,kind TEXT);
+INSERT INTO nodes VALUES
+ ('controller','method','getDevices4Share','RoomDeviceController.getDevices4Share','repos/hsas/hsas-dreo-app/hsas-share/src/RoomDeviceController.java','java',63,67,''),
+ ('route','route','GET /family/me/room/devices','RoomDeviceController.getDevices4Share.route','repos/hsas/hsas-dreo-app/hsas-share/src/RoomDeviceController.java','java',63,63,'');`)
+	if err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := Open(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer graph.Close()
+	node, err := graph.ResolveRouteMethodInPath("repos/hsas/hsas-dreo-app", "GET", "/family/me/room/devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.ID != "controller" || node.FilePath != "repos/hsas/hsas-dreo-app/hsas-share/src/RoomDeviceController.java" {
+		t.Fatalf("resolved node = %+v", node)
+	}
+}

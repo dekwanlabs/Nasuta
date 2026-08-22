@@ -81,6 +81,23 @@ func TestIncidentPromptDoesNotForceUnsupportedRootCause(t *testing.T) {
 	}
 }
 
+func TestInvestigationSynthesizerPromptPreservesUserFacingStructure(t *testing.T) {
+	prompt := Text(AgentCatalogSynthesizer)
+	for _, required := range []string{
+		`"workflow.synthesis_objective"`,
+		`"investigation_goals"`,
+		`Use short "##" headings`,
+		"Never collapse a multi-goal or multi-path answer into one dense paragraph",
+		"final evidence-boundary section",
+		`Do not lead with "verification"`,
+		`Markdown is required inside the "answer" string`,
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("synthesizer prompt missing structure rule %q", required)
+		}
+	}
+}
+
 func TestRetrievalExecutionPromptDecomposesIndependentComparisons(t *testing.T) {
 	prompt := Text(RetrievalExecution)
 	for _, required := range []string{
@@ -90,6 +107,20 @@ func TestRetrievalExecutionPromptDecomposesIndependentComparisons(t *testing.T) 
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("retrieval execution prompt missing comparison rule %q", required)
+		}
+	}
+}
+
+func TestRetrievalExecutionAuditPromptIsNarrow(t *testing.T) {
+	prompt := Text(RetrievalExecutionAudit)
+	for _, required := range []string{
+		`exactly one top-level property: "tasks"`,
+		"user-level objective",
+		"For a focused fact question, return tasks as []",
+		"Do not return strategy",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("retrieval execution audit prompt missing %q", required)
 		}
 	}
 }

@@ -30,6 +30,7 @@ const (
 
 type projectionResult struct {
 	Input              Handoff
+	Task               *TaskDirective
 	Status             investigatorProjectionStatus
 	InputTokens        int
 	ProjectedTokens    int
@@ -42,9 +43,12 @@ type projectionResult struct {
 }
 
 type contractProjection struct {
-	Entities      []projectedEntityRef    `json:"entities"`
-	EvidenceGoals []projectedEvidenceGoal `json:"evidence_goals"`
-	Context       projectedTaskContext    `json:"context"`
+	Objective               string                        `json:"objective"`
+	Entities                []projectedEntityRef          `json:"entities"`
+	InvestigationGoals      []projectedInvestigationGoal  `json:"investigation_goals"`
+	EvidenceGoals           []projectedEvidenceGoal       `json:"evidence_goals"`
+	TaskEvidenceAssignments []projectedEvidenceAssignment `json:"task_evidence_assignments,omitempty"`
+	Context                 projectedTaskContext          `json:"context"`
 }
 
 type projectedEntityRef struct {
@@ -52,6 +56,13 @@ type projectedEntityRef struct {
 	Label   string   `json:"label,omitempty"`
 	Role    string   `json:"role,omitempty"`
 	Aliases []string `json:"aliases,omitempty"`
+}
+
+type projectedInvestigationGoal struct {
+	ID                  string   `json:"id"`
+	Objective           string   `json:"objective"`
+	IndependentlyUseful bool     `json:"independently_useful"`
+	DependsOn           []string `json:"depends_on"`
 }
 
 type projectedEvidenceGoal struct {
@@ -63,6 +74,18 @@ type projectedEvidenceGoal struct {
 	Freshness       agentapi.FreshnessPolicy  `json:"freshness"`
 	MinimumCoverage int                       `json:"minimum_coverage"`
 	HighRisk        bool                      `json:"high_risk,omitempty"`
+}
+
+type projectedEvidenceAssignment struct {
+	TaskID         string                    `json:"task_id"`
+	RequiredFacets []string                  `json:"required_facets,omitempty"`
+	InputRefs      []agentapi.EvidenceRef    `json:"input_refs"`
+	ContextRefs    []projectedTaskContextRef `json:"context_refs"`
+}
+
+type projectedTaskContextRef struct {
+	Source      string `json:"source"`
+	ContentHash string `json:"content_hash"`
 }
 
 type projectedTaskContext struct {
@@ -91,10 +114,11 @@ func projectInvestigatorHandoff(
 ) (projectionResult, error) {
 	result := projectionResult{
 		Input:       cloneProjectedHandoff(input),
+		Task:        cloneTaskDirective(task),
 		Status:      projectionLegacy,
 		InputTokens: estimateProjectionTokens(input.Payload),
 	}
-	if task == nil || len(task.RequiredFacets) == 0 || input.Schema.ID != "task.contract" {
+	if input.Schema.ID != "task.contract" {
 		result.ProjectedTokens = result.InputTokens
 		result.ProjectionHash = input.ContentHash
 		return result, nil
@@ -115,12 +139,87 @@ func projectInvestigatorHandoff(
 		result.ProjectionHash = input.ContentHash
 		return result, nil
 	}
-	var contract contractProjection
+	contract := contractProjection{
+		InvestigationGoals: []projectedInvestigationGoal{},
+	}
 	if err := decodeProjectionFields(raw, &contract); err != nil {
 		return projectionResult{}, fmt.Errorf("decode task contract context for node %q: %w", nodeID, err)
 	}
+	_, assignmentsDeclared := raw["task_evidence_assignments"]
+	assignment, assigned, err := taskEvidenceAssignmentForNode(
+		contract.TaskEvidenceAssignments,
+		nodeID,
+	)
+	if err != nil {
+		return projectionResult{}, fmt.Errorf(
+			"task contract evidence assignments for node %q: %w",
+			nodeID,
+			err,
+		)
+	}
+	if assignmentsDeclared && !assigned {
+		assignment = projectedEvidenceAssignment{
+			TaskID: nodeID, InputRefs: []agentapi.EvidenceRef{},
+			ContextRefs: []projectedTaskContextRef{},
+		}
+		assigned = true
+	}
+	effectiveTask := cloneTaskDirective(task)
+	if assigned {
+		if effectiveTask == nil {
+			effectiveTask = &TaskDirective{}
+		}
+		if effectiveTask.Purpose == "" {
+			effectiveTask.Purpose = investigatorTaskPurpose(nodeID)
+		}
+		requiredFacets := assignment.RequiredFacets
+		if len(requiredFacets) == 0 {
+			requiredFacets = projectedEvidenceGoalFacets(contract.EvidenceGoals)
+		}
+		effectiveTask.RequiredFacets = append([]string(nil), requiredFacets...)
+		effectiveTask.InputRefs = cloneEvidenceRefs(assignment.InputRefs)
+		contract.TaskEvidenceAssignments = []projectedEvidenceAssignment{
+			cloneProjectedEvidenceAssignment(assignment),
+		}
+	}
+	if effectiveTask == nil ||
+		!assigned &&
+			len(effectiveTask.RequiredFacets) == 0 &&
+			len(effectiveTask.InvestigationGoalIDs) == 0 {
+		result.ProjectedTokens = result.InputTokens
+		result.ProjectionHash = input.ContentHash
+		result.Task = effectiveTask
+		return result, nil
+	}
+	result.Task = effectiveTask
 
-	required := stringSet(task.RequiredFacets)
+	if len(effectiveTask.InvestigationGoalIDs) > 0 {
+		bound := stringSet(effectiveTask.InvestigationGoalIDs)
+		filtered := make(
+			[]projectedInvestigationGoal,
+			0,
+			len(effectiveTask.InvestigationGoalIDs),
+		)
+		for _, goal := range contract.InvestigationGoals {
+			if _, ok := bound[goal.ID]; ok {
+				filtered = append(filtered, goal)
+			}
+		}
+		if len(filtered) != len(bound) {
+			return projectionResult{}, fmt.Errorf(
+				"task contract for node %q is missing bound investigation goals",
+				nodeID,
+			)
+		}
+		contract.InvestigationGoals = filtered
+		if len(filtered) == 1 {
+			contract.Objective = filtered[0].Objective
+		} else {
+			contract.Objective = effectiveTask.Purpose
+		}
+	}
+
+	required := stringSet(effectiveTask.RequiredFacets)
 	filteredGoals := make([]projectedEvidenceGoal, 0, len(contract.EvidenceGoals))
 	for _, goal := range contract.EvidenceGoals {
 		if _, ok := required[goal.Facet]; ok {
@@ -130,9 +229,11 @@ func projectInvestigatorHandoff(
 	contract.EvidenceGoals = filteredGoals
 
 	allowedSources := investigatorSourceKinds(nodeID)
-	refs := append([]agentapi.EvidenceRef(nil), task.InputRefs...)
+	refs := cloneEvidenceRefs(effectiveTask.InputRefs)
+	contextRefs := assignment.ContextRefs
 	selectedBlocks := make([]agentapi.ContextBlock, 0, len(contract.Context.SeedMaterial))
 	selectedHandoffUnits := make([]tool.EvidenceUnit, 0, len(input.EvidenceUnits))
+	selectedContextReferences := make([]agentapi.Reference, 0)
 	selectedKeys := make(map[string]struct{})
 	seenKeys := make(map[string]struct{})
 	matchedSeeds := 0
@@ -140,6 +241,19 @@ func projectInvestigatorHandoff(
 	duplicateSeeds := 0
 
 	for _, block := range contract.Context.SeedMaterial {
+		if len(block.Evidence) == 0 {
+			if assigned && taskContextReferenceMatches(block, contextRefs) {
+				selectedBlocks = append(selectedBlocks, cloneContextBlock(block))
+				selectedContextReferences = append(
+					selectedContextReferences,
+					block.References...,
+				)
+				matchedSeeds++
+			} else {
+				droppedSeeds++
+			}
+			continue
+		}
 		selectedUnits := make([]tool.EvidenceUnit, 0, len(block.Evidence))
 		for _, unit := range block.Evidence {
 			key := projectionEvidenceKey(unit)
@@ -196,7 +310,10 @@ func projectInvestigatorHandoff(
 
 	result.Input.Payload = payload
 	result.Input.EvidenceUnits = selectedHandoffUnits
-	result.Input.References = filterProjectionReferences(input.References, selectedHandoffUnits)
+	result.Input.References = appendUniqueReferences(
+		filterProjectionReferences(input.References, selectedHandoffUnits),
+		selectedContextReferences,
+	)
 	result.Input.EvidenceConflicts = filterProjectionConflicts(input.EvidenceConflicts, selectedHandoffUnits)
 	if result.Input.ContentHash, err = handoffHash(result.Input); err != nil {
 		return projectionResult{}, fmt.Errorf("hash projected handoff for node %q: %w", nodeID, err)
@@ -206,7 +323,10 @@ func projectInvestigatorHandoff(
 	result.DroppedSeedCount = droppedSeeds
 	result.MatchedSeedCount = matchedSeeds
 	result.DuplicateSeedCount = duplicateSeeds
-	result.MissingFacets = missingProjectionFacets(task.RequiredFacets, selectedHandoffUnits)
+	result.MissingFacets = missingProjectionFacets(
+		effectiveTask.RequiredFacets,
+		selectedHandoffUnits,
+	)
 	result.MissingEntities = missingProjectionEntities(
 		contract.Entities, selectedHandoffUnits, projectionMinimumCoverage(contract.EvidenceGoals),
 	)
@@ -220,7 +340,7 @@ func projectInvestigatorHandoff(
 	default:
 		result.Status = projectionMatched
 	}
-	result.ProjectionHash = projectionHash(input, task, nodeID, payload)
+	result.ProjectionHash = projectionHash(input, effectiveTask, nodeID, payload)
 	if maxTokens > 0 && int64(result.ProjectedTokens) > maxTokens {
 		return projectionResult{}, fmt.Errorf(
 			"projected task contract for node %q exceeds input budget: %d tokens > %d",
@@ -248,14 +368,32 @@ func projectionHash(input Handoff, task *TaskDirective, nodeID string, payload [
 }
 
 func decodeProjectionFields(raw map[string]json.RawMessage, contract *contractProjection) error {
+	if value, ok := raw["objective"]; ok {
+		if err := json.Unmarshal(value, &contract.Objective); err != nil {
+			return fmt.Errorf("objective: %w", err)
+		}
+	}
 	if value, ok := raw["entities"]; ok {
 		if err := json.Unmarshal(value, &contract.Entities); err != nil {
 			return fmt.Errorf("entities: %w", err)
 		}
 	}
+	if value, ok := raw["investigation_goals"]; ok {
+		if err := json.Unmarshal(value, &contract.InvestigationGoals); err != nil {
+			return fmt.Errorf("investigation_goals: %w", err)
+		}
+	}
 	if value, ok := raw["evidence_goals"]; ok {
 		if err := json.Unmarshal(value, &contract.EvidenceGoals); err != nil {
 			return fmt.Errorf("evidence_goals: %w", err)
+		}
+	}
+	if value, ok := raw["task_evidence_assignments"]; ok {
+		if err := json.Unmarshal(
+			value,
+			&contract.TaskEvidenceAssignments,
+		); err != nil {
+			return fmt.Errorf("task_evidence_assignments: %w", err)
 		}
 	}
 	if value, ok := raw["context"]; ok {
@@ -353,17 +491,164 @@ func canonicalProjectionEntityText(value string) string {
 }
 
 func encodeProjectionFields(raw map[string]json.RawMessage, contract contractProjection) error {
+	objective, err := json.Marshal(contract.Objective)
+	if err != nil {
+		return fmt.Errorf("objective: %w", err)
+	}
+	investigationGoals, err := json.Marshal(contract.InvestigationGoals)
+	if err != nil {
+		return fmt.Errorf("investigation_goals: %w", err)
+	}
 	goals, err := json.Marshal(contract.EvidenceGoals)
 	if err != nil {
 		return fmt.Errorf("evidence_goals: %w", err)
+	}
+	assignments, err := json.Marshal(contract.TaskEvidenceAssignments)
+	if err != nil {
+		return fmt.Errorf("task_evidence_assignments: %w", err)
 	}
 	contextValue, err := json.Marshal(contract.Context)
 	if err != nil {
 		return fmt.Errorf("context: %w", err)
 	}
+	raw["objective"] = objective
+	raw["investigation_goals"] = investigationGoals
 	raw["evidence_goals"] = goals
+	if len(contract.TaskEvidenceAssignments) == 0 {
+		delete(raw, "task_evidence_assignments")
+	} else {
+		raw["task_evidence_assignments"] = assignments
+	}
 	raw["context"] = contextValue
 	return nil
+}
+
+func taskEvidenceAssignmentForNode(
+	assignments []projectedEvidenceAssignment,
+	nodeID string,
+) (projectedEvidenceAssignment, bool, error) {
+	var matched projectedEvidenceAssignment
+	found := false
+	seen := make(map[string]struct{}, len(assignments))
+	for _, assignment := range assignments {
+		if _, duplicate := seen[assignment.TaskID]; duplicate {
+			return projectedEvidenceAssignment{}, false, fmt.Errorf(
+				"task %q is assigned more than once",
+				assignment.TaskID,
+			)
+		}
+		seen[assignment.TaskID] = struct{}{}
+		if assignment.TaskID != nodeID {
+			continue
+		}
+		matched = cloneProjectedEvidenceAssignment(assignment)
+		found = true
+	}
+	return matched, found, nil
+}
+
+func projectedEvidenceGoalFacets(
+	goals []projectedEvidenceGoal,
+) []string {
+	facets := make([]string, 0, len(goals))
+	seen := make(map[string]struct{}, len(goals))
+	for _, goal := range goals {
+		if _, duplicate := seen[goal.Facet]; duplicate {
+			continue
+		}
+		seen[goal.Facet] = struct{}{}
+		facets = append(facets, goal.Facet)
+	}
+	return facets
+}
+
+func investigatorTaskPurpose(nodeID string) string {
+	switch {
+	case strings.Contains(nodeID, ".code"):
+		return "Inspect the assigned implementation evidence."
+	case strings.Contains(nodeID, ".runtime"),
+		strings.Contains(nodeID, ".service"):
+		return "Trace the assigned runtime and service evidence."
+	case strings.Contains(nodeID, ".docs"):
+		return "Verify the assigned documentation evidence."
+	case strings.Contains(nodeID, ".web"):
+		return "Research the assigned public evidence."
+	case strings.Contains(nodeID, ".memory"):
+		return "Evaluate the assigned recalled evidence."
+	default:
+		return "Investigate the assigned evidence."
+	}
+}
+
+func cloneProjectedEvidenceAssignment(
+	assignment projectedEvidenceAssignment,
+) projectedEvidenceAssignment {
+	assignment.RequiredFacets = append(
+		[]string(nil),
+		assignment.RequiredFacets...,
+	)
+	assignment.InputRefs = cloneEvidenceRefs(assignment.InputRefs)
+	assignment.ContextRefs = append(
+		[]projectedTaskContextRef(nil),
+		assignment.ContextRefs...,
+	)
+	return assignment
+}
+
+func cloneTaskDirective(task *TaskDirective) *TaskDirective {
+	if task == nil {
+		return nil
+	}
+	cloned := *task
+	cloned.InvestigationGoalIDs = append(
+		[]string(nil),
+		task.InvestigationGoalIDs...,
+	)
+	cloned.RequiredFacets = append([]string(nil), task.RequiredFacets...)
+	cloned.InputRefs = cloneEvidenceRefs(task.InputRefs)
+	return &cloned
+}
+
+func taskContextReferenceMatches(
+	block agentapi.ContextBlock,
+	refs []projectedTaskContextRef,
+) bool {
+	for _, ref := range refs {
+		if ref.Source == block.Source && ref.ContentHash == block.ContentHash {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneContextBlock(block agentapi.ContextBlock) agentapi.ContextBlock {
+	block.References = append([]agentapi.Reference(nil), block.References...)
+	block.Evidence = cloneEvidenceUnits(block.Evidence)
+	block.EvidenceConflicts = cloneEvidenceConflicts(block.EvidenceConflicts)
+	return block
+}
+
+func appendUniqueReferences(
+	values []agentapi.Reference,
+	additions []agentapi.Reference,
+) []agentapi.Reference {
+	seen := make(map[agentapi.Reference]struct{}, len(values)+len(additions))
+	out := make([]agentapi.Reference, 0, len(values)+len(additions))
+	for _, reference := range values {
+		if _, duplicate := seen[reference]; duplicate {
+			continue
+		}
+		seen[reference] = struct{}{}
+		out = append(out, reference)
+	}
+	for _, reference := range additions {
+		if _, duplicate := seen[reference]; duplicate {
+			continue
+		}
+		seen[reference] = struct{}{}
+		out = append(out, reference)
+	}
+	return out
 }
 
 func projectContextBlock(block agentapi.ContextBlock, units []tool.EvidenceUnit) agentapi.ContextBlock {
@@ -437,8 +722,11 @@ func projectionEvidenceMatches(
 	if !facetMatch {
 		return false
 	}
-	if len(refs) == 0 {
+	if refs == nil {
 		return true
+	}
+	if len(refs) == 0 {
+		return false
 	}
 	for _, ref := range refs {
 		if projectionReferenceMatches(unit, ref) {
