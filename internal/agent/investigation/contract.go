@@ -16,6 +16,7 @@ import (
 
 var (
 	ErrInvalidTransition = errors.New("invalid investigation state transition")
+	ErrNotFound          = errors.New("investigation run not found")
 	ErrBudgetExceeded    = errors.New("investigation budget exceeded")
 	ErrPlanInvalid       = errors.New("investigation plan is invalid")
 	ErrCapabilityGap     = errors.New("investigation capability gap")

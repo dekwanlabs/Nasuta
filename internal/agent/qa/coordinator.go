@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -74,12 +75,15 @@ func (coordinator *Coordinator) Await(
 			workflowRunID,
 		)
 	}
-	investigation, err := coordinator.runner()
+	investigator, err := coordinator.runner()
 	if err != nil {
 		return err
 	}
-	terminal, err := investigation.AwaitTerminal(ctx, workflowRunID)
+	terminal, err := investigator.AwaitTerminal(ctx, workflowRunID)
 	if err != nil {
+		if errors.Is(err, investigation.ErrNotFound) {
+			return coordinator.complete(ctx, parent, missingInvestigationTerminal(workflowRunID))
+		}
 		return fmt.Errorf("await QA investigation workflow %q: %w", workflowRunID, err)
 	}
 	return coordinator.converge(ctx, parent, terminal)
@@ -94,12 +98,15 @@ func (coordinator *Coordinator) Reconcile(
 	if err != nil {
 		return err
 	}
-	investigation, err := coordinator.runner()
+	investigator, err := coordinator.runner()
 	if err != nil {
 		return err
 	}
-	terminal, err := investigation.LoadTerminal(ctx, parent.WorkflowRunID)
+	terminal, err := investigator.LoadTerminal(ctx, parent.WorkflowRunID)
 	if err != nil {
+		if errors.Is(err, investigation.ErrNotFound) {
+			return coordinator.complete(ctx, parent, missingInvestigationTerminal(parent.WorkflowRunID))
+		}
 		return fmt.Errorf(
 			"load QA investigation workflow %q terminal result: %w",
 			parent.WorkflowRunID,
@@ -110,6 +117,15 @@ func (coordinator *Coordinator) Reconcile(
 }
 
 // Cancel propagates an owned Parent cancellation to its Workflow.
+func missingInvestigationTerminal(workflowRunID string) InvestigationTerminal {
+	return InvestigationTerminal{
+		WorkflowRunID: workflowRunID,
+		Status:        InvestigationFailed,
+		ErrorCode:     "investigation_run_missing",
+		Completeness:  InvestigationUnavailable,
+	}
+}
+
 func (coordinator *Coordinator) Cancel(
 	ctx context.Context,
 	parentRunID string,

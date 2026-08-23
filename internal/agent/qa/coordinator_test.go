@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -222,6 +223,62 @@ func TestCoordinatorReplayUsesIdempotentSessionRunKey(t *testing.T) {
 		sessions.appendRuns[0] != parent.ID ||
 		sessions.appendRuns[1] != parent.ID {
 		t.Fatalf("append run keys = %v", sessions.appendRuns)
+	}
+}
+
+func TestCoordinatorFailsParentWhenInvestigationRunIsMissing(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-missing", WorkflowRunID: "workflow-missing", Status: RunStatusRunning,
+	}
+	scenarios := &coordinatorScenarioLifecycle{}
+	runner := &investigationRunnerRecorder{
+		load: func(context.Context, string) (InvestigationTerminal, error) {
+			return InvestigationTerminal{}, fmt.Errorf("load snapshot: %w", investigation.ErrNotFound)
+		},
+	}
+	coordinator := &Coordinator{
+		investigation: runner,
+		scenarios:     scenarios,
+		parentRuns:    coordinatorParentStore{parent: parent},
+	}
+
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(scenarios.outcomes) != 1 {
+		t.Fatalf("outcomes = %+v, want one terminal outcome", scenarios.outcomes)
+	}
+	outcome := scenarios.outcomes[0]
+	if outcome.Status != RunStatusFailed || outcome.ErrorCode != "investigation_run_missing" {
+		t.Fatalf("outcome = %+v, want failed investigation_run_missing", outcome)
+	}
+}
+
+func TestCoordinatorAwaitFailsParentWhenInvestigationRunIsMissing(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-await-missing", WorkflowRunID: "workflow-await-missing", Status: RunStatusRunning,
+	}
+	scenarios := &coordinatorScenarioLifecycle{}
+	runner := &investigationRunnerRecorder{
+		await: func(context.Context, string) (InvestigationTerminal, error) {
+			return InvestigationTerminal{}, fmt.Errorf("await snapshot: %w", investigation.ErrNotFound)
+		},
+	}
+	coordinator := &Coordinator{
+		investigation: runner,
+		scenarios:     scenarios,
+		parentRuns:    coordinatorParentStore{parent: parent},
+	}
+
+	if err := coordinator.Await(t.Context(), parent.ID, parent.WorkflowRunID); err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	if len(scenarios.outcomes) != 1 {
+		t.Fatalf("outcomes = %+v, want one terminal outcome", scenarios.outcomes)
+	}
+	outcome := scenarios.outcomes[0]
+	if outcome.Status != RunStatusFailed || outcome.ErrorCode != "investigation_run_missing" {
+		t.Fatalf("outcome = %+v, want failed investigation_run_missing", outcome)
 	}
 }
 

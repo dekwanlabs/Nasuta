@@ -223,7 +223,7 @@ func (store *MemoryRunStore) Get(id string) (InvestigationRun, error) {
 	defer store.mu.RUnlock()
 	run, ok := store.runs[id]
 	if !ok {
-		return InvestigationRun{}, fmt.Errorf("run %q not found", id)
+		return InvestigationRun{}, fmt.Errorf("%w: %q", ErrNotFound, id)
 	}
 	return cloneRun(run), nil
 }
@@ -516,7 +516,7 @@ func (store *SQLiteRunStore) loadPayload(id string) (InvestigationRun, error) {
 	var payload string
 	if err := store.db.QueryRow(`SELECT payload FROM investigation_runs WHERE id = ?`, id).Scan(&payload); err != nil {
 		if err == sql.ErrNoRows {
-			return InvestigationRun{}, fmt.Errorf("run %q not found", id)
+			return InvestigationRun{}, fmt.Errorf("%w: %q", ErrNotFound, id)
 		}
 		return InvestigationRun{}, err
 	}

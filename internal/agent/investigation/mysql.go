@@ -193,7 +193,7 @@ func (store *MySQLRunStore) applyLocked(id, owner string, token uint64, mutate r
 			return fmt.Errorf("%w: run %q fencing token %d is stale", ErrLeaseFenced, id, token)
 		}
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("run %q not found", id)
+			return fmt.Errorf("%w: %q", ErrNotFound, id)
 		}
 		return err
 	}
@@ -213,7 +213,7 @@ func (store *MySQLRunStore) loadPayload(id string) (InvestigationRun, error) {
 	var payload string
 	if err := store.db.QueryRow(`SELECT payload FROM investigation_runs WHERE id = ?`, id).Scan(&payload); err != nil {
 		if err == sql.ErrNoRows {
-			return InvestigationRun{}, fmt.Errorf("run %q not found", id)
+			return InvestigationRun{}, fmt.Errorf("%w: %q", ErrNotFound, id)
 		}
 		return InvestigationRun{}, err
 	}
