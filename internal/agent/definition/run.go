@@ -323,18 +323,19 @@ func (run *activeRun) Execute(
 	)
 	observer := run.observer()
 	loop := agentexecution.NewAgent(client, run.runtime.executor, agentexecution.Config{
-		MaxSteps:            execution.snapshot.Limits.MaxSteps,
-		MaxToolCalls:        execution.snapshot.Limits.MaxToolCalls,
-		Timeout:             time.Until(execution.snapshot.Limits.Deadline),
-		AnswerReserve:       run.runtime.settings.answerReserve,
-		AnswerMaxTokens:     execution.definition.Model.MaxOutputTokens,
-		ConclusionMaxTokens: execution.definition.Model.MaxOutputTokens,
-		ContextWindow:       execution.snapshot.Budget.ContextTokens,
-		MaxToolResultBytes:  execution.definition.Budget.MaxToolResultBytes,
-		MaxContinueRounds:   execution.definition.Budget.MaxContinueRounds,
-		StructuredOutput:    execution.structuredOutput,
-		ModelParameters:     execution.modelParameters,
-		BudgetCheck:         run.recorder.CheckLimits,
+		MaxSteps:                    execution.snapshot.Limits.MaxSteps,
+		MaxToolCalls:                execution.snapshot.Limits.MaxToolCalls,
+		Timeout:                     time.Until(execution.snapshot.Limits.Deadline),
+		AnswerReserve:               run.runtime.settings.answerReserve,
+		AnswerMaxTokens:             execution.definition.Model.MaxOutputTokens,
+		ConclusionMaxTokens:         execution.definition.Model.MaxOutputTokens,
+		ContextWindow:               execution.snapshot.Budget.ContextTokens,
+		MaxToolResultBytes:          execution.definition.Budget.MaxToolResultBytes,
+		MaxContinueRounds:           execution.definition.Budget.MaxContinueRounds,
+		StructuredOutput:            execution.structuredOutput,
+		ModelParameters:             execution.modelParameters,
+		BudgetCheck:                 run.recorder.CheckLimits,
+		DisableLegacyAnswerRecovery: run.runtime.settings.disableLegacyAnswerRecovery,
 	}, observer, run.runtime.hub)
 	loop.SetOnFirstAnswerToken(func(runID string) {
 		run.runtime.hub.EmitPhase(runID, "找到啦，我来把答案写出来 ✍️")
@@ -440,6 +441,15 @@ func (run *activeRun) setOutcome(outcome agentrun.Outcome) {
 	run.outcome = outcome
 	run.outcomeSet = true
 	run.mu.Unlock()
+}
+
+// Outcome returns the durable outcome computed by Execute for this run. It lets
+// upper-layer QA projections avoid reconstructing an outcome from public result
+// fields that may have been redacted or rendered for display.
+func (run *activeRun) Outcome() agentrun.Outcome {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.outcome
 }
 
 func (run *activeRun) validateRequest(

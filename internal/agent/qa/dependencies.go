@@ -132,26 +132,6 @@ func compressTurnDetail(turnNumber int, messages []llm.Message) (json.RawMessage
 	return session.CompressDetail(turnNumber, messages)
 }
 
-func internalMessage(message agentapi.Message) llm.Message {
-	compiled := llm.Message{
-		Role: message.Role, Content: message.Content,
-		ToolCallID: message.ToolCallID, Name: message.Name,
-	}
-	if len(message.ToolCalls) == 0 {
-		return compiled
-	}
-	compiled.ToolCalls = make([]llm.ToolCall, 0, len(message.ToolCalls))
-	for _, call := range message.ToolCalls {
-		compiled.ToolCalls = append(compiled.ToolCalls, llm.ToolCall{
-			ID: call.ID, Type: call.Type,
-			Function: llm.ToolFunction{
-				Name: call.Function.Name, Arguments: call.Function.Arguments,
-			},
-		})
-	}
-	return compiled
-}
-
 func publicMessages(messages []llm.Message) []agentapi.Message {
 	if len(messages) == 0 {
 		return nil

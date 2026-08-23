@@ -1,7 +1,6 @@
 package run
 
 import (
-	"encoding/json"
 	"errors"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -90,12 +89,4 @@ type DelegationTaskRecord struct {
 	SettledUsage     *agentapi.Usage
 	ReportArtifactID string
 	Existing         bool `json:"-"`
-}
-
-func (record DelegationTaskRecord) settledUsageJSON() json.RawMessage {
-	if record.SettledUsage == nil {
-		return nil
-	}
-	raw, _ := json.Marshal(record.SettledUsage)
-	return raw
 }

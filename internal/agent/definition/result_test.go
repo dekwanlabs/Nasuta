@@ -571,42 +571,6 @@ func TestValidatedInvestigationReportNormalizesEvidenceMetadata(t *testing.T) {
 	}
 }
 
-func TestPublicOutputTextExtractsOnlyTheTopLevelAnswer(t *testing.T) {
-	tests := []struct {
-		name   string
-		output string
-		want   string
-	}{
-		{
-			name:   "structured answer",
-			output: `{"answer":"grounded answer","supported_claims":[{"claim":"internal"}],"verification":{"decision":"partial"}}`,
-			want:   "grounded answer",
-		},
-		{
-			name:   "json string",
-			output: `"plain answer"`,
-			want:   "plain answer",
-		},
-		{
-			name:   "structured output without answer",
-			output: `{"supported_claims":[],"verification":{"decision":"partial"},"evidence_units":[]}`,
-			want:   "",
-		},
-		{
-			name:   "invalid output",
-			output: `{"answer":`,
-			want:   "",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := publicOutputText(json.RawMessage(test.output)); got != test.want {
-				t.Fatalf("publicOutputText() = %q, want %q", got, test.want)
-			}
-		})
-	}
-}
-
 func TestMapResultDoesNotExposeStructuredInvestigationFields(t *testing.T) {
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish([]agentapi.SchemaDefinition{{

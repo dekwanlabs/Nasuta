@@ -44,13 +44,8 @@ type Service struct {
 	domainKnowledge    string
 	toolPruningEnabled bool
 	delegationEnabled  bool
-	delegationShadow   bool
-	workflowEscalation bool
-	delegationChildren int
 	delegationTokens   int64
 	delegationCost     int64
-	workflowEscalator  agentapi.WorkflowEscalator
-	capabilities       WorkflowCapabilityResolver
 	definitions        DefinitionResolver
 	agentRef           agentapi.DefinitionRef
 	definitionErr      error
@@ -79,9 +74,6 @@ func New(d Deps) *Service {
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
 		toolPruningEnabled: platformSettings.ToolPruningEnabled,
 		delegationEnabled:  platformSettings.DelegationEnabled,
-		delegationShadow:   platformSettings.DelegationShadowEnabled,
-		workflowEscalation: platformSettings.DelegationWorkflowEscalationEnabled,
-		delegationChildren: platformSettings.DelegationMaxChildren,
 		delegationTokens:   platformSettings.DelegationMaxTotalTokens,
 		delegationCost:     platformSettings.DelegationMaxTotalCostMicros,
 		history:            d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
@@ -91,11 +83,9 @@ func New(d Deps) *Service {
 		runtime: d.Runtime, runtimeTools: d.RuntimeTools,
 		phaseEmitter: d.PhaseEmitter, investigation: d.Investigation,
 		scenarios: d.ScenarioLifecycle, coordinator: d.Coordinator,
-		executionEvents:   d.ExecutionEvents,
-		workflowEscalator: d.WorkflowEscalator,
-		capabilities:      d.Capabilities,
-		memory:            d.Memory,
-		compactionStatus:  make(map[string]SessionStatusEvent),
+		executionEvents:  d.ExecutionEvents,
+		memory:           d.Memory,
+		compactionStatus: make(map[string]SessionStatusEvent),
 	}
 	svc.writeAvailable.Store(d.WriteAvailable)
 	if svc.agentRef.ID == "" {

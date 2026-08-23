@@ -17,10 +17,8 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
-	agentworkflow "github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -143,8 +141,8 @@ func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
 
 	svc.applyExecutionRoute(prepared)
 
-	if prepared.execution.DowngradeReason != "workflow_unavailable" {
-		t.Fatalf("downgrade reason = %q, want workflow_unavailable", prepared.execution.DowngradeReason)
+	if prepared.execution.DowngradeReason != "investigation_unavailable" {
+		t.Fatalf("downgrade reason = %q, want investigation_unavailable", prepared.execution.DowngradeReason)
 	}
 	if prepared.planning.RoutedToolIDs != nil {
 		t.Fatalf("routed tools = %v, want nil after planning degradation", prepared.planning.RoutedToolIDs)
@@ -180,8 +178,8 @@ func TestExecutionRoutingDoesNotUseResolvedHistoryRelation(t *testing.T) {
 
 	svc.applyExecutionRoute(prepared)
 
-	if prepared.execution.DowngradeReason != "workflow_unavailable" {
-		t.Fatalf("downgrade reason = %q, want workflow_unavailable",
+	if prepared.execution.DowngradeReason != "investigation_unavailable" {
+		t.Fatalf("downgrade reason = %q, want investigation_unavailable",
 			prepared.execution.DowngradeReason)
 	}
 }
@@ -655,24 +653,6 @@ func (emptyContextRetriever) ContextBudget() int {
 	return 48000
 }
 
-type staticContextRetriever struct {
-	context *retrieval.RetrievedContext
-}
-
-func (retriever staticContextRetriever) RetrievePlan(
-	context.Context,
-	string,
-	retrieval.QueryTerms,
-	domain.EvidencePlan,
-	domain.QueryPlan,
-) (*retrieval.RetrievedContext, error) {
-	return retriever.context, nil
-}
-
-func (staticContextRetriever) ContextBudget() int {
-	return 48000
-}
-
 type investigationRunnerRecorder struct {
 	start  func(context.Context, InvestigationRequest) error
 	await  func(context.Context, string) (InvestigationTerminal, error)
@@ -723,25 +703,6 @@ func (runner *investigationRunnerRecorder) Cancel(
 		panic("unexpected InvestigationRunner.Cancel")
 	}
 	return runner.cancel(ctx, workflowRunID, userID)
-}
-
-type workflowEscalatorRecorder struct {
-	requests chan agentapi.WorkflowEscalationRequest
-}
-
-func (recorder *workflowEscalatorRecorder) Escalate(
-	_ context.Context,
-	request agentapi.WorkflowEscalationRequest,
-) (agentapi.WorkflowEscalationReceipt, error) {
-	recorder.requests <- request
-	return agentapi.WorkflowEscalationReceipt{
-		RequestID: request.RequestID,
-		WorkflowRunID: agentworkflow.StableWorkflowEscalationRunID(
-			request.ParentRunID,
-			request.RequestID,
-		),
-		Status: agentapi.EscalationAccepted,
-	}, nil
 }
 
 type scenarioRunRecorder struct {
@@ -836,6 +797,10 @@ func (recorder *executionEventRecorder) EmitEvent(eventType EventType, event Exe
 	recorder.events = append(recorder.events, executionEventRecord{eventType: eventType, event: event})
 	recorder.mu.Unlock()
 }
+
+func (recorder *executionEventRecorder) EmitToolStarted(string, run.ToolStartedEvent) {}
+
+func (recorder *executionEventRecorder) EmitToolFinished(string, run.ToolFinishedEvent) {}
 
 func (recorder *executionEventRecorder) Snapshot() []executionEventRecord {
 	recorder.mu.Lock()
@@ -944,318 +909,6 @@ func TestSubmitInvestigationSurvivesCallerCancellation(t *testing.T) {
 	}
 	if runContext.Err() != nil {
 		t.Fatalf("run context = %v, want uncanceled context", runContext.Err())
-	}
-}
-
-func TestSubmitInvestigationPassesParentEvidenceToWorkflowEscalation(
-	t *testing.T,
-) {
-	const runID = "qa-escalation-parent"
-	contentHash := strings.Repeat("a", 64)
-	overview := tool.EvidenceUnit{
-		SourceKind:  "retrieval",
-		Target:      "doc-a",
-		Sections:    []string{"overview"},
-		ContentHash: contentHash,
-		Coverage: tool.EvidenceCoverage{
-			Complete: true,
-			Included: 1,
-		},
-	}
-	failure := overview
-	failure.Sections = []string{"failure"}
-	scenario := &scenarioRunRecorder{released: make(chan struct{}, 1)}
-	lifecycle := &scenarioLifecycleRecorder{
-		start:     make(chan ScenarioRunStart, 1),
-		completed: make(chan RunOutcome, 1),
-		scenario:  scenario,
-	}
-	runner := &investigationRunnerRecorder{
-		await: func(
-			_ context.Context,
-			workflowRunID string,
-		) (InvestigationTerminal, error) {
-			result := InvestigationResult{Answer: "workflow answer"}
-			return InvestigationTerminal{
-				WorkflowRunID: workflowRunID,
-				Status:        InvestigationSucceeded,
-				Completeness:  InvestigationComplete,
-				Output:        &result,
-			}, nil
-		},
-	}
-	escalator := &workflowEscalatorRecorder{
-		requests: make(chan agentapi.WorkflowEscalationRequest, 1),
-	}
-	qa := &Service{
-		retriever: staticContextRetriever{
-			context: &retrieval.RetrievedContext{
-				Text:          "retrieved evidence",
-				EvidenceUnits: []tool.EvidenceUnit{overview, failure},
-			},
-		},
-		investigation:      runner,
-		scenarios:          lifecycle,
-		delegationEnabled:  true,
-		workflowEscalation: true,
-		workflowEscalator:  escalator,
-	}
-	qa.coordinator = &Coordinator{
-		investigation: runner,
-		scenarios:     lifecycle,
-		parentRuns:    lifecycle,
-		sessions: &coordinatorSessionStore{
-			turnByRun: make(map[string]int),
-		},
-	}
-	prepared := &preparation{
-		ctx: context.Background(),
-		request: Request{
-			Question: "trace checkout",
-			Conversation: ConversationContext{
-				SessionID: "session-1",
-			},
-			UserID: 42,
-			RunID:  runID,
-		},
-		planning: evidencePlanningOutput{
-			CleanQuestion: "trace checkout",
-			Effective: domain.PlanDecision{
-				Plan: domain.EvidencePlan{Sources: domain.Internal},
-			},
-		},
-		execution: executionRouteDecision{
-			Path:                     executionPathWorkflow,
-			RouteReason:              string(agentapi.EscalationStrongTaskDependencies),
-			EscalationCapability:     agentapi.CapabilityRef{ID: "knowledge.service.trace", Version: 1},
-			EscalationCapabilityHash: strings.Repeat("b", 64),
-			EscalationFocusFacets:    []string{"runtime_behavior"},
-		},
-	}
-	result, err := qa.submitInvestigation(prepared)
-	if err != nil {
-		t.Fatalf("submitInvestigation: %v", err)
-	}
-	if result.RunID != runID {
-		t.Fatalf("result run ID = %q", result.RunID)
-	}
-	var request agentapi.WorkflowEscalationRequest
-	select {
-	case request = <-escalator.requests:
-	case <-time.After(time.Second):
-		t.Fatal("workflow escalation did not start")
-	}
-	wantRefs := []string{
-		run.EvidenceReferenceID(overview),
-		run.EvidenceReferenceID(failure),
-	}
-	if !reflect.DeepEqual(request.EvidenceRefs, wantRefs) {
-		t.Fatalf("evidence refs = %v, want %v", request.EvidenceRefs, wantRefs)
-	}
-	if !reflect.DeepEqual(scenario.evidence, []tool.EvidenceUnit{overview, failure}) {
-		t.Fatalf("persisted evidence = %+v", scenario.evidence)
-	}
-	select {
-	case outcome := <-lifecycle.completed:
-		if outcome.Status != RunStatusDone ||
-			outcome.Answer != "workflow answer" {
-			t.Fatalf("outcome = %+v", outcome)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("workflow parent did not complete")
-	}
-}
-
-type shadowRuntimeCall struct {
-	ctx     context.Context
-	request agentapi.RunRequest
-}
-
-type shadowRuntimeRecorder struct {
-	calls chan shadowRuntimeCall
-}
-
-func (runtime *shadowRuntimeRecorder) Run(
-	ctx context.Context,
-	request agentapi.RunRequest,
-) (agentapi.RunResult, error) {
-	runtime.calls <- shadowRuntimeCall{ctx: ctx, request: request}
-	return agentapi.RunResult{
-		RunID: request.RunID, Status: agentapi.RunSucceeded,
-		Text: "shadow answer",
-		Usage: agentapi.Usage{
-			InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
-		},
-	}, nil
-}
-
-func (*shadowRuntimeRecorder) Begin(
-	context.Context,
-	agentapi.RunStart,
-) (agentapi.ManagedRun, error) {
-	return nil, errors.New("shadow runtime Begin must not be called")
-}
-
-func TestSubmitInvestigationRunsDelegationShadowWithoutChangingAuthority(
-	t *testing.T,
-) {
-	const runID = "qa-shadow-parent"
-	definition := testQADefinition(t, nil)
-	registry := testRegistry(
-		t,
-		testAgentTool(
-			delegation.DelegateToolID,
-			ToolKindRead,
-			noopTool,
-		),
-		testAgentTool("search_code", ToolKindRead, noopTool),
-	)
-	toolSet := preparedScenarioTools{
-		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
-		executor: NewToolExecutor(registry),
-	}
-	scenario := &scenarioRunRecorder{released: make(chan struct{}, 1)}
-	lifecycle := &scenarioLifecycleRecorder{
-		start:     make(chan ScenarioRunStart, 1),
-		completed: make(chan RunOutcome, 1),
-		scenario:  scenario,
-	}
-	investigationRequests := make(chan InvestigationRequest, 1)
-	runner := &investigationRunnerRecorder{
-		start: func(_ context.Context, request InvestigationRequest) error {
-			investigationRequests <- request
-			return nil
-		},
-		await: func(
-			_ context.Context,
-			workflowRunID string,
-		) (InvestigationTerminal, error) {
-			result := InvestigationResult{Answer: "authoritative workflow answer"}
-			return InvestigationTerminal{
-				WorkflowRunID: workflowRunID,
-				Status:        InvestigationSucceeded,
-				Completeness:  InvestigationComplete,
-				Output:        &result,
-			}, nil
-		},
-	}
-	shadow := &shadowRuntimeRecorder{
-		calls: make(chan shadowRuntimeCall, 1),
-	}
-	events := &executionEventRecorder{}
-	qa := &Service{
-		retriever:         emptyContextRetriever{},
-		runtime:           shadow,
-		investigation:     runner,
-		scenarios:         lifecycle,
-		executionEvents:   events,
-		delegationEnabled: true,
-		delegationShadow:  true,
-		definitions: definitionResolverFunc(func(
-			ref agentapi.DefinitionRef,
-		) (agentapi.Definition, error) {
-			if ref.ID != definition.ID {
-				return agentapi.Definition{}, fmt.Errorf("definition not found")
-			}
-			return definition, nil
-		}),
-		agentRef: agentapi.DefinitionRef{
-			ID: definition.ID, Version: definition.Version,
-		},
-	}
-	qa.coordinator = &Coordinator{
-		investigation: runner,
-		scenarios:     lifecycle,
-		parentRuns:    lifecycle,
-		sessions: &coordinatorSessionStore{
-			turnByRun: make(map[string]int),
-		},
-	}
-	prepared := &preparation{
-		ctx: context.Background(),
-		request: Request{
-			Question: "trace checkout",
-			Conversation: ConversationContext{
-				SessionID: "session-1",
-			},
-			UserID: 42,
-			RunID:  runID,
-		},
-		candidateToolSet: toolSet,
-		analysis: queryAnalysisOutput{
-			QueryPlan: domain.QueryPlan{Kind: domain.QueryCodeReview},
-		},
-		execution: executionRouteDecision{
-			Strategy:   retrieval.ExecutionMultiAgent,
-			Path:       executionPathWorkflow,
-			ShadowPath: executionPathDelegation,
-		},
-	}
-	result, err := qa.submitInvestigation(prepared)
-	if err != nil {
-		t.Fatalf("submitInvestigation: %v", err)
-	}
-	if result.RunID != runID {
-		t.Fatalf("result run ID = %q", result.RunID)
-	}
-	select {
-	case authoritative := <-investigationRequests:
-		if authoritative.Contract.TaskID != runID {
-			t.Fatalf("authoritative request = %+v", authoritative)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("authoritative workflow did not start")
-	}
-	select {
-	case call := <-shadow.calls:
-		if call.request.RunID != delegationShadowRunID(runID) ||
-			call.request.Correlation.ParentRunID != runID ||
-			call.request.Correlation.WorkflowRunID != "" ||
-			call.request.Actor.UserID != 42 {
-			t.Fatalf("shadow request = %+v", call.request)
-		}
-		if !call.request.ToolScope.RestrictVisible ||
-			!stringPresent(call.request.ToolScope.VisibleToolIDs, string(delegation.DelegateToolID)) {
-			t.Fatalf("shadow tool scope = %+v", call.request.ToolScope)
-		}
-		parent, ok := delegation.ParentContextFrom(call.ctx)
-		if !ok || parent.RunID != call.request.RunID ||
-			parent.Correlation.ParentRunID != runID ||
-			parent.Depth != 0 {
-			t.Fatalf("shadow parent context = %+v, ok=%t", parent, ok)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("delegation shadow did not start")
-	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		recorded := events.Snapshot()
-		if len(recorded) > 0 {
-			if len(recorded) != 1 ||
-				recorded[0].eventType != run.EventDelegationShadow ||
-				recorded[0].event.RunID != runID ||
-				recorded[0].event.ChildRunID != delegationShadowRunID(runID) ||
-				recorded[0].event.Status != "completed" ||
-				recorded[0].event.QueryKind != string(domain.QueryCodeReview) ||
-				!recorded[0].event.Shadow ||
-				recorded[0].event.Usage.TotalTokens != 15 {
-				t.Fatalf("shadow evaluation event = %+v", recorded)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("delegation shadow evaluation event was not emitted")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	select {
-	case outcome := <-lifecycle.completed:
-		if outcome.Status != RunStatusDone ||
-			outcome.Answer != "authoritative workflow answer" {
-			t.Fatalf("authoritative outcome = %+v", outcome)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("authoritative workflow did not complete")
 	}
 }
 
@@ -1370,7 +1023,7 @@ func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
 	recorded := events.Snapshot()
 	if len(recorded) != 1 || recorded[0].eventType != EventExecutionRouted ||
 		recorded[0].event.RunID != runID ||
-		recorded[0].event.Strategy != string(retrieval.ExecutionMultiAgent) ||
+		recorded[0].event.Strategy != string(executionPathWorkflow) ||
 		recorded[0].event.Status != "completed" {
 		t.Fatalf("execution events = %+v", recorded)
 	}

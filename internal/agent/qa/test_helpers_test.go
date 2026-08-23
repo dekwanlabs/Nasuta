@@ -232,10 +232,6 @@ func propString(description string) map[string]any {
 	return map[string]any{"type": "string", "description": description}
 }
 
-func propInt(description string) map[string]any {
-	return map[string]any{"type": "integer", "description": description}
-}
-
 func noopTool(context.Context, tool.Arguments) (string, error) {
 	return "ok", nil
 }

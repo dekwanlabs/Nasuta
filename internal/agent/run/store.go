@@ -221,22 +221,6 @@ type QAParentRecord struct {
 	EndedAt       string
 }
 
-// WorkflowEscalationParentRecord carries only authoritative parent facts needed
-// to validate and budget one durable Workflow escalation.
-type WorkflowEscalationParentRecord struct {
-	ID            string
-	RunKind       Kind
-	Status        Status
-	UserID        int64
-	SessionID     string
-	Question      string
-	ParentRunID   string
-	WorkflowRunID string
-	RunLimits     agentapi.RunLimits
-	TotalTokens   int64
-	CostMicros    int64
-}
-
 // QAParentCursor is a stable keyset cursor over parent creation order.
 type QAParentCursor struct {
 	StartedAt string

@@ -68,6 +68,32 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 	if settings.LLMContextWindow != DefaultLLMContextWindow {
 		t.Fatalf("context window = %d", settings.LLMContextWindow)
 	}
+	if settings.InvestigationMaxInputTokens != DefaultInvestigationMaxInputTokens ||
+		settings.InvestigationMaxOutputTokens != DefaultInvestigationMaxOutputTokens ||
+		settings.InvestigationMaxToolCalls != DefaultInvestigationMaxToolCalls {
+		t.Fatalf(
+			"investigation token/tool limits = %d/%d/%d",
+			settings.InvestigationMaxInputTokens,
+			settings.InvestigationMaxOutputTokens,
+			settings.InvestigationMaxToolCalls,
+		)
+	}
+	if time.Duration(settings.InvestigationMaxDuration) != DefaultInvestigationMaxDuration ||
+		settings.InvestigationMaxRounds != DefaultInvestigationMaxRounds ||
+		settings.InvestigationMaxTasks != DefaultInvestigationMaxTasks ||
+		settings.InvestigationMaxParallelism != DefaultInvestigationMaxParallelism ||
+		settings.InvestigationMaxCostMicros != DefaultInvestigationMaxCostMicros ||
+		settings.InvestigationBudgetProfile != DefaultInvestigationBudgetProfile {
+		t.Fatalf(
+			"investigation defaults = duration %s rounds %d tasks %d parallelism %d cost %d profile %q",
+			time.Duration(settings.InvestigationMaxDuration),
+			settings.InvestigationMaxRounds,
+			settings.InvestigationMaxTasks,
+			settings.InvestigationMaxParallelism,
+			settings.InvestigationMaxCostMicros,
+			settings.InvestigationBudgetProfile,
+		)
+	}
 	if time.Duration(settings.FeatureGenerationTimeout) != DefaultFeatureGenerationTimeout {
 		t.Fatalf("feature generation timeout = %s", time.Duration(settings.FeatureGenerationTimeout))
 	}
@@ -80,9 +106,11 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 	if time.Duration(settings.CodingWorktreeTTL) != DefaultCodingWorktreeTTL {
 		t.Fatalf("coding worktree TTL = %s", time.Duration(settings.CodingWorktreeTTL))
 	}
-	if settings.DelegationEnabled || settings.DelegationShadowEnabled ||
-		settings.DelegationWorkflowEscalationEnabled {
+	if settings.DelegationEnabled {
 		t.Fatal("delegation feature flags must default off")
+	}
+	if !settings.InvestigationEnabled {
+		t.Fatal("investigation must default on")
 	}
 	if settings.DelegationMaxChildren != DefaultDelegationMaxChildren ||
 		settings.DelegationMaxConcurrent != DefaultDelegationMaxConcurrent {
@@ -216,21 +244,19 @@ func TestCanonicalCodingLimits(t *testing.T) {
 
 func TestCanonicalDelegationSettings(t *testing.T) {
 	valid := map[string]string{
-		"delegation_enabled":                     "true",
-		"delegation_shadow_enabled":              "false",
-		"delegation_capabilities":                " knowledge.docs.verify,knowledge.code.inspect,knowledge.docs.verify ",
-		"delegation_max_children":                "3",
-		"delegation_max_concurrent":              "2",
-		"delegation_workflow_escalation_enabled": "false",
-		"delegation_child_timeout":               "90s",
-		"delegation_max_child_turns":             "4",
-		"delegation_max_child_tool_calls":        "8",
-		"delegation_max_child_input_tokens":      "12000",
-		"delegation_max_child_output_tokens":     "1200",
-		"delegation_max_report_tokens":           "1000",
-		"delegation_max_total_tokens":            "48000",
-		"delegation_max_total_cost_micros":       "0",
-		"delegation_parent_answer_reserve":       "4000",
+		"delegation_enabled":                 "true",
+		"delegation_capabilities":            " knowledge.docs.verify,knowledge.code.inspect,knowledge.docs.verify ",
+		"delegation_max_children":            "3",
+		"delegation_max_concurrent":          "2",
+		"delegation_child_timeout":           "90s",
+		"delegation_max_child_turns":         "4",
+		"delegation_max_child_tool_calls":    "8",
+		"delegation_max_child_input_tokens":  "12000",
+		"delegation_max_child_output_tokens": "1200",
+		"delegation_max_report_tokens":       "1000",
+		"delegation_max_total_tokens":        "48000",
+		"delegation_max_total_cost_micros":   "0",
+		"delegation_parent_answer_reserve":   "4000",
 	}
 	for key, value := range valid {
 		if _, err := CanonicalPlatformSetting(key, value); err != nil {
@@ -265,22 +291,20 @@ func TestCanonicalDelegationSettings(t *testing.T) {
 func TestValidateAgentSettingsChecksDelegationRelationships(t *testing.T) {
 	var settings PlatformSettings
 	settings.Apply(map[string]string{
-		"agent_timeout":                          "5m",
-		"agent_answer_reserve":                   "30s",
-		"delegation_enabled":                     "true",
-		"delegation_max_children":                "3",
-		"delegation_max_concurrent":              "2",
-		"delegation_child_timeout":               "90s",
-		"delegation_max_child_input_tokens":      "12000",
-		"delegation_max_child_output_tokens":     "1200",
-		"delegation_max_total_tokens":            "48000",
-		"delegation_parent_answer_reserve":       "4000",
-		"delegation_max_child_turns":             "4",
-		"delegation_max_child_tool_calls":        "8",
-		"delegation_max_report_tokens":           "1000",
-		"delegation_max_total_cost_micros":       "0",
-		"delegation_shadow_enabled":              "false",
-		"delegation_workflow_escalation_enabled": "false",
+		"agent_timeout":                      "5m",
+		"agent_answer_reserve":               "30s",
+		"delegation_enabled":                 "true",
+		"delegation_max_children":            "3",
+		"delegation_max_concurrent":          "2",
+		"delegation_child_timeout":           "90s",
+		"delegation_max_child_input_tokens":  "12000",
+		"delegation_max_child_output_tokens": "1200",
+		"delegation_max_total_tokens":        "48000",
+		"delegation_parent_answer_reserve":   "4000",
+		"delegation_max_child_turns":         "4",
+		"delegation_max_child_tool_calls":    "8",
+		"delegation_max_report_tokens":       "1000",
+		"delegation_max_total_cost_micros":   "0",
 	})
 	if err := settings.ValidateAgentSettings(); err != nil {
 		t.Fatalf("valid delegation settings: %v", err)
@@ -295,11 +319,6 @@ func TestValidateAgentSettingsChecksDelegationRelationships(t *testing.T) {
 		t.Fatal("insufficient aggregate delegation token budget was accepted")
 	}
 	settings.DelegationMaxTotalTokens = DefaultDelegationMaxTotalTokens
-	settings.DelegationShadowEnabled = true
-	settings.DelegationEnabled = false
-	if err := settings.ValidateAgentSettings(); err == nil {
-		t.Fatal("delegation shadow without delegation was accepted")
-	}
 }
 
 func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
@@ -310,12 +329,21 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"llm_max_continue_rounds": "0", "llm_context_window": "128000", "agent_answer_reserve": "30s",
 		"llm_input_price_micros_per_million_tokens":  "0",
 		"llm_output_price_micros_per_million_tokens": "0",
-		"agent_timeout": "5m", "agent_max_steps": "1", "agent_max_tool_calls": "24", "context_budget": "1", "domain_knowledge": "domain",
+		"investigation_max_input_tokens":             "20000",
+		"investigation_max_output_tokens":            "8000",
+		"investigation_max_tool_calls":               "24",
+		"investigation_max_duration":                 "5m",
+		"investigation_max_rounds":                   "4",
+		"investigation_max_tasks":                    "12",
+		"investigation_max_parallelism":              "4",
+		"investigation_max_cost_micros":              "0",
+		"investigation_budget_profile":               "interactive",
+		"investigation_enabled":                      "false",
+		"agent_timeout":                              "5m", "agent_max_steps": "1", "agent_max_tool_calls": "24", "context_budget": "1", "domain_knowledge": "domain",
 		"retrieval_router_direct_min_confidence": "0.9", "retrieval_router_max_tokens": "512",
-		"tool_pruning_enabled": "false",
-		"delegation_enabled":   "false", "delegation_shadow_enabled": "false",
-		"delegation_capabilities": "knowledge.code.inspect", "delegation_max_children": "3",
-		"delegation_max_concurrent": "2", "delegation_workflow_escalation_enabled": "false",
+		"tool_pruning_enabled":           "false",
+		"disable_legacy_answer_recovery": "false",
+		"delegation_enabled":             "false", "delegation_capabilities": "knowledge.code.inspect", "delegation_max_children": "3", "delegation_max_concurrent": "2",
 		"delegation_child_timeout": "90s", "delegation_max_child_turns": "4",
 		"delegation_max_child_tool_calls": "8", "delegation_max_child_input_tokens": "12000",
 		"delegation_max_child_output_tokens": "1200", "delegation_max_report_tokens": "1000",

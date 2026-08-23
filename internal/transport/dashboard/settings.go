@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/semantic"
 	"github.com/dekwanlabs/nasuta/log"
@@ -444,18 +443,4 @@ func (handler *Handler) loadVCSSettings() (vcsURL, vcsToken, vcsGroups, vcsConcu
 		return
 	}
 	return
-}
-
-func loadPlatformSettings(db *auth.DB) *config.PlatformSettings {
-	ps := &config.PlatformSettings{}
-	if db == nil {
-		return ps
-	}
-	m, err := db.GetSettings()
-	if err != nil {
-		log.Errorf("[settings] load settings error: %v", err)
-		return ps
-	}
-	ps.Apply(m)
-	return ps
 }

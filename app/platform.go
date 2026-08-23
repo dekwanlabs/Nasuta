@@ -71,35 +71,33 @@ type qaState struct {
 
 type workflowRuntime struct {
 	catalog     *workflow.Catalog
-	bindings    *workflow.WorkflowBindingRegistry
 	pipeline    *pipeline.Executor
 	review      *reviewworkflow.Executor
 	coordinator *reviewworkflow.Coordinator
 	service     *workflow.Service
-	escalations *workflow.EscalationStore
-	escalator   *workflow.ServerWorkflowEscalator
 	api         *workflowhttp.Handler
 }
 
 // Platform owns reusable runtime state and exposes only stable composition ports.
 type Platform struct {
-	cfg      config.Config
-	settings *config.PlatformSettings
-	db       *sql.DB
-	index    *indexing.Service
-	tools    *agent.Service
-	registry *tool.Registry
-	reads    *tool.ReadRegistry
-	graph    *codegraph.DB
-	calls    *callchain.Service
-	ontology ontology.Backend
-	history  *sessionhistory.Service
-	auth     authRuntime
-	incident incidentRuntime
-	agents   agentRuntime
-	qa       qaState
-	flow     workflowRuntime
-	delivery featureDeliveryRuntime
+	cfg                           config.Config
+	settings                      *config.PlatformSettings
+	db                            *sql.DB
+	index                         *indexing.Service
+	tools                         *agent.Service
+	registry                      *tool.Registry
+	reads                         *tool.ReadRegistry
+	graph                         *codegraph.DB
+	calls                         *callchain.Service
+	ontology                      ontology.Backend
+	history                       *sessionhistory.Service
+	auth                          authRuntime
+	incident                      incidentRuntime
+	agents                        agentRuntime
+	qa                            qaState
+	flow                          workflowRuntime
+	delivery                      featureDeliveryRuntime
+	investigationTemplateProvider InvestigationTemplateProvider
 }
 
 // New constructs the reusable platform without registering scenario routes.
@@ -192,10 +190,6 @@ func (p *Platform) initCatalogs() error {
 	)
 	p.agents.api = agenthttp.New(p.agents.catalog)
 	p.flow.catalog = workflow.NewCatalog(schemas, p.agents.catalog)
-	p.flow.bindings = workflow.NewWorkflowBindingRegistry(
-		p.agents.capabilities,
-		p.flow.catalog,
-	)
 	if p.db == nil {
 		return nil
 	}
@@ -290,29 +284,6 @@ func (p *Platform) initAgentWorkflow() error {
 	}
 	p.flow.service = service
 	p.flow.api = workflowhttp.New(service)
-	if p.qa.runs != nil {
-		escalations, err := workflow.NewEscalationStore(p.db)
-		if err != nil {
-			return fmt.Errorf("configure workflow escalation store: %w", err)
-		}
-		escalator, err := workflow.NewWorkflowEscalator(
-			p.flow.bindings,
-			service,
-			escalations,
-			workflowEscalationParentLoader{runs: p.qa.runs},
-			workflowEscalationHandoffResolver{
-				runs: p.qa.runs, schemas: p.agents.schemas,
-			},
-			p.agents.schemas,
-			workflow.DefaultWorkflowEscalatorConfig(),
-		)
-		if err != nil {
-			return fmt.Errorf("configure workflow escalator: %w", err)
-		}
-		p.flow.escalations = escalations
-		p.flow.escalator = escalator
-		log.Infof("[workflow] durable QA escalation enabled")
-	}
 	log.Infof("[workflow] persistence enabled (MySQL)")
 	return nil
 }

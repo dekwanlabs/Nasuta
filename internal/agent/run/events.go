@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
@@ -33,7 +34,6 @@ const (
 	EventDelegationCancelled            EventType = "delegation.cancelled"
 	EventDelegationRejected             EventType = "delegation.rejected"
 	EventDelegationValidated            EventType = "delegation.validated"
-	EventDelegationShadow               EventType = "delegation.shadow_evaluated"
 	EventDelegationVerificationStarted  EventType = "delegation.verification_started"
 	EventDelegationVerificationDone     EventType = "delegation.verification_completed"
 	EventDelegationVerificationFailed   EventType = "delegation.verification_failed"
@@ -128,7 +128,6 @@ type ExecutionEvent struct {
 	VerificationReasons     []string       `json:"verification_reasons,omitempty"`
 	VerificationID          string         `json:"verification_id,omitempty"`
 	QueryKind               string         `json:"query_kind,omitempty"`
-	Shadow                  bool           `json:"shadow,omitempty"`
 	ReferenceCount          int            `json:"reference_count,omitempty"`
 	Complexity              float64        `json:"complexity,omitempty"`
 	Confidence              float64        `json:"confidence,omitempty"`
@@ -136,6 +135,8 @@ type ExecutionEvent struct {
 
 type ExecutionEventEmitter interface {
 	EmitEvent(EventType, ExecutionEvent)
+	EmitToolStarted(string, ToolStartedEvent)
+	EmitToolFinished(string, ToolFinishedEvent)
 }
 
 // SSEEvent is the tagged event forwarded unchanged by the HTTP transport.
@@ -146,18 +147,19 @@ type SSEEvent struct {
 
 // Terminal is the sole real-time projection of one persisted Run outcome.
 type Terminal struct {
-	RunID               string                        `json:"run_id"`
-	Status              Status                        `json:"status"`
-	Answer              string                        `json:"answer,omitempty"`
-	ErrorCode           string                        `json:"error_code,omitempty"`
-	StepCount           int                           `json:"step_count"`
-	TokenUsed           int                           `json:"token_used"`
-	References          []agentapi.Reference          `json:"references,omitempty"`
-	DelegationAdoptions []agentapi.DelegationAdoption `json:"delegation_adoptions,omitempty"`
-	HitCount            int                           `json:"hit_count"`
-	Error               string                        `json:"error,omitempty"`
-	Evidence            EvidenceMetrics               `json:"evidence"`
-	SessionMessages     []llm.Message                 `json:"-"`
+	RunID                 string                        `json:"run_id"`
+	Status                Status                        `json:"status"`
+	Answer                string                        `json:"answer,omitempty"`
+	ErrorCode             string                        `json:"error_code,omitempty"`
+	StepCount             int                           `json:"step_count"`
+	TokenUsed             int                           `json:"token_used"`
+	References            []agentapi.Reference          `json:"references,omitempty"`
+	DelegationAdoptions   []agentapi.DelegationAdoption `json:"delegation_adoptions,omitempty"`
+	HitCount              int                           `json:"hit_count"`
+	Error                 string                        `json:"error,omitempty"`
+	Evidence              EvidenceMetrics               `json:"evidence"`
+	InvestigationDelivery *investigation.DeliveryResult `json:"investigation_delivery,omitempty"`
+	SessionMessages       []llm.Message                 `json:"-"`
 }
 
 // QAParentEvent is the durable counterpart of a Parent Run projection.

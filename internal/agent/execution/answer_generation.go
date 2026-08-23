@@ -27,7 +27,8 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		attemptStarted := time.Now()
 		stream := newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
 		res, callErr := agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
-		if errors.Is(callErr, ErrReasoningTruncated) || errors.Is(callErr, ErrEmptyModelResponse) {
+		if !agent.cfg.DisableLegacyAnswerRecovery &&
+			(errors.Is(callErr, ErrReasoningTruncated) || errors.Is(callErr, ErrEmptyModelResponse)) {
 			log.WarnfCtx(ctx, "[agent] run %s force-conclusion produced no visible content, retrying with no-reasoning prompt: %v", input.RunID, callErr)
 			input.Messages = append(input.Messages, llm.Message{
 				Role:    "user",
@@ -37,7 +38,8 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 			stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
 			res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionRetryMaxTokens, stream)
 		}
-		if callErr == nil && hasLeakedToolProtocol(res) {
+		if !agent.cfg.DisableLegacyAnswerRecovery &&
+			callErr == nil && hasLeakedToolProtocol(res) {
 			log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", input.RunID)
 			input.Messages = append(input.Messages, llm.Message{Role: "user", Content: protocolRepairInstruction})
 			attemptStarted = time.Now()

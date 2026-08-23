@@ -1350,5 +1350,28 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 				"additionalProperties":false
 			}`),
 		},
+		{
+			ID: "investigation.task.input", Version: 1,
+			Document: json.RawMessage(`{
+				"$schema":"https://json-schema.org/draft/2020-12/schema",
+				"type":"object",
+				"required":["task"],
+				"properties":{
+					"task":{"type":"object"},
+					"evidence":{"type":"array","items":{"type":"object"}},
+					"claims":{"type":"array","items":{"type":"object"}},
+					"upstream":{"type":"object"}
+				},
+				"additionalProperties":true
+			}`),
+		},
+		{
+			ID: "investigation.task.output", Version: 1,
+			Document: json.RawMessage(`{
+				"$schema":"https://json-schema.org/draft/2020-12/schema",
+				"type":"object",
+				"additionalProperties":true
+			}`),
+		},
 	}
 }

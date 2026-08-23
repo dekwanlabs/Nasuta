@@ -2,11 +2,11 @@ package dashboard
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
@@ -42,13 +42,11 @@ type Handler struct {
 	db                 *store.SQLite
 	docDB              *store.DocStore
 	authDB             *auth.DB
-	platformDB         *sql.DB
 	semantic           semantic.Store
 	embedder           embed.Embedder
 	tools              *agent.Service
 	qa                 *agent.QA
 	persistentRunStore *run.Store
-	registry           *agent.Registry
 	writeAvailable     bool
 	codegraphDB        *codegraph.DB
 	callChain          *callchain.Service
@@ -72,6 +70,10 @@ type QAInvestigationReconciler interface {
 	Reconcile(context.Context, string) error
 }
 
+type QAInvestigationDeliveryReader interface {
+	LoadDelivery(context.Context, string) (investigation.DeliveryResult, error)
+}
+
 type QARuntime struct {
 	QA                      *agent.QA
 	Hub                     *run.Hub
@@ -79,6 +81,7 @@ type QARuntime struct {
 	RunStore                *run.Store
 	InvestigationCanceller  QAInvestigationCanceller
 	InvestigationReconciler QAInvestigationReconciler
+	InvestigationReader     QAInvestigationDeliveryReader
 	Sessions                *memory.SessionStore
 	History                 agent.SessionHistory
 	Settings                *config.PlatformSettings

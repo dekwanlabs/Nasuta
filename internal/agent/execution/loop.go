@@ -34,12 +34,13 @@ type Config struct {
 	ContextWindow            int
 	// MaxToolResultBytes bounds the model-facing copy of one tool result.
 	// The authoritative result remains available to observers and trace storage.
-	MaxToolResultBytes int
-	MaxContinueRounds  int
-	StructuredOutput   bool
-	DomainKnowledge    string
-	ModelParameters    llm.ModelParameters
-	BudgetCheck        func() error
+	MaxToolResultBytes          int
+	MaxContinueRounds           int
+	StructuredOutput            bool
+	DomainKnowledge             string
+	ModelParameters             llm.ModelParameters
+	BudgetCheck                 func() error
+	DisableLegacyAnswerRecovery bool
 }
 
 // ConversationContext carries recalled archived history and recent turns.

@@ -72,15 +72,6 @@ func TestReconcileRecoveredWorkflowDispatchesByPersistedScenario(t *testing.T) {
 		wantReviewCall bool
 	}{
 		{
-			name: "QA",
-			record: workflow.RunRecord{
-				ID: "workflow-qa", ParentRunID: "parent-1",
-				Scenario: workflow.FlowID,
-				Status:   workflow.RunSucceeded,
-			},
-			wantQAParent: "parent-1",
-		},
-		{
 			name: "review",
 			record: workflow.RunRecord{
 				ID:       "review.round-1",
@@ -127,33 +118,6 @@ func TestReconcileRecoveredWorkflowDispatchesByPersistedScenario(t *testing.T) {
 				t.Fatalf("QA calls = %v, review = %+v", qa.parentRunIDs, reviews)
 			}
 		})
-	}
-}
-
-func TestReconcileRecoveredQAWorkflowWaitsForTerminalState(t *testing.T) {
-	workflows := &recoveredWorkflowStoreStub{
-		records: map[string]workflow.RunRecord{
-			"workflow-qa": {
-				ID: "workflow-qa", ParentRunID: "parent-1",
-				Scenario: workflow.FlowID,
-				Status:   workflow.RunRunning,
-			},
-		},
-	}
-	qa := &qaRecoveryReconcilerStub{}
-
-	if err := reconcileRecoveredWorkflow(
-		t.Context(),
-		workflows,
-		qa,
-		&reviewRecoveryReconcilerStub{},
-		"workflow-qa",
-		workflow.ErrConflict,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if len(qa.parentRunIDs) != 0 {
-		t.Fatalf("active workflow converged parent: %v", qa.parentRunIDs)
 	}
 }
 

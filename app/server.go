@@ -58,7 +58,12 @@ func (p *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	dashboardHandler.SetFeatureDeliveryStatus(p.delivery.status)
 	routes.Setup(mux, routes.Config{
 		Auth: p.auth.service, Dashboard: dashboardHandler, RBAC: p.auth.rbac,
-		MCP:        mcp.NewDynamicHandler(p.registry),
+		MCP: mcp.NewDynamicHandler(
+			p.registry,
+			func() mcp.InvestigationDeliveryReader {
+				return p.currentQARuntime().InvestigationReader
+			},
+		),
 		MCPKeyAuth: p.auth.keyAuth,
 		VCS:        webhook.VCSHandler(p.index, p.settings.VCSWebhookSecret),
 		Cfg:        p.cfg,
@@ -218,32 +223,6 @@ func reconcileRecoveredWorkflow(
 		return fmt.Errorf("load recovered workflow %q metadata: %w", runID, err)
 	}
 	switch record.Scenario {
-	case workflow.FlowID:
-		if record.ParentRunID == "" {
-			return fmt.Errorf(
-				"recovered QA workflow %q has no parent run",
-				runID,
-			)
-		}
-		terminal, err := recoveredWorkflowTerminal(record.Status)
-		if err != nil {
-			return fmt.Errorf("recovered QA workflow %q: %w", runID, err)
-		}
-		if !terminal {
-			return nil
-		}
-		if qa == nil {
-			return fmt.Errorf("reconcile recovered QA workflow %q: coordinator is unavailable", runID)
-		}
-		if err := qa.Reconcile(ctx, record.ParentRunID); err != nil {
-			return fmt.Errorf(
-				"reconcile recovered QA workflow %q parent %q: %w",
-				runID,
-				record.ParentRunID,
-				err,
-			)
-		}
-		return nil
 	case reviewworkflow.ScenarioID:
 		if reviews == nil {
 			return fmt.Errorf("reconcile recovered review workflow %q: coordinator is unavailable", runID)
@@ -255,17 +234,6 @@ func reconcileRecoveredWorkflow(
 			runID,
 			record.Scenario,
 		)
-	}
-}
-
-func recoveredWorkflowTerminal(status workflow.RunStatus) (bool, error) {
-	switch status {
-	case workflow.RunRunning, workflow.RunWaitingHuman:
-		return false, nil
-	case workflow.RunSucceeded, workflow.RunFailed, workflow.RunCancelled, workflow.RunTimedOut:
-		return true, nil
-	default:
-		return false, fmt.Errorf("unsupported persisted status %q", status)
 	}
 }
 

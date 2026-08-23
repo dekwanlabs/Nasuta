@@ -453,18 +453,175 @@ composing -> replanning
 
 ## 7. 动态规划
 
+### 7.0 Task Template Catalog 的来源与职责
+
+`TaskTemplateCatalog` 不是由 LLM 在每次请求中临时发明的任务列表，也不是一次
+retrieval 的结果。它是由平台维护、版本化、启动时注册的能力目录。目录中的每个
+模板代表一种可以重复执行、权限可审计、输出可验证的调查动作。
+
+模板不是对用户问题的无限穷举，而是少量可组合的调查积木。目录优先定义通用
+动作，例如“搜索”“定位实体”“查看符号”“追踪调用/依赖”“比较证据”“验证声明”，
+再用参数绑定到具体问题。用户问题不需要提前出现在目录中，Planner 只需要把问题
+拆成这些通用动作的组合。
+
+模板的确定遵循以下规则：
+
+1. 有稳定的 EvidenceGoal 类型，例如 `ai_entrypoint`、`model_provider`、
+   `external_dependency`、`runtime_failure_path`；
+2. 有明确的证据来源和工具链，能够说明“从哪里取证”；
+3. 有固定的输入、输出和失败语义，不能只返回一段无法验证的自由文本；
+4. 有最小权限集合、前置条件、停止条件和成本上限；
+5. 能通过离线契约测试、Schema 测试和权限测试。
+
+初始模板由平台工程师根据工具注册表、证据来源类型和高频调查动作编写，例如：
+
+```text
+code.find_ai_entrypoint
+code.trace_call_chain
+config.find_model_provider
+api.list_external_endpoints
+docs.find_ai_integration
+runtime.find_failure_path
+workspace.resolve_entity
+```
+
+线上 trace、失败任务和重复出现的 EvidenceGap 可以作为新增模板的候选来源，
+但只能经过人工评审、版本化和测试后进入目录。运行中的 Planner 不能创建新的
+`task_type`、工具 ID 或输出 Schema。
+
+如果问题不匹配任何一个专用模板，Planner 可以使用通用的
+`investigation.explore` 模板，并把目标、范围和证据来源作为参数传入。它仍然只能
+使用工具注册表中已有的工具，并返回统一的 `investigation.report`。如果现有工具
+和通用模板都无法覆盖目标，系统应返回“当前能力不足”的明确缺口，而不是让 LLM
+临时创造一个没有执行器和校验规则的任务类型。
+
+模板至少包含以下元数据：
+
+```json
+{
+  "id": "code.find_ai_entrypoint",
+  "version": 1,
+  "goal_kinds": ["ai_entrypoint"],
+  "source_kinds": ["source_code"],
+  "required_inputs": ["entity", "scope"],
+  "tool_grant": ["search_code", "get_symbol", "trace_calls"],
+  "input_schema": {"id": "task.input", "version": 1},
+  "output_schema": {"id": "investigation.report", "version": 1},
+  "preconditions": ["entity_is_resolved"],
+  "cost_profile": {
+    "max_input_tokens": 4000,
+    "max_output_tokens": 2500,
+    "max_tool_calls": 6,
+    "max_duration_seconds": 45
+  }
+}
+```
+
+模板是“能力定义”，不是任务实例。Planner 将模板与当前 Contract 中的 goal、
+实体、范围和依赖绑定后，才生成 `TaskCandidate`：
+
+```json
+{
+  "task_id": "task_code_entrypoint_001",
+  "template": {"id": "code.find_ai_entrypoint", "version": 1},
+  "goal_ids": ["G3"],
+  "bindings": {
+    "entity": "hsas-aiot-service",
+    "scope": "workspace"
+  },
+  "depends_on": [],
+  "allowed_tools": ["search_code", "get_symbol", "trace_calls"],
+  "output_schema": {"id": "investigation.report", "version": 1}
+}
+```
+
+因此，候选任务的拆解位置是：`planning/catalog.go` 负责目录查询，
+`planning/planner.go` 负责绑定和排序，`planning/compiler.go` 负责把候选任务
+编译成可执行任务。候选任务和被拒绝的候选任务都必须写入对应的
+`plan_revision`，不能只存在于 LLM 输出中。
+
 ### 7.1 初始规划
 
-Contract Builder 先从用户问题生成目标集合，Planner 再根据目标选择第一批任务。
+Contract Builder 先从用户问题生成 EvidenceGoal，Planner 查询已注册的模板目录，
+再绑定实体和参数。初始计划不依赖先做业务 retrieval；检索是任务执行阶段由
+Investigator 通过 `search_code`、`get_symbol`、`trace_calls` 等工具完成的。
+
+完整顺序是：
+
+```text
+用户问题
+  -> Contract
+  -> EvidenceGoal
+  -> Catalog 查询
+  -> 实体/范围绑定
+  -> TaskCandidate
+  -> PlanCompiler
+  -> ExecutableTask
+  -> Investigator 调用 retrieval 工具
+  -> EvidenceNormalizer / Verifier
+```
+
+这里的 Catalog 查询只是查询本地能力注册表，不是从知识库召回业务证据。
+如果实体尚未明确，Planner 选择 `workspace.resolve_entity` 或其他发现类模板，
+而不是先把整个知识库检索一遍。
 
 初始计划必须满足：
 
 1. 每个 required goal 至少有一个候选任务；
-2. 任务的工具权限属于 Contract 允许范围；
-3. 任务依赖无环；
-4. 任务总成本不超过当前预算预留；
-5. 每个任务都有独立的输出 Schema；
-6. 任务失败后仍能返回明确 failure，而不是空报告。
+2. 每个候选任务都来自已激活、已版本化的模板；
+3. 任务的工具权限属于 Contract 允许范围；
+4. 任务依赖无环；
+5. 任务总成本不超过当前 Run 和当前阶段的预算预留；
+6. 每个任务都有独立的输出 Schema；
+7. 任务失败后仍能返回明确 failure，而不是空报告。
+
+### 7.1.1 初始规划与重规划的区别
+
+候选任务有两个产生时机：
+
+```text
+初始规划：在第一次 retrieval 之前，根据 Contract 和模板目录生成第一批候选任务
+重规划：在前一批任务完成、证据归一化和验证之后，根据新的缺口再次查询模板目录
+```
+
+所以答案不是“候选任务都在 retrieval 之后生成”，而是：
+
+```text
+第一批候选任务：retrieval 之前
+后续候选任务：可以由前一轮 retrieval 暴露的缺口、新实体、冲突触发
+```
+
+重规划只能读取压缩后的 EvidenceLedger、ClaimLedger 和 Gap 摘要，不能把无限增长
+的原始工具正文重新塞入 Planner。
+
+### 7.1.2 任务不等于 Agent
+
+动态规划产生的是任务节点，不是“每个节点启动一个新 Agent”。Scheduler 根据任务
+的 `executor` 选择执行方式：
+
+```text
+direct_tool       直接调用一个确定性工具，不启动 Agent
+tool_pipeline     按固定顺序调用多个工具，不启动 Agent
+investigator      需要多步判断和工具选择时，启动一个 Investigator Agent
+verifier          使用规则或一个共享 Verifier 完成证据检查
+composer          在最后阶段启动 Composer，生成用户答案
+```
+
+例如，五个简单的代码查询任务可以直接并行调用工具，不需要五个 Agent。只有当
+任务需要根据中间结果决定下一步、理解复杂调用关系或处理语义冲突时，才启动
+Investigator Agent。Agent 数量由并发限制和 RunBudget 决定，不由任务数量直接决定。
+
+因此一轮运行可能是：
+
+```text
+2 个 direct_tool 任务
+1 个 tool_pipeline 任务
+1 个 Investigator Agent
+1 个共享 Verifier
+1 个 Composer
+```
+
+而不是每个任务都创建一个独立 Agent。
 
 ### 7.2 重规划输入
 
@@ -760,17 +917,66 @@ compose:
 
 ### 10.1 BudgetLedger
 
+预算不是某个 Agent 自己决定的 token 数，也不是 Planner 可以在运行中随意扩大的
+常量。它有四个层次：
+
+```text
+PlatformSettings / BudgetPolicy
+  -> RunBudget 快照
+      -> StageBudget 阶段预留
+          -> TaskBudget 任务授予
+```
+
+它们的职责不同：
+
+| 层次 | 谁决定 | 作用 | 是否可以在 Run 中扩大 |
+| --- | --- | --- | --- |
+| `PlatformSettings` | 平台管理员 | 规定系统硬上限、默认 profile 和价格/时间约束 | 否 |
+| `RunBudget` | Coordinator 在创建 Run 时 | 把平台策略和本次 profile 固化成一次运行的预算快照 | 否 |
+| `StageBudget` | Coordinator 根据 RunBudget 预留 | 为 planning、investigation、verification、composition 和 fallback 留出额度 | 只能在未使用额度内重分配 |
+| `TaskBudget` | Scheduler 根据模板成本和剩余额度授予 | 限制一个任务的输入、输出、工具调用和时间 | 否 |
+
+模板里的 `cost_profile` 不是平台预算，也不是任务一创建就自动获得的额度。它只
+说明这个任务的预估成本和单任务安全上限；真正授予多少，要由 Scheduler 根据
+PlatformSettings、当前 Run 剩余额度和当前阶段剩余额度计算。
+
+Run 创建后必须持久化预算策略版本和快照。这样平台设置之后发生变化，也不会让
+同一个 Run 在恢复时获得不同的资源。
+
+预算应按多个维度同时限制，不能只看输出 token：
+
 ```go
-type BudgetLedger struct {
-    TotalTokens    int64
-    UsedTokens     int64
-    ReservedTokens int64
-    ToolCalls      int
-    Elapsed        time.Duration
-    MaxRounds      int
-    MaxTasks       int
+type BudgetVector struct {
+    InputTokens  int64
+    OutputTokens int64
+    ToolCalls    int
+    Duration     time.Duration
+    CostMicros   int64
+}
+
+type RunBudget struct {
+    Caps            BudgetVector
+    Reserved        BudgetVector
+    Used            BudgetVector
+    MaxRounds       int
+    MaxTasks        int
+    PolicyVersion   string
+    Profile         string
 }
 ```
+
+其中 `LLMAnswerMaxTokens` 只能解释为“一次 LLM 调用的输出上限”，不能直接当作
+整个 Run 的 `TotalTokens`；`LLMContextWindow` 是单次调用的上下文容量，也不是
+可消费预算。当前平台中的 `AgentTimeout`、`AgentMaxToolCalls` 和
+`DelegationMaxTotalTokens` 可以作为迁移时的输入，但 v2 应提供语义明确的
+`InvestigationMaxDuration`、`InvestigationMaxToolCalls`、
+`InvestigationMaxOutputTokens`、`InvestigationMaxRounds`、
+`InvestigationMaxTasks` 和 `InvestigationMaxCostMicros` 等设置，避免继续复用
+一个字段表达多个生命周期。
+
+因此，答案是：预算由 PlatformSettings 提供上限和默认策略，由系统在 Run 创建时
+计算和冻结；不是写死在 Agent 代码里，也不是单个 Agent 的预算。请求方最多只能
+选择一个不超过平台硬上限的 profile，不能直接把本次 Run 的上限调大。
 
 任务执行前申请预算：
 
@@ -800,7 +1006,35 @@ budget.Settle(reservation, actualUsage)
 
 最终 Composer 或确定性交付所需的资源必须在 Run 创建时预留，不能等调查任务消耗完所有 token 后再“强行总结”。
 
-默认预算分区：
+预算准入的正确含义是：
+
+```text
+sum(active task reservations) + scheduler overhead
+    <= min(RunBudget.remaining, current StageBudget.remaining)
+```
+
+并且每个任务还必须满足：
+
+```text
+actual usage <= TaskBudget
+```
+
+初始计划的最低可行预算为：
+
+```text
+planning reserve
++ verification reserve
++ composition reserve
++ deterministic fallback reserve
++ 每个 required goal 的最便宜可行候选任务 reservation
+```
+
+如果这个总量已经超过 RunBudget，PlanCompiler 不应启动任务，而应直接生成
+`budget_insufficient` 的部分交付或失败结果。这样“每个 required goal 至少一个
+候选任务”和“不能超预算”不会互相矛盾。
+
+第一版可以提供一个显式的默认 profile，下面的比例只是 profile 的起始策略，
+不是 Planner 中的隐藏常量：
 
 ```text
 问题分析和初始规划：10%
@@ -810,7 +1044,28 @@ budget.Settle(reservation, actualUsage)
 确定性降级和系统开销：5%
 ```
 
-实际分配由运行配置决定，但必须满足：
+其中 composition 和 fallback 是硬预留，调查任务不能借用；planning、
+investigation 和 verification 可以在每轮结算后把未使用额度返还到 Run 的未分配
+池，再由 Coordinator 根据未覆盖目标和任务价值重新分配。任务模板中的
+`cost_profile` 只用于估算和上限约束，Planner 的自然语言“预计成本”不能突破
+模板上限。
+
+预算数值不应凭感觉永久写死，初始值按以下顺序确定：
+
+1. 先由产品 SLO 决定交互请求允许的最大时延、最大费用和最大并发；
+2. 再由平台管理员把这些 SLO 写成 Run 级硬上限；
+3. 根据每个模板的历史 p50/p95 输入 token、输出 token、工具调用和耗时，维护
+   `cost_profile`；
+4. 用最便宜候选任务覆盖每个 required goal，预留 Composer 和 fallback 后，检查
+   初始计划是否可行；
+5. 通过真实 Run 的预算消耗、覆盖率和交付质量指标调整 profile，而不是通过不断
+   增大 token 或 retry 次数解决问题。
+
+第一版实现可以先只开放 `interactive` 和 `deep` 两个 profile；profile 中的具体
+   数值必须落在 PlatformSettings 的硬上限内，并在配置快照中可见。没有经过压测
+   的数值只能作为默认起点，不能被当成所有问题都适用的“正确预算”。
+
+实际分配由运行配置和 Coordinator 决定，但必须满足：
 
 1. 每个阶段都有上限；
 2. 所有任务共用同一个运行账本；
@@ -1193,6 +1448,9 @@ failure.code == composer_reasoning_truncated
 
 这是一次不保留旧 workflow 运行时兼容的重写，按以下阶段实施。
 
+具体的 P0、P1、P2 任务、依赖关系和退出条件见：
+[dynamic-investigation-workflow-v2-implementation-tasks.zh-CN.md](dynamic-investigation-workflow-v2-implementation-tasks.zh-CN.md)。
+
 ### Phase 1：领域模型与交付不变量
 
 新增：
@@ -1385,4 +1643,3 @@ Composer failed
   -> Deterministic partial delivery
   -> User receives a non-empty, bounded, traceable result
 ```
-

@@ -9,8 +9,6 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-const evidenceManifestVersion = 1
-
 type promptEvidenceIdentity struct {
 	EvidenceID string `json:"evidence_id"`
 	SourceKind string `json:"source_kind"`

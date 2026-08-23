@@ -140,7 +140,7 @@ func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
 		CitationCoverage: 1, StructuredClaimCoverage: 0.5,
 		ConflictCount: 1, RequiresVerification: true,
 		VerificationReasons: []string{"critical_structured_conflict"},
-		QueryKind:           "code_review", Shadow: true, ReferenceCount: 4,
+		QueryKind:           "code_review", ReferenceCount: 4,
 		Strategy: "multi_agent", Status: "completed", Reason: "evidence joined",
 		Complexity: 0.95, Confidence: 0.91,
 	}
@@ -161,7 +161,6 @@ func TestEmitHubEventForwardsExecutionEvents(t *testing.T) {
 		{eventType: run.EventDelegationCancelled},
 		{eventType: run.EventDelegationRejected},
 		{eventType: run.EventDelegationValidated},
-		{eventType: run.EventDelegationShadow},
 		{eventType: run.EventDelegationVerificationStarted},
 		{eventType: run.EventDelegationVerificationDone},
 		{eventType: run.EventDelegationVerificationFailed},

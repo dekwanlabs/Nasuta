@@ -1,7 +1,6 @@
 package run
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -113,49 +112,6 @@ func (rs *Store) GetControlForUser(id string, userID int64) (ControlRecord, erro
 // GetQAParent loads one parent without loading child steps or model calls.
 func (rs *Store) GetQAParent(id string) (QAParentRecord, error) {
 	return rs.getQAParent(id, nil)
-}
-
-// GetWorkflowEscalationParent loads one narrow, server-owned parent snapshot.
-func (rs *Store) GetWorkflowEscalationParent(
-	ctx context.Context,
-	id string,
-) (WorkflowEscalationParentRecord, error) {
-	var (
-		record    WorkflowEscalationParentRecord
-		limitsRaw []byte
-	)
-	err := rs.db.QueryRowContext(
-		ctx,
-		`SELECT id,run_kind,status,user_id,session_id,question,parent_run_id,
-			workflow_run_id,run_limits_json,total_tokens,cost_micros
-		 FROM agent_runs WHERE id=? AND run_kind=?`,
-		id,
-		KindQAParent,
-	).Scan(
-		&record.ID,
-		&record.RunKind,
-		&record.Status,
-		&record.UserID,
-		&record.SessionID,
-		&record.Question,
-		&record.ParentRunID,
-		&record.WorkflowRunID,
-		&limitsRaw,
-		&record.TotalTokens,
-		&record.CostMicros,
-	)
-	if err != nil {
-		return WorkflowEscalationParentRecord{}, err
-	}
-	if len(limitsRaw) > 0 {
-		if err := json.Unmarshal(limitsRaw, &record.RunLimits); err != nil {
-			return WorkflowEscalationParentRecord{}, fmt.Errorf(
-				"decode workflow escalation parent limits: %w",
-				err,
-			)
-		}
-	}
-	return record, nil
 }
 
 // GetParentForUser enforces ownership at the parent read boundary.

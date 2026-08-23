@@ -41,7 +41,7 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 			"agent_run_artifacts", "agent_steps", "agent_llm_calls",
 		}},
 		{group: GroupWorkflow, tables: []string{
-			"workflow_definitions", "workflow_runs", "workflow_escalations",
+			"workflow_definitions", "workflow_runs",
 			"workflow_node_runs", "handoff_artifacts",
 		}},
 		{group: GroupRuntimeEvents, tables: []string{"runtime_events"}},
@@ -74,13 +74,13 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 	}
 }
 
-func TestManagedSchemaContainsFortyFourTables(t *testing.T) {
+func TestManagedSchemaContainsFortySixTables(t *testing.T) {
 	total := 0
 	for _, statements := range mysqlSchema {
 		total += len(statements)
 	}
-	if total != 44 {
-		t.Fatalf("managed schema table count=%d want=44", total)
+	if total != 46 {
+		t.Fatalf("managed schema table count=%d want=46", total)
 	}
 }
 
@@ -166,9 +166,6 @@ func TestWorkflowSchemaStoresApprovalSnapshots(t *testing.T) {
 		"round_number         INT NOT NULL DEFAULT 1",
 		"base_depth          INT NOT NULL DEFAULT 0",
 		"stop_reason          VARCHAR(64) NOT NULL DEFAULT ''",
-		"CREATE TABLE IF NOT EXISTS workflow_escalations",
-		"PRIMARY KEY (parent_run_id, request_id)",
-		"UNIQUE KEY uniq_workflow_escalation_run (workflow_run_id)",
 		"approval_decision   VARCHAR(16) NULL",
 		"approver_user_id    BIGINT NULL",
 		"approver_tenant_id  VARCHAR(128) NULL",

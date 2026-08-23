@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
@@ -19,19 +20,28 @@ import (
 // DynamicHandler atomically rebuilds the MCP surface when the registry changes.
 type DynamicHandler struct {
 	registry *tool.Registry
+	reader   func() InvestigationDeliveryReader
 	mu       sync.RWMutex
 	revision uint64
 	handler  http.Handler
 }
 
+// InvestigationDeliveryReader resolves one investigation delivery snapshot.
+type InvestigationDeliveryReader interface {
+	LoadDelivery(context.Context, string) (investigation.DeliveryResult, error)
+}
+
 // NewDynamicHandler builds an MCP surface from the current tool Registry.
 // Later Registry revisions are compiled lazily when requests arrive.
 // A failed refresh leaves the last valid handler available.
-func NewDynamicHandler(registry *tool.Registry) *DynamicHandler {
+func NewDynamicHandler(registry *tool.Registry, reader ...func() InvestigationDeliveryReader) *DynamicHandler {
 	if registry == nil {
 		panic("mcp: registry is required")
 	}
 	handler := &DynamicHandler{registry: registry}
+	if len(reader) > 0 {
+		handler.reader = reader[0]
+	}
 	if err := handler.rebuild(); err != nil {
 		log.Errorf("[mcp] initial tool surface build failed: %v", err)
 		handler.handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -73,7 +83,7 @@ func (handler *DynamicHandler) rebuild() error {
 	if handler.handler != nil && handler.revision == revision {
 		return nil
 	}
-	mcpServer, err := BuildMCP(handler.registry)
+	mcpServer, err := BuildMCP(handler.registry, handler.reader)
 	if err != nil {
 		return err
 	}
@@ -85,7 +95,7 @@ func (handler *DynamicHandler) rebuild() error {
 // BuildMCP registers the knowledge tools on a new MCP server. Tool descriptions
 // and parameter schemas come from the shared tools.Registry (ADR: single source
 // of truth), so the MCP surface and the internal Agent loop never drift apart.
-func BuildMCP(registry *tool.Registry) (*server.MCPServer, error) {
+func BuildMCP(registry *tool.Registry, reader ...func() InvestigationDeliveryReader) (*server.MCPServer, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("mcp: registry is required")
 	}
@@ -95,6 +105,34 @@ func BuildMCP(registry *tool.Registry) (*server.MCPServer, error) {
 
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 	executor := tool.NewExecutor(30 * time.Second)
+	if len(reader) > 0 && reader[0] != nil {
+		mcpServer.AddTool(
+			mcp.NewToolWithRawSchema(
+				"get_investigation_delivery",
+				"Read the investigation delivery snapshot for one workflow run.",
+				json.RawMessage(`{"type":"object","properties":{"workflow_run_id":{"type":"string"}},"required":["workflow_run_id"]}`),
+			),
+			func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				workflowRunID, _ := request.GetArguments()["workflow_run_id"].(string)
+				if workflowRunID == "" {
+					return mcp.NewToolResultError("workflow_run_id is required"), nil
+				}
+				deliveryReader := reader[0]()
+				if deliveryReader == nil {
+					return mcp.NewToolResultError("investigation runtime is unavailable"), nil
+				}
+				delivery, err := deliveryReader.LoadDelivery(ctx, workflowRunID)
+				if err != nil {
+					return mcp.NewToolResultError(err.Error()), nil
+				}
+				payload, err := json.Marshal(delivery)
+				if err != nil {
+					return mcp.NewToolResultError(err.Error()), nil
+				}
+				return mcp.NewToolResultText(string(payload)), nil
+			},
+		)
+	}
 	for _, candidate := range snapshot.MCPTools() {
 		toolID := candidate.ID
 		schema, err := schemaWithTrace(candidate.InputSchema)

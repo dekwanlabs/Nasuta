@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"time"
 
@@ -85,118 +84,6 @@ func (rs *Store) GetDelegationEvidence(
 		return nil, err
 	}
 	return decodeEvidenceLedger(artifact)
-}
-
-// ResolveWorkflowEscalationEvidence resolves requested refs from the parent
-// ledger and, when provided, settled children in the same delegation batch.
-func (rs *Store) ResolveWorkflowEscalationEvidence(
-	ctx context.Context,
-	parentRunID,
-	delegationID string,
-	refs []string,
-) ([]EvidenceReference, error) {
-	if strings.TrimSpace(parentRunID) == "" {
-		return nil, fmt.Errorf("invalid workflow evidence parent")
-	}
-	if len(refs) == 0 {
-		return nil, nil
-	}
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if strings.TrimSpace(delegationID) == "" {
-		rows, err = rs.db.QueryContext(
-			ctx,
-			`SELECT artifact_id,run_id,kind,schema_id,schema_version,
-				content_hash,content
-			 FROM agent_run_artifacts
-			 WHERE run_id=? AND kind=?
-			 ORDER BY run_id`,
-			parentRunID,
-			EvidenceLedgerArtifactKind,
-		)
-	} else {
-		rows, err = rs.db.QueryContext(
-			ctx,
-			`SELECT DISTINCT a.artifact_id,a.run_id,a.kind,a.schema_id,
-				a.schema_version,a.content_hash,a.content
-			 FROM agent_run_artifacts a
-			 WHERE a.kind=? AND (
-				a.run_id=? OR EXISTS (
-					SELECT 1 FROM agent_delegation_tasks t
-					WHERE t.parent_run_id=? AND t.delegation_id=?
-					  AND t.child_run_id=a.run_id
-					  AND t.admitted=TRUE
-					  AND t.settled_usage_json IS NOT NULL
-				)
-			 )
-			 ORDER BY CASE WHEN a.run_id=? THEN 0 ELSE 1 END,a.run_id`,
-			EvidenceLedgerArtifactKind,
-			parentRunID,
-			parentRunID,
-			delegationID,
-			parentRunID,
-		)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	type resolvedAlias struct {
-		unit      tool.EvidenceUnit
-		ambiguous bool
-	}
-	aliases := make(map[string]resolvedAlias)
-	for rows.Next() {
-		artifact, err := scanRunArtifact(rows)
-		if err != nil {
-			return nil, err
-		}
-		units, err := decodeEvidenceLedger(artifact)
-		if err != nil {
-			return nil, err
-		}
-		for _, unit := range units {
-			for _, alias := range evidenceUnitAliases(unit) {
-				existing, ok := aliases[alias]
-				if !ok {
-					aliases[alias] = resolvedAlias{unit: cloneEvidenceUnit(unit)}
-					continue
-				}
-				if !reflect.DeepEqual(existing.unit, unit) {
-					existing.ambiguous = true
-					aliases[alias] = existing
-				}
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	resolved := make([]EvidenceReference, 0, len(refs))
-	for _, ref := range refs {
-		ref = strings.TrimSpace(ref)
-		candidate, ok := aliases[ref]
-		if !ok {
-			return nil, fmt.Errorf(
-				"evidence ref %q does not belong to the parent handoff",
-				ref,
-			)
-		}
-		if candidate.ambiguous {
-			return nil, fmt.Errorf(
-				"evidence ref %q is ambiguous in the parent handoff",
-				ref,
-			)
-		}
-		resolved = append(resolved, EvidenceReference{
-			Ref: ref, Unit: cloneEvidenceUnit(candidate.unit),
-		})
-	}
-	return resolved, nil
 }
 
 // NewEvidenceLedgerArtifact builds the canonical ledger persisted for one Run.
@@ -304,21 +191,6 @@ func sameRunArtifact(left, right RunArtifact) bool {
 		left.Schema == right.Schema &&
 		left.ContentHash == right.ContentHash &&
 		string(left.Content) == string(right.Content)
-}
-
-func evidenceUnitAliases(unit tool.EvidenceUnit) []string {
-	aliases := make([]string, 0, 4)
-	aliases = append(aliases, EvidenceReferenceID(unit))
-	if contentHash := strings.TrimSpace(unit.ContentHash); contentHash != "" {
-		aliases = append(aliases, contentHash)
-	}
-	if target := strings.TrimSpace(unit.Target); target != "" {
-		aliases = append(aliases, target)
-		if source := strings.TrimSpace(unit.SourceKind); source != "" {
-			aliases = append(aliases, source+":"+target)
-		}
-	}
-	return aliases
 }
 
 func cloneEvidenceUnit(unit tool.EvidenceUnit) tool.EvidenceUnit {

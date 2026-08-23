@@ -19,11 +19,9 @@ import (
 const dynamicDelegationToolOwner = "nasuta.dynamic_delegation"
 
 type qaCatalogSnapshot struct {
-	version            int64
-	definitions        []agentapi.Definition
-	capabilities       []agentapi.Capability
-	workflowDefinition workflow.Definition
-	bindings           []workflow.WorkflowBindingRegistration
+	version      int64
+	definitions  []agentapi.Definition
+	capabilities []agentapi.Capability
 }
 
 // buildQARuntime assembles a QA runtime candidate and the catalog artifacts
@@ -37,7 +35,6 @@ func (p *Platform) buildQARuntime(
 	dashboard.QARuntime,
 	[]agentapi.Definition,
 	[]agentapi.Capability,
-	[]WorkflowBindingContribution,
 	agentapi.Runtime,
 	error,
 ) {
@@ -47,7 +44,7 @@ func (p *Platform) buildQARuntime(
 	snapshot.CodingEnabledProviders = append([]string(nil), settings.CodingEnabledProviders...)
 	snapshot.DelegationCapabilities = append([]string(nil), settings.DelegationCapabilities...)
 	writeAvailable := p.incident.manager != nil
-	investigationRunner := qaInvestigator{platform: p}
+	var investigationRunner agent.InvestigationRunner = &qaInvestigator{platform: p}
 	if !snapshot.LLMEnabled() {
 		scenarios := agent.NewScenarioRuntime(p.qa.runs)
 		runtime := dashboard.QARuntime{
@@ -66,10 +63,10 @@ func (p *Platform) buildQARuntime(
 			runtime.InvestigationCanceller = coordinator
 			runtime.InvestigationReconciler = coordinator
 		}
-		return runtime, nil, nil, nil, nil, nil
+		return runtime, nil, nil, nil, nil
 	}
 	if err := snapshot.ValidateAgentSettings(); err != nil {
-		return dashboard.QARuntime{}, nil, nil, nil, nil, err
+		return dashboard.QARuntime{}, nil, nil, nil, err
 	}
 	if p.qa.memory == nil {
 		p.qa.memory = buildLongTermMemory(
@@ -80,29 +77,24 @@ func (p *Platform) buildQARuntime(
 	}
 	definitions, err := defaultAgentDefinitions(&snapshot, version)
 	if err != nil {
-		return dashboard.QARuntime{}, nil, nil, nil, nil, err
+		return dashboard.QARuntime{}, nil, nil, nil, err
 	}
 	var extensionCapabilities []agentapi.Capability
-	var extensionBindings []WorkflowBindingContribution
 	if p.agents.provider != nil {
 		contribution, err := p.agents.provider.AgentCatalog(snapshot, version)
 		if err != nil {
-			return dashboard.QARuntime{}, nil, nil, nil, nil, fmt.Errorf(
+			return dashboard.QARuntime{}, nil, nil, nil, fmt.Errorf(
 				"prepare application agent catalog: %w",
 				err,
 			)
 		}
 		if err := validateAgentCatalogContribution(contribution, version); err != nil {
-			return dashboard.QARuntime{}, nil, nil, nil, nil, err
+			return dashboard.QARuntime{}, nil, nil, nil, err
 		}
 		definitions = append(definitions, contribution.Definitions...)
 		extensionCapabilities = append(
 			extensionCapabilities,
 			contribution.Capabilities...,
-		)
-		extensionBindings = append(
-			extensionBindings,
-			contribution.WorkflowBindings...,
 		)
 	}
 	definitionRuntime, err := agent.NewDefinitionRuntime(
@@ -113,13 +105,16 @@ func (p *Platform) buildQARuntime(
 		p.qa.runs,
 	)
 	if err != nil {
-		return dashboard.QARuntime{}, nil, nil, nil, nil, fmt.Errorf(
+		return dashboard.QARuntime{}, nil, nil, nil, fmt.Errorf(
 			"configure definition runtime: %w",
 			err,
 		)
 	}
 	models := agent.NewQAModels(&snapshot)
-	investigationRunner.events = definitionRuntime
+	if investigatorRunner, ok := investigationRunner.(*qaInvestigator); ok {
+		investigatorRunner.events = definitionRuntime
+		investigationRunner = investigatorRunner
+	}
 	var coordinator *agent.QACoordinator
 	if p.qa.runs != nil && p.flow.service != nil {
 		coordinator = agent.NewQACoordinator(
@@ -143,8 +138,6 @@ func (p *Platform) buildQARuntime(
 		ScenarioLifecycle: definitionRuntime,
 		Coordinator:       coordinator,
 		ExecutionEvents:   definitionRuntime,
-		WorkflowEscalator: p.flow.escalator,
-		Capabilities:      p.agents.capabilities,
 		WriteAvailable:    writeAvailable,
 	})
 	if coordinator != nil {
@@ -157,12 +150,14 @@ func (p *Platform) buildQARuntime(
 		WriteAvailable: writeAvailable, Hub: definitionRuntime.Hub(),
 		CompactionLLM: models.Primary(),
 	}
+	if investigatorRunner, ok := investigationRunner.(*qaInvestigator); ok {
+		runtime.InvestigationReader = investigatorRunner
+	}
 	if coordinator != nil {
 		runtime.InvestigationCanceller = coordinator
 		runtime.InvestigationReconciler = coordinator
 	}
-	return runtime, definitions, extensionCapabilities, extensionBindings,
-		definitionRuntime, nil
+	return runtime, definitions, extensionCapabilities, definitionRuntime, nil
 }
 
 // defaultAgentDefinitions builds the built-in QA, reviewer, and investigator
@@ -262,7 +257,6 @@ func (p *Platform) prepareQACatalogSnapshot(
 	version int64,
 	definitions []agentapi.Definition,
 	extensionCapabilities []agentapi.Capability,
-	extensionBindings []WorkflowBindingContribution,
 ) (qaCatalogSnapshot, error) {
 	capabilities, err := catalog.DefaultCapabilities(definitions, version)
 	if err != nil {
@@ -272,7 +266,7 @@ func (p *Platform) prepareQACatalogSnapshot(
 		)
 	}
 	capabilities = append(capabilities, extensionCapabilities...)
-	stagedCapabilities, preparedDefinitions, preparedCapabilities, err :=
+	_, preparedDefinitions, preparedCapabilities, err :=
 		stageAgentCatalogSnapshot(
 			p.agents.schemas,
 			definitions,
@@ -281,63 +275,10 @@ func (p *Platform) prepareQACatalogSnapshot(
 	if err != nil {
 		return qaCatalogSnapshot{}, err
 	}
-	budgets, err := investigationBudgets(preparedDefinitions)
-	if err != nil {
-		return qaCatalogSnapshot{}, fmt.Errorf(
-			"prepare investigation budgets: %w",
-			err,
-		)
-	}
-	workflowDefinition, err := buildDefaultInvestigationFlow(
-		p.agents.schemas,
-		stagedCapabilities,
-		version,
-		time.Duration(settings.AgentTimeout),
-		budgets,
-	)
-	if err != nil {
-		return qaCatalogSnapshot{}, fmt.Errorf(
-			"prepare investigation flow: %w",
-			err,
-		)
-	}
-	workflowDefinition, err = workflow.Prepare(
-		workflowDefinition,
-		p.agents.schemas,
-	)
-	if err != nil {
-		return qaCatalogSnapshot{}, fmt.Errorf(
-			"validate investigation flow: %w",
-			err,
-		)
-	}
-	registrations, err := buildDefaultWorkflowBindingRegistrations(
-		stagedCapabilities,
-		version,
-		workflowDefinition,
-		budgets.InvestigatorPayloadTokens,
-	)
-	if err != nil {
-		return qaCatalogSnapshot{}, fmt.Errorf(
-			"prepare investigation workflow bindings: %w",
-			err,
-		)
-	}
-	for _, contribution := range extensionBindings {
-		registrations = append(
-			registrations,
-			workflow.WorkflowBindingRegistration{
-				Binding: contribution.Binding,
-				Builder: contribution.Builder,
-			},
-		)
-	}
 	return qaCatalogSnapshot{
-		version:            version,
-		definitions:        preparedDefinitions,
-		capabilities:       preparedCapabilities,
-		workflowDefinition: workflowDefinition,
-		bindings:           registrations,
+		version:      version,
+		definitions:  preparedDefinitions,
+		capabilities: preparedCapabilities,
 	}, nil
 }
 
@@ -398,12 +339,7 @@ func (p *Platform) publishedQACatalogMatches(
 			}
 		}
 	}
-	publishedWorkflow, err := p.flow.catalog.Resolve(workflow.DefinitionRef{
-		ID:      snapshot.workflowDefinition.ID,
-		Version: snapshot.workflowDefinition.Version,
-	})
-	return err == nil &&
-		publishedWorkflow.ContentHash == snapshot.workflowDefinition.ContentHash
+	return true
 }
 
 // nextQACatalogVersion allocates above both the active version and restored
@@ -413,7 +349,6 @@ func (p *Platform) nextQACatalogVersion() int64 {
 		p.agents.version,
 		p.agents.maxVersion,
 		p.agents.catalog.MaxVersion(),
-		p.flow.catalog.MaxVersion(),
 	) + 1
 }
 
@@ -424,8 +359,7 @@ func (p *Platform) rebuildQARuntimeLocked(
 	graph *codegraph.DB,
 ) error {
 	version := p.nextQACatalogVersion()
-	candidate, definitions, extensionCapabilities, extensionBindings,
-		definitionRuntime, err := p.buildQARuntime(
+	candidate, definitions, extensionCapabilities, definitionRuntime, err := p.buildQARuntime(
 		settings,
 		graph,
 		version,
@@ -440,7 +374,6 @@ func (p *Platform) rebuildQARuntimeLocked(
 			version,
 			definitions,
 			extensionCapabilities,
-			extensionBindings,
 		)
 		if err != nil {
 			return err
@@ -449,7 +382,7 @@ func (p *Platform) rebuildQARuntimeLocked(
 			definitions,
 		); reusable {
 			reusedCandidate, reusedDefinitions, reusedCapabilities,
-				reusedBindings, reusedRuntime, buildErr := p.buildQARuntime(
+				reusedRuntime, buildErr := p.buildQARuntime(
 				settings,
 				graph,
 				reusableVersion,
@@ -462,7 +395,6 @@ func (p *Platform) rebuildQARuntimeLocked(
 				reusableVersion,
 				reusedDefinitions,
 				reusedCapabilities,
-				reusedBindings,
 			)
 			if prepareErr != nil {
 				return prepareErr
@@ -489,16 +421,6 @@ func (p *Platform) rebuildQARuntimeLocked(
 		}
 		if err := p.agents.capabilities.Publish(snapshot.capabilities); err != nil {
 			return fmt.Errorf("publish investigation capabilities: %w", err)
-		}
-		if !reusedCatalog {
-			if err := p.flow.catalog.Publish(
-				[]workflow.Definition{snapshot.workflowDefinition},
-			); err != nil {
-				return fmt.Errorf("publish investigation flow: %w", err)
-			}
-		}
-		if err := p.flow.bindings.Publish(snapshot.bindings); err != nil {
-			return fmt.Errorf("publish investigation workflow bindings: %w", err)
 		}
 		if reusedCatalog {
 			log.Infof(
@@ -690,39 +612,6 @@ func validateAgentCatalogContribution(
 			)
 		}
 	}
-	for _, registration := range contribution.WorkflowBindings {
-		binding := registration.Binding
-		if registration.Builder == nil {
-			return fmt.Errorf(
-				"application workflow binding %q builder is required",
-				binding.ID,
-			)
-		}
-		if binding.Version != version {
-			return fmt.Errorf(
-				"application workflow binding %q version %d does not match catalog version %d",
-				binding.ID,
-				binding.Version,
-				version,
-			)
-		}
-		if binding.Capability.Version != version {
-			return fmt.Errorf(
-				"application workflow binding %q capability version %d does not match catalog version %d",
-				binding.ID,
-				binding.Capability.Version,
-				version,
-			)
-		}
-		if binding.Workflow.Version != version {
-			return fmt.Errorf(
-				"application workflow binding %q workflow version %d does not match catalog version %d",
-				binding.ID,
-				binding.Workflow.Version,
-				version,
-			)
-		}
-	}
 	return nil
 }
 
@@ -782,78 +671,6 @@ func stageAgentCatalogSnapshot(
 	return stagedCapabilities, preparedDefinitions, prepared, nil
 }
 
-// defaultInvestigationFlow builds the investigation workflow, using the
-// compiled proposal plan when available and a fixed flow as a fallback.
-func (p *Platform) defaultInvestigationFlow(
-	version int64,
-	nodeTimeout time.Duration,
-	budgets workflow.Budgets,
-) (workflow.Definition, error) {
-	return buildDefaultInvestigationFlow(
-		p.agents.schemas,
-		p.agents.capabilities,
-		version,
-		nodeTimeout,
-		budgets,
-	)
-}
-
-// buildDefaultInvestigationFlow compiles one Workflow against an explicit
-// capability snapshot so candidates can be validated before live publication.
-func buildDefaultInvestigationFlow(
-	schemas *agentapi.SchemaRegistry,
-	capabilities *agentapi.CapabilityRegistry,
-	version int64,
-	nodeTimeout time.Duration,
-	budgets workflow.Budgets,
-) (workflow.Definition, error) {
-	fallback, err := workflow.DefaultFlow(
-		version,
-		nodeTimeout,
-		budgets,
-	)
-	if err != nil {
-		return workflow.Definition{}, err
-	}
-	policy, err := workflow.DefaultPolicy(
-		version,
-		nodeTimeout,
-		budgets,
-	)
-	if err != nil {
-		log.Warnf(
-			"[workflow] investigation plan policy unavailable; using fixed fallback: %v",
-			err,
-		)
-		return fallback, nil
-	}
-	compiler, err := workflow.NewProposalCompiler(
-		schemas,
-		capabilities,
-	)
-	if err != nil {
-		log.Warnf(
-			"[workflow] investigation plan compiler unavailable; using fixed fallback: %v",
-			err,
-		)
-		return fallback, nil
-	}
-	compiled, err := compiler.Compile(
-		workflow.DefaultPlan(),
-		policy,
-	)
-	if err != nil {
-		log.Warnf(
-			"[workflow] investigation plan rejected; using fixed fallback: %v",
-			err,
-		)
-		return fallback, nil
-	}
-	return compiled, nil
-}
-
-// configureAgentWorkflowRuntime connects the current agent runtime to the
-// workflow orchestrator without rebuilding the QA service itself.
 func (p *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime) error {
 	if p.flow.service == nil {
 		return nil
@@ -883,9 +700,7 @@ func (p *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime) error
 	runner := workflow.NewOrchestrator(
 		p.agents.schemas,
 		nodes,
-		map[string]workflow.GateEvaluator{
-			workflow.EvidenceRiskGateID: workflow.RiskGateEvaluator{},
-		},
+		map[string]workflow.GateEvaluator{},
 	)
 	p.flow.service.SetOrchestrator(runner)
 	switch {

@@ -31,13 +31,7 @@ type Deps struct {
 	ScenarioLifecycle ScenarioLifecycle
 	Coordinator       *Coordinator
 	ExecutionEvents   ExecutionEventEmitter
-	WorkflowEscalator agentapi.WorkflowEscalator
-	Capabilities      WorkflowCapabilityResolver
 	WriteAvailable    bool
-}
-
-type WorkflowCapabilityResolver interface {
-	Resolve(agentapi.CapabilityRef) (agentapi.Capability, error)
 }
 
 type SelectionResolver interface {

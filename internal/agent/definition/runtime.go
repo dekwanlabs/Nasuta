@@ -45,11 +45,12 @@ type Resolver interface {
 }
 
 type runtimeSettings struct {
-	baseURL       string
-	apiKey        string
-	provider      string
-	model         string
-	answerReserve time.Duration
+	baseURL                     string
+	apiKey                      string
+	provider                    string
+	model                       string
+	answerReserve               time.Duration
+	disableLegacyAnswerRecovery bool
 }
 
 type preparedExecution struct {
@@ -169,7 +170,8 @@ func NewRuntime(
 		settings: runtimeSettings{
 			baseURL: settings.LLMBaseURL, apiKey: settings.LLMAPIKey,
 			provider: settings.LLMProvider, model: settings.LLMModel,
-			answerReserve: answerReserve,
+			answerReserve:               answerReserve,
+			disableLegacyAnswerRecovery: settings.DisableLegacyAnswerRecovery,
 		},
 		scenarios:  scenarios,
 		usageStore: usageStore,
@@ -227,6 +229,20 @@ func (runtime *Runtime) EmitEvent(
 ) {
 	if runtime != nil && runtime.hub != nil {
 		runtime.hub.EmitEvent(eventType, event)
+	}
+}
+
+// EmitToolStarted implements run.ExecutionEventEmitter for direct tool events.
+func (runtime *Runtime) EmitToolStarted(runID string, event run.ToolStartedEvent) {
+	if runtime != nil && runtime.hub != nil {
+		runtime.hub.EmitToolStarted(runID, event)
+	}
+}
+
+// EmitToolFinished implements run.ExecutionEventEmitter for direct tool events.
+func (runtime *Runtime) EmitToolFinished(runID string, event run.ToolFinishedEvent) {
+	if runtime != nil && runtime.hub != nil {
+		runtime.hub.EmitToolFinished(runID, event)
 	}
 }
 

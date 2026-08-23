@@ -381,7 +381,7 @@ func TestServiceStartPersistsExplicitDetachedContract(t *testing.T) {
 		Input:               json.RawMessage(`{"subject":"x"}`),
 		Actor:               agentapi.Actor{UserID: 9, TenantID: "tenant-a"},
 		ActorPermissions:    readOnly,
-		Scenario:            FlowID,
+		Scenario:            "test.workflow",
 		ScenarioPermissions: readOnly,
 	})
 	if err != nil {
@@ -398,7 +398,7 @@ func TestServiceStartPersistsExplicitDetachedContract(t *testing.T) {
 	defer persistence.mu.Unlock()
 	started := persistence.startedRun
 	if started.ParentRunID != "qa_parent_1" ||
-		started.Scenario != FlowID ||
+		started.Scenario != "test.workflow" ||
 		started.ActorUserID != 9 ||
 		started.ActorTenantID != "tenant-a" ||
 		len(started.ActorPermissions.Scopes) != 1 ||
@@ -437,7 +437,7 @@ func TestServiceStartPersistsWithDetachedContext(t *testing.T) {
 		Input:               json.RawMessage(`{"subject":"x"}`),
 		Actor:               agentapi.Actor{UserID: 9},
 		ActorPermissions:    readOnly,
-		Scenario:            FlowID,
+		Scenario:            "test.workflow",
 		ScenarioPermissions: readOnly,
 	})
 	if err != nil {
@@ -483,7 +483,7 @@ func TestServiceStartSurvivesCallerCancellationAndAwaitJoinsPersistence(t *testi
 		Input:               json.RawMessage(`{"subject":"x"}`),
 		Actor:               agentapi.Actor{UserID: 9},
 		ActorPermissions:    readOnly,
-		Scenario:            FlowID,
+		Scenario:            "test.workflow",
 		ScenarioPermissions: readOnly,
 	})
 	if err != nil {

@@ -180,7 +180,7 @@ func isBestEffortEvent(event EventType) bool {
 		EventAgentStarted, EventAgentCompleted, EventEvidenceJoined,
 		EventDelegationCreated, EventDelegationStarted, EventDelegationDone,
 		EventDelegationFailed, EventDelegationCancelled, EventDelegationRejected,
-		EventDelegationValidated, EventDelegationShadow,
+		EventDelegationValidated,
 		EventDelegationVerificationStarted, EventDelegationVerificationDone,
 		EventDelegationVerificationFailed, EventDelegationVerificationRejected,
 		EventDelegationAdoptionEvaluated:

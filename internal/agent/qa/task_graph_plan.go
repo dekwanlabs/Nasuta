@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -914,10 +913,4 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func sortedStrings(values []string) []string {
-	out := append([]string(nil), values...)
-	sort.Strings(out)
-	return out
 }

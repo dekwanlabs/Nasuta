@@ -22,6 +22,14 @@ type InvestigationRunner interface {
 	Cancel(context.Context, string, int64) error
 }
 
+// InvestigationDeliveryReader exposes the investigation snapshot used by transports.
+// Parent reconciliation may still project a QA outcome, but transport reads must
+// not reconstruct the public answer from that projection.
+type InvestigationDeliveryReader interface {
+	LoadRun(context.Context, string) (investigation.InvestigationRun, error)
+	LoadDelivery(context.Context, string) (investigation.DeliveryResult, error)
+}
+
 // InvestigationPlanner replans a continuation from its verified gaps.
 // Implementations must keep the returned proposal within the supplied contract.
 type InvestigationPlanner interface {

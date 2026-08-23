@@ -3,7 +3,6 @@ package execution
 import (
 	"context"
 
-	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -13,14 +12,6 @@ const (
 	ToolKindRead  = tool.KindRead
 	ToolKindWrite = tool.KindWrite
 )
-
-type toolTraceRecorder struct {
-	events []domain.EvaluationTrace
-}
-
-func (recorder *toolTraceRecorder) RecordTrace(event domain.EvaluationTrace) {
-	recorder.events = append(recorder.events, event)
-}
 
 func stringHandler(run func(context.Context, tool.Arguments) (string, error)) tool.Handler {
 	return tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {

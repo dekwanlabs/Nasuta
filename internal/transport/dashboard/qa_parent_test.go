@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 )
@@ -279,4 +281,76 @@ func serveQAParentRequest(
 	response := httptest.NewRecorder()
 	serve(response, request)
 	return response
+}
+
+func TestAPIQARunGetProjectsNativeDelivery(t *testing.T) {
+	handler, mock, closeDB := newQAParentHandler(t)
+	defer closeDB()
+	startedAt := time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC)
+	expectQAParentDetailRecord(mock, "parent-investigation", 42, run.StatusDone, startedAt)
+	terminal := run.Terminal{
+		RunID: "parent-investigation", Status: run.StatusDone,
+		Answer: "legacy projection", ErrorCode: "completed",
+	}
+	raw, err := json.Marshal(terminal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT detail_json FROM runtime_events").
+		WithArgs("qa_parent", terminal.RunID, int64(1), "run_finished").
+		WillReturnRows(sqlmock.NewRows([]string{"detail_json"}).AddRow(raw))
+	delivery := investigation.DeliveryResult{
+		Status: investigation.DeliveryPartial,
+		Text:   "native investigation delivery",
+	}
+	handler.qaRuntimeFn = func() QARuntime {
+		return QARuntime{
+			RunStore: handler.persistentRunStore,
+			InvestigationReader: investigationDeliveryReaderFunc(func(
+				context.Context, string,
+			) (investigation.DeliveryResult, error) {
+				return delivery, nil
+			}),
+		}
+	}
+
+	response := serveQAParentRequest(
+		t,
+		handler.APIQARunGet,
+		http.MethodGet,
+		"/api/qa/runs/parent-investigation",
+		"parent-investigation",
+		42,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			Terminal              *run.Terminal                 `json:"terminal"`
+			InvestigationDelivery *investigation.DeliveryResult `json:"investigation_delivery"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Data.InvestigationDelivery == nil ||
+		payload.Data.InvestigationDelivery.Text != delivery.Text ||
+		payload.Data.Terminal == nil ||
+		payload.Data.Terminal.Answer != delivery.Text ||
+		payload.Data.Terminal.InvestigationDelivery == nil {
+		t.Fatalf("response = %+v", payload.Data)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type investigationDeliveryReaderFunc func(context.Context, string) (investigation.DeliveryResult, error)
+
+func (fn investigationDeliveryReaderFunc) LoadDelivery(
+	ctx context.Context,
+	runID string,
+) (investigation.DeliveryResult, error) {
+	return fn(ctx, runID)
 }

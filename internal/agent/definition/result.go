@@ -382,24 +382,9 @@ func mapResult(
 		return publicResult, outcome
 	}
 	publicResult.Output = output
-	publicResult.Text = publicOutputText(output)
+	publicResult.Text = RenderPublicAnswer(output)
 	outcome.Answer = publicResult.Text
 	return publicResult, outcome
-}
-
-// publicOutputText keeps structured handoff fields out of user-facing answers.
-func publicOutputText(output json.RawMessage) string {
-	var text string
-	if err := json.Unmarshal(output, &text); err == nil {
-		return text
-	}
-	var object struct {
-		Answer string `json:"answer"`
-	}
-	if err := json.Unmarshal(output, &object); err != nil {
-		return ""
-	}
-	return object.Answer
 }
 
 func publicTerminalEvidence(

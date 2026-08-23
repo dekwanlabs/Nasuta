@@ -315,6 +315,18 @@ func (hub *Hub) EmitEvent(eventType EventType, event ExecutionEvent) {
 	hub.broadcast(event.RunID, SSEEvent{Type: eventType, Data: event})
 }
 
+// EmitToolStarted publishes a direct tool lifecycle event on the shared stream.
+func (hub *Hub) EmitToolStarted(runID string, event ToolStartedEvent) {
+	hub.broadcast(runID, SSEEvent{Type: EventToolStarted, Data: event})
+	hub.projectToolEvent(runID, EventToolStarted, event)
+}
+
+// EmitToolFinished publishes a direct tool result event on the shared stream.
+func (hub *Hub) EmitToolFinished(runID string, event ToolFinishedEvent) {
+	hub.broadcast(runID, SSEEvent{Type: EventToolFinished, Data: event})
+	hub.projectToolEvent(runID, EventToolFinished, event)
+}
+
 func (hub *Hub) Complete(runID string, outcome Outcome) {
 	hub.complete(runID, outcome, true)
 }

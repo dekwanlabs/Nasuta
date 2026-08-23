@@ -1,0 +1,385 @@
+package investigation
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+)
+
+type TaskInputProvider func(ExecutableTask, map[string]json.RawMessage) TaskExecutionInput
+
+type ScheduledTaskResult struct {
+	Task        ExecutableTask      `json:"task"`
+	Status      TaskStatus          `json:"status"`
+	Result      TaskExecutionResult `json:"result,omitempty"`
+	Failure     *RunFailure         `json:"failure,omitempty"`
+	Started     time.Time           `json:"started_at,omitempty"`
+	Ended       time.Time           `json:"ended_at,omitempty"`
+	Attempts    []TaskAttempt       `json:"attempts,omitempty"`
+	Discoveries []Discovery         `json:"discoveries,omitempty"`
+}
+
+type Scheduler struct {
+	Executors           ExecutorRegistry
+	Schemas             SchemaResolver
+	Ledger              *BudgetLedger
+	MaxParallelism      int
+	MaxAgentParallelism int
+	MaxToolParallelism  int
+	OnStart             func(ExecutableTask)
+	OnComplete          func(ScheduledTaskResult)
+	InitialResults      map[string]ScheduledTaskResult
+	InitialOutputs      map[string]json.RawMessage
+}
+
+func (scheduler Scheduler) Execute(
+	ctx context.Context,
+	tasks []ExecutableTask,
+	provider TaskInputProvider,
+) ([]ScheduledTaskResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if scheduler.Executors == nil {
+		return nil, fmt.Errorf("executor registry is required")
+	}
+	if scheduler.Schemas == nil {
+		return nil, fmt.Errorf("schema registry is required")
+	}
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+	maxParallelism := scheduler.MaxParallelism
+	if maxParallelism <= 0 || maxParallelism > len(tasks) {
+		maxParallelism = len(tasks)
+	}
+	agentLimit := scheduler.MaxAgentParallelism
+	if agentLimit <= 0 || agentLimit > maxParallelism {
+		agentLimit = maxParallelism
+	}
+	toolLimit := scheduler.MaxToolParallelism
+	if toolLimit <= 0 || toolLimit > maxParallelism {
+		toolLimit = maxParallelism
+	}
+	state := make(map[string]ExecutableTask, len(tasks))
+	for _, task := range tasks {
+		if _, duplicate := state[task.ID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate task %q", ErrPlanInvalid, task.ID)
+		}
+		if task.Status == "" {
+			task.Status = TaskPending
+		}
+		state[task.ID] = task
+	}
+	results := make(map[string]ScheduledTaskResult, len(scheduler.InitialResults))
+	for id, result := range scheduler.InitialResults {
+		results[id] = result
+		if task, ok := state[id]; ok {
+			task.Status = result.Status
+			state[id] = task
+		}
+	}
+	outputs := make(map[string]json.RawMessage, len(scheduler.InitialOutputs))
+	for id, output := range scheduler.InitialOutputs {
+		outputs[id] = append([]byte(nil), output...)
+	}
+	record := func(result ScheduledTaskResult) {
+		results[result.Task.ID] = result
+		if scheduler.OnComplete != nil {
+			scheduler.OnComplete(result)
+		}
+	}
+	for len(results) < len(tasks) {
+		if err := ctx.Err(); err != nil {
+			for id, task := range state {
+				if _, done := results[id]; done {
+					continue
+				}
+				record(ScheduledTaskResult{
+					Task: task, Status: TaskCancelled,
+					Failure: contextTaskFailure(err, id),
+				})
+			}
+			return orderedTaskResults(tasks, results), nil
+		}
+		ready, blocked := scheduler.readyTasks(state, results)
+		for _, task := range blocked {
+			failure := &RunFailure{
+				Code: FailureExecution, Message: "required dependency failed", Stage: string(StageExecution), TaskID: task.ID,
+			}
+			record(ScheduledTaskResult{Task: task, Status: TaskBlocked, Failure: failure})
+		}
+		if len(ready) == 0 {
+			if len(results) == len(tasks) {
+				break
+			}
+			return orderedTaskResults(tasks, results), fmt.Errorf("%w: no ready task remains", ErrTaskNotReady)
+		}
+		batchTasks := make([]ExecutableTask, 0, minInt(maxParallelism, len(ready)))
+		agentRunning := 0
+		toolRunning := 0
+		for _, task := range ready {
+			if len(batchTasks) >= maxParallelism {
+				break
+			}
+			if isAgentExecutor(task.Executor) {
+				if agentRunning >= agentLimit {
+					continue
+				}
+				agentRunning++
+			} else {
+				if toolRunning >= toolLimit {
+					continue
+				}
+				toolRunning++
+			}
+			batchTasks = append(batchTasks, task)
+		}
+		batch := make([]ScheduledTaskResult, len(batchTasks))
+		var waitGroup sync.WaitGroup
+		for index, task := range batchTasks {
+			index, task := index, task
+			runningTask := task
+			runningTask.Status = TaskRunning
+			state[task.ID] = runningTask
+			if scheduler.OnStart != nil {
+				scheduler.OnStart(task)
+			}
+			waitGroup.Add(1)
+			go func() {
+				defer waitGroup.Done()
+				batch[index] = scheduler.executeOne(ctx, task, provider, outputs)
+			}()
+		}
+		waitGroup.Wait()
+		for _, taskResult := range batch {
+			record(taskResult)
+			completedTask := taskResult.Task
+			completedTask.Status = taskResult.Status
+			state[taskResult.Task.ID] = completedTask
+			if len(taskResult.Result.Output) > 0 {
+				outputs[taskResult.Task.ID] = append([]byte(nil), taskResult.Result.Output...)
+			}
+		}
+	}
+	return orderedTaskResults(tasks, results), nil
+}
+
+func (scheduler Scheduler) executeOne(
+	parent context.Context,
+	task ExecutableTask,
+	provider TaskInputProvider,
+	outputs map[string]json.RawMessage,
+) ScheduledTaskResult {
+	result := ScheduledTaskResult{Task: task, Status: TaskFailed, Started: time.Now().UTC()}
+	if scheduler.Ledger == nil {
+		result.Failure = &RunFailure{Code: FailureBudget, Message: "budget ledger is required", Stage: string(StageExecution), TaskID: task.ID}
+		result.Ended = time.Now().UTC()
+		return result
+	}
+	reservation, err := scheduler.Ledger.Reserve(StageExecution, task.ID, task.Budget.Limit)
+	if err != nil {
+		result.Failure = &RunFailure{Code: FailureBudget, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID}
+		result.Ended = time.Now().UTC()
+		return result
+	}
+	defer func() {
+		if result.Status != TaskSucceeded {
+			_ = reservation.Release()
+		}
+	}()
+	input := TaskExecutionInput{Task: task}
+	if provider != nil {
+		input = provider(task, cloneOutputs(outputs))
+		input.Task = task
+	}
+	if err := validateTaskInput(scheduler.Schemas, task, input); err != nil {
+		result.Failure = &RunFailure{Code: FailureSchema, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID}
+		result.Ended = time.Now().UTC()
+		return result
+	}
+	executor, resolveErr := scheduler.Executors.Resolve(task.Executor)
+	if resolveErr != nil {
+		result.Failure = &RunFailure{Code: FailureExecution, Message: resolveErr.Error(), Stage: string(StageExecution), TaskID: task.ID}
+		result.Ended = time.Now().UTC()
+		return result
+	}
+	maxAttempts := task.Budget.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	var lastFailure *RunFailure
+	var lastTaskResult TaskExecutionResult
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptStarted := time.Now().UTC()
+		execCtx := parent
+		var cancel context.CancelFunc
+		if task.Budget.Limit.Duration > 0 {
+			execCtx, cancel = context.WithTimeout(parent, task.Budget.Limit.Duration)
+		}
+		taskResult, execErr := executor.Execute(execCtx, task, input)
+		execContextErr := execCtx.Err()
+		if cancel != nil {
+			cancel()
+		}
+		lastTaskResult = taskResult
+		attemptEnded := time.Now().UTC()
+		if execErr == nil && taskResult.Failure == nil && execCtx.Err() == nil {
+			if err := reservation.Settle(taskResult.Usage); err != nil {
+				result.Failure = &RunFailure{Code: FailureBudget, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID}
+				result.Ended = time.Now().UTC()
+				return result
+			}
+			result.Result = taskResult
+			result.Status = TaskSucceeded
+			result.Ended = attemptEnded
+			result.Discoveries = append([]Discovery(nil), taskResult.Discoveries...)
+			result.Attempts = append(result.Attempts, TaskAttempt{
+				Attempt: attempt, StartedAt: attemptStarted, EndedAt: attemptEnded, Status: TaskSucceeded,
+			})
+			return result
+		}
+		failure := taskResult.Failure
+		if failure == nil {
+			failure = contextTaskFailure(execContextErr, task.ID)
+			if failure == nil {
+				failure = &RunFailure{Code: FailureExecution, Message: "task execution failed", Stage: string(StageExecution), TaskID: task.ID}
+			}
+		}
+		status := TaskFailed
+		if failure.Code == FailureTimeout || failure.Code == FailureCancelled {
+			status = TaskCancelled
+		}
+		result.Attempts = append(result.Attempts, TaskAttempt{
+			Attempt: attempt, StartedAt: attemptStarted, EndedAt: attemptEnded, Status: status, Failure: failure,
+		})
+		lastFailure = failure
+		if !retryableTaskFailure(failure) || attempt >= maxAttempts {
+			break
+		}
+	}
+	result.Result = lastTaskResult
+	result.Failure = lastFailure
+	if lastFailure != nil && (lastFailure.Code == FailureTimeout || lastFailure.Code == FailureCancelled) {
+		result.Status = TaskCancelled
+	}
+	result.Ended = time.Now().UTC()
+	return result
+}
+
+func retryableTaskFailure(failure *RunFailure) bool {
+	if failure == nil {
+		return false
+	}
+	if failure.Retryable {
+		return true
+	}
+	switch failure.Code {
+	case FailureToolUnavailable, FailureReasoning:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateTaskInput(schemas SchemaResolver, task ExecutableTask, input TaskExecutionInput) error {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("task %q input encode failed: %w", task.ID, err)
+	}
+	validator, ok := schemas.(schemaValidator)
+	if !ok || validator == nil {
+		return fmt.Errorf("task %q schema registry cannot validate input", task.ID)
+	}
+	if err := validator.Validate(task.InputSchema, json.RawMessage(payload)); err != nil {
+		return fmt.Errorf("task %q input schema: %w", task.ID, err)
+	}
+	return nil
+}
+
+func (scheduler Scheduler) readyTasks(
+	state map[string]ExecutableTask,
+	results map[string]ScheduledTaskResult,
+) (ready []ExecutableTask, blocked []ExecutableTask) {
+	for _, task := range state {
+		if task.Status != TaskPending {
+			continue
+		}
+		allSucceeded := true
+		allResolved := true
+		dependencyFailed := false
+		for _, dependency := range task.Dependencies {
+			dependencyResult, exists := results[dependency]
+			if !exists {
+				allSucceeded = false
+				allResolved = false
+				continue
+			}
+			if dependencyResult.Status != TaskSucceeded {
+				dependencyFailed = true
+			}
+		}
+		if dependencyFailed && !task.Optional {
+			blocked = append(blocked, task)
+			continue
+		}
+		if allResolved && (allSucceeded || (dependencyFailed && task.Optional)) {
+			ready = append(ready, task)
+		}
+	}
+	sortTasks(ready)
+	sortTasks(blocked)
+	return ready, blocked
+}
+
+func contextTaskFailure(err error, taskID string) *RunFailure {
+	code := FailureExecution
+	if errors.Is(err, context.DeadlineExceeded) {
+		code = FailureTimeout
+	} else if errors.Is(err, context.Canceled) {
+		code = FailureCancelled
+	}
+	message := "task execution failed"
+	if err != nil {
+		message = err.Error()
+	}
+	return &RunFailure{Code: code, Message: message, Stage: string(StageExecution), TaskID: taskID}
+}
+
+func orderedTaskResults(tasks []ExecutableTask, results map[string]ScheduledTaskResult) []ScheduledTaskResult {
+	out := make([]ScheduledTaskResult, 0, len(tasks))
+	for _, task := range tasks {
+		if result, ok := results[task.ID]; ok {
+			out = append(out, result)
+		}
+	}
+	return out
+}
+
+func sortTasks(tasks []ExecutableTask) {
+	for i := 1; i < len(tasks); i++ {
+		for j := i; j > 0 && tasks[j].ID < tasks[j-1].ID; j-- {
+			tasks[j], tasks[j-1] = tasks[j-1], tasks[j]
+		}
+	}
+}
+
+func cloneOutputs(outputs map[string]json.RawMessage) map[string]json.RawMessage {
+	cloned := make(map[string]json.RawMessage, len(outputs))
+	for id, output := range outputs {
+		cloned[id] = append([]byte(nil), output...)
+	}
+	return cloned
+}
+
+func isAgentExecutor(executor ExecutorType) bool {
+	switch executor {
+	case ExecutorInvestigator, ExecutorVerifier, ExecutorComposer:
+		return true
+	default:
+		return false
+	}
+}
