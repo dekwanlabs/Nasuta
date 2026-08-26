@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -16,29 +17,36 @@ func TestShouldContinueBoundsRoundsGoalsAndBudget(t *testing.T) {
 		{
 			name: "eligible",
 			context: InvestigationRoundContext{
-				Round: 1, MaxRounds: 3,
-				UnresolvedEvidenceGoals: []string{"core_flow"}, RemainingBudget: 1,
+				Round: 2, MaxRounds: 3,
+				UnresolvedEvidenceGoals: []string{"core_flow"},
+			},
+			want: true,
+		},
+		{
+			name: "last configured round is eligible",
+			context: InvestigationRoundContext{
+				Round: 3, MaxRounds: 3,
+				UnresolvedEvidenceGoals: []string{"core_flow"},
 			},
 			want: true,
 		},
 		{
 			name: "round limit",
 			context: InvestigationRoundContext{
-				Round: 3, MaxRounds: 3,
-				UnresolvedEvidenceGoals: []string{"core_flow"}, RemainingBudget: 1,
+				Round: 4, MaxRounds: 3,
+				UnresolvedEvidenceGoals: []string{"core_flow"},
 			},
 		},
 		{
-			name: "goals covered",
-			context: InvestigationRoundContext{
-				Round: 1, MaxRounds: 3, RemainingBudget: 1,
-			},
+			name:    "goals covered",
+			context: InvestigationRoundContext{Round: 2, MaxRounds: 3},
 		},
 		{
 			name: "budget exhausted",
 			context: InvestigationRoundContext{
-				Round: 1, MaxRounds: 3,
-				UnresolvedEvidenceGoals: []string{"core_flow"}, RemainingBudget: -1,
+				Round: 2, MaxRounds: 3, UnresolvedEvidenceGoals: []string{"core_flow"},
+				BudgetLimit: InvestigationBudget{TotalTokens: 100},
+				BudgetUsed:  InvestigationUsage{TotalTokens: 100},
 			},
 		},
 	}
@@ -48,6 +56,33 @@ func TestShouldContinueBoundsRoundsGoalsAndBudget(t *testing.T) {
 				t.Fatalf("ShouldContinue(%+v) = %v, want %v", test.context, got, test.want)
 			}
 		})
+	}
+}
+
+func TestTightenContinuationBudgetUsesAggregateRemainingBudget(t *testing.T) {
+	proposal := &agentapi.TaskGraphProposal{}
+	ok := tightenContinuationBudget(proposal, InvestigationBudget{
+		InputTokens: 100, OutputTokens: 50, TotalTokens: 150, ToolCalls: 10, CostMicros: 1_000,
+	}, InvestigationUsage{
+		InputTokens: 40, OutputTokens: 20, TotalTokens: 60, ToolCalls: 3, CostMicros: 250,
+	})
+	if !ok {
+		t.Fatal("remaining budget was rejected")
+	}
+	stop := proposal.Stop
+	if stop.MaxInputTokens != 60 || stop.MaxOutputTokens != 30 || stop.MaxTotalTokens != 90 ||
+		stop.MaxToolCalls != 7 || stop.MaxCostMicros != 750 {
+		t.Fatalf("remaining stop policy = %+v", stop)
+	}
+}
+
+func TestTightenContinuationBudgetDoesNotWidenPlannerLimit(t *testing.T) {
+	proposal := &agentapi.TaskGraphProposal{Stop: agentapi.StopPolicy{MaxTotalTokens: 20, MaxToolCalls: 2}}
+	if !tightenContinuationBudget(proposal, InvestigationBudget{TotalTokens: 100, ToolCalls: 10}, InvestigationUsage{TotalTokens: 10, ToolCalls: 1}) {
+		t.Fatal("remaining budget was rejected")
+	}
+	if proposal.Stop.MaxTotalTokens != 20 || proposal.Stop.MaxToolCalls != 2 {
+		t.Fatalf("planner limit was widened: %+v", proposal.Stop)
 	}
 }
 

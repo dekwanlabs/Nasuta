@@ -357,6 +357,11 @@ func (coordinator *Coordinator) Resume(
 	if err := ledger.Restore(run.Budget); err != nil {
 		return InvestigationRun{}, err
 	}
+	if coordinator.Catalog.Has(TaskTemplateRef{ID: "evidence.verify", Version: 1}) {
+		if err := validateVerifierPlan(run.Plan.Tasks); err != nil {
+			return persistResumeFailure(store, runID, ledger, planFailure(err), RunFailed)
+		}
+	}
 	evidence := NewEvidenceLedgerFrom(run.Evidence)
 	claims := NewClaimLedgerFrom(run.Contract.EvidenceGoals, evidence, run.Claims)
 	failures := append([]RunFailure(nil), run.Report.Failures...)
@@ -385,6 +390,7 @@ func (coordinator *Coordinator) Resume(
 		tasks = append(tasks, task)
 	}
 
+	executionResults := orderedTaskResults(tasks, seededResults)
 	var requiredFailure *RunFailure
 	for _, seeded := range seededResults {
 		if failure := requiredTaskFailure(seeded); failure != nil {
@@ -405,6 +411,7 @@ func (coordinator *Coordinator) Resume(
 	resumedAt := time.Now().UTC()
 	resumeStatus := run.Status
 	var persistErr error
+	var scheduleErr error
 	if resumeStatus == RunPlanned || resumeStatus == RunExecuting {
 		if resumeStatus == RunPlanned {
 			if err := store.Transition(runID, RunExecuting); err != nil {
@@ -480,7 +487,7 @@ func (coordinator *Coordinator) Resume(
 				coordinator.emitProgress(runID, ProgressTaskCompleted, scheduled.Task.ID, scheduled.Task.Executor, directToolID(scheduled.Task), string(scheduled.Status), reason)
 			},
 		}
-		_, scheduleErr := scheduler.Execute(deadlineCtx, tasks, func(task ExecutableTask, upstream map[string]json.RawMessage) TaskExecutionInput {
+		executionResults, scheduleErr = scheduler.Execute(deadlineCtx, tasks, func(task ExecutableTask, upstream map[string]json.RawMessage) TaskExecutionInput {
 			return TaskExecutionInput{
 				Task: task, Evidence: evidence.All(), Claims: claims.All(), Upstream: upstream,
 				WorkflowRunID: runID, ParentRunID: run.Contract.ParentRunID, Actor: run.Contract.Actor,
@@ -512,6 +519,22 @@ func (coordinator *Coordinator) Resume(
 			}, RunFailed)
 		}
 		return persistResumeFailure(store, runID, ledger, *requiredFailure, RunFailed)
+	}
+	if scheduleErr != nil {
+		return persistResumeFailure(
+			store, runID, ledger, runFailureFromContext(deadlineCtx, scheduleErr), runFailureStatus(deadlineCtx, scheduleErr),
+		)
+	}
+	if coordinator.Catalog.Has(TaskTemplateRef{ID: "evidence.verify", Version: 1}) {
+		if verifierErr := validateVerifierExecution(tasks, executionResults); verifierErr != nil {
+			report := BuildReport(evidence, claims, failures)
+			if err := store.SaveReport(runID, report); err != nil {
+				return persistResumeFailure(store, runID, ledger, RunFailure{
+					Code: FailureVerifier, Message: err.Error(), Stage: string(StageVerification),
+				}, RunFailed)
+			}
+			return persistResumeFailure(store, runID, ledger, *verifierErr, RunFailed)
+		}
 	}
 	if err := deadlineCtx.Err(); err != nil {
 		return persistResumeFailure(
@@ -1258,7 +1281,13 @@ func (coordinator *Coordinator) execute(
 		}
 		if err := compositionReservation.Settle(actual); err != nil {
 			_ = compositionReservation.Release()
-			failures = append(failures, RunFailure{Code: FailureBudget, Message: err.Error(), Stage: string(StageComposition)})
+			report.Failures = append(report.Failures, RunFailure{
+				Code: FailureBudget, Message: err.Error(), Stage: string(StageComposition),
+			})
+			if saveErr := store.SaveReport(runID, report); saveErr != nil {
+				return fail(RunFailure{Code: FailureBudget, Message: saveErr.Error(), Stage: string(StageComposition)}, RunFailed)
+			}
+			return fail(RunFailure{Code: FailureBudget, Message: err.Error(), Stage: string(StageComposition)}, RunBudgetExhausted)
 		}
 	}
 	if err := saveMetrics(delivery.Failure != nil && delivery.Failure.Code == FailureComposer); err != nil {

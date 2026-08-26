@@ -28,6 +28,7 @@ type Coordinator struct {
 	scenarios     ScenarioLifecycle
 	parentRuns    ParentRunReader
 	sessions      sessionTurnStore
+	maxRounds     int
 }
 
 // NewCoordinator binds the durable stores used by recovery and control.
@@ -47,6 +48,14 @@ func NewCoordinator(
 		parentRuns:    parentRuns,
 		sessions:      sessionTurns,
 	}
+}
+
+// SetInvestigationMaxRounds applies the platform-owned continuation bound.
+func (coordinator *Coordinator) SetInvestigationMaxRounds(maxRounds int) {
+	if coordinator == nil {
+		return
+	}
+	coordinator.maxRounds = maxRounds
 }
 
 // SetInvestigationPlanner enables gap-aware planning for continuation rounds.
@@ -278,6 +287,18 @@ func (coordinator *Coordinator) converge(
 	return coordinator.complete(ctx, parent, terminal)
 }
 
+func (coordinator *Coordinator) investigationMaxRounds() int {
+	if coordinator.maxRounds > 0 {
+		return coordinator.maxRounds
+	}
+	return defaultInvestigationMaxRounds
+}
+
+func continuationEligible(terminal InvestigationTerminal) bool {
+	return terminal.Status == InvestigationSucceeded ||
+		(terminal.Status == InvestigationFailed && terminal.ErrorCode == "evidence_insufficient")
+}
+
 func (coordinator *Coordinator) convergeContinuation(
 	ctx context.Context,
 	parent QAParentRecord,
@@ -300,7 +321,7 @@ func (coordinator *Coordinator) convergeContinuation(
 		)
 	}
 	terminal = snapshot.Terminal
-	if terminal.Output == nil {
+	if terminal.Output == nil || !continuationEligible(terminal) {
 		return coordinator.complete(ctx, parent, terminal)
 	}
 
@@ -316,12 +337,13 @@ func (coordinator *Coordinator) convergeContinuation(
 		ParentRunID:           parent.ID,
 		Objective:             snapshot.Contract.Objective,
 		Round:                 currentRound,
-		MaxRounds:             defaultInvestigationMaxRounds,
+		MaxRounds:             coordinator.investigationMaxRounds(),
 		PreviousWorkflowRunID: terminal.WorkflowRunID,
-		RemainingBudget:       0,
+		BudgetLimit:           snapshot.BudgetLimit,
 	}
 
 	for {
+		roundContext.BudgetUsed = addInvestigationUsage(roundContext.BudgetUsed, terminal.Usage)
 		current := cloneInvestigationResult(*terminal.Output)
 		if current.Round <= 0 {
 			current.Round = currentRound
@@ -329,6 +351,9 @@ func (coordinator *Coordinator) convergeContinuation(
 		merged = MergeRoundResult(merged, current)
 		nextContext := NextRound(roundContext, current)
 		if !ShouldContinue(nextContext) {
+			if !investigationBudgetAvailable(nextContext.BudgetLimit, nextContext.BudgetUsed) {
+				merged.StopReason = string(workflow.StopBudgetExhausted)
+			}
 			return coordinator.completeResult(ctx, parent, terminal, merged)
 		}
 		if NewEvidenceRatio(snapshot.SeedEvidence, current.EvidenceUnits) <= 0 {
@@ -351,6 +376,10 @@ func (coordinator *Coordinator) convergeContinuation(
 				nextContext.Round,
 				err,
 			)
+		}
+		if !tightenContinuationBudget(proposal, nextContext.BudgetLimit, nextContext.BudgetUsed) {
+			merged.StopReason = string(workflow.StopBudgetExhausted)
+			return coordinator.completeResult(ctx, parent, terminal, merged)
 		}
 
 		nextID := StableRoundWorkflowID(parent.ID, nextContext.Round)

@@ -145,6 +145,7 @@ func (p *Platform) buildQARuntime(
 	})
 	if coordinator != nil {
 		coordinator.SetInvestigationPlanner(qa)
+		coordinator.SetInvestigationMaxRounds(snapshot.InvestigationMaxRounds)
 	}
 	runtime := dashboard.QARuntime{
 		QA: qa, RunStore: p.qa.runs,

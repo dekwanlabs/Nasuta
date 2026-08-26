@@ -78,3 +78,37 @@ func supportedReport() (InvestigationContract, InvestigationReport) {
 			}},
 		}
 }
+
+func TestDeterministicRendererDoesNotExposeInternalGapIdentifiers(t *testing.T) {
+	report := InvestigationReport{
+		Gaps: []EvidenceGap{
+			{GoalID: "business_domain", Reason: "no verified claim covers this goal"},
+			{GoalID: "core_flow", Reason: "no verified claim covers this goal"},
+		},
+	}
+
+	text := (DeterministicRenderer{}).Render(report)
+	for _, internal := range []string{"business_domain", "core_flow", "no verified claim covers this goal", "Investigation limits"} {
+		if strings.Contains(text, internal) {
+			t.Fatalf("renderer leaked %q in %q", internal, text)
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		t.Fatal("renderer returned empty insufficiency text")
+	}
+}
+
+func TestDeterministicRendererKeepsReadableClaimsAndHidesGapDetails(t *testing.T) {
+	report := InvestigationReport{
+		Claims: []VerifiedClaim{{ID: "claim-1", GoalID: "core_flow", Text: "请求先经过路由层，再进入问答协调器。", Status: ClaimSupported}},
+		Gaps:   []EvidenceGap{{GoalID: "runtime_and_operations", Reason: "no verified claim covers this goal"}},
+	}
+
+	text := (DeterministicRenderer{}).Render(report)
+	if !strings.Contains(text, "请求先经过路由层") {
+		t.Fatalf("renderer omitted readable claim: %q", text)
+	}
+	if strings.Contains(text, "runtime_and_operations") || strings.Contains(text, "no verified claim covers this goal") {
+		t.Fatalf("renderer leaked internal gap details: %q", text)
+	}
+}

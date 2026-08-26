@@ -66,6 +66,7 @@ type InvestigationRoundSnapshot struct {
 	Contract     TaskContract
 	SeedEvidence []tool.EvidenceUnit
 	Actor        agentapi.Actor
+	BudgetLimit  InvestigationBudget
 }
 
 type InvestigationRequest struct {
@@ -171,6 +172,15 @@ type InvestigationUsage struct {
 	TotalTokens     int64
 	ToolCalls       int64
 	CostMicros      int64
+}
+
+// InvestigationBudget is the parent-owned ceiling shared by continuation rounds.
+type InvestigationBudget struct {
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
+	ToolCalls    int64
+	CostMicros   int64
 }
 
 type InvestigationStatus string

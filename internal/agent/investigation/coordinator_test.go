@@ -444,3 +444,78 @@ func TestPlanFailureClassifiesLeaseFenceAsRetryableLeaseLoss(t *testing.T) {
 		t.Fatalf("failure = %#v", failure)
 	}
 }
+
+func TestValidateVerifierExecutionRejectsMissingResult(t *testing.T) {
+	tasks := []ExecutableTask{{ID: "evidence.verify", Executor: ExecutorVerifier}}
+
+	failure := validateVerifierExecution(tasks, nil)
+	if failure == nil || failure.Code != FailureVerifier || failure.TaskID != "evidence.verify" ||
+		!strings.Contains(failure.Message, "did not execute") {
+		t.Fatalf("failure = %#v", failure)
+	}
+}
+
+func TestValidateVerifierExecutionRejectsBlockedVerifier(t *testing.T) {
+	task := ExecutableTask{ID: "evidence.verify", Executor: ExecutorVerifier}
+	results := []ScheduledTaskResult{{
+		Task:   task,
+		Status: TaskBlocked,
+		Failure: &RunFailure{
+			Code: FailureExecution, Message: "required dependency failed", Stage: string(StageExecution),
+		},
+	}}
+
+	failure := validateVerifierExecution([]ExecutableTask{task}, results)
+	if failure == nil || failure.Code != FailureVerifier || failure.Stage != string(StageVerification) ||
+		failure.TaskID != task.ID || failure.Message != "required dependency failed" {
+		t.Fatalf("failure = %#v", failure)
+	}
+}
+
+func TestValidateVerifierExecutionAcceptsSucceededVerifier(t *testing.T) {
+	task := ExecutableTask{ID: "evidence.verify", Executor: ExecutorVerifier}
+	results := []ScheduledTaskResult{{Task: task, Status: TaskSucceeded}}
+
+	if failure := validateVerifierExecution([]ExecutableTask{task}, results); failure != nil {
+		t.Fatalf("failure = %#v", failure)
+	}
+}
+
+func TestCoordinatorDoesNotDeliverAfterCompositionBudgetSettlementFails(t *testing.T) {
+	catalog := NewTaskTemplateCatalog()
+	if err := catalog.Register(testTemplate("verify", 1, []string{"flow"}, ExecutorVerifier, nil, BudgetVector{})); err != nil {
+		t.Fatal(err)
+	}
+	evidenceCandidate := EvidenceCandidate{SourceKind: "code", Target: "service-a", Content: "verified implementation"}
+	normalized, err := normalizeEvidence("", evidenceCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := ClaimCandidate{
+		GoalID: "g1", Text: "service-a contains the implementation", Status: ClaimSupported,
+		EvidenceRefs: []EvidenceRef{{
+			EvidenceID: normalized.ID, SourceKind: normalized.SourceKind, Target: normalized.Target, ContentHash: normalized.ContentHash,
+		}},
+	}
+	coordinator := NewCoordinator(CoordinatorOptions{
+		Catalog: catalog, Schemas: testSchemas(), Store: NewMemoryRunStore(),
+		Executors: testExecutors(TaskExecutorFunc(func(context.Context, ExecutableTask, TaskExecutionInput) (TaskExecutionResult, error) {
+			return TaskExecutionResult{Output: []byte(`{"ok":true}`), EvidenceCandidates: []EvidenceCandidate{evidenceCandidate}, Claims: []ClaimCandidate{claim}}, nil
+		})),
+		BudgetLimit:       BudgetVector{OutputTokens: 100},
+		CompositionBudget: BudgetVector{OutputTokens: 100},
+		Composer: ComposerFunc(func(context.Context, InvestigationContract, InvestigationReport) (AnswerDraft, error) {
+			return AnswerDraft{Text: "answer", Status: DeliverySucceeded, ClaimIDs: []string{claimID(claim)}, Usage: BudgetVector{OutputTokens: 50}}, nil
+		}),
+	})
+	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	contract.CreatedAt = time.Now().UTC()
+
+	run, err := coordinator.Execute(t.Context(), contract)
+	if err == nil || run.Status != RunBudgetExhausted || run.Delivery != nil || run.Failure == nil || run.Failure.Code != FailureBudget {
+		t.Fatalf("run = %#v, err = %v", run, err)
+	}
+	if len(run.Report.Failures) == 0 || run.Report.Failures[len(run.Report.Failures)-1].Code != FailureBudget {
+		t.Fatalf("report failures = %#v", run.Report.Failures)
+	}
+}

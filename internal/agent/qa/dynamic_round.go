@@ -24,7 +24,8 @@ type InvestigationRoundContext struct {
 	CoveredEvidenceGoals    []string
 	UnresolvedEvidenceGoals []string
 	PreviousWorkflowRunID   string
-	RemainingBudget         int64
+	BudgetLimit             InvestigationBudget
+	BudgetUsed              InvestigationUsage
 }
 
 // ShouldContinue reports whether another bounded child workflow is eligible.
@@ -35,9 +36,54 @@ func ShouldContinue(context InvestigationRoundContext) bool {
 	}
 	unresolved := context.UnresolvedEvidenceGoals
 	return context.Round > 0 &&
-		context.Round < maxRounds &&
+		context.Round <= maxRounds &&
 		len(unresolved) > 0 &&
-		context.RemainingBudget >= 0
+		investigationBudgetAvailable(context.BudgetLimit, context.BudgetUsed)
+}
+
+func investigationBudgetAvailable(limit InvestigationBudget, used InvestigationUsage) bool {
+	return !limitedBudgetExhausted(limit.InputTokens, used.InputTokens) &&
+		!limitedBudgetExhausted(limit.OutputTokens, used.OutputTokens) &&
+		!limitedBudgetExhausted(limit.TotalTokens, used.TotalTokens) &&
+		!limitedBudgetExhausted(limit.ToolCalls, used.ToolCalls) &&
+		!limitedBudgetExhausted(limit.CostMicros, used.CostMicros)
+}
+
+func limitedBudgetExhausted(limit, used int64) bool {
+	return limit > 0 && used >= limit
+}
+
+func addInvestigationUsage(left, right InvestigationUsage) InvestigationUsage {
+	left.InputTokens += right.InputTokens
+	left.OutputTokens += right.OutputTokens
+	left.ReasoningTokens += right.ReasoningTokens
+	left.TotalTokens += right.TotalTokens
+	left.ToolCalls += right.ToolCalls
+	left.CostMicros += right.CostMicros
+	return left
+}
+
+func tightenContinuationBudget(proposal *agentapi.TaskGraphProposal, limit InvestigationBudget, used InvestigationUsage) bool {
+	if proposal == nil || !investigationBudgetAvailable(limit, used) {
+		return false
+	}
+	proposal.Stop.MaxInputTokens = tightenRemainingBudget(proposal.Stop.MaxInputTokens, limit.InputTokens, used.InputTokens)
+	proposal.Stop.MaxOutputTokens = tightenRemainingBudget(proposal.Stop.MaxOutputTokens, limit.OutputTokens, used.OutputTokens)
+	proposal.Stop.MaxTotalTokens = tightenRemainingBudget(proposal.Stop.MaxTotalTokens, limit.TotalTokens, used.TotalTokens)
+	proposal.Stop.MaxToolCalls = tightenRemainingBudget(proposal.Stop.MaxToolCalls, limit.ToolCalls, used.ToolCalls)
+	proposal.Stop.MaxCostMicros = tightenRemainingBudget(proposal.Stop.MaxCostMicros, limit.CostMicros, used.CostMicros)
+	return true
+}
+
+func tightenRemainingBudget(existing, limit, used int64) int64 {
+	if limit <= 0 {
+		return existing
+	}
+	remaining := limit - used
+	if existing > 0 && existing < remaining {
+		return existing
+	}
+	return remaining
 }
 
 // NextRound derives the next coordinator cursor from one verified result.

@@ -326,6 +326,7 @@ func (runner *qaInvestigator) LoadRound(
 		Contract:     taskContractFromInvestigationContract(run.Contract),
 		SeedEvidence: evidenceUnits(run.Contract.SeedEvidence),
 		Actor:        run.Contract.Actor,
+		BudgetLimit:  investigationBudget(run.Budget.Run.Limit),
 	}, nil
 }
 
@@ -866,10 +867,8 @@ func investigationTerminal(
 			// transport failure that hides the answer from QA.
 			terminal.Status = agent.InvestigationSucceeded
 		case investigation.DeliveryEvidenceInsufficient:
-			// The delivery gate always supplies a non-empty explanation for an
-			// evidence gap. Keep that answer user-visible; the gap is reflected
-			// by partial completeness, not by replacing delivery with failure.
-			terminal.Status = agent.InvestigationSucceeded
+			terminal.Status = agent.InvestigationFailed
+			terminal.ErrorCode = "evidence_insufficient"
 		case investigation.DeliveryFailed:
 			terminal.Status = agent.InvestigationFailed
 			terminal.ErrorCode = "delivery_failed"
@@ -918,12 +917,8 @@ func investigationResult(
 		Round:                   run.Contract.Round,
 		BaseDepth:               run.Contract.BaseDepth,
 	}
-	for _, gap := range report.Gaps {
-		reason := strings.TrimSpace(gap.Reason)
-		if reason == "" {
-			reason = "no verified claim covers this goal"
-		}
-		result.Limitations = append(result.Limitations, gap.GoalID+": "+reason)
+	if len(report.Gaps) > 0 {
+		result.Limitations = []string{"some requested areas lack verified evidence"}
 	}
 	if delivery.Failure != nil {
 		result.FailureReason = delivery.Failure.Message
@@ -1081,15 +1076,22 @@ func gapGoalIDs(gaps []investigation.EvidenceGap) []string {
 }
 
 func investigationUsage(run investigation.InvestigationRun) agent.InvestigationUsage {
-	var usage agent.InvestigationUsage
-	for _, record := range run.Results {
-		usage.InputTokens += record.Usage.InputTokens
-		usage.OutputTokens += record.Usage.OutputTokens
-		usage.ToolCalls += int64(record.Usage.ToolCalls)
-		usage.CostMicros += record.Usage.CostMicros
+	used := run.Budget.Run.Used
+	totalTokens := used.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = used.InputTokens + used.OutputTokens
 	}
-	usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-	return usage
+	return agent.InvestigationUsage{
+		InputTokens: used.InputTokens, OutputTokens: used.OutputTokens,
+		TotalTokens: totalTokens, ToolCalls: int64(used.ToolCalls), CostMicros: used.CostMicros,
+	}
+}
+
+func investigationBudget(limit investigation.BudgetVector) agent.InvestigationBudget {
+	return agent.InvestigationBudget{
+		InputTokens: limit.InputTokens, OutputTokens: limit.OutputTokens,
+		TotalTokens: limit.TotalTokens, ToolCalls: int64(limit.ToolCalls), CostMicros: limit.CostMicros,
+	}
 }
 
 func stopReason(run investigation.InvestigationRun) string {

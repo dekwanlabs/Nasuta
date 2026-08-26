@@ -23,6 +23,7 @@ type InvestigationTerminal = agentqa.InvestigationTerminal
 type InvestigationStatus = agentqa.InvestigationStatus
 type InvestigationCompleteness = agentqa.InvestigationCompleteness
 type InvestigationUsage = agentqa.InvestigationUsage
+type InvestigationBudget = agentqa.InvestigationBudget
 type InvestigationRunner = agentqa.InvestigationRunner
 type InvestigationPlanner = agentqa.InvestigationPlanner
 type InvestigationContinuationRunner = agentqa.InvestigationContinuationRunner

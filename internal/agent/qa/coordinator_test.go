@@ -578,6 +578,7 @@ func TestCoordinatorContinuationStartsStableBoundedRound(t *testing.T) {
 	firstTerminal := InvestigationTerminal{
 		WorkflowRunID: parent.WorkflowRunID, Status: InvestigationSucceeded,
 		Completeness: InvestigationPartial, Round: 1, BaseDepth: 2,
+		Usage: InvestigationUsage{InputTokens: 30, OutputTokens: 10, TotalTokens: 40, ToolCalls: 2},
 		Output: &InvestigationResult{
 			Answer: "round one", Round: 1,
 			EvidenceUnits:           []tool.EvidenceUnit{first},
@@ -606,6 +607,7 @@ func TestCoordinatorContinuationStartsStableBoundedRound(t *testing.T) {
 				Contract:     coordinatorContinuationContract(),
 				SeedEvidence: []tool.EvidenceUnit{seed},
 				Actor:        agentapi.Actor{UserID: parent.UserID, TenantID: "tenant-1"},
+				BudgetLimit:  InvestigationBudget{InputTokens: 80, OutputTokens: 20, TotalTokens: 100, ToolCalls: 5},
 			},
 		},
 		loadRoundErr: make(map[string]error),
@@ -657,6 +659,11 @@ func TestCoordinatorContinuationStartsStableBoundedRound(t *testing.T) {
 	}
 	if request.Contract.TaskEvidenceAssignments != nil {
 		t.Fatalf("next task evidence assignments = %+v, want nil", request.Contract.TaskEvidenceAssignments)
+	}
+	if request.Proposal == nil || request.Proposal.Stop.MaxInputTokens != 50 ||
+		request.Proposal.Stop.MaxOutputTokens != 10 || request.Proposal.Stop.MaxTotalTokens != 60 ||
+		request.Proposal.Stop.MaxToolCalls != 3 {
+		t.Fatalf("continuation budget = %+v", request.Proposal)
 	}
 	if len(request.SeedEvidence) != 2 ||
 		request.SeedEvidence[0].Target != seed.Target ||
@@ -925,5 +932,56 @@ func TestCoordinatorTreatsConcurrentParentCompletionAsReplay(t *testing.T) {
 	coordinator := &Coordinator{scenarios: scenarios}
 	if err := coordinator.completeOutcome(t.Context(), parent, RunOutcome{Status: RunStatusFailed}); err != nil {
 		t.Fatalf("concurrent completion was not replay-safe: %v", err)
+	}
+}
+
+func TestCoordinatorDoesNotContinueNonEvidenceFailure(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-composer-failure", WorkflowRunID: "workflow-composer-failure", Status: RunStatusRunning,
+	}
+	terminal := InvestigationTerminal{
+		WorkflowRunID: parent.WorkflowRunID, Status: InvestigationFailed, ErrorCode: "composer_failed",
+		Completeness: InvestigationPartial, Round: 1,
+		Output: &InvestigationResult{
+			Answer: "fallback answer", EvidenceUnits: []tool.EvidenceUnit{
+				coordinatorEvidenceUnit("code", "service-a", "implementation", "v1"),
+			},
+			UnresolvedEvidenceGoals: []string{"core_flow"},
+		},
+	}
+	runner := &coordinatorContinuationRunner{
+		investigationRunnerRecorder: &investigationRunnerRecorder{load: func(context.Context, string) (InvestigationTerminal, error) {
+			return terminal, nil
+		}},
+		snapshots: map[string]InvestigationRoundSnapshot{
+			parent.WorkflowRunID: {Terminal: terminal, Contract: coordinatorContinuationContract()},
+		},
+		loadRoundErr: make(map[string]error),
+	}
+	scenarios := &coordinatorScenarioLifecycle{}
+	coordinator := &Coordinator{
+		investigation: runner, scenarios: scenarios, parentRuns: coordinatorParentStore{parent: parent},
+	}
+
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(runner.startRequests) != 0 {
+		t.Fatalf("continuation started after non-evidence failure: %+v", runner.startRequests)
+	}
+	if len(scenarios.outcomes) != 1 || scenarios.outcomes[0].Status != RunStatusFailed ||
+		scenarios.outcomes[0].ErrorCode != "composer_failed" {
+		t.Fatalf("outcomes = %+v", scenarios.outcomes)
+	}
+}
+
+func TestCoordinatorUsesConfiguredContinuationRoundLimit(t *testing.T) {
+	coordinator := &Coordinator{}
+	if coordinator.investigationMaxRounds() != defaultInvestigationMaxRounds {
+		t.Fatalf("default max rounds = %d", coordinator.investigationMaxRounds())
+	}
+	coordinator.SetInvestigationMaxRounds(6)
+	if coordinator.investigationMaxRounds() != 6 {
+		t.Fatalf("configured max rounds = %d", coordinator.investigationMaxRounds())
 	}
 }

@@ -239,3 +239,58 @@ func TestCoordinatorResumeConvergesVerificationStages(t *testing.T) {
 		})
 	}
 }
+
+func TestCoordinatorResumeRejectsMissingVerifierExecution(t *testing.T) {
+	store := NewMemoryRunStore()
+	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	contract.ID = "contract-resume-missing-verifier"
+	runID := "run-resume-missing-verifier"
+	if err := store.Create(InvestigationRun{ID: runID, Contract: contract, Status: RunCreated}); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []RunStatus{RunAnalyzing, RunPlanned} {
+		if err := store.Transition(runID, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	investigator := ExecutableTask{ID: "investigate", Executor: ExecutorInvestigator, Status: TaskSucceeded}
+	verifier := ExecutableTask{
+		ID: "evidence.verify", Executor: ExecutorVerifier, Status: TaskPending, Dependencies: []string{investigator.ID},
+	}
+	if err := store.SavePlan(runID, PlanRevision{
+		Revision: 1, ContractID: contract.ID, Tasks: []ExecutableTask{investigator, verifier},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Transition(runID, RunExecuting); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveResult(runID, TaskExecutionRecord{
+		TaskID: investigator.ID, Status: TaskSucceeded, Output: json.RawMessage(`{"ok":true}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Transition(runID, RunVerifying); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := NewBudgetLedger(BudgetVector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveBudget(runID, ledger.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	catalog := NewTaskTemplateCatalog()
+	if err := catalog.Register(testTemplate("evidence.verify", 1, []string{"flow"}, ExecutorVerifier, nil, BudgetVector{})); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := NewCoordinator(CoordinatorOptions{Catalog: catalog, Store: store, Schemas: testSchemas()})
+
+	run, err := coordinator.Resume(t.Context(), runID)
+	if err == nil || run.Status != RunFailed || run.Failure == nil || run.Failure.Code != FailureVerifier {
+		t.Fatalf("run = %#v, err = %v", run, err)
+	}
+	if !strings.Contains(run.Failure.Message, "did not execute") {
+		t.Fatalf("failure = %#v", run.Failure)
+	}
+}

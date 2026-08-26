@@ -333,3 +333,14 @@ func TestBindTaskGraphDraftRejectsMissingRequiredSource(t *testing.T) {
 		t.Fatalf("required source error = %v", err)
 	}
 }
+
+func TestCapabilityTaskIDUsesContiguousPerGoalSequence(t *testing.T) {
+	kindCounts := map[string]int{"code": 1}
+	goalTaskCounts := make(map[string]int)
+	first := capabilityTaskID([]string{"core_flow"}, "code", kindCounts, goalTaskCounts, true)
+	kindCounts["code"]++
+	second := capabilityTaskID([]string{"core_flow"}, "code", kindCounts, goalTaskCounts, true)
+	if first != "investigate.core_flow.code.1" || second != "investigate.core_flow.code.2" {
+		t.Fatalf("task ids = %q, %q", first, second)
+	}
+}

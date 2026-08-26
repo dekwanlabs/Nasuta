@@ -573,7 +573,7 @@ func TestInvestigationRunnerCancelWaitsForDurableTerminal(t *testing.T) {
 	}
 }
 
-func TestTerminalMapsEvidenceInsufficientDeliveryToSuccessfulPartialResult(t *testing.T) {
+func TestTerminalMapsEvidenceInsufficientDeliveryToFailedPartialResult(t *testing.T) {
 	run := investigation.InvestigationRun{
 		ID: "run-evidence-insufficient",
 		Contract: investigation.InvestigationContract{
@@ -595,9 +595,9 @@ func TestTerminalMapsEvidenceInsufficientDeliveryToSuccessfulPartialResult(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if terminal.Status != agent.InvestigationSucceeded || terminal.ErrorCode != "" ||
+	if terminal.Status != agent.InvestigationFailed || terminal.ErrorCode != "evidence_insufficient" ||
 		terminal.StopReason != "evidence_insufficient" {
-		t.Fatalf("terminal = %#v, want successful user-visible result", terminal)
+		t.Fatalf("terminal = %#v, want failed evidence-insufficient result", terminal)
 	}
 	if terminal.Output == nil || terminal.Output.Answer != run.Delivery.Text ||
 		terminal.Completeness != agent.InvestigationPartial {
@@ -632,5 +632,20 @@ func TestTerminalMapsPartialDeliveryToSuccessfulPartialResult(t *testing.T) {
 	}
 	if terminal.Output == nil || terminal.Completeness != agent.InvestigationPartial {
 		t.Fatalf("terminal output = %#v", terminal)
+	}
+}
+
+func TestInvestigationUsageUsesSharedLedgerIncludingComposition(t *testing.T) {
+	run := investigation.InvestigationRun{Budget: investigation.BudgetSnapshot{Run: investigation.RunBudget{Used: investigation.BudgetVector{
+		InputTokens: 70, OutputTokens: 30, ToolCalls: 4, CostMicros: 900,
+	}}}}
+	run.Results = map[string]investigation.TaskExecutionRecord{
+		"investigator": {Usage: investigation.BudgetVector{InputTokens: 50, OutputTokens: 10, ToolCalls: 4, CostMicros: 600}},
+	}
+
+	usage := investigationUsage(run)
+	if usage.InputTokens != 70 || usage.OutputTokens != 30 || usage.TotalTokens != 100 ||
+		usage.ToolCalls != 4 || usage.CostMicros != 900 {
+		t.Fatalf("usage = %+v", usage)
 	}
 }
