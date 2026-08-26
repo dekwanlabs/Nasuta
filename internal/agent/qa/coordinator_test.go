@@ -9,6 +9,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -579,9 +580,9 @@ func TestCoordinatorContinuationStartsStableBoundedRound(t *testing.T) {
 		Completeness: InvestigationPartial, Round: 1, BaseDepth: 2,
 		Output: &InvestigationResult{
 			Answer: "round one", Round: 1,
-			EvidenceUnits:   []tool.EvidenceUnit{first},
-			PartialGoals:    []string{"core_flow"},
-			UnresolvedGoals: []string{"core_flow"},
+			EvidenceUnits:           []tool.EvidenceUnit{first},
+			PartialEvidenceGoals:    []string{"core_flow"},
+			UnresolvedEvidenceGoals: []string{"core_flow"},
 		},
 	}
 	childID := StableRoundWorkflowID(parent.ID, 2)
@@ -622,7 +623,7 @@ func TestCoordinatorContinuationStartsStableBoundedRound(t *testing.T) {
 		proposal: &agentapi.TaskGraphProposal{
 			Tasks: []agentapi.TaskSpec{{
 				ID: "dynamic.task", Capability: "knowledge.code.inspect",
-				OutputSchema: agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+				OutputSchema: agentapi.InvestigationReportSchemaRef(),
 			}},
 		},
 	}
@@ -663,7 +664,7 @@ func TestCoordinatorContinuationStartsStableBoundedRound(t *testing.T) {
 		t.Fatalf("next seed evidence = %+v", request.SeedEvidence)
 	}
 	if planner.calls != 1 || planner.contract.EvidenceGoals[0].ID != "core_flow" ||
-		planner.result.UnresolvedGoals[0] != "core_flow" || len(planner.seed) != 2 {
+		planner.result.UnresolvedEvidenceGoals[0] != "core_flow" || len(planner.seed) != 2 {
 		t.Fatalf("planner input = calls:%d contract:%+v result:%+v seed:%+v", planner.calls, planner.contract, planner.result, planner.seed)
 	}
 	if request.Proposal == nil || len(request.Proposal.Tasks) != 1 ||
@@ -688,8 +689,8 @@ func TestCoordinatorContinuationStopsWithoutNewEvidence(t *testing.T) {
 		Completeness: InvestigationPartial, Round: 1,
 		Output: &InvestigationResult{
 			Answer: "partial", Round: 1,
-			EvidenceUnits:   []tool.EvidenceUnit{unit},
-			UnresolvedGoals: []string{"core_flow"},
+			EvidenceUnits:           []tool.EvidenceUnit{unit},
+			UnresolvedEvidenceGoals: []string{"core_flow"},
 		},
 	}
 	runner := &coordinatorContinuationRunner{
@@ -736,7 +737,7 @@ func TestCoordinatorContinuationReusesExistingStableChild(t *testing.T) {
 		Completeness: InvestigationPartial, Round: 1,
 		Output: &InvestigationResult{
 			Answer: "round one", Round: 1, EvidenceUnits: []tool.EvidenceUnit{first},
-			UnresolvedGoals: []string{"core_flow"},
+			UnresolvedEvidenceGoals: []string{"core_flow"},
 		},
 	}
 	childID := StableRoundWorkflowID(parent.ID, 2)
@@ -797,7 +798,7 @@ func TestCoordinatorContinuationStopsAtRoundLimit(t *testing.T) {
 			EvidenceUnits: []tool.EvidenceUnit{
 				coordinatorEvidenceUnit("code", "new.Service", "implementation", "v1"),
 			},
-			UnresolvedGoals: []string{"core_flow"},
+			UnresolvedEvidenceGoals: []string{"core_flow"},
 		},
 	}
 	runner := &coordinatorContinuationRunner{
@@ -824,5 +825,105 @@ func TestCoordinatorContinuationStopsAtRoundLimit(t *testing.T) {
 	}
 	if len(runner.startRequests) != 0 {
 		t.Fatalf("continuation started past round limit: %+v", runner.startRequests)
+	}
+}
+
+func TestLoadInvestigationTerminalRetriesTransientMissingSnapshot(t *testing.T) {
+	calls := 0
+	runner := &investigationRunnerRecorder{
+		load: func(context.Context, string) (InvestigationTerminal, error) {
+			calls++
+			if calls < 3 {
+				return InvestigationTerminal{}, fmt.Errorf("replica lag: %w", investigation.ErrNotFound)
+			}
+			return InvestigationTerminal{WorkflowRunID: "workflow-retry", Status: InvestigationFailed}, nil
+		},
+	}
+	terminal, err := loadInvestigationTerminalWithRetry(t.Context(), runner, "workflow-retry", "reconcile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 || terminal.WorkflowRunID != "workflow-retry" {
+		t.Fatalf("calls=%d terminal=%#v", calls, terminal)
+	}
+}
+
+func TestLoadInvestigationTerminalStopsAfterMissingRetryBudget(t *testing.T) {
+	calls := 0
+	runner := &investigationRunnerRecorder{
+		load: func(context.Context, string) (InvestigationTerminal, error) {
+			calls++
+			return InvestigationTerminal{}, fmt.Errorf("missing: %w", investigation.ErrNotFound)
+		},
+	}
+	_, err := loadInvestigationTerminalWithRetry(t.Context(), runner, "workflow-missing", "reconcile")
+	if !errors.Is(err, investigation.ErrNotFound) || calls != investigationMissingRetryAttempts {
+		t.Fatalf("calls=%d error=%v", calls, err)
+	}
+}
+
+func TestLoadInvestigationTerminalCancellationStopsRetry(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	calls := 0
+	runner := &investigationRunnerRecorder{
+		load: func(context.Context, string) (InvestigationTerminal, error) {
+			calls++
+			cancel()
+			return InvestigationTerminal{}, fmt.Errorf("missing: %w", investigation.ErrNotFound)
+		},
+	}
+	_, err := loadInvestigationTerminalWithRetry(ctx, runner, "workflow-cancel", "reconcile")
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("calls=%d error=%v", calls, err)
+	}
+}
+
+func TestLoadInvestigationTerminalDoesNotRetryOtherFailures(t *testing.T) {
+	calls := 0
+	want := errors.New("database unavailable")
+	runner := &investigationRunnerRecorder{
+		load: func(context.Context, string) (InvestigationTerminal, error) {
+			calls++
+			return InvestigationTerminal{}, want
+		},
+	}
+	_, err := loadInvestigationTerminalWithRetry(t.Context(), runner, "workflow-error", "reconcile")
+	if !errors.Is(err, want) || calls != 1 {
+		t.Fatalf("calls=%d error=%v", calls, err)
+	}
+}
+
+func TestCoordinatorTerminalParentSkipsWorkflowAndSessionSideEffects(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-terminal", WorkflowRunID: "workflow-terminal", Status: RunStatusDone,
+		SessionID: "session-terminal", UserID: 42,
+	}
+	sessions := &coordinatorSessionStore{turnByRun: make(map[string]int)}
+	scenarios := &coordinatorScenarioLifecycle{}
+	coordinator := &Coordinator{
+		investigation: &investigationRunnerRecorder{},
+		scenarios:     scenarios,
+		parentRuns:    coordinatorParentStore{parent: parent},
+		sessions:      sessions,
+	}
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Await(t.Context(), parent.ID, parent.WorkflowRunID); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions.appendRuns) != 0 || len(scenarios.outcomes) != 0 {
+		t.Fatalf("terminal replay produced side effects: sessions=%v outcomes=%v", sessions.appendRuns, scenarios.outcomes)
+	}
+}
+
+func TestCoordinatorTreatsConcurrentParentCompletionAsReplay(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-concurrent-complete", WorkflowRunID: "workflow-concurrent-complete", Status: RunStatusRunning,
+	}
+	scenarios := &coordinatorScenarioLifecycle{err: agentrun.ErrNotActive}
+	coordinator := &Coordinator{scenarios: scenarios}
+	if err := coordinator.completeOutcome(t.Context(), parent, RunOutcome{Status: RunStatusFailed}); err != nil {
+		t.Fatalf("concurrent completion was not replay-safe: %v", err)
 	}
 }

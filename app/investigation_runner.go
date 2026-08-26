@@ -1,7 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,6 +15,8 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	agentqa "github.com/dekwanlabs/nasuta/internal/agent/qa"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -32,6 +37,139 @@ type investigationState struct {
 	err         error
 }
 
+type investigationStartResult struct {
+	persisted bool
+	err       error
+}
+
+type investigationRecoveryReport struct {
+	Scanned int
+	Resumed int
+	Failed  int
+	Skipped int
+	Errors  int
+}
+
+// RecoverActive resumes durable child snapshots that were left non-terminal
+// when the process stopped. The storage cursor makes this scan bounded.
+func (runner *qaInvestigator) RecoverActive(
+	ctx context.Context,
+	cutoff time.Time,
+	pageSize int,
+) error {
+	var report investigationRecoveryReport
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cutoff.IsZero() {
+		return fmt.Errorf("investigation recovery cutoff is required")
+	}
+	if pageSize <= 0 {
+		return fmt.Errorf("investigation recovery page size must be positive")
+	}
+	coordinator, err := runner.coordinator()
+	if err != nil {
+		return err
+	}
+	lister, ok := coordinator.Store.(investigation.ActiveRunLister)
+	if !ok {
+		return fmt.Errorf("investigation run store does not support bounded active-run recovery")
+	}
+	cursor := investigation.ActiveRunCursor{}
+	var firstErr error
+	for {
+		page, err := lister.ListActiveRuns(cutoff, cursor, pageSize)
+		if err != nil {
+			return fmt.Errorf("list active investigation runs: %w", err)
+		}
+		for _, durable := range page.Runs {
+			report.Scanned++
+			parentID := durable.Contract.ParentRunID
+			if parentID == "" {
+				parentID = durable.Contract.TaskID
+			}
+			log.InfofCtx(ctx, "[qa] investigation child recovery requested run=%s parent=%s status=%s", durable.ID, parentID, durable.Status)
+			if failure := nonResumableRecoveryFailure(durable, parentID); failure != nil {
+				if err := coordinator.Store.Fail(durable.ID, *failure, investigation.RunFailed); err != nil {
+					report.Errors++
+					if firstErr == nil {
+						firstErr = fmt.Errorf("fail created investigation run %q: %w", durable.ID, err)
+					}
+					log.ErrorfCtx(ctx, "[qa] investigation child recovery failed run=%s parent=%s status=%s error_code=%s retryable=%t: %v", durable.ID, parentID, durable.Status, failure.Code, failure.Retryable, err)
+					continue
+				}
+				report.Failed++
+				log.WarnfCtx(ctx, "[qa] investigation child recovery terminalized run=%s parent=%s status=%s error_code=%s retryable=%t", durable.ID, parentID, durable.Status, failure.Code, failure.Retryable)
+				continue
+			}
+			_, resumeErr := coordinator.Resume(ctx, durable.ID)
+			if errors.Is(resumeErr, investigation.ErrLeaseHeld) {
+				report.Skipped++
+				log.InfofCtx(ctx, "[qa] investigation child recovery skipped run=%s parent=%s status=%s reason=lease_held", durable.ID, parentID, durable.Status)
+				continue
+			}
+			if resumeErr != nil {
+				report.Errors++
+				if firstErr == nil {
+					firstErr = fmt.Errorf("resume investigation run %q: %w", durable.ID, resumeErr)
+				}
+				log.ErrorfCtx(ctx, "[qa] investigation child recovery failed run=%s parent=%s status=%s error_code=%s: %v", durable.ID, parentID, durable.Status, investigationFailureCode(resumeErr), resumeErr)
+				continue
+			}
+			report.Resumed++
+			log.InfofCtx(ctx, "[qa] investigation child recovery completed run=%s parent=%s previous_status=%s", durable.ID, parentID, durable.Status)
+		}
+		if !page.HasMore {
+			break
+		}
+		if page.Next.ID == "" || page.Next.UpdatedAt.IsZero() {
+			return fmt.Errorf("active investigation recovery returned an incomplete cursor")
+		}
+		cursor = page.Next
+	}
+	log.InfofCtx(ctx, "[qa] investigation child recovery complete scanned=%d resumed=%d terminalized=%d skipped=%d errors=%d", report.Scanned, report.Resumed, report.Failed, report.Skipped, report.Errors)
+	return firstErr
+}
+
+func nonResumableRecoveryFailure(
+	run investigation.InvestigationRun,
+	parentID string,
+) *investigation.RunFailure {
+	if run.Status == investigation.RunCreated {
+		return &investigation.RunFailure{
+			Code: investigation.FailureExecution, Message: "investigation snapshot was left before execution began",
+			Stage: "initialization", TaskID: parentID, Retryable: false,
+		}
+	}
+	if run.Status == investigation.RunAnalyzing || len(run.Plan.Tasks) == 0 {
+		return &investigation.RunFailure{
+			Code: investigation.FailurePlan, Message: "investigation snapshot has no durable executable plan",
+			Stage: string(investigation.StagePlanning), TaskID: parentID, Retryable: false,
+		}
+	}
+	return nil
+}
+
+func investigationFailureCode(err error) string {
+	var failure *investigation.RunFailureError
+	switch {
+	case err == nil:
+		return ""
+	case errors.As(err, &failure):
+		return string(failure.Failure.Code)
+	case errors.Is(err, investigation.ErrLeaseHeld):
+		return "lease_held"
+	case errors.Is(err, investigation.ErrLeaseFenced):
+		return string(investigation.FailureLease)
+	case errors.Is(err, investigation.ErrNotFound):
+		return "investigation_run_missing"
+	case errors.Is(err, investigation.ErrInvalidTransition):
+		return "invalid_transition"
+	default:
+		return "resume_failed"
+	}
+}
+
 func (runner *qaInvestigator) Available() bool {
 	_, err := runner.coordinator()
 	return err == nil
@@ -41,32 +179,91 @@ func (runner *qaInvestigator) Start(
 	ctx context.Context,
 	request agent.InvestigationRequest,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	workflowRunID := strings.TrimSpace(request.WorkflowRunID)
+	if workflowRunID == "" {
+		return fmt.Errorf("investigation workflow run id is required")
+	}
 	parentRunID := strings.TrimSpace(request.ParentRunID)
 	if parentRunID == "" {
 		parentRunID = request.Contract.TaskID
 	}
+	log.InfofCtx(ctx, "[qa] investigation start requested workflow=%s parent=%s", workflowRunID, parentRunID)
 	coordinator, err := runner.newCoordinator(request, parentRunID)
 	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation coordinator initialization failed workflow=%s: %v", workflowRunID, err)
 		return err
 	}
 	contract := contractFromTaskContract(request)
+	if contract.ID != workflowRunID || investigation.ContractRunID(contract) != workflowRunID {
+		return fmt.Errorf("investigation workflow identity mismatch: request=%q contract=%q", workflowRunID, contract.ID)
+	}
 	state := &investigationState{
 		runID:       investigation.ContractRunID(contract),
 		coordinator: coordinator,
 		done:        make(chan struct{}),
 	}
-	runner.track(request.WorkflowRunID, state)
+	if existing, loadErr := coordinator.LoadRun(ctx, state.runID); loadErr == nil {
+		if existing.Status.Terminal() {
+			if !sameInvestigationContract(existing.Contract, contract) {
+				return fmt.Errorf("%w: investigation workflow %q already completed with a different contract", workflow.ErrConflict, workflowRunID)
+			}
+			log.InfofCtx(ctx, "[qa] investigation start replayed durable terminal workflow=%s run=%s status=%s", workflowRunID, existing.ID, existing.Status)
+			return nil
+		}
+		return fmt.Errorf("%w: investigation workflow %q run %q is already active", investigation.ErrInvalidTransition, workflowRunID, existing.ID)
+	} else if !errors.Is(loadErr, investigation.ErrNotFound) {
+		return fmt.Errorf("load investigation workflow %q before start: %w", workflowRunID, loadErr)
+	}
+	if err := runner.track(workflowRunID, state); err != nil {
+		return err
+	}
+	ready := make(chan investigationStartResult, 1)
+	executionCtx := context.WithoutCancel(ctx)
 	go func() {
-		defer close(state.done)
-		run, runErr := coordinator.ExecuteWithProposal(
-			context.WithoutCancel(ctx),
+		defer func() {
+			close(state.done)
+			runner.remove(workflowRunID, state)
+		}()
+		started := false
+		run, runErr := coordinator.ExecuteWithProposalReady(
+			executionCtx,
 			contract,
 			request.Proposal,
+			func(persisted investigation.InvestigationRun) {
+				started = true
+				log.InfofCtx(executionCtx, "[qa] investigation snapshot persisted workflow=%s run=%s status=%s", workflowRunID, persisted.ID, persisted.Status)
+				ready <- investigationStartResult{persisted: true}
+			},
 		)
+		if !started {
+			ready <- investigationStartResult{err: runErr}
+		}
+		if runErr != nil {
+			phase := "execution"
+			if !started {
+				phase = "initialization"
+			}
+			log.ErrorfCtx(executionCtx, "[qa] investigation %s failed workflow=%s run=%s: %v", phase, workflowRunID, run.ID, runErr)
+		} else {
+			log.InfofCtx(executionCtx, "[qa] investigation execution completed workflow=%s run=%s status=%s", workflowRunID, run.ID, run.Status)
+		}
 		terminal, mapErr := investigationTerminal(run, runErr)
-		runner.complete(request.WorkflowRunID, terminal, mapErr)
+		runner.complete(workflowRunID, state, terminal, mapErr)
 	}()
-	return nil
+	select {
+	case startResult := <-ready:
+		if startResult.err != nil {
+			log.ErrorfCtx(ctx, "[qa] investigation start failed before snapshot became durable workflow=%s persisted=%t: %v", workflowRunID, startResult.persisted, startResult.err)
+			return fmt.Errorf("start investigation workflow %q: %w", workflowRunID, startResult.err)
+		}
+		return nil
+	case <-ctx.Done():
+		log.ErrorfCtx(ctx, "[qa] investigation snapshot persistence wait canceled workflow=%s: %v", workflowRunID, ctx.Err())
+		return fmt.Errorf("wait for investigation workflow %q to start: %w", workflowRunID, ctx.Err())
+	}
 }
 
 // LoadRun returns the native  snapshot for transport and recovery reads.
@@ -81,8 +278,7 @@ func (runner *qaInvestigator) LoadRun(
 	return coordinator.LoadRun(ctx, strings.TrimSpace(workflowRunID))
 }
 
-// LoadDelivery returns the one persisted  delivery result without projecting it
-// through the legacy QA terminal contract.
+// LoadDelivery returns the persisted delivery without the QA terminal projection.
 func (runner *qaInvestigator) LoadDelivery(
 	ctx context.Context,
 	workflowRunID string,
@@ -91,12 +287,66 @@ func (runner *qaInvestigator) LoadDelivery(
 	if err != nil {
 		return investigation.DeliveryResult{}, err
 	}
+	if err := investigation.ValidateContractVersion(run.Contract); err != nil {
+		return investigation.DeliveryResult{}, fmt.Errorf("load investigation delivery %q: %w", run.ID, err)
+	}
 	if run.Delivery == nil {
 		return investigation.DeliveryResult{}, fmt.Errorf(
 			"%w: run %q has no delivery result", investigation.ErrNoDelivery, run.ID,
 		)
 	}
 	return *run.Delivery, nil
+}
+
+func (runner *qaInvestigator) LoadRound(
+	ctx context.Context,
+	workflowRunID string,
+) (agent.InvestigationRoundSnapshot, error) {
+	run, err := runner.LoadRun(ctx, workflowRunID)
+	if err != nil {
+		if errors.Is(err, investigation.ErrNotFound) {
+			return agent.InvestigationRoundSnapshot{}, fmt.Errorf("%w: investigation round %q", workflow.ErrNotFound, workflowRunID)
+		}
+		return agent.InvestigationRoundSnapshot{}, err
+	}
+	if !run.Status.Terminal() {
+		return agent.InvestigationRoundSnapshot{}, fmt.Errorf(
+			"%w: investigation run %q is still %q",
+			workflow.ErrConflict,
+			run.ID,
+			run.Status,
+		)
+	}
+	terminal, err := investigationTerminal(run, nil)
+	if err != nil {
+		return agent.InvestigationRoundSnapshot{}, err
+	}
+	return agent.InvestigationRoundSnapshot{
+		Terminal:     terminal,
+		Contract:     taskContractFromInvestigationContract(run.Contract),
+		SeedEvidence: evidenceUnits(run.Contract.SeedEvidence),
+		Actor:        run.Contract.Actor,
+	}, nil
+}
+
+func (runner *qaInvestigator) StartNextRound(
+	ctx context.Context,
+	request agent.InvestigationContinuationRequest,
+) error {
+	err := runner.Start(ctx, agent.InvestigationRequest{
+		WorkflowRunID: request.WorkflowRunID,
+		ParentRunID:   request.ParentRunID,
+		Round:         request.Round,
+		BaseDepth:     request.BaseDepth,
+		Contract:      request.Contract,
+		Proposal:      request.Proposal,
+		SeedEvidence:  request.SeedEvidence,
+		Actor:         request.Actor,
+	})
+	if errors.Is(err, investigation.ErrInvalidTransition) || errors.Is(err, investigation.ErrLeaseHeld) {
+		return fmt.Errorf("%w: investigation round %q is already active", workflow.ErrConflict, request.WorkflowRunID)
+	}
+	return err
 }
 
 func (runner *qaInvestigator) AwaitTerminal(
@@ -108,21 +358,13 @@ func (runner *qaInvestigator) AwaitTerminal(
 	}
 	workflowRunID = strings.TrimSpace(workflowRunID)
 	if workflowRunID == "" {
-		return agent.InvestigationTerminal{}, fmt.Errorf(" investigation run id is required")
+		return agent.InvestigationTerminal{}, fmt.Errorf("investigation run id is required")
 	}
-	if state, ok := runner.state(workflowRunID); ok {
-		select {
-		case <-state.done:
-			if state.err != nil {
-				return agent.InvestigationTerminal{}, state.err
-			}
-			return state.terminal, nil
-		default:
-		}
-	}
-
+	log.InfofCtx(ctx, "[qa] investigation await started workflow=%s", workflowRunID)
+	state, tracked := runner.state(workflowRunID)
 	coordinator, err := runner.coordinator()
 	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation await coordinator unavailable workflow=%s: %v", workflowRunID, err)
 		return agent.InvestigationTerminal{}, err
 	}
 	// The process-local channel is only an optimization. A durable poll makes
@@ -130,27 +372,47 @@ func (runner *qaInvestigator) AwaitTerminal(
 	const pollInterval = 100 * time.Millisecond
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	const creationGrace = 2 * time.Second
+	missingSince := time.Time{}
 	for {
 		run, loadErr := coordinator.LoadRun(ctx, workflowRunID)
 		if loadErr != nil {
-			return agent.InvestigationTerminal{}, loadErr
+			if errors.Is(loadErr, investigation.ErrNotFound) {
+				if missingSince.IsZero() {
+					missingSince = time.Now()
+				}
+				log.WarnfCtx(ctx, "[qa] investigation await load missing workflow=%s state_tracked=%t age=%s: %v", workflowRunID, tracked, time.Since(missingSince).Round(time.Millisecond), loadErr)
+				if !tracked || time.Since(missingSince) >= creationGrace {
+					return agent.InvestigationTerminal{}, loadErr
+				}
+			} else {
+				log.ErrorfCtx(ctx, "[qa] investigation await load failed workflow=%s: %v", workflowRunID, loadErr)
+				return agent.InvestigationTerminal{}, loadErr
+			}
+		} else {
+			missingSince = time.Time{}
+			if run.Status.Terminal() {
+				terminal, terminalErr := investigationTerminal(run, nil)
+				if terminalErr != nil {
+					log.ErrorfCtx(ctx, "[qa] investigation await terminal mapping failed workflow=%s phase=terminal: %v", workflowRunID, terminalErr)
+					return agent.InvestigationTerminal{}, terminalErr
+				}
+				log.InfofCtx(ctx, "[qa] investigation await terminal workflow=%s status=%s", workflowRunID, terminal.Status)
+				return terminal, nil
+			}
 		}
-		if run.Status.Terminal() {
-			return investigationTerminal(run, nil)
-		}
-		if state, ok := runner.state(workflowRunID); ok {
+		if loadErr == nil && state != nil {
 			select {
 			case <-state.done:
-				if state.err != nil {
-					return agent.InvestigationTerminal{}, state.err
-				}
-				return state.terminal, nil
+				// Durable state was not terminal above, so a completed local
+				// callback cannot override it. Keep polling until persistence catches up.
 			default:
 			}
 		}
 		select {
 		case <-ticker.C:
 		case <-ctx.Done():
+			log.WarnfCtx(ctx, "[qa] investigation await canceled workflow=%s: %v", workflowRunID, ctx.Err())
 			return agent.InvestigationTerminal{}, ctx.Err()
 		}
 	}
@@ -160,29 +422,40 @@ func (runner *qaInvestigator) LoadTerminal(
 	ctx context.Context,
 	workflowRunID string,
 ) (agent.InvestigationTerminal, error) {
-	if state, ok := runner.state(workflowRunID); ok {
-		select {
-		case <-state.done:
-			if state.err != nil {
-				return agent.InvestigationTerminal{}, state.err
-			}
-			return state.terminal, nil
-		default:
-			return agent.InvestigationTerminal{}, fmt.Errorf(
-				" investigation run %q is not terminal",
-				workflowRunID,
-			)
-		}
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowRunID == "" {
+		return agent.InvestigationTerminal{}, fmt.Errorf("investigation run id is required")
 	}
 	coordinator, err := runner.coordinator()
 	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation terminal coordinator unavailable workflow=%s: %v", workflowRunID, err)
 		return agent.InvestigationTerminal{}, err
 	}
+	// Durable state is authoritative. Local state is only a notification
+	// optimization and must never resurrect a deleted or incomplete snapshot.
 	run, err := coordinator.LoadRun(ctx, workflowRunID)
 	if err != nil {
+		if errors.Is(err, investigation.ErrNotFound) {
+			log.WarnfCtx(ctx, "[qa] investigation terminal load missing workflow=%s: %v", workflowRunID, err)
+		} else {
+			log.ErrorfCtx(ctx, "[qa] investigation terminal load failed workflow=%s: %v", workflowRunID, err)
+		}
 		return agent.InvestigationTerminal{}, err
 	}
-	return investigationTerminal(run, nil)
+	if !run.Status.Terminal() {
+		return agent.InvestigationTerminal{}, fmt.Errorf(
+			"%w: investigation run %q is still %q",
+			workflow.ErrConflict,
+			workflowRunID,
+			run.Status,
+		)
+	}
+	terminal, err := investigationTerminal(run, nil)
+	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation terminal mapping failed workflow=%s: %v", workflowRunID, err)
+		return agent.InvestigationTerminal{}, err
+	}
+	return terminal, nil
 }
 
 func (runner *qaInvestigator) Cancel(
@@ -190,22 +463,35 @@ func (runner *qaInvestigator) Cancel(
 	workflowRunID string,
 	_ int64,
 ) error {
-	if state, ok := runner.state(workflowRunID); ok {
-		if state.coordinator != nil {
-			return state.coordinator.Cancel(ctx, state.runID)
-		}
-		workflowRunID = state.runID
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowRunID == "" {
+		return fmt.Errorf("investigation run id is required")
 	}
+	log.InfofCtx(ctx, "[qa] investigation cancellation requested workflow=%s", workflowRunID)
 	coordinator, err := runner.coordinator()
 	if err != nil {
 		return err
 	}
-	return coordinator.Cancel(ctx, workflowRunID)
+	if state, ok := runner.state(workflowRunID); ok && state.coordinator != nil {
+		coordinator = state.coordinator
+		workflowRunID = state.runID
+	}
+	if err := coordinator.Cancel(ctx, workflowRunID); err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation cancellation failed workflow=%s: %v", workflowRunID, err)
+		return err
+	}
+	_, err = runner.AwaitTerminal(ctx, workflowRunID)
+	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation cancellation convergence failed workflow=%s: %v", workflowRunID, err)
+		return fmt.Errorf("await cancelled investigation workflow %q: %w", workflowRunID, err)
+	}
+	log.InfofCtx(ctx, "[qa] investigation cancellation completed workflow=%s", workflowRunID)
+	return nil
 }
 
 func (runner *qaInvestigator) coordinator() (*investigation.Coordinator, error) {
 	if runner == nil || runner.platform == nil {
-		return nil, fmt.Errorf(" investigation platform is unavailable")
+		return nil, fmt.Errorf("investigation platform is unavailable")
 	}
 	runner.mu.Lock()
 	if runner.coord != nil {
@@ -238,6 +524,7 @@ func (runner *qaInvestigator) newCoordinator(
 	if err != nil {
 		return nil, err
 	}
+	coordinator.Lease = base.Lease
 	coordinator.Observer = runner.progressObserver(request.WorkflowRunID, parentRunID)
 	return coordinator, nil
 }
@@ -247,7 +534,25 @@ func (runner *qaInvestigator) progressObserver(
 	parentRunID string,
 ) investigation.ProgressObserver {
 	return func(event investigation.ProgressEvent) {
-		if runner == nil || runner.events == nil {
+		if runner == nil {
+			return
+		}
+		if event.Kind == investigation.ProgressTaskCompleted && isAgentExecutor(event.Executor) {
+			switch event.Status {
+			case string(investigation.TaskSucceeded):
+			case string(investigation.TaskPartial):
+				log.Warnf(
+					"[qa] investigation agent completed partially workflow=%s parent=%s node=%s executor=%s reason=%s",
+					workflowRunID, parentRunID, event.NodeID, event.Executor, event.Reason,
+				)
+			default:
+				log.Errorf(
+					"[qa] investigation agent failed workflow=%s parent=%s node=%s executor=%s status=%s reason=%s",
+					workflowRunID, parentRunID, event.NodeID, event.Executor, event.Status, event.Reason,
+				)
+			}
+		}
+		if runner.events == nil {
 			return
 		}
 		projected := run.ExecutionEvent{
@@ -302,32 +607,51 @@ func isAgentExecutor(executor investigation.ExecutorType) bool {
 	}
 }
 
-func (runner *qaInvestigator) track(runID string, state *investigationState) {
+func (runner *qaInvestigator) track(runID string, state *investigationState) error {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
 	if runner.runs == nil {
 		runner.runs = make(map[string]*investigationState)
 	}
+	if existing := runner.runs[runID]; existing != nil {
+		select {
+		case <-existing.done:
+			// A completed local entry is safe to replace only after the durable
+			// preflight in Start has found no terminal snapshot.
+		default:
+			return fmt.Errorf("%w: investigation workflow %q is already active", investigation.ErrInvalidTransition, runID)
+		}
+	}
 	runner.runs[runID] = state
+	return nil
 }
 
 func (runner *qaInvestigator) complete(
 	runID string,
+	completed *investigationState,
 	terminal agent.InvestigationTerminal,
 	err error,
 ) {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
 	if runner.runs == nil {
-		runner.runs = make(map[string]*investigationState)
+		return
 	}
 	state := runner.runs[runID]
-	if state == nil {
-		state = &investigationState{done: make(chan struct{})}
-		runner.runs[runID] = state
+	if state != completed {
+		log.Warnf("[qa] ignored stale investigation completion workflow=%s", runID)
+		return
 	}
 	state.terminal = terminal
 	state.err = err
+}
+
+func (runner *qaInvestigator) remove(runID string, completed *investigationState) {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if runner.runs != nil && runner.runs[runID] == completed {
+		delete(runner.runs, runID)
+	}
 }
 
 func (runner *qaInvestigator) state(runID string) (*investigationState, bool) {
@@ -337,19 +661,93 @@ func (runner *qaInvestigator) state(runID string) (*investigationState, bool) {
 	return state, ok
 }
 
+func taskContractFromInvestigationContract(contract investigation.InvestigationContract) agent.TaskContract {
+	entities := make([]agent.EntityRef, 0, len(contract.EntityDetails))
+	for _, entity := range contract.EntityDetails {
+		entities = append(entities, agent.EntityRef{
+			ID: entity.ID, Label: entity.Label, Role: entity.Role,
+			Aliases: append([]string(nil), entity.Aliases...),
+		})
+	}
+	if len(entities) == 0 {
+		entities = make([]agent.EntityRef, 0, len(contract.Entities))
+		for _, id := range contract.Entities {
+			entities = append(entities, agent.EntityRef{ID: id})
+		}
+	}
+	investigationGoals := make([]agent.InvestigationGoal, 0, len(contract.InvestigationGoals))
+	for _, goal := range contract.InvestigationGoals {
+		investigationGoals = append(investigationGoals, agent.InvestigationGoal{
+			ID: goal.ID, Objective: goal.Objective,
+			IndependentlyUseful: goal.IndependentlyUseful,
+			DependsOn:           append([]string(nil), goal.DependsOn...),
+		})
+	}
+	evidenceGoals := make([]agent.EvidenceGoal, 0, len(contract.EvidenceGoals))
+	for _, goal := range contract.EvidenceGoals {
+		facets := append([]string(nil), goal.Facets...)
+		facet := goal.Kind
+		evidenceGoals = append(evidenceGoals, agent.EvidenceGoal{
+			ID: goal.ID, Facet: facet, Facets: facets, Required: goal.Required,
+			Sources:         append([]agentapi.EvidenceSource(nil), goal.Sources...),
+			RequiredSources: append([]agentapi.EvidenceSource(nil), goal.RequiredSources...),
+			Freshness:       goal.Freshness, MinimumCoverage: goal.MinimumCoverage, HighRisk: goal.HighRisk,
+		})
+	}
+	conversationRefs := make([]agent.ConversationRef, 0, len(contract.Context.ConversationRefs))
+	for _, ref := range contract.Context.ConversationRefs {
+		conversationRefs = append(conversationRefs, agent.ConversationRef{
+			SessionID: ref.SessionID, RunID: ref.RunID, Turn: ref.Turn,
+		})
+	}
+	var timeRange *agent.TaskTimeRange
+	if contract.Context.TimeRange != nil {
+		timeRange = &agent.TaskTimeRange{
+			From: contract.Context.TimeRange.From, To: contract.Context.TimeRange.To,
+			ToExclusive: contract.Context.TimeRange.ToExclusive,
+		}
+	}
+	return agent.TaskContract{
+		TaskID:             contract.TaskID,
+		Objective:          contract.Question,
+		Entities:           entities,
+		InvestigationGoals: investigationGoals,
+		EvidenceGoals:      evidenceGoals,
+		Context: agent.TaskContext{
+			ConversationRefs: conversationRefs,
+			TimeRange:        timeRange,
+			SeedMaterial:     append([]agentapi.ContextBlock(nil), contract.Context.SeedMaterial...),
+		},
+	}
+}
+
+func sameInvestigationContract(left, right investigation.InvestigationContract) bool {
+	left.CreatedAt = time.Time{}
+	right.CreatedAt = time.Time{}
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
 func contractFromTaskContract(request agent.InvestigationRequest) investigation.InvestigationContract {
 	contract := request.Contract
-	goals := make([]investigation.EvidenceGoal, 0, len(contract.EvidenceGoals))
+	investigationGoals := make([]investigation.InvestigationGoal, 0, len(contract.InvestigationGoals))
+	for _, goal := range contract.InvestigationGoals {
+		investigationGoals = append(investigationGoals, investigation.InvestigationGoal{
+			ID: goal.ID, Objective: goal.Objective,
+			IndependentlyUseful: goal.IndependentlyUseful,
+			DependsOn:           append([]string(nil), goal.DependsOn...),
+		})
+	}
+	evidenceGoals := make([]investigation.EvidenceGoal, 0, len(contract.EvidenceGoals))
 	for _, goal := range contract.EvidenceGoals {
-		kind := strings.TrimSpace(goal.Facet)
-		if kind == "" {
-			kind = goal.ID
-		}
-		goals = append(goals, investigation.EvidenceGoal{
+		facets := append([]string(nil), goal.Facets...)
+		kind := goal.Facet
+		evidenceGoals = append(evidenceGoals, investigation.EvidenceGoal{
 			ID:              goal.ID,
 			Kind:            kind,
 			Description:     goal.ID,
-			Facets:          []string{kind},
+			Facets:          facets,
 			Sources:         append([]agentapi.EvidenceSource(nil), goal.Sources...),
 			RequiredSources: append([]agentapi.EvidenceSource(nil), goal.RequiredSources...),
 			Freshness:       goal.Freshness,
@@ -359,8 +757,26 @@ func contractFromTaskContract(request agent.InvestigationRequest) investigation.
 		})
 	}
 	entities := make([]string, 0, len(contract.Entities))
+	entityDetails := make([]investigation.InvestigationEntity, 0, len(contract.Entities))
 	for _, entity := range contract.Entities {
 		entities = append(entities, entity.ID)
+		entityDetails = append(entityDetails, investigation.InvestigationEntity{
+			ID: entity.ID, Label: entity.Label, Role: entity.Role,
+			Aliases: append([]string(nil), entity.Aliases...),
+		})
+	}
+	conversationRefs := make([]investigation.InvestigationConversationRef, 0, len(contract.Context.ConversationRefs))
+	for _, ref := range contract.Context.ConversationRefs {
+		conversationRefs = append(conversationRefs, investigation.InvestigationConversationRef{
+			SessionID: ref.SessionID, RunID: ref.RunID, Turn: ref.Turn,
+		})
+	}
+	var timeRange *investigation.InvestigationTimeRange
+	if contract.Context.TimeRange != nil {
+		timeRange = &investigation.InvestigationTimeRange{
+			From: contract.Context.TimeRange.From, To: contract.Context.TimeRange.To,
+			ToExclusive: contract.Context.TimeRange.ToExclusive,
+		}
 	}
 	seed := make([]investigation.EvidenceUnit, 0, len(request.SeedEvidence))
 	for _, unit := range request.SeedEvidence {
@@ -380,14 +796,30 @@ func contractFromTaskContract(request agent.InvestigationRequest) investigation.
 			TimeRange:     unit.TimeRange,
 		})
 	}
+	round := request.Round
+	if round <= 0 {
+		round = 1
+	}
 	return investigation.InvestigationContract{
-		ID:           request.WorkflowRunID,
-		Version:      1,
-		Entities:     entities,
-		Question:     contract.Objective,
-		Goals:        goals,
-		SeedEvidence: seed,
-		CreatedAt:    time.Now().UTC(),
+		ID:            request.WorkflowRunID,
+		Version:       investigation.InvestigationContractVersion,
+		ParentRunID:   request.ParentRunID,
+		TaskID:        contract.TaskID,
+		Round:         round,
+		BaseDepth:     request.BaseDepth,
+		Actor:         request.Actor,
+		Entities:      entities,
+		EntityDetails: entityDetails,
+		Context: investigation.InvestigationContext{
+			ConversationRefs: conversationRefs,
+			TimeRange:        timeRange,
+			SeedMaterial:     append([]agentapi.ContextBlock(nil), contract.Context.SeedMaterial...),
+		},
+		Question:           contract.Objective,
+		InvestigationGoals: investigationGoals,
+		EvidenceGoals:      evidenceGoals,
+		SeedEvidence:       seed,
+		CreatedAt:          time.Now().UTC(),
 	}
 }
 
@@ -395,6 +827,9 @@ func investigationTerminal(
 	run investigation.InvestigationRun,
 	runErr error,
 ) (agent.InvestigationTerminal, error) {
+	if err := investigation.ValidateContractVersion(run.Contract); err != nil {
+		return agent.InvestigationTerminal{}, fmt.Errorf("map investigation run %q: %w", run.ID, err)
+	}
 	if runErr != nil && run.Delivery == nil {
 		return agent.InvestigationTerminal{
 			WorkflowRunID: run.ID,
@@ -402,22 +837,45 @@ func investigationTerminal(
 			ErrorCode:     errorCode(run, runErr),
 		}, nil
 	}
-	round := run.Metrics.Rounds
+	round := run.Contract.Round
 	if round <= 0 {
 		round = 1
 	}
 	terminal := agent.InvestigationTerminal{
 		WorkflowRunID: run.ID,
 		Round:         round,
+		BaseDepth:     run.Contract.BaseDepth,
 		StopReason:    stopReason(run),
 		Usage:         investigationUsage(run),
 	}
 	switch run.Status {
 	case investigation.RunDelivered:
-		if run.Delivery != nil {
+		if run.Delivery == nil {
+			terminal.Status = agent.InvestigationFailed
+			terminal.ErrorCode = "missing_delivery"
+			break
+		}
+		terminal.Output = investigationResult(run, run.Delivery)
+		terminal.Completeness = investigationCompleteness(run.Delivery.Status)
+		switch run.Delivery.Status {
+		case investigation.DeliverySucceeded:
 			terminal.Status = agent.InvestigationSucceeded
-			terminal.Output = investigationResult(run, run.Delivery)
-			terminal.Completeness = investigationCompleteness(run.Delivery.Status)
+		case investigation.DeliveryPartial:
+			// Partial is a valid, user-readable result. Keep the incomplete
+			// completeness on the terminal instead of turning it into a
+			// transport failure that hides the answer from QA.
+			terminal.Status = agent.InvestigationSucceeded
+		case investigation.DeliveryEvidenceInsufficient:
+			// The delivery gate always supplies a non-empty explanation for an
+			// evidence gap. Keep that answer user-visible; the gap is reflected
+			// by partial completeness, not by replacing delivery with failure.
+			terminal.Status = agent.InvestigationSucceeded
+		case investigation.DeliveryFailed:
+			terminal.Status = agent.InvestigationFailed
+			terminal.ErrorCode = "delivery_failed"
+			if run.Delivery.Failure != nil && run.Delivery.Failure.Code != "" {
+				terminal.ErrorCode = string(run.Delivery.Failure.Code)
+			}
 		}
 	case investigation.RunCancelled:
 		terminal.Status = agent.InvestigationCancelled
@@ -431,13 +889,13 @@ func investigationTerminal(
 		terminal.ErrorCode = errorCode(run, runErr)
 	default:
 		return agent.InvestigationTerminal{}, fmt.Errorf(
-			" investigation run %q is not terminal",
+			"investigation run %q is not terminal",
 			run.ID,
 		)
 	}
 	if terminal.Output == nil && terminal.Status == agent.InvestigationSucceeded {
 		return agent.InvestigationTerminal{}, fmt.Errorf(
-			" investigation run %q succeeded without delivery",
+			"investigation run %q succeeded without delivery",
 			run.ID,
 		)
 	}
@@ -449,11 +907,16 @@ func investigationResult(
 	delivery *investigation.DeliveryResult,
 ) *agent.InvestigationResult {
 	report := delivery.Report
+	partialEvidenceGoals, unresolvedEvidenceGoals := reportEvidenceGoalStatus(report)
 	result := &agent.InvestigationResult{
-		Answer:               delivery.Text,
-		EvidenceUnits:        evidenceUnits(report.Evidence),
-		UnresolvedGoals:      gapGoalIDs(report.Gaps),
-		WorkflowCompleteness: string(investigationCompleteness(delivery.Status)),
+		Answer:                  delivery.Text,
+		EvidenceUnits:           evidenceUnits(report.Evidence),
+		EvidenceConflicts:       append([]agentapi.EvidenceConflict(nil), report.EvidenceConflicts...),
+		PartialEvidenceGoals:    partialEvidenceGoals,
+		UnresolvedEvidenceGoals: unresolvedEvidenceGoals,
+		WorkflowCompleteness:    string(investigationCompleteness(delivery.Status)),
+		Round:                   run.Contract.Round,
+		BaseDepth:               run.Contract.BaseDepth,
 	}
 	for _, gap := range report.Gaps {
 		reason := strings.TrimSpace(gap.Reason)
@@ -470,19 +933,62 @@ func investigationResult(
 			ProducerNodeID:     claim.VerifierTaskID,
 			FindingIndex:       index,
 			Claim:              claim.Text,
-			GoalIDs:            []string{claim.GoalID},
+			EvidenceGoalIDs:    []string{claim.GoalID},
 			Evidence:           claimEvidence(claim.EvidenceRefs, report.Evidence),
 			EvidenceIdentities: evidenceIdentities(claim.EvidenceRefs, report.Evidence),
 			Confidence:         claim.Confidence,
 			Support:            string(claim.Status),
 		}
-		if claim.Status == investigation.ClaimSupported {
+		switch claim.Status {
+		case investigation.ClaimSupported:
 			result.SupportedClaims = append(result.SupportedClaims, item)
-		} else {
+		case investigation.ClaimPartial, investigation.ClaimConflicting:
 			result.PartialClaims = append(result.PartialClaims, item)
+		case investigation.ClaimRejected:
+			result.UnsupportedClaims = append(result.UnsupportedClaims, agent.InvestigationUnsupportedClaim{
+				ProducerNodeID:  claim.VerifierTaskID,
+				FindingIndex:    index,
+				EvidenceGoalIDs: []string{claim.GoalID},
+				Support:         string(claim.Status),
+				ReasonCode:      "verifier_rejected",
+			})
 		}
 	}
 	return result
+}
+
+func reportEvidenceGoalStatus(report investigation.InvestigationReport) ([]string, []string) {
+	partial := make([]string, 0)
+	unresolved := make([]string, 0)
+	for _, coverage := range report.Coverage {
+		switch coverage.Status {
+		case investigation.GoalPartial:
+			partial = append(partial, coverage.GoalID)
+		case investigation.GoalUnresolved:
+			unresolved = append(unresolved, coverage.GoalID)
+		}
+	}
+	if len(report.Coverage) == 0 {
+		unresolved = gapGoalIDs(report.Gaps)
+	}
+	return uniqueGoalIDs(partial), uniqueGoalIDs(unresolved)
+}
+
+func uniqueGoalIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func investigationCompleteness(status investigation.DeliveryStatus) agent.InvestigationCompleteness {
@@ -492,7 +998,7 @@ func investigationCompleteness(status investigation.DeliveryStatus) agent.Invest
 	case investigation.DeliveryPartial:
 		return agent.InvestigationPartial
 	case investigation.DeliveryEvidenceInsufficient:
-		return agent.InvestigationUnavailable
+		return agent.InvestigationPartial
 	default:
 		return agent.InvestigationUnavailable
 	}
@@ -587,8 +1093,13 @@ func investigationUsage(run investigation.InvestigationRun) agent.InvestigationU
 }
 
 func stopReason(run investigation.InvestigationRun) string {
-	if run.Delivery != nil && run.Delivery.Failure != nil {
-		return string(run.Delivery.Failure.Code)
+	if run.Delivery != nil {
+		if run.Delivery.Failure != nil {
+			return string(run.Delivery.Failure.Code)
+		}
+		if run.Delivery.Status == investigation.DeliveryEvidenceInsufficient {
+			return "evidence_insufficient"
+		}
 	}
 	if run.Failure != nil {
 		return string(run.Failure.Code)
@@ -600,8 +1111,9 @@ func errorCode(run investigation.InvestigationRun, runErr error) string {
 	if run.Failure != nil {
 		return string(run.Failure.Code)
 	}
-	if runErr != nil {
-		return "execution_failed"
+	var failure *investigation.RunFailureError
+	if errors.As(runErr, &failure) {
+		return string(failure.Failure.Code)
 	}
-	return "execution_failed"
+	return string(investigation.FailureExecution)
 }

@@ -20,7 +20,7 @@ import (
 func TestTrimVerifiedEvidencePrioritizesClaimsAndTracksOmissions(t *testing.T) {
 	claim := func(name, goal, target string, highRisk bool) verifiedClaimView {
 		return verifiedClaimView{
-			Claim: name, GoalIDs: []string{goal}, Support: claimSupported,
+			Claim: name, EvidenceGoalIDs: []string{goal}, Support: claimSupported,
 			HighRisk: highRisk,
 			EvidenceIdentities: []agentapi.EvidenceIdentity{{
 				SourceKind: "source", Target: target,
@@ -37,11 +37,11 @@ func TestTrimVerifiedEvidencePrioritizesClaimsAndTracksOmissions(t *testing.T) {
 			claim("partial", "partial", "partial", false),
 		},
 		UnsupportedClaims: []unsupportedClaimView{{
-			GoalIDs: []string{"unsupported"}, Support: claimUnsupported,
+			EvidenceGoalIDs: []string{"unsupported"}, Support: claimUnsupported,
 		}},
-		PartialGoals:    []string{"partial"},
-		UnresolvedGoals: []string{"missing"},
-		Limitations:     []string{"runtime evidence unavailable"},
+		PartialEvidenceGoals:    []string{"partial"},
+		UnresolvedEvidenceGoals: []string{"missing"},
+		Limitations:             []string{"runtime evidence unavailable"},
 		EvidenceUnits: []tool.EvidenceUnit{
 			verifiedEvidenceUnit("regular"),
 			verifiedEvidenceUnit("required"),
@@ -106,7 +106,7 @@ func TestTrimVerifiedEvidencePreservesProtectedBaseline(t *testing.T) {
 	baseline := verifiedEvidenceUnit("baseline")
 	view := verifiedEvidenceView{
 		SupportedClaims: []verifiedClaimView{{
-			Claim: "derived", GoalIDs: []string{"optional"},
+			Claim: "derived", EvidenceGoalIDs: []string{"optional"},
 			EvidenceIdentities: []agentapi.EvidenceIdentity{{
 				SourceKind: "source", Target: "derived",
 			}},
@@ -142,12 +142,12 @@ func TestTrimVerifiedEvidencePreservesProtectedBaseline(t *testing.T) {
 func TestTrimVerifiedEvidenceBoundsLargeSynthesisPayload(t *testing.T) {
 	const maxTokens = 8192
 	view := verifiedEvidenceView{
-		SupportedClaims:   make([]verifiedClaimView, 0, 80),
-		PartialClaims:     []verifiedClaimView{},
-		UnsupportedClaims: []unsupportedClaimView{},
-		PartialGoals:      []string{},
-		UnresolvedGoals:   []string{},
-		Limitations:       []string{},
+		SupportedClaims:         make([]verifiedClaimView, 0, 80),
+		PartialClaims:           []verifiedClaimView{},
+		UnsupportedClaims:       []unsupportedClaimView{},
+		PartialEvidenceGoals:    []string{},
+		UnresolvedEvidenceGoals: []string{},
+		Limitations:             []string{},
 		LimitationsDetail: &limitationsDetailRef{
 			ArtifactID:           "art_00000000-0000-0000-0000-000000000000",
 			NormalizationVersion: LimitationsNormalizationVersion,
@@ -166,10 +166,10 @@ func TestTrimVerifiedEvidenceBoundsLargeSynthesisPayload(t *testing.T) {
 			SourceKind: "code", Target: target, Section: "flow",
 		}
 		view.SupportedClaims = append(view.SupportedClaims, verifiedClaimView{
-			ProducerNodeID: fmt.Sprintf("investigate.%d", index%3),
-			FindingIndex:   index,
-			Claim:          fmt.Sprintf("%s %s", target, strings.Repeat("grounded detail ", 32)),
-			GoalIDs:        []string{"optional"},
+			ProducerNodeID:  fmt.Sprintf("investigate.%d", index%3),
+			FindingIndex:    index,
+			Claim:           fmt.Sprintf("%s %s", target, strings.Repeat("grounded detail ", 32)),
+			EvidenceGoalIDs: []string{"optional"},
 			Evidence: []findingEvidenceView{{
 				Kind: "code", Reference: target,
 				Summary:  strings.Repeat("concrete support ", 16),
@@ -185,7 +185,7 @@ func TestTrimVerifiedEvidenceBoundsLargeSynthesisPayload(t *testing.T) {
 			Coverage: tool.EvidenceCoverage{Complete: true},
 		})
 	}
-	view.SupportedClaims[1].GoalIDs = []string{"required"}
+	view.SupportedClaims[1].EvidenceGoalIDs = []string{"required"}
 
 	required := map[string]struct{}{"required": {}}
 	got, err := trimVerifiedEvidence(view, maxTokens, required, nil)
@@ -200,7 +200,7 @@ func TestTrimVerifiedEvidenceBoundsLargeSynthesisPayload(t *testing.T) {
 	}
 	if len(got.SupportedClaims) < 2 ||
 		!got.SupportedClaims[0].HighRisk ||
-		!reflect.DeepEqual(got.SupportedClaims[1].GoalIDs, []string{"required"}) {
+		!reflect.DeepEqual(got.SupportedClaims[1].EvidenceGoalIDs, []string{"required"}) {
 		t.Fatalf("priority claims were not retained: %+v", got.SupportedClaims[:min(2, len(got.SupportedClaims))])
 	}
 
@@ -213,7 +213,7 @@ func TestTrimVerifiedEvidenceBoundsLargeSynthesisPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := schemas.Validate(
-		agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2},
+		agentapi.InvestigationVerifiedBundleSchemaRef(),
 		payload,
 	); err != nil {
 		t.Fatalf("trimmed verified bundle failed schema validation: %v", err)
@@ -277,7 +277,7 @@ func TestVerifyInvestigationEvidenceClassifiesRequiredGoalCoverage(t *testing.T)
 			},
 			completeness:   Partial,
 			wantDecision:   Partial,
-			wantStopReason: StopCapabilityUnavailable,
+			wantStopReason: StopEvidenceInsufficient,
 			wantClaims:     1,
 			wantUnresolved: []string{"documentation"},
 		},
@@ -286,7 +286,7 @@ func TestVerifyInvestigationEvidenceClassifiesRequiredGoalCoverage(t *testing.T)
 			reports:        []handoffView{},
 			completeness:   Unavailable,
 			wantDecision:   Unavailable,
-			wantStopReason: StopCapabilityUnavailable,
+			wantStopReason: StopEvidenceInsufficient,
 			wantClaims:     0,
 			wantUnresolved: []string{"core_flow", "documentation"},
 		},
@@ -302,7 +302,7 @@ func TestVerifyInvestigationEvidenceClassifiesRequiredGoalCoverage(t *testing.T)
 			)},
 			completeness:   Complete,
 			wantDecision:   Unavailable,
-			wantStopReason: StopCapabilityUnavailable,
+			wantStopReason: StopEvidenceInsufficient,
 			wantClaims:     0,
 			wantUnresolved: []string{"core_flow", "documentation"},
 		},
@@ -323,9 +323,7 @@ func TestVerifyInvestigationEvidenceClassifiesRequiredGoalCoverage(t *testing.T)
 				workflowRunID: "verification-run",
 				node: NodeDefinition{
 					ID: "evidence.verify", Kind: NodeVerifier,
-					OutputSchema: agentapi.SchemaRef{
-						ID: "investigation.verified_bundle", Version: 1,
-					},
+					OutputSchema: agentapi.InvestigationVerifiedBundleSchemaRef(),
 					Verifier: &VerifierSpec{
 						RequiredGoals: []string{"core_flow", "documentation"},
 					},
@@ -350,7 +348,7 @@ func TestVerifyInvestigationEvidenceClassifiesRequiredGoalCoverage(t *testing.T)
 				verified.Verification.StopReason != test.wantStopReason ||
 				verified.Completeness != test.wantDecision ||
 				len(verified.SupportedClaims) != test.wantClaims ||
-				!reflect.DeepEqual(verified.UnresolvedGoals, test.wantUnresolved) {
+				!reflect.DeepEqual(verified.UnresolvedEvidenceGoals, test.wantUnresolved) {
 				t.Fatalf("verified evidence = %+v", verified)
 			}
 			if test.wantClaims > 0 {
@@ -358,16 +356,11 @@ func TestVerifyInvestigationEvidenceClassifiesRequiredGoalCoverage(t *testing.T)
 				if claim.ProducerNodeID != "investigate.code" ||
 					claim.FindingIndex != 0 ||
 					claim.Claim != "Checkout enters PlaceOrder." ||
-					!reflect.DeepEqual(claim.GoalIDs, []string{"core_flow"}) ||
-					len(claim.Evidence) != 1 ||
-					claim.Evidence[0].Reference != "code:checkout" ||
-					!reflect.DeepEqual(
-						claim.EvidenceIdentities,
-						[]agentapi.EvidenceIdentity{{
-							SourceKind: "source",
-							Target:     "code:checkout",
-						}},
-					) {
+					!reflect.DeepEqual(claim.EvidenceGoalIDs, []string{"core_flow"}) ||
+					len(claim.EvidenceRefs) != 1 ||
+					claim.EvidenceRefs[0].EvidenceID == "" ||
+					verified.EvidenceLookup[claim.EvidenceRefs[0].EvidenceID].Reference !=
+						"code:checkout" {
 					t.Fatalf("verified claim support = %+v", claim)
 				}
 			}
@@ -504,10 +497,8 @@ func TestVerifyInvestigationEvidenceBindsExplicitCanonicalIdentity(t *testing.T)
 		workflowRunID: "verification-run",
 		node: NodeDefinition{
 			ID: "evidence.verify", Kind: NodeVerifier,
-			OutputSchema: agentapi.SchemaRef{
-				ID: "investigation.verified_bundle", Version: 1,
-			},
-			Verifier: &VerifierSpec{RequiredGoals: []string{"core_flow"}},
+			OutputSchema: agentapi.InvestigationVerifiedBundleSchemaRef(),
+			Verifier:     &VerifierSpec{RequiredGoals: []string{"core_flow"}},
 		},
 		inputs: []Handoff{{
 			ProducerNodeID: "evidence.join",
@@ -531,11 +522,9 @@ func TestVerifyInvestigationEvidenceBindsExplicitCanonicalIdentity(t *testing.T)
 		Section:    "validation",
 		Version:    "commit-123",
 	}}
+	identity := verified.EvidenceLookup[verified.SupportedClaims[0].EvidenceRefs[0].EvidenceID].Identity
 	if len(verified.SupportedClaims) != 1 ||
-		!reflect.DeepEqual(
-			verified.SupportedClaims[0].EvidenceIdentities,
-			want,
-		) ||
+		identity == nil || !reflect.DeepEqual(*identity, want[0]) ||
 		len(verified.UnsupportedClaims) != 1 ||
 		verified.UnsupportedClaims[0].ReasonCode !=
 			"canonical_evidence_unbound" ||
@@ -590,10 +579,8 @@ func TestVerifyInvestigationEvidenceKeepsOnlyBoundReferences(t *testing.T) {
 		workflowRunID: "verification-run",
 		node: NodeDefinition{
 			ID: "evidence.verify", Kind: NodeVerifier,
-			OutputSchema: agentapi.SchemaRef{
-				ID: "investigation.verified_bundle", Version: 1,
-			},
-			Verifier: &VerifierSpec{RequiredGoals: []string{"core_flow"}},
+			OutputSchema: agentapi.InvestigationVerifiedBundleSchemaRef(),
+			Verifier:     &VerifierSpec{RequiredGoals: []string{"core_flow"}},
 		},
 		inputs: []Handoff{{
 			ProducerNodeID: "evidence.join",
@@ -614,9 +601,10 @@ func TestVerifyInvestigationEvidenceKeepsOnlyBoundReferences(t *testing.T) {
 	if len(verified.SupportedClaims) != 0 ||
 		len(verified.PartialClaims) != 1 ||
 		verified.PartialClaims[0].Support != claimPartial ||
-		len(verified.PartialClaims[0].Evidence) != 1 ||
-		verified.PartialClaims[0].Evidence[0].Reference != "code:checkout" ||
-		!reflect.DeepEqual(verified.PartialGoals, []string{"core_flow"}) ||
+		len(verified.PartialClaims[0].EvidenceRefs) != 1 ||
+		verified.EvidenceLookup[verified.PartialClaims[0].EvidenceRefs[0].EvidenceID].Reference !=
+			"code:checkout" ||
+		!reflect.DeepEqual(verified.PartialEvidenceGoals, []string{"core_flow"}) ||
 		len(verified.Limitations) != 3 ||
 		bytes.Contains(
 			[]byte(verified.Limitations[0]),
@@ -704,9 +692,7 @@ func TestVerifyInvestigationEvidenceClassifiesCoverageAndTrust(t *testing.T) {
 				workflowRunID: "verification-run",
 				node: NodeDefinition{
 					ID: "evidence.verify", Kind: NodeVerifier,
-					OutputSchema: agentapi.SchemaRef{
-						ID: "investigation.verified_bundle", Version: 1,
-					},
+					OutputSchema: agentapi.InvestigationVerifiedBundleSchemaRef(),
 					Verifier: &VerifierSpec{
 						RequiredGoals:            []string{"core_flow"},
 						HighRiskGoals:            highRiskGoals,
@@ -734,7 +720,7 @@ func TestVerifyInvestigationEvidenceClassifiesCoverageAndTrust(t *testing.T) {
 			}
 			if verified.Completeness != test.wantDecision ||
 				!reflect.DeepEqual(
-					verified.PartialGoals,
+					verified.PartialEvidenceGoals,
 					test.wantPartial,
 				) ||
 				len(verified.SupportedClaims) != test.wantSupported {
@@ -812,9 +798,7 @@ func TestVerifierTraceOmitsClaimPayload(t *testing.T) {
 		"verification-run",
 		NodeDefinition{
 			ID: "evidence.verify", Kind: NodeVerifier,
-			OutputSchema: agentapi.SchemaRef{
-				ID: "investigation.verified_bundle", Version: 1,
-			},
+			OutputSchema: agentapi.InvestigationVerifiedBundleSchemaRef(),
 			Verifier: &VerifierSpec{RequiredGoals: []string{
 				"core_flow",
 				"documentation",
@@ -837,7 +821,7 @@ func TestVerifierTraceOmitsClaimPayload(t *testing.T) {
 		traces[0].Output["supported_claim_count"] != 1 ||
 		traces[0].Output["partial_claim_count"] != 1 ||
 		traces[0].Output["unsupported_claim_count"] != 1 ||
-		traces[0].Output["stop_reason"] != StopCapabilityUnavailable {
+		traces[0].Output["stop_reason"] != StopEvidenceInsufficient {
 		t.Fatalf("verification traces = %#v", traces)
 	}
 	encoded, err := json.Marshal(traces[0])
@@ -862,34 +846,32 @@ func verifiedReportHandoff(
 ) handoffView {
 	covered := make([]string, 0, len(findings))
 	for _, finding := range findings {
-		goalIDs, _ := finding["goal_ids"].([]string)
+		goalIDs, _ := finding["evidence_goal_ids"].([]string)
 		covered = append(covered, goalIDs...)
 	}
 	payload, err := json.Marshal(map[string]any{
-		"focus":            focus,
-		"summary":          focus + " report",
-		"findings":         findings,
-		"gaps":             gaps,
-		"covered_goals":    covered,
-		"unresolved_goals": []string{},
+		"focus":                     focus,
+		"summary":                   focus + " report",
+		"findings":                  findings,
+		"gaps":                      gaps,
+		"covered_evidence_goals":    covered,
+		"unresolved_evidence_goals": []string{},
 	})
 	if err != nil {
 		panic(err)
 	}
 	return handoffView{
 		ProducerNodeID: producerNodeID,
-		Schema: agentapi.SchemaRef{
-			ID: "investigation.report", Version: 1,
-		},
-		Payload:      payload,
-		Completeness: Complete,
+		Schema:         agentapi.InvestigationReportSchemaRef(),
+		Payload:        payload,
+		Completeness:   Complete,
 	}
 }
 
 func verifiedFinding(claim, goalID, reference string) map[string]any {
 	return map[string]any{
-		"claim":    claim,
-		"goal_ids": []string{goalID},
+		"claim":             claim,
+		"evidence_goal_ids": []string{goalID},
 		"evidence": []map[string]any{{
 			"kind": "source", "reference": reference, "summary": "Concrete support.",
 		}},
@@ -1025,9 +1007,7 @@ func verifySubjectBundle(
 		workflowRunID: "subject-verification-run",
 		node: NodeDefinition{
 			ID: "evidence.verify", Kind: NodeVerifier,
-			OutputSchema: agentapi.SchemaRef{
-				ID: "investigation.verified_bundle", Version: 2,
-			},
+			OutputSchema: agentapi.InvestigationVerifiedBundleSchemaRef(),
 			Verifier: &VerifierSpec{
 				RequiredGoals: []string{"core_flow"},
 				SubjectRequirements: []SubjectRequirement{
@@ -1093,9 +1073,9 @@ func TestSubjectCoverageUsesExplicitFindingEntityIDs(t *testing.T) {
 		t.Fatal("unit has no canonical key")
 	}
 	finding := map[string]any{
-		"claim":      "The first-party agent sends device commands.",
-		"entity_ids": []string{"our_agent"},
-		"goal_ids":   []string{"core_flow"},
+		"claim":             "The first-party agent sends device commands.",
+		"entity_ids":        []string{"our_agent"},
+		"evidence_goal_ids": []string{"core_flow"},
 		"evidence": []map[string]any{{
 			"kind": "code", "reference": unit.Target, "summary": "support",
 			"evidence_id": key.Handle(),
@@ -1116,7 +1096,7 @@ func TestSubjectCoverageUsesExplicitFindingEntityIDs(t *testing.T) {
 		workflowRunID: "subject-handle-run",
 		node: NodeDefinition{
 			ID: "evidence.verify", Kind: NodeVerifier,
-			OutputSchema: agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2},
+			OutputSchema: agentapi.InvestigationVerifiedBundleSchemaRef(),
 			Verifier: &VerifierSpec{
 				RequiredGoals: []string{"core_flow"},
 				SubjectRequirements: []SubjectRequirement{{

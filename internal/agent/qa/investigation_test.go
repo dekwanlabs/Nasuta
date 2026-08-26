@@ -1,6 +1,7 @@
 package qa
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -106,7 +108,7 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 	for _, facet := range domain.RequiredFacetsFor(domain.QueryRuntimeDiagnosis) {
 		value := string(facet)
 		wantGoals = append(wantGoals, EvidenceGoal{
-			ID: value, Facet: value, Required: true,
+			ID: value, Facet: value, Facets: []string{value}, Required: true,
 			Sources: []agentapi.EvidenceSource{
 				agentapi.EvidenceSourceInternal,
 				agentapi.EvidenceSourceWeb,
@@ -118,6 +120,17 @@ func TestTaskContractFromPreparationCarriesCanonicalContext(t *testing.T) {
 	}
 	if !reflect.DeepEqual(contract.EvidenceGoals, wantGoals) {
 		t.Fatalf("evidence goals = %+v", contract.EvidenceGoals)
+	}
+	raw, err := json.Marshal(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Validate(agentapi.TaskContractSchemaRef(), raw); err != nil {
+		t.Fatalf("QA task contract does not match current schema: %v", err)
 	}
 	if contract.Context.TimeRange == nil ||
 		contract.Context.TimeRange.From != from ||

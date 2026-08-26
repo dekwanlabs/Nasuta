@@ -48,9 +48,10 @@ func TestDeliveryRejectsComposerUnknownClaimAndFallsBack(t *testing.T) {
 
 func TestDeliveryWithoutEvidenceStillReturnsExplicitInsufficiency(t *testing.T) {
 	contract := InvestigationContract{
-		ID:       "contract-1",
-		Question: "what happened?",
-		Goals:    []EvidenceGoal{{ID: "g1", Kind: "flow", Required: true}},
+		Version:       InvestigationContractVersion,
+		ID:            "contract-1",
+		Question:      "what happened?",
+		EvidenceGoals: []EvidenceGoal{{ID: "g1", Kind: "flow", Required: true}},
 	}
 	result := (DeliveryGate{}).Deliver(context.Background(), contract, InvestigationReport{
 		Coverage: []GoalCoverage{{GoalID: "g1", Required: true, Status: GoalUnresolved}},
@@ -66,9 +67,10 @@ func TestDeliveryWithoutEvidenceStillReturnsExplicitInsufficiency(t *testing.T) 
 
 func supportedReport() (InvestigationContract, InvestigationReport) {
 	return InvestigationContract{
-			ID:       "contract-1",
-			Question: "how is AI integrated?",
-			Goals:    []EvidenceGoal{{ID: "g1", Kind: "integration", Required: true}},
+			Version:       InvestigationContractVersion,
+			ID:            "contract-1",
+			Question:      "how is AI integrated?",
+			EvidenceGoals: []EvidenceGoal{{ID: "g1", Kind: "integration", Required: true}},
 		}, InvestigationReport{
 			Claims: []VerifiedClaim{{ID: "claim-1", GoalID: "g1", Text: "the service calls the model", Status: ClaimSupported}},
 			Coverage: []GoalCoverage{{

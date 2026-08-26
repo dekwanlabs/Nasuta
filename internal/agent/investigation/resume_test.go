@@ -3,13 +3,35 @@ package investigation
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
 
+func TestCoordinatorResumeRejectsUnsupportedContractVersion(t *testing.T) {
+	store := NewMemoryRunStore()
+	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	contract.Version = 2
+	if err := store.Create(InvestigationRun{
+		ID: "run-old-contract", Contract: contract, Status: RunCreated,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := NewCoordinator(CoordinatorOptions{Store: store})
+
+	_, err := coordinator.Resume(t.Context(), "run-old-contract")
+	if !errors.Is(err, ErrPlanInvalid) || !strings.Contains(err.Error(), "current version is 1") {
+		t.Fatalf("Resume error = %v", err)
+	}
+}
+
 func TestCoordinatorResumeSkipsCompletedTasks(t *testing.T) {
 	store := NewMemoryRunStore()
 	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	contract.ParentRunID = "run-parent"
+	contract.Actor.UserID = 42
+	contract.Actor.TenantID = "tenant-a"
 	contract.CreatedAt = time.Now().UTC()
 	if err := store.Create(InvestigationRun{ID: "run-resume", Contract: contract, Status: RunCreated}); err != nil {
 		t.Fatal(err)
@@ -44,10 +66,12 @@ func TestCoordinatorResumeSkipsCompletedTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var executionInput TaskExecutionInput
 	coordinator := NewCoordinator(CoordinatorOptions{
 		Schemas: testSchemas(),
 		Store:   store,
-		Executors: testExecutors(TaskExecutorFunc(func(_ context.Context, _ ExecutableTask, _ TaskExecutionInput) (TaskExecutionResult, error) {
+		Executors: testExecutors(TaskExecutorFunc(func(_ context.Context, _ ExecutableTask, input TaskExecutionInput) (TaskExecutionResult, error) {
+			executionInput = input
 			return TaskExecutionResult{Output: json.RawMessage(`{"ok":true}`), Usage: BudgetVector{ToolCalls: 1}}, nil
 		})),
 		BudgetLimit: BudgetVector{ToolCalls: 2},
@@ -66,6 +90,10 @@ func TestCoordinatorResumeSkipsCompletedTasks(t *testing.T) {
 	if run.Results["task-first"].Status != TaskSucceeded ||
 		run.Results["task-second"].Status != TaskSucceeded {
 		t.Fatalf("resumed results = %#v", run.Results)
+	}
+	if executionInput.WorkflowRunID != run.ID || executionInput.ParentRunID != contract.ParentRunID ||
+		executionInput.Actor != contract.Actor || executionInput.Attempt != 1 {
+		t.Fatalf("resume execution input identity = %#v", executionInput)
 	}
 	events, err := store.Events("run-resume")
 	if err != nil {
@@ -93,5 +121,121 @@ func TestCoordinatorResumeSkipsCompletedTasks(t *testing.T) {
 	}
 	if !deliveryCompleted {
 		t.Fatalf("resume delivery completion event missing: %#v", events)
+	}
+}
+
+func TestCoordinatorConcurrentResumeUsesSingleLeaseOwner(t *testing.T) {
+	store := NewMemoryRunStore()
+	lease := NewMemoryLeaseStore()
+	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	contract.CreatedAt = time.Now().UTC()
+	if err := store.Create(InvestigationRun{ID: "run-concurrent-resume", Contract: contract, Status: RunCreated}); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []RunStatus{RunAnalyzing, RunPlanned, RunExecuting} {
+		if err := store.Transition("run-concurrent-resume", status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := testExecutableTask("task-blocked", nil)
+	if err := store.SavePlan("run-concurrent-resume", PlanRevision{Revision: 1, ContractID: contract.ID, Tasks: []ExecutableTask{task}}); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := NewBudgetLedger(BudgetVector{ToolCalls: 1, Duration: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.SetStageLimit(StageExecution, BudgetVector{ToolCalls: 1, Duration: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveBudget("run-concurrent-resume", ledger.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	executor := TaskExecutorFunc(func(context.Context, ExecutableTask, TaskExecutionInput) (TaskExecutionResult, error) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-release
+		return TaskExecutionResult{Output: json.RawMessage(`{"ok":true}`), Usage: BudgetVector{ToolCalls: 1}}, nil
+	})
+	options := CoordinatorOptions{
+		Schemas: testSchemas(), Store: store, Lease: lease,
+		Executors: testExecutors(executor), BudgetLimit: BudgetVector{ToolCalls: 1, Duration: time.Minute}, MaxRounds: 1,
+	}
+	first := NewCoordinator(options)
+	second := NewCoordinator(options)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := first.Resume(t.Context(), "run-concurrent-resume")
+		firstDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first resume did not start")
+	}
+	if _, err := second.Resume(t.Context(), "run-concurrent-resume"); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("second resume error = %v, want ErrLeaseHeld", err)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first resume: %v", err)
+	}
+}
+
+func TestCoordinatorResumeConvergesVerificationStages(t *testing.T) {
+	for _, status := range []RunStatus{RunVerifying, RunReplanning, RunComposing} {
+		t.Run(string(status), func(t *testing.T) {
+			store := NewMemoryRunStore()
+			runID := "run-resume-" + string(status)
+			contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+			contract.ID = runID
+			contract.CreatedAt = time.Now().UTC()
+			if err := store.Create(InvestigationRun{ID: runID, Contract: contract, Status: RunCreated}); err != nil {
+				t.Fatal(err)
+			}
+			for _, next := range []RunStatus{RunAnalyzing, RunPlanned} {
+				if err := store.Transition(runID, next); err != nil {
+					t.Fatal(err)
+				}
+			}
+			task := testExecutableTask("task-finished", nil)
+			if err := store.SavePlan(runID, PlanRevision{Revision: 1, ContractID: contract.ID, Tasks: []ExecutableTask{task}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Transition(runID, RunExecuting); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SaveResult(runID, TaskExecutionRecord{TaskID: task.ID, Status: TaskSucceeded, Output: json.RawMessage(`{"ok":true}`)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Transition(runID, RunVerifying); err != nil {
+				t.Fatal(err)
+			}
+			if status == RunReplanning || status == RunComposing {
+				if err := store.SaveReport(runID, InvestigationReport{}); err != nil {
+					t.Fatal(err)
+				}
+				if status == RunReplanning {
+					if err := store.Transition(runID, RunReplanning); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := store.Transition(runID, RunComposing); err != nil {
+					t.Fatal(err)
+				}
+			}
+			coordinator := NewCoordinator(CoordinatorOptions{Store: store, Schemas: testSchemas()})
+			run, err := coordinator.Resume(t.Context(), runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.Status != RunDelivered || run.Delivery == nil {
+				t.Fatalf("run = %#v", run)
+			}
+		})
 	}
 }

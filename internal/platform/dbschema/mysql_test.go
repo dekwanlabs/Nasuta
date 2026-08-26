@@ -503,3 +503,33 @@ func TestAgentToolResultTraceSchemaPreservesAuthoritativeResults(t *testing.T) {
 		t.Fatal("managed QA run schema still persists a result preview")
 	}
 }
+
+func TestInvestigationSchemaSupportsFencedKeysetRecovery(t *testing.T) {
+	statements := strings.Join(mysqlSchema[GroupInvestigation], "\n")
+	for _, required := range []string{
+		"fencing_token  BIGINT      NOT NULL DEFAULT 0",
+		"KEY idx_investigation_runs_updated (updated_at, id)",
+		"KEY idx_investigation_leases_expiry (expires_at)",
+	} {
+		if !strings.Contains(statements, required) {
+			t.Fatalf("investigation schema missing %q", required)
+		}
+	}
+}
+
+func TestInvestigationFencingMigrationAddsRecoveryIndex(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_add_investigation_fencing_token_20260822.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read investigation fencing migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN fencing_token BIGINT NOT NULL DEFAULT 0",
+		"ADD INDEX idx_investigation_runs_updated (updated_at, id)",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("investigation fencing migration missing %q", required)
+		}
+	}
+}

@@ -270,6 +270,20 @@ func RegisterProposalInvestigatorTemplates(catalog *TaskTemplateCatalog) error {
 // RegisterDefaultInvestigationTemplates installs the code chain plus the facet
 // coverage leaves and the generic explore fallback. It is the catalog used by the
 // default  coordinator assembly.
+
+func canonicalVerifierTemplate() TaskTemplate {
+	return TaskTemplate{
+		ID: "evidence.verify", Version: 1,
+		// An empty goal-kind list is intentional: the server-owned verifier
+		// validates every admitted evidence goal.
+		GoalKinds:    nil,
+		InputSchema:  agentapi.SchemaRef{ID: DefaultTaskInputSchema, Version: 1},
+		OutputSchema: agentapi.SchemaRef{ID: DefaultTaskOutputSchema, Version: 1},
+		Executor:     ExecutorVerifier,
+		Enabled:      true,
+	}
+}
+
 func RegisterDefaultInvestigationTemplates(catalog *TaskTemplateCatalog) error {
 	if err := RegisterCodeInvestigationTemplates(catalog); err != nil {
 		return err

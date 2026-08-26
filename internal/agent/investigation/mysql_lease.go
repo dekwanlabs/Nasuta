@@ -94,6 +94,56 @@ func (store *MySQLLeaseStore) AcquireLeaseWithToken(
 	return Lease{RunID: runID, Owner: owner, Token: token, ExpiresAt: nextExpires}, nil
 }
 
+func (store *MySQLLeaseStore) RevokeLeaseWithToken(
+	ctx context.Context,
+	runID string,
+	owner string,
+	ttl time.Duration,
+) (Lease, error) {
+	if err := validateLeaseInput(store, runID, owner, ttl); err != nil {
+		return Lease{}, err
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Lease{}, fmt.Errorf("revoke run %q lease: begin: %w", runID, err)
+	}
+	defer tx.Rollback()
+	var currentToken uint64
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT fencing_token FROM investigation_leases WHERE run_id = ? FOR UPDATE`,
+		runID,
+	).Scan(&currentToken)
+	exists := err == nil
+	if err != nil && err != sql.ErrNoRows {
+		return Lease{}, fmt.Errorf("revoke run %q lease: load: %w", runID, err)
+	}
+	token := currentToken + 1
+	if token == 0 {
+		token = 1
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
+	if exists {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE investigation_leases SET owner = ?, expires_at = ?, fencing_token = ? WHERE run_id = ?`,
+			owner, expiresAt.UnixMilli(), token, runID,
+		); err != nil {
+			return Lease{}, fmt.Errorf("revoke run %q lease: update: %w", runID, err)
+		}
+	} else if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO investigation_leases (run_id, owner, expires_at, fencing_token) VALUES (?, ?, ?, ?)`,
+		runID, owner, expiresAt.UnixMilli(), token,
+	); err != nil {
+		return Lease{}, fmt.Errorf("revoke run %q lease: insert: %w", runID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Lease{}, fmt.Errorf("revoke run %q lease: commit: %w", runID, err)
+	}
+	return Lease{RunID: runID, Owner: owner, Token: token, ExpiresAt: expiresAt}, nil
+}
+
 func (store *MySQLLeaseStore) RenewLease(
 	ctx context.Context,
 	runID string,
@@ -151,18 +201,40 @@ func (store *MySQLLeaseStore) ReleaseLease(
 	runID string,
 	owner string,
 ) error {
+	return store.releaseLease(ctx, runID, owner, 0)
+}
+
+func (store *MySQLLeaseStore) ReleaseLeaseWithToken(
+	ctx context.Context,
+	runID string,
+	owner string,
+	token uint64,
+) error {
+	if token == 0 {
+		return fmt.Errorf("lease fencing token must be positive")
+	}
+	return store.releaseLease(ctx, runID, owner, token)
+}
+
+func (store *MySQLLeaseStore) releaseLease(
+	ctx context.Context,
+	runID string,
+	owner string,
+	token uint64,
+) error {
 	if store == nil || store.db == nil {
 		return fmt.Errorf("mysql lease store: database is required")
 	}
 	if runID == "" || owner == "" {
 		return fmt.Errorf("mysql lease store: run id and owner are required")
 	}
-	_, err := store.db.ExecContext(
-		ctx,
-		`UPDATE investigation_leases SET owner = '', expires_at = 0 WHERE run_id = ? AND owner = ?`,
-		runID, owner,
-	)
-	if err != nil {
+	query := `UPDATE investigation_leases SET owner = '', expires_at = 0 WHERE run_id = ? AND owner = ?`
+	args := []any{runID, owner}
+	if token > 0 {
+		query += ` AND fencing_token = ?`
+		args = append(args, token)
+	}
+	if _, err := store.db.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("release run %q lease: %w", runID, err)
 	}
 	return nil

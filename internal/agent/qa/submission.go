@@ -192,6 +192,7 @@ func cloneTaskGraphProposal(
 			[]string(nil),
 			task.InvestigationGoalIDs...,
 		)
+		task.EvidenceGoalIDs = append([]string(nil), task.EvidenceGoalIDs...)
 		task.RequiredFacets = append([]string(nil), task.RequiredFacets...)
 		task.InputRefs = cloneProposalEvidenceRefs(task.InputRefs)
 		cloned.Tasks[index] = task

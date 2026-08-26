@@ -75,7 +75,81 @@ type ToolScope struct {
 }
 
 // RunPolicy carries execution semantics that are independent of a scenario's planner types.
+// RunOutputMode describes whether a Run is serving a user directly or is a
+// structured node inside a Workflow. The execution loop is identical in both
+// modes; the mode only documents the output contract for orchestration.
+type RunOutputMode string
+
+const (
+	RunOutputStandalone     RunOutputMode = "standalone"
+	RunOutputWorkflowNode   RunOutputMode = "workflow_node"
+	RunOutputEvidenceWorker RunOutputMode = "evidence_worker"
+)
+
+// RunBudgetGate is an optional shared hard-limit check supplied by a Workflow
+// coordinator. It is deliberately defined in the public agent package so the
+// Single-Agent runtime can enforce a parent Run limit without importing the
+// investigation package.
+type RunBudgetGate interface {
+	Check() error
+}
+
+// RunBudgetCallReservation accounts one physical model call inside a task
+// reservation. The estimate stays reserved until the call reports usage.
+type RunBudgetCallReservation interface {
+	Settle(Usage) error
+	Release() error
+}
+
+// RunBudgetUsageGate extends the shared run gate with in-flight call accounting.
+// It is optional so standalone runtimes can keep using the simpler gate.
+type RunBudgetUsageGate interface {
+	RunBudgetGate
+	ReserveCall(Usage) (RunBudgetCallReservation, error)
+}
+
+// RunBudgetAvailability reports the budget that a physical model call may add
+// without exceeding the shared run or its current task reservation. Runtimes
+// use it to shrink a requested output ceiling before reserving the call.
+type RunBudgetAvailability interface {
+	Available() Usage
+}
+
+type runBudgetGateContextKey struct{}
+
+// WithRunBudgetGate attaches a shared Workflow budget gate to a Runtime call.
+func WithRunBudgetGate(ctx context.Context, gate RunBudgetGate) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if gate == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, runBudgetGateContextKey{}, gate)
+}
+
+// RunBudgetGateFromContext returns the shared Workflow gate, if any.
+func RunBudgetGateFromContext(ctx context.Context) RunBudgetGate {
+	if ctx == nil {
+		return nil
+	}
+	gate, _ := ctx.Value(runBudgetGateContextKey{}).(RunBudgetGate)
+	return gate
+}
+
+// RunBudgetUsageGateFromContext returns the call-accounting gate, if any.
+func RunBudgetUsageGateFromContext(ctx context.Context) RunBudgetUsageGate {
+	if ctx == nil {
+		return nil
+	}
+	gate, _ := ctx.Value(runBudgetGateContextKey{}).(RunBudgetUsageGate)
+	return gate
+}
+
 type RunPolicy struct {
+	// OutputMode distinguishes direct user delivery from a structured Workflow
+	// node. It does not create a second execution runtime.
+	OutputMode RunOutputMode `json:"output_mode,omitempty"`
 	// EvidenceRequired forbids an unsupported successful conclusion.
 	EvidenceRequired bool `json:"evidence_required"`
 	// EvidenceSeeded records that admitted evidence existed before tool execution.
@@ -91,8 +165,12 @@ type RunLimits struct {
 	Deadline       time.Time `json:"deadline,omitempty"`
 	MaxSteps       int       `json:"max_steps,omitempty"`
 	MaxToolCalls   int64     `json:"max_tool_calls,omitempty"`
-	MaxTotalTokens int64     `json:"max_total_tokens,omitempty"`
-	MaxCostMicros  int64     `json:"max_cost_micros,omitempty"`
+	MaxInputTokens int64     `json:"max_input_tokens,omitempty"`
+	// MaxContextTokens limits one provider request; MaxInputTokens remains the
+	// cumulative input budget for the whole Run.
+	MaxContextTokens int64 `json:"max_context_tokens,omitempty"`
+	MaxTotalTokens   int64 `json:"max_total_tokens,omitempty"`
+	MaxCostMicros    int64 `json:"max_cost_micros,omitempty"`
 }
 
 // RunDelegation pins the immutable capability identity and parent relation for
@@ -234,18 +312,35 @@ type EvidenceConflict struct {
 
 // RunResult is the durable public outcome of one Agent Run.
 type RunResult struct {
-	RunID               string               `json:"run_id"`
-	Status              RunStatus            `json:"status"`
-	Output              json.RawMessage      `json:"output,omitempty"`
-	Text                string               `json:"text,omitempty"`
-	Evidence            EvidenceSummary      `json:"evidence"`
-	EvidenceUnits       []tool.EvidenceUnit  `json:"evidence_units,omitempty"`
-	EvidenceConflicts   []EvidenceConflict   `json:"evidence_conflicts,omitempty"`
-	References          []Reference          `json:"references,omitempty"`
-	Messages            []Message            `json:"messages,omitempty"`
-	DelegationAdoptions []DelegationAdoption `json:"delegation_adoptions,omitempty"`
-	Usage               Usage                `json:"usage"`
-	Error               *RunError            `json:"error,omitempty"`
+	RunID                string                `json:"run_id"`
+	Status               RunStatus             `json:"status"`
+	Output               json.RawMessage       `json:"output,omitempty"`
+	Text                 string                `json:"text,omitempty"`
+	Evidence             EvidenceSummary       `json:"evidence"`
+	EvidenceUnits        []tool.EvidenceUnit   `json:"evidence_units,omitempty"`
+	EvidenceObservations []EvidenceObservation `json:"evidence_observations,omitempty"`
+	EvidenceConflicts    []EvidenceConflict    `json:"evidence_conflicts,omitempty"`
+	References           []Reference           `json:"references,omitempty"`
+	Messages             []Message             `json:"messages,omitempty"`
+	DelegationAdoptions  []DelegationAdoption  `json:"delegation_adoptions,omitempty"`
+	Usage                Usage                 `json:"usage"`
+	Error                *RunError             `json:"error,omitempty"`
+}
+
+// EvidenceObservation is the bounded content projection a workflow worker
+// hands to downstream verification. It deliberately omits messages, prompts,
+// tool arguments, and full authoritative tool payloads.
+type EvidenceObservation struct {
+	SourceKind    string   `json:"source_kind"`
+	Target        string   `json:"target"`
+	Section       string   `json:"section,omitempty"`
+	Summary       string   `json:"summary"`
+	ContentHash   string   `json:"content_hash,omitempty"`
+	Facets        []string `json:"facets,omitempty"`
+	TrustTier     int      `json:"trust_tier,omitempty"`
+	EvidenceClass string   `json:"evidence_class,omitempty"`
+	Version       string   `json:"version,omitempty"`
+	TimeRange     string   `json:"time_range,omitempty"`
 }
 
 // Runtime executes one already-compiled request against a pinned definition.

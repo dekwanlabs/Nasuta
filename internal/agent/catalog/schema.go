@@ -6,9 +6,9 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
-// DefaultSchemas returns the versioned contracts shipped with the standard Agent definitions.
+// DefaultSchemas returns the schemas supported by the current runtime.
 func DefaultSchemas() []agentapi.SchemaDefinition {
-	return []agentapi.SchemaDefinition{
+	schemas := []agentapi.SchemaDefinition{
 		{
 			ID: "qa.request", Version: 1,
 			Document: json.RawMessage(`{
@@ -28,17 +28,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 			}`),
 		},
 		{
-			ID: "investigation.request", Version: 1,
-			Document: json.RawMessage(`{
-				"$schema":"https://json-schema.org/draft/2020-12/schema",
-				"type":"object",
-				"required":["question"],
-				"properties":{"question":{"type":"string","minLength":1,"maxLength":8000}},
-				"additionalProperties":false
-			}`),
-		},
-		{
-			ID: "task.contract", Version: 1,
+			ID: agentapi.TaskContractSchemaID, Version: agentapi.TaskContractSchemaVersion,
 			Document: json.RawMessage(`{
 				"$schema":"https://json-schema.org/draft/2020-12/schema",
 				"type":"object",
@@ -107,10 +97,17 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"maxItems":50,
 						"items":{
 							"type":"object",
-							"required":["id","facet","required","sources","freshness","minimum_coverage"],
+							"required":["id","facet","facets","required","sources","freshness","minimum_coverage"],
 							"properties":{
 								"id":{"type":"string","minLength":1},
 								"facet":{"type":"string","minLength":1},
+								"facets":{
+									"type":"array",
+									"minItems":1,
+									"maxItems":50,
+									"uniqueItems":true,
+									"items":{"type":"string","minLength":1}
+								},
 								"required":{"type":"boolean"},
 								"sources":{
 									"type":"array",
@@ -130,6 +127,11 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							},
 							"additionalProperties":false
 						}
+					},
+					"input_refs":{
+						"type":"array",
+						"maxItems":200,
+						"items":{"$ref":"#/$defs/evidence_ref"}
 					},
 					"task_evidence_assignments":{
 						"type":"array",
@@ -332,23 +334,23 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 			}`),
 		},
 		{
-			ID: "investigation.report", Version: 1,
+			ID: agentapi.InvestigationReportSchemaID, Version: agentapi.InvestigationReportSchemaVersion,
 			Document: json.RawMessage(`{
 				"$schema":"https://json-schema.org/draft/2020-12/schema",
 				"type":"object",
-				"required":["focus","summary","findings","gaps","covered_goals","unresolved_goals"],
+				"required":["focus","summary","findings","gaps","covered_evidence_goals","unresolved_evidence_goals"],
 				"properties":{
 					"focus":{"enum":["code","runtime","docs","web","memory"]},
 					"summary":{"type":"string","minLength":1},
 					"findings":{"type":"array","maxItems":50,"items":{"$ref":"#/$defs/finding"}},
 					"gaps":{"type":"array","maxItems":20,"items":{"type":"string","minLength":1}},
-					"covered_goals":{
+					"covered_evidence_goals":{
 						"type":"array",
 						"maxItems":50,
 						"uniqueItems":true,
 						"items":{"type":"string","minLength":1}
 					},
-					"unresolved_goals":{
+					"unresolved_evidence_goals":{
 						"type":"array",
 						"maxItems":50,
 						"uniqueItems":true,
@@ -383,7 +385,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					},
 					"finding":{
 						"type":"object",
-						"required":["claim","goal_ids","evidence","confidence"],
+						"required":["claim","evidence_goal_ids","evidence","confidence"],
 						"properties":{
 							"claim":{"type":"string","minLength":1},
 							"entity_ids":{
@@ -392,7 +394,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 								"uniqueItems":true,
 								"items":{"type":"string","minLength":1}
 							},
-							"goal_ids":{
+							"evidence_goal_ids":{
 								"type":"array",
 								"minItems":1,
 								"maxItems":50,
@@ -542,7 +544,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					"decision_question":{"type":"string","minLength":1,"maxLength":2000},
 					"claims":{
 						"type":"array",
-						"maxItems":40,
+						"maxItems":8,
 						"items":{
 							"type":"object",
 							"required":["id","statement","citations"],
@@ -605,10 +607,10 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 				"type":"object",
 				"required":["summary","verdicts","uncertainties"],
 				"properties":{
-					"summary":{"type":"string","minLength":1,"maxLength":8000},
+					"summary":{"type":"string","minLength":1,"maxLength":1000},
 					"verdicts":{
 						"type":"array",
-						"maxItems":40,
+						"maxItems":8,
 						"items":{
 							"type":"object",
 							"required":["claim_ids","decision","rationale","evidence_refs"],
@@ -621,7 +623,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 									"items":{"type":"string","minLength":1,"maxLength":256}
 								},
 								"decision":{"enum":["supported","contradicted","distinct","unresolved"]},
-								"rationale":{"type":"string","minLength":1,"maxLength":4000},
+								"rationale":{"type":"string","minLength":1,"maxLength":512},
 								"evidence_refs":{
 									"type":"array",
 									"maxItems":20,
@@ -634,8 +636,8 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					},
 					"uncertainties":{
 						"type":"array",
-						"maxItems":20,
-						"items":{"type":"string","minLength":1,"maxLength":2000}
+						"maxItems":4,
+						"items":{"type":"string","minLength":1,"maxLength":512}
 					}
 				},
 				"additionalProperties":false
@@ -711,7 +713,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 			}`),
 		},
 		{
-			ID: "investigation.bundle", Version: 1,
+			ID: agentapi.InvestigationBundleSchemaID, Version: agentapi.InvestigationBundleSchemaVersion,
 			Document: json.RawMessage(`{
 				"$schema":"https://json-schema.org/draft/2020-12/schema",
 				"type":"object",
@@ -804,19 +806,19 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					},
 					"report":{
 						"type":"object",
-						"required":["focus","summary","findings","gaps","covered_goals","unresolved_goals"],
+						"required":["focus","summary","findings","gaps","covered_evidence_goals","unresolved_evidence_goals"],
 						"properties":{
 							"focus":{"enum":["code","runtime","docs","web","memory"]},
 							"summary":{"type":"string","minLength":1},
 							"findings":{"type":"array","maxItems":50,"items":{"$ref":"#/$defs/finding"}},
 							"gaps":{"type":"array","maxItems":20,"items":{"type":"string","minLength":1}},
-							"covered_goals":{
+							"covered_evidence_goals":{
 								"type":"array",
 								"maxItems":50,
 								"uniqueItems":true,
 								"items":{"type":"string","minLength":1}
 							},
-							"unresolved_goals":{
+							"unresolved_evidence_goals":{
 								"type":"array",
 								"maxItems":50,
 								"uniqueItems":true,
@@ -892,7 +894,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					},
 					"finding":{
 						"type":"object",
-						"required":["claim","goal_ids","evidence","confidence"],
+						"required":["claim","evidence_goal_ids","evidence","confidence"],
 						"properties":{
 							"claim":{"type":"string","minLength":1},
 							"entity_ids":{
@@ -901,7 +903,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 								"uniqueItems":true,
 								"items":{"type":"string","minLength":1}
 							},
-							"goal_ids":{
+							"evidence_goal_ids":{
 								"type":"array",
 								"minItems":1,
 								"maxItems":50,
@@ -917,323 +919,15 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 			}`),
 		},
 		{
-			ID: "investigation.verified_bundle", Version: 1,
-			Document: json.RawMessage(`{
-				"$schema":"https://json-schema.org/draft/2020-12/schema",
-				"type":"object",
-				"required":[
-					"supported_claims",
-					"partial_claims",
-					"unsupported_claims",
-					"partial_goals",
-					"unresolved_goals",
-					"limitations",
-					"evidence_units",
-					"evidence_conflicts",
-					"omissions",
-					"verification",
-					"completeness"
-				],
-				"properties":{
-					"supported_claims":{
-						"type":"array",
-						"maxItems":200,
-						"items":{"$ref":"#/$defs/supported_claim"}
-					},
-					"partial_claims":{
-						"type":"array",
-						"maxItems":200,
-						"items":{"$ref":"#/$defs/supported_claim"}
-					},
-					"unsupported_claims":{
-						"type":"array",
-						"maxItems":200,
-						"items":{"$ref":"#/$defs/unsupported_claim"}
-					},
-					"partial_goals":{
-						"type":"array",
-						"maxItems":50,
-						"uniqueItems":true,
-						"items":{"type":"string","minLength":1}
-					},
-					"unresolved_goals":{
-						"type":"array",
-						"maxItems":50,
-						"uniqueItems":true,
-						"items":{"type":"string","minLength":1}
-					},
-					"limitations":{
-						"type":"array",
-						"maxItems":100,
-						"uniqueItems":true,
-						"items":{"type":"string","minLength":1}
-					},
-					"evidence_units":{
-						"type":"array",
-						"maxItems":200,
-						"items":{"$ref":"#/$defs/evidence_unit"}
-					},
-					"evidence_conflicts":{
-						"type":"array",
-						"maxItems":100,
-						"items":{"$ref":"#/$defs/evidence_conflict"}
-					},
-					"omissions":{
-						"type":"object",
-						"required":[
-							"claims",
-							"goals",
-							"limitations",
-							"evidence_units",
-							"evidence_conflicts"
-						],
-						"properties":{
-							"claims":{"type":"integer","minimum":0},
-							"goals":{"type":"integer","minimum":0},
-							"limitations":{"type":"integer","minimum":0},
-							"evidence_units":{"type":"integer","minimum":0},
-							"evidence_conflicts":{"type":"integer","minimum":0}
-						},
-						"additionalProperties":false
-					},
-					"verification":{
-						"type":"object",
-						"required":["decision","stop_reason"],
-						"properties":{
-							"decision":{"enum":["complete","partial","unavailable"]},
-							"stop_reason":{"enum":[
-								"required_goals_covered",
-								"no_new_evidence",
-								"no_affordable_task",
-								"duplicate_evidence_limit",
-								"verification_failed",
-								"deadline_exceeded",
-								"budget_exhausted",
-								"capability_unavailable",
-								"needs_clarification"
-							]}
-						},
-						"additionalProperties":false
-					},
-					"completeness":{"enum":["complete","partial","unavailable"]}
-				},
-				"additionalProperties":false,
-				"$defs":{
-					"evidence":{
-						"type":"object",
-						"required":["kind","reference","summary"],
-						"properties":{
-							"kind":{"type":"string","minLength":1},
-							"reference":{"type":"string","minLength":1},
-							"summary":{"type":"string","minLength":1},
-							"identity":{"$ref":"#/$defs/evidence_identity"}
-						},
-						"additionalProperties":false
-					},
-					"supported_claim":{
-						"type":"object",
-						"required":[
-							"producer_node_id",
-							"finding_index",
-							"claim",
-							"goal_ids",
-							"evidence",
-							"evidence_identities",
-							"confidence",
-							"support",
-							"high_risk"
-						],
-						"properties":{
-							"producer_node_id":{"type":"string","minLength":1},
-							"finding_index":{"type":"integer","minimum":0},
-							"claim":{"type":"string","minLength":1},
-							"goal_ids":{
-								"type":"array",
-								"minItems":1,
-								"maxItems":50,
-								"uniqueItems":true,
-								"items":{"type":"string","minLength":1}
-							},
-							"evidence":{
-								"type":"array",
-								"minItems":1,
-								"maxItems":20,
-								"items":{"$ref":"#/$defs/evidence"}
-							},
-							"evidence_identities":{
-								"type":"array",
-								"minItems":1,
-								"maxItems":200,
-								"uniqueItems":true,
-								"items":{"$ref":"#/$defs/evidence_identity"}
-							},
-							"confidence":{"type":"number","minimum":0,"maximum":1},
-							"support":{"enum":["supported","partial"]},
-							"high_risk":{"type":"boolean"}
-						},
-						"additionalProperties":false
-					},
-					"unsupported_claim":{
-						"type":"object",
-						"required":[
-							"producer_node_id",
-							"finding_index",
-							"goal_ids",
-							"support",
-							"high_risk",
-							"reason_code"
-						],
-						"properties":{
-							"producer_node_id":{"type":"string","minLength":1},
-							"finding_index":{"type":"integer","minimum":0},
-							"goal_ids":{
-								"type":"array",
-								"minItems":1,
-								"maxItems":50,
-								"uniqueItems":true,
-								"items":{"type":"string","minLength":1}
-							},
-							"support":{"const":"unsupported"},
-							"high_risk":{"type":"boolean"},
-							"reason_code":{"const":"canonical_evidence_unbound"}
-						},
-						"additionalProperties":false
-					},
-					"coverage":{
-						"type":"object",
-						"properties":{
-							"complete":{"type":"boolean"},
-							"partial":{"type":"boolean"},
-							"included":{"type":"integer","minimum":0},
-							"omitted_items":{"type":"integer","minimum":0},
-							"next_cursor":{"type":"string"}
-						},
-						"additionalProperties":false
-					},
-					"evidence_unit":{
-						"type":"object",
-						"required":["source_kind","target","coverage"],
-						"properties":{
-							"source_kind":{"type":"string","minLength":1},
-							"target":{"type":"string","minLength":1},
-							"sections":{"type":"array","items":{"type":"string","minLength":1}},
-							"content_hash":{"type":"string"},
-							"coverage":{"$ref":"#/$defs/coverage"},
-							"facets":{"type":"array","items":{"type":"string","minLength":1}},
-							"trust_tier":{"type":"integer","minimum":0},
-							"evidence_class":{"type":"string"},
-							"token_cost":{"type":"integer","minimum":0},
-							"version":{"type":"string"},
-							"time_range":{"type":"string"}
-						},
-						"additionalProperties":false
-					},
-					"evidence_identity":{
-						"type":"object",
-						"required":["source_kind","target"],
-						"properties":{
-							"source_kind":{"type":"string","minLength":1},
-							"target":{"type":"string","minLength":1},
-							"section":{"type":"string"},
-							"version":{"type":"string"},
-							"time_range":{"type":"string"}
-						},
-						"additionalProperties":false
-					},
-					"evidence_conflict":{
-						"type":"object",
-						"required":["identity","current","incoming"],
-						"properties":{
-							"identity":{"$ref":"#/$defs/evidence_identity"},
-							"current":{"$ref":"#/$defs/evidence_unit"},
-							"incoming":{"$ref":"#/$defs/evidence_unit"},
-							"current_origin":{"type":"string"},
-							"incoming_origin":{"type":"string"}
-						},
-						"additionalProperties":false
-					}
-				}
-			}`),
-		},
-		{
-			ID: "investigation.verified_bundle", Version: 2,
-			Document: json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["supported_claims","partial_claims","unsupported_claims","partial_goals","unresolved_goals","limitations","evidence_units","evidence_conflicts","omissions","verification","completeness","limitations_detail"],"properties":{"supported_claims":{"type":"array","maxItems":200,"items":{"$ref":"#/$defs/supported_claim"}},"partial_claims":{"type":"array","maxItems":200,"items":{"$ref":"#/$defs/supported_claim"}},"unsupported_claims":{"type":"array","maxItems":200,"items":{"$ref":"#/$defs/unsupported_claim"}},"partial_goals":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},"unresolved_goals":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},"limitations":{"type":"array","maxItems":10,"uniqueItems":true,"items":{"type":"string","minLength":1}},"evidence_units":{"type":"array","maxItems":200,"items":{"$ref":"#/$defs/evidence_unit"}},"evidence_conflicts":{"type":"array","maxItems":100,"items":{"$ref":"#/$defs/evidence_conflict"}},"subject_coverage":{"type":"array","maxItems":50,"items":{"type":"object","required":["entity_id","covered_facets","missing_facets","sources","complete"],"properties":{"entity_id":{"type":"string","minLength":1},"covered_facets":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"missing_facets":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"sources":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"complete":{"type":"boolean"}},"additionalProperties":false}},"omissions":{"type":"object","required":["claims","goals","limitations","evidence_units","evidence_conflicts"],"properties":{"claims":{"type":"integer","minimum":0},"goals":{"type":"integer","minimum":0},"limitations":{"type":"integer","minimum":0},"evidence_units":{"type":"integer","minimum":0},"evidence_conflicts":{"type":"integer","minimum":0}},"additionalProperties":false},"verification":{"type":"object","required":["decision","stop_reason"],"properties":{"decision":{"enum":["complete","partial","unavailable"]},"stop_reason":{"enum":["required_goals_covered","no_new_evidence","no_affordable_task","duplicate_evidence_limit","verification_failed","deadline_exceeded","budget_exhausted","capability_unavailable","evidence_insufficient","needs_clarification"]}},"additionalProperties":false},"completeness":{"enum":["complete","partial","unavailable"]},"limitations_detail":{"type":"object","required":["artifact_id","total_count","displayed_count","omitted_count","normalization_version"],"properties":{"artifact_id":{"type":"string","pattern":"^art_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},"total_count":{"type":"integer","minimum":0},"displayed_count":{"type":"integer","minimum":0},"omitted_count":{"type":"integer","minimum":0},"normalization_version":{"type":"string","minLength":1}},"additionalProperties":false}},"additionalProperties":false,"$defs":{"evidence":{"type":"object","required":["kind","reference","summary"],"properties":{"kind":{"type":"string","minLength":1},"reference":{"type":"string","minLength":1},"summary":{"type":"string","minLength":1},"identity":{"$ref":"#/$defs/evidence_identity"}},"additionalProperties":false},"supported_claim":{"type":"object","required":["producer_node_id","finding_index","claim","goal_ids","evidence","evidence_identities","confidence","support","high_risk"],"properties":{"producer_node_id":{"type":"string","minLength":1},"finding_index":{"type":"integer","minimum":0},"claim":{"type":"string","minLength":1},"goal_ids":{"type":"array","minItems":1,"maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},"evidence":{"type":"array","minItems":1,"maxItems":20,"items":{"$ref":"#/$defs/evidence"}},"evidence_identities":{"type":"array","minItems":1,"maxItems":200,"uniqueItems":true,"items":{"$ref":"#/$defs/evidence_identity"}},"confidence":{"type":"number","minimum":0,"maximum":1},"support":{"enum":["supported","partial"]},"high_risk":{"type":"boolean"}},"additionalProperties":false},"unsupported_claim":{"type":"object","required":["producer_node_id","finding_index","goal_ids","support","high_risk","reason_code"],"properties":{"producer_node_id":{"type":"string","minLength":1},"finding_index":{"type":"integer","minimum":0},"goal_ids":{"type":"array","minItems":1,"maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},"support":{"const":"unsupported"},"high_risk":{"type":"boolean"},"reason_code":{"const":"canonical_evidence_unbound"}},"additionalProperties":false},"coverage":{"type":"object","properties":{"complete":{"type":"boolean"},"partial":{"type":"boolean"},"included":{"type":"integer","minimum":0},"omitted_items":{"type":"integer","minimum":0},"next_cursor":{"type":"string"}},"additionalProperties":false},"evidence_unit":{"type":"object","required":["source_kind","target","coverage"],"properties":{"source_kind":{"type":"string","minLength":1},"target":{"type":"string","minLength":1},"sections":{"type":"array","items":{"type":"string","minLength":1}},"content_hash":{"type":"string"},"coverage":{"$ref":"#/$defs/coverage"},"facets":{"type":"array","items":{"type":"string","minLength":1}},"trust_tier":{"type":"integer","minimum":0},"evidence_class":{"type":"string"},"token_cost":{"type":"integer","minimum":0},"version":{"type":"string"},"time_range":{"type":"string"}},"additionalProperties":false},"evidence_identity":{"type":"object","required":["source_kind","target"],"properties":{"source_kind":{"type":"string","minLength":1},"target":{"type":"string","minLength":1},"section":{"type":"string"},"version":{"type":"string"},"time_range":{"type":"string"}},"additionalProperties":false},"evidence_conflict":{"type":"object","required":["identity","current","incoming"],"properties":{"identity":{"$ref":"#/$defs/evidence_identity"},"current":{"$ref":"#/$defs/evidence_unit"},"incoming":{"$ref":"#/$defs/evidence_unit"},"current_origin":{"type":"string"},"incoming_origin":{"type":"string"}},"additionalProperties":false}}}`),
+			ID: agentapi.InvestigationVerifiedBundleSchemaID, Version: agentapi.InvestigationVerifiedBundleSchemaVersion,
+			Document: verifiedBundleSchema(),
 		},
 		{
 			ID: "investigation.limitations.detail", Version: 1,
 			Document: json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["schema_id","schema_version","workflow_run_id","normalization_version","raw_count","deduplicated_count","merged_count","displayed_count","omitted_count","limitations"],"properties":{"schema_id":{"const":"investigation.limitations.detail"},"schema_version":{"const":1},"workflow_run_id":{"type":"string","minLength":1},"normalization_version":{"type":"string","minLength":1},"raw_count":{"type":"integer","minimum":0},"deduplicated_count":{"type":"integer","minimum":0},"merged_count":{"type":"integer","minimum":0},"displayed_count":{"type":"integer","minimum":0},"omitted_count":{"type":"integer","minimum":0},"limitations":{"type":"array","maxItems":100,"items":{"$ref":"#/$defs/limitation_record"}}},"additionalProperties":false,"$defs":{"limitation_record":{"type":"object","required":["id","text","severity","category","confidence","merge_key","displayed","rank"],"properties":{"id":{"type":"string","minLength":1},"text":{"type":"string","minLength":1},"severity":{"enum":["critical","high","medium","low"]},"category":{"type":"string","minLength":1},"confidence":{"type":"number","minimum":0,"maximum":1},"evidence_refs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"producer_node_ids":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"merge_key":{"type":"string","minLength":1},"merged_from_ids":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"merge_reason":{"type":"string"},"merge_method":{"type":"string","minLength":1},"displayed":{"type":"boolean"},"rank":{"type":"integer","minimum":1}},"additionalProperties":false}}}`),
 		},
 		{
-			ID: "investigation.answer", Version: 1,
-			Document: json.RawMessage(`{
-				"$schema":"https://json-schema.org/draft/2020-12/schema",
-				"type":"object",
-				"required":["answer","citations","limitations"],
-				"properties":{
-					"answer":{"type":"string","minLength":1},
-					"citations":{"type":"array","maxItems":50,"items":{
-						"type":"object",
-						"required":["claim","evidence"],
-						"properties":{
-							"claim":{"type":"string","minLength":1},
-							"evidence":{"type":"array","minItems":1,"maxItems":20,"items":{
-								"type":"object",
-								"required":["kind","reference","summary"],
-								"properties":{
-									"kind":{"type":"string","minLength":1},
-									"reference":{"type":"string","minLength":1},
-									"summary":{"type":"string","minLength":1}
-								},
-								"additionalProperties":false
-							}}
-						},
-						"additionalProperties":false
-					}},
-					"limitations":{"type":"array","maxItems":20,"items":{"type":"string","minLength":1}}
-				},
-				"additionalProperties":false
-			}`),
-		},
-		{
-			// Version 1 capped limitations at 20 while the verified-bundle input
-			// correctly permits up to 100. Keep v1 immutable for pinned runs and
-			// widen the successor so synthesis can faithfully carry all verified
-			// material limitations.
-			ID: "investigation.answer", Version: 2,
-			CompatibleFrom: []agentapi.SchemaRef{{
-				ID: "investigation.answer", Version: 1,
-			}},
-			Document: json.RawMessage(`{
-				"$schema":"https://json-schema.org/draft/2020-12/schema",
-				"type":"object",
-				"required":["answer","citations","limitations"],
-				"properties":{
-					"answer":{"type":"string","minLength":1},
-					"citations":{"type":"array","maxItems":50,"items":{
-						"type":"object",
-						"required":["claim","evidence"],
-						"properties":{
-							"claim":{"type":"string","minLength":1},
-							"evidence":{"type":"array","minItems":1,"maxItems":20,"items":{
-								"type":"object",
-								"required":["kind","reference","summary"],
-								"properties":{
-									"kind":{"type":"string","minLength":1},
-									"reference":{"type":"string","minLength":1},
-									"summary":{"type":"string","minLength":1}
-								},
-								"additionalProperties":false
-							}}
-						},
-						"additionalProperties":false
-					}},
-					"limitations":{"type":"array","maxItems":100,"items":{"type":"string","minLength":1}}
-				},
-				"additionalProperties":false
-			}`),
-		},
-		{
-			ID: "investigation.answer", Version: 3,
+			ID: agentapi.InvestigationAnswerSchemaID, Version: agentapi.InvestigationAnswerSchemaVersion,
 			Document: json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["answer","citations","limitations","limitations_detail"],"properties":{"answer":{"type":"string","minLength":1},"citations":{"type":"array","maxItems":50,"items":{"type":"object","required":["claim","evidence"],"properties":{"claim":{"type":"string","minLength":1},"evidence":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","required":["kind","reference","summary"],"properties":{"kind":{"type":"string","minLength":1},"reference":{"type":"string","minLength":1},"summary":{"type":"string","minLength":1}},"additionalProperties":false}}},"additionalProperties":false}},"limitations":{"type":"array","maxItems":10,"items":{"type":"string","minLength":1}},"limitations_detail":{"type":"object","required":["artifact_id","total_count","displayed_count","omitted_count","normalization_version"],"properties":{"artifact_id":{"type":"string","pattern":"^art_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},"total_count":{"type":"integer","minimum":0},"displayed_count":{"type":"integer","minimum":0},"omitted_count":{"type":"integer","minimum":0},"normalization_version":{"type":"string","minLength":1}},"additionalProperties":false}},"additionalProperties":false}`),
 		},
 		{
@@ -1374,4 +1068,5 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 			}`),
 		},
 	}
+	return schemas
 }

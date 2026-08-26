@@ -13,8 +13,9 @@ func TestPlanCompilerCompileProposalPreservesGraphAndContract(t *testing.T) {
 		t.Fatalf("register templates: %v", err)
 	}
 	contract := InvestigationContract{
-		ID: "run-proposal", Question: "trace the entrypoint", MaxTasks: 4,
-		Goals: []EvidenceGoal{{
+		Version: InvestigationContractVersion,
+		ID:      "run-proposal", Question: "trace the entrypoint", MaxTasks: 4,
+		EvidenceGoals: []EvidenceGoal{{
 			ID: "entrypoint", Kind: GoalKindEntrypoint, Facets: []string{"entrypoint"},
 			Sources:   []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal},
 			Freshness: agentapi.FreshnessStable, Required: true,
@@ -95,8 +96,9 @@ func TestCompileProposalBindsExplicitGoalsAndFreezesStopPolicy(t *testing.T) {
 		t.Fatalf("register templates: %v", err)
 	}
 	contract := InvestigationContract{
-		ID: "run-policy", Question: "inspect one goal",
-		Goals: []EvidenceGoal{
+		Version: InvestigationContractVersion,
+		ID:      "run-policy", Question: "inspect one goal",
+		EvidenceGoals: []EvidenceGoal{
 			{ID: "entry", Kind: GoalKindEntrypoint, Facets: []string{"entrypoint"}, Required: true},
 			{ID: "runtime", Kind: GoalKindRuntimeOperations, Facets: []string{"runtime"}},
 		},
@@ -111,7 +113,7 @@ func TestCompileProposalBindsExplicitGoalsAndFreezesStopPolicy(t *testing.T) {
 	proposal := agentapi.TaskGraphProposal{
 		Tasks: []agentapi.TaskSpec{{
 			ID: "inspect", Purpose: "inspect the entrypoint", Capability: "knowledge.code.inspect",
-			InvestigationGoalIDs: []string{"entry"}, RequiredFacets: []string{"entrypoint"},
+			EvidenceGoalIDs: []string{"entry"}, RequiredFacets: []string{"entrypoint"},
 			MaxAttempts: 5,
 		}},
 		Stop: agentapi.StopPolicy{
@@ -124,8 +126,8 @@ func TestCompileProposalBindsExplicitGoalsAndFreezesStopPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile proposal: %v", err)
 	}
-	if len(plan.Tasks[0].GoalIDs) != 1 || plan.Tasks[0].GoalIDs[0] != "entry" {
-		t.Fatalf("explicit goal binding = %+v", plan.Tasks[0].GoalIDs)
+	if len(plan.Tasks[0].EvidenceGoalIDs) != 1 || plan.Tasks[0].EvidenceGoalIDs[0] != "entry" {
+		t.Fatalf("explicit goal binding = %+v", plan.Tasks[0].EvidenceGoalIDs)
 	}
 	if plan.Tasks[0].Budget.MaxAttempts != 2 {
 		t.Fatalf("max retries was not converted to attempts: %d", plan.Tasks[0].Budget.MaxAttempts)
@@ -143,9 +145,11 @@ func TestCompileProposalRejectsUnknownSourceToSynthesize(t *testing.T) {
 	if err := RegisterDefaultInvestigationTemplates(catalog); err != nil {
 		t.Fatalf("register templates: %v", err)
 	}
-	contract := InvestigationContract{ID: "run-edge", Question: "inspect", Goals: []EvidenceGoal{{
-		ID: "entry", Kind: GoalKindEntrypoint, Required: true,
-	}}}
+	contract := InvestigationContract{
+		Version: InvestigationContractVersion,
+		ID:      "run-edge", Question: "inspect", EvidenceGoals: []EvidenceGoal{{
+			ID: "entry", Kind: GoalKindEntrypoint, Required: true,
+		}}}
 	schemas := agentapi.NewSchemaRegistry()
 	if err := schemas.Publish([]agentapi.SchemaDefinition{
 		{ID: DefaultTaskInputSchema, Version: 1, Document: json.RawMessage(`{"type":"object"}`)},
@@ -167,9 +171,11 @@ func TestCompileProposalRejectsPlannerOutputSchemaOverride(t *testing.T) {
 	if err := RegisterDefaultInvestigationTemplates(catalog); err != nil {
 		t.Fatalf("register templates: %v", err)
 	}
-	contract := InvestigationContract{ID: "run-schema", Question: "inspect", Goals: []EvidenceGoal{{
-		ID: "entry", Kind: GoalKindEntrypoint, Facets: []string{"entrypoint"}, Required: true,
-	}}}
+	contract := InvestigationContract{
+		Version: InvestigationContractVersion,
+		ID:      "run-schema", Question: "inspect", EvidenceGoals: []EvidenceGoal{{
+			ID: "entry", Kind: GoalKindEntrypoint, Facets: []string{"entrypoint"}, Required: true,
+		}}}
 	_, err := (PlanCompiler{Catalog: catalog, Schemas: testSchemas()}).CompileProposal(contract, agentapi.TaskGraphProposal{
 		Tasks: []agentapi.TaskSpec{{
 			ID: "inspect", Purpose: "inspect", Capability: "knowledge.code.inspect",
@@ -181,14 +187,31 @@ func TestCompileProposalRejectsPlannerOutputSchemaOverride(t *testing.T) {
 	}
 }
 
+func TestValidateProposalOutputSchemaAcceptsCurrentServerOwnedSchema(t *testing.T) {
+	task := agentapi.TaskSpec{
+		ID:           "inspect",
+		OutputSchema: agentapi.InvestigationReportSchemaRef(),
+	}
+	if err := validateProposalOutputSchema(task); err != nil {
+		t.Fatalf("current server-owned schema rejected: %v", err)
+	}
+
+	task.OutputSchema.Version--
+	if err := validateProposalOutputSchema(task); err == nil {
+		t.Fatal("obsolete server-owned schema was accepted")
+	}
+}
+
 func TestCompileProposalRejectsDuplicateEdges(t *testing.T) {
 	catalog := NewTaskTemplateCatalog()
 	if err := RegisterDefaultInvestigationTemplates(catalog); err != nil {
 		t.Fatalf("register templates: %v", err)
 	}
-	contract := InvestigationContract{ID: "run-duplicate-edge", Question: "inspect", Goals: []EvidenceGoal{{
-		ID: "entry", Kind: GoalKindEntrypoint, Facets: []string{"entrypoint"}, Required: true,
-	}}}
+	contract := InvestigationContract{
+		Version: InvestigationContractVersion,
+		ID:      "run-duplicate-edge", Question: "inspect", EvidenceGoals: []EvidenceGoal{{
+			ID: "entry", Kind: GoalKindEntrypoint, Facets: []string{"entrypoint"}, Required: true,
+		}}}
 	_, err := (PlanCompiler{Catalog: catalog, Schemas: testSchemas()}).CompileProposal(contract, agentapi.TaskGraphProposal{
 		Tasks: []agentapi.TaskSpec{
 			{ID: "inspect", Purpose: "inspect", Capability: "knowledge.code.inspect"},
@@ -209,16 +232,83 @@ func TestCompileProposalRejectsUnknownGoalSelector(t *testing.T) {
 	if err := RegisterDefaultInvestigationTemplates(catalog); err != nil {
 		t.Fatalf("register templates: %v", err)
 	}
-	contract := InvestigationContract{ID: "run-goal", Question: "inspect", Goals: []EvidenceGoal{{
-		ID: "entry", Kind: GoalKindEntrypoint, Facets: []string{"entrypoint"}, Required: true,
-	}}}
+	contract := InvestigationContract{
+		Version: InvestigationContractVersion,
+		ID:      "run-goal", Question: "inspect", EvidenceGoals: []EvidenceGoal{{
+			ID: "entry", Kind: GoalKindEntrypoint, Facets: []string{"entrypoint"}, Required: true,
+		}}}
 	_, err := (PlanCompiler{Catalog: catalog, Schemas: testSchemas()}).CompileProposal(contract, agentapi.TaskGraphProposal{
 		Tasks: []agentapi.TaskSpec{{
 			ID: "inspect", Purpose: "inspect", Capability: "knowledge.code.inspect",
-			InvestigationGoalIDs: []string{"missing"},
+			EvidenceGoalIDs: []string{"missing"},
 		}},
 	})
 	if err == nil {
 		t.Fatal("unknown goal selector was accepted")
+	}
+}
+
+func TestCompileProposalReservesServerVerifierOutsideEvidenceTaskLimit(t *testing.T) {
+	catalog := NewTaskTemplateCatalog()
+	if err := RegisterDefaultInvestigationTemplates(catalog); err != nil {
+		t.Fatalf("register templates: %v", err)
+	}
+	contract := InvestigationContract{
+		Version: InvestigationContractVersion,
+		ID:      "run-three-investigators", Question: "describe the architecture",
+		EvidenceGoals: []EvidenceGoal{
+			{ID: "boundary", Kind: GoalKindSystemBoundary, Required: true},
+			{ID: "domain", Kind: GoalKindBusinessDomain, Required: true},
+			{ID: "flow", Kind: GoalKindCoreFlow, Required: true},
+		},
+	}
+	proposal := agentapi.TaskGraphProposal{
+		Tasks: []agentapi.TaskSpec{
+			{ID: "inspect_boundary", Purpose: "inspect the system boundary", Capability: "knowledge.code.inspect", EvidenceGoalIDs: []string{"boundary"}},
+			{ID: "inspect_domain", Purpose: "inspect the business domain", Capability: "knowledge.docs.verify", EvidenceGoalIDs: []string{"domain"}},
+			{ID: "inspect_flow", Purpose: "inspect the core flow", Capability: "knowledge.service.trace", EvidenceGoalIDs: []string{"flow"}},
+			{ID: "synthesize", Purpose: "compose the answer", Capability: "evidence.synthesize"},
+		},
+		Stop: agentapi.StopPolicy{MaxTasks: 3, MaxParallelism: 3, MaxRounds: 1},
+	}
+	schemas := agentapi.NewSchemaRegistry()
+	if err := schemas.Publish([]agentapi.SchemaDefinition{
+		{ID: DefaultTaskInputSchema, Version: 1, Document: json.RawMessage(`{"type":"object"}`)},
+		{ID: DefaultTaskOutputSchema, Version: 1, Document: json.RawMessage(`{"type":"object"}`)},
+	}); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	plan, err := (PlanCompiler{Catalog: catalog, Schemas: schemas}).CompileProposal(contract, proposal)
+	if err != nil {
+		t.Fatalf("compile proposal: %v", err)
+	}
+	if len(plan.Tasks) != 4 {
+		t.Fatalf("plan task count = %d, want 4 (three evidence tasks plus verifier)", len(plan.Tasks))
+	}
+	verifierCount := 0
+	var verifier ExecutableTask
+	for _, task := range plan.Tasks {
+		if task.Executor == ExecutorVerifier {
+			verifierCount++
+			verifier = task
+		}
+	}
+	if verifierCount != 1 || verifier.ID != "evidence.verify" {
+		t.Fatalf("verifier tasks = %d, task = %#v", verifierCount, verifier)
+	}
+	if len(verifier.Dependencies) != 3 {
+		t.Fatalf("verifier dependencies = %#v, want all evidence tasks", verifier.Dependencies)
+	}
+	for _, id := range []string{"inspect_boundary", "inspect_domain", "inspect_flow"} {
+		found := false
+		for _, dependency := range verifier.Dependencies {
+			if dependency == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("verifier dependencies = %#v, missing %q", verifier.Dependencies, id)
+		}
 	}
 }

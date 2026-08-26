@@ -79,8 +79,9 @@ func TestCodeInvestigationClosedLoop(t *testing.T) {
 	})
 
 	contract := InvestigationContract{
-		ID: "code-entrypoint", Question: "where does hsas-aiot-service call the AI model?",
-		Goals:          []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
+		Version: InvestigationContractVersion,
+		ID:      "code-entrypoint", Question: "where does hsas-aiot-service call the AI model?",
+		EvidenceGoals:  []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
 		AllowedToolIDs: []tool.ToolID{"get_service", "search_code", "get_symbol", "trace_calls"},
 		CreatedAt:      time.Now().UTC(),
 	}
@@ -108,9 +109,10 @@ func TestCodeInvestigationCandidatesFormAcyclicDependencyChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidates, err := catalog.GenerateCandidates(InvestigationContract{
-		ID:       "contract",
-		Question: "where is the AI entry point?",
-		Goals:    []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
+		Version:       InvestigationContractVersion,
+		ID:            "contract",
+		Question:      "where is the AI entry point?",
+		EvidenceGoals: []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
@@ -70,6 +71,10 @@ type QAInvestigationReconciler interface {
 	Reconcile(context.Context, string) error
 }
 
+type QAInvestigationRecovery interface {
+	RecoverActive(context.Context, time.Time, int) error
+}
+
 type QAInvestigationDeliveryReader interface {
 	LoadDelivery(context.Context, string) (investigation.DeliveryResult, error)
 }
@@ -81,6 +86,7 @@ type QARuntime struct {
 	RunStore                *run.Store
 	InvestigationCanceller  QAInvestigationCanceller
 	InvestigationReconciler QAInvestigationReconciler
+	InvestigationRecovery   QAInvestigationRecovery
 	InvestigationReader     QAInvestigationDeliveryReader
 	Sessions                *memory.SessionStore
 	History                 agent.SessionHistory

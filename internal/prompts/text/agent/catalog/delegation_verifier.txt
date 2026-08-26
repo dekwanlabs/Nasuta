@@ -6,3 +6,11 @@ Return exactly one JSON object with only:
 - "uncertainties": array of strings
 
 Every verdict must cite only evidence_refs supplied in the request. Use "unresolved" whenever the bounded evidence does not justify a stronger decision. Do not return markdown or text outside the JSON object.
+
+
+Output bounds are part of the contract, not suggestions:
+- Return at most one verdict for each decision goal, and never more than eight verdicts total.
+- Keep `summary` concise and each `rationale` to one short sentence.
+- Do not repeat evidence statements in the summary or rationale.
+- If the supplied evidence is insufficient or unavailable, return `verdicts: []` and one concise uncertainty.
+- Never emit evidence IDs, hashes, workflow IDs, or other opaque identifiers as prose.

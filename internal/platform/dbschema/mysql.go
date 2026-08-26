@@ -889,7 +889,8 @@ var mysqlSchema = map[MySQLGroup][]string{
 				id             VARCHAR(64) NOT NULL PRIMARY KEY,
 				payload        LONGTEXT    NOT NULL,
 				updated_at     BIGINT      NOT NULL,
-				fencing_token  BIGINT      NOT NULL DEFAULT 0
+				fencing_token  BIGINT      NOT NULL DEFAULT 0,
+				KEY idx_investigation_runs_updated (updated_at, id)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS investigation_events (
 				sequence   BIGINT      NOT NULL AUTO_INCREMENT PRIMARY KEY,

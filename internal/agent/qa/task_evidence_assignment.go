@@ -46,7 +46,7 @@ func assignTaskEvidenceOwners(
 	refSets := make(map[int]map[agentapi.EvidenceRef]struct{})
 	for index := range proposal.Tasks {
 		task := &proposal.Tasks[index]
-		if task.OutputSchema.ID != "investigation.report" {
+		if task.OutputSchema != agentapi.InvestigationReportSchemaRef() {
 			continue
 		}
 		task.InputRefs = []agentapi.EvidenceRef{}

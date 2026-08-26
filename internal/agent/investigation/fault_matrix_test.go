@@ -47,8 +47,9 @@ func TestFaultMatrixReasoningTruncationUsesDeterministicFallback(t *testing.T) {
 		Coverage: []GoalCoverage{{GoalID: "g1", Required: true, Status: GoalCovered, ClaimIDs: []string{"claim-1"}}},
 	}
 	result := (DeliveryGate{}).Deliver(context.Background(), InvestigationContract{
-		ID: "run-truncated", Question: "trace entrypoint",
-		Goals: []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
+		Version: InvestigationContractVersion,
+		ID:      "run-truncated", Question: "trace entrypoint",
+		EvidenceGoals: []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
 	}, report, ComposerFunc(func(context.Context, InvestigationContract, InvestigationReport) (AnswerDraft, error) {
 		return AnswerDraft{}, errors.New("reasoning truncated")
 	}))

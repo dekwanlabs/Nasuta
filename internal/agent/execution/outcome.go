@@ -56,6 +56,8 @@ func OutcomeFor(
 		outcome.Status = run.StatusFailed
 		outcome.ErrorCode = "agent_failed"
 		outcome.Err = result.Err
+	case result.OutputMode == agentapi.RunOutputEvidenceWorker:
+		outcome.Status = run.StatusDone
 	case strings.TrimSpace(result.Answer) == "":
 		outcome.Status = run.StatusFailed
 		outcome.ErrorCode = "empty_output"

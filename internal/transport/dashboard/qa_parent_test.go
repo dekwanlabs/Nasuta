@@ -283,7 +283,7 @@ func serveQAParentRequest(
 	return response
 }
 
-func TestAPIQARunGetProjectsNativeDelivery(t *testing.T) {
+func TestAPIQARunGetProjectsEvidenceInsufficientDeliveryAsDone(t *testing.T) {
 	handler, mock, closeDB := newQAParentHandler(t)
 	defer closeDB()
 	startedAt := time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC)
@@ -300,8 +300,8 @@ func TestAPIQARunGetProjectsNativeDelivery(t *testing.T) {
 		WithArgs("qa_parent", terminal.RunID, int64(1), "run_finished").
 		WillReturnRows(sqlmock.NewRows([]string{"detail_json"}).AddRow(raw))
 	delivery := investigation.DeliveryResult{
-		Status: investigation.DeliveryPartial,
-		Text:   "native investigation delivery",
+		Status: investigation.DeliveryEvidenceInsufficient,
+		Text:   "native investigation delivery is incomplete",
 	}
 	handler.qaRuntimeFn = func() QARuntime {
 		return QARuntime{
@@ -338,8 +338,10 @@ func TestAPIQARunGetProjectsNativeDelivery(t *testing.T) {
 		payload.Data.InvestigationDelivery.Text != delivery.Text ||
 		payload.Data.Terminal == nil ||
 		payload.Data.Terminal.Answer != delivery.Text ||
+		payload.Data.Terminal.Status != run.StatusDone ||
+		payload.Data.Terminal.ErrorCode != "" ||
 		payload.Data.Terminal.InvestigationDelivery == nil {
-		t.Fatalf("response = %+v", payload.Data)
+		t.Fatalf("response = terminal=%#v delivery=%#v", payload.Data.Terminal, payload.Data.InvestigationDelivery)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

@@ -104,7 +104,7 @@ func (executor *AgentExecutor) Execute(
 		contextBlocks = append(contextBlocks, taskBlock)
 	}
 	if request.Node.Agent.ID == "synthesizer" &&
-		request.WorkflowInput.Schema.ID == "task.contract" {
+		request.WorkflowInput.Schema == agentapi.TaskContractSchemaRef() {
 		objectiveBlock, err := contextFromSynthesisObjective(request.WorkflowInput)
 		if err != nil {
 			return NodeResult{}, fmt.Errorf(
@@ -189,7 +189,7 @@ func (executor *AgentExecutor) Execute(
 	}
 	completeness := nodeInput.Completeness
 	if projected.Task != nil &&
-		request.Node.OutputSchema.ID == "investigation.report" &&
+		request.Node.OutputSchema == agentapi.InvestigationReportSchemaRef() &&
 		len(projected.Task.RequiredFacets) > 0 {
 		reportCompleteness, err := reportCompleteness(
 			nodeInput.Payload,
@@ -213,12 +213,12 @@ func (executor *AgentExecutor) Execute(
 			EvidenceConflicts: result.EvidenceConflicts,
 		},
 	})
-	if request.Node.OutputSchema.ID == "investigation.report" &&
+	if request.Node.OutputSchema == agentapi.InvestigationReportSchemaRef() &&
 		completeness == Unavailable &&
 		len(evidenceUnits) > 0 {
 		completeness = Partial
 	}
-	if request.Node.OutputSchema.ID == "investigation.report" {
+	if request.Node.OutputSchema == agentapi.InvestigationReportSchemaRef() {
 		retained, omitted, err := retainReportedEvidence([]Handoff{{
 			ProducerNodeID: request.Node.ID,
 			Schema:         request.Node.OutputSchema,
@@ -263,11 +263,11 @@ type contractCoverage struct {
 }
 
 type reportCoverage struct {
-	CoveredGoals    []string `json:"covered_goals"`
-	UnresolvedGoals []string `json:"unresolved_goals"`
-	Findings        []struct {
-		GoalIDs  []string          `json:"goal_ids"`
-		Evidence []json.RawMessage `json:"evidence"`
+	CoveredEvidenceGoals    []string `json:"covered_evidence_goals"`
+	UnresolvedEvidenceGoals []string `json:"unresolved_evidence_goals"`
+	Findings                []struct {
+		EvidenceGoalIDs []string          `json:"evidence_goal_ids"`
+		Evidence        []json.RawMessage `json:"evidence"`
 	} `json:"findings"`
 }
 
@@ -285,7 +285,7 @@ func reportCompleteness(
 		return "", fmt.Errorf("decode investigation report: %w", err)
 	}
 	status := make(map[string]Completeness, len(required))
-	for _, goal := range report.CoveredGoals {
+	for _, goal := range report.CoveredEvidenceGoals {
 		if _, ok := required[goal]; !ok {
 			return "", fmt.Errorf("covered goal %q was not requested", goal)
 		}
@@ -294,7 +294,7 @@ func reportCompleteness(
 		}
 		status[goal] = Complete
 	}
-	for _, goal := range report.UnresolvedGoals {
+	for _, goal := range report.UnresolvedEvidenceGoals {
 		if _, ok := required[goal]; !ok {
 			return "", fmt.Errorf("unresolved goal %q was not requested", goal)
 		}
@@ -310,13 +310,13 @@ func reportCompleteness(
 	}
 
 	minimum := minimumCoverage(contractPayload)
-	findingCounts := make(map[string]int, len(report.CoveredGoals))
+	findingCounts := make(map[string]int, len(report.CoveredEvidenceGoals))
 	for index, finding := range report.Findings {
 		if len(finding.Evidence) == 0 {
 			return "", fmt.Errorf("finding %d has no concrete evidence", index)
 		}
-		seen := make(map[string]struct{}, len(finding.GoalIDs))
-		for _, goal := range finding.GoalIDs {
+		seen := make(map[string]struct{}, len(finding.EvidenceGoalIDs))
+		for _, goal := range finding.EvidenceGoalIDs {
 			if _, ok := required[goal]; !ok {
 				return "", fmt.Errorf("finding %d references unrequested goal %q", index, goal)
 			}

@@ -22,7 +22,12 @@ func (compiler PlanCompiler) CompileProposal(
 	if len(proposal.Tasks) == 0 {
 		return PlanRevision{}, fmt.Errorf("%w: proposal has no tasks", ErrPlanInvalid)
 	}
-	goalIndex, err := indexGoals(contract.Goals)
+	evidenceGoals := contract.EvidenceGoals
+	goalIndex, err := indexGoals(evidenceGoals)
+	if err != nil {
+		return PlanRevision{}, err
+	}
+	investigationIndex, err := indexInvestigationGoals(contract.InvestigationGoals)
 	if err != nil {
 		return PlanRevision{}, err
 	}
@@ -53,7 +58,7 @@ func (compiler PlanCompiler) CompileProposal(
 		if err := validateProposalOutputSchema(task); err != nil {
 			return PlanRevision{}, err
 		}
-		if err := validateProposalGoalSelectors(task, goalIndex, contract.Goals); err != nil {
+		if err := validateProposalGoalSelectors(task, investigationIndex, goalIndex, evidenceGoals); err != nil {
 			return PlanRevision{}, err
 		}
 		if _, ok := proposalTemplate(task.Capability); !ok {
@@ -106,12 +111,13 @@ func (compiler PlanCompiler) CompileProposal(
 	sort.Strings(ids)
 	for _, id := range ids {
 		task := tasks[id]
-		goalIDs := proposalGoalIDs(task, contract.Goals)
-		if len(goalIDs) == 0 {
+		evidenceGoalIDs := proposalEvidenceGoalIDs(task, evidenceGoals)
+		investigationGoalIDs := normalizedIDs(task.InvestigationGoalIDs)
+		if len(evidenceGoalIDs) == 0 {
 			return PlanRevision{}, fmt.Errorf("%w: proposal task %q does not bind an evidence goal", ErrPlanInvalid, id)
 		}
-		goalCopies := make([]EvidenceGoal, 0, len(goalIDs))
-		for _, goalID := range goalIDs {
+		goalCopies := make([]EvidenceGoal, 0, len(evidenceGoalIDs))
+		for _, goalID := range evidenceGoalIDs {
 			goalCopies = append(goalCopies, goalIndex[goalID])
 		}
 		ref, ok := proposalTemplate(task.Capability)
@@ -136,34 +142,35 @@ func (compiler PlanCompiler) CompileProposal(
 		}
 		maxAttempts := proposalMaxAttempts(task.MaxAttempts, proposal.Stop)
 		candidate := TaskCandidate{
-			ID:            id,
-			Template:      ref,
-			Objective:     strings.TrimSpace(task.Purpose),
-			GoalIDs:       goalIDs,
-			Capability:    task.Capability,
-			EvidenceGoals: goalCopies,
-			Optional:      task.Optional && !requiredDependency[id],
-			MaxAttempts:   maxAttempts,
-			InputRefs:     convertEvidenceRefs(task.InputRefs),
-			Dependencies:  uniqueStrings(dependencies[id]),
-			Budget:        budget,
+			ID:                   id,
+			Template:             ref,
+			Objective:            strings.TrimSpace(task.Purpose),
+			InvestigationGoalIDs: investigationGoalIDs,
+			EvidenceGoalIDs:      evidenceGoalIDs,
+			Capability:           task.Capability,
+			EvidenceGoals:        goalCopies,
+			Optional:             task.Optional && !requiredDependency[id],
+			AllowParallel:        task.AllowParallel,
+			MaxAttempts:          maxAttempts,
+			InputRefs:            convertEvidenceRefs(task.InputRefs),
+			Dependencies:         uniqueStrings(dependencies[id]),
+			Budget:               budget,
 		}
 		candidates = append(candidates, candidate)
 	}
-	// Verification is server-owned and cannot be omitted by the planner. It is
-	// appended after the proposal graph and receives all evidence-task outputs.
-	verifyGoals := make([]string, 0, len(contract.Goals))
-	for _, goal := range contract.Goals {
-		verifyGoals = append(verifyGoals, goal.ID)
+	// Verification is server-owned and cannot be omitted by the planner. The
+	// helper also removes planner-supplied verifier candidates so the graph has
+	// one deterministic verification stage.
+	candidates, err = appendServerVerifierCandidate(compiler.Catalog, contract, candidates)
+	if err != nil {
+		return PlanRevision{}, err
 	}
-	candidates = append(candidates, TaskCandidate{
-		ID: "evidence.verify", Template: TaskTemplateRef{ID: "evidence.verify", Version: 1},
-		Objective: "Verify the evidence produced by the proposed investigation tasks.",
-		GoalIDs:   verifyGoals,
-	})
 
 	plan, err := compiler.Compile(contract, candidates)
 	if err != nil {
+		return PlanRevision{}, err
+	}
+	if err := validateVerifierPlan(plan.Tasks); err != nil {
 		return PlanRevision{}, err
 	}
 	policy, err := proposalPolicy(proposal.Stop)
@@ -186,29 +193,32 @@ func validateProposalOutputSchema(task agentapi.TaskSpec) error {
 	}
 	// Investigator implementations are server-owned. Accept the public report
 	// schema used by QA and reject any other planner-selected output contract.
-	if task.OutputSchema.ID != "investigation.report" || task.OutputSchema.Version != 1 {
+	if task.OutputSchema != agentapi.InvestigationReportSchemaRef() {
 		return fmt.Errorf("%w: proposal task %q output schema %q@%d is not the server-owned investigation report schema", ErrPlanInvalid, task.ID, task.OutputSchema.ID, task.OutputSchema.Version)
 	}
 	return nil
 }
 
-func validateProposalGoalSelectors(task agentapi.TaskSpec, goals map[string]EvidenceGoal, allGoals []EvidenceGoal) error {
-	for _, goalID := range task.InvestigationGoalIDs {
-		goalID = strings.TrimSpace(goalID)
-		if goalID == "" {
-			return fmt.Errorf("%w: proposal task %q has an empty investigation goal id", ErrPlanInvalid, task.ID)
+func validateProposalGoalSelectors(
+	task agentapi.TaskSpec,
+	investigationGoals map[string]InvestigationGoal,
+	evidenceGoals map[string]EvidenceGoal,
+	allEvidenceGoals []EvidenceGoal,
+) error {
+	for _, goalID := range normalizedIDs(task.InvestigationGoalIDs) {
+		if _, ok := investigationGoals[goalID]; ok {
+			continue
 		}
-		if _, ok := goals[goalID]; !ok {
-			return fmt.Errorf("%w: proposal task %q references unknown investigation goal %q", ErrPlanInvalid, task.ID, goalID)
+		return fmt.Errorf("%w: proposal task %q references unknown investigation goal %q", ErrPlanInvalid, task.ID, goalID)
+	}
+	for _, goalID := range normalizedIDs(task.EvidenceGoalIDs) {
+		if _, ok := evidenceGoals[goalID]; !ok {
+			return fmt.Errorf("%w: proposal task %q references unknown evidence goal %q", ErrPlanInvalid, task.ID, goalID)
 		}
 	}
-	for _, facet := range task.RequiredFacets {
-		facet = strings.TrimSpace(facet)
-		if facet == "" {
-			return fmt.Errorf("%w: proposal task %q has an empty required facet", ErrPlanInvalid, task.ID)
-		}
+	for _, facet := range normalizedIDs(task.RequiredFacets) {
 		found := false
-		for _, goal := range allGoals {
+		for _, goal := range allEvidenceGoals {
 			if goalMatchesFacets(goal, map[string]struct{}{facet: {}}) {
 				found = true
 				break
@@ -228,41 +238,51 @@ func proposalTemplate(capability string) (TaskTemplateRef, bool) {
 	return TaskTemplateRef{ID: "proposal." + strings.TrimPrefix(capability, "knowledge."), Version: 1}, true
 }
 
-func proposalGoalIDs(task agentapi.TaskSpec, goals []EvidenceGoal) []string {
-	wantedGoals := make(map[string]struct{}, len(task.InvestigationGoalIDs))
-	for _, goalID := range task.InvestigationGoalIDs {
-		if goalID = strings.TrimSpace(goalID); goalID != "" {
-			wantedGoals[goalID] = struct{}{}
-		}
+func proposalEvidenceGoalIDs(task agentapi.TaskSpec, goals []EvidenceGoal) []string {
+	if explicit := normalizedIDs(task.EvidenceGoalIDs); len(explicit) > 0 {
+		return explicit
 	}
 	wantedFacets := make(map[string]struct{}, len(task.RequiredFacets))
-	for _, facet := range task.RequiredFacets {
-		if facet = strings.TrimSpace(facet); facet != "" {
-			wantedFacets[facet] = struct{}{}
-		}
+	for _, facet := range normalizedIDs(task.RequiredFacets) {
+		wantedFacets[facet] = struct{}{}
+	}
+	if len(wantedFacets) == 0 {
+		return evidenceGoalIDs(goals)
 	}
 	out := make([]string, 0, len(goals))
 	for _, goal := range goals {
-		if len(wantedGoals) > 0 {
-			if _, ok := wantedGoals[goal.ID]; !ok {
-				continue
-			}
-		}
-		if len(wantedFacets) > 0 && !goalMatchesFacets(goal, wantedFacets) {
-			continue
-		}
-		out = append(out, goal.ID)
-	}
-	// Older planner proposals did not populate either binding field. In that
-	// case preserve compatibility by binding the task to the whole contract;
-	// once either field is present it is an explicit allow-list.
-	if len(wantedGoals) == 0 && len(wantedFacets) == 0 {
-		out = out[:0]
-		for _, goal := range goals {
+		if goalMatchesFacets(goal, wantedFacets) {
 			out = append(out, goal.ID)
 		}
 	}
 	return uniqueStrings(out)
+}
+
+func evidenceGoalIDs(goals []EvidenceGoal) []string {
+	out := make([]string, 0, len(goals))
+	for _, goal := range goals {
+		out = append(out, goal.ID)
+	}
+	return uniqueStrings(out)
+}
+
+func normalizedIDs(values []string) []string {
+	return uniqueStrings(values)
+}
+
+func indexInvestigationGoals(goals []InvestigationGoal) (map[string]InvestigationGoal, error) {
+	indexed := make(map[string]InvestigationGoal, len(goals))
+	for _, goal := range goals {
+		goal.ID = strings.TrimSpace(goal.ID)
+		if goal.ID == "" {
+			return nil, fmt.Errorf("%w: investigation goal id is required", ErrPlanInvalid)
+		}
+		if _, duplicate := indexed[goal.ID]; duplicate {
+			return nil, fmt.Errorf("%w: investigation goal %q is duplicated", ErrPlanInvalid, goal.ID)
+		}
+		indexed[goal.ID] = goal
+	}
+	return indexed, nil
 }
 
 func goalMatchesFacets(goal EvidenceGoal, wanted map[string]struct{}) bool {

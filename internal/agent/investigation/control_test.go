@@ -2,6 +2,7 @@ package investigation
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -142,5 +143,38 @@ func TestCoordinatorTimeoutPersistsTimedOutRun(t *testing.T) {
 	}
 	if run.Status != RunTimedOut || run.Failure == nil || run.Failure.Code != FailureTimeout {
 		t.Fatalf("timed out run = %#v", run)
+	}
+}
+
+func TestCoordinatorRemoteCancelFencesPreviousWorker(t *testing.T) {
+	store := NewMemoryRunStore()
+	lease := NewMemoryLeaseStore()
+	runID := "run-remote-cancel"
+	if err := store.Create(InvestigationRun{ID: runID, Status: RunCreated}); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []RunStatus{RunAnalyzing, RunPlanned, RunExecuting} {
+		if err := store.Transition(runID, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	worker, err := lease.AcquireLeaseWithToken(t.Context(), runID, "worker-old", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := bindLeaseRunStore(store, lease, runID, worker.Owner, worker.Token)
+	coordinator := NewCoordinator(CoordinatorOptions{Store: store, Lease: lease})
+	if err := coordinator.Cancel(t.Context(), runID); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := store.Get(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != RunCancelled || cancelled.Failure == nil || cancelled.Failure.Code != FailureCancelled {
+		t.Fatalf("cancelled run = %#v", cancelled)
+	}
+	if err := stale.SaveBudget(runID, BudgetSnapshot{}); !errors.Is(err, ErrLeaseFenced) {
+		t.Fatalf("stale worker write error = %v, want ErrLeaseFenced", err)
 	}
 }

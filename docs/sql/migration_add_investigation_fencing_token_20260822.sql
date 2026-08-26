@@ -6,3 +6,8 @@ ALTER TABLE investigation_runs
 
 ALTER TABLE investigation_leases
     ADD COLUMN fencing_token BIGINT NOT NULL DEFAULT 0;
+
+
+-- Startup recovery scans snapshots by a stable keyset cursor.
+ALTER TABLE investigation_runs
+    ADD INDEX idx_investigation_runs_updated (updated_at, id);

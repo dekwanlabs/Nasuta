@@ -4,6 +4,9 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
+
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
 func TestBudgetReserveIncludesOutstandingGrant(t *testing.T) {
@@ -123,6 +126,122 @@ func TestBudgetTracksExplicitTotalTokens(t *testing.T) {
 	}
 }
 
+func TestBudgetCallReservationReplacesEstimateWithActualUsage(t *testing.T) {
+	ledger, err := NewBudgetLedger(BudgetVector{InputTokens: 100, OutputTokens: 20, CostMicros: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := ledger.ReserveAdmission(StageExecution, "task", BudgetVector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := ledger.ReserveCall(task.ID, BudgetVector{InputTokens: 40, OutputTokens: 15, CostMicros: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := ledger.Snapshot()
+	if snapshot.Run.Reserved.InputTokens != 40 || snapshot.Run.Reserved.OutputTokens != 15 || snapshot.Run.Reserved.CostMicros != 60 {
+		t.Fatalf("reserved usage after call admission = %#v", snapshot.Run.Reserved)
+	}
+	if err := call.Settle(agentapi.Usage{InputTokens: 60, OutputTokens: 5, CostMicros: 20}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = ledger.Snapshot()
+	if snapshot.Run.Reserved.InputTokens != 60 || snapshot.Run.Reserved.OutputTokens != 5 || snapshot.Run.Reserved.CostMicros != 20 {
+		t.Fatalf("reserved usage after call settle = %#v", snapshot.Run.Reserved)
+	}
+	if err := task.Settle(BudgetVector{InputTokens: 60, OutputTokens: 5, CostMicros: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := ledger.Snapshot(); snapshot.Run.Reserved != (BudgetVector{}) || snapshot.Run.Used.InputTokens != 60 {
+		t.Fatalf("final budget snapshot = %#v", snapshot.Run)
+	}
+}
+
+func TestBudgetCallReservationMakesInFlightUsageVisibleToSiblings(t *testing.T) {
+	ledger, err := NewBudgetLedger(BudgetVector{InputTokens: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := ledger.ReserveAdmission(StageExecution, "first", BudgetVector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ledger.ReserveAdmission(StageExecution, "second", BudgetVector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCall, err := ledger.ReserveCall(first.ID, BudgetVector{InputTokens: 80})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.ReserveCall(second.ID, BudgetVector{InputTokens: 30}); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("second in-flight call error = %v, want ErrBudgetExceeded", err)
+	}
+	if err := firstCall.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBudgetReallocateAvailableTransfersOnlyUnusedBoundedCapacity(t *testing.T) {
+	ledger, err := NewBudgetLedger(BudgetVector{
+		InputTokens: 100, OutputTokens: 100, ToolCalls: 10,
+		Duration: 100 * time.Second, CostMicros: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.SetStageLimit(StagePlanning, BudgetVector{
+		InputTokens: 10, OutputTokens: 10, ToolCalls: 2,
+		Duration: 10 * time.Second, CostMicros: 10,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.SetStageLimit(StageExecution, BudgetVector{
+		InputTokens: 70, OutputTokens: 70, ToolCalls: 7,
+		Duration: 70 * time.Second, CostMicros: 70,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := ledger.Reserve(StagePlanning, "plan", BudgetVector{
+		InputTokens: 3, OutputTokens: 4, ToolCalls: 1,
+		Duration: 3 * time.Second, CostMicros: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.Settle(BudgetVector{
+		InputTokens: 3, OutputTokens: 4, ToolCalls: 1,
+		Duration: 3 * time.Second, CostMicros: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.reallocateAvailable(StagePlanning, StageExecution); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := ledger.Snapshot()
+	planning := snapshot.Stages[StagePlanning].Limit
+	if planning != (BudgetVector{
+		InputTokens: 3, OutputTokens: 4, ToolCalls: 1,
+		Duration: 3 * time.Second, CostMicros: 5,
+	}) {
+		t.Fatalf("planning limit = %#v", planning)
+	}
+	execution := snapshot.Stages[StageExecution].Limit
+	if execution != (BudgetVector{
+		InputTokens: 77, OutputTokens: 76, ToolCalls: 8,
+		Duration: 77 * time.Second, CostMicros: 75,
+	}) {
+		t.Fatalf("execution limit = %#v", execution)
+	}
+}
+
 func TestBudgetZeroTaskDimensionStillUsesRunHardLimit(t *testing.T) {
 	ledger, err := NewBudgetLedger(BudgetVector{InputTokens: 10, ToolCalls: 2})
 	if err != nil {
@@ -145,5 +264,20 @@ func TestBudgetZeroTaskDimensionStillUsesRunHardLimit(t *testing.T) {
 	}
 	if err := second.Release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAvailableForReservationIncludesExistingProtectionReserve(t *testing.T) {
+	ledger, err := NewBudgetLedger(BudgetVector{InputTokens: 100, OutputTokens: 100, TotalTokens: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := ledger.Reserve(StageComposition, "composition", BudgetVector{OutputTokens: 10, TotalTokens: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	available := ledger.AvailableForReservation(reservation.ID)
+	if available.InputTokens != 100 || available.OutputTokens != 90 || available.TotalTokens != 190 {
+		t.Fatalf("available = %+v, want input=100 output=90 total=190", available)
 	}
 }

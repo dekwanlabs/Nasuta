@@ -748,7 +748,7 @@ func bindTaskGraphDraft(
 		Tasks: make([]agentapi.TaskSpec, 0, len(draft.Tasks)+1),
 		Edges: make([]agentapi.TaskEdge, 0, len(draft.Tasks)),
 		Stop: agentapi.StopPolicy{
-			MaxTasks: len(draft.Tasks) + 1, MaxParallelism: len(draft.Tasks), MaxRounds: 1,
+			MaxTasks: len(draft.Tasks), MaxParallelism: len(draft.Tasks), MaxRounds: 1,
 		},
 	}
 	kindCounts := make(map[string]int)
@@ -773,8 +773,9 @@ func bindTaskGraphDraft(
 		proposal.Tasks = append(proposal.Tasks, agentapi.TaskSpec{
 			ID: id, Purpose: strings.TrimSpace(task.Purpose),
 			InvestigationGoalIDs: append([]string(nil), task.InvestigationGoalIDs...),
+			EvidenceGoalIDs:      append([]string(nil), task.EvidenceGoalIDs...),
 			RequiredFacets:       facets, Capability: task.Capability,
-			OutputSchema:  agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+			OutputSchema:  agentapi.InvestigationReportSchemaRef(),
 			ParallelGroup: "investigation", Optional: true, MaxAttempts: 2,
 		})
 		proposal.Edges = append(proposal.Edges, agentapi.TaskEdge{From: id, To: "synthesize"})
@@ -782,7 +783,7 @@ func bindTaskGraphDraft(
 	proposal.Tasks = append(proposal.Tasks, agentapi.TaskSpec{
 		ID: "synthesize", Purpose: "Synthesize the available evidence.",
 		Capability:   "evidence.synthesize",
-		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
+		OutputSchema: agentapi.InvestigationAnswerSchemaRef(),
 		MaxAttempts:  2,
 	})
 	return proposal, nil

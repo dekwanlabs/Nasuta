@@ -1,6 +1,7 @@
 package investigation
 
 import (
+	"errors"
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -467,5 +468,17 @@ func TestClaimLedgerMergeReevaluatesConflictsAcrossAdmissions(t *testing.T) {
 	}
 	if merged.Status != ClaimConflicting || len(merged.EvidenceRefs) != 2 {
 		t.Fatalf("merged claim = %#v, want conflicting claim with both refs", merged)
+	}
+}
+
+func TestEvidenceLedgerRejectsOpaqueContent(t *testing.T) {
+	ledger := NewEvidenceLedger()
+	_, admitted, err := ledger.Admit("task-opaque", EvidenceCandidate{
+		SourceKind: "code",
+		Target:     "svc.go:42",
+		Content:    "856d907454773e97fd50c8e2609629031f2910c0229376261da8e7d1b59f7ff7",
+	})
+	if admitted || !errors.Is(err, ErrOpaqueEvidence) {
+		t.Fatalf("opaque evidence = admitted=%v err=%v, want rejection", admitted, err)
 	}
 }

@@ -10,7 +10,7 @@ import (
 func TestAssignTaskEvidenceOwnersDoesNotShareSeedGroupsBetweenSiblings(
 	t *testing.T,
 ) {
-	report := agentapi.SchemaRef{ID: "investigation.report", Version: 1}
+	report := agentapi.InvestigationReportSchemaRef()
 	proposal := agentapi.TaskGraphProposal{Tasks: []agentapi.TaskSpec{
 		{
 			ID: "investigate.design.code.1", RequiredFacets: []string{"core_flow"},
@@ -26,7 +26,7 @@ func TestAssignTaskEvidenceOwnersDoesNotShareSeedGroupsBetweenSiblings(
 		},
 		{
 			ID: "synthesize", Capability: "evidence.synthesize",
-			OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
+			OutputSchema: agentapi.InvestigationAnswerSchemaRef(),
 		},
 	}}
 	seed := []tool.EvidenceUnit{

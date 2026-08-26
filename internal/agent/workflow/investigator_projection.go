@@ -25,7 +25,7 @@ const (
 	projectionEmpty        investigatorProjectionStatus = "empty"
 	projectionInsufficient investigatorProjectionStatus = "insufficient"
 	projectionPartial      investigatorProjectionStatus = "partial"
-	projectionLegacy       investigatorProjectionStatus = "legacy"
+	projectionBypassed     investigatorProjectionStatus = "bypassed"
 )
 
 type projectionResult struct {
@@ -68,6 +68,7 @@ type projectedInvestigationGoal struct {
 type projectedEvidenceGoal struct {
 	ID              string                    `json:"id"`
 	Facet           string                    `json:"facet"`
+	Facets          []string                  `json:"facets"`
 	Required        bool                      `json:"required"`
 	Sources         []agentapi.EvidenceSource `json:"sources"`
 	RequiredSources []agentapi.EvidenceSource `json:"required_sources,omitempty"`
@@ -115,13 +116,19 @@ func projectInvestigatorHandoff(
 	result := projectionResult{
 		Input:       cloneProjectedHandoff(input),
 		Task:        cloneTaskDirective(task),
-		Status:      projectionLegacy,
+		Status:      projectionBypassed,
 		InputTokens: estimateProjectionTokens(input.Payload),
 	}
-	if input.Schema.ID != "task.contract" {
+	if input.Schema.ID != agentapi.TaskContractSchemaID {
 		result.ProjectedTokens = result.InputTokens
 		result.ProjectionHash = input.ContentHash
 		return result, nil
+	}
+	if input.Schema != agentapi.TaskContractSchemaRef() {
+		return projectionResult{}, fmt.Errorf(
+			"task contract schema version %d is unsupported; current version is %d",
+			input.Schema.Version, agentapi.TaskContractSchemaVersion,
+		)
 	}
 
 	var raw map[string]json.RawMessage
@@ -131,9 +138,8 @@ func projectInvestigatorHandoff(
 	if raw == nil {
 		return projectionResult{}, fmt.Errorf("task contract for node %q is not an object", nodeID)
 	}
-	// A task.contract without task_id is the older planner-facing shape. Do
-	// not rewrite it: the node remains compatible with the pre-projection
-	// execution path.
+	// Delegation-shaped task contracts do not contain the canonical investigation
+	// context required for server-side projection, so they pass through unchanged.
 	if taskID, ok := raw["task_id"]; !ok || strings.TrimSpace(string(taskID)) == "null" || strings.TrimSpace(string(taskID)) == `""` {
 		result.ProjectedTokens = result.InputTokens
 		result.ProjectionHash = input.ContentHash
@@ -222,7 +228,7 @@ func projectInvestigatorHandoff(
 	required := stringSet(effectiveTask.RequiredFacets)
 	filteredGoals := make([]projectedEvidenceGoal, 0, len(contract.EvidenceGoals))
 	for _, goal := range contract.EvidenceGoals {
-		if _, ok := required[goal.Facet]; ok {
+		if projectedEvidenceGoalMatches(goal, required) {
 			filteredGoals = append(filteredGoals, goal)
 		}
 	}
@@ -553,13 +559,27 @@ func projectedEvidenceGoalFacets(
 	facets := make([]string, 0, len(goals))
 	seen := make(map[string]struct{}, len(goals))
 	for _, goal := range goals {
-		if _, duplicate := seen[goal.Facet]; duplicate {
-			continue
+		for _, facet := range goal.Facets {
+			if _, duplicate := seen[facet]; duplicate {
+				continue
+			}
+			seen[facet] = struct{}{}
+			facets = append(facets, facet)
 		}
-		seen[goal.Facet] = struct{}{}
-		facets = append(facets, goal.Facet)
 	}
 	return facets
+}
+
+func projectedEvidenceGoalMatches(goal projectedEvidenceGoal, required map[string]struct{}) bool {
+	if _, ok := required[goal.Facet]; ok {
+		return true
+	}
+	for _, facet := range goal.Facets {
+		if _, ok := required[facet]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func investigatorTaskPurpose(nodeID string) string {
@@ -604,6 +624,7 @@ func cloneTaskDirective(task *TaskDirective) *TaskDirective {
 		[]string(nil),
 		task.InvestigationGoalIDs...,
 	)
+	cloned.EvidenceGoalIDs = append([]string(nil), task.EvidenceGoalIDs...)
 	cloned.RequiredFacets = append([]string(nil), task.RequiredFacets...)
 	cloned.InputRefs = cloneEvidenceRefs(task.InputRefs)
 	return &cloned

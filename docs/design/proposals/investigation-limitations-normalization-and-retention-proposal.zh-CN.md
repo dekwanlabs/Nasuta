@@ -3,14 +3,14 @@
 状态：草案  
 作者：Nasuta Agent Platform  
 日期：2026-08-18  
-关联事项：`workflow_592090ef0cdc50a3e5f55d88`、trace `3d4ceaafb7b8`、`investigation.answer` Schema v1/v2  
+关联事项：`workflow_592090ef0cdc50a3e5f55d88`、trace `3d4ceaafb7b8`、当前 `investigation.answer` Schema
 目标版本：待评审
 
 ## 1. 摘要
 
 本提案用于解决多 Agent Investigation 流程中 `limitations` 列表重复、冗余、顺序不稳定，以及最终答案无法同时满足“简洁展示”和“完整保留细节”的问题。
 
-当前，多个 investigator 和 verifier 可能分别产生限制项。系统虽然能够把限制项汇总出来，但缺少统一的归一化流程：相同限制可能重复出现，相似限制没有合并，限制项没有按影响程度排序，最终 Synthesizer 只能把大量限制直接写进最终答案。此前 `investigation.answer v1` 只允许 20 条限制项，导致 28 条合法限制项无法通过 Schema 校验。
+当前，多个 investigator 和 verifier 可能分别产生限制项。系统虽然能够把限制项汇总出来，但缺少统一的归一化流程：相同限制可能重复出现，相似限制没有合并，限制项没有按影响程度排序，最终 Synthesizer 只能把大量限制直接写进最终答案。此前答案契约只允许有限数量的限制项，导致 28 条合法限制项无法通过 Schema 校验。
 
 本提案计划增加一个由服务端负责的限制项整理阶段，将流程从：
 
@@ -65,11 +65,11 @@ Investigation 是多 Agent 并行调查流程。不同 investigator 负责代码
 - `internal/agent/run/hub.go`：持久化 Agent step 和 artifact；
 - `internal/agent/workflow/investigation.go`：编译 Investigation workflow。
 
-当前已存在的兼容性修复是：
+当前已完成的契约修复是：
 
-- 保留 `investigation.answer v1` 不变；
-- 新增 `investigation.answer v2`，允许最多 100 条限制项；
-- 新的 Synthesizer 使用 `investigation.answer v2`。
+- Investigation 链路只发布一个当前 `investigation.answer` Schema；
+- 服务端先归一化并限制展示列表，再把紧凑结果交给 Synthesizer；
+- 不通过并行 Schema 版本承载兼容逻辑，历史运行需要清理、作废或离线迁移。
 
 本提案是在该兼容性修复之上，进一步解决限制项质量、展示和详细结果留存问题。
 
@@ -80,9 +80,9 @@ Investigation 是多 Agent 并行调查流程。不同 investigator 负责代码
 - 触发时间：2026-08-18 10:11:36 +08:00；
 - 触发标识：trace `3d4ceaafb7b8`；
 - 工作流：`workflow_592090ef0cdc50a3e5f55d88`；
-- 直接表现：`investigation.answer v1` 校验失败，`limitations` 数量为 28，超过 Schema 上限 20；
+- 直接表现：当前 `investigation.answer` 校验失败，`limitations` 数量为 28，超过展示上限；
 - 根因：上游 verified bundle 允许产生更多限制项，下游最终答案直接接收全部限制项，且没有整理、排序和详情留存机制；
-- 临时处置：新增 `investigation.answer v2`，将可接收上限提高到 100。
+- 临时处置：由服务端归一化限制项并保留 detail artifact，避免把完整限制列表直接交给模型。
 
 提高 Schema 上限可以避免当前失败，但不能解决以下长期问题：
 
@@ -209,7 +209,7 @@ Investigation 是多 Agent 并行调查流程。不同 investigator 负责代码
 6. 严重程度缺失或不合法；
 7. artifact 持久化失败；
 8. 同一个 workflow run 重试或重复完成；
-9. 历史 run 仍引用 `investigation.answer v1/v2`；
+9. 历史 run 仍引用旧的 answer contract；
 10. 多个并发 workflow 同时写入限制详情。
 
 ### 4.3 复现步骤
@@ -217,9 +217,9 @@ Investigation 是多 Agent 并行调查流程。不同 investigator 负责代码
 1. 构造一个包含至少两个 investigator 的 Investigation 请求；
 2. 让不同 investigator 分别返回相同或相似的限制项；
 3. 让 verifier 返回 28 条限制项；
-4. 使用旧的 `investigation.answer v1` 执行 Synthesizer；
-5. 观察输出合法 JSON 在 Schema 校验阶段因 `maxItems: 20` 失败；
-6. 使用 v2 执行同样输入，观察虽然可以通过，但最终答案会展示全部限制项，缺少归一化和详细结果分离。
+4. 使用未归一化的限制列表执行 Synthesizer；
+5. 观察输出合法 JSON 在 Schema 校验阶段因展示列表超过上限而失败；
+6. 观察当前服务端归一化后只向 Synthesizer 提供主要限制，同时保留完整 detail artifact。
 
 ## 5. 如何修改
 
@@ -479,26 +479,28 @@ Synthesizer 必须：
 建议新增以下内部 Schema：
 
 ```text
-investigation.verified_bundle v2
-  limitations: LimitationRecord[]
-  maxItems: 100
+investigation.verified_bundle 当前唯一 compact schema
+  claim.evidence: evidence_id 引用
+  evidence_lookup: evidence_id → 有界摘要
+  limitations: string[]
+  maxItems: 10（详细审计通过 limitations_detail 引用）
 
 investigation.limitations.detail v1
   全量归一化限制项和合并审计信息
 
-investigation.answer v3
+investigation.answer 当前 Schema
   answer: string
   citations: Citation[]
   limitations: string[]       // 仅主要限制，maxItems=10（或配置上限）
   limitations_detail: DetailRef
 ```
 
-兼容关系：
+契约关系：
 
 ```text
-investigation.answer v1：历史任务，最多20条字符串限制，不修改
-investigation.answer v2：当前过渡版本，最多100条字符串限制，不修改
-investigation.answer v3：新任务，展示主要限制 + detail artifact 引用
+当前 investigation.verified_bundle
+→ 服务端归一化限制项并持久化 detail artifact
+→ 当前 investigation.answer 只接收主要限制和受控 detail reference
 ```
 
 状态转换：
@@ -636,7 +638,7 @@ if err != nil {
 }
 synthesizerInput := buildAnswerInput(normalized, detailRef)
 answer := runSynthesizer(synthesizerInput)
-validateAnswerV3(answer)
+validateAnswer(answer)
 ```
 
 ### 6.4 配置或数据库变更
@@ -702,7 +704,7 @@ artifact 使用现有 artifact 存储能力，新增的只是 schema/kind 约束
 
 ### 7.4 不应发生的变化
 
-- 不修改历史 `investigation.answer v1/v2` Schema；
+- 不为历史 run 增加并行 answer Schema；
 - 不改变 investigator 的权限、工具可见范围和执行预算；
 - 不因为展示上限而删除 detail artifact 中的限制；
 - 不允许模型新增、静默删除或重排服务端已经确定的主要限制；
@@ -805,10 +807,10 @@ artifact 使用现有 artifact 存储能力，新增的只是 schema/kind 约束
 ## 11. 待决策事项
 
 1. `primary_display_limit` 默认值取 10 还是沿用现有 20；
-2. `investigation.answer v3` 是否直接返回 `limitations_detail.artifact_id`，还是只返回受控的 detail reference；
+2. 当前 `investigation.answer` 是否直接返回 `limitations_detail.artifact_id`，还是只返回受控的 detail reference；
 3. 相似合并第一阶段是否只允许 verified `merge_key`，暂不使用语义相似度；
 4. detail artifact 的保留期限、读取权限和是否支持用户侧查看；
-5. artifact 持久化失败时，是将 workflow 标记为 retryable，还是允许返回 answer v2 作为降级结果；
+5. artifact 持久化失败时，是将 workflow 标记为 retryable，还是直接失败并等待重试；
 6. 是否需要在 Schema 中暴露 `hidden_count`，还是只通过 detail reference 查询。
 
 ## 12. 决策摘要

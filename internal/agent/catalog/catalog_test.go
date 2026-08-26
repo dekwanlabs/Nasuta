@@ -173,7 +173,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 			t.Fatalf("definition %q tools = %v, want %v", definition.ID, definition.Tools.VisibleToolIDs, wantTools[definition.ID])
 		}
 		if strings.HasPrefix(definition.ID, "investigator.") &&
-			definition.InputSchema.ID != "task.contract" {
+			definition.InputSchema != agentapi.TaskContractSchemaRef() {
 			t.Fatalf("definition %q input schema = %+v", definition.ID, definition.InputSchema)
 		}
 		wantToolCalls := int64(0)
@@ -194,16 +194,15 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		}
 	}
 	synthesizer := definitions[len(definitions)-1]
-	if synthesizer.InputSchema.ID != "investigation.verified_bundle" ||
-		synthesizer.OutputSchema.ID != "investigation.answer" ||
-		synthesizer.OutputSchema.Version != 3 ||
-		synthesizer.Prompt.Version != "investigation-synthesis-v7" ||
+	if synthesizer.InputSchema != agentapi.InvestigationVerifiedBundleSchemaRef() ||
+		synthesizer.OutputSchema != agentapi.InvestigationAnswerSchemaRef() ||
+		synthesizer.Prompt.Version != "investigation-synthesis-v8" ||
 		!strings.Contains(synthesizer.Prompt.System, `"supported_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"partial_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"unsupported_claims"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"omissions"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"producer_node_id"`) ||
-		!strings.Contains(synthesizer.Prompt.System, `canonical "evidence_identities"`) ||
+		!strings.Contains(synthesizer.Prompt.System, `"evidence_lookup"`) ||
 		!strings.Contains(synthesizer.Prompt.System, "same canonical target") ||
 		!strings.Contains(synthesizer.Prompt.System, "must not be inserted into a main path") ||
 		!strings.Contains(synthesizer.Prompt.System, `"workflow.synthesis_objective"`) ||
@@ -227,7 +226,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 	verifier := definitions[len(definitions)-2]
 	if verifier.InputSchema.ID != "delegation.verification.request" ||
 		verifier.OutputSchema.ID != "delegation.verification.result" ||
-		verifier.Prompt.Version != "delegation-verification-v1" ||
+		verifier.Prompt.Version != "delegation-verification-v2" ||
 		!strings.Contains(verifier.Prompt.System, `"unresolved"`) ||
 		len(verifier.Tools.VisibleToolIDs) != 0 ||
 		!verifier.Tools.RestrictVisible {

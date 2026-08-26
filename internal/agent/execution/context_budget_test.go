@@ -16,3 +16,15 @@ func TestEnsureInputBudgetRejectsBeforeProviderCall(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestEffectiveContextWindowNarrowedByMaxContextTokens(t *testing.T) {
+	agent := &Agent{cfg: Config{
+		ContextWindow: 2048, AnswerMaxTokens: 200, ConclusionMaxTokens: 200,
+		MaxInputTokens: 500, MaxContextTokens: 700,
+	}}
+	got := agent.effectiveContextWindow()
+	want := 700
+	if got != want {
+		t.Fatalf("effective context window = %d, want %d", got, want)
+	}
+}

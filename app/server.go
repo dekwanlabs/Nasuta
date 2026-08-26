@@ -141,15 +141,34 @@ func (p *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 // This ordering prevents owners from observing a stale terminal outcome.
 func (p *Platform) recoverStartupRuns(ctx context.Context, startedBefore time.Time) {
 	p.qa.reload.RLock()
-	qa := p.currentQARuntime().InvestigationReconciler
+	qaRuntime := p.currentQARuntime()
+	qa := qaRuntime.InvestigationReconciler
+	recovery := qaRuntime.InvestigationRecovery
 	reviews := p.flow.coordinator
 	p.qa.reload.RUnlock()
+	p.recoverActiveInvestigationChildren(ctx, startedBefore, recovery)
 	if p.flow.service != nil && p.flow.service.Available() {
 		p.recoverActiveWorkflows(ctx, startedBefore, qa, reviews)
 	} else if p.flow.service != nil {
 		log.WarnfCtx(ctx, "[workflow] startup execution recovery skipped (execution unavailable)")
 	}
 	p.recoverActiveQAParents(ctx, startedBefore, qa)
+}
+
+func (p *Platform) recoverActiveInvestigationChildren(
+	ctx context.Context,
+	startedBefore time.Time,
+	recovery dashboard.QAInvestigationRecovery,
+) {
+	if recovery == nil {
+		log.WarnfCtx(ctx, "[qa] startup child recovery skipped (investigation recovery unavailable)")
+		return
+	}
+	if err := recovery.RecoverActive(ctx, startedBefore, workflowRecoveryPageSize); err != nil {
+		log.ErrorfCtx(ctx, "[qa] startup child recovery incomplete: %v", err)
+		return
+	}
+	log.InfofCtx(ctx, "[qa] startup child recovery complete")
 }
 
 func (p *Platform) recoverActiveWorkflows(
@@ -304,8 +323,22 @@ func reconcileActiveQAParents(
 				report.Converged++
 			case errors.Is(err, workflow.ErrConflict):
 				report.Active++
+				log.WarnfCtx(
+					ctx,
+					"[qa] startup parent recovery still active parent=%s workflow=%s: %v",
+					parent.ID,
+					parent.WorkflowRunID,
+					err,
+				)
 			default:
 				report.Errors++
+				log.ErrorfCtx(
+					ctx,
+					"[qa] startup parent recovery failed parent=%s workflow=%s: %v",
+					parent.ID,
+					parent.WorkflowRunID,
+					err,
+				)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("reconcile QA parent %q: %w", parent.ID, err)
 				}

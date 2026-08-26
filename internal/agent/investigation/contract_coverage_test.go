@@ -19,10 +19,16 @@ func TestContractBuilderOverviewDerivesAllRequiredFacets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(contract.Goals) != len(domain.RequiredFacetsFor(domain.QueryOverview)) {
-		t.Fatalf("goal count = %d", len(contract.Goals))
+	if contract.Version != InvestigationContractVersion {
+		t.Fatalf("contract version = %d, want %d", contract.Version, InvestigationContractVersion)
 	}
-	for _, goal := range contract.Goals {
+	if len(contract.EvidenceGoals) != len(domain.RequiredFacetsFor(domain.QueryOverview)) {
+		t.Fatalf("goal count = %d", len(contract.EvidenceGoals))
+	}
+	for _, goal := range contract.EvidenceGoals {
+		if len(goal.Facets) != 1 || goal.Facets[0] != goal.Kind {
+			t.Fatalf("goal %q facets = %v", goal.ID, goal.Facets)
+		}
 		if !goal.Required {
 			t.Fatalf("goal %q is not required", goal.ID)
 		}
@@ -50,13 +56,13 @@ func TestDefaultCatalogCoversEveryRequiredFacet(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	covered := make(map[string]bool, len(contract.Goals))
+	covered := make(map[string]bool, len(contract.EvidenceGoals))
 	for _, candidate := range candidates {
-		for _, goalID := range candidate.GoalIDs {
+		for _, goalID := range candidate.EvidenceGoalIDs {
 			covered[goalID] = true
 		}
 	}
-	for _, goal := range contract.Goals {
+	for _, goal := range contract.EvidenceGoals {
 		if !covered[goal.ID] {
 			t.Fatalf("required goal %q has no candidate task", goal.ID)
 		}
@@ -83,7 +89,7 @@ func TestContractBuilderAllQueryKindsDeriveRequiredFacets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(contract.Goals) == 0 {
+			if len(contract.EvidenceGoals) == 0 {
 				t.Fatal("contract has no evidence goals")
 			}
 			catalog := NewTaskTemplateCatalog()
@@ -94,13 +100,13 @@ func TestContractBuilderAllQueryKindsDeriveRequiredFacets(t *testing.T) {
 			if err != nil {
 				t.Fatalf("candidate generation failed: %v", err)
 			}
-			covered := make(map[string]bool, len(contract.Goals))
+			covered := make(map[string]bool, len(contract.EvidenceGoals))
 			for _, candidate := range candidates {
-				for _, goalID := range candidate.GoalIDs {
+				for _, goalID := range candidate.EvidenceGoalIDs {
 					covered[goalID] = true
 				}
 			}
-			for _, goal := range contract.Goals {
+			for _, goal := range contract.EvidenceGoals {
 				if goal.Required && !covered[goal.ID] {
 					t.Fatalf("required goal %q has no candidate task", goal.ID)
 				}

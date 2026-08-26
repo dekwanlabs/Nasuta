@@ -213,8 +213,8 @@ func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T)
 			"summary":"Evidence collection completed, but report generation was incomplete.",
 			"findings":[],
 			"gaps":["The collected runtime evidence could not be converted into a schema-backed finding."],
-			"covered_goals":[],
-			"unresolved_goals":["runtime_and_operations"]
+			"covered_evidence_goals":[],
+			"unresolved_evidence_goals":["runtime_and_operations"]
 		}`),
 		Evidence: agentapi.EvidenceSummary{ForcedConclusion: true},
 		EvidenceUnits: []tool.EvidenceUnit{
@@ -235,6 +235,7 @@ func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T)
 			{
 				"id":"core_flow",
 				"facet":"core_flow",
+				"facets":["core_flow"],
 				"required":true,
 				"sources":["internal"],
 				"freshness":"stable",
@@ -243,6 +244,7 @@ func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T)
 			{
 				"id":"runtime_and_operations",
 				"facet":"runtime_and_operations",
+				"facets":["runtime_and_operations"],
 				"required":true,
 				"sources":["internal"],
 				"freshness":"current",
@@ -254,7 +256,7 @@ func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T)
 	input, err := PrepareHandoff(Handoff{
 		WorkflowRunID:  "workflow-run",
 		ProducerNodeID: "workflow.input",
-		Schema:         agentapi.SchemaRef{ID: "task.contract", Version: 1},
+		Schema:         agentapi.TaskContractSchemaRef(),
 		Payload:        contract,
 		Completeness:   Complete,
 	}, 1<<20, schemas)
@@ -269,8 +271,8 @@ func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T)
 			Agent: agentapi.DefinitionRef{
 				ID: "investigator.runtime", Version: version,
 			},
-			InputSchema:  agentapi.SchemaRef{ID: "task.contract", Version: 1},
-			OutputSchema: agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+			InputSchema:  agentapi.TaskContractSchemaRef(),
+			OutputSchema: agentapi.InvestigationReportSchemaRef(),
 			Task: &TaskDirective{
 				Purpose:        "Inspect runtime evidence.",
 				RequiredFacets: []string{"runtime_and_operations"},
@@ -301,19 +303,19 @@ func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T)
 	codeReport := Handoff{
 		WorkflowRunID:  "workflow-run",
 		ProducerNodeID: "investigate.code",
-		Schema:         agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		Schema:         agentapi.InvestigationReportSchemaRef(),
 		Payload: json.RawMessage(`{
 			"focus":"code",
 			"summary":"code report",
 			"findings":[{
 				"claim":"The checkout route reaches the placement handler.",
-				"goal_ids":["core_flow"],
+				"evidence_goal_ids":["core_flow"],
 				"evidence":[{"kind":"code","reference":"checkout.go","summary":"Route registration"}],
 				"confidence":0.9
 			}],
 			"gaps":[],
-			"covered_goals":["core_flow"],
-			"unresolved_goals":[]
+			"covered_evidence_goals":["core_flow"],
+			"unresolved_evidence_goals":[]
 		}`),
 		EvidenceUnits: []tool.EvidenceUnit{codeEvidence},
 		Completeness:  Complete,
@@ -321,7 +323,7 @@ func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T)
 	joined, err := joinHandoffs(
 		"workflow-run",
 		"evidence.join",
-		agentapi.SchemaRef{ID: "investigation.bundle", Version: 1},
+		agentapi.InvestigationBundleSchemaRef(),
 		JoinEvidenceView,
 		[]Handoff{codeReport, nodeResult.Handoff},
 		nil,
@@ -349,7 +351,7 @@ func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T)
 		node: NodeDefinition{
 			ID:           "evidence.verify",
 			Kind:         NodeVerifier,
-			OutputSchema: agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2},
+			OutputSchema: agentapi.InvestigationVerifiedBundleSchemaRef(),
 			Verifier: &VerifierSpec{
 				RequiredGoals: []string{"core_flow", "runtime_and_operations"},
 			},

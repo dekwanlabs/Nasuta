@@ -10,6 +10,47 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
+func TestProjectInvestigatorHandoffRejectsUnsupportedTaskContractVersion(t *testing.T) {
+	_, err := projectInvestigatorHandoff(Handoff{
+		Schema:  agentapi.SchemaRef{ID: agentapi.TaskContractSchemaID, Version: 2},
+		Payload: json.RawMessage(`{"objective":"inspect"}`),
+	}, nil, "investigate.code.1", 1000)
+	if err == nil || !strings.Contains(err.Error(), "current version is 1") {
+		t.Fatalf("projection error = %v", err)
+	}
+}
+
+func TestProjectInvestigatorHandoffMatchesV2SecondaryFacet(t *testing.T) {
+	payload := mustJSON(t, map[string]any{
+		"task_id": "task-1", "objective": "inspect state flow",
+		"entities": []any{},
+		"evidence_goals": []map[string]any{{
+			"id": "implementation", "facet": "core_flow",
+			"facets":   []string{"core_flow", "data_and_state"},
+			"required": true, "sources": []string{"internal"},
+			"freshness": "stable", "minimum_coverage": 1,
+		}},
+		"context": map[string]any{},
+	})
+	result, err := projectInvestigatorHandoff(Handoff{
+		Schema: agentapi.TaskContractSchemaRef(), Payload: payload,
+	}, &TaskDirective{
+		Purpose: "inspect state", RequiredFacets: []string{"data_and_state"},
+	}, "investigate.code.1", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projected contractProjection
+	if err := json.Unmarshal(result.Input.Payload, &projected); err != nil {
+		t.Fatal(err)
+	}
+	if len(projected.EvidenceGoals) != 1 ||
+		len(projected.EvidenceGoals[0].Facets) != 2 ||
+		projected.EvidenceGoals[0].Facets[1] != "data_and_state" {
+		t.Fatalf("projected evidence goals = %+v", projected.EvidenceGoals)
+	}
+}
+
 func TestProjectInvestigatorHandoffScopesFacetSourceAndReferences(t *testing.T) {
 	code := tool.EvidenceUnit{
 		SourceKind: "code", Target: "repo/order.go", Sections: []string{"core"},
@@ -36,14 +77,14 @@ func TestProjectInvestigatorHandoffScopesFacetSourceAndReferences(t *testing.T) 
 			{"id": "explain_runtime", "objective": "Explain the runtime behavior.", "independently_useful": true, "depends_on": []string{}},
 		},
 		"evidence_goals": []map[string]any{
-			{"id": "core_flow", "facet": "core_flow", "required": true, "sources": []string{"internal"}, "freshness": "stable", "minimum_coverage": 1},
-			{"id": "runtime_behavior", "facet": "runtime_behavior", "required": true, "sources": []string{"runtime"}, "freshness": "current", "minimum_coverage": 1},
+			{"id": "core_flow", "facet": "core_flow", "facets": []string{"core_flow"}, "required": true, "sources": []string{"internal"}, "freshness": "stable", "minimum_coverage": 1},
+			{"id": "runtime_behavior", "facet": "runtime_behavior", "facets": []string{"runtime_behavior"}, "required": true, "sources": []string{"runtime"}, "freshness": "current", "minimum_coverage": 1},
 		},
 		"context": map[string]any{"seed_material": []agentapi.ContextBlock{block}},
 	})
 	input := Handoff{
 		ID: "handoff-original", WorkflowRunID: "workflow-1", ProducerNodeID: "workflow.input",
-		Schema: agentapi.SchemaRef{ID: "task.contract", Version: 1}, Payload: payload,
+		Schema: agentapi.TaskContractSchemaRef(), Payload: payload,
 		References: block.References, EvidenceUnits: []tool.EvidenceUnit{code, runtime}, Completeness: Complete,
 	}
 	original := append([]byte(nil), input.Payload...)
@@ -116,13 +157,13 @@ func TestProjectInvestigatorHandoffRejectsMissingBoundGoal(t *testing.T) {
 			"independently_useful": true, "depends_on": []string{},
 		}},
 		"evidence_goals": []map[string]any{{
-			"id": "core_flow", "facet": "core_flow", "required": true,
+			"id": "core_flow", "facet": "core_flow", "facets": []string{"core_flow"}, "required": true,
 			"sources": []string{"internal"}, "freshness": "stable", "minimum_coverage": 1,
 		}},
 		"context": map[string]any{},
 	})
 	_, err := projectInvestigatorHandoff(Handoff{
-		Schema: agentapi.SchemaRef{ID: "task.contract", Version: 1}, Payload: payload,
+		Schema: agentapi.TaskContractSchemaRef(), Payload: payload,
 	}, &TaskDirective{
 		Purpose: "Unknown goal", InvestigationGoalIDs: []string{"unknown"},
 		RequiredFacets: []string{"core_flow"},
@@ -139,14 +180,14 @@ func TestProjectInvestigatorHandoffEmptyMatchIsNotComplete(t *testing.T) {
 	}
 	payload := mustJSON(t, map[string]any{
 		"task_id": "task-1", "objective": "investigate", "entities": []any{},
-		"evidence_goals": []map[string]any{{"id": "core_flow", "facet": "core_flow", "required": true, "sources": []string{"internal"}, "freshness": "stable", "minimum_coverage": 1}},
+		"evidence_goals": []map[string]any{{"id": "core_flow", "facet": "core_flow", "facets": []string{"core_flow"}, "required": true, "sources": []string{"internal"}, "freshness": "stable", "minimum_coverage": 1}},
 		"context": map[string]any{"seed_material": []agentapi.ContextBlock{{
 			Source: "seed", Title: "seed", Content: "raw", Evidence: []tool.EvidenceUnit{unit}, Complete: true, ContentHash: "h0",
 		}}},
 	})
 	result, err := projectInvestigatorHandoff(Handoff{
 		WorkflowRunID: "workflow-1", ProducerNodeID: "workflow.input",
-		Schema: agentapi.SchemaRef{ID: "task.contract", Version: 1}, Payload: payload,
+		Schema: agentapi.TaskContractSchemaRef(), Payload: payload,
 		Completeness: Complete,
 	}, &TaskDirective{RequiredFacets: []string{"core_flow"}}, "investigate.code.1", 1000)
 	if err != nil {
@@ -182,7 +223,7 @@ func TestProjectInvestigatorHandoffExplicitEmptyRefsAdmitsNoSeed(t *testing.T) {
 	payload := mustJSON(t, map[string]any{
 		"task_id": "task-1", "objective": "investigate", "entities": []any{},
 		"evidence_goals": []map[string]any{{
-			"id": "core_flow", "facet": "core_flow", "required": true,
+			"id": "core_flow", "facet": "core_flow", "facets": []string{"core_flow"}, "required": true,
 			"sources": []string{"internal"}, "freshness": "stable", "minimum_coverage": 1,
 		}},
 		"context": map[string]any{"seed_material": []agentapi.ContextBlock{{
@@ -191,7 +232,7 @@ func TestProjectInvestigatorHandoffExplicitEmptyRefsAdmitsNoSeed(t *testing.T) {
 		}}},
 	})
 	result, err := projectInvestigatorHandoff(Handoff{
-		Schema:  agentapi.SchemaRef{ID: "task.contract", Version: 1},
+		Schema:  agentapi.TaskContractSchemaRef(),
 		Payload: payload, EvidenceUnits: []tool.EvidenceUnit{unit},
 	}, &TaskDirective{
 		RequiredFacets: []string{"core_flow"},
@@ -232,7 +273,7 @@ func TestProjectInvestigatorHandoffUsesServerTaskEvidenceAssignment(t *testing.T
 		"entities": []any{},
 		"evidence_goals": []map[string]any{{
 			"id": "external_dependency", "facet": "external_dependency",
-			"required": true, "sources": []string{"internal"},
+			"facets": []string{"external_dependency"}, "required": true, "sources": []string{"internal"},
 			"freshness": "stable", "minimum_coverage": 1,
 		}},
 		"task_evidence_assignments": []map[string]any{
@@ -259,7 +300,7 @@ func TestProjectInvestigatorHandoffUsesServerTaskEvidenceAssignment(t *testing.T
 		},
 	})
 	input := Handoff{
-		Schema:  agentapi.SchemaRef{ID: "task.contract", Version: 1},
+		Schema:  agentapi.TaskContractSchemaRef(),
 		Payload: payload, EvidenceUnits: []tool.EvidenceUnit{unit},
 		References: report.References,
 	}
@@ -319,22 +360,22 @@ func TestProjectInvestigatorHandoffUsesServerTaskEvidenceAssignment(t *testing.T
 	}
 }
 
-func TestProjectInvestigatorHandoffLegacyAndBudget(t *testing.T) {
+func TestProjectInvestigatorHandoffBypassesUnrelatedSchemaAndEnforcesBudget(t *testing.T) {
 	input := Handoff{
 		Schema:  agentapi.SchemaRef{ID: "review.subject", Version: 1},
 		Payload: json.RawMessage(`{"subject":"x"}`), ContentHash: "original-hash",
 	}
-	legacy, err := projectInvestigatorHandoff(input, &TaskDirective{RequiredFacets: []string{"core_flow"}}, "review.a", 1)
+	bypassed, err := projectInvestigatorHandoff(input, &TaskDirective{RequiredFacets: []string{"core_flow"}}, "review.a", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if legacy.Status != projectionLegacy || string(legacy.Input.Payload) != string(input.Payload) {
-		t.Fatalf("legacy result = %+v", legacy)
+	if bypassed.Status != projectionBypassed || string(bypassed.Input.Payload) != string(input.Payload) {
+		t.Fatalf("bypassed result = %+v", bypassed)
 	}
 
 	payload := json.RawMessage(`{"task_id":"task-1","objective":"investigate","entities":[],"evidence_goals":[],"context":{}}`)
 	_, err = projectInvestigatorHandoff(Handoff{
-		Schema: agentapi.SchemaRef{ID: "task.contract", Version: 1}, Payload: payload,
+		Schema: agentapi.TaskContractSchemaRef(), Payload: payload,
 	}, &TaskDirective{RequiredFacets: []string{"core_flow"}}, "investigate.code.1", 1)
 	if err == nil || !strings.Contains(err.Error(), "exceeds input budget") {
 		t.Fatalf("budget error = %v", err)
@@ -362,7 +403,7 @@ func TestProjectInvestigatorHandoffReportsMissingEntityWithCanonicalSeparators(t
 			{"id": "google", "label": "Google"},
 		},
 		"evidence_goals": []map[string]any{{
-			"id": "core_flow", "facet": "core_flow", "required": true,
+			"id": "core_flow", "facet": "core_flow", "facets": []string{"core_flow"}, "required": true,
 			"sources": []string{"internal"}, "minimum_coverage": 2,
 		}},
 		"context": map[string]any{"seed_material": []agentapi.ContextBlock{{
@@ -371,7 +412,7 @@ func TestProjectInvestigatorHandoffReportsMissingEntityWithCanonicalSeparators(t
 		}}},
 	})
 	result, err := projectInvestigatorHandoff(Handoff{
-		Schema: agentapi.SchemaRef{ID: "task.contract", Version: 1}, Payload: payload,
+		Schema: agentapi.TaskContractSchemaRef(), Payload: payload,
 		EvidenceUnits: []tool.EvidenceUnit{unit}, Completeness: Complete,
 	}, &TaskDirective{RequiredFacets: []string{"core_flow"}, InputRefs: []agentapi.EvidenceRef{{SourceKind: "code", Target: unit.Target}}}, "investigate.code.1", 2000)
 	if err != nil {

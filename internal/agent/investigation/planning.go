@@ -39,17 +39,90 @@ func (compiler PlanCompiler) CompileGenerated(contract InvestigationContract) (P
 	if err != nil {
 		return PlanRevision{}, err
 	}
-	selected := selectInitialCandidates(contract, candidates, compiler.MaxTasks)
+	// The verifier is a fixed server-owned stage, not one of the evidence
+	// collection slots. Select evidence tasks first, then append exactly one
+	// verifier so MaxTasks cannot accidentally remove the safety gate. A
+	// reduced test catalog without the canonical template keeps the legacy
+	// low-level planning behavior; the production catalog always registers it.
+	if !compiler.Catalog.Has(TaskTemplateRef{ID: "evidence.verify", Version: 1}) {
+		selected := selectInitialCandidates(contract, candidates, compiler.MaxTasks)
+		return compiler.compile(contract, dropUnresolvedCandidates(selected), nil, 1)
+	}
+	evidenceCandidates, err := splitVerifierCandidates(compiler.Catalog, candidates)
+	if err != nil {
+		return PlanRevision{}, err
+	}
+	selected := selectInitialCandidates(contract, evidenceCandidates, compiler.MaxTasks)
 	selected = dropUnresolvedCandidates(selected)
-	return compiler.compile(contract, selected, nil, 1)
+	selected, err = appendServerVerifierCandidate(compiler.Catalog, contract, selected)
+	if err != nil {
+		return PlanRevision{}, err
+	}
+	plan, err := compiler.compile(contract, selected, nil, 1)
+	if err != nil {
+		return PlanRevision{}, err
+	}
+	if err := validateVerifierPlan(plan.Tasks); err != nil {
+		return PlanRevision{}, err
+	}
+	return plan, nil
 }
 
 func (compiler PlanCompiler) Compile(contract InvestigationContract, candidates []TaskCandidate) (PlanRevision, error) {
 	return compiler.compile(contract, candidates, nil, 1)
 }
 
-// CompileReplan compiles a later-round plan while trusting that coveredRequired
-// goals were already satisfied by an earlier plan revision.
+func splitVerifierCandidates(
+	catalog *TaskTemplateCatalog,
+	candidates []TaskCandidate,
+) ([]TaskCandidate, error) {
+	evidence := make([]TaskCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		template, err := catalog.Resolve(candidate.Template)
+		if err != nil {
+			return nil, fmt.Errorf("%w: task %q template: %v", ErrPlanInvalid, candidate.ID, err)
+		}
+		// Generated and planner-provided verifier candidates are discarded here;
+		// appendServerVerifierCandidate installs the one server-owned stage.
+		if template.Executor == ExecutorVerifier {
+			continue
+		}
+		evidence = append(evidence, candidate)
+	}
+	return evidence, nil
+}
+
+func selectVerifierCandidate(
+	contract InvestigationContract,
+	catalog *TaskTemplateCatalog,
+) (TaskCandidate, error) {
+	// The canonical verifier is resolved through the catalog when available;
+	// TaskTemplateCatalog.Resolve supplies its server-owned definition for a
+	// reduced catalog as well.
+	template, err := catalog.Resolve(TaskTemplateRef{ID: "evidence.verify", Version: 1})
+	if err != nil {
+		return TaskCandidate{}, fmt.Errorf("%w: server-owned verifier: %v", ErrCapabilityGap, err)
+	}
+	return verifierCandidate(template, contract), nil
+}
+
+func verifierCandidate(template TaskTemplate, contract InvestigationContract) TaskCandidate {
+	goalIDs := make([]string, 0, len(contract.EvidenceGoals))
+	for _, goal := range contract.EvidenceGoals {
+		if templateMatchesGoal(template, goal) {
+			goalIDs = append(goalIDs, goal.ID)
+		}
+	}
+	return TaskCandidate{
+		ID:              "evidence.verify",
+		Template:        TaskTemplateRef{ID: "evidence.verify", Version: 1},
+		Objective:       "Verify the evidence produced by the investigation tasks.",
+		EvidenceGoalIDs: goalIDs,
+		AllowedTools:    append([]tool.ToolID(nil), template.ToolGrant...),
+		Budget:          taskCandidateBudget(template),
+	}
+}
+
 func (compiler PlanCompiler) CompileReplan(
 	contract InvestigationContract,
 	candidates []TaskCandidate,
@@ -59,7 +132,40 @@ func (compiler PlanCompiler) CompileReplan(
 	if revision < 2 {
 		return PlanRevision{}, fmt.Errorf("%w: replan revision must be at least 2", ErrPlanInvalid)
 	}
-	return compiler.compile(contract, candidates, coveredRequired, revision)
+	var err error
+	serverOwnedVerifier := compiler.Catalog.Has(TaskTemplateRef{ID: "evidence.verify", Version: 1})
+	if serverOwnedVerifier {
+		candidates, err = appendServerVerifierCandidate(compiler.Catalog, contract, candidates)
+		if err != nil {
+			return PlanRevision{}, err
+		}
+	}
+	plan, err := compiler.compile(contract, candidates, coveredRequired, revision)
+	if err != nil {
+		return PlanRevision{}, err
+	}
+	if serverOwnedVerifier {
+		if err := validateVerifierPlan(plan.Tasks); err != nil {
+			return PlanRevision{}, err
+		}
+	}
+	return plan, nil
+}
+
+func appendServerVerifierCandidate(
+	catalog *TaskTemplateCatalog,
+	contract InvestigationContract,
+	candidates []TaskCandidate,
+) ([]TaskCandidate, error) {
+	evidence, err := splitVerifierCandidates(catalog, candidates)
+	if err != nil {
+		return nil, err
+	}
+	verifier, err := selectVerifierCandidate(contract, catalog)
+	if err != nil {
+		return nil, err
+	}
+	return append(evidence, verifier), nil
 }
 
 func (compiler PlanCompiler) compile(
@@ -77,7 +183,7 @@ func (compiler PlanCompiler) compile(
 	if compiler.Schemas == nil {
 		return PlanRevision{}, fmt.Errorf("%w: schema registry is required", ErrCapabilityGap)
 	}
-	goals, err := indexGoals(contract.Goals)
+	goals, err := indexGoals(contract.EvidenceGoals)
 	if err != nil {
 		return PlanRevision{}, err
 	}
@@ -85,8 +191,18 @@ func (compiler PlanCompiler) compile(
 	if contract.MaxTasks > 0 && (maxTasks == 0 || contract.MaxTasks < maxTasks) {
 		maxTasks = contract.MaxTasks
 	}
-	if maxTasks > 0 && len(candidates) > maxTasks {
-		return PlanRevision{}, fmt.Errorf("%w: plan has %d tasks, maximum is %d", ErrPlanInvalid, len(candidates), maxTasks)
+	evidenceTaskCount := len(candidates)
+	for _, candidate := range candidates {
+		template, err := compiler.Catalog.Resolve(candidate.Template)
+		if err != nil {
+			return PlanRevision{}, fmt.Errorf("%w: task %q template: %v", ErrPlanInvalid, candidate.ID, err)
+		}
+		if template.Executor == ExecutorVerifier {
+			evidenceTaskCount--
+		}
+	}
+	if maxTasks > 0 && evidenceTaskCount > maxTasks {
+		return PlanRevision{}, fmt.Errorf("%w: plan has %d evidence tasks, maximum is %d", ErrPlanInvalid, evidenceTaskCount, maxTasks)
 	}
 	tasks := make([]ExecutableTask, 0, len(candidates))
 	seenTasks := make(map[string]struct{}, len(candidates))
@@ -107,7 +223,7 @@ func (compiler PlanCompiler) compile(
 		if strings.TrimSpace(candidate.Objective) == "" {
 			return PlanRevision{}, fmt.Errorf("%w: task %q objective is required", ErrPlanInvalid, candidate.ID)
 		}
-		for _, goalID := range candidate.GoalIDs {
+		for _, goalID := range candidate.EvidenceGoalIDs {
 			goal, ok := goals[goalID]
 			if !ok {
 				return PlanRevision{}, fmt.Errorf("%w: task %q references unknown goal %q", ErrPlanInvalid, candidate.ID, goalID)
@@ -117,7 +233,7 @@ func (compiler PlanCompiler) compile(
 			}
 			coveredGoals[goalID] = struct{}{}
 		}
-		if len(candidate.GoalIDs) == 0 {
+		if len(candidate.EvidenceGoalIDs) == 0 {
 			return PlanRevision{}, fmt.Errorf("%w: task %q must target at least one goal", ErrPlanInvalid, candidate.ID)
 		}
 		allowedTools, err := compiler.compileToolGrant(contract, template, candidate.AllowedTools)
@@ -125,10 +241,17 @@ func (compiler PlanCompiler) compile(
 			return PlanRevision{}, fmt.Errorf("%w: task %q tools: %v", ErrPlanInvalid, candidate.ID, err)
 		}
 		budget := candidate.Budget
-		if isZeroBudget(budget) {
+		explicitBudget := !isZeroBudget(budget)
+		// Agent-backed tasks reuse the Single-Agent definition's step/tool
+		// limits. They must not inherit a template CostProfile as an implicit
+		// token/tool quota, because that would recreate the old per-agent
+		// allocation bug (for example ToolCalls: 1). Explicit proposal limits
+		// are still honored as an intentional narrowing.
+		if !explicitBudget && !isAgentExecutor(template.Executor) {
 			budget = template.CostProfile
 		}
-		if !budgetWithin(budget, template.CostProfile) {
+		budgetLimit := template.CostProfile
+		if !budgetWithin(budget, budgetLimit) {
 			return PlanRevision{}, fmt.Errorf("%w: task %q budget exceeds template cost profile", ErrPlanInvalid, candidate.ID)
 		}
 		if err := validateBudgetVector(budget); err != nil {
@@ -141,31 +264,33 @@ func (compiler PlanCompiler) compile(
 			return PlanRevision{}, fmt.Errorf("%w: task %q output schema: %v", ErrPlanInvalid, candidate.ID, err)
 		}
 		task := ExecutableTask{
-			ID:            candidate.ID,
-			Template:      candidate.Template,
-			Objective:     candidate.Objective,
-			GoalIDs:       append([]string(nil), candidate.GoalIDs...),
-			Capability:    candidate.Capability,
-			EvidenceGoals: cloneEvidenceGoals(candidate.EvidenceGoals),
-			Entities:      append([]string(nil), candidate.Entities...),
-			AllowedTools:  allowedTools,
-			InputRefs:     append([]EvidenceRef(nil), candidate.InputRefs...),
-			Dependencies:  uniqueStrings(candidate.Dependencies),
+			ID:                   candidate.ID,
+			Template:             candidate.Template,
+			Objective:            candidate.Objective,
+			EvidenceGoalIDs:      append([]string(nil), candidate.EvidenceGoalIDs...),
+			InvestigationGoalIDs: append([]string(nil), candidate.InvestigationGoalIDs...),
+			Capability:           candidate.Capability,
+			EvidenceGoals:        cloneEvidenceGoals(candidate.EvidenceGoals),
+			Entities:             append([]string(nil), candidate.Entities...),
+			AllowedTools:         allowedTools,
+			InputRefs:            append([]EvidenceRef(nil), candidate.InputRefs...),
+			Dependencies:         uniqueStrings(candidate.Dependencies),
 			Budget: TaskBudget{
 				Limit:       budget,
 				MaxAttempts: maxTaskAttempts(firstPositive(candidate.MaxAttempts, template.MaxAttempts)),
 			},
-			InputSchema:  template.InputSchema,
-			OutputSchema: template.OutputSchema,
-			Executor:     template.Executor,
-			ToolCalls:    append([]ToolCallSpec(nil), template.ToolCalls...),
-			Optional:     candidate.Optional,
-			Status:       TaskPending,
+			InputSchema:   template.InputSchema,
+			OutputSchema:  template.OutputSchema,
+			Executor:      template.Executor,
+			ToolCalls:     append([]ToolCallSpec(nil), template.ToolCalls...),
+			Optional:      candidate.Optional,
+			AllowParallel: candidate.AllowParallel || template.AllowParallel || (template.Executor == ExecutorInvestigator),
+			Status:        TaskPending,
 		}
 		tasks = append(tasks, task)
 		totalBudget = addVector(totalBudget, budget)
 	}
-	for _, goal := range contract.Goals {
+	for _, goal := range contract.EvidenceGoals {
 		if goal.Required {
 			if _, covered := coveredRequired[goal.ID]; covered {
 				continue
@@ -197,8 +322,19 @@ func (compiler PlanCompiler) compile(
 	}, nil
 }
 
-// ensureVerifierRunsAfterEvidence makes every standalone verifier wait for all
-// evidence-producing tasks so it cannot run on an empty ledger.
+func validateVerifierPlan(tasks []ExecutableTask) error {
+	count := 0
+	for _, task := range tasks {
+		if task.Executor == ExecutorVerifier {
+			count++
+		}
+	}
+	if count != 1 {
+		return fmt.Errorf("%w: executable plan must contain exactly one verifier, found %d", ErrPlanInvalid, count)
+	}
+	return nil
+}
+
 func ensureVerifierRunsAfterEvidence(tasks []ExecutableTask) []ExecutableTask {
 	evidenceTasks := make([]string, 0, len(tasks))
 	for _, task := range tasks {
@@ -210,9 +346,19 @@ func ensureVerifierRunsAfterEvidence(tasks []ExecutableTask) []ExecutableTask {
 		if tasks[index].Executor != ExecutorVerifier {
 			continue
 		}
-		if len(tasks[index].Dependencies) == 0 {
-			tasks[index].Dependencies = append([]string(nil), evidenceTasks...)
+		dependencies := make(map[string]struct{}, len(tasks[index].Dependencies)+len(evidenceTasks))
+		for _, dependency := range tasks[index].Dependencies {
+			dependencies[dependency] = struct{}{}
 		}
+		for _, dependency := range evidenceTasks {
+			dependencies[dependency] = struct{}{}
+		}
+		merged := make([]string, 0, len(dependencies))
+		for dependency := range dependencies {
+			merged = append(merged, dependency)
+		}
+		sort.Strings(merged)
+		tasks[index].Dependencies = merged
 	}
 	return tasks
 }
@@ -320,7 +466,7 @@ func selectInitialCandidates(contract InvestigationContract, candidates []TaskCa
 	covered := make(map[string]struct{})
 	for _, candidate := range candidates {
 		needed := false
-		for _, goalID := range candidate.GoalIDs {
+		for _, goalID := range candidate.EvidenceGoalIDs {
 			if _, ok := covered[goalID]; !ok {
 				needed = true
 				break
@@ -330,7 +476,7 @@ func selectInitialCandidates(contract InvestigationContract, candidates []TaskCa
 			continue
 		}
 		selected = append(selected, candidate)
-		for _, goalID := range candidate.GoalIDs {
+		for _, goalID := range candidate.EvidenceGoalIDs {
 			covered[goalID] = struct{}{}
 		}
 		if len(selected) >= maxTasks {

@@ -135,7 +135,8 @@ func declaredToolTokens(candidate tool.Tool, args tool.Arguments) int {
 }
 
 func (agent *Agent) availableToolTokens(state *compiledLoop) int {
-	if agent.cfg.ContextWindow <= 0 {
+	window := agent.effectiveContextWindow()
+	if window <= 0 {
 		return -1
 	}
 	inputTokens, err := estimateInputTokens(state.messages, state.tools)
@@ -144,7 +145,7 @@ func (agent *Agent) availableToolTokens(state *compiledLoop) int {
 	}
 	contextRemaining := max(
 		0,
-		agent.cfg.ContextWindow-inputTokens-agent.outputReserve()-contextSafetyTokens(agent.cfg.ContextWindow),
+		window-inputTokens-agent.outputReserve()-contextSafetyTokens(window),
 	)
 	if state.remainingToolTokens < 0 {
 		return contextRemaining
@@ -153,7 +154,8 @@ func (agent *Agent) availableToolTokens(state *compiledLoop) int {
 }
 
 func initialToolTokenBudget(agent *Agent, messages []llm.Message, tools []llm.ToolDef) int {
-	if agent.cfg.ContextWindow <= 0 {
+	window := agent.effectiveContextWindow()
+	if window <= 0 {
 		return -1
 	}
 	inputTokens, err := estimateInputTokens(messages, tools)
@@ -162,7 +164,7 @@ func initialToolTokenBudget(agent *Agent, messages []llm.Message, tools []llm.To
 	}
 	return max(
 		0,
-		agent.cfg.ContextWindow-inputTokens-agent.outputReserve()-contextSafetyTokens(agent.cfg.ContextWindow),
+		window-inputTokens-agent.outputReserve()-contextSafetyTokens(window),
 	)
 }
 

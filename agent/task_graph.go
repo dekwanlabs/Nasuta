@@ -43,12 +43,16 @@ type TaskSpec struct {
 	ID                   string   `json:"id"`
 	Purpose              string   `json:"purpose"`
 	InvestigationGoalIDs []string `json:"investigation_goal_ids,omitempty"`
+	EvidenceGoalIDs      []string `json:"evidence_goal_ids,omitempty"`
 	RequiredFacets       []string `json:"required_facets,omitempty"`
 	Capability           string   `json:"capability"`
 	// InputRefs limits the task to evidence already admitted by the server.
 	InputRefs     []EvidenceRef `json:"input_refs"`
 	OutputSchema  SchemaRef     `json:"output_schema"`
 	ParallelGroup string        `json:"parallel_group,omitempty"`
+	// AllowParallel permits this task to share a scheduler batch with other
+	// ready Agent tasks. False keeps the node serialized.
+	AllowParallel bool `json:"allow_parallel,omitempty"`
 	// Optional allows downstream scheduling to continue after terminal failure.
 	Optional    bool       `json:"optional"`
 	MaxAttempts int        `json:"max_attempts,omitempty"`

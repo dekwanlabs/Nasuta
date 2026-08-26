@@ -84,9 +84,9 @@ func TestSelectReplanCandidatesPrefersCoverageAndKeepsBudgetBound(t *testing.T) 
 		EvidenceGoal{ID: "g-state", Kind: "state", Required: true},
 	)
 	candidates := []TaskCandidate{
-		{ID: "task_cheap-one_v1", Template: TaskTemplateRef{ID: "cheap-one", Version: 1}, GoalIDs: []string{"g-flow"}, Budget: BudgetVector{ToolCalls: 1}},
-		{ID: "task_cheap-two_v1", Template: TaskTemplateRef{ID: "cheap-two", Version: 1}, GoalIDs: []string{"g-state"}, Budget: BudgetVector{ToolCalls: 1}},
-		{ID: "task_shared_v1", Template: TaskTemplateRef{ID: "shared", Version: 1}, GoalIDs: []string{"g-flow", "g-state"}, Budget: BudgetVector{ToolCalls: 3}},
+		{ID: "task_cheap-one_v1", Template: TaskTemplateRef{ID: "cheap-one", Version: 1}, EvidenceGoalIDs: []string{"g-flow"}, Budget: BudgetVector{ToolCalls: 1}},
+		{ID: "task_cheap-two_v1", Template: TaskTemplateRef{ID: "cheap-two", Version: 1}, EvidenceGoalIDs: []string{"g-state"}, Budget: BudgetVector{ToolCalls: 1}},
+		{ID: "task_shared_v1", Template: TaskTemplateRef{ID: "shared", Version: 1}, EvidenceGoalIDs: []string{"g-flow", "g-state"}, Budget: BudgetVector{ToolCalls: 3}},
 	}
 	selected := selectReplanCandidates(
 		catalog, contract, candidates,
@@ -127,8 +127,8 @@ func TestSelectReplanCandidatesMatchesRequiredSource(t *testing.T) {
 	selected := selectReplanCandidates(
 		catalog, contract,
 		[]TaskCandidate{
-			{ID: "task_a-internal_v1", Template: TaskTemplateRef{ID: "a-internal", Version: 1}, GoalIDs: []string{"g1"}, Budget: BudgetVector{ToolCalls: 1}},
-			{ID: "task_z-runtime_v1", Template: TaskTemplateRef{ID: "z-runtime", Version: 1}, GoalIDs: []string{"g1"}, Budget: BudgetVector{ToolCalls: 1}},
+			{ID: "task_a-internal_v1", Template: TaskTemplateRef{ID: "a-internal", Version: 1}, EvidenceGoalIDs: []string{"g1"}, Budget: BudgetVector{ToolCalls: 1}},
+			{ID: "task_z-runtime_v1", Template: TaskTemplateRef{ID: "z-runtime", Version: 1}, EvidenceGoalIDs: []string{"g1"}, Budget: BudgetVector{ToolCalls: 1}},
 		},
 		map[string]struct{}{"g1": {}}, nil, 1, BudgetVector{ToolCalls: 1}, nil,
 	)
@@ -153,7 +153,7 @@ func TestSelectReplanCandidatesTreatsExecutedDependenciesAsSatisfied(t *testing.
 		catalog, testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true}),
 		[]TaskCandidate{{
 			ID: "task_consumer_v1", Template: TaskTemplateRef{ID: "consumer", Version: 1},
-			GoalIDs: []string{"g1"}, Dependencies: []string{"task_provider_v1"}, Budget: BudgetVector{ToolCalls: 1},
+			EvidenceGoalIDs: []string{"g1"}, Dependencies: []string{"task_provider_v1"}, Budget: BudgetVector{ToolCalls: 1},
 		}},
 		map[string]struct{}{"g1": {}},
 		map[string]struct{}{"task_provider_v1": {}},

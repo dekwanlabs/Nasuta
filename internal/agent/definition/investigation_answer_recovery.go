@@ -15,6 +15,7 @@ const maxRecoveredInvestigationCitations = 50
 type recoveredInvestigationBundle struct {
 	SupportedClaims   []recoveredInvestigationClaim `json:"supported_claims"`
 	PartialClaims     []recoveredInvestigationClaim `json:"partial_claims"`
+	EvidenceLookup    map[string]recoveredEvidence  `json:"evidence_lookup"`
 	Limitations       []string                      `json:"limitations"`
 	LimitationsDetail recoveredLimitationsDetail    `json:"limitations_detail"`
 	Verification      struct {
@@ -32,6 +33,13 @@ type recoveredInvestigationClaim struct {
 }
 
 type recoveredInvestigationEvidence struct {
+	EvidenceID string `json:"evidence_id,omitempty"`
+	Kind       string `json:"kind"`
+	Reference  string `json:"reference"`
+	Summary    string `json:"summary"`
+}
+
+type recoveredEvidence struct {
 	Kind      string `json:"kind"`
 	Reference string `json:"reference"`
 	Summary   string `json:"summary"`
@@ -61,11 +69,10 @@ func canRecoverInvestigationAnswer(
 	ref agentapi.SchemaRef,
 	err error,
 ) bool {
-	return ref == (agentapi.SchemaRef{
-		ID: "investigation.answer", Version: 3,
-	}) && (errors.Is(err, execution.ErrReasoningTruncated) ||
+	return ref == (agentapi.InvestigationAnswerSchemaRef()) && (errors.Is(err, execution.ErrReasoningTruncated) ||
 		errors.Is(err, execution.ErrEmptyModelResponse) ||
-		errors.Is(err, execution.ErrAnswerTruncated))
+		errors.Is(err, execution.ErrAnswerTruncated) ||
+		errors.Is(err, execution.ErrModelCallBudgetExhausted))
 }
 
 func recoverInvestigationAnswer(
@@ -79,9 +86,7 @@ func recoverInvestigationAnswer(
 	if context.AgentID != "synthesizer" || len(context.Input) == 0 {
 		return nil, fmt.Errorf("investigation answer recovery context is incomplete")
 	}
-	inputSchema := agentapi.SchemaRef{
-		ID: "investigation.verified_bundle", Version: 2,
-	}
+	inputSchema := agentapi.InvestigationVerifiedBundleSchemaRef()
 	if err := schemas.Validate(inputSchema, context.Input); err != nil {
 		return nil, fmt.Errorf("validate verified investigation bundle: %w", err)
 	}
@@ -97,6 +102,7 @@ func recoverInvestigationAnswer(
 	citations := recoveredCitations(
 		bundle.SupportedClaims,
 		bundle.PartialClaims,
+		bundle.EvidenceLookup,
 	)
 	output, err := json.Marshal(recoveredInvestigationAnswer{
 		Answer:            answer,
@@ -183,6 +189,7 @@ func appendRecoveredClaims(
 func recoveredCitations(
 	supported []recoveredInvestigationClaim,
 	partial []recoveredInvestigationClaim,
+	lookup map[string]recoveredEvidence,
 ) []recoveredInvestigationCitation {
 	claims := make(
 		[]recoveredInvestigationClaim,
@@ -196,12 +203,24 @@ func recoveredCitations(
 	claims = appendRecoveredClaims(claims, partial)
 	citations := make([]recoveredInvestigationCitation, 0, len(claims))
 	for _, claim := range claims {
+		evidence := make([]recoveredInvestigationEvidence, 0, len(claim.Evidence))
+		for _, reference := range claim.Evidence {
+			summary, ok := lookup[reference.EvidenceID]
+			if !ok || summary.Kind == "" || summary.Reference == "" || summary.Summary == "" {
+				continue
+			}
+			evidence = append(evidence, recoveredInvestigationEvidence{
+				Kind:      summary.Kind,
+				Reference: summary.Reference,
+				Summary:   summary.Summary,
+			})
+		}
+		if len(evidence) == 0 {
+			continue
+		}
 		citations = append(citations, recoveredInvestigationCitation{
-			Claim: strings.TrimSpace(claim.Claim),
-			Evidence: append(
-				[]recoveredInvestigationEvidence(nil),
-				claim.Evidence...,
-			),
+			Claim:    strings.TrimSpace(claim.Claim),
+			Evidence: evidence,
 		})
 	}
 	return citations

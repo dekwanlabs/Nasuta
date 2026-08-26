@@ -36,6 +36,18 @@ func (store *MySQLRunStore) Create(run InvestigationRun) error {
 	return store.persist(next, event, true)
 }
 
+func (store *MySQLRunStore) ListActiveRuns(before time.Time, cursor ActiveRunCursor, limit int) (ActiveRunPage, error) {
+	if store == nil || store.db == nil {
+		return ActiveRunPage{}, fmt.Errorf("run store is required")
+	}
+	if err := validateActiveRunPage(before, cursor, limit); err != nil {
+		return ActiveRunPage{}, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return listActiveRunsSQL(store.db, before, cursor, limit, "mysql")
+}
+
 func (store *MySQLRunStore) Get(id string) (InvestigationRun, error) {
 	if store == nil || store.db == nil {
 		return InvestigationRun{}, fmt.Errorf("run store is required")
@@ -158,6 +170,50 @@ func (store *MySQLRunStore) apply(id string, mutate runMutation) error {
 	return store.applyWithToken(id, 0, mutate)
 }
 
+func (store *MySQLRunStore) adoptFencingToken(id, owner string, token uint64) error {
+	if store == nil || store.db == nil {
+		return fmt.Errorf("run store is required")
+	}
+	if id == "" || owner == "" || token == 0 {
+		return fmt.Errorf("%w: run id, lease owner, and fencing token are required", ErrLeaseFenced)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	tx, err := store.db.Begin()
+	if err != nil {
+		return fmt.Errorf("adopt run %q fencing token: begin: %w", id, err)
+	}
+	defer tx.Rollback()
+	var leaseToken uint64
+	var expiresAt int64
+	if err := tx.QueryRow(
+		`SELECT fencing_token, expires_at FROM investigation_leases WHERE run_id = ? AND owner = ? FOR UPDATE`,
+		id, owner,
+	).Scan(&leaseToken, &expiresAt); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("%w: run %q lease is not owned by %q", ErrLeaseFenced, id, owner)
+		}
+		return fmt.Errorf("adopt run %q fencing token: validate lease: %w", id, err)
+	}
+	if leaseToken != token || !time.UnixMilli(expiresAt).After(time.Now().UTC()) {
+		return fmt.Errorf("%w: run %q fencing token %d is stale", ErrLeaseFenced, id, token)
+	}
+	var existing string
+	if err := tx.QueryRow(`SELECT id FROM investigation_runs WHERE id = ? FOR UPDATE`, id).Scan(&existing); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("%w: %q", ErrNotFound, id)
+		}
+		return fmt.Errorf("adopt run %q fencing token: load run: %w", id, err)
+	}
+	if _, err := tx.Exec(`UPDATE investigation_runs SET fencing_token = ? WHERE id = ?`, token, id); err != nil {
+		return fmt.Errorf("adopt run %q fencing token: update: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("adopt run %q fencing token: commit: %w", id, err)
+	}
+	return nil
+}
+
 func (store *MySQLRunStore) applyFenced(id, owner string, token uint64, mutate runMutation) error {
 	if owner == "" || token == 0 {
 		return fmt.Errorf("%w: lease owner and fencing token are required", ErrLeaseFenced)
@@ -244,6 +300,74 @@ func (store *MySQLRunStore) createFenced(run InvestigationRun, owner string, tok
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return store.persistLocked(next, event, true, runFence{owner: owner, token: token})
+}
+
+func (store *MySQLRunStore) appendEventFenced(
+	id string,
+	eventType string,
+	message string,
+	owner string,
+	token uint64,
+) error {
+	if store == nil || store.db == nil {
+		return fmt.Errorf("run store is required")
+	}
+	if id == "" || eventType == "" {
+		return fmt.Errorf("run id and event type are required")
+	}
+	if owner == "" || token == 0 {
+		return fmt.Errorf("%w: lease owner and fencing token are required", ErrLeaseFenced)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	tx, err := store.db.Begin()
+	if err != nil {
+		return fmt.Errorf("append fenced event for run %q: begin: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	var leaseToken uint64
+	var expiresAt int64
+	if err := tx.QueryRow(
+		`SELECT fencing_token, expires_at FROM investigation_leases WHERE run_id = ? AND owner = ? FOR UPDATE`,
+		id,
+		owner,
+	).Scan(&leaseToken, &expiresAt); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("%w: run %q lease is not owned by %q", ErrLeaseFenced, id, owner)
+		}
+		return fmt.Errorf("append fenced event for run %q: validate lease: %w", id, err)
+	}
+	if leaseToken != token {
+		return fmt.Errorf("%w: run %q lease token %d does not match worker token %d", ErrLeaseFenced, id, leaseToken, token)
+	}
+	if !time.UnixMilli(expiresAt).After(time.Now().UTC()) {
+		return fmt.Errorf("%w: run %q lease token %d has expired", ErrLeaseFenced, id, token)
+	}
+
+	var runToken uint64
+	if err := tx.QueryRow(
+		`SELECT fencing_token FROM investigation_runs WHERE id = ? FOR UPDATE`,
+		id,
+	).Scan(&runToken); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("%w: %q", ErrNotFound, id)
+		}
+		return fmt.Errorf("append fenced event for run %q: validate run: %w", id, err)
+	}
+	if runToken != token {
+		return fmt.Errorf("%w: run %q snapshot token %d does not match worker token %d", ErrLeaseFenced, id, runToken, token)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO investigation_events (run_id, type, status, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+		id, eventType, "", message, time.Now().UTC().UnixMilli(),
+	); err != nil {
+		return fmt.Errorf("append fenced event for run %q: insert: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("append fenced event for run %q: commit: %w", id, err)
+	}
+	return nil
 }
 
 type runFence struct {

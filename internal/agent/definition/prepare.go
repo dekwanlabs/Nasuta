@@ -91,8 +91,13 @@ func prepareRunLimits(
 	now time.Time,
 ) (agentapi.RunLimits, error) {
 	if requested.MaxSteps < 0 || requested.MaxToolCalls < 0 ||
+		requested.MaxInputTokens < 0 || requested.MaxContextTokens < 0 ||
 		requested.MaxTotalTokens < 0 || requested.MaxCostMicros < 0 {
 		return agentapi.RunLimits{}, fmt.Errorf("run limits cannot be negative")
+	}
+	if requested.MaxContextTokens > 0 && definition.Budget.ContextTokens > 0 &&
+		requested.MaxContextTokens > int64(definition.Budget.ContextTokens) {
+		return agentapi.RunLimits{}, fmt.Errorf("run context limit exceeds the definition context window")
 	}
 	maxDeadline := now.Add(definition.Budget.Timeout)
 	deadline := requested.Deadline
@@ -126,11 +131,13 @@ func prepareRunLimits(
 		}
 	}
 	return agentapi.RunLimits{
-		Deadline:       deadline,
-		MaxSteps:       maxSteps,
-		MaxToolCalls:   maxToolCalls,
-		MaxTotalTokens: requested.MaxTotalTokens,
-		MaxCostMicros:  requested.MaxCostMicros,
+		Deadline:         deadline,
+		MaxSteps:         maxSteps,
+		MaxToolCalls:     maxToolCalls,
+		MaxInputTokens:   requested.MaxInputTokens,
+		MaxContextTokens: requested.MaxContextTokens,
+		MaxTotalTokens:   requested.MaxTotalTokens,
+		MaxCostMicros:    requested.MaxCostMicros,
 	}, nil
 }
 
@@ -364,6 +371,7 @@ func compileRequest(
 		}
 		return execution.Input{
 			Question: question, Messages: messages,
+			OutputMode:        request.Policy.OutputMode,
 			EvidenceSeeded:    evidenceSeeded,
 			Direct:            !request.Policy.EvidenceRequired,
 			Web:               request.Policy.WebResearch,
@@ -395,6 +403,7 @@ func compileRequest(
 	messages = append(messages, llm.Message{Role: "user", Content: question})
 	return execution.Input{
 		Question: question, Messages: messages,
+		OutputMode:        request.Policy.OutputMode,
 		EvidenceSeeded:    evidenceSeeded,
 		Direct:            !request.Policy.EvidenceRequired,
 		Web:               request.Policy.WebResearch,

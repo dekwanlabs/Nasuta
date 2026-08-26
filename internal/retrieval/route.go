@@ -444,6 +444,20 @@ func bindExecutionAudit(raw map[string]any) ([]ExecutionTask, error) {
 	if err != nil {
 		return nil, err
 	}
+	for index, task := range tasks {
+		if !task.IndependentlyUseful {
+			return nil, fmt.Errorf(
+				"execution task audit tasks[%d].independently_useful must be true",
+				index,
+			)
+		}
+		if len(task.DependsOn) != 0 {
+			return nil, fmt.Errorf(
+				"execution task audit tasks[%d].depends_on must be empty",
+				index,
+			)
+		}
+	}
 	return tasks, nil
 }
 

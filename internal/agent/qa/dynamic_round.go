@@ -17,14 +17,14 @@ const defaultInvestigationMaxRounds = 3
 // InvestigationRoundContext is the coordinator's bounded progress cursor.
 // It is derived from durable child facts and does not need its own state table.
 type InvestigationRoundContext struct {
-	ParentRunID           string
-	Objective             string
-	Round                 int
-	MaxRounds             int
-	CoveredGoals          []string
-	UnresolvedGoals       []string
-	PreviousWorkflowRunID string
-	RemainingBudget       int64
+	ParentRunID             string
+	Objective               string
+	Round                   int
+	MaxRounds               int
+	CoveredEvidenceGoals    []string
+	UnresolvedEvidenceGoals []string
+	PreviousWorkflowRunID   string
+	RemainingBudget         int64
 }
 
 // ShouldContinue reports whether another bounded child workflow is eligible.
@@ -33,9 +33,10 @@ func ShouldContinue(context InvestigationRoundContext) bool {
 	if maxRounds <= 0 {
 		maxRounds = defaultInvestigationMaxRounds
 	}
+	unresolved := context.UnresolvedEvidenceGoals
 	return context.Round > 0 &&
 		context.Round < maxRounds &&
-		len(context.UnresolvedGoals) > 0 &&
+		len(unresolved) > 0 &&
 		context.RemainingBudget >= 0
 }
 
@@ -46,16 +47,16 @@ func NextRound(
 ) InvestigationRoundContext {
 	next := context
 	next.Round++
-	next.CoveredGoals = appendUniqueStrings(
-		append([]string(nil), context.CoveredGoals...),
-		result.PartialGoals...,
+	next.CoveredEvidenceGoals = appendUniqueStrings(
+		append([]string(nil), context.CoveredEvidenceGoals...),
+		result.PartialEvidenceGoals...,
 	)
 	for _, claim := range result.SupportedClaims {
-		next.CoveredGoals = appendUniqueStrings(next.CoveredGoals, claim.GoalIDs...)
+		next.CoveredEvidenceGoals = appendUniqueStrings(next.CoveredEvidenceGoals, claim.EvidenceGoalIDs...)
 	}
-	next.UnresolvedGoals = uniqueStrings(result.UnresolvedGoals)
-	if len(next.UnresolvedGoals) == 0 {
-		next.UnresolvedGoals = uniqueStrings(result.PartialGoals)
+	next.UnresolvedEvidenceGoals = uniqueStrings(result.UnresolvedEvidenceGoals)
+	if len(next.UnresolvedEvidenceGoals) == 0 {
+		next.UnresolvedEvidenceGoals = uniqueStrings(result.PartialEvidenceGoals)
 	}
 	return next
 }
@@ -67,7 +68,7 @@ func continuationContract(
 	previous TaskContract,
 	result InvestigationResult,
 ) (TaskContract, bool) {
-	unresolved := uniqueStrings(result.UnresolvedGoals)
+	unresolved := uniqueStrings(result.UnresolvedEvidenceGoals)
 	if len(unresolved) == 0 {
 		return TaskContract{}, false
 	}
@@ -100,25 +101,28 @@ func continuationContract(
 		return TaskContract{}, false
 	}
 
-	partialOrUnresolved := make(map[string]struct{},
-		len(unresolved)+len(result.PartialGoals),
-	)
-	for _, goalID := range unresolved {
-		partialOrUnresolved[goalID] = struct{}{}
-	}
-	for _, goalID := range result.PartialGoals {
-		goalID = strings.TrimSpace(goalID)
-		if goalID != "" {
-			partialOrUnresolved[goalID] = struct{}{}
+	// Evidence gaps do not identify investigation deliverables. New results
+	// therefore preserve all admitted investigation goals while removing
+	// dependency edges that could refer to evidence already covered.
+	if result.PartialInvestigationGoals != nil || result.UnresolvedInvestigationGoals != nil {
+		allowedInvestigation := make(map[string]struct{}, len(result.PartialInvestigationGoals)+len(result.UnresolvedInvestigationGoals))
+		for _, goalID := range append(append([]string(nil), result.PartialInvestigationGoals...), result.UnresolvedInvestigationGoals...) {
+			if goalID = strings.TrimSpace(goalID); goalID != "" {
+				allowedInvestigation[goalID] = struct{}{}
+			}
 		}
-	}
-	next.InvestigationGoals = next.InvestigationGoals[:0]
-	for _, goal := range previous.InvestigationGoals {
-		if _, ok := partialOrUnresolved[goal.ID]; !ok {
-			continue
+		next.InvestigationGoals = next.InvestigationGoals[:0]
+		for _, goal := range previous.InvestigationGoals {
+			if _, ok := allowedInvestigation[goal.ID]; !ok {
+				continue
+			}
+			goal.DependsOn = []string{}
+			next.InvestigationGoals = append(next.InvestigationGoals, goal)
 		}
-		goal.DependsOn = []string{}
-		next.InvestigationGoals = append(next.InvestigationGoals, goal)
+	} else {
+		for index := range next.InvestigationGoals {
+			next.InvestigationGoals[index].DependsOn = []string{}
+		}
 	}
 	next.TaskEvidenceAssignments = nil
 	return next, true
@@ -158,6 +162,7 @@ func cloneTaskContract(contract TaskContract) TaskContract {
 }
 
 func cloneEvidenceGoal(goal EvidenceGoal) EvidenceGoal {
+	goal.Facets = append([]string(nil), goal.Facets...)
 	goal.Sources = append([]agentapi.EvidenceSource(nil), goal.Sources...)
 	goal.RequiredSources = append(
 		[]agentapi.EvidenceSource(nil), goal.RequiredSources...,
@@ -279,11 +284,17 @@ func MergeRoundResult(previous, current InvestigationResult) InvestigationResult
 		merged.UnsupportedClaims,
 		current.UnsupportedClaims,
 	)
-	if current.PartialGoals != nil {
-		merged.PartialGoals = uniqueStrings(current.PartialGoals)
+	if current.PartialEvidenceGoals != nil {
+		merged.PartialEvidenceGoals = uniqueStrings(current.PartialEvidenceGoals)
 	}
-	if current.UnresolvedGoals != nil {
-		merged.UnresolvedGoals = uniqueStrings(current.UnresolvedGoals)
+	if current.UnresolvedEvidenceGoals != nil {
+		merged.UnresolvedEvidenceGoals = uniqueStrings(current.UnresolvedEvidenceGoals)
+	}
+	if current.PartialInvestigationGoals != nil {
+		merged.PartialInvestigationGoals = uniqueStrings(current.PartialInvestigationGoals)
+	}
+	if current.UnresolvedInvestigationGoals != nil {
+		merged.UnresolvedInvestigationGoals = uniqueStrings(current.UnresolvedInvestigationGoals)
 	}
 	ledger := evidence.New(previous.EvidenceUnits, "previous")
 	conflicts := append([]agentapi.EvidenceConflict(nil), previous.EvidenceConflicts...)
@@ -305,8 +316,10 @@ func cloneInvestigationResult(result InvestigationResult) InvestigationResult {
 	result.SupportedClaims = cloneClaims(result.SupportedClaims)
 	result.PartialClaims = cloneClaims(result.PartialClaims)
 	result.UnsupportedClaims = append([]InvestigationUnsupportedClaim(nil), result.UnsupportedClaims...)
-	result.PartialGoals = append([]string(nil), result.PartialGoals...)
-	result.UnresolvedGoals = append([]string(nil), result.UnresolvedGoals...)
+	result.PartialInvestigationGoals = append([]string(nil), result.PartialInvestigationGoals...)
+	result.UnresolvedInvestigationGoals = append([]string(nil), result.UnresolvedInvestigationGoals...)
+	result.PartialEvidenceGoals = append([]string(nil), result.PartialEvidenceGoals...)
+	result.UnresolvedEvidenceGoals = append([]string(nil), result.UnresolvedEvidenceGoals...)
 	result.EvidenceUnits = evidence.CloneUnits(result.EvidenceUnits)
 	result.EvidenceConflicts = append([]agentapi.EvidenceConflict(nil), result.EvidenceConflicts...)
 	return result
@@ -319,7 +332,7 @@ func cloneClaims(claims []InvestigationClaim) []InvestigationClaim {
 	out := make([]InvestigationClaim, len(claims))
 	for index, claim := range claims {
 		out[index] = claim
-		out[index].GoalIDs = append([]string(nil), claim.GoalIDs...)
+		out[index].EvidenceGoalIDs = append([]string(nil), claim.EvidenceGoalIDs...)
 		out[index].EntityIDs = append([]string(nil), claim.EntityIDs...)
 		out[index].Evidence = append([]InvestigationEvidence(nil), claim.Evidence...)
 		out[index].EvidenceIdentities = append([]agentapi.EvidenceIdentity(nil), claim.EvidenceIdentities...)
@@ -356,10 +369,10 @@ func mergeClaim(previous, current InvestigationClaim) InvestigationClaim {
 	if strings.TrimSpace(merged.Claim) == "" {
 		merged.Claim = previous.Claim
 	}
-	if len(merged.GoalIDs) == 0 {
-		merged.GoalIDs = append([]string(nil), previous.GoalIDs...)
+	if len(merged.EvidenceGoalIDs) == 0 {
+		merged.EvidenceGoalIDs = append([]string(nil), previous.EvidenceGoalIDs...)
 	} else {
-		merged.GoalIDs = appendUniqueStrings(previous.GoalIDs, merged.GoalIDs...)
+		merged.EvidenceGoalIDs = appendUniqueStrings(previous.EvidenceGoalIDs, merged.EvidenceGoalIDs...)
 	}
 	if len(merged.EntityIDs) == 0 {
 		merged.EntityIDs = append([]string(nil), previous.EntityIDs...)

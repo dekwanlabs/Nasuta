@@ -8,12 +8,169 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
-func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
+func TestDefaultSchemasPublishOnlyCurrentTaskContract(t *testing.T) {
+	var refs []agentapi.SchemaRef
+	for _, definition := range DefaultSchemas() {
+		if definition.ID == agentapi.TaskContractSchemaID {
+			refs = append(refs, agentapi.SchemaRef{ID: definition.ID, Version: definition.Version})
+		}
+	}
+	if len(refs) != 1 || refs[0] != agentapi.TaskContractSchemaRef() {
+		t.Fatalf("published task contracts = %+v", refs)
+	}
+}
+
+func TestDefaultSchemasRejectUnsupportedInvestigationSchemaVersions(t *testing.T) {
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish(DefaultSchemas()); err != nil {
 		t.Fatal(err)
 	}
-	ref := agentapi.SchemaRef{ID: "task.contract", Version: 1}
+	removed := []agentapi.SchemaRef{
+		{ID: "investigation.request", Version: 1},
+		{ID: agentapi.InvestigationVerifiedBundleSchemaID, Version: 2},
+		{ID: agentapi.InvestigationVerifiedBundleSchemaID, Version: 3},
+		{ID: agentapi.InvestigationVerifiedBundleSchemaID, Version: 4},
+		{ID: agentapi.InvestigationAnswerSchemaID, Version: 2},
+		{ID: agentapi.InvestigationAnswerSchemaID, Version: 3},
+		{ID: agentapi.InvestigationReportSchemaID, Version: 2},
+		{ID: agentapi.InvestigationBundleSchemaID, Version: 2},
+		{ID: agentapi.TaskContractSchemaID, Version: 2},
+	}
+	for _, ref := range removed {
+		if _, err := registry.Resolve(ref); err == nil {
+			t.Fatalf("resolved removed schema %+v", ref)
+		}
+	}
+}
+
+func TestDefaultSchemasDoNotPublishRemovedInvestigationRequest(t *testing.T) {
+	for _, definition := range DefaultSchemas() {
+		if definition.ID == "investigation.request" {
+			t.Fatalf("published removed schema = %+v", definition)
+		}
+	}
+}
+
+func TestDefaultSchemasPublishOneCurrentSchemaPerInvestigationContract(t *testing.T) {
+	want := map[string][]agentapi.SchemaRef{
+		agentapi.InvestigationReportSchemaID: {
+			agentapi.InvestigationReportSchemaRef(),
+		},
+		agentapi.InvestigationBundleSchemaID: {
+			agentapi.InvestigationBundleSchemaRef(),
+		},
+		agentapi.InvestigationVerifiedBundleSchemaID: {
+			agentapi.InvestigationVerifiedBundleSchemaRef(),
+		},
+		agentapi.InvestigationAnswerSchemaID: {
+			agentapi.InvestigationAnswerSchemaRef(),
+		},
+	}
+	seen := make(map[string][]agentapi.SchemaRef, len(want))
+	for _, definition := range DefaultSchemas() {
+		if _, ok := want[definition.ID]; !ok {
+			continue
+		}
+		seen[definition.ID] = append(seen[definition.ID], agentapi.SchemaRef{
+			ID: definition.ID, Version: definition.Version,
+		})
+	}
+	for id, wantRefs := range want {
+		gotRefs := seen[id]
+		if len(gotRefs) != len(wantRefs) {
+			t.Fatalf("published %s schemas = %+v, want %+v", id, gotRefs, wantRefs)
+		}
+		for index, ref := range wantRefs {
+			if gotRefs[index] != ref {
+				t.Fatalf("published %s schemas = %+v, want %+v", id, gotRefs, wantRefs)
+			}
+		}
+	}
+}
+
+func TestDefaultSchemasValidateCurrentCompactVerifiedBundle(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`{
+		"supported_claims":[{
+			"producer_node_id":"investigate.code",
+			"finding_index":0,
+			"claim":"Checkout validates the request.",
+			"evidence_goal_ids":["core_flow"],
+			"evidence":[{"evidence_id":"ev_1"}],
+			"evidence_identities":[{"source_kind":"code","target":"Checkout.PlaceOrder"}],
+			"confidence":0.9,
+			"support":"supported",
+			"high_risk":false
+		}],
+		"partial_claims":[],
+		"unsupported_claims":[],
+		"partial_evidence_goals":[],
+		"unresolved_evidence_goals":[],
+		"limitations":[],
+		"evidence_lookup":{"ev_1":{"kind":"code","reference":"Checkout.PlaceOrder","summary":"validation branch"}},
+		"evidence_conflicts":[],
+		"omissions":{"claims":0,"goals":0,"limitations":0,"evidence_units":0,"evidence_conflicts":0},
+		"verification":{"decision":"complete","stop_reason":"required_goals_covered"},
+		"completeness":"complete",
+		"limitations_detail":{
+			"artifact_id":"art_00000000-0000-0000-0000-000000000000",
+			"total_count":0,"displayed_count":0,"omitted_count":0,
+			"normalization_version":"limitations-v1"
+		}
+	}`)
+	ref := agentapi.SchemaRef{
+		ID:      agentapi.InvestigationVerifiedBundleSchemaID,
+		Version: agentapi.InvestigationVerifiedBundleSchemaVersion,
+	}
+	if err := registry.Validate(ref, payload); err != nil {
+		t.Fatalf("current compact verified bundle rejected: %v", err)
+	}
+}
+
+func TestDefaultSchemasRejectsEmbeddedVerifiedBundleEvidence(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`{
+		"supported_claims":[{
+			"producer_node_id":"investigate.code",
+			"finding_index":0,
+			"claim":"Checkout validates the request.",
+			"evidence_goal_ids":["core_flow"],
+			"evidence":[{"kind":"code","reference":"Checkout.PlaceOrder","summary":"validation branch"}],
+			"confidence":0.9,
+			"support":"supported",
+			"high_risk":false
+		}],
+		"partial_claims":[],
+		"unsupported_claims":[],
+		"partial_evidence_goals":[],
+		"unresolved_evidence_goals":[],
+		"limitations":[],
+		"omissions":{"claims":0,"goals":0,"limitations":0,"evidence_units":0,"evidence_conflicts":0},
+		"verification":{"decision":"complete","stop_reason":"required_goals_covered"},
+		"completeness":"complete",
+		"limitations_detail":{
+			"artifact_id":"art_00000000-0000-0000-0000-000000000000",
+			"total_count":0,"displayed_count":0,"omitted_count":0,
+			"normalization_version":"limitations-v1"
+		}
+	}`)
+	if err := registry.Validate(agentapi.InvestigationVerifiedBundleSchemaRef(), payload); err == nil {
+		t.Fatal("compact verified bundle accepted embedded evidence")
+	}
+}
+
+func TestCurrentTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	ref := agentapi.TaskContractSchemaRef()
 	tests := []struct {
 		name    string
 		payload string
@@ -29,7 +186,8 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 					{"id":"failure_path","objective":"Trace the failure path.","independently_useful":true,"depends_on":[]},
 					{"id":"runtime_impact","objective":"Assess the runtime impact.","independently_useful":true,"depends_on":[]}
 				],
-				"evidence_goals":[{"id":"core_flow","facet":"core_flow","required":true,"sources":["internal","web"],"freshness":"bounded_live","minimum_coverage":1}],
+				"evidence_goals":[{"id":"core_flow","facet":"core_flow","facets":["core_flow","data_and_state"],"required":true,"sources":["internal","web"],"freshness":"bounded_live","minimum_coverage":1,"high_risk":true}],
+				"input_refs":[{"source_kind":"code","target":"service-a","section":"handler"}],
 				"context":{
 					"conversation_refs":[{"session_id":"session-1","run_id":"qa_0"},{"session_id":"session-1","turn":2}],
 					"time_range":{"from":"2026-08-11T00:00:00Z","to":"2026-08-12T00:00:00Z","to_exclusive":true,"raw":"yesterday"},
@@ -65,13 +223,13 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 				"task_id":"qa_1",
 				"objective":"Locate the checkout implementation",
 				"entities":[],
-				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","required":true,"sources":["internal"],"freshness":"stable","minimum_coverage":1}],
+				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","facets":["entrypoint"],"required":true,"sources":["internal"],"freshness":"stable","minimum_coverage":1}],
 				"context":{}
 			}`,
 			valid: true,
 		},
 		{
-			name:    "legacy request",
+			name:    "removed unstructured request",
 			payload: `{"question":"Where is checkout implemented?"}`,
 		},
 		{
@@ -126,7 +284,7 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 				"task_id":"qa_1",
 				"objective":"Locate the checkout implementation",
 				"entities":[],
-				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","required":true,"sources":["internal"],"freshness":"stable","minimum_coverage":1}],
+				"evidence_goals":[{"id":"entrypoint","facet":"entrypoint","facets":["entrypoint"],"required":true,"sources":["internal"],"freshness":"stable","minimum_coverage":1}],
 				"context":{"conversation_refs":[{"session_id":"session-1","content":"copied dialogue"}]}
 			}`,
 		},
@@ -141,6 +299,30 @@ func TestTaskContractRequiresCanonicalInvestigationContext(t *testing.T) {
 				t.Fatal("invalid task contract accepted")
 			}
 		})
+	}
+}
+
+func TestCurrentTaskContractRejectsMissingFacets(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`{
+		"task_id":"qa_1",
+		"objective":"Trace the checkout failure",
+		"entities":[],
+		"evidence_goals":[{
+			"id":"core_flow",
+			"facet":"core_flow",
+			"required":true,
+			"sources":["internal"],
+			"freshness":"stable",
+			"minimum_coverage":1
+		}],
+		"context":{}
+	}`)
+	if err := registry.Validate(agentapi.TaskContractSchemaRef(), payload); err == nil {
+		t.Fatal("task.contract accepted a payload outside the current contract")
 	}
 }
 
@@ -258,7 +440,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 	if err := registry.Publish(DefaultSchemas()); err != nil {
 		t.Fatal(err)
 	}
-	ref := agentapi.SchemaRef{ID: "investigation.bundle", Version: 1}
+	ref := agentapi.InvestigationBundleSchemaRef()
 	tests := []struct {
 		name    string
 		payload string
@@ -268,9 +450,9 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			name: "multiple reports",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"code report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"},
-					{"producer_node_id":"investigate.runtime","schema":{"id":"investigation.report","version":1},"payload":{"focus":"runtime","summary":"runtime report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"},
-					{"producer_node_id":"investigate.docs","schema":{"id":"investigation.report","version":1},"payload":{"focus":"docs","summary":"docs report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"}
+					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"code report","findings":[],"gaps":[],"covered_evidence_goals":[],"unresolved_evidence_goals":[]},"completeness":"complete"},
+					{"producer_node_id":"investigate.runtime","schema":{"id":"investigation.report","version":1},"payload":{"focus":"runtime","summary":"runtime report","findings":[],"gaps":[],"covered_evidence_goals":[],"unresolved_evidence_goals":[]},"completeness":"complete"},
+					{"producer_node_id":"investigate.docs","schema":{"id":"investigation.report","version":1},"payload":{"focus":"docs","summary":"docs report","findings":[],"gaps":[],"covered_evidence_goals":[],"unresolved_evidence_goals":[]},"completeness":"complete"}
 				],
 				"evidence_units":[],
 				"evidence_conflicts":[],
@@ -282,7 +464,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			name: "one available report",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.docs","schema":{"id":"investigation.report","version":1},"payload":{"focus":"docs","summary":"docs report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"partial"}
+					{"producer_node_id":"investigate.docs","schema":{"id":"investigation.report","version":1},"payload":{"focus":"docs","summary":"docs report","findings":[],"gaps":[],"covered_evidence_goals":[],"unresolved_evidence_goals":[]},"completeness":"partial"}
 				],
 				"unavailable_tasks":[
 					{"producer_node_id":"investigate.code"},
@@ -318,7 +500,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 						"summary":"code report",
 						"findings":[{
 							"claim":"Checkout validates the request.",
-							"goal_ids":["core_flow"],
+							"evidence_goal_ids":["core_flow"],
 							"evidence":[{
 								"kind":"code",
 								"reference":"Checkout.PlaceOrder",
@@ -333,8 +515,8 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 							"confidence":0.9
 						}],
 						"gaps":[],
-						"covered_goals":["core_flow"],
-						"unresolved_goals":[]
+						"covered_evidence_goals":["core_flow"],
+						"unresolved_evidence_goals":[]
 					},
 					"completeness":"complete"
 				}],
@@ -362,7 +544,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 						"findings":[{
 							"claim":"Checkout validates the request.",
 							"entity_ids":["Checkout.Place"],
-							"goal_ids":["core_flow"],
+							"evidence_goal_ids":["core_flow"],
 							"evidence":[{
 								"kind":"code",
 								"reference":"Checkout.PlaceOrder",
@@ -372,8 +554,8 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 							"confidence":0.9
 						}],
 						"gaps":[],
-						"covered_goals":["core_flow"],
-						"unresolved_goals":[]
+						"covered_evidence_goals":["core_flow"],
+						"unresolved_evidence_goals":[]
 					},
 					"completeness":"complete"
 				}],
@@ -397,7 +579,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			name: "invalid report",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"unknown","summary":"report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"}
+					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"unknown","summary":"report","findings":[],"gaps":[],"covered_evidence_goals":[],"unresolved_evidence_goals":[]},"completeness":"complete"}
 				],
 				"evidence_units":[],
 				"evidence_conflicts":[],
@@ -408,7 +590,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			name: "missing ledger field",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"}
+					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"report","findings":[],"gaps":[],"covered_evidence_goals":[],"unresolved_evidence_goals":[]},"completeness":"complete"}
 				],
 				"evidence_units":[],
 				"completeness":"complete"
@@ -418,7 +600,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 			name: "invalid unavailable task",
 			payload: `{
 				"handoffs":[
-					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"report","findings":[],"gaps":[],"covered_goals":[],"unresolved_goals":[]},"completeness":"complete"}
+					{"producer_node_id":"investigate.code","schema":{"id":"investigation.report","version":1},"payload":{"focus":"code","summary":"report","findings":[],"gaps":[],"covered_evidence_goals":[],"unresolved_evidence_goals":[]},"completeness":"complete"}
 				],
 				"unavailable_tasks":[
 					{"producer_node_id":"investigate.runtime","reason":"timeout"}
@@ -442,43 +624,25 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 	}
 }
 
-func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
+func TestVerifiedBundleRequiresEvidenceReferences(t *testing.T) {
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish(DefaultSchemas()); err != nil {
 		t.Fatal(err)
 	}
-	ref := agentapi.SchemaRef{
-		ID: "investigation.verified_bundle", Version: 2,
-	}
+	ref := agentapi.InvestigationVerifiedBundleSchemaRef()
 	tests := []struct {
 		name  string
 		claim string
 		valid bool
 	}{
 		{
-			name: "canonical claim support",
+			name: "claim references lookup",
 			claim: `{
 				"producer_node_id":"investigate.code",
 				"finding_index":0,
 				"claim":"Checkout validates the request.",
-				"goal_ids":["core_flow"],
-				"evidence":[{
-					"kind":"code",
-					"reference":"Checkout.PlaceOrder",
-					"summary":"validation branch",
-					"identity":{
-						"source_kind":"code",
-						"target":"Checkout.PlaceOrder",
-						"section":"validation",
-						"version":"commit-123"
-					}
-				}],
-				"evidence_identities":[{
-					"source_kind":"code",
-					"target":"Checkout.PlaceOrder",
-					"section":"validation",
-					"version":"commit-123"
-				}],
+				"evidence_goal_ids":["core_flow"],
+				"evidence":[{"evidence_id":"ev-1"}],
 				"confidence":0.9,
 				"support":"supported",
 				"high_risk":false
@@ -486,35 +650,13 @@ func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
 			valid: true,
 		},
 		{
-			name: "missing canonical identities",
+			name: "missing evidence reference",
 			claim: `{
 				"producer_node_id":"investigate.code",
 				"finding_index":0,
 				"claim":"Checkout validates the request.",
-				"goal_ids":["core_flow"],
-				"evidence":[{
-					"kind":"code",
-					"reference":"Checkout.PlaceOrder",
-					"summary":"validation branch"
-				}],
-				"confidence":0.9,
-				"support":"supported",
-				"high_risk":false
-			}`,
-		},
-		{
-			name: "empty canonical identities",
-			claim: `{
-				"producer_node_id":"investigate.code",
-				"finding_index":0,
-				"claim":"Checkout validates the request.",
-				"goal_ids":["core_flow"],
-				"evidence":[{
-					"kind":"code",
-					"reference":"Checkout.PlaceOrder",
-					"summary":"validation branch"
-				}],
-				"evidence_identities":[],
+				"evidence_goal_ids":["core_flow"],
+				"evidence":[{}],
 				"confidence":0.9,
 				"support":"supported",
 				"high_risk":false
@@ -527,8 +669,8 @@ func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
 				"supported_claims":[` + test.claim + `],
 				"partial_claims":[],
 				"unsupported_claims":[],
-				"partial_goals":[],
-				"unresolved_goals":[],
+				"partial_evidence_goals":[],
+				"unresolved_evidence_goals":[],
 				"limitations":[],
 				"evidence_units":[{
 					"source_kind":"code",
@@ -537,6 +679,7 @@ func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
 					"coverage":{"complete":true},
 					"version":"commit-123"
 				}],
+				"evidence_lookup":{"ev-1":{"kind":"code","reference":"Checkout.PlaceOrder","summary":"validation branch","identity":{"source_kind":"code","target":"Checkout.PlaceOrder"}}},
 				"evidence_conflicts":[],
 				"omissions":{
 					"claims":0,
@@ -550,6 +693,7 @@ func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
 					"stop_reason":"required_goals_covered"
 				},
 				"completeness":"complete",
+				"evidence_context":{"budget_tokens":100,"used_tokens":1},
 				"limitations_detail":{
 					"artifact_id":"art_00000000-0000-0000-0000-000000000000",
 					"total_count":0,"displayed_count":0,"omitted_count":0,
@@ -567,50 +711,19 @@ func TestVerifiedBundleRequiresCanonicalEvidenceIdentities(t *testing.T) {
 	}
 }
 
-func TestInvestigationAnswerV2AcceptsAllVerifiedLimitations(t *testing.T) {
-	registry := agentapi.NewSchemaRegistry()
-	if err := registry.Publish(DefaultSchemas()); err != nil {
-		t.Fatal(err)
-	}
-	limitations := make([]string, 28)
-	for index := range limitations {
-		limitations[index] = "verified limitation"
-	}
-	payload, err := json.Marshal(map[string]any{
-		"answer":      "The evidence is partial.",
-		"citations":   []any{},
-		"limitations": limitations,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := registry.Validate(
-		agentapi.SchemaRef{ID: "investigation.answer", Version: 2},
-		payload,
-	); err != nil {
-		t.Fatalf("v2 rejected 28 verified limitations: %v", err)
-	}
-	if err := registry.Validate(
-		agentapi.SchemaRef{ID: "investigation.answer", Version: 1},
-		payload,
-	); err == nil {
-		t.Fatal("v1 accepted a payload beyond its immutable 20-item limit")
-	}
-}
-
 func TestVerifiedBundleSubjectCoverageSchema(t *testing.T) {
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish(DefaultSchemas()); err != nil {
 		t.Fatal(err)
 	}
-	ref := agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2}
+	ref := agentapi.InvestigationVerifiedBundleSchemaRef()
 	base := func(subject string) json.RawMessage {
 		return json.RawMessage(`{
 			"supported_claims":[],
 			"partial_claims":[],
 			"unsupported_claims":[],
-			"partial_goals":[],
-			"unresolved_goals":[],
+			"partial_evidence_goals":[],
+			"unresolved_evidence_goals":[],
 			"limitations":["One comparison subject is missing internal evidence."],
 			"evidence_units":[],
 			"evidence_conflicts":[],
@@ -618,6 +731,7 @@ func TestVerifiedBundleSubjectCoverageSchema(t *testing.T) {
 			"omissions":{"claims":0,"goals":0,"limitations":0,"evidence_units":0,"evidence_conflicts":0},
 			"verification":{"decision":"partial","stop_reason":"evidence_insufficient"},
 			"completeness":"partial",
+			"evidence_context":{"budget_tokens":100,"used_tokens":0},
 			"limitations_detail":{
 				"artifact_id":"art_00000000-0000-0000-0000-000000000000",
 				"total_count":1,"displayed_count":1,"omitted_count":0,

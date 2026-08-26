@@ -162,6 +162,49 @@ func TestAnalyzeEvidenceAuditsInsufficientIndependentTasks(t *testing.T) {
 	}
 }
 
+func TestAnalyzeEvidenceRepairsAuditDependencyEdges(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch call {
+		case 1:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"overview\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.95},\"query_terms\":{\"domain_terms\":[\"platform architecture\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.8,\"confidence\":0.8,\"tasks\":[{\"id\":\"platform_overview\",\"objective\":\"Explain the platform architecture and capability boundaries.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"domain_analysis\",\"objective\":\"Analyze the major domains and their detailed flows.\",\"independently_useful\":true,\"depends_on\":[\"platform_overview\"]}],\"reasons\":[\"requires_multiple_subproblems\",\"subproblems_are_sequential\"]}}"}}]}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"tasks\":[{\"id\":\"platform_overview\",\"objective\":\"Explain the platform architecture and capability boundaries.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"domain_analysis\",\"objective\":\"Analyze the major domains and their detailed flows.\",\"independently_useful\":true,\"depends_on\":[\"platform_overview\"]}]}"}}]}`))
+		case 3:
+			if !strings.Contains(string(body), "depends_on must be empty") {
+				t.Fatalf("audit repair request missing dependency validation error: %s", body)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"tasks\":[{\"id\":\"platform_overview\",\"objective\":\"Explain the platform architecture and capability boundaries.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"domain_analysis\",\"objective\":\"Analyze the major domains and their detailed flows.\",\"independently_useful\":true,\"depends_on\":[]}]}"}}]}`))
+		default:
+			t.Fatalf("unexpected LLM call %d", call)
+		}
+	}))
+	defer server.Close()
+	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
+
+	result, err := AnalyzeEvidence(
+		t.Context(), client, "explain the platform architecture and analyze its major domains",
+		"", "explain the platform architecture and analyze its major domains",
+		RoutingCapabilities{}, nil, 512,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("planner, audit, and repair requests = %d, want 3", got)
+	}
+	if !result.ExecutionAuditTried || !result.ExecutionAuditUsed ||
+		result.ExecutionAuditError != nil {
+		t.Fatalf("analysis = %+v", result)
+	}
+	if got := countIndependentExecutionTasks(result.Execution.Tasks); got != 2 {
+		t.Fatalf("independent tasks = %d, want 2", got)
+	}
+}
+
 func TestAnalyzeEvidenceDoesNotAuditFocusedFact(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

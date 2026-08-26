@@ -224,12 +224,23 @@ func (agent *Agent) outputReserve() int {
 	return max(agent.cfg.AnswerMaxTokens, agent.cfg.ConclusionMaxTokens)
 }
 
+func (agent *Agent) effectiveContextWindow() int {
+	window := agent.cfg.ContextWindow
+	if window <= 0 || agent.cfg.MaxContextTokens <= 0 {
+		return window
+	}
+	if narrowed := int(agent.cfg.MaxContextTokens); narrowed < window {
+		return narrowed
+	}
+	return window
+}
+
 func contextSafetyTokens(window int) int {
 	return run.ContextSafetyTokens(window)
 }
 
 func (agent *Agent) ensureInputBudget(messages []llm.Message, tools []llm.ToolDef) error {
-	window := agent.cfg.ContextWindow
+	window := agent.effectiveContextWindow()
 	if window <= 0 {
 		return nil
 	}

@@ -63,6 +63,18 @@ func (catalog *TaskTemplateCatalog) Register(template TaskTemplate) error {
 	return nil
 }
 
+// Has reports whether an enabled, non-deprecated template is registered. It
+// intentionally does not include the built-in verifier fallback used by Resolve.
+func (catalog *TaskTemplateCatalog) Has(ref TaskTemplateRef) bool {
+	if catalog == nil {
+		return false
+	}
+	catalog.mu.RLock()
+	defer catalog.mu.RUnlock()
+	template, ok := catalog.templates[templateKey{id: ref.ID, version: ref.Version}]
+	return ok && template.Enabled && !template.Deprecated
+}
+
 func (catalog *TaskTemplateCatalog) Resolve(ref TaskTemplateRef) (TaskTemplate, error) {
 	if catalog == nil {
 		return TaskTemplate{}, fmt.Errorf("task template catalog is required")
@@ -70,6 +82,32 @@ func (catalog *TaskTemplateCatalog) Resolve(ref TaskTemplateRef) (TaskTemplate, 
 	catalog.mu.RLock()
 	defer catalog.mu.RUnlock()
 	template, ok := catalog.templates[templateKey{id: ref.ID, version: ref.Version}]
+	if !ok && ref.ID == "evidence.verify" && ref.Version == 1 {
+		// Verification is a server-owned stage. Keep a built-in definition so a
+		// caller cannot accidentally remove the safety gate by using a reduced
+		// template catalog in tests or an isolated runtime. Reuse the catalog
+		// schema vocabulary when a reduced catalog provides one.
+		verifier := canonicalVerifierTemplate()
+		keys := make([]templateKey, 0, len(catalog.templates))
+		for key := range catalog.templates {
+			keys = append(keys, key)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			if keys[i].id == keys[j].id {
+				return keys[i].version < keys[j].version
+			}
+			return keys[i].id < keys[j].id
+		})
+		for _, key := range keys {
+			registered := catalog.templates[key]
+			if registered.InputSchema.ID != "" && registered.OutputSchema.ID != "" {
+				verifier.InputSchema = registered.InputSchema
+				verifier.OutputSchema = registered.OutputSchema
+				break
+			}
+		}
+		return verifier, nil
+	}
 	if !ok || !template.Enabled || template.Deprecated {
 		return TaskTemplate{}, fmt.Errorf("%w: template %q version %d is unavailable", ErrCapabilityGap, ref.ID, ref.Version)
 	}
@@ -168,7 +206,7 @@ func (catalog *TaskTemplateCatalog) GenerateCandidatesForDiscoveries(
 	if len(templates) == 0 {
 		return nil, nil
 	}
-	goalByID := indexGoalsByKind(contract.Goals)
+	goalByID := indexGoalsByKind(contract.EvidenceGoals)
 	seenDiscoveries := make(map[string]struct{}, len(discoveries))
 	candidates := make([]TaskCandidate, 0, len(discoveries))
 	for _, rawDiscovery := range discoveries {
@@ -229,6 +267,29 @@ func matchingDiscoveryGoals(
 	return matched
 }
 
+func isParallelInvestigatorTemplate(template TaskTemplate) bool {
+	if !isAgentExecutor(template.Executor) {
+		return false
+	}
+	if template.AllowParallel {
+		return true
+	}
+	// Investigator leaves are independent by default. Verifier and Composer
+	// remain serialized behind their dependencies.
+	return template.Executor == ExecutorInvestigator
+}
+
+func taskCandidateBudget(template TaskTemplate) BudgetVector {
+	// Agent-backed work is governed by the shared Workflow Run budget. A
+	// template tool-call cost is meaningful for deterministic executors, but it
+	// must not become a hidden per-Agent quota. Explicit proposal budgets still
+	// pass through the compiler for callers that intentionally narrow a task.
+	if isAgentExecutor(template.Executor) {
+		return BudgetVector{}
+	}
+	return template.CostProfile
+}
+
 func discoveryCandidate(template TaskTemplate, discovery Discovery, goalIDs []string) TaskCandidate {
 	taskID := fmt.Sprintf("task_%s_v%d_discovery_%s", template.ID, template.Version, discoveryID(discovery))
 	if template.ID == "investigation.explore" && template.Version == 1 {
@@ -237,13 +298,14 @@ func discoveryCandidate(template TaskTemplate, discovery Discovery, goalIDs []st
 		taskID = "task_explore_discovery_" + discoveryID(discovery)
 	}
 	return TaskCandidate{
-		ID:           taskID,
-		Template:     TaskTemplateRef{ID: template.ID, Version: template.Version},
-		Objective:    discoveryObjective(discovery),
-		GoalIDs:      append([]string(nil), goalIDs...),
-		Entities:     discoveryEntities(discovery),
-		AllowedTools: append([]tool.ToolID(nil), template.ToolGrant...),
-		Budget:       template.CostProfile,
+		ID:              taskID,
+		Template:        TaskTemplateRef{ID: template.ID, Version: template.Version},
+		Objective:       discoveryObjective(discovery),
+		AllowParallel:   isParallelInvestigatorTemplate(template),
+		EvidenceGoalIDs: append([]string(nil), goalIDs...),
+		Entities:        discoveryEntities(discovery),
+		AllowedTools:    append([]tool.ToolID(nil), template.ToolGrant...),
+		Budget:          taskCandidateBudget(template),
 	}
 }
 
@@ -325,8 +387,8 @@ func (catalog *TaskTemplateCatalog) generateCandidates(
 	if len(templates) == 0 {
 		return nil, fmt.Errorf("%w: task template catalog is empty", ErrCapabilityGap)
 	}
-	goals := make(map[string]EvidenceGoal, len(contract.Goals))
-	for _, goal := range contract.Goals {
+	goals := make(map[string]EvidenceGoal, len(contract.EvidenceGoals))
+	for _, goal := range contract.EvidenceGoals {
 		if strings.TrimSpace(goal.ID) == "" {
 			return nil, fmt.Errorf("%w: goal id is required", ErrPlanInvalid)
 		}
@@ -337,8 +399,8 @@ func (catalog *TaskTemplateCatalog) generateCandidates(
 		if template.ProposalOnly {
 			continue
 		}
-		matched := make([]string, 0, len(contract.Goals))
-		for _, goal := range contract.Goals {
+		matched := make([]string, 0, len(contract.EvidenceGoals))
+		for _, goal := range contract.EvidenceGoals {
 			if goalFilter != nil {
 				if _, wanted := goalFilter[goal.ID]; !wanted {
 					continue
@@ -354,22 +416,23 @@ func (catalog *TaskTemplateCatalog) generateCandidates(
 		// One candidate per template covers all matched goals so a shared
 		// investigation chain never emits duplicate capability providers.
 		candidates = append(candidates, TaskCandidate{
-			ID:           fmt.Sprintf("task_%s_v%d", template.ID, template.Version),
-			Template:     TaskTemplateRef{ID: template.ID, Version: template.Version},
-			Objective:    templateObjective(template, contract),
-			GoalIDs:      matched,
-			AllowedTools: append([]tool.ToolID(nil), template.ToolGrant...),
-			Budget:       template.CostProfile,
+			ID:              fmt.Sprintf("task_%s_v%d", template.ID, template.Version),
+			Template:        TaskTemplateRef{ID: template.ID, Version: template.Version},
+			Objective:       templateObjective(template, contract),
+			AllowParallel:   isParallelInvestigatorTemplate(template),
+			EvidenceGoalIDs: matched,
+			AllowedTools:    append([]tool.ToolID(nil), template.ToolGrant...),
+			Budget:          taskCandidateBudget(template),
 		})
 	}
 	requiredFilter := goalFilter
 	if requiredFilter == nil {
-		requiredFilter = make(map[string]struct{}, len(contract.Goals))
-		for _, goal := range contract.Goals {
+		requiredFilter = make(map[string]struct{}, len(contract.EvidenceGoals))
+		for _, goal := range contract.EvidenceGoals {
 			requiredFilter[goal.ID] = struct{}{}
 		}
 	}
-	for _, goal := range contract.Goals {
+	for _, goal := range contract.EvidenceGoals {
 		if !goal.Required {
 			continue
 		}
@@ -378,7 +441,7 @@ func (catalog *TaskTemplateCatalog) generateCandidates(
 		}
 		found := false
 		for _, candidate := range candidates {
-			if containsString(candidate.GoalIDs, goal.ID) {
+			if containsString(candidate.EvidenceGoalIDs, goal.ID) {
 				found = true
 				break
 			}
@@ -506,7 +569,7 @@ func validateCapabilityLabels(labels []string) error {
 
 func templateObjective(template TaskTemplate, contract InvestigationContract) string {
 	var descriptions []string
-	for _, goal := range contract.Goals {
+	for _, goal := range contract.EvidenceGoals {
 		if templateMatchesGoal(template, goal) && strings.TrimSpace(goal.Description) != "" {
 			descriptions = append(descriptions, goal.Description)
 		}

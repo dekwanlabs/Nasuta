@@ -15,11 +15,11 @@ import (
 )
 
 type findingView struct {
-	Claim      string                `json:"claim"`
-	EntityIDs  []string              `json:"entity_ids,omitempty"`
-	GoalIDs    []string              `json:"goal_ids"`
-	Evidence   []findingEvidenceView `json:"evidence"`
-	Confidence float64               `json:"confidence"`
+	Claim           string                `json:"claim"`
+	EntityIDs       []string              `json:"entity_ids,omitempty"`
+	EvidenceGoalIDs []string              `json:"evidence_goal_ids"`
+	Evidence        []findingEvidenceView `json:"evidence"`
+	Confidence      float64               `json:"confidence"`
 }
 
 type findingEvidenceView struct {
@@ -31,10 +31,10 @@ type findingEvidenceView struct {
 }
 
 type reportView struct {
-	Findings        []findingView `json:"findings"`
-	Gaps            []string      `json:"gaps"`
-	CoveredGoals    []string      `json:"covered_goals"`
-	UnresolvedGoals []string      `json:"unresolved_goals"`
+	Findings                []findingView `json:"findings"`
+	Gaps                    []string      `json:"gaps"`
+	CoveredEvidenceGoals    []string      `json:"covered_evidence_goals"`
+	UnresolvedEvidenceGoals []string      `json:"unresolved_evidence_goals"`
 }
 
 type claimSupport string
@@ -49,22 +49,27 @@ type verifiedClaimView struct {
 	ProducerNodeID     string                      `json:"producer_node_id"`
 	FindingIndex       int                         `json:"finding_index"`
 	Claim              string                      `json:"claim"`
-	GoalIDs            []string                    `json:"goal_ids"`
+	EvidenceGoalIDs    []string                    `json:"evidence_goal_ids"`
 	EntityIDs          []string                    `json:"-"`
-	Evidence           []findingEvidenceView       `json:"evidence"`
-	EvidenceIdentities []agentapi.EvidenceIdentity `json:"evidence_identities"`
+	Evidence           []findingEvidenceView       `json:"-"`
+	EvidenceRefs       []evidenceRefView           `json:"evidence"`
+	EvidenceIdentities []agentapi.EvidenceIdentity `json:"-"`
 	Confidence         float64                     `json:"confidence"`
 	Support            claimSupport                `json:"support"`
 	HighRisk           bool                        `json:"high_risk"`
 }
 
+type evidenceRefView struct {
+	EvidenceID string `json:"evidence_id"`
+}
+
 type unsupportedClaimView struct {
-	ProducerNodeID string       `json:"producer_node_id"`
-	FindingIndex   int          `json:"finding_index"`
-	GoalIDs        []string     `json:"goal_ids"`
-	Support        claimSupport `json:"support"`
-	HighRisk       bool         `json:"high_risk"`
-	ReasonCode     string       `json:"reason_code"`
+	ProducerNodeID  string       `json:"producer_node_id"`
+	FindingIndex    int          `json:"finding_index"`
+	EvidenceGoalIDs []string     `json:"evidence_goal_ids"`
+	Support         claimSupport `json:"support"`
+	HighRisk        bool         `json:"high_risk"`
+	ReasonCode      string       `json:"reason_code"`
 }
 
 type verificationView struct {
@@ -89,18 +94,19 @@ type omissionView struct {
 }
 
 type verifiedEvidenceView struct {
-	SupportedClaims   []verifiedClaimView         `json:"supported_claims"`
-	PartialClaims     []verifiedClaimView         `json:"partial_claims"`
-	UnsupportedClaims []unsupportedClaimView      `json:"unsupported_claims"`
-	PartialGoals      []string                    `json:"partial_goals"`
-	UnresolvedGoals   []string                    `json:"unresolved_goals"`
-	Limitations       []string                    `json:"limitations"`
-	LimitationsDetail *limitationsDetailRef       `json:"limitations_detail,omitempty"`
-	EvidenceUnits     []tool.EvidenceUnit         `json:"evidence_units"`
-	EvidenceConflicts []agentapi.EvidenceConflict `json:"evidence_conflicts"`
-	SubjectCoverage   []subjectCoverageView       `json:"subject_coverage,omitempty"`
-	Verification      verificationView            `json:"verification"`
-	Completeness      Completeness                `json:"completeness"`
+	SupportedClaims         []verifiedClaimView            `json:"supported_claims"`
+	PartialClaims           []verifiedClaimView            `json:"partial_claims"`
+	UnsupportedClaims       []unsupportedClaimView         `json:"unsupported_claims"`
+	PartialEvidenceGoals    []string                       `json:"partial_evidence_goals"`
+	UnresolvedEvidenceGoals []string                       `json:"unresolved_evidence_goals"`
+	Limitations             []string                       `json:"limitations"`
+	LimitationsDetail       *limitationsDetailRef          `json:"limitations_detail,omitempty"`
+	EvidenceUnits           []tool.EvidenceUnit            `json:"evidence_units"`
+	EvidenceConflicts       []agentapi.EvidenceConflict    `json:"evidence_conflicts"`
+	EvidenceLookup          map[string]findingEvidenceView `json:"evidence_lookup,omitempty"`
+	SubjectCoverage         []subjectCoverageView          `json:"subject_coverage,omitempty"`
+	Verification            verificationView               `json:"verification"`
+	Completeness            Completeness                   `json:"completeness"`
 	// Omissions makes payload compaction visible to the synthesizer.
 	Omissions omissionView `json:"omissions"`
 }
@@ -255,11 +261,12 @@ func verifyBundle(
 	claims := make([]verifiedClaimView, 0)
 	partialClaims := make([]verifiedClaimView, 0)
 	unsupportedClaims := make([]unsupportedClaimView, 0)
+	evidenceLookup := make(map[string]findingEvidenceView)
 	limitations := make([]string, 0)
 	seenLimitations := make(map[string]struct{})
 	rawLimitations := make([]rawLimitation, 0)
 	rawLimitationIndex := 0
-	appendLegacyLimitation := func(value string) {
+	appendLimitationText := func(value string) {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return
@@ -271,7 +278,7 @@ func verifyBundle(
 		limitations = append(limitations, value)
 	}
 	appendLimitation := func(value string) {
-		appendLegacyLimitation(value)
+		appendLimitationText(value)
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return
@@ -282,7 +289,7 @@ func verifyBundle(
 		rawLimitationIndex++
 	}
 	appendLimitationFor := func(value, producerNodeID string, evidenceRefs []string) {
-		appendLegacyLimitation(value)
+		appendLimitationText(value)
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return
@@ -308,15 +315,20 @@ func verifyBundle(
 			boundEvidence, identities, supportFacts := evidenceIndex.bind(
 				finding.Evidence,
 			)
-			findingHighRisk := hasTrackedGoal(finding.GoalIDs, highRisk)
+			for _, item := range finding.Evidence {
+				for _, match := range evidenceIndex.match(item) {
+					addEvidenceSummary(evidenceLookup, item, match.identity)
+				}
+			}
+			findingHighRisk := hasTrackedGoal(finding.EvidenceGoalIDs, highRisk)
 			if len(identities) == 0 {
 				unsupportedClaims = append(unsupportedClaims, unsupportedClaimView{
-					ProducerNodeID: handoff.ProducerNodeID,
-					FindingIndex:   index,
-					GoalIDs:        append([]string(nil), finding.GoalIDs...),
-					Support:        claimUnsupported,
-					HighRisk:       findingHighRisk,
-					ReasonCode:     "canonical_evidence_unbound",
+					ProducerNodeID:  handoff.ProducerNodeID,
+					FindingIndex:    index,
+					EvidenceGoalIDs: append([]string(nil), finding.EvidenceGoalIDs...),
+					Support:         claimUnsupported,
+					HighRisk:        findingHighRisk,
+					ReasonCode:      "canonical_evidence_unbound",
 				})
 				appendLimitationFor(fmt.Sprintf(
 					"Finding %d from investigation node %q was excluded because its evidence did not match the canonical ledger.",
@@ -349,9 +361,10 @@ func verifyBundle(
 				ProducerNodeID:     handoff.ProducerNodeID,
 				FindingIndex:       index,
 				Claim:              finding.Claim,
-				GoalIDs:            append([]string(nil), finding.GoalIDs...),
+				EvidenceGoalIDs:    append([]string(nil), finding.EvidenceGoalIDs...),
 				EntityIDs:          append([]string(nil), finding.EntityIDs...),
 				Evidence:           boundEvidence,
+				EvidenceRefs:       evidenceRefsForIdentities(identities),
 				EvidenceIdentities: identities,
 				Confidence:         finding.Confidence,
 				Support:            support,
@@ -362,7 +375,7 @@ func verifyBundle(
 			} else {
 				partialClaims = append(partialClaims, claim)
 			}
-			for _, goal := range finding.GoalIDs {
+			for _, goal := range finding.EvidenceGoalIDs {
 				if _, tracked := required[goal]; tracked {
 					covered[goal] = struct{}{}
 					if support == claimSupported {
@@ -420,10 +433,6 @@ func verifyBundle(
 		ledger,
 		subjectEvidenceInsufficient,
 	)
-	stopReason = compatibleVerificationStopReason(
-		input.node.OutputSchema,
-		stopReason,
-	)
 	evidenceUnits := evidence.CloneUnits(source.EvidenceUnits)
 	if evidenceUnits == nil {
 		evidenceUnits = []tool.EvidenceUnit{}
@@ -434,7 +443,7 @@ func verifyBundle(
 	}
 	var limitationsDetail *limitationsDetailRef
 	var artifacts []WorkflowArtifact
-	if input.node.OutputSchema.Version >= 2 {
+	if input.node.OutputSchema == agentapi.InvestigationVerifiedBundleSchemaRef() {
 		normalized, err := normalizeLimitations(input.workflowRunID, rawLimitations)
 		if err != nil {
 			return verificationRunOutput{}, err
@@ -444,16 +453,17 @@ func verifyBundle(
 		artifacts = []WorkflowArtifact{normalized.Detail}
 	}
 	view := verifiedEvidenceView{
-		SupportedClaims:   claims,
-		PartialClaims:     partialClaims,
-		UnsupportedClaims: unsupportedClaims,
-		PartialGoals:      partialGoals,
-		UnresolvedGoals:   unresolved,
-		Limitations:       limitations,
-		LimitationsDetail: limitationsDetail,
-		EvidenceUnits:     evidenceUnits,
-		EvidenceConflicts: evidenceConflicts,
-		SubjectCoverage:   subjectCoverage,
+		SupportedClaims:         claims,
+		PartialClaims:           partialClaims,
+		UnsupportedClaims:       unsupportedClaims,
+		PartialEvidenceGoals:    partialGoals,
+		UnresolvedEvidenceGoals: unresolved,
+		Limitations:             limitations,
+		LimitationsDetail:       limitationsDetail,
+		EvidenceUnits:           evidenceUnits,
+		EvidenceConflicts:       evidenceConflicts,
+		EvidenceLookup:          evidenceLookup,
+		SubjectCoverage:         subjectCoverage,
 		Verification: verificationView{
 			Decision: completeness, StopReason: stopReason,
 		},
@@ -571,8 +581,8 @@ func verifiedSlots(
 ) []verifiedSlot {
 	slots := make([]verifiedSlot, 0,
 		len(view.SupportedClaims)+len(view.PartialClaims)+
-			len(view.UnsupportedClaims)+len(view.PartialGoals)+
-			len(view.UnresolvedGoals)+len(view.Limitations)+
+			len(view.UnsupportedClaims)+len(view.PartialEvidenceGoals)+
+			len(view.UnresolvedEvidenceGoals)+len(view.Limitations)+
 			len(view.EvidenceConflicts),
 	)
 	for index, claim := range view.SupportedClaims {
@@ -595,12 +605,12 @@ func verifiedSlots(
 			kind: verifiedPartialSlot, index: index,
 		})
 	}
-	for index := range view.PartialGoals {
+	for index := range view.PartialEvidenceGoals {
 		slots = append(slots, verifiedSlot{
 			kind: verifiedPartialGoalSlot, index: index,
 		})
 	}
-	for index := range view.UnresolvedGoals {
+	for index := range view.UnresolvedEvidenceGoals {
 		slots = append(slots, verifiedSlot{
 			kind: verifiedUnresolvedGoalSlot, index: index,
 		})
@@ -624,7 +634,7 @@ func verifiedSlots(
 }
 
 func claimHasGoal(claim verifiedClaimView, required map[string]struct{}) bool {
-	for _, goal := range claim.GoalIDs {
+	for _, goal := range claim.EvidenceGoalIDs {
 		if _, ok := required[goal]; ok {
 			return true
 		}
@@ -639,28 +649,29 @@ func viewAtVerifiedSlot(
 	protectedEvidence map[evidence.Key]struct{},
 ) verifiedEvidenceView {
 	view := verifiedEvidenceView{
-		SupportedClaims:   []verifiedClaimView{},
-		PartialClaims:     []verifiedClaimView{},
-		UnsupportedClaims: []unsupportedClaimView{},
-		PartialGoals:      []string{},
-		UnresolvedGoals:   []string{},
-		Limitations:       []string{},
-		LimitationsDetail: full.LimitationsDetail,
-		EvidenceUnits:     []tool.EvidenceUnit{},
-		EvidenceConflicts: []agentapi.EvidenceConflict{},
-		SubjectCoverage:   append([]subjectCoverageView(nil), full.SubjectCoverage...),
-		Verification:      full.Verification,
-		Completeness:      full.Completeness,
+		SupportedClaims:         []verifiedClaimView{},
+		PartialClaims:           []verifiedClaimView{},
+		UnsupportedClaims:       []unsupportedClaimView{},
+		PartialEvidenceGoals:    []string{},
+		UnresolvedEvidenceGoals: []string{},
+		Limitations:             []string{},
+		LimitationsDetail:       full.LimitationsDetail,
+		EvidenceUnits:           []tool.EvidenceUnit{},
+		EvidenceConflicts:       []agentapi.EvidenceConflict{},
+		EvidenceLookup:          make(map[string]findingEvidenceView),
+		SubjectCoverage:         append([]subjectCoverageView(nil), full.SubjectCoverage...),
+		Verification:            full.Verification,
+		Completeness:            full.Completeness,
 	}
 	selectedEvidence := cloneEvidenceKeySet(protectedEvidence)
 	for _, slot := range slots[:min(count, len(slots))] {
 		switch slot.kind {
 		case verifiedSupportedSlot:
-			claim := full.SupportedClaims[slot.index]
+			claim := compactVerifiedClaim(full.SupportedClaims[slot.index])
 			view.SupportedClaims = append(view.SupportedClaims, claim)
 			addClaimEvidence(selectedEvidence, claim)
 		case verifiedPartialSlot:
-			claim := full.PartialClaims[slot.index]
+			claim := compactVerifiedClaim(full.PartialClaims[slot.index])
 			view.PartialClaims = append(view.PartialClaims, claim)
 			addClaimEvidence(selectedEvidence, claim)
 		case verifiedUnsupportedSlot:
@@ -669,14 +680,14 @@ func viewAtVerifiedSlot(
 				full.UnsupportedClaims[slot.index],
 			)
 		case verifiedPartialGoalSlot:
-			view.PartialGoals = append(
-				view.PartialGoals,
-				full.PartialGoals[slot.index],
+			view.PartialEvidenceGoals = append(
+				view.PartialEvidenceGoals,
+				full.PartialEvidenceGoals[slot.index],
 			)
 		case verifiedUnresolvedGoalSlot:
-			view.UnresolvedGoals = append(
-				view.UnresolvedGoals,
-				full.UnresolvedGoals[slot.index],
+			view.UnresolvedEvidenceGoals = append(
+				view.UnresolvedEvidenceGoals,
+				full.UnresolvedEvidenceGoals[slot.index],
 			)
 		case verifiedLimitationSlot:
 			view.Limitations = append(
@@ -691,12 +702,17 @@ func viewAtVerifiedSlot(
 		}
 	}
 	view.EvidenceUnits = selectedEvidenceUnits(full.EvidenceUnits, selectedEvidence)
+	view.EvidenceLookup = selectedEvidenceLookup(
+		full.EvidenceLookup,
+		view.SupportedClaims,
+		view.PartialClaims,
+	)
 	view.Omissions = omissionView{
 		Claims: len(full.SupportedClaims) + len(full.PartialClaims) +
 			len(full.UnsupportedClaims) - len(view.SupportedClaims) -
 			len(view.PartialClaims) - len(view.UnsupportedClaims),
-		Goals: len(full.PartialGoals) + len(full.UnresolvedGoals) -
-			len(view.PartialGoals) - len(view.UnresolvedGoals),
+		Goals: len(full.PartialEvidenceGoals) + len(full.UnresolvedEvidenceGoals) -
+			len(view.PartialEvidenceGoals) - len(view.UnresolvedEvidenceGoals),
 		Limitations:   len(full.Limitations) - len(view.Limitations),
 		EvidenceUnits: len(full.EvidenceUnits) - len(view.EvidenceUnits),
 		EvidenceConflicts: len(full.EvidenceConflicts) -
@@ -709,9 +725,81 @@ func addClaimEvidence(
 	selected map[evidence.Key]struct{},
 	claim verifiedClaimView,
 ) {
-	for _, identity := range claim.EvidenceIdentities {
-		selected[keyFromIdentity(identity)] = struct{}{}
+	for _, evidenceID := range evidenceIDsForClaim(claim) {
+		if identity, ok := identityFromEvidenceID(evidenceID, claim.EvidenceIdentities); ok {
+			selected[keyFromIdentity(identity)] = struct{}{}
+		}
 	}
+}
+
+func compactVerifiedClaim(claim verifiedClaimView) verifiedClaimView {
+	if len(claim.EvidenceRefs) == 0 {
+		claim.EvidenceRefs = evidenceRefsForIdentities(claim.EvidenceIdentities)
+	}
+	return claim
+}
+
+func evidenceRefsForIdentities(
+	identities []agentapi.EvidenceIdentity,
+) []evidenceRefView {
+	refs := make([]evidenceRefView, 0, len(identities))
+	seen := make(map[string]struct{}, len(identities))
+	for _, identity := range identities {
+		evidenceID := keyFromIdentity(identity).Handle()
+		if _, duplicate := seen[evidenceID]; duplicate {
+			continue
+		}
+		seen[evidenceID] = struct{}{}
+		refs = append(refs, evidenceRefView{EvidenceID: evidenceID})
+	}
+	return refs
+}
+
+func evidenceIDsForClaim(claim verifiedClaimView) []string {
+	if len(claim.EvidenceRefs) > 0 {
+		ids := make([]string, 0, len(claim.EvidenceRefs))
+		for _, ref := range claim.EvidenceRefs {
+			if ref.EvidenceID != "" {
+				ids = append(ids, ref.EvidenceID)
+			}
+		}
+		return ids
+	}
+	refs := evidenceRefsForIdentities(claim.EvidenceIdentities)
+	ids := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ids = append(ids, ref.EvidenceID)
+	}
+	return ids
+}
+
+func identityFromEvidenceID(
+	evidenceID string,
+	identities []agentapi.EvidenceIdentity,
+) (agentapi.EvidenceIdentity, bool) {
+	for _, identity := range identities {
+		if keyFromIdentity(identity).Handle() == evidenceID {
+			return identity, true
+		}
+	}
+	return agentapi.EvidenceIdentity{}, false
+}
+
+func selectedEvidenceLookup(
+	full map[string]findingEvidenceView,
+	claims ...[]verifiedClaimView,
+) map[string]findingEvidenceView {
+	selected := make(map[string]findingEvidenceView)
+	for _, group := range claims {
+		for _, claim := range group {
+			for _, evidenceID := range evidenceIDsForClaim(claim) {
+				if summary, ok := full[evidenceID]; ok {
+					selected[evidenceID] = summary
+				}
+			}
+		}
+	}
+	return selected
 }
 
 func selectedEvidenceUnits(
@@ -758,6 +846,29 @@ func evidenceReferences(items []findingEvidenceView) []string {
 	return unionStrings(nil, refs)
 }
 
+func addEvidenceSummary(
+	lookup map[string]findingEvidenceView,
+	item findingEvidenceView,
+	identity agentapi.EvidenceIdentity,
+) {
+	evidenceID := keyFromIdentity(identity).Handle()
+	if existing, ok := lookup[evidenceID]; ok && existing.Summary != "" {
+		return
+	}
+	item.EvidenceID = evidenceID
+	item.Identity = &identity
+	if strings.TrimSpace(item.Kind) == "" {
+		item.Kind = identity.SourceKind
+	}
+	if strings.TrimSpace(item.Reference) == "" {
+		item.Reference = identity.Target
+	}
+	if strings.TrimSpace(item.Summary) == "" {
+		item.Summary = item.Reference
+	}
+	lookup[evidenceID] = item
+}
+
 func verifiedViewTokens(view verifiedEvidenceView) int {
 	payload, err := json.Marshal(view)
 	if err != nil {
@@ -796,7 +907,7 @@ func verifySubjectCoverage(
 			if !matched {
 				continue
 			}
-			for _, facet := range claim.GoalIDs {
+			for _, facet := range claim.EvidenceGoalIDs {
 				if _, required := requiredFacets[facet]; required {
 					coveredFacets[facet] = struct{}{}
 				}
@@ -1042,18 +1153,6 @@ func stopForVerification(
 		return StopEvidenceInsufficient
 	}
 	return StopEvidenceInsufficient
-}
-
-func compatibleVerificationStopReason(
-	ref agentapi.SchemaRef,
-	reason StopReason,
-) StopReason {
-	if ref == (agentapi.SchemaRef{
-		ID: "investigation.verified_bundle", Version: 1,
-	}) && reason == StopEvidenceInsufficient {
-		return StopCapabilityUnavailable
-	}
-	return reason
 }
 
 func unavailableStopReason(

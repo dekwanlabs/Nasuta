@@ -26,7 +26,7 @@ func TestCatalogGeneratesCandidatesForRequiredGoals(t *testing.T) {
 	if len(candidates) != 1 {
 		t.Fatalf("candidate count = %d, want 1", len(candidates))
 	}
-	if got, want := len(candidates[0].GoalIDs), 2; got != want {
+	if got, want := len(candidates[0].EvidenceGoalIDs), 2; got != want {
 		t.Fatalf("candidate goal ids = %d, want %d", got, want)
 	}
 }
@@ -53,7 +53,7 @@ func TestPlanRejectsRequiredGoalWithoutCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := (PlanCompiler{Catalog: catalog, Schemas: testSchemas()}).Compile(testContract(EvidenceGoal{ID: "g1", Kind: "domain", Required: true}), []TaskCandidate{
-		{ID: "task-flow", Template: TaskTemplateRef{ID: "flow", Version: 1}, Objective: "flow", GoalIDs: []string{"g1"}},
+		{ID: "task-flow", Template: TaskTemplateRef{ID: "flow", Version: 1}, Objective: "flow", EvidenceGoalIDs: []string{"g1"}},
 	})
 	if err == nil {
 		t.Fatal("plan accepted a candidate whose template does not match its goal")
@@ -67,14 +67,14 @@ func TestPlanRejectsUnknownDependencyAndCycle(t *testing.T) {
 	}
 	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
 	_, err := (PlanCompiler{Catalog: catalog, Schemas: testSchemas()}).Compile(contract, []TaskCandidate{
-		{ID: "a", Template: TaskTemplateRef{ID: "inspect", Version: 1}, Objective: "a", GoalIDs: []string{"g1"}, Dependencies: []string{"missing"}},
+		{ID: "a", Template: TaskTemplateRef{ID: "inspect", Version: 1}, Objective: "a", EvidenceGoalIDs: []string{"g1"}, Dependencies: []string{"missing"}},
 	})
 	if err == nil || !errors.Is(err, ErrPlanInvalid) {
 		t.Fatalf("unknown dependency error = %v", err)
 	}
 	_, err = (PlanCompiler{Catalog: catalog, Schemas: testSchemas()}).Compile(contract, []TaskCandidate{
-		{ID: "a", Template: TaskTemplateRef{ID: "inspect", Version: 1}, Objective: "a", GoalIDs: []string{"g1"}, Dependencies: []string{"b"}},
-		{ID: "b", Template: TaskTemplateRef{ID: "inspect", Version: 1}, Objective: "b", GoalIDs: []string{"g1"}, Dependencies: []string{"a"}},
+		{ID: "a", Template: TaskTemplateRef{ID: "inspect", Version: 1}, Objective: "a", EvidenceGoalIDs: []string{"g1"}, Dependencies: []string{"b"}},
+		{ID: "b", Template: TaskTemplateRef{ID: "inspect", Version: 1}, Objective: "b", EvidenceGoalIDs: []string{"g1"}, Dependencies: []string{"a"}},
 	})
 	if err == nil || !errors.Is(err, ErrPlanInvalid) {
 		t.Fatalf("cycle error = %v", err)
@@ -161,7 +161,10 @@ func testExecutors(executor TaskExecutor) ExecutorRegistry {
 }
 
 func testContract(goals ...EvidenceGoal) InvestigationContract {
-	return InvestigationContract{ID: "contract-test", Question: "test question", Goals: goals}
+	return InvestigationContract{
+		ID: "contract-test", Version: InvestigationContractVersion,
+		Question: "test question", EvidenceGoals: goals,
+	}
 }
 
 func testPlanTool(id tool.ToolID) tool.Tool {
@@ -173,5 +176,25 @@ func testPlanTool(id tool.ToolID) tool.Tool {
 		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
 			return tool.Result{Content: "ok"}, nil
 		}),
+	}
+}
+
+func TestPlanCompilerDoesNotAssignImplicitBudgetToAgentTasks(t *testing.T) {
+	catalog := NewTaskTemplateCatalog()
+	if err := catalog.Register(testTemplate("investigate", 1, []string{"flow"}, ExecutorInvestigator, nil, BudgetVector{ToolCalls: 1})); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := (PlanCompiler{
+		Catalog: catalog,
+		Schemas: testSchemas(),
+	}).Compile(testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true}), []TaskCandidate{{
+		ID: "task-investigate", Template: TaskTemplateRef{ID: "investigate", Version: 1},
+		Objective: "investigate", EvidenceGoalIDs: []string{"g1"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.Tasks[0].Budget.Limit; got != (BudgetVector{}) {
+		t.Fatalf("implicit agent task budget = %+v, want zero shared-run grant", got)
 	}
 }

@@ -137,3 +137,39 @@ func TestPlanAdmissionPassesSufficientMinimumBudget(t *testing.T) {
 		t.Fatalf("plan task count = %d, want 1", len(plan.Tasks))
 	}
 }
+
+func TestBudgetPolicyUsesInvestigationOutputAsRunLimit(t *testing.T) {
+	settings := config.PlatformSettings{
+		LLMAnswerMaxTokens:           12000,
+		InvestigationMaxOutputTokens: 8000,
+		InvestigationBudgetProfile:   "interactive",
+	}
+	policy, err := BudgetPolicyFromPlatformSettings(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Limit.OutputTokens != 8000 {
+		t.Fatalf("run output limit = %d, want 8000", policy.Limit.OutputTokens)
+	}
+}
+
+func TestCompositionProtectionDoesNotReserveEntireRun(t *testing.T) {
+	ledger, err := NewBudgetLedger(BudgetVector{OutputTokens: 12000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.SetRunPolicy(1, 10, DefaultBudgetPolicyVersion, ProfileInteractive); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := NewCoordinator(CoordinatorOptions{
+		CompositionBudget: BudgetVector{OutputTokens: 12000},
+	})
+	reservation, err := coordinator.reserveComposition(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation.Release()
+	if got := ledger.Snapshot().Run.Reserved.OutputTokens; got != 1200 {
+		t.Fatalf("composition protection = %d, want 1200", got)
+	}
+}

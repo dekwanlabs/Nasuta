@@ -41,8 +41,8 @@ type InvestigationPlanner interface {
 	) (*agentapi.TaskGraphProposal, error)
 }
 
-// InvestigationContinuationRunner is optional so older runners remain valid.
-// The Coordinator uses it only when durable round recovery is available.
+// InvestigationContinuationRunner adds durable multi-round convergence.
+// The Coordinator uses it only when the configured runner exposes that capability.
 type InvestigationContinuationRunner interface {
 	InvestigationRunner
 	LoadRound(context.Context, string) (InvestigationRoundSnapshot, error)
@@ -108,8 +108,10 @@ type InvestigationGoal struct {
 }
 
 type EvidenceGoal struct {
-	ID              string                    `json:"id"`
+	ID string `json:"id"`
+	// Facet is the primary routing facet; Facets is the complete coverage set.
 	Facet           string                    `json:"facet"`
+	Facets          []string                  `json:"facets"`
 	Required        bool                      `json:"required"`
 	Sources         []agentapi.EvidenceSource `json:"sources"`
 	RequiredSources []agentapi.EvidenceSource `json:"required_sources,omitempty"`
@@ -207,7 +209,7 @@ type InvestigationClaim struct {
 	ProducerNodeID     string                      `json:"producer_node_id"`
 	FindingIndex       int                         `json:"finding_index"`
 	Claim              string                      `json:"claim"`
-	GoalIDs            []string                    `json:"goal_ids"`
+	EvidenceGoalIDs    []string                    `json:"evidence_goal_ids"`
 	EntityIDs          []string                    `json:"entity_ids,omitempty"`
 	Evidence           []InvestigationEvidence     `json:"evidence"`
 	EvidenceIdentities []agentapi.EvidenceIdentity `json:"evidence_identities,omitempty"`
@@ -217,12 +219,12 @@ type InvestigationClaim struct {
 }
 
 type InvestigationUnsupportedClaim struct {
-	ProducerNodeID string   `json:"producer_node_id"`
-	FindingIndex   int      `json:"finding_index"`
-	GoalIDs        []string `json:"goal_ids"`
-	Support        string   `json:"support"`
-	HighRisk       bool     `json:"high_risk"`
-	ReasonCode     string   `json:"reason_code"`
+	ProducerNodeID  string   `json:"producer_node_id"`
+	FindingIndex    int      `json:"finding_index"`
+	EvidenceGoalIDs []string `json:"evidence_goal_ids"`
+	Support         string   `json:"support"`
+	HighRisk        bool     `json:"high_risk"`
+	ReasonCode      string   `json:"reason_code"`
 }
 
 type InvestigationVerification struct {
@@ -231,26 +233,28 @@ type InvestigationVerification struct {
 }
 
 type InvestigationResult struct {
-	Answer               string                          `json:"answer"`
-	Citations            []InvestigationCitation         `json:"citations"`
-	Limitations          []string                        `json:"limitations"`
-	SupportedClaims      []InvestigationClaim            `json:"supported_claims,omitempty"`
-	PartialClaims        []InvestigationClaim            `json:"partial_claims,omitempty"`
-	UnsupportedClaims    []InvestigationUnsupportedClaim `json:"unsupported_claims,omitempty"`
-	PartialGoals         []string                        `json:"partial_goals,omitempty"`
-	UnresolvedGoals      []string                        `json:"unresolved_goals,omitempty"`
-	EvidenceUnits        []tool.EvidenceUnit             `json:"evidence_units,omitempty"`
-	EvidenceConflicts    []agentapi.EvidenceConflict     `json:"evidence_conflicts,omitempty"`
-	Verification         InvestigationVerification       `json:"verification,omitempty"`
-	ExecutionStatus      string                          `json:"execution_status,omitempty"`
-	EvidenceStatus       string                          `json:"evidence_status,omitempty"`
-	ClaimStatus          string                          `json:"claim_status,omitempty"`
-	VerificationStatus   string                          `json:"verification_status,omitempty"`
-	WorkflowCompleteness string                          `json:"workflow_completeness,omitempty"`
-	FailureReason        string                          `json:"failure_reason,omitempty"`
-	Round                int                             `json:"round,omitempty"`
-	BaseDepth            int                             `json:"base_depth,omitempty"`
-	StopReason           string                          `json:"stop_reason,omitempty"`
+	Answer                       string                          `json:"answer"`
+	Citations                    []InvestigationCitation         `json:"citations"`
+	Limitations                  []string                        `json:"limitations"`
+	SupportedClaims              []InvestigationClaim            `json:"supported_claims,omitempty"`
+	PartialClaims                []InvestigationClaim            `json:"partial_claims,omitempty"`
+	UnsupportedClaims            []InvestigationUnsupportedClaim `json:"unsupported_claims,omitempty"`
+	PartialInvestigationGoals    []string                        `json:"partial_investigation_goals,omitempty"`
+	UnresolvedInvestigationGoals []string                        `json:"unresolved_investigation_goals,omitempty"`
+	PartialEvidenceGoals         []string                        `json:"partial_evidence_goals,omitempty"`
+	UnresolvedEvidenceGoals      []string                        `json:"unresolved_evidence_goals,omitempty"`
+	EvidenceUnits                []tool.EvidenceUnit             `json:"evidence_units,omitempty"`
+	EvidenceConflicts            []agentapi.EvidenceConflict     `json:"evidence_conflicts,omitempty"`
+	Verification                 InvestigationVerification       `json:"verification,omitempty"`
+	ExecutionStatus              string                          `json:"execution_status,omitempty"`
+	EvidenceStatus               string                          `json:"evidence_status,omitempty"`
+	ClaimStatus                  string                          `json:"claim_status,omitempty"`
+	VerificationStatus           string                          `json:"verification_status,omitempty"`
+	WorkflowCompleteness         string                          `json:"workflow_completeness,omitempty"`
+	FailureReason                string                          `json:"failure_reason,omitempty"`
+	Round                        int                             `json:"round,omitempty"`
+	BaseDepth                    int                             `json:"base_depth,omitempty"`
+	StopReason                   string                          `json:"stop_reason,omitempty"`
 }
 
 func contractFromPreparation(
@@ -283,7 +287,7 @@ func contractFromPreparation(
 	for _, facet := range requiredFacets {
 		value := string(facet)
 		goals = append(goals, EvidenceGoal{
-			ID: value, Facet: value, Required: true,
+			ID: value, Facet: value, Facets: []string{value}, Required: true,
 			Sources: append([]agentapi.EvidenceSource(nil), sources...),
 			RequiredSources: requiredEvidenceSources(
 				prepared.analysis.QueryPlan.Kind, sources,

@@ -3,10 +3,36 @@ package investigation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
+
+func TestCoordinatorRejectsUnsupportedContractVersion(t *testing.T) {
+	store := NewMemoryRunStore()
+	coordinator := NewCoordinator(CoordinatorOptions{
+		Catalog: NewTaskTemplateCatalog(),
+		Store:   store,
+		Executors: testExecutors(TaskExecutorFunc(func(
+			context.Context, ExecutableTask, TaskExecutionInput,
+		) (TaskExecutionResult, error) {
+			return TaskExecutionResult{}, nil
+		})),
+	})
+	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	contract.Version = 2
+
+	_, err := coordinator.Execute(t.Context(), contract)
+	if !errors.Is(err, ErrPlanInvalid) || !strings.Contains(err.Error(), "current version is 1") {
+		t.Fatalf("Execute error = %v", err)
+	}
+	if _, err := store.Get(investigationRunID(contract)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unsupported contract was persisted: %v", err)
+	}
+}
 
 func TestCoordinatorDeliversVerifiedAnswer(t *testing.T) {
 	catalog := NewTaskTemplateCatalog()
@@ -24,12 +50,14 @@ func TestCoordinatorDeliversVerifiedAnswer(t *testing.T) {
 		Status:       ClaimSupported,
 		EvidenceRefs: []EvidenceRef{{EvidenceID: normalized.ID, SourceKind: normalized.SourceKind, Target: normalized.Target, ContentHash: normalized.ContentHash}},
 	}
+	var executionInput TaskExecutionInput
 	coordinator := NewCoordinator(CoordinatorOptions{
 		Catalog:     catalog,
 		Schemas:     testSchemas(),
 		Store:       NewMemoryRunStore(),
 		BudgetLimit: BudgetVector{},
-		Executors: testExecutors(TaskExecutorFunc(func(context.Context, ExecutableTask, TaskExecutionInput) (TaskExecutionResult, error) {
+		Executors: testExecutors(TaskExecutorFunc(func(_ context.Context, _ ExecutableTask, input TaskExecutionInput) (TaskExecutionResult, error) {
+			executionInput = input
 			return TaskExecutionResult{
 				Output:             []byte(`{"ok":true}`),
 				EvidenceCandidates: []EvidenceCandidate{evidenceCandidate},
@@ -41,6 +69,9 @@ func TestCoordinatorDeliversVerifiedAnswer(t *testing.T) {
 		}),
 	})
 	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	contract.ParentRunID = "run-parent"
+	contract.Actor.UserID = 42
+	contract.Actor.TenantID = "tenant-a"
 	contract.CreatedAt = time.Now().UTC()
 	run, err := coordinator.Execute(context.Background(), contract)
 	if err != nil {
@@ -51,6 +82,80 @@ func TestCoordinatorDeliversVerifiedAnswer(t *testing.T) {
 	}
 	if run.Delivery.Text != "verified answer" || len(run.Report.Evidence) != 1 || len(run.Report.Claims) != 1 {
 		t.Fatalf("delivery = %#v", run.Delivery)
+	}
+	if executionInput.WorkflowRunID != run.ID || executionInput.ParentRunID != contract.ParentRunID ||
+		executionInput.Actor != contract.Actor || executionInput.Attempt != 1 {
+		t.Fatalf("execution input identity = %#v", executionInput)
+	}
+}
+
+func TestCoordinatorRequiredInvestigatorFailureBlocksVerifierAndFailsRun(t *testing.T) {
+	catalog := NewTaskTemplateCatalog()
+	for _, template := range []TaskTemplate{
+		{
+			ID: "proposal.docs.verify", Version: 1,
+			GoalKinds:    []string{"flow"},
+			InputSchema:  agentapi.SchemaRef{ID: "investigation.input", Version: 1},
+			OutputSchema: agentapi.SchemaRef{ID: "investigation.output", Version: 1},
+			Executor:     ExecutorInvestigator, Enabled: true,
+		},
+		{
+			ID: "evidence.verify", Version: 1,
+			GoalKinds:    []string{"flow"},
+			InputSchema:  agentapi.SchemaRef{ID: "investigation.input", Version: 1},
+			OutputSchema: agentapi.SchemaRef{ID: "investigation.output", Version: 1},
+			Executor:     ExecutorVerifier, Enabled: true,
+		},
+	} {
+		if err := catalog.Register(template); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := NewMemoryRunStore()
+	verifierCalled := false
+	coordinator := NewCoordinator(CoordinatorOptions{
+		Catalog: catalog,
+		Schemas: testSchemas(),
+		Store:   store,
+		Executors: testExecutors(TaskExecutorFunc(func(_ context.Context, task ExecutableTask, _ TaskExecutionInput) (TaskExecutionResult, error) {
+			if task.ID == "evidence.verify" {
+				verifierCalled = true
+			}
+			return TaskExecutionResult{}, errors.New("investigator provider failed")
+		})),
+	})
+	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	proposal := &agentapi.TaskGraphProposal{
+		Tasks: []agentapi.TaskSpec{{
+			ID: "docs-task", Purpose: "inspect documentation", Capability: "knowledge.docs.verify",
+			EvidenceGoalIDs: []string{"g1"},
+		}},
+	}
+
+	run, err := coordinator.ExecuteWithProposal(context.Background(), contract, proposal)
+	if err == nil {
+		t.Fatal("required investigator failure returned success")
+	}
+	if verifierCalled {
+		t.Fatal("verifier started after its required investigator dependency failed")
+	}
+	if run.Status != RunFailed || run.Failure == nil || run.Failure.Code != FailureExecution {
+		t.Fatalf("run = %#v, err = %v", run, err)
+	}
+	investigator, ok := run.Results["docs-task"]
+	if !ok || investigator.Status != TaskFailed {
+		t.Fatalf("investigator result = %#v", investigator)
+	}
+	verifier, ok := run.Results["evidence.verify"]
+	if !ok || verifier.Status != TaskBlocked || verifier.Failure == nil || verifier.Failure.Message != "required dependency failed" {
+		t.Fatalf("verifier result = %#v", verifier)
+	}
+	persisted, getErr := store.Get(run.ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if persisted.Status != RunFailed {
+		t.Fatalf("persisted status = %q, want %q", persisted.Status, RunFailed)
 	}
 }
 
@@ -253,5 +358,89 @@ func TestCoordinatorLeaseRenewalCancelsOnFailure(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("lease renewal failure did not cancel execution context")
+	}
+}
+
+func TestExecuteWithProposalReadyPersistsBeforeExecution(t *testing.T) {
+	catalog := NewTaskTemplateCatalog()
+	if err := catalog.Register(testTemplate("verify", 1, []string{"flow"}, ExecutorVerifier, nil, BudgetVector{})); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryRunStore()
+	persisted := make(chan struct{})
+	coordinator := NewCoordinator(CoordinatorOptions{
+		Catalog:     catalog,
+		Schemas:     testSchemas(),
+		Store:       store,
+		BudgetLimit: BudgetVector{},
+		Executors: testExecutors(TaskExecutorFunc(func(context.Context, ExecutableTask, TaskExecutionInput) (TaskExecutionResult, error) {
+			select {
+			case <-persisted:
+			default:
+				t.Error("execution started before the initial snapshot was persisted")
+			}
+			return TaskExecutionResult{Output: []byte(`{"ok":true}`)}, nil
+		})),
+	})
+	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	contract.CreatedAt = time.Now().UTC()
+
+	var callbackRun InvestigationRun
+	run, err := coordinator.ExecuteWithProposalReady(
+		context.Background(),
+		contract,
+		nil,
+		func(persistedRun InvestigationRun) {
+			callbackRun = persistedRun
+			loaded, loadErr := store.Get(persistedRun.ID)
+			if loadErr != nil {
+				t.Errorf("load persisted snapshot in readiness callback: %v", loadErr)
+			} else if loaded.Status != RunCreated {
+				t.Errorf("persisted snapshot status = %q, want %q", loaded.Status, RunCreated)
+			}
+			close(persisted)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callbackRun.ID != run.ID || callbackRun.Status != RunCreated {
+		t.Fatalf("callback run = %#v, final run = %#v", callbackRun, run)
+	}
+}
+
+func TestCoordinatorLeaseRenewalFailurePersistsLeaseLost(t *testing.T) {
+	catalog := NewTaskTemplateCatalog()
+	if err := catalog.Register(testTemplate("inspect", 1, []string{"flow"}, ExecutorDirectTool, nil, BudgetVector{})); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryRunStore()
+	coordinator := NewCoordinator(CoordinatorOptions{
+		Catalog: catalog,
+		Schemas: testSchemas(),
+		Store:   store,
+		Lease:   renewFailureLease{},
+		Executors: testExecutors(TaskExecutorFunc(func(ctx context.Context, _ ExecutableTask, _ TaskExecutionInput) (TaskExecutionResult, error) {
+			<-ctx.Done()
+			return TaskExecutionResult{}, ctx.Err()
+		})),
+		BudgetLimit: BudgetVector{Duration: 30 * time.Millisecond},
+		MaxRounds:   1,
+	})
+	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
+	contract.CreatedAt = time.Now().UTC()
+	run, err := coordinator.Execute(t.Context(), contract)
+	if err == nil {
+		t.Fatal("lease renewal failure returned nil error")
+	}
+	if run.Status != RunFailed || run.Failure == nil || run.Failure.Code != FailureLease || !run.Failure.Retryable {
+		t.Fatalf("run = %#v", run)
+	}
+}
+
+func TestPlanFailureClassifiesLeaseFenceAsRetryableLeaseLoss(t *testing.T) {
+	failure := planFailure(fmt.Errorf("append plan event: %w", ErrLeaseFenced))
+	if failure.Code != FailureLease || failure.Stage != string(StagePlanning) || !failure.Retryable {
+		t.Fatalf("failure = %#v", failure)
 	}
 }

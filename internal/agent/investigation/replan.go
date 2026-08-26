@@ -66,8 +66,8 @@ func selectReplanCandidates(
 		return nil
 	}
 
-	goals := make(map[string]EvidenceGoal, len(contract.Goals))
-	for _, goal := range contract.Goals {
+	goals := make(map[string]EvidenceGoal, len(contract.EvidenceGoals))
+	for _, goal := range contract.EvidenceGoals {
 		goals[goal.ID] = goal
 	}
 	coverageByGoal := make(map[string]GoalCoverage, len(coverage))
@@ -111,7 +111,7 @@ func selectReplanCandidates(
 			newGoals := make(map[string]struct{})
 			for _, item := range bundle {
 				bundleBudget = addVector(bundleBudget, item.Budget)
-				for _, goalID := range item.GoalIDs {
+				for _, goalID := range item.EvidenceGoalIDs {
 					if _, needed := unresolved[goalID]; !needed {
 						continue
 					}
@@ -152,7 +152,7 @@ func selectReplanCandidates(
 			selected[item.ID] = struct{}{}
 			selectedCount++
 			used = addVector(used, item.Budget)
-			for _, goalID := range item.GoalIDs {
+			for _, goalID := range item.EvidenceGoalIDs {
 				if _, needed := unresolved[goalID]; needed {
 					covered[goalID] = struct{}{}
 				}

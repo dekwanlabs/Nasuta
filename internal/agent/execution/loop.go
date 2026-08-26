@@ -32,15 +32,23 @@ type Config struct {
 	// reasoning truncation or an empty model response.
 	ConclusionRetryMaxTokens int
 	ContextWindow            int
+	// MaxInputTokens is the cumulative provider-input budget for one Run.
+	MaxInputTokens int64
+	// MaxContextTokens is the ceiling for one provider request.
+	MaxContextTokens int64
 	// MaxToolResultBytes bounds the model-facing copy of one tool result.
 	// The authoritative result remains available to observers and trace storage.
-	MaxToolResultBytes          int
-	MaxContinueRounds           int
-	StructuredOutput            bool
-	DomainKnowledge             string
-	ModelParameters             llm.ModelParameters
-	BudgetCheck                 func() error
-	DisableLegacyAnswerRecovery bool
+	MaxToolResultBytes int
+	MaxContinueRounds  int
+	StructuredOutput   bool
+	DomainKnowledge    string
+	ModelParameters    llm.ModelParameters
+	// Token prices let the shared run ledger reserve a cost ceiling before
+	// sending a provider request; zero keeps cost accounting unbounded.
+	InputPriceMicrosPerMillionTokens  int64
+	OutputPriceMicrosPerMillionTokens int64
+	BudgetCheck                       func() error
+	DisableLegacyAnswerRecovery       bool
 }
 
 // ConversationContext carries recalled archived history and recent turns.
@@ -129,23 +137,26 @@ func (agent *Agent) SetOnFirstAnswerToken(fn func(runID string)) {
 }
 
 type RunResult struct {
-	RunID               string
-	Answer              string
-	Steps               int
-	Evidence            EvidenceMetrics
-	EvidenceUnits       []tool.EvidenceUnit
-	EvidenceConflicts   []evidence.Conflict
-	References          []tool.Reference
-	DelegationAdoptions []agentapi.DelegationAdoption
-	ForcedConclusion    bool
-	Aborted             bool
-	Err                 error
-	SessionMessages     []llm.Message
+	RunID                string
+	OutputMode           agentapi.RunOutputMode
+	Answer               string
+	Steps                int
+	Evidence             EvidenceMetrics
+	EvidenceUnits        []tool.EvidenceUnit
+	EvidenceObservations []agentapi.EvidenceObservation
+	EvidenceConflicts    []evidence.Conflict
+	References           []tool.Reference
+	DelegationAdoptions  []agentapi.DelegationAdoption
+	ForcedConclusion     bool
+	Aborted              bool
+	Err                  error
+	SessionMessages      []llm.Message
 }
 
 // Input is a fully compiled request for the execution loop.
 type Input struct {
 	Question           string
+	OutputMode         agentapi.RunOutputMode
 	Messages           []llm.Message
 	EvidenceContent    string
 	EvidenceUnits      []tool.EvidenceUnit

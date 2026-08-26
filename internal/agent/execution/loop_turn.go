@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
@@ -129,13 +132,12 @@ func (agent *Agent) callModelTurn(state *compiledLoop, step int) (modelTurn, err
 			Step: step, Messages: state.messages, Tools: state.tools, Stream: stream,
 		},
 		func(callCtx context.Context, input agentModelTurnInput) (agentModelTurnOutput, error) {
-			result, callErr := agent.llm.ChatWithToolsMaxWithParameters(
+			result, callErr := agent.callModel(
 				callCtx,
 				input.Messages,
 				input.Tools,
 				input.Stream,
 				agent.cfg.AnswerMaxTokens,
-				agent.cfg.ModelParameters,
 			)
 			return agentModelTurnOutput{Result: result, Timing: input.Stream.Timings()}, callErr
 		},
@@ -349,6 +351,10 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 				}
 			}
 		}
+		if state.input.OutputMode == agentapi.RunOutputEvidenceWorker &&
+			!execution.Failed && execution.Evidence {
+			appendEvidenceObservations(&state.result.EvidenceObservations, execution, executionCall.Function.Name)
+		}
 		execution = agent.prepareDelivery(
 			state.runID,
 			state.messages,
@@ -419,6 +425,52 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 	// Provider protocols forbid non-tool messages inside a parallel result group.
 	state.messages = appendToolTurnPostlude(state.messages, notices, state.answerContract)
 	return outcome
+}
+
+const (
+	maxEvidenceObservationTokens = 256
+	maxEvidenceObservations      = 128
+)
+
+func appendEvidenceObservations(
+	observations *[]agentapi.EvidenceObservation,
+	execution ToolExecution,
+	toolName string,
+) {
+	if observations == nil || len(*observations) >= maxEvidenceObservations {
+		return
+	}
+	summary := tooloutput.TruncateContent(strings.TrimSpace(execution.AuthoritativeContent), maxEvidenceObservationTokens)
+	if summary == "" {
+		return
+	}
+	if len(execution.EvidenceUnits) == 0 {
+		*observations = append(*observations, agentapi.EvidenceObservation{
+			SourceKind: "tool", Target: toolName, Summary: summary,
+		})
+		return
+	}
+	for _, unit := range execution.EvidenceUnits {
+		if len(*observations) >= maxEvidenceObservations {
+			return
+		}
+		section := ""
+		if len(unit.Sections) > 0 {
+			section = unit.Sections[0]
+		}
+		*observations = append(*observations, agentapi.EvidenceObservation{
+			SourceKind:    unit.SourceKind,
+			Target:        unit.Target,
+			Section:       section,
+			Summary:       summary,
+			ContentHash:   unit.ContentHash,
+			Facets:        append([]string(nil), unit.Facets...),
+			TrustTier:     unit.TrustTier,
+			EvidenceClass: unit.EvidenceClass,
+			Version:       unit.Version,
+			TimeRange:     unit.TimeRange,
+		})
+	}
 }
 
 // appendBudgetSkippedToolResults closes every omitted call in a parallel tool

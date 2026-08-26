@@ -63,6 +63,9 @@ func (p *Platform) buildQARuntime(
 			runtime.InvestigationCanceller = coordinator
 			runtime.InvestigationReconciler = coordinator
 		}
+		if recovery, ok := investigationRunner.(dashboard.QAInvestigationRecovery); ok {
+			runtime.InvestigationRecovery = recovery
+		}
 		return runtime, nil, nil, nil, nil
 	}
 	if err := snapshot.ValidateAgentSettings(); err != nil {
@@ -152,6 +155,7 @@ func (p *Platform) buildQARuntime(
 	}
 	if investigatorRunner, ok := investigationRunner.(*qaInvestigator); ok {
 		runtime.InvestigationReader = investigatorRunner
+		runtime.InvestigationRecovery = investigatorRunner
 	}
 	if coordinator != nil {
 		runtime.InvestigationCanceller = coordinator

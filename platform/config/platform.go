@@ -16,7 +16,7 @@ const (
 	DefaultRetrievalRouterMaxTokens        = 1024
 	DefaultAgentAnswerReserve              = 30 * time.Second
 	DefaultAgentMaxToolCalls               = 24
-	DefaultLLMContextWindow                = 128000
+	DefaultLLMContextWindow                = 1_000_000
 	DefaultFeatureGenerationTimeout        = 5 * time.Minute
 
 	DefaultCodingTimeout        = 30 * time.Minute
@@ -34,12 +34,12 @@ const (
 	DefaultDelegationMaxTotalTokens       = 48000
 	DefaultDelegationParentAnswerReserve  = 4000
 
-	DefaultInvestigationMaxInputTokens  = 20000
-	DefaultInvestigationMaxOutputTokens = 8000
-	DefaultInvestigationMaxToolCalls    = 24
-	DefaultInvestigationMaxDuration     = 5 * time.Minute
-	DefaultInvestigationMaxRounds       = 4
-	DefaultInvestigationMaxTasks        = 24
+	DefaultInvestigationMaxInputTokens  = 300_000
+	DefaultInvestigationMaxOutputTokens = 16_000
+	DefaultInvestigationMaxToolCalls    = 48
+	DefaultInvestigationMaxDuration     = 10 * time.Minute
+	DefaultInvestigationMaxRounds       = 6
+	DefaultInvestigationMaxTasks        = 32
 	DefaultInvestigationMaxParallelism  = 4
 	DefaultInvestigationMaxCostMicros   = 0
 	DefaultInvestigationBudgetProfile   = "interactive"

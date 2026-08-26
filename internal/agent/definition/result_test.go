@@ -30,7 +30,7 @@ func TestMapResultRecoversReasoningTruncatedSynthesizerFromVerifiedBundle(t *tes
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
+		agentapi.InvestigationAnswerSchemaRef(),
 		outputRecoveryContext{
 			AgentID: "synthesizer",
 			Input:   input,
@@ -70,6 +70,36 @@ func TestMapResultRecoversReasoningTruncatedSynthesizerFromVerifiedBundle(t *tes
 	}
 }
 
+func TestMapResultRecoversBudgetExhaustedSynthesizerFromVerifiedBundle(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	result, outcome := mapResult(
+		"run-synthesis-budget-recovery",
+		&execution.RunResult{
+			Err:      execution.ErrModelCallBudgetExhausted,
+			Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidencePartial},
+		},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.InvestigationAnswerSchemaRef(),
+		outputRecoveryContext{
+			AgentID: "synthesizer",
+			Input:   verifiedBundleForAnswerRecovery(),
+		},
+	)
+	if result.Status != agentapi.RunSucceeded || result.Error != nil {
+		t.Fatalf("result = %+v", result)
+	}
+	if outcome.Status != agentrun.StatusDone || outcome.Err != nil {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+}
+
 func TestMapResultRecoversAnswerTruncatedSynthesizerFromVerifiedBundle(t *testing.T) {
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
@@ -87,7 +117,7 @@ func TestMapResultRecoversAnswerTruncatedSynthesizerFromVerifiedBundle(t *testin
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
+		agentapi.InvestigationAnswerSchemaRef(),
 		outputRecoveryContext{
 			AgentID: "synthesizer",
 			Input:   verifiedBundleForAnswerRecovery(),
@@ -117,7 +147,7 @@ func TestMapResultDoesNotRecoverUnclassifiedSynthesizerFailure(t *testing.T) {
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
+		agentapi.InvestigationAnswerSchemaRef(),
 		outputRecoveryContext{
 			AgentID: "synthesizer",
 			Input:   verifiedBundleForAnswerRecovery(),
@@ -144,13 +174,13 @@ func TestMapResultRecoversValidTruncatedInvestigationReport(t *testing.T) {
 		"summary":"code report",
 		"findings":[{
 			"claim":"The route reaches the handler.",
-			"goal_ids":["core_flow"],
+			"evidence_goal_ids":["core_flow"],
 			"evidence":[{"kind":"code","reference":"router.go","summary":"Route registration"}],
 			"confidence":0.9
 		}],
 		"gaps":[],
-		"covered_goals":["core_flow"],
-		"unresolved_goals":[]
+		"covered_evidence_goals":["core_flow"],
+		"unresolved_evidence_goals":[]
 	}`
 	result, outcome := mapResult(
 		"run-investigator-valid-truncated",
@@ -166,7 +196,7 @@ func TestMapResultRecoversValidTruncatedInvestigationReport(t *testing.T) {
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		outputRecoveryContext{
 			AgentID: "investigator.code",
 			Input:   investigationReportRecoveryContract(),
@@ -203,8 +233,8 @@ func TestMapResultRepairsTruncatedInvestigationJSON(t *testing.T) {
 		"summary":"code report",
 		"findings":[],
 		"gaps":["No evidence-backed finding was completed."],
-		"covered_goals":[],
-		"unresolved_goals":["core_flow"]`
+		"covered_evidence_goals":[],
+		"unresolved_evidence_goals":["core_flow"]`
 	result, outcome := mapResult(
 		"run-investigator-repair-truncated",
 		&execution.RunResult{
@@ -219,7 +249,7 @@ func TestMapResultRepairsTruncatedInvestigationJSON(t *testing.T) {
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		outputRecoveryContext{
 			AgentID: "investigator.code",
 			Input:   investigationReportRecoveryContract(),
@@ -230,7 +260,7 @@ func TestMapResultRepairsTruncatedInvestigationJSON(t *testing.T) {
 		t.Fatalf("result=%+v outcome=%+v", result, outcome)
 	}
 	if err := registry.Validate(
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		result.Output,
 	); err != nil {
 		t.Fatalf("repaired output: %v", err)
@@ -259,7 +289,7 @@ func TestMapResultRecoversEmptyTruncatedInvestigationReportWithEvidence(t *testi
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		outputRecoveryContext{
 			AgentID: "investigator.code",
 			Input:   investigationReportRecoveryContract(),
@@ -275,19 +305,19 @@ func TestMapResultRecoversEmptyTruncatedInvestigationReportWithEvidence(t *testi
 		t.Fatalf("recovered evidence = %+v units=%+v", result.Evidence, result.EvidenceUnits)
 	}
 	var report struct {
-		Summary         string   `json:"summary"`
-		Findings        []any    `json:"findings"`
-		Gaps            []string `json:"gaps"`
-		CoveredGoals    []string `json:"covered_goals"`
-		UnresolvedGoals []string `json:"unresolved_goals"`
+		Summary                 string   `json:"summary"`
+		Findings                []any    `json:"findings"`
+		Gaps                    []string `json:"gaps"`
+		CoveredEvidenceGoals    []string `json:"covered_evidence_goals"`
+		UnresolvedEvidenceGoals []string `json:"unresolved_evidence_goals"`
 	}
 	if err := json.Unmarshal(result.Output, &report); err != nil {
 		t.Fatalf("decode recovered report: %v", err)
 	}
 	if len(report.Findings) != 0 ||
-		len(report.CoveredGoals) != 0 ||
-		len(report.UnresolvedGoals) != 1 ||
-		report.UnresolvedGoals[0] != "core_flow" ||
+		len(report.CoveredEvidenceGoals) != 0 ||
+		len(report.UnresolvedEvidenceGoals) != 1 ||
+		report.UnresolvedEvidenceGoals[0] != "core_flow" ||
 		len(report.Gaps) != 1 ||
 		!strings.Contains(report.Summary, "Evidence collection completed") {
 		t.Fatalf("recovered report = %+v", report)
@@ -311,7 +341,7 @@ func TestMapResultDoesNotRecoverUnclassifiedInvestigationFailure(t *testing.T) {
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		outputRecoveryContext{
 			AgentID: "investigator.code",
 			Input:   investigationReportRecoveryContract(),
@@ -348,9 +378,8 @@ func verifiedBundleForAnswerRecovery() json.RawMessage {
 			"producer_node_id":"investigate.code",
 			"finding_index":0,
 			"claim":"The runtime uses a durable workflow.",
-			"goal_ids":["core_flow"],
-			"evidence":[{"kind":"code","reference":"runtime.go","summary":"Workflow execution entrypoint"}],
-			"evidence_identities":[{"source_kind":"code","target":"runtime.go","section":"L1-L20"}],
+			"evidence_goal_ids":["core_flow"],
+			"evidence":[{"evidence_id":"ev_runtime"}],
 			"confidence":0.95,
 			"support":"supported",
 			"high_risk":false
@@ -359,17 +388,20 @@ func verifiedBundleForAnswerRecovery() json.RawMessage {
 			"producer_node_id":"investigate.runtime",
 			"finding_index":0,
 			"claim":"Live runtime behavior could not be fully confirmed.",
-			"goal_ids":["runtime_and_operations"],
-			"evidence":[{"kind":"runbook","reference":"operations","summary":"Documented runtime behavior"}],
-			"evidence_identities":[{"source_kind":"runbook","target":"operations","section":"runtime"}],
+			"evidence_goal_ids":["runtime_and_operations"],
+			"evidence":[{"evidence_id":"ev_operations"}],
 			"confidence":0.6,
 			"support":"partial",
 			"high_risk":false
 		}],
 		"unsupported_claims":[],
-		"partial_goals":["runtime_and_operations"],
-		"unresolved_goals":[],
+		"partial_evidence_goals":["runtime_and_operations"],
+		"unresolved_evidence_goals":[],
 		"limitations":["Live logs were unavailable."],
+		"evidence_lookup":{
+			"ev_runtime":{"kind":"code","reference":"runtime.go","summary":"Workflow execution entrypoint","identity":{"source_kind":"code","target":"runtime.go","section":"L1-L20"}},
+			"ev_operations":{"kind":"runbook","reference":"operations","summary":"Documented runtime behavior","identity":{"source_kind":"runbook","target":"operations","section":"runtime"}}
+		},
 		"evidence_units":[],
 		"evidence_conflicts":[],
 		"omissions":{"claims":0,"goals":0,"limitations":0,"evidence_units":0,"evidence_conflicts":0},
@@ -501,8 +533,8 @@ func TestValidatedInvestigationReportNormalizesEvidenceMetadata(t *testing.T) {
 		"summary": "code report",
 		"findings": []any{
 			map[string]any{
-				"claim":    "The request reaches the handler.",
-				"goal_ids": []string{"core_flow"},
+				"claim":             "The request reaches the handler.",
+				"evidence_goal_ids": []string{"core_flow"},
 				"evidence": []any{
 					map[string]any{
 						"kind":        "code",
@@ -531,9 +563,9 @@ func TestValidatedInvestigationReportNormalizesEvidenceMetadata(t *testing.T) {
 				"confidence": 0.9,
 			},
 		},
-		"gaps":             []string{},
-		"covered_goals":    []string{"core_flow"},
-		"unresolved_goals": []string{},
+		"gaps":                      []string{},
+		"covered_evidence_goals":    []string{"core_flow"},
+		"unresolved_evidence_goals": []string{},
 	}
 	raw, err := json.Marshal(report)
 	if err != nil {
@@ -541,7 +573,7 @@ func TestValidatedInvestigationReportNormalizesEvidenceMetadata(t *testing.T) {
 	}
 	got, err := validatedOutput(
 		registry,
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		string(raw),
 	)
 	if err != nil {
@@ -642,7 +674,7 @@ func TestMapResultRecoversInvalidInvestigationReportAsUnavailable(t *testing.T) 
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		outputRecoveryContext{AgentID: "investigator.code", Input: input},
 	)
 	if result.Status != agentapi.RunSucceeded || result.Error != nil {
@@ -652,14 +684,14 @@ func TestMapResultRecoversInvalidInvestigationReportAsUnavailable(t *testing.T) 
 		t.Fatalf("outcome = %+v", outcome)
 	}
 	var report struct {
-		Focus           string   `json:"focus"`
-		CoveredGoals    []string `json:"covered_goals"`
-		UnresolvedGoals []string `json:"unresolved_goals"`
+		Focus                   string   `json:"focus"`
+		CoveredEvidenceGoals    []string `json:"covered_evidence_goals"`
+		UnresolvedEvidenceGoals []string `json:"unresolved_evidence_goals"`
 	}
 	if err := json.Unmarshal(result.Output, &report); err != nil {
 		t.Fatalf("decode recovered report: %v", err)
 	}
-	if report.Focus != "code" || len(report.CoveredGoals) != 0 || len(report.UnresolvedGoals) != 1 || report.UnresolvedGoals[0] != "core_flow" {
+	if report.Focus != "code" || len(report.CoveredEvidenceGoals) != 0 || len(report.UnresolvedEvidenceGoals) != 1 || report.UnresolvedEvidenceGoals[0] != "core_flow" {
 		t.Fatalf("recovered report = %+v", report)
 	}
 }
@@ -684,7 +716,7 @@ func TestMapResultPreservesInvestigationFindingsWhenGoalCoverageIsMissing(t *tes
 		"summary":"domain report",
 		"findings":[{
 			"claim":"The service belongs to the smart-home domain.",
-			"goal_ids":["business_domain"],
+			"evidence_goal_ids":["business_domain"],
 			"evidence":[{"kind":"runbook","reference":"architecture","summary":"Domain overview"}],
 			"confidence":0.9
 		}],
@@ -698,7 +730,7 @@ func TestMapResultPreservesInvestigationFindingsWhenGoalCoverageIsMissing(t *tes
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		outputRecoveryContext{AgentID: "investigator.docs", Input: input},
 	)
 	if result.Status != agentapi.RunSucceeded || result.Error != nil {
@@ -708,9 +740,9 @@ func TestMapResultPreservesInvestigationFindingsWhenGoalCoverageIsMissing(t *tes
 		t.Fatalf("outcome = %+v", outcome)
 	}
 	var report struct {
-		Findings        []map[string]any `json:"findings"`
-		CoveredGoals    []string         `json:"covered_goals"`
-		UnresolvedGoals []string         `json:"unresolved_goals"`
+		Findings                []map[string]any `json:"findings"`
+		CoveredEvidenceGoals    []string         `json:"covered_evidence_goals"`
+		UnresolvedEvidenceGoals []string         `json:"unresolved_evidence_goals"`
 	}
 	if err := json.Unmarshal(result.Output, &report); err != nil {
 		t.Fatalf("decode recovered report: %v", err)
@@ -718,11 +750,11 @@ func TestMapResultPreservesInvestigationFindingsWhenGoalCoverageIsMissing(t *tes
 	if len(report.Findings) != 1 {
 		t.Fatalf("findings were not preserved: %+v", report)
 	}
-	if len(report.CoveredGoals) != 1 || report.CoveredGoals[0] != "business_domain" {
-		t.Fatalf("covered goals = %v", report.CoveredGoals)
+	if len(report.CoveredEvidenceGoals) != 1 || report.CoveredEvidenceGoals[0] != "business_domain" {
+		t.Fatalf("covered goals = %v", report.CoveredEvidenceGoals)
 	}
-	if len(report.UnresolvedGoals) != 1 || report.UnresolvedGoals[0] != "runtime_and_operations" {
-		t.Fatalf("unresolved goals = %v", report.UnresolvedGoals)
+	if len(report.UnresolvedEvidenceGoals) != 1 || report.UnresolvedEvidenceGoals[0] != "runtime_and_operations" {
+		t.Fatalf("unresolved goals = %v", report.UnresolvedEvidenceGoals)
 	}
 }
 
@@ -746,12 +778,12 @@ func TestMapResultRebuildsPartialInvestigationGoalCoverage(t *testing.T) {
 		"summary":"code report",
 		"findings":[{
 			"claim":"The route reaches the handler.",
-			"goal_ids":["entrypoint"],
+			"evidence_goal_ids":["entrypoint"],
 			"evidence":[{"kind":"code","reference":"router.go","summary":"Route registration"}],
 			"confidence":0.9
 		}],
 		"gaps":[],
-		"covered_goals":["stale"]
+		"covered_evidence_goals":["stale"]
 	}`
 	result, _ := mapResult(
 		"run-rebuild-coverage",
@@ -761,20 +793,20 @@ func TestMapResultRebuildsPartialInvestigationGoalCoverage(t *testing.T) {
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		outputRecoveryContext{AgentID: "investigator.code", Input: input},
 	)
 	var report struct {
-		Findings        []map[string]any `json:"findings"`
-		CoveredGoals    []string         `json:"covered_goals"`
-		UnresolvedGoals []string         `json:"unresolved_goals"`
+		Findings                []map[string]any `json:"findings"`
+		CoveredEvidenceGoals    []string         `json:"covered_evidence_goals"`
+		UnresolvedEvidenceGoals []string         `json:"unresolved_evidence_goals"`
 	}
 	if err := json.Unmarshal(result.Output, &report); err != nil {
 		t.Fatalf("decode recovered report: %v", err)
 	}
 	if len(report.Findings) != 1 ||
-		len(report.CoveredGoals) != 1 || report.CoveredGoals[0] != "entrypoint" ||
-		len(report.UnresolvedGoals) != 1 || report.UnresolvedGoals[0] != "core_flow" {
+		len(report.CoveredEvidenceGoals) != 1 || report.CoveredEvidenceGoals[0] != "entrypoint" ||
+		len(report.UnresolvedEvidenceGoals) != 1 || report.UnresolvedEvidenceGoals[0] != "core_flow" {
 		t.Fatalf("recovered report = %+v", report)
 	}
 }
@@ -796,7 +828,7 @@ func TestMapResultDoesNotPreserveInvestigationFindingsWithUnknownGoals(t *testin
 		"summary":"domain report",
 		"findings":[{
 			"claim":"An unrelated claim.",
-			"goal_ids":["unknown_goal"],
+			"evidence_goal_ids":["unknown_goal"],
 			"evidence":[{"kind":"runbook","reference":"architecture","summary":"Overview"}],
 			"confidence":0.9
 		}],
@@ -810,19 +842,135 @@ func TestMapResultDoesNotPreserveInvestigationFindingsWithUnknownGoals(t *testin
 		agentapi.Usage{},
 		nil,
 		registry,
-		agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+		agentapi.InvestigationReportSchemaRef(),
 		outputRecoveryContext{AgentID: "investigator.docs", Input: input},
 	)
 	var report struct {
-		Findings        []map[string]any `json:"findings"`
-		CoveredGoals    []string         `json:"covered_goals"`
-		UnresolvedGoals []string         `json:"unresolved_goals"`
+		Findings                []map[string]any `json:"findings"`
+		CoveredEvidenceGoals    []string         `json:"covered_evidence_goals"`
+		UnresolvedEvidenceGoals []string         `json:"unresolved_evidence_goals"`
 	}
 	if err := json.Unmarshal(result.Output, &report); err != nil {
 		t.Fatalf("decode recovered report: %v", err)
 	}
-	if len(report.Findings) != 0 || len(report.CoveredGoals) != 0 ||
-		len(report.UnresolvedGoals) != 1 || report.UnresolvedGoals[0] != "business_domain" {
+	if len(report.Findings) != 0 || len(report.CoveredEvidenceGoals) != 0 ||
+		len(report.UnresolvedEvidenceGoals) != 1 || report.UnresolvedEvidenceGoals[0] != "business_domain" {
 		t.Fatalf("unknown goal was accepted: %+v", report)
+	}
+}
+
+func TestMapResultStrictInvestigatorDocsRejectsMalformedReport(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	result, outcome := mapResult(
+		"run-docs-strict-output",
+		&execution.RunResult{Answer: `{"focus":"docs","summary":"incomplete"}`},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.InvestigationReportSchemaRef(),
+		outputRecoveryContext{AgentID: "investigator.docs", StrictOutput: true},
+	)
+	if result.Status != agentapi.RunFailed || result.Error == nil || result.Error.Code != "invalid_output" {
+		t.Fatalf("result = %+v, want invalid_output failure", result)
+	}
+	if outcome.Status != agentrun.StatusFailed || outcome.ErrorCode != "invalid_output" {
+		t.Fatalf("outcome = %+v, want failed invalid_output", outcome)
+	}
+	if result.Output != nil || result.Text != "" {
+		t.Fatalf("strict malformed output was exposed as success: %+v", result)
+	}
+}
+
+func TestMapResultRecoversTruncatedVerifierAsValidEmptyResult(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	result, outcome := mapResult(
+		"run-verifier-truncated",
+		&execution.RunResult{
+			Answer:   `{"summary":"partial verifier`,
+			Err:      execution.ErrAnswerTruncated,
+			Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidencePartial},
+		},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.SchemaRef{ID: "delegation.verification.result", Version: 1},
+		outputRecoveryContext{AgentID: "delegation.verifier"},
+	)
+	if result.Status != agentapi.RunSucceeded || result.Error != nil {
+		t.Fatalf("result = %+v", result)
+	}
+	if outcome.Status != agentrun.StatusDone || outcome.Err != nil || !outcome.Evidence.ForcedConclusion {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	var verification struct {
+		Summary       string            `json:"summary"`
+		Verdicts      []json.RawMessage `json:"verdicts"`
+		Uncertainties []string          `json:"uncertainties"`
+	}
+	if err := json.Unmarshal(result.Output, &verification); err != nil {
+		t.Fatalf("decode recovered verifier result: %v", err)
+	}
+	if len(verification.Verdicts) != 0 || len(verification.Uncertainties) != 1 {
+		t.Fatalf("recovered verifier result = %+v", verification)
+	}
+}
+
+func TestMapResultKeepsCompleteVerifierOutputWhenTruncatedErrorHasUsableJSON(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	answer := `{"summary":"supported","verdicts":[],"uncertainties":["none"]}`
+	result, outcome := mapResult(
+		"run-verifier-complete",
+		&execution.RunResult{Answer: answer, Err: execution.ErrAnswerTruncated},
+		nil, nil, agentapi.Usage{}, nil, registry,
+		agentapi.SchemaRef{ID: "delegation.verification.result", Version: 1},
+		outputRecoveryContext{AgentID: "delegation.verifier"},
+	)
+	if result.Status != agentapi.RunSucceeded || outcome.Status != agentrun.StatusDone {
+		t.Fatalf("result=%+v outcome=%+v", result, outcome)
+	}
+	if string(result.Output) != answer {
+		t.Fatalf("output = %s, want %s", result.Output, answer)
+	}
+}
+
+func TestMapResultPreservesCompleteVerifierVerdictFromTruncatedJSON(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	answer := `{"summary":"supported","verdicts":[{"claim_ids":["claim-1"],"decision":"supported","rationale":"The cited source supports the claim.","evidence_refs":["ev-1"]}`
+	result, outcome := mapResult(
+		"run-verifier-partial-verdict",
+		&execution.RunResult{Answer: answer, Err: execution.ErrAnswerTruncated},
+		nil, nil, agentapi.Usage{}, nil, registry,
+		agentapi.SchemaRef{ID: "delegation.verification.result", Version: 1},
+		outputRecoveryContext{AgentID: "delegation.verifier"},
+	)
+	if result.Status != agentapi.RunSucceeded || outcome.Status != agentrun.StatusDone {
+		t.Fatalf("result=%+v outcome=%+v", result, outcome)
+	}
+	var verification struct {
+		Verdicts []struct {
+			ClaimIDs []string `json:"claim_ids"`
+		} `json:"verdicts"`
+	}
+	if err := json.Unmarshal(result.Output, &verification); err != nil {
+		t.Fatalf("decode recovered verifier result: %v", err)
+	}
+	if len(verification.Verdicts) != 1 || len(verification.Verdicts[0].ClaimIDs) != 1 || verification.Verdicts[0].ClaimIDs[0] != "claim-1" {
+		t.Fatalf("recovered verdicts = %+v, want the complete verdict preserved", verification.Verdicts)
 	}
 }

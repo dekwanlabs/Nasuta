@@ -10,37 +10,42 @@ import (
 type DeterministicRenderer struct{}
 
 func (DeterministicRenderer) Render(report InvestigationReport) string {
-	var lines []string
-	if len(report.Claims) > 0 {
-		lines = append(lines, "Verified findings:")
-		for _, claim := range report.Claims {
-			prefix := "- "
-			if claim.Status != ClaimSupported {
-				prefix = "- [limited] "
-			}
-			lines = append(lines, prefix+claim.Text)
+	claims := readableClaims(report.Claims)
+	if len(claims) == 0 {
+		if len(report.Evidence) > 0 {
+			return "已完成资料检索，但现有证据还没有形成可验证的结论，暂时不能可靠回答这个问题。"
 		}
+		return "当前没有足够的可验证资料，暂时不能可靠回答这个问题。"
+	}
+
+	lines := make([]string, 0, len(claims)+3)
+	if len(report.Gaps) > 0 {
+		lines = append(lines, "以下是基于已验证证据得到的部分结论：")
+	} else {
+		lines = append(lines, "基于已验证证据：")
+	}
+	for _, claim := range claims {
+		prefix := "- "
+		if claim.Status != ClaimSupported {
+			prefix = "- （有限结论）"
+		}
+		lines = append(lines, prefix+claim.Text)
 	}
 	if len(report.Gaps) > 0 {
-		if len(lines) > 0 {
-			lines = append(lines, "")
-		}
-		lines = append(lines, "Investigation limits:")
-		for _, gap := range report.Gaps {
-			reason := strings.TrimSpace(gap.Reason)
-			if reason == "" {
-				reason = "the goal has no verified coverage"
-			}
-			lines = append(lines, fmt.Sprintf("- %s: %s", gap.GoalID, reason))
-		}
-	}
-	if len(lines) == 0 && len(report.Evidence) > 0 {
-		return "Evidence was collected, but no claim was verified. A reliable conclusion cannot be formed yet."
-	}
-	if len(lines) == 0 {
-		return "The investigation produced no admissible evidence, so a reliable conclusion cannot be given."
+		lines = append(lines, "部分问题仍缺少足够证据，以上内容不应视为完整结论。")
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func readableClaims(claims []VerifiedClaim) []VerifiedClaim {
+	readable := make([]VerifiedClaim, 0, len(claims))
+	for _, claim := range claims {
+		if claim.Status == ClaimRejected || !isUserReadableClaimText(claim.Text) {
+			continue
+		}
+		readable = append(readable, claim)
+	}
+	return readable
 }
 
 type DeliveryGate struct {
@@ -53,12 +58,15 @@ func (gate DeliveryGate) Deliver(
 	report InvestigationReport,
 	composer Composer,
 ) DeliveryResult {
+	report.Claims = readableClaims(report.Claims)
 	status := deliveryStatus(contract, report)
 	var compositionFailure *RunFailure
 	text := ""
+	var compositionUsage BudgetVector
 	if composer != nil && len(report.Claims) > 0 {
 		draft, err := composer.Compose(ctx, contract, report)
 		if err == nil {
+			compositionUsage = draft.Usage
 			if draftErr := validateAnswerDraft(draft, status, report); draftErr != nil {
 				compositionFailure = &RunFailure{
 					Code:      FailureComposer,
@@ -70,6 +78,7 @@ func (gate DeliveryGate) Deliver(
 				text = strings.TrimSpace(draft.Text)
 			}
 		} else {
+			compositionUsage = draft.Usage
 			compositionFailure = &RunFailure{
 				Code:      FailureComposer,
 				Message:   err.Error(),
@@ -84,6 +93,7 @@ func (gate DeliveryGate) Deliver(
 	result := DeliveryResult{
 		Status:    status,
 		Text:      text,
+		Usage:     compositionUsage,
 		Report:    report,
 		Failure:   compositionFailure,
 		CreatedAt: time.Now().UTC(),
@@ -104,6 +114,9 @@ func (gate DeliveryGate) Deliver(
 func validateAnswerDraft(draft AnswerDraft, expected DeliveryStatus, report InvestigationReport) error {
 	if strings.TrimSpace(draft.Text) == "" {
 		return ErrEmptyDelivery
+	}
+	if containsOpaqueIdentifier(draft.Text) {
+		return fmt.Errorf("composer returned an opaque internal identifier")
 	}
 	if draft.Status != "" && draft.Status != expected {
 		return fmt.Errorf("composer status %q does not match report status %q", draft.Status, expected)
@@ -143,7 +156,7 @@ func ValidateDelivery(result DeliveryResult) error {
 
 func deliveryStatus(contract InvestigationContract, report InvestigationReport) DeliveryStatus {
 	required := make(map[string]struct{})
-	for _, goal := range contract.Goals {
+	for _, goal := range contract.EvidenceGoals {
 		if goal.Required {
 			required[goal.ID] = struct{}{}
 		}

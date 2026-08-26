@@ -822,13 +822,7 @@ func (handler *Handler) APIQARunGet(w http.ResponseWriter, r *http.Request) {
 			}
 			response.InvestigationDelivery = &delivery
 			if detail.Terminal != nil {
-				projected := *detail.Terminal
-				projected.Answer = delivery.Text
-				projected.InvestigationDelivery = &delivery
-				if delivery.Failure != nil {
-					projected.ErrorCode = string(delivery.Failure.Code)
-					projected.Error = delivery.Failure.Message
-				}
+				projected := projectInvestigationDelivery(*detail.Terminal, delivery)
 				detail.Terminal = &projected
 			}
 		}
@@ -1060,19 +1054,33 @@ func (handler *Handler) projectInvestigationTerminal(
 		}
 		return nil, fmt.Errorf("load investigation delivery %q: %w", detail.WorkflowRunID, err)
 	}
-	projected := *terminal
-	projected.Answer = delivery.Text
-	projected.InvestigationDelivery = &delivery
+	projected := projectInvestigationDelivery(*terminal, delivery)
+	return &projected, nil
+}
+
+func projectInvestigationDelivery(
+	terminal agentrun.Terminal,
+	delivery investigation.DeliveryResult,
+) agentrun.Terminal {
+	terminal.Answer = delivery.Text
+	terminal.InvestigationDelivery = &delivery
+	// The native delivery is authoritative. Do not leak a stale parent error
+	// when a partial answer was successfully persisted.
+	terminal.ErrorCode = ""
+	terminal.Error = ""
 	if delivery.Failure != nil {
-		projected.ErrorCode = string(delivery.Failure.Code)
-		projected.Error = delivery.Failure.Message
+		terminal.ErrorCode = string(delivery.Failure.Code)
+		terminal.Error = delivery.Failure.Message
 	}
 	if delivery.Status == investigation.DeliveryFailed {
-		projected.Status = agentrun.StatusFailed
+		terminal.Status = agentrun.StatusFailed
+		if terminal.ErrorCode == "" {
+			terminal.ErrorCode = "delivery_failed"
+		}
 	} else {
-		projected.Status = agentrun.StatusDone
+		terminal.Status = agentrun.StatusDone
 	}
-	return &projected, nil
+	return terminal
 }
 
 func emitHubEvent(ev agentrun.SSEEvent, sseEvent func(string, any) bool) bool {

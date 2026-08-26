@@ -93,8 +93,8 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 			Prompt: agentapi.PromptSpec{
 				System: reportPrompt(spec.focus, rolePrompt), Version: "investigation-report-v2",
 			},
-			InputSchema:  agentapi.SchemaRef{ID: "task.contract", Version: 1},
-			OutputSchema: agentapi.SchemaRef{ID: "investigation.report", Version: 1},
+			InputSchema:  agentapi.TaskContractSchemaRef(),
+			OutputSchema: agentapi.InvestigationReportSchemaRef(),
 			Model: agentapi.ModelPolicy{
 				Provider: settings.LLMProvider, Model: settings.LLMModel,
 				MaxOutputTokens:                   investigatorOutput,
@@ -125,7 +125,7 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		Purpose:     "Resolve bounded semantic claim conflicts using only cited evidence.",
 		Prompt: agentapi.PromptSpec{
 			System:  prompts.Text(prompts.AgentCatalogDelegationVerifier),
-			Version: "delegation-verification-v1",
+			Version: "delegation-verification-v2",
 		},
 		InputSchema: agentapi.SchemaRef{
 			ID: "delegation.verification.request", Version: 1,
@@ -159,10 +159,10 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		Purpose: "Synthesize delegated investigation handoffs without gathering new evidence.",
 		Prompt: agentapi.PromptSpec{
 			System:  prompts.Text(prompts.AgentCatalogSynthesizer),
-			Version: "investigation-synthesis-v7",
+			Version: "investigation-synthesis-v8",
 		},
-		InputSchema:  agentapi.SchemaRef{ID: "investigation.verified_bundle", Version: 2},
-		OutputSchema: agentapi.SchemaRef{ID: "investigation.answer", Version: 3},
+		InputSchema:  agentapi.InvestigationVerifiedBundleSchemaRef(),
+		OutputSchema: agentapi.InvestigationAnswerSchemaRef(),
 		Model: agentapi.ModelPolicy{
 			Provider: settings.LLMProvider, Model: settings.LLMModel,
 			MaxOutputTokens:                   synthesizerOutput,

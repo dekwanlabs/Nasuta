@@ -87,7 +87,8 @@ func (agent *Agent) deliveryBudget(
 	currentContract *exactAnswerContract,
 	execution ToolExecution,
 ) (int, int, error) {
-	if agent.cfg.ContextWindow <= 0 {
+	window := agent.effectiveContextWindow()
+	if window <= 0 {
 		return -1, 0, nil
 	}
 	current := deliveryContextMessages(messages, pendingNotices, currentContract)
@@ -96,8 +97,8 @@ func (agent *Agent) deliveryBudget(
 		return 0, 0, err
 	}
 	outputReserve := agent.outputReserve()
-	safety := contextSafetyTokens(agent.cfg.ContextWindow)
-	available := agent.cfg.ContextWindow - currentInputTokens - outputReserve - safety
+	safety := contextSafetyTokens(window)
+	available := window - currentInputTokens - outputReserve - safety
 	candidate := deliveryMessages(messages, pendingNotices, call, currentContract, execution)
 	candidateInputTokens, err := estimateInputTokens(candidate, tools)
 	if err != nil {

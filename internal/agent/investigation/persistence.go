@@ -5,9 +5,31 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
+
+// ActiveRunCursor identifies the last storage row scanned by an active-run page.
+// It includes terminal rows so pagination remains complete when old snapshots dominate.
+type ActiveRunCursor struct {
+	UpdatedAt time.Time
+	ID        string
+}
+
+// ActiveRunPage is a bounded page of non-terminal snapshots and the storage
+// cursor needed to continue scanning without loading an unbounded result.
+type ActiveRunPage struct {
+	Runs    []InvestigationRun
+	Next    ActiveRunCursor
+	HasMore bool
+}
+
+// ActiveRunLister exposes bounded startup recovery scans without widening the
+// RunStore mutation contract used by execution.
+type ActiveRunLister interface {
+	ListActiveRuns(time.Time, ActiveRunCursor, int) (ActiveRunPage, error)
+}
 
 type RunEvent struct {
 	Sequence  int64     `json:"sequence"`
@@ -112,7 +134,7 @@ func mutateSaveResult(run InvestigationRun, record TaskExecutionRecord) (Investi
 	if _, exists := run.Tasks[record.TaskID]; !exists {
 		return InvestigationRun{}, RunEvent{}, fmt.Errorf("task %q is not part of run %q", record.TaskID, run.ID)
 	}
-	if record.Status != TaskSucceeded && record.Status != TaskFailed && record.Status != TaskBlocked && record.Status != TaskCancelled {
+	if record.Status != TaskSucceeded && record.Status != TaskPartial && record.Status != TaskFailed && record.Status != TaskBlocked && record.Status != TaskCancelled {
 		return InvestigationRun{}, RunEvent{}, fmt.Errorf("task %q result has non-terminal status %q", record.TaskID, record.Status)
 	}
 	if previous, exists := run.Results[record.TaskID]; exists && previous.Status != TaskRunning {
@@ -213,6 +235,42 @@ func (store *MemoryRunStore) Create(run InvestigationRun) error {
 	store.runs[run.ID] = next
 	store.appendEventLocked(run.ID, event)
 	return nil
+}
+
+func (store *MemoryRunStore) ListActiveRuns(before time.Time, cursor ActiveRunCursor, limit int) (ActiveRunPage, error) {
+	if store == nil {
+		return ActiveRunPage{}, fmt.Errorf("run store is required")
+	}
+	if err := validateActiveRunPage(before, cursor, limit); err != nil {
+		return ActiveRunPage{}, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	all := make([]InvestigationRun, 0, len(store.runs))
+	for _, run := range store.runs {
+		if run.UpdatedAt.Before(before) && afterActiveRunCursor(run.UpdatedAt, run.ID, cursor) {
+			all = append(all, cloneRun(run))
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].UpdatedAt.Equal(all[j].UpdatedAt) {
+			return all[i].ID < all[j].ID
+		}
+		return all[i].UpdatedAt.Before(all[j].UpdatedAt)
+	})
+	page := ActiveRunPage{Runs: make([]InvestigationRun, 0, min(limit, len(all)))}
+	scanned := min(limit, len(all))
+	for _, run := range all[:scanned] {
+		if !run.Status.Terminal() {
+			page.Runs = append(page.Runs, run)
+		}
+	}
+	if scanned > 0 {
+		last := all[scanned-1]
+		page.Next = ActiveRunCursor{UpdatedAt: last.UpdatedAt, ID: last.ID}
+	}
+	page.HasMore = len(all) > scanned
+	return page, nil
 }
 
 func (store *MemoryRunStore) Get(id string) (InvestigationRun, error) {
@@ -353,6 +411,7 @@ CREATE TABLE IF NOT EXISTS investigation_runs (
     payload TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS investigation_runs_updated_at ON investigation_runs(updated_at, id);
 CREATE TABLE IF NOT EXISTS investigation_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,
@@ -378,6 +437,18 @@ func (store *SQLiteRunStore) Create(run InvestigationRun) error {
 		return err
 	}
 	return store.persist(next, event, true)
+}
+
+func (store *SQLiteRunStore) ListActiveRuns(before time.Time, cursor ActiveRunCursor, limit int) (ActiveRunPage, error) {
+	if store == nil || store.db == nil {
+		return ActiveRunPage{}, fmt.Errorf("run store is required")
+	}
+	if err := validateActiveRunPage(before, cursor, limit); err != nil {
+		return ActiveRunPage{}, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return listActiveRunsSQL(store.db, before, cursor, limit, "sqlite")
 }
 
 func (store *SQLiteRunStore) Get(id string) (InvestigationRun, error) {
@@ -566,6 +637,70 @@ func (store *SQLiteRunStore) persistLocked(next InvestigationRun, event RunEvent
 	return nil
 }
 
+func listActiveRunsSQL(db *sql.DB, before time.Time, cursor ActiveRunCursor, limit int, storeName string) (ActiveRunPage, error) {
+	if err := validateActiveRunPage(before, cursor, limit); err != nil {
+		return ActiveRunPage{}, err
+	}
+	query := `SELECT id, payload, updated_at FROM investigation_runs WHERE updated_at < ?`
+	args := []any{before.UnixMilli()}
+	if !cursor.UpdatedAt.IsZero() {
+		query += ` AND (updated_at > ? OR (updated_at = ? AND id > ?))`
+		args = append(args, cursor.UpdatedAt.UnixMilli(), cursor.UpdatedAt.UnixMilli(), cursor.ID)
+	}
+	query += ` ORDER BY updated_at ASC, id ASC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return ActiveRunPage{}, fmt.Errorf("%s list active runs: query: %w", storeName, err)
+	}
+	defer rows.Close()
+	page := ActiveRunPage{Runs: make([]InvestigationRun, 0, limit)}
+	count := 0
+	for rows.Next() {
+		var id, payload string
+		var updatedAt int64
+		if err := rows.Scan(&id, &payload, &updatedAt); err != nil {
+			return ActiveRunPage{}, fmt.Errorf("%s list active runs: scan: %w", storeName, err)
+		}
+		count++
+		if count > limit {
+			page.HasMore = true
+			continue
+		}
+		page.Next = ActiveRunCursor{UpdatedAt: time.UnixMilli(updatedAt).UTC(), ID: id}
+		var run InvestigationRun
+		if err := json.Unmarshal([]byte(payload), &run); err != nil {
+			return ActiveRunPage{}, fmt.Errorf("%s list active runs: decode run %q: %w", storeName, id, err)
+		}
+		run = normalizeStoredRun(run)
+		if !run.Status.Terminal() {
+			page.Runs = append(page.Runs, run)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return ActiveRunPage{}, fmt.Errorf("%s list active runs: rows: %w", storeName, err)
+	}
+	return page, nil
+}
+
+func validateActiveRunPage(before time.Time, cursor ActiveRunCursor, limit int) error {
+	if before.IsZero() {
+		return fmt.Errorf("active run cutoff is required")
+	}
+	if limit <= 0 {
+		return fmt.Errorf("active run page size must be positive")
+	}
+	if cursor.UpdatedAt.IsZero() != (cursor.ID == "") {
+		return fmt.Errorf("active run cursor requires both updated_at and id")
+	}
+	return nil
+}
+
+func afterActiveRunCursor(updatedAt time.Time, id string, cursor ActiveRunCursor) bool {
+	return cursor.UpdatedAt.IsZero() || updatedAt.After(cursor.UpdatedAt) ||
+		(updatedAt.Equal(cursor.UpdatedAt) && id > cursor.ID)
+}
+
 func normalizeStoredRun(run InvestigationRun) InvestigationRun {
 	if run.Tasks == nil {
 		run.Tasks = make(map[string]ExecutableTask)
@@ -712,6 +847,14 @@ type fencingMutationStore interface {
 	createFenced(InvestigationRun, string, uint64) error
 }
 
+type fencingEventStore interface {
+	appendEventFenced(string, string, string, string, uint64) error
+}
+
+type fencingTokenAdopter interface {
+	adoptFencingToken(string, string, uint64) error
+}
+
 // fencedRunStore rejects writes after the lease owner loses authority. Durable
 // stores may additionally enforce the token in the same conditional update.
 type fencedRunStore struct {
@@ -740,7 +883,7 @@ func (store *fencedRunStore) check() error {
 	if store.token > 0 {
 		if validator, ok := store.lease.(FencingLeaseStore); ok {
 			if err := validator.ValidateLeaseWithToken(context.Background(), store.runID, store.owner, store.token); err != nil {
-				return fmt.Errorf("%w: run %q owner %q token %d: %v", ErrLeaseFenced, store.runID, store.owner, store.token, err)
+				return fmt.Errorf("%w: run %q owner %q token %d: %w", ErrLeaseFenced, store.runID, store.owner, store.token, err)
 			}
 			return nil
 		}
@@ -750,7 +893,7 @@ func (store *fencedRunStore) check() error {
 		return nil
 	}
 	if err := validator.ValidateLease(context.Background(), store.runID, store.owner); err != nil {
-		return fmt.Errorf("%w: run %q owner %q: %v", ErrLeaseFenced, store.runID, store.owner, err)
+		return fmt.Errorf("%w: run %q owner %q: %w", ErrLeaseFenced, store.runID, store.owner, err)
 	}
 	return nil
 }
@@ -835,6 +978,11 @@ func (store *fencedRunStore) Fail(id string, failure RunFailure, status RunStatu
 	}, func() error { return store.base.Fail(id, failure, status) })
 }
 func (store *fencedRunStore) AppendEvent(id, eventType, message string) error {
+	if store.token > 0 {
+		if durable, ok := store.base.(fencingEventStore); ok {
+			return durable.appendEventFenced(id, eventType, message, store.owner, store.token)
+		}
+	}
 	return store.apply(id, func(run InvestigationRun) (InvestigationRun, RunEvent, error) {
 		return mutateAppendEvent(run, eventType, message)
 	}, func() error { return store.base.AppendEvent(id, eventType, message) })

@@ -49,7 +49,7 @@ func EvaluateDelivery(run InvestigationRun) EvaluationResult {
 	for _, coverage := range run.Report.Coverage {
 		coverageByGoal[coverage.GoalID] = coverage.Status
 	}
-	for _, goal := range run.Contract.Goals {
+	for _, goal := range run.Contract.EvidenceGoals {
 		if goal.Required && coverageByGoal[goal.ID] != GoalCovered {
 			result.RequiredGoalsCovered = false
 			result.Failures = append(result.Failures, fmt.Sprintf("required goal %q is not covered", goal.ID))

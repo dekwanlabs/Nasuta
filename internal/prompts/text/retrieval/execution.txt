@@ -13,6 +13,7 @@ Identify the user-level investigation deliverables first, then suggest whether t
 - Tasks are candidate investigation deliverables; the server owns the final strategy decision.
 - For a focused request, tasks may be [].
 - For a decomposable request, tasks must contain 2 to 4 candidate tasks even if strategy is single_agent.
+- When the user asks for an overview plus several separate explanations, or asks to select a number of items and explain them individually, keep those deliverables separate; do not merge the whole request into one umbrella task.
 - Candidate tasks may be sequential. Only tasks with independently_useful=true and depends_on=[] can run in the parallel round.
 - Task ids must be unique canonical lowercase ids. Objectives must be distinct and no longer than 500 characters.
 - Consider distinct deliverables, uncertainty, risk, independent validation, and whether work can begin in parallel.

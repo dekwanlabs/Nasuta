@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -63,30 +65,50 @@ func (coordinator *Coordinator) Await(
 	parentRunID string,
 	workflowRunID string,
 ) error {
+	log.InfofCtx(ctx, "[qa] investigation await requested parent=%s workflow=%s", parentRunID, workflowRunID)
 	parent, err := coordinator.loadParent(parentRunID)
 	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation await parent load failed parent=%s workflow=%s: %v", parentRunID, workflowRunID, err)
 		return err
 	}
 	if parent.WorkflowRunID != workflowRunID {
-		return fmt.Errorf(
+		err := fmt.Errorf(
 			"QA parent run %q references workflow %q, not %q",
 			parentRunID,
 			parent.WorkflowRunID,
 			workflowRunID,
 		)
+		log.ErrorfCtx(ctx, "[qa] investigation await identity mismatch parent=%s workflow=%s: %v", parentRunID, workflowRunID, err)
+		return err
 	}
 	investigator, err := coordinator.runner()
 	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation await runner unavailable parent=%s workflow=%s: %v", parentRunID, workflowRunID, err)
 		return err
 	}
-	terminal, err := investigator.AwaitTerminal(ctx, workflowRunID)
+	if parent.Status.Terminal() {
+		log.InfofCtx(ctx, "[qa] investigation await parent already terminal parent=%s workflow=%s status=%s", parentRunID, workflowRunID, parent.Status)
+		return nil
+	}
+	terminal, err := loadInvestigationTerminalWithRetry(ctx, investigator, workflowRunID, "await")
 	if err != nil {
 		if errors.Is(err, investigation.ErrNotFound) {
-			return coordinator.complete(ctx, parent, missingInvestigationTerminal(workflowRunID))
+			log.WarnfCtx(ctx, "[qa] investigation workflow missing while converging parent=%s workflow=%s phase=await: %v", parentRunID, workflowRunID, err)
+			completeErr := coordinator.complete(ctx, parent, missingInvestigationTerminal(workflowRunID))
+			if completeErr != nil {
+				log.ErrorfCtx(ctx, "[qa] investigation missing terminal persistence failed parent=%s workflow=%s: %v", parentRunID, workflowRunID, completeErr)
+			}
+			return completeErr
 		}
+		log.ErrorfCtx(ctx, "[qa] investigation await failed parent=%s workflow=%s: %v", parentRunID, workflowRunID, err)
 		return fmt.Errorf("await QA investigation workflow %q: %w", workflowRunID, err)
 	}
-	return coordinator.converge(ctx, parent, terminal)
+	log.InfofCtx(ctx, "[qa] investigation await terminal received parent=%s workflow=%s status=%s", parentRunID, workflowRunID, terminal.Status)
+	if err := coordinator.converge(ctx, parent, terminal); err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation terminal convergence failed parent=%s workflow=%s: %v", parentRunID, workflowRunID, err)
+		return err
+	}
+	return nil
 }
 
 // Reconcile converges one Parent from durable Workflow facts.
@@ -94,26 +116,85 @@ func (coordinator *Coordinator) Reconcile(
 	ctx context.Context,
 	parentRunID string,
 ) error {
+	log.InfofCtx(ctx, "[qa] investigation reconcile requested parent=%s", parentRunID)
 	parent, err := coordinator.loadParent(parentRunID)
 	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation reconcile parent load failed parent=%s: %v", parentRunID, err)
 		return err
+	}
+	if parent.Status.Terminal() {
+		log.InfofCtx(ctx, "[qa] investigation reconcile parent already terminal parent=%s workflow=%s status=%s", parentRunID, parent.WorkflowRunID, parent.Status)
+		return nil
 	}
 	investigator, err := coordinator.runner()
 	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation reconcile runner unavailable parent=%s workflow=%s: %v", parentRunID, parent.WorkflowRunID, err)
 		return err
 	}
-	terminal, err := investigator.LoadTerminal(ctx, parent.WorkflowRunID)
+	terminal, err := loadInvestigationTerminalWithRetry(ctx, investigator, parent.WorkflowRunID, "reconcile")
 	if err != nil {
 		if errors.Is(err, investigation.ErrNotFound) {
-			return coordinator.complete(ctx, parent, missingInvestigationTerminal(parent.WorkflowRunID))
+			log.WarnfCtx(ctx, "[qa] investigation workflow missing while converging parent=%s workflow=%s phase=reconcile: %v", parentRunID, parent.WorkflowRunID, err)
+			completeErr := coordinator.complete(ctx, parent, missingInvestigationTerminal(parent.WorkflowRunID))
+			if completeErr != nil {
+				log.ErrorfCtx(ctx, "[qa] investigation missing terminal persistence failed parent=%s workflow=%s: %v", parentRunID, parent.WorkflowRunID, completeErr)
+			}
+			return completeErr
 		}
+		log.ErrorfCtx(ctx, "[qa] investigation reconcile load failed parent=%s workflow=%s: %v", parentRunID, parent.WorkflowRunID, err)
 		return fmt.Errorf(
 			"load QA investigation workflow %q terminal result: %w",
 			parent.WorkflowRunID,
 			err,
 		)
 	}
-	return coordinator.converge(ctx, parent, terminal)
+	log.InfofCtx(ctx, "[qa] investigation reconcile terminal received parent=%s workflow=%s status=%s", parentRunID, parent.WorkflowRunID, terminal.Status)
+	if err := coordinator.converge(ctx, parent, terminal); err != nil {
+		log.ErrorfCtx(ctx, "[qa] investigation reconcile convergence failed parent=%s workflow=%s: %v", parentRunID, parent.WorkflowRunID, err)
+		return err
+	}
+	return nil
+}
+
+const investigationMissingRetryAttempts = 5
+
+func loadInvestigationTerminalWithRetry(
+	ctx context.Context,
+	runner InvestigationRunner,
+	workflowRunID string,
+	phase string,
+) (InvestigationTerminal, error) {
+	var terminal InvestigationTerminal
+	var err error
+	for attempt := 1; attempt <= investigationMissingRetryAttempts; attempt++ {
+		if phase == "await" {
+			terminal, err = runner.AwaitTerminal(ctx, workflowRunID)
+		} else {
+			terminal, err = runner.LoadTerminal(ctx, workflowRunID)
+		}
+		if err == nil {
+			return terminal, nil
+		}
+		if !errors.Is(err, investigation.ErrNotFound) {
+			return InvestigationTerminal{}, err
+		}
+		retryable := attempt < investigationMissingRetryAttempts
+		log.WarnfCtx(ctx, "[qa] investigation terminal not found parent_phase=%s workflow=%s attempt=%d/%d retryable=%t: %v", phase, workflowRunID, attempt, investigationMissingRetryAttempts, retryable, err)
+		if !retryable {
+			break
+		}
+		delay := time.Duration(25*(1<<(attempt-1))) * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return InvestigationTerminal{}, ctx.Err()
+		}
+	}
+	return InvestigationTerminal{}, err
 }
 
 // Cancel propagates an owned Parent cancellation to its Workflow.
@@ -444,6 +525,10 @@ func (coordinator *Coordinator) completeOutcome(
 	parent QAParentRecord,
 	outcome RunOutcome,
 ) error {
+	if parent.Status.Terminal() {
+		log.InfofCtx(ctx, "[qa] complete skipped because parent is already terminal parent=%s status=%s", parent.ID, parent.Status)
+		return nil
+	}
 	if coordinator.scenarios == nil {
 		return fmt.Errorf("QA parent lifecycle is unavailable")
 	}
@@ -465,6 +550,10 @@ func (coordinator *Coordinator) completeOutcome(
 		}
 	}
 	if err := coordinator.scenarios.Complete(ctx, parent.ID, outcome); err != nil {
+		if errors.Is(err, agentrun.ErrNotActive) {
+			log.InfofCtx(ctx, "[qa] complete replay observed already terminal parent=%s", parent.ID)
+			return nil
+		}
 		return err
 	}
 	return nil

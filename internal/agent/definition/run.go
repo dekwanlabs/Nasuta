@@ -322,20 +322,32 @@ func (run *activeRun) Execute(
 		nil,
 	)
 	observer := run.observer()
+	budgetCheck := func() error {
+		if gate := agentapi.RunBudgetGateFromContext(ctx); gate != nil {
+			if err := gate.Check(); err != nil {
+				return err
+			}
+		}
+		return run.recorder.CheckLimits()
+	}
 	loop := agentexecution.NewAgent(client, run.runtime.executor, agentexecution.Config{
-		MaxSteps:                    execution.snapshot.Limits.MaxSteps,
-		MaxToolCalls:                execution.snapshot.Limits.MaxToolCalls,
-		Timeout:                     time.Until(execution.snapshot.Limits.Deadline),
-		AnswerReserve:               run.runtime.settings.answerReserve,
-		AnswerMaxTokens:             execution.definition.Model.MaxOutputTokens,
-		ConclusionMaxTokens:         execution.definition.Model.MaxOutputTokens,
-		ContextWindow:               execution.snapshot.Budget.ContextTokens,
-		MaxToolResultBytes:          execution.definition.Budget.MaxToolResultBytes,
-		MaxContinueRounds:           execution.definition.Budget.MaxContinueRounds,
-		StructuredOutput:            execution.structuredOutput,
-		ModelParameters:             execution.modelParameters,
-		BudgetCheck:                 run.recorder.CheckLimits,
-		DisableLegacyAnswerRecovery: run.runtime.settings.disableLegacyAnswerRecovery,
+		MaxSteps:                          execution.snapshot.Limits.MaxSteps,
+		MaxToolCalls:                      execution.snapshot.Limits.MaxToolCalls,
+		Timeout:                           time.Until(execution.snapshot.Limits.Deadline),
+		AnswerReserve:                     run.runtime.settings.answerReserve,
+		AnswerMaxTokens:                   execution.definition.Model.MaxOutputTokens,
+		ConclusionMaxTokens:               execution.definition.Model.MaxOutputTokens,
+		ContextWindow:                     execution.snapshot.Budget.ContextTokens,
+		MaxInputTokens:                    execution.snapshot.Limits.MaxInputTokens,
+		MaxContextTokens:                  execution.snapshot.Limits.MaxContextTokens,
+		MaxToolResultBytes:                execution.definition.Budget.MaxToolResultBytes,
+		MaxContinueRounds:                 execution.definition.Budget.MaxContinueRounds,
+		StructuredOutput:                  execution.structuredOutput,
+		ModelParameters:                   execution.modelParameters,
+		InputPriceMicrosPerMillionTokens:  execution.definition.Model.InputPriceMicrosPerMillionTokens,
+		OutputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
+		BudgetCheck:                       budgetCheck,
+		DisableLegacyAnswerRecovery:       run.runtime.settings.disableLegacyAnswerRecovery,
 	}, observer, run.runtime.hub)
 	loop.SetOnFirstAnswerToken(func(runID string) {
 		run.runtime.hub.EmitPhase(runID, "找到啦，我来把答案写出来 ✍️")
@@ -352,9 +364,10 @@ func (run *activeRun) Execute(
 		run.runtime.schemas,
 		execution.definition.OutputSchema,
 		outputRecoveryContext{
-			AgentID: request.Agent.ID,
-			Input:   request.Input,
-			Context: request.Context,
+			AgentID:      request.Agent.ID,
+			Input:        request.Input,
+			Context:      request.Context,
+			StrictOutput: request.Agent.ID == "investigator.docs",
 		},
 	)
 	outcome = run.mergePreparationOutcome(outcome)
@@ -513,6 +526,8 @@ func sameRunLimits(left, right agentapi.RunLimits) bool {
 	return left.Deadline.Equal(right.Deadline) &&
 		left.MaxSteps == right.MaxSteps &&
 		left.MaxToolCalls == right.MaxToolCalls &&
+		left.MaxInputTokens == right.MaxInputTokens &&
+		left.MaxContextTokens == right.MaxContextTokens &&
 		left.MaxTotalTokens == right.MaxTotalTokens &&
 		left.MaxCostMicros == right.MaxCostMicros
 }

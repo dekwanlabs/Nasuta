@@ -1191,7 +1191,8 @@ func TestAskSingleAgentRouteDoesNotStartScenario(t *testing.T) {
 		t.Fatalf("execution events = %+v", recorded)
 	}
 	if recorded[0].event.Strategy != string(retrieval.ExecutionSingleAgent) ||
-		recorded[0].event.Status != "completed" {
+		recorded[0].event.Status != "completed" ||
+		recorded[0].event.Reason != "insufficient_independent_tasks" {
 		t.Fatalf("routed event = %+v", recorded[0])
 	}
 }

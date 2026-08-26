@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
@@ -70,7 +71,7 @@ func (agent *Agent) prepareLoop(
 		runID, time.Since(historyStarted), len(messages), contextChars(messages))
 
 	tools := agent.prepareTools(ctx, runID, input, toolSnapshot)
-	result := &RunResult{RunID: runID}
+	result := &RunResult{RunID: runID, OutputMode: input.OutputMode}
 	if input.EvidenceSeeded {
 		result.Evidence.ResultCount = 1
 	}
@@ -150,7 +151,8 @@ func (state *compiledLoop) recordSeedEvidence(observer Observer) {
 }
 
 func (agent *Agent) finishLoop(state *compiledLoop) {
-	if !state.answered && !state.result.Aborted && state.result.Err == nil {
+	if state.input.OutputMode != agentapi.RunOutputEvidenceWorker &&
+		!state.answered && !state.result.Aborted && state.result.Err == nil {
 		state.result.ForcedConclusion = true
 		state.result.Evidence.ForcedConclusion = true
 		log.InfofCtx(state.ctx, "[agent] run %s forcing conclusion (steps=%d)",
@@ -183,12 +185,25 @@ func (agent *Agent) finalizeLoop(state *compiledLoop) {
 		state.runID, state.result.Steps, len(state.result.Answer), state.result.Aborted, state.result.Err)
 }
 
+func isRecoverableConclusionError(err error) bool {
+	return errors.Is(err, ErrModelCallBudgetExhausted) ||
+		errors.Is(err, ErrReasoningTruncated) ||
+		errors.Is(err, ErrEmptyModelResponse) ||
+		errors.Is(err, ErrAnswerTruncated)
+}
+
 func (agent *Agent) concludeLoop(state *compiledLoop) {
 	if _, err := agent.compactAnswerContext(state, nil, "forced_conclusion"); err != nil {
 		state.result.Err = fmt.Errorf("compact context before forced conclusion: %w", err)
 		log.ErrorfCtx(state.ctx, "[agent] run %s final-answer context compaction failed: %v",
 			state.runID, err)
 		return
+	}
+	if agent.cfg.BudgetCheck != nil {
+		if err := agent.cfg.BudgetCheck(); err != nil {
+			state.result.Err = err
+			return
+		}
 	}
 	final, err := agent.forceConclusion(
 		state.runCtx,
@@ -209,7 +224,11 @@ func (agent *Agent) concludeLoop(state *compiledLoop) {
 				state.runID, err)
 		} else {
 			state.result.Err = err
-			log.ErrorfCtx(state.ctx, "[agent] run %s force-conclusion error: %v", state.runID, err)
+			if isRecoverableConclusionError(err) {
+				log.WarnfCtx(state.ctx, "[agent] run %s force-conclusion unavailable; recovery may use evidence or a deterministic renderer: %v", state.runID, err)
+			} else {
+				log.ErrorfCtx(state.ctx, "[agent] run %s force-conclusion error: %v", state.runID, err)
+			}
 		}
 	} else if final != nil {
 		state.result.Answer += final.Content

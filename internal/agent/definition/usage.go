@@ -80,6 +80,15 @@ func (recorder *usageRecorder) Usage() agentapi.Usage {
 func (recorder *usageRecorder) CheckLimits() error {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
+	if recorder.limits.MaxInputTokens > 0 &&
+		recorder.usage.InputTokens > recorder.limits.MaxInputTokens {
+		return fmt.Errorf(
+			"%w: input tokens %d exceed %d",
+			errRunLimitExceeded,
+			recorder.usage.InputTokens,
+			recorder.limits.MaxInputTokens,
+		)
+	}
 	if recorder.limits.MaxTotalTokens > 0 &&
 		recorder.usage.TotalTokens > recorder.limits.MaxTotalTokens {
 		return fmt.Errorf(

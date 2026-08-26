@@ -19,9 +19,9 @@ const (
 // when the caller does not pin one.
 const DefaultBudgetPolicyVersion = "v1"
 
-// StageAllocation records the starting share of the run limit reserved for each
-// stage. Planning, execution and verification may be reallocated from the unused
-// pool in later rounds; composition and fallback stay hard reserves.
+// StageAllocation records non-token stage controls and the optional
+// composition-protection share. Token dimensions are normalized to the shared
+// Run limit by the Coordinator and are not split across stages.
 type StageAllocation struct {
 	Planning     float64
 	Execution    float64
@@ -56,9 +56,9 @@ func (profile BudgetProfile) Allocation() (StageAllocation, error) {
 	return allocation, nil
 }
 
-// AllocateStageLimits derives each stage cap from the run hard limit. Dimensions
-// left unbounded by the platform (zero) stay zero so a profile cannot turn an
-// unbounded cost or empty token budget into a new cap.
+// AllocateStageLimits derives stage controls from the run hard limit. The
+// Coordinator later normalizes token dimensions back to the shared Run limit;
+// this function remains a deterministic profile primitive for compatibility.
 func AllocateStageLimits(profile BudgetProfile, runLimit BudgetVector) (map[BudgetStage]BudgetVector, error) {
 	allocation, err := profile.Allocation()
 	if err != nil {

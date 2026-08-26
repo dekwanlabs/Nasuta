@@ -304,6 +304,12 @@ func (compiler *ProposalCompiler) validateTask(
 		return validatedTask{}, err
 	}
 	if err := validateCanonical(
+		"task "+task.ID+" evidence goal",
+		task.EvidenceGoalIDs,
+	); err != nil {
+		return validatedTask{}, err
+	}
+	if err := validateCanonical(
 		"task "+task.ID+" required facet",
 		task.RequiredFacets,
 	); err != nil {

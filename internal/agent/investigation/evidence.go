@@ -3,6 +3,8 @@ package investigation
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,6 +13,9 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/tool"
 )
+
+// ErrOpaqueEvidence marks model or adapter output that contains only an internal identifier.
+var ErrOpaqueEvidence = errors.New("evidence content is an opaque identifier")
 
 // EvidenceLedger admits normalized evidence once and preserves conflicting units.
 type EvidenceLedger struct {
@@ -246,6 +251,9 @@ func (ledger *ClaimLedger) Admit(taskID string, candidate ClaimCandidate) (Verif
 	}
 	candidate.GoalID = strings.TrimSpace(candidate.GoalID)
 	candidate.Text = strings.TrimSpace(candidate.Text)
+	if !isUserReadableClaimText(candidate.Text) {
+		return VerifiedClaim{}, false, fmt.Errorf("%w: claim text is an opaque identifier", ErrEvidenceReference)
+	}
 	_, ok := ledger.goals[candidate.GoalID]
 	if !ok {
 		return VerifiedClaim{}, false, fmt.Errorf("%w: unknown goal %q", ErrEvidenceReference, candidate.GoalID)
@@ -640,6 +648,9 @@ func normalizeEvidence(taskID string, candidate EvidenceCandidate) (EvidenceUnit
 	if candidate.SourceKind == "" || candidate.Target == "" || candidate.Content == "" {
 		return EvidenceUnit{}, fmt.Errorf("evidence source, target, and content are required")
 	}
+	if !isReadableEvidenceContent(candidate.Content) {
+		return EvidenceUnit{}, fmt.Errorf("%w: content cannot be admitted as evidence", ErrOpaqueEvidence)
+	}
 	hash := sha256.Sum256([]byte(candidate.Content))
 	computedHash := hex.EncodeToString(hash[:])
 	if candidate.ContentHash == "" {
@@ -691,6 +702,117 @@ func normalizeSeedEvidence(taskID string, unit EvidenceUnit) (EvidenceUnit, erro
 		TimeRange:     unit.TimeRange,
 		TaskID:        taskID,
 	}, nil
+}
+
+func isUserReadableClaimText(text string) bool {
+	text = strings.TrimSpace(text)
+	return text != "" && !containsOpaqueIdentifier(text)
+}
+
+// isReadableEvidenceContent rejects identity-only payloads while allowing
+// authoritative text that also contains ordinary metadata such as evidence IDs.
+func isReadableEvidenceContent(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" || isOpaqueIdentifier(text) {
+		return false
+	}
+	if json.Valid([]byte(text)) {
+		var value any
+		if err := json.Unmarshal([]byte(text), &value); err == nil {
+			return hasReadableJSONValue(value)
+		}
+	}
+	for _, token := range strings.Fields(text) {
+		token = strings.Trim(token, `.,;:!?()[]{}\"'<>`)
+		if token != "" && !isOpaqueIdentifier(token) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasReadableJSONValue(value any) bool {
+	switch value := value.(type) {
+	case nil:
+		return false
+	case string:
+		return isReadableEvidenceContent(value)
+	case []any:
+		for _, item := range value {
+			if hasReadableJSONValue(item) {
+				return true
+			}
+		}
+		return false
+	case map[string]any:
+		for _, item := range value {
+			if hasReadableJSONValue(item) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
+func containsOpaqueIdentifier(text string) bool {
+	for _, token := range strings.Fields(text) {
+		token = strings.Trim(token, `.,;:!?()[]{}\"'<>`)
+		if isOpaqueIdentifier(token) {
+			return true
+		}
+	}
+	return false
+}
+
+func isOpaqueIdentifier(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if isHexString(value) && (len(value) == 64 || len(value) >= 32) {
+		return true
+	}
+	for _, prefix := range []string{"evidence_", "claim_", "workflow_", "run_", "reservation_"} {
+		if strings.HasPrefix(value, prefix) {
+			suffix := strings.TrimPrefix(value, prefix)
+			if isHexString(suffix) && len(suffix) >= 16 {
+				return true
+			}
+		}
+	}
+	if len(value) == 36 {
+		for index, char := range value {
+			if index == 8 || index == 13 || index == 18 || index == 23 {
+				if char != '-' {
+					return false
+				}
+				continue
+			}
+			if !isHexRune(char) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func isHexString(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if !isHexRune(char) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHexRune(char rune) bool {
+	return (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')
 }
 
 func gapReason(status GoalCoverageStatus) string {

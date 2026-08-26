@@ -56,9 +56,10 @@ func TestBuildInvestigationCoordinator(t *testing.T) {
 	}
 
 	contract := investigation.InvestigationContract{
-		ID:       "code-entrypoint",
-		Question: "where does hsas-aiot-service call the AI model?",
-		Goals:    []investigation.EvidenceGoal{{ID: "g1", Kind: investigation.GoalKindEntrypoint, Required: true}},
+		Version:       investigation.InvestigationContractVersion,
+		ID:            "code-entrypoint",
+		Question:      "where does hsas-aiot-service call the AI model?",
+		EvidenceGoals: []investigation.EvidenceGoal{{ID: "g1", Kind: investigation.GoalKindEntrypoint, Required: true}},
 	}
 	candidates, err := coordinator.Catalog.GenerateCandidates(contract)
 	if err != nil {

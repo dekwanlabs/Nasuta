@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -32,6 +34,8 @@ type AgentComposer struct {
 	// ComposerDefinition overrides the default synthesizer definition. A zero
 	// Version resolves the catalog default.
 	ComposerDefinition agentapi.DefinitionRef
+	// EvidenceContextBudget bounds evidence text entering the synthesizer.
+	EvidenceContextBudget EvidenceContextBudget
 }
 
 func (composer AgentComposer) Compose(
@@ -53,7 +57,7 @@ func (composer AgentComposer) Compose(
 	if err != nil {
 		return AnswerDraft{}, fmt.Errorf("resolve synthesizer definition %q: %w", ref.ID, err)
 	}
-	bundle, err := marshalVerifiedBundle(contract, report)
+	bundle, err := marshalVerifiedBundleWithBudget(contract, report, composer.EvidenceContextBudget)
 	if err != nil {
 		return AnswerDraft{}, err
 	}
@@ -72,7 +76,7 @@ func (composer AgentComposer) Compose(
 			RestrictVisible: true,
 			VisibleToolIDs:  append([]string(nil), definition.Tools.VisibleToolIDs...),
 		},
-		Policy: agentapi.RunPolicy{EvidenceSeeded: true},
+		Policy: agentapi.RunPolicy{EvidenceSeeded: true, OutputMode: agentapi.RunOutputStandalone},
 		Limits: agentapi.RunLimits{
 			MaxSteps:     definition.Budget.MaxSteps,
 			MaxToolCalls: definition.Budget.MaxToolCalls,
@@ -89,71 +93,84 @@ func (composer AgentComposer) Compose(
 }
 
 func projectAnswer(result agentapi.RunResult) (AnswerDraft, error) {
+	usage := budgetVectorFromAgentUsage(result.Usage)
 	if result.Error != nil {
-		return AnswerDraft{}, fmt.Errorf("synthesizer run %q failed: %s", result.RunID, result.Error.Message)
+		return AnswerDraft{Usage: usage}, fmt.Errorf("synthesizer run %q failed: %s", result.RunID, result.Error.Message)
 	}
 	if result.Status != agentapi.RunSucceeded {
-		return AnswerDraft{}, fmt.Errorf("synthesizer run %q has status %q", result.RunID, result.Status)
+		return AnswerDraft{Usage: usage}, fmt.Errorf("synthesizer run %q has status %q", result.RunID, result.Status)
 	}
 	var answer struct {
 		Answer string `json:"answer"`
 	}
 	if len(result.Output) == 0 {
-		return AnswerDraft{}, fmt.Errorf("synthesizer run %q produced no output", result.RunID)
+		return AnswerDraft{Usage: usage}, fmt.Errorf("synthesizer run %q produced no output", result.RunID)
 	}
 	if err := json.Unmarshal(result.Output, &answer); err != nil {
-		return AnswerDraft{}, fmt.Errorf("decode synthesizer answer: %w", err)
+		return AnswerDraft{Usage: usage}, fmt.Errorf("decode synthesizer answer: %w", err)
 	}
 	if strings.TrimSpace(answer.Answer) == "" {
-		return AnswerDraft{}, fmt.Errorf("synthesizer run %q produced an empty answer", result.RunID)
+		return AnswerDraft{Usage: usage}, fmt.Errorf("synthesizer run %q produced an empty answer", result.RunID)
 	}
-	return AnswerDraft{Text: answer.Answer}, nil
+	return AnswerDraft{Text: answer.Answer, Usage: usage}, nil
 }
 
-// verifiedBundleView is the JSON shape required by investigation.verified_bundle v2.
-// Required fields are always emitted even when empty; subject_coverage stays optional.
+func budgetVectorFromAgentUsage(usage agentapi.Usage) BudgetVector {
+	total := usage.TotalTokens
+	if total == 0 && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+		total = usage.InputTokens + usage.OutputTokens
+	}
+	return BudgetVector{
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		TotalTokens:  total,
+		CostMicros:   usage.CostMicros,
+	}
+}
+
+// verifiedBundleView is the compact JSON handoff required by the synthesizer.
+// Evidence bodies live once in evidence_lookup; claims carry only references.
 type verifiedBundleView struct {
-	SupportedClaims   []supportedClaimView        `json:"supported_claims"`
-	PartialClaims     []supportedClaimView        `json:"partial_claims"`
-	UnsupportedClaims []unsupportedClaimView      `json:"unsupported_claims"`
-	PartialGoals      []string                    `json:"partial_goals"`
-	UnresolvedGoals   []string                    `json:"unresolved_goals"`
-	Limitations       []string                    `json:"limitations"`
-	LimitationsDetail limitationsDetailRef        `json:"limitations_detail"`
-	EvidenceUnits     []tool.EvidenceUnit         `json:"evidence_units"`
-	EvidenceConflicts []agentapi.EvidenceConflict `json:"evidence_conflicts"`
-	SubjectCoverage   []subjectCoverageView       `json:"subject_coverage,omitempty"`
-	Verification      verificationView            `json:"verification"`
-	Completeness      string                      `json:"completeness"`
-	Omissions         omissionView                `json:"omissions"`
+	SupportedClaims         []supportedClaimView           `json:"supported_claims"`
+	PartialClaims           []supportedClaimView           `json:"partial_claims"`
+	UnsupportedClaims       []unsupportedClaimView         `json:"unsupported_claims"`
+	PartialEvidenceGoals    []string                       `json:"partial_evidence_goals"`
+	UnresolvedEvidenceGoals []string                       `json:"unresolved_evidence_goals"`
+	Limitations             []string                       `json:"limitations"`
+	LimitationsDetail       limitationsDetailRef           `json:"limitations_detail"`
+	EvidenceUnits           []tool.EvidenceUnit            `json:"evidence_units,omitempty"`
+	EvidenceConflicts       []agentapi.EvidenceConflict    `json:"evidence_conflicts,omitempty"`
+	SubjectCoverage         []subjectCoverageView          `json:"subject_coverage,omitempty"`
+	Verification            verificationView               `json:"verification"`
+	Completeness            string                         `json:"completeness"`
+	Omissions               omissionView                   `json:"omissions"`
+	EvidenceLookup          map[string]evidenceSummaryView `json:"evidence_lookup,omitempty"`
+	EvidenceContext         evidenceContextView            `json:"evidence_context"`
+	EvidenceOmissions       []evidenceOmissionView         `json:"evidence_omissions,omitempty"`
 }
 
 type supportedClaimView struct {
-	ProducerNodeID     string                      `json:"producer_node_id"`
-	FindingIndex       int                         `json:"finding_index"`
-	Claim              string                      `json:"claim"`
-	GoalIDs            []string                    `json:"goal_ids"`
-	Evidence           []findingEvidenceView       `json:"evidence"`
-	EvidenceIdentities []agentapi.EvidenceIdentity `json:"evidence_identities"`
-	Confidence         float64                     `json:"confidence"`
-	Support            string                      `json:"support"`
-	HighRisk           bool                        `json:"high_risk"`
+	ProducerNodeID  string                `json:"producer_node_id"`
+	FindingIndex    int                   `json:"finding_index"`
+	Claim           string                `json:"claim"`
+	EvidenceGoalIDs []string              `json:"evidence_goal_ids"`
+	Evidence        []findingEvidenceView `json:"evidence"`
+	Confidence      float64               `json:"confidence"`
+	Support         string                `json:"support"`
+	HighRisk        bool                  `json:"high_risk"`
 }
 
 type unsupportedClaimView struct {
-	ProducerNodeID string   `json:"producer_node_id"`
-	FindingIndex   int      `json:"finding_index"`
-	GoalIDs        []string `json:"goal_ids"`
-	Support        string   `json:"support"`
-	HighRisk       bool     `json:"high_risk"`
-	ReasonCode     string   `json:"reason_code"`
+	ProducerNodeID  string   `json:"producer_node_id"`
+	FindingIndex    int      `json:"finding_index"`
+	EvidenceGoalIDs []string `json:"evidence_goal_ids"`
+	Support         string   `json:"support"`
+	HighRisk        bool     `json:"high_risk"`
+	ReasonCode      string   `json:"reason_code"`
 }
 
 type findingEvidenceView struct {
-	Kind      string                     `json:"kind"`
-	Reference string                     `json:"reference"`
-	Summary   string                     `json:"summary"`
-	Identity  *agentapi.EvidenceIdentity `json:"identity,omitempty"`
+	EvidenceID string `json:"evidence_id"`
 }
 
 type verificationView struct {
@@ -186,10 +203,22 @@ type limitationsDetailRef struct {
 }
 
 func marshalVerifiedBundle(contract InvestigationContract, report InvestigationReport) (json.RawMessage, error) {
+	return marshalVerifiedBundleWithBudget(contract, report, EvidenceContextBudget{})
+}
+
+func marshalVerifiedBundleWithBudget(
+	contract InvestigationContract,
+	report InvestigationReport,
+	budget EvidenceContextBudget,
+) (json.RawMessage, error) {
+	originalEvidence := append([]EvidenceUnit(nil), report.Evidence...)
 	report = PruneUnreferencedEvidence(report)
-	evidenceByID := indexEvidence(report.Evidence)
 	goalByClaim := indexGoalByClaim(report.Coverage)
 	required := requiredGoalIDs(contract)
+	evidenceContext := buildEvidenceContext(report.Evidence, report.Claims, contract, budget)
+	prunedOmissions := prunedEvidenceOmissions(originalEvidence, report.Evidence)
+	evidenceOmissions := append([]evidenceOmissionView(nil), prunedOmissions...)
+	knownEvidence := indexEvidence(report.Evidence)
 
 	supported := make([]supportedClaimView, 0)
 	partial := make([]supportedClaimView, 0)
@@ -197,6 +226,12 @@ func marshalVerifiedBundle(contract InvestigationContract, report InvestigationR
 	findingIndex := 0
 	for _, claim := range report.Claims {
 		goalIDs := claimGoalIDs(claim, goalByClaim, required)
+		claim.EvidenceRefs, evidenceOmissions = boundedEvidenceRefs(
+			claim.EvidenceRefs,
+			evidenceContext.lookup,
+			knownEvidence,
+			evidenceOmissions,
+		)
 		if claim.Status != ClaimRejected && len(claim.EvidenceRefs) == 0 {
 			unsupported = append(unsupported, unsupportedClaim(claim, goalIDs, findingIndex))
 			findingIndex++
@@ -204,11 +239,11 @@ func marshalVerifiedBundle(contract InvestigationContract, report InvestigationR
 		}
 		switch claim.Status {
 		case ClaimSupported:
-			supported = append(supported, supportedClaim(claim, goalIDs, findingIndex, "supported", evidenceByID))
+			supported = append(supported, supportedClaim(claim, goalIDs, findingIndex, "supported"))
 		case ClaimRejected:
 			unsupported = append(unsupported, unsupportedClaim(claim, goalIDs, findingIndex))
 		default:
-			partial = append(partial, supportedClaim(claim, goalIDs, findingIndex, "partial", evidenceByID))
+			partial = append(partial, supportedClaim(claim, goalIDs, findingIndex, "partial"))
 		}
 		findingIndex++
 	}
@@ -230,12 +265,12 @@ func marshalVerifiedBundle(contract InvestigationContract, report InvestigationR
 	limitations := reportLimitations(report)
 	decision := verificationDecision(contract, report)
 	view := verifiedBundleView{
-		SupportedClaims:   supported,
-		PartialClaims:     partial,
-		UnsupportedClaims: unsupported,
-		PartialGoals:      partialGoals,
-		UnresolvedGoals:   unresolvedGoals,
-		Limitations:       limitations.displayed,
+		SupportedClaims:         supported,
+		PartialClaims:           partial,
+		UnsupportedClaims:       unsupported,
+		PartialEvidenceGoals:    partialGoals,
+		UnresolvedEvidenceGoals: unresolvedGoals,
+		Limitations:             limitations.displayed,
 		LimitationsDetail: limitationsDetailRef{
 			ArtifactID:           limitationArtifactID(contract.ID),
 			TotalCount:           limitations.total,
@@ -243,20 +278,78 @@ func marshalVerifiedBundle(contract InvestigationContract, report InvestigationR
 			OmittedCount:         limitations.total - len(limitations.displayed),
 			NormalizationVersion: limitationsNormalization,
 		},
-		EvidenceUnits:     publicEvidenceUnits(report.Evidence),
 		EvidenceConflicts: append([]agentapi.EvidenceConflict(nil), report.EvidenceConflicts...),
 		Verification: verificationView{
 			Decision:   decision,
 			StopReason: stopReason(decision),
 		},
-		Completeness: decision,
-		Omissions:    omissionView{},
+		Completeness:      decision,
+		Omissions:         omissionView{EvidenceUnits: len(prunedOmissions)},
+		EvidenceLookup:    evidenceContext.lookup,
+		EvidenceContext:   evidenceContext.context,
+		EvidenceOmissions: appendEvidenceOmissions(evidenceOmissions, evidenceContext.omissions...),
 	}
-	payload, err := json.Marshal(view)
+	payload, err := marshalBoundedVerifiedBundle(&view, budget)
 	if err != nil {
 		return nil, fmt.Errorf("marshal verified bundle: %w", err)
 	}
 	return payload, nil
+}
+
+func boundedEvidenceRefs(
+	refs []EvidenceRef,
+	lookup map[string]evidenceSummaryView,
+	known map[string]EvidenceUnit,
+	omissions []evidenceOmissionView,
+) ([]EvidenceRef, []evidenceOmissionView) {
+	bounded := make([]EvidenceRef, 0, len(refs))
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		id := strings.TrimSpace(ref.EvidenceID)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, available := lookup[id]; available {
+			ref.EvidenceID = id
+			bounded = append(bounded, ref)
+			continue
+		}
+		reason := "evidence_context_budget"
+		if _, exists := known[id]; !exists {
+			reason = "evidence_not_found"
+		}
+		omissions = appendEvidenceOmission(omissions, evidenceOmissionView{EvidenceID: id, Reason: reason})
+	}
+	return bounded, omissions
+}
+
+func appendEvidenceOmissions(existing []evidenceOmissionView, omissions ...evidenceOmissionView) []evidenceOmissionView {
+	for _, omission := range omissions {
+		existing = appendEvidenceOmission(existing, omission)
+	}
+	return existing
+}
+
+func prunedEvidenceOmissions(original, pruned []EvidenceUnit) []evidenceOmissionView {
+	kept := make(map[string]struct{}, len(pruned))
+	for _, unit := range pruned {
+		kept[unit.ID] = struct{}{}
+	}
+	omitted := make([]evidenceOmissionView, 0)
+	for _, unit := range original {
+		if _, ok := kept[unit.ID]; ok {
+			continue
+		}
+		omitted = append(omitted, evidenceOmissionView{
+			EvidenceID: unit.ID,
+			Reason:     "unreferenced_evidence",
+		})
+	}
+	return omitted
 }
 
 func indexEvidence(units []EvidenceUnit) map[string]EvidenceUnit {
@@ -278,8 +371,8 @@ func indexGoalByClaim(coverage []GoalCoverage) map[string]string {
 }
 
 func requiredGoalIDs(contract InvestigationContract) map[string]struct{} {
-	required := make(map[string]struct{}, len(contract.Goals))
-	for _, goal := range contract.Goals {
+	required := make(map[string]struct{}, len(contract.EvidenceGoals))
+	for _, goal := range contract.EvidenceGoals {
 		if goal.Required {
 			required[goal.ID] = struct{}{}
 		}
@@ -310,39 +403,18 @@ func supportedClaim(
 	goalIDs []string,
 	findingIndex int,
 	support string,
-	evidenceByID map[string]EvidenceUnit,
 ) supportedClaimView {
-	identities := make([]agentapi.EvidenceIdentity, 0, len(claim.EvidenceRefs))
 	evidence := make([]findingEvidenceView, 0, len(claim.EvidenceRefs))
-	seenIdentity := make(map[string]struct{}, len(claim.EvidenceRefs))
+	seenEvidence := make(map[string]struct{}, len(claim.EvidenceRefs))
 	for _, ref := range claim.EvidenceRefs {
-		unit, ok := evidenceByID[ref.EvidenceID]
-		if !ok {
-			unit = EvidenceUnit{
-				SourceKind: fallbackEvidenceSourceKind,
-				Target:     fallbackEvidenceTarget,
-				Content:    claim.Text,
-			}
-		}
-		identity := agentapi.EvidenceIdentity{
-			SourceKind: firstNonEmpty(unit.SourceKind, ref.SourceKind, fallbackEvidenceSourceKind),
-			Target:     firstNonEmpty(unit.Target, ref.Target, fallbackEvidenceTarget),
-			Section:    firstNonEmpty(unit.Section, ref.Section),
-			Version:    unit.Version,
-			TimeRange:  unit.TimeRange,
-		}
-		key := identity.SourceKind + "\x00" + identity.Target + "\x00" + identity.Section
-		if _, duplicate := seenIdentity[key]; duplicate {
+		if strings.TrimSpace(ref.EvidenceID) == "" {
 			continue
 		}
-		seenIdentity[key] = struct{}{}
-		identities = append(identities, identity)
-		evidence = append(evidence, findingEvidenceView{
-			Kind:      identity.SourceKind,
-			Reference: identity.Target,
-			Summary:   firstNonEmpty(unit.Content, claim.Text),
-			Identity:  &identity,
-		})
+		if _, duplicate := seenEvidence[ref.EvidenceID]; duplicate {
+			continue
+		}
+		seenEvidence[ref.EvidenceID] = struct{}{}
+		evidence = append(evidence, findingEvidenceView{EvidenceID: ref.EvidenceID})
 	}
 	confidence := claim.Confidence
 	if confidence < 0 {
@@ -352,26 +424,213 @@ func supportedClaim(
 		confidence = 1
 	}
 	return supportedClaimView{
-		ProducerNodeID:     firstNonEmpty(claim.VerifierTaskID, fallbackProducerNodeID),
-		FindingIndex:       findingIndex,
-		Claim:              claim.Text,
-		GoalIDs:            append([]string(nil), goalIDs...),
-		Evidence:           evidence,
-		EvidenceIdentities: identities,
-		Confidence:         confidence,
-		Support:            support,
-		HighRisk:           false,
+		ProducerNodeID:  firstNonEmpty(claim.VerifierTaskID, fallbackProducerNodeID),
+		FindingIndex:    findingIndex,
+		Claim:           claim.Text,
+		EvidenceGoalIDs: append([]string(nil), goalIDs...),
+		Evidence:        evidence,
+		Confidence:      confidence,
+		Support:         support,
+		HighRisk:        false,
 	}
+}
+
+func marshalBoundedVerifiedBundle(view *verifiedBundleView, budget EvidenceContextBudget) (json.RawMessage, error) {
+	_, _, maxBundleTokens := budget.effective()
+	payload, err := json.Marshal(view)
+	if err != nil {
+		return nil, err
+	}
+	if maxBundleTokens <= 0 || tooloutput.EstimateTokens(string(payload)) <= int(maxBundleTokens) {
+		return payload, nil
+	}
+
+	for target := 128; target >= 8; target /= 2 {
+		if shrinkEvidenceSummaries(view.EvidenceLookup, target) {
+			payload, err = json.Marshal(view)
+			if err != nil {
+				return nil, err
+			}
+			if tooloutput.EstimateTokens(string(payload)) <= int(maxBundleTokens) {
+				return payload, nil
+			}
+		}
+	}
+
+	view.EvidenceConflicts = nil
+	view.SubjectCoverage = nil
+	payload, err = json.Marshal(view)
+	if err != nil {
+		return nil, err
+	}
+	if tooloutput.EstimateTokens(string(payload)) <= int(maxBundleTokens) {
+		return payload, nil
+	}
+
+	for tooloutput.EstimateTokens(string(payload)) > int(maxBundleTokens) {
+		progressed := false
+		if trimBundleClaimText(view, 64) {
+			progressed = true
+		} else if removeEvidenceForBundleBudget(view) {
+			progressed = true
+		} else if trimBundleClaimText(view, 32) {
+			progressed = true
+		} else if dropLastBundleClaim(view) {
+			progressed = true
+		}
+		if !progressed {
+			break
+		}
+		payload, err = json.Marshal(view)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if tooloutput.EstimateTokens(string(payload)) > int(maxBundleTokens) {
+		return nil, fmt.Errorf("verified bundle requires %d tokens, budget is %d", tooloutput.EstimateTokens(string(payload)), maxBundleTokens)
+	}
+	return payload, nil
+}
+
+func shrinkEvidenceSummaries(lookup map[string]evidenceSummaryView, maxTokens int) bool {
+	changed := false
+	for id, evidence := range lookup {
+		shrunk := tooloutput.TruncateContent(evidence.Summary, maxTokens)
+		if shrunk == evidence.Summary {
+			continue
+		}
+		evidence.Summary = shrunk
+		lookup[id] = evidence
+		changed = true
+	}
+	return changed
+}
+
+func removeEvidenceForBundleBudget(view *verifiedBundleView) bool {
+	ids := make([]string, 0, len(view.EvidenceLookup))
+	for id := range view.EvidenceLookup {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if bundleEvidenceReferenced(view, id) {
+			continue
+		}
+		delete(view.EvidenceLookup, id)
+		view.EvidenceOmissions = appendEvidenceOmission(view.EvidenceOmissions, evidenceOmissionView{EvidenceID: id, Reason: "bundle_budget"})
+		return true
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	id := ids[len(ids)-1]
+	delete(view.EvidenceLookup, id)
+	view.EvidenceOmissions = appendEvidenceOmission(view.EvidenceOmissions, evidenceOmissionView{
+		EvidenceID: id,
+		Reason:     "bundle_budget",
+	})
+	filterBundleEvidence(view)
+	return true
+}
+
+func bundleEvidenceReferenced(view *verifiedBundleView, evidenceID string) bool {
+	for _, claim := range view.SupportedClaims {
+		for _, ref := range claim.Evidence {
+			if ref.EvidenceID == evidenceID {
+				return true
+			}
+		}
+	}
+	for _, claim := range view.PartialClaims {
+		for _, ref := range claim.Evidence {
+			if ref.EvidenceID == evidenceID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func filterBundleEvidence(view *verifiedBundleView) {
+	filterClaims := func(claims []supportedClaimView) []supportedClaimView {
+		filtered := claims[:0]
+		for _, claim := range claims {
+			refs := claim.Evidence[:0]
+			for _, ref := range claim.Evidence {
+				if _, ok := view.EvidenceLookup[ref.EvidenceID]; ok {
+					refs = append(refs, ref)
+				}
+			}
+			if len(refs) == 0 {
+				view.Omissions.Claims++
+				continue
+			}
+			claim.Evidence = refs
+			filtered = append(filtered, claim)
+		}
+		return filtered
+	}
+	view.SupportedClaims = filterClaims(view.SupportedClaims)
+	view.PartialClaims = filterClaims(view.PartialClaims)
+}
+
+func appendEvidenceOmission(existing []evidenceOmissionView, omission evidenceOmissionView) []evidenceOmissionView {
+	for _, item := range existing {
+		if item.EvidenceID == omission.EvidenceID {
+			return existing
+		}
+	}
+	return append(existing, omission)
+}
+
+func trimBundleClaimText(view *verifiedBundleView, maxTokens int) bool {
+	changed := false
+	for index := range view.SupportedClaims {
+		claim := &view.SupportedClaims[index]
+		trimmed := tooloutput.TruncateContent(claim.Claim, maxTokens)
+		if trimmed != claim.Claim {
+			claim.Claim = trimmed
+			changed = true
+		}
+	}
+	for index := range view.PartialClaims {
+		claim := &view.PartialClaims[index]
+		trimmed := tooloutput.TruncateContent(claim.Claim, maxTokens)
+		if trimmed != claim.Claim {
+			claim.Claim = trimmed
+			changed = true
+		}
+	}
+	return changed
+}
+
+func dropLastBundleClaim(view *verifiedBundleView) bool {
+	if len(view.PartialClaims) > 0 {
+		view.PartialClaims = view.PartialClaims[:len(view.PartialClaims)-1]
+		view.Omissions.Claims++
+		return true
+	}
+	if len(view.SupportedClaims) > 0 {
+		view.SupportedClaims = view.SupportedClaims[:len(view.SupportedClaims)-1]
+		view.Omissions.Claims++
+		return true
+	}
+	if len(view.UnsupportedClaims) > 0 {
+		view.UnsupportedClaims = view.UnsupportedClaims[:len(view.UnsupportedClaims)-1]
+		view.Omissions.Claims++
+		return true
+	}
+	return false
 }
 
 func unsupportedClaim(claim VerifiedClaim, goalIDs []string, findingIndex int) unsupportedClaimView {
 	return unsupportedClaimView{
-		ProducerNodeID: firstNonEmpty(claim.VerifierTaskID, fallbackProducerNodeID),
-		FindingIndex:   findingIndex,
-		GoalIDs:        append([]string(nil), goalIDs...),
-		Support:        "unsupported",
-		HighRisk:       false,
-		ReasonCode:     unsupportedReasonCode,
+		ProducerNodeID:  firstNonEmpty(claim.VerifierTaskID, fallbackProducerNodeID),
+		FindingIndex:    findingIndex,
+		EvidenceGoalIDs: append([]string(nil), goalIDs...),
+		Support:         "unsupported",
+		HighRisk:        false,
+		ReasonCode:      unsupportedReasonCode,
 	}
 }
 
@@ -483,8 +742,8 @@ func limitationArtifactID(runID string) string {
 }
 
 func synthesisObjectiveBlock(contract InvestigationContract) (agentapi.ContextBlock, error) {
-	goals := make([]synthesisGoalView, 0, len(contract.Goals))
-	for _, goal := range contract.Goals {
+	goals := make([]synthesisGoalView, 0, len(contract.EvidenceGoals))
+	for _, goal := range contract.EvidenceGoals {
 		objective := strings.TrimSpace(goal.Description)
 		if objective == "" {
 			objective = goal.Kind

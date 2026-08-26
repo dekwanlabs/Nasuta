@@ -24,8 +24,11 @@ func TestCoordinatorRecordsSchemaInvalidTaskFailure(t *testing.T) {
 	contract := testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true})
 	contract.CreatedAt = time.Now().UTC()
 	run, err := coordinator.Execute(context.Background(), contract)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("required schema-invalid task returned success")
+	}
+	if run.Status != RunFailed || run.Failure == nil || run.Failure.Code != FailureSchema {
+		t.Fatalf("run = %#v, err = %v", run, err)
 	}
 	if !hasFailureCode(run.Report.Failures, FailureSchema) {
 		t.Fatalf("report failures = %#v", run.Report.Failures)

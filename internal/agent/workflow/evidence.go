@@ -249,7 +249,7 @@ func reportedEvidenceKeys(
 	byProducer := make([][]evidence.Key, len(inputs))
 	all := make(map[evidence.Key]struct{})
 	for producer, input := range inputs {
-		if input.Schema.ID != "investigation.report" {
+		if input.Schema != agentapi.InvestigationReportSchemaRef() {
 			continue
 		}
 		var report reportView

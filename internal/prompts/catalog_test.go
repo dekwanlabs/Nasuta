@@ -116,6 +116,8 @@ func TestRetrievalExecutionAuditPromptIsNarrow(t *testing.T) {
 	for _, required := range []string{
 		`exactly one top-level property: "tasks"`,
 		"user-level objective",
+		"Every returned task must set independently_useful to true and depends_on to []",
+		"Drop genuinely sequential candidates",
 		"For a focused fact question, return tasks as []",
 		"Do not return strategy",
 	} {

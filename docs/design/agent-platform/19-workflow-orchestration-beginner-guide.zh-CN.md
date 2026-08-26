@@ -200,12 +200,12 @@
 | 策略允许多 agent 吗? | `policy_disallows_multi_agent` |
 | 用户是不是要求**写**东西(改代码)? | `write_requested` —— **写操作硬性降级**,多 agent 只读不写 |
 | workflow 引擎可用吗? | `workflow_unavailable` |
-| 独立任务数 ≥ 2 吗? | `insufficient_independent_tasks` |
+| 独立任务数 ≥ 2，或证据合同本身可拆分吗? | `insufficient_independent_tasks` |
 | 这些任务**能并行**吗? | `tasks_not_parallelizable` |
 
 **判断「能不能拆」的依据,是任务结构本身**,不是「问题来自哪个来源」。具体看 `assessExecution`(`route.go:174`):它从 `TaskContract` 的证据目标,数出有几个「独立的能力」,再判断有没有「必须串行」的理由。
 
-> 大白话:只有当「问题天然能拆成 ≥2 个互不干扰、能同时查的小问题」时,才上多 agent。写操作一律不让多 agent 碰。
+> 大白话:通常要有 ≥2 个互不干扰、能同时查的小问题才上多 agent；如果模型把一个宽问题错误合并成一个任务，但服务端已经确认它需要多个证据目标和多个独立能力覆盖，也会交给 workflow planner 再拆一次。写操作一律不让多 agent 碰。
 
 ### 4.3 AI 规划任务(task graph plan)
 

@@ -41,6 +41,7 @@ type ExecutionAssessment struct {
 	HighRisk               bool
 	RequiresLiveRuntime    bool
 	SharedContextPressure  bool
+	EvidenceDecomposable   bool
 	EstimatedCoordination  CoordinationEstimate
 	Reasons                []string
 }
@@ -94,6 +95,7 @@ var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecisi
 			"high_risk":                input.Assessment.HighRisk,
 			"requires_live_runtime":    input.Assessment.RequiresLiveRuntime,
 			"shared_context_pressure":  input.Assessment.SharedContextPressure,
+			"evidence_decomposable":    input.Assessment.EvidenceDecomposable,
 			"estimated_agent_runs":     input.Assessment.EstimatedCoordination.AgentRuns,
 			"estimated_join_inputs":    input.Assessment.EstimatedCoordination.JoinInputs,
 			"downgrade_reason":         output.DowngradeReason,
@@ -136,7 +138,7 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	prepared.execution.HighRisk = assessment.HighRisk
 	log.InfofCtx(
 		prepared.ctx,
-		"[qa] execution route proposed=%s effective=%s path=%s tasks=%d independent_tasks=%d capabilities=%d parallelizable=%t origin=%s reason=%s promotion=%s downgrade=%s",
+		"[qa] execution route proposed=%s effective=%s path=%s tasks=%d independent_tasks=%d capabilities=%d parallelizable=%t evidence_decomposable=%t origin=%s reason=%s promotion=%s downgrade=%s",
 		planning.Execution.Strategy,
 		prepared.execution.Strategy,
 		prepared.execution.Path,
@@ -144,6 +146,7 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 		assessment.IndependentTaskCount,
 		assessment.RequiredCapabilities,
 		assessment.Parallelizable,
+		assessment.EvidenceDecomposable,
 		prepared.execution.DecisionOrigin,
 		prepared.execution.RouteReason,
 		prepared.execution.PromotionReason,
@@ -217,17 +220,35 @@ func assessExecution(suggestion retrieval.ExecutionSuggestion, contract TaskCont
 		}
 	}
 	parallelizable := independentTasks >= 2
+	sharedContextPressure := len(contract.EvidenceGoals) >= 3 || len(contract.Entities) >= 2
+	// The model's candidate list is advisory. A broad request can still arrive
+	// as one umbrella task, while the server already knows that several
+	// independent capabilities must cover the evidence contract. Let the
+	// workflow planner split that contract instead of silently collapsing the
+	// request into single-agent execution.
+	// Candidate dependencies describe the model's answer composition, not the
+	// evidence collection graph. The server-owned capability map decides whether
+	// evidence can be collected in parallel; otherwise one umbrella task can
+	// incorrectly block multi-agent routing.
+	evidenceDecomposable := sharedContextPressure && len(capabilities) >= 2
+	decomposable := parallelizable || evidenceDecomposable
 	strategy := retrieval.ExecutionSingleAgent
-	if parallelizable {
+	if decomposable {
 		strategy = retrieval.ExecutionMultiAgent
+	}
+	estimatedRuns := independentTasks + 1
+	estimatedJoins := independentTasks
+	if evidenceDecomposable && estimatedRuns < 2 {
+		estimatedRuns = len(capabilities) + 1
+		estimatedJoins = len(capabilities)
 	}
 	return ExecutionAssessment{
 		Strategy: strategy, TaskCount: len(suggestion.Tasks),
 		IndependentTaskCount: independentTasks, RequiredCapabilities: len(capabilities),
 		Parallelizable: parallelizable, StrongTaskDependencies: strongDependencies,
 		HighRisk: highRisk, RequiresLiveRuntime: requiresLiveRuntime,
-		SharedContextPressure: len(contract.EvidenceGoals) >= 3 || len(contract.Entities) >= 2,
-		EstimatedCoordination: CoordinationEstimate{AgentRuns: independentTasks + 1, JoinInputs: independentTasks},
+		SharedContextPressure: sharedContextPressure, EvidenceDecomposable: evidenceDecomposable,
+		EstimatedCoordination: CoordinationEstimate{AgentRuns: estimatedRuns, JoinInputs: estimatedJoins},
 		Reasons:               append([]string(nil), suggestion.Reasons...),
 	}
 }
@@ -260,9 +281,19 @@ func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 	single := func(reason, origin string) executionRouteDecision {
 		return executionRouteDecision{Strategy: retrieval.ExecutionSingleAgent, Path: executionPathSingle, DowngradeReason: reason, DecisionOrigin: origin}
 	}
+	assessedSingle := func(reason string) executionRouteDecision {
+		return executionRouteDecision{
+			Strategy: retrieval.ExecutionSingleAgent, Path: executionPathSingle,
+			RouteReason: reason, DecisionOrigin: "server_assessment",
+		}
+	}
 	suggestedMulti := input.Suggestion.Strategy == retrieval.ExecutionMultiAgent
-	if !suggestedMulti && (input.Assessment.IndependentTaskCount < 2 || !input.Assessment.Parallelizable) {
-		return single("", "server_assessment")
+	canDecompose := input.Assessment.IndependentTaskCount >= 2 || input.Assessment.EvidenceDecomposable
+	if !suggestedMulti && !canDecompose {
+		return assessedSingle("insufficient_independent_tasks")
+	}
+	if !suggestedMulti && !input.Assessment.Parallelizable && !input.Assessment.EvidenceDecomposable {
+		return assessedSingle("tasks_not_parallelizable")
 	}
 	if !input.Policy.AllowMultiAgent {
 		return single("policy_disallows_multi_agent", "server_policy")
@@ -273,15 +304,21 @@ func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 	if !input.InvestigationAvailable {
 		return single("investigation_unavailable", "server_policy")
 	}
-	if input.Assessment.IndependentTaskCount < 2 {
+	if !canDecompose {
 		return single("insufficient_independent_tasks", "server_assessment")
 	}
-	if !input.Assessment.Parallelizable {
+	if !input.Assessment.Parallelizable && !input.Assessment.EvidenceDecomposable {
 		return single("tasks_not_parallelizable", "server_assessment")
 	}
 	decision := executionRouteDecision{Strategy: retrieval.ExecutionMultiAgent, Path: executionPathWorkflow, DecisionOrigin: "server_assessment"}
+	if input.Assessment.EvidenceDecomposable && input.Assessment.IndependentTaskCount < 2 {
+		decision.RouteReason = "evidence_goal_decomposition"
+	}
 	if !suggestedMulti {
 		decision.PromotionReason = "independent_task_decomposition"
+		if input.Assessment.IndependentTaskCount < 2 {
+			decision.PromotionReason = "evidence_goal_decomposition"
+		}
 	}
 	return decision
 }

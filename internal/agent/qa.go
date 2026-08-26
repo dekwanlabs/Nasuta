@@ -32,6 +32,7 @@ type QACoordinator = agentqa.Coordinator
 type ParentRunReader = agentqa.ParentRunReader
 type TaskContract = agentqa.TaskContract
 type EntityRef = agentqa.EntityRef
+type InvestigationGoal = agentqa.InvestigationGoal
 type EvidenceGoal = agentqa.EvidenceGoal
 type TaskEvidenceAssignment = agentqa.TaskEvidenceAssignment
 type TaskContextRef = agentqa.TaskContextRef

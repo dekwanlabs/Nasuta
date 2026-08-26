@@ -43,10 +43,12 @@ func (builder ContractBuilder) Build(request ContractRequest) (InvestigationCont
 	facets := domain.RequiredFacetsFor(request.Kind)
 	goals := make([]EvidenceGoal, 0, len(facets)+len(builder.ExtraGoals))
 	for _, facet := range facets {
+		value := string(facet)
 		goals = append(goals, EvidenceGoal{
-			ID:          string(facet),
-			Kind:        string(facet),
+			ID:          value,
+			Kind:        value,
 			Description: facetDescription(facet),
+			Facets:      []string{value},
 			Required:    true,
 		})
 	}
@@ -58,6 +60,7 @@ func (builder ContractBuilder) Build(request ContractRequest) (InvestigationCont
 			ID:          "explore",
 			Kind:        GoalKindExplore,
 			Description: "collect and verify evidence that answers the question",
+			Facets:      []string{GoalKindExplore},
 			Required:    true,
 		})
 	}
@@ -67,10 +70,10 @@ func (builder ContractBuilder) Build(request ContractRequest) (InvestigationCont
 	}
 	return InvestigationContract{
 		ID:               id,
-		Version:          1,
+		Version:          InvestigationContractVersion,
 		Entities:         append([]string(nil), request.Entities...),
 		Question:         question,
-		Goals:            goals,
+		EvidenceGoals:    goals,
 		AllowedToolIDs:   append([]tool.ToolID(nil), builder.AllowedToolIDs...),
 		PrincipalToolIDs: append([]tool.ToolID(nil), builder.PrincipalToolIDs...),
 		WorkspaceToolIDs: append([]tool.ToolID(nil), builder.WorkspaceToolIDs...),
@@ -96,6 +99,14 @@ func validateContractGoals(goals []EvidenceGoal) error {
 		id := strings.TrimSpace(goal.ID)
 		if id == "" || strings.TrimSpace(goal.Kind) == "" {
 			return fmt.Errorf("%w: goal id and kind are required", ErrPlanInvalid)
+		}
+		if len(goal.Facets) == 0 {
+			return fmt.Errorf("%w: goal %q facets are required", ErrPlanInvalid, id)
+		}
+		for _, facet := range goal.Facets {
+			if strings.TrimSpace(facet) == "" {
+				return fmt.Errorf("%w: goal %q contains an empty facet", ErrPlanInvalid, id)
+			}
 		}
 		if _, duplicate := seen[id]; duplicate {
 			return fmt.Errorf("%w: goal %q is duplicated", ErrPlanInvalid, id)

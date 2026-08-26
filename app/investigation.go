@@ -53,7 +53,7 @@ func (p *Platform) buildInvestigationCoordinator(
 		}
 	}
 
-	store := investigation.RunStore(investigation.NewMemoryRunStore())
+	var store investigation.RunStore
 	var leaseStore investigation.LeaseStore
 	if len(sharedStore) > 0 && sharedStore[0] != nil {
 		store = sharedStore[0]
@@ -67,13 +67,21 @@ func (p *Platform) buildInvestigationCoordinator(
 		if err != nil {
 			return nil, fmt.Errorf("investigation: configure mysql lease store: %w", err)
 		}
+	} else {
+		return nil, fmt.Errorf("investigation: durable run store is unavailable")
 	}
 
 	snapshot := p.registry.Snapshot(tool.ReadPolicy())
 	toolExecutor := tool.NewExecutor(time.Duration(settings.AgentTimeout))
+	evidenceContextBudget := investigation.EvidenceContextBudget{
+		MaxSummaryTokens: 256,
+		MaxContextTokens: 6000,
+		MaxBundleTokens:  8000,
+	}
 	agentExecutor := investigation.AgentRuntimeTaskExecutor{
-		Runtime:     p.agents.runtime,
-		Definitions: p.agents.catalog,
+		Runtime:               p.agents.runtime,
+		Definitions:           p.agents.catalog,
+		EvidenceContextBudget: evidenceContextBudget,
 	}
 	executors := investigation.NewExecutorRegistry(map[investigation.ExecutorType]investigation.TaskExecutor{
 		investigation.ExecutorDirectTool:   investigation.DirectToolExecutor{Executor: toolExecutor, Snapshot: snapshot},
@@ -84,8 +92,9 @@ func (p *Platform) buildInvestigationCoordinator(
 	})
 
 	composer := investigation.AgentComposer{
-		Runtime:     p.agents.runtime,
-		Definitions: p.agents.catalog,
+		Runtime:               p.agents.runtime,
+		Definitions:           p.agents.catalog,
+		EvidenceContextBudget: evidenceContextBudget,
 	}
 
 	policy, err := investigation.BudgetPolicyFromPlatformSettings(*settings)

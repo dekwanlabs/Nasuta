@@ -111,6 +111,7 @@ type NodeDefinition struct {
 type TaskDirective struct {
 	Purpose              string                 `json:"purpose"`
 	InvestigationGoalIDs []string               `json:"investigation_goal_ids,omitempty"`
+	EvidenceGoalIDs      []string               `json:"evidence_goal_ids,omitempty"`
 	RequiredFacets       []string               `json:"required_facets,omitempty"`
 	InputRefs            []agentapi.EvidenceRef `json:"input_refs"`
 	ParallelGroup        string                 `json:"parallel_group,omitempty"`
@@ -925,6 +926,12 @@ func validateTaskDirective(workflowID string, node NodeDefinition) error {
 		return err
 	}
 	if err := validateCanonical(
+		"node "+node.ID+" task evidence goal",
+		node.Task.EvidenceGoalIDs,
+	); err != nil {
+		return err
+	}
+	if err := validateCanonical(
 		"node "+node.ID+" task required facet",
 		node.Task.RequiredFacets,
 	); err != nil {
@@ -1032,6 +1039,7 @@ func cloneDefinition(definition Definition) Definition {
 				[]string(nil),
 				task.InvestigationGoalIDs...,
 			)
+			task.EvidenceGoalIDs = append([]string(nil), task.EvidenceGoalIDs...)
 			task.RequiredFacets = append([]string(nil), task.RequiredFacets...)
 			task.InputRefs = cloneEvidenceRefs(task.InputRefs)
 			node.Task = &task

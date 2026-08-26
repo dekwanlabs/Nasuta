@@ -1155,6 +1155,43 @@ func TestPrepareRunLimitsAppliesDefinitionToolCallCeiling(t *testing.T) {
 	}
 }
 
+func TestPrepareRunLimitsKeepsInputAndContextBudgetsSeparate(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	definition := testReviewerDefinition(t, nil)
+	limits, err := prepareRunLimits(
+		definition,
+		agentapi.RunPolicy{},
+		agentapi.RunLimits{MaxInputTokens: 12000, MaxContextTokens: 2048},
+		100*time.Millisecond,
+		now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.MaxInputTokens != 12000 || limits.MaxContextTokens != 2048 {
+		t.Fatalf("run limits = %+v", limits)
+	}
+	if _, err := prepareRunLimits(
+		definition,
+		agentapi.RunPolicy{},
+		agentapi.RunLimits{MaxContextTokens: 4097},
+		100*time.Millisecond,
+		now,
+	); err == nil || !strings.Contains(err.Error(), "run context limit exceeds") {
+		t.Fatalf("context limit error = %v", err)
+	}
+}
+
+func TestSameRunLimitsIncludesContextWindowLimit(t *testing.T) {
+	deadline := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	base := agentapi.RunLimits{Deadline: deadline, MaxContextTokens: 1024}
+	changed := base
+	changed.MaxContextTokens = 2048
+	if sameRunLimits(base, changed) {
+		t.Fatal("run limits with different context ceilings were treated as equal")
+	}
+}
+
 func TestDefinitionRuntimeKeepsStepAndToolCallLimitsIndependent(t *testing.T) {
 	definition := testReviewerDefinition(t, func(definition *agentapi.Definition) {
 		definition.Budget.MaxSteps = 8

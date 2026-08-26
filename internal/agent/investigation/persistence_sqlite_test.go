@@ -2,9 +2,12 @@ package investigation
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -129,5 +132,58 @@ func TestSQLiteRunStoreRejectsIllegalTransitionsAndDuplicateTerminalWrites(t *te
 	}
 	if err := store.Transition(run.ID, RunDelivered); !errors.Is(err, ErrTerminalRun) {
 		t.Fatalf("terminal transition error = %v", err)
+	}
+}
+
+func TestSQLiteRunStoreListActiveRunsPaginatesAcrossTerminalRows(t *testing.T) {
+	store := openSQLiteRunStore(t)
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	insert := func(id string, status RunStatus, updatedAt time.Time) {
+		t.Helper()
+		payload, err := json.Marshal(InvestigationRun{ID: id, Status: status})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(
+			`INSERT INTO investigation_runs (id, payload, updated_at) VALUES (?, ?, ?)`,
+			id, string(payload), updatedAt.UnixMilli(),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("run-a", RunExecuting, base)
+	insert("run-b", RunDelivered, base)
+	insert("run-c", RunPlanned, base)
+	insert("run-d", RunVerifying, base.Add(time.Millisecond))
+	insert("run-e", RunExecuting, base.Add(2*time.Hour))
+
+	first, err := store.ListActiveRuns(base.Add(time.Hour), ActiveRunCursor{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Runs) != 1 || first.Runs[0].ID != "run-a" || !first.HasMore || first.Next.ID != "run-b" {
+		t.Fatalf("first page = %#v", first)
+	}
+	second, err := store.ListActiveRuns(base.Add(time.Hour), first.Next, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Runs) != 2 || second.Runs[0].ID != "run-c" || second.Runs[1].ID != "run-d" || second.HasMore {
+		t.Fatalf("second page = %#v", second)
+	}
+}
+
+func TestSQLiteRunStoreListActiveRunsWrapsDecodeFailure(t *testing.T) {
+	store := openSQLiteRunStore(t)
+	updatedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	if _, err := store.db.Exec(
+		`INSERT INTO investigation_runs (id, payload, updated_at) VALUES (?, ?, ?)`,
+		"run-corrupt", "{", updatedAt.UnixMilli(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.ListActiveRuns(time.Now().UTC(), ActiveRunCursor{}, 1)
+	if err == nil || !strings.Contains(err.Error(), `decode run "run-corrupt"`) {
+		t.Fatalf("decode error = %v", err)
 	}
 }

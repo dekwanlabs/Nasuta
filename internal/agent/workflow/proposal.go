@@ -149,9 +149,10 @@ var proposalTraceSpec = runtrace.Spec[
 					[]string(nil),
 					task.InvestigationGoalIDs...,
 				),
-				"required_facets": append([]string(nil), task.RequiredFacets...),
-				"optional":        task.Optional,
-				"parallel_group":  task.ParallelGroup,
+				"evidence_goal_ids": append([]string(nil), task.EvidenceGoalIDs...),
+				"required_facets":   append([]string(nil), task.RequiredFacets...),
+				"optional":          task.Optional,
+				"parallel_group":    task.ParallelGroup,
 			})
 		}
 		edges := make([]map[string]any, 0, len(input.proposal.Edges))

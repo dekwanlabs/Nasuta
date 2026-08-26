@@ -17,7 +17,7 @@ func TestShouldContinueBoundsRoundsGoalsAndBudget(t *testing.T) {
 			name: "eligible",
 			context: InvestigationRoundContext{
 				Round: 1, MaxRounds: 3,
-				UnresolvedGoals: []string{"core_flow"}, RemainingBudget: 1,
+				UnresolvedEvidenceGoals: []string{"core_flow"}, RemainingBudget: 1,
 			},
 			want: true,
 		},
@@ -25,7 +25,7 @@ func TestShouldContinueBoundsRoundsGoalsAndBudget(t *testing.T) {
 			name: "round limit",
 			context: InvestigationRoundContext{
 				Round: 3, MaxRounds: 3,
-				UnresolvedGoals: []string{"core_flow"}, RemainingBudget: 1,
+				UnresolvedEvidenceGoals: []string{"core_flow"}, RemainingBudget: 1,
 			},
 		},
 		{
@@ -38,7 +38,7 @@ func TestShouldContinueBoundsRoundsGoalsAndBudget(t *testing.T) {
 			name: "budget exhausted",
 			context: InvestigationRoundContext{
 				Round: 1, MaxRounds: 3,
-				UnresolvedGoals: []string{"core_flow"}, RemainingBudget: -1,
+				UnresolvedEvidenceGoals: []string{"core_flow"}, RemainingBudget: -1,
 			},
 		},
 	}
@@ -110,11 +110,11 @@ func TestMergeRoundResultDeduplicatesClaimsEvidenceAndConflicts(t *testing.T) {
 		Answer: "first answer",
 		SupportedClaims: []InvestigationClaim{{
 			ProducerNodeID: "code", FindingIndex: 1, Claim: "same",
-			GoalIDs: []string{"business_domain"},
+			EvidenceGoalIDs: []string{"business_domain"},
 		}},
-		EvidenceUnits:   []tool.EvidenceUnit{unit},
-		UnresolvedGoals: []string{"core_flow"},
-		PartialGoals:    []string{"data_state"},
+		EvidenceUnits:           []tool.EvidenceUnit{unit},
+		UnresolvedEvidenceGoals: []string{"core_flow"},
+		PartialEvidenceGoals:    []string{"data_state"},
 	}
 	current := InvestigationResult{
 		Answer: "second answer",
@@ -126,14 +126,14 @@ func TestMergeRoundResultDeduplicatesClaimsEvidenceAndConflicts(t *testing.T) {
 			unit,
 			{SourceKind: "runtime", Target: "checkout", Sections: []string{"logs"}, ContentHash: "v2"},
 		},
-		UnresolvedGoals: []string{"system_boundary"},
-		Round:           2,
-		Verification:    InvestigationVerification{Decision: "partial"},
+		UnresolvedEvidenceGoals: []string{"system_boundary"},
+		Round:                   2,
+		Verification:            InvestigationVerification{Decision: "partial"},
 	}
 	merged := MergeRoundResult(previous, current)
 	if merged.Answer != "second answer" || len(merged.SupportedClaims) != 2 ||
 		len(merged.EvidenceUnits) != 2 || merged.Round != 2 ||
-		merged.UnresolvedGoals[0] != "system_boundary" {
+		merged.UnresolvedEvidenceGoals[0] != "system_boundary" {
 		t.Fatalf("merged result = %+v", merged)
 	}
 	if merged.Verification.Decision != "partial" {
@@ -148,8 +148,8 @@ func TestMergeRoundResultUpdatesDuplicateClaimAndRetainsEvidence(t *testing.T) {
 	previous := InvestigationResult{
 		SupportedClaims: []InvestigationClaim{{
 			ProducerNodeID: "investigate.code", FindingIndex: 1,
-			Claim:   "The route reaches the handler.",
-			GoalIDs: []string{"core_flow"},
+			Claim:           "The route reaches the handler.",
+			EvidenceGoalIDs: []string{"core_flow"},
 			Evidence: []InvestigationEvidence{{
 				Kind: "code", Reference: "route.go", Summary: "route",
 			}},
@@ -158,8 +158,8 @@ func TestMergeRoundResultUpdatesDuplicateClaimAndRetainsEvidence(t *testing.T) {
 	current := InvestigationResult{
 		SupportedClaims: []InvestigationClaim{{
 			ProducerNodeID: "investigate.code", FindingIndex: 1,
-			Claim:   "The route reaches the handler and emits the response.",
-			GoalIDs: []string{"core_flow", "system_boundary"},
+			Claim:           "The route reaches the handler and emits the response.",
+			EvidenceGoalIDs: []string{"core_flow", "system_boundary"},
 			Evidence: []InvestigationEvidence{{
 				Kind: "runtime", Reference: "trace-42", Summary: "trace",
 			}},
@@ -172,26 +172,38 @@ func TestMergeRoundResultUpdatesDuplicateClaimAndRetainsEvidence(t *testing.T) {
 	}
 	claim := merged.SupportedClaims[0]
 	if claim.Claim != current.SupportedClaims[0].Claim ||
-		len(claim.GoalIDs) != 2 || len(claim.Evidence) != 2 {
+		len(claim.EvidenceGoalIDs) != 2 || len(claim.Evidence) != 2 {
 		t.Fatalf("merged claim = %#v", claim)
 	}
 }
 
 func TestMergeRoundResultTreatsExplicitEmptyGoalsAsResolved(t *testing.T) {
 	previous := InvestigationResult{
-		PartialGoals:    []string{"data_state"},
-		UnresolvedGoals: []string{"core_flow"},
+		PartialEvidenceGoals:    []string{"data_state"},
+		UnresolvedEvidenceGoals: []string{"core_flow"},
 	}
 	current := InvestigationResult{
-		PartialGoals:    []string{},
-		UnresolvedGoals: []string{},
+		PartialEvidenceGoals:    []string{},
+		UnresolvedEvidenceGoals: []string{},
 	}
 
 	merged := MergeRoundResult(previous, current)
-	if merged.PartialGoals == nil || len(merged.PartialGoals) != 0 {
-		t.Fatalf("partial goals = %#v, want explicit empty list", merged.PartialGoals)
+	if merged.PartialEvidenceGoals == nil || len(merged.PartialEvidenceGoals) != 0 {
+		t.Fatalf("partial goals = %#v, want explicit empty list", merged.PartialEvidenceGoals)
 	}
-	if merged.UnresolvedGoals == nil || len(merged.UnresolvedGoals) != 0 {
-		t.Fatalf("unresolved goals = %#v, want explicit empty list", merged.UnresolvedGoals)
+	if merged.UnresolvedEvidenceGoals == nil || len(merged.UnresolvedEvidenceGoals) != 0 {
+		t.Fatalf("unresolved goals = %#v, want explicit empty list", merged.UnresolvedEvidenceGoals)
+	}
+}
+
+func TestCloneTaskContractDetachesEvidenceGoalFacets(t *testing.T) {
+	original := TaskContract{EvidenceGoals: []EvidenceGoal{{
+		ID: "implementation", Facet: "core_flow",
+		Facets: []string{"core_flow", "data_and_state"},
+	}}}
+	cloned := cloneTaskContract(original)
+	cloned.EvidenceGoals[0].Facets[0] = "changed"
+	if original.EvidenceGoals[0].Facets[0] != "core_flow" {
+		t.Fatalf("original facets were mutated: %+v", original.EvidenceGoals[0].Facets)
 	}
 }

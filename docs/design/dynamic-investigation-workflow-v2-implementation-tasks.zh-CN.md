@@ -1,8 +1,8 @@
 # 动态规划多 Agent Workflow v2 实施任务清单
 
-状态：P0 核心机制已完成；P1 大部分完成，P1-06 已接入 token-aware fencing 但仍需生产迁移和重启验收；P2 仍为收尾阶段
+状态：P0 核心机制已完成；P1 代码闭环基本完成，P1-06 仍需生产 MySQL 迁移和双实例重启验收；P2 仍为收尾阶段
 关联设计：[dynamic-investigation-workflow-v2.zh-CN.md](dynamic-investigation-workflow-v2.zh-CN.md)
-日期：2026-08-22
+日期：2026-08-23
 
 ## 1. 文档目的
 
@@ -12,7 +12,7 @@
 EvidenceLedger、ClaimLedger 和 DeliveryResult。旧的 `forceConclusion`、多层
 recovery 和旧 workflow 不作为 v2 的运行时依赖。
 
-## 1.1 当前实现对齐状态（2026-08-22）
+## 1.1 当前实现对齐状态（2026-08-23）
 
 以下为与当前代码逐项核对后的实际完成度。已完成表示有实现和单测；部分完成表示
 核心路径存在，但仍有验收项缺失；未完成表示当前代码中还没有对应能力。
@@ -22,7 +22,7 @@ recovery 和旧 workflow 不作为 v2 的运行时依赖。
 | 任务 | 完成度 | 缺口 |
 | --- | --- | --- |
 | P0-01 领域契约与 Schema | 已完成 | 无 |
-| P0-02 Run 生命周期与持久化 | 部分完成 | 已有 event log、Replay、TaskAttempt、续租和 token-aware 条件写；Execute/Resume 均记录结构化 task/delivery event；旧 MySQL 实例仍需执行 fencing migration，Memory/非 token store 仍是写前校验 |
+| P0-02 Run 生命周期与持久化 | 基本完成 | 已有 event log、Replay、TaskAttempt、有界 active-run 扫描、续租和 token-aware 条件写；Execute/Resume 均记录结构化 task/delivery event；旧 MySQL 实例仍需执行 fencing/index migration |
 | P0-03 BudgetLedger | 已完成 | 无 |
 | P0-04 Evidence/Claim Ledger | 已完成 | 多来源合并和冲突识别较浅，但账本约束已落地 |
 | P0-05 DeliveryGate / Renderer | 已完成 | 无 |
@@ -36,13 +36,13 @@ recovery 和旧 workflow 不作为 v2 的运行时依赖。
 | P1-03 多执行器并行 | 已完成 | Scheduler 已分离 Agent/Tool 并发上限，平台配置值暂沿用全局 MaxParallelism |
 | P1-04 完整证据验证与冲突 | 部分完成 | 已完成 claim 跨任务 provenance union、冲突证据自动降级、confidence/引用 canonicalization、MissingFacets/MissingSources coverage 和 conflict refs 保留；仍缺少来源权威性/优先级合并、事实级审计和更完整的冲突公开展示 |
 | P1-05 REST/MCP/SSE 统一交付 | 部分完成 | REST、SSE、MCP 结果读取已统一；MCP 没有调查发起入口 |
-| P1-06 Run 恢复/超时/取消/幂等 | 部分完成 | 已接入续租、单调 fencing token、MySQL 条件写、Resume metrics/budget 持久化和 durable AwaitTerminal；仍需真实 MySQL migration、重启并发 Resume、取消和接口回放验收 |
+| P1-06 Run 恢复/超时/取消/幂等 | 基本完成 | 已接入 child-first startup recovery、稳定 keyset 分页、单调 fencing token、token 接管、远程取消强制 fencing、并发 Resume single-owner、durable Await/Load、parent 幂等收敛和 continuation round 恢复；仍需真实 MySQL migration、双实例进程级重启和接口回放验收 |
 | P1-07 预算 profile 和运行指标 | 已完成 | run 内维度齐备，并新增 AggregateRunMetrics 计算 p50/p95、预算不足率和 Composer fallback 率 |
 | P1-08 生产级故障注入 | 部分完成 | 新增 tool unavailable、reasoning truncation、provider timeout 专项；重启并发恢复仍未成体系 |
 | P2-01 成本模型优化 | 部分完成 | Replan 已使用模板成本做确定性排序扣分，且已有 CalibrateTemplateCosts 按 p95 使用量校准模板成本；仍未把历史成本、失败率和重复证据率接入运行时 catalog 更新 |
 | P2-02 并发/上下文优化 | 部分完成 | 新增 PruneUnreferencedEvidence 减少 Composer 上下文；provider/model 路由仍缺 |
-| P2-03 模板生命周期治理 | 部分完成 | 模板废弃、List/Resolve 过滤和 append-only audit 已实现；版本发布、Schema 兼容、权限/成本审计仍缺 |
-| P2-04 历史迁移和旧链路删除 | 部分完成 | escalation/delegated.investigation 已删；DisableLegacyAnswerRecovery 已接入；publicOutputText 由 AnswerRenderer 替代；outcomeFromPublicResult 已删除，普通 QA 直接读取 durable outcome |
+| P2-03 模板生命周期治理 | 部分完成 | 模板废弃、List/Resolve 过滤、append-only audit、当前 Investigation Schema 单版本发布和精确 SchemaRef 校验已实现；模板版本发布、权限/成本审计仍缺 |
+| P2-04 历史迁移和旧链路删除 | 基本完成 | escalation/delegated.investigation、兼容用途的 investigation.request、旧 Investigation Schema 和字段 alias 已删除；旧 snapshot 不再兼容 Resume，生产发布前仍需显式清理旧数据 |
 | P2-05 评估集和持续回归 | 部分完成 | 新增 EvaluateDelivery 和 JSON 持久化 EvaluationSuite；尚未接入 CI/部署回放 |
 
 ### 已完成项
@@ -64,6 +64,54 @@ recovery 和旧 workflow 不作为 v2 的运行时依赖。
 
 实现时可以暂时在新的包边界中开发，最后切换入口并删除旧链路；这属于代码迁移
 顺序，不代表保留旧 workflow compatibility adapter。
+
+## 1.2 可靠性补强状态（2026-08-23）
+
+本轮针对 QA parent、Investigation child 和 session history 的非事务链路完成了以下补强：
+
+```text
+双 goal namespace 全链路传播和独立校验
+Start 在 snapshot durable 后才返回
+Load/Await durable-first，进程内状态不再复活已删除 snapshot
+child -> workflow -> parent 的启动恢复顺序
+active child 有界 keyset 扫描和多页恢复
+created/analyzing/无 plan snapshot 明确 terminalize
+verifying/replanning/composing Resume 闭环
+transient missing 重试后才生成 investigation_run_missing
+跨进程 lease held 与 lease lost 稳定语义
+恢复时 MySQL run fencing_token 接管
+远程取消先 revoke lease，再持久化 cancelled
+stale SaveResult/SaveDelivery/Release 被 fencing 拒绝
+terminal parent/session turn 幂等 replay
+continuation round 的 contract、actor、round、depth、context durable 恢复
+```
+
+自动化覆盖已包含 Memory、SQLite、MySQL sqlmock、并发 Resume、lease renewal failure、
+stale worker、child 多页恢复、missing retry、parent replay 和 runner durable-first。生产验收仍必须执行
+`docs/sql/migration_add_investigation_fencing_token_20260822.sql`，并在真实 MySQL 双实例环境完成重启、
+接管、取消和 REST/SSE 回放；这些属于部署验收，不由单元测试替代。
+
+## 1.3 Investigation 当前契约状态（2026-08-24）
+
+这些契约都属于同一条当前 Investigation 链路，不再按功能迭代维护 v1/v2/v3/v4
+并行 Schema。运行时每个契约只发布一个当前版本，组件之间必须引用共享的
+`agent.*SchemaRef()`，禁止手写版本号：
+
+| 契约 | 当前唯一版本 | 运行时约束 |
+| --- | ---: | --- |
+| `task.contract` | 1 | `facets` 必填；projection 入口只接受当前完整 `SchemaRef` |
+| `investigation.report` | 1 | Agent、evidence、recovery、proposal 只接受当前完整 `SchemaRef` |
+| `investigation.bundle` | 1 | bundle 内嵌 report 引用当前 report SchemaRef |
+| `investigation.verified_bundle` | 1 | evidence 使用 `evidence_id` 引用，摘要集中在 `evidence_lookup` |
+| `investigation.answer` | 1 | Synthesizer 与 recovery 只接受当前 answer SchemaRef |
+| `InvestigationContract` 持久化对象 | 1 | Execute 和 Resume 在副作用前拒绝非当前 contract |
+
+同时删除了只承担兼容用途且没有生产调用方的 `investigation.request`。测试必须验证未知
+Schema 无法 Resolve、非当前 contract 无法 Execute/Resume、非当前 `task.contract` 无法进入
+projection，不得通过 `CompatibleFrom`、字段 alias、单字段 fallback 或按 Schema ID 忽略版本
+来恢复兼容。
+
+旧数据库 snapshot 的处理方式是显式清理、作废或离线迁移，不允许在读取/恢复路径增加永久兼容分支。
 
 ## 2. 优先级定义
 

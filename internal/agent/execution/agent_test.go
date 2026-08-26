@@ -196,6 +196,32 @@ func TestForceConclusionTraceContractAndTokenOrder(t *testing.T) {
 	}
 }
 
+func TestForceConclusionChecksBudgetBeforeProviderCall(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		drainRequestBody(r)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	agent := newTestAgent(t, server.URL)
+	agent.cfg.MaxSteps = 0
+	agent.cfg.BudgetCheck = func() error {
+		return errors.New("shared budget exhausted")
+	}
+	result, err := agent.RunWithPlan(t.Context(), "budget_force_conclusion", "问题", nil, nil, domain.EvidencePlan{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "shared budget exhausted") {
+		t.Fatalf("result error = %v", result.Err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("provider calls = %d, want 0", got)
+	}
+}
+
 func traceEventByNode(t *testing.T, events []domain.EvaluationTrace, node string) domain.EvaluationTrace {
 	t.Helper()
 	for _, event := range events {

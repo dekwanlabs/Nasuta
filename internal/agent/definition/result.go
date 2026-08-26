@@ -203,9 +203,10 @@ func hashMessages(messages []llm.Message) string {
 }
 
 type outputRecoveryContext struct {
-	AgentID string
-	Input   json.RawMessage
-	Context []agentapi.ContextBlock
+	AgentID      string
+	Input        json.RawMessage
+	Context      []agentapi.ContextBlock
+	StrictOutput bool
 }
 
 func mapResult(
@@ -243,6 +244,28 @@ func mapResult(
 	}
 	if outcome.Status != run.StatusDone &&
 		len(recovery) > 0 &&
+		!recovery[0].StrictOutput &&
+		canRecoverVerificationResult(outputSchema, outcome.Err) {
+		recovered, recoveryErr := recoverVerificationResult(
+			schemas, outputSchema, outcome.Answer,
+		)
+		if recoveryErr == nil {
+			modelErr := outcome.Err
+			outcome.Status = run.StatusDone
+			outcome.ErrorCode = ""
+			outcome.Err = nil
+			outcome.Answer = string(recovered)
+			outcome.Evidence.ForcedConclusion = true
+			log.WarnfCtx(
+				log.WithTraceID(context.Background(), runID),
+				"[agent] run %s recovered truncated %s output for %s without another model call: %v",
+				runID, outputSchema.ID, recovery[0].AgentID, modelErr,
+			)
+		}
+	}
+	if outcome.Status != run.StatusDone &&
+		len(recovery) > 0 &&
+		!recovery[0].StrictOutput &&
 		canRecoverInvestigationReport(outputSchema, outcome.Err) {
 		recovered, preserved, recoveryErr := recoverFailedInvestigationReport(
 			schemas,
@@ -284,6 +307,7 @@ func mapResult(
 	}
 	if outcome.Status != run.StatusDone &&
 		len(recovery) > 0 &&
+		!recovery[0].StrictOutput &&
 		canRecoverInvestigationAnswer(outputSchema, outcome.Err) {
 		recovered, recoveryErr := recoverInvestigationAnswer(
 			schemas,
@@ -335,11 +359,14 @@ func mapResult(
 	}
 	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
 	publicResult.Status = agentapi.RunSucceeded
+	if result != nil && result.OutputMode == agentapi.RunOutputEvidenceWorker {
+		return publicResult, outcome
+	}
 	publicResult.Text = outcome.Answer
 	publicResult.References = append([]agentapi.Reference(nil), outcome.References...)
 	publicResult.Messages = publicMessages(outcome.SessionMessages)
 	output, err := validatedOutput(schemas, outputSchema, outcome.Answer)
-	if err != nil && outputSchema.ID == "investigation.report" && len(recovery) > 0 {
+	if err != nil && outputSchema == agentapi.InvestigationReportSchemaRef() && len(recovery) > 0 && !recovery[0].StrictOutput {
 		if recovered, preserved, recoveryErr := recoverInvestigationReport(
 			schemas, outputSchema, recovery[0], outcome.Answer, err,
 		); recoveryErr == nil {
@@ -404,8 +431,21 @@ func publicTerminalEvidence(
 		return publicResult
 	}
 	publicResult.EvidenceUnits = evidence.CloneUnits(result.EvidenceUnits)
+	publicResult.EvidenceObservations = cloneEvidenceObservations(result.EvidenceObservations)
 	publicResult.EvidenceConflicts = publicEvidenceConflicts(result.EvidenceConflicts)
 	return publicResult
+}
+
+func cloneEvidenceObservations(observations []agentapi.EvidenceObservation) []agentapi.EvidenceObservation {
+	if len(observations) == 0 {
+		return nil
+	}
+	out := make([]agentapi.EvidenceObservation, len(observations))
+	for index, observation := range observations {
+		observation.Facets = append([]string(nil), observation.Facets...)
+		out[index] = observation
+	}
+	return out
 }
 
 func cloneDelegationAdoptions(
@@ -512,7 +552,7 @@ func validatedOutput(
 }
 
 func normalizeOutputForSchema(ref agentapi.SchemaRef, raw json.RawMessage) json.RawMessage {
-	if ref.ID != "investigation.report" {
+	if ref != agentapi.InvestigationReportSchemaRef() {
 		return raw
 	}
 	var report map[string]any
@@ -574,15 +614,137 @@ func isValidEvidenceID(value string) bool {
 	return true
 }
 
+func canRecoverVerificationResult(ref agentapi.SchemaRef, err error) bool {
+	return ref == (agentapi.SchemaRef{ID: "delegation.verification.result", Version: 1}) &&
+		(errors.Is(err, execution.ErrReasoningTruncated) ||
+			errors.Is(err, execution.ErrEmptyModelResponse) ||
+			errors.Is(err, execution.ErrAnswerTruncated) ||
+			errors.Is(err, execution.ErrModelCallBudgetExhausted))
+}
+
+func recoverVerificationResult(
+	schemas *agentapi.SchemaRegistry,
+	ref agentapi.SchemaRef,
+	answer string,
+) (json.RawMessage, error) {
+	if schemas == nil {
+		return nil, fmt.Errorf("verification recovery schema registry is required")
+	}
+	if strings.TrimSpace(answer) != "" {
+		if output, err := validatedOutput(schemas, ref, answer); err == nil {
+			return output, nil
+		}
+		if output, ok := recoverPartialVerification(schemas, ref, answer); ok {
+			return output, nil
+		}
+	}
+	fallback := json.RawMessage(`{"summary":"Verification output was truncated; no complete verdict was admitted.","verdicts":[],"uncertainties":["verification output was truncated before a complete result was produced"]}`)
+	if err := schemas.Validate(ref, fallback); err != nil {
+		return nil, fmt.Errorf("validate recovered verification result: %w", err)
+	}
+	return fallback, nil
+}
+
+type recoveredVerificationResult struct {
+	Summary       string                         `json:"summary"`
+	Verdicts      []recoveredVerificationVerdict `json:"verdicts"`
+	Uncertainties []string                       `json:"uncertainties"`
+}
+
+type recoveredVerificationVerdict struct {
+	ClaimIDs     []string `json:"claim_ids"`
+	Decision     string   `json:"decision"`
+	Rationale    string   `json:"rationale"`
+	EvidenceRefs []string `json:"evidence_refs"`
+}
+
+func recoverPartialVerification(
+	schemas *agentapi.SchemaRegistry,
+	ref agentapi.SchemaRef,
+	answer string,
+) (json.RawMessage, bool) {
+	repaired := llm.RepairJSON(answer)
+	if !json.Valid([]byte(repaired)) {
+		return nil, false
+	}
+	var partial recoveredVerificationResult
+	if err := json.Unmarshal([]byte(repaired), &partial); err != nil {
+		return nil, false
+	}
+	partial.Summary = truncateForSchema(strings.TrimSpace(partial.Summary), 1000)
+	if partial.Summary == "" {
+		partial.Summary = "Verification output was truncated."
+	}
+	validVerdicts := make([]recoveredVerificationVerdict, 0, len(partial.Verdicts))
+	for _, verdict := range partial.Verdicts {
+		if len(verdict.ClaimIDs) == 0 || strings.TrimSpace(verdict.Rationale) == "" {
+			continue
+		}
+		switch verdict.Decision {
+		case "supported", "contradicted", "distinct", "unresolved":
+		default:
+			continue
+		}
+		if len(verdict.ClaimIDs) > 20 {
+			verdict.ClaimIDs = verdict.ClaimIDs[:20]
+		}
+		if len(verdict.EvidenceRefs) > 20 {
+			verdict.EvidenceRefs = verdict.EvidenceRefs[:20]
+		}
+		verdict.Rationale = truncateForSchema(strings.TrimSpace(verdict.Rationale), 512)
+		if verdict.Rationale == "" {
+			continue
+		}
+		validVerdicts = append(validVerdicts, verdict)
+		if len(validVerdicts) == 8 {
+			break
+		}
+	}
+	partial.Verdicts = validVerdicts
+	uncertainties := make([]string, 0, minInt(len(partial.Uncertainties), 4)+1)
+	for _, uncertainty := range partial.Uncertainties {
+		uncertainty = truncateForSchema(strings.TrimSpace(uncertainty), 512)
+		if uncertainty != "" {
+			uncertainties = append(uncertainties, uncertainty)
+		}
+		if len(uncertainties) == 4 {
+			break
+		}
+	}
+	if len(uncertainties) == 0 {
+		uncertainties = []string{"verification output was truncated before a complete result was produced"}
+	}
+	partial.Uncertainties = uncertainties
+	output, err := json.Marshal(partial)
+	if err != nil || schemas.Validate(ref, output) != nil {
+		return nil, false
+	}
+	return output, true
+}
+
+func truncateForSchema(value string, max int) string {
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max])
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
 func canRecoverInvestigationReport(
 	ref agentapi.SchemaRef,
 	err error,
 ) bool {
-	return ref == (agentapi.SchemaRef{
-		ID: "investigation.report", Version: 1,
-	}) && (errors.Is(err, execution.ErrReasoningTruncated) ||
+	return ref == (agentapi.InvestigationReportSchemaRef()) && (errors.Is(err, execution.ErrReasoningTruncated) ||
 		errors.Is(err, execution.ErrEmptyModelResponse) ||
-		errors.Is(err, execution.ErrAnswerTruncated))
+		errors.Is(err, execution.ErrAnswerTruncated) ||
+		errors.Is(err, execution.ErrModelCallBudgetExhausted))
 }
 
 func recoverFailedInvestigationReport(
@@ -668,8 +830,8 @@ func recoverInvestigationReport(
 		"gaps": []string{
 			"Evidence collection completed, but report generation ended before a schema-valid investigation.report was produced.",
 		},
-		"covered_goals":    []string{},
-		"unresolved_goals": required,
+		"covered_evidence_goals":    []string{},
+		"unresolved_evidence_goals": required,
 	}
 	encoded, err := json.Marshal(fallback)
 	if err != nil {
@@ -698,8 +860,8 @@ func repairInvestigationGoalCoverage(
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return nil, false
 	}
-	_, hasCovered := report["covered_goals"]
-	_, hasUnresolved := report["unresolved_goals"]
+	_, hasCovered := report["covered_evidence_goals"]
+	_, hasUnresolved := report["unresolved_evidence_goals"]
 	if hasCovered && hasUnresolved {
 		return nil, false
 	}
@@ -717,7 +879,7 @@ func repairInvestigationGoalCoverage(
 		if !ok {
 			return nil, false
 		}
-		goalIDs, ok := finding["goal_ids"].([]any)
+		goalIDs, ok := finding["evidence_goal_ids"].([]any)
 		if !ok {
 			return nil, false
 		}
@@ -741,8 +903,8 @@ func repairInvestigationGoalCoverage(
 			unresolved = append(unresolved, facet)
 		}
 	}
-	report["covered_goals"] = covered
-	report["unresolved_goals"] = unresolved
+	report["covered_evidence_goals"] = covered
+	report["unresolved_evidence_goals"] = unresolved
 	encoded, err := json.Marshal(report)
 	if err != nil {
 		return nil, false

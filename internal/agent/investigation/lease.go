@@ -24,17 +24,24 @@ type LeaseStore interface {
 	ReleaseLease(context.Context, string, string) error
 }
 
-// FencingLeaseStore extends the legacy lease API with a monotonic takeover
+// FencingLeaseStore extends the base lease API with a monotonic takeover
 // token. Callers use it when the durable run store supports conditional writes.
 type FencingLeaseStore interface {
 	LeaseStore
 	AcquireLeaseWithToken(context.Context, string, string, time.Duration) (Lease, error)
 	RenewLeaseWithToken(context.Context, string, string, uint64, time.Duration) error
+	ReleaseLeaseWithToken(context.Context, string, string, uint64) error
 	ValidateLeaseWithToken(context.Context, string, string, uint64) error
 }
 
+// LeaseRevoker transfers authority even when a worker is still active. It is
+// reserved for durable cancellation, which must fence the previous owner.
+type LeaseRevoker interface {
+	RevokeLeaseWithToken(context.Context, string, string, time.Duration) (Lease, error)
+}
+
 // LeaseValidator lets a run store reject writes from a worker that no longer
-// owns the lease. It is optional for legacy test doubles.
+// owns the lease. It remains optional for non-fencing test doubles.
 type LeaseValidator interface {
 	ValidateLease(context.Context, string, string) error
 }
@@ -89,7 +96,7 @@ func (store *MemoryLeaseStore) AcquireLeaseWithToken(
 	defer store.mu.Unlock()
 	current, exists := store.leases[runID]
 	if exists && current.expiresAt.After(now) && current.owner != owner {
-		return Lease{}, fmt.Errorf("run %q is already leased", runID)
+		return Lease{}, fmt.Errorf("%w: run %q is owned by %q", ErrLeaseHeld, runID, current.owner)
 	}
 	token := current.token
 	if !exists || !current.expiresAt.After(now) {
@@ -101,6 +108,35 @@ func (store *MemoryLeaseStore) AcquireLeaseWithToken(
 	store.nextTokens[runID] = token
 	next := memoryLease{owner: owner, token: token, expiresAt: now.Add(ttl)}
 	store.leases[runID] = next
+	return Lease{RunID: runID, Owner: owner, Token: token, ExpiresAt: next.expiresAt}, nil
+}
+
+func (store *MemoryLeaseStore) RevokeLeaseWithToken(
+	_ context.Context,
+	runID string,
+	owner string,
+	ttl time.Duration,
+) (Lease, error) {
+	if store == nil {
+		return Lease{}, fmt.Errorf("lease store is required")
+	}
+	if runID == "" || owner == "" || ttl <= 0 {
+		return Lease{}, fmt.Errorf("lease run id, owner, and positive ttl are required")
+	}
+	now := time.Now().UTC()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	current := store.leases[runID]
+	token := current.token + 1
+	if next := store.nextTokens[runID] + 1; next > token {
+		token = next
+	}
+	if token == 0 {
+		token = 1
+	}
+	next := memoryLease{owner: owner, token: token, expiresAt: now.Add(ttl)}
+	store.leases[runID] = next
+	store.nextTokens[runID] = token
 	return Lease{RunID: runID, Owner: owner, Token: token, ExpiresAt: next.expiresAt}, nil
 }
 
@@ -153,9 +189,30 @@ func (store *MemoryLeaseStore) renewLease(
 }
 
 func (store *MemoryLeaseStore) ReleaseLease(
+	ctx context.Context,
+	runID string,
+	owner string,
+) error {
+	return store.releaseLease(ctx, runID, owner, 0)
+}
+
+func (store *MemoryLeaseStore) ReleaseLeaseWithToken(
+	ctx context.Context,
+	runID string,
+	owner string,
+	token uint64,
+) error {
+	if token == 0 {
+		return fmt.Errorf("lease fencing token must be positive")
+	}
+	return store.releaseLease(ctx, runID, owner, token)
+}
+
+func (store *MemoryLeaseStore) releaseLease(
 	_ context.Context,
 	runID string,
 	owner string,
+	token uint64,
 ) error {
 	if store == nil {
 		return fmt.Errorf("lease store is required")
@@ -163,7 +220,7 @@ func (store *MemoryLeaseStore) ReleaseLease(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	current, ok := store.leases[runID]
-	if !ok || current.owner != owner {
+	if !ok || current.owner != owner || (token > 0 && current.token != token) {
 		return nil
 	}
 	store.nextTokens[runID] = current.token

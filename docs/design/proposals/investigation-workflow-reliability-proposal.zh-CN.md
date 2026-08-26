@@ -441,7 +441,7 @@ case int64(state.result.Evidence.ToolCallCount) >= agent.cfg.MaxToolCalls:
 它不接受只有一个标准 `json` code fence 的回答。触发案例的 code 报告在去除 fence 后：
 
 - 可以正常 `json.Unmarshal`；
-- 可以通过 `investigation.report/v1` schema；
+- 可以通过当前 `investigation.report` Schema；
 - 但当前实现将节点标记为 `invalid_output`，并清空公开文本、引用和消息。
 
 相关实现：
@@ -949,7 +949,7 @@ Facet 允许 code、docs、runtime 三种来源，规划器就会把三者全部
 
 #### 路径作用域
 
-第一阶段不修改 `investigation.report/v1` 让模型自报 `path_id`、`stage` 或 `support`：
+第一阶段不修改当前 `investigation.report` 让模型自报 `path_id`、`stage` 或 `support`：
 
 - `support` 已由 verifier 产生，不能在 report 中维护第二份；
 - `path_id` 应来自服务端校验的 task scope、producer node 或 canonical entrypoint identity；
@@ -1289,4 +1289,3 @@ func TestInvalidPlannerKindFallsBackWithoutFailingQuestion(t *testing.T) {
 因此，答案是：**原稿确实存在局部“水多加面”风险，但不是整体方向错误。** 风险主要来自重复建模和通用后置
 repair；收敛后的方案把改动压回四个真正缺口：语义分类边界、独立工具预算、证据 producer coverage、以及
 受信任的多路径合成与完成度投影。
-

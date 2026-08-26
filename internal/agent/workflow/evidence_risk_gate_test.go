@@ -136,9 +136,7 @@ func TestEvidenceRiskGateEvaluatorRejectsInvalidInput(t *testing.T) {
 
 func TestEvidenceRiskGateForwardsVerifiedHandoff(t *testing.T) {
 	schemas, _ := investigationCatalogs(t, 25)
-	schema := agentapi.SchemaRef{
-		ID: "investigation.verified_bundle", Version: 1,
-	}
+	schema := agentapi.InvestigationVerifiedBundleSchemaRef()
 	units := []tool.EvidenceUnit{{
 		SourceKind: "runtime",
 		Target:     "checkout",
@@ -146,16 +144,20 @@ func TestEvidenceRiskGateForwardsVerifiedHandoff(t *testing.T) {
 		TrustTier:  2,
 	}}
 	payload, err := json.Marshal(verifiedEvidenceView{
-		SupportedClaims:   []verifiedClaimView{},
-		PartialClaims:     []verifiedClaimView{},
-		UnsupportedClaims: []unsupportedClaimView{},
-		PartialGoals:      []string{},
-		UnresolvedGoals:   []string{},
-		Limitations:       []string{},
+		SupportedClaims:         []verifiedClaimView{},
+		PartialClaims:           []verifiedClaimView{},
+		UnsupportedClaims:       []unsupportedClaimView{},
+		PartialEvidenceGoals:    []string{},
+		UnresolvedEvidenceGoals: []string{},
+		Limitations:             []string{},
+		LimitationsDetail: &limitationsDetailRef{
+			ArtifactID:           "art_00000000-0000-0000-0000-000000000000",
+			NormalizationVersion: LimitationsNormalizationVersion,
+		},
 		EvidenceUnits:     units,
 		EvidenceConflicts: []agentapi.EvidenceConflict{},
 		Verification: verificationView{
-			Decision: Partial, StopReason: StopCapabilityUnavailable,
+			Decision: Partial, StopReason: StopEvidenceInsufficient,
 		},
 		Completeness: Partial,
 	})

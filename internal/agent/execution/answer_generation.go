@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
@@ -29,14 +30,18 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		res, callErr := agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
 		if !agent.cfg.DisableLegacyAnswerRecovery &&
 			(errors.Is(callErr, ErrReasoningTruncated) || errors.Is(callErr, ErrEmptyModelResponse)) {
-			log.WarnfCtx(ctx, "[agent] run %s force-conclusion produced no visible content, retrying with no-reasoning prompt: %v", input.RunID, callErr)
-			input.Messages = append(input.Messages, llm.Message{
-				Role:    "user",
-				Content: forceConclusionNoReasoningInstruction,
-			})
-			attemptStarted = time.Now()
-			stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
-			res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionRetryMaxTokens, stream)
+			if modelOutputBudgetAvailable(ctx) {
+				log.WarnfCtx(ctx, "[agent] run %s force-conclusion produced no visible content, retrying with no-reasoning prompt: %v", input.RunID, callErr)
+				input.Messages = append(input.Messages, llm.Message{
+					Role:    "user",
+					Content: forceConclusionNoReasoningInstruction,
+				})
+				attemptStarted = time.Now()
+				stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
+				res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionRetryMaxTokens, stream)
+			} else {
+				log.WarnfCtx(ctx, "[agent] run %s force-conclusion recovery skipped: no output budget remains: %v", input.RunID, callErr)
+			}
 		}
 		if !agent.cfg.DisableLegacyAnswerRecovery &&
 			callErr == nil && hasLeakedToolProtocol(res) {
@@ -92,6 +97,12 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		})
 	}
 	return res, err
+}
+
+func modelOutputBudgetAvailable(ctx context.Context) bool {
+	gate := agentapi.RunBudgetUsageGateFromContext(ctx)
+	availability, ok := gate.(agentapi.RunBudgetAvailability)
+	return !ok || availability.Available().OutputTokens > 0
 }
 
 func recordFirstAnswerToken(ctx context.Context, step any, turnTTFT, runElapsed time.Duration) {
@@ -165,9 +176,7 @@ func (agent *Agent) generateWithContinue(ctx context.Context, messages []llm.Mes
 	if err := agent.ensureInputBudget(messages, nil); err != nil {
 		return nil, err
 	}
-	res, err := agent.llm.ChatWithToolsMaxWithParameters(
-		ctx, messages, nil, h, maxTokens, agent.cfg.ModelParameters,
-	)
+	res, err := agent.callModel(ctx, messages, nil, h, maxTokens)
 	if err != nil {
 		return res, err
 	}
@@ -211,9 +220,7 @@ func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message
 		if err := agent.ensureInputBudget(msgs, nil); err != nil {
 			return nil, err
 		}
-		cont, err := agent.llm.ChatWithToolsMaxWithParameters(
-			continuationCtx, msgs, nil, h, maxTokens, agent.cfg.ModelParameters,
-		)
+		cont, err := agent.callModel(continuationCtx, msgs, nil, h, maxTokens)
 		if err != nil {
 			log.ErrorfCtx(ctx, "[agent] continuation round %d failed: %v", rounds, err)
 			return res, fmt.Errorf("continuation round %d: %w", rounds, err)
@@ -258,9 +265,7 @@ func (agent *Agent) continueStructuredIfNeeded(
 		if err := agent.ensureInputBudget(msgs, nil); err != nil {
 			return nil, err
 		}
-		cont, err := agent.llm.ChatWithToolsMaxWithParameters(
-			continuationCtx, msgs, nil, h, maxTokens, agent.cfg.ModelParameters,
-		)
+		cont, err := agent.callModel(continuationCtx, msgs, nil, h, maxTokens)
 		if err != nil {
 			log.ErrorfCtx(ctx, "[agent] structured continuation round %d failed: %v", rounds, err)
 			return res, fmt.Errorf("structured continuation round %d: %w", rounds, err)

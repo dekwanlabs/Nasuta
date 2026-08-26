@@ -192,8 +192,9 @@ func TestDiscoveryCandidateGenerationTargetsUnresolvedGoals(t *testing.T) {
 		t.Fatal(err)
 	}
 	contract := InvestigationContract{
-		ID: "contract-discovery", Question: "trace new dependency",
-		Goals: []EvidenceGoal{{ID: "g1", Kind: GoalKindExplore, Required: true}},
+		Version: InvestigationContractVersion,
+		ID:      "contract-discovery", Question: "trace new dependency",
+		EvidenceGoals: []EvidenceGoal{{ID: "g1", Kind: GoalKindExplore, Required: true}},
 	}
 	candidates, err := catalog.GenerateCandidatesForDiscoveries(
 		contract,
@@ -210,7 +211,7 @@ func TestDiscoveryCandidateGenerationTargetsUnresolvedGoals(t *testing.T) {
 		t.Fatalf("candidates = %#v", candidates)
 	}
 	for _, candidate := range candidates {
-		if len(candidate.GoalIDs) != 1 || candidate.GoalIDs[0] != "g1" ||
+		if len(candidate.EvidenceGoalIDs) != 1 || candidate.EvidenceGoalIDs[0] != "g1" ||
 			len(candidate.Entities) == 0 || candidate.Template.ID != "investigation.explore" {
 			t.Fatalf("candidate = %#v", candidate)
 		}
@@ -259,7 +260,8 @@ func TestEvaluateDeliveryCatchesEmptyAndUntraceableDelivery(t *testing.T) {
 	run := InvestigationRun{
 		ID: "eval-run",
 		Contract: InvestigationContract{
-			Goals: []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
+			Version:       InvestigationContractVersion,
+			EvidenceGoals: []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
 		},
 		Delivery: &DeliveryResult{Status: DeliverySucceeded, Text: "answer"},
 		Report: InvestigationReport{
@@ -296,7 +298,8 @@ func TestEvaluationSuitePersistsAndReplays(t *testing.T) {
 	suite := EvaluationSuite{Cases: []EvaluationCase{{
 		ID: "case-1",
 		Contract: InvestigationContract{
-			Goals: []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
+			Version:       InvestigationContractVersion,
+			EvidenceGoals: []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
 		},
 		ExpectNonEmpty: true, ExpectTraceable: true, ExpectGoalsCovered: true,
 	}}}
@@ -347,9 +350,10 @@ func TestDiscoveryCandidateGenerationUsesTypedTemplatesAndDeduplicates(t *testin
 	}
 
 	contract := InvestigationContract{
+		Version:  InvestigationContractVersion,
 		ID:       "contract-typed-discovery",
 		Question: "trace a newly discovered external dependency",
-		Goals: []EvidenceGoal{{
+		EvidenceGoals: []EvidenceGoal{{
 			ID: "external", Kind: GoalKindExternalDependency, Required: true,
 		}},
 	}
@@ -390,8 +394,9 @@ func TestDiscoveryCandidateGenerationUsesEntityTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	contract := InvestigationContract{
-		ID: "contract-entity-discovery", Question: "inspect a newly discovered service",
-		Goals: []EvidenceGoal{{ID: "entry", Kind: GoalKindEntrypoint, Required: true}},
+		Version: InvestigationContractVersion,
+		ID:      "contract-entity-discovery", Question: "inspect a newly discovered service",
+		EvidenceGoals: []EvidenceGoal{{ID: "entry", Kind: GoalKindEntrypoint, Required: true}},
 	}
 	candidates, err := catalog.GenerateCandidatesForDiscoveries(contract,
 		[]Discovery{{Type: "entity", Entity: " svc-new "}},

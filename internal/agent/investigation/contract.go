@@ -25,6 +25,7 @@ var (
 	ErrNoDelivery        = errors.New("investigation run has no delivery result")
 	ErrTaskNotReady      = errors.New("investigation task is not ready")
 	ErrTerminalRun       = errors.New("investigation run is already terminal")
+	ErrLeaseHeld         = errors.New("investigation run lease is held")
 	ErrLeaseFenced       = errors.New("investigation run lease fenced")
 )
 
@@ -62,6 +63,7 @@ const (
 	TaskPending   TaskStatus = "pending"
 	TaskRunning   TaskStatus = "running"
 	TaskSucceeded TaskStatus = "succeeded"
+	TaskPartial   TaskStatus = "partial"
 	TaskFailed    TaskStatus = "failed"
 	TaskBlocked   TaskStatus = "blocked"
 	TaskCancelled TaskStatus = "cancelled"
@@ -82,6 +84,7 @@ const (
 	FailureEmptyOutput     FailureCode = "empty_output"
 	FailureComposer        FailureCode = "composer_failed"
 	FailureVerifier        FailureCode = "verifier_failed"
+	FailureLease           FailureCode = "lease_lost"
 )
 
 type ClaimStatus string
@@ -112,11 +115,19 @@ const (
 	ExecutorComposer     ExecutorType = "composer"
 )
 
+// InvestigationGoal is one user-facing deliverable tracked independently from evidence coverage.
+type InvestigationGoal struct {
+	ID                  string   `json:"id"`
+	Objective           string   `json:"objective"`
+	IndependentlyUseful bool     `json:"independently_useful"`
+	DependsOn           []string `json:"depends_on,omitempty"`
+}
+
 type EvidenceGoal struct {
 	ID              string                    `json:"id"`
 	Kind            string                    `json:"kind"`
 	Description     string                    `json:"description"`
-	Facets          []string                  `json:"facets,omitempty"`
+	Facets          []string                  `json:"facets"`
 	Sources         []agentapi.EvidenceSource `json:"sources,omitempty"`
 	RequiredSources []agentapi.EvidenceSource `json:"required_sources,omitempty"`
 	Freshness       agentapi.FreshnessPolicy  `json:"freshness,omitempty"`
@@ -138,19 +149,54 @@ const (
 	GoalKindExplore            = "evidence.explore"
 )
 
+type InvestigationEntity struct {
+	ID      string   `json:"id"`
+	Label   string   `json:"label,omitempty"`
+	Role    string   `json:"role,omitempty"`
+	Aliases []string `json:"aliases,omitempty"`
+}
+
+type InvestigationConversationRef struct {
+	SessionID string `json:"session_id,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	Turn      int    `json:"turn,omitempty"`
+}
+
+type InvestigationTimeRange struct {
+	From        time.Time `json:"from"`
+	To          time.Time `json:"to"`
+	ToExclusive bool      `json:"to_exclusive"`
+}
+
+type InvestigationContext struct {
+	ConversationRefs []InvestigationConversationRef `json:"conversation_refs,omitempty"`
+	TimeRange        *InvestigationTimeRange        `json:"time_range,omitempty"`
+	SeedMaterial     []agentapi.ContextBlock        `json:"seed_material,omitempty"`
+}
+
+const InvestigationContractVersion int64 = 1
+
 type InvestigationContract struct {
-	ID               string         `json:"id"`
-	Version          int64          `json:"version"`
-	Entities         []string       `json:"entities,omitempty"`
-	Question         string         `json:"question"`
-	Goals            []EvidenceGoal `json:"goals"`
-	AllowedToolIDs   []tool.ToolID  `json:"allowed_tool_ids,omitempty"`
-	PrincipalToolIDs []tool.ToolID  `json:"principal_tool_ids,omitempty"`
-	WorkspaceToolIDs []tool.ToolID  `json:"workspace_tool_ids,omitempty"`
-	MaxRounds        int            `json:"max_rounds,omitempty"`
-	MaxTasks         int            `json:"max_tasks,omitempty"`
-	BudgetProfile    string         `json:"budget_profile,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
+	ID                 string                `json:"id"`
+	Version            int64                 `json:"version"`
+	ParentRunID        string                `json:"parent_run_id,omitempty"`
+	TaskID             string                `json:"task_id,omitempty"`
+	Round              int                   `json:"round,omitempty"`
+	BaseDepth          int                   `json:"base_depth,omitempty"`
+	Actor              agentapi.Actor        `json:"actor,omitempty"`
+	Entities           []string              `json:"entities,omitempty"`
+	EntityDetails      []InvestigationEntity `json:"entity_details,omitempty"`
+	Context            InvestigationContext  `json:"context,omitempty"`
+	Question           string                `json:"question"`
+	InvestigationGoals []InvestigationGoal   `json:"investigation_goals,omitempty"`
+	EvidenceGoals      []EvidenceGoal        `json:"evidence_goals,omitempty"`
+	AllowedToolIDs     []tool.ToolID         `json:"allowed_tool_ids,omitempty"`
+	PrincipalToolIDs   []tool.ToolID         `json:"principal_tool_ids,omitempty"`
+	WorkspaceToolIDs   []tool.ToolID         `json:"workspace_tool_ids,omitempty"`
+	MaxRounds          int                   `json:"max_rounds,omitempty"`
+	MaxTasks           int                   `json:"max_tasks,omitempty"`
+	BudgetProfile      string                `json:"budget_profile,omitempty"`
+	CreatedAt          time.Time             `json:"created_at"`
 	// SeedEvidence carries identity-only evidence already admitted by the
 	// caller. It is not normalized as text and must not be duplicated.
 	SeedEvidence []EvidenceUnit `json:"seed_evidence,omitempty"`
@@ -186,18 +232,22 @@ type TaskTemplate struct {
 	Enabled        bool               `json:"enabled"`
 	// ProposalOnly prevents a template from being selected by the generic planner.
 	ProposalOnly bool `json:"proposal_only,omitempty"`
-	Deprecated   bool `json:"deprecated,omitempty"`
+	// AllowParallel is the server-owned default for ready Agent nodes.
+	AllowParallel bool `json:"allow_parallel,omitempty"`
+	Deprecated    bool `json:"deprecated,omitempty"`
 }
 
 type TaskCandidate struct {
-	ID        string          `json:"id"`
-	Template  TaskTemplateRef `json:"template"`
-	Objective string          `json:"objective"`
-	GoalIDs   []string        `json:"goal_ids"`
+	ID                   string          `json:"id"`
+	Template             TaskTemplateRef `json:"template"`
+	Objective            string          `json:"objective"`
+	InvestigationGoalIDs []string        `json:"investigation_goal_ids,omitempty"`
+	EvidenceGoalIDs      []string        `json:"evidence_goal_ids"`
 	// Capability preserves the validated planner capability through compilation.
 	Capability    string         `json:"capability,omitempty"`
 	EvidenceGoals []EvidenceGoal `json:"evidence_goals,omitempty"`
 	Optional      bool           `json:"optional,omitempty"`
+	AllowParallel bool           `json:"allow_parallel,omitempty"`
 	MaxAttempts   int            `json:"max_attempts,omitempty"`
 	Entities      []string       `json:"entities,omitempty"`
 	AllowedTools  []tool.ToolID  `json:"allowed_tools,omitempty"`
@@ -212,10 +262,11 @@ type TaskBudget struct {
 }
 
 type ExecutableTask struct {
-	ID        string          `json:"id"`
-	Template  TaskTemplateRef `json:"template"`
-	Objective string          `json:"objective"`
-	GoalIDs   []string        `json:"goal_ids"`
+	ID                   string          `json:"id"`
+	Template             TaskTemplateRef `json:"template"`
+	Objective            string          `json:"objective"`
+	InvestigationGoalIDs []string        `json:"investigation_goal_ids,omitempty"`
+	EvidenceGoalIDs      []string        `json:"evidence_goal_ids"`
 	// Capability is retained for runtime routing and audit of proposal tasks.
 	Capability    string             `json:"capability,omitempty"`
 	EvidenceGoals []EvidenceGoal     `json:"evidence_goals,omitempty"`
@@ -229,6 +280,7 @@ type ExecutableTask struct {
 	Executor      ExecutorType       `json:"executor"`
 	ToolCalls     []ToolCallSpec     `json:"tool_calls,omitempty"`
 	Optional      bool               `json:"optional,omitempty"`
+	AllowParallel bool               `json:"allow_parallel,omitempty"`
 	Status        TaskStatus         `json:"status"`
 }
 
@@ -343,6 +395,18 @@ type RunFailure struct {
 	Retryable bool        `json:"retryable"`
 }
 
+// RunFailureError preserves the stable failure code through wrapped execution errors.
+type RunFailureError struct {
+	Failure RunFailure
+}
+
+func (err *RunFailureError) Error() string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s: %s", err.Failure.Code, err.Failure.Message)
+}
+
 type InvestigationReport struct {
 	Evidence          []EvidenceUnit              `json:"evidence,omitempty"`
 	Claims            []VerifiedClaim             `json:"claims,omitempty"`
@@ -356,11 +420,16 @@ type AnswerDraft struct {
 	Text     string         `json:"text"`
 	ClaimIDs []string       `json:"claim_ids,omitempty"`
 	Status   DeliveryStatus `json:"status"`
+	// Usage is populated by Runtime-backed composers. Custom composers may
+	// leave it zero, in which case the coordinator uses a compatibility
+	// fallback estimate for composition accounting.
+	Usage BudgetVector `json:"usage,omitempty"`
 }
 
 type DeliveryResult struct {
 	Status    DeliveryStatus      `json:"status"`
 	Text      string              `json:"text"`
+	Usage     BudgetVector        `json:"usage,omitempty"`
 	Report    InvestigationReport `json:"report"`
 	Failure   *RunFailure         `json:"failure,omitempty"`
 	CreatedAt time.Time           `json:"created_at"`
@@ -371,6 +440,13 @@ type TaskExecutionInput struct {
 	Evidence []EvidenceUnit             `json:"evidence,omitempty"`
 	Claims   []VerifiedClaim            `json:"claims,omitempty"`
 	Upstream map[string]json.RawMessage `json:"upstream,omitempty"`
+	// RuntimeBudget is the shared hard ceiling for Agent-backed execution. It
+	// is separate from Task.Budget.Limit, which also carries admission grants.
+	RuntimeBudget BudgetVector   `json:"-"`
+	WorkflowRunID string         `json:"-"`
+	ParentRunID   string         `json:"-"`
+	Actor         agentapi.Actor `json:"-"`
+	Attempt       int            `json:"-"`
 }
 
 type TaskExecutionResult struct {

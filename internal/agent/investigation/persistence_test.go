@@ -104,14 +104,14 @@ func TestMemoryRunStoreReturnsDetachedSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first.Contract.Goals[0].Facets[0] = "changed"
+	first.Contract.EvidenceGoals[0].Facets[0] = "changed"
 	first.Tasks[task.ID] = testExecutableTask("different", nil)
 	first.Budget.Stages[StageExecution] = StageBudget{Limit: BudgetVector{ToolCalls: 99}}
 	second, err := store.Get(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Contract.Goals[0].Facets[0] != "entry" || second.Tasks[task.ID].ID != task.ID || second.Budget.Stages[StageExecution].Limit.ToolCalls != 2 {
+	if second.Contract.EvidenceGoals[0].Facets[0] != "entry" || second.Tasks[task.ID].ID != task.ID || second.Budget.Stages[StageExecution].Limit.ToolCalls != 2 {
 		t.Fatalf("snapshot was not detached: %#v", second)
 	}
 }
@@ -119,7 +119,12 @@ func TestMemoryRunStoreReturnsDetachedSnapshots(t *testing.T) {
 func TestFencedRunStoreRejectsStaleOwner(t *testing.T) {
 	lease := NewMemoryLeaseStore()
 	base := NewMemoryRunStore()
-	run := InvestigationRun{ID: "fenced-run", Status: RunCreated, Contract: InvestigationContract{ID: "fenced-run"}}
+	run := InvestigationRun{
+		ID: "fenced-run", Status: RunCreated,
+		Contract: InvestigationContract{
+			ID: "fenced-run", Version: InvestigationContractVersion,
+		},
+	}
 	if err := base.Create(run); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -135,5 +140,92 @@ func TestFencedRunStoreRejectsStaleOwner(t *testing.T) {
 	}
 	if err := bound.SaveBudget("fenced-run", BudgetSnapshot{}); !errors.Is(err, ErrLeaseFenced) {
 		t.Fatalf("stale write error = %v, want ErrLeaseFenced", err)
+	}
+}
+
+func TestMemoryRunStoreListActiveRunsUsesStableStorageCursor(t *testing.T) {
+	store := NewMemoryRunStore()
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	statuses := map[string]RunStatus{
+		"run-a": RunExecuting,
+		"run-b": RunDelivered,
+		"run-c": RunPlanned,
+		"run-d": RunVerifying,
+		"run-e": RunExecuting,
+	}
+	for id := range statuses {
+		if err := store.Create(InvestigationRun{ID: id, Status: RunCreated}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.mu.Lock()
+	for id, status := range statuses {
+		run := store.runs[id]
+		run.Status = status
+		run.UpdatedAt = base
+		if id == "run-d" {
+			run.UpdatedAt = base.Add(time.Millisecond)
+		}
+		if id == "run-e" {
+			run.UpdatedAt = base.Add(2 * time.Hour)
+		}
+		store.runs[id] = run
+	}
+	store.mu.Unlock()
+
+	first, err := store.ListActiveRuns(base.Add(time.Hour), ActiveRunCursor{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Runs) != 1 || first.Runs[0].ID != "run-a" || !first.HasMore || first.Next.ID != "run-b" {
+		t.Fatalf("first page = %#v", first)
+	}
+	second, err := store.ListActiveRuns(base.Add(time.Hour), first.Next, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Runs) != 2 || second.Runs[0].ID != "run-c" || second.Runs[1].ID != "run-d" || second.HasMore {
+		t.Fatalf("second page = %#v", second)
+	}
+}
+
+func TestMemoryRunStoreListActiveRunsRejectsIncompleteCursor(t *testing.T) {
+	store := NewMemoryRunStore()
+	_, err := store.ListActiveRuns(time.Now().UTC(), ActiveRunCursor{ID: "run-a"}, 1)
+	if err == nil {
+		t.Fatal("incomplete cursor was accepted")
+	}
+}
+
+func TestFencedRunStoreRejectsStaleDelivery(t *testing.T) {
+	lease := NewMemoryLeaseStore()
+	base := NewMemoryRunStore()
+	runID := "fenced-delivery"
+	if err := base.Create(InvestigationRun{ID: runID, Status: RunCreated}); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []RunStatus{RunAnalyzing, RunPlanned, RunExecuting, RunVerifying, RunComposing} {
+		if err := base.Transition(runID, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := lease.AcquireLeaseWithToken(t.Context(), runID, "owner-a", 5*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := bindLeaseRunStore(base, lease, runID, first.Owner, first.Token)
+	time.Sleep(10 * time.Millisecond)
+	if _, err := lease.AcquireLeaseWithToken(t.Context(), runID, "owner-b", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.SaveDelivery(runID, DeliveryResult{Status: DeliveryPartial, Text: "stale"}); !errors.Is(err, ErrLeaseFenced) {
+		t.Fatalf("stale delivery error = %v, want ErrLeaseFenced", err)
+	}
+	run, err := base.Get(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != RunComposing || run.Delivery != nil {
+		t.Fatalf("stale delivery mutated run: %#v", run)
 	}
 }

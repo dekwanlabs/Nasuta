@@ -181,3 +181,197 @@ func TestMySQLRunStoreFencedUpdateUsesCurrentOwnerTokenAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMySQLRunStoreFencedAppendEventDoesNotRewriteSnapshot(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	runStore, err := NewMySQLRunStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseStore, err := NewMySQLLeaseStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := bindLeaseRunStore(runStore, leaseStore, "run-event", "owner-current", 9)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fencing_token, expires_at FROM investigation_leases WHERE run_id = ? AND owner = ? FOR UPDATE")).
+		WithArgs("run-event", "owner-current").
+		WillReturnRows(sqlmock.NewRows([]string{"fencing_token", "expires_at"}).AddRow(uint64(9), time.Now().Add(time.Minute).UnixMilli()))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fencing_token FROM investigation_runs WHERE id = ? FOR UPDATE")).
+		WithArgs("run-event").
+		WillReturnRows(sqlmock.NewRows([]string{"fencing_token"}).AddRow(uint64(9)))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO investigation_events (run_id, type, status, message, created_at) VALUES (?, ?, ?, ?, ?)")).
+		WithArgs("run-event", "plan_compiled", "", `{"revision":1}`, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if err := store.AppendEvent("run-event", "plan_compiled", `{"revision":1}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLRunStoreFencedAppendEventRejectsStaleSnapshotToken(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	runStore, err := NewMySQLRunStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseStore, err := NewMySQLLeaseStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := bindLeaseRunStore(runStore, leaseStore, "run-event", "owner-current", 9)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fencing_token, expires_at FROM investigation_leases WHERE run_id = ? AND owner = ? FOR UPDATE")).
+		WithArgs("run-event", "owner-current").
+		WillReturnRows(sqlmock.NewRows([]string{"fencing_token", "expires_at"}).AddRow(uint64(9), time.Now().Add(time.Minute).UnixMilli()))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fencing_token FROM investigation_runs WHERE id = ? FOR UPDATE")).
+		WithArgs("run-event").
+		WillReturnRows(sqlmock.NewRows([]string{"fencing_token"}).AddRow(uint64(10)))
+	mock.ExpectRollback()
+
+	err = store.AppendEvent("run-event", "plan_compiled", `{"revision":1}`)
+	if !errors.Is(err, ErrLeaseFenced) {
+		t.Fatalf("append event error = %v, want ErrLeaseFenced", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLRunStoreFencedAppendEventRejectsExpiredLease(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	runStore, err := NewMySQLRunStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseStore, err := NewMySQLLeaseStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := bindLeaseRunStore(runStore, leaseStore, "run-event", "owner-current", 9)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fencing_token, expires_at FROM investigation_leases WHERE run_id = ? AND owner = ? FOR UPDATE")).
+		WithArgs("run-event", "owner-current").
+		WillReturnRows(sqlmock.NewRows([]string{"fencing_token", "expires_at"}).AddRow(uint64(9), time.Now().Add(-time.Minute).UnixMilli()))
+	mock.ExpectRollback()
+
+	err = store.AppendEvent("run-event", "plan_compiled", `{"revision":1}`)
+	if !errors.Is(err, ErrLeaseFenced) {
+		t.Fatalf("append event error = %v, want ErrLeaseFenced", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLRunStoreListActiveRunsUsesBoundedKeysetQuery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewMySQLRunStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	cursor := ActiveRunCursor{UpdatedAt: base, ID: "run-a"}
+	query := regexp.QuoteMeta("SELECT id, payload, updated_at FROM investigation_runs WHERE updated_at < ? AND (updated_at > ? OR (updated_at = ? AND id > ?)) ORDER BY updated_at ASC, id ASC LIMIT ?")
+	mock.ExpectQuery(query).
+		WithArgs(base.Add(time.Hour).UnixMilli(), base.UnixMilli(), base.UnixMilli(), cursor.ID, 3).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "payload", "updated_at"}).
+			AddRow("run-b", `{"id":"run-b","status":"delivered"}`, base.Add(time.Millisecond).UnixMilli()).
+			AddRow("run-c", `{"id":"run-c","status":"executing"}`, base.Add(2*time.Millisecond).UnixMilli()).
+			AddRow("run-d", `{"id":"run-d","status":"planned"}`, base.Add(3*time.Millisecond).UnixMilli()))
+
+	page, err := store.ListActiveRuns(base.Add(time.Hour), cursor, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Runs) != 1 || page.Runs[0].ID != "run-c" || !page.HasMore || page.Next.ID != "run-c" {
+		t.Fatalf("page = %#v", page)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLRunStoreAdoptsCurrentLeaseFencingTokenForRecovery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewMySQLRunStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fencing_token, expires_at FROM investigation_leases WHERE run_id = ? AND owner = ? FOR UPDATE")).
+		WithArgs("run-recover", "owner-new").
+		WillReturnRows(sqlmock.NewRows([]string{"fencing_token", "expires_at"}).AddRow(uint64(12), time.Now().Add(time.Minute).UnixMilli()))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM investigation_runs WHERE id = ? FOR UPDATE")).
+		WithArgs("run-recover").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("run-recover"))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE investigation_runs SET fencing_token = ? WHERE id = ?")).
+		WithArgs(uint64(12), "run-recover").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := store.adoptFencingToken("run-recover", "owner-new", 12); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLLeaseStoreRevocationAdvancesTokenRegardlessOfOwner(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewMySQLLeaseStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fencing_token FROM investigation_leases WHERE run_id = ? FOR UPDATE")).
+		WithArgs("run-cancel").
+		WillReturnRows(sqlmock.NewRows([]string{"fencing_token"}).AddRow(uint64(8)))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE investigation_leases SET owner = ?, expires_at = ?, fencing_token = ? WHERE run_id = ?")).
+		WithArgs("cancel-owner", sqlmock.AnyArg(), uint64(9), "run-cancel").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	grant, err := store.RevokeLeaseWithToken(t.Context(), "run-cancel", "cancel-owner", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.Token != 9 || grant.Owner != "cancel-owner" {
+		t.Fatalf("grant = %#v", grant)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
