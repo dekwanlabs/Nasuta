@@ -102,7 +102,14 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 func modelOutputBudgetAvailable(ctx context.Context) bool {
 	gate := agentapi.RunBudgetUsageGateFromContext(ctx)
 	availability, ok := gate.(agentapi.RunBudgetAvailability)
-	return !ok || availability.Available().OutputTokens > 0
+	if !ok {
+		return true
+	}
+	available := availability.Available().OutputTokens
+	if minimum, ok := gate.(agentapi.RunBudgetMinimum); ok {
+		return available >= minimum.MinimumOutputTokens()
+	}
+	return available > 0
 }
 
 func recordFirstAnswerToken(ctx context.Context, step any, turnTTFT, runElapsed time.Duration) {

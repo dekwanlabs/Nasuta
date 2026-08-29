@@ -18,6 +18,13 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
+func runtimeErrorCode(err error) string {
+	if errors.Is(err, agentapi.ErrBudgetExceeded) {
+		return "budget_exhausted"
+	}
+	return "runtime_failed"
+}
+
 // Run resolves and executes one exact immutable definition version.
 func (runtime *Runtime) Run(
 	ctx context.Context,
@@ -36,7 +43,7 @@ func (runtime *Runtime) Run(
 	runCtx := managed.Context(ctx)
 	result, err := managed.Execute(runCtx, request)
 	if err != nil {
-		_ = managed.Finish(&agentapi.RunError{Code: "runtime_failed", Message: err.Error()})
+		_ = managed.Finish(&agentapi.RunError{Code: runtimeErrorCode(err), Message: err.Error()})
 		return agentapi.RunResult{}, err
 	}
 	if err := managed.Finish(nil); err != nil {

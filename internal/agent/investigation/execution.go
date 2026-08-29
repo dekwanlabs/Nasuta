@@ -15,6 +15,14 @@ type TaskExecutor interface {
 
 type TaskExecutorFunc func(context.Context, ExecutableTask, TaskExecutionInput) (TaskExecutionResult, error)
 
+// TaskMinimumBudgetProvider exposes the smallest usable physical-call grant
+// needed before a task may be started. It keeps scheduler admission tied to
+// the executor's immutable model contract without coupling the scheduler to a
+// particular runtime implementation.
+type TaskMinimumBudgetProvider interface {
+	MinimumBudget(ExecutableTask) (BudgetVector, error)
+}
+
 func (fn TaskExecutorFunc) Execute(ctx context.Context, task ExecutableTask, input TaskExecutionInput) (TaskExecutionResult, error) {
 	return fn(ctx, task, input)
 }

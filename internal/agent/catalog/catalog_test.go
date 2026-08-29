@@ -185,8 +185,8 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		}
 	}
 	for _, definition := range definitions[:len(wantTools)-2] {
-		if definition.Model.MaxOutputTokens != 1024 ||
-			definition.Budget.MaxSteps != 3 ||
+		if definition.Model.MaxOutputTokens != investigatorOutputMinimum ||
+			definition.Budget.MaxSteps != 4 ||
 			definition.Budget.MaxContinueRounds != 1 {
 			t.Fatalf("investigator %q budget = model=%d steps=%d continuation=%d",
 				definition.ID, definition.Model.MaxOutputTokens,
@@ -216,7 +216,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		len(synthesizer.Tools.VisibleToolIDs) != 0 || !synthesizer.Tools.RestrictVisible {
 		t.Fatalf("synthesizer contract = %+v", synthesizer)
 	}
-	if synthesizer.Model.MaxOutputTokens != 2048 ||
+	if synthesizer.Model.MaxOutputTokens != synthesizerOutputMinimum ||
 		synthesizer.Budget.MaxSteps != 1 ||
 		synthesizer.Budget.MaxContinueRounds != 1 {
 		t.Fatalf("synthesizer budget = model=%d steps=%d continuation=%d",
@@ -232,7 +232,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		!verifier.Tools.RestrictVisible {
 		t.Fatalf("delegation verifier contract = %+v", verifier)
 	}
-	if verifier.Model.MaxOutputTokens != 768 ||
+	if verifier.Model.MaxOutputTokens != verifierOutputMinimum ||
 		verifier.Budget.MaxSteps != 1 ||
 		verifier.Budget.MaxContinueRounds != 1 {
 		t.Fatalf("verifier budget = model=%d steps=%d continuation=%d",
@@ -241,7 +241,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 	}
 }
 
-func TestDefaultInvestigatorsRoleBudgetsRespectGlobalCeilings(t *testing.T) {
+func TestDefaultInvestigatorsRoleBudgetsKeepIndependentRoleFloors(t *testing.T) {
 	settings := &config.PlatformSettings{
 		LLMProvider: "openai", LLMModel: "investigation-model",
 		LLMAnswerMaxTokens: 512, LLMContextWindow: 32000,
@@ -253,12 +253,21 @@ func TestDefaultInvestigatorsRoleBudgetsRespectGlobalCeilings(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, definition := range definitions {
-		if definition.Model.MaxOutputTokens != 512 ||
+		wantOutput := 0
+		switch {
+		case strings.HasPrefix(definition.ID, "investigator."):
+			wantOutput = investigatorOutputMinimum
+		case definition.ID == "delegation.verifier":
+			wantOutput = verifierOutputMinimum
+		case definition.ID == "synthesizer":
+			wantOutput = synthesizerOutputMinimum
+		}
+		if definition.Model.MaxOutputTokens != wantOutput ||
 			definition.Budget.MaxSteps != 1 ||
 			definition.Budget.MaxContinueRounds != 0 {
-			t.Fatalf("definition %q exceeded global ceilings: model=%d steps=%d continuation=%d",
+			t.Fatalf("definition %q role budget: model=%d steps=%d continuation=%d, want output=%d",
 				definition.ID, definition.Model.MaxOutputTokens,
-				definition.Budget.MaxSteps, definition.Budget.MaxContinueRounds)
+				definition.Budget.MaxSteps, definition.Budget.MaxContinueRounds, wantOutput)
 		}
 	}
 }
@@ -278,11 +287,11 @@ func TestDefaultInvestigatorsBudgetsFollowGlobalConfiguration(t *testing.T) {
 		wantOutput, wantSteps, wantRounds := 0, 0, 0
 		switch {
 		case strings.HasPrefix(definition.ID, "investigator."):
-			wantOutput, wantSteps, wantRounds = 3000, 3, 1
+			wantOutput, wantSteps, wantRounds = 8192, 4, 1
 		case definition.ID == "delegation.verifier":
-			wantOutput, wantSteps, wantRounds = 2000, 1, 1
+			wantOutput, wantSteps, wantRounds = 4096, 1, 1
 		case definition.ID == "synthesizer":
-			wantOutput, wantSteps, wantRounds = 6000, 1, 1
+			wantOutput, wantSteps, wantRounds = 8192, 1, 1
 		}
 		if definition.Model.MaxOutputTokens != wantOutput ||
 			definition.Budget.MaxSteps != wantSteps ||
@@ -291,6 +300,27 @@ func TestDefaultInvestigatorsBudgetsFollowGlobalConfiguration(t *testing.T) {
 				definition.ID, definition.Model.MaxOutputTokens,
 				definition.Budget.MaxSteps, definition.Budget.MaxContinueRounds,
 				wantOutput, wantSteps, wantRounds)
+		}
+	}
+}
+
+func TestDefaultInvestigatorsVerifierAndSynthesizerUseRunOutputShares(t *testing.T) {
+	settings := &config.PlatformSettings{
+		LLMProvider: "openai", LLMModel: "investigation-model",
+		LLMAnswerMaxTokens: 12_000, LLMContextWindow: 256_000,
+		InvestigationMaxOutputTokens: 128_000,
+		AgentTimeout:                 config.Duration(time.Minute), AgentMaxSteps: 4,
+	}
+	definitions, err := DefaultInvestigators(settings, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range definitions {
+		if definition.ID != "delegation.verifier" && definition.ID != "synthesizer" {
+			continue
+		}
+		if definition.Model.MaxOutputTokens != 12_800 {
+			t.Fatalf("%s output budget = %d, want 12800", definition.ID, definition.Model.MaxOutputTokens)
 		}
 	}
 }

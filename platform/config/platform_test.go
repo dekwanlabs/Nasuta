@@ -70,6 +70,7 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 	}
 	if settings.InvestigationMaxInputTokens != DefaultInvestigationMaxInputTokens ||
 		settings.InvestigationMaxOutputTokens != DefaultInvestigationMaxOutputTokens ||
+		settings.InvestigationMaxTotalTokens != DefaultInvestigationMaxTotalTokens ||
 		settings.InvestigationMaxToolCalls != DefaultInvestigationMaxToolCalls {
 		t.Fatalf(
 			"investigation token/tool limits = %d/%d/%d",
@@ -331,6 +332,7 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"llm_output_price_micros_per_million_tokens": "0",
 		"investigation_max_input_tokens":             "20000",
 		"investigation_max_output_tokens":            "8000",
+		"investigation_max_total_tokens":             "512000",
 		"investigation_max_tool_calls":               "24",
 		"investigation_max_duration":                 "5m",
 		"investigation_max_rounds":                   "4",

@@ -3,6 +3,7 @@ package investigation
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/dekwanlabs/nasuta/platform/config"
 )
@@ -13,6 +14,36 @@ func TestParseBudgetProfileRejectsUnknown(t *testing.T) {
 	}
 	if profile, err := ParseBudgetProfile("  DEEP  "); err != nil || profile != ProfileDeep {
 		t.Fatalf("deep profile = %q, err = %v", profile, err)
+	}
+}
+
+func TestAllocateRoleBudgetUsesTheRunTotalForVerifierAndComposition(t *testing.T) {
+	runLimit := BudgetVector{
+		InputTokens:  300_000,
+		OutputTokens: 128_000,
+		TotalTokens:  512_000,
+		ToolCalls:    40,
+		Duration:     10 * time.Minute,
+		CostMicros:   1000,
+	}
+	// Role shares only split token/cost capacity. Duration and tool calls stay
+	// zero so a 10% share never becomes a 1-minute child deadline or a
+	// shrunken tool-call quota.
+	want := BudgetVector{InputTokens: 30_000, OutputTokens: 12_800, TotalTokens: 51_200, CostMicros: 100}
+	for _, stage := range []BudgetStage{StageVerification, StageComposition} {
+		got, err := AllocateRoleBudget(ProfileInteractive, runLimit, stage)
+		if err != nil {
+			t.Fatalf("AllocateRoleBudget(%q): %v", stage, err)
+		}
+		if got != want {
+			t.Fatalf("AllocateRoleBudget(%q) = %+v, want %+v", stage, got, want)
+		}
+		if got.Duration != 0 {
+			t.Fatalf("AllocateRoleBudget(%q) duration = %v, want 0", stage, got.Duration)
+		}
+		if got.ToolCalls != 0 {
+			t.Fatalf("AllocateRoleBudget(%q) tool calls = %d, want 0", stage, got.ToolCalls)
+		}
 	}
 }
 
@@ -47,6 +78,7 @@ func TestBudgetPolicyFromPlatformSettings(t *testing.T) {
 	settings := config.PlatformSettings{
 		InvestigationMaxInputTokens:  2000,
 		InvestigationMaxOutputTokens: 800,
+		InvestigationMaxTotalTokens:  1600,
 		InvestigationMaxToolCalls:    12,
 		InvestigationMaxDuration:     config.Duration(1),
 		InvestigationMaxRounds:       4,
@@ -60,7 +92,7 @@ func TestBudgetPolicyFromPlatformSettings(t *testing.T) {
 	if policy.Profile != ProfileInteractive || policy.MaxRounds != 4 || policy.MaxTasks != 8 {
 		t.Fatalf("policy = %#v", policy)
 	}
-	if policy.Limit.InputTokens != 2000 || policy.Limit.ToolCalls != 12 {
+	if policy.Limit.InputTokens != 2000 || policy.Limit.TotalTokens != 1600 || policy.Limit.ToolCalls != 12 {
 		t.Fatalf("policy limit = %#v", policy.Limit)
 	}
 
@@ -169,7 +201,7 @@ func TestCompositionProtectionDoesNotReserveEntireRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reservation.Release()
-	if got := ledger.Snapshot().Run.Reserved.OutputTokens; got != 1200 {
-		t.Fatalf("composition protection = %d, want 1200", got)
+	if got := ledger.Snapshot().Run.Reserved.OutputTokens; got != composerMinimumOutputTokens {
+		t.Fatalf("composition protection = %d, want %d", got, composerMinimumOutputTokens)
 	}
 }

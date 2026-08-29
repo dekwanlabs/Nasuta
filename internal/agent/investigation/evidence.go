@@ -102,6 +102,22 @@ func (ledger *EvidenceLedger) All() []EvidenceUnit {
 	return out
 }
 
+// HasTask reports whether a task owns at least one admitted evidence unit.
+// Ownership keeps a sibling task from satisfying another task's partial result.
+func (ledger *EvidenceLedger) HasTask(taskID string) bool {
+	if ledger == nil || strings.TrimSpace(taskID) == "" {
+		return false
+	}
+	ledger.mu.RLock()
+	defer ledger.mu.RUnlock()
+	for _, unit := range ledger.items {
+		if unit.TaskID == taskID {
+			return true
+		}
+	}
+	return false
+}
+
 // Conflicts preserves competing units with the same full evidence identity.
 // Independent sources, versions, and time ranges remain separate provenance.
 func (ledger *EvidenceLedger) Conflicts() []agentapi.EvidenceConflict {
@@ -329,6 +345,21 @@ func (ledger *ClaimLedger) All() []VerifiedClaim {
 		out = append(out, cloneClaim(ledger.claims[id]))
 	}
 	return out
+}
+
+// HasTask reports whether a task owns at least one admitted verifier claim.
+func (ledger *ClaimLedger) HasTask(taskID string) bool {
+	if ledger == nil || strings.TrimSpace(taskID) == "" {
+		return false
+	}
+	ledger.mu.RLock()
+	defer ledger.mu.RUnlock()
+	for _, claim := range ledger.claims {
+		if claim.VerifierTaskID == taskID {
+			return true
+		}
+	}
+	return false
 }
 
 func (ledger *ClaimLedger) Coverage() []GoalCoverage {
@@ -674,6 +705,32 @@ func normalizeEvidence(taskID string, candidate EvidenceCandidate) (EvidenceUnit
 	}, nil
 }
 
+func evidenceCandidatesForTask(units []EvidenceUnit, taskID string) []EvidenceCandidate {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" || len(units) == 0 {
+		return nil
+	}
+	candidates := make([]EvidenceCandidate, 0)
+	for _, unit := range units {
+		if unit.TaskID != taskID || !isReadableEvidenceContent(unit.Content) {
+			continue
+		}
+		candidates = append(candidates, EvidenceCandidate{
+			SourceKind:    unit.SourceKind,
+			Target:        unit.Target,
+			Section:       unit.Section,
+			Content:       unit.Content,
+			ContentHash:   unit.ContentHash,
+			Facets:        append([]string(nil), unit.Facets...),
+			TrustTier:     unit.TrustTier,
+			EvidenceClass: unit.EvidenceClass,
+			Version:       unit.Version,
+			TimeRange:     unit.TimeRange,
+		})
+	}
+	return candidates
+}
+
 func normalizeSeedEvidence(taskID string, unit EvidenceUnit) (EvidenceUnit, error) {
 	unit.SourceKind = strings.TrimSpace(unit.SourceKind)
 	unit.Target = strings.TrimSpace(unit.Target)
@@ -704,9 +761,38 @@ func normalizeSeedEvidence(taskID string, unit EvidenceUnit) (EvidenceUnit, erro
 	}, nil
 }
 
+// UserReadableClaimText reports whether text may enter ClaimLedger or be
+// treated as a user-visible finding. Tool payloads are rejected even when
+// truncated so they cannot become verifier or composer input.
+func UserReadableClaimText(text string) bool {
+	return isUserReadableClaimText(text)
+}
+
 func isUserReadableClaimText(text string) bool {
 	text = strings.TrimSpace(text)
-	return text != "" && !containsOpaqueIdentifier(text)
+	if text == "" || containsOpaqueIdentifier(text) {
+		return false
+	}
+	// Adapter/tool payloads start with an object or array. Complete JSON is
+	// rejected by json.Valid; truncated dumps such as `{"matches":[{"docId"`
+	// are not valid JSON and must still be rejected. Natural-language claims
+	// may mention JSON later in the sentence.
+	if looksLikeMachineJSONPayload(text) {
+		return false
+	}
+	return true
+}
+
+func looksLikeMachineJSONPayload(text string) bool {
+	if text == "" {
+		return false
+	}
+	switch text[0] {
+	case '{', '[':
+		return true
+	default:
+		return false
+	}
 }
 
 // isReadableEvidenceContent rejects identity-only payloads while allowing
@@ -777,7 +863,10 @@ func isOpaqueIdentifier(value string) bool {
 	for _, prefix := range []string{"evidence_", "claim_", "workflow_", "run_", "reservation_"} {
 		if strings.HasPrefix(value, prefix) {
 			suffix := strings.TrimPrefix(value, prefix)
-			if isHexString(suffix) && len(suffix) >= 16 {
+			// Canonical evidence/claim handles are now 8 hex chars; keep a
+			// floor low enough to catch them leaking into claim text while
+			// still ignoring short human-readable words.
+			if isHexString(suffix) && len(suffix) >= 8 {
 				return true
 			}
 		}

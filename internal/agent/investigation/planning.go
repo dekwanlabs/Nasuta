@@ -263,6 +263,13 @@ func (compiler PlanCompiler) compile(
 		if _, err := compiler.Schemas.Resolve(template.OutputSchema); err != nil {
 			return PlanRevision{}, fmt.Errorf("%w: task %q output schema: %v", ErrPlanInvalid, candidate.ID, err)
 		}
+		// Investigation tasks are best-effort: tool failures, budget
+		// exhaustion, or model truncation must not block the verifier from
+		// running with whatever evidence was collected.
+		optional := candidate.Optional
+		if template.Executor == ExecutorInvestigator {
+			optional = true
+		}
 		task := ExecutableTask{
 			ID:                   candidate.ID,
 			Template:             candidate.Template,
@@ -283,7 +290,7 @@ func (compiler PlanCompiler) compile(
 			OutputSchema:  template.OutputSchema,
 			Executor:      template.Executor,
 			ToolCalls:     append([]ToolCallSpec(nil), template.ToolCalls...),
-			Optional:      candidate.Optional,
+			Optional:      optional,
 			AllowParallel: candidate.AllowParallel || template.AllowParallel || (template.Executor == ExecutorInvestigator),
 			Status:        TaskPending,
 		}

@@ -3,18 +3,38 @@ package investigation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
 const (
 	maxVerifierEvidenceClaims = 8
 	maxVerifierVerdicts       = 8
+
+	// This margin covers provider/message framing around the deterministic
+	// request estimate. It is deliberately small: the evidence context itself
+	// is bounded separately by EvidenceContextBudget.
+	verifierInputSafetyTokens int64 = 256
+
+	// These floors protect one complete role response during admission. The shared
+	// Run ledger still remains the cumulative hard limit for all actual usage.
+	investigatorMinimumOutputTokens int64 = 8192
+	verifierMinimumOutputTokens     int64 = 4096
+	composerMinimumOutputTokens     int64 = 8192
+
+	// Synthetic verifier evidence is only a shape used for admission estimation.
+	// Keep materialization bounded so a malformed/huge context setting cannot
+	// force an unbounded allocation; the omitted virtual tokens are added back to
+	// the estimate below.
+	maxSyntheticTokenTextTokens = 8192
 
 	defaultInvestigatorDefinitionID = "investigator.code"
 	defaultVerifierDefinitionID     = "delegation.verifier"
@@ -37,6 +57,224 @@ type AgentRuntimeTaskExecutor struct {
 	EvidenceContextBudget EvidenceContextBudget
 }
 
+// MinimumBudget returns the protected grant required for one usable model
+// response. Explicit task limits may narrow a role floor, but never expand it.
+//
+// Investigator and Composer keep their historical output-only admission floor.
+// A Verifier is different: it is mandatory downstream work, so its admission
+// protects the first request's input, output, and aggregate token budget before
+// any Investigator is started.
+func (e AgentRuntimeTaskExecutor) MinimumBudget(task ExecutableTask) (BudgetVector, error) {
+	if !isAgentExecutor(task.Executor) {
+		return BudgetVector{}, nil
+	}
+	ref, err := e.definitionRefForTask(task)
+	if err != nil {
+		return BudgetVector{}, err
+	}
+	if e.Definitions == nil {
+		return BudgetVector{}, fmt.Errorf("agent definition resolver is required")
+	}
+	definition, err := e.Definitions.Resolve(ref)
+	if err != nil {
+		return BudgetVector{}, fmt.Errorf("resolve agent definition %q: %w", ref.ID, err)
+	}
+	minimumOutput := investigatorMinimumOutputTokens
+	switch task.Executor {
+	case ExecutorVerifier:
+		minimumOutput = verifierMinimumOutputTokens
+	case ExecutorComposer:
+		minimumOutput = composerMinimumOutputTokens
+	}
+	if definition.Model.MaxOutputTokens > 0 && int64(definition.Model.MaxOutputTokens) < minimumOutput {
+		minimumOutput = int64(definition.Model.MaxOutputTokens)
+	}
+	if task.Budget.Limit.OutputTokens > 0 && task.Budget.Limit.OutputTokens < minimumOutput {
+		minimumOutput = task.Budget.Limit.OutputTokens
+	}
+	if minimumOutput < 0 {
+		minimumOutput = 0
+	}
+
+	grant := BudgetVector{OutputTokens: minimumOutput}
+	if task.Executor != ExecutorVerifier {
+		if minimumOutput <= 0 {
+			return BudgetVector{}, nil
+		}
+		return grant, nil
+	}
+
+	minimumInput, err := e.verifierMinimumInputTokens(task, definition)
+	if err != nil {
+		return BudgetVector{}, err
+	}
+	if task.Budget.Limit.InputTokens > 0 {
+		minimumInput = minInt64(minimumInput, task.Budget.Limit.InputTokens)
+	}
+
+	// TotalTokens is an aggregate reservation, not a second copy of input and
+	// output. Keep the three dimensions self-consistent even when a task-level
+	// total cap is tighter than the two component floors. We narrow output first
+	// only after preserving as much input as that explicit cap allows.
+	if task.Budget.Limit.TotalTokens > 0 {
+		minimumInput = minInt64(minimumInput, task.Budget.Limit.TotalTokens)
+		remaining := task.Budget.Limit.TotalTokens - minimumInput
+		if remaining < 0 {
+			remaining = 0
+		}
+		minimumOutput = minInt64(minimumOutput, remaining)
+	}
+	// Keep the three token dimensions self-consistent even for a pathological
+	// configuration that drives the estimated input floor near int64's ceiling.
+	// Prefer preserving the usable output floor, then narrow input by the tiny
+	// amount that cannot be represented in TotalTokens.
+	maxTokenBudget := int64(^uint64(0) >> 1)
+	if minimumInput > maxTokenBudget-minimumOutput {
+		minimumInput = maxTokenBudget - minimumOutput
+	}
+	total := minimumInput + minimumOutput
+	if minimumInput == 0 && minimumOutput == 0 {
+		return BudgetVector{}, nil
+	}
+	grant.InputTokens = minimumInput
+	grant.OutputTokens = minimumOutput
+	grant.TotalTokens = total
+	return grant, nil
+}
+
+// verifierMinimumInputTokens estimates the first physical Verifier request
+// using the same input shape as verifierInput plus the runtime's system/user
+// envelope. Evidence bodies are represented by bounded synthetic summaries so
+// admission is conservative without reserving the entire evidence pool.
+func (e AgentRuntimeTaskExecutor) verifierMinimumInputTokens(task ExecutableTask, definition agentapi.Definition) (int64, error) {
+	maxSummaryTokens, maxContextTokens, _ := e.EvidenceContextBudget.effective()
+	claimCount := maxVerifierEvidenceClaims
+	if maxContextTokens > 0 && maxContextTokens < int64(claimCount) {
+		claimCount = int(maxContextTokens)
+	}
+	if claimCount <= 0 || maxSummaryTokens <= 0 {
+		claimCount = 0
+	}
+
+	claims := make([]verificationClaim, 0, claimCount)
+	evidenceRefs := make([]string, 0, claimCount)
+	remainingContext := maxContextTokens
+	var virtualEvidenceTokens int64
+	for index := 0; index < claimCount; index++ {
+		statementTokens := int64(maxSummaryTokens)
+		if maxContextTokens > 0 {
+			// Leave at least one estimated token for every remaining claim. This
+			// mirrors buildEvidenceContext, which can admit several short summaries
+			// even when the context budget is smaller than 8*MaxSummaryTokens.
+			remainingClaims := int64(claimCount - index - 1)
+			available := remainingContext - remainingClaims
+			if available <= 0 {
+				break
+			}
+			if statementTokens > available {
+				statementTokens = available
+			}
+		}
+		materializedTokens := minInt64(statementTokens, maxSyntheticTokenTextTokens)
+		statement := syntheticTokenText(int(materializedTokens))
+		if statement == "" {
+			break
+		}
+		statementCost := int64(tooloutput.EstimateTokens(statement))
+		if statement == "" || statementCost <= 0 {
+			break
+		}
+		claims = append(claims, verificationClaim{
+			ID:        syntheticEvidenceID(index),
+			Statement: statement,
+			Citations: []string{syntheticEvidenceID(index)},
+		})
+		evidenceRefs = append(evidenceRefs, syntheticEvidenceID(index))
+		if statementTokens > statementCost {
+			virtualEvidenceTokens = saturatingAdd(virtualEvidenceTokens, statementTokens-statementCost)
+		}
+		if maxContextTokens > 0 {
+			// Consume the requested worst-case context, not only the bounded
+			// materialized sample. This keeps the estimate conservative for very
+			// large MaxSummaryTokens values without allocating that much text.
+			remainingContext -= statementTokens
+		}
+	}
+
+	payload, err := json.Marshal(struct {
+		Question         string              `json:"question"`
+		DecisionQuestion string              `json:"decision_question"`
+		Claims           []verificationClaim `json:"claims"`
+		Conflicts        []any               `json:"conflicts"`
+		EvidenceRefs     []string            `json:"evidence_refs"`
+		Reasons          []string            `json:"reasons"`
+	}{
+		Question:         task.Objective,
+		DecisionQuestion: task.Objective,
+		Claims:           claims,
+		Conflicts:        []any{},
+		EvidenceRefs:     evidenceRefs,
+		Reasons:          []string{"verify evidence-backed claims"},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("encode verifier input for budget admission: %w", err)
+	}
+	question := prompts.MustRender(prompts.AgentRuntimeExecuteInput, struct {
+		SchemaID      string
+		SchemaVersion int64
+		Input         string
+	}{
+		SchemaID:      definition.OutputSchema.ID,
+		SchemaVersion: definition.OutputSchema.Version,
+		Input:         string(payload),
+	})
+	inputTokens := int64(tooloutput.EstimateTokens(definition.Prompt.System) + 4)
+	inputTokens = saturatingAdd(inputTokens, int64(tooloutput.EstimateTokens(question)+4))
+	// The JSON contains bounded samples above. Add the virtual tail that would
+	// have occupied the same evidence statements, plus a one-token rounding
+	// margin per claim, so the estimate never becomes optimistic for huge
+	// configured summary limits.
+	inputTokens = saturatingAdd(inputTokens, virtualEvidenceTokens)
+	if virtualEvidenceTokens > 0 {
+		inputTokens = saturatingAdd(inputTokens, int64(len(claims)+1))
+	}
+	inputTokens = saturatingAdd(inputTokens, verifierInputSafetyTokens)
+	if inputTokens <= 0 {
+		return 1, nil
+	}
+	return inputTokens, nil
+}
+
+func syntheticEvidenceID(index int) string {
+	// Match the short canonical handle length so budget estimates stay honest
+	// about how much identifier text actually reaches the model.
+	return fmt.Sprintf("evidence_%07x", index+1)
+}
+
+func syntheticTokenText(tokens int) string {
+	if tokens <= 0 {
+		return ""
+	}
+	if tokens > maxSyntheticTokenTextTokens {
+		tokens = maxSyntheticTokenTextTokens
+	}
+	// Two ASCII characters are one conservative estimated token under the
+	// repository estimator. Compute the initial size without tokens*30 so a
+	// hostile integer setting cannot overflow before the materialization cap.
+	chars := (tokens/11)*30 + (tokens%11)*30/11
+	if chars < 2 {
+		chars = 2
+	}
+	text := strings.Repeat("x", chars)
+	for tooloutput.EstimateTokens(text) > tokens {
+		text = text[:len(text)-1]
+	}
+	for tooloutput.EstimateTokens(text) < tokens {
+		text += "x"
+	}
+	return text
+}
+
 func (e AgentRuntimeTaskExecutor) Execute(
 	ctx context.Context,
 	task ExecutableTask,
@@ -48,12 +286,21 @@ func (e AgentRuntimeTaskExecutor) Execute(
 	if e.Definitions == nil {
 		return TaskExecutionResult{}, fmt.Errorf("agent definition resolver is required")
 	}
-	if task.Executor == ExecutorVerifier && len(taskEvidenceContext(task, input, e.EvidenceContextBudget).selected) == 0 {
-		output, err := marshalUnresolvedVerification("no user-readable evidence was available")
-		if err != nil {
-			return TaskExecutionResult{}, err
+	if task.Executor == ExecutorVerifier {
+		if len(taskEvidenceContext(task, input, e.EvidenceContextBudget).selected) == 0 {
+			output, err := marshalUnresolvedVerification("no user-readable evidence was available")
+			if err != nil {
+				return TaskExecutionResult{}, err
+			}
+			return TaskExecutionResult{Output: output}, nil
 		}
-		return TaskExecutionResult{Output: output}, nil
+		if len(collectVerifierClaims(task, input, e.EvidenceContextBudget)) == 0 {
+			output, err := marshalUnresolvedVerification("no user-readable claims were available")
+			if err != nil {
+				return TaskExecutionResult{}, err
+			}
+			return TaskExecutionResult{Output: output}, nil
+		}
 	}
 	ref, err := e.definitionRefForTask(task)
 	if err != nil {
@@ -67,9 +314,34 @@ func (e AgentRuntimeTaskExecutor) Execute(
 	if err != nil {
 		return TaskExecutionResult{}, err
 	}
-	result, err := e.Runtime.Run(ctx, request)
-	if err != nil {
-		return TaskExecutionResult{}, err
+	result, runErr := e.Runtime.Run(ctx, request)
+	if runErr != nil {
+		// Some runtimes return a durable partial RunResult together with a
+		// transport/provider error. Project it before surfacing the error so
+		// evidence collected before the failure is not discarded at this
+		// boundary.
+		budgetFailure := errors.Is(runErr, agentapi.ErrBudgetExceeded) ||
+			(result.Error != nil && isBudgetRunError(result.Error.Code))
+		if result.Error == nil || budgetFailure {
+			code := "runtime_error"
+			if budgetFailure {
+				code = "budget_exhausted"
+			}
+			message := runErr.Error()
+			if !errors.Is(runErr, agentapi.ErrBudgetExceeded) && result.Error != nil && strings.TrimSpace(result.Error.Message) != "" {
+				message = result.Error.Message
+			}
+			result.Error = &agentapi.RunError{
+				Code:      code,
+				Message:   message,
+				Retryable: false,
+			}
+		}
+		projected, projectErr := e.project(task, input, result)
+		if projectErr != nil {
+			return projected, errors.Join(runErr, projectErr)
+		}
+		return projected, nil
 	}
 	return e.project(task, input, result)
 }
@@ -141,11 +413,13 @@ func (e AgentRuntimeTaskExecutor) buildRequest(
 		runtimeBudget = input.RuntimeBudget
 	}
 	limits := e.limitsForBudget(runtimeBudget, definition)
-	if sharedRuntimeBudget {
+	if sharedRuntimeBudget && task.Executor != ExecutorVerifier {
 		// The investigation ledger accounts cumulative input, total tokens, and
 		// cost across all model calls and sibling tasks. Keeping those same values
-		// on the child Run would turn the shared admission grant into a private
-		// per-agent quota and stop a valid multi-turn investigator too early.
+		// on a normal child Run would turn shared capacity into a private quota and
+		// stop a valid multi-turn Investigator too early. Verifier is intentionally
+		// excluded: its RuntimeBudget is the role slice protected before execution,
+		// so its child Run must honor that input/total ceiling too.
 		limits.MaxInputTokens = 0
 		limits.MaxTotalTokens = 0
 		limits.MaxCostMicros = 0
@@ -226,6 +500,13 @@ func (e AgentRuntimeTaskExecutor) limits(task ExecutableTask, definition agentap
 }
 
 func (e AgentRuntimeTaskExecutor) limitsForBudget(
+	budget BudgetVector,
+	definition agentapi.Definition,
+) agentapi.RunLimits {
+	return runLimitsForBudget(budget, definition)
+}
+
+func runLimitsForBudget(
 	budget BudgetVector,
 	definition agentapi.Definition,
 ) agentapi.RunLimits {
@@ -410,21 +691,17 @@ type verificationClaim struct {
 }
 
 func verifierInput(task ExecutableTask, input TaskExecutionInput, budget EvidenceContextBudget) (json.RawMessage, error) {
-	context := taskEvidenceContext(task, input, budget)
-	claimLimit := len(context.selected)
-	if claimLimit > maxVerifierEvidenceClaims {
-		claimLimit = maxVerifierEvidenceClaims
-	}
-	claims := make([]verificationClaim, 0, claimLimit)
-	evidenceRefs := make([]string, 0, claimLimit)
-	for _, unit := range context.selected[:claimLimit] {
-		statement := context.lookup[unit.ID].Summary
-		claims = append(claims, verificationClaim{
-			ID:        unit.ID,
-			Statement: statement,
-			Citations: []string{unit.ID},
-		})
-		evidenceRefs = append(evidenceRefs, unit.ID)
+	claims := collectVerifierClaims(task, input, budget)
+	evidenceRefs := make([]string, 0, len(claims))
+	seen := make(map[string]struct{}, len(claims))
+	for _, claim := range claims {
+		for _, id := range claim.Citations {
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			evidenceRefs = append(evidenceRefs, id)
+		}
 	}
 	return json.Marshal(struct {
 		Question         string              `json:"question"`
@@ -441,6 +718,91 @@ func verifierInput(task ExecutableTask, input TaskExecutionInput, budget Evidenc
 		EvidenceRefs:     evidenceRefs,
 		Reasons:          []string{"verify evidence-backed claims"},
 	})
+}
+
+func collectVerifierClaims(
+	task ExecutableTask,
+	input TaskExecutionInput,
+	budget EvidenceContextBudget,
+) []verificationClaim {
+	context := taskEvidenceContext(task, input, budget)
+	claims := verifierClaimsFromReports(input.Upstream, context)
+	if len(claims) == 0 {
+		claims = verifierClaimsFromEvidence(context)
+	}
+	if len(claims) > maxVerifierEvidenceClaims {
+		claims = claims[:maxVerifierEvidenceClaims]
+	}
+	return claims
+}
+
+func verifierClaimsFromReports(
+	upstream map[string]json.RawMessage,
+	context evidenceContextResult,
+) []verificationClaim {
+	if len(upstream) == 0 {
+		return nil
+	}
+	idByRef := evidenceIDsByReference(context.lookup)
+	claims := make([]verificationClaim, 0)
+	for _, raw := range upstream {
+		var report investigationReportOutput
+		if err := json.Unmarshal(raw, &report); err != nil {
+			continue
+		}
+		for _, finding := range report.Findings {
+			statement := strings.TrimSpace(finding.Claim)
+			if !isUserReadableClaimText(statement) {
+				continue
+			}
+			citations := make([]string, 0, len(finding.Evidence))
+			seen := make(map[string]struct{}, len(finding.Evidence))
+			for _, item := range finding.Evidence {
+				id, ok := idByRef[item.Kind+"\x00"+item.Reference]
+				if !ok {
+					continue
+				}
+				if _, exists := seen[id]; exists {
+					continue
+				}
+				seen[id] = struct{}{}
+				citations = append(citations, id)
+			}
+			if len(citations) == 0 {
+				continue
+			}
+			claims = append(claims, verificationClaim{
+				ID:        citations[0],
+				Statement: statement,
+				Citations: citations,
+			})
+		}
+	}
+	return claims
+}
+
+func verifierClaimsFromEvidence(context evidenceContextResult) []verificationClaim {
+	claims := make([]verificationClaim, 0, len(context.selected))
+	for _, unit := range context.selected {
+		statement := context.lookup[unit.ID].Summary
+		if !isUserReadableClaimText(statement) {
+			continue
+		}
+		claims = append(claims, verificationClaim{
+			ID:        unit.ID,
+			Statement: statement,
+			Citations: []string{unit.ID},
+		})
+	}
+	return claims
+}
+
+func evidenceIDsByReference(lookup map[string]evidenceSummaryView) map[string]string {
+	idByRef := make(map[string]string, len(lookup))
+	for id, view := range lookup {
+		idByRef[view.Kind+"\x00"+view.Reference] = id
+	}
+	return idByRef
 }
 
 func (e AgentRuntimeTaskExecutor) project(
@@ -464,11 +826,21 @@ func (e AgentRuntimeTaskExecutor) project(
 	}
 	if task.Executor == ExecutorInvestigator {
 		out.EvidenceCandidates = projectInvestigatorObservations(result)
+		out.Discoveries = projectInvestigatorDiscoveries(result.Output)
+		if len(out.EvidenceCandidates) == 0 {
+			// Evidence units carry identity only. If a worker stopped after a
+			// report was emitted, recover readable summaries before handling the
+			// run error so partial evidence is not lost at this boundary.
+			if evidence, err := projectInvestigatorEvidence(result); err == nil {
+				out.EvidenceCandidates = evidence
+			}
+		}
 	}
 	// A failed Single-Agent Run can have consumed model/tool budget before the
 	// failure was reported (for example when the shared Run gate rejects the
 	// next turn). Return that usage to the Scheduler so it is settled instead
-	// of silently disappearing from the parent ledger.
+	// of silently disappearing from the parent ledger. The failure remains
+	// authoritative; only content-bearing evidence can make the task partial.
 	if result.Error != nil {
 		code := mapAgentRunFailureCode(result.Error.Code, result.Status)
 		retryable := result.Error.Retryable
@@ -496,33 +868,22 @@ func (e AgentRuntimeTaskExecutor) project(
 	}
 	switch task.Executor {
 	case ExecutorInvestigator:
-		if len(out.EvidenceCandidates) == 0 && strictInvestigatorReportTask(task) {
-			if err := validateInvestigationReportOutput(result.Output); err != nil {
-				out.Failure = &RunFailure{Code: FailureSchema, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID, Retryable: true}
-				return out, nil
-			}
-		}
 		if len(out.EvidenceCandidates) == 0 {
 			evidence, err := projectInvestigatorEvidence(result)
-			if err != nil {
-				// Evidence-worker output is supplemental: authoritative tool
-				// observations have already been projected above. A worker may
-				// stop after tools and leave an incomplete report; do not turn
-				// that absence into a verifier dependency failure.
-				if !strictInvestigatorReportTask(task) {
-					out.Output = emptyInvestigationReport(task)
-				} else {
-					out.Failure = &RunFailure{Code: FailureSchema, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID, Retryable: true}
-					return out, nil
-				}
-			} else {
+			if err == nil {
 				out.EvidenceCandidates = evidence
 			}
+			if len(out.EvidenceCandidates) == 0 {
+				// A worker is allowed to stop after tool calls. When neither
+				// observations nor a readable report survived the runtime
+				// boundary, emit an explicit unavailable report so verification
+				// can close the workflow as evidence-insufficient instead of
+				// blocking on a missing dependency.
+				if err := validateInvestigationReportOutput(result.Output); err != nil {
+					out.Output = emptyInvestigationReport(task)
+				}
+			}
 		}
-		if len(out.Output) == 0 && len(out.EvidenceCandidates) == 0 && len(strings.TrimSpace(string(result.Output))) == 0 {
-			out.Output = emptyInvestigationReport(task)
-		}
-		out.Discoveries = projectInvestigatorDiscoveries(result.Output)
 	case ExecutorVerifier:
 		claims, err := projectVerifierClaims(task, input, result, e.EvidenceContextBudget)
 		if err != nil {
@@ -571,6 +932,15 @@ func strictInvestigatorReportTask(task ExecutableTask) bool {
 		return false
 	}
 	return task.Capability == "knowledge.docs.verify" || task.Template.ID == "proposal.docs.verify"
+}
+
+func isBudgetRunError(code string) bool {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "budget_exceeded", "budget_exhausted", "limit_exceeded", "run_limit_exceeded":
+		return true
+	default:
+		return false
+	}
 }
 
 func mapAgentRunFailureCode(code string, status agentapi.RunStatus) FailureCode {
@@ -819,6 +1189,7 @@ func projectVerifierClaims(
 	for id, evidence := range context.lookup {
 		statements[id] = evidence.Summary
 	}
+	findings := findingStatementsByEvidenceID(input.Upstream, context.lookup)
 	availableEvidence := make(map[string]struct{}, len(context.lookup))
 	for id := range context.lookup {
 		availableEvidence[id] = struct{}{}
@@ -838,13 +1209,14 @@ func projectVerifierClaims(
 		statement := ""
 		for _, rawID := range verdict.ClaimIDs {
 			id := strings.TrimSpace(rawID)
-			if text := statements[id]; text != "" {
+			if text := findings[id]; isUserReadableClaimText(text) {
 				statement = text
 				break
 			}
-		}
-		if !isUserReadableClaimText(statement) {
-			statement = ""
+			if text := statements[id]; isUserReadableClaimText(text) {
+				statement = text
+				break
+			}
 		}
 		if statement == "" {
 			rationale := strings.TrimSpace(verdict.Rationale)
@@ -871,6 +1243,39 @@ func projectVerifierClaims(
 		})
 	}
 	return claims, nil
+}
+
+func findingStatementsByEvidenceID(
+	upstream map[string]json.RawMessage,
+	lookup map[string]evidenceSummaryView,
+) map[string]string {
+	out := make(map[string]string)
+	if len(upstream) == 0 || len(lookup) == 0 {
+		return out
+	}
+	idByRef := evidenceIDsByReference(lookup)
+	for _, raw := range upstream {
+		var report investigationReportOutput
+		if err := json.Unmarshal(raw, &report); err != nil {
+			continue
+		}
+		for _, finding := range report.Findings {
+			statement := strings.TrimSpace(finding.Claim)
+			if !isUserReadableClaimText(statement) {
+				continue
+			}
+			for _, item := range finding.Evidence {
+				id, ok := idByRef[item.Kind+"\x00"+item.Reference]
+				if !ok {
+					continue
+				}
+				if _, exists := out[id]; !exists {
+					out[id] = statement
+				}
+			}
+		}
+	}
+	return out
 }
 
 func verifierEvidenceRefs(verdict verificationVerdict, available map[string]struct{}) []EvidenceRef {

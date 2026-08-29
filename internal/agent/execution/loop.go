@@ -294,6 +294,10 @@ func (agent *Agent) RunCompiled(
 		runStarted,
 	)
 	if err := agent.runTurns(state); err != nil {
+		// runTurns returns control-flow failures separately from result.Err.
+		// Copy it before finalization so terminal logs and evidence snapshots
+		// describe the actual failure that stopped the loop.
+		state.result.Err = err
 		state.result.DelegationAdoptions = state.answerContract.UnknownAdoptions(
 			"parent_run_failed",
 		)

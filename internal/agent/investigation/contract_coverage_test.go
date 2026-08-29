@@ -2,6 +2,7 @@ package investigation
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -127,5 +128,22 @@ func TestDefaultCatalogSchemasResolveFromStandardCatalog(t *testing.T) {
 		if _, err := registry.Resolve(ref); err != nil {
 			t.Fatalf("default schema %s not resolvable: %v", ref.ID, err)
 		}
+	}
+}
+
+func TestEvidenceAndClaimIDsAreShortCitationTokens(t *testing.T) {
+	evidence := evidenceID(EvidenceCandidate{
+		SourceKind: "code", Target: "service-a", Section: "L10-L20",
+		Version: "v1", TimeRange: "release-1", ContentHash: "abc123",
+	})
+	if len(evidence) != 16 || !strings.HasPrefix(evidence, "evidence_") {
+		t.Fatalf("evidence id = %q (len %d), want 16 chars prefixed with evidence_", evidence, len(evidence))
+	}
+	claim := claimID(ClaimCandidate{GoalID: "g1", Text: "the flow is supported"})
+	if len(claim) != 16 || !strings.HasPrefix(claim, "claim_") {
+		t.Fatalf("claim id = %q (len %d), want 16 chars prefixed with claim_", claim, len(claim))
+	}
+	if evidence == strings.Replace(claim, "claim_", "evidence_", 1) {
+		t.Fatal("evidence and claim handles must not collide across namespaces")
 	}
 }

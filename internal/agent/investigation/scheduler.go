@@ -15,8 +15,11 @@ import (
 type TaskInputProvider func(ExecutableTask, map[string]json.RawMessage) TaskExecutionInput
 
 type ScheduledTaskResult struct {
-	Task        ExecutableTask      `json:"task"`
-	Status      TaskStatus          `json:"status"`
+	Task   ExecutableTask `json:"task"`
+	Status TaskStatus     `json:"status"`
+	// BudgetGrant records the protected admission floor assigned to this task;
+	// it is diagnostic context, not a private task hard limit.
+	BudgetGrant BudgetVector        `json:"budget_grant,omitempty"`
 	Result      TaskExecutionResult `json:"result,omitempty"`
 	Failure     *RunFailure         `json:"failure,omitempty"`
 	Started     time.Time           `json:"started_at,omitempty"`
@@ -36,6 +39,11 @@ type Scheduler struct {
 	OnComplete          func(ScheduledTaskResult)
 	InitialResults      map[string]ScheduledTaskResult
 	InitialOutputs      map[string]json.RawMessage
+	// ProtectedAdmissions contains reservations made by the coordinator for
+	// downstream stages (for example the verifier). They are already counted
+	// in the shared ledger and must be consumed by the matching task instead of
+	// being reserved a second time during ordinary batch admission.
+	ProtectedAdmissions map[string]BudgetReservation
 }
 
 func (scheduler Scheduler) Execute(
@@ -52,12 +60,16 @@ func (scheduler Scheduler) Execute(
 	if scheduler.Schemas == nil {
 		return nil, fmt.Errorf("schema registry is required")
 	}
+	if scheduler.Ledger == nil {
+		return nil, fmt.Errorf("budget ledger is required")
+	}
 	if scheduler.Ledger != nil {
 		ctx = agentapi.WithRunBudgetGate(ctx, scheduler.Ledger)
 	}
 	if len(tasks) == 0 {
 		return nil, nil
 	}
+	defer scheduler.releaseProtectedAdmissions(tasks)
 	if err := validateDependencies(tasks); err != nil {
 		return nil, err
 	}
@@ -83,13 +95,18 @@ func (scheduler Scheduler) Execute(
 		}
 		state[task.ID] = task
 	}
-	results := make(map[string]ScheduledTaskResult, len(scheduler.InitialResults))
+	results := make(map[string]ScheduledTaskResult, len(tasks))
 	for id, result := range scheduler.InitialResults {
-		results[id] = result
-		if task, ok := state[id]; ok {
-			task.Status = result.Status
-			state[id] = task
+		task, ok := state[id]
+		if !ok || !terminalTaskStatus(result.Status) {
+			// Resume snapshots may contain stale nodes or an in-flight record.
+			// Only a terminal result closes a task in this scheduler invocation.
+			continue
 		}
+		result.Task = task
+		results[id] = result
+		task.Status = result.Status
+		state[id] = task
 	}
 	outputs := make(map[string]json.RawMessage, len(scheduler.InitialOutputs))
 	for id, output := range scheduler.InitialOutputs {
@@ -116,9 +133,7 @@ func (scheduler Scheduler) Execute(
 		}
 		ready, blocked := scheduler.readyTasks(state, results)
 		for _, task := range blocked {
-			failure := &RunFailure{
-				Code: FailureExecution, Message: "required dependency failed", Stage: string(StageExecution), TaskID: task.ID,
-			}
+			failure := dependencyFailure(task, results)
 			record(ScheduledTaskResult{Task: task, Status: TaskBlocked, Failure: failure})
 		}
 		if len(ready) == 0 {
@@ -153,6 +168,25 @@ func (scheduler Scheduler) Execute(
 			}
 			batchTasks = append(batchTasks, task)
 		}
+		admissions, admittedTasks, rejectedTask, admissionErr := scheduler.admitAgentBatch(batchTasks)
+		if admissionErr != nil {
+			return orderedTaskResults(tasks, results), fmt.Errorf("admit agent batch: %w", admissionErr)
+		}
+		if len(admittedTasks) != len(batchTasks) {
+			batchTasks = admittedTasks
+		}
+		if len(batchTasks) == 0 {
+			// A single task whose minimum cannot fit can never become runnable
+			// by waiting. The admission helper returns the exact rejected Agent;
+			// do not infer it from ready[0], whose order is not a scheduling contract.
+			if rejectedTask != nil {
+				result := ScheduledTaskResult{Task: *rejectedTask, Status: TaskFailed, Started: time.Now().UTC(), Ended: time.Now().UTC(),
+					Failure: &RunFailure{Code: FailureBudget, Message: "task minimum budget cannot fit within the run limit", Stage: string(StageExecution), TaskID: rejectedTask.ID}}
+				record(result)
+				continue
+			}
+			return orderedTaskResults(tasks, results), fmt.Errorf("%w: no admitted task remains", ErrTaskNotReady)
+		}
 		batch := make([]ScheduledTaskResult, len(batchTasks))
 		var waitGroup sync.WaitGroup
 		for index, task := range batchTasks {
@@ -166,7 +200,7 @@ func (scheduler Scheduler) Execute(
 			waitGroup.Add(1)
 			go func() {
 				defer waitGroup.Done()
-				batch[index] = scheduler.executeOne(ctx, task, provider, outputs)
+				batch[index] = scheduler.executeOne(ctx, task, provider, outputs, admissions[task.ID])
 			}()
 		}
 		waitGroup.Wait()
@@ -188,8 +222,9 @@ func (scheduler Scheduler) executeOne(
 	task ExecutableTask,
 	provider TaskInputProvider,
 	outputs map[string]json.RawMessage,
+	preAdmission BudgetReservation,
 ) ScheduledTaskResult {
-	result := ScheduledTaskResult{Task: task, Status: TaskFailed, Started: time.Now().UTC()}
+	result := ScheduledTaskResult{Task: task, Status: TaskFailed, Started: time.Now().UTC(), BudgetGrant: preAdmission.Grant}
 	if scheduler.Ledger == nil {
 		result.Failure = &RunFailure{Code: FailureBudget, Message: "budget ledger is required", Stage: string(StageExecution), TaskID: task.ID}
 		result.Ended = time.Now().UTC()
@@ -201,12 +236,14 @@ func (scheduler Scheduler) executeOne(
 		input.Task = task
 	}
 	if err := validateTaskInput(scheduler.Schemas, task, input); err != nil {
+		releaseAdmission(preAdmission)
 		result.Failure = &RunFailure{Code: FailureSchema, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID}
 		result.Ended = time.Now().UTC()
 		return result
 	}
 	executor, resolveErr := scheduler.Executors.Resolve(task.Executor)
 	if resolveErr != nil {
+		releaseAdmission(preAdmission)
 		result.Failure = &RunFailure{Code: FailureExecution, Message: resolveErr.Error(), Stage: string(StageExecution), TaskID: task.ID}
 		result.Ended = time.Now().UTC()
 		return result
@@ -225,33 +262,52 @@ func (scheduler Scheduler) executeOne(
 	var totalUsage BudgetVector
 	baseTaskBudget := task.Budget.Limit
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// This is a run-level preflight, not a child quota. It lets the reused
-		// Single-Agent runtime stop before starting another model turn after a
-		// sibling has exhausted the shared budget.
-		if err := scheduler.Ledger.Check(); err != nil {
-			lastFailure = &RunFailure{Code: FailureBudget, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID}
-			result.Attempts = append(result.Attempts, TaskAttempt{Attempt: attempt, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(), Status: TaskFailed, Failure: lastFailure})
-			break
+		// Model tasks need a run-level preflight when no protected admission
+		// covers them. Deterministic tools reserve their exact cost below, so an
+		// exhausted model dimension must not block a tool-only task.
+		protectedAdmission := attempt == 1 && preAdmission.ID != "" && preAdmission.Grant != (BudgetVector{})
+		if !protectedAdmission && isAgentExecutor(task.Executor) {
+			if err := scheduler.Ledger.Check(); err != nil {
+				releaseAdmission(preAdmission)
+				lastFailure = &RunFailure{Code: FailureBudget, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID}
+				// No task artifact exists when the run is rejected before execution.
+				// Keep this a hard failure so admission cannot turn the budget cause
+				// into a misleading empty-output partial result.
+				result.Failure = lastFailure
+				result.Attempts = append(result.Attempts, TaskAttempt{Attempt: attempt, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(), Status: TaskFailed, Failure: lastFailure})
+				break
+			}
 		}
 		taskBudget := baseTaskBudget
 		grant := taskBudget
 		admissionGrant := grant
-		if isAgentExecutor(task.Executor) {
-			// Agent tasks have no implicit cumulative quota. Explicit task
-			// limits only narrow request context or wall-clock execution; model
-			// usage is reserved and settled through the shared run ledger.
-			admissionGrant = agentAdmissionGrant(grant)
-		}
-		reservationID := fmt.Sprintf("%s.attempt.%d", task.ID, attempt)
 		var reservation BudgetReservation
 		var err error
 		if isAgentExecutor(task.Executor) {
-			reservation, err = scheduler.Ledger.ReserveAdmission(StageExecution, reservationID, admissionGrant)
+			if attempt == 1 && preAdmission.ID != "" {
+				admissionGrant = preAdmission.Grant
+			} else {
+				admissionGrant, err = scheduler.minimumBudget(task)
+			}
+		}
+		if err != nil {
+			lastFailure = &RunFailure{Code: FailureExecution, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID}
+			result.Failure = lastFailure
+			result.Attempts = append(result.Attempts, TaskAttempt{Attempt: attempt, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(), Status: TaskFailed, Failure: lastFailure})
+			break
+		}
+		if attempt == 1 && preAdmission.ID != "" {
+			reservation = preAdmission
+		} else if isAgentExecutor(task.Executor) {
+			reservation, err = scheduler.Ledger.ReserveAdmission(StageExecution, fmt.Sprintf("%s.attempt.%d", task.ID, attempt), admissionGrant)
 		} else {
-			reservation, err = scheduler.Ledger.Reserve(StageExecution, reservationID, grant)
+			reservation, err = scheduler.Ledger.Reserve(StageExecution, fmt.Sprintf("%s.attempt.%d", task.ID, attempt), grant)
 		}
 		if err != nil {
 			lastFailure = &RunFailure{Code: FailureBudget, Message: err.Error(), Stage: string(StageExecution), TaskID: task.ID}
+			// Admission failure happens before the executor starts, therefore
+			// there is no partial artifact to pass downstream.
+			result.Failure = lastFailure
 			result.Attempts = append(result.Attempts, TaskAttempt{Attempt: attempt, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(), Status: TaskFailed, Failure: lastFailure})
 			break
 		}
@@ -271,11 +327,17 @@ func (scheduler Scheduler) executeOne(
 		attemptInput.Attempt = attempt
 		attemptTask := task
 		if isAgentExecutor(task.Executor) {
-			// RuntimeBudget carries only explicit task narrowing. The shared
-			// ledger remains the sole cumulative token/cost authority.
-			attemptTask.Budget.Limit = grant
+			// RuntimeBudget normally carries explicit task narrowing while the
+			// shared ledger remains authoritative. A pre-admitted Verifier is
+			// different: its input/output/total role slice was allocated from the
+			// Run before Investigators started, so pass that exact slice to the
+			// child Run as well.
+			attemptTask.Budget.Limit = baseTaskBudget
 			attemptInput.Task = attemptTask
-			attemptInput.RuntimeBudget = grant
+			attemptInput.RuntimeBudget = baseTaskBudget
+			if task.Executor == ExecutorVerifier && protectedAdmission {
+				attemptInput.RuntimeBudget = admissionGrant
+			}
 		}
 		taskResult, execErr := executor.Execute(execCtx, attemptTask, attemptInput)
 		execContextErr := execCtx.Err()
@@ -291,9 +353,9 @@ func (scheduler Scheduler) executeOne(
 				"[investigation] reservation settle failed task=%s executor=%s reservation=%s grant=%+v actual=%+v: %v",
 				task.ID, task.Executor, reservation.ID, reservation.Grant, taskResult.Usage, settleErr,
 			)
-			// Settle keeps the reservation when usage is rejected so callers can
-			// inspect or release it. This attempt is terminal here, therefore
-			// release it before allowing siblings/retries to use the budget.
+			// A soft settlement may already have consumed and removed the
+			// reservation while reporting the hard-limit overrun. Release is
+			// therefore best effort for hard-settlement failures only.
 			_ = reservation.Release()
 			lastFailure = &RunFailure{Code: FailureBudget, Message: settleErr.Error(), Stage: string(StageExecution), TaskID: task.ID}
 			result.Attempts = append(result.Attempts, TaskAttempt{Attempt: attempt, StartedAt: attemptStarted, EndedAt: attemptEnded, Status: TaskFailed, Failure: lastFailure})
@@ -336,11 +398,11 @@ func (scheduler Scheduler) executeOne(
 	result.Result = lastTaskResult
 	result.Result.Usage = totalUsage
 	result.Failure = lastFailure
-	if lastFailure != nil && lastFailure.Code == FailureBudget && hasAdmissibleEvidence(lastTaskResult) {
+	if lastFailure != nil && hasAdmissibleArtifacts(task, lastTaskResult) {
 		result.Status = TaskPartial
 		log.Printf(
-			"[investigation] worker partial task=%s executor=%s stop_reason=budget_exhausted completeness=partial evidence=%d usage=%+v",
-			task.ID, task.Executor, len(lastTaskResult.EvidenceCandidates), totalUsage,
+			"[investigation] task partial task=%s executor=%s stop_reason=%s evidence=%d claims=%d usage=%+v",
+			task.ID, task.Executor, lastFailure.Code, len(lastTaskResult.EvidenceCandidates), len(lastTaskResult.Claims), totalUsage,
 		)
 	}
 	if lastFailure != nil && (lastFailure.Code == FailureTimeout || lastFailure.Code == FailureCancelled) {
@@ -350,28 +412,103 @@ func (scheduler Scheduler) executeOne(
 	return result
 }
 
-func agentAdmissionGrant(grant BudgetVector) BudgetVector {
-	grant.InputTokens = 0
-	grant.OutputTokens = 0
-	grant.TotalTokens = 0
-	grant.ToolCalls = 0
-	grant.CostMicros = 0
-	return grant
+func releaseAdmission(reservation BudgetReservation) {
+	if reservation.ID == "" {
+		return
+	}
+	if err := reservation.Release(); err != nil {
+		log.Printf("[investigation] admission release failed reservation=%s: %v", reservation.ID, err)
+	}
 }
 
-func (ledger *BudgetLedger) checkReservation(id string) error {
-	if ledger == nil {
-		return fmt.Errorf("budget ledger is required")
+func (scheduler Scheduler) isAgentTask(task ExecutableTask) bool {
+	return isAgentExecutor(task.Executor)
+}
+
+func (scheduler Scheduler) minimumBudget(task ExecutableTask) (BudgetVector, error) {
+	executor, err := scheduler.Executors.Resolve(task.Executor)
+	if err != nil {
+		if errors.Is(err, ErrCapabilityGap) {
+			// executeOne reports the missing executor as a task failure; admission
+			// has no model contract to inspect in this case.
+			return BudgetVector{}, nil
+		}
+		return BudgetVector{}, fmt.Errorf("resolve executor %q for budget admission: %w", task.Executor, err)
 	}
-	ledger.mu.Lock()
-	defer ledger.mu.Unlock()
-	if _, exists := ledger.reservations[id]; !exists {
-		return fmt.Errorf("reservation %q not found", id)
+	if provider, ok := executor.(TaskMinimumBudgetProvider); ok {
+		grant, providerErr := provider.MinimumBudget(task)
+		if providerErr != nil {
+			return BudgetVector{}, fmt.Errorf("minimum budget for task %q: %w", task.ID, providerErr)
+		}
+		return grant, nil
 	}
-	if !fits(addVector(ledger.run.Used, ledger.run.Reserved), ledger.run.Limit) {
-		return fmt.Errorf("%w: shared investigation run budget is exhausted", ErrBudgetExceeded)
+	// Executors without a model contract (including test/custom executors)
+	// retain the old zero-token admission semantics.
+	return BudgetVector{}, nil
+}
+
+func (scheduler Scheduler) admitAgentBatch(tasks []ExecutableTask) (map[string]BudgetReservation, []ExecutableTask, *ExecutableTask, error) {
+	admitted := append([]ExecutableTask(nil), tasks...)
+	var lastRemoved *ExecutableTask
+	for {
+		requests := make([]BudgetAdmission, 0, len(admitted))
+		for _, task := range admitted {
+			if !isAgentExecutor(task.Executor) {
+				continue
+			}
+			if _, protected := scheduler.ProtectedAdmissions[task.ID]; protected {
+				continue
+			}
+			grant, err := scheduler.minimumBudget(task)
+			if err != nil {
+				return nil, nil, lastRemoved, err
+			}
+			requests = append(requests, BudgetAdmission{TaskID: task.ID, Grant: grant})
+		}
+		reservations, err := scheduler.Ledger.ReserveAdmissionGroup(StageExecution, requests)
+		if err == nil {
+			for _, task := range admitted {
+				if protected, ok := scheduler.ProtectedAdmissions[task.ID]; ok {
+					reservations[task.ID] = protected
+				}
+			}
+			return reservations, admitted, nil, nil
+		}
+		if !errors.Is(err, ErrBudgetExceeded) {
+			return nil, nil, lastRemoved, err
+		}
+		remove := -1
+		for index := len(admitted) - 1; index >= 0; index-- {
+			if isAgentExecutor(admitted[index].Executor) {
+				remove = index
+				break
+			}
+		}
+		if remove < 0 {
+			return nil, nil, lastRemoved, err
+		}
+		removed := admitted[remove]
+		lastRemoved = &removed
+		admitted = append(admitted[:remove], admitted[remove+1:]...)
+		if len(admitted) == 0 {
+			return nil, nil, lastRemoved, nil
+		}
 	}
-	return nil
+}
+
+func (scheduler Scheduler) releaseProtectedAdmissions(tasks []ExecutableTask) {
+	if len(scheduler.ProtectedAdmissions) == 0 {
+		return
+	}
+	for _, task := range tasks {
+		reservation, ok := scheduler.ProtectedAdmissions[task.ID]
+		if !ok || reservation.ID == "" {
+			continue
+		}
+		// A reservation consumed by executeOne has already been settled; release
+		// is then a harmless no-op from the scheduler's cleanup perspective.
+		_ = reservation.Release()
+	}
 }
 
 func retryableTaskFailure(failure *RunFailure) bool {
@@ -402,6 +539,42 @@ func validateTaskInput(schemas SchemaResolver, task ExecutableTask, input TaskEx
 		return fmt.Errorf("task %q input schema: %w", task.ID, err)
 	}
 	return nil
+}
+
+func terminalTaskStatus(status TaskStatus) bool {
+	switch status {
+	case TaskSucceeded, TaskPartial, TaskFailed, TaskBlocked, TaskCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func dependencyFailure(task ExecutableTask, results map[string]ScheduledTaskResult) *RunFailure {
+	for _, dependencyID := range task.Dependencies {
+		dependency, ok := results[dependencyID]
+		if !ok || dependency.Status == TaskSucceeded || dependency.Status == TaskPartial {
+			continue
+		}
+		failure := RunFailure{
+			Code:    FailureExecution,
+			Message: fmt.Sprintf("required dependency %q ended with status %q", dependencyID, dependency.Status),
+			Stage:   string(StageExecution),
+			TaskID:  task.ID,
+		}
+		if dependency.Failure != nil {
+			failure.Message = fmt.Sprintf("required dependency %q failed (%s): %s", dependencyID, dependency.Failure.Code, dependency.Failure.Message)
+			failure.Code = dependency.Failure.Code
+			failure.Retryable = dependency.Failure.Retryable
+		}
+		return &failure
+	}
+	return &RunFailure{
+		Code:    FailureExecution,
+		Message: fmt.Sprintf("required dependency failed for task %q", task.ID),
+		Stage:   string(StageExecution),
+		TaskID:  task.ID,
+	}
 }
 
 func (scheduler Scheduler) readyTasks(
@@ -440,8 +613,17 @@ func (scheduler Scheduler) readyTasks(
 	return ready, blocked
 }
 
-func hasAdmissibleEvidence(result TaskExecutionResult) bool {
-	return len(result.EvidenceCandidates) > 0
+func hasAdmissibleArtifacts(task ExecutableTask, result TaskExecutionResult) bool {
+	// Investigator output is an internal report, not the dependency contract.
+	// Only content-bearing evidence can unblock verification; an empty fallback
+	// report must not hide a budget or runtime failure.
+	if task.Executor == ExecutorInvestigator {
+		return len(result.EvidenceCandidates) > 0
+	}
+	if task.Executor == ExecutorVerifier {
+		return len(result.Claims) > 0
+	}
+	return false
 }
 
 func contextTaskFailure(err error, taskID string) *RunFailure {

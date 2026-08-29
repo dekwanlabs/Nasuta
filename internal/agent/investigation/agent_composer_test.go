@@ -15,6 +15,8 @@ import (
 func synthesizerDefinition() agentapi.Definition {
 	def := testDefinition()
 	def.ID = "synthesizer"
+	def.Model.MaxOutputTokens = 12_800
+	def.Budget.ContextTokens = 256_000
 	return def
 }
 
@@ -27,6 +29,9 @@ func TestAgentComposerComposeSuccessful(t *testing.T) {
 	composer := AgentComposer{
 		Runtime:     runtime,
 		Definitions: fakeDefinitionResolver{def: synthesizerDefinition()},
+		Budget: BudgetVector{
+			InputTokens: 30_000, OutputTokens: 12_800, TotalTokens: 51_200,
+		},
 	}
 	contract := InvestigationContract{
 		Version:       InvestigationContractVersion,
@@ -68,6 +73,16 @@ func TestAgentComposerComposeSuccessful(t *testing.T) {
 	request := *runtime.gotReq
 	if request.Agent.ID != "synthesizer" || request.Agent.Version != 1 {
 		t.Fatalf("agent ref = %+v", request.Agent)
+	}
+	if request.Limits.MaxInputTokens != 30_000 || request.Limits.MaxTotalTokens != 51_200 {
+		t.Fatalf("synthesizer limits = %+v, want input=30000 total=51200", request.Limits)
+	}
+	if request.Limits.MaxContextTokens <= request.Limits.MaxInputTokens ||
+		request.Limits.MaxContextTokens > 256_000 {
+		t.Fatalf("synthesizer context limit = %d", request.Limits.MaxContextTokens)
+	}
+	if got := synthesizerDefinition().Model.MaxOutputTokens; got != 12_800 {
+		t.Fatalf("synthesizer output limit = %d, want 12800", got)
 	}
 	if !request.Policy.EvidenceSeeded {
 		t.Fatal("synthesis request is not evidence-seeded")

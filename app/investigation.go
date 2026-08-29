@@ -102,19 +102,30 @@ func (p *Platform) buildInvestigationCoordinator(
 		return nil, fmt.Errorf("investigation: %w", err)
 	}
 
+	// Synthesizer receives the Composition share of the frozen Investigation
+	// Run budget. Do not fall back to the generic answer budget here: that would
+	// make the role ignore the same total-budget allocation used by the ledger.
+	compositionBudget, err := investigation.AllocateRoleBudget(
+		policy.Profile,
+		policy.Limit,
+		investigation.StageComposition,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("investigation: composition budget: %w", err)
+	}
+	composer.Budget = compositionBudget
+
 	coordinator := investigation.NewCoordinator(investigation.CoordinatorOptions{
-		Catalog:     catalog,
-		Schemas:     p.agents.schemas,
-		Tools:       snapshot,
-		Store:       store,
-		Executors:   executors,
-		Composer:    composer,
-		Delivery:    investigation.DeliveryGate{},
-		Lease:       leaseStore,
-		BudgetLimit: policy.Limit,
-		CompositionBudget: investigation.BudgetVector{
-			OutputTokens: int64(settings.LLMAnswerMaxTokens),
-		},
+		Catalog:             catalog,
+		Schemas:             p.agents.schemas,
+		Tools:               snapshot,
+		Store:               store,
+		Executors:           executors,
+		Composer:            composer,
+		Delivery:            investigation.DeliveryGate{},
+		Lease:               leaseStore,
+		BudgetLimit:         policy.Limit,
+		CompositionBudget:   compositionBudget,
 		BudgetProfile:       policy.Profile,
 		PolicyVersion:       investigation.DefaultBudgetPolicyVersion,
 		MaxRounds:           policy.MaxRounds,

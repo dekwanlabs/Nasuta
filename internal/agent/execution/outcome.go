@@ -50,11 +50,11 @@ func OutcomeFor(
 		outcome.Err = runErr
 	case runErr != nil:
 		outcome.Status = run.StatusFailed
-		outcome.ErrorCode = "runtime_failed"
+		outcome.ErrorCode = errorCodeFor(runErr, "runtime_failed")
 		outcome.Err = runErr
 	case result.Err != nil:
 		outcome.Status = run.StatusFailed
-		outcome.ErrorCode = "agent_failed"
+		outcome.ErrorCode = errorCodeFor(result.Err, "agent_failed")
 		outcome.Err = result.Err
 	case result.OutputMode == agentapi.RunOutputEvidenceWorker:
 		outcome.Status = run.StatusDone
@@ -66,6 +66,13 @@ func OutcomeFor(
 		outcome.Status = run.StatusDone
 	}
 	return outcome
+}
+
+func errorCodeFor(err error, fallback string) string {
+	if errors.Is(err, agentapi.ErrBudgetExceeded) || errors.Is(err, ErrModelCallBudgetExhausted) {
+		return "budget_exhausted"
+	}
+	return fallback
 }
 
 // MergeOutcomeReferences keeps one canonical public reference set across sources.

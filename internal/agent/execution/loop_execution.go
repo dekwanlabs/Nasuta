@@ -151,8 +151,7 @@ func (state *compiledLoop) recordSeedEvidence(observer Observer) {
 }
 
 func (agent *Agent) finishLoop(state *compiledLoop) {
-	if state.input.OutputMode != agentapi.RunOutputEvidenceWorker &&
-		!state.answered && !state.result.Aborted && state.result.Err == nil {
+	if agent.shouldForceConclusion(state) {
 		state.result.ForcedConclusion = true
 		state.result.Evidence.ForcedConclusion = true
 		log.InfofCtx(state.ctx, "[agent] run %s forcing conclusion (steps=%d)",
@@ -160,6 +159,29 @@ func (agent *Agent) finishLoop(state *compiledLoop) {
 		agent.concludeLoop(state)
 	}
 	agent.finalizeLoop(state)
+}
+
+func (agent *Agent) shouldForceConclusion(state *compiledLoop) bool {
+	if state.answered || state.result.Aborted || state.result.Err != nil {
+		return false
+	}
+	if state.input.OutputMode != agentapi.RunOutputEvidenceWorker {
+		return true
+	}
+	// Structured investigators must emit investigation.report. Tool-only
+	// evidence workers without a schema still stop after observations.
+	return agent.cfg.StructuredOutput
+}
+
+func (agent *Agent) reservesLastStepForAnswer() bool {
+	return agent.cfg.StructuredOutput
+}
+
+func (agent *Agent) toolsForStep(state *compiledLoop, step int) []llm.ToolDef {
+	if agent.reservesLastStepForAnswer() && state.stepLimit > 1 && step >= state.stepLimit {
+		return nil
+	}
+	return state.tools
 }
 
 func (agent *Agent) finalizeLoop(state *compiledLoop) {

@@ -482,3 +482,54 @@ func TestEvidenceLedgerRejectsOpaqueContent(t *testing.T) {
 		t.Fatalf("opaque evidence = admitted=%v err=%v, want rejection", admitted, err)
 	}
 }
+
+func TestUserReadableClaimTextRejectsMachineJSON(t *testing.T) {
+	for _, text := range []string{
+		`{"service":"service-a","upstream":[],"downstream":[],"truncated":false}`,
+		`[{"source":"code","target":"service-a"}]`,
+		"{\n  \"matches\":[{\"docId\":\"doc-2015a2bba8c6e812\",\"title\":\"hsds-product\"",
+		`{"matches":[{"docId":"doc-2015a2bba8c6e812","title":"hsds-product","chunk":2`,
+	} {
+		if isUserReadableClaimText(text) {
+			t.Fatalf("machine JSON claim accepted: %s", text)
+		}
+	}
+}
+
+func TestUserReadableClaimTextAllowsNaturalLanguageContainingMetadata(t *testing.T) {
+	text := `The service returns metadata {"truncated":false} after the request completes.`
+	if !isUserReadableClaimText(text) {
+		t.Fatalf("natural-language claim containing metadata was rejected")
+	}
+}
+
+func TestBudgetFailureRequiresOwnedArtifact(t *testing.T) {
+	evidence := NewEvidenceLedger()
+	candidate := EvidenceCandidate{SourceKind: "runbook", Target: "shared.md", Content: "usable evidence"}
+	if _, admitted, err := evidence.Admit("sibling-task", candidate); err != nil || !admitted {
+		t.Fatalf("admit sibling evidence = %v, %v", admitted, err)
+	}
+	failure := &RunFailure{Code: FailureBudget, TaskID: "failed-task"}
+	if budgetFailureCanDeliver(evidence, nil, failure) {
+		t.Fatal("sibling evidence satisfied budget failure")
+	}
+	failure.TaskID = "sibling-task"
+	if !budgetFailureCanDeliver(evidence, nil, failure) {
+		t.Fatal("task-owned evidence did not satisfy budget failure")
+	}
+
+	claims := NewClaimLedger([]EvidenceGoal{{ID: "goal"}}, evidence)
+	claim := ClaimCandidate{GoalID: "goal", Text: "The runbook supports this claim.", Status: ClaimSupported,
+		EvidenceRefs: []EvidenceRef{{EvidenceID: evidence.All()[0].ID}}}
+	if _, admitted, err := claims.Admit("verifier-task", claim); err != nil || !admitted {
+		t.Fatalf("admit verifier claim = %v, %v", admitted, err)
+	}
+	failure.TaskID = "other-verifier"
+	if budgetFailureCanDeliver(nil, claims, failure) {
+		t.Fatal("sibling claim satisfied budget failure")
+	}
+	failure.TaskID = "verifier-task"
+	if !budgetFailureCanDeliver(nil, claims, failure) {
+		t.Fatal("task-owned claim did not satisfy budget failure")
+	}
+}

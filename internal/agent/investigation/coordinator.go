@@ -278,6 +278,17 @@ func appendStructuredRunEvent(store RunStore, runID, eventType string, fields ma
 	return nil
 }
 
+func failureWithPersistenceError(failure RunFailure, operation string, err error) RunFailure {
+	if err == nil {
+		return failure
+	}
+	if strings.TrimSpace(failure.Message) == "" {
+		failure.Message = string(failure.Code)
+	}
+	failure.Message = fmt.Sprintf("%s; %s: %v", failure.Message, operation, err)
+	return failure
+}
+
 func persistResumeFailure(
 	store RunStore,
 	runID string,
@@ -288,6 +299,7 @@ func persistResumeFailure(
 	if failure.Message == "" {
 		failure.Message = string(failure.Code)
 	}
+	status = runFailureStatusForFailure(failure, status)
 	resultErr := failureError(failure)
 	if ledger != nil {
 		if err := store.SaveBudget(runID, ledger.Snapshot()); err != nil {
@@ -378,12 +390,20 @@ func (coordinator *Coordinator) Resume(
 		task.Status = record.Status
 		result := ScheduledTaskResult{
 			Task: task, Status: record.Status,
-			Result:      TaskExecutionResult{Output: record.Output, Usage: record.Usage},
+			Result: TaskExecutionResult{
+				Output:             record.Output,
+				EvidenceCandidates: evidenceCandidatesForTask(run.Evidence, task.ID),
+				Usage:              record.Usage,
+			},
 			Failure:     record.Failure,
 			Attempts:    append([]TaskAttempt(nil), record.Attempts...),
 			Discoveries: append([]Discovery(nil), record.Discoveries...),
 		}
-		if record.Status == TaskSucceeded {
+		if (record.Status == TaskSucceeded || record.Status == TaskPartial) && len(record.Output) > 0 {
+			// Partial investigators may have durable report context that the
+			// verifier needs after a resume. Evidence is restored separately;
+			// upstream output must be restored with the same terminal artifact
+			// contract.
 			seededOutputs[task.ID] = append([]byte(nil), record.Output...)
 		}
 		seededResults[task.ID] = result
@@ -394,8 +414,7 @@ func (coordinator *Coordinator) Resume(
 	var requiredFailure *RunFailure
 	for _, seeded := range seededResults {
 		if failure := requiredTaskFailure(seeded); failure != nil {
-			requiredFailure = failure
-			break
+			requiredFailure = preferRunFailure(requiredFailure, failure)
 		}
 	}
 
@@ -410,8 +429,25 @@ func (coordinator *Coordinator) Resume(
 	}()
 	resumedAt := time.Now().UTC()
 	resumeStatus := run.Status
+	var compositionReservation BudgetReservation
+	compositionBudgetUnavailable := false
+	releaseComposition := func() {
+		if compositionReservation.ID == "" {
+			return
+		}
+		_ = compositionReservation.Release()
+		compositionReservation = BudgetReservation{}
+	}
 	var persistErr error
 	var scheduleErr error
+	if requiredFailure != nil && !budgetFailureCanDeliverForPlan(tasks, evidence, claims, requiredFailure) {
+		report := BuildReport(evidence, claims, failures)
+		if err := store.SaveReport(runID, report); err != nil {
+			failure := failureWithPersistenceError(*requiredFailure, "save failure report", err)
+			return persistResumeFailure(store, runID, ledger, failure, runFailureStatusForFailure(failure, RunFailed))
+		}
+		return persistResumeFailure(store, runID, ledger, *requiredFailure, runFailureStatusForFailure(*requiredFailure, RunFailed))
+	}
 	if resumeStatus == RunPlanned || resumeStatus == RunExecuting {
 		if resumeStatus == RunPlanned {
 			if err := store.Transition(runID, RunExecuting); err != nil {
@@ -419,6 +455,20 @@ func (coordinator *Coordinator) Resume(
 			}
 			resumeStatus = RunExecuting
 		}
+		// Synthesizer budget is deliberately acquired after investigation and
+		// verification, never during resumed execution admission.
+		verificationAdmissions, err := coordinator.reserveVerification(ledger, tasks)
+		if err != nil {
+			releaseComposition()
+			failure := verifierReservationFailure(err)
+			return persistResumeFailure(store, runID, ledger, failure, runFailureStatusForFailure(failure, RunFailed))
+		}
+		// Composition is optional and runs after execution. Do not keep its
+		// reservation alive while Investigators consume the shared Run budget;
+		// otherwise the later Verifier can be rejected even though its own floor
+		// was protected successfully.
+		releaseComposition()
+		compositionBudgetUnavailable = false
 		scheduler := Scheduler{
 			Executors:           coordinator.Executors,
 			Schemas:             coordinator.Schemas,
@@ -428,6 +478,7 @@ func (coordinator *Coordinator) Resume(
 			MaxToolParallelism:  effectiveParallelism(coordinator.MaxToolParallelism, run.Plan.Policy.MaxParallelism),
 			InitialResults:      seededResults,
 			InitialOutputs:      seededOutputs,
+			ProtectedAdmissions: verificationAdmissions,
 			OnStart: func(task ExecutableTask) {
 				coordinator.emitProgress(runID, ProgressTaskStarted, task.ID, task.Executor, directToolID(task), "running", "")
 				if err := appendStructuredRunEvent(store, runID, "task_started", map[string]any{
@@ -442,8 +493,8 @@ func (coordinator *Coordinator) Resume(
 				admitted := len(evidence.All()) - beforeEvidence
 				if taskFailure != nil {
 					failures = append(failures, *taskFailure)
-					if !scheduled.Task.Optional && requiredFailure == nil {
-						requiredFailure = taskFailure
+					if !scheduled.Task.Optional {
+						requiredFailure = preferRunFailure(requiredFailure, taskFailure)
 					}
 					if record.Status == TaskSucceeded {
 						record.Status = TaskFailed
@@ -452,8 +503,8 @@ func (coordinator *Coordinator) Resume(
 				}
 				if scheduled.Failure != nil {
 					failures = append(failures, *scheduled.Failure)
-					if requiredTaskFailure(scheduled) != nil && requiredFailure == nil {
-						requiredFailure = scheduled.Failure
+					if failure := requiredTaskFailure(scheduled); failure != nil {
+						requiredFailure = preferRunFailure(requiredFailure, failure)
 					}
 				}
 				if err := store.SaveResult(runID, record); err != nil && persistErr == nil {
@@ -465,12 +516,12 @@ func (coordinator *Coordinator) Resume(
 				if err := store.SaveClaims(runID, claims.All()); err != nil && persistErr == nil {
 					persistErr = err
 				}
-				fields := map[string]any{
-					"task_id": scheduled.Task.ID, "executor": scheduled.Task.Executor,
-					"status": scheduled.Status, "attempt": len(scheduled.Attempts),
-					"usage": scheduled.Result.Usage, "evidence_candidates": len(scheduled.Result.EvidenceCandidates),
-					"evidence_admitted": admitted, "claims": len(scheduled.Result.Claims),
-				}
+				fields := taskBudgetEventFields(runID, scheduled, ledger)
+				fields["attempt"] = len(scheduled.Attempts)
+				fields["usage"] = scheduled.Result.Usage
+				fields["evidence_candidates"] = len(scheduled.Result.EvidenceCandidates)
+				fields["evidence_admitted"] = admitted
+				fields["claims"] = len(scheduled.Result.Claims)
 				if scheduled.Failure != nil {
 					fields["failure_code"] = scheduled.Failure.Code
 				}
@@ -493,56 +544,64 @@ func (coordinator *Coordinator) Resume(
 				WorkflowRunID: runID, ParentRunID: run.Contract.ParentRunID, Actor: run.Contract.Actor,
 			}
 		})
-		if requiredFailure != nil {
+		if requiredFailure != nil && !budgetFailureCanDeliverForPlan(tasks, evidence, claims, requiredFailure) {
 			report := BuildReport(evidence, claims, failures)
 			if err := store.SaveReport(runID, report); err != nil {
-				return persistResumeFailure(store, runID, ledger, RunFailure{
-					Code: FailureExecution, Message: err.Error(), Stage: string(StageVerification),
-				}, RunFailed)
+				releaseComposition()
+				failure := failureWithPersistenceError(*requiredFailure, "save failure report", err)
+				return persistResumeFailure(store, runID, ledger, failure, runFailureStatusForFailure(failure, RunFailed))
 			}
-			return persistResumeFailure(store, runID, ledger, *requiredFailure, RunFailed)
+			releaseComposition()
+			return persistResumeFailure(store, runID, ledger, *requiredFailure, runFailureStatusForFailure(*requiredFailure, RunFailed))
 		}
 		if persistErr != nil {
+			releaseComposition()
 			return persistResumeFailure(store, runID, ledger, RunFailure{
 				Code: FailureExecution, Message: persistErr.Error(), Stage: string(StageExecution),
 			}, RunFailed)
 		}
 		if scheduleErr != nil {
-			failures = append(failures, RunFailure{Code: FailureExecution, Message: scheduleErr.Error(), Stage: string(StageExecution)})
+			failure := runFailureFromContext(deadlineCtx, scheduleErr)
+			failures = append(failures, failure)
 		}
 	}
-	if requiredFailure != nil {
+	if requiredFailure != nil && !budgetFailureCanDeliverForPlan(tasks, evidence, claims, requiredFailure) {
 		report := BuildReport(evidence, claims, failures)
 		if err := store.SaveReport(runID, report); err != nil {
-			return persistResumeFailure(store, runID, ledger, RunFailure{
-				Code: FailureExecution, Message: err.Error(), Stage: string(StageVerification),
-			}, RunFailed)
+			releaseComposition()
+			failure := failureWithPersistenceError(*requiredFailure, "save failure report", err)
+			return persistResumeFailure(store, runID, ledger, failure, runFailureStatusForFailure(failure, RunFailed))
 		}
-		return persistResumeFailure(store, runID, ledger, *requiredFailure, RunFailed)
+		releaseComposition()
+		return persistResumeFailure(store, runID, ledger, *requiredFailure, runFailureStatusForFailure(*requiredFailure, RunFailed))
 	}
 	if scheduleErr != nil {
+		releaseComposition()
 		return persistResumeFailure(
 			store, runID, ledger, runFailureFromContext(deadlineCtx, scheduleErr), runFailureStatus(deadlineCtx, scheduleErr),
 		)
 	}
 	if coordinator.Catalog.Has(TaskTemplateRef{ID: "evidence.verify", Version: 1}) {
-		if verifierErr := validateVerifierExecution(tasks, executionResults); verifierErr != nil {
+		if verifierErr := validateVerifierExecution(tasks, executionResults, evidence, claims); verifierErr != nil {
 			report := BuildReport(evidence, claims, failures)
 			if err := store.SaveReport(runID, report); err != nil {
-				return persistResumeFailure(store, runID, ledger, RunFailure{
-					Code: FailureVerifier, Message: err.Error(), Stage: string(StageVerification),
-				}, RunFailed)
+				releaseComposition()
+				failure := failureWithPersistenceError(*verifierErr, "save failure report", err)
+				return persistResumeFailure(store, runID, ledger, failure, runFailureStatusForFailure(failure, RunFailed))
 			}
-			return persistResumeFailure(store, runID, ledger, *verifierErr, RunFailed)
+			releaseComposition()
+			return persistResumeFailure(store, runID, ledger, *verifierErr, runFailureStatusForFailure(*verifierErr, RunFailed))
 		}
 	}
 	if err := deadlineCtx.Err(); err != nil {
+		releaseComposition()
 		return persistResumeFailure(
 			store, runID, ledger, runFailureFromContext(deadlineCtx, err), runFailureStatus(deadlineCtx, err),
 		)
 	}
 	if resumeStatus == RunExecuting {
 		if err := store.Transition(runID, RunVerifying); err != nil {
+			releaseComposition()
 			return InvestigationRun{}, err
 		}
 		resumeStatus = RunVerifying
@@ -550,17 +609,38 @@ func (coordinator *Coordinator) Resume(
 	report := BuildReport(evidence, claims, failures)
 	if resumeStatus == RunVerifying || resumeStatus == RunReplanning {
 		if err := store.SaveReport(runID, report); err != nil {
+			releaseComposition()
 			return InvestigationRun{}, err
 		}
 		if err := store.Transition(runID, RunComposing); err != nil {
+			releaseComposition()
 			return InvestigationRun{}, err
 		}
 		resumeStatus = RunComposing
 	}
-	compositionReservation, compositionErr := coordinator.reserveComposition(ledger)
-	composer := coordinator.Composer
-	if compositionErr != nil {
+	var compositionErr error
+	if compositionReservation.ID == "" {
+		compositionReservation, compositionErr = coordinator.reserveComposition(ledger)
+		if compositionErr != nil {
+			if !errors.Is(compositionErr, ErrBudgetExceeded) {
+				return persistResumeFailure(store, runID, ledger, RunFailure{
+					Code: FailureComposer, Message: compositionErr.Error(), Stage: string(StageComposition),
+				}, RunFailed)
+			}
+			compositionBudgetUnavailable = true
+			compositionReservation = BudgetReservation{}
+		}
+	}
+	composer := composerForDelivery(run.Contract, coordinator.Composer)
+	if compositionBudgetUnavailable {
 		composer = nil
+	}
+	composer, compositionReservation, compositionErr = beginComposition(ledger, compositionReservation, composer, report, !isZeroBudget(coordinator.CompositionBudget))
+	if compositionErr != nil {
+		releaseComposition()
+		return persistResumeFailure(store, runID, ledger, RunFailure{
+			Code: FailureComposer, Message: compositionErr.Error(), Stage: string(StageComposition),
+		}, RunFailed)
 	}
 	deliveryContext := agentapi.WithRunBudgetGate(deadlineCtx, ledger)
 	if compositionReservation.ID != "" {
@@ -571,7 +651,7 @@ func (coordinator *Coordinator) Resume(
 	}
 	delivery := coordinator.Delivery.Deliver(deliveryContext, run.Contract, report, composer)
 	if err := deadlineCtx.Err(); err != nil {
-		_ = compositionReservation.Release()
+		releaseComposition()
 		return persistResumeFailure(store, runID, ledger, runFailureFromContext(deadlineCtx, err), runFailureStatus(deadlineCtx, err))
 	}
 	if compositionReservation.ID != "" {
@@ -580,14 +660,15 @@ func (coordinator *Coordinator) Resume(
 			actual.OutputTokens = int64(len(strings.Fields(delivery.Text)))
 		}
 		if err := compositionReservation.Settle(actual); err != nil {
-			_ = compositionReservation.Release()
+			releaseComposition()
 			return persistResumeFailure(store, runID, ledger, RunFailure{
 				Code: FailureBudget, Message: err.Error(), Stage: string(StageComposition),
 			}, RunBudgetExhausted)
 		}
+		compositionReservation = BudgetReservation{}
 	}
 	if err := store.SaveDelivery(runID, delivery); err != nil {
-		_ = compositionReservation.Release()
+		releaseComposition()
 		return persistResumeFailure(store, runID, ledger, RunFailure{
 			Code: FailureEmptyOutput, Message: err.Error(), Stage: string(StageComposition),
 		}, RunFailed)
@@ -863,6 +944,7 @@ func (coordinator *Coordinator) execute(
 	executedTaskCount := 0
 	agentTaskCount := 0
 	executorCounts := make(map[ExecutorType]int)
+	var compositionReservation BudgetReservation
 	saveMetrics := func(composerFallback bool) error {
 		snapshot := ledger.Snapshot()
 		stageUsage := make(map[BudgetStage]BudgetVector, len(snapshot.Stages))
@@ -890,9 +972,14 @@ func (coordinator *Coordinator) execute(
 		})
 	}
 	fail := func(failure RunFailure, status RunStatus) (InvestigationRun, error) {
+		if compositionReservation.ID != "" {
+			_ = compositionReservation.Release()
+			compositionReservation = BudgetReservation{}
+		}
 		if failure.Message == "" {
 			failure.Message = string(failure.Code)
 		}
+		status = runFailureStatusForFailure(failure, status)
 		resultErr := failureError(failure)
 		if err := saveMetrics(false); err != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("persist run metrics: %w", err))
@@ -924,12 +1011,9 @@ func (coordinator *Coordinator) execute(
 	}
 	coordinator.emitProgress(runID, ProgressWorkflowStarted, "", "", "", "running", "")
 
-	compositionReservation, err := coordinator.reserveComposition(ledger)
+	// Synthesizer is optional. Do not reserve its budget while planning or
+	// investigating; request it only after verification has completed.
 	compositionBudgetUnavailable := false
-	if err != nil {
-		compositionBudgetUnavailable = true
-		compositionReservation = BudgetReservation{}
-	}
 	compiler := PlanCompiler{
 		Catalog:  coordinator.Catalog,
 		Schemas:  coordinator.Schemas,
@@ -1010,6 +1094,19 @@ func (coordinator *Coordinator) execute(
 		_ = compositionReservation.Release()
 		return fail(RunFailure{Code: FailureVerifier, Message: err.Error(), Stage: string(StageVerification)}, RunFailed)
 	}
+	verificationAdmissions, err := coordinator.reserveVerification(ledger, plan.Tasks)
+	if err != nil {
+		_ = compositionReservation.Release()
+		failure := verifierReservationFailure(err)
+		return fail(failure, runFailureStatusForFailure(failure, RunFailed))
+	}
+	// Composition is admitted at the composition stage, not during evidence
+	// collection. Holding this reservation through Investigator execution would
+	// turn an optional final response into a sibling reservation that starves the
+	// mandatory Verifier.
+	_ = compositionReservation.Release()
+	compositionReservation = BudgetReservation{}
+	compositionBudgetUnavailable = false
 	failures := make([]RunFailure, 0)
 	var requiredFailure *RunFailure
 	var persistErr error
@@ -1024,6 +1121,7 @@ func (coordinator *Coordinator) execute(
 		MaxParallelism:      effectiveParallelism(coordinator.MaxParallelism, policy.MaxParallelism),
 		MaxAgentParallelism: effectiveParallelism(coordinator.MaxAgentParallelism, policy.MaxParallelism),
 		MaxToolParallelism:  effectiveParallelism(coordinator.MaxToolParallelism, policy.MaxParallelism),
+		ProtectedAdmissions: verificationAdmissions,
 		OnStart: func(task ExecutableTask) {
 			coordinator.emitProgress(runID, ProgressTaskStarted, task.ID, task.Executor, directToolID(task), "running", "")
 			if err := appendStructuredRunEvent(store, runID, "task_started", map[string]any{
@@ -1050,8 +1148,8 @@ func (coordinator *Coordinator) execute(
 			}
 			if taskFailure != nil {
 				failures = append(failures, *taskFailure)
-				if !scheduled.Task.Optional && requiredFailure == nil {
-					requiredFailure = taskFailure
+				if !scheduled.Task.Optional {
+					requiredFailure = preferRunFailure(requiredFailure, taskFailure)
 				}
 				if record.Status == TaskSucceeded {
 					record.Status = TaskFailed
@@ -1060,8 +1158,8 @@ func (coordinator *Coordinator) execute(
 			}
 			if scheduled.Failure != nil {
 				failures = append(failures, *scheduled.Failure)
-				if requiredTaskFailure(scheduled) != nil && requiredFailure == nil {
-					requiredFailure = scheduled.Failure
+				if failure := requiredTaskFailure(scheduled); failure != nil {
+					requiredFailure = preferRunFailure(requiredFailure, failure)
 				}
 			}
 			if err := store.SaveResult(runID, record); err != nil {
@@ -1079,12 +1177,12 @@ func (coordinator *Coordinator) execute(
 					persistErr = err
 				}
 			}
-			fields := map[string]any{
-				"task_id": scheduled.Task.ID, "executor": scheduled.Task.Executor,
-				"status": scheduled.Status, "attempt": len(scheduled.Attempts),
-				"usage": scheduled.Result.Usage, "evidence_candidates": len(scheduled.Result.EvidenceCandidates),
-				"evidence_admitted": admitted, "claims": len(scheduled.Result.Claims),
-			}
+			fields := taskBudgetEventFields(runID, scheduled, ledger)
+			fields["attempt"] = len(scheduled.Attempts)
+			fields["usage"] = scheduled.Result.Usage
+			fields["evidence_candidates"] = len(scheduled.Result.EvidenceCandidates)
+			fields["evidence_admitted"] = admitted
+			fields["claims"] = len(scheduled.Result.Claims)
 			if scheduled.Failure != nil {
 				fields["failure_code"] = scheduled.Failure.Code
 			}
@@ -1133,6 +1231,7 @@ func (coordinator *Coordinator) execute(
 		}
 
 		persistErr = nil
+		scheduler.ProtectedAdmissions = verificationAdmissions
 		executionCtx, cancelRound := context.WithCancel(deadlineCtx)
 		stopRound = cancelRound
 		executionResults, scheduleErr := scheduler.Execute(executionCtx, plan.Tasks, func(task ExecutableTask, upstream map[string]json.RawMessage) TaskExecutionInput {
@@ -1143,14 +1242,15 @@ func (coordinator *Coordinator) execute(
 		})
 		cancelRound()
 		stopRound = nil
-		if requiredFailure != nil {
+		if requiredFailure != nil && !budgetFailureCanDeliverForPlan(plan.Tasks, evidence, claims, requiredFailure) {
 			report = BuildReport(evidence, claims, failures)
 			if err := store.SaveReport(runID, report); err != nil {
 				_ = compositionReservation.Release()
-				return fail(RunFailure{Code: FailureExecution, Message: err.Error(), Stage: string(StageVerification)}, RunFailed)
+				failure := failureWithPersistenceError(*requiredFailure, "save failure report", err)
+				return fail(failure, runFailureStatusForFailure(failure, RunFailed))
 			}
 			_ = compositionReservation.Release()
-			return fail(*requiredFailure, RunFailed)
+			return fail(*requiredFailure, runFailureStatusForFailure(*requiredFailure, RunFailed))
 		}
 		if duplicateStop {
 			failures = append(failures, RunFailure{Code: FailureExecution, Message: fmt.Sprintf("duplicate evidence ratio exceeded %.3f", policy.MaxDuplicateRatio), Stage: string(StageExecution), Retryable: false})
@@ -1160,7 +1260,8 @@ func (coordinator *Coordinator) execute(
 			return fail(RunFailure{Code: FailureExecution, Message: persistErr.Error(), Stage: string(StageExecution)}, RunFailed)
 		}
 		if scheduleErr != nil {
-			failures = append(failures, RunFailure{Code: FailureExecution, Message: scheduleErr.Error(), Stage: string(StageExecution)})
+			failure := runFailureFromContext(deadlineCtx, scheduleErr)
+			failures = append(failures, failure)
 		}
 		if err := store.SaveBudget(runID, ledger.Snapshot()); err != nil {
 			return fail(RunFailure{Code: FailureExecution, Message: err.Error(), Stage: string(StageExecution)}, RunFailed)
@@ -1170,14 +1271,15 @@ func (coordinator *Coordinator) execute(
 			return fail(runFailureFromContext(deadlineCtx, scheduleErr), runFailureStatus(deadlineCtx, scheduleErr))
 		}
 		if coordinator.Catalog.Has(TaskTemplateRef{ID: "evidence.verify", Version: 1}) {
-			if verifierErr := validateVerifierExecution(plan.Tasks, executionResults); verifierErr != nil {
+			if verifierErr := validateVerifierExecution(plan.Tasks, executionResults, evidence, claims); verifierErr != nil {
 				report = BuildReport(evidence, claims, failures)
 				if err := store.SaveReport(runID, report); err != nil {
 					_ = compositionReservation.Release()
-					return fail(RunFailure{Code: FailureVerifier, Message: err.Error(), Stage: string(StageVerification)}, RunFailed)
+					failure := failureWithPersistenceError(*verifierErr, "save failure report", err)
+					return fail(failure, runFailureStatusForFailure(failure, RunFailed))
 				}
 				_ = compositionReservation.Release()
-				return fail(*verifierErr, RunFailed)
+				return fail(*verifierErr, runFailureStatusForFailure(*verifierErr, RunFailed))
 			}
 		}
 		if err := deadlineCtx.Err(); err != nil {
@@ -1242,6 +1344,11 @@ func (coordinator *Coordinator) execute(
 			failures = append(failures, RunFailure{Code: FailurePlan, Message: replanErr.Error(), Stage: string(StagePlanning)})
 			break
 		}
+		verificationAdmissions, replanErr = coordinator.reserveVerification(ledger, plan.Tasks)
+		if replanErr != nil {
+			failures = append(failures, verifierReservationFailure(replanErr))
+			break
+		}
 	}
 	report = BuildReport(evidence, claims, failures)
 	if err := store.SaveReport(runID, report); err != nil {
@@ -1253,9 +1360,23 @@ func (coordinator *Coordinator) execute(
 		return fail(RunFailure{Code: FailureComposer, Message: err.Error(), Stage: string(StageComposition)}, RunFailed)
 	}
 
-	composer := coordinator.Composer
+	if compositionReservation.ID == "" {
+		compositionReservation, err = coordinator.reserveComposition(ledger)
+		if err != nil {
+			if !errors.Is(err, ErrBudgetExceeded) {
+				return fail(RunFailure{Code: FailureComposer, Message: err.Error(), Stage: string(StageComposition)}, RunFailed)
+			}
+			compositionBudgetUnavailable = true
+			compositionReservation = BudgetReservation{}
+		}
+	}
+	composer := composerForDelivery(contract, coordinator.Composer)
 	if compositionBudgetUnavailable {
 		composer = nil
+	}
+	composer, compositionReservation, err = beginComposition(ledger, compositionReservation, composer, report, !isZeroBudget(coordinator.CompositionBudget))
+	if err != nil {
+		return fail(RunFailure{Code: FailureComposer, Message: err.Error(), Stage: string(StageComposition)}, RunFailed)
 	}
 	deliveryContext := agentapi.WithRunBudgetGate(deadlineCtx, ledger)
 	if compositionReservation.ID != "" {
@@ -1285,10 +1406,12 @@ func (coordinator *Coordinator) execute(
 				Code: FailureBudget, Message: err.Error(), Stage: string(StageComposition),
 			})
 			if saveErr := store.SaveReport(runID, report); saveErr != nil {
-				return fail(RunFailure{Code: FailureBudget, Message: saveErr.Error(), Stage: string(StageComposition)}, RunFailed)
+				failure := failureWithPersistenceError(RunFailure{Code: FailureBudget, Message: err.Error(), Stage: string(StageComposition)}, "save budget failure report", saveErr)
+				return fail(failure, RunBudgetExhausted)
 			}
 			return fail(RunFailure{Code: FailureBudget, Message: err.Error(), Stage: string(StageComposition)}, RunBudgetExhausted)
 		}
+		compositionReservation = BudgetReservation{}
 	}
 	if err := saveMetrics(delivery.Failure != nil && delivery.Failure.Code == FailureComposer); err != nil {
 		_ = compositionReservation.Release()
@@ -1322,7 +1445,7 @@ func (coordinator *Coordinator) execute(
 	return completed, nil
 }
 
-func validateVerifierExecution(tasks []ExecutableTask, results []ScheduledTaskResult) *RunFailure {
+func validateVerifierExecution(tasks []ExecutableTask, results []ScheduledTaskResult, evidence *EvidenceLedger, claims *ClaimLedger) *RunFailure {
 	verifierID := ""
 	verifierCount := 0
 	for _, task := range tasks {
@@ -1347,7 +1470,13 @@ func validateVerifierExecution(tasks []ExecutableTask, results []ScheduledTaskRe
 		if result.Status == TaskSucceeded {
 			return nil
 		}
+		if result.Status == TaskPartial && len(result.Result.Claims) > 0 {
+			return nil
+		}
 		if failure := requiredTaskFailure(result); failure != nil {
+			if budgetFailureCanDeliverForPlan(tasks, evidence, claims, failure) {
+				return nil
+			}
 			failure.Code = FailureVerifier
 			failure.Stage = string(StageVerification)
 			return failure
@@ -1697,6 +1826,152 @@ func withoutTokenBudget(value BudgetVector) BudgetVector {
 	return value
 }
 
+// beginComposition releases the stage-entry protection floor before opening
+// the actual composer accounting reservation. The active admission is soft to
+// avoid double-reserving provider calls; AgentComposer independently applies
+// the allocated Composition input/total limits to its child Run.
+func beginComposition(ledger *BudgetLedger, protection BudgetReservation, composer Composer, report InvestigationReport, enabled bool) (Composer, BudgetReservation, error) {
+	if protection.ID != "" {
+		if err := protection.Release(); err != nil {
+			return nil, protection, fmt.Errorf("release composition protection: %w", err)
+		}
+	}
+	if !enabled || composer == nil || len(report.Claims) == 0 {
+		return composer, BudgetReservation{}, nil
+	}
+	active, err := ledger.ReserveAdmission(StageComposition, "composition", BudgetVector{})
+	if err != nil {
+		if errors.Is(err, ErrBudgetExceeded) {
+			// Deterministic delivery remains valid when no model-call capacity is
+			// left; only the optional composer is unavailable.
+			return nil, BudgetReservation{}, nil
+		}
+		return nil, BudgetReservation{}, fmt.Errorf("reserve composition admission: %w", err)
+	}
+	return composer, active, nil
+}
+
+// reserveVerification protects the Verification share of the frozen Run
+// budget for every server-owned verifier in a plan before Investigator
+// execution starts. The reservation is later handed to Scheduler so the
+// verifier is not charged a second time during normal admission.
+func verifierReservationFailure(err error) RunFailure {
+	code := FailureVerifier
+	if errors.Is(err, ErrBudgetExceeded) {
+		code = FailureBudget
+	}
+	return RunFailure{
+		Code: code, Message: err.Error(), Stage: string(StageVerification),
+	}
+}
+
+func (coordinator *Coordinator) reserveVerification(ledger *BudgetLedger, tasks []ExecutableTask) (map[string]BudgetReservation, error) {
+	if ledger == nil {
+		return nil, fmt.Errorf("budget ledger is required")
+	}
+	if coordinator == nil || coordinator.Executors == nil {
+		return nil, fmt.Errorf("executor registry is required")
+	}
+
+	type verifierCandidate struct {
+		task    ExecutableTask
+		minimum BudgetVector
+	}
+	candidates := make([]verifierCandidate, 0)
+	for _, task := range tasks {
+		if task.Executor != ExecutorVerifier {
+			continue
+		}
+		executor, err := coordinator.Executors.Resolve(task.Executor)
+		if err != nil {
+			if errors.Is(err, ErrCapabilityGap) {
+				continue
+			}
+			return nil, fmt.Errorf("resolve verifier executor for budget admission: %w", err)
+		}
+		provider, ok := executor.(TaskMinimumBudgetProvider)
+		if !ok {
+			continue
+		}
+		minimum, err := provider.MinimumBudget(task)
+		if err != nil {
+			return nil, fmt.Errorf("minimum budget for verifier task %q: %w", task.ID, err)
+		}
+		if isZeroBudget(minimum) {
+			continue
+		}
+		candidates = append(candidates, verifierCandidate{task: task, minimum: minimum})
+	}
+	if len(candidates) == 0 {
+		return map[string]BudgetReservation{}, nil
+	}
+
+	snapshot := ledger.Snapshot()
+	profile, err := coordinator.profileForBudgetSnapshot(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve verifier budget profile: %w", err)
+	}
+	pool, err := AllocateRoleBudget(profile, snapshot.Run.Limit, StageVerification)
+	if err != nil {
+		return nil, fmt.Errorf("allocate verifier budget: %w", err)
+	}
+
+	admissions := make([]BudgetAdmission, 0, len(candidates))
+	for index, candidate := range candidates {
+		// The role pool is split before task limits are applied. This keeps the
+		// sum of all verifier grants inside the Verification share even when a
+		// plan contains more than one verifier task.
+		grant := splitBudgetVector(pool, index, len(candidates))
+		grant = capBudgetToLimit(grant, candidate.task.Budget.Limit)
+		if !budgetVectorCovers(grant, candidate.minimum) {
+			return nil, fmt.Errorf(
+				"%w: verifier task %q minimum %+v exceeds its allocated budget %+v",
+				ErrBudgetExceeded, candidate.task.ID, candidate.minimum, grant,
+			)
+		}
+		admissions = append(admissions, BudgetAdmission{TaskID: candidate.task.ID, Grant: grant})
+	}
+
+	reservations, err := ledger.ReserveProtectedAdmissionGroup(StageVerification, admissions)
+	if err != nil {
+		return nil, fmt.Errorf("reserve verifier budget: %w", err)
+	}
+	return reservations, nil
+}
+
+func (coordinator *Coordinator) profileForBudgetSnapshot(snapshot BudgetSnapshot) (BudgetProfile, error) {
+	if profile := strings.TrimSpace(snapshot.Run.Profile); profile != "" {
+		return ParseBudgetProfile(profile)
+	}
+	if coordinator != nil && coordinator.BudgetProfile != "" {
+		return coordinator.BudgetProfile, nil
+	}
+	return ProfileInteractive, nil
+}
+
+// budgetVectorCovers reports whether a role grant can cover a required
+// minimum. A zero grant dimension retains the ledger's unbounded meaning.
+func budgetVectorCovers(grant, minimum BudgetVector) bool {
+	return coversInt64(grant.InputTokens, minimum.InputTokens) &&
+		coversInt64(grant.OutputTokens, minimum.OutputTokens) &&
+		coversInt64(grant.TotalTokens, minimum.TotalTokens) &&
+		coversInt(grant.ToolCalls, minimum.ToolCalls) &&
+		coversDuration(grant.Duration, minimum.Duration) &&
+		coversInt64(grant.CostMicros, minimum.CostMicros)
+}
+
+func coversInt64(grant, minimum int64) bool {
+	return grant == 0 || grant >= minimum
+}
+
+func coversInt(grant, minimum int) bool {
+	return grant == 0 || grant >= minimum
+}
+
+func coversDuration(grant, minimum time.Duration) bool {
+	return grant == 0 || grant >= minimum
+}
+
 func (coordinator *Coordinator) reserveComposition(ledger *BudgetLedger) (BudgetReservation, error) {
 	if isZeroBudget(coordinator.CompositionBudget) {
 		return BudgetReservation{}, nil
@@ -1711,6 +1986,16 @@ func (coordinator *Coordinator) reserveComposition(ledger *BudgetLedger) (Budget
 	}
 	allocation, _ := profile.Allocation()
 	protection := scaleBudgetVector(snapshot.Run.Limit, allocation.Composition)
+	// A composition percentage is only a starting point. Never let it fall
+	// below the smallest usable synthesizer response when the Run itself can
+	// afford that response; otherwise Investigators can consume the last few
+	// tokens and leave no path to a final answer.
+	minimumCompositionOutput := minInt64(composerMinimumOutputTokens, coordinator.CompositionBudget.OutputTokens)
+	if coordinator.CompositionBudget.OutputTokens >= composerMinimumOutputTokens &&
+		snapshot.Run.Limit.OutputTokens >= minimumCompositionOutput &&
+		protection.OutputTokens < minimumCompositionOutput {
+		protection.OutputTokens = minimumCompositionOutput
+	}
 	grant := capCompositionGrant(coordinator.CompositionBudget, protection)
 	if isZeroBudget(grant) {
 		return BudgetReservation{}, nil
@@ -1751,6 +2036,54 @@ func capCompositionGrant(grant, protection BudgetVector) BudgetVector {
 	return out
 }
 
+func taskBudgetEventFields(runID string, scheduled ScheduledTaskResult, ledger *BudgetLedger) map[string]any {
+	snapshot := ledger.Snapshot()
+	remaining := subtractVector(snapshot.Run.Limit, addVector(snapshot.Run.Used, snapshot.Run.Reserved))
+	return map[string]any{
+		"run_id":                   runID,
+		"task_id":                  scheduled.Task.ID,
+		"executor":                 scheduled.Task.Executor,
+		"status":                   scheduled.Status,
+		"completion_status":        scheduled.Status,
+		"budget_boundary":          "run",
+		"budget_dimension":         budgetDimensions(snapshot.Run.Limit),
+		"run_limit":                snapshot.Run.Limit,
+		"run_reserved":             snapshot.Run.Reserved,
+		"run_used":                 snapshot.Run.Used,
+		"run_remaining":            remaining,
+		"task_reserved":            scheduled.BudgetGrant,
+		"task_used":                scheduled.Result.Usage,
+		"requested_output":         scheduled.BudgetGrant.OutputTokens,
+		"effective_output":         scheduled.Result.Usage.OutputTokens,
+		"input_tokens":             scheduled.Result.Usage.InputTokens,
+		"failure_code":             "",
+		"evidence_candidate_count": len(scheduled.Result.EvidenceCandidates),
+	}
+}
+
+func budgetDimensions(limit BudgetVector) []string {
+	dimensions := make([]string, 0, 6)
+	if limit.InputTokens > 0 {
+		dimensions = append(dimensions, "input_tokens")
+	}
+	if limit.OutputTokens > 0 {
+		dimensions = append(dimensions, "output_tokens")
+	}
+	if limit.TotalTokens > 0 {
+		dimensions = append(dimensions, "total_tokens")
+	}
+	if limit.ToolCalls > 0 {
+		dimensions = append(dimensions, "tool_calls")
+	}
+	if limit.Duration > 0 {
+		dimensions = append(dimensions, "duration")
+	}
+	if limit.CostMicros > 0 {
+		dimensions = append(dimensions, "cost_micros")
+	}
+	return dimensions
+}
+
 func (coordinator *Coordinator) admitTaskResult(
 	scheduled ScheduledTaskResult,
 	evidence *EvidenceLedger,
@@ -1776,54 +2109,149 @@ func (coordinator *Coordinator) admitTaskResult(
 			Failure:   cloneFailure(scheduled.Failure),
 		}}
 	}
+	reject := func(failure *RunFailure) (TaskExecutionRecord, *RunFailure) {
+		record.Status = TaskFailed
+		record.Failure = failure
+		return record, failure
+	}
 	if scheduled.Status != TaskSucceeded && scheduled.Status != TaskPartial {
 		return record, nil
 	}
 	if scheduled.Status == TaskSucceeded && !isEvidenceWorkerTask(scheduled.Task) {
 		if failure := validateTaskOutput(coordinator.Schemas, scheduled.Task, scheduled.Result.Output); failure != nil {
-			return record, failureForTask(scheduled.Task.ID, *failure)
+			return reject(failureForTask(scheduled.Task.ID, *failure))
 		}
 	}
-	if scheduled.Status == TaskPartial && len(scheduled.Result.EvidenceCandidates) == 0 {
-		return record, failureForTask(scheduled.Task.ID, RunFailure{
-			Code: FailureEmptyOutput, Message: "partial task produced no admissible evidence", Stage: string(StageExecution), Retryable: false,
-		})
-	}
+	admittedEvidence := false
+	admittedClaims := false
 	for _, candidate := range scheduled.Result.EvidenceCandidates {
 		if _, _, err := evidence.Admit(scheduled.Task.ID, candidate); err != nil {
 			if errors.Is(err, ErrOpaqueEvidence) {
 				continue
 			}
-			return record, failureForTask(scheduled.Task.ID, RunFailure{
+			return reject(failureForTask(scheduled.Task.ID, RunFailure{
 				Code: FailureSchema, Message: err.Error(), Stage: string(StageVerification), Retryable: false,
-			})
+			}))
 		}
+		// Duplicate evidence is still an admitted dependency: it already exists
+		// in the ledger and can be referenced by the verifier.
+		admittedEvidence = true
 	}
 	for _, candidate := range scheduled.Result.Claims {
 		if scheduled.Task.Executor != ExecutorVerifier {
-			return record, failureForTask(scheduled.Task.ID, RunFailure{
+			return reject(failureForTask(scheduled.Task.ID, RunFailure{
 				Code: FailureVerifier, Message: "only verifier tasks may submit claims", Stage: string(StageVerification), Retryable: false,
-			})
+			}))
 		}
 		if _, _, err := claims.Admit(scheduled.Task.ID, candidate); err != nil {
-			return record, failureForTask(scheduled.Task.ID, RunFailure{
+			return reject(failureForTask(scheduled.Task.ID, RunFailure{
 				Code: FailureVerifier, Message: err.Error(), Stage: string(StageVerification), Retryable: false,
-			})
+			}))
 		}
+		admittedClaims = true
 	}
-	if len(scheduled.Result.Output) == 0 && len(scheduled.Result.EvidenceCandidates) == 0 && len(scheduled.Result.Claims) == 0 {
-		return record, failureForTask(scheduled.Task.ID, RunFailure{
+	if scheduled.Status == TaskPartial && !hasAdmittedArtifact(scheduled.Task, scheduled.Result.Output, admittedEvidence, admittedClaims) {
+		return reject(failureForTask(scheduled.Task.ID, RunFailure{
+			Code: FailureEmptyOutput, Message: "partial task produced no admissible artifact", Stage: string(StageExecution), Retryable: false,
+		}))
+	}
+	if len(scheduled.Result.Output) == 0 && !admittedEvidence && !admittedClaims {
+		return reject(failureForTask(scheduled.Task.ID, RunFailure{
 			Code: FailureEmptyOutput, Message: "task produced no output or admissible evidence", Stage: string(StageExecution), Retryable: false,
-		})
+		}))
 	}
 	return record, nil
+}
+
+func hasAdmittedArtifact(task ExecutableTask, output json.RawMessage, evidence, claims bool) bool {
+	switch task.Executor {
+	case ExecutorInvestigator:
+		return evidence
+	case ExecutorVerifier:
+		return claims
+	default:
+		return len(output) > 0 || evidence || claims
+	}
 }
 
 func isEvidenceWorkerTask(task ExecutableTask) bool {
 	return task.Executor == ExecutorInvestigator
 }
 
+func preferRunFailure(current, candidate *RunFailure) *RunFailure {
+	if candidate == nil {
+		return current
+	}
+	if current == nil || candidate.Code == FailureBudget {
+		return candidate
+	}
+	return current
+}
+
+func runFailureStatusForFailure(failure RunFailure, status RunStatus) RunStatus {
+	if failure.Code == FailureBudget {
+		return RunBudgetExhausted
+	}
+	return status
+}
+
+func budgetFailureCanDeliver(evidence *EvidenceLedger, claims *ClaimLedger, failure *RunFailure) bool {
+	if failure == nil || failure.Code != FailureBudget || strings.TrimSpace(failure.TaskID) == "" {
+		return false
+	}
+	return (evidence != nil && evidence.HasTask(failure.TaskID)) ||
+		(claims != nil && claims.HasTask(failure.TaskID))
+}
+
+// budgetFailureCanDeliverForPlan also permits a verifier budget stop when an
+// investigator already produced evidence. The verifier owns claims, so its
+// failed attempt cannot own an artifact even though the run can still deliver
+// a bounded evidence-insufficient or partial result.
+func budgetFailureCanDeliverForPlan(
+	tasks []ExecutableTask,
+	evidence *EvidenceLedger,
+	claims *ClaimLedger,
+	failure *RunFailure,
+) bool {
+	if budgetFailureCanDeliver(evidence, claims, failure) {
+		return true
+	}
+	if failure == nil || failure.Code != FailureBudget || evidence == nil {
+		return false
+	}
+	for _, task := range tasks {
+		if task.Executor == ExecutorVerifier && task.ID == failure.TaskID {
+			for _, investigator := range tasks {
+				if investigator.Executor == ExecutorInvestigator && evidence.HasTask(investigator.ID) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
+}
+
 func requiredTaskFailure(result ScheduledTaskResult) *RunFailure {
+	// A worker that produced a usable artifact can hand control to verification
+	// even when its own run ended early. The artifact, not the worker's final
+	// prose, is the dependency contract.
+	if result.Status == TaskPartial && hasAdmissibleArtifacts(result.Task, result.Result) {
+		return nil
+	}
+	// A required task cannot hide a hard shared-budget stop behind an empty
+	// fallback report. Optional persisted records with a report remain useful
+	// diagnostics and do not gate resume.
+	if result.Failure != nil && result.Failure.Code == FailureBudget {
+		if result.Task.Optional && hasAdmissibleArtifacts(result.Task, result.Result) {
+			return nil
+		}
+		failure := *result.Failure
+		if failure.TaskID == "" {
+			failure.TaskID = result.Task.ID
+		}
+		return &failure
+	}
 	if result.Task.Optional {
 		return nil
 	}

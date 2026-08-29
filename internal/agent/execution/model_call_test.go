@@ -228,3 +228,39 @@ func TestForceConclusionSkipsRetryWhenSharedOutputBudgetIsExhausted(t *testing.T
 		t.Fatalf("call reservations = %#v, want one call", gate.reserved)
 	}
 }
+
+type minimumAvailableCallGate struct {
+	availableRecordingCallGate
+	minimum int64
+}
+
+func (gate *minimumAvailableCallGate) MinimumOutputTokens() int64 {
+	return gate.minimum
+}
+
+func TestCallModelDoesNotShrinkBelowProtectedOutputMinimum(t *testing.T) {
+	server := fakeStreamServer(t, []streamEvent{{content: "不应调用", finish: "stop"}})
+	defer server.Close()
+
+	agent := newTestAgent(t, server.URL)
+	gate := &minimumAvailableCallGate{
+		availableRecordingCallGate: availableRecordingCallGate{available: agentapi.Usage{
+			InputTokens: 10_000, OutputTokens: 619,
+		}},
+		minimum: 1024,
+	}
+	ctx := agentapi.WithRunBudgetGate(context.Background(), gate)
+	_, err := agent.callModel(
+		ctx,
+		[]llm.Message{{Role: "user", Content: "请说明服务职责"}},
+		nil,
+		nil,
+		3000,
+	)
+	if !errors.Is(err, agentapi.ErrBudgetExceeded) {
+		t.Fatalf("error = %v, want canonical budget error", err)
+	}
+	if len(gate.reserved) != 0 {
+		t.Fatalf("call reservations = %#v, want none", gate.reserved)
+	}
+}

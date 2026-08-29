@@ -17,7 +17,7 @@ import (
 var (
 	ErrInvalidTransition = errors.New("invalid investigation state transition")
 	ErrNotFound          = errors.New("investigation run not found")
-	ErrBudgetExceeded    = errors.New("investigation budget exceeded")
+	ErrBudgetExceeded    = agentapi.ErrBudgetExceeded
 	ErrPlanInvalid       = errors.New("investigation plan is invalid")
 	ErrCapabilityGap     = errors.New("investigation capability gap")
 	ErrEvidenceReference = errors.New("invalid evidence reference")
@@ -177,26 +177,29 @@ type InvestigationContext struct {
 const InvestigationContractVersion int64 = 1
 
 type InvestigationContract struct {
-	ID                 string                `json:"id"`
-	Version            int64                 `json:"version"`
-	ParentRunID        string                `json:"parent_run_id,omitempty"`
-	TaskID             string                `json:"task_id,omitempty"`
-	Round              int                   `json:"round,omitempty"`
-	BaseDepth          int                   `json:"base_depth,omitempty"`
-	Actor              agentapi.Actor        `json:"actor,omitempty"`
-	Entities           []string              `json:"entities,omitempty"`
-	EntityDetails      []InvestigationEntity `json:"entity_details,omitempty"`
-	Context            InvestigationContext  `json:"context,omitempty"`
-	Question           string                `json:"question"`
-	InvestigationGoals []InvestigationGoal   `json:"investigation_goals,omitempty"`
-	EvidenceGoals      []EvidenceGoal        `json:"evidence_goals,omitempty"`
-	AllowedToolIDs     []tool.ToolID         `json:"allowed_tool_ids,omitempty"`
-	PrincipalToolIDs   []tool.ToolID         `json:"principal_tool_ids,omitempty"`
-	WorkspaceToolIDs   []tool.ToolID         `json:"workspace_tool_ids,omitempty"`
-	MaxRounds          int                   `json:"max_rounds,omitempty"`
-	MaxTasks           int                   `json:"max_tasks,omitempty"`
-	BudgetProfile      string                `json:"budget_profile,omitempty"`
-	CreatedAt          time.Time             `json:"created_at"`
+	ID                    string                `json:"id"`
+	Version               int64                 `json:"version"`
+	ParentRunID           string                `json:"parent_run_id,omitempty"`
+	TaskID                string                `json:"task_id,omitempty"`
+	Round                 int                   `json:"round,omitempty"`
+	BaseDepth             int                   `json:"base_depth,omitempty"`
+	Actor                 agentapi.Actor        `json:"actor,omitempty"`
+	Entities              []string              `json:"entities,omitempty"`
+	EntityDetails         []InvestigationEntity `json:"entity_details,omitempty"`
+	Context               InvestigationContext  `json:"context,omitempty"`
+	Question              string                `json:"question"`
+	InvestigationGoals    []InvestigationGoal   `json:"investigation_goals,omitempty"`
+	EvidenceGoals         []EvidenceGoal        `json:"evidence_goals,omitempty"`
+	SelectCount           int                   `json:"select_count,omitempty"`
+	DiscoveryPhase        bool                  `json:"discovery_phase,omitempty"`
+	DeferredEvidenceGoals []EvidenceGoal        `json:"deferred_evidence_goals,omitempty"`
+	AllowedToolIDs        []tool.ToolID         `json:"allowed_tool_ids,omitempty"`
+	PrincipalToolIDs      []tool.ToolID         `json:"principal_tool_ids,omitempty"`
+	WorkspaceToolIDs      []tool.ToolID         `json:"workspace_tool_ids,omitempty"`
+	MaxRounds             int                   `json:"max_rounds,omitempty"`
+	MaxTasks              int                   `json:"max_tasks,omitempty"`
+	BudgetProfile         string                `json:"budget_profile,omitempty"`
+	CreatedAt             time.Time             `json:"created_at"`
 	// SeedEvidence carries identity-only evidence already admitted by the
 	// caller. It is not normalized as text and must not be duplicated.
 	SeedEvidence []EvidenceUnit `json:"seed_evidence,omitempty"`
@@ -407,6 +410,11 @@ func (err *RunFailureError) Error() string {
 	return fmt.Sprintf("%s: %s", err.Failure.Code, err.Failure.Message)
 }
 
+// Is keeps budget classification discoverable after the failure is wrapped.
+func (err *RunFailureError) Is(target error) bool {
+	return err != nil && err.Failure.Code == FailureBudget && target == ErrBudgetExceeded
+}
+
 type InvestigationReport struct {
 	Evidence          []EvidenceUnit              `json:"evidence,omitempty"`
 	Claims            []VerifiedClaim             `json:"claims,omitempty"`
@@ -440,8 +448,9 @@ type TaskExecutionInput struct {
 	Evidence []EvidenceUnit             `json:"evidence,omitempty"`
 	Claims   []VerifiedClaim            `json:"claims,omitempty"`
 	Upstream map[string]json.RawMessage `json:"upstream,omitempty"`
-	// RuntimeBudget is the shared hard ceiling for Agent-backed execution. It
-	// is separate from Task.Budget.Limit, which also carries admission grants.
+	// RuntimeBudget is the child-Run token ceiling selected by Scheduler. It is
+	// normally shared task narrowing; for a protected Verifier it is the exact
+	// role slice allocated from the parent Run before execution begins.
 	RuntimeBudget BudgetVector   `json:"-"`
 	WorkflowRunID string         `json:"-"`
 	ParentRunID   string         `json:"-"`
@@ -536,6 +545,11 @@ func (fn ComposerFunc) Compose(ctx context.Context, contract InvestigationContra
 	return fn(ctx, contract, report)
 }
 
+// evidenceIDTargetLength keeps evidence/claim citation tokens short. They are
+// repeated inside every verifier and synthesizer prompt, so a 64-char SHA-256
+// hex digest wastes a meaningful slice of the token budget.
+const evidenceIDTargetLength = 16
+
 func evidenceID(candidate EvidenceCandidate) string {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(candidate.SourceKind))
@@ -549,7 +563,7 @@ func evidenceID(candidate EvidenceCandidate) string {
 	_, _ = hash.Write([]byte(candidate.TimeRange))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(candidate.ContentHash))
-	return "evidence_" + hex.EncodeToString(hash.Sum(nil))
+	return shortHandle("evidence", hash.Sum(nil))
 }
 
 func claimID(candidate ClaimCandidate) string {
@@ -557,7 +571,29 @@ func claimID(candidate ClaimCandidate) string {
 	_, _ = hash.Write([]byte(candidate.GoalID))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(candidate.Text))
-	return "claim_" + hex.EncodeToString(hash.Sum(nil))
+	return shortHandle("claim", hash.Sum(nil))
+}
+
+// shortHandle builds a stable citation token with a fixed total length. The
+// trailing hex characters keep deduplication deterministic while never
+// exceeding the target length.
+func shortHandle(prefix string, sum []byte) string {
+	full := prefix + "_"
+	hexChars := evidenceIDTargetLength - len(full)
+	if hexChars < 1 {
+		hexChars = 1
+	}
+	// hex.EncodeToString emits two characters per byte; round up to the nearest
+	// byte, then trim to the exact character count.
+	byteCount := (hexChars + 1) / 2
+	if byteCount > len(sum) {
+		byteCount = len(sum)
+	}
+	encoded := hex.EncodeToString(sum[:byteCount])
+	if len(encoded) > hexChars {
+		encoded = encoded[:hexChars]
+	}
+	return full + encoded
 }
 
 func validateSchemaRef(ref agentapi.SchemaRef) error {

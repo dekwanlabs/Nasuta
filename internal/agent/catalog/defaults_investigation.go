@@ -11,15 +11,11 @@ import (
 
 const (
 	investigatorOutputDenominator = 4
-	investigatorOutputMinimum     = 1024
-	investigatorOutputMaximum     = 4096
-	verifierOutputDenominator     = 6
-	verifierOutputMinimum         = 768
-	verifierOutputMaximum         = 3072
-	synthesizerOutputDenominator  = 2
-	synthesizerOutputMinimum      = 2048
-	synthesizerOutputMaximum      = 6144
-	investigatorMaxSteps          = 3
+	investigatorOutputMinimum     = 8192
+	investigatorOutputMaximum     = 8192
+	verifierOutputMinimum         = 4096
+	synthesizerOutputMinimum      = 8192
+	investigatorMaxSteps          = 4
 	convergenceMaxSteps           = 1
 	roleMaxContinueRounds         = 1
 )
@@ -32,17 +28,13 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		investigatorOutputMinimum,
 		investigatorOutputMaximum,
 	)
-	verifierOutput := roleOutputBudget(
-		settings.LLMAnswerMaxTokens,
-		verifierOutputDenominator,
+	verifierOutput := investigationRoleOutputBudget(
+		settings.InvestigationMaxOutputTokens,
 		verifierOutputMinimum,
-		verifierOutputMaximum,
 	)
-	synthesizerOutput := roleOutputBudget(
-		settings.LLMAnswerMaxTokens,
-		synthesizerOutputDenominator,
+	synthesizerOutput := investigationRoleOutputBudget(
+		settings.InvestigationMaxOutputTokens,
 		synthesizerOutputMinimum,
-		synthesizerOutputMaximum,
 	)
 	investigatorSteps := boundedRoleLimit(settings.AgentMaxSteps, investigatorMaxSteps)
 	convergenceSteps := boundedRoleLimit(settings.AgentMaxSteps, convergenceMaxSteps)
@@ -91,7 +83,7 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		definition, err := agentapi.Prepare(agentapi.Definition{
 			ID: spec.id, Version: version, DisplayName: spec.name, Purpose: spec.purpose,
 			Prompt: agentapi.PromptSpec{
-				System: reportPrompt(spec.focus, rolePrompt), Version: "investigation-report-v2",
+				System: reportPrompt(spec.focus, rolePrompt), Version: "investigation-report-v3",
 			},
 			InputSchema:  agentapi.TaskContractSchemaRef(),
 			OutputSchema: agentapi.InvestigationReportSchemaRef(),
@@ -184,6 +176,26 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 	return append(definitions, synthesizer), nil
 }
 
+// investigationRoleOutputBudget derives a role's model output cap from the
+// Investigation Run output budget. A missing Investigation setting is kept as
+// a test/legacy compatibility fallback; once configured, the role gets exactly
+// the current Verification/Composition ten-percent share instead of an old
+// fixed floor that could exceed the role pool.
+func investigationRoleOutputBudget(global int64, fallback int) int {
+	if global <= 0 {
+		return fallback
+	}
+	budget := global / 10
+	if budget <= 0 {
+		return 1
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if budget > maxInt {
+		return int(maxInt)
+	}
+	return int(budget)
+}
+
 func roleOutputBudget(global, denominator, minimum, maximum int) int {
 	if global <= 0 {
 		return global
@@ -195,9 +207,12 @@ func roleOutputBudget(global, denominator, minimum, maximum int) int {
 	if budget > maximum {
 		budget = maximum
 	}
-	if budget > global {
-		return global
-	}
+	// LLMAnswerMaxTokens is the generic answerer baseline, not the hard
+	// ceiling for an investigation role. Investigators must be able to emit
+	// a complete structured handoff, while the investigation Run ledger
+	// remains the authoritative cumulative hard limit. A low generic answer
+	// setting (for example 3000) must not silently reduce every investigation
+	// role below its usable floor.
 	return budget
 }
 

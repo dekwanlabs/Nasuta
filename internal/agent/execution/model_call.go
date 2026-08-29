@@ -90,17 +90,24 @@ func (agent *Agent) limitModelOutput(inputTokens, requested int, gate agentapi.R
 	}
 	available := availability.Available()
 	input := int64(inputTokens)
+	minimumOutput := int64(0)
+	if minimum, ok := gate.(agentapi.RunBudgetMinimum); ok {
+		minimumOutput = minimum.MinimumOutputTokens()
+	}
 	if input > available.InputTokens {
-		return 0, fmt.Errorf("model call budget exceeded: input_tokens requested=%d available=%d", input, available.InputTokens)
+		return 0, fmt.Errorf("%w: input_tokens requested=%d available=%d", agentapi.ErrBudgetExceeded, input, available.InputTokens)
 	}
 	if available.OutputTokens <= 0 {
+		if minimumOutput > 0 {
+			return 0, fmt.Errorf("%w: protected output minimum=%d available=%d", agentapi.ErrBudgetExceeded, minimumOutput, available.OutputTokens)
+		}
 		return 0, fmt.Errorf("%w: output_tokens requested=%d available=%d", ErrModelCallBudgetExhausted, requested, available.OutputTokens)
 	}
 	maxOutput := minInt(requested, saturatingInt(available.OutputTokens))
 	if available.TotalTokens > 0 {
 		remaining := available.TotalTokens - input
 		if remaining <= 0 {
-			return 0, fmt.Errorf("model call budget exceeded: total_tokens input=%d available=%d", input, available.TotalTokens)
+			return 0, fmt.Errorf("%w: total_tokens input=%d available=%d", agentapi.ErrBudgetExceeded, input, available.TotalTokens)
 		}
 		maxOutput = minInt(maxOutput, saturatingInt(remaining))
 	}
@@ -112,7 +119,10 @@ func (agent *Agent) limitModelOutput(inputTokens, requested int, gate agentapi.R
 		}
 	}
 	if maxOutput <= 0 {
-		return 0, fmt.Errorf("model call budget exceeded: no output_tokens remain")
+		return 0, fmt.Errorf("%w: no output_tokens remain", agentapi.ErrBudgetExceeded)
+	}
+	if minimumOutput > 0 && int64(maxOutput) < minimumOutput {
+		return 0, fmt.Errorf("%w: protected output minimum=%d effective=%d", agentapi.ErrBudgetExceeded, minimumOutput, maxOutput)
 	}
 	return maxOutput, nil
 }
@@ -123,7 +133,7 @@ func (agent *Agent) capOutputByCost(inputTokens, maxOutput int, availableCost in
 		return 0, fmt.Errorf("estimate model call cost: %w", err)
 	}
 	if base.CostMicros > availableCost {
-		return 0, fmt.Errorf("model call budget exceeded: cost_micros input=%d available=%d", base.CostMicros, availableCost)
+		return 0, fmt.Errorf("%w: cost_micros input=%d available=%d", agentapi.ErrBudgetExceeded, base.CostMicros, availableCost)
 	}
 	low, high := 0, maxOutput
 	for low < high {
@@ -139,7 +149,7 @@ func (agent *Agent) capOutputByCost(inputTokens, maxOutput int, availableCost in
 		}
 	}
 	if low == 0 && maxOutput > 0 && base.CostMicros == availableCost {
-		return 0, fmt.Errorf("model call budget exceeded: no output cost budget remains")
+		return 0, fmt.Errorf("%w: no output cost budget remains", agentapi.ErrBudgetExceeded)
 	}
 	return low, nil
 }

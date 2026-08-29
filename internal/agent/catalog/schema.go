@@ -355,6 +355,26 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"maxItems":50,
 						"uniqueItems":true,
 						"items":{"type":"string","minLength":1}
+					},
+					"discovered_entities":{
+						"type":"array",
+						"maxItems":20,
+						"uniqueItems":true,
+						"items":{"type":"string","minLength":1,"maxLength":256}
+					},
+					"discovered_dependencies":{
+						"type":"array",
+						"maxItems":20,
+						"items":{
+							"type":"object",
+							"required":["from","to"],
+							"properties":{
+								"from":{"type":"string","minLength":1,"maxLength":256},
+								"to":{"type":"string","minLength":1,"maxLength":256},
+								"kind":{"type":"string","maxLength":64}
+							},
+							"additionalProperties":false
+						}
 					}
 				},
 				"additionalProperties":false,

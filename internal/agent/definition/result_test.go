@@ -13,6 +13,26 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
+func TestMapResultMapsCanonicalBudgetError(t *testing.T) {
+	wrapped := errors.Join(errors.New("turn stopped"), agentapi.ErrBudgetExceeded)
+	result, outcome := mapResult(
+		"run-budget-code",
+		&execution.RunResult{},
+		wrapped,
+		nil,
+		agentapi.Usage{},
+		nil,
+		nil,
+		agentapi.SchemaRef{},
+	)
+	if result.Status != agentapi.RunFailed || result.Error == nil || result.Error.Code != "budget_exhausted" {
+		t.Fatalf("result = %+v, want budget_exhausted failure", result)
+	}
+	if outcome.ErrorCode != "budget_exhausted" || !errors.Is(outcome.Err, agentapi.ErrBudgetExceeded) {
+		t.Fatalf("outcome = %+v, want canonical budget cause", outcome)
+	}
+}
+
 func TestMapResultRecoversReasoningTruncatedSynthesizerFromVerifiedBundle(t *testing.T) {
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
@@ -886,6 +906,60 @@ func TestMapResultStrictInvestigatorDocsRejectsMalformedReport(t *testing.T) {
 	}
 }
 
+func TestMapResultRecoversTruncatedStrictInvestigatorDocs(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	answer := `{
+		"focus":"docs",
+		"summary":"domain report",
+		"findings":[],
+		"gaps":["The report was cut off before all evidence was classified."],
+		"covered_evidence_goals":[]`
+	result, outcome := mapResult(
+		"run-docs-truncated-output",
+		&execution.RunResult{
+			Answer: answer,
+			Err:    execution.ErrAnswerTruncated,
+			Evidence: agentrun.EvidenceMetrics{
+				Status: agentrun.EvidencePartial,
+			},
+		},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.InvestigationReportSchemaRef(),
+		outputRecoveryContext{
+			AgentID:      "investigator.docs",
+			Input:        investigationReportRecoveryContract(),
+			StrictOutput: true,
+		},
+	)
+	if result.Status != agentapi.RunSucceeded || result.Error != nil ||
+		outcome.Status != agentrun.StatusDone || outcome.Err != nil {
+		t.Fatalf("result=%+v outcome=%+v", result, outcome)
+	}
+	if err := registry.Validate(agentapi.InvestigationReportSchemaRef(), result.Output); err != nil {
+		t.Fatalf("recovered output is not schema-valid: %v", err)
+	}
+	var report struct {
+		Findings                []any    `json:"findings"`
+		CoveredEvidenceGoals    []string `json:"covered_evidence_goals"`
+		UnresolvedEvidenceGoals []string `json:"unresolved_evidence_goals"`
+	}
+	if err := json.Unmarshal(result.Output, &report); err != nil {
+		t.Fatalf("decode recovered report: %v", err)
+	}
+	if len(report.Findings) != 0 || len(report.CoveredEvidenceGoals) != 0 ||
+		len(report.UnresolvedEvidenceGoals) != 1 ||
+		report.UnresolvedEvidenceGoals[0] != "core_flow" {
+		t.Fatalf("recovered report = %+v", report)
+	}
+}
+
 func TestMapResultRecoversTruncatedVerifierAsValidEmptyResult(t *testing.T) {
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
@@ -972,5 +1046,94 @@ func TestMapResultPreservesCompleteVerifierVerdictFromTruncatedJSON(t *testing.T
 	}
 	if len(verification.Verdicts) != 1 || len(verification.Verdicts[0].ClaimIDs) != 1 || verification.Verdicts[0].ClaimIDs[0] != "claim-1" {
 		t.Fatalf("recovered verdicts = %+v, want the complete verdict preserved", verification.Verdicts)
+	}
+}
+
+func TestMapResultAttachesInvestigationReportFromEvidenceWorkerAnswer(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	answer := `{
+		"focus":"docs",
+		"summary":"Named businesses from product docs.",
+		"findings":[{
+			"claim":"Checkout and billing are distinct core businesses.",
+			"evidence_goal_ids":["business_domain"],
+			"evidence":[{"kind":"runbook","reference":"overview.md","summary":"The overview names checkout and billing."}],
+			"confidence":0.8
+		}],
+		"gaps":[],
+		"covered_evidence_goals":["business_domain"],
+		"unresolved_evidence_goals":[],
+		"discovered_entities":["checkout","billing"]
+	}`
+	observation := agentapi.EvidenceObservation{
+		SourceKind: "runbook", Target: "overview.md", Summary: `{"matches":[{"title":"overview"}]}`,
+	}
+	result, outcome := mapResult(
+		"run-evidence-worker-report",
+		&execution.RunResult{
+			OutputMode:           agentapi.RunOutputEvidenceWorker,
+			Answer:               answer,
+			EvidenceObservations: []agentapi.EvidenceObservation{observation},
+			Evidence:             agentrun.EvidenceMetrics{Status: agentrun.EvidenceComplete},
+		},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.InvestigationReportSchemaRef(),
+		outputRecoveryContext{AgentID: "investigator.docs", StrictOutput: true},
+	)
+	if outcome.Status != agentrun.StatusDone || result.Status != agentapi.RunSucceeded {
+		t.Fatalf("result=%+v outcome=%+v", result, outcome)
+	}
+	if len(result.EvidenceObservations) != 1 {
+		t.Fatalf("observations = %+v, want preserved tool evidence", result.EvidenceObservations)
+	}
+	var report struct {
+		DiscoveredEntities []string `json:"discovered_entities"`
+		Summary            string   `json:"summary"`
+	}
+	if err := json.Unmarshal(result.Output, &report); err != nil {
+		t.Fatalf("decode attached report: %v", err)
+	}
+	if report.Summary == "" || len(report.DiscoveredEntities) != 2 {
+		t.Fatalf("attached report = %+v, want discovered businesses", report)
+	}
+}
+
+func TestMapResultPreservesEvidenceWorkerObservationsWithoutVisibleAnswer(t *testing.T) {
+	observation := agentapi.EvidenceObservation{
+		SourceKind: "code", Target: "service.go", Summary: "the service routes requests through the application layer",
+	}
+	result, outcome := mapResult(
+		"run-evidence-worker",
+		&execution.RunResult{
+			OutputMode:           agentapi.RunOutputEvidenceWorker,
+			EvidenceObservations: []agentapi.EvidenceObservation{observation},
+			Evidence:             agentrun.EvidenceMetrics{Status: agentrun.EvidenceComplete},
+		},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		nil,
+		agentapi.InvestigationReportSchemaRef(),
+		outputRecoveryContext{AgentID: "investigator.docs", StrictOutput: true},
+	)
+	if outcome.Status != agentrun.StatusDone || outcome.Err != nil {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if result.Status != agentapi.RunSucceeded || result.Error != nil {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(result.EvidenceObservations) != 1 ||
+		result.EvidenceObservations[0].SourceKind != observation.SourceKind ||
+		result.EvidenceObservations[0].Target != observation.Target ||
+		result.EvidenceObservations[0].Summary != observation.Summary {
+		t.Fatalf("observations = %+v, want %+v", result.EvidenceObservations, observation)
 	}
 }

@@ -75,6 +75,11 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 			agent.handleAnswerTurn(state, turn)
 			break
 		}
+		if len(agent.toolsForStep(state, step)) == 0 {
+			log.InfofCtx(state.ctx, "[agent] run %s reserved last step for structured output; ignoring tool calls",
+				state.runID)
+			break
+		}
 
 		if err := agent.recordThinkTurn(state, turn); err != nil {
 			state.result.Err = err
@@ -105,15 +110,16 @@ func (agent *Agent) ensureTurnBudget(state *compiledLoop, step int) error {
 			return err
 		}
 	}
+	tools := agent.toolsForStep(state, step)
 	if _, err := agent.compactAnswerContext(
-		state, state.tools, fmt.Sprintf("model_step_%d", step),
+		state, tools, fmt.Sprintf("model_step_%d", step),
 	); err != nil {
 		return err
 	}
 	_, err := runtrace.Invoke(
 		state.ctx,
 		contextBudgetSpec,
-		contextBudgetInput{Step: step, Messages: state.messages, Tools: state.tools},
+		contextBudgetInput{Step: step, Messages: state.messages, Tools: tools},
 		func(_ context.Context, input contextBudgetInput) (struct{}, error) {
 			return struct{}{}, agent.ensureInputBudget(input.Messages, input.Tools)
 		},
@@ -125,11 +131,12 @@ func (agent *Agent) callModelTurn(state *compiledLoop, step int) (modelTurn, err
 	started := time.Now()
 	stream := newStreamPipe(agent.observer, state.runID, step, started, agent.onFirstAnswerToken)
 	callCtx := llm.WithUsagePhase(state.loopCtx, llm.PhaseAgentStep)
+	tools := agent.toolsForStep(state, step)
 	output, err := runtrace.Invoke(
 		callCtx,
 		agentModelTurnSpec,
 		agentModelTurnInput{
-			Step: step, Messages: state.messages, Tools: state.tools, Stream: stream,
+			Step: step, Messages: state.messages, Tools: tools, Stream: stream,
 		},
 		func(callCtx context.Context, input agentModelTurnInput) (agentModelTurnOutput, error) {
 			result, callErr := agent.callModel(
@@ -463,7 +470,7 @@ func appendEvidenceObservations(
 			Target:        unit.Target,
 			Section:       section,
 			Summary:       summary,
-			ContentHash:   unit.ContentHash,
+			ContentHash:   toolContentSHA256(summary),
 			Facets:        append([]string(nil), unit.Facets...),
 			TrustTier:     unit.TrustTier,
 			EvidenceClass: unit.EvidenceClass,

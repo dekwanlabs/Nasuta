@@ -58,6 +58,9 @@ type budgetReservation struct {
 	id    string
 	stage BudgetStage
 	grant BudgetVector
+	// calls is cumulative in-flight model usage: pending calls contribute their
+	// estimates and settled calls contribute actual usage until the task settles.
+	calls BudgetVector
 	// soft marks an admission reservation: the grant is a concurrency floor,
 	// not a hard per-task ceiling. Settle charges actual usage to the shared
 	// run/stage limits without rejecting usage that exceeds the grant.
@@ -106,6 +109,13 @@ func (gate reservationBudgetGate) Available() agentapi.Usage {
 		return agentapi.Usage{}
 	}
 	return budgetUsageFromVector(gate.ledger.AvailableForReservation(gate.id))
+}
+
+func (gate reservationBudgetGate) MinimumOutputTokens() int64 {
+	if gate.ledger == nil {
+		return 0
+	}
+	return gate.ledger.MinimumOutputForReservation(gate.id)
 }
 
 func (reservation budgetCallReservation) Settle(usage agentapi.Usage) error {
@@ -172,8 +182,10 @@ func (ledger *BudgetLedger) Restore(snapshot BudgetSnapshot) error {
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
 	ledger.run = snapshot.Run
+	ledger.run.Reserved = BudgetVector{}
 	ledger.stages = make(map[BudgetStage]StageBudget, len(snapshot.Stages))
 	for stage, budget := range snapshot.Stages {
+		budget.Reserved = BudgetVector{}
 		ledger.stages[stage] = budget
 	}
 	ledger.reservations = make(map[string]budgetReservation)
@@ -322,18 +334,7 @@ func transferAvailableDurationLimit(
 }
 
 func (ledger *BudgetLedger) CanReserve(stage BudgetStage, id string, grant BudgetVector) error {
-	if ledger == nil {
-		return fmt.Errorf("budget ledger is required")
-	}
-	if stage == "" || id == "" {
-		return fmt.Errorf("budget stage and reservation id are required")
-	}
-	if err := validateBudgetVector(grant); err != nil {
-		return fmt.Errorf("reservation %q: %w", id, err)
-	}
-	ledger.mu.Lock()
-	defer ledger.mu.Unlock()
-	return ledger.canReserveLocked(stage, id, grant)
+	return ledger.canReserve(stage, id, grant, false)
 }
 
 func (ledger *BudgetLedger) Reserve(stage BudgetStage, id string, grant BudgetVector) (BudgetReservation, error) {
@@ -349,13 +350,85 @@ func (ledger *BudgetLedger) ReserveAdmission(stage BudgetStage, id string, grant
 	return ledger.reserve(stage, id, grant, true)
 }
 
+// BudgetAdmission is one task's protected minimum in an atomic parallel-group
+// admission. TaskID is only an ownership key; the ledger assigns reservation IDs.
+type BudgetAdmission struct {
+	TaskID string
+	Grant  BudgetVector
+}
+
+// ReserveAdmissionGroup atomically protects all requested task minimums. A
+// failed group leaves the ledger unchanged so the scheduler can reduce the
+// batch and retry without first-wins overbooking. These normal admissions are
+// soft: their grant protects capacity but does not become a private task quota.
+func (ledger *BudgetLedger) ReserveAdmissionGroup(stage BudgetStage, admissions []BudgetAdmission) (map[string]BudgetReservation, error) {
+	return ledger.reserveAdmissionGroup(stage, admissions, true)
+}
+
+// ReserveProtectedAdmissionGroup atomically locks role allocations that must be
+// both protected from siblings and enforced as per-task ceilings. Verifier uses
+// this path because its input/output/total slice is assigned before execution.
+func (ledger *BudgetLedger) ReserveProtectedAdmissionGroup(stage BudgetStage, admissions []BudgetAdmission) (map[string]BudgetReservation, error) {
+	return ledger.reserveAdmissionGroup(stage, admissions, false)
+}
+
+func (ledger *BudgetLedger) reserveAdmissionGroup(stage BudgetStage, admissions []BudgetAdmission, soft bool) (map[string]BudgetReservation, error) {
+	if ledger == nil {
+		return nil, fmt.Errorf("budget ledger is required")
+	}
+	if stage == "" {
+		return nil, fmt.Errorf("budget stage is required")
+	}
+	if len(admissions) == 0 {
+		return map[string]BudgetReservation{}, nil
+	}
+	var total BudgetVector
+	seen := make(map[string]struct{}, len(admissions))
+	for _, admission := range admissions {
+		if admission.TaskID == "" {
+			return nil, fmt.Errorf("budget admission task id is required")
+		}
+		if _, exists := seen[admission.TaskID]; exists {
+			return nil, fmt.Errorf("duplicate budget admission task %q", admission.TaskID)
+		}
+		seen[admission.TaskID] = struct{}{}
+		if err := validateBudgetVector(admission.Grant); err != nil {
+			return nil, fmt.Errorf("budget admission %q: %w", admission.TaskID, err)
+		}
+		total = addVector(total, admission.Grant)
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	if !fits(addVector(addVector(ledger.run.Used, ledger.run.Reserved), total), ledger.run.Limit) {
+		return nil, fmt.Errorf("%w: parallel admission exceeds run limit", ErrBudgetExceeded)
+	}
+	stageBudget := ledger.stageLocked(stage)
+	// Admission is soft with respect to a stage: token dimensions are shared
+	// at Run scope, while hard task/tool reservations still enforce their stage.
+	reservations := make(map[string]BudgetReservation, len(admissions))
+	for _, admission := range admissions {
+		reservationID := fmt.Sprintf("reservation_%d", ledger.nextID.Add(1))
+		ledger.reservations[reservationID] = budgetReservation{
+			id: reservationID, stage: stage, grant: admission.Grant, soft: soft,
+			pending: make(map[string]BudgetVector),
+		}
+		reservations[admission.TaskID] = BudgetReservation{
+			ledger: ledger, ID: reservationID, Grant: admission.Grant,
+		}
+	}
+	ledger.run.Reserved = addVector(ledger.run.Reserved, total)
+	stageBudget.Reserved = addVector(stageBudget.Reserved, total)
+	ledger.stages[stage] = stageBudget
+	return reservations, nil
+}
+
 func (ledger *BudgetLedger) reserve(stage BudgetStage, id string, grant BudgetVector, soft bool) (BudgetReservation, error) {
-	if err := ledger.CanReserve(stage, id, grant); err != nil {
+	if err := ledger.canReserve(stage, id, grant, soft); err != nil {
 		return BudgetReservation{}, err
 	}
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
-	if err := ledger.canReserveLocked(stage, id, grant); err != nil {
+	if err := ledger.canReserveLocked(stage, id, grant, soft); err != nil {
 		return BudgetReservation{}, err
 	}
 	reservationID := fmt.Sprintf("reservation_%d", ledger.nextID.Add(1))
@@ -409,13 +482,35 @@ func (ledger *BudgetLedger) CapStageGrant(stage BudgetStage, grant BudgetVector)
 // Check implements agent.RunBudgetGate. It is intentionally run-scoped: a
 // Workflow child is not assigned a private token quota. Call reservations add
 // the missing in-flight accounting before the task is finally settled.
+func (ledger *BudgetLedger) checkReservation(id string) error {
+	if ledger == nil {
+		return fmt.Errorf("budget ledger is required")
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	reservation, exists := ledger.reservations[id]
+	if !exists {
+		return fmt.Errorf("reservation %q not found", id)
+	}
+	// The current reservation is already protected for this task. Exclude it
+	// from global preflight so a full group can spend its own minimum while
+	// refusing calls that invade a sibling's grant.
+	otherReserved := subtractVector(ledger.run.Reserved, reservationReserved(reservation))
+	other := addVector(ledger.run.Used, otherReserved)
+	if !fits(other, ledger.run.Limit) ||
+		(reservationReserved(reservation) == (BudgetVector{}) && exhausted(other, ledger.run.Limit)) {
+		return fmt.Errorf("%w: shared investigation run budget is exhausted", ErrBudgetExceeded)
+	}
+	return nil
+}
+
 func (ledger *BudgetLedger) Check() error {
 	if ledger == nil {
 		return fmt.Errorf("budget ledger is required")
 	}
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
-	if !fits(addVector(ledger.run.Used, ledger.run.Reserved), ledger.run.Limit) {
+	if exhausted(addVector(ledger.run.Used, ledger.run.Reserved), ledger.run.Limit) {
 		return fmt.Errorf("%w: shared investigation run budget is exhausted", ErrBudgetExceeded)
 	}
 	return nil
@@ -436,7 +531,19 @@ func (ledger *BudgetLedger) ReserveCall(id string, estimate BudgetVector) (budge
 	if !exists {
 		return budgetCallReservation{}, fmt.Errorf("reservation %q not found", id)
 	}
-	projectedRun := addVector(ledger.run.Used, addVector(ledger.run.Reserved, estimate))
+	nextCalls := addVector(reservation.calls, estimate)
+	if !reservation.soft && !fitsGrant(nextCalls, reservation.grant) {
+		return budgetCallReservation{}, fmt.Errorf(
+			"%w: model call for reservation %q exceeds its grant",
+			ErrBudgetExceeded, id,
+		)
+	}
+	currentReserved := reservationReserved(reservation)
+	nextReserved := maxBudgetVector(reservation.grant, nextCalls)
+	projectedRun := addVector(
+		ledger.run.Used,
+		addVector(subtractVector(ledger.run.Reserved, currentReserved), nextReserved),
+	)
 	if !fits(projectedRun, ledger.run.Limit) {
 		return budgetCallReservation{}, fmt.Errorf(
 			"%w: model call for reservation %q exceeds run limit dimensions=%s projected=%+v limit=%+v",
@@ -444,22 +551,27 @@ func (ledger *BudgetLedger) ReserveCall(id string, estimate BudgetVector) (budge
 		)
 	}
 	stageBudget := ledger.stageLocked(reservation.stage)
-	projectedStage := addVector(stageBudget.Used, addVector(stageBudget.Reserved, estimate))
-	if !fits(projectedStage, stageBudget.Limit) {
-		return budgetCallReservation{}, fmt.Errorf(
-			"%w: model call for reservation %q exceeds stage %q limit dimensions=%s projected=%+v limit=%+v",
-			ErrBudgetExceeded, id, reservation.stage, strings.Join(exceededDimensions(projectedStage, stageBudget.Limit), ","), projectedStage, stageBudget.Limit,
+	if !reservation.soft {
+		projectedStage := addVector(
+			stageBudget.Used,
+			addVector(subtractVector(stageBudget.Reserved, currentReserved), nextReserved),
 		)
+		if !fits(projectedStage, stageBudget.Limit) {
+			return budgetCallReservation{}, fmt.Errorf(
+				"%w: model call for reservation %q exceeds stage %q limit dimensions=%s projected=%+v limit=%+v",
+				ErrBudgetExceeded, id, reservation.stage, strings.Join(exceededDimensions(projectedStage, stageBudget.Limit), ","), projectedStage, stageBudget.Limit,
+			)
+		}
 	}
 	if reservation.pending == nil {
 		reservation.pending = make(map[string]BudgetVector)
 	}
 	callID := fmt.Sprintf("%s.call.%d", id, ledger.nextID.Add(1))
 	reservation.pending[callID] = estimate
-	reservation.grant = addVector(reservation.grant, estimate)
+	reservation.calls = nextCalls
 	ledger.reservations[id] = reservation
-	ledger.run.Reserved = addVector(ledger.run.Reserved, estimate)
-	stageBudget.Reserved = addVector(stageBudget.Reserved, estimate)
+	ledger.run.Reserved = addVector(subtractVector(ledger.run.Reserved, currentReserved), nextReserved)
+	stageBudget.Reserved = addVector(subtractVector(stageBudget.Reserved, currentReserved), nextReserved)
 	ledger.stages[reservation.stage] = stageBudget
 	return budgetCallReservation{ledger: ledger, reservationID: id, callID: callID}, nil
 }
@@ -478,27 +590,39 @@ func (ledger *BudgetLedger) settleCall(id, callID string, actual BudgetVector) e
 	if !exists {
 		return fmt.Errorf("call reservation %q not found", callID)
 	}
+	currentReserved := reservationReserved(reservation)
+	nextCalls := addVector(subtractVector(reservation.calls, estimate), actual)
+	if !reservation.soft && !fitsGrant(nextCalls, reservation.grant) {
+		return fmt.Errorf("%w: actual model usage exceeds reservation %q", ErrBudgetExceeded, id)
+	}
+	nextReserved := maxBudgetVector(reservation.grant, nextCalls)
 	projectedRun := addVector(
 		ledger.run.Used,
-		addVector(subtractVector(ledger.run.Reserved, estimate), actual),
+		addVector(subtractVector(ledger.run.Reserved, currentReserved), nextReserved),
 	)
-	if !fits(projectedRun, ledger.run.Limit) {
+	runExceeded := !fits(projectedRun, ledger.run.Limit)
+	if runExceeded && !reservation.soft {
 		return fmt.Errorf("%w: actual model usage exceeds run limit for reservation %q", ErrBudgetExceeded, id)
 	}
 	stageBudget := ledger.stageLocked(reservation.stage)
-	projectedStage := addVector(
-		stageBudget.Used,
-		addVector(subtractVector(stageBudget.Reserved, estimate), actual),
-	)
-	if !fits(projectedStage, stageBudget.Limit) {
-		return fmt.Errorf("%w: actual model usage exceeds stage %q limit for reservation %q", ErrBudgetExceeded, reservation.stage, id)
+	if !reservation.soft {
+		projectedStage := addVector(
+			stageBudget.Used,
+			addVector(subtractVector(stageBudget.Reserved, currentReserved), nextReserved),
+		)
+		if !fits(projectedStage, stageBudget.Limit) {
+			return fmt.Errorf("%w: actual model usage exceeds stage %q limit for reservation %q", ErrBudgetExceeded, reservation.stage, id)
+		}
 	}
 	delete(reservation.pending, callID)
-	reservation.grant = addVector(subtractVector(reservation.grant, estimate), actual)
+	reservation.calls = nextCalls
 	ledger.reservations[id] = reservation
-	ledger.run.Reserved = addVector(subtractVector(ledger.run.Reserved, estimate), actual)
-	stageBudget.Reserved = addVector(subtractVector(stageBudget.Reserved, estimate), actual)
+	ledger.run.Reserved = addVector(subtractVector(ledger.run.Reserved, currentReserved), nextReserved)
+	stageBudget.Reserved = addVector(subtractVector(stageBudget.Reserved, currentReserved), nextReserved)
 	ledger.stages[reservation.stage] = stageBudget
+	if runExceeded {
+		return fmt.Errorf("%w: actual model usage exceeds run limit for reservation %q", ErrBudgetExceeded, id)
+	}
 	return nil
 }
 
@@ -513,12 +637,14 @@ func (ledger *BudgetLedger) releaseCall(id, callID string) error {
 	if !exists {
 		return fmt.Errorf("call reservation %q not found", callID)
 	}
+	currentReserved := reservationReserved(reservation)
 	delete(reservation.pending, callID)
-	reservation.grant = subtractVector(reservation.grant, estimate)
+	reservation.calls = subtractVector(reservation.calls, estimate)
+	nextReserved := reservationReserved(reservation)
 	ledger.reservations[id] = reservation
-	ledger.run.Reserved = subtractVector(ledger.run.Reserved, estimate)
+	ledger.run.Reserved = addVector(subtractVector(ledger.run.Reserved, currentReserved), nextReserved)
 	stageBudget := ledger.stageLocked(reservation.stage)
-	stageBudget.Reserved = subtractVector(stageBudget.Reserved, estimate)
+	stageBudget.Reserved = addVector(subtractVector(stageBudget.Reserved, currentReserved), nextReserved)
 	ledger.stages[reservation.stage] = stageBudget
 	return nil
 }
@@ -533,9 +659,24 @@ func (ledger *BudgetLedger) Available(stage BudgetStage) BudgetVector {
 	return subtractVector(stageBudget.Limit, addVector(stageBudget.Used, stageBudget.Reserved))
 }
 
+// MinimumOutputForReservation returns the unconsumed output floor protected
+// by an admission grant. It is zero after the grant has been consumed.
+func (ledger *BudgetLedger) MinimumOutputForReservation(id string) int64 {
+	if ledger == nil {
+		return 0
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	reservation, ok := ledger.reservations[id]
+	if !ok || reservation.grant.OutputTokens <= reservation.calls.OutputTokens {
+		return 0
+	}
+	return reservation.grant.OutputTokens - reservation.calls.OutputTokens
+}
+
 // AvailableForReservation returns the incremental call budget left for one
-// reservation. Both the run and stage views matter because non-token stage
-// controls may still be narrower than the shared token ledger.
+// reservation. Admission reservations use only the shared run view because
+// their stage allocation is not a private Agent quota.
 func (ledger *BudgetLedger) AvailableForReservation(id string) BudgetVector {
 	if ledger == nil {
 		return BudgetVector{}
@@ -546,10 +687,22 @@ func (ledger *BudgetLedger) AvailableForReservation(id string) BudgetVector {
 	if !ok {
 		return BudgetVector{}
 	}
-	runAvailable := subtractVector(ledger.run.Limit, addVector(ledger.run.Used, ledger.run.Reserved))
+	reserved := reservationReserved(reservation)
+	covered := subtractVector(reserved, reservation.calls)
+	runAvailable := addAvailableCapacity(
+		subtractVector(ledger.run.Limit, addVector(ledger.run.Used, ledger.run.Reserved)),
+		covered,
+	)
+	if reservation.soft {
+		return runAvailable
+	}
 	stageBudget := ledger.stageLocked(reservation.stage)
-	stageAvailable := subtractVector(stageBudget.Limit, addVector(stageBudget.Used, stageBudget.Reserved))
-	return minAvailable(runAvailable, stageAvailable)
+	stageAvailable := addAvailableCapacity(
+		subtractVector(stageBudget.Limit, addVector(stageBudget.Used, stageBudget.Reserved)),
+		covered,
+	)
+	available := minAvailable(runAvailable, stageAvailable)
+	return capAvailableToGrant(available, reservation.calls, reservation.grant)
 }
 
 func (ledger *BudgetLedger) Snapshot() BudgetSnapshot {
@@ -565,7 +718,22 @@ func (ledger *BudgetLedger) Snapshot() BudgetSnapshot {
 	return BudgetSnapshot{Run: ledger.run, Stages: stages}
 }
 
-func (ledger *BudgetLedger) canReserveLocked(stage BudgetStage, id string, grant BudgetVector) error {
+func (ledger *BudgetLedger) canReserve(stage BudgetStage, id string, grant BudgetVector, soft bool) error {
+	if ledger == nil {
+		return fmt.Errorf("budget ledger is required")
+	}
+	if stage == "" || id == "" {
+		return fmt.Errorf("budget stage and reservation id are required")
+	}
+	if err := validateBudgetVector(grant); err != nil {
+		return fmt.Errorf("reservation %q: %w", id, err)
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	return ledger.canReserveLocked(stage, id, grant, soft)
+}
+
+func (ledger *BudgetLedger) canReserveLocked(stage BudgetStage, id string, grant BudgetVector, soft bool) error {
 	if _, exists := ledger.reservations[id]; exists {
 		return fmt.Errorf("reservation %q already exists", id)
 	}
@@ -576,7 +744,7 @@ func (ledger *BudgetLedger) canReserveLocked(stage BudgetStage, id string, grant
 		return fmt.Errorf("%w: run reservation %q exceeds run limit", ErrBudgetExceeded, id)
 	}
 	stageBudget := ledger.stageLocked(stage)
-	if !fits(addVector(addVector(stageBudget.Used, stageBudget.Reserved), grant), stageBudget.Limit) {
+	if !soft && !fits(addVector(addVector(stageBudget.Used, stageBudget.Reserved), grant), stageBudget.Limit) {
 		return fmt.Errorf("%w: stage %q reservation %q exceeds stage limit", ErrBudgetExceeded, stage, id)
 	}
 	return nil
@@ -592,31 +760,39 @@ func (ledger *BudgetLedger) settle(id string, actual BudgetVector) error {
 	if !exists {
 		return fmt.Errorf("reservation %q not found", id)
 	}
-	if !reservation.soft && !fitsGrant(actual, reservation.grant) {
-		return fmt.Errorf("%w: actual usage exceeds reservation %q", ErrBudgetExceeded, id)
-	}
 	if len(reservation.pending) > 0 {
 		return fmt.Errorf("reservation %q has unsettled model calls", id)
 	}
-	// A zero grant dimension means the template did not publish a per-task
-	// ceiling. It is not permission to exceed the run or stage hard limit.
-	// Check the settled usage while the ledger lock is held, including grants
-	// still reserved by sibling tasks.
-	projectedRun := addVector(addVector(subtractVector(ledger.run.Reserved, reservation.grant), ledger.run.Used), actual)
-	if !fits(projectedRun, ledger.run.Limit) {
+	// Settled model calls are authoritative for provider usage. The outer task
+	// may add dimensions such as tool calls or duration, but cannot erase them.
+	actual = maxBudgetVector(actual, reservation.calls)
+	if !reservation.soft && !fitsGrant(actual, reservation.grant) {
+		return fmt.Errorf("%w: actual usage exceeds reservation %q", ErrBudgetExceeded, id)
+	}
+	// Admission reservations have no private stage ceiling. The shared run
+	// limit remains authoritative; hard reservations still enforce their stage.
+	reserved := reservationReserved(reservation)
+	projectedRun := addVector(addVector(subtractVector(ledger.run.Reserved, reserved), ledger.run.Used), actual)
+	runExceeded := !fits(projectedRun, ledger.run.Limit)
+	if runExceeded && !reservation.soft {
 		return fmt.Errorf("%w: actual usage exceeds run limit for reservation %q", ErrBudgetExceeded, id)
 	}
 	stageBudget := ledger.stageLocked(reservation.stage)
-	projectedStage := addVector(addVector(subtractVector(stageBudget.Reserved, reservation.grant), stageBudget.Used), actual)
-	if !fits(projectedStage, stageBudget.Limit) {
-		return fmt.Errorf("%w: actual usage exceeds stage %q limit for reservation %q", ErrBudgetExceeded, reservation.stage, id)
+	if !reservation.soft {
+		projectedStage := addVector(addVector(subtractVector(stageBudget.Reserved, reserved), stageBudget.Used), actual)
+		if !fits(projectedStage, stageBudget.Limit) {
+			return fmt.Errorf("%w: actual usage exceeds stage %q limit for reservation %q", ErrBudgetExceeded, reservation.stage, id)
+		}
 	}
 	delete(ledger.reservations, id)
-	ledger.run.Reserved = subtractVector(ledger.run.Reserved, reservation.grant)
+	ledger.run.Reserved = subtractVector(ledger.run.Reserved, reserved)
 	ledger.run.Used = addVector(ledger.run.Used, actual)
-	stageBudget.Reserved = subtractVector(stageBudget.Reserved, reservation.grant)
+	stageBudget.Reserved = subtractVector(stageBudget.Reserved, reserved)
 	stageBudget.Used = addVector(stageBudget.Used, actual)
 	ledger.stages[reservation.stage] = stageBudget
+	if runExceeded {
+		return fmt.Errorf("%w: actual usage exceeds run limit for reservation %q", ErrBudgetExceeded, id)
+	}
 	return nil
 }
 
@@ -634,6 +810,56 @@ func budgetUsageFromVector(value BudgetVector) agentapi.Usage {
 		InputTokens: value.InputTokens, OutputTokens: value.OutputTokens,
 		TotalTokens: value.TotalTokens, CostMicros: value.CostMicros,
 	}
+}
+
+func reservationReserved(reservation budgetReservation) BudgetVector {
+	return maxBudgetVector(reservation.grant, reservation.calls)
+}
+
+func maxBudgetVector(left, right BudgetVector) BudgetVector {
+	return BudgetVector{
+		InputTokens:  maxInt64(left.InputTokens, right.InputTokens),
+		OutputTokens: maxInt64(left.OutputTokens, right.OutputTokens),
+		TotalTokens:  maxInt64(left.TotalTokens, right.TotalTokens),
+		ToolCalls:    maxInt(left.ToolCalls, right.ToolCalls),
+		Duration:     maxDuration(left.Duration, right.Duration),
+		CostMicros:   maxInt64(left.CostMicros, right.CostMicros),
+	}
+}
+
+func addAvailableCapacity(available, covered BudgetVector) BudgetVector {
+	out := addVector(available, covered)
+	if available.CostMicros == 0 {
+		out.CostMicros = 0
+	}
+	return out
+}
+
+func capAvailableToGrant(available, used, grant BudgetVector) BudgetVector {
+	remaining := subtractVector(grant, used)
+	if grant.InputTokens > 0 {
+		available.InputTokens = minInt64(available.InputTokens, remaining.InputTokens)
+	}
+	if grant.OutputTokens > 0 {
+		available.OutputTokens = minInt64(available.OutputTokens, remaining.OutputTokens)
+	}
+	if grant.TotalTokens > 0 {
+		available.TotalTokens = minInt64(available.TotalTokens, remaining.TotalTokens)
+	}
+	if grant.ToolCalls > 0 {
+		available.ToolCalls = minInt(available.ToolCalls, remaining.ToolCalls)
+	}
+	if grant.Duration > 0 {
+		available.Duration = maxDuration(0, minDuration(available.Duration, remaining.Duration))
+	}
+	if grant.CostMicros > 0 {
+		if available.CostMicros == 0 {
+			available.CostMicros = remaining.CostMicros
+		} else {
+			available.CostMicros = minInt64(available.CostMicros, remaining.CostMicros)
+		}
+	}
+	return available
 }
 
 func minAvailable(left, right BudgetVector) BudgetVector {
@@ -663,9 +889,10 @@ func (ledger *BudgetLedger) release(id string) error {
 		return fmt.Errorf("reservation %q not found", id)
 	}
 	delete(ledger.reservations, id)
-	ledger.run.Reserved = subtractVector(ledger.run.Reserved, reservation.grant)
+	reserved := reservationReserved(reservation)
+	ledger.run.Reserved = subtractVector(ledger.run.Reserved, reserved)
 	stageBudget := ledger.stageLocked(reservation.stage)
-	stageBudget.Reserved = subtractVector(stageBudget.Reserved, reservation.grant)
+	stageBudget.Reserved = subtractVector(stageBudget.Reserved, reserved)
 	ledger.stages[reservation.stage] = stageBudget
 	return nil
 }
@@ -706,6 +933,41 @@ func exceededDimensions(value, limit BudgetVector) []string {
 		dimensions = append(dimensions, "cost_micros")
 	}
 	return dimensions
+}
+
+// exhausted reports whether no further call can start under a positive run
+// limit. Equality is exhausted for admission, while zero keeps a dimension
+// unbounded just like the other budget helpers.
+func exhausted(used, limit BudgetVector) bool {
+	return exhaustedInt64(used.InputTokens, limit.InputTokens) ||
+		exhaustedInt64(used.OutputTokens, limit.OutputTokens) ||
+		exhaustedTotalTokens(used, limit) ||
+		exhaustedInt(used.ToolCalls, limit.ToolCalls) ||
+		exhaustedDuration(used.Duration, limit.Duration) ||
+		exhaustedInt64(used.CostMicros, limit.CostMicros)
+}
+
+func exhaustedTotalTokens(used, limit BudgetVector) bool {
+	if limit.TotalTokens == 0 {
+		return false
+	}
+	total := used.TotalTokens
+	if total == 0 {
+		total = saturatingAdd(used.InputTokens, used.OutputTokens)
+	}
+	return total >= limit.TotalTokens
+}
+
+func exhaustedInt64(value, limit int64) bool {
+	return limit > 0 && value >= limit
+}
+
+func exhaustedInt(value, limit int) bool {
+	return limit > 0 && value >= limit
+}
+
+func exhaustedDuration(value, limit time.Duration) bool {
+	return limit > 0 && value >= limit
 }
 
 func fits(used, limit BudgetVector, limits ...BudgetVector) bool {
@@ -865,6 +1127,13 @@ func maxInt64(left, right int64) int64 {
 
 func maxInt(left, right int) int {
 	if left > right {
+		return left
+	}
+	return right
+}
+
+func minDuration(left, right time.Duration) time.Duration {
+	if left < right {
 		return left
 	}
 	return right

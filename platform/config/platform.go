@@ -35,7 +35,8 @@ const (
 	DefaultDelegationParentAnswerReserve  = 4000
 
 	DefaultInvestigationMaxInputTokens  = 300_000
-	DefaultInvestigationMaxOutputTokens = 16_000
+	DefaultInvestigationMaxOutputTokens = 128_000
+	DefaultInvestigationMaxTotalTokens  = 512_000
 	DefaultInvestigationMaxToolCalls    = 48
 	DefaultInvestigationMaxDuration     = 10 * time.Minute
 	DefaultInvestigationMaxRounds       = 6
@@ -90,6 +91,7 @@ type PlatformSettings struct {
 	AgentAnswerReserve           Duration
 	InvestigationMaxInputTokens  int64
 	InvestigationMaxOutputTokens int64
+	InvestigationMaxTotalTokens  int64
 	InvestigationMaxToolCalls    int64
 	InvestigationMaxDuration     Duration
 	InvestigationMaxRounds       int
@@ -139,7 +141,8 @@ var platformSettingKeys = map[string]bool{
 	"llm_output_price_micros_per_million_tokens": true,
 	"agent_timeout": true, "agent_max_steps": true, "agent_max_tool_calls": true, "context_budget": false, "domain_knowledge": true,
 	"investigation_max_input_tokens": true, "investigation_max_output_tokens": true,
-	"investigation_max_tool_calls": true, "investigation_max_duration": true,
+	"investigation_max_total_tokens": true,
+	"investigation_max_tool_calls":   true, "investigation_max_duration": true,
 	"investigation_max_rounds": true, "investigation_max_tasks": true,
 	"investigation_max_parallelism": true,
 	"investigation_max_cost_micros": true, "investigation_budget_profile": true,
@@ -209,6 +212,7 @@ func (p *PlatformSettings) Values() map[string]any {
 		"agent_max_tool_calls":                       strconv.FormatInt(p.AgentMaxToolCalls, 10),
 		"investigation_max_input_tokens":             strconv.FormatInt(p.InvestigationMaxInputTokens, 10),
 		"investigation_max_output_tokens":            strconv.FormatInt(p.InvestigationMaxOutputTokens, 10),
+		"investigation_max_total_tokens":             strconv.FormatInt(p.InvestigationMaxTotalTokens, 10),
 		"investigation_max_tool_calls":               strconv.FormatInt(p.InvestigationMaxToolCalls, 10),
 		"investigation_max_duration":                 time.Duration(p.InvestigationMaxDuration).String(),
 		"investigation_max_rounds":                   p.InvestigationMaxRounds,
@@ -283,6 +287,9 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	}
 	if p.InvestigationMaxOutputTokens <= 0 {
 		p.InvestigationMaxOutputTokens = DefaultInvestigationMaxOutputTokens
+	}
+	if p.InvestigationMaxTotalTokens <= 0 {
+		p.InvestigationMaxTotalTokens = DefaultInvestigationMaxTotalTokens
 	}
 	if p.InvestigationMaxToolCalls <= 0 {
 		p.InvestigationMaxToolCalls = DefaultInvestigationMaxToolCalls
@@ -506,6 +513,11 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 			p.InvestigationMaxOutputTokens = n
 		}
 	}
+	if v := strings.TrimSpace(m["investigation_max_total_tokens"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			p.InvestigationMaxTotalTokens = n
+		}
+	}
 	if v := strings.TrimSpace(m["investigation_max_tool_calls"]); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			p.InvestigationMaxToolCalls = n
@@ -723,7 +735,8 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 	case "agent_max_tool_calls", "delegation_max_child_tool_calls", "delegation_max_child_input_tokens",
 		"delegation_max_child_output_tokens", "delegation_max_report_tokens",
 		"delegation_max_total_tokens", "investigation_max_input_tokens",
-		"investigation_max_output_tokens", "investigation_max_tool_calls":
+		"investigation_max_output_tokens", "investigation_max_total_tokens",
+		"investigation_max_tool_calls":
 		return canonicalPositiveInt64Setting(key, value)
 	case "delegation_max_total_cost_micros", "delegation_parent_answer_reserve", "investigation_max_cost_micros":
 		return canonicalNonNegativeInt64Setting(key, value)

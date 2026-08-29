@@ -2,8 +2,11 @@ package investigation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -166,6 +169,32 @@ func TestAgentRuntimeTaskExecutorUsesSharedRuntimeBudget(t *testing.T) {
 	}
 	if runtime.gotReq.Limits.MaxContextTokens <= 0 {
 		t.Fatalf("request max context tokens = %d, want a per-request context limit", runtime.gotReq.Limits.MaxContextTokens)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorVerifierKeepsAllocatedRoleLimits(t *testing.T) {
+	definition := testDefinition()
+	definition.ID = defaultVerifierDefinitionID
+	definition.Model.MaxOutputTokens = 12_800
+	definition.Budget.ContextTokens = 256_000
+	executor := AgentRuntimeTaskExecutor{}
+	task := ExecutableTask{
+		ID: "verify-budget", Executor: ExecutorVerifier, Objective: "verify claims",
+	}
+	input := testRuntimeTaskInput(task)
+	input.RuntimeBudget = BudgetVector{
+		InputTokens: 30_000, OutputTokens: 12_800, TotalTokens: 51_200,
+	}
+	request, err := executor.buildRequest(task, input, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Limits.MaxInputTokens != 30_000 || request.Limits.MaxTotalTokens != 51_200 {
+		t.Fatalf("verifier limits = %+v, want input=30000 total=51200", request.Limits)
+	}
+	if request.Limits.MaxContextTokens <= request.Limits.MaxInputTokens ||
+		request.Limits.MaxContextTokens > 256_000 {
+		t.Fatalf("verifier context limit = %d", request.Limits.MaxContextTokens)
 	}
 }
 
@@ -370,7 +399,7 @@ func TestAgentRuntimeTaskExecutor_VerifierProjection(t *testing.T) {
 }
 
 func TestProjectVerifierClaimsRecoversEvidenceRefFromCanonicalClaimID(t *testing.T) {
-	const evidenceID = "evidence_fda78bad2fe387e24cba17548a43ea14e81cfa87acb81ebe05a9357567d41512"
+	const evidenceID = "evidence_fda78bad"
 	statement := `{
   "service": "service-a",
   "upstream": [],
@@ -614,6 +643,97 @@ func TestEvidenceContextTreatsHashContentAsUnavailable(t *testing.T) {
 	}
 }
 
+func TestVerifierWithOnlyToolJSONReturnsUnresolvedWithoutModelCall(t *testing.T) {
+	runtime := &fakeRuntime{}
+	executor := AgentRuntimeTaskExecutor{
+		Runtime:     runtime,
+		Definitions: fakeDefinitionResolver{def: testDefinition()},
+	}
+	task := ExecutableTask{ID: "verify-json", Executor: ExecutorVerifier, Objective: "verify", EvidenceGoalIDs: []string{"goal"}}
+	input := testRuntimeTaskInput(task)
+	input.Evidence = []EvidenceUnit{{
+		ID: "ev-json", SourceKind: "runbook", Target: "hsds-product",
+		Content: `{"matches":[{"docId":"doc-2015a2bba8c6e812","title":"hsds-product","chunk":2`,
+	}}
+	result, err := executor.Execute(context.Background(), task, input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if runtime.gotReq != nil {
+		t.Fatal("verifier made a model call on truncated tool JSON")
+	}
+	var output verificationResult
+	if err := json.Unmarshal(result.Output, &output); err != nil {
+		t.Fatalf("decode unresolved verification: %v", err)
+	}
+	if len(output.Verdicts) != 0 || len(output.Uncertainties) != 1 {
+		t.Fatalf("output = %#v, want empty verdicts and one uncertainty", output)
+	}
+}
+
+func TestVerifierInputUsesReportFindingsNotToolJSON(t *testing.T) {
+	task := ExecutableTask{ID: "verify-findings", Executor: ExecutorVerifier, Objective: "verify", EvidenceGoalIDs: []string{"business_domain"}}
+	input := testRuntimeTaskInput(task)
+	input.Evidence = []EvidenceUnit{{
+		ID: "ev-1", SourceKind: "runbook", Target: "overview.md",
+		Content: `{"matches":[{"docId":"doc-1","title":"overview","text":"checkout and billing"}]}`,
+	}}
+	input.Upstream = map[string]json.RawMessage{
+		"investigate.docs": mustJSON(t, investigationReportOutput{
+			Focus:   "docs",
+			Summary: "Named businesses from product docs.",
+			Findings: []investigationFinding{{
+				Claim:           "Checkout and billing are distinct core businesses.",
+				EvidenceGoalIDs: []string{"business_domain"},
+				Evidence:        []investigationEvidence{{Kind: "runbook", Reference: "overview.md", Summary: "The overview names checkout and billing."}},
+				Confidence:      0.8,
+			}},
+		}),
+	}
+	raw, err := verifierInput(task, input, EvidenceContextBudget{})
+	if err != nil {
+		t.Fatalf("verifierInput: %v", err)
+	}
+	var payload struct {
+		Claims []verificationClaim `json:"claims"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode verifier input: %v", err)
+	}
+	if len(payload.Claims) != 1 {
+		t.Fatalf("claims = %#v, want one finding", payload.Claims)
+	}
+	if payload.Claims[0].Statement != "Checkout and billing are distinct core businesses." {
+		t.Fatalf("statement = %q, want the report finding", payload.Claims[0].Statement)
+	}
+	if strings.HasPrefix(strings.TrimSpace(payload.Claims[0].Statement), "{") {
+		t.Fatal("tool JSON leaked into verifier claims")
+	}
+}
+
+func TestProjectVerifierClaimsRejectsTruncatedToolJSON(t *testing.T) {
+	task := ExecutableTask{ID: "verify-truncated", Executor: ExecutorVerifier, Objective: "verify", EvidenceGoalIDs: []string{"goal"}}
+	truncated := `{"matches":[{"docId":"doc-2015a2bba8c6e812","title":"hsds-product"`
+	result := agentapi.RunResult{Status: agentapi.RunSucceeded, Output: mustJSON(t, verificationResult{
+		Summary: "supported",
+		Verdicts: []verificationVerdict{{
+			ClaimIDs: []string{"ev-json"}, Decision: "supported", Rationale: truncated, EvidenceRefs: []string{"ev-json"},
+		}},
+	})}
+	claims, err := projectVerifierClaims(task, TaskExecutionInput{
+		Task: task,
+		Evidence: []EvidenceUnit{{
+			ID: "ev-json", SourceKind: "runbook", Target: "hsds-product", Content: truncated,
+		}},
+	}, result, EvidenceContextBudget{})
+	if err != nil {
+		t.Fatalf("projectVerifierClaims: %v", err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("claims = %#v, want truncated tool JSON dropped", claims)
+	}
+}
+
 func TestVerifierWithNoReadableEvidenceReturnsUnresolvedWithoutModelCall(t *testing.T) {
 	runtime := &fakeRuntime{}
 	executor := AgentRuntimeTaskExecutor{
@@ -671,6 +791,44 @@ func TestProjectInvestigatorObservationsAllowsReadableContentWithOpaqueMetadata(
 	}
 	if !strings.Contains(candidates[0].Content, "calls its dependency") {
 		t.Fatalf("candidate content = %q, want readable tool content", candidates[0].Content)
+	}
+}
+
+func TestAgentRuntimeTaskExecutor_InvestigatorToolEvidenceSurvivesEmptyVisibleOutput(t *testing.T) {
+	summary := `{"matches":[{"path":"service.go","text":"the service routes device commands through the application layer"}]}`
+	digest := sha256.Sum256([]byte(summary))
+	runtime := &fakeRuntime{result: agentapi.RunResult{
+		RunID: "empty-answer-with-evidence", Status: agentapi.RunSucceeded,
+		EvidenceObservations: []agentapi.EvidenceObservation{{
+			SourceKind: "code", Target: "service.go", Summary: summary,
+			ContentHash: hex.EncodeToString(digest[:]), Facets: []string{"core_flow"},
+		}},
+	}}
+	executor := AgentRuntimeTaskExecutor{
+		Runtime: runtime, Definitions: fakeDefinitionResolver{def: testDefinition()},
+	}
+	task := ExecutableTask{
+		ID: "empty-answer-with-evidence", Executor: ExecutorInvestigator,
+		Capability: "knowledge.code.inspect", Objective: "inspect the core flow",
+		EvidenceGoalIDs: []string{"core_flow"},
+	}
+	result, err := executor.Execute(context.Background(), task, testRuntimeTaskInput(task))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Failure != nil {
+		t.Fatalf("failure = %#v, want tool evidence to remain usable", result.Failure)
+	}
+	if len(result.EvidenceCandidates) != 1 {
+		t.Fatalf("evidence candidates = %d, want 1", len(result.EvidenceCandidates))
+	}
+	ledger := NewEvidenceLedger()
+	unit, admitted, err := ledger.Admit(task.ID, result.EvidenceCandidates[0])
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if !admitted || unit.Content != summary {
+		t.Fatalf("admitted = %t content = %q, want bounded tool summary", admitted, unit.Content)
 	}
 }
 
@@ -737,5 +895,363 @@ func TestAgentRuntimeTaskExecutor_InvestigatorTruncatedReportFallsBackWithoutDec
 	}
 	if !json.Valid(result.Output) {
 		t.Fatalf("output = %q, want valid fallback JSON", result.Output)
+	}
+}
+
+func TestAgentRuntimeTaskExecutor_DocsWorkerEmptyOutputClosesAsUnavailable(t *testing.T) {
+	runtime := &fakeRuntime{result: agentapi.RunResult{
+		RunID: "empty-docs-investigator", Status: agentapi.RunSucceeded,
+	}}
+	executor := AgentRuntimeTaskExecutor{
+		Runtime: runtime, Definitions: fakeDefinitionResolver{def: testDefinition()},
+	}
+	task := ExecutableTask{
+		ID: "empty-docs-investigator", Executor: ExecutorInvestigator,
+		Capability: "knowledge.docs.verify", Objective: "verify the documented business flow",
+		EvidenceGoalIDs: []string{"business_domain"},
+	}
+	result, err := executor.Execute(context.Background(), task, testRuntimeTaskInput(task))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Failure != nil {
+		t.Fatalf("failure = %#v, want unavailable report", result.Failure)
+	}
+	var report investigationReportOutput
+	if err := json.Unmarshal(result.Output, &report); err != nil {
+		t.Fatalf("decode fallback report: %v", err)
+	}
+	if report.Focus != "docs" || len(report.UnresolvedEvidenceGoals) != 1 || report.UnresolvedEvidenceGoals[0] != "business_domain" {
+		t.Fatalf("fallback report = %#v, want docs report with unresolved goal", report)
+	}
+	if err := validateInvestigationReportOutput(result.Output); err != nil {
+		t.Fatalf("fallback report is not valid: %v", err)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorProjectsPartialResultReturnedWithRuntimeError(t *testing.T) {
+	task := ExecutableTask{
+		ID: "investigator", Executor: ExecutorInvestigator, Capability: "knowledge.code.inspect",
+		EvidenceGoalIDs: []string{"entrypoint"},
+	}
+	runtime := &fakeRuntime{
+		result: agentapi.RunResult{
+			RunID: "investigator", Status: agentapi.RunFailed,
+			Output: mustJSON(t, investigationReportOutput{
+				Focus: "code", Summary: "the entry point was inspected",
+				Findings: []investigationFinding{{
+					Claim: "the handler is the entry point", EvidenceGoalIDs: []string{"entrypoint"},
+					Evidence:   []investigationEvidence{{Kind: "code", Reference: "service.go:42", Summary: "the handler is registered here"}},
+					Confidence: 0.7,
+				}},
+			}),
+			EvidenceUnits: []tool.EvidenceUnit{{SourceKind: "code", Target: "service.go:42"}},
+		},
+		err: errors.New("provider connection closed after tool result"),
+	}
+	executor := AgentRuntimeTaskExecutor{
+		Runtime: runtime, Definitions: fakeDefinitionResolver{def: testDefinition()},
+	}
+	result, err := executor.Execute(context.Background(), task, testRuntimeTaskInput(task))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Failure == nil || result.Failure.Code != FailureExecution {
+		t.Fatalf("failure = %#v, want projected runtime failure", result.Failure)
+	}
+	if len(result.EvidenceCandidates) != 1 || result.EvidenceCandidates[0].Content != "the handler is registered here" {
+		t.Fatalf("evidence candidates = %#v", result.EvidenceCandidates)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorPreservesBudgetClassificationWithWrappedRuntimeError(t *testing.T) {
+	task := ExecutableTask{
+		ID: "budget-investigator", Executor: ExecutorInvestigator, Capability: "knowledge.code.inspect",
+		EvidenceGoalIDs: []string{"entrypoint"},
+	}
+	runtime := &fakeRuntime{
+		result: agentapi.RunResult{
+			RunID: "budget-investigator", Status: agentapi.RunFailed,
+			EvidenceObservations: []agentapi.EvidenceObservation{{
+				SourceKind: "code", Target: "service.go:42", Summary: "the handler is registered here",
+			}},
+		},
+		err: fmt.Errorf("turn stopped: %w", agentapi.ErrBudgetExceeded),
+	}
+	executor := AgentRuntimeTaskExecutor{
+		Runtime: runtime, Definitions: fakeDefinitionResolver{def: testDefinition()},
+	}
+	result, err := executor.Execute(context.Background(), task, testRuntimeTaskInput(task))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Failure == nil || result.Failure.Code != FailureBudget {
+		t.Fatalf("failure = %#v, want budget failure", result.Failure)
+	}
+	if len(result.EvidenceCandidates) != 1 || result.EvidenceCandidates[0].Content != "the handler is registered here" {
+		t.Fatalf("evidence candidates = %#v", result.EvidenceCandidates)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorDoesNotPromoteGenericRuntimeErrorToBudget(t *testing.T) {
+	task := ExecutableTask{
+		ID: "runtime-investigator", Executor: ExecutorInvestigator, Capability: "knowledge.code.inspect",
+	}
+	runtime := &fakeRuntime{
+		result: agentapi.RunResult{
+			RunID: "runtime-investigator", Status: agentapi.RunFailed,
+			Error: &agentapi.RunError{Code: "provider_failed", Message: "provider unavailable"},
+		},
+		err: errors.New("transport wrapper"),
+	}
+	executor := AgentRuntimeTaskExecutor{
+		Runtime: runtime, Definitions: fakeDefinitionResolver{def: testDefinition()},
+	}
+	result, err := executor.Execute(context.Background(), task, testRuntimeTaskInput(task))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Failure == nil || result.Failure.Code != FailureExecution {
+		t.Fatalf("failure = %#v, want execution failure", result.Failure)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorProjectsBudgetResultAlongsideGenericRuntimeError(t *testing.T) {
+	task := ExecutableTask{
+		ID: "budget-result-investigator", Executor: ExecutorInvestigator, Capability: "knowledge.code.inspect",
+		EvidenceGoalIDs: []string{"entrypoint"},
+	}
+	runtime := &fakeRuntime{
+		result: agentapi.RunResult{
+			RunID: "budget-result-investigator", Status: agentapi.RunFailed,
+			EvidenceObservations: []agentapi.EvidenceObservation{{
+				SourceKind: "code", Target: "service.go:42", Summary: "the handler is registered here",
+			}},
+			Error: &agentapi.RunError{Code: "budget_exhausted", Message: "next turn exceeded budget"},
+		},
+		err: errors.New("transport wrapper"),
+	}
+	executor := AgentRuntimeTaskExecutor{
+		Runtime: runtime, Definitions: fakeDefinitionResolver{def: testDefinition()},
+	}
+	result, err := executor.Execute(context.Background(), task, testRuntimeTaskInput(task))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Failure == nil || result.Failure.Code != FailureBudget {
+		t.Fatalf("failure = %#v, want budget failure", result.Failure)
+	}
+	if len(result.EvidenceCandidates) != 1 {
+		t.Fatalf("evidence candidates = %#v, want one salvaged candidate", result.EvidenceCandidates)
+	}
+}
+
+func TestProjectInvestigatorRetainsEvidenceWhenRuntimeFailsAfterReport(t *testing.T) {
+	task := ExecutableTask{ID: "investigator", Executor: ExecutorInvestigator, Capability: "knowledge.code.inspect"}
+	result := agentapi.RunResult{
+		RunID:  "investigator",
+		Status: agentapi.RunFailed,
+		Output: mustJSON(t, investigationReportOutput{
+			Focus:   "code",
+			Summary: "the worker inspected the service entry point",
+			Findings: []investigationFinding{{
+				Claim:           "the service contains the entry point",
+				EvidenceGoalIDs: []string{"entrypoint"},
+				Evidence:        []investigationEvidence{{Kind: "code", Reference: "service.go:42", Summary: "the handler calls the model client"}},
+				Confidence:      0.8,
+			}},
+		}),
+		EvidenceUnits: []tool.EvidenceUnit{{SourceKind: "code", Target: "service.go:42"}},
+		Error:         &agentapi.RunError{Code: "budget_exhausted", Message: "output budget exhausted"},
+	}
+	out, err := (AgentRuntimeTaskExecutor{}).project(task, TaskExecutionInput{Task: task}, result)
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if out.Failure == nil || out.Failure.Code != FailureBudget {
+		t.Fatalf("failure = %#v, want budget failure", out.Failure)
+	}
+	if len(out.EvidenceCandidates) != 1 || out.EvidenceCandidates[0].Content != "the handler calls the model client" {
+		t.Fatalf("evidence candidates = %#v", out.EvidenceCandidates)
+	}
+}
+
+func TestProjectInvestigatorFailedWithoutEvidenceDoesNotInventDependencyArtifact(t *testing.T) {
+	task := ExecutableTask{ID: "investigator", Executor: ExecutorInvestigator, Capability: "knowledge.code.inspect"}
+	out, err := (AgentRuntimeTaskExecutor{}).project(task, TaskExecutionInput{Task: task}, agentapi.RunResult{
+		RunID: "investigator", Status: agentapi.RunFailed,
+		Error: &agentapi.RunError{Code: "budget_exhausted", Message: "budget exhausted"},
+	})
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if out.Failure == nil || out.Failure.Code != FailureBudget {
+		t.Fatalf("failure = %#v, want budget failure", out.Failure)
+	}
+	if len(out.EvidenceCandidates) != 0 || len(out.Output) != 0 {
+		t.Fatalf("invented artifact: evidence=%#v output=%q", out.EvidenceCandidates, out.Output)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorMinimumBudgetUsesRoleFloor(t *testing.T) {
+	executor := AgentRuntimeTaskExecutor{Definitions: fakeDefinitionResolver{def: testDefinition()}}
+	for _, test := range []struct {
+		name string
+		task ExecutableTask
+		want int64
+	}{
+		{name: "investigator", task: ExecutableTask{Executor: ExecutorInvestigator}, want: investigatorMinimumOutputTokens},
+		{name: "verifier", task: ExecutableTask{Executor: ExecutorVerifier}, want: verifierMinimumOutputTokens},
+		{name: "composer", task: ExecutableTask{Executor: ExecutorComposer}, want: composerMinimumOutputTokens},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			grant, err := executor.MinimumBudget(test.task)
+			if err != nil {
+				t.Fatalf("MinimumBudget: %v", err)
+			}
+			if grant.OutputTokens != test.want {
+				t.Fatalf("minimum output = %d, want %d", grant.OutputTokens, test.want)
+			}
+		})
+	}
+}
+
+func TestAgentRuntimeTaskExecutorVerifierMinimumBudgetProtectsInputOutputAndTotal(t *testing.T) {
+	executor := AgentRuntimeTaskExecutor{Definitions: fakeDefinitionResolver{def: testDefinition()}}
+	grant, err := executor.MinimumBudget(ExecutableTask{
+		Executor:  ExecutorVerifier,
+		Objective: "decide whether the delegated evidence supports the claim",
+	})
+	if err != nil {
+		t.Fatalf("MinimumBudget: %v", err)
+	}
+	if grant.InputTokens <= 0 {
+		t.Fatalf("verifier input floor = %d, want positive", grant.InputTokens)
+	}
+	if grant.OutputTokens != verifierMinimumOutputTokens {
+		t.Fatalf("verifier output floor = %d, want %d", grant.OutputTokens, verifierMinimumOutputTokens)
+	}
+	if grant.TotalTokens != grant.InputTokens+grant.OutputTokens {
+		t.Fatalf("verifier total floor = %d, want input+output=%d", grant.TotalTokens, grant.InputTokens+grant.OutputTokens)
+	}
+
+	investigatorGrant, err := executor.MinimumBudget(ExecutableTask{Executor: ExecutorInvestigator})
+	if err != nil {
+		t.Fatalf("investigator MinimumBudget: %v", err)
+	}
+	if investigatorGrant.InputTokens != 0 || investigatorGrant.TotalTokens != 0 {
+		t.Fatalf("investigator unexpectedly received input/total protection: %+v", investigatorGrant)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorVerifierEvidenceBudgetNarrowsInputFloor(t *testing.T) {
+	defaultExecutor := AgentRuntimeTaskExecutor{Definitions: fakeDefinitionResolver{def: testDefinition()}}
+	defaultGrant, err := defaultExecutor.MinimumBudget(ExecutableTask{Executor: ExecutorVerifier, Objective: "verify"})
+	if err != nil {
+		t.Fatalf("default MinimumBudget: %v", err)
+	}
+
+	smallExecutor := AgentRuntimeTaskExecutor{
+		Definitions: fakeDefinitionResolver{def: testDefinition()},
+		EvidenceContextBudget: EvidenceContextBudget{
+			MaxSummaryTokens: 20,
+			MaxContextTokens: 50,
+		},
+	}
+	smallGrant, err := smallExecutor.MinimumBudget(ExecutableTask{Executor: ExecutorVerifier, Objective: "verify"})
+	if err != nil {
+		t.Fatalf("small-budget MinimumBudget: %v", err)
+	}
+	if smallGrant.InputTokens <= 0 || smallGrant.InputTokens >= defaultGrant.InputTokens {
+		t.Fatalf("small verifier input floor = %d, default = %d; want positive and smaller", smallGrant.InputTokens, defaultGrant.InputTokens)
+	}
+	if smallGrant.TotalTokens != smallGrant.InputTokens+smallGrant.OutputTokens {
+		t.Fatalf("small verifier total floor = %d, want input+output=%d", smallGrant.TotalTokens, smallGrant.InputTokens+smallGrant.OutputTokens)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorVerifierMinimumBudgetRespectsAllTaskLimits(t *testing.T) {
+	executor := AgentRuntimeTaskExecutor{Definitions: fakeDefinitionResolver{def: testDefinition()}}
+	grant, err := executor.MinimumBudget(ExecutableTask{
+		Executor: ExecutorVerifier,
+		Budget: TaskBudget{Limit: BudgetVector{
+			InputTokens:  100,
+			OutputTokens: 200,
+			TotalTokens:  300,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("MinimumBudget: %v", err)
+	}
+	if grant.InputTokens > 100 || grant.OutputTokens > 200 || grant.TotalTokens > 300 {
+		t.Fatalf("verifier grant exceeded task limits: %+v", grant)
+	}
+	if grant.TotalTokens != grant.InputTokens+grant.OutputTokens {
+		t.Fatalf("verifier total floor = %d, want input+output=%d", grant.TotalTokens, grant.InputTokens+grant.OutputTokens)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorMinimumBudgetCanOnlyNarrowFloor(t *testing.T) {
+	resolver := fakeDefinitionResolver{def: testDefinition()}
+	executor := AgentRuntimeTaskExecutor{Definitions: resolver}
+
+	definitionLimited := ExecutableTask{Executor: ExecutorInvestigator, Budget: TaskBudget{Limit: BudgetVector{OutputTokens: 512}}}
+	grant, err := executor.MinimumBudget(definitionLimited)
+	if err != nil {
+		t.Fatalf("MinimumBudget definition-limited: %v", err)
+	}
+	if grant.OutputTokens != 512 {
+		t.Fatalf("definition-limited minimum output = %d, want 512", grant.OutputTokens)
+	}
+
+	taskLimited := ExecutableTask{Executor: ExecutorInvestigator, Budget: TaskBudget{Limit: BudgetVector{OutputTokens: 2048}}}
+	grant, err = executor.MinimumBudget(taskLimited)
+	if err != nil {
+		t.Fatalf("MinimumBudget task-limited: %v", err)
+	}
+	if grant.OutputTokens != 2048 {
+		t.Fatalf("task output limit expanded minimum to %d, want 2048", grant.OutputTokens)
+	}
+
+	definition := testDefinition()
+	definition.Model.MaxOutputTokens = 2048
+	executor.Definitions = fakeDefinitionResolver{def: definition}
+	grant, err = executor.MinimumBudget(ExecutableTask{Executor: ExecutorInvestigator, Budget: TaskBudget{Limit: BudgetVector{OutputTokens: 4096}}})
+	if err != nil {
+		t.Fatalf("MinimumBudget model-limited: %v", err)
+	}
+	if grant.OutputTokens != 2048 {
+		t.Fatalf("model output limit expanded minimum to %d, want 2048", grant.OutputTokens)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorMinimumBudgetPropagatesDefinitionError(t *testing.T) {
+	wantErr := errors.New("definition provider unavailable")
+	executor := AgentRuntimeTaskExecutor{Definitions: fakeDefinitionResolver{err: wantErr}}
+	_, err := executor.MinimumBudget(ExecutableTask{Executor: ExecutorInvestigator})
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want wrapped definition error", err)
+	}
+}
+
+func TestAgentRuntimeTaskExecutorVerifierMinimumBudgetBoundsHugeEvidenceSetting(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	maxInt64 := int64(^uint64(0) >> 1)
+	executor := AgentRuntimeTaskExecutor{
+		Definitions: fakeDefinitionResolver{def: testDefinition()},
+		EvidenceContextBudget: EvidenceContextBudget{
+			MaxSummaryTokens: maxInt,
+			MaxContextTokens: maxInt64,
+		},
+	}
+	grant, err := executor.MinimumBudget(ExecutableTask{Executor: ExecutorVerifier, Objective: "verify"})
+	if err != nil {
+		t.Fatalf("MinimumBudget: %v", err)
+	}
+	if grant.TotalTokens != grant.InputTokens+grant.OutputTokens {
+		t.Fatalf("verifier total floor = %d, want input+output=%d", grant.TotalTokens, grant.InputTokens+grant.OutputTokens)
+	}
+	if grant.InputTokens <= 0 || grant.OutputTokens != verifierMinimumOutputTokens {
+		t.Fatalf("verifier grant = %+v, want bounded input and preserved output floor", grant)
 	}
 }

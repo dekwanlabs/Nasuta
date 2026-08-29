@@ -4,148 +4,277 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
-	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/tool"
 )
 
-func TestCodeInvestigationClosedLoop(t *testing.T) {
-	registry := tool.NewRegistry()
-	for _, id := range []tool.ToolID{"get_service", "search_code", "get_symbol", "trace_calls"} {
-		candidate := tool.Tool{
-			ID:          id,
-			Description: string(id),
-			Kind:        tool.KindRead,
-			InputSchema: tool.JSONSchema{"type": "object", "properties": map[string]any{}},
-			Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
-				return tool.Result{Content: "evidence from " + string(id)}, nil
-			}),
-		}
-		if err := registry.Register(candidate); err != nil {
+func TestWorkflowDeliversReadableInsufficiencyWhenVerifierFindsNoClaims(t *testing.T) {
+	catalog := closedLoopCatalog(t)
+	evidence := EvidenceCandidate{
+		SourceKind: "code",
+		Target:     "service-a",
+		Content:    "the request reaches service-a before the downstream call",
+	}
+	verifierCalled := false
+	coordinator := NewCoordinator(CoordinatorOptions{
+		Catalog: catalog,
+		Schemas: testSchemas(),
+		Store:   NewMemoryRunStore(),
+		Executors: testExecutors(TaskExecutorFunc(func(_ context.Context, task ExecutableTask, _ TaskExecutionInput) (TaskExecutionResult, error) {
+			switch task.Executor {
+			case ExecutorInvestigator:
+				return TaskExecutionResult{
+					EvidenceCandidates: []EvidenceCandidate{evidence},
+					Failure: &RunFailure{
+						Code: FailureReasoning, Message: "investigator stopped after collecting evidence",
+					},
+				}, nil
+			case ExecutorVerifier:
+				verifierCalled = true
+				return TaskExecutionResult{Output: json.RawMessage(`{"verified":true}`)}, nil
+			default:
+				t.Fatalf("unexpected executor: %s", task.Executor)
+				return TaskExecutionResult{}, nil
+			}
+		})),
+		MaxRounds: 1,
+	})
+
+	run, err := coordinator.ExecuteWithProposal(
+		t.Context(),
+		testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true}),
+		closedLoopProposal(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verifierCalled || run.Status != RunDelivered || run.Delivery == nil {
+		t.Fatalf("run = %#v, verifier_called=%v", run, verifierCalled)
+	}
+	if run.Delivery.Status != DeliveryEvidenceInsufficient || len(run.Report.Gaps) == 0 {
+		t.Fatalf("delivery = %#v, report = %#v", run.Delivery, run.Report)
+	}
+	if len(run.Report.Evidence) != 1 || len(run.Report.Claims) != 0 {
+		t.Fatalf("report = %#v", run.Report)
+	}
+	if text := run.Delivery.Text; strings.TrimSpace(text) == "" || strings.Contains(text, "Investigation limits") || containsOpaqueIdentifier(text) {
+		t.Fatalf("delivery text is not user-readable: %q", text)
+	}
+}
+
+func TestWorkflowPreservesInvestigatorBudgetFailureAsTerminalCause(t *testing.T) {
+	catalog := closedLoopCatalog(t)
+	verifierCalled := false
+	coordinator := NewCoordinator(CoordinatorOptions{
+		Catalog: catalog,
+		Schemas: testSchemas(),
+		Store:   NewMemoryRunStore(),
+		Executors: testExecutors(TaskExecutorFunc(func(_ context.Context, task ExecutableTask, _ TaskExecutionInput) (TaskExecutionResult, error) {
+			if task.Executor == ExecutorVerifier {
+				verifierCalled = true
+			}
+			return TaskExecutionResult{Failure: &RunFailure{
+				Code: FailureBudget, Message: "model call budget exhausted before investigator could produce evidence",
+			}}, nil
+		})),
+		MaxRounds: 1,
+	})
+
+	run, err := coordinator.ExecuteWithProposal(
+		t.Context(),
+		testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true}),
+		closedLoopProposal(),
+	)
+	if err == nil {
+		t.Fatal("budget failure returned success")
+	}
+	if verifierCalled || run.Status != RunBudgetExhausted || run.Failure == nil || run.Failure.Code != FailureBudget {
+		t.Fatalf("run = %#v, verifier_called=%v, err=%v", run, verifierCalled, err)
+	}
+	if !strings.Contains(run.Failure.Message, "model call budget exhausted") || strings.Contains(run.Failure.Message, "required dependency failed") {
+		t.Fatalf("terminal failure lost root cause: %#v", run.Failure)
+	}
+	verifier := run.Results["evidence.verify"]
+	if verifier.Status != TaskBlocked || verifier.Failure == nil || verifier.Failure.Code != FailureBudget ||
+		!strings.Contains(verifier.Failure.Message, "model call budget exhausted") {
+		t.Fatalf("blocked verifier = %#v", verifier)
+	}
+}
+
+func TestWorkflowRejectsMachineClaimWithoutMaskingVerifierFailure(t *testing.T) {
+	catalog := closedLoopCatalog(t)
+	evidence := EvidenceCandidate{
+		SourceKind: "code",
+		Target:     "service-a",
+		Content:    "service-a calls the downstream client",
+	}
+	normalized, err := normalizeEvidence("", evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator := NewCoordinator(CoordinatorOptions{
+		Catalog: catalog,
+		Schemas: testSchemas(),
+		Store:   NewMemoryRunStore(),
+		Executors: testExecutors(TaskExecutorFunc(func(_ context.Context, task ExecutableTask, _ TaskExecutionInput) (TaskExecutionResult, error) {
+			if task.Executor == ExecutorInvestigator {
+				return TaskExecutionResult{
+					Output:             json.RawMessage(`{"summary":"evidence collected"}`),
+					EvidenceCandidates: []EvidenceCandidate{evidence},
+				}, nil
+			}
+			return TaskExecutionResult{
+				Output: json.RawMessage(`{"verified":true}`),
+				Claims: []ClaimCandidate{{
+					GoalID: "g1",
+					Text:   `{"service":"service-a","truncated":false}`,
+					Status: ClaimSupported,
+					EvidenceRefs: []EvidenceRef{{
+						EvidenceID: normalized.ID, SourceKind: normalized.SourceKind,
+						Target: normalized.Target, ContentHash: normalized.ContentHash,
+					}},
+				}},
+			}, nil
+		})),
+		MaxRounds: 1,
+	})
+
+	run, err := coordinator.ExecuteWithProposal(
+		t.Context(),
+		testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true}),
+		closedLoopProposal(),
+	)
+	if err == nil {
+		t.Fatal("invalid verifier claim returned success")
+	}
+	if run.Status != RunFailed || run.Failure == nil || run.Failure.Code != FailureVerifier || run.Delivery != nil {
+		t.Fatalf("run = %#v, err=%v", run, err)
+	}
+	if len(run.Claims) != 0 || strings.Contains(run.Failure.Message, "required dependency failed") ||
+		!strings.Contains(run.Failure.Message, "opaque identifier") {
+		t.Fatalf("verifier failure was masked or invalid claim admitted: run=%#v", run)
+	}
+	verifier := run.Results["evidence.verify"]
+	if verifier.Status != TaskFailed || verifier.Failure == nil || verifier.Failure.Code != FailureVerifier {
+		t.Fatalf("verifier result = %#v", verifier)
+	}
+}
+
+func closedLoopCatalog(t *testing.T) *TaskTemplateCatalog {
+	t.Helper()
+	catalog := NewTaskTemplateCatalog()
+	for _, template := range []TaskTemplate{
+		testTemplate("proposal.docs.verify", 1, []string{"flow"}, ExecutorInvestigator, nil, BudgetVector{}),
+		testTemplate("evidence.verify", 1, []string{"flow"}, ExecutorVerifier, nil, BudgetVector{}),
+	} {
+		if err := catalog.Register(template); err != nil {
 			t.Fatal(err)
 		}
 	}
-	snapshot := registry.Snapshot(tool.ReadPolicy())
+	return catalog
+}
 
-	schemas := agentapi.NewSchemaRegistry()
-	if err := schemas.Publish([]agentapi.SchemaDefinition{
-		{ID: DefaultTaskInputSchema, Version: 1, Document: json.RawMessage(`{"type":"object"}`)},
-		{ID: DefaultTaskOutputSchema, Version: 1, Document: json.RawMessage(`{"type":"object"}`)},
-	}); err != nil {
-		t.Fatal(err)
-	}
+func closedLoopProposal() *agentapi.TaskGraphProposal {
+	return &agentapi.TaskGraphProposal{Tasks: []agentapi.TaskSpec{{
+		ID: "docs-task", Purpose: "inspect available documentation",
+		Capability: "knowledge.docs.verify", EvidenceGoalIDs: []string{"g1"},
+	}}}
+}
 
+func TestWorkflowFailureReleasesCompositionProtectionBeforePersistingBudget(t *testing.T) {
 	catalog := NewTaskTemplateCatalog()
-	if err := RegisterCodeInvestigationTemplates(catalog); err != nil {
+	if err := catalog.Register(testTemplate("inspect", 1, []string{"flow"}, ExecutorDirectTool, nil, BudgetVector{})); err != nil {
 		t.Fatal(err)
 	}
-
-	toolExecutor := tool.NewExecutor(0)
-	executors := NewExecutorRegistry(map[ExecutorType]TaskExecutor{
-		ExecutorDirectTool:   DirectToolExecutor{Executor: toolExecutor, Snapshot: snapshot},
-		ExecutorToolPipeline: ToolPipelineExecutor{Executor: toolExecutor, Snapshot: snapshot},
-		ExecutorVerifier: TaskExecutorFunc(func(_ context.Context, _ ExecutableTask, input TaskExecutionInput) (TaskExecutionResult, error) {
-			if len(input.Evidence) == 0 {
-				return TaskExecutionResult{}, errors.New("verifier received no upstream evidence")
-			}
-			unit := input.Evidence[0]
-			claim := ClaimCandidate{
-				GoalID: "g1",
-				Text:   "the service exposes an AI call path",
-				Status: ClaimSupported,
-				EvidenceRefs: []EvidenceRef{{
-					EvidenceID: unit.ID, SourceKind: unit.SourceKind, Target: unit.Target, ContentHash: unit.ContentHash,
-				}},
-			}
-			return TaskExecutionResult{Output: []byte(`{"verified":true}`), Claims: []ClaimCandidate{claim}}, nil
-		}),
-	})
-
+	store := &failNthBudgetStore{MemoryRunStore: NewMemoryRunStore(), failAt: 4}
 	coordinator := NewCoordinator(CoordinatorOptions{
-		Catalog:     catalog,
-		Schemas:     schemas,
-		Tools:       snapshot,
-		Store:       NewMemoryRunStore(),
-		Executors:   executors,
-		BudgetLimit: BudgetVector{ToolCalls: 10},
-		Composer: ComposerFunc(func(_ context.Context, _ InvestigationContract, report InvestigationReport) (AnswerDraft, error) {
-			if len(report.Claims) == 0 {
-				return AnswerDraft{}, errors.New("composer received no claims")
+		Catalog: catalog,
+		Schemas: testSchemas(),
+		Store:   store,
+		Executors: testExecutors(TaskExecutorFunc(func(context.Context, ExecutableTask, TaskExecutionInput) (TaskExecutionResult, error) {
+			return TaskExecutionResult{Output: json.RawMessage(`{"ok":true}`)}, nil
+		})),
+		BudgetLimit:       BudgetVector{OutputTokens: 100},
+		CompositionBudget: BudgetVector{OutputTokens: 100},
+		MaxRounds:         1,
+	})
+
+	run, err := coordinator.Execute(t.Context(), testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true}))
+	if err == nil || run.Status != RunFailed {
+		t.Fatalf("run = %#v, err=%v", run, err)
+	}
+	if store.calls < store.failAt {
+		t.Fatalf("SaveBudget calls = %d, want at least %d", store.calls, store.failAt)
+	}
+	if run.Budget.Run.Reserved.OutputTokens != 0 || run.Budget.Stages[StageComposition].Reserved.OutputTokens != 0 {
+		t.Fatalf("failed run retained composition reservation: %#v", run.Budget)
+	}
+}
+
+type failNthBudgetStore struct {
+	*MemoryRunStore
+	failAt int
+	calls  int
+}
+
+func (store *failNthBudgetStore) SaveBudget(runID string, budget BudgetSnapshot) error {
+	store.calls++
+	if store.calls == store.failAt {
+		return errors.New("injected budget persistence failure")
+	}
+	return store.MemoryRunStore.SaveBudget(runID, budget)
+}
+
+func TestWorkflowDeliversBoundedEvidenceWhenVerifierBudgetIsExhausted(t *testing.T) {
+	catalog := closedLoopCatalog(t)
+	evidence := EvidenceCandidate{
+		SourceKind: "code",
+		Target:     "service-a",
+		Content:    "the request reaches service-a before the downstream call",
+	}
+	verifierCalled := false
+	coordinator := NewCoordinator(CoordinatorOptions{
+		Catalog: catalog,
+		Schemas: testSchemas(),
+		Store:   NewMemoryRunStore(),
+		Executors: testExecutors(TaskExecutorFunc(func(_ context.Context, task ExecutableTask, _ TaskExecutionInput) (TaskExecutionResult, error) {
+			if task.Executor == ExecutorInvestigator {
+				return TaskExecutionResult{
+					EvidenceCandidates: []EvidenceCandidate{evidence},
+				}, nil
 			}
-			return AnswerDraft{Text: "the AI entry point is traced", Status: DeliverySucceeded, ClaimIDs: []string{report.Claims[0].ID}}, nil
-		}),
+			verifierCalled = true
+			return TaskExecutionResult{Failure: &RunFailure{
+				Code: FailureBudget, Message: "verifier model call exhausted the shared budget",
+			}}, nil
+		})),
+		MaxRounds: 1,
 	})
 
-	contract := InvestigationContract{
-		Version: InvestigationContractVersion,
-		ID:      "code-entrypoint", Question: "where does hsas-aiot-service call the AI model?",
-		EvidenceGoals:  []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
-		AllowedToolIDs: []tool.ToolID{"get_service", "search_code", "get_symbol", "trace_calls"},
-		CreatedAt:      time.Now().UTC(),
-	}
-	run, err := coordinator.Execute(context.Background(), contract)
+	run, err := coordinator.ExecuteWithProposal(
+		t.Context(),
+		testContract(EvidenceGoal{ID: "g1", Kind: "flow", Required: true}),
+		closedLoopProposal(),
+	)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("budget-limited verifier should still produce bounded delivery: %v", err)
 	}
-	if run.Status != RunDelivered || run.Delivery == nil || run.Delivery.Status != DeliverySucceeded {
-		t.Fatalf("run = %#v", run)
+	if !verifierCalled || run.Status != RunDelivered || run.Delivery == nil {
+		t.Fatalf("run = %#v, verifier_called=%v", run, verifierCalled)
 	}
-	if len(run.Plan.Tasks) != 5 {
-		t.Fatalf("plan task count = %d, want 5", len(run.Plan.Tasks))
+	if run.Delivery.Status != DeliveryEvidenceInsufficient || !strings.Contains(run.Delivery.Text, "证据") {
+		t.Fatalf("delivery = %#v", run.Delivery)
 	}
-	if len(run.Report.Evidence) == 0 || len(run.Report.Claims) != 1 {
-		t.Fatalf("report = %#v", run.Report)
+	if len(run.Evidence) != 1 || run.Evidence[0].TaskID != "docs-task" {
+		t.Fatalf("evidence = %#v", run.Evidence)
 	}
-	if run.Report.Claims[0].Status != ClaimSupported {
-		t.Fatalf("claim = %#v", run.Report.Claims[0])
+	if len(run.Report.Failures) == 0 || run.Report.Failures[len(run.Report.Failures)-1].Code != FailureBudget {
+		t.Fatalf("report failures = %#v", run.Report.Failures)
 	}
-}
-
-func TestCodeInvestigationCandidatesFormAcyclicDependencyChain(t *testing.T) {
-	catalog := NewTaskTemplateCatalog()
-	if err := RegisterCodeInvestigationTemplates(catalog); err != nil {
-		t.Fatal(err)
+	verifier := run.Results["evidence.verify"]
+	if verifier.Status != TaskFailed || verifier.Failure == nil || verifier.Failure.Code != FailureBudget {
+		t.Fatalf("verifier result = %#v", verifier)
 	}
-	candidates, err := catalog.GenerateCandidates(InvestigationContract{
-		Version:       InvestigationContractVersion,
-		ID:            "contract",
-		Question:      "where is the AI entry point?",
-		EvidenceGoals: []EvidenceGoal{{ID: "g1", Kind: GoalKindEntrypoint, Required: true}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 5 {
-		t.Fatalf("candidate count = %d, want 5", len(candidates))
-	}
-	byTemplate := make(map[string]string, len(candidates))
-	for _, candidate := range candidates {
-		byTemplate[candidate.Template.ID] = candidate.ID
-	}
-	for _, want := range []struct {
-		task string
-		dep  string
-	}{
-		{"code.search", "workspace.resolve_entity"},
-		{"code.inspect_symbol", "code.search"},
-		{"code.trace_calls", "code.inspect_symbol"},
-	} {
-		taskID := byTemplate[want.task]
-		depID := byTemplate[want.dep]
-		actual := candidateDependencies(candidates, taskID)
-		if len(actual) != 1 || actual[0] != depID {
-			t.Fatalf("task %s dependencies = %#v, want %s", want.task, actual, want.dep)
-		}
-	}
-}
-
-func candidateDependencies(candidates []TaskCandidate, id string) []string {
-	for _, candidate := range candidates {
-		if candidate.ID == id {
-			return candidate.Dependencies
-		}
-	}
-	return nil
 }

@@ -36,6 +36,10 @@ type AgentComposer struct {
 	ComposerDefinition agentapi.DefinitionRef
 	// EvidenceContextBudget bounds evidence text entering the synthesizer.
 	EvidenceContextBudget EvidenceContextBudget
+	// Budget is the Composition share allocated from the frozen Investigation
+	// Run budget. Input and aggregate-token limits are applied to the child Run;
+	// output remains pinned by the synthesizer definition model policy.
+	Budget BudgetVector
 }
 
 func (composer AgentComposer) Compose(
@@ -65,6 +69,10 @@ func (composer AgentComposer) Compose(
 	if err != nil {
 		return AnswerDraft{}, err
 	}
+	limits := runLimitsForBudget(composer.Budget, definition)
+	if limits.Deadline.IsZero() && definition.Budget.Timeout > 0 {
+		limits.Deadline = time.Now().UTC().Add(definition.Budget.Timeout)
+	}
 	request := agentapi.RunRequest{
 		RunID:          contract.ID + synthesizerRunIDSuffix,
 		Agent:          agentapi.DefinitionRef{ID: definition.ID, Version: definition.Version},
@@ -77,13 +85,7 @@ func (composer AgentComposer) Compose(
 			VisibleToolIDs:  append([]string(nil), definition.Tools.VisibleToolIDs...),
 		},
 		Policy: agentapi.RunPolicy{EvidenceSeeded: true, OutputMode: agentapi.RunOutputStandalone},
-		Limits: agentapi.RunLimits{
-			MaxSteps:     definition.Budget.MaxSteps,
-			MaxToolCalls: definition.Budget.MaxToolCalls,
-		},
-	}
-	if definition.Budget.Timeout > 0 {
-		request.Limits.Deadline = time.Now().UTC().Add(definition.Budget.Timeout)
+		Limits: limits,
 	}
 	result, err := composer.Runtime.Run(ctx, request)
 	if err != nil {

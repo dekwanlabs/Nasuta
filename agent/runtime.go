@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/tool"
@@ -86,6 +87,10 @@ const (
 	RunOutputEvidenceWorker RunOutputMode = "evidence_worker"
 )
 
+// ErrBudgetExceeded identifies a hard budget boundary across the public
+// runtime and workflow packages. Callers may wrap it without losing its code.
+var ErrBudgetExceeded = errors.New("investigation budget exceeded")
+
 // RunBudgetGate is an optional shared hard-limit check supplied by a Workflow
 // coordinator. It is deliberately defined in the public agent package so the
 // Single-Agent runtime can enforce a parent Run limit without importing the
@@ -113,6 +118,12 @@ type RunBudgetUsageGate interface {
 // use it to shrink a requested output ceiling before reserving the call.
 type RunBudgetAvailability interface {
 	Available() Usage
+}
+
+// RunBudgetMinimum reports output tokens still protected for the current task
+// admission. A call must not be silently shrunk below this floor.
+type RunBudgetMinimum interface {
+	MinimumOutputTokens() int64
 }
 
 type runBudgetGateContextKey struct{}
@@ -328,8 +339,8 @@ type RunResult struct {
 }
 
 // EvidenceObservation is the bounded content projection a workflow worker
-// hands to downstream verification. It deliberately omits messages, prompts,
-// tool arguments, and full authoritative tool payloads.
+// hands to downstream verification. ContentHash, when present, hashes Summary;
+// full tool payloads and their source hashes remain in the execution trace.
 type EvidenceObservation struct {
 	SourceKind    string   `json:"source_kind"`
 	Target        string   `json:"target"`

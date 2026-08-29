@@ -236,6 +236,9 @@ func mapResult(
 		return publicResult, outcome
 	}
 	outcome := execution.OutcomeFor(result, preRetrieved, runErr)
+	if errors.Is(outcome.Err, agentapi.ErrBudgetExceeded) {
+		outcome.ErrorCode = "budget_exhausted"
+	}
 	if errors.Is(outcome.Err, execution.ErrToolCallBudgetExhausted) {
 		outcome.ErrorCode = "tool_call_budget_exhausted"
 	}
@@ -265,8 +268,7 @@ func mapResult(
 	}
 	if outcome.Status != run.StatusDone &&
 		len(recovery) > 0 &&
-		!recovery[0].StrictOutput &&
-		canRecoverInvestigationReport(outputSchema, outcome.Err) {
+		canRecoverInvestigationReportOutput(recovery[0], outputSchema, outcome.Err) {
 		recovered, preserved, recoveryErr := recoverFailedInvestigationReport(
 			schemas,
 			outputSchema,
@@ -360,6 +362,11 @@ func mapResult(
 	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
 	publicResult.Status = agentapi.RunSucceeded
 	if result != nil && result.OutputMode == agentapi.RunOutputEvidenceWorker {
+		if output := attachEvidenceWorkerStructuredOutput(
+			schemas, outputSchema, outcome.Answer, recovery,
+		); len(output) > 0 {
+			publicResult.Output = output
+		}
 		return publicResult, outcome
 	}
 	publicResult.Text = outcome.Answer
@@ -412,6 +419,38 @@ func mapResult(
 	publicResult.Text = RenderPublicAnswer(output)
 	outcome.Answer = publicResult.Text
 	return publicResult, outcome
+}
+
+// attachEvidenceWorkerStructuredOutput keeps evidence observations as the
+// primary worker artifact, but promotes a schema-valid investigation.report
+// when the model actually wrote one. Empty or invalid answers stay omitted so
+// tool-only workers can still succeed.
+func attachEvidenceWorkerStructuredOutput(
+	schemas *agentapi.SchemaRegistry,
+	ref agentapi.SchemaRef,
+	answer string,
+	recovery []outputRecoveryContext,
+) json.RawMessage {
+	if schemas == nil || ref != agentapi.InvestigationReportSchemaRef() {
+		return nil
+	}
+	if strings.TrimSpace(answer) == "" {
+		return nil
+	}
+	output, err := validatedOutput(schemas, ref, answer)
+	if err == nil {
+		return output
+	}
+	if len(recovery) == 0 {
+		return nil
+	}
+	recovered, _, recoveryErr := recoverInvestigationReport(
+		schemas, ref, recovery[0], answer, err,
+	)
+	if recoveryErr != nil {
+		return nil
+	}
+	return recovered
 }
 
 func publicTerminalEvidence(
@@ -735,6 +774,23 @@ func minInt(left, right int) int {
 		return left
 	}
 	return right
+}
+
+// canRecoverInvestigationReportOutput permits deterministic recovery for transient
+// model-output failures even when the agent otherwise requires strict output.
+func canRecoverInvestigationReportOutput(
+	context outputRecoveryContext,
+	ref agentapi.SchemaRef,
+	err error,
+) bool {
+	if !context.StrictOutput {
+		return canRecoverInvestigationReport(ref, err)
+	}
+	return ref == agentapi.InvestigationReportSchemaRef() &&
+		(errors.Is(err, execution.ErrReasoningTruncated) ||
+			errors.Is(err, execution.ErrEmptyModelResponse) ||
+			errors.Is(err, execution.ErrAnswerTruncated) ||
+			errors.Is(err, execution.ErrModelCallBudgetExhausted))
 }
 
 func canRecoverInvestigationReport(

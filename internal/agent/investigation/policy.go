@@ -12,6 +12,7 @@ func BudgetVectorFromPlatformSettings(settings config.PlatformSettings) BudgetVe
 	return BudgetVector{
 		InputTokens:  settings.InvestigationMaxInputTokens,
 		OutputTokens: settings.InvestigationMaxOutputTokens,
+		TotalTokens:  settings.InvestigationMaxTotalTokens,
 		ToolCalls:    int(settings.InvestigationMaxToolCalls),
 		Duration:     time.Duration(settings.InvestigationMaxDuration),
 		CostMicros:   settings.InvestigationMaxCostMicros,
