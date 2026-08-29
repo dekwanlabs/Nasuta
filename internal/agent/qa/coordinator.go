@@ -294,7 +294,20 @@ func (coordinator *Coordinator) investigationMaxRounds() int {
 	return defaultInvestigationMaxRounds
 }
 
+func terminalBudgetExhausted(terminal InvestigationTerminal) bool {
+	return terminal.ErrorCode == "budget_exhausted" ||
+		terminal.ErrorCode == "workflow_budget_exhausted" ||
+		terminal.StopReason == string(workflow.StopBudgetExhausted) ||
+		terminal.StopReason == "workflow_budget_exhausted"
+}
+
 func continuationEligible(terminal InvestigationTerminal) bool {
+	// Budget exhaustion is a hard terminal boundary. A child may still carry
+	// useful partial evidence, but spending another round cannot make the
+	// exhausted ledger affordable.
+	if terminalBudgetExhausted(terminal) {
+		return false
+	}
 	return terminal.Status == InvestigationSucceeded ||
 		(terminal.Status == InvestigationFailed && terminal.ErrorCode == "evidence_insufficient")
 }
@@ -350,13 +363,16 @@ func (coordinator *Coordinator) convergeContinuation(
 		}
 		merged = MergeRoundResult(merged, current)
 		nextContext := NextRound(roundContext, current)
+		nextContext.HasValidReport = resultHasValidReport(merged)
+		nextContext.PendingEntitySelection = pendingEntitySelection(snapshot.Contract, merged)
 		if !ShouldContinue(nextContext) {
 			if !investigationBudgetAvailable(nextContext.BudgetLimit, nextContext.BudgetUsed) {
 				merged.StopReason = string(workflow.StopBudgetExhausted)
 			}
 			return coordinator.completeResult(ctx, parent, terminal, merged)
 		}
-		if NewEvidenceRatio(snapshot.SeedEvidence, current.EvidenceUnits) <= 0 {
+		if !nextContext.PendingEntitySelection &&
+			NewEvidenceRatio(snapshot.SeedEvidence, current.EvidenceUnits) <= 0 {
 			merged.StopReason = string(workflow.StopNoNewEvidence)
 			return coordinator.completeResult(ctx, parent, terminal, merged)
 		}

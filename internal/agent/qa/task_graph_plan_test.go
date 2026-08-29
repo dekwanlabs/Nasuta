@@ -84,6 +84,37 @@ func TestBuildTaskGraphFallbackRepeatsCapabilityForDistinctDeliverables(t *testi
 	}
 }
 
+func TestBuildTaskGraphFallbackOneTaskPerSelectedBusiness(t *testing.T) {
+	contract := applyDiscoverThenSelect(TaskContract{
+		Objective: "我们的架构是什么样的，有哪些业务",
+		EvidenceGoals: []EvidenceGoal{
+			{ID: "system_boundary", Facet: "system_boundary", Required: true, Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}},
+			{ID: "business_domain", Facet: "business_domain", Required: true, Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}},
+			{ID: "core_flow", Facet: "core_flow", Required: true, Sources: []agentapi.EvidenceSource{agentapi.EvidenceSourceInternal}},
+		},
+	})
+	next, ok := bindSelectedEntitiesContract(contract, InvestigationResult{
+		DiscoveredEntities: []string{"checkout", "billing", "inventory"},
+	})
+	if !ok {
+		t.Fatal("expected bound subjects")
+	}
+	proposal, err := buildTaskGraphFallback(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.Tasks) != 4 {
+		t.Fatalf("tasks = %+v, want one investigator per business plus synthesizer", proposal.Tasks)
+	}
+	for index, entity := range next.Entities {
+		task := proposal.Tasks[index]
+		if task.Capability != "knowledge.docs.verify" ||
+			!reflect.DeepEqual(task.InvestigationGoalIDs, []string{entity.ID}) {
+			t.Fatalf("task %d = %+v, want docs investigator for %q", index, task, entity.ID)
+		}
+	}
+}
+
 func TestBuildTaskGraphFallbackTreatsSourcesAsAlternatives(t *testing.T) {
 	contract := TaskContract{EvidenceGoals: []EvidenceGoal{{
 		ID: "core_flow", Facet: "core_flow", Required: true,

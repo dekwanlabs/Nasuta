@@ -676,25 +676,8 @@ func taskContractFromInvestigationContract(contract investigation.InvestigationC
 			entities = append(entities, agent.EntityRef{ID: id})
 		}
 	}
-	investigationGoals := make([]agent.InvestigationGoal, 0, len(contract.InvestigationGoals))
-	for _, goal := range contract.InvestigationGoals {
-		investigationGoals = append(investigationGoals, agent.InvestigationGoal{
-			ID: goal.ID, Objective: goal.Objective,
-			IndependentlyUseful: goal.IndependentlyUseful,
-			DependsOn:           append([]string(nil), goal.DependsOn...),
-		})
-	}
-	evidenceGoals := make([]agent.EvidenceGoal, 0, len(contract.EvidenceGoals))
-	for _, goal := range contract.EvidenceGoals {
-		facets := append([]string(nil), goal.Facets...)
-		facet := goal.Kind
-		evidenceGoals = append(evidenceGoals, agent.EvidenceGoal{
-			ID: goal.ID, Facet: facet, Facets: facets, Required: goal.Required,
-			Sources:         append([]agentapi.EvidenceSource(nil), goal.Sources...),
-			RequiredSources: append([]agentapi.EvidenceSource(nil), goal.RequiredSources...),
-			Freshness:       goal.Freshness, MinimumCoverage: goal.MinimumCoverage, HighRisk: goal.HighRisk,
-		})
-	}
+	investigationGoals := qaInvestigationGoals(contract.InvestigationGoals)
+	evidenceGoals := deferredEvidenceGoalsFromInvestigation(contract.EvidenceGoals)
 	conversationRefs := make([]agent.ConversationRef, 0, len(contract.Context.ConversationRefs))
 	for _, ref := range contract.Context.ConversationRefs {
 		conversationRefs = append(conversationRefs, agent.ConversationRef{
@@ -709,11 +692,14 @@ func taskContractFromInvestigationContract(contract investigation.InvestigationC
 		}
 	}
 	return agent.TaskContract{
-		TaskID:             contract.TaskID,
-		Objective:          contract.Question,
-		Entities:           entities,
-		InvestigationGoals: investigationGoals,
-		EvidenceGoals:      evidenceGoals,
+		TaskID:                contract.TaskID,
+		Objective:             contract.Question,
+		Entities:              entities,
+		InvestigationGoals:    investigationGoals,
+		EvidenceGoals:         evidenceGoals,
+		SelectCount:           contract.SelectCount,
+		DiscoveryPhase:        contract.DiscoveryPhase,
+		DeferredEvidenceGoals: deferredEvidenceGoalsFromInvestigation(contract.DeferredEvidenceGoals),
 		Context: agent.TaskContext{
 			ConversationRefs: conversationRefs,
 			TimeRange:        timeRange,
@@ -732,31 +718,8 @@ func sameInvestigationContract(left, right investigation.InvestigationContract) 
 
 func contractFromTaskContract(request agent.InvestigationRequest) investigation.InvestigationContract {
 	contract := request.Contract
-	investigationGoals := make([]investigation.InvestigationGoal, 0, len(contract.InvestigationGoals))
-	for _, goal := range contract.InvestigationGoals {
-		investigationGoals = append(investigationGoals, investigation.InvestigationGoal{
-			ID: goal.ID, Objective: goal.Objective,
-			IndependentlyUseful: goal.IndependentlyUseful,
-			DependsOn:           append([]string(nil), goal.DependsOn...),
-		})
-	}
-	evidenceGoals := make([]investigation.EvidenceGoal, 0, len(contract.EvidenceGoals))
-	for _, goal := range contract.EvidenceGoals {
-		facets := append([]string(nil), goal.Facets...)
-		kind := goal.Facet
-		evidenceGoals = append(evidenceGoals, investigation.EvidenceGoal{
-			ID:              goal.ID,
-			Kind:            kind,
-			Description:     goal.ID,
-			Facets:          facets,
-			Sources:         append([]agentapi.EvidenceSource(nil), goal.Sources...),
-			RequiredSources: append([]agentapi.EvidenceSource(nil), goal.RequiredSources...),
-			Freshness:       goal.Freshness,
-			Required:        goal.Required,
-			HighRisk:        goal.HighRisk,
-			MinimumCoverage: goal.MinimumCoverage,
-		})
-	}
+	investigationGoals := investigationGoalsFromQA(contract.InvestigationGoals)
+	evidenceGoals := investigationEvidenceGoals(contract.EvidenceGoals)
 	entities := make([]string, 0, len(contract.Entities))
 	entityDetails := make([]investigation.InvestigationEntity, 0, len(contract.Entities))
 	for _, entity := range contract.Entities {
@@ -816,12 +779,75 @@ func contractFromTaskContract(request agent.InvestigationRequest) investigation.
 			TimeRange:        timeRange,
 			SeedMaterial:     append([]agentapi.ContextBlock(nil), contract.Context.SeedMaterial...),
 		},
-		Question:           contract.Objective,
-		InvestigationGoals: investigationGoals,
-		EvidenceGoals:      evidenceGoals,
-		SeedEvidence:       seed,
-		CreatedAt:          time.Now().UTC(),
+		Question:              contract.Objective,
+		InvestigationGoals:    investigationGoals,
+		EvidenceGoals:         evidenceGoals,
+		SelectCount:           contract.SelectCount,
+		DiscoveryPhase:        contract.DiscoveryPhase,
+		DeferredEvidenceGoals: investigationEvidenceGoals(contract.DeferredEvidenceGoals),
+		SeedEvidence:          seed,
+		CreatedAt:             time.Now().UTC(),
 	}
+}
+
+func qaInvestigationGoals(goals []investigation.InvestigationGoal) []agent.InvestigationGoal {
+	out := make([]agent.InvestigationGoal, 0, len(goals))
+	for _, goal := range goals {
+		out = append(out, agent.InvestigationGoal{
+			ID: goal.ID, Objective: goal.Objective,
+			IndependentlyUseful: goal.IndependentlyUseful,
+			DependsOn:           append([]string(nil), goal.DependsOn...),
+		})
+	}
+	return out
+}
+
+func investigationGoalsFromQA(goals []agent.InvestigationGoal) []investigation.InvestigationGoal {
+	out := make([]investigation.InvestigationGoal, 0, len(goals))
+	for _, goal := range goals {
+		out = append(out, investigation.InvestigationGoal{
+			ID: goal.ID, Objective: goal.Objective,
+			IndependentlyUseful: goal.IndependentlyUseful,
+			DependsOn:           append([]string(nil), goal.DependsOn...),
+		})
+	}
+	return out
+}
+
+func deferredEvidenceGoalsFromInvestigation(goals []investigation.EvidenceGoal) []agent.EvidenceGoal {
+	out := make([]agent.EvidenceGoal, 0, len(goals))
+	for _, goal := range goals {
+		facet := goal.Kind
+		out = append(out, agent.EvidenceGoal{
+			ID: goal.ID, Facet: facet, Facets: append([]string(nil), goal.Facets...),
+			Required: goal.Required,
+			Sources:  append([]agentapi.EvidenceSource(nil), goal.Sources...),
+			RequiredSources: append(
+				[]agentapi.EvidenceSource(nil), goal.RequiredSources...,
+			),
+			Freshness: goal.Freshness, MinimumCoverage: goal.MinimumCoverage, HighRisk: goal.HighRisk,
+		})
+	}
+	return out
+}
+
+func investigationEvidenceGoals(goals []agent.EvidenceGoal) []investigation.EvidenceGoal {
+	out := make([]investigation.EvidenceGoal, 0, len(goals))
+	for _, goal := range goals {
+		out = append(out, investigation.EvidenceGoal{
+			ID:              goal.ID,
+			Kind:            goal.Facet,
+			Description:     goal.ID,
+			Facets:          append([]string(nil), goal.Facets...),
+			Sources:         append([]agentapi.EvidenceSource(nil), goal.Sources...),
+			RequiredSources: append([]agentapi.EvidenceSource(nil), goal.RequiredSources...),
+			Freshness:       goal.Freshness,
+			Required:        goal.Required,
+			HighRisk:        goal.HighRisk,
+			MinimumCoverage: goal.MinimumCoverage,
+		})
+	}
+	return out
 }
 
 func investigationTerminal(
@@ -830,13 +856,6 @@ func investigationTerminal(
 ) (agent.InvestigationTerminal, error) {
 	if err := investigation.ValidateContractVersion(run.Contract); err != nil {
 		return agent.InvestigationTerminal{}, fmt.Errorf("map investigation run %q: %w", run.ID, err)
-	}
-	if runErr != nil && run.Delivery == nil {
-		return agent.InvestigationTerminal{
-			WorkflowRunID: run.ID,
-			Status:        agent.InvestigationFailed,
-			ErrorCode:     errorCode(run, runErr),
-		}, nil
 	}
 	round := run.Contract.Round
 	if round <= 0 {
@@ -849,6 +868,11 @@ func investigationTerminal(
 		StopReason:    stopReason(run),
 		Usage:         investigationUsage(run),
 	}
+	if runErr != nil && run.Delivery == nil {
+		terminal.Status = agent.InvestigationFailed
+		terminal.ErrorCode = errorCode(run, runErr)
+		return terminal, nil
+	}
 	switch run.Status {
 	case investigation.RunDelivered:
 		if run.Delivery == nil {
@@ -858,6 +882,7 @@ func investigationTerminal(
 		}
 		terminal.Output = investigationResult(run, run.Delivery)
 		terminal.Completeness = investigationCompleteness(run.Delivery.Status)
+		budgetExhausted := deliveryBudgetExhausted(*run.Delivery)
 		switch run.Delivery.Status {
 		case investigation.DeliverySucceeded:
 			terminal.Status = agent.InvestigationSucceeded
@@ -867,8 +892,21 @@ func investigationTerminal(
 			// transport failure that hides the answer from QA.
 			terminal.Status = agent.InvestigationSucceeded
 		case investigation.DeliveryEvidenceInsufficient:
-			terminal.Status = agent.InvestigationFailed
-			terminal.ErrorCode = "evidence_insufficient"
+			if budgetExhausted && reportHasUserClaims(run.Delivery.Report) {
+				// Evidence was collected before the shared run budget was
+				// exhausted, so this is still a user-readable partial result.
+				// Preserve the machine-readable cause alongside the stop reason.
+				terminal.Status = agent.InvestigationSucceeded
+				terminal.ErrorCode = "budget_exhausted"
+				terminal.Completeness = agent.InvestigationPartial
+			} else if budgetExhausted {
+				terminal.Status = agent.InvestigationFailed
+				terminal.ErrorCode = "budget_exhausted"
+				terminal.Completeness = agent.InvestigationPartial
+			} else {
+				terminal.Status = agent.InvestigationFailed
+				terminal.ErrorCode = "evidence_insufficient"
+			}
 		case investigation.DeliveryFailed:
 			terminal.Status = agent.InvestigationFailed
 			terminal.ErrorCode = "delivery_failed"
@@ -911,6 +949,7 @@ func investigationResult(
 		Answer:                  delivery.Text,
 		EvidenceUnits:           evidenceUnits(report.Evidence),
 		EvidenceConflicts:       append([]agentapi.EvidenceConflict(nil), report.EvidenceConflicts...),
+		DiscoveredEntities:      discoveredEntitiesFromRun(run),
 		PartialEvidenceGoals:    partialEvidenceGoals,
 		UnresolvedEvidenceGoals: unresolvedEvidenceGoals,
 		WorkflowCompleteness:    string(investigationCompleteness(delivery.Status)),
@@ -950,6 +989,41 @@ func investigationResult(
 		}
 	}
 	return result
+}
+
+func reportHasUserClaims(report investigation.InvestigationReport) bool {
+	for _, claim := range report.Claims {
+		if claim.Status == investigation.ClaimSupported ||
+			claim.Status == investigation.ClaimPartial {
+			return true
+		}
+	}
+	return false
+}
+
+func discoveredEntitiesFromRun(run investigation.InvestigationRun) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, exists := seen[name]; exists {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	for _, record := range run.Results {
+		for _, discovery := range record.Discoveries {
+			if discovery.Type == "dependency" {
+				continue
+			}
+			add(discovery.Entity)
+		}
+	}
+	return out
 }
 
 func reportEvidenceGoalStatus(report investigation.InvestigationReport) ([]string, []string) {
@@ -1099,6 +1173,9 @@ func stopReason(run investigation.InvestigationRun) string {
 		if run.Delivery.Failure != nil {
 			return string(run.Delivery.Failure.Code)
 		}
+		if deliveryBudgetExhausted(*run.Delivery) {
+			return "budget_exhausted"
+		}
 		if run.Delivery.Status == investigation.DeliveryEvidenceInsufficient {
 			return "evidence_insufficient"
 		}
@@ -1109,6 +1186,18 @@ func stopReason(run investigation.InvestigationRun) string {
 	return ""
 }
 
+func deliveryBudgetExhausted(delivery investigation.DeliveryResult) bool {
+	if delivery.Failure != nil && delivery.Failure.Code == investigation.FailureBudget {
+		return true
+	}
+	for _, failure := range delivery.Report.Failures {
+		if failure.Code == investigation.FailureBudget {
+			return true
+		}
+	}
+	return false
+}
+
 func errorCode(run investigation.InvestigationRun, runErr error) string {
 	if run.Failure != nil {
 		return string(run.Failure.Code)
@@ -1116,6 +1205,9 @@ func errorCode(run investigation.InvestigationRun, runErr error) string {
 	var failure *investigation.RunFailureError
 	if errors.As(runErr, &failure) {
 		return string(failure.Failure.Code)
+	}
+	if errors.Is(runErr, investigation.ErrBudgetExceeded) {
+		return string(investigation.FailureBudget)
 	}
 	return string(investigation.FailureExecution)
 }

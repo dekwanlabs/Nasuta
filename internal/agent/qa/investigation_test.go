@@ -241,6 +241,40 @@ func TestInvestigationOutcomeUsesWorkflowCompleteness(t *testing.T) {
 	}
 }
 
+func TestInvestigationOutcomePreservesBudgetCauseForPartialSuccess(t *testing.T) {
+	result := InvestigationResult{
+		Answer: "evidence-backed partial answer",
+		Citations: []InvestigationCitation{{
+			Claim: "claim one",
+			Evidence: []InvestigationEvidence{{
+				Kind: "code", Reference: "Checkout.Place", Summary: "implementation evidence",
+			}},
+		}},
+	}
+
+	outcome, err := investigationOutcome(InvestigationTerminal{
+		WorkflowRunID: "workflow-budget-partial",
+		Status:        InvestigationSucceeded,
+		ErrorCode:     "budget_exhausted",
+		Output:        &result,
+		Usage:         InvestigationUsage{TotalTokens: 120, ToolCalls: 3},
+		Completeness:  InvestigationPartial,
+	})
+	if err != nil {
+		t.Fatalf("investigationOutcome: %v", err)
+	}
+	if outcome.Status != RunStatusDone || outcome.ErrorCode != "budget_exhausted" {
+		t.Fatalf("outcome status/cause = %+v, want done with budget_exhausted", outcome)
+	}
+	if outcome.Evidence.Status != EvidencePartial || outcome.Evidence.ResultCount != 1 ||
+		outcome.Evidence.ToolCallCount != 3 || len(outcome.References) != 1 {
+		t.Fatalf("outcome evidence = %+v references=%+v", outcome.Evidence, outcome.References)
+	}
+	if outcome.References[0].Type != "code" || outcome.References[0].Target != "Checkout.Place" {
+		t.Fatalf("outcome references = %+v", outcome.References)
+	}
+}
+
 func TestInvestigationOutcomeMapsFailureAndRejectsEmptyAnswer(t *testing.T) {
 	failed, err := investigationOutcome(InvestigationTerminal{
 		WorkflowRunID: "workflow_1",

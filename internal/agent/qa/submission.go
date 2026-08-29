@@ -121,7 +121,7 @@ func (svc *Service) submitInvestigation(
 		startErr       error
 		startErrorCode = "investigation_start_failed"
 	)
-	contract := contractFromPreparation(prepared, seedMaterial)
+	contract := applyDiscoverThenSelect(contractFromPreparation(prepared, seedMaterial))
 	proposal := cloneTaskGraphProposal(prepared.taskGraphProposal)
 	proposal, err = prepareInvestigationProposal(
 		proposal,
@@ -299,8 +299,12 @@ func (svc *Service) submitRun(
 		result, runErr := run.Execute(ctx, request)
 		if runErr != nil {
 			log.ErrorfCtx(ctx, "[qa] runtime run %s failed: %v", runID, runErr)
+			code := "runtime_failed"
+			if errors.Is(runErr, agentapi.ErrBudgetExceeded) {
+				code = "budget_exhausted"
+			}
 			if finishErr := run.Finish(&agentapi.RunError{
-				Code: "runtime_failed", Message: runErr.Error(),
+				Code: code, Message: runErr.Error(),
 			}); finishErr != nil {
 				log.ErrorfCtx(ctx, "[qa] finish failed run %s: %v", runID, finishErr)
 			}

@@ -46,6 +46,29 @@ func TestDeliveryRejectsComposerUnknownClaimAndFallsBack(t *testing.T) {
 	}
 }
 
+func TestDeliverySkipsComposerDuringDiscoveryPhase(t *testing.T) {
+	contract, report := supportedReport()
+	contract.DiscoveryPhase = true
+	called := false
+	result := (DeliveryGate{}).Deliver(context.Background(), contract, report, ComposerFunc(func(context.Context, InvestigationContract, InvestigationReport) (AnswerDraft, error) {
+		called = true
+		return AnswerDraft{
+			Text:     "should not compose a final answer during discovery",
+			Status:   DeliverySucceeded,
+			ClaimIDs: []string{"claim-1"},
+		}, nil
+	}))
+	if called {
+		t.Fatal("composer ran during discovery")
+	}
+	if strings.Contains(result.Text, "should not compose") {
+		t.Fatalf("discovery delivery used composer text: %q", result.Text)
+	}
+	if strings.TrimSpace(result.Text) == "" {
+		t.Fatal("discovery delivery is empty")
+	}
+}
+
 func TestDeliveryWithoutEvidenceStillReturnsExplicitInsufficiency(t *testing.T) {
 	contract := InvestigationContract{
 		Version:       InvestigationContractVersion,

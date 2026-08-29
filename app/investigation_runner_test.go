@@ -605,6 +605,130 @@ func TestTerminalMapsEvidenceInsufficientDeliveryToFailedPartialResult(t *testin
 	}
 }
 
+func TestTerminalMapsBudgetFailureWithoutClaimsToFailed(t *testing.T) {
+	run := investigation.InvestigationRun{
+		ID: "run-budget-partial",
+		Contract: investigation.InvestigationContract{
+			ID: "run-budget-partial", Version: investigation.InvestigationContractVersion, Round: 2,
+		},
+		Status: investigation.RunDelivered,
+		Budget: investigation.BudgetSnapshot{Run: investigation.RunBudget{Used: investigation.BudgetVector{
+			InputTokens: 120, OutputTokens: 30, TotalTokens: 150, ToolCalls: 8,
+		}}},
+		Delivery: &investigation.DeliveryResult{
+			Status: investigation.DeliveryEvidenceInsufficient,
+			Text:   "partial evidence",
+			Report: investigation.InvestigationReport{
+				Evidence: []investigation.EvidenceUnit{{
+					ID: "evidence-1", SourceKind: "code", Target: "service-a",
+					Content: "partial implementation", ContentHash: "hash",
+				}},
+				Failures: []investigation.RunFailure{{
+					Code: investigation.FailureBudget, Message: "shared budget exhausted",
+				}},
+			},
+		},
+	}
+
+	terminal, err := investigationTerminal(run, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Status != agent.InvestigationFailed || terminal.ErrorCode != "budget_exhausted" ||
+		terminal.Completeness != agent.InvestigationPartial ||
+		terminal.StopReason != "budget_exhausted" {
+		t.Fatalf("terminal = %#v, want failed budget stop without claims", terminal)
+	}
+	if terminal.Round != 2 || terminal.Usage.TotalTokens != 150 || terminal.Output == nil {
+		t.Fatalf("terminal lost durable partial facts: %#v", terminal)
+	}
+}
+
+func TestTerminalMapsBudgetFailureWithClaimsToPartialSuccess(t *testing.T) {
+	run := investigation.InvestigationRun{
+		ID: "run-budget-claims",
+		Contract: investigation.InvestigationContract{
+			ID: "run-budget-claims", Version: investigation.InvestigationContractVersion, Round: 2,
+		},
+		Status: investigation.RunDelivered,
+		Budget: investigation.BudgetSnapshot{Run: investigation.RunBudget{Used: investigation.BudgetVector{
+			InputTokens: 120, OutputTokens: 30, TotalTokens: 150, ToolCalls: 8,
+		}}},
+		Delivery: &investigation.DeliveryResult{
+			Status: investigation.DeliveryEvidenceInsufficient,
+			Text:   "partial evidence",
+			Report: investigation.InvestigationReport{
+				Evidence: []investigation.EvidenceUnit{{
+					ID: "evidence-1", SourceKind: "code", Target: "service-a",
+					Content: "partial implementation", ContentHash: "hash",
+				}},
+				Claims: []investigation.VerifiedClaim{{
+					ID: "claim-1", GoalID: "g1", Text: "checkout is a core business",
+					Status: investigation.ClaimSupported,
+				}},
+				Failures: []investigation.RunFailure{{
+					Code: investigation.FailureBudget, Message: "shared budget exhausted",
+				}},
+			},
+		},
+	}
+
+	terminal, err := investigationTerminal(run, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Status != agent.InvestigationSucceeded || terminal.ErrorCode != "budget_exhausted" {
+		t.Fatalf("terminal = %#v, want partial success when claims exist", terminal)
+	}
+}
+
+func TestContractFromTaskContractPersistsDiscoveryPhase(t *testing.T) {
+	request := agent.InvestigationRequest{
+		WorkflowRunID: "workflow-discover",
+		Contract: agent.TaskContract{
+			Objective:      "我们的架构是什么样的，有哪些业务",
+			DiscoveryPhase: true,
+			SelectCount:    3,
+			EvidenceGoals: []agent.EvidenceGoal{{
+				ID: "business_domain", Facet: "business_domain", Facets: []string{"business_domain"},
+				Required: true,
+			}},
+			DeferredEvidenceGoals: []agent.EvidenceGoal{{
+				ID: "core_flow", Facet: "core_flow", Facets: []string{"core_flow"}, Required: true,
+			}},
+			InvestigationGoals: []agent.InvestigationGoal{{
+				ID: "discover_businesses", Objective: "Inventory businesses.",
+				IndependentlyUseful: true, DependsOn: []string{},
+			}},
+		},
+	}
+	contract := contractFromTaskContract(request)
+	if !contract.DiscoveryPhase || contract.SelectCount != 3 || len(contract.DeferredEvidenceGoals) != 1 {
+		t.Fatalf("contract = %#v", contract)
+	}
+	restored := taskContractFromInvestigationContract(contract)
+	if !restored.DiscoveryPhase || restored.SelectCount != 3 ||
+		len(restored.DeferredEvidenceGoals) != 1 || restored.DeferredEvidenceGoals[0].ID != "core_flow" {
+		t.Fatalf("restored = %#v", restored)
+	}
+}
+
+func TestInvestigationResultCopiesDiscoveredEntities(t *testing.T) {
+	run := investigation.InvestigationRun{
+		ID: "run-discover",
+		Results: map[string]investigation.TaskExecutionRecord{
+			"docs": {Discoveries: []investigation.Discovery{
+				{Type: "entity", Entity: "checkout"},
+				{Type: "dependency", From: "a", To: "b"},
+			}},
+		},
+	}
+	result := investigationResult(run, &investigation.DeliveryResult{Text: "ok"})
+	if len(result.DiscoveredEntities) != 1 || result.DiscoveredEntities[0] != "checkout" {
+		t.Fatalf("discovered = %#v", result.DiscoveredEntities)
+	}
+}
+
 func TestTerminalMapsPartialDeliveryToSuccessfulPartialResult(t *testing.T) {
 	run := investigation.InvestigationRun{
 		ID: "run-partial",

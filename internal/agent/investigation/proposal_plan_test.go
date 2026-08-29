@@ -61,7 +61,7 @@ func TestPlanCompilerCompileProposalPreservesGraphAndContract(t *testing.T) {
 	if first.EvidenceGoals[0].Freshness != agentapi.FreshnessStable || first.EvidenceGoals[0].Sources[0] != agentapi.EvidenceSourceInternal {
 		t.Fatalf("evidence contract was lost: %+v", first.EvidenceGoals)
 	}
-	if len(byID["inspect_next"].Dependencies) != 1 || byID["inspect_next"].Dependencies[0] != "inspect" || byID["inspect_next"].Optional {
+	if len(byID["inspect_next"].Dependencies) != 1 || byID["inspect_next"].Dependencies[0] != "inspect" || !byID["inspect_next"].Optional {
 		t.Fatalf("edge projection = %+v", byID["inspect_next"])
 	}
 
@@ -137,6 +137,52 @@ func TestCompileProposalBindsExplicitGoalsAndFreezesStopPolicy(t *testing.T) {
 	}
 	if plan.Policy.Budget.OutputTokens != 100 || plan.Policy.Budget.TotalTokens != 120 || plan.Policy.Budget.ToolCalls != 4 || plan.Policy.Budget.CostMicros != 50 {
 		t.Fatalf("stop budget = %+v", plan.Policy.Budget)
+	}
+}
+
+func TestCompileProposalCopiesContractEntitiesFromInvestigationGoals(t *testing.T) {
+	catalog := NewTaskTemplateCatalog()
+	if err := RegisterDefaultInvestigationTemplates(catalog); err != nil {
+		t.Fatalf("register templates: %v", err)
+	}
+	contract := InvestigationContract{
+		Version: InvestigationContractVersion,
+		ID:      "run-entities", Question: "explain selected businesses",
+		Entities: []string{"checkout", "billing"},
+		EntityDetails: []InvestigationEntity{
+			{ID: "checkout", Label: "Checkout"},
+			{ID: "billing", Label: "Billing"},
+		},
+		InvestigationGoals: []InvestigationGoal{
+			{ID: "checkout", Objective: "Explain checkout.", IndependentlyUseful: true},
+			{ID: "billing", Objective: "Explain billing.", IndependentlyUseful: true},
+		},
+		EvidenceGoals: []EvidenceGoal{{
+			ID: "domain", Kind: GoalKindBusinessDomain, Facets: []string{"business_domain"}, Required: true,
+		}},
+	}
+	schemas := agentapi.NewSchemaRegistry()
+	if err := schemas.Publish([]agentapi.SchemaDefinition{
+		{ID: DefaultTaskInputSchema, Version: 1, Document: json.RawMessage(`{"type":"object"}`)},
+		{ID: DefaultTaskOutputSchema, Version: 1, Document: json.RawMessage(`{"type":"object"}`)},
+	}); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	plan, err := (PlanCompiler{Catalog: catalog, Schemas: schemas, MaxTasks: 4}).CompileProposal(contract, agentapi.TaskGraphProposal{
+		Tasks: []agentapi.TaskSpec{{
+			ID: "inspect_checkout", Purpose: "explain checkout", Capability: "knowledge.docs.verify",
+			InvestigationGoalIDs: []string{"checkout"}, EvidenceGoalIDs: []string{"domain"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("compile proposal: %v", err)
+	}
+	byID := make(map[string]ExecutableTask, len(plan.Tasks))
+	for _, task := range plan.Tasks {
+		byID[task.ID] = task
+	}
+	if got := byID["inspect_checkout"].Entities; len(got) != 1 || got[0] != "checkout" {
+		t.Fatalf("compiled entities = %#v, want the bound subject", got)
 	}
 }
 

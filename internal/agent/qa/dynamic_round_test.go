@@ -17,7 +17,7 @@ func TestShouldContinueBoundsRoundsGoalsAndBudget(t *testing.T) {
 		{
 			name: "eligible",
 			context: InvestigationRoundContext{
-				Round: 2, MaxRounds: 3,
+				Round: 2, MaxRounds: 3, HasValidReport: true,
 				UnresolvedEvidenceGoals: []string{"core_flow"},
 			},
 			want: true,
@@ -25,7 +25,7 @@ func TestShouldContinueBoundsRoundsGoalsAndBudget(t *testing.T) {
 		{
 			name: "last configured round is eligible",
 			context: InvestigationRoundContext{
-				Round: 3, MaxRounds: 3,
+				Round: 3, MaxRounds: 3, HasValidReport: true,
 				UnresolvedEvidenceGoals: []string{"core_flow"},
 			},
 			want: true,

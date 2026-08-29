@@ -91,6 +91,10 @@ type TaskContract struct {
 	EvidenceGoals           []EvidenceGoal           `json:"evidence_goals"`
 	TaskEvidenceAssignments []TaskEvidenceAssignment `json:"task_evidence_assignments,omitempty"`
 	Context                 TaskContext              `json:"context"`
+	// Orchestration-only. Omitted from investigator task.contract JSON.
+	SelectCount           int            `json:"-"`
+	DiscoveryPhase        bool           `json:"-"`
+	DeferredEvidenceGoals []EvidenceGoal `json:"-"`
 }
 
 type EntityRef struct {
@@ -255,6 +259,7 @@ type InvestigationResult struct {
 	UnresolvedEvidenceGoals      []string                        `json:"unresolved_evidence_goals,omitempty"`
 	EvidenceUnits                []tool.EvidenceUnit             `json:"evidence_units,omitempty"`
 	EvidenceConflicts            []agentapi.EvidenceConflict     `json:"evidence_conflicts,omitempty"`
+	DiscoveredEntities           []string                        `json:"discovered_entities,omitempty"`
 	Verification                 InvestigationVerification       `json:"verification,omitempty"`
 	ExecutionStatus              string                          `json:"execution_status,omitempty"`
 	EvidenceStatus               string                          `json:"evidence_status,omitempty"`
@@ -458,11 +463,19 @@ func investigationOutcome(terminal InvestigationTerminal) (RunOutcome, error) {
 				terminal.WorkflowRunID,
 			)
 		}
-		return successfulOutcome(
+		outcome := successfulOutcome(
 			*terminal.Output,
 			terminal.Usage,
 			terminal.Completeness,
-		), nil
+		)
+		// A readable partial result may still carry a terminal cause such as
+		// budget_exhausted; retain it for the parent API without changing the
+		// successful delivery status. Do not erase a locally derived failure
+		// such as empty_output when the terminal has no explicit cause.
+		if terminal.ErrorCode != "" {
+			outcome.ErrorCode = terminal.ErrorCode
+		}
+		return outcome, nil
 	case InvestigationFailed:
 		return failedInvestigationOutcome(
 			terminal,
@@ -511,7 +524,9 @@ func failedInvestigationOutcome(
 	if partial.Status != RunStatusDone {
 		return outcome
 	}
-	partial.Status = RunStatusFailed
+	// A failed investigation that still produced a user-readable answer is
+	// delivered as a done partial result instead of hiding the answer behind a
+	// transport failure. Stop reasons and limitations remain on the result.
 	partial.ErrorCode = terminal.ErrorCode
 	partial.Err = err
 	return partial

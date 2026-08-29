@@ -63,6 +63,7 @@ func (gate DeliveryGate) Deliver(
 	var compositionFailure *RunFailure
 	text := ""
 	var compositionUsage BudgetVector
+	composer = composerForDelivery(contract, composer)
 	if composer != nil && len(report.Claims) > 0 {
 		draft, err := composer.Compose(ctx, contract, report)
 		if err == nil {
@@ -152,6 +153,15 @@ func ValidateDelivery(result DeliveryResult) error {
 	default:
 		return fmt.Errorf("unknown delivery status %q", result.Status)
 	}
+}
+
+// composerForDelivery withholds the synthesizer from inventory waves. Those
+// rounds must bind discovered businesses before a user-facing answer is written.
+func composerForDelivery(contract InvestigationContract, composer Composer) Composer {
+	if contract.DiscoveryPhase {
+		return nil
+	}
+	return composer
 }
 
 func deliveryStatus(contract InvestigationContract, report InvestigationReport) DeliveryStatus {

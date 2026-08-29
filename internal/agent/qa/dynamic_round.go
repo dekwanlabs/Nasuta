@@ -26,6 +26,8 @@ type InvestigationRoundContext struct {
 	PreviousWorkflowRunID   string
 	BudgetLimit             InvestigationBudget
 	BudgetUsed              InvestigationUsage
+	HasValidReport          bool
+	PendingEntitySelection  bool
 }
 
 // ShouldContinue reports whether another bounded child workflow is eligible.
@@ -35,10 +37,16 @@ func ShouldContinue(context InvestigationRoundContext) bool {
 		maxRounds = defaultInvestigationMaxRounds
 	}
 	unresolved := context.UnresolvedEvidenceGoals
-	return context.Round > 0 &&
-		context.Round <= maxRounds &&
-		len(unresolved) > 0 &&
-		investigationBudgetAvailable(context.BudgetLimit, context.BudgetUsed)
+	if context.Round <= 0 || context.Round > maxRounds {
+		return false
+	}
+	if !investigationBudgetAvailable(context.BudgetLimit, context.BudgetUsed) {
+		return false
+	}
+	if context.PendingEntitySelection {
+		return true
+	}
+	return len(unresolved) > 0 && context.HasValidReport
 }
 
 func investigationBudgetAvailable(limit InvestigationBudget, used InvestigationUsage) bool {
@@ -114,6 +122,12 @@ func continuationContract(
 	previous TaskContract,
 	result InvestigationResult,
 ) (TaskContract, bool) {
+	if previous.DiscoveryPhase {
+		return bindSelectedEntitiesContract(previous, result)
+	}
+	if subjectExplainRound(previous) {
+		return TaskContract{}, false
+	}
 	unresolved := uniqueStrings(result.UnresolvedEvidenceGoals)
 	if len(unresolved) == 0 {
 		return TaskContract{}, false
@@ -196,6 +210,10 @@ func cloneTaskContract(contract TaskContract) TaskContract {
 	contract.TaskEvidenceAssignments = append(
 		[]TaskEvidenceAssignment(nil), contract.TaskEvidenceAssignments...,
 	)
+	contract.DeferredEvidenceGoals = append([]EvidenceGoal(nil), contract.DeferredEvidenceGoals...)
+	for index := range contract.DeferredEvidenceGoals {
+		contract.DeferredEvidenceGoals[index] = cloneEvidenceGoal(contract.DeferredEvidenceGoals[index])
+	}
 	contract.Context.ConversationRefs = append(
 		[]ConversationRef(nil), contract.Context.ConversationRefs...,
 	)
@@ -347,6 +365,10 @@ func MergeRoundResult(previous, current InvestigationResult) InvestigationResult
 	for _, conflict := range ledger.Add(current.EvidenceUnits, "current") {
 		conflicts = appendUniqueEvidenceConflict(conflicts, conflictToAPI(conflict))
 	}
+	merged.DiscoveredEntities = uniqueStrings(append(
+		append([]string(nil), merged.DiscoveredEntities...),
+		current.DiscoveredEntities...,
+	))
 	merged.EvidenceUnits = ledger.Units()
 	for _, conflict := range current.EvidenceConflicts {
 		conflicts = appendUniqueEvidenceConflict(conflicts, conflict)
@@ -368,6 +390,7 @@ func cloneInvestigationResult(result InvestigationResult) InvestigationResult {
 	result.UnresolvedEvidenceGoals = append([]string(nil), result.UnresolvedEvidenceGoals...)
 	result.EvidenceUnits = evidence.CloneUnits(result.EvidenceUnits)
 	result.EvidenceConflicts = append([]agentapi.EvidenceConflict(nil), result.EvidenceConflicts...)
+	result.DiscoveredEntities = append([]string(nil), result.DiscoveredEntities...)
 	return result
 }
 

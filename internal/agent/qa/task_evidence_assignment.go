@@ -2,6 +2,7 @@ package qa
 
 import (
 	"fmt"
+	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -30,7 +31,7 @@ func prepareInvestigationProposal(
 		}
 		proposal = &fallback
 	}
-	assignTaskEvidenceOwners(proposal, seedEvidence)
+	assignTaskEvidenceOwners(proposal, seedEvidence, contract)
 	return proposal, nil
 }
 
@@ -38,6 +39,7 @@ func prepareInvestigationProposal(
 func assignTaskEvidenceOwners(
 	proposal *agentapi.TaskGraphProposal,
 	seedEvidence []tool.EvidenceUnit,
+	contract TaskContract,
 ) {
 	if proposal == nil {
 		return
@@ -58,12 +60,14 @@ func assignTaskEvidenceOwners(
 	}
 
 	loads := make(map[int]int, len(investigators))
+	preferEntity := len(contract.Entities) > 0 && !contract.DiscoveryPhase
 	for _, group := range groupTaskEvidence(seedEvidence) {
 		owner := selectTaskEvidenceOwner(
 			proposal.Tasks,
 			investigators,
 			group,
 			loads,
+			preferEntity,
 		)
 		if owner < 0 {
 			continue
@@ -120,7 +124,20 @@ func selectTaskEvidenceOwner(
 	investigators []int,
 	group taskEvidenceGroup,
 	loads map[int]int,
+	preferEntity bool,
 ) int {
+	if preferEntity {
+		matched := make([]int, 0, len(investigators))
+		for _, index := range investigators {
+			if taskOwnsEvidenceEntity(tasks[index], group) {
+				matched = append(matched, index)
+			}
+		}
+		if len(matched) == 0 {
+			return -1
+		}
+		investigators = matched
+	}
 	best := -1
 	bestFacetCount := 0
 	bestLoad := 0
@@ -147,6 +164,23 @@ func selectTaskEvidenceOwner(
 		}
 	}
 	return best
+}
+
+func taskOwnsEvidenceEntity(task agentapi.TaskSpec, group taskEvidenceGroup) bool {
+	if len(group.units) == 0 {
+		return false
+	}
+	haystack := strings.ToLower(group.units[0].Target)
+	if haystack == "" {
+		return false
+	}
+	for _, id := range task.InvestigationGoalIDs {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if id != "" && strings.Contains(haystack, id) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchingTaskFacetCount(

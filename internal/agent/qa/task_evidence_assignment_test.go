@@ -51,7 +51,7 @@ func TestAssignTaskEvidenceOwnersDoesNotShareSeedGroupsBetweenSiblings(
 		},
 	}
 
-	assignTaskEvidenceOwners(&proposal, seed)
+	assignTaskEvidenceOwners(&proposal, seed, TaskContract{})
 
 	first := proposal.Tasks[0].InputRefs
 	second := proposal.Tasks[1].InputRefs
@@ -90,6 +90,41 @@ func TestAssignTaskEvidenceOwnersDoesNotShareSeedGroupsBetweenSiblings(
 	}
 	if _, assigned := owners["runtime\x00trace-1"]; assigned {
 		t.Fatal("unmatched runtime evidence was assigned")
+	}
+}
+
+func TestAssignTaskEvidenceOwnersPrefersSubjectIdentity(t *testing.T) {
+	report := agentapi.InvestigationReportSchemaRef()
+	proposal := agentapi.TaskGraphProposal{Tasks: []agentapi.TaskSpec{
+		{
+			ID: "investigate.checkout.docs.1", Capability: "knowledge.docs.verify",
+			InvestigationGoalIDs: []string{"checkout"}, RequiredFacets: []string{"business_domain"},
+			OutputSchema: report,
+		},
+		{
+			ID: "investigate.billing.docs.1", Capability: "knowledge.docs.verify",
+			InvestigationGoalIDs: []string{"billing"}, RequiredFacets: []string{"business_domain"},
+			OutputSchema: report,
+		},
+	}}
+	assignTaskEvidenceOwners(&proposal, []tool.EvidenceUnit{
+		{
+			SourceKind: "runbook", Target: "docs/billing-overview.md",
+			Sections: []string{"overview"}, Facets: []string{"business_domain"},
+		},
+		{
+			SourceKind: "runbook", Target: "docs/shared-readme.md",
+			Sections: []string{"overview"}, Facets: []string{"business_domain"},
+		},
+	}, TaskContract{
+		Entities: []EntityRef{{ID: "checkout"}, {ID: "billing"}},
+	})
+	if len(proposal.Tasks[0].InputRefs) != 0 {
+		t.Fatalf("checkout task must not receive unmatched seeds: %#v", proposal.Tasks[0].InputRefs)
+	}
+	if len(proposal.Tasks[1].InputRefs) != 1 ||
+		proposal.Tasks[1].InputRefs[0].Target != "docs/billing-overview.md" {
+		t.Fatalf("billing task refs = %#v", proposal.Tasks[1].InputRefs)
 	}
 }
 

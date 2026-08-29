@@ -42,6 +42,7 @@ type ExecutionAssessment struct {
 	RequiresLiveRuntime    bool
 	SharedContextPressure  bool
 	EvidenceDecomposable   bool
+	DiscoverThenSelect     bool
 	EstimatedCoordination  CoordinationEstimate
 	Reasons                []string
 }
@@ -126,7 +127,7 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	}
 
 	policy := ExecutionPolicy{AllowMultiAgent: standardRequest(prepared.request, svc.agentRef)}
-	contract := contractFromPreparation(prepared, nil)
+	contract := applyDiscoverThenSelect(contractFromPreparation(prepared, nil))
 	available := policy.AllowMultiAgent && svc.investigation != nil && svc.investigation.Available()
 	assessment := assessExecution(planning.Execution, contract)
 	prepared.execution = routeExecution(prepared.ctx, executionRouteInput{
@@ -138,7 +139,7 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	prepared.execution.HighRisk = assessment.HighRisk
 	log.InfofCtx(
 		prepared.ctx,
-		"[qa] execution route proposed=%s effective=%s path=%s tasks=%d independent_tasks=%d capabilities=%d parallelizable=%t evidence_decomposable=%t origin=%s reason=%s promotion=%s downgrade=%s",
+		"[qa] execution route proposed=%s effective=%s path=%s tasks=%d independent_tasks=%d capabilities=%d parallelizable=%t evidence_decomposable=%t discover_then_select=%t origin=%s reason=%s promotion=%s downgrade=%s",
 		planning.Execution.Strategy,
 		prepared.execution.Strategy,
 		prepared.execution.Path,
@@ -147,6 +148,7 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 		assessment.RequiredCapabilities,
 		assessment.Parallelizable,
 		assessment.EvidenceDecomposable,
+		assessment.DiscoverThenSelect,
 		prepared.execution.DecisionOrigin,
 		prepared.execution.RouteReason,
 		prepared.execution.PromotionReason,
@@ -221,17 +223,12 @@ func assessExecution(suggestion retrieval.ExecutionSuggestion, contract TaskCont
 	}
 	parallelizable := independentTasks >= 2
 	sharedContextPressure := len(contract.EvidenceGoals) >= 3 || len(contract.Entities) >= 2
-	// The model's candidate list is advisory. A broad request can still arrive
-	// as one umbrella task, while the server already knows that several
-	// independent capabilities must cover the evidence contract. Let the
-	// workflow planner split that contract instead of silently collapsing the
-	// request into single-agent execution.
-	// Candidate dependencies describe the model's answer composition, not the
-	// evidence collection graph. The server-owned capability map decides whether
-	// evidence can be collected in parallel; otherwise one umbrella task can
-	// incorrectly block multi-agent routing.
-	evidenceDecomposable := sharedContextPressure && len(capabilities) >= 2
-	decomposable := parallelizable || evidenceDecomposable
+	// Facet count is not a subject. Capability-parallel multi-agent is only
+	// safe after named entities exist. Unnamed business-domain questions
+	// inventory first; they do not split by docs/service/code.
+	evidenceDecomposable := sharedContextPressure && len(capabilities) >= 2 && len(contract.Entities) >= 1
+	discoverThenSelect := contract.DiscoveryPhase || needsSubjectDiscovery(contract)
+	decomposable := parallelizable || evidenceDecomposable || discoverThenSelect
 	strategy := retrieval.ExecutionSingleAgent
 	if decomposable {
 		strategy = retrieval.ExecutionMultiAgent
@@ -248,6 +245,7 @@ func assessExecution(suggestion retrieval.ExecutionSuggestion, contract TaskCont
 		Parallelizable: parallelizable, StrongTaskDependencies: strongDependencies,
 		HighRisk: highRisk, RequiresLiveRuntime: requiresLiveRuntime,
 		SharedContextPressure: sharedContextPressure, EvidenceDecomposable: evidenceDecomposable,
+		DiscoverThenSelect:    discoverThenSelect,
 		EstimatedCoordination: CoordinationEstimate{AgentRuns: estimatedRuns, JoinInputs: estimatedJoins},
 		Reasons:               append([]string(nil), suggestion.Reasons...),
 	}
@@ -288,11 +286,14 @@ func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 		}
 	}
 	suggestedMulti := input.Suggestion.Strategy == retrieval.ExecutionMultiAgent
-	canDecompose := input.Assessment.IndependentTaskCount >= 2 || input.Assessment.EvidenceDecomposable
+	canDecompose := input.Assessment.IndependentTaskCount >= 2 ||
+		input.Assessment.EvidenceDecomposable ||
+		input.Assessment.DiscoverThenSelect
 	if !suggestedMulti && !canDecompose {
 		return assessedSingle("insufficient_independent_tasks")
 	}
-	if !suggestedMulti && !input.Assessment.Parallelizable && !input.Assessment.EvidenceDecomposable {
+	if !suggestedMulti && !input.Assessment.Parallelizable &&
+		!input.Assessment.EvidenceDecomposable && !input.Assessment.DiscoverThenSelect {
 		return assessedSingle("tasks_not_parallelizable")
 	}
 	if !input.Policy.AllowMultiAgent {
@@ -307,16 +308,21 @@ func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 	if !canDecompose {
 		return single("insufficient_independent_tasks", "server_assessment")
 	}
-	if !input.Assessment.Parallelizable && !input.Assessment.EvidenceDecomposable {
+	if !input.Assessment.Parallelizable && !input.Assessment.EvidenceDecomposable &&
+		!input.Assessment.DiscoverThenSelect {
 		return single("tasks_not_parallelizable", "server_assessment")
 	}
 	decision := executionRouteDecision{Strategy: retrieval.ExecutionMultiAgent, Path: executionPathWorkflow, DecisionOrigin: "server_assessment"}
-	if input.Assessment.EvidenceDecomposable && input.Assessment.IndependentTaskCount < 2 {
+	if input.Assessment.DiscoverThenSelect {
+		decision.RouteReason = "discover_then_select"
+	} else if input.Assessment.EvidenceDecomposable && input.Assessment.IndependentTaskCount < 2 {
 		decision.RouteReason = "evidence_goal_decomposition"
 	}
 	if !suggestedMulti {
 		decision.PromotionReason = "independent_task_decomposition"
-		if input.Assessment.IndependentTaskCount < 2 {
+		if input.Assessment.DiscoverThenSelect {
+			decision.PromotionReason = "discover_then_select"
+		} else if input.Assessment.IndependentTaskCount < 2 {
 			decision.PromotionReason = "evidence_goal_decomposition"
 		}
 	}

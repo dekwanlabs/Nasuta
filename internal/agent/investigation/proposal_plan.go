@@ -152,6 +152,7 @@ func (compiler PlanCompiler) CompileProposal(
 			Optional:             task.Optional && !requiredDependency[id],
 			AllowParallel:        task.AllowParallel,
 			MaxAttempts:          maxAttempts,
+			Entities:             proposalTaskEntities(contract, investigationGoalIDs),
 			InputRefs:            convertEvidenceRefs(task.InputRefs),
 			Dependencies:         uniqueStrings(dependencies[id]),
 			Budget:               budget,
@@ -229,6 +230,44 @@ func validateProposalGoalSelectors(
 		}
 	}
 	return nil
+}
+
+func proposalTaskEntities(contract InvestigationContract, investigationGoalIDs []string) []string {
+	if len(investigationGoalIDs) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(contract.Entities)+len(contract.EntityDetails))
+	for _, id := range contract.Entities {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		allowed[id] = struct{}{}
+	}
+	for _, detail := range contract.EntityDetails {
+		id := strings.TrimSpace(detail.ID)
+		if id == "" {
+			continue
+		}
+		allowed[id] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(investigationGoalIDs))
+	seen := make(map[string]struct{}, len(investigationGoalIDs))
+	for _, id := range investigationGoalIDs {
+		id = strings.TrimSpace(id)
+		if _, ok := allowed[id]; !ok {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func proposalTemplate(capability string) (TaskTemplateRef, bool) {

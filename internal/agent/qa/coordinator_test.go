@@ -544,6 +544,13 @@ func coordinatorEvidenceUnit(
 	}
 }
 
+func coordinatorContinuationClaim() []InvestigationClaim {
+	return []InvestigationClaim{{
+		ProducerNodeID: "investigate.docs.1", FindingIndex: 1,
+		Claim: "bounded finding", EvidenceGoalIDs: []string{"core_flow"},
+	}}
+}
+
 func coordinatorContinuationContract() TaskContract {
 	return TaskContract{
 		TaskID: "parent-dynamic", Objective: "investigate the system",
@@ -582,6 +589,7 @@ func TestCoordinatorContinuationStartsStableBoundedRound(t *testing.T) {
 		Output: &InvestigationResult{
 			Answer: "round one", Round: 1,
 			EvidenceUnits:           []tool.EvidenceUnit{first},
+			PartialClaims:           coordinatorContinuationClaim(),
 			PartialEvidenceGoals:    []string{"core_flow"},
 			UnresolvedEvidenceGoals: []string{"core_flow"},
 		},
@@ -697,6 +705,7 @@ func TestCoordinatorContinuationStopsWithoutNewEvidence(t *testing.T) {
 		Output: &InvestigationResult{
 			Answer: "partial", Round: 1,
 			EvidenceUnits:           []tool.EvidenceUnit{unit},
+			PartialClaims:           coordinatorContinuationClaim(),
 			UnresolvedEvidenceGoals: []string{"core_flow"},
 		},
 	}
@@ -744,6 +753,7 @@ func TestCoordinatorContinuationReusesExistingStableChild(t *testing.T) {
 		Completeness: InvestigationPartial, Round: 1,
 		Output: &InvestigationResult{
 			Answer: "round one", Round: 1, EvidenceUnits: []tool.EvidenceUnit{first},
+			PartialClaims:           coordinatorContinuationClaim(),
 			UnresolvedEvidenceGoals: []string{"core_flow"},
 		},
 	}
@@ -935,6 +945,59 @@ func TestCoordinatorTreatsConcurrentParentCompletionAsReplay(t *testing.T) {
 	}
 }
 
+func TestCoordinatorDoesNotContinueBudgetExhaustedPartialEvidence(t *testing.T) {
+	parent := QAParentRecord{
+		ID: "parent-budget", WorkflowRunID: "workflow-budget", UserID: 42,
+		Status: RunStatusRunning,
+	}
+	terminal := InvestigationTerminal{
+		WorkflowRunID: parent.WorkflowRunID, Status: InvestigationFailed,
+		ErrorCode: "budget_exhausted", StopReason: string(workflow.StopBudgetExhausted),
+		Completeness: InvestigationPartial, Round: 2,
+		Output: &InvestigationResult{
+			Answer: "partial answer", UnresolvedEvidenceGoals: []string{"core_flow"},
+			EvidenceUnits: []tool.EvidenceUnit{coordinatorEvidenceUnit("code", "service-a", "implementation", "v1")},
+		},
+	}
+	runner := &coordinatorContinuationRunner{
+		investigationRunnerRecorder: &investigationRunnerRecorder{load: func(context.Context, string) (InvestigationTerminal, error) {
+			return terminal, nil
+		}},
+		snapshots: map[string]InvestigationRoundSnapshot{
+			parent.WorkflowRunID: {Terminal: terminal, Contract: coordinatorContinuationContract()},
+		},
+		loadRoundErr: make(map[string]error),
+	}
+	scenarios := &coordinatorScenarioLifecycle{}
+	coordinator := &Coordinator{
+		investigation: runner, scenarios: scenarios,
+		parentRuns: coordinatorParentStore{parent: parent},
+	}
+
+	if err := coordinator.Reconcile(t.Context(), parent.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(runner.startRequests) != 0 {
+		t.Fatalf("continuation started after budget exhaustion: %+v", runner.startRequests)
+	}
+	if len(scenarios.outcomes) != 1 || scenarios.outcomes[0].Status != RunStatusDone ||
+		scenarios.outcomes[0].ErrorCode != "budget_exhausted" ||
+		scenarios.outcomes[0].Answer != "partial answer" {
+		t.Fatalf("outcomes = %+v", scenarios.outcomes)
+	}
+}
+
+func TestContinuationEligibilityRejectsBudgetExhaustion(t *testing.T) {
+	for _, terminal := range []InvestigationTerminal{
+		{Status: InvestigationSucceeded, StopReason: string(workflow.StopBudgetExhausted)},
+		{Status: InvestigationFailed, ErrorCode: "budget_exhausted"},
+	} {
+		if continuationEligible(terminal) {
+			t.Fatalf("budget terminal was eligible for continuation: %+v", terminal)
+		}
+	}
+}
+
 func TestCoordinatorDoesNotContinueNonEvidenceFailure(t *testing.T) {
 	parent := QAParentRecord{
 		ID: "parent-composer-failure", WorkflowRunID: "workflow-composer-failure", Status: RunStatusRunning,
@@ -969,8 +1032,9 @@ func TestCoordinatorDoesNotContinueNonEvidenceFailure(t *testing.T) {
 	if len(runner.startRequests) != 0 {
 		t.Fatalf("continuation started after non-evidence failure: %+v", runner.startRequests)
 	}
-	if len(scenarios.outcomes) != 1 || scenarios.outcomes[0].Status != RunStatusFailed ||
-		scenarios.outcomes[0].ErrorCode != "composer_failed" {
+	if len(scenarios.outcomes) != 1 || scenarios.outcomes[0].Status != RunStatusDone ||
+		scenarios.outcomes[0].ErrorCode != "composer_failed" ||
+		scenarios.outcomes[0].Answer != "fallback answer" {
 		t.Fatalf("outcomes = %+v", scenarios.outcomes)
 	}
 }
@@ -983,5 +1047,15 @@ func TestCoordinatorUsesConfiguredContinuationRoundLimit(t *testing.T) {
 	coordinator.SetInvestigationMaxRounds(6)
 	if coordinator.investigationMaxRounds() != 6 {
 		t.Fatalf("configured max rounds = %d", coordinator.investigationMaxRounds())
+	}
+}
+
+func TestContinuationEligibilityRejectsWorkflowBudgetExhaustion(t *testing.T) {
+	terminal := InvestigationTerminal{
+		Status:    InvestigationFailed,
+		ErrorCode: "workflow_budget_exhausted",
+	}
+	if continuationEligible(terminal) {
+		t.Fatal("workflow budget exhaustion was eligible for continuation")
 	}
 }

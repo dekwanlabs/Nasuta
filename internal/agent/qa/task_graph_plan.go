@@ -21,6 +21,7 @@ Return JSON only with this exact shape:
 Rules:
 - Cover required evidence goals with the smallest useful set of allowed capabilities.
 - When investigation goals are supplied, bind every task to one or more of them and cover every investigation goal.
+- When entities are supplied, emit exactly one task per entity and bind that entity's investigation goal. Do not split one entity across capabilities.
 - Sources listed as required_sources are mandatory for that evidence goal; sources listed only in sources are optional alternatives.
 - A capability may cover multiple evidence goals and a user investigation goal may require multiple capabilities.
 - Use at most max_investigation_tasks tasks.
@@ -383,6 +384,9 @@ func validateTaskGraphContractCoverage(
 	if err := validateInvestigationGoalBindings(draft, contract); err != nil {
 		return err
 	}
+	if err := validateSubjectExplainCoverage(draft, contract); err != nil {
+		return err
+	}
 	if err := validateContractEntityCoverage(contract); err != nil {
 		return err
 	}
@@ -445,6 +449,13 @@ func validateInvestigationGoalBindings(
 				index+1,
 			)
 		}
+		if len(contract.Entities) > 0 && !contract.DiscoveryPhase &&
+			len(task.InvestigationGoalIDs) > 1 {
+			return fmt.Errorf(
+				"task %d must bind a single investigation goal after subjects are selected",
+				index+1,
+			)
+		}
 		seen := make(map[string]struct{}, len(task.InvestigationGoalIDs))
 		for _, goalID := range task.InvestigationGoalIDs {
 			if _, ok := allowed[goalID]; !ok {
@@ -476,6 +487,28 @@ func validateInvestigationGoalBindings(
 			"task graph does not cover investigation goals: %s",
 			strings.Join(missing, ", "),
 		)
+	}
+	return nil
+}
+
+func validateSubjectExplainCoverage(draft taskGraphDraft, contract TaskContract) error {
+	if !subjectExplainRound(contract) {
+		return nil
+	}
+	if len(draft.Tasks) != len(contract.InvestigationGoals) {
+		return fmt.Errorf(
+			"subject explain round must emit one task per selected business, got %d",
+			len(draft.Tasks),
+		)
+	}
+	required := requiredEvidenceGoalIDs(contract)
+	for index, task := range draft.Tasks {
+		if !subsetStringSet(required, task.EvidenceGoalIDs) {
+			return fmt.Errorf(
+				"task %d must cover required evidence goals for its selected business",
+				index+1,
+			)
+		}
 	}
 	return nil
 }
@@ -560,6 +593,9 @@ func selectCapabilityCover(
 }
 
 func buildTaskGraphFallback(contract TaskContract) (agentapi.TaskGraphProposal, error) {
+	if subjectExplainRound(contract) {
+		return buildSubjectExplainFallback(contract)
+	}
 	capabilities, err := taskGraphCapabilities(contract)
 	if err != nil {
 		return agentapi.TaskGraphProposal{}, err
@@ -589,6 +625,80 @@ func buildTaskGraphFallback(contract TaskContract) (agentapi.TaskGraphProposal, 
 		})
 	}
 	return bindTaskGraphDraft(draft, capabilities, contract, maxInvestigationTasks)
+}
+
+func buildSubjectExplainFallback(contract TaskContract) (agentapi.TaskGraphProposal, error) {
+	capabilities, err := taskGraphCapabilities(contract)
+	if err != nil {
+		return agentapi.TaskGraphProposal{}, err
+	}
+	required := requiredEvidenceGoalIDs(contract)
+	capability, err := pickSubjectExplainCapability(capabilities, required)
+	if err != nil {
+		return agentapi.TaskGraphProposal{}, err
+	}
+	if len(contract.InvestigationGoals) > maxInvestigationTasks {
+		return agentapi.TaskGraphProposal{}, fmt.Errorf(
+			"subject explain round has %d businesses, limit is %d",
+			len(contract.InvestigationGoals),
+			maxInvestigationTasks,
+		)
+	}
+	evidenceGoalIDs := intersectStrings(capability.EvidenceGoalIDs, required)
+	draft := taskGraphDraft{Tasks: make([]taskGraphDraftTask, 0, len(contract.InvestigationGoals))}
+	for _, goal := range contract.InvestigationGoals {
+		draft.Tasks = append(draft.Tasks, taskGraphDraftTask{
+			Purpose: defaultTaskPurpose(
+				capability.RequiredFacets,
+				[]InvestigationGoal{goal},
+			),
+			Capability:           capability.ID,
+			InvestigationGoalIDs: []string{goal.ID},
+			EvidenceGoalIDs:      append([]string(nil), evidenceGoalIDs...),
+		})
+	}
+	return bindTaskGraphDraft(draft, capabilities, contract, maxInvestigationTasks)
+}
+
+func pickSubjectExplainCapability(
+	capabilities []taskGraphCapability,
+	required []string,
+) (taskGraphCapability, error) {
+	requiredSet := stringSet(required)
+	var (
+		preferred taskGraphCapability
+		best      taskGraphCapability
+		bestCover int
+		found     bool
+		hasPrefer bool
+	)
+	for _, capability := range capabilities {
+		cover := 0
+		for _, goalID := range capability.EvidenceGoalIDs {
+			if _, ok := requiredSet[goalID]; ok {
+				cover++
+			}
+		}
+		if cover == 0 {
+			continue
+		}
+		if capability.ID == "knowledge.docs.verify" {
+			preferred = capability
+			hasPrefer = true
+		}
+		if !found || cover > bestCover {
+			best = capability
+			bestCover = cover
+			found = true
+		}
+	}
+	if hasPrefer && subsetStringSet(required, preferred.EvidenceGoalIDs) {
+		return preferred, nil
+	}
+	if found && subsetStringSet(required, best.EvidenceGoalIDs) {
+		return best, nil
+	}
+	return taskGraphCapability{}, fmt.Errorf("no investigation capability covers required evidence goals for selected businesses")
 }
 
 func expandCapabilityCoverForGoals(

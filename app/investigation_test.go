@@ -55,6 +55,21 @@ func TestBuildInvestigationCoordinator(t *testing.T) {
 		t.Fatalf("coordinator max parallelism = %d, want %d", coordinator.MaxParallelism, settings.InvestigationMaxParallelism)
 	}
 
+	wantCompositionBudget := investigation.BudgetVector{
+		InputTokens: 30_000, OutputTokens: 12_800, TotalTokens: 51_200,
+		ToolCalls: 0, Duration: 0,
+	}
+	if coordinator.CompositionBudget != wantCompositionBudget {
+		t.Fatalf("composition budget = %+v, want %+v", coordinator.CompositionBudget, wantCompositionBudget)
+	}
+	composer, ok := coordinator.Composer.(investigation.AgentComposer)
+	if !ok {
+		t.Fatalf("coordinator composer = %T, want AgentComposer", coordinator.Composer)
+	}
+	if composer.Budget != wantCompositionBudget {
+		t.Fatalf("composer budget = %+v, want %+v", composer.Budget, wantCompositionBudget)
+	}
+
 	contract := investigation.InvestigationContract{
 		Version:       investigation.InvestigationContractVersion,
 		ID:            "code-entrypoint",
