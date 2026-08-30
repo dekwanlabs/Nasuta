@@ -14,24 +14,21 @@ import (
 
 // Deps bundles the services needed by the QA scenario.
 type Deps struct {
-	Tools             *ToolService
-	Cfg               config.Config
-	Platform          *config.PlatformSettings
-	CodeGraphDB       *codegraph.DB
-	History           SessionHistory
-	Sessions          *memory.SessionStore
-	Memory            *memory.MemoryStore
-	Definitions       DefinitionResolver
-	Agent             agentapi.DefinitionRef
-	Runtime           agentapi.ManagedRuntime
-	RuntimeTools      ScenarioToolSource
-	Models            *Models
-	PhaseEmitter      interface{ EmitPhase(string, string) }
-	Investigation     InvestigationRunner
-	ScenarioLifecycle ScenarioLifecycle
-	Coordinator       *Coordinator
-	ExecutionEvents   ExecutionEventEmitter
-	WriteAvailable    bool
+	Tools           *ToolService
+	Cfg             config.Config
+	Platform        *config.PlatformSettings
+	CodeGraphDB     *codegraph.DB
+	History         SessionHistory
+	Sessions        *memory.SessionStore
+	Memory          *memory.MemoryStore
+	Definitions     DefinitionResolver
+	Agent           agentapi.DefinitionRef
+	Runtime         agentapi.ManagedRuntime
+	RuntimeTools    ScenarioToolSource
+	Models          *Models
+	PhaseEmitter    interface{ EmitPhase(string, string) }
+	ExecutionEvents ExecutionEventEmitter
+	WriteAvailable  bool
 }
 
 type SelectionResolver interface {

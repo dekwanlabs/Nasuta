@@ -153,6 +153,8 @@ func (compiler PlanCompiler) CompileProposal(
 			AllowParallel:        task.AllowParallel,
 			MaxAttempts:          maxAttempts,
 			Entities:             proposalTaskEntities(contract, investigationGoalIDs),
+			EntityDetails:        proposalTaskEntityDetails(contract, investigationGoalIDs),
+			IdentityBindings:     proposalTaskIdentityBindings(contract, investigationGoalIDs),
 			InputRefs:            convertEvidenceRefs(task.InputRefs),
 			Dependencies:         uniqueStrings(dependencies[id]),
 			Budget:               budget,
@@ -266,6 +268,58 @@ func proposalTaskEntities(contract InvestigationContract, investigationGoalIDs [
 		}
 		seen[id] = struct{}{}
 		out = append(out, id)
+	}
+	return out
+}
+
+func proposalTaskEntityDetails(
+	contract InvestigationContract,
+	investigationGoalIDs []string,
+) []InvestigationEntity {
+	ids := proposalTaskEntities(contract, investigationGoalIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	byID := make(map[string]InvestigationEntity, len(contract.EntityDetails))
+	for _, detail := range contract.EntityDetails {
+		id := strings.TrimSpace(detail.ID)
+		if id == "" {
+			continue
+		}
+		byID[id] = detail
+	}
+	out := make([]InvestigationEntity, 0, len(ids))
+	for _, id := range ids {
+		if detail, ok := byID[id]; ok {
+			out = append(out, InvestigationEntity{
+				ID: detail.ID, Label: detail.Label, Role: detail.Role,
+				Aliases: append([]string(nil), detail.Aliases...),
+			})
+			continue
+		}
+		out = append(out, InvestigationEntity{ID: id, Label: id})
+	}
+	return out
+}
+
+func proposalTaskIdentityBindings(
+	contract InvestigationContract,
+	investigationGoalIDs []string,
+) []EntityIdentityBinding {
+	ids := proposalTaskEntities(contract, investigationGoalIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+	out := make([]EntityIdentityBinding, 0, len(ids))
+	for _, binding := range contract.IdentityBindings {
+		if _, ok := wanted[strings.TrimSpace(binding.EntityID)]; !ok {
+			continue
+		}
+		out = append(out, cloneEntityIdentityBindings([]EntityIdentityBinding{binding})[0])
 	}
 	return out
 }

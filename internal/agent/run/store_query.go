@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
@@ -109,77 +108,6 @@ func (rs *Store) GetControlForUser(id string, userID int64) (ControlRecord, erro
 	return record, err
 }
 
-// GetQAParent loads one parent without loading child steps or model calls.
-func (rs *Store) GetQAParent(id string) (QAParentRecord, error) {
-	return rs.getQAParent(id, nil)
-}
-
-// GetParentForUser enforces ownership at the parent read boundary.
-func (rs *Store) GetParentForUser(id string, userID int64) (QAParentRecord, error) {
-	return rs.getQAParent(id, &userID)
-}
-
-func (rs *Store) getQAParent(id string, userID *int64) (QAParentRecord, error) {
-	query := `SELECT id,workflow_run_id,user_id,session_id,question,status,started_at,ended_at
-		FROM agent_runs WHERE id=? AND run_kind=?`
-	args := []any{id, KindQAParent}
-	if userID != nil {
-		query += " AND user_id=?"
-		args = append(args, *userID)
-	}
-	return scanQAParent(rs.db.QueryRow(query, args...))
-}
-
-// ListActiveQAParents returns one bounded page ordered by a stable keyset.
-func (rs *Store) ListActiveQAParents(
-	startedBefore time.Time,
-	cursor QAParentCursor,
-	limit int,
-) ([]QAParentRecord, error) {
-	if startedBefore.IsZero() {
-		return nil, fmt.Errorf("list active QA parents: startup cutoff is required")
-	}
-	if limit <= 0 || limit > 200 {
-		return nil, fmt.Errorf("list active QA parents: limit must be between 1 and 200")
-	}
-	query := `SELECT id,workflow_run_id,user_id,session_id,question,status,started_at,ended_at
-		FROM agent_runs
-		WHERE run_kind=? AND status IN (?,?) AND started_at<?`
-	args := []any{
-		KindQAParent,
-		StatusRunning,
-		StatusPaused,
-		store.DatabaseTime(startedBefore.UTC().Format(time.RFC3339Nano)),
-	}
-	if cursor.StartedAt != "" || cursor.ID != "" {
-		if cursor.StartedAt == "" || cursor.ID == "" {
-			return nil, fmt.Errorf("list active QA parents: incomplete cursor")
-		}
-		query += ` AND (started_at>? OR (started_at=? AND id>?))`
-		startedAt := store.DatabaseTime(cursor.StartedAt)
-		args = append(args, startedAt, startedAt, cursor.ID)
-	}
-	query += ` ORDER BY started_at,id LIMIT ?`
-	args = append(args, limit)
-	rows, err := rs.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	parents := make([]QAParentRecord, 0, limit)
-	for rows.Next() {
-		parent, err := scanQAParent(rows)
-		if err != nil {
-			return nil, err
-		}
-		parents = append(parents, parent)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return parents, nil
-}
-
 // GetForUser loads one run only when it belongs to the requested user.
 func (rs *Store) GetForUser(id string, userID int64) (*Detail, error) {
 	return rs.get(id, &userID)
@@ -204,18 +132,6 @@ func (rs *Store) get(id string, userID *int64) (*Detail, error) {
 	if err != nil {
 		return nil, err
 	}
-	if r.RunKind == KindQAParent {
-		detail := &Detail{Record: r}
-		if r.Status.Terminal() {
-			terminal, err := loadQAParentTerminal(rs.db, id)
-			if err != nil {
-				return nil, fmt.Errorf("load QA parent %q terminal result: %w", id, err)
-			}
-			detail.Terminal = &terminal
-		}
-		return detail, nil
-	}
-
 	rows, err := rs.db.Query(
 		`SELECT s.id,s.run_id,s.step_no,s.kind,s.trace_id,s.artifact_id,s.tool_call_id,s.tool,s.args,
 			s.content,s.prompt_content,s.authoritative_sha256,s.prompt_sha256,s.content_bytes,
@@ -360,24 +276,4 @@ func scanRecord(row rowScanner) (Record, error) {
 	record.StartedAt = store.FormatDatabaseTime(startedAt)
 	record.EndedAt = store.FormatDatabaseTime(endedAt)
 	return record, nil
-}
-
-func scanQAParent(row rowScanner) (QAParentRecord, error) {
-	var parent QAParentRecord
-	var startedAt, endedAt sql.NullTime
-	if err := row.Scan(
-		&parent.ID,
-		&parent.WorkflowRunID,
-		&parent.UserID,
-		&parent.SessionID,
-		&parent.Question,
-		&parent.Status,
-		&startedAt,
-		&endedAt,
-	); err != nil {
-		return parent, err
-	}
-	parent.StartedAt = store.FormatDatabaseTime(startedAt)
-	parent.EndedAt = store.FormatDatabaseTime(endedAt)
-	return parent, nil
 }

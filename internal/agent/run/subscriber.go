@@ -178,12 +178,9 @@ func isBestEffortEvent(event EventType) bool {
 	case EventAnswerDelta, EventReasoningDelta, EventTrace, EventStatus, EventLLMCall,
 		EventExecutionRouted, EventExecutionDegraded, EventWorkflowStarted,
 		EventAgentStarted, EventAgentCompleted, EventEvidenceJoined,
-		EventDelegationCreated, EventDelegationStarted, EventDelegationDone,
-		EventDelegationFailed, EventDelegationCancelled, EventDelegationRejected,
+		EventDelegationCreated, EventDelegationStarted,
 		EventDelegationValidated,
-		EventDelegationVerificationStarted, EventDelegationVerificationDone,
-		EventDelegationVerificationFailed, EventDelegationVerificationRejected,
-		EventDelegationAdoptionEvaluated:
+		EventDelegationVerificationStarted:
 		return true
 	default:
 		return false

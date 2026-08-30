@@ -13,6 +13,8 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -539,10 +541,7 @@ func (coordinator *Coordinator) Resume(
 			},
 		}
 		executionResults, scheduleErr = scheduler.Execute(deadlineCtx, tasks, func(task ExecutableTask, upstream map[string]json.RawMessage) TaskExecutionInput {
-			return TaskExecutionInput{
-				Task: task, Evidence: evidence.All(), Claims: claims.All(), Upstream: upstream,
-				WorkflowRunID: runID, ParentRunID: run.Contract.ParentRunID, Actor: run.Contract.Actor,
-			}
+			return newTaskExecutionInput(runID, run.Contract, task, evidence.All(), claims.All(), upstream)
 		})
 		if requiredFailure != nil && !budgetFailureCanDeliverForPlan(tasks, evidence, claims, requiredFailure) {
 			report := BuildReport(evidence, claims, failures)
@@ -650,6 +649,7 @@ func (coordinator *Coordinator) Resume(
 		})
 	}
 	delivery := coordinator.Delivery.Deliver(deliveryContext, run.Contract, report, composer)
+	logInvestigationDelivery(runID, report, delivery)
 	if err := deadlineCtx.Err(); err != nil {
 		releaseComposition()
 		return persistResumeFailure(store, runID, ledger, runFailureFromContext(deadlineCtx, err), runFailureStatus(deadlineCtx, err))
@@ -1235,10 +1235,7 @@ func (coordinator *Coordinator) execute(
 		executionCtx, cancelRound := context.WithCancel(deadlineCtx)
 		stopRound = cancelRound
 		executionResults, scheduleErr := scheduler.Execute(executionCtx, plan.Tasks, func(task ExecutableTask, upstream map[string]json.RawMessage) TaskExecutionInput {
-			return TaskExecutionInput{
-				Task: task, Evidence: evidence.All(), Claims: claims.All(), Upstream: upstream,
-				WorkflowRunID: runID, ParentRunID: contract.ParentRunID, Actor: contract.Actor,
-			}
+			return newTaskExecutionInput(runID, contract, task, evidence.All(), claims.All(), upstream)
 		})
 		cancelRound()
 		stopRound = nil
@@ -1386,6 +1383,7 @@ func (coordinator *Coordinator) execute(
 		})
 	}
 	delivery := coordinator.Delivery.Deliver(deliveryContext, contract, report, composer)
+	logInvestigationDelivery(runID, report, delivery)
 	if err := deadlineCtx.Err(); err != nil {
 		_ = compositionReservation.Release()
 		return fail(runFailureFromContext(deadlineCtx, err), runFailureStatus(deadlineCtx, err))
@@ -2117,8 +2115,16 @@ func (coordinator *Coordinator) admitTaskResult(
 	if scheduled.Status != TaskSucceeded && scheduled.Status != TaskPartial {
 		return record, nil
 	}
+	if scheduled.Task.Executor == ExecutorVerifier {
+		log.Infof("[investigation] verifier admit input task=%s status=%s claim_candidates=%d evidence_candidates=%d output_len=%d",
+			scheduled.Task.ID, scheduled.Status, len(scheduled.Result.Claims), len(scheduled.Result.EvidenceCandidates), len(scheduled.Result.Output),
+		)
+	}
 	if scheduled.Status == TaskSucceeded && !isEvidenceWorkerTask(scheduled.Task) {
 		if failure := validateTaskOutput(coordinator.Schemas, scheduled.Task, scheduled.Result.Output); failure != nil {
+			log.Warnf("[investigation] task output schema rejected task=%s executor=%s message=%s output=%s",
+				scheduled.Task.ID, scheduled.Task.Executor, failure.Message, platform.TruncateForLog(string(scheduled.Result.Output), 2000),
+			)
 			return reject(failureForTask(scheduled.Task.ID, *failure))
 		}
 	}
@@ -2129,6 +2135,9 @@ func (coordinator *Coordinator) admitTaskResult(
 			if errors.Is(err, ErrOpaqueEvidence) {
 				continue
 			}
+			log.Warnf("[investigation] evidence admit failed task=%s kind=%s target=%s err=%v",
+				scheduled.Task.ID, candidate.SourceKind, candidate.Target, err,
+			)
 			return reject(failureForTask(scheduled.Task.ID, RunFailure{
 				Code: FailureSchema, Message: err.Error(), Stage: string(StageVerification), Retryable: false,
 			}))
@@ -2144,11 +2153,24 @@ func (coordinator *Coordinator) admitTaskResult(
 			}))
 		}
 		if _, _, err := claims.Admit(scheduled.Task.ID, candidate); err != nil {
+			log.Warnf("[investigation] claim admit failed task=%s goal=%s status=%s entities=%v evidence_refs=%d err=%v text=%s",
+				scheduled.Task.ID, candidate.GoalID, candidate.Status, candidate.EntityIDs, len(candidate.EvidenceRefs), err,
+				platform.TruncateForLog(candidate.Text, 240),
+			)
 			return reject(failureForTask(scheduled.Task.ID, RunFailure{
 				Code: FailureVerifier, Message: err.Error(), Stage: string(StageVerification), Retryable: false,
 			}))
 		}
+		log.Infof("[investigation] claim admitted task=%s goal=%s status=%s entities=%v evidence_refs=%d text=%s",
+			scheduled.Task.ID, candidate.GoalID, candidate.Status, candidate.EntityIDs, len(candidate.EvidenceRefs),
+			platform.TruncateForLog(candidate.Text, 240),
+		)
 		admittedClaims = true
+	}
+	if scheduled.Task.Executor == ExecutorVerifier {
+		log.Infof("[investigation] verifier admit result task=%s admitted_claims=%t claim_candidates=%d",
+			scheduled.Task.ID, admittedClaims, len(scheduled.Result.Claims),
+		)
 	}
 	if scheduled.Status == TaskPartial && !hasAdmittedArtifact(scheduled.Task, scheduled.Result.Output, admittedEvidence, admittedClaims) {
 		return reject(failureForTask(scheduled.Task.ID, RunFailure{
@@ -2161,6 +2183,52 @@ func (coordinator *Coordinator) admitTaskResult(
 		}))
 	}
 	return record, nil
+}
+
+func logInvestigationDelivery(runID string, report InvestigationReport, delivery DeliveryResult) {
+	in := claimStatusCounts(report.Claims)
+	out := claimStatusCounts(delivery.Report.Claims)
+	failure := ""
+	if delivery.Failure != nil {
+		failure = fmt.Sprintf("%s:%s", delivery.Failure.Code, delivery.Failure.Message)
+	}
+	log.Infof("[investigation] delivery run=%s status=%s in_claims=%d in_supported=%d in_partial=%d in_rejected=%d in_other=%d out_claims=%d out_supported=%d out_partial=%d out_rejected=%d out_other=%d evidence=%d gaps=%d coverage=%d failure=%q text_len=%d",
+		runID, delivery.Status,
+		len(report.Claims), in.supported, in.partial, in.rejected, in.other,
+		len(delivery.Report.Claims), out.supported, out.partial, out.rejected, out.other,
+		len(delivery.Report.Evidence), len(delivery.Report.Gaps), len(delivery.Report.Coverage),
+		failure, len(delivery.Text),
+	)
+	for index, claim := range report.Claims {
+		log.Infof("[investigation] delivery inbound claim run=%s index=%d id=%s status=%s goal=%s entities=%v evidence_refs=%d readable=%t text=%s",
+			runID, index, claim.ID, claim.Status, claim.GoalID, claim.EntityIDs, len(claim.EvidenceRefs),
+			isUserReadableClaimText(claim.Text), platform.TruncateForLog(claim.Text, 240),
+		)
+	}
+}
+
+type claimStatusTally struct {
+	supported int
+	partial   int
+	rejected  int
+	other     int
+}
+
+func claimStatusCounts(claims []VerifiedClaim) claimStatusTally {
+	var tally claimStatusTally
+	for _, claim := range claims {
+		switch claim.Status {
+		case ClaimSupported:
+			tally.supported++
+		case ClaimPartial, ClaimConflicting:
+			tally.partial++
+		case ClaimRejected:
+			tally.rejected++
+		default:
+			tally.other++
+		}
+	}
+	return tally
 }
 
 func hasAdmittedArtifact(task ExecutableTask, output json.RawMessage, evidence, claims bool) bool {

@@ -6,6 +6,27 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
+func TestHandleIsSixteenCharacterCitationToken(t *testing.T) {
+	first := Key{
+		SourceKind: "code", Target: "service-a", Section: "L10-L20",
+	}.Handle()
+	again := Key{
+		SourceKind: "code", Target: "service-a", Section: "L10-L20",
+	}.Handle()
+	other := Key{
+		SourceKind: "code", Target: "service-b", Section: "L10-L20",
+	}.Handle()
+	if len(first) != HandleLength || !ValidHandle(first) {
+		t.Fatalf("handle = %q (len %d), want %d-char ev_ token", first, len(first), HandleLength)
+	}
+	if first != again {
+		t.Fatalf("handle is not stable: %q vs %q", first, again)
+	}
+	if first == other {
+		t.Fatal("distinct identities must not share a handle")
+	}
+}
+
 func TestLedgerExpandsAndPrefersCompleteCoverage(t *testing.T) {
 	ledger := New([]tool.EvidenceUnit{{
 		SourceKind: "runbook", Target: "doc-a", Sections: []string{"overview", "failure"},

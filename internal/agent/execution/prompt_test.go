@@ -363,6 +363,7 @@ func TestAgentToolPromptDoesNotRepeatCoreRoleOrEvidenceRules(t *testing.T) {
 		"Name runtime result states precisely",
 		"Resolve client-facing entries across tool boundaries",
 		"Prefer structured runtime scope",
+		"Stay on the parent loop until a subject is isolated",
 	} {
 		if !strings.Contains(agentToolPrompt, must) {
 			t.Errorf("agentToolPrompt missing tool policy %q", must)

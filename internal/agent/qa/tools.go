@@ -31,24 +31,6 @@ func routingCandidates(tools []tool.Tool) []retrieval.ToolRouteCandidate {
 	return candidates
 }
 
-func toolsNeedInvestigation(candidates []retrieval.ToolRouteCandidate, selected []string) bool {
-	if len(selected) == 0 {
-		return false
-	}
-	temporal := make(map[string]struct{}, len(candidates))
-	for _, candidate := range candidates {
-		if candidate.Temporal {
-			temporal[candidate.ID] = struct{}{}
-		}
-	}
-	for _, id := range selected {
-		if _, ok := temporal[id]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 func scenarioToolIDs(tools []tool.Tool) []string {
 	ids := make([]string, 0, len(tools))
 	for _, candidate := range tools {
@@ -112,10 +94,19 @@ func withoutHistoryTools(prepared ScenarioToolSet) ScenarioToolSet {
 	return filtered
 }
 
-func preferenceInstruction(ids []string) string {
+func preferenceInstruction(ids []string, delegationActive bool) string {
 	return prompts.MustRender(prompts.AgentPreferredTool, struct {
-		ToolIDs string
-	}{ToolIDs: strings.Join(ids, ", ")})
+		ToolIDs          string
+		DelegationActive bool
+	}{ToolIDs: strings.Join(ids, ", "), DelegationActive: delegationActive})
+}
+
+func parentDelegationInstruction(prepared *preparation) string {
+	if prepared == nil ||
+		!scenarioToolsContain(prepared.candidateToolSet, "delegate_investigation") {
+		return ""
+	}
+	return prompts.Text(prompts.AgentQAParentDelegation)
 }
 
 func (svc *Service) executePrefetch(

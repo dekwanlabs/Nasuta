@@ -279,6 +279,8 @@ func (compiler PlanCompiler) compile(
 			Capability:           candidate.Capability,
 			EvidenceGoals:        cloneEvidenceGoals(candidate.EvidenceGoals),
 			Entities:             append([]string(nil), candidate.Entities...),
+			EntityDetails:        cloneInvestigationEntities(candidate.EntityDetails),
+			IdentityBindings:     cloneEntityIdentityBindings(candidate.IdentityBindings),
 			AllowedTools:         allowedTools,
 			InputRefs:            append([]EvidenceRef(nil), candidate.InputRefs...),
 			Dependencies:         uniqueStrings(candidate.Dependencies),
@@ -590,6 +592,32 @@ func cloneEvidenceGoals(goals []EvidenceGoal) []EvidenceGoal {
 	for index, goal := range goals {
 		out[index] = goal
 		out[index].Facets = append([]string(nil), goal.Facets...)
+	}
+	return out
+}
+
+func cloneInvestigationEntities(entities []InvestigationEntity) []InvestigationEntity {
+	if len(entities) == 0 {
+		return nil
+	}
+	out := make([]InvestigationEntity, len(entities))
+	for index, entity := range entities {
+		out[index] = entity
+		out[index].Aliases = append([]string(nil), entity.Aliases...)
+	}
+	return out
+}
+
+func cloneEntityIdentityBindings(bindings []EntityIdentityBinding) []EntityIdentityBinding {
+	if len(bindings) == 0 {
+		return nil
+	}
+	out := make([]EntityIdentityBinding, len(bindings))
+	for index, binding := range bindings {
+		out[index] = binding
+		out[index].Services = append([]ServiceRef(nil), binding.Services...)
+		out[index].Repositories = append([]RepositoryRef(nil), binding.Repositories...)
+		out[index].Documents = append([]DocumentRef(nil), binding.Documents...)
 	}
 	return out
 }

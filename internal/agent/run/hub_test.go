@@ -76,10 +76,10 @@ func TestHub_BroadcastDeliversToSubscriber(t *testing.T) {
 
 func TestHubProjectsChildToolLifecycleToParentRun(t *testing.T) {
 	hub := NewHub(nil)
-	parent := hub.Subscribe("qa_parent")
+	parent := hub.Subscribe("parent_run")
 	stop := hub.ProjectToolEvents(
 		"agent_child",
-		"qa_parent",
+		"parent_run",
 		"workflow_1",
 		"inspect.runtime",
 	)
@@ -427,6 +427,35 @@ func TestRunSubscriberQueueIsBoundedAndPreservesTerminal(t *testing.T) {
 	}
 	if sub.queue[len(sub.queue)-1].Type != EventRunFinished {
 		t.Fatalf("last event = %s, want %s", sub.queue[len(sub.queue)-1].Type, EventRunFinished)
+	}
+}
+
+func TestRunSubscriberQueuePreservesDelegationTerminalProjection(t *testing.T) {
+	sub := &subscriber{
+		wake: make(chan struct{}, 1),
+		stop: make(chan struct{}),
+	}
+	defer sub.close()
+
+	for index := 0; index < subscriberDiagnosticLimit; index++ {
+		if !sub.enqueue(SSEEvent{Type: EventTrace}) {
+			t.Fatalf("trace event %d was rejected before the queue reached its limit", index)
+		}
+	}
+	if !sub.enqueue(SSEEvent{Type: EventDelegationVerificationFailed, Data: ExecutionEvent{
+		RunID: "bounded", Status: "failed",
+	}}) {
+		t.Fatal("verification terminal projection was rejected by a full queue")
+	}
+
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	if len(sub.queue) != subscriberDiagnosticLimit {
+		t.Fatalf("queue length = %d, want %d", len(sub.queue), subscriberDiagnosticLimit)
+	}
+	if sub.queue[len(sub.queue)-1].Type != EventDelegationVerificationFailed {
+		t.Fatalf("last event = %s, want %s",
+			sub.queue[len(sub.queue)-1].Type, EventDelegationVerificationFailed)
 	}
 }
 

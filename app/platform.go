@@ -80,24 +80,23 @@ type workflowRuntime struct {
 
 // Platform owns reusable runtime state and exposes only stable composition ports.
 type Platform struct {
-	cfg                           config.Config
-	settings                      *config.PlatformSettings
-	db                            *sql.DB
-	index                         *indexing.Service
-	tools                         *agent.Service
-	registry                      *tool.Registry
-	reads                         *tool.ReadRegistry
-	graph                         *codegraph.DB
-	calls                         *callchain.Service
-	ontology                      ontology.Backend
-	history                       *sessionhistory.Service
-	auth                          authRuntime
-	incident                      incidentRuntime
-	agents                        agentRuntime
-	qa                            qaState
-	flow                          workflowRuntime
-	delivery                      featureDeliveryRuntime
-	investigationTemplateProvider InvestigationTemplateProvider
+	cfg      config.Config
+	settings *config.PlatformSettings
+	db       *sql.DB
+	index    *indexing.Service
+	tools    *agent.Service
+	registry *tool.Registry
+	reads    *tool.ReadRegistry
+	graph    *codegraph.DB
+	calls    *callchain.Service
+	ontology ontology.Backend
+	history  *sessionhistory.Service
+	auth     authRuntime
+	incident incidentRuntime
+	agents   agentRuntime
+	qa       qaState
+	flow     workflowRuntime
+	delivery featureDeliveryRuntime
 }
 
 // New constructs the reusable platform without registering scenario routes.

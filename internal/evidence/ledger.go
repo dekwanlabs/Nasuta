@@ -3,8 +3,19 @@ package evidence
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 
 	"github.com/dekwanlabs/nasuta/tool"
+)
+
+const (
+	// HandlePrefix is the stable citation namespace for ledger evidence.
+	HandlePrefix = "ev_"
+	// HandleLength is the full citation token length, including the prefix.
+	// Verifier and synthesizer prompts repeat these tokens, so a 64-char
+	// SHA-256 hex digest wastes prompt budget.
+	HandleLength    = 16
+	handleHexLength = HandleLength - len(HandlePrefix)
 )
 
 // Key is the canonical identity of one independently coverable evidence unit.
@@ -24,7 +35,24 @@ func (key Key) String() string {
 // Handle is the stable citation token for one canonical evidence identity.
 func (key Key) Handle() string {
 	digest := sha256.Sum256([]byte("evidence-handle-v1\x00" + key.String()))
-	return "ev_" + hex.EncodeToString(digest[:])
+	encoded := hex.EncodeToString(digest[:])
+	if handleHexLength < len(encoded) {
+		encoded = encoded[:handleHexLength]
+	}
+	return HandlePrefix + encoded
+}
+
+// ValidHandle reports whether value is a generated evidence citation token.
+func ValidHandle(value string) bool {
+	if len(value) != HandleLength || !strings.HasPrefix(value, HandlePrefix) {
+		return false
+	}
+	for _, char := range value[len(HandlePrefix):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // UnitHandle returns the stable citation token for one single-section unit.

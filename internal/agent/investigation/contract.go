@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -156,6 +157,28 @@ type InvestigationEntity struct {
 	Aliases []string `json:"aliases,omitempty"`
 }
 
+type EntityIdentityBinding struct {
+	EntityID     string          `json:"entity_id"`
+	Services     []ServiceRef    `json:"services,omitempty"`
+	Repositories []RepositoryRef `json:"repositories,omitempty"`
+	Documents    []DocumentRef   `json:"documents,omitempty"`
+}
+
+type ServiceRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+type RepositoryRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+type DocumentRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
 type InvestigationConversationRef struct {
 	SessionID string `json:"session_id,omitempty"`
 	RunID     string `json:"run_id,omitempty"`
@@ -177,29 +200,35 @@ type InvestigationContext struct {
 const InvestigationContractVersion int64 = 1
 
 type InvestigationContract struct {
-	ID                    string                `json:"id"`
-	Version               int64                 `json:"version"`
-	ParentRunID           string                `json:"parent_run_id,omitempty"`
-	TaskID                string                `json:"task_id,omitempty"`
-	Round                 int                   `json:"round,omitempty"`
-	BaseDepth             int                   `json:"base_depth,omitempty"`
-	Actor                 agentapi.Actor        `json:"actor,omitempty"`
-	Entities              []string              `json:"entities,omitempty"`
-	EntityDetails         []InvestigationEntity `json:"entity_details,omitempty"`
-	Context               InvestigationContext  `json:"context,omitempty"`
-	Question              string                `json:"question"`
-	InvestigationGoals    []InvestigationGoal   `json:"investigation_goals,omitempty"`
-	EvidenceGoals         []EvidenceGoal        `json:"evidence_goals,omitempty"`
-	SelectCount           int                   `json:"select_count,omitempty"`
-	DiscoveryPhase        bool                  `json:"discovery_phase,omitempty"`
-	DeferredEvidenceGoals []EvidenceGoal        `json:"deferred_evidence_goals,omitempty"`
-	AllowedToolIDs        []tool.ToolID         `json:"allowed_tool_ids,omitempty"`
-	PrincipalToolIDs      []tool.ToolID         `json:"principal_tool_ids,omitempty"`
-	WorkspaceToolIDs      []tool.ToolID         `json:"workspace_tool_ids,omitempty"`
-	MaxRounds             int                   `json:"max_rounds,omitempty"`
-	MaxTasks              int                   `json:"max_tasks,omitempty"`
-	BudgetProfile         string                `json:"budget_profile,omitempty"`
-	CreatedAt             time.Time             `json:"created_at"`
+	ID                    string                  `json:"id"`
+	Version               int64                   `json:"version"`
+	ParentRunID           string                  `json:"parent_run_id,omitempty"`
+	TaskID                string                  `json:"task_id,omitempty"`
+	Round                 int                     `json:"round,omitempty"`
+	BaseDepth             int                     `json:"base_depth,omitempty"`
+	Actor                 agentapi.Actor          `json:"actor,omitempty"`
+	Entities              []string                `json:"entities,omitempty"`
+	EntityDetails         []InvestigationEntity   `json:"entity_details,omitempty"`
+	IdentityBindings      []EntityIdentityBinding `json:"identity_bindings,omitempty"`
+	Context               InvestigationContext    `json:"context,omitempty"`
+	Question              string                  `json:"question"`
+	InvestigationGoals    []InvestigationGoal     `json:"investigation_goals,omitempty"`
+	EvidenceGoals         []EvidenceGoal          `json:"evidence_goals,omitempty"`
+	SelectCount           int                     `json:"select_count,omitempty"`
+	DiscoveryPhase        bool                    `json:"discovery_phase,omitempty"`
+	DeferredEvidenceGoals []EvidenceGoal          `json:"deferred_evidence_goals,omitempty"`
+	// OriginalObjective and FocusEvidenceGoalIDs are durable control-plane
+	// state. They are intentionally excluded from the investigator-facing task
+	// contract but must survive restart and continuation reconciliation.
+	OriginalObjective    string        `json:"original_objective,omitempty"`
+	FocusEvidenceGoalIDs []string      `json:"focus_evidence_goal_ids,omitempty"`
+	AllowedToolIDs       []tool.ToolID `json:"allowed_tool_ids,omitempty"`
+	PrincipalToolIDs     []tool.ToolID `json:"principal_tool_ids,omitempty"`
+	WorkspaceToolIDs     []tool.ToolID `json:"workspace_tool_ids,omitempty"`
+	MaxRounds            int           `json:"max_rounds,omitempty"`
+	MaxTasks             int           `json:"max_tasks,omitempty"`
+	BudgetProfile        string        `json:"budget_profile,omitempty"`
+	CreatedAt            time.Time     `json:"created_at"`
 	// SeedEvidence carries identity-only evidence already admitted by the
 	// caller. It is not normalized as text and must not be duplicated.
 	SeedEvidence []EvidenceUnit `json:"seed_evidence,omitempty"`
@@ -247,16 +276,18 @@ type TaskCandidate struct {
 	InvestigationGoalIDs []string        `json:"investigation_goal_ids,omitempty"`
 	EvidenceGoalIDs      []string        `json:"evidence_goal_ids"`
 	// Capability preserves the validated planner capability through compilation.
-	Capability    string         `json:"capability,omitempty"`
-	EvidenceGoals []EvidenceGoal `json:"evidence_goals,omitempty"`
-	Optional      bool           `json:"optional,omitempty"`
-	AllowParallel bool           `json:"allow_parallel,omitempty"`
-	MaxAttempts   int            `json:"max_attempts,omitempty"`
-	Entities      []string       `json:"entities,omitempty"`
-	AllowedTools  []tool.ToolID  `json:"allowed_tools,omitempty"`
-	InputRefs     []EvidenceRef  `json:"input_refs,omitempty"`
-	Dependencies  []string       `json:"dependencies,omitempty"`
-	Budget        BudgetVector   `json:"budget"`
+	Capability       string                  `json:"capability,omitempty"`
+	EvidenceGoals    []EvidenceGoal          `json:"evidence_goals,omitempty"`
+	Optional         bool                    `json:"optional,omitempty"`
+	AllowParallel    bool                    `json:"allow_parallel,omitempty"`
+	MaxAttempts      int                     `json:"max_attempts,omitempty"`
+	Entities         []string                `json:"entities,omitempty"`
+	EntityDetails    []InvestigationEntity   `json:"entity_details,omitempty"`
+	IdentityBindings []EntityIdentityBinding `json:"identity_bindings,omitempty"`
+	AllowedTools     []tool.ToolID           `json:"allowed_tools,omitempty"`
+	InputRefs        []EvidenceRef           `json:"input_refs,omitempty"`
+	Dependencies     []string                `json:"dependencies,omitempty"`
+	Budget           BudgetVector            `json:"budget"`
 }
 
 type TaskBudget struct {
@@ -271,20 +302,22 @@ type ExecutableTask struct {
 	InvestigationGoalIDs []string        `json:"investigation_goal_ids,omitempty"`
 	EvidenceGoalIDs      []string        `json:"evidence_goal_ids"`
 	// Capability is retained for runtime routing and audit of proposal tasks.
-	Capability    string             `json:"capability,omitempty"`
-	EvidenceGoals []EvidenceGoal     `json:"evidence_goals,omitempty"`
-	Entities      []string           `json:"entities,omitempty"`
-	AllowedTools  []tool.ToolID      `json:"allowed_tools,omitempty"`
-	InputRefs     []EvidenceRef      `json:"input_refs,omitempty"`
-	Dependencies  []string           `json:"dependencies,omitempty"`
-	Budget        TaskBudget         `json:"budget"`
-	InputSchema   agentapi.SchemaRef `json:"input_schema"`
-	OutputSchema  agentapi.SchemaRef `json:"output_schema"`
-	Executor      ExecutorType       `json:"executor"`
-	ToolCalls     []ToolCallSpec     `json:"tool_calls,omitempty"`
-	Optional      bool               `json:"optional,omitempty"`
-	AllowParallel bool               `json:"allow_parallel,omitempty"`
-	Status        TaskStatus         `json:"status"`
+	Capability       string                  `json:"capability,omitempty"`
+	EvidenceGoals    []EvidenceGoal          `json:"evidence_goals,omitempty"`
+	Entities         []string                `json:"entities,omitempty"`
+	EntityDetails    []InvestigationEntity   `json:"entity_details,omitempty"`
+	IdentityBindings []EntityIdentityBinding `json:"identity_bindings,omitempty"`
+	AllowedTools     []tool.ToolID           `json:"allowed_tools,omitempty"`
+	InputRefs        []EvidenceRef           `json:"input_refs,omitempty"`
+	Dependencies     []string                `json:"dependencies,omitempty"`
+	Budget           TaskBudget              `json:"budget"`
+	InputSchema      agentapi.SchemaRef      `json:"input_schema"`
+	OutputSchema     agentapi.SchemaRef      `json:"output_schema"`
+	Executor         ExecutorType            `json:"executor"`
+	ToolCalls        []ToolCallSpec          `json:"tool_calls,omitempty"`
+	Optional         bool                    `json:"optional,omitempty"`
+	AllowParallel    bool                    `json:"allow_parallel,omitempty"`
+	Status           TaskStatus              `json:"status"`
 }
 
 // PlanExecutionPolicy freezes planner-provided limits after the server has
@@ -346,9 +379,13 @@ type EvidenceRef struct {
 }
 
 type ClaimCandidate struct {
-	GoalID       string        `json:"goal_id"`
-	Text         string        `json:"text"`
-	Status       ClaimStatus   `json:"status"`
+	GoalID string      `json:"goal_id"`
+	Text   string      `json:"text"`
+	Status ClaimStatus `json:"status"`
+	// EntityIDs is an explicit server-owned binding. Claims without this field
+	// remain unscoped and must not be attributed to a discovered subject by
+	// counting evidence or matching free-form text.
+	EntityIDs    []string      `json:"entity_ids,omitempty"`
 	EvidenceRefs []EvidenceRef `json:"evidence_refs"`
 	Confidence   float64       `json:"confidence,omitempty"`
 	ConflictRefs []EvidenceRef `json:"conflict_refs,omitempty"`
@@ -359,6 +396,7 @@ type VerifiedClaim struct {
 	GoalID         string        `json:"goal_id"`
 	Text           string        `json:"text"`
 	Status         ClaimStatus   `json:"status"`
+	EntityIDs      []string      `json:"entity_ids,omitempty"`
 	EvidenceRefs   []EvidenceRef `json:"evidence_refs"`
 	Confidence     float64       `json:"confidence,omitempty"`
 	ConflictRefs   []EvidenceRef `json:"conflict_refs,omitempty"`
@@ -456,6 +494,25 @@ type TaskExecutionInput struct {
 	ParentRunID   string         `json:"-"`
 	Actor         agentapi.Actor `json:"-"`
 	Attempt       int            `json:"-"`
+	// SeedMaterial is the shared pre-retrieved evidence body already assembled
+	// at the QA boundary. Investigators receive the same prose single-agent
+	// sees; it is omitted from scheduler schema validation.
+	SeedMaterial []agentapi.ContextBlock `json:"-"`
+}
+
+func newTaskExecutionInput(
+	runID string,
+	contract InvestigationContract,
+	task ExecutableTask,
+	evidence []EvidenceUnit,
+	claims []VerifiedClaim,
+	upstream map[string]json.RawMessage,
+) TaskExecutionInput {
+	return TaskExecutionInput{
+		Task: task, Evidence: evidence, Claims: claims, Upstream: upstream,
+		WorkflowRunID: runID, ParentRunID: contract.ParentRunID, Actor: contract.Actor,
+		SeedMaterial: append([]agentapi.ContextBlock(nil), contract.Context.SeedMaterial...),
+	}
 }
 
 type TaskExecutionResult struct {
@@ -571,6 +628,24 @@ func claimID(candidate ClaimCandidate) string {
 	_, _ = hash.Write([]byte(candidate.GoalID))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(candidate.Text))
+	entityIDs := make([]string, 0, len(candidate.EntityIDs))
+	seen := make(map[string]struct{}, len(candidate.EntityIDs))
+	for _, entityID := range candidate.EntityIDs {
+		entityID = strings.TrimSpace(entityID)
+		if entityID == "" {
+			continue
+		}
+		if _, exists := seen[entityID]; exists {
+			continue
+		}
+		seen[entityID] = struct{}{}
+		entityIDs = append(entityIDs, entityID)
+	}
+	sort.Strings(entityIDs)
+	for _, entityID := range entityIDs {
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(entityID))
+	}
 	return shortHandle("claim", hash.Sum(nil))
 }
 

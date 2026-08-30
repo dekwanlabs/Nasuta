@@ -30,9 +30,7 @@ type preparation struct {
 	planning           evidencePlanningOutput
 	analysis           queryAnalysisOutput
 	execution          executionRouteDecision
-	taskGraphProposal  *agentapi.TaskGraphProposal
 	historyCandidates  *HistoryCandidates
-	conversationRefs   []ConversationRef
 	runLimits          agentapi.RunLimits
 }
 
@@ -195,38 +193,7 @@ func (svc *Service) prepareConversation(
 	}
 	svc.emitStatus(request.RunID, "上下文整理完成，正在准备检索", "prepare.routing", historyStarted)
 	prepared.request.Conversation = assembled.Conversation
-	prepared.conversationRefs = conversationReferences(
-		request.ParentRunID,
-		assembled.Conversation.SessionID,
-		assembled.Stats.SelectedTurnNumbers,
-		request.Conversation.RecentTurns,
-	)
 	return nil
-}
-
-func conversationReferences(
-	parentRunID,
-	sessionID string,
-	selectedTurns []int,
-	turns []memory.TurnMetadata,
-) []ConversationRef {
-	refs := make([]ConversationRef, 0, len(selectedTurns)+1)
-	if parentRunID != "" || sessionID != "" {
-		refs = append(refs, ConversationRef{SessionID: sessionID, RunID: parentRunID})
-	}
-	if len(selectedTurns) == 0 {
-		return refs
-	}
-	byTurn := make(map[int]string, len(turns))
-	for _, turn := range turns {
-		byTurn[turn.TurnNumber] = turn.RunID
-	}
-	for _, turn := range selectedTurns {
-		refs = append(refs, ConversationRef{
-			SessionID: sessionID, RunID: byTurn[turn], Turn: turn,
-		})
-	}
-	return refs
 }
 
 func (svc *Service) applyTimeConstraint(prepared *preparation) {
@@ -284,37 +251,17 @@ func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) 
 	runCtx := run.Context(prepared.ctx)
 
 	conversation := svc.prepareRunConversation(prepared)
-	planning := prepared.planning
-	log.InfofCtx(runCtx, "[qa] evidence plan proposed=%s proposed_sources=%v confidence=%.2f origin=%s effective=%s effective_sources=%v effective_confidence=%.2f effective_origin=%s",
-		planning.Decision.Plan.String(), planning.Decision.Plan.SourceNames(), planning.Decision.Confidence, planning.Decision.Origin,
-		planning.Effective.Plan.String(), planning.Effective.Plan.SourceNames(), planning.Effective.Confidence, planning.Effective.Origin,
-	)
-	evidencePlan := planning.Effective.Plan
-	webUnavailable := evidencePlan.Has(domain.Web) && !svc.cfg.WebSearchEnabled
-	if webUnavailable {
-		log.WarnfCtx(runCtx, "[qa] retrieval source unavailable: web")
-	}
 	stepRecorder, _ := run.(preparationStepRecorder)
-	evidence, err := svc.prepareEvidence(
-		runCtx, prepared, evidencePlan, webUnavailable, stepRecorder,
-	)
+	admitted, err := svc.acquireEvidence(runCtx, prepared, stepRecorder, run)
 	if err != nil {
 		prepared.failPreparation(runCtx, run, err)
 		return nil, err
 	}
-	if err := recordEvidenceLedger(
-		runCtx,
-		run,
-		contextBlockEvidence(contextBlocks(evidence.retrieved)),
-	); err != nil {
-		prepared.failPreparation(runCtx, run, err)
-		return nil, fmt.Errorf("persist QA evidence ledger: %w", err)
-	}
 	conversation = svc.answerContext(
-		runCtx, conversation, evidence.recalled, prepared.request.RolePrompt, evidence.retrieved,
+		runCtx, conversation, admitted.Recalled, prepared.request.RolePrompt, admitted.Retrieved,
 	)
 	conversation, err = svc.compactAnswer(
-		runCtx, prepared, conversation, evidence.retrieved, evidencePlan,
+		runCtx, prepared, conversation, admitted.Retrieved, admitted.Plan,
 		contextWindow, outputReserve,
 	)
 	if err != nil {
@@ -323,8 +270,8 @@ func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) 
 	}
 	return svc.submitRun(
 		runCtx, run, prepared.request, definition, selection, prepared.request.Question,
-		conversation, prepared.request.UserID, evidence.retrieved,
-		prepared.request.RunID, prepared.analysis.QueryPlan, evidencePlan, prepared.toolPolicy,
+		conversation, prepared.request.UserID, admitted.Retrieved,
+		prepared.request.RunID, prepared.analysis.QueryPlan, admitted.Plan, prepared.toolPolicy,
 		prepared.candidateToolSet, prepared.execution.HighRisk, prepared.runLimits,
 		prepared.trace, prepared.ownsTrace,
 	)
@@ -334,19 +281,11 @@ func (svc *Service) parentRunLimits(
 	prepared *preparation,
 	definition agentapi.Definition,
 ) agentapi.RunLimits {
-	limits := agentapi.RunLimits{
+	return agentapi.RunLimits{
 		Deadline:     time.Now().UTC().Add(definition.Budget.Timeout),
 		MaxSteps:     definition.Budget.MaxSteps,
 		MaxToolCalls: definition.Budget.MaxToolCalls,
 	}
-	if !svc.delegationEnabled ||
-		!standardRequest(prepared.request, svc.agentRef) ||
-		!scenarioToolsContain(prepared.candidateToolSet, "delegate_investigation") {
-		return limits
-	}
-	limits.MaxTotalTokens = svc.delegationTokens
-	limits.MaxCostMicros = svc.delegationCost
-	return limits
 }
 
 func (svc *Service) reassembleConversation(
@@ -376,14 +315,17 @@ func (svc *Service) reassembleConversation(
 func (svc *Service) prepareRunConversation(prepared *preparation) ConversationContext {
 	conversation := prepared.request.Conversation
 	routedToolIDs := prepared.planning.RoutedToolIDs
+	delegation := parentDelegationInstruction(prepared)
 	if len(routedToolIDs) > 0 {
 		conversation.Instructions = append(conversation.Instructions, llm.Message{
-			Role: "system", Content: preferenceInstruction(routedToolIDs),
+			Role: "system", Content: preferenceInstruction(routedToolIDs, delegation != ""),
 		})
 	}
-	conversation.FullInvestigation = toolsNeedInvestigation(
-		prepared.toolCandidates, routedToolIDs,
-	)
+	if delegation != "" {
+		conversation.Instructions = append(conversation.Instructions, llm.Message{
+			Role: "system", Content: delegation,
+		})
+	}
 	// Dry-run pruning still records the potential saving while keeping all tools visible.
 	if decidePrune(prepared.planning.PlanningError, prepared.planning.Effective) {
 		conversation.PrunedToolIDs = svc.prunedToolIDSet(

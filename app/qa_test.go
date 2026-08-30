@@ -50,7 +50,7 @@ func TestSettingsAffectQARuntime(t *testing.T) {
 		},
 		{
 			name: "delegation settings",
-			keys: []string{"delegation_enabled", "delegation_capabilities"},
+			keys: []string{"delegation_capabilities"},
 			want: true,
 		},
 		{

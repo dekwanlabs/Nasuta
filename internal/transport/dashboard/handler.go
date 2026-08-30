@@ -3,11 +3,9 @@ package dashboard
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
@@ -63,35 +61,15 @@ type Handler struct {
 	codeGraphChangedFn func(*codegraph.DB) error
 }
 
-type QAInvestigationCanceller interface {
-	Cancel(context.Context, string, int64) error
-}
-
-type QAInvestigationReconciler interface {
-	Reconcile(context.Context, string) error
-}
-
-type QAInvestigationRecovery interface {
-	RecoverActive(context.Context, time.Time, int) error
-}
-
-type QAInvestigationDeliveryReader interface {
-	LoadDelivery(context.Context, string) (investigation.DeliveryResult, error)
-}
-
 type QARuntime struct {
-	QA                      *agent.QA
-	Hub                     *run.Hub
-	CompactionLLM           *llm.LLMClient
-	RunStore                *run.Store
-	InvestigationCanceller  QAInvestigationCanceller
-	InvestigationReconciler QAInvestigationReconciler
-	InvestigationRecovery   QAInvestigationRecovery
-	InvestigationReader     QAInvestigationDeliveryReader
-	Sessions                *memory.SessionStore
-	History                 agent.SessionHistory
-	Settings                *config.PlatformSettings
-	WriteAvailable          bool
+	QA             *agent.QA
+	Hub            *run.Hub
+	CompactionLLM  *llm.LLMClient
+	RunStore       *run.Store
+	Sessions       *memory.SessionStore
+	History        agent.SessionHistory
+	Settings       *config.PlatformSettings
+	WriteAvailable bool
 }
 
 // SetRolePrompt wires a function that returns the combined RBAC-role

@@ -71,125 +71,6 @@ func (runtime *Runtime) Begin(
 	return runtime.beginPrepared(start, execution, trace, ownsTrace)
 }
 
-// Start persists a parent Run without inventing an agent definition snapshot.
-func (runtime *Runtime) Start(
-	ctx context.Context,
-	start ScenarioRunStart,
-) (ScenarioRun, error) {
-	if runtime == nil || runtime.scenarios == nil {
-		return nil, fmt.Errorf("create scenario run %q: runtime is unavailable", start.RunID)
-	}
-	return runtime.scenarios.Start(ctx, start)
-}
-
-// Start persists a parent Run without requiring model execution.
-func (runtime *ScenarioRuntime) Start(
-	ctx context.Context,
-	start ScenarioRunStart,
-) (ScenarioRun, error) {
-	trace, ownsTrace := beginExecutionTrace(ctx)
-	if runtime.runStore == nil {
-		if ownsTrace {
-			trace.Close()
-		}
-		return nil, fmt.Errorf("create scenario run %q: run store is unavailable", start.RunID)
-	}
-	if err := runtime.runStore.Create(agentrun.Record{
-		ID: start.RunID, RunKind: agentrun.KindQAParent, UserID: start.UserID,
-		SessionID: start.SessionID, ParentRunID: start.ParentRunID,
-		WorkflowRunID: start.WorkflowRunID,
-		Question:      start.Question, Mode: start.Mode,
-		RunLimits: start.Limits,
-	}); err != nil {
-		if ownsTrace {
-			trace.Close()
-		}
-		runtime.hub.CompleteTransient(start.RunID, agentrun.Outcome{
-			Status: agentrun.StatusFailed, ErrorCode: "persistence_failed", Err: err,
-			Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidenceUnavailable},
-		})
-		return nil, fmt.Errorf("create scenario run %q: %w", start.RunID, err)
-	}
-	return &scenarioManagedRun{
-		runtime: runtime, start: start, trace: trace, ownsTrace: ownsTrace,
-	}, nil
-}
-
-// Complete commits a durable terminal fact before projecting it.
-func (runtime *Runtime) Complete(
-	ctx context.Context,
-	runID string,
-	outcome agentrun.Outcome,
-) error {
-	if runtime == nil || runtime.scenarios == nil {
-		return fmt.Errorf("complete scenario run %q: runtime is unavailable", runID)
-	}
-	return runtime.scenarios.Complete(ctx, runID, outcome)
-}
-
-// Complete commits a durable terminal fact before projecting it.
-func (runtime *ScenarioRuntime) Complete(
-	ctx context.Context,
-	runID string,
-	outcome agentrun.Outcome,
-) error {
-	if runtime.runStore == nil {
-		return fmt.Errorf("complete scenario run %q: run store is unavailable", runID)
-	}
-	if !outcome.Status.Terminal() {
-		return fmt.Errorf(
-			"complete scenario run %q with non-terminal status %q",
-			runID,
-			outcome.Status,
-		)
-	}
-	persisted, err := runtime.runStore.CompleteQAParent(ctx, runID, outcome)
-	if err != nil {
-		return fmt.Errorf("complete scenario run %q: %w", runID, err)
-	}
-	if persisted.Status != outcome.Status {
-		return fmt.Errorf(
-			"complete scenario run %q as %q conflicts with persisted status %q",
-			runID,
-			outcome.Status,
-			persisted.Status,
-		)
-	}
-	runtime.hub.ProjectTerminal(runID, persisted)
-	return nil
-}
-
-func (run *scenarioManagedRun) Context(ctx context.Context) context.Context {
-	ctx = runtrace.WithScope(ctx, run.trace)
-	return runtrace.WithCorrelation(ctx, runtrace.Correlation{
-		RunID: run.start.RunID, ParentRunID: run.start.ParentRunID,
-	})
-}
-
-func (run *scenarioManagedRun) RecordEvidence(
-	ctx context.Context,
-	units []tool.EvidenceUnit,
-) error {
-	if run == nil || run.runtime == nil || run.runtime.runStore == nil ||
-		len(units) == 0 {
-		return nil
-	}
-	_, err := run.runtime.runStore.PutEvidenceLedger(
-		ctx,
-		run.start.RunID,
-		units,
-	)
-	return err
-}
-
-func (run *scenarioManagedRun) Release() {
-	run.release.Do(func() {
-		if run.ownsTrace {
-			run.trace.Close()
-		}
-	})
-}
-
 func beginExecutionTrace(ctx context.Context) (*runtrace.Scope, bool) {
 	inherited := runtrace.FromContext(ctx)
 	trace := runtrace.Begin(ctx)
@@ -227,14 +108,14 @@ func (runtime *Runtime) createRun(
 	start agentapi.RunStart,
 	execution preparedExecution,
 ) error {
-	if runtime.scenarios == nil || runtime.scenarios.runStore == nil {
+	if runtime == nil || runtime.runStore == nil {
 		return nil
 	}
 	mode := "single"
 	if start.Correlation.WorkflowRunID != "" {
 		mode = "workflow"
 	}
-	if err := runtime.scenarios.runStore.Create(agentrun.Record{
+	if err := runtime.runStore.Create(agentrun.Record{
 		ID: start.RunID, RunKind: agentrun.KindAgent, UserID: start.Actor.UserID,
 		SessionID: start.Correlation.SessionID,
 		AgentID:   execution.snapshot.AgentID, DefinitionVersion: execution.snapshot.DefinitionVersion,
@@ -276,11 +157,10 @@ func (run *activeRun) RecordEvidence(
 	ctx context.Context,
 	units []tool.EvidenceUnit,
 ) error {
-	if run == nil || run.runtime == nil || run.runtime.scenarios == nil ||
-		run.runtime.scenarios.runStore == nil || len(units) == 0 {
+	if run == nil || run.runtime == nil || run.runtime.runStore == nil || len(units) == 0 {
 		return nil
 	}
-	_, err := run.runtime.scenarios.runStore.PutEvidenceLedger(
+	_, err := run.runtime.runStore.PutEvidenceLedger(
 		ctx,
 		run.start.RunID,
 		units,
@@ -341,7 +221,7 @@ func (run *activeRun) Execute(
 		MaxSteps:                          execution.snapshot.Limits.MaxSteps,
 		MaxToolCalls:                      execution.snapshot.Limits.MaxToolCalls,
 		Timeout:                           time.Until(execution.snapshot.Limits.Deadline),
-		AnswerReserve:                     run.runtime.settings.answerReserve,
+		AnswerReserve:                     execution.answerReserve,
 		AnswerMaxTokens:                   execution.definition.Model.MaxOutputTokens,
 		ConclusionMaxTokens:               execution.definition.Model.MaxOutputTokens,
 		ContextWindow:                     execution.snapshot.Budget.ContextTokens,
@@ -371,10 +251,11 @@ func (run *activeRun) Execute(
 		run.runtime.schemas,
 		execution.definition.OutputSchema,
 		outputRecoveryContext{
-			AgentID:      request.Agent.ID,
-			Input:        request.Input,
-			Context:      request.Context,
-			StrictOutput: request.Agent.ID == "investigator.docs",
+			AgentID: request.Agent.ID,
+			Input:   request.Input,
+			Context: request.Context,
+			StrictOutput: request.Agent.ID == "investigator.docs" &&
+				request.Delegation.Depth <= 0,
 		},
 	)
 	outcome = run.mergePreparationOutcome(outcome)

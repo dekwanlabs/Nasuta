@@ -72,6 +72,21 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"additionalProperties":false
 						}
 					},
+					"identity_bindings":{
+						"type":"array",
+						"maxItems":50,
+						"items":{
+							"type":"object",
+							"required":["entity_id"],
+							"properties":{
+								"entity_id":{"type":"string","minLength":1},
+								"services":{"type":"array","maxItems":20,"items":{"$ref":"#/$defs/typed_identity_ref"}},
+								"repositories":{"type":"array","maxItems":20,"items":{"$ref":"#/$defs/typed_identity_ref"}},
+								"documents":{"type":"array","maxItems":50,"items":{"$ref":"#/$defs/typed_identity_ref"}}
+							},
+							"additionalProperties":false
+						}
+					},
 					"investigation_goals":{
 						"type":"array",
 						"maxItems":4,
@@ -156,6 +171,15 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 				}],
 				"additionalProperties":false,
 				"$defs":{
+					"typed_identity_ref":{
+						"type":"object",
+						"required":["id"],
+						"properties":{
+							"id":{"type":"string","minLength":1},
+							"name":{"type":"string","maxLength":256}
+						},
+						"additionalProperties":false
+					},
 					"context":{
 						"type":"object",
 						"properties":{
@@ -358,7 +382,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					},
 					"discovered_entities":{
 						"type":"array",
-						"maxItems":20,
+						"maxItems":50,
 						"uniqueItems":true,
 						"items":{"type":"string","minLength":1,"maxLength":256}
 					},
@@ -398,7 +422,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"kind":{"type":"string","minLength":1},
 							"reference":{"type":"string","minLength":1},
 							"summary":{"type":"string","minLength":1},
-							"evidence_id":{"type":"string","pattern":"^ev_[a-f0-9]{64}$"},
+							"evidence_id":{"type":"string","pattern":"^ev_[a-f0-9]{13}$"},
 							"identity":{"$ref":"#/$defs/evidence_identity"}
 						},
 						"additionalProperties":false
@@ -608,6 +632,19 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"maxItems":100,
 						"uniqueItems":true,
 						"items":{"type":"string","minLength":1,"maxLength":256}
+					},
+					"evidence_lookup":{
+						"type":"object",
+						"additionalProperties":{
+							"type":"object",
+							"required":["kind","reference","summary"],
+							"properties":{
+								"kind":{"type":"string","minLength":1,"maxLength":128},
+								"reference":{"type":"string","minLength":1,"maxLength":512},
+								"summary":{"type":"string","minLength":1,"maxLength":8000}
+							},
+							"additionalProperties":false
+						}
 					},
 					"reasons":{
 						"type":"array",
@@ -854,7 +891,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"kind":{"type":"string","minLength":1},
 							"reference":{"type":"string","minLength":1},
 							"summary":{"type":"string","minLength":1},
-							"evidence_id":{"type":"string","pattern":"^ev_[a-f0-9]{64}$"},
+							"evidence_id":{"type":"string","pattern":"^ev_[a-f0-9]{13}$"},
 							"identity":{"$ref":"#/$defs/evidence_identity"}
 						},
 						"additionalProperties":false

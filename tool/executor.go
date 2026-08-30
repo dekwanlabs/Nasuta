@@ -38,10 +38,7 @@ func (executor *Executor) Execute(ctx context.Context, snapshot Snapshot, id Too
 		err = fmt.Errorf("tool %q arguments: %w", id, validationErr)
 		return Result{}, err
 	}
-	timeout := executor.DefaultTimeout
-	if candidate.Prefetch != nil && candidate.Prefetch.Timeout > 0 {
-		timeout = candidate.Prefetch.Timeout
-	}
+	timeout := executor.invocationTimeout(candidate)
 	if timeout <= 0 {
 		result, err = candidate.Handler.Execute(ctx, args)
 		return result, err
@@ -53,4 +50,14 @@ func (executor *Executor) Execute(ctx context.Context, snapshot Snapshot, id Too
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func (executor *Executor) invocationTimeout(candidate Tool) time.Duration {
+	if candidate.Timeout != 0 {
+		return candidate.Timeout
+	}
+	if candidate.Prefetch != nil && candidate.Prefetch.Timeout > 0 {
+		return candidate.Prefetch.Timeout
+	}
+	return executor.DefaultTimeout
 }

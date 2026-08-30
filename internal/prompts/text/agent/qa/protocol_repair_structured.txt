@@ -1,0 +1,1 @@
+Your previous response leaked internal tool protocol. Return exactly one schema-valid JSON object using only the evidence already in the conversation. Do not emit DSML, XML tool calls, tool_calls, invoke tags, control markup, or any text outside the JSON object.

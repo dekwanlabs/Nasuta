@@ -26,8 +26,7 @@ const (
 	ToolKindRead  = tool.KindRead
 	ToolKindWrite = tool.KindWrite
 
-	RunKindAgent    = run.KindAgent
-	RunKindQAParent = run.KindQAParent
+	RunKindAgent = run.KindAgent
 
 	RunStatusRunning = run.StatusRunning
 	RunStatusDone    = run.StatusDone

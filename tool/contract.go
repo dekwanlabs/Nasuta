@@ -25,6 +25,11 @@ type ReferenceInput struct {
 	Accepts  []ReferenceType
 }
 
+// InheritCallerDeadline tells Executor not to add a per-tool timeout.
+// Use this for tools that already bound work with the caller deadline,
+// such as nested child runs.
+const InheritCallerDeadline time.Duration = -1
+
 // Kind separates read operations from approval-gated writes.
 type Kind string
 
@@ -282,6 +287,9 @@ type Tool struct {
 	Admission       *AdmissionSpec
 	Handler         Handler
 	MCPHidden       bool
+	// Timeout bounds one invocation. Zero uses Executor.DefaultTimeout.
+	// InheritCallerDeadline keeps only the caller context.
+	Timeout time.Duration
 }
 
 // ReadTool is the only tool shape exposed to upper-layer compositions.
@@ -295,6 +303,7 @@ type ReadTool struct {
 	Admission       *AdmissionSpec
 	Handler         Handler
 	MCPHidden       bool
+	Timeout         time.Duration
 }
 
 // ReadToolSet is one owner's complete desired read-tool catalog.
@@ -308,7 +317,7 @@ func (candidate ReadTool) tool() Tool {
 		ID: candidate.ID, Description: candidate.Description, Kind: KindRead,
 		InputSchema: candidate.InputSchema, ReferenceInputs: candidate.ReferenceInputs,
 		Routing: candidate.Routing, Prefetch: candidate.Prefetch, Admission: candidate.Admission,
-		Handler: candidate.Handler, MCPHidden: candidate.MCPHidden,
+		Handler: candidate.Handler, MCPHidden: candidate.MCPHidden, Timeout: candidate.Timeout,
 	}
 }
 

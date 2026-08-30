@@ -1,0 +1,1 @@
+Tools are closed for this turn. Return exactly one schema-valid JSON object now. Do not emit DSML, XML tool calls, invoke tags, markdown, or any text outside the JSON object.

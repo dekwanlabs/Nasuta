@@ -16,6 +16,8 @@ const (
 	DefaultRetrievalRouterMaxTokens        = 1024
 	DefaultAgentAnswerReserve              = 30 * time.Second
 	DefaultAgentMaxToolCalls               = 24
+	minAgentTimeout                        = 4 * time.Minute
+	maxAgentTimeout                        = 10 * time.Minute
 	DefaultLLMContextWindow                = 1_000_000
 	DefaultFeatureGenerationTimeout        = 5 * time.Minute
 
@@ -23,16 +25,31 @@ const (
 	DefaultCodingMaxConcurrency = 1
 	DefaultCodingWorktreeTTL    = 72 * time.Hour
 
-	DefaultDelegationMaxChildren          = 3
-	DefaultDelegationMaxConcurrent        = 2
-	DefaultDelegationChildTimeout         = 90 * time.Second
+	DefaultDelegationEnabled              = true
+	DefaultDelegationMaxChildren          = 6
+	DefaultDelegationMaxConcurrent        = 3
+	DefaultDelegationChildTimeout         = 150 * time.Second
 	DefaultDelegationMaxChildTurns        = 4
-	DefaultDelegationMaxChildToolCalls    = 8
-	DefaultDelegationMaxChildInputTokens  = 12000
-	DefaultDelegationMaxChildOutputTokens = 1200
-	DefaultDelegationMaxReportTokens      = 1000
-	DefaultDelegationMaxTotalTokens       = 48000
+	DefaultDelegationMaxChildToolCalls    = 16
+	DefaultDelegationMaxChildInputTokens  = 96000
+	DefaultDelegationMaxChildOutputTokens = 16000
+	DefaultDelegationMaxReportTokens      = 4000
+	DefaultDelegationMaxTotalTokens       = 720000
 	DefaultDelegationParentAnswerReserve  = 4000
+
+	// Shipped lookup-sized delegation defaults. A persisted copy of this
+	// bundle cannot finish retrieve-then-report, so Apply upgrades it.
+	legacyDelegationMaxConcurrent        = 2
+	legacyDelegationMaxChildToolCalls    = 8
+	legacyDelegationMaxChildInputTokens  = 12000
+	legacyDelegationMaxChildOutputTokens = 1200
+	legacyDelegationMaxReportTokens      = 1000
+	legacyDelegationMaxTotalTokens       = 48000
+	priorDelegationMaxChildren           = 3
+	priorDelegationMaxTotalTokens        = 360000
+	priorDelegationChildTimeout          = 90 * time.Second
+	priorDelegationParentTimeout         = 5 * time.Minute
+	upgradedDelegationParentTimeout      = 8 * time.Minute
 
 	DefaultInvestigationMaxInputTokens  = 300_000
 	DefaultInvestigationMaxOutputTokens = 128_000
@@ -44,7 +61,7 @@ const (
 	DefaultInvestigationMaxParallelism  = 4
 	DefaultInvestigationMaxCostMicros   = 0
 	DefaultInvestigationBudgetProfile   = "interactive"
-	DefaultInvestigationEnabled         = true
+	DefaultInvestigationEnabled         = false
 )
 
 var canonicalCapabilityID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
@@ -150,7 +167,7 @@ var platformSettingKeys = map[string]bool{
 	"retrieval_router_direct_min_confidence": false, "retrieval_router_max_tokens": false,
 	"tool_pruning_enabled":           false,
 	"disable_legacy_answer_recovery": false,
-	"delegation_enabled":             true, "delegation_capabilities": true, "delegation_max_children": true,
+	"delegation_capabilities":        true, "delegation_max_children": true,
 	"delegation_max_concurrent": true,
 	"delegation_child_timeout":  true, "delegation_max_child_turns": true,
 	"delegation_max_child_tool_calls": true, "delegation_max_child_input_tokens": true,
@@ -225,7 +242,6 @@ func (p *PlatformSettings) Values() map[string]any {
 		"retrieval_router_max_tokens":                p.routerMaxTokens(),
 		"tool_pruning_enabled":                       p.ToolPruningEnabled,
 		"disable_legacy_answer_recovery":             strconv.FormatBool(p.DisableLegacyAnswerRecovery),
-		"delegation_enabled":                         strconv.FormatBool(p.DelegationEnabled),
 		"delegation_capabilities":                    strings.Join(p.DelegationCapabilities, ","),
 		"delegation_max_children":                    strconv.Itoa(p.DelegationMaxChildren),
 		"delegation_max_concurrent":                  strconv.Itoa(p.DelegationMaxConcurrent),
@@ -359,7 +375,7 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	}
 	p.ToolPruningEnabled = false // default off; dry-run measurement logs what pruning would save
 	p.DisableLegacyAnswerRecovery = false
-	p.DelegationEnabled = false
+	p.DelegationEnabled = DefaultDelegationEnabled
 	if v := strings.TrimSpace(m["llm_model"]); v != "" {
 		p.LLMModel = v
 	}
@@ -565,10 +581,6 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 			p.RetrievalRouterMaxTokens = tokens
 		}
 	}
-	if raw, ok := m["delegation_enabled"]; ok {
-		value := strings.ToLower(strings.TrimSpace(raw))
-		p.DelegationEnabled = value == "1" || value == "true"
-	}
 	if raw, ok := m["delegation_capabilities"]; ok {
 		if value, err := canonicalCapabilityList(raw); err == nil {
 			p.DelegationCapabilities = splitList(value)
@@ -687,6 +699,57 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 			p.CodingWorktreeTTL = Duration(d)
 		}
 	}
+	p.upgradeLookupSizedDelegationBudget()
+	p.upgradeDelegationSubjectCapacity()
+	p.clampAgentTimeout()
+}
+
+func (p *PlatformSettings) clampAgentTimeout() {
+	timeout := time.Duration(p.AgentTimeout)
+	if timeout <= 0 {
+		return
+	}
+	if timeout < minAgentTimeout {
+		p.AgentTimeout = Duration(minAgentTimeout)
+		return
+	}
+	if timeout > maxAgentTimeout {
+		p.AgentTimeout = Duration(maxAgentTimeout)
+	}
+}
+
+func (p *PlatformSettings) upgradeLookupSizedDelegationBudget() {
+	if p.DelegationMaxConcurrent != legacyDelegationMaxConcurrent ||
+		p.DelegationMaxChildToolCalls != legacyDelegationMaxChildToolCalls ||
+		p.DelegationMaxChildInputTokens != legacyDelegationMaxChildInputTokens ||
+		p.DelegationMaxChildOutputTokens != legacyDelegationMaxChildOutputTokens ||
+		p.DelegationMaxReportTokens != legacyDelegationMaxReportTokens ||
+		p.DelegationMaxTotalTokens != legacyDelegationMaxTotalTokens {
+		return
+	}
+	p.DelegationMaxConcurrent = DefaultDelegationMaxConcurrent
+	p.DelegationMaxChildToolCalls = DefaultDelegationMaxChildToolCalls
+	p.DelegationMaxChildInputTokens = DefaultDelegationMaxChildInputTokens
+	p.DelegationMaxChildOutputTokens = DefaultDelegationMaxChildOutputTokens
+	p.DelegationMaxReportTokens = DefaultDelegationMaxReportTokens
+	p.DelegationMaxTotalTokens = DefaultDelegationMaxTotalTokens
+}
+
+func (p *PlatformSettings) upgradeDelegationSubjectCapacity() {
+	upgraded := false
+	if p.DelegationMaxChildren == priorDelegationMaxChildren &&
+		p.DelegationMaxTotalTokens == priorDelegationMaxTotalTokens {
+		p.DelegationMaxChildren = DefaultDelegationMaxChildren
+		p.DelegationMaxTotalTokens = DefaultDelegationMaxTotalTokens
+		upgraded = true
+	}
+	if time.Duration(p.DelegationChildTimeout) == priorDelegationChildTimeout {
+		p.DelegationChildTimeout = Duration(DefaultDelegationChildTimeout)
+		upgraded = true
+	}
+	if upgraded && time.Duration(p.AgentTimeout) == priorDelegationParentTimeout {
+		p.AgentTimeout = Duration(upgradedDelegationParentTimeout)
+	}
 }
 
 func (p *PlatformSettings) routerConfidence() float64 {
@@ -720,7 +783,7 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 		return value, nil
 	case "rerank_enabled", "coding_allow_network", "tool_pruning_enabled",
 		"disable_legacy_answer_recovery",
-		"delegation_enabled", "investigation_enabled":
+		"investigation_enabled":
 		return canonicalBoolSetting(key, value)
 	case "llm_max_tokens", "llm_answer_max_tokens", "agent_conclusion_max_tokens", "llm_max_continue_rounds":
 		return canonicalNonNegativeIntSetting(key, value)
@@ -743,7 +806,7 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 	case "rerank_min_score", "rerank_min_dense_preflight", "runbook_min_score", "code_min_score":
 		return canonicalScoreSetting(key, value)
 	case "agent_timeout":
-		return canonicalDurationSetting(key, value, time.Second, 24*time.Hour)
+		return canonicalDurationSetting(key, value, minAgentTimeout, maxAgentTimeout)
 	case "investigation_max_duration":
 		return canonicalDurationSetting(key, value, time.Second, 24*time.Hour)
 	case "delegation_child_timeout":
@@ -927,6 +990,9 @@ func (p *PlatformSettings) ValidateAgentSettings() error {
 	}
 	if reserve >= timeout {
 		return fmt.Errorf("agent_answer_reserve must be less than agent_timeout")
+	}
+	if timeout < minAgentTimeout || timeout > maxAgentTimeout {
+		return fmt.Errorf("agent_timeout must be between %s and %s", minAgentTimeout, maxAgentTimeout)
 	}
 	if p.LLMContextWindow > 0 && p.ContextBudget >= p.LLMContextWindow {
 		return fmt.Errorf("context_budget must be less than llm_context_window")

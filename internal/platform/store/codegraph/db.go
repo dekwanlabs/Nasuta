@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -118,12 +119,23 @@ func schemaOK(d *sql.DB) bool {
 }
 
 func validateNodePaths(d *sql.DB) error {
-	var invalid int
-	if err := d.QueryRow(`SELECT COUNT(*) FROM nodes WHERE file_path NOT LIKE 'repos/%'`).Scan(&invalid); err != nil {
-		return fmt.Errorf("codegraph: validate node paths: %w", err)
-	}
-	if invalid > 0 {
-		return fmt.Errorf("codegraph: index contains %d nodes outside canonical repos/ paths; run a full rebuild", invalid)
+	// Reject leftover indexes from the pre-repos/ layout (gitlab/..., absolute
+	// paths). Call-chain and service ownership assume repos/<group>/<project>.
+	// Two file_path index probes cover "not prefixed by repos/" without a
+	// COUNT(*) NOT LIKE full scan on the multi-GB production graph.
+	for _, query := range []string{
+		`SELECT 1 FROM nodes WHERE file_path < 'repos/' LIMIT 1`,
+		`SELECT 1 FROM nodes WHERE file_path >= 'repos0' LIMIT 1`,
+	} {
+		var found int
+		err := d.QueryRow(query).Scan(&found)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("codegraph: validate node paths: %w", err)
+		}
+		return fmt.Errorf("codegraph: index contains nodes outside canonical repos/ paths; run a full rebuild")
 	}
 	return nil
 }

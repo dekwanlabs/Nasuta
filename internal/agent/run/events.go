@@ -108,6 +108,8 @@ type ExecutionEvent struct {
 	NodeID                  string         `json:"node_id,omitempty"`
 	DelegationID            string         `json:"delegation_id,omitempty"`
 	Capability              string         `json:"capability,omitempty"`
+	AgentID                 string         `json:"agent_id,omitempty"`
+	AgentName               string         `json:"agent_name,omitempty"`
 	ObjectiveSummary        string         `json:"objective_summary,omitempty"`
 	Strategy                string         `json:"strategy,omitempty"`
 	Status                  string         `json:"status"`
@@ -160,16 +162,6 @@ type Terminal struct {
 	Evidence              EvidenceMetrics               `json:"evidence"`
 	InvestigationDelivery *investigation.DeliveryResult `json:"investigation_delivery,omitempty"`
 	SessionMessages       []llm.Message                 `json:"-"`
-}
-
-// QAParentEvent is the durable counterpart of a Parent Run projection.
-type QAParentEvent struct {
-	RunID     string   `json:"run_id"`
-	Seq       int64    `json:"seq"`
-	Kind      string   `json:"kind"`
-	Summary   string   `json:"summary"`
-	Detail    Terminal `json:"detail"`
-	CreatedAt string   `json:"created_at"`
 }
 
 func TerminalFromEvent(event SSEEvent) *Terminal {

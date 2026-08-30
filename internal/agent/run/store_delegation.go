@@ -264,14 +264,21 @@ func (rs *Store) ReserveDelegationBatch(
 		return nil, ErrDelegationChildLimit
 	}
 
-	tokenCeiling := minPositiveInt64(admission.MaxTotalTokens, parentLimits.MaxTotalTokens)
-	if tokenCeiling > 0 &&
-		parentTokens+settledTokens+outstandingTokens+newTokens+admission.ParentAnswerReserve > tokenCeiling {
+	childTokens := settledTokens + outstandingTokens + newTokens + admission.ParentAnswerReserve
+	if admission.MaxTotalTokens > 0 && childTokens > admission.MaxTotalTokens {
 		return nil, ErrDelegationBudgetInsufficient
 	}
-	costCeiling := minPositiveInt64(admission.MaxTotalCostMicros, parentLimits.MaxCostMicros)
-	if costCeiling > 0 &&
-		parentCost+settledCost+outstandingCost+newCost > costCeiling {
+	if parentLimits.MaxTotalTokens > 0 &&
+		parentTokens+settledTokens+outstandingTokens+newTokens+admission.ParentAnswerReserve >
+			parentLimits.MaxTotalTokens {
+		return nil, ErrDelegationBudgetInsufficient
+	}
+	childCost := settledCost + outstandingCost + newCost
+	if admission.MaxTotalCostMicros > 0 && childCost > admission.MaxTotalCostMicros {
+		return nil, ErrDelegationBudgetInsufficient
+	}
+	if parentLimits.MaxCostMicros > 0 &&
+		parentCost+settledCost+outstandingCost+newCost > parentLimits.MaxCostMicros {
 		return nil, ErrDelegationBudgetInsufficient
 	}
 
@@ -426,7 +433,27 @@ func (rs *Store) LinkDelegationChild(
 	if err != nil {
 		return err
 	}
-	if affected != 1 {
+	if affected == 1 {
+		return nil
+	}
+	// Reservation already writes child_run_id. A no-op UPDATE on MySQL
+	// reports 0 rows even when the admitted row already has this identity.
+	var current string
+	if err := rs.db.QueryRowContext(
+		ctx,
+		`SELECT child_run_id FROM agent_delegation_tasks
+		 WHERE parent_run_id=? AND delegation_id=? AND task_index=?
+		   AND admitted=TRUE`,
+		parentRunID,
+		delegationID,
+		taskIndex,
+	).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrDelegationTaskConflict
+		}
+		return err
+	}
+	if current != childRunID {
 		return ErrDelegationTaskConflict
 	}
 	return nil
@@ -737,19 +764,6 @@ func recordFromReservation(reservation DelegationReservation) DelegationTaskReco
 
 func delegationTaskKey(delegationID string, taskIndex int) string {
 	return fmt.Sprintf("%s\x00%d", delegationID, taskIndex)
-}
-
-func minPositiveInt64(left, right int64) int64 {
-	switch {
-	case left <= 0:
-		return right
-	case right <= 0:
-		return left
-	case left < right:
-		return left
-	default:
-		return right
-	}
 }
 
 func artifactID(artifact *DelegationArtifact) string {

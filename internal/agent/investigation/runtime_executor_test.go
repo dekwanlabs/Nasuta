@@ -14,6 +14,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
+	canonicalevidence "github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -285,6 +286,97 @@ func TestAgentRuntimeTaskExecutor_InvestigatorProjection(t *testing.T) {
 	}
 }
 
+func TestInvestigatorInputIncludesEntityLabels(t *testing.T) {
+	raw, err := investigatorInput(ExecutableTask{
+		ID:        "inspect_app_client",
+		Objective: "Explain App & Client.",
+		Entities:  []string{"app_client"},
+		EntityDetails: []InvestigationEntity{{
+			ID: "app_client", Label: "App & Client", Role: "core_business",
+			Aliases: []string{"App & Client"},
+		}},
+		EvidenceGoalIDs: []string{"business_domain"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Entities []struct {
+			ID    string `json:"id"`
+			Label string `json:"label"`
+			Role  string `json:"role"`
+		} `json:"entities"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Entities) != 1 ||
+		payload.Entities[0].ID != "app_client" ||
+		payload.Entities[0].Label != "App & Client" ||
+		payload.Entities[0].Role != "core_business" {
+		t.Fatalf("investigator entities = %#v", payload.Entities)
+	}
+}
+
+func TestInvestigatorRequestReceivesSharedSeedProse(t *testing.T) {
+	runtime := &fakeRuntime{result: agentapi.RunResult{
+		RunID: "seeded", Status: agentapi.RunSucceeded,
+		Output: mustJSON(t, investigationReportOutput{Focus: "docs", Summary: "ok"}),
+	}}
+	executor := AgentRuntimeTaskExecutor{
+		Runtime:     runtime,
+		Definitions: fakeDefinitionResolver{def: testDefinition()},
+	}
+	task := ExecutableTask{
+		ID: "discover_docs", Executor: ExecutorInvestigator,
+		Objective: "Inventory business domains.", Capability: "knowledge.docs.verify",
+		EvidenceGoalIDs: []string{"business_domain"},
+	}
+	content := "Tech Stack | Java | Spring Boot\nProduct overview for hsds."
+	sum := sha256.Sum256([]byte(content))
+	input := testRuntimeTaskInput(task)
+	input.SeedMaterial = []agentapi.ContextBlock{{
+		Source: "qa.evidence", Title: "QA Evidence", Content: content,
+		Complete: false, ContentHash: hex.EncodeToString(sum[:]),
+		Evidence: []tool.EvidenceUnit{{
+			SourceKind: "runbook", Target: "doc-2015a2bba8c6e812",
+		}},
+	}}
+	if _, err := executor.Execute(context.Background(), task, input); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if runtime.gotReq == nil {
+		t.Fatal("runtime received no request")
+	}
+	if !runtime.gotReq.Policy.EvidenceSeeded {
+		t.Fatal("expected shared seed to mark the investigator run as evidence-seeded")
+	}
+	if len(runtime.gotReq.Context) != 1 || runtime.gotReq.Context[0].Content != content {
+		t.Fatalf("investigator context = %+v", runtime.gotReq.Context)
+	}
+	if len(runtime.gotReq.Context[0].Evidence) != 0 {
+		t.Fatalf("seed units leaked into runtime context: %+v", runtime.gotReq.Context[0].Evidence)
+	}
+	var payload struct {
+		Context struct {
+			SeedMaterial []agentapi.ContextBlock `json:"seed_material"`
+		} `json:"context"`
+	}
+	if err := json.Unmarshal(runtime.gotReq.Input, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Context.SeedMaterial) != 1 || payload.Context.SeedMaterial[0].Content != content {
+		t.Fatalf("investigator seed material = %+v", payload.Context.SeedMaterial)
+	}
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Validate(agentapi.TaskContractSchemaRef(), runtime.gotReq.Input); err != nil {
+		t.Fatalf("seeded investigator input rejected by task.contract: %v", err)
+	}
+}
+
 func TestChildAgentRunIDScopesWorkflowAndAttempt(t *testing.T) {
 	first, err := childAgentRunID("workflow-a", "task-1", 1)
 	if err != nil {
@@ -517,7 +609,7 @@ func TestVerifierInputBoundsEvidenceContext(t *testing.T) {
 	if payload.Claims[0].ID != "ev-19" {
 		t.Fatalf("required facet evidence was not prioritized: %+v", payload.Claims)
 	}
-	if tokens := tooloutput.EstimateTokens(string(raw)); tokens > 250 {
+	if tokens := tooloutput.EstimateTokens(string(raw)); tokens > 400 {
 		t.Fatalf("verifier input tokens = %d, want bounded request", tokens)
 	}
 }
@@ -559,7 +651,16 @@ func TestAgentRuntimeTaskExecutor_InvestigatorInputRetainsEvidenceContract(t *te
 			Sources:         []agentapi.EvidenceSource{agentapi.EvidenceSourceRuntime},
 			RequiredSources: []agentapi.EvidenceSource{agentapi.EvidenceSourceRuntime},
 			Freshness:       agentapi.FreshnessCurrent, Required: true, MinimumCoverage: 2, HighRisk: true,
-		}}, InputRefs: []EvidenceRef{{SourceKind: "runtime", Target: "service-a", Version: "now", TimeRange: "5m", ContentHash: "hash"}},
+		}},
+		Entities:      []string{"checkout"},
+		EntityDetails: []InvestigationEntity{{ID: "checkout", Label: "Checkout", Role: "core_business"}},
+		IdentityBindings: []EntityIdentityBinding{{
+			EntityID:     "checkout",
+			Services:     []ServiceRef{{ID: "service.checkout", Name: "Checkout Service"}},
+			Repositories: []RepositoryRef{{ID: "repository.checkout", Name: "checkout"}},
+			Documents:    []DocumentRef{{ID: "document.checkout", Name: "Checkout Guide"}},
+		}},
+		InputRefs: []EvidenceRef{{SourceKind: "runtime", Target: "service-a", Version: "now", TimeRange: "5m", ContentHash: "hash"}},
 	}
 	if _, err := executor.Execute(context.Background(), task, testRuntimeTaskInput(task)); err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -575,7 +676,12 @@ func TestAgentRuntimeTaskExecutor_InvestigatorInputRetainsEvidenceContract(t *te
 			MinimumCoverage int      `json:"minimum_coverage"`
 			HighRisk        bool     `json:"high_risk"`
 		} `json:"evidence_goals"`
-		Refs []agentapi.EvidenceRef `json:"input_refs"`
+		Refs     []agentapi.EvidenceRef `json:"input_refs"`
+		Entities []struct {
+			ID   string `json:"id"`
+			Role string `json:"role"`
+		} `json:"entities"`
+		IdentityBindings []EntityIdentityBinding `json:"identity_bindings"`
 	}
 	if err := json.Unmarshal(runtime.gotReq.Input, &input); err != nil {
 		t.Fatalf("decode investigator input: %v", err)
@@ -588,6 +694,15 @@ func TestAgentRuntimeTaskExecutor_InvestigatorInputRetainsEvidenceContract(t *te
 	}
 	if len(input.Refs) != 1 || input.Refs[0].Target != "service-a" || input.Refs[0].TimeRange != "5m" {
 		t.Fatalf("investigator input refs = %+v", input.Refs)
+	}
+	if len(input.Entities) != 1 || input.Entities[0].ID != "checkout" || input.Entities[0].Role != "core_business" {
+		t.Fatalf("business entities = %+v", input.Entities)
+	}
+	if len(input.IdentityBindings) != 1 || input.IdentityBindings[0].EntityID != "checkout" ||
+		len(input.IdentityBindings[0].Services) != 1 || input.IdentityBindings[0].Services[0].ID != "service.checkout" ||
+		len(input.IdentityBindings[0].Repositories) != 1 || input.IdentityBindings[0].Repositories[0].ID != "repository.checkout" ||
+		len(input.IdentityBindings[0].Documents) != 1 || input.IdentityBindings[0].Documents[0].ID != "document.checkout" {
+		t.Fatalf("typed identity bindings = %+v", input.IdentityBindings)
 	}
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
@@ -708,6 +823,97 @@ func TestVerifierInputUsesReportFindingsNotToolJSON(t *testing.T) {
 	}
 	if strings.HasPrefix(strings.TrimSpace(payload.Claims[0].Statement), "{") {
 		t.Fatal("tool JSON leaked into verifier claims")
+	}
+}
+
+func TestVerifierClaimsFromReportsResolvesRuntimeHandleToLedgerID(t *testing.T) {
+	task := ExecutableTask{ID: "verify-ev", Executor: ExecutorVerifier, Objective: "verify", EvidenceGoalIDs: []string{"business_domain"}}
+	input := testRuntimeTaskInput(task)
+	handle := canonicalevidence.Key{
+		SourceKind: "runbook", Target: "event-flow-backstage-admin", Section: "chunk:16",
+	}.Handle()
+	input.Evidence = []EvidenceUnit{{
+		ID: "evidence_76ded73", SourceKind: "runbook", Target: "event-flow-backstage-admin",
+		Section: "chunk:16",
+		Content: `{"matches":[{"text":"Cookbook, messaging, devices"}]}`,
+	}}
+	input.Upstream = map[string]json.RawMessage{
+		"investigate.docs": mustJSON(t, investigationReportOutput{
+			Focus:   "docs",
+			Summary: "Named backstage domains.",
+			Findings: []investigationFinding{{
+				Claim:           "Backstage-managed business domains include Cookbook, messaging, and devices.",
+				EvidenceGoalIDs: []string{"business_domain"},
+				Evidence: []investigationEvidence{{
+					Kind: "runbook", Reference: "event-flow-backstage-admin (chunk 16)",
+					Summary: "All domains requiring backstage management.", EvidenceID: handle,
+				}},
+				Confidence: 0.85,
+			}},
+		}),
+	}
+	claims := collectVerifierClaims(task, input, EvidenceContextBudget{})
+	if len(claims) != 1 {
+		t.Fatalf("claims = %#v, want the finding bound to the ledger unit", claims)
+	}
+	if claims[0].ID != "evidence_76ded73" {
+		t.Fatalf("claim id = %q, want ledger id evidence_76ded73 (runtime handle was %s)", claims[0].ID, handle)
+	}
+	if claims[0].Statement != "Backstage-managed business domains include Cookbook, messaging, and devices." {
+		t.Fatalf("statement = %q", claims[0].Statement)
+	}
+	if len(claims[0].Citations) != 1 || claims[0].Citations[0] != "evidence_76ded73" {
+		t.Fatalf("citations = %#v, want ledger id", claims[0].Citations)
+	}
+
+	raw, err := verifierInput(task, input, EvidenceContextBudget{})
+	if err != nil {
+		t.Fatalf("verifierInput: %v", err)
+	}
+	var payload struct {
+		EvidenceLookup map[string]verifierEvidenceView `json:"evidence_lookup"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode verifier input: %v", err)
+	}
+	view, ok := payload.EvidenceLookup["evidence_76ded73"]
+	if !ok {
+		t.Fatalf("evidence_lookup = %#v, want cited ledger body", payload.EvidenceLookup)
+	}
+	if view.Summary != "All domains requiring backstage management." {
+		t.Fatalf("lookup summary = %q, want the finding evidence summary", view.Summary)
+	}
+	if strings.HasPrefix(strings.TrimSpace(view.Summary), "{") {
+		t.Fatal("tool JSON leaked into verifier evidence_lookup")
+	}
+}
+
+func TestVerifierClaimsFromReportsResolvesChunkCaptionWithoutHandle(t *testing.T) {
+	task := ExecutableTask{ID: "verify-caption", Executor: ExecutorVerifier, Objective: "verify", EvidenceGoalIDs: []string{"business_domain"}}
+	input := testRuntimeTaskInput(task)
+	input.Evidence = []EvidenceUnit{{
+		ID: "evidence_caption", SourceKind: "runbook", Target: "event-flow-backstage-admin",
+		Section: "chunk:16",
+		Content: `{"matches":[{"text":"Cookbook, messaging, devices"}]}`,
+	}}
+	input.Upstream = map[string]json.RawMessage{
+		"investigate.docs": mustJSON(t, investigationReportOutput{
+			Focus:   "docs",
+			Summary: "Named backstage domains.",
+			Findings: []investigationFinding{{
+				Claim:           "Backstage-managed business domains include Cookbook.",
+				EvidenceGoalIDs: []string{"business_domain"},
+				Evidence: []investigationEvidence{{
+					Kind: "runbook", Reference: "event-flow-backstage-admin (chunk 16)",
+					Summary: "All domains requiring backstage management.",
+				}},
+				Confidence: 0.8,
+			}},
+		}),
+	}
+	claims := collectVerifierClaims(task, input, EvidenceContextBudget{})
+	if len(claims) != 1 || claims[0].ID != "evidence_caption" {
+		t.Fatalf("claims = %#v, want caption to resolve to evidence_caption", claims)
 	}
 }
 
@@ -1253,5 +1459,119 @@ func TestAgentRuntimeTaskExecutorVerifierMinimumBudgetBoundsHugeEvidenceSetting(
 	}
 	if grant.InputTokens <= 0 || grant.OutputTokens != verifierMinimumOutputTokens {
 		t.Fatalf("verifier grant = %+v, want bounded input and preserved output floor", grant)
+	}
+}
+
+func TestProjectVerifierClaimsBindsCanonicalTaskEntityIDs(t *testing.T) {
+	task := ExecutableTask{
+		ID: "verify-checkout", Executor: ExecutorVerifier, Objective: "verify checkout flow",
+		EvidenceGoalIDs: []string{"core_flow"},
+		Entities:        []string{"legacy-checkout"},
+		EntityDetails: []InvestigationEntity{
+			{ID: "checkout", Label: "Checkout"},
+			{ID: "billing", Label: "Billing"},
+		},
+	}
+	unit := EvidenceUnit{ID: "ev-flow", SourceKind: "code", Target: "checkout.go", Content: "Checkout calls billing during order placement."}
+	result := agentapi.RunResult{Status: agentapi.RunSucceeded, Output: mustJSON(t, verificationResult{
+		Summary: "supported",
+		Verdicts: []verificationVerdict{{
+			ClaimIDs: []string{unit.ID}, Decision: "supported", EvidenceRefs: []string{unit.ID},
+		}},
+	})}
+	claims, err := projectVerifierClaims(task, TaskExecutionInput{Task: task, Evidence: []EvidenceUnit{unit}}, result, EvidenceContextBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("claims = %#v, want one", claims)
+	}
+	if len(claims[0].EntityIDs) != 2 || claims[0].EntityIDs[0] != "checkout" || claims[0].EntityIDs[1] != "billing" {
+		t.Fatalf("entity ids = %#v, want canonical entity details", claims[0].EntityIDs)
+	}
+}
+
+func TestProjectVerifierClaimsLeavesDiscoveryClaimsUnscoped(t *testing.T) {
+	task := ExecutableTask{
+		ID: "verify-discovery", Executor: ExecutorVerifier, Objective: "discover businesses",
+		EvidenceGoalIDs: []string{"business_domain"},
+	}
+	unit := EvidenceUnit{ID: "ev-domain", SourceKind: "docs", Target: "overview.md", Content: "Checkout is a user-facing business domain."}
+	result := agentapi.RunResult{Status: agentapi.RunSucceeded, Output: mustJSON(t, verificationResult{
+		Summary: "supported",
+		Verdicts: []verificationVerdict{{
+			ClaimIDs: []string{unit.ID}, Decision: "supported", EvidenceRefs: []string{unit.ID},
+		}},
+	})}
+	claims, err := projectVerifierClaims(task, TaskExecutionInput{Task: task, Evidence: []EvidenceUnit{unit}}, result, EvidenceContextBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || len(claims[0].EntityIDs) != 0 {
+		t.Fatalf("claims = %#v, discovery must not guess entity ownership", claims)
+	}
+}
+
+func TestProjectVerifierClaimsKeepsUnscopedVerdictsSharingOneGoal(t *testing.T) {
+	task := ExecutableTask{
+		ID: "verify-discovery", Executor: ExecutorVerifier, Objective: "discover businesses",
+		EvidenceGoalIDs: []string{"business_domain"},
+	}
+	first := EvidenceUnit{ID: "ev-domains", SourceKind: "docs", Target: "overview.md", Content: "The overview names Auth and Cookbook."}
+	second := EvidenceUnit{ID: "ev-voice", SourceKind: "docs", Target: "voice.md", Content: "The schema declares Voice as a domain."}
+	result := agentapi.RunResult{Status: agentapi.RunSucceeded, Output: mustJSON(t, verificationResult{
+		Summary: "supported",
+		Verdicts: []verificationVerdict{
+			{ClaimIDs: []string{first.ID}, Decision: "supported", EvidenceRefs: []string{first.ID}, Rationale: "overview names the domains"},
+			{ClaimIDs: []string{second.ID}, Decision: "supported", EvidenceRefs: []string{second.ID}, Rationale: "schema declares Voice"},
+		},
+	})}
+	claims, err := projectVerifierClaims(task, TaskExecutionInput{
+		Task:     task,
+		Evidence: []EvidenceUnit{first, second},
+	}, result, EvidenceContextBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 2 {
+		t.Fatalf("claims = %#v, want both unscoped supported verdicts", claims)
+	}
+}
+
+func TestProjectVerifierClaimsUsesFindingEntityIDsWhenTaskHasNone(t *testing.T) {
+	task := ExecutableTask{
+		ID: "verify-discovery", Executor: ExecutorVerifier, Objective: "discover businesses",
+		EvidenceGoalIDs: []string{"business_domain"},
+	}
+	unit := EvidenceUnit{ID: "ev-domain", SourceKind: "docs", Target: "overview.md", Content: "Product catalog is a user-facing business domain."}
+	report := investigationReportOutput{
+		Focus:   "docs",
+		Summary: "Found product catalog.",
+		Findings: []investigationFinding{{
+			Claim:           "Product catalog is a user-facing business domain.",
+			EntityIDs:       []string{"Product Catalog"},
+			EvidenceGoalIDs: []string{"business_domain"},
+			Evidence: []investigationEvidence{{
+				Kind: "docs", Reference: "overview.md", Summary: "catalog APIs",
+			}},
+			Confidence: 0.8,
+		}},
+	}
+	result := agentapi.RunResult{Status: agentapi.RunSucceeded, Output: mustJSON(t, verificationResult{
+		Summary: "supported",
+		Verdicts: []verificationVerdict{{
+			ClaimIDs: []string{unit.ID}, Decision: "supported", EvidenceRefs: []string{unit.ID},
+		}},
+	})}
+	claims, err := projectVerifierClaims(task, TaskExecutionInput{
+		Task:     task,
+		Evidence: []EvidenceUnit{unit},
+		Upstream: map[string]json.RawMessage{"investigate.docs": mustJSON(t, report)},
+	}, result, EvidenceContextBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || len(claims[0].EntityIDs) != 1 || claims[0].EntityIDs[0] != "Product Catalog" {
+		t.Fatalf("claims = %#v, want finding entity ids", claims)
 	}
 }

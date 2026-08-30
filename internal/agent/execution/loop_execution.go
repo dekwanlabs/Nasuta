@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -27,21 +28,22 @@ type compiledLoop struct {
 	toolSnapshot tool.Snapshot
 	runStarted   time.Time
 
-	answerContract       *exactAnswerContract
-	messages             []llm.Message
-	tools                []llm.ToolDef
-	initialMessageCount  int
-	answerToolSources    map[int]string
-	result               *RunResult
-	stepSeq              int
-	answered             bool
-	seenTools            map[string]bool
-	evidenceLedger       *runEvidenceLedger
-	remainingToolTokens  int
-	webEvidence          webEvidenceState
-	evidenceTurnExtended bool
-	stepLimit            int
-	toolBudgetExhausted  bool
+	answerContract             *exactAnswerContract
+	messages                   []llm.Message
+	tools                      []llm.ToolDef
+	initialMessageCount        int
+	answerToolSources          map[int]string
+	result                     *RunResult
+	stepSeq                    int
+	answered                   bool
+	seenTools                  map[string]bool
+	evidenceLedger             *runEvidenceLedger
+	remainingToolTokens        int
+	webEvidence                webEvidenceState
+	evidenceTurnExtended       bool
+	stepLimit                  int
+	toolBudgetExhausted        bool
+	structuredLastStepReminded bool
 }
 
 func (agent *Agent) prepareLoop(
@@ -205,6 +207,10 @@ func (agent *Agent) finalizeLoop(state *compiledLoop) {
 	state.result.Evidence.Finalize(state.input.Direct)
 	log.InfofCtx(state.ctx, "[agent] run %s end: steps=%d answerLen=%d aborted=%v err=%v",
 		state.runID, state.result.Steps, len(state.result.Answer), state.result.Aborted, state.result.Err)
+	if answer := strings.TrimSpace(state.result.Answer); answer != "" {
+		log.InfofCtx(state.ctx, "[agent] run %s answer:\n%s",
+			state.runID, platform.TruncateForLog(answer, 4000))
+	}
 }
 
 func isRecoverableConclusionError(err error) bool {

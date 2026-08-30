@@ -23,7 +23,7 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 	conclusion, err := runtrace.Invoke(ctx, forceConclusionSpec, input, func(ctx context.Context, input *forceConclusionInput) (forceConclusionOutput, error) {
 		input.Messages = append(input.Messages, llm.Message{
 			Role:    "user",
-			Content: forceConclusionInstruction,
+			Content: agent.forceConclusionInstruction(),
 		})
 		attemptStarted := time.Now()
 		stream := newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
@@ -43,13 +43,14 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 				log.WarnfCtx(ctx, "[agent] run %s force-conclusion recovery skipped: no output budget remains: %v", input.RunID, callErr)
 			}
 		}
-		if !agent.cfg.DisableLegacyAnswerRecovery &&
-			callErr == nil && hasLeakedToolProtocol(res) {
-			log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", input.RunID)
-			input.Messages = append(input.Messages, llm.Message{Role: "user", Content: protocolRepairInstruction})
-			attemptStarted = time.Now()
-			stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
-			res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
+		if callErr == nil && hasLeakedToolProtocol(res) {
+			if !agent.cfg.DisableLegacyAnswerRecovery {
+				log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", input.RunID)
+				input.Messages = append(input.Messages, llm.Message{Role: "user", Content: agent.protocolRepairInstruction()})
+				attemptStarted = time.Now()
+				stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
+				res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
+			}
 			if callErr == nil && hasLeakedToolProtocol(res) {
 				res = nil
 				callErr = ErrToolProtocolLeak
@@ -132,13 +133,15 @@ func recordFirstAnswerToken(ctx context.Context, step any, turnTTFT, runElapsed 
 
 var ErrToolProtocolLeak = errors.New("final answer contained an unsupported tool protocol")
 
+// LeakedToolProtocol reports DSML / invoke tool markup dumped into visible content.
+func LeakedToolProtocol(content string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(content, "｜", "|"))
+	return strings.Contains(normalized, "dsml") &&
+		(strings.Contains(normalized, "tool_calls") || strings.Contains(normalized, "invoke name="))
+}
+
 func hasLeakedToolProtocol(res *llm.ChatStreamResult) bool {
-	if res == nil {
-		return false
-	}
-	content := strings.ToLower(strings.ReplaceAll(res.Content, "｜", "|"))
-	return strings.Contains(content, "dsml") &&
-		(strings.Contains(content, "tool_calls") || strings.Contains(content, "invoke name="))
+	return res != nil && LeakedToolProtocol(res.Content)
 }
 
 func hasDeliverableAnswer(res *llm.ChatStreamResult) bool {
@@ -315,7 +318,24 @@ func mergeStructuredContinuation(prefix, suffix string) string {
 var (
 	forceConclusionInstruction            = prompts.Text(prompts.AgentQAForceConclusion)
 	forceConclusionNoReasoningInstruction = prompts.Text(prompts.AgentQAForceConclusionNoThink)
+	forceConclusionStructuredInstruction  = prompts.Text(prompts.AgentQAForceConclusionStructured)
 	protocolRepairInstruction             = prompts.Text(prompts.AgentQAProtocolRepair)
+	protocolRepairStructuredInstruction   = prompts.Text(prompts.AgentQAProtocolRepairStructured)
+	structuredLastStepInstruction         = prompts.Text(prompts.AgentQAStructuredLastStep)
 	continuationInstruction               = prompts.Text(prompts.AgentQAContinuation)
 	structuredContinuationInstruction     = prompts.Text(prompts.AgentQAStructuredContinuation)
 )
+
+func (agent *Agent) forceConclusionInstruction() string {
+	if agent != nil && agent.cfg.StructuredOutput {
+		return forceConclusionStructuredInstruction
+	}
+	return forceConclusionInstruction
+}
+
+func (agent *Agent) protocolRepairInstruction() string {
+	if agent != nil && agent.cfg.StructuredOutput {
+		return protocolRepairStructuredInstruction
+	}
+	return protocolRepairInstruction
+}

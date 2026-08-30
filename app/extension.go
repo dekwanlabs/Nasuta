@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
@@ -42,62 +41,6 @@ type AgentCatalogProvider interface {
 	AgentCatalog(config.PlatformSettings, int64) (AgentCatalogContribution, error)
 }
 
-// InvestigationTemplate is the public application-owned template shape. It is
-// converted to the internal investigation catalog after platform startup so
-// upper-layer applications do not depend on internal packages.
-type InvestigationTemplate struct {
-	ID             string
-	Version        int64
-	GoalKinds      []string
-	RequiredInputs []string
-	Provides       []string
-	ToolGrant      []tool.ToolID
-	InputSchema    agentapi.SchemaRef
-	OutputSchema   agentapi.SchemaRef
-	Executor       InvestigationExecutorType
-	ToolCalls      []InvestigationToolCallSpec
-	CostProfile    InvestigationBudgetVector
-	MaxAttempts    int
-	Enabled        bool
-}
-
-type InvestigationExecutorType string
-
-const (
-	InvestigationExecutorDirectTool   InvestigationExecutorType = "direct_tool"
-	InvestigationExecutorToolPipeline InvestigationExecutorType = "tool_pipeline"
-	InvestigationExecutorInvestigator InvestigationExecutorType = "investigator"
-	InvestigationExecutorVerifier     InvestigationExecutorType = "verifier"
-	InvestigationExecutorComposer     InvestigationExecutorType = "composer"
-)
-
-type InvestigationToolCallSpec struct {
-	ToolID tool.ToolID
-	Args   tool.Arguments
-}
-
-type InvestigationBudgetVector struct {
-	InputTokens  int64
-	OutputTokens int64
-	ToolCalls    int
-	Duration     time.Duration
-	CostMicros   int64
-}
-
-// InvestigationTemplateProvider contributes application-owned investigation
-// task templates. The platform still owns template validation and planning.
-type InvestigationTemplateProvider interface {
-	InvestigationTemplates() ([]InvestigationTemplate, error)
-}
-
-// InvestigationTemplateProviderFunc adapts a function to
-// InvestigationTemplateProvider.
-type InvestigationTemplateProviderFunc func() ([]InvestigationTemplate, error)
-
-func (provide InvestigationTemplateProviderFunc) InvestigationTemplates() ([]InvestigationTemplate, error) {
-	return provide()
-}
-
 // AgentCatalogProviderFunc adapts a function to AgentCatalogProvider.
 type AgentCatalogProviderFunc func(
 	config.PlatformSettings,
@@ -113,13 +56,12 @@ func (provide AgentCatalogProviderFunc) AgentCatalog(
 
 // Extension is the application-owned surface mounted onto one platform host.
 type Extension struct {
-	RegisterRoutes                func(APIRegistrar)
-	WebHandler                    http.Handler
-	IncidentEvidence              incident.EvidenceProvider
-	ConfigResolver                config.Resolver
-	AgentCatalogProvider          AgentCatalogProvider
-	InvestigationTemplateProvider InvestigationTemplateProvider
-	Close                         func() error
+	RegisterRoutes       func(APIRegistrar)
+	WebHandler           http.Handler
+	IncidentEvidence     incident.EvidenceProvider
+	ConfigResolver       config.Resolver
+	AgentCatalogProvider AgentCatalogProvider
+	Close                func() error
 }
 
 // ExtensionFactory constructs one application extension from stable platform ports.
@@ -152,9 +94,6 @@ func Run(ctx context.Context, factory ExtensionFactory) (runErr error) {
 		return err
 	}
 	if err := platform.configureAgentCatalogProvider(extension.AgentCatalogProvider); err != nil {
-		return err
-	}
-	if err := platform.configureInvestigationTemplateProvider(extension.InvestigationTemplateProvider); err != nil {
 		return err
 	}
 	if err := platform.initializePlatformRuntime(); err != nil {
@@ -190,18 +129,6 @@ func (platform *Platform) configureAgentCatalogProvider(
 		platform.agents.provider = previous
 		return fmt.Errorf("rebuild QA runtime with application agent catalog: %w", err)
 	}
-	return nil
-}
-
-// configureInvestigationTemplateProvider records application-owned
-// investigation templates before runtime initialization.
-func (platform *Platform) configureInvestigationTemplateProvider(
-	provider InvestigationTemplateProvider,
-) error {
-	if platform == nil {
-		return fmt.Errorf("platform is required")
-	}
-	platform.investigationTemplateProvider = provider
 	return nil
 }
 

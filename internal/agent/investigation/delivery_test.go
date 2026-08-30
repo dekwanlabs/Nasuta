@@ -135,3 +135,88 @@ func TestDeterministicRendererKeepsReadableClaimsAndHidesGapDetails(t *testing.T
 		t.Fatalf("renderer leaked internal gap details: %q", text)
 	}
 }
+
+func TestDeliveryStatusRequiresEveryEntityRequiredFacet(t *testing.T) {
+	contract := InvestigationContract{
+		EntityDetails: []InvestigationEntity{{ID: "checkout"}, {ID: "billing"}},
+		EvidenceGoals: []EvidenceGoal{{
+			ID: "core_flow", Kind: "core_flow", Facets: []string{"entrypoint", "core_flow"}, Required: true,
+		}},
+	}
+	evidence := EvidenceUnit{ID: "evidence-1", SourceKind: "code", Target: "service", Content: "supported"}
+	ref := EvidenceRef{EvidenceID: evidence.ID, SourceKind: evidence.SourceKind, Target: evidence.Target}
+	base := InvestigationReport{
+		Evidence: []EvidenceUnit{evidence},
+		Coverage: []GoalCoverage{{GoalID: "core_flow", Required: true, Status: GoalCovered}},
+	}
+	tests := []struct {
+		name   string
+		claims []VerifiedClaim
+		want   DeliveryStatus
+	}{
+		{
+			name: "one entity missing",
+			claims: []VerifiedClaim{{
+				ID: "claim-checkout", GoalID: "core_flow", Status: ClaimSupported,
+				EntityIDs: []string{"checkout"}, EvidenceRefs: []EvidenceRef{ref},
+			}},
+			want: DeliveryPartial,
+		},
+		{
+			name: "claim has no entity binding",
+			claims: []VerifiedClaim{{
+				ID: "claim-unscoped", GoalID: "core_flow", Status: ClaimSupported,
+				EvidenceRefs: []EvidenceRef{ref},
+			}},
+			want: DeliveryPartial,
+		},
+		{
+			name: "claim has no evidence",
+			claims: []VerifiedClaim{{
+				ID: "claim-checkout", GoalID: "core_flow", Status: ClaimSupported,
+				EntityIDs: []string{"checkout", "billing"},
+			}},
+			want: DeliveryPartial,
+		},
+		{
+			name: "conflict blocks supported pair",
+			claims: []VerifiedClaim{
+				{ID: "claim-supported", GoalID: "core_flow", Status: ClaimSupported, EntityIDs: []string{"checkout", "billing"}, EvidenceRefs: []EvidenceRef{ref}},
+				{ID: "claim-conflict", GoalID: "core_flow", Status: ClaimConflicting, EntityIDs: []string{"billing"}, EvidenceRefs: []EvidenceRef{ref}},
+			},
+			want: DeliveryPartial,
+		},
+		{
+			name: "all entity facets covered",
+			claims: []VerifiedClaim{
+				{ID: "claim-checkout", GoalID: "core_flow", Status: ClaimSupported, EntityIDs: []string{"checkout"}, EvidenceRefs: []EvidenceRef{ref}},
+				{ID: "claim-billing", GoalID: "core_flow", Status: ClaimSupported, EntityIDs: []string{"billing"}, EvidenceRefs: []EvidenceRef{ref}},
+			},
+			want: DeliverySucceeded,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			report := base
+			report.Claims = test.claims
+			if got := deliveryStatus(contract, report); got != test.want {
+				t.Fatalf("status = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDeliveryStatusSkipsEntityFacetGateDuringDiscovery(t *testing.T) {
+	contract := InvestigationContract{
+		DiscoveryPhase: true,
+		EntityDetails:  []InvestigationEntity{{ID: "candidate"}},
+		EvidenceGoals:  []EvidenceGoal{{ID: "business_domain", Kind: "business_domain", Required: true}},
+	}
+	report := InvestigationReport{
+		Claims:   []VerifiedClaim{{ID: "claim-1", GoalID: "business_domain", Status: ClaimSupported}},
+		Coverage: []GoalCoverage{{GoalID: "business_domain", Required: true, Status: GoalCovered}},
+	}
+	if got := deliveryStatus(contract, report); got != DeliverySucceeded {
+		t.Fatalf("status = %q, want succeeded", got)
+	}
+}

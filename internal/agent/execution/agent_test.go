@@ -1162,6 +1162,119 @@ func TestForceConclusion_StreamsLiveAndRecordsAnswer(t *testing.T) {
 	}
 }
 
+func TestLeakedToolProtocolDetectsDSMLDump(t *testing.T) {
+	dump := "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"search_runbooks\">"
+	if !LeakedToolProtocol(dump) {
+		t.Fatal("expected leaked DSML tool protocol")
+	}
+	if LeakedToolProtocol(`{"focus":"docs","summary":"ok"}`) {
+		t.Fatal("JSON report must not look like leaked tool protocol")
+	}
+}
+
+func TestAnswerTurnRejectsLeakedToolProtocolAndForcesConclusion(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		content := "最终答案"
+		if atomic.AddInt32(&calls, 1) == 1 {
+			content = `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="search_runbooks"></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>`
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: content}, FinishReason: "stop"}}}
+		data, _ := json.Marshal(chunk)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	agent := newTestAgent(t, srv.URL)
+	agent.cfg.MaxSteps = 2
+	result, err := agent.RunWithPlan(t.Context(), "run_dsml_answer", "问题", nil, nil, domain.EvidencePlan{}, false)
+	if err != nil {
+		t.Fatalf("RunWithPlan() error = %v", err)
+	}
+	if result.Err != nil {
+		t.Fatalf("result error = %v", result.Err)
+	}
+	if result.Answer != "最终答案" {
+		t.Fatalf("answer = %q, want 最终答案", result.Answer)
+	}
+	if !result.ForcedConclusion {
+		t.Fatal("expected forced conclusion after leaked tool protocol")
+	}
+	if atomic.LoadInt32(&calls) < 2 {
+		t.Fatalf("LLM calls = %d, want at least 2", calls)
+	}
+}
+
+func TestStructuredAnswerTurnRejectsLeakedToolProtocolAndEmitsJSON(t *testing.T) {
+	const report = `{"focus":"docs","summary":"docs report","findings":[],"gaps":[],"covered_evidence_goals":[],"unresolved_evidence_goals":[]}`
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		content := report
+		if atomic.AddInt32(&calls, 1) == 1 {
+			content = `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="search_runbooks"></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>`
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: content}, FinishReason: "stop"}}}
+		data, _ := json.Marshal(chunk)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	agent := newTestAgent(t, srv.URL)
+	agent.cfg.MaxSteps = 4
+	agent.cfg.StructuredOutput = true
+	result, err := agent.RunCompiled(t.Context(), "run_docs_dsml", Input{
+		Question: "查文档",
+		Messages: []llm.Message{{Role: "user", Content: "查文档"}},
+	}, tool.Snapshot{})
+	if err != nil {
+		t.Fatalf("RunCompiled() error = %v", err)
+	}
+	if result.Err != nil {
+		t.Fatalf("result error = %v", result.Err)
+	}
+	if result.Answer != report {
+		t.Fatalf("answer = %q, want investigation.report JSON", result.Answer)
+	}
+	if !result.ForcedConclusion {
+		t.Fatal("expected forced conclusion after leaked tool protocol")
+	}
+}
+
+func TestForceConclusion_RejectsToolProtocolWhenLegacyRecoveryDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainRequestBody(r)
+		content := `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="search_runbooks"></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>`
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: content}, FinishReason: "stop"}}}
+		data, _ := json.Marshal(chunk)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	client := llm.NewLLMClientWithHTTP(srv.URL, "k", "test", 100, &http.Client{})
+	agent := NewAgent(client, nil, Config{
+		MaxSteps: 1, AnswerMaxTokens: 100, MaxContinueRounds: 0,
+		Timeout: 5 * time.Second, AnswerReserve: 4 * time.Second,
+		DisableLegacyAnswerRecovery: true,
+	}, nil, nil)
+
+	seq := 0
+	res, err := agent.forceConclusion(t.Context(), "run_no_legacy", nil, nil, &seq, time.Now())
+	if !errors.Is(err, ErrToolProtocolLeak) {
+		t.Fatalf("forceConclusion() error = %v, want ErrToolProtocolLeak", err)
+	}
+	if res != nil {
+		t.Fatalf("result = %#v, want nil leaked protocol", res)
+	}
+}
+
 func TestForceConclusion_RetriesToolProtocolWithoutStreamingIt(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

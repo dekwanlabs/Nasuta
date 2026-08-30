@@ -1,6 +1,7 @@
 package delegation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -340,36 +342,221 @@ func TestExecutorBoundsConcurrencyPreservesOrderAndNarrowsChild(t *testing.T) {
 	}
 }
 
-func TestExecutorRejectsUnauthorizedInputWithoutStartingChild(t *testing.T) {
-	var runtimeCalls int
+func TestExecutorProjectsAgentIdentityOnDelegationEvents(t *testing.T) {
+	events := &executorEventRecorder{}
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			return successfulExecutorResult(request.RunID, executorObjective(t, request)), nil
+		}),
+		newExecutorPersistence(),
+		nil,
+	)
+	executor.events = events
+	if _, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect",
+			Objective:  "inspect checkout",
+		}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, event := range events.snapshot() {
+		if event.eventType != agentrun.EventDelegationCreated &&
+			event.eventType != agentrun.EventDelegationStarted &&
+			event.eventType != agentrun.EventDelegationDone {
+			continue
+		}
+		if event.event.AgentID != "delegation.investigator" ||
+			event.event.AgentName != "Code Investigator" {
+			t.Fatalf("%s agent = %q %q", event.eventType, event.event.AgentID, event.event.AgentName)
+		}
+		seen++
+	}
+	if seen < 2 {
+		t.Fatalf("agent identity events = %d, want created/started/completed", seen)
+	}
+}
+
+func TestExecutorProjectsChildToolEventsOntoParent(t *testing.T) {
+	runtime := &projectingExecutorRuntime{
+		run: func(_ context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
+			return successfulExecutorResult(request.RunID, executorObjective(t, request)), nil
+		},
+	}
+	executor := newExecutorFixture(t, runtime, newExecutorPersistence(), nil)
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect",
+			Objective:  "inspect checkout",
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 1 || result.Results[0].RunID == "" {
+		t.Fatalf("result = %+v", result.Results)
+	}
+	if runtime.childRunID != result.Results[0].RunID ||
+		runtime.parentRunID != "parent-1" ||
+		runtime.nodeID != result.Results[0].RunID {
+		t.Fatalf("projection = child=%q parent=%q node=%q",
+			runtime.childRunID, runtime.parentRunID, runtime.nodeID)
+	}
+	if !runtime.stopped {
+		t.Fatal("child tool projection was not stopped")
+	}
+}
+
+type projectingExecutorRuntime struct {
+	run         executorRuntimeFunc
+	childRunID  string
+	parentRunID string
+	nodeID      string
+	stopped     bool
+}
+
+func (runtime *projectingExecutorRuntime) Run(
+	ctx context.Context,
+	request agentapi.RunRequest,
+) (agentapi.RunResult, error) {
+	return runtime.run(ctx, request)
+}
+
+func (runtime *projectingExecutorRuntime) ProjectToolEvents(
+	childRunID string,
+	parentRunID string,
+	_ string,
+	nodeID string,
+) func() {
+	runtime.childRunID = childRunID
+	runtime.parentRunID = parentRunID
+	runtime.nodeID = nodeID
+	return func() { runtime.stopped = true }
+}
+
+func TestExecutorDropsUnauthorizedHintsWithoutRejectingTask(t *testing.T) {
+	var captured agentapi.RunRequest
 	persistence := newExecutorPersistence()
 	executor := newExecutorFixture(t, executorRuntimeFunc(func(
-		context.Context,
-		agentapi.RunRequest,
+		_ context.Context,
+		request agentapi.RunRequest,
 	) (agentapi.RunResult, error) {
-		runtimeCalls++
-		return agentapi.RunResult{}, nil
+		captured = request
+		return successfulExecutorResult(request.RunID, "inspect"), nil
 	}), persistence, nil)
 	result, _, err := executor.Execute(
 		executorContext(t, context.Background(), 0),
 		[]agentapi.DelegationTask{{
 			Capability:   "knowledge.code.inspect",
 			Objective:    "inspect",
+			FocusFacets:  []string{"core_flow", "设备激活与配网"},
+			EvidenceRefs: []string{"owned-evidence", "not-owned"},
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 1 ||
+		result.Results[0].Status != agentapi.DelegationCompleted ||
+		captured.RunID == "" {
+		t.Fatalf("result = %+v captured=%+v", result, captured)
+	}
+	facets, refs := executorTaskHints(t, captured)
+	if len(facets) != 1 || facets[0] != "core_flow" {
+		t.Fatalf("focus_facets = %v", facets)
+	}
+	if len(refs) != 1 || refs[0] != "owned-evidence" {
+		t.Fatalf("evidence_refs = %v", refs)
+	}
+	if len(persistence.rejections) != 0 || len(persistence.linked) != 1 {
+		t.Fatalf("rejections=%d linked=%v",
+			len(persistence.rejections), persistence.linked)
+	}
+}
+
+func TestExecutorAcceptsLiveManifestEvidenceHandle(t *testing.T) {
+	unit := tool.EvidenceUnit{
+		SourceKind: "runbook", Target: "device.md", ContentHash: "hash-1",
+	}
+	handle, ok := evidence.UnitHandle(unit)
+	if !ok {
+		t.Fatal("unit handle")
+	}
+	var captured agentapi.RunRequest
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		_ context.Context,
+		request agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		captured = request
+		return successfulExecutorResult(request.RunID, "inspect"), nil
+	}), newExecutorPersistence(), nil)
+	ctx := executorContext(t, context.Background(), 0)
+	ctx = WithLiveEvidence(ctx, []tool.EvidenceUnit{unit})
+	result, _, err := executor.Execute(ctx, []agentapi.DelegationTask{{
+		Capability:   "knowledge.code.inspect",
+		Objective:    "inspect",
+		EvidenceRefs: []string{handle},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 1 ||
+		result.Results[0].Status != agentapi.DelegationCompleted {
+		t.Fatalf("result = %+v", result)
+	}
+	_, refs := executorTaskHints(t, captured)
+	if len(refs) != 1 || refs[0] != handle {
+		t.Fatalf("evidence_refs = %v, want %s", refs, handle)
+	}
+}
+
+func TestExecutorEmptyHintsEncodeAsArrays(t *testing.T) {
+	var captured agentapi.RunRequest
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		_ context.Context,
+		request agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		captured = request
+		return successfulExecutorResult(request.RunID, "inspect"), nil
+	}), newExecutorPersistence(), nil)
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{
+			Capability:   "knowledge.code.inspect",
+			Objective:    "inspect",
+			FocusFacets:  []string{"设备激活与配网"},
 			EvidenceRefs: []string{"not-owned"},
 		}},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtimeCalls != 0 || len(result.Results) != 1 ||
-		result.Results[0].Status != agentapi.DelegationRejected ||
-		result.Results[0].Error == nil ||
-		result.Results[0].Error.Code != ErrorUnauthorizedEvidence {
-		t.Fatalf("result = %+v runtime calls=%d", result, runtimeCalls)
+	if len(result.Results) != 1 ||
+		result.Results[0].Status != agentapi.DelegationCompleted {
+		t.Fatalf("result = %+v", result)
 	}
-	if len(persistence.rejections) != 1 || len(persistence.linked) != 0 {
-		t.Fatalf("rejections=%d linked=%v",
-			len(persistence.rejections), persistence.linked)
+	if !bytes.Contains(captured.Input, []byte(`"focus_facets":[]`)) ||
+		!bytes.Contains(captured.Input, []byte(`"evidence_refs":[]`)) {
+		t.Fatalf("input = %s", captured.Input)
+	}
+}
+
+func TestDelegateToolInheritsCallerDeadline(t *testing.T) {
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		context.Context,
+		agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		return agentapi.RunResult{}, nil
+	}), newExecutorPersistence(), nil)
+	if executor.Tool().Timeout != tool.InheritCallerDeadline {
+		t.Fatalf("timeout = %s, want inherit caller deadline", executor.Tool().Timeout)
 	}
 }
 
@@ -870,9 +1057,10 @@ func TestExecutorHighRiskRunsBoundedSemanticVerifier(t *testing.T) {
 	}
 	if !verificationRun.ToolScope.RestrictVisible ||
 		len(verificationRun.ToolScope.VisibleToolIDs) != 0 ||
-		verificationRun.Policy.MaxToolCalls != 0 {
-		t.Fatalf("verifier tool scope = %+v policy=%+v",
-			verificationRun.ToolScope, verificationRun.Policy)
+		verificationRun.Policy.MaxToolCalls != 0 ||
+		verificationRun.Limits.MaxToolCalls != 0 {
+		t.Fatalf("verifier tool scope = %+v policy=%+v limits=%+v",
+			verificationRun.ToolScope, verificationRun.Policy, verificationRun.Limits)
 	}
 	var inputFields map[string]json.RawMessage
 	if err := json.Unmarshal(verificationInput, &inputFields); err != nil {
@@ -907,6 +1095,53 @@ func TestExecutorHighRiskRunsBoundedSemanticVerifier(t *testing.T) {
 	}
 	if verificationArtifact == nil {
 		t.Fatal("semantic verification artifact was not settled")
+	}
+}
+
+func TestChildLimitsClampsToolCallsToDefinitionBudget(t *testing.T) {
+	executor := &Executor{policy: agentapi.DelegationPolicy{
+		MaxChildTurns: 3, MaxChildToolCalls: 4,
+		MaxChildInputTokens: 256, MaxChildOutputTokens: 128,
+		ChildTimeout: 200 * time.Millisecond,
+	}}
+	parent := ParentContext{
+		Limits: agentapi.RunLimits{Deadline: time.Now().UTC().Add(time.Minute)},
+	}
+
+	observe, err := executor.childLimits(parent, agentapi.Definition{
+		Budget: agentapi.BudgetPolicy{
+			Timeout: time.Second, MaxSteps: 8, MaxToolCalls: 24,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observe.MaxToolCalls != 4 {
+		t.Fatalf("observe max tool calls = %d, want policy cap 4", observe.MaxToolCalls)
+	}
+
+	toolless, err := executor.childLimits(parent, agentapi.Definition{
+		Budget: agentapi.BudgetPolicy{
+			Timeout: time.Second, MaxSteps: 8, MaxToolCalls: 0,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if toolless.MaxToolCalls != 0 {
+		t.Fatalf("tool-less max tool calls = %d, want 0", toolless.MaxToolCalls)
+	}
+
+	tight, err := executor.childLimits(parent, agentapi.Definition{
+		Budget: agentapi.BudgetPolicy{
+			Timeout: time.Second, MaxSteps: 2, MaxToolCalls: 2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tight.MaxToolCalls != 2 {
+		t.Fatalf("tight budget max tool calls = %d, want 2", tight.MaxToolCalls)
 	}
 }
 
@@ -1166,6 +1401,7 @@ func newExecutorFixture(
 	}
 	definition, err := agentapi.Prepare(agentapi.Definition{
 		ID: "delegation.investigator", Version: 1,
+		DisplayName: "Code Investigator",
 		Prompt: agentapi.PromptSpec{
 			System: "Inspect the delegated objective.", Version: "1",
 		},
@@ -1452,6 +1688,18 @@ func executorContext(
 		},
 	})
 	return tool.WithInvocationID(ctx, "tool-call-1")
+}
+
+func executorTaskHints(t *testing.T, request agentapi.RunRequest) ([]string, []string) {
+	t.Helper()
+	var payload struct {
+		FocusFacets  []string `json:"focus_facets"`
+		EvidenceRefs []string `json:"evidence_refs"`
+	}
+	if err := json.Unmarshal(request.Input, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.FocusFacets, payload.EvidenceRefs
 }
 
 func executorObjective(t *testing.T, request agentapi.RunRequest) string {

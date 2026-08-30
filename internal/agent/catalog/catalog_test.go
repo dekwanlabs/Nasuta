@@ -185,7 +185,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		}
 	}
 	for _, definition := range definitions[:len(wantTools)-2] {
-		if definition.Model.MaxOutputTokens != investigatorOutputMinimum ||
+		if definition.Model.MaxOutputTokens != settings.LLMAnswerMaxTokens ||
 			definition.Budget.MaxSteps != 4 ||
 			definition.Budget.MaxContinueRounds != 1 {
 			t.Fatalf("investigator %q budget = model=%d steps=%d continuation=%d",
@@ -241,7 +241,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 	}
 }
 
-func TestDefaultInvestigatorsRoleBudgetsKeepIndependentRoleFloors(t *testing.T) {
+func TestDefaultInvestigatorsInvestigatorOutputFollowsAnswerTokens(t *testing.T) {
 	settings := &config.PlatformSettings{
 		LLMProvider: "openai", LLMModel: "investigation-model",
 		LLMAnswerMaxTokens: 512, LLMContextWindow: 32000,
@@ -256,7 +256,7 @@ func TestDefaultInvestigatorsRoleBudgetsKeepIndependentRoleFloors(t *testing.T) 
 		wantOutput := 0
 		switch {
 		case strings.HasPrefix(definition.ID, "investigator."):
-			wantOutput = investigatorOutputMinimum
+			wantOutput = settings.LLMAnswerMaxTokens
 		case definition.ID == "delegation.verifier":
 			wantOutput = verifierOutputMinimum
 		case definition.ID == "synthesizer":
@@ -287,7 +287,7 @@ func TestDefaultInvestigatorsBudgetsFollowGlobalConfiguration(t *testing.T) {
 		wantOutput, wantSteps, wantRounds := 0, 0, 0
 		switch {
 		case strings.HasPrefix(definition.ID, "investigator."):
-			wantOutput, wantSteps, wantRounds = 8192, 4, 1
+			wantOutput, wantSteps, wantRounds = settings.LLMAnswerMaxTokens, 4, 1
 		case definition.ID == "delegation.verifier":
 			wantOutput, wantSteps, wantRounds = 4096, 1, 1
 		case definition.ID == "synthesizer":

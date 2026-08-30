@@ -77,6 +77,12 @@ type EventEmitter interface {
 	EmitEvent(agentrun.EventType, agentrun.ExecutionEvent)
 }
 
+// toolEventProjector mirrors a child investigator's tool lifecycle onto the
+// parent QA stream so the dashboard can nest those calls under the child.
+type toolEventProjector interface {
+	ProjectToolEvents(string, string, string, string) func()
+}
+
 type ExecutorConfig struct {
 	Capabilities       *agentapi.CapabilityRegistry
 	Definitions        agentapi.DefinitionResolver
@@ -353,10 +359,7 @@ func (executor *Executor) prepareTask(
 	request.Objective = strings.TrimSpace(request.Objective)
 	request.FocusFacets = canonicalStrings(request.FocusFacets)
 	request.EvidenceRefs = canonicalStrings(request.EvidenceRefs)
-	objectiveHash := hashJSON(request)
-	candidate := preparedTask{
-		index: index, request: request, objectiveHash: objectiveHash,
-	}
+	candidate := preparedTask{index: index, request: request}
 	if parent.Depth+1 > executor.policy.MaxDepth {
 		return candidate, ErrorDepthExceeded, fmt.Errorf("delegation depth exceeds %d", executor.policy.MaxDepth)
 	}
@@ -366,22 +369,6 @@ func (executor *Executor) prepareTask(
 	if request.Objective == "" || len(request.Objective) > maxObjectiveBytes {
 		return candidate, ErrorInvalidObjective, fmt.Errorf("delegation objective must be between 1 and %d bytes", maxObjectiveBytes)
 	}
-	if len(request.EvidenceRefs) > maxEvidenceRefs {
-		return candidate, ErrorUnauthorizedEvidence, fmt.Errorf("too many evidence references")
-	}
-	key := hashJSON(struct {
-		Capability   string
-		Objective    string
-		FocusFacets  []string
-		EvidenceRefs []string
-	}{
-		Capability: request.Capability, Objective: request.Objective,
-		FocusFacets: request.FocusFacets, EvidenceRefs: request.EvidenceRefs,
-	})
-	if _, duplicate := seen[key]; duplicate {
-		return candidate, ErrorDuplicateTask, fmt.Errorf("duplicate delegation task")
-	}
-	seen[key] = struct{}{}
 
 	capability, err := executor.capabilities.Resolve(
 		agentapi.CapabilityRef{ID: request.Capability},
@@ -404,26 +391,27 @@ func (executor *Executor) prepareTask(
 			return candidate, ErrorCapabilityNotAllowed, fmt.Errorf("capability %q is not enabled for delegation", capability.ID)
 		}
 	}
-	allowedFacets := make(map[string]struct{}, len(capability.InputFacets))
-	for _, facet := range capability.InputFacets {
-		allowedFacets[facet] = struct{}{}
+	request.FocusFacets = filterAuthorizedFacets(request.FocusFacets, capability.InputFacets)
+	request.EvidenceRefs = filterAuthorizedRefs(request.EvidenceRefs, parent)
+	if len(request.EvidenceRefs) > maxEvidenceRefs {
+		return candidate, ErrorUnauthorizedEvidence, fmt.Errorf("too many evidence references")
 	}
-	for _, facet := range request.FocusFacets {
-		if _, allowed := allowedFacets[facet]; !allowed {
-			return candidate, ErrorInvalidFacet, fmt.Errorf(
-				"focus facet %q is outside capability %q", facet, capability.ID,
-			)
-		}
+	objectiveHash := hashJSON(request)
+	candidate.request = request
+	candidate.objectiveHash = objectiveHash
+	key := hashJSON(struct {
+		Capability   string
+		Objective    string
+		FocusFacets  []string
+		EvidenceRefs []string
+	}{
+		Capability: request.Capability, Objective: request.Objective,
+		FocusFacets: request.FocusFacets, EvidenceRefs: request.EvidenceRefs,
+	})
+	if _, duplicate := seen[key]; duplicate {
+		return candidate, ErrorDuplicateTask, fmt.Errorf("duplicate delegation task")
 	}
-	for _, reference := range request.EvidenceRefs {
-		if _, allowed := parent.Evidence[reference]; !allowed {
-			if _, allowed = parent.Context[reference]; !allowed {
-				return candidate, ErrorUnauthorizedEvidence, fmt.Errorf(
-					"evidence reference %q is not in the parent ledger", reference,
-				)
-			}
-		}
-	}
+	seen[key] = struct{}{}
 	definition, err := executor.definitions.Resolve(capability.Agent)
 	if err != nil {
 		return candidate, ErrorUnknownCapability, err
@@ -610,6 +598,13 @@ func (executor *Executor) runTaskOwned(
 		agentrun.EventDelegationStarted, parent, delegationID,
 		task.childRunID, task.request, "running", "", "", 0, agentapi.Usage{},
 	)
+	stopToolProjection := func() {}
+	if projector, ok := executor.runtime.(toolEventProjector); ok {
+		stopToolProjection = projector.ProjectToolEvents(
+			task.childRunID, parent.RunID, "", task.childRunID,
+		)
+	}
+	defer stopToolProjection()
 	runCtx, cancel := context.WithDeadline(ctx, task.limits.Deadline)
 	result, runErr := executor.runtime.Run(runCtx, executor.runRequest(parent, delegationID, task))
 	childErr := runCtx.Err()
@@ -870,7 +865,7 @@ func (executor *Executor) runRequest(
 		},
 		Policy: agentapi.RunPolicy{
 			EvidenceRequired: true, EvidenceSeeded: len(task.context) > 0,
-			MaxToolCalls: executor.policy.MaxChildToolCalls,
+			MaxToolCalls: task.limits.MaxToolCalls,
 		},
 		Limits: task.limits,
 		Delegation: agentapi.RunDelegation{
@@ -906,8 +901,8 @@ func childInput(
 	}{
 		Capability: task.capability.ID, Objective: task.request.Objective,
 		ParentQuestionSummary: investigation.BoundedSummary(parent.QuestionSummary),
-		FocusFacets:           append([]string(nil), task.request.FocusFacets...),
-		EvidenceRefs:          append([]string(nil), task.request.EvidenceRefs...),
+		FocusFacets:           jsonStringArray(task.request.FocusFacets),
+		EvidenceRefs:          jsonStringArray(task.request.EvidenceRefs),
 		DelegationID:          delegationID, ParentRunID: parent.RunID, TaskIndex: task.index,
 	}
 	raw, err := json.Marshal(payload)
@@ -943,9 +938,22 @@ func (executor *Executor) childLimits(
 	)
 	return agentapi.RunLimits{
 		Deadline: deadline, MaxSteps: maxSteps,
-		MaxToolCalls:   executor.policy.MaxChildToolCalls,
+		MaxToolCalls:   clampChildToolCalls(executor.policy.MaxChildToolCalls, definition.Budget.MaxToolCalls),
 		MaxTotalTokens: tokens, MaxCostMicros: cost,
 	}, nil
+}
+
+// clampChildToolCalls keeps the child request inside the definition budget.
+// A tool-less definition (budget 0) must request 0; asking for the parent
+// child-tool cap fails admission with "max_tool_calls exceeds the definition budget".
+func clampChildToolCalls(requested, definitionBudget int64) int64 {
+	if definitionBudget <= 0 {
+		return 0
+	}
+	if requested <= 0 || requested > definitionBudget {
+		return definitionBudget
+	}
+	return requested
 }
 
 func (executor *Executor) capabilitySlot(
@@ -1048,6 +1056,15 @@ func (executor *Executor) emitWithDetails(
 	details.ChildRunID = childRunID
 	details.DelegationID = delegationID
 	details.Capability = strings.TrimSpace(task.Capability)
+	if details.AgentID == "" || details.AgentName == "" {
+		agentID, agentName := executor.projectAgent(details.Capability)
+		if details.AgentID == "" {
+			details.AgentID = agentID
+		}
+		if details.AgentName == "" {
+			details.AgentName = agentName
+		}
+	}
 	details.ObjectiveSummary = truncateText(task.Objective, 240)
 	details.Status = status
 	details.ErrorCode = errorCode
@@ -1055,6 +1072,27 @@ func (executor *Executor) emitWithDetails(
 	details.DurationMS = durationMS
 	details.Usage = usage
 	executor.events.EmitEvent(eventType, details)
+}
+
+func (executor *Executor) projectAgent(capabilityID string) (agentID, agentName string) {
+	if executor == nil || executor.capabilities == nil {
+		return "", ""
+	}
+	capability, err := executor.capabilities.Resolve(agentapi.CapabilityRef{
+		ID: strings.TrimSpace(capabilityID),
+	})
+	if err != nil {
+		return "", ""
+	}
+	agentID = strings.TrimSpace(capability.Agent.ID)
+	if executor.definitions == nil || agentID == "" {
+		return agentID, ""
+	}
+	definition, err := executor.definitions.Resolve(capability.Agent)
+	if err != nil {
+		return agentID, ""
+	}
+	return agentID, strings.TrimSpace(definition.DisplayName)
 }
 
 func (executor *Executor) emitValidation(
@@ -1288,6 +1326,45 @@ func canonicalStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func filterAuthorizedFacets(requested, allowed []string) []string {
+	if len(requested) == 0 || len(allowed) == 0 {
+		return nil
+	}
+	allow := make(map[string]struct{}, len(allowed))
+	for _, facet := range allowed {
+		allow[facet] = struct{}{}
+	}
+	kept := make([]string, 0, len(requested))
+	for _, facet := range requested {
+		if _, ok := allow[facet]; ok {
+			kept = append(kept, facet)
+		}
+	}
+	return kept
+}
+
+func jsonStringArray(values []string) []string {
+	out := make([]string, 0, len(values))
+	return append(out, values...)
+}
+
+func filterAuthorizedRefs(refs []string, parent ParentContext) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	kept := make([]string, 0, len(refs))
+	for _, reference := range refs {
+		if _, ok := parent.Evidence[reference]; ok {
+			kept = append(kept, reference)
+			continue
+		}
+		if _, ok := parent.Context[reference]; ok {
+			kept = append(kept, reference)
+		}
+	}
+	return kept
 }
 
 func appendUniqueStrings(target []string, values ...string) []string {

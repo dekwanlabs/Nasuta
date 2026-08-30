@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 
 	"github.com/dekwanlabs/nasuta/internal/agent"
-	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -355,21 +353,12 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 				return
 			}
 			if ev.Type == agentrun.EventRunFinished {
-				projected, err := handler.projectInvestigationTerminal(
-					runCtx, runID, userID, ev.Data,
-					runtime,
-				)
-				if err != nil {
-					log.ErrorfCtx(runCtx, "[qa] load investigation delivery for SSE run %s: %v", runID, err)
-					projected = &agentrun.Terminal{
-						RunID: runID, Status: agentrun.StatusFailed,
-						ErrorCode: "investigation_delivery_unavailable", Error: err.Error(),
-					}
-				}
-				if !sseEvent(string(agentrun.EventRunFinished), projected) {
+				// QA runs are ordinary agent runs. Their terminal event is already
+				// authoritative; there is no workflow delivery projection layer.
+				if !sseEvent(string(agentrun.EventRunFinished), ev.Data) {
 					return
 				}
-				terminal = projected
+				terminal = agentrun.TerminalFromEvent(ev)
 				continue
 			}
 			if !emitHubEvent(ev, sseEvent) {
@@ -801,91 +790,9 @@ func (handler *Handler) APIQARunGet(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteErr(w, err)
 		return
 	}
-	response := struct {
-		*agentrun.Detail
-		InvestigationDelivery *investigation.DeliveryResult `json:"investigation_delivery,omitempty"`
-	}{Detail: detail}
-	// A delivered parent is projected from the investigation delivery snapshot. The old
-	// QA terminal is retained only as the parent lifecycle record and is not the
-	// source of the public investigation answer.
-	if detail.RunKind == agentrun.KindQAParent &&
-		detail.Status == agentrun.StatusDone &&
-		detail.WorkflowRunID != "" {
-		runtime := handler.currentQARuntime()
-		if runtime.InvestigationReader != nil {
-			delivery, deliveryErr := runtime.InvestigationReader.LoadDelivery(
-				r.Context(), detail.WorkflowRunID,
-			)
-			if deliveryErr != nil {
-				httputil.WriteErr(w, fmt.Errorf("load investigation delivery %q: %w", detail.WorkflowRunID, deliveryErr))
-				return
-			}
-			response.InvestigationDelivery = &delivery
-			if detail.Terminal != nil {
-				projected := projectInvestigationDelivery(*detail.Terminal, delivery)
-				detail.Terminal = &projected
-			}
-		}
-	}
-	httputil.WriteJSON(w, response)
-}
-
-// APIQARunEvents returns a bounded durable Parent event page.
-func (handler *Handler) APIQARunEvents(w http.ResponseWriter, r *http.Request) {
-	runs := handler.runStore()
-	if runs == nil {
-		httputil.WriteServiceUnavailable(w, "run store not available")
-		return
-	}
-	afterSeq, err := parseQAEventCursor(r.URL.Query().Get("after_seq"))
-	if err != nil {
-		httputil.WriteBadRequest(w, err.Error())
-		return
-	}
-	query := httputil.Query(r)
-	limit := query.Int("limit", 50)
-	if query.Err() != nil || limit <= 0 || limit > 200 {
-		if query.Err() != nil {
-			httputil.WriteBadRequest(w, query.Err().Error())
-		} else {
-			httputil.WriteBadRequest(w, "limit must be between 1 and 200")
-		}
-		return
-	}
-	items, err := runs.ListParentEvents(
-		r.Context(),
-		r.PathValue("id"),
-		currentUserID(r),
-		afterSeq,
-		limit,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		httputil.WriteErrStatus(w, http.StatusNotFound, errors.New("run not found"))
-		return
-	}
-	if err != nil {
-		httputil.WriteErr(w, err)
-		return
-	}
-	nextAfterSeq := afterSeq
-	if len(items) > 0 {
-		nextAfterSeq = items[len(items)-1].Seq
-	}
-	httputil.WriteJSON(w, map[string]any{
-		"items": items, "next_after_seq": nextAfterSeq,
-	})
-}
-
-func parseQAEventCursor(value string) (int64, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0, nil
-	}
-	sequence, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || sequence < 0 {
-		return 0, fmt.Errorf("after_seq must be a non-negative integer")
-	}
-	return sequence, nil
+	// QA is backed by the ordinary agent run store. The terminal and step
+	// payloads are authoritative; no investigation workflow projection is needed.
+	httputil.WriteJSON(w, detail)
 }
 
 // APIQAToolResultArtifact reads a bounded chunk of one authoritative tool result.
@@ -951,23 +858,6 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 		if !controlAgentRun(runtime.Hub, record, req, w) {
 			return
 		}
-	case agentrun.KindQAParent:
-		if req.Action != "abort" {
-			httputil.WriteBadRequest(w, "QA parent runs only support abort")
-			return
-		}
-		if !activeRunStatus(record.Status) {
-			httputil.WriteBadRequest(w, "only an active run can be aborted")
-			return
-		}
-		if runtime.InvestigationCanceller == nil {
-			httputil.WriteServiceUnavailable(w, "QA investigation cancellation not available")
-			return
-		}
-		if err := runtime.InvestigationCanceller.Cancel(r.Context(), runID, userID); err != nil {
-			httputil.WriteErr(w, err)
-			return
-		}
 	default:
 		httputil.WriteErr(w, fmt.Errorf(
 			"run %q has unsupported kind %q",
@@ -1022,65 +912,6 @@ func controlAgentRun(
 
 func activeRunStatus(status agentrun.Status) bool {
 	return status == agentrun.StatusRunning || status == agentrun.StatusPaused
-}
-
-func (handler *Handler) projectInvestigationTerminal(
-	ctx context.Context,
-	runID string,
-	userID int64,
-	data any,
-	runtime QARuntime,
-) (*agentrun.Terminal, error) {
-	terminal, ok := data.(*agentrun.Terminal)
-	if !ok || terminal == nil || runtime.RunStore == nil || runtime.InvestigationReader == nil {
-		if terminal == nil {
-			return nil, fmt.Errorf("run.finished event has no terminal")
-		}
-		return terminal, nil
-	}
-	detail, err := runtime.RunStore.GetForUser(runID, userID)
-	if err != nil {
-		return nil, fmt.Errorf("load QA parent %q: %w", runID, err)
-	}
-	if detail.RunKind != agentrun.KindQAParent ||
-		detail.Status != agentrun.StatusDone ||
-		strings.TrimSpace(detail.WorkflowRunID) == "" {
-		return terminal, nil
-	}
-	delivery, err := runtime.InvestigationReader.LoadDelivery(ctx, detail.WorkflowRunID)
-	if err != nil {
-		if errors.Is(err, investigation.ErrNoDelivery) {
-			return terminal, nil
-		}
-		return nil, fmt.Errorf("load investigation delivery %q: %w", detail.WorkflowRunID, err)
-	}
-	projected := projectInvestigationDelivery(*terminal, delivery)
-	return &projected, nil
-}
-
-func projectInvestigationDelivery(
-	terminal agentrun.Terminal,
-	delivery investigation.DeliveryResult,
-) agentrun.Terminal {
-	terminal.Answer = delivery.Text
-	terminal.InvestigationDelivery = &delivery
-	// The native delivery is authoritative. Do not leak a stale parent error
-	// when a partial answer was successfully persisted.
-	terminal.ErrorCode = ""
-	terminal.Error = ""
-	if delivery.Failure != nil {
-		terminal.ErrorCode = string(delivery.Failure.Code)
-		terminal.Error = delivery.Failure.Message
-	}
-	if delivery.Status == investigation.DeliveryFailed {
-		terminal.Status = agentrun.StatusFailed
-		if terminal.ErrorCode == "" {
-			terminal.ErrorCode = "delivery_failed"
-		}
-	} else {
-		terminal.Status = agentrun.StatusDone
-	}
-	return terminal
 }
 
 func emitHubEvent(ev agentrun.SSEEvent, sseEvent func(string, any) bool) bool {

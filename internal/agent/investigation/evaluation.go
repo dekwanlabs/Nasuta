@@ -8,11 +8,12 @@ import (
 // EvaluationResult is a deterministic regression gate for one delivered run. It
 // checks delivery text, evidence traceability, and required-goal coverage.
 type EvaluationResult struct {
-	RunID                string
-	NonEmptyDelivery     bool
-	ClaimsTraceable      bool
-	RequiredGoalsCovered bool
-	Failures             []string
+	RunID                       string
+	NonEmptyDelivery            bool
+	ClaimsTraceable             bool
+	RequiredGoalsCovered        bool
+	RequiredEntityFacetsCovered bool
+	Failures                    []string
 }
 
 // EvaluateDelivery applies the P0 non-empty and traceability invariants to one
@@ -55,10 +56,15 @@ func EvaluateDelivery(run InvestigationRun) EvaluationResult {
 			result.Failures = append(result.Failures, fmt.Sprintf("required goal %q is not covered", goal.ID))
 		}
 	}
+	result.RequiredEntityFacetsCovered = requiredEntityFacetCoverageComplete(run.Contract, run.Report)
+	if !result.RequiredEntityFacetsCovered {
+		result.Failures = append(result.Failures, "required entity facets are not covered")
+	}
 	return result
 }
 
 // Pass reports whether all deterministic invariants held.
 func (result EvaluationResult) Pass() bool {
-	return result.NonEmptyDelivery && result.ClaimsTraceable && result.RequiredGoalsCovered
+	return result.NonEmptyDelivery && result.ClaimsTraceable && result.RequiredGoalsCovered &&
+		result.RequiredEntityFacetsCovered
 }

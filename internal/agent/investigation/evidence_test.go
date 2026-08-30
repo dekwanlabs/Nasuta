@@ -533,3 +533,58 @@ func TestBudgetFailureRequiresOwnedArtifact(t *testing.T) {
 		t.Fatal("task-owned claim did not satisfy budget failure")
 	}
 }
+
+func TestClaimLedgerPreservesEntityIDsAcrossAdmitAndRestore(t *testing.T) {
+	evidence := NewEvidenceLedger()
+	unit, _, err := evidence.Admit("collect", EvidenceCandidate{
+		SourceKind: "code", Target: "checkout.go", Content: "Checkout routes an order to billing.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := EvidenceRef{EvidenceID: unit.ID, SourceKind: unit.SourceKind, Target: unit.Target, ContentHash: unit.ContentHash}
+	ledger := NewClaimLedger([]EvidenceGoal{{ID: "core_flow", Kind: "core_flow", Required: true}}, evidence)
+	claim, added, err := ledger.Admit("verify", ClaimCandidate{
+		GoalID: "core_flow", Text: "Checkout routes an order to billing.", Status: ClaimSupported,
+		EntityIDs: []string{"checkout"}, EvidenceRefs: []EvidenceRef{ref},
+	})
+	if err != nil || !added {
+		t.Fatalf("admit claim = %#v added=%t err=%v", claim, added, err)
+	}
+	if len(claim.EntityIDs) != 1 || claim.EntityIDs[0] != "checkout" {
+		t.Fatalf("claim entity ids = %#v", claim.EntityIDs)
+	}
+
+	restored := NewClaimLedgerFrom([]EvidenceGoal{{ID: "core_flow", Kind: "core_flow", Required: true}}, evidence, ledger.All())
+	claims := restored.All()
+	if len(claims) != 1 || len(claims[0].EntityIDs) != 1 || claims[0].EntityIDs[0] != "checkout" {
+		t.Fatalf("restored claims = %#v", claims)
+	}
+}
+
+func TestClaimLedgerDoesNotMergeSameTextAcrossDifferentEntities(t *testing.T) {
+	evidence := NewEvidenceLedger()
+	unit, _, err := evidence.Admit("collect", EvidenceCandidate{
+		SourceKind: "docs", Target: "overview.md", Content: "The domain has a documented application flow.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := EvidenceRef{EvidenceID: unit.ID, SourceKind: unit.SourceKind, Target: unit.Target, ContentHash: unit.ContentHash}
+	ledger := NewClaimLedger([]EvidenceGoal{{ID: "core_flow", Kind: "core_flow", Required: true}}, evidence)
+	for _, entityID := range []string{"checkout", "billing"} {
+		if _, added, err := ledger.Admit("verify-"+entityID, ClaimCandidate{
+			GoalID: "core_flow", Text: "The domain has a documented application flow.", Status: ClaimSupported,
+			EntityIDs: []string{entityID}, EvidenceRefs: []EvidenceRef{ref},
+		}); err != nil || !added {
+			t.Fatalf("admit %s: added=%t err=%v", entityID, added, err)
+		}
+	}
+	claims := ledger.All()
+	if len(claims) != 2 {
+		t.Fatalf("claims = %#v, want distinct claims per entity", claims)
+	}
+	if claims[0].ID == claims[1].ID {
+		t.Fatalf("claim ids collided: %#v", claims)
+	}
+}

@@ -27,8 +27,6 @@ type SessionHistory = session.History
 type HistoryCandidates = session.HistoryCandidates
 type CandidateDiscovery = session.CandidateDiscovery
 type DefinitionResolver = definition.Resolver
-type ScenarioRunStart = definition.ScenarioRunStart
-type ScenarioLifecycle = definition.ScenarioLifecycle
 type ScenarioToolSet = definition.ScenarioToolSet
 type ScenarioToolSource = definition.ScenarioToolSource
 type Agent = execution.Agent
@@ -41,7 +39,6 @@ type ExecutionEvent = run.ExecutionEvent
 type ExecutionEventEmitter = run.ExecutionEventEmitter
 type SessionStatusEvent = run.SessionStatusEvent
 type ContextUsageEvent = run.ContextUsageEvent
-type QAParentRecord = run.QAParentRecord
 type EventType = run.EventType
 type ToolPolicy = tool.Policy
 type Tool = tool.Tool
@@ -64,8 +61,9 @@ const (
 
 var ErrEmptyAnswer = run.ErrEmptyAnswer
 
-type ParentRunReader interface {
-	GetQAParent(string) (run.QAParentRecord, error)
+type sessionTurnStore interface {
+	EnsureSession(string, int64, string) error
+	AppendTurn(string, string, int64, []llm.Message) (int, error)
 }
 
 type preparationStepRecorder interface {

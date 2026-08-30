@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -93,23 +92,6 @@ func TestEvidenceMetricsFinalStatus(t *testing.T) {
 	}
 }
 
-func TestRoutedTemporalToolUsesFullInvestigationBudget(t *testing.T) {
-	candidates := []retrieval.ToolRouteCandidate{
-		{ID: "search_code", Temporal: false},
-		{ID: "observe_logs", Temporal: true},
-	}
-	if !toolsNeedInvestigation(candidates, []string{"observe_logs"}) {
-		t.Fatal("selected temporal tool did not enable full investigation")
-	}
-	agent := NewAgent(nil, nil, Config{MaxSteps: 8}, nil, nil)
-	if got := agent.MaxStepsForContext("查一下问题", domain.EvidencePlan{}, true); got != 8 {
-		t.Fatalf("max steps = %d, want 8", got)
-	}
-	if toolsNeedInvestigation(candidates, []string{"search_code"}) {
-		t.Fatal("non-temporal tool enabled full investigation")
-	}
-}
-
 func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
 	svc := &Service{}
 	prepared := &preparation{
@@ -141,8 +123,8 @@ func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
 
 	svc.applyExecutionRoute(prepared)
 
-	if prepared.execution.DowngradeReason != "investigation_unavailable" {
-		t.Fatalf("downgrade reason = %q, want investigation_unavailable", prepared.execution.DowngradeReason)
+	if prepared.execution.DowngradeReason != "delegation_unavailable" {
+		t.Fatalf("downgrade reason = %q, want delegation_unavailable", prepared.execution.DowngradeReason)
 	}
 	if prepared.planning.RoutedToolIDs != nil {
 		t.Fatalf("routed tools = %v, want nil after planning degradation", prepared.planning.RoutedToolIDs)
@@ -178,8 +160,8 @@ func TestExecutionRoutingDoesNotUseResolvedHistoryRelation(t *testing.T) {
 
 	svc.applyExecutionRoute(prepared)
 
-	if prepared.execution.DowngradeReason != "investigation_unavailable" {
-		t.Fatalf("downgrade reason = %q, want investigation_unavailable",
+	if prepared.execution.DowngradeReason != "delegation_unavailable" {
+		t.Fatalf("downgrade reason = %q, want delegation_unavailable",
 			prepared.execution.DowngradeReason)
 	}
 }
@@ -653,135 +635,6 @@ func (emptyContextRetriever) ContextBudget() int {
 	return 48000
 }
 
-type investigationRunnerRecorder struct {
-	start  func(context.Context, InvestigationRequest) error
-	await  func(context.Context, string) (InvestigationTerminal, error)
-	load   func(context.Context, string) (InvestigationTerminal, error)
-	cancel func(context.Context, string, int64) error
-}
-
-func (*investigationRunnerRecorder) Available() bool {
-	return true
-}
-
-func (runner *investigationRunnerRecorder) Start(
-	ctx context.Context,
-	request InvestigationRequest,
-) error {
-	if runner.start == nil {
-		panic("unexpected InvestigationRunner.Start")
-	}
-	return runner.start(ctx, request)
-}
-
-func (runner *investigationRunnerRecorder) AwaitTerminal(
-	ctx context.Context,
-	workflowRunID string,
-) (InvestigationTerminal, error) {
-	if runner.await == nil {
-		panic("unexpected InvestigationRunner.AwaitTerminal")
-	}
-	return runner.await(ctx, workflowRunID)
-}
-
-func (runner *investigationRunnerRecorder) LoadTerminal(
-	ctx context.Context,
-	workflowRunID string,
-) (InvestigationTerminal, error) {
-	if runner.load == nil {
-		panic("unexpected InvestigationRunner.LoadTerminal")
-	}
-	return runner.load(ctx, workflowRunID)
-}
-
-func (runner *investigationRunnerRecorder) Cancel(
-	ctx context.Context,
-	workflowRunID string,
-	userID int64,
-) error {
-	if runner.cancel == nil {
-		panic("unexpected InvestigationRunner.Cancel")
-	}
-	return runner.cancel(ctx, workflowRunID, userID)
-}
-
-type scenarioRunRecorder struct {
-	context  context.Context
-	released chan struct{}
-	evidence []tool.EvidenceUnit
-}
-
-func (recorder *scenarioRunRecorder) Context(ctx context.Context) context.Context {
-	recorder.context = ctx
-	return ctx
-}
-
-func (recorder *scenarioRunRecorder) RecordStep(
-	context.Context,
-	RunStepRecord,
-) error {
-	return nil
-}
-
-func (recorder *scenarioRunRecorder) RecordEvidence(
-	_ context.Context,
-	units []tool.EvidenceUnit,
-) error {
-	recorder.evidence = cloneEvidenceUnits(units)
-	return nil
-}
-
-func (recorder *scenarioRunRecorder) Release() {
-	if recorder.released != nil {
-		recorder.released <- struct{}{}
-	}
-}
-
-type scenarioLifecycleRecorder struct {
-	mu        sync.Mutex
-	start     chan ScenarioRunStart
-	completed chan RunOutcome
-	scenario  *scenarioRunRecorder
-	parent    QAParentRecord
-	complete  func(context.Context, string, RunOutcome) error
-}
-
-func (recorder *scenarioLifecycleRecorder) Start(_ context.Context, start ScenarioRunStart) (ScenarioRun, error) {
-	recorder.mu.Lock()
-	recorder.parent = QAParentRecord{
-		ID: start.RunID, WorkflowRunID: start.WorkflowRunID,
-		UserID: start.UserID, SessionID: start.SessionID,
-		Question: start.Question, Status: RunStatusRunning,
-	}
-	recorder.mu.Unlock()
-	recorder.start <- start
-	return recorder.scenario, nil
-}
-
-func (recorder *scenarioLifecycleRecorder) Complete(
-	ctx context.Context,
-	runID string,
-	outcome RunOutcome,
-) error {
-	if recorder.complete != nil {
-		return recorder.complete(ctx, runID, outcome)
-	}
-	recorder.mu.Lock()
-	recorder.parent.Status = outcome.Status
-	recorder.mu.Unlock()
-	recorder.completed <- outcome
-	return nil
-}
-
-func (recorder *scenarioLifecycleRecorder) GetQAParent(runID string) (QAParentRecord, error) {
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	if recorder.parent.ID != runID {
-		return QAParentRecord{}, fmt.Errorf("QA parent %q not found", runID)
-	}
-	return recorder.parent, nil
-}
-
 type executionEventRecord struct {
 	eventType EventType
 	event     ExecutionEvent
@@ -822,352 +675,13 @@ func (failingContextRetriever) ContextBudget() int {
 	return 48000
 }
 
-func TestSubmitInvestigationSurvivesCallerCancellation(t *testing.T) {
-	const runID = "qa-parent-run"
-	requests := make(chan InvestigationRequest, 1)
-	awaited := make(chan context.Context, 1)
-	release := make(chan struct{})
-	scenario := &scenarioRunRecorder{released: make(chan struct{}, 1)}
-	lifecycle := &scenarioLifecycleRecorder{
-		start:     make(chan ScenarioRunStart, 1),
-		completed: make(chan RunOutcome, 1),
-		scenario:  scenario,
-	}
-	runner := &investigationRunnerRecorder{
-		start: func(_ context.Context, request InvestigationRequest) error {
-			requests <- request
-			return nil
-		},
-		await: func(ctx context.Context, workflowRunID string) (InvestigationTerminal, error) {
-			awaited <- ctx
-			<-release
-			result := InvestigationResult{Answer: "multi-agent answer"}
-			return InvestigationTerminal{
-				WorkflowRunID: workflowRunID,
-				Status:        InvestigationSucceeded,
-				Completeness:  InvestigationComplete,
-				Output:        &result,
-			}, nil
-		},
-	}
-	qa := &Service{
-		investigation: runner,
-		scenarios:     lifecycle,
-		coordinator: &Coordinator{
-			investigation: runner,
-			scenarios:     lifecycle,
-			parentRuns:    lifecycle,
-			sessions:      &coordinatorSessionStore{turnByRun: make(map[string]int)},
-		},
-	}
-	request := Request{
-		Question:     "trace the checkout flow",
-		Conversation: ConversationContext{SessionID: "session-1"},
-		UserID:       42,
-		RunID:        runID,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	result, err := qa.submitInvestigation(&preparation{ctx: ctx, request: request})
-	if err != nil {
-		t.Fatalf("submitInvestigation: %v", err)
-	}
-	if result.RunID != runID {
-		t.Fatalf("result run ID = %q, want %q", result.RunID, runID)
-	}
-	select {
-	case start := <-lifecycle.start:
-		if start.RunID != runID || start.UserID != 42 || start.Mode != "multi_agent" ||
-			start.SessionID != "session-1" {
-			t.Fatalf("scenario start = %+v", start)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("scenario did not start")
-	}
-	select {
-	case investigation := <-requests:
-		if investigation.Contract.TaskID != runID ||
-			!strings.HasPrefix(investigation.WorkflowRunID, "workflow_") ||
-			investigation.Actor.UserID != 42 {
-			t.Fatalf("investigation request = %+v", investigation)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("investigation did not start")
-	}
-	runContext := <-awaited
-	cancel()
-	close(release)
-	select {
-	case outcome := <-lifecycle.completed:
-		if outcome.Status != RunStatusDone || outcome.Answer != "multi-agent answer" {
-			t.Fatalf("outcome = %+v", outcome)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("parent run did not finish")
-	}
-	if runContext.Err() != nil {
-		t.Fatalf("investigation context was canceled after caller cancellation: %v", runContext.Err())
-	}
-	if runContext.Err() != nil {
-		t.Fatalf("run context = %v, want uncanceled context", runContext.Err())
-	}
-}
-
-func TestAskMultiAgentRoutePersistsParentOutcomeAndCorrelation(t *testing.T) {
-	const runID = "qa-multi-agent-run"
-	client, server := newQATestLLM(t, serverPromotableRouteBody(), "")
-	defer server.Close()
-
-	registry := tool.NewRegistry()
-	qa, _ := newQARuntimeFixture(t, client, server.URL, registry, nil, false)
-	scenario := &scenarioRunRecorder{released: make(chan struct{}, 1)}
-	lifecycle := &scenarioLifecycleRecorder{
-		start:     make(chan ScenarioRunStart, 1),
-		completed: make(chan RunOutcome, 1),
-		scenario:  scenario,
-	}
-	investigationRequests := make(chan InvestigationRequest, 1)
-	qa.scenarios = lifecycle
-	qa.investigation = &investigationRunnerRecorder{
-		start: func(_ context.Context, request InvestigationRequest) error {
-			investigationRequests <- request
-			return nil
-		},
-		await: func(_ context.Context, workflowRunID string) (InvestigationTerminal, error) {
-			result := InvestigationResult{
-				Answer: "  grounded multi-agent answer  ",
-				Citations: []InvestigationCitation{{
-					Claim: "checkout calls inventory",
-					Evidence: []InvestigationEvidence{{
-						Kind: "call", Reference: "Checkout.Place", Summary: "calls inventory",
-					}},
-				}},
-			}
-			return InvestigationTerminal{
-				WorkflowRunID: workflowRunID,
-				Status:        InvestigationSucceeded,
-				Completeness:  InvestigationComplete,
-				Output:        &result,
-				Usage:         InvestigationUsage{TotalTokens: 91, ToolCalls: 4},
-			}, nil
-		},
-	}
-	qa.coordinator = &Coordinator{
-		investigation: qa.investigation,
-		scenarios:     lifecycle,
-		parentRuns:    lifecycle,
-		sessions:      &coordinatorSessionStore{turnByRun: make(map[string]int)},
-	}
-	events := &executionEventRecorder{}
-	qa.executionEvents = events
-
-	result, err := qa.Ask(context.Background(), Request{
-		Question:     "trace the checkout flow",
-		Conversation: ConversationContext{SessionID: "session-1"},
-		UserID:       42,
-		RunID:        runID,
-	})
-	if err != nil {
-		t.Fatalf("Ask: %v", err)
-	}
-	if result.RunID != runID {
-		t.Fatalf("result run ID = %q, want %q", result.RunID, runID)
-	}
-
-	select {
-	case start := <-lifecycle.start:
-		if start.RunID != runID || start.ParentRunID != "" || start.UserID != 42 ||
-			!strings.HasPrefix(start.WorkflowRunID, "workflow_") ||
-			start.SessionID != "session-1" || start.Mode != "multi_agent" {
-			t.Fatalf("scenario start = %+v", start)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("scenario did not start")
-	}
-
-	select {
-	case request := <-investigationRequests:
-		if request.Contract.TaskID != runID || !strings.HasPrefix(request.WorkflowRunID, "workflow_") ||
-			request.Contract.Objective != "trace the checkout flow" ||
-			request.Actor.UserID != 42 {
-			t.Fatalf("investigation request = %+v", request)
-		}
-		if request.Proposal == nil || len(request.Proposal.Tasks) != 3 ||
-			request.Proposal.Tasks[0].ID != "investigate.design.code.1" ||
-			!reflect.DeepEqual(request.Proposal.Tasks[0].InvestigationGoalIDs, []string{"design"}) ||
-			request.Proposal.Tasks[1].ID != "investigate.implementation.service.1" ||
-			!reflect.DeepEqual(request.Proposal.Tasks[1].InvestigationGoalIDs, []string{"implementation"}) ||
-			request.Proposal.Tasks[2].ID != "synthesize" {
-			t.Fatalf("task graph proposal = %+v", request.Proposal)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("investigation did not start")
-	}
-
-	select {
-	case outcome := <-lifecycle.completed:
-		if outcome.Status != RunStatusDone || outcome.Answer != "grounded multi-agent answer" ||
-			outcome.TokenUsed != 91 || outcome.HitCount != 1 ||
-			outcome.Evidence.Status != EvidenceComplete ||
-			outcome.Evidence.ToolCallCount != 4 {
-			t.Fatalf("parent outcome = %+v", outcome)
-		}
-		if len(outcome.References) != 1 ||
-			outcome.References[0].Type != "call" ||
-			outcome.References[0].Target != "Checkout.Place" {
-			t.Fatalf("parent references = %+v", outcome.References)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("parent run did not finish")
-	}
-
-	recorded := events.Snapshot()
-	if len(recorded) != 1 || recorded[0].eventType != EventExecutionRouted ||
-		recorded[0].event.RunID != runID ||
-		recorded[0].event.Strategy != string(executionPathWorkflow) ||
-		recorded[0].event.Status != "completed" {
-		t.Fatalf("execution events = %+v", recorded)
-	}
-}
-
-func TestAskMultiAgentInvestigationFailureCompletesParentAsFailed(t *testing.T) {
-	const runID = "qa-multi-agent-failed-run"
-	client, server := newQATestLLM(t, serverPromotableRouteBody(), "")
-	defer server.Close()
-
-	qa, _ := newQARuntimeFixture(t, client, server.URL, tool.NewRegistry(), nil, false)
-	scenario := &scenarioRunRecorder{released: make(chan struct{}, 1)}
-	lifecycle := &scenarioLifecycleRecorder{
-		start:     make(chan ScenarioRunStart, 1),
-		completed: make(chan RunOutcome, 1),
-		scenario:  scenario,
-	}
-	qa.scenarios = lifecycle
-	qa.investigation = &investigationRunnerRecorder{
-		start: func(context.Context, InvestigationRequest) error {
-			return nil
-		},
-		await: func(_ context.Context, workflowRunID string) (InvestigationTerminal, error) {
-			return InvestigationTerminal{
-				WorkflowRunID: workflowRunID,
-				Status:        InvestigationFailed,
-				ErrorCode:     "provider_failed",
-			}, nil
-		},
-	}
-	qa.coordinator = NewCoordinator(
-		qa.investigation,
-		lifecycle,
-		lifecycle,
-		nil,
-	)
-
-	if _, err := qa.Ask(context.Background(), Request{
-		Question: "trace the checkout flow", UserID: 42, RunID: runID,
-	}); err != nil {
-		t.Fatalf("Ask: %v", err)
-	}
-
-	select {
-	case outcome := <-lifecycle.completed:
-		if outcome.Status != RunStatusFailed || outcome.ErrorCode != "provider_failed" {
-			t.Fatalf("parent outcome = %+v", outcome)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("parent run did not finish")
-	}
-}
-
-func TestAskExecutionEventsOrderDegradedRouteBeforeSingleAgent(t *testing.T) {
-	const runID = "qa-policy-downgrade-run"
-	client, server := newQATestLLM(t, serverPromotableRouteBody(), "single-agent answer")
-	defer server.Close()
-
-	retriever := retrieval.New(emptyRetrievalTools{}, config.Config{})
-	qa, runtime := newQARuntimeFixture(t, client, server.URL, tool.NewRegistry(), retriever, false)
-	scenario := &scenarioRunRecorder{}
-	lifecycle := &scenarioLifecycleRecorder{
-		start:     make(chan ScenarioRunStart, 1),
-		completed: make(chan RunOutcome, 1),
-		scenario:  scenario,
-	}
-	qa.scenarios = lifecycle
-	qa.investigation = &investigationRunnerRecorder{}
-	qa.coordinator = NewCoordinator(
-		qa.investigation,
-		lifecycle,
-		lifecycle,
-		nil,
-	)
-	events := &executionEventRecorder{}
-	qa.executionEvents = events
-	terminalEvents := runtime.Hub().Subscribe(runID)
-
-	result, err := qa.Ask(context.Background(), Request{
-		Question: "trace the checkout flow",
-		PreloadedContext: []ContextBlock{{
-			Source: "scenario", Content: "supplied scenario context",
-		}},
-		UserID:         42,
-		RunID:          runID,
-		WorkflowRunID:  "parent-workflow",
-		WorkflowNodeID: "child-node",
-	})
-	if err != nil {
-		t.Fatalf("Ask: %v", err)
-	}
-	if result.RunID != runID {
-		t.Fatalf("result run ID = %q, want %q", result.RunID, runID)
-	}
-	terminal := waitForTerminal(t, terminalEvents)
-	if terminal.Status != RunStatusDone || terminal.Answer != "single-agent answer" {
-		t.Fatalf("terminal = %+v", terminal)
-	}
-	select {
-	case start := <-lifecycle.start:
-		t.Fatalf("policy-downgraded request started scenario: %+v", start)
-	default:
-	}
-
-	recorded := events.Snapshot()
-	if len(recorded) != 2 ||
-		recorded[0].eventType != EventExecutionRouted ||
-		recorded[1].eventType != EventExecutionDegraded {
-		t.Fatalf("execution events = %+v", recorded)
-	}
-	if recorded[0].event.RunID != runID ||
-		recorded[0].event.Strategy != string(retrieval.ExecutionSingleAgent) ||
-		recorded[0].event.Status != "completed" {
-		t.Fatalf("routed event = %+v", recorded[0])
-	}
-	if recorded[1].event.RunID != runID ||
-		recorded[1].event.Strategy != string(retrieval.ExecutionSingleAgent) ||
-		recorded[1].event.Status != "degraded" ||
-		recorded[1].event.Reason != "policy_disallows_multi_agent" {
-		t.Fatalf("degraded event = %+v", recorded[1])
-	}
-}
-
-func TestAskSingleAgentRouteDoesNotStartScenario(t *testing.T) {
-	const runID = "qa-single-agent-run"
+func TestAskAlwaysUsesNormalAgentRun(t *testing.T) {
+	const runID = "qa-normal-agent-run"
 	client, server := newQATestLLM(t, singleAgentRouteBody(), "single-agent answer")
 	defer server.Close()
 
 	retriever := retrieval.New(emptyRetrievalTools{}, config.Config{})
 	qa, runtime := newQARuntimeFixture(t, client, server.URL, tool.NewRegistry(), retriever, false)
-	scenario := &scenarioRunRecorder{}
-	lifecycle := &scenarioLifecycleRecorder{
-		start:     make(chan ScenarioRunStart, 1),
-		completed: make(chan RunOutcome, 1),
-		scenario:  scenario,
-	}
-	qa.scenarios = lifecycle
-	qa.investigation = &investigationRunnerRecorder{}
-	qa.coordinator = NewCoordinator(
-		qa.investigation,
-		lifecycle,
-		lifecycle,
-		nil,
-	)
 	events := &executionEventRecorder{}
 	qa.executionEvents = events
 	terminalEvents := runtime.Hub().Subscribe(runID)
@@ -1181,19 +695,20 @@ func TestAskSingleAgentRouteDoesNotStartScenario(t *testing.T) {
 	if terminal.Status != RunStatusDone || terminal.Answer != "single-agent answer" {
 		t.Fatalf("terminal = %+v", terminal)
 	}
-	select {
-	case start := <-lifecycle.start:
-		t.Fatalf("single-agent request started scenario: %+v", start)
-	default:
-	}
 	recorded := events.Snapshot()
-	if len(recorded) != 1 || recorded[0].eventType != EventExecutionRouted {
+	if len(recorded) != 2 || recorded[0].eventType != EventExecutionRouted ||
+		recorded[1].eventType != EventExecutionDegraded {
 		t.Fatalf("execution events = %+v", recorded)
 	}
 	if recorded[0].event.Strategy != string(retrieval.ExecutionSingleAgent) ||
 		recorded[0].event.Status != "completed" ||
-		recorded[0].event.Reason != "insufficient_independent_tasks" {
+		recorded[0].event.Reason != routeReasonDelegationUnavailable {
 		t.Fatalf("routed event = %+v", recorded[0])
+	}
+	if recorded[1].event.Strategy != string(retrieval.ExecutionSingleAgent) ||
+		recorded[1].event.Status != "degraded" ||
+		recorded[1].event.Reason != routeReasonDelegationUnavailable {
+		t.Fatalf("degraded event = %+v", recorded[1])
 	}
 }
 

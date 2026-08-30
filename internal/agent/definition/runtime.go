@@ -28,15 +28,9 @@ type Runtime struct {
 	registry    *tool.Registry
 	executor    *execution.ToolExecutor
 	settings    runtimeSettings
-	scenarios   *ScenarioRuntime
+	runStore    *run.Store
 	usageStore  llm.UsageRecorder
 	hub         *run.Hub
-}
-
-// ScenarioRuntime owns durable non-agent Run lifecycles without requiring model execution.
-type ScenarioRuntime struct {
-	runStore *run.Store
-	hub      *run.Hub
 }
 
 // Resolver resolves one exact immutable definition version.
@@ -62,6 +56,7 @@ type preparedExecution struct {
 	offeredTools     map[tool.ToolID]struct{}
 	pruneApplied     bool
 	structuredOutput bool
+	answerReserve    time.Duration
 }
 
 type toolSelection struct {
@@ -87,42 +82,6 @@ type activeRun struct {
 	preparationEvidence  run.EvidenceMetrics
 	outcomeSet           bool
 	outcome              run.Outcome
-}
-
-// ScenarioRunStart carries business-run identity without an agent snapshot.
-type ScenarioRunStart struct {
-	RunID         string
-	ParentRunID   string
-	WorkflowRunID string
-	UserID        int64
-	SessionID     string
-	Question      string
-	Mode          string
-	Limits        agentapi.RunLimits
-}
-
-// ScenarioRun owns one non-agent parent lifecycle.
-type ScenarioRun interface {
-	Context(context.Context) context.Context
-	RecordStep(context.Context, run.StepRecord) error
-	Release()
-}
-
-// ScenarioLifecycle keeps parent persistence behind the Runtime boundary.
-type ScenarioLifecycle interface {
-	Start(context.Context, ScenarioRunStart) (ScenarioRun, error)
-	Complete(context.Context, string, run.Outcome) error
-}
-
-type scenarioManagedRun struct {
-	runtime   *ScenarioRuntime
-	start     ScenarioRunStart
-	trace     *runtrace.Scope
-	ownsTrace bool
-
-	mu                   sync.Mutex
-	preparationStepCount int
-	release              sync.Once
 }
 
 // NewRuntime pins one configured model endpoint for definition execution.
@@ -161,7 +120,7 @@ func NewRuntime(
 	if runStore != nil {
 		usageStore = runStore
 	}
-	scenarios := NewScenarioRuntime(runStore)
+	hub := run.NewHub(runStore)
 	return &Runtime{
 		definitions: definitions,
 		schemas:     schemas,
@@ -173,30 +132,14 @@ func NewRuntime(
 			answerReserve:               answerReserve,
 			disableLegacyAnswerRecovery: settings.DisableLegacyAnswerRecovery,
 		},
-		scenarios:  scenarios,
+		runStore:   runStore,
 		usageStore: usageStore,
-		hub:        scenarios.Hub(),
+		hub:        hub,
 	}, nil
-}
-
-// NewScenarioRuntime binds Parent persistence and terminal projection.
-func NewScenarioRuntime(runStore *run.Store) *ScenarioRuntime {
-	return &ScenarioRuntime{
-		runStore: runStore,
-		hub:      run.NewHub(runStore),
-	}
 }
 
 // Hub exposes the Runtime-owned event and control boundary.
 func (runtime *Runtime) Hub() *run.Hub {
-	if runtime == nil {
-		return nil
-	}
-	return runtime.hub
-}
-
-// Hub exposes Parent lifecycle events independently of model execution.
-func (runtime *ScenarioRuntime) Hub() *run.Hub {
 	if runtime == nil {
 		return nil
 	}

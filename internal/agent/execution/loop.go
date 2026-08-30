@@ -65,7 +65,6 @@ type ConversationContext struct {
 	RecentDialogue       []memory.RecentDialogueTurn
 	SessionTitle         string
 	Instructions         []llm.Message
-	FullInvestigation    bool
 	EvidenceSeeded       bool
 	PrunedToolIDs        map[tool.ToolID]struct{}
 	PruneApplied         bool

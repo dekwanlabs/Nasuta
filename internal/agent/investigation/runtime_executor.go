@@ -2,16 +2,21 @@ package investigation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
+	canonicalevidence "github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
+	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
@@ -184,12 +189,13 @@ func (e AgentRuntimeTaskExecutor) verifierMinimumInputTokens(task ExecutableTask
 		if statement == "" || statementCost <= 0 {
 			break
 		}
+		claimID := syntheticEvidenceID(index)
 		claims = append(claims, verificationClaim{
-			ID:        syntheticEvidenceID(index),
+			ID:        claimID,
 			Statement: statement,
-			Citations: []string{syntheticEvidenceID(index)},
+			Citations: []string{claimID},
 		})
-		evidenceRefs = append(evidenceRefs, syntheticEvidenceID(index))
+		evidenceRefs = append(evidenceRefs, claimID)
 		if statementTokens > statementCost {
 			virtualEvidenceTokens = saturatingAdd(virtualEvidenceTokens, statementTokens-statementCost)
 		}
@@ -201,19 +207,27 @@ func (e AgentRuntimeTaskExecutor) verifierMinimumInputTokens(task ExecutableTask
 		}
 	}
 
+	lookup := make(map[string]verifierEvidenceView, len(claims))
+	for _, claim := range claims {
+		lookup[claim.ID] = verifierEvidenceView{
+			Kind: "runbook", Reference: claim.ID, Summary: claim.Statement,
+		}
+	}
 	payload, err := json.Marshal(struct {
-		Question         string              `json:"question"`
-		DecisionQuestion string              `json:"decision_question"`
-		Claims           []verificationClaim `json:"claims"`
-		Conflicts        []any               `json:"conflicts"`
-		EvidenceRefs     []string            `json:"evidence_refs"`
-		Reasons          []string            `json:"reasons"`
+		Question         string                         `json:"question"`
+		DecisionQuestion string                         `json:"decision_question"`
+		Claims           []verificationClaim            `json:"claims"`
+		Conflicts        []any                          `json:"conflicts"`
+		EvidenceRefs     []string                       `json:"evidence_refs"`
+		EvidenceLookup   map[string]verifierEvidenceView `json:"evidence_lookup,omitempty"`
+		Reasons          []string                       `json:"reasons"`
 	}{
 		Question:         task.Objective,
 		DecisionQuestion: task.Objective,
 		Claims:           claims,
 		Conflicts:        []any{},
 		EvidenceRefs:     evidenceRefs,
+		EvidenceLookup:   lookup,
 		Reasons:          []string{"verify evidence-backed claims"},
 	})
 	if err != nil {
@@ -287,18 +301,24 @@ func (e AgentRuntimeTaskExecutor) Execute(
 		return TaskExecutionResult{}, fmt.Errorf("agent definition resolver is required")
 	}
 	if task.Executor == ExecutorVerifier {
-		if len(taskEvidenceContext(task, input, e.EvidenceContextBudget).selected) == 0 {
+		selected := len(taskEvidenceContext(task, input, e.EvidenceContextBudget).selected)
+		collected := len(collectVerifierClaims(task, input, e.EvidenceContextBudget))
+		log.InfofCtx(ctx, "[investigation] verifier admission task=%s selected_evidence=%d collected_claims=%d",
+			task.ID, selected, collected)
+		if selected == 0 {
 			output, err := marshalUnresolvedVerification("no user-readable evidence was available")
 			if err != nil {
 				return TaskExecutionResult{}, err
 			}
+			log.WarnfCtx(ctx, "[investigation] verifier skipped task=%s reason=no_user_readable_evidence", task.ID)
 			return TaskExecutionResult{Output: output}, nil
 		}
-		if len(collectVerifierClaims(task, input, e.EvidenceContextBudget)) == 0 {
+		if collected == 0 {
 			output, err := marshalUnresolvedVerification("no user-readable claims were available")
 			if err != nil {
 				return TaskExecutionResult{}, err
 			}
+			log.WarnfCtx(ctx, "[investigation] verifier skipped task=%s reason=no_user_readable_claims", task.ID)
 			return TaskExecutionResult{Output: output}, nil
 		}
 	}
@@ -450,6 +470,12 @@ func (e AgentRuntimeTaskExecutor) buildRequest(
 			NodeID:        task.ID,
 		},
 	}
+	if task.Executor == ExecutorInvestigator {
+		if blocks := investigatorSeedBlocks(input.SeedMaterial); len(blocks) > 0 {
+			request.Context = blocks
+			request.Policy.EvidenceSeeded = true
+		}
+	}
 	if task.Executor == ExecutorComposer {
 		contract := composerTaskContract(task)
 		objective, err := synthesisObjectiveBlock(contract)
@@ -485,7 +511,7 @@ func childAgentRunID(workflowRunID, taskID string, attempt int) (string, error) 
 func (e AgentRuntimeTaskExecutor) buildInput(task ExecutableTask, input TaskExecutionInput) (json.RawMessage, error) {
 	switch task.Executor {
 	case ExecutorInvestigator:
-		return investigatorInput(task)
+		return investigatorInput(task, input.SeedMaterial)
 	case ExecutorVerifier:
 		return verifierInput(task, input, e.EvidenceContextBudget)
 	case ExecutorComposer:
@@ -617,11 +643,8 @@ type contractEvidenceGoal struct {
 	HighRisk        bool     `json:"high_risk,omitempty"`
 }
 
-func investigatorInput(task ExecutableTask) (json.RawMessage, error) {
-	entities := make([]contractEntity, 0, len(task.Entities))
-	for _, entity := range task.Entities {
-		entities = append(entities, contractEntity{ID: entity})
-	}
+func investigatorInput(task ExecutableTask, seed []agentapi.ContextBlock) (json.RawMessage, error) {
+	entities := projectInvestigatorEntities(task)
 	goals := make([]contractEvidenceGoal, 0, len(task.EvidenceGoals))
 	if len(task.EvidenceGoals) > 0 {
 		for _, goal := range task.EvidenceGoals {
@@ -645,19 +668,76 @@ func investigatorInput(task ExecutableTask) (json.RawMessage, error) {
 			Version: ref.Version, TimeRange: ref.TimeRange, ContentHash: ref.ContentHash,
 		})
 	}
+	context := map[string]any{}
+	if blocks := investigatorSeedBlocks(seed); len(blocks) > 0 {
+		context["seed_material"] = blocks
+	}
 	return json.Marshal(struct {
-		TaskID        string                 `json:"task_id"`
-		Objective     string                 `json:"objective"`
-		Capability    string                 `json:"capability,omitempty"`
-		Entities      []contractEntity       `json:"entities"`
-		EvidenceGoals []contractEvidenceGoal `json:"evidence_goals"`
-		InputRefs     []agentapi.EvidenceRef `json:"input_refs,omitempty"`
-		Context       map[string]any         `json:"context"`
+		TaskID           string                  `json:"task_id"`
+		Objective        string                  `json:"objective"`
+		Capability       string                  `json:"capability,omitempty"`
+		Entities         []contractEntity        `json:"entities"`
+		IdentityBindings []EntityIdentityBinding `json:"identity_bindings,omitempty"`
+		EvidenceGoals    []contractEvidenceGoal  `json:"evidence_goals"`
+		InputRefs        []agentapi.EvidenceRef  `json:"input_refs,omitempty"`
+		Context          map[string]any          `json:"context"`
 	}{
 		TaskID: task.ID, Objective: task.Objective, Capability: task.Capability,
-		Entities: entities, EvidenceGoals: goals, InputRefs: refs,
-		Context: map[string]any{},
+		Entities: entities, IdentityBindings: cloneEntityIdentityBindings(task.IdentityBindings),
+		EvidenceGoals: goals, InputRefs: refs, Context: context,
 	})
+}
+
+// investigatorSeedBlocks keeps the shared retrieved prose and drops ledger
+// units so the task.contract schema stays valid. Identity stays on input_refs.
+func investigatorSeedBlocks(blocks []agentapi.ContextBlock) []agentapi.ContextBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := make([]agentapi.ContextBlock, 0, len(blocks))
+	for _, block := range blocks {
+		if strings.TrimSpace(block.Content) == "" {
+			continue
+		}
+		source := strings.TrimSpace(block.Source)
+		if source == "" {
+			source = "qa.evidence"
+		}
+		title := strings.TrimSpace(block.Title)
+		if title == "" {
+			title = "QA Evidence"
+		}
+		sum := sha256.Sum256([]byte(block.Content))
+		out = append(out, agentapi.ContextBlock{
+			Source: source, Title: title, Content: block.Content,
+			Complete: block.Complete, ContentHash: hex.EncodeToString(sum[:]),
+		})
+		if len(out) == 20 {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func projectInvestigatorEntities(task ExecutableTask) []contractEntity {
+	if len(task.EntityDetails) > 0 {
+		out := make([]contractEntity, 0, len(task.EntityDetails))
+		for _, entity := range task.EntityDetails {
+			out = append(out, contractEntity{
+				ID: entity.ID, Label: entity.Label, Role: entity.Role,
+				Aliases: append([]string(nil), entity.Aliases...),
+			})
+		}
+		return out
+	}
+	out := make([]contractEntity, 0, len(task.Entities))
+	for _, id := range task.Entities {
+		out = append(out, contractEntity{ID: id})
+	}
+	return out
 }
 
 func projectEvidenceGoal(goal EvidenceGoal) contractEvidenceGoal {
@@ -690,7 +770,14 @@ type verificationClaim struct {
 	Citations []string `json:"citations"`
 }
 
+type verifierEvidenceView struct {
+	Kind      string `json:"kind"`
+	Reference string `json:"reference"`
+	Summary   string `json:"summary"`
+}
+
 func verifierInput(task ExecutableTask, input TaskExecutionInput, budget EvidenceContextBudget) (json.RawMessage, error) {
+	context := taskEvidenceContext(task, input, budget)
 	claims := collectVerifierClaims(task, input, budget)
 	evidenceRefs := make([]string, 0, len(claims))
 	seen := make(map[string]struct{}, len(claims))
@@ -704,20 +791,91 @@ func verifierInput(task ExecutableTask, input TaskExecutionInput, budget Evidenc
 		}
 	}
 	return json.Marshal(struct {
-		Question         string              `json:"question"`
-		DecisionQuestion string              `json:"decision_question"`
-		Claims           []verificationClaim `json:"claims"`
-		Conflicts        []any               `json:"conflicts"`
-		EvidenceRefs     []string            `json:"evidence_refs"`
-		Reasons          []string            `json:"reasons"`
+		Question         string                          `json:"question"`
+		DecisionQuestion string                          `json:"decision_question"`
+		Claims           []verificationClaim             `json:"claims"`
+		Conflicts        []any                           `json:"conflicts"`
+		EvidenceRefs     []string                        `json:"evidence_refs"`
+		EvidenceLookup   map[string]verifierEvidenceView `json:"evidence_lookup,omitempty"`
+		Reasons          []string                        `json:"reasons"`
 	}{
 		Question:         task.Objective,
 		DecisionQuestion: task.Objective,
 		Claims:           claims,
 		Conflicts:        []any{},
 		EvidenceRefs:     evidenceRefs,
+		EvidenceLookup:   citedEvidenceLookup(claims, input.Upstream, context),
 		Reasons:          []string{"verify evidence-backed claims"},
 	})
+}
+
+func citedEvidenceLookup(
+	claims []verificationClaim,
+	upstream map[string]json.RawMessage,
+	context evidenceContextResult,
+) map[string]verifierEvidenceView {
+	if len(claims) == 0 {
+		return nil
+	}
+	findingSummaries := findingEvidenceSummaries(upstream, context.lookup)
+	out := make(map[string]verifierEvidenceView, len(claims))
+	for _, claim := range claims {
+		for _, id := range claim.Citations {
+			if _, exists := out[id]; exists {
+				continue
+			}
+			view, ok := context.lookup[id]
+			if !ok {
+				continue
+			}
+			summary := strings.TrimSpace(findingSummaries[id])
+			if !isUserReadableClaimText(summary) {
+				summary = strings.TrimSpace(view.Summary)
+			}
+			if !isUserReadableClaimText(summary) {
+				summary = strings.TrimSpace(claim.Statement)
+			}
+			if !isUserReadableClaimText(summary) {
+				continue
+			}
+			kind := firstNonEmpty(view.Kind, "runbook")
+			reference := firstNonEmpty(view.Reference, id)
+			out[id] = verifierEvidenceView{Kind: kind, Reference: reference, Summary: summary}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func findingEvidenceSummaries(
+	upstream map[string]json.RawMessage,
+	lookup map[string]evidenceSummaryView,
+) map[string]string {
+	out := make(map[string]string)
+	if len(upstream) == 0 || len(lookup) == 0 {
+		return out
+	}
+	idByRef := evidenceIDsByReference(lookup)
+	for _, raw := range upstream {
+		var report investigationReportOutput
+		if err := json.Unmarshal(raw, &report); err != nil {
+			continue
+		}
+		for _, finding := range report.Findings {
+			for _, item := range finding.Evidence {
+				id, ok := resolveFindingCitation(item, idByRef, lookup)
+				if !ok || !isUserReadableClaimText(item.Summary) {
+					continue
+				}
+				if _, exists := out[id]; !exists {
+					out[id] = strings.TrimSpace(item.Summary)
+				}
+			}
+		}
+	}
+	return out
 }
 
 func collectVerifierClaims(
@@ -758,7 +916,7 @@ func verifierClaimsFromReports(
 			citations := make([]string, 0, len(finding.Evidence))
 			seen := make(map[string]struct{}, len(finding.Evidence))
 			for _, item := range finding.Evidence {
-				id, ok := idByRef[item.Kind+"\x00"+item.Reference]
+				id, ok := resolveFindingCitation(item, idByRef, context.lookup)
 				if !ok {
 					continue
 				}
@@ -798,11 +956,215 @@ func verifierClaimsFromEvidence(context evidenceContextResult) []verificationCla
 }
 
 func evidenceIDsByReference(lookup map[string]evidenceSummaryView) map[string]string {
-	idByRef := make(map[string]string, len(lookup))
-	for id, view := range lookup {
-		idByRef[view.Kind+"\x00"+view.Reference] = id
+	ids := make([]string, 0, len(lookup))
+	for id := range lookup {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	idByRef := make(map[string]string, len(lookup)*8)
+	add := func(key, id string) {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return
+		}
+		if _, exists := idByRef[key]; !exists {
+			idByRef[key] = id
+		}
+	}
+	for _, id := range ids {
+		view := lookup[id]
+		add(id, id)
+		kind := firstNonEmpty(view.Kind, identitySourceKind(view.Identity))
+		target := firstNonEmpty(view.Reference, identityTarget(view.Identity))
+		section := identitySection(view.Identity)
+		if view.Identity != nil {
+			key := canonicalevidence.Key{
+				SourceKind: view.Identity.SourceKind,
+				Target:     view.Identity.Target,
+				Section:    view.Identity.Section,
+				Version:    view.Identity.Version,
+				TimeRange:  view.Identity.TimeRange,
+			}
+			if key.SourceKind != "" && key.Target != "" {
+				add(key.Handle(), id)
+			}
+		}
+		addCitationAliases(add, id, kind, target, section)
 	}
 	return idByRef
+}
+
+func addCitationAliases(add func(string, string), id, kind, target, section string) {
+	kind = strings.TrimSpace(kind)
+	target = strings.TrimSpace(target)
+	section = strings.TrimSpace(section)
+	if kind != "" && target != "" {
+		add(kind+"\x00"+target, id)
+	}
+	if target != "" {
+		add(target, id)
+	}
+	if target == "" || section == "" {
+		return
+	}
+	captions := []string{target + " (" + section + ")"}
+	if display, ok := chunkCaption(section); ok {
+		captions = append(captions, target+" ("+display+")")
+	}
+	for _, caption := range captions {
+		if kind != "" {
+			add(kind+"\x00"+caption, id)
+		}
+		add(caption, id)
+	}
+}
+
+func chunkCaption(section string) (string, bool) {
+	section = strings.TrimSpace(section)
+	if trimmed, ok := strings.CutPrefix(section, "chunk:"); ok {
+		if n := strings.TrimSpace(trimmed); n != "" {
+			return "chunk " + n, true
+		}
+	}
+	return "", false
+}
+
+func identitySourceKind(identity *agentapi.EvidenceIdentity) string {
+	if identity == nil {
+		return ""
+	}
+	return identity.SourceKind
+}
+
+func identityTarget(identity *agentapi.EvidenceIdentity) string {
+	if identity == nil {
+		return ""
+	}
+	return identity.Target
+}
+
+func identitySection(identity *agentapi.EvidenceIdentity) string {
+	if identity == nil {
+		return ""
+	}
+	return identity.Section
+}
+
+func resolveFindingCitation(
+	item investigationEvidence,
+	idByRef map[string]string,
+	lookup map[string]evidenceSummaryView,
+) (string, bool) {
+	if id := strings.TrimSpace(item.EvidenceID); id != "" {
+		if resolved, ok := idByRef[id]; ok {
+			return resolved, true
+		}
+		if _, ok := lookup[id]; ok {
+			return id, true
+		}
+	}
+	if item.Identity != nil {
+		key := canonicalevidence.Key{
+			SourceKind: item.Identity.SourceKind,
+			Target:     item.Identity.Target,
+			Section:    item.Identity.Section,
+			Version:    item.Identity.Version,
+			TimeRange:  item.Identity.TimeRange,
+		}
+		if key.SourceKind != "" && key.Target != "" {
+			if resolved, ok := idByRef[key.Handle()]; ok {
+				return resolved, true
+			}
+		}
+		if resolved, ok := lookupCitation(idByRef, item.Kind, item.Identity.Target, item.Identity.Section); ok {
+			return resolved, true
+		}
+	}
+	kind := strings.TrimSpace(item.Kind)
+	reference := strings.TrimSpace(item.Reference)
+	if resolved, ok := lookupCitation(idByRef, kind, reference, ""); ok {
+		return resolved, true
+	}
+	if target, section := splitCaptionReference(reference); section != "" {
+		if resolved, ok := lookupCitation(idByRef, kind, target, section); ok {
+			return resolved, true
+		}
+	}
+	for id, view := range lookup {
+		if reference != "" && view.Reference == reference {
+			return id, true
+		}
+		if kind != "" && view.Kind == kind && reference != "" &&
+			(strings.HasSuffix(reference, view.Reference) || strings.HasSuffix(view.Reference, reference)) {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+func lookupCitation(idByRef map[string]string, kind, target, section string) (string, bool) {
+	kind = strings.TrimSpace(kind)
+	target = strings.TrimSpace(target)
+	section = strings.TrimSpace(section)
+	keys := make([]string, 0, 6)
+	if kind != "" && target != "" {
+		keys = append(keys, kind+"\x00"+target)
+		if section != "" {
+			keys = append(keys, kind+"\x00"+target+" ("+section+")")
+			if display, ok := chunkCaption(section); ok {
+				keys = append(keys, kind+"\x00"+target+" ("+display+")")
+			}
+		}
+	}
+	if target != "" {
+		keys = append(keys, target)
+		if section != "" {
+			keys = append(keys, target+" ("+section+")")
+			if display, ok := chunkCaption(section); ok {
+				keys = append(keys, target+" ("+display+")")
+			}
+		}
+	}
+	for _, key := range keys {
+		if id, ok := idByRef[key]; ok {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+func splitCaptionReference(reference string) (target, section string) {
+	reference = strings.TrimSpace(reference)
+	start := strings.LastIndex(reference, " (")
+	if start <= 0 || !strings.HasSuffix(reference, ")") {
+		return reference, ""
+	}
+	target = strings.TrimSpace(reference[:start])
+	section = strings.TrimSpace(reference[start+2 : len(reference)-1])
+	if n, ok := strings.CutPrefix(section, "chunk "); ok {
+		section = "chunk:" + strings.TrimSpace(n)
+	}
+	return target, section
+}
+
+func appendEvidenceCandidates(existing, extra []EvidenceCandidate) []EvidenceCandidate {
+	if len(extra) == 0 {
+		return existing
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, candidate := range existing {
+		seen[candidate.SourceKind+"\x00"+candidate.Target+"\x00"+candidate.Section] = struct{}{}
+	}
+	out := append([]EvidenceCandidate(nil), existing...)
+	for _, candidate := range extra {
+		key := candidate.SourceKind + "\x00" + candidate.Target + "\x00" + candidate.Section
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, candidate)
+	}
+	return out
 }
 
 func (e AgentRuntimeTaskExecutor) project(
@@ -827,14 +1189,10 @@ func (e AgentRuntimeTaskExecutor) project(
 	if task.Executor == ExecutorInvestigator {
 		out.EvidenceCandidates = projectInvestigatorObservations(result)
 		out.Discoveries = projectInvestigatorDiscoveries(result.Output)
-		if len(out.EvidenceCandidates) == 0 {
-			// Evidence units carry identity only. If a worker stopped after a
-			// report was emitted, recover readable summaries before handling the
-			// run error so partial evidence is not lost at this boundary.
-			if evidence, err := projectInvestigatorEvidence(result); err == nil {
-				out.EvidenceCandidates = evidence
-			}
+		if evidence, err := projectInvestigatorEvidence(result); err == nil {
+			out.EvidenceCandidates = appendEvidenceCandidates(out.EvidenceCandidates, evidence)
 		}
+		logInvestigatorProjection(task, result.Output, out)
 	}
 	// A failed Single-Agent Run can have consumed model/tool budget before the
 	// failure was reported (for example when the shared Run gate rejects the
@@ -887,10 +1245,13 @@ func (e AgentRuntimeTaskExecutor) project(
 	case ExecutorVerifier:
 		claims, err := projectVerifierClaims(task, input, result, e.EvidenceContextBudget)
 		if err != nil {
+			log.Warnf("[investigation] verifier projection failed task=%s err=%v output=%s",
+				task.ID, err, platform.TruncateForLog(string(result.Output), 2000))
 			out.Failure = &RunFailure{Code: FailureVerifier, Message: err.Error(), Stage: string(StageVerification), TaskID: task.ID}
 			return out, nil
 		}
 		out.Claims = claims
+		logVerifierProjection(task, input, result, claims, e.EvidenceContextBudget)
 	case ExecutorComposer:
 		// The synthesized answer is carried in Output.
 	default:
@@ -981,15 +1342,18 @@ type investigationReportOutput struct {
 
 type investigationFinding struct {
 	Claim           string                  `json:"claim"`
+	EntityIDs       []string                `json:"entity_ids,omitempty"`
 	EvidenceGoalIDs []string                `json:"evidence_goal_ids"`
 	Evidence        []investigationEvidence `json:"evidence"`
 	Confidence      float64                 `json:"confidence"`
 }
 
 type investigationEvidence struct {
-	Kind      string `json:"kind"`
-	Reference string `json:"reference"`
-	Summary   string `json:"summary"`
+	Kind       string                     `json:"kind"`
+	Reference  string                     `json:"reference"`
+	Summary    string                     `json:"summary"`
+	EvidenceID string                     `json:"evidence_id,omitempty"`
+	Identity   *agentapi.EvidenceIdentity `json:"identity,omitempty"`
 }
 
 type investigationDependency struct {
@@ -1149,6 +1513,112 @@ func projectInvestigatorDiscoveries(output json.RawMessage) []Discovery {
 	return discoveries
 }
 
+func logInvestigatorProjection(task ExecutableTask, output json.RawMessage, out TaskExecutionResult) {
+	var report investigationReportOutput
+	_ = json.Unmarshal(output, &report)
+	findingEntities := 0
+	for _, finding := range report.Findings {
+		findingEntities += len(finding.EntityIDs)
+	}
+	log.Infof("[investigation] investigator projected task=%s discoveries=%d discovered=%v findings=%d finding_entity_ids=%d evidence_candidates=%d output_len=%d summary=%s",
+		task.ID, len(out.Discoveries), report.DiscoveredEntities, len(report.Findings), findingEntities, len(out.EvidenceCandidates), len(output),
+		platform.TruncateForLog(report.Summary, 200),
+	)
+}
+
+func logVerifierProjection(
+	task ExecutableTask,
+	input TaskExecutionInput,
+	result agentapi.RunResult,
+	claims []ClaimCandidate,
+	budget EvidenceContextBudget,
+) {
+	var verification verificationResult
+	_ = json.Unmarshal(result.Output, &verification)
+	context := taskEvidenceContext(task, input, budget)
+	drops := verifierProjectionDrops(verification, task, input, budget)
+	entityCounts := make([]int, 0, len(claims))
+	for _, claim := range claims {
+		entityCounts = append(entityCounts, len(claim.EntityIDs))
+	}
+	available := make(map[string]struct{}, len(context.lookup))
+	for id := range context.lookup {
+		available[id] = struct{}{}
+	}
+	log.Infof("[investigation] verifier projected task=%s output_len=%d verdicts=%d projected_claims=%d selected_evidence=%d lookup=%d available_ids=%v json_keys=%v claim_entity_ids=%v drops=%v output=%s",
+		task.ID, len(result.Output), len(verification.Verdicts), len(claims),
+		len(context.selected), len(context.lookup), availableEvidenceIDs(available), jsonObjectKeys(result.Output), entityCounts, drops,
+		platform.TruncateForLog(string(result.Output), 2000),
+	)
+}
+
+func jsonObjectKeys(raw json.RawMessage) []string {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return []string{"<not_object>"}
+	}
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func availableEvidenceIDs(available map[string]struct{}) []string {
+	ids := make([]string, 0, len(available))
+	for id := range available {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func verifierProjectionDrops(
+	verification verificationResult,
+	task ExecutableTask,
+	input TaskExecutionInput,
+	budget EvidenceContextBudget,
+) []string {
+	context := taskEvidenceContext(task, input, budget)
+	statements := make(map[string]string, len(context.lookup))
+	for id, evidence := range context.lookup {
+		statements[id] = evidence.Summary
+	}
+	findings := findingStatementsByEvidenceID(input.Upstream, context.lookup)
+	availableEvidence := make(map[string]struct{}, len(context.lookup))
+	for id := range context.lookup {
+		availableEvidence[id] = struct{}{}
+	}
+	drops := make([]string, 0)
+	for index, verdict := range verification.Verdicts {
+		statement := ""
+		for _, rawID := range verdict.ClaimIDs {
+			id := strings.TrimSpace(rawID)
+			if text := findings[id]; isUserReadableClaimText(text) {
+				statement = text
+				break
+			}
+			if text := statements[id]; isUserReadableClaimText(text) {
+				statement = text
+				break
+			}
+		}
+		if statement == "" && isUserReadableClaimText(verdict.Rationale) {
+			statement = strings.TrimSpace(verdict.Rationale)
+		}
+		if statement == "" {
+			drops = append(drops, fmt.Sprintf("verdict_%d_empty_statement claim_ids=%v", index, verdict.ClaimIDs))
+			continue
+		}
+		if len(verifierEvidenceRefs(verdict, availableEvidence)) == 0 {
+			drops = append(drops, fmt.Sprintf("verdict_%d_no_evidence_refs claim_ids=%v evidence_refs=%v", index, verdict.ClaimIDs, verdict.EvidenceRefs))
+		}
+	}
+	if len(verification.Verdicts) == 0 {
+		drops = append(drops, "no_verdicts")
+	}
+	return drops
+}
+
 type verificationResult struct {
 	Summary       string                `json:"summary"`
 	Verdicts      []verificationVerdict `json:"verdicts"`
@@ -1198,9 +1668,20 @@ func projectVerifierClaims(
 	if verdictLimit <= 0 {
 		verdictLimit = 1
 	}
+	// Unscoped discovery findings share one evidence goal. Project every
+	// readable verdict instead of keeping only the first goal slot.
+	if len(executableTaskEntityIDs(task)) == 0 {
+		verdictLimit = maxVerifierVerdicts
+	}
 	if verdictLimit > maxVerifierVerdicts {
 		verdictLimit = maxVerifierVerdicts
 	}
+	if len(verification.Verdicts) > verdictLimit {
+		log.Warnf("[investigation] verifier verdicts truncated task=%s verdicts=%d projected_limit=%d unscoped=%t",
+			task.ID, len(verification.Verdicts), verdictLimit, len(executableTaskEntityIDs(task)) == 0)
+	}
+	entityIDs := executableTaskEntityIDs(task)
+	findingEntities := findingEntityIDsByEvidenceID(input.Upstream, context.lookup)
 	claims := make([]ClaimCandidate, 0, verdictLimit)
 	for _, verdict := range verification.Verdicts {
 		if len(claims) >= verdictLimit {
@@ -1228,21 +1709,52 @@ func projectVerifierClaims(
 			// A verifier may cite identity-only evidence or echo an internal
 			// identifier. Neither is a user-readable claim. Leave the goal
 			// unresolved instead of promoting the identifier into a finding.
+			log.Warnf("[investigation] verifier verdict dropped task=%s reason=empty_statement claim_ids=%v rationale=%s",
+				task.ID, verdict.ClaimIDs, platform.TruncateForLog(verdict.Rationale, 200),
+			)
 			continue
 		}
 		refs := verifierEvidenceRefs(verdict, availableEvidence)
 		if len(refs) == 0 {
 			// Never hand an ungrounded model claim to the claim ledger.
+			log.Warnf("[investigation] verifier verdict dropped task=%s reason=no_evidence_refs claim_ids=%v evidence_refs=%v available=%v",
+				task.ID, verdict.ClaimIDs, verdict.EvidenceRefs, availableEvidenceIDs(availableEvidence),
+			)
 			continue
+		}
+		boundEntities := entityIDs
+		if len(boundEntities) == 0 {
+			boundEntities = findingEntitiesForVerdict(verdict, findingEntities)
 		}
 		claims = append(claims, ClaimCandidate{
 			GoalID:       goalID,
 			Text:         statement,
 			Status:       verdictStatus(verdict.Decision),
+			EntityIDs:    append([]string(nil), boundEntities...),
 			EvidenceRefs: refs,
 		})
 	}
 	return claims, nil
+}
+
+func executableTaskEntityIDs(task ExecutableTask) []string {
+	if len(task.EntityDetails) > 0 {
+		ids := make([]string, 0, len(task.EntityDetails))
+		for _, entity := range task.EntityDetails {
+			if id := strings.TrimSpace(entity.ID); id != "" && !containsString(ids, id) {
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
+	ids := make([]string, 0, len(task.Entities))
+	for _, id := range task.Entities {
+		id = strings.TrimSpace(id)
+		if id != "" && !containsString(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func findingStatementsByEvidenceID(
@@ -1265,7 +1777,7 @@ func findingStatementsByEvidenceID(
 				continue
 			}
 			for _, item := range finding.Evidence {
-				id, ok := idByRef[item.Kind+"\x00"+item.Reference]
+				id, ok := resolveFindingCitation(item, idByRef, lookup)
 				if !ok {
 					continue
 				}
@@ -1274,6 +1786,70 @@ func findingStatementsByEvidenceID(
 				}
 			}
 		}
+	}
+	return out
+}
+
+func findingEntityIDsByEvidenceID(
+	upstream map[string]json.RawMessage,
+	lookup map[string]evidenceSummaryView,
+) map[string][]string {
+	out := make(map[string][]string)
+	if len(upstream) == 0 || len(lookup) == 0 {
+		return out
+	}
+	idByRef := evidenceIDsByReference(lookup)
+	for _, raw := range upstream {
+		var report investigationReportOutput
+		if err := json.Unmarshal(raw, &report); err != nil {
+			continue
+		}
+		for _, finding := range report.Findings {
+			ids := normalizeFindingEntityIDs(finding.EntityIDs)
+			if len(ids) == 0 {
+				continue
+			}
+			for _, item := range finding.Evidence {
+				id, ok := resolveFindingCitation(item, idByRef, lookup)
+				if !ok {
+					continue
+				}
+				if _, exists := out[id]; !exists {
+					out[id] = append([]string(nil), ids...)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func findingEntitiesForVerdict(verdict verificationVerdict, byEvidenceID map[string][]string) []string {
+	for _, rawID := range verdict.ClaimIDs {
+		if ids := byEvidenceID[strings.TrimSpace(rawID)]; len(ids) > 0 {
+			return append([]string(nil), ids...)
+		}
+	}
+	for _, rawID := range verdict.EvidenceRefs {
+		if ids := byEvidenceID[strings.TrimSpace(rawID)]; len(ids) > 0 {
+			return append([]string(nil), ids...)
+		}
+	}
+	return nil
+}
+
+func normalizeFindingEntityIDs(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
 	}
 	return out
 }

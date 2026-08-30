@@ -193,11 +193,115 @@ func deliveryStatus(contract InvestigationContract, report InvestigationReport) 
 			hasPartial = true
 		}
 	}
-	if hasSupported && !partial && len(coveredRequired) == len(required) {
+	if hasSupported && !partial && len(coveredRequired) == len(required) &&
+		requiredEntityFacetCoverageComplete(contract, report) {
 		return DeliverySucceeded
 	}
 	if hasSupported || hasPartial || partial {
 		return DeliveryPartial
 	}
 	return DeliveryEvidenceInsufficient
+}
+
+// requiredEntityFacetCoverageComplete is the server-side synthesis gate. Goal
+// coverage alone is insufficient for multi-entity investigations: every
+// selected entity must have a conflict-free, evidence-backed supported claim
+// for every required goal (and therefore every facet carried by that goal).
+func requiredEntityFacetCoverageComplete(
+	contract InvestigationContract,
+	report InvestigationReport,
+) bool {
+	if contract.DiscoveryPhase {
+		return true
+	}
+	entityIDs := investigationContractEntityIDs(contract)
+	if len(entityIDs) == 0 {
+		return true
+	}
+	requiredGoals := make([]string, 0, len(contract.EvidenceGoals))
+	for _, goal := range contract.EvidenceGoals {
+		if goal.Required && strings.TrimSpace(goal.ID) != "" {
+			requiredGoals = append(requiredGoals, strings.TrimSpace(goal.ID))
+		}
+	}
+	if len(requiredGoals) == 0 {
+		return true
+	}
+	evidenceIDs := make(map[string]struct{}, len(report.Evidence))
+	for _, unit := range report.Evidence {
+		if id := strings.TrimSpace(unit.ID); id != "" {
+			evidenceIDs[id] = struct{}{}
+		}
+	}
+	type pair struct{ entityID, goalID string }
+	supported := make(map[pair]bool, len(entityIDs)*len(requiredGoals))
+	conflicted := make(map[pair]bool)
+	knownEntities := make(map[string]struct{}, len(entityIDs))
+	for _, entityID := range entityIDs {
+		knownEntities[entityID] = struct{}{}
+	}
+	for _, claim := range report.Claims {
+		goalID := strings.TrimSpace(claim.GoalID)
+		for _, entityID := range claim.EntityIDs {
+			entityID = strings.TrimSpace(entityID)
+			if _, ok := knownEntities[entityID]; !ok {
+				continue
+			}
+			key := pair{entityID: entityID, goalID: goalID}
+			if claim.Status == ClaimConflicting || len(claim.ConflictRefs) > 0 {
+				conflicted[key] = true
+			}
+			if claim.Status == ClaimSupported && len(claim.ConflictRefs) == 0 &&
+				claimHasKnownEvidence(claim, evidenceIDs) {
+				supported[key] = true
+			}
+		}
+	}
+	for _, entityID := range entityIDs {
+		for _, goalID := range requiredGoals {
+			key := pair{entityID: entityID, goalID: goalID}
+			if conflicted[key] || !supported[key] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func investigationContractEntityIDs(contract InvestigationContract) []string {
+	seen := make(map[string]struct{})
+	ids := make([]string, 0, len(contract.EntityDetails)+len(contract.Entities))
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(contract.EntityDetails) > 0 {
+		for _, entity := range contract.EntityDetails {
+			add(entity.ID)
+		}
+	} else {
+		for _, entityID := range contract.Entities {
+			add(entityID)
+		}
+	}
+	return ids
+}
+
+func claimHasKnownEvidence(claim VerifiedClaim, evidenceIDs map[string]struct{}) bool {
+	if len(claim.EvidenceRefs) == 0 {
+		return false
+	}
+	for _, ref := range claim.EvidenceRefs {
+		if _, ok := evidenceIDs[strings.TrimSpace(ref.EvidenceID)]; ok {
+			return true
+		}
+	}
+	return false
 }

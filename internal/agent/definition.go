@@ -9,11 +9,7 @@ import (
 )
 
 type DefinitionRuntime = definition.Runtime
-type ScenarioRuntime = definition.ScenarioRuntime
 type DefinitionResolver = definition.Resolver
-type ScenarioRunStart = definition.ScenarioRunStart
-type ScenarioRun = definition.ScenarioRun
-type ScenarioLifecycle = definition.ScenarioLifecycle
 type ScenarioToolSet = definition.ScenarioToolSet
 type ScenarioToolSource = definition.ScenarioToolSource
 
@@ -32,9 +28,4 @@ func NewDefinitionRuntime(
 		settings,
 		runStore,
 	)
-}
-
-// NewScenarioRuntime preserves the Parent lifecycle facade for application wiring.
-func NewScenarioRuntime(runStore *run.Store) *ScenarioRuntime {
-	return definition.NewScenarioRuntime(runStore)
 }

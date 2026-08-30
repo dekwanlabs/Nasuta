@@ -116,7 +116,18 @@ func NewSessionStore(db *sql.DB) *SessionStore {
 func (ss *SessionStore) List(userID int64) ([]SessionRecord, error) {
 	rows, err := ss.db.Query(
 		`SELECT s.id, s.title, COALESCE(s.user_id,0), s.created_at, s.updated_at,
-		        (SELECT COUNT(*) FROM qa_messages m WHERE m.session_id = s.id)
+		        (SELECT COUNT(*) FROM qa_messages m
+		          WHERE m.session_id = s.id
+		            AND (
+		              m.role = 'user'
+		              OR (
+		                m.role = 'assistant'
+		                AND EXISTS (
+		                  SELECT 1 FROM qa_turns t
+		                  WHERE t.session_id = m.session_id AND t.last_seq = m.seq
+		                )
+		              )
+		            ))
 		 FROM qa_sessions s WHERE s.user_id = ? ORDER BY s.updated_at DESC LIMIT 50`,
 		userID)
 	if err != nil {

@@ -15,7 +15,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/log"
-	"github.com/dekwanlabs/nasuta/tool"
 )
 
 // Service is the agent-facing runtime facade.
@@ -28,9 +27,6 @@ type Service struct {
 	runtime            agentapi.ManagedRuntime
 	runtimeTools       ScenarioToolSource
 	phaseEmitter       interface{ EmitPhase(string, string) }
-	investigation      InvestigationRunner
-	scenarios          ScenarioLifecycle
-	coordinator        *Coordinator
 	executionEvents    ExecutionEventEmitter
 	memory             *memory.MemoryStore
 	sessions           *memory.SessionStore
@@ -44,8 +40,6 @@ type Service struct {
 	domainKnowledge    string
 	toolPruningEnabled bool
 	delegationEnabled  bool
-	delegationTokens   int64
-	delegationCost     int64
 	definitions        DefinitionResolver
 	agentRef           agentapi.DefinitionRef
 	definitionErr      error
@@ -74,15 +68,12 @@ func New(d Deps) *Service {
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
 		toolPruningEnabled: platformSettings.ToolPruningEnabled,
 		delegationEnabled:  platformSettings.DelegationEnabled,
-		delegationTokens:   platformSettings.DelegationMaxTotalTokens,
-		delegationCost:     platformSettings.DelegationMaxTotalCostMicros,
 		history:            d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
 		outputReserve:   platformSettings.LLMAnswerMaxTokens,
 		domainKnowledge: platformSettings.DomainKnowledge,
 		definitions:     d.Definitions, agentRef: d.Agent,
 		runtime: d.Runtime, runtimeTools: d.RuntimeTools,
-		phaseEmitter: d.PhaseEmitter, investigation: d.Investigation,
-		scenarios: d.ScenarioLifecycle, coordinator: d.Coordinator,
+		phaseEmitter:     d.PhaseEmitter,
 		executionEvents:  d.ExecutionEvents,
 		memory:           d.Memory,
 		compactionStatus: make(map[string]SessionStatusEvent),
@@ -123,20 +114,6 @@ func New(d Deps) *Service {
 }
 
 func (svc *Service) Memory() *memory.MemoryStore { return svc.memory }
-
-// PlanInvestigation replans only the evidence goals that remain unresolved.
-func (svc *Service) PlanInvestigation(
-	ctx context.Context,
-	contract TaskContract,
-	previous InvestigationResult,
-	seedEvidence []tool.EvidenceUnit,
-) (*agentapi.TaskGraphProposal, error) {
-	proposal, err := svc.planTaskGraphWithResult(ctx, contract, previous)
-	if err != nil {
-		return nil, err
-	}
-	return prepareInvestigationProposal(&proposal, contract, seedEvidence)
-}
 
 // SetWriteAvailable updates write-action availability without replacing the
 // service or any of the runtime dependencies it already holds.
@@ -227,12 +204,10 @@ func (svc *Service) Ask(ctx context.Context, request Request) (*AskResult, error
 		return nil, err
 	}
 
-	var result *AskResult
-	if prepared.execution.Strategy == retrieval.ExecutionMultiAgent {
-		result, err = svc.submitInvestigation(prepared)
-	} else {
-		result, err = svc.prepareSingleRun(prepared)
-	}
+	// QA always executes through the normal agent loop. When enabled, the
+	// parent agent can use delegate_investigation to fan out read-only work;
+	// QA itself no longer creates or waits on a durable investigation workflow.
+	result, err := svc.prepareSingleRun(prepared)
 	if err != nil {
 		prepared.closeTrace()
 	}

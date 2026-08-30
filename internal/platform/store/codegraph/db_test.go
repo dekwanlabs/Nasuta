@@ -104,12 +104,17 @@ func TestRefreshKeepsCurrentDatabaseWhenReplacementIsInvalid(t *testing.T) {
 }
 
 func TestOpenRejectsNonCanonicalNodePaths(t *testing.T) {
-	workspace := t.TempDir()
-	dbPath := filepath.Join(workspace, ".codegraph", "codegraph.db")
-	writeTestDatabase(t, dbPath, "gitlab/team/service/main.go", true)
+	for _, filePath := range []string{
+		"gitlab/team/service/main.go",
+		"repot/team/service/main.go",
+	} {
+		workspace := t.TempDir()
+		dbPath := filepath.Join(workspace, ".codegraph", "codegraph.db")
+		writeTestDatabase(t, dbPath, filePath, true)
 
-	if _, err := Open(workspace); err == nil {
-		t.Fatal("Open succeeded with a non-canonical node path")
+		if _, err := Open(workspace); err == nil {
+			t.Fatalf("Open succeeded with a non-canonical node path %q", filePath)
+		}
 	}
 }
 

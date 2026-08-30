@@ -362,9 +362,17 @@ func mapResult(
 	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
 	publicResult.Status = agentapi.RunSucceeded
 	if result != nil && result.OutputMode == agentapi.RunOutputEvidenceWorker {
-		if output := attachEvidenceWorkerStructuredOutput(
+		output, validationErr, recovered := attachEvidenceWorkerStructuredOutput(
 			schemas, outputSchema, outcome.Answer, recovery,
-		); len(output) > 0 {
+		)
+		if validationErr != nil {
+			log.WarnfCtx(
+				log.WithTraceID(context.Background(), runID),
+				"[agent] run %s evidence-worker investigation.report answer_len=%d output_len=%d recovered=%t err=%v",
+				runID, len(outcome.Answer), len(output), recovered, validationErr,
+			)
+		}
+		if len(output) > 0 {
 			publicResult.Output = output
 		}
 		return publicResult, outcome
@@ -373,7 +381,8 @@ func mapResult(
 	publicResult.References = append([]agentapi.Reference(nil), outcome.References...)
 	publicResult.Messages = publicMessages(outcome.SessionMessages)
 	output, err := validatedOutput(schemas, outputSchema, outcome.Answer)
-	if err != nil && outputSchema == agentapi.InvestigationReportSchemaRef() && len(recovery) > 0 && !recovery[0].StrictOutput {
+	if err != nil && outputSchema == agentapi.InvestigationReportSchemaRef() && len(recovery) > 0 &&
+		shouldRecoverInvalidInvestigationOutput(recovery[0], outcome.Answer) {
 		if recovered, preserved, recoveryErr := recoverInvestigationReport(
 			schemas, outputSchema, recovery[0], outcome.Answer, err,
 		); recoveryErr == nil {
@@ -430,27 +439,27 @@ func attachEvidenceWorkerStructuredOutput(
 	ref agentapi.SchemaRef,
 	answer string,
 	recovery []outputRecoveryContext,
-) json.RawMessage {
+) (json.RawMessage, error, bool) {
 	if schemas == nil || ref != agentapi.InvestigationReportSchemaRef() {
-		return nil
+		return nil, nil, false
 	}
 	if strings.TrimSpace(answer) == "" {
-		return nil
+		return nil, nil, false
 	}
 	output, err := validatedOutput(schemas, ref, answer)
 	if err == nil {
-		return output
+		return output, nil, false
 	}
 	if len(recovery) == 0 {
-		return nil
+		return nil, err, false
 	}
 	recovered, _, recoveryErr := recoverInvestigationReport(
 		schemas, ref, recovery[0], answer, err,
 	)
 	if recoveryErr != nil {
-		return nil
+		return nil, err, false
 	}
-	return recovered
+	return recovered, err, true
 }
 
 func publicTerminalEvidence(
@@ -590,6 +599,11 @@ func validatedOutput(
 	)
 }
 
+const (
+	investigationDiscoveredEntitiesLimit     = 50
+	investigationDiscoveredDependenciesLimit = 20
+)
+
 func normalizeOutputForSchema(ref agentapi.SchemaRef, raw json.RawMessage) json.RawMessage {
 	if ref != agentapi.InvestigationReportSchemaRef() {
 		return raw
@@ -598,38 +612,47 @@ func normalizeOutputForSchema(ref agentapi.SchemaRef, raw json.RawMessage) json.
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return raw
 	}
-	findings, ok := report["findings"].([]any)
-	if !ok {
-		return raw
-	}
 	changed := false
-	for _, findingValue := range findings {
-		finding, ok := findingValue.(map[string]any)
-		if !ok {
-			continue
-		}
-		evidenceItems, ok := finding["evidence"].([]any)
-		if !ok {
-			continue
-		}
-		for _, evidenceValue := range evidenceItems {
-			item, ok := evidenceValue.(map[string]any)
+	if findings, ok := report["findings"].([]any); ok {
+		for _, findingValue := range findings {
+			finding, ok := findingValue.(map[string]any)
 			if !ok {
 				continue
 			}
-			if identity, exists := item["identity"]; exists {
-				if _, isString := identity.(string); isString {
-					delete(item, "identity")
-					changed = true
-				}
+			evidenceItems, ok := finding["evidence"].([]any)
+			if !ok {
+				continue
 			}
-			if evidenceID, exists := item["evidence_id"]; exists {
-				if value, isString := evidenceID.(string); !isString || !isValidEvidenceID(value) {
-					delete(item, "evidence_id")
-					changed = true
+			for _, evidenceValue := range evidenceItems {
+				item, ok := evidenceValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if identity, exists := item["identity"]; exists {
+					if _, isString := identity.(string); isString {
+						delete(item, "identity")
+						changed = true
+					}
+				}
+				if evidenceID, exists := item["evidence_id"]; exists {
+					if value, isString := evidenceID.(string); !isString || !isValidEvidenceID(value) {
+						delete(item, "evidence_id")
+						changed = true
+					}
 				}
 			}
 		}
+	}
+	if entities, exists := report["discovered_entities"]; exists {
+		if bounded, clipped := boundUniqueStringList(entities, investigationDiscoveredEntitiesLimit); clipped {
+			report["discovered_entities"] = bounded
+			changed = true
+		}
+	}
+	if deps, ok := report["discovered_dependencies"].([]any); ok &&
+		len(deps) > investigationDiscoveredDependenciesLimit {
+		report["discovered_dependencies"] = append([]any(nil), deps[:investigationDiscoveredDependenciesLimit]...)
+		changed = true
 	}
 	if !changed {
 		return raw
@@ -641,16 +664,44 @@ func normalizeOutputForSchema(ref agentapi.SchemaRef, raw json.RawMessage) json.
 	return normalized
 }
 
-func isValidEvidenceID(value string) bool {
-	if len(value) != len("ev_")+64 || !strings.HasPrefix(value, "ev_") {
-		return false
+func boundUniqueStringList(value any, maxItems int) ([]any, bool) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, false
 	}
-	for _, char := range value[len("ev_"):] {
-		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
-			return false
+	out := make([]any, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		name, ok := item.(string)
+		if !ok {
+			return items, false
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+		if maxItems > 0 && len(out) >= maxItems {
+			break
 		}
 	}
-	return true
+	if len(out) != len(items) {
+		return out, true
+	}
+	for index := range items {
+		if items[index] != out[index] {
+			return out, true
+		}
+	}
+	return items, false
+}
+
+func isValidEvidenceID(value string) bool {
+	return evidence.ValidHandle(value)
 }
 
 func canRecoverVerificationResult(ref agentapi.SchemaRef, err error) bool {
@@ -779,18 +830,18 @@ func minInt(left, right int) int {
 // canRecoverInvestigationReportOutput permits deterministic recovery for transient
 // model-output failures even when the agent otherwise requires strict output.
 func canRecoverInvestigationReportOutput(
-	context outputRecoveryContext,
+	_ outputRecoveryContext,
 	ref agentapi.SchemaRef,
 	err error,
 ) bool {
-	if !context.StrictOutput {
-		return canRecoverInvestigationReport(ref, err)
+	return canRecoverInvestigationReport(ref, err)
+}
+
+func shouldRecoverInvalidInvestigationOutput(recovery outputRecoveryContext, answer string) bool {
+	if !recovery.StrictOutput {
+		return true
 	}
-	return ref == agentapi.InvestigationReportSchemaRef() &&
-		(errors.Is(err, execution.ErrReasoningTruncated) ||
-			errors.Is(err, execution.ErrEmptyModelResponse) ||
-			errors.Is(err, execution.ErrAnswerTruncated) ||
-			errors.Is(err, execution.ErrModelCallBudgetExhausted))
+	return execution.LeakedToolProtocol(answer)
 }
 
 func canRecoverInvestigationReport(
@@ -800,7 +851,8 @@ func canRecoverInvestigationReport(
 	return ref == (agentapi.InvestigationReportSchemaRef()) && (errors.Is(err, execution.ErrReasoningTruncated) ||
 		errors.Is(err, execution.ErrEmptyModelResponse) ||
 		errors.Is(err, execution.ErrAnswerTruncated) ||
-		errors.Is(err, execution.ErrModelCallBudgetExhausted))
+		errors.Is(err, execution.ErrModelCallBudgetExhausted) ||
+		errors.Is(err, execution.ErrToolProtocolLeak))
 }
 
 func recoverFailedInvestigationReport(

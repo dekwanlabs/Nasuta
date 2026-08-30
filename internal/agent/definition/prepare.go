@@ -28,14 +28,15 @@ func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution,
 	if err != nil {
 		return preparedExecution{}, err
 	}
-	if definition.Budget.Timeout <= runtime.settings.answerReserve {
+	answerReserve := answerReserveFor(request, runtime.settings.answerReserve)
+	if definition.Budget.Timeout <= answerReserve {
 		return preparedExecution{}, fmt.Errorf("definition timeout must exceed the answer reserve")
 	}
 	limits, err := prepareRunLimits(
 		definition,
 		request.Policy,
 		request.Limits,
-		runtime.settings.answerReserve,
+		answerReserve,
 		time.Now().UTC(),
 	)
 	if err != nil {
@@ -80,7 +81,17 @@ func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution,
 		offeredTools:     tools.offeredIDs,
 		pruneApplied:     tools.pruneApplied,
 		structuredOutput: schemaHasStructuredRoot(outputSchema.Document),
+		answerReserve:    answerReserve,
 	}, nil
+}
+
+const delegatedChildAnswerReserve = 15 * time.Second
+
+func answerReserveFor(request agentapi.RunRequest, parentReserve time.Duration) time.Duration {
+	if request.Delegation.Depth <= 0 || parentReserve <= delegatedChildAnswerReserve {
+		return parentReserve
+	}
+	return delegatedChildAnswerReserve
 }
 
 func prepareRunLimits(

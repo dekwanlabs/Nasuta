@@ -3,6 +3,7 @@ package definition
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -547,7 +548,7 @@ func TestValidatedInvestigationReportNormalizesEvidenceMetadata(t *testing.T) {
 	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
 		t.Fatalf("publish schemas: %v", err)
 	}
-	validEvidenceID := "ev_" + strings.Repeat("a", 64)
+	validEvidenceID := "ev_" + strings.Repeat("a", 13)
 	report := map[string]any{
 		"focus":   "code",
 		"summary": "code report",
@@ -879,6 +880,83 @@ func TestMapResultDoesNotPreserveInvestigationFindingsWithUnknownGoals(t *testin
 	}
 }
 
+func TestMapResultRecoversStrictDocsToolProtocolLeak(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	result, outcome := mapResult(
+		"run-docs-protocol-leak",
+		&execution.RunResult{
+			Answer: `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="search_runbooks"></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>`,
+			Err:    execution.ErrToolProtocolLeak,
+		},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.InvestigationReportSchemaRef(),
+		outputRecoveryContext{
+			AgentID:      "investigator.docs",
+			Input:        investigationReportRecoveryContract(),
+			StrictOutput: true,
+		},
+	)
+	if result.Status != agentapi.RunSucceeded || result.Error != nil ||
+		outcome.Status != agentrun.StatusDone || outcome.Err != nil {
+		t.Fatalf("result=%+v outcome=%+v", result, outcome)
+	}
+	if err := registry.Validate(agentapi.InvestigationReportSchemaRef(), result.Output); err != nil {
+		t.Fatalf("recovered output is not schema-valid: %v", err)
+	}
+}
+
+func TestMapResultRecoversStrictDocsLeakedProtocolAnswer(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	result, outcome := mapResult(
+		"run-docs-dsml-answer",
+		&execution.RunResult{
+			Answer: `<｜｜DSML｜｜tool_calls>
+<｜｜DSML｜｜invoke name="search_runbooks">
+<｜｜DSML｜｜parameter name="query" string="true">消息 去重</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>
+</｜｜DSML｜｜tool_calls>`,
+		},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.InvestigationReportSchemaRef(),
+		outputRecoveryContext{
+			AgentID:      "investigator.docs",
+			Input:        json.RawMessage(`{"capability":"knowledge.docs.verify","objective":"查文档","focus_facets":[],"evidence_refs":[]}`),
+			StrictOutput: true,
+		},
+	)
+	if result.Status != agentapi.RunSucceeded || result.Error != nil ||
+		outcome.Status != agentrun.StatusDone || outcome.Err != nil {
+		t.Fatalf("result=%+v outcome=%+v", result, outcome)
+	}
+	if err := registry.Validate(agentapi.InvestigationReportSchemaRef(), result.Output); err != nil {
+		t.Fatalf("recovered output is not schema-valid: %v", err)
+	}
+	var report struct {
+		Findings []any    `json:"findings"`
+		Gaps     []string `json:"gaps"`
+	}
+	if err := json.Unmarshal(result.Output, &report); err != nil {
+		t.Fatalf("decode recovered report: %v", err)
+	}
+	if len(report.Findings) != 0 || len(report.Gaps) == 0 {
+		t.Fatalf("recovered protocol leak as a successful findings report: %+v", report)
+	}
+}
+
 func TestMapResultStrictInvestigatorDocsRejectsMalformedReport(t *testing.T) {
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
@@ -1105,6 +1183,55 @@ func TestMapResultAttachesInvestigationReportFromEvidenceWorkerAnswer(t *testing
 	}
 }
 
+func TestMapResultKeepsEvidenceWorkerReportWithTwentyOneDiscoveredEntities(t *testing.T) {
+	entities := []string{
+		"Cookbook", "Messaging", "Devices", "SN/OTA", "Users", "CDP", "NPS", "Voice",
+		"E-commerce", "Products", "Auth & Identity", "Device & IoT", "Cookbook & Recipe",
+		"Message & Push", "Voice & Assistant", "Backstage & Ops", "Commerce & Integration",
+		"Open Platform", "CDP & Data", "App & Client", "User & Content",
+	}
+	result := mapEvidenceWorkerReport(t, entities)
+	var report struct {
+		Summary            string   `json:"summary"`
+		Findings           []any    `json:"findings"`
+		DiscoveredEntities []string `json:"discovered_entities"`
+	}
+	if err := json.Unmarshal(result.Output, &report); err != nil {
+		t.Fatalf("decode attached report: %v", err)
+	}
+	if strings.Contains(report.Summary, "could not produce a schema-valid report") {
+		t.Fatalf("attached stub report instead of investigator output: %s", result.Output)
+	}
+	if len(report.Findings) != 1 || len(report.DiscoveredEntities) != 21 {
+		t.Fatalf("attached report = %+v, want findings and all 21 investigator names", report)
+	}
+}
+
+func TestMapResultClipsOverflowDiscoveredEntitiesWithoutDroppingFindings(t *testing.T) {
+	entities := make([]string, investigationDiscoveredEntitiesLimit+1)
+	for index := range entities {
+		entities[index] = fmt.Sprintf("biz-%02d", index+1)
+	}
+	result := mapEvidenceWorkerReport(t, entities)
+	var report struct {
+		Summary            string   `json:"summary"`
+		Findings           []any    `json:"findings"`
+		DiscoveredEntities []string `json:"discovered_entities"`
+	}
+	if err := json.Unmarshal(result.Output, &report); err != nil {
+		t.Fatalf("decode attached report: %v", err)
+	}
+	if strings.Contains(report.Summary, "could not produce a schema-valid report") {
+		t.Fatalf("attached stub report instead of clipped investigator output: %s", result.Output)
+	}
+	if len(report.Findings) != 1 ||
+		len(report.DiscoveredEntities) != investigationDiscoveredEntitiesLimit ||
+		report.DiscoveredEntities[0] != "biz-01" ||
+		report.DiscoveredEntities[len(report.DiscoveredEntities)-1] != fmt.Sprintf("biz-%02d", investigationDiscoveredEntitiesLimit) {
+		t.Fatalf("attached report = %+v, want findings and first %d investigator names", report, investigationDiscoveredEntitiesLimit)
+	}
+}
+
 func TestMapResultPreservesEvidenceWorkerObservationsWithoutVisibleAnswer(t *testing.T) {
 	observation := agentapi.EvidenceObservation{
 		SourceKind: "code", Target: "service.go", Summary: "the service routes requests through the application layer",
@@ -1136,4 +1263,59 @@ func TestMapResultPreservesEvidenceWorkerObservationsWithoutVisibleAnswer(t *tes
 		result.EvidenceObservations[0].Summary != observation.Summary {
 		t.Fatalf("observations = %+v, want %+v", result.EvidenceObservations, observation)
 	}
+}
+
+func mapEvidenceWorkerReport(t *testing.T, entities []string) agentapi.RunResult {
+	t.Helper()
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	payload := map[string]any{
+		"focus":   "docs",
+		"summary": "Named businesses from product docs.",
+		"findings": []any{map[string]any{
+			"claim":             "The documentation names multiple user-facing business domains.",
+			"entity_ids":        entities[:1],
+			"evidence_goal_ids": []string{"business_domain"},
+			"evidence": []any{map[string]any{
+				"kind": "runbook", "reference": "overview.md",
+				"summary": "The overview names the business domains.",
+			}},
+			"confidence": 0.8,
+		}},
+		"gaps":                      []any{},
+		"covered_evidence_goals":    []string{"business_domain"},
+		"unresolved_evidence_goals": []any{},
+		"discovered_entities":       entities,
+	}
+	answer, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("encode report: %v", err)
+	}
+	result, outcome := mapResult(
+		"run-evidence-worker-overflow",
+		&execution.RunResult{
+			OutputMode: agentapi.RunOutputEvidenceWorker,
+			Answer:     string(answer),
+			Evidence:   agentrun.EvidenceMetrics{Status: agentrun.EvidenceComplete},
+		},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.InvestigationReportSchemaRef(),
+		outputRecoveryContext{
+			AgentID: "investigator.docs",
+			Input:   json.RawMessage(`{"evidence_goals":[{"facet":"business_domain"}]}`),
+		},
+	)
+	if outcome.Status != agentrun.StatusDone || result.Status != agentapi.RunSucceeded {
+		t.Fatalf("result=%+v outcome=%+v", result, outcome)
+	}
+	if len(result.Output) == 0 {
+		t.Fatalf("output is empty")
+	}
+	return result
 }

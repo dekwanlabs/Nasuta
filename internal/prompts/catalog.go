@@ -14,32 +14,36 @@ import (
 type ID string
 
 const (
-	AgentQACore                   ID = "agent.qa.core"
-	AgentQADirect                 ID = "agent.qa.direct"
-	AgentQAToolPolicy             ID = "agent.qa.tool_policy"
-	AgentQAWeb                    ID = "agent.qa.web"
-	AgentQAUserVisibleAnswer      ID = "agent.qa.user_visible_answer"
-	AgentQADefaultIdentity        ID = "agent.qa.default_identity"
-	AgentQAQueryKind              ID = "agent.qa.query_kind"
-	AgentQAForceConclusion        ID = "agent.qa.force_conclusion"
-	AgentQAForceConclusionNoThink ID = "agent.qa.force_conclusion_no_think"
-	AgentQAProtocolRepair         ID = "agent.qa.protocol_repair"
-	AgentQAContinuation           ID = "agent.qa.continuation"
-	AgentQAStructuredContinuation ID = "agent.qa.structured_continuation"
-	AgentQAEvidencePlan           ID = "agent.qa.evidence_plan"
-	AgentQARetrievedHistory       ID = "agent.qa.retrieved_history"
-	AgentQAHistoricalContext      ID = "agent.qa.historical_context"
-	AgentQARecentDialogue         ID = "agent.qa.recent_dialogue"
-	AgentQAPreRetrievedEvidence   ID = "agent.qa.pre_retrieved_evidence"
-	AgentQAMidRunAddition         ID = "agent.qa.mid_run_addition"
-	AgentQAToolDeliveryNotice     ID = "agent.qa.tool_delivery_notice"
-	AgentQAExactAnswerContract    ID = "agent.qa.exact_answer_contract"
-	AgentQAAnswerRepair           ID = "agent.qa.answer_repair"
-	AgentQATurnSummary            ID = "agent.qa.turn_summary"
-	AgentQAWebConvergence         ID = "agent.qa.web_convergence"
-	AgentRuntimeContextBlock      ID = "agent.runtime.context_block"
-	AgentRuntimeExecuteInput      ID = "agent.runtime.execute_input"
-	AgentPreferredTool            ID = "agent.runtime.preferred_tool"
+	AgentQACore                      ID = "agent.qa.core"
+	AgentQADirect                    ID = "agent.qa.direct"
+	AgentQAToolPolicy                ID = "agent.qa.tool_policy"
+	AgentQAParentDelegation          ID = "agent.qa.parent_delegation"
+	AgentQAWeb                       ID = "agent.qa.web"
+	AgentQAUserVisibleAnswer         ID = "agent.qa.user_visible_answer"
+	AgentQADefaultIdentity           ID = "agent.qa.default_identity"
+	AgentQAQueryKind                 ID = "agent.qa.query_kind"
+	AgentQAForceConclusion           ID = "agent.qa.force_conclusion"
+	AgentQAForceConclusionNoThink    ID = "agent.qa.force_conclusion_no_think"
+	AgentQAForceConclusionStructured ID = "agent.qa.force_conclusion_structured"
+	AgentQAProtocolRepair            ID = "agent.qa.protocol_repair"
+	AgentQAProtocolRepairStructured  ID = "agent.qa.protocol_repair_structured"
+	AgentQAStructuredLastStep        ID = "agent.qa.structured_last_step"
+	AgentQAContinuation              ID = "agent.qa.continuation"
+	AgentQAStructuredContinuation    ID = "agent.qa.structured_continuation"
+	AgentQAEvidencePlan              ID = "agent.qa.evidence_plan"
+	AgentQARetrievedHistory          ID = "agent.qa.retrieved_history"
+	AgentQAHistoricalContext         ID = "agent.qa.historical_context"
+	AgentQARecentDialogue            ID = "agent.qa.recent_dialogue"
+	AgentQAPreRetrievedEvidence      ID = "agent.qa.pre_retrieved_evidence"
+	AgentQAMidRunAddition            ID = "agent.qa.mid_run_addition"
+	AgentQAToolDeliveryNotice        ID = "agent.qa.tool_delivery_notice"
+	AgentQAExactAnswerContract       ID = "agent.qa.exact_answer_contract"
+	AgentQAAnswerRepair              ID = "agent.qa.answer_repair"
+	AgentQATurnSummary               ID = "agent.qa.turn_summary"
+	AgentQAWebConvergence            ID = "agent.qa.web_convergence"
+	AgentRuntimeContextBlock         ID = "agent.runtime.context_block"
+	AgentRuntimeExecuteInput         ID = "agent.runtime.execute_input"
+	AgentPreferredTool               ID = "agent.runtime.preferred_tool"
 
 	AgentCatalogFallbackQA          ID = "agent.catalog.fallback_qa"
 	AgentCatalogInvestigator        ID = "agent.catalog.investigator"
@@ -108,13 +112,17 @@ var idFiles = map[ID]string{
 	AgentQACore:                            "agent/qa/core.txt",
 	AgentQADirect:                          "agent/qa/direct.txt",
 	AgentQAToolPolicy:                      "agent/qa/tool_policy.txt",
+	AgentQAParentDelegation:                "agent/qa/parent_delegation.txt",
 	AgentQAWeb:                             "agent/qa/web.txt",
 	AgentQAUserVisibleAnswer:               "agent/qa/user_visible_answer.txt",
 	AgentQADefaultIdentity:                 "agent/qa/default_identity.txt",
 	AgentQAQueryKind:                       "agent/qa/query_kind.txt",
 	AgentQAForceConclusion:                 "agent/qa/force_conclusion.txt",
 	AgentQAForceConclusionNoThink:          "agent/qa/force_conclusion_no_think.txt",
+	AgentQAForceConclusionStructured:       "agent/qa/force_conclusion_structured.txt",
 	AgentQAProtocolRepair:                  "agent/qa/protocol_repair.txt",
+	AgentQAProtocolRepairStructured:        "agent/qa/protocol_repair_structured.txt",
+	AgentQAStructuredLastStep:              "agent/qa/structured_last_step.txt",
 	AgentQAContinuation:                    "agent/qa/continuation.txt",
 	AgentQAStructuredContinuation:          "agent/qa/structured_continuation.txt",
 	AgentQAEvidencePlan:                    "agent/qa/evidence_plan.txt",

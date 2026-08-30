@@ -99,7 +99,7 @@ func TestReserveDelegationBatchProtectsParentAnswerReserve(t *testing.T) {
 	defer db.Close()
 	store := &Store{db: db}
 	admission := testDelegationAdmission()
-	admission.MaxTotalTokens = 800
+	admission.MaxTotalTokens = 799
 	admission.ParentAnswerReserve = 300
 
 	mock.ExpectBegin()
@@ -112,6 +112,83 @@ func TestReserveDelegationBatchProtectsParentAnswerReserve(t *testing.T) {
 	_, err = store.ReserveDelegationBatch(t.Context(), admission)
 	if !errors.Is(err, ErrDelegationBudgetInsufficient) {
 		t.Fatalf("error = %v, want budget insufficient", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReserveDelegationBatchDoesNotChargeParentRetrieveAgainstChildCeiling(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+	admission := testDelegationAdmission()
+	admission.MaxTotalTokens = 800
+	admission.ParentAnswerReserve = 200
+	reservationRaw, err := json.Marshal(admission.Reservations[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	expectDelegationParentBudget(mock, admission.ParentRunID, 61679, 0, 512000, 0)
+	mock.ExpectQuery("FROM agent_delegation_tasks WHERE parent_run_id=\\? FOR UPDATE").
+		WithArgs(admission.ParentRunID).
+		WillReturnRows(emptyDelegationTaskRows())
+	mock.ExpectExec("INSERT INTO agent_delegation_tasks").
+		WithArgs(
+			admission.ParentRunID,
+			admission.DelegationID,
+			0,
+			"child-0",
+			"knowledge.code.inspect",
+			int64(3),
+			strings.Repeat("a", 64),
+			strings.Repeat("b", 64),
+			true,
+			"",
+			reservationRaw,
+			sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	records, err := store.ReserveDelegationBatch(t.Context(), admission)
+	if err != nil {
+		t.Fatalf("ReserveDelegationBatch: %v", err)
+	}
+	if len(records) != 1 || !records[0].Admitted {
+		t.Fatalf("records = %+v", records)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReserveDelegationBatchHonorsParentOwnedCeiling(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+	admission := testDelegationAdmission()
+	admission.MaxTotalTokens = 2000
+	admission.ParentAnswerReserve = 200
+
+	mock.ExpectBegin()
+	expectDelegationParentBudget(mock, admission.ParentRunID, 900, 0, 1000, 0)
+	mock.ExpectQuery("FROM agent_delegation_tasks WHERE parent_run_id=\\? FOR UPDATE").
+		WithArgs(admission.ParentRunID).
+		WillReturnRows(emptyDelegationTaskRows())
+	mock.ExpectRollback()
+
+	_, err = store.ReserveDelegationBatch(t.Context(), admission)
+	if !errors.Is(err, ErrDelegationBudgetInsufficient) {
+		t.Fatalf("error = %v, want parent ceiling", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -230,6 +307,73 @@ func TestSettleDelegationTaskPersistsReportBeforeSettlement(t *testing.T) {
 	if settled.SettledUsage == nil || *settled.SettledUsage != usage ||
 		settled.ReportArtifactID != artifact.ID {
 		t.Fatalf("settled task = %+v", settled)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLinkDelegationChildIsIdempotentWhenAlreadyLinked(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+	mock.ExpectExec("UPDATE agent_delegation_tasks").
+		WithArgs("child-0", "parent-1", "delegation-1", 0, "child-0").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT child_run_id FROM agent_delegation_tasks").
+		WithArgs("parent-1", "delegation-1", 0).
+		WillReturnRows(sqlmock.NewRows([]string{"child_run_id"}).AddRow("child-0"))
+	if err := store.LinkDelegationChild(
+		t.Context(), "parent-1", "delegation-1", 0, "child-0",
+	); err != nil {
+		t.Fatalf("LinkDelegationChild: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLinkDelegationChildConflictsOnDifferentChild(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+	mock.ExpectExec("UPDATE agent_delegation_tasks").
+		WithArgs("child-0", "parent-1", "delegation-1", 0, "child-0").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT child_run_id FROM agent_delegation_tasks").
+		WithArgs("parent-1", "delegation-1", 0).
+		WillReturnRows(sqlmock.NewRows([]string{"child_run_id"}).AddRow("other-child"))
+	err = store.LinkDelegationChild(
+		t.Context(), "parent-1", "delegation-1", 0, "child-0",
+	)
+	if !errors.Is(err, ErrDelegationTaskConflict) {
+		t.Fatalf("error = %v, want conflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLinkDelegationChildSucceedsOnFirstWrite(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+	mock.ExpectExec("UPDATE agent_delegation_tasks").
+		WithArgs("child-0", "parent-1", "delegation-1", 0, "child-0").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := store.LinkDelegationChild(
+		t.Context(), "parent-1", "delegation-1", 0, "child-0",
+	); err != nil {
+		t.Fatalf("LinkDelegationChild: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

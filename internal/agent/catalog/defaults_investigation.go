@@ -10,24 +10,15 @@ import (
 )
 
 const (
-	investigatorOutputDenominator = 4
-	investigatorOutputMinimum     = 8192
-	investigatorOutputMaximum     = 8192
-	verifierOutputMinimum         = 4096
-	synthesizerOutputMinimum      = 8192
-	investigatorMaxSteps          = 4
-	convergenceMaxSteps           = 1
-	roleMaxContinueRounds         = 1
+	verifierOutputMinimum    = 4096
+	synthesizerOutputMinimum = 8192
+	investigatorMaxSteps     = 4
+	convergenceMaxSteps      = 1
+	roleMaxContinueRounds    = 1
 )
 
 // DefaultInvestigators builds the fixed read-only delegated investigation panel.
 func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]agentapi.Definition, error) {
-	investigatorOutput := roleOutputBudget(
-		settings.LLMAnswerMaxTokens,
-		investigatorOutputDenominator,
-		investigatorOutputMinimum,
-		investigatorOutputMaximum,
-	)
 	verifierOutput := investigationRoleOutputBudget(
 		settings.InvestigationMaxOutputTokens,
 		verifierOutputMinimum,
@@ -89,7 +80,7 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 			OutputSchema: agentapi.InvestigationReportSchemaRef(),
 			Model: agentapi.ModelPolicy{
 				Provider: settings.LLMProvider, Model: settings.LLMModel,
-				MaxOutputTokens:                   investigatorOutput,
+				MaxOutputTokens:                   settings.LLMAnswerMaxTokens,
 				InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
 				OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
 			},
@@ -194,26 +185,6 @@ func investigationRoleOutputBudget(global int64, fallback int) int {
 		return int(maxInt)
 	}
 	return int(budget)
-}
-
-func roleOutputBudget(global, denominator, minimum, maximum int) int {
-	if global <= 0 {
-		return global
-	}
-	budget := global / denominator
-	if budget < minimum {
-		budget = minimum
-	}
-	if budget > maximum {
-		budget = maximum
-	}
-	// LLMAnswerMaxTokens is the generic answerer baseline, not the hard
-	// ceiling for an investigation role. Investigators must be able to emit
-	// a complete structured handoff, while the investigation Run ledger
-	// remains the authoritative cumulative hard limit. A low generic answer
-	// setting (for example 3000) must not silently reduce every investigation
-	// role below its usable floor.
-	return budget
 }
 
 func boundedRoleLimit(global, maximum int) int {

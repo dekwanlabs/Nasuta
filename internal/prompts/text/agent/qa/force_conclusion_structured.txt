@@ -1,0 +1,1 @@
+Using the evidence gathered so far, return exactly one schema-valid JSON object now. Do not request more tools. Do not emit DSML, XML tool calls, invoke tags, markdown, or any text outside the JSON object.

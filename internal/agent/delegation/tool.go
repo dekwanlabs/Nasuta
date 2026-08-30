@@ -14,15 +14,37 @@ const DelegateToolID tool.ToolID = "delegate_investigation"
 func (executor *Executor) Tool() tool.ReadTool {
 	capabilities := executor.Capabilities()
 	enum := make([]any, 0, len(capabilities))
+	facetEnum := make([]any, 0)
+	seenFacets := make(map[string]struct{})
 	for _, capability := range capabilities {
 		enum = append(enum, capability.ID)
+		for _, facet := range capability.InputFacets {
+			if _, exists := seenFacets[facet]; exists {
+				continue
+			}
+			seenFacets[facet] = struct{}{}
+			facetEnum = append(facetEnum, facet)
+		}
 	}
 	maxTasks := executor.policy.MaxChildren
 	return tool.ReadTool{
 		ID: DelegateToolID,
-		Description: "Delegate one to three independent, bounded, read-only investigations. " +
-			"Use one batch call and keep each objective narrow.",
+		Description: fmt.Sprintf(
+			"Required after any parent retrieval has isolated named subjects that still need a "+
+				"deep investigation. Delegate one batch of at most %d independent, bounded, "+
+				"read-only investigations. Put every isolated named subject that still needs a "+
+				"deep-dive into this single batch; do not call this tool again for leftover "+
+				"subjects. Keep each objective to one named subject and its primary missing "+
+				"flow — not an exhaustive API inventory. Parent retrieval of any registered "+
+				"tool is isolation-only: do not keep searching those subjects on the parent, "+
+				"and do not write the deep-dive from parent results. Omit evidence_refs unless "+
+				"they are ev_ handles from this run's manifests. Omit focus_facets unless they "+
+				"are catalog IDs from the schema enum. Do not use this to inventory unnamed "+
+				"businesses or to pre-split one question by capability.",
+			maxTasks,
+		),
 		MCPHidden: true,
+		Timeout:   tool.InheritCallerDeadline,
 		InputSchema: tool.JSONSchema{
 			"type":     "object",
 			"required": []any{"tasks"},
@@ -43,7 +65,7 @@ func (executor *Executor) Tool() tool.ReadTool {
 							"focus_facets": map[string]any{
 								"type": "array", "maxItems": 10,
 								"uniqueItems": true,
-								"items":       map[string]any{"type": "string"},
+								"items":       facetItems(facetEnum),
 							},
 							"evidence_refs": map[string]any{
 								"type": "array", "maxItems": maxEvidenceRefs,
@@ -135,6 +157,14 @@ func delegationTasks(arguments tool.Arguments) ([]agentapi.DelegationTask, error
 		})
 	}
 	return tasks, nil
+}
+
+func facetItems(enum []any) map[string]any {
+	items := map[string]any{"type": "string"}
+	if len(enum) > 0 {
+		items["enum"] = enum
+	}
+	return items
 }
 
 func batchPartial(result agentapi.DelegationBatchResult) bool {

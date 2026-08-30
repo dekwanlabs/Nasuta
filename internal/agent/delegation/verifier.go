@@ -458,6 +458,13 @@ func (executor *Executor) runVerification(
 		0,
 		agentapi.Usage{},
 	)
+	stopToolProjection := func() {}
+	if projector, ok := executor.runtime.(toolEventProjector); ok {
+		stopToolProjection = projector.ProjectToolEvents(
+			task.childRunID, parent.RunID, "", task.childRunID,
+		)
+	}
+	defer stopToolProjection()
 	runCtx, cancel := context.WithDeadline(ctx, task.limits.Deadline)
 	result, runErr := executor.runtime.Run(
 		runCtx,
@@ -844,11 +851,12 @@ func (executor *Executor) emitVerification(
 	if executor.events == nil {
 		return
 	}
+	agentID, agentName := executor.projectAgent(task.capability.ID)
 	executor.events.EmitEvent(eventType, agentrun.ExecutionEvent{
 		RunID: parent.RunID, ParentRunID: parent.RunID,
 		ChildRunID: task.childRunID, DelegationID: delegationID,
-		Capability: task.capability.ID, Status: status,
-		ErrorCode: errorCode, DurationMS: durationMS, Usage: usage,
+		Capability: task.capability.ID, AgentID: agentID, AgentName: agentName,
+		Status: status, ErrorCode: errorCode, DurationMS: durationMS, Usage: usage,
 		VerificationID: task.verificationID,
 		VerificationReasons: append(
 			[]string(nil),

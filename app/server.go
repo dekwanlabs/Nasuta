@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/feature/reviewworkflow"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
@@ -22,23 +21,12 @@ import (
 
 const workflowRecoveryPageSize = 100
 
-type activeQAParentStore interface {
-	ListActiveQAParents(time.Time, run.QAParentCursor, int) ([]run.QAParentRecord, error)
-}
-
 type recoveredWorkflowReader interface {
 	GetRun(context.Context, string, int64, bool) (*workflow.RunRecord, error)
 }
 
 type recoveredReviewReconciler interface {
 	ReconcileRecoveredRun(context.Context, string, workflow.RunStatus, error) error
-}
-
-type qaParentRecoveryReport struct {
-	Scanned   int
-	Converged int
-	Active    int
-	Errors    int
 }
 
 // RegisterCommonRoutes attaches only reusable platform routes to mux.
@@ -58,12 +46,7 @@ func (p *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 	dashboardHandler.SetFeatureDeliveryStatus(p.delivery.status)
 	routes.Setup(mux, routes.Config{
 		Auth: p.auth.service, Dashboard: dashboardHandler, RBAC: p.auth.rbac,
-		MCP: mcp.NewDynamicHandler(
-			p.registry,
-			func() mcp.InvestigationDeliveryReader {
-				return p.currentQARuntime().InvestigationReader
-			},
-		),
+		MCP:        mcp.NewDynamicHandler(p.registry),
 		MCPKeyAuth: p.auth.keyAuth,
 		VCS:        webhook.VCSHandler(p.index, p.settings.VCSWebhookSecret),
 		Cfg:        p.cfg,
@@ -140,41 +123,21 @@ func (p *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 // Durable Workflow state is recovered before domain projections are reconciled.
 // This ordering prevents owners from observing a stale terminal outcome.
 func (p *Platform) recoverStartupRuns(ctx context.Context, startedBefore time.Time) {
-	p.qa.reload.RLock()
-	qaRuntime := p.currentQARuntime()
-	qa := qaRuntime.InvestigationReconciler
-	recovery := qaRuntime.InvestigationRecovery
+	// Only incident and product-development workflows use the durable workflow
+	// runtime. QA requests are ordinary agent runs; dynamic investigation is
+	// handled by delegate_investigation inside that run and has no workflow
+	// startup recovery or parent reconciliation phase.
 	reviews := p.flow.coordinator
-	p.qa.reload.RUnlock()
-	p.recoverActiveInvestigationChildren(ctx, startedBefore, recovery)
 	if p.flow.service != nil && p.flow.service.Available() {
-		p.recoverActiveWorkflows(ctx, startedBefore, qa, reviews)
+		p.recoverActiveWorkflows(ctx, startedBefore, reviews)
 	} else if p.flow.service != nil {
 		log.WarnfCtx(ctx, "[workflow] startup execution recovery skipped (execution unavailable)")
 	}
-	p.recoverActiveQAParents(ctx, startedBefore, qa)
-}
-
-func (p *Platform) recoverActiveInvestigationChildren(
-	ctx context.Context,
-	startedBefore time.Time,
-	recovery dashboard.QAInvestigationRecovery,
-) {
-	if recovery == nil {
-		log.WarnfCtx(ctx, "[qa] startup child recovery skipped (investigation recovery unavailable)")
-		return
-	}
-	if err := recovery.RecoverActive(ctx, startedBefore, workflowRecoveryPageSize); err != nil {
-		log.ErrorfCtx(ctx, "[qa] startup child recovery incomplete: %v", err)
-		return
-	}
-	log.InfofCtx(ctx, "[qa] startup child recovery complete")
 }
 
 func (p *Platform) recoverActiveWorkflows(
 	ctx context.Context,
 	startedBefore time.Time,
-	qa dashboard.QAInvestigationReconciler,
 	reviews recoveredReviewReconciler,
 ) {
 	report, err := p.flow.service.RecoverWithObserver(
@@ -190,7 +153,6 @@ func (p *Platform) recoverActiveWorkflows(
 			return reconcileRecoveredWorkflow(
 				ctx,
 				p.flow.service,
-				qa,
 				reviews,
 				runID,
 				resumeErr,
@@ -229,7 +191,6 @@ func (p *Platform) recoverActiveWorkflows(
 func reconcileRecoveredWorkflow(
 	ctx context.Context,
 	workflows recoveredWorkflowReader,
-	qa dashboard.QAInvestigationReconciler,
 	reviews recoveredReviewReconciler,
 	runID string,
 	resumeErr error,
@@ -254,113 +215,6 @@ func reconcileRecoveredWorkflow(
 			record.Scenario,
 		)
 	}
-}
-
-func (p *Platform) recoverActiveQAParents(
-	ctx context.Context,
-	startedBefore time.Time,
-	reconciler dashboard.QAInvestigationReconciler,
-) {
-	if p.qa.runs == nil {
-		return
-	}
-	report, err := reconcileActiveQAParents(
-		ctx,
-		startedBefore,
-		workflowRecoveryPageSize,
-		p.qa.runs,
-		reconciler,
-	)
-	if err != nil {
-		log.ErrorfCtx(
-			ctx,
-			"[qa] startup parent recovery incomplete scanned=%d converged=%d active=%d errors=%d: %v",
-			report.Scanned,
-			report.Converged,
-			report.Active,
-			report.Errors,
-			err,
-		)
-		return
-	}
-	log.InfofCtx(
-		ctx,
-		"[qa] startup parent recovery complete scanned=%d converged=%d active=%d",
-		report.Scanned,
-		report.Converged,
-		report.Active,
-	)
-}
-
-func reconcileActiveQAParents(
-	ctx context.Context,
-	startedBefore time.Time,
-	pageSize int,
-	parents activeQAParentStore,
-	reconciler dashboard.QAInvestigationReconciler,
-) (qaParentRecoveryReport, error) {
-	var report qaParentRecoveryReport
-	if parents == nil {
-		return report, fmt.Errorf("QA parent store is unavailable")
-	}
-	if reconciler == nil {
-		return report, fmt.Errorf("QA investigation coordinator is unavailable")
-	}
-	var (
-		cursor   run.QAParentCursor
-		firstErr error
-	)
-	for {
-		page, err := parents.ListActiveQAParents(startedBefore, cursor, pageSize)
-		if err != nil {
-			return report, errors.Join(firstErr, fmt.Errorf("list active QA parents: %w", err))
-		}
-		for _, parent := range page {
-			report.Scanned++
-			err := reconciler.Reconcile(ctx, parent.ID)
-			switch {
-			case err == nil:
-				report.Converged++
-			case errors.Is(err, workflow.ErrConflict):
-				report.Active++
-				log.WarnfCtx(
-					ctx,
-					"[qa] startup parent recovery still active parent=%s workflow=%s: %v",
-					parent.ID,
-					parent.WorkflowRunID,
-					err,
-				)
-			default:
-				report.Errors++
-				log.ErrorfCtx(
-					ctx,
-					"[qa] startup parent recovery failed parent=%s workflow=%s: %v",
-					parent.ID,
-					parent.WorkflowRunID,
-					err,
-				)
-				if firstErr == nil {
-					firstErr = fmt.Errorf("reconcile QA parent %q: %w", parent.ID, err)
-				}
-			}
-			if err := ctx.Err(); err != nil {
-				return report, errors.Join(firstErr, err)
-			}
-		}
-		if len(page) < pageSize {
-			break
-		}
-		last := page[len(page)-1]
-		cursor = run.QAParentCursor{StartedAt: last.StartedAt, ID: last.ID}
-	}
-	if report.Errors > 0 {
-		return report, fmt.Errorf(
-			"%d QA parent recoveries failed; first failure: %w",
-			report.Errors,
-			firstErr,
-		)
-	}
-	return report, nil
 }
 
 func (p *Platform) startDailySyncTicker(ctx context.Context) {

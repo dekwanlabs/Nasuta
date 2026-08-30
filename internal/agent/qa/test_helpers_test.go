@@ -24,7 +24,6 @@ import (
 // migrated fixtures but not by production QA code, so they live in the test
 // helper file instead of polluting dependencies.go.
 type DefinitionRuntime = definition.Runtime
-type ScenarioRun = definition.ScenarioRun
 type Config = execution.Config
 type ToolExecutor = execution.ToolExecutor
 type Observer = execution.Observer

@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"context"
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -29,6 +30,31 @@ func TestToolsForStepKeepsToolsWhenUnstructured(t *testing.T) {
 	}
 	if got := agent.toolsForStep(state, 4); len(got) != 1 {
 		t.Fatalf("unstructured last step tools = %d, want tools kept", len(got))
+	}
+}
+
+func TestRemindStructuredLastStepOnlyWhenToolsAreClosed(t *testing.T) {
+	agent := &Agent{cfg: Config{StructuredOutput: true}}
+	state := &compiledLoop{
+		ctx:       context.Background(),
+		tools:     []llm.ToolDef{{Type: "function", Function: llm.ToolFunctionDef{Name: "search_runbooks"}}},
+		stepLimit: 4,
+		messages:  []llm.Message{{Role: "user", Content: "查文档"}},
+	}
+	agent.remindStructuredLastStep(state, 3)
+	if state.structuredLastStepReminded || len(state.messages) != 1 {
+		t.Fatalf("reminded before tools closed: reminded=%t messages=%d", state.structuredLastStepReminded, len(state.messages))
+	}
+	agent.remindStructuredLastStep(state, 4)
+	if !state.structuredLastStepReminded || len(state.messages) != 2 {
+		t.Fatalf("last step reminder missing: reminded=%t messages=%d", state.structuredLastStepReminded, len(state.messages))
+	}
+	if state.messages[1].Content != structuredLastStepInstruction {
+		t.Fatalf("last step reminder = %q", state.messages[1].Content)
+	}
+	agent.remindStructuredLastStep(state, 4)
+	if len(state.messages) != 2 {
+		t.Fatalf("last step reminder appended twice: %d", len(state.messages))
 	}
 }
 

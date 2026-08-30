@@ -313,6 +313,7 @@ func (ledger *ClaimLedger) Admit(taskID string, candidate ClaimCandidate) (Verif
 		GoalID:         candidate.GoalID,
 		Text:           candidate.Text,
 		Status:         candidate.Status,
+		EntityIDs:      cloneStrings(candidate.EntityIDs),
 		EvidenceRefs:   cloneEvidenceRefs(candidate.EvidenceRefs),
 		Confidence:     candidate.Confidence,
 		ConflictRefs:   cloneEvidenceRefs(candidate.ConflictRefs),
@@ -547,6 +548,7 @@ func conflictingRefs(evidence *EvidenceLedger, refs []EvidenceRef) []EvidenceRef
 
 func mergeVerifiedClaims(evidence *EvidenceLedger, existing, incoming VerifiedClaim) VerifiedClaim {
 	merged := existing
+	merged.EntityIDs = mergeStrings(existing.EntityIDs, incoming.EntityIDs)
 	merged.EvidenceRefs = mergeEvidenceRefs(existing.EvidenceRefs, incoming.EvidenceRefs)
 	merged.ConflictRefs = mergeEvidenceRefs(existing.ConflictRefs, incoming.ConflictRefs)
 	if claimStatusRank(incoming.Status) > claimStatusRank(merged.Status) {
@@ -917,9 +919,31 @@ func cloneEvidence(value EvidenceUnit) EvidenceUnit {
 }
 
 func cloneClaim(value VerifiedClaim) VerifiedClaim {
+	value.EntityIDs = append([]string(nil), value.EntityIDs...)
 	value.EvidenceRefs = cloneEvidenceRefs(value.EvidenceRefs)
 	value.ConflictRefs = cloneEvidenceRefs(value.ConflictRefs)
 	return value
+}
+
+func cloneStrings(values []string) []string {
+	return append([]string(nil), values...)
+}
+
+func mergeStrings(left, right []string) []string {
+	seen := make(map[string]struct{}, len(left)+len(right))
+	out := make([]string, 0, len(left)+len(right))
+	for _, value := range append(append([]string(nil), left...), right...) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func cloneEvidenceRefs(refs []EvidenceRef) []EvidenceRef {

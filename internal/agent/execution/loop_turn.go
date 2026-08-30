@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
@@ -40,6 +41,7 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 		if err := agent.ensureTurnBudget(state, step); err != nil {
 			return err
 		}
+		agent.remindStructuredLastStep(state, step)
 
 		turn, err := agent.callModelTurn(state, step)
 		if err != nil {
@@ -163,6 +165,22 @@ func (agent *Agent) callModelTurn(state *compiledLoop, step int) (modelTurn, err
 	return turn, nil
 }
 
+func (agent *Agent) remindStructuredLastStep(state *compiledLoop, step int) {
+	if !agent.reservesLastStepForAnswer() || state.structuredLastStepReminded {
+		return
+	}
+	if len(agent.toolsForStep(state, step)) != 0 {
+		return
+	}
+	state.messages = append(state.messages, llm.Message{
+		Role:    "user",
+		Content: structuredLastStepInstruction,
+	})
+	state.structuredLastStepReminded = true
+	log.InfofCtx(state.ctx, "[agent] run %s reserved last step for structured output; requiring JSON report",
+		state.runID)
+}
+
 func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 	result := turn.result
 	recordFirstAnswerToken(
@@ -179,6 +197,11 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 		turn.stream,
 	)
 	result = continued
+	if hasLeakedToolProtocol(result) {
+		log.WarnfCtx(state.ctx, "[agent] run %s step %d leaked tool protocol; forcing conclusion instead of accepting it as the answer",
+			state.runID, turn.step)
+		return
+	}
 	if err != nil && !state.answerContract.Active() &&
 		agent.preservePartialAnswer(
 			state.runCtx,
@@ -331,6 +354,10 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 		case toolAdmissionAlreadyAvailable, toolAdmissionDenyBudget:
 			execution = toolAdmissionExecution(admission)
 		default:
+			if executionCall.Function.Name == string(delegation.DelegateToolID) {
+				units, _ := state.evidenceLedger.snapshot()
+				state.loopCtx = delegation.WithLiveEvidence(state.loopCtx, units)
+			}
 			execution = agent.executor.ExecuteLimited(
 				state.loopCtx,
 				state.toolSnapshot,

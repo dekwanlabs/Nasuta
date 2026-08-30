@@ -184,6 +184,10 @@ func TestCompileProposalCopiesContractEntitiesFromInvestigationGoals(t *testing.
 	if got := byID["inspect_checkout"].Entities; len(got) != 1 || got[0] != "checkout" {
 		t.Fatalf("compiled entities = %#v, want the bound subject", got)
 	}
+	details := byID["inspect_checkout"].EntityDetails
+	if len(details) != 1 || details[0].ID != "checkout" || details[0].Label != "Checkout" {
+		t.Fatalf("compiled entity details = %#v, want labeled subject", details)
+	}
 }
 
 func TestCompileProposalRejectsUnknownSourceToSynthesize(t *testing.T) {
@@ -355,6 +359,76 @@ func TestCompileProposalReservesServerVerifierOutsideEvidenceTaskLimit(t *testin
 		}
 		if !found {
 			t.Fatalf("verifier dependencies = %#v, missing %q", verifier.Dependencies, id)
+		}
+	}
+}
+
+func TestCompileProposalProjectsOnlyTheTaskEntityIdentityBinding(t *testing.T) {
+	catalog := NewTaskTemplateCatalog()
+	if err := RegisterDefaultInvestigationTemplates(catalog); err != nil {
+		t.Fatalf("register templates: %v", err)
+	}
+	contract := InvestigationContract{
+		Version: InvestigationContractVersion,
+		ID:      "run-identity-projection", Question: "trace two businesses",
+		Entities: []string{"checkout", "catalog"},
+		EntityDetails: []InvestigationEntity{
+			{ID: "checkout", Label: "Checkout", Role: "core_business"},
+			{ID: "catalog", Label: "Catalog", Role: "core_business"},
+		},
+		IdentityBindings: []EntityIdentityBinding{
+			{
+				EntityID:     "checkout",
+				Services:     []ServiceRef{{ID: "service.checkout"}},
+				Repositories: []RepositoryRef{{ID: "repository.checkout"}},
+				Documents:    []DocumentRef{{ID: "document.checkout"}},
+			},
+			{
+				EntityID: "catalog",
+				Services: []ServiceRef{{ID: "service.catalog"}},
+			},
+		},
+		InvestigationGoals: []InvestigationGoal{
+			{ID: "checkout", Objective: "trace checkout", IndependentlyUseful: true},
+			{ID: "catalog", Objective: "trace catalog", IndependentlyUseful: true},
+		},
+		EvidenceGoals: []EvidenceGoal{{
+			ID: "core_flow", Kind: GoalKindCoreFlow, Facets: []string{"core_flow"}, Required: true,
+		}},
+	}
+	proposal := agentapi.TaskGraphProposal{Tasks: []agentapi.TaskSpec{
+		{
+			ID: "inspect_checkout", Purpose: "trace checkout", Capability: "knowledge.code.inspect",
+			InvestigationGoalIDs: []string{"checkout"}, EvidenceGoalIDs: []string{"core_flow"},
+		},
+		{
+			ID: "inspect_catalog", Purpose: "trace catalog", Capability: "knowledge.code.inspect",
+			InvestigationGoalIDs: []string{"catalog"}, EvidenceGoalIDs: []string{"core_flow"},
+		},
+	}}
+	schemas := agentapi.NewSchemaRegistry()
+	if err := schemas.Publish([]agentapi.SchemaDefinition{
+		{ID: DefaultTaskInputSchema, Version: 1, Document: json.RawMessage(`{"type":"object"}`)},
+		{ID: DefaultTaskOutputSchema, Version: 1, Document: json.RawMessage(`{"type":"object"}`)},
+	}); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	plan, err := (PlanCompiler{Catalog: catalog, Schemas: schemas}).CompileProposal(contract, proposal)
+	if err != nil {
+		t.Fatalf("compile proposal: %v", err)
+	}
+	for _, task := range plan.Tasks {
+		if task.Executor != ExecutorInvestigator {
+			continue
+		}
+		if len(task.Entities) != 1 || len(task.IdentityBindings) != 1 {
+			t.Fatalf("task %q projection = entities:%+v bindings:%+v", task.ID, task.Entities, task.IdentityBindings)
+		}
+		if task.IdentityBindings[0].EntityID != task.Entities[0] {
+			t.Fatalf("task %q received another entity binding: %+v", task.ID, task.IdentityBindings)
+		}
+		if task.IdentityBindings[0].Services[0].ID == task.IdentityBindings[0].EntityID {
+			t.Fatalf("task %q reused business id as service id: %+v", task.ID, task.IdentityBindings[0])
 		}
 	}
 }

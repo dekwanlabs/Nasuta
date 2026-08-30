@@ -131,8 +131,7 @@ type Record struct {
 type Kind string
 
 const (
-	KindAgent    Kind = "agent"
-	KindQAParent Kind = "qa_parent"
+	KindAgent Kind = "agent"
 )
 
 // UsageSummary is the token snapshot needed by the live QA composer.
@@ -207,22 +206,4 @@ type ControlRecord struct {
 	Status        Status
 	WorkflowRunID string
 	UserID        int64
-}
-
-// QAParentRecord is the durable identity and state needed for parent reconciliation.
-type QAParentRecord struct {
-	ID            string
-	WorkflowRunID string
-	UserID        int64
-	SessionID     string
-	Question      string
-	Status        Status
-	StartedAt     string
-	EndedAt       string
-}
-
-// QAParentCursor is a stable keyset cursor over parent creation order.
-type QAParentCursor struct {
-	StartedAt string
-	ID        string
 }

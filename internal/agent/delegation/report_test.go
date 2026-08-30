@@ -9,6 +9,46 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 )
 
+func TestProjectReportSalvagesInvalidOutputWhenToolsSucceeded(t *testing.T) {
+	report, err := projectReport(agentapi.RunResult{
+		RunID:  "run_child_1",
+		Status: agentapi.RunFailed,
+		Error:  &agentapi.RunError{Code: "invalid_output", Message: "not investigation.report"},
+		Evidence: agentapi.EvidenceSummary{
+			Status:        "partial",
+			ToolCallCount: 6,
+			ResultCount:   6,
+		},
+	}, "knowledge.docs.verify", "report-docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != agentapi.DelegationPartial ||
+		report.Completeness != agentapi.DelegationIncomplete ||
+		report.Error != nil ||
+		report.Summary == "" {
+		t.Fatalf("salvaged report = %+v", report)
+	}
+}
+
+func TestProjectReportKeepsHardFailuresFailed(t *testing.T) {
+	report, err := projectReport(agentapi.RunResult{
+		RunID:  "run_child_2",
+		Status: agentapi.RunFailed,
+		Error:  &agentapi.RunError{Code: ErrorChildTimeout, Message: "deadline"},
+		Evidence: agentapi.EvidenceSummary{
+			ToolCallCount: 2,
+			ResultCount:   2,
+		},
+	}, "knowledge.docs.verify", "report-timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != agentapi.DelegationTimeout {
+		t.Fatalf("status = %s, want timeout", report.Status)
+	}
+}
+
 func TestProjectReportIncludesAuthoritativeToolCalls(t *testing.T) {
 	output, err := json.Marshal(investigationOutput{
 		Summary: "verified",

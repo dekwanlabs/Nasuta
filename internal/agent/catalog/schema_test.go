@@ -549,7 +549,7 @@ func TestInvestigationBundleAcceptsAvailableReports(t *testing.T) {
 								"kind":"code",
 								"reference":"Checkout.PlaceOrder",
 								"summary":"validation branch",
-								"evidence_id":"ev_0000000000000000000000000000000000000000000000000000000000000000"
+								"evidence_id":"ev_0000000000000"
 							}],
 							"confidence":0.9
 						}],
@@ -757,5 +757,74 @@ func TestVerifiedBundleSubjectCoverageSchema(t *testing.T) {
 	}`)
 	if err := registry.Validate(ref, invalid); err == nil {
 		t.Fatal("subject coverage without sources was accepted")
+	}
+}
+
+func TestCurrentTaskContractValidatesTypedIdentityBindings(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	ref := agentapi.TaskContractSchemaRef()
+	tests := []struct {
+		name    string
+		binding string
+		valid   bool
+	}{
+		{
+			name: "complete typed identity binding",
+			binding: `{
+				"entity_id":"checkout",
+				"services":[{"id":"service.checkout","name":"Checkout Service"}],
+				"repositories":[{"id":"repository.checkout","name":"checkout"}],
+				"documents":[{"id":"document.checkout","name":"Checkout Guide"}]
+			}`,
+			valid: true,
+		},
+		{
+			name: "typed ref missing id",
+			binding: `{
+				"entity_id":"checkout",
+				"services":[{"name":"Checkout Service"}]
+			}`,
+		},
+		{
+			name: "identity binding rejects extra fields",
+			binding: `{
+				"entity_id":"checkout",
+				"services":[{"id":"service.checkout"}],
+				"guessed_service":"checkout"
+			}`,
+		},
+		{
+			name: "typed ref rejects extra fields",
+			binding: `{
+				"entity_id":"checkout",
+				"services":[{"id":"service.checkout","alias":"checkout"}]
+			}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := json.RawMessage(`{
+				"task_id":"qa_identity",
+				"objective":"Trace checkout",
+				"entities":[{"id":"checkout"}],
+				"identity_bindings":[` + test.binding + `],
+				"evidence_goals":[{
+					"id":"core_flow","facet":"core_flow","facets":["core_flow"],
+					"required":true,"sources":["internal"],"freshness":"stable","minimum_coverage":1
+				}],
+				"context":{}
+			}`)
+			err := registry.Validate(ref, payload)
+			if test.valid && err != nil {
+				t.Fatalf("valid identity binding rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid identity binding accepted")
+			}
+		})
 	}
 }

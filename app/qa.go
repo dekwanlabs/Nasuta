@@ -8,6 +8,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
@@ -44,27 +45,13 @@ func (p *Platform) buildQARuntime(
 	snapshot.CodingEnabledProviders = append([]string(nil), settings.CodingEnabledProviders...)
 	snapshot.DelegationCapabilities = append([]string(nil), settings.DelegationCapabilities...)
 	writeAvailable := p.incident.manager != nil
-	var investigationRunner agent.InvestigationRunner = &qaInvestigator{platform: p}
 	if !snapshot.LLMEnabled() {
-		scenarios := agent.NewScenarioRuntime(p.qa.runs)
+		hub := run.NewHub(p.qa.runs)
 		runtime := dashboard.QARuntime{
-			Hub: scenarios.Hub(), RunStore: p.qa.runs,
+			Hub: hub, RunStore: p.qa.runs,
 			Sessions: p.qa.sessions,
 			History:  p.history, Settings: &snapshot,
 			WriteAvailable: writeAvailable,
-		}
-		if p.qa.runs != nil && p.flow.service != nil {
-			coordinator := agent.NewQACoordinator(
-				investigationRunner,
-				scenarios,
-				p.qa.runs,
-				p.qa.sessions,
-			)
-			runtime.InvestigationCanceller = coordinator
-			runtime.InvestigationReconciler = coordinator
-		}
-		if recovery, ok := investigationRunner.(dashboard.QAInvestigationRecovery); ok {
-			runtime.InvestigationRecovery = recovery
 		}
 		return runtime, nil, nil, nil, nil
 	}
@@ -114,53 +101,25 @@ func (p *Platform) buildQARuntime(
 		)
 	}
 	models := agent.NewQAModels(&snapshot)
-	if investigatorRunner, ok := investigationRunner.(*qaInvestigator); ok {
-		investigatorRunner.events = definitionRuntime
-		investigationRunner = investigatorRunner
-	}
-	var coordinator *agent.QACoordinator
-	if p.qa.runs != nil && p.flow.service != nil {
-		coordinator = agent.NewQACoordinator(
-			investigationRunner,
-			definitionRuntime,
-			p.qa.runs,
-			p.qa.sessions,
-		)
-	}
 	qa := agent.NewQA(agent.QADeps{
 		Tools: p.tools, Cfg: p.cfg, Platform: &snapshot,
 		CodeGraphDB: graph, History: p.history,
 		Sessions: p.qa.sessions, Memory: p.qa.memory,
-		Definitions:       p.agents.catalog,
-		Agent:             agentapi.DefinitionRef{ID: definitions[0].ID},
-		Runtime:           definitionRuntime,
-		RuntimeTools:      definitionRuntime,
-		Models:            models,
-		PhaseEmitter:      definitionRuntime,
-		Investigation:     investigationRunner,
-		ScenarioLifecycle: definitionRuntime,
-		Coordinator:       coordinator,
-		ExecutionEvents:   definitionRuntime,
-		WriteAvailable:    writeAvailable,
+		Definitions:     p.agents.catalog,
+		Agent:           agentapi.DefinitionRef{ID: definitions[0].ID},
+		Runtime:         definitionRuntime,
+		RuntimeTools:    definitionRuntime,
+		Models:          models,
+		PhaseEmitter:    definitionRuntime,
+		ExecutionEvents: definitionRuntime,
+		WriteAvailable:  writeAvailable,
 	})
-	if coordinator != nil {
-		coordinator.SetInvestigationPlanner(qa)
-		coordinator.SetInvestigationMaxRounds(snapshot.InvestigationMaxRounds)
-	}
 	runtime := dashboard.QARuntime{
 		QA: qa, RunStore: p.qa.runs,
 		Sessions: p.qa.sessions,
 		History:  p.history, Settings: &snapshot,
 		WriteAvailable: writeAvailable, Hub: definitionRuntime.Hub(),
 		CompactionLLM: models.Primary(),
-	}
-	if investigatorRunner, ok := investigationRunner.(*qaInvestigator); ok {
-		runtime.InvestigationReader = investigatorRunner
-		runtime.InvestigationRecovery = investigatorRunner
-	}
-	if coordinator != nil {
-		runtime.InvestigationCanceller = coordinator
-		runtime.InvestigationReconciler = coordinator
 	}
 	return runtime, definitions, extensionCapabilities, definitionRuntime, nil
 }

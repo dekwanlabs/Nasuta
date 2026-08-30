@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -85,6 +86,17 @@ func IndexContext(
 	return evidence, contextByRef
 }
 
+// WithLiveEvidence adds mid-run parent evidence to the delegation ledger so
+// model-visible ev_ handles from earlier tool results can be authorized.
+func WithLiveEvidence(ctx context.Context, units []tool.EvidenceUnit) context.Context {
+	parent, ok := ParentContextFrom(ctx)
+	if !ok {
+		return ctx
+	}
+	parent.Evidence = AddEvidenceUnits(parent.Evidence, units)
+	return WithParentContext(ctx, parent)
+}
+
 // AddEvidenceUnits extends a ledger with stable aliases for child evidence.
 func AddEvidenceUnits(
 	ledger map[string]tool.EvidenceUnit,
@@ -152,7 +164,7 @@ func cloneEvidenceUnit(unit tool.EvidenceUnit) tool.EvidenceUnit {
 }
 
 func evidenceAliases(unit tool.EvidenceUnit) []string {
-	aliases := make([]string, 0, 3)
+	aliases := make([]string, 0, 4)
 	if value := strings.TrimSpace(unit.ContentHash); value != "" {
 		aliases = append(aliases, value)
 	}
@@ -160,6 +172,11 @@ func evidenceAliases(unit tool.EvidenceUnit) []string {
 		aliases = append(aliases, value)
 		if source := strings.TrimSpace(unit.SourceKind); source != "" {
 			aliases = append(aliases, source+":"+value)
+		}
+	}
+	for _, expanded := range evidence.Expand([]tool.EvidenceUnit{unit}) {
+		if handle, ok := evidence.UnitHandle(expanded); ok {
+			aliases = append(aliases, handle)
 		}
 	}
 	return aliases

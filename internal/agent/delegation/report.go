@@ -22,15 +22,33 @@ type investigationOutput struct {
 	Summary         string                 `json:"summary"`
 	Findings        []investigationFinding `json:"findings"`
 	Gaps            []string               `json:"gaps"`
-	CoveredGoals    []string               `json:"covered_goals"`
-	UnresolvedGoals []string               `json:"unresolved_goals"`
+	CoveredGoals    []string               `json:"covered_evidence_goals"`
+	UnresolvedGoals []string               `json:"unresolved_evidence_goals"`
 }
 
 type investigationFinding struct {
 	Claim      string                  `json:"claim"`
-	GoalIDs    []string                `json:"goal_ids"`
+	GoalIDs    []string                `json:"evidence_goal_ids"`
 	Evidence   []investigationEvidence `json:"evidence"`
 	Confidence float64                 `json:"confidence"`
+}
+
+func (finding *investigationFinding) UnmarshalJSON(raw []byte) error {
+	var wire struct {
+		Claim           string                  `json:"claim"`
+		GoalIDs         []string                `json:"goal_ids"`
+		EvidenceGoalIDs []string                `json:"evidence_goal_ids"`
+		Evidence        []investigationEvidence `json:"evidence"`
+		Confidence      float64                 `json:"confidence"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return err
+	}
+	finding.Claim = wire.Claim
+	finding.GoalIDs = firstNonEmptyStrings(wire.EvidenceGoalIDs, wire.GoalIDs)
+	finding.Evidence = wire.Evidence
+	finding.Confidence = wire.Confidence
+	return nil
 }
 
 type investigationEvidence struct {
@@ -53,6 +71,9 @@ func projectReport(
 		report.Error = cloneRunError(result.Error)
 	}
 	if result.Status != agentapi.RunSucceeded {
+		if salvaged, ok := salvageCollectedChildReport(result, capability, reportID); ok {
+			return salvaged, nil
+		}
 		report.Status = ProjectStatus(StatusFacts{
 			Admitted: true, Settled: true, RunStatus: result.Status,
 			ErrorCode:    runErrorCode(result.Error),
@@ -61,7 +82,10 @@ func projectReport(
 		return report, nil
 	}
 	var output investigationOutput
-	if err := json.Unmarshal(result.Output, &output); err != nil {
+	if err := decodeInvestigationOutput(result.Output, &output); err != nil {
+		if salvaged, ok := salvageCollectedChildReport(result, capability, reportID); ok {
+			return salvaged, nil
+		}
 		return report, fmt.Errorf("decode investigation report: %w", err)
 	}
 	report.Summary = strings.TrimSpace(output.Summary)
@@ -69,22 +93,7 @@ func projectReport(
 		nil,
 		append(output.Gaps, output.UnresolvedGoals...)...,
 	)
-	report.Findings = make([]agentapi.DelegationFinding, 0, len(output.Findings))
-	for index, finding := range output.Findings {
-		citations := make([]string, 0, len(finding.Evidence))
-		for _, evidence := range finding.Evidence {
-			if reference := strings.TrimSpace(evidence.Reference); reference != "" {
-				citations = append(citations, reference)
-			}
-		}
-		report.Findings = append(report.Findings, agentapi.DelegationFinding{
-			ID:         stableID("claim", reportID, fmt.Sprintf("%d", index)),
-			Statement:  strings.TrimSpace(finding.Claim),
-			Confidence: confidence(finding.Confidence),
-			Citations:  appendUniqueStrings(nil, citations...),
-			Facets:     appendUniqueStrings(nil, finding.GoalIDs...),
-		})
-	}
+	report.Findings = projectedFindings(output.Findings, reportID)
 	report.Completeness = agentapi.DelegationComplete
 	if result.Evidence.Status == "partial" ||
 		result.Evidence.Status == "unavailable" ||
@@ -97,6 +106,119 @@ func projectReport(
 		Completeness:   report.Completeness,
 	})
 	return report, nil
+}
+
+func salvageCollectedChildReport(
+	result agentapi.RunResult,
+	capability string,
+	reportID string,
+) (agentapi.DelegationReport, bool) {
+	if !isRecoverableChildOutputFailure(result) || !childCollectedEvidence(result) {
+		return agentapi.DelegationReport{}, false
+	}
+	report := agentapi.DelegationReport{
+		RunID: result.RunID, ReportID: reportID, Capability: capability,
+		Completeness: agentapi.DelegationIncomplete,
+		Usage:        publicDelegationUsage(result),
+		Summary:      "Evidence collection completed, but the investigator could not produce a schema-valid report.",
+		Uncertainties: []string{
+			"Report generation ended before a schema-valid investigation.report was produced.",
+		},
+	}
+	var output investigationOutput
+	if decodeInvestigationOutput(result.Output, &output) == nil &&
+		strings.TrimSpace(output.Summary) != "" {
+		report.Summary = strings.TrimSpace(output.Summary)
+		report.Uncertainties = appendUniqueStrings(
+			nil,
+			append(output.Gaps, output.UnresolvedGoals...)...,
+		)
+		report.Findings = projectedFindings(output.Findings, reportID)
+	}
+	if len(report.Uncertainties) == 0 {
+		report.Uncertainties = []string{
+			"Report generation ended before a schema-valid investigation.report was produced.",
+		}
+	}
+	report.Status = agentapi.DelegationPartial
+	return report, true
+}
+
+func isRecoverableChildOutputFailure(result agentapi.RunResult) bool {
+	if result.Status == agentapi.RunCancelled {
+		return false
+	}
+	switch runErrorCode(result.Error) {
+	case "", "invalid_output", "empty_output":
+		return true
+	default:
+		return false
+	}
+}
+
+func childCollectedEvidence(result agentapi.RunResult) bool {
+	return result.Evidence.ToolCallCount > 0 ||
+		result.Evidence.ResultCount > 0 ||
+		len(result.EvidenceUnits) > 0 ||
+		len(result.EvidenceObservations) > 0
+}
+
+func decodeInvestigationOutput(raw json.RawMessage, output *investigationOutput) error {
+	if len(raw) == 0 || output == nil {
+		return fmt.Errorf("investigation report is empty")
+	}
+	var wire struct {
+		Focus                   string                 `json:"focus"`
+		Summary                 string                 `json:"summary"`
+		Findings                []investigationFinding `json:"findings"`
+		Gaps                    []string               `json:"gaps"`
+		CoveredGoals            []string               `json:"covered_goals"`
+		CoveredEvidenceGoals    []string               `json:"covered_evidence_goals"`
+		UnresolvedGoals         []string               `json:"unresolved_goals"`
+		UnresolvedEvidenceGoals []string               `json:"unresolved_evidence_goals"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return err
+	}
+	output.Focus = wire.Focus
+	output.Summary = wire.Summary
+	output.Findings = wire.Findings
+	output.Gaps = wire.Gaps
+	output.CoveredGoals = firstNonEmptyStrings(wire.CoveredEvidenceGoals, wire.CoveredGoals)
+	output.UnresolvedGoals = firstNonEmptyStrings(wire.UnresolvedEvidenceGoals, wire.UnresolvedGoals)
+	return nil
+}
+
+func firstNonEmptyStrings(values ...[]string) []string {
+	for _, value := range values {
+		if len(value) > 0 {
+			return value
+		}
+	}
+	return nil
+}
+
+func projectedFindings(
+	findings []investigationFinding,
+	reportID string,
+) []agentapi.DelegationFinding {
+	projected := make([]agentapi.DelegationFinding, 0, len(findings))
+	for index, finding := range findings {
+		citations := make([]string, 0, len(finding.Evidence))
+		for _, evidence := range finding.Evidence {
+			if reference := strings.TrimSpace(evidence.Reference); reference != "" {
+				citations = append(citations, reference)
+			}
+		}
+		projected = append(projected, agentapi.DelegationFinding{
+			ID:         stableID("claim", reportID, fmt.Sprintf("%d", index)),
+			Statement:  strings.TrimSpace(finding.Claim),
+			Confidence: confidence(finding.Confidence),
+			Citations:  appendUniqueStrings(nil, citations...),
+			Facets:     appendUniqueStrings(nil, finding.GoalIDs...),
+		})
+	}
+	return projected
 }
 
 func boundReport(
