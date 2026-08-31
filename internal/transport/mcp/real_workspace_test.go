@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,18 +21,30 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 )
 
-const mcpRealWorkspaceRoot = "/Users/dequan.mac/agent-workspace/workspace"
+func realWorkspaceRoot(t *testing.T) string {
+	t.Helper()
+	if os.Getenv("NASUTA_RUN_REAL_WORKSPACE_TESTS") != "1" {
+		t.Skip("real workspace tests disabled; set NASUTA_RUN_REAL_WORKSPACE_TESTS=1 to enable")
+	}
+	root := strings.TrimSpace(os.Getenv("NASUTA_REAL_WORKSPACE_ROOT"))
+	if root == "" {
+		t.Skip("real workspace tests require NASUTA_REAL_WORKSPACE_ROOT")
+	}
+	return filepath.Clean(root)
+}
 
 func realMCPClient(t *testing.T) *client.Client {
 	t.Helper()
-	if _, err := os.Stat(mcpRealWorkspaceRoot + "/.nasuta/index.db"); err != nil {
+	root := realWorkspaceRoot(t)
+	databasePath := filepath.Join(root, ".nasuta", "index.db")
+	if _, err := os.Stat(databasePath); err != nil {
 		t.Skipf("real workspace index is unavailable: %v", err)
 	}
-	structure, err := store.Open(mcpRealWorkspaceRoot + "/.nasuta/index.db")
+	structure, err := store.Open(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	graph, err := codegraph.Open(mcpRealWorkspaceRoot)
+	graph, err := codegraph.Open(root)
 	if err != nil {
 		_ = structure.Close()
 		t.Fatal(err)
@@ -50,7 +63,7 @@ func realMCPClient(t *testing.T) *client.Client {
 	}
 	chain := callchain.New(structure, graph)
 	service := tools.New(tools.Deps{
-		DB: structure, WorkspaceRoot: mcpRealWorkspaceRoot,
+		DB: structure, WorkspaceRoot: root,
 		CallChain: chain, Ontology: ontology.NewService(backend),
 	})
 	registry := tools.NewRegistry(service, config.Config{}, memory.NewSessionStore(nil), nil)

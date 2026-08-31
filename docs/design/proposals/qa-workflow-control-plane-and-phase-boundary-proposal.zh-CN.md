@@ -171,7 +171,7 @@ QA 入口
    - `qa-unified-evidence-acquisition-pipeline.zh-CN.md`；
    - `qa-agent-context-budget-and-cancellation.zh-CN.md`；
    - `investigation-run-budget-and-large-context-governance-proposal.zh-CN.md`；
-   - `investigation-parallel-budget-starvation-and-evidence-salvage-proposal.zh-CN.md`；
+   - `archive/investigation-parallel-budget-starvation-and-evidence-salvage-proposal.zh-CN.md`；
    - `qa-comparison-entity-and-evidence-coverage-proposal.zh-CN.md`。
 
 ## 3. 问题

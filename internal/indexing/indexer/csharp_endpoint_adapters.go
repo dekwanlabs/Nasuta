@@ -11,7 +11,6 @@ import (
 
 type csharpSource struct {
 	usings     map[string]string
-	namespaces []string
 	attributes []csharpAttrInfo
 	classes    []csharpClassInfo
 	methods    []csharpMethodInfo

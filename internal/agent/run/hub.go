@@ -347,7 +347,7 @@ func (hub *Hub) complete(runID string, outcome Outcome, persist bool) {
 		outcome.Err = fmt.Errorf("agent: non-terminal outcome")
 	}
 
-	stepErr, paused, accepted := hub.beginTerminal(runID)
+	paused, accepted, stepErr := hub.beginTerminal(runID)
 	if !accepted {
 		return
 	}
@@ -373,11 +373,11 @@ func (hub *Hub) complete(runID string, outcome Outcome, persist bool) {
 	hub.projectTerminal(runID, outcome)
 }
 
-func (hub *Hub) beginTerminal(runID string) (error, chan struct{}, bool) {
+func (hub *Hub) beginTerminal(runID string) (chan struct{}, bool, error) {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	if _, done := hub.completed[runID]; done {
-		return nil, nil, false
+		return nil, false, nil
 	}
 	hub.completed[runID] = struct{}{}
 	delete(hub.signals, runID)
@@ -385,7 +385,7 @@ func (hub *Hub) beginTerminal(runID string) (error, chan struct{}, bool) {
 	delete(hub.paused, runID)
 	stepErr := hub.stepErrs[runID]
 	delete(hub.stepErrs, runID)
-	return stepErr, paused, true
+	return paused, true, stepErr
 }
 
 func (hub *Hub) projectTerminal(runID string, outcome Outcome) {

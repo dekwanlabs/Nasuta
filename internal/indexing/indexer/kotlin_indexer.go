@@ -188,35 +188,6 @@ func inferKotlinServiceName(root, file string) string {
 	return "unknown"
 }
 
-func extractKotlinClassPrefix(text string) string {
-	// Same pattern as Java — @RequestMapping on class
-	beforeClass := regexp.MustCompile(`(?:class|object)\s+`).Split(text, 2)[0]
-	matches := requestMappingRe.FindAllStringSubmatch(beforeClass, -1)
-	if len(matches) == 0 {
-		return ""
-	}
-	return extractFirstString(matches[len(matches)-1][1])
-}
-
-var kotlinFuncRe = regexp.MustCompile(`fun\s+(\w+)\s*\(`)
-
-func kotlinMethodName(lines []string, index int) string {
-	end := index + 8
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for i := index; i < end; i++ {
-		line := lines[i]
-		if strings.Contains(line, "@") && !strings.Contains(line, "(") {
-			continue
-		}
-		if m := kotlinFuncRe.FindStringSubmatch(line); m != nil {
-			return m[1]
-		}
-	}
-	return ""
-}
-
 func readKotlinPorts(dir string) []int {
 	if dir == "" {
 		return nil

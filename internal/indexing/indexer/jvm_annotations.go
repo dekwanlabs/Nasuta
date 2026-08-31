@@ -90,38 +90,6 @@ func strictJavaMappingMethods(annotation jvmAnnotation) ([]string, bool) {
 	return methods, true
 }
 
-func strictFeignStringArgument(annotation jvmAnnotation, name string) (value string, present, resolved bool) {
-	argument, ok := jvmNamedAnnotationArgument(annotation, name)
-	if !ok {
-		return "", false, true
-	}
-	values, ok := strictJVMStringValues(argument.tokens)
-	if !ok || len(values) != 1 {
-		return "", true, false
-	}
-	return values[0], true, true
-}
-
-func strictFeignClientName(annotation jvmAnnotation) (string, bool) {
-	if value, present, resolved := strictFeignStringArgument(annotation, "name"); present {
-		return value, resolved
-	}
-	if value, present, resolved := strictFeignStringArgument(annotation, "value"); present {
-		return value, resolved
-	}
-	for _, argument := range annotation.arguments {
-		if argument.name != "" {
-			continue
-		}
-		values, ok := strictJVMStringValues(argument.tokens)
-		if !ok || len(values) != 1 {
-			return "", false
-		}
-		return values[0], true
-	}
-	return "", true
-}
-
 func jvmNamedAnnotationArgument(annotation jvmAnnotation, name string) (jvmAnnotationArgument, bool) {
 	for _, argument := range annotation.arguments {
 		if strings.TrimSpace(argument.name) == name {

@@ -11,7 +11,6 @@ type valueKind uint8
 const (
 	valueUnresolved valueKind = iota
 	valueLiteral
-	valueConfigReference
 )
 
 type valueExpr struct {
@@ -26,14 +25,6 @@ func literalValue(value string) valueExpr {
 
 func unresolvedValue(raw string) valueExpr {
 	return valueExpr{kind: valueUnresolved, raw: strings.TrimSpace(raw)}
-}
-
-func configReferenceValue(raw, key string) valueExpr {
-	return valueExpr{
-		kind:  valueConfigReference,
-		raw:   strings.TrimSpace(raw),
-		value: strings.TrimSpace(key),
-	}
 }
 
 type endpointCandidate struct {

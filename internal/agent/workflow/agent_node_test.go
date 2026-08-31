@@ -200,7 +200,7 @@ func TestAgentNodeExecutorMapsRetryableRuntimeFailure(t *testing.T) {
 
 func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T) {
 	const version int64 = 41
-	schemas, agents := investigationCatalogs(t, version)
+	schemas, agents := workflowTestCatalogs(t, version)
 	runtimeEvidence := tool.EvidenceUnit{
 		SourceKind: "log",
 		Target:     "checkout-runtime",

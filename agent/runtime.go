@@ -89,12 +89,12 @@ const (
 
 // ErrBudgetExceeded identifies a hard budget boundary across the public
 // runtime and workflow packages. Callers may wrap it without losing its code.
-var ErrBudgetExceeded = errors.New("investigation budget exceeded")
+var ErrBudgetExceeded = errors.New("agent budget exceeded")
 
 // RunBudgetGate is an optional shared hard-limit check supplied by a Workflow
 // coordinator. It is deliberately defined in the public agent package so the
-// Single-Agent runtime can enforce a parent Run limit without importing the
-// investigation package.
+// standalone and delegated runtimes can enforce a parent Run limit without
+// importing an orchestration implementation.
 type RunBudgetGate interface {
 	Check() error
 }

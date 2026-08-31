@@ -21,7 +21,6 @@ const (
 	GroupIncident        MySQLGroup = "incident"
 	GroupApproval        MySQLGroup = "approval"
 	GroupFeatureDelivery MySQLGroup = "feature_delivery"
-	GroupInvestigation   MySQLGroup = "investigation"
 )
 
 // allMySQLGroups lists every schema group in dependency order. GroupRBAC follows
@@ -39,7 +38,6 @@ var allMySQLGroups = []MySQLGroup{
 	GroupIncident,
 	GroupApproval,
 	GroupFeatureDelivery,
-	GroupInvestigation,
 }
 
 // AllGroups returns every known MySQL schema group.
@@ -882,31 +880,6 @@ var mysqlSchema = map[MySQLGroup][]string{
 				UNIQUE KEY uniq_review_evaluation_target (round_id, target_hash),
 				KEY idx_review_evaluation_policy (policy_id, policy_version, created_at, seq),
 				KEY idx_review_evaluation_round (round_id, seq)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-	},
-	GroupInvestigation: {
-		`CREATE TABLE IF NOT EXISTS investigation_runs (
-				id             VARCHAR(64) NOT NULL PRIMARY KEY,
-				payload        LONGTEXT    NOT NULL,
-				updated_at     BIGINT      NOT NULL,
-				fencing_token  BIGINT      NOT NULL DEFAULT 0,
-				KEY idx_investigation_runs_updated (updated_at, id)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS investigation_events (
-				sequence   BIGINT      NOT NULL AUTO_INCREMENT PRIMARY KEY,
-				run_id     VARCHAR(64) NOT NULL,
-				type       VARCHAR(64) NOT NULL,
-				status     VARCHAR(64) NOT NULL,
-				message    TEXT        NOT NULL,
-				created_at BIGINT      NOT NULL,
-				KEY idx_investigation_events_run (run_id, sequence)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS investigation_leases (
-				run_id         VARCHAR(64) NOT NULL PRIMARY KEY,
-				owner          VARCHAR(96) NOT NULL,
-				expires_at     BIGINT      NOT NULL,
-				fencing_token  BIGINT      NOT NULL DEFAULT 0,
-				KEY idx_investigation_leases_expiry (expires_at)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	},
 }

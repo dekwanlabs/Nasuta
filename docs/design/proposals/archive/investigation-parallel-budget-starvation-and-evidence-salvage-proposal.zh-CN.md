@@ -1,6 +1,6 @@
 # Investigation 并行预算饥饿、错误码保真与证据抢救提案
 
-状态：已实施
+状态：已实施并归档
 作者：Nasuta Agent Platform Team
 日期：2026-08-27
 关联事项：`run_inv_46257b6b`、`investigate.core_businesses_detail.code.1`、`investigation-run-budget-and-large-context-governance-proposal.zh-CN.md`

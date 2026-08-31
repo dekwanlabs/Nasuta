@@ -132,7 +132,7 @@ func scanSpringMVC(source endpointSource) []endpointCandidate {
 		if controller == nil {
 			continue
 		}
-		if controller.resolved == false {
+		if !controller.resolved {
 			continue
 		}
 		prefixes, pathsResolved := springMappingPaths(binding.annotation)
@@ -279,10 +279,6 @@ func combineMethodValues(classMethods, methodMethods []valueExpr) []valueExpr {
 		}
 	}
 	return out
-}
-
-func javaAnnotationIsSpring(name string) bool {
-	return javaAnnotationIsController(name) || isJavaMappingAnnotation(name)
 }
 
 func isResolvedJavaSpringAnnotation(source jvmSource, annotation jvmAnnotation) bool {

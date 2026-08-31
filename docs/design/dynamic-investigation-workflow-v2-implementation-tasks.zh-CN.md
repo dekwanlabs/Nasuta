@@ -1,8 +1,11 @@
 # 动态规划多 Agent Workflow v2 实施任务清单
 
-状态：P0 核心机制已完成；P1 代码闭环基本完成，P1-06 仍需生产 MySQL 迁移和双实例重启验收；P2 仍为收尾阶段
+状态：历史实施记录（已被 2026-08-31 QA 链路收敛取代，不代表当前运行时）
 关联设计：[dynamic-investigation-workflow-v2.zh-CN.md](dynamic-investigation-workflow-v2.zh-CN.md)
+当前实现：[20-agent-orchestration-current-implementation.zh-CN.md](agent-platform/20-agent-orchestration-current-implementation.zh-CN.md)
 日期：2026-08-23
+
+> 本文保留用于回溯旧 durable Investigation workflow 的设计和实施过程。当前 QA 不再创建该 Workflow；请以当前实现文档为准。
 
 ## 1. 文档目的
 

@@ -489,10 +489,6 @@ func goStaticString(expression ast.Expr, constants map[string]string) (string, b
 	}
 }
 
-func goStaticStringFromSource(source goSource, expression ast.Expr) (string, bool) {
-	return goStaticString(expression, source.consts)
-}
-
 // goBuiltinMethod returns whether name is a recognised Go HTTP method name.
 func goBuiltinMethod(name string) string {
 	switch strings.ToUpper(name) {

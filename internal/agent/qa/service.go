@@ -214,17 +214,6 @@ func (svc *Service) Ask(ctx context.Context, request Request) (*AskResult, error
 	return result, err
 }
 
-func standardRequest(request Request, defaultAgent agentapi.DefinitionRef) bool {
-	if request.WorkflowRunID != "" || request.WorkflowNodeID != "" {
-		return false
-	}
-	if request.Agent.ID == "" {
-		return true
-	}
-	return request.Agent.ID == defaultAgent.ID &&
-		(request.Agent.Version == 0 || request.Agent.Version == defaultAgent.Version)
-}
-
 func (svc *Service) emitEvent(eventType EventType, event ExecutionEvent) {
 	if svc.executionEvents != nil {
 		svc.executionEvents.EmitEvent(eventType, event)

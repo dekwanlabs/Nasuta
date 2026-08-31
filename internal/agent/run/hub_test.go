@@ -459,34 +459,6 @@ func TestRunSubscriberQueuePreservesDelegationTerminalProjection(t *testing.T) {
 	}
 }
 
-func TestRunSubscriberQueuePreservesWorkflowTerminalProjection(t *testing.T) {
-	sub := &subscriber{
-		wake: make(chan struct{}, 1),
-		stop: make(chan struct{}),
-	}
-	defer sub.close()
-
-	for index := 0; index < subscriberDiagnosticLimit; index++ {
-		if !sub.enqueue(SSEEvent{Type: EventTrace}) {
-			t.Fatalf("trace event %d was rejected before the queue reached its limit", index)
-		}
-	}
-	if !sub.enqueue(SSEEvent{Type: EventWorkflowCompleted, Data: ExecutionEvent{
-		RunID: "bounded", Status: "succeeded", Completeness: "partial",
-	}}) {
-		t.Fatal("workflow terminal projection was rejected by a full queue")
-	}
-
-	sub.mu.Lock()
-	defer sub.mu.Unlock()
-	if len(sub.queue) != subscriberDiagnosticLimit {
-		t.Fatalf("queue length = %d, want %d", len(sub.queue), subscriberDiagnosticLimit)
-	}
-	if sub.queue[len(sub.queue)-1].Type != EventWorkflowCompleted {
-		t.Fatalf("last event = %s, want %s", sub.queue[len(sub.queue)-1].Type, EventWorkflowCompleted)
-	}
-}
-
 func TestRunSubscriberCloseReleasesQueueAndRejectsLateEvents(t *testing.T) {
 	sub := &subscriber{
 		wake: make(chan struct{}, 1),

@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/platform"
@@ -164,19 +163,6 @@ func readFile(path string) string {
 		return ""
 	}
 	return string(b)
-}
-
-// Spring annotation helpers live in java.go and are shared by the JVM scanners.
-
-var firstStringRe = regexp.MustCompile(`["']([^"']*)["']`)
-
-// extractFirstString returns the first quoted substring from an annotation or expression.
-func extractFirstString(text string) string {
-	m := firstStringRe.FindStringSubmatch(text)
-	if m == nil {
-		return ""
-	}
-	return m[1]
 }
 
 func joinPaths(prefix, route string) string {

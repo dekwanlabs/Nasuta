@@ -48,54 +48,6 @@ func scanNodeJSServices(root string, dirs []string) []domain.ServiceRecord {
 	return records
 }
 
-// scanNodeJSEndpoints finds Express/Fastify/Koa route registrations.
-func scanNodeJSEndpoints(root string, dirs []string) []domain.EndpointRecord {
-	files := walkFiles(root, dirs, func(name string) bool {
-		return strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".ts") ||
-			strings.HasSuffix(name, ".mjs") || strings.HasSuffix(name, ".cjs")
-	})
-	var records []domain.EndpointRecord
-	for _, file := range files {
-		if isTestSourcePath(relativeTo(root, file)) {
-			continue
-		}
-		text := readFile(file)
-		if !strings.Contains(text, ".get(") && !strings.Contains(text, ".post(") &&
-			!strings.Contains(text, "router.") && !strings.Contains(text, "Router(") &&
-			!strings.Contains(text, "@Get(") && !strings.Contains(text, "@Post(") &&
-			!strings.Contains(text, "@Controller(") && !strings.Contains(text, "server.route(") &&
-			!strings.Contains(text, "Route.get(") && !strings.Contains(text, "Route.post(") {
-			continue
-		}
-		rel := relativeTo(root, file)
-		moduleRoot := findNodeJSModuleRoot(root, file)
-		serviceName := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			serviceName = readNodeJSPackageName(moduleRoot)
-		}
-		handler := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
-		lines := strings.Split(text, "\n")
-		controllerPrefix := extractNestControllerPrefix(text)
-		for i, line := range lines {
-			for _, route := range parseNodeJSRoutes(line, controllerPrefix) {
-				records = append(records, domain.EndpointRecord{
-					ServiceName:   serviceName,
-					Repo:          topSegment(rel),
-					Method:        route.method,
-					Path:          route.path,
-					Handler:       handler,
-					HandlerMethod: nodejsHandlerName(lines, i),
-					File:          rel,
-					Line:          i + 1,
-					Source:        domain.SourceCodeScan,
-					Confidence:    0.85,
-				})
-			}
-		}
-	}
-	return records
-}
-
 // scanNodeJSDependencies finds HTTP client calls (axios, fetch, node-fetch).
 func scanNodeJSDependencies(root string, dirs []string) []domain.DependencyEdge {
 	files := walkFiles(root, dirs, func(name string) bool {
@@ -196,43 +148,10 @@ func readNodeJSPorts(dir string) []int {
 	return nil
 }
 
-type nodeJSRoute struct {
-	method string
-	path   string
-}
-
 var (
-	nodeMethodRouteRe = regexp.MustCompile(`(?i)\.(get|post|put|delete|patch|head|options)\s*\(\s*["']([^"']+)["']`)
-	nestRouteRe       = regexp.MustCompile(`@(Get|Post|Put|Delete|Patch|Head|Options)\s*\(\s*(?:["']([^"']*)["'])?\s*\)`)
-	nestControllerRe  = regexp.MustCompile(`@Controller\s*\(\s*(?:["']([^"']*)["'])?\s*\)`)
 	hapiMethodFirstRe = regexp.MustCompile(`(?i)method\s*:\s*['"]([A-Z]+)['"].*?path\s*:\s*['"]([^'"]+)['"]`)
 	hapiPathFirstRe   = regexp.MustCompile(`(?i)path\s*:\s*['"]([^'"]+)['"].*?method\s*:\s*['"]([A-Z]+)['"]`)
 )
-
-func parseNodeJSRoutes(line, controllerPrefix string) []nodeJSRoute {
-	if m := nestRouteRe.FindStringSubmatch(line); m != nil {
-		return []nodeJSRoute{{method: strings.ToUpper(m[1]), path: joinPaths(controllerPrefix, m[2])}}
-	}
-	if m := hapiMethodFirstRe.FindStringSubmatch(line); m != nil {
-		return []nodeJSRoute{{method: strings.ToUpper(m[1]), path: m[2]}}
-	}
-	if m := hapiPathFirstRe.FindStringSubmatch(line); m != nil {
-		return []nodeJSRoute{{method: strings.ToUpper(m[2]), path: m[1]}}
-	}
-	if m := nodeMethodRouteRe.FindStringSubmatch(line); m != nil {
-		return []nodeJSRoute{{method: strings.ToUpper(m[1]), path: m[2]}}
-	}
-	return nil
-}
-
-func extractNestControllerPrefix(text string) string {
-	beforeClass := regexp.MustCompile(`(?:export\s+)?class\s+`).Split(text, 2)[0]
-	matches := nestControllerRe.FindAllStringSubmatch(beforeClass, -1)
-	if len(matches) == 0 {
-		return ""
-	}
-	return matches[len(matches)-1][1]
-}
 
 var nodejsFuncRe = regexp.MustCompile(`(?:async\s+)?(?:function\s+)?(\w+)\s*\(`)
 

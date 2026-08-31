@@ -41,33 +41,6 @@ type mavenProjectXML struct {
 	} `xml:"dependencies>dependency"`
 }
 
-func expandFeignConsumers(
-	root string,
-	dirs []string,
-	services []domain.ServiceRecord,
-	refs []feignReference,
-) []feignReference {
-	consumers := mavenRuntimeConsumers(root, dirs, services)
-	if len(consumers) == 0 {
-		return refs
-	}
-	out := make([]feignReference, 0, len(refs))
-	for _, ref := range refs {
-		applications := consumers[canonicalPath(ref.ModulePath)]
-		if len(applications) == 0 {
-			out = append(out, ref)
-			continue
-		}
-		for _, application := range applications {
-			expanded := ref
-			expanded.From = application.Name
-			expanded.CallerServiceKey = application.Key
-			out = append(out, expanded)
-		}
-	}
-	return out
-}
-
 func mavenRuntimeConsumers(
 	root string,
 	dirs []string,
@@ -103,9 +76,7 @@ func mavenRuntimeConsumers(
 			if !mavenDependencyIsReachable(dependency, true) {
 				continue
 			}
-			for _, index := range localMavenModules(dependency.coordinate, byCoordinate, byArtifact) {
-				pending = append(pending, index)
-			}
+			pending = append(pending, localMavenModules(dependency.coordinate, byCoordinate, byArtifact)...)
 		}
 		for len(pending) > 0 {
 			current := pending[0]
@@ -125,9 +96,7 @@ func mavenRuntimeConsumers(
 				if !mavenDependencyIsReachable(dependency, false) {
 					continue
 				}
-				for _, index := range localMavenModules(dependency.coordinate, byCoordinate, byArtifact) {
-					pending = append(pending, index)
-				}
+				pending = append(pending, localMavenModules(dependency.coordinate, byCoordinate, byArtifact)...)
 			}
 		}
 	}

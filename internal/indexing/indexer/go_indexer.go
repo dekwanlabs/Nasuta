@@ -145,19 +145,6 @@ func goHasMain(text string) bool {
 	return false
 }
 
-var goEndpointPatterns = []*regexp.Regexp{
-	// Gin: router.GET("/path", ...)  — uppercase method, immediate path
-	regexp.MustCompile(`(?i)\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\(\s*"([^"]+)"`),
-	// net/http: mux.HandleFunc("/path", handler)
-	regexp.MustCompile(`\.HandleFunc\s*\(\s*"([^"]+)"`),
-	// Chi/mux r.Get("/path") — mixed case
-	regexp.MustCompile(`(?i)\.(Get|Post|Put|Delete|Patch|Head|Options)\s*\(\s*"([^"]+)"`),
-	// gorilla/mux: r.HandleFunc("/path", handler).Methods("GET", "POST")
-	regexp.MustCompile(`\.HandleFunc\s*\(\s*"([^"]+)"`),
-	// httprouter: router.GET("/path", handler)
-	regexp.MustCompile(`(?i)(?:router|mux|r)\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\(\s*"([^"]+)"`),
-}
-
 // parseInts is a shared helper that converts a numeric string to a single-element int slice.
 func parseInts(s string) []int {
 	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
@@ -166,7 +153,6 @@ func parseInts(s string) []int {
 	return nil
 }
 
-var goHandlerRe = regexp.MustCompile(`func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(`)
 var goHTTPCallRe = regexp.MustCompile(`https?://([^\s"'\)]+)`)
 var goClientCallRe = regexp.MustCompile(`(?i)(?:http\.(?:NewRequest|Get|Post|Put|Patch)|client\.Do|resty\.[A-Za-z]+)\s*\(`)
 

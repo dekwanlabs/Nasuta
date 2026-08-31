@@ -1,6 +1,6 @@
 # QA 动态子 Agent 委派与 Workflow 降级提案
 
-> 状态：Implemented
+> 状态：Implemented，已归档
 > 创建日期：2026-08-15
 > 实施日期：2026-08-16
 > 范围：QA Agent 工具循环、调查任务委派、Agent Runtime、权限与预算、EvidenceUnit、RunStore、Workflow 编排及运行事件

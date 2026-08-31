@@ -233,28 +233,6 @@ func traceEventByNode(t *testing.T, events []domain.EvaluationTrace, node string
 	return domain.EvaluationTrace{}
 }
 
-func TestMaxStepsForQuestion(t *testing.T) {
-	agent := &Agent{cfg: Config{MaxSteps: 5}}
-	for _, question := range []string{
-		"what does this service do",
-		"review this architecture",
-		"trace the caller call chain",
-		"why did this request timeout",
-	} {
-		if got := agent.MaxStepsFor(question); got != 5 {
-			t.Errorf("MaxStepsFor(%q) = %d, want configured limit 5", question, got)
-		}
-	}
-}
-
-func TestMaxStepsForWebPlanUsesConfiguredLimit(t *testing.T) {
-	agent := &Agent{cfg: Config{MaxSteps: 5}}
-	plan := domain.EvidencePlan{Sources: domain.Web}
-	if got := agent.MaxStepsForPlan("school information", plan); got != 5 {
-		t.Fatalf("MaxStepsForPlan() = %d, want 5", got)
-	}
-}
-
 func TestExtendWebStepLimitOnlyAfterUnusableEvidenceAtBoundary(t *testing.T) {
 	if got := extendWebStepLimit(3, 3, 5, true, false); got != 4 {
 		t.Fatalf("failed boundary attempt extended to %d, want 4", got)

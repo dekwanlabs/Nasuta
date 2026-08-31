@@ -230,7 +230,7 @@ func mustMarshalJSON(t *testing.T, value any) string {
 }
 
 func TestVerifyInvestigationEvidenceClassifiesRequiredGoalCoverage(t *testing.T) {
-	schemas, _ := investigationCatalogs(t, 21)
+	schemas, _ := workflowTestCatalogs(t, 21)
 	tests := []struct {
 		name           string
 		reports        []handoffView
@@ -438,7 +438,7 @@ func TestStopReasonForVerificationUsesConvergenceFacts(t *testing.T) {
 }
 
 func TestVerifyInvestigationEvidenceBindsExplicitCanonicalIdentity(t *testing.T) {
-	schemas, _ := investigationCatalogs(t, 23)
+	schemas, _ := workflowTestCatalogs(t, 23)
 	units := []tool.EvidenceUnit{{
 		SourceKind: "code",
 		Target:     "Checkout.PlaceOrder",
@@ -545,7 +545,7 @@ func TestVerifyInvestigationEvidenceBindsExplicitCanonicalIdentity(t *testing.T)
 }
 
 func TestVerifyInvestigationEvidenceKeepsOnlyBoundReferences(t *testing.T) {
-	schemas, _ := investigationCatalogs(t, 24)
+	schemas, _ := workflowTestCatalogs(t, 24)
 	units := []tool.EvidenceUnit{verifiedEvidenceUnit("code:checkout")}
 	finding := verifiedFinding(
 		"Checkout enters PlaceOrder.",
@@ -615,7 +615,7 @@ func TestVerifyInvestigationEvidenceKeepsOnlyBoundReferences(t *testing.T) {
 }
 
 func TestVerifyInvestigationEvidenceClassifiesCoverageAndTrust(t *testing.T) {
-	schemas, _ := investigationCatalogs(t, 26)
+	schemas, _ := workflowTestCatalogs(t, 26)
 	tests := []struct {
 		name          string
 		coverage      tool.EvidenceCoverage
@@ -747,7 +747,7 @@ func TestVerifyInvestigationEvidenceClassifiesCoverageAndTrust(t *testing.T) {
 }
 
 func TestVerifierTraceOmitsClaimPayload(t *testing.T) {
-	schemas, _ := investigationCatalogs(t, 22)
+	schemas, _ := workflowTestCatalogs(t, 22)
 	units := []tool.EvidenceUnit{
 		verifiedEvidenceUnit("private-evidence-reference"),
 		{
@@ -962,7 +962,7 @@ func verifySubjectBundle(
 	requiredSources []agentapi.EvidenceSource,
 ) verifiedEvidenceView {
 	t.Helper()
-	schemas, _ := investigationCatalogs(t, 31)
+	schemas, _ := workflowTestCatalogs(t, 31)
 	units := make([]tool.EvidenceUnit, 0, len(targets))
 	findings := make([]map[string]any, 0, len(targets))
 	for _, target := range targets {
@@ -1091,7 +1091,7 @@ func TestSubjectCoverageUsesExplicitFindingEntityIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schemas, _ := investigationCatalogs(t, 21)
+	schemas, _ := workflowTestCatalogs(t, 21)
 	output, err := verifyBundle(verificationRunInput{
 		workflowRunID: "subject-handle-run",
 		node: NodeDefinition{

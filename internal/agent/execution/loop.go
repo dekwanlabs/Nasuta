@@ -116,20 +116,6 @@ func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config Config, obse
 	}
 }
 
-func (agent *Agent) MaxStepsFor(question string) int {
-	return agent.cfg.MaxSteps
-}
-
-// MaxStepsForPlan leaves one extra turn for web research to fetch a selected page.
-func (agent *Agent) MaxStepsForPlan(question string, plan domain.EvidencePlan) int {
-	return agent.MaxStepsForContext(question, plan, false)
-}
-
-// MaxStepsForContext grants routed runtime investigations their configured budget.
-func (agent *Agent) MaxStepsForContext(question string, plan domain.EvidencePlan, fullInvestigation bool) int {
-	return agent.cfg.MaxSteps
-}
-
 // SetOnFirstAnswerToken installs a callback fired before the first answer token.
 func (agent *Agent) SetOnFirstAnswerToken(fn func(runID string)) {
 	agent.onFirstAnswerToken = fn

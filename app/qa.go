@@ -140,7 +140,7 @@ func defaultAgentDefinitions(
 	}
 	investigators, err := catalog.DefaultInvestigators(settings, version)
 	if err != nil {
-		return nil, fmt.Errorf("prepare investigation definitions: %w", err)
+		return nil, fmt.Errorf("prepare delegation investigator definitions: %w", err)
 	}
 	definitions := make([]agentapi.Definition, 0, 1+len(reviewers)+len(investigators))
 	definitions = append(definitions, qa)
@@ -225,7 +225,7 @@ func (p *Platform) prepareQACatalogSnapshot(
 	capabilities, err := catalog.DefaultCapabilities(definitions, version)
 	if err != nil {
 		return qaCatalogSnapshot{}, fmt.Errorf(
-			"prepare investigation capabilities: %w",
+			"prepare delegation capabilities: %w",
 			err,
 		)
 	}
@@ -384,7 +384,7 @@ func (p *Platform) rebuildQARuntimeLocked(
 			}
 		}
 		if err := p.agents.capabilities.Publish(snapshot.capabilities); err != nil {
-			return fmt.Errorf("publish investigation capabilities: %w", err)
+			return fmt.Errorf("publish delegation capabilities: %w", err)
 		}
 		if reusedCatalog {
 			log.Infof(

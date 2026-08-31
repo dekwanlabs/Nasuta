@@ -74,13 +74,13 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 	}
 }
 
-func TestManagedSchemaContainsFortySixTables(t *testing.T) {
+func TestManagedSchemaContainsFortyThreeTables(t *testing.T) {
 	total := 0
 	for _, statements := range mysqlSchema {
 		total += len(statements)
 	}
-	if total != 46 {
-		t.Fatalf("managed schema table count=%d want=46", total)
+	if total != 43 {
+		t.Fatalf("managed schema table count=%d want=43", total)
 	}
 }
 
@@ -311,6 +311,40 @@ func TestQAMessageFeedbackMigrationAddsExistingTableColumn(t *testing.T) {
 	}
 }
 
+func TestLegacyInvestigationWorkflowRemovalMigrationDropsTablesAndSettings(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_remove_legacy_investigation_workflow_20260831.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read legacy investigation workflow removal migration: %v", err)
+	}
+	script := string(raw)
+	for _, table := range []string{"investigation_leases", "investigation_events", "investigation_runs", "workflow_escalations"} {
+		if !strings.Contains(script, "DROP TABLE IF EXISTS "+table) {
+			t.Fatalf("legacy investigation migration missing drop for %s", table)
+		}
+	}
+	for _, key := range []string{
+		"investigation_max_input_tokens",
+		"investigation_max_output_tokens",
+		"investigation_max_total_tokens",
+		"investigation_max_tool_calls",
+		"investigation_max_duration",
+		"investigation_max_rounds",
+		"investigation_max_tasks",
+		"investigation_max_parallelism",
+		"investigation_max_cost_micros",
+		"investigation_budget_profile",
+		"investigation_enabled",
+	} {
+		if !strings.Contains(script, "'"+key+"'") {
+			t.Fatalf("legacy investigation migration missing settings key %q", key)
+		}
+	}
+	if !strings.Contains(script, "DELETE FROM settings") {
+		t.Fatal("legacy investigation migration does not remove obsolete settings")
+	}
+}
+
 func TestFeatureSubjectReviewRemovalMigrationCopiesBothSubjectKinds(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_remove_feature_subject_reviews.sql")
 	raw, err := os.ReadFile(path)
@@ -501,35 +535,5 @@ func TestAgentToolResultTraceSchemaPreservesAuthoritativeResults(t *testing.T) {
 	}
 	if strings.Contains(statements, "result_summary") {
 		t.Fatal("managed QA run schema still persists a result preview")
-	}
-}
-
-func TestInvestigationSchemaSupportsFencedKeysetRecovery(t *testing.T) {
-	statements := strings.Join(mysqlSchema[GroupInvestigation], "\n")
-	for _, required := range []string{
-		"fencing_token  BIGINT      NOT NULL DEFAULT 0",
-		"KEY idx_investigation_runs_updated (updated_at, id)",
-		"KEY idx_investigation_leases_expiry (expires_at)",
-	} {
-		if !strings.Contains(statements, required) {
-			t.Fatalf("investigation schema missing %q", required)
-		}
-	}
-}
-
-func TestInvestigationFencingMigrationAddsRecoveryIndex(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_add_investigation_fencing_token_20260822.sql")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read investigation fencing migration: %v", err)
-	}
-	script := string(raw)
-	for _, required := range []string{
-		"ADD COLUMN fencing_token BIGINT NOT NULL DEFAULT 0",
-		"ADD INDEX idx_investigation_runs_updated (updated_at, id)",
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("investigation fencing migration missing %q", required)
-		}
 	}
 }

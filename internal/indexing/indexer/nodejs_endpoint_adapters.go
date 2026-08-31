@@ -26,11 +26,6 @@ type nodejsAssignmentInfo struct {
 	line   int
 }
 
-type nodejsRoute struct {
-	method string
-	path   string
-}
-
 func parseNodeJSEndpointSource(root, file, text string) (endpointSource, bool) {
 	source := parseNodeJSSource(text)
 	moduleRoot := findNodeJSModuleRoot(root, file)
@@ -452,7 +447,3 @@ func scanNodeJSRoutesWithReceivers(
 }
 
 var nodejsReceiverRouteRe = regexp.MustCompile(`(?i)\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\.\s*(get|post|put|delete|patch|head|options)\s*\(\s*["']([^"']+)["']`)
-
-// Re-export of compile-time variables from nodejs_indexer.go (still needed by the existing
-// scanNodeJSEndpoints function until it's removed).
-var _ = hapiMethodFirstRe // suppress unused warning

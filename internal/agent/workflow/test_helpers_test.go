@@ -9,10 +9,9 @@ import (
 	"github.com/dekwanlabs/nasuta/platform/config"
 )
 
-// investigationCatalogs provides the catalog fixtures shared by generic
-// workflow verifier tests; it is deliberately test-only and is not a runtime
-// investigation workflow compatibility layer.
-func investigationCatalogs(t *testing.T, version int64) (*agentapi.SchemaRegistry, *catalog.Catalog) {
+// workflowTestCatalogs provides catalog fixtures shared by generic workflow
+// tests. It is deliberately test-only and does not model a runtime workflow.
+func workflowTestCatalogs(t *testing.T, version int64) (*agentapi.SchemaRegistry, *catalog.Catalog) {
 	t.Helper()
 	schemas := agentapi.NewSchemaRegistry()
 	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {

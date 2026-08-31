@@ -135,7 +135,7 @@ func TestEvidenceRiskGateEvaluatorRejectsInvalidInput(t *testing.T) {
 }
 
 func TestEvidenceRiskGateForwardsVerifiedHandoff(t *testing.T) {
-	schemas, _ := investigationCatalogs(t, 25)
+	schemas, _ := workflowTestCatalogs(t, 25)
 	schema := agentapi.InvestigationVerifiedBundleSchemaRef()
 	units := []tool.EvidenceUnit{{
 		SourceKind: "runtime",

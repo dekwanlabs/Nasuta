@@ -1,10 +1,7 @@
 package run
 
 import (
-	"errors"
-
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
@@ -21,11 +18,6 @@ const (
 	EventSessionStatus                  EventType = "session.status"
 	EventExecutionRouted                EventType = "execution.routed"
 	EventExecutionDegraded              EventType = "execution.degraded"
-	EventWorkflowStarted                EventType = "workflow.started"
-	EventWorkflowCompleted              EventType = "workflow.completed"
-	EventAgentStarted                   EventType = "agent.started"
-	EventAgentCompleted                 EventType = "agent.completed"
-	EventEvidenceJoined                 EventType = "evidence.joined"
 	EventContextUsage                   EventType = "context.usage"
 	EventDelegationCreated              EventType = "delegation.created"
 	EventDelegationStarted              EventType = "delegation.started"
@@ -149,19 +141,18 @@ type SSEEvent struct {
 
 // Terminal is the sole real-time projection of one persisted Run outcome.
 type Terminal struct {
-	RunID                 string                        `json:"run_id"`
-	Status                Status                        `json:"status"`
-	Answer                string                        `json:"answer,omitempty"`
-	ErrorCode             string                        `json:"error_code,omitempty"`
-	StepCount             int                           `json:"step_count"`
-	TokenUsed             int                           `json:"token_used"`
-	References            []agentapi.Reference          `json:"references,omitempty"`
-	DelegationAdoptions   []agentapi.DelegationAdoption `json:"delegation_adoptions,omitempty"`
-	HitCount              int                           `json:"hit_count"`
-	Error                 string                        `json:"error,omitempty"`
-	Evidence              EvidenceMetrics               `json:"evidence"`
-	InvestigationDelivery *investigation.DeliveryResult `json:"investigation_delivery,omitempty"`
-	SessionMessages       []llm.Message                 `json:"-"`
+	RunID               string                        `json:"run_id"`
+	Status              Status                        `json:"status"`
+	Answer              string                        `json:"answer,omitempty"`
+	ErrorCode           string                        `json:"error_code,omitempty"`
+	StepCount           int                           `json:"step_count"`
+	TokenUsed           int                           `json:"token_used"`
+	References          []agentapi.Reference          `json:"references,omitempty"`
+	DelegationAdoptions []agentapi.DelegationAdoption `json:"delegation_adoptions,omitempty"`
+	HitCount            int                           `json:"hit_count"`
+	Error               string                        `json:"error,omitempty"`
+	Evidence            EvidenceMetrics               `json:"evidence"`
+	SessionMessages     []llm.Message                 `json:"-"`
 }
 
 func TerminalFromEvent(event SSEEvent) *Terminal {
@@ -192,24 +183,6 @@ func terminalFromOutcome(runID string, outcome Outcome) Terminal {
 		terminal.Error = outcome.Err.Error()
 	}
 	return terminal
-}
-
-func outcomeFromTerminal(terminal Terminal) Outcome {
-	outcome := Outcome{
-		Status: terminal.Status, ErrorCode: terminal.ErrorCode,
-		StepCount: terminal.StepCount, TokenUsed: terminal.TokenUsed,
-		Answer:     terminal.Answer,
-		Evidence:   terminal.Evidence,
-		References: append([]agentapi.Reference(nil), terminal.References...),
-		DelegationAdoptions: cloneDelegationAdoptions(
-			terminal.DelegationAdoptions,
-		),
-		HitCount: terminal.HitCount,
-	}
-	if terminal.Error != "" {
-		outcome.Err = errors.New(terminal.Error)
-	}
-	return outcome
 }
 
 func cloneDelegationAdoptions(

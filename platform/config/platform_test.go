@@ -68,33 +68,6 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 	if settings.LLMContextWindow != DefaultLLMContextWindow {
 		t.Fatalf("context window = %d", settings.LLMContextWindow)
 	}
-	if settings.InvestigationMaxInputTokens != DefaultInvestigationMaxInputTokens ||
-		settings.InvestigationMaxOutputTokens != DefaultInvestigationMaxOutputTokens ||
-		settings.InvestigationMaxTotalTokens != DefaultInvestigationMaxTotalTokens ||
-		settings.InvestigationMaxToolCalls != DefaultInvestigationMaxToolCalls {
-		t.Fatalf(
-			"investigation token/tool limits = %d/%d/%d",
-			settings.InvestigationMaxInputTokens,
-			settings.InvestigationMaxOutputTokens,
-			settings.InvestigationMaxToolCalls,
-		)
-	}
-	if time.Duration(settings.InvestigationMaxDuration) != DefaultInvestigationMaxDuration ||
-		settings.InvestigationMaxRounds != DefaultInvestigationMaxRounds ||
-		settings.InvestigationMaxTasks != DefaultInvestigationMaxTasks ||
-		settings.InvestigationMaxParallelism != DefaultInvestigationMaxParallelism ||
-		settings.InvestigationMaxCostMicros != DefaultInvestigationMaxCostMicros ||
-		settings.InvestigationBudgetProfile != DefaultInvestigationBudgetProfile {
-		t.Fatalf(
-			"investigation defaults = duration %s rounds %d tasks %d parallelism %d cost %d profile %q",
-			time.Duration(settings.InvestigationMaxDuration),
-			settings.InvestigationMaxRounds,
-			settings.InvestigationMaxTasks,
-			settings.InvestigationMaxParallelism,
-			settings.InvestigationMaxCostMicros,
-			settings.InvestigationBudgetProfile,
-		)
-	}
 	if time.Duration(settings.FeatureGenerationTimeout) != DefaultFeatureGenerationTimeout {
 		t.Fatalf("feature generation timeout = %s", time.Duration(settings.FeatureGenerationTimeout))
 	}
@@ -113,13 +86,6 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 	settings.Apply(map[string]string{"delegation_enabled": "false"})
 	if !settings.DelegationEnabled {
 		t.Fatal("persisted delegation_enabled must be ignored; delegation stays on")
-	}
-	if settings.InvestigationEnabled {
-		t.Fatal("investigation workflow must default off")
-	}
-	settings.Apply(map[string]string{"investigation_enabled": "true"})
-	if !settings.InvestigationEnabled {
-		t.Fatal("investigation_enabled=true must turn investigation workflow on")
 	}
 	if settings.DelegationMaxChildren != DefaultDelegationMaxChildren ||
 		settings.DelegationMaxConcurrent != DefaultDelegationMaxConcurrent {
@@ -421,18 +387,7 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"llm_max_continue_rounds": "0", "llm_context_window": "128000", "agent_answer_reserve": "30s",
 		"llm_input_price_micros_per_million_tokens":  "0",
 		"llm_output_price_micros_per_million_tokens": "0",
-		"investigation_max_input_tokens":             "20000",
-		"investigation_max_output_tokens":            "8000",
-		"investigation_max_total_tokens":             "512000",
-		"investigation_max_tool_calls":               "24",
-		"investigation_max_duration":                 "5m",
-		"investigation_max_rounds":                   "4",
-		"investigation_max_tasks":                    "12",
-		"investigation_max_parallelism":              "4",
-		"investigation_max_cost_micros":              "0",
-		"investigation_budget_profile":               "interactive",
-		"investigation_enabled":                      "false",
-		"agent_timeout":                              "5m", "agent_max_steps": "1", "agent_max_tool_calls": "24", "context_budget": "1", "domain_knowledge": "domain",
+		"agent_timeout": "5m", "agent_max_steps": "1", "agent_max_tool_calls": "24", "context_budget": "1", "domain_knowledge": "domain",
 		"retrieval_router_direct_min_confidence": "0.9", "retrieval_router_max_tokens": "512",
 		"tool_pruning_enabled":           "false",
 		"disable_legacy_answer_recovery": "false",

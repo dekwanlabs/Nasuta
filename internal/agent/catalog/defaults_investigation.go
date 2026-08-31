@@ -19,12 +19,12 @@ const (
 
 // DefaultInvestigators builds the fixed read-only delegated investigation panel.
 func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]agentapi.Definition, error) {
-	verifierOutput := investigationRoleOutputBudget(
-		settings.InvestigationMaxOutputTokens,
+	verifierOutput := delegationRoleOutputBudget(
+		settings.LLMAnswerMaxTokens,
 		verifierOutputMinimum,
 	)
-	synthesizerOutput := investigationRoleOutputBudget(
-		settings.InvestigationMaxOutputTokens,
+	synthesizerOutput := delegationRoleOutputBudget(
+		settings.LLMAnswerMaxTokens,
 		synthesizerOutputMinimum,
 	)
 	investigatorSteps := boundedRoleLimit(settings.AgentMaxSteps, investigatorMaxSteps)
@@ -167,24 +167,18 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 	return append(definitions, synthesizer), nil
 }
 
-// investigationRoleOutputBudget derives a role's model output cap from the
-// Investigation Run output budget. A missing Investigation setting is kept as
-// a test/legacy compatibility fallback; once configured, the role gets exactly
-// the current Verification/Composition ten-percent share instead of an old
-// fixed floor that could exceed the role pool.
-func investigationRoleOutputBudget(global int64, fallback int) int {
+// delegationRoleOutputBudget derives a bounded verifier or synthesizer model
+// output cap from the shared answer budget. Small answer budgets retain the
+// role-specific floor required for structured handoffs.
+func delegationRoleOutputBudget(global, minimum int) int {
 	if global <= 0 {
-		return fallback
+		return minimum
 	}
 	budget := global / 10
-	if budget <= 0 {
-		return 1
+	if budget < minimum {
+		return minimum
 	}
-	maxInt := int64(^uint(0) >> 1)
-	if budget > maxInt {
-		return int(maxInt)
-	}
-	return int(budget)
+	return budget
 }
 
 func boundedRoleLimit(global, maximum int) int {

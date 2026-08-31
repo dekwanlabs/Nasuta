@@ -302,7 +302,7 @@ func (orchestrator *Orchestrator) prepareRun(
 	if orchestrator == nil {
 		return Definition{}, graphMetadata{}, fmt.Errorf("workflow orchestrator is unavailable")
 	}
-	prepared, err := prepareRuntime(definition, orchestrator.schemas)
+	prepared, err := prepareForExecution(definition, orchestrator.schemas)
 	if err != nil {
 		return Definition{}, graphMetadata{}, err
 	}

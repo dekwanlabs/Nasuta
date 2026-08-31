@@ -1,6 +1,6 @@
 # Embedding 语料范围与增量索引治理提案
 
-状态：已实施
+状态：已实施并归档
 作者：Nasuta / CodeLoom
 日期：2026-08-19
 关联事项：workspace embedding corpus 分析；当前无关联 Issue、Trace 或 PR

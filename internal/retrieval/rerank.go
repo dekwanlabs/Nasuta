@@ -69,13 +69,11 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 	if rerankLimit <= 0 || rerankLimit > budget {
 		rerankLimit = budget
 	}
-	before := len(pool)
 	pool, _ = runtrace.Invoke(ctx, candidateDedupSpec, candidateDedupInput{Docs: pool}, func(_ context.Context, input candidateDedupInput) ([]codeDoc, error) {
 		return dedupBySource(input.Docs), nil
 	})
 	log.InfofCtx(ctx, "[qa] code pool dedup: → %d\n%s", len(pool), poolSummary(pool, "dedup"))
 
-	before = len(pool)
 	pool, _ = runtrace.Invoke(ctx, candidateTruncateSpec, candidateTruncateInput{
 		Docs: pool, Limit: rerankLimit, MinimumPerSource: 2,
 	}, func(_ context.Context, input candidateTruncateInput) ([]codeDoc, error) {
@@ -102,7 +100,7 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 		log.InfofCtx(ctx, "[qa] code pool AFTER rerank:\n%s", poolSummary(pool, "after-rerank"))
 	}
 
-	before = len(pool)
+	before := len(pool)
 	pool, _ = runtrace.Invoke(ctx, candidateThresholdSpec, candidateThresholdInput{
 		Docs: pool, MinScore: retrieve.platform.RerankMinScore,
 	}, func(_ context.Context, input candidateThresholdInput) ([]codeDoc, error) {
@@ -110,7 +108,6 @@ func (retrieve *Retriever) postProcessCodePool(ctx context.Context, pool []codeD
 	})
 	log.InfofCtx(ctx, "[qa] code pool threshold(%.2f): %d → %d", retrieve.platform.RerankMinScore, before, len(pool))
 
-	before = len(pool)
 	pool, _ = runtrace.Invoke(ctx, candidateDiversitySpec, candidateDiversityInput{
 		Docs: pool, TopK: retrieve.platform.RerankTopK, MaxPerService: retrieve.platform.RerankMaxPerService,
 		MaxPerServiceLowBand: retrieve.platform.RerankMaxPerServiceLowBand,

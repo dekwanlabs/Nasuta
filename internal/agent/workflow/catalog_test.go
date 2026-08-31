@@ -50,9 +50,9 @@ func TestCatalogRetainsPublishedVersionsDuringConcurrentReads(t *testing.T) {
 	}
 }
 
-func TestCatalogAttachStoreRestoresLegacyExecutionBudget(t *testing.T) {
+func TestCatalogAttachStoreRestoresPreLimitExecutionBudget(t *testing.T) {
 	schemas := testSchemaRegistry(t)
-	definition := legacyDefinition(t, schemas)
+	definition := preLimitDefinition(t, schemas)
 	raw, err := json.Marshal(definition)
 	if err != nil {
 		t.Fatal(err)
@@ -91,9 +91,9 @@ func TestCatalogAttachStoreRestoresLegacyExecutionBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resolved.legacyExecutionBudget ||
+	if !resolved.persistedWithoutExecutionLimits ||
 		resolved.ContentHash != definition.ContentHash {
-		t.Fatalf("resolved legacy workflow = %+v", resolved)
+		t.Fatalf("resolved pre-limit workflow = %+v", resolved)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)

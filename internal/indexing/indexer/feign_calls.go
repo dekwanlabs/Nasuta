@@ -258,7 +258,6 @@ func javaFeignMethods(
 }
 
 var (
-	kotlinPackageRe     = regexp.MustCompile(`(?m)^\s*package\s+([\w.]+)`)
 	kotlinInterfaceRe   = regexp.MustCompile(`\binterface\s+([A-Za-z_$][\w$]*)`)
 	kotlinFunNameRe     = regexp.MustCompile(`\bfun\s+([A-Za-z_$][\w$]*)\s*\(`)
 	javaStringConstRe   = regexp.MustCompile(`\bString\s+([A-Za-z_$][\w$]*)\s*=\s*("(?:\\.|[^"\\])*")`)

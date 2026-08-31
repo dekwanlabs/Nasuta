@@ -79,8 +79,9 @@ type Definition struct {
 	FailurePolicy FailurePolicy             `json:"failure_policy"`
 	ContentHash   string                    `json:"content_hash"`
 
-	// Set only after a persisted pre-limit hash is verified.
-	legacyExecutionBudget bool
+	// Set only after a persisted definition's pre-limit hash is verified.
+	// New definitions never enter this execution path.
+	persistedWithoutExecutionLimits bool
 }
 
 type NodeDefinition struct {
@@ -173,7 +174,9 @@ type VerifierSpec struct {
 type Budget struct {
 	MaxNodes       int `json:"max_nodes"`
 	MaxParallelism int `json:"max_parallelism"`
-	// Zero omission preserves hashes published before orchestration limits.
+	// New definitions must provide both limits. They remain omittable on the
+	// wire only while the catalog can restore definitions published before
+	// these execution limits existed.
 	MaxRounds         int           `json:"max_rounds,omitempty"`
 	MaxDepth          int           `json:"max_depth,omitempty"`
 	Timeout           time.Duration `json:"timeout"`
@@ -281,28 +284,28 @@ func Prepare(definition Definition, schemas *agentapi.SchemaRegistry) (Definitio
 	return prepareDefinition(definition, schemas, false)
 }
 
-func prepareStored(
+func preparePersisted(
 	definition Definition,
 	schemas *agentapi.SchemaRegistry,
 ) (Definition, error) {
 	return prepareDefinition(definition, schemas, true)
 }
 
-func prepareRuntime(
+func prepareForExecution(
 	definition Definition,
 	schemas *agentapi.SchemaRegistry,
 ) (Definition, error) {
 	return prepareDefinition(
 		definition,
 		schemas,
-		definition.legacyExecutionBudget,
+		definition.persistedWithoutExecutionLimits,
 	)
 }
 
 func prepareDefinition(
 	definition Definition,
 	schemas *agentapi.SchemaRegistry,
-	allowLegacyExecutionBudget bool,
+	allowPersistedWithoutExecutionLimits bool,
 ) (Definition, error) {
 	if schemas == nil {
 		return Definition{}, fmt.Errorf("workflow schema registry is required")
@@ -324,12 +327,12 @@ func prepareDefinition(
 	if err := validateSchema("workflow output", prepared.OutputSchema, schemas); err != nil {
 		return Definition{}, err
 	}
-	legacyExecutionBudget := prepared.Budget.MaxRounds == 0 &&
+	persistedWithoutExecutionLimits := prepared.Budget.MaxRounds == 0 &&
 		prepared.Budget.MaxDepth == 0
 	if prepared.Budget.MaxNodes <= 0 || prepared.Budget.MaxParallelism <= 0 ||
-		(!legacyExecutionBudget &&
+		(!persistedWithoutExecutionLimits &&
 			(prepared.Budget.MaxRounds <= 0 || prepared.Budget.MaxDepth <= 0)) ||
-		(legacyExecutionBudget && !allowLegacyExecutionBudget) ||
+		(persistedWithoutExecutionLimits && !allowPersistedWithoutExecutionLimits) ||
 		prepared.Budget.Timeout <= 0 || prepared.Budget.MaxHandoffBytes <= 0 {
 		return Definition{}, fmt.Errorf("workflow %q budgets must be positive", prepared.ID)
 	}
@@ -378,7 +381,7 @@ func prepareDefinition(
 		return Definition{}, err
 	}
 	maxDepth := prepared.Budget.MaxDepth
-	if legacyExecutionBudget {
+	if persistedWithoutExecutionLimits {
 		maxDepth = prepared.Budget.MaxNodes
 	}
 	if metadata.maxDepth > maxDepth {
@@ -397,7 +400,7 @@ func prepareDefinition(
 		return Definition{}, fmt.Errorf("workflow %q content hash mismatch", prepared.ID)
 	}
 	prepared.ContentHash = hash
-	prepared.legacyExecutionBudget = legacyExecutionBudget
+	prepared.persistedWithoutExecutionLimits = persistedWithoutExecutionLimits
 	return prepared, nil
 }
 
@@ -947,6 +950,23 @@ func validateTaskDirective(workflowID string, node NodeDefinition) error {
 	}
 	if err := validateEvidenceRefs(node.ID, node.Task.InputRefs); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateEvidenceRefs(taskID string, refs []agentapi.EvidenceRef) error {
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref.SourceKind == "" || ref.SourceKind != strings.TrimSpace(ref.SourceKind) ||
+			ref.Target == "" || ref.Target != strings.TrimSpace(ref.Target) {
+			return fmt.Errorf("task %q contains an invalid evidence reference", taskID)
+		}
+		key := ref.SourceKind + "\x00" + ref.Target + "\x00" + ref.Section +
+			"\x00" + ref.Version + "\x00" + ref.TimeRange + "\x00" + ref.ContentHash
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("task %q contains a duplicate evidence reference", taskID)
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }

@@ -176,8 +176,7 @@ func (sub *subscriber) close() {
 func isBestEffortEvent(event EventType) bool {
 	switch event {
 	case EventAnswerDelta, EventReasoningDelta, EventTrace, EventStatus, EventLLMCall,
-		EventExecutionRouted, EventExecutionDegraded, EventWorkflowStarted,
-		EventAgentStarted, EventAgentCompleted, EventEvidenceJoined,
+		EventExecutionRouted, EventExecutionDegraded,
 		EventDelegationCreated, EventDelegationStarted,
 		EventDelegationValidated,
 		EventDelegationVerificationStarted:

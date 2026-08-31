@@ -28,7 +28,7 @@ func TestPrepareReviewPanelSelectsOptionalReviewersByRisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	highFacts, highRiskHash, highPanel, highPanelHash, err := PrepareReviewPanel(policy, highFacts)
+	_, highRiskHash, highPanel, highPanelHash, err := PrepareReviewPanel(policy, highFacts)
 	if err != nil {
 		t.Fatal(err)
 	}

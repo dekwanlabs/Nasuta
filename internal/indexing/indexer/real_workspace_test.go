@@ -2,20 +2,27 @@ package indexer
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
-
-const realWorkspaceRoot = "/Users/dequan.mac/agent-workspace/workspace"
 
 // This test intentionally scans the checked-out projects instead of reading
 // the historical .nasuta snapshot. It protects the invariant that shared
 // Feign modules contribute only clients reached by executable call sites.
 func TestRealWorkspaceFeignDependenciesRequireCallSites(t *testing.T) {
-	if _, err := os.Stat(realWorkspaceRoot + "/repos/hsas/hsas-dreo-app"); err != nil {
+	if os.Getenv("NASUTA_RUN_REAL_WORKSPACE_TESTS") != "1" {
+		t.Skip("real workspace tests disabled; set NASUTA_RUN_REAL_WORKSPACE_TESTS=1 to enable")
+	}
+	root := strings.TrimSpace(os.Getenv("NASUTA_REAL_WORKSPACE_ROOT"))
+	if root == "" {
+		t.Skip("real workspace tests require NASUTA_REAL_WORKSPACE_ROOT")
+	}
+	root = filepath.Clean(root)
+	if _, err := os.Stat(filepath.Join(root, "repos", "hsas", "hsas-dreo-app")); err != nil {
 		t.Skipf("real workspace is unavailable: %v", err)
 	}
-	bundle := BuildStructuralBundle(realWorkspaceRoot, []string{
+	bundle := BuildStructuralBundle(root, []string{
 		"repos/hsas/hsas-dreo-app",
 		"repos/hsds/hsds-base-system",
 	})

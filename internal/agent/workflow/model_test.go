@@ -46,26 +46,26 @@ func TestPrepareRequiresPublishedSchemasAndAcceptsExplicitCompatibility(t *testi
 	}
 }
 
-func TestPrepareStoredDefinitionRestoresLegacyExecutionBudget(t *testing.T) {
+func TestPreparePersistedDefinitionRestoresPreLimitExecutionBudget(t *testing.T) {
 	schemas := testSchemaRegistry(t)
-	definition := legacyDefinition(t, schemas)
+	definition := preLimitDefinition(t, schemas)
 
 	if _, err := Prepare(definition, schemas); err == nil ||
 		!strings.Contains(err.Error(), "budgets must be positive") {
-		t.Fatalf("Prepare legacy workflow error = %v", err)
+		t.Fatalf("Prepare pre-limit workflow error = %v", err)
 	}
-	prepared, err := prepareStored(definition, schemas)
+	prepared, err := preparePersisted(definition, schemas)
 	if err != nil {
-		t.Fatalf("prepareStoredDefinition: %v", err)
+		t.Fatalf("preparePersisted definition: %v", err)
 	}
-	if !prepared.legacyExecutionBudget ||
+	if !prepared.persistedWithoutExecutionLimits ||
 		prepared.ContentHash != definition.ContentHash {
-		t.Fatalf("prepared legacy workflow = %+v", prepared)
+		t.Fatalf("prepared pre-limit workflow = %+v", prepared)
 	}
 	maxRounds, maxDepth := executionLimits(prepared)
 	if maxRounds != 1 || maxDepth != prepared.Budget.MaxNodes {
 		t.Fatalf(
-			"legacy execution limits = rounds %d depth %d",
+			"pre-limit execution limits = rounds %d depth %d",
 			maxRounds,
 			maxDepth,
 		)
@@ -73,9 +73,18 @@ func TestPrepareStoredDefinitionRestoresLegacyExecutionBudget(t *testing.T) {
 	orchestrator := NewOrchestrator(schemas, staticOutputExecutor{}, nil)
 	if _, _, err := orchestrator.prepareRun(
 		prepared,
-		RunRequest{RunID: "legacy_workflow_run"},
+		RunRequest{RunID: "pre_limit_workflow_run"},
 	); err != nil {
-		t.Fatalf("prepareRun restored legacy workflow: %v", err)
+		t.Fatalf("prepareRun restored pre-limit workflow: %v", err)
+	}
+}
+
+func TestPreparePersistedRejectsPartiallyMissingExecutionLimits(t *testing.T) {
+	definition := testWorkflow()
+	definition.Budget.MaxRounds = 0
+	if _, err := preparePersisted(definition, testSchemaRegistry(t)); err == nil ||
+		!strings.Contains(err.Error(), "budgets must be positive") {
+		t.Fatalf("preparePersisted partial execution limits error = %v", err)
 	}
 }
 
@@ -782,7 +791,7 @@ func testWorkflow() Definition {
 	}
 }
 
-func legacyDefinition(
+func preLimitDefinition(
 	t *testing.T,
 	schemas *agentapi.SchemaRegistry,
 ) Definition {
@@ -804,7 +813,7 @@ func legacyDefinition(
 		Nodes         []NodeDefinition          `json:"nodes"`
 		Edges         []EdgeDefinition          `json:"edges"`
 		Permissions   agentapi.PermissionPolicy `json:"permissions"`
-		Budget        legacyBudget              `json:"budget"`
+		Budget        preLimitBudget            `json:"budget"`
 		FailurePolicy FailurePolicy             `json:"failure_policy"`
 		ContentHash   string                    `json:"content_hash"`
 	}{
@@ -812,7 +821,7 @@ func legacyDefinition(
 		Purpose: definition.Purpose, InputSchema: definition.InputSchema,
 		OutputSchema: definition.OutputSchema, Nodes: definition.Nodes,
 		Edges: definition.Edges, Permissions: definition.Permissions,
-		Budget: legacyBudget{
+		Budget: preLimitBudget{
 			MaxNodes:        definition.Budget.MaxNodes,
 			MaxParallelism:  definition.Budget.MaxParallelism,
 			Timeout:         definition.Budget.Timeout,
@@ -835,7 +844,7 @@ func legacyDefinition(
 	return definition
 }
 
-type legacyBudget struct {
+type preLimitBudget struct {
 	MaxNodes        int           `json:"max_nodes"`
 	MaxParallelism  int           `json:"max_parallelism"`
 	Timeout         time.Duration `json:"timeout"`

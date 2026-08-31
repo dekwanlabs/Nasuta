@@ -170,10 +170,10 @@ func (catalog *Catalog) prepare(
 	return catalog.prepareDefinitions(definitions, Prepare)
 }
 
-func (catalog *Catalog) prepareStored(
+func (catalog *Catalog) preparePersisted(
 	definitions []Definition,
 ) ([]Definition, error) {
-	return catalog.prepareDefinitions(definitions, prepareStored)
+	return catalog.prepareDefinitions(definitions, preparePersisted)
 }
 
 func (catalog *Catalog) prepareDefinitions(
@@ -488,7 +488,7 @@ func (catalog *Catalog) AttachStore(
 		rollouts: make(map[string]RolloutRule),
 	}
 	for _, record := range loaded {
-		preparedRecord, prepareErr := catalog.prepareStoredRecord(record)
+		preparedRecord, prepareErr := catalog.preparePersistedRecord(record)
 		if prepareErr != nil {
 			return fmt.Errorf(
 				"load workflow %q version %d: %w",
@@ -585,7 +585,7 @@ func (catalog *Catalog) loadDefinition(
 	if err != nil {
 		return err
 	}
-	record, err = catalog.prepareStoredRecord(record)
+	record, err = catalog.preparePersistedRecord(record)
 	if err != nil {
 		return fmt.Errorf(
 			"load workflow %q version %d: %w",
@@ -612,11 +612,11 @@ func (catalog *Catalog) loadDefinition(
 	return nil
 }
 
-// prepareStoredRecord validates one persisted definition before caching it.
-func (catalog *Catalog) prepareStoredRecord(
+// preparePersistedRecord validates one persisted definition before caching it.
+func (catalog *Catalog) preparePersistedRecord(
 	record DefinitionRecord,
 ) (DefinitionRecord, error) {
-	prepared, err := catalog.prepareStored([]Definition{record.Definition})
+	prepared, err := catalog.preparePersisted([]Definition{record.Definition})
 	if err != nil {
 		return DefinitionRecord{}, err
 	}

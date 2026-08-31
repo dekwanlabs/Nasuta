@@ -7,6 +7,8 @@
 - **审查性质**：实现对齐、生产闭环、失败链路和代码质量审查
 - **本次变更**：仅新增本审查文档，未修改业务代码，未创建 commit
 
+> **历史材料（Superseded，2026-08-31）：** 本报告审查的 durable Investigation workflow 已从当前 QA 链路删除。当前实现请阅读 [20-agent-orchestration-current-implementation.zh-CN.md](agent-platform/20-agent-orchestration-current-implementation.zh-CN.md)；本文仅用于保留当时的风险和决策记录。
+
 > 附件日志时间为 `2026-08-23 00:59`，晚于本审查环境日期 `2026-08-22`。该差异可能来自日志回放、机器时钟或时区配置，不能直接作为业务失败原因，但应在运行时日志链路中确认时间来源。
 
 ---

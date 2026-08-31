@@ -336,7 +336,7 @@ func admitPosition(
 }
 
 func executionLimits(definition Definition) (int, int) {
-	if definition.legacyExecutionBudget {
+	if definition.persistedWithoutExecutionLimits {
 		return 1, definition.Budget.MaxNodes
 	}
 	return definition.Budget.MaxRounds, definition.Budget.MaxDepth

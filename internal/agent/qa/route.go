@@ -9,20 +9,14 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 )
 
-// ExecutionPolicy records the request-level conditions that affect whether
-// the parent agent may use its delegation tool. QA itself always remains a
-// normal agent run; it never creates a durable QA workflow.
-type ExecutionPolicy struct {
-	AllowMultiAgent bool
-}
-
 type executionPath string
 
+const executionPathSingle executionPath = "single_agent"
+
 const (
-	executionPathSingle                executionPath = "single_agent"
-	routeReasonParentDynamicDelegation               = "parent_dynamic_delegation"
-	routeReasonDelegationUnavailable                 = "delegation_unavailable"
-	routeReasonWriteRequested                        = "write_requested"
+	routeReasonParentDynamicDelegation = "parent_dynamic_delegation"
+	routeReasonDelegationUnavailable   = "delegation_unavailable"
+	routeReasonWriteRequested          = "write_requested"
 )
 
 // executionRouteInput is deliberately limited to parent-run advisory data.

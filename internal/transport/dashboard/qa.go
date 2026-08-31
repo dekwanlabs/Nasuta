@@ -791,7 +791,7 @@ func (handler *Handler) APIQARunGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// QA is backed by the ordinary agent run store. The terminal and step
-	// payloads are authoritative; no investigation workflow projection is needed.
+	// payloads are authoritative; no durable workflow projection is needed.
 	httputil.WriteJSON(w, detail)
 }
 

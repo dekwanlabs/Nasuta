@@ -166,27 +166,6 @@ func TestExecutionRoutingDoesNotUseResolvedHistoryRelation(t *testing.T) {
 	}
 }
 
-func TestStandardQARequestAllowsSeedContextPrefetchAndParentReference(t *testing.T) {
-	defaultAgent := agentapi.DefinitionRef{ID: "qa.answerer", Version: 3}
-	request := Request{
-		PreloadedContext: []ContextBlock{{
-			Source: "scenario", Content: "trusted seed context",
-		}},
-		ToolPlan: ToolPlan{Prefetch: []PlannedToolCall{{
-			ToolID: "search_code",
-		}}},
-		ParentRunID: "qa-parent-run",
-	}
-	if !standardRequest(request, defaultAgent) {
-		t.Fatal("seed context, prefetch, and parent reference disabled multi-agent routing")
-	}
-	request.WorkflowRunID = "workflow-parent"
-	request.WorkflowNodeID = "answer"
-	if standardRequest(request, defaultAgent) {
-		t.Fatal("nested workflow node was accepted as a standard QA request")
-	}
-}
-
 func TestNormalizeQARequestCanonicalizesWithoutMutatingConversationInstructions(t *testing.T) {
 	request := Request{
 		Question: "  explain the checkout flow  ",
@@ -714,8 +693,6 @@ func TestAskAlwaysUsesNormalAgentRun(t *testing.T) {
 
 func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *httptest.Server) {
 	t.Helper()
-	var nonStreamMu sync.Mutex
-	nonStreamCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var payload struct {
 			Stream bool `json:"stream"`
@@ -725,16 +702,8 @@ func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *http
 			return
 		}
 		if !payload.Stream {
-			nonStreamMu.Lock()
-			nonStreamCalls++
-			call := nonStreamCalls
-			nonStreamMu.Unlock()
 			writer.Header().Set("Content-Type", "application/json")
-			if call == 1 {
-				_, _ = writer.Write([]byte(routeBody))
-			} else {
-				_, _ = writer.Write([]byte(multiAgentTaskGraphBody()))
-			}
+			_, _ = writer.Write([]byte(routeBody))
 			return
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
@@ -747,14 +716,6 @@ func newQATestLLM(t *testing.T, routeBody, answer string) (*llm.LLMClient, *http
 		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	return llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client()), server
-}
-
-func serverPromotableRouteBody() string {
-	return `{"choices":[{"message":{"content":"{\"query_semantics\":{\"kind\":\"flow\"},\"route\":{\"sources\":[\"internal\"],\"confidence\":0.99},\"query_terms\":{\"domain_terms\":[\"call chain\"],\"identifiers\":[]},\"execution\":{\"strategy\":\"single_agent\",\"complexity\":0.95,\"confidence\":0.95,\"tasks\":[{\"id\":\"design\",\"objective\":\"Establish the intended behavior.\",\"independently_useful\":true,\"depends_on\":[]},{\"id\":\"implementation\",\"objective\":\"Verify the implementation behavior.\",\"independently_useful\":true,\"depends_on\":[]}],\"reasons\":[\"requires_multiple_subproblems\",\"supports_parallel_investigation\"]}}"}}]}`
-}
-
-func multiAgentTaskGraphBody() string {
-	return `{"choices":[{"message":{"content":"{\"tasks\":[{\"purpose\":\"Establish the intended behavior from implementation evidence.\",\"capability\":\"knowledge.code.inspect\",\"investigation_goal_ids\":[\"design\"],\"evidence_goal_ids\":[\"entrypoint\",\"core_flow\",\"data_and_state\"],\"depends_on\":[]},{\"purpose\":\"Verify the implementation behavior across service dependencies.\",\"capability\":\"knowledge.service.trace\",\"investigation_goal_ids\":[\"implementation\"],\"evidence_goal_ids\":[\"external_dependency\"],\"depends_on\":[]}] }"}}]}`
 }
 
 func singleAgentRouteBody() string {

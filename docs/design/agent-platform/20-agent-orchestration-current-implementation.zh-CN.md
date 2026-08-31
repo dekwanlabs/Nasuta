@@ -1,318 +1,228 @@
 # Agent 编排、协作与契约（当前实现总览）
 
-> **状态：当前实现**  
-> **更新日期：2026-08-16**  
-> **范围：** CodeLoom 是应用装配层，Nasuta 是可复用 Agent 平台。本文描述本仓库当前运行时行为；被索引的业务知识库内容不属于本文架构范围。
-
-本文梳理系统中有哪些 Agent 链路、单/多 Agent 如何编排、父问题如何分发为子任务，以及 `Catalog`、`Workflow` 和各类合同如何把整个链路连接起来。
+> **状态：当前实现**
+> **更新日期：2026-08-31**
+> **范围：** 本文描述 Nasuta 当前的 Agent Runtime、QA 委派、Catalog、Run 持久化和通用 Workflow 边界。
+>
+> **已废弃的模型：** QA durable investigation run、旧 TaskGraphProposal、ProposalCompiler 和 `internal/agent/investigation` 包已经删除。文中“委派调查”指当前的 `delegate_investigation` 工具，不指旧的独立 Investigation 生命周期。
 
 ## 1. 结论先行
 
-1. **CodeLoom 不维护第二套 Agent 内核。** 它负责环境、应用组装、Dashboard/MCP/REST 和场景工具注册；Agent Runtime、Schema、Catalog、Workflow、Run 持久化属于 Nasuta。
-2. **“父 Agent fork 子 Agent”不是模型的自由递归能力。** QA 服务先做预检；仅在只读、存在多个独立且可并行的调查能力等条件成立时，服务端才会生成并执行多 Agent DAG。
-3. **子 Agent 不共享可变聊天上下文，也不直接对话。** 它们从有界 `TaskContract` 接收自己的任务投影，输出受 Schema 验证；协作只通过持久化 Handoff、证据账本和 DAG 边发生。
-4. **`Catalog` 定义“什么可以运行”，`Workflow` 定义“何时、依赖和并发怎样运行”，`Definition Runtime` 执行“模型—工具—观察—回答”循环。** 三者职责不可互换。
-5. **最终回答不是拼接子回答。** 调查报告先汇合为证据视图，再做验证和风险判断，最后由无工具的 `synthesizer` 基于已准入证据输出答案。
+1. QA 请求始终启动一个普通的 `qa.answerer` Agent Run；服务端不会先创建一个 QA durable Workflow 再等待另一个 coordinator。
+2. 当父 Agent 判断需要并行只读调查时，它可以调用 `delegate_investigation`。该工具由服务端注册，模型不能替换它的 Schema、Capability allowlist、权限或预算。
+3. 每个 delegated child 都是一个普通 Agent Run，有自己的 Definition/Capability 快照、上下文投影、Run limits、步骤、LLM usage、报告 artifact 和证据 ledger。
+4. `delegation.Executor` 负责 child 的 admission、并发、幂等重放、结算和事件；`delegation.Validator` 负责报告、claim、citation、冲突和 high-risk 结果的服务端验证。
+5. `internal/agent/workflow` 是独立的通用持久化 DAG 引擎，提供 Definition、节点、Handoff、Retry、Budget、Approval、Gate 和 Recovery；它不是 QA 委派的隐藏实现。
 
-## 2. 组件与所有权
-
-```mermaid
-flowchart TB
-    User["用户 / Dashboard / MCP Client"] --> CL["CodeLoom 应用层\ninternal/app + internal/transport"]
-    CL --> App["Nasuta app\n公开装配面"]
-    App --> QA["QA 服务\n预检、检索、路由"]
-    App --> FD["Feature Delivery\n需求到代码交付"]
-    App --> Tools["Tool Registry\n通用工具 + 应用场景工具"]
-
-    QA --> Catalog["Catalog\nDefinition / Capability / Rollout"]
-    QA --> Runtime["Definition Runtime\n模型—工具循环"]
-    QA --> Workflow["Workflow Service\n持久化 DAG 调度"]
-    Catalog --> Schemas["Schema Registry\n版本化 JSON Contract"]
-    Runtime --> Tools
-    Workflow --> Runtime
-    Runtime --> Store["Run / Event / Handoff Store"]
-    Workflow --> Store
-    FD --> Store
-```
-
-| 层次 | 当前职责 | 不负责什么 |
-|---|---|---|
-| CodeLoom | 环境配置、应用组合、HTTP/SSE/MCP、Observe/Apollo 等场景工具注册、前端展示 | 不绕过 Nasuta 公共面，不复制 Agent 编排逻辑 |
-| Nasuta `app` | 装配 QA、Catalog、Workflow、Feature Delivery、存储和恢复任务 | 不拥有客户系统的业务适配策略 |
-| QA 服务 | 问题预检、证据计划、检索、单/多 Agent 路由、父 Run 收敛 | 不让模型自行决定权限、预算或 DAG 安全边界 |
-| Catalog | 发布、选择和快照 Agent Definition/Capability | 不调用模型，也不调度节点 |
-| Definition Runtime | 执行一个 Definition 的 LLM/工具循环 | 不决定是否拆分问题 |
-| Workflow | 编译、持久化、恢复、调度 DAG、汇合节点结果 | 不允许模型绕过编译策略创建高权限节点 |
-| Feature Delivery | 需求产物、Coding Provider、Worktree、验证、评审、审计 | 不把 QA 对话直接变成代码写入 |
-
-## 3. Agent 链路总览
-
-| 链路 | 触发入口 | 运行形态 | 终态产物 |
-|---|---|---|---|
-| 标准 QA | Dashboard `POST /api/qa/ask`（SSE） | 一个 `qa.answerer` Definition Runtime | 已验证回答、引用、Run/Event |
-| 委派调查 QA | QA 路由判定任务可拆且可并行 | Workflow 内多个调查子 Run + 合成 | `investigation.answer`、证据状态、父/子 Run 关联 |
-| Feature Delivery | 研发任务 API / 工作台 | 分阶段 Artifact + Coding Runner + 独立验证/评审 | Artifact 谱系、Change Set、审计和交付状态 |
-
-### 3.1 标准 QA：单 Agent 执行链路
-
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant D as Dashboard API
-    participant Q as QA 服务
-    participant R as 检索/证据层
-    participant C as Catalog
-    participant A as qa.answerer Runtime
-    participant T as Tool Registry
-    participant S as Run/Event Store
-
-    U->>D: 问题和会话标识
-    D->>Q: 有界会话上下文 + 问题
-    Q->>Q: Query Plan / Evidence Plan / 路由判断
-    Q->>R: 取得代码、服务、文档或运行态证据
-    Q->>C: 选择并钉死 Definition 版本
-    Q->>A: 输入快照、证据、工具快照
-    loop 受 MaxSteps / MaxToolCalls / Timeout 约束
-        A->>T: 合法工具调用
-        T-->>A: 结构化结果
-        A->>A: 观察、压缩上下文、继续或结束
-    end
-    A->>S: Run、步骤、证据、输出、事件
-    A-->>D: 已验证结果或明确失败
-    D-->>U: SSE 与最终回答
-```
-
-实际动作如下：
-
-1. Dashboard 层加载当前会话的有界对话，创建或关联 QA Parent Run。
-2. QA 预处理把问题规范化为 Query Plan，推导实体、回答方式、必需证据 facet、来源和新鲜度要求。
-3. 检索层收集代码、服务、Runbook、运行态、Web 或已准入记忆。证据来源会影响允许的能力，但不会单独决定是否多 Agent。
-4. Catalog 选择 `qa.answerer` 的精确版本；Runtime 同时固定输入/输出 Schema、Prompt、Model、预算、权限和工具快照。
-5. Runtime 执行模型循环：编译消息、调用 Provider、执行可见工具、记录观察、在边界内继续。
-6. 结束时 Runtime 为最终回答保留时间；常规循环未产生结论时，可进入仍受 Answer Contract 约束的 forced conclusion。
-7. 最终输出必须通过 Definition 的输出 Schema。字符串答案被编码成 JSON 字符串；结构化对象必须是合法 JSON 或单一 JSON fence。
-
-### 3.2 委派调查：多 Agent 链路
-
-多 Agent 是 QA 的受限执行路径，不是所有问答的默认行为。
-
-```mermaid
-flowchart LR
-    Q["父问题 + 预检结果"] --> TC["TaskContract\n目标、facet、来源、实体"]
-    TC --> Route{"可委派且可并行？"}
-    Route -- 否 --> Single["qa.answerer\n单 Agent Runtime"]
-    Route -- 是 --> Plan["受限 Task Graph Planner\n最多 3 个独立任务"]
-    Plan --> Check["服务端白名单校验\n失败则确定性回退"]
-    Check --> Compile["ProposalCompiler\n固定 Definition/Schema/权限/预算"]
-    Compile --> Persist["Workflow Service\n先持久化、后后台执行"]
-    Persist --> W1["investigator.* 子 Run"]
-    Persist --> W2["investigator.* 子 Run"]
-    Persist --> W3["investigator.* 子 Run"]
-    W1 --> Join["evidence.join"]
-    W2 --> Join
-    W3 --> Join
-    Join --> Verify["evidence.verify"]
-    Verify --> Gate["evidence.risk"]
-    Gate --> Synth["synthesizer\n不再收集新证据"]
-    Synth --> Parent["QA Parent Run\nSSE / 持久化收敛"]
-```
-
-#### 3.2.1 是否允许拆分
-
-`assessExecution` 根据 `TaskContract` 的目标结构路由，而不是仅仅看问题来自代码、日志还是 Web。当前只有在以下性质同时满足时才进入委派路径：
-
-- 多 Agent 功能和 Workflow 运行时可用；
-- 任务只读，写能力不参加调查分支；
-- 至少两个独立调查能力可以覆盖所需证据；
-- 任务可并行，不存在必须先完成的串行依赖；
-- 调用方、Workflow 与 Capability 的权限、预算、并发限制都可满足。
-
-不满足时系统退回单 Agent 路径，不通过放宽权限、虚构子任务或静默替换 Provider 来“凑出”并行执行。
-
-#### 3.2.2 父问题如何分发为子问题
-
-父任务不会把整段原始会话复制给每个子 Agent。子任务分发有四层边界：
-
-| 层次 | 负责者 | 子 Agent 实际获得 | 模型不能决定 |
-|---|---|---|---|
-| 任务合同 | QA 服务 | 有界目标、实体、调查目标、证据目标、来源、新鲜度、最小覆盖度和已准入证据 | 权限、工具、模型、并发 |
-| 能力筛选 | 服务端 | 与 facet/来源匹配的允许 Capability 集合 | 创建任意新能力或跨来源越权 |
-| 任务草图 | 快速规划模型 | `purpose`、`capability`、`evidence_goal_ids`、空 `depends_on` | 任务 ID、工具、Schema、预算、Provider、重试、汇总节点 |
-| 编译绑定 | `ProposalCompiler` | 钉死后的 Agent 节点和边 | 放宽权限、预算或写安全；增加未注册节点 |
-
-原始用户问题只保留在 QA Parent Run，不会复制到子 Agent。TaskContract 只传递受 token 预算限制的目标投影；Planner 和每个子 Agent 都基于该投影、任务指令和已准入证据工作。当前 Planner 是一轮并行调查：最多三项任务，`depends_on` 必须为空。它只能从允许 Capability 中挑选覆盖必需证据目标的最小有效集合。模型草图不能解析或未通过白名单验证时，服务端使用确定性的能力覆盖算法生成受同样约束的回退草图。
-
-默认 Capability 的分工如下：
-
-| Capability | 绑定的 Definition | 适用职责 |
-|---|---|---|
-| `knowledge.code.inspect` | `investigator.code` | 源码实现、符号、API、调用路径 |
-| `knowledge.service.trace` | `investigator.runtime` | 服务拓扑、依赖、入口和运行操作 |
-| `knowledge.docs.verify` | `investigator.docs` | Runbook、系统文档和文档覆盖度 |
-| `knowledge.web.research` | `investigator.web` | 经配置 Web Provider 取得当前公开证据 |
-| `knowledge.memory.recall` | `investigator.memory` | 已被 TaskContract 准入的有界记忆 |
-| `evidence.semantic.verify` | `delegation.verifier` | 基于引用证据消解语义冲突 |
-| `evidence.synthesize` | `synthesizer` | 基于已准入证据生成最终答案 |
-
-#### 3.2.3 Workflow 如何执行“fork”
-
-编译后的 DAG 才是可执行的分叉定义。默认只读调查图 `delegated.investigation` 包含并行调查、证据汇合、验证、风险闸门和合成；动态任务图也遵守相同的编译与调度规则。
-
-1. `Workflow Service.Start` **先持久化** Run、Definition 快照和输入 Handoff，再用脱离 HTTP 请求的 context 后台执行。因此浏览器断开 SSE 不会让已接收的工作流中断。
-2. 执行器按拓扑关系寻找 ready node，并按 wave 同时派发。Workflow 的 `MaxParallelism` 与每个 Capability 的 `MaxConcurrency` 共同限流。
-3. 每个 `agent` 节点都启动独立子 Run，使用精确 `DefinitionRef`、`CapabilityRef`、输入/输出 Schema、可见工具白名单、权限和节点预算；它不是父 Agent 的共享 goroutine。
-4. 节点失败按 Retry Policy 处理。默认调查图采用 `collect_available`：可选分支失败不会阻止已有证据进入汇合；required 边、验证失败或风险闸门仍可阻止最终合成。
-5. 子 Run ID、父 Run ID、Workflow Run ID、节点 ID、轮次和尝试次数都进入统一 execution trace，最终回答可以反查每个分支。
-
-#### 3.2.4 子结果怎样合作和收敛
-
-子 Agent 的协作是有边界的证据管道，而不是自由文本协商：
-
-1. 子 Agent 输出 `investigation.report`，其中的 claim、引用和证据单位通过 Schema。
-2. `evidence.join` 将报告合并为 `investigation.bundle`；证据账本按稳定 identity 去重并记录冲突，而不是字符串拼接。
-3. `evidence.verify` 在有界 payload 内检查 required/high-risk 目标、引用和冲突，输出 `investigation.verified_bundle`。
-4. `evidence.risk` 只允许通过或要求澄清，阻止证据不足或风险未解决的内容被伪装为完整结论。
-5. `synthesize` 读取 verified bundle，输出 `investigation.answer`。其工具白名单为空，避免合成阶段偷偷进行未审计的调查。
-6. 父 QA Run 收敛最终文本、证据状态、delegation adoption、错误码和事件，并通过 SSE/查询接口对外提供。
-
-## 4. Runtime 和 Workflow 的动作集合
-
-### 4.1 一个 Agent Run 的循环动作
-
-| 动作 | 执行者 | 输入/输出边界 |
-|---|---|---|
-| 准备 | Definition Runtime | 解析 Definition、输入、Schema、工具 Snapshot、Budget 和会话消息 |
-| 生成 | LLM Provider Dispatcher | 仅使用 Definition 的 Provider/Model；已配置 Provider 失败会显式报错 |
-| 工具调用 | Tool Executor | 工具名、参数 Schema、可见范围、权限和写策略由 Snapshot/Definition 限制 |
-| 观察 | Runtime + Evidence Ledger | 记录工具结果、步骤和证据单位，压缩为可用上下文 |
-| 继续 | Runtime | 受 `MaxSteps`、`MaxToolCalls`、上下文窗口和总超时约束 |
-| 收束 | Runtime | 预留 answer reserve；forced conclusion 仍须满足 Answer Contract |
-| 验证与映射 | Definition Result Mapper | 验证输出 Schema，映射公开 `RunResult`、文本、结构化输出、引用和失败语义 |
-| 记录与通知 | Run Store / Hub | 持久化步骤和终态，SSE 推送运行事件 |
-
-### 4.2 Workflow 节点种类
-
-`Workflow` 是通用 DAG 内核。以下是当前 `NodeKind` 的含义；具体流程是否使用由编译策略决定。
-
-| 节点 | 作用 | 当前委派调查中的位置 |
-|---|---|---|
-| `agent` | 用精确 Agent Definition 执行有界任务 | 调查分支和 `synthesizer` |
-| `join` | 以 payload list 或 evidence view 汇合多个前驱 Handoff | `evidence.join` |
-| `verifier` | 验证冲突、required/high-risk 目标和引用 | `evidence.verify` |
-| `gate` | 根据策略决定允许继续、拒绝或要求澄清 | `evidence.risk` |
-| `transform` | 由服务端 dispatcher 执行确定性转换 | 通用节点，是否采用取决于流程定义 |
-| `human_approval` | 进入等待人工状态，恢复后继续 | 通用节点，用于需要人工确认的流程 |
-
-## 5. 连接全链路的合同与契约
+## 2. 组件和所有权
 
 ```mermaid
 flowchart TB
-    Input["QA / Feature 输入"] --> InputSchema["Input Schema"]
-    InputSchema --> Def["Agent Definition\nPrompt + Model + ToolPolicy + Budget + Permission"]
-    Def --> Catalog["Catalog Record\n精确版本、默认/激活/灰度"]
-    Def --> Cap["Capability\nDefinition 的可规划投影"]
-    TaskContract["TaskContract\n目标与证据边界"] --> Proposal["TaskGraphProposal"]
-    Cap --> Proposal
-    Proposal --> Compiler["ProposalCompiler"]
-    Catalog --> Compiler
-    Compiler --> DAG["Workflow Definition\n节点、边、预算、权限、ContentHash"]
-    DAG --> Handoff["Handoff / Node Output Schema"]
-    Handoff --> Output["最终 Output Schema + Run/Event"]
+    Client["Dashboard / MCP / REST"] --> QA["QA Service"]
+    QA --> Prep["Prepare: query / evidence / context"]
+    Prep --> Parent["qa.answerer Agent Run"]
+    Parent --> Tools["Scenario Tool Registry"]
+    Tools --> Delegate["delegate_investigation"]
+    Delegate --> Executor["Delegation Executor"]
+    Executor --> Child["Read-only investigator child Runs"]
+    Child --> Validator["Delegation Validator"]
+    Validator --> Parent
+
+    Catalog["Catalog / Schema Registry"] --> Parent
+    Catalog --> Child
+    Parent --> RunStore["Agent Run / Delegation / Evidence Store"]
+    Child --> RunStore
+
+    WorkflowClient["Feature Delivery / Workflow API"] --> Workflow["Workflow Service"]
+    Workflow --> WorkflowStore["Workflow Run / Node / Handoff Store"]
+    Workflow --> Catalog
 ```
 
-| 契约 | 生产者 → 消费者 | 关键约束 | 解决的问题 |
-|---|---|---|---|
-| `SchemaDefinition` / `SchemaRef` | Catalog/调用方 → Runtime、Workflow、Tool | JSON Schema、ID、版本、内容哈希、显式兼容 | 防止不兼容输入/输出跨边界传播 |
-| `agent.Definition` | Catalog → Definition Runtime | Prompt、输入/输出 Schema、Model、Tool Policy、Budget、Permission | 把模型执行冻结为可审计声明 |
-| Catalog Record / Rollout | 管理 API/持久化 → 选择器 | Definition 不可变；默认、激活和灰度元数据可变 | 新旧版本并存时运行中 Run 继续使用原快照 |
-| `Capability` | Catalog → QA Planner / Compiler | Agent、Schema、facet、工具、权限、副作用、并发、启用状态 | Planner 看到受控能力，不接触内部实现细节 |
-| `TaskContract` | QA 预检 → Planner / 子 Agent | 问题、实体、调查/证据目标、来源、新鲜度、覆盖度 | 把父问题分成可验证子问题，不传无限会话历史 |
-| `TaskGraphProposal` | Planner → ProposalCompiler | 仅有限任务字段；当前单轮并行无依赖 | 模型提供语义分工，但不拥有系统控制权 |
-| `Workflow Definition` | Compiler → Workflow Service | 节点、边、Schema、重试、权限、预算、ContentHash | 将草图变为可验证、可恢复的执行计划 |
-| Tool Snapshot | Tool Registry → Runtime | 工具定义、参数/返回契约、可见范围、版本快照 | 防止工具表变化使同一 Run 行为漂移 |
-| Handoff / Evidence Unit | 上游节点 → 下游节点 | 输出 Schema、载荷上限、来源、证据 identity、冲突记录 | 让协作基于已验证产物，而不是共享无界上下文 |
-| Run / Event / Trace | Runtime/Workflow → 前端、恢复器 | Parent/Child/Workflow 关联、状态、步骤、时间、错误码 | 为流式展示、取消、恢复和审计提供同一事实来源 |
+| 组件 | 当前职责 | 明确不负责 |
+|---|---|---|
+| QA Service | 规范化问题、构建证据/上下文、advisory route、启动 parent Run | 不创建旧式 durable investigation workflow |
+| Definition Runtime | 执行一个 Definition 的模型—工具—观察—回答循环 | 不决定是否创建 child，也不授予权限 |
+| Catalog | 发布、选择、快照 Definition/Capability/Schema | 不直接调模型、不调度 child |
+| Delegation Executor | 执行 bounded read-only child、并发、结算、artifact、验证接线 | 不执行通用 Workflow DAG |
+| Delegation Validator | 校验 child reports、claims、citations、conflicts 和完整性 | 不进行新的检索或扩大证据范围 |
+| Workflow Service | 通用 DAG 的编译前校验、持久化、调度、审批、恢复 | 不被 QA 的 `delegate_investigation` 路由隐式调用 |
+| Run Store | 保存 Agent Run、步骤、usage、delegation task、artifact、evidence | 不用旧 investigation 表作为事实来源 |
 
-### 5.1 `Catalog`、`Workflow` 与 Runtime 的边界
+## 3. 当前 QA 请求的完整链路
 
-| 问题 | Catalog | Workflow | Runtime |
-|---|---|---|---|
-| 什么 Agent 可以运行？ | 发布、激活、默认/灰度选择 Definition 和 Capability | 不决定 | 执行已选择版本 |
-| 使用哪个模型、Prompt、工具、权限？ | Definition 固化；Capability 只暴露受控投影 | 只能在节点层收紧 | 用快照实际调用 |
-| 是否拆分任务？ | 提供候选能力 | 接收编译后的图 | 不负责 |
-| 子任务依赖、并发、重试？ | 不负责 | DAG 边、wave、限流、Retry、Failure Policy | 只执行当前节点 |
-| 输出如何汇合？ | 不负责 | Join、Verifier、Gate、Handoff | 产生节点输出 |
-| 怎样恢复半途任务？ | 保留可解析 Definition 快照 | 持久化 Workflow 进度并恢复 | 恢复单个 Run 的执行边界 |
+### 3.1 Prepare
 
-一句话概括：**Catalog 是能力与版本的注册表，Workflow 是依赖和生命周期的调度器，Runtime 是模型和工具的执行器。**
+`internal/agent/qa/prepare.go` 和相邻的 QA 文件负责：
 
-## 6. Feature Delivery：并列的 Agent 交付链路
+- 规范化问题和 Run ID；
+- 识别 Query Plan、Evidence Plan 和来源/时间范围；
+- 加载有界会话历史、记忆和检索上下文；
+- 计算可用工具、写入授权、high-risk 标记和 parent Run limits；
+- 选择精确的 `qa.answerer` Definition/Schema/ContentHash。
 
-Feature Delivery 与 QA 共享证据、结构化输出、Provider 显式分发、持久化和审计原则，但不是“让 QA Agent 直接改代码”。
+准备阶段产出的上下文是有界且带 provenance 的。它会进入 parent Run 的 `ContextBlock`，而不是被无限复制给每个 child。
 
-```mermaid
-flowchart LR
-    FR["Feature Request"] --> RA["需求分析 Artifact"]
-    RA --> TD["技术决策 Artifact"]
-    TD --> SD["系统设计 Artifact"]
-    SD --> IP["实现计划 Artifact"]
-    IP --> CP["Coding Provider\nCodex / Claude"]
-    CP --> WT["隔离 Worktree\n固定 Base Commit + Task Package"]
-    WT --> IV["独立验证"]
-    IV --> RV["交付评审 / Approval"]
-    RV --> CS["Change Set / 审计事件"]
+### 3.2 Advisory route
+
+`internal/agent/qa/route.go` 会记录模型/检索 planner 的建议以及服务端的有效路径。当前有效路径只有普通 Agent Run：
+
+```text
+proposed strategy
+  -> server assessment
+       -> single_agent parent Run
+            -> delegate_investigation（可选工具）
 ```
 
-- 每个阶段产生不可变 Artifact，并有输入、输出、证据、Prompt、质量门和谱系合同。
-- Coding Runner 通过显式 Provider dispatcher 调用配置的 Provider；缺凭据或执行失败返回明确错误，不能自动换 Provider。
-- 代码在受限 Worktree 和固定基线提交上执行，任务包、网络、命令和验证都受配置与审计控制。
-- 实施后必须经过独立验证和交付评审；写行为不会从 QA 的只读调查 Workflow 越界获得权限。
+如果写操作被请求，或 delegation 未启用/工具未注册，系统会记录相应 downgrade reason；它不会为了“凑出”多 Agent 而创建虚假的 Workflow。
 
-## 7. 可观测性、取消和恢复
+路由事件只是可观测性和策略结果，不能被理解为 `Workflow Service.Start` 的调用。
 
-1. Agent 子 Run、QA Parent Run、Workflow Run 和节点执行共享关联 ID；trace 包含 child run、节点、轮次、尝试和调度 wave。
-2. Dashboard 通过 SSE 读取运行事件；查询接口使用持久化且有界分页的 Run/Event 记录，不依赖浏览器内存作为唯一事实来源。
-3. 单 Agent Run 支持暂停、恢复、取消和 nudge；QA Parent 调查工作流支持取消。
-4. Workflow 的输入和进度先持久化，平台启动时扫描并恢复活动 Workflow/QA Parent；恢复继续使用历史 Run 固定的 Definition/Schema 快照。
-5. 取消、预算耗尽、工具调用耗尽、输出验证失败、验证失败和需要澄清都以明确状态/错误码记录，不伪装成成功回答。
+### 3.3 Parent Run
 
-## 8. 扩展一个调查 Agent 的正确路径
+`internal/agent/qa/submission.go` 构造普通 `agentapi.RunRequest`：
 
-不要只在 Prompt 中让现有 Agent “扮演”一个新角色。新增可规划能力应完成以下闭环：
+- Definition 和 DefinitionHash 固定；
+- Input、Messages、Context、Actor、Correlation 固定；
+- ToolScope 只暴露当前场景允许的工具；
+- `Policy` 记录 evidence required、evidence seeded、web research 等边界；
+- 如果存在 `delegate_investigation`，通过 `delegation.WithParentContext` 注入 parent Run ID、权限、limits、high-risk、已准入 evidence 和 context index。
 
-1. 在 Schema Registry 定义版本化输入/输出 Schema，并声明必要兼容关系。
-2. 创建并 `Prepare` Agent Definition，明确 Prompt、模型、工具白名单、预算和最小权限。
-3. 在 Catalog 发布 Definition；如需参与任务分发，再创建绑定该 Definition 的 Capability，声明 facet、来源新鲜度、副作用、并发和重试安全性。
-4. 让 QA 能把该能力映射到 `TaskContract` 中的证据目标；Planner 只能从此白名单选择。
-5. 扩展 Compilation Policy/Workflow 模板，保证节点输入输出、Join、Verifier、Gate 和失败策略的 Schema 连续性。
-6. 为 Definition、Capability、Proposal 编译、节点执行、恢复和输出 Schema 添加测试，并更新本目录相关设计文档。
+最终由 `ManagedRun.Execute` 在 goroutine 中执行，结束后由 QA 持久化 session turn、terminal 和异步 memory extraction。
 
-## 9. 关键不变量
+## 4. `delegate_investigation` 当前实现
 
-- 模型输出、工具参数、Handoff 和公开输出都经过版本化 JSON Schema；结构化对象不能以自然语言替代。
-- Provider、工具和 Capability 使用显式 dispatcher；已配置 Provider 失败必须可见，不能静默替换。
-- 父任务无法通过 Prompt 给子 Agent 新权限；权限、工具、预算和并发只能由服务端固定或收紧。
-- 多 Agent 调查当前只读；写操作必须走 Feature Delivery、Approval 等专门边界。
-- 子 Agent 仅通过合同和已验证证据协作；最终合成不得引入未记录的新调查。
-- Workflow Definition 和 Agent Definition 都以版本与内容哈希固定运行快照，运行中的行为不随配置热更新漂移。
+### 4.1 工具合同
 
-## 10. 代码导航
+实现：`internal/agent/delegation/tool.go`
 
-| 主题 | 主要实现 |
+工具输入只有有界的 `tasks` 数组，每个 task 主要包含：
+
+- `capability`：必须来自服务端发布且 allowlist 允许的 capability；
+- `objective`：有长度上限的子任务目标；
+- `focus_facets`：必须属于 capability 的 facet 白名单；
+- `evidence_refs`：只能引用 parent 已有的合法 evidence handle。
+
+工具不是 planner API。模型可以选择当前白名单中的任务，但不能创建新 Capability、添加工具、指定 Provider、改变预算、设定 child 依赖或把写能力带入只读调查。
+
+### 4.2 Child admission
+
+`internal/agent/delegation/executor.go` 在执行前逐项检查：
+
+1. delegation depth 和 child 数量；
+2. objective、facet、evidence ref 的大小和格式；
+3. Capability 是否存在、启用、allowlist 命中；
+4. Capability 是否为 `RoleInvestigator` 且 `SideEffectNone`；
+5. parent 权限与 capability 权限交集是否非空；
+6. child Definition 是否可解析、输入/输出 Schema 是否匹配；
+7. 重复 task 是否已出现；
+8. child timeout、token、tool call、report、total budget 和 cost 是否可满足。
+
+不通过的 task 会留下明确 rejected report/error code，而不是静默跳过。
+
+### 4.3 并行和幂等
+
+Executor 为每次工具调用生成稳定 delegation ID，为每个 task 生成稳定 child Run ID、report ID 和 artifact ID。相同 parent/delegation/task 可以从已结算记录 replay，不重复执行模型调用。
+
+可执行 child 受全局 `MaxConcurrent` 和 capability slot 限制；每次 child 完成后先记录 usage 和报告 artifact，再 settle parent 的 delegation task。持久化失败会让 task 进入显式失败状态。
+
+### 4.4 Evidence ledger 和验证
+
+child 输出的 evidence units 会写入当前 Agent Run 的 evidence ledger。Executor 收齐报告后交给 `internal/agent/delegation/validator.go`：
+
+- 验证报告 Schema、大小和 finding 数量；
+- 检查 citation 是否指向本批或 parent 已准入的 evidence；
+- 对同一 canonical identity 的 claim 去重和比对；
+- 发现结构化冲突、缺少关键 citation、high-risk 结果或截断时，返回明确 validation reason；
+- 将验证结果附到 `DelegationBatchResult` 和 parent tool result。
+
+父 Agent 只能看到工具返回的 bounded result，并据此决定是否继续或回答。当前动态 QA 委派没有旧式“child delivered → durable investigation report → QA coordinator Await”的第二条生命周期。
+
+## 5. Catalog 和默认角色
+
+`internal/agent/catalog` 发布两类当前仍有用的内容：
+
+- QA/Feature Delivery 所需的 Agent Definitions；
+- delegation investigator、semantic verifier、synthesizer 等角色及其 Capability 映射。
+
+`DefaultInvestigators` 生成的 investigator Definition 必须是只读的；`DefaultCapabilities` 再把 Capability 绑定到精确的 Agent、Schema、工具、权限、facet、freshness、并发和 retry policy。
+
+注意：角色/Schema 名称中保留 `investigation.*` 是“证据调查报告”这一业务语义，不表示旧的 `internal/agent/investigation` durable 包仍然存在。当前 child 持久化走 `agent_runs` 和 delegation artifact/evidence 表。
+
+## 6. 通用 Workflow 与 QA 的边界
+
+如果代码路径出现以下调用，它属于通用 Workflow，而不是 QA 动态委派：
+
+```text
+workflow.NewService
+workflow.Service.Start
+workflow.RecoverWithObserver
+workflow.WorkflowStore
+workflow_runs / workflow_node_runs / handoff_artifacts
+```
+
+Workflow Definition 的执行顺序是：
+
+```text
+Prepare Definition
+  -> Service.Start 持久化
+  -> ready nodes / dispatch waves
+  -> agent / join / verifier / gate / approval / transform
+  -> Handoff 和 checkpoint
+  -> terminal 或 recovery
+```
+
+通用 Workflow 还保留一个**与 QA 无关、范围很窄的持久化兼容窗口**：Catalog 读取在执行预算字段 `max_rounds`、`max_depth` 加入前发布的 Definition 时，会先校验原始 `content_hash`，再按安全上限执行（`max_rounds=1`、`max_depth=max_nodes`）。新发布的 Definition 缺少任一字段会直接被拒绝；该窗口的清理条件是所有存量 Definition 重新发布或显式终止后，删除 `preparePersisted`、`persistedWithoutExecutionLimits` 和对应的测试。不要把这段通用 Workflow 数据兼容误认为 QA Investigation 遗留。
+
+当前 QA 代码的正确结论是：
+
+```text
+QA Ask -> prepareSingleRun -> normal Agent Runtime
+                         └-> optional delegate_investigation
+```
+
+而不是：
+
+```text
+QA Ask -> TaskGraphProposal -> ProposalCompiler -> Investigation Coordinator
+```
+
+后者是已删除的历史路径。
+
+## 7. 可观测性、错误和恢复
+
+- Parent、child、delegation、tool invocation 和 evidence artifact 通过 Run/Correlation ID 关联。
+- Dashboard 的 QA API 读取普通 Agent Run store 的 terminal、steps、usage、artifacts 和 evidence；没有额外的旧 Investigation projection。
+- delegation events 会投影 child 创建、开始、验证、结算和 terminal 状态，便于在 parent stream 中嵌套展示。
+- `agent.ErrBudgetExceeded` 是公共预算错误边界；预算错误会映射到 `budget_exhausted`，不再携带旧 package 名称。
+- Parent 取消会传给 child；child timeout、rejection、persistence failure、validation failure 和 partial result 都有各自的状态/错误码。
+- 普通 Agent Run 的恢复使用 `agent_runs`、steps、LLM calls 和 artifacts；通用 Workflow 的恢复单独使用 Workflow checkpoint。两者不能互相假设对方的表存在。
+
+## 8. 代码导航
+
+| 主题 | 主要代码 |
 |---|---|
-| CodeLoom 应用装配 | `codeloom/internal/app/app.go`、`codeloom/internal/runtime` |
-| Dashboard QA 入口、SSE、Run 控制 | `Nasuta/internal/transport/dashboard/qa.go` |
-| QA 预检、路由和任务图规划 | `Nasuta/internal/agent/qa/route.go`、`Nasuta/internal/agent/qa/task_graph_plan.go` |
-| 公共 Agent/Schema 契约 | `Nasuta/agent/definition.go`、`Nasuta/agent/schema.go`、`Nasuta/agent/workflow.go` |
-| Catalog、默认 Definition 与 Capability | `Nasuta/internal/agent/catalog` |
-| 单 Agent Runtime 与工具循环 | `Nasuta/internal/agent/definition`、`Nasuta/internal/agent/execution` |
-| Workflow 模型、编译、调度和恢复 | `Nasuta/internal/agent/workflow`、`Nasuta/app/qa.go`、`Nasuta/app/server.go` |
-| 默认只读调查 DAG | `Nasuta/internal/agent/workflow/investigation.go` |
-| Feature Delivery | `Nasuta/internal/feature`、`Nasuta/app/feature_delivery.go`、[10-feature-delivery.zh-CN.md](10-feature-delivery.zh-CN.md) |
+| QA prepare / route / submit | `internal/agent/qa/prepare.go`、`route.go`、`submission.go` |
+| QA 服务生命周期 | `internal/agent/qa/service.go`、`runtime.go` |
+| delegation tool / child executor | `internal/agent/delegation/tool.go`、`executor.go` |
+| delegation validation | `internal/agent/delegation/validator.go`、`claims.go`、`report.go` |
+| Agent Run 和 delegation persistence | `internal/agent/run/store.go`、`store_delegation.go`、`store_evidence.go` |
+| 默认 Definition/Capability | `internal/agent/catalog/defaults_investigation.go`、`defaults_capability.go` |
+| 通用 Workflow model/service | `internal/agent/workflow/model.go`、`service.go`、`service_execution.go` |
+| 通用 Workflow executor/recovery | `executor_orchestration.go`、`executor_attempt.go`、`executor_budget.go`、`service_recovery.go` |
+| 应用装配和 delegation 开关 | `app/qa.go`、`app/server.go` |
+| 旧表清理 migration | `docs/sql/migration_remove_legacy_investigation_workflow_20260831.sql` |
 
-继续阅读：
+## 9. Cleanup 后的不变量
 
-- [架构、执行流与 Run 收敛](01-architecture-and-execution.zh-CN.md)：单 Run 生命周期、超时、流式输出与失败语义；
-- [证据规划、工具与运行时调查](02-evidence-and-tooling.zh-CN.md)：Evidence Plan、工具选择和运行时证据；
-- [上下文、会话与工具结果](04-context-session-and-tool-results.zh-CN.md)：会话压缩、上下文和工具结果边界；
-- [Workflow 编排入门](19-workflow-orchestration-beginner-guide.zh-CN.md)：DAG 执行器、wave、重试和节点处理的逐步讲解。
+1. QA 请求不会创建 `investigation_runs`、`investigation_events`、`investigation_leases` 或旧 `workflow_escalations`。
+2. QA 请求不会调用旧 Proposal Compiler、Coordinator、Scheduler、Lease 或 Delivery API。
+3. 动态委派只能创建有界的、只读的 investigator child Run。
+4. Parent/child 的 Definition、Schema、Capability、工具、权限、预算和 evidence provenance 都可追溯。
+5. 不完整、冲突、未授权引用或超限结果必须显式反映在 validation/terminal 中。
+6. 通用 Workflow 的持久化 DAG 与 QA delegation 的 Run/Task/Artifact 持久化相互独立。
+
+## 10. 阅读结论
+
+> **当前 QA 不是一个隐藏的 durable investigation workflow。** 它是一个普通 Agent Run，必要时通过 `delegate_investigation` 做 bounded read-only fan-out，再把经过服务端验证的结果交还给父 Agent。
+>
+> `internal/agent/workflow` 仍然重要，但它是独立的通用 DAG 内核；只有看到明确的 Workflow API/Store 调用时，才应把一段代码当作 Workflow 执行链分析。

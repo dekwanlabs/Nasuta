@@ -16,7 +16,6 @@ import (
 	"unicode/utf8"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agent/investigation"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -900,7 +899,7 @@ func childInput(
 		TaskIndex             int      `json:"task_index"`
 	}{
 		Capability: task.capability.ID, Objective: task.request.Objective,
-		ParentQuestionSummary: investigation.BoundedSummary(parent.QuestionSummary),
+		ParentQuestionSummary: boundedSummary(parent.QuestionSummary),
 		FocusFacets:           jsonStringArray(task.request.FocusFacets),
 		EvidenceRefs:          jsonStringArray(task.request.EvidenceRefs),
 		DelegationID:          delegationID, ParentRunID: parent.RunID, TaskIndex: task.index,

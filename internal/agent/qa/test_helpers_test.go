@@ -15,7 +15,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"github.com/dekwanlabs/nasuta/internal/domain"
-	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -47,10 +46,6 @@ const (
 )
 
 var ErrRunNotActive = run.ErrNotActive
-
-func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config Config, observer Observer, controller Controller) *Agent {
-	return execution.NewAgent(client, executor, config, observer, controller)
-}
 
 func NewToolExecutor(registry *Registry) *ToolExecutor {
 	return execution.NewToolExecutor(registry)

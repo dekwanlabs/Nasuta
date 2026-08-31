@@ -307,9 +307,8 @@ func TestDefaultInvestigatorsBudgetsFollowGlobalConfiguration(t *testing.T) {
 func TestDefaultInvestigatorsVerifierAndSynthesizerUseRunOutputShares(t *testing.T) {
 	settings := &config.PlatformSettings{
 		LLMProvider: "openai", LLMModel: "investigation-model",
-		LLMAnswerMaxTokens: 12_000, LLMContextWindow: 256_000,
-		InvestigationMaxOutputTokens: 128_000,
-		AgentTimeout:                 config.Duration(time.Minute), AgentMaxSteps: 4,
+		LLMAnswerMaxTokens: 128_000, LLMContextWindow: 256_000,
+		AgentTimeout: config.Duration(time.Minute), AgentMaxSteps: 4,
 	}
 	definitions, err := DefaultInvestigators(settings, 15)
 	if err != nil {

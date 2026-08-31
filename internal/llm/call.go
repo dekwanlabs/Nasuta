@@ -75,14 +75,6 @@ func doubleBackoff(d time.Duration) time.Duration {
 	return d
 }
 
-func retryableCallError(err error) (*CallError, bool) {
-	var ce *CallError
-	if !errors.As(err, &ce) || !ce.Retryable() {
-		return nil, false
-	}
-	return ce, true
-}
-
 func callErrorDetails(err error) (kind string, status int, retryable bool, ce *CallError) {
 	if !errors.As(err, &ce) {
 		return "other", 0, false, nil

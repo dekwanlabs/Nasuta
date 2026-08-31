@@ -1,4 +1,9 @@
 # QA / Investigation Workflow 全流程审计
+> **状态：废弃历史材料（Superseded）**
+> **标记日期：2026-08-31**
+> 本文审计的是已经删除的 durable Investigation workflow、TaskGraphProposal 和 ProposalCompiler 设计/实现。它不代表当前 QA 运行时；当前实现请阅读 [20-agent-orchestration-current-implementation.zh-CN.md](agent-platform/20-agent-orchestration-current-implementation.zh-CN.md) 和 [19-workflow-orchestration-beginner-guide.zh-CN.md](agent-platform/19-workflow-orchestration-beginner-guide.zh-CN.md)。
+> 历史代码引用、缺陷结论和待办项均不应直接作为当前代码的判断依据。
+
 
 - 审计日期：2026-08-23
 - 审计对象：QA 问答进入动态 Investigation Workflow v2 后的规划、执行、证据验证、交付、父子运行收敛、重启恢复和会话归档

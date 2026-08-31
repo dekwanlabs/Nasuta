@@ -50,18 +50,6 @@ const (
 	priorDelegationChildTimeout          = 90 * time.Second
 	priorDelegationParentTimeout         = 5 * time.Minute
 	upgradedDelegationParentTimeout      = 8 * time.Minute
-
-	DefaultInvestigationMaxInputTokens  = 300_000
-	DefaultInvestigationMaxOutputTokens = 128_000
-	DefaultInvestigationMaxTotalTokens  = 512_000
-	DefaultInvestigationMaxToolCalls    = 48
-	DefaultInvestigationMaxDuration     = 10 * time.Minute
-	DefaultInvestigationMaxRounds       = 6
-	DefaultInvestigationMaxTasks        = 32
-	DefaultInvestigationMaxParallelism  = 4
-	DefaultInvestigationMaxCostMicros   = 0
-	DefaultInvestigationBudgetProfile   = "interactive"
-	DefaultInvestigationEnabled         = false
 )
 
 var canonicalCapabilityID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
@@ -88,39 +76,28 @@ type PlatformSettings struct {
 	LLMInputPriceMicrosPerMillionTokens  int64
 	LLMOutputPriceMicrosPerMillionTokens int64
 
-	RerankEnabled                bool
-	RerankPool                   int
-	RerankTopK                   int
-	RerankMinScore               float64
-	RerankMinDensePreflight      float64
-	RunbookMinScore              float64
-	CodeMinScore                 float64
-	ContextBudget                int
-	RerankMaxPerService          int
-	RerankMaxPerServiceLowBand   int
-	RerankProvider               string
-	RerankAPIKey                 string
-	RerankModel                  string
-	RerankBaseURL                string
-	AgentTimeout                 Duration
-	AgentMaxSteps                int
-	AgentMaxToolCalls            int64
-	AgentAnswerReserve           Duration
-	InvestigationMaxInputTokens  int64
-	InvestigationMaxOutputTokens int64
-	InvestigationMaxTotalTokens  int64
-	InvestigationMaxToolCalls    int64
-	InvestigationMaxDuration     Duration
-	InvestigationMaxRounds       int
-	InvestigationMaxTasks        int
-	InvestigationMaxParallelism  int
-	InvestigationMaxCostMicros   int64
-	InvestigationBudgetProfile   string
-	InvestigationEnabled         bool
-	RetrievalRouterConfidence    float64
-	RetrievalRouterMaxTokens     int
-	ToolPruningEnabled           bool
-	DisableLegacyAnswerRecovery  bool
+	RerankEnabled               bool
+	RerankPool                  int
+	RerankTopK                  int
+	RerankMinScore              float64
+	RerankMinDensePreflight     float64
+	RunbookMinScore             float64
+	CodeMinScore                float64
+	ContextBudget               int
+	RerankMaxPerService         int
+	RerankMaxPerServiceLowBand  int
+	RerankProvider              string
+	RerankAPIKey                string
+	RerankModel                 string
+	RerankBaseURL               string
+	AgentTimeout                Duration
+	AgentMaxSteps               int
+	AgentMaxToolCalls           int64
+	AgentAnswerReserve          Duration
+	RetrievalRouterConfidence   float64
+	RetrievalRouterMaxTokens    int
+	ToolPruningEnabled          bool
+	DisableLegacyAnswerRecovery bool
 
 	DelegationEnabled              bool
 	DelegationCapabilities         []string
@@ -157,13 +134,6 @@ var platformSettingKeys = map[string]bool{
 	"llm_input_price_micros_per_million_tokens":  true,
 	"llm_output_price_micros_per_million_tokens": true,
 	"agent_timeout": true, "agent_max_steps": true, "agent_max_tool_calls": true, "context_budget": false, "domain_knowledge": true,
-	"investigation_max_input_tokens": true, "investigation_max_output_tokens": true,
-	"investigation_max_total_tokens": true,
-	"investigation_max_tool_calls":   true, "investigation_max_duration": true,
-	"investigation_max_rounds": true, "investigation_max_tasks": true,
-	"investigation_max_parallelism": true,
-	"investigation_max_cost_micros": true, "investigation_budget_profile": true,
-	"investigation_enabled":                  true,
 	"retrieval_router_direct_min_confidence": false, "retrieval_router_max_tokens": false,
 	"tool_pruning_enabled":           false,
 	"disable_legacy_answer_recovery": false,
@@ -227,17 +197,6 @@ func (p *PlatformSettings) Values() map[string]any {
 		"agent_answer_reserve":                       time.Duration(p.AgentAnswerReserve).String(),
 		"agent_max_steps":                            p.AgentMaxSteps,
 		"agent_max_tool_calls":                       strconv.FormatInt(p.AgentMaxToolCalls, 10),
-		"investigation_max_input_tokens":             strconv.FormatInt(p.InvestigationMaxInputTokens, 10),
-		"investigation_max_output_tokens":            strconv.FormatInt(p.InvestigationMaxOutputTokens, 10),
-		"investigation_max_total_tokens":             strconv.FormatInt(p.InvestigationMaxTotalTokens, 10),
-		"investigation_max_tool_calls":               strconv.FormatInt(p.InvestigationMaxToolCalls, 10),
-		"investigation_max_duration":                 time.Duration(p.InvestigationMaxDuration).String(),
-		"investigation_max_rounds":                   p.InvestigationMaxRounds,
-		"investigation_max_tasks":                    p.InvestigationMaxTasks,
-		"investigation_max_parallelism":              p.InvestigationMaxParallelism,
-		"investigation_max_cost_micros":              strconv.FormatInt(p.InvestigationMaxCostMicros, 10),
-		"investigation_budget_profile":               p.InvestigationBudgetProfile,
-		"investigation_enabled":                      strconv.FormatBool(p.InvestigationEnabled),
 		"retrieval_router_direct_min_confidence":     p.routerConfidence(),
 		"retrieval_router_max_tokens":                p.routerMaxTokens(),
 		"tool_pruning_enabled":                       p.ToolPruningEnabled,
@@ -291,39 +250,11 @@ func (p *PlatformSettings) Values() map[string]any {
 // Missing values receive the canonical defaults owned by this boundary.
 // Downstream consumers can rely on the resulting normalized representation.
 func (p *PlatformSettings) Apply(m map[string]string) {
-	p.InvestigationEnabled = DefaultInvestigationEnabled
 	if p.LLMContextWindow == 0 {
 		p.LLMContextWindow = DefaultLLMContextWindow
 	}
 	if p.AgentMaxToolCalls <= 0 {
 		p.AgentMaxToolCalls = DefaultAgentMaxToolCalls
-	}
-	if p.InvestigationMaxInputTokens <= 0 {
-		p.InvestigationMaxInputTokens = DefaultInvestigationMaxInputTokens
-	}
-	if p.InvestigationMaxOutputTokens <= 0 {
-		p.InvestigationMaxOutputTokens = DefaultInvestigationMaxOutputTokens
-	}
-	if p.InvestigationMaxTotalTokens <= 0 {
-		p.InvestigationMaxTotalTokens = DefaultInvestigationMaxTotalTokens
-	}
-	if p.InvestigationMaxToolCalls <= 0 {
-		p.InvestigationMaxToolCalls = DefaultInvestigationMaxToolCalls
-	}
-	if p.InvestigationMaxDuration <= 0 {
-		p.InvestigationMaxDuration = Duration(DefaultInvestigationMaxDuration)
-	}
-	if p.InvestigationMaxRounds <= 0 {
-		p.InvestigationMaxRounds = DefaultInvestigationMaxRounds
-	}
-	if p.InvestigationMaxTasks <= 0 {
-		p.InvestigationMaxTasks = DefaultInvestigationMaxTasks
-	}
-	if p.InvestigationMaxParallelism <= 0 {
-		p.InvestigationMaxParallelism = DefaultInvestigationMaxParallelism
-	}
-	if p.InvestigationBudgetProfile == "" {
-		p.InvestigationBudgetProfile = DefaultInvestigationBudgetProfile
 	}
 	if p.RetrievalRouterConfidence == 0 {
 		p.RetrievalRouterConfidence = DefaultRetrievalRouterDirectConfidence
@@ -518,58 +449,6 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			p.AgentMaxToolCalls = n
 		}
-	}
-	if v := strings.TrimSpace(m["investigation_max_input_tokens"]); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			p.InvestigationMaxInputTokens = n
-		}
-	}
-	if v := strings.TrimSpace(m["investigation_max_output_tokens"]); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			p.InvestigationMaxOutputTokens = n
-		}
-	}
-	if v := strings.TrimSpace(m["investigation_max_total_tokens"]); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			p.InvestigationMaxTotalTokens = n
-		}
-	}
-	if v := strings.TrimSpace(m["investigation_max_tool_calls"]); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			p.InvestigationMaxToolCalls = n
-		}
-	}
-	if v := strings.TrimSpace(m["investigation_max_duration"]); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			p.InvestigationMaxDuration = Duration(d)
-		}
-	}
-	if v := strings.TrimSpace(m["investigation_max_rounds"]); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			p.InvestigationMaxRounds = n
-		}
-	}
-	if v := strings.TrimSpace(m["investigation_max_tasks"]); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			p.InvestigationMaxTasks = n
-		}
-	}
-	if v := strings.TrimSpace(m["investigation_max_parallelism"]); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			p.InvestigationMaxParallelism = n
-		}
-	}
-	if v := strings.TrimSpace(m["investigation_max_cost_micros"]); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			p.InvestigationMaxCostMicros = n
-		}
-	}
-	if v := strings.TrimSpace(m["investigation_budget_profile"]); v != "" {
-		p.InvestigationBudgetProfile = strings.ToLower(v)
-	}
-	if raw, ok := m["investigation_enabled"]; ok {
-		value := strings.ToLower(strings.TrimSpace(raw))
-		p.InvestigationEnabled = value == "1" || value == "true"
 	}
 	if v := strings.TrimSpace(m["retrieval_router_direct_min_confidence"]); v != "" {
 		if confidence, err := strconv.ParseFloat(v, 64); err == nil {
@@ -782,8 +661,7 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 		}
 		return value, nil
 	case "rerank_enabled", "coding_allow_network", "tool_pruning_enabled",
-		"disable_legacy_answer_recovery",
-		"investigation_enabled":
+		"disable_legacy_answer_recovery":
 		return canonicalBoolSetting(key, value)
 	case "llm_max_tokens", "llm_answer_max_tokens", "agent_conclusion_max_tokens", "llm_max_continue_rounds":
 		return canonicalNonNegativeIntSetting(key, value)
@@ -791,24 +669,19 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 		return canonicalNonNegativeInt64Setting(key, value)
 	case "agent_max_steps", "context_budget", "rerank_pool",
 		"rerank_topk", "rerank_max_per_service", "rerank_max_per_service_low_band",
-		"vcs_clone_concurrency", "delegation_max_children", "investigation_max_rounds",
-		"delegation_max_concurrent", "delegation_max_child_turns", "investigation_max_tasks",
-		"investigation_max_parallelism":
+		"vcs_clone_concurrency", "delegation_max_children",
+		"delegation_max_concurrent", "delegation_max_child_turns":
 		return canonicalPositiveIntSetting(key, value)
 	case "agent_max_tool_calls", "delegation_max_child_tool_calls", "delegation_max_child_input_tokens",
 		"delegation_max_child_output_tokens", "delegation_max_report_tokens",
-		"delegation_max_total_tokens", "investigation_max_input_tokens",
-		"investigation_max_output_tokens", "investigation_max_total_tokens",
-		"investigation_max_tool_calls":
+		"delegation_max_total_tokens":
 		return canonicalPositiveInt64Setting(key, value)
-	case "delegation_max_total_cost_micros", "delegation_parent_answer_reserve", "investigation_max_cost_micros":
+	case "delegation_max_total_cost_micros", "delegation_parent_answer_reserve":
 		return canonicalNonNegativeInt64Setting(key, value)
 	case "rerank_min_score", "rerank_min_dense_preflight", "runbook_min_score", "code_min_score":
 		return canonicalScoreSetting(key, value)
 	case "agent_timeout":
 		return canonicalDurationSetting(key, value, minAgentTimeout, maxAgentTimeout)
-	case "investigation_max_duration":
-		return canonicalDurationSetting(key, value, time.Second, 24*time.Hour)
 	case "delegation_child_timeout":
 		return canonicalDurationSetting(key, value, time.Second, 24*time.Hour)
 	case "delegation_capabilities":
@@ -857,12 +730,6 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 			return "", fmt.Errorf("llm_context_window must be between 8192 and 2000000")
 		}
 		return strconv.Itoa(tokens), nil
-	case "investigation_budget_profile":
-		value = strings.ToLower(value)
-		if value != "interactive" && value != "deep" {
-			return "", fmt.Errorf("investigation_budget_profile must be interactive or deep")
-		}
-		return value, nil
 	case "vcs_groups", "vcs_exclude_projects":
 		return strings.Join(ParseExcludeList(value), "\n"), nil
 	default:

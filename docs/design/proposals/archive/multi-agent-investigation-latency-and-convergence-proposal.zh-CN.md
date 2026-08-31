@@ -1,14 +1,14 @@
 # 多 Agent 调查延迟与上下文收敛提案（历史版本）
 
-状态：已被任务级上下文与证据所有权提案替代  
-作者：Nasuta Agent Platform Team  
-日期：2026-08-20  
-关联事项：用户运行 trace `run_fd5c1d1029781f11cd80b76022a4559c`、`investigator-scoped-context-projection-proposal.zh-CN.md`、`qa-agent-context-budget-and-cancellation.zh-CN.md`  
+状态：已被任务级上下文与证据所有权提案替代并归档
+作者：Nasuta Agent Platform Team
+日期：2026-08-20
+关联事项：用户运行 trace `run_fd5c1d1029781f11cd80b76022a4559c`、`investigator-scoped-context-projection-proposal.zh-CN.md`、`qa-agent-context-budget-and-cancellation.zh-CN.md`
 目标版本：历史记录
 
 > 注意：本文件最初把问题归因到角色级 token 预算，并建议缩小
 > Investigator/Verifier/Synthesizer 的预算。该方向不是当前修复方案。
-> 当前方案见 `task-scoped-evidence-ownership-proposal.zh-CN.md`，重点是任务分配、
+> 当前方案见 `archive/task-scoped-evidence-ownership-proposal.zh-CN.md`，重点是任务分配、
 > evidence owner、`InputRefs` 和 baseline evidence 保留。
 
 ## 1. 摘要

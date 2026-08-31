@@ -55,76 +55,6 @@ func scanCSharpServices(root string, dirs []string) []domain.ServiceRecord {
 	return records
 }
 
-// scanCSharpEndpoints finds ASP.NET Core controller endpoints + ServiceStack routes.
-func scanCSharpEndpoints(root string, dirs []string) []domain.EndpointRecord {
-	files := walkFiles(root, dirs, hasSuffix(".cs"))
-	var records []domain.EndpointRecord
-	for _, file := range files {
-		if isTestSourcePath(relativeTo(root, file)) {
-			continue
-		}
-		base := strings.ToLower(filepath.Base(file))
-		if strings.Contains(base, ".designer.") || strings.Contains(base, ".generated.") || strings.Contains(base, ".g.cs") {
-			continue
-		}
-		text := readFile(file)
-		rel := relativeTo(root, file)
-		moduleRoot := findCSharpModuleRoot(root, file)
-		serviceName := filepath.Base(relativeTo(root, moduleRoot))
-		if moduleRoot != "" {
-			serviceName = readCSharpProjectName(moduleRoot)
-		}
-		handler := strings.TrimSuffix(filepath.Base(file), ".cs")
-
-		// ASP.NET Core: ControllerBase / [ApiController] / Minimal API
-		if strings.Contains(text, "[ApiController]") || strings.Contains(text, "ControllerBase") ||
-			strings.Contains(text, "MapGet") || strings.Contains(text, "MapPost") {
-			classRoute := extractCSharpClassRoute(text)
-			lines := strings.Split(text, "\n")
-			for i, line := range lines {
-				for _, re := range csharpEndpointPatterns {
-					m := re.FindStringSubmatch(line)
-					if m == nil {
-						continue
-					}
-					records = append(records, domain.EndpointRecord{
-						ServiceName: serviceName, Repo: topSegment(rel),
-						Method: strings.ToUpper(m[1]), Path: joinPaths(classRoute, m[2]),
-						Handler: handler, HandlerMethod: csharpMethodName(lines, i),
-						File: rel, Line: i + 1, Source: domain.SourceCodeScan, Confidence: 0.85,
-					})
-				}
-			}
-			for _, re := range csharpMinimalAPIPatterns {
-				for _, m := range re.FindAllStringSubmatch(text, -1) {
-					if len(m) > 2 {
-						records = append(records, domain.EndpointRecord{
-							ServiceName: serviceName, Repo: topSegment(rel),
-							Method: strings.ToUpper(m[1]), Path: m[2],
-							Handler: handler, File: rel,
-							Source: domain.SourceCodeScan, Confidence: 0.8,
-						})
-					}
-				}
-			}
-		}
-
-		// ServiceStack: [Route("/path", "GET")] on request DTOs
-		if strings.Contains(text, "[Route(") && strings.Contains(text, "ServiceStack") || strings.Contains(text, "IReturn") {
-			for _, m := range serviceStackRouteRe.FindAllStringSubmatch(text, -1) {
-				if len(m) > 2 {
-					records = append(records, domain.EndpointRecord{
-						ServiceName: serviceName, Repo: topSegment(rel),
-						Method: strings.ToUpper(m[2]), Path: m[1],
-						Handler: handler, File: rel, Source: domain.SourceCodeScan, Confidence: 0.8,
-					})
-				}
-			}
-		}
-	}
-	return records
-}
-
 // scanCSharpRefits finds Refit interfaces (C# equivalent of @FeignClient).
 func scanCSharpRefits(root string, dirs []string) []domain.DependencyEdge {
 	type refitMethod struct {
@@ -308,42 +238,9 @@ func readCSharpProjectName(dir string) string {
 	return filepath.Base(dir)
 }
 
-var csharpClassRouteRe = regexp.MustCompile(`\[Route\s*\(\s*"([^"]+)"\s*\)\]`)
-
-func extractCSharpClassRoute(text string) string {
-	if m := csharpClassRouteRe.FindStringSubmatch(text); m != nil {
-		return m[1]
-	}
-	return ""
-}
-
-var csharpEndpointPatterns = []*regexp.Regexp{
-	// [HttpGet("path")] or [HttpPost("path")]
-	regexp.MustCompile(`\[Http(Get|Post|Put|Delete|Patch|Head|Options)\s*\(\s*"([^"]+)"\s*\)\]`),
-}
-
 var csharpMinimalAPIPatterns = []*regexp.Regexp{
 	// app.MapGet("/path", handler)
 	regexp.MustCompile(`\.Map(Get|Post|Put|Delete|Patch)\s*\(\s*"([^"]+)"`),
-}
-
-var csharpMethodRe = regexp.MustCompile(`(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:\w+[\w<>\[\],\s]*)\s+(\w+)\s*\(`)
-
-func csharpMethodName(lines []string, index int) string {
-	end := index + 6
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for i := index; i < end; i++ {
-		line := lines[i]
-		if strings.HasPrefix(strings.TrimSpace(line), "[") {
-			continue
-		}
-		if m := csharpMethodRe.FindStringSubmatch(line); m != nil {
-			return m[1]
-		}
-	}
-	return ""
 }
 
 func readCSharpPorts(dir string) []int {
@@ -367,8 +264,6 @@ func readCSharpPorts(dir string) []int {
 
 var csharpHTTPCallRe = regexp.MustCompile(`https?://([^\s"'\)]+)`)
 var csharpClientCallRe = regexp.MustCompile(`(?i)(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStringAsync|GetByteArrayAsync)\s*\(`)
-
-var serviceStackRouteRe = regexp.MustCompile(`\[Route\s*\(\s*"([^"]+)"\s*,\s*"([A-Za-z]+)"\s*\)\]`)
 
 func refitRegistrationTarget(files []string, interfaceName string) string {
 	pattern := regexp.MustCompile(`(?s)RestService\.For\s*<\s*` + regexp.QuoteMeta(interfaceName) + `\s*>\s*\(\s*["']https?://([^"'/]+)`)

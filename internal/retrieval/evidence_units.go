@@ -57,17 +57,6 @@ func evidenceUnitsForCodeDoc(doc codeDoc, content string) []tool.EvidenceUnit {
 	}}
 }
 
-func evidenceUnitForPart(source, target, content string, coverage tool.EvidenceCoverage) tool.EvidenceUnit {
-	trustTier := domain.TrustServiceMeta
-	evidenceClass := domain.EvidenceClassServiceMeta
-	return tool.EvidenceUnit{
-		SourceKind: source, Target: target, ContentHash: evidenceHash(content),
-		Coverage: coverage, Facets: evidenceFacets(source, ""),
-		TrustTier: trustTier, EvidenceClass: evidenceClass,
-		TokenCost: tokenestimate.Count(content),
-	}
-}
-
 func evidenceUnitKey(unit tool.EvidenceUnit) string {
 	expanded := evidence.Expand([]tool.EvidenceUnit{unit})
 	if len(expanded) == 0 {
