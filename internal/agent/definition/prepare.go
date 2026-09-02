@@ -16,6 +16,22 @@ import (
 )
 
 func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution, error) {
+	now := time.Now().UTC()
+	return runtime.prepareAt(request, now, now)
+}
+
+// prepareAt separates the deadline origin from the validation clock. Normal
+// runs use the same instant for both. Recovery passes the persisted run start
+// as deadlineOrigin so re-preparation cannot move the absolute SLA window.
+func (runtime *Runtime) prepareAt(request agentapi.RunRequest, deadlineOrigin, now time.Time) (preparedExecution, error) {
+	if deadlineOrigin.IsZero() {
+		deadlineOrigin = now
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	deadlineOrigin = deadlineOrigin.UTC()
+	now = now.UTC()
 	definition, modelParameters, err := runtime.resolveExecution(request)
 	if err != nil {
 		return preparedExecution{}, err
@@ -28,16 +44,20 @@ func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution,
 	if err != nil {
 		return preparedExecution{}, err
 	}
+	if err := validateOutputContract(request.Policy.OutputContract); err != nil {
+		return preparedExecution{}, err
+	}
 	answerReserve := answerReserveFor(request, runtime.settings.answerReserve)
 	if definition.Budget.Timeout <= answerReserve {
 		return preparedExecution{}, fmt.Errorf("definition timeout must exceed the answer reserve")
 	}
-	limits, err := prepareRunLimits(
+	limits, err := prepareRunLimitsAt(
 		definition,
 		request.Policy,
 		request.Limits,
 		answerReserve,
-		time.Now().UTC(),
+		deadlineOrigin,
+		now,
 	)
 	if err != nil {
 		return preparedExecution{}, err
@@ -73,7 +93,7 @@ func (runtime *Runtime) prepare(request agentapi.RunRequest) (preparedExecution,
 			PromptHash:          hashString(definition.Prompt.System), ContextHash: contextHash,
 			Budget: definition.Budget, Limits: limits, Delegation: request.Delegation,
 			Permissions: clonePermissions(request.Permissions),
-			Actor:       request.Actor, Correlation: request.Correlation, CreatedAt: time.Now().UTC(),
+			Actor:       request.Actor, Correlation: request.Correlation, CreatedAt: now,
 		},
 		modelParameters:  modelParameters,
 		toolPolicy:       tools.policy,
@@ -94,6 +114,39 @@ func answerReserveFor(request agentapi.RunRequest, parentReserve time.Duration) 
 	return delegatedChildAnswerReserve
 }
 
+func validateOutputContract(contract agentapi.RunOutputContract) error {
+	if contract.Kind == "" {
+		if contract.RequireMermaid || len(contract.Subjects) > 0 || contract.MaxHops != 0 {
+			return fmt.Errorf("output contract kind is required")
+		}
+		return nil
+	}
+	if contract.Kind != "flow" {
+		return fmt.Errorf("unsupported output contract kind %q", contract.Kind)
+	}
+	if !contract.RequireMermaid {
+		return fmt.Errorf("flow output contract must require mermaid")
+	}
+	if contract.MaxHops <= 0 || contract.MaxHops > 32 {
+		return fmt.Errorf("flow output contract max_hops must be between 1 and 32")
+	}
+	if len(contract.Subjects) > 8 {
+		return fmt.Errorf("flow output contract has too many subjects")
+	}
+	seen := make(map[string]struct{}, len(contract.Subjects))
+	for _, subject := range contract.Subjects {
+		if strings.TrimSpace(subject) == "" {
+			return fmt.Errorf("flow output contract subjects must be non-empty")
+		}
+		key := strings.ToLower(strings.TrimSpace(subject))
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("flow output contract subjects must be unique")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
 func prepareRunLimits(
 	definition agentapi.Definition,
 	policy agentapi.RunPolicy,
@@ -101,16 +154,42 @@ func prepareRunLimits(
 	answerReserve time.Duration,
 	now time.Time,
 ) (agentapi.RunLimits, error) {
+	return prepareRunLimitsAt(definition, policy, requested, answerReserve, now, now)
+}
+
+// prepareRunLimitsAt validates a persisted run against its original deadline
+// origin while using now only for remaining-time checks. This distinction is
+// required by recovery: restarting a run must never grant a fresh timeout.
+func prepareRunLimitsAt(
+	definition agentapi.Definition,
+	policy agentapi.RunPolicy,
+	requested agentapi.RunLimits,
+	answerReserve time.Duration,
+	deadlineOrigin time.Time,
+	now time.Time,
+) (agentapi.RunLimits, error) {
+	if deadlineOrigin.IsZero() {
+		deadlineOrigin = now
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	deadlineOrigin = deadlineOrigin.UTC()
+	now = now.UTC()
 	if requested.MaxSteps < 0 || requested.MaxToolCalls < 0 ||
 		requested.MaxInputTokens < 0 || requested.MaxContextTokens < 0 ||
-		requested.MaxTotalTokens < 0 || requested.MaxCostMicros < 0 {
+		requested.MaxOutputTokens < 0 || requested.MaxTotalTokens < 0 ||
+		requested.MaxCostMicros < 0 || requested.ParentAnswerReserve < 0 {
 		return agentapi.RunLimits{}, fmt.Errorf("run limits cannot be negative")
 	}
 	if requested.MaxContextTokens > 0 && definition.Budget.ContextTokens > 0 &&
 		requested.MaxContextTokens > int64(definition.Budget.ContextTokens) {
 		return agentapi.RunLimits{}, fmt.Errorf("run context limit exceeds the definition context window")
 	}
-	maxDeadline := now.Add(definition.Budget.Timeout)
+	if requested.MaxOutputTokens > int64(definition.Model.MaxOutputTokens) {
+		return agentapi.RunLimits{}, fmt.Errorf("run max_output_tokens exceeds the definition model ceiling")
+	}
+	maxDeadline := deadlineOrigin.Add(definition.Budget.Timeout)
 	deadline := requested.Deadline
 	if deadline.IsZero() {
 		deadline = maxDeadline
@@ -142,13 +221,15 @@ func prepareRunLimits(
 		}
 	}
 	return agentapi.RunLimits{
-		Deadline:         deadline,
-		MaxSteps:         maxSteps,
-		MaxToolCalls:     maxToolCalls,
-		MaxInputTokens:   requested.MaxInputTokens,
-		MaxContextTokens: requested.MaxContextTokens,
-		MaxTotalTokens:   requested.MaxTotalTokens,
-		MaxCostMicros:    requested.MaxCostMicros,
+		Deadline:            deadline,
+		MaxSteps:            maxSteps,
+		MaxToolCalls:        maxToolCalls,
+		MaxInputTokens:      requested.MaxInputTokens,
+		MaxContextTokens:    requested.MaxContextTokens,
+		MaxOutputTokens:     requested.MaxOutputTokens,
+		MaxTotalTokens:      requested.MaxTotalTokens,
+		MaxCostMicros:       requested.MaxCostMicros,
+		ParentAnswerReserve: requested.ParentAnswerReserve,
 	}, nil
 }
 
@@ -381,8 +462,9 @@ func compileRequest(
 			}
 		}
 		return execution.Input{
-			Question: question, Messages: messages,
+			OriginalRequest: cloneRunRequest(request), Question: question, Messages: messages,
 			OutputMode:        request.Policy.OutputMode,
+			OutputContract:    request.Policy.OutputContract,
 			EvidenceSeeded:    evidenceSeeded,
 			Direct:            !request.Policy.EvidenceRequired,
 			Web:               request.Policy.WebResearch,
@@ -413,8 +495,9 @@ func compileRequest(
 	})
 	messages = append(messages, llm.Message{Role: "user", Content: question})
 	return execution.Input{
-		Question: question, Messages: messages,
+		OriginalRequest: cloneRunRequest(request), Question: question, Messages: messages,
 		OutputMode:        request.Policy.OutputMode,
+		OutputContract:    request.Policy.OutputContract,
 		EvidenceSeeded:    evidenceSeeded,
 		Direct:            !request.Policy.EvidenceRequired,
 		Web:               request.Policy.WebResearch,
@@ -423,6 +506,18 @@ func compileRequest(
 		EvidenceUnits:     contextEvidenceUnits(request.Context),
 		EvidenceConflicts: evidenceConflicts(request.Context),
 	}
+}
+
+func cloneRunRequest(request agentapi.RunRequest) *agentapi.RunRequest {
+	copy := request
+	copy.Input = append([]byte(nil), request.Input...)
+	copy.Messages = append([]agentapi.Message(nil), request.Messages...)
+	copy.Context = append([]agentapi.ContextBlock(nil), request.Context...)
+	copy.Permissions.Scopes = append([]string(nil), request.Permissions.Scopes...)
+	copy.ToolScope.VisibleToolIDs = append([]string(nil), request.ToolScope.VisibleToolIDs...)
+	copy.ToolScope.OfferedToolIDs = append([]string(nil), request.ToolScope.OfferedToolIDs...)
+	copy.Policy.OutputContract.Subjects = append([]string(nil), request.Policy.OutputContract.Subjects...)
+	return &copy
 }
 
 func evidenceSeeded(

@@ -9,7 +9,7 @@ Every verdict must cite only evidence_refs supplied in the request. Use "unresol
 
 
 Output bounds are part of the contract, not suggestions:
-- Return at most one verdict for each decision goal, and never more than eight verdicts total.
+- Return at most one verdict for each decision goal, and never more than ten verdicts total.
 - Keep `summary` concise and each `rationale` to one short sentence.
 - Do not repeat evidence statements in the summary or rationale.
 - If `evidence_lookup` is missing or does not cover a citation, treat that citation as unavailable. If no cited evidence body is available, return `verdicts: []` and one concise uncertainty.

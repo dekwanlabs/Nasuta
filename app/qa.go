@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -393,6 +394,9 @@ func (p *Platform) rebuildQARuntimeLocked(
 			)
 		}
 	}
+	p.qa.mu.RLock()
+	oldRuntime := p.agents.runtime
+	p.qa.mu.RUnlock()
 	if err := p.configureDynamicDelegation(candidate.Settings, definitionRuntime); err != nil {
 		return err
 	}
@@ -413,6 +417,17 @@ func (p *Platform) rebuildQARuntimeLocked(
 	}
 	p.graph = graph
 	p.qa.mu.Unlock()
+	if oldRecovery, ok := oldRuntime.(durableRecoveryWorker); ok && oldRuntime != definitionRuntime {
+		oldRecovery.StopDurableRecoveryWorker()
+	}
+	p.workerMu.Lock()
+	workerCtx := p.workerCtx
+	p.workerMu.Unlock()
+	if workerCtx != nil {
+		if recovery, ok := definitionRuntime.(durableRecoveryWorker); ok {
+			recovery.StartDurableRecoveryWorker(workerCtx, time.Second)
+		}
+	}
 	p.index.SetPlatform(candidate.Settings)
 	log.Infof("[settings] agent runtimes reloaded (definition_version=%d, model=%s, timeout=%s, max_steps=%d)",
 		p.agents.version, candidate.Settings.LLMModel,
@@ -484,6 +499,7 @@ func (p *Platform) configureDynamicDelegation(
 ) error {
 	set := tool.ReadToolSet{Owner: dynamicDelegationToolOwner}
 	if settings == nil || !settings.DelegationEnabled {
+		p.configureDelegationWorker(nil)
 		if err := p.reads.Reconcile(set); err != nil {
 			return fmt.Errorf("disable dynamic delegation tool: %w", err)
 		}
@@ -517,6 +533,9 @@ func (p *Platform) configureDynamicDelegation(
 		Allowlist:          settings.DelegationCapabilities,
 		VerifierCapability: delegation.SemanticVerifierCapabilityID,
 		Events:             runtimeEventEmitter(runtime),
+		Queue:              p.qa.runs,
+		WorkerOwner:        p.qa.runs.LeaseOwner(),
+		WorkerLeaseTTL:     30 * time.Second,
 	})
 	if err != nil {
 		return fmt.Errorf("configure dynamic delegation executor: %w", err)
@@ -540,7 +559,83 @@ func (p *Platform) configureDynamicDelegation(
 	if err := p.reads.Reconcile(set); err != nil {
 		return fmt.Errorf("publish dynamic delegation tool: %w", err)
 	}
+	p.configureDelegationWorker(executor)
 	return nil
+}
+
+// configureDelegationWorker publishes one executor to the platform worker
+// lifecycle. It is deliberately separate from the read-tool registry so a
+// runtime reload cannot leave an old child dispatcher consuming new work.
+func (p *Platform) configureDelegationWorker(worker durableChildWorker) {
+	if p == nil {
+		return
+	}
+	p.workerMu.Lock()
+	oldCancel := p.delegationWorkerCancel
+	p.delegationWorkerCancel = nil
+	p.delegationWorker = worker
+	workerCtx := p.workerCtx
+	var childCtx context.Context
+	if worker != nil && workerCtx != nil {
+		childCtx, p.delegationWorkerCancel = context.WithCancel(workerCtx)
+	}
+	p.workerMu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if worker != nil && childCtx != nil {
+		worker.StartWorker(childCtx, time.Second)
+	}
+}
+
+func (p *Platform) startAgentWorkers(ctx context.Context) {
+	if p == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	p.workerMu.Lock()
+	if p.workerCtx == nil {
+		p.workerCtx = ctx
+	}
+	workerCtx := p.workerCtx
+	worker := p.delegationWorker
+	var childCtx context.Context
+	if worker != nil && p.delegationWorkerCancel == nil {
+		childCtx, p.delegationWorkerCancel = context.WithCancel(workerCtx)
+	}
+	p.workerMu.Unlock()
+	if worker != nil && childCtx != nil {
+		worker.StartWorker(childCtx, time.Second)
+	}
+	p.qa.mu.RLock()
+	runtime := p.agents.runtime
+	p.qa.mu.RUnlock()
+	if recovery, ok := runtime.(durableRecoveryWorker); ok {
+		recovery.StartDurableRecoveryWorker(workerCtx, time.Second)
+	}
+}
+
+func (p *Platform) stopAgentWorkers() {
+	if p == nil {
+		return
+	}
+	p.workerMu.Lock()
+	cancel := p.delegationWorkerCancel
+	p.delegationWorkerCancel = nil
+	p.delegationWorker = nil
+	p.workerCtx = nil
+	p.workerMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	p.qa.mu.RLock()
+	runtime := p.agents.runtime
+	p.qa.mu.RUnlock()
+	if recovery, ok := runtime.(durableRecoveryWorker); ok {
+		recovery.StopDurableRecoveryWorker()
+	}
 }
 
 // runtimeEventEmitter returns the runtime's optional delegation event

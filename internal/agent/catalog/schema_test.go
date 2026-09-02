@@ -828,3 +828,55 @@ func TestCurrentTaskContractValidatesTypedIdentityBindings(t *testing.T) {
 		})
 	}
 }
+
+func TestFlowFieldsAreAcceptedByInvestigationAndDelegationReports(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	flow := `"flow":{
+		"subject":"订单创建",
+		"status":"partial",
+		"nodes":[
+			{"id":"api","label":"订单 API","kind":"service"},
+			{"id":"worker","label":"订单处理器","kind":"worker"}
+		],
+		"edges":[{"from":"api","to":"worker","protocol":"HTTP","sync_mode":"sync","evidence_refs":["ev-1"],"evidence_state":"verified"}],
+		"open_hops":["worker -> database"],
+		"confidence":"medium"
+	}`
+	investigation := json.RawMessage(`{
+		"focus":"code","summary":"订单创建流程","findings":[],"gaps":[],
+		"covered_evidence_goals":[],"unresolved_evidence_goals":[],` + flow + `}`)
+	if err := registry.Validate(agentapi.InvestigationReportSchemaRef(), investigation); err != nil {
+		t.Fatalf("investigation flow rejected: %v", err)
+	}
+	delegation := json.RawMessage(`{
+		"capability":"knowledge.code.inspect","status":"partial","completeness":"partial",
+		"summary":"订单创建流程","usage":{"tool_calls":0,"input_tokens":0,"output_tokens":0,"total_tokens":0},` + flow + `}`)
+	if err := registry.Validate(agentapi.SchemaRef{ID: "delegation.report", Version: 1}, delegation); err != nil {
+		t.Fatalf("delegation flow rejected: %v", err)
+	}
+}
+
+func TestTaskContractAcceptsFlowOutputHints(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`{
+		"capability":"knowledge.code.inspect",
+		"objective":"调查订单创建流程",
+		"parent_question_summary":"订单创建流程",
+		"focus_facets":[],
+		"evidence_refs":[],
+		"output_kind":"flow",
+		"max_hops":6,
+		"delegation_id":"del-1",
+		"parent_run_id":"parent-1",
+		"task_index":0
+	}`)
+	if err := registry.Validate(agentapi.TaskContractSchemaRef(), payload); err != nil {
+		t.Fatalf("flow task hints rejected: %v", err)
+	}
+}

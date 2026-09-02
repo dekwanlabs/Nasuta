@@ -115,6 +115,47 @@ BEGIN
         'cost_micros',
         'ALTER TABLE agent_runs ADD COLUMN cost_micros BIGINT NOT NULL DEFAULT 0 AFTER total_tokens'
     );
+    CALL migration_add_column_20260816(
+        'agent_run_budget_ledger',
+        'lease_fence',
+        'ALTER TABLE agent_run_budget_ledger ADD COLUMN lease_fence BIGINT NOT NULL DEFAULT 0 AFTER lease_expires_at'
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_run_checkpoints (
+        run_id VARCHAR(64) PRIMARY KEY,
+        step_no INT NOT NULL DEFAULT 0,
+        phase VARCHAR(32) NOT NULL,
+        input_hash CHAR(64) NOT NULL DEFAULT '',
+        prompt_hash CHAR(64) NOT NULL DEFAULT '',
+        state_json JSON NOT NULL,
+        lease_fence BIGINT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        KEY idx_run_checkpoint_updated (updated_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+    CREATE TABLE IF NOT EXISTS agent_work_items (
+        work_id VARCHAR(128) PRIMARY KEY,
+        run_id VARCHAR(64) NOT NULL,
+        parent_run_id VARCHAR(64) NOT NULL DEFAULT '',
+        delegation_id VARCHAR(64) NOT NULL DEFAULT '',
+        task_index INT NOT NULL DEFAULT 0,
+        attempt_no INT NOT NULL DEFAULT 1,
+        kind VARCHAR(32) NOT NULL,
+        payload_json JSON NOT NULL,
+        state VARCHAR(24) NOT NULL DEFAULT 'ready',
+        lease_owner VARCHAR(128) NOT NULL DEFAULT '',
+        lease_fence BIGINT NOT NULL DEFAULT 0,
+        lease_expires_at TIMESTAMP NULL DEFAULT NULL,
+        available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        attempt_count INT NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_work_delegation_attempt (parent_run_id,delegation_id,task_index,attempt_no),
+        KEY idx_work_ready (state,available_at,lease_expires_at),
+        KEY idx_work_run (run_id,state)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
     UPDATE agent_runs
     SET run_limits_json = JSON_OBJECT()
@@ -137,6 +178,40 @@ BEGIN
         'idx_delegation',
         'CREATE INDEX idx_delegation ON agent_runs (parent_run_id, delegation_id)'
     );
+
+    -- Durable hierarchical budget state. The root row is authoritative for
+    -- cross-process admission; reservation rows make task grants and physical
+    -- provider calls recoverable and idempotent.
+    CREATE TABLE IF NOT EXISTS agent_run_budget_ledger (
+        root_run_id VARCHAR(64) PRIMARY KEY,
+        limits_json JSON NOT NULL,
+        used_usage_json JSON NOT NULL,
+        reserved_usage_json JSON NOT NULL,
+        price_version VARCHAR(64) NOT NULL DEFAULT '',
+        lease_owner VARCHAR(128) NOT NULL DEFAULT '',
+        lease_expires_at TIMESTAMP NULL DEFAULT NULL,
+        version BIGINT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        KEY idx_agent_budget_ledger_updated (updated_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+    CREATE TABLE IF NOT EXISTS agent_run_budget_reservations (
+        reservation_id VARCHAR(160) PRIMARY KEY,
+        root_run_id VARCHAR(64) NOT NULL,
+        parent_reservation_id VARCHAR(160) NOT NULL DEFAULT '',
+        kind VARCHAR(24) NOT NULL,
+        phase VARCHAR(24) NOT NULL DEFAULT 'default',
+        estimate_usage_json JSON NOT NULL,
+        grant_usage_json JSON NOT NULL,
+        used_usage_json JSON NOT NULL,
+        state VARCHAR(24) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        settled_at TIMESTAMP NULL DEFAULT NULL,
+        UNIQUE KEY uniq_agent_budget_reservation_root (root_run_id, reservation_id),
+        KEY idx_agent_budget_reservation_parent (root_run_id, parent_reservation_id, state),
+        KEY idx_agent_budget_reservation_state (root_run_id, state, settled_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
     -- Record admission, reservation, and settlement for every delegated task.
     CREATE TABLE IF NOT EXISTS agent_delegation_tasks (
@@ -165,6 +240,48 @@ BEGIN
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
     -- Store authoritative reports and verification results outside step traces.
+    CREATE TABLE IF NOT EXISTS agent_delegation_attempts (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        parent_run_id VARCHAR(64) NOT NULL,
+        delegation_id VARCHAR(64) NOT NULL,
+        task_index INT NOT NULL,
+        attempt_no INT NOT NULL,
+        attempt_id VARCHAR(64) NOT NULL,
+        child_run_id VARCHAR(64) NOT NULL,
+        status VARCHAR(24) NOT NULL,
+        retryable BOOLEAN NOT NULL DEFAULT FALSE,
+        error_code VARCHAR(64) NOT NULL DEFAULT '',
+        error_message TEXT NOT NULL,
+        started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        ended_at TIMESTAMP NULL DEFAULT NULL,
+        next_attempt_at TIMESTAMP NULL DEFAULT NULL,
+        usage_json JSON NULL,
+        report_artifact_id VARCHAR(64) NOT NULL DEFAULT '',
+        UNIQUE KEY uniq_delegation_attempt (parent_run_id, delegation_id, task_index, attempt_no),
+        UNIQUE KEY uniq_delegation_attempt_id (attempt_id),
+        UNIQUE KEY uniq_delegation_attempt_child (child_run_id),
+        KEY idx_delegation_attempt_latest (parent_run_id, delegation_id, task_index, attempt_no),
+        KEY idx_delegation_attempt_status (status, next_attempt_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+    CREATE TABLE IF NOT EXISTS agent_delegation_checkpoints (
+        parent_run_id VARCHAR(64) NOT NULL,
+        delegation_id VARCHAR(64) NOT NULL,
+        task_index INT NOT NULL,
+        invocation_id VARCHAR(128) NOT NULL DEFAULT '',
+        request_hash CHAR(64) NOT NULL DEFAULT '',
+        status VARCHAR(24) NOT NULL,
+        child_run_id VARCHAR(64) NOT NULL DEFAULT '',
+        report_artifact_id VARCHAR(64) NOT NULL DEFAULT '',
+        error_code VARCHAR(64) NOT NULL DEFAULT '',
+        error_message TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (parent_run_id, delegation_id, task_index),
+        KEY idx_delegation_checkpoint_status (status, updated_at),
+        KEY idx_delegation_checkpoint_invocation (invocation_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
     CREATE TABLE IF NOT EXISTS agent_run_artifacts (
         artifact_id VARCHAR(64) PRIMARY KEY,
         run_id VARCHAR(64) NOT NULL,

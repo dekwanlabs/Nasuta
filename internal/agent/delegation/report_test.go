@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func TestProjectReportSalvagesInvalidOutputWhenToolsSucceeded(t *testing.T) {
@@ -190,4 +191,168 @@ func TestBoundReportStrictlyHonorsMinimumBudgetForLongestStatus(t *testing.T) {
 		bounded.Capability != wantCapability {
 		t.Fatalf("bounded report lost identity: %+v", bounded)
 	}
+}
+
+func flowReport(subject string) *agentapi.FlowIR {
+	return &agentapi.FlowIR{
+		Subject:    subject,
+		Status:     "partial",
+		Confidence: "medium",
+		Nodes: []agentapi.FlowNode{
+			{ID: "api", Label: "订单 API", Kind: "service"},
+			{ID: "worker", Label: "订单处理器", Kind: "worker"},
+			{ID: "db", Label: "订单库", Kind: "database"},
+		},
+		Edges: []agentapi.FlowEdge{
+			{From: "api", To: "worker", Protocol: "HTTP", SyncMode: "sync", EvidenceRefs: []string{"ev-1"}, EvidenceState: "verified"},
+			{From: "worker", To: "db", Protocol: "SQL", SyncMode: "async", EvidenceRefs: []string{"ev-2"}, EvidenceState: "verified"},
+		},
+		OpenHops: []string{"worker -> external payment"},
+	}
+}
+
+func TestProjectReportProjectsValidFlow(t *testing.T) {
+	flow := flowReport("订单创建")
+	output, err := json.Marshal(investigationOutput{Summary: "订单创建流程", Flow: flow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := projectReport(agentapi.RunResult{
+		RunID: "child-flow", Status: agentapi.RunSucceeded, Output: output,
+		Evidence: agentapi.EvidenceSummary{Status: "complete"},
+	}, "knowledge.code.inspect", "report-flow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Flow == nil || report.Flow.Subject != "订单创建" {
+		t.Fatalf("flow = %#v", report.Flow)
+	}
+	if len(report.Flow.Nodes) != 3 || len(report.Flow.Edges) != 2 || len(report.Flow.OpenHops) != 1 {
+		t.Fatalf("flow cardinality = %#v", report.Flow)
+	}
+	if len(report.Uncertainties) != 0 {
+		t.Fatalf("unexpected uncertainties = %v", report.Uncertainties)
+	}
+	// Projection must not share nested slices with the decoded child object.
+	flow.Nodes[0].EvidenceRefs = []string{"mutated"}
+	flow.Edges[0].EvidenceRefs[0] = "mutated"
+	flow.OpenHops[0] = "mutated"
+	if report.Flow.Nodes[0].EvidenceRefs != nil || report.Flow.Edges[0].EvidenceRefs[0] != "ev-1" || report.Flow.OpenHops[0] != "worker -> external payment" {
+		t.Fatalf("projected flow aliases child data: %#v", report.Flow)
+	}
+}
+
+func TestProjectReportWithEvidenceDowngradesUnknownVerifiedFlowRefs(t *testing.T) {
+	flow := flowReport("订单创建")
+	flow.Edges[0].EvidenceRefs = []string{"missing-ref"}
+	output, err := json.Marshal(investigationOutput{Summary: "订单创建流程", Flow: flow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := projectReportWithEvidence(
+		agentapi.RunResult{RunID: "child-flow", Status: agentapi.RunSucceeded, Output: output,
+			Evidence: agentapi.EvidenceSummary{Status: "complete"}},
+		"knowledge.code.inspect", "report-flow",
+		map[string]tool.EvidenceUnit{"ev-1": {SourceKind: "code", Target: "orders.go"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Flow == nil {
+		t.Fatal("flow was discarded instead of being downgraded")
+	}
+	if report.Flow.Edges[0].EvidenceState != "unresolved" || len(report.Flow.Edges[0].EvidenceRefs) != 0 {
+		t.Fatalf("unknown verified edge refs were retained: %#v", report.Flow.Edges[0])
+	}
+}
+
+func TestProjectReportOmitsInvalidFlowAndMarksUncertainty(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*agentapi.FlowIR)
+	}{
+		{name: "verified edge without evidence", mutate: func(flow *agentapi.FlowIR) {
+			flow.Edges[0].EvidenceRefs = nil
+		}},
+		{name: "unknown node", mutate: func(flow *agentapi.FlowIR) {
+			flow.Edges[0].To = "missing"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flow := flowReport("订单创建")
+			tc.mutate(flow)
+			output, err := json.Marshal(investigationOutput{Summary: "订单创建流程", Flow: flow})
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := projectReport(agentapi.RunResult{
+				RunID: "child-flow", Status: agentapi.RunSucceeded, Output: output,
+				Evidence: agentapi.EvidenceSummary{Status: "complete"},
+			}, "knowledge.code.inspect", "report-flow")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Flow != nil {
+				t.Fatalf("invalid flow was projected: %#v", report.Flow)
+			}
+			if !containsString(report.Uncertainties, invalidFlowUncertainty) {
+				t.Fatalf("uncertainties = %v", report.Uncertainties)
+			}
+		})
+	}
+}
+
+func TestBoundReportShrinksFlowBeforeFindings(t *testing.T) {
+	report := validReport("report-flow", "claim-1", "ev-1")
+	report.Summary = strings.Repeat("summary ", 80)
+	report.Flow = flowReport("订单创建")
+	maxTokens := int64(0)
+	for tokens := int64(1); tokens < 1000; tokens++ {
+		candidate := boundReport(report, tokens)
+		if candidate.Flow != nil && len(candidate.Flow.Edges) < len(report.Flow.Edges) {
+			maxTokens = tokens
+			break
+		}
+	}
+	if maxTokens == 0 {
+		t.Fatal("could not find a budget that exercises flow shrinking")
+	}
+	bounded := boundReport(report, maxTokens)
+	raw, err := json.Marshal(bounded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) > reportByteLimit(maxTokens) {
+		t.Fatalf("bounded report is %d bytes, want <= %d", len(raw), reportByteLimit(maxTokens))
+	}
+	if bounded.Flow == nil {
+		t.Fatal("flow should be retained when shrinking can satisfy the budget")
+	}
+	if len(bounded.Flow.Edges) >= len(report.Flow.Edges) {
+		t.Fatalf("flow was not shrunk: %#v", bounded.Flow)
+	}
+}
+
+func TestCloneFlowIRDeepCopiesSlices(t *testing.T) {
+	original := flowReport("订单创建")
+	cloned := cloneFlowIR(original)
+	if cloned == original {
+		t.Fatal("clone returned the original pointer")
+	}
+	cloned.Nodes[0].EvidenceRefs = []string{"ev-node"}
+	cloned.Edges[0].EvidenceRefs[0] = "ev-edge"
+	cloned.OpenHops[0] = "changed"
+	if len(original.Nodes[0].EvidenceRefs) != 0 || original.Edges[0].EvidenceRefs[0] != "ev-1" || original.OpenHops[0] != "worker -> external payment" {
+		t.Fatalf("clone shares nested slices: original = %#v", original)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

@@ -1,9 +1,12 @@
 package run
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -12,7 +15,10 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db               *sql.DB
+	durableBudget    bool
+	fencingEnabled   bool
+	budgetLeaseOwner string
 }
 
 type stepStore interface {
@@ -32,20 +38,50 @@ func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("agent/runstore: database is required")
 	}
-	runStore := &Store{db: db}
+	leaseOwner, err := newBudgetLeaseOwner()
+	if err != nil {
+		return nil, fmt.Errorf("agent/runstore: create budget lease owner: %w", err)
+	}
+	runStore := &Store{db: db, durableBudget: true, fencingEnabled: true, budgetLeaseOwner: leaseOwner}
 	recovered, err := runStore.RecoverInterrupted()
 	if err != nil {
 		return nil, fmt.Errorf("agent/runstore: recover interrupted runs: %w", err)
 	}
 	if recovered > 0 {
-		log.Warnf("[qa] recovered %d interrupted agent runs as aborted", recovered)
+		log.Warnf("[qa] claimed %d expired agent runs for durable recovery", recovered)
 	}
 	return runStore, nil
 }
 
+func newBudgetLeaseOwner() (string, error) {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "unknown-host"
+	}
+	return fmt.Sprintf("%s:%d:%s", hostname, os.Getpid(), hex.EncodeToString(random)), nil
+}
+
 // Bind binds a database without running startup recovery.
 func Bind(db *sql.DB) *Store {
-	return &Store{db: db}
+	return &Store{db: db, durableBudget: false}
+}
+
+// DurableBudgetEnabled reports whether this store is the production-backed
+// constructor that should use the cross-process budget ledger. Bind is kept as
+// a lightweight test/integration constructor and deliberately disables it.
+func (rs *Store) DurableBudgetEnabled() bool {
+	return rs != nil && rs.durableBudget
+}
+
+func (rs *Store) LeaseOwner() string {
+	if rs == nil {
+		return ""
+	}
+	return rs.budgetLeaseOwner
 }
 
 var ErrNotActive = errors.New("agent: run is missing or already terminal")

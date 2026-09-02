@@ -19,21 +19,17 @@ func TestQAHistoryPageRestoresEvidenceOnFinalAnswer(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectBegin()
-	mock.ExpectQuery(`FROM agent_delegation_tasks t.*FOR UPDATE`).
+	mock.ExpectQuery(`FROM agent_runs r.*FOR UPDATE`).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"parent_run_id", "delegation_id", "task_index", "child_run_id",
 			"capability_id", "input_tokens", "output_tokens", "reasoning_tokens",
 			"total_tokens", "cost_micros", "tool_call_count",
 		}))
-	mock.ExpectExec(`UPDATE agent_runs SET status=\?,error_code=\?,ended_at=\?.*`+
-		`WHERE run_kind=\? AND status IN \(\?,\?\)`).
+	mock.ExpectExec(`UPDATE agent_work_items SET state=\?,lease_owner=''`+
+		`.*WHERE state=\? AND lease_expires_at IS NOT NULL AND lease_expires_at<=UTC_TIMESTAMP\(\)` ).
 		WithArgs(
-			run.StatusAborted,
-			"interrupted",
-			sqlmock.AnyArg(),
-			run.KindAgent,
-			run.StatusRunning,
-			run.StatusPaused,
+			run.WorkReady, sqlmock.AnyArg(), "worker lease expired during recovery", sqlmock.AnyArg(),
+			run.WorkRunning,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()

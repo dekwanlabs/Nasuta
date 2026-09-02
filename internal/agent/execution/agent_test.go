@@ -1685,6 +1685,96 @@ func TestRunFailsWhenRequiredLiteralStillMissing(t *testing.T) {
 	}
 }
 
+func TestRunRecoversFromTruncatedExactAnswerWithForcedConclusion(t *testing.T) {
+	const serial = "SN-recovered-after-truncation"
+	var calls int32
+	var forcedConclusionSawPartial bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		_ = r.Body.Close()
+		call := atomic.AddInt32(&calls, 1)
+		var request struct {
+			Messages []llm.Message `json:"messages"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		if call == 3 {
+			for _, message := range request.Messages {
+				if message.Role == "assistant" && message.Content == "SN：partial" {
+					forcedConclusionSawPartial = true
+				}
+			}
+		}
+
+		if call == 1 {
+			writeTestSSE(t, w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-exact-recovery","type":"function","function":{"name":"exact_read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+			return
+		}
+		content := "SN：partial"
+		finish := llm.FinishLength
+		if call == 3 {
+			content = "SN：" + serial
+			finish = "stop"
+		}
+		encoded, _ := json.Marshal(streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: content}, FinishReason: finish}}})
+		writeTestSSE(t, w, string(encoded))
+	}))
+	defer server.Close()
+
+	registry := testRegistry(t, Tool{
+		ID: "exact_read", Description: "test exact output", Kind: ToolKindRead,
+		InputSchema: objectSchema(map[string]any{}, nil),
+		Handler: tool.HandlerFunc(func(context.Context, tool.Arguments) (tool.Result, error) {
+			return tool.Result{
+				Content: serial,
+				AnswerContract: tool.AnswerContract{
+					RequiredLiterals: []string{serial},
+				},
+			}, nil
+		}),
+	})
+	observer := &captureObserver{}
+	agent := NewAgent(
+		llm.NewLLMClientWithHTTP(server.URL, "k", "test", 100, &http.Client{}),
+		NewToolExecutor(registry),
+		Config{
+			MaxSteps: 2, AnswerMaxTokens: 100, MaxContinueRounds: 0,
+			Timeout: 5 * time.Second, AnswerReserve: time.Second,
+		},
+		observer,
+		nil,
+	)
+
+	result, err := agent.RunWithPlan(
+		t.Context(), "run_exact_recovery", "列出完整 SN", nil, nil,
+		domain.EvidencePlan{Sources: domain.Internal}, false,
+	)
+	if err != nil {
+		t.Fatalf("RunWithPlan() error = %v", err)
+	}
+	if result.Err != nil || result.Answer != "SN："+serial || !result.ForcedConclusion {
+		t.Fatalf("result = %#v", result)
+	}
+	if !forcedConclusionSawPartial {
+		t.Fatal("forced conclusion did not receive the truncated answer as internal context")
+	}
+	if got := strings.Join(observer.tokens, ""); got != result.Answer {
+		t.Fatalf("visible tokens = %q, want only validated answer %q", got, result.Answer)
+	}
+	if strings.Contains(strings.Join(observer.tokens, ""), "partial") {
+		t.Fatal("invalid truncated answer leaked to client")
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("LLM calls = %d, want tool + truncated answer + forced conclusion", got)
+	}
+}
+
 func TestBuildAgentMessagesDropsHistoricalAnswerContract(t *testing.T) {
 	message, ok := contractMessage(tool.AnswerContract{RequiredLiterals: []string{"SN-history"}})
 	if !ok {

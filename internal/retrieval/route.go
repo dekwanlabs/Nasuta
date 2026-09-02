@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -91,8 +90,6 @@ const (
 )
 
 const executionAuditMaxTokens = 512
-
-var executionTaskID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 
 var executionReasonCodes = map[string]struct{}{
 	"requires_multiple_subproblems":            {},
@@ -612,92 +609,156 @@ func bindExecutionTasks(value any) ([]ExecutionTask, error) {
 	if len(items) > 4 {
 		return nil, fmt.Errorf("execution.tasks exceeds 4 items")
 	}
-	tasks := make([]ExecutionTask, 0, len(items))
-	ids := make(map[string]struct{}, len(items))
+
+	// Task identity is control-plane metadata, not an LLM-authored value. Parse
+	// the model's optional id only as a dependency alias, then assign a stable
+	// canonical id from the task's position. This keeps malformed/non-ASCII ids
+	// from causing a planner retry while preserving dependency semantics.
+	type parsedTask struct {
+		task       ExecutionTask
+		rawID      string
+		rawDepends []string
+	}
+	parsed := make([]parsedTask, 0, len(items))
 	objectives := make(map[string]struct{}, len(items))
 	for index, item := range items {
 		raw, ok := item.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("execution.tasks[%d] must be an object", index)
 		}
-		task, err := bindExecutionTask(raw, index)
+		task, rawID, rawDepends, err := bindExecutionTask(raw, index)
 		if err != nil {
 			return nil, err
 		}
-		if _, duplicate := ids[task.ID]; duplicate {
-			return nil, fmt.Errorf("execution task id %q is duplicated", task.ID)
-		}
-		ids[task.ID] = struct{}{}
-		objectiveKey := strings.ToLower(task.Objective)
+		objectiveKey := strings.ToLower(strings.TrimSpace(task.Objective))
 		if _, duplicate := objectives[objectiveKey]; duplicate {
 			return nil, fmt.Errorf("execution task objective %q is duplicated", task.Objective)
 		}
 		objectives[objectiveKey] = struct{}{}
-		tasks = append(tasks, task)
+		parsed = append(parsed, parsedTask{
+			task: task, rawID: rawID, rawDepends: rawDepends,
+		})
 	}
-	for _, task := range tasks {
-		for _, dependency := range task.DependsOn {
-			if _, exists := ids[dependency]; !exists {
-				return nil, fmt.Errorf("execution task %q depends on unknown task %q", task.ID, dependency)
+
+	canonicalIDs := make(map[string]struct{}, len(parsed))
+	rawToCanonical := make(map[string]string, len(parsed))
+	ambiguousRawIDs := make(map[string]struct{})
+	for index := range parsed {
+		canonicalID := fmt.Sprintf("task_%03d", index+1)
+		parsed[index].task.ID = canonicalID
+		canonicalIDs[canonicalID] = struct{}{}
+		if rawID := parsed[index].rawID; rawID != "" {
+			if _, ambiguous := ambiguousRawIDs[rawID]; ambiguous {
+				continue
 			}
-			if dependency == task.ID {
-				return nil, fmt.Errorf("execution task %q cannot depend on itself", task.ID)
+			if existing, exists := rawToCanonical[rawID]; exists {
+				delete(rawToCanonical, rawID)
+				ambiguousRawIDs[rawID] = struct{}{}
+				_ = existing
+				continue
 			}
+			rawToCanonical[rawID] = canonicalID
 		}
+	}
+
+	for index := range parsed {
+		dependencies := make([]string, 0, len(parsed[index].rawDepends))
+		seen := make(map[string]struct{}, len(parsed[index].rawDepends))
+		for dependencyIndex, rawDependency := range parsed[index].rawDepends {
+			dependency := strings.TrimSpace(rawDependency)
+			canonicalDependency, ok := rawToCanonical[dependency]
+			if !ok {
+				if _, ambiguous := ambiguousRawIDs[dependency]; ambiguous {
+					return nil, fmt.Errorf(
+						"execution task %q depends on ambiguous task id %q",
+						parsed[index].task.ID,
+						dependency,
+					)
+				}
+				if _, canonical := canonicalIDs[dependency]; canonical {
+					canonicalDependency = dependency
+				} else {
+					return nil, fmt.Errorf(
+						"execution.tasks[%d].depends_on[%d] references unknown task %q",
+						index,
+						dependencyIndex,
+						dependency,
+					)
+				}
+			}
+			if canonicalDependency == parsed[index].task.ID {
+				return nil, fmt.Errorf(
+					"execution task %q cannot depend on itself",
+					parsed[index].task.ID,
+				)
+			}
+			if _, duplicate := seen[canonicalDependency]; duplicate {
+				continue
+			}
+			seen[canonicalDependency] = struct{}{}
+			dependencies = append(dependencies, canonicalDependency)
+		}
+		parsed[index].task.DependsOn = dependencies
+	}
+
+	tasks := make([]ExecutionTask, 0, len(parsed))
+	for _, item := range parsed {
+		tasks = append(tasks, item.task)
 	}
 	return tasks, nil
 }
 
-func bindExecutionTask(raw map[string]any, index int) (ExecutionTask, error) {
+// bindExecutionTask parses fields that remain model-controlled. The returned
+// id is retained only as a dependency alias; the caller owns the canonical id.
+func bindExecutionTask(raw map[string]any, index int) (ExecutionTask, string, []string, error) {
 	allowedFields := map[string]struct{}{
 		"id": {}, "objective": {}, "independently_useful": {}, "depends_on": {},
 	}
 	for field := range raw {
 		if _, ok := allowedFields[field]; !ok {
-			return ExecutionTask{}, fmt.Errorf("execution.tasks[%d] field %q is unknown", index, field)
+			return ExecutionTask{}, "", nil, fmt.Errorf("execution.tasks[%d] field %q is unknown", index, field)
 		}
 	}
-	id, ok := raw["id"].(string)
-	if !ok || !executionTaskID.MatchString(id) {
-		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].id must be canonical", index)
+
+	rawID := ""
+	if value, exists := raw["id"]; exists {
+		// IDs are advisory aliases. Ignore missing, empty, non-canonical, and
+		// non-string values rather than spending an LLM retry on control metadata.
+		if value, ok := value.(string); ok {
+			rawID = strings.TrimSpace(value)
+		}
 	}
 	objective, ok := raw["objective"].(string)
 	objective = strings.TrimSpace(objective)
 	if !ok || objective == "" || utf8.RuneCountInString(objective) > 500 {
-		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].objective must contain 1 to 500 characters", index)
+		return ExecutionTask{}, "", nil, fmt.Errorf("execution.tasks[%d].objective must contain 1 to 500 characters", index)
 	}
 	independent, ok := raw["independently_useful"].(bool)
 	if !ok {
-		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].independently_useful must be a boolean", index)
+		return ExecutionTask{}, "", nil, fmt.Errorf("execution.tasks[%d].independently_useful must be a boolean", index)
 	}
 	dependencyItems, ok := raw["depends_on"].([]any)
 	if !ok {
-		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].depends_on must be an array", index)
+		return ExecutionTask{}, "", nil, fmt.Errorf("execution.tasks[%d].depends_on must be an array", index)
 	}
 	if len(dependencyItems) > 3 {
-		return ExecutionTask{}, fmt.Errorf("execution.tasks[%d].depends_on exceeds 3 items", index)
+		return ExecutionTask{}, "", nil, fmt.Errorf("execution.tasks[%d].depends_on exceeds 3 items", index)
 	}
-	dependencies := make([]string, 0, len(dependencyItems))
-	seen := make(map[string]struct{}, len(dependencyItems))
+	rawDepends := make([]string, 0, len(dependencyItems))
 	for dependencyIndex, item := range dependencyItems {
 		dependency, ok := item.(string)
-		if !ok || !executionTaskID.MatchString(dependency) {
-			return ExecutionTask{}, fmt.Errorf(
-				"execution.tasks[%d].depends_on[%d] must be a canonical task id",
+		if !ok || strings.TrimSpace(dependency) == "" {
+			return ExecutionTask{}, "", nil, fmt.Errorf(
+				"execution.tasks[%d].depends_on[%d] must be a non-empty task id",
 				index,
 				dependencyIndex,
 			)
 		}
-		if _, duplicate := seen[dependency]; duplicate {
-			continue
-		}
-		seen[dependency] = struct{}{}
-		dependencies = append(dependencies, dependency)
+		rawDepends = append(rawDepends, strings.TrimSpace(dependency))
 	}
 	return ExecutionTask{
-		ID: id, Objective: objective, IndependentlyUseful: independent,
-		DependsOn: dependencies,
-	}, nil
+		Objective: objective, IndependentlyUseful: independent,
+	}, rawID, rawDepends, nil
 }
 
 func bindHistoryRelation(raw map[string]any, question string) (HistoryRelation, error) {

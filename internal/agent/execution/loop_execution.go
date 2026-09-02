@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
@@ -44,6 +45,9 @@ type compiledLoop struct {
 	stepLimit                  int
 	toolBudgetExhausted        bool
 	structuredLastStepReminded bool
+	answerRecoveryPending      bool
+	delegatedFlows             []agentapi.FlowIR
+	startStep                  int
 }
 
 func (agent *Agent) prepareLoop(
@@ -95,6 +99,7 @@ func (agent *Agent) prepareLoop(
 		evidenceLedger:      newRunEvidenceLedger(input.EvidenceUnits, input.EvidenceConflicts),
 		remainingToolTokens: initialToolTokenBudget(agent, messages, tools),
 		stepLimit:           maxSteps,
+		startStep:           1,
 	}
 	state.recordSeedEvidence(agent.observer)
 	return state
@@ -153,6 +158,14 @@ func (state *compiledLoop) recordSeedEvidence(observer Observer) {
 }
 
 func (agent *Agent) finishLoop(state *compiledLoop) {
+	if len(state.delegatedFlows) > 0 {
+		merged, err := delegation.MergeFlowIRs(state.delegatedFlows)
+		if err != nil {
+			log.WarnfCtx(state.ctx, "[agent] run %s flow merge failed: %v", state.runID, err)
+		} else {
+			state.result.Flow = merged
+		}
+	}
 	if agent.shouldForceConclusion(state) {
 		state.result.ForcedConclusion = true
 		state.result.Evidence.ForcedConclusion = true
@@ -164,6 +177,9 @@ func (agent *Agent) finishLoop(state *compiledLoop) {
 }
 
 func (agent *Agent) shouldForceConclusion(state *compiledLoop) bool {
+	if state.answerRecoveryPending {
+		return true
+	}
 	if state.answered || state.result.Aborted || state.result.Err != nil {
 		return false
 	}

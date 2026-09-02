@@ -21,7 +21,7 @@ const (
 	ErrorVerificationInput        = "verification_input_invalid"
 	ErrorVerificationOutput       = "verification_output_invalid"
 	ErrorVerificationPersistence  = "verification_persistence_failed"
-	maxVerificationClaims         = 40
+	maxVerificationClaims         = 10
 	maxVerificationConflicts      = 20
 	maxVerificationEvidenceRefs   = 100
 	maxVerificationStatementBytes = 2000
@@ -45,6 +45,7 @@ type preparedVerification struct {
 	limits         agentapi.RunLimits
 	permissions    agentapi.PermissionPolicy
 	context        []agentapi.ContextBlock
+	budget         agentapi.RunBudgetTaskReservation
 }
 
 func (executor *Executor) attachVerification(
@@ -52,19 +53,21 @@ func (executor *Executor) attachVerification(
 	parent ParentContext,
 	result *agentapi.DelegationBatchResult,
 	evidence map[string]tool.EvidenceUnit,
+	observations []agentapi.EvidenceObservation,
 	validationErr error,
 ) {
 	if result == nil || validationErr != nil ||
 		!result.Validation.RequiresVerification {
 		return
 	}
-	verification := executor.executeVerification(
+	verification := executor.executeVerificationWithObservations(
 		ctx,
 		parent,
 		result.DelegationID,
 		result.Results,
 		result.Validation,
 		evidence,
+		observations,
 	)
 	result.Verification = &verification
 }
@@ -77,13 +80,28 @@ func (executor *Executor) executeVerification(
 	validation agentapi.DelegationValidation,
 	evidence map[string]tool.EvidenceUnit,
 ) agentapi.DelegationVerification {
-	task, code, err := executor.prepareVerification(
+	return executor.executeVerificationWithObservations(
+		ctx, parent, delegationID, reports, validation, evidence, nil,
+	)
+}
+
+func (executor *Executor) executeVerificationWithObservations(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	reports []agentapi.DelegationReport,
+	validation agentapi.DelegationValidation,
+	evidence map[string]tool.EvidenceUnit,
+	observations []agentapi.EvidenceObservation,
+) agentapi.DelegationVerification {
+	task, code, err := executor.prepareVerificationWithObservations(
 		parent,
 		delegationID,
 		len(reports),
 		reports,
 		validation,
 		evidence,
+		observations,
 	)
 	if err != nil {
 		return executor.rejectVerification(
@@ -117,6 +135,18 @@ func (executor *Executor) executeVerification(
 		// path; tolerate stores that do not distinguish a missing lookup.
 	}
 
+	rootGate := agentapi.RunBudgetTaskGateFromContext(ctx)
+	if rootGate != nil {
+		task.budget, err = rootGate.ReserveTask(budgetGrant(
+			task.limits, executor.policy.MaxChildInputTokens, executor.policy.MaxChildOutputTokens,
+		))
+		if err != nil {
+			return executor.rejectVerification(
+				ctx, parent, delegationID, task, ErrorBudgetInsufficient, err,
+			)
+		}
+	}
+
 	reservation := agentrun.DelegationReservation{
 		ParentRunID: parent.RunID, DelegationID: delegationID,
 		TaskIndex: task.index, ChildRunID: task.childRunID,
@@ -141,6 +171,9 @@ func (executor *Executor) executeVerification(
 		},
 	)
 	if err != nil {
+		if task.budget != nil {
+			_ = task.budget.Release()
+		}
 		code := ErrorBudgetInsufficient
 		if errors.Is(err, agentrun.ErrDelegationChildLimit) {
 			code = ErrorChildLimitExceeded
@@ -157,6 +190,9 @@ func (executor *Executor) executeVerification(
 		)
 	}
 	if len(records) != 1 {
+		if task.budget != nil {
+			_ = task.budget.Release()
+		}
 		return failedVerification(
 			task,
 			ErrorVerifierUnavailable,
@@ -180,11 +216,27 @@ func (executor *Executor) prepareVerification(
 	validation agentapi.DelegationValidation,
 	evidence map[string]tool.EvidenceUnit,
 ) (preparedVerification, string, error) {
+	return executor.prepareVerificationWithObservations(
+		parent, delegationID, index, reports, validation, evidence, nil,
+	)
+}
+
+func (executor *Executor) prepareVerificationWithObservations(
+	parent ParentContext,
+	delegationID string,
+	index int,
+	reports []agentapi.DelegationReport,
+	validation agentapi.DelegationValidation,
+	evidence map[string]tool.EvidenceUnit,
+	observations []agentapi.EvidenceObservation,
+) (preparedVerification, string, error) {
 	request := buildVerificationRequest(
 		parent.QuestionSummary,
 		reports,
 		validation,
 		evidence,
+		parent.Context,
+		observations,
 	)
 	task := preparedVerification{
 		index: index, request: request, objectiveHash: hashJSON(request),
@@ -256,6 +308,8 @@ func buildVerificationRequest(
 	reports []agentapi.DelegationReport,
 	validation agentapi.DelegationValidation,
 	evidence map[string]tool.EvidenceUnit,
+	contextIndex map[string]agentapi.ContextBlock,
+	observations []agentapi.EvidenceObservation,
 ) agentapi.DelegationVerificationRequest {
 	type claimCandidate struct {
 		claim      agentapi.DelegationVerificationClaim
@@ -349,6 +403,7 @@ func buildVerificationRequest(
 		Claims:           claims,
 		Conflicts:        conflicts,
 		EvidenceRefs:     evidenceRefs,
+		EvidenceLookup:   buildEvidenceLookup(evidenceRefs, evidence, contextIndex, observations),
 		Reasons:          canonicalStrings(validation.VerificationReasons),
 	}
 }
@@ -360,6 +415,9 @@ func (executor *Executor) runVerification(
 	task preparedVerification,
 	record agentrun.DelegationTaskRecord,
 ) agentapi.DelegationVerification {
+	if task.budget != nil {
+		defer func() { _ = task.budget.Release() }()
+	}
 	if record.Existing && record.SettledUsage != nil {
 		_, artifact, err := executor.persistence.GetDelegationTask(
 			ctx,
@@ -466,6 +524,9 @@ func (executor *Executor) runVerification(
 	}
 	defer stopToolProjection()
 	runCtx, cancel := context.WithDeadline(ctx, task.limits.Deadline)
+	if task.budget != nil {
+		runCtx = agentapi.WithRunBudgetGate(runCtx, task.budget)
+	}
 	result, runErr := executor.runtime.Run(
 		runCtx,
 		executor.verificationRunRequest(parent, delegationID, task),
@@ -597,7 +658,58 @@ func projectVerification(
 		output.Verdicts...,
 	)
 	verification.Uncertainties = canonicalStrings(output.Uncertainties)
+	completeVerificationCoverage(&verification, task.request.Claims)
 	return verification
+}
+
+// completeVerificationCoverage makes the verifier result total over the claims
+// submitted by the server. A verifier may group several claims into one verdict,
+// but it must not silently omit a claim: omitted claims are deterministic
+// unresolved outcomes. This keeps partial provider output safe for the parent.
+func completeVerificationCoverage(
+	verification *agentapi.DelegationVerification,
+	claims []agentapi.DelegationVerificationClaim,
+) {
+	if verification == nil || len(claims) == 0 {
+		return
+	}
+	covered := make(map[string]struct{}, len(claims))
+	for _, verdict := range verification.Verdicts {
+		for _, claimID := range verdict.ClaimIDs {
+			claimID = strings.TrimSpace(claimID)
+			if claimID != "" {
+				covered[claimID] = struct{}{}
+			}
+		}
+	}
+	missing := make([]string, 0)
+	for _, claim := range claims {
+		claimID := strings.TrimSpace(claim.ID)
+		if claimID == "" {
+			continue
+		}
+		if _, ok := covered[claimID]; ok {
+			continue
+		}
+		missing = append(missing, claimID)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	for _, claimID := range missing {
+		if len(verification.Verdicts) >= maxVerificationClaims {
+			break
+		}
+		verification.Verdicts = append(verification.Verdicts, agentapi.DelegationVerificationVerdict{
+			ClaimIDs:  []string{claimID},
+			Decision:  "unresolved",
+			Rationale: "The verifier returned no claim-level decision for this claim; it remains unresolved.",
+		})
+	}
+	verification.Uncertainties = canonicalStrings(append(
+		verification.Uncertainties,
+		"The semantic verifier did not cover every submitted claim; omitted claims remain unresolved.",
+	))
 }
 
 func validateVerificationOutput(
@@ -614,6 +726,9 @@ func validateVerificationOutput(
 	evidenceRefs := make(map[string]struct{}, len(request.EvidenceRefs))
 	for _, reference := range request.EvidenceRefs {
 		evidenceRefs[reference] = struct{}{}
+	}
+	if len(request.Claims) > 0 && len(verification.Verdicts) == 0 {
+		return fmt.Errorf("semantic verifier returned no verdicts for submitted claims")
 	}
 	if len(verification.Verdicts) > maxVerificationClaims {
 		return fmt.Errorf("semantic verifier returned too many verdicts")

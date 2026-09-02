@@ -93,6 +93,7 @@ func (executor *Executor) Tool() tool.ReadTool {
 			if err != nil {
 				return tool.Result{}, err
 			}
+			result.Warnings = delegationWarnings(result)
 			content, err := json.Marshal(result)
 			if err != nil {
 				return tool.Result{}, fmt.Errorf("encode delegation result: %w", err)
@@ -110,6 +111,34 @@ func (executor *Executor) Tool() tool.ReadTool {
 	}
 }
 
+const (
+	verificationUnavailableWarning = "verification unavailable; do not state affected claims as verified; express them as inferred/unresolved and say what remains to confirm."
+	verificationUnresolvedWarning  = "verification left one or more claims unresolved; preserve their unresolved status and say what remains to confirm."
+)
+
+func delegationWarnings(result agentapi.DelegationBatchResult) []string {
+	if result.Validation.CitationCoverage <= 0 ||
+		result.Validation.EvidenceBodyCoverage+1e-9 < result.Validation.CitationCoverage {
+		return []string{verificationUnavailableWarning}
+	}
+	if !result.Validation.RequiresVerification {
+		return nil
+	}
+	verification := result.Verification
+	if verification == nil ||
+		(verification.Status != agentapi.DelegationCompleted &&
+			verification.Status != agentapi.DelegationPartial) ||
+		len(verification.Verdicts) == 0 {
+		return []string{verificationUnavailableWarning}
+	}
+	for _, verdict := range verification.Verdicts {
+		if verdict.Decision == "unresolved" {
+			return []string{verificationUnresolvedWarning}
+		}
+	}
+	return nil
+}
+
 func delegationAdoptionContract(
 	result agentapi.DelegationBatchResult,
 ) tool.AnswerContract {
@@ -117,24 +146,115 @@ func delegationAdoptionContract(
 		return tool.AnswerContract{}
 	}
 	reportIDs := make([]string, 0, len(result.Results))
-	seen := make(map[string]struct{}, len(result.Results))
+	seenReports := make(map[string]struct{}, len(result.Results))
+	claims := make([]tool.AnswerEvidenceClaim, 0)
+	seenClaims := make(map[string]struct{})
 	for _, report := range result.Results {
 		if report.ReportID == "" ||
 			report.Status == agentapi.DelegationRejected {
 			continue
 		}
-		if _, exists := seen[report.ReportID]; exists {
-			continue
+		if _, exists := seenReports[report.ReportID]; !exists {
+			seenReports[report.ReportID] = struct{}{}
+			reportIDs = append(reportIDs, report.ReportID)
 		}
-		seen[report.ReportID] = struct{}{}
-		reportIDs = append(reportIDs, report.ReportID)
+		for _, finding := range report.Findings {
+			claimID := report.ReportID + "/" + finding.ID
+			if finding.ID == "" || finding.Statement == "" {
+				continue
+			}
+			if _, exists := seenClaims[claimID]; exists {
+				continue
+			}
+			seenClaims[claimID] = struct{}{}
+			decision := delegationClaimDecision(result, claimID)
+			// A supported natural-language claim must have an explicit citation
+			// on the server-owned finding. The final-answer manifest can only
+			// authorize a claim; it must not turn an uncited model statement into
+			// evidence-backed fact.
+			if len(canonicalStrings(finding.Citations)) == 0 {
+				decision = "unresolved"
+			}
+			claims = append(claims, tool.AnswerEvidenceClaim{
+				ClaimID: claimID, Decision: decision,
+			})
+		}
 	}
-	return tool.AnswerContract{
+	contract := tool.AnswerContract{
 		Delegations: []tool.DelegationAdoptionContract{{
 			DelegationID: result.DelegationID,
 			ReportIDs:    reportIDs,
 		}},
 	}
+	if len(claims) > 0 {
+		contract.Evidence = &tool.AnswerEvidenceContract{Claims: claims}
+	}
+	if merged, err := MergeFlowIRs(reportFlows(result.Results)); err == nil && merged != nil && len(merged.Edges) > 0 {
+		contract.Evidence = ensureAnswerEvidenceContract(contract.Evidence)
+		for _, edge := range merged.Edges {
+			contract.Evidence.Edges = append(contract.Evidence.Edges, tool.AnswerEvidenceEdge{
+				From: edge.From, To: edge.To, Protocol: edge.Protocol,
+				SyncMode: edge.SyncMode, EvidenceState: edge.EvidenceState,
+			})
+		}
+	}
+	return contract
+}
+
+func delegationClaimDecision(
+	result agentapi.DelegationBatchResult,
+	claimID string,
+) string {
+	if !result.Validation.RequiresVerification {
+		return "supported"
+	}
+	if result.Verification == nil ||
+		(result.Verification.Status != agentapi.DelegationCompleted &&
+			result.Verification.Status != agentapi.DelegationPartial) {
+		return "unresolved"
+	}
+	decision := "unresolved"
+	for _, verdict := range result.Verification.Verdicts {
+		for _, id := range verdict.ClaimIDs {
+			if id != claimID {
+				continue
+			}
+			decision = normalizeDelegationClaimDecision(verdict.Decision)
+			if decision == "" {
+				return "unresolved"
+			}
+		}
+	}
+	return decision
+}
+
+func normalizeDelegationClaimDecision(value string) string {
+	switch value {
+	case "supported", "contradicted", "distinct", "unresolved":
+		return value
+	default:
+		return ""
+	}
+}
+
+func reportFlows(reports []agentapi.DelegationReport) []agentapi.FlowIR {
+	flows := make([]agentapi.FlowIR, 0, len(reports))
+	for _, report := range reports {
+		if report.Status == agentapi.DelegationRejected || report.Flow == nil {
+			continue
+		}
+		flows = append(flows, *report.Flow)
+	}
+	return flows
+}
+
+func ensureAnswerEvidenceContract(
+	contract *tool.AnswerEvidenceContract,
+) *tool.AnswerEvidenceContract {
+	if contract != nil {
+		return contract
+	}
+	return &tool.AnswerEvidenceContract{}
 }
 
 func delegationTasks(arguments tool.Arguments) ([]agentapi.DelegationTask, error) {

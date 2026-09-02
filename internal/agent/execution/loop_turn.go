@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -33,7 +34,7 @@ type toolTurnOutcome struct {
 }
 
 func (agent *Agent) runTurns(state *compiledLoop) error {
-	for step := 1; step <= state.stepLimit; step++ {
+	for step := state.startStep; step <= state.stepLimit; step++ {
 		if agent.controller != nil &&
 			agent.handleControl(state.runCtx, state.runID, step, &state.messages, state.result) {
 			break
@@ -75,6 +76,9 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 		}
 		if len(turn.result.ToolCalls) == 0 {
 			agent.handleAnswerTurn(state, turn)
+			if err := agent.checkpointState(state, "answered", step); err != nil {
+				return fmt.Errorf("persist logical loop answer checkpoint at step %d: %w", step, err)
+			}
 			break
 		}
 		if len(agent.toolsForStep(state, step)) == 0 {
@@ -100,6 +104,9 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 			break
 		}
 		agent.advanceTurn(state, step, outcome)
+		if err := agent.checkpointState(state, "running", step); err != nil {
+			return fmt.Errorf("persist logical loop checkpoint at step %d: %w", step, err)
+		}
 		log.InfofCtx(state.ctx, "[agent] run %s context size after step %d: %d chars",
 			state.runID, step, contextChars(state.messages))
 	}
@@ -245,6 +252,22 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 		)
 		return
 	}
+	if errors.Is(err, ErrAnswerTruncated) && state.answerContract.Active() {
+		state.answerRecoveryPending = true
+		if hasDeliverableAnswer(result) && !turn.stream.HasToolCallDelta() {
+			// Keep the unvalidated prefix available to the forced conclusion model,
+			// but never publish or persist it as a user-visible answer.
+			state.messages = append(state.messages, llm.Message{
+				Role: "assistant", Content: result.Content,
+			})
+		}
+		log.WarnfCtx(
+			state.ctx,
+			"[agent] run %s answer truncated before exact-answer contract was satisfied; deferring to forced conclusion",
+			state.runID,
+		)
+		return
+	}
 	if errors.Is(err, ErrReasoningTruncated) || errors.Is(err, ErrEmptyModelResponse) {
 		log.WarnfCtx(state.ctx, "[agent] run %s final-answer generation produced no visible content; forcing conclusion: %v",
 			state.runID, err)
@@ -256,6 +279,16 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 			state.messages,
 			result,
 			state.answerContract,
+			agent.cfg.AnswerMaxTokens,
+			turn.stream,
+		)
+	}
+	if err == nil {
+		result = agent.enforceFlowContract(
+			state.loopCtx,
+			state.messages,
+			result,
+			state.input.OutputContract,
 			agent.cfg.AnswerMaxTokens,
 			turn.stream,
 		)
@@ -412,6 +445,9 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 		if !execution.Failed && execution.Evidence && execution.DeliveryError == "" {
 			mergeToolReferences(&state.result.References, execution.References)
 		}
+		if !execution.Failed {
+			agent.captureDelegationFlows(state, executionCall, execution)
+		}
 		if isWebEvidenceTool(executionCall.Function.Name) {
 			outcome.webAttempted = true
 			outcome.webSucceeded = outcome.webSucceeded || acceptedWebEvidence
@@ -459,6 +495,23 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 	// Provider protocols forbid non-tool messages inside a parallel result group.
 	state.messages = appendToolTurnPostlude(state.messages, notices, state.answerContract)
 	return outcome
+}
+
+func (agent *Agent) captureDelegationFlows(state *compiledLoop, call llm.ToolCall, execution ToolExecution) {
+	if state == nil || call.Function.Name != string(delegation.DelegateToolID) || strings.TrimSpace(execution.AuthoritativeContent) == "" {
+		return
+	}
+	var batch agentapi.DelegationBatchResult
+	if err := json.Unmarshal([]byte(execution.AuthoritativeContent), &batch); err != nil {
+		log.WarnfCtx(state.ctx, "[agent] run %s delegation flow capture skipped: invalid batch result: %v", state.runID, err)
+		return
+	}
+	for _, report := range batch.Results {
+		if report.Flow == nil {
+			continue
+		}
+		state.delegatedFlows = append(state.delegatedFlows, *cloneExecutionFlow(report.Flow))
+	}
 }
 
 const (

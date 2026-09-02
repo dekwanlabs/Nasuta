@@ -205,6 +205,17 @@ func WithUsagePhase(ctx context.Context, phase string) context.Context {
 	return context.WithValue(ctx, usageContextKey{}, metadata)
 }
 
+// UsagePhaseFromContext returns the phase associated with the next physical
+// provider call. It is exported for cross-package budget and observability
+// adapters; an empty phase means the call is unclassified.
+func UsagePhaseFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
+	return metadata.phase
+}
+
 func beginCallLifecycle(ctx context.Context, provider, model string, maxOutputTokens int) func(error, any) {
 	metadata, _ := ctx.Value(usageContextKey{}).(usageContext)
 	state := metadata.lifecycle

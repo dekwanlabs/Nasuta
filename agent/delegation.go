@@ -78,6 +78,38 @@ type DelegationFinding struct {
 	Critical        bool                 `json:"critical,omitempty"`
 }
 
+// FlowNode is one bounded responsibility or system node in a delegated flow.
+type FlowNode struct {
+	ID           string   `json:"id"`
+	Label        string   `json:"label"`
+	Kind         string   `json:"kind"`
+	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+}
+
+// FlowEdge is one bounded hop between two FlowNode IDs. EvidenceState keeps
+// the parent from presenting an inferred or unresolved hop as verified.
+type FlowEdge struct {
+	From          string   `json:"from"`
+	To            string   `json:"to"`
+	Protocol      string   `json:"protocol,omitempty"`
+	SyncMode      string   `json:"sync_mode,omitempty"`
+	EvidenceRefs  []string `json:"evidence_refs,omitempty"`
+	EvidenceState string   `json:"evidence_state"`
+}
+
+// FlowIR is the compact, machine-readable flow handoff used when a child
+// investigates a process or architecture question. It is optional so older
+// investigator reports remain valid.
+type FlowIR struct {
+	Subject       string     `json:"subject"`
+	Status        string     `json:"status"`
+	Nodes         []FlowNode `json:"nodes,omitempty"`
+	Edges         []FlowEdge `json:"edges,omitempty"`
+	OpenHops      []string   `json:"open_hops,omitempty"`
+	Uncertainties []string   `json:"uncertainties,omitempty"`
+	Confidence    string     `json:"confidence"`
+}
+
 type DelegationConflict struct {
 	ID       string   `json:"id,omitempty"`
 	Kind     string   `json:"kind"`
@@ -103,6 +135,7 @@ type DelegationReport struct {
 	Completeness  DelegationCompleteness `json:"completeness"`
 	Summary       string                 `json:"summary,omitempty"`
 	Findings      []DelegationFinding    `json:"findings,omitempty"`
+	Flow          *FlowIR                `json:"flow,omitempty"`
 	Conflicts     []DelegationConflict   `json:"conflicts,omitempty"`
 	Uncertainties []string               `json:"uncertainties,omitempty"`
 	Usage         DelegationUsage        `json:"usage"`
@@ -120,6 +153,7 @@ type DelegationValidationConflict struct {
 type DelegationValidation struct {
 	ReportIDs                 []string                       `json:"report_ids,omitempty"`
 	CitationCoverage          float64                        `json:"citation_coverage"`
+	EvidenceBodyCoverage      float64                        `json:"evidence_body_coverage"`
 	StructuredClaimCoverage   float64                        `json:"structured_claim_coverage"`
 	Conflicts                 []DelegationValidationConflict `json:"conflicts,omitempty"`
 	HasConflicts              bool                           `json:"has_conflicts"`
@@ -135,15 +169,26 @@ type DelegationVerificationClaim struct {
 	Citations []string `json:"citations"`
 }
 
+// DelegationEvidenceLookup gives a semantic verifier bounded authoritative
+// context for an evidence reference. Body is present only when the server has
+// the corresponding admitted content; it is never synthesized from metadata.
+type DelegationEvidenceLookup struct {
+	Kind      string `json:"kind"`
+	Reference string `json:"reference"`
+	Summary   string `json:"summary"`
+	Body      string `json:"body,omitempty"`
+}
+
 // DelegationVerificationRequest is the bounded semantic-verifier input. It
 // deliberately excludes complete reports, child traces, and tool transcripts.
 type DelegationVerificationRequest struct {
-	Question         string                         `json:"question"`
-	DecisionQuestion string                         `json:"decision_question"`
-	Claims           []DelegationVerificationClaim  `json:"claims"`
-	Conflicts        []DelegationValidationConflict `json:"conflicts"`
-	EvidenceRefs     []string                       `json:"evidence_refs"`
-	Reasons          []string                       `json:"reasons"`
+	Question         string                              `json:"question"`
+	DecisionQuestion string                              `json:"decision_question"`
+	Claims           []DelegationVerificationClaim       `json:"claims"`
+	Conflicts        []DelegationValidationConflict      `json:"conflicts"`
+	EvidenceRefs     []string                            `json:"evidence_refs"`
+	EvidenceLookup   map[string]DelegationEvidenceLookup `json:"evidence_lookup,omitempty"`
+	Reasons          []string                            `json:"reasons"`
 }
 
 type DelegationVerificationVerdict struct {
@@ -171,6 +216,7 @@ type DelegationBatchResult struct {
 	Results      []DelegationReport      `json:"results"`
 	Validation   DelegationValidation    `json:"validation"`
 	Verification *DelegationVerification `json:"verification,omitempty"`
+	Warnings     []string                `json:"warnings,omitempty"`
 }
 
 // DelegationAdoptionStatus records whether a parent final answer used any

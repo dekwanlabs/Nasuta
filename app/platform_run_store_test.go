@@ -16,7 +16,7 @@ func TestInitRunStoreFailsWhenRunSchemaIsIncompatible(t *testing.T) {
 	defer db.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("FROM agent_delegation_tasks").
+	mock.ExpectQuery("FROM agent_runs r").
 		WillReturnError(errors.New("unknown column r.cost_micros"))
 	mock.ExpectRollback()
 

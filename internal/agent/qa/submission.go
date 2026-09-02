@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -45,6 +46,7 @@ func (svc *Service) submitRun(
 	limits agentapi.RunLimits,
 	trace *runtrace.Scope,
 	ownsTrace bool,
+	requestCancel context.CancelFunc,
 ) (*AskResult, error) {
 	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", runID, definition.ID, definition.Version)
 	messages := buildAgentMessages(
@@ -72,6 +74,7 @@ func (svc *Service) submitRun(
 			EvidenceRequired: !plan.Direct(),
 			EvidenceSeeded:   conversation.EvidenceSeeded,
 			WebResearch:      plan.Has(domain.Web),
+			OutputContract:   outputContractForQuery(query),
 		},
 		Limits: limits,
 		Actor:  agentapi.Actor{UserID: userID},
@@ -91,6 +94,7 @@ func (svc *Service) submitRun(
 			Correlation:     request.Correlation,
 			Limits:          limits,
 			Depth:           0,
+			OutputContract:  request.Policy.OutputContract,
 			Evidence:        evidenceIndex,
 			Context:         contextIndex,
 		})
@@ -98,6 +102,9 @@ func (svc *Service) submitRun(
 	ctx = withSessionToolScope(ctx, conversation, userID)
 
 	go func() {
+		if requestCancel != nil {
+			defer requestCancel()
+		}
 		if ownsTrace {
 			defer trace.Close()
 		}
@@ -125,6 +132,18 @@ func (svc *Service) submitRun(
 			return
 		}
 		outcome := outcomeRunner.Outcome()
+		switch outcome.Status {
+		case RunStatusFailed:
+			log.ErrorfCtx(ctx,
+				"[qa] runtime run %s completed with failed outcome code=%s error=%v",
+				runID, outcome.ErrorCode, outcome.Err,
+			)
+		case RunStatusAborted:
+			log.InfofCtx(ctx,
+				"[qa] runtime run %s completed with aborted outcome code=%s error=%v",
+				runID, outcome.ErrorCode, outcome.Err,
+			)
+		}
 		if outcome.Status == RunStatusDone {
 			if err := svc.persistTurn(context.WithoutCancel(ctx), runID, conversation.SessionID, userID, question, outcome); err != nil {
 				log.ErrorfCtx(ctx, "[qa] persist completed run %s session turn: %v", runID, err)
@@ -215,6 +234,58 @@ func (svc *Service) answerContext(
 	conversation.Instructions = instructions
 	conversation.EvidenceSeeded = len(recalled) > 0 || rc != nil && rc.Text != ""
 	return conversation
+}
+
+func outputContractForQuery(query domain.QueryPlan) agentapi.RunOutputContract {
+	if query.Kind != domain.QueryFlow {
+		return agentapi.RunOutputContract{}
+	}
+	return agentapi.RunOutputContract{
+		Kind:           "flow",
+		RequireMermaid: true,
+		Subjects:       flowSubjects(query),
+		MaxHops:        6,
+	}
+}
+
+func flowSubjects(query domain.QueryPlan) []string {
+	const maxSubjects = 8
+	seen := make(map[string]struct{}, maxSubjects)
+	subjects := make([]string, 0, min(len(query.EntitySpecs), maxSubjects))
+	for _, spec := range query.EntitySpecs {
+		label := strings.TrimSpace(spec.Label)
+		if label == "" {
+			label = strings.TrimSpace(spec.ID)
+		}
+		if label == "" {
+			continue
+		}
+		key := strings.ToLower(label)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		subjects = append(subjects, label)
+		if len(subjects) == maxSubjects {
+			return subjects
+		}
+	}
+	for _, entity := range query.Entities {
+		label := strings.TrimSpace(entity)
+		if label == "" {
+			continue
+		}
+		key := strings.ToLower(label)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		subjects = append(subjects, label)
+		if len(subjects) == maxSubjects {
+			break
+		}
+	}
+	return subjects
 }
 
 func runPermissions(allowWrite bool) agentapi.PermissionPolicy {

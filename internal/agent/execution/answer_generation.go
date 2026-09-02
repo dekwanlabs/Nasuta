@@ -17,8 +17,13 @@ import (
 )
 
 // forceConclusion asks the model to finish with the evidence already gathered.
-func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages []llm.Message, answerContract *exactAnswerContract, stepSeq *int, runStarted time.Time) (*llm.ChatStreamResult, error) {
+func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages []llm.Message, answerContract *exactAnswerContract, stepSeq *int, runStarted time.Time, outputContracts ...agentapi.RunOutputContract) (*llm.ChatStreamResult, error) {
 	ctx = llm.WithUsagePhase(ctx, llm.PhaseForcedConclusion)
+	ctx = agentapi.WithRunBudgetPhase(ctx, agentapi.RunBudgetPhaseAnswer)
+	var outputContract agentapi.RunOutputContract
+	if len(outputContracts) > 0 {
+		outputContract = outputContracts[0]
+	}
 	input := &forceConclusionInput{RunID: runID, Messages: messages, AnswerContract: answerContract}
 	conclusion, err := runtrace.Invoke(ctx, forceConclusionSpec, input, func(ctx context.Context, input *forceConclusionInput) (forceConclusionOutput, error) {
 		input.Messages = append(input.Messages, llm.Message{
@@ -58,6 +63,9 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 		}
 		if callErr == nil {
 			res, callErr = agent.enforceContract(ctx, input.Messages, res, input.AnswerContract, agent.cfg.ConclusionMaxTokens, stream)
+		}
+		if callErr == nil {
+			res = agent.enforceFlowContract(ctx, input.Messages, res, outputContract, agent.cfg.ConclusionMaxTokens, stream)
 		} else if errors.Is(callErr, ErrAnswerTruncated) &&
 			input.AnswerContract.Active() &&
 			validateAndStripContractPartial(res, input.AnswerContract) {

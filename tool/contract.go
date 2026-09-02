@@ -218,10 +218,36 @@ type DelegationAdoptionContract struct {
 	ReportIDs    []string `json:"report_ids,omitempty"`
 }
 
+// AnswerEvidenceClaim declares the only server-known state a final answer may
+// use for one delegated claim. It is metadata for a final-answer manifest, not
+// a replacement for the claim text itself.
+type AnswerEvidenceClaim struct {
+	ClaimID  string `json:"claim_id"`
+	Decision string `json:"decision"`
+}
+
+// AnswerEvidenceEdge declares one server-known flow hop and its conservative
+// evidence state. From/To refer to the typed flow node IDs returned by a child.
+type AnswerEvidenceEdge struct {
+	From          string `json:"from"`
+	To            string `json:"to"`
+	Protocol      string `json:"protocol,omitempty"`
+	SyncMode      string `json:"sync_mode,omitempty"`
+	EvidenceState string `json:"evidence_state"`
+}
+
+// AnswerEvidenceContract is a server-owned allow-list for claim/edge manifest
+// entries in the final answer.
+type AnswerEvidenceContract struct {
+	Claims []AnswerEvidenceClaim `json:"claims,omitempty"`
+	Edges  []AnswerEvidenceEdge  `json:"edges,omitempty"`
+}
+
 // AnswerContract declares exact final-answer requirements owned by tools.
 type AnswerContract struct {
 	RequiredLiterals []string                     `json:"required_literals,omitempty"`
 	Delegations      []DelegationAdoptionContract `json:"delegations,omitempty"`
+	Evidence         *AnswerEvidenceContract      `json:"evidence,omitempty"`
 }
 
 // Result is the bounded content passed back to the caller.

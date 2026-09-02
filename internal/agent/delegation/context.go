@@ -2,6 +2,8 @@ package delegation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -12,15 +14,20 @@ import (
 // ParentContext is server-owned state inherited by delegate_investigation.
 type ParentContext struct {
 	RunID           string
+	InvocationID    string
 	QuestionSummary string
 	HighRisk        bool
 	Actor           agentapi.Actor
 	Permissions     agentapi.PermissionPolicy
 	Correlation     agentapi.Correlation
 	Limits          agentapi.RunLimits
-	Depth           int
-	Evidence        map[string]tool.EvidenceUnit
-	Context         map[string]agentapi.ContextBlock
+	// OutputContract is the parent request shape. Children use it to select
+	// server-owned specialized budgets without inheriting the parent's final
+	// answer rendering contract.
+	OutputContract agentapi.RunOutputContract
+	Depth          int
+	Evidence       map[string]tool.EvidenceUnit
+	Context        map[string]agentapi.ContextBlock
 }
 
 type parentContextKey struct{}
@@ -29,6 +36,7 @@ func WithParentContext(ctx context.Context, parent ParentContext) context.Contex
 	parent.Permissions.Scopes = append([]string(nil), parent.Permissions.Scopes...)
 	parent.Evidence = cloneEvidenceIndex(parent.Evidence)
 	parent.Context = cloneContextIndex(parent.Context)
+	parent.OutputContract.Subjects = append([]string(nil), parent.OutputContract.Subjects...)
 	return context.WithValue(ctx, parentContextKey{}, parent)
 }
 
@@ -40,6 +48,7 @@ func ParentContextFrom(ctx context.Context) (ParentContext, bool) {
 	parent.Permissions.Scopes = append([]string(nil), parent.Permissions.Scopes...)
 	parent.Evidence = cloneEvidenceIndex(parent.Evidence)
 	parent.Context = cloneContextIndex(parent.Context)
+	parent.OutputContract.Subjects = append([]string(nil), parent.OutputContract.Subjects...)
 	return parent, true
 }
 
@@ -61,7 +70,14 @@ func IndexContext(
 				addAlias(aliases, reference.Type+":"+reference.Target)
 			}
 		}
-		for _, unit := range block.Evidence {
+		// Only admit evidence that can survive the definition runtime's
+		// context validation. A malformed unit must not hitchhike into a
+		// context block selected by its content hash or reference alias.
+		for _, rawUnit := range block.Evidence {
+			unit, ok := canonicalContextEvidenceUnit(rawUnit)
+			if !ok {
+				continue
+			}
 			unitAliases := evidenceAliases(unit)
 			for _, alias := range unitAliases {
 				if _, exists := evidence[alias]; !exists {
@@ -120,8 +136,15 @@ func cloneEvidenceIndex(source map[string]tool.EvidenceUnit) map[string]tool.Evi
 		return nil
 	}
 	out := make(map[string]tool.EvidenceUnit, len(source))
-	for key, unit := range source {
-		out[key] = cloneEvidenceUnit(unit)
+	for key, rawUnit := range source {
+		unit, ok := canonicalEvidenceIdentity(rawUnit)
+		if !ok {
+			continue
+		}
+		out[key] = unit
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -141,20 +164,115 @@ func cloneContextIndex(
 
 func cloneContextBlock(block agentapi.ContextBlock) agentapi.ContextBlock {
 	block.References = append([]agentapi.Reference(nil), block.References...)
-	block.Evidence = make([]tool.EvidenceUnit, len(block.Evidence))
-	for index, unit := range block.Evidence {
-		block.Evidence[index] = cloneEvidenceUnit(unit)
+	rawEvidence := block.Evidence
+	block.Evidence = nil
+	for _, rawUnit := range rawEvidence {
+		if unit, ok := canonicalContextEvidenceUnit(rawUnit); ok {
+			block.Evidence = append(block.Evidence, unit)
+		}
 	}
-	block.EvidenceConflicts = make(
-		[]agentapi.EvidenceConflict,
-		len(block.EvidenceConflicts),
-	)
-	for index, conflict := range block.EvidenceConflicts {
-		conflict.Current = cloneEvidenceUnit(conflict.Current)
-		conflict.Incoming = cloneEvidenceUnit(conflict.Incoming)
-		block.EvidenceConflicts[index] = conflict
+	rawConflicts := block.EvidenceConflicts
+	block.EvidenceConflicts = nil
+	for _, rawConflict := range rawConflicts {
+		if conflict, ok := canonicalContextEvidenceConflict(rawConflict); ok {
+			block.EvidenceConflicts = append(block.EvidenceConflicts, conflict)
+		}
 	}
 	return block
+}
+
+// canonicalEvidenceIdentity normalizes the identity fields used by the
+// evidence ledger without imposing the stricter context-body checks. Tool
+// results may use opaque content hashes, but a source and target are required
+// before an evidence handle can be authorized.
+func canonicalEvidenceIdentity(raw tool.EvidenceUnit) (tool.EvidenceUnit, bool) {
+	unit := cloneEvidenceUnit(raw)
+	unit.SourceKind = strings.TrimSpace(unit.SourceKind)
+	unit.Target = strings.TrimSpace(unit.Target)
+	unit.Version = strings.TrimSpace(unit.Version)
+	unit.TimeRange = strings.TrimSpace(unit.TimeRange)
+	if unit.SourceKind == "" || unit.Target == "" {
+		return tool.EvidenceUnit{}, false
+	}
+	if len(unit.Sections) > 0 {
+		seen := make(map[string]struct{}, len(unit.Sections))
+		for index, section := range unit.Sections {
+			section = strings.TrimSpace(section)
+			if section == "" {
+				return tool.EvidenceUnit{}, false
+			}
+			if _, duplicate := seen[section]; duplicate {
+				return tool.EvidenceUnit{}, false
+			}
+			seen[section] = struct{}{}
+			unit.Sections[index] = section
+		}
+	}
+	return unit, true
+}
+
+// canonicalContextEvidenceUnit returns only evidence units that are safe to
+// place in an agent RunRequest.Context. It deliberately drops units whose
+// identity or structural metadata cannot be repaired; inventing a source or
+// target would make a verifier appear more certain than the evidence allows.
+func canonicalContextEvidenceUnit(raw tool.EvidenceUnit) (tool.EvidenceUnit, bool) {
+	unit, ok := canonicalEvidenceIdentity(raw)
+	if !ok {
+		return tool.EvidenceUnit{}, false
+	}
+	if unit.Coverage.Complete && unit.Coverage.Partial || unit.TokenCost < 0 {
+		return tool.EvidenceUnit{}, false
+	}
+	if unit.ContentHash != "" {
+		unit.ContentHash = strings.TrimSpace(unit.ContentHash)
+		if len(unit.ContentHash) != sha256.Size*2 {
+			return tool.EvidenceUnit{}, false
+		}
+		if _, err := hex.DecodeString(unit.ContentHash); err != nil {
+			return tool.EvidenceUnit{}, false
+		}
+	}
+	return unit, true
+}
+
+func canonicalContextEvidenceConflict(
+	raw agentapi.EvidenceConflict,
+) (agentapi.EvidenceConflict, bool) {
+	conflict := raw
+	conflict.Identity.SourceKind = strings.TrimSpace(conflict.Identity.SourceKind)
+	conflict.Identity.Target = strings.TrimSpace(conflict.Identity.Target)
+	conflict.Identity.Section = strings.TrimSpace(conflict.Identity.Section)
+	conflict.Identity.Version = strings.TrimSpace(conflict.Identity.Version)
+	conflict.Identity.TimeRange = strings.TrimSpace(conflict.Identity.TimeRange)
+	if conflict.Identity.SourceKind == "" || conflict.Identity.Target == "" {
+		return agentapi.EvidenceConflict{}, false
+	}
+	current, currentOK := canonicalContextEvidenceUnit(conflict.Current)
+	incoming, incomingOK := canonicalContextEvidenceUnit(conflict.Incoming)
+	if !currentOK || !incomingOK ||
+		!contextEvidenceIdentityMatches(conflict.Identity, current) ||
+		!contextEvidenceIdentityMatches(conflict.Identity, incoming) {
+		return agentapi.EvidenceConflict{}, false
+	}
+	conflict.Current = current
+	conflict.Incoming = incoming
+	return conflict, true
+}
+
+func contextEvidenceIdentityMatches(
+	identity agentapi.EvidenceIdentity,
+	unit tool.EvidenceUnit,
+) bool {
+	if identity.SourceKind != unit.SourceKind ||
+		identity.Target != unit.Target ||
+		identity.Version != unit.Version ||
+		identity.TimeRange != unit.TimeRange {
+		return false
+	}
+	if identity.Section == "" {
+		return len(unit.Sections) == 0
+	}
+	return len(unit.Sections) == 1 && unit.Sections[0] == identity.Section
 }
 
 func cloneEvidenceUnit(unit tool.EvidenceUnit) tool.EvidenceUnit {
@@ -163,7 +281,11 @@ func cloneEvidenceUnit(unit tool.EvidenceUnit) tool.EvidenceUnit {
 	return unit
 }
 
-func evidenceAliases(unit tool.EvidenceUnit) []string {
+func evidenceAliases(raw tool.EvidenceUnit) []string {
+	unit, ok := canonicalEvidenceIdentity(raw)
+	if !ok {
+		return nil
+	}
 	aliases := make([]string, 0, 4)
 	if value := strings.TrimSpace(unit.ContentHash); value != "" {
 		aliases = append(aliases, value)

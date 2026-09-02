@@ -483,6 +483,15 @@ func TestRunStoreRecoversInterruptedRuns(t *testing.T) {
 			RunStatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("UPDATE agent_delegation_attempts a JOIN agent_delegation_tasks t").
+		WithArgs(
+			run.DelegationAttemptInterrupted,
+			"interrupted",
+			"delegation attempt was interrupted during process recovery",
+			sqlmock.AnyArg(),
+			run.DelegationAttemptRunning,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 	recovered, err := store.RecoverInterrupted()
 	if err != nil {

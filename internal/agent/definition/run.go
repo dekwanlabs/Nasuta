@@ -2,6 +2,8 @@ package definition
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/budget"
 	agentexecution "github.com/dekwanlabs/nasuta/internal/agent/execution"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -17,6 +20,8 @@ import (
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
 )
+
+func hashRawInput(raw []byte) string { sum := sha256.Sum256(raw); return hex.EncodeToString(sum[:]) }
 
 func runtimeErrorCode(err error) string {
 	if errors.Is(err, agentapi.ErrBudgetExceeded) {
@@ -36,7 +41,10 @@ func (runtime *Runtime) Run(
 		return failedRun(request.RunID, "invalid_request", err), nil
 	}
 	trace, ownsTrace := beginExecutionTrace(ctx)
-	managed, err := runtime.beginPrepared(runStart(request), execution, trace, ownsTrace)
+	managed, err := runtime.beginPrepared(
+		ctx, runStart(request), execution, trace, ownsTrace,
+		agentapi.RunBudgetGateFromContext(ctx),
+	)
 	if err != nil {
 		return agentapi.RunResult{}, err
 	}
@@ -68,7 +76,10 @@ func (runtime *Runtime) Begin(
 		return nil, err
 	}
 	trace, ownsTrace := beginExecutionTrace(ctx)
-	return runtime.beginPrepared(start, execution, trace, ownsTrace)
+	return runtime.beginPrepared(
+		ctx, start, execution, trace, ownsTrace,
+		agentapi.RunBudgetGateFromContext(ctx),
+	)
 }
 
 func beginExecutionTrace(ctx context.Context) (*runtrace.Scope, bool) {
@@ -78,10 +89,12 @@ func beginExecutionTrace(ctx context.Context) (*runtrace.Scope, bool) {
 }
 
 func (runtime *Runtime) beginPrepared(
+	lifecycleCtx context.Context,
 	start agentapi.RunStart,
 	execution preparedExecution,
 	trace *runtrace.Scope,
 	ownsTrace bool,
+	inheritedBudget agentapi.RunBudgetGate,
 ) (*activeRun, error) {
 	recorder := &usageRecorder{
 		store:                             runtime.usageStore,
@@ -89,7 +102,14 @@ func (runtime *Runtime) beginPrepared(
 		outputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
 		limits:                            execution.snapshot.Limits,
 	}
-	if err := runtime.createRun(start, execution); err != nil {
+	var durableCreatedBudget agentapi.RunBudgetGate
+	var err error
+	if inheritedBudget == nil && runtime.runStore != nil && runtime.runStore.DurableBudgetEnabled() && hasBudgetLimits(execution.snapshot.Limits) {
+		durableCreatedBudget, err = runtime.runStore.CreateWithDurableBudgetContext(lifecycleCtx, runtime.runRecord(start, execution), execution.snapshot.Limits)
+	} else {
+		err = runtime.createRun(start, execution)
+	}
+	if err != nil {
 		if ownsTrace {
 			trace.Close()
 		}
@@ -99,50 +119,63 @@ func (runtime *Runtime) beginPrepared(
 		})
 		return nil, err
 	}
+	budgetGate := inheritedBudget
+	if budgetGate == nil {
+		if durableCreatedBudget != nil {
+			budgetGate = durableCreatedBudget
+		} else {
+			budgetGate = newRunBudget(execution.snapshot.Limits)
+		}
+	}
 	return &activeRun{
-		runtime: runtime, start: start, execution: execution, recorder: recorder, trace: trace, ownsTrace: ownsTrace,
+		runtime: runtime, start: start, execution: execution, recorder: recorder,
+		budget: budgetGate, trace: trace, ownsTrace: ownsTrace,
 	}, nil
 }
 
-func (runtime *Runtime) createRun(
-	start agentapi.RunStart,
-	execution preparedExecution,
-) error {
-	if runtime == nil || runtime.runStore == nil {
+func newRunBudget(limits agentapi.RunLimits) agentapi.RunBudgetGate {
+	if !hasBudgetLimits(limits) {
 		return nil
 	}
+	return budget.NewRoot(limits)
+}
+
+func hasBudgetLimits(limits agentapi.RunLimits) bool {
+	return limits.MaxInputTokens > 0 || limits.MaxTotalTokens > 0 ||
+		limits.MaxCostMicros > 0 || limits.ParentAnswerReserve > 0
+}
+
+func (runtime *Runtime) runRecord(start agentapi.RunStart, execution preparedExecution) agentrun.Record {
 	mode := "single"
 	if start.Correlation.WorkflowRunID != "" {
 		mode = "workflow"
 	}
-	if err := runtime.runStore.Create(agentrun.Record{
-		ID: start.RunID, RunKind: agentrun.KindAgent, UserID: start.Actor.UserID,
-		SessionID: start.Correlation.SessionID,
-		AgentID:   execution.snapshot.AgentID, DefinitionVersion: execution.snapshot.DefinitionVersion,
-		DefinitionHash:      execution.snapshot.DefinitionHash,
-		Selection:           execution.snapshot.Selection,
-		ToolSnapshotID:      execution.snapshot.ToolSnapshotID,
-		InputSchemaVersion:  execution.snapshot.InputSchemaVersion,
-		OutputSchemaVersion: execution.snapshot.OutputSchemaVersion,
-		ParentRunID:         start.Correlation.ParentRunID,
-		CapabilityID:        start.Delegation.Capability.ID,
-		CapabilityVersion:   start.Delegation.Capability.Version,
-		CapabilityHash:      start.Delegation.CapabilityContentHash,
-		DelegationID:        start.Delegation.DelegationID,
-		DelegationDepth:     start.Delegation.Depth,
-		RunLimits:           execution.snapshot.Limits,
-		CapabilityRevision:  start.Delegation.CapabilityRegistryRevision,
-		WorkflowRunID:       start.Correlation.WorkflowRunID,
-		WorkflowNodeID:      start.Correlation.NodeID,
-		Question:            string(start.Input), Mode: mode,
-		MaxSteps: execution.snapshot.Limits.MaxSteps,
-	}); err != nil {
+	return agentrun.Record{ID: start.RunID, RunKind: agentrun.KindAgent, UserID: start.Actor.UserID, SessionID: start.Correlation.SessionID,
+		AgentID: execution.snapshot.AgentID, DefinitionVersion: execution.snapshot.DefinitionVersion, DefinitionHash: execution.snapshot.DefinitionHash,
+		Selection: execution.snapshot.Selection, ToolSnapshotID: execution.snapshot.ToolSnapshotID, InputSchemaVersion: execution.snapshot.InputSchemaVersion,
+		OutputSchemaVersion: execution.snapshot.OutputSchemaVersion, ParentRunID: start.Correlation.ParentRunID, CapabilityID: start.Delegation.Capability.ID,
+		CapabilityVersion: start.Delegation.Capability.Version, CapabilityHash: start.Delegation.CapabilityContentHash, DelegationID: start.Delegation.DelegationID,
+		DelegationDepth: start.Delegation.Depth, RunLimits: execution.snapshot.Limits, CapabilityRevision: start.Delegation.CapabilityRegistryRevision,
+		WorkflowRunID: start.Correlation.WorkflowRunID, WorkflowNodeID: start.Correlation.NodeID, Question: string(start.Input), Mode: mode, MaxSteps: execution.snapshot.Limits.MaxSteps}
+}
+
+func (runtime *Runtime) createRun(start agentapi.RunStart, execution preparedExecution) error {
+	if runtime == nil || runtime.runStore == nil {
+		return nil
+	}
+	if err := runtime.runStore.Create(runtime.runRecord(start, execution)); err != nil {
 		return fmt.Errorf("create definition run %q: %w", start.RunID, err)
 	}
 	return nil
 }
 
 func (run *activeRun) Context(ctx context.Context) context.Context {
+	if root, ok := run.budget.(interface{ StartHeartbeat(context.Context) }); ok {
+		root.StartHeartbeat(ctx)
+	}
+	if agentapi.RunBudgetGateFromContext(ctx) == nil && run.budget != nil {
+		ctx = agentapi.WithRunBudgetGate(ctx, run.budget)
+	}
 	ctx = runtrace.WithScope(ctx, run.trace)
 	ctx = runtrace.WithCorrelation(ctx, runtrace.Correlation{
 		RunID: run.start.RunID, ParentRunID: run.start.Correlation.ParentRunID,
@@ -199,74 +232,52 @@ func (run *activeRun) Execute(
 	input.OfferedToolIDs = execution.offeredTools
 	input.ToolPruningApplied = execution.pruneApplied
 	execution.snapshot.PromptHash = hashMessages(input.Messages)
-
-	client := llm.NewLLMClientWithHTTPAndProvider(
-		run.runtime.settings.baseURL,
-		run.runtime.settings.apiKey,
-		execution.snapshot.Model,
-		execution.snapshot.Provider,
-		execution.definition.Model.MaxOutputTokens,
-		nil,
-	)
-	observer := run.observer()
-	budgetCheck := func() error {
-		if gate := agentapi.RunBudgetGateFromContext(ctx); gate != nil {
-			if err := gate.Check(); err != nil {
-				return err
-			}
-		}
-		return run.recorder.CheckLimits()
-	}
-	loop := agentexecution.NewAgent(client, run.runtime.executor, agentexecution.Config{
-		MaxSteps:                          execution.snapshot.Limits.MaxSteps,
-		MaxToolCalls:                      execution.snapshot.Limits.MaxToolCalls,
-		Timeout:                           time.Until(execution.snapshot.Limits.Deadline),
-		AnswerReserve:                     execution.answerReserve,
-		AnswerMaxTokens:                   execution.definition.Model.MaxOutputTokens,
-		ConclusionMaxTokens:               execution.definition.Model.MaxOutputTokens,
-		ContextWindow:                     execution.snapshot.Budget.ContextTokens,
-		MaxInputTokens:                    execution.snapshot.Limits.MaxInputTokens,
-		MaxContextTokens:                  execution.snapshot.Limits.MaxContextTokens,
-		MaxToolResultBytes:                execution.definition.Budget.MaxToolResultBytes,
-		MaxContinueRounds:                 execution.definition.Budget.MaxContinueRounds,
-		StructuredOutput:                  execution.structuredOutput,
-		ModelParameters:                   execution.modelParameters,
-		InputPriceMicrosPerMillionTokens:  execution.definition.Model.InputPriceMicrosPerMillionTokens,
-		OutputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
-		BudgetCheck:                       budgetCheck,
-		DisableLegacyAnswerRecovery:       run.runtime.settings.disableLegacyAnswerRecovery,
-	}, observer, run.runtime.hub)
-	loop.SetOnFirstAnswerToken(func(runID string) {
-		run.runtime.hub.EmitPhase(runID, "找到啦，我来把答案写出来 ✍️")
+	initialState, err := agentexecution.MarshalLogicalLoopState(agentexecution.LogicalLoopState{
+		Version: 1, Request: cloneRunRequest(request), Input: input, Messages: append([]llm.Message(nil), input.Messages...),
 	})
-	runCtx := llm.WithUsageRecorder(ctx, request.RunID, run.recorder)
-	result, runErr := loop.RunCompiled(runCtx, request.RunID, input, execution.toolSnapshot)
-	publicResult, outcome := mapResult(
-		request.RunID,
-		result,
-		runErr,
-		context.Cause(ctx),
-		run.recorder.Usage(),
-		referencesFromRequest(request.Context),
-		run.runtime.schemas,
-		execution.definition.OutputSchema,
-		outputRecoveryContext{
-			AgentID: request.Agent.ID,
-			Input:   request.Input,
-			Context: request.Context,
-			StrictOutput: request.Agent.ID == "investigator.docs" &&
-				request.Delegation.Depth <= 0,
-		},
-	)
-	outcome = run.mergePreparationOutcome(outcome)
-	publicResult.Evidence = publicEvidence(outcome.Evidence)
-	if request.Policy.RedactSensitive {
-		publicResult = redactResult(publicResult)
-		outcome = redactOutcome(outcome)
+	if err != nil {
+		outcome := agentrun.Outcome{Status: agentrun.StatusFailed, ErrorCode: "checkpoint_persistence_failed", Err: err, Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidenceUnavailable}}
+		run.setOutcome(outcome)
+		return failedRun(request.RunID, "checkpoint_persistence_failed", err), nil
 	}
-	run.emitDelegationAdoptions(request.RunID, publicResult.DelegationAdoptions)
-	run.setOutcome(outcome)
-	return publicResult, nil
+	if err := run.persistLogicalCheckpoint(ctx, agentexecution.LogicalLoopCheckpoint{StepNo: 0, Phase: "running", State: initialState}, execution.snapshot.PromptHash); err != nil {
+		outcome := agentrun.Outcome{Status: agentrun.StatusFailed, ErrorCode: "checkpoint_persistence_failed", Err: err, Evidence: agentrun.EvidenceMetrics{Status: agentrun.EvidenceUnavailable}}
+		run.setOutcome(outcome)
+		return failedRun(request.RunID, "checkpoint_persistence_failed", err), nil
+	}
+
+	return run.executePrepared(ctx, request, execution, input, nil)
+}
+func (run *activeRun) persistLogicalCheckpoint(ctx context.Context, checkpoint agentexecution.LogicalLoopCheckpoint, promptHash string) error {
+	if run == nil || run.runtime == nil || run.runtime.runStore == nil {
+		return nil
+	}
+	root, ok := run.budget.(interface{ LeaseInfo() (string, int64, error) })
+	if !ok {
+		return nil
+	}
+	owner, fence, err := root.LeaseInfo()
+	if err != nil {
+		return err
+	}
+	if fence <= 0 {
+		return fmt.Errorf("logical checkpoint requires a positive lease fence")
+	}
+	state := checkpoint.State
+	if len(state) == 0 {
+		// The post-run compatibility call has no execution state. Keep the
+		// previously persisted checkpoint authoritative rather than replacing
+		// it with an invalid legacy envelope.
+		return nil
+	}
+	if _, err := agentexecution.UnmarshalLogicalLoopState(state); err != nil {
+		return fmt.Errorf("validate logical loop checkpoint: %w", err)
+	}
+	return run.runtime.runStore.SaveLogicalCheckpoint(context.WithoutCancel(ctx), agentrun.LogicalCheckpoint{
+		RunID: run.start.RunID, StepNo: checkpoint.StepNo, Phase: checkpoint.Phase,
+		InputHash: hashBytes(run.start.Input), PromptHash: promptHash, State: state,
+		LeaseOwner: owner, LeaseFence: fence,
+	})
 }
 
 func (run *activeRun) emitDelegationAdoptions(
@@ -333,8 +344,39 @@ func (run *activeRun) Finish(runError *agentapi.RunError) error {
 	if run.ownsTrace {
 		run.trace.Close()
 	}
-	run.runtime.hub.Complete(run.start.RunID, outcome)
-	return nil
+	completedByLease := false
+	fencedCompletion := false
+	var completionErr error
+	if run.runtime.runStore != nil && run.runtime.runStore.DurableBudgetEnabled() {
+		if root, ok := run.budget.(interface{ LeaseInfo() (string, int64, error) }); ok {
+			fencedCompletion = true
+			owner, fence, leaseErr := root.LeaseInfo()
+			if leaseErr != nil {
+				completionErr = fmt.Errorf("read durable run lease: %w", leaseErr)
+			} else if completeErr := run.runtime.runStore.CompleteFenced(run.start.RunID, owner, fence, outcome); completeErr != nil {
+				// Never fall back to the unfenced Hub.Complete path. A stale
+				// owner must not publish or overwrite a result after reclamation.
+				completionErr = fmt.Errorf("persist fenced run outcome: %w", completeErr)
+			} else {
+				completedByLease = true
+			}
+		}
+	}
+	if completedByLease {
+		run.runtime.hub.ProjectTerminal(run.start.RunID, outcome)
+	} else if !fencedCompletion {
+		run.runtime.hub.Complete(run.start.RunID, outcome)
+	}
+	if lease, ok := run.budget.(interface{ Close() }); ok {
+		lease.Close()
+	}
+	var releaseErr error
+	if lease, ok := run.budget.(interface{ ReleaseLease() error }); ok {
+		if err := lease.ReleaseLease(); err != nil {
+			releaseErr = fmt.Errorf("release durable budget lease for run %q: %w", run.start.RunID, err)
+		}
+	}
+	return errors.Join(completionErr, releaseErr)
 }
 
 func (run *activeRun) setOutcome(outcome agentrun.Outcome) {
@@ -344,9 +386,105 @@ func (run *activeRun) setOutcome(outcome agentrun.Outcome) {
 	run.mu.Unlock()
 }
 
-// Outcome returns the durable outcome computed by Execute for this run. It lets
-// upper-layer QA projections avoid reconstructing an outcome from public result
+func (run *activeRun) executePrepared(
+	ctx context.Context,
+	request agentapi.RunRequest,
+	execution preparedExecution,
+	input agentexecution.Input,
+	resume *agentrun.LogicalCheckpoint,
+) (agentapi.RunResult, error) {
+	maxOutputTokens := effectiveOutputTokens(execution.definition, execution.snapshot.Limits)
+	conclusionMaxTokens := effectiveConclusionTokens(
+		run.runtime.settings.conclusionMaxTokens,
+		maxOutputTokens,
+	)
+	client := llm.NewLLMClientWithHTTPAndProvider(
+		run.runtime.settings.baseURL,
+		run.runtime.settings.apiKey,
+		execution.snapshot.Model,
+		execution.snapshot.Provider,
+		maxOutputTokens,
+		nil,
+	)
+	observer := run.observer()
+	budgetCheck := func() error {
+		if gate := agentapi.RunBudgetGateFromContext(ctx); gate != nil {
+			if err := gate.Check(); err != nil {
+				return err
+			}
+		}
+		return run.recorder.CheckLimits()
+	}
+	loop := agentexecution.NewAgent(client, run.runtime.executor, agentexecution.Config{
+		MaxSteps:                          execution.snapshot.Limits.MaxSteps,
+		MaxToolCalls:                      execution.snapshot.Limits.MaxToolCalls,
+		Timeout:                           time.Until(execution.snapshot.Limits.Deadline),
+		AnswerReserve:                     execution.answerReserve,
+		AnswerMaxTokens:                   maxOutputTokens,
+		ConclusionMaxTokens:               conclusionMaxTokens,
+		ContextWindow:                     execution.snapshot.Budget.ContextTokens,
+		MaxInputTokens:                    execution.snapshot.Limits.MaxInputTokens,
+		MaxContextTokens:                  execution.snapshot.Limits.MaxContextTokens,
+		MaxToolResultBytes:                execution.definition.Budget.MaxToolResultBytes,
+		MaxContinueRounds:                 execution.definition.Budget.MaxContinueRounds,
+		StructuredOutput:                  execution.structuredOutput,
+		ModelParameters:                   execution.modelParameters,
+		InputPriceMicrosPerMillionTokens:  execution.definition.Model.InputPriceMicrosPerMillionTokens,
+		OutputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
+		BudgetCheck:                       budgetCheck,
+		DisableLegacyAnswerRecovery:       run.runtime.settings.disableLegacyAnswerRecovery,
+		Checkpoint: func(checkpoint agentexecution.LogicalLoopCheckpoint) error {
+			return run.persistLogicalCheckpoint(ctx, checkpoint, execution.snapshot.PromptHash)
+		},
+	}, observer, run.runtime.hub)
+	loop.SetOnFirstAnswerToken(func(runID string) {
+		run.runtime.hub.EmitPhase(runID, "找到啦，我来把答案写出来 ✍️")
+	})
+	runCtx := llm.WithUsageRecorder(ctx, request.RunID, run.recorder)
+	var result *agentexecution.RunResult
+	var runErr error
+	if resume != nil {
+		result, runErr = loop.RunCompiledFromCheckpoint(runCtx, request.RunID, agentexecution.LogicalLoopCheckpoint{StepNo: resume.StepNo, Phase: resume.Phase, State: resume.State}, execution.toolSnapshot)
+	} else {
+		result, runErr = loop.RunCompiledWithRequest(runCtx, request.RunID, input, &request, execution.toolSnapshot)
+	}
+	checkpointPhase := "completed"
+	if runErr != nil {
+		checkpointPhase = "interrupted"
+	}
+	if checkpointErr := run.persistLogicalCheckpoint(ctx, agentexecution.LogicalLoopCheckpoint{StepNo: result.Steps, Phase: checkpointPhase}, execution.snapshot.PromptHash); checkpointErr != nil && runErr == nil {
+		runErr = checkpointErr
+	}
+	publicResult, outcome := mapResult(
+		request.RunID,
+		result,
+		runErr,
+		context.Cause(ctx),
+		run.recorder.Usage(),
+		referencesFromRequest(request.Context),
+		run.runtime.schemas,
+		execution.definition.OutputSchema,
+		outputRecoveryContext{
+			AgentID: request.Agent.ID,
+			Input:   request.Input,
+			Context: request.Context,
+			StrictOutput: request.Agent.ID == "investigator.docs" &&
+				request.Delegation.Depth <= 0,
+		},
+	)
+	outcome = run.mergePreparationOutcome(outcome)
+	publicResult.Evidence = publicEvidence(outcome.Evidence)
+	if request.Policy.RedactSensitive {
+		publicResult = redactResult(publicResult)
+		outcome = redactOutcome(outcome)
+	}
+	run.emitDelegationAdoptions(request.RunID, publicResult.DelegationAdoptions)
+	run.setOutcome(outcome)
+	return publicResult, nil
+}
+
 // fields that may have been redacted or rendered for display.
+// Outcome returns the durable outcome computed by Execute for this run.
 func (run *activeRun) Outcome() agentrun.Outcome {
 	run.mu.Lock()
 	defer run.mu.Unlock()
@@ -357,17 +495,10 @@ func (run *activeRun) validateRequest(
 	request agentapi.RunRequest,
 ) (preparedExecution, error) {
 	start := runStart(request)
-	if start.RunID != run.start.RunID || start.Agent != run.start.Agent ||
-		start.DefinitionHash != run.start.DefinitionHash ||
-		start.Selection != run.start.Selection ||
-		!jsonBytesEqual(start.Input, run.start.Input) || start.Actor != run.start.Actor ||
-		start.Correlation != run.start.Correlation ||
-		start.Policy.RedactSensitive != run.start.Policy.RedactSensitive ||
-		!sameRunLimits(start.Limits, run.start.Limits) ||
-		start.Delegation != run.start.Delegation ||
-		!samePermissions(start.Permissions, run.start.Permissions) ||
-		!sameToolScope(start.ToolScope, run.start.ToolScope) {
-		return preparedExecution{}, fmt.Errorf("run request does not match the prepared run")
+	if mismatch := runStartMismatch(start, run.start); mismatch != "" {
+		return preparedExecution{}, fmt.Errorf(
+			"run request does not match the prepared run: %s", mismatch,
+		)
 	}
 	if err := validateMessages(request.Messages); err != nil {
 		return preparedExecution{}, err
@@ -396,6 +527,63 @@ func (run *activeRun) validateRequest(
 	return execution, nil
 }
 
+func runStartMismatch(actual, prepared agentapi.RunStart) string {
+	switch {
+	case actual.RunID != prepared.RunID:
+		return "run_id"
+	case actual.Agent != prepared.Agent:
+		return "agent"
+	case actual.DefinitionHash != prepared.DefinitionHash:
+		return "definition_hash"
+	case actual.Selection != prepared.Selection:
+		return "selection"
+	case !jsonBytesEqual(actual.Input, prepared.Input):
+		return "input"
+	case actual.Actor != prepared.Actor:
+		return "actor"
+	case actual.Correlation != prepared.Correlation:
+		return "correlation"
+	case actual.Policy.RedactSensitive != prepared.Policy.RedactSensitive:
+		return "policy.redact_sensitive"
+	case !sameOutputContract(actual.Policy.OutputContract, prepared.Policy.OutputContract):
+		return "policy.output_contract"
+	case !sameRunLimits(actual.Limits, prepared.Limits):
+		return "limits"
+	case actual.Delegation != prepared.Delegation:
+		return "delegation"
+	case !samePermissions(actual.Permissions, prepared.Permissions):
+		return "permissions"
+	case !sameToolScope(actual.ToolScope, prepared.ToolScope):
+		return "tool_scope"
+	default:
+		return ""
+	}
+}
+
+func effectiveConclusionTokens(configured, answerMax int) int {
+	if answerMax <= 0 {
+		return configured
+	}
+	if configured <= 0 {
+		configured = answerMax / 4
+		if configured <= 0 {
+			configured = 1
+		}
+	}
+	if configured > answerMax {
+		return answerMax
+	}
+	return configured
+}
+
+func effectiveOutputTokens(definition agentapi.Definition, limits agentapi.RunLimits) int {
+	maxOutputTokens := definition.Model.MaxOutputTokens
+	if limits.MaxOutputTokens > 0 && limits.MaxOutputTokens < int64(maxOutputTokens) {
+		maxOutputTokens = int(limits.MaxOutputTokens)
+	}
+	return maxOutputTokens
+}
+
 func runStart(request agentapi.RunRequest) agentapi.RunStart {
 	return agentapi.RunStart{
 		RunID: request.RunID, Agent: request.Agent, DefinitionHash: request.DefinitionHash,
@@ -410,14 +598,29 @@ func runStart(request agentapi.RunRequest) agentapi.RunStart {
 	}
 }
 
+func sameOutputContract(left, right agentapi.RunOutputContract) bool {
+	if left.Kind != right.Kind || left.RequireMermaid != right.RequireMermaid ||
+		left.MaxHops != right.MaxHops || len(left.Subjects) != len(right.Subjects) {
+		return false
+	}
+	for index := range left.Subjects {
+		if left.Subjects[index] != right.Subjects[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func sameRunLimits(left, right agentapi.RunLimits) bool {
 	return left.Deadline.Equal(right.Deadline) &&
 		left.MaxSteps == right.MaxSteps &&
 		left.MaxToolCalls == right.MaxToolCalls &&
 		left.MaxInputTokens == right.MaxInputTokens &&
 		left.MaxContextTokens == right.MaxContextTokens &&
+		left.MaxOutputTokens == right.MaxOutputTokens &&
 		left.MaxTotalTokens == right.MaxTotalTokens &&
-		left.MaxCostMicros == right.MaxCostMicros
+		left.MaxCostMicros == right.MaxCostMicros &&
+		left.ParentAnswerReserve == right.ParentAnswerReserve
 }
 
 func jsonBytesEqual(left, right json.RawMessage) bool {

@@ -332,3 +332,58 @@ func TestFinalizeLoopMarksUnevaluatedDelegationsUnknown(t *testing.T) {
 		})
 	}
 }
+
+func TestAnswerEvidenceContractRejectsUnknownClaim(t *testing.T) {
+	contract := &exactAnswerContract{}
+	contract.Add(tool.AnswerContract{Evidence: &tool.AnswerEvidenceContract{
+		Claims: []tool.AnswerEvidenceClaim{{ClaimID: "report-1/f-1", Decision: "supported"}},
+	}})
+	answer := "Visible answer.\n" + delegationAdoptionMarkerPrefix +
+		`{"delegations":[],"claims":[{"claim_id":"report-1/unknown","decision":"supported"}]}`
+	_, violations := contract.ValidateAndStrip(answer)
+	if !strings.Contains(strings.Join(violations, "\n"), `unknown claim "report-1/unknown"`) {
+		t.Fatalf("violations = %#v", violations)
+	}
+}
+
+func TestAnswerEvidenceContractRejectsUnresolvedClaimAsSupported(t *testing.T) {
+	contract := &exactAnswerContract{}
+	contract.Add(tool.AnswerContract{Evidence: &tool.AnswerEvidenceContract{
+		Claims: []tool.AnswerEvidenceClaim{{ClaimID: "report-1/f-1", Decision: "unresolved"}},
+	}})
+	answer := "Visible answer.\n" + delegationAdoptionMarkerPrefix +
+		`{"delegations":[],"claims":[{"claim_id":"report-1/f-1","decision":"supported"}]}`
+	_, violations := contract.ValidateAndStrip(answer)
+	if !strings.Contains(strings.Join(violations, "\n"), `does not match server state "unresolved"`) {
+		t.Fatalf("violations = %#v", violations)
+	}
+}
+
+func TestAnswerEvidenceContractRejectsUnknownEdge(t *testing.T) {
+	contract := &exactAnswerContract{}
+	contract.Add(tool.AnswerContract{Evidence: &tool.AnswerEvidenceContract{
+		Edges: []tool.AnswerEvidenceEdge{{From: "node-a", To: "node-b", Protocol: "HTTP", SyncMode: "sync", EvidenceState: "verified"}},
+	}})
+	answer := "Visible answer.\n" + delegationAdoptionMarkerPrefix +
+		`{"delegations":[],"edges":[{"from":"node-a","to":"node-c","protocol":"HTTP","sync_mode":"sync","evidence_state":"verified"}]}`
+	_, violations := contract.ValidateAndStrip(answer)
+	if !strings.Contains(strings.Join(violations, "\n"), `unknown edge`) {
+		t.Fatalf("violations = %#v", violations)
+	}
+}
+
+func TestAnswerEvidenceContractAcceptsSupportedClaim(t *testing.T) {
+	contract := &exactAnswerContract{}
+	contract.Add(tool.AnswerContract{Evidence: &tool.AnswerEvidenceContract{
+		Claims: []tool.AnswerEvidenceClaim{{ClaimID: "report-1/f-1", Decision: "supported"}},
+	}})
+	answer := "Visible answer.\n" + delegationAdoptionMarkerPrefix +
+		`{"delegations":[],"claims":[{"claim_id":"report-1/f-1","decision":"supported"}]}`
+	clean, violations := contract.ValidateAndStrip(answer)
+	if len(violations) != 0 {
+		t.Fatalf("violations = %#v", violations)
+	}
+	if clean != "Visible answer." {
+		t.Fatalf("clean answer = %q", clean)
+	}
+}

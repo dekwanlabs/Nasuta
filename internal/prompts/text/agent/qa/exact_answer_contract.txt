@@ -3,4 +3,7 @@ Internal validation contract:
 - The final answer must contain every required_literals value verbatim. Never abbreviate, truncate, mask, summarize, or replace any part with ... or ….
 - When delegations is non-empty, append exactly one final line using this form: {{ .AdoptionMarker }}{"delegations":[{"delegation_id":"...","adopted_report_ids":["..."]}]}.
 - Include every registered delegation_id exactly once. adopted_report_ids must be a subset of that delegation's report_ids. Use an empty array when no report contributed to the final answer.
+- When evidence.claims is non-empty, include a claims array in the same JSON object. Each claim_id may appear at most once, must be one of the server-provided claim IDs, and decision must exactly equal the server-provided decision. Never upgrade unresolved to supported.
+- When evidence.edges is non-empty, include an edges array in the same JSON object. Each edge must match a server-provided from/to/protocol/sync_mode tuple at most once, and evidence_state must exactly equal the server-provided state. Never upgrade inferred or unresolved to verified.
+- If a claims or edges array is required, do not omit it even when the answer adopts only a subset; use the server-known entries that are actually used.
 - This metadata is internal. Do not explain it, quote it, or expose either internal marker to the user.

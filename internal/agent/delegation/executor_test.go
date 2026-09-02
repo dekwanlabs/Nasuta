@@ -3,7 +3,9 @@ package delegation
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/budget"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -77,6 +80,8 @@ type executorPersistence struct {
 	linked      []int
 	settlements []agentrun.DelegationSettlement
 	rejections  []agentrun.DelegationRejection
+	attempts    map[string]agentrun.DelegationAttemptRecord
+	checkpoints map[string]agentrun.DelegationCheckpoint
 
 	settleStarted chan struct{}
 	settleRelease chan struct{}
@@ -96,9 +101,11 @@ func (persistence *verifierBudgetPersistence) ReserveDelegationBatch(
 
 func newExecutorPersistence() *executorPersistence {
 	return &executorPersistence{
-		records:   make(map[string]agentrun.DelegationTaskRecord),
-		artifacts: make(map[string]agentrun.DelegationArtifact),
-		evidence:  make(map[string][]tool.EvidenceUnit),
+		records:     make(map[string]agentrun.DelegationTaskRecord),
+		artifacts:   make(map[string]agentrun.DelegationArtifact),
+		evidence:    make(map[string][]tool.EvidenceUnit),
+		attempts:    make(map[string]agentrun.DelegationAttemptRecord),
+		checkpoints: make(map[string]agentrun.DelegationCheckpoint),
 	}
 }
 
@@ -256,6 +263,759 @@ func (persistence *executorPersistence) GetDelegationEvidence(
 
 func executorTaskKey(parentRunID, delegationID string, taskIndex int) string {
 	return fmt.Sprintf("%s/%s/%d", parentRunID, delegationID, taskIndex)
+}
+
+func executorAttemptKey(parentRunID, delegationID string, taskIndex, attemptNo int) string {
+	return fmt.Sprintf("%s/%s/%d/%d", parentRunID, delegationID, taskIndex, attemptNo)
+}
+
+func (persistence *executorPersistence) StartDelegationAttempt(
+	_ context.Context,
+	start agentrun.DelegationAttemptStart,
+) (agentrun.DelegationAttemptRecord, error) {
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	key := executorAttemptKey(start.ParentRunID, start.DelegationID, start.TaskIndex, start.AttemptNo)
+	if existing, ok := persistence.attempts[key]; ok {
+		if existing.AttemptID != start.AttemptID || existing.ChildRunID != start.ChildRunID {
+			return agentrun.DelegationAttemptRecord{}, agentrun.ErrDelegationTaskConflict
+		}
+		existing.Existing = existing.Status != agentrun.DelegationAttemptRunning
+		return existing, nil
+	}
+	record := agentrun.DelegationAttemptRecord{
+		ParentRunID: start.ParentRunID, DelegationID: start.DelegationID,
+		TaskIndex: start.TaskIndex, AttemptNo: start.AttemptNo, AttemptID: start.AttemptID,
+		ChildRunID: start.ChildRunID, Status: agentrun.DelegationAttemptRunning,
+		StartedAt: start.StartedAt,
+	}
+	persistence.attempts[key] = record
+	return record, nil
+}
+
+func (persistence *executorPersistence) FinishDelegationAttempt(
+	_ context.Context,
+	finish agentrun.DelegationAttemptFinish,
+) (agentrun.DelegationAttemptRecord, error) {
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	key := executorAttemptKey(finish.ParentRunID, finish.DelegationID, finish.TaskIndex, finish.AttemptNo)
+	record, ok := persistence.attempts[key]
+	if !ok {
+		return agentrun.DelegationAttemptRecord{}, sql.ErrNoRows
+	}
+	if record.AttemptID != finish.AttemptID {
+		return agentrun.DelegationAttemptRecord{}, agentrun.ErrDelegationTaskConflict
+	}
+	if record.Status != agentrun.DelegationAttemptRunning {
+		if record.Status != finish.Status || record.Retryable != finish.Retryable ||
+			record.ErrorCode != finish.ErrorCode || record.ErrorMessage != finish.ErrorMessage ||
+			record.ReportArtifactID != finish.ReportArtifactID || !sameExecutorUsage(record.Usage, finish.Usage) {
+			return agentrun.DelegationAttemptRecord{}, agentrun.ErrDelegationTaskConflict
+		}
+		return record, nil
+	}
+	record.Status = finish.Status
+	record.Retryable = finish.Retryable
+	record.ErrorCode = finish.ErrorCode
+	record.ErrorMessage = finish.ErrorMessage
+	record.EndedAt = finish.EndedAt
+	record.NextAttemptAt = finish.NextAttemptAt
+	record.ReportArtifactID = finish.ReportArtifactID
+	if finish.Usage != nil {
+		usage := *finish.Usage
+		record.Usage = &usage
+	} else {
+		record.Usage = nil
+	}
+	persistence.attempts[key] = record
+	return record, nil
+}
+
+func (persistence *executorPersistence) GetLatestDelegationAttempt(
+	_ context.Context, parentRunID, delegationID string, taskIndex int,
+) (agentrun.DelegationAttemptRecord, error) {
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	var latest agentrun.DelegationAttemptRecord
+	found := false
+	for _, record := range persistence.attempts {
+		if record.ParentRunID != parentRunID || record.DelegationID != delegationID || record.TaskIndex != taskIndex {
+			continue
+		}
+		if !found || record.AttemptNo > latest.AttemptNo {
+			latest, found = record, true
+		}
+	}
+	if !found {
+		return agentrun.DelegationAttemptRecord{}, sql.ErrNoRows
+	}
+	return latest, nil
+}
+
+func (persistence *executorPersistence) LinkDelegationAttemptChild(
+	_ context.Context, parentRunID, delegationID string, taskIndex, attemptNo int, childRunID string,
+) error {
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	key := executorAttemptKey(parentRunID, delegationID, taskIndex, attemptNo)
+	record, ok := persistence.attempts[key]
+	if !ok {
+		return sql.ErrNoRows
+	}
+	record.ChildRunID = childRunID
+	persistence.attempts[key] = record
+	taskKey := executorTaskKey(parentRunID, delegationID, taskIndex)
+	task := persistence.records[taskKey]
+	task.ChildRunID = childRunID
+	persistence.records[taskKey] = task
+	persistence.linked = append(persistence.linked, taskIndex)
+	return nil
+}
+
+func (persistence *executorPersistence) UpsertDelegationCheckpoint(
+	_ context.Context, checkpoint agentrun.DelegationCheckpoint,
+) error {
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	key := executorTaskKey(checkpoint.ParentRunID, checkpoint.DelegationID, checkpoint.TaskIndex)
+	if existing, ok := persistence.checkpoints[key]; ok && existing.Status == agentrun.DelegationCheckpointCompleted && checkpoint.Status == agentrun.DelegationCheckpointPending {
+		return nil
+	}
+	persistence.checkpoints[key] = checkpoint
+	return nil
+}
+
+func (persistence *executorPersistence) GetDelegationCheckpoint(
+	_ context.Context, parentRunID, delegationID string, taskIndex int,
+) (agentrun.DelegationCheckpoint, error) {
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	checkpoint, ok := persistence.checkpoints[executorTaskKey(parentRunID, delegationID, taskIndex)]
+	if !ok {
+		return agentrun.DelegationCheckpoint{}, sql.ErrNoRows
+	}
+	return checkpoint, nil
+}
+
+func sameExecutorUsage(left *agentapi.Usage, right *agentapi.Usage) bool {
+	if (left == nil) != (right == nil) {
+		return false
+	}
+	return left == nil || *left == *right
+}
+
+func TestExecutorRetriesTransientChildFailureAndSettlesOnlyFinalAttempt(t *testing.T) {
+	persistence := newExecutorPersistence()
+	var (
+		mu       sync.Mutex
+		calls    int
+		childIDs []string
+	)
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			mu.Lock()
+			calls++
+			childIDs = append(childIDs, request.RunID)
+			call := calls
+			mu.Unlock()
+			if call == 1 {
+				return agentapi.RunResult{
+					RunID:  request.RunID,
+					Status: agentapi.RunFailed,
+					Error: &agentapi.RunError{
+						Code:      "provider_unavailable",
+						Message:   "temporary provider outage",
+						Retryable: true,
+					},
+				}, nil
+			}
+			return successfulExecutorResult(request.RunID, "retry succeeded"), nil
+		}),
+		persistence,
+		nil,
+	)
+
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect",
+			Objective:  "retry transient provider failure",
+		}},
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Status != agentapi.DelegationCompleted {
+		t.Fatalf("result = %+v", result.Results)
+	}
+
+	mu.Lock()
+	gotCalls := calls
+	gotChildIDs := append([]string(nil), childIDs...)
+	mu.Unlock()
+	if gotCalls != 2 || len(gotChildIDs) != 2 || gotChildIDs[0] == gotChildIDs[1] {
+		t.Fatalf("runtime calls=%d child ids=%v, want two distinct attempts", gotCalls, gotChildIDs)
+	}
+
+	delegationID := result.DelegationID
+	key := executorTaskKey("parent-1", delegationID, 0)
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	record := persistence.records[key]
+	if record.Reservation.ChildRunID != gotChildIDs[0] || record.ChildRunID != gotChildIDs[1] {
+		t.Fatalf("record = %+v, want immutable reservation=%q and current child=%q", record, gotChildIDs[0], gotChildIDs[1])
+	}
+	if len(persistence.settlements) != 1 || persistence.settlements[0].ChildRunID != gotChildIDs[1] {
+		t.Fatalf("settlements = %+v, want only final attempt", persistence.settlements)
+	}
+	first, ok := persistence.attempts[executorAttemptKey("parent-1", delegationID, 0, 1)]
+	if !ok || first.Status != agentrun.DelegationAttemptFailed || !first.Retryable {
+		t.Fatalf("first attempt = %+v", first)
+	}
+	second, ok := persistence.attempts[executorAttemptKey("parent-1", delegationID, 0, 2)]
+	if !ok || second.Status != agentrun.DelegationAttemptSucceeded || second.Retryable {
+		t.Fatalf("second attempt = %+v", second)
+	}
+	checkpoint := persistence.checkpoints[key]
+	if checkpoint.Status != agentrun.DelegationCheckpointCompleted || checkpoint.ChildRunID != gotChildIDs[1] || checkpoint.ReportArtifactID == "" {
+		t.Fatalf("checkpoint = %+v", checkpoint)
+	}
+}
+
+func TestExecutorDoesNotRetryPermanentChildFailure(t *testing.T) {
+	persistence := newExecutorPersistence()
+	calls := 0
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			calls++
+			return agentapi.RunResult{
+				RunID:  request.RunID,
+				Status: agentapi.RunFailed,
+				Error: &agentapi.RunError{
+					Code:    "invalid_query",
+					Message: "permanent child failure",
+				},
+			}, nil
+		}),
+		persistence,
+		nil,
+	)
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{Capability: "knowledge.code.inspect", Objective: "permanent failure"}},
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("runtime calls = %d, want 1", calls)
+	}
+	if len(result.Results) != 1 || result.Results[0].Error == nil || result.Results[0].Error.Code != "invalid_query" {
+		t.Fatalf("result = %+v", result.Results)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if len(persistence.attempts) != 1 {
+		t.Fatalf("attempts = %+v, want one", persistence.attempts)
+	}
+	for _, attempt := range persistence.attempts {
+		if attempt.Status != agentrun.DelegationAttemptFailed || attempt.Retryable {
+			t.Fatalf("attempt = %+v", attempt)
+		}
+	}
+}
+
+func TestExecutorParentCancellationDoesNotRetryTransientFailure(t *testing.T) {
+	persistence := newExecutorPersistence()
+	started := make(chan struct{})
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(ctx context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
+			close(started)
+			<-ctx.Done()
+			return agentapi.RunResult{
+				RunID:  request.RunID,
+				Status: agentapi.RunFailed,
+				Error:  &agentapi.RunError{Code: "provider_unavailable", Retryable: true},
+			}, nil
+		}),
+		persistence,
+		nil,
+	)
+	ctx, cancel := context.WithCancel(executorContext(t, context.Background(), 0))
+	defer cancel()
+	resultCh := make(chan struct {
+		result agentapi.DelegationBatchResult
+		err    error
+	}, 1)
+	go func() {
+		result, _, err := executor.Execute(ctx, []agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect", Objective: "cancel retry",
+		}})
+		resultCh <- struct {
+			result agentapi.DelegationBatchResult
+			err    error
+		}{result, err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("child did not start")
+	}
+	cancel()
+	execution := <-resultCh
+	if execution.err != nil {
+		t.Fatalf("Execute: %v", execution.err)
+	}
+	if len(execution.result.Results) != 1 || execution.result.Results[0].Error == nil || execution.result.Results[0].Error.Code != ErrorParentCancelled {
+		t.Fatalf("result = %+v", execution.result.Results)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if len(persistence.attempts) != 1 {
+		t.Fatalf("attempts = %+v, want one", persistence.attempts)
+	}
+	for _, attempt := range persistence.attempts {
+		if attempt.Status != agentrun.DelegationAttemptCancelled || attempt.Retryable {
+			t.Fatalf("attempt = %+v", attempt)
+		}
+	}
+}
+
+func TestExecutorChildDeadlinePreventsRetryBackoff(t *testing.T) {
+	persistence := newExecutorPersistence()
+	calls := 0
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			calls++
+			return agentapi.RunResult{
+				RunID:  request.RunID,
+				Status: agentapi.RunFailed,
+				Error:  &agentapi.RunError{Code: "provider_unavailable", Retryable: true},
+			}, nil
+		}),
+		persistence,
+		nil,
+	)
+	ctx := executorContext(t, context.Background(), 0)
+	parent, ok := ParentContextFrom(ctx)
+	if !ok {
+		t.Fatal("parent context unavailable")
+	}
+	parent.Limits.Deadline = time.Now().Add(5 * time.Millisecond)
+	ctx = WithParentContext(ctx, parent)
+	result, _, err := executor.Execute(ctx, []agentapi.DelegationTask{{
+		Capability: "knowledge.code.inspect", Objective: "deadline prevents retry",
+	}})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("runtime calls = %d, want 1", calls)
+	}
+	if len(result.Results) != 1 || result.Results[0].Error == nil || result.Results[0].Error.Code != "provider_unavailable" {
+		t.Fatalf("result = %+v", result.Results)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if len(persistence.attempts) != 1 {
+		t.Fatalf("attempts = %+v, want one", persistence.attempts)
+	}
+}
+
+func TestExecutorRespectsInfrastructureRetryLimit(t *testing.T) {
+	persistence := newExecutorPersistence()
+	calls := 0
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			calls++
+			return agentapi.RunResult{
+				RunID:  request.RunID,
+				Status: agentapi.RunFailed,
+				Error:  &agentapi.RunError{Code: "provider_unavailable", Retryable: true},
+			}, nil
+		}),
+		persistence,
+		nil,
+	)
+	definitions, ok := executor.definitions.(executorDefinitionResolver)
+	if !ok {
+		t.Fatalf("definitions = %T", executor.definitions)
+	}
+	for ref, definition := range definitions {
+		definition.FailurePolicy.MaxInfrastructureRetries = 0
+		definitions[ref] = definition
+	}
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{Capability: "knowledge.code.inspect", Objective: "retry limit"}},
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if calls != 1 || len(result.Results) != 1 {
+		t.Fatalf("calls=%d results=%+v", calls, result.Results)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if len(persistence.attempts) != 1 {
+		t.Fatalf("attempts = %+v, want one", persistence.attempts)
+	}
+}
+
+func TestExecutorReplayUsesFinalRetryAttemptWithoutRestartingChild(t *testing.T) {
+	persistence := newExecutorPersistence()
+	calls := 0
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			calls++
+			if calls == 1 {
+				return agentapi.RunResult{
+					RunID: request.RunID, Status: agentapi.RunFailed,
+					Error: &agentapi.RunError{Code: "provider_unavailable", Retryable: true},
+				}, nil
+			}
+			return successfulExecutorResult(request.RunID, "replay final attempt"), nil
+		}),
+		persistence,
+		nil,
+	)
+	ctx := executorContext(t, context.Background(), 0)
+	first, _, err := executor.Execute(ctx, []agentapi.DelegationTask{{
+		Capability: "knowledge.code.inspect", Objective: "replay final attempt",
+	}})
+	if err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("first runtime calls = %d, want 2", calls)
+	}
+	second, _, err := executor.Execute(ctx, []agentapi.DelegationTask{{
+		Capability: "knowledge.code.inspect", Objective: "replay final attempt",
+	}})
+	if err != nil {
+		t.Fatalf("replay Execute: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("replay restarted child: runtime calls = %d", calls)
+	}
+	if len(first.Results) != 1 || len(second.Results) != 1 ||
+		first.Results[0].RunID != second.Results[0].RunID ||
+		first.Results[0].Status != agentapi.DelegationCompleted ||
+		second.Results[0].Status != agentapi.DelegationCompleted {
+		t.Fatalf("first=%+v second=%+v", first.Results, second.Results)
+	}
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if len(persistence.settlements) != 1 {
+		t.Fatalf("settlements = %+v, want one", persistence.settlements)
+	}
+}
+
+func TestExecutorCheckpointStatusesAreDurableAndBounded(t *testing.T) {
+	persistence := newExecutorPersistence()
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		_ context.Context, request agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		return successfulExecutorResult(request.RunID, "checkpoint"), nil
+	}), persistence, nil)
+	parent, ok := ParentContextFrom(executorContext(t, context.Background(), 0))
+	if !ok {
+		t.Fatal("parent context unavailable")
+	}
+	task := preparedTask{index: 0, childRunID: "child-checkpoint", objectiveHash: "objective-hash"}
+	delegationID := "delegation-checkpoint"
+	for _, status := range []agentrun.DelegationCheckpointStatus{
+		agentrun.DelegationCheckpointPending,
+		agentrun.DelegationCheckpointCompleted,
+		agentrun.DelegationCheckpointUnavailable,
+		agentrun.DelegationCheckpointInterrupted,
+	} {
+		executor.markCheckpoint(context.Background(), parent, delegationID, task, string(status), "error", "artifact")
+		checkpoint, err := persistence.GetDelegationCheckpoint(context.Background(), parent.RunID, delegationID, task.index)
+		if err != nil {
+			t.Fatalf("GetDelegationCheckpoint(%s): %v", status, err)
+		}
+		if checkpoint.Status != status || checkpoint.ChildRunID != task.childRunID || checkpoint.RequestHash != task.objectiveHash {
+			t.Fatalf("checkpoint(%s) = %+v", status, checkpoint)
+		}
+	}
+}
+
+func TestExecutorChildUsesTaskBudgetAndSettlesIntoRoot(t *testing.T) {
+	root := budget.NewRoot(agentapi.RunLimits{
+		MaxTotalTokens:      1000,
+		ParentAnswerReserve: 100,
+	})
+	var (
+		mu                 sync.Mutex
+		seenTaskGate       bool
+		seenRootTaskGate   bool
+		settledChildUsage  agentapi.Usage
+		remainingTaskGrant agentapi.Usage
+	)
+	runtime := executorRuntimeFunc(func(ctx context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
+		gate := agentapi.RunBudgetGateFromContext(ctx)
+		usageGate := agentapi.RunBudgetUsageGateFromContext(ctx)
+		if gate == nil || usageGate == nil {
+			return agentapi.RunResult{}, fmt.Errorf("child budget gate was not attached")
+		}
+		mu.Lock()
+		seenTaskGate = true
+		seenRootTaskGate = agentapi.RunBudgetTaskGateFromContext(ctx) != nil
+		mu.Unlock()
+
+		actual := agentapi.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}
+		reservation, err := usageGate.ReserveCall(agentapi.Usage{
+			InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+		})
+		if err != nil {
+			return agentapi.RunResult{}, fmt.Errorf("reserve child call: %w", err)
+		}
+		if err := reservation.Settle(actual); err != nil {
+			return agentapi.RunResult{}, fmt.Errorf("settle child call: %w", err)
+		}
+		if availability, ok := usageGate.(agentapi.RunBudgetAvailability); ok {
+			mu.Lock()
+			settledChildUsage = actual
+			remainingTaskGrant = availability.Available()
+			mu.Unlock()
+		}
+		return successfulExecutorResult(request.RunID, executorObjective(t, request)), nil
+	})
+	executor := newExecutorFixture(t, runtime, newExecutorPersistence(), nil)
+	ctx := agentapi.WithRunBudgetGate(
+		executorContext(t, context.Background(), 0),
+		root,
+	)
+	result, _, err := executor.Execute(ctx, []agentapi.DelegationTask{{
+		Capability: "knowledge.code.inspect",
+		Objective:  "settle one child call",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Status != agentapi.DelegationCompleted {
+		t.Fatalf("result = %+v", result)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !seenTaskGate || seenRootTaskGate {
+		t.Fatalf("child gate task=%v root_task_gate=%v", seenTaskGate, seenRootTaskGate)
+	}
+	if settledChildUsage.TotalTokens != 15 {
+		t.Fatalf("settled child usage = %+v", settledChildUsage)
+	}
+	// The child grant is 256 input + 128 output = 384 total tokens. After
+	// settling 15 tokens, its task-local availability is 369; Release then
+	// returns the remaining grant to the root.
+	if remainingTaskGrant.TotalTokens != 369 {
+		t.Fatalf("remaining child grant = %+v, want total 369", remainingTaskGrant)
+	}
+	if got := root.Used().TotalTokens; got != 15 {
+		t.Fatalf("root used total = %d, want 15", got)
+	}
+	if got := root.Available().TotalTokens; got != 885 {
+		t.Fatalf("root default availability = %d, want 885", got)
+	}
+	if got := root.AvailableForPhase(agentapi.RunBudgetPhaseAnswer).TotalTokens; got != 985 {
+		t.Fatalf("root answer availability = %d, want 985", got)
+	}
+}
+
+func TestExecutorRejectsChildWhenParentRootHasNoAdmissionCapacity(t *testing.T) {
+	root := budget.NewRoot(agentapi.RunLimits{
+		MaxTotalTokens:      500,
+		ParentAnswerReserve: 100,
+	})
+	parentCall, err := root.ReserveCall(agentapi.Usage{
+		InputTokens: 100, OutputTokens: 50, TotalTokens: 150,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := parentCall.Settle(agentapi.Usage{
+		InputTokens: 100, OutputTokens: 50, TotalTokens: 150,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeCalls := 0
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(context.Context, agentapi.RunRequest) (agentapi.RunResult, error) {
+			runtimeCalls++
+			return agentapi.RunResult{}, nil
+		}),
+		newExecutorPersistence(),
+		nil,
+	)
+	ctx := agentapi.WithRunBudgetGate(
+		executorContext(t, context.Background(), 0),
+		root,
+	)
+	result, _, err := executor.Execute(ctx, []agentapi.DelegationTask{{
+		Capability: "knowledge.code.inspect",
+		Objective:  "must not start after root admission is exhausted",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("runtime calls = %d, want 0", runtimeCalls)
+	}
+	if len(result.Results) != 1 ||
+		result.Results[0].Status != agentapi.DelegationRejected ||
+		result.Results[0].Error == nil ||
+		result.Results[0].Error.Code != ErrorBudgetInsufficient {
+		t.Fatalf("result = %+v", result.Results)
+	}
+	if got := root.Used().TotalTokens; got != 150 {
+		t.Fatalf("root used total = %d, want 150", got)
+	}
+	// Default calls must still leave the 100-token parent answer reserve intact.
+	if got := root.Available().TotalTokens; got != 250 {
+		t.Fatalf("root default availability = %d, want 250", got)
+	}
+}
+
+func TestExecutorReleasesInMemoryChildGrantWhenDurableAdmissionFails(t *testing.T) {
+	root := budget.NewRoot(agentapi.RunLimits{MaxTotalTokens: 1000})
+	persistence := &verifierBudgetPersistence{executorPersistence: newExecutorPersistence()}
+	runtimeCalls := 0
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(context.Context, agentapi.RunRequest) (agentapi.RunResult, error) {
+			runtimeCalls++
+			return agentapi.RunResult{}, nil
+		}),
+		persistence,
+		nil,
+	)
+	ctx := agentapi.WithRunBudgetGate(
+		executorContext(t, context.Background(), 0),
+		root,
+	)
+	result, _, err := executor.Execute(ctx, []agentapi.DelegationTask{{
+		Capability: "knowledge.code.inspect",
+		Objective:  "durable admission failure must release grant",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("runtime calls = %d, want 0", runtimeCalls)
+	}
+	if len(result.Results) != 1 ||
+		result.Results[0].Status != agentapi.DelegationRejected ||
+		result.Results[0].Error == nil ||
+		result.Results[0].Error.Code != ErrorBudgetInsufficient {
+		t.Fatalf("result = %+v", result.Results)
+	}
+	if got := root.Used().TotalTokens; got != 0 {
+		t.Fatalf("root used total = %d, want 0", got)
+	}
+	if got := root.Available().TotalTokens; got != 1000 {
+		t.Fatalf("root availability = %d, want 1000 after release", got)
+	}
+}
+
+func TestSemanticVerifierRespectsParentRootBudget(t *testing.T) {
+	root := budget.NewRoot(agentapi.RunLimits{MaxTotalTokens: 384})
+	var (
+		mu          sync.Mutex
+		runtimeRuns []string
+	)
+	executor := newSemanticVerifierExecutor(
+		t,
+		executorRuntimeFunc(func(ctx context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
+			mu.Lock()
+			runtimeRuns = append(runtimeRuns, request.Agent.ID)
+			mu.Unlock()
+			gate := agentapi.RunBudgetUsageGateFromContext(ctx)
+			if gate == nil {
+				return agentapi.RunResult{}, fmt.Errorf("budget gate missing for %s", request.Agent.ID)
+			}
+			reservation, err := gate.ReserveCall(agentapi.Usage{
+				InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+			})
+			if err != nil {
+				return agentapi.RunResult{}, err
+			}
+			if err := reservation.Settle(agentapi.Usage{
+				InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+			}); err != nil {
+				return agentapi.RunResult{}, err
+			}
+			if request.Agent.ID == "delegation.verifier" {
+				return successfulVerificationResult(t, request), nil
+			}
+			return semanticInvestigationResult(
+				request.RunID,
+				"report for "+executorObjective(t, request),
+				"claim for "+executorObjective(t, request),
+				"evidence-"+executorObjective(t, request),
+			), nil
+		}),
+		newExecutorPersistence(),
+	)
+	parentCtx := agentapi.WithRunBudgetGate(
+		executorContext(t, context.Background(), 0),
+		root,
+	)
+	parent, ok := ParentContextFrom(parentCtx)
+	if !ok {
+		t.Fatal("parent context is unavailable")
+	}
+	parent.HighRisk = true
+	parentCtx = WithParentContext(parentCtx, parent)
+
+	result, _, err := executor.Execute(parentCtx, []agentapi.DelegationTask{{
+		Capability: "knowledge.code.inspect",
+		Objective:  "high-risk claim",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gotRuntimeRuns := append([]string(nil), runtimeRuns...)
+	mu.Unlock()
+	if len(gotRuntimeRuns) != 1 || gotRuntimeRuns[0] != "delegation.investigator" {
+		t.Fatalf("runtime runs = %v, want investigator only", gotRuntimeRuns)
+	}
+	if result.Verification == nil ||
+		result.Verification.Status != agentapi.DelegationRejected ||
+		result.Verification.Error == nil ||
+		result.Verification.Error.Code != ErrorBudgetInsufficient {
+		t.Fatalf("verification = %+v", result.Verification)
+	}
+	if got := root.Used().TotalTokens; got != 15 {
+		t.Fatalf("root used total = %d, want 15", got)
+	}
+	if got := root.Available().TotalTokens; got != 369 {
+		t.Fatalf("root availability = %d, want 369 after child", got)
+	}
 }
 
 func TestExecutorBoundsConcurrencyPreservesOrderAndNarrowsChild(t *testing.T) {
@@ -1098,6 +1858,118 @@ func TestExecutorHighRiskRunsBoundedSemanticVerifier(t *testing.T) {
 	}
 }
 
+func TestFlowChildBudgetIsNarrowerThanOrdinaryDelegation(t *testing.T) {
+	executor := &Executor{policy: agentapi.DelegationPolicy{
+		MaxChildTurns:        4,
+		MaxChildToolCalls:    16,
+		MaxChildInputTokens:  96000,
+		MaxChildOutputTokens: 16000,
+		MaxReportTokens:      4000,
+		ChildTimeout:         200 * time.Millisecond,
+	}}
+	parent := ParentContext{
+		OutputContract: agentapi.RunOutputContract{
+			Kind:           "flow",
+			RequireMermaid: true,
+			Subjects:       []string{"订单创建"},
+			MaxHops:        6,
+		},
+		Limits: agentapi.RunLimits{Deadline: time.Now().UTC().Add(time.Minute)},
+	}
+	budget := executor.childBudget(parent)
+	if budget.turns != flowChildMaxTurns || budget.toolCalls != flowChildMaxToolCalls ||
+		budget.outputTokens != flowChildMaxOutputTokens || budget.reportTokens != flowReportMaxTokens {
+		t.Fatalf("flow child budget = %#v", budget)
+	}
+	limits, err := executor.childLimits(parent, agentapi.Definition{
+		Model: agentapi.ModelPolicy{
+			InputPriceMicrosPerMillionTokens:  1,
+			OutputPriceMicrosPerMillionTokens: 1,
+		},
+		Budget: agentapi.BudgetPolicy{Timeout: time.Second, MaxSteps: 8, MaxToolCalls: 24},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.MaxSteps != flowChildMaxTurns || limits.MaxToolCalls != flowChildMaxToolCalls ||
+		limits.MaxTotalTokens != flowChildMaxOutputTokens+executor.policy.MaxChildInputTokens {
+		t.Fatalf("flow child limits = %#v", limits)
+	}
+}
+
+func TestChildInputCarriesParentFlowShapeWithoutForcingMermaidOnChild(t *testing.T) {
+	parent := ParentContext{
+		RunID: "parent-1", QuestionSummary: "订单创建流程",
+		OutputContract: agentapi.RunOutputContract{
+			Kind: "flow", RequireMermaid: true, MaxHops: 6,
+		},
+	}
+	task := preparedTask{
+		capability: agentapi.Capability{ID: "knowledge.code.inspect"},
+		request:    agentapi.DelegationTask{Objective: "调查订单创建主路径"},
+	}
+	raw, err := childInput(parent, "del-1", task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["output_kind"] != "flow" || int(payload["max_hops"].(float64)) != 6 {
+		t.Fatalf("flow shape missing from child input: %#v", payload)
+	}
+	request := (&Executor{}).runRequest(parent, "del-1", task)
+	if request.Policy.OutputContract.Kind != "" || request.Policy.OutputContract.RequireMermaid {
+		t.Fatalf("child inherited user-facing Mermaid contract: %#v", request.Policy.OutputContract)
+	}
+}
+
+func TestChildLimitsClampsOutputTokensToDefinitionModel(t *testing.T) {
+	executor := &Executor{policy: agentapi.DelegationPolicy{
+		MaxChildTurns: 3, MaxChildToolCalls: 4,
+		MaxChildInputTokens: 256, MaxChildOutputTokens: 128,
+		ChildTimeout: 200 * time.Millisecond,
+	}}
+	parent := ParentContext{Limits: agentapi.RunLimits{Deadline: time.Now().UTC().Add(time.Minute)}}
+	limits, err := executor.childLimits(parent, agentapi.Definition{
+		Model:  agentapi.ModelPolicy{MaxOutputTokens: 64},
+		Budget: agentapi.BudgetPolicy{Timeout: time.Second, MaxSteps: 8, MaxToolCalls: 24},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.MaxOutputTokens != 64 || limits.MaxTotalTokens != 320 {
+		t.Fatalf("child limits = %+v, want output=64 total=320", limits)
+	}
+}
+
+func TestChildLimitsForContextUsesCallerDeadline(t *testing.T) {
+	executor := &Executor{policy: agentapi.DelegationPolicy{
+		MaxChildTurns: 3, MaxChildToolCalls: 4,
+		MaxChildInputTokens: 256, MaxChildOutputTokens: 128,
+		ChildTimeout: 10 * time.Second,
+	}}
+	parent := ParentContext{Limits: agentapi.RunLimits{Deadline: time.Now().UTC().Add(time.Minute)}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	contextDeadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("context deadline was not installed")
+	}
+
+	limits, err := executor.childLimitsForContext(ctx, parent, agentapi.Definition{
+		Model:  agentapi.ModelPolicy{MaxOutputTokens: 256},
+		Budget: agentapi.BudgetPolicy{Timeout: time.Minute, MaxSteps: 8, MaxToolCalls: 24},
+	})
+	if err != nil {
+		t.Fatalf("childLimitsForContext: %v", err)
+	}
+	if limits.Deadline.After(contextDeadline) {
+		t.Fatalf("child deadline %s exceeds caller deadline %s", limits.Deadline, contextDeadline)
+	}
+}
+
 func TestChildLimitsClampsToolCallsToDefinitionBudget(t *testing.T) {
 	executor := &Executor{policy: agentapi.DelegationPolicy{
 		MaxChildTurns: 3, MaxChildToolCalls: 4,
@@ -1420,6 +2292,7 @@ func newExecutorFixture(
 		Permissions: agentapi.PermissionPolicy{
 			Scopes: []string{"knowledge.read", "tenant.read"},
 		},
+		FailurePolicy: agentapi.FailurePolicy{MaxInfrastructureRetries: 1},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1736,5 +2609,290 @@ func successfulExecutorResult(
 		Usage: agentapi.Usage{
 			InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
 		},
+	}
+}
+
+type scriptedExecutorQueue struct {
+	mu           sync.Mutex
+	items        map[string]agentrun.WorkItem
+	claimStarted chan struct{}
+	claimOnce    sync.Once
+	claimErr     error
+}
+
+func newScriptedExecutorQueue() *scriptedExecutorQueue {
+	return &scriptedExecutorQueue{items: make(map[string]agentrun.WorkItem)}
+}
+
+func (queue *scriptedExecutorQueue) EnqueueWorkItem(_ context.Context, item agentrun.WorkItem) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.items[item.WorkID] = item
+	return nil
+}
+
+func (queue *scriptedExecutorQueue) ClaimWorkItem(_ context.Context, owner string, now time.Time, ttl time.Duration) (agentrun.WorkItem, error) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	for workID, item := range queue.items {
+		if item.State != agentrun.WorkReady {
+			continue
+		}
+		item.State = agentrun.WorkRunning
+		item.LeaseOwner = owner
+		item.LeaseFence++
+		item.LeaseExpiresAt = now.Add(ttl).Format(time.RFC3339Nano)
+		queue.items[workID] = item
+		return item, nil
+	}
+	return agentrun.WorkItem{}, sql.ErrNoRows
+}
+
+func (queue *scriptedExecutorQueue) ClaimWorkItemByID(_ context.Context, workID, owner string, now time.Time, ttl time.Duration) (agentrun.WorkItem, error) {
+	if queue.claimStarted != nil {
+		queue.claimOnce.Do(func() { close(queue.claimStarted) })
+	}
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if queue.claimErr != nil {
+		return agentrun.WorkItem{}, queue.claimErr
+	}
+	item, ok := queue.items[workID]
+	if !ok {
+		return agentrun.WorkItem{}, sql.ErrNoRows
+	}
+	if item.State != agentrun.WorkReady {
+		return agentrun.WorkItem{}, sql.ErrNoRows
+	}
+	item.State = agentrun.WorkRunning
+	item.LeaseOwner = owner
+	item.LeaseFence++
+	item.LeaseExpiresAt = now.Add(ttl).Format(time.RFC3339Nano)
+	queue.items[workID] = item
+	return item, nil
+}
+
+func (queue *scriptedExecutorQueue) RenewWorkItem(_ context.Context, workID, owner string, fence int64, _ time.Time, _ time.Duration) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	item, ok := queue.items[workID]
+	if !ok || item.State != agentrun.WorkRunning || item.LeaseOwner != owner || item.LeaseFence != fence {
+		return fmt.Errorf("worker lease lost")
+	}
+	return nil
+}
+
+func (queue *scriptedExecutorQueue) CompleteWorkItem(_ context.Context, workID, owner string, fence int64, state, lastError string) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	item, ok := queue.items[workID]
+	if !ok || item.State != agentrun.WorkRunning || item.LeaseOwner != owner || item.LeaseFence != fence {
+		return fmt.Errorf("worker lease lost")
+	}
+	item.State = state
+	item.LastError = lastError
+	queue.items[workID] = item
+	return nil
+}
+
+func queuedReportArtifact(childRunID, capability string) agentrun.DelegationArtifact {
+	reportID := stableID("report", childRunID)
+	report := agentapi.DelegationReport{
+		RunID: childRunID, ReportID: reportID, Capability: capability,
+		Status: agentapi.DelegationCompleted, Completeness: agentapi.DelegationComplete,
+		Summary: "completed by durable worker",
+	}
+	raw, _ := json.Marshal(report)
+	return agentrun.DelegationArtifact{
+		ID: stableID("artifact", reportID), RunID: childRunID,
+		Kind:        agentrun.DelegationReportArtifactKind,
+		Schema:      agentapi.SchemaRef{ID: "delegation.report", Version: 1},
+		ContentHash: hashBytes(raw), Content: raw,
+	}
+}
+
+func TestExecutorQueuedWorkerSettlementIsReplayedByParent(t *testing.T) {
+	persistence := newExecutorPersistence()
+	queue := newScriptedExecutorQueue()
+	queue.claimStarted = make(chan struct{})
+	queue.claimErr = sql.ErrNoRows
+	var runtimeCalls int
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(context.Context, agentapi.RunRequest) (agentapi.RunResult, error) {
+		runtimeCalls++
+		return agentapi.RunResult{}, fmt.Errorf("parent must not execute a worker-owned child")
+	}), persistence, nil)
+	executor.queue = queue
+	executor.workerOwner = "parent-dispatcher"
+	executor.workerLeaseTTL = time.Second
+
+	type executionResult struct {
+		result agentapi.DelegationBatchResult
+		err    error
+	}
+	done := make(chan executionResult, 1)
+	go func() {
+		result, _, err := executor.Execute(
+			executorContext(t, context.Background(), 0),
+			[]agentapi.DelegationTask{{Capability: "knowledge.code.inspect", Objective: "queue-race"}},
+		)
+		done <- executionResult{result: result, err: err}
+	}()
+	select {
+	case <-queue.claimStarted:
+	case <-time.After(time.Second):
+		t.Fatal("parent did not attempt the queue claim")
+	}
+
+	delegationID := stableID("del", "parent-1", "tool-call-1")
+	var record agentrun.DelegationTaskRecord
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		persistence.mu.Lock()
+		record, _ = persistence.records[executorTaskKey("parent-1", delegationID, 0)]
+		persistence.mu.Unlock()
+		if record.ChildRunID != "" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if record.ChildRunID == "" {
+		t.Fatal("delegation admission was not persisted")
+	}
+	worker := newExecutorFixture(t, executorRuntimeFunc(func(_ context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
+		return successfulExecutorResult(request.RunID, "queue-race-worker"), nil
+	}), persistence, nil)
+	worker.queue = queue
+	worker.workerOwner = "worker-instance-1"
+	worker.workerLeaseTTL = time.Second
+	workerDone := make(chan error, 1)
+	go func() {
+		_, err := worker.RunOneQueuedWork(context.Background())
+		workerDone <- err
+	}()
+	select {
+	case err := <-workerDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not settle the queued child")
+	}
+
+	select {
+	case execution := <-done:
+		if execution.err != nil {
+			t.Fatal(execution.err)
+		}
+		if execution.result.Results[0].Status != agentapi.DelegationCompleted {
+			t.Fatalf("result = %+v error=%+v", execution.result.Results[0], execution.result.Results[0].Error)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("parent did not replay the worker settlement")
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("runtime calls = %d, want 0", runtimeCalls)
+	}
+	persistence.mu.Lock()
+	settlements := len(persistence.settlements)
+	persistence.mu.Unlock()
+	if settlements != 1 {
+		t.Fatalf("settlements = %d, want one authoritative worker settlement", settlements)
+	}
+}
+
+func TestExecutorQueuedParentCancellationDoesNotSettleWorkerOwnedTask(t *testing.T) {
+	persistence := newExecutorPersistence()
+	queue := newScriptedExecutorQueue()
+	queue.claimStarted = make(chan struct{})
+	queue.claimErr = sql.ErrNoRows
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(context.Context, agentapi.RunRequest) (agentapi.RunResult, error) {
+		return agentapi.RunResult{}, fmt.Errorf("child must remain queued")
+	}), persistence, nil)
+	executor.queue = queue
+	executor.workerOwner = "parent-dispatcher"
+	executor.workerLeaseTTL = time.Second
+
+	ctx, cancel := context.WithCancel(executorContext(t, context.Background(), 0))
+	done := make(chan error, 1)
+	var result agentapi.DelegationBatchResult
+	go func() {
+		var err error
+		result, _, err = executor.Execute(ctx, []agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect", Objective: "queue-cancel",
+		}})
+		done <- err
+	}()
+	select {
+	case <-queue.claimStarted:
+	case <-time.After(time.Second):
+		t.Fatal("parent did not attempt the queue claim")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("parent did not stop waiting after cancellation")
+	}
+	if result.Results[0].Status != agentapi.DelegationCancelled ||
+		result.Results[0].Error == nil || result.Results[0].Error.Code != ErrorParentCancelled {
+		t.Fatalf("result = %+v error=%+v", result.Results[0], result.Results[0].Error)
+	}
+	persistence.mu.Lock()
+	settlements := len(persistence.settlements)
+	persistence.mu.Unlock()
+	if settlements != 0 {
+		t.Fatalf("settlements = %d, want 0 while worker-owned task is unresolved", settlements)
+	}
+}
+
+func TestExecutorDurableContextBoundsEachOperationAndPreservesDeadline(t *testing.T) {
+	executor := &Executor{durableIOTimeout: 80 * time.Millisecond}
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	durableCtx, stop := executor.durableContext(parent)
+	defer stop()
+	if err := durableCtx.Err(); err != nil {
+		t.Fatalf("durable context inherited parent cancellation: %v", err)
+	}
+	deadline, ok := durableCtx.Deadline()
+	if !ok {
+		t.Fatal("durable context is missing I/O deadline")
+	}
+	if remaining := deadline.Sub(started); remaining <= 0 || remaining > 150*time.Millisecond {
+		t.Fatalf("durable I/O deadline remaining = %v", remaining)
+	}
+
+	requestDeadline := time.Now().Add(20 * time.Millisecond)
+	requestCtx, cancelRequest := context.WithDeadline(context.Background(), requestDeadline)
+	defer cancelRequest()
+	boundedCtx, stopBounded := executor.durableContext(requestCtx)
+	defer stopBounded()
+	boundedDeadline, ok := boundedCtx.Deadline()
+	if !ok || !boundedDeadline.Equal(requestDeadline) {
+		t.Fatalf("deadline = %v, want request deadline %v", boundedDeadline, requestDeadline)
+	}
+}
+
+func TestExecutorCleanupContextAllowsBoundedTerminalWriteAfterDeadline(t *testing.T) {
+	executor := &Executor{durableIOTimeout: 50 * time.Millisecond}
+	expiredCtx, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	if !errors.Is(expiredCtx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("parent err = %v", expiredCtx.Err())
+	}
+
+	cleanupCtx, stop := executor.cleanupContext(expiredCtx)
+	defer stop()
+	if err := cleanupCtx.Err(); err != nil {
+		t.Fatalf("cleanup context inherited expired request deadline: %v", err)
+	}
+	deadline, ok := cleanupCtx.Deadline()
+	if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 100*time.Millisecond {
+		t.Fatalf("cleanup deadline = %v", deadline)
 	}
 }

@@ -3,7 +3,7 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
 > 状态：统一设计入口
-> 更新日期：2026-08-07
+> 更新日期：2026-09-02
 > 来源：CodeLoom `docs/design/agent` 与 Nasuta `docs/design`
 
 ## 1. 文档定位
@@ -54,6 +54,9 @@
 | 文档 | 范围 |
 |---|---|
 | [Agent 编排、协作与契约（当前实现总览）](20-agent-orchestration-current-implementation.zh-CN.md) | 从 CodeLoom 入口到 Nasuta Runtime，串联单 Agent、委派调查、多 Agent DAG、Catalog、Schema/Capability/Task Contract、Workflow 与 Feature Delivery 的职责边界。 |
+| [Agent 委派现状、超时语义与能力演进路线](21-agent-delegation-analysis-and-roadmap.zh-CN.md) | 汇总当前 Parent/Child 委派链路、预算与 deadline 计算、已知边界、必要能力和分阶段实现建议。 |
+| [流程类问题回答质量复盘：四业务流程分析](22-flow-query-answer-quality-review-20260831.zh-CN.md) | 复盘 2026-08-31 流程类回答的延迟与质量问题，并记录截至 2026-09-02 已落地的 Mermaid 输出契约、Durable Root、恢复链路和 evidence guardrail。 |
+| [生产级 Durable Execution 剩余七项能力说明](23-production-durable-execution-remaining-capabilities.zh-CN.md) | 解释 queue 治理、SLO/告警、故障注入、成本治理、Flow 产品语义、Dashboard 渲染矩阵和自然语言 evidence entailment；每项包含大白话解释、流程图和最小验收标准。 |
 
 ## 2.1 专项实施方案
 
@@ -69,6 +72,11 @@
 | 16 | QA、研发任务与多 Agent 统一 Execution Trace | [16-unified-execution-trace-proposal.zh-CN.md](16-unified-execution-trace-proposal.zh-CN.md) |
 | 17 | Nasuta Core、Feature 与 CodeLoom 拆分 | [17-nasuta-core-feature-codeloom-split-proposal.zh-CN.md](17-nasuta-core-feature-codeloom-split-proposal.zh-CN.md) |
 | 18 | 任务驱动多 Agent 架构 | [18-task-driven-multi-agent-architecture.zh-CN.md](18-task-driven-multi-agent-architecture.zh-CN.md) |
+| 19 | Workflow 编排入门说明 | [19-workflow-orchestration-beginner-guide.zh-CN.md](19-workflow-orchestration-beginner-guide.zh-CN.md) |
+| 20 | Agent 编排当前实现总览 | [20-agent-orchestration-current-implementation.zh-CN.md](20-agent-orchestration-current-implementation.zh-CN.md) |
+| 21 | Agent 委派、预算、超时与演进路线 | [21-agent-delegation-analysis-and-roadmap.zh-CN.md](21-agent-delegation-analysis-and-roadmap.zh-CN.md) |
+| 22 | 流程类问题回答质量复盘 | [22-flow-query-answer-quality-review-20260831.zh-CN.md](22-flow-query-answer-quality-review-20260831.zh-CN.md) |
+| 23 | 生产级 Durable Execution 剩余七项能力 | [23-production-durable-execution-remaining-capabilities.zh-CN.md](23-production-durable-execution-remaining-capabilities.zh-CN.md) |
 
 截至 2026-08-07，差距审计剩余 12 项：P1 已清零，P2 9 项，后置分布式能力 3 项。具体证据、边界和建议顺序以方案 14 为准。
 

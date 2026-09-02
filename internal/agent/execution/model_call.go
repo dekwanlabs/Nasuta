@@ -36,7 +36,11 @@ func (agent *Agent) callModel(
 	}
 	var callReservation agentapi.RunBudgetCallReservation
 	if gate := agentapi.RunBudgetUsageGateFromContext(ctx); gate != nil {
-		effectiveMaxTokens, limitErr := agent.limitModelOutput(inputTokens, maxTokens, gate)
+		phase := agentapi.RunBudgetPhaseDefault
+		if llm.UsagePhaseFromContext(ctx) == llm.PhaseForcedConclusion {
+			phase = agentapi.RunBudgetPhaseAnswer
+		}
+		effectiveMaxTokens, limitErr := agent.limitModelOutputForPhase(inputTokens, maxTokens, gate, phase)
 		if limitErr != nil {
 			return nil, limitErr
 		}
@@ -49,7 +53,11 @@ func (agent *Agent) callModel(
 		if estimateErr != nil {
 			return nil, fmt.Errorf("estimate model call budget: %w", estimateErr)
 		}
-		callReservation, err = gate.ReserveCall(estimate)
+		if phased, ok := gate.(agentapi.RunBudgetPhasedGate); ok {
+			callReservation, err = phased.ReserveCallForPhase(estimate, phase)
+		} else {
+			callReservation, err = gate.ReserveCall(estimate)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("reserve model call budget: %w", err)
 		}
@@ -67,6 +75,13 @@ func (agent *Agent) callModel(
 			accountingErr = errors.Join(usageErr, callReservation.Release())
 		} else {
 			accountingErr = callReservation.Settle(actual)
+			if accountingErr != nil {
+				// A provider can report more usage than the admission estimate,
+				// or the durable accounting write can fail before commit. Release
+				// is idempotent after a committed settlement and prevents an
+				// uncommitted reservation from leaking on the error path.
+				accountingErr = errors.Join(accountingErr, callReservation.Release())
+			}
 		}
 	} else {
 		accountingErr = callReservation.Release()
@@ -81,6 +96,14 @@ func (agent *Agent) callModel(
 }
 
 func (agent *Agent) limitModelOutput(inputTokens, requested int, gate agentapi.RunBudgetUsageGate) (int, error) {
+	return agent.limitModelOutputForPhase(inputTokens, requested, gate, agentapi.RunBudgetPhaseDefault)
+}
+
+func (agent *Agent) limitModelOutputForPhase(
+	inputTokens, requested int,
+	gate agentapi.RunBudgetUsageGate,
+	phase agentapi.RunBudgetPhase,
+) (int, error) {
 	if requested <= 0 {
 		return requested, nil
 	}
@@ -89,6 +112,9 @@ func (agent *Agent) limitModelOutput(inputTokens, requested int, gate agentapi.R
 		return requested, nil
 	}
 	available := availability.Available()
+	if phased, ok := gate.(agentapi.RunBudgetPhasedAvailability); ok {
+		available = phased.AvailableForPhase(phase)
+	}
 	input := int64(inputTokens)
 	minimumOutput := int64(0)
 	if minimum, ok := gate.(agentapi.RunBudgetMinimum); ok {

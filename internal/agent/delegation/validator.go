@@ -69,11 +69,36 @@ func (validator *Validator) Validate(
 	evidence map[string]tool.EvidenceUnit,
 	highRisk bool,
 ) (agentapi.DelegationValidation, error) {
+	return validator.validate(ctx, reports, evidence, nil, nil, highRisk)
+}
+
+// ValidateWithContext adds the server-owned admitted content and bounded child
+// observations used to distinguish citation metadata coverage from evidence
+// material that a semantic verifier can actually read.
+func (validator *Validator) ValidateWithContext(
+	ctx context.Context,
+	reports []agentapi.DelegationReport,
+	evidence map[string]tool.EvidenceUnit,
+	contextIndex map[string]agentapi.ContextBlock,
+	observations []agentapi.EvidenceObservation,
+	highRisk bool,
+) (agentapi.DelegationValidation, error) {
+	return validator.validate(ctx, reports, evidence, contextIndex, observations, highRisk)
+}
+
+func (validator *Validator) validate(
+	ctx context.Context,
+	reports []agentapi.DelegationReport,
+	evidence map[string]tool.EvidenceUnit,
+	contextIndex map[string]agentapi.ContextBlock,
+	observations []agentapi.EvidenceObservation,
+	highRisk bool,
+) (agentapi.DelegationValidation, error) {
 	validation := agentapi.DelegationValidation{}
 	reasons := map[string]struct{}{}
 	claimIDs := make(map[string]struct{})
 	claimHasCitation := make(map[string]bool)
-	var findings, cited, structured int
+	var findings, cited, bodyAvailable, structured int
 	var entries []claimEntry
 	unstructuredByReport := make(map[int]bool)
 
@@ -92,16 +117,27 @@ func (validator *Validator) Validate(
 			fullID := report.ReportID + "/" + finding.ID
 			claimIDs[fullID] = struct{}{}
 			validCitations := 0
+			materialCitations := 0
 			for _, citation := range finding.Citations {
 				unit, ok := evidence[citation]
-				if ok && unit.ContentHash != "" {
-					validCitations++
+				if !ok || unit.ContentHash == "" {
+					continue
+				}
+				validCitations++
+				if evidenceMaterialAvailable(citation, unit, contextIndex, observations) {
+					materialCitations++
 				}
 			}
 			if validCitations > 0 {
 				cited++
+				// Explicit conflicts are allowed to reference an admitted evidence
+				// unit even when its body is not available in this process. Body
+				// availability is tracked separately for semantic verification.
 				claimHasCitation[fullID] = true
-			} else if finding.Critical {
+			}
+			if materialCitations > 0 {
+				bodyAvailable++
+			} else if validCitations == 0 && finding.Critical {
 				reasons[ReasonMissingCriticalCitation] = struct{}{}
 			}
 			if finding.StructuredClaim == nil {
@@ -128,6 +164,7 @@ func (validator *Validator) Validate(
 	}
 	if findings > 0 {
 		validation.CitationCoverage = float64(cited) / float64(findings)
+		validation.EvidenceBodyCoverage = float64(bodyAvailable) / float64(findings)
 		validation.StructuredClaimCoverage = float64(structured) / float64(findings)
 	}
 

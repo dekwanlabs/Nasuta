@@ -732,7 +732,7 @@ func sameDelegationReservation(
 	requested DelegationReservation,
 ) error {
 	if !existing.Admitted ||
-		existing.ChildRunID != requested.ChildRunID ||
+		existing.Reservation.ChildRunID != requested.ChildRunID ||
 		existing.Capability != requested.Capability ||
 		existing.CapabilityHash != requested.CapabilityHash ||
 		existing.ObjectiveHash != requested.ObjectiveHash ||

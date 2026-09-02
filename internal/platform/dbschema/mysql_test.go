@@ -37,8 +37,8 @@ func TestSchemaGroupsContainCreateStatements(t *testing.T) {
 		{group: GroupQASession, tables: []string{"qa_sessions", "qa_messages", "qa_turns", "qa_session_history_terms", "qa_session_history_index_outbox"}},
 		{group: GroupCatalogControl, tables: []string{"catalog_rollouts", "catalog_audit"}},
 		{group: GroupQARun, tables: []string{
-			"agent_definitions", "agent_runs", "agent_delegation_tasks",
-			"agent_run_artifacts", "agent_steps", "agent_llm_calls",
+			"agent_definitions", "agent_runs", "agent_run_budget_ledger", "agent_run_budget_reservations", "agent_delegation_tasks",
+			"agent_delegation_attempts", "agent_delegation_checkpoints", "agent_run_checkpoints", "agent_work_items", "agent_run_artifacts", "agent_steps", "agent_llm_calls",
 		}},
 		{group: GroupWorkflow, tables: []string{
 			"workflow_definitions", "workflow_runs",
@@ -79,8 +79,8 @@ func TestManagedSchemaContainsFortyThreeTables(t *testing.T) {
 	for _, statements := range mysqlSchema {
 		total += len(statements)
 	}
-	if total != 43 {
-		t.Fatalf("managed schema table count=%d want=43", total)
+	if total != 49 {
+		t.Fatalf("managed schema table count=%d want=49", total)
 	}
 }
 

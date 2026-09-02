@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
@@ -69,6 +70,15 @@ type qaState struct {
 	current  dashboard.QARuntime
 }
 
+type durableChildWorker interface {
+	StartWorker(context.Context, time.Duration)
+}
+
+type durableRecoveryWorker interface {
+	StartDurableRecoveryWorker(context.Context, time.Duration)
+	StopDurableRecoveryWorker()
+}
+
 type workflowRuntime struct {
 	catalog     *workflow.Catalog
 	pipeline    *pipeline.Executor
@@ -97,6 +107,11 @@ type Platform struct {
 	qa       qaState
 	flow     workflowRuntime
 	delivery featureDeliveryRuntime
+
+	workerMu               sync.Mutex
+	workerCtx              context.Context
+	delegationWorker       durableChildWorker
+	delegationWorkerCancel context.CancelFunc
 }
 
 // New constructs the reusable platform without registering scenario routes.
@@ -313,6 +328,7 @@ func (p *Platform) Close() error {
 	if p == nil {
 		return nil
 	}
+	p.stopAgentWorkers()
 	if p.flow.service != nil {
 		p.flow.service.Close()
 	}

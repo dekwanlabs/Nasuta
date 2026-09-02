@@ -52,6 +52,8 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"items":{"type":"string","minLength":1,"maxLength":256}
 					},
 					"delegation_id":{"type":"string","minLength":1,"maxLength":64},
+					"output_kind":{"type":"string","enum":["flow"]},
+					"max_hops":{"type":"integer","minimum":1,"maximum":32},
 					"parent_run_id":{"type":"string","minLength":1,"maxLength":64},
 					"task_index":{"type":"integer","minimum":0},
 					"entities":{
@@ -399,7 +401,8 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							},
 							"additionalProperties":false
 						}
-					}
+					},
+					"flow":{"$ref":"#/$defs/flow"}
 				},
 				"additionalProperties":false,
 				"$defs":{
@@ -424,6 +427,43 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"summary":{"type":"string","minLength":1},
 							"evidence_id":{"type":"string","pattern":"^ev_[a-f0-9]{13}$"},
 							"identity":{"$ref":"#/$defs/evidence_identity"}
+						},
+						"additionalProperties":false
+					},
+					"flow_node":{
+						"type":"object",
+						"required":["id","label","kind"],
+						"properties":{
+							"id":{"type":"string","minLength":1,"maxLength":128},
+							"label":{"type":"string","minLength":1,"maxLength":256},
+							"kind":{"type":"string","minLength":1,"maxLength":64},
+							"evidence_refs":{"type":"array","maxItems":20,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}}
+						},
+						"additionalProperties":false
+					},
+					"flow_edge":{
+						"type":"object",
+						"required":["from","to","evidence_state"],
+						"properties":{
+							"from":{"type":"string","minLength":1,"maxLength":128},
+							"to":{"type":"string","minLength":1,"maxLength":128},
+							"protocol":{"type":"string","maxLength":128},
+							"sync_mode":{"enum":["sync","async","unknown"]},
+							"evidence_refs":{"type":"array","maxItems":20,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}},
+							"evidence_state":{"enum":["verified","inferred","unresolved"]}
+						},
+						"additionalProperties":false
+					},
+					"flow":{
+						"type":"object",
+						"required":["subject","status","nodes","edges","open_hops","confidence"],
+						"properties":{
+							"subject":{"type":"string","minLength":1,"maxLength":256},
+							"status":{"enum":["complete","partial"]},
+							"nodes":{"type":"array","maxItems":32,"items":{"$ref":"#/$defs/flow_node"}},
+							"edges":{"type":"array","maxItems":32,"items":{"$ref":"#/$defs/flow_edge"}},
+							"open_hops":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":512}},
+							"confidence":{"enum":["low","medium","high"]}
 						},
 						"additionalProperties":false
 					},
@@ -486,7 +526,8 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"items":{"type":"string","minLength":1,"maxLength":2000}
 					},
 					"usage":{"$ref":"#/$defs/usage"},
-					"error":{"$ref":"#/$defs/error"}
+					"error":{"$ref":"#/$defs/error"},
+					"flow":{"$ref":"#/$defs/flow"}
 				},
 				"allOf":[{
 					"if":{"properties":{"status":{"const":"completed"}},"required":["status"]},
@@ -494,6 +535,43 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 				}],
 				"additionalProperties":false,
 				"$defs":{
+					"flow_node":{
+						"type":"object",
+						"required":["id","label","kind"],
+						"properties":{
+							"id":{"type":"string","minLength":1,"maxLength":128},
+							"label":{"type":"string","minLength":1,"maxLength":256},
+							"kind":{"type":"string","minLength":1,"maxLength":64},
+							"evidence_refs":{"type":"array","maxItems":20,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}}
+						},
+						"additionalProperties":false
+					},
+					"flow_edge":{
+						"type":"object",
+						"required":["from","to","evidence_state"],
+						"properties":{
+							"from":{"type":"string","minLength":1,"maxLength":128},
+							"to":{"type":"string","minLength":1,"maxLength":128},
+							"protocol":{"type":"string","maxLength":128},
+							"sync_mode":{"enum":["sync","async","unknown"]},
+							"evidence_refs":{"type":"array","maxItems":20,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}},
+							"evidence_state":{"enum":["verified","inferred","unresolved"]}
+						},
+						"additionalProperties":false
+					},
+					"flow":{
+						"type":"object",
+						"required":["subject","status","nodes","edges","open_hops","confidence"],
+						"properties":{
+							"subject":{"type":"string","minLength":1,"maxLength":256},
+							"status":{"enum":["complete","partial"]},
+							"nodes":{"type":"array","maxItems":32,"items":{"$ref":"#/$defs/flow_node"}},
+							"edges":{"type":"array","maxItems":32,"items":{"$ref":"#/$defs/flow_edge"}},
+							"open_hops":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":512}},
+							"confidence":{"enum":["low","medium","high"]}
+						},
+						"additionalProperties":false
+					},
 					"structured_claim":{
 						"type":"object",
 						"required":["schema","subject","predicate","value"],
@@ -588,7 +666,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					"decision_question":{"type":"string","minLength":1,"maxLength":2000},
 					"claims":{
 						"type":"array",
-						"maxItems":8,
+						"maxItems":10,
 						"items":{
 							"type":"object",
 							"required":["id","statement","citations"],
@@ -641,7 +719,8 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							"properties":{
 								"kind":{"type":"string","minLength":1,"maxLength":128},
 								"reference":{"type":"string","minLength":1,"maxLength":512},
-								"summary":{"type":"string","minLength":1,"maxLength":8000}
+								"summary":{"type":"string","minLength":1,"maxLength":8000},
+									"body":{"type":"string","maxLength":8000}
 							},
 							"additionalProperties":false
 						}
@@ -667,7 +746,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					"summary":{"type":"string","minLength":1,"maxLength":1000},
 					"verdicts":{
 						"type":"array",
-						"maxItems":8,
+						"maxItems":10,
 						"items":{
 							"type":"object",
 							"required":["claim_ids","decision","rationale","evidence_refs"],

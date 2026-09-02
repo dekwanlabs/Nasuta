@@ -13,6 +13,7 @@ var (
 	ErrDelegationNotAdmitted        = errors.New("agent: delegation task was not admitted")
 	ErrDelegationAccounting         = errors.New("agent: delegation usage exceeds its reservation")
 	ErrEvidenceLedgerConflict       = errors.New("agent: evidence ledger conflicts with persisted artifact")
+	ErrWorkItemConflict             = errors.New("agent: work item identity conflicts with persisted queue item")
 )
 
 // DelegationReservation is the immutable grant persisted before a child starts.
@@ -89,4 +90,95 @@ type DelegationTaskRecord struct {
 	SettledUsage     *agentapi.Usage
 	ReportArtifactID string
 	Existing         bool `json:"-"`
+}
+
+// DelegationAttemptStatus is the durable lifecycle state of one child attempt.
+type DelegationAttemptStatus string
+
+const (
+	DelegationAttemptRunning     DelegationAttemptStatus = "running"
+	DelegationAttemptSucceeded   DelegationAttemptStatus = "succeeded"
+	DelegationAttemptFailed      DelegationAttemptStatus = "failed"
+	DelegationAttemptCancelled   DelegationAttemptStatus = "cancelled"
+	DelegationAttemptTimedOut    DelegationAttemptStatus = "timed_out"
+	DelegationAttemptInterrupted DelegationAttemptStatus = "interrupted"
+)
+
+// DelegationAttemptRecord makes retries observable without changing the
+// logical delegation task identity. attempt_no starts at one.
+type DelegationAttemptRecord struct {
+	ParentRunID      string
+	DelegationID     string
+	TaskIndex        int
+	AttemptNo        int
+	AttemptID        string
+	ChildRunID       string
+	Status           DelegationAttemptStatus
+	Retryable        bool
+	ErrorCode        string
+	ErrorMessage     string
+	StartedAt        string
+	EndedAt          string
+	NextAttemptAt    string
+	Usage            *agentapi.Usage
+	ReportArtifactID string
+	Existing         bool
+}
+
+// DelegationAttemptStart is the idempotent admission input for one attempt.
+type DelegationAttemptStart struct {
+	ParentRunID  string
+	DelegationID string
+	TaskIndex    int
+	AttemptNo    int
+	AttemptID    string
+	ChildRunID   string
+	StartedAt    string
+}
+
+// DelegationAttemptFinish closes one attempt. A retryable failed attempt does
+// not settle the logical task; only the final attempt produces a report.
+type DelegationAttemptFinish struct {
+	ParentRunID      string
+	DelegationID     string
+	TaskIndex        int
+	AttemptNo        int
+	AttemptID        string
+	Status           DelegationAttemptStatus
+	Retryable        bool
+	ErrorCode        string
+	ErrorMessage     string
+	EndedAt          string
+	NextAttemptAt    string
+	Usage            *agentapi.Usage
+	ReportArtifactID string
+}
+
+// DelegationCheckpointStatus is the parent-side durable handoff state.
+type DelegationCheckpointStatus string
+
+const (
+	DelegationCheckpointPending     DelegationCheckpointStatus = "pending"
+	DelegationCheckpointCompleted   DelegationCheckpointStatus = "completed"
+	DelegationCheckpointUnavailable DelegationCheckpointStatus = "unavailable"
+	DelegationCheckpointInterrupted DelegationCheckpointStatus = "interrupted"
+)
+
+// DelegationCheckpoint records the point at which the parent delegated work.
+// It is deliberately independent from Agent StepNo so older callers can use
+// the recovery boundary even when a step number is not available at the tool
+// boundary.
+type DelegationCheckpoint struct {
+	ParentRunID      string
+	DelegationID     string
+	TaskIndex        int
+	InvocationID     string
+	RequestHash      string
+	Status           DelegationCheckpointStatus
+	ChildRunID       string
+	ReportArtifactID string
+	ErrorCode        string
+	ErrorMessage     string
+	CreatedAt        string
+	UpdatedAt        string
 }

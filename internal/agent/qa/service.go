@@ -40,6 +40,7 @@ type Service struct {
 	domainKnowledge    string
 	toolPruningEnabled bool
 	delegationEnabled  bool
+	delegationBudget   agentapi.RunLimits
 	definitions        DefinitionResolver
 	agentRef           agentapi.DefinitionRef
 	definitionErr      error
@@ -68,7 +69,12 @@ func New(d Deps) *Service {
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
 		toolPruningEnabled: platformSettings.ToolPruningEnabled,
 		delegationEnabled:  platformSettings.DelegationEnabled,
-		history:            d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
+		delegationBudget: agentapi.RunLimits{
+			MaxTotalTokens:      platformSettings.DelegationMaxTotalTokens,
+			MaxCostMicros:       platformSettings.DelegationMaxTotalCostMicros,
+			ParentAnswerReserve: platformSettings.DelegationParentAnswerReserve,
+		},
+		history: d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
 		outputReserve:   platformSettings.LLMAnswerMaxTokens,
 		domainKnowledge: platformSettings.DomainKnowledge,
 		definitions:     d.Definitions, agentRef: d.Agent,
@@ -196,10 +202,11 @@ func (svc *Service) AskWithContext(ctx context.Context, question string, convers
 
 // Ask starts one QA run with optional trusted scenario context.
 func (svc *Service) Ask(ctx context.Context, request Request) (*AskResult, error) {
+	requestStartedAt := time.Now()
 	if svc.runtimeErr != nil {
 		return nil, svc.runtimeErr
 	}
-	prepared, err := svc.prepare(ctx, request)
+	prepared, err := svc.prepare(ctx, request, requestStartedAt)
 	if err != nil {
 		return nil, err
 	}

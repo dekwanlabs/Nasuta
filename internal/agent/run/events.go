@@ -116,6 +116,7 @@ type ExecutionEvent struct {
 	ReportBytes             int            `json:"report_bytes,omitempty"`
 	Completeness            string         `json:"completeness,omitempty"`
 	CitationCoverage        float64        `json:"citation_coverage,omitempty"`
+	EvidenceBodyCoverage    float64        `json:"evidence_body_coverage,omitempty"`
 	StructuredClaimCoverage float64        `json:"structured_claim_coverage,omitempty"`
 	ConflictCount           int            `json:"conflict_count,omitempty"`
 	RequiresVerification    bool           `json:"requires_verification,omitempty"`

@@ -3,6 +3,8 @@ package execution
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -49,6 +51,8 @@ type Config struct {
 	OutputPriceMicrosPerMillionTokens int64
 	BudgetCheck                       func() error
 	DisableLegacyAnswerRecovery       bool
+	// Checkpoint is called after each completed logical turn.
+	Checkpoint func(LogicalLoopCheckpoint) error
 }
 
 // ConversationContext carries recalled archived history and recent turns.
@@ -132,6 +136,7 @@ type RunResult struct {
 	EvidenceConflicts    []evidence.Conflict
 	References           []tool.Reference
 	DelegationAdoptions  []agentapi.DelegationAdoption
+	Flow                 *agentapi.FlowIR
 	ForcedConclusion     bool
 	Aborted              bool
 	Err                  error
@@ -140,8 +145,13 @@ type RunResult struct {
 
 // Input is a fully compiled request for the execution loop.
 type Input struct {
+	// OriginalRequest is persisted with logical checkpoints so a recovery worker
+	// can rebuild the immutable definition/tool contract without guessing from
+	// provider-facing messages.
+	OriginalRequest    *agentapi.RunRequest
 	Question           string
 	OutputMode         agentapi.RunOutputMode
+	OutputContract     agentapi.RunOutputContract
 	Messages           []llm.Message
 	EvidenceContent    string
 	EvidenceUnits      []tool.EvidenceUnit
@@ -257,18 +267,122 @@ func (agent *Agent) runWithSnapshot(
 }
 
 // RunCompiled executes a request whose messages and evidence are already assembled.
+// RunCompiledFromCheckpoint resumes a parent logical loop from its last
+// durable boundary. The checkpoint contains only server-owned execution state;
+// the caller must provide the immutable tool snapshot captured for the run.
+func (agent *Agent) RunCompiledFromCheckpoint(
+	ctx context.Context,
+	runID string,
+	checkpoint LogicalLoopCheckpoint,
+	toolSnapshot tool.Snapshot,
+) (*RunResult, error) {
+	stateData, err := UnmarshalLogicalLoopState(checkpoint.State)
+	if err != nil {
+		return nil, fmt.Errorf("decode logical loop checkpoint: %w", err)
+	}
+	if strings.TrimSpace(runID) == "" {
+		runID = stateData.Input.Question
+	}
+	runStarted := time.Now()
+	runTimeout := agent.cfg.Timeout
+	if runTimeout <= 0 {
+		runTimeout = 5 * time.Minute
+	}
+	runCtx, runCancel := context.WithTimeout(ctx, runTimeout)
+	defer runCancel()
+	loopTimeout := runTimeout - agent.cfg.AnswerReserve
+	if loopTimeout <= 0 {
+		loopTimeout = runTimeout
+	}
+	loopCtx, loopCancel := context.WithTimeout(runCtx, loopTimeout)
+	defer loopCancel()
+	state := agent.prepareLoop(ctx, runCtx, loopCtx, runID, stateData.Input, toolSnapshot, runStarted)
+	state.messages = append([]llm.Message(nil), stateData.Messages...)
+	state.stepSeq = stateData.StepSeq
+	if state.stepSeq == 0 {
+		state.stepSeq = stateData.StepNo
+	}
+	state.result.Answer = stateData.Answer
+	state.result.References = append([]tool.Reference(nil), stateData.References...)
+	state.result.Flow = cloneExecutionFlow(stateData.Flow)
+	state.result.DelegationAdoptions = cloneDelegationAdoptions(stateData.DelegationAdoptions)
+	state.delegatedFlows = cloneExecutionFlows(stateData.DelegatedFlows)
+	state.result.Steps = stateData.StepNo
+	state.answered = stateData.Answered
+	state.toolBudgetExhausted = stateData.ToolBudgetExhausted
+	state.startStep = stateData.StepNo + 1
+	if state.startStep < 1 {
+		state.startStep = 1
+	}
+	state.evidenceLedger = newRunEvidenceLedger(stateData.EvidenceUnits, stateData.EvidenceConflicts)
+	state.answerContract = &exactAnswerContract{}
+	state.answerContract.Add(stateData.AnswerContract)
+	state.answerContract.restoreEvaluated(stateData.EvaluatedAdoptions)
+	if stateData.Answered || strings.EqualFold(checkpoint.Phase, "completed") {
+		agent.finalizeLoop(state)
+		return state.result, nil
+	}
+	if err := agent.runTurns(state); err != nil {
+		state.result.Err = err
+		state.result.DelegationAdoptions = state.answerContract.UnknownAdoptions("parent_run_failed")
+		agent.finalizeLoop(state)
+		return state.result, err
+	}
+	agent.finishLoop(state)
+	if err := agent.checkpointState(state, "completed", state.result.Steps); err != nil {
+		state.result.Err = err
+		return state.result, err
+	}
+	return state.result, nil
+}
+
 func (agent *Agent) RunCompiled(
 	ctx context.Context,
 	runID string,
 	input Input,
 	toolSnapshot tool.Snapshot,
 ) (*RunResult, error) {
+	return agent.runCompiled(ctx, runID, input, nil, toolSnapshot)
+}
+
+// RunCompiledWithRequest is the durable variant of RunCompiled. The original
+// request is carried into every logical checkpoint so recovery can rebuild the
+// exact definition, permissions, policy and tool scope rather than infer them
+// from provider-facing messages.
+func (agent *Agent) RunCompiledWithRequest(
+	ctx context.Context,
+	runID string,
+	input Input,
+	request *agentapi.RunRequest,
+	toolSnapshot tool.Snapshot,
+) (*RunResult, error) {
+	return agent.runCompiled(ctx, runID, input, request, toolSnapshot)
+}
+
+func (agent *Agent) runCompiled(
+	ctx context.Context,
+	runID string,
+	input Input,
+	request *agentapi.RunRequest,
+	toolSnapshot tool.Snapshot,
+) (*RunResult, error) {
 	runStarted := time.Now()
-	runCtx, runCancel := context.WithTimeout(ctx, agent.cfg.Timeout)
+	runTimeout := agent.cfg.Timeout
+	if runTimeout <= 0 {
+		runTimeout = 5 * time.Minute
+	}
+	runCtx, runCancel := context.WithTimeout(ctx, runTimeout)
 	defer runCancel()
-	loopCtx, loopCancel := context.WithTimeout(runCtx, agent.cfg.Timeout-agent.cfg.AnswerReserve)
+	loopTimeout := runTimeout - agent.cfg.AnswerReserve
+	if loopTimeout <= 0 {
+		loopTimeout = runTimeout
+	}
+	loopCtx, loopCancel := context.WithTimeout(runCtx, loopTimeout)
 	defer loopCancel()
 
+	if request != nil {
+		input.OriginalRequest = request
+	}
 	state := agent.prepareLoop(
 		ctx,
 		runCtx,
@@ -290,6 +404,10 @@ func (agent *Agent) RunCompiled(
 		return state.result, err
 	}
 	agent.finishLoop(state)
+	if err := agent.checkpointState(state, "completed", state.result.Steps); err != nil {
+		state.result.Err = err
+		return state.result, err
+	}
 	return state.result, nil
 }
 

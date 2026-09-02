@@ -73,6 +73,7 @@ func (p *Platform) AuthenticatedAPI(mux *http.ServeMux) APIRegistrar {
 // Serve runs background platform work and serves the already-composed root mux.
 func (p *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 	workflowRecoveryCutoff := time.Now().UTC()
+	p.startAgentWorkers(ctx)
 	go p.startDailySyncTicker(ctx)
 	p.delivery.start(ctx)
 	if p.history != nil {
@@ -83,6 +84,10 @@ func (p *Platform) Serve(ctx context.Context, mux *http.ServeMux) error {
 	// address conflicts deterministic and prevents a misleading startup log.
 	listener, err := net.Listen("tcp", p.cfg.HTTPAddr)
 	if err != nil {
+		// Workers are started before the listener so recovery can be ready as
+		// soon as Serve returns successfully. If binding fails, however, this
+		// invocation must not leave child/recovery workers consuming queue work.
+		p.stopAgentWorkers()
 		return fmt.Errorf("http server: listen tcp %s: %w", p.cfg.HTTPAddr, err)
 	}
 

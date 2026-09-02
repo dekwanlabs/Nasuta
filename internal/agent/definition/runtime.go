@@ -31,6 +31,10 @@ type Runtime struct {
 	runStore    *run.Store
 	usageStore  llm.UsageRecorder
 	hub         *run.Hub
+
+	recoveryMu         sync.Mutex
+	recoveryCancel     context.CancelFunc
+	recoveryGeneration uint64
 }
 
 // Resolver resolves one exact immutable definition version.
@@ -44,6 +48,7 @@ type runtimeSettings struct {
 	provider                    string
 	model                       string
 	answerReserve               time.Duration
+	conclusionMaxTokens         int
 	disableLegacyAnswerRecovery bool
 }
 
@@ -74,6 +79,7 @@ type activeRun struct {
 	recorder  *usageRecorder
 	trace     *runtrace.Scope
 	ownsTrace bool
+	budget    agentapi.RunBudgetGate
 
 	mu                   sync.Mutex
 	executed             bool
@@ -130,6 +136,7 @@ func NewRuntime(
 			baseURL: settings.LLMBaseURL, apiKey: settings.LLMAPIKey,
 			provider: settings.LLMProvider, model: settings.LLMModel,
 			answerReserve:               answerReserve,
+			conclusionMaxTokens:         settings.LLMConclusionMaxTokens,
 			disableLegacyAnswerRecovery: settings.DisableLegacyAnswerRecovery,
 		},
 		runStore:   runStore,

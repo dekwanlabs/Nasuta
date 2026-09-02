@@ -267,7 +267,8 @@ func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string
 	}, nil
 }
 
-func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool, evidencePlan *domain.EvidencePlan, writeRequested bool, allowEmit func(string, any) error, r *http.Request) {
+func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool,
+	evidencePlan *domain.EvidencePlan, writeRequested bool, allowEmit func(string, any) error, r *http.Request) {
 	runtime := handler.currentQARuntime()
 	if runtime.QA == nil {
 		_ = allowEmit("run.finished", agentrun.Terminal{Status: agentrun.StatusFailed, Error: "QA service not initialized"})

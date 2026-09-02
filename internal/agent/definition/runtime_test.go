@@ -39,6 +39,28 @@ func testRuntimeSettings(baseURL string) *config.PlatformSettings {
 	}
 }
 
+func TestEffectiveConclusionTokens(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured int
+		answerMax  int
+		want       int
+	}{
+		{name: "default reserves a quarter", configured: 0, answerMax: 12000, want: 3000},
+		{name: "configured value is preserved", configured: 2048, answerMax: 12000, want: 2048},
+		{name: "configured value is capped by answer ceiling", configured: 16000, answerMax: 12000, want: 12000},
+		{name: "no answer ceiling leaves configured value", configured: 2048, answerMax: 0, want: 2048},
+		{name: "no budgets remain unset", configured: 0, answerMax: 0, want: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := effectiveConclusionTokens(test.configured, test.answerMax); got != test.want {
+				t.Fatalf("effectiveConclusionTokens(%d, %d) = %d, want %d", test.configured, test.answerMax, got, test.want)
+			}
+		})
+	}
+}
+
 func testReviewerDefinition(t *testing.T, mutate func(*agentapi.Definition)) agentapi.Definition {
 	t.Helper()
 	definition := agentapi.Definition{
@@ -602,6 +624,42 @@ func TestDefinitionRuntimeExecutesStructuredOutput(t *testing.T) {
 	}
 }
 
+func TestDefinitionRuntimeUsesRunOutputTokenCeilingInProviderRequest(t *testing.T) {
+	var maxTokens int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		defer request.Body.Close()
+		var body struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode provider request: %v", err)
+			return
+		}
+		maxTokens = body.MaxTokens
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"coverage\\\":[],\\\"findings\\\":[],\\\"uncertainties\\\":[],\\\"summary\\\":\\\"pass\\\"}\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(writer, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	definition := testReviewerDefinition(t, nil)
+	runtime := newTestDefinitionRuntime(
+		t, definition, tool.NewRegistry(), testRuntimeSettings(server.URL), nil,
+	)
+	request := testDefinitionRequest(definition)
+	request.Limits.MaxOutputTokens = 96
+	result, err := runtime.Run(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != agentapi.RunSucceeded {
+		t.Fatalf("result = %+v", result)
+	}
+	if maxTokens != 96 {
+		t.Fatalf("provider max_tokens = %d, want 96", maxTokens)
+	}
+}
+
 func TestDefinitionRuntimeEncodesPlainTextStringOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		defer request.Body.Close()
@@ -983,6 +1041,43 @@ func TestAnswerReserveForDelegatedChild(t *testing.T) {
 	}
 }
 
+func TestPrepareRunLimitsAllowsNarrowOutputCeiling(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	definition := testReviewerDefinition(t, nil)
+	limits, err := prepareRunLimits(
+		definition,
+		agentapi.RunPolicy{},
+		agentapi.RunLimits{MaxOutputTokens: 96},
+		100*time.Millisecond,
+		now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.MaxOutputTokens != 96 {
+		t.Fatalf("max output tokens = %d, want 96", limits.MaxOutputTokens)
+	}
+	if _, err := prepareRunLimits(
+		definition,
+		agentapi.RunPolicy{},
+		agentapi.RunLimits{MaxOutputTokens: 257},
+		100*time.Millisecond,
+		now,
+	); err == nil || !strings.Contains(err.Error(), "run max_output_tokens exceeds") {
+		t.Fatalf("output ceiling error = %v", err)
+	}
+}
+
+func TestEffectiveOutputTokensUsesRunCeiling(t *testing.T) {
+	definition := testReviewerDefinition(t, nil)
+	if got := effectiveOutputTokens(definition, agentapi.RunLimits{}); got != 256 {
+		t.Fatalf("default output tokens = %d, want 256", got)
+	}
+	if got := effectiveOutputTokens(definition, agentapi.RunLimits{MaxOutputTokens: 96}); got != 96 {
+		t.Fatalf("narrow output tokens = %d, want 96", got)
+	}
+}
+
 func TestPrepareRunLimitsKeepsInputAndContextBudgetsSeparate(t *testing.T) {
 	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
 	definition := testReviewerDefinition(t, nil)
@@ -1091,5 +1186,48 @@ func TestDefinitionRuntimeDoesNotRepairSchemaAfterContinuation(t *testing.T) {
 	if calls != 2 || result.Status != agentapi.RunFailed || result.Error == nil ||
 		result.Error.Code != "invalid_output" || len(result.Output) != 0 {
 		t.Fatalf("calls=%d result=%+v", calls, result)
+	}
+}
+
+func TestRunStartMismatchIdentifiesOutputContract(t *testing.T) {
+	prepared := agentapi.RunStart{
+		RunID: "run-1",
+		Input: json.RawMessage(`{}`),
+		Policy: agentapi.RunPolicy{OutputContract: agentapi.RunOutputContract{
+			Kind: "flow", RequireMermaid: true, Subjects: []string{"RGB"}, MaxHops: 6,
+		}},
+	}
+	actual := prepared
+	actual.Policy.OutputContract = agentapi.RunOutputContract{}
+
+	if got := runStartMismatch(actual, prepared); got != "policy.output_contract" {
+		t.Fatalf("mismatch = %q, want policy.output_contract", got)
+	}
+}
+
+func TestPrepareRunLimitsRecoveryPreservesAbsoluteDeadline(t *testing.T) {
+	origin := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	now := origin.Add(1500 * time.Millisecond)
+	definition := testReviewerDefinition(t, func(definition *agentapi.Definition) {
+		definition.Budget.Timeout = 2 * time.Second
+	})
+	requested := agentapi.RunLimits{Deadline: origin.Add(2 * time.Second)}
+	limits, err := prepareRunLimitsAt(definition, agentapi.RunPolicy{}, requested, 100*time.Millisecond, origin, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !limits.Deadline.Equal(origin.Add(2 * time.Second)) {
+		t.Fatalf("deadline = %s, want %s", limits.Deadline, origin.Add(2*time.Second))
+	}
+	if _, err := prepareRunLimitsAt(definition, agentapi.RunPolicy{}, requested, 100*time.Millisecond, origin, origin.Add(3*time.Second)); err == nil || !strings.Contains(err.Error(), "deadline must exceed") {
+		t.Fatalf("expired absolute deadline unexpectedly accepted: %v", err)
+	}
+	withoutExplicit := agentapi.RunLimits{}
+	recovered, err := prepareRunLimitsAt(definition, agentapi.RunPolicy{}, withoutExplicit, 100*time.Millisecond, origin, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovered.Deadline.Equal(origin.Add(2 * time.Second)) {
+		t.Fatalf("recovered default deadline = %s, want %s", recovered.Deadline, origin.Add(2*time.Second))
 	}
 }

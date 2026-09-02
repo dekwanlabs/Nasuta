@@ -1,7 +1,9 @@
 package run
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -12,6 +14,38 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/tool"
 )
+
+type nonNilDatabaseTimestamp struct{}
+
+func (nonNilDatabaseTimestamp) Match(value driver.Value) bool {
+	timestamp, ok := value.(time.Time)
+	return ok && !timestamp.IsZero()
+}
+
+func TestUpsertDelegationCheckpointFillsRequiredTimestamps(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+
+	mock.ExpectExec("INSERT INTO agent_delegation_checkpoints").
+		WithArgs(
+			"parent-1", "delegation-1", 0, "", "", DelegationCheckpointPending,
+			"", "", "", "", nonNilDatabaseTimestamp{}, nonNilDatabaseTimestamp{},
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	if err := store.UpsertDelegationCheckpoint(context.Background(), DelegationCheckpoint{
+		ParentRunID: "parent-1", DelegationID: "delegation-1", Status: DelegationCheckpointPending,
+	}); err != nil {
+		t.Fatalf("UpsertDelegationCheckpoint: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestRunStoreAddStepPersistsInlineToolResultAtomically(t *testing.T) {
 	db, mock, err := sqlmock.New()
@@ -289,6 +323,7 @@ func TestRunStoreRecoverInterruptedSettlesDelegationWithAuthoritativeUsage(t *te
 			StatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectRecoveryAttemptClose(mock)
 	mock.ExpectExec("INSERT INTO agent_run_artifacts").
 		WithArgs(
 			artifact.ID,
@@ -312,6 +347,7 @@ func TestRunStoreRecoverInterruptedSettlesDelegationWithAuthoritativeUsage(t *te
 			task.ChildRunID,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectInterruptedCheckpoint(mock, task)
 	mock.ExpectCommit()
 
 	recovered, err := store.RecoverInterrupted()
@@ -371,6 +407,7 @@ func TestRunStoreRecoverInterruptedSettlesMissingChildWithZeroUsage(t *testing.T
 			StatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	expectRecoveryAttemptClose(mock)
 	mock.ExpectExec("INSERT INTO agent_run_artifacts").
 		WithArgs(
 			artifact.ID,
@@ -394,6 +431,7 @@ func TestRunStoreRecoverInterruptedSettlesMissingChildWithZeroUsage(t *testing.T
 			task.ChildRunID,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectInterruptedCheckpoint(mock, task)
 	mock.ExpectCommit()
 
 	recovered, err := store.RecoverInterrupted()
@@ -441,6 +479,7 @@ func TestRunStoreRecoverInterruptedRollsBackOnArtifactFailure(t *testing.T) {
 			StatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectRecoveryAttemptClose(mock)
 	mock.ExpectExec("INSERT INTO agent_run_artifacts").
 		WillReturnError(errors.New("artifact unavailable"))
 	mock.ExpectRollback()
@@ -451,6 +490,30 @@ func TestRunStoreRecoverInterruptedRollsBackOnArtifactFailure(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func expectRecoveryAttemptClose(mock sqlmock.Sqlmock) {
+	mock.ExpectExec("UPDATE agent_delegation_attempts a JOIN agent_delegation_tasks t").
+		WithArgs(
+			DelegationAttemptInterrupted,
+			interruptedErrorCode,
+			"delegation attempt was interrupted during process recovery",
+			sqlmock.AnyArg(),
+			DelegationAttemptRunning,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+}
+
+func expectInterruptedCheckpoint(mock sqlmock.Sqlmock, task interruptedDelegationTask) {
+	mock.ExpectExec("INSERT INTO agent_delegation_checkpoints").
+		WithArgs(
+			task.ParentRunID, task.DelegationID, task.TaskIndex, "", "",
+			DelegationCheckpointInterrupted, task.ChildRunID, sqlmock.AnyArg(),
+			interruptedErrorCode,
+			"delegation was interrupted during process recovery",
+			sqlmock.AnyArg(), sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
 }
 
 func interruptedDelegationTaskRows() *sqlmock.Rows {
@@ -619,6 +682,150 @@ func TestRunStoreGetReturnsFullInlineTraceAndBoundedArtifactPreview(t *testing.T
 	}
 	if artifact.PromptContent != `{"error":"tool_result_exceeds_context_budget"}` || !artifact.Failed || !artifact.Coverage.Partial {
 		t.Fatalf("artifact delivery trace = %+v", artifact)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaimWorkItemByKindClaimsOneItemWithFencingLease(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rs := &Store{db: db}
+	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	available := now.Add(-time.Second)
+	payload := []byte(`{"parent":"p1"}`)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), "delegation_child").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"work_id", "run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json", "state", "lease_owner", "lease_fence", "lease_expires_at", "available_at", "attempt_count", "last_error",
+		}).AddRow("work-1", "run-1", "parent-1", "delegation-1", 2, 1, "delegation_child", payload, WorkReady, "", int64(4), nil, available, 3, ""))
+	mock.ExpectExec(`UPDATE agent_work_items SET state=\?,lease_owner=\?,lease_fence=\?,lease_expires_at=\?,attempt_count=\?,updated_at=\? WHERE work_id=\?`).
+		WithArgs(WorkRunning, "worker-a", int64(5), sqlmock.AnyArg(), 4, sqlmock.AnyArg(), "work-1", WorkReady, WorkRunning, WorkReady, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	item, err := rs.ClaimWorkItemByKind(context.Background(), "delegation_child", "worker-a", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.WorkID != "work-1" || item.LeaseOwner != "worker-a" || item.LeaseFence != 5 || item.AttemptCount != 4 || item.State != WorkRunning {
+		t.Fatalf("claimed item = %#v", item)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaimWorkItemByKindCanReclaimExpiredLease(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rs := &Store{db: db}
+	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), "delegation_child").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"work_id", "run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json", "state", "lease_owner", "lease_fence", "lease_expires_at", "available_at", "attempt_count", "last_error",
+		}).AddRow("work-2", "run-2", "parent-2", "delegation-2", 0, 1, "delegation_child", []byte(`{}`), WorkRunning, "dead-worker", int64(9), now.Add(-time.Second), now.Add(-time.Minute), 1, "worker lease expired"))
+	mock.ExpectExec(`UPDATE agent_work_items SET state=\?,lease_owner=\?,lease_fence=\?,lease_expires_at=\?,attempt_count=\?,updated_at=\? WHERE work_id=\?`).
+		WithArgs(WorkRunning, "worker-b", int64(10), sqlmock.AnyArg(), 2, sqlmock.AnyArg(), "work-2", WorkReady, WorkRunning, WorkReady, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	item, err := rs.ClaimWorkItemByKind(context.Background(), "delegation_child", "worker-b", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.LeaseFence != 10 || item.LeaseOwner != "worker-b" {
+		t.Fatalf("reclaimed item = %#v", item)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkLeaseRenewAndCompleteRejectStaleOwner(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rs := &Store{db: db}
+	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec(`UPDATE agent_work_items SET lease_expires_at=\?,updated_at=\? WHERE work_id=\? AND state=\? AND lease_owner=\? AND lease_fence=\?`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "work-1", WorkRunning, "old-worker", int64(1), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	if err := rs.RenewWorkItem(context.Background(), "work-1", "old-worker", 1, now, time.Minute); err == nil {
+		t.Fatal("stale owner renewal succeeded")
+	}
+
+	mock.ExpectExec(`UPDATE agent_work_items SET state=\?,lease_owner='',lease_expires_at=NULL,last_error=\?,updated_at=\? WHERE work_id=\? AND state=\? AND lease_owner=\? AND lease_fence=\?`).
+		WithArgs(WorkSucceeded, "", sqlmock.AnyArg(), "work-1", WorkRunning, "old-worker", int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	if err := rs.CompleteWorkItem(context.Background(), "work-1", "old-worker", 1, WorkSucceeded, ""); err == nil {
+		t.Fatal("stale owner completion succeeded")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkLeaseRejectsInvalidTTL(t *testing.T) {
+	rs := &Store{}
+	if _, err := rs.ClaimWorkItem(context.Background(), "worker", time.Now(), 0); err == nil {
+		t.Fatal("zero TTL claim accepted")
+	}
+	if err := rs.RenewWorkItem(context.Background(), "work", "worker", 1, time.Now(), -time.Second); err == nil {
+		t.Fatal("negative TTL renewal accepted")
+	}
+}
+
+func TestEnqueueWorkItemRejectsIdentityOrPayloadConflict(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := &Store{db: db}
+	item := WorkItem{
+		WorkID: "work-1", RunID: "run-1", ParentRunID: "parent-1",
+		DelegationID: "delegation-1", TaskIndex: 0, AttemptNo: 1,
+		Kind: "delegation_child", Payload: []byte(`{"objective":"original"}`), State: WorkReady,
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO agent_work_items`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json FROM agent_work_items WHERE work_id=\? FOR UPDATE`).
+		WithArgs("work-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json",
+		}).AddRow("run-1", "parent-1", "delegation-1", 0, 1, "delegation_child", []byte(`{"objective":"tampered"}`)))
+	mock.ExpectRollback()
+	if err := store.EnqueueWorkItem(context.Background(), item); !errors.Is(err, ErrWorkItemConflict) {
+		t.Fatalf("error = %v, want ErrWorkItemConflict", err)
+	}
+
+	// A semantically identical JSON redelivery is idempotent and commits without
+	// replacing any mutable queue state owned by the current worker. MySQL JSON
+	// may normalize whitespace and object key order on storage.
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO agent_work_items`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json FROM agent_work_items WHERE work_id=\? FOR UPDATE`).
+		WithArgs("work-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json",
+		}).AddRow("run-1", "parent-1", "delegation-1", 0, 1, "delegation_child", []byte(`{ "objective" : "original" }`)))
+	mock.ExpectCommit()
+	if err := store.EnqueueWorkItem(context.Background(), item); err != nil {
+		t.Fatalf("idempotent enqueue: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

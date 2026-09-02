@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -24,9 +25,14 @@ type interruptedDelegationTask struct {
 	ToolCalls    int64
 }
 
-// RecoverInterrupted closes process-local Agent Runs and settles delegation
-// reservations left active by a prior process.
+// RecoverInterrupted recovers work owned by a previous process. Legacy
+// non-fenced stores retain the historical abort-and-settle behavior; durable
+// fenced stores claim expired roots and enqueue replay work without executing
+// model calls during database startup.
 func (rs *Store) RecoverInterrupted() (int64, error) {
+	if rs != nil && rs.fencingEnabled {
+		return rs.recoverDurable()
+	}
 	ctx := context.Background()
 	tx, err := rs.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -34,15 +40,18 @@ func (rs *Store) RecoverInterrupted() (int64, error) {
 	}
 	defer tx.Rollback()
 
-	tasks, err := loadInterruptedDelegationTasks(ctx, tx)
+	tasks, err := loadInterruptedDelegationTasks(ctx, tx, rs.fencingEnabled)
 	if err != nil {
 		return 0, err
 	}
 	recoveredAt := store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano))
+	query := `UPDATE agent_runs SET status=?,error_code=?,ended_at=? WHERE run_kind=? AND status IN (?,?)`
+	if rs.fencingEnabled {
+		query = `UPDATE agent_runs r LEFT JOIN agent_run_budget_ledger l ON l.root_run_id=r.id SET r.status=?,r.error_code=?,r.ended_at=? WHERE r.run_kind=? AND r.status IN (?,?) AND (l.root_run_id IS NULL OR l.lease_owner='' OR l.lease_expires_at IS NULL OR l.lease_expires_at<=UTC_TIMESTAMP())`
+	}
 	result, err := tx.ExecContext(
 		ctx,
-		`UPDATE agent_runs SET status=?,error_code=?,ended_at=?
-		 WHERE run_kind=? AND status IN (?,?)`,
+		query,
 		StatusAborted,
 		interruptedErrorCode,
 		recoveredAt,
@@ -55,6 +64,24 @@ func (rs *Store) RecoverInterrupted() (int64, error) {
 	}
 	recovered, err := result.RowsAffected()
 	if err != nil {
+		return 0, err
+	}
+	// Startup recovery is intentionally conservative: a process-local run is
+	// aborted rather than automatically re-entering the model loop. Close any
+	// physical attempt left running so later replay cannot mistake it for live
+	// work or create an unbounded retry chain.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_delegation_attempts a
+		JOIN agent_delegation_tasks t ON t.parent_run_id=a.parent_run_id
+		  AND t.delegation_id=a.delegation_id AND t.task_index=a.task_index
+		SET a.status=?,a.retryable=FALSE,a.error_code=?,
+			a.error_message=?,a.ended_at=?,a.next_attempt_at=NULL
+		WHERE t.admitted=TRUE AND t.settled_usage_json IS NULL
+		  AND a.status=?`,
+		DelegationAttemptInterrupted, interruptedErrorCode,
+		"delegation attempt was interrupted during process recovery", recoveredAt,
+		DelegationAttemptRunning,
+	); err != nil {
 		return 0, err
 	}
 	for _, task := range tasks {
@@ -106,6 +133,25 @@ func (rs *Store) RecoverInterrupted() (int64, error) {
 		if affected != 1 {
 			return 0, ErrDelegationTaskConflict
 		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO agent_delegation_checkpoints(
+				parent_run_id,delegation_id,task_index,invocation_id,request_hash,status,
+				child_run_id,report_artifact_id,error_code,error_message,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+			ON DUPLICATE KEY UPDATE
+				status=VALUES(status),child_run_id=VALUES(child_run_id),
+				report_artifact_id=VALUES(report_artifact_id),error_code=VALUES(error_code),
+				error_message=VALUES(error_message),updated_at=VALUES(updated_at)`,
+			task.ParentRunID, task.DelegationID, task.TaskIndex, "", "",
+			DelegationCheckpointInterrupted, task.ChildRunID, artifact.ID,
+			interruptedErrorCode,
+			"delegation was interrupted during process recovery", recoveredAt, recoveredAt,
+		); err != nil {
+			return 0, fmt.Errorf(
+				"persist interrupted delegation checkpoint for child %q: %w",
+				task.ChildRunID, err,
+			)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -113,22 +159,165 @@ func (rs *Store) RecoverInterrupted() (int64, error) {
 	return recovered, nil
 }
 
+type durableRecoveryWork struct {
+	RunID           string `json:"run_id"`
+	CheckpointStep  int    `json:"checkpoint_step"`
+	CheckpointPhase string `json:"checkpoint_phase"`
+	LeaseFence      int64  `json:"lease_fence"`
+}
+
+// recoverDurable performs the only startup-safe part of recovery: a fenced
+// claim. It deliberately does not call the model or mark a resumable parent as
+// aborted. The runtime worker can later consume parent_resume and execute the
+// checkpoint with the newly claimed fence.
+func (rs *Store) recoverDurable() (int64, error) {
+	if rs == nil || rs.db == nil || rs.budgetLeaseOwner == "" {
+		return 0, fmt.Errorf("agent/runstore: durable recovery requires database and owner")
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+	ttl := minimumRecoveryLeaseTTL
+	expires := now.Add(ttl)
+	tx, err := rs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
+		SELECT r.id,l.lease_fence,c.step_no,c.phase,c.state_json
+		FROM agent_runs r
+		JOIN agent_run_budget_ledger l ON l.root_run_id=r.id
+		LEFT JOIN agent_run_checkpoints c ON c.run_id=r.id
+		WHERE r.run_kind=? AND r.status IN (?,?)
+		  AND (l.lease_owner='' OR l.lease_expires_at IS NULL OR l.lease_expires_at<=UTC_TIMESTAMP())
+		ORDER BY r.started_at
+		FOR UPDATE`, KindAgent, StatusRunning, StatusPaused)
+	if err != nil {
+		return 0, err
+	}
+	type recoveryCandidate struct {
+		runID    string
+		oldFence int64
+		step     int
+		phase    string
+	}
+	var candidates []recoveryCandidate
+	for rows.Next() {
+		var runID string
+		var oldFence int64
+		var step sql.NullInt64
+		var phase, state sql.NullString
+		if err := rows.Scan(&runID, &oldFence, &step, &phase, &state); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		// No valid checkpoint means there is no deterministic replay boundary;
+		// leave the run for an explicit operator policy instead of fabricating
+		// a new model turn. It must not be silently converted to success.
+		if !step.Valid || !phase.Valid || !state.Valid || strings.TrimSpace(state.String) == "" || !json.Valid([]byte(state.String)) || oldFence < 0 {
+			continue
+		}
+		candidates = append(candidates, recoveryCandidate{
+			runID: runID, oldFence: oldFence, step: int(step.Int64), phase: phase.String,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	// go-sql-driver/mysql does not permit another statement while a result set
+	// is active on the same transaction connection. Closing the fully-buffered
+	// candidate rows keeps the SELECT ... FOR UPDATE locks until commit while
+	// allowing the fenced UPDATE/enqueue statements below to execute.
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+
+	var claimed int64
+	for _, candidate := range candidates {
+		newFence := candidate.oldFence + 1
+		if newFence <= 0 {
+			return 0, fmt.Errorf("durable recovery fence overflow for run %q", candidate.runID)
+		}
+		claimedRoot, err := tx.ExecContext(ctx, `
+			UPDATE agent_run_budget_ledger
+			SET lease_owner=?,lease_expires_at=?,lease_fence=?,version=version+1,updated_at=?
+			WHERE root_run_id=? AND (lease_owner='' OR lease_expires_at IS NULL OR lease_expires_at<=UTC_TIMESTAMP())`,
+			rs.budgetLeaseOwner, store.DatabaseTime(expires.Format(time.RFC3339Nano)), newFence,
+			store.DatabaseTime(now.Format(time.RFC3339Nano)), candidate.runID)
+		if err != nil {
+			return 0, err
+		}
+		if affected, err := claimedRoot.RowsAffected(); err != nil {
+			return 0, err
+		} else if affected != 1 {
+			// The predicate is repeated after SELECT ... FOR UPDATE so a
+			// concurrent recovery attempt can never enqueue work for a lease it
+			// did not actually acquire.
+			continue
+		}
+		payload, err := json.Marshal(durableRecoveryWork{RunID: candidate.runID, CheckpointStep: candidate.step, CheckpointPhase: candidate.phase, LeaseFence: newFence})
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO agent_work_items(work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,available_at,attempt_count,last_error,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			ON DUPLICATE KEY UPDATE
+				payload_json=CASE WHEN state=? THEN payload_json
+				                  WHEN state=? AND lease_expires_at>UTC_TIMESTAMP() THEN payload_json
+				                  ELSE VALUES(payload_json) END,
+				state=CASE WHEN state=? THEN state
+				           WHEN state=? AND lease_expires_at>UTC_TIMESTAMP() THEN state
+				           ELSE VALUES(state) END,
+				available_at=CASE WHEN state=? THEN available_at
+				                 WHEN state=? AND lease_expires_at>UTC_TIMESTAMP() THEN available_at
+				                 ELSE VALUES(available_at) END,
+				updated_at=VALUES(updated_at)`,
+			parentResumeWorkID(candidate.runID), candidate.runID, "", "", 0, 1, WorkParentResume, payload, WorkReady, store.DatabaseTime(now.Format(time.RFC3339Nano)), 0, "", store.DatabaseTime(now.Format(time.RFC3339Nano)), store.DatabaseTime(now.Format(time.RFC3339Nano)), WorkSucceeded, WorkRunning, WorkSucceeded, WorkRunning, WorkSucceeded, WorkRunning); err != nil {
+			return 0, err
+		}
+		claimed++
+	}
+	// Expired child worker leases are safe to replay because ClaimWorkItem
+	// increments the work fence and child task persistence is idempotent.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_work_items
+		SET state=?,lease_owner='',lease_expires_at=NULL,available_at=?,last_error=?,updated_at=?
+		WHERE state=? AND lease_expires_at IS NOT NULL AND lease_expires_at<=UTC_TIMESTAMP()`,
+		WorkReady, store.DatabaseTime(now.Format(time.RFC3339Nano)), "worker lease expired during recovery", store.DatabaseTime(now.Format(time.RFC3339Nano)), WorkRunning); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return claimed, nil
+}
+
+const minimumRecoveryLeaseTTL = time.Minute
+
+const WorkParentResume = "parent_resume"
+
+func parentResumeWorkID(runID string) string { return "parent_resume:" + runID }
+
 func loadInterruptedDelegationTasks(
 	ctx context.Context,
 	tx *sql.Tx,
+	filterExpiredLease bool,
 ) ([]interruptedDelegationTask, error) {
-	rows, err := tx.QueryContext(
-		ctx,
-		`SELECT
+	query := `SELECT
 			t.parent_run_id,t.delegation_id,t.task_index,t.child_run_id,t.capability_id,
 			COALESCE(r.input_tokens,0),COALESCE(r.output_tokens,0),
 			COALESCE(r.reasoning_tokens,0),COALESCE(r.total_tokens,0),
 			COALESCE(r.cost_micros,0),COALESCE(r.tool_call_count,0)
 		 FROM agent_delegation_tasks t
 		 LEFT JOIN agent_runs r ON r.id=t.child_run_id
-		 WHERE t.admitted=TRUE AND t.settled_usage_json IS NULL
-		 FOR UPDATE`,
-	)
+		 WHERE t.admitted=TRUE AND t.settled_usage_json IS NULL`
+	if filterExpiredLease {
+		query += ` AND (NOT EXISTS (SELECT 1 FROM agent_run_budget_ledger l WHERE l.root_run_id=t.parent_run_id AND l.lease_owner<>'' AND l.lease_expires_at>UTC_TIMESTAMP()))`
+	}
+	query += ` FOR UPDATE`
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +498,38 @@ func (rs *Store) Complete(id string, outcome Outcome) error {
 		outcome.Evidence.PartialResultCount, outcome.Evidence.OmittedItemCount,
 		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)), id,
 		StatusRunning, StatusPaused,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrNotActive
+	}
+	return nil
+}
+
+// CompleteFenced atomically transitions a run only while the caller still owns
+// the current root lease fence. A paused process cannot publish a terminal
+// outcome after another instance has reclaimed the run.
+func (rs *Store) CompleteFenced(id, owner string, fence int64, outcome Outcome) error {
+	if owner == "" || fence <= 0 || !outcome.Status.Terminal() {
+		return fmt.Errorf("invalid fenced run completion")
+	}
+	result, err := rs.db.Exec(
+		`UPDATE agent_runs r JOIN agent_run_budget_ledger l ON l.root_run_id=r.id
+		 SET r.status=?,r.error_code=?,r.step_count=?,r.token_used=?,r.evidence_status=?,r.forced_conclusion=?,
+		 r.evidence_result_count=?,r.tool_call_count=?,r.tool_failure_count=?,r.partial_result_count=?,
+		 r.omitted_evidence_count=?,r.ended_at=?
+		 WHERE r.id=? AND r.status IN (?,?) AND l.lease_owner=? AND l.lease_fence=?
+		   AND l.lease_expires_at>UTC_TIMESTAMP()`,
+		outcome.Status, outcome.ErrorCode, outcome.StepCount, outcome.TokenUsed, outcome.Evidence.Status,
+		outcome.Evidence.ForcedConclusion, outcome.Evidence.ResultCount, outcome.Evidence.ToolCallCount,
+		outcome.Evidence.ToolFailureCount, outcome.Evidence.PartialResultCount, outcome.Evidence.OmittedItemCount,
+		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339)), id, StatusRunning, StatusPaused, owner, fence,
 	)
 	if err != nil {
 		return err

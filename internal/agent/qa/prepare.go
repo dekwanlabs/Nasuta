@@ -32,6 +32,10 @@ type preparation struct {
 	execution          executionRouteDecision
 	historyCandidates  *HistoryCandidates
 	runLimits          agentapi.RunLimits
+	definition         agentapi.Definition
+	selection          agentapi.DefinitionSelection
+	requestDeadline    time.Time
+	requestCancel      context.CancelFunc
 }
 
 type preparedEvidence struct {
@@ -40,6 +44,10 @@ type preparedEvidence struct {
 }
 
 func (prepared *preparation) closeTrace() {
+	if prepared.requestCancel != nil {
+		prepared.requestCancel()
+		prepared.requestCancel = nil
+	}
 	if !prepared.ownsTrace {
 		return
 	}
@@ -59,8 +67,8 @@ func (prepared *preparation) failPreparation(
 	}
 }
 
-func (svc *Service) prepare(ctx context.Context, request Request) (*preparation, error) {
-	prepared, err := svc.initializePreparation(ctx, request)
+func (svc *Service) prepare(ctx context.Context, request Request, requestStartedAt time.Time) (*preparation, error) {
+	prepared, err := svc.initializePreparation(ctx, request, requestStartedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +103,7 @@ func (svc *Service) prepare(ctx context.Context, request Request) (*preparation,
 func (svc *Service) initializePreparation(
 	ctx context.Context,
 	request Request,
+	requestStartedAt time.Time,
 ) (*preparation, error) {
 	request, err := normalizeRequest(request)
 	if err != nil {
@@ -109,6 +118,21 @@ func (svc *Service) initializePreparation(
 	prepared := &preparation{
 		request: request, sourceConversation: request.Conversation,
 		ctx: ctx, trace: trace, ownsTrace: ownsTrace,
+	}
+	definition, selection, err := svc.resolveAgentDefinition(prepared)
+	if err != nil {
+		prepared.closeTrace()
+		return nil, err
+	}
+	prepared.definition = definition
+	prepared.selection = selection
+	if definition.Budget.Timeout > 0 {
+		deadline := requestStartedAt.Add(definition.Budget.Timeout)
+		if existing, ok := ctx.Deadline(); ok && existing.Before(deadline) {
+			deadline = existing
+		}
+		prepared.ctx, prepared.requestCancel = context.WithDeadline(ctx, deadline)
+		prepared.requestDeadline = deadline
 	}
 
 	prepared.toolPolicy = toolPolicyForRun(
@@ -229,10 +253,7 @@ func normalizeRequest(request Request) (Request, error) {
 }
 
 func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) {
-	definition, selection, err := svc.resolveAgentDefinition(prepared)
-	if err != nil {
-		return nil, err
-	}
+	definition, selection := prepared.definition, prepared.selection
 	contextWindow, outputReserve := svc.contextLimits(
 		definition.Budget.ContextTokens, definition.Model.MaxOutputTokens,
 	)
@@ -273,7 +294,7 @@ func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) 
 		conversation, prepared.request.UserID, admitted.Retrieved,
 		prepared.request.RunID, prepared.analysis.QueryPlan, admitted.Plan, prepared.toolPolicy,
 		prepared.candidateToolSet, prepared.execution.HighRisk, prepared.runLimits,
-		prepared.trace, prepared.ownsTrace,
+		prepared.trace, prepared.ownsTrace, prepared.requestCancel,
 	)
 }
 
@@ -281,11 +302,21 @@ func (svc *Service) parentRunLimits(
 	prepared *preparation,
 	definition agentapi.Definition,
 ) agentapi.RunLimits {
-	return agentapi.RunLimits{
-		Deadline:     time.Now().UTC().Add(definition.Budget.Timeout),
+	deadline := prepared.requestDeadline
+	if deadline.IsZero() {
+		deadline = time.Now().UTC().Add(definition.Budget.Timeout)
+	}
+	limits := agentapi.RunLimits{
+		Deadline:     deadline,
 		MaxSteps:     definition.Budget.MaxSteps,
 		MaxToolCalls: definition.Budget.MaxToolCalls,
 	}
+	if svc.delegationEnabled {
+		limits.MaxTotalTokens = svc.delegationBudget.MaxTotalTokens
+		limits.MaxCostMicros = svc.delegationBudget.MaxCostMicros
+		limits.ParentAnswerReserve = svc.delegationBudget.ParentAnswerReserve
+	}
+	return limits
 }
 
 func (svc *Service) reassembleConversation(
@@ -387,6 +418,12 @@ func (svc *Service) beginSingleRun(
 			AllowWrite:      prepared.toolPolicy.AllowWrite,
 			RestrictVisible: true,
 			VisibleToolIDs:  scenarioToolIDs(prepared.candidateToolSet.Tools()),
+		},
+		Policy: agentapi.RunPolicy{
+			// The output contract is derived before Begin and is part of the
+			// immutable RunStart/RunRequest boundary. Evidence admission fields
+			// are intentionally filled only after preparation completes.
+			OutputContract: outputContractForQuery(prepared.analysis.QueryPlan),
 		},
 		Limits: prepared.runLimits,
 		Actor:  agentapi.Actor{UserID: prepared.request.UserID},

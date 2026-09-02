@@ -113,6 +113,72 @@ type RunBudgetUsageGate interface {
 	ReserveCall(Usage) (RunBudgetCallReservation, error)
 }
 
+// RunBudgetTaskReservation owns one admitted child budget. Child model calls
+// must reserve through this handle so they cannot consume a sibling's grant.
+type RunBudgetTaskReservation interface {
+	RunBudgetUsageGate
+	RunBudgetAvailability
+	Release() error
+}
+
+// RunBudgetTaskGate admits bounded child budgets from a shared root ledger.
+type RunBudgetTaskGate interface {
+	RunBudgetUsageGate
+	ReserveTask(Usage) (RunBudgetTaskReservation, error)
+}
+
+// RunBudgetPhase identifies whether a physical model call may consume the
+// protected parent-answer reserve.
+type RunBudgetPhase string
+
+const (
+	RunBudgetPhaseDefault RunBudgetPhase = "default"
+	RunBudgetPhaseAnswer  RunBudgetPhase = "answer"
+)
+
+// RunBudgetPhasedGate lets a root ledger protect answer capacity while the
+// agent is still reasoning, without changing the legacy ReserveCall contract.
+type RunBudgetPhasedGate interface {
+	RunBudgetUsageGate
+	ReserveCallForPhase(Usage, RunBudgetPhase) (RunBudgetCallReservation, error)
+}
+
+// RunBudgetPhasedAvailability reports phase-aware capacity for output sizing.
+type RunBudgetPhasedAvailability interface {
+	RunBudgetAvailability
+	AvailableForPhase(RunBudgetPhase) Usage
+}
+
+// RunBudgetTaskGateFromContext returns a hierarchical budget gate, if any.
+func RunBudgetTaskGateFromContext(ctx context.Context) RunBudgetTaskGate {
+	if ctx == nil {
+		return nil
+	}
+	gate, _ := ctx.Value(runBudgetGateContextKey{}).(RunBudgetTaskGate)
+	return gate
+}
+
+// WithRunBudgetPhase marks a physical call as an answer call for budget
+// accounting. The default phase keeps the protected answer reserve intact.
+func WithRunBudgetPhase(ctx context.Context, phase RunBudgetPhase) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, runBudgetPhaseContextKey{}, phase)
+}
+
+// RunBudgetPhaseFromContext returns the current budget phase.
+func RunBudgetPhaseFromContext(ctx context.Context) RunBudgetPhase {
+	if ctx == nil {
+		return RunBudgetPhaseDefault
+	}
+	phase, ok := ctx.Value(runBudgetPhaseContextKey{}).(RunBudgetPhase)
+	if !ok || phase == "" {
+		return RunBudgetPhaseDefault
+	}
+	return phase
+}
+
 // RunBudgetAvailability reports the budget that a physical model call may add
 // without exceeding the shared run or its current task reservation. Runtimes
 // use it to shrink a requested output ceiling before reserving the call.
@@ -127,6 +193,7 @@ type RunBudgetMinimum interface {
 }
 
 type runBudgetGateContextKey struct{}
+type runBudgetPhaseContextKey struct{}
 
 // WithRunBudgetGate attaches a shared Workflow budget gate to a Runtime call.
 func WithRunBudgetGate(ctx context.Context, gate RunBudgetGate) context.Context {
@@ -157,10 +224,22 @@ func RunBudgetUsageGateFromContext(ctx context.Context) RunBudgetUsageGate {
 	return gate
 }
 
+// RunOutputContract describes a request-specific answer shape enforced by the
+// runtime in addition to the definition's output schema. It is intentionally
+// small and transport-neutral so callers can pin it before execution begins.
+type RunOutputContract struct {
+	Kind           string   `json:"kind,omitempty"`
+	RequireMermaid bool     `json:"require_mermaid,omitempty"`
+	Subjects       []string `json:"subjects,omitempty"`
+	MaxHops        int      `json:"max_hops,omitempty"`
+}
+
 type RunPolicy struct {
 	// OutputMode distinguishes direct user delivery from a structured Workflow
 	// node. It does not create a second execution runtime.
 	OutputMode RunOutputMode `json:"output_mode,omitempty"`
+	// OutputContract pins the required user-facing answer shape for this run.
+	OutputContract RunOutputContract `json:"output_contract,omitempty"`
 	// EvidenceRequired forbids an unsupported successful conclusion.
 	EvidenceRequired bool `json:"evidence_required"`
 	// EvidenceSeeded records that admitted evidence existed before tool execution.
@@ -180,8 +259,15 @@ type RunLimits struct {
 	// MaxContextTokens limits one provider request; MaxInputTokens remains the
 	// cumulative input budget for the whole Run.
 	MaxContextTokens int64 `json:"max_context_tokens,omitempty"`
-	MaxTotalTokens   int64 `json:"max_total_tokens,omitempty"`
-	MaxCostMicros    int64 `json:"max_cost_micros,omitempty"`
+	// MaxOutputTokens narrows the model output ceiling for every provider call.
+	// Zero keeps the Definition model ceiling. It is not a cumulative budget.
+	MaxOutputTokens int64 `json:"max_output_tokens,omitempty"`
+	MaxTotalTokens  int64 `json:"max_total_tokens,omitempty"`
+	MaxCostMicros   int64 `json:"max_cost_micros,omitempty"`
+	// ParentAnswerReserve protects a final user-facing answer from child and
+	// reasoning calls. It is a root-only token reserve and is not cumulative
+	// output quota for a child Run.
+	ParentAnswerReserve int64 `json:"parent_answer_reserve,omitempty"`
 }
 
 // RunDelegation pins the immutable capability identity and parent relation for

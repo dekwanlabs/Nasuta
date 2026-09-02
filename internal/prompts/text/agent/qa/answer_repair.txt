@@ -1,5 +1,5 @@
 The final-answer validator rejected the previous answer for these reasons: {{ .Violations }}
 
-Regenerate the complete answer using the evidence already present. Copy every required value exactly, character for character. Never abbreviate, truncate, mask, summarize, or replace any part with "..." or "…". If a delegation adoption line is required, emit exactly one {{ .AdoptionMarker }} line as the final content and select only report IDs allowed by the contract.
+Regenerate the complete answer using the evidence already present. Copy every required value exactly, character for character. Never abbreviate, truncate, mask, summarize, or replace any part with "..." or "…". If a delegation adoption line is required, emit exactly one {{ .AdoptionMarker }} line as the final content. Include required claims and edges manifests, selecting only server-allowed IDs and preserving their exact supported/contradicted/distinct/unresolved or verified/inferred/unresolved state; never upgrade an unresolved or inferred item.
 
 Continue to follow the user-visible answer contract: preserve a concise, non-repetitive structure; do not expose capability names, arguments, execution protocol, internal document attribution, or retrieval metadata. Required values do not permit copying unrelated internal labels or surrounding raw payload fields. Do not discuss this internal validation.
