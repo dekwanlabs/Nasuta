@@ -132,6 +132,18 @@ func (rs *Store) get(id string, userID *int64) (*Detail, error) {
 	if err != nil {
 		return nil, err
 	}
+	steps, err := rs.loadSteps(id)
+	if err != nil {
+		return nil, err
+	}
+	llmCalls, err := rs.listLLMCalls(id, 1000)
+	if err != nil {
+		return nil, err
+	}
+	return &Detail{Record: r, Steps: steps, LLMCalls: llmCalls}, nil
+}
+
+func (rs *Store) loadSteps(id string) ([]StepRow, error) {
 	rows, err := rs.db.Query(
 		`SELECT s.id,s.run_id,s.step_no,s.kind,s.trace_id,s.artifact_id,s.tool_call_id,s.tool,s.args,
 			s.content,s.prompt_content,s.authoritative_sha256,s.prompt_sha256,s.content_bytes,
@@ -147,66 +159,70 @@ func (rs *Store) get(id string, userID *int64) (*Detail, error) {
 	defer rows.Close()
 	steps := make([]StepRow, 0)
 	for rows.Next() {
-		var st StepRow
-		var traceID, artifactID, toolCallID, args, content, promptContent sql.NullString
-		var authoritativeSHA, promptSHA, coverageRaw, contractRaw, adoptionsRaw sql.NullString
-		var deliveryError, artifactPreview sql.NullString
-		var createdAt sql.NullTime
-		if err := rows.Scan(
-			&st.ID, &st.RunID, &st.StepNo, &st.Kind, &traceID, &artifactID, &toolCallID, &st.Tool, &args,
-			&content, &promptContent, &authoritativeSHA, &promptSHA, &st.SizeBytes, &coverageRaw,
-			&contractRaw, &adoptionsRaw, &st.Failed, &deliveryError, &st.TokenDelta,
-			&st.ReasoningTokens, &st.DurationMs, &createdAt, &artifactPreview,
-		); err != nil {
+		st, err := scanStep(rows)
+		if err != nil {
 			return nil, err
 		}
-		st.TraceID = traceID.String
-		st.ArtifactID = artifactID.String
-		st.ToolCallID = toolCallID.String
-		st.Args = args.String
-		st.Content = content.String
-		st.PromptContent = promptContent.String
-		st.AuthoritativeSHA256 = authoritativeSHA.String
-		st.PromptSHA256 = promptSHA.String
-		st.DeliveryError = deliveryError.String
-		if coverageRaw.Valid && coverageRaw.String != "" {
-			if err := json.Unmarshal([]byte(coverageRaw.String), &st.Coverage); err != nil {
-				return nil, fmt.Errorf("decode step %d coverage: %w", st.StepNo, err)
-			}
-		}
-		if contractRaw.Valid && contractRaw.String != "" {
-			if err := json.Unmarshal([]byte(contractRaw.String), &st.AnswerContract); err != nil {
-				return nil, fmt.Errorf("decode step %d answer contract: %w", st.StepNo, err)
-			}
-		}
-		if adoptionsRaw.Valid && adoptionsRaw.String != "" {
-			if err := json.Unmarshal(
-				[]byte(adoptionsRaw.String),
-				&st.DelegationAdoptions,
-			); err != nil {
-				return nil, fmt.Errorf(
-					"decode step %d delegation adoptions: %w",
-					st.StepNo,
-					err,
-				)
-			}
-		}
-		previewSource := st.Content
-		if previewSource == "" {
-			previewSource = artifactPreview.String
-		}
-		st.ResultPreview = toolResultPreview(previewSource)
-		st.CreatedAt = store.FormatDatabaseTime(createdAt)
 		steps = append(steps, st)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	llmCalls, err := rs.listLLMCalls(id, 1000)
-	if err != nil {
-		return nil, err
+	return steps, nil
+}
+
+func scanStep(rows *sql.Rows) (StepRow, error) {
+	var st StepRow
+	var traceID, artifactID, toolCallID, args, content, promptContent sql.NullString
+	var authoritativeSHA, promptSHA, coverageRaw, contractRaw, adoptionsRaw sql.NullString
+	var deliveryError, artifactPreview sql.NullString
+	var createdAt sql.NullTime
+	if err := rows.Scan(
+		&st.ID, &st.RunID, &st.StepNo, &st.Kind, &traceID, &artifactID, &toolCallID, &st.Tool, &args,
+		&content, &promptContent, &authoritativeSHA, &promptSHA, &st.SizeBytes, &coverageRaw,
+		&contractRaw, &adoptionsRaw, &st.Failed, &deliveryError, &st.TokenDelta,
+		&st.ReasoningTokens, &st.DurationMs, &createdAt, &artifactPreview,
+	); err != nil {
+		return StepRow{}, err
 	}
-	return &Detail{Record: r, Steps: steps, LLMCalls: llmCalls}, nil
+	st.TraceID = traceID.String
+	st.ArtifactID = artifactID.String
+	st.ToolCallID = toolCallID.String
+	st.Args = args.String
+	st.Content = content.String
+	st.PromptContent = promptContent.String
+	st.AuthoritativeSHA256 = authoritativeSHA.String
+	st.PromptSHA256 = promptSHA.String
+	st.DeliveryError = deliveryError.String
+	if coverageRaw.Valid && coverageRaw.String != "" {
+		if err := json.Unmarshal([]byte(coverageRaw.String), &st.Coverage); err != nil {
+			return StepRow{}, fmt.Errorf("decode step %d coverage: %w", st.StepNo, err)
+		}
+	}
+	if contractRaw.Valid && contractRaw.String != "" {
+		if err := json.Unmarshal([]byte(contractRaw.String), &st.AnswerContract); err != nil {
+			return StepRow{}, fmt.Errorf("decode step %d answer contract: %w", st.StepNo, err)
+		}
+	}
+	if adoptionsRaw.Valid && adoptionsRaw.String != "" {
+		if err := json.Unmarshal(
+			[]byte(adoptionsRaw.String),
+			&st.DelegationAdoptions,
+		); err != nil {
+			return StepRow{}, fmt.Errorf(
+				"decode step %d delegation adoptions: %w",
+				st.StepNo,
+				err,
+			)
+		}
+	}
+	previewSource := st.Content
+	if previewSource == "" {
+		previewSource = artifactPreview.String
+	}
+	st.ResultPreview = toolResultPreview(previewSource)
+	st.CreatedAt = store.FormatDatabaseTime(createdAt)
+	return st, nil
 }
 
 // EvidenceByIDs loads one bounded page of persisted evidence summaries.

@@ -32,35 +32,62 @@ func flowIRFromContext(ctx context.Context) *agentapi.FlowIR {
 	return cloneExecutionFlow(flow)
 }
 
+// flowRenderer accumulates the Mermaid output for a single FlowIR and owns
+// the synthetic ID allocator state shared by nodes, edges, and open hops.
+type flowRenderer struct {
+	b    strings.Builder
+	used map[string]struct{}
+}
+
+func newFlowRenderer() *flowRenderer {
+	return &flowRenderer{used: make(map[string]struct{})}
+}
+
 // RenderFlowIR renders only server-owned, typed flow data. Model-provided
 // Mermaid is never trusted for the final architecture diagram.
 func RenderFlowIR(flow *agentapi.FlowIR) string {
 	if flow == nil {
 		return ""
 	}
+	renderer := newFlowRenderer()
+	renderer.render(flow)
+	return renderer.b.String()
+}
 
-	nodes := append([]agentapi.FlowNode(nil), flow.Nodes...)
-	sort.Slice(nodes, func(i, j int) bool {
-		if nodes[i].ID != nodes[j].ID {
-			return nodes[i].ID < nodes[j].ID
-		}
-		return nodes[i].Label < nodes[j].Label
-	})
+func (renderer *flowRenderer) render(flow *agentapi.FlowIR) {
+	nodes := sortedRenderNodes(flow.Nodes)
+	ids := renderer.allocateRenderNodeIDs(nodes)
 
+	renderer.b.WriteString("```mermaid\nflowchart LR\n")
+	renderer.renderSubject(flow.Subject)
+	renderer.renderNodes(nodes, ids)
+
+	edges := sortedRenderEdges(flow.Edges)
+	renderedEdges := renderer.renderEdges(edges, ids)
+
+	openHopIDs := renderer.renderOpenHops(flow.OpenHops)
+	renderer.renderUnresolvedTail(nodes, ids, openHopIDs, renderedEdges)
+	renderer.b.WriteString("```\n")
+}
+
+func (renderer *flowRenderer) allocateRenderNodeIDs(nodes []agentapi.FlowNode) map[string]string {
 	ids := make(map[string]string, len(nodes))
-	used := make(map[string]struct{}, len(nodes))
 	for index, node := range nodes {
-		id := allocateMermaidID(node.ID, fmt.Sprintf("node:%d:%s:%s", index, node.ID, node.Label), used)
+		id := allocateMermaidID(node.ID, fmt.Sprintf("node:%d:%s:%s", index, node.ID, node.Label), renderer.used)
 		ids[node.ID] = id
 	}
+	return ids
+}
 
-	var b strings.Builder
-	b.WriteString("```mermaid\nflowchart LR\n")
-	if subject := mermaidSafeLabel(flow.Subject); subject != "" {
+func (renderer *flowRenderer) renderSubject(subject string) {
+	if label := mermaidSafeLabel(subject); label != "" {
 		// Mermaid comments are visible to validators and do not create an
 		// unverified edge or an extra semantic node.
-		fmt.Fprintf(&b, "    %%%% subject: %s\n", subject)
+		fmt.Fprintf(&renderer.b, "    %%%% subject: %s\n", label)
 	}
+}
+
+func (renderer *flowRenderer) renderNodes(nodes []agentapi.FlowNode, ids map[string]string) {
 	for _, node := range nodes {
 		id := ids[node.ID]
 		label := mermaidSafeLabel(node.Label)
@@ -71,15 +98,11 @@ func RenderFlowIR(flow *agentapi.FlowIR) string {
 		if label == "" {
 			label = "未命名节点"
 		}
-		fmt.Fprintf(&b, "    %s[\"%s\"]\n", id, label)
+		fmt.Fprintf(&renderer.b, "    %s[\"%s\"]\n", id, label)
 	}
+}
 
-	edges := append([]agentapi.FlowEdge(nil), flow.Edges...)
-	sort.Slice(edges, func(i, j int) bool {
-		left := strings.Join([]string{edges[i].From, edges[i].To, edges[i].Protocol, edges[i].SyncMode, edges[i].EvidenceState}, "\x00")
-		right := strings.Join([]string{edges[j].From, edges[j].To, edges[j].Protocol, edges[j].SyncMode, edges[j].EvidenceState}, "\x00")
-		return left < right
-	})
+func (renderer *flowRenderer) renderEdges(edges []agentapi.FlowEdge, ids map[string]string) int {
 	renderedEdges := 0
 	for _, edge := range edges {
 		from, fromOK := ids[edge.From]
@@ -101,39 +124,45 @@ func RenderFlowIR(flow *agentapi.FlowIR) string {
 			syncMode = "unknown"
 		}
 		label := protocol + " / " + syncMode + " / " + state
-		fmt.Fprintf(&b, "    %s %s|\"%s\"| %s\n", from, marker, label, to)
+		fmt.Fprintf(&renderer.b, "    %s %s|\"%s\"| %s\n", from, marker, label, to)
 		renderedEdges++
 	}
+	return renderedEdges
+}
 
-	openHops := sortedRenderStrings(flow.OpenHops)
+func (renderer *flowRenderer) renderOpenHops(openHops []string) []string {
+	openHops = sortedRenderStrings(openHops)
 	openHopIDs := make([]string, len(openHops))
 	for index, hop := range openHops {
 		id := allocateMermaidID(
 			fmt.Sprintf("open_hop_%d", index+1),
 			fmt.Sprintf("open-hop:%d:%s", index, hop),
-			used,
+			renderer.used,
 		)
 		openHopIDs[index] = id
-		fmt.Fprintf(&b, "    %s[\"待确认：%s\"]\n", id, mermaidSafeLabel(hop))
+		fmt.Fprintf(&renderer.b, "    %s[\"待确认：%s\"]\n", id, mermaidSafeLabel(hop))
 	}
+	return openHopIDs
+}
 
+func (renderer *flowRenderer) renderUnresolvedTail(nodes []agentapi.FlowNode, ids map[string]string, openHopIDs []string, renderedEdges int) {
 	if renderedEdges == 0 {
 		// An edge-less flow is not evidence of a disconnected architecture.
 		// Make the uncertainty explicit so the output remains useful and safe.
 		from := ""
 		if len(nodes) == 0 {
-			from = allocateMermaidID("flow_scope", "synthetic:flow-scope", used)
-			b.WriteString("    " + from + "[\"流程范围\"]\n")
+			from = allocateMermaidID("flow_scope", "synthetic:flow-scope", renderer.used)
+			renderer.b.WriteString("    " + from + "[\"流程范围\"]\n")
 		} else {
 			from = ids[nodes[0].ID]
 		}
 		if len(openHopIDs) == 0 {
-			unresolved := allocateMermaidID("unresolved_flow", "synthetic:unresolved-flow", used)
-			b.WriteString("    " + unresolved + "[\"待确认：关键流程跳转\"]\n")
-			fmt.Fprintf(&b, "    %s -.->|\"unknown / unknown / unresolved\"| %s\n", from, unresolved)
+			unresolved := allocateMermaidID("unresolved_flow", "synthetic:unresolved-flow", renderer.used)
+			renderer.b.WriteString("    " + unresolved + "[\"待确认：关键流程跳转\"]\n")
+			fmt.Fprintf(&renderer.b, "    %s -.->|\"unknown / unknown / unresolved\"| %s\n", from, unresolved)
 		} else {
 			for _, openHopID := range openHopIDs {
-				fmt.Fprintf(&b, "    %s -.->|\"unknown / unknown / unresolved\"| %s\n", from, openHopID)
+				fmt.Fprintf(&renderer.b, "    %s -.->|\"unknown / unknown / unresolved\"| %s\n", from, openHopID)
 				from = openHopID
 			}
 		}
@@ -142,12 +171,31 @@ func RenderFlowIR(flow *agentapi.FlowIR) string {
 		// attach them to the first canonical node as unresolved follow-ups.
 		from := ids[nodes[0].ID]
 		for _, openHopID := range openHopIDs {
-			fmt.Fprintf(&b, "    %s -.->|\"unknown / unknown / unresolved\"| %s\n", from, openHopID)
+			fmt.Fprintf(&renderer.b, "    %s -.->|\"unknown / unknown / unresolved\"| %s\n", from, openHopID)
 			from = openHopID
 		}
 	}
-	b.WriteString("```\n")
-	return b.String()
+}
+
+func sortedRenderNodes(nodes []agentapi.FlowNode) []agentapi.FlowNode {
+	nodes = append([]agentapi.FlowNode(nil), nodes...)
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].ID != nodes[j].ID {
+			return nodes[i].ID < nodes[j].ID
+		}
+		return nodes[i].Label < nodes[j].Label
+	})
+	return nodes
+}
+
+func sortedRenderEdges(edges []agentapi.FlowEdge) []agentapi.FlowEdge {
+	edges = append([]agentapi.FlowEdge(nil), edges...)
+	sort.Slice(edges, func(i, j int) bool {
+		left := strings.Join([]string{edges[i].From, edges[i].To, edges[i].Protocol, edges[i].SyncMode, edges[i].EvidenceState}, "\x00")
+		right := strings.Join([]string{edges[j].From, edges[j].To, edges[j].Protocol, edges[j].SyncMode, edges[j].EvidenceState}, "\x00")
+		return left < right
+	})
+	return edges
 }
 
 // ValidateRenderedFlowIR is a deterministic server-side quality gate. It
@@ -176,6 +224,15 @@ func validateRenderableFlowIR(flow *agentapi.FlowIR) []string {
 		return []string{"flow IR is required"}
 	}
 	var violations []string
+	violations = append(violations, validateRenderFlowHeader(flow)...)
+	nodes := validateRenderFlowNodes(flow.Nodes, &violations)
+	violations = append(violations, validateRenderFlowEdges(flow.Edges, nodes)...)
+	violations = append(violations, validateRenderFlowOpenHops(flow.OpenHops)...)
+	return violations
+}
+
+func validateRenderFlowHeader(flow *agentapi.FlowIR) []string {
+	var violations []string
 	if strings.TrimSpace(flow.Subject) == "" {
 		violations = append(violations, "flow subject is required")
 	}
@@ -189,33 +246,42 @@ func validateRenderableFlowIR(flow *agentapi.FlowIR) []string {
 	default:
 		violations = append(violations, fmt.Sprintf("flow confidence %q is invalid", flow.Confidence))
 	}
-	nodes := make(map[string]struct{}, len(flow.Nodes))
-	for index, node := range flow.Nodes {
+	return violations
+}
+
+func validateRenderFlowNodes(nodes []agentapi.FlowNode, violations *[]string) map[string]struct{} {
+	ids := make(map[string]struct{}, len(nodes))
+	for index, node := range nodes {
 		id := strings.TrimSpace(node.ID)
 		if id == "" {
-			violations = append(violations, fmt.Sprintf("flow node %d has an empty id", index))
+			*violations = append(*violations, fmt.Sprintf("flow node %d has an empty id", index))
 			continue
 		}
 		if node.ID != id {
-			violations = append(violations, fmt.Sprintf("flow node %d id is not canonical", index))
+			*violations = append(*violations, fmt.Sprintf("flow node %d id is not canonical", index))
 		}
 		if strings.TrimSpace(node.Label) == "" || strings.TrimSpace(node.Kind) == "" {
-			violations = append(violations, fmt.Sprintf("flow node %q requires label and kind", id))
+			*violations = append(*violations, fmt.Sprintf("flow node %q requires label and kind", id))
 		}
-		if _, exists := nodes[id]; exists {
-			violations = append(violations, fmt.Sprintf("flow node id %q is duplicated", id))
+		if _, exists := ids[id]; exists {
+			*violations = append(*violations, fmt.Sprintf("flow node id %q is duplicated", id))
 			continue
 		}
-		nodes[id] = struct{}{}
-		violations = append(violations, validateRenderEvidenceRefs("flow node "+id, node.EvidenceRefs)...)
+		ids[id] = struct{}{}
+		*violations = append(*violations, validateRenderEvidenceRefs("flow node "+id, node.EvidenceRefs)...)
 	}
-	edges := make(map[string]struct{}, len(flow.Edges))
-	for index, edge := range flow.Edges {
+	return ids
+}
+
+func validateRenderFlowEdges(edges []agentapi.FlowEdge, nodes map[string]struct{}) []string {
+	var violations []string
+	seen := make(map[string]struct{}, len(edges))
+	for index, edge := range edges {
 		edgeKey := strings.Join([]string{edge.From, edge.To, edge.Protocol, edge.SyncMode, edge.EvidenceState}, "\x00")
-		if _, exists := edges[edgeKey]; exists {
+		if _, exists := seen[edgeKey]; exists {
 			violations = append(violations, fmt.Sprintf("flow edge %d is duplicated", index))
 		} else {
-			edges[edgeKey] = struct{}{}
+			seen[edgeKey] = struct{}{}
 		}
 		if edge.From != strings.TrimSpace(edge.From) || edge.To != strings.TrimSpace(edge.To) {
 			violations = append(violations, fmt.Sprintf("flow edge %d endpoint ids are not canonical", index))
@@ -249,8 +315,13 @@ func validateRenderableFlowIR(flow *agentapi.FlowIR) []string {
 		}
 		violations = append(violations, validateRenderEvidenceRefs(fmt.Sprintf("flow edge %d", index), edge.EvidenceRefs)...)
 	}
-	openHops := make(map[string]struct{}, len(flow.OpenHops))
-	for index, hop := range flow.OpenHops {
+	return violations
+}
+
+func validateRenderFlowOpenHops(hops []string) []string {
+	var violations []string
+	seen := make(map[string]struct{}, len(hops))
+	for index, hop := range hops {
 		canonical := strings.TrimSpace(hop)
 		if canonical == "" {
 			violations = append(violations, fmt.Sprintf("flow open hop %d is empty", index))
@@ -260,11 +331,11 @@ func validateRenderableFlowIR(flow *agentapi.FlowIR) []string {
 			violations = append(violations, fmt.Sprintf("flow open hop %d is not canonical", index))
 		}
 		key := strings.ToLower(canonical)
-		if _, exists := openHops[key]; exists {
+		if _, exists := seen[key]; exists {
 			violations = append(violations, fmt.Sprintf("flow open hop %d is duplicated", index))
 			continue
 		}
-		openHops[key] = struct{}{}
+		seen[key] = struct{}{}
 	}
 	return violations
 }

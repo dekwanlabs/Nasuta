@@ -26,7 +26,7 @@ type Deps struct {
 	Runtime         agentapi.ManagedRuntime
 	RuntimeTools    ScenarioToolSource
 	Models          *Models
-	PhaseEmitter    interface{ EmitPhase(string, string) }
+	PhaseEmitter    PhaseEmitter
 	ExecutionEvents ExecutionEventEmitter
 	WriteAvailable  bool
 }

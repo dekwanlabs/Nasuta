@@ -162,23 +162,76 @@ func compactTurns(ctx context.Context, client *llm.LLMClient, sessions *memory.S
 	histories ...History) (CompactionResult, error) {
 
 	compactionStarted := time.Now()
+	candidate, prepareDuration, err := prepareCompactionCandidate(
+		ctx, sessions, sessionID, userID, plan, result, onStart,
+	)
+	if err != nil {
+		return result, err
+	}
+	if candidate == nil {
+		return result, nil
+	}
+	records, refs, removedTokens, archiveDuration, err := compressCompactionTurns(
+		ctx, sessions, candidate, sessionID, userID,
+	)
+	if err != nil {
+		return result, err
+	}
+	summaryDuration, err := summarizeCompactionTurns(ctx, client, sessions, candidate, records, sessionID)
+	if err != nil {
+		return result, err
+	}
+	if len(histories) > 0 && histories[0] != nil {
+		histories[0].PrepareRecords(records)
+	}
+	remainingTokens := max(0, stats.UncompactedTokens-removedTokens)
+	projectedAfter := remainingTokens + plan.incomingTokens + plan.outputReserve
+	result.ProjectedAfterTokens = projectedAfter
+
+	applyDuration, err := applyCompactionResult(ctx, sessions, candidate, records, refs, projectedAfter, plan, sessionID, &result)
+	if err != nil {
+		return result, err
+	}
+	logCompactionResult(ctx, sessionID, plan, candidate, removedTokens, remainingTokens, projectedAfter,
+		result, compactionStarted, prepareDuration, archiveDuration, summaryDuration, applyDuration)
+	return result, nil
+}
+
+func prepareCompactionCandidate(
+	ctx context.Context,
+	sessions *memory.SessionStore,
+	sessionID string,
+	userID int64,
+	plan compactionPlan,
+	result CompactionResult,
+	onStart func(fromTurn, toTurn int),
+) (*memory.CompactionCandidate, time.Duration, error) {
+	started := time.Now()
 	candidate, err := sessions.PrepareCompaction(sessionID, userID, memory.CompactionSelection{
 		KeepRecentTurns: sessionRecentTurns, TargetReductionTokens: plan.targetReduction,
 	})
 	if err != nil {
-		return result, fmt.Errorf("prepare session compaction %q: %w", sessionID, err)
+		return nil, 0, fmt.Errorf("prepare session compaction %q: %w", sessionID, err)
 	}
 	if candidate == nil {
 		log.WarnfCtx(ctx, "[qa] compaction target unavailable session=%s trigger=%s projected=%d target=%d reason=minimum_recent_turns_prevent_target",
 			sessionID, plan.trigger, result.ProjectedBeforeTokens, plan.lowWater)
-		return result, nil
+		return nil, 0, nil
 	}
 	if onStart != nil {
 		onStart(candidate.FromTurn, candidate.ToTurn)
 	}
-	prepareDuration := time.Since(compactionStarted)
+	return candidate, time.Since(started), nil
+}
 
-	archiveStarted := time.Now()
+func compressCompactionTurns(
+	ctx context.Context,
+	sessions *memory.SessionStore,
+	candidate *memory.CompactionCandidate,
+	sessionID string,
+	userID int64,
+) ([]memory.TurnContextRecord, []string, int, time.Duration, error) {
+	started := time.Now()
 	records := make([]memory.TurnContextRecord, 0, len(candidate.Turns))
 	refs := make([]string, 0, len(candidate.Turns))
 	removedTokens := 0
@@ -186,7 +239,7 @@ func compactTurns(ctx context.Context, client *llm.LLMClient, sessions *memory.S
 		ref := turnCompactionRef(sessionID, turn.TurnNumber)
 		detail, err := CompressDetail(turn.TurnNumber, turn.Messages)
 		if err != nil {
-			return result, fmt.Errorf("compress session %q turn %d: %w", sessionID, turn.TurnNumber, err)
+			return nil, nil, 0, 0, fmt.Errorf("compress session %q turn %d: %w", sessionID, turn.TurnNumber, err)
 		}
 		records = append(records, memory.TurnContextRecord{
 			Ref: ref, SessionID: sessionID, UserID: userID, RunID: turn.RunID,
@@ -196,34 +249,50 @@ func compactTurns(ctx context.Context, client *llm.LLMClient, sessions *memory.S
 		refs = append(refs, ref)
 		removedTokens += turn.SourceTokens
 	}
-	archiveDuration := time.Since(archiveStarted)
-	summaryStarted := time.Now()
+	return records, refs, removedTokens, time.Since(started), nil
+}
+
+func summarizeCompactionTurns(
+	ctx context.Context,
+	client *llm.LLMClient,
+	sessions *memory.SessionStore,
+	candidate *memory.CompactionCandidate,
+	records []memory.TurnContextRecord,
+	sessionID string,
+) (time.Duration, error) {
+	started := time.Now()
 	summaries, err := GenerateSummaries(ctx, client, records)
 	if err != nil {
-		return result, fmt.Errorf("summarize session %q turns %d-%d: %w",
+		return 0, fmt.Errorf("summarize session %q turns %d-%d: %w",
 			sessionID, candidate.FromTurn, candidate.ToTurn, err)
 	}
 	for i := range records {
 		summary := strings.TrimSpace(summaries[records[i].Ref])
 		if summary == "" {
-			return result, fmt.Errorf("summarize session %q turn %d: empty summary",
+			return 0, fmt.Errorf("summarize session %q turn %d: empty summary",
 				sessionID, records[i].TurnNumber)
 		}
 		records[i].SummaryText = summary
 		records[i].SummaryTokens = tooloutput.EstimateTokens(summary)
 	}
-	summaryDuration := time.Since(summaryStarted)
-	if len(histories) > 0 && histories[0] != nil {
-		histories[0].PrepareRecords(records)
-	}
-	remainingTokens := max(0, stats.UncompactedTokens-removedTokens)
-	projectedAfter := remainingTokens + plan.incomingTokens + plan.outputReserve
-	result.ProjectedAfterTokens = projectedAfter
+	return time.Since(started), nil
+}
 
-	applyStarted := time.Now()
+func applyCompactionResult(
+	ctx context.Context,
+	sessions *memory.SessionStore,
+	candidate *memory.CompactionCandidate,
+	records []memory.TurnContextRecord,
+	refs []string,
+	projectedAfter int,
+	plan compactionPlan,
+	sessionID string,
+	result *CompactionResult,
+) (time.Duration, error) {
+	started := time.Now()
 	applied, err := sessions.ApplyCompaction(*candidate, records)
 	if err != nil {
-		return result, fmt.Errorf("apply session compaction %q: %w", sessionID, err)
+		return 0, fmt.Errorf("apply session compaction %q: %w", sessionID, err)
 	}
 	result.Applied = applied
 	result.Stale = !applied
@@ -235,9 +304,23 @@ func compactTurns(ctx context.Context, client *llm.LLMClient, sessions *memory.S
 	result.NewSessionRecommended = applied && recommendNewSession(
 		projectedAfter, plan.criticalWater, result.ArchivedTurnCount, result.RestartTurnThreshold,
 	)
-	applyDuration := time.Since(applyStarted)
+	return time.Since(started), nil
+}
+
+func logCompactionResult(
+	ctx context.Context,
+	sessionID string,
+	plan compactionPlan,
+	candidate *memory.CompactionCandidate,
+	removedTokens int,
+	remainingTokens int,
+	projectedAfter int,
+	result CompactionResult,
+	compactionStarted time.Time,
+	prepareDuration, archiveDuration, summaryDuration, applyDuration time.Duration,
+) {
 	status := "stale"
-	if applied {
+	if result.Applied {
 		status = "below_low_water"
 		if projectedAfter > plan.lowWater {
 			status = "above_low_water"
@@ -250,12 +333,11 @@ func compactTurns(ctx context.Context, client *llm.LLMClient, sessions *memory.S
 		plan.lowWater, plan.criticalWater, result.NewSessionRecommended,
 		time.Since(compactionStarted).Milliseconds(), prepareDuration.Milliseconds(),
 		archiveDuration.Milliseconds(), summaryDuration.Milliseconds(), applyDuration.Milliseconds(), status)
-	if applied && projectedAfter > plan.lowWater {
+	if result.Applied && projectedAfter > plan.lowWater {
 		log.WarnfCtx(ctx, "[qa] compaction remains above low water session=%s trigger=%s projected_after=%d low=%d turns=%d-%d eligible_through=%d reason=all_eligible_turns_compacted_minimum_recent_turns_retained",
 			sessionID, plan.trigger, projectedAfter, plan.lowWater, candidate.FromTurn, candidate.ToTurn,
 			candidate.EligibleThrough)
 	}
-	return result, nil
 }
 
 func restartTurnThreshold(contextWindow int) int {

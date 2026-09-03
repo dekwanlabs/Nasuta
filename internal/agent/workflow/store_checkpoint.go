@@ -20,6 +20,29 @@ func (workflowStore *Store) LoadFullRunState(
 		Handoffs: make(map[string]Handoff), NodeOutputs: make(map[string]Handoff),
 		Gates: make(map[string]GateDecision), Approvals: make(map[string]Approval),
 	}
+	if err := workflowStore.loadFullNodeRuns(ctx, workflowRunID, state); err != nil {
+		return nil, err
+	}
+	if err := workflowStore.loadFullInputHandoffs(ctx, workflowRunID, state); err != nil {
+		return nil, err
+	}
+	if err := workflowStore.loadFullNodeOutputs(ctx, workflowRunID, state); err != nil {
+		return nil, err
+	}
+	if err := workflowStore.loadFullGateDecisions(ctx, workflowRunID, state.Gates); err != nil {
+		return nil, err
+	}
+	if err := workflowStore.loadFullApprovals(ctx, workflowRunID, state.Approvals); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+func (workflowStore *Store) loadFullNodeRuns(
+	ctx context.Context,
+	workflowRunID string,
+	state *RunState,
+) error {
 	rows, err := workflowStore.db.QueryContext(ctx, `SELECT
 		current.workflow_run_id,current.node_id,current.attempt,current.kind,
 		current.agent_run_id,current.input_handoff_ids_json,current.output_handoff_id,
@@ -37,58 +60,68 @@ func (workflowStore *Store) LoadFullRunState(
 			AND latest.node_id=current.node_id)
 		ORDER BY current.node_id`, workflowRunID)
 	if err != nil {
-		return nil, fmt.Errorf("load workflow node checkpoint %q: %w", workflowRunID, err)
+		return fmt.Errorf("load workflow node checkpoint %q: %w", workflowRunID, err)
 	}
 	for rows.Next() {
 		node, err := scanNodeRun(rows)
 		if err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("scan workflow node checkpoint %q: %w", workflowRunID, err)
+			return fmt.Errorf("scan workflow node checkpoint %q: %w", workflowRunID, err)
 		}
 		state.Nodes[node.NodeID] = node
 	}
 	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close workflow node checkpoint %q: %w", workflowRunID, err)
+		return fmt.Errorf("close workflow node checkpoint %q: %w", workflowRunID, err)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate workflow node checkpoint %q: %w", workflowRunID, err)
+		return fmt.Errorf("iterate workflow node checkpoint %q: %w", workflowRunID, err)
 	}
+	return nil
+}
+
+func (workflowStore *Store) loadFullInputHandoffs(
+	ctx context.Context,
+	workflowRunID string,
+	state *RunState,
+) error {
 	handoffs, err := workflowStore.loadFullHandoffs(ctx, workflowRunID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, handoff := range handoffs {
 		state.Handoffs[handoff.ID] = handoff
 		if handoff.ProducerNodeID == "workflow.input" {
 			if state.Input.ID != "" {
-				return nil, fmt.Errorf("workflow run %q has multiple input handoffs", workflowRunID)
+				return fmt.Errorf("workflow run %q has multiple input handoffs", workflowRunID)
 			}
 			state.Input = handoff
 		}
 	}
 	if state.Input.ID == "" {
-		return nil, fmt.Errorf("workflow run %q input handoff is missing", workflowRunID)
+		return fmt.Errorf("workflow run %q input handoff is missing", workflowRunID)
 	}
+	return nil
+}
+
+func (workflowStore *Store) loadFullNodeOutputs(
+	ctx context.Context,
+	workflowRunID string,
+	state *RunState,
+) error {
 	for nodeID, node := range state.Nodes {
 		if node.Status != RunSucceeded {
 			continue
 		}
 		handoff, ok := state.Handoffs[node.OutputHandoffID]
 		if !ok {
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"workflow node %q/%q output handoff %q is missing",
 				workflowRunID, nodeID, node.OutputHandoffID,
 			)
 		}
 		state.NodeOutputs[nodeID] = handoff
 	}
-	if err := workflowStore.loadFullGateDecisions(ctx, workflowRunID, state.Gates); err != nil {
-		return nil, err
-	}
-	if err := workflowStore.loadFullApprovals(ctx, workflowRunID, state.Approvals); err != nil {
-		return nil, err
-	}
-	return state, nil
+	return nil
 }
 
 func (workflowStore *Store) loadFullHandoffs(

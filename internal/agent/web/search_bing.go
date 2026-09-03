@@ -41,11 +41,16 @@ func (srv *Service) searchBing(ctx context.Context, query string, limit int) ([]
 	return results, nil
 }
 
+type bingParseState struct {
+	current  SearchResult
+	inResult bool
+	inTitle  bool
+}
+
 func parseBingResults(reader io.Reader, limit int) []SearchResult {
 	var results []SearchResult
 	tokenizer := nethtml.NewTokenizer(reader)
-	var current SearchResult
-	var inResult, inTitle bool
+	var state bingParseState
 
 	for len(results) < limit {
 		tokenType := tokenizer.Next()
@@ -56,40 +61,61 @@ func parseBingResults(reader io.Reader, limit int) []SearchResult {
 		tagName := strings.ToLower(string(tag))
 		switch tokenType {
 		case nethtml.StartTagToken:
-			if tagName == "li" && hasClass(tokenizer, "b_algo") {
-				current = SearchResult{}
-				inResult = true
-			}
-			if inResult && tagName == "h2" {
-				inTitle = true
-			}
-			if inResult && inTitle && tagName == "a" {
-				current.URL = extractAttr(tokenizer, "href")
-			}
-			if inResult && tagName == "div" && hasClass(tokenizer, "b_caption") {
-				current.Snippet = extractBingSnippet(tokenizer)
-			}
+			state.handleBingStartTag(tokenizer, tagName)
 		case nethtml.EndTagToken:
-			if tagName == "li" && inResult {
-				if current.URL != "" && current.Title != "" {
-					results = append(results, current)
-				}
-				inResult = false
-				inTitle = false
-			}
-			if tagName == "h2" && inTitle {
-				inTitle = false
-			}
+			results = state.handleBingEndTag(tagName, results)
 		case nethtml.TextToken:
-			if inResult && inTitle {
-				text := strings.TrimSpace(string(tokenizer.Text()))
-				if text != "" && current.Title == "" {
-					current.Title = text
-				}
-			}
+			state.handleBingText(tokenizer)
 		}
 	}
 	return results
+}
+
+func (state *bingParseState) handleBingStartTag(tokenizer *nethtml.Tokenizer, tagName string) {
+	if tagName == "li" && hasClass(tokenizer, "b_algo") {
+		state.current = SearchResult{}
+		state.inResult = true
+		return
+	}
+	if !state.inResult {
+		return
+	}
+	switch tagName {
+	case "h2":
+		state.inTitle = true
+	case "a":
+		if state.inTitle {
+			state.current.URL = extractAttr(tokenizer, "href")
+		}
+	case "div":
+		if hasClass(tokenizer, "b_caption") {
+			state.current.Snippet = extractBingSnippet(tokenizer)
+		}
+	}
+}
+
+func (state *bingParseState) handleBingEndTag(tagName string, results []SearchResult) []SearchResult {
+	if tagName == "li" && state.inResult {
+		if state.current.URL != "" && state.current.Title != "" {
+			results = append(results, state.current)
+		}
+		state.inResult = false
+		state.inTitle = false
+	}
+	if tagName == "h2" && state.inTitle {
+		state.inTitle = false
+	}
+	return results
+}
+
+func (state *bingParseState) handleBingText(tokenizer *nethtml.Tokenizer) {
+	if !state.inResult || !state.inTitle {
+		return
+	}
+	text := strings.TrimSpace(string(tokenizer.Text()))
+	if text != "" && state.current.Title == "" {
+		state.current.Title = text
+	}
 }
 
 type bingChallengeReader struct {

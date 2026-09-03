@@ -49,6 +49,20 @@ func TestPrepareRunConversationRequiresDelegationOnParentDynamicRoute(t *testing
 	}
 }
 
+func TestPrepareRunConversationSkipsDelegationContractWhenRouteGatesFanout(t *testing.T) {
+	svc := &Service{}
+	prepared := &preparation{
+		execution: executionRouteDecision{RouteReason: routeReasonMultiAgentNotWorthwhile},
+		candidateToolSet: compactionToolSet{tools: []tool.Tool{{
+			ID: "delegate_investigation",
+		}}},
+	}
+	conversation := svc.prepareRunConversation(prepared)
+	if hasDelegationContract(conversation) {
+		t.Fatalf("instructions = %+v, want no contract for a gated route", conversation.Instructions)
+	}
+}
+
 func TestPrepareRunConversationSkipsDelegationContractWhenToolMissing(t *testing.T) {
 	svc := &Service{}
 	prepared := &preparation{

@@ -229,19 +229,55 @@ func (workflowStore *Store) FailNode(
 	usage Usage,
 	endedAt time.Time,
 ) error {
-	eventKind := "node_failed"
-	summary := "workflow node failed"
-	if status == RunWaitingHuman {
-		eventKind = "human_review_required"
-		summary = "workflow node requires human approval"
-	} else if status != RunFailed && status != RunCancelled && status != RunTimedOut {
-		return fmt.Errorf("workflow node terminal status %q is invalid", status)
+	eventKind, summary, err := failNodeEventKind(status)
+	if err != nil {
+		return err
 	}
 	tx, err := workflowStore.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin workflow node %q/%q failure: %w", workflowRunID, nodeID, err)
 	}
 	defer tx.Rollback()
+	if err := assertRunFailable(ctx, tx, workflowRunID, nodeID, attempt, status); err != nil {
+		return err
+	}
+	if err := failNodeAttempt(ctx, tx, workflowRunID, nodeID, attempt, agentRunID, status, errorCode, usage, endedAt); err != nil {
+		return err
+	}
+	events := []Event{{
+		WorkflowRunID: workflowRunID, Kind: eventKind, NodeID: nodeID,
+		Summary: summary, CreatedAt: endedAt,
+	}}
+	if err := appendEventsTx(ctx, tx, workflowRunID, events); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit workflow node %q/%q failure: %w", workflowRunID, nodeID, err)
+	}
+	workflowStore.publish(events)
+	return nil
+}
+
+func failNodeEventKind(status RunStatus) (string, string, error) {
+	eventKind := "node_failed"
+	summary := "workflow node failed"
+	if status == RunWaitingHuman {
+		eventKind = "human_review_required"
+		summary = "workflow node requires human approval"
+	} else if status != RunFailed && status != RunCancelled && status != RunTimedOut {
+		return "", "", fmt.Errorf("workflow node terminal status %q is invalid", status)
+	}
+	return eventKind, summary, nil
+}
+
+func assertRunFailable(
+	ctx context.Context,
+	tx *sql.Tx,
+	workflowRunID string,
+	nodeID string,
+	attempt int,
+	status RunStatus,
+) error {
 	runStatus, err := lockWorkflow(ctx, tx, workflowRunID)
 	if err != nil {
 		return err
@@ -263,6 +299,21 @@ func (workflowStore *Store) FailNode(
 			workflowRunID, runStatus, ErrConflict,
 		)
 	}
+	return nil
+}
+
+func failNodeAttempt(
+	ctx context.Context,
+	tx *sql.Tx,
+	workflowRunID string,
+	nodeID string,
+	attempt int,
+	agentRunID string,
+	status RunStatus,
+	errorCode string,
+	usage Usage,
+	endedAt time.Time,
+) error {
 	result, err := tx.ExecContext(ctx, `UPDATE workflow_node_runs
 		SET agent_run_id=?,status=?,error_code=?,
 			input_tokens=?,output_tokens=?,reasoning_tokens=?,total_tokens=?,
@@ -280,21 +331,70 @@ func (workflowStore *Store) FailNode(
 	if err := requireSingleTransition(result, workflowRunID+"/"+nodeID); err != nil {
 		return err
 	}
-	if err := accumulateUsageTx(ctx, tx, workflowRunID, usage); err != nil {
-		return err
+	return accumulateUsageTx(ctx, tx, workflowRunID, usage)
+}
+
+// finishRunEvents persists the optional final output, closes running nodes,
+// transitions the workflow run to its terminal state, and assembles the events
+// describing the completion.
+func finishRunEvents(
+	ctx context.Context,
+	tx *sql.Tx,
+	workflowRunID string,
+	status RunStatus,
+	stopReason StopReason,
+	errorCode string,
+	eventKind string,
+	summary string,
+	output *Handoff,
+	endedAt time.Time,
+) ([]Event, error) {
+	events := make([]Event, 0, 2)
+	if output != nil {
+		if err := saveHandoffTx(ctx, tx, *output); err != nil {
+			return nil, err
+		}
+		events = append(events, Event{
+			WorkflowRunID: workflowRunID, Kind: "handoff_created", NodeID: output.ProducerNodeID,
+			Summary: "workflow output created", CreatedAt: endedAt,
+		})
 	}
-	events := []Event{{
-		WorkflowRunID: workflowRunID, Kind: eventKind, NodeID: nodeID,
-		Summary: summary, CreatedAt: endedAt,
-	}}
-	if err := appendEventsTx(ctx, tx, workflowRunID, events); err != nil {
-		return err
+	if err := closeRunningNodesTx(
+		ctx,
+		tx,
+		workflowRunID,
+		status,
+		errorCode,
+		endedAt,
+	); err != nil {
+		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit workflow node %q/%q failure: %w", workflowRunID, nodeID, err)
+	result, err := tx.ExecContext(ctx, `UPDATE workflow_runs
+		SET status=?,error_code=?,stop_reason=?,ended_at=? WHERE id=? AND status=?`,
+		status, errorCode, stopReason, store.DatabaseTime(endedAt.UTC().Format(time.RFC3339Nano)),
+		workflowRunID, RunRunning,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("complete workflow run %q: %w", workflowRunID, err)
 	}
-	workflowStore.publish(events)
-	return nil
+	if err := requireSingleTransition(result, workflowRunID); err != nil {
+		return nil, err
+	}
+	terminalDetail := TerminalEventDetail{
+		RunStatus: status, StopReason: stopReason, ErrorCode: errorCode,
+	}
+	if output != nil {
+		terminalDetail.Completeness = output.Completeness
+	}
+	detail, err := json.Marshal(terminalDetail)
+	if err != nil {
+		return nil, fmt.Errorf("marshal workflow %q terminal event: %w", workflowRunID, err)
+	}
+	events = append(events, Event{
+		WorkflowRunID: workflowRunID, Kind: eventKind, Summary: summary,
+		Detail: detail, CreatedAt: endedAt,
+	})
+	return events, nil
 }
 
 // FinishRun atomically records an optional final output and the Run terminal state.
@@ -329,51 +429,10 @@ func (workflowStore *Store) FinishRun(
 			workflowRunID, runStatus, ErrConflict,
 		)
 	}
-	events := make([]Event, 0, 2)
-	if output != nil {
-		if err := saveHandoffTx(ctx, tx, *output); err != nil {
-			return err
-		}
-		events = append(events, Event{
-			WorkflowRunID: workflowRunID, Kind: "handoff_created", NodeID: output.ProducerNodeID,
-			Summary: "workflow output created", CreatedAt: endedAt,
-		})
-	}
-	if err := closeRunningNodesTx(
-		ctx,
-		tx,
-		workflowRunID,
-		status,
-		errorCode,
-		endedAt,
-	); err != nil {
+	events, err := finishRunEvents(ctx, tx, workflowRunID, status, stopReason, errorCode, eventKind, summary, output, endedAt)
+	if err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE workflow_runs
-		SET status=?,error_code=?,stop_reason=?,ended_at=? WHERE id=? AND status=?`,
-		status, errorCode, stopReason, store.DatabaseTime(endedAt.UTC().Format(time.RFC3339Nano)),
-		workflowRunID, RunRunning,
-	)
-	if err != nil {
-		return fmt.Errorf("complete workflow run %q: %w", workflowRunID, err)
-	}
-	if err := requireSingleTransition(result, workflowRunID); err != nil {
-		return err
-	}
-	terminalDetail := TerminalEventDetail{
-		RunStatus: status, StopReason: stopReason, ErrorCode: errorCode,
-	}
-	if output != nil {
-		terminalDetail.Completeness = output.Completeness
-	}
-	detail, err := json.Marshal(terminalDetail)
-	if err != nil {
-		return fmt.Errorf("marshal workflow %q terminal event: %w", workflowRunID, err)
-	}
-	events = append(events, Event{
-		WorkflowRunID: workflowRunID, Kind: eventKind, Summary: summary,
-		Detail: detail, CreatedAt: endedAt,
-	})
 	if err := appendEventsTx(ctx, tx, workflowRunID, events); err != nil {
 		return err
 	}

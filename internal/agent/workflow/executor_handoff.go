@@ -142,28 +142,41 @@ func unavailablePredecessors(
 	return unavailable
 }
 
-func joinHandoffs(
-	runID,
-	producer string,
-	schema agentapi.SchemaRef,
-	mode JoinMode,
-	inputs []Handoff,
-	unavailableTasks []unavailableTaskView,
-	baselineEvidence []tool.EvidenceUnit,
-	maxDuplicateRatio float64,
-	rejectEvidenceConflicts bool,
-	maxBytes int64,
-	schemas *agentapi.SchemaRegistry,
-) (Handoff, error) {
+// unavailableReasonsForNode limits failure metadata to the current node's
+// optional predecessors. The coordinator keeps a run-wide reason map for
+// convergence and recovery, but a node must not observe unrelated failures.
+func unavailableReasonsForNode(
+	nodeID string,
+	predecessors map[string][]string,
+	reasons map[string]StopReason,
+) map[string]StopReason {
+	ids := predecessors[nodeID]
+	if len(ids) == 0 || len(reasons) == 0 {
+		return nil
+	}
+	filtered := make(map[string]StopReason)
+	for _, id := range ids {
+		if reason := reasons[id]; reason != "" {
+			filtered[id] = reason
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func collectJoinReferences(inputs []Handoff) []agentapi.Reference {
 	references := make([]agentapi.Reference, 0)
-	baselineIdentities := canonicalEvidenceIdentities(baselineEvidence)
-	evidenceUnits, evidenceConflicts := mergeEvidenceHandoffs(
-		baselineEvidence,
-		inputs,
-	)
-	completeness := Complete
 	for _, input := range inputs {
 		references = append(references, input.References...)
+	}
+	return references
+}
+
+func joinCompleteness(inputs []Handoff, unavailableTasks []unavailableTaskView) Completeness {
+	completeness := Complete
+	for _, input := range inputs {
 		if input.Completeness == Unavailable {
 			completeness = Unavailable
 		} else if input.Completeness == Partial && completeness == Complete {
@@ -177,54 +190,103 @@ func joinHandoffs(
 			completeness = Partial
 		}
 	}
-	var convergence *convergenceView
-	if mode == JoinEvidenceView {
-		measured := measureConvergence(
-			inputs,
-			baselineEvidence,
-			maxDuplicateRatio,
-		)
-		convergence = &measured
+	return completeness
+}
+
+func measureJoinConvergence(mode JoinMode, inputs []Handoff, baselineEvidence []tool.EvidenceUnit, maxDuplicateRatio float64) *convergenceView {
+	if mode != JoinEvidenceView {
+		return nil
 	}
-	evidenceUnitsTotal := 0
-	evidenceUnitsOmitted := 0
-	if mode == JoinEvidenceView {
-		payloadFor := func(
-			units []tool.EvidenceUnit,
-			total, omitted int,
-		) (json.RawMessage, error) {
-			return joinedPayload(
-				mode,
-				inputs,
-				unavailableTasks,
-				units,
-				baselineIdentities,
-				evidenceConflicts,
-				total,
-				omitted,
-				convergence,
-				completeness,
-			)
-		}
-		compacted, total, omitted, err := compactInvestigationEvidenceToBudget(
+	measured := measureConvergence(inputs, baselineEvidence, maxDuplicateRatio)
+	return &measured
+}
+
+func compactJoinEvidence(
+	producer string,
+	mode JoinMode,
+	inputs []Handoff,
+	unavailableTasks []unavailableTaskView,
+	baselineIdentities []agentapi.EvidenceIdentity,
+	evidenceConflicts []agentapi.EvidenceConflict,
+	convergence *convergenceView,
+	completeness Completeness,
+	evidenceUnits []tool.EvidenceUnit,
+	maxBytes int64,
+) ([]tool.EvidenceUnit, int, int, error) {
+	if mode != JoinEvidenceView {
+		return evidenceUnits, 0, 0, nil
+	}
+	payloadFor := func(
+		units []tool.EvidenceUnit,
+		total, omitted int,
+	) (json.RawMessage, error) {
+		return joinedPayload(
+			mode,
 			inputs,
-			evidenceUnits,
-			evidenceIdentityKeySet(baselineIdentities),
-			maxBytes,
-			payloadFor,
+			unavailableTasks,
+			units,
+			baselineIdentities,
+			evidenceConflicts,
+			total,
+			omitted,
+			convergence,
+			completeness,
 		)
-		if err != nil {
-			return Handoff{}, fmt.Errorf("compact join %q evidence: %w", producer, err)
-		}
-		evidenceUnits = compacted
-		if omitted > 0 {
-			evidenceUnitsTotal = total
-			evidenceUnitsOmitted = omitted
-			log.Warnf(
-				"[workflow] join %s retained %d of %d evidence units; omitted %d uncited or over-budget unit(s)",
-				producer, len(compacted), total, omitted,
-			)
-		}
+	}
+	compacted, total, omitted, err := compactInvestigationEvidenceToBudget(
+		inputs,
+		evidenceUnits,
+		evidenceIdentityKeySet(baselineIdentities),
+		maxBytes,
+		payloadFor,
+	)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("compact join %q evidence: %w", producer, err)
+	}
+	if omitted > 0 {
+		log.Warnf(
+			"[workflow] join %s retained %d of %d evidence units; omitted %d uncited or over-budget unit(s)",
+			producer, len(compacted), total, omitted,
+		)
+	}
+	return compacted, total, omitted, nil
+}
+
+func joinHandoffs(
+	runID,
+	producer string,
+	schema agentapi.SchemaRef,
+	mode JoinMode,
+	inputs []Handoff,
+	unavailableTasks []unavailableTaskView,
+	baselineEvidence []tool.EvidenceUnit,
+	maxDuplicateRatio float64,
+	rejectEvidenceConflicts bool,
+	maxBytes int64,
+	schemas *agentapi.SchemaRegistry,
+) (Handoff, error) {
+	references := collectJoinReferences(inputs)
+	baselineIdentities := canonicalEvidenceIdentities(baselineEvidence)
+	evidenceUnits, evidenceConflicts := mergeEvidenceHandoffs(
+		baselineEvidence,
+		inputs,
+	)
+	completeness := joinCompleteness(inputs, unavailableTasks)
+	convergence := measureJoinConvergence(mode, inputs, baselineEvidence, maxDuplicateRatio)
+	evidenceUnits, evidenceUnitsTotal, evidenceUnitsOmitted, err := compactJoinEvidence(
+		producer,
+		mode,
+		inputs,
+		unavailableTasks,
+		baselineIdentities,
+		evidenceConflicts,
+		convergence,
+		completeness,
+		evidenceUnits,
+		maxBytes,
+	)
+	if err != nil {
+		return Handoff{}, err
 	}
 	payload, err := joinedPayload(
 		mode,

@@ -32,37 +32,54 @@ func ValidateFlowAnswer(answer string, contract agentapi.RunOutputContract) []st
 	if len(blocks) == 0 {
 		return []string{"flow answer must start with one or more fenced Mermaid diagrams"}
 	}
-	violations := make([]string, 0, 4)
-	if first := firstNonEmptyLine(answer); !strings.HasPrefix(strings.ToLower(first), "```mermaid") {
-		violations = append(violations, "flow answer must start with a fenced Mermaid diagram")
-	}
-	if !mermaidBlocksPrecedeProse(answer, blocks) {
-		violations = append(violations, "all Mermaid diagrams must appear before explanatory prose")
-	}
-	if strings.TrimSpace(answer[blocks[len(blocks)-1].end:]) == "" {
-		violations = append(violations, "flow answer must include explanatory text after the diagrams")
-	}
+	return validateFlowAnswerBlocks(answer, blocks, contract)
+}
 
-	hasEdge := false
-	for index, block := range blocks {
-		lower := strings.ToLower(block.content)
-		if !strings.Contains(lower, "flowchart") && !strings.Contains(lower, "sequencediagram") {
-			violations = append(violations, fmt.Sprintf("Mermaid block %d must be a flowchart or sequenceDiagram", index+1))
-		}
-		edges := countMermaidEdges(block.content)
-		if edges > 0 {
-			hasEdge = true
-		}
-		if contract.MaxHops > 0 && edges > contract.MaxHops {
-			violations = append(violations, fmt.Sprintf("Mermaid block %d exceeds the %d-hop limit", index+1, contract.MaxHops))
-		}
-	}
+func validateFlowAnswerBlocks(answer string, blocks []mermaidBlock, contract agentapi.RunOutputContract) []string {
+	violations := make([]string, 0, 4)
+	appendDiagramEnvelopeViolations(&violations, answer, blocks)
+	hasEdge := appendDiagramTypeViolations(&violations, blocks, contract)
 	if !hasEdge {
 		violations = append(violations, "Mermaid diagrams must contain at least one flow edge")
 	}
 	if len(contract.Subjects) > 1 && len(blocks) < len(contract.Subjects) {
 		violations = append(violations, fmt.Sprintf("flow answer needs at least one Mermaid diagram per subject (%d required)", len(contract.Subjects)))
 	}
+	appendSubjectCoverageViolations(&violations, blocks, contract)
+	return uniqueStrings(violations)
+}
+
+func appendDiagramEnvelopeViolations(violations *[]string, answer string, blocks []mermaidBlock) {
+	if first := firstNonEmptyLine(answer); !strings.HasPrefix(strings.ToLower(first), "```mermaid") {
+		*violations = append(*violations, "flow answer must start with a fenced Mermaid diagram")
+	}
+	if !mermaidBlocksPrecedeProse(answer, blocks) {
+		*violations = append(*violations, "all Mermaid diagrams must appear before explanatory prose")
+	}
+	if strings.TrimSpace(answer[blocks[len(blocks)-1].end:]) == "" {
+		*violations = append(*violations, "flow answer must include explanatory text after the diagrams")
+	}
+}
+
+func appendDiagramTypeViolations(violations *[]string, blocks []mermaidBlock, contract agentapi.RunOutputContract) bool {
+	hasEdge := false
+	for index, block := range blocks {
+		lower := strings.ToLower(block.content)
+		if !strings.Contains(lower, "flowchart") && !strings.Contains(lower, "sequencediagram") {
+			*violations = append(*violations, fmt.Sprintf("Mermaid block %d must be a flowchart or sequenceDiagram", index+1))
+		}
+		edges := countMermaidEdges(block.content)
+		if edges > 0 {
+			hasEdge = true
+		}
+		if contract.MaxHops > 0 && edges > contract.MaxHops {
+			*violations = append(*violations, fmt.Sprintf("Mermaid block %d exceeds the %d-hop limit", index+1, contract.MaxHops))
+		}
+	}
+	return hasEdge
+}
+
+func appendSubjectCoverageViolations(violations *[]string, blocks []mermaidBlock, contract agentapi.RunOutputContract) {
 	for _, subject := range contract.Subjects {
 		found := false
 		for _, block := range blocks {
@@ -72,10 +89,9 @@ func ValidateFlowAnswer(answer string, contract agentapi.RunOutputContract) []st
 			}
 		}
 		if !found {
-			violations = append(violations, fmt.Sprintf("Mermaid diagrams must mention subject %q", subject))
+			*violations = append(*violations, fmt.Sprintf("Mermaid diagrams must mention subject %q", subject))
 		}
 	}
-	return uniqueStrings(violations)
 }
 
 type mermaidBlock struct {

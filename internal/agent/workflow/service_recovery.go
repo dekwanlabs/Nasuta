@@ -79,26 +79,10 @@ func (service *Service) RecoverWithObserver(
 			return report, err
 		}
 		for _, run := range runs {
-			report.Scanned++
-			result, resumeErr := service.Resume(ctx, run.ID)
-			if result.Applied {
-				report.Resumed++
-			}
-			recordRecoveryStatus(&report, result.Status)
-			var recoveryErr error
-			if resumeErr != nil && !errors.Is(resumeErr, ErrHumanApprovalRequired) {
-				recoveryErr = resumeErr
-			}
-			if observer != nil {
-				recoveryErr = errors.Join(
-					recoveryErr,
-					observer(ctx, run.ID, result, resumeErr),
-				)
-			}
+			recoveryErr := service.recoverOne(ctx, run.ID, observer, &report)
 			if recoveryErr != nil {
-				report.Errors++
 				if firstErr == nil {
-					firstErr = fmt.Errorf("recover workflow run %q: %w", run.ID, recoveryErr)
+					firstErr = recoveryErr
 				}
 			}
 			if err := ctx.Err(); err != nil {
@@ -118,6 +102,35 @@ func (service *Service) RecoverWithObserver(
 		)
 	}
 	return report, nil
+}
+
+func (service *Service) recoverOne(
+	ctx context.Context,
+	runID string,
+	observer RecoveryObserver,
+	report *RecoveryReport,
+) error {
+	report.Scanned++
+	result, resumeErr := service.Resume(ctx, runID)
+	if result.Applied {
+		report.Resumed++
+	}
+	recordRecoveryStatus(report, result.Status)
+	var recoveryErr error
+	if resumeErr != nil && !errors.Is(resumeErr, ErrHumanApprovalRequired) {
+		recoveryErr = resumeErr
+	}
+	if observer != nil {
+		recoveryErr = errors.Join(
+			recoveryErr,
+			observer(ctx, runID, result, resumeErr),
+		)
+	}
+	if recoveryErr != nil {
+		report.Errors++
+		return fmt.Errorf("recover workflow run %q: %w", runID, recoveryErr)
+	}
+	return nil
 }
 
 func (service *Service) resumeRun(

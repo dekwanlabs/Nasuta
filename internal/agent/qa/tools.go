@@ -78,14 +78,32 @@ func (filtered filteredScenarioTools) Execute(ctx context.Context, id tool.ToolI
 	return filtered.base.Execute(ctx, id, arguments)
 }
 
+func withoutScenarioTool(prepared ScenarioToolSet, excluded tool.ToolID) ScenarioToolSet {
+	return withoutScenarioTools(prepared, excluded)
+}
+
 func withoutHistoryTools(prepared ScenarioToolSet) ScenarioToolSet {
+	return withoutScenarioTools(prepared, "get_turn", "find_turns")
+}
+
+func withoutScenarioTools(
+	prepared ScenarioToolSet,
+	excluded ...tool.ToolID,
+) ScenarioToolSet {
+	if prepared == nil || len(excluded) == 0 {
+		return prepared
+	}
+	excludedSet := make(map[tool.ToolID]struct{}, len(excluded))
+	for _, id := range excluded {
+		excludedSet[id] = struct{}{}
+	}
 	tools := prepared.Tools()
 	filtered := filteredScenarioTools{
 		base: prepared, tools: make([]tool.Tool, 0, len(tools)),
 		byID: make(map[tool.ToolID]tool.Tool, len(tools)),
 	}
 	for _, candidate := range tools {
-		if candidate.ID == "get_turn" || candidate.ID == "find_turns" {
+		if _, remove := excludedSet[candidate.ID]; remove {
 			continue
 		}
 		filtered.tools = append(filtered.tools, candidate)
@@ -103,6 +121,7 @@ func preferenceInstruction(ids []string, delegationActive bool) string {
 
 func parentDelegationInstruction(prepared *preparation) string {
 	if prepared == nil ||
+		prepared.execution.RouteReason != routeReasonParentDynamicDelegation ||
 		!scenarioToolsContain(prepared.candidateToolSet, "delegate_investigation") {
 		return ""
 	}
@@ -121,12 +140,9 @@ func (svc *Service) executePrefetch(
 	}
 	blocks := make([]ContextBlock, 0, len(plan.Prefetch))
 	for index, call := range plan.Prefetch {
-		args, err := json.Marshal(call.Arguments)
+		args, err := marshalPrefetchArgs(call)
 		if err != nil {
-			return nil, fmt.Errorf("marshal prefetch tool %q arguments: %w", call.ToolID, err)
-		}
-		if len(args) == 0 || string(args) == "null" {
-			args = []byte("{}")
+			return nil, err
 		}
 		callID := prefetchToolCallID(runID, index, call.ToolID)
 		startedAt := time.Now()
@@ -139,65 +155,96 @@ func (svc *Service) executePrefetch(
 		}); err != nil {
 			return nil, fmt.Errorf("record prefetch tool %q call: %w", call.ToolID, err)
 		}
-
-		candidate, ok := prepared.Get(call.ToolID)
-		if !ok {
-			failure := fmt.Errorf("tool is unavailable")
-			if err := recordPrefetchResult(
-				ctx, stepRecorder, runID, callID, call.ToolID, string(args),
-				tool.Result{}, failure, "tool_unavailable", startedAt,
-			); err != nil {
-				return nil, err
-			}
-			if call.Required {
-				return nil, fmt.Errorf("required prefetch tool %q is unavailable", call.ToolID)
-			}
-			blocks = append(blocks, unavailableToolBlock(call.ToolID, "tool is unavailable"))
-			continue
-		}
-		if candidate.Kind != tool.KindRead || candidate.Prefetch == nil {
-			failure := fmt.Errorf("tool is not eligible for prefetch")
-			if err := recordPrefetchResult(
-				ctx, stepRecorder, runID, callID, call.ToolID, string(args),
-				tool.Result{}, failure, "tool_not_prefetch_eligible", startedAt,
-			); err != nil {
-				return nil, err
-			}
-			return nil, fmt.Errorf("prefetch tool %q is not eligible", call.ToolID)
-		}
-		result, err := prepared.Execute(ctx, call.ToolID, call.Arguments)
+		block, err := executePrefetchCall(
+			ctx, runID, prepared, call, args, callID, startedAt, stepRecorder,
+		)
 		if err != nil {
-			if recordErr := recordPrefetchResult(
-				ctx, stepRecorder, runID, callID, call.ToolID, string(args),
-				result, err, "tool_execution_failed", startedAt,
-			); recordErr != nil {
-				return nil, recordErr
-			}
-			if call.Required {
-				return nil, fmt.Errorf("required prefetch tool %q: %w", call.ToolID, err)
-			}
-			blocks = append(blocks, unavailableToolBlock(call.ToolID, err.Error()))
-			continue
+			return nil, err
 		}
+		if block != nil {
+			blocks = append(blocks, *block)
+		}
+	}
+	return blocks, nil
+}
+
+func marshalPrefetchArgs(call PlannedToolCall) ([]byte, error) {
+	args, err := json.Marshal(call.Arguments)
+	if err != nil {
+		return nil, fmt.Errorf("marshal prefetch tool %q arguments: %w", call.ToolID, err)
+	}
+	if len(args) == 0 || string(args) == "null" {
+		args = []byte("{}")
+	}
+	return args, nil
+}
+
+func executePrefetchCall(
+	ctx context.Context,
+	runID string,
+	prepared ScenarioToolSet,
+	call PlannedToolCall,
+	args []byte,
+	callID string,
+	startedAt time.Time,
+	stepRecorder preparationStepRecorder,
+) (*ContextBlock, error) {
+	candidate, ok := prepared.Get(call.ToolID)
+	if !ok {
+		failure := fmt.Errorf("tool is unavailable")
 		if err := recordPrefetchResult(
 			ctx, stepRecorder, runID, callID, call.ToolID, string(args),
-			result, nil, "", startedAt,
+			tool.Result{}, failure, "tool_unavailable", startedAt,
 		); err != nil {
 			return nil, err
 		}
-		references := make([]retrieval.Reference, 0, len(result.References))
-		for _, ref := range result.References {
-			references = append(references, retrieval.Reference{
-				Type: string(ref.Type), Label: ref.Label, Target: ref.Target,
-			})
+		if call.Required {
+			return nil, fmt.Errorf("required prefetch tool %q is unavailable", call.ToolID)
 		}
-		blocks = append(blocks, ContextBlock{
-			Source: string(call.ToolID), Title: candidate.Description,
-			Content: result.Content, References: references,
-			Evidence: cloneEvidenceUnits(result.EvidenceUnits),
+		block := unavailableToolBlock(call.ToolID, "tool is unavailable")
+		return &block, nil
+	}
+	if candidate.Kind != tool.KindRead || candidate.Prefetch == nil {
+		failure := fmt.Errorf("tool is not eligible for prefetch")
+		if err := recordPrefetchResult(
+			ctx, stepRecorder, runID, callID, call.ToolID, string(args),
+			tool.Result{}, failure, "tool_not_prefetch_eligible", startedAt,
+		); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("prefetch tool %q is not eligible", call.ToolID)
+	}
+	result, err := prepared.Execute(ctx, call.ToolID, call.Arguments)
+	if err != nil {
+		if recordErr := recordPrefetchResult(
+			ctx, stepRecorder, runID, callID, call.ToolID, string(args),
+			result, err, "tool_execution_failed", startedAt,
+		); recordErr != nil {
+			return nil, recordErr
+		}
+		if call.Required {
+			return nil, fmt.Errorf("required prefetch tool %q: %w", call.ToolID, err)
+		}
+		block := unavailableToolBlock(call.ToolID, err.Error())
+		return &block, nil
+	}
+	if err := recordPrefetchResult(
+		ctx, stepRecorder, runID, callID, call.ToolID, string(args),
+		result, nil, "", startedAt,
+	); err != nil {
+		return nil, err
+	}
+	references := make([]retrieval.Reference, 0, len(result.References))
+	for _, ref := range result.References {
+		references = append(references, retrieval.Reference{
+			Type: string(ref.Type), Label: ref.Label, Target: ref.Target,
 		})
 	}
-	return blocks, nil
+	return &ContextBlock{
+		Source: string(call.ToolID), Title: candidate.Description,
+		Content: result.Content, References: references,
+		Evidence: cloneEvidenceUnits(result.EvidenceUnits),
+	}, nil
 }
 
 func recordPrefetchStep(
@@ -279,6 +326,18 @@ func (svc *Service) contextBudget() int {
 	return 48000
 }
 
+type preloadedMergeState struct {
+	context       *retrieval.RetrievedContext
+	blocks        []ContextBlock
+	totalBudget   int
+	seenContent   map[string]struct{}
+	seenRefs      map[string]struct{}
+	evidence      *evidence.Ledger
+	conflicts     []evidence.Conflict
+	preloadedText strings.Builder
+	spentRunes    int
+}
+
 func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []ContextBlock, totalBudget int) {
 	if context == nil || len(blocks) == 0 {
 		return
@@ -286,55 +345,48 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 	if totalBudget <= 0 {
 		totalBudget = 48000
 	}
-	seenContent := make(map[string]struct{}, len(blocks))
+	state := newPreloadedMergeState(context, blocks, totalBudget)
+	state.fillPreloadedBlocks()
+	if state.preloadedText.Len() == 0 {
+		return
+	}
+	existingComplete := state.appendExistingContext()
+	state.finalize(existingComplete)
+}
+
+func newPreloadedMergeState(context *retrieval.RetrievedContext, blocks []ContextBlock, totalBudget int) *preloadedMergeState {
 	seenRefs := make(map[string]struct{}, len(context.References)+len(blocks))
-	preloadedEvidence := evidence.New(nil, "")
-	var preloadedConflicts []evidence.Conflict
 	for _, ref := range context.References {
 		seenRefs[ref.Type+"\x00"+ref.Target] = struct{}{}
 	}
-	var text strings.Builder
-	preloadedLimit := min(preloadedContextBudget, totalBudget)
+	return &preloadedMergeState{
+		context:     context,
+		blocks:      blocks,
+		totalBudget: totalBudget,
+		seenContent: make(map[string]struct{}, len(blocks)),
+		seenRefs:    seenRefs,
+		evidence:    evidence.New(nil, ""),
+	}
+}
+
+func (state *preloadedMergeState) fillPreloadedBlocks() {
+	preloadedLimit := min(preloadedContextBudget, state.totalBudget)
 	budget := preloadedLimit
-	for _, block := range blocks {
+	for _, block := range state.blocks {
 		content := strings.TrimSpace(block.Content)
 		if content == "" {
 			continue
 		}
-		if _, duplicate := seenContent[content]; duplicate {
+		if _, duplicate := state.seenContent[content]; duplicate {
 			continue
 		}
-		seenContent[content] = struct{}{}
-		title := strings.TrimSpace(block.Title)
-		if title == "" {
-			title = strings.TrimSpace(block.Source)
-		}
-		if title == "" {
-			title = "Preloaded Context"
-		}
-		section := "## " + title + "\n" + content + "\n"
-		runes := []rune(section)
-		truncated := len(runes) > budget
-		if len(runes) > budget {
-			runes = runes[:budget]
-		}
-		delivered := string(runes)
-		text.WriteString(delivered)
-		budget -= len(runes)
-		for _, ref := range block.References {
-			key := ref.Type + "\x00" + ref.Target
-			if ref.Target == "" {
-				continue
-			}
-			if _, duplicate := seenRefs[key]; duplicate {
-				continue
-			}
-			seenRefs[key] = struct{}{}
-			context.References = append(context.References, ref)
-		}
-		preloadedConflicts = appendEvidenceConflicts(
-			preloadedConflicts,
-			preloadedEvidence.Add(
+		state.seenContent[content] = struct{}{}
+		delivered, truncated, spent := state.appendPreloadedSection(block, content, budget)
+		budget = spent
+		state.collectPreloadedReferences(block)
+		state.conflicts = appendEvidenceConflicts(
+			state.conflicts,
+			state.evidence.Add(
 				deliveredEvidenceUnits(block.Evidence, delivered, truncated),
 				"preload",
 			),
@@ -343,43 +395,88 @@ func mergePreloadedContext(context *retrieval.RetrievedContext, blocks []Context
 			break
 		}
 	}
-	if text.Len() == 0 {
-		return
+	_ = preloadedLimit
+}
+
+func (state *preloadedMergeState) appendPreloadedSection(block ContextBlock, content string, budget int) (string, bool, int) {
+	title := strings.TrimSpace(block.Title)
+	if title == "" {
+		title = strings.TrimSpace(block.Source)
 	}
-	existingComplete := true
-	if context.Text != "" {
-		remaining := totalBudget - (preloadedLimit - budget)
-		if remaining > 0 {
-			text.WriteString("\n")
-			remaining--
+	if title == "" {
+		title = "Preloaded Context"
+	}
+	section := "## " + title + "\n" + content + "\n"
+	runes := []rune(section)
+	truncated := len(runes) > budget
+	if len(runes) > budget {
+		runes = runes[:budget]
+	}
+	delivered := string(runes)
+	state.preloadedText.WriteString(delivered)
+	state.spentRunes += len(runes)
+	return delivered, truncated, budget - len(runes)
+}
+
+func (state *preloadedMergeState) collectPreloadedReferences(block ContextBlock) {
+	for _, ref := range block.References {
+		if ref.Target == "" {
+			continue
 		}
-		if remaining > 0 {
-			existing := []rune(context.Text)
-			if len(existing) > remaining {
-				existing = existing[:remaining]
-				existingComplete = false
-			}
-			text.WriteString(string(existing))
-		} else {
+		key := ref.Type + "\x00" + ref.Target
+		if _, duplicate := state.seenRefs[key]; duplicate {
+			continue
+		}
+		state.seenRefs[key] = struct{}{}
+		state.context.References = append(state.context.References, ref)
+	}
+}
+
+func (state *preloadedMergeState) appendExistingContext() bool {
+	existingComplete := true
+	if state.context.Text == "" {
+		return existingComplete
+	}
+	preloadedLimit := min(preloadedContextBudget, state.totalBudget)
+	remaining := state.totalBudget - (preloadedLimit - state.consumedPreloadedBudget())
+	if remaining > 0 {
+		state.preloadedText.WriteString("\n")
+		remaining--
+	}
+	if remaining > 0 {
+		existing := []rune(state.context.Text)
+		if len(existing) > remaining {
+			existing = existing[:remaining]
 			existingComplete = false
 		}
+		state.preloadedText.WriteString(string(existing))
+	} else {
+		existingComplete = false
 	}
-	context.Text = text.String()
+	return existingComplete
+}
+
+func (state *preloadedMergeState) consumedPreloadedBudget() int {
+	return state.spentRunes
+}
+
+func (state *preloadedMergeState) finalize(existingComplete bool) {
+	state.context.Text = state.preloadedText.String()
 	mergedEvidence := evidence.New(nil, "")
-	conflicts := appendEvidenceConflicts(nil, context.EvidenceConflicts)
+	conflicts := appendEvidenceConflicts(nil, state.context.EvidenceConflicts)
 	if existingComplete {
-		mergedEvidence.Add(context.EvidenceUnits, "retrieval")
+		mergedEvidence.Add(state.context.EvidenceUnits, "retrieval")
 	}
 	mergedEvidence.RememberConflicts(conflicts)
-	mergedEvidence.RememberConflicts(preloadedConflicts)
-	conflicts = appendEvidenceConflicts(conflicts, preloadedConflicts)
+	mergedEvidence.RememberConflicts(state.conflicts)
+	conflicts = appendEvidenceConflicts(conflicts, state.conflicts)
 	conflicts = appendEvidenceConflicts(
 		conflicts,
-		mergedEvidence.Add(preloadedEvidence.Units(), "preload"),
+		mergedEvidence.Add(state.evidence.Units(), "preload"),
 	)
-	context.EvidenceUnits = mergedEvidence.Units()
-	context.EvidenceConflicts = evidence.CloneConflicts(conflicts)
-	context.HitCount = len(context.References)
+	state.context.EvidenceUnits = mergedEvidence.Units()
+	state.context.EvidenceConflicts = evidence.CloneConflicts(conflicts)
+	state.context.HitCount = len(state.context.References)
 }
 
 func appendEvidenceConflicts(

@@ -30,187 +30,220 @@ const sessionArchiveTimeout = 2 * time.Minute
 func (svc *Service) submitRun(
 	ctx context.Context,
 	run agentapi.ManagedRun,
-	scenario Request,
-	definition agentapi.Definition,
-	selection agentapi.DefinitionSelection,
-	question string,
+	prepared *preparation,
 	conversation ConversationContext,
-	userID int64,
-	rc *retrieval.RetrievedContext,
-	runID string,
-	query domain.QueryPlan,
-	plan domain.EvidencePlan,
-	policy ToolPolicy,
-	prepared ScenarioToolSet,
-	highRisk bool,
-	limits agentapi.RunLimits,
-	trace *runtrace.Scope,
-	ownsTrace bool,
-	requestCancel context.CancelFunc,
+	admitted *admittedEvidence,
 ) (*AskResult, error) {
-	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", runID, definition.ID, definition.Version)
+	request := prepared.request
+	definition := prepared.definition
+	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", request.RunID, definition.ID, definition.Version)
 	messages := buildAgentMessages(
-		question, query, conversation, rc, plan, svc.domainKnowledge, 0,
+		request.Question,
+		prepared.analysis.QueryPlan,
+		conversation,
+		admitted.Retrieved,
+		admitted.Plan,
+		svc.domainKnowledge,
+		0,
 	)
-	request := agentapi.RunRequest{
-		RunID: runID,
+	runRequest := agentapi.RunRequest{
+		RunID: request.RunID,
 		Agent: agentapi.DefinitionRef{
 			ID: definition.ID, Version: definition.Version,
 		},
 		DefinitionHash: definition.ContentHash,
-		Selection:      selection,
-		Input:          runInput(question),
+		Selection:      prepared.selection,
+		Input:          runInput(request.Question),
 		Messages:       publicMessages(messages),
-		Context:        contextBlocks(rc),
-		Permissions:    runPermissions(policy.AllowWrite),
+		Context:        contextBlocks(admitted.Retrieved),
+		Permissions:    runPermissions(prepared.toolPolicy.AllowWrite),
 		ToolScope: agentapi.ToolScope{
-			AllowWrite:      policy.AllowWrite,
+			AllowWrite:      prepared.toolPolicy.AllowWrite,
 			RestrictVisible: true,
-			VisibleToolIDs:  scenarioToolIDs(prepared.Tools()),
-			OfferedToolIDs:  orderedToolIDs(prepared.Tools(), conversation.PrunedToolIDs),
-			PruneApplied:    conversation.PruneApplied,
+			VisibleToolIDs:  scenarioToolIDs(prepared.candidateToolSet.Tools()),
+			OfferedToolIDs: orderedToolIDs(
+				prepared.candidateToolSet.Tools(), conversation.PrunedToolIDs,
+			),
+			PruneApplied: conversation.PruneApplied,
 		},
 		Policy: agentapi.RunPolicy{
-			EvidenceRequired: !plan.Direct(),
+			EvidenceRequired: !admitted.Plan.Direct(),
 			EvidenceSeeded:   conversation.EvidenceSeeded,
-			WebResearch:      plan.Has(domain.Web),
-			OutputContract:   outputContractForQuery(query),
+			WebResearch:      admitted.Plan.Has(domain.Web),
+			OutputContract:   outputContractForQuery(prepared.analysis.QueryPlan),
 		},
-		Limits: limits,
-		Actor:  agentapi.Actor{UserID: userID},
+		Limits: prepared.runLimits,
+		Actor:  agentapi.Actor{UserID: request.UserID},
 		Correlation: agentapi.Correlation{
-			SessionID: conversation.SessionID, ParentRunID: scenario.ParentRunID,
-			WorkflowRunID: scenario.WorkflowRunID, NodeID: scenario.WorkflowNodeID,
+			SessionID: conversation.SessionID, ParentRunID: request.ParentRunID,
+			WorkflowRunID: request.WorkflowRunID, NodeID: request.WorkflowNodeID,
 		},
 	}
-	if scenarioToolsContain(prepared, delegation.DelegateToolID) {
-		evidenceIndex, contextIndex := delegation.IndexContext(request.Context)
-		ctx = delegation.WithParentContext(ctx, delegation.ParentContext{
-			RunID:           runID,
-			QuestionSummary: tooloutput.TruncateContent(question, 2000),
-			HighRisk:        highRisk,
-			Actor:           request.Actor,
-			Permissions:     request.Permissions,
-			Correlation:     request.Correlation,
-			Limits:          limits,
-			Depth:           0,
-			OutputContract:  request.Policy.OutputContract,
-			Evidence:        evidenceIndex,
-			Context:         contextIndex,
-		})
+	ctx = svc.withDelegationParentContext(ctx, prepared, runRequest)
+	ctx = withSessionToolScope(ctx, conversation, request.UserID)
+
+	go svc.executeSubmittedRun(ctx, run, prepared, conversation, runRequest)
+	return &AskResult{RunID: request.RunID, Context: admitted.Retrieved}, nil
+}
+
+func (svc *Service) withDelegationParentContext(
+	ctx context.Context,
+	prepared *preparation,
+	request agentapi.RunRequest,
+) context.Context {
+	if !scenarioToolsContain(prepared.candidateToolSet, delegation.DelegateToolID) {
+		return ctx
 	}
-	ctx = withSessionToolScope(ctx, conversation, userID)
+	evidenceIndex, contextIndex := delegation.IndexContext(request.Context)
+	return delegation.WithParentContext(ctx, delegation.ParentContext{
+		RunID:           request.RunID,
+		QuestionSummary: tooloutput.TruncateContent(prepared.request.Question, 2000),
+		HighRisk:        prepared.execution.HighRisk,
+		Actor:           request.Actor,
+		Permissions:     request.Permissions,
+		Correlation:     request.Correlation,
+		Limits:          request.Limits,
+		Depth:           0,
+		OutputContract:  request.Policy.OutputContract,
+		Evidence:        evidenceIndex,
+		Context:         contextIndex,
+	})
+}
 
-	go func() {
-		if requestCancel != nil {
-			defer requestCancel()
+func (svc *Service) executeSubmittedRun(
+	ctx context.Context,
+	run agentapi.ManagedRun,
+	prepared *preparation,
+	conversation ConversationContext,
+	request agentapi.RunRequest,
+) {
+	defer prepared.closeTrace()
+	result, err := run.Execute(ctx, request)
+	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] runtime run %s failed: %v", request.RunID, err)
+		code := "runtime_failed"
+		if errors.Is(err, agentapi.ErrBudgetExceeded) {
+			code = "budget_exhausted"
 		}
-		if ownsTrace {
-			defer trace.Close()
-		}
-		result, runErr := run.Execute(ctx, request)
-		if runErr != nil {
-			log.ErrorfCtx(ctx, "[qa] runtime run %s failed: %v", runID, runErr)
-			code := "runtime_failed"
-			if errors.Is(runErr, agentapi.ErrBudgetExceeded) {
-				code = "budget_exhausted"
-			}
-			if finishErr := run.Finish(&agentapi.RunError{
-				Code: code, Message: runErr.Error(),
-			}); finishErr != nil {
-				log.ErrorfCtx(ctx, "[qa] finish failed run %s: %v", runID, finishErr)
-			}
+		svc.finishRunWithError(ctx, run, request.RunID, code, err)
+		return
+	}
+
+	outcomeRunner, ok := run.(interface{ Outcome() RunOutcome })
+	if !ok {
+		svc.finishRunWithError(
+			ctx, run, request.RunID, "runtime_outcome_unavailable",
+			fmt.Errorf("managed run does not expose a durable outcome"),
+		)
+		return
+	}
+	outcome := outcomeRunner.Outcome()
+	svc.logRunOutcome(ctx, request.RunID, outcome)
+	if outcome.Status == RunStatusDone {
+		if err := svc.persistTurn(
+			context.WithoutCancel(ctx), request.RunID, conversation.SessionID,
+			request.Actor.UserID, prepared.request.Question, outcome,
+		); err != nil {
+			log.ErrorfCtx(ctx, "[qa] persist completed run %s session turn: %v", request.RunID, err)
+			svc.finishRunWithError(
+				ctx, run, request.RunID, "session_persistence_failed", err,
+			)
 			return
 		}
-		outcomeRunner, ok := run.(interface{ Outcome() RunOutcome })
-		if !ok {
-			if finishErr := run.Finish(&agentapi.RunError{
-				Code: "runtime_outcome_unavailable", Message: "managed run does not expose a durable outcome",
-			}); finishErr != nil {
-				log.ErrorfCtx(ctx, "[qa] finish outcome-unavailable run %s: %v", runID, finishErr)
-			}
-			return
-		}
-		outcome := outcomeRunner.Outcome()
-		switch outcome.Status {
-		case RunStatusFailed:
-			log.ErrorfCtx(ctx,
-				"[qa] runtime run %s completed with failed outcome code=%s error=%v",
-				runID, outcome.ErrorCode, outcome.Err,
-			)
-		case RunStatusAborted:
-			log.InfofCtx(ctx,
-				"[qa] runtime run %s completed with aborted outcome code=%s error=%v",
-				runID, outcome.ErrorCode, outcome.Err,
-			)
-		}
-		if outcome.Status == RunStatusDone {
-			if err := svc.persistTurn(context.WithoutCancel(ctx), runID, conversation.SessionID, userID, question, outcome); err != nil {
-				log.ErrorfCtx(ctx, "[qa] persist completed run %s session turn: %v", runID, err)
-				if finishErr := run.Finish(&agentapi.RunError{
-					Code: "session_persistence_failed", Message: err.Error(),
-				}); finishErr != nil {
-					log.ErrorfCtx(ctx, "[qa] finish session persistence failure %s: %v", runID, finishErr)
-				}
-				return
-			}
-		}
-		if outcome.Status == RunStatusDone {
-			svc.archiveHistoryAsync(
-				ctx, runID, conversation.SessionID, userID,
-				definition.Budget.ContextTokens, definition.Model.MaxOutputTokens,
-			)
-		}
-		if finishErr := run.Finish(nil); finishErr != nil {
-			log.ErrorfCtx(ctx, "[qa] finish run %s: %v", runID, finishErr)
-			return
-		}
+		svc.archiveHistoryAsync(
+			ctx, request.RunID, conversation.SessionID, request.Actor.UserID,
+			prepared.definition.Budget.ContextTokens,
+			prepared.definition.Model.MaxOutputTokens,
+		)
+	}
+	if err := run.Finish(nil); err != nil {
+		log.ErrorfCtx(ctx, "[qa] finish run %s: %v", request.RunID, err)
+		return
+	}
+	svc.extractRunMemory(ctx, prepared, conversation, result, outcome)
+}
 
-		if memoryExtractionAllowed(outcome, resultFromPublic(result)) && svc.memory != nil && userID != 0 {
-			memCtx := llm.WithUsagePhase(context.WithoutCancel(ctx), llm.PhaseMemoryExtract)
-			memCtx, memCancel := context.WithTimeout(memCtx, 60*time.Second)
-			memoryQuestion := tooloutput.TruncateContent(question, 1000)
-			memoryAnswer := tooloutput.TruncateContent(result.Text, 2000)
-			probe, probeErr := buildMemoryProbe(memCtx, memoryProbeInput{
-				Client: svc.helperLLM, Question: memoryQuestion,
-			})
-			if probeErr != nil {
-				log.ErrorfCtx(ctx, "[qa] memory probe error: %v", probeErr)
-				memCancel()
-				return
-			}
-			if len(probe.Probes) == 0 {
-				memCancel()
-				return
-			}
-			recalled, recallErr := recallMemoriesForWrite(memCtx, writeRecallInput{
-				Store: svc.memory, UserID: userID, Probes: probe.Probes,
-			})
-			if recallErr != nil {
-				log.ErrorfCtx(ctx, "[qa] memory write recall error: %v", recallErr)
-				memCancel()
-				return
-			}
-			extraction, err := extractMemories(memCtx, memoryExtractInput{
-				Client: svc.helperLLM, Question: memoryQuestion, Answer: memoryAnswer,
-				Existing:       recalled.Result.Matches,
-				EvidenceStatus: EvidenceStatus(result.Evidence.Status),
-			})
-			if err == nil {
-				_, _ = writeMemories(memCtx, memoryWriteInput{
-					Store: svc.memory, Decisions: extraction.Decisions, UserID: userID, SessionID: conversation.SessionID,
-				})
-				if len(extraction.Decisions) > 0 {
-					log.InfofCtx(ctx, "[qa] consolidated %d memories for user %d", len(extraction.Decisions), userID)
-				}
-			} else {
-				log.ErrorfCtx(ctx, "[qa] memory extraction error: %v", err)
-			}
-			memCancel()
-		}
-	}()
+func (svc *Service) finishRunWithError(
+	ctx context.Context,
+	run agentapi.ManagedRun,
+	runID string,
+	code string,
+	err error,
+) {
+	if finishErr := run.Finish(&agentapi.RunError{Code: code, Message: err.Error()}); finishErr != nil {
+		log.ErrorfCtx(ctx, "[qa] finish failed run %s code=%s: %v", runID, code, finishErr)
+	}
+}
 
-	return &AskResult{RunID: runID, Context: rc}, nil
+func (svc *Service) logRunOutcome(
+	ctx context.Context,
+	runID string,
+	outcome RunOutcome,
+) {
+	switch outcome.Status {
+	case RunStatusFailed:
+		log.ErrorfCtx(ctx,
+			"[qa] runtime run %s completed with failed outcome code=%s error=%v",
+			runID, outcome.ErrorCode, outcome.Err,
+		)
+	case RunStatusAborted:
+		log.InfofCtx(ctx,
+			"[qa] runtime run %s completed with aborted outcome code=%s error=%v",
+			runID, outcome.ErrorCode, outcome.Err,
+		)
+	}
+}
+
+func (svc *Service) extractRunMemory(
+	ctx context.Context,
+	prepared *preparation,
+	conversation ConversationContext,
+	result agentapi.RunResult,
+	outcome RunOutcome,
+) {
+	userID := prepared.request.UserID
+	if !memoryExtractionAllowed(outcome, resultFromPublic(result)) || svc.memory == nil || userID == 0 {
+		return
+	}
+	memCtx := llm.WithUsagePhase(context.WithoutCancel(ctx), llm.PhaseMemoryExtract)
+	memCtx, cancel := context.WithTimeout(memCtx, 60*time.Second)
+	defer cancel()
+
+	question := tooloutput.TruncateContent(prepared.request.Question, 1000)
+	answer := tooloutput.TruncateContent(result.Text, 2000)
+	probe, err := buildMemoryProbe(memCtx, memoryProbeInput{
+		Client: svc.helperLLM, Question: question,
+	})
+	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] memory probe error: %v", err)
+		return
+	}
+	if len(probe.Probes) == 0 {
+		return
+	}
+	recalled, err := recallMemoriesForWrite(memCtx, writeRecallInput{
+		Store: svc.memory, UserID: userID, Probes: probe.Probes,
+	})
+	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] memory write recall error: %v", err)
+		return
+	}
+	extraction, err := extractMemories(memCtx, memoryExtractInput{
+		Client: svc.helperLLM, Question: question, Answer: answer,
+		Existing:       recalled.Result.Matches,
+		EvidenceStatus: EvidenceStatus(result.Evidence.Status),
+	})
+	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] memory extraction error: %v", err)
+		return
+	}
+	_, _ = writeMemories(memCtx, memoryWriteInput{
+		Store: svc.memory, Decisions: extraction.Decisions, UserID: userID,
+		SessionID: conversation.SessionID,
+	})
+	if len(extraction.Decisions) > 0 {
+		log.InfofCtx(ctx, "[qa] consolidated %d memories for user %d", len(extraction.Decisions), userID)
+	}
 }
 
 func (svc *Service) answerContext(

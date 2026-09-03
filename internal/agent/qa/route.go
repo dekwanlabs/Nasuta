@@ -14,18 +14,22 @@ type executionPath string
 const executionPathSingle executionPath = "single_agent"
 
 const (
-	routeReasonParentDynamicDelegation = "parent_dynamic_delegation"
-	routeReasonDelegationUnavailable   = "delegation_unavailable"
-	routeReasonWriteRequested          = "write_requested"
+	routeReasonParentDynamicDelegation     = "parent_dynamic_delegation"
+	routeReasonDelegationUnavailable       = "delegation_unavailable"
+	routeReasonDelegationConcurrencyTooLow = "delegation_concurrency_too_low"
+	routeReasonMultiAgentNotWorthwhile     = "multi_agent_not_worthwhile"
+	routeReasonSingleAgentSuggestion       = "single_agent_suggestion"
+	routeReasonWriteRequested              = "write_requested"
 )
 
 // executionRouteInput is deliberately limited to parent-run advisory data.
 // Task-graph planning and workflow promotion no longer belong to QA.
 type executionRouteInput struct {
-	Suggestion          retrieval.ExecutionSuggestion
-	WriteRequested      bool
-	DelegationAvailable bool
-	DelegationToolReady bool
+	Suggestion              retrieval.ExecutionSuggestion
+	WriteRequested          bool
+	DelegationAvailable     bool
+	DelegationToolReady     bool
+	DelegationMaxConcurrent int
 }
 
 type executionRouteDecision struct {
@@ -50,18 +54,19 @@ var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecisi
 			})
 		}
 		return map[string]any{
-			"proposed_strategy":     input.Suggestion.Strategy,
-			"effective_strategy":    output.Strategy,
-			"effective_path":        output.Path,
-			"route_reason":          output.RouteReason,
-			"complexity":            input.Suggestion.Complexity,
-			"confidence":            input.Suggestion.Confidence,
-			"downgrade_reason":      output.DowngradeReason,
-			"decision_origin":       output.DecisionOrigin,
-			"delegation_available":  input.DelegationAvailable,
-			"delegation_tool_ready": input.DelegationToolReady,
-			"write_requested":       input.WriteRequested,
-			"delegation_tasks":      tasks,
+			"proposed_strategy":         input.Suggestion.Strategy,
+			"effective_strategy":        output.Strategy,
+			"effective_path":            output.Path,
+			"route_reason":              output.RouteReason,
+			"complexity":                input.Suggestion.Complexity,
+			"confidence":                input.Suggestion.Confidence,
+			"downgrade_reason":          output.DowngradeReason,
+			"decision_origin":           output.DecisionOrigin,
+			"delegation_available":      input.DelegationAvailable,
+			"delegation_tool_ready":     input.DelegationToolReady,
+			"delegation_max_concurrent": input.DelegationMaxConcurrent,
+			"write_requested":           input.WriteRequested,
+			"delegation_tasks":          tasks,
 		}
 	},
 }
@@ -83,22 +88,33 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 
 	toolReady := scenarioToolsContain(prepared.candidateToolSet, "delegate_investigation")
 	prepared.execution = routeExecution(prepared.ctx, executionRouteInput{
-		Suggestion:          planning.Execution,
-		WriteRequested:      prepared.request.WriteRequested,
-		DelegationAvailable: svc.delegationEnabled,
-		DelegationToolReady: toolReady,
+		Suggestion:              planning.Execution,
+		WriteRequested:          prepared.request.WriteRequested,
+		DelegationAvailable:     svc.delegationEnabled,
+		DelegationToolReady:     toolReady,
+		DelegationMaxConcurrent: svc.delegationMaxConcurrent,
 	})
 	prepared.execution.HighRisk = executionReasonPresent(
 		planning.Execution.Reasons, "requires_risk_sensitive_analysis",
 	)
+	if prepared.execution.RouteReason != routeReasonParentDynamicDelegation {
+		// Do not merely omit the prompt: hiding the delegation tool from the
+		// immutable RunRequest is what makes the route decision authoritative.
+		// Otherwise a parent model can still discover and invoke the tool on a
+		// simple request, paying the multi-agent latency penalty by accident.
+		prepared.candidateToolSet = withoutScenarioTool(
+			prepared.candidateToolSet, "delegate_investigation",
+		)
+	}
 	log.InfofCtx(
 		prepared.ctx,
-		"[qa] execution route proposed=%s effective=%s path=%s delegation_available=%t delegation_tool_ready=%t origin=%s reason=%s downgrade=%s",
+		"[qa] execution route proposed=%s effective=%s path=%s delegation_available=%t delegation_tool_ready=%t delegation_max_concurrent=%d origin=%s reason=%s downgrade=%s",
 		planning.Execution.Strategy,
 		prepared.execution.Strategy,
 		prepared.execution.Path,
 		svc.delegationEnabled,
 		toolReady,
+		svc.delegationMaxConcurrent,
 		prepared.execution.DecisionOrigin,
 		prepared.execution.RouteReason,
 		prepared.execution.DowngradeReason,
@@ -152,13 +168,48 @@ func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 		decision.DowngradeReason = routeReasonWriteRequested
 		return decision
 	}
-	if input.DelegationAvailable && input.DelegationToolReady {
-		decision.RouteReason = routeReasonParentDynamicDelegation
+	if input.Suggestion.Strategy != retrieval.ExecutionMultiAgent {
+		// A single-agent suggestion must stay single-agent even when the
+		// delegation feature is globally enabled. Exposing delegation on every
+		// request adds prompt/tool overhead and lets the model make an
+		// expensive fan-out decision that routing already rejected.
+		decision.RouteReason = routeReasonSingleAgentSuggestion
 		return decision
 	}
-	decision.RouteReason = routeReasonDelegationUnavailable
-	decision.DowngradeReason = routeReasonDelegationUnavailable
+	if !input.DelegationAvailable || !input.DelegationToolReady {
+		decision.RouteReason = routeReasonDelegationUnavailable
+		decision.DowngradeReason = routeReasonDelegationUnavailable
+		return decision
+	}
+	if input.DelegationMaxConcurrent > 0 && input.DelegationMaxConcurrent < 2 {
+		// A multi-agent route with one worker is guaranteed to serialize child
+		// execution while retaining the parent decision, persistence, validation,
+		// and synthesis overhead. Zero means unspecified for compatibility with
+		// manually constructed services; production settings are always positive.
+		decision.RouteReason = routeReasonDelegationConcurrencyTooLow
+		decision.DowngradeReason = routeReasonDelegationConcurrencyTooLow
+		return decision
+	}
+	if countParallelExecutionTasks(input.Suggestion.Tasks) < 2 {
+		// One task, or tasks with dependencies, cannot amortize the parent
+		// model call and delegation persistence/scheduling overhead. Keep the
+		// normal parent loop instead of creating a slower equivalent path.
+		decision.RouteReason = routeReasonMultiAgentNotWorthwhile
+		decision.DowngradeReason = routeReasonMultiAgentNotWorthwhile
+		return decision
+	}
+	decision.RouteReason = routeReasonParentDynamicDelegation
 	return decision
+}
+
+func countParallelExecutionTasks(tasks []retrieval.ExecutionTask) int {
+	count := 0
+	for _, task := range tasks {
+		if task.IndependentlyUseful && len(task.DependsOn) == 0 {
+			count++
+		}
+	}
+	return count
 }
 
 func (svc *Service) executionEventStrategy(decision executionRouteDecision) string {

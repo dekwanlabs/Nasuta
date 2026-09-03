@@ -21,46 +21,16 @@ func (agent *Agent) callModel(
 	h llm.StreamHandler,
 	maxTokens int,
 ) (*llm.ChatStreamResult, error) {
-	if agent.cfg.BudgetCheck != nil {
-		if err := agent.cfg.BudgetCheck(); err != nil {
-			return nil, err
-		}
-	} else if gate := agentapi.RunBudgetGateFromContext(ctx); gate != nil {
-		if err := gate.Check(); err != nil {
-			return nil, err
-		}
+	if err := agent.checkModelCallBudget(ctx); err != nil {
+		return nil, err
 	}
 	inputTokens, err := estimateInputTokens(messages, tools)
 	if err != nil {
 		return nil, fmt.Errorf("estimate model call input: %w", err)
 	}
-	var callReservation agentapi.RunBudgetCallReservation
-	if gate := agentapi.RunBudgetUsageGateFromContext(ctx); gate != nil {
-		phase := agentapi.RunBudgetPhaseDefault
-		if llm.UsagePhaseFromContext(ctx) == llm.PhaseForcedConclusion {
-			phase = agentapi.RunBudgetPhaseAnswer
-		}
-		effectiveMaxTokens, limitErr := agent.limitModelOutputForPhase(inputTokens, maxTokens, gate, phase)
-		if limitErr != nil {
-			return nil, limitErr
-		}
-		if effectiveMaxTokens != maxTokens {
-			log.WarnfCtx(ctx, "[agent] shrinking model output budget requested=%d effective=%d input_tokens=%d",
-				maxTokens, effectiveMaxTokens, inputTokens)
-		}
-		maxTokens = effectiveMaxTokens
-		estimate, estimateErr := agent.modelCallEstimate(inputTokens, maxTokens)
-		if estimateErr != nil {
-			return nil, fmt.Errorf("estimate model call budget: %w", estimateErr)
-		}
-		if phased, ok := gate.(agentapi.RunBudgetPhasedGate); ok {
-			callReservation, err = phased.ReserveCallForPhase(estimate, phase)
-		} else {
-			callReservation, err = gate.ReserveCall(estimate)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reserve model call budget: %w", err)
-		}
+	maxTokens, callReservation, err := agent.reserveModelCallBudget(ctx, inputTokens, maxTokens)
+	if err != nil {
+		return nil, err
 	}
 	result, callErr := agent.llm.ChatWithToolsMaxWithParameters(
 		ctx, messages, tools, h, maxTokens, agent.cfg.ModelParameters,
@@ -68,24 +38,7 @@ func (agent *Agent) callModel(
 	if callReservation == nil {
 		return result, callErr
 	}
-	var accountingErr error
-	if result != nil && hasReportedUsage(result.Usage) {
-		actual, usageErr := agent.usageForLedger(result.Usage)
-		if usageErr != nil {
-			accountingErr = errors.Join(usageErr, callReservation.Release())
-		} else {
-			accountingErr = callReservation.Settle(actual)
-			if accountingErr != nil {
-				// A provider can report more usage than the admission estimate,
-				// or the durable accounting write can fail before commit. Release
-				// is idempotent after a committed settlement and prevents an
-				// uncommitted reservation from leaking on the error path.
-				accountingErr = errors.Join(accountingErr, callReservation.Release())
-			}
-		}
-	} else {
-		accountingErr = callReservation.Release()
-	}
+	accountingErr := agent.accountModelCallUsage(result, callReservation)
 	if accountingErr != nil {
 		accountingErr = fmt.Errorf("account model call usage: %w", accountingErr)
 	}
@@ -93,6 +46,70 @@ func (agent *Agent) callModel(
 		return result, errors.Join(callErr, accountingErr)
 	}
 	return result, nil
+}
+
+func (agent *Agent) checkModelCallBudget(ctx context.Context) error {
+	if agent.cfg.BudgetCheck != nil {
+		return agent.cfg.BudgetCheck()
+	}
+	if gate := agentapi.RunBudgetGateFromContext(ctx); gate != nil {
+		return gate.Check()
+	}
+	return nil
+}
+
+func (agent *Agent) reserveModelCallBudget(ctx context.Context, inputTokens, maxTokens int) (int, agentapi.RunBudgetCallReservation, error) {
+	gate := agentapi.RunBudgetUsageGateFromContext(ctx)
+	if gate == nil {
+		return maxTokens, nil, nil
+	}
+	phase := agentapi.RunBudgetPhaseFromContext(ctx)
+	if llm.UsagePhaseFromContext(ctx) == llm.PhaseForcedConclusion {
+		phase = agentapi.RunBudgetPhaseAnswer
+	}
+	effectiveMaxTokens, limitErr := agent.limitModelOutputForPhase(inputTokens, maxTokens, gate, phase)
+	if limitErr != nil {
+		return maxTokens, nil, limitErr
+	}
+	if effectiveMaxTokens != maxTokens {
+		log.WarnfCtx(ctx, "[agent] shrinking model output budget requested=%d effective=%d input_tokens=%d",
+			maxTokens, effectiveMaxTokens, inputTokens)
+	}
+	maxTokens = effectiveMaxTokens
+	estimate, estimateErr := agent.modelCallEstimate(inputTokens, maxTokens)
+	if estimateErr != nil {
+		return maxTokens, nil, fmt.Errorf("estimate model call budget: %w", estimateErr)
+	}
+	var callReservation agentapi.RunBudgetCallReservation
+	var err error
+	if phased, ok := gate.(agentapi.RunBudgetPhasedGate); ok {
+		callReservation, err = phased.ReserveCallForPhase(estimate, phase)
+	} else {
+		callReservation, err = gate.ReserveCall(estimate)
+	}
+	if err != nil {
+		return maxTokens, nil, fmt.Errorf("reserve model call budget: %w", err)
+	}
+	return maxTokens, callReservation, nil
+}
+
+func (agent *Agent) accountModelCallUsage(result *llm.ChatStreamResult, callReservation agentapi.RunBudgetCallReservation) error {
+	if result != nil && hasReportedUsage(result.Usage) {
+		actual, usageErr := agent.usageForLedger(result.Usage)
+		if usageErr != nil {
+			return errors.Join(usageErr, callReservation.Release())
+		}
+		accountingErr := callReservation.Settle(actual)
+		if accountingErr != nil {
+			// A provider can report more usage than the admission estimate,
+			// or the durable accounting write can fail before commit. Release
+			// is idempotent after a committed settlement and prevents an
+			// uncommitted reservation from leaking on the error path.
+			return errors.Join(accountingErr, callReservation.Release())
+		}
+		return nil
+	}
+	return callReservation.Release()
 }
 
 func (agent *Agent) limitModelOutput(inputTokens, requested int, gate agentapi.RunBudgetUsageGate) (int, error) {

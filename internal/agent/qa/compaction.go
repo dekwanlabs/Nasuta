@@ -28,11 +28,8 @@ func (svc *Service) compactAnswer(
 	if contextWindow <= 0 {
 		return conversation, nil
 	}
-
-	tools := sessionCompactionTools(prepared.candidateToolSet, conversation)
-	incomingTokens, projectedTokens, err := compactionProjection(
-		prepared.request.Question, prepared.analysis.QueryPlan, conversation, rc, plan,
-		svc.domainKnowledge, tools, outputReserve,
+	incomingTokens, projectedTokens, err := svc.compactionProjectionFor(
+		prepared, conversation, rc, plan, contextWindow, outputReserve,
 	)
 	if err != nil {
 		return conversation, fmt.Errorf("estimate session compaction context: %w", err)
@@ -53,10 +50,68 @@ func (svc *Service) compactAnswer(
 		svc.sessions == nil || svc.helperLLM == nil || conversation.SessionID == "" {
 		return conversation, nil
 	}
+	result, started, fromTurn, toTurn, err := svc.runAnswerCompaction(
+		ctx, prepared, conversation, incomingTokens, projectedTokens, contextWindow, outputReserve,
+	)
+	if err != nil {
+		if started {
+			svc.updateCompaction(
+				prepared.request.RunID, conversation.SessionID, "failed", "历史上下文压缩失败",
+				fromTurn, toTurn,
+			)
+		}
+		return conversation, err
+	}
+	if result.Applied || result.Stale {
+		refreshed, refreshErr := svc.refreshConversation(
+			ctx, prepared, conversation, contextWindow, outputReserve,
+		)
+		if refreshErr != nil {
+			if started {
+				svc.updateCompaction(
+					prepared.request.RunID, conversation.SessionID, "failed", "历史上下文压缩失败",
+					fromTurn, toTurn,
+				)
+			}
+			return conversation, refreshErr
+		}
+		conversation = refreshed
+		_, projectedAfter, projectionErr := svc.compactionProjectionFor(
+			prepared, conversation, rc, plan, contextWindow, outputReserve,
+		)
+		if projectionErr != nil {
+			return conversation, fmt.Errorf("estimate compacted session context: %w", projectionErr)
+		}
+		result.ProjectedAfterTokens = projectedAfter
+	}
+	svc.reportAnswerCompaction(ctx, prepared.request.RunID, conversation.SessionID, result, started)
+	return conversation, nil
+}
 
+func (svc *Service) compactionProjectionFor(
+	prepared *preparation,
+	conversation ConversationContext,
+	rc *retrieval.RetrievedContext,
+	plan domain.EvidencePlan,
+	contextWindow int,
+	outputReserve int,
+) (int, int, error) {
+	tools := sessionCompactionTools(prepared.candidateToolSet, conversation)
+	return compactionProjection(
+		prepared.request.Question, prepared.analysis.QueryPlan, conversation, rc, plan,
+		svc.domainKnowledge, tools, outputReserve,
+	)
+}
+
+func (svc *Service) runAnswerCompaction(
+	ctx context.Context,
+	prepared *preparation,
+	conversation ConversationContext,
+	incomingTokens, projectedTokens, contextWindow, outputReserve int,
+) (session.CompactionResult, bool, int, int, error) {
 	started := false
 	fromTurn, toTurn := 0, 0
-	result, err = session.CompactIfNeeded(
+	result, err := session.CompactIfNeeded(
 		ctx, svc.helperLLM, svc.sessions, conversation.SessionID, prepared.request.UserID,
 		session.CompactionUsage{
 			ContextWindow:       contextWindow,
@@ -77,53 +132,33 @@ func (svc *Service) compactAnswer(
 		svc.history,
 	)
 	if err != nil {
-		if started {
-			svc.updateCompaction(
-				prepared.request.RunID, conversation.SessionID, "failed", "历史上下文压缩失败",
-				fromTurn, toTurn,
-			)
-		}
-		return conversation, fmt.Errorf("compact session %q after retrieval: %w", conversation.SessionID, err)
+		return result, started, fromTurn, toTurn,
+			fmt.Errorf("compact session %q after retrieval: %w", conversation.SessionID, err)
 	}
-	if result.Applied || result.Stale {
-		refreshed, refreshErr := svc.refreshConversation(
-			ctx, prepared, conversation, contextWindow, outputReserve,
-		)
-		if refreshErr != nil {
-			if started {
-				svc.updateCompaction(
-					prepared.request.RunID, conversation.SessionID, "failed", "历史上下文压缩失败",
-					fromTurn, toTurn,
-				)
-			}
-			return conversation, refreshErr
-		}
-		conversation = refreshed
-		_, projectedAfter, projectionErr := compactionProjection(
-			prepared.request.Question, prepared.analysis.QueryPlan, conversation, rc, plan,
-			svc.domainKnowledge, sessionCompactionTools(prepared.candidateToolSet, conversation), outputReserve,
-		)
-		if projectionErr != nil {
-			return conversation, fmt.Errorf("estimate compacted session context: %w", projectionErr)
-		}
-		result.ProjectedAfterTokens = projectedAfter
-	}
+	return result, started, fromTurn, toTurn, nil
+}
+
+func (svc *Service) reportAnswerCompaction(
+	ctx context.Context,
+	runID, sessionID string,
+	result session.CompactionResult,
+	started bool,
+) {
 	if result.Applied {
 		svc.updateCompaction(
-			prepared.request.RunID, conversation.SessionID, "done", "历史上下文压缩完成",
+			runID, sessionID, "done", "历史上下文压缩完成",
 			result.FromTurn, result.ToTurn,
 		)
 		log.InfofCtx(ctx, "[qa] compacted session %s turns %d-%d after retrieval",
-			conversation.SessionID, result.FromTurn, result.ToTurn)
+			sessionID, result.FromTurn, result.ToTurn)
 	} else if result.Stale && started {
 		svc.updateCompaction(
-			prepared.request.RunID, conversation.SessionID, "done", "历史上下文压缩完成",
+			runID, sessionID, "done", "历史上下文压缩完成",
 			result.FromTurn, result.ToTurn,
 		)
 		log.InfofCtx(ctx, "[qa] ignored stale post-retrieval compaction for session %s through turn %d",
-			conversation.SessionID, result.ToTurn)
+			sessionID, result.ToTurn)
 	}
-	return conversation, nil
 }
 
 func compactionProjection(

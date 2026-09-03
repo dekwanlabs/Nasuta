@@ -145,19 +145,238 @@ func projectInvestigatorHandoff(
 		result.ProjectionHash = input.ContentHash
 		return result, nil
 	}
+	resolved, bypass, err := resolveProjection(input, task, nodeID, raw)
+	if err != nil {
+		return projectionResult{}, err
+	}
+	if bypass {
+		result.ProjectedTokens = result.InputTokens
+		result.ProjectionHash = input.ContentHash
+		result.Task = resolved.effectiveTask
+		return result, nil
+	}
+	result.Task = resolved.effectiveTask
+
+	collector := newProjectionCollector(
+		resolved.required,
+		investigatorSourceKinds(nodeID),
+		cloneEvidenceRefs(resolved.effectiveTask.InputRefs),
+		resolved.assignment.ContextRefs,
+		resolved.assigned,
+		len(resolved.contract.Context.SeedMaterial),
+		len(input.EvidenceUnits),
+	)
+	collector.collectSeedMaterial(resolved.contract.Context.SeedMaterial)
+	// Some workflows carry the evidence ledger on the Handoff as well as in
+	// seed_material. Keep the same narrow view for the runtime policy and for
+	// downstream provenance, without exposing an unrelated unit through the
+	// projected payload.
+	collector.collectHandoffUnits(input.EvidenceUnits)
+
+	if err := finalizeProjection(input, nodeID, maxTokens, &result, resolved, collector); err != nil {
+		return projectionResult{}, err
+	}
+	return result, nil
+}
+
+// projectionCollector narrows seed material and the handoff evidence ledger to
+// the current investigator's assigned facets, sources, and input refs. It keeps
+// shared deduplication state across both the seed_material blocks and the
+// handoff evidence units so neither can expose a unit the other already saw.
+type projectionCollector struct {
+	required      map[string]struct{}
+	allowedSource map[string]struct{}
+	refs          []agentapi.EvidenceRef
+	contextRefs   []projectedTaskContextRef
+	assigned      bool
+
+	selectedBlocks            []agentapi.ContextBlock
+	selectedHandoffUnits      []tool.EvidenceUnit
+	selectedContextReferences []agentapi.Reference
+	selectedKeys              map[string]struct{}
+	seenKeys                  map[string]struct{}
+	matchedSeeds              int
+	droppedSeeds              int
+	duplicateSeeds            int
+}
+
+func newProjectionCollector(
+	required map[string]struct{},
+	allowedSource map[string]struct{},
+	refs []agentapi.EvidenceRef,
+	contextRefs []projectedTaskContextRef,
+	assigned bool,
+	seedCount int,
+	handoffCount int,
+) projectionCollector {
+	return projectionCollector{
+		required:                  required,
+		allowedSource:             allowedSource,
+		refs:                      refs,
+		contextRefs:               contextRefs,
+		assigned:                  assigned,
+		selectedBlocks:            make([]agentapi.ContextBlock, 0, seedCount),
+		selectedHandoffUnits:      make([]tool.EvidenceUnit, 0, handoffCount),
+		selectedContextReferences: make([]agentapi.Reference, 0),
+		selectedKeys:              make(map[string]struct{}),
+		seenKeys:                  make(map[string]struct{}),
+	}
+}
+
+func (collector *projectionCollector) collectSeedMaterial(blocks []agentapi.ContextBlock) {
+	for _, block := range blocks {
+		if len(block.Evidence) == 0 {
+			if collector.assigned && taskContextReferenceMatches(block, collector.contextRefs) {
+				collector.selectedBlocks = append(
+					collector.selectedBlocks,
+					cloneContextBlock(block),
+				)
+				collector.selectedContextReferences = append(
+					collector.selectedContextReferences,
+					block.References...,
+				)
+				collector.matchedSeeds++
+			} else {
+				collector.droppedSeeds++
+			}
+			continue
+		}
+		selectedUnits := make([]tool.EvidenceUnit, 0, len(block.Evidence))
+		for _, unit := range block.Evidence {
+			if !collector.admit(unit) {
+				continue
+			}
+			selectedUnits = append(selectedUnits, cloneEvidenceUnit(unit))
+		}
+		if len(selectedUnits) == 0 {
+			collector.droppedSeeds++
+			continue
+		}
+		collector.matchedSeeds++
+		projected := projectContextBlock(block, selectedUnits)
+		collector.selectedBlocks = append(collector.selectedBlocks, projected)
+		collector.selectedHandoffUnits = append(
+			collector.selectedHandoffUnits,
+			selectedUnits...,
+		)
+	}
+}
+
+func (collector *projectionCollector) collectHandoffUnits(units []tool.EvidenceUnit) {
+	for _, unit := range units {
+		key := projectionEvidenceKey(unit)
+		if _, duplicate := collector.selectedKeys[key]; duplicate {
+			continue
+		}
+		if _, duplicate := collector.seenKeys[key]; duplicate {
+			collector.duplicateSeeds++
+			continue
+		}
+		if !collector.matches(unit) {
+			continue
+		}
+		collector.seenKeys[key] = struct{}{}
+		collector.selectedKeys[key] = struct{}{}
+		collector.selectedHandoffUnits = append(
+			collector.selectedHandoffUnits,
+			cloneEvidenceUnit(unit),
+		)
+	}
+}
+
+// admit returns true when a seed unit should be kept in its projected block.
+func (collector *projectionCollector) admit(unit tool.EvidenceUnit) bool {
+	key := projectionEvidenceKey(unit)
+	if _, duplicate := collector.seenKeys[key]; duplicate {
+		collector.duplicateSeeds++
+		return false
+	}
+	if !collector.matches(unit) {
+		return false
+	}
+	collector.seenKeys[key] = struct{}{}
+	collector.selectedKeys[key] = struct{}{}
+	return true
+}
+
+func (collector *projectionCollector) matches(unit tool.EvidenceUnit) bool {
+	return projectionEvidenceMatches(
+		unit, collector.required, collector.allowedSource, collector.refs,
+	)
+}
+
+// resolvedProjection carries the decoded and narrowed contract state before the
+// evidence units are collected and re-encoded.
+type resolvedProjection struct {
+	raw           map[string]json.RawMessage
+	contract      contractProjection
+	effectiveTask *TaskDirective
+	assigned      bool
+	assignment    projectedEvidenceAssignment
+	required      map[string]struct{}
+}
+
+// resolveProjection decodes a task contract, binds it to the current node's
+// assignment, and narrows its investigation/evidence goals. A zero return with
+// bypass=true means the input should pass through unchanged; the caller must
+// fill the projection hash and token estimate from the original handoff.
+func resolveProjection(
+	input Handoff,
+	task *TaskDirective,
+	nodeID string,
+	raw map[string]json.RawMessage,
+) (resolvedProjection, bool, error) {
+	var resolved resolvedProjection
 	contract := contractProjection{
 		InvestigationGoals: []projectedInvestigationGoal{},
 	}
 	if err := decodeProjectionFields(raw, &contract); err != nil {
-		return projectionResult{}, fmt.Errorf("decode task contract context for node %q: %w", nodeID, err)
+		return resolved, false, fmt.Errorf(
+			"decode task contract context for node %q: %w",
+			nodeID,
+			err,
+		)
 	}
+	assignment, assigned, err := resolveProjectionAssignment(raw, contract, nodeID)
+	if err != nil {
+		return resolved, false, err
+	}
+	effectiveTask := resolveProjectionTask(task, assignment, assigned, &contract)
+	if effectiveTask == nil ||
+		!assigned &&
+			len(effectiveTask.RequiredFacets) == 0 &&
+			len(effectiveTask.InvestigationGoalIDs) == 0 {
+		return resolved, true, nil
+	}
+
+	required := stringSet(effectiveTask.RequiredFacets)
+	if err := narrowProjectionContract(effectiveTask, &contract, nodeID); err != nil {
+		return resolved, false, err
+	}
+	contract.EvidenceGoals = filterProjectionEvidenceGoals(contract.EvidenceGoals, required)
+
+	return resolvedProjection{
+		raw:           raw,
+		contract:      contract,
+		effectiveTask: effectiveTask,
+		assigned:      assigned,
+		assignment:    assignment,
+		required:      required,
+	}, false, nil
+}
+
+func resolveProjectionAssignment(
+	raw map[string]json.RawMessage,
+	contract contractProjection,
+	nodeID string,
+) (projectedEvidenceAssignment, bool, error) {
 	_, assignmentsDeclared := raw["task_evidence_assignments"]
 	assignment, assigned, err := taskEvidenceAssignmentForNode(
 		contract.TaskEvidenceAssignments,
 		nodeID,
 	)
 	if err != nil {
-		return projectionResult{}, fmt.Errorf(
+		return assignment, assigned, fmt.Errorf(
 			"task contract evidence assignments for node %q: %w",
 			nodeID,
 			err,
@@ -165,195 +384,152 @@ func projectInvestigatorHandoff(
 	}
 	if assignmentsDeclared && !assigned {
 		assignment = projectedEvidenceAssignment{
-			TaskID: nodeID, InputRefs: []agentapi.EvidenceRef{},
+			TaskID:      nodeID,
+			InputRefs:   []agentapi.EvidenceRef{},
 			ContextRefs: []projectedTaskContextRef{},
 		}
 		assigned = true
 	}
+	return assignment, assigned, nil
+}
+
+func resolveProjectionTask(
+	task *TaskDirective,
+	assignment projectedEvidenceAssignment,
+	assigned bool,
+	contract *contractProjection,
+) *TaskDirective {
 	effectiveTask := cloneTaskDirective(task)
-	if assigned {
-		if effectiveTask == nil {
-			effectiveTask = &TaskDirective{}
-		}
-		if effectiveTask.Purpose == "" {
-			effectiveTask.Purpose = investigatorTaskPurpose(nodeID)
-		}
-		requiredFacets := assignment.RequiredFacets
-		if len(requiredFacets) == 0 {
-			requiredFacets = projectedEvidenceGoalFacets(contract.EvidenceGoals)
-		}
-		effectiveTask.RequiredFacets = append([]string(nil), requiredFacets...)
-		effectiveTask.InputRefs = cloneEvidenceRefs(assignment.InputRefs)
-		contract.TaskEvidenceAssignments = []projectedEvidenceAssignment{
-			cloneProjectedEvidenceAssignment(assignment),
-		}
+	if !assigned {
+		return effectiveTask
 	}
-	if effectiveTask == nil ||
-		!assigned &&
-			len(effectiveTask.RequiredFacets) == 0 &&
-			len(effectiveTask.InvestigationGoalIDs) == 0 {
-		result.ProjectedTokens = result.InputTokens
-		result.ProjectionHash = input.ContentHash
-		result.Task = effectiveTask
-		return result, nil
+	if effectiveTask == nil {
+		effectiveTask = &TaskDirective{}
 	}
-	result.Task = effectiveTask
+	if effectiveTask.Purpose == "" {
+		effectiveTask.Purpose = investigatorTaskPurpose(assignment.TaskID)
+	}
+	requiredFacets := assignment.RequiredFacets
+	if len(requiredFacets) == 0 {
+		requiredFacets = projectedEvidenceGoalFacets(contract.EvidenceGoals)
+	}
+	effectiveTask.RequiredFacets = append([]string(nil), requiredFacets...)
+	effectiveTask.InputRefs = cloneEvidenceRefs(assignment.InputRefs)
+	contract.TaskEvidenceAssignments = []projectedEvidenceAssignment{
+		cloneProjectedEvidenceAssignment(assignment),
+	}
+	return effectiveTask
+}
 
-	if len(effectiveTask.InvestigationGoalIDs) > 0 {
-		bound := stringSet(effectiveTask.InvestigationGoalIDs)
-		filtered := make(
-			[]projectedInvestigationGoal,
-			0,
-			len(effectiveTask.InvestigationGoalIDs),
+func narrowProjectionContract(
+	effectiveTask *TaskDirective,
+	contract *contractProjection,
+	nodeID string,
+) error {
+	if len(effectiveTask.InvestigationGoalIDs) == 0 {
+		return nil
+	}
+	bound := stringSet(effectiveTask.InvestigationGoalIDs)
+	filtered := make(
+		[]projectedInvestigationGoal,
+		0,
+		len(effectiveTask.InvestigationGoalIDs),
+	)
+	for _, goal := range contract.InvestigationGoals {
+		if _, ok := bound[goal.ID]; ok {
+			filtered = append(filtered, goal)
+		}
+	}
+	if len(filtered) != len(bound) {
+		return fmt.Errorf(
+			"task contract for node %q is missing bound investigation goals",
+			nodeID,
 		)
-		for _, goal := range contract.InvestigationGoals {
-			if _, ok := bound[goal.ID]; ok {
-				filtered = append(filtered, goal)
-			}
-		}
-		if len(filtered) != len(bound) {
-			return projectionResult{}, fmt.Errorf(
-				"task contract for node %q is missing bound investigation goals",
-				nodeID,
-			)
-		}
-		contract.InvestigationGoals = filtered
-		if len(filtered) == 1 {
-			contract.Objective = filtered[0].Objective
-		} else {
-			contract.Objective = effectiveTask.Purpose
-		}
 	}
+	contract.InvestigationGoals = filtered
+	if len(filtered) == 1 {
+		contract.Objective = filtered[0].Objective
+	} else {
+		contract.Objective = effectiveTask.Purpose
+	}
+	return nil
+}
 
-	required := stringSet(effectiveTask.RequiredFacets)
-	filteredGoals := make([]projectedEvidenceGoal, 0, len(contract.EvidenceGoals))
-	for _, goal := range contract.EvidenceGoals {
+func filterProjectionEvidenceGoals(goals []projectedEvidenceGoal, required map[string]struct{}) []projectedEvidenceGoal {
+	filteredGoals := make([]projectedEvidenceGoal, 0, len(goals))
+	for _, goal := range goals {
 		if projectedEvidenceGoalMatches(goal, required) {
 			filteredGoals = append(filteredGoals, goal)
 		}
 	}
-	contract.EvidenceGoals = filteredGoals
+	return filteredGoals
+}
 
-	allowedSources := investigatorSourceKinds(nodeID)
-	refs := cloneEvidenceRefs(effectiveTask.InputRefs)
-	contextRefs := assignment.ContextRefs
-	selectedBlocks := make([]agentapi.ContextBlock, 0, len(contract.Context.SeedMaterial))
-	selectedHandoffUnits := make([]tool.EvidenceUnit, 0, len(input.EvidenceUnits))
-	selectedContextReferences := make([]agentapi.Reference, 0)
-	selectedKeys := make(map[string]struct{})
-	seenKeys := make(map[string]struct{})
-	matchedSeeds := 0
-	droppedSeeds := 0
-	duplicateSeeds := 0
-
-	for _, block := range contract.Context.SeedMaterial {
-		if len(block.Evidence) == 0 {
-			if assigned && taskContextReferenceMatches(block, contextRefs) {
-				selectedBlocks = append(selectedBlocks, cloneContextBlock(block))
-				selectedContextReferences = append(
-					selectedContextReferences,
-					block.References...,
-				)
-				matchedSeeds++
-			} else {
-				droppedSeeds++
-			}
-			continue
-		}
-		selectedUnits := make([]tool.EvidenceUnit, 0, len(block.Evidence))
-		for _, unit := range block.Evidence {
-			key := projectionEvidenceKey(unit)
-			if _, duplicate := seenKeys[key]; duplicate {
-				duplicateSeeds++
-				continue
-			}
-			if !projectionEvidenceMatches(unit, required, allowedSources, refs) {
-				continue
-			}
-			seenKeys[key] = struct{}{}
-			selectedKeys[key] = struct{}{}
-			selectedUnits = append(selectedUnits, cloneEvidenceUnit(unit))
-		}
-		if len(selectedUnits) == 0 {
-			droppedSeeds++
-			continue
-		}
-		matchedSeeds++
-		projected := projectContextBlock(block, selectedUnits)
-		selectedBlocks = append(selectedBlocks, projected)
-		selectedHandoffUnits = append(selectedHandoffUnits, selectedUnits...)
+// finalizeProjection encodes the narrowed contract, rehashes the handoff, and
+// fills the remaining projectionResult fields.
+func finalizeProjection(
+	input Handoff,
+	nodeID string,
+	maxTokens int64,
+	result *projectionResult,
+	resolved resolvedProjection,
+	collector projectionCollector,
+) error {
+	resolved.contract.Context.SeedMaterial = collector.selectedBlocks
+	if err := encodeProjectionFields(resolved.raw, resolved.contract); err != nil {
+		return fmt.Errorf("encode projected task contract for node %q: %w", nodeID, err)
 	}
-
-	// Some workflows carry the evidence ledger on the Handoff as well as in
-	// seed_material. Keep the same narrow view for the runtime policy and for
-	// downstream provenance, without exposing an unrelated unit through the
-	// projected payload.
-	for _, unit := range input.EvidenceUnits {
-		key := projectionEvidenceKey(unit)
-		if _, duplicate := selectedKeys[key]; duplicate {
-			continue
-		}
-		if _, duplicate := seenKeys[key]; duplicate {
-			duplicateSeeds++
-			continue
-		}
-		if !projectionEvidenceMatches(unit, required, allowedSources, refs) {
-			continue
-		}
-		seenKeys[key] = struct{}{}
-		selectedKeys[key] = struct{}{}
-		selectedHandoffUnits = append(selectedHandoffUnits, cloneEvidenceUnit(unit))
-	}
-
-	contract.Context.SeedMaterial = selectedBlocks
-	if err := encodeProjectionFields(raw, contract); err != nil {
-		return projectionResult{}, fmt.Errorf("encode projected task contract for node %q: %w", nodeID, err)
-	}
-	payload, err := json.Marshal(raw)
+	payload, err := json.Marshal(resolved.raw)
 	if err != nil {
-		return projectionResult{}, fmt.Errorf("marshal projected task contract for node %q: %w", nodeID, err)
+		return fmt.Errorf("marshal projected task contract for node %q: %w", nodeID, err)
 	}
 
 	result.Input.Payload = payload
-	result.Input.EvidenceUnits = selectedHandoffUnits
+	result.Input.EvidenceUnits = collector.selectedHandoffUnits
 	result.Input.References = appendUniqueReferences(
-		filterProjectionReferences(input.References, selectedHandoffUnits),
-		selectedContextReferences,
+		filterProjectionReferences(input.References, collector.selectedHandoffUnits),
+		collector.selectedContextReferences,
 	)
-	result.Input.EvidenceConflicts = filterProjectionConflicts(input.EvidenceConflicts, selectedHandoffUnits)
+	result.Input.EvidenceConflicts = filterProjectionConflicts(
+		input.EvidenceConflicts, collector.selectedHandoffUnits,
+	)
 	if result.Input.ContentHash, err = handoffHash(result.Input); err != nil {
-		return projectionResult{}, fmt.Errorf("hash projected handoff for node %q: %w", nodeID, err)
+		return fmt.Errorf("hash projected handoff for node %q: %w", nodeID, err)
 	}
 	result.InputTokens = estimateProjectionTokens(input.Payload)
 	result.ProjectedTokens = estimateProjectionTokens(payload)
-	result.DroppedSeedCount = droppedSeeds
-	result.MatchedSeedCount = matchedSeeds
-	result.DuplicateSeedCount = duplicateSeeds
+	result.DroppedSeedCount = collector.droppedSeeds
+	result.MatchedSeedCount = collector.matchedSeeds
+	result.DuplicateSeedCount = collector.duplicateSeeds
 	result.MissingFacets = missingProjectionFacets(
-		effectiveTask.RequiredFacets,
-		selectedHandoffUnits,
+		resolved.effectiveTask.RequiredFacets,
+		collector.selectedHandoffUnits,
 	)
 	result.MissingEntities = missingProjectionEntities(
-		contract.Entities, selectedHandoffUnits, projectionMinimumCoverage(contract.EvidenceGoals),
+		resolved.contract.Entities,
+		collector.selectedHandoffUnits,
+		projectionMinimumCoverage(resolved.contract.EvidenceGoals),
 	)
 	switch {
-	case matchedSeeds == 0:
+	case collector.matchedSeeds == 0:
 		result.Status = projectionEmpty
 	case len(result.MissingFacets) > 0 || len(result.MissingEntities) > 0:
 		result.Status = projectionInsufficient
-	case droppedSeeds > 0 || duplicateSeeds > 0:
+	case collector.droppedSeeds > 0 || collector.duplicateSeeds > 0:
 		result.Status = projectionPartial
 	default:
 		result.Status = projectionMatched
 	}
-	result.ProjectionHash = projectionHash(input, effectiveTask, nodeID, payload)
+	result.ProjectionHash = projectionHash(
+		input, resolved.effectiveTask, nodeID, payload,
+	)
 	if maxTokens > 0 && int64(result.ProjectedTokens) > maxTokens {
-		return projectionResult{}, fmt.Errorf(
+		return fmt.Errorf(
 			"projected task contract for node %q exceeds input budget: %d tokens > %d",
 			nodeID, result.ProjectedTokens, maxTokens,
 		)
 	}
-	return result, nil
+	return nil
 }
 
 func projectionHash(input Handoff, task *TaskDirective, nodeID string, payload []byte) string {

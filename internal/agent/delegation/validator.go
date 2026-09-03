@@ -96,79 +96,13 @@ func (validator *Validator) validate(
 ) (agentapi.DelegationValidation, error) {
 	validation := agentapi.DelegationValidation{}
 	reasons := map[string]struct{}{}
-	claimIDs := make(map[string]struct{})
-	claimHasCitation := make(map[string]bool)
-	var findings, cited, bodyAvailable, structured int
-	var entries []claimEntry
-	unstructuredByReport := make(map[int]bool)
-
-	for reportIndex, report := range reports {
-		if err := validator.validateReport(report); err != nil {
-			return validation, fmt.Errorf("report %d: %w", reportIndex, err)
-		}
-		if report.ReportID != "" {
-			validation.ReportIDs = append(validation.ReportIDs, report.ReportID)
-		}
-		if reportWasTruncated(report) {
-			reasons[ReasonReportTruncated] = struct{}{}
-		}
-		for _, finding := range report.Findings {
-			findings++
-			fullID := report.ReportID + "/" + finding.ID
-			claimIDs[fullID] = struct{}{}
-			validCitations := 0
-			materialCitations := 0
-			for _, citation := range finding.Citations {
-				unit, ok := evidence[citation]
-				if !ok || unit.ContentHash == "" {
-					continue
-				}
-				validCitations++
-				if evidenceMaterialAvailable(citation, unit, contextIndex, observations) {
-					materialCitations++
-				}
-			}
-			if validCitations > 0 {
-				cited++
-				// Explicit conflicts are allowed to reference an admitted evidence
-				// unit even when its body is not available in this process. Body
-				// availability is tracked separately for semantic verification.
-				claimHasCitation[fullID] = true
-			}
-			if materialCitations > 0 {
-				bodyAvailable++
-			} else if validCitations == 0 && finding.Critical {
-				reasons[ReasonMissingCriticalCitation] = struct{}{}
-			}
-			if finding.StructuredClaim == nil {
-				unstructuredByReport[reportIndex] = true
-				continue
-			}
-			structured++
-			entry, known, err := validator.claimEntry(
-				reportIndex,
-				fullID,
-				finding,
-			)
-			if err != nil {
-				return validation, err
-			}
-			if !known {
-				if finding.Critical {
-					reasons[ReasonUnknownClaimComparator] = struct{}{}
-				}
-				continue
-			}
-			entries = append(entries, entry)
-		}
+	collected, err := validator.collectReports(
+		reports, evidence, contextIndex, observations, &validation, reasons,
+	)
+	if err != nil {
+		return validation, err
 	}
-	if findings > 0 {
-		validation.CitationCoverage = float64(cited) / float64(findings)
-		validation.EvidenceBodyCoverage = float64(bodyAvailable) / float64(findings)
-		validation.StructuredClaimCoverage = float64(structured) / float64(findings)
-	}
-
-	explicit, err := explicitConflicts(reports, claimIDs, claimHasCitation)
+	explicit, err := explicitConflicts(reports, collected.claimIDs, collected.claimHasCitation)
 	if err != nil {
 		return validation, err
 	}
@@ -178,7 +112,7 @@ func (validator *Validator) validate(
 			reasons[ReasonCriticalExplicitConflict] = struct{}{}
 		}
 	}
-	structuredConflicts, err := structuredConflicts(ctx, entries)
+	structuredConflicts, err := structuredConflicts(ctx, collected.entries)
 	if err != nil {
 		return validation, err
 	}
@@ -189,7 +123,7 @@ func (validator *Validator) validate(
 		}
 	}
 
-	if len(reports) > 1 && len(unstructuredByReport) > 0 {
+	if len(reports) > 1 && len(collected.unstructuredByReport) > 0 {
 		validation.UnverifiedSemanticOverlap = true
 		reasons[ReasonUnstructuredCrossReportMerge] = struct{}{}
 	}
@@ -200,6 +134,109 @@ func (validator *Validator) validate(
 	validation.VerificationReasons = sortedKeys(reasons)
 	validation.RequiresVerification = len(validation.VerificationReasons) > 0
 	return validation, nil
+}
+
+type validationAccumulator struct {
+	claimIDs             map[string]struct{}
+	claimHasCitation     map[string]bool
+	entries              []claimEntry
+	unstructuredByReport map[int]bool
+}
+
+// collectReports validates each report and accumulates citation coverage and
+// structured claim entries, returning the intermediate state consumed by the
+// conflict pass.
+func (validator *Validator) collectReports(
+	reports []agentapi.DelegationReport,
+	evidence map[string]tool.EvidenceUnit,
+	contextIndex map[string]agentapi.ContextBlock,
+	observations []agentapi.EvidenceObservation,
+	validation *agentapi.DelegationValidation,
+	reasons map[string]struct{},
+) (validationAccumulator, error) {
+	acc := validationAccumulator{
+		claimIDs:             make(map[string]struct{}),
+		claimHasCitation:     make(map[string]bool),
+		unstructuredByReport: make(map[int]bool),
+	}
+	var findings, cited, bodyAvailable, structured int
+
+	for reportIndex, report := range reports {
+		if err := validator.validateReport(report); err != nil {
+			return acc, fmt.Errorf("report %d: %w", reportIndex, err)
+		}
+		if report.ReportID != "" {
+			validation.ReportIDs = append(validation.ReportIDs, report.ReportID)
+		}
+		if reportWasTruncated(report) {
+			reasons[ReasonReportTruncated] = struct{}{}
+		}
+		for _, finding := range report.Findings {
+			findings++
+			fullID := report.ReportID + "/" + finding.ID
+			acc.claimIDs[fullID] = struct{}{}
+			validCitations, materialCitations := countFindingCitations(finding, evidence, contextIndex, observations)
+			if validCitations > 0 {
+				cited++
+				// Explicit conflicts are allowed to reference an admitted evidence
+				// unit even when its body is not available in this process. Body
+				// availability is tracked separately for semantic verification.
+				acc.claimHasCitation[fullID] = true
+			}
+			if materialCitations > 0 {
+				bodyAvailable++
+			} else if validCitations == 0 && finding.Critical {
+				reasons[ReasonMissingCriticalCitation] = struct{}{}
+			}
+			if finding.StructuredClaim == nil {
+				acc.unstructuredByReport[reportIndex] = true
+				continue
+			}
+			structured++
+			entry, known, err := validator.claimEntry(
+				reportIndex,
+				fullID,
+				finding,
+			)
+			if err != nil {
+				return acc, err
+			}
+			if !known {
+				if finding.Critical {
+					reasons[ReasonUnknownClaimComparator] = struct{}{}
+				}
+				continue
+			}
+			acc.entries = append(acc.entries, entry)
+		}
+	}
+	if findings > 0 {
+		validation.CitationCoverage = float64(cited) / float64(findings)
+		validation.EvidenceBodyCoverage = float64(bodyAvailable) / float64(findings)
+		validation.StructuredClaimCoverage = float64(structured) / float64(findings)
+	}
+	return acc, nil
+}
+
+// countFindingCitations tallies citations with admitted evidence and those whose
+// material is actually readable in this process.
+func countFindingCitations(
+	finding agentapi.DelegationFinding,
+	evidence map[string]tool.EvidenceUnit,
+	contextIndex map[string]agentapi.ContextBlock,
+	observations []agentapi.EvidenceObservation,
+) (validCitations, materialCitations int) {
+	for _, citation := range finding.Citations {
+		unit, ok := evidence[citation]
+		if !ok || unit.ContentHash == "" {
+			continue
+		}
+		validCitations++
+		if evidenceMaterialAvailable(citation, unit, contextIndex, observations) {
+			materialCitations++
+		}
+	}
+	return validCitations, materialCitations
 }
 
 func (validator *Validator) validateReport(report agentapi.DelegationReport) error {

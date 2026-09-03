@@ -92,6 +92,16 @@ var directAgentSystemPrompt = withUserVisibleAnswer(withRolePlaceholder(prompts.
 
 // replayableTailMessages keeps only provider-valid tool call/result groups.
 func ReplayableTailMessages(msgs []llm.Message, n int) []llm.Message {
+	start := replayableTailStart(msgs, n)
+	tail := msgs[start:]
+	out := make([]llm.Message, 0, len(tail))
+	for i := 0; i < len(tail); {
+		i = appendReplayableMessageGroup(tail, i, &out)
+	}
+	return out
+}
+
+func replayableTailStart(msgs []llm.Message, n int) int {
 	start := 0
 	if n > 0 && len(msgs) > n {
 		start = len(msgs) - n
@@ -107,29 +117,30 @@ func ReplayableTailMessages(msgs []llm.Message, n int) []llm.Message {
 			start--
 		}
 	}
-	tail := msgs[start:]
-	out := make([]llm.Message, 0, len(tail))
-	for i := 0; i < len(tail); {
-		message := tail[i]
-		if message.Role == "tool" {
-			i++
-			continue
-		}
-		if message.Role != "assistant" || len(message.ToolCalls) == 0 {
-			out = append(out, message)
-			i++
-			continue
-		}
-		j := i + 1
-		for j < len(tail) && tail[j].Role == "tool" {
-			j++
-		}
-		if completeToolResultGroup(message.ToolCalls, tail[i+1:j]) {
-			out = append(out, tail[i:j]...)
-		}
-		i = j
+	return start
+}
+
+func appendReplayableMessageGroup(
+	tail []llm.Message,
+	i int,
+	out *[]llm.Message,
+) int {
+	message := tail[i]
+	if message.Role == "tool" {
+		return i + 1
 	}
-	return out
+	if message.Role != "assistant" || len(message.ToolCalls) == 0 {
+		*out = append(*out, message)
+		return i + 1
+	}
+	j := i + 1
+	for j < len(tail) && tail[j].Role == "tool" {
+		j++
+	}
+	if completeToolResultGroup(message.ToolCalls, tail[i+1:j]) {
+		*out = append(*out, tail[i:j]...)
+	}
+	return j
 }
 
 func completeToolResultGroup(calls []llm.ToolCall, results []llm.Message) bool {

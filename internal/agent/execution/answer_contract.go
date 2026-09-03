@@ -81,10 +81,16 @@ func (contract *exactAnswerContract) Add(candidate tool.AnswerContract) {
 	if contract == nil {
 		return
 	}
-	if len(candidate.RequiredLiterals) > 0 && contract.seen == nil {
-		contract.seen = make(map[string]struct{}, len(candidate.RequiredLiterals))
+	contract.addRequiredLiterals(candidate.RequiredLiterals)
+	contract.addDelegations(candidate.Delegations)
+	contract.addEvidence(candidate.Evidence)
+}
+
+func (contract *exactAnswerContract) addRequiredLiterals(literals []string) {
+	if len(literals) > 0 && contract.seen == nil {
+		contract.seen = make(map[string]struct{}, len(literals))
 	}
-	for _, literal := range candidate.RequiredLiterals {
+	for _, literal := range literals {
 		if literal == "" {
 			continue
 		}
@@ -94,7 +100,10 @@ func (contract *exactAnswerContract) Add(candidate tool.AnswerContract) {
 		contract.seen[literal] = struct{}{}
 		contract.required = append(contract.required, literal)
 	}
-	for _, delegation := range candidate.Delegations {
+}
+
+func (contract *exactAnswerContract) addDelegations(delegations []tool.DelegationAdoptionContract) {
+	for _, delegation := range delegations {
 		delegationID := strings.TrimSpace(delegation.DelegationID)
 		if delegationID == "" {
 			continue
@@ -102,11 +111,11 @@ func (contract *exactAnswerContract) Add(candidate tool.AnswerContract) {
 		if contract.allowedReports == nil {
 			contract.allowedReports = make(
 				map[string]map[string]struct{},
-				len(candidate.Delegations),
+				len(delegations),
 			)
 			contract.reportOrder = make(
 				map[string][]string,
-				len(candidate.Delegations),
+				len(delegations),
 			)
 		}
 		allowed, exists := contract.allowedReports[delegationID]
@@ -133,42 +142,46 @@ func (contract *exactAnswerContract) Add(candidate tool.AnswerContract) {
 			)
 		}
 	}
-	if candidate.Evidence != nil {
-		if len(candidate.Evidence.Claims) > 0 || len(candidate.Evidence.Edges) > 0 {
-			contract.evidenceRequired = true
+}
+
+func (contract *exactAnswerContract) addEvidence(evidence *tool.AnswerEvidenceContract) {
+	if evidence == nil {
+		return
+	}
+	if len(evidence.Claims) > 0 || len(evidence.Edges) > 0 {
+		contract.evidenceRequired = true
+	}
+	if contract.allowedClaims == nil {
+		contract.allowedClaims = make(map[string]string, len(evidence.Claims))
+	}
+	for _, claim := range evidence.Claims {
+		id := strings.TrimSpace(claim.ClaimID)
+		decision := normalizeAnswerEvidenceDecision(claim.Decision)
+		if id == "" || decision == "" {
+			continue
 		}
-		if contract.allowedClaims == nil {
-			contract.allowedClaims = make(map[string]string, len(candidate.Evidence.Claims))
+		if previous, exists := contract.allowedClaims[id]; exists {
+			contract.allowedClaims[id] = mergeAnswerEvidenceDecision(previous, decision)
+			continue
 		}
-		for _, claim := range candidate.Evidence.Claims {
-			id := strings.TrimSpace(claim.ClaimID)
-			decision := normalizeAnswerEvidenceDecision(claim.Decision)
-			if id == "" || decision == "" {
-				continue
-			}
-			if previous, exists := contract.allowedClaims[id]; exists {
-				contract.allowedClaims[id] = mergeAnswerEvidenceDecision(previous, decision)
-				continue
-			}
-			contract.allowedClaims[id] = decision
-			contract.claimOrder = append(contract.claimOrder, id)
+		contract.allowedClaims[id] = decision
+		contract.claimOrder = append(contract.claimOrder, id)
+	}
+	if contract.allowedEdges == nil {
+		contract.allowedEdges = make(map[string]string, len(evidence.Edges))
+	}
+	for _, edge := range evidence.Edges {
+		key := answerEvidenceEdgeKey(edge.From, edge.To, edge.Protocol, edge.SyncMode)
+		state := normalizeAnswerEvidenceDecision(edge.EvidenceState)
+		if key == "" || state == "" {
+			continue
 		}
-		if contract.allowedEdges == nil {
-			contract.allowedEdges = make(map[string]string, len(candidate.Evidence.Edges))
+		if previous, exists := contract.allowedEdges[key]; exists {
+			contract.allowedEdges[key] = mergeAnswerEvidenceDecision(previous, state)
+			continue
 		}
-		for _, edge := range candidate.Evidence.Edges {
-			key := answerEvidenceEdgeKey(edge.From, edge.To, edge.Protocol, edge.SyncMode)
-			state := normalizeAnswerEvidenceDecision(edge.EvidenceState)
-			if key == "" || state == "" {
-				continue
-			}
-			if previous, exists := contract.allowedEdges[key]; exists {
-				contract.allowedEdges[key] = mergeAnswerEvidenceDecision(previous, state)
-				continue
-			}
-			contract.allowedEdges[key] = state
-			contract.edgeOrder = append(contract.edgeOrder, key)
-		}
+		contract.allowedEdges[key] = state
+		contract.edgeOrder = append(contract.edgeOrder, key)
 	}
 }
 
@@ -247,28 +260,18 @@ func (contract *exactAnswerContract) Satisfied(answer string) bool {
 		len(contract.evaluated) == len(contract.delegationOrder)
 }
 
-func (contract *exactAnswerContract) appendConservativeFallbackMetadata(answer string) (string, error) {
-	if contract == nil || !contract.Active() {
-		return answer, nil
+func appendFallbackRequiredLiterals(builder *strings.Builder, required []string) {
+	if len(required) == 0 {
+		return
 	}
-	answer = strings.TrimRight(answer, " \t\r\n")
-	if answer == "" {
-		return "", fmt.Errorf("fallback answer is empty")
+	builder.WriteString("\n\n补充：最终模型调用未完成，以下契约要求内容来自已收集证据；其关系仍需继续核对：")
+	for _, literal := range required {
+		builder.WriteString("\n- ")
+		builder.WriteString(literal)
 	}
-	var builder strings.Builder
-	builder.WriteString(answer)
-	if len(contract.required) > 0 {
-		builder.WriteString("\n\n补充：最终模型调用未完成，以下契约要求内容来自已收集证据；其关系仍需继续核对：")
-		for _, literal := range contract.required {
-			builder.WriteString("\n- ")
-			builder.WriteString(literal)
-		}
-	}
-	if len(contract.delegationOrder) == 0 && !contract.evidenceRequired {
-		return builder.String(), nil
-	}
-	builder.WriteString("\n")
+}
 
+func buildFallbackAdoptionEnvelope(contract *exactAnswerContract) delegationAdoptionEnvelope {
 	envelope := delegationAdoptionEnvelope{}
 	if len(contract.delegationOrder) > 0 {
 		envelope.Delegations = make([]delegationAdoptionSelection, 0, len(contract.delegationOrder))
@@ -279,28 +282,49 @@ func (contract *exactAnswerContract) appendConservativeFallbackMetadata(answer s
 			})
 		}
 	}
-	if contract.evidenceRequired {
-		if contractHasClaims(contract) {
-			claims := make([]answerEvidenceClaimSelection, 0, len(contract.claimOrder))
-			for _, claimID := range contract.claimOrder {
-				claims = append(claims, answerEvidenceClaimSelection{
-					ClaimID: claimID, Decision: contract.allowedClaims[claimID],
-				})
-			}
-			envelope.Claims = &claims
-		}
-		if contractHasEdges(contract) {
-			edges := make([]answerEvidenceEdgeSelection, 0, len(contract.edgeOrder))
-			for _, edgeKey := range contract.edgeOrder {
-				from, to, protocol, syncMode := splitAnswerEvidenceEdgeKey(edgeKey)
-				edges = append(edges, answerEvidenceEdgeSelection{
-					From: from, To: to, Protocol: protocol, SyncMode: syncMode,
-					EvidenceState: contract.allowedEdges[edgeKey],
-				})
-			}
-			envelope.Edges = &edges
-		}
+	if !contract.evidenceRequired {
+		return envelope
 	}
+	if contractHasClaims(contract) {
+		claims := make([]answerEvidenceClaimSelection, 0, len(contract.claimOrder))
+		for _, claimID := range contract.claimOrder {
+			claims = append(claims, answerEvidenceClaimSelection{
+				ClaimID: claimID, Decision: contract.allowedClaims[claimID],
+			})
+		}
+		envelope.Claims = &claims
+	}
+	if contractHasEdges(contract) {
+		edges := make([]answerEvidenceEdgeSelection, 0, len(contract.edgeOrder))
+		for _, edgeKey := range contract.edgeOrder {
+			from, to, protocol, syncMode := splitAnswerEvidenceEdgeKey(edgeKey)
+			edges = append(edges, answerEvidenceEdgeSelection{
+				From: from, To: to, Protocol: protocol, SyncMode: syncMode,
+				EvidenceState: contract.allowedEdges[edgeKey],
+			})
+		}
+		envelope.Edges = &edges
+	}
+	return envelope
+}
+
+func (contract *exactAnswerContract) appendConservativeFallbackMetadata(answer string) (string, error) {
+	if contract == nil || !contract.Active() {
+		return answer, nil
+	}
+	answer = strings.TrimRight(answer, " \t\r\n")
+	if answer == "" {
+		return "", fmt.Errorf("fallback answer is empty")
+	}
+	var builder strings.Builder
+	builder.WriteString(answer)
+	appendFallbackRequiredLiterals(&builder, contract.required)
+	if len(contract.delegationOrder) == 0 && !contract.evidenceRequired {
+		return builder.String(), nil
+	}
+	builder.WriteString("\n")
+
+	envelope := buildFallbackAdoptionEnvelope(contract)
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
 		return "", fmt.Errorf("encode fallback answer contract: %w", err)
@@ -338,6 +362,42 @@ func (contract *exactAnswerContract) ValidateAndStrip(
 		return answer, nil
 	}
 	contract.evaluated = nil
+	violations := contract.missingLiteralViolations(answer)
+	if len(contract.delegationOrder) == 0 && !contract.evidenceRequired {
+		return answer, violations
+	}
+
+	payload, markerIndex, ok, violations := adoptionMarkerPayload(answer, violations)
+	if !ok {
+		return answer, violations
+	}
+
+	envelope, decodeViolations, ok := decodeAdoptionEnvelope(payload)
+	if !ok {
+		return answer, append(violations, decodeViolations...)
+	}
+
+	evaluated, seenDelegations, violations := contract.validateDelegationSelections(envelope.Delegations, violations)
+	violations = contract.validateAdoptedEvidence(&envelope, violations)
+	violations = contract.appendMissingDelegationViolations(seenDelegations, violations)
+
+	visible := strings.TrimRight(answer[:markerIndex], " \t\r\n")
+	if strings.TrimSpace(visible) == "" {
+		violations = append(
+			violations,
+			"visible final answer is missing before delegation adoption metadata",
+		)
+	}
+	if len(violations) > 0 {
+		return answer, violations
+	}
+	contract.evaluated = evaluated
+	return visible, nil
+}
+
+func (contract *exactAnswerContract) missingLiteralViolations(
+	answer string,
+) []string {
 	violations := make([]string, 0)
 	for _, literal := range contract.Missing(answer) {
 		violations = append(
@@ -345,60 +405,73 @@ func (contract *exactAnswerContract) ValidateAndStrip(
 			fmt.Sprintf("missing required literal %q", literal),
 		)
 	}
-	if len(contract.delegationOrder) == 0 && !contract.evidenceRequired {
-		return answer, violations
-	}
+	return violations
+}
 
+func adoptionMarkerPayload(
+	answer string,
+	violations []string,
+) (payload string, markerIndex int, ok bool, out []string) {
 	markerCount := strings.Count(answer, delegationAdoptionMarkerPrefix)
 	if markerCount == 0 {
-		return answer, append(
+		return "", 0, false, append(
 			violations,
 			"delegation adoption marker is missing",
 		)
 	}
 	if markerCount != 1 {
-		return answer, append(
+		return "", 0, false, append(
 			violations,
 			"delegation adoption marker must appear exactly once",
 		)
 	}
-	markerIndex := strings.Index(answer, delegationAdoptionMarkerPrefix)
+	markerIndex = strings.Index(answer, delegationAdoptionMarkerPrefix)
 	if markerIndex > 0 && answer[markerIndex-1] != '\n' {
 		violations = append(
 			violations,
 			"delegation adoption marker must start on its own final line",
 		)
 	}
-	payload := strings.TrimSpace(
+	payload = strings.TrimSpace(
 		answer[markerIndex+len(delegationAdoptionMarkerPrefix):],
 	)
+	return payload, markerIndex, true, violations
+}
+
+func decodeAdoptionEnvelope(
+	payload string,
+) (delegationAdoptionEnvelope, []string, bool) {
 	var envelope delegationAdoptionEnvelope
 	decoder := json.NewDecoder(strings.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&envelope); err != nil {
-		return answer, append(
-			violations,
+		return envelope, []string{
 			fmt.Sprintf("delegation adoption metadata is invalid: %v", err),
-		)
+		}, false
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return answer, append(
-			violations,
+		return envelope, []string{
 			"delegation adoption marker must be the final answer content",
-		)
+		}, false
 	}
+	return envelope, nil, true
+}
 
+func (contract *exactAnswerContract) validateDelegationSelections(
+	selections []delegationAdoptionSelection,
+	violations []string,
+) ([]agentapi.DelegationAdoption, map[string]struct{}, []string) {
 	seenDelegations := make(
 		map[string]struct{},
-		len(envelope.Delegations),
+		len(selections),
 	)
 	evaluated := make(
 		[]agentapi.DelegationAdoption,
 		0,
 		len(contract.delegationOrder),
 	)
-	for _, selection := range envelope.Delegations {
+	for _, selection := range selections {
 		delegationID := strings.TrimSpace(selection.DelegationID)
 		allowed, known := contract.allowedReports[delegationID]
 		if !known {
@@ -458,72 +531,102 @@ func (contract *exactAnswerContract) ValidateAndStrip(
 			Status:           status,
 		})
 	}
-	if contract.evidenceRequired {
-		if contractHasClaims(contract) && envelope.Claims == nil {
-			violations = append(violations, "claims evidence manifest is missing")
+	return evaluated, seenDelegations, violations
+}
+
+func (contract *exactAnswerContract) validateAdoptedEvidence(
+	envelope *delegationAdoptionEnvelope,
+	violations []string,
+) []string {
+	if !contract.evidenceRequired {
+		return violations
+	}
+	if contractHasClaims(contract) && envelope.Claims == nil {
+		violations = append(violations, "claims evidence manifest is missing")
+	}
+	if contractHasEdges(contract) && envelope.Edges == nil {
+		violations = append(violations, "edges evidence manifest is missing")
+	}
+	violations = contract.validateAdoptedClaims(envelope, violations)
+	return contract.validateAdoptedEdges(envelope, violations)
+}
+
+func (contract *exactAnswerContract) validateAdoptedClaims(
+	envelope *delegationAdoptionEnvelope,
+	violations []string,
+) []string {
+	if envelope.Claims == nil {
+		return violations
+	}
+	seenClaims := make(map[string]struct{}, len(*envelope.Claims))
+	for _, selection := range *envelope.Claims {
+		claimID := strings.TrimSpace(selection.ClaimID)
+		if claimID == "" {
+			violations = append(violations, "claim_id must not be empty")
+			continue
 		}
-		if contractHasEdges(contract) && envelope.Edges == nil {
-			violations = append(violations, "edges evidence manifest is missing")
+		if _, duplicate := seenClaims[claimID]; duplicate {
+			violations = append(violations, fmt.Sprintf("claim %q appears more than once", claimID))
+			continue
 		}
-		seenClaims := make(map[string]struct{})
-		if envelope.Claims != nil {
-			seenClaims = make(map[string]struct{}, len(*envelope.Claims))
-			for _, selection := range *envelope.Claims {
-				claimID := strings.TrimSpace(selection.ClaimID)
-				if claimID == "" {
-					violations = append(violations, "claim_id must not be empty")
-					continue
-				}
-				if _, duplicate := seenClaims[claimID]; duplicate {
-					violations = append(violations, fmt.Sprintf("claim %q appears more than once", claimID))
-					continue
-				}
-				seenClaims[claimID] = struct{}{}
-				expected, known := contract.allowedClaims[claimID]
-				if !known {
-					violations = append(violations, fmt.Sprintf("unknown claim %q", claimID))
-					continue
-				}
-				decision := normalizeAnswerEvidenceDecision(selection.Decision)
-				if decision == "" || !isAnswerEvidenceClaimDecision(decision) {
-					violations = append(violations, fmt.Sprintf("claim %q has invalid decision %q", claimID, selection.Decision))
-					continue
-				}
-				if decision != expected {
-					violations = append(violations, fmt.Sprintf("claim %q decision %q does not match server state %q", claimID, decision, expected))
-				}
-			}
+		seenClaims[claimID] = struct{}{}
+		expected, known := contract.allowedClaims[claimID]
+		if !known {
+			violations = append(violations, fmt.Sprintf("unknown claim %q", claimID))
+			continue
 		}
-		seenEdges := make(map[string]struct{})
-		if envelope.Edges != nil {
-			seenEdges = make(map[string]struct{}, len(*envelope.Edges))
-			for _, selection := range *envelope.Edges {
-				key := answerEvidenceEdgeKey(selection.From, selection.To, selection.Protocol, selection.SyncMode)
-				if key == "" {
-					violations = append(violations, "edge from and to must not be empty")
-					continue
-				}
-				if _, duplicate := seenEdges[key]; duplicate {
-					violations = append(violations, fmt.Sprintf("edge %q appears more than once", key))
-					continue
-				}
-				seenEdges[key] = struct{}{}
-				expected, known := contract.allowedEdges[key]
-				if !known {
-					violations = append(violations, fmt.Sprintf("unknown edge %q", key))
-					continue
-				}
-				state := normalizeAnswerEvidenceDecision(selection.EvidenceState)
-				if state == "" || !isAnswerEvidenceEdgeState(state) {
-					violations = append(violations, fmt.Sprintf("edge %q has invalid evidence_state %q", key, selection.EvidenceState))
-					continue
-				}
-				if state != expected {
-					violations = append(violations, fmt.Sprintf("edge %q evidence_state %q does not match server state %q", key, state, expected))
-				}
-			}
+		decision := normalizeAnswerEvidenceDecision(selection.Decision)
+		if decision == "" || !isAnswerEvidenceClaimDecision(decision) {
+			violations = append(violations, fmt.Sprintf("claim %q has invalid decision %q", claimID, selection.Decision))
+			continue
+		}
+		if decision != expected {
+			violations = append(violations, fmt.Sprintf("claim %q decision %q does not match server state %q", claimID, decision, expected))
 		}
 	}
+	return violations
+}
+
+func (contract *exactAnswerContract) validateAdoptedEdges(
+	envelope *delegationAdoptionEnvelope,
+	violations []string,
+) []string {
+	if envelope.Edges == nil {
+		return violations
+	}
+	seenEdges := make(map[string]struct{}, len(*envelope.Edges))
+	for _, selection := range *envelope.Edges {
+		key := answerEvidenceEdgeKey(selection.From, selection.To, selection.Protocol, selection.SyncMode)
+		if key == "" {
+			violations = append(violations, "edge from and to must not be empty")
+			continue
+		}
+		if _, duplicate := seenEdges[key]; duplicate {
+			violations = append(violations, fmt.Sprintf("edge %q appears more than once", key))
+			continue
+		}
+		seenEdges[key] = struct{}{}
+		expected, known := contract.allowedEdges[key]
+		if !known {
+			violations = append(violations, fmt.Sprintf("unknown edge %q", key))
+			continue
+		}
+		state := normalizeAnswerEvidenceDecision(selection.EvidenceState)
+		if state == "" || !isAnswerEvidenceEdgeState(state) {
+			violations = append(violations, fmt.Sprintf("edge %q has invalid evidence_state %q", key, selection.EvidenceState))
+			continue
+		}
+		if state != expected {
+			violations = append(violations, fmt.Sprintf("edge %q evidence_state %q does not match server state %q", key, state, expected))
+		}
+	}
+	return violations
+}
+
+func (contract *exactAnswerContract) appendMissingDelegationViolations(
+	seenDelegations map[string]struct{},
+	violations []string,
+) []string {
 	for _, delegationID := range contract.delegationOrder {
 		if _, exists := seenDelegations[delegationID]; !exists {
 			violations = append(
@@ -532,18 +635,7 @@ func (contract *exactAnswerContract) ValidateAndStrip(
 			)
 		}
 	}
-	visible := strings.TrimRight(answer[:markerIndex], " \t\r\n")
-	if strings.TrimSpace(visible) == "" {
-		violations = append(
-			violations,
-			"visible final answer is missing before delegation adoption metadata",
-		)
-	}
-	if len(violations) > 0 {
-		return answer, violations
-	}
-	contract.evaluated = evaluated
-	return visible, nil
+	return violations
 }
 
 func contractHasClaims(contract *exactAnswerContract) bool {

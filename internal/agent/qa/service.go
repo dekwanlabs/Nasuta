@@ -22,31 +22,32 @@ type Service struct {
 	// helperLLM handles session maintenance and memory extraction outside Runs.
 	helperLLM *llm.LLMClient
 	// fastLLM handles cheap structured preparation and falls back to helperLLM.
-	fastLLM            *llm.LLMClient
-	retriever          contextRetriever
-	runtime            agentapi.ManagedRuntime
-	runtimeTools       ScenarioToolSource
-	phaseEmitter       interface{ EmitPhase(string, string) }
-	executionEvents    ExecutionEventEmitter
-	memory             *memory.MemoryStore
-	sessions           *memory.SessionStore
-	history            SessionHistory
-	writeAvailable     atomic.Bool
-	cfg                config.Config
-	routerConfidence   float64
-	routerMaxTokens    int
-	contextWindow      int
-	outputReserve      int
-	domainKnowledge    string
-	toolPruningEnabled bool
-	delegationEnabled  bool
-	delegationBudget   agentapi.RunLimits
-	definitions        DefinitionResolver
-	agentRef           agentapi.DefinitionRef
-	definitionErr      error
-	runtimeErr         error
-	compactionMu       sync.RWMutex
-	compactionStatus   map[string]SessionStatusEvent
+	fastLLM                 *llm.LLMClient
+	retriever               contextRetriever
+	runtime                 agentapi.ManagedRuntime
+	runtimeTools            ScenarioToolSource
+	phaseEmitter            PhaseEmitter
+	executionEvents         ExecutionEventEmitter
+	memory                  *memory.MemoryStore
+	sessions                *memory.SessionStore
+	history                 SessionHistory
+	writeAvailable          atomic.Bool
+	cfg                     config.Config
+	routerConfidence        float64
+	routerMaxTokens         int
+	contextWindow           int
+	outputReserve           int
+	domainKnowledge         string
+	toolPruningEnabled      bool
+	delegationEnabled       bool
+	delegationMaxConcurrent int
+	delegationBudget        agentapi.RunLimits
+	definitions             DefinitionResolver
+	agentRef                agentapi.DefinitionRef
+	definitionErr           error
+	runtimeErr              error
+	compactionMu            sync.RWMutex
+	compactionStatus        map[string]SessionStatusEvent
 }
 
 // New wires retrieval, agent, memory, and write tools together.
@@ -67,8 +68,9 @@ func New(d Deps) *Service {
 	svc := &Service{
 		retriever: ret, cfg: d.Cfg,
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
-		toolPruningEnabled: platformSettings.ToolPruningEnabled,
-		delegationEnabled:  platformSettings.DelegationEnabled,
+		toolPruningEnabled:      platformSettings.ToolPruningEnabled,
+		delegationEnabled:       platformSettings.DelegationEnabled,
+		delegationMaxConcurrent: platformSettings.DelegationMaxConcurrent,
 		delegationBudget: agentapi.RunLimits{
 			MaxTotalTokens:      platformSettings.DelegationMaxTotalTokens,
 			MaxCostMicros:       platformSettings.DelegationMaxTotalCostMicros,
@@ -143,20 +145,14 @@ func (svc *Service) emitStatus(runID, text, code string, started time.Time) {
 }
 
 func (svc *Service) emitStatusElapsed(runID, text, code string, elapsedMS int64) {
-	if emitter, ok := svc.phaseEmitter.(interface {
-		EmitStatus(string, string, string, int64)
-	}); ok {
-		emitter.EmitStatus(runID, text, code, elapsedMS)
-		return
+	if svc.phaseEmitter != nil {
+		svc.phaseEmitter.EmitStatus(runID, text, code, elapsedMS)
 	}
-	svc.emitStep(runID, text)
 }
 
 func (svc *Service) emitContextUsage(runID string, event ContextUsageEvent) {
-	if emitter, ok := svc.phaseEmitter.(interface {
-		EmitContextUsage(string, ContextUsageEvent)
-	}); ok {
-		emitter.EmitContextUsage(runID, event)
+	if svc.phaseEmitter != nil {
+		svc.phaseEmitter.EmitContextUsage(runID, event)
 	}
 }
 
@@ -168,10 +164,8 @@ func (svc *Service) updateCompaction(runID, sessionID, status, text string, from
 	svc.compactionMu.Lock()
 	svc.compactionStatus[sessionID] = event
 	svc.compactionMu.Unlock()
-	if emitter, ok := svc.phaseEmitter.(interface {
-		EmitSessionStatus(string, SessionStatusEvent)
-	}); ok {
-		emitter.EmitSessionStatus(runID, event)
+	if svc.phaseEmitter != nil {
+		svc.phaseEmitter.EmitSessionStatus(runID, event)
 	}
 }
 

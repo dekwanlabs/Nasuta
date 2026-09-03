@@ -215,216 +215,36 @@ func (orchestrator *Orchestrator) verifyEvidence(
 func verifyBundle(
 	input verificationRunInput,
 ) (verificationRunOutput, error) {
-	if input.node.Verifier == nil {
-		return verificationRunOutput{}, fmt.Errorf(
-			"verifier node %q has no policy",
-			input.node.ID,
-		)
+	source, ledger, err := decodeVerificationBundle(input)
+	if err != nil {
+		return verificationRunOutput{}, err
 	}
-	if len(input.inputs) != 1 {
-		return verificationRunOutput{}, fmt.Errorf(
-			"verifier node %q requires exactly one evidence bundle",
-			input.node.ID,
-		)
-	}
-	source := input.inputs[0]
-	var ledger ledgerView
-	if err := json.Unmarshal(source.Payload, &ledger); err != nil {
-		return verificationRunOutput{}, fmt.Errorf(
-			"decode verifier node %q evidence bundle: %w",
-			input.node.ID,
-			err,
-		)
-	}
-	if input.node.Verifier.RejectEvidenceConflicts &&
-		len(ledger.EvidenceConflicts) > 0 {
-		return verificationRunOutput{
-				decision:      "reject",
-				stopReason:    StopVerificationFailed,
-				conflictCount: len(ledger.EvidenceConflicts),
-			}, rejectionError{
-				nodeID: input.node.ID,
-				count:  len(ledger.EvidenceConflicts),
-			}
+	if rejected, ok := rejectConflictedVerification(input, ledger); ok {
+		return rejected, rejectionError{nodeID: input.node.ID, count: len(ledger.EvidenceConflicts)}
 	}
 
-	required := make(map[string]struct{}, len(input.node.Verifier.RequiredGoals))
-	for _, goal := range input.node.Verifier.RequiredGoals {
-		required[goal] = struct{}{}
+	required, _, collector, collection, err := collectVerificationGoals(input, ledger)
+	if err != nil {
+		return verificationRunOutput{}, err
 	}
-	highRisk := make(map[string]struct{}, len(input.node.Verifier.HighRiskGoals))
-	for _, goal := range input.node.Verifier.HighRiskGoals {
-		highRisk[goal] = struct{}{}
-	}
-	supported := make(map[string]struct{}, len(required))
-	covered := make(map[string]struct{}, len(required))
-	claims := make([]verifiedClaimView, 0)
-	partialClaims := make([]verifiedClaimView, 0)
-	unsupportedClaims := make([]unsupportedClaimView, 0)
-	evidenceLookup := make(map[string]findingEvidenceView)
-	limitations := make([]string, 0)
-	seenLimitations := make(map[string]struct{})
-	rawLimitations := make([]rawLimitation, 0)
-	rawLimitationIndex := 0
-	appendLimitationText := func(value string) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return
-		}
-		if _, duplicate := seenLimitations[value]; duplicate {
-			return
-		}
-		seenLimitations[value] = struct{}{}
-		limitations = append(limitations, value)
-	}
-	appendLimitation := func(value string) {
-		appendLimitationText(value)
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return
-		}
-		rawLimitations = append(rawLimitations, rawLimitation{
-			Text: value, FirstSeen: rawLimitationIndex,
-		})
-		rawLimitationIndex++
-	}
-	appendLimitationFor := func(value, producerNodeID string, evidenceRefs []string) {
-		appendLimitationText(value)
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return
-		}
-		rawLimitations = append(rawLimitations, rawLimitation{
-			Text: value, ProducerNodeIDs: []string{producerNodeID},
-			EvidenceRefs: append([]string(nil), evidenceRefs...), FirstSeen: rawLimitationIndex,
-		})
-		rawLimitationIndex++
-	}
-	evidenceIndex := newEvidenceIndex(source.EvidenceUnits)
+	claims := collection.claims
+	partialClaims := collection.partialClaims
+	unsupportedClaims := collection.unsupportedClaims
+	evidenceLookup := collection.evidenceLookup
 
-	for _, handoff := range ledger.Handoffs {
-		var report reportView
-		if err := json.Unmarshal(handoff.Payload, &report); err != nil {
-			return verificationRunOutput{}, fmt.Errorf(
-				"decode verifier input from %q: %w",
-				handoff.ProducerNodeID,
-				err,
-			)
-		}
-		for index, finding := range report.Findings {
-			boundEvidence, identities, supportFacts := evidenceIndex.bind(
-				finding.Evidence,
-			)
-			for _, item := range finding.Evidence {
-				for _, match := range evidenceIndex.match(item) {
-					addEvidenceSummary(evidenceLookup, item, match.identity)
-				}
-			}
-			findingHighRisk := hasTrackedGoal(finding.EvidenceGoalIDs, highRisk)
-			if len(identities) == 0 {
-				unsupportedClaims = append(unsupportedClaims, unsupportedClaimView{
-					ProducerNodeID:  handoff.ProducerNodeID,
-					FindingIndex:    index,
-					EvidenceGoalIDs: append([]string(nil), finding.EvidenceGoalIDs...),
-					Support:         claimUnsupported,
-					HighRisk:        findingHighRisk,
-					ReasonCode:      "canonical_evidence_unbound",
-				})
-				appendLimitationFor(fmt.Sprintf(
-					"Finding %d from investigation node %q was excluded because its evidence did not match the canonical ledger.",
-					index,
-					handoff.ProducerNodeID,
-				), handoff.ProducerNodeID, nil)
-				continue
-			}
-			if supportFacts.unboundCount > 0 {
-				appendLimitationFor(fmt.Sprintf(
-					"Finding %d from investigation node %q omitted %d evidence reference(s) that did not match the canonical ledger.",
-					index,
-					handoff.ProducerNodeID,
-					supportFacts.unboundCount,
-				), handoff.ProducerNodeID, evidenceReferences(boundEvidence))
-			}
-			support := claimSupported
-			if supportFacts.incompleteCoverage ||
-				findingHighRisk &&
-					supportFacts.minimumTrustTier <
-						input.node.Verifier.HighRiskMinimumTrustTier {
-				support = claimPartial
-				appendLimitationFor(fmt.Sprintf(
-					"Finding %d from investigation node %q has partial evidence support.",
-					index,
-					handoff.ProducerNodeID,
-				), handoff.ProducerNodeID, evidenceReferences(boundEvidence))
-			}
-			claim := verifiedClaimView{
-				ProducerNodeID:     handoff.ProducerNodeID,
-				FindingIndex:       index,
-				Claim:              finding.Claim,
-				EvidenceGoalIDs:    append([]string(nil), finding.EvidenceGoalIDs...),
-				EntityIDs:          append([]string(nil), finding.EntityIDs...),
-				Evidence:           boundEvidence,
-				EvidenceRefs:       evidenceRefsForIdentities(identities),
-				EvidenceIdentities: identities,
-				Confidence:         finding.Confidence,
-				Support:            support,
-				HighRisk:           findingHighRisk,
-			}
-			if support == claimSupported {
-				claims = append(claims, claim)
-			} else {
-				partialClaims = append(partialClaims, claim)
-			}
-			for _, goal := range finding.EvidenceGoalIDs {
-				if _, tracked := required[goal]; tracked {
-					covered[goal] = struct{}{}
-					if support == claimSupported {
-						supported[goal] = struct{}{}
-					}
-				}
-			}
-		}
-		for _, gap := range report.Gaps {
-			appendLimitationFor(gap, handoff.ProducerNodeID, nil)
-		}
-	}
-	for _, task := range ledger.UnavailableTasks {
-		appendLimitationFor(fmt.Sprintf(
-			"Investigation task %q was unavailable.",
-			task.ProducerNodeID,
-		), task.ProducerNodeID, nil)
-	}
-
-	unresolved := make([]string, 0, len(required))
-	partialGoals := make([]string, 0, len(required))
-	for _, goal := range input.node.Verifier.RequiredGoals {
-		if _, fullySupported := supported[goal]; fullySupported {
-			continue
-		}
-		if _, partlyCovered := covered[goal]; partlyCovered {
-			partialGoals = append(partialGoals, goal)
-			appendLimitation(fmt.Sprintf(
-				"Required evidence goal %q has only partial support.",
-				goal,
-			))
-			continue
-		}
-		unresolved = append(unresolved, goal)
-		appendLimitation(fmt.Sprintf(
-			"Required evidence goal %q remains unresolved.",
-			goal,
-		))
-	}
+	unresolved, partialGoals := classifyVerificationGoals(input, collection, required, collector)
+	limitations := collector.limitations
+	rawLimitations := collector.rawLimitations
 	subjectCoverage, subjectEvidenceInsufficient := verifySubjectCoverage(
 		input.node.Verifier.SubjectRequirements,
 		claims,
 		partialClaims,
-		appendLimitation,
+		collector.append,
 	)
 	completeness := verifiedCompleteness(
 		len(required),
 		len(required)-len(unresolved),
-		len(supported),
+		len(collection.supported),
 		source.Completeness,
 	)
 	completeness = subjectCompleteness(completeness, subjectCoverage)
@@ -469,7 +289,7 @@ func verifyBundle(
 		},
 		Completeness: completeness,
 	}
-	view, err := trimVerifiedEvidence(
+	view, err = trimVerifiedEvidence(
 		view,
 		input.node.Verifier.MaxPayloadTokens,
 		required,
@@ -514,6 +334,289 @@ func verifyBundle(
 		unresolvedGoalCount: len(unresolved),
 		conflictCount:       len(ledger.EvidenceConflicts),
 	}, nil
+}
+
+func decodeVerificationBundle(input verificationRunInput) (Handoff, ledgerView, error) {
+	if input.node.Verifier == nil {
+		return Handoff{}, ledgerView{}, fmt.Errorf(
+			"verifier node %q has no policy",
+			input.node.ID,
+		)
+	}
+	if len(input.inputs) != 1 {
+		return Handoff{}, ledgerView{}, fmt.Errorf(
+			"verifier node %q requires exactly one evidence bundle",
+			input.node.ID,
+		)
+	}
+	source := input.inputs[0]
+	var ledger ledgerView
+	if err := json.Unmarshal(source.Payload, &ledger); err != nil {
+		return Handoff{}, ledgerView{}, fmt.Errorf(
+			"decode verifier node %q evidence bundle: %w",
+			input.node.ID,
+			err,
+		)
+	}
+	return source, ledger, nil
+}
+
+func rejectConflictedVerification(input verificationRunInput, ledger ledgerView) (verificationRunOutput, bool) {
+	if !input.node.Verifier.RejectEvidenceConflicts || len(ledger.EvidenceConflicts) == 0 {
+		return verificationRunOutput{}, false
+	}
+	return verificationRunOutput{
+		decision:      "reject",
+		stopReason:    StopVerificationFailed,
+		conflictCount: len(ledger.EvidenceConflicts),
+	}, true
+}
+
+func collectVerificationGoals(
+	input verificationRunInput,
+	ledger ledgerView,
+) (map[string]struct{}, map[string]struct{}, *verificationCollector, verifiedClaimCollection, error) {
+	required := make(map[string]struct{}, len(input.node.Verifier.RequiredGoals))
+	for _, goal := range input.node.Verifier.RequiredGoals {
+		required[goal] = struct{}{}
+	}
+	highRisk := make(map[string]struct{}, len(input.node.Verifier.HighRiskGoals))
+	for _, goal := range input.node.Verifier.HighRiskGoals {
+		highRisk[goal] = struct{}{}
+	}
+	collector := newVerificationCollector()
+	collection, err := collectVerifiedClaims(
+		ledger, input.node.Verifier, &collector, required, highRisk,
+	)
+	if err != nil {
+		return nil, nil, nil, verifiedClaimCollection{}, err
+	}
+	return required, highRisk, &collector, collection, nil
+}
+
+func classifyVerificationGoals(
+	input verificationRunInput,
+	collection verifiedClaimCollection,
+	required map[string]struct{},
+	collector *verificationCollector,
+) ([]string, []string) {
+	unresolved := make([]string, 0, len(required))
+	partialGoals := make([]string, 0, len(required))
+	for _, goal := range input.node.Verifier.RequiredGoals {
+		if _, fullySupported := collection.supported[goal]; fullySupported {
+			continue
+		}
+		if _, partlyCovered := collection.covered[goal]; partlyCovered {
+			partialGoals = append(partialGoals, goal)
+			collector.append(fmt.Sprintf(
+				"Required evidence goal %q has only partial support.",
+				goal,
+			))
+			continue
+		}
+		unresolved = append(unresolved, goal)
+		collector.append(fmt.Sprintf(
+			"Required evidence goal %q remains unresolved.",
+			goal,
+		))
+	}
+	return unresolved, partialGoals
+}
+
+// verificationCollector accumulates deduplicated limitation text together with
+// the structured raw records used later for detailed normalization.
+type verificationCollector struct {
+	limitations        []string
+	seenLimitations    map[string]struct{}
+	rawLimitations     []rawLimitation
+	rawLimitationIndex int
+}
+
+func newVerificationCollector() verificationCollector {
+	return verificationCollector{
+		seenLimitations: make(map[string]struct{}),
+	}
+}
+
+func (collector *verificationCollector) text(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if _, duplicate := collector.seenLimitations[value]; duplicate {
+		return false
+	}
+	collector.seenLimitations[value] = struct{}{}
+	collector.limitations = append(collector.limitations, value)
+	return true
+}
+
+func (collector *verificationCollector) append(value string) {
+	if !collector.text(value) {
+		return
+	}
+	collector.rawLimitations = append(collector.rawLimitations, rawLimitation{
+		Text: value, FirstSeen: collector.rawLimitationIndex,
+	})
+	collector.rawLimitationIndex++
+}
+
+func (collector *verificationCollector) appendFor(
+	value, producerNodeID string,
+	evidenceRefs []string,
+) {
+	if !collector.text(value) {
+		return
+	}
+	collector.rawLimitations = append(collector.rawLimitations, rawLimitation{
+		Text:            value,
+		ProducerNodeIDs: []string{producerNodeID},
+		EvidenceRefs:    append([]string(nil), evidenceRefs...),
+		FirstSeen:       collector.rawLimitationIndex,
+	})
+	collector.rawLimitationIndex++
+}
+
+type verifiedClaimCollection struct {
+	supported         map[string]struct{}
+	covered           map[string]struct{}
+	claims            []verifiedClaimView
+	partialClaims     []verifiedClaimView
+	unsupportedClaims []unsupportedClaimView
+	evidenceLookup    map[string]findingEvidenceView
+}
+
+// collectVerifiedClaims walks the joined bundle and binds each finding back to
+// the canonical ledger. It returns nil only when the bundle contains no
+// findings, which callers treat as empty collections.
+func collectVerifiedClaims(
+	ledger ledgerView,
+	verifier *VerifierSpec,
+	collector *verificationCollector,
+	required map[string]struct{},
+	highRisk map[string]struct{},
+) (verifiedClaimCollection, error) {
+	collection := verifiedClaimCollection{
+		supported:         make(map[string]struct{}, len(required)),
+		covered:           make(map[string]struct{}, len(required)),
+		claims:            make([]verifiedClaimView, 0),
+		partialClaims:     make([]verifiedClaimView, 0),
+		unsupportedClaims: make([]unsupportedClaimView, 0),
+		evidenceLookup:    make(map[string]findingEvidenceView),
+	}
+	evidenceIndex := newEvidenceIndex(ledger.EvidenceUnits)
+	for _, handoff := range ledger.Handoffs {
+		var report reportView
+		if err := json.Unmarshal(handoff.Payload, &report); err != nil {
+			return verifiedClaimCollection{}, fmt.Errorf(
+				"decode verifier input from %q: %w",
+				handoff.ProducerNodeID,
+				err,
+			)
+		}
+		collectClaimsFromReport(
+			handoff.ProducerNodeID, report, verifier, collector,
+			evidenceIndex, required, highRisk, &collection,
+		)
+		for _, gap := range report.Gaps {
+			collector.appendFor(gap, handoff.ProducerNodeID, nil)
+		}
+	}
+	for _, task := range ledger.UnavailableTasks {
+		collector.appendFor(fmt.Sprintf(
+			"Investigation task %q was unavailable.",
+			task.ProducerNodeID,
+		), task.ProducerNodeID, nil)
+	}
+	return collection, nil
+}
+
+func collectClaimsFromReport(
+	producerNodeID string,
+	report reportView,
+	verifier *VerifierSpec,
+	collector *verificationCollector,
+	evidenceIndex verificationIndex,
+	required map[string]struct{},
+	highRisk map[string]struct{},
+	collection *verifiedClaimCollection,
+) {
+	for index, finding := range report.Findings {
+		boundEvidence, identities, supportFacts := evidenceIndex.bind(
+			finding.Evidence,
+		)
+		for _, item := range finding.Evidence {
+			for _, match := range evidenceIndex.match(item) {
+				addEvidenceSummary(collection.evidenceLookup, item, match.identity)
+			}
+		}
+		findingHighRisk := hasTrackedGoal(finding.EvidenceGoalIDs, highRisk)
+		if len(identities) == 0 {
+			collection.unsupportedClaims = append(
+				collection.unsupportedClaims,
+				unsupportedClaimView{
+					ProducerNodeID:  producerNodeID,
+					FindingIndex:    index,
+					EvidenceGoalIDs: append([]string(nil), finding.EvidenceGoalIDs...),
+					Support:         claimUnsupported,
+					HighRisk:        findingHighRisk,
+					ReasonCode:      "canonical_evidence_unbound",
+				},
+			)
+			collector.appendFor(fmt.Sprintf(
+				"Finding %d from investigation node %q was excluded because its evidence did not match the canonical ledger.",
+				index,
+				producerNodeID,
+			), producerNodeID, nil)
+			continue
+		}
+		if supportFacts.unboundCount > 0 {
+			collector.appendFor(fmt.Sprintf(
+				"Finding %d from investigation node %q omitted %d evidence reference(s) that did not match the canonical ledger.",
+				index,
+				producerNodeID,
+				supportFacts.unboundCount,
+			), producerNodeID, evidenceReferences(boundEvidence))
+		}
+		support := claimSupported
+		if supportFacts.incompleteCoverage ||
+			findingHighRisk &&
+				supportFacts.minimumTrustTier <
+					verifier.HighRiskMinimumTrustTier {
+			support = claimPartial
+			collector.appendFor(fmt.Sprintf(
+				"Finding %d from investigation node %q has partial evidence support.",
+				index,
+				producerNodeID,
+			), producerNodeID, evidenceReferences(boundEvidence))
+		}
+		claim := verifiedClaimView{
+			ProducerNodeID:     producerNodeID,
+			FindingIndex:       index,
+			Claim:              finding.Claim,
+			EvidenceGoalIDs:    append([]string(nil), finding.EvidenceGoalIDs...),
+			EntityIDs:          append([]string(nil), finding.EntityIDs...),
+			Evidence:           boundEvidence,
+			EvidenceRefs:       evidenceRefsForIdentities(identities),
+			EvidenceIdentities: identities,
+			Confidence:         finding.Confidence,
+			Support:            support,
+			HighRisk:           findingHighRisk,
+		}
+		if support == claimSupported {
+			collection.claims = append(collection.claims, claim)
+		} else {
+			collection.partialClaims = append(collection.partialClaims, claim)
+		}
+		for _, goal := range finding.EvidenceGoalIDs {
+			if _, tracked := required[goal]; tracked {
+				collection.covered[goal] = struct{}{}
+				if support == claimSupported {
+					collection.supported[goal] = struct{}{}
+				}
+			}
+		}
+	}
 }
 
 type verifiedSlotKind uint8

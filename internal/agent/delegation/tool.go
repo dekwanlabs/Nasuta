@@ -145,6 +145,21 @@ func delegationAdoptionContract(
 	if result.DelegationID == "" {
 		return tool.AnswerContract{}
 	}
+	reportIDs, claims := collectAdoptionContractItems(result)
+	contract := tool.AnswerContract{
+		Delegations: []tool.DelegationAdoptionContract{{
+			DelegationID: result.DelegationID,
+			ReportIDs:    reportIDs,
+		}},
+	}
+	if len(claims) > 0 {
+		contract.Evidence = &tool.AnswerEvidenceContract{Claims: claims}
+	}
+	appendAdoptionContractEdges(&contract, result)
+	return contract
+}
+
+func collectAdoptionContractItems(result agentapi.DelegationBatchResult) ([]string, []tool.AnswerEvidenceClaim) {
 	reportIDs := make([]string, 0, len(result.Results))
 	seenReports := make(map[string]struct{}, len(result.Results))
 	claims := make([]tool.AnswerEvidenceClaim, 0)
@@ -180,15 +195,10 @@ func delegationAdoptionContract(
 			})
 		}
 	}
-	contract := tool.AnswerContract{
-		Delegations: []tool.DelegationAdoptionContract{{
-			DelegationID: result.DelegationID,
-			ReportIDs:    reportIDs,
-		}},
-	}
-	if len(claims) > 0 {
-		contract.Evidence = &tool.AnswerEvidenceContract{Claims: claims}
-	}
+	return reportIDs, claims
+}
+
+func appendAdoptionContractEdges(contract *tool.AnswerContract, result agentapi.DelegationBatchResult) {
 	if merged, err := MergeFlowIRs(reportFlows(result.Results)); err == nil && merged != nil && len(merged.Edges) > 0 {
 		contract.Evidence = ensureAnswerEvidenceContract(contract.Evidence)
 		for _, edge := range merged.Edges {
@@ -198,7 +208,6 @@ func delegationAdoptionContract(
 			})
 		}
 	}
-	return contract
 }
 
 func delegationClaimDecision(

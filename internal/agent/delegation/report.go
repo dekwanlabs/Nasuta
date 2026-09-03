@@ -279,49 +279,67 @@ func boundReport(
 	if shrinkFlowToFit(&report, maxBytes) {
 		return report
 	}
+	if truncateReportLists(&report, maxBytes) {
+		return report
+	}
+	if truncateReportTexts(&report, maxBytes) {
+		return report
+	}
+	if truncateReportUsage(&report, maxBytes) {
+		return report
+	}
+	return report
+}
+
+func truncateReportLists(report *agentapi.DelegationReport, maxBytes int64) bool {
 	for len(report.Findings) > 0 {
-		if reportFits(report, maxBytes) {
-			return report
+		if reportFits(*report, maxBytes) {
+			return true
 		}
 		report.Findings = report.Findings[:len(report.Findings)-1]
 	}
 	for len(report.Conflicts) > 0 {
-		if reportFits(report, maxBytes) {
-			return report
+		if reportFits(*report, maxBytes) {
+			return true
 		}
 		report.Conflicts = report.Conflicts[:len(report.Conflicts)-1]
 	}
 	for len(report.Uncertainties) > 1 {
-		if reportFits(report, maxBytes) {
-			return report
+		if reportFits(*report, maxBytes) {
+			return true
 		}
 		report.Uncertainties = report.Uncertainties[:len(report.Uncertainties)-1]
 	}
-	if fitReportText(&report, maxBytes, &report.Summary) {
-		return report
+	return false
+}
+
+func truncateReportTexts(report *agentapi.DelegationReport, maxBytes int64) bool {
+	if fitReportText(report, maxBytes, &report.Summary) {
+		return true
 	}
 	if report.Error != nil {
-		if fitReportText(&report, maxBytes, &report.Error.Message) {
-			return report
+		if fitReportText(report, maxBytes, &report.Error.Message) {
+			return true
 		}
-		if fitReportText(&report, maxBytes, &report.Error.Code) {
-			return report
+		if fitReportText(report, maxBytes, &report.Error.Code) {
+			return true
 		}
 		report.Error = nil
-		if reportFits(report, maxBytes) {
-			return report
+		if reportFits(*report, maxBytes) {
+			return true
 		}
 	}
+	return false
+}
+
+func truncateReportUsage(report *agentapi.DelegationReport, maxBytes int64) bool {
 	report.Usage.ReasoningTokens = 0
 	report.Usage.CostMicros = 0
-	if reportFits(report, maxBytes) {
-		return report
+	if reportFits(*report, maxBytes) {
+		return true
 	}
 	report.Usage = agentapi.DelegationUsage{}
-	if reportFits(report, maxBytes) {
-		return report
-	}
-	return report
+	return reportFits(*report, maxBytes)
 }
 
 func minimumBoundedReportTokens() int64 {
@@ -450,6 +468,23 @@ func validateFlowIR(flow *agentapi.FlowIR) error {
 	if flow == nil {
 		return nil
 	}
+	if err := validateFlowHeader(flow); err != nil {
+		return err
+	}
+	if len(flow.Nodes) > maxFlowNodes || len(flow.Edges) > maxFlowEdges || len(flow.OpenHops) > maxFlowOpenHops {
+		return fmt.Errorf("flow exceeds bounded node, edge, or open-hop limit")
+	}
+	nodes, err := validateFlowNodes(flow.Nodes)
+	if err != nil {
+		return err
+	}
+	if err := validateFlowEdges(flow.Edges, nodes); err != nil {
+		return err
+	}
+	return validateFlowOpenHops(flow.OpenHops)
+}
+
+func validateFlowHeader(flow *agentapi.FlowIR) error {
 	if strings.TrimSpace(flow.Subject) == "" || len(flow.Subject) > maxFlowSubjectLen {
 		return fmt.Errorf("flow subject is required and must be at most %d bytes", maxFlowSubjectLen)
 	}
@@ -463,23 +498,28 @@ func validateFlowIR(flow *agentapi.FlowIR) error {
 	default:
 		return fmt.Errorf("flow confidence %q is invalid", flow.Confidence)
 	}
-	if len(flow.Nodes) > maxFlowNodes || len(flow.Edges) > maxFlowEdges || len(flow.OpenHops) > maxFlowOpenHops {
-		return fmt.Errorf("flow exceeds bounded node, edge, or open-hop limit")
-	}
-	nodes := make(map[string]struct{}, len(flow.Nodes))
-	for index, node := range flow.Nodes {
+	return nil
+}
+
+func validateFlowNodes(nodes []agentapi.FlowNode) (map[string]struct{}, error) {
+	ids := make(map[string]struct{}, len(nodes))
+	for index, node := range nodes {
 		if strings.TrimSpace(node.ID) == "" || len(node.ID) > maxFlowNodeIDLen || strings.TrimSpace(node.Label) == "" || len(node.Label) > maxFlowNodeLabelLen || strings.TrimSpace(node.Kind) == "" || len(node.Kind) > maxFlowNodeKindLen {
-			return fmt.Errorf("flow node %d has invalid identity or label", index)
+			return nil, fmt.Errorf("flow node %d has invalid identity or label", index)
 		}
-		if _, exists := nodes[node.ID]; exists {
-			return fmt.Errorf("flow node %q is duplicated", node.ID)
+		if _, exists := ids[node.ID]; exists {
+			return nil, fmt.Errorf("flow node %q is duplicated", node.ID)
 		}
-		nodes[node.ID] = struct{}{}
+		ids[node.ID] = struct{}{}
 		if err := validateFlowEvidenceRefs(node.EvidenceRefs); err != nil {
-			return fmt.Errorf("flow node %q: %w", node.ID, err)
+			return nil, fmt.Errorf("flow node %q: %w", node.ID, err)
 		}
 	}
-	for index, edge := range flow.Edges {
+	return ids, nil
+}
+
+func validateFlowEdges(edges []agentapi.FlowEdge, nodes map[string]struct{}) error {
+	for index, edge := range edges {
 		if _, ok := nodes[edge.From]; !ok {
 			return fmt.Errorf("flow edge %d references unknown from node %q", index, edge.From)
 		}
@@ -506,7 +546,11 @@ func validateFlowIR(flow *agentapi.FlowIR) error {
 			return fmt.Errorf("flow edge %d: %w", index, err)
 		}
 	}
-	for index, hop := range flow.OpenHops {
+	return nil
+}
+
+func validateFlowOpenHops(hops []string) error {
+	for index, hop := range hops {
 		if strings.TrimSpace(hop) == "" || len(hop) > maxFlowOpenHopLen {
 			return fmt.Errorf("flow open_hops[%d] is invalid", index)
 		}

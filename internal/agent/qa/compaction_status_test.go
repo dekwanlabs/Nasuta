@@ -7,9 +7,20 @@ type compactionStatusRecorder struct {
 	event        SessionStatusEvent
 	contextRunID string
 	contextEvent ContextUsageEvent
+	statusRunID  string
+	statusText   string
+	statusCode   string
+	statusMS     int64
 }
 
 func (recorder *compactionStatusRecorder) EmitPhase(string, string) {}
+
+func (recorder *compactionStatusRecorder) EmitStatus(runID, text, code string, elapsedMS int64) {
+	recorder.statusRunID = runID
+	recorder.statusText = text
+	recorder.statusCode = code
+	recorder.statusMS = elapsedMS
+}
 
 func (recorder *compactionStatusRecorder) EmitSessionStatus(runID string, event SessionStatusEvent) {
 	recorder.runID = runID
@@ -40,6 +51,21 @@ func TestUpdateSessionCompactionStoresAndPublishesLatestStatus(t *testing.T) {
 	}
 	if recorder.runID != "run-1" || recorder.event != status {
 		t.Fatalf("published run=%q event=%+v, want run-1 %+v", recorder.runID, recorder.event, status)
+	}
+}
+
+func TestEmitStatusPublishesStructuredProgress(t *testing.T) {
+	recorder := &compactionStatusRecorder{}
+	svc := &Service{phaseEmitter: recorder}
+
+	svc.emitStatusElapsed("run-status", "正在检索", "retrieval.active", 42)
+
+	if recorder.statusRunID != "run-status" || recorder.statusText != "正在检索" ||
+		recorder.statusCode != "retrieval.active" || recorder.statusMS != 42 {
+		t.Fatalf(
+			"status = run:%q text:%q code:%q elapsed:%d",
+			recorder.statusRunID, recorder.statusText, recorder.statusCode, recorder.statusMS,
+		)
 	}
 }
 

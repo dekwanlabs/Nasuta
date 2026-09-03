@@ -43,107 +43,36 @@ func NewAgentExecutor(
 	return &AgentExecutor{schemas: schemas, agents: agents, runtime: runtime}, nil
 }
 
+type preparedAgentRun struct {
+	definition    agentapi.Definition
+	permissions   agentapi.PermissionPolicy
+	runID         string
+	nodeInput     Handoff
+	projected     projectionResult
+	contextBlocks []agentapi.ContextBlock
+	maxToolCalls  int64
+}
+
 func (executor *AgentExecutor) Execute(
 	ctx context.Context,
 	request NodeRequest,
 ) (NodeResult, error) {
-	if executor == nil || executor.schemas == nil || executor.agents == nil || executor.runtime == nil {
-		return NodeResult{}, fmt.Errorf("agent node executor is unavailable")
-	}
-	if request.Node.Kind != NodeAgent {
-		return NodeResult{}, fmt.Errorf("node %q kind %q is not an agent", request.Node.ID, request.Node.Kind)
-	}
-	if len(request.Inputs) != 1 {
-		return NodeResult{}, fmt.Errorf(
-			"agent node %q requires exactly one handoff; use a join or transform for %d inputs",
-			request.Node.ID,
-			len(request.Inputs),
-		)
-	}
-	definition, err := executor.agents.Resolve(request.Node.Agent)
-	if err != nil {
-		return NodeResult{}, fmt.Errorf("resolve agent node %q definition: %w", request.Node.ID, err)
-	}
-	if definition.ID != request.Node.Agent.ID || definition.Version != request.Node.Agent.Version {
-		return NodeResult{}, fmt.Errorf("agent node %q definition is not pinned", request.Node.ID)
-	}
-	if err := executor.schemas.ValidateCompatibility(request.Node.InputSchema, definition.InputSchema); err != nil {
-		return NodeResult{}, fmt.Errorf("agent node %q input schema: %w", request.Node.ID, err)
-	}
-	if err := executor.schemas.ValidateCompatibility(definition.OutputSchema, request.Node.OutputSchema); err != nil {
-		return NodeResult{}, fmt.Errorf("agent node %q output schema: %w", request.Node.ID, err)
-	}
-	permissions := IntersectPermissions(request.EffectivePermissions, definition.Permissions)
-	runID, err := randomRunID()
+	prepared, err := executor.prepareAgentRun(ctx, request)
 	if err != nil {
 		return NodeResult{}, err
 	}
-	input := request.Inputs[0]
-	projected, err := projectInvestigatorHandoff(
-		input, request.Node.Task, request.Node.ID, request.Node.Budget.MaxInputTokens,
-	)
-	if err != nil {
-		return NodeResult{}, fmt.Errorf("agent node %q scoped context: %w", request.Node.ID, err)
-	}
-	nodeInput := projected.Input
-	log.InfofCtx(ctx, "[workflow] node %s scoped context: version=%s status=%s inputTokens=%d projectedTokens=%d matchedSeeds=%d droppedSeeds=%d duplicateSeeds=%d missingEntities=%v missingFacets=%v projectionHash=%s",
-		request.Node.ID, projectionVersion, projected.Status, projected.InputTokens,
-		projected.ProjectedTokens, projected.MatchedSeedCount, projected.DroppedSeedCount,
-		projected.DuplicateSeedCount, projected.MissingEntities, projected.MissingFacets,
-		projected.ProjectionHash)
-	contextBlock, err := contextFromHandoff(nodeInput)
-	if err != nil {
-		return NodeResult{}, fmt.Errorf("agent node %q context: %w", request.Node.ID, err)
-	}
-	contextBlocks := []agentapi.ContextBlock{contextBlock}
-	if projected.Task != nil {
-		taskBlock, err := contextFromDirective(*projected.Task)
-		if err != nil {
-			return NodeResult{}, fmt.Errorf("agent node %q task context: %w", request.Node.ID, err)
-		}
-		contextBlocks = append(contextBlocks, taskBlock)
-	}
-	if request.Node.Agent.ID == "synthesizer" &&
-		request.WorkflowInput.Schema == agentapi.TaskContractSchemaRef() {
-		objectiveBlock, err := contextFromSynthesisObjective(request.WorkflowInput)
-		if err != nil {
-			return NodeResult{}, fmt.Errorf(
-				"agent node %q synthesis objective context: %w",
-				request.Node.ID,
-				err,
-			)
-		}
-		contextBlocks = append(contextBlocks, objectiveBlock)
-	}
-	runRequest := agentapi.RunRequest{
-		RunID: runID, Agent: request.Node.Agent, DefinitionHash: definition.ContentHash,
-		Input: nodeInput.Payload, Context: contextBlocks,
-		Permissions: permissions,
-		ToolScope: agentapi.ToolScope{
-			AllowWrite:      scope.Has(permissions.Scopes, scope.KnowledgeWrite),
-			RestrictVisible: request.Node.RestrictVisibleTools,
-			VisibleToolIDs:  append([]string(nil), request.Node.VisibleToolIDs...),
-		},
-		Policy: agentapi.RunPolicy{
-			EvidenceSeeded: len(nodeInput.EvidenceUnits) > 0,
-			MaxToolCalls:   request.Node.Budget.MaxToolCalls,
-		},
-		Actor: request.Actor,
-		Correlation: agentapi.Correlation{
-			ParentRunID:   request.WorkflowRunID,
-			WorkflowRunID: request.WorkflowRunID,
-			NodeID:        request.Node.ID,
-		},
-	}
+
+	runRequest := executor.buildRunRequest(request, prepared)
+
 	childCtx := runtrace.WithCorrelation(ctx, runtrace.Correlation{
-		RunID: runID, ParentRunID: request.WorkflowRunID,
-		WorkflowRunID: request.WorkflowRunID, AgentRunID: runID,
+		RunID: prepared.runID, ParentRunID: request.WorkflowRunID,
+		WorkflowRunID: request.WorkflowRunID, AgentRunID: prepared.runID,
 		WorkflowNodeID: request.Node.ID,
 	})
 	stopToolProjection := func() {}
 	if projector, ok := executor.runtime.(toolEventProjector); ok {
 		stopToolProjection = projector.ProjectToolEvents(
-			runID,
+			prepared.runID,
 			request.ParentRunID,
 			request.WorkflowRunID,
 			request.Node.ID,
@@ -158,8 +87,9 @@ func (executor *AgentExecutor) Execute(
 			return executor.runtime.Run(ctx, runRequest)
 		},
 	)
+
 	nodeResult := NodeResult{
-		AgentRunID: runID,
+		AgentRunID: prepared.runID,
 		Usage: Usage{
 			InputTokens:     result.Usage.InputTokens,
 			OutputTokens:    result.Usage.OutputTokens,
@@ -174,30 +104,181 @@ func (executor *AgentExecutor) Execute(
 	}
 	if result.Status != agentapi.RunSucceeded {
 		if result.Error == nil {
-			return nodeResult, fmt.Errorf("agent node %q run %q failed", request.Node.ID, runID)
+			return nodeResult, fmt.Errorf("agent node %q run %q failed", request.Node.ID, prepared.runID)
 		}
 		return nodeResult, &agentNodeRunError{
 			message: fmt.Sprintf(
 				"agent node %q run %q failed (%s): %s",
 				request.Node.ID,
-				runID,
+				prepared.runID,
 				result.Error.Code,
 				result.Error.Message,
 			),
 			retryable: result.Error.Retryable,
 		}
 	}
+
+	handoff, err := executor.buildNodeHandoff(ctx, request, prepared, result)
+	if err != nil {
+		return nodeResult, err
+	}
+	nodeResult.Handoff = handoff
+	return nodeResult, nil
+}
+
+func validateAgentNodePinning(executor *AgentExecutor, request NodeRequest, definition agentapi.Definition) error {
+	if definition.ID != request.Node.Agent.ID || definition.Version != request.Node.Agent.Version {
+		return fmt.Errorf("agent node %q definition is not pinned", request.Node.ID)
+	}
+	if err := executor.schemas.ValidateCompatibility(request.Node.InputSchema, definition.InputSchema); err != nil {
+		return fmt.Errorf("agent node %q input schema: %w", request.Node.ID, err)
+	}
+	if err := executor.schemas.ValidateCompatibility(definition.OutputSchema, request.Node.OutputSchema); err != nil {
+		return fmt.Errorf("agent node %q output schema: %w", request.Node.ID, err)
+	}
+	return nil
+}
+
+func (executor *AgentExecutor) prepareAgentRun(
+	ctx context.Context,
+	request NodeRequest,
+) (preparedAgentRun, error) {
+	var prepared preparedAgentRun
+	if executor == nil || executor.schemas == nil || executor.agents == nil || executor.runtime == nil {
+		return prepared, fmt.Errorf("agent node executor is unavailable")
+	}
+	if request.Node.Kind != NodeAgent {
+		return prepared, fmt.Errorf("node %q kind %q is not an agent", request.Node.ID, request.Node.Kind)
+	}
+	if len(request.Inputs) != 1 {
+		return prepared, fmt.Errorf(
+			"agent node %q requires exactly one handoff; use a join or transform for %d inputs",
+			request.Node.ID,
+			len(request.Inputs),
+		)
+	}
+	definition, err := executor.agents.Resolve(request.Node.Agent)
+	if err != nil {
+		return prepared, fmt.Errorf("resolve agent node %q definition: %w", request.Node.ID, err)
+	}
+	if err := validateAgentNodePinning(executor, request, definition); err != nil {
+		return prepared, err
+	}
+	runID, err := randomRunID()
+	if err != nil {
+		return prepared, err
+	}
+	input := request.Inputs[0]
+	projected, err := projectInvestigatorHandoff(
+		input, request.Node.Task, request.Node.ID, request.Node.Budget.MaxInputTokens,
+	)
+	if err != nil {
+		return prepared, fmt.Errorf("agent node %q scoped context: %w", request.Node.ID, err)
+	}
+	nodeInput := projected.Input
+	log.InfofCtx(ctx, "[workflow] node %s scoped context: version=%s status=%s inputTokens=%d projectedTokens=%d matchedSeeds=%d droppedSeeds=%d duplicateSeeds=%d missingEntities=%v missingFacets=%v projectionHash=%s",
+		request.Node.ID, projectionVersion, projected.Status, projected.InputTokens,
+		projected.ProjectedTokens, projected.MatchedSeedCount, projected.DroppedSeedCount,
+		projected.DuplicateSeedCount, projected.MissingEntities, projected.MissingFacets,
+		projected.ProjectionHash)
+	contextBlocks, err := buildAgentContextBlocks(request, nodeInput, projected)
+	if err != nil {
+		return prepared, err
+	}
+	maxToolCalls := definition.Budget.MaxToolCalls
+	// NodeBudget.MaxToolCalls is retained as a compatibility fallback for
+	// definitions published before Agent Definition budgets became the source
+	// of the child Runtime policy. It is not a Workflow Run quota.
+	if maxToolCalls == 0 {
+		maxToolCalls = request.Node.Budget.MaxToolCalls
+	}
+	prepared.definition = definition
+	prepared.permissions = IntersectPermissions(request.EffectivePermissions, definition.Permissions)
+	prepared.runID = runID
+	prepared.nodeInput = nodeInput
+	prepared.projected = projected
+	prepared.contextBlocks = contextBlocks
+	prepared.maxToolCalls = maxToolCalls
+	return prepared, nil
+}
+
+func buildAgentContextBlocks(
+	request NodeRequest,
+	nodeInput Handoff,
+	projected projectionResult,
+) ([]agentapi.ContextBlock, error) {
+	contextBlock, err := contextFromHandoff(nodeInput)
+	if err != nil {
+		return nil, fmt.Errorf("agent node %q context: %w", request.Node.ID, err)
+	}
+	contextBlocks := []agentapi.ContextBlock{contextBlock}
+	if projected.Task != nil {
+		taskBlock, err := contextFromDirective(*projected.Task)
+		if err != nil {
+			return nil, fmt.Errorf("agent node %q task context: %w", request.Node.ID, err)
+		}
+		contextBlocks = append(contextBlocks, taskBlock)
+	}
+	if request.Node.Agent.ID == "synthesizer" &&
+		request.WorkflowInput.Schema == agentapi.TaskContractSchemaRef() {
+		objectiveBlock, err := contextFromSynthesisObjective(request.WorkflowInput)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"agent node %q synthesis objective context: %w",
+				request.Node.ID,
+				err,
+			)
+		}
+		contextBlocks = append(contextBlocks, objectiveBlock)
+	}
+	return contextBlocks, nil
+}
+
+func (executor *AgentExecutor) buildRunRequest(
+	request NodeRequest,
+	prepared preparedAgentRun,
+) agentapi.RunRequest {
+	return agentapi.RunRequest{
+		RunID: prepared.runID, Agent: request.Node.Agent, DefinitionHash: prepared.definition.ContentHash,
+		Input: prepared.nodeInput.Payload, Context: prepared.contextBlocks,
+		Permissions: prepared.permissions,
+		ToolScope: agentapi.ToolScope{
+			AllowWrite:      scope.Has(prepared.permissions.Scopes, scope.KnowledgeWrite),
+			RestrictVisible: request.Node.RestrictVisibleTools,
+			VisibleToolIDs:  append([]string(nil), request.Node.VisibleToolIDs...),
+		},
+		Policy: agentapi.RunPolicy{
+			OutputMode:     agentapi.RunOutputWorkflowNode,
+			EvidenceSeeded: len(prepared.nodeInput.EvidenceUnits) > 0,
+			MaxToolCalls:   prepared.maxToolCalls,
+		},
+		Actor: request.Actor,
+		Correlation: agentapi.Correlation{
+			ParentRunID:   request.WorkflowRunID,
+			WorkflowRunID: request.WorkflowRunID,
+			NodeID:        request.Node.ID,
+		},
+	}
+}
+
+func (executor *AgentExecutor) buildNodeHandoff(
+	ctx context.Context,
+	request NodeRequest,
+	prepared preparedAgentRun,
+	result agentapi.RunResult,
+) (Handoff, error) {
+	nodeInput := prepared.nodeInput
 	completeness := nodeInput.Completeness
-	if projected.Task != nil &&
+	if prepared.projected.Task != nil &&
 		request.Node.OutputSchema == agentapi.InvestigationReportSchemaRef() &&
-		len(projected.Task.RequiredFacets) > 0 {
+		len(prepared.projected.Task.RequiredFacets) > 0 {
 		reportCompleteness, err := reportCompleteness(
 			nodeInput.Payload,
 			result.Output,
-			projected.Task.RequiredFacets,
+			prepared.projected.Task.RequiredFacets,
 		)
 		if err != nil {
-			return nodeResult, fmt.Errorf(
+			return Handoff{}, fmt.Errorf(
 				"agent node %q goal coverage: %w",
 				request.Node.ID,
 				err,
@@ -226,7 +307,7 @@ func (executor *AgentExecutor) Execute(
 			EvidenceUnits:  evidenceUnits,
 		}}, evidenceUnits)
 		if err != nil {
-			return nodeResult, fmt.Errorf(
+			return Handoff{}, fmt.Errorf(
 				"agent node %q reported evidence: %w",
 				request.Node.ID,
 				err,
@@ -237,10 +318,10 @@ func (executor *AgentExecutor) Execute(
 			log.InfofCtx(ctx, "[workflow] node %s omitted %d uncited exploration evidence unit(s)", request.Node.ID, omitted)
 		}
 	}
-	nodeResult.Handoff = Handoff{
+	return Handoff{
 		WorkflowRunID:  request.WorkflowRunID,
 		ProducerNodeID: request.Node.ID,
-		ProducerRunID:  runID,
+		ProducerRunID:  prepared.runID,
 		Schema:         request.Node.OutputSchema,
 		Payload:        append([]byte(nil), result.Output...),
 		References: append(
@@ -250,8 +331,7 @@ func (executor *AgentExecutor) Execute(
 		EvidenceUnits:     evidenceUnits,
 		EvidenceConflicts: evidenceConflicts,
 		Completeness:      completeness,
-	}
-	return nodeResult, nil
+	}, nil
 }
 
 type contractCoverage struct {
@@ -284,44 +364,70 @@ func reportCompleteness(
 	if err := json.Unmarshal(reportPayload, &report); err != nil {
 		return "", fmt.Errorf("decode investigation report: %w", err)
 	}
+	status, err := classifyReportedGoals(report, required)
+	if err != nil {
+		return "", err
+	}
+	findingCounts, err := countReportedFindings(report, required, status)
+	if err != nil {
+		return "", err
+	}
+	covered := countCoveredGoals(requiredFacets, minimumCoverage(contractPayload), status, findingCounts)
+	switch {
+	case covered == len(requiredFacets):
+		return Complete, nil
+	case covered == 0:
+		return Unavailable, nil
+	default:
+		return Partial, nil
+	}
+}
+
+func classifyReportedGoals(report reportCoverage, required map[string]struct{}) (map[string]Completeness, error) {
 	status := make(map[string]Completeness, len(required))
 	for _, goal := range report.CoveredEvidenceGoals {
 		if _, ok := required[goal]; !ok {
-			return "", fmt.Errorf("covered goal %q was not requested", goal)
+			return nil, fmt.Errorf("covered goal %q was not requested", goal)
 		}
 		if _, duplicate := status[goal]; duplicate {
-			return "", fmt.Errorf("goal %q is reported more than once", goal)
+			return nil, fmt.Errorf("goal %q is reported more than once", goal)
 		}
 		status[goal] = Complete
 	}
 	for _, goal := range report.UnresolvedEvidenceGoals {
 		if _, ok := required[goal]; !ok {
-			return "", fmt.Errorf("unresolved goal %q was not requested", goal)
+			return nil, fmt.Errorf("unresolved goal %q was not requested", goal)
 		}
 		if _, duplicate := status[goal]; duplicate {
-			return "", fmt.Errorf("goal %q is both covered and unresolved", goal)
+			return nil, fmt.Errorf("goal %q is both covered and unresolved", goal)
 		}
 		status[goal] = Unavailable
 	}
-	for _, facet := range requiredFacets {
+	for facet := range required {
 		if _, ok := status[facet]; !ok {
-			return "", fmt.Errorf("required goal %q is not classified", facet)
+			return nil, fmt.Errorf("required goal %q is not classified", facet)
 		}
 	}
+	return status, nil
+}
 
-	minimum := minimumCoverage(contractPayload)
+func countReportedFindings(
+	report reportCoverage,
+	required map[string]struct{},
+	status map[string]Completeness,
+) (map[string]int, error) {
 	findingCounts := make(map[string]int, len(report.CoveredEvidenceGoals))
 	for index, finding := range report.Findings {
 		if len(finding.Evidence) == 0 {
-			return "", fmt.Errorf("finding %d has no concrete evidence", index)
+			return nil, fmt.Errorf("finding %d has no concrete evidence", index)
 		}
 		seen := make(map[string]struct{}, len(finding.EvidenceGoalIDs))
 		for _, goal := range finding.EvidenceGoalIDs {
 			if _, ok := required[goal]; !ok {
-				return "", fmt.Errorf("finding %d references unrequested goal %q", index, goal)
+				return nil, fmt.Errorf("finding %d references unrequested goal %q", index, goal)
 			}
 			if status[goal] != Complete {
-				return "", fmt.Errorf("finding %d references unresolved goal %q", index, goal)
+				return nil, fmt.Errorf("finding %d references unresolved goal %q", index, goal)
 			}
 			if _, duplicate := seen[goal]; duplicate {
 				continue
@@ -330,6 +436,15 @@ func reportCompleteness(
 			findingCounts[goal]++
 		}
 	}
+	return findingCounts, nil
+}
+
+func countCoveredGoals(
+	requiredFacets []string,
+	minimum map[string]int,
+	status map[string]Completeness,
+	findingCounts map[string]int,
+) int {
 	covered := 0
 	for _, facet := range requiredFacets {
 		if status[facet] != Complete {
@@ -340,23 +455,11 @@ func reportCompleteness(
 			needed = 1
 		}
 		if findingCounts[facet] < needed {
-			return "", fmt.Errorf(
-				"covered goal %q has %d evidence-backed findings; minimum is %d",
-				facet,
-				findingCounts[facet],
-				needed,
-			)
+			continue
 		}
 		covered++
 	}
-	switch {
-	case covered == len(requiredFacets):
-		return Complete, nil
-	case covered == 0:
-		return Unavailable, nil
-	default:
-		return Partial, nil
-	}
+	return covered
 }
 
 func minimumCoverage(payload json.RawMessage) map[string]int {

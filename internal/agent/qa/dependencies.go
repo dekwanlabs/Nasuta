@@ -43,6 +43,15 @@ type EventType = run.EventType
 type ToolPolicy = tool.Policy
 type Tool = tool.Tool
 
+// PhaseEmitter is the complete QA progress projection contract. Keeping one
+// explicit interface avoids optional method assertions at every emission site.
+type PhaseEmitter interface {
+	EmitPhase(string, string)
+	EmitStatus(string, string, string, int64)
+	EmitContextUsage(string, ContextUsageEvent)
+	EmitSessionStatus(string, SessionStatusEvent)
+}
+
 const (
 	RunStatusDone    = run.StatusDone
 	RunStatusFailed  = run.StatusFailed

@@ -222,118 +222,20 @@ func (registry *CapabilityRegistry) DelegatableInvestigators() []Capability {
 func (registry *CapabilityRegistry) prepare(capability Capability) (Capability, error) {
 	prepared := cloneCapability(capability)
 	prepared.ID = strings.TrimSpace(prepared.ID)
-	if prepared.ID != capability.ID || !canonicalID.MatchString(prepared.ID) {
-		return Capability{}, fmt.Errorf("capability id %q is not canonical", capability.ID)
-	}
-	if len(prepared.ID) > MaxCapabilityIDBytes {
-		return Capability{}, fmt.Errorf(
-			"capability id %q exceeds %d bytes",
-			prepared.ID,
-			MaxCapabilityIDBytes,
-		)
-	}
-	if prepared.Version <= 0 {
-		return Capability{}, fmt.Errorf("capability %q version must be positive", prepared.ID)
-	}
-	if strings.TrimSpace(prepared.Purpose) == "" {
-		return Capability{}, fmt.Errorf("capability %q purpose is required", prepared.ID)
-	}
-	switch prepared.Role {
-	case RoleInvestigator, RoleVerifier, RoleSynthesizer:
-	default:
-		return Capability{}, fmt.Errorf(
-			"capability %q role %q is invalid",
-			prepared.ID,
-			prepared.Role,
-		)
-	}
-	if err := validateSchemaRef("capability input", prepared.InputSchema); err != nil {
-		return Capability{}, fmt.Errorf("capability %q: %w", prepared.ID, err)
-	}
-	if err := validateSchemaRef("capability output", prepared.OutputSchema); err != nil {
-		return Capability{}, fmt.Errorf("capability %q: %w", prepared.ID, err)
-	}
-	if _, err := registry.schemas.Resolve(prepared.InputSchema); err != nil {
-		return Capability{}, fmt.Errorf("capability %q input schema: %w", prepared.ID, err)
-	}
-	if _, err := registry.schemas.Resolve(prepared.OutputSchema); err != nil {
-		return Capability{}, fmt.Errorf("capability %q output schema: %w", prepared.ID, err)
-	}
-	if err := validateCapabilityList(prepared.ID, "input facet", prepared.InputFacets); err != nil {
+	if err := registry.validatePreparedIdentity(capability.ID, &prepared); err != nil {
 		return Capability{}, err
 	}
-	if err := validateCapabilityList(prepared.ID, "tool", prepared.ToolIDs); err != nil {
+	if err := registry.validatePreparedSchemas(&prepared); err != nil {
 		return Capability{}, err
 	}
-	if err := validateCapabilityList(prepared.ID, "permission", prepared.PermissionScope); err != nil {
+	if err := validatePreparedLists(&prepared); err != nil {
 		return Capability{}, err
 	}
-	switch prepared.Freshness {
-	case FreshnessStable, FreshnessCurrent, FreshnessBoundedLive:
-	default:
-		return Capability{}, fmt.Errorf(
-			"capability %q freshness policy %q is invalid",
-			prepared.ID,
-			prepared.Freshness,
-		)
-	}
-	if prepared.MaxConcurrency <= 0 {
-		return Capability{}, fmt.Errorf("capability %q max concurrency must be positive", prepared.ID)
-	}
-	switch prepared.SideEffects {
-	case SideEffectNone:
-		if len(prepared.WriteSet) != 0 {
-			return Capability{}, fmt.Errorf("capability %q read-only write set must be empty", prepared.ID)
-		}
-	case SideEffectWrite:
-		if len(prepared.WriteSet) == 0 {
-			return Capability{}, fmt.Errorf("capability %q write set is required", prepared.ID)
-		}
-	default:
-		return Capability{}, fmt.Errorf(
-			"capability %q side effect class %q is invalid",
-			prepared.ID,
-			prepared.SideEffects,
-		)
-	}
-	if err := validateWriteSet(prepared.ID, prepared.WriteSet); err != nil {
+	if err := validatePreparedPolicies(&prepared); err != nil {
 		return Capability{}, err
 	}
-	if !canonicalID.MatchString(prepared.Agent.ID) || prepared.Agent.Version <= 0 {
-		return Capability{}, fmt.Errorf("capability %q requires a pinned agent definition", prepared.ID)
-	}
-	definition, err := registry.agents.Resolve(prepared.Agent)
-	if err != nil {
-		return Capability{}, fmt.Errorf("capability %q agent definition: %w", prepared.ID, err)
-	}
-	if definition.ID != prepared.Agent.ID || definition.Version != prepared.Agent.Version {
-		return Capability{}, fmt.Errorf("capability %q agent definition is not pinned", prepared.ID)
-	}
-	if err := registry.schemas.ValidateCompatibility(
-		prepared.InputSchema,
-		definition.InputSchema,
-	); err != nil {
-		return Capability{}, fmt.Errorf("capability %q agent input: %w", prepared.ID, err)
-	}
-	if err := registry.schemas.ValidateCompatibility(
-		definition.OutputSchema,
-		prepared.OutputSchema,
-	); err != nil {
-		return Capability{}, fmt.Errorf("capability %q agent output: %w", prepared.ID, err)
-	}
-	if err := ensureStringSubset(
-		prepared.PermissionScope,
-		definition.Permissions.Scopes,
-	); err != nil {
-		return Capability{}, fmt.Errorf("capability %q permissions: %w", prepared.ID, err)
-	}
-	if definition.Tools.RestrictVisible || len(definition.Tools.VisibleToolIDs) > 0 {
-		if err := ensureStringSubset(
-			prepared.ToolIDs,
-			definition.Tools.VisibleToolIDs,
-		); err != nil {
-			return Capability{}, fmt.Errorf("capability %q tools: %w", prepared.ID, err)
-		}
+	if err := registry.validatePreparedAgentBinding(&prepared); err != nil {
+		return Capability{}, err
 	}
 	hash, err := capabilityHash(prepared)
 	if err != nil {
@@ -344,6 +246,139 @@ func (registry *CapabilityRegistry) prepare(capability Capability) (Capability, 
 	}
 	prepared.ContentHash = hash
 	return prepared, nil
+}
+
+func (registry *CapabilityRegistry) validatePreparedIdentity(originalID string, prepared *Capability) error {
+	if prepared.ID != originalID || !canonicalID.MatchString(prepared.ID) {
+		return fmt.Errorf("capability id %q is not canonical", originalID)
+	}
+	if len(prepared.ID) > MaxCapabilityIDBytes {
+		return fmt.Errorf(
+			"capability id %q exceeds %d bytes",
+			prepared.ID,
+			MaxCapabilityIDBytes,
+		)
+	}
+	if prepared.Version <= 0 {
+		return fmt.Errorf("capability %q version must be positive", prepared.ID)
+	}
+	if strings.TrimSpace(prepared.Purpose) == "" {
+		return fmt.Errorf("capability %q purpose is required", prepared.ID)
+	}
+	switch prepared.Role {
+	case RoleInvestigator, RoleVerifier, RoleSynthesizer:
+	default:
+		return fmt.Errorf(
+			"capability %q role %q is invalid",
+			prepared.ID,
+			prepared.Role,
+		)
+	}
+	return nil
+}
+
+func (registry *CapabilityRegistry) validatePreparedSchemas(prepared *Capability) error {
+	if err := validateSchemaRef("capability input", prepared.InputSchema); err != nil {
+		return fmt.Errorf("capability %q: %w", prepared.ID, err)
+	}
+	if err := validateSchemaRef("capability output", prepared.OutputSchema); err != nil {
+		return fmt.Errorf("capability %q: %w", prepared.ID, err)
+	}
+	if _, err := registry.schemas.Resolve(prepared.InputSchema); err != nil {
+		return fmt.Errorf("capability %q input schema: %w", prepared.ID, err)
+	}
+	if _, err := registry.schemas.Resolve(prepared.OutputSchema); err != nil {
+		return fmt.Errorf("capability %q output schema: %w", prepared.ID, err)
+	}
+	return nil
+}
+
+func validatePreparedLists(prepared *Capability) error {
+	if err := validateCapabilityList(prepared.ID, "input facet", prepared.InputFacets); err != nil {
+		return err
+	}
+	if err := validateCapabilityList(prepared.ID, "tool", prepared.ToolIDs); err != nil {
+		return err
+	}
+	if err := validateCapabilityList(prepared.ID, "permission", prepared.PermissionScope); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePreparedPolicies(prepared *Capability) error {
+	switch prepared.Freshness {
+	case FreshnessStable, FreshnessCurrent, FreshnessBoundedLive:
+	default:
+		return fmt.Errorf(
+			"capability %q freshness policy %q is invalid",
+			prepared.ID,
+			prepared.Freshness,
+		)
+	}
+	if prepared.MaxConcurrency <= 0 {
+		return fmt.Errorf("capability %q max concurrency must be positive", prepared.ID)
+	}
+	switch prepared.SideEffects {
+	case SideEffectNone:
+		if len(prepared.WriteSet) != 0 {
+			return fmt.Errorf("capability %q read-only write set must be empty", prepared.ID)
+		}
+	case SideEffectWrite:
+		if len(prepared.WriteSet) == 0 {
+			return fmt.Errorf("capability %q write set is required", prepared.ID)
+		}
+	default:
+		return fmt.Errorf(
+			"capability %q side effect class %q is invalid",
+			prepared.ID,
+			prepared.SideEffects,
+		)
+	}
+	if err := validateWriteSet(prepared.ID, prepared.WriteSet); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (registry *CapabilityRegistry) validatePreparedAgentBinding(prepared *Capability) error {
+	if !canonicalID.MatchString(prepared.Agent.ID) || prepared.Agent.Version <= 0 {
+		return fmt.Errorf("capability %q requires a pinned agent definition", prepared.ID)
+	}
+	definition, err := registry.agents.Resolve(prepared.Agent)
+	if err != nil {
+		return fmt.Errorf("capability %q agent definition: %w", prepared.ID, err)
+	}
+	if definition.ID != prepared.Agent.ID || definition.Version != prepared.Agent.Version {
+		return fmt.Errorf("capability %q agent definition is not pinned", prepared.ID)
+	}
+	if err := registry.schemas.ValidateCompatibility(
+		prepared.InputSchema,
+		definition.InputSchema,
+	); err != nil {
+		return fmt.Errorf("capability %q agent input: %w", prepared.ID, err)
+	}
+	if err := registry.schemas.ValidateCompatibility(
+		definition.OutputSchema,
+		prepared.OutputSchema,
+	); err != nil {
+		return fmt.Errorf("capability %q agent output: %w", prepared.ID, err)
+	}
+	if err := ensureStringSubset(
+		prepared.PermissionScope,
+		definition.Permissions.Scopes,
+	); err != nil {
+		return fmt.Errorf("capability %q permissions: %w", prepared.ID, err)
+	}
+	if definition.Tools.RestrictVisible || len(definition.Tools.VisibleToolIDs) > 0 {
+		if err := ensureStringSubset(
+			prepared.ToolIDs,
+			definition.Tools.VisibleToolIDs,
+		); err != nil {
+			return fmt.Errorf("capability %q tools: %w", prepared.ID, err)
+		}
+	}
+	return nil
 }
 
 func validateCapabilityList(capabilityID, label string, values []string) error {

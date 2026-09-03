@@ -132,8 +132,9 @@ type RunBudgetTaskGate interface {
 type RunBudgetPhase string
 
 const (
-	RunBudgetPhaseDefault RunBudgetPhase = "default"
-	RunBudgetPhaseAnswer  RunBudgetPhase = "answer"
+	RunBudgetPhaseDefault  RunBudgetPhase = "default"
+	RunBudgetPhaseVerifier RunBudgetPhase = "verifier"
+	RunBudgetPhaseAnswer   RunBudgetPhase = "answer"
 )
 
 // RunBudgetPhasedGate lets a root ledger protect answer capacity while the
@@ -158,8 +159,9 @@ func RunBudgetTaskGateFromContext(ctx context.Context) RunBudgetTaskGate {
 	return gate
 }
 
-// WithRunBudgetPhase marks a physical call as an answer call for budget
-// accounting. The default phase keeps the protected answer reserve intact.
+// WithRunBudgetPhase marks physical calls made by a workflow phase. The
+// default phase preserves protected downstream capacity; verifier and answer
+// phases may consume the reserve assigned to the phase they activate.
 func WithRunBudgetPhase(ctx context.Context, phase RunBudgetPhase) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -167,7 +169,8 @@ func WithRunBudgetPhase(ctx context.Context, phase RunBudgetPhase) context.Conte
 	return context.WithValue(ctx, runBudgetPhaseContextKey{}, phase)
 }
 
-// RunBudgetPhaseFromContext returns the current budget phase.
+// RunBudgetPhaseFromContext returns the current budget phase. Unknown or empty
+// values fall back to the conservative default phase.
 func RunBudgetPhaseFromContext(ctx context.Context) RunBudgetPhase {
 	if ctx == nil {
 		return RunBudgetPhaseDefault

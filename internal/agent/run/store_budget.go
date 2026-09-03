@@ -361,18 +361,7 @@ func (backend *sqlBudgetBackend) RenewLeaseWithFence(rootRunID, owner string, fe
 	return tx.Commit()
 }
 
-func (backend *sqlBudgetBackend) ReleaseLeaseWithFence(rootRunID, owner string, fence int64, now time.Time) error {
-	if backend == nil || backend.db == nil {
-		return fmt.Errorf("budget database is required")
-	}
-	if rootRunID == "" || owner == "" || fence <= 0 {
-		return fmt.Errorf("budget root, owner and fence are required")
-	}
-	tx, err := backend.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+func applyLeaseReleaseTx(tx *sql.Tx, rootRunID, owner string, fence int64, now time.Time) error {
 	var currentOwner string
 	var currentExpiry sql.NullTime
 	var currentFence int64
@@ -381,7 +370,7 @@ func (backend *sqlBudgetBackend) ReleaseLeaseWithFence(rootRunID, owner string, 
 		return err
 	}
 	if currentOwner == "" {
-		return tx.Commit()
+		return nil
 	}
 	if currentOwner != owner || currentFence != fence {
 		return budget.ErrLeaseOwnerMismatch
@@ -397,8 +386,26 @@ func (backend *sqlBudgetBackend) ReleaseLeaseWithFence(rootRunID, owner string, 
 	if active > 0 || !isZeroBudgetUsage(reserved) {
 		return budget.ErrLeaseHasReservations
 	}
-	_, err = tx.Exec(`UPDATE agent_run_budget_ledger SET lease_owner='',lease_expires_at=NULL,version=version+1,updated_at=? WHERE root_run_id=? AND lease_owner=? AND lease_fence=?`, store.DatabaseTime(now.UTC().Format(time.RFC3339Nano)), rootRunID, owner, fence)
+	_, err := tx.Exec(`UPDATE agent_run_budget_ledger SET lease_owner='',lease_expires_at=NULL,version=version+1,updated_at=? WHERE root_run_id=? AND lease_owner=? AND lease_fence=?`, store.DatabaseTime(now.UTC().Format(time.RFC3339Nano)), rootRunID, owner, fence)
 	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (backend *sqlBudgetBackend) ReleaseLeaseWithFence(rootRunID, owner string, fence int64, now time.Time) error {
+	if backend == nil || backend.db == nil {
+		return fmt.Errorf("budget database is required")
+	}
+	if rootRunID == "" || owner == "" || fence <= 0 {
+		return fmt.Errorf("budget root, owner and fence are required")
+	}
+	tx, err := backend.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := applyLeaseReleaseTx(tx, rootRunID, owner, fence, now); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -554,20 +561,56 @@ func (backend *sqlBudgetBackend) TaskSnapshot(rootRunID, reservationID string) (
 }
 
 func (backend *sqlBudgetBackend) reserve(rootRunID string, reservation budget.DurableReservation, owner string, fence int64) error {
-	if backend == nil || backend.db == nil {
-		return fmt.Errorf("budget database is required")
-	}
-	if rootRunID == "" || reservation.ID == "" {
-		return fmt.Errorf("budget root and reservation ids are required")
-	}
-	estimate, err := normalizeBudgetUsage(reservation.Estimate)
+	reservation, estimate, grant, err := validateAndNormalizeReservation(backend, rootRunID, reservation)
 	if err != nil {
 		return err
 	}
-	grant, err := normalizeBudgetUsage(reservation.Grant)
+	estimateRaw, grantRaw, zeroRaw, err := marshalBudgetReservation(estimate, grant)
 	if err != nil {
 		return err
 	}
+	tx, err := backend.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	limitsRaw, usedRaw, reservedRaw, err := loadReservationLedger(tx, rootRunID, owner, fence)
+	if err != nil {
+		return err
+	}
+	if existing, found, err := findBudgetReservation(tx, reservation.ID); err != nil {
+		return err
+	} else if found {
+		if err := validateDuplicateReservation(existing, rootRunID, reservation, estimate, grant); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	limits, used, reserved, err := decodeBudgetLedger(limitsRaw, usedRaw, reservedRaw)
+	if err != nil {
+		return err
+	}
+	reserved, err = applyReservationChange(tx, rootRunID, reservation, estimate, grant, limits, used, reserved)
+	if err != nil {
+		return err
+	}
+
+	committed, err := insertBudgetReservation(tx, rootRunID, reservation, estimateRaw, grantRaw, zeroRaw, estimate, grant)
+	if err != nil {
+		return err
+	}
+	if committed {
+		return nil
+	}
+	if err := updateBudgetRoot(tx, rootRunID, used, reserved); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func validateReservationShape(reservation *budget.DurableReservation, estimate, grant agentapi.Usage) error {
 	if reservation.Kind != "task" && reservation.Kind != "call" {
 		return fmt.Errorf("unsupported budget reservation kind %q", reservation.Kind)
 	}
@@ -581,87 +624,130 @@ func (backend *sqlBudgetBackend) reserve(rootRunID string, reservation budget.Du
 		if !isZeroBudgetUsage(estimate) {
 			return fmt.Errorf("task reservation cannot have a physical-call estimate")
 		}
-	} else {
-		if reservation.ParentID != "" && reservation.ParentID == reservation.ID {
-			return fmt.Errorf("call reservation cannot parent itself")
-		}
-		if !isZeroBudgetUsage(grant) {
-			return fmt.Errorf("call reservation cannot have a task grant")
-		}
+		return nil
 	}
-	estimateRaw, err := json.Marshal(estimate)
-	if err != nil {
-		return fmt.Errorf("marshal budget estimate: %w", err)
+	if reservation.ParentID != "" && reservation.ParentID == reservation.ID {
+		return fmt.Errorf("call reservation cannot parent itself")
 	}
-	grantRaw, err := json.Marshal(grant)
-	if err != nil {
-		return fmt.Errorf("marshal budget grant: %w", err)
+	if !isZeroBudgetUsage(grant) {
+		return fmt.Errorf("call reservation cannot have a task grant")
 	}
-	zeroRaw, err := json.Marshal(agentapi.Usage{})
-	if err != nil {
-		return fmt.Errorf("marshal zero budget usage: %w", err)
-	}
-	tx, err := backend.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	return nil
+}
 
-	var limitsRaw, usedRaw, reservedRaw []byte
+func validateAndNormalizeReservation(
+	backend *sqlBudgetBackend,
+	rootRunID string,
+	reservation budget.DurableReservation,
+) (budget.DurableReservation, agentapi.Usage, agentapi.Usage, error) {
+	if backend == nil || backend.db == nil {
+		return reservation, agentapi.Usage{}, agentapi.Usage{}, fmt.Errorf("budget database is required")
+	}
+	if rootRunID == "" || reservation.ID == "" {
+		return reservation, agentapi.Usage{}, agentapi.Usage{}, fmt.Errorf("budget root and reservation ids are required")
+	}
+	estimate, err := normalizeBudgetUsage(reservation.Estimate)
+	if err != nil {
+		return reservation, agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	grant, err := normalizeBudgetUsage(reservation.Grant)
+	if err != nil {
+		return reservation, agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	if err := validateReservationShape(&reservation, estimate, grant); err != nil {
+		return reservation, agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	return reservation, estimate, grant, nil
+}
+
+func marshalBudgetReservation(
+	estimate, grant agentapi.Usage,
+) (estimateRaw, grantRaw, zeroRaw []byte, err error) {
+	estimateRaw, err = json.Marshal(estimate)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal budget estimate: %w", err)
+	}
+	grantRaw, err = json.Marshal(grant)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal budget grant: %w", err)
+	}
+	zeroRaw, err = json.Marshal(agentapi.Usage{})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal zero budget usage: %w", err)
+	}
+	return estimateRaw, grantRaw, zeroRaw, nil
+}
+
+func loadReservationLedger(
+	tx *sql.Tx,
+	rootRunID, owner string,
+	fence int64,
+) (limitsRaw, usedRaw, reservedRaw []byte, err error) {
 	if err := tx.QueryRow(
 		`SELECT limits_json,used_usage_json,reserved_usage_json
 		 FROM agent_run_budget_ledger WHERE root_run_id=? FOR UPDATE`, rootRunID,
 	).Scan(&limitsRaw, &usedRaw, &reservedRaw); err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 	if fence > 0 {
 		if err := assertBudgetFence(tx, rootRunID, owner, fence); err != nil {
-			return err
+			return nil, nil, nil, err
 		}
 	}
+	return limitsRaw, usedRaw, reservedRaw, nil
+}
 
-	if existing, found, err := findBudgetReservation(tx, reservation.ID); err != nil {
-		return err
-	} else if found {
-		if err := validateDuplicateReservation(existing, rootRunID, reservation, estimate, grant); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		return nil
-	}
-
+func decodeBudgetLedger(
+	limitsRaw, usedRaw, reservedRaw []byte,
+) (agentapi.RunLimits, agentapi.Usage, agentapi.Usage, error) {
 	var limits agentapi.RunLimits
 	var used, reserved agentapi.Usage
 	if err := json.Unmarshal(limitsRaw, &limits); err != nil {
-		return fmt.Errorf("decode budget limits: %w", err)
+		return limits, used, reserved, fmt.Errorf("decode budget limits: %w", err)
 	}
 	if err := json.Unmarshal(usedRaw, &used); err != nil {
-		return fmt.Errorf("decode budget used usage: %w", err)
+		return limits, used, reserved, fmt.Errorf("decode budget used usage: %w", err)
 	}
 	if err := json.Unmarshal(reservedRaw, &reserved); err != nil {
-		return fmt.Errorf("decode budget reserved usage: %w", err)
+		return limits, used, reserved, fmt.Errorf("decode budget reserved usage: %w", err)
 	}
+	return limits, used, reserved, nil
+}
 
+func applyReservationChange(
+	tx *sql.Tx,
+	rootRunID string,
+	reservation budget.DurableReservation,
+	estimate, grant agentapi.Usage,
+	limits agentapi.RunLimits,
+	used, reserved agentapi.Usage,
+) (agentapi.Usage, error) {
 	if reservation.Kind == "call" && reservation.ParentID != "" {
 		if err := reserveChildCall(tx, rootRunID, reservation.ParentID, estimate); err != nil {
-			return err
+			return reserved, err
 		}
-	} else {
-		phase := reservation.Phase
-		available := budgetAvailable(limits, used, reserved, phase)
-		request := estimate
-		if reservation.Kind == "task" {
-			request = grant
-		}
-		if err := requireBudgetWithin(request, available, reservation.Kind); err != nil {
-			return err
-		}
-		reserved = addUsage(reserved, request)
+		return reserved, nil
 	}
+	phase := reservation.Phase
+	available := budgetAvailable(limits, used, reserved, phase)
+	request := estimate
+	if reservation.Kind == "task" {
+		request = grant
+	}
+	if err := requireBudgetWithin(request, available, reservation.Kind); err != nil {
+		return reserved, err
+	}
+	return addUsage(reserved, request), nil
+}
 
-	if _, err := tx.Exec(
+func insertBudgetReservation(
+	tx *sql.Tx,
+	rootRunID string,
+	reservation budget.DurableReservation,
+	estimateRaw, grantRaw, zeroRaw []byte,
+	estimate, grant agentapi.Usage,
+) (bool, error) {
+	_, execErr := tx.Exec(
 		`INSERT INTO agent_run_budget_reservations(
 			reservation_id,root_run_id,parent_reservation_id,kind,phase,
 			estimate_usage_json,grant_usage_json,used_usage_json,state,
@@ -670,29 +756,24 @@ func (backend *sqlBudgetBackend) reserve(rootRunID string, reservation budget.Du
 		reservation.ID, rootRunID, reservation.ParentID, reservation.Kind,
 		string(reservation.Phase), estimateRaw, grantRaw, zeroRaw, reservationStateFor(reservation),
 		store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano)), nil,
-	); err != nil {
-		if isDuplicate(err) {
-			existing, found, lookupErr := findBudgetReservation(tx, reservation.ID)
-			if lookupErr != nil {
-				return lookupErr
-			}
-			if !found {
-				return err
-			}
-			if validateErr := validateDuplicateReservation(existing, rootRunID, reservation, estimate, grant); validateErr != nil {
-				return validateErr
-			}
-			if commitErr := tx.Commit(); commitErr != nil {
-				return commitErr
-			}
-			return nil
-		}
-		return err
+	)
+	if execErr == nil {
+		return false, nil
 	}
-	if err := updateBudgetRoot(tx, rootRunID, used, reserved); err != nil {
-		return err
+	if !isDuplicate(execErr) {
+		return false, execErr
 	}
-	return tx.Commit()
+	existing, found, lookupErr := findBudgetReservation(tx, reservation.ID)
+	if lookupErr != nil {
+		return false, lookupErr
+	}
+	if !found {
+		return false, execErr
+	}
+	if validateErr := validateDuplicateReservation(existing, rootRunID, reservation, estimate, grant); validateErr != nil {
+		return false, validateErr
+	}
+	return true, tx.Commit()
 }
 
 func (backend *sqlBudgetBackend) Reserve(rootRunID string, reservation budget.DurableReservation) error {
@@ -828,92 +909,18 @@ func (backend *sqlBudgetBackend) settleCall(rootRunID, reservationID string, act
 		return err
 	}
 	defer tx.Rollback()
-	var parentID, kind, state string
-	var estimateRaw, usedRaw []byte
-	if err := tx.QueryRow(
-		`SELECT parent_reservation_id,kind,state,estimate_usage_json,used_usage_json
-		 FROM agent_run_budget_reservations
-		 WHERE root_run_id=? AND reservation_id=? FOR UPDATE`, rootRunID, reservationID,
-	).Scan(&parentID, &kind, &state, &estimateRaw, &usedRaw); err != nil {
+	parentID, estimate, alreadySettled, err := loadOpenCallReservation(tx, rootRunID, reservationID, actual)
+	if err != nil {
 		return err
 	}
-	if kind != "call" {
-		return fmt.Errorf("budget reservation %q is not a physical call", reservationID)
-	}
-	if state == "settled" {
-		var previous agentapi.Usage
-		if err := json.Unmarshal(usedRaw, &previous); err != nil {
-			return err
-		}
-		if previous != actual {
-			return fmt.Errorf("%w: model call settled twice with different usage", agentapi.ErrBudgetExceeded)
-		}
+	if alreadySettled {
 		return nil
-	}
-	if state != "open" {
-		return fmt.Errorf("%w: model call reservation is not open", agentapi.ErrBudgetExceeded)
-	}
-	var estimate agentapi.Usage
-	if err := json.Unmarshal(estimateRaw, &estimate); err != nil {
-		return err
 	}
 	accountingErr := requireBudgetWithin(actual, estimate, "reported model usage")
 
-	var usedRawRoot, reservedRaw []byte
-	if err := tx.QueryRow(
-		`SELECT used_usage_json,reserved_usage_json
-		 FROM agent_run_budget_ledger WHERE root_run_id=? FOR UPDATE`, rootRunID,
-	).Scan(&usedRawRoot, &reservedRaw); err != nil {
+	used, reserved, err := applySettledCallToLedger(tx, rootRunID, parentID, actual, estimate, owner, fence)
+	if err != nil {
 		return err
-	}
-	if fence > 0 {
-		if err := assertBudgetFence(tx, rootRunID, owner, fence); err != nil {
-			return err
-		}
-	}
-	var used, reserved agentapi.Usage
-	if err := json.Unmarshal(usedRawRoot, &used); err != nil {
-		return err
-	}
-	if err := json.Unmarshal(reservedRaw, &reserved); err != nil {
-		return err
-	}
-	used = addUsage(used, actual)
-	if parentID == "" {
-		reserved = subtractUsage(reserved, estimate)
-	} else {
-		// A task grant is kept in reserved_usage_json as its remaining
-		// unconsumed capacity. Once a child call settles, the consumed part
-		// moves to used_usage_json and must leave the root reservation.
-		reserved = subtractUsage(reserved, actual)
-
-		var taskState string
-		var taskUsedRaw []byte
-		if err := tx.QueryRow(
-			`SELECT state,used_usage_json FROM agent_run_budget_reservations
-			 WHERE root_run_id=? AND reservation_id=? AND kind=? FOR UPDATE`,
-			rootRunID, parentID, "task",
-		).Scan(&taskState, &taskUsedRaw); err != nil {
-			return err
-		}
-		if taskState != "active" {
-			return fmt.Errorf("%w: child task budget released before call settlement", agentapi.ErrBudgetExceeded)
-		}
-		var taskUsed agentapi.Usage
-		if err := json.Unmarshal(taskUsedRaw, &taskUsed); err != nil {
-			return err
-		}
-		taskUsed = addUsage(taskUsed, actual)
-		taskUsedRaw, err = json.Marshal(taskUsed)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(
-			`UPDATE agent_run_budget_reservations SET used_usage_json=? WHERE root_run_id=? AND reservation_id=?`,
-			taskUsedRaw, rootRunID, parentID,
-		); err != nil {
-			return err
-		}
 	}
 	if _, err := tx.Exec(
 		`UPDATE agent_run_budget_reservations
@@ -927,14 +934,8 @@ func (backend *sqlBudgetBackend) settleCall(rootRunID, reservationID string, act
 	if err := updateBudgetRoot(tx, rootRunID, used, reserved); err != nil {
 		return err
 	}
-	var limitsRaw []byte
-	if err := tx.QueryRow(
-		`SELECT limits_json FROM agent_run_budget_ledger WHERE root_run_id=?`, rootRunID,
-	).Scan(&limitsRaw); err != nil {
-		return err
-	}
-	var limits agentapi.RunLimits
-	if err := json.Unmarshal(limitsRaw, &limits); err != nil {
+	limits, err := loadBudgetLimits(tx, rootRunID)
+	if err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -947,6 +948,126 @@ func (backend *sqlBudgetBackend) settleCall(rootRunID, reservationID string, act
 		return &budget.SettlementError{Err: accountingErr, Committed: true}
 	}
 	return nil
+}
+
+// loadOpenCallReservation validates the call reservation row and returns its
+// parent grant and estimate. A previously settled call with identical usage is
+// idempotent; a differing second settlement or a non-open state is an error.
+func loadOpenCallReservation(
+	tx *sql.Tx,
+	rootRunID, reservationID string,
+	actual agentapi.Usage,
+) (parentID string, estimate agentapi.Usage, alreadySettled bool, err error) {
+	var kind, state string
+	var estimateRaw, usedRaw []byte
+	if err := tx.QueryRow(
+		`SELECT parent_reservation_id,kind,state,estimate_usage_json,used_usage_json
+		 FROM agent_run_budget_reservations
+		 WHERE root_run_id=? AND reservation_id=? FOR UPDATE`, rootRunID, reservationID,
+	).Scan(&parentID, &kind, &state, &estimateRaw, &usedRaw); err != nil {
+		return "", agentapi.Usage{}, false, err
+	}
+	if kind != "call" {
+		return "", agentapi.Usage{}, false, fmt.Errorf("budget reservation %q is not a physical call", reservationID)
+	}
+	if state == "settled" {
+		var previous agentapi.Usage
+		if err := json.Unmarshal(usedRaw, &previous); err != nil {
+			return "", agentapi.Usage{}, false, err
+		}
+		if previous != actual {
+			return "", agentapi.Usage{}, false, fmt.Errorf("%w: model call settled twice with different usage", agentapi.ErrBudgetExceeded)
+		}
+		return "", agentapi.Usage{}, true, nil
+	}
+	if state != "open" {
+		return "", agentapi.Usage{}, false, fmt.Errorf("%w: model call reservation is not open", agentapi.ErrBudgetExceeded)
+	}
+	if err := json.Unmarshal(estimateRaw, &estimate); err != nil {
+		return "", agentapi.Usage{}, false, err
+	}
+	return parentID, estimate, false, nil
+}
+
+// applySettledCallToLedger folds the settled usage into the root ledger and, for
+// task-backed calls, the parent task grant's used capacity.
+func applySettledCallToLedger(
+	tx *sql.Tx,
+	rootRunID, parentID string,
+	actual, estimate agentapi.Usage,
+	owner string,
+	fence int64,
+) (used, reserved agentapi.Usage, err error) {
+	var usedRawRoot, reservedRaw []byte
+	if err := tx.QueryRow(
+		`SELECT used_usage_json,reserved_usage_json
+		 FROM agent_run_budget_ledger WHERE root_run_id=? FOR UPDATE`, rootRunID,
+	).Scan(&usedRawRoot, &reservedRaw); err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	if fence > 0 {
+		if err := assertBudgetFence(tx, rootRunID, owner, fence); err != nil {
+			return agentapi.Usage{}, agentapi.Usage{}, err
+		}
+	}
+	if err := json.Unmarshal(usedRawRoot, &used); err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	if err := json.Unmarshal(reservedRaw, &reserved); err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	used = addUsage(used, actual)
+	if parentID == "" {
+		reserved = subtractUsage(reserved, estimate)
+		return used, reserved, nil
+	}
+	// A task grant is kept in reserved_usage_json as its remaining
+	// unconsumed capacity. Once a child call settles, the consumed part
+	// moves to used_usage_json and must leave the root reservation.
+	reserved = subtractUsage(reserved, actual)
+
+	var taskState string
+	var taskUsedRaw []byte
+	if err := tx.QueryRow(
+		`SELECT state,used_usage_json FROM agent_run_budget_reservations
+		 WHERE root_run_id=? AND reservation_id=? AND kind=? FOR UPDATE`,
+		rootRunID, parentID, "task",
+	).Scan(&taskState, &taskUsedRaw); err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	if taskState != "active" {
+		return agentapi.Usage{}, agentapi.Usage{}, fmt.Errorf("%w: child task budget released before call settlement", agentapi.ErrBudgetExceeded)
+	}
+	var taskUsed agentapi.Usage
+	if err := json.Unmarshal(taskUsedRaw, &taskUsed); err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	taskUsed = addUsage(taskUsed, actual)
+	taskUsedRaw, err = json.Marshal(taskUsed)
+	if err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	if _, err := tx.Exec(
+		`UPDATE agent_run_budget_reservations SET used_usage_json=? WHERE root_run_id=? AND reservation_id=?`,
+		taskUsedRaw, rootRunID, parentID,
+	); err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	return used, reserved, nil
+}
+
+func loadBudgetLimits(tx *sql.Tx, rootRunID string) (agentapi.RunLimits, error) {
+	var limitsRaw []byte
+	if err := tx.QueryRow(
+		`SELECT limits_json FROM agent_run_budget_ledger WHERE root_run_id=?`, rootRunID,
+	).Scan(&limitsRaw); err != nil {
+		return agentapi.RunLimits{}, err
+	}
+	var limits agentapi.RunLimits
+	if err := json.Unmarshal(limitsRaw, &limits); err != nil {
+		return agentapi.RunLimits{}, err
+	}
+	return limits, nil
 }
 
 func (backend *sqlBudgetBackend) SettleCall(rootRunID, reservationID string, actual agentapi.Usage) error {
@@ -963,36 +1084,16 @@ func (backend *sqlBudgetBackend) ReleaseCallFenced(rootRunID, owner string, fenc
 	return backend.release(rootRunID, reservationID, "call", owner, fence)
 }
 
-func (backend *sqlBudgetBackend) release(rootRunID, reservationID, kind, owner string, fence int64) error {
-	if backend == nil || backend.db == nil {
-		return fmt.Errorf("budget database is required")
-	}
-	tx, err := backend.db.Begin()
+func applyReleaseTx(tx *sql.Tx, rootRunID, reservationID, kind, owner string, fence int64) error {
+	reservation, err := loadReleaseReservation(tx, rootRunID, reservationID, kind)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	var parentID, state string
-	var estimateRaw []byte
-	if err := tx.QueryRow(
-		`SELECT parent_reservation_id,state,estimate_usage_json
-		 FROM agent_run_budget_reservations
-		 WHERE root_run_id=? AND reservation_id=? AND kind=? FOR UPDATE`,
-		rootRunID, reservationID, kind,
-	).Scan(&parentID, &state, &estimateRaw); err != nil {
-		return err
-	}
-	if state == "released" || state == "settled" {
+	if !reservation.releasable {
 		return nil
 	}
-	if state != "open" && !(kind == "task" && state == "active") {
-		return fmt.Errorf("budget reservation %q is not releasable", reservationID)
-	}
-	var usedRaw, reservedRaw []byte
-	if err := tx.QueryRow(
-		`SELECT used_usage_json,reserved_usage_json
-		 FROM agent_run_budget_ledger WHERE root_run_id=? FOR UPDATE`, rootRunID,
-	).Scan(&usedRaw, &reservedRaw); err != nil {
+	used, reserved, err := loadReleaseLedger(tx, rootRunID)
+	if err != nil {
 		return err
 	}
 	if fence > 0 {
@@ -1000,50 +1101,18 @@ func (backend *sqlBudgetBackend) release(rootRunID, reservationID, kind, owner s
 			return err
 		}
 	}
-	var used, reserved agentapi.Usage
-	if err := json.Unmarshal(usedRaw, &used); err != nil {
-		return err
-	}
-	if err := json.Unmarshal(reservedRaw, &reserved); err != nil {
-		return err
-	}
-	if kind == "call" && parentID == "" {
+	if kind == "call" && reservation.parentID == "" {
 		var estimate agentapi.Usage
-		if err := json.Unmarshal(estimateRaw, &estimate); err != nil {
+		if err := json.Unmarshal(reservation.estimateRaw, &estimate); err != nil {
 			return err
 		}
 		reserved = subtractUsage(reserved, estimate)
 	}
 	if kind == "task" {
-		var grant, taskUsed agentapi.Usage
-		var grantRaw, taskUsedRaw []byte
-		if err := tx.QueryRow(
-			`SELECT grant_usage_json,used_usage_json FROM agent_run_budget_reservations
-			 WHERE root_run_id=? AND reservation_id=? AND kind=? FOR UPDATE`,
-			rootRunID, reservationID, "task",
-		).Scan(&grantRaw, &taskUsedRaw); err != nil {
+		reserved, err = releaseTaskReservation(tx, rootRunID, reservationID, reserved)
+		if err != nil {
 			return err
 		}
-		if err := json.Unmarshal(grantRaw, &grant); err != nil {
-			return err
-		}
-		if err := json.Unmarshal(taskUsedRaw, &taskUsed); err != nil {
-			return err
-		}
-		// An open child call means task usage is not final and releasing it
-		// would make the root ledger under-accounted.
-		var openCalls int
-		if err := tx.QueryRow(
-			`SELECT COUNT(*) FROM agent_run_budget_reservations
-			 WHERE root_run_id=? AND parent_reservation_id=? AND state=?`,
-			rootRunID, reservationID, "open",
-		).Scan(&openCalls); err != nil {
-			return err
-		}
-		if openCalls > 0 {
-			return fmt.Errorf("%w: cannot release child task with in-flight model calls", agentapi.ErrBudgetExceeded)
-		}
-		reserved = subtractUsage(reserved, subtractUsage(grant, taskUsed))
 	}
 	if _, err := tx.Exec(
 		`UPDATE agent_run_budget_reservations SET state=?,settled_at=?
@@ -1056,7 +1125,99 @@ func (backend *sqlBudgetBackend) release(rootRunID, reservationID, kind, owner s
 	if err := updateBudgetRoot(tx, rootRunID, used, reserved); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (backend *sqlBudgetBackend) release(rootRunID, reservationID, kind, owner string, fence int64) error {
+	if backend == nil || backend.db == nil {
+		return fmt.Errorf("budget database is required")
+	}
+	tx, err := backend.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := applyReleaseTx(tx, rootRunID, reservationID, kind, owner, fence); err != nil {
+		return err
+	}
 	return tx.Commit()
+
+}
+
+type releaseReservation struct {
+	parentID    string
+	estimateRaw []byte
+	releasable  bool
+}
+
+func loadReleaseReservation(tx *sql.Tx, rootRunID, reservationID, kind string) (releaseReservation, error) {
+	var parentID, state string
+	var estimateRaw []byte
+	if err := tx.QueryRow(
+		`SELECT parent_reservation_id,state,estimate_usage_json
+		 FROM agent_run_budget_reservations
+		 WHERE root_run_id=? AND reservation_id=? AND kind=? FOR UPDATE`,
+		rootRunID, reservationID, kind,
+	).Scan(&parentID, &state, &estimateRaw); err != nil {
+		return releaseReservation{}, err
+	}
+	if state == "released" || state == "settled" {
+		return releaseReservation{releasable: false}, nil
+	}
+	if state != "open" && !(kind == "task" && state == "active") {
+		return releaseReservation{}, fmt.Errorf("budget reservation %q is not releasable", reservationID)
+	}
+	return releaseReservation{parentID: parentID, estimateRaw: estimateRaw, releasable: true}, nil
+}
+
+func loadReleaseLedger(tx *sql.Tx, rootRunID string) (agentapi.Usage, agentapi.Usage, error) {
+	var usedRaw, reservedRaw []byte
+	if err := tx.QueryRow(
+		`SELECT used_usage_json,reserved_usage_json
+		 FROM agent_run_budget_ledger WHERE root_run_id=? FOR UPDATE`, rootRunID,
+	).Scan(&usedRaw, &reservedRaw); err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	var used, reserved agentapi.Usage
+	if err := json.Unmarshal(usedRaw, &used); err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	if err := json.Unmarshal(reservedRaw, &reserved); err != nil {
+		return agentapi.Usage{}, agentapi.Usage{}, err
+	}
+	return used, reserved, nil
+}
+
+func releaseTaskReservation(tx *sql.Tx, rootRunID, reservationID string, reserved agentapi.Usage) (agentapi.Usage, error) {
+	var grant, taskUsed agentapi.Usage
+	var grantRaw, taskUsedRaw []byte
+	if err := tx.QueryRow(
+		`SELECT grant_usage_json,used_usage_json FROM agent_run_budget_reservations
+		 WHERE root_run_id=? AND reservation_id=? AND kind=? FOR UPDATE`,
+		rootRunID, reservationID, "task",
+	).Scan(&grantRaw, &taskUsedRaw); err != nil {
+		return reserved, err
+	}
+	if err := json.Unmarshal(grantRaw, &grant); err != nil {
+		return reserved, err
+	}
+	if err := json.Unmarshal(taskUsedRaw, &taskUsed); err != nil {
+		return reserved, err
+	}
+	// An open child call means task usage is not final and releasing it
+	// would make the root ledger under-accounted.
+	var openCalls int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM agent_run_budget_reservations
+		 WHERE root_run_id=? AND parent_reservation_id=? AND state=?`,
+		rootRunID, reservationID, "open",
+	).Scan(&openCalls); err != nil {
+		return reserved, err
+	}
+	if openCalls > 0 {
+		return reserved, fmt.Errorf("%w: cannot release child task with in-flight model calls", agentapi.ErrBudgetExceeded)
+	}
+	return subtractUsage(reserved, subtractUsage(grant, taskUsed)), nil
 }
 
 func (backend *sqlBudgetBackend) ReleaseTask(rootRunID, reservationID string) error {

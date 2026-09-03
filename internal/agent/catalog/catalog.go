@@ -362,18 +362,48 @@ func (catalog *Catalog) AttachStore(
 	if store == nil {
 		return fmt.Errorf("agent catalog store is required: %w", ErrUnavailable)
 	}
-	records, err := store.LoadDefaultDefinitions(ctx)
+	records, highest, rollouts, err := catalog.loadStoreState(ctx, store)
 	if err != nil {
 		return err
+	}
+	next, err := catalog.buildState(ctx, store, records, highest, rollouts)
+	if err != nil {
+		return err
+	}
+	catalog.writeMu.Lock()
+	defer catalog.writeMu.Unlock()
+	catalog.store = store
+	next.revision = catalog.state.Load().revision + 1
+	catalog.state.Store(next)
+	return nil
+}
+
+func (catalog *Catalog) loadStoreState(
+	ctx context.Context,
+	store catalogPersistence,
+) ([]DefinitionRecord, map[string]int64, []RolloutRule, error) {
+	records, err := store.LoadDefaultDefinitions(ctx)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	highest, err := store.LoadHighestVersions(ctx)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 	rollouts, err := store.LoadRollouts(ctx)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
+	return records, highest, rollouts, nil
+}
+
+func (catalog *Catalog) buildState(
+	ctx context.Context,
+	store catalogPersistence,
+	records []DefinitionRecord,
+	highest map[string]int64,
+	rollouts []RolloutRule,
+) (*state, error) {
 	loaded := make(map[key]DefinitionRecord, len(records)+len(rollouts))
 	for _, record := range records {
 		loaded[key{id: record.ID, version: record.Version}] = record
@@ -389,7 +419,7 @@ func (catalog *Catalog) AttachStore(
 			rule.CandidateVersion,
 		)
 		if loadErr != nil {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"load agent rollout %q candidate version %d: %w",
 				rule.AgentID, rule.CandidateVersion, loadErr,
 			)
@@ -402,6 +432,16 @@ func (catalog *Catalog) AttachStore(
 		defaults: make(map[string]int64),
 		rollouts: make(map[string]RolloutRule),
 	}
+	if err := catalog.ingestLoadedRecords(next, loaded); err != nil {
+		return nil, err
+	}
+	if err := catalog.ingestRolloutRules(next, rollouts); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+func (catalog *Catalog) ingestLoadedRecords(next *state, loaded map[key]DefinitionRecord) error {
 	for _, record := range loaded {
 		preparedRecord, prepareErr := catalog.prepareStoredRecord(record)
 		if prepareErr != nil {
@@ -432,6 +472,10 @@ func (catalog *Catalog) AttachStore(
 			next.defaults[record.ID] = record.Version
 		}
 	}
+	return nil
+}
+
+func (catalog *Catalog) ingestRolloutRules(next *state, rollouts []RolloutRule) error {
 	for _, rule := range rollouts {
 		preparedRule, prepareErr := prepareRolloutRule(rule)
 		if prepareErr != nil {
@@ -454,11 +498,6 @@ func (catalog *Catalog) AttachStore(
 		}
 		next.rollouts[rule.AgentID] = preparedRule
 	}
-	catalog.writeMu.Lock()
-	defer catalog.writeMu.Unlock()
-	catalog.store = store
-	next.revision = catalog.state.Load().revision + 1
-	catalog.state.Store(next)
 	return nil
 }
 

@@ -29,6 +29,19 @@ func validateTool(candidate Tool) error {
 	if err := validateSchema(candidate.InputSchema, "input"); err != nil {
 		return fmt.Errorf("tool %q schema: %w", candidate.ID, err)
 	}
+	if err := validateReferenceInputs(candidate); err != nil {
+		return err
+	}
+	if err := validatePrefetch(candidate); err != nil {
+		return err
+	}
+	if err := validateRouting(candidate); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateReferenceInputs(candidate Tool) error {
 	for _, input := range candidate.ReferenceInputs {
 		if strings.TrimSpace(input.Argument) == "" || input.Argument != strings.TrimSpace(input.Argument) {
 			return fmt.Errorf("tool %q reference argument %q must be canonical", candidate.ID, input.Argument)
@@ -44,34 +57,44 @@ func validateTool(candidate Tool) error {
 			}
 		}
 	}
-	if candidate.Prefetch != nil {
-		if candidate.Kind != KindRead {
-			return fmt.Errorf("tool %q prefetch requires read kind", candidate.ID)
-		}
-		if strings.TrimSpace(candidate.Prefetch.Description) == "" {
-			return fmt.Errorf("tool %q prefetch description is required", candidate.ID)
-		}
-		if candidate.Prefetch.Timeout < 0 {
-			return fmt.Errorf("tool %q prefetch timeout cannot be negative", candidate.ID)
-		}
+	return nil
+}
+
+func validatePrefetch(candidate Tool) error {
+	if candidate.Prefetch == nil {
+		return nil
 	}
-	if candidate.Routing != nil {
-		if candidate.Kind != KindRead {
-			return fmt.Errorf("tool %q routing requires read kind", candidate.ID)
-		}
-		if strings.TrimSpace(candidate.Routing.Intent) == "" {
-			return fmt.Errorf("tool %q routing intent is required", candidate.ID)
-		}
-		switch candidate.Routing.EvidenceSource {
-		case "", RoutingEvidenceInternal, RoutingEvidenceMemory,
-			RoutingEvidenceWeb, RoutingEvidenceRuntime:
-		default:
-			return fmt.Errorf(
-				"tool %q routing evidence source %q is invalid",
-				candidate.ID,
-				candidate.Routing.EvidenceSource,
-			)
-		}
+	if candidate.Kind != KindRead {
+		return fmt.Errorf("tool %q prefetch requires read kind", candidate.ID)
+	}
+	if strings.TrimSpace(candidate.Prefetch.Description) == "" {
+		return fmt.Errorf("tool %q prefetch description is required", candidate.ID)
+	}
+	if candidate.Prefetch.Timeout < 0 {
+		return fmt.Errorf("tool %q prefetch timeout cannot be negative", candidate.ID)
+	}
+	return nil
+}
+
+func validateRouting(candidate Tool) error {
+	if candidate.Routing == nil {
+		return nil
+	}
+	if candidate.Kind != KindRead {
+		return fmt.Errorf("tool %q routing requires read kind", candidate.ID)
+	}
+	if strings.TrimSpace(candidate.Routing.Intent) == "" {
+		return fmt.Errorf("tool %q routing intent is required", candidate.ID)
+	}
+	switch candidate.Routing.EvidenceSource {
+	case "", RoutingEvidenceInternal, RoutingEvidenceMemory,
+		RoutingEvidenceWeb, RoutingEvidenceRuntime:
+	default:
+		return fmt.Errorf(
+			"tool %q routing evidence source %q is invalid",
+			candidate.ID,
+			candidate.Routing.EvidenceSource,
+		)
 	}
 	return nil
 }
@@ -83,52 +106,82 @@ func validateSchema(schema map[string]any, path string) error {
 	}
 	switch typ {
 	case TypeObject:
-		properties, ok := schema["properties"].(map[string]any)
-		if !ok {
-			return fmt.Errorf("%s properties must be an object", path)
-		}
-		for name, raw := range properties {
-			child, ok := raw.(map[string]any)
-			if !ok {
-				return fmt.Errorf("%s.%s must be a schema object", path, name)
-			}
-			if err := validateSchema(child, path+"."+name); err != nil {
-				return err
-			}
-		}
-		if required, ok := schema["required"]; ok {
-			items, ok := required.([]string)
-			if !ok {
-				rawItems, rawOK := required.([]any)
-				if !rawOK {
-					return fmt.Errorf("%s required must be an array", path)
-				}
-				items = make([]string, 0, len(rawItems))
-				for _, raw := range rawItems {
-					name, ok := raw.(string)
-					if !ok {
-						return fmt.Errorf("%s required entries must be strings", path)
-					}
-					items = append(items, name)
-				}
-			}
-			for _, name := range items {
-				if _, ok := properties[name]; !ok {
-					return fmt.Errorf("%s required property %q is undefined", path, name)
-				}
-			}
-		}
+		return validateSchemaObject(schema, path)
 	case TypeArray:
-		items, ok := schema["items"].(map[string]any)
-		if !ok {
-			return fmt.Errorf("%s items must be a schema object", path)
-		}
-		return validateSchema(items, path+"[]")
+		return validateSchemaArray(schema, path)
 	case TypeString, TypeInt, TypeNumber, TypeBool:
 	default:
 		return fmt.Errorf("%s has unsupported type %q", path, typ)
 	}
 	return nil
+}
+
+func validateSchemaObject(schema map[string]any, path string) error {
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s properties must be an object", path)
+	}
+	if err := validateSchemaProperties(properties, path); err != nil {
+		return err
+	}
+	return validateSchemaRequired(schema, properties, path)
+}
+
+func validateSchemaProperties(properties map[string]any, path string) error {
+	for name, raw := range properties {
+		child, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s.%s must be a schema object", path, name)
+		}
+		if err := validateSchema(child, path+"."+name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSchemaRequired(schema map[string]any, properties map[string]any, path string) error {
+	required, ok := schema["required"]
+	if !ok {
+		return nil
+	}
+	items, err := schemaRequiredNames(required, path)
+	if err != nil {
+		return err
+	}
+	for _, name := range items {
+		if _, ok := properties[name]; !ok {
+			return fmt.Errorf("%s required property %q is undefined", path, name)
+		}
+	}
+	return nil
+}
+
+func schemaRequiredNames(required any, path string) ([]string, error) {
+	if items, ok := required.([]string); ok {
+		return items, nil
+	}
+	rawItems, ok := required.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s required must be an array", path)
+	}
+	items := make([]string, 0, len(rawItems))
+	for _, raw := range rawItems {
+		name, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s required entries must be strings", path)
+		}
+		items = append(items, name)
+	}
+	return items, nil
+}
+
+func validateSchemaArray(schema map[string]any, path string) error {
+	items, ok := schema["items"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s items must be a schema object", path)
+	}
+	return validateSchema(items, path+"[]")
 }
 
 func validateSchemaAlternatives(schema map[string]any, path string) error {
@@ -159,79 +212,110 @@ func validateArguments(schema map[string]any, value any, path string) error {
 	if typ == "" {
 		return validateArgumentAlternatives(schema, value, path)
 	}
+	if err := validateArgumentsByType(typ, schema, value, path); err != nil {
+		return err
+	}
+	return validateArgumentConstraints(schema, value, path)
+}
+
+func validateArgumentsByType(typ SchemaType, schema map[string]any, value any, path string) error {
 	switch typ {
 	case TypeObject:
-		object, ok := value.(map[string]any)
-		if !ok {
-			if args, argsOK := value.(Arguments); argsOK {
-				object = map[string]any(args)
-				ok = true
-			}
-		}
-		if !ok {
-			return fmt.Errorf("%s must be an object", path)
-		}
-		properties, _ := schema["properties"].(map[string]any)
-		for _, name := range requiredNames(schema["required"]) {
-			if _, exists := object[name]; !exists {
-				return fmt.Errorf("%s.%s is required", path, name)
-			}
-		}
-		for name, raw := range object {
-			property, exists := properties[name]
-			if !exists {
-				if additional, configured := schema["additionalProperties"].(bool); configured && !additional {
-					return fmt.Errorf("%s.%s is not allowed", path, name)
-				}
-				continue
-			}
-			child, _ := property.(map[string]any)
-			if err := validateArguments(child, raw, path+"."+name); err != nil {
-				return err
-			}
-		}
+		return validateArgumentObject(schema, value, path)
 	case TypeArray:
-		items, ok := value.([]any)
-		if !ok {
-			return fmt.Errorf("%s must be an array", path)
-		}
-		if minimum, ok := schemaInt(schema["minItems"]); ok && len(items) < minimum {
-			return fmt.Errorf("%s must contain at least %d items", path, minimum)
-		}
-		if maximum, ok := schemaInt(schema["maxItems"]); ok && len(items) > maximum {
-			return fmt.Errorf("%s must contain at most %d items", path, maximum)
-		}
-		itemSchema, _ := schema["items"].(map[string]any)
-		for i, item := range items {
-			if err := validateArguments(itemSchema, item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
-				return err
-			}
-		}
+		return validateArgumentArray(schema, value, path)
 	case TypeString:
 		if _, ok := value.(string); !ok {
 			return fmt.Errorf("%s must be a string", path)
 		}
 	case TypeInt:
-		switch number := value.(type) {
-		case int:
-		case float64:
-			if math.Trunc(number) != number {
-				return fmt.Errorf("%s must be an integer", path)
-			}
-		default:
-			return fmt.Errorf("%s must be an integer", path)
-		}
+		return validateArgumentInt(value, path)
 	case TypeNumber:
-		switch value.(type) {
-		case int, float64:
-		default:
-			return fmt.Errorf("%s must be a number", path)
-		}
+		return validateArgumentNumber(value, path)
 	case TypeBool:
 		if _, ok := value.(bool); !ok {
 			return fmt.Errorf("%s must be a boolean", path)
 		}
 	}
+	return nil
+}
+
+func validateArgumentObject(schema map[string]any, value any, path string) error {
+	object, ok := value.(map[string]any)
+	if !ok {
+		if args, argsOK := value.(Arguments); argsOK {
+			object = map[string]any(args)
+			ok = true
+		}
+	}
+	if !ok {
+		return fmt.Errorf("%s must be an object", path)
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	for _, name := range requiredNames(schema["required"]) {
+		if _, exists := object[name]; !exists {
+			return fmt.Errorf("%s.%s is required", path, name)
+		}
+	}
+	for name, raw := range object {
+		property, exists := properties[name]
+		if !exists {
+			if additional, configured := schema["additionalProperties"].(bool); configured && !additional {
+				return fmt.Errorf("%s.%s is not allowed", path, name)
+			}
+			continue
+		}
+		child, _ := property.(map[string]any)
+		if err := validateArguments(child, raw, path+"."+name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateArgumentArray(schema map[string]any, value any, path string) error {
+	items, ok := value.([]any)
+	if !ok {
+		return fmt.Errorf("%s must be an array", path)
+	}
+	if minimum, ok := schemaInt(schema["minItems"]); ok && len(items) < minimum {
+		return fmt.Errorf("%s must contain at least %d items", path, minimum)
+	}
+	if maximum, ok := schemaInt(schema["maxItems"]); ok && len(items) > maximum {
+		return fmt.Errorf("%s must contain at most %d items", path, maximum)
+	}
+	itemSchema, _ := schema["items"].(map[string]any)
+	for i, item := range items {
+		if err := validateArguments(itemSchema, item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateArgumentInt(value any, path string) error {
+	switch number := value.(type) {
+	case int:
+	case float64:
+		if math.Trunc(number) != number {
+			return fmt.Errorf("%s must be an integer", path)
+		}
+	default:
+		return fmt.Errorf("%s must be an integer", path)
+	}
+	return nil
+}
+
+func validateArgumentNumber(value any, path string) error {
+	switch value.(type) {
+	case int, float64:
+		return nil
+	default:
+		return fmt.Errorf("%s must be a number", path)
+	}
+}
+
+func validateArgumentConstraints(schema map[string]any, value any, path string) error {
 	if number, ok := schemaNumber(value); ok {
 		if minimum, exists := schemaNumber(schema["minimum"]); exists && number < minimum {
 			return fmt.Errorf("%s must be at least %v", path, schema["minimum"])

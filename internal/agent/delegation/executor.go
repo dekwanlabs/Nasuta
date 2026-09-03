@@ -53,6 +53,8 @@ const (
 	flowReportMaxTokens      = 2000
 )
 
+var errAttemptUnrecoverable = errors.New("delegation attempt cannot be recovered")
+
 type Persistence interface {
 	ReserveDelegationBatch(
 		context.Context,
@@ -112,6 +114,15 @@ type WorkQueue interface {
 
 type kindWorkQueue interface {
 	ClaimWorkItemByKind(context.Context, string, string, time.Time, time.Duration) (agentrun.WorkItem, error)
+}
+
+// enqueueAndClaimWorkQueue is an optional fast path for the in-process parent
+// dispatcher. Implementations must persist the item and acquire its lease in
+// one transaction. The lease/fence semantics are identical to enqueue followed
+// by ClaimWorkItemByID, but this avoids an extra round trip and prevents the
+// local worker from winning the claim race between those two operations.
+type enqueueAndClaimWorkQueue interface {
+	EnqueueAndClaimWorkItem(context.Context, agentrun.WorkItem, string, time.Time, time.Duration) (agentrun.WorkItem, error)
 }
 
 type queuedDelegationWork struct {
@@ -188,6 +199,9 @@ type preparedTask struct {
 	outputTokens  int64
 	reportTokens  int64
 	budget        agentapi.RunBudgetTaskReservation
+	queueWaitMS   int64
+	queueClaimMS  int64
+	settlementMS  int64
 }
 
 type taskOutcome struct {
@@ -268,19 +282,9 @@ func (executor *Executor) Execute(
 	ctx context.Context,
 	tasks []agentapi.DelegationTask,
 ) (agentapi.DelegationBatchResult, []tool.EvidenceUnit, error) {
-	parent, ok := ParentContextFrom(ctx)
-	if !ok || strings.TrimSpace(parent.RunID) == "" {
-		return agentapi.DelegationBatchResult{}, nil,
-			fmt.Errorf("delegation parent context is required")
-	}
-	invocationID, ok := tool.InvocationIDFromContext(ctx)
-	if !ok {
-		return agentapi.DelegationBatchResult{}, nil,
-			fmt.Errorf("delegation invocation id is required")
-	}
-	if len(tasks) == 0 {
-		return agentapi.DelegationBatchResult{}, nil,
-			fmt.Errorf("at least one delegation task is required")
+	parent, invocationID, err := delegationInvocation(ctx, tasks)
+	if err != nil {
+		return agentapi.DelegationBatchResult{}, nil, err
 	}
 	parent.InvocationID = invocationID
 	delegationID := stableID("del", parent.RunID, invocationID)
@@ -288,6 +292,103 @@ func (executor *Executor) Execute(
 		DelegationID: delegationID,
 		Results:      make([]agentapi.DelegationReport, len(tasks)),
 	}
+
+	prepared, err := executor.prepareTasks(ctx, parent, delegationID, tasks, &result)
+	if err != nil {
+		return agentapi.DelegationBatchResult{}, nil, err
+	}
+	evidenceLedger := cloneEvidenceIndex(parent.Evidence)
+	if len(prepared) == 0 {
+		return result, nil, executor.finalizeBatch(
+			ctx, parent, &result, evidenceLedger, nil,
+		)
+	}
+
+	if err := executor.reserveTaskBudgets(ctx, prepared); err != nil {
+		releaseTaskBudgets(prepared)
+		if rejectErr := executor.rejectPreparedTasks(
+			ctx, parent, delegationID, prepared, ErrorBudgetInsufficient, err, &result,
+		); rejectErr != nil {
+			return agentapi.DelegationBatchResult{}, nil, rejectErr
+		}
+		return result, nil, executor.finalizeBatch(
+			ctx, parent, &result, evidenceLedger, nil,
+		)
+	}
+
+	records, err := executor.persistence.ReserveDelegationBatch(
+		ctx,
+		agentrun.DelegationAdmission{
+			ParentRunID: parent.RunID, DelegationID: delegationID,
+			MaxChildren:         executor.policy.MaxChildren,
+			MaxTotalTokens:      executor.policy.MaxTotalTokens,
+			MaxTotalCostMicros:  executor.policy.MaxTotalCostMicros,
+			ParentAnswerReserve: executor.policy.ParentAnswerReserve,
+			Reservations:        delegationReservations(parent, delegationID, prepared),
+		},
+	)
+	if err != nil {
+		releaseTaskBudgets(prepared)
+		code, handled := delegationReservationErrorCode(err)
+		if !handled {
+			return agentapi.DelegationBatchResult{}, nil,
+				fmt.Errorf("reserve delegation batch: %w", err)
+		}
+		if rejectErr := executor.rejectPreparedTasks(
+			ctx, parent, delegationID, prepared, code, err, &result,
+		); rejectErr != nil {
+			return agentapi.DelegationBatchResult{}, nil, rejectErr
+		}
+		return result, nil, executor.finalizeBatch(
+			ctx, parent, &result, evidenceLedger, nil,
+		)
+	}
+
+	// The durable queue remains the recovery boundary. Stores with atomic
+	// enqueue+claim skip the separate enqueue pass and avoid the parent/worker
+	// lease race; legacy queues retain the explicit enqueue path.
+	if _, fastPath := executor.queue.(enqueueAndClaimWorkQueue); !fastPath {
+		if err := executor.enqueueTasks(ctx, parent, delegationID, prepared); err != nil {
+			return agentapi.DelegationBatchResult{}, nil, fmt.Errorf("enqueue delegation work: %w", err)
+		}
+	}
+	outcomes := executor.runTasks(
+		ctx, parent, delegationID, prepared, delegationRecordsByIndex(records),
+	)
+	evidenceLedger, returnedEvidence, observations := collectTaskOutcomes(
+		outcomes, result.Results, evidenceLedger,
+	)
+	err = executor.finalizeBatch(
+		ctx, parent, &result, evidenceLedger, observations,
+	)
+	return result, returnedEvidence, err
+}
+
+func delegationInvocation(
+	ctx context.Context,
+	tasks []agentapi.DelegationTask,
+) (ParentContext, string, error) {
+	parent, ok := ParentContextFrom(ctx)
+	if !ok || strings.TrimSpace(parent.RunID) == "" {
+		return ParentContext{}, "", fmt.Errorf("delegation parent context is required")
+	}
+	invocationID, ok := tool.InvocationIDFromContext(ctx)
+	if !ok {
+		return ParentContext{}, "", fmt.Errorf("delegation invocation id is required")
+	}
+	if len(tasks) == 0 {
+		return ParentContext{}, "", fmt.Errorf("at least one delegation task is required")
+	}
+	return parent, invocationID, nil
+}
+
+func (executor *Executor) prepareTasks(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	tasks []agentapi.DelegationTask,
+	result *agentapi.DelegationBatchResult,
+) ([]preparedTask, error) {
 	prepared := make([]preparedTask, 0, len(tasks))
 	seenTasks := make(map[string]struct{}, len(tasks))
 	for index, task := range tasks {
@@ -295,83 +396,88 @@ func (executor *Executor) Execute(
 		candidate, code, err := executor.prepareTask(
 			parent, delegationID, index, task, seenTasks,
 		)
-		if err != nil {
-			report, persistErr := executor.reject(
-				ctx, parent, delegationID, index, task,
-				candidate.capability, candidate.objectiveHash, code, err,
-			)
-			if persistErr != nil {
-				return agentapi.DelegationBatchResult{}, nil, persistErr
-			}
-			result.Results[index] = report
+		if err == nil {
+			prepared = append(prepared, candidate)
 			continue
 		}
-		prepared = append(prepared, candidate)
-	}
-	rootGate := agentapi.RunBudgetTaskGateFromContext(ctx)
-	if rootGate != nil {
-		reserved := make([]agentapi.RunBudgetTaskReservation, 0, len(prepared))
-		reserveErr := error(nil)
-		for index := range prepared {
-			grant := taskBudgetGrant(prepared[index])
-			prepared[index].budget, reserveErr = rootGate.ReserveTask(grant)
-			if reserveErr != nil {
-				break
-			}
-			if prepared[index].budget != nil {
-				reserved = append(reserved, prepared[index].budget)
-			}
-		}
-		if reserveErr != nil {
-			for _, reservation := range reserved {
-				_ = reservation.Release()
-			}
-			for _, task := range prepared {
-				report, rejectErr := executor.reject(
-					ctx, parent, delegationID, task.index, task.request,
-					task.capability, task.objectiveHash, ErrorBudgetInsufficient, reserveErr,
-				)
-				if rejectErr != nil {
-					return agentapi.DelegationBatchResult{}, nil, rejectErr
-				}
-				result.Results[task.index] = report
-			}
-			validation, validateErr := executor.validator.ValidateWithContext(
-				ctx, result.Results, cloneEvidenceIndex(parent.Evidence),
-				parent.Context, nil, parent.HighRisk,
-			)
-			result.Validation = validation
-			executor.emitValidation(parent, delegationID, validation, validateErr)
-			executor.attachVerification(
-				ctx, parent, &result, cloneEvidenceIndex(parent.Evidence), nil, validateErr,
-			)
-			return result, nil, validateErr
-		}
-	}
-	if len(prepared) == 0 {
-		validation, err := executor.validator.ValidateWithContext(
-			ctx,
-			result.Results,
-			cloneEvidenceIndex(parent.Evidence),
-			parent.Context,
-			nil,
-			parent.HighRisk,
+		report, persistErr := executor.reject(
+			ctx, parent, delegationID, index, task,
+			candidate.capability, candidate.objectiveHash, code, err,
 		)
-		result.Validation = validation
-		executor.emitValidation(parent, delegationID, validation, err)
-		executor.attachVerification(
-			ctx,
-			parent,
-			&result,
-			cloneEvidenceIndex(parent.Evidence),
-			nil,
-			err,
-		)
-		return result, nil, err
+		if persistErr != nil {
+			return nil, persistErr
+		}
+		result.Results[index] = report
 	}
+	return prepared, nil
+}
 
-	reservations := make([]agentrun.DelegationReservation, len(prepared))
-	for index, task := range prepared {
+func (executor *Executor) reserveTaskBudgets(
+	ctx context.Context,
+	tasks []preparedTask,
+) error {
+	rootGate := agentapi.RunBudgetTaskGateFromContext(ctx)
+	if rootGate == nil {
+		return nil
+	}
+	for index := range tasks {
+		reservation, err := rootGate.ReserveTask(taskBudgetGrant(tasks[index]))
+		if err != nil {
+			return err
+		}
+		tasks[index].budget = reservation
+	}
+	return nil
+}
+
+func releaseTaskBudgets(tasks []preparedTask) {
+	for _, task := range tasks {
+		if task.budget != nil {
+			_ = task.budget.Release()
+		}
+	}
+}
+
+func (executor *Executor) rejectPreparedTasks(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	tasks []preparedTask,
+	code string,
+	cause error,
+	result *agentapi.DelegationBatchResult,
+) error {
+	for _, task := range tasks {
+		report, err := executor.reject(
+			ctx, parent, delegationID, task.index, task.request,
+			task.capability, task.objectiveHash, code, cause,
+		)
+		if err != nil {
+			return err
+		}
+		result.Results[task.index] = report
+	}
+	return nil
+}
+
+func delegationReservationErrorCode(err error) (string, bool) {
+	switch {
+	case errors.Is(err, agentrun.ErrDelegationChildLimit):
+		return ErrorChildLimitExceeded, true
+	case errors.Is(err, agentrun.ErrDelegationBudgetInsufficient):
+		return ErrorBudgetInsufficient, true
+	default:
+		return "", false
+	}
+}
+
+func delegationReservations(
+	parent ParentContext,
+	delegationID string,
+	tasks []preparedTask,
+) []agentrun.DelegationReservation {
+	reservations := make([]agentrun.DelegationReservation, len(tasks))
+	for index, task := range tasks {
 		reservations[index] = agentrun.DelegationReservation{
 			ParentRunID: parent.RunID, DelegationID: delegationID,
 			TaskIndex: task.index, ChildRunID: task.childRunID,
@@ -385,80 +491,43 @@ func (executor *Executor) Execute(
 			ReservedCostMicros: task.limits.MaxCostMicros,
 		}
 	}
-	records, err := executor.persistence.ReserveDelegationBatch(
-		ctx,
-		agentrun.DelegationAdmission{
-			ParentRunID: parent.RunID, DelegationID: delegationID,
-			MaxChildren:         executor.policy.MaxChildren,
-			MaxTotalTokens:      executor.policy.MaxTotalTokens,
-			MaxTotalCostMicros:  executor.policy.MaxTotalCostMicros,
-			ParentAnswerReserve: executor.policy.ParentAnswerReserve,
-			Reservations:        reservations,
-		},
-	)
-	if err != nil {
-		for _, task := range prepared {
-			if task.budget != nil {
-				_ = task.budget.Release()
-			}
-		}
-		code := ErrorBudgetInsufficient
-		if errors.Is(err, agentrun.ErrDelegationChildLimit) {
-			code = ErrorChildLimitExceeded
-		} else if !errors.Is(err, agentrun.ErrDelegationBudgetInsufficient) {
-			return agentapi.DelegationBatchResult{}, nil,
-				fmt.Errorf("reserve delegation batch: %w", err)
-		}
-		for _, task := range prepared {
-			report, rejectErr := executor.reject(
-				ctx, parent, delegationID, task.index, task.request,
-				task.capability, task.objectiveHash, code, err,
-			)
-			if rejectErr != nil {
-				return agentapi.DelegationBatchResult{}, nil, rejectErr
-			}
-			result.Results[task.index] = report
-		}
-		validation, validateErr := executor.validator.ValidateWithContext(
-			ctx,
-			result.Results,
-			cloneEvidenceIndex(parent.Evidence),
-			parent.Context,
-			nil,
-			parent.HighRisk,
-		)
-		result.Validation = validation
-		executor.emitValidation(parent, delegationID, validation, validateErr)
-		executor.attachVerification(
-			ctx,
-			parent,
-			&result,
-			cloneEvidenceIndex(parent.Evidence),
-			nil,
-			validateErr,
-		)
-		return result, nil, validateErr
-	}
+	return reservations
+}
 
-	recordByIndex := make(map[int]agentrun.DelegationTaskRecord, len(records))
+func delegationRecordsByIndex(
+	records []agentrun.DelegationTaskRecord,
+) map[int]agentrun.DelegationTaskRecord {
+	indexed := make(map[int]agentrun.DelegationTaskRecord, len(records))
 	for _, record := range records {
-		recordByIndex[record.TaskIndex] = record
+		indexed[record.TaskIndex] = record
 	}
-	if err := executor.enqueueTasks(ctx, parent, delegationID, prepared); err != nil {
-		return agentapi.DelegationBatchResult{}, nil, fmt.Errorf("enqueue delegation work: %w", err)
-	}
-	outcomes := executor.runTasks(ctx, parent, delegationID, prepared, recordByIndex)
-	evidenceLedger := cloneEvidenceIndex(parent.Evidence)
+	return indexed
+}
+
+func collectTaskOutcomes(
+	outcomes []indexedOutcome,
+	reports []agentapi.DelegationReport,
+	evidenceLedger map[string]tool.EvidenceUnit,
+) (map[string]tool.EvidenceUnit, []tool.EvidenceUnit, []agentapi.EvidenceObservation) {
 	var returnedEvidence []tool.EvidenceUnit
-	for _, outcome := range outcomes {
-		result.Results[outcome.reportIndex()] = outcome.report
-		evidenceLedger = AddEvidenceUnits(evidenceLedger, outcome.evidence)
-		returnedEvidence = append(returnedEvidence, cloneEvidenceUnits(outcome.evidence)...)
-	}
 	var observations []agentapi.EvidenceObservation
 	for _, outcome := range outcomes {
+		reports[outcome.reportIndex()] = outcome.report
+		evidenceLedger = AddEvidenceUnits(evidenceLedger, outcome.evidence)
+		returnedEvidence = append(returnedEvidence, cloneEvidenceUnits(outcome.evidence)...)
 		observations = append(observations, outcome.observations...)
 	}
+	return evidenceLedger, returnedEvidence, observations
+}
+
+func (executor *Executor) finalizeBatch(
+	ctx context.Context,
+	parent ParentContext,
+	result *agentapi.DelegationBatchResult,
+	evidenceLedger map[string]tool.EvidenceUnit,
+	observations []agentapi.EvidenceObservation,
+) error {
+	validationStarted := time.Now()
 	validation, err := executor.validator.ValidateWithContext(
 		ctx,
 		result.Results,
@@ -467,17 +536,13 @@ func (executor *Executor) Execute(
 		observations,
 		parent.HighRisk,
 	)
+	validationMS := time.Since(validationStarted).Milliseconds()
 	result.Validation = validation
-	executor.emitValidation(parent, delegationID, validation, err)
+	executor.emitValidation(parent, result.DelegationID, validation, err, validationMS)
 	executor.attachVerification(
-		ctx,
-		parent,
-		&result,
-		evidenceLedger,
-		observations,
-		err,
+		ctx, parent, result, evidenceLedger, observations, err,
 	)
-	return result, returnedEvidence, err
+	return err
 }
 
 func (executor *Executor) prepareTask(
@@ -492,14 +557,8 @@ func (executor *Executor) prepareTask(
 	request.FocusFacets = canonicalStrings(request.FocusFacets)
 	request.EvidenceRefs = canonicalStrings(request.EvidenceRefs)
 	candidate := preparedTask{index: index, request: request}
-	if parent.Depth+1 > executor.policy.MaxDepth {
-		return candidate, ErrorDepthExceeded, fmt.Errorf("delegation depth exceeds %d", executor.policy.MaxDepth)
-	}
-	if index >= executor.policy.MaxChildren {
-		return candidate, ErrorChildLimitExceeded, fmt.Errorf("delegation child limit is %d", executor.policy.MaxChildren)
-	}
-	if request.Objective == "" || len(request.Objective) > maxObjectiveBytes {
-		return candidate, ErrorInvalidObjective, fmt.Errorf("delegation objective must be between 1 and %d bytes", maxObjectiveBytes)
+	if code, err := executor.validateTaskAdmission(parent, index, request); err != nil {
+		return candidate, code, err
 	}
 
 	capability, err := executor.capabilities.Resolve(
@@ -508,21 +567,10 @@ func (executor *Executor) prepareTask(
 	if err != nil {
 		return candidate, ErrorUnknownCapability, err
 	}
+	if code, err := executor.validateTaskCapability(capability); err != nil {
+		return candidate, code, err
+	}
 	candidate.capability = capability
-	if !capability.Enabled {
-		return candidate, ErrorCapabilityDisabled, fmt.Errorf("capability %q is disabled", capability.ID)
-	}
-	if capability.Role != agentapi.RoleInvestigator {
-		return candidate, ErrorCapabilityRole, fmt.Errorf("capability %q is not an investigator", capability.ID)
-	}
-	if capability.SideEffects != agentapi.SideEffectNone {
-		return candidate, ErrorCapabilityNotReadOnly, fmt.Errorf("capability %q is not read-only", capability.ID)
-	}
-	if len(executor.allowlist) > 0 {
-		if _, allowed := executor.allowlist[capability.ID]; !allowed {
-			return candidate, ErrorCapabilityNotAllowed, fmt.Errorf("capability %q is not enabled for delegation", capability.ID)
-		}
-	}
 	request.FocusFacets = filterAuthorizedFacets(request.FocusFacets, capability.InputFacets)
 	request.EvidenceRefs = filterAuthorizedRefs(request.EvidenceRefs, parent)
 	if len(request.EvidenceRefs) > maxEvidenceRefs {
@@ -531,46 +579,14 @@ func (executor *Executor) prepareTask(
 	objectiveHash := hashJSON(request)
 	candidate.request = request
 	candidate.objectiveHash = objectiveHash
-	key := hashJSON(struct {
-		Capability   string
-		Objective    string
-		FocusFacets  []string
-		EvidenceRefs []string
-	}{
-		Capability: request.Capability, Objective: request.Objective,
-		FocusFacets: request.FocusFacets, EvidenceRefs: request.EvidenceRefs,
-	})
-	if _, duplicate := seen[key]; duplicate {
-		return candidate, ErrorDuplicateTask, fmt.Errorf("duplicate delegation task")
+	if err := executor.registerTaskDuplicate(candidate, seen); err != nil {
+		return candidate, ErrorDuplicateTask, err
 	}
-	seen[key] = struct{}{}
-	definition, err := executor.definitions.Resolve(capability.Agent)
-	if err != nil {
-		return candidate, ErrorUnknownCapability, err
+	if err := executor.prepareTaskDefinition(parent, &candidate, capability); err != nil {
+		return candidate, ErrorCapabilityNotAllowed, err
 	}
-	candidate.definition = definition
-	candidate.permissions = intersectPermissions(
-		parent.Permissions,
-		agentapi.PermissionPolicy{Scopes: capability.PermissionScope},
-	)
-	if len(candidate.permissions.Scopes) == 0 {
-		return candidate, ErrorCapabilityNotAllowed,
-			fmt.Errorf("parent has no permission accepted by capability %q", capability.ID)
-	}
-	childBudget := executor.childBudget(parent)
-	candidate.inputTokens = childBudget.inputTokens
-	candidate.outputTokens = childBudget.outputTokens
-	candidate.reportTokens = childBudget.reportTokens
-	candidate.context = selectContext(
-		parent, request.EvidenceRefs, request.FocusFacets,
-		childBudget.inputTokens,
-	)
-	input, err := childInput(parent, delegationID, candidate)
-	if err != nil {
+	if err := executor.prepareTaskBudget(parent, delegationID, &candidate, capability); err != nil {
 		return candidate, ErrorChildInputLimit, err
-	}
-	if estimateTokens(input, candidate.context) > childBudget.inputTokens {
-		return candidate, ErrorChildInputLimit, fmt.Errorf("delegation child input exceeds token limit")
 	}
 	candidate.childRunID = stableID(
 		"run_child", parent.RunID, delegationID, fmt.Sprintf("%d", index),
@@ -578,7 +594,7 @@ func (executor *Executor) prepareTask(
 	)
 	candidate.reportID = stableID("report", candidate.childRunID)
 	candidate.artifactID = stableID("artifact", candidate.reportID)
-	limits, err := executor.childLimits(parent, definition)
+	limits, err := executor.childLimits(parent, candidate.definition)
 	if err != nil {
 		return candidate, ErrorParentTimeInsufficient, err
 	}
@@ -587,6 +603,89 @@ func (executor *Executor) prepareTask(
 		candidate.outputTokens = limits.MaxOutputTokens
 	}
 	return candidate, "", nil
+}
+
+func (executor *Executor) validateTaskAdmission(parent ParentContext, index int, request agentapi.DelegationTask) (string, error) {
+	if parent.Depth+1 > executor.policy.MaxDepth {
+		return ErrorDepthExceeded, fmt.Errorf("delegation depth exceeds %d", executor.policy.MaxDepth)
+	}
+	if index >= executor.policy.MaxChildren {
+		return ErrorChildLimitExceeded, fmt.Errorf("delegation child limit is %d", executor.policy.MaxChildren)
+	}
+	if request.Objective == "" || len(request.Objective) > maxObjectiveBytes {
+		return ErrorInvalidObjective, fmt.Errorf("delegation objective must be between 1 and %d bytes", maxObjectiveBytes)
+	}
+	return "", nil
+}
+
+func (executor *Executor) validateTaskCapability(capability agentapi.Capability) (string, error) {
+	if !capability.Enabled {
+		return ErrorCapabilityDisabled, fmt.Errorf("capability %q is disabled", capability.ID)
+	}
+	if capability.Role != agentapi.RoleInvestigator {
+		return ErrorCapabilityRole, fmt.Errorf("capability %q is not an investigator", capability.ID)
+	}
+	if capability.SideEffects != agentapi.SideEffectNone {
+		return ErrorCapabilityNotReadOnly, fmt.Errorf("capability %q is not read-only", capability.ID)
+	}
+	if len(executor.allowlist) > 0 {
+		if _, allowed := executor.allowlist[capability.ID]; !allowed {
+			return ErrorCapabilityNotAllowed, fmt.Errorf("capability %q is not enabled for delegation", capability.ID)
+		}
+	}
+	return "", nil
+}
+
+func (executor *Executor) registerTaskDuplicate(candidate preparedTask, seen map[string]struct{}) error {
+	key := hashJSON(struct {
+		Capability   string
+		Objective    string
+		FocusFacets  []string
+		EvidenceRefs []string
+	}{
+		Capability: candidate.request.Capability, Objective: candidate.request.Objective,
+		FocusFacets: candidate.request.FocusFacets, EvidenceRefs: candidate.request.EvidenceRefs,
+	})
+	if _, duplicate := seen[key]; duplicate {
+		return fmt.Errorf("duplicate delegation task")
+	}
+	seen[key] = struct{}{}
+	return nil
+}
+
+func (executor *Executor) prepareTaskDefinition(parent ParentContext, candidate *preparedTask, capability agentapi.Capability) error {
+	definition, err := executor.definitions.Resolve(capability.Agent)
+	if err != nil {
+		return err
+	}
+	candidate.definition = definition
+	candidate.permissions = intersectPermissions(
+		parent.Permissions,
+		agentapi.PermissionPolicy{Scopes: capability.PermissionScope},
+	)
+	if len(candidate.permissions.Scopes) == 0 {
+		return fmt.Errorf("parent has no permission accepted by capability %q", capability.ID)
+	}
+	return nil
+}
+
+func (executor *Executor) prepareTaskBudget(parent ParentContext, delegationID string, candidate *preparedTask, capability agentapi.Capability) error {
+	childBudget := executor.childBudget(parent)
+	candidate.inputTokens = childBudget.inputTokens
+	candidate.outputTokens = childBudget.outputTokens
+	candidate.reportTokens = childBudget.reportTokens
+	candidate.context = selectContext(
+		parent, candidate.request.EvidenceRefs, candidate.request.FocusFacets,
+		childBudget.inputTokens,
+	)
+	input, err := childInput(parent, delegationID, *candidate)
+	if err != nil {
+		return err
+	}
+	if estimateTokens(input, candidate.context) > childBudget.inputTokens {
+		return fmt.Errorf("delegation child input exceeds token limit")
+	}
+	return nil
 }
 
 func delegationWorkID(delegationID string, taskIndex int) string {
@@ -602,16 +701,13 @@ func (executor *Executor) enqueueTasks(ctx context.Context, parent ParentContext
 		return fmt.Errorf("worker owner is required when durable delegation queue is enabled")
 	}
 	for _, task := range tasks {
-		payload, err := json.Marshal(queuedDelegationWork{Parent: parent, Task: task.request})
+		durableCtx, cancelDurable := executor.durableContext(ctx)
+		item, err := executor.queuedWorkItem(parent, delegationID, task)
 		if err != nil {
+			cancelDurable()
 			return err
 		}
-		durableCtx, cancelDurable := executor.durableContext(ctx)
-		err = executor.queue.EnqueueWorkItem(durableCtx, agentrun.WorkItem{
-			WorkID: delegationWorkID(delegationID, task.index), RunID: parent.RunID,
-			ParentRunID: parent.RunID, DelegationID: delegationID, TaskIndex: task.index,
-			AttemptNo: 1, Kind: "delegation_child", Payload: payload, State: agentrun.WorkReady,
-		})
+		err = executor.queue.EnqueueWorkItem(durableCtx, item)
 		cancelDurable()
 		if err != nil {
 			return err
@@ -624,10 +720,30 @@ func (executor *Executor) runQueuedOrInline(ctx context.Context, parent ParentCo
 	if executor.queue == nil {
 		return executor.runTask(ctx, parent, delegationID, task, record)
 	}
-	durableCtx, cancelDurable := executor.durableContext(ctx)
-	item, err := executor.queue.ClaimWorkItemByID(durableCtx, delegationWorkID(delegationID, task.index), executor.workerOwner, time.Now().UTC(), executor.workerLeaseTTL)
-	cancelDurable()
+
+	workItem, marshalErr := executor.queuedWorkItem(parent, delegationID, task)
+	if marshalErr != nil {
+		return taskOutcome{report: failedReport(task, ErrorReportPersistenceFailed, marshalErr)}
+	}
+	claimStarted := time.Now()
+	var item agentrun.WorkItem
+	var err error
+	if fastPath, ok := executor.queue.(enqueueAndClaimWorkQueue); ok {
+		durableCtx, cancelDurable := executor.durableContext(ctx)
+		item, err = fastPath.EnqueueAndClaimWorkItem(
+			durableCtx, workItem, executor.workerOwner, claimStarted.UTC(), executor.workerLeaseTTL,
+		)
+		cancelDurable()
+	} else {
+		durableCtx, cancelDurable := executor.durableContext(ctx)
+		item, err = executor.queue.ClaimWorkItemByID(
+			durableCtx, workItem.WorkID, executor.workerOwner, claimStarted.UTC(), executor.workerLeaseTTL,
+		)
+		cancelDurable()
+	}
+	task.queueClaimMS = time.Since(claimStarted).Milliseconds()
 	if err == nil {
+		task.queueWaitMS = workItemQueueWaitMS(item)
 		return executor.runClaimedWork(ctx, parent, delegationID, task, record, item)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -638,12 +754,38 @@ func (executor *Executor) runQueuedOrInline(ctx context.Context, parent ParentCo
 		return taskOutcome{report: report}
 	}
 
-	// A process-local child worker may have won the queue lease between
-	// enqueue and this parent-side claim. That is not a task failure: wait for
-	// the durable delegation projection and replay the persisted report. The
-	// task reservation remains owned by this parent until the persisted
-	// settlement is observed, at which point Release closes it exactly once.
+	// A different worker may already own the item (or a previous attempt may
+	// have settled it). That is not a task failure: wait for the durable
+	// delegation projection and replay the persisted report. The reservation
+	// remains owned by this parent until the persisted settlement is observed.
 	return executor.waitForQueuedTask(ctx, parent, delegationID, task)
+}
+
+func (executor *Executor) queuedWorkItem(parent ParentContext, delegationID string, task preparedTask) (agentrun.WorkItem, error) {
+	payload, err := json.Marshal(queuedDelegationWork{Parent: parent, Task: task.request})
+	if err != nil {
+		return agentrun.WorkItem{}, fmt.Errorf("marshal queued delegation work: %w", err)
+	}
+	return agentrun.WorkItem{
+		WorkID: delegationWorkID(delegationID, task.index), RunID: parent.RunID,
+		ParentRunID: parent.RunID, DelegationID: delegationID, TaskIndex: task.index,
+		AttemptNo: 1, Kind: "delegation_child", Payload: payload, State: agentrun.WorkReady,
+	}, nil
+}
+
+func workItemQueueWaitMS(item agentrun.WorkItem) int64 {
+	if strings.TrimSpace(item.AvailableAt) == "" {
+		return 0
+	}
+	availableAt, err := time.Parse(time.RFC3339Nano, item.AvailableAt)
+	if err != nil {
+		return 0
+	}
+	wait := time.Since(availableAt).Milliseconds()
+	if wait < 0 {
+		return 0
+	}
+	return wait
 }
 
 func (executor *Executor) runClaimedWork(ctx context.Context, parent ParentContext, delegationID string, task preparedTask, record agentrun.DelegationTaskRecord, item agentrun.WorkItem) taskOutcome {
@@ -860,6 +1002,7 @@ func (executor *Executor) RunOneQueuedWork(ctx context.Context) (bool, error) {
 	}
 	var item agentrun.WorkItem
 	var err error
+	claimStarted := time.Now()
 	claimCtx, cancelClaim := executor.durableContext(ctx)
 	if typed, ok := executor.queue.(kindWorkQueue); ok {
 		item, err = typed.ClaimWorkItemByKind(claimCtx, "delegation_child", executor.workerOwner, time.Now().UTC(), executor.workerLeaseTTL)
@@ -867,6 +1010,7 @@ func (executor *Executor) RunOneQueuedWork(ctx context.Context) (bool, error) {
 		item, err = executor.queue.ClaimWorkItem(claimCtx, executor.workerOwner, time.Now().UTC(), executor.workerLeaseTTL)
 	}
 	cancelClaim()
+	queueClaimMS := time.Since(claimStarted).Milliseconds()
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -888,6 +1032,8 @@ func (executor *Executor) RunOneQueuedWork(ctx context.Context) (bool, error) {
 		_ = executor.completeWorkItem(ctx, item, agentrun.WorkFailed, err.Error())
 		return true, fmt.Errorf("prepare queued child: %s: %w", code, err)
 	}
+	prepared.queueWaitMS = workItemQueueWaitMS(item)
+	prepared.queueClaimMS = queueClaimMS
 	readCtx, cancelRead := executor.durableContext(ctx)
 	record, _, err := executor.persistence.GetDelegationTask(readCtx, parent.RunID, item.DelegationID, item.TaskIndex)
 	cancelRead()
@@ -996,6 +1142,160 @@ func (executor *Executor) runTask(
 	return outcome
 }
 
+func (executor *Executor) prepareAttempt(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedTask,
+	attemptTask preparedTask,
+	attemptNo int,
+	attemptID string,
+	attemptStore AttemptPersistence,
+) (preparedTask, taskOutcome, bool) {
+	if attemptNo == 1 {
+		linkCtx, cancelLink := executor.cleanupContext(ctx)
+		err := executor.persistence.LinkDelegationChild(
+			linkCtx, parent.RunID, delegationID, task.index, attemptTask.childRunID,
+		)
+		cancelLink()
+		if err != nil {
+			report := failedReport(attemptTask, ErrorChildExecution, err)
+			executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
+				agentrun.DelegationAttemptFailed, false, report.Error, nil, "", "")
+			executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
+			return attemptTask, taskOutcome{report: report}, true
+		}
+		return attemptTask, taskOutcome{}, false
+	}
+	if attemptStore != nil {
+		linkCtx, cancelLink := executor.cleanupContext(ctx)
+		err := attemptStore.LinkDelegationAttemptChild(
+			linkCtx, parent.RunID, delegationID,
+			task.index, attemptNo, attemptTask.childRunID,
+		)
+		cancelLink()
+		if err != nil {
+			report := failedReport(attemptTask, ErrorReportPersistenceFailed, err)
+			executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
+				agentrun.DelegationAttemptFailed, false, report.Error, nil, "", "")
+			executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
+			return attemptTask, taskOutcome{report: report}, true
+		}
+		return attemptTask, taskOutcome{}, false
+	}
+	// Legacy embedders without attempt persistence cannot safely switch the
+	// task's durable child identity, so keep retries on the stable child ID.
+	attemptTask.childRunID = task.childRunID
+	return attemptTask, taskOutcome{}, false
+}
+
+func (executor *Executor) executeAttempt(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	attemptTask preparedTask,
+) (time.Time, agentapi.RunResult, error, error) {
+	started := time.Now()
+	executor.emit(
+		agentrun.EventDelegationStarted, parent, delegationID,
+		attemptTask.childRunID, attemptTask.request, "running", "", "", 0, agentapi.Usage{},
+	)
+	executor.markCheckpoint(ctx, parent, delegationID, attemptTask, "pending", "", "")
+	stopToolProjection := func() {}
+	if projector, ok := executor.runtime.(toolEventProjector); ok {
+		stopToolProjection = projector.ProjectToolEvents(
+			attemptTask.childRunID, parent.RunID, "", attemptTask.childRunID,
+		)
+	}
+	runCtx, cancel := context.WithDeadline(ctx, attemptTask.limits.Deadline)
+	if attemptTask.budget != nil {
+		runCtx = agentapi.WithRunBudgetGate(runCtx, attemptTask.budget)
+	}
+	result, runErr := executor.runtime.Run(runCtx, executor.runRequest(parent, delegationID, attemptTask))
+	childErr := runCtx.Err()
+	cancel()
+	stopToolProjection()
+	return started, result, runErr, childErr
+}
+
+func (executor *Executor) buildSettlementArtifacts(
+	attemptTask preparedTask,
+	raw []byte,
+	result agentapi.RunResult,
+) (*agentrun.DelegationArtifact, *agentrun.RunArtifact, error) {
+	artifact := &agentrun.DelegationArtifact{
+		ID: attemptTask.artifactID, RunID: attemptTask.childRunID,
+		Kind:        agentrun.DelegationReportArtifactKind,
+		Schema:      agentapi.SchemaRef{ID: "delegation.report", Version: 1},
+		ContentHash: hashBytes(raw), Content: raw,
+	}
+	if len(result.EvidenceUnits) == 0 {
+		return artifact, nil, nil
+	}
+	persisted, err := agentrun.NewEvidenceLedgerArtifact(
+		attemptTask.childRunID, result.EvidenceUnits,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return artifact, &persisted, nil
+}
+
+func (executor *Executor) preflightAttempt(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedTask,
+	record agentrun.DelegationTaskRecord,
+) (AttemptPersistence, int, int, preparedTask, error) {
+	attemptStore, _ := executor.persistence.(AttemptPersistence)
+	maxAttempts := 1 + task.definition.FailurePolicy.MaxInfrastructureRetries
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	attemptNo := 1
+	if !record.Existing || attemptStore == nil {
+		return attemptStore, attemptNo, maxAttempts, task, nil
+	}
+	latest, err := attemptStore.GetLatestDelegationAttempt(
+		ctx, parent.RunID, delegationID, task.index,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return attemptStore, attemptNo, maxAttempts, task, nil
+		}
+		return nil, 0, 0, task, err
+	}
+	attemptNo = latest.AttemptNo + 1
+	// The task projection follows the latest physical child attempt.
+	// Its immutable logical report ID remains unchanged.
+	if latest.ChildRunID != "" {
+		task.childRunID = latest.ChildRunID
+	}
+	if attemptNo > maxAttempts ||
+		(latest.Status != agentrun.DelegationAttemptRunning && !latest.Retryable) {
+		report := interruptedReport(task)
+		executor.settleUnavailable(ctx, parent, delegationID, task, report)
+		return nil, 0, 0, task, errAttemptUnrecoverable
+	}
+	if latest.Status == agentrun.DelegationAttemptRunning {
+		// A process restart can leave the previous physical child in
+		// running state. Close that attempt before starting its bounded
+		// recovery attempt; otherwise the attempt history is ambiguous.
+		interrupted := &agentapi.RunError{
+			Code:    ErrorInterrupted,
+			Message: "delegation attempt was interrupted before a durable result was available",
+		}
+		if finishErr := executor.finishAttempt(
+			ctx, parent, delegationID, task, latest.AttemptNo, latest.AttemptID,
+			agentrun.DelegationAttemptInterrupted, true, interrupted, latest.Usage, "", "",
+		); finishErr != nil {
+			return nil, 0, 0, task, finishErr
+		}
+	}
+	return attemptStore, attemptNo, maxAttempts, task, nil
+}
+
 func (executor *Executor) runTaskOwned(
 	ctx context.Context,
 	parent ParentContext,
@@ -1010,51 +1310,16 @@ func (executor *Executor) runTaskOwned(
 		return executor.replayTask(ctx, parent, delegationID, task)
 	}
 
-	attemptStore, _ := executor.persistence.(AttemptPersistence)
-	maxAttempts := 1 + task.definition.FailurePolicy.MaxInfrastructureRetries
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
-	attemptNo := 1
-	if record.Existing && attemptStore != nil {
-		latest, err := attemptStore.GetLatestDelegationAttempt(
-			ctx, parent.RunID, delegationID, task.index,
-		)
-		if err == nil {
-			attemptNo = latest.AttemptNo + 1
-			// The task projection follows the latest physical child attempt.
-			// Its immutable logical report ID remains unchanged.
-			if latest.ChildRunID != "" {
-				task.childRunID = latest.ChildRunID
-			}
-			if attemptNo > maxAttempts ||
-				(latest.Status != agentrun.DelegationAttemptRunning && !latest.Retryable) {
-				report := interruptedReport(task)
-				executor.settleUnavailable(ctx, parent, delegationID, task, report)
-				return taskOutcome{report: report}
-			}
-			if latest.Status == agentrun.DelegationAttemptRunning {
-				// A process restart can leave the previous physical child in
-				// running state. Close that attempt before starting its bounded
-				// recovery attempt; otherwise the attempt history is ambiguous.
-				interrupted := &agentapi.RunError{
-					Code:    ErrorInterrupted,
-					Message: "delegation attempt was interrupted before a durable result was available",
-				}
-				if err := executor.finishAttempt(
-					ctx, parent, delegationID, task, latest.AttemptNo, latest.AttemptID,
-					agentrun.DelegationAttemptInterrupted, true, interrupted, latest.Usage, "", "",
-				); err != nil {
-					report := failedReport(task, ErrorReportPersistenceFailed, err)
-					executor.settleUnavailable(ctx, parent, delegationID, task, report)
-					return taskOutcome{report: report}
-				}
-			}
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			report := failedReport(task, ErrorReportPersistenceFailed, err)
-			executor.settleUnavailable(ctx, parent, delegationID, task, report)
-			return taskOutcome{report: report}
+	attemptStore, attemptNo, maxAttempts, task, err := executor.preflightAttempt(
+		ctx, parent, delegationID, task, record,
+	)
+	if err != nil {
+		if errors.Is(err, errAttemptUnrecoverable) {
+			return taskOutcome{report: interruptedReport(task)}
 		}
+		report := failedReport(task, ErrorReportPersistenceFailed, err)
+		executor.settleUnavailable(ctx, parent, delegationID, task, report)
+		return taskOutcome{report: report}
 	}
 	if attemptNo < 1 {
 		attemptNo = 1
@@ -1094,196 +1359,204 @@ func (executor *Executor) runTaskOwned(
 	task.limits = limits
 
 	for {
-		attemptTask := task
-		if attemptNo > 1 {
-			attemptTask.childRunID = stableID(
-				"run_child_attempt", task.childRunID, fmt.Sprintf("%d", attemptNo),
-			)
-		}
-		attemptID := stableID(
-			"attempt", parent.RunID, delegationID, fmt.Sprintf("%d", task.index),
-			fmt.Sprintf("%d", attemptNo),
+		attemptTask, attemptID, outcome, failed := executor.beginOwnedAttempt(
+			ctx, parent, delegationID, task, attemptNo, attemptStore,
 		)
-		if attemptStore != nil {
-			attemptCtx, cancelAttempt := executor.cleanupContext(ctx)
-			_, err := attemptStore.StartDelegationAttempt(
-				attemptCtx, agentrun.DelegationAttemptStart{
-					ParentRunID: parent.RunID, DelegationID: delegationID,
-					TaskIndex: task.index, AttemptNo: attemptNo, AttemptID: attemptID,
-					ChildRunID: attemptTask.childRunID,
-					StartedAt:  time.Now().UTC().Format(time.RFC3339Nano),
-				},
-			)
-			cancelAttempt()
-			if err != nil {
-				report := failedReport(attemptTask, ErrorReportPersistenceFailed, err)
-				executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
-				return taskOutcome{report: report}
-			}
+		if failed {
+			return outcome
 		}
-		if attemptNo == 1 {
-			linkCtx, cancelLink := executor.cleanupContext(ctx)
-			err := executor.persistence.LinkDelegationChild(
-				linkCtx, parent.RunID, delegationID, task.index, attemptTask.childRunID,
-			)
-			cancelLink()
-			if err != nil {
-				report := failedReport(attemptTask, ErrorChildExecution, err)
-				executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
-					agentrun.DelegationAttemptFailed, false, report.Error, nil, "", "")
-				executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
-				return taskOutcome{report: report}
-			}
-		} else if attemptStore != nil {
-			linkCtx, cancelLink := executor.cleanupContext(ctx)
-			err := attemptStore.LinkDelegationAttemptChild(
-				linkCtx, parent.RunID, delegationID,
-				task.index, attemptNo, attemptTask.childRunID,
-			)
-			cancelLink()
-			if err != nil {
-				report := failedReport(attemptTask, ErrorReportPersistenceFailed, err)
-				executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
-					agentrun.DelegationAttemptFailed, false, report.Error, nil, "", "")
-				executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
-				return taskOutcome{report: report}
-			}
-		} else {
-			// Legacy embedders without attempt persistence cannot safely switch the
-			// task's durable child identity, so keep retries on the stable child ID.
-			attemptTask.childRunID = task.childRunID
+		started, result, runErr, childErr := executor.executeAttempt(
+			ctx, parent, delegationID, attemptTask,
+		)
+		nextAttemptNo, retry, outcome := executor.completeOwnedAttempt(
+			ctx, parent, delegationID, task, attemptTask, attemptID,
+			attemptNo, maxAttempts, started, result, runErr, childErr,
+		)
+		if retry {
+			attemptNo = nextAttemptNo
+			continue
 		}
+		return outcome
+	}
+}
 
-		started := time.Now()
-		executor.emit(
-			agentrun.EventDelegationStarted, parent, delegationID,
-			attemptTask.childRunID, attemptTask.request, "running", "", "", 0, agentapi.Usage{},
+func (executor *Executor) beginOwnedAttempt(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedTask,
+	attemptNo int,
+	attemptStore AttemptPersistence,
+) (preparedTask, string, taskOutcome, bool) {
+	attemptTask := task
+	if attemptNo > 1 {
+		attemptTask.childRunID = stableID(
+			"run_child_attempt", task.childRunID, fmt.Sprintf("%d", attemptNo),
 		)
-		executor.markCheckpoint(ctx, parent, delegationID, attemptTask, "pending", "", "")
-		stopToolProjection := func() {}
-		if projector, ok := executor.runtime.(toolEventProjector); ok {
-			stopToolProjection = projector.ProjectToolEvents(
-				attemptTask.childRunID, parent.RunID, "", attemptTask.childRunID,
-			)
-		}
-		runCtx, cancel := context.WithDeadline(ctx, attemptTask.limits.Deadline)
-		if attemptTask.budget != nil {
-			runCtx = agentapi.WithRunBudgetGate(runCtx, attemptTask.budget)
-		}
-		result, runErr := executor.runtime.Run(runCtx, executor.runRequest(parent, delegationID, attemptTask))
-		childErr := runCtx.Err()
-		cancel()
-		stopToolProjection()
-		result = normalizeChildResult(result, attemptTask, runErr, childErr, ctx)
-		if attemptTask.inputTokens > 0 && result.Usage.InputTokens > attemptTask.inputTokens {
-			result.Status = agentapi.RunFailed
-			result.Error = &agentapi.RunError{Code: ErrorChildInputLimit, Message: "child input token limit exceeded"}
-		}
-		if attemptTask.outputTokens > 0 && result.Usage.OutputTokens > attemptTask.outputTokens {
-			result.Status = agentapi.RunFailed
-			result.Error = &agentapi.RunError{Code: ErrorChildOutputLimit, Message: "child output token limit exceeded"}
-		}
-		retryable := retryableChildResult(result, runErr, childErr, ctx)
-		if retryable && attemptNo < maxAttempts {
-			delay := retryBackoff(attemptNo)
-			next := time.Now().UTC().Add(delay)
-			executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
-				agentrun.DelegationAttemptFailed, true, result.Error,
-				&result.Usage, next.Format(time.RFC3339Nano), "")
-			if !waitRetry(ctx, delay, attemptTask.limits.Deadline) {
-				retryable = false
-			} else {
-				attemptNo++
-				continue
-			}
-		}
-
-		flowEvidence := AddEvidenceUnits(
-			cloneEvidenceIndex(parent.Evidence), result.EvidenceUnits,
-		)
-		report, err := projectReportWithEvidence(
-			result, attemptTask.capability.ID, attemptTask.reportID, flowEvidence,
-		)
-		if err != nil {
-			report = failedReport(attemptTask, ErrorChildExecution, err)
-			report.Usage = publicDelegationUsage(result)
-		}
-		reportTokens := attemptTask.reportTokens
-		if reportTokens <= 0 {
-			reportTokens = executor.policy.MaxReportTokens
-		}
-		report = boundReport(report, reportTokens)
-		raw, marshalErr := json.Marshal(report)
-		if marshalErr != nil {
-			report = failedReport(attemptTask, ErrorReportPersistenceFailed, marshalErr)
-			executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
-				agentrun.DelegationAttemptFailed, false, report.Error, &result.Usage, "", "")
-			executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
-			executor.emitTerminal(parent, delegationID, attemptTask, report, started)
-			return taskOutcome{report: report}
-		}
-		artifact := &agentrun.DelegationArtifact{
-			ID: attemptTask.artifactID, RunID: attemptTask.childRunID,
-			Kind:        agentrun.DelegationReportArtifactKind,
-			Schema:      agentapi.SchemaRef{ID: "delegation.report", Version: 1},
-			ContentHash: hashBytes(raw), Content: raw,
-		}
-		var evidenceArtifact *agentrun.RunArtifact
-		if len(result.EvidenceUnits) > 0 {
-			persisted, evidenceErr := agentrun.NewEvidenceLedgerArtifact(
-				attemptTask.childRunID, result.EvidenceUnits,
-			)
-			if evidenceErr != nil {
-				report = failedReport(attemptTask, ErrorReportPersistenceFailed, evidenceErr)
-				report.Usage = publicDelegationUsage(result)
-				executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
-					agentrun.DelegationAttemptFailed, false, report.Error, &result.Usage, "", "")
-				executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
-				executor.emitTerminal(parent, delegationID, attemptTask, report, started)
-				return taskOutcome{report: report}
-			}
-			evidenceArtifact = &persisted
-		}
-		settleCtx, cancelSettle := executor.cleanupContext(ctx)
-		_, settleErr := executor.persistence.SettleDelegationTask(
-			settleCtx,
-			agentrun.DelegationSettlement{
+	}
+	attemptID := stableID(
+		"attempt", parent.RunID, delegationID, fmt.Sprintf("%d", task.index),
+		fmt.Sprintf("%d", attemptNo),
+	)
+	if attemptStore != nil {
+		attemptCtx, cancelAttempt := executor.cleanupContext(ctx)
+		_, err := attemptStore.StartDelegationAttempt(
+			attemptCtx, agentrun.DelegationAttemptStart{
 				ParentRunID: parent.RunID, DelegationID: delegationID,
-				TaskIndex: task.index, ChildRunID: attemptTask.childRunID,
-				Usage: result.Usage, Artifact: artifact, EvidenceArtifact: evidenceArtifact,
+				TaskIndex: task.index, AttemptNo: attemptNo, AttemptID: attemptID,
+				ChildRunID: attemptTask.childRunID,
+				StartedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 			},
 		)
-		cancelSettle()
-		if settleErr != nil {
-			code := ErrorReportPersistenceFailed
-			if errors.Is(settleErr, agentrun.ErrDelegationAccounting) {
-				code = ErrorBudgetAccountingViolation
-			}
-			report = failedReport(attemptTask, code, settleErr)
-			report.Usage = publicDelegationUsage(result)
-			executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
-				agentrun.DelegationAttemptFailed, false, report.Error, &result.Usage, "", "")
-			executor.emitTerminal(parent, delegationID, attemptTask, report, started)
-			return taskOutcome{report: report}
-		}
-		status := agentrun.DelegationAttemptSucceeded
-		if result.Status == agentapi.RunCancelled {
-			status = agentrun.DelegationAttemptCancelled
-		} else if result.Status != agentapi.RunSucceeded {
-			status = agentrun.DelegationAttemptFailed
-			if result.Error != nil && result.Error.Code == ErrorChildTimeout {
-				status = agentrun.DelegationAttemptTimedOut
-			}
-		}
-		executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
-			status, false, report.Error, &result.Usage, "", attemptTask.artifactID)
-		executor.markCheckpoint(ctx, parent, delegationID, attemptTask, "completed", "", attemptTask.artifactID)
-		executor.emitTerminal(parent, delegationID, attemptTask, report, started)
-		return taskOutcome{
-			report: report, evidence: cloneEvidenceUnits(result.EvidenceUnits),
-			observations: cloneEvidenceObservations(result.EvidenceObservations),
+		cancelAttempt()
+		if err != nil {
+			report := failedReport(attemptTask, ErrorReportPersistenceFailed, err)
+			executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
+			return attemptTask, attemptID, taskOutcome{report: report}, true
 		}
 	}
+	attemptTask, outcome, failed := executor.prepareAttempt(
+		ctx, parent, delegationID, task, attemptTask, attemptNo, attemptID, attemptStore,
+	)
+	if failed {
+		return attemptTask, attemptID, outcome, true
+	}
+	return attemptTask, attemptID, taskOutcome{}, false
+}
+
+func (executor *Executor) completeOwnedAttempt(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedTask,
+	attemptTask preparedTask,
+	attemptID string,
+	attemptNo int,
+	maxAttempts int,
+	started time.Time,
+	result agentapi.RunResult,
+	runErr, childErr error,
+) (int, bool, taskOutcome) {
+	result = normalizeChildResult(result, attemptTask, runErr, childErr, ctx)
+	applyAttemptTokenLimits(&result, attemptTask)
+	if nextAttempt, handled, outcome := executor.retryOwnedAttempt(
+		ctx, parent, delegationID, task, attemptTask, attemptID,
+		attemptNo, maxAttempts, result, runErr, childErr,
+	); handled {
+		return nextAttempt, true, outcome
+	}
+
+	flowEvidence := AddEvidenceUnits(
+		cloneEvidenceIndex(parent.Evidence), result.EvidenceUnits,
+	)
+	report, err := projectReportWithEvidence(
+		result, attemptTask.capability.ID, attemptTask.reportID, flowEvidence,
+	)
+	if err != nil {
+		report = failedReport(attemptTask, ErrorChildExecution, err)
+		report.Usage = publicDelegationUsage(result)
+	}
+	reportTokens := attemptTask.reportTokens
+	if reportTokens <= 0 {
+		reportTokens = executor.policy.MaxReportTokens
+	}
+	report = boundReport(report, reportTokens)
+	raw, marshalErr := json.Marshal(report)
+	if marshalErr != nil {
+		report = failedReport(attemptTask, ErrorReportPersistenceFailed, marshalErr)
+		executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
+			agentrun.DelegationAttemptFailed, false, report.Error, &result.Usage, "", "")
+		executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
+		executor.emitTerminal(parent, delegationID, attemptTask, report, started)
+		return attemptNo, false, taskOutcome{report: report}
+	}
+	artifact, evidenceArtifact, err := executor.buildSettlementArtifacts(attemptTask, raw, result)
+	if err != nil {
+		report = failedReport(attemptTask, ErrorReportPersistenceFailed, err)
+		report.Usage = publicDelegationUsage(result)
+		executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
+			agentrun.DelegationAttemptFailed, false, report.Error, &result.Usage, "", "")
+		executor.settleUnavailable(ctx, parent, delegationID, attemptTask, report)
+		executor.emitTerminal(parent, delegationID, attemptTask, report, started)
+		return attemptNo, false, taskOutcome{report: report}
+	}
+	settleStarted := time.Now()
+	settleCtx, cancelSettle := executor.cleanupContext(ctx)
+	_, settleErr := executor.persistence.SettleDelegationTask(
+		settleCtx,
+		agentrun.DelegationSettlement{
+			ParentRunID: parent.RunID, DelegationID: delegationID,
+			TaskIndex: task.index, ChildRunID: attemptTask.childRunID,
+			Usage: result.Usage, Artifact: artifact, EvidenceArtifact: evidenceArtifact,
+		},
+	)
+	cancelSettle()
+	attemptTask.settlementMS = time.Since(settleStarted).Milliseconds()
+	if settleErr != nil {
+		code := ErrorReportPersistenceFailed
+		if errors.Is(settleErr, agentrun.ErrDelegationAccounting) {
+			code = ErrorBudgetAccountingViolation
+		}
+		report = failedReport(attemptTask, code, settleErr)
+		report.Usage = publicDelegationUsage(result)
+		executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
+			agentrun.DelegationAttemptFailed, false, report.Error, &result.Usage, "", "")
+		executor.emitTerminal(parent, delegationID, attemptTask, report, started)
+		return attemptNo, false, taskOutcome{report: report}
+	}
+	status := agentrun.DelegationAttemptSucceeded
+	if result.Status == agentapi.RunCancelled {
+		status = agentrun.DelegationAttemptCancelled
+	} else if result.Status != agentapi.RunSucceeded {
+		status = agentrun.DelegationAttemptFailed
+		if result.Error != nil && result.Error.Code == ErrorChildTimeout {
+			status = agentrun.DelegationAttemptTimedOut
+		}
+	}
+	executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
+		status, false, report.Error, &result.Usage, "", attemptTask.artifactID)
+	executor.markCheckpoint(ctx, parent, delegationID, attemptTask, "completed", "", attemptTask.artifactID)
+	executor.emitTerminal(parent, delegationID, attemptTask, report, started)
+	return attemptNo, false, taskOutcome{
+		report: report, evidence: cloneEvidenceUnits(result.EvidenceUnits),
+		observations: cloneEvidenceObservations(result.EvidenceObservations),
+	}
+}
+
+func applyAttemptTokenLimits(result *agentapi.RunResult, task preparedTask) {
+	if task.inputTokens > 0 && result.Usage.InputTokens > task.inputTokens {
+		result.Status = agentapi.RunFailed
+		result.Error = &agentapi.RunError{Code: ErrorChildInputLimit, Message: "child input token limit exceeded"}
+	}
+	if task.outputTokens > 0 && result.Usage.OutputTokens > task.outputTokens {
+		result.Status = agentapi.RunFailed
+		result.Error = &agentapi.RunError{Code: ErrorChildOutputLimit, Message: "child output token limit exceeded"}
+	}
+}
+
+func (executor *Executor) retryOwnedAttempt(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedTask,
+	attemptTask preparedTask,
+	attemptID string,
+	attemptNo int,
+	maxAttempts int,
+	result agentapi.RunResult,
+	runErr, childErr error,
+) (int, bool, taskOutcome) {
+	if retryable := retryableChildResult(result, runErr, childErr, ctx); retryable && attemptNo < maxAttempts {
+		delay := retryBackoff(attemptNo)
+		next := time.Now().UTC().Add(delay)
+		executor.finishAttempt(ctx, parent, delegationID, task, attemptNo, attemptID,
+			agentrun.DelegationAttemptFailed, true, result.Error,
+			&result.Usage, next.Format(time.RFC3339Nano), "")
+		if waitRetry(ctx, delay, attemptTask.limits.Deadline) {
+			return attemptNo + 1, true, taskOutcome{}
+		}
+	}
+	return attemptNo, false, taskOutcome{}
 }
 
 func normalizeChildResult(
@@ -1857,6 +2130,9 @@ func (executor *Executor) emitTerminal(
 			ToolCalls:    report.Usage.ToolCalls,
 			ReportBytes:  len(raw),
 			Completeness: string(report.Completeness),
+			QueueWaitMS:  task.queueWaitMS,
+			QueueClaimMS: task.queueClaimMS,
+			SettlementMS: task.settlementMS,
 		},
 	)
 }
@@ -1953,6 +2229,7 @@ func (executor *Executor) emitValidation(
 	delegationID string,
 	validation agentapi.DelegationValidation,
 	err error,
+	validationMS int64,
 ) {
 	if executor.events == nil {
 		return
@@ -1969,6 +2246,7 @@ func (executor *Executor) emitValidation(
 			RunID: parent.RunID, ParentRunID: parent.RunID,
 			DelegationID:            delegationID,
 			Status:                  status,
+			ValidationMS:            validationMS,
 			ErrorCode:               errorCode,
 			CitationCoverage:        validation.CitationCoverage,
 			EvidenceBodyCoverage:    validation.EvidenceBodyCoverage,
@@ -1983,19 +2261,23 @@ func (executor *Executor) emitValidation(
 	)
 }
 
+func delegationPolicyLimitsInvalid(policy agentapi.DelegationPolicy) bool {
+	return policy.MaxChildren <= 0 || policy.MaxConcurrent <= 0 ||
+		policy.MaxConcurrent > policy.MaxChildren ||
+		policy.MaxChildTurns <= 0 || policy.MaxChildToolCalls <= 0 ||
+		policy.MaxChildInputTokens <= 0 || policy.MaxChildOutputTokens <= 0 ||
+		policy.MaxReportTokens <= 0 || policy.MaxTotalTokens <= 0 ||
+		policy.MaxTotalCostMicros < 0 || policy.ParentAnswerReserve < 0 ||
+		policy.ChildTimeout <= 0
+}
+
 func normalizePolicy(
 	policy agentapi.DelegationPolicy,
 ) (agentapi.DelegationPolicy, error) {
 	if policy.MaxDepth <= 0 || policy.MaxDepth > 1 {
 		return policy, fmt.Errorf("delegation max depth must be 1")
 	}
-	if policy.MaxChildren <= 0 || policy.MaxConcurrent <= 0 ||
-		policy.MaxConcurrent > policy.MaxChildren ||
-		policy.MaxChildTurns <= 0 || policy.MaxChildToolCalls <= 0 ||
-		policy.MaxChildInputTokens <= 0 || policy.MaxChildOutputTokens <= 0 ||
-		policy.MaxReportTokens <= 0 || policy.MaxTotalTokens <= 0 ||
-		policy.MaxTotalCostMicros < 0 || policy.ParentAnswerReserve < 0 ||
-		policy.ChildTimeout <= 0 {
+	if delegationPolicyLimitsInvalid(policy) {
 		return policy, fmt.Errorf("delegation policy limits are invalid")
 	}
 	if policy.MaxReportTokens < minimumBoundedReportTokens() {

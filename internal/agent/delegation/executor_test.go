@@ -2896,3 +2896,116 @@ func TestExecutorCleanupContextAllowsBoundedTerminalWriteAfterDeadline(t *testin
 		t.Fatalf("cleanup deadline = %v", deadline)
 	}
 }
+
+type atomicScriptedExecutorQueue struct {
+	*scriptedExecutorQueue
+	atomicCalls    int
+	enqueueCalls   int
+	claimByIDCalls int
+}
+
+func newAtomicScriptedExecutorQueue() *atomicScriptedExecutorQueue {
+	return &atomicScriptedExecutorQueue{scriptedExecutorQueue: newScriptedExecutorQueue()}
+}
+
+func (queue *atomicScriptedExecutorQueue) EnqueueWorkItem(ctx context.Context, item agentrun.WorkItem) error {
+	queue.mu.Lock()
+	queue.enqueueCalls++
+	queue.mu.Unlock()
+	return queue.scriptedExecutorQueue.EnqueueWorkItem(ctx, item)
+}
+
+func (queue *atomicScriptedExecutorQueue) EnqueueAndClaimWorkItem(
+	_ context.Context,
+	item agentrun.WorkItem,
+	owner string,
+	now time.Time,
+	ttl time.Duration,
+) (agentrun.WorkItem, error) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.atomicCalls++
+	if existing, ok := queue.items[item.WorkID]; ok {
+		if existing.RunID != item.RunID || existing.ParentRunID != item.ParentRunID ||
+			existing.DelegationID != item.DelegationID || existing.TaskIndex != item.TaskIndex ||
+			existing.AttemptNo != item.AttemptNo || existing.Kind != item.Kind ||
+			!bytes.Equal(existing.Payload, item.Payload) {
+			return agentrun.WorkItem{}, fmt.Errorf("work item conflict")
+		}
+		item = existing
+	} else {
+		queue.items[item.WorkID] = item
+	}
+	if item.State != agentrun.WorkReady {
+		return agentrun.WorkItem{}, sql.ErrNoRows
+	}
+	item.State = agentrun.WorkRunning
+	item.LeaseOwner = owner
+	item.LeaseFence++
+	item.LeaseExpiresAt = now.Add(ttl).Format(time.RFC3339Nano)
+	item.AttemptCount++
+	queue.items[item.WorkID] = item
+	return item, nil
+}
+
+func (queue *atomicScriptedExecutorQueue) ClaimWorkItemByID(
+	ctx context.Context,
+	workID, owner string,
+	now time.Time,
+	ttl time.Duration,
+) (agentrun.WorkItem, error) {
+	queue.mu.Lock()
+	queue.claimByIDCalls++
+	queue.mu.Unlock()
+	return queue.scriptedExecutorQueue.ClaimWorkItemByID(ctx, workID, owner, now, ttl)
+}
+
+func TestExecutorUsesAtomicQueueDispatchWithoutParentClaimPolling(t *testing.T) {
+	persistence := newExecutorPersistence()
+	queue := newAtomicScriptedExecutorQueue()
+	var runtimeCalls int
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(_ context.Context, request agentapi.RunRequest) (agentapi.RunResult, error) {
+		runtimeCalls++
+		return successfulExecutorResult(request.RunID, "atomic queue child"), nil
+	}), persistence, nil)
+	executor.queue = queue
+	executor.workerOwner = "parent-dispatcher"
+	executor.workerLeaseTTL = time.Second
+
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{Capability: "knowledge.code.inspect", Objective: "atomic queue"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Status != agentapi.DelegationCompleted {
+		t.Fatalf("result = %+v", result.Results)
+	}
+	if runtimeCalls != 1 {
+		t.Fatalf("runtime calls = %d, want 1", runtimeCalls)
+	}
+
+	queue.mu.Lock()
+	atomicCalls := queue.atomicCalls
+	enqueueCalls := queue.enqueueCalls
+	claimByIDCalls := queue.claimByIDCalls
+	var item agentrun.WorkItem
+	for _, candidate := range queue.items {
+		item = candidate
+		break
+	}
+	queue.mu.Unlock()
+	if atomicCalls != 1 || enqueueCalls != 0 || claimByIDCalls != 0 {
+		t.Fatalf("queue calls: atomic=%d enqueue=%d claim_by_id=%d; want 1/0/0", atomicCalls, enqueueCalls, claimByIDCalls)
+	}
+	if item.State != agentrun.WorkSucceeded {
+		t.Fatalf("queue item = %#v", item)
+	}
+	persistence.mu.Lock()
+	settlements := len(persistence.settlements)
+	persistence.mu.Unlock()
+	if settlements != 1 {
+		t.Fatalf("settlements = %d, want 1", settlements)
+	}
+}

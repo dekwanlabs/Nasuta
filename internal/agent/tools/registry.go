@@ -36,20 +36,26 @@ func NewRegistry(svc *Service, cfg config.Config, sessions *memory.SessionStore,
 }
 
 func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore, history SessionHistory) []Tool {
-	listAPISchema := objectSchema(map[string]any{
-		"service": propString("Optional exact service name filter."),
-		"keyword": propString("Optional case-insensitive path, controller, or handler keyword."),
-		"limit":   propInt("Max results (default 20)."),
-	}, nil)
-	listAPISchema["additionalProperties"] = false
-	symbolProperties := map[string]any{
-		"query":          propString("Function, method, class, or interface name; do not pass a service name, document title, or runbook ID."),
-		"file":           propString("Optional canonical repos/... path scope."),
-		"qualified_name": propString("Optional exact qualified name; may be used without query."),
-		"limit":          propInt("Max nodes to return (default 5, min 2, max 10)."),
+	tools := append([]Tool(nil), serviceTools(svc)...)
+	tools = append(tools, codeTools(svc)...)
+	tools = append(tools, runbookTools(svc)...)
+	if svc.ontology != nil {
+		tools = append(tools, relationTool(svc))
 	}
-	symbolSchema := objectSchema(symbolProperties, nil)
-	tools := []Tool{
+	if sessions != nil {
+		tools = append(tools, sessionTurnDetailsTool(sessions))
+	}
+	if history != nil {
+		tools = append(tools, findTurnsTool(history))
+	}
+	if cfg.WebSearchEnabled {
+		tools = append(tools, webSearchTool(svc, cfg.WebSearchMCPEnabled))
+	}
+	return tools
+}
+
+func serviceTools(svc *Service) []Tool {
+	return []Tool{
 		{
 			ID: "get_service",
 			Description: "Look up service metadata and location by name, module path, owner, tag, or keyword. " +
@@ -101,6 +107,24 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				}, nil
 			}),
 		},
+	}
+}
+
+func codeTools(svc *Service) []Tool {
+	listAPISchema := objectSchema(map[string]any{
+		"service": propString("Optional exact service name filter."),
+		"keyword": propString("Optional case-insensitive path, controller, or handler keyword."),
+		"limit":   propInt("Max results (default 20)."),
+	}, nil)
+	listAPISchema["additionalProperties"] = false
+	symbolProperties := map[string]any{
+		"query":          propString("Function, method, class, or interface name; do not pass a service name, document title, or runbook ID."),
+		"file":           propString("Optional canonical repos/... path scope."),
+		"qualified_name": propString("Optional exact qualified name; may be used without query."),
+		"limit":          propInt("Max nodes to return (default 5, min 2, max 10)."),
+	}
+	symbolSchema := objectSchema(symbolProperties, nil)
+	return []Tool{
 		{
 			ID: "list_apis",
 			Description: "Authoritatively look up indexed complete API routes by service and/or a path, controller, or handler keyword. " +
@@ -212,6 +236,11 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 				}, nil
 			}),
 		},
+	}
+}
+
+func runbookTools(svc *Service) []Tool {
+	return []Tool{
 		{
 			ID: "search_runbooks",
 			Description: "Search knowledge documents and operational runbooks covering system architecture, business flows, modules, schemas, business guidance, and operations. " +
@@ -266,40 +295,27 @@ func builtinTools(svc *Service, cfg config.Config, sessions *memory.SessionStore
 			}),
 		},
 	}
-	if svc.ontology != nil {
-		tools = append(tools, relationTool(svc))
-	}
-	if sessions != nil {
-		tools = append(tools, sessionTurnDetailsTool(sessions))
-	}
-	if history != nil {
-		tools = append(tools, findTurnsTool(history))
-	}
+}
 
-	if !cfg.WebSearchEnabled {
-		return tools
+func webSearchTool(svc *Service, mcpHidden bool) Tool {
+	return Tool{
+		ID: "web_search",
+		Description: "Search the configured web backend for external documentation or current facts. " +
+			"This call automatically fetches the highest-ranked result and returns bounded page evidence together with the candidates.",
+		Kind:      ToolKindRead,
+		MCPHidden: mcpHidden,
+		InputSchema: objectSchema(map[string]any{
+			"query": propString("Search query string."),
+			"limit": propInt("Max results (default 5, max 10)."),
+		}, []string{"query"}),
+		Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
+			response, err := svc.WebSearchWithFetch(ctx, args.String("query"), args.Int("limit", 5))
+			if err != nil {
+				return tool.Result{}, err
+			}
+			return webSearchToolResult(response)
+		}),
 	}
-	tools = append(tools,
-		Tool{
-			ID: "web_search",
-			Description: "Search the configured web backend for external documentation or current facts. " +
-				"This call automatically fetches the highest-ranked result and returns bounded page evidence together with the candidates.",
-			Kind:      ToolKindRead,
-			MCPHidden: !cfg.WebSearchMCPEnabled,
-			InputSchema: objectSchema(map[string]any{
-				"query": propString("Search query string."),
-				"limit": propInt("Max results (default 5, max 10)."),
-			}, []string{"query"}),
-			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
-				response, err := svc.WebSearchWithFetch(ctx, args.String("query"), args.Int("limit", 5))
-				if err != nil {
-					return tool.Result{}, err
-				}
-				return webSearchToolResult(response)
-			}),
-		},
-	)
-	return tools
 }
 
 func sessionTurnDetailsTool(sessions *memory.SessionStore) Tool {

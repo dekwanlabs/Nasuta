@@ -53,7 +53,11 @@ type NodeRequest struct {
 	// BaselineEvidence prevents a node from presenting seeded evidence as newly discovered.
 	BaselineEvidence []tool.EvidenceUnit
 	Attempt          int
-	Actor            agentapi.Actor
+	// retryAccounted marks a retry charged by the coordinator before this
+	// attempt. It is internal bookkeeping used to persist the retry exactly
+	// once without charging the shared ledger twice.
+	retryAccounted bool
+	Actor          agentapi.Actor
 	// EffectivePermissions is final and must not be widened by a node executor.
 	EffectivePermissions agentapi.PermissionPolicy
 }
@@ -109,6 +113,10 @@ type NodeResult struct {
 	Handoff    Handoff
 	AgentRunID string
 	Usage      Usage
+	// accountedUsage is the subset of Usage already settled through the
+	// per-attempt Run budget gate. The coordinator records only the remainder,
+	// which keeps custom Runtimes that ignore the gate fully accounted as well.
+	accountedUsage Usage
 }
 
 // RunObserver persists or projects node transitions without controlling scheduling.
@@ -400,11 +408,4 @@ var nodeTraceSpec = runtrace.Spec[NodeRequest, nodeOutcome]{
 		}
 		return ""
 	},
-}
-
-type budgetAccount struct {
-	mu       sync.Mutex
-	budget   Budget
-	usage    Usage
-	reserved Usage
 }

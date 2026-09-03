@@ -124,9 +124,8 @@ func (agent *Agent) compactContext(
 		return result, fmt.Errorf("measure %s context: %w", phase, err)
 	}
 	outputReserve := agent.outputReserve()
-	projectedBefore := inputTokens + outputReserve
-	result.ProjectedBeforeTokens = projectedBefore
-	result.ProjectedAfterTokens = projectedBefore
+	result.ProjectedBeforeTokens = inputTokens + outputReserve
+	result.ProjectedAfterTokens = result.ProjectedBeforeTokens
 
 	window := agent.cfg.ContextWindow
 	highWater := run.ContextHighWaterTokens(window)
@@ -145,7 +144,7 @@ func (agent *Agent) compactContext(
 			CompactionApplied:     result.Applied,
 		})
 	}()
-	if projectedBefore < highWater {
+	if result.ProjectedBeforeTokens < highWater {
 		return result, nil
 	}
 	result.Triggered = true
@@ -156,96 +155,26 @@ func (agent *Agent) compactContext(
 	}
 	messages := append([]llm.Message(nil), state.messages...)
 	target := window * answerContextTargetPercent / 100
-	needed := max(0, projectedBefore-target)
 
-	// Tool-call narration is not authoritative evidence. Remove older narration
-	// first while retaining the assistant tool_calls and tool result pairing.
-	for index := start; index < len(messages) && needed > 0; index++ {
-		message := &messages[index]
-		if message.Role != "assistant" || len(message.ToolCalls) == 0 || message.Content == "" {
-			continue
-		}
-		removed := tooloutput.EstimateTokens(message.Content)
-		message.Content = ""
-		result.AssistantTokensRemoved += removed
-		needed = max(0, needed-removed)
-	}
+	needed := max(0, result.ProjectedBeforeTokens-target)
+	needed = removeAssistantNarration(messages, start, needed, &result)
 
 	currentInputTokens, err := estimateInputTokens(messages, tools)
 	if err != nil {
 		return result, fmt.Errorf("remeasure %s context: %w", phase, err)
 	}
-	candidates := toolResultCandidates(
-		messages,
-		start,
-		state.answerToolSources,
-	)
+	candidates := toolResultCandidates(messages, start, state.answerToolSources)
 	needed = max(0, currentInputTokens+outputReserve-target)
-	allocateToolBudgets(
-		candidates,
-		needed,
-		oldToolResultFloorTokens,
-		recentToolResultFloorTokens,
-	)
+	allocateToolBudgets(candidates, needed, oldToolResultFloorTokens, recentToolResultFloorTokens)
 
 	plannedReduction := plannedToolReduction(candidates)
 	hardInputLimit := window - outputReserve - contextSafetyTokens(window)
 	hardOverflow := max(0, currentInputTokens-plannedReduction-hardInputLimit)
 	if hardOverflow > 0 {
-		allocateToolBudgets(
-			candidates,
-			hardOverflow,
-			emergencyToolResultFloor,
-			emergencyToolResultFloor,
-		)
+		allocateToolBudgets(candidates, hardOverflow, emergencyToolResultFloor, emergencyToolResultFloor)
 	}
 
-	for _, candidate := range candidates {
-		if candidate.budgetTokens >= candidate.originalTokens {
-			continue
-		}
-		compressed := tooloutput.Compress(tooloutput.Request{
-			Question:  state.input.Question,
-			Content:   candidate.sourceContent,
-			MaxTokens: candidate.budgetTokens,
-		})
-		retainedTokens := tooloutput.EstimateTokens(compressed.Content)
-		if retainedTokens >= candidate.originalTokens ||
-			compressed.Content == messages[candidate.index].Content {
-			continue
-		}
-		messages[candidate.index].Content = compressed.Content
-		if _, exists := state.answerToolSources[candidate.index]; !exists {
-			state.answerToolSources[candidate.index] = candidate.sourceContent
-		}
-		result.ToolResultsCompressed++
-		result.ToolResults = append(result.ToolResults, toolResultCompaction{
-			ToolCallID:     candidate.toolCallID,
-			Tool:           candidate.tool,
-			Strategy:       compressed.Strategy,
-			OriginalTokens: compressed.OriginalTokens,
-			BeforeTokens:   candidate.originalTokens,
-			RetainedTokens: retainedTokens,
-			ChunkCoverage:  compressed.ChunkCoverage,
-			ItemCoverage:   compressed.ItemCoverage,
-			FieldCoverage:  compressed.FieldCoverage,
-		})
-		log.InfofCtx(
-			state.ctx,
-			"[agent] run %s answer context tool result compacted phase=%s tool_call_id=%s tool=%s strategy=%s tokens=%d->%d source_tokens=%d chunk_coverage=%s item_coverage=%s field_coverage=%s",
-			state.runID,
-			phase,
-			candidate.toolCallID,
-			candidate.tool,
-			compressed.Strategy,
-			candidate.originalTokens,
-			retainedTokens,
-			compressed.OriginalTokens,
-			compressed.ChunkCoverage,
-			compressed.ItemCoverage,
-			compressed.FieldCoverage,
-		)
-	}
+	compressToolResults(state, messages, candidates, phase, &result)
 
 	afterInputTokens, err := estimateInputTokens(messages, tools)
 	if err != nil {
@@ -293,6 +222,78 @@ func (agent *Agent) compactContext(
 		)
 	}
 	return result, nil
+}
+
+// removeAssistantNarration strips non-authoritative tool-call narration from
+// older assistant turns, retaining the assistant tool_calls and tool result
+// pairing.
+func removeAssistantNarration(messages []llm.Message, start, needed int, result *answerCompactionResult) int {
+	for index := start; index < len(messages) && needed > 0; index++ {
+		message := &messages[index]
+		if message.Role != "assistant" || len(message.ToolCalls) == 0 || message.Content == "" {
+			continue
+		}
+		removed := tooloutput.EstimateTokens(message.Content)
+		message.Content = ""
+		result.AssistantTokensRemoved += removed
+		needed = max(0, needed-removed)
+	}
+	return needed
+}
+
+func compressToolResults(
+	state *compiledLoop,
+	messages []llm.Message,
+	candidates []toolResultCandidate,
+	phase string,
+	result *answerCompactionResult,
+) {
+	for _, candidate := range candidates {
+		if candidate.budgetTokens >= candidate.originalTokens {
+			continue
+		}
+		compressed := tooloutput.Compress(tooloutput.Request{
+			Question:  state.input.Question,
+			Content:   candidate.sourceContent,
+			MaxTokens: candidate.budgetTokens,
+		})
+		retainedTokens := tooloutput.EstimateTokens(compressed.Content)
+		if retainedTokens >= candidate.originalTokens ||
+			compressed.Content == messages[candidate.index].Content {
+			continue
+		}
+		messages[candidate.index].Content = compressed.Content
+		if _, exists := state.answerToolSources[candidate.index]; !exists {
+			state.answerToolSources[candidate.index] = candidate.sourceContent
+		}
+		result.ToolResultsCompressed++
+		result.ToolResults = append(result.ToolResults, toolResultCompaction{
+			ToolCallID:     candidate.toolCallID,
+			Tool:           candidate.tool,
+			Strategy:       compressed.Strategy,
+			OriginalTokens: compressed.OriginalTokens,
+			BeforeTokens:   candidate.originalTokens,
+			RetainedTokens: retainedTokens,
+			ChunkCoverage:  compressed.ChunkCoverage,
+			ItemCoverage:   compressed.ItemCoverage,
+			FieldCoverage:  compressed.FieldCoverage,
+		})
+		log.InfofCtx(
+			state.ctx,
+			"[agent] run %s answer context tool result compacted phase=%s tool_call_id=%s tool=%s strategy=%s tokens=%d->%d source_tokens=%d chunk_coverage=%s item_coverage=%s field_coverage=%s",
+			state.runID,
+			phase,
+			candidate.toolCallID,
+			candidate.tool,
+			compressed.Strategy,
+			candidate.originalTokens,
+			retainedTokens,
+			compressed.OriginalTokens,
+			compressed.ChunkCoverage,
+			compressed.ItemCoverage,
+			compressed.FieldCoverage,
+		)
+	}
 }
 
 func stateContext(state *compiledLoop) context.Context {

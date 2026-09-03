@@ -33,6 +33,10 @@ func (rs *Store) RecoverInterrupted() (int64, error) {
 	if rs != nil && rs.fencingEnabled {
 		return rs.recoverDurable()
 	}
+	return rs.recoverInterruptedLegacy()
+}
+
+func (rs *Store) recoverInterruptedLegacy() (int64, error) {
 	ctx := context.Background()
 	tx, err := rs.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -45,6 +49,29 @@ func (rs *Store) RecoverInterrupted() (int64, error) {
 		return 0, err
 	}
 	recoveredAt := store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano))
+	recovered, err := rs.abortInterruptedRuns(ctx, tx, recoveredAt)
+	if err != nil {
+		return 0, err
+	}
+	if err := rs.closeInterruptedAttempts(ctx, tx, recoveredAt); err != nil {
+		return 0, err
+	}
+	for _, task := range tasks {
+		if err := settleInterruptedDelegationTask(ctx, tx, task, recoveredAt); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return recovered, nil
+}
+
+func (rs *Store) abortInterruptedRuns(
+	ctx context.Context,
+	tx *sql.Tx,
+	recoveredAt any,
+) (int64, error) {
 	query := `UPDATE agent_runs SET status=?,error_code=?,ended_at=? WHERE run_kind=? AND status IN (?,?)`
 	if rs.fencingEnabled {
 		query = `UPDATE agent_runs r LEFT JOIN agent_run_budget_ledger l ON l.root_run_id=r.id SET r.status=?,r.error_code=?,r.ended_at=? WHERE r.run_kind=? AND r.status IN (?,?) AND (l.root_run_id IS NULL OR l.lease_owner='' OR l.lease_expires_at IS NULL OR l.lease_expires_at<=UTC_TIMESTAMP())`
@@ -62,15 +89,19 @@ func (rs *Store) RecoverInterrupted() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	recovered, err := result.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
+	return result.RowsAffected()
+}
+
+func (rs *Store) closeInterruptedAttempts(
+	ctx context.Context,
+	tx *sql.Tx,
+	recoveredAt any,
+) error {
 	// Startup recovery is intentionally conservative: a process-local run is
 	// aborted rather than automatically re-entering the model loop. Close any
 	// physical attempt left running so later replay cannot mistake it for live
 	// work or create an unbounded retry chain.
-	if _, err := tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		UPDATE agent_delegation_attempts a
 		JOIN agent_delegation_tasks t ON t.parent_run_id=a.parent_run_id
 		  AND t.delegation_id=a.delegation_id AND t.task_index=a.task_index
@@ -81,82 +112,84 @@ func (rs *Store) RecoverInterrupted() (int64, error) {
 		DelegationAttemptInterrupted, interruptedErrorCode,
 		"delegation attempt was interrupted during process recovery", recoveredAt,
 		DelegationAttemptRunning,
-	); err != nil {
-		return 0, err
+	)
+	return err
+}
+
+func settleInterruptedDelegationTask(
+	ctx context.Context,
+	tx *sql.Tx,
+	task interruptedDelegationTask,
+	recoveredAt any,
+) error {
+	artifact, err := interruptedDelegationReportArtifact(task)
+	if err != nil {
+		return err
 	}
-	for _, task := range tasks {
-		artifact, err := interruptedDelegationReportArtifact(task)
-		if err != nil {
-			return 0, err
-		}
-		if err := insertRunArtifact(ctx, tx, artifact); err != nil {
-			return 0, fmt.Errorf(
-				"persist interrupted delegation report for child %q: %w",
-				task.ChildRunID,
-				err,
-			)
-		}
-		usageRaw, err := json.Marshal(task.Usage)
-		if err != nil {
-			return 0, fmt.Errorf(
-				"marshal interrupted delegation usage for child %q: %w",
-				task.ChildRunID,
-				err,
-			)
-		}
-		settled, err := tx.ExecContext(
-			ctx,
-			`UPDATE agent_delegation_tasks
-			 SET settled_usage_json=?,report_artifact_id=?,settled_at=?
-			 WHERE parent_run_id=? AND delegation_id=? AND task_index=?
-			   AND child_run_id=? AND admitted=TRUE
-			   AND settled_usage_json IS NULL`,
-			usageRaw,
-			artifact.ID,
-			recoveredAt,
-			task.ParentRunID,
-			task.DelegationID,
-			task.TaskIndex,
+	if err := insertRunArtifact(ctx, tx, artifact); err != nil {
+		return fmt.Errorf(
+			"persist interrupted delegation report for child %q: %w",
 			task.ChildRunID,
+			err,
 		)
-		if err != nil {
-			return 0, fmt.Errorf(
-				"settle interrupted delegation child %q: %w",
-				task.ChildRunID,
-				err,
-			)
-		}
-		affected, err := settled.RowsAffected()
-		if err != nil {
-			return 0, err
-		}
-		if affected != 1 {
-			return 0, ErrDelegationTaskConflict
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO agent_delegation_checkpoints(
-				parent_run_id,delegation_id,task_index,invocation_id,request_hash,status,
-				child_run_id,report_artifact_id,error_code,error_message,created_at,updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-			ON DUPLICATE KEY UPDATE
-				status=VALUES(status),child_run_id=VALUES(child_run_id),
-				report_artifact_id=VALUES(report_artifact_id),error_code=VALUES(error_code),
-				error_message=VALUES(error_message),updated_at=VALUES(updated_at)`,
-			task.ParentRunID, task.DelegationID, task.TaskIndex, "", "",
-			DelegationCheckpointInterrupted, task.ChildRunID, artifact.ID,
-			interruptedErrorCode,
-			"delegation was interrupted during process recovery", recoveredAt, recoveredAt,
-		); err != nil {
-			return 0, fmt.Errorf(
-				"persist interrupted delegation checkpoint for child %q: %w",
-				task.ChildRunID, err,
-			)
-		}
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
+	usageRaw, err := json.Marshal(task.Usage)
+	if err != nil {
+		return fmt.Errorf(
+			"marshal interrupted delegation usage for child %q: %w",
+			task.ChildRunID,
+			err,
+		)
 	}
-	return recovered, nil
+	settled, err := tx.ExecContext(
+		ctx,
+		`UPDATE agent_delegation_tasks
+		 SET settled_usage_json=?,report_artifact_id=?,settled_at=?
+		 WHERE parent_run_id=? AND delegation_id=? AND task_index=?
+		   AND child_run_id=? AND admitted=TRUE
+		   AND settled_usage_json IS NULL`,
+		usageRaw,
+		artifact.ID,
+		recoveredAt,
+		task.ParentRunID,
+		task.DelegationID,
+		task.TaskIndex,
+		task.ChildRunID,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"settle interrupted delegation child %q: %w",
+			task.ChildRunID,
+			err,
+		)
+	}
+	affected, err := settled.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrDelegationTaskConflict
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO agent_delegation_checkpoints(
+			parent_run_id,delegation_id,task_index,invocation_id,request_hash,status,
+			child_run_id,report_artifact_id,error_code,error_message,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		ON DUPLICATE KEY UPDATE
+			status=VALUES(status),child_run_id=VALUES(child_run_id),
+			report_artifact_id=VALUES(report_artifact_id),error_code=VALUES(error_code),
+			error_message=VALUES(error_message),updated_at=VALUES(updated_at)`,
+		task.ParentRunID, task.DelegationID, task.TaskIndex, "", "",
+		DelegationCheckpointInterrupted, task.ChildRunID, artifact.ID,
+		interruptedErrorCode,
+		"delegation was interrupted during process recovery", recoveredAt, recoveredAt,
+	); err != nil {
+		return fmt.Errorf(
+			"persist interrupted delegation checkpoint for child %q: %w",
+			task.ChildRunID, err,
+		)
+	}
+	return nil
 }
 
 type durableRecoveryWork struct {
@@ -170,19 +203,43 @@ type durableRecoveryWork struct {
 // claim. It deliberately does not call the model or mark a resumable parent as
 // aborted. The runtime worker can later consume parent_resume and execute the
 // checkpoint with the newly claimed fence.
+type recoveryCandidate struct {
+	runID    string
+	oldFence int64
+	step     int
+	phase    string
+}
+
 func (rs *Store) recoverDurable() (int64, error) {
 	if rs == nil || rs.db == nil || rs.budgetLeaseOwner == "" {
 		return 0, fmt.Errorf("agent/runstore: durable recovery requires database and owner")
 	}
 	ctx := context.Background()
 	now := time.Now().UTC()
-	ttl := minimumRecoveryLeaseTTL
-	expires := now.Add(ttl)
+	expires := now.Add(minimumRecoveryLeaseTTL)
 	tx, err := rs.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
+	candidates, err := loadRecoveryCandidates(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	claimed, err := claimRecoveryCandidates(ctx, tx, rs.budgetLeaseOwner, candidates, now, expires)
+	if err != nil {
+		return 0, err
+	}
+	if err := replayExpiredWorkerLeases(ctx, tx, now); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return claimed, nil
+}
+
+func loadRecoveryCandidates(ctx context.Context, tx *sql.Tx) ([]recoveryCandidate, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT r.id,l.lease_fence,c.step_no,c.phase,c.state_json
 		FROM agent_runs r
@@ -193,13 +250,7 @@ func (rs *Store) recoverDurable() (int64, error) {
 		ORDER BY r.started_at
 		FOR UPDATE`, KindAgent, StatusRunning, StatusPaused)
 	if err != nil {
-		return 0, err
-	}
-	type recoveryCandidate struct {
-		runID    string
-		oldFence int64
-		step     int
-		phase    string
+		return nil, err
 	}
 	var candidates []recoveryCandidate
 	for rows.Next() {
@@ -209,7 +260,7 @@ func (rs *Store) recoverDurable() (int64, error) {
 		var phase, state sql.NullString
 		if err := rows.Scan(&runID, &oldFence, &step, &phase, &state); err != nil {
 			rows.Close()
-			return 0, err
+			return nil, err
 		}
 		// No valid checkpoint means there is no deterministic replay boundary;
 		// leave the run for an explicit operator policy instead of fabricating
@@ -223,16 +274,26 @@ func (rs *Store) recoverDurable() (int64, error) {
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, err
+		return nil, err
 	}
 	// go-sql-driver/mysql does not permit another statement while a result set
 	// is active on the same transaction connection. Closing the fully-buffered
 	// candidate rows keeps the SELECT ... FOR UPDATE locks until commit while
 	// allowing the fenced UPDATE/enqueue statements below to execute.
 	if err := rows.Close(); err != nil {
-		return 0, err
+		return nil, err
 	}
+	return candidates, nil
+}
 
+func claimRecoveryCandidates(
+	ctx context.Context,
+	tx *sql.Tx,
+	owner string,
+	candidates []recoveryCandidate,
+	now time.Time,
+	expires time.Time,
+) (int64, error) {
 	var claimed int64
 	for _, candidate := range candidates {
 		newFence := candidate.oldFence + 1
@@ -243,7 +304,7 @@ func (rs *Store) recoverDurable() (int64, error) {
 			UPDATE agent_run_budget_ledger
 			SET lease_owner=?,lease_expires_at=?,lease_fence=?,version=version+1,updated_at=?
 			WHERE root_run_id=? AND (lease_owner='' OR lease_expires_at IS NULL OR lease_expires_at<=UTC_TIMESTAMP())`,
-			rs.budgetLeaseOwner, store.DatabaseTime(expires.Format(time.RFC3339Nano)), newFence,
+			owner, store.DatabaseTime(expires.Format(time.RFC3339Nano)), newFence,
 			store.DatabaseTime(now.Format(time.RFC3339Nano)), candidate.runID)
 		if err != nil {
 			return 0, err
@@ -279,19 +340,18 @@ func (rs *Store) recoverDurable() (int64, error) {
 		}
 		claimed++
 	}
+	return claimed, nil
+}
+
+func replayExpiredWorkerLeases(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	// Expired child worker leases are safe to replay because ClaimWorkItem
 	// increments the work fence and child task persistence is idempotent.
-	if _, err := tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		UPDATE agent_work_items
 		SET state=?,lease_owner='',lease_expires_at=NULL,available_at=?,last_error=?,updated_at=?
 		WHERE state=? AND lease_expires_at IS NOT NULL AND lease_expires_at<=UTC_TIMESTAMP()`,
-		WorkReady, store.DatabaseTime(now.Format(time.RFC3339Nano)), "worker lease expired during recovery", store.DatabaseTime(now.Format(time.RFC3339Nano)), WorkRunning); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return claimed, nil
+		WorkReady, store.DatabaseTime(now.Format(time.RFC3339Nano)), "worker lease expired during recovery", store.DatabaseTime(now.Format(time.RFC3339Nano)), WorkRunning)
+	return err
 }
 
 const minimumRecoveryLeaseTTL = time.Minute

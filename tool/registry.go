@@ -92,16 +92,37 @@ func (registry *Registry) reconcileReadSet(owner string, candidates []Tool) erro
 	if err != nil {
 		return err
 	}
-	for _, candidate := range prepared {
-		if candidate.Kind != KindRead {
-			return fmt.Errorf("reconcile read tool %q: read kind is required", candidate.ID)
-		}
+	if err := validateReadCandidates(prepared); err != nil {
+		return err
 	}
 
 	registry.writeMu.Lock()
 	defer registry.writeMu.Unlock()
 
 	current := registry.load()
+	if err := validateReadOwnership(current, owner, prepared); err != nil {
+		return err
+	}
+	desired := buildDesiredReadSet(prepared)
+	if !readSetChanged(current, owner, desired, len(prepared) > 0) {
+		return nil
+	}
+
+	next := rebuildReadSet(current, owner, desired, prepared)
+	registry.publish(current, next)
+	return nil
+}
+
+func validateReadCandidates(prepared []Tool) error {
+	for _, candidate := range prepared {
+		if candidate.Kind != KindRead {
+			return fmt.Errorf("reconcile read tool %q: read kind is required", candidate.ID)
+		}
+	}
+	return nil
+}
+
+func validateReadOwnership(current *registryState, owner string, prepared []Tool) error {
 	for _, candidate := range prepared {
 		existing, exists := current.tools[candidate.ID]
 		if !exists {
@@ -114,25 +135,43 @@ func (registry *Registry) reconcileReadSet(owner string, candidates []Tool) erro
 			return fmt.Errorf("reconcile read tool %q: existing tool is not read-only", candidate.ID)
 		}
 	}
+	return nil
+}
 
+func buildDesiredReadSet(prepared []Tool) map[ToolID]struct{} {
 	desired := make(map[ToolID]struct{}, len(prepared))
 	for _, candidate := range prepared {
 		desired[candidate.ID] = struct{}{}
 	}
-	changed := len(prepared) > 0
+	return desired
+}
+
+func readSetChanged(
+	current *registryState,
+	owner string,
+	desired map[ToolID]struct{},
+	hasPrepared bool,
+) bool {
+	if hasPrepared {
+		return true
+	}
 	for id, currentOwner := range current.owners {
 		if currentOwner != owner {
 			continue
 		}
 		if _, keep := desired[id]; !keep {
-			changed = true
-			break
+			return true
 		}
 	}
-	if !changed {
-		return nil
-	}
+	return false
+}
 
+func rebuildReadSet(
+	current *registryState,
+	owner string,
+	desired map[ToolID]struct{},
+	prepared []Tool,
+) *registryState {
 	next := cloneState(current)
 	next.order = next.order[:0]
 	for _, id := range current.order {
@@ -152,8 +191,7 @@ func (registry *Registry) reconcileReadSet(owner string, candidates []Tool) erro
 		next.tools[candidate.ID] = candidate
 		next.owners[candidate.ID] = owner
 	}
-	registry.publish(current, next)
-	return nil
+	return next
 }
 
 // Snapshot pins definitions and handlers to one registry revision.

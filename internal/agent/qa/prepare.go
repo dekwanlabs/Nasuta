@@ -289,13 +289,7 @@ func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) 
 		prepared.failPreparation(runCtx, run, err)
 		return nil, err
 	}
-	return svc.submitRun(
-		runCtx, run, prepared.request, definition, selection, prepared.request.Question,
-		conversation, prepared.request.UserID, admitted.Retrieved,
-		prepared.request.RunID, prepared.analysis.QueryPlan, admitted.Plan, prepared.toolPolicy,
-		prepared.candidateToolSet, prepared.execution.HighRisk, prepared.runLimits,
-		prepared.trace, prepared.ownsTrace, prepared.requestCancel,
-	)
+	return svc.submitRun(runCtx, run, prepared, conversation, admitted)
 }
 
 func (svc *Service) parentRunLimits(
@@ -311,7 +305,7 @@ func (svc *Service) parentRunLimits(
 		MaxSteps:     definition.Budget.MaxSteps,
 		MaxToolCalls: definition.Budget.MaxToolCalls,
 	}
-	if svc.delegationEnabled {
+	if svc.delegationEnabled && prepared.execution.RouteReason == routeReasonParentDynamicDelegation {
 		limits.MaxTotalTokens = svc.delegationBudget.MaxTotalTokens
 		limits.MaxCostMicros = svc.delegationBudget.MaxCostMicros
 		limits.ParentAnswerReserve = svc.delegationBudget.ParentAnswerReserve

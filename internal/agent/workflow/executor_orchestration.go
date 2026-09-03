@@ -179,16 +179,53 @@ func (orchestrator *Orchestrator) executePrepared(
 		}
 	}
 
+	if err := orchestrator.runConvergenceLoop(
+		runCtx, definition, metadata, request, progress,
+		outputs, gates, failedOptional, failedOptionalReasons, waitingHuman,
+		account, observer,
+	); err != nil {
+		return traceOutput, err
+	}
+	output, err := orchestrator.assembleTerminalOutput(ctx, definition, metadata, request, outputs)
+	if err != nil {
+		return traceOutput, err
+	}
+	traceDelivered(ctx, "workflow_output", output)
+	traceOutput.result = Result{
+		RunID: request.RunID, Output: output, NodeOutputs: outputs, Gates: gates,
+		Usage:      account.Usage(),
+		StopReason: resultStopReason(metadata, outputs, output.Completeness),
+	}
+	return traceOutput, nil
+}
+
+// runConvergenceLoop dispatches DAG waves until every node has produced an
+// output or been marked unavailable. It mutates the output/gate/failure maps in
+// place and returns a convergence or node error when the run cannot continue.
+func (orchestrator *Orchestrator) runConvergenceLoop(
+	runCtx context.Context,
+	definition Definition,
+	metadata graphMetadata,
+	request RunRequest,
+	progress Progress,
+	outputs map[string]Handoff,
+	gates map[string]GateDecision,
+	failedOptional map[string]struct{},
+	failedOptionalReasons map[string]StopReason,
+	waitingHuman map[string]struct{},
+	account *budgetAccount,
+	observer RunObserver,
+) error {
 	for len(outputs)+len(failedOptional) < len(definition.Nodes) {
 		if err := runCtx.Err(); err != nil {
-			return traceOutput, err
+			return err
 		}
 		ready := readyNodes(metadata, outputs, failedOptional, waitingHuman)
 		if len(ready) == 0 {
 			if len(waitingHuman) > 0 {
-				return traceOutput, ErrHumanApprovalRequired
+				return ErrHumanApprovalRequired
 			}
-			return traceOutput, convergenceError{
+			return convergenceError{
 				reason: blockedStopReason(
 					metadata,
 					outputs,
@@ -203,7 +240,7 @@ func (orchestrator *Orchestrator) executePrepared(
 			failedOptional, failedOptionalReasons, ready, account, observer,
 		)
 		if err != nil {
-			return traceOutput, err
+			return err
 		}
 		var waveErr error
 		for index, outcome := range wave {
@@ -233,15 +270,27 @@ func (orchestrator *Orchestrator) executePrepared(
 			}
 		}
 		if waveErr != nil {
-			return traceOutput, waveErr
+			return waveErr
 		}
 		if hasClarificationGate(gates) {
-			return traceOutput, convergenceError{
+			return convergenceError{
 				reason:  StopNeedsClarification,
 				message: fmt.Sprintf("workflow %q requires clarification", definition.ID),
 			}
 		}
 	}
+	return nil
+}
+
+// assembleTerminalOutput collects the terminal node outputs and reduces them to
+// the single workflow output handoff.
+func (orchestrator *Orchestrator) assembleTerminalOutput(
+	ctx context.Context,
+	definition Definition,
+	metadata graphMetadata,
+	request RunRequest,
+	outputs map[string]Handoff,
+) (Handoff, error) {
 	terminals := make([]Handoff, 0)
 	for _, nodeID := range metadata.order {
 		if len(metadata.successors[nodeID]) == 0 {
@@ -251,11 +300,11 @@ func (orchestrator *Orchestrator) executePrepared(
 		}
 	}
 	if len(terminals) == 0 {
-		return traceOutput, fmt.Errorf("workflow %q produced no terminal output", definition.ID)
+		return Handoff{}, fmt.Errorf("workflow %q produced no terminal output", definition.ID)
 	}
 	output := terminals[0]
 	if len(terminals) > 1 {
-		output, err = orchestrator.aggregateHandoffs(
+		return orchestrator.aggregateHandoffs(
 			ctx,
 			request.RunID,
 			NodeDefinition{ID: "workflow.output", OutputSchema: definition.OutputSchema},
@@ -265,31 +314,17 @@ func (orchestrator *Orchestrator) executePrepared(
 			0,
 			definition.Budget.MaxHandoffBytes,
 		)
-		if err != nil {
-			return traceOutput, err
-		}
-	} else {
-		if err := orchestrator.schemas.ValidateCompatibility(output.Schema, definition.OutputSchema); err != nil {
-			return traceOutput, fmt.Errorf("workflow %q terminal output schema: %w", definition.ID, err)
-		}
-		output, err = PrepareHandoff(Handoff{
-			WorkflowRunID: request.RunID, ProducerNodeID: "workflow.output",
-			Schema: definition.OutputSchema, Payload: output.Payload,
-			References: output.References, EvidenceUnits: output.EvidenceUnits,
-			EvidenceConflicts: output.EvidenceConflicts,
-			Completeness:      output.Completeness,
-		}, definition.Budget.MaxHandoffBytes, orchestrator.schemas)
-		if err != nil {
-			return traceOutput, fmt.Errorf("workflow %q output: %w", definition.ID, err)
-		}
 	}
-	traceDelivered(ctx, "workflow_output", output)
-	traceOutput.result = Result{
-		RunID: request.RunID, Output: output, NodeOutputs: outputs, Gates: gates,
-		Usage:      account.Usage(),
-		StopReason: resultStopReason(metadata, outputs, output.Completeness),
+	if err := orchestrator.schemas.ValidateCompatibility(output.Schema, definition.OutputSchema); err != nil {
+		return Handoff{}, fmt.Errorf("workflow %q terminal output schema: %w", definition.ID, err)
 	}
-	return traceOutput, nil
+	return PrepareHandoff(Handoff{
+		WorkflowRunID: request.RunID, ProducerNodeID: "workflow.output",
+		Schema: definition.OutputSchema, Payload: output.Payload,
+		References: output.References, EvidenceUnits: output.EvidenceUnits,
+		EvidenceConflicts: output.EvidenceConflicts,
+		Completeness:      output.Completeness,
+	}, definition.Budget.MaxHandoffBytes, orchestrator.schemas)
 }
 
 func normalizePosition(round, baseDepth int) (int, int) {
@@ -347,15 +382,26 @@ func convergenceOutcome(
 	err error,
 ) (string, string) {
 	if err == nil {
-		switch output.result.Output.Completeness {
-		case Partial:
-			return string(Partial), ""
-		case Unavailable:
-			return string(Unavailable), ""
-		default:
-			return string(Complete), ""
-		}
+		return convergenceSuccessOutcome(output)
 	}
+	if status, code := convergenceStopOutcome(err); code != "" {
+		return status, code
+	}
+	return convergenceErrorOutcome(err)
+}
+
+func convergenceSuccessOutcome(output convergedTraceOutput) (string, string) {
+	switch output.result.Output.Completeness {
+	case Partial:
+		return string(Partial), ""
+	case Unavailable:
+		return string(Unavailable), ""
+	default:
+		return string(Complete), ""
+	}
+}
+
+func convergenceStopOutcome(err error) (string, string) {
 	switch errorStopReason(err) {
 	case StopNeedsClarification:
 		return string(StopNeedsClarification), "needs_clarification"
@@ -365,7 +411,12 @@ func convergenceOutcome(
 		return string(StopCapabilityUnavailable), "capability_unavailable"
 	case StopEvidenceInsufficient:
 		return string(StopEvidenceInsufficient), "evidence_insufficient"
+	default:
+		return "", ""
 	}
+}
+
+func convergenceErrorOutcome(err error) (string, string) {
 	switch {
 	case errors.Is(err, ErrHumanApprovalRequired):
 		return "waiting_human", "human_approval_required"
@@ -507,6 +558,9 @@ func (orchestrator *Orchestrator) dispatchWave(
 	account *budgetAccount,
 	observer RunObserver,
 ) ([]nodeOutcome, error) {
+	// A task that explicitly disallows parallel execution is dispatched alone.
+	// The next scheduler iteration will reconsider the remaining ready nodes.
+	ready = serialiseReadyNodes(ready, metadata.nodes)
 	result, err := runtrace.Invoke(
 		ctx,
 		dispatchTraceSpec,
@@ -571,6 +625,16 @@ func (orchestrator *Orchestrator) dispatchWave(
 		},
 	)
 	return result.outcomes, err
+}
+
+func serialiseReadyNodes(ready []string, nodes map[string]NodeDefinition) []string {
+	for _, nodeID := range ready {
+		node := nodes[nodeID]
+		if !node.Task.AllowsParallel() {
+			return []string{nodeID}
+		}
+	}
+	return ready
 }
 
 func (orchestrator *Orchestrator) limitersForWave(
@@ -686,17 +750,29 @@ func (orchestrator *Orchestrator) executeNode(
 			definition.Permissions, node.Permissions,
 		),
 	}
+	var previous nodeOutcome
 	for attempt := firstAttempt; attempt <= node.Retry.MaxAttempts; attempt++ {
 		nodeRequest := baseRequest
 		nodeRequest.Attempt = attempt
+		if attempt > 1 {
+			// A resumed attempt already has the prior attempt's backoff applied
+			// by waitUntil above. Fresh in-process retries still wait between
+			// attempts here. Every attempt after the first is a retry admission,
+			// including the first attempt after a process-restart takeover.
+			if attempt > firstAttempt && !waitForRetry(nodeCtx, node.Retry.Backoff) {
+				return nodeOutcome{nodeResult: previous.nodeResult, err: nodeCtx.Err()}
+			}
+			if err := account.ConsumeRetry(); err != nil {
+				return nodeOutcome{nodeResult: previous.nodeResult, err: err}
+			}
+			nodeRequest.retryAccounted = true
+		}
 		outcome := orchestrator.executeNodeAttempt(
 			nodeCtx, definition, request, nodeRequest, account, observer,
 		)
+		previous = outcome
 		if outcome.err == nil || !outcome.retryable || attempt == node.Retry.MaxAttempts {
 			return outcome
-		}
-		if !waitForRetry(nodeCtx, node.Retry.Backoff) {
-			return nodeOutcome{nodeResult: outcome.nodeResult, err: nodeCtx.Err()}
 		}
 	}
 	return nodeOutcome{err: fmt.Errorf("workflow node %q retry policy has no attempts", node.ID)}

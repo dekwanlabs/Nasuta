@@ -43,25 +43,77 @@ func (orchestrator *Orchestrator) executeAttempt(
 ) nodeOutcome {
 	node := nodeRequest.Node
 	inputs := nodeRequest.Inputs
-	reservation, err := account.Reserve(node, nodeRequest.Attempt)
-	if err != nil {
-		return nodeOutcome{err: err}
+	// Every attempt gets its own adapter so the coordinator can tell whether
+	// the child Runtime actually settled physical model usage. All attempts
+	// still delegate admission and settlement to the shared Run ledger.
+	phase := runBudgetPhaseForNode(node)
+	attemptGate := newAttemptBudgetGate(account, phase)
+	nodeCtx = agentapi.WithRunBudgetGate(nodeCtx, attemptGate)
+	nodeCtx = agentapi.WithRunBudgetPhase(nodeCtx, phase)
+	// Custom NodeExecutors used by deterministic integrations and tests may not
+	// call the Runtime model-call gate themselves. Admit Agent nodes here as a
+	// coordinator-level preflight so a restored run cannot start a child after
+	// its shared Workflow budget is already exhausted. The Runtime still
+	// performs the authoritative ReserveCall/Settle for every physical call.
+	if node.Kind == NodeAgent {
+		if err := account.checkForPhase(phase); err != nil {
+			return nodeOutcome{err: errors.Join(ErrNoAffordableTask, err)}
+		}
+		if !account.CanStartAgentForPhase(phase) {
+			return nodeOutcome{err: errors.Join(
+				ErrNoAffordableTask,
+				budgetExceededError("workflow Run has no capacity for another Agent model call in phase %q", phase),
+			)}
+		}
 	}
 	if observer != nil {
 		if err := observer.NodeStarted(nodeCtx, nodeRequest); err != nil {
-			account.Release(reservation)
 			return nodeOutcome{err: fmt.Errorf("persist node start: %w", err)}
 		}
 	}
 	if err := orchestrator.validateNodeInputs(node, inputs, definition.Budget.MaxHandoffBytes); err != nil {
-		result := NodeResult{}
-		budgetErr := account.Settle(reservation, &result.Usage, node.Budget)
-		return orchestrator.failNode(nodeCtx, nodeRequest, result, errors.Join(err, budgetErr), observer)
+		return orchestrator.failNode(nodeCtx, nodeRequest, NodeResult{}, err, observer)
 	}
-	var handoff Handoff
-	var result NodeResult
-	var decision *GateDecision
-	var executeErr error
+	handoff, result, decision, executeErr := orchestrator.executeNodeByKind(
+		nodeCtx, request, nodeRequest, definition,
+	)
+	if node.Kind == NodeAgent {
+		result.accountedUsage = attemptGate.AccountedUsage()
+	}
+	if executeErr == nil {
+		if err := nodeCtx.Err(); err != nil {
+			executeErr = err
+		}
+	}
+	prepared, result, executeErr := orchestrator.finalizeAttempt(
+		nodeCtx, request, nodeRequest, definition, account,
+		handoff, result, decision, executeErr,
+	)
+	if executeErr != nil {
+		return orchestrator.failNode(nodeCtx, nodeRequest, result, executeErr, observer)
+	}
+	var err error
+	if observer != nil {
+		err = observer.NodeSucceeded(nodeCtx, nodeRequest, result, decision)
+		if err != nil {
+			err = fmt.Errorf("persist node success: %w", err)
+		}
+	}
+	return nodeOutcome{handoff: prepared, nodeResult: result, gate: decision, err: err}
+}
+
+// executeNodeByKind dispatches a single attempt to the executor matching the
+// node kind and returns the raw handoff, result, gate decision and any error.
+// Accounting and final handoff preparation happen in the caller so each
+// attempt still settles its usage exactly once.
+func (orchestrator *Orchestrator) executeNodeByKind(
+	nodeCtx context.Context,
+	request RunRequest,
+	nodeRequest NodeRequest,
+	definition Definition,
+) (handoff Handoff, result NodeResult, decision *GateDecision, executeErr error) {
+	node := nodeRequest.Node
+	inputs := nodeRequest.Inputs
 	switch node.Kind {
 	case NodeJoin:
 		handoff, executeErr = orchestrator.aggregateHandoffs(
@@ -89,16 +141,14 @@ func (orchestrator *Orchestrator) executeAttempt(
 		evaluator := orchestrator.gates[node.Gate.ID]
 		if evaluator == nil {
 			executeErr = fmt.Errorf("gate evaluator %q is not registered", node.Gate.ID)
-			break
+			return handoff, result, decision, executeErr
 		}
 		gateDecision, err := evaluator.Evaluate(nodeCtx, nodeRequest)
 		if err != nil {
-			executeErr = err
-			break
+			return handoff, result, decision, err
 		}
 		if !contains(node.Gate.AllowedDecisions, gateDecision.Decision) {
-			executeErr = fmt.Errorf("gate %q returned unsupported decision %q", node.Gate.ID, gateDecision.Decision)
-			break
+			return handoff, result, decision, fmt.Errorf("gate %q returned unsupported decision %q", node.Gate.ID, gateDecision.Decision)
 		}
 		gateDecision.GateID = node.Gate.ID
 		if gateDecision.EvaluatedAt.IsZero() {
@@ -117,8 +167,7 @@ func (orchestrator *Orchestrator) executeAttempt(
 		} else {
 			payload, err := json.Marshal(gateDecision)
 			if err != nil {
-				executeErr = fmt.Errorf("marshal gate decision: %w", err)
-				break
+				return handoff, result, decision, fmt.Errorf("marshal gate decision: %w", err)
 			}
 			handoff = Handoff{
 				Schema: node.OutputSchema, Payload: payload, Completeness: Complete,
@@ -130,7 +179,7 @@ func (orchestrator *Orchestrator) executeAttempt(
 	case NodeAgent, NodeTransform:
 		if orchestrator.nodes == nil {
 			executeErr = fmt.Errorf("node executor is not configured")
-			break
+			return handoff, result, decision, executeErr
 		}
 		result, executeErr = orchestrator.nodes.Execute(nodeCtx, nodeRequest)
 		if executeErr == nil {
@@ -139,16 +188,36 @@ func (orchestrator *Orchestrator) executeAttempt(
 	default:
 		executeErr = fmt.Errorf("node kind %q is unsupported", node.Kind)
 	}
-	if executeErr == nil {
-		if err := nodeCtx.Err(); err != nil {
-			executeErr = err
-		}
+	return handoff, result, decision, executeErr
+}
+
+// finalizeAttempt records retry bookkeeping, prepares the handoff and settles
+// the attempt's remaining usage against the shared Run ledger. It returns the
+// prepared handoff and a possibly-joined error; on error the caller is
+// responsible for recording the node failure.
+func (orchestrator *Orchestrator) finalizeAttempt(
+	nodeCtx context.Context,
+	request RunRequest,
+	nodeRequest NodeRequest,
+	definition Definition,
+	account *budgetAccount,
+	handoff Handoff,
+	result NodeResult,
+	decision *GateDecision,
+	executeErr error,
+) (Handoff, NodeResult, error) {
+	node := nodeRequest.Node
+	if nodeRequest.retryAccounted {
+		// Make the retry visible in the node transition so durable stores retain
+		// the same aggregate usage as the in-memory Run ledger.
+		result.Usage.Retries++
 	}
 	var prepared Handoff
 	if executeErr == nil {
 		handoff.WorkflowRunID = request.RunID
 		handoff.ProducerNodeID = node.ID
 		handoff.Schema = node.OutputSchema
+		var err error
 		prepared, err = PrepareHandoff(
 			handoff,
 			definition.Budget.MaxHandoffBytes,
@@ -158,20 +227,49 @@ func (orchestrator *Orchestrator) executeAttempt(
 			executeErr = err
 		}
 	}
-	if budgetErr := account.Settle(reservation, &result.Usage, node.Budget); budgetErr != nil {
-		executeErr = errors.Join(executeErr, budgetErr)
+	accountingUsage := subtractAccountedUsage(result.Usage, result.accountedUsage)
+	if nodeRequest.retryAccounted && accountingUsage.Retries > 0 {
+		// ConsumeRetry already charged this retry in the shared ledger. Keep it
+		// in the persisted NodeResult, but do not charge it a second time here.
+		accountingUsage.Retries--
+	}
+	if usageErr := account.RecordUsage(accountingUsage); usageErr != nil {
+		executeErr = errors.Join(executeErr, usageErr)
 	}
 	if executeErr != nil {
-		return orchestrator.failNode(nodeCtx, nodeRequest, result, executeErr, observer)
+		return prepared, result, executeErr
 	}
 	result.Handoff = prepared
-	if observer != nil {
-		err = observer.NodeSucceeded(nodeCtx, nodeRequest, result, decision)
-		if err != nil {
-			err = fmt.Errorf("persist node success: %w", err)
-		}
+	return prepared, result, nil
+}
+
+func runBudgetPhaseForNode(node NodeDefinition) agentapi.RunBudgetPhase {
+	if node.Kind == NodeVerifier {
+		return agentapi.RunBudgetPhaseVerifier
 	}
-	return nodeOutcome{handoff: prepared, nodeResult: result, gate: decision, err: err}
+	if node.Kind != NodeAgent {
+		return agentapi.RunBudgetPhaseDefault
+	}
+	switch node.Agent.ID {
+	case "delegation.verifier", "evidence.verify", "verifier":
+		return agentapi.RunBudgetPhaseVerifier
+	case "synthesizer", "composer":
+		return agentapi.RunBudgetPhaseAnswer
+	default:
+		return agentapi.RunBudgetPhaseDefault
+	}
+}
+
+func subtractAccountedUsage(total, accounted Usage) Usage {
+	return Usage{
+		InputTokens:     maxInt64(0, total.InputTokens-accounted.InputTokens),
+		OutputTokens:    maxInt64(0, total.OutputTokens-accounted.OutputTokens),
+		ReasoningTokens: maxInt64(0, total.ReasoningTokens-accounted.ReasoningTokens),
+		TotalTokens:     maxInt64(0, total.TotalTokens-accounted.TotalTokens),
+		ToolCalls:       total.ToolCalls,
+		CostMicros:      maxInt64(0, total.CostMicros-accounted.CostMicros),
+		Retries:         total.Retries,
+	}
 }
 
 func (orchestrator *Orchestrator) failNode(

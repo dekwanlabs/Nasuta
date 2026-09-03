@@ -684,19 +684,13 @@ func TestAskAlwaysUsesNormalAgentRun(t *testing.T) {
 		t.Fatalf("terminal = %+v", terminal)
 	}
 	recorded := events.Snapshot()
-	if len(recorded) != 2 || recorded[0].eventType != EventExecutionRouted ||
-		recorded[1].eventType != EventExecutionDegraded {
-		t.Fatalf("execution events = %+v", recorded)
+	if len(recorded) != 1 || recorded[0].eventType != EventExecutionRouted {
+		t.Fatalf("execution events = %+v, a single-agent suggestion must not be degraded", recorded)
 	}
 	if recorded[0].event.Strategy != string(retrieval.ExecutionSingleAgent) ||
 		recorded[0].event.Status != "completed" ||
-		recorded[0].event.Reason != routeReasonDelegationUnavailable {
+		recorded[0].event.Reason != routeReasonSingleAgentSuggestion {
 		t.Fatalf("routed event = %+v", recorded[0])
-	}
-	if recorded[1].event.Strategy != string(retrieval.ExecutionSingleAgent) ||
-		recorded[1].event.Status != "degraded" ||
-		recorded[1].event.Reason != routeReasonDelegationUnavailable {
-		t.Fatalf("degraded event = %+v", recorded[1])
 	}
 }
 

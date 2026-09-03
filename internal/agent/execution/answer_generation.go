@@ -26,86 +26,109 @@ func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages 
 	}
 	input := &forceConclusionInput{RunID: runID, Messages: messages, AnswerContract: answerContract}
 	conclusion, err := runtrace.Invoke(ctx, forceConclusionSpec, input, func(ctx context.Context, input *forceConclusionInput) (forceConclusionOutput, error) {
-		input.Messages = append(input.Messages, llm.Message{
-			Role:    "user",
-			Content: agent.forceConclusionInstruction(),
-		})
-		attemptStarted := time.Now()
-		stream := newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
-		res, callErr := agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
-		if !agent.cfg.DisableLegacyAnswerRecovery &&
-			(errors.Is(callErr, ErrReasoningTruncated) || errors.Is(callErr, ErrEmptyModelResponse)) {
-			if modelOutputBudgetAvailable(ctx) {
-				log.WarnfCtx(ctx, "[agent] run %s force-conclusion produced no visible content, retrying with no-reasoning prompt: %v", input.RunID, callErr)
-				input.Messages = append(input.Messages, llm.Message{
-					Role:    "user",
-					Content: forceConclusionNoReasoningInstruction,
-				})
-				attemptStarted = time.Now()
-				stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
-				res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionRetryMaxTokens, stream)
-			} else {
-				log.WarnfCtx(ctx, "[agent] run %s force-conclusion recovery skipped: no output budget remains: %v", input.RunID, callErr)
-			}
-		}
-		if callErr == nil && hasLeakedToolProtocol(res) {
-			if !agent.cfg.DisableLegacyAnswerRecovery {
-				log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", input.RunID)
-				input.Messages = append(input.Messages, llm.Message{Role: "user", Content: agent.protocolRepairInstruction()})
-				attemptStarted = time.Now()
-				stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
-				res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
-			}
-			if callErr == nil && hasLeakedToolProtocol(res) {
-				res = nil
-				callErr = ErrToolProtocolLeak
-			}
-		}
-		if callErr == nil {
-			res, callErr = agent.enforceContract(ctx, input.Messages, res, input.AnswerContract, agent.cfg.ConclusionMaxTokens, stream)
-		}
-		if callErr == nil {
-			res = agent.enforceFlowContract(ctx, input.Messages, res, outputContract, agent.cfg.ConclusionMaxTokens, stream)
-		} else if errors.Is(callErr, ErrAnswerTruncated) &&
-			input.AnswerContract.Active() &&
-			validateAndStripContractPartial(res, input.AnswerContract) {
-			log.WarnfCtx(
-				ctx,
-				"[agent] run %s preserving contract-valid truncated force-conclusion candidate",
-				input.RunID,
-			)
-		}
-		return forceConclusionOutput{
-			Result: res, Stream: stream, Timing: stream.Timings(), AttemptStarted: attemptStarted,
-		}, callErr
+		return agent.concludeWithRecovery(ctx, input, outputContract)
 	})
 	res := conclusion.Result
 	stream := conclusion.Stream
 	timing := conclusion.Timing
 	t0 := conclusion.AttemptStarted
-	if timing.FirstContent > 0 {
-		elapsed := timing.FirstContent.Milliseconds()
-		if !runStarted.IsZero() {
-			elapsed = t0.Sub(runStarted).Milliseconds() + timing.FirstContent.Milliseconds()
-		}
-		recordFirstAnswerToken(ctx, "force_conclusion", timing.FirstContent, time.Duration(elapsed)*time.Millisecond)
-	}
+	recordForceConclusionTiming(ctx, runStarted, t0, timing)
 	*stepSeq++
-	validAnswer := res != nil && answerContract.Satisfied(res.Content)
-	if hasDeliverableAnswer(res) && validAnswer && !errors.Is(err, ErrAnswerContractViolation) {
-		stream.Publish(res.Content)
-		agent.observer.OnStep(ctx, runID, StepRecord{
-			StepNo:              *stepSeq,
-			Kind:                StepKindAnswer,
-			Content:             res.Content,
-			DelegationAdoptions: answerContract.Adoptions(),
-			TokenDelta:          utf8.RuneCountInString(res.Content),
-			ReasoningTokens:     res.ReasoningTokens,
-			DurationMs:          int(time.Since(t0) / time.Millisecond),
-			CreatedAt:           t0,
-		})
-	}
+	agent.publishForceConclusionAnswer(ctx, runID, res, answerContract, stepSeq, t0, err, stream)
 	return res, err
+}
+
+func (agent *Agent) concludeWithRecovery(
+	ctx context.Context,
+	input *forceConclusionInput,
+	outputContract agentapi.RunOutputContract,
+) (forceConclusionOutput, error) {
+	input.Messages = append(input.Messages, llm.Message{
+		Role:    "user",
+		Content: agent.forceConclusionInstruction(),
+	})
+	attemptStarted := time.Now()
+	stream := newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
+	res, callErr := agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
+	if !agent.cfg.DisableLegacyAnswerRecovery &&
+		(errors.Is(callErr, ErrReasoningTruncated) || errors.Is(callErr, ErrEmptyModelResponse)) {
+		if modelOutputBudgetAvailable(ctx) {
+			log.WarnfCtx(ctx, "[agent] run %s force-conclusion produced no visible content, retrying with no-reasoning prompt: %v", input.RunID, callErr)
+			input.Messages = append(input.Messages, llm.Message{
+				Role:    "user",
+				Content: forceConclusionNoReasoningInstruction,
+			})
+			attemptStarted = time.Now()
+			stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
+			res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionRetryMaxTokens, stream)
+		} else {
+			log.WarnfCtx(ctx, "[agent] run %s force-conclusion recovery skipped: no output budget remains: %v", input.RunID, callErr)
+		}
+	}
+	if callErr == nil && hasLeakedToolProtocol(res) {
+		if !agent.cfg.DisableLegacyAnswerRecovery {
+			log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", input.RunID)
+			input.Messages = append(input.Messages, llm.Message{Role: "user", Content: agent.protocolRepairInstruction()})
+			attemptStarted = time.Now()
+			stream = newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
+			res, callErr = agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
+		}
+		if callErr == nil && hasLeakedToolProtocol(res) {
+			res = nil
+			callErr = ErrToolProtocolLeak
+		}
+	}
+	if callErr == nil {
+		res, callErr = agent.enforceContract(ctx, input.Messages, res, input.AnswerContract, agent.cfg.ConclusionMaxTokens, stream)
+	}
+	if callErr == nil {
+		res = agent.enforceFlowContract(ctx, input.Messages, res, outputContract, agent.cfg.ConclusionMaxTokens, stream)
+	} else if errors.Is(callErr, ErrAnswerTruncated) &&
+		input.AnswerContract.Active() &&
+		validateAndStripContractPartial(res, input.AnswerContract) {
+		log.WarnfCtx(ctx, "[agent] run %s preserving contract-valid truncated force-conclusion candidate", input.RunID)
+	}
+	return forceConclusionOutput{
+		Result: res, Stream: stream, Timing: stream.Timings(), AttemptStarted: attemptStarted,
+	}, callErr
+}
+
+func recordForceConclusionTiming(ctx context.Context, runStarted, t0 time.Time, timing StreamTiming) {
+	if timing.FirstContent <= 0 {
+		return
+	}
+	elapsed := timing.FirstContent.Milliseconds()
+	if !runStarted.IsZero() {
+		elapsed = t0.Sub(runStarted).Milliseconds() + timing.FirstContent.Milliseconds()
+	}
+	recordFirstAnswerToken(ctx, "force_conclusion", timing.FirstContent, time.Duration(elapsed)*time.Millisecond)
+}
+
+func (agent *Agent) publishForceConclusionAnswer(
+	ctx context.Context,
+	runID string,
+	res *llm.ChatStreamResult,
+	answerContract *exactAnswerContract,
+	stepSeq *int,
+	t0 time.Time,
+	callErr error,
+	stream *StreamPipe,
+) {
+	validAnswer := res != nil && answerContract.Satisfied(res.Content)
+	if !hasDeliverableAnswer(res) || !validAnswer || errors.Is(callErr, ErrAnswerContractViolation) {
+		return
+	}
+	stream.Publish(res.Content)
+	agent.observer.OnStep(ctx, runID, StepRecord{
+		StepNo:              *stepSeq,
+		Kind:                StepKindAnswer,
+		Content:             res.Content,
+		DelegationAdoptions: answerContract.Adoptions(),
+		TokenDelta:          utf8.RuneCountInString(res.Content),
+		ReasoningTokens:     res.ReasoningTokens,
+		DurationMs:          int(time.Since(t0) / time.Millisecond),
+		CreatedAt:           t0,
+	})
 }
 
 func modelOutputBudgetAvailable(ctx context.Context) bool {

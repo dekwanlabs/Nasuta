@@ -831,3 +831,166 @@ func TestEnqueueWorkItemRejectsIdentityOrPayloadConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEnqueueAndClaimWorkItemAtomicallyClaimsNewItem(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rs := &Store{db: db}
+	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	payload := []byte(`{"objective":"inspect"}`)
+	item := WorkItem{
+		WorkID: "work-atomic-1", RunID: "run-1", ParentRunID: "parent-1",
+		DelegationID: "delegation-1", TaskIndex: 0, AttemptNo: 1,
+		Kind: "delegation_child", Payload: payload, State: WorkReady,
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO agent_work_items`).
+		WithArgs(
+			item.WorkID, item.RunID, item.ParentRunID, item.DelegationID,
+			item.TaskIndex, item.AttemptNo, item.Kind, item.Payload, item.State,
+			sqlmock.AnyArg(), item.AttemptCount, item.LastError,
+			sqlmock.AnyArg(), sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(`SELECT run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json FROM agent_work_items WHERE work_id=\? FOR UPDATE`).
+		WithArgs(item.WorkID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json",
+		}).AddRow(item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload))
+	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), item.WorkID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"work_id", "run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json", "state", "lease_owner", "lease_fence", "lease_expires_at", "available_at", "attempt_count", "last_error",
+		}).AddRow(item.WorkID, item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload, WorkReady, "", int64(0), nil, now, 0, ""))
+	mock.ExpectExec(`UPDATE agent_work_items SET state=\?,lease_owner=\?,lease_fence=\?,lease_expires_at=\?,attempt_count=\?,updated_at=\? WHERE work_id=\?`).
+		WithArgs(WorkRunning, "parent-dispatcher", int64(1), sqlmock.AnyArg(), 1, sqlmock.AnyArg(), item.WorkID, WorkReady, WorkRunning, WorkReady, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	claimed, err := rs.EnqueueAndClaimWorkItem(context.Background(), item, "parent-dispatcher", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.WorkID != item.WorkID || claimed.State != WorkRunning ||
+		claimed.LeaseOwner != "parent-dispatcher" || claimed.LeaseFence != 1 ||
+		claimed.AttemptCount != 1 {
+		t.Fatalf("claimed item = %#v", claimed)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnqueueAndClaimWorkItemRejectsIdentityConflict(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rs := &Store{db: db}
+	item := WorkItem{
+		WorkID: "work-atomic-conflict", RunID: "run-1", ParentRunID: "parent-1",
+		DelegationID: "delegation-1", TaskIndex: 0, AttemptNo: 1,
+		Kind: "delegation_child", Payload: []byte(`{"objective":"original"}`), State: WorkReady,
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO agent_work_items`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json FROM agent_work_items WHERE work_id=\? FOR UPDATE`).
+		WithArgs(item.WorkID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json",
+		}).AddRow(item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, []byte(`{"objective":"tampered"}`)))
+	mock.ExpectRollback()
+
+	if _, err := rs.EnqueueAndClaimWorkItem(context.Background(), item, "parent-dispatcher", time.Now().UTC(), time.Minute); !errors.Is(err, ErrWorkItemConflict) {
+		t.Fatalf("error = %v, want ErrWorkItemConflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnqueueAndClaimWorkItemReturnsNoRowsForLiveLease(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rs := &Store{db: db}
+	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	payload := []byte(`{"objective":"inspect"}`)
+	item := WorkItem{
+		WorkID: "work-atomic-live", RunID: "run-1", ParentRunID: "parent-1",
+		DelegationID: "delegation-1", TaskIndex: 0, AttemptNo: 1,
+		Kind: "delegation_child", Payload: payload, State: WorkReady,
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO agent_work_items`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json FROM agent_work_items WHERE work_id=\? FOR UPDATE`).
+		WithArgs(item.WorkID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json",
+		}).AddRow(item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload))
+	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), item.WorkID).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	if _, err := rs.EnqueueAndClaimWorkItem(context.Background(), item, "parent-dispatcher", now, time.Minute); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("error = %v, want sql.ErrNoRows", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnqueueAndClaimWorkItemReclaimsExpiredLease(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rs := &Store{db: db}
+	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	expired := now.Add(-time.Second)
+	payload := []byte(`{"objective":"inspect"}`)
+	item := WorkItem{
+		WorkID: "work-atomic-expired", RunID: "run-1", ParentRunID: "parent-1",
+		DelegationID: "delegation-1", TaskIndex: 0, AttemptNo: 1,
+		Kind: "delegation_child", Payload: payload, State: WorkReady,
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO agent_work_items`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json FROM agent_work_items WHERE work_id=\? FOR UPDATE`).
+		WithArgs(item.WorkID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json",
+		}).AddRow(item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload))
+	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), item.WorkID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"work_id", "run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json", "state", "lease_owner", "lease_fence", "lease_expires_at", "available_at", "attempt_count", "last_error",
+		}).AddRow(item.WorkID, item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload, WorkRunning, "old-worker", int64(7), expired, expired, 3, "worker lease expired"))
+	mock.ExpectExec(`UPDATE agent_work_items SET state=\?,lease_owner=\?,lease_fence=\?,lease_expires_at=\?,attempt_count=\?,updated_at=\? WHERE work_id=\?`).
+		WithArgs(WorkRunning, "parent-dispatcher", int64(8), sqlmock.AnyArg(), 4, sqlmock.AnyArg(), item.WorkID, WorkReady, WorkRunning, WorkReady, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	claimed, err := rs.EnqueueAndClaimWorkItem(context.Background(), item, "parent-dispatcher", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.LeaseOwner != "parent-dispatcher" || claimed.LeaseFence != 8 || claimed.AttemptCount != 4 {
+		t.Fatalf("reclaimed item = %#v", claimed)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

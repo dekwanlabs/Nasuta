@@ -160,6 +160,12 @@ func (runtime *Runtime) EmitPhase(runID, text string) {
 	}
 }
 
+func (runtime *Runtime) EmitStatus(runID, text, code string, elapsedMS int64) {
+	if runtime != nil && runtime.hub != nil {
+		runtime.hub.EmitStatus(runID, text, code, elapsedMS)
+	}
+}
+
 func (runtime *Runtime) EmitSessionStatus(runID string, event run.SessionStatusEvent) {
 	if runtime != nil && runtime.hub != nil {
 		runtime.hub.EmitSessionStatus(runID, event)

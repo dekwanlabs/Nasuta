@@ -32,6 +32,121 @@ func TestPrepareRejectsCyclesAndSchemaMismatches(t *testing.T) {
 	}
 }
 
+func TestPrepareValidatesComposerWorkflowContractAndTopology(t *testing.T) {
+	schemas := testSchemaRegistry(t)
+	verified := agentapi.InvestigationVerifiedBundleSchemaRef()
+	answer := agentapi.InvestigationAnswerSchemaRef()
+	definition := Definition{
+		ID:           "investigation.composer",
+		Version:      1,
+		Purpose:      "Verify and synthesize an investigation.",
+		InputSchema:  agentapi.SchemaRef{ID: "review.subject", Version: 1},
+		OutputSchema: answer,
+		Budget: Budget{
+			MaxNodes: 2, MaxParallelism: 1, MaxRounds: 1, MaxDepth: 2,
+			Timeout: time.Second, MaxHandoffBytes: 4096,
+		},
+		FailurePolicy: FailurePolicy{Mode: FailFast},
+		Nodes: []NodeDefinition{
+			{
+				ID: "verify", Kind: NodeAgent,
+				Agent:        agentapi.DefinitionRef{ID: "delegation.verifier", Version: 1},
+				InputSchema:  agentapi.SchemaRef{ID: "review.subject", Version: 1},
+				OutputSchema: verified, Timeout: time.Second,
+			},
+			{
+				ID: "compose", Kind: NodeAgent,
+				Agent:       agentapi.DefinitionRef{ID: "synthesizer", Version: 1},
+				InputSchema: verified, OutputSchema: answer, Timeout: time.Second,
+			},
+		},
+		Edges: []EdgeDefinition{{From: "verify", To: "compose", Required: true}},
+	}
+	if _, err := Prepare(definition, schemas); err != nil {
+		t.Fatalf("Prepare valid composer workflow: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Definition)
+		want   string
+	}{
+		{
+			name: "wrong input schema",
+			mutate: func(definition *Definition) {
+				definition.Nodes[1].InputSchema = agentapi.SchemaRef{ID: "review.report", Version: 1}
+			},
+			want: "must consume investigation.verified_bundle schema",
+		},
+		{
+			name: "wrong output schema",
+			mutate: func(definition *Definition) {
+				definition.Nodes[1].OutputSchema = agentapi.SchemaRef{ID: "review.report", Version: 1}
+				definition.OutputSchema = definition.Nodes[1].OutputSchema
+			},
+			want: "must produce investigation.answer schema",
+		},
+		{
+			name: "composer has successor",
+			mutate: func(definition *Definition) {
+				definition.Nodes = append(definition.Nodes, NodeDefinition{
+					ID: "tail", Kind: NodeJoin,
+					InputSchema: answer, OutputSchema: answer, Timeout: time.Second,
+				})
+				definition.Edges = append(definition.Edges, EdgeDefinition{
+					From: "compose", To: "tail", Required: true,
+				})
+				definition.Budget.MaxNodes = 3
+				definition.Budget.MaxDepth = 3
+			},
+			want: `composer node "compose" must be terminal`,
+		},
+		{
+			name: "composer points to verifier",
+			mutate: func(definition *Definition) {
+				definition.Nodes = append(definition.Nodes, NodeDefinition{
+					ID: "verify_again", Kind: NodeAgent,
+					Agent:       agentapi.DefinitionRef{ID: "delegation.verifier", Version: 1},
+					InputSchema: answer, OutputSchema: verified, Timeout: time.Second,
+				})
+				definition.Edges = append(definition.Edges, EdgeDefinition{
+					From: "compose", To: "verify_again", Required: true,
+				})
+				definition.Budget.MaxNodes = 3
+				definition.Budget.MaxDepth = 3
+			},
+			want: "cannot point to verifier node",
+		},
+		{
+			name: "multiple predecessors",
+			mutate: func(definition *Definition) {
+				definition.Nodes = append(definition.Nodes, NodeDefinition{
+					ID: "verify_optional", Kind: NodeAgent,
+					Agent:        agentapi.DefinitionRef{ID: "delegation.verifier", Version: 1},
+					InputSchema:  agentapi.SchemaRef{ID: "review.subject", Version: 1},
+					OutputSchema: verified, Timeout: time.Second,
+				})
+				definition.Edges = append(definition.Edges, EdgeDefinition{
+					From: "verify_optional", To: "compose", Required: false,
+				})
+				definition.Budget.MaxNodes = 3
+			},
+			want: "requires exactly one verifier predecessor",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := definition
+			candidate.Nodes = append([]NodeDefinition(nil), definition.Nodes...)
+			candidate.Edges = append([]EdgeDefinition(nil), definition.Edges...)
+			test.mutate(&candidate)
+			if _, err := Prepare(candidate, schemas); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Prepare error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestPrepareRequiresPublishedSchemasAndAcceptsExplicitCompatibility(t *testing.T) {
 	schemas := testSchemaRegistry(t)
 	definition := testWorkflow()
@@ -951,9 +1066,69 @@ func testSchemaRegistry(t *testing.T) *agentapi.SchemaRegistry {
 			ID: "other.input", Version: 1,
 			Document: json.RawMessage(`{"type":"object","required":["other"]}`),
 		},
+		{
+			ID: agentapi.TaskContractSchemaID, Version: agentapi.TaskContractSchemaVersion,
+			Document: json.RawMessage(`{"type":"object","additionalProperties":true}`),
+		},
+		{
+			ID: agentapi.InvestigationVerifiedBundleSchemaID, Version: agentapi.InvestigationVerifiedBundleSchemaVersion,
+			Document: json.RawMessage(`{"type":"object","additionalProperties":true}`),
+		},
+		{
+			ID: agentapi.InvestigationAnswerSchemaID, Version: agentapi.InvestigationAnswerSchemaVersion,
+			Document: json.RawMessage(`{"type":"object","additionalProperties":true}`),
+		},
 	}
 	if err := registry.Publish(definitions); err != nil {
 		t.Fatalf("publish test schemas: %v", err)
 	}
 	return registry
+}
+
+func TestTaskDirectiveAllowsParallelDefaultsToTrue(t *testing.T) {
+	if task := (*TaskDirective)(nil); !task.AllowsParallel() {
+		t.Fatal("nil task directive should allow parallel dispatch")
+	}
+	task := &TaskDirective{}
+	if !task.AllowsParallel() {
+		t.Fatal("unset allow_parallel should allow parallel dispatch")
+	}
+	allow := false
+	task.AllowParallel = &allow
+	if task.AllowsParallel() {
+		t.Fatal("explicit allow_parallel=false should serialize dispatch")
+	}
+	allow = true
+	if !task.AllowsParallel() {
+		t.Fatal("explicit allow_parallel=true should allow parallel dispatch")
+	}
+}
+
+func TestUnavailableReasonsForNodeFiltersUnrelatedFailures(t *testing.T) {
+	predecessors := map[string][]string{
+		"verifier": {"code", "runtime"},
+		"composer": {"verifier"},
+	}
+	reasons := map[string]StopReason{
+		"code":     StopCapabilityUnavailable,
+		"runtime":  StopEvidenceInsufficient,
+		"verifier": StopVerificationFailed,
+		"docs":     StopBudgetExhausted,
+	}
+	got := unavailableReasonsForNode("verifier", predecessors, reasons)
+	if len(got) != 2 || got["code"] != StopCapabilityUnavailable || got["runtime"] != StopEvidenceInsufficient {
+		t.Fatalf("filtered reasons = %#v", got)
+	}
+	if _, ok := got["verifier"]; ok {
+		t.Fatalf("current node failure leaked into reasons: %#v", got)
+	}
+	if _, ok := got["docs"]; ok {
+		t.Fatalf("unrelated failure leaked into reasons: %#v", got)
+	}
+	if got := unavailableReasonsForNode("composer", predecessors, reasons); len(got) != 1 || got["verifier"] != StopVerificationFailed {
+		t.Fatalf("composer reasons = %#v", got)
+	}
+	if got := unavailableReasonsForNode("missing", predecessors, reasons); got != nil {
+		t.Fatalf("missing node reasons = %#v, want nil", got)
+	}
 }

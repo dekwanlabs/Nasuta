@@ -24,122 +24,164 @@ func MergeFlowIRs(flows []agentapi.FlowIR) (*agentapi.FlowIR, error) {
 	if len(flows) == 0 {
 		return nil, nil
 	}
-	type nodeAggregate struct {
-		key         string
-		subject     string
-		label       string
-		kind        string
-		evidenceRef map[string]struct{}
-	}
-	type edgeAggregate struct {
-		edge        agentapi.FlowEdge
-		evidenceRef map[string]struct{}
-		states      map[string]struct{}
-	}
-
-	nodes := make(map[string]*nodeAggregate)
-	edges := make(map[string]*edgeAggregate)
-	subjects := make(map[string]string)
-	openHops := make(map[string]string)
-	uncertainties := make(map[string]string)
-	status := "complete"
-	confidence := "high"
-
+	state := newFlowMergeState()
 	for flowIndex := range flows {
-		flow := flows[flowIndex]
-		if err := validateFlowIR(&flow); err != nil {
+		if err := mergeFlowInto(state, flows[flowIndex]); err != nil {
 			return nil, fmt.Errorf("flow %d: %w", flowIndex, err)
 		}
-		subject := normalizeFlowText(flow.Subject)
-		if subject != "" {
-			subjects[strings.ToLower(subject)] = subject
-		}
-		if flow.Status == "partial" {
-			status = "partial"
-		}
-		if flow.Confidence == "low" || (flow.Confidence == "medium" && confidence == "high") {
-			confidence = flow.Confidence
-		}
-		for _, uncertainty := range flow.Uncertainties {
-			if value := normalizeFlowText(uncertainty); value != "" {
-				uncertainties[strings.ToLower(value)] = value
-			}
-		}
-		for _, hop := range flow.OpenHops {
-			if value := normalizeFlowText(hop); value != "" {
-				openHops[strings.ToLower(value)] = value
-			}
-		}
+	}
+	merged := state.finalize()
+	if err := validateFlowIR(merged); err != nil {
+		return nil, fmt.Errorf("merged flow: %w", err)
+	}
+	return merged, nil
+}
 
-		idToKey := make(map[string]string, len(flow.Nodes))
-		for _, node := range flow.Nodes {
-			label := normalizeFlowText(node.Label)
-			kind := normalizeFlowText(node.Kind)
-			key := flowNodeKey(subject, kind, label)
-			idToKey[node.ID] = key
-			aggregate := nodes[key]
-			if aggregate == nil {
-				aggregate = &nodeAggregate{
-					key: key, subject: subject, label: label, kind: kind,
-					evidenceRef: make(map[string]struct{}),
-				}
-				nodes[key] = aggregate
-			}
-			for _, reference := range node.EvidenceRefs {
-				if value := strings.TrimSpace(reference); value != "" {
-					aggregate.evidenceRef[value] = struct{}{}
-				}
-			}
+type nodeAggregate struct {
+	key         string
+	subject     string
+	label       string
+	kind        string
+	evidenceRef map[string]struct{}
+}
+
+type edgeAggregate struct {
+	edge        agentapi.FlowEdge
+	evidenceRef map[string]struct{}
+	states      map[string]struct{}
+}
+
+type flowMergeState struct {
+	nodes         map[string]*nodeAggregate
+	edges         map[string]*edgeAggregate
+	subjects      map[string]string
+	openHops      map[string]string
+	uncertainties map[string]string
+	status        string
+	confidence    string
+}
+
+func newFlowMergeState() *flowMergeState {
+	return &flowMergeState{
+		nodes:         make(map[string]*nodeAggregate),
+		edges:         make(map[string]*edgeAggregate),
+		subjects:      make(map[string]string),
+		openHops:      make(map[string]string),
+		uncertainties: make(map[string]string),
+		status:        "complete",
+		confidence:    "high",
+	}
+}
+
+func mergeFlowInto(state *flowMergeState, flow agentapi.FlowIR) error {
+	if err := validateFlowIR(&flow); err != nil {
+		return err
+	}
+	subject := mergeFlowMetadata(state, flow)
+	idToKey := mergeFlowNodes(state, flow, subject)
+	mergeFlowEdges(state, flow, subject, idToKey)
+	return nil
+}
+
+func mergeFlowMetadata(state *flowMergeState, flow agentapi.FlowIR) string {
+	subject := normalizeFlowText(flow.Subject)
+	if subject != "" {
+		state.subjects[strings.ToLower(subject)] = subject
+	}
+	if flow.Status == "partial" {
+		state.status = "partial"
+	}
+	if flow.Confidence == "low" || (flow.Confidence == "medium" && state.confidence == "high") {
+		state.confidence = flow.Confidence
+	}
+	for _, uncertainty := range flow.Uncertainties {
+		if value := normalizeFlowText(uncertainty); value != "" {
+			state.uncertainties[strings.ToLower(value)] = value
 		}
-		for _, edge := range flow.Edges {
-			from, fromOK := idToKey[edge.From]
-			to, toOK := idToKey[edge.To]
-			if !fromOK || !toOK {
-				status = "partial"
-				uncertainties[strings.ToLower(flowMergeMissingNode)] = flowMergeMissingNode
-				continue
+	}
+	for _, hop := range flow.OpenHops {
+		if value := normalizeFlowText(hop); value != "" {
+			state.openHops[strings.ToLower(value)] = value
+		}
+	}
+	return subject
+}
+
+func mergeFlowNodes(state *flowMergeState, flow agentapi.FlowIR, subject string) map[string]string {
+	idToKey := make(map[string]string, len(flow.Nodes))
+	for _, node := range flow.Nodes {
+		label := normalizeFlowText(node.Label)
+		kind := normalizeFlowText(node.Kind)
+		key := flowNodeKey(subject, kind, label)
+		idToKey[node.ID] = key
+		aggregate := state.nodes[key]
+		if aggregate == nil {
+			aggregate = &nodeAggregate{
+				key: key, subject: subject, label: label, kind: kind,
+				evidenceRef: make(map[string]struct{}),
 			}
-			protocol := normalizeFlowText(edge.Protocol)
-			syncMode := normalizeFlowText(edge.SyncMode)
-			edgeKey := strings.Join([]string{subject, from, to, protocol, syncMode}, "\x00")
-			aggregate := edges[edgeKey]
-			if aggregate == nil {
-				aggregate = &edgeAggregate{
-					edge: agentapi.FlowEdge{
-						From: from, To: to, Protocol: protocol, SyncMode: syncMode,
-						EvidenceState: normalizeEvidenceState(edge.EvidenceState),
-					},
-					evidenceRef: make(map[string]struct{}),
-					states:      make(map[string]struct{}),
-				}
-				edges[edgeKey] = aggregate
-			}
-			state := normalizeEvidenceState(edge.EvidenceState)
-			aggregate.states[state] = struct{}{}
-			if evidenceRank(state) > evidenceRank(aggregate.edge.EvidenceState) {
-				aggregate.edge.EvidenceState = state
-			}
-			for _, reference := range edge.EvidenceRefs {
-				if value := strings.TrimSpace(reference); value != "" {
-					aggregate.evidenceRef[value] = struct{}{}
-				}
+			state.nodes[key] = aggregate
+		}
+		for _, reference := range node.EvidenceRefs {
+			if value := strings.TrimSpace(reference); value != "" {
+				aggregate.evidenceRef[value] = struct{}{}
 			}
 		}
 	}
+	return idToKey
+}
 
-	if len(openHops) > 0 {
-		status = "partial"
+func mergeFlowEdges(state *flowMergeState, flow agentapi.FlowIR, subject string, idToKey map[string]string) {
+	for _, edge := range flow.Edges {
+		from, fromOK := idToKey[edge.From]
+		to, toOK := idToKey[edge.To]
+		if !fromOK || !toOK {
+			state.status = "partial"
+			state.uncertainties[strings.ToLower(flowMergeMissingNode)] = flowMergeMissingNode
+			continue
+		}
+		protocol := normalizeFlowText(edge.Protocol)
+		syncMode := normalizeFlowText(edge.SyncMode)
+		edgeKey := strings.Join([]string{subject, from, to, protocol, syncMode}, "\x00")
+		aggregate := state.edges[edgeKey]
+		if aggregate == nil {
+			aggregate = &edgeAggregate{
+				edge: agentapi.FlowEdge{
+					From: from, To: to, Protocol: protocol, SyncMode: syncMode,
+					EvidenceState: normalizeEvidenceState(edge.EvidenceState),
+				},
+				evidenceRef: make(map[string]struct{}),
+				states:      make(map[string]struct{}),
+			}
+			state.edges[edgeKey] = aggregate
+		}
+		stateValue := normalizeEvidenceState(edge.EvidenceState)
+		aggregate.states[stateValue] = struct{}{}
+		if evidenceRank(stateValue) > evidenceRank(aggregate.edge.EvidenceState) {
+			aggregate.edge.EvidenceState = stateValue
+		}
+		for _, reference := range edge.EvidenceRefs {
+			if value := strings.TrimSpace(reference); value != "" {
+				aggregate.evidenceRef[value] = struct{}{}
+			}
+		}
 	}
-	for _, edge := range edges {
+}
+
+func (state *flowMergeState) finalize() *agentapi.FlowIR {
+	if len(state.openHops) > 0 {
+		state.status = "partial"
+	}
+	for _, edge := range state.edges {
 		if edge.edge.EvidenceState != "verified" {
-			status = "partial"
-			uncertainties[strings.ToLower(flowMergePartialUncertainty)] = flowMergePartialUncertainty
+			state.status = "partial"
+			state.uncertainties[strings.ToLower(flowMergePartialUncertainty)] = flowMergePartialUncertainty
 		}
 	}
 
-	canonicalNodes := make([]agentapi.FlowNode, 0, len(nodes))
-	canonicalIDByKey := make(map[string]string, len(nodes))
-	for key, aggregate := range nodes {
+	canonicalNodes := make([]agentapi.FlowNode, 0, len(state.nodes))
+	canonicalIDByKey := make(map[string]string, len(state.nodes))
+	for key, aggregate := range state.nodes {
 		id := canonicalFlowNodeID(key)
 		canonicalIDByKey[key] = id
 		canonicalNodes = append(canonicalNodes, agentapi.FlowNode{
@@ -151,16 +193,16 @@ func MergeFlowIRs(flows []agentapi.FlowIR) (*agentapi.FlowIR, error) {
 		return canonicalNodes[i].ID < canonicalNodes[j].ID
 	})
 
-	canonicalEdges := make([]agentapi.FlowEdge, 0, len(edges))
-	for _, aggregate := range edges {
+	canonicalEdges := make([]agentapi.FlowEdge, 0, len(state.edges))
+	for _, aggregate := range state.edges {
 		edge := aggregate.edge
 		edge.From = canonicalIDByKey[edge.From]
 		edge.To = canonicalIDByKey[edge.To]
 		edge.EvidenceRefs = sortedSet(aggregate.evidenceRef)
 		if edge.EvidenceState == "verified" && len(edge.EvidenceRefs) == 0 {
 			edge.EvidenceState = "unresolved"
-			status = "partial"
-			uncertainties[strings.ToLower(flowMergePartialUncertainty)] = flowMergePartialUncertainty
+			state.status = "partial"
+			state.uncertainties[strings.ToLower(flowMergePartialUncertainty)] = flowMergePartialUncertainty
 		}
 		canonicalEdges = append(canonicalEdges, edge)
 	}
@@ -171,21 +213,18 @@ func MergeFlowIRs(flows []agentapi.FlowIR) (*agentapi.FlowIR, error) {
 	})
 
 	merged := &agentapi.FlowIR{
-		Subject:       joinSortedValues(subjects, " / "),
-		Status:        status,
+		Subject:       joinSortedValues(state.subjects, " / "),
+		Status:        state.status,
 		Nodes:         canonicalNodes,
 		Edges:         canonicalEdges,
-		OpenHops:      sortedMapValues(openHops),
-		Uncertainties: sortedMapValues(uncertainties),
-		Confidence:    confidence,
+		OpenHops:      sortedMapValues(state.openHops),
+		Uncertainties: sortedMapValues(state.uncertainties),
+		Confidence:    state.confidence,
 	}
 	if merged.Subject == "" {
 		merged.Subject = "未命名流程"
 	}
-	if err := validateFlowIR(merged); err != nil {
-		return nil, fmt.Errorf("merged flow: %w", err)
-	}
-	return merged, nil
+	return merged
 }
 
 func normalizeFlowText(value string) string {

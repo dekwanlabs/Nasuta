@@ -41,14 +41,9 @@ func (rs *Store) EnqueueWorkItem(ctx context.Context, item WorkItem) error {
 	if rs == nil || rs.db == nil {
 		return fmt.Errorf("agent/runstore: database is required")
 	}
-	if item.WorkID == "" || item.RunID == "" || item.Kind == "" || len(item.Payload) == 0 {
-		return fmt.Errorf("invalid work item")
-	}
-	if item.AttemptNo <= 0 {
-		item.AttemptNo = 1
-	}
-	if item.State == "" {
-		item.State = WorkReady
+	item, err := normalizeWorkItem(item)
+	if err != nil {
+		return err
 	}
 	now := time.Now().UTC()
 	tx, err := rs.db.BeginTx(ctx, nil)
@@ -56,13 +51,77 @@ func (rs *Store) EnqueueWorkItem(ctx context.Context, item WorkItem) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := upsertAndVerifyWorkItem(ctx, tx, item, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
-	// WorkID and the logical delegation tuple are immutable identity. A
-	// redelivery may safely call Enqueue again, but it must never silently
-	// replace the payload or kind of an existing queue item: doing so could
-	// execute a different child under a previously admitted reservation. JSON
-	// equality is semantic because MySQL normalizes JSON representation.
-	_, err = tx.ExecContext(ctx, `INSERT INTO agent_work_items(work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,available_at,attempt_count,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE work_id=work_id`, item.WorkID, item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, item.Payload, item.State, store.DatabaseTime(now.Format(time.RFC3339Nano)), item.AttemptCount, item.LastError, store.DatabaseTime(now.Format(time.RFC3339Nano)), store.DatabaseTime(now.Format(time.RFC3339Nano)))
+// EnqueueAndClaimWorkItem atomically creates (or idempotently reuses) a work
+// item and acquires its lease. This is the low-latency path for a parent that
+// dispatches child work in the same process. Keeping enqueue and claim in one
+// transaction preserves the durable queue's lease/fence guarantees while
+// avoiding an extra transaction and the parent/worker claim race.
+func (rs *Store) EnqueueAndClaimWorkItem(
+	ctx context.Context,
+	item WorkItem,
+	owner string,
+	now time.Time,
+	ttl time.Duration,
+) (WorkItem, error) {
+	if rs == nil || rs.db == nil {
+		return WorkItem{}, fmt.Errorf("agent/runstore: database is required")
+	}
+	item, err := normalizeWorkItem(item)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if owner == "" || ttl <= 0 {
+		return WorkItem{}, fmt.Errorf("invalid worker lease")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	tx, err := rs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	defer tx.Rollback()
+	if err := upsertAndVerifyWorkItem(ctx, tx, item, now); err != nil {
+		return WorkItem{}, err
+	}
+	claimed, err := claimWorkItemTx(ctx, tx, owner, now, ttl, item.WorkID, "")
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return WorkItem{}, err
+	}
+	return claimed, nil
+}
+
+func normalizeWorkItem(item WorkItem) (WorkItem, error) {
+	if item.WorkID == "" || item.RunID == "" || item.Kind == "" || len(item.Payload) == 0 {
+		return WorkItem{}, fmt.Errorf("invalid work item")
+	}
+	if item.AttemptNo <= 0 {
+		item.AttemptNo = 1
+	}
+	if item.State == "" {
+		item.State = WorkReady
+	}
+	return item, nil
+}
+
+// upsertAndVerifyWorkItem idempotently inserts the work item and verifies its
+// immutable identity. WorkID and the logical delegation tuple are immutable
+// identity. A redelivery may safely call Enqueue again, but it must never
+// silently replace the payload or kind of an existing queue item: doing so
+// could execute a different child under a previously admitted reservation.
+// JSON equality is semantic because MySQL normalizes JSON representation.
+func upsertAndVerifyWorkItem(ctx context.Context, tx *sql.Tx, item WorkItem, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO agent_work_items(work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,available_at,attempt_count,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE work_id=work_id`, item.WorkID, item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, item.Payload, item.State, store.DatabaseTime(now.Format(time.RFC3339Nano)), item.AttemptCount, item.LastError, store.DatabaseTime(now.Format(time.RFC3339Nano)), store.DatabaseTime(now.Format(time.RFC3339Nano)))
 	if err != nil {
 		return err
 	}
@@ -77,7 +136,7 @@ func (rs *Store) EnqueueWorkItem(ctx context.Context, item WorkItem) error {
 		!equalJSONPayload(payload, item.Payload) {
 		return fmt.Errorf("%w: work_id=%q", ErrWorkItemConflict, item.WorkID)
 	}
-	return tx.Commit()
+	return nil
 }
 
 func equalJSONPayload(left, right []byte) bool {
@@ -139,6 +198,17 @@ func (rs *Store) claimWorkItem(ctx context.Context, owner string, now time.Time,
 		return WorkItem{}, err
 	}
 	defer tx.Rollback()
+	item, err := claimWorkItemTx(ctx, tx, owner, now, ttl, workID, kind)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return WorkItem{}, err
+	}
+	return item, nil
+}
+
+func claimWorkItemTx(ctx context.Context, tx *sql.Tx, owner string, now time.Time, ttl time.Duration, workID, kind string) (WorkItem, error) {
 	var item WorkItem
 	var payload []byte
 	var expires, available sql.NullTime
@@ -153,7 +223,7 @@ func (rs *Store) claimWorkItem(ctx context.Context, owner string, now time.Time,
 		args = append(args, kind)
 	}
 	query += ` ORDER BY available_at,created_at LIMIT 1 FOR UPDATE`
-	err = tx.QueryRowContext(ctx, query, args...).Scan(&item.WorkID, &item.RunID, &item.ParentRunID, &item.DelegationID, &item.TaskIndex, &item.AttemptNo, &item.Kind, &payload, &item.State, &item.LeaseOwner, &item.LeaseFence, &expires, &available, &item.AttemptCount, &item.LastError)
+	err := tx.QueryRowContext(ctx, query, args...).Scan(&item.WorkID, &item.RunID, &item.ParentRunID, &item.DelegationID, &item.TaskIndex, &item.AttemptNo, &item.Kind, &payload, &item.State, &item.LeaseOwner, &item.LeaseFence, &expires, &available, &item.AttemptCount, &item.LastError)
 	if err != nil {
 		return WorkItem{}, err
 	}
@@ -172,9 +242,6 @@ func (rs *Store) claimWorkItem(ctx context.Context, owner string, now time.Time,
 		return WorkItem{}, err
 	} else if affected != 1 {
 		return WorkItem{}, fmt.Errorf("worker lease claim lost")
-	}
-	if err = tx.Commit(); err != nil {
-		return WorkItem{}, err
 	}
 	return item, nil
 }

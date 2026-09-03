@@ -15,10 +15,7 @@ import (
 
 // PutWorkflowArtifact stores an immutable secondary artifact idempotently.
 // A repeated write is accepted only when the content hash is identical.
-func (workflowStore *Store) PutWorkflowArtifact(
-	ctx context.Context,
-	artifact WorkflowArtifact,
-) error {
+func validateWorkflowArtifact(artifact WorkflowArtifact) error {
 	if artifact.ID == "" || artifact.WorkflowRunID == "" || artifact.ProducerNodeID == "" ||
 		artifact.Kind == "" || artifact.Schema.ID == "" || len(artifact.Content) == 0 {
 		return fmt.Errorf("workflow artifact fields are required")
@@ -31,8 +28,15 @@ func (workflowStore *Store) PutWorkflowArtifact(
 	if artifact.ContentHash != "" && artifact.ContentHash != hash {
 		return fmt.Errorf("workflow artifact %q content hash mismatch", artifact.ID)
 	}
-	artifact.ContentHash = hash
+	return nil
+}
 
+func contentHashOf(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+func ensureWorkflowArtifactInsert(ctx context.Context, workflowStore *Store, artifact WorkflowArtifact) error {
 	var existingHash string
 	err := workflowStore.db.QueryRowContext(ctx,
 		`SELECT content_hash FROM handoff_artifacts WHERE id=? LIMIT 1`, artifact.ID,
@@ -66,6 +70,20 @@ func (workflowStore *Store) PutWorkflowArtifact(
 			return nil
 		}
 		return fmt.Errorf("save workflow artifact %q: %w", artifact.ID, err)
+	}
+	return nil
+}
+
+func (workflowStore *Store) PutWorkflowArtifact(
+	ctx context.Context,
+	artifact WorkflowArtifact,
+) error {
+	if err := validateWorkflowArtifact(artifact); err != nil {
+		return err
+	}
+	artifact.ContentHash = contentHashOf(artifact.Content)
+	if err := ensureWorkflowArtifactInsert(ctx, workflowStore, artifact); err != nil {
+		return err
 	}
 	return nil
 }

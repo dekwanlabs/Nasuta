@@ -111,6 +111,10 @@ type ExecutionEvent struct {
 	ReportIDs               []string       `json:"report_ids,omitempty"`
 	AdoptionStatus          string         `json:"adoption_status,omitempty"`
 	DurationMS              int64          `json:"duration_ms,omitempty"`
+	QueueWaitMS             int64          `json:"queue_wait_ms,omitempty"`
+	QueueClaimMS            int64          `json:"queue_claim_ms,omitempty"`
+	SettlementMS            int64          `json:"settlement_ms,omitempty"`
+	ValidationMS            int64          `json:"validation_ms,omitempty"`
 	Usage                   agentapi.Usage `json:"usage,omitempty"`
 	ToolCalls               int64          `json:"tool_calls,omitempty"`
 	ReportBytes             int            `json:"report_bytes,omitempty"`

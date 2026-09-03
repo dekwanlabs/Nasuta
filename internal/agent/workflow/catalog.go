@@ -225,81 +225,135 @@ func (catalog *Catalog) validateAgents(definition Definition) error {
 		if node.Kind != NodeAgent {
 			continue
 		}
-		agentDefinition, err := catalog.agents.Resolve(node.Agent)
-		if err != nil {
-			return fmt.Errorf("publish workflow %q node %q agent: %w", definition.ID, node.ID, err)
+		if err := catalog.validateAgentNode(definition, node); err != nil {
+			return err
 		}
-		if agentDefinition.ID != node.Agent.ID || agentDefinition.Version != node.Agent.Version {
-			return fmt.Errorf("publish workflow %q node %q agent is not pinned", definition.ID, node.ID)
-		}
-		if err := scope.ValidateAgentRuntime(agentDefinition.Permissions.Scopes); err != nil {
-			return fmt.Errorf(
-				"publish workflow %q node %q agent permissions: %w",
-				definition.ID,
-				node.ID,
-				err,
-			)
-		}
-		if err := scope.EnsureSubset(
-			node.Permissions.Scopes,
-			agentDefinition.Permissions.Scopes,
+	}
+	return nil
+}
+
+func validateAgentNodeContract(catalog *Catalog, definition Definition, node NodeDefinition, agentDefinition agentapi.Definition) error {
+	if agentDefinition.ID != node.Agent.ID || agentDefinition.Version != node.Agent.Version {
+		return fmt.Errorf("publish workflow %q node %q agent is not pinned", definition.ID, node.ID)
+	}
+	if err := scope.ValidateAgentRuntime(agentDefinition.Permissions.Scopes); err != nil {
+		return fmt.Errorf(
+			"publish workflow %q node %q agent permissions: %w",
+			definition.ID, node.ID, err,
+		)
+	}
+	if err := scope.EnsureSubset(node.Permissions.Scopes, agentDefinition.Permissions.Scopes); err != nil {
+		return fmt.Errorf(
+			"publish workflow %q node %q permissions exceed agent definition: %w",
+			definition.ID, node.ID, err,
+		)
+	}
+	if err := validateComposerAgentContract(definition.ID, node, agentDefinition); err != nil {
+		return err
+	}
+	if node.RestrictVisibleTools {
+		if err := ensureToolSubset(
+			node.VisibleToolIDs,
+			agentDefinition.Tools.VisibleToolIDs,
+			agentDefinition.Tools.RestrictVisible ||
+				len(agentDefinition.Tools.VisibleToolIDs) > 0,
 		); err != nil {
 			return fmt.Errorf(
-				"publish workflow %q node %q permissions exceed agent definition: %w",
-				definition.ID,
-				node.ID,
-				err,
+				"publish workflow %q node %q tools exceed agent definition: %w",
+				definition.ID, node.ID, err,
 			)
 		}
-		if node.RestrictVisibleTools {
-			if err := ensureToolSubset(
-				node.VisibleToolIDs,
-				agentDefinition.Tools.VisibleToolIDs,
-				agentDefinition.Tools.RestrictVisible ||
-					len(agentDefinition.Tools.VisibleToolIDs) > 0,
-			); err != nil {
-				return fmt.Errorf(
-					"publish workflow %q node %q tools exceed agent definition: %w",
-					definition.ID,
-					node.ID,
-					err,
-				)
-			}
-		}
-		if err := catalog.schemas.ValidateCompatibility(node.InputSchema, agentDefinition.InputSchema); err != nil {
-			return fmt.Errorf("publish workflow %q node %q agent input: %w", definition.ID, node.ID, err)
-		}
-		if err := catalog.schemas.ValidateCompatibility(agentDefinition.OutputSchema, node.OutputSchema); err != nil {
-			return fmt.Errorf("publish workflow %q node %q agent output: %w", definition.ID, node.ID, err)
-		}
-		toolsDisabled := node.RestrictVisibleTools && len(node.VisibleToolIDs) == 0 ||
-			!node.RestrictVisibleTools &&
-				agentDefinition.Tools.RestrictVisible &&
-				len(agentDefinition.Tools.VisibleToolIDs) == 0
-		switch {
-		case toolsDisabled && node.Budget.MaxToolCalls != 0:
-			return fmt.Errorf(
-				"publish workflow %q node %q tool budget must be zero because its agent disables tools",
-				definition.ID,
-				node.ID,
-			)
-		case !toolsDisabled && definition.Budget.MaxToolCalls > 0 &&
-			node.Budget.MaxToolCalls <= 0:
-			return fmt.Errorf(
-				"publish workflow %q node %q tool budget is required",
-				definition.ID,
-				node.ID,
-			)
-		}
-		if definition.Budget.MaxCostMicros > 0 &&
-			(agentDefinition.Model.InputPriceMicrosPerMillionTokens <= 0 ||
-				agentDefinition.Model.OutputPriceMicrosPerMillionTokens <= 0) {
-			return fmt.Errorf(
-				"publish workflow %q node %q agent model prices are required for cost budgeting",
-				definition.ID,
-				node.ID,
-			)
-		}
+	}
+	if err := catalog.schemas.ValidateCompatibility(node.InputSchema, agentDefinition.InputSchema); err != nil {
+		return fmt.Errorf("publish workflow %q node %q agent input: %w", definition.ID, node.ID, err)
+	}
+	if err := catalog.schemas.ValidateCompatibility(agentDefinition.OutputSchema, node.OutputSchema); err != nil {
+		return fmt.Errorf("publish workflow %q node %q agent output: %w", definition.ID, node.ID, err)
+	}
+	if err := validateAgentNodeToolBudget(definition, node, agentDefinition); err != nil {
+		return err
+	}
+	if definition.Budget.MaxCostMicros > 0 &&
+		(agentDefinition.Model.InputPriceMicrosPerMillionTokens <= 0 ||
+			agentDefinition.Model.OutputPriceMicrosPerMillionTokens <= 0) {
+		return fmt.Errorf(
+			"publish workflow %q node %q agent model prices are required for cost budgeting",
+			definition.ID, node.ID,
+		)
+	}
+	return nil
+}
+
+func (catalog *Catalog) validateAgentNode(definition Definition, node NodeDefinition) error {
+	agentDefinition, err := catalog.agents.Resolve(node.Agent)
+	if err != nil {
+		return fmt.Errorf("publish workflow %q node %q agent: %w", definition.ID, node.ID, err)
+	}
+	if err := validateAgentNodeContract(catalog, definition, node, agentDefinition); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateAgentNodeToolBudget(definition Definition, node NodeDefinition, agentDefinition agentapi.Definition) error {
+	toolsDisabled := node.RestrictVisibleTools && len(node.VisibleToolIDs) == 0 ||
+		!node.RestrictVisibleTools &&
+			agentDefinition.Tools.RestrictVisible &&
+			len(agentDefinition.Tools.VisibleToolIDs) == 0
+	if toolsDisabled && node.Budget.MaxToolCalls != 0 {
+		return fmt.Errorf(
+			"publish workflow %q node %q tool budget must be zero because its agent disables tools",
+			definition.ID, node.ID,
+		)
+	}
+	return nil
+}
+
+func validateComposerAgentContract(
+	workflowID string,
+	node NodeDefinition,
+	definition agentapi.Definition,
+) error {
+	if !isComposerAgent(node.Agent) {
+		return nil
+	}
+	verified := agentapi.InvestigationVerifiedBundleSchemaRef()
+	answer := agentapi.InvestigationAnswerSchemaRef()
+	if node.InputSchema != verified {
+		return fmt.Errorf(
+			"publish workflow %q composer node %q input schema must be %s version %d",
+			workflowID, node.ID, verified.ID, verified.Version,
+		)
+	}
+	if node.OutputSchema != answer {
+		return fmt.Errorf(
+			"publish workflow %q composer node %q output schema must be %s version %d",
+			workflowID, node.ID, answer.ID, answer.Version,
+		)
+	}
+	if definition.InputSchema != verified {
+		return fmt.Errorf(
+			"publish workflow %q composer node %q agent input schema must be %s version %d",
+			workflowID, node.ID, verified.ID, verified.Version,
+		)
+	}
+	if definition.OutputSchema != answer {
+		return fmt.Errorf(
+			"publish workflow %q composer node %q agent output schema must be %s version %d",
+			workflowID, node.ID, answer.ID, answer.Version,
+		)
+	}
+	if !node.RestrictVisibleTools || len(node.VisibleToolIDs) != 0 {
+		return fmt.Errorf(
+			"publish workflow %q composer node %q must restrict visible tools and expose none",
+			workflowID, node.ID,
+		)
+	}
+	if !definition.Tools.RestrictVisible || len(definition.Tools.VisibleToolIDs) != 0 {
+		return fmt.Errorf(
+			"publish workflow %q composer node %q agent must restrict visible tools and expose none",
+			workflowID, node.ID,
+		)
 	}
 	return nil
 }
@@ -445,18 +499,48 @@ func (catalog *Catalog) AttachStore(
 	if store == nil {
 		return fmt.Errorf("workflow catalog store is required: %w", ErrUnavailable)
 	}
-	records, err := store.LoadDefaultDefinitions(ctx)
+	records, highest, rollouts, err := catalog.loadStoreState(ctx, store)
 	if err != nil {
 		return err
+	}
+	next, err := catalog.buildCatalogState(ctx, store, records, highest, rollouts)
+	if err != nil {
+		return err
+	}
+	catalog.writeMu.Lock()
+	defer catalog.writeMu.Unlock()
+	catalog.store = store
+	next.revision = catalog.state.Load().revision + 1
+	catalog.state.Store(next)
+	return nil
+}
+
+func (catalog *Catalog) loadStoreState(
+	ctx context.Context,
+	store catalogPersistence,
+) ([]DefinitionRecord, map[string]int64, []RolloutRule, error) {
+	records, err := store.LoadDefaultDefinitions(ctx)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	highest, err := store.LoadHighestVersions(ctx)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 	rollouts, err := store.LoadRollouts(ctx)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
+	return records, highest, rollouts, nil
+}
+
+func (catalog *Catalog) buildCatalogState(
+	ctx context.Context,
+	store catalogPersistence,
+	records []DefinitionRecord,
+	highest map[string]int64,
+	rollouts []RolloutRule,
+) (*catalogState, error) {
 	loaded := make(map[definitionKey]DefinitionRecord, len(records)+len(rollouts))
 	for _, record := range records {
 		loaded[definitionKey{id: record.ID, version: record.Version}] = record
@@ -474,7 +558,7 @@ func (catalog *Catalog) AttachStore(
 			rule.CandidateVersion,
 		)
 		if loadErr != nil {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"load workflow rollout %q candidate version %d: %w",
 				rule.WorkflowID, rule.CandidateVersion, loadErr,
 			)
@@ -487,6 +571,16 @@ func (catalog *Catalog) AttachStore(
 		defaults: make(map[string]int64),
 		rollouts: make(map[string]RolloutRule),
 	}
+	if err := catalog.ingestLoadedRecords(next, loaded); err != nil {
+		return nil, err
+	}
+	if err := catalog.ingestRolloutRules(next, rollouts); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+func (catalog *Catalog) ingestLoadedRecords(next *catalogState, loaded map[definitionKey]DefinitionRecord) error {
 	for _, record := range loaded {
 		preparedRecord, prepareErr := catalog.preparePersistedRecord(record)
 		if prepareErr != nil {
@@ -517,6 +611,10 @@ func (catalog *Catalog) AttachStore(
 			next.defaults[record.ID] = record.Version
 		}
 	}
+	return nil
+}
+
+func (catalog *Catalog) ingestRolloutRules(next *catalogState, rollouts []RolloutRule) error {
 	for _, rule := range rollouts {
 		preparedRule, prepareErr := prepareRolloutRule(rule)
 		if prepareErr != nil {
@@ -539,11 +637,6 @@ func (catalog *Catalog) AttachStore(
 		}
 		next.rollouts[rule.WorkflowID] = preparedRule
 	}
-	catalog.writeMu.Lock()
-	defer catalog.writeMu.Unlock()
-	catalog.store = store
-	next.revision = catalog.state.Load().revision + 1
-	catalog.state.Store(next)
 	return nil
 }
 

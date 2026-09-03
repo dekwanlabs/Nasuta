@@ -190,51 +190,16 @@ func (rs *Store) ReserveDelegationBatch(
 	}
 	defer tx.Rollback()
 
-	var (
-		parentStatus Status
-		parentTokens int64
-		parentCost   int64
-		limitsRaw    []byte
-	)
-	if err := tx.QueryRowContext(
-		ctx,
-		`SELECT status,total_tokens,cost_micros,run_limits_json
-		 FROM agent_runs WHERE id=? FOR UPDATE`,
-		admission.ParentRunID,
-	).Scan(&parentStatus, &parentTokens, &parentCost, &limitsRaw); err != nil {
+	parent, err := loadParentBudgetForUpdate(ctx, tx, admission.ParentRunID)
+	if err != nil {
 		return nil, err
-	}
-	if parentStatus != StatusRunning && parentStatus != StatusPaused {
-		return nil, ErrNotActive
-	}
-	var parentLimits agentapi.RunLimits
-	if len(limitsRaw) > 0 {
-		if err := json.Unmarshal(limitsRaw, &parentLimits); err != nil {
-			return nil, fmt.Errorf("decode parent run limits: %w", err)
-		}
 	}
 
 	persisted, err := loadDelegationTasksForUpdate(ctx, tx, admission.ParentRunID)
 	if err != nil {
 		return nil, err
 	}
-	byKey := make(map[string]DelegationTaskRecord, len(persisted))
-	admittedChildren := 0
-	var settledTokens, settledCost, outstandingTokens, outstandingCost int64
-	for _, task := range persisted {
-		byKey[delegationTaskKey(task.DelegationID, task.TaskIndex)] = task
-		if !task.Admitted {
-			continue
-		}
-		admittedChildren++
-		if task.SettledUsage != nil {
-			settledTokens += task.SettledUsage.TotalTokens
-			settledCost += task.SettledUsage.CostMicros
-			continue
-		}
-		outstandingTokens += task.Reservation.ReservedTokens
-		outstandingCost += task.Reservation.ReservedCostMicros
-	}
+	account := summarizeDelegationTasks(persisted)
 
 	results := make([]DelegationTaskRecord, len(admission.Reservations))
 	newReservations := make([]DelegationReservation, 0, len(admission.Reservations))
@@ -246,47 +211,149 @@ func (rs *Store) ReserveDelegationBatch(
 		}
 		seen[reservation.TaskIndex] = struct{}{}
 		key := delegationTaskKey(admission.DelegationID, reservation.TaskIndex)
-		if existing, ok := byKey[key]; ok {
+		if existing, ok := account.byKey[key]; ok {
 			if err := sameDelegationReservation(existing, reservation); err != nil {
 				return nil, err
 			}
 			existing.Existing = true
 			results[index] = existing
-			byKey[key] = existing
+			account.byKey[key] = existing
 			continue
 		}
 		newReservations = append(newReservations, reservation)
 		newTokens += reservation.ReservedTokens
 		newCost += reservation.ReservedCostMicros
 	}
-	if admission.MaxChildren > 0 &&
-		admittedChildren+len(newReservations) > admission.MaxChildren {
-		return nil, ErrDelegationChildLimit
+	if err := validateDelegationBudget(admission, parent, account, newTokens, newCost, len(newReservations)); err != nil {
+		return nil, err
 	}
+
+	if err := insertDelegationReservations(ctx, tx, admission, newReservations, account.byKey); err != nil {
+		return nil, err
+	}
+	for index, reservation := range admission.Reservations {
+		results[index] = account.byKey[delegationTaskKey(admission.DelegationID, reservation.TaskIndex)]
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+type parentBudgetSnapshot struct {
+	status Status
+	tokens int64
+	cost   int64
+	limits agentapi.RunLimits
+}
+
+type delegationTaskSummary struct {
+	byKey             map[string]DelegationTaskRecord
+	admittedChildren  int
+	settledTokens     int64
+	settledCost       int64
+	outstandingTokens int64
+	outstandingCost   int64
+}
+
+func loadParentBudgetForUpdate(
+	ctx context.Context,
+	tx *sql.Tx,
+	parentRunID string,
+) (parentBudgetSnapshot, error) {
+	var (
+		parent    parentBudgetSnapshot
+		limitsRaw []byte
+	)
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT status,total_tokens,cost_micros,run_limits_json
+		 FROM agent_runs WHERE id=? FOR UPDATE`,
+		parentRunID,
+	).Scan(&parent.status, &parent.tokens, &parent.cost, &limitsRaw); err != nil {
+		return parentBudgetSnapshot{}, err
+	}
+	if parent.status != StatusRunning && parent.status != StatusPaused {
+		return parentBudgetSnapshot{}, ErrNotActive
+	}
+	if len(limitsRaw) > 0 {
+		if err := json.Unmarshal(limitsRaw, &parent.limits); err != nil {
+			return parentBudgetSnapshot{}, fmt.Errorf("decode parent run limits: %w", err)
+		}
+	}
+	return parent, nil
+}
+
+func summarizeDelegationTasks(persisted []DelegationTaskRecord) delegationTaskSummary {
+	summary := delegationTaskSummary{
+		byKey: make(map[string]DelegationTaskRecord, len(persisted)),
+	}
+	for _, task := range persisted {
+		summary.byKey[delegationTaskKey(task.DelegationID, task.TaskIndex)] = task
+		if !task.Admitted {
+			continue
+		}
+		summary.admittedChildren++
+		if task.SettledUsage != nil {
+			summary.settledTokens += task.SettledUsage.TotalTokens
+			summary.settledCost += task.SettledUsage.CostMicros
+			continue
+		}
+		summary.outstandingTokens += task.Reservation.ReservedTokens
+		summary.outstandingCost += task.Reservation.ReservedCostMicros
+	}
+	return summary
+}
+
+func validateDelegationBudget(
+	admission DelegationAdmission,
+	parent parentBudgetSnapshot,
+	account delegationTaskSummary,
+	newTokens int64,
+	newCost int64,
+	newReservationCount int,
+) error {
+	if admission.MaxChildren > 0 &&
+		account.admittedChildren+newReservationCount > admission.MaxChildren {
+		return ErrDelegationChildLimit
+	}
+	settledTokens := account.settledTokens
+	settledCost := account.settledCost
+	outstandingTokens := account.outstandingTokens
+	outstandingCost := account.outstandingCost
 
 	childTokens := settledTokens + outstandingTokens + newTokens + admission.ParentAnswerReserve
 	if admission.MaxTotalTokens > 0 && childTokens > admission.MaxTotalTokens {
-		return nil, ErrDelegationBudgetInsufficient
+		return ErrDelegationBudgetInsufficient
 	}
-	if parentLimits.MaxTotalTokens > 0 &&
-		parentTokens+settledTokens+outstandingTokens+newTokens+admission.ParentAnswerReserve >
-			parentLimits.MaxTotalTokens {
-		return nil, ErrDelegationBudgetInsufficient
+	if parent.limits.MaxTotalTokens > 0 &&
+		parent.tokens+settledTokens+outstandingTokens+newTokens+admission.ParentAnswerReserve >
+			parent.limits.MaxTotalTokens {
+		return ErrDelegationBudgetInsufficient
 	}
 	childCost := settledCost + outstandingCost + newCost
 	if admission.MaxTotalCostMicros > 0 && childCost > admission.MaxTotalCostMicros {
-		return nil, ErrDelegationBudgetInsufficient
+		return ErrDelegationBudgetInsufficient
 	}
-	if parentLimits.MaxCostMicros > 0 &&
-		parentCost+settledCost+outstandingCost+newCost > parentLimits.MaxCostMicros {
-		return nil, ErrDelegationBudgetInsufficient
+	if parent.limits.MaxCostMicros > 0 &&
+		parent.cost+settledCost+outstandingCost+newCost > parent.limits.MaxCostMicros {
+		return ErrDelegationBudgetInsufficient
 	}
+	return nil
+}
 
+func insertDelegationReservations(
+	ctx context.Context,
+	tx *sql.Tx,
+	admission DelegationAdmission,
+	reservations []DelegationReservation,
+	byKey map[string]DelegationTaskRecord,
+) error {
 	createdAt := store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano))
-	for _, reservation := range newReservations {
+	for _, reservation := range reservations {
 		reservationRaw, err := json.Marshal(reservation)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if _, err := tx.ExecContext(
 			ctx,
@@ -308,18 +375,12 @@ func (rs *Store) ReserveDelegationBatch(
 			reservationRaw,
 			createdAt,
 		); err != nil {
-			return nil, err
+			return err
 		}
 		record := recordFromReservation(reservation)
 		byKey[delegationTaskKey(admission.DelegationID, reservation.TaskIndex)] = record
 	}
-	for index, reservation := range admission.Reservations {
-		results[index] = byKey[delegationTaskKey(admission.DelegationID, reservation.TaskIndex)]
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return nil
 }
 
 // RejectDelegationTask records a stable rejection without consuming a reservation.
@@ -339,6 +400,31 @@ func (rs *Store) RejectDelegationTask(
 	}
 	defer tx.Rollback()
 
+	if record, handled, err := replayDelegationRejection(ctx, tx, rejection); handled {
+		return record, err
+	}
+	if err := insertDelegationRejection(ctx, tx, rejection); err != nil {
+		return DelegationTaskRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DelegationTaskRecord{}, err
+	}
+	return DelegationTaskRecord{
+		ParentRunID:    rejection.ParentRunID,
+		DelegationID:   rejection.DelegationID,
+		TaskIndex:      rejection.TaskIndex,
+		Capability:     rejection.Capability,
+		CapabilityHash: rejection.CapabilityHash,
+		ObjectiveHash:  rejection.ObjectiveHash,
+		RejectionCode:  rejection.Code,
+	}, nil
+}
+
+func replayDelegationRejection(
+	ctx context.Context,
+	tx *sql.Tx,
+	rejection DelegationRejection,
+) (DelegationTaskRecord, bool, error) {
 	existing, err := loadDelegationTaskForUpdate(
 		ctx,
 		tx,
@@ -346,24 +432,32 @@ func (rs *Store) RejectDelegationTask(
 		rejection.DelegationID,
 		rejection.TaskIndex,
 	)
-	if err == nil {
-		if existing.Admitted ||
-			existing.Capability.ID != rejection.Capability.ID ||
-			existing.Capability.Version != rejection.Capability.Version ||
-			existing.CapabilityHash != rejection.CapabilityHash ||
-			existing.ObjectiveHash != rejection.ObjectiveHash ||
-			existing.RejectionCode != rejection.Code {
-			return DelegationTaskRecord{}, ErrDelegationTaskConflict
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DelegationTaskRecord{}, false, nil
 		}
-		if err := tx.Commit(); err != nil {
-			return DelegationTaskRecord{}, err
-		}
-		existing.Existing = true
-		return existing, nil
+		return DelegationTaskRecord{}, false, err
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return DelegationTaskRecord{}, err
+	if existing.Admitted ||
+		existing.Capability.ID != rejection.Capability.ID ||
+		existing.Capability.Version != rejection.Capability.Version ||
+		existing.CapabilityHash != rejection.CapabilityHash ||
+		existing.ObjectiveHash != rejection.ObjectiveHash ||
+		existing.RejectionCode != rejection.Code {
+		return DelegationTaskRecord{}, false, ErrDelegationTaskConflict
 	}
+	if err := tx.Commit(); err != nil {
+		return DelegationTaskRecord{}, false, err
+	}
+	existing.Existing = true
+	return existing, true, nil
+}
+
+func insertDelegationRejection(
+	ctx context.Context,
+	tx *sql.Tx,
+	rejection DelegationRejection,
+) error {
 	emptyReservation := []byte(`{}`)
 	now := store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano))
 	if _, err := tx.ExecContext(
@@ -387,20 +481,9 @@ func (rs *Store) RejectDelegationTask(
 		now,
 		now,
 	); err != nil {
-		return DelegationTaskRecord{}, err
+		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return DelegationTaskRecord{}, err
-	}
-	return DelegationTaskRecord{
-		ParentRunID:    rejection.ParentRunID,
-		DelegationID:   rejection.DelegationID,
-		TaskIndex:      rejection.TaskIndex,
-		Capability:     rejection.Capability,
-		CapabilityHash: rejection.CapabilityHash,
-		ObjectiveHash:  rejection.ObjectiveHash,
-		RejectionCode:  rejection.Code,
-	}, nil
+	return nil
 }
 
 // LinkDelegationChild fills the stable child identity before runtime execution.
@@ -491,60 +574,104 @@ func (rs *Store) SettleDelegationTask(
 		return DelegationTaskRecord{}, ErrDelegationTaskConflict
 	}
 	if task.SettledUsage != nil {
-		evidenceArtifactID, err := existingArtifactID(
-			ctx,
-			tx,
-			settlement.ChildRunID,
-			EvidenceLedgerArtifactKind,
-		)
-		if err != nil {
-			return DelegationTaskRecord{}, err
-		}
-		if *task.SettledUsage != settlement.Usage ||
-			artifactID(settlement.Artifact) != task.ReportArtifactID ||
-			artifactID(settlement.EvidenceArtifact) != evidenceArtifactID {
-			return DelegationTaskRecord{}, ErrDelegationTaskConflict
-		}
-		if err := tx.Commit(); err != nil {
-			return DelegationTaskRecord{}, err
-		}
-		return task, nil
+		return settleIdempotentDelegation(ctx, tx, task, settlement)
 	}
+	if err := validateSettlementWithinReservation(task, settlement); err != nil {
+		return DelegationTaskRecord{}, err
+	}
+	reportArtifactID, err := persistSettlementArtifacts(ctx, tx, settlement)
+	if err != nil {
+		return DelegationTaskRecord{}, err
+	}
+	if err := writeDelegationSettlement(ctx, tx, settlement, reportArtifactID); err != nil {
+		return DelegationTaskRecord{}, err
+	}
+	task.SettledUsage = &settlement.Usage
+	task.ReportArtifactID = reportArtifactID
+	return task, nil
+}
+
+// settleIdempotentDelegation re-checks a previously settled task and commits
+// only when the persisted settlement matches the new request exactly.
+func settleIdempotentDelegation(
+	ctx context.Context,
+	tx *sql.Tx,
+	task DelegationTaskRecord,
+	settlement DelegationSettlement,
+) (DelegationTaskRecord, error) {
+	evidenceArtifactID, err := existingArtifactID(
+		ctx,
+		tx,
+		settlement.ChildRunID,
+		EvidenceLedgerArtifactKind,
+	)
+	if err != nil {
+		return DelegationTaskRecord{}, err
+	}
+	if *task.SettledUsage != settlement.Usage ||
+		artifactID(settlement.Artifact) != task.ReportArtifactID ||
+		artifactID(settlement.EvidenceArtifact) != evidenceArtifactID {
+		return DelegationTaskRecord{}, ErrDelegationTaskConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return DelegationTaskRecord{}, err
+	}
+	return task, nil
+}
+
+func validateSettlementWithinReservation(
+	task DelegationTaskRecord,
+	settlement DelegationSettlement,
+) error {
 	if task.Reservation.ReservedTokens > 0 &&
 		settlement.Usage.TotalTokens > task.Reservation.ReservedTokens ||
 		task.Reservation.ReservedCostMicros > 0 &&
 			settlement.Usage.CostMicros > task.Reservation.ReservedCostMicros {
-		return DelegationTaskRecord{}, ErrDelegationAccounting
+		return ErrDelegationAccounting
 	}
+	return nil
+}
 
+// persistSettlementArtifacts stores the optional report and evidence artifacts
+// and returns the report artifact ID used on the settled task row.
+func persistSettlementArtifacts(
+	ctx context.Context,
+	tx *sql.Tx,
+	settlement DelegationSettlement,
+) (string, error) {
 	reportArtifactID := ""
 	if settlement.Artifact != nil {
 		if err := validateDelegationArtifact(*settlement.Artifact, settlement.ChildRunID); err != nil {
-			return DelegationTaskRecord{}, err
+			return "", err
 		}
 		reportArtifactID = settlement.Artifact.ID
 		if err := insertRunArtifact(ctx, tx, *settlement.Artifact); err != nil {
-			return DelegationTaskRecord{}, err
+			return "", err
 		}
 	}
 	if settlement.EvidenceArtifact != nil {
 		if _, err := decodeEvidenceLedger(*settlement.EvidenceArtifact); err != nil {
-			return DelegationTaskRecord{}, err
+			return "", err
 		}
 		if settlement.EvidenceArtifact.RunID != settlement.ChildRunID {
-			return DelegationTaskRecord{}, ErrEvidenceLedgerConflict
+			return "", ErrEvidenceLedgerConflict
 		}
-		if err := insertRunArtifact(
-			ctx,
-			tx,
-			*settlement.EvidenceArtifact,
-		); err != nil {
-			return DelegationTaskRecord{}, err
+		if err := insertRunArtifact(ctx, tx, *settlement.EvidenceArtifact); err != nil {
+			return "", err
 		}
 	}
+	return reportArtifactID, nil
+}
+
+func writeDelegationSettlement(
+	ctx context.Context,
+	tx *sql.Tx,
+	settlement DelegationSettlement,
+	reportArtifactID string,
+) error {
 	usageRaw, err := json.Marshal(settlement.Usage)
 	if err != nil {
-		return DelegationTaskRecord{}, err
+		return err
 	}
 	settledAt := store.DatabaseTime(time.Now().UTC().Format(time.RFC3339Nano))
 	result, err := tx.ExecContext(
@@ -561,21 +688,16 @@ func (rs *Store) SettleDelegationTask(
 		settlement.TaskIndex,
 	)
 	if err != nil {
-		return DelegationTaskRecord{}, err
+		return err
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return DelegationTaskRecord{}, err
+		return err
 	}
 	if affected != 1 {
-		return DelegationTaskRecord{}, ErrDelegationTaskConflict
+		return ErrDelegationTaskConflict
 	}
-	if err := tx.Commit(); err != nil {
-		return DelegationTaskRecord{}, err
-	}
-	task.SettledUsage = &settlement.Usage
-	task.ReportArtifactID = reportArtifactID
-	return task, nil
+	return tx.Commit()
 }
 
 func loadDelegationTasksForUpdate(
@@ -675,26 +797,33 @@ func validateDelegationAdmission(admission DelegationAdmission) error {
 		return fmt.Errorf("invalid delegation admission")
 	}
 	for index, reservation := range admission.Reservations {
-		if reservation.ParentRunID != admission.ParentRunID ||
-			reservation.DelegationID != admission.DelegationID ||
-			reservation.TaskIndex < 0 ||
-			reservation.ChildRunID == "" ||
-			reservation.Capability.ID == "" ||
-			reservation.Capability.Version <= 0 ||
-			reservation.CapabilityHash == "" ||
-			reservation.ObjectiveHash == "" ||
-			reservation.ReservedTokens < 0 ||
-			reservation.ReservedCostMicros < 0 {
-			return fmt.Errorf("invalid delegation reservation %d", index)
+		if err := validateDelegationReservation(admission, reservation, index); err != nil {
+			return err
 		}
-		if reservation.Limits.MaxTotalTokens > 0 &&
-			reservation.ReservedTokens != reservation.Limits.MaxTotalTokens {
-			return fmt.Errorf("delegation reservation %d token grant mismatch", index)
-		}
-		if reservation.Limits.MaxCostMicros > 0 &&
-			reservation.ReservedCostMicros != reservation.Limits.MaxCostMicros {
-			return fmt.Errorf("delegation reservation %d cost grant mismatch", index)
-		}
+	}
+	return nil
+}
+
+func validateDelegationReservation(admission DelegationAdmission, reservation DelegationReservation, index int) error {
+	if reservation.ParentRunID != admission.ParentRunID ||
+		reservation.DelegationID != admission.DelegationID ||
+		reservation.TaskIndex < 0 ||
+		reservation.ChildRunID == "" ||
+		reservation.Capability.ID == "" ||
+		reservation.Capability.Version <= 0 ||
+		reservation.CapabilityHash == "" ||
+		reservation.ObjectiveHash == "" ||
+		reservation.ReservedTokens < 0 ||
+		reservation.ReservedCostMicros < 0 {
+		return fmt.Errorf("invalid delegation reservation %d", index)
+	}
+	if reservation.Limits.MaxTotalTokens > 0 &&
+		reservation.ReservedTokens != reservation.Limits.MaxTotalTokens {
+		return fmt.Errorf("delegation reservation %d token grant mismatch", index)
+	}
+	if reservation.Limits.MaxCostMicros > 0 &&
+		reservation.ReservedCostMicros != reservation.Limits.MaxCostMicros {
+		return fmt.Errorf("delegation reservation %d cost grant mismatch", index)
 	}
 	return nil
 }

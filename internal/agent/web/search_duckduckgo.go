@@ -36,11 +36,16 @@ func (srv *Service) searchDuckDuckGo(ctx context.Context, query string, limit in
 	return parseDDGResults(resp.Body, limit), nil
 }
 
+type ddgParseState struct {
+	current   SearchResult
+	inResult  bool
+	inSnippet bool
+}
+
 func parseDDGResults(reader io.Reader, limit int) []SearchResult {
 	var results []SearchResult
 	tokenizer := nethtml.NewTokenizer(reader)
-	var current SearchResult
-	var inResult, inSnippet bool
+	var state ddgParseState
 
 	for len(results) < limit {
 		tokenType := tokenizer.Next()
@@ -50,42 +55,59 @@ func parseDDGResults(reader io.Reader, limit int) []SearchResult {
 		tag, _ := tokenizer.TagName()
 		switch tokenType {
 		case nethtml.StartTagToken:
-			if isDiv(tag, tokenizer, "result__body") {
-				current = SearchResult{}
-				inResult = true
-			}
-			if inResult && isAnchor(tag, tokenizer, "result__a") {
-				current.URL = extractAttr(tokenizer, "href")
-			}
-			if inResult && isAnchor(tag, tokenizer, "result__snippet") {
-				inSnippet = true
-			}
+			state.handleDDGStartTag(tag, tokenizer)
 		case nethtml.EndTagToken:
-			if isTag(tag, "a") && inResult && inSnippet {
-				inSnippet = false
-			}
-			if isTag(tag, "div") && inResult {
-				if current.URL != "" && current.Title != "" {
-					results = append(results, current)
-				}
-				inResult = false
-				inSnippet = false
-			}
+			results = state.handleDDGEndTag(tag, results)
 		case nethtml.TextToken:
-			text := strings.TrimSpace(string(tokenizer.Text()))
-			if text == "" {
-				continue
-			}
-			if inResult && !inSnippet && current.Title == "" {
-				current.Title = text
-			}
-			if inSnippet {
-				if current.Snippet != "" {
-					current.Snippet += " "
-				}
-				current.Snippet += text
-			}
+			state.handleDDGText(tokenizer)
 		}
 	}
 	return results
+}
+
+func (state *ddgParseState) handleDDGStartTag(tag []byte, tokenizer *nethtml.Tokenizer) {
+	if isDiv(tag, tokenizer, "result__body") {
+		state.current = SearchResult{}
+		state.inResult = true
+		return
+	}
+	if !state.inResult {
+		return
+	}
+	if isAnchor(tag, tokenizer, "result__a") {
+		state.current.URL = extractAttr(tokenizer, "href")
+	}
+	if isAnchor(tag, tokenizer, "result__snippet") {
+		state.inSnippet = true
+	}
+}
+
+func (state *ddgParseState) handleDDGEndTag(tag []byte, results []SearchResult) []SearchResult {
+	if isTag(tag, "a") && state.inResult && state.inSnippet {
+		state.inSnippet = false
+	}
+	if isTag(tag, "div") && state.inResult {
+		if state.current.URL != "" && state.current.Title != "" {
+			results = append(results, state.current)
+		}
+		state.inResult = false
+		state.inSnippet = false
+	}
+	return results
+}
+
+func (state *ddgParseState) handleDDGText(tokenizer *nethtml.Tokenizer) {
+	text := strings.TrimSpace(string(tokenizer.Text()))
+	if text == "" {
+		return
+	}
+	if state.inResult && !state.inSnippet && state.current.Title == "" {
+		state.current.Title = text
+	}
+	if state.inSnippet {
+		if state.current.Snippet != "" {
+			state.current.Snippet += " "
+		}
+		state.current.Snippet += text
+	}
 }

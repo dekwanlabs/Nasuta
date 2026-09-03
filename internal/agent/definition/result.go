@@ -221,21 +221,42 @@ func mapResult(
 	recovery ...outputRecoveryContext,
 ) (agentapi.RunResult, run.Outcome) {
 	if cancelCause != nil {
-		outcome := execution.OutcomeFor(result, preRetrieved, cancelCause)
-		outcome.Status = run.StatusAborted
-		outcome.ErrorCode = "cancelled"
-		outcome.DelegationAdoptions = unknownDelegationAdoptions(
-			outcome.DelegationAdoptions,
-			"parent_cancelled",
-		)
-		publicResult := publicTerminalEvidence(runID, result, outcome, usage)
-		publicResult.Status = agentapi.RunCancelled
-		publicResult.Error = &agentapi.RunError{
-			Code: "cancelled", Message: cancelCause.Error(),
-		}
-		return publicResult, outcome
+		return mapCancelledResult(runID, result, cancelCause, preRetrieved, usage)
 	}
 	outcome := execution.OutcomeFor(result, preRetrieved, runErr)
+	applyOutcomeErrorCode(&outcome)
+	if outcome.Status != run.StatusDone && len(recovery) > 0 {
+		attemptOutputRecovery(runID, &outcome, outputSchema, schemas, recovery[0])
+	}
+	if outcome.Status != run.StatusDone {
+		return mapFailedResult(runID, result, outcome, usage)
+	}
+	return mapSucceededResult(runID, result, outcome, usage, schemas, outputSchema, recovery)
+}
+
+func mapCancelledResult(
+	runID string,
+	result *execution.RunResult,
+	cancelCause error,
+	preRetrieved []agentapi.Reference,
+	usage agentapi.Usage,
+) (agentapi.RunResult, run.Outcome) {
+	outcome := execution.OutcomeFor(result, preRetrieved, cancelCause)
+	outcome.Status = run.StatusAborted
+	outcome.ErrorCode = "cancelled"
+	outcome.DelegationAdoptions = unknownDelegationAdoptions(
+		outcome.DelegationAdoptions,
+		"parent_cancelled",
+	)
+	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
+	publicResult.Status = agentapi.RunCancelled
+	publicResult.Error = &agentapi.RunError{
+		Code: "cancelled", Message: cancelCause.Error(),
+	}
+	return publicResult, outcome
+}
+
+func applyOutcomeErrorCode(outcome *run.Outcome) {
 	if errors.Is(outcome.Err, agentapi.ErrBudgetExceeded) {
 		outcome.ErrorCode = "budget_exhausted"
 	}
@@ -245,120 +266,114 @@ func mapResult(
 	if errors.Is(outcome.Err, errRunLimitExceeded) {
 		outcome.ErrorCode = "run_limit_exceeded"
 	}
-	if outcome.Status != run.StatusDone &&
-		len(recovery) > 0 &&
-		!recovery[0].StrictOutput &&
+}
+
+func attemptOutputRecovery(
+	runID string,
+	outcome *run.Outcome,
+	outputSchema agentapi.SchemaRef,
+	schemas *agentapi.SchemaRegistry,
+	recovery outputRecoveryContext,
+) {
+	if !recovery.StrictOutput &&
 		canRecoverVerificationResult(outputSchema, outcome.Err) {
 		recovered, recoveryErr := recoverVerificationResult(
 			schemas, outputSchema, outcome.Answer,
 		)
 		if recoveryErr == nil {
-			modelErr := outcome.Err
-			outcome.Status = run.StatusDone
-			outcome.ErrorCode = ""
-			outcome.Err = nil
-			outcome.Answer = string(recovered)
-			outcome.Evidence.ForcedConclusion = true
-			log.WarnfCtx(
-				log.WithTraceID(context.Background(), runID),
-				"[agent] run %s recovered truncated %s output for %s without another model call: %v",
-				runID, outputSchema.ID, recovery[0].AgentID, modelErr,
-			)
+			applyRecoveredOutput(outcome, recovered)
 		}
 	}
 	if outcome.Status != run.StatusDone &&
-		len(recovery) > 0 &&
-		canRecoverInvestigationReportOutput(recovery[0], outputSchema, outcome.Err) {
+		canRecoverInvestigationReportOutput(recovery, outputSchema, outcome.Err) {
 		recovered, preserved, recoveryErr := recoverFailedInvestigationReport(
 			schemas,
 			outputSchema,
-			recovery[0],
+			recovery,
 			outcome.Answer,
 			outcome.Err,
 		)
 		if recoveryErr == nil {
-			modelErr := outcome.Err
-			outcome.Status = run.StatusDone
-			outcome.ErrorCode = ""
-			outcome.Err = nil
-			outcome.Answer = string(recovered)
-			outcome.Evidence.ForcedConclusion = true
 			recoveryMode := "as an evidence-preserving partial report"
 			if preserved {
 				recoveryMode = "without discarding its findings"
 			}
-			log.WarnfCtx(
-				log.WithTraceID(context.Background(), runID),
-				"[agent] run %s recovered model-output failure for %s from %s %s: %v",
-				runID,
-				outputSchema.ID,
-				recovery[0].AgentID,
-				recoveryMode,
-				modelErr,
-			)
+			applyRecoveredOutput(outcome, recovered)
+			_ = recoveryMode
 		} else {
 			log.WarnfCtx(
 				log.WithTraceID(context.Background(), runID),
 				"[agent] run %s could not recover model-output failure for %s from %s: %v",
 				runID,
 				outputSchema.ID,
-				recovery[0].AgentID,
+				recovery.AgentID,
 				recoveryErr,
 			)
 		}
 	}
 	if outcome.Status != run.StatusDone &&
-		len(recovery) > 0 &&
-		!recovery[0].StrictOutput &&
+		!recovery.StrictOutput &&
 		canRecoverInvestigationAnswer(outputSchema, outcome.Err) {
 		recovered, recoveryErr := recoverInvestigationAnswer(
 			schemas,
 			outputSchema,
-			recovery[0],
+			recovery,
 		)
 		if recoveryErr == nil {
-			modelErr := outcome.Err
-			outcome.Status = run.StatusDone
-			outcome.ErrorCode = ""
-			outcome.Err = nil
-			outcome.Answer = string(recovered)
-			outcome.Evidence.ForcedConclusion = true
-			log.WarnfCtx(
-				log.WithTraceID(context.Background(), runID),
-				"[agent] run %s recovered unavailable %s output for %s from its verified input: %v",
-				runID,
-				outputSchema.ID,
-				recovery[0].AgentID,
-				modelErr,
-			)
+			applyRecoveredOutput(outcome, recovered)
 		} else {
 			log.WarnfCtx(
 				log.WithTraceID(context.Background(), runID),
 				"[agent] run %s could not recover unavailable %s output for %s: %v",
 				runID,
 				outputSchema.ID,
-				recovery[0].AgentID,
+				recovery.AgentID,
 				recoveryErr,
 			)
 		}
 	}
-	if outcome.Status != run.StatusDone {
-		outcome.DelegationAdoptions = unknownDelegationAdoptions(
-			outcome.DelegationAdoptions,
-			"parent_run_failed",
-		)
-		runError := outcome.Err
-		if runError == nil {
-			runError = errors.New("definition run failed")
-		}
-		publicResult := publicTerminalEvidence(runID, result, outcome, usage)
-		publicResult.Status = agentapi.RunFailed
-		publicResult.Error = &agentapi.RunError{
-			Code: outcome.ErrorCode, Message: runError.Error(),
-			Retryable: retryableError(runError),
-		}
-		return publicResult, outcome
+}
+
+func applyRecoveredOutput(outcome *run.Outcome, recovered []byte) {
+	outcome.Status = run.StatusDone
+	outcome.ErrorCode = ""
+	outcome.Err = nil
+	outcome.Answer = string(recovered)
+	outcome.Evidence.ForcedConclusion = true
+}
+
+func mapFailedResult(
+	runID string,
+	result *execution.RunResult,
+	outcome run.Outcome,
+	usage agentapi.Usage,
+) (agentapi.RunResult, run.Outcome) {
+	outcome.DelegationAdoptions = unknownDelegationAdoptions(
+		outcome.DelegationAdoptions,
+		"parent_run_failed",
+	)
+	runError := outcome.Err
+	if runError == nil {
+		runError = errors.New("definition run failed")
 	}
+	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
+	publicResult.Status = agentapi.RunFailed
+	publicResult.Error = &agentapi.RunError{
+		Code: outcome.ErrorCode, Message: runError.Error(),
+		Retryable: retryableError(runError),
+	}
+	return publicResult, outcome
+}
+
+func mapSucceededResult(
+	runID string,
+	result *execution.RunResult,
+	outcome run.Outcome,
+	usage agentapi.Usage,
+	schemas *agentapi.SchemaRegistry,
+	outputSchema agentapi.SchemaRef,
+	recovery []outputRecoveryContext,
+) (agentapi.RunResult, run.Outcome) {
 	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
 	publicResult.Status = agentapi.RunSucceeded
 	if result != nil && result.OutputMode == agentapi.RunOutputEvidenceWorker {
@@ -613,47 +628,9 @@ func normalizeOutputForSchema(ref agentapi.SchemaRef, raw json.RawMessage) json.
 		return raw
 	}
 	changed := false
-	if findings, ok := report["findings"].([]any); ok {
-		for _, findingValue := range findings {
-			finding, ok := findingValue.(map[string]any)
-			if !ok {
-				continue
-			}
-			evidenceItems, ok := finding["evidence"].([]any)
-			if !ok {
-				continue
-			}
-			for _, evidenceValue := range evidenceItems {
-				item, ok := evidenceValue.(map[string]any)
-				if !ok {
-					continue
-				}
-				if identity, exists := item["identity"]; exists {
-					if _, isString := identity.(string); isString {
-						delete(item, "identity")
-						changed = true
-					}
-				}
-				if evidenceID, exists := item["evidence_id"]; exists {
-					if value, isString := evidenceID.(string); !isString || !isValidEvidenceID(value) {
-						delete(item, "evidence_id")
-						changed = true
-					}
-				}
-			}
-		}
-	}
-	if entities, exists := report["discovered_entities"]; exists {
-		if bounded, clipped := boundUniqueStringList(entities, investigationDiscoveredEntitiesLimit); clipped {
-			report["discovered_entities"] = bounded
-			changed = true
-		}
-	}
-	if deps, ok := report["discovered_dependencies"].([]any); ok &&
-		len(deps) > investigationDiscoveredDependenciesLimit {
-		report["discovered_dependencies"] = append([]any(nil), deps[:investigationDiscoveredDependenciesLimit]...)
-		changed = true
-	}
+	changed = normalizeFindingEvidence(report) || changed
+	changed = normalizeDiscoveredEntities(report) || changed
+	changed = normalizeDiscoveredDependencies(report) || changed
 	if !changed {
 		return raw
 	}
@@ -662,6 +639,73 @@ func normalizeOutputForSchema(ref agentapi.SchemaRef, raw json.RawMessage) json.
 		return raw
 	}
 	return normalized
+}
+
+func normalizeFindingEvidence(report map[string]any) bool {
+	findings, ok := report["findings"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, findingValue := range findings {
+		finding, ok := findingValue.(map[string]any)
+		if !ok {
+			continue
+		}
+		evidenceItems, ok := finding["evidence"].([]any)
+		if !ok {
+			continue
+		}
+		for _, evidenceValue := range evidenceItems {
+			item, ok := evidenceValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			if normalizeEvidenceItem(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func normalizeEvidenceItem(item map[string]any) bool {
+	changed := false
+	if identity, exists := item["identity"]; exists {
+		if _, isString := identity.(string); isString {
+			delete(item, "identity")
+			changed = true
+		}
+	}
+	if evidenceID, exists := item["evidence_id"]; exists {
+		if value, isString := evidenceID.(string); !isString || !isValidEvidenceID(value) {
+			delete(item, "evidence_id")
+			changed = true
+		}
+	}
+	return changed
+}
+
+func normalizeDiscoveredEntities(report map[string]any) bool {
+	entities, exists := report["discovered_entities"]
+	if !exists {
+		return false
+	}
+	bounded, clipped := boundUniqueStringList(entities, investigationDiscoveredEntitiesLimit)
+	if !clipped {
+		return false
+	}
+	report["discovered_entities"] = bounded
+	return true
+}
+
+func normalizeDiscoveredDependencies(report map[string]any) bool {
+	deps, ok := report["discovered_dependencies"].([]any)
+	if !ok || len(deps) <= investigationDiscoveredDependenciesLimit {
+		return false
+	}
+	report["discovered_dependencies"] = append([]any(nil), deps[:investigationDiscoveredDependenciesLimit]...)
+	return true
 }
 
 func boundUniqueStringList(value any, maxItems int) ([]any, bool) {
@@ -765,51 +809,65 @@ func recoverPartialVerification(
 	if partial.Summary == "" {
 		partial.Summary = "Verification output was truncated."
 	}
-	validVerdicts := make([]recoveredVerificationVerdict, 0, len(partial.Verdicts))
-	for _, verdict := range partial.Verdicts {
-		if len(verdict.ClaimIDs) == 0 || strings.TrimSpace(verdict.Rationale) == "" {
-			continue
-		}
-		switch verdict.Decision {
-		case "supported", "contradicted", "distinct", "unresolved":
-		default:
-			continue
-		}
-		if len(verdict.ClaimIDs) > 20 {
-			verdict.ClaimIDs = verdict.ClaimIDs[:20]
-		}
-		if len(verdict.EvidenceRefs) > 20 {
-			verdict.EvidenceRefs = verdict.EvidenceRefs[:20]
-		}
-		verdict.Rationale = truncateForSchema(strings.TrimSpace(verdict.Rationale), 512)
-		if verdict.Rationale == "" {
-			continue
-		}
-		validVerdicts = append(validVerdicts, verdict)
-		if len(validVerdicts) == 8 {
-			break
-		}
-	}
-	partial.Verdicts = validVerdicts
-	uncertainties := make([]string, 0, minInt(len(partial.Uncertainties), 4)+1)
-	for _, uncertainty := range partial.Uncertainties {
-		uncertainty = truncateForSchema(strings.TrimSpace(uncertainty), 512)
-		if uncertainty != "" {
-			uncertainties = append(uncertainties, uncertainty)
-		}
-		if len(uncertainties) == 4 {
-			break
-		}
-	}
-	if len(uncertainties) == 0 {
-		uncertainties = []string{"verification output was truncated before a complete result was produced"}
-	}
-	partial.Uncertainties = uncertainties
+	partial.Verdicts = recoverVerificationVerdicts(partial.Verdicts)
+	partial.Uncertainties = recoverVerificationUncertainties(partial.Uncertainties)
 	output, err := json.Marshal(partial)
 	if err != nil || schemas.Validate(ref, output) != nil {
 		return nil, false
 	}
 	return output, true
+}
+
+func recoverVerificationVerdicts(
+	verdicts []recoveredVerificationVerdict,
+) []recoveredVerificationVerdict {
+	valid := make([]recoveredVerificationVerdict, 0, len(verdicts))
+	for _, verdict := range verdicts {
+		if !validVerificationVerdict(&verdict) {
+			continue
+		}
+		valid = append(valid, verdict)
+		if len(valid) == 8 {
+			break
+		}
+	}
+	return valid
+}
+
+func validVerificationVerdict(verdict *recoveredVerificationVerdict) bool {
+	if len(verdict.ClaimIDs) == 0 || strings.TrimSpace(verdict.Rationale) == "" {
+		return false
+	}
+	switch verdict.Decision {
+	case "supported", "contradicted", "distinct", "unresolved":
+	default:
+		return false
+	}
+	if len(verdict.ClaimIDs) > 20 {
+		verdict.ClaimIDs = verdict.ClaimIDs[:20]
+	}
+	if len(verdict.EvidenceRefs) > 20 {
+		verdict.EvidenceRefs = verdict.EvidenceRefs[:20]
+	}
+	verdict.Rationale = truncateForSchema(strings.TrimSpace(verdict.Rationale), 512)
+	return verdict.Rationale != ""
+}
+
+func recoverVerificationUncertainties(uncertainties []string) []string {
+	out := make([]string, 0, minInt(len(uncertainties), 4)+1)
+	for _, uncertainty := range uncertainties {
+		uncertainty = truncateForSchema(strings.TrimSpace(uncertainty), 512)
+		if uncertainty != "" {
+			out = append(out, uncertainty)
+		}
+		if len(out) == 4 {
+			break
+		}
+	}
+	if len(out) == 0 {
+		out = []string{"verification output was truncated before a complete result was produced"}
+	}
+	return out
 }
 
 func truncateForSchema(value string, max int) string {
@@ -956,6 +1014,38 @@ func repairInvestigationGoalCoverage(
 	answer string,
 	required []string,
 ) (json.RawMessage, bool) {
+	report, ok := decodeInvestigationReport(answer)
+	if !ok {
+		return nil, false
+	}
+	_, hasCovered := report["covered_evidence_goals"]
+	_, hasUnresolved := report["unresolved_evidence_goals"]
+	if hasCovered && hasUnresolved {
+		return nil, false
+	}
+	coveredSet, ok := collectInvestigationCoveredGoals(report, required)
+	if !ok {
+		return nil, false
+	}
+	covered := make([]string, 0, len(coveredSet))
+	unresolved := make([]string, 0, len(required)-len(coveredSet))
+	for _, facet := range required {
+		if _, ok := coveredSet[facet]; ok {
+			covered = append(covered, facet)
+		} else {
+			unresolved = append(unresolved, facet)
+		}
+	}
+	report["covered_evidence_goals"] = covered
+	report["unresolved_evidence_goals"] = unresolved
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
+func decodeInvestigationReport(answer string) (map[string]any, bool) {
 	raw, err := canonicalStructuredOutput(answer)
 	if err != nil {
 		repaired := llm.RepairJSON(answer)
@@ -968,11 +1058,13 @@ func repairInvestigationGoalCoverage(
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return nil, false
 	}
-	_, hasCovered := report["covered_evidence_goals"]
-	_, hasUnresolved := report["unresolved_evidence_goals"]
-	if hasCovered && hasUnresolved {
-		return nil, false
-	}
+	return report, true
+}
+
+func collectInvestigationCoveredGoals(
+	report map[string]any,
+	required []string,
+) (map[string]struct{}, bool) {
 	findings, ok := report["findings"].([]any)
 	if !ok {
 		return nil, false
@@ -1002,22 +1094,7 @@ func repairInvestigationGoalCoverage(
 			coveredSet[goal] = struct{}{}
 		}
 	}
-	covered := make([]string, 0, len(coveredSet))
-	unresolved := make([]string, 0, len(required)-len(coveredSet))
-	for _, facet := range required {
-		if _, ok := coveredSet[facet]; ok {
-			covered = append(covered, facet)
-		} else {
-			unresolved = append(unresolved, facet)
-		}
-	}
-	report["covered_evidence_goals"] = covered
-	report["unresolved_evidence_goals"] = unresolved
-	encoded, err := json.Marshal(report)
-	if err != nil {
-		return nil, false
-	}
-	return encoded, true
+	return coveredSet, true
 }
 
 func failedRun(runID, code string, err error) agentapi.RunResult {

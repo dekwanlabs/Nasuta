@@ -80,60 +80,7 @@ type FailurePolicy struct {
 func Prepare(definition Definition) (Definition, error) {
 	prepared := cloneDefinition(definition)
 	prepared.ID = strings.TrimSpace(prepared.ID)
-	if !canonicalID.MatchString(prepared.ID) {
-		return Definition{}, fmt.Errorf("agent definition id %q is not canonical", definition.ID)
-	}
-	if prepared.Version <= 0 {
-		return Definition{}, fmt.Errorf("agent definition %q version must be positive", prepared.ID)
-	}
-	if strings.TrimSpace(prepared.Prompt.System) == "" {
-		return Definition{}, fmt.Errorf("agent definition %q system prompt is required", prepared.ID)
-	}
-	if strings.TrimSpace(prepared.Prompt.Version) == "" {
-		return Definition{}, fmt.Errorf("agent definition %q prompt version is required", prepared.ID)
-	}
-	if err := validateSchema(prepared.ID, "input", prepared.InputSchema); err != nil {
-		return Definition{}, err
-	}
-	if err := validateSchema(prepared.ID, "output", prepared.OutputSchema); err != nil {
-		return Definition{}, err
-	}
-	if strings.TrimSpace(prepared.Model.Provider) == "" {
-		return Definition{}, fmt.Errorf("agent definition %q model provider is required", prepared.ID)
-	}
-	if strings.TrimSpace(prepared.Model.Model) == "" {
-		return Definition{}, fmt.Errorf("agent definition %q model is required", prepared.ID)
-	}
-	if prepared.Model.MaxOutputTokens <= 0 {
-		return Definition{}, fmt.Errorf("agent definition %q max output tokens must be positive", prepared.ID)
-	}
-	if prepared.Model.InputPriceMicrosPerMillionTokens < 0 ||
-		prepared.Model.OutputPriceMicrosPerMillionTokens < 0 {
-		return Definition{}, fmt.Errorf("agent definition %q model prices cannot be negative", prepared.ID)
-	}
-	if (prepared.Model.InputPriceMicrosPerMillionTokens == 0) !=
-		(prepared.Model.OutputPriceMicrosPerMillionTokens == 0) {
-		return Definition{}, fmt.Errorf("agent definition %q model prices must be configured together", prepared.ID)
-	}
-	if prepared.Budget.Timeout <= 0 || prepared.Budget.MaxSteps <= 0 || prepared.Budget.ContextTokens <= 0 {
-		return Definition{}, fmt.Errorf("agent definition %q budgets must be positive", prepared.ID)
-	}
-	if prepared.Budget.MaxToolCalls < 0 {
-		return Definition{}, fmt.Errorf("agent definition %q max tool calls cannot be negative", prepared.ID)
-	}
-	if prepared.Budget.MaxToolResultBytes < 0 {
-		return Definition{}, fmt.Errorf("agent definition %q max tool result bytes cannot be negative", prepared.ID)
-	}
-	if prepared.Budget.MaxContinueRounds < 0 {
-		return Definition{}, fmt.Errorf("agent definition %q continuation rounds cannot be negative", prepared.ID)
-	}
-	if prepared.FailurePolicy.MaxInfrastructureRetries < 0 {
-		return Definition{}, fmt.Errorf("agent definition %q retries cannot be negative", prepared.ID)
-	}
-	if err := validateCanonicalList(prepared.ID, "tool", prepared.Tools.VisibleToolIDs); err != nil {
-		return Definition{}, err
-	}
-	if err := validateCanonicalList(prepared.ID, "permission", prepared.Permissions.Scopes); err != nil {
+	if err := validatePreparedDefinition(prepared); err != nil {
 		return Definition{}, err
 	}
 	hash, err := definitionHash(prepared)
@@ -145,6 +92,87 @@ func Prepare(definition Definition) (Definition, error) {
 	}
 	prepared.ContentHash = hash
 	return prepared, nil
+}
+
+func validatePreparedDefinition(prepared Definition) error {
+	if !canonicalID.MatchString(prepared.ID) {
+		return fmt.Errorf("agent definition id %q is not canonical", prepared.ID)
+	}
+	if prepared.Version <= 0 {
+		return fmt.Errorf("agent definition %q version must be positive", prepared.ID)
+	}
+	if err := validatePreparedPrompt(prepared); err != nil {
+		return err
+	}
+	if err := validatePreparedModel(prepared); err != nil {
+		return err
+	}
+	if err := validatePreparedBudget(prepared); err != nil {
+		return err
+	}
+	if prepared.FailurePolicy.MaxInfrastructureRetries < 0 {
+		return fmt.Errorf("agent definition %q retries cannot be negative", prepared.ID)
+	}
+	if err := validateCanonicalList(prepared.ID, "tool", prepared.Tools.VisibleToolIDs); err != nil {
+		return err
+	}
+	if err := validateCanonicalList(prepared.ID, "permission", prepared.Permissions.Scopes); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePreparedPrompt(prepared Definition) error {
+	if strings.TrimSpace(prepared.Prompt.System) == "" {
+		return fmt.Errorf("agent definition %q system prompt is required", prepared.ID)
+	}
+	if strings.TrimSpace(prepared.Prompt.Version) == "" {
+		return fmt.Errorf("agent definition %q prompt version is required", prepared.ID)
+	}
+	if err := validateSchema(prepared.ID, "input", prepared.InputSchema); err != nil {
+		return err
+	}
+	if err := validateSchema(prepared.ID, "output", prepared.OutputSchema); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePreparedModel(prepared Definition) error {
+	if strings.TrimSpace(prepared.Model.Provider) == "" {
+		return fmt.Errorf("agent definition %q model provider is required", prepared.ID)
+	}
+	if strings.TrimSpace(prepared.Model.Model) == "" {
+		return fmt.Errorf("agent definition %q model is required", prepared.ID)
+	}
+	if prepared.Model.MaxOutputTokens <= 0 {
+		return fmt.Errorf("agent definition %q max output tokens must be positive", prepared.ID)
+	}
+	if prepared.Model.InputPriceMicrosPerMillionTokens < 0 ||
+		prepared.Model.OutputPriceMicrosPerMillionTokens < 0 {
+		return fmt.Errorf("agent definition %q model prices cannot be negative", prepared.ID)
+	}
+	if (prepared.Model.InputPriceMicrosPerMillionTokens == 0) !=
+		(prepared.Model.OutputPriceMicrosPerMillionTokens == 0) {
+		return fmt.Errorf("agent definition %q model prices must be configured together", prepared.ID)
+	}
+	return nil
+}
+
+func validatePreparedBudget(prepared Definition) error {
+	if prepared.Budget.Timeout <= 0 || prepared.Budget.MaxSteps <= 0 || prepared.Budget.ContextTokens <= 0 {
+		return fmt.Errorf("agent definition %q budgets must be positive", prepared.ID)
+	}
+	if prepared.Budget.MaxToolCalls < 0 {
+		return fmt.Errorf("agent definition %q max tool calls cannot be negative", prepared.ID)
+	}
+	if prepared.Budget.MaxToolResultBytes < 0 {
+		return fmt.Errorf("agent definition %q max tool result bytes cannot be negative", prepared.ID)
+	}
+	if prepared.Budget.MaxContinueRounds < 0 {
+		return fmt.Errorf("agent definition %q continuation rounds cannot be negative", prepared.ID)
+	}
+	return nil
 }
 
 func validateSchema(agentID, kind string, schema SchemaRef) error {

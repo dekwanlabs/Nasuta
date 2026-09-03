@@ -1,7 +1,8 @@
 # 多 Agent 编排复用 Single-Agent Runtime 简化提案
 
-状态：提案
+状态：实施中（P0/P1 已完成，性能关键路径优化已落地）
 日期：2026-08-23
+最近更新：2026-09-03
 适用范围：Nasuta Investigation / QA 多 Agent Workflow
 
 ## 1. 提案摘要
@@ -956,3 +957,204 @@ DAG / 并行 / 失败传播
         =
 可控的多 Agent Investigation Workflow
 ```
+
+
+---
+
+## 11. 性能根因分析与已实施优化
+
+### 11.1 为什么多 Agent 可能比单 Agent 更慢
+
+多 Agent 不是天然更快。它只有在任务能够拆成至少两个相互独立、耗时占主导的子任务，并且这些子任务能够真正并行时，才可能用并行收益覆盖编排开销。
+
+修复前的动态 delegation 关键路径为：
+
+```text
+Parent 模型决定是否 delegation
+    + Child 模型调用
+    + enqueue 事务
+    + claim 事务
+    + Parent / Worker 抢 lease
+    + claim 失败后的 100ms polling
+    + settlement / artifact / checkpoint / event
+    + validation / optional verifier
+    + Parent 最终综合
+```
+
+主要根因如下：
+
+1. **简单请求误入 delegation**：普通请求仍能看到 `delegate_investigation`，模型可能绕过服务端路由主动 fan-out；
+2. **单子任务或串行任务也进入多 Agent**：无法产生并行收益，却承担完整的 Parent、持久化、校验和综合开销；
+3. **配置并发度与路由脱节**：即使 `delegation_max_concurrent=1`，路由仍可能选择多 Agent，最终子任务只能串行执行；
+4. **durable queue 存在 lease 竞争**：旧流程执行 `enqueue -> Worker claim -> Parent claim`，Parent 与后台 Worker 会竞争同一 Work Item；
+5. **Parent claim 失败后轮询**：Parent 以 100ms 周期等待 Worker settlement，把固定调度延迟加入关键路径；
+6. **Run 预算语义不统一**：并行节点、Retry、Replan 可能使用不同的预算投影，造成不必要的拒绝、等待或重复预算；
+7. **缺少分阶段耗时**：只能看到总耗时，无法区分模型耗时、队列等待、claim、settlement 和 validation。
+
+因此，性能目标不是“所有多 Agent 请求都一定快于单 Agent”，而是：
+
+```text
+没有可验证并行收益的请求不进入多 Agent；
+真正可并行的请求消除固定轮询和重复事务；
+多 Agent 关键路径接近最慢子任务，而不是所有子任务耗时之和。
+```
+
+理想关键路径近似为：
+
+```text
+T_multi ≈ T_parent_decision
+        + max(T_child_1 ... T_child_n)
+        + T_validation
+        + T_parent_synthesis
+```
+
+而不是：
+
+```text
+T_multi ≈ T_parent_decision
+        + sum(T_child_1 ... T_child_n)
+        + T_queue_polling
+        + T_validation
+        + T_parent_synthesis
+```
+
+### 11.2 已实施的路由优化
+
+QA 路由现在只有在以下条件全部满足时才暴露动态 delegation：
+
+1. Retrieval 明确建议 `multi_agent`；
+2. delegation 功能已启用；
+3. `delegate_investigation` 工具已就绪；
+4. 至少有两个 `IndependentlyUseful=true` 且没有前置依赖的任务；
+5. 生产配置的 `delegation_max_concurrent >= 2`。
+
+以下情况统一降级为 Single-Agent：
+
+- Retrieval 建议 `single_agent`；
+- 只有一个子任务；
+- 任务必须顺序执行；
+- 只有一个可独立执行的任务；
+- delegation 不可用或工具不可见；
+- `delegation_max_concurrent=1`；
+- 请求包含写操作。
+
+降级后不仅省略 delegation 提示词，还会从不可变的候选工具集合中移除 `delegate_investigation`，防止 Parent 模型绕过路由重新触发慢链路。
+
+对应路由原因包括：
+
+```text
+single_agent_suggestion
+multi_agent_not_worthwhile
+delegation_unavailable
+delegation_concurrency_too_low
+write_requested
+parent_dynamic_delegation
+```
+
+### 11.3 已实施的 durable queue 优化
+
+生产 Store 新增原子派发能力：
+
+```text
+EnqueueAndClaimWorkItem(...)
+```
+
+在同一个事务中完成：
+
+```text
+enqueue + claim + lease/fence 建立
+```
+
+新的 Parent 快路径不再执行：
+
+```text
+enqueue
+    -> 等待后台 Worker 抢 lease
+    -> Parent 再次 ClaimWorkItemByID
+    -> claim 失败后每 100ms 轮询 settlement
+```
+
+该优化保留以下 durable 语义：
+
+- Work Item identity / payload 冲突校验；
+- live lease 不可抢占；
+- expired lease 可以 reclaim；
+- reclaim 后 fence 单调增长；
+- settlement 幂等；
+- 不支持原子接口的测试队列或嵌入式实现继续使用兼容路径。
+
+### 11.4 已实施的共享 Run 预算
+
+Workflow Coordinator 与 Single-Agent Runtime 现在共享同一个 Run-level budget account：
+
+- 每次物理模型调用前原子 Reserve；
+- provider 返回 usage 后按实际值 Settle；
+- 并行调用共享同一份已用量和 in-flight reservation；
+- Retry 和 Replan 不创建新预算；
+- Verifier 和 Composer 使用 phase reserve；
+- Workflow Node 返回的 `ToolCalls` 在 Node accounting 阶段计入共享 Run 预算，不会因为模型 usage settlement 只包含 token/cost 而丢失；
+- 自定义 Node Executor 即使没有进入 Runtime 的物理调用 Gate，其返回 usage 仍会由 Coordinator 补记。
+
+### 11.5 已实施的 Workflow 约束
+
+- Investigator、Verifier、Composer 继续复用 Single-Agent Runtime；
+- Workflow Agent Node 使用 `RunOutputWorkflowNode`；
+- Composer 只消费 Verified Bundle；
+- Composer 输出 Answer；
+- Composer 不暴露调查工具；
+- 节点级预算仅作为兼容投影，不再是平均切分的硬 quota。
+
+### 11.6 新增耗时观测指标
+
+`ExecutionEvent` 已增加以下阶段耗时：
+
+| 字段 | 含义 |
+|---|---|
+| `queue_wait_ms` | Work Item 从可执行到获得执行权的等待时间 |
+| `queue_claim_ms` | enqueue/claim 或 claim 事务自身耗时 |
+| `settlement_ms` | child result、artifact、checkpoint、event 等终态结算耗时 |
+| `validation_ms` | delegation report 的确定性校验和可选语义验证耗时 |
+
+分析多 Agent 慢请求时，应至少关联以下维度：
+
+```text
+route_reason
+child_count
+configured_max_concurrent
+actual_peak_concurrency
+parent_model_ms
+child_model_ms (per child)
+queue_wait_ms
+queue_claim_ms
+settlement_ms
+validation_ms
+retry_count
+replan_count
+```
+
+其中本次已经落库/投影的是 queue、claim、settlement、validation 四类字段；其余字段作为后续聚合看板维度。
+
+### 11.7 性能验收标准
+
+新增以下性能验收标准：
+
+1. Single-Agent 建议、单任务、串行任务和并发度为 1 的请求不得暴露 delegation 工具；
+2. 多 Agent 路由必须具备至少两个可独立并行任务以及至少两个执行槽；
+3. 生产 Store 原子快路径不得再次调用 Parent `ClaimWorkItemByID`；
+4. 原子快路径不得引入固定 100ms polling；
+5. 每个 child Runtime 只执行一次，每个 terminal settlement 只提交一次；
+6. 并行 child 的模型调用必须共享同一个 Run budget gate；
+7. Workflow `MaxToolCalls` 必须包含 Agent Node 实际返回的工具调用数；
+8. 性能回归测试应分别覆盖：单 Agent 基线、无收益 fan-out、两个并行 child、并发度为 1、claim 冲突、expired lease reclaim；
+9. 对可并行的同类任务，目标是 child execution 段接近 `max(child duration)`，不能退化为 `sum(child duration)`；
+10. 端到端是否快于单 Agent 以实际 benchmark 为准；若 Parent 决策、validation 和 synthesis 的固定成本大于并行收益，路由必须保持 Single-Agent。
+
+### 11.8 当前迁移状态
+
+| 阶段 | 状态 | 已完成内容 | 后续工作 |
+|---|---|---|---|
+| P0 统一执行语义 | 已完成 | Workflow Node 复用 Runtime、统一输出模式、Composer 约束 | 持续删除遗留重复实现 |
+| P1 共享 Run 预算 | 已完成 | 原子 Reserve/Settle、Retry/Replan 共享预算、Verifier/Composer reserve、ToolCalls 回归测试 | 增加预算看板和告警 |
+| P2 DAG 与并行 | 部分完成 | DAG/并行调度已存在，QA 路由增加并行收益和实际并发槽校验 | Required/Optional 策略继续统一，增加端到端 benchmark |
+| P3 Composer 统一 | 已完成核心路径 | Verified Bundle -> Composer -> Answer，Composer 无工具 | 清理旧 Composer 兼容入口 |
+| 性能关键路径 | 已完成首轮 | 原子 enqueue+claim、移除 Parent claim polling、阶段耗时字段 | 基于线上分位数继续优化 validation 和 synthesis |

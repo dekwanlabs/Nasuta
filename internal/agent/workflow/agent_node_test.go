@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -373,6 +374,65 @@ func TestAgentNodeExecutorTreatsEvidenceBackedEmptyReportAsPartial(t *testing.T)
 		verified.SupportedClaims[0].Claim != "The checkout route reaches the placement handler." ||
 		len(verified.EvidenceUnits) != 2 {
 		t.Fatalf("verified evidence = %+v", verified)
+	}
+}
+
+func TestAgentNodeExecutorUsesComposerWorkflowContract(t *testing.T) {
+	runtime := &capturingAgentRuntime{result: agentapi.RunResult{
+		Status: agentapi.RunSucceeded,
+		Output: json.RawMessage(`{"answer":"bounded answer"}`),
+	}}
+	agents := testAgentDefinitions(t)
+	addTestAgent(t, agents, testComposerAgentDefinition(t))
+	executor, err := NewAgentExecutor(testSchemaRegistry(t), agents, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := agentapi.InvestigationVerifiedBundleSchemaRef()
+	answer := agentapi.InvestigationAnswerSchemaRef()
+	input, err := PrepareHandoff(Handoff{
+		WorkflowRunID: "workflow-run", ProducerNodeID: "verify",
+		Schema: verified, Payload: json.RawMessage(`{}`), Completeness: Complete,
+	}, 4096, testSchemaRegistry(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowInput, err := PrepareHandoff(Handoff{
+		WorkflowRunID: "workflow-run", ProducerNodeID: "workflow.input",
+		Schema: agentapi.TaskContractSchemaRef(), Payload: json.RawMessage(`{}`),
+		Completeness: Complete,
+	}, 4096, testSchemaRegistry(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(t.Context(), NodeRequest{
+		WorkflowRunID: "workflow-run", ParentRunID: "parent-run",
+		Node: NodeDefinition{
+			ID: "compose", Kind: NodeAgent,
+			Agent:       agentapi.DefinitionRef{ID: "synthesizer", Version: 1},
+			InputSchema: verified, OutputSchema: answer, Timeout: time.Minute,
+			RestrictVisibleTools: true,
+		},
+		Inputs: []Handoff{input}, WorkflowInput: workflowInput,
+		EffectivePermissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Handoff.Schema != answer || runtime.request.Policy.OutputMode != agentapi.RunOutputWorkflowNode {
+		t.Fatalf("composer output contract = schema=%+v policy=%+v", result.Handoff.Schema, runtime.request.Policy)
+	}
+	if !runtime.request.ToolScope.RestrictVisible || len(runtime.request.ToolScope.VisibleToolIDs) != 0 {
+		t.Fatalf("composer tool scope = %+v", runtime.request.ToolScope)
+	}
+	if len(runtime.request.Context) != 2 ||
+		runtime.request.Context[0].Source != "workflow.handoff" ||
+		runtime.request.Context[1].Source != "workflow.synthesis_objective" {
+		t.Fatalf("composer context = %+v", runtime.request.Context)
+	}
+	if strings.Contains(runtime.request.Context[0].Content, "bounded answer") ||
+		strings.Contains(runtime.request.Context[1].Content, "bounded answer") {
+		t.Fatal("composer context leaked runtime output")
 	}
 }
 

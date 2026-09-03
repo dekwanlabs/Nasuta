@@ -45,76 +45,11 @@ func (service *Service) DecideHumanApproval(
 	if err != nil {
 		return ApprovalResult{}, err
 	}
-	state, err := service.store.LoadFullRunState(ctx, prepared.WorkflowRunID)
+	state, definition, node, metadata, err := service.loadApprovalTarget(
+		ctx, orchestrator, prepared,
+	)
 	if err != nil {
 		return ApprovalResult{}, err
-	}
-	if !prepared.Admin {
-		if prepared.Approver.TenantID != state.Run.ActorTenantID {
-			return ApprovalResult{}, fmt.Errorf(
-				"workflow approval tenant %q does not match run tenant %q: %w",
-				prepared.Approver.TenantID, state.Run.ActorTenantID, ErrForbidden,
-			)
-		}
-		if prepared.Approver.UserID != state.Run.ActorUserID {
-			return ApprovalResult{}, ErrForbidden
-		}
-	}
-	definition, err := service.catalog.Resolve(DefinitionRef{
-		ID: state.Run.WorkflowID, Version: state.Run.WorkflowVersion,
-	})
-	if err != nil {
-		return ApprovalResult{}, err
-	}
-	if definition.ContentHash != state.Run.WorkflowHash {
-		return ApprovalResult{}, fmt.Errorf(
-			"workflow run %q definition hash mismatch",
-			state.Run.ID,
-		)
-	}
-	metadata, err := graph(definition, orchestrator.schemas)
-	if err != nil {
-		return ApprovalResult{}, err
-	}
-	node, ok := metadata.nodes[prepared.NodeID]
-	if !ok {
-		return ApprovalResult{}, fmt.Errorf(
-			"workflow run %q node %q not found: %w",
-			state.Run.ID, prepared.NodeID, ErrNotFound,
-		)
-	}
-	if node.Kind != NodeHumanApproval {
-		return ApprovalResult{}, fmt.Errorf(
-			"workflow run %q node %q does not require human approval: %w",
-			state.Run.ID, node.ID, ErrConflict,
-		)
-	}
-	if _, decided := state.Approvals[node.ID]; !decided {
-		if state.Run.Status != RunWaitingHuman {
-			return ApprovalResult{}, fmt.Errorf(
-				"workflow run %q is %q, expected %q: %w",
-				state.Run.ID, state.Run.Status, RunWaitingHuman, ErrConflict,
-			)
-		}
-		nodeRun, exists := state.Nodes[node.ID]
-		if !exists {
-			return ApprovalResult{}, fmt.Errorf(
-				"workflow run %q node %q has not started: %w",
-				state.Run.ID, node.ID, ErrNotFound,
-			)
-		}
-		if nodeRun.Kind != NodeHumanApproval {
-			return ApprovalResult{}, fmt.Errorf(
-				"workflow run %q node %q persisted kind %q does not require human approval: %w",
-				state.Run.ID, node.ID, nodeRun.Kind, ErrConflict,
-			)
-		}
-		if nodeRun.Status != RunWaitingHuman {
-			return ApprovalResult{}, fmt.Errorf(
-				"workflow run %q node %q is %q, expected %q: %w",
-				state.Run.ID, node.ID, nodeRun.Status, RunWaitingHuman, ErrConflict,
-			)
-		}
 	}
 	approval := Approval{
 		WorkflowRunID:    state.Run.ID,
@@ -156,10 +91,101 @@ func (service *Service) DecideHumanApproval(
 		Applied:  transition.Applied,
 		Status:   transition.RunStatus,
 	}
-	if transition.RunStatus != RunRunning {
+	return service.finalizeApprovalResume(ctx, approvalResult, state.Run.ID)
+}
+
+// loadApprovalTarget loads and validates the durable run, definition and
+// approval node targeted by an approval decision.
+func (service *Service) loadApprovalTarget(
+	ctx context.Context,
+	orchestrator *Orchestrator,
+	prepared ApprovalRequest,
+) (*RunState, Definition, NodeDefinition, graphMetadata, error) {
+	state, err := service.store.LoadFullRunState(ctx, prepared.WorkflowRunID)
+	if err != nil {
+		return nil, Definition{}, NodeDefinition{}, graphMetadata{}, err
+	}
+	if !prepared.Admin {
+		if prepared.Approver.TenantID != state.Run.ActorTenantID {
+			return nil, Definition{}, NodeDefinition{}, graphMetadata{}, fmt.Errorf(
+				"workflow approval tenant %q does not match run tenant %q: %w",
+				prepared.Approver.TenantID, state.Run.ActorTenantID, ErrForbidden,
+			)
+		}
+		if prepared.Approver.UserID != state.Run.ActorUserID {
+			return nil, Definition{}, NodeDefinition{}, graphMetadata{}, ErrForbidden
+		}
+	}
+	definition, err := service.catalog.Resolve(DefinitionRef{
+		ID: state.Run.WorkflowID, Version: state.Run.WorkflowVersion,
+	})
+	if err != nil {
+		return nil, Definition{}, NodeDefinition{}, graphMetadata{}, err
+	}
+	if definition.ContentHash != state.Run.WorkflowHash {
+		return nil, Definition{}, NodeDefinition{}, graphMetadata{}, fmt.Errorf(
+			"workflow run %q definition hash mismatch",
+			state.Run.ID,
+		)
+	}
+	metadata, err := graph(definition, orchestrator.schemas)
+	if err != nil {
+		return nil, Definition{}, NodeDefinition{}, graphMetadata{}, err
+	}
+	node, ok := metadata.nodes[prepared.NodeID]
+	if !ok {
+		return nil, Definition{}, NodeDefinition{}, graphMetadata{}, fmt.Errorf(
+			"workflow run %q node %q not found: %w",
+			state.Run.ID, prepared.NodeID, ErrNotFound,
+		)
+	}
+	if node.Kind != NodeHumanApproval {
+		return nil, Definition{}, NodeDefinition{}, graphMetadata{}, fmt.Errorf(
+			"workflow run %q node %q does not require human approval: %w",
+			state.Run.ID, node.ID, ErrConflict,
+		)
+	}
+	if _, decided := state.Approvals[node.ID]; !decided {
+		if state.Run.Status != RunWaitingHuman {
+			return nil, Definition{}, NodeDefinition{}, graphMetadata{}, fmt.Errorf(
+				"workflow run %q is %q, expected %q: %w",
+				state.Run.ID, state.Run.Status, RunWaitingHuman, ErrConflict,
+			)
+		}
+		nodeRun, exists := state.Nodes[node.ID]
+		if !exists {
+			return nil, Definition{}, NodeDefinition{}, graphMetadata{}, fmt.Errorf(
+				"workflow run %q node %q has not started: %w",
+				state.Run.ID, node.ID, ErrNotFound,
+			)
+		}
+		if nodeRun.Kind != NodeHumanApproval {
+			return nil, Definition{}, NodeDefinition{}, graphMetadata{}, fmt.Errorf(
+				"workflow run %q node %q persisted kind %q does not require human approval: %w",
+				state.Run.ID, node.ID, nodeRun.Kind, ErrConflict,
+			)
+		}
+		if nodeRun.Status != RunWaitingHuman {
+			return nil, Definition{}, NodeDefinition{}, graphMetadata{}, fmt.Errorf(
+				"workflow run %q node %q is %q, expected %q: %w",
+				state.Run.ID, node.ID, nodeRun.Status, RunWaitingHuman, ErrConflict,
+			)
+		}
+	}
+	return state, definition, node, metadata, nil
+}
+
+// finalizeApprovalResume resumes a running workflow after an approval decision
+// and folds the resumed result into the returned approval result.
+func (service *Service) finalizeApprovalResume(
+	ctx context.Context,
+	approvalResult ApprovalResult,
+	runID string,
+) (ApprovalResult, error) {
+	if approvalResult.Status != RunRunning {
 		return approvalResult, nil
 	}
-	resumed, resumeErr := service.Resume(ctx, state.Run.ID)
+	resumed, resumeErr := service.Resume(ctx, runID)
 	if resumed.Status != "" {
 		approvalResult.Status = resumed.Status
 	}

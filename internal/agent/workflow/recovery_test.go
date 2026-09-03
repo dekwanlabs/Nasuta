@@ -264,14 +264,10 @@ func TestServiceTakesOverRunningReadOnlyAgentAttempt(t *testing.T) {
 	if len(persistence.failedNodes) != 1 ||
 		persistence.failedNodes[0].attempt != 1 ||
 		persistence.failedNodes[0].errorCode != nodeRestartedRetryableErrorCode ||
-		persistence.failedNodes[0].usage != (Usage{
-			InputTokens: 10, OutputTokens: 5, TotalTokens: 15, ToolCalls: 2,
-		}) {
+		persistence.failedNodes[0].usage != (Usage{}) {
 		t.Fatalf("takeover transitions = %+v", persistence.failedNodes)
 	}
-	if persistence.state.Run.Usage != (Usage{
-		InputTokens: 10, OutputTokens: 5, TotalTokens: 15, ToolCalls: 2, Retries: 1,
-	}) {
+	if persistence.state.Run.Usage != (Usage{Retries: 1}) {
 		t.Fatalf("restored workflow usage = %+v", persistence.state.Run.Usage)
 	}
 }

@@ -42,75 +42,95 @@ func (agent *Agent) runTurns(state *compiledLoop) error {
 		if err := agent.ensureTurnBudget(state, step); err != nil {
 			return err
 		}
-		agent.remindStructuredLastStep(state, step)
-
-		turn, err := agent.callModelTurn(state, step)
+		stop, err := agent.runTurnStep(state, step)
 		if err != nil {
-			if !state.answerContract.Active() &&
-				agent.preservePartialAnswer(
-					state.runCtx,
-					state.runID,
-					&state.stepSeq,
-					state.result,
-					turn.result,
-					turn.stream,
-					turn.started,
-					turn.duration,
-				) {
-				state.result.Err = fmt.Errorf("agent step %d: %w", step, err)
-				log.WarnfCtx(state.ctx, "[agent] run %s preserving partial answer from interrupted step %d: %v",
-					state.runID, step, err)
-				break
-			}
-			if state.loopCtx.Err() != nil {
-				log.InfofCtx(state.ctx, "[agent] run %s loop budget exhausted at step %d: %v",
-					state.runID, step, state.loopCtx.Err())
-				break
-			}
-			return fmt.Errorf("agent step %d: %w", step, err)
+			return err
 		}
-		if agent.cfg.BudgetCheck != nil {
-			if err := agent.cfg.BudgetCheck(); err != nil {
-				return err
-			}
-		}
-		if len(turn.result.ToolCalls) == 0 {
-			agent.handleAnswerTurn(state, turn)
-			if err := agent.checkpointState(state, "answered", step); err != nil {
-				return fmt.Errorf("persist logical loop answer checkpoint at step %d: %w", step, err)
-			}
+		if stop {
 			break
 		}
-		if len(agent.toolsForStep(state, step)) == 0 {
-			log.InfofCtx(state.ctx, "[agent] run %s reserved last step for structured output; ignoring tool calls",
-				state.runID)
-			break
-		}
-
-		if err := agent.recordThinkTurn(state, turn); err != nil {
-			state.result.Err = err
-			break
-		}
-		outcome := agent.executeToolTurn(state, turn.result.ToolCalls)
-		if state.result.Err != nil {
-			break
-		}
-		if state.toolBudgetExhausted {
-			log.InfofCtx(
-				state.ctx,
-				"[agent] run %s tool-call budget exhausted; forcing conclusion with collected evidence",
-				state.runID,
-			)
-			break
-		}
-		agent.advanceTurn(state, step, outcome)
-		if err := agent.checkpointState(state, "running", step); err != nil {
-			return fmt.Errorf("persist logical loop checkpoint at step %d: %w", step, err)
-		}
-		log.InfofCtx(state.ctx, "[agent] run %s context size after step %d: %d chars",
-			state.runID, step, contextChars(state.messages))
 	}
 	return nil
+}
+
+func (agent *Agent) runTurnStep(state *compiledLoop, step int) (bool, error) {
+	agent.remindStructuredLastStep(state, step)
+
+	turn, err := agent.callModelTurn(state, step)
+	if err != nil {
+		return agent.handleTurnError(state, step, turn, err)
+	}
+	if agent.cfg.BudgetCheck != nil {
+		if err := agent.cfg.BudgetCheck(); err != nil {
+			return false, err
+		}
+	}
+	if len(turn.result.ToolCalls) == 0 {
+		agent.handleAnswerTurn(state, turn)
+		if err := agent.checkpointState(state, "answered", step); err != nil {
+			return false, fmt.Errorf("persist logical loop answer checkpoint at step %d: %w", step, err)
+		}
+		return true, nil
+	}
+	if len(agent.toolsForStep(state, step)) == 0 {
+		log.InfofCtx(state.ctx, "[agent] run %s reserved last step for structured output; ignoring tool calls",
+			state.runID)
+		return true, nil
+	}
+
+	if err := agent.recordThinkTurn(state, turn); err != nil {
+		state.result.Err = err
+		return true, nil
+	}
+	outcome := agent.executeToolTurn(state, turn.result.ToolCalls)
+	if state.result.Err != nil {
+		return true, nil
+	}
+	if state.toolBudgetExhausted {
+		log.InfofCtx(
+			state.ctx,
+			"[agent] run %s tool-call budget exhausted; forcing conclusion with collected evidence",
+			state.runID,
+		)
+		return true, nil
+	}
+	agent.advanceTurn(state, step, outcome)
+	if err := agent.checkpointState(state, "running", step); err != nil {
+		return false, fmt.Errorf("persist logical loop checkpoint at step %d: %w", step, err)
+	}
+	log.InfofCtx(state.ctx, "[agent] run %s context size after step %d: %d chars",
+		state.runID, step, contextChars(state.messages))
+	return false, nil
+}
+
+func (agent *Agent) handleTurnError(
+	state *compiledLoop,
+	step int,
+	turn modelTurn,
+	err error,
+) (bool, error) {
+	if !state.answerContract.Active() &&
+		agent.preservePartialAnswer(
+			state.runCtx,
+			state.runID,
+			&state.stepSeq,
+			state.result,
+			turn.result,
+			turn.stream,
+			turn.started,
+			turn.duration,
+		) {
+		state.result.Err = fmt.Errorf("agent step %d: %w", step, err)
+		log.WarnfCtx(state.ctx, "[agent] run %s preserving partial answer from interrupted step %d: %v",
+			state.runID, step, err)
+		return true, nil
+	}
+	if state.loopCtx.Err() != nil {
+		log.InfofCtx(state.ctx, "[agent] run %s loop budget exhausted at step %d: %v",
+			state.runID, step, state.loopCtx.Err())
+		return true, nil
+	}
+	return false, fmt.Errorf("agent step %d: %w", step, err)
 }
 
 func (agent *Agent) ensureTurnBudget(state *compiledLoop, step int) error {
@@ -204,73 +224,7 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 		turn.stream,
 	)
 	result = continued
-	if hasLeakedToolProtocol(result) {
-		log.WarnfCtx(state.ctx, "[agent] run %s step %d leaked tool protocol; forcing conclusion instead of accepting it as the answer",
-			state.runID, turn.step)
-		return
-	}
-	if err != nil && !state.answerContract.Active() &&
-		agent.preservePartialAnswer(
-			state.runCtx,
-			state.runID,
-			&state.stepSeq,
-			state.result,
-			result,
-			turn.stream,
-			turn.started,
-			turn.duration,
-		) {
-		state.result.Err = err
-		log.WarnfCtx(state.ctx, "[agent] run %s preserving partial final answer at step %d: %v",
-			state.runID, turn.step, err)
-		return
-	}
-	if errors.Is(err, ErrAnswerTruncated) &&
-		state.answerContract.Active() &&
-		validateAndStripContractPartial(result, state.answerContract) {
-		state.result.DelegationAdoptions = state.answerContract.Adoptions()
-		turn.stream.Publish(result.Content)
-		state.result.Answer += result.Content
-		state.stepSeq++
-		_ = agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
-			StepNo:              state.stepSeq,
-			Kind:                StepKindAnswer,
-			Content:             result.Content,
-			DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions),
-			TokenDelta:          utf8.RuneCountInString(result.Content),
-			ReasoningTokens:     result.ReasoningTokens,
-			DurationMs:          int(turn.duration / time.Millisecond),
-			CreatedAt:           turn.started,
-		})
-		state.result.Err = err
-		log.WarnfCtx(
-			state.ctx,
-			"[agent] run %s preserving contract-valid partial final answer at step %d: %v",
-			state.runID,
-			turn.step,
-			err,
-		)
-		return
-	}
-	if errors.Is(err, ErrAnswerTruncated) && state.answerContract.Active() {
-		state.answerRecoveryPending = true
-		if hasDeliverableAnswer(result) && !turn.stream.HasToolCallDelta() {
-			// Keep the unvalidated prefix available to the forced conclusion model,
-			// but never publish or persist it as a user-visible answer.
-			state.messages = append(state.messages, llm.Message{
-				Role: "assistant", Content: result.Content,
-			})
-		}
-		log.WarnfCtx(
-			state.ctx,
-			"[agent] run %s answer truncated before exact-answer contract was satisfied; deferring to forced conclusion",
-			state.runID,
-		)
-		return
-	}
-	if errors.Is(err, ErrReasoningTruncated) || errors.Is(err, ErrEmptyModelResponse) {
-		log.WarnfCtx(state.ctx, "[agent] run %s final-answer generation produced no visible content; forcing conclusion: %v",
-			state.runID, err)
+	if agent.interceptAnswerTurn(state, turn, result, err) {
 		return
 	}
 	if err == nil {
@@ -324,6 +278,82 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 		state.runID, turn.step)
 }
 
+// interceptAnswerTurn handles all early-termination branches that accept,
+// preserve, or defer an answer without reaching final publication. It returns
+// true when the turn has been fully handled and the caller must return.
+func (agent *Agent) interceptAnswerTurn(state *compiledLoop, turn modelTurn, result *llm.ChatStreamResult, err error) bool {
+	if hasLeakedToolProtocol(result) {
+		log.WarnfCtx(state.ctx, "[agent] run %s step %d leaked tool protocol; forcing conclusion instead of accepting it as the answer",
+			state.runID, turn.step)
+		return true
+	}
+	if err != nil && !state.answerContract.Active() &&
+		agent.preservePartialAnswer(
+			state.runCtx,
+			state.runID,
+			&state.stepSeq,
+			state.result,
+			result,
+			turn.stream,
+			turn.started,
+			turn.duration,
+		) {
+		state.result.Err = err
+		log.WarnfCtx(state.ctx, "[agent] run %s preserving partial final answer at step %d: %v",
+			state.runID, turn.step, err)
+		return true
+	}
+	if errors.Is(err, ErrAnswerTruncated) &&
+		state.answerContract.Active() &&
+		validateAndStripContractPartial(result, state.answerContract) {
+		state.result.DelegationAdoptions = state.answerContract.Adoptions()
+		turn.stream.Publish(result.Content)
+		state.result.Answer += result.Content
+		state.stepSeq++
+		_ = agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
+			StepNo:              state.stepSeq,
+			Kind:                StepKindAnswer,
+			Content:             result.Content,
+			DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions),
+			TokenDelta:          utf8.RuneCountInString(result.Content),
+			ReasoningTokens:     result.ReasoningTokens,
+			DurationMs:          int(turn.duration / time.Millisecond),
+			CreatedAt:           turn.started,
+		})
+		state.result.Err = err
+		log.WarnfCtx(
+			state.ctx,
+			"[agent] run %s preserving contract-valid partial final answer at step %d: %v",
+			state.runID,
+			turn.step,
+			err,
+		)
+		return true
+	}
+	if errors.Is(err, ErrAnswerTruncated) && state.answerContract.Active() {
+		state.answerRecoveryPending = true
+		if hasDeliverableAnswer(result) && !turn.stream.HasToolCallDelta() {
+			// Keep the unvalidated prefix available to the forced conclusion model,
+			// but never publish or persist it as a user-visible answer.
+			state.messages = append(state.messages, llm.Message{
+				Role: "assistant", Content: result.Content,
+			})
+		}
+		log.WarnfCtx(
+			state.ctx,
+			"[agent] run %s answer truncated before exact-answer contract was satisfied; deferring to forced conclusion",
+			state.runID,
+		)
+		return true
+	}
+	if errors.Is(err, ErrReasoningTruncated) || errors.Is(err, ErrEmptyModelResponse) {
+		log.WarnfCtx(state.ctx, "[agent] run %s final-answer generation produced no visible content; forcing conclusion: %v",
+			state.runID, err)
+		return true
+	}
+	return false
+}
+
 func (agent *Agent) recordThinkTurn(state *compiledLoop, turn modelTurn) error {
 	reasoning := turn.result.Reasoning
 	if reasoning == "" {
@@ -361,140 +391,183 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 	var outcome toolTurnOutcome
 	var notices []string
 	for index, call := range calls {
-		if agent.cfg.MaxToolCalls > 0 &&
-			int64(state.result.Evidence.ToolCallCount) >= agent.cfg.MaxToolCalls {
+		if agent.toolCallBudgetExhausted(state) {
 			agent.appendBudgetSkippedToolResults(state, calls[index:])
 			state.toolBudgetExhausted = true
 			break
 		}
-		state.result.Evidence.ToolCallCount++
-		state.stepSeq++
-		if err := agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
-			StepNo:     state.stepSeq,
-			Kind:       StepKindToolCall,
-			ToolCallID: call.ID,
-			Tool:       call.Function.Name,
-			Args:       call.Function.Arguments,
-			CreatedAt:  time.Now(),
-		}); err != nil {
-			state.result.Err = fmt.Errorf("persist tool call %q: %w", call.ID, err)
+		executionCall, execution, err := agent.runToolCall(state, call)
+		if err != nil {
+			state.result.Err = err
 			return outcome
 		}
-
-		executionCall, admission := agent.admitToolCall(state, call)
-		var execution ToolExecution
-		switch admission.Action {
-		case toolAdmissionAlreadyAvailable, toolAdmissionDenyBudget:
-			execution = toolAdmissionExecution(admission)
-		default:
-			if executionCall.Function.Name == string(delegation.DelegateToolID) {
-				units, _ := state.evidenceLedger.snapshot()
-				state.loopCtx = delegation.WithLiveEvidence(state.loopCtx, units)
-			}
-			execution = agent.executor.ExecuteLimited(
-				state.loopCtx,
-				state.toolSnapshot,
-				executionCall,
-				state.input.ReferenceTypes,
-				state.seenTools,
-				state.runID,
-				agent.cfg.MaxToolResultBytes,
-			)
-			if !execution.Failed {
-				conflicts := state.evidenceLedger.add(execution.EvidenceUnits, "tool")
-				if len(conflicts) > 0 {
-					notices, err := marshalConflictNotices(conflicts)
-					if err != nil {
-						state.result.Err = fmt.Errorf(
-							"prepare evidence conflict notice for tool %q: %w",
-							executionCall.Function.Name,
-							err,
-						)
-						return outcome
-					}
-					execution.Notices = append(execution.Notices, notices...)
-					execution.Coverage.Complete = false
-					execution.Coverage.Partial = true
-				}
-			}
-		}
-		if state.input.OutputMode == agentapi.RunOutputEvidenceWorker &&
-			!execution.Failed && execution.Evidence {
-			appendEvidenceObservations(&state.result.EvidenceObservations, execution, executionCall.Function.Name)
-		}
-		execution = agent.prepareDelivery(
-			state.runID,
-			state.messages,
-			notices,
-			state.tools,
-			executionCall,
-			state.answerContract,
-			execution,
+		callOutcome, callNotices, err := agent.applyToolExecution(
+			state, executionCall, execution, notices,
 		)
-		if execution.Failed {
-			state.result.Evidence.ToolFailureCount++
-		} else if execution.Evidence {
-			state.result.Evidence.ResultCount++
-		}
-		outcome.producedEvidence = outcome.producedEvidence || execution.Evidence
-
-		acceptedWebEvidence := false
-		if !execution.Failed {
-			acceptedWebEvidence = state.webEvidence.Observe(executionCall, execution.AuthoritativeContent)
-		}
-		if !execution.Failed && execution.Evidence && execution.DeliveryError == "" {
-			mergeToolReferences(&state.result.References, execution.References)
-		}
-		if !execution.Failed {
-			agent.captureDelegationFlows(state, executionCall, execution)
-		}
-		if isWebEvidenceTool(executionCall.Function.Name) {
-			outcome.webAttempted = true
-			outcome.webSucceeded = outcome.webSucceeded || acceptedWebEvidence
-		}
-		if execution.Coverage.Partial {
-			state.result.Evidence.PartialResultCount++
-		}
-		state.result.Evidence.OmittedItemCount += execution.Coverage.OmittedItems
-
-		state.stepSeq++
-		toolResultStep := newToolResultStep(state.runID, state.stepSeq, executionCall, execution)
-		if err := agent.observer.OnStep(state.runCtx, state.runID, toolResultStep); err != nil {
-			state.result.Err = fmt.Errorf("persist tool result trace %q: %w", toolResultStep.TraceID, err)
+		if err != nil {
+			state.result.Err = err
 			return outcome
 		}
-		log.InfofCtx(state.ctx, "[agent] tool result trace persisted: trace_id=%s tool_call_id=%s tool=%s bytes=%d sha256=%s artifact_id=%s failed=%v",
-			toolResultStep.TraceID, executionCall.ID, executionCall.Function.Name, toolResultStep.SizeBytes,
-			toolResultStep.AuthoritativeSHA256, execution.ArtifactID, execution.Failed)
-		if execution.DeliveryError != "" {
-			log.WarnfCtx(state.ctx, "[agent] tool %s delivery failed: trace_id=%s reason=%s bytes=%d",
-				executionCall.Function.Name, toolResultStep.TraceID, execution.DeliveryError, toolResultStep.SizeBytes)
-		}
-
-		consumeToolTokens(state, execution.PromptContent)
-		message := toolMessage(executionCall.ID, executionCall.Function.Name, execution.PromptContent)
-		state.messages = append(state.messages, message)
-		state.result.SessionMessages = append(state.result.SessionMessages, message)
-		if execution.Failed {
-			continue
-		}
-		notices = append(notices, execution.Notices...)
-		state.answerContract.Add(execution.AnswerContract)
+		outcome.producedEvidence = outcome.producedEvidence || callOutcome.producedEvidence
+		outcome.webAttempted = outcome.webAttempted || callOutcome.webAttempted
+		outcome.webSucceeded = outcome.webSucceeded || callOutcome.webSucceeded
+		notices = append(notices, callNotices...)
 	}
-	if agent.cfg.MaxToolCalls > 0 &&
-		int64(state.result.Evidence.ToolCallCount) >= agent.cfg.MaxToolCalls {
+	if agent.toolCallBudgetExhausted(state) {
 		state.toolBudgetExhausted = true
-		notices = append(
-			notices,
-			fmt.Sprintf(
-				"Tool-call budget exhausted after %d calls. Do not request more tools; summarize the evidence already available.",
-				agent.cfg.MaxToolCalls,
-			),
-		)
+		notices = append(notices, fmt.Sprintf(
+			"Tool-call budget exhausted after %d calls. Do not request more tools; summarize the evidence already available.",
+			agent.cfg.MaxToolCalls,
+		))
 	}
 	// Provider protocols forbid non-tool messages inside a parallel result group.
 	state.messages = appendToolTurnPostlude(state.messages, notices, state.answerContract)
 	return outcome
+}
+
+func (agent *Agent) toolCallBudgetExhausted(state *compiledLoop) bool {
+	return agent.cfg.MaxToolCalls > 0 &&
+		int64(state.result.Evidence.ToolCallCount) >= agent.cfg.MaxToolCalls
+}
+
+func (agent *Agent) runToolCall(
+	state *compiledLoop,
+	call llm.ToolCall,
+) (llm.ToolCall, ToolExecution, error) {
+	state.result.Evidence.ToolCallCount++
+	state.stepSeq++
+	if err := agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
+		StepNo:     state.stepSeq,
+		Kind:       StepKindToolCall,
+		ToolCallID: call.ID,
+		Tool:       call.Function.Name,
+		Args:       call.Function.Arguments,
+		CreatedAt:  time.Now(),
+	}); err != nil {
+		return call, ToolExecution{}, fmt.Errorf("persist tool call %q: %w", call.ID, err)
+	}
+
+	executionCall, admission := agent.admitToolCall(state, call)
+	if admission.Action == toolAdmissionAlreadyAvailable ||
+		admission.Action == toolAdmissionDenyBudget {
+		return executionCall, toolAdmissionExecution(admission), nil
+	}
+	if executionCall.Function.Name == string(delegation.DelegateToolID) {
+		units, _ := state.evidenceLedger.snapshot()
+		state.loopCtx = delegation.WithLiveEvidence(state.loopCtx, units)
+	}
+	execution := agent.executor.ExecuteLimited(
+		state.loopCtx,
+		state.toolSnapshot,
+		executionCall,
+		state.input.ReferenceTypes,
+		state.seenTools,
+		state.runID,
+		agent.cfg.MaxToolResultBytes,
+	)
+	if execution.Failed {
+		return executionCall, execution, nil
+	}
+	conflicts := state.evidenceLedger.add(execution.EvidenceUnits, "tool")
+	if len(conflicts) == 0 {
+		return executionCall, execution, nil
+	}
+	conflictNotices, err := marshalConflictNotices(conflicts)
+	if err != nil {
+		return executionCall, ToolExecution{}, fmt.Errorf(
+			"prepare evidence conflict notice for tool %q: %w",
+			executionCall.Function.Name,
+			err,
+		)
+	}
+	execution.Notices = append(execution.Notices, conflictNotices...)
+	execution.Coverage.Complete = false
+	execution.Coverage.Partial = true
+	return executionCall, execution, nil
+}
+
+func (agent *Agent) applyToolExecution(
+	state *compiledLoop,
+	executionCall llm.ToolCall,
+	execution ToolExecution,
+	priorNotices []string,
+) (toolTurnOutcome, []string, error) {
+	if state.input.OutputMode == agentapi.RunOutputEvidenceWorker &&
+		!execution.Failed && execution.Evidence {
+		appendEvidenceObservations(
+			&state.result.EvidenceObservations, execution, executionCall.Function.Name,
+		)
+	}
+	execution = agent.prepareDelivery(
+		state.runID,
+		state.messages,
+		priorNotices,
+		state.tools,
+		executionCall,
+		state.answerContract,
+		execution,
+	)
+	if execution.Failed {
+		state.result.Evidence.ToolFailureCount++
+	} else if execution.Evidence {
+		state.result.Evidence.ResultCount++
+	}
+
+	acceptedWebEvidence := false
+	if !execution.Failed {
+		acceptedWebEvidence = state.webEvidence.Observe(
+			executionCall, execution.AuthoritativeContent,
+		)
+		if execution.Evidence && execution.DeliveryError == "" {
+			mergeToolReferences(&state.result.References, execution.References)
+		}
+		agent.captureDelegationFlows(state, executionCall, execution)
+	}
+	if execution.Coverage.Partial {
+		state.result.Evidence.PartialResultCount++
+	}
+	state.result.Evidence.OmittedItemCount += execution.Coverage.OmittedItems
+
+	if err := agent.recordToolResult(state, executionCall, execution); err != nil {
+		return toolTurnOutcome{}, nil, err
+	}
+	consumeToolTokens(state, execution.PromptContent)
+	message := toolMessage(
+		executionCall.ID, executionCall.Function.Name, execution.PromptContent,
+	)
+	state.messages = append(state.messages, message)
+	state.result.SessionMessages = append(state.result.SessionMessages, message)
+
+	outcome := toolTurnOutcome{producedEvidence: execution.Evidence}
+	if isWebEvidenceTool(executionCall.Function.Name) {
+		outcome.webAttempted = true
+		outcome.webSucceeded = acceptedWebEvidence
+	}
+	if execution.Failed {
+		return outcome, nil, nil
+	}
+	state.answerContract.Add(execution.AnswerContract)
+	return outcome, execution.Notices, nil
+}
+
+func (agent *Agent) recordToolResult(
+	state *compiledLoop,
+	executionCall llm.ToolCall,
+	execution ToolExecution,
+) error {
+	state.stepSeq++
+	step := newToolResultStep(state.runID, state.stepSeq, executionCall, execution)
+	if err := agent.observer.OnStep(state.runCtx, state.runID, step); err != nil {
+		return fmt.Errorf("persist tool result trace %q: %w", step.TraceID, err)
+	}
+	log.InfofCtx(state.ctx, "[agent] tool result trace persisted: trace_id=%s tool_call_id=%s tool=%s bytes=%d sha256=%s artifact_id=%s failed=%v",
+		step.TraceID, executionCall.ID, executionCall.Function.Name, step.SizeBytes,
+		step.AuthoritativeSHA256, execution.ArtifactID, execution.Failed)
+	if execution.DeliveryError != "" {
+		log.WarnfCtx(state.ctx, "[agent] tool %s delivery failed: trace_id=%s reason=%s bytes=%d",
+			executionCall.Function.Name, step.TraceID, execution.DeliveryError, step.SizeBytes)
+	}
+	return nil
 }
 
 func (agent *Agent) captureDelegationFlows(state *compiledLoop, call llm.ToolCall, execution ToolExecution) {

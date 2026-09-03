@@ -176,49 +176,20 @@ func prepareRunLimitsAt(
 	}
 	deadlineOrigin = deadlineOrigin.UTC()
 	now = now.UTC()
-	if requested.MaxSteps < 0 || requested.MaxToolCalls < 0 ||
-		requested.MaxInputTokens < 0 || requested.MaxContextTokens < 0 ||
-		requested.MaxOutputTokens < 0 || requested.MaxTotalTokens < 0 ||
-		requested.MaxCostMicros < 0 || requested.ParentAnswerReserve < 0 {
-		return agentapi.RunLimits{}, fmt.Errorf("run limits cannot be negative")
+	if err := validateRequestedLimits(definition, requested); err != nil {
+		return agentapi.RunLimits{}, err
 	}
-	if requested.MaxContextTokens > 0 && definition.Budget.ContextTokens > 0 &&
-		requested.MaxContextTokens > int64(definition.Budget.ContextTokens) {
-		return agentapi.RunLimits{}, fmt.Errorf("run context limit exceeds the definition context window")
+	deadline, err := resolveRunDeadline(definition, requested.Deadline, deadlineOrigin, now, answerReserve)
+	if err != nil {
+		return agentapi.RunLimits{}, err
 	}
-	if requested.MaxOutputTokens > int64(definition.Model.MaxOutputTokens) {
-		return agentapi.RunLimits{}, fmt.Errorf("run max_output_tokens exceeds the definition model ceiling")
+	maxSteps, err := resolveRunMaxSteps(definition, requested.MaxSteps)
+	if err != nil {
+		return agentapi.RunLimits{}, err
 	}
-	maxDeadline := deadlineOrigin.Add(definition.Budget.Timeout)
-	deadline := requested.Deadline
-	if deadline.IsZero() {
-		deadline = maxDeadline
-	} else if deadline.After(maxDeadline) {
-		return agentapi.RunLimits{}, fmt.Errorf("run deadline exceeds the definition timeout")
-	}
-	if !deadline.After(now.Add(answerReserve)) {
-		return agentapi.RunLimits{}, fmt.Errorf("run deadline must exceed the answer reserve")
-	}
-	maxSteps := requested.MaxSteps
-	if maxSteps == 0 {
-		maxSteps = definition.Budget.MaxSteps
-	} else if maxSteps > definition.Budget.MaxSteps {
-		return agentapi.RunLimits{}, fmt.Errorf("run max_steps exceeds the definition budget")
-	}
-	maxToolCalls := definition.Budget.MaxToolCalls
-	if requested.MaxToolCalls > 0 {
-		if requested.MaxToolCalls > maxToolCalls {
-			return agentapi.RunLimits{}, fmt.Errorf("run max_tool_calls exceeds the definition budget")
-		}
-		maxToolCalls = requested.MaxToolCalls
-	}
-	if policy.MaxToolCalls > 0 {
-		if policy.MaxToolCalls > definition.Budget.MaxToolCalls {
-			return agentapi.RunLimits{}, fmt.Errorf("run policy max_tool_calls exceeds the definition budget")
-		}
-		if maxToolCalls == 0 || policy.MaxToolCalls < maxToolCalls {
-			maxToolCalls = policy.MaxToolCalls
-		}
+	maxToolCalls, err := resolveRunMaxToolCalls(definition, policy, requested.MaxToolCalls)
+	if err != nil {
+		return agentapi.RunLimits{}, err
 	}
 	return agentapi.RunLimits{
 		Deadline:            deadline,
@@ -233,43 +204,149 @@ func prepareRunLimitsAt(
 	}, nil
 }
 
+func validateRequestedLimits(definition agentapi.Definition, requested agentapi.RunLimits) error {
+	if requested.MaxSteps < 0 || requested.MaxToolCalls < 0 ||
+		requested.MaxInputTokens < 0 || requested.MaxContextTokens < 0 ||
+		requested.MaxOutputTokens < 0 || requested.MaxTotalTokens < 0 ||
+		requested.MaxCostMicros < 0 || requested.ParentAnswerReserve < 0 {
+		return fmt.Errorf("run limits cannot be negative")
+	}
+	if requested.MaxContextTokens > 0 && definition.Budget.ContextTokens > 0 &&
+		requested.MaxContextTokens > int64(definition.Budget.ContextTokens) {
+		return fmt.Errorf("run context limit exceeds the definition context window")
+	}
+	if requested.MaxOutputTokens > int64(definition.Model.MaxOutputTokens) {
+		return fmt.Errorf("run max_output_tokens exceeds the definition model ceiling")
+	}
+	return nil
+}
+
+func resolveRunDeadline(
+	definition agentapi.Definition,
+	requestedDeadline time.Time,
+	deadlineOrigin time.Time,
+	now time.Time,
+	answerReserve time.Duration,
+) (time.Time, error) {
+	maxDeadline := deadlineOrigin.Add(definition.Budget.Timeout)
+	deadline := requestedDeadline
+	if deadline.IsZero() {
+		deadline = maxDeadline
+	} else if deadline.After(maxDeadline) {
+		return time.Time{}, fmt.Errorf("run deadline exceeds the definition timeout")
+	}
+	if !deadline.After(now.Add(answerReserve)) {
+		return time.Time{}, fmt.Errorf("run deadline must exceed the answer reserve")
+	}
+	return deadline, nil
+}
+
+func resolveRunMaxSteps(definition agentapi.Definition, requestedMaxSteps int) (int, error) {
+	maxSteps := requestedMaxSteps
+	if maxSteps == 0 {
+		maxSteps = definition.Budget.MaxSteps
+	} else if maxSteps > definition.Budget.MaxSteps {
+		return 0, fmt.Errorf("run max_steps exceeds the definition budget")
+	}
+	return maxSteps, nil
+}
+
+func resolveRunMaxToolCalls(definition agentapi.Definition, policy agentapi.RunPolicy, requestedMaxToolCalls int64) (int64, error) {
+	maxToolCalls := definition.Budget.MaxToolCalls
+	if requestedMaxToolCalls > 0 {
+		if requestedMaxToolCalls > maxToolCalls {
+			return 0, fmt.Errorf("run max_tool_calls exceeds the definition budget")
+		}
+		maxToolCalls = requestedMaxToolCalls
+	}
+	if policy.MaxToolCalls > 0 {
+		if policy.MaxToolCalls > definition.Budget.MaxToolCalls {
+			return 0, fmt.Errorf("run policy max_tool_calls exceeds the definition budget")
+		}
+		if maxToolCalls == 0 || policy.MaxToolCalls < maxToolCalls {
+			maxToolCalls = policy.MaxToolCalls
+		}
+	}
+	return maxToolCalls, nil
+}
+
 func (runtime *Runtime) resolveExecution(
 	request agentapi.RunRequest,
 ) (agentapi.Definition, llm.ModelParameters, error) {
-	if runtime == nil || runtime.definitions == nil || runtime.registry == nil {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition runtime is unavailable")
-	}
-	if strings.TrimSpace(request.RunID) == "" {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("run_id is required")
-	}
-	if request.Agent.ID == "" || request.Agent.Version <= 0 {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("exact agent id and version are required")
-	}
-	if len(request.DefinitionHash) != sha256.Size*2 || !validHex(request.DefinitionHash) {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition_hash must be a SHA-256 hex digest")
-	}
-	if err := validateDelegationSnapshot(request.Delegation); err != nil {
+	if err := validateExecutionRequest(runtime, request); err != nil {
 		return agentapi.Definition{}, llm.ModelParameters{}, err
 	}
-	definition, err := runtime.definitions.Resolve(request.Agent)
+	definition, err := resolveExecutionDefinition(runtime, request)
 	if err != nil {
 		return agentapi.Definition{}, llm.ModelParameters{}, err
 	}
+	if err := validateExecutionSchemas(runtime, definition, request); err != nil {
+		return agentapi.Definition{}, llm.ModelParameters{}, err
+	}
+	modelParameters, err := prepareExecutionModel(runtime, definition)
+	if err != nil {
+		return agentapi.Definition{}, llm.ModelParameters{}, err
+	}
+	return definition, modelParameters, nil
+}
+
+func validateExecutionRequest(runtime *Runtime, request agentapi.RunRequest) error {
+	if runtime == nil || runtime.definitions == nil || runtime.registry == nil {
+		return fmt.Errorf("definition runtime is unavailable")
+	}
+	if strings.TrimSpace(request.RunID) == "" {
+		return fmt.Errorf("run_id is required")
+	}
+	if request.Agent.ID == "" || request.Agent.Version <= 0 {
+		return fmt.Errorf("exact agent id and version are required")
+	}
+	if len(request.DefinitionHash) != sha256.Size*2 || !validHex(request.DefinitionHash) {
+		return fmt.Errorf("definition_hash must be a SHA-256 hex digest")
+	}
+	if err := validateDelegationSnapshot(request.Delegation); err != nil {
+		return err
+	}
+	return nil
+}
+
+func resolveExecutionDefinition(
+	runtime *Runtime,
+	request agentapi.RunRequest,
+) (agentapi.Definition, error) {
+	definition, err := runtime.definitions.Resolve(request.Agent)
+	if err != nil {
+		return agentapi.Definition{}, err
+	}
 	if definition.ID != request.Agent.ID || definition.Version != request.Agent.Version {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition resolver returned an unpinned version")
+		return agentapi.Definition{}, fmt.Errorf("definition resolver returned an unpinned version")
 	}
 	if definition.ContentHash != request.DefinitionHash {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition hash does not match published version")
+		return agentapi.Definition{}, fmt.Errorf("definition hash does not match published version")
 	}
+	return definition, nil
+}
+
+func validateExecutionSchemas(
+	runtime *Runtime,
+	definition agentapi.Definition,
+	request agentapi.RunRequest,
+) error {
 	if err := runtime.schemas.Validate(definition.InputSchema, request.Input); err != nil {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition input: %w", err)
+		return fmt.Errorf("definition input: %w", err)
 	}
 	if _, err := runtime.schemas.Resolve(definition.OutputSchema); err != nil {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition output schema: %w", err)
+		return fmt.Errorf("definition output schema: %w", err)
 	}
+	return nil
+}
+
+func prepareExecutionModel(
+	runtime *Runtime,
+	definition agentapi.Definition,
+) (llm.ModelParameters, error) {
 	if definition.Model.Provider != runtime.settings.provider ||
 		definition.Model.Model != runtime.settings.model {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf(
+		return llm.ModelParameters{}, fmt.Errorf(
 			"definition model %s/%s does not match configured model %s/%s",
 			definition.Model.Provider, definition.Model.Model,
 			runtime.settings.provider, runtime.settings.model,
@@ -279,9 +356,9 @@ func (runtime *Runtime) resolveExecution(
 		definition.Model.Provider, definition.Model.Parameters,
 	)
 	if err != nil {
-		return agentapi.Definition{}, llm.ModelParameters{}, fmt.Errorf("definition model parameters: %w", err)
+		return llm.ModelParameters{}, fmt.Errorf("definition model parameters: %w", err)
 	}
-	return definition, modelParameters, nil
+	return modelParameters, nil
 }
 
 func schemaHasStructuredRoot(document json.RawMessage) bool {
@@ -357,59 +434,18 @@ func (runtime *Runtime) prepareTools(
 	request agentapi.ToolScope,
 	policy tool.Policy,
 ) (toolSelection, error) {
-	definitionToolIDs, err := canonicalToolIDSet(definition.Tools.VisibleToolIDs)
-	if err != nil {
-		return toolSelection{}, fmt.Errorf("definition tools: %w", err)
-	}
-	requestedToolIDs, err := canonicalToolIDSet(request.VisibleToolIDs)
-	if err != nil {
-		return toolSelection{}, fmt.Errorf("tool scope: %w", err)
-	}
-	requestRestricted := request.RestrictVisible || request.VisibleToolIDs != nil
-	allowedToolIDs, restricted, err := intersectToolIDs(
-		definitionToolIDs,
-		definition.Tools.RestrictVisible || len(definition.Tools.VisibleToolIDs) > 0,
-		requestedToolIDs,
-		requestRestricted,
-	)
+	allowedToolIDs, restricted, err := resolveToolRestriction(definition, request)
 	if err != nil {
 		return toolSelection{}, err
 	}
-	capabilitySnapshot := runtime.registry.Snapshot(tool.Policy{
-		AllowRead: true, AllowWrite: definition.Tools.AllowWrite,
-	})
-	capabilityTools := capabilitySnapshot.Tools()
-	capabilityAvailable := make(map[tool.ToolID]struct{}, len(capabilityTools))
-	for _, candidate := range capabilityTools {
-		capabilityAvailable[candidate.ID] = struct{}{}
+	if err := runtime.validateDefinitionTools(definition); err != nil {
+		return toolSelection{}, err
 	}
-	for _, id := range definition.Tools.VisibleToolIDs {
-		if _, ok := capabilityAvailable[tool.ToolID(id)]; !ok {
-			return toolSelection{}, fmt.Errorf("tool %q is unavailable", id)
-		}
+	if err := runtime.validateRequestedTools(request, policy); err != nil {
+		return toolSelection{}, err
 	}
-	baseSnapshot := runtime.registry.Snapshot(policy)
-	baseTools := baseSnapshot.Tools()
-	baseAvailable := make(map[tool.ToolID]struct{}, len(baseTools))
-	for _, candidate := range baseTools {
-		baseAvailable[candidate.ID] = struct{}{}
-	}
-	for _, id := range request.VisibleToolIDs {
-		if _, ok := baseAvailable[tool.ToolID(id)]; !ok {
-			return toolSelection{}, fmt.Errorf("requested tool %q is unavailable", id)
-		}
-	}
-	toolSnapshot := baseSnapshot
-	if restricted {
-		toolSnapshot = baseSnapshot.Select(allowedToolIDs)
-	}
-	visibleTools := toolSnapshot.Tools()
-	visibleToolIDs := make([]string, 0, len(visibleTools))
-	available := make(map[tool.ToolID]struct{}, len(visibleTools))
-	for _, candidate := range visibleTools {
-		visibleToolIDs = append(visibleToolIDs, string(candidate.ID))
-		available[candidate.ID] = struct{}{}
-	}
+	toolSnapshot := runtime.buildToolSnapshot(policy, allowedToolIDs, restricted)
+	visibleToolIDs, available := collectVisibleTools(toolSnapshot)
 	offeredTools, err := canonicalToolIDSet(request.OfferedToolIDs)
 	if err != nil {
 		return toolSelection{}, fmt.Errorf("offered tools: %w", err)
@@ -426,6 +462,82 @@ func (runtime *Runtime) prepareTools(
 		offeredIDs:   offeredTools,
 		pruneApplied: request.PruneApplied,
 	}, nil
+}
+
+func resolveToolRestriction(
+	definition agentapi.Definition,
+	request agentapi.ToolScope,
+) (map[tool.ToolID]struct{}, bool, error) {
+	definitionToolIDs, err := canonicalToolIDSet(definition.Tools.VisibleToolIDs)
+	if err != nil {
+		return nil, false, fmt.Errorf("definition tools: %w", err)
+	}
+	requestedToolIDs, err := canonicalToolIDSet(request.VisibleToolIDs)
+	if err != nil {
+		return nil, false, fmt.Errorf("tool scope: %w", err)
+	}
+	requestRestricted := request.RestrictVisible || request.VisibleToolIDs != nil
+	return intersectToolIDs(
+		definitionToolIDs,
+		definition.Tools.RestrictVisible || len(definition.Tools.VisibleToolIDs) > 0,
+		requestedToolIDs,
+		requestRestricted,
+	)
+}
+
+func (runtime *Runtime) validateDefinitionTools(definition agentapi.Definition) error {
+	capabilitySnapshot := runtime.registry.Snapshot(tool.Policy{
+		AllowRead: true, AllowWrite: definition.Tools.AllowWrite,
+	})
+	capabilityAvailable := toolIDSet(capabilitySnapshot.Tools())
+	for _, id := range definition.Tools.VisibleToolIDs {
+		if _, ok := capabilityAvailable[tool.ToolID(id)]; !ok {
+			return fmt.Errorf("tool %q is unavailable", id)
+		}
+	}
+	return nil
+}
+
+func (runtime *Runtime) validateRequestedTools(request agentapi.ToolScope, policy tool.Policy) error {
+	baseSnapshot := runtime.registry.Snapshot(policy)
+	baseAvailable := toolIDSet(baseSnapshot.Tools())
+	for _, id := range request.VisibleToolIDs {
+		if _, ok := baseAvailable[tool.ToolID(id)]; !ok {
+			return fmt.Errorf("requested tool %q is unavailable", id)
+		}
+	}
+	return nil
+}
+
+func (runtime *Runtime) buildToolSnapshot(
+	policy tool.Policy,
+	allowedToolIDs map[tool.ToolID]struct{},
+	restricted bool,
+) tool.Snapshot {
+	baseSnapshot := runtime.registry.Snapshot(policy)
+	if restricted {
+		return baseSnapshot.Select(allowedToolIDs)
+	}
+	return baseSnapshot
+}
+
+func toolIDSet(tools []tool.Tool) map[tool.ToolID]struct{} {
+	set := make(map[tool.ToolID]struct{}, len(tools))
+	for _, candidate := range tools {
+		set[candidate.ID] = struct{}{}
+	}
+	return set
+}
+
+func collectVisibleTools(snapshot tool.Snapshot) ([]string, map[tool.ToolID]struct{}) {
+	visibleTools := snapshot.Tools()
+	visibleToolIDs := make([]string, 0, len(visibleTools))
+	available := make(map[tool.ToolID]struct{}, len(visibleTools))
+	for _, candidate := range visibleTools {
+		visibleToolIDs = append(visibleToolIDs, string(candidate.ID))
+		available[candidate.ID] = struct{}{}
+	}
+	return visibleToolIDs, available
 }
 
 func permissionSet(policy agentapi.PermissionPolicy) (map[string]struct{}, error) {
@@ -559,47 +671,8 @@ func validateMessages(messages []agentapi.Message) error {
 
 func validateContext(blocks []agentapi.ContextBlock) (string, error) {
 	for index, block := range blocks {
-		if block.Source == "" || block.Title == "" || block.Content == "" {
-			return "", fmt.Errorf("context block %d source, title, and content are required", index)
-		}
-		if len(block.ContentHash) != sha256.Size*2 || !validHex(block.ContentHash) {
-			return "", fmt.Errorf("context block %d content_hash is invalid", index)
-		}
-		if hashString(block.Content) != block.ContentHash {
-			return "", fmt.Errorf("context block %d content_hash does not match content", index)
-		}
-		for unitIndex, unit := range block.Evidence {
-			if err := validateEvidenceUnit(index, fmt.Sprintf("evidence unit %d", unitIndex), unit); err != nil {
-				return "", err
-			}
-		}
-		for conflictIndex, conflict := range block.EvidenceConflicts {
-			label := fmt.Sprintf("evidence conflict %d", conflictIndex)
-			identity := conflict.Identity
-			if identity.SourceKind == "" ||
-				identity.SourceKind != strings.TrimSpace(identity.SourceKind) ||
-				identity.Target == "" ||
-				identity.Target != strings.TrimSpace(identity.Target) {
-				return "", fmt.Errorf(
-					"context block %d %s identity source_kind and target are required and canonical",
-					index,
-					label,
-				)
-			}
-			if err := validateEvidenceUnit(index, label+" current", conflict.Current); err != nil {
-				return "", err
-			}
-			if err := validateEvidenceUnit(index, label+" incoming", conflict.Incoming); err != nil {
-				return "", err
-			}
-			if !evidenceIdentityMatches(identity, conflict.Current) ||
-				!evidenceIdentityMatches(identity, conflict.Incoming) {
-				return "", fmt.Errorf(
-					"context block %d %s identity does not match current and incoming evidence",
-					index,
-					label,
-				)
-			}
+		if err := validateContextBlock(index, block); err != nil {
+			return "", err
 		}
 	}
 	raw, err := json.Marshal(blocks)
@@ -607,6 +680,59 @@ func validateContext(blocks []agentapi.ContextBlock) (string, error) {
 		return "", fmt.Errorf("marshal context snapshot: %w", err)
 	}
 	return hashBytes(raw), nil
+}
+
+func validateContextBlock(index int, block agentapi.ContextBlock) error {
+	if block.Source == "" || block.Title == "" || block.Content == "" {
+		return fmt.Errorf("context block %d source, title, and content are required", index)
+	}
+	if len(block.ContentHash) != sha256.Size*2 || !validHex(block.ContentHash) {
+		return fmt.Errorf("context block %d content_hash is invalid", index)
+	}
+	if hashString(block.Content) != block.ContentHash {
+		return fmt.Errorf("context block %d content_hash does not match content", index)
+	}
+	for unitIndex, unit := range block.Evidence {
+		if err := validateEvidenceUnit(index, fmt.Sprintf("evidence unit %d", unitIndex), unit); err != nil {
+			return err
+		}
+	}
+	for conflictIndex, conflict := range block.EvidenceConflicts {
+		if err := validateContextConflict(index, conflictIndex, conflict); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateContextConflict(index, conflictIndex int, conflict agentapi.EvidenceConflict) error {
+	label := fmt.Sprintf("evidence conflict %d", conflictIndex)
+	identity := conflict.Identity
+	if identity.SourceKind == "" ||
+		identity.SourceKind != strings.TrimSpace(identity.SourceKind) ||
+		identity.Target == "" ||
+		identity.Target != strings.TrimSpace(identity.Target) {
+		return fmt.Errorf(
+			"context block %d %s identity source_kind and target are required and canonical",
+			index,
+			label,
+		)
+	}
+	if err := validateEvidenceUnit(index, label+" current", conflict.Current); err != nil {
+		return err
+	}
+	if err := validateEvidenceUnit(index, label+" incoming", conflict.Incoming); err != nil {
+		return err
+	}
+	if !evidenceIdentityMatches(identity, conflict.Current) ||
+		!evidenceIdentityMatches(identity, conflict.Incoming) {
+		return fmt.Errorf(
+			"context block %d %s identity does not match current and incoming evidence",
+			index,
+			label,
+		)
+	}
+	return nil
 }
 
 func validateEvidenceUnit(

@@ -119,17 +119,23 @@ func TestServicePersistsSuccessfulWorkflowLifecycle(t *testing.T) {
 func TestServicePersistsNoAffordableTaskConvergence(t *testing.T) {
 	schemas := testSchemaRegistry(t)
 	catalog := NewCatalog(schemas, testAgentDefinitions(t))
-	definition := singleNodeWorkflow()
+	definition := testWorkflow()
+	definition.Budget.MaxParallelism = 1
 	definition.Budget.MaxInputTokens = 5
-	definition.Nodes[0].Budget.MaxInputTokens = 10
 	if err := catalog.Publish([]Definition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	persistence := &recordingWorkflowPersistence{}
+	executor := &usageWorkflowExecutor{
+		usage: map[string]Usage{
+			"review.a": {InputTokens: 5, TotalTokens: 5},
+			"review.b": {InputTokens: 5, TotalTokens: 5},
+		},
+	}
 	service, err := NewService(
 		catalog,
 		persistence,
-		NewOrchestrator(schemas, staticOutputExecutor{}, nil),
+		NewOrchestrator(schemas, executor, nil),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -139,15 +145,18 @@ func TestServicePersistsNoAffordableTaskConvergence(t *testing.T) {
 		traces = append(traces, event)
 	})
 	result, err := service.Execute(ctx, ExecuteRequest{
-		RunID:    "workflow_no_affordable_task",
-		Workflow: DefinitionRef{ID: definition.ID, Version: definition.Version},
-		Input:    json.RawMessage(`{"subject":"x"}`),
+		RunID:               "workflow_no_affordable_task",
+		Workflow:            DefinitionRef{ID: definition.ID, Version: definition.Version},
+		Input:               json.RawMessage(`{"subject":"x"}`),
+		ActorPermissions:    definition.Permissions,
+		ScenarioPermissions: definition.Permissions,
 	})
 	if !errors.Is(err, ErrNoAffordableTask) {
 		t.Fatalf("Execute error = %v, want no affordable task", err)
 	}
 	if result.RunID != "workflow_no_affordable_task" ||
-		result.StopReason != StopNoAffordableTask {
+		result.StopReason != StopNoAffordableTask ||
+		result.Usage.InputTokens != 5 {
 		t.Fatalf("result = %+v", result)
 	}
 	var converged *domain.EvaluationTrace
@@ -166,7 +175,7 @@ func TestServicePersistsNoAffordableTaskConvergence(t *testing.T) {
 	}
 	persistence.mu.Lock()
 	defer persistence.mu.Unlock()
-	if len(persistence.startedNodes) != 0 ||
+	if len(persistence.startedNodes) != 1 ||
 		persistence.finishedStatus != RunFailed ||
 		persistence.finishedError != "no_affordable_task" ||
 		persistence.finishedStopReason != StopNoAffordableTask {

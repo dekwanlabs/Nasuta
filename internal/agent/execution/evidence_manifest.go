@@ -61,6 +61,14 @@ func modelFacingToolContent(
 }
 
 func evidenceManifest(units []tool.EvidenceUnit, maxBytes int) string {
+	encoded := encodeEvidenceManifestItems(units)
+	if len(encoded) == 0 {
+		return ""
+	}
+	return renderEvidenceManifest(encoded, maxBytes)
+}
+
+func encodeEvidenceManifestItems(units []tool.EvidenceUnit) [][]byte {
 	expanded := canonicalevidence.Expand(units)
 	encoded := make([][]byte, 0, len(expanded))
 	seen := make(map[string]struct{}, len(expanded))
@@ -87,10 +95,10 @@ func evidenceManifest(units []tool.EvidenceUnit, maxBytes int) string {
 		}
 		encoded = append(encoded, item)
 	}
-	if len(encoded) == 0 {
-		return ""
-	}
+	return encoded
+}
 
+func renderEvidenceManifest(encoded [][]byte, maxBytes int) string {
 	const prefix = `{"_nasuta_evidence_manifest":{"version":1,"items":[`
 	const suffix = `]}}`
 	var buffer bytes.Buffer

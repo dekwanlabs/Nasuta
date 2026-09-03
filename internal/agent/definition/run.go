@@ -304,79 +304,104 @@ func (run *activeRun) emitDelegationAdoptions(
 }
 
 func (run *activeRun) Finish(runError *agentapi.RunError) error {
-	run.mu.Lock()
-	if run.finished {
-		run.mu.Unlock()
-		return fmt.Errorf("definition run %q is already finished", run.start.RunID)
+	outcome, err := run.prepareFinishOutcome(runError)
+	if err != nil {
+		return err
 	}
-	if !run.executed && runError == nil {
-		run.mu.Unlock()
-		return fmt.Errorf("definition run %q has not executed", run.start.RunID)
-	}
-	outcome := run.outcome
-	if !run.outcomeSet {
-		outcome = mergePreparationOutcome(
-			outcome,
-			run.preparationEvidence,
-		)
-	}
-	if runError != nil {
-		code := strings.TrimSpace(runError.Code)
-		if code == "" {
-			code = "scenario_failed"
-		}
-		message := strings.TrimSpace(runError.Message)
-		if message == "" {
-			message = code
-		}
-		if run.start.Policy.RedactSensitive {
-			message = platform.RedactSensitiveText(message)
-		}
-		outcome.Status = agentrun.StatusFailed
-		outcome.ErrorCode = code
-		outcome.Err = errors.New(message)
-		if outcome.Evidence.Status == "" {
-			outcome.Evidence.Status = agentrun.EvidenceUnavailable
-		}
-	}
-	run.finished = true
-	run.mu.Unlock()
 	if run.ownsTrace {
 		run.trace.Close()
 	}
-	completedByLease := false
-	fencedCompletion := false
-	var completionErr error
-	if run.runtime.runStore != nil && run.runtime.runStore.DurableBudgetEnabled() {
-		if root, ok := run.budget.(interface{ LeaseInfo() (string, int64, error) }); ok {
-			fencedCompletion = true
-			owner, fence, leaseErr := root.LeaseInfo()
-			if leaseErr != nil {
-				completionErr = fmt.Errorf("read durable run lease: %w", leaseErr)
-			} else if completeErr := run.runtime.runStore.CompleteFenced(run.start.RunID, owner, fence, outcome); completeErr != nil {
-				// Never fall back to the unfenced Hub.Complete path. A stale
-				// owner must not publish or overwrite a result after reclamation.
-				completionErr = fmt.Errorf("persist fenced run outcome: %w", completeErr)
-			} else {
-				completedByLease = true
-			}
-		}
+	completionErr := run.persistFinishOutcome(outcome)
+	releaseErr := run.releaseFinishLease()
+	return errors.Join(completionErr, releaseErr)
+}
+
+// prepareFinishOutcome validates the run state, finalizes the outcome (merging
+// preparation evidence and applying runError), and marks the run finished.
+func (run *activeRun) prepareFinishOutcome(runError *agentapi.RunError) (agentrun.Outcome, error) {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if run.finished {
+		return agentrun.Outcome{}, fmt.Errorf("definition run %q is already finished", run.start.RunID)
 	}
+	if !run.executed && runError == nil {
+		return agentrun.Outcome{}, fmt.Errorf("definition run %q has not executed", run.start.RunID)
+	}
+	outcome := run.outcome
+	if !run.outcomeSet {
+		outcome = mergePreparationOutcome(outcome, run.preparationEvidence)
+	}
+	if runError != nil {
+		outcome = applyRunError(outcome, runError, run.start.Policy.RedactSensitive)
+	}
+	run.finished = true
+	return outcome, nil
+}
+
+func applyRunError(outcome agentrun.Outcome, runError *agentapi.RunError, redact bool) agentrun.Outcome {
+	code := strings.TrimSpace(runError.Code)
+	if code == "" {
+		code = "scenario_failed"
+	}
+	message := strings.TrimSpace(runError.Message)
+	if message == "" {
+		message = code
+	}
+	if redact {
+		message = platform.RedactSensitiveText(message)
+	}
+	outcome.Status = agentrun.StatusFailed
+	outcome.ErrorCode = code
+	outcome.Err = errors.New(message)
+	if outcome.Evidence.Status == "" {
+		outcome.Evidence.Status = agentrun.EvidenceUnavailable
+	}
+	return outcome
+}
+
+// persistFinishOutcome publishes the outcome, preferring the fenced durable
+// completion path when the budget is durable and exposes lease information.
+func (run *activeRun) persistFinishOutcome(outcome agentrun.Outcome) error {
+	completedByLease, fencedCompletion, completionErr := run.completeFencedIfDurable(outcome)
 	if completedByLease {
 		run.runtime.hub.ProjectTerminal(run.start.RunID, outcome)
 	} else if !fencedCompletion {
 		run.runtime.hub.Complete(run.start.RunID, outcome)
 	}
+	return completionErr
+}
+
+func (run *activeRun) completeFencedIfDurable(outcome agentrun.Outcome) (completedByLease, fencedCompletion bool, completionErr error) {
+	if run.runtime.runStore == nil || !run.runtime.runStore.DurableBudgetEnabled() {
+		return false, false, nil
+	}
+	root, ok := run.budget.(interface{ LeaseInfo() (string, int64, error) })
+	if !ok {
+		return false, false, nil
+	}
+	fencedCompletion = true
+	owner, fence, leaseErr := root.LeaseInfo()
+	if leaseErr != nil {
+		return false, fencedCompletion, fmt.Errorf("read durable run lease: %w", leaseErr)
+	}
+	if completeErr := run.runtime.runStore.CompleteFenced(run.start.RunID, owner, fence, outcome); completeErr != nil {
+		// Never fall back to the unfenced Hub.Complete path. A stale
+		// owner must not publish or overwrite a result after reclamation.
+		return false, fencedCompletion, fmt.Errorf("persist fenced run outcome: %w", completeErr)
+	}
+	return true, fencedCompletion, nil
+}
+
+func (run *activeRun) releaseFinishLease() error {
 	if lease, ok := run.budget.(interface{ Close() }); ok {
 		lease.Close()
 	}
-	var releaseErr error
 	if lease, ok := run.budget.(interface{ ReleaseLease() error }); ok {
 		if err := lease.ReleaseLease(); err != nil {
-			releaseErr = fmt.Errorf("release durable budget lease for run %q: %w", run.start.RunID, err)
+			return fmt.Errorf("release durable budget lease for run %q: %w", run.start.RunID, err)
 		}
 	}
-	return errors.Join(completionErr, releaseErr)
+	return nil
 }
 
 func (run *activeRun) setOutcome(outcome agentrun.Outcome) {

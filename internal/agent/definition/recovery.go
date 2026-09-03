@@ -143,13 +143,22 @@ func parseRunStartedAt(value string) (time.Time, error) {
 	return startedAt.UTC(), nil
 }
 
+type parentRecoveryPayload struct {
+	RunID           string `json:"run_id"`
+	CheckpointStep  int    `json:"checkpoint_step"`
+	CheckpointPhase string `json:"checkpoint_phase"`
+	LeaseFence      int64  `json:"lease_fence"`
+}
+
+type parentRecoveryPlan struct {
+	request    *agentapi.RunRequest
+	execution  preparedExecution
+	input      execution.Input
+	checkpoint agentrun.LogicalCheckpoint
+}
+
 func (runtime *Runtime) resumeParent(ctx context.Context, item agentrun.WorkItem) error {
-	var payload struct {
-		RunID           string `json:"run_id"`
-		CheckpointStep  int    `json:"checkpoint_step"`
-		CheckpointPhase string `json:"checkpoint_phase"`
-		LeaseFence      int64  `json:"lease_fence"`
-	}
+	var payload parentRecoveryPayload
 	if err := json.Unmarshal(item.Payload, &payload); err != nil {
 		return fmt.Errorf("decode parent recovery work: %w", err)
 	}
@@ -173,47 +182,40 @@ func (runtime *Runtime) resumeParent(ctx context.Context, item agentrun.WorkItem
 		return cause
 	}
 
-	detail, err := runtime.runStore.Get(payload.RunID)
+	plan, err := runtime.loadParentRecoveryPlan(ctx, payload, failBeforeExecution)
 	if err != nil {
-		return failBeforeExecution("recovery_load_failed", fmt.Errorf("load recovered run: %w", err))
+		return err
 	}
-	checkpoint, err := runtime.runStore.GetLogicalCheckpoint(ctx, payload.RunID)
+	return runtime.executeRecoveredParent(ctx, payload.RunID, plan, failBeforeExecution)
+}
+
+// loadParentRecoveryPlan validates the recovery payload against the persisted
+// run and checkpoint, then re-prepares the execution plan with the authoritative
+// limits and deadline.
+func (runtime *Runtime) loadParentRecoveryPlan(
+	ctx context.Context,
+	payload parentRecoveryPayload,
+	failBeforeExecution func(code string, cause error) error,
+) (parentRecoveryPlan, error) {
+	detail, err := runtime.loadRecoveryRunDetail(payload, failBeforeExecution)
 	if err != nil {
-		return failBeforeExecution("checkpoint_load_failed", fmt.Errorf("load logical checkpoint: %w", err))
+		return parentRecoveryPlan{}, err
 	}
-	if (payload.CheckpointStep != 0 && checkpoint.StepNo != payload.CheckpointStep) ||
-		(payload.CheckpointPhase != "" && checkpoint.Phase != payload.CheckpointPhase) {
-		return failBeforeExecution("checkpoint_changed", fmt.Errorf("recovery work checkpoint does not match persisted checkpoint"))
-	}
-	state, err := execution.UnmarshalLogicalLoopState(checkpoint.State)
+	checkpoint, state, err := runtime.loadRecoveryCheckpoint(ctx, payload, failBeforeExecution)
 	if err != nil {
-		return failBeforeExecution("checkpoint_invalid", fmt.Errorf("decode logical checkpoint: %w", err))
+		return parentRecoveryPlan{}, err
 	}
-	request := state.Request
-	if request == nil {
-		request = state.Input.OriginalRequest
+	request, err := resolveRecoveryRequest(payload, detail, checkpoint, state, failBeforeExecution)
+	if err != nil {
+		return parentRecoveryPlan{}, err
 	}
-	if request == nil {
-		return failBeforeExecution("checkpoint_request_missing", fmt.Errorf("logical checkpoint does not contain replay request"))
-	}
-	if request.RunID != payload.RunID || detail.DefinitionHash != request.DefinitionHash || detail.AgentID != request.Agent.ID {
-		return failBeforeExecution("checkpoint_identity_mismatch", fmt.Errorf("logical checkpoint identity does not match persisted run"))
-	}
-	if checkpoint.InputHash != "" && checkpoint.InputHash != hashBytes(request.Input) {
-		return failBeforeExecution("checkpoint_input_mismatch", fmt.Errorf("logical checkpoint input hash mismatch"))
-	}
-	// The persisted, resolved limits and StartedAt are authoritative. In
-	// particular, recovery must not recompute deadline as recovery-now plus
-	// the definition timeout. An expired run is fenced failed before any model
-	// call; a live run gets only the original deadline's remaining time.
-	request.Limits = detail.RunLimits
 	startedAt, err := parseRunStartedAt(detail.StartedAt)
 	if err != nil {
-		return failBeforeExecution("recovery_started_at_invalid", err)
+		return parentRecoveryPlan{}, failBeforeExecution("recovery_started_at_invalid", err)
 	}
 	now := time.Now().UTC()
 	if !request.Limits.Deadline.After(now) {
-		return failBeforeExecution("deadline_exceeded", fmt.Errorf("recovered run deadline %s has expired", request.Limits.Deadline.UTC().Format(time.RFC3339Nano)))
+		return parentRecoveryPlan{}, failBeforeExecution("deadline_exceeded", fmt.Errorf("recovered run deadline %s has expired", request.Limits.Deadline.UTC().Format(time.RFC3339Nano)))
 	}
 	executionPlan, err := runtime.prepareAt(*request, startedAt, now)
 	if err != nil {
@@ -221,23 +223,98 @@ func (runtime *Runtime) resumeParent(ctx context.Context, item agentrun.WorkItem
 		if !request.Limits.Deadline.After(time.Now().UTC()) {
 			code = "deadline_exceeded"
 		}
-		return failBeforeExecution(code, fmt.Errorf("re-prepare recovered run: %w", err))
+		return parentRecoveryPlan{}, failBeforeExecution(code, fmt.Errorf("re-prepare recovered run: %w", err))
 	}
-	budgetGate, err := runtime.runStore.AttachDurableBudgetContext(ctx, payload.RunID, executionPlan.snapshot.Limits)
+	return parentRecoveryPlan{
+		request:    request,
+		execution:  executionPlan,
+		input:      state.Input,
+		checkpoint: checkpoint,
+	}, nil
+}
+
+func (runtime *Runtime) loadRecoveryRunDetail(
+	payload parentRecoveryPayload,
+	failBeforeExecution func(code string, cause error) error,
+) (*agentrun.Detail, error) {
+	detail, err := runtime.runStore.Get(payload.RunID)
+	if err != nil {
+		return nil, failBeforeExecution("recovery_load_failed", fmt.Errorf("load recovered run: %w", err))
+	}
+	return detail, nil
+}
+
+func (runtime *Runtime) loadRecoveryCheckpoint(
+	ctx context.Context,
+	payload parentRecoveryPayload,
+	failBeforeExecution func(code string, cause error) error,
+) (agentrun.LogicalCheckpoint, execution.LogicalLoopState, error) {
+	checkpoint, err := runtime.runStore.GetLogicalCheckpoint(ctx, payload.RunID)
+	if err != nil {
+		return agentrun.LogicalCheckpoint{}, execution.LogicalLoopState{}, failBeforeExecution("checkpoint_load_failed", fmt.Errorf("load logical checkpoint: %w", err))
+	}
+	if (payload.CheckpointStep != 0 && checkpoint.StepNo != payload.CheckpointStep) ||
+		(payload.CheckpointPhase != "" && checkpoint.Phase != payload.CheckpointPhase) {
+		return agentrun.LogicalCheckpoint{}, execution.LogicalLoopState{}, failBeforeExecution("checkpoint_changed", fmt.Errorf("recovery work checkpoint does not match persisted checkpoint"))
+	}
+	state, err := execution.UnmarshalLogicalLoopState(checkpoint.State)
+	if err != nil {
+		return agentrun.LogicalCheckpoint{}, execution.LogicalLoopState{}, failBeforeExecution("checkpoint_invalid", fmt.Errorf("decode logical checkpoint: %w", err))
+	}
+	return checkpoint, state, nil
+}
+
+func resolveRecoveryRequest(
+	payload parentRecoveryPayload,
+	detail *agentrun.Detail,
+	checkpoint agentrun.LogicalCheckpoint,
+	state execution.LogicalLoopState,
+	failBeforeExecution func(code string, cause error) error,
+) (*agentapi.RunRequest, error) {
+	request := state.Request
+	if request == nil {
+		request = state.Input.OriginalRequest
+	}
+	if request == nil {
+		return nil, failBeforeExecution("checkpoint_request_missing", fmt.Errorf("logical checkpoint does not contain replay request"))
+	}
+	if request.RunID != payload.RunID || detail.DefinitionHash != request.DefinitionHash || detail.AgentID != request.Agent.ID {
+		return nil, failBeforeExecution("checkpoint_identity_mismatch", fmt.Errorf("logical checkpoint identity does not match persisted run"))
+	}
+	if checkpoint.InputHash != "" && checkpoint.InputHash != hashBytes(request.Input) {
+		return nil, failBeforeExecution("checkpoint_input_mismatch", fmt.Errorf("logical checkpoint input hash mismatch"))
+	}
+	// The persisted, resolved limits and StartedAt are authoritative. In
+	// particular, recovery must not recompute deadline as recovery-now plus
+	// the definition timeout. An expired run is fenced failed before any model
+	// call; a live run gets only the original deadline's remaining time.
+	request.Limits = detail.RunLimits
+	return request, nil
+}
+
+// executeRecoveredParent attaches the durable budget lease and replays the
+// prepared execution plan against the persisted logical-loop state.
+func (runtime *Runtime) executeRecoveredParent(
+	ctx context.Context,
+	runID string,
+	plan parentRecoveryPlan,
+	failBeforeExecution func(code string, cause error) error,
+) error {
+	budgetGate, err := runtime.runStore.AttachDurableBudgetContext(ctx, runID, plan.execution.snapshot.Limits)
 	if err != nil {
 		return failBeforeExecution("recovery_lease_lost", fmt.Errorf("attach recovered budget lease: %w", err))
 	}
 	trace, ownsTrace := beginExecutionTrace(ctx)
 	run := &activeRun{
-		runtime: runtime, start: runStart(*request), execution: executionPlan,
+		runtime: runtime, start: runStart(*plan.request), execution: plan.execution,
 		recorder: &usageRecorder{store: runtime.usageStore,
-			inputPriceMicrosPerMillionTokens:  executionPlan.definition.Model.InputPriceMicrosPerMillionTokens,
-			outputPriceMicrosPerMillionTokens: executionPlan.definition.Model.OutputPriceMicrosPerMillionTokens,
-			limits:                            executionPlan.snapshot.Limits},
+			inputPriceMicrosPerMillionTokens:  plan.execution.definition.Model.InputPriceMicrosPerMillionTokens,
+			outputPriceMicrosPerMillionTokens: plan.execution.definition.Model.OutputPriceMicrosPerMillionTokens,
+			limits:                            plan.execution.snapshot.Limits},
 		budget: budgetGate, trace: trace, ownsTrace: ownsTrace, executed: true,
 	}
 	runCtx := run.Context(ctx)
-	_, runErr := run.executePrepared(runCtx, *request, executionPlan, state.Input, &checkpoint)
+	_, runErr := run.executePrepared(runCtx, *plan.request, plan.execution, plan.input, &plan.checkpoint)
 	if runErr != nil {
 		finishErr := run.Finish(&agentapi.RunError{Code: runtimeErrorCode(runErr), Message: runErr.Error()})
 		return errors.Join(runErr, finishErr)

@@ -303,6 +303,11 @@ func (executor *Executor) prepareVerificationWithObservations(
 	return task, "", nil
 }
 
+type verificationClaimCandidate struct {
+	claim      agentapi.DelegationVerificationClaim
+	conflicted bool
+}
+
 func buildVerificationRequest(
 	question string,
 	reports []agentapi.DelegationReport,
@@ -311,22 +316,37 @@ func buildVerificationRequest(
 	contextIndex map[string]agentapi.ContextBlock,
 	observations []agentapi.EvidenceObservation,
 ) agentapi.DelegationVerificationRequest {
-	type claimCandidate struct {
-		claim      agentapi.DelegationVerificationClaim
-		conflicted bool
+	candidates := buildVerificationClaimCandidates(reports, validation.Conflicts)
+	claims := selectVerificationClaims(candidates)
+	selected, evidenceRefs := collectVerificationEvidence(claims, evidence)
+	conflicts := selectVerificationConflicts(validation.Conflicts, selected)
+	return agentapi.DelegationVerificationRequest{
+		Question:         truncateText(question, 4000),
+		DecisionQuestion: "Which claims are supported, contradicted, distinct, or unresolved by the cited evidence?",
+		Claims:           claims,
+		Conflicts:        conflicts,
+		EvidenceRefs:     evidenceRefs,
+		EvidenceLookup:   buildEvidenceLookup(evidenceRefs, evidence, contextIndex, observations),
+		Reasons:          canonicalStrings(validation.VerificationReasons),
 	}
+}
+
+func buildVerificationClaimCandidates(
+	reports []agentapi.DelegationReport,
+	conflicts []agentapi.DelegationValidationConflict,
+) []verificationClaimCandidate {
 	conflicted := make(map[string]struct{})
-	for _, conflict := range validation.Conflicts {
+	for _, conflict := range conflicts {
 		for _, claimID := range conflict.ClaimIDs {
 			conflicted[claimID] = struct{}{}
 		}
 	}
-	candidates := make([]claimCandidate, 0)
+	candidates := make([]verificationClaimCandidate, 0)
 	for _, report := range reports {
 		for _, finding := range report.Findings {
 			id := report.ReportID + "/" + finding.ID
 			_, hasConflict := conflicted[id]
-			candidates = append(candidates, claimCandidate{
+			candidates = append(candidates, verificationClaimCandidate{
 				claim: agentapi.DelegationVerificationClaim{
 					ID: id,
 					Statement: truncateText(
@@ -340,12 +360,18 @@ func buildVerificationRequest(
 			})
 		}
 	}
+	return candidates
+}
+
+func selectVerificationClaims(
+	candidates []verificationClaimCandidate,
+) []agentapi.DelegationVerificationClaim {
 	claims := make([]agentapi.DelegationVerificationClaim, 0, min(
 		len(candidates),
 		maxVerificationClaims,
 	))
 	seen := make(map[string]struct{}, len(candidates))
-	appendClaims := func(selectClaim func(claimCandidate) bool) {
+	appendClaims := func(selectClaim func(verificationClaimCandidate) bool) {
 		for _, candidate := range candidates {
 			if len(claims) >= maxVerificationClaims ||
 				!selectClaim(candidate) {
@@ -358,10 +384,16 @@ func buildVerificationRequest(
 			claims = append(claims, candidate.claim)
 		}
 	}
-	appendClaims(func(candidate claimCandidate) bool { return candidate.conflicted })
-	appendClaims(func(candidate claimCandidate) bool { return candidate.claim.Critical })
-	appendClaims(func(claimCandidate) bool { return true })
+	appendClaims(func(candidate verificationClaimCandidate) bool { return candidate.conflicted })
+	appendClaims(func(candidate verificationClaimCandidate) bool { return candidate.claim.Critical })
+	appendClaims(func(verificationClaimCandidate) bool { return true })
+	return claims
+}
 
+func collectVerificationEvidence(
+	claims []agentapi.DelegationVerificationClaim,
+	evidence map[string]tool.EvidenceUnit,
+) (map[string]struct{}, []string) {
 	selected := make(map[string]struct{}, len(claims))
 	var evidenceRefs []string
 	for _, claim := range claims {
@@ -376,11 +408,18 @@ func buildVerificationRequest(
 	if len(evidenceRefs) > maxVerificationEvidenceRefs {
 		evidenceRefs = evidenceRefs[:maxVerificationEvidenceRefs]
 	}
-	conflicts := make([]agentapi.DelegationValidationConflict, 0, min(
-		len(validation.Conflicts),
+	return selected, evidenceRefs
+}
+
+func selectVerificationConflicts(
+	conflicts []agentapi.DelegationValidationConflict,
+	selected map[string]struct{},
+) []agentapi.DelegationValidationConflict {
+	out := make([]agentapi.DelegationValidationConflict, 0, min(
+		len(conflicts),
 		maxVerificationConflicts,
 	))
-	for _, conflict := range validation.Conflicts {
+	for _, conflict := range conflicts {
 		include := true
 		for _, claimID := range conflict.ClaimIDs {
 			if _, ok := selected[claimID]; !ok {
@@ -392,20 +431,12 @@ func buildVerificationRequest(
 			continue
 		}
 		conflict.ClaimIDs = append([]string(nil), conflict.ClaimIDs...)
-		conflicts = append(conflicts, conflict)
-		if len(conflicts) >= maxVerificationConflicts {
+		out = append(out, conflict)
+		if len(out) >= maxVerificationConflicts {
 			break
 		}
 	}
-	return agentapi.DelegationVerificationRequest{
-		Question:         truncateText(question, 4000),
-		DecisionQuestion: "Which claims are supported, contradicted, distinct, or unresolved by the cited evidence?",
-		Claims:           claims,
-		Conflicts:        conflicts,
-		EvidenceRefs:     evidenceRefs,
-		EvidenceLookup:   buildEvidenceLookup(evidenceRefs, evidence, contextIndex, observations),
-		Reasons:          canonicalStrings(validation.VerificationReasons),
-	}
+	return out
 }
 
 func (executor *Executor) runVerification(
@@ -431,59 +462,45 @@ func (executor *Executor) runVerification(
 		return executor.replayVerification(record, artifact, task)
 	}
 	if record.Existing {
-		verification := failedVerification(
-			task,
-			ErrorInterrupted,
-			errors.New("semantic verifier admission was recovered without a durable result"),
-		)
-		executor.persistVerification(
+		return executor.finishVerification(
 			context.WithoutCancel(ctx),
 			parent,
 			delegationID,
 			task,
-			verification,
+			failedVerification(
+				task,
+				ErrorInterrupted,
+				errors.New("semantic verifier admission was recovered without a durable result"),
+			),
 			agentapi.Usage{},
+			time.Time{},
 		)
-		executor.emitVerificationTerminal(parent, delegationID, task, verification, time.Time{})
-		return verification
 	}
 	if err := ctx.Err(); err != nil {
-		verification := cancelledVerification(
-			task,
-			ErrorParentCancelled,
-			err,
-		)
-		executor.persistVerification(
+		return executor.finishVerification(
 			context.WithoutCancel(ctx),
 			parent,
 			delegationID,
 			task,
-			verification,
+			cancelledVerification(task, ErrorParentCancelled, err),
 			agentapi.Usage{},
+			time.Time{},
 		)
-		executor.emitVerificationTerminal(parent, delegationID, task, verification, time.Time{})
-		return verification
 	}
 	slot := executor.capabilitySlot(task.capability)
 	select {
 	case slot <- struct{}{}:
 		defer func() { <-slot }()
 	case <-ctx.Done():
-		verification := cancelledVerification(
-			task,
-			ErrorParentCancelled,
-			ctx.Err(),
-		)
-		executor.persistVerification(
+		return executor.finishVerification(
 			context.WithoutCancel(ctx),
 			parent,
 			delegationID,
 			task,
-			verification,
+			cancelledVerification(task, ErrorParentCancelled, ctx.Err()),
 			agentapi.Usage{},
+			time.Time{},
 		)
-		executor.emitVerificationTerminal(parent, delegationID, task, verification, time.Time{})
-		return verification
 	}
 	if err := executor.persistence.LinkDelegationChild(
 		ctx,
@@ -492,17 +509,15 @@ func (executor *Executor) runVerification(
 		task.index,
 		task.childRunID,
 	); err != nil {
-		verification := failedVerification(task, ErrorChildExecution, err)
-		executor.persistVerification(
+		return executor.finishVerification(
 			context.WithoutCancel(ctx),
 			parent,
 			delegationID,
 			task,
-			verification,
+			failedVerification(task, ErrorChildExecution, err),
 			agentapi.Usage{},
+			time.Time{},
 		)
-		executor.emitVerificationTerminal(parent, delegationID, task, verification, time.Time{})
-		return verification
 	}
 
 	started := time.Now()
@@ -533,9 +548,36 @@ func (executor *Executor) runVerification(
 	)
 	childErr := runCtx.Err()
 	cancel()
+	result = executor.classifyVerificationRunResult(task.childRunID, result, runErr, childErr, ctx)
+	return executor.completeVerificationRun(ctx, parent, delegationID, task, result, started)
+}
+
+// finishVerification persists an already-decided verification outcome and
+// emits the terminal event, returning the outcome unchanged.
+func (executor *Executor) finishVerification(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedVerification,
+	verification agentapi.DelegationVerification,
+	usage agentapi.Usage,
+	started time.Time,
+) agentapi.DelegationVerification {
+	_ = executor.persistVerification(ctx, parent, delegationID, task, verification, usage)
+	executor.emitVerificationTerminal(parent, delegationID, task, verification, started)
+	return verification
+}
+
+func (executor *Executor) classifyVerificationRunResult(
+	childRunID string,
+	result agentapi.RunResult,
+	runErr error,
+	childErr error,
+	ctx context.Context,
+) agentapi.RunResult {
 	if runErr != nil {
 		result = agentapi.RunResult{
-			RunID:  task.childRunID,
+			RunID:  childRunID,
 			Status: agentapi.RunFailed,
 			Error: &agentapi.RunError{
 				Code: ErrorChildExecution, Message: runErr.Error(),
@@ -562,6 +604,17 @@ func (executor *Executor) runVerification(
 			Code: ErrorChildOutputLimit, Message: "verifier output token limit exceeded",
 		}
 	}
+	return result
+}
+
+func (executor *Executor) completeVerificationRun(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedVerification,
+	result agentapi.RunResult,
+	started time.Time,
+) agentapi.DelegationVerification {
 	verification := projectVerification(result, task)
 	if err := validateVerificationOutput(task.request, verification); err != nil &&
 		verification.Status == agentapi.DelegationCompleted {
