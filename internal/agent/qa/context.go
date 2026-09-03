@@ -464,6 +464,76 @@ func fullOrDetailTurn(
 // complete representation that still fits the remaining token budget. It
 // mutates conversation.Recent and stats in place and returns the historical
 // turns to be serialized.
+// assembleHistoricalTurn appends one selected turn using the most complete
+// representation that fits the remaining budget, returning true when any
+// representation was emitted (full, detail, or reference).
+func assembleHistoricalTurn(
+	item scoredTurn,
+	turnByNumber map[int][]llm.Message,
+	latestTurn int,
+	latestHasAnswer bool,
+	relation retrieval.HistoryRelation,
+	budget int,
+	conversation *ConversationContext,
+	stats *contextAssembleStats,
+	historical *[]historicalTurn,
+) bool {
+	metadata := item.metadata
+	messages := turnByNumber[metadata.TurnNumber]
+	remaining := budget - stats.HistoryUsedTokens
+	fullPreferred := explicitTurnSelected(metadata, relation.ExplicitTurnRefs) ||
+		metadata.TurnNumber == latestTurn && relation.NeedsPriorEvidence
+	if fullPreferred {
+		atomic := replayableTailMessages(messages, 0)
+		cost := estimateMessagesTokens(atomic)
+		if len(atomic) == len(messages) && cost <= remaining {
+			conversation.Recent = append(conversation.Recent, atomic...)
+			stats.HistoryUsedTokens += cost
+			stats.FullTurnCount++
+			stats.SelectedTurnNumbers = append(stats.SelectedTurnNumbers, metadata.TurnNumber)
+			stats.SelectedReasons = append(stats.SelectedReasons, item.reason+":full")
+			return true
+		}
+	}
+	needsDetail := fullPreferred || metadata.TurnNumber == latestTurn &&
+		relation.NeedsPriorConclusion && !latestHasAnswer
+	if needsDetail {
+		detail, detailErr := compressTurnDetail(metadata.TurnNumber, messages)
+		if detailErr == nil {
+			cost := tooloutput.EstimateTokens(string(detail))
+			if cost <= remaining {
+				*historical = append(*historical, historicalTurn{
+					TurnNumber: metadata.TurnNumber, RunID: metadata.RunID, Representation: "detail",
+					Reason: item.reason, Evidence: metadata.EvidenceManifest,
+					EvidenceStatus: metadata.EvidenceStatus, Forced: metadata.ForcedConclusion, Detail: detail,
+				})
+				stats.HistoryUsedTokens += cost
+				stats.DetailCount++
+				stats.SelectedTurnNumbers = append(stats.SelectedTurnNumbers, metadata.TurnNumber)
+				stats.SelectedReasons = append(stats.SelectedReasons, item.reason+":detail")
+				return true
+			}
+		}
+	}
+	reference := historicalTurn{
+		TurnNumber: metadata.TurnNumber, RunID: metadata.RunID, Representation: "reference",
+		Reason: item.reason, Question: metadata.Question, TopicKey: metadata.TopicKey,
+		Entities: metadata.Entities, Evidence: metadata.EvidenceManifest,
+		EvidenceStatus: metadata.EvidenceStatus, Forced: metadata.ForcedConclusion,
+	}
+	raw, marshalErr := json.Marshal(reference)
+	cost := tooloutput.EstimateTokens(string(raw))
+	if marshalErr == nil && cost <= remaining {
+		*historical = append(*historical, reference)
+		stats.HistoryUsedTokens += cost
+		stats.ReferenceCount++
+		stats.SelectedTurnNumbers = append(stats.SelectedTurnNumbers, metadata.TurnNumber)
+		stats.SelectedReasons = append(stats.SelectedReasons, item.reason+":reference")
+		return true
+	}
+	return false
+}
+
 func assembleHistoricalTurns(
 	selected []scoredTurn,
 	turnByNumber map[int][]llm.Message,
@@ -476,57 +546,7 @@ func assembleHistoricalTurns(
 ) []historicalTurn {
 	historical := make([]historicalTurn, 0, len(selected))
 	for _, item := range selected {
-		metadata := item.metadata
-		messages := turnByNumber[metadata.TurnNumber]
-		remaining := budget - stats.HistoryUsedTokens
-		fullPreferred := explicitTurnSelected(metadata, relation.ExplicitTurnRefs) ||
-			metadata.TurnNumber == latestTurn && relation.NeedsPriorEvidence
-		if fullPreferred {
-			atomic := replayableTailMessages(messages, 0)
-			cost := estimateMessagesTokens(atomic)
-			if len(atomic) == len(messages) && cost <= remaining {
-				conversation.Recent = append(conversation.Recent, atomic...)
-				stats.HistoryUsedTokens += cost
-				stats.FullTurnCount++
-				stats.SelectedTurnNumbers = append(stats.SelectedTurnNumbers, metadata.TurnNumber)
-				stats.SelectedReasons = append(stats.SelectedReasons, item.reason+":full")
-				continue
-			}
-		}
-		needsDetail := fullPreferred || metadata.TurnNumber == latestTurn &&
-			relation.NeedsPriorConclusion && !latestHasAnswer
-		if needsDetail {
-			detail, detailErr := compressTurnDetail(metadata.TurnNumber, messages)
-			if detailErr == nil {
-				cost := tooloutput.EstimateTokens(string(detail))
-				if cost <= remaining {
-					historical = append(historical, historicalTurn{
-						TurnNumber: metadata.TurnNumber, RunID: metadata.RunID, Representation: "detail",
-						Reason: item.reason, Evidence: metadata.EvidenceManifest,
-						EvidenceStatus: metadata.EvidenceStatus, Forced: metadata.ForcedConclusion, Detail: detail,
-					})
-					stats.HistoryUsedTokens += cost
-					stats.DetailCount++
-					stats.SelectedTurnNumbers = append(stats.SelectedTurnNumbers, metadata.TurnNumber)
-					stats.SelectedReasons = append(stats.SelectedReasons, item.reason+":detail")
-					continue
-				}
-			}
-		}
-		reference := historicalTurn{
-			TurnNumber: metadata.TurnNumber, RunID: metadata.RunID, Representation: "reference",
-			Reason: item.reason, Question: metadata.Question, TopicKey: metadata.TopicKey,
-			Entities: metadata.Entities, Evidence: metadata.EvidenceManifest,
-			EvidenceStatus: metadata.EvidenceStatus, Forced: metadata.ForcedConclusion,
-		}
-		raw, marshalErr := json.Marshal(reference)
-		cost := tooloutput.EstimateTokens(string(raw))
-		if marshalErr == nil && cost <= remaining {
-			historical = append(historical, reference)
-			stats.HistoryUsedTokens += cost
-			stats.ReferenceCount++
-			stats.SelectedTurnNumbers = append(stats.SelectedTurnNumbers, metadata.TurnNumber)
-			stats.SelectedReasons = append(stats.SelectedReasons, item.reason+":reference")
+		if assembleHistoricalTurn(item, turnByNumber, latestTurn, latestHasAnswer, relation, budget, conversation, stats, &historical) {
 			continue
 		}
 		stats.OmittedCount++

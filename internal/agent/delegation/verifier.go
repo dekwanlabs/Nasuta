@@ -772,51 +772,69 @@ func validateVerificationOutput(
 	if strings.TrimSpace(verification.Summary) == "" {
 		return fmt.Errorf("semantic verifier summary is required")
 	}
-	claimIDs := make(map[string]struct{}, len(request.Claims))
-	for _, claim := range request.Claims {
-		claimIDs[claim.ID] = struct{}{}
-	}
-	evidenceRefs := make(map[string]struct{}, len(request.EvidenceRefs))
-	for _, reference := range request.EvidenceRefs {
-		evidenceRefs[reference] = struct{}{}
-	}
 	if len(request.Claims) > 0 && len(verification.Verdicts) == 0 {
 		return fmt.Errorf("semantic verifier returned no verdicts for submitted claims")
 	}
 	if len(verification.Verdicts) > maxVerificationClaims {
 		return fmt.Errorf("semantic verifier returned too many verdicts")
 	}
+	claimIDs, evidenceRefs := verificationReferenceSets(request)
 	for index, verdict := range verification.Verdicts {
-		if len(verdict.ClaimIDs) == 0 ||
-			strings.TrimSpace(verdict.Rationale) == "" {
-			return fmt.Errorf("semantic verifier verdict %d is incomplete", index)
+		if err := validateVerificationVerdict(index, verdict, claimIDs, evidenceRefs); err != nil {
+			return err
 		}
-		switch verdict.Decision {
-		case "supported", "contradicted", "distinct", "unresolved":
-		default:
+	}
+	return nil
+}
+
+func verificationReferenceSets(
+	request agentapi.DelegationVerificationRequest,
+) (claimIDs, evidenceRefs map[string]struct{}) {
+	claimIDs = make(map[string]struct{}, len(request.Claims))
+	for _, claim := range request.Claims {
+		claimIDs[claim.ID] = struct{}{}
+	}
+	evidenceRefs = make(map[string]struct{}, len(request.EvidenceRefs))
+	for _, reference := range request.EvidenceRefs {
+		evidenceRefs[reference] = struct{}{}
+	}
+	return claimIDs, evidenceRefs
+}
+
+func validateVerificationVerdict(
+	index int,
+	verdict agentapi.DelegationVerificationVerdict,
+	claimIDs, evidenceRefs map[string]struct{},
+) error {
+	if len(verdict.ClaimIDs) == 0 ||
+		strings.TrimSpace(verdict.Rationale) == "" {
+		return fmt.Errorf("semantic verifier verdict %d is incomplete", index)
+	}
+	switch verdict.Decision {
+	case "supported", "contradicted", "distinct", "unresolved":
+	default:
+		return fmt.Errorf(
+			"semantic verifier verdict %d has invalid decision %q",
+			index,
+			verdict.Decision,
+		)
+	}
+	for _, claimID := range verdict.ClaimIDs {
+		if _, ok := claimIDs[claimID]; !ok {
 			return fmt.Errorf(
-				"semantic verifier verdict %d has invalid decision %q",
+				"semantic verifier verdict %d references unknown claim %q",
 				index,
-				verdict.Decision,
+				claimID,
 			)
 		}
-		for _, claimID := range verdict.ClaimIDs {
-			if _, ok := claimIDs[claimID]; !ok {
-				return fmt.Errorf(
-					"semantic verifier verdict %d references unknown claim %q",
-					index,
-					claimID,
-				)
-			}
-		}
-		for _, reference := range verdict.EvidenceRefs {
-			if _, ok := evidenceRefs[reference]; !ok {
-				return fmt.Errorf(
-					"semantic verifier verdict %d references unauthorized evidence %q",
-					index,
-					reference,
-				)
-			}
+	}
+	for _, reference := range verdict.EvidenceRefs {
+		if _, ok := evidenceRefs[reference]; !ok {
+			return fmt.Errorf(
+				"semantic verifier verdict %d references unauthorized evidence %q",
+				index,
+				reference,
+			)
 		}
 	}
 	return nil

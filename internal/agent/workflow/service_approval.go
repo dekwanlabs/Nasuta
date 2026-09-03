@@ -96,6 +96,22 @@ func (service *Service) DecideHumanApproval(
 
 // loadApprovalTarget loads and validates the durable run, definition and
 // approval node targeted by an approval decision.
+func validateApprovalIdentity(prepared ApprovalRequest, state *RunState) error {
+	if prepared.Admin {
+		return nil
+	}
+	if prepared.Approver.TenantID != state.Run.ActorTenantID {
+		return fmt.Errorf(
+			"workflow approval tenant %q does not match run tenant %q: %w",
+			prepared.Approver.TenantID, state.Run.ActorTenantID, ErrForbidden,
+		)
+	}
+	if prepared.Approver.UserID != state.Run.ActorUserID {
+		return ErrForbidden
+	}
+	return nil
+}
+
 func (service *Service) loadApprovalTarget(
 	ctx context.Context,
 	orchestrator *Orchestrator,
@@ -105,16 +121,8 @@ func (service *Service) loadApprovalTarget(
 	if err != nil {
 		return nil, Definition{}, NodeDefinition{}, graphMetadata{}, err
 	}
-	if !prepared.Admin {
-		if prepared.Approver.TenantID != state.Run.ActorTenantID {
-			return nil, Definition{}, NodeDefinition{}, graphMetadata{}, fmt.Errorf(
-				"workflow approval tenant %q does not match run tenant %q: %w",
-				prepared.Approver.TenantID, state.Run.ActorTenantID, ErrForbidden,
-			)
-		}
-		if prepared.Approver.UserID != state.Run.ActorUserID {
-			return nil, Definition{}, NodeDefinition{}, graphMetadata{}, ErrForbidden
-		}
+	if err := validateApprovalIdentity(prepared, state); err != nil {
+		return nil, Definition{}, NodeDefinition{}, graphMetadata{}, err
 	}
 	definition, err := service.catalog.Resolve(DefinitionRef{
 		ID: state.Run.WorkflowID, Version: state.Run.WorkflowVersion,

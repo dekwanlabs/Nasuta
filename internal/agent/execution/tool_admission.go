@@ -58,6 +58,47 @@ var toolAdmissionSpec = runtrace.Spec[toolAdmissionInput, toolAdmissionDecision]
 	},
 }
 
+func admitToolCallDecision(
+	state *compiledLoop,
+	candidate tool.Tool,
+	scope tool.EvidenceScope,
+	args tool.Arguments,
+	remaining, declared int,
+) toolAdmissionDecision {
+	if keys, covered := state.evidenceLedger.fullyCovers(scope); covered {
+		return toolAdmissionDecision{
+			Action: toolAdmissionAlreadyAvailable, Reason: "scope_fully_covered",
+			Scope: scope, Arguments: args, RemainingTokens: remaining,
+			DeclaredTokens: declared, EvidenceKeys: keys,
+		}
+	}
+	if remaining < 0 || declared <= remaining {
+		return toolAdmissionDecision{
+			Action: toolAdmissionAllow, Reason: "within_budget",
+			Scope: scope, Arguments: args, RemainingTokens: remaining,
+			DeclaredTokens: declared,
+		}
+	}
+	if candidate.Admission != nil && candidate.Admission.Narrow != nil {
+		narrowed, changed := candidate.Admission.Narrow(args, remaining)
+		if changed {
+			narrowedTokens := declaredToolTokens(candidate, narrowed)
+			if narrowedTokens <= remaining {
+				return toolAdmissionDecision{
+					Action: toolAdmissionNarrow, Reason: "reduced_to_budget",
+					Scope: scope, Arguments: narrowed, RemainingTokens: remaining,
+					DeclaredTokens: narrowedTokens,
+				}
+			}
+		}
+	}
+	return toolAdmissionDecision{
+		Action: toolAdmissionDenyBudget, Reason: "declared_result_exceeds_budget",
+		Scope: scope, Arguments: args, RemainingTokens: remaining,
+		DeclaredTokens: declared,
+	}
+}
+
 func (agent *Agent) admitToolCall(state *compiledLoop, call llm.ToolCall) (llm.ToolCall, toolAdmissionDecision) {
 	args, err := parseArgs(state.ctx, call.Function.Arguments)
 	if err != nil {
@@ -84,38 +125,7 @@ func (agent *Agent) admitToolCall(state *compiledLoop, call llm.ToolCall) (llm.T
 		_ context.Context,
 		input toolAdmissionInput,
 	) (toolAdmissionDecision, error) {
-		if keys, covered := state.evidenceLedger.fullyCovers(scope); covered {
-			return toolAdmissionDecision{
-				Action: toolAdmissionAlreadyAvailable, Reason: "scope_fully_covered",
-				Scope: scope, Arguments: args, RemainingTokens: remaining,
-				DeclaredTokens: declared, EvidenceKeys: keys,
-			}, nil
-		}
-		if remaining < 0 || declared <= remaining {
-			return toolAdmissionDecision{
-				Action: toolAdmissionAllow, Reason: "within_budget",
-				Scope: scope, Arguments: args, RemainingTokens: remaining,
-				DeclaredTokens: declared,
-			}, nil
-		}
-		if candidate.Admission != nil && candidate.Admission.Narrow != nil {
-			narrowed, changed := candidate.Admission.Narrow(args, remaining)
-			if changed {
-				narrowedTokens := declaredToolTokens(candidate, narrowed)
-				if narrowedTokens <= remaining {
-					return toolAdmissionDecision{
-						Action: toolAdmissionNarrow, Reason: "reduced_to_budget",
-						Scope: scope, Arguments: narrowed, RemainingTokens: remaining,
-						DeclaredTokens: narrowedTokens,
-					}, nil
-				}
-			}
-		}
-		return toolAdmissionDecision{
-			Action: toolAdmissionDenyBudget, Reason: "declared_result_exceeds_budget",
-			Scope: scope, Arguments: args, RemainingTokens: remaining,
-			DeclaredTokens: declared,
-		}, nil
+		return admitToolCallDecision(state, candidate, scope, args, remaining, declared), nil
 	})
 	if decision.Action == toolAdmissionNarrow {
 		encoded, marshalErr := json.Marshal(decision.Arguments)

@@ -128,15 +128,9 @@ func (agent *Agent) limitModelOutputForPhase(
 	if !ok {
 		return requested, nil
 	}
-	available := availability.Available()
-	if phased, ok := gate.(agentapi.RunBudgetPhasedAvailability); ok {
-		available = phased.AvailableForPhase(phase)
-	}
+	available := modelOutputAvailability(gate, phase, availability)
 	input := int64(inputTokens)
-	minimumOutput := int64(0)
-	if minimum, ok := gate.(agentapi.RunBudgetMinimum); ok {
-		minimumOutput = minimum.MinimumOutputTokens()
-	}
+	minimumOutput := modelOutputMinimum(gate)
 	if input > available.InputTokens {
 		return 0, fmt.Errorf("%w: input_tokens requested=%d available=%d", agentapi.ErrBudgetExceeded, input, available.InputTokens)
 	}
@@ -168,6 +162,24 @@ func (agent *Agent) limitModelOutputForPhase(
 		return 0, fmt.Errorf("%w: protected output minimum=%d effective=%d", agentapi.ErrBudgetExceeded, minimumOutput, maxOutput)
 	}
 	return maxOutput, nil
+}
+
+func modelOutputAvailability(
+	gate agentapi.RunBudgetUsageGate,
+	phase agentapi.RunBudgetPhase,
+	availability agentapi.RunBudgetAvailability,
+) agentapi.Usage {
+	if phased, ok := gate.(agentapi.RunBudgetPhasedAvailability); ok {
+		return phased.AvailableForPhase(phase)
+	}
+	return availability.Available()
+}
+
+func modelOutputMinimum(gate agentapi.RunBudgetUsageGate) int64 {
+	if minimum, ok := gate.(agentapi.RunBudgetMinimum); ok {
+		return minimum.MinimumOutputTokens()
+	}
+	return 0
 }
 
 func (agent *Agent) capOutputByCost(inputTokens, maxOutput int, availableCost int64) (int, error) {

@@ -740,13 +740,8 @@ func validateEvidenceUnit(
 	label string,
 	unit tool.EvidenceUnit,
 ) error {
-	if unit.SourceKind == "" || unit.SourceKind != strings.TrimSpace(unit.SourceKind) ||
-		unit.Target == "" || unit.Target != strings.TrimSpace(unit.Target) {
-		return fmt.Errorf(
-			"context block %d %s source_kind and target are required and canonical",
-			blockIndex,
-			label,
-		)
+	if err := validateEvidenceUnitIdentity(blockIndex, label, unit); err != nil {
+		return err
 	}
 	if unit.Coverage.Complete && unit.Coverage.Partial {
 		return fmt.Errorf("context block %d %s coverage is contradictory", blockIndex, label)
@@ -758,8 +753,24 @@ func validateEvidenceUnit(
 		(len(unit.ContentHash) != sha256.Size*2 || !validHex(unit.ContentHash)) {
 		return fmt.Errorf("context block %d %s content_hash is invalid", blockIndex, label)
 	}
-	seenSections := make(map[string]struct{}, len(unit.Sections))
-	for sectionIndex, section := range unit.Sections {
+	return validateEvidenceUnitSections(blockIndex, label, unit.Sections)
+}
+
+func validateEvidenceUnitIdentity(blockIndex int, label string, unit tool.EvidenceUnit) error {
+	if unit.SourceKind == "" || unit.SourceKind != strings.TrimSpace(unit.SourceKind) ||
+		unit.Target == "" || unit.Target != strings.TrimSpace(unit.Target) {
+		return fmt.Errorf(
+			"context block %d %s source_kind and target are required and canonical",
+			blockIndex,
+			label,
+		)
+	}
+	return nil
+}
+
+func validateEvidenceUnitSections(blockIndex int, label string, sections []string) error {
+	seenSections := make(map[string]struct{}, len(sections))
+	for sectionIndex, section := range sections {
 		if section == "" || section != strings.TrimSpace(section) {
 			return fmt.Errorf(
 				"context block %d %s section %d is invalid",

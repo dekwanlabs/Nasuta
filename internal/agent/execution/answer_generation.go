@@ -50,6 +50,22 @@ func (agent *Agent) concludeWithRecovery(
 	attemptStarted := time.Now()
 	stream := newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
 	res, callErr := agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
+	attemptStarted, stream, res, callErr = agent.retryForceConclusionWithoutReasoning(ctx, input, attemptStarted, stream, res, callErr)
+	res, callErr = agent.recoverConclusionToolProtocol(ctx, input, attemptStarted, stream, res, callErr)
+	res, callErr = agent.enforceConclusionContracts(ctx, input, outputContract, stream, res, callErr)
+	return forceConclusionOutput{
+		Result: res, Stream: stream, Timing: stream.Timings(), AttemptStarted: attemptStarted,
+	}, callErr
+}
+
+func (agent *Agent) retryForceConclusionWithoutReasoning(
+	ctx context.Context,
+	input *forceConclusionInput,
+	attemptStarted time.Time,
+	stream *StreamPipe,
+	res *llm.ChatStreamResult,
+	callErr error,
+) (time.Time, *StreamPipe, *llm.ChatStreamResult, error) {
 	if !agent.cfg.DisableLegacyAnswerRecovery &&
 		(errors.Is(callErr, ErrReasoningTruncated) || errors.Is(callErr, ErrEmptyModelResponse)) {
 		if modelOutputBudgetAvailable(ctx) {
@@ -65,6 +81,17 @@ func (agent *Agent) concludeWithRecovery(
 			log.WarnfCtx(ctx, "[agent] run %s force-conclusion recovery skipped: no output budget remains: %v", input.RunID, callErr)
 		}
 	}
+	return attemptStarted, stream, res, callErr
+}
+
+func (agent *Agent) recoverConclusionToolProtocol(
+	ctx context.Context,
+	input *forceConclusionInput,
+	attemptStarted time.Time,
+	stream *StreamPipe,
+	res *llm.ChatStreamResult,
+	callErr error,
+) (*llm.ChatStreamResult, error) {
 	if callErr == nil && hasLeakedToolProtocol(res) {
 		if !agent.cfg.DisableLegacyAnswerRecovery {
 			log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", input.RunID)
@@ -78,6 +105,17 @@ func (agent *Agent) concludeWithRecovery(
 			callErr = ErrToolProtocolLeak
 		}
 	}
+	return res, callErr
+}
+
+func (agent *Agent) enforceConclusionContracts(
+	ctx context.Context,
+	input *forceConclusionInput,
+	outputContract agentapi.RunOutputContract,
+	stream *StreamPipe,
+	res *llm.ChatStreamResult,
+	callErr error,
+) (*llm.ChatStreamResult, error) {
 	if callErr == nil {
 		res, callErr = agent.enforceContract(ctx, input.Messages, res, input.AnswerContract, agent.cfg.ConclusionMaxTokens, stream)
 	}
@@ -88,9 +126,7 @@ func (agent *Agent) concludeWithRecovery(
 		validateAndStripContractPartial(res, input.AnswerContract) {
 		log.WarnfCtx(ctx, "[agent] run %s preserving contract-valid truncated force-conclusion candidate", input.RunID)
 	}
-	return forceConclusionOutput{
-		Result: res, Stream: stream, Timing: stream.Timings(), AttemptStarted: attemptStarted,
-	}, callErr
+	return res, callErr
 }
 
 func recordForceConclusionTiming(ctx context.Context, runStarted, t0 time.Time, timing StreamTiming) {

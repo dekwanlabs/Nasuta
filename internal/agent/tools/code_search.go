@@ -231,47 +231,64 @@ func (srv *Service) FindCodeByVector(ctx context.Context, query, lang string, li
 	if len(vector) == 0 {
 		return domain.SearchResult[domain.CodeSearchHit]{}, errEmptyQueryEmbedding
 	}
-	filters := map[string]string{"kind": "code_chunk"}
-	if lang != "" {
-		filters["lang"] = lang
-	}
-	fetchLimit := min(max(limit*4, 40), 64)
-	mode := "dense"
-	sparseTerms := 0
+	filters, fetchLimit := codeSearchFilters(lang, limit)
 	searchQuery := semantic.Query{
 		DenseVector: vector, Filter: semantic.Filter{Keywords: filters},
 		Limit: fetchLimit, GroupBy: "path",
 	}
+	mode, sparseTerms := srv.applyCodeSparseQuery(ctx, query, vector, &searchQuery)
+	hits, err := srv.runCodeVectorSearch(ctx, searchQuery, mode, fetchLimit, sparseTerms, filters)
+	if err != nil {
+		log.ErrorfCtx(ctx, "[search_code] semantic search failed: %v", err)
+		return domain.SearchResult[domain.CodeSearchHit]{}, err
+	}
+	log.InfofCtx(ctx, "[search_code] semantic backend returned %d hits before filtering", len(hits))
+	candidates := srv.dedupeCodeHits(ctx, hits, fetchLimit)
+	log.InfofCtx(ctx, "[search_code] dedup by file: %d hits -> %d files", len(hits), len(candidates))
+	ranked := srv.rankCodeCandidates(ctx, query, candidates, limit)
+	return domain.SearchResult[domain.CodeSearchHit]{Matches: ranked.Matches, Semantic: true}, nil
+}
+
+func codeSearchFilters(lang string, limit int) (map[string]string, int) {
+	filters := map[string]string{"kind": "code_chunk"}
+	if lang != "" {
+		filters["lang"] = lang
+	}
+	return filters, min(max(limit*4, 40), 64)
+}
+
+func (srv *Service) applyCodeSparseQuery(ctx context.Context, query string, vector []float32, searchQuery *semantic.Query) (string, int) {
 	if bm := srv.BM25View(); bm != nil {
 		sparse, _ := runtrace.Invoke(ctx, sparseQuerySpec, query, func(_ context.Context, query string) (sparseQueryOutput, error) {
 			vector := bm.QuerySparse(query)
 			indices, values := retrieval.SparseToSorted(vector)
 			return sparseQueryOutput{Indices: indices, Values: values}, nil
 		})
-		sparseTerms = len(sparse.Indices)
+		sparseTerms := len(sparse.Indices)
 		if sparseTerms == 0 {
 			log.InfofCtx(ctx, "[search_code] dense fallback: query has no known BM25 terms, dim=%d", len(vector))
-		} else {
-			mode = "hybrid"
-			log.InfofCtx(ctx, "[search_code] hybrid: dim=%d sparseTerms=%d", len(vector), sparseTerms)
-			searchQuery.SparseVector = &semantic.SparseVector{Indices: sparse.Indices, Values: sparse.Values}
+			return "dense", sparseTerms
 		}
-	} else {
-		srv.denseWarnOnce.Do(func() {
-			log.WarnfCtx(ctx, "[search_code] hybrid search disabled (BM25 nil) — running dense-only; run the full code embedding operation to enable it")
-		})
-		log.InfofCtx(ctx, "[search_code] dense-only: dim=%d (BM25 nil)", len(vector))
+		log.InfofCtx(ctx, "[search_code] hybrid: dim=%d sparseTerms=%d", len(vector), sparseTerms)
+		searchQuery.SparseVector = &semantic.SparseVector{Indices: sparse.Indices, Values: sparse.Values}
+		return "hybrid", sparseTerms
 	}
-	hits, err := runtrace.Invoke(ctx, vectorSearchSpec, vectorSearchInput{
+	srv.denseWarnOnce.Do(func() {
+		log.WarnfCtx(ctx, "[search_code] hybrid search disabled (BM25 nil) — running dense-only; run the full code embedding operation to enable it")
+	})
+	log.InfofCtx(ctx, "[search_code] dense-only: dim=%d (BM25 nil)", len(vector))
+	return "dense", 0
+}
+
+func (srv *Service) runCodeVectorSearch(ctx context.Context, searchQuery semantic.Query, mode string, fetchLimit, sparseTerms int, filters map[string]string) ([]semantic.Hit, error) {
+	return runtrace.Invoke(ctx, vectorSearchSpec, vectorSearchInput{
 		Query: searchQuery, Mode: mode, FetchLimit: fetchLimit, SparseTerms: sparseTerms, Filters: filters,
 	}, func(ctx context.Context, input vectorSearchInput) ([]semantic.Hit, error) {
 		return srv.semantic.Search(ctx, input.Query)
 	})
-	if err != nil {
-		log.ErrorfCtx(ctx, "[search_code] semantic search failed: %v", err)
-		return domain.SearchResult[domain.CodeSearchHit]{}, err
-	}
-	log.InfofCtx(ctx, "[search_code] semantic backend returned %d hits before filtering", len(hits))
+}
+
+func (srv *Service) dedupeCodeHits(ctx context.Context, hits []semantic.Hit, fetchLimit int) []semantic.Hit {
 	candidates, _ := runtrace.Invoke(ctx, fileDedupSpec, fileDedupInput{
 		Hits: hits, FetchLimit: fetchLimit,
 	}, func(_ context.Context, input fileDedupInput) ([]semantic.Hit, error) {
@@ -293,8 +310,10 @@ func (srv *Service) FindCodeByVector(ctx context.Context, query, lang string, li
 		}
 		return candidates, nil
 	})
-	log.InfofCtx(ctx, "[search_code] dedup by file: %d hits -> %d files", len(hits), len(candidates))
+	return candidates
+}
 
+func (srv *Service) rankCodeCandidates(ctx context.Context, query string, candidates []semantic.Hit, limit int) codeRankOutput {
 	ranked, _ := runtrace.Invoke(ctx, codeRankSpec, codeRankInput{
 		Query: query, Candidates: candidates, Limit: limit,
 	}, func(_ context.Context, input codeRankInput) (codeRankOutput, error) {
@@ -322,7 +341,7 @@ func (srv *Service) FindCodeByVector(ctx context.Context, query, lang string, li
 		}
 		return codeRankOutput{Ranked: ranked, Matches: matches}, nil
 	})
-	return domain.SearchResult[domain.CodeSearchHit]{Matches: ranked.Matches, Semantic: true}, nil
+	return ranked
 }
 
 func traceSemanticHits(hits []semantic.Hit) []map[string]any {

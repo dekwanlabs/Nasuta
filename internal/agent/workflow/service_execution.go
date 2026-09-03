@@ -50,6 +50,25 @@ func (service *Service) Execute(ctx context.Context, request ExecuteRequest) (Re
 }
 
 // Start persists a Run before executing it independently of the request lifetime.
+func (service *Service) runPreparedInBackground(
+	runCtx context.Context,
+	orchestrator *Orchestrator,
+	prepared preparedRun,
+	release func(),
+) {
+	defer release()
+	if _, runErr := service.executePrepared(runCtx, orchestrator, prepared); runErr != nil &&
+		!errors.Is(runErr, context.Canceled) &&
+		!errors.Is(runErr, context.DeadlineExceeded) &&
+		!errors.Is(runErr, ErrHumanApprovalRequired) {
+		log.Warnf(
+			"[workflow] background run %s failed: %v",
+			prepared.record.ID,
+			runErr,
+		)
+	}
+}
+
 func (service *Service) Start(
 	ctx context.Context,
 	request StartRequest,
@@ -101,19 +120,7 @@ func (service *Service) Start(
 		release()
 		return nil, err
 	}
-	go func() {
-		defer release()
-		if _, runErr := service.executePrepared(runCtx, orchestrator, prepared); runErr != nil &&
-			!errors.Is(runErr, context.Canceled) &&
-			!errors.Is(runErr, context.DeadlineExceeded) &&
-			!errors.Is(runErr, ErrHumanApprovalRequired) {
-			log.Warnf(
-				"[workflow] background run %s failed: %v",
-				prepared.record.ID,
-				runErr,
-			)
-		}
-	}()
+	go service.runPreparedInBackground(runCtx, orchestrator, prepared, release)
 	run := detachedRunRecord(prepared.record)
 	return &run, nil
 }
@@ -215,26 +222,18 @@ func (service *Service) resolveDefinitionFor(
 	return definition, selection, nil
 }
 
-func prepareStart(
-	orchestrator *Orchestrator,
-	definition Definition,
-	selection DefinitionSelection,
-	request ExecuteRequest,
-) (preparedRun, error) {
-	if orchestrator == nil || orchestrator.schemas == nil {
-		return preparedRun{}, ErrUnavailable
-	}
+func validateStartPermissions(definition Definition, request ExecuteRequest) error {
 	if err := scope.Validate(request.ActorPermissions.Scopes); err != nil {
-		return preparedRun{}, fmt.Errorf("workflow actor permissions: %v: %w", err, ErrInvalid)
+		return fmt.Errorf("workflow actor permissions: %v: %w", err, ErrInvalid)
 	}
 	if err := scope.Validate(request.ScenarioPermissions.Scopes); err != nil {
-		return preparedRun{}, fmt.Errorf("workflow scenario permissions: %v: %w", err, ErrInvalid)
+		return fmt.Errorf("workflow scenario permissions: %v: %w", err, ErrInvalid)
 	}
 	if err := scope.EnsureSubset(
 		definition.Permissions.Scopes,
 		request.ActorPermissions.Scopes,
 	); err != nil {
-		return preparedRun{}, fmt.Errorf(
+		return fmt.Errorf(
 			"workflow %q permissions exceed actor permissions: %v: %w",
 			definition.ID,
 			err,
@@ -245,35 +244,57 @@ func prepareStart(
 		definition.Permissions.Scopes,
 		request.ScenarioPermissions.Scopes,
 	); err != nil {
-		return preparedRun{}, fmt.Errorf(
+		return fmt.Errorf(
 			"workflow %q permissions exceed scenario permissions: %v: %w",
 			definition.ID,
 			err,
 			ErrForbidden,
 		)
 	}
-	runID := strings.TrimSpace(request.RunID)
+	return nil
+}
+
+func resolveStartPosition(request ExecuteRequest) (runID, parentRunID string, round, baseDepth int, err error) {
+	runID = strings.TrimSpace(request.RunID)
 	if runID == "" {
-		var err error
 		runID, err = newRunID()
 		if err != nil {
-			return preparedRun{}, err
+			return "", "", 0, 0, err
 		}
 	} else if !canonicalID.MatchString(runID) {
-		return preparedRun{}, fmt.Errorf("workflow run id %q is invalid: %w", runID, ErrInvalid)
+		return "", "", 0, 0, fmt.Errorf("workflow run id %q is invalid: %w", runID, ErrInvalid)
 	}
-	parentRunID := strings.TrimSpace(request.ParentRunID)
+	parentRunID = strings.TrimSpace(request.ParentRunID)
 	if parentRunID != "" && !canonicalID.MatchString(parentRunID) {
-		return preparedRun{}, fmt.Errorf("workflow parent run id %q is invalid: %w", parentRunID, ErrInvalid)
+		return "", "", 0, 0, fmt.Errorf("workflow parent run id %q is invalid: %w", parentRunID, ErrInvalid)
 	}
-	round, baseDepth := normalizePosition(request.Round, request.BaseDepth)
+	round, baseDepth = normalizePosition(request.Round, request.BaseDepth)
 	if round <= 0 || baseDepth < 0 {
-		return preparedRun{}, fmt.Errorf(
+		return "", "", 0, 0, fmt.Errorf(
 			"workflow execution position round=%d base_depth=%d is invalid: %w",
 			round,
 			baseDepth,
 			ErrInvalid,
 		)
+	}
+	return runID, parentRunID, round, baseDepth, nil
+}
+
+func prepareStart(
+	orchestrator *Orchestrator,
+	definition Definition,
+	selection DefinitionSelection,
+	request ExecuteRequest,
+) (preparedRun, error) {
+	if orchestrator == nil || orchestrator.schemas == nil {
+		return preparedRun{}, ErrUnavailable
+	}
+	if err := validateStartPermissions(definition, request); err != nil {
+		return preparedRun{}, err
+	}
+	runID, parentRunID, round, baseDepth, err := resolveStartPosition(request)
+	if err != nil {
+		return preparedRun{}, err
 	}
 	startedAt := time.Now().UTC()
 	input, err := PrepareHandoff(Handoff{

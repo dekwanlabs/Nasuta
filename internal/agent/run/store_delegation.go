@@ -817,10 +817,21 @@ func validateDelegationReservation(admission DelegationAdmission, reservation De
 		reservation.ReservedCostMicros < 0 {
 		return fmt.Errorf("invalid delegation reservation %d", index)
 	}
+	if err := validateDelegationTokenGrant(reservation, index); err != nil {
+		return err
+	}
+	return validateDelegationCostGrant(reservation, index)
+}
+
+func validateDelegationTokenGrant(reservation DelegationReservation, index int) error {
 	if reservation.Limits.MaxTotalTokens > 0 &&
 		reservation.ReservedTokens != reservation.Limits.MaxTotalTokens {
 		return fmt.Errorf("delegation reservation %d token grant mismatch", index)
 	}
+	return nil
+}
+
+func validateDelegationCostGrant(reservation DelegationReservation, index int) error {
 	if reservation.Limits.MaxCostMicros > 0 &&
 		reservation.ReservedCostMicros != reservation.Limits.MaxCostMicros {
 		return fmt.Errorf("delegation reservation %d cost grant mismatch", index)

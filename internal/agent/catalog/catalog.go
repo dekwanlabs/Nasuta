@@ -234,6 +234,37 @@ func (catalog *Catalog) ResolveFor(
 	return catalog.resolve(ref, stableKey, true)
 }
 
+func (catalog *Catalog) resolveRollout(
+	current *state,
+	ref agentapi.DefinitionRef,
+	stableKey string,
+	defaultVersion int64,
+) (int64, agentapi.DefinitionSelection, error) {
+	selection := agentapi.DefinitionSelection{Reason: "default"}
+	rule, ok := current.rollouts[ref.ID]
+	if !ok || !rule.Active {
+		return defaultVersion, selection, nil
+	}
+	candidate, candidateOK := current.records[key{id: ref.ID, version: rule.CandidateVersion}]
+	if !candidateOK {
+		return 0, agentapi.DefinitionSelection{}, fmt.Errorf(
+			"agent rollout for %q candidate version %d not found: %w",
+			ref.ID, rule.CandidateVersion, ErrConflict,
+		)
+	}
+	if !candidate.Active {
+		return 0, agentapi.DefinitionSelection{}, fmt.Errorf(
+			"agent rollout for %q candidate version %d is disabled: %w",
+			ref.ID, rule.CandidateVersion, ErrConflict,
+		)
+	}
+	selection, candidate, err := catalog.rolloutSelection(current, rule, stableKey, defaultVersion)
+	if err != nil {
+		return 0, agentapi.DefinitionSelection{}, err
+	}
+	return candidate.Version, selection, nil
+}
+
 func (catalog *Catalog) resolve(
 	ref agentapi.DefinitionRef,
 	stableKey string,
@@ -252,29 +283,14 @@ func (catalog *Catalog) resolve(
 		version = current.defaults[ref.ID]
 		selection.Reason = "default"
 		if applyRollout {
-			if rule, ok := current.rollouts[ref.ID]; ok && rule.Active {
-				candidate, candidateOK := current.records[key{id: ref.ID, version: rule.CandidateVersion}]
-				if !candidateOK {
-					return agentapi.Definition{}, agentapi.DefinitionSelection{}, fmt.Errorf(
-						"agent rollout for %q candidate version %d not found: %w",
-						ref.ID, rule.CandidateVersion, ErrConflict,
-					)
-				}
-				if !candidate.Active {
-					return agentapi.Definition{}, agentapi.DefinitionSelection{}, fmt.Errorf(
-						"agent rollout for %q candidate version %d is disabled: %w",
-						ref.ID, rule.CandidateVersion, ErrConflict,
-					)
-				}
-				var err error
-				selection, candidate, err = catalog.rolloutSelection(
-					current, rule, stableKey, current.defaults[ref.ID],
-				)
-				if err != nil {
-					return agentapi.Definition{}, agentapi.DefinitionSelection{}, err
-				}
-				version = candidate.Version
+			nextVersion, nextSelection, err := catalog.resolveRollout(
+				current, ref, stableKey, version,
+			)
+			if err != nil {
+				return agentapi.Definition{}, agentapi.DefinitionSelection{}, err
 			}
+			version = nextVersion
+			selection = nextSelection
 		}
 	}
 	record, ok := current.records[key{id: ref.ID, version: version}]

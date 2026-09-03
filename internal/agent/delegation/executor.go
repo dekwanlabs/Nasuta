@@ -1296,6 +1296,69 @@ func (executor *Executor) preflightAttempt(
 	return attemptStore, attemptNo, maxAttempts, task, nil
 }
 
+func (executor *Executor) preflightFailureOutcome(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedTask,
+	err error,
+) taskOutcome {
+	if errors.Is(err, errAttemptUnrecoverable) {
+		return taskOutcome{report: interruptedReport(task)}
+	}
+	report := failedReport(task, ErrorReportPersistenceFailed, err)
+	executor.settleUnavailable(ctx, parent, delegationID, task, report)
+	return taskOutcome{report: report}
+}
+
+func (executor *Executor) acquireOwnedSlot(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedTask,
+) bool {
+	slot := executor.capabilitySlot(task.capability)
+	select {
+	case slot <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (executor *Executor) releaseOwnedSlot(task preparedTask) {
+	slot := executor.capabilitySlot(task.capability)
+	<-slot
+}
+
+func (executor *Executor) settleSlotCancelled(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedTask,
+) taskOutcome {
+	report := cancelledReport(task, ErrorParentCancelled, ctx.Err())
+	executor.settleUnavailable(ctx, parent, delegationID, task, report)
+	return taskOutcome{report: report}
+}
+
+func (executor *Executor) settleChildLimitsFailed(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	task preparedTask,
+	err error,
+) taskOutcome {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		report := cancelledReport(task, ErrorParentCancelled, ctxErr)
+		executor.settleUnavailable(ctx, parent, delegationID, task, report)
+		return taskOutcome{report: report}
+	}
+	report := failedReport(task, ErrorParentTimeInsufficient, err)
+	executor.settleUnavailable(ctx, parent, delegationID, task, report)
+	return taskOutcome{report: report}
+}
+
 func (executor *Executor) runTaskOwned(
 	ctx context.Context,
 	parent ParentContext,
@@ -1314,47 +1377,29 @@ func (executor *Executor) runTaskOwned(
 		ctx, parent, delegationID, task, record,
 	)
 	if err != nil {
-		if errors.Is(err, errAttemptUnrecoverable) {
-			return taskOutcome{report: interruptedReport(task)}
-		}
-		report := failedReport(task, ErrorReportPersistenceFailed, err)
-		executor.settleUnavailable(ctx, parent, delegationID, task, report)
-		return taskOutcome{report: report}
+		return executor.preflightFailureOutcome(ctx, parent, delegationID, task, err)
 	}
 	if attemptNo < 1 {
 		attemptNo = 1
 	}
 
-	slot := executor.capabilitySlot(task.capability)
-	select {
-	case slot <- struct{}{}:
-		defer func() { <-slot }()
-	case <-ctx.Done():
-		report := cancelledReport(task, ErrorParentCancelled, ctx.Err())
-		executor.settleUnavailable(ctx, parent, delegationID, task, report)
-		return taskOutcome{report: report}
+	if !executor.acquireOwnedSlot(ctx, parent, delegationID, task) {
+		return executor.settleSlotCancelled(ctx, parent, delegationID, task)
 	}
+	defer executor.releaseOwnedSlot(task)
 	// When the capability slot and cancellation become ready together, the
 	// select above may legally choose the slot. Re-check before linking or
 	// invoking the child so queued work never starts after parent cancellation.
 	if err := ctx.Err(); err != nil {
-		report := cancelledReport(task, ErrorParentCancelled, err)
-		executor.settleUnavailable(ctx, parent, delegationID, task, report)
-		return taskOutcome{report: report}
+		return executor.settleSlotCancelled(ctx, parent, delegationID, task)
 	}
+
 	// The task may have waited in the worker queue while another child used the
 	// capability slot. Recompute only the time limit at admission so queued work
 	// gets a fresh child window without expanding any token or cost reservation.
 	limits, err := executor.childLimitsForContext(ctx, parent, task.definition)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			report := cancelledReport(task, ErrorParentCancelled, ctxErr)
-			executor.settleUnavailable(ctx, parent, delegationID, task, report)
-			return taskOutcome{report: report}
-		}
-		report := failedReport(task, ErrorParentTimeInsufficient, err)
-		executor.settleUnavailable(ctx, parent, delegationID, task, report)
-		return taskOutcome{report: report}
+		return executor.settleChildLimitsFailed(ctx, parent, delegationID, task, err)
 	}
 	task.limits = limits
 

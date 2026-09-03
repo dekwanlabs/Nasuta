@@ -202,6 +202,45 @@ func (orchestrator *Orchestrator) executePrepared(
 // runConvergenceLoop dispatches DAG waves until every node has produced an
 // output or been marked unavailable. It mutates the output/gate/failure maps in
 // place and returns a convergence or node error when the run cannot continue.
+func applyConvergenceWave(
+	definition Definition,
+	metadata graphMetadata,
+	ready []string,
+	wave []nodeOutcome,
+	outputs map[string]Handoff,
+	gates map[string]GateDecision,
+	failedOptional map[string]struct{},
+	failedOptionalReasons map[string]StopReason,
+	waitingHuman map[string]struct{},
+) error {
+	var waveErr error
+	for index, outcome := range wave {
+		node := metadata.nodes[ready[index]]
+		if outcome.err != nil {
+			if errors.Is(outcome.err, ErrHumanApprovalRequired) {
+				waitingHuman[node.ID] = struct{}{}
+				continue
+			}
+			if node.Optional && definition.FailurePolicy.Mode == CollectAvailable {
+				failedOptional[node.ID] = struct{}{}
+				failedOptionalReasons[node.ID] = optionalStopReason(outcome.err)
+				continue
+			}
+			if waveErr == nil {
+				waveErr = fmt.Errorf("workflow %q node %q: %w", definition.ID, node.ID, outcome.err)
+			}
+			continue
+		}
+		outputs[node.ID] = outcome.handoff
+		delete(failedOptionalReasons, node.ID)
+		delete(waitingHuman, node.ID)
+		if outcome.gate != nil {
+			gates[node.ID] = *outcome.gate
+		}
+	}
+	return waveErr
+}
+
 func (orchestrator *Orchestrator) runConvergenceLoop(
 	runCtx context.Context,
 	definition Definition,
@@ -242,35 +281,11 @@ func (orchestrator *Orchestrator) runConvergenceLoop(
 		if err != nil {
 			return err
 		}
-		var waveErr error
-		for index, outcome := range wave {
-			node := metadata.nodes[ready[index]]
-			if outcome.err != nil {
-				if errors.Is(outcome.err, ErrHumanApprovalRequired) {
-					waitingHuman[node.ID] = struct{}{}
-					continue
-				}
-				if node.Optional && definition.FailurePolicy.Mode == CollectAvailable {
-					failedOptional[node.ID] = struct{}{}
-					failedOptionalReasons[node.ID] = optionalStopReason(
-						outcome.err,
-					)
-					continue
-				}
-				if waveErr == nil {
-					waveErr = fmt.Errorf("workflow %q node %q: %w", definition.ID, node.ID, outcome.err)
-				}
-				continue
-			}
-			outputs[node.ID] = outcome.handoff
-			delete(failedOptionalReasons, node.ID)
-			delete(waitingHuman, node.ID)
-			if outcome.gate != nil {
-				gates[node.ID] = *outcome.gate
-			}
-		}
-		if waveErr != nil {
-			return waveErr
+		if err := applyConvergenceWave(
+			definition, metadata, ready, wave,
+			outputs, gates, failedOptional, failedOptionalReasons, waitingHuman,
+		); err != nil {
+			return err
 		}
 		if hasClarificationGate(gates) {
 			return convergenceError{

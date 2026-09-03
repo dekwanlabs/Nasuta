@@ -236,6 +236,28 @@ func validateAgentNodeContract(catalog *Catalog, definition Definition, node Nod
 	if agentDefinition.ID != node.Agent.ID || agentDefinition.Version != node.Agent.Version {
 		return fmt.Errorf("publish workflow %q node %q agent is not pinned", definition.ID, node.ID)
 	}
+	if err := validateAgentNodePermissions(definition, node, agentDefinition); err != nil {
+		return err
+	}
+	if err := validateComposerAgentContract(definition.ID, node, agentDefinition); err != nil {
+		return err
+	}
+	if err := validateAgentNodeTools(catalog, definition, node, agentDefinition); err != nil {
+		return err
+	}
+	if err := validateAgentNodeSchemas(catalog, definition, node, agentDefinition); err != nil {
+		return err
+	}
+	if err := validateAgentNodeToolBudget(definition, node, agentDefinition); err != nil {
+		return err
+	}
+	if err := validateAgentNodeModelPrices(definition, node, agentDefinition); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateAgentNodePermissions(definition Definition, node NodeDefinition, agentDefinition agentapi.Definition) error {
 	if err := scope.ValidateAgentRuntime(agentDefinition.Permissions.Scopes); err != nil {
 		return fmt.Errorf(
 			"publish workflow %q node %q agent permissions: %w",
@@ -248,31 +270,38 @@ func validateAgentNodeContract(catalog *Catalog, definition Definition, node Nod
 			definition.ID, node.ID, err,
 		)
 	}
-	if err := validateComposerAgentContract(definition.ID, node, agentDefinition); err != nil {
-		return err
+	return nil
+}
+
+func validateAgentNodeTools(catalog *Catalog, definition Definition, node NodeDefinition, agentDefinition agentapi.Definition) error {
+	if !node.RestrictVisibleTools {
+		return nil
 	}
-	if node.RestrictVisibleTools {
-		if err := ensureToolSubset(
-			node.VisibleToolIDs,
-			agentDefinition.Tools.VisibleToolIDs,
-			agentDefinition.Tools.RestrictVisible ||
-				len(agentDefinition.Tools.VisibleToolIDs) > 0,
-		); err != nil {
-			return fmt.Errorf(
-				"publish workflow %q node %q tools exceed agent definition: %w",
-				definition.ID, node.ID, err,
-			)
-		}
+	if err := ensureToolSubset(
+		node.VisibleToolIDs,
+		agentDefinition.Tools.VisibleToolIDs,
+		agentDefinition.Tools.RestrictVisible ||
+			len(agentDefinition.Tools.VisibleToolIDs) > 0,
+	); err != nil {
+		return fmt.Errorf(
+			"publish workflow %q node %q tools exceed agent definition: %w",
+			definition.ID, node.ID, err,
+		)
 	}
+	return nil
+}
+
+func validateAgentNodeSchemas(catalog *Catalog, definition Definition, node NodeDefinition, agentDefinition agentapi.Definition) error {
 	if err := catalog.schemas.ValidateCompatibility(node.InputSchema, agentDefinition.InputSchema); err != nil {
 		return fmt.Errorf("publish workflow %q node %q agent input: %w", definition.ID, node.ID, err)
 	}
 	if err := catalog.schemas.ValidateCompatibility(agentDefinition.OutputSchema, node.OutputSchema); err != nil {
 		return fmt.Errorf("publish workflow %q node %q agent output: %w", definition.ID, node.ID, err)
 	}
-	if err := validateAgentNodeToolBudget(definition, node, agentDefinition); err != nil {
-		return err
-	}
+	return nil
+}
+
+func validateAgentNodeModelPrices(definition Definition, node NodeDefinition, agentDefinition agentapi.Definition) error {
 	if definition.Budget.MaxCostMicros > 0 &&
 		(agentDefinition.Model.InputPriceMicrosPerMillionTokens <= 0 ||
 			agentDefinition.Model.OutputPriceMicrosPerMillionTokens <= 0) {

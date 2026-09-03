@@ -19,23 +19,30 @@ type ModelUsageCeiling struct {
 }
 
 // UsageCeiling includes continuation and bounded answer-repair calls.
+func validateUsageCeilingInputs(budget agentapi.BudgetPolicy, model agentapi.ModelPolicy) error {
+	if budget.MaxSteps <= 0 || budget.ContextTokens <= 0 || budget.MaxContinueRounds < 0 {
+		return fmt.Errorf("model usage ceiling requires valid agent budgets")
+	}
+	if model.MaxOutputTokens <= 0 {
+		return fmt.Errorf("model usage ceiling requires positive output tokens")
+	}
+	if model.InputPriceMicrosPerMillionTokens < 0 ||
+		model.OutputPriceMicrosPerMillionTokens < 0 {
+		return fmt.Errorf("model prices cannot be negative")
+	}
+	if (model.InputPriceMicrosPerMillionTokens == 0) !=
+		(model.OutputPriceMicrosPerMillionTokens == 0) {
+		return fmt.Errorf("model prices must be configured together")
+	}
+	return nil
+}
+
 func UsageCeiling(
 	budget agentapi.BudgetPolicy,
 	model agentapi.ModelPolicy,
 ) (ModelUsageCeiling, error) {
-	if budget.MaxSteps <= 0 || budget.ContextTokens <= 0 || budget.MaxContinueRounds < 0 {
-		return ModelUsageCeiling{}, fmt.Errorf("model usage ceiling requires valid agent budgets")
-	}
-	if model.MaxOutputTokens <= 0 {
-		return ModelUsageCeiling{}, fmt.Errorf("model usage ceiling requires positive output tokens")
-	}
-	if model.InputPriceMicrosPerMillionTokens < 0 ||
-		model.OutputPriceMicrosPerMillionTokens < 0 {
-		return ModelUsageCeiling{}, fmt.Errorf("model prices cannot be negative")
-	}
-	if (model.InputPriceMicrosPerMillionTokens == 0) !=
-		(model.OutputPriceMicrosPerMillionTokens == 0) {
-		return ModelUsageCeiling{}, fmt.Errorf("model prices must be configured together")
+	if err := validateUsageCeilingInputs(budget, model); err != nil {
+		return ModelUsageCeiling{}, err
 	}
 
 	generationCalls, err := checkedAdd(

@@ -292,6 +292,20 @@ func (backend *sqlBudgetBackend) AcquireLeaseWithFence(rootRunID, owner string, 
 		return 0, err
 	}
 	defer tx.Rollback()
+	fence, err := acquireLeaseFenceTx(tx, rootRunID, owner, now)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`UPDATE agent_run_budget_ledger SET lease_owner=?,lease_expires_at=?,lease_fence=?,version=version+1,updated_at=? WHERE root_run_id=?`, owner, store.DatabaseTime(expires.Format(time.RFC3339Nano)), fence, store.DatabaseTime(now.Format(time.RFC3339Nano)), rootRunID); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return fence, nil
+}
+
+func acquireLeaseFenceTx(tx *sql.Tx, rootRunID, owner string, now time.Time) (int64, error) {
 	var currentOwner string
 	var currentExpiry sql.NullTime
 	var reservedRaw []byte
@@ -318,12 +332,6 @@ func (backend *sqlBudgetBackend) AcquireLeaseWithFence(rootRunID, owner string, 
 		fence++
 	default:
 		return 0, fmt.Errorf("%w: root %q is owned by %q", budget.ErrLeaseHeld, rootRunID, currentOwner)
-	}
-	if _, err := tx.Exec(`UPDATE agent_run_budget_ledger SET lease_owner=?,lease_expires_at=?,lease_fence=?,version=version+1,updated_at=? WHERE root_run_id=?`, owner, store.DatabaseTime(expires.Format(time.RFC3339Nano)), fence, store.DatabaseTime(now.Format(time.RFC3339Nano)), rootRunID); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
 	}
 	return fence, nil
 }
@@ -1399,37 +1407,37 @@ func (rs *Store) CreateWithDurableBudget(record Record, limits agentapi.RunLimit
 }
 
 // CreateWithDurableBudgetContext atomically creates the run, ledger and initial lease.
-func (rs *Store) CreateWithDurableBudgetContext(ctx context.Context, record Record, limits agentapi.RunLimits) (agentapi.RunBudgetGate, error) {
-	if rs == nil || rs.db == nil {
-		return nil, fmt.Errorf("agent/runstore: database is required")
-	}
-	if rs.budgetLeaseOwner == "" {
-		return nil, fmt.Errorf("agent/runstore: durable budget lease owner is required")
-	}
+type durableRunPayload struct {
+	limitsRaw     []byte
+	zeroRaw       []byte
+	selectionJSON []byte
+	runLimitsJSON []byte
+}
+
+func serializeDurableRun(record Record, limits agentapi.RunLimits) (durableRunPayload, error) {
 	limitsRaw, err := json.Marshal(limits)
 	if err != nil {
-		return nil, err
+		return durableRunPayload{}, err
 	}
 	zeroRaw, err := json.Marshal(agentapi.Usage{})
 	if err != nil {
-		return nil, err
+		return durableRunPayload{}, err
 	}
 	selectionJSON, err := json.Marshal(record.Selection)
 	if err != nil {
-		return nil, err
+		return durableRunPayload{}, err
 	}
 	runLimitsJSON, err := json.Marshal(record.RunLimits)
 	if err != nil {
-		return nil, err
+		return durableRunPayload{}, err
 	}
-	now := time.Now().UTC()
-	ttl := durableBudgetLeaseTTL(limits.Deadline, now)
-	expiry := now.Add(ttl)
-	tx, err := rs.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
+	return durableRunPayload{
+		limitsRaw: limitsRaw, zeroRaw: zeroRaw,
+		selectionJSON: selectionJSON, runLimitsJSON: runLimitsJSON,
+	}, nil
+}
+
+func normalizeDurableRunRecord(record Record, now time.Time) Record {
 	if record.RunKind == "" {
 		record.RunKind = KindAgent
 	}
@@ -1439,18 +1447,48 @@ func (rs *Store) CreateWithDurableBudgetContext(ctx context.Context, record Reco
 	if record.StartedAt == "" {
 		record.StartedAt = now.Format(time.RFC3339)
 	}
-	_, err = tx.Exec(`INSERT INTO agent_runs(
+	return record
+}
+
+func insertDurableRunTx(ctx context.Context, tx *sql.Tx, rs *Store, record Record, payload durableRunPayload, expiry time.Time) error {
+	now := time.Now().UTC()
+	_, err := tx.Exec(`INSERT INTO agent_runs(
 		id,run_kind,user_id,session_id,agent_id,definition_version,definition_hash,selection_json,tool_snapshot_id,
 		input_schema_version,output_schema_version,parent_run_id,capability_id,capability_version,capability_content_hash,
 		delegation_id,delegation_depth,run_limits_json,capability_registry_revision,workflow_run_id,workflow_node_id,
 		question,status,error_code,mode,max_steps,step_count,token_used,started_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, record.ID, record.RunKind, record.UserID, record.SessionID, record.AgentID, record.DefinitionVersion, record.DefinitionHash, selectionJSON, record.ToolSnapshotID, record.InputSchemaVersion, record.OutputSchemaVersion, record.ParentRunID, record.CapabilityID, record.CapabilityVersion, record.CapabilityHash, record.DelegationID, record.DelegationDepth, runLimitsJSON, record.CapabilityRevision, record.WorkflowRunID, record.WorkflowNodeID, record.Question, record.Status, record.ErrorCode, record.Mode, record.MaxSteps, 0, 0, store.DatabaseTime(record.StartedAt))
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, record.ID, record.RunKind, record.UserID, record.SessionID, record.AgentID, record.DefinitionVersion, record.DefinitionHash, payload.selectionJSON, record.ToolSnapshotID, record.InputSchemaVersion, record.OutputSchemaVersion, record.ParentRunID, record.CapabilityID, record.CapabilityVersion, record.CapabilityHash, record.DelegationID, record.DelegationDepth, payload.runLimitsJSON, record.CapabilityRevision, record.WorkflowRunID, record.WorkflowNodeID, record.Question, record.Status, record.ErrorCode, record.Mode, record.MaxSteps, 0, 0, store.DatabaseTime(record.StartedAt))
 	if err != nil {
-		return nil, fmt.Errorf("create run and budget transaction: %w", err)
+		return fmt.Errorf("create run and budget transaction: %w", err)
 	}
-	_, err = tx.Exec(`INSERT INTO agent_run_budget_ledger(root_run_id,limits_json,used_usage_json,reserved_usage_json,price_version,lease_owner,lease_expires_at,lease_fence,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, record.ID, limitsRaw, zeroRaw, zeroRaw, "", rs.budgetLeaseOwner, store.DatabaseTime(expiry.Format(time.RFC3339Nano)), int64(1), int64(0), store.DatabaseTime(now.Format(time.RFC3339Nano)), store.DatabaseTime(now.Format(time.RFC3339Nano)))
+	_, err = tx.Exec(`INSERT INTO agent_run_budget_ledger(root_run_id,limits_json,used_usage_json,reserved_usage_json,price_version,lease_owner,lease_expires_at,lease_fence,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, record.ID, payload.limitsRaw, payload.zeroRaw, payload.zeroRaw, "", rs.budgetLeaseOwner, store.DatabaseTime(expiry.Format(time.RFC3339Nano)), int64(1), int64(0), store.DatabaseTime(now.Format(time.RFC3339Nano)), store.DatabaseTime(now.Format(time.RFC3339Nano)))
 	if err != nil {
-		return nil, fmt.Errorf("create budget ledger: %w", err)
+		return fmt.Errorf("create budget ledger: %w", err)
+	}
+	return nil
+}
+
+func (rs *Store) CreateWithDurableBudgetContext(ctx context.Context, record Record, limits agentapi.RunLimits) (agentapi.RunBudgetGate, error) {
+	if rs == nil || rs.db == nil {
+		return nil, fmt.Errorf("agent/runstore: database is required")
+	}
+	if rs.budgetLeaseOwner == "" {
+		return nil, fmt.Errorf("agent/runstore: durable budget lease owner is required")
+	}
+	serialized, err := serializeDurableRun(record, limits)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	ttl := durableBudgetLeaseTTL(limits.Deadline, now)
+	tx, err := rs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	record = normalizeDurableRunRecord(record, now)
+	if err := insertDurableRunTx(ctx, tx, rs, record, serialized, now.Add(ttl)); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

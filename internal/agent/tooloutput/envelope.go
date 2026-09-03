@@ -43,10 +43,7 @@ type envelopeChunk struct {
 
 func pack(req Request, sourceFormat string, chunks []chunk, contexts []ancestorContext, originalTokens int) Result {
 	ranked := rankChunks(chunks, req.Question)
-	contextByRef := make(map[string]ancestorContext, len(contexts))
-	for _, item := range contexts {
-		contextByRef[item.ref] = item
-	}
+	contextByRef := indexContexts(contexts)
 
 	base := buildEnvelope(sourceFormat, chunks, contexts, nil, req.Notices, originalTokens)
 	baseBytes, err := json.Marshal(base)
@@ -54,32 +51,7 @@ func pack(req Request, sourceFormat string, chunks []chunk, contexts []ancestorC
 		return fallbackResult(req, "envelope metadata exceeds token budget")
 	}
 
-	target := req.MaxTokens * 97 / 100
-	if target <= 0 {
-		target = req.MaxTokens
-	}
-	used := EstimateTokens(string(baseBytes))
-	selected := make([]int, 0, len(chunks))
-	selectedContexts := make(map[string]struct{}, len(contexts))
-	for _, index := range ranked {
-		cost := estimateEnvelopeChunk(chunks[index])
-		for _, ref := range chunks[index].contextRefs {
-			if _, exists := selectedContexts[ref]; exists {
-				continue
-			}
-			if item, ok := contextByRef[ref]; ok {
-				cost += estimateEnvelopeContext(item)
-			}
-		}
-		if used+cost > target {
-			continue
-		}
-		selected = append(selected, index)
-		used += cost
-		for _, ref := range chunks[index].contextRefs {
-			selectedContexts[ref] = struct{}{}
-		}
-	}
+	selected := selectChunksWithinBudget(req, baseBytes, ranked, chunks, contextByRef)
 	if len(selected) == 0 {
 		return packTruncatedChunk(req, sourceFormat, chunks, contexts, ranked, originalTokens)
 	}
@@ -93,6 +65,54 @@ func pack(req Request, sourceFormat string, chunks []chunk, contexts []ancestorC
 		selected = selected[:len(selected)-1]
 	}
 	return packTruncatedChunk(req, sourceFormat, chunks, contexts, ranked, originalTokens)
+}
+
+func indexContexts(contexts []ancestorContext) map[string]ancestorContext {
+	contextByRef := make(map[string]ancestorContext, len(contexts))
+	for _, item := range contexts {
+		contextByRef[item.ref] = item
+	}
+	return contextByRef
+}
+
+func packTargetBudget(req Request, baseBytes []byte) int {
+	target := req.MaxTokens * 97 / 100
+	if target <= 0 {
+		target = req.MaxTokens
+	}
+	return target - EstimateTokens(string(baseBytes))
+}
+
+func selectChunksWithinBudget(
+	req Request,
+	baseBytes []byte,
+	ranked []int,
+	chunks []chunk,
+	contextByRef map[string]ancestorContext,
+) []int {
+	remaining := packTargetBudget(req, baseBytes)
+	selected := make([]int, 0, len(chunks))
+	selectedContexts := make(map[string]struct{}, len(contextByRef))
+	for _, index := range ranked {
+		cost := estimateEnvelopeChunk(chunks[index])
+		for _, ref := range chunks[index].contextRefs {
+			if _, exists := selectedContexts[ref]; exists {
+				continue
+			}
+			if item, ok := contextByRef[ref]; ok {
+				cost += estimateEnvelopeContext(item)
+			}
+		}
+		if cost > remaining {
+			continue
+		}
+		selected = append(selected, index)
+		remaining -= cost
+		for _, ref := range chunks[index].contextRefs {
+			selectedContexts[ref] = struct{}{}
+		}
+	}
+	return selected
 }
 
 func buildEnvelope(sourceFormat string, chunks []chunk, contexts []ancestorContext, selected []int, notices []string, originalTokens int) envelope {

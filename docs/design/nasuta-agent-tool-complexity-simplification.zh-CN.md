@@ -590,3 +590,114 @@ GOWORK=off go test -race -count=1 ./internal/agent/... ./tool/... ./agent/...
 15  internal/agent/workflow/executor_orchestration.go:205 (method).runConvergenceLoop
 15  internal/agent/workflow/service_approval.go:99 (method).loadApprovalTarget
 ```
+
+## 11. 本轮继续简化（第四轮）
+
+本轮继续从 Go AST 静态复杂度 top-30 出发，把上一轮验证后仍处于 15 级的所有热点全部清零，
+并补齐前一轮尾部分拆点（`FindCodeByVector`、`prepareStart`、`runTaskOwned`、`runConvergenceLoop`、
+`loadApprovalTarget`、`collectReports`、`assembleHistoricalTurns`、`Start`、`admitToolCall`、
+`UsageCeiling`、`resolve`、`CreateWithDurableBudgetContext`），全部保持行为语义、错误字符串、日志格式、
+SQL 幂等与排序不变。
+
+1. **tool `FindCodeByVector`（15 → 拆分）**
+   `internal/agent/tools/code_search.go`
+   - 拆出 `codeSearchFilters`、`applyCodeSparseQuery`、`runCodeVectorSearch`、
+     `dedupeCodeHits`、`rankCodeCandidates`。保留 dense/hybrid 行为、metadata 过滤与排序。
+
+2. **workflow `prepareStart`（15 → 拆分）**
+   `internal/agent/workflow/service_execution.go`
+   - 拆出 `validateStartPermissions`、`resolveStartPosition`。
+
+3. **delegation `runTaskOwned`（15 → 拆分）**
+   `internal/agent/delegation/executor.go`
+   - 拆出 `preflightFailureOutcome`、`acquireOwnedSlot`、`releaseOwnedSlot`、
+     `settleSlotCancelled`、`settleChildLimitsFailed`。
+   - `defer executor.releaseOwnedSlot(task)` 与原先 `defer func() { <-slot }()` 等价；
+     slot 获取后仍保留父级取消的二次检查，避免排队任务在父级取消后启动。
+
+4. **workflow `runConvergenceLoop`（15 → 拆分）**
+   `internal/agent/workflow/executor_orchestration.go`
+   - 拆出 `applyConvergenceWave`，把单轮收敛 wave 的应用逻辑隔离。
+
+5. **workflow `loadApprovalTarget`（15 → 拆分）**
+   `internal/agent/workflow/service_approval.go`
+   - 拆出 `validateApprovalIdentity`。
+
+6. **delegation `collectReports`（15 → 拆分）**
+   `internal/agent/delegation/validator.go`
+   - 拆出 `collectReportMetadata`、`collectReportFindings`、`reportCoverageCounter`。
+
+7. **qa `assembleHistoricalTurns`（15 → 拆分）**
+   `internal/agent/qa/context.go`
+   - 拆出 `assembleHistoricalTurn`，返回 bool 表示是否成功输出表示，`omit` 统计行为等价。
+
+8. **workflow `Start`（15 → 拆分）**
+   `internal/agent/workflow/service_execution.go`
+   - 拆出 `runPreparedInBackground`，goroutine 内日志与错误过滤原文保留。
+
+9. **execution `admitToolCall`（15 → 拆分）**
+   `internal/agent/execution/tool_admission.go`
+   - 拆出 `admitToolCallDecision`。
+
+10. **execution `UsageCeiling`（15 → 拆分）**
+    `internal/agent/execution/model_budget.go`
+    - 拆出 `validateUsageCeilingInputs`。
+
+11. **catalog `resolve`（15 → 拆分）**
+    `internal/agent/catalog/catalog.go`
+    - 拆出 `resolveRollout`。
+
+12. **run `CreateWithDurableBudgetContext`（15 → 拆分）**
+    `internal/agent/run/store_budget.go`
+    - 拆出 `serializeDurableRun`、`normalizeDurableRunRecord`、`insertDurableRunTx`、
+      `durableRunPayload` 类型。
+
+13. **delegation `validateVerificationOutput`（15 → 拆分）**
+    `internal/agent/delegation/verifier.go`
+    - 拆出 `verificationReferenceSets`、`validateVerificationVerdict`。
+
+14. **execution `concludeWithRecovery`（15 → 拆分）**
+    `internal/agent/execution/answer_generation.go`
+    - 拆出 `retryForceConclusionWithoutReasoning`、`recoverConclusionToolProtocol`、
+      `enforceConclusionContracts`。
+
+15. **tooloutput `pack`（15 → 拆分）**
+    `internal/agent/tooloutput/envelope.go`
+    - 拆出 `indexContexts`、`packTargetBudget`、`selectChunksWithinBudget`。
+
+16. **execution `limitModelOutputForPhase`（15 → 拆分）**
+    `internal/agent/execution/model_call.go`
+    - 拆出 `modelOutputAvailability`、`modelOutputMinimum`。
+
+17. **delegation `validateReport`（15 → 拆分）**
+    `internal/agent/delegation/validator.go`
+    - 拆出 `validateReportStatus`、`validateReportCardinality`、`validateReportFindings`。
+
+18. **workflow `validateAgentNodeContract`（15 → 拆分）**
+    `internal/agent/workflow/catalog.go`
+    - 拆出 `validateAgentNodePermissions`、`validateAgentNodeTools`、
+      `validateAgentNodeSchemas`、`validateAgentNodeModelPrices`。
+
+19. **run `AcquireLeaseWithFence`（15 → 拆分）**
+    `internal/agent/run/store_budget.go`
+    - 拆出 `acquireLeaseFenceTx`，lease 获取事务体移出主入口。
+
+20. **definition `validateEvidenceUnit`（15 → 拆分）**
+    `internal/agent/definition/prepare.go`
+    - 拆出 `validateEvidenceUnitIdentity`、`validateEvidenceUnitSections`。
+
+21. **run `validateDelegationReservation`（15 → 拆分）**
+    `internal/agent/run/store_delegation.go`
+    - 拆出 `validateDelegationTokenGrant`、`validateDelegationCostGrant`。
+
+## 验证结果
+
+```bash
+git diff --check
+GOWORK=off go build ./...
+GOWORK=off go vet ./...
+GOWORK=off go test ./...
+GOWORK=off go test -race -count=1 ./internal/agent/... ./tool/... ./agent/...
+```
+
+全部通过。重新运行 Go AST 统计，15 级热点全部清零，当前最高复杂度已从 15 降为 14。
