@@ -194,7 +194,66 @@ func (agent *Agent) finishLoop(state *compiledLoop) {
 			state.runID, state.result.Steps)
 		agent.concludeLoop(state)
 	}
+	agent.classifyTerminalResult(state)
 	agent.finalizeLoop(state)
+}
+
+// classifyTerminalResult derives the answer-complete, fallback-used, and
+// termination-reason flags from loop facts so the public result never reports
+// a fallback or partial answer as a clean success.
+func (agent *Agent) classifyTerminalResult(state *compiledLoop) {
+	if state == nil || state.result == nil {
+		return
+	}
+	result := state.result
+
+	// Completeness defaults to failed; the loops below upgrade it.
+	result.Completeness = "failed"
+	if result.Aborted {
+		result.Completeness = "failed"
+		if result.TerminationReason == "" {
+			result.TerminationReason = "cancelled"
+		}
+		return
+	}
+
+	deadlineCause := context.DeadlineExceeded
+	if result.Err != nil {
+		result.TerminationReason = terminationReasonFor(result.Err, deadlineCause)
+	}
+
+	hasAnswer := strings.TrimSpace(result.Answer) != ""
+	// A deterministic fallback is not a deliverable partial answer: it exists
+	// only to keep the run from returning an empty body after the real
+	// synthesis path failed (provider outage, deadline, budget). It is the
+	// only fallback flavor that leaves Err nil (the cause is recorded on
+	// TerminationReason instead), so we use that to distinguish it from a real
+	// partial/fallback model answer that satisfied the output contract.
+	deterministicFallback := hasAnswer &&
+		result.ForcedConclusion &&
+		result.FallbackUsed &&
+		result.Err == nil
+
+	switch {
+	case state.answered && !result.ForcedConclusion && !result.FallbackUsed:
+		result.AnswerComplete = true
+		result.Completeness = "complete"
+		if result.TerminationReason == "" {
+			result.TerminationReason = "completed"
+		}
+	case hasAnswer && !deterministicFallback:
+		result.AnswerComplete = false
+		result.Completeness = "partial"
+		if result.TerminationReason == "" {
+			result.TerminationReason = "incomplete"
+		}
+	default:
+		result.AnswerComplete = false
+		result.Completeness = "failed"
+		if result.TerminationReason == "" {
+			result.TerminationReason = "failed"
+		}
+	}
 }
 
 func (agent *Agent) shouldForceConclusion(state *compiledLoop) bool {
@@ -220,7 +279,43 @@ func (agent *Agent) toolsForStep(state *compiledLoop, step int) []llm.ToolDef {
 	if agent.reservesLastStepForAnswer() && state.stepLimit > 1 && step >= state.stepLimit {
 		return nil
 	}
-	return state.tools
+	return agent.effectiveToolsForStep(state)
+}
+
+// effectiveToolsForStep applies phase-aware tool surface narrowing to the
+// already-pruned definitions. Once every delegation the parent dispatched has
+// settled, the parent must converge to synthesis instead of polling status or
+// dispatching again, so the delegation tools and the status backfill query are
+// removed from the offered surface.
+func (agent *Agent) effectiveToolsForStep(state *compiledLoop) []llm.ToolDef {
+	tools := state.tools
+	if !agent.delegationSettled(state) {
+		return tools
+	}
+	filtered := tools[:0]
+	for _, def := range tools {
+		name := def.Function.Name
+		if name == string(delegation.DelegateToolID) ||
+			name == string(delegation.DelegationStatusToolID) {
+			continue
+		}
+		filtered = append(filtered, def)
+	}
+	return filtered
+}
+
+// delegationSettled reports whether the parent dispatched at least one
+// delegation and every dispatched batch has reached a durable settlement.
+func (agent *Agent) delegationSettled(state *compiledLoop) bool {
+	if len(state.dispatchedDelegations) == 0 {
+		return false
+	}
+	for _, id := range state.dispatchedDelegations {
+		if !state.settledDelegations[id] {
+			return false
+		}
+	}
+	return true
 }
 
 func (agent *Agent) finalizeLoop(state *compiledLoop) {
@@ -278,11 +373,14 @@ func (agent *Agent) installDeterministicConclusion(state *compiledLoop, cause er
 		state.result.DelegationAdoptions = state.answerContract.Adoptions()
 	}
 	state.result.Answer = answer
-	state.result.Err = nil
 	state.result.ForcedConclusion = true
 	state.result.Evidence.ForcedConclusion = true
+	state.result.FallbackUsed = true
+	state.result.AnswerComplete = false
 	if cause != nil {
-		log.WarnfCtx(state.ctx, "[agent] run %s installed deterministic conclusion after %v", state.runID, cause)
+		state.result.TerminationReason = terminationReasonFor(cause, context.DeadlineExceeded)
+		log.WarnfCtx(state.ctx, "[agent] run %s installed deterministic conclusion after %v (termination_reason=%s)",
+			state.runID, cause, state.result.TerminationReason)
 	}
 	return true
 }
@@ -347,6 +445,8 @@ func (agent *Agent) concludeLoop(state *compiledLoop) {
 		if hasDeliverableAnswer(final) && validPartial && !errors.Is(err, ErrAnswerContractViolation) {
 			state.result.Answer += final.Content
 			state.result.DelegationAdoptions = state.answerContract.Adoptions()
+			state.result.FallbackUsed = true
+			state.result.AnswerComplete = false
 			state.result.Err = err
 			log.WarnfCtx(state.ctx, "[agent] run %s preserving partial force-conclusion answer: %v",
 				state.runID, err)
@@ -408,7 +508,7 @@ func (agent *Agent) awaitDelegationSettlement(
 		return agentapi.DelegationDispatchResult{}, false
 	}
 	dispatch, err := agent.cfg.DelegationAwaiter.AwaitSettlement(
-		state.loopCtx, delegationID, time.Time{},
+		state.loopCtx, delegationID, agent.settlementDeadline(state),
 	)
 	if err != nil {
 		log.WarnfCtx(state.ctx, "[agent] run %s await delegation %s failed: %v",
@@ -440,7 +540,7 @@ func dispatchStillRunning(dispatch agentapi.DelegationDispatchResult) bool {
 // settledDelegationNotice renders the server-side "children finished" notice
 // that hands the model the backfilled reports instead of delegation_status.
 func settledDelegationNotice(dispatch agentapi.DelegationDispatchResult) llm.Message {
-	encoded, err := json.Marshal(dispatch)
+	encoded, err := json.Marshal(delegationHandoffProjection(dispatch))
 	if err != nil {
 		encoded = []byte(`{"status":"unavailable"}`)
 	}
@@ -450,6 +550,105 @@ func settledDelegationNotice(dispatch agentapi.DelegationDispatchResult) llm.Mes
 			Dispatch string
 		}{Dispatch: string(encoded)}),
 	}
+}
+
+// delegationHandoffProjection bounds the server-side "children finished"
+// notice to the fields the parent needs to synthesize an answer. Full reports,
+// findings and flow edges stay in durable artifacts; only IDs, summaries,
+// top-level claims and unresolved gaps are copied into provider messages.
+func delegationHandoffProjection(dispatch agentapi.DelegationDispatchResult) agentapi.DelegationDispatchResult {
+	if len(dispatch.Tasks) == 0 {
+		return dispatch
+	}
+	tasks := make([]agentapi.DelegationTaskStatus, 0, len(dispatch.Tasks))
+	for _, task := range dispatch.Tasks {
+		tasks = append(tasks, delegationTaskProjection(task))
+	}
+	dispatch.Tasks = tasks
+	return dispatch
+}
+
+func delegationTaskProjection(task agentapi.DelegationTaskStatus) agentapi.DelegationTaskStatus {
+	if task.Report == nil {
+		return task
+	}
+	report := task.Report
+	projected := agentapi.DelegationTaskStatus{
+		TaskID:  task.TaskID,
+		Subject: task.Subject,
+		Status:  task.Status,
+		Report: &agentapi.DelegationReport{
+			ReportID:      report.ReportID,
+			Capability:    report.Capability,
+			Status:        report.Status,
+			Completeness:  report.Completeness,
+			Summary:       report.Summary,
+			Uncertainties: report.Uncertainties,
+			Error:         report.Error,
+		},
+	}
+	if report.Flow != nil {
+		projected.Report.Flow = &agentapi.FlowIR{
+			Subject:       report.Flow.Subject,
+			Status:        report.Flow.Status,
+			Uncertainties: report.Flow.Uncertainties,
+			Confidence:    report.Flow.Confidence,
+			Nodes:         make([]agentapi.FlowNode, 0, len(report.Flow.Nodes)),
+			Edges:         make([]agentapi.FlowEdge, 0, len(report.Flow.Edges)),
+		}
+		for _, node := range report.Flow.Nodes {
+			projected.Report.Flow.Nodes = append(projected.Report.Flow.Nodes, agentapi.FlowNode{
+				ID:    node.ID,
+				Label: node.Label,
+				Kind:  node.Kind,
+			})
+		}
+		// Only verified hops are safe to hand the parent as facts; inferred or
+		// unresolved hops are summarized in uncertainties rather than copied.
+		for _, edge := range report.Flow.Edges {
+			if edge.EvidenceState != "verified" {
+				continue
+			}
+			projected.Report.Flow.Edges = append(projected.Report.Flow.Edges, agentapi.FlowEdge{
+				From:          edge.From,
+				To:            edge.To,
+				Protocol:      edge.Protocol,
+				SyncMode:      edge.SyncMode,
+				EvidenceRefs:  edge.EvidenceRefs,
+				EvidenceState: edge.EvidenceState,
+			})
+		}
+	}
+	return projected
+}
+
+// settlementDeadline computes the latest wall-clock instant the parent may
+// block on a child batch before it must enter synthesis. It prefers the loop
+// deadline (run deadline minus answer reserve) so a slow child can never eat
+// into the final answer window, and it never extends beyond the outer request
+// deadline.
+func (agent *Agent) settlementDeadline(state *compiledLoop) time.Time {
+	if state == nil {
+		return time.Time{}
+	}
+	var deadline time.Time
+	consider := func(candidate time.Time) {
+		if candidate.IsZero() {
+			return
+		}
+		if deadline.IsZero() || candidate.Before(deadline) {
+			deadline = candidate
+		}
+	}
+	for _, ctx := range []context.Context{state.loopCtx, state.runCtx, state.ctx} {
+		if ctx == nil {
+			continue
+		}
+		if candidate, ok := ctx.Deadline(); ok {
+			consider(candidate)
+		}
+	}
+	return deadline
 }
 
 // awaitUnsettledDelegations is the finish-loop backstop: it waits for any
@@ -464,7 +663,7 @@ func (agent *Agent) awaitUnsettledDelegations(state *compiledLoop) {
 			continue
 		}
 		dispatch, err := agent.cfg.DelegationAwaiter.AwaitSettlement(
-			state.runCtx, delegationID, time.Time{},
+			state.loopCtx, delegationID, agent.settlementDeadline(state),
 		)
 		if err != nil {
 			log.WarnfCtx(state.ctx, "[agent] run %s finish await delegation %s failed: %v",

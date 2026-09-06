@@ -365,6 +365,10 @@ const (
 	RunSucceeded RunStatus = "succeeded"
 	RunFailed    RunStatus = "failed"
 	RunCancelled RunStatus = "cancelled"
+	// RunPartial is a terminal status for a run that produced a usable,
+	// partially complete answer but exhausted time or budget before it could
+	// satisfy the full output contract. It must not be mapped to succeeded.
+	RunPartial RunStatus = "partial"
 )
 
 type Usage struct {
@@ -425,6 +429,20 @@ type RunResult struct {
 	DelegationAdoptions  []DelegationAdoption  `json:"delegation_adoptions,omitempty"`
 	Usage                Usage                 `json:"usage"`
 	Error                *RunError             `json:"error,omitempty"`
+	// AnswerComplete is true only when the final answer satisfied the full
+	// output contract. Partial or fallback answers report false.
+	AnswerComplete bool `json:"answer_complete,omitempty"`
+	// FallbackUsed records whether a deterministic/partial fallback was
+	// installed because the normal synthesis path did not complete.
+	FallbackUsed bool `json:"fallback_used,omitempty"`
+	// Completeness is a coarse terminal classification: complete, partial,
+	// failed, or unknown.
+	Completeness string `json:"completeness,omitempty"`
+	// TerminationReason preserves the primary terminal cause, e.g.
+	// completed, deadline_exceeded, budget_exhausted, cancelled,
+	// provider_error. It is deliberately separate from Status so callers can
+	// distinguish "partial because deadline" from "failed because provider".
+	TerminationReason string `json:"termination_reason,omitempty"`
 }
 
 // EvidenceObservation is the bounded content projection a workflow worker

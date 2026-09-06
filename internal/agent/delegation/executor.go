@@ -38,6 +38,10 @@ const (
 	ErrorChildExecution         = "child_execution_failed"
 	ErrorChildInputLimit        = "child_input_limit_exceeded"
 	ErrorChildOutputLimit       = "child_output_limit_exceeded"
+	// ErrorChildOutputSoftOverrun marks a small output-token overrun that is
+	// still within the settlement headroom. It is a soft budget signal, not a
+	// hard failure: the child's own status and report parsability are kept.
+	ErrorChildOutputSoftOverrun = "child_output_soft_overrun"
 )
 
 const (
@@ -48,6 +52,13 @@ const (
 	// parent's answer deadline so settlement/verification can still run before
 	// the parent must deliver.
 	childAnswerDeadlineSafety = 10 * time.Second
+
+	// childOutputTokenHeadroom is the small rounding/decoding headroom above
+	// which a child output overrun is still kept as a usable partial report
+	// instead of a hard failure. The initial value must be calibrated against
+	// provider replay; it deliberately covers the observed "reported 14164 vs
+	// available 14163" 1-token class without silently absorbing large overruns.
+	childOutputTokenHeadroom = 512
 )
 
 var errAttemptUnrecoverable = errors.New("delegation attempt cannot be recovered")
@@ -2001,11 +2012,30 @@ func (executor *Executor) completeOwnedAttempt(
 }
 
 func applyAttemptTokenLimits(result *agentapi.RunResult, task preparedTask) {
+	// A child that already failed or was cancelled for a more specific reason
+	// keeps that terminal classification; budget accounting must not mask a
+	// provider or execution error with a generic limit error.
+	if result.Status == agentapi.RunFailed || result.Status == agentapi.RunCancelled {
+		return
+	}
 	if task.inputTokens > 0 && result.Usage.InputTokens > task.inputTokens {
 		result.Status = agentapi.RunFailed
 		result.Error = &agentapi.RunError{Code: ErrorChildInputLimit, Message: "child input token limit exceeded"}
+		return
 	}
 	if task.outputTokens > 0 && result.Usage.OutputTokens > task.outputTokens {
+		overrun := result.Usage.OutputTokens - task.outputTokens
+		// A small rounding/decoding overrun must not discard a usable child
+		// report. Within headroom we keep the child's own terminal status and
+		// report parsability, and record a soft budget signal so the parent can
+		// still see the child as incomplete rather than silently succeeded.
+		if overrun <= childOutputTokenHeadroom {
+			result.Error = &agentapi.RunError{
+				Code:    ErrorChildOutputSoftOverrun,
+				Message: "child output tokens exceeded budget by a soft headroom",
+			}
+			return
+		}
 		result.Status = agentapi.RunFailed
 		result.Error = &agentapi.RunError{Code: ErrorChildOutputLimit, Message: "child output token limit exceeded"}
 	}

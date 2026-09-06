@@ -597,8 +597,19 @@ func (executor *Executor) classifyVerificationRunResult(
 		result.Error = &agentapi.RunError{
 			Code: ErrorChildInputLimit, Message: "verifier input token limit exceeded",
 		}
+		return result
 	}
 	if result.Usage.OutputTokens > executor.policy.MaxChildOutputTokens {
+		overrun := result.Usage.OutputTokens - executor.policy.MaxChildOutputTokens
+		if result.Status != agentapi.RunFailed && result.Status != agentapi.RunCancelled && overrun <= childOutputTokenHeadroom {
+			if result.Error == nil {
+				result.Error = &agentapi.RunError{
+					Code:    ErrorChildOutputSoftOverrun,
+					Message: "verifier output tokens exceeded budget by a soft headroom",
+				}
+			}
+			return result
+		}
 		result.Status = agentapi.RunFailed
 		result.Error = &agentapi.RunError{
 			Code: ErrorChildOutputLimit, Message: "verifier output token limit exceeded",

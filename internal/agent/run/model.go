@@ -17,11 +17,14 @@ const (
 	StatusFailed  Status = "failed"
 	StatusAborted Status = "aborted"
 	StatusPaused  Status = "paused"
+	// StatusPartial is terminal and means a usable but incomplete result was
+	// produced after time or budget was exhausted.
+	StatusPartial Status = "partial"
 )
 
 func (status Status) Terminal() bool {
 	switch status {
-	case StatusDone, StatusFailed, StatusAborted:
+	case StatusDone, StatusFailed, StatusAborted, StatusPartial:
 		return true
 	default:
 		return false
@@ -82,6 +85,18 @@ type Outcome struct {
 	DelegationAdoptions []agentapi.DelegationAdoption
 	HitCount            int
 	Err                 error
+	// AnswerComplete is true only when the output contract was fully
+	// satisfied. Partial and fallback answers report false.
+	AnswerComplete bool
+	// FallbackUsed records whether a deterministic/partial fallback was
+	// installed after the normal synthesis path did not complete.
+	FallbackUsed bool
+	// Completeness is a coarse terminal classification: complete, partial,
+	// failed, or unknown.
+	Completeness string
+	// TerminationReason preserves the primary terminal cause (completed,
+	// deadline_exceeded, budget_exhausted, cancelled, provider_error, ...).
+	TerminationReason string
 }
 
 type StepKind string

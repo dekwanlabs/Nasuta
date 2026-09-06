@@ -180,12 +180,37 @@ func mapResult(
 	}
 	outcome := execution.OutcomeFor(result, preRetrieved, runErr)
 	applyOutcomeErrorCode(&outcome)
+
+	// Recovery may still turn an invalid/truncated answer into a clean success,
+	// so it must run before the terminal partial classification below.
 	if outcome.Status != run.StatusDone && len(recovery) > 0 {
 		attemptOutputRecovery(runID, &outcome, outputSchema, schemas, recovery[0])
 	}
+
 	if outcome.Status != run.StatusDone {
 		return mapFailedResult(runID, result, outcome, usage)
 	}
+
+	// A usable-but-incomplete or fallback answer is terminal-partial, never a
+	// clean success. The execution loop records this explicitly via
+	// Completeness="partial" (and FallbackUsed=true on fallback paths), so we
+	// classify on those signals rather than on the default-false
+	// AnswerComplete field. Direct callers that construct a valid RunResult
+	// without running the loop keep the historical succeeded behavior.
+	// A deterministic fallback keeps Err nil while recording the cause on
+	// TerminationReason. It is not a deliverable partial answer, so it must
+	// remain failed rather than be upgraded through the partial path below.
+	deterministicFallback := result != nil &&
+		result.ForcedConclusion &&
+		result.FallbackUsed &&
+		result.Err == nil
+	if result != nil &&
+		result.OutputMode != agentapi.RunOutputEvidenceWorker &&
+		!deterministicFallback &&
+		(outcome.FallbackUsed || outcome.Completeness == "partial") {
+		return mapPartialResult(runID, result, outcome, usage)
+	}
+
 	return mapSucceededResult(runID, result, outcome, usage, schemas, outputSchema, recovery)
 }
 
@@ -205,6 +230,10 @@ func mapCancelledResult(
 	)
 	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
 	publicResult.Status = agentapi.RunCancelled
+	publicResult.AnswerComplete = false
+	publicResult.FallbackUsed = false
+	publicResult.Completeness = "failed"
+	publicResult.TerminationReason = "cancelled"
 	publicResult.Error = &agentapi.RunError{
 		Code: "cancelled", Message: cancelCause.Error(),
 	}
@@ -295,6 +324,10 @@ func applyRecoveredOutput(outcome *run.Outcome, recovered []byte) {
 	outcome.Err = nil
 	outcome.Answer = string(recovered)
 	outcome.Evidence.ForcedConclusion = true
+	outcome.AnswerComplete = true
+	outcome.FallbackUsed = false
+	outcome.Completeness = "complete"
+	outcome.TerminationReason = "recovered"
 }
 
 func mapFailedResult(
@@ -313,6 +346,13 @@ func mapFailedResult(
 	}
 	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
 	publicResult.Status = agentapi.RunFailed
+	publicResult.AnswerComplete = false
+	if publicResult.Completeness == "" || publicResult.Completeness == "complete" {
+		publicResult.Completeness = "failed"
+	}
+	if publicResult.TerminationReason == "" {
+		publicResult.TerminationReason = "failed"
+	}
 	publicResult.Error = &agentapi.RunError{
 		Code: outcome.ErrorCode, Message: runError.Error(),
 		Retryable: retryableError(runError),
@@ -331,6 +371,12 @@ func mapSucceededResult(
 ) (agentapi.RunResult, run.Outcome) {
 	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
 	publicResult.Status = agentapi.RunSucceeded
+	publicResult.AnswerComplete = true
+	publicResult.FallbackUsed = false
+	publicResult.Completeness = "complete"
+	if publicResult.TerminationReason == "" {
+		publicResult.TerminationReason = "completed"
+	}
 	if result != nil && result.OutputMode == agentapi.RunOutputEvidenceWorker {
 		output, validationErr, recovered := attachEvidenceWorkerStructuredOutput(
 			schemas, outputSchema, outcome.Answer, recovery,
@@ -400,6 +446,33 @@ func mapSucceededResult(
 	return publicResult, outcome
 }
 
+// mapPartialResult renders a usable-but-incomplete result as a distinct
+// terminal status instead of a clean success. It preserves the fallback and
+// deadline/budget cause so downstream consumers and QA telemetry can tell
+// "partial because deadline" apart from "failed because provider".
+func mapPartialResult(
+	runID string,
+	result *execution.RunResult,
+	outcome run.Outcome,
+	usage agentapi.Usage,
+) (agentapi.RunResult, run.Outcome) {
+	publicResult := publicTerminalEvidence(runID, result, outcome, usage)
+	publicResult.Status = agentapi.RunPartial
+	publicResult.AnswerComplete = false
+	publicResult.FallbackUsed = outcome.FallbackUsed
+	publicResult.Completeness = "partial"
+	if publicResult.TerminationReason == "" {
+		publicResult.TerminationReason = "incomplete"
+	}
+	if outcome.Err != nil {
+		publicResult.Error = &agentapi.RunError{
+			Code: outcome.ErrorCode, Message: outcome.Err.Error(),
+			Retryable: retryableError(outcome.Err),
+		}
+	}
+	return publicResult, outcome
+}
+
 // attachEvidenceWorkerStructuredOutput keeps evidence observations as the
 // primary worker artifact, but promotes a schema-valid investigation.report
 // when the model actually wrote one. Empty or invalid answers stay omitted so
@@ -444,6 +517,10 @@ func publicTerminalEvidence(
 		DelegationAdoptions: cloneDelegationAdoptions(
 			outcome.DelegationAdoptions,
 		),
+		AnswerComplete:    outcome.AnswerComplete,
+		FallbackUsed:      outcome.FallbackUsed,
+		Completeness:      outcome.Completeness,
+		TerminationReason: outcome.TerminationReason,
 	}
 	if result == nil {
 		return publicResult

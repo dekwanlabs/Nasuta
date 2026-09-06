@@ -118,7 +118,8 @@ func projectReportWithEvidence(
 	report.Completeness = agentapi.DelegationComplete
 	if result.Evidence.Status == "partial" ||
 		result.Evidence.Status == "unavailable" ||
-		len(report.Uncertainties) > 0 {
+		len(report.Uncertainties) > 0 ||
+		runErrorCode(result.Error) == ErrorChildOutputSoftOverrun {
 		report.Completeness = agentapi.DelegationIncomplete
 	}
 	report.Status = ProjectStatus(StatusFacts{

@@ -3490,3 +3490,49 @@ func TestDispatchIgnoresToolInvocationTimeoutForBatchDeadline(t *testing.T) {
 		t.Fatal("child runtime was not invoked")
 	}
 }
+
+func TestApplyAttemptTokenLimitsSoftOutputOverrun(t *testing.T) {
+	task := preparedTask{inputTokens: 1024, outputTokens: 1000}
+	result := agentapi.RunResult{
+		Status: agentapi.RunSucceeded,
+		Usage:  agentapi.Usage{InputTokens: 100, OutputTokens: 1001},
+	}
+	applyAttemptTokenLimits(&result, task)
+	if result.Status != agentapi.RunSucceeded {
+		t.Fatalf("status = %s, want succeeded for 1-token overrun", result.Status)
+	}
+	if result.Error == nil || result.Error.Code != ErrorChildOutputSoftOverrun {
+		t.Fatalf("error = %+v, want soft overrun code", result.Error)
+	}
+}
+
+func TestApplyAttemptTokenLimitsHardOutputOverrun(t *testing.T) {
+	task := preparedTask{inputTokens: 1024, outputTokens: 1000}
+	result := agentapi.RunResult{
+		Status: agentapi.RunSucceeded,
+		Usage:  agentapi.Usage{InputTokens: 100, OutputTokens: 2000},
+	}
+	applyAttemptTokenLimits(&result, task)
+	if result.Status != agentapi.RunFailed {
+		t.Fatalf("status = %s, want failed for large overrun", result.Status)
+	}
+	if result.Error == nil || result.Error.Code != ErrorChildOutputLimit {
+		t.Fatalf("error = %+v, want hard output limit code", result.Error)
+	}
+}
+
+func TestApplyAttemptTokenLimitsSoftOverrunDoesNotMaskFailure(t *testing.T) {
+	task := preparedTask{inputTokens: 1024, outputTokens: 1000}
+	result := agentapi.RunResult{
+		Status: agentapi.RunFailed,
+		Error:  &agentapi.RunError{Code: ErrorChildExecution, Message: "boom"},
+		Usage:  agentapi.Usage{InputTokens: 100, OutputTokens: 1001},
+	}
+	applyAttemptTokenLimits(&result, task)
+	if result.Status != agentapi.RunFailed {
+		t.Fatalf("status = %s, want failed", result.Status)
+	}
+	if result.Error == nil || result.Error.Code != ErrorChildExecution {
+		t.Fatalf("error = %+v, want original execution error", result.Error)
+	}
+}

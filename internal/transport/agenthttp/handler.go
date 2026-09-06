@@ -292,10 +292,6 @@ func (handler *Handler) ListRolloutAudit(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func authenticatedUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
-	return transport.AuthenticatedUser(w, r)
-}
-
 func adminUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
 	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {

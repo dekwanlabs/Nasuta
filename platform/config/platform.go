@@ -25,15 +25,21 @@ const (
 	DefaultCodingMaxConcurrency = 1
 	DefaultCodingWorktreeTTL    = 72 * time.Hour
 
-	DefaultDelegationEnabled              = true
-	DefaultDelegationMaxChildren          = 6
-	DefaultDelegationMaxConcurrent        = 6
-	DefaultDelegationChildTimeout         = 150 * time.Second
-	DefaultDelegationBatchTimeout         = 180 * time.Second
-	DefaultDelegationMaxChildTurns        = 4
-	DefaultDelegationMaxChildToolCalls    = 16
-	DefaultDelegationMaxChildInputTokens  = 96000
-	DefaultDelegationMaxChildOutputTokens = 16000
+	DefaultDelegationEnabled             = true
+	DefaultDelegationMaxChildren         = 6
+	DefaultDelegationMaxConcurrent       = 6
+	DefaultDelegationChildTimeout        = 150 * time.Second
+	DefaultDelegationBatchTimeout        = 180 * time.Second
+	DefaultDelegationMaxChildTurns       = 4
+	DefaultDelegationMaxChildToolCalls   = 16
+	DefaultDelegationMaxChildInputTokens = 96000
+	// DefaultDelegationMaxChildOutputTokens is the provider-side generation
+	// cap for a child investigator. It is intentionally separate from
+	// MaxReportTokens (the projection bound) so the model decode time is
+	// bounded before the report is post-trimmed. 8k is a conservative default
+	// for read-only investigation; it must be calibrated against provider
+	// replay and per-workload profiles.
+	DefaultDelegationMaxChildOutputTokens = 8000
 	DefaultDelegationMaxReportTokens      = 4000
 	DefaultDelegationMaxTotalTokens       = 720000
 	DefaultDelegationParentAnswerReserve  = 4000

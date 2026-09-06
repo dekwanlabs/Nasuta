@@ -53,7 +53,7 @@ func (agent *Agent) modelParametersForPhase(ctx context.Context) llm.ModelParame
 		return llm.ModelParameters{}
 	}
 	switch llm.UsagePhaseFromContext(ctx) {
-	case llm.PhaseForcedConclusion, llm.PhaseContinuation:
+	case llm.PhaseSynthesis, llm.PhaseForcedConclusion, llm.PhaseContinuation:
 		return agent.cfg.AnswerModelParameters.Clone()
 	default:
 		return agent.cfg.InvestigationModelParameters.Clone()

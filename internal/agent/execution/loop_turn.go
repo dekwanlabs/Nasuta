@@ -302,6 +302,8 @@ func (agent *Agent) interceptAnswerTurn(state *compiledLoop, turn modelTurn, res
 			turn.duration,
 		) {
 		state.result.Err = err
+		state.result.AnswerComplete = false
+		state.result.FallbackUsed = true
 		log.WarnfCtx(state.ctx, "[agent] run %s preserving partial final answer at step %d: %v",
 			state.runID, turn.step, err)
 		return true
@@ -324,6 +326,8 @@ func (agent *Agent) interceptAnswerTurn(state *compiledLoop, turn modelTurn, res
 			CreatedAt:           turn.started,
 		})
 		state.result.Err = err
+		state.result.AnswerComplete = false
+		state.result.FallbackUsed = true
 		log.WarnfCtx(
 			state.ctx,
 			"[agent] run %s preserving contract-valid partial final answer at step %d: %v",

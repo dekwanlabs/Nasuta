@@ -356,3 +356,33 @@ func containsString(values []string, target string) bool {
 	}
 	return false
 }
+
+func TestProjectReportMarksSoftOutputOverrunIncomplete(t *testing.T) {
+	output, err := json.Marshal(investigationOutput{Summary: "usable partial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := projectReport(agentapi.RunResult{
+		RunID:  "child-soft",
+		Status: agentapi.RunSucceeded,
+		Output: output,
+		Error:  &agentapi.RunError{Code: ErrorChildOutputSoftOverrun, Message: "soft headroom"},
+		Evidence: agentapi.EvidenceSummary{
+			Status:        "partial",
+			ToolCallCount: 2,
+			ResultCount:   2,
+		},
+	}, "knowledge.code.inspect", "report-soft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Completeness != agentapi.DelegationIncomplete {
+		t.Fatalf("completeness = %s, want incomplete", report.Completeness)
+	}
+	if report.Status != agentapi.DelegationPartial {
+		t.Fatalf("status = %s, want partial", report.Status)
+	}
+	if report.Error == nil || report.Error.Code != ErrorChildOutputSoftOverrun {
+		t.Fatalf("soft overrun error not preserved: %+v", report.Error)
+	}
+}

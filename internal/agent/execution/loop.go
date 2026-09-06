@@ -199,6 +199,16 @@ type RunResult struct {
 	Aborted              bool
 	Err                  error
 	SessionMessages      []llm.Message
+	// AnswerComplete is true only when the final answer satisfied the full
+	// output contract. Partial and fallback answers leave it false.
+	AnswerComplete bool
+	// FallbackUsed records whether a deterministic/partial fallback was
+	// installed after the normal synthesis path did not complete.
+	FallbackUsed bool
+	// Completeness is a coarse terminal classification.
+	Completeness string
+	// TerminationReason preserves the primary terminal cause.
+	TerminationReason string
 }
 
 // Input is a fully compiled request for the execution loop.
