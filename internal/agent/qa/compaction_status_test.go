@@ -40,11 +40,11 @@ func TestUpdateSessionCompactionStoresAndPublishesLatestStatus(t *testing.T) {
 	}
 
 	svc.updateCompaction(
-		"run-1", "session-1", "start",
+		"run-1", "start",
 		"正在压缩第 1–3 轮历史上下文…", 1, 3,
 	)
 
-	status := svc.CompactionStatus("session-1")
+	status := svc.CompactionStatus("run-1")
 	if status.Status != "start" || status.FromTurn != 1 || status.ToTurn != 3 ||
 		status.UpdatedAtMs == 0 {
 		t.Fatalf("stored status = %+v", status)

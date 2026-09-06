@@ -165,45 +165,32 @@ func (s *DocStore) ListDocsMetaByKind(kind string) ([]domain.DocRecord, error) {
 }
 
 func (s *DocStore) ListDocsByKinds(kinds []string) ([]domain.DocRecord, error) {
-	if len(kinds) == 0 {
-		return nil, nil
-	}
-	args := make([]any, len(kinds))
-	for i, k := range kinds {
-		args[i] = k
-	}
-	ph := strings.TrimRight(strings.Repeat("?,", len(kinds)), ",")
-	rows, err := s.db.Query(
-		`SELECT id, title, filename, COALESCE(kind,''), COALESCE(content,''), chunk_count, created_at, updated_at
-		 FROM documents WHERE kind IN (`+ph+`) ORDER BY updated_at DESC`,
-		args...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanDocRows(rows)
+	return s.listDocsByKinds(kinds, true)
 }
 
 func (s *DocStore) ListDocsMetaByKinds(kinds []string) ([]domain.DocRecord, error) {
+	return s.listDocsByKinds(kinds, false)
+}
+
+func (s *DocStore) listDocsByKinds(kinds []string, withContent bool) ([]domain.DocRecord, error) {
 	if len(kinds) == 0 {
 		return nil, nil
 	}
-	args := make([]any, len(kinds))
-	for i, k := range kinds {
-		args[i] = k
+	columns := "id, title, filename, COALESCE(kind,''), chunk_count, created_at, updated_at"
+	scanner := scanDocMetaRows
+	if withContent {
+		columns = "id, title, filename, COALESCE(kind,''), COALESCE(content,''), chunk_count, created_at, updated_at"
+		scanner = scanDocRows
 	}
-	ph := strings.TrimRight(strings.Repeat("?,", len(kinds)), ",")
+	args := stringSliceToAny(kinds)
 	rows, err := s.db.Query(
-		`SELECT id, title, filename, COALESCE(kind,''), chunk_count, created_at, updated_at
-		 FROM documents WHERE kind IN (`+ph+`) ORDER BY updated_at DESC`,
+		`SELECT `+columns+` FROM documents WHERE kind IN (`+placeholders(len(kinds))+`) ORDER BY updated_at DESC`,
 		args...,
 	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scanDocMetaRows(rows)
+	return scanner(rows)
 }
 
 func scanDocRows(rows *sql.Rows) ([]domain.DocRecord, error) {

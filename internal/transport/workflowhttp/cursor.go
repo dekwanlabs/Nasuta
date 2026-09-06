@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/internal/transport/sse"
 )
 
 var canonicalCursorID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
@@ -27,15 +28,22 @@ func requestLimit(r *http.Request) (int, error) {
 }
 
 func decodeDefinitionCursor(value string) (workflow.DefinitionCursor, error) {
-	var cursor workflow.DefinitionCursor
+	return decodeValidatedCursor(value, "workflow", func(cursor workflow.DefinitionCursor) bool {
+		return canonicalCursorID.MatchString(cursor.ID) && cursor.Version > 0
+	})
+}
+
+func decodeValidatedCursor[T any](value, kind string, valid func(T) bool) (T, error) {
+	var cursor T
 	if err := decodeCursor(value, &cursor); err != nil {
-		return workflow.DefinitionCursor{}, fmt.Errorf("invalid workflow cursor: %w", err)
+		return cursor, fmt.Errorf("invalid %s cursor: %w", kind, err)
 	}
 	if strings.TrimSpace(value) == "" {
 		return cursor, nil
 	}
-	if !canonicalCursorID.MatchString(cursor.ID) || cursor.Version <= 0 {
-		return workflow.DefinitionCursor{}, fmt.Errorf("invalid workflow cursor")
+	if !valid(cursor) {
+		var zero T
+		return zero, fmt.Errorf("invalid %s cursor", kind)
 	}
 	return cursor, nil
 }
@@ -47,17 +55,9 @@ func encodeDefinitionCursor(definition workflow.DefinitionRecord) string {
 }
 
 func decodeNodeCursor(value string) (workflow.NodeRunCursor, error) {
-	var cursor workflow.NodeRunCursor
-	if err := decodeCursor(value, &cursor); err != nil {
-		return workflow.NodeRunCursor{}, fmt.Errorf("invalid node cursor: %w", err)
-	}
-	if strings.TrimSpace(value) == "" {
-		return cursor, nil
-	}
-	if !canonicalCursorID.MatchString(cursor.NodeID) || cursor.Attempt <= 0 {
-		return workflow.NodeRunCursor{}, fmt.Errorf("invalid node cursor")
-	}
-	return cursor, nil
+	return decodeValidatedCursor(value, "node", func(cursor workflow.NodeRunCursor) bool {
+		return canonicalCursorID.MatchString(cursor.NodeID) && cursor.Attempt > 0
+	})
 }
 
 func encodeNodeCursor(run workflow.NodeRunRecord) string {
@@ -107,16 +107,5 @@ func encodeCursor(value any) string {
 }
 
 func eventCursor(r *http.Request, allowLastEventID bool) (int64, error) {
-	value := strings.TrimSpace(r.URL.Query().Get("after_seq"))
-	if value == "" && allowLastEventID {
-		value = strings.TrimSpace(r.Header.Get("Last-Event-ID"))
-	}
-	if value == "" {
-		return 0, nil
-	}
-	seq, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || seq < 0 {
-		return 0, fmt.Errorf("after_seq must be a non-negative integer")
-	}
-	return seq, nil
+	return sse.Cursor(r, allowLastEventID)
 }

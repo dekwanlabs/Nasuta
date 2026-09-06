@@ -17,16 +17,8 @@ func httpURLUsedByClient(text string, start, end int, clientCall *regexp.Regexp)
 	// actual client call. This handles multi-line calls without relying on a
 	// fragile character window and prevents a nearby, unrelated URL constant
 	// from being attributed to the request.
-	for _, call := range clientCall.FindAllStringIndex(text, -1) {
-		open := strings.IndexByte(text[call[0]:call[1]], '(')
-		if open < 0 {
-			continue
-		}
-		open += call[0]
-		close := matchingParen(text, open)
-		if close > end && start >= open && start < close {
-			return true
-		}
+	if httpURLInsideClientCall(text, start, end, clientCall) {
+		return true
 	}
 
 	// Common clients receive a URL through a local variable:
@@ -49,6 +41,23 @@ func httpURLUsedByClient(text string, start, end int, clientCall *regexp.Regexp)
 			if regexp.MustCompile(`\b` + regexp.QuoteMeta(variable) + `\b`).MatchString(args) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// httpURLInsideClientCall reports whether a URL span is contained by one of
+// the supplied client call argument lists.
+func httpURLInsideClientCall(text string, start, end int, clientCall *regexp.Regexp) bool {
+	for _, call := range clientCall.FindAllStringIndex(text, -1) {
+		open := strings.IndexByte(text[call[0]:call[1]], '(')
+		if open < 0 {
+			continue
+		}
+		open += call[0]
+		close := matchingParen(text, open)
+		if close > end && start >= open && start < close {
+			return true
 		}
 	}
 	return false

@@ -57,17 +57,8 @@ func scanCSharpServices(root string, dirs []string) []domain.ServiceRecord {
 
 // scanCSharpRefits finds Refit interfaces (C# equivalent of @FeignClient).
 func scanCSharpRefits(root string, dirs []string) []domain.DependencyEdge {
-	type refitMethod struct {
-		name string
-		line int
-	}
-	type refitClient struct {
-		interfaceName string
-		target        string
-		methods       map[string]refitMethod
-		path          string
-	}
-	var clients []refitClient
+
+	var clients []indexedHTTPClient
 	files := walkFiles(root, dirs, hasSuffix(".cs"))
 	interfaceRe := regexp.MustCompile(`(?s)\binterface\s+(\w+)\s*(?:\([^)]*\))?\s*\{(.*?)\}`)
 	methodRe := regexp.MustCompile(`(?m)\[(?:Get|Post|Put|Delete|Patch|Head)\s*\([^)]*\)\][\s\r\n]*(?:public\s+)?(?:static\s+)?(?:[\w<>,.?\[\]\s]+\s+)?(\w+)\s*\(`)
@@ -89,15 +80,7 @@ func scanCSharpRefits(root string, dirs []string) []domain.DependencyEdge {
 			}
 			name := text[match[2]:match[3]]
 			body := text[match[4]:match[5]]
-			methods := make(map[string]refitMethod)
-			for _, method := range methodRe.FindAllStringSubmatchIndex(body, -1) {
-				if len(method) < 4 {
-					continue
-				}
-				methodName := body[method[2]:method[3]]
-				line := 1 + strings.Count(text[:match[4]+method[0]], "\n")
-				methods[methodName] = refitMethod{name: methodName, line: line}
-			}
+			methods := extractIndexedClientMethods(text, body, match[4], methodRe)
 			if len(methods) == 0 {
 				continue
 			}
@@ -110,7 +93,7 @@ func scanCSharpRefits(root string, dirs []string) []domain.DependencyEdge {
 				// a declaration candidate, but cannot become a service edge.
 				continue
 			}
-			clients = append(clients, refitClient{
+			clients = append(clients, indexedHTTPClient{
 				interfaceName: name, target: target, methods: methods, path: rel,
 			})
 		}
@@ -148,17 +131,10 @@ func scanCSharpRefits(root string, dirs []string) []domain.DependencyEdge {
 					callRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(receiver) + `\s*\.\s*` + regexp.QuoteMeta(methodName) + `\s*\(`)
 					for _, call := range callRe.FindAllStringIndex(text, -1) {
 						line := 1 + strings.Count(text[:call[0]], "\n")
-						records = append(records, domain.DependencyEdge{
-							CallerServiceKey: caller.Key,
-							From:             caller.Name,
-							To:               client.target,
-							Type:             domain.EdgeHTTP,
-							Evidence: []domain.Evidence{
-								{Path: rel, Line: line, Symbol: receiver + "." + methodName, Kind: domain.SourceCodeScan},
-								{Path: client.path, Line: method.line, Symbol: client.interfaceName + "." + methodName, Kind: domain.SourceCodeScan},
-							},
-							Confidence: 0.75,
-						})
+						appendIndexedHTTPClientEdge(
+							&records, caller, client.target, rel, line, receiver, methodName,
+							client.path, client.interfaceName, method.line,
+						)
 					}
 				}
 			}
@@ -169,32 +145,13 @@ func scanCSharpRefits(root string, dirs []string) []domain.DependencyEdge {
 
 // scanCSharpDependencies finds HttpClient calls in C# code.
 func scanCSharpDependencies(root string, dirs []string) []domain.DependencyEdge {
-	files := walkFiles(root, dirs, hasSuffix(".cs"))
-	var edges []domain.DependencyEdge
-	for _, file := range files {
-		if isTestSourcePath(relativeTo(root, file)) {
-			continue
-		}
-		text := readFile(file)
-		if !strings.Contains(text, "HttpClient") && !strings.Contains(text, "RestClient") {
-			continue
-		}
-		rel := relativeTo(root, file)
-		caller := dependencyIdentity(root, file)
-		for _, match := range csharpHTTPCallRe.FindAllStringSubmatchIndex(text, -1) {
-			if len(match) < 4 || !httpURLUsedByClient(text, match[0], match[1], csharpClientCallRe) {
-				continue
-			}
-			target := text[match[2]:match[3]]
-			target = strings.TrimPrefix(strings.TrimPrefix(target, "http://"), "https://")
-			target, _, _ = strings.Cut(target, "/")
-			if skipDependencyTarget(target) {
-				continue
-			}
-			edges = append(edges, protocolEdge(caller, target, domain.EdgeHTTP, rel, lineAt(text, match[0]), 0.5))
-		}
-	}
-	return edges
+	return scanHTTPURLDependencies(
+		root, walkFiles(root, dirs, hasSuffix(".cs")),
+		func(text string) bool {
+			return strings.Contains(text, "HttpClient") || strings.Contains(text, "RestClient")
+		},
+		csharpHTTPCallRe, csharpClientCallRe, normalizeHTTPHost, 0.5,
+	)
 }
 
 // ---- helpers ----

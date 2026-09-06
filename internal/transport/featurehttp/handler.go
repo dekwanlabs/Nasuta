@@ -20,6 +20,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
 	"github.com/dekwanlabs/nasuta/internal/feature/pipeline"
+	"github.com/dekwanlabs/nasuta/internal/transport"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
@@ -173,7 +174,7 @@ func (handler *Handler) StartPipeline(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) CreateFeature(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -200,7 +201,7 @@ func (handler *Handler) CreateFeature(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ListFeatures(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -223,7 +224,7 @@ func (handler *Handler) ListFeatures(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) GetFeature(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -236,7 +237,7 @@ func (handler *Handler) GetFeature(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) AddRequirement(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -260,7 +261,7 @@ func (handler *Handler) AddRequirement(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ArchiveFeature(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -273,7 +274,7 @@ func (handler *Handler) ArchiveFeature(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -309,7 +310,7 @@ func (handler *Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ListGenerationRuns(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -334,7 +335,7 @@ func (handler *Handler) ListGenerationRuns(w http.ResponseWriter, r *http.Reques
 }
 
 func (handler *Handler) GetGenerationRun(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -347,7 +348,7 @@ func (handler *Handler) GetGenerationRun(w http.ResponseWriter, r *http.Request)
 }
 
 func (handler *Handler) GetArtifact(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -362,7 +363,7 @@ func (handler *Handler) GetArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) GenerateArtifact(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -388,7 +389,7 @@ func (handler *Handler) GenerateArtifact(w http.ResponseWriter, r *http.Request)
 }
 
 func (handler *Handler) AddArtifact(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -468,7 +469,7 @@ func (handler *Handler) CreateImplementation(w http.ResponseWriter, r *http.Requ
 }
 
 func (handler *Handler) ListImplementations(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -493,7 +494,7 @@ func (handler *Handler) ListImplementations(w http.ResponseWriter, r *http.Reque
 }
 
 func (handler *Handler) GetImplementation(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -698,7 +699,7 @@ func (handler *Handler) ListReviewPolicyAudit(w http.ResponseWriter, r *http.Req
 
 // GetReviewPolicyRollout returns the current subject-kind rollout rule.
 func (handler *Handler) GetReviewPolicyRollout(w http.ResponseWriter, r *http.Request) {
-	if _, ok := authenticatedUser(w, r); !ok {
+	if _, ok := transport.AuthenticatedUser(w, r); !ok {
 		return
 	}
 	kind, err := delivery.ParseSubjectKind(r.PathValue("subject_kind"))
@@ -791,7 +792,7 @@ func (handler *Handler) ListReviewPolicyRolloutAudit(w http.ResponseWriter, r *h
 
 // CreateReviewRound uses a published Policy reference or the server-owned default.
 func (handler *Handler) CreateReviewRound(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -840,7 +841,7 @@ func (handler *Handler) CreateReviewRound(w http.ResponseWriter, r *http.Request
 
 // GetReviewRound serves one ownership-scoped review round.
 func (handler *Handler) GetReviewRound(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -855,7 +856,7 @@ func (handler *Handler) GetReviewRound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ListReviewRounds(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -924,7 +925,7 @@ func (handler *Handler) ExecuteReviewRound(w http.ResponseWriter, r *http.Reques
 
 // ListReviewAssignments serves a bounded assignment page.
 func (handler *Handler) ListReviewAssignments(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -952,7 +953,7 @@ func (handler *Handler) ListReviewAssignments(w http.ResponseWriter, r *http.Req
 
 // GetReviewReport serves one immutable assignment report.
 func (handler *Handler) GetReviewReport(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -972,7 +973,7 @@ func (handler *Handler) GetReviewReport(w http.ResponseWriter, r *http.Request) 
 
 // ListReviewFindings serves bounded summaries with an optional severity filter.
 func (handler *Handler) ListReviewFindings(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -1005,7 +1006,7 @@ func (handler *Handler) ListReviewFindings(w http.ResponseWriter, r *http.Reques
 
 // ListReviewAdjudications serves immutable conflict decisions for one round.
 func (handler *Handler) ListReviewAdjudications(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -1033,7 +1034,7 @@ func (handler *Handler) ListReviewAdjudications(w http.ResponseWriter, r *http.R
 
 // GetReviewGateResult serves the immutable Gate for one authorized round.
 func (handler *Handler) GetReviewGateResult(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -1049,7 +1050,7 @@ func (handler *Handler) GetReviewGateResult(w http.ResponseWriter, r *http.Reque
 
 // ListReviewEvents serves a bounded durable event page.
 func (handler *Handler) ListReviewEvents(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -1101,7 +1102,7 @@ func (handler *Handler) CancelReviewRound(w http.ResponseWriter, r *http.Request
 
 // GetReviewFinding serves one finding with bounded evidence.
 func (handler *Handler) GetReviewFinding(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -1117,7 +1118,7 @@ func (handler *Handler) GetReviewFinding(w http.ResponseWriter, r *http.Request)
 
 // ListFindingResolutions serves the bounded lifecycle audit trail.
 func (handler *Handler) ListFindingResolutions(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -1227,7 +1228,7 @@ func (handler *Handler) CreateFindingWaiver(w http.ResponseWriter, r *http.Reque
 }
 
 func (handler *Handler) DownloadPatch(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -1254,7 +1255,7 @@ func (handler *Handler) DownloadPatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) DownloadValidationOutput(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -1321,16 +1322,11 @@ func writeArtifactError(w http.ResponseWriter, name string, err error) {
 }
 
 func authenticatedUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		httputil.WriteUnauthorized(w, "authentication required")
-		return nil, false
-	}
-	return user, true
+	return transport.AuthenticatedUser(w, r)
 }
 
 func adminUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return nil, false
 	}

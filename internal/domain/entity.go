@@ -11,6 +11,7 @@ import (
 const MaxCanonicalEntities = 8
 
 var canonicalEntityIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
+var synthesizedEntityIDPattern = regexp.MustCompile(`^entity_[0-9a-f]{64}$`)
 
 // EntitySpec carries the planner's bounded description of one comparison
 // subject. ID is the stable join key; the other fields preserve disambiguation
@@ -126,6 +127,14 @@ func CanonicalQuestionEntities(question string) []string {
 	}
 	flush()
 	return CanonicalEntityIDs(candidates)
+}
+
+// IsSynthesizedEntityID reports whether candidate is a server-synthesized
+// opaque entity identity (entity_<sha256>) carrying no user-facing meaning.
+// These identities are internal join keys; user-facing subject lists must
+// render the label/alias instead of the hash.
+func IsSynthesizedEntityID(candidate string) bool {
+	return synthesizedEntityIDPattern.MatchString(strings.ToLower(strings.TrimSpace(candidate)))
 }
 
 func canonicalEntityID(candidate string) string {

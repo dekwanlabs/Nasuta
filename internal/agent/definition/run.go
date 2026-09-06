@@ -454,9 +454,12 @@ func (run *activeRun) executePrepared(
 		MaxContinueRounds:                 execution.definition.Budget.MaxContinueRounds,
 		StructuredOutput:                  execution.structuredOutput,
 		ModelParameters:                   execution.modelParameters,
+		InvestigationModelParameters:      execution.modelParameters,
+		AnswerModelParameters:             execution.modelParameters.WithoutReasoning(),
 		InputPriceMicrosPerMillionTokens:  execution.definition.Model.InputPriceMicrosPerMillionTokens,
 		OutputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
 		BudgetCheck:                       budgetCheck,
+		DelegationAwaiter:                 run.runtime.delegationAwaiter,
 		DisableLegacyAnswerRecovery:       run.runtime.settings.disableLegacyAnswerRecovery,
 		Checkpoint: func(checkpoint agentexecution.LogicalLoopCheckpoint) error {
 			return run.persistLogicalCheckpoint(ctx, checkpoint, execution.snapshot.PromptHash)
@@ -637,15 +640,7 @@ func sameOutputContract(left, right agentapi.RunOutputContract) bool {
 }
 
 func sameRunLimits(left, right agentapi.RunLimits) bool {
-	return left.Deadline.Equal(right.Deadline) &&
-		left.MaxSteps == right.MaxSteps &&
-		left.MaxToolCalls == right.MaxToolCalls &&
-		left.MaxInputTokens == right.MaxInputTokens &&
-		left.MaxContextTokens == right.MaxContextTokens &&
-		left.MaxOutputTokens == right.MaxOutputTokens &&
-		left.MaxTotalTokens == right.MaxTotalTokens &&
-		left.MaxCostMicros == right.MaxCostMicros &&
-		left.ParentAnswerReserve == right.ParentAnswerReserve
+	return budget.RunLimitsEqual(left, right)
 }
 
 func jsonBytesEqual(left, right json.RawMessage) bool {

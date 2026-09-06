@@ -18,7 +18,6 @@ import (
 const (
 	exactAnswerContractPrefix      = "[NASUTA_EXACT_ANSWER_CONTRACT] "
 	delegationAdoptionMarkerPrefix = "[NASUTA_DELEGATION_ADOPTION] "
-	maxAnswerContractRetries       = 2
 )
 
 var ErrAnswerContractViolation = errors.New("final answer violated an exact-output contract")
@@ -324,6 +323,62 @@ func (contract *exactAnswerContract) appendConservativeFallbackMetadata(answer s
 	}
 	builder.WriteString("\n")
 
+	envelope := buildFallbackAdoptionEnvelope(contract)
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return "", fmt.Errorf("encode fallback answer contract: %w", err)
+	}
+	builder.WriteString(delegationAdoptionMarkerPrefix)
+	builder.Write(encoded)
+	return builder.String(), nil
+}
+
+// VisibleAnswerBody returns the user-facing portion of an answer, discarding
+// any trailing delegation adoption metadata marker the model may have emitted.
+func (contract *exactAnswerContract) VisibleAnswerBody(answer string) string {
+	if contract == nil {
+		return answer
+	}
+	return stripAdoptionMarker(answer)
+}
+
+// stripAdoptionMarker removes any model-emitted delegation adoption marker so a
+// conservative recovery can re-attach a single valid server-owned envelope
+// without tripping the "marker must appear exactly once" rule.
+func stripAdoptionMarker(answer string) string {
+	if idx := strings.Index(answer, delegationAdoptionMarkerPrefix); idx >= 0 {
+		return strings.TrimRight(answer[:idx], " \t\r\n")
+	}
+	return answer
+}
+
+// recoverAnswerWithConservativeMetadata keeps the model's visible answer body
+// and re-attaches the adoption/evidence metadata server-side when the model
+// failed to emit a valid exact-answer contract. Missing required literals are
+// appended from the already-observed evidence, but the model's own wording is
+// never discarded.
+func (contract *exactAnswerContract) recoverAnswerWithConservativeMetadata(body string) (string, error) {
+	if contract == nil || !contract.Active() {
+		return body, nil
+	}
+	body = stripAdoptionMarker(body)
+	body = strings.TrimRight(body, " \t\r\n")
+	if strings.TrimSpace(body) == "" {
+		return "", fmt.Errorf("answer body is empty")
+	}
+	var builder strings.Builder
+	builder.WriteString(body)
+	if missing := contract.Missing(body); len(missing) > 0 {
+		builder.WriteString("\n\n补充：以下为已收集证据中契约要求的内容，仍需继续核对：")
+		for _, literal := range missing {
+			builder.WriteString("\n- ")
+			builder.WriteString(literal)
+		}
+	}
+	if len(contract.delegationOrder) == 0 && !contract.evidenceRequired {
+		return builder.String(), nil
+	}
+	builder.WriteString("\n")
 	envelope := buildFallbackAdoptionEnvelope(contract)
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
@@ -732,17 +787,6 @@ func contractMessage(candidate tool.AnswerContract) (llm.Message, bool) {
 	}, true
 }
 
-func repairInstruction(violations []string) string {
-	encoded, _ := json.Marshal(violations)
-	return prompts.MustRender(prompts.AgentQAAnswerRepair, struct {
-		Violations     string
-		AdoptionMarker string
-	}{
-		Violations:     string(encoded),
-		AdoptionMarker: delegationAdoptionMarkerPrefix,
-	})
-}
-
 func contractError(violations []string) error {
 	return fmt.Errorf(
 		"%w: %d validation errors",
@@ -755,27 +799,32 @@ func (agent *Agent) enforceContract(ctx context.Context, messages []llm.Message,
 	if !contract.Active() || initial == nil {
 		return initial, nil
 	}
-	candidate := initial
-	clean, violations := contract.ValidateAndStrip(candidate.Content)
-	for attempt := 1; len(violations) > 0 && attempt <= maxAnswerContractRetries; attempt++ {
-		log.WarnfCtx(ctx, "[agent] exact-answer validation rejected candidate: violations=%d retry=%d/%d", len(violations), attempt, maxAnswerContractRetries)
-		repairMessages := append(append([]llm.Message{}, messages...),
-			llm.Message{Role: "assistant", Content: candidate.Content},
-			llm.Message{Role: "user", Content: repairInstruction(violations)},
-		)
-		repaired, err := agent.generateWithContinue(ctx, repairMessages, maxTokens, stream)
-		if err != nil {
-			return repaired, fmt.Errorf("%w: retry %d failed: %v", ErrAnswerContractViolation, attempt, err)
-		}
-		candidate = repaired
-		clean, violations = contract.ValidateAndStrip(candidate.Content)
+	clean, violations := contract.ValidateAndStrip(initial.Content)
+	if len(violations) == 0 {
+		initial.Content = clean
+		return initial, nil
 	}
-	if len(violations) > 0 {
-		log.ErrorfCtx(ctx, "[agent] exact-answer validation failed after %d retries: violations=%d", maxAnswerContractRetries, len(violations))
-		return candidate, contractError(violations)
+
+	// The exact-answer contract failed. Instead of discarding the model answer
+	// (or paying for extra repair LLM calls), keep the visible model body and
+	// conservatively re-attach the internal adoption/evidence metadata
+	// server-side. Only a truly empty answer is a hard failure.
+	log.WarnfCtx(ctx, "[agent] exact-answer contract unsatisfied; preserving model body with server-side conservative metadata: violations=%d", len(violations))
+	body := contract.VisibleAnswerBody(initial.Content)
+	if strings.TrimSpace(body) == "" {
+		return initial, contractError(violations)
 	}
-	candidate.Content = clean
-	return candidate, nil
+	recovered, err := contract.recoverAnswerWithConservativeMetadata(body)
+	if err != nil {
+		return initial, contractError(violations)
+	}
+	visible, remaining := contract.ValidateAndStrip(recovered)
+	if len(remaining) > 0 {
+		log.ErrorfCtx(ctx, "[agent] exact-answer conservative metadata recovery failed: violations=%d", len(remaining))
+		return initial, contractError(remaining)
+	}
+	initial.Content = visible
+	return initial, nil
 }
 
 func cloneDelegationAdoptions(

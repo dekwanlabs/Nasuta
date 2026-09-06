@@ -7,12 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/transport"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
@@ -84,7 +84,7 @@ func (handler *Handler) RegisterRoutes(api func(string, http.HandlerFunc)) {
 }
 
 func (handler *Handler) Publish(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -109,7 +109,7 @@ func (handler *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) List(w http.ResponseWriter, r *http.Request) {
-	if _, ok := authenticatedUser(w, r); !ok {
+	if _, ok := transport.AuthenticatedUser(w, r); !ok {
 		return
 	}
 	limit, err := requestLimit(r)
@@ -143,11 +143,11 @@ func (handler *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) SetDefault(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
-	version, err := pathVersion(r)
+	version, err := transport.PathVersion(r)
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -168,11 +168,11 @@ func (handler *Handler) SetDefault(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) SetStatus(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
-	version, err := pathVersion(r)
+	version, err := transport.PathVersion(r)
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -202,7 +202,7 @@ func (handler *Handler) SetStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ListAudit(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -237,7 +237,7 @@ func (handler *Handler) ListAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) GetRollout(w http.ResponseWriter, r *http.Request) {
-	if _, ok := authenticatedUser(w, r); !ok {
+	if _, ok := transport.AuthenticatedUser(w, r); !ok {
 		return
 	}
 	if handler.service == nil {
@@ -261,7 +261,7 @@ func (handler *Handler) GetRollout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) SetRollout(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -297,7 +297,7 @@ func (handler *Handler) SetRollout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ListRolloutAudit(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -336,7 +336,7 @@ func (handler *Handler) ListRolloutAudit(w http.ResponseWriter, r *http.Request)
 }
 
 func (handler *Handler) Start(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -376,7 +376,7 @@ func (handler *Handler) Start(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -395,7 +395,7 @@ func (handler *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ListNodes(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -430,7 +430,7 @@ func (handler *Handler) ListNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -465,7 +465,7 @@ func (handler *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) ListHandoffs(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -500,7 +500,7 @@ func (handler *Handler) ListHandoffs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -519,7 +519,7 @@ func (handler *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) Approve(w http.ResponseWriter, r *http.Request) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -566,22 +566,7 @@ func (handler *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 }
 
 func authenticatedUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		httputil.WriteUnauthorized(w, "authentication required")
-		return nil, false
-	}
-	return user, true
-}
-
-func pathVersion(r *http.Request) (int64, error) {
-	version, err := strconv.ParseInt(
-		strings.TrimSpace(r.PathValue("version")), 10, 64,
-	)
-	if err != nil || version <= 0 {
-		return 0, errors.New("version must be a positive integer")
-	}
-	return version, nil
+	return transport.AuthenticatedUser(w, r)
 }
 
 func writeDomainError(w http.ResponseWriter, err error) {

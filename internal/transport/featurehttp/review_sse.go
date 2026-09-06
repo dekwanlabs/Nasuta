@@ -2,12 +2,11 @@ package featurehttp
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
+	"github.com/dekwanlabs/nasuta/internal/transport/sse"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
@@ -37,7 +36,7 @@ func (handler *Handler) StreamReviewEvents(w http.ResponseWriter, r *http.Reques
 		writeDomainError(w, err)
 		return
 	}
-	writer, err := newReviewEventWriter(w)
+	writer, err := newEventWriter(w)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
@@ -46,7 +45,7 @@ func (handler *Handler) StreamReviewEvents(w http.ResponseWriter, r *http.Reques
 		r.Context(), writer, reader, afterSeq,
 	)
 	if err != nil {
-		writer.emitError(err)
+		writer.EmitError(err)
 		return
 	}
 	if terminal || terminalReviewRoundStatus(round.Status) {
@@ -55,7 +54,7 @@ func (handler *Handler) StreamReviewEvents(w http.ResponseWriter, r *http.Reques
 
 	live, unsubscribe, err := reader.Subscribe()
 	if err != nil {
-		writer.emitError(err)
+		writer.EmitError(err)
 		return
 	}
 	defer unsubscribe()
@@ -64,7 +63,7 @@ func (handler *Handler) StreamReviewEvents(w http.ResponseWriter, r *http.Reques
 		r.Context(), writer, reader, lastSeq,
 	)
 	if err != nil {
-		writer.emitError(err)
+		writer.EmitError(err)
 		return
 	}
 	if terminal {
@@ -79,7 +78,7 @@ func (handler *Handler) StreamReviewEvents(w http.ResponseWriter, r *http.Reques
 			return
 		case event, open := <-live:
 			if !open {
-				writer.emitError(delivery.ErrUnavailable)
+				writer.EmitError(delivery.ErrUnavailable)
 				return
 			}
 			lastSeq, terminal, err = handler.emitLiveReviewEvent(
@@ -96,117 +95,45 @@ func (handler *Handler) StreamReviewEvents(w http.ResponseWriter, r *http.Reques
 				r.Context(), writer, reader, lastSeq,
 			)
 			if err != nil {
-				writer.emitError(err)
+				writer.EmitError(err)
 				return
 			}
 			if terminal {
 				return
 			}
-			writer.keepalive()
+			writer.Keepalive()
 		}
 	}
 }
 
 func (handler *Handler) emitLiveReviewEvent(
 	ctx context.Context,
-	writer *reviewEventWriter,
+	writer *eventWriter,
 	reader *delivery.ReviewEventReader,
 	lastSeq int64,
 	event delivery.ReviewEvent,
 ) (int64, bool, error) {
-	if event.Seq <= lastSeq {
-		return lastSeq, false, nil
-	}
-	if event.Seq > lastSeq+1 {
-		var terminal bool
-		var err error
-		lastSeq, terminal, err = handler.replayReviewEvents(
-			ctx, writer, reader, lastSeq,
-		)
-		if err != nil || terminal || event.Seq <= lastSeq {
-			return lastSeq, terminal, err
-		}
-	}
-	if err := writer.emit(event); err != nil {
-		return lastSeq, false, err
-	}
-	return event.Seq, terminalReviewEvent(event.Kind), nil
+	return sse.EmitLive(ctx, reader, lastSeq, event, reviewEventReplayOptions(writer))
 }
 
 func (handler *Handler) replayReviewEvents(
 	ctx context.Context,
-	writer *reviewEventWriter,
+	writer *eventWriter,
 	reader *delivery.ReviewEventReader,
 	afterSeq int64,
 ) (int64, bool, error) {
-	lastSeq := afterSeq
-	for {
-		events, err := reader.List(ctx, lastSeq, reviewEventReplayPage)
-		if err != nil {
-			return lastSeq, false, err
-		}
-		for _, event := range events {
-			if event.Seq <= lastSeq {
-				continue
-			}
-			if err := writer.emit(event); err != nil {
-				return lastSeq, false, err
-			}
-			lastSeq = event.Seq
-			if terminalReviewEvent(event.Kind) {
-				return lastSeq, true, nil
-			}
-		}
-		if len(events) < reviewEventReplayPage {
-			return lastSeq, false, nil
-		}
+	return sse.Replay(ctx, reader, afterSeq, reviewEventReplayOptions(writer))
+}
+
+func reviewEventReplayOptions(writer *eventWriter) sse.ReplayOptions[delivery.ReviewEvent] {
+	return sse.ReplayOptions[delivery.ReviewEvent]{
+		PageSize: reviewEventReplayPage,
+		Sequence: func(event delivery.ReviewEvent) int64 { return event.Seq },
+		Terminal: func(event delivery.ReviewEvent) bool { return terminalReviewEvent(event.Kind) },
+		Emit: func(event delivery.ReviewEvent) error {
+			return writer.Emit(event.Seq, string(event.Kind), event)
+		},
 	}
-}
-
-type reviewEventWriter struct {
-	writer  http.ResponseWriter
-	flusher http.Flusher
-}
-
-func newReviewEventWriter(w http.ResponseWriter) (*reviewEventWriter, error) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return nil, fmt.Errorf("streaming not supported")
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	return &reviewEventWriter{writer: w, flusher: flusher}, nil
-}
-
-func (writer *reviewEventWriter) emit(event delivery.ReviewEvent) error {
-	raw, err := json.Marshal(event)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(
-		writer.writer,
-		"id: %d\nevent: %s\ndata: %s\n\n",
-		event.Seq,
-		event.Kind,
-		raw,
-	); err != nil {
-		return err
-	}
-	writer.flusher.Flush()
-	return nil
-}
-
-func (writer *reviewEventWriter) emitError(err error) {
-	raw, _ := json.Marshal(map[string]string{"error": err.Error()})
-	_, _ = fmt.Fprintf(writer.writer, "event: error\ndata: %s\n\n", raw)
-	writer.flusher.Flush()
-}
-
-func (writer *reviewEventWriter) keepalive() {
-	_, _ = fmt.Fprint(writer.writer, ": keepalive\n\n")
-	writer.flusher.Flush()
 }
 
 func terminalReviewEvent(kind delivery.ReviewEventKind) bool {

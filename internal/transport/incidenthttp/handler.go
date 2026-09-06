@@ -112,26 +112,24 @@ func (handler *Handler) DeleteIncident(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) FixIncident(w http.ResponseWriter, r *http.Request) {
-	var request incident.FixRequest
-	if err := httputil.DecodeJSON(r, &request); err != nil {
-		httputil.WriteBadRequest(w, err.Error())
-		return
-	}
-	value, err := handler.incidents.StartFix(r.Context(), r.PathValue("id"), request)
-	if err != nil {
-		httputil.WriteErr(w, err)
-		return
-	}
-	httputil.WriteJSON(w, value)
+	decodeAndRespond(w, r, func(request incident.FixRequest) (*incident.Incident, error) {
+		return handler.incidents.StartFix(r.Context(), r.PathValue("id"), request)
+	})
 }
 
 func (handler *Handler) ConfirmIncident(w http.ResponseWriter, r *http.Request) {
-	var request incident.ConfirmRequest
+	decodeAndRespond(w, r, func(request incident.ConfirmRequest) (*incident.Incident, error) {
+		return handler.incidents.CommitFix(r.Context(), r.PathValue("id"), request)
+	})
+}
+
+func decodeAndRespond[T any](w http.ResponseWriter, r *http.Request, action func(T) (*incident.Incident, error)) {
+	var request T
 	if err := httputil.DecodeJSON(r, &request); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
-	value, err := handler.incidents.CommitFix(r.Context(), r.PathValue("id"), request)
+	value, err := action(request)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return

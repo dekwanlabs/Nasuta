@@ -336,23 +336,9 @@ func findNearestApplicationModule(root, file string) string {
 }
 
 func hasApplicationFile(dir string) bool {
-	found := false
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || found {
-			return nil
-		}
-		if d.IsDir() {
-			if ignoredDirectory(d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(d.Name(), "Application.java") {
-			found = true
-		}
-		return nil
+	return directoryContainsFile(dir, func(entry os.DirEntry) bool {
+		return strings.HasSuffix(entry.Name(), "Application.java")
 	})
-	return found
 }
 
 func readPorts(moduleRoot string) []int {

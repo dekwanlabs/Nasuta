@@ -28,9 +28,10 @@ type modelTurn struct {
 }
 
 type toolTurnOutcome struct {
-	producedEvidence bool
-	webAttempted     bool
-	webSucceeded     bool
+	producedEvidence   bool
+	webAttempted       bool
+	webSucceeded       bool
+	settledDelegations []agentapi.DelegationDispatchResult
 }
 
 func (agent *Agent) runTurns(state *compiledLoop) error {
@@ -126,7 +127,7 @@ func (agent *Agent) handleTurnError(
 		return true, nil
 	}
 	if state.loopCtx.Err() != nil {
-		log.InfofCtx(state.ctx, "[agent] run %s loop budget exhausted at step %d: %v",
+		log.InfofCtx(state.ctx, "[agent] run %s loop budget exhausted dimension=budget.time.deadline at step %d: %v",
 			state.runID, step, state.loopCtx.Err())
 		return true, nil
 	}
@@ -173,7 +174,7 @@ func (agent *Agent) callModelTurn(state *compiledLoop, step int) (modelTurn, err
 				input.Messages,
 				input.Tools,
 				input.Stream,
-				agent.cfg.AnswerMaxTokens,
+				agent.cfg.ParentToolMaxTokens,
 			)
 			return agentModelTurnOutput{Result: result, Timing: input.Stream.Timings()}, callErr
 		},
@@ -220,7 +221,7 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 		state.loopCtx,
 		state.messages,
 		result,
-		agent.cfg.AnswerMaxTokens,
+		agent.cfg.ContinuationMaxTokens,
 		turn.stream,
 	)
 	result = continued
@@ -233,17 +234,19 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 			state.messages,
 			result,
 			state.answerContract,
-			agent.cfg.AnswerMaxTokens,
+			agent.cfg.SynthesisMaxTokens,
 			turn.stream,
 		)
 	}
 	if err == nil {
+		agent.mergeDelegatedFlows(state)
+		flowCtx := withFlowIR(state.loopCtx, state.result.Flow)
 		result = agent.enforceFlowContract(
-			state.loopCtx,
+			flowCtx,
 			state.messages,
 			result,
 			state.input.OutputContract,
-			agent.cfg.AnswerMaxTokens,
+			agent.cfg.SynthesisMaxTokens,
 			turn.stream,
 		)
 	}
@@ -411,6 +414,9 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 		outcome.producedEvidence = outcome.producedEvidence || callOutcome.producedEvidence
 		outcome.webAttempted = outcome.webAttempted || callOutcome.webAttempted
 		outcome.webSucceeded = outcome.webSucceeded || callOutcome.webSucceeded
+		outcome.settledDelegations = append(
+			outcome.settledDelegations, callOutcome.settledDelegations...,
+		)
 		notices = append(notices, callNotices...)
 	}
 	if agent.toolCallBudgetExhausted(state) {
@@ -422,6 +428,14 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 	}
 	// Provider protocols forbid non-tool messages inside a parallel result group.
 	state.messages = appendToolTurnPostlude(state.messages, notices, state.answerContract)
+	// Hand the model the finished child reports as a system notice. This is a
+	// non-tool message placed after the parallel result group, which the
+	// provider protocol permits.
+	for _, settled := range outcome.settledDelegations {
+		notice := settledDelegationNotice(settled)
+		state.messages = append(state.messages, notice)
+		state.result.SessionMessages = append(state.result.SessionMessages, notice)
+	}
 	return outcome
 }
 
@@ -547,6 +561,26 @@ func (agent *Agent) applyToolExecution(
 		return outcome, nil, nil
 	}
 	state.answerContract.Add(execution.AnswerContract)
+
+	// Server-side settlement: after a dispatch the parent loop waits for the
+	// children to finish and hands the model the backfilled reports, instead
+	// of leaving the model to poll delegation_status until it burns steps.
+	if executionCall.Function.Name == string(delegation.DelegateToolID) {
+		dispatch, ok := parseDelegationDispatch(execution.AuthoritativeContent)
+		if ok && dispatch.DelegationID != "" {
+			state.dispatchedDelegations = append(
+				state.dispatchedDelegations, dispatch.DelegationID,
+			)
+			settled, allSettled := agent.awaitDelegationSettlement(
+				state, dispatch.DelegationID,
+			)
+			if allSettled {
+				outcome.settledDelegations = append(
+					outcome.settledDelegations, settled,
+				)
+			}
+		}
+	}
 	return outcome, execution.Notices, nil
 }
 
@@ -571,26 +605,20 @@ func (agent *Agent) recordToolResult(
 }
 
 func (agent *Agent) captureDelegationFlows(state *compiledLoop, call llm.ToolCall, execution ToolExecution) {
-	if state == nil || call.Function.Name != string(delegation.DelegateToolID) || strings.TrimSpace(execution.AuthoritativeContent) == "" {
+	if state == nil || strings.TrimSpace(execution.AuthoritativeContent) == "" {
 		return
 	}
-	var batch agentapi.DelegationBatchResult
-	if err := json.Unmarshal([]byte(execution.AuthoritativeContent), &batch); err != nil {
-		log.WarnfCtx(state.ctx, "[agent] run %s delegation flow capture skipped: invalid batch result: %v", state.runID, err)
+	if call.Function.Name != string(delegation.DelegateToolID) &&
+		call.Function.Name != string(delegation.DelegationStatusToolID) {
 		return
 	}
-	for _, report := range batch.Results {
-		if report.Flow == nil {
-			continue
-		}
-		state.delegatedFlows = append(state.delegatedFlows, *cloneExecutionFlow(report.Flow))
+	var dispatch agentapi.DelegationDispatchResult
+	if err := json.Unmarshal([]byte(execution.AuthoritativeContent), &dispatch); err != nil {
+		log.WarnfCtx(state.ctx, "[agent] run %s delegation flow capture skipped: invalid dispatch result: %v", state.runID, err)
+		return
 	}
+	agent.mergeDelegationDispatchFlows(state, dispatch)
 }
-
-const (
-	maxEvidenceObservationTokens = 256
-	maxEvidenceObservations      = 128
-)
 
 func appendEvidenceObservations(
 	observations *[]agentapi.EvidenceObservation,

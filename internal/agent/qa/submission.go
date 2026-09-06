@@ -12,6 +12,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
+	"github.com/dekwanlabs/nasuta/internal/agent/messages"
 	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -25,8 +26,6 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-const sessionArchiveTimeout = 2 * time.Minute
-
 func (svc *Service) submitRun(
 	ctx context.Context,
 	run agentapi.ManagedRun,
@@ -37,7 +36,7 @@ func (svc *Service) submitRun(
 	request := prepared.request
 	definition := prepared.definition
 	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", request.RunID, definition.ID, definition.Version)
-	messages := buildAgentMessages(
+	builtMessages := buildAgentMessages(
 		request.Question,
 		prepared.analysis.QueryPlan,
 		conversation,
@@ -46,39 +45,34 @@ func (svc *Service) submitRun(
 		svc.domainKnowledge,
 		0,
 	)
+	runStart := svc.buildRunStart(prepared, definition, prepared.selection)
 	runRequest := agentapi.RunRequest{
-		RunID: request.RunID,
-		Agent: agentapi.DefinitionRef{
-			ID: definition.ID, Version: definition.Version,
-		},
-		DefinitionHash: definition.ContentHash,
-		Selection:      prepared.selection,
-		Input:          runInput(request.Question),
-		Messages:       publicMessages(messages),
+		RunID:          runStart.RunID,
+		Agent:          runStart.Agent,
+		DefinitionHash: runStart.DefinitionHash,
+		Selection:      runStart.Selection,
+		Input:          runStart.Input,
+		Messages:       messages.Public(builtMessages),
 		Context:        contextBlocks(admitted.Retrieved),
-		Permissions:    runPermissions(prepared.toolPolicy.AllowWrite),
-		ToolScope: agentapi.ToolScope{
-			AllowWrite:      prepared.toolPolicy.AllowWrite,
-			RestrictVisible: true,
-			VisibleToolIDs:  scenarioToolIDs(prepared.candidateToolSet.Tools()),
-			OfferedToolIDs: orderedToolIDs(
-				prepared.candidateToolSet.Tools(), conversation.PrunedToolIDs,
-			),
-			PruneApplied: conversation.PruneApplied,
-		},
-		Policy: agentapi.RunPolicy{
-			EvidenceRequired: !admitted.Plan.Direct(),
-			EvidenceSeeded:   conversation.EvidenceSeeded,
-			WebResearch:      admitted.Plan.Has(domain.Web),
-			OutputContract:   outputContractForQuery(prepared.analysis.QueryPlan),
-		},
-		Limits: prepared.runLimits,
-		Actor:  agentapi.Actor{UserID: request.UserID},
-		Correlation: agentapi.Correlation{
-			SessionID: conversation.SessionID, ParentRunID: request.ParentRunID,
-			WorkflowRunID: request.WorkflowRunID, NodeID: request.WorkflowNodeID,
-		},
+		Permissions:    runStart.Permissions,
+		ToolScope:      runStart.ToolScope,
+		Policy:         runStart.Policy,
+		Limits:         runStart.Limits,
+		Delegation:     runStart.Delegation,
+		Actor:          runStart.Actor,
+		Correlation:    runStart.Correlation,
 	}
+	// Evidence admission and tool pruning are only known after preparation, so
+	// they are layered onto the immutable boundary rather than duplicated here.
+	runRequest.ToolScope.OfferedToolIDs = orderedToolIDs(
+		prepared.candidateToolSet.Tools(), conversation.PrunedToolIDs,
+	)
+	runRequest.ToolScope.PruneApplied = conversation.PruneApplied
+	runRequest.Policy.EvidenceRequired = !admitted.Plan.Direct()
+	runRequest.Policy.EvidenceSeeded = conversation.EvidenceSeeded
+	runRequest.Policy.WebResearch = admitted.Plan.Has(domain.Web)
+	// The final RunRequest must use the re-assembled conversation session.
+	runRequest.Correlation.SessionID = conversation.SessionID
 	ctx = svc.withDelegationParentContext(ctx, prepared, runRequest)
 	ctx = withSessionToolScope(ctx, conversation, request.UserID)
 
@@ -95,6 +89,14 @@ func (svc *Service) withDelegationParentContext(
 		return ctx
 	}
 	evidenceIndex, contextIndex := delegation.IndexContext(request.Context)
+	answerDeadline := time.Time{}
+	if !request.Limits.Deadline.IsZero() {
+		reserve := svc.answerReserve
+		if reserve <= 0 {
+			reserve = 30 * time.Second
+		}
+		answerDeadline = request.Limits.Deadline.Add(-reserve)
+	}
 	return delegation.WithParentContext(ctx, delegation.ParentContext{
 		RunID:           request.RunID,
 		QuestionSummary: tooloutput.TruncateContent(prepared.request.Question, 2000),
@@ -103,6 +105,7 @@ func (svc *Service) withDelegationParentContext(
 		Permissions:     request.Permissions,
 		Correlation:     request.Correlation,
 		Limits:          request.Limits,
+		AnswerDeadline:  answerDeadline,
 		Depth:           0,
 		OutputContract:  request.Policy.OutputContract,
 		Evidence:        evidenceIndex,
@@ -255,6 +258,13 @@ func (svc *Service) answerContext(
 ) ConversationContext {
 	instructions := append([]llm.Message{}, conversation.Instructions...)
 	if len(recalled) > 0 {
+		var memoryInjectSpec = runtrace.Spec[[]memory.MemoryRecord, string]{
+			Operation: "memory.inject",
+			Node:      "memory_inject",
+			Output: func(records []memory.MemoryRecord, formatted string, _ error) map[string]any {
+				return map[string]any{"records": len(records), "characters": len([]rune(formatted))}
+			},
+		}
 		formatted, _ := runtrace.Invoke(ctx, memoryInjectSpec, recalled, func(
 			_ context.Context,
 			records []memory.MemoryRecord,
@@ -287,7 +297,7 @@ func flowSubjects(query domain.QueryPlan) []string {
 	subjects := make([]string, 0, min(len(query.EntitySpecs), maxSubjects))
 	for _, spec := range query.EntitySpecs {
 		label := strings.TrimSpace(spec.Label)
-		if label == "" {
+		if label == "" && !domain.IsSynthesizedEntityID(spec.ID) {
 			label = strings.TrimSpace(spec.ID)
 		}
 		if label == "" {
@@ -305,7 +315,10 @@ func flowSubjects(query domain.QueryPlan) []string {
 	}
 	for _, entity := range query.Entities {
 		label := strings.TrimSpace(entity)
-		if label == "" {
+		if label == "" || domain.IsSynthesizedEntityID(label) {
+			// Entities carries the canonical join key; a synthesized opaque
+			// identity has no user-facing meaning, and its label is already
+			// represented by the matching EntitySpec above.
 			continue
 		}
 		key := strings.ToLower(label)
@@ -343,28 +356,8 @@ func cloneEvidenceUnits(units []tool.EvidenceUnit) []tool.EvidenceUnit {
 func publicEvidenceConflicts(
 	conflicts []evidence.Conflict,
 ) []agentapi.EvidenceConflict {
-	if len(conflicts) == 0 {
-		return nil
-	}
-	out := make([]agentapi.EvidenceConflict, len(conflicts))
-	for index, conflict := range conflicts {
-		out[index] = agentapi.EvidenceConflict{
-			Identity: agentapi.EvidenceIdentity{
-				SourceKind: conflict.Key.SourceKind,
-				Target:     conflict.Key.Target,
-				Section:    conflict.Key.Section,
-				Version:    conflict.Key.Version,
-				TimeRange:  conflict.Key.TimeRange,
-			},
-			Current:        evidence.CloneUnit(conflict.Current),
-			Incoming:       evidence.CloneUnit(conflict.Incoming),
-			CurrentOrigin:  conflict.CurrentOrigin,
-			IncomingOrigin: conflict.IncomingOrigin,
-		}
-	}
-	return out
+	return evidence.PublicConflicts(conflicts)
 }
-
 func orderedToolIDs(tools []tool.Tool, selected map[tool.ToolID]struct{}) []string {
 	if len(selected) == 0 {
 		return nil
@@ -448,7 +441,7 @@ func (svc *Service) archiveHistoryAsync(
 				started = true
 				fromTurn, toTurn = from, to
 				svc.updateCompaction(
-					runID, sessionID, "start",
+					runID, "start",
 					fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", from, to),
 					fromTurn, toTurn,
 				)
@@ -459,7 +452,7 @@ func (svc *Service) archiveHistoryAsync(
 			log.ErrorfCtx(archiveCtx, "[qa] post-turn history archive failed for %s: %v", sessionID, err)
 			if started {
 				svc.updateCompaction(
-					runID, sessionID, "failed", "历史上下文压缩失败",
+					runID, "failed", "历史上下文压缩失败",
 					fromTurn, toTurn,
 				)
 			}
@@ -467,7 +460,7 @@ func (svc *Service) archiveHistoryAsync(
 		}
 		if result.Applied {
 			svc.updateCompaction(
-				runID, sessionID, "done", "历史上下文压缩完成",
+				runID, "done", "历史上下文压缩完成",
 				result.FromTurn, result.ToTurn,
 			)
 			log.InfofCtx(archiveCtx, "[qa] archived session %s turns %d-%d after saved turn",
@@ -475,7 +468,7 @@ func (svc *Service) archiveHistoryAsync(
 		} else if result.Stale {
 			if started {
 				svc.updateCompaction(
-					runID, sessionID, "done", "历史上下文压缩完成",
+					runID, "done", "历史上下文压缩完成",
 					result.FromTurn, result.ToTurn,
 				)
 			}

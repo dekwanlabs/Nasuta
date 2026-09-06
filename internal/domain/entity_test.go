@@ -69,3 +69,18 @@ func TestCanonicalEntitySpecsUseOpaqueIDsForNonCanonicalNames(t *testing.T) {
 		t.Fatalf("entity ID mapping drifted: %#v", got[0])
 	}
 }
+
+func TestIsSynthesizedEntityID(t *testing.T) {
+	cases := map[string]bool{
+		"entity_9a6a4c8c07579004fe1867dc472bb5688214542305113aab7020435df7246d47": true,
+		"entity_18b7db54924fbd9017ceb18d492eb412363626b1c3ed5e6aea64a10777108e75": true,
+		"tts":                   false,
+		"rgb灯效":                 false,
+		"paymenthandler.handle": false,
+	}
+	for candidate, want := range cases {
+		if got := IsSynthesizedEntityID(candidate); got != want {
+			t.Fatalf("IsSynthesizedEntityID(%q) = %v, want %v", candidate, got, want)
+		}
+	}
+}

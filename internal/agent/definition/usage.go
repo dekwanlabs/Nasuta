@@ -54,21 +54,7 @@ func (recorder *usageRecorder) RecordLLMCall(
 }
 
 func tokenCostMicros(tokens, priceMicrosPerMillionTokens int64) (int64, error) {
-	if tokens < 0 || priceMicrosPerMillionTokens < 0 {
-		return 0, fmt.Errorf("tokens and price cannot be negative")
-	}
-	if tokens == 0 || priceMicrosPerMillionTokens == 0 {
-		return 0, nil
-	}
-	if tokens > math.MaxInt64/priceMicrosPerMillionTokens {
-		return 0, fmt.Errorf("token price multiplication overflow")
-	}
-	product := tokens * priceMicrosPerMillionTokens
-	cost := product / 1_000_000
-	if product%1_000_000 != 0 {
-		cost++
-	}
-	return cost, nil
+	return llm.TokenCostMicros(tokens, priceMicrosPerMillionTokens)
 }
 
 func (recorder *usageRecorder) Usage() agentapi.Usage {

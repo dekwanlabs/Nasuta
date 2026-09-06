@@ -9,6 +9,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/messages"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -36,32 +37,6 @@ func internalMessage(message agentapi.Message) llm.Message {
 	return compiled
 }
 
-func publicMessages(messages []llm.Message) []agentapi.Message {
-	if len(messages) == 0 {
-		return nil
-	}
-	out := make([]agentapi.Message, 0, len(messages))
-	for _, message := range messages {
-		compiled := agentapi.Message{
-			Role: message.Role, Content: message.Content,
-			ToolCallID: message.ToolCallID, Name: message.Name,
-		}
-		if len(message.ToolCalls) > 0 {
-			compiled.ToolCalls = make([]agentapi.ToolCall, 0, len(message.ToolCalls))
-			for _, call := range message.ToolCalls {
-				compiled.ToolCalls = append(compiled.ToolCalls, agentapi.ToolCall{
-					ID: call.ID, Type: call.Type,
-					Function: agentapi.ToolFunction{
-						Name: call.Function.Name, Arguments: call.Function.Arguments,
-					},
-				})
-			}
-		}
-		out = append(out, compiled)
-	}
-	return out
-}
-
 func publicEvidence(evidence run.EvidenceMetrics) agentapi.EvidenceSummary {
 	return agentapi.EvidenceSummary{
 		Status: string(evidence.Status), ForcedConclusion: evidence.ForcedConclusion,
@@ -73,28 +48,8 @@ func publicEvidence(evidence run.EvidenceMetrics) agentapi.EvidenceSummary {
 }
 
 func publicEvidenceConflicts(conflicts []evidence.Conflict) []agentapi.EvidenceConflict {
-	if len(conflicts) == 0 {
-		return nil
-	}
-	out := make([]agentapi.EvidenceConflict, len(conflicts))
-	for index, conflict := range conflicts {
-		out[index] = agentapi.EvidenceConflict{
-			Identity: agentapi.EvidenceIdentity{
-				SourceKind: conflict.Key.SourceKind,
-				Target:     conflict.Key.Target,
-				Section:    conflict.Key.Section,
-				Version:    conflict.Key.Version,
-				TimeRange:  conflict.Key.TimeRange,
-			},
-			Current:        evidence.CloneUnit(conflict.Current),
-			Incoming:       evidence.CloneUnit(conflict.Incoming),
-			CurrentOrigin:  conflict.CurrentOrigin,
-			IncomingOrigin: conflict.IncomingOrigin,
-		}
-	}
-	return out
+	return evidence.PublicConflicts(conflicts)
 }
-
 func referencesFromRequest(blocks []agentapi.ContextBlock) []agentapi.Reference {
 	count := 0
 	for _, block := range blocks {
@@ -394,7 +349,7 @@ func mapSucceededResult(
 	}
 	publicResult.Text = outcome.Answer
 	publicResult.References = append([]agentapi.Reference(nil), outcome.References...)
-	publicResult.Messages = publicMessages(outcome.SessionMessages)
+	publicResult.Messages = messages.Public(outcome.SessionMessages)
 	output, err := validatedOutput(schemas, outputSchema, outcome.Answer)
 	if err != nil && outputSchema == agentapi.InvestigationReportSchemaRef() && len(recovery) > 0 &&
 		shouldRecoverInvalidInvestigationOutput(recovery[0], outcome.Answer) {

@@ -11,9 +11,9 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/incident"
-	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
@@ -94,7 +94,7 @@ type Platform struct {
 	settings *config.PlatformSettings
 	db       *sql.DB
 	index    *indexing.Service
-	tools    *agent.Service
+	tools    *tools.Service
 	registry *tool.Registry
 	reads    *tool.ReadRegistry
 	graph    *codegraph.DB
@@ -147,7 +147,7 @@ func New() (_ *Platform, err error) {
 		p.graph = nil
 	}
 	p.calls = callchain.New(index.DB, p.graph)
-	p.tools = agent.NewTools(agent.Deps{
+	p.tools = tools.New(tools.Deps{
 		DB: index.DB, Semantic: index.Semantic,
 		Embedder: index.Embedder, WorkspaceRoot: cfg.WorkspaceRoot, DocStore: index.DocDB(),
 		CallChain: p.calls, Ontology: ontology.NewService(ontologyBackend),
@@ -161,7 +161,7 @@ func New() (_ *Platform, err error) {
 	p.index.SetPlatform(p.settings)
 	p.qa.sessions = memory.NewSessionStore(db)
 	p.history = buildSessionHistory(cfg, p.qa.sessions, index.Embedder)
-	p.registry = agent.NewRegistry(p.tools, cfg, p.qa.sessions, p.history)
+	p.registry = tools.NewRegistry(p.tools, cfg, p.qa.sessions, p.history)
 	p.reads = tool.NewReadRegistry(p.registry)
 
 	if err := p.initCatalogs(); err != nil {

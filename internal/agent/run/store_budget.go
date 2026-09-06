@@ -114,7 +114,7 @@ func (backend *sqlBudgetBackend) EnsureRoot(rootRunID string, limits agentapi.Ru
 	if err := json.Unmarshal(storedRaw, &stored); err != nil {
 		return fmt.Errorf("decode stored budget limits: %w", err)
 	}
-	if !sameBudgetLimits(stored, limits) {
+	if !budget.RunLimitsEqual(stored, limits) {
 		return fmt.Errorf("budget root %q limits conflict with existing ledger", rootRunID)
 	}
 	if err := tx.Commit(); err != nil {
@@ -742,7 +742,7 @@ func applyReservationChange(
 	if reservation.Kind == "task" {
 		request = grant
 	}
-	if err := requireBudgetWithin(request, available, reservation.Kind); err != nil {
+	if err := budget.RequireWithin(request, available, reservation.Kind); err != nil {
 		return reserved, err
 	}
 	return addUsage(reserved, request), nil
@@ -900,7 +900,7 @@ func reserveChildCall(tx *sql.Tx, rootRunID, parentID string, estimate agentapi.
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	return requireBudgetWithin(estimate, subtractUsage(grant, addUsage(used, inFlight)), "child call")
+	return budget.RequireWithin(estimate, subtractUsage(grant, addUsage(used, inFlight)), "child call")
 }
 
 func (backend *sqlBudgetBackend) settleCall(rootRunID, reservationID string, actual agentapi.Usage, owner string, fence int64) error {
@@ -924,7 +924,7 @@ func (backend *sqlBudgetBackend) settleCall(rootRunID, reservationID string, act
 	if alreadySettled {
 		return nil
 	}
-	accountingErr := requireBudgetWithin(actual, estimate, "reported model usage")
+	accountingErr := budget.RequireWithin(actual, estimate, "reported model usage")
 
 	used, reserved, err := applySettledCallToLedger(tx, rootRunID, parentID, actual, estimate, owner, fence)
 	if err != nil {
@@ -1284,52 +1284,19 @@ func updateBudgetRoot(tx *sql.Tx, rootRunID string, used, reserved agentapi.Usag
 }
 
 func normalizeBudgetUsage(usage agentapi.Usage) (agentapi.Usage, error) {
-	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.ReasoningTokens < 0 || usage.TotalTokens < 0 || usage.CostMicros < 0 {
-		return agentapi.Usage{}, fmt.Errorf("%w: usage cannot be negative", agentapi.ErrBudgetExceeded)
-	}
-	if usage.TotalTokens == 0 {
-		if usage.InputTokens > math.MaxInt64-usage.OutputTokens {
-			return agentapi.Usage{}, fmt.Errorf("%w: usage total overflow", agentapi.ErrBudgetExceeded)
-		}
-		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-	}
-	return usage, nil
+	return budget.NormalizeUsage(usage)
 }
 
 func addUsage(left, right agentapi.Usage) agentapi.Usage {
-	return agentapi.Usage{
-		InputTokens:     saturatingAddBudget(left.InputTokens, right.InputTokens),
-		OutputTokens:    saturatingAddBudget(left.OutputTokens, right.OutputTokens),
-		ReasoningTokens: saturatingAddBudget(left.ReasoningTokens, right.ReasoningTokens),
-		TotalTokens:     saturatingAddBudget(left.TotalTokens, right.TotalTokens),
-		CostMicros:      saturatingAddBudget(left.CostMicros, right.CostMicros),
-	}
+	return budget.AddUsage(left, right)
 }
 
 func subtractUsage(left, right agentapi.Usage) agentapi.Usage {
-	return agentapi.Usage{
-		InputTokens:     maxInt64(0, left.InputTokens-right.InputTokens),
-		OutputTokens:    maxInt64(0, left.OutputTokens-right.OutputTokens),
-		ReasoningTokens: maxInt64(0, left.ReasoningTokens-right.ReasoningTokens),
-		TotalTokens:     maxInt64(0, left.TotalTokens-right.TotalTokens),
-		CostMicros:      maxInt64(0, left.CostMicros-right.CostMicros),
-	}
+	return budget.SubtractUsage(left, right)
 }
 
 func isZeroBudgetUsage(usage agentapi.Usage) bool {
-	return usage == (agentapi.Usage{})
-}
-
-func sameBudgetLimits(left, right agentapi.RunLimits) bool {
-	return left.Deadline.Equal(right.Deadline) &&
-		left.MaxSteps == right.MaxSteps &&
-		left.MaxToolCalls == right.MaxToolCalls &&
-		left.MaxInputTokens == right.MaxInputTokens &&
-		left.MaxContextTokens == right.MaxContextTokens &&
-		left.MaxOutputTokens == right.MaxOutputTokens &&
-		left.MaxTotalTokens == right.MaxTotalTokens &&
-		left.MaxCostMicros == right.MaxCostMicros &&
-		left.ParentAnswerReserve == right.ParentAnswerReserve
+	return budget.IsZeroUsage(usage)
 }
 
 func budgetWithinLimits(limits agentapi.RunLimits, allocated agentapi.Usage, subject string) error {
@@ -1345,13 +1312,6 @@ func budgetWithinLimits(limits agentapi.RunLimits, allocated agentapi.Usage, sub
 	return nil
 }
 
-func saturatingAddBudget(left, right int64) int64 {
-	if right > 0 && left > math.MaxInt64-right {
-		return math.MaxInt64
-	}
-	return left + right
-}
-
 func budgetAvailable(limits agentapi.RunLimits, used, reserved agentapi.Usage, phase agentapi.RunBudgetPhase) agentapi.Usage {
 	allocated := addUsage(used, reserved)
 	available := agentapi.Usage{
@@ -1365,13 +1325,6 @@ func budgetAvailable(limits agentapi.RunLimits, used, reserved agentapi.Usage, p
 		available.TotalTokens = maxInt64(0, available.TotalTokens-limits.ParentAnswerReserve)
 	}
 	return available
-}
-
-func requireBudgetWithin(request, available agentapi.Usage, subject string) error {
-	if request.InputTokens > available.InputTokens || request.OutputTokens > available.OutputTokens || request.TotalTokens > available.TotalTokens || request.CostMicros > available.CostMicros {
-		return fmt.Errorf("%w: %s input=%d output=%d total=%d cost=%d available_input=%d available_output=%d available_total=%d available_cost=%d", agentapi.ErrBudgetExceeded, subject, request.InputTokens, request.OutputTokens, request.TotalTokens, request.CostMicros, available.InputTokens, available.OutputTokens, available.TotalTokens, available.CostMicros)
-	}
-	return nil
 }
 
 func remainingBudget(limit, used int64) int64 {

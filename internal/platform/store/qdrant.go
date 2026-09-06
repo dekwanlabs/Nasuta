@@ -294,7 +294,7 @@ func (q *Qdrant) search(ctx context.Context, vector []float32, filter *qdrantcli
 	}
 	hits := pointsToHits(res, semantic.ScoreDense)
 	if groupFallback {
-		hits = deduplicateHits(hits, groupKey, limit)
+		hits = semantic.DeduplicateHits(hits, groupKey, limit)
 	}
 	return hits, nil
 }
@@ -390,7 +390,7 @@ func (q *Qdrant) searchHybridBranch(
 	}
 	hits := pointsToBranchHits(res, branch)
 	if groupFallback {
-		hits = deduplicateHits(hits, groupKey, limit)
+		hits = semantic.DeduplicateHits(hits, groupKey, limit)
 	}
 	return hits, nil
 }
@@ -486,7 +486,7 @@ func fuseHybridHits(denseHits, sparseHits []semantic.Hit, limit int, groupKey st
 		return fused[i].ID < fused[j].ID
 	})
 	if groupKey != "" {
-		return deduplicateHits(fused, groupKey, limit)
+		return semantic.DeduplicateHits(fused, groupKey, limit)
 	}
 	if len(fused) > limit {
 		fused = fused[:limit]
@@ -513,23 +513,6 @@ func (branch hybridBranch) String() string {
 		return "sparse"
 	}
 	return "dense"
-}
-
-func deduplicateHits(hits []semantic.Hit, field string, limit int) []semantic.Hit {
-	seen := make(map[string]struct{}, min(len(hits), limit))
-	out := make([]semantic.Hit, 0, min(len(hits), limit))
-	for _, hit := range hits {
-		group := fmt.Sprint(hit.Metadata[field])
-		if _, exists := seen[group]; exists {
-			continue
-		}
-		seen[group] = struct{}{}
-		out = append(out, hit)
-		if len(out) == limit {
-			break
-		}
-	}
-	return out
 }
 
 func stringPtr(s string) *string { return &s }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
@@ -21,6 +22,15 @@ type ParentContext struct {
 	Permissions     agentapi.PermissionPolicy
 	Correlation     agentapi.Correlation
 	Limits          agentapi.RunLimits
+	// AnswerDeadline is the hard line by which the parent must deliver its
+	// final answer. Children are capped against this line (minus a safety
+	// margin) instead of inheriting the parent run deadline, so a slow child
+	// can never push the parent past its answer reserve.
+	AnswerDeadline time.Time
+	// BatchDeadline is computed by the delegation executor for the current
+	// admitted batch. It is kept in the server-owned context so queued and
+	// background execution use the same wall-clock boundary.
+	BatchDeadline time.Time
 	// OutputContract is the parent request shape. Children use it to select
 	// server-owned specialized budgets without inheriting the parent's final
 	// answer rendering contract.
@@ -250,29 +260,13 @@ func canonicalContextEvidenceConflict(
 	current, currentOK := canonicalContextEvidenceUnit(conflict.Current)
 	incoming, incomingOK := canonicalContextEvidenceUnit(conflict.Incoming)
 	if !currentOK || !incomingOK ||
-		!contextEvidenceIdentityMatches(conflict.Identity, current) ||
-		!contextEvidenceIdentityMatches(conflict.Identity, incoming) {
+		!evidence.IdentityMatches(conflict.Identity, current) ||
+		!evidence.IdentityMatches(conflict.Identity, incoming) {
 		return agentapi.EvidenceConflict{}, false
 	}
 	conflict.Current = current
 	conflict.Incoming = incoming
 	return conflict, true
-}
-
-func contextEvidenceIdentityMatches(
-	identity agentapi.EvidenceIdentity,
-	unit tool.EvidenceUnit,
-) bool {
-	if identity.SourceKind != unit.SourceKind ||
-		identity.Target != unit.Target ||
-		identity.Version != unit.Version ||
-		identity.TimeRange != unit.TimeRange {
-		return false
-	}
-	if identity.Section == "" {
-		return len(unit.Sections) == 0
-	}
-	return len(unit.Sections) == 1 && unit.Sections[0] == identity.Section
 }
 
 func cloneEvidenceUnit(unit tool.EvidenceUnit) tool.EvidenceUnit {

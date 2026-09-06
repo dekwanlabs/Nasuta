@@ -317,8 +317,6 @@ func unavailableToolBlock(id tool.ToolID, reason string) ContextBlock {
 	}
 }
 
-const preloadedContextBudget = 16000
-
 func (svc *Service) contextBudget() int {
 	if svc.retriever != nil {
 		return svc.retriever.ContextBudget()

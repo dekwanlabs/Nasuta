@@ -8,18 +8,22 @@ import (
 
 // DelegationPolicy is a server-owned ceiling for dynamic child Runs.
 type DelegationPolicy struct {
-	MaxDepth             int           `json:"max_depth"`
-	MaxChildren          int           `json:"max_children"`
-	MaxConcurrent        int           `json:"max_concurrent"`
-	MaxChildTurns        int           `json:"max_child_turns"`
-	MaxChildToolCalls    int64         `json:"max_child_tool_calls"`
-	MaxChildInputTokens  int64         `json:"max_child_input_tokens"`
-	MaxChildOutputTokens int64         `json:"max_child_output_tokens"`
-	MaxReportTokens      int64         `json:"max_report_tokens"`
-	MaxTotalTokens       int64         `json:"max_total_tokens"`
-	MaxTotalCostMicros   int64         `json:"max_total_cost_micros"`
-	ParentAnswerReserve  int64         `json:"parent_answer_reserve"`
-	ChildTimeout         time.Duration `json:"child_timeout"`
+	MaxDepth             int   `json:"max_depth"`
+	MaxChildren          int   `json:"max_children"`
+	MaxConcurrent        int   `json:"max_concurrent"`
+	MaxChildTurns        int   `json:"max_child_turns"`
+	MaxChildToolCalls    int64 `json:"max_child_tool_calls"`
+	MaxChildInputTokens  int64 `json:"max_child_input_tokens"`
+	MaxChildOutputTokens int64 `json:"max_child_output_tokens"`
+	MaxReportTokens      int64 `json:"max_report_tokens"`
+	MaxTotalTokens       int64 `json:"max_total_tokens"`
+	MaxTotalCostMicros   int64 `json:"max_total_cost_micros"`
+	ParentAnswerReserve  int64 `json:"parent_answer_reserve"`
+	// BatchTimeout bounds the wall-clock lifetime of one admitted delegation
+	// batch. A non-positive value is normalized to ChildTimeout for embedders
+	// that construct policies directly.
+	BatchTimeout time.Duration `json:"batch_timeout"`
+	ChildTimeout time.Duration `json:"child_timeout"`
 }
 
 // DelegationTask is the complete model-visible child request. Definition,
@@ -35,6 +39,7 @@ type DelegationTask struct {
 type DelegationStatus string
 
 const (
+	DelegationRunning     DelegationStatus = "running"
 	DelegationCompleted   DelegationStatus = "completed"
 	DelegationPartial     DelegationStatus = "partial"
 	DelegationFailed      DelegationStatus = "failed"
@@ -42,6 +47,7 @@ const (
 	DelegationCancelled   DelegationStatus = "cancelled"
 	DelegationRejected    DelegationStatus = "rejected"
 	DelegationInterrupted DelegationStatus = "interrupted"
+	DelegationUnavailable DelegationStatus = "unavailable"
 )
 
 type DelegationCompleteness string
@@ -217,6 +223,24 @@ type DelegationBatchResult struct {
 	Validation   DelegationValidation    `json:"validation"`
 	Verification *DelegationVerification `json:"verification,omitempty"`
 	Warnings     []string                `json:"warnings,omitempty"`
+}
+
+// DelegationDispatchResult is the immediate, non-blocking projection returned
+// by an async delegate_investigation call. Tasks are populated up front with a
+// running status; completed reports are backfilled through delegation_status.
+type DelegationDispatchResult struct {
+	DelegationID string                 `json:"delegation_id"`
+	Status       DelegationStatus       `json:"status"`
+	Tasks        []DelegationTaskStatus `json:"tasks"`
+}
+
+// DelegationTaskStatus is the streaming projection of one admitted child task.
+// Report is present only after the child has settled a durable report artifact.
+type DelegationTaskStatus struct {
+	TaskID  string            `json:"task_id"`
+	Subject string            `json:"subject"`
+	Status  DelegationStatus  `json:"status"`
+	Report  *DelegationReport `json:"report,omitempty"`
 }
 
 // DelegationAdoptionStatus records whether a parent final answer used any

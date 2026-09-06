@@ -5,11 +5,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 )
 
 func TestCodeSearchBackendFailureReturnsHTTPError(t *testing.T) {
-	handler := &Handler{tools: agent.NewTools(agent.Deps{})}
+	handler := &Handler{tools: tools.New(tools.Deps{})}
 	request := httptest.NewRequest(http.MethodGet, "/api/tools/code-search?query=orders", nil)
 	response := httptest.NewRecorder()
 

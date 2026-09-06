@@ -158,17 +158,28 @@ func analyzeQuestion(
 		Execution: ExecutionSuggestion{Strategy: ExecutionSingleAgent},
 	}
 
+	// Compute each section's presence once and share it between prompt assembly
+	// and response validation so the two phases can never drift on a condition.
+	sections := struct {
+		route, tools, terms, time, history bool
+	}{
+		route:   fixedPlan == nil,
+		tools:   len(toolCandidates) > 0,
+		terms:   fixedPlan == nil || len(toolCandidates) > 0,
+		time:    hasTemporalCandidate(toolCandidates),
+		history: strings.TrimSpace(routeContext) != "",
+	}
+
 	contracts := []string{"Query semantics contract:\n" + querySemanticsContract}
 	properties := []string{"\"query_semantics\""}
 	decision := domain.PlanDecision{}
-	temporal := hasTemporalCandidate(toolCandidates)
-	if fixedPlan == nil {
+	if sections.route {
 		contracts = append(contracts, fmt.Sprintf("Routing contract:\n%s\nRuntime capabilities: memory=%t internal=true web=%t", routingContract, capabilities.Memory, capabilities.Web))
 		properties = append(properties, "\"route\"")
 	} else {
 		decision = domain.PlanDecision{Plan: *fixedPlan, Confidence: 1, Origin: domain.Explicit}
 	}
-	if len(toolCandidates) > 0 {
+	if sections.tools {
 		encoded, _ := json.Marshal(toolCandidates)
 		toolContract, err := prompts.Render(prompts.RetrievalToolRouting, struct {
 			AvailableTools string
@@ -179,27 +190,21 @@ func analyzeQuestion(
 		contracts = append(contracts, "Tool routing contract:\n"+toolContract)
 		properties = append(properties, "\"tools\"")
 	}
-	if fixedPlan == nil || len(toolCandidates) > 0 {
+	if sections.terms {
 		contracts = append(contracts, "Query terms contract:\n"+queryTermsContract)
 		properties = append(properties, "\"query_terms\"")
 	}
-	if temporal {
+	if sections.time {
 		contracts = append(contracts, "Time contract:\n"+timeContract)
 		properties = append(properties, "\"time\"")
 	}
-	if strings.TrimSpace(routeContext) != "" {
+	if sections.history {
 		contracts = append(contracts, "History relation contract:\n"+historyRelationContract)
 		properties = append(properties, "\"history_relation\"")
 	}
-	analyzeExecution := len(properties) > 0
-	if analyzeExecution {
-		contracts = append(contracts, "Execution routing contract:\n"+executionContract)
-		properties = append(properties, "\"execution\"")
-	}
-	if len(properties) == 0 {
-		empty.Decision = decision
-		return empty, nil
-	}
+	// query_semantics is always requested, so execution is always requested too.
+	contracts = append(contracts, "Execution routing contract:\n"+executionContract)
+	properties = append(properties, "\"execution\"")
 	if client == nil {
 		return empty, fmt.Errorf("evidence planner unavailable: LLM client is nil")
 	}
@@ -246,7 +251,7 @@ func analyzeQuestion(
 			} else {
 				semantics, semanticsErr = bindQuerySemantics(semanticsRaw)
 			}
-			if fixedPlan == nil {
+			if sections.route {
 				routeRaw, ok := (*m)["route"].(map[string]any)
 				if !ok {
 					return fmt.Errorf("missing route object")
@@ -257,7 +262,7 @@ func analyzeQuestion(
 				}
 				decision = d
 			}
-			if len(toolCandidates) > 0 {
+			if sections.tools {
 				toolsRaw, ok := (*m)["tools"].(map[string]any)
 				if !ok {
 					return fmt.Errorf("missing tools object")
@@ -268,7 +273,7 @@ func analyzeQuestion(
 				}
 				toolIDs = ids
 			}
-			if fixedPlan == nil || len(toolCandidates) > 0 {
+			if sections.terms {
 				termsRaw, ok := (*m)["query_terms"].(map[string]any)
 				if !ok {
 					return fmt.Errorf("missing query_terms object")
@@ -280,18 +285,16 @@ func analyzeQuestion(
 				extracted.Identifiers = groundedIdentifiers(extracted.Identifiers, termsQuestion)
 				terms = extracted.normalize()
 			}
-			if analyzeExecution {
-				executionRaw, ok := (*m)["execution"].(map[string]any)
-				if !ok {
-					return fmt.Errorf("missing execution object")
-				}
-				extractedExecution, err := bindExecutionSuggestion(executionRaw)
-				if err != nil {
-					return err
-				}
-				execution = extractedExecution
+			executionRaw, ok := (*m)["execution"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("missing execution object")
 			}
-			if temporal {
+			extractedExecution, err := bindExecutionSuggestion(executionRaw)
+			if err != nil {
+				return err
+			}
+			execution = extractedExecution
+			if sections.time {
 				timeRaw, ok := (*m)["time"].(map[string]any)
 				if !ok {
 					return fmt.Errorf("missing time object")
@@ -302,7 +305,7 @@ func analyzeQuestion(
 				}
 				timeExpr = extracted
 			}
-			if strings.TrimSpace(routeContext) != "" {
+			if sections.history {
 				historyRaw, ok := (*m)["history_relation"].(map[string]any)
 				if !ok {
 					return fmt.Errorf("missing history_relation object")
@@ -432,10 +435,8 @@ func requestExecutionTaskAudit(
 }
 
 func bindExecutionAudit(raw map[string]any) ([]ExecutionTask, error) {
-	for field := range raw {
-		if field != "tasks" {
-			return nil, fmt.Errorf("execution task audit field %q is unknown", field)
-		}
+	if err := rejectUnknownFields(raw, map[string]struct{}{"tasks": {}}, "execution task audit"); err != nil {
+		return nil, err
 	}
 	tasks, err := bindExecutionTasks(raw["tasks"])
 	if err != nil {
@@ -540,46 +541,89 @@ func bindStringList(raw any) ([]string, error) {
 	return result, nil
 }
 
+// bindScore reads a required numeric score in [0,1]. key is the map key; field
+// is the dotted path used in error messages.
+func bindScore(raw map[string]any, key, field string) (float64, error) {
+	value, ok := raw[key].(float64)
+	if !ok || value < 0 || value > 1 {
+		return 0, fmt.Errorf("%s must be between 0 and 1", field)
+	}
+	return value, nil
+}
+
+// bindBool reads a required boolean field. key is the map key; field is the
+// dotted path used in error messages.
+func bindBool(raw map[string]any, key, field string) (bool, error) {
+	value, ok := raw[key].(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", field)
+	}
+	return value, nil
+}
+
+// rejectUnknownFields errors if raw contains a key outside allowed. prefix names
+// the enclosing object in the error message.
+func rejectUnknownFields(raw map[string]any, allowed map[string]struct{}, prefix string) error {
+	for field := range raw {
+		if _, ok := allowed[field]; !ok {
+			return fmt.Errorf("%s field %q is unknown", prefix, field)
+		}
+	}
+	return nil
+}
+
+// bindStringSlice reads a required array of strings. key is the map key; path is
+// the dotted path used in error messages.
+func bindStringSlice(raw map[string]any, key, path string) ([]string, error) {
+	items, ok := raw[key].([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an array", path)
+	}
+	values := make([]string, 0, len(items))
+	for i, item := range items {
+		value, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d] must be a string", path, i)
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
 func bindExecutionSuggestion(raw map[string]any) (ExecutionSuggestion, error) {
 	allowedFields := map[string]struct{}{
 		"strategy": {}, "complexity": {}, "confidence": {}, "tasks": {}, "reasons": {},
 	}
-	for field := range raw {
-		if _, ok := allowedFields[field]; !ok {
-			return ExecutionSuggestion{}, fmt.Errorf("execution field %q is unknown", field)
-		}
+	if err := rejectUnknownFields(raw, allowedFields, "execution"); err != nil {
+		return ExecutionSuggestion{}, err
 	}
 	strategy, ok := raw["strategy"].(string)
 	if !ok || ExecutionStrategy(strategy) != ExecutionSingleAgent && ExecutionStrategy(strategy) != ExecutionMultiAgent {
 		return ExecutionSuggestion{}, fmt.Errorf("execution.strategy must be single_agent or multi_agent")
 	}
-	complexity, ok := raw["complexity"].(float64)
-	if !ok || complexity < 0 || complexity > 1 {
-		return ExecutionSuggestion{}, fmt.Errorf("execution.complexity must be between 0 and 1")
+	complexity, err := bindScore(raw, "complexity", "execution.complexity")
+	if err != nil {
+		return ExecutionSuggestion{}, err
 	}
-	confidence, ok := raw["confidence"].(float64)
-	if !ok || confidence < 0 || confidence > 1 {
-		return ExecutionSuggestion{}, fmt.Errorf("execution.confidence must be between 0 and 1")
+	confidence, err := bindScore(raw, "confidence", "execution.confidence")
+	if err != nil {
+		return ExecutionSuggestion{}, err
 	}
 	tasks, err := bindExecutionTasks(raw["tasks"])
 	if err != nil {
 		return ExecutionSuggestion{}, err
 	}
 	executionStrategy := ExecutionStrategy(strategy)
-	items, ok := raw["reasons"].([]any)
-	if !ok {
-		return ExecutionSuggestion{}, fmt.Errorf("execution.reasons must be an array")
+	items, err := bindStringSlice(raw, "reasons", "execution.reasons")
+	if err != nil {
+		return ExecutionSuggestion{}, err
 	}
 	if len(items) > 4 {
 		return ExecutionSuggestion{}, fmt.Errorf("execution.reasons exceeds 4 items")
 	}
 	reasons := make([]string, 0, len(items))
 	seen := make(map[string]struct{}, len(items))
-	for index, item := range items {
-		reason, ok := item.(string)
-		if !ok {
-			return ExecutionSuggestion{}, fmt.Errorf("execution.reasons[%d] must be a string", index)
-		}
+	for _, reason := range items {
 		if _, allowed := executionReasonCodes[reason]; !allowed {
 			return ExecutionSuggestion{}, fmt.Errorf("execution reason %q is unknown", reason)
 		}
@@ -714,10 +758,9 @@ func bindExecutionTask(raw map[string]any, index int) (ExecutionTask, string, []
 	allowedFields := map[string]struct{}{
 		"id": {}, "objective": {}, "independently_useful": {}, "depends_on": {},
 	}
-	for field := range raw {
-		if _, ok := allowedFields[field]; !ok {
-			return ExecutionTask{}, "", nil, fmt.Errorf("execution.tasks[%d] field %q is unknown", index, field)
-		}
+	prefix := fmt.Sprintf("execution.tasks[%d]", index)
+	if err := rejectUnknownFields(raw, allowedFields, prefix); err != nil {
+		return ExecutionTask{}, "", nil, err
 	}
 
 	rawID := ""
@@ -733,9 +776,9 @@ func bindExecutionTask(raw map[string]any, index int) (ExecutionTask, string, []
 	if !ok || objective == "" || utf8.RuneCountInString(objective) > 500 {
 		return ExecutionTask{}, "", nil, fmt.Errorf("execution.tasks[%d].objective must contain 1 to 500 characters", index)
 	}
-	independent, ok := raw["independently_useful"].(bool)
-	if !ok {
-		return ExecutionTask{}, "", nil, fmt.Errorf("execution.tasks[%d].independently_useful must be a boolean", index)
+	independent, err := bindBool(raw, "independently_useful", fmt.Sprintf("execution.tasks[%d].independently_useful", index))
+	if err != nil {
+		return ExecutionTask{}, "", nil, err
 	}
 	dependencyItems, ok := raw["depends_on"].([]any)
 	if !ok {
@@ -762,54 +805,36 @@ func bindExecutionTask(raw map[string]any, index int) (ExecutionTask, string, []
 }
 
 func bindHistoryRelation(raw map[string]any, question string) (HistoryRelation, error) {
-	readScore := func(key string) (float64, error) {
-		value, ok := raw[key].(float64)
-		if !ok || value < 0 || value > 1 {
-			return 0, fmt.Errorf("history_relation.%s must be between 0 and 1", key)
-		}
-		return value, nil
-	}
-	readBool := func(key string) (bool, error) {
-		value, ok := raw[key].(bool)
-		if !ok {
-			return false, fmt.Errorf("history_relation.%s must be a boolean", key)
-		}
-		return value, nil
-	}
-	affinity, err := readScore("topic_affinity")
+	affinity, err := bindScore(raw, "topic_affinity", "history_relation.topic_affinity")
 	if err != nil {
 		return HistoryRelation{}, err
 	}
-	confidence, err := readScore("confidence")
+	confidence, err := bindScore(raw, "confidence", "history_relation.confidence")
 	if err != nil {
 		return HistoryRelation{}, err
 	}
-	entities, err := readBool("needs_prior_entities")
+	entities, err := bindBool(raw, "needs_prior_entities", "history_relation.needs_prior_entities")
 	if err != nil {
 		return HistoryRelation{}, err
 	}
-	conclusion, err := readBool("needs_prior_conclusion")
+	conclusion, err := bindBool(raw, "needs_prior_conclusion", "history_relation.needs_prior_conclusion")
 	if err != nil {
 		return HistoryRelation{}, err
 	}
-	evidence, err := readBool("needs_prior_evidence")
+	evidence, err := bindBool(raw, "needs_prior_evidence", "history_relation.needs_prior_evidence")
 	if err != nil {
 		return HistoryRelation{}, err
 	}
-	items, ok := raw["explicit_turn_refs"].([]any)
-	if !ok {
-		return HistoryRelation{}, fmt.Errorf("history_relation.explicit_turn_refs must be an array")
+	items, err := bindStringSlice(raw, "explicit_turn_refs", "history_relation.explicit_turn_refs")
+	if err != nil {
+		return HistoryRelation{}, err
 	}
 	if len(items) > 4 {
 		return HistoryRelation{}, fmt.Errorf("history_relation.explicit_turn_refs exceeds 4 items")
 	}
 	refs := make([]string, 0, len(items))
 	seen := make(map[string]struct{}, len(items))
-	for i, item := range items {
-		ref, ok := item.(string)
-		if !ok {
-			return HistoryRelation{}, fmt.Errorf("history_relation.explicit_turn_refs[%d] must be a string", i)
-		}
+	for _, ref := range items {
 		ref = strings.TrimSpace(ref)
 		if ref == "" || !strings.Contains(strings.ToLower(question), strings.ToLower(ref)) {
 			continue
@@ -843,26 +868,11 @@ func hasTemporalCandidate(candidates []ToolRouteCandidate) bool {
 }
 
 func bindQueryTerms(raw map[string]any) (QueryTerms, error) {
-	read := func(key string) ([]string, error) {
-		items, ok := raw[key].([]any)
-		if !ok {
-			return nil, fmt.Errorf("query_terms.%s must be an array", key)
-		}
-		values := make([]string, 0, len(items))
-		for i, item := range items {
-			value, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("query_terms.%s[%d] must be a string", key, i)
-			}
-			values = append(values, value)
-		}
-		return values, nil
-	}
-	domainTerms, err := read("domain_terms")
+	domainTerms, err := bindStringSlice(raw, "domain_terms", "query_terms.domain_terms")
 	if err != nil {
 		return QueryTerms{}, err
 	}
-	identifiers, err := read("identifiers")
+	identifiers, err := bindStringSlice(raw, "identifiers", "query_terms.identifiers")
 	if err != nil {
 		return QueryTerms{}, err
 	}
@@ -881,9 +891,9 @@ func groundedIdentifiers(identifiers []string, question string) []string {
 }
 
 func bindToolIDs(raw map[string]any, candidates []ToolRouteCandidate) ([]string, error) {
-	items, ok := raw["tool_ids"].([]any)
-	if !ok {
-		return nil, fmt.Errorf("tool_ids must be an array")
+	items, err := bindStringSlice(raw, "tool_ids", "tool_ids")
+	if err != nil {
+		return nil, err
 	}
 	allowed := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
@@ -891,11 +901,7 @@ func bindToolIDs(raw map[string]any, candidates []ToolRouteCandidate) ([]string,
 	}
 	selected := make(map[string]struct{}, len(items))
 	ids := make([]string, 0, len(items))
-	for _, item := range items {
-		id, ok := item.(string)
-		if !ok {
-			return nil, fmt.Errorf("tool id must be a string")
-		}
+	for _, id := range items {
 		if _, ok := allowed[id]; !ok {
 			return nil, fmt.Errorf("unknown routed tool %q", id)
 		}
@@ -909,16 +915,12 @@ func bindToolIDs(raw map[string]any, candidates []ToolRouteCandidate) ([]string,
 }
 
 func bindPlanDecision(raw map[string]any) (domain.PlanDecision, error) {
-	items, ok := raw["sources"].([]any)
-	if !ok {
-		return domain.PlanDecision{}, fmt.Errorf("sources must be an array")
+	items, err := bindStringSlice(raw, "sources", "sources")
+	if err != nil {
+		return domain.PlanDecision{}, err
 	}
 	var sources domain.EvidenceSources
-	for _, item := range items {
-		name, ok := item.(string)
-		if !ok {
-			return domain.PlanDecision{}, fmt.Errorf("source must be a string")
-		}
+	for _, name := range items {
 		switch name {
 		case "memory":
 			sources |= domain.Memory
@@ -930,9 +932,9 @@ func bindPlanDecision(raw map[string]any) (domain.PlanDecision, error) {
 			return domain.PlanDecision{}, fmt.Errorf("unknown source %q", name)
 		}
 	}
-	confidence, ok := raw["confidence"].(float64)
-	if !ok || confidence < 0 || confidence > 1 {
-		return domain.PlanDecision{}, fmt.Errorf("confidence must be between 0 and 1")
+	confidence, err := bindScore(raw, "confidence", "confidence")
+	if err != nil {
+		return domain.PlanDecision{}, err
 	}
 	plan := domain.EvidencePlan{Sources: sources}
 	if !plan.Valid() {

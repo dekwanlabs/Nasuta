@@ -12,6 +12,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/auth"
+	"github.com/dekwanlabs/nasuta/internal/transport"
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
@@ -77,7 +78,7 @@ func (handler *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) List(w http.ResponseWriter, r *http.Request) {
-	if _, ok := authenticatedUser(w, r); !ok {
+	if _, ok := transport.AuthenticatedUser(w, r); !ok {
 		return
 	}
 	limit, err := requestLimit(r)
@@ -113,7 +114,7 @@ func (handler *Handler) SetDefault(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	version, err := pathVersion(r)
+	version, err := transport.PathVersion(r)
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -137,7 +138,7 @@ func (handler *Handler) SetStatus(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	version, err := pathVersion(r)
+	version, err := transport.PathVersion(r)
 	if err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
@@ -200,7 +201,7 @@ func (handler *Handler) ListAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) GetRollout(w http.ResponseWriter, r *http.Request) {
-	if _, ok := authenticatedUser(w, r); !ok {
+	if _, ok := transport.AuthenticatedUser(w, r); !ok {
 		return
 	}
 	if handler.catalog == nil {
@@ -292,16 +293,11 @@ func (handler *Handler) ListRolloutAudit(w http.ResponseWriter, r *http.Request)
 }
 
 func authenticatedUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		httputil.WriteUnauthorized(w, "authentication required")
-		return nil, false
-	}
-	return user, true
+	return transport.AuthenticatedUser(w, r)
 }
 
 func adminUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
-	user, ok := authenticatedUser(w, r)
+	user, ok := transport.AuthenticatedUser(w, r)
 	if !ok {
 		return nil, false
 	}
@@ -334,16 +330,6 @@ func afterSequence(r *http.Request) (int64, error) {
 		return 0, errors.New("after_seq must be a non-negative integer")
 	}
 	return sequence, nil
-}
-
-func pathVersion(r *http.Request) (int64, error) {
-	version, err := strconv.ParseInt(
-		strings.TrimSpace(r.PathValue("version")), 10, 64,
-	)
-	if err != nil || version <= 0 {
-		return 0, errors.New("version must be a positive integer")
-	}
-	return version, nil
 }
 
 func writeDomainError(w http.ResponseWriter, err error) {

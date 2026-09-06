@@ -1541,13 +1541,12 @@ func TestRun_PreservesPartialForcedConclusionWhenDeadlineExpires(t *testing.T) {
 	}
 }
 
-func TestRunRetriesOnlyCurrentRunAnswerContract(t *testing.T) {
+func TestRunConservativelyRecoversUnsatisfiedAnswerContract(t *testing.T) {
 	const (
 		priorSerial = "SN-prior-round-complete"
 		serial      = "SN-prefix-0123456789-suffix"
 	)
 	var calls int32
-	var repairPrompt string
 	var historicalContractVisible bool
 	var currentContractVisible bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1572,14 +1571,6 @@ func TestRunRetriesOnlyCurrentRunAnswerContract(t *testing.T) {
 		if call == 1 {
 			writeTestSSE(t, w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-exact","type":"function","function":{"name":"exact_read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
 			return
-		}
-		if call == 3 {
-			for _, message := range request.Messages {
-				if message.Role == "user" && strings.Contains(message.Content, "final-answer validator") {
-					repairPrompt = message.Content
-				}
-			}
-			content = "本轮 SN：" + serial
 		}
 		encoded, _ := json.Marshal(streamChunkJS{Choices: []streamChoiceJS{{Delta: streamDeltaJS{Content: content}, FinishReason: "stop"}}})
 		writeTestSSE(t, w, string(encoded))
@@ -1612,24 +1603,26 @@ func TestRunRetriesOnlyCurrentRunAnswerContract(t *testing.T) {
 		t.Fatal("prior answer contract was empty")
 	}
 	result, err := agent.RunWithContext(
-		t.Context(), "run_exact_retry", "继续列出完整 SN",
+		t.Context(), "run_exact_recover", "继续列出完整 SN",
 		ConversationContext{Recent: []llm.Message{priorMessage}}, nil,
 		domain.EvidencePlan{Sources: domain.Internal}, false,
 	)
 	if err != nil {
 		t.Fatalf("RunWithPlan() error = %v", err)
 	}
-	if result.Err != nil || result.Answer != "本轮 SN："+serial {
-		t.Fatalf("result = %#v", result)
+	if result.Err != nil {
+		t.Fatalf("result.Err = %v", result.Err)
+	}
+	// The model body must be preserved, and the missing required literal is
+	// re-attached server-side instead of paying for a repair LLM round-trip.
+	if !strings.Contains(result.Answer, "设备 SN：…0123456789…") || !strings.Contains(result.Answer, serial) {
+		t.Fatalf("answer did not preserve body and required literal: %#v", result)
 	}
 	if got := strings.Join(observer.tokens, ""); got != result.Answer {
-		t.Fatalf("visible tokens = %q, want only validated answer %q", got, result.Answer)
+		t.Fatalf("visible tokens = %q, want %q", got, result.Answer)
 	}
-	if !strings.Contains(repairPrompt, serial) || strings.Contains(repairPrompt, priorSerial) || !strings.Contains(repairPrompt, "Never abbreviate") {
-		t.Fatalf("repair prompt = %q", repairPrompt)
-	}
-	if atomic.LoadInt32(&calls) != 3 {
-		t.Fatalf("LLM calls = %d, want 3", calls)
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("LLM calls = %d, want tool call + answer (no repair retries)", calls)
 	}
 	if historicalContractVisible || !currentContractVisible {
 		t.Fatalf("contract visibility historical=%v current=%v", historicalContractVisible, currentContractVisible)
@@ -1639,7 +1632,7 @@ func TestRunRetriesOnlyCurrentRunAnswerContract(t *testing.T) {
 	}
 }
 
-func TestRunFailsWhenRequiredLiteralStillMissing(t *testing.T) {
+func TestRunRecoversMissingLiteralWithoutDroppingBody(t *testing.T) {
 	const serial = "SN-must-remain-complete"
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1670,18 +1663,18 @@ func TestRunFailsWhenRequiredLiteralStillMissing(t *testing.T) {
 		nil,
 	)
 
-	result, err := agent.RunWithPlan(t.Context(), "run_exact_failure", "列出完整 SN", nil, nil, domain.EvidencePlan{Sources: domain.Internal}, false)
+	result, err := agent.RunWithPlan(t.Context(), "run_exact_recover", "列出完整 SN", nil, nil, domain.EvidencePlan{Sources: domain.Internal}, false)
 	if err != nil {
 		t.Fatalf("RunWithPlan() error = %v", err)
 	}
-	if !errors.Is(result.Err, ErrAnswerContractViolation) || result.Answer != "" {
-		t.Fatalf("result = %#v", result)
+	if result.Err != nil {
+		t.Fatalf("result.Err = %v", result.Err)
 	}
-	if got := strings.Join(observer.tokens, ""); got != "" {
-		t.Fatalf("invalid answer leaked to client: %q", got)
+	if !strings.Contains(result.Answer, "SN：…complete") || !strings.Contains(result.Answer, serial) {
+		t.Fatalf("answer lost model body or required literal: %#v", result)
 	}
-	if atomic.LoadInt32(&calls) != 4 {
-		t.Fatalf("LLM calls = %d, want initial tool call + answer + 2 retries", calls)
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("LLM calls = %d, want tool call + answer (no repair retries)", calls)
 	}
 }
 
@@ -1795,7 +1788,7 @@ func writeTestSSE(t *testing.T, w http.ResponseWriter, data string) {
 	_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
 }
 
-func TestForceConclusionRejectsAnswerContractViolation(t *testing.T) {
+func TestForceConclusionRecoversUnsatisfiedContract(t *testing.T) {
 	const serial = "SN-force-conclusion-complete"
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1818,19 +1811,14 @@ func TestForceConclusionRejectsAnswerContractViolation(t *testing.T) {
 	contract.Add(tool.AnswerContract{RequiredLiterals: []string{serial}})
 	seq := 0
 	res, err := agent.forceConclusion(t.Context(), "run_force_exact", nil, contract, &seq, time.Now())
-	if !errors.Is(err, ErrAnswerContractViolation) || res == nil {
+	if err != nil || res == nil {
 		t.Fatalf("res=%#v err=%v", res, err)
 	}
-	if got := strings.Join(observer.tokens, ""); got != "" {
-		t.Fatalf("invalid forced conclusion leaked to client: %q", got)
+	if !strings.Contains(res.Content, "SN：…complete") || !strings.Contains(res.Content, serial) {
+		t.Fatalf("forced conclusion lost model body or required literal: %#v", res)
 	}
-	if atomic.LoadInt32(&calls) != 3 {
-		t.Fatalf("LLM calls = %d, want initial answer + 2 retries", calls)
-	}
-	for _, step := range observer.steps {
-		if step.Kind == StepKindAnswer {
-			t.Fatalf("invalid answer step was recorded: %#v", step)
-		}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("LLM calls = %d, want single answer (no repair retries)", calls)
 	}
 }
 

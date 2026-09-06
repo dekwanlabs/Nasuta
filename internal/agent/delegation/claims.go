@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"sort"
 	"strings"
 	"sync"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/strutil"
 )
 
 const (
@@ -136,21 +136,7 @@ func schemaKey(schema agentapi.SchemaRef) string {
 }
 
 func canonicalFields(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, duplicate := seen[value]; duplicate {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
+	return strutil.Canonical(values)
 }
 
 type claimComparatorFunc func(context.Context, json.RawMessage, json.RawMessage) (bool, error)

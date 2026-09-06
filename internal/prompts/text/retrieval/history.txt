@@ -6,6 +6,7 @@ Determine how the current question depends on the bounded previous-turn metadata
 - needs_prior_evidence is true when the answer requires prior request, response, message, or tool evidence rather than only an entity name.
 - explicit_turn_refs contains at most 4 turn or run references explicitly written by the user. Do not invent references.
 - Dependencies are monotonic: evidence implies conclusion and entities; conclusion implies entities.
+- A bare number or ordinal/measure-word selection (for example "3" or "the third one") depends on the prior conclusion and its target: set needs_prior_conclusion and needs_prior_entities to true.
 Use recent_dialogue to resolve numeric selections, omitted targets, references, and unfinished work from prior assistant answers.
 The conversation_context contains bounded metadata and the newest user/final-assistant exchanges, but never tool payloads.
 Populate only the top-level `history_relation` property in the single JSON object requested by the planner. Do not emit a separate JSON object:

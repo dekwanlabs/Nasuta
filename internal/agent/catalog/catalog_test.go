@@ -9,6 +9,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/scope"
 )
 
@@ -207,10 +208,8 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		!strings.Contains(synthesizer.Prompt.System, "must not be inserted into a main path") ||
 		!strings.Contains(synthesizer.Prompt.System, `"workflow.synthesis_objective"`) ||
 		!strings.Contains(synthesizer.Prompt.System, `"investigation_goals"`) ||
-		!strings.Contains(synthesizer.Prompt.System, `Use short "##" headings`) ||
-		!strings.Contains(synthesizer.Prompt.System, "one dense paragraph") ||
-		!strings.Contains(synthesizer.Prompt.System, "final evidence-boundary section") ||
-		!strings.Contains(synthesizer.Prompt.System, `Do not lead with "verification"`) ||
+		!strings.Contains(synthesizer.Prompt.System, `User-Visible Answer Contract`) ||
+		!strings.Contains(synthesizer.Prompt.System, "lead with the answer itself and the conclusion") ||
 		strings.Contains(synthesizer.Prompt.System, `"handoffs[].payload"`) ||
 		strings.Contains(synthesizer.Prompt.System, `"unavailable_tasks"`) ||
 		len(synthesizer.Tools.VisibleToolIDs) != 0 || !synthesizer.Tools.RestrictVisible {
@@ -385,7 +384,7 @@ func TestDefaultCapabilitiesPinAgentContracts(t *testing.T) {
 		if !ok || capability.Version != 12 || !capability.Enabled ||
 			!capability.RetrySafe ||
 			capability.SideEffects != agentapi.SideEffectNone ||
-			capability.MaxConcurrency != 3 ||
+			capability.MaxConcurrency != 6 ||
 			capability.Freshness != wantFreshness[capability.ID] ||
 			capability.Agent != (agentapi.DefinitionRef{ID: agentID, Version: 12}) ||
 			!slices.Equal(capability.PermissionScope, []string{"knowledge.read"}) {
@@ -436,5 +435,41 @@ func TestCatalogRejectsNonRuntimePermissionScope(t *testing.T) {
 	err := catalog.Publish([]agentapi.Definition{definition})
 	if err == nil || !strings.Contains(err.Error(), "not supported by the agent runtime") {
 		t.Fatalf("Publish error = %v, want non-runtime scope rejection", err)
+	}
+}
+
+func TestDefaultQAAndSynthesizerShareUserVisibleAnswerContract(t *testing.T) {
+	settings := &config.PlatformSettings{
+		LLMProvider: "openai", LLMModel: "model", LLMAnswerMaxTokens: 4096,
+		LLMContextWindow: 32000, AgentTimeout: config.Duration(time.Minute),
+		AgentMaxSteps: 2,
+	}
+	qa, err := DefaultQAVersion(settings, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions, err := DefaultInvestigators(settings, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var synthesizer agentapi.Definition
+	for _, definition := range definitions {
+		if definition.ID == "synthesizer" {
+			synthesizer = definition
+			break
+		}
+	}
+	if synthesizer.ID == "" {
+		t.Fatal("synthesizer definition not found")
+	}
+	contract := prompts.Text(prompts.AgentQAUserVisibleAnswer)
+	if !strings.HasSuffix(qa.Prompt.System, contract) {
+		t.Fatal("single-agent QA prompt does not end with canonical answer contract")
+	}
+	if !strings.HasSuffix(synthesizer.Prompt.System, contract) {
+		t.Fatal("delegated synthesizer prompt does not end with canonical answer contract")
+	}
+	if strings.Count(qa.Prompt.System, contract) != 1 || strings.Count(synthesizer.Prompt.System, contract) != 1 {
+		t.Fatal("canonical answer contract must appear exactly once in public answer prompts")
 	}
 }

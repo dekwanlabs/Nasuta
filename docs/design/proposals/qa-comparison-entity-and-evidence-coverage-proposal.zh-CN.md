@@ -1,9 +1,9 @@
 # QA 对比问题的实体识别与证据覆盖修复提案
 
-状态：核心机制已实施；离线回放、灰度观测与指标验收待执行  
-作者：CodeLoom / Nasuta Agent Platform  
-日期：2026-08-18  
-关联事项：Trace `9d09b180705c`；用户问题“我们的 Agent 控制设备和 Google、Alexa 有什么区别，链路是什么样的”  
+状态：核心机制已实施；离线回放、灰度观测与指标验收待执行
+作者：CodeLoom / Nasuta Agent Platform
+日期：2026-08-18
+关联事项：Trace `9d09b180705c`；用户问题“我们的 Agent 控制设备和 Google、Alexa 有什么区别，链路是什么样的”
 目标版本：当前分支 `feat/multi-agent-platform`
 
 ## 0. 实施记录（2026-08-18）

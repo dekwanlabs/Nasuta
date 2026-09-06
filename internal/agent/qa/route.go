@@ -82,7 +82,6 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	}
 	if planning.PlanningError != nil {
 		logPlannerFailure(prepared.ctx, planning.PlanningTime, planning.PlanningError)
-		planning.RoutedToolIDs = nil
 		prepared.planning.RoutedToolIDs = nil
 	}
 

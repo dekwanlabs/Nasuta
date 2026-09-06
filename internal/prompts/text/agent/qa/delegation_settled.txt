@@ -1,0 +1,2 @@
+DELEGATION_SETTLED: 委派调查已全部结束，报告如下（每个任务的结果已回填）。请基于这些报告撰写 synthesis，不要再次调用 delegation_status 或 delegate_investigation。
+{{ .Dispatch }}

@@ -4,12 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
 const DelegateToolID tool.ToolID = "delegate_investigation"
+
+// DelegationStatusToolID is the streaming backfill query. It is a fast,
+// non-blocking read; the parent polls it between loop steps instead of waiting
+// inside delegate_investigation.
+const DelegationStatusToolID tool.ToolID = "delegation_status"
 
 func (executor *Executor) Tool() tool.ReadTool {
 	capabilities := executor.Capabilities()
@@ -44,7 +50,7 @@ func (executor *Executor) Tool() tool.ReadTool {
 			maxTasks,
 		),
 		MCPHidden: true,
-		Timeout:   tool.InheritCallerDeadline,
+		Timeout:   15 * time.Second,
 		InputSchema: tool.JSONSchema{
 			"type":     "object",
 			"required": []any{"tasks"},
@@ -89,23 +95,23 @@ func (executor *Executor) Tool() tool.ReadTool {
 			if err != nil {
 				return tool.Result{}, err
 			}
-			result, evidence, err := executor.Execute(ctx, tasks)
+			dispatch, err := executor.Dispatch(ctx, tasks)
 			if err != nil {
 				return tool.Result{}, err
 			}
-			result.Warnings = delegationWarnings(result)
-			content, err := json.Marshal(result)
+			content, err := json.Marshal(dispatch)
 			if err != nil {
-				return tool.Result{}, fmt.Errorf("encode delegation result: %w", err)
+				return tool.Result{}, fmt.Errorf("encode delegation dispatch: %w", err)
 			}
+			anyRunning := dispatchHasRunning(dispatch)
 			return tool.Result{
-				Content: string(content), EvidenceUnits: evidence,
+				Content: string(content),
 				Coverage: tool.EvidenceCoverage{
-					Complete: !batchPartial(result),
-					Partial:  batchPartial(result),
-					Included: len(result.Results),
+					Complete: !anyRunning,
+					Partial:  anyRunning,
+					Included: len(dispatch.Tasks),
 				},
-				AnswerContract: delegationAdoptionContract(result),
+				AnswerContract: delegationDispatchAdoptionContract(dispatch),
 			}, nil
 		}),
 	}
@@ -303,4 +309,94 @@ func batchPartial(result agentapi.DelegationBatchResult) bool {
 		}
 	}
 	return false
+}
+
+// StatusTool exposes a non-blocking poll of one dispatched delegation. It lets
+// the parent read whichever children have already settled and backfill its
+// draft answer between loop steps instead of blocking inside
+// delegate_investigation.
+func (executor *Executor) StatusTool() tool.ReadTool {
+	return tool.ReadTool{
+		ID:          DelegationStatusToolID,
+		Description: "Poll the current state of a previously dispatched investigation batch. Returns the tasks that have already completed with their reports, and marks the rest as running. Call this after delegate_investigation to collect finished results; it never blocks.",
+		MCPHidden:   true,
+		NoDedup:     true,
+		Timeout:     5 * time.Second,
+		InputSchema: tool.JSONSchema{
+			"type":     "object",
+			"required": []any{"delegation_id"},
+			"properties": map[string]any{
+				"delegation_id": map[string]any{
+					"type": "string", "minLength": 1, "maxLength": 128,
+				},
+			},
+			"additionalProperties": false,
+		},
+		Handler: tool.HandlerFunc(func(
+			ctx context.Context,
+			arguments tool.Arguments,
+		) (tool.Result, error) {
+			delegationID := arguments.String("delegation_id")
+			if delegationID == "" {
+				return tool.Result{}, fmt.Errorf("delegation_id is required")
+			}
+			result, err := executor.Poll(ctx, delegationID)
+			if err != nil {
+				return tool.Result{}, err
+			}
+			content, err := json.Marshal(result)
+			if err != nil {
+				return tool.Result{}, fmt.Errorf("encode delegation status: %w", err)
+			}
+			anyRunning := dispatchHasRunning(result)
+			return tool.Result{
+				Content: string(content),
+				Coverage: tool.EvidenceCoverage{
+					Complete: !anyRunning,
+					Partial:  anyRunning,
+					Included: len(result.Tasks),
+				},
+				AnswerContract: delegationDispatchAdoptionContract(result),
+			}, nil
+		}),
+	}
+}
+
+// dispatchHasRunning reports whether any admitted task has not yet settled.
+func dispatchHasRunning(dispatch agentapi.DelegationDispatchResult) bool {
+	for _, task := range dispatch.Tasks {
+		switch task.Status {
+		case agentapi.DelegationRunning:
+			return true
+		}
+	}
+	return false
+}
+
+// DelegationAdoptionContract adapts a streaming dispatch projection to the
+// batch-shaped adoption contract used by the exact-answer contract. It is
+// deliberately bounded to the reports already visible so adoption metadata is
+// never emitted as "unknown". The execution loop calls it after an awaited
+// settlement to re-register the backfilled reports as adoptable.
+func DelegationAdoptionContract(result agentapi.DelegationDispatchResult) tool.AnswerContract {
+	return delegationDispatchAdoptionContract(result)
+}
+
+// delegationDispatchAdoptionContract adapts a streaming dispatch projection to
+// the batch-shaped adoption contract used by the exact-answer contract. It is
+// deliberately bounded to the reports already visible so adoption metadata is
+// never emitted as "unknown".
+func delegationDispatchAdoptionContract(
+	result agentapi.DelegationDispatchResult,
+) tool.AnswerContract {
+	batch := agentapi.DelegationBatchResult{
+		DelegationID: result.DelegationID,
+		Results:      make([]agentapi.DelegationReport, 0, len(result.Tasks)),
+	}
+	for _, task := range result.Tasks {
+		if task.Report != nil {
+			batch.Results = append(batch.Results, *task.Report)
+		}
+	}
+	return delegationAdoptionContract(batch)
 }

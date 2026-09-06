@@ -100,46 +100,10 @@ func scanIOSDependencies(root string, dirs []string) []domain.DependencyEdge {
 		}
 
 		// Alamofire: AF.request("https://api.example.com/path")
-		for _, m := range iosAlamofireRe.FindAllStringSubmatch(text, -1) {
-			if len(m) > 1 {
-				start := strings.Index(text, m[1])
-				if start < 0 || !iosHTTPURLUsage(text, start, start+len(m[1])) {
-					continue
-				}
-				target := extractIOSHost(m[1])
-				if target != "" {
-					edges = append(edges, domain.DependencyEdge{
-						CallerServiceKey: caller.Key,
-						From:             caller.Name,
-						To:               target,
-						Type:             domain.EdgeHTTP,
-						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence:       0.6,
-					})
-				}
-			}
-		}
+		appendIOSURLDependencyEdges(&edges, caller, rel, text, iosAlamofireRe, 0.6)
 		// Moya: enum with path patterns (e.g. .getUsers: return "/users")
 		// Swift URLSession: URL(string: "https://api.example.com/path")
-		for _, m := range iosURLRe.FindAllStringSubmatch(text, -1) {
-			if len(m) > 1 {
-				start := strings.Index(text, m[1])
-				if start < 0 || !iosHTTPURLUsage(text, start, start+len(m[1])) {
-					continue
-				}
-				target := extractIOSHost(m[1])
-				if target != "" {
-					edges = append(edges, domain.DependencyEdge{
-						CallerServiceKey: caller.Key,
-						From:             caller.Name,
-						To:               target,
-						Type:             domain.EdgeHTTP,
-						Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
-						Confidence:       0.5,
-					})
-				}
-			}
-		}
+		appendIOSURLDependencyEdges(&edges, caller, rel, text, iosURLRe, 0.5)
 	}
 	return edges
 }
@@ -253,6 +217,33 @@ func extractIOSHost(url string) string {
 	return ""
 }
 
+func appendIOSURLDependencyEdges(
+	edges *[]domain.DependencyEdge, caller serviceIdentity, rel, text string,
+	urlRe *regexp.Regexp, confidence float64,
+) {
+	for _, match := range urlRe.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		start := strings.Index(text, match[1])
+		if start < 0 || !iosHTTPURLUsage(text, start, start+len(match[1])) {
+			continue
+		}
+		target := extractIOSHost(match[1])
+		if target == "" {
+			continue
+		}
+		*edges = append(*edges, domain.DependencyEdge{
+			CallerServiceKey: caller.Key,
+			From:             caller.Name,
+			To:               target,
+			Type:             domain.EdgeHTTP,
+			Evidence:         []domain.Evidence{{Path: rel, Kind: domain.SourceCodeScan}},
+			Confidence:       confidence,
+		})
+	}
+}
+
 var iosAlamofireRe = regexp.MustCompile(`AF\.request\s*\(\s*"(https?://[^"]+)"`)
 
 var iosURLRe = regexp.MustCompile(`(?:URL|url)\s*\(\s*(?:string\s*:\s*)?["'](https?://[^"']+)["']`)
@@ -265,16 +256,8 @@ func iosHTTPURLUsage(text string, start, end int) bool {
 	}
 	// AF.request(url) and URLSession dataTaskWithURL(url) put the literal
 	// directly in the request expression.
-	for _, call := range iosClientCallRe.FindAllStringIndex(text, -1) {
-		open := strings.IndexByte(text[call[0]:call[1]], '(')
-		if open < 0 {
-			continue
-		}
-		open += call[0]
-		close := matchingParen(text, open)
-		if close > end && start >= open && start < close {
-			return true
-		}
+	if httpURLInsideClientCall(text, start, end, iosClientCallRe) {
+		return true
 	}
 	// URL(string:) is commonly assigned to a URLRequest before the session
 	// starts. Require that the assigned variable is subsequently consumed by a

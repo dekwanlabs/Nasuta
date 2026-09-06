@@ -385,29 +385,15 @@ func (service *Service) generateArtifact(
 	defer cancel()
 	artifact, inputTokens, outputTokens, generationErr := service.generator.Generate(generationCtx, run.ID, *feature, *parent, kind, userID)
 	if generationErr != nil {
-		run.Status = "failed"
-		run.InputTokens = inputTokens
-		run.OutputTokens = outputTokens
-		run.ErrorSummary = truncateText(generationErr.Error(), 2048)
-		ended := service.now()
-		run.EndedAt = &ended
-		if finishErr := service.store.FinishGenerationRun(context.WithoutCancel(ctx), run.ID, run.Status, inputTokens, outputTokens, run.ErrorSummary); finishErr != nil {
-			generationErr = errors.Join(generationErr, fmt.Errorf("persist failed generation %q: %w", run.ID, finishErr))
-		}
+		generationErr = service.failGeneration(
+			ctx, &run, generationErr, inputTokens, outputTokens,
+		)
 		return nil, &run, generationErr
 	}
 	artifact.CreatedAt = service.now()
 	saved, err := service.store.CompleteGeneration(generationCtx, run.ID, artifact, inputTokens, outputTokens)
 	if err != nil {
-		run.Status = "failed"
-		run.InputTokens = inputTokens
-		run.OutputTokens = outputTokens
-		run.ErrorSummary = truncateText(err.Error(), 2048)
-		ended := service.now()
-		run.EndedAt = &ended
-		if finishErr := service.store.FinishGenerationRun(context.WithoutCancel(ctx), run.ID, run.Status, inputTokens, outputTokens, run.ErrorSummary); finishErr != nil {
-			err = errors.Join(err, fmt.Errorf("persist failed generation %q: %w", run.ID, finishErr))
-		}
+		err = service.failGeneration(ctx, &run, err, inputTokens, outputTokens)
 		return nil, &run, err
 	}
 	run.Status = "succeeded"
@@ -417,6 +403,29 @@ func (service *Service) generateArtifact(
 	ended := service.now()
 	run.EndedAt = &ended
 	return saved, &run, nil
+}
+
+func (service *Service) failGeneration(
+	ctx context.Context,
+	run *GenerationRun,
+	cause error,
+	inputTokens, outputTokens int64,
+) error {
+	run.Status = "failed"
+	run.InputTokens = inputTokens
+	run.OutputTokens = outputTokens
+	run.ErrorSummary = truncateText(cause.Error(), 2048)
+	ended := service.now()
+	run.EndedAt = &ended
+	if finishErr := service.store.FinishGenerationRun(
+		context.WithoutCancel(ctx), run.ID, run.Status,
+		inputTokens, outputTokens, run.ErrorSummary,
+	); finishErr != nil {
+		return errors.Join(cause, fmt.Errorf(
+			"persist failed generation %q: %w", run.ID, finishErr,
+		))
+	}
+	return cause
 }
 
 func (service *Service) ReviewArtifact(

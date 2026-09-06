@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,19 +16,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 )
 
-const (
-	activeHistoryTopK      = 4
-	activeHistoryMaxTokens = 32_000
-	routeHistoryTextTokens = 512
-)
-
-var explicitHistoryRefPattern = regexp.MustCompile(`(?i)(?:\b(?:turn|run)[-_: #]?[a-z0-9-]+\b|第[[:space:]]*[0-9]+[[:space:]]*轮)`)
-var selectionReferencePattern = regexp.MustCompile(`(?i)^[[:space:]]*(?:#?[0-9]{1,2}|第[[:space:]]*(?:[0-9]{1,2}|[一二三四五六七八九十两]+)[[:space:]]*(?:个|项|条|种|组|份|类|位|套)?|(?:选|选择)[[:space:]]*(?:第[[:space:]]*)?(?:[0-9]{1,2}|[一二三四五六七八九十两]+)[[:space:]]*(?:个|项|条|种|组|份|类|位|套)?)[[:space:]]*[。.!！]?[[:space:]]*$`)
-
 type contextAssembleStats struct {
 	Relation            retrieval.HistoryRelation
 	RelationOrigin      string
-	UpgradeReason       string
 	CandidateCount      int
 	SelectedCount       int
 	FullTurnCount       int
@@ -48,7 +37,6 @@ type contextAssembleInput struct {
 	Conversation  ConversationContext
 	Relation      retrieval.HistoryRelation
 	Origin        string
-	Upgrade       string
 	Candidates    *HistoryCandidates
 	ContextWindow int
 	OutputReserve int
@@ -70,8 +58,8 @@ var contextAssembleSpec = runtrace.Spec[contextAssembleInput, contextAssembleOut
 			"needs_prior_entities":   stats.Relation.NeedsPriorEntities,
 			"needs_prior_conclusion": stats.Relation.NeedsPriorConclusion,
 			"needs_prior_evidence":   stats.Relation.NeedsPriorEvidence,
-			"dependency_upgrade":     stats.UpgradeReason, "candidate_turns": stats.CandidateCount,
-			"selected_turns": stats.SelectedCount, "full_turns": stats.FullTurnCount,
+			"candidate_turns":        stats.CandidateCount,
+			"selected_turns":         stats.SelectedCount, "full_turns": stats.FullTurnCount,
 			"detail_turns": stats.DetailCount, "reference_turns": stats.ReferenceCount,
 			"omitted_turns": stats.OmittedCount, "history_budget_tokens": stats.HistoryBudgetTokens,
 			"history_used_tokens":   stats.HistoryUsedTokens,
@@ -92,7 +80,7 @@ func (svc *Service) assembleContext(ctx context.Context, input contextAssembleIn
 			input.ContextWindow, input.OutputReserve,
 		)
 		conversation, stats, err := svc.assembleActiveHistory(
-			ctx, input.Question, input.UserID, input.Conversation, input.Relation, input.Origin, input.Upgrade,
+			ctx, input.Question, input.UserID, input.Conversation, input.Relation, input.Origin,
 			contextWindow, outputReserve,
 		)
 		output := contextAssembleOutput{Conversation: conversation, Stats: stats}
@@ -262,90 +250,18 @@ func boundedRouteEntities(entities []string) []string {
 	return bounded
 }
 
-func resolveHistoryRelation(question string, recent []memory.TurnMetadata, model retrieval.HistoryRelation, modelValid bool) (retrieval.HistoryRelation, string, string) {
+// resolveHistoryRelation trusts the model's history_relation when valid and
+// falls back to a generic lexical-affinity estimate when the model did not run.
+func resolveHistoryRelation(question string, recent []memory.TurnMetadata, model retrieval.HistoryRelation, modelValid bool) (retrieval.HistoryRelation, string) {
 	if len(recent) == 0 {
-		return retrieval.HistoryRelation{}, "none", ""
+		return retrieval.HistoryRelation{}, "none"
+	}
+	if modelValid {
+		return model, "model"
 	}
 	_, currentEntities, currentTerms := memory.CanonicalQuestionMetadata(question)
-	latest := recent[0]
-	localAffinity, conflict := turnAffinity(currentEntities, currentTerms, latest, 0, len(recent))
-	relation, origin := baseHistoryRelation(model, modelValid, localAffinity, question)
-	upgrade := applyHistoryRelationSignals(
-		question, latest, conflict, &relation, modelValid, localAffinity,
-	)
-	return relation, origin, upgrade
-}
-
-func baseHistoryRelation(
-	model retrieval.HistoryRelation,
-	modelValid bool,
-	localAffinity float64,
-	question string,
-) (retrieval.HistoryRelation, string) {
-	relation := model
-	origin := "model"
-	if !modelValid {
-		relation = retrieval.HistoryRelation{
-			TopicAffinity:    localAffinity,
-			Confidence:       0.5,
-			ExplicitTurnRefs: explicitHistoryRefPattern.FindAllString(question, 4),
-		}
-		origin = "deterministic"
-	}
-	return relation, origin
-}
-
-func applyHistoryRelationSignals(
-	question string,
-	latest memory.TurnMetadata,
-	conflict bool,
-	relation *retrieval.HistoryRelation,
-	modelValid bool,
-	localAffinity float64,
-) string {
-	pronoun := containsAnyFold(question, []string{
-		"这个", "那个", "它", "该", "上述", "前面", "刚才", "继续", "然后", "呢", "this", "that", "it", "previous", "continue",
-	})
-	evidenceReference := containsAnyFold(question, []string{
-		"证据", "结果", "日志", "请求", "响应", "报错", "错误", "trace", "request", "response", "message", "result", "evidence",
-	})
-	upgrade := applyHistorySelectionSignal(question, relation)
-	if pronoun && !conflict && !relation.NeedsPriorEntities {
-		relation.NeedsPriorEntities = true
-		upgrade = "unresolved_reference"
-	}
-	if pronoun && evidenceReference && !conflict && latest.EvidenceManifest.Status != "none" {
-		relation.NeedsPriorEvidence = true
-		relation.NeedsPriorConclusion = true
-		relation.NeedsPriorEntities = true
-		upgrade = "reference_requires_evidence"
-	}
-	cascadeHistoryNeeds(relation)
-	if !modelValid || relation.TopicAffinity == 0 {
-		relation.TopicAffinity = localAffinity
-	}
-	if conflict && len(relation.ExplicitTurnRefs) == 0 && !pronoun {
-		relation.TopicAffinity *= 0.25
-	}
-	return upgrade
-}
-
-func applyHistorySelectionSignal(question string, relation *retrieval.HistoryRelation) string {
-	if !selectionReferencePattern.MatchString(question) {
-		return ""
-	}
-	relation.NeedsPriorConclusion = true
-	relation.NeedsPriorEntities = true
-	return "selection_reference"
-}
-
-func cascadeHistoryNeeds(relation *retrieval.HistoryRelation) {
-	if relation.NeedsPriorEvidence {
-		relation.NeedsPriorConclusion = true
-		relation.NeedsPriorEntities = true
-	} else if relation.NeedsPriorConclusion {
-		relation.NeedsPriorEntities = true
-	}
+	localAffinity, _ := turnAffinity(currentEntities, currentTerms, recent[0], 0, len(recent))
+	return retrieval.HistoryRelation{TopicAffinity: localAffinity, Confidence: 0.5}, "deterministic"
 }
 
 func (svc *Service) assembleActiveHistory(
@@ -355,12 +271,11 @@ func (svc *Service) assembleActiveHistory(
 	conversation ConversationContext,
 	relation retrieval.HistoryRelation,
 	origin string,
-	upgrade string,
 	contextWindow int,
 	outputReserve int,
 ) (ConversationContext, contextAssembleStats, error) {
 	stats := contextAssembleStats{
-		Relation: relation, RelationOrigin: origin, UpgradeReason: upgrade,
+		Relation: relation, RelationOrigin: origin,
 		CandidateCount: len(conversation.RecentTurns),
 	}
 	if len(conversation.RecentTurns) == 0 {
@@ -679,16 +594,6 @@ func explicitTurnSelected(metadata memory.TurnMetadata, refs []string) bool {
 			if digits == turnNumber {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-func containsAnyFold(value string, terms []string) bool {
-	lower := strings.ToLower(value)
-	for _, term := range terms {
-		if strings.Contains(lower, term) {
-			return true
 		}
 	}
 	return false

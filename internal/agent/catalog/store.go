@@ -149,19 +149,14 @@ func (catalogStore *Store) LoadDefaultDefinitions(
 	if err != nil {
 		return nil, fmt.Errorf("load default agent definitions: %w", err)
 	}
-	defer rows.Close()
-	records := make([]DefinitionRecord, 0)
-	for rows.Next() {
-		record, err := scanDefinitionRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate default agent definitions: %w", err)
-	}
-	return records, nil
+	return store.CollectRows(
+		rows,
+		0,
+		func() (DefinitionRecord, error) { return scanDefinitionRecord(rows) },
+		func(err error) error {
+			return fmt.Errorf("iterate default agent definitions: %w", err)
+		},
+	)
 }
 
 // LoadDefinition returns one immutable version for lazy catalog hydration.
@@ -229,19 +224,14 @@ func (catalogStore *Store) LoadFullCatalog(
 	if err != nil {
 		return nil, fmt.Errorf("load full agent catalog: %w", err)
 	}
-	defer rows.Close()
-	records := make([]DefinitionRecord, 0)
-	for rows.Next() {
-		record, err := scanDefinitionRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate full agent catalog: %w", err)
-	}
-	return records, nil
+	return store.CollectRows(
+		rows,
+		0,
+		func() (DefinitionRecord, error) { return scanDefinitionRecord(rows) },
+		func(err error) error {
+			return fmt.Errorf("iterate full agent catalog: %w", err)
+		},
+	)
 }
 
 func (catalogStore *Store) LoadRollouts(
@@ -290,19 +280,14 @@ func (catalogStore *Store) ListDefinitions(
 	if err != nil {
 		return nil, fmt.Errorf("list agent definitions: %w", err)
 	}
-	defer rows.Close()
-	records := make([]DefinitionRecord, 0, limit)
-	for rows.Next() {
-		record, err := scanDefinitionRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate agent definitions: %w", err)
-	}
-	return records, nil
+	return store.CollectRows(
+		rows,
+		limit,
+		func() (DefinitionRecord, error) { return scanDefinitionRecord(rows) },
+		func(err error) error {
+			return fmt.Errorf("iterate agent definitions: %w", err)
+		},
+	)
 }
 
 func (catalogStore *Store) SetDefault(

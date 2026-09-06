@@ -2162,23 +2162,8 @@ func (store *FeatureDeliveryStore) CompleteReviewRound(
 }
 
 func (store *FeatureDeliveryStore) GetReviewGateResult(ctx context.Context, id string) (*delivery.ReviewGateResult, error) {
-	var raw []byte
-	err := store.db.QueryRowContext(ctx,
-		`SELECT gate_result_json FROM review_rounds
-		 WHERE gate_result_id=? AND gate_result_json IS NOT NULL LIMIT 1`,
-		id,
-	).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, delivery.ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get review gate result %q: %w", id, err)
-	}
-	var result delivery.ReviewGateResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, fmt.Errorf("decode review gate result %q: %w", id, err)
-	}
-	return &result, nil
+	return store.getReviewGateResult(ctx,
+		"gate_result_id", id, "review gate result")
 }
 
 // GetReviewGateResultByRound resolves the single immutable Gate for a round.
@@ -2186,21 +2171,29 @@ func (store *FeatureDeliveryStore) GetReviewGateResultByRound(
 	ctx context.Context,
 	roundID string,
 ) (*delivery.ReviewGateResult, error) {
+	return store.getReviewGateResult(ctx,
+		"id", roundID, "review gate result for round")
+}
+
+func (store *FeatureDeliveryStore) getReviewGateResult(
+	ctx context.Context,
+	column, value, label string,
+) (*delivery.ReviewGateResult, error) {
 	var raw []byte
 	err := store.db.QueryRowContext(ctx,
 		`SELECT gate_result_json FROM review_rounds
-		 WHERE id=? AND gate_result_json IS NOT NULL LIMIT 1`,
-		roundID,
+		 WHERE `+column+`=? AND gate_result_json IS NOT NULL LIMIT 1`,
+		value,
 	).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, delivery.ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get review gate result for round %q: %w", roundID, err)
+		return nil, fmt.Errorf("get %s %q: %w", label, value, err)
 	}
 	var result delivery.ReviewGateResult
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, fmt.Errorf("decode review gate result for round %q: %w", roundID, err)
+		return nil, fmt.Errorf("decode %s %q: %w", label, value, err)
 	}
 	return &result, nil
 }

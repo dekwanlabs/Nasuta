@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agent"
+	agenttools "github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	ontologysqlite "github.com/dekwanlabs/nasuta/internal/platform/ontologystore/sqlite"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
@@ -167,7 +167,7 @@ func (s *recordingSemantic) repoPoints(repo string) map[string]semantic.Record {
 	return out
 }
 
-func newBM25TestService(t *testing.T) (*Service, *agent.Service, string) {
+func newBM25TestService(t *testing.T) (*Service, *agenttools.Service, string) {
 	t.Helper()
 	root := t.TempDir()
 	svcDir := filepath.Join(root, "demo-svc")
@@ -199,7 +199,7 @@ func newBM25TestService(t *testing.T) (*Service, *agent.Service, string) {
 		Embedder: emb,
 		ScanDirs: []string{"demo-svc"},
 	}
-	tools := agent.NewTools(agent.Deps{DB: db, Semantic: contract.NewMemory(), Embedder: emb})
+	tools := agenttools.New(agenttools.Deps{DB: db, Semantic: contract.NewMemory(), Embedder: emb})
 	svc.SetTools(tools)
 	return svc, tools, root
 }

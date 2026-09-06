@@ -5,9 +5,10 @@ import (
 	"math"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 )
 
-const maxConclusionGenerations = 3 + maxAnswerContractRetries
+const maxConclusionGenerations = 3
 
 // ModelUsageCeiling bounds every model call the immutable execution policy permits.
 type ModelUsageCeiling struct {
@@ -117,21 +118,7 @@ func modelCostCeiling(
 }
 
 func tokenCostCeiling(tokens, priceMicrosPerMillionTokens int64) (int64, error) {
-	if tokens < 0 || priceMicrosPerMillionTokens < 0 {
-		return 0, fmt.Errorf("tokens and price cannot be negative")
-	}
-	if tokens == 0 || priceMicrosPerMillionTokens == 0 {
-		return 0, nil
-	}
-	if tokens > math.MaxInt64/priceMicrosPerMillionTokens {
-		return 0, fmt.Errorf("token price multiplication overflow")
-	}
-	product := tokens * priceMicrosPerMillionTokens
-	cost := product / 1_000_000
-	if product%1_000_000 != 0 {
-		cost++
-	}
-	return cost, nil
+	return llm.TokenCostMicros(tokens, priceMicrosPerMillionTokens)
 }
 
 func checkedAdd(left, right int64, name string) (int64, error) {

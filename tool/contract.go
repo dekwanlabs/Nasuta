@@ -313,6 +313,11 @@ type Tool struct {
 	Admission       *AdmissionSpec
 	Handler         Handler
 	MCPHidden       bool
+	// NoDedup marks a stateful tool whose identical argument set may legally
+	// produce different results on later calls (for example a polling tool
+	// that reports changing status). Such tools are exempt from the
+	// execution-layer fingerprint dedup and are always re-executed.
+	NoDedup bool
 	// Timeout bounds one invocation. Zero uses Executor.DefaultTimeout.
 	// InheritCallerDeadline keeps only the caller context.
 	Timeout time.Duration
@@ -329,6 +334,7 @@ type ReadTool struct {
 	Admission       *AdmissionSpec
 	Handler         Handler
 	MCPHidden       bool
+	NoDedup         bool
 	Timeout         time.Duration
 }
 
@@ -343,7 +349,8 @@ func (candidate ReadTool) tool() Tool {
 		ID: candidate.ID, Description: candidate.Description, Kind: KindRead,
 		InputSchema: candidate.InputSchema, ReferenceInputs: candidate.ReferenceInputs,
 		Routing: candidate.Routing, Prefetch: candidate.Prefetch, Admission: candidate.Admission,
-		Handler: candidate.Handler, MCPHidden: candidate.MCPHidden, Timeout: candidate.Timeout,
+		Handler: candidate.Handler, MCPHidden: candidate.MCPHidden, NoDedup: candidate.NoDedup,
+		Timeout: candidate.Timeout,
 	}
 }
 

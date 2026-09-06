@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
-	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/definition"
 	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
@@ -29,7 +28,6 @@ type CandidateDiscovery = session.CandidateDiscovery
 type DefinitionResolver = definition.Resolver
 type ScenarioToolSet = definition.ScenarioToolSet
 type ScenarioToolSource = definition.ScenarioToolSource
-type Agent = execution.Agent
 
 type RunOutcome = run.Outcome
 type RunStepRecord = run.StepRecord
@@ -137,32 +135,6 @@ func shouldShortCircuitMeta(question string) bool {
 
 func compressTurnDetail(turnNumber int, messages []llm.Message) (json.RawMessage, error) {
 	return session.CompressDetail(turnNumber, messages)
-}
-
-func publicMessages(messages []llm.Message) []agentapi.Message {
-	if len(messages) == 0 {
-		return nil
-	}
-	out := make([]agentapi.Message, 0, len(messages))
-	for _, message := range messages {
-		compiled := agentapi.Message{
-			Role: message.Role, Content: message.Content,
-			ToolCallID: message.ToolCallID, Name: message.Name,
-		}
-		if len(message.ToolCalls) > 0 {
-			compiled.ToolCalls = make([]agentapi.ToolCall, 0, len(message.ToolCalls))
-			for _, call := range message.ToolCalls {
-				compiled.ToolCalls = append(compiled.ToolCalls, agentapi.ToolCall{
-					ID: call.ID, Type: call.Type,
-					Function: agentapi.ToolFunction{
-						Name: call.Function.Name, Arguments: call.Function.Arguments,
-					},
-				})
-			}
-		}
-		out = append(out, compiled)
-	}
-	return out
 }
 
 func withSessionToolScope(

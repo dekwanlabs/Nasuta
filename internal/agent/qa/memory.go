@@ -1,10 +1,11 @@
 package qa
 
 import (
+	"strings"
+
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
-	"strings"
 )
 
 type memoryRecallInput struct {
@@ -44,14 +45,6 @@ var memoryRecallSpec = runtrace.Spec[*memoryRecallInput, memoryRecallOutput]{
 		}
 	},
 	Status: func(output memoryRecallOutput, _ error) string { return output.Status },
-}
-
-var memoryInjectSpec = runtrace.Spec[[]memory.MemoryRecord, string]{
-	Operation: "memory.inject",
-	Node:      "memory_inject",
-	Output: func(records []memory.MemoryRecord, formatted string, _ error) map[string]any {
-		return map[string]any{"records": len(records), "characters": len([]rune(formatted))}
-	},
 }
 
 func memoryExtractionAllowed(outcome RunOutcome, result *RunResult) bool {

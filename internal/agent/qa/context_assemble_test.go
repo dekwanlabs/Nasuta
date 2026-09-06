@@ -63,27 +63,13 @@ func TestBuildHistoryRouteContextBoundsDialogueAndEntities(t *testing.T) {
 	}
 }
 
-func TestResolveHistoryRelationTreatsSelectionAsPriorConclusionReference(t *testing.T) {
-	latest := turnMetadataForQuestion(8, "列出 UserController 选项")
-	for _, question := range []string{"2", "第2个", "第二个", "选择 2"} {
-		relation, origin, upgrade := resolveHistoryRelation(
-			question, []memory.TurnMetadata{latest},
-			retrieval.HistoryRelation{TopicAffinity: 0.2, Confidence: 0.8}, true,
-		)
-		if origin != "model" || upgrade != "selection_reference" ||
-			!relation.NeedsPriorEntities || !relation.NeedsPriorConclusion {
-			t.Fatalf("question=%q relation=%+v origin=%q upgrade=%q", question, relation, origin, upgrade)
-		}
-	}
-}
-
-func TestResolveHistoryRelationPreservesCrossSourceEntityContinuity(t *testing.T) {
+func TestResolveHistoryRelationTrustsModelWhenValid(t *testing.T) {
 	latest := turnMetadataForQuestion(8, "查 hs-user-service 的日志")
-	relation, origin, _ := resolveHistoryRelation(
+	relation, origin := resolveHistoryRelation(
 		"再看 hs-user-service 的配置", []memory.TurnMetadata{latest},
 		retrieval.HistoryRelation{TopicAffinity: 0.7, Confidence: 0.8}, true,
 	)
-	if origin != "model" || relation.TopicAffinity <= 0 {
+	if origin != "model" || relation.TopicAffinity != 0.7 {
 		t.Fatalf("relation = %+v origin=%q", relation, origin)
 	}
 	if relation.NeedsPriorEvidence {
@@ -91,17 +77,17 @@ func TestResolveHistoryRelationPreservesCrossSourceEntityContinuity(t *testing.T
 	}
 }
 
-func TestResolveHistoryRelationUpgradesUnresolvedEvidenceReference(t *testing.T) {
-	latest := turnMetadataForQuestion(8, "查 trace-123 的日志")
-	latest.EvidenceManifest = memory.EvidenceManifest{
-		Status: "available", Items: []memory.EvidenceManifestItem{{Tool: "observe_logs", Coverage: "full"}},
-	}
-	relation, origin, upgrade := resolveHistoryRelation(
-		"继续看刚才的错误证据", []memory.TurnMetadata{latest}, retrieval.HistoryRelation{Confidence: 0.2}, true,
+func TestResolveHistoryRelationFallsBackToLexicalAffinity(t *testing.T) {
+	latest := turnMetadataForQuestion(8, "查 hs-user-service 的日志")
+	relation, origin := resolveHistoryRelation(
+		"查 hs-user-service 的日志", []memory.TurnMetadata{latest}, retrieval.HistoryRelation{}, false,
 	)
-	if origin != "model" || upgrade != "reference_requires_evidence" ||
-		!relation.NeedsPriorEntities || !relation.NeedsPriorConclusion || !relation.NeedsPriorEvidence {
-		t.Fatalf("relation = %+v origin=%q upgrade=%q", relation, origin, upgrade)
+	if origin != "deterministic" || relation.Confidence != 0.5 || relation.TopicAffinity <= 0 {
+		t.Fatalf("relation = %+v origin=%q", relation, origin)
+	}
+	if relation.NeedsPriorEntities || relation.NeedsPriorConclusion || relation.NeedsPriorEvidence ||
+		len(relation.ExplicitTurnRefs) != 0 {
+		t.Fatalf("deterministic fallback produced model-only fields: %+v", relation)
 	}
 }
 
@@ -150,7 +136,7 @@ func TestAssembleActiveHistoryLoadsOneCompleteAtomicTurn(t *testing.T) {
 		context.Background(), "继续看刚才的错误证据", 42,
 		ConversationContext{SessionID: "session-1", RecentTurns: []memory.TurnMetadata{metadata}},
 		retrieval.HistoryRelation{NeedsPriorEntities: true, NeedsPriorConclusion: true, NeedsPriorEvidence: true},
-		"model", "",
+		"model",
 		128000, 4000,
 	)
 	if err != nil {
@@ -188,7 +174,7 @@ func TestAssembleActiveHistoryUsesRecentAnswerWithoutReloadingToolTurn(t *testin
 			}},
 		},
 		retrieval.HistoryRelation{NeedsPriorEntities: true, NeedsPriorConclusion: true},
-		"model", "selection_reference",
+		"model",
 		128000, 4000,
 	)
 	if err != nil {
@@ -225,7 +211,6 @@ func TestAssembleContextUsesDefinitionLimitsForActiveHistory(t *testing.T) {
 		},
 		Relation:      retrieval.HistoryRelation{NeedsPriorEntities: true, NeedsPriorConclusion: true},
 		Origin:        "model",
-		Upgrade:       "selection_reference",
 		ContextWindow: 8192,
 		OutputReserve: 4096,
 	})

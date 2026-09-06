@@ -138,7 +138,7 @@ func DefaultCapabilities(
 			Freshness:      specification.freshness,
 			SideEffects:    agentapi.SideEffectNone,
 			RetrySafe:      true,
-			MaxConcurrency: 3,
+			MaxConcurrency: 6,
 			Enabled:        true,
 			Agent: agentapi.DefinitionRef{
 				ID:      definition.ID,

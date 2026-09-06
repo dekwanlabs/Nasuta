@@ -32,6 +32,10 @@ type Runtime struct {
 	usageStore  llm.UsageRecorder
 	hub         *run.Hub
 
+	// delegationAwaiter resolves finished child reports on the server side.
+	// The application wires it after the delegation executor is built.
+	delegationAwaiter execution.DelegationAwaiter
+
 	recoveryMu         sync.Mutex
 	recoveryCancel     context.CancelFunc
 	recoveryGeneration uint64
@@ -143,6 +147,16 @@ func NewRuntime(
 		usageStore: usageStore,
 		hub:        hub,
 	}, nil
+}
+
+// SetDelegationAwaiter wires the server-side delegation settlement resolver
+// into the runtime. The application calls it after building the delegation
+// executor; before that the parent loop simply runs without the await.
+func (runtime *Runtime) SetDelegationAwaiter(awaiter execution.DelegationAwaiter) {
+	if runtime == nil {
+		return
+	}
+	runtime.delegationAwaiter = awaiter
 }
 
 // Hub exposes the Runtime-owned event and control boundary.

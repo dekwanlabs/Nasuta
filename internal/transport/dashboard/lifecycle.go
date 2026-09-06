@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/qa"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 )
@@ -23,7 +23,7 @@ func (handler *Handler) currentQARuntime() QARuntime {
 }
 
 // qaService returns the active QA service used by dashboard requests.
-func (handler *Handler) qaService() *agent.QA {
+func (handler *Handler) qaService() *qa.Service {
 	return handler.currentQARuntime().QA
 }
 

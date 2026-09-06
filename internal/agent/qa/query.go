@@ -26,7 +26,6 @@ type queryAnalysisInput struct {
 type queryAnalysisOutput struct {
 	History       retrieval.HistoryRelation
 	HistoryOrigin string
-	HistoryUpdate string
 	TimeRange     tool.TimeRange
 	HasTimeRange  bool
 	TimeError     error
@@ -89,7 +88,7 @@ func queryEntityTrace(specs []domain.EntitySpec) []map[string]any {
 
 func analyzeQuery(ctx context.Context, input queryAnalysisInput) (queryAnalysisOutput, error) {
 	result, err := runtrace.Invoke(ctx, queryAnalysisSpec, input, func(_ context.Context, input queryAnalysisInput) (queryAnalysisResult, error) {
-		history, origin, update := resolveHistoryRelation(input.Question, input.RecentTurns, input.History, input.HistoryValid)
+		history, origin := resolveHistoryRelation(input.Question, input.RecentTurns, input.History, input.HistoryValid)
 		timeRange, hasTimeRange, timeErr := retrieval.ResolveTime(input.Time, input.Anchor)
 		resolution := domain.ResolveQueryPlan(
 			input.Question,
@@ -98,7 +97,7 @@ func analyzeQuery(ctx context.Context, input queryAnalysisInput) (queryAnalysisO
 		)
 		return queryAnalysisResult{
 			Analysis: queryAnalysisOutput{
-				History: history, HistoryOrigin: origin, HistoryUpdate: update,
+				History: history, HistoryOrigin: origin,
 				TimeRange: timeRange, HasTimeRange: hasTimeRange, TimeError: timeErr,
 				QueryPlan: resolution.Plan,
 			},

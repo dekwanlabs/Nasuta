@@ -1,8 +1,8 @@
 # Investigation 限制项归一化、排序与详细结果留存提案
 
-状态：草案  
-作者：Nasuta Agent Platform  
-日期：2026-08-18  
+状态：草案
+作者：Nasuta Agent Platform
+日期：2026-08-18
 关联事项：`workflow_592090ef0cdc50a3e5f55d88`、trace `3d4ceaafb7b8`、当前 `investigation.answer` Schema
 目标版本：待评审
 

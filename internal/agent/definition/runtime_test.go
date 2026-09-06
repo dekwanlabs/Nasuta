@@ -18,6 +18,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
+	"github.com/dekwanlabs/nasuta/internal/agent/messages"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
@@ -542,7 +543,7 @@ func TestDefinitionRuntimePinsSelectionAcrossManagedRun(t *testing.T) {
 }
 
 func TestDefinitionRuntimePreservesToolMessageRoundTrip(t *testing.T) {
-	messages := []llm.Message{
+	incoming := []llm.Message{
 		{
 			Role: "assistant", ToolCalls: []llm.ToolCall{{
 				ID: "call-1", Type: "function",
@@ -551,7 +552,7 @@ func TestDefinitionRuntimePreservesToolMessageRoundTrip(t *testing.T) {
 		},
 		{Role: "tool", Content: "result", ToolCallID: "call-1", Name: "lookup"},
 	}
-	got := publicResultMessages(publicMessages(messages))
+	got := publicResultMessages(messages.Public(incoming))
 	if len(got) != 2 || len(got[0].ToolCalls) != 1 {
 		t.Fatalf("round trip messages = %#v", got)
 	}

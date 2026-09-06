@@ -8,15 +8,15 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 )
 
-func DefaultQA(settings *config.PlatformSettings) (agentapi.Definition, error) {
-	return DefaultQAVersion(settings, 1)
-}
-
 func DefaultQAVersion(settings *config.PlatformSettings, version int64) (agentapi.Definition, error) {
 	systemPrompt := settings.DomainKnowledge
 	if systemPrompt == "" {
 		systemPrompt = prompts.Text(prompts.AgentCatalogFallbackQA)
 	}
+	// The single-agent QA answerer shares the same user-visible answer contract
+	// as the investigation synthesizer, so every public answer follows one
+	// output rule set regardless of which agent produced it.
+	systemPrompt = prompts.WithUserVisibleAnswerContract(systemPrompt)
 	return agentapi.Prepare(agentapi.Definition{
 		ID: "qa.answerer", Version: version, DisplayName: "QA Answerer",
 		Purpose: "Answer questions using bounded, attributable evidence.",

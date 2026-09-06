@@ -50,35 +50,13 @@ func scanNodeJSServices(root string, dirs []string) []domain.ServiceRecord {
 
 // scanNodeJSDependencies finds HTTP client calls (axios, fetch, node-fetch).
 func scanNodeJSDependencies(root string, dirs []string) []domain.DependencyEdge {
-	files := walkFiles(root, dirs, func(name string) bool {
-		return strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".ts") ||
-			strings.HasSuffix(name, ".mjs") || strings.HasSuffix(name, ".cjs")
-	})
-	var edges []domain.DependencyEdge
-	for _, file := range files {
-		if isTestSourcePath(relativeTo(root, file)) {
-			continue
-		}
-		text := readFile(file)
-		if !strings.Contains(text, "axios") && !strings.Contains(text, "fetch(") && !strings.Contains(text, "request(") {
-			continue
-		}
-		rel := relativeTo(root, file)
-		caller := dependencyIdentity(root, file)
-		for _, match := range nodejsHTTPCallRe.FindAllStringSubmatchIndex(text, -1) {
-			if len(match) < 4 || !httpURLUsedByClient(text, match[0], match[1], nodejsClientCallRe) {
-				continue
-			}
-			target := text[match[2]:match[3]]
-			target = strings.TrimPrefix(strings.TrimPrefix(target, "http://"), "https://")
-			target, _, _ = strings.Cut(target, "/")
-			if skipDependencyTarget(target) {
-				continue
-			}
-			edges = append(edges, protocolEdge(caller, target, domain.EdgeHTTP, rel, lineAt(text, match[0]), 0.5))
-		}
-	}
-	return edges
+	return scanHTTPURLDependencies(
+		root, walkFiles(root, dirs, nodejsMatch),
+		func(text string) bool {
+			return strings.Contains(text, "axios") || strings.Contains(text, "fetch(") || strings.Contains(text, "request(")
+		},
+		nodejsHTTPCallRe, nodejsClientCallRe, normalizeHTTPHost, 0.5,
+	)
 }
 
 // ---- helpers ----

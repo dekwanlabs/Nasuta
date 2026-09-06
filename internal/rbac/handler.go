@@ -96,32 +96,26 @@ func (h *Handler) DeleteRole(w http.ResponseWriter, r *http.Request) {
 
 // User-Role
 
+type roleBindingRequest struct {
+	UserID int64 `json:"user_id"`
+	RoleID int64 `json:"role_id"`
+}
+
 func (h *Handler) AssignRole(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		UserID int64 `json:"user_id"`
-		RoleID int64 `json:"role_id"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		httputil.WriteBadRequest(w, "bad request")
-		return
-	}
-	if err := h.store.AssignRole(body.UserID, body.RoleID); err != nil {
-		httputil.WriteErr(w, err)
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true})
+	h.updateRoleBinding(w, r, h.store.AssignRole)
 }
 
 func (h *Handler) RevokeRole(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		UserID int64 `json:"user_id"`
-		RoleID int64 `json:"role_id"`
-	}
+	h.updateRoleBinding(w, r, h.store.RevokeRole)
+}
+
+func (h *Handler) updateRoleBinding(w http.ResponseWriter, r *http.Request, action func(int64, int64) error) {
+	var body roleBindingRequest
 	if err := readJSON(r, &body); err != nil {
 		httputil.WriteBadRequest(w, "bad request")
 		return
 	}
-	if err := h.store.RevokeRole(body.UserID, body.RoleID); err != nil {
+	if err := action(body.UserID, body.RoleID); err != nil {
 		httputil.WriteErr(w, err)
 		return
 	}

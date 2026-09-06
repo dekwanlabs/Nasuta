@@ -83,7 +83,7 @@ func (te *ToolExecutor) ExecuteLimited(ctx context.Context, snapshot tool.Snapsh
 	}
 
 	fp := ""
-	if seen != nil {
+	if seen != nil && !candidate.NoDedup {
 		fp = toolFingerprint(name, args)
 		if seen[fp] {
 			log.InfofCtx(ctx, "[agent] tool %s deduped (repeat call — returning placeholder)", name)
@@ -107,7 +107,7 @@ func (te *ToolExecutor) ExecuteLimited(ctx context.Context, snapshot tool.Snapsh
 		return ToolExecution{AuthoritativeContent: result, PromptContent: result, Failed: true, DurationMs: int(duration / time.Millisecond)}
 	}
 	result := toolResult.Content
-	if seen != nil {
+	if seen != nil && !candidate.NoDedup {
 		seen[fp] = true
 	}
 
@@ -372,8 +372,6 @@ func extendEvidenceStepLimit(step, current, configured int, produced, alreadyExt
 	}
 	return current + 1
 }
-
-const toolArgumentLimit = 8_000
 
 func canonicalToolCalls(calls []llm.ToolCall) []llm.ToolCall {
 	out := make([]llm.ToolCall, len(calls))

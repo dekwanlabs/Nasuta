@@ -143,20 +143,8 @@ func scanKotlinFeigns(root string, dirs []string) []feignReference {
 // ---- helpers ----
 
 func findKotlinModuleRoot(root, file string) string {
-	current := filepath.Dir(file)
-	for strings.HasPrefix(current, root) {
-		for _, marker := range []string{"build.gradle.kts", "build.gradle", "pom.xml"} {
-			if _, err := os.Stat(filepath.Join(current, marker)); err == nil {
-				return current
-			}
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-	return ""
+	return findModuleRootByMarkers(root, file,
+		"build.gradle.kts", "build.gradle", "pom.xml")
 }
 
 func readKotlinArtifactID(dir string) string {

@@ -53,12 +53,13 @@ type ToolFunctionDef struct {
 
 // LLMClient calls an OpenAI-compatible chat completions endpoint.
 type LLMClient struct {
-	baseURL   string
-	apiKey    string
-	model     string
-	maxTokens int
-	rc        *resty.Client
-	provider  string // "openai" (default) | "anthropic"
+	baseURL    string
+	apiKey     string
+	model      string
+	maxTokens  int
+	rc         *resty.Client
+	provider   string // "openai" (default) | "anthropic"
+	capability ModelCapabilityProfile
 }
 
 func (lc *LLMClient) anthropic() anthropicProvider {
@@ -83,46 +84,83 @@ func newRestyClient(apiKey string, hc *http.Client) *resty.Client {
 
 // NewLLMClientWithHTTP builds an LLMClient with a custom http.Transport.
 func NewLLMClientWithHTTP(baseURL, apiKey, model string, maxTokens int, httpCli *http.Client) *LLMClient {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	apiKey = strings.TrimSpace(apiKey)
-	model = strings.TrimSpace(model)
-	rc := newRestyClient(apiKey, httpCli)
-	return &LLMClient{
-		baseURL:   baseURL,
-		apiKey:    apiKey,
-		model:     model,
-		maxTokens: maxTokens,
-		rc:        rc,
-		provider:  "openai",
-	}
+	return NewLLMClientWithHTTPAndCapability(
+		baseURL, apiKey, model, "openai", maxTokens, DefaultModelCapability("openai", model), httpCli,
+	)
 }
 
 // NewLLMClientWithHTTPAndProvider builds an LLM client with explicit provider.
 func NewLLMClientWithHTTPAndProvider(baseURL, apiKey, model, provider string, maxTokens int, httpCli *http.Client) *LLMClient {
-	lc := NewLLMClientWithHTTP(baseURL, apiKey, model, maxTokens, httpCli)
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "anthropic":
-		lc.provider = "anthropic"
-	default:
-		lc.provider = "openai"
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "anthropic" {
+		provider = "openai"
 	}
-	return lc
+	return NewLLMClientWithHTTPAndCapability(
+		baseURL, apiKey, model, provider, maxTokens,
+		DefaultModelCapability(provider, model), httpCli,
+	)
+}
+
+// NewLLMClientWithHTTPAndCapability builds a client with an explicit verified
+// provider/model capability. The legacy constructors remain conservative and
+// default to the current OpenAI-compatible max_tokens contract.
+func NewLLMClientWithHTTPAndCapability(
+	baseURL, apiKey, model, provider string,
+	maxTokens int,
+	capability ModelCapabilityProfile,
+	httpCli *http.Client,
+) *LLMClient {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	apiKey = strings.TrimSpace(apiKey)
+	model = strings.TrimSpace(model)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		provider = "openai"
+	}
+	capability.Provider = provider
+	capability.Model = model
+	capability = capability.normalized()
+	return &LLMClient{
+		baseURL:    baseURL,
+		apiKey:     apiKey,
+		model:      model,
+		maxTokens:  maxTokens,
+		rc:         newRestyClient(apiKey, httpCli),
+		provider:   provider,
+		capability: capability,
+	}
+}
+
+// Capability returns the resolved wire contract for this client.
+func (lc *LLMClient) Capability() ModelCapabilityProfile {
+	if lc == nil {
+		return ModelCapabilityProfile{}
+	}
+	return lc.capability
 }
 
 // chatRequest is the request body for /chat/completions.
 type chatRequest struct {
-	Model            string         `json:"model"`
-	Messages         []Message      `json:"messages"`
-	MaxTokens        int            `json:"max_tokens,omitempty"`
-	Stream           bool           `json:"stream"`
-	StreamOptions    *streamOptions `json:"stream_options,omitempty"`
-	Tools            []ToolDef      `json:"tools,omitempty"`
-	ToolChoice       string         `json:"tool_choice,omitempty"` // "auto" | "none"
-	Temperature      *float64       `json:"temperature,omitempty"`
-	TopP             *float64       `json:"top_p,omitempty"`
-	Stop             []string       `json:"stop,omitempty"`
-	FrequencyPenalty *float64       `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float64       `json:"presence_penalty,omitempty"`
+	Model               string         `json:"model"`
+	Messages            []Message      `json:"messages"`
+	MaxTokens           *int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int           `json:"max_completion_tokens,omitempty"`
+	MaxOutputTokens     *int           `json:"max_output_tokens,omitempty"`
+	ReasoningEffort     string         `json:"reasoning_effort,omitempty"`
+	Thinking            *thinkingParam `json:"thinking,omitempty"`
+	Stream              bool           `json:"stream"`
+	StreamOptions       *streamOptions `json:"stream_options,omitempty"`
+	Tools               []ToolDef      `json:"tools,omitempty"`
+	ToolChoice          string         `json:"tool_choice,omitempty"` // "auto" | "none"
+	Temperature         *float64       `json:"temperature,omitempty"`
+	TopP                *float64       `json:"top_p,omitempty"`
+	Stop                []string       `json:"stop,omitempty"`
+	FrequencyPenalty    *float64       `json:"frequency_penalty,omitempty"`
+	PresencePenalty     *float64       `json:"presence_penalty,omitempty"`
+}
+
+type thinkingParam struct {
+	Type string `json:"type"`
 }
 
 type streamOptions struct {
@@ -175,7 +213,9 @@ func (lc *LLMClient) chatMessages(ctx context.Context, messages []Message, maxTo
 
 // chatMessagesOpenAI performs one OpenAI-compatible non-streaming call.
 func (lc *LLMClient) chatMessagesOpenAI(ctx context.Context, messages []Message, maxTokens int) (string, Usage, error) {
-	body := chatRequest{Model: lc.model, Messages: messages, MaxTokens: maxTokens, Stream: false}
+	body := chatRequest{Model: lc.model, Messages: messages, Stream: false}
+	lc.applyCompletionLimit(&body, maxTokens)
+	lc.applyReasoningParameters(&body, ModelParameters{})
 	var result struct {
 		Choices []struct {
 			Message struct {
@@ -236,9 +276,10 @@ func (lc *LLMClient) StreamChat(ctx context.Context, messages []Message, tokenCh
 
 func (lc *LLMClient) streamChat(ctx context.Context, messages []Message, tokenCh chan<- string) error {
 	lc.logPrompt(ctx, messages, 0, lc.maxTokens)
-	body, err := json.Marshal(chatRequest{
-		Model: lc.model, Messages: messages, MaxTokens: lc.maxTokens, Stream: true,
-	})
+	bodyRequest := chatRequest{Model: lc.model, Messages: messages, Stream: true}
+	lc.applyCompletionLimit(&bodyRequest, lc.maxTokens)
+	lc.applyReasoningParameters(&bodyRequest, ModelParameters{})
+	body, err := json.Marshal(bodyRequest)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
@@ -374,14 +415,16 @@ func (lc *LLMClient) ChatWithToolsMaxWithParameters(
 	// gateway (e.g. deepseek-v4-pro) would reject or ignore, and the gateway
 	// already prefix-caches implicitly (measured 32-99% of step input cached).
 	req := chatRequest{
-		Model: lc.model, Messages: messages, MaxTokens: maxTokens,
+		Model: lc.model, Messages: messages,
 		Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Tools: tools,
 	}
+	lc.applyCompletionLimit(&req, maxTokens)
 	req.Temperature = parameters.Temperature
 	req.TopP = parameters.TopP
 	req.Stop = append([]string(nil), parameters.Stop...)
 	req.FrequencyPenalty = parameters.FrequencyPenalty
 	req.PresencePenalty = parameters.PresencePenalty
+	lc.applyReasoningParameters(&req, parameters)
 	if len(tools) > 0 {
 		req.ToolChoice = "auto"
 	}
@@ -479,9 +522,57 @@ func (lc *LLMClient) ChatWithToolsMaxWithParameters(
 	return result, nil
 }
 
+func (lc *LLMClient) applyCompletionLimit(req *chatRequest, maxTokens int) {
+	if req == nil || maxTokens <= 0 {
+		return
+	}
+	// Clear every alternate field first. This makes the single-field invariant
+	// explicit even if a request is reused by a caller in the future.
+	req.MaxTokens = nil
+	req.MaxCompletionTokens = nil
+	req.MaxOutputTokens = nil
+	field := lc.capability.CompletionLimitField
+	switch field {
+	case CompletionLimitMaxCompletionTokens:
+		value := maxTokens
+		req.MaxCompletionTokens = &value
+	case CompletionLimitMaxOutputTokens:
+		value := maxTokens
+		req.MaxOutputTokens = &value
+	default:
+		value := maxTokens
+		req.MaxTokens = &value
+	}
+}
+
+func (lc *LLMClient) applyReasoningParameters(req *chatRequest, parameters ModelParameters) {
+	if req == nil {
+		return
+	}
+	mode := parameters.ReasoningMode
+	effort := strings.ToLower(strings.TrimSpace(parameters.ReasoningEffort))
+	switch lc.capability.ReasoningWireField {
+	case ReasoningWireEffort:
+		if !lc.capability.SupportsReasoningEffort || mode == ReasoningDisabled || effort == "" || effort == "none" {
+			return
+		}
+		req.ReasoningEffort = effort
+	case ReasoningWireThinking:
+		if !lc.capability.SupportsThinkingToggle || mode == ReasoningDefault {
+			return
+		}
+		typeValue := "enabled"
+		if mode == ReasoningDisabled {
+			typeValue = "disabled"
+		}
+		req.Thinking = &thinkingParam{Type: typeValue}
+	}
+}
+
 func (lc *LLMClient) logPrompt(ctx context.Context, messages []Message, toolCount, maxTokens int) {
-	log.InfofCtx(ctx, "[llm] request provider=%s model=%s max_tokens=%d messages=%d tools=%d dynamic_prompt:\n%s",
-		lc.provider, lc.model, maxTokens, len(messages), toolCount, joinDynamicPromptMessages(messages))
+	log.InfofCtx(ctx, "[llm] request provider=%s model=%s completion_limit_field=%s logical_completion_limit=%d reasoning_wire=%s messages=%d tools=%d dynamic_prompt:\n%s",
+		lc.provider, lc.model, lc.capability.CompletionLimitField, maxTokens,
+		lc.capability.ReasoningWireField, len(messages), toolCount, joinDynamicPromptMessages(messages))
 }
 
 func joinDynamicPromptMessages(messages []Message) string {

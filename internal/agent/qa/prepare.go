@@ -205,17 +205,36 @@ func (svc *Service) prepareConversation(
 	prepared.historyCandidates = resolveCandidates(
 		prepared.ctx, historyDiscovery, prepared.analysis.History,
 	)
+	if err := svc.assemblePreparedConversation(prepared, 0, 0); err != nil {
+		return err
+	}
+	svc.emitStatus(prepared.request.RunID, "上下文整理完成，正在准备检索", "prepare.routing", historyStarted)
+	return nil
+}
+
+// assemblePreparedConversation is the single context assembly path. It rebuilds
+// the conversation from the immutable source conversation plus the resolved
+// history candidates, applying explicit context/output reserves when they
+// differ from the service defaults.
+func (svc *Service) assemblePreparedConversation(
+	prepared *preparation,
+	contextWindow int,
+	outputReserve int,
+) error {
 	request := prepared.request
 	assembled, err := svc.assembleContext(prepared.ctx, contextAssembleInput{
-		Question: request.Question, UserID: request.UserID, Conversation: request.Conversation,
-		Relation: prepared.analysis.History, Origin: prepared.analysis.HistoryOrigin,
-		Upgrade:    prepared.analysis.HistoryUpdate,
-		Candidates: prepared.historyCandidates,
+		Question:      request.Question,
+		UserID:        request.UserID,
+		Conversation:  prepared.sourceConversation,
+		Relation:      prepared.analysis.History,
+		Origin:        prepared.analysis.HistoryOrigin,
+		Candidates:    prepared.historyCandidates,
+		ContextWindow: contextWindow,
+		OutputReserve: outputReserve,
 	})
 	if err != nil {
 		return err
 	}
-	svc.emitStatus(request.RunID, "上下文整理完成，正在准备检索", "prepare.routing", historyStarted)
 	prepared.request.Conversation = assembled.Conversation
 	return nil
 }
@@ -314,26 +333,14 @@ func (svc *Service) parentRunLimits(
 }
 
 func (svc *Service) reassembleConversation(
-	ctx context.Context,
+	_ context.Context,
 	prepared *preparation,
 	contextWindow int,
 	outputReserve int,
 ) error {
-	assembled, err := svc.assembleContext(ctx, contextAssembleInput{
-		Question:      prepared.request.Question,
-		UserID:        prepared.request.UserID,
-		Conversation:  prepared.sourceConversation,
-		Relation:      prepared.analysis.History,
-		Origin:        prepared.analysis.HistoryOrigin,
-		Upgrade:       prepared.analysis.HistoryUpdate,
-		Candidates:    prepared.historyCandidates,
-		ContextWindow: contextWindow,
-		OutputReserve: outputReserve,
-	})
-	if err != nil {
+	if err := svc.assemblePreparedConversation(prepared, contextWindow, outputReserve); err != nil {
 		return fmt.Errorf("reassemble context for agent definition: %w", err)
 	}
-	prepared.request.Conversation = assembled.Conversation
 	return nil
 }
 
@@ -399,7 +406,23 @@ func (svc *Service) beginSingleRun(
 	definition agentapi.Definition,
 	selection agentapi.DefinitionSelection,
 ) (agentapi.ManagedRun, error) {
-	run, err := svc.runtime.Begin(prepared.ctx, agentapi.RunStart{
+	// buildRunStart is the single source of truth for the immutable run
+	// boundary. submitRun fills only the admission/evidence fields that are
+	// unknown until after preparation completes.
+	run, err := svc.runtime.Begin(prepared.ctx, svc.buildRunStart(prepared, definition, selection))
+	if err != nil {
+		return nil, fmt.Errorf("begin QA run %q: %w", prepared.request.RunID, err)
+	}
+	return run, nil
+}
+
+// buildRunStart assembles the fields shared verbatim by RunStart and RunRequest.
+func (svc *Service) buildRunStart(
+	prepared *preparation,
+	definition agentapi.Definition,
+	selection agentapi.DefinitionSelection,
+) agentapi.RunStart {
+	return agentapi.RunStart{
 		RunID: prepared.request.RunID,
 		Agent: agentapi.DefinitionRef{
 			ID: definition.ID, Version: definition.Version,
@@ -427,11 +450,7 @@ func (svc *Service) beginSingleRun(
 			WorkflowRunID: prepared.request.WorkflowRunID,
 			NodeID:        prepared.request.WorkflowNodeID,
 		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("begin QA run %q: %w", prepared.request.RunID, err)
 	}
-	return run, nil
 }
 
 func (svc *Service) prepareEvidence(

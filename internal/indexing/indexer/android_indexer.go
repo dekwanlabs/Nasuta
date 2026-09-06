@@ -1,7 +1,7 @@
 package indexer
 
 import (
-	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -60,21 +60,10 @@ func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge
 		return strings.HasSuffix(name, ".kt") || strings.HasSuffix(name, ".java")
 	})
 
-	type retrofitMethod struct {
-		name string
-		line int
-	}
-	type retrofitClient struct {
-		interfaceName string
-		target        string
-		path          string
-		methods       map[string]retrofitMethod
-	}
-
 	// An annotated Retrofit interface is only a declaration candidate. It must
 	// be activated by a call on a bound instance below; the annotation itself
 	// is not evidence that the application ever uses the remote service.
-	var clients []retrofitClient
+	var clients []indexedHTTPClient
 	interfaceRe := regexp.MustCompile(`(?s)\binterface\s+(\w+)\s*\{(.*?)\}`)
 	methodRe := regexp.MustCompile(`(?m)@(?:GET|POST|PUT|DELETE|PATCH|HEAD)\s*\([^)]*\)[\s\r\n]*(?:suspend\s+)?(?:fun\s+)?(?:[\w<>,.?\[\]\s]+\s+)?(\w+)\s*\(`)
 	for _, file := range files {
@@ -92,20 +81,12 @@ func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge
 			}
 			name := text[match[2]:match[3]]
 			body := text[match[4]:match[5]]
-			methods := make(map[string]retrofitMethod)
-			for _, method := range methodRe.FindAllStringSubmatchIndex(body, -1) {
-				if len(method) < 4 {
-					continue
-				}
-				methodName := body[method[2]:method[3]]
-				line := 1 + strings.Count(text[:match[4]+method[0]], "\n")
-				methods[methodName] = retrofitMethod{name: methodName, line: line}
-			}
+			methods := extractIndexedClientMethods(text, body, match[4], methodRe)
 			if len(methods) == 0 {
 				continue
 			}
 			target := androidRetrofitTarget(text, body)
-			clients = append(clients, retrofitClient{
+			clients = append(clients, indexedHTTPClient{
 				interfaceName: name,
 				target:        target,
 				path:          relativeTo(root, file),
@@ -143,17 +124,10 @@ func scanAndroidDependencies(root string, dirs []string) []domain.DependencyEdge
 						if client.target == "" || skipDependencyTarget(client.target) {
 							continue
 						}
-						edges = append(edges, domain.DependencyEdge{
-							CallerServiceKey: caller.Key,
-							From:             caller.Name,
-							To:               client.target,
-							Type:             domain.EdgeHTTP,
-							Evidence: []domain.Evidence{
-								{Path: rel, Line: line, Symbol: receiver + "." + methodName, Kind: domain.SourceCodeScan},
-								{Path: client.path, Line: method.line, Symbol: client.interfaceName + "." + methodName, Kind: domain.SourceCodeScan},
-							},
-							Confidence: 0.75,
-						})
+						appendIndexedHTTPClientEdge(
+							&edges, caller, client.target, rel, line, receiver, methodName,
+							client.path, client.interfaceName, method.line,
+						)
 					}
 				}
 			}
@@ -279,24 +253,10 @@ func readAndroidAppID(dir string) string {
 }
 
 func readAndroidLang(dir string) string {
-	// Check whether this Android project uses Kotlin or Java
-	hasKt := false
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || hasKt {
-			return nil
-		}
-		if d.IsDir() {
-			if ignoredDirectory(d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(d.Name(), ".kt") {
-			hasKt = true
-		}
-		return nil
-	})
-	if hasKt {
+	// Check whether this Android project uses Kotlin or Java.
+	if directoryContainsFile(dir, func(entry os.DirEntry) bool {
+		return strings.HasSuffix(entry.Name(), ".kt")
+	}) {
 		return "kotlin"
 	}
 	return "java"

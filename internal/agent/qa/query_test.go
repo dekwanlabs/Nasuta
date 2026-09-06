@@ -125,3 +125,25 @@ func TestBeginSingleRunPinsFlowOutputContract(t *testing.T) {
 		t.Fatalf("begin output contract = %+v, want %+v", runtime.start.Policy.OutputContract, want)
 	}
 }
+
+func TestFlowSubjectsSkipSynthesizedOpaqueEntityIDs(t *testing.T) {
+	contract := outputContractForQuery(domain.QueryPlan{
+		Kind: domain.QueryFlow,
+		Entities: []string{
+			"entity_9a6a4c8c07579004fe1867dc472bb5688214542305113aab7020435df7246d47",
+			"entity_18b7db54924fbd9017ceb18d492eb412363626b1c3ed5e6aea64a10777108e75",
+			"entity_4387d92838113359d40a57f8cc7ead646399ee5021975b97fcae9fb6c480ed5e",
+			"tts",
+		},
+		EntitySpecs: []domain.EntitySpec{
+			{ID: "entity_9a6a4c8c07579004fe1867dc472bb5688214542305113aab7020435df7246d47", Label: "rgb灯效"},
+			{ID: "entity_18b7db54924fbd9017ceb18d492eb412363626b1c3ed5e6aea64a10777108e75", Label: "消息中心"},
+			{ID: "entity_4387d92838113359d40a57f8cc7ead646399ee5021975b97fcae9fb6c480ed5e", Label: "菜谱"},
+			{ID: "tts", Label: "TTS"},
+		},
+	})
+	want := []string{"rgb灯效", "消息中心", "菜谱", "TTS"}
+	if !reflect.DeepEqual(contract.Subjects, want) {
+		t.Fatalf("subjects = %v, want %v", contract.Subjects, want)
+	}
+}

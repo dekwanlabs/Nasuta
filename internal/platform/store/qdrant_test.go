@@ -54,7 +54,7 @@ func TestDeduplicateHitsKeepsBestHitPerGroup(t *testing.T) {
 		{ID: "b1", Score: 0.7, Metadata: map[string]any{"repo": "b"}},
 	}
 
-	grouped := deduplicateHits(hits, "repo", 2)
+	grouped := semantic.DeduplicateHits(hits, "repo", 2)
 	if len(grouped) != 2 || grouped[0].ID != "a1" || grouped[1].ID != "b1" {
 		t.Fatalf("grouped hits = %#v, want best hit from a then b", grouped)
 	}

@@ -14,8 +14,10 @@ import (
 
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 
-	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/qa"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -105,7 +107,7 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, sseEvent func(string, any) error,
-	sessionID string, result agent.SessionCompactionResult, compactionFailed bool) {
+	sessionID string, result session.CompactionResult, compactionFailed bool) {
 	reason, message, recommend := compactionRestartRecommendation(result, compactionFailed)
 	if !recommend {
 		return
@@ -130,7 +132,7 @@ func (handler *Handler) emitSessionRestartRecommendation(ctx context.Context, ss
 		result.ArchivedTurnCount, result.RestartTurnThreshold)
 }
 
-func compactionRestartRecommendation(result agent.SessionCompactionResult, compactionFailed bool) (string, string, bool) {
+func compactionRestartRecommendation(result session.CompactionResult, compactionFailed bool) (string, string, bool) {
 	switch {
 	case compactionFailed:
 		return "compaction_failed", "历史上下文压缩失败，当前会话无法安全继续，请开启新对话后重试。", true
@@ -244,30 +246,30 @@ func (s *sseWriter) startHeartbeat(ctx context.Context, interval time.Duration) 
 	}
 }
 
-func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string, userID int64, fallback []llm.Message) (agent.ConversationContext, error) {
+func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string, userID int64, fallback []llm.Message) (execution.ConversationContext, error) {
 	sessions := handler.qaSessionStore()
 	if sessionID == "" || sessions == nil {
-		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}, nil
+		return execution.ConversationContext{SessionID: sessionID, Recent: fallback}, nil
 	}
 	sess, err := sessions.GetContextSnapshot(
 		sessionID, userID, memory.RecentTurnMetadataLimit, memory.RecentDialogueTurnLimit,
 	)
 	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] session load error: %v", err)
-		return agent.ConversationContext{}, fmt.Errorf("load bounded session context %q: %w", sessionID, err)
+		return execution.ConversationContext{}, fmt.Errorf("load bounded session context %q: %w", sessionID, err)
 	}
 	if sess == nil {
-		return agent.ConversationContext{SessionID: sessionID, Recent: fallback}, nil
+		return execution.ConversationContext{SessionID: sessionID, Recent: fallback}, nil
 	}
 	log.InfofCtx(ctx, "[qa] loaded session %s: candidateTurns=%d recentDialogue=%d compactedThrough=%d",
 		sessionID, len(sess.RecentTurns), len(sess.RecentDialogue), sess.CompactedThroughTurn)
-	return agent.ConversationContext{
+	return execution.ConversationContext{
 		SessionID: sessionID, SessionTitle: sess.Title, CompactedThroughTurn: sess.CompactedThroughTurn,
 		RecentTurns: sess.RecentTurns, RecentDialogue: sess.RecentDialogue,
 	}, nil
 }
 
-func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation agent.ConversationContext, sessionID string, traceEnabled bool,
+func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation execution.ConversationContext, sessionID string, traceEnabled bool,
 	evidencePlan *domain.EvidencePlan, writeRequested bool, allowEmit func(string, any) error, r *http.Request) {
 	runtime := handler.currentQARuntime()
 	if runtime.QA == nil {
@@ -288,7 +290,7 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	// Subscribe before AskAgent starts.
 	// AskAgent emits phase hints during synchronous preprocessing and retrieval.
 	// Subscribing later would drop those early updates.
-	runID := agent.NewRunID()
+	runID := qa.NewRunID()
 	var channel chan agentrun.SSEEvent
 	hub := runtime.Hub
 	if hub != nil {
@@ -307,12 +309,12 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 	user := auth.UserFromContext(r.Context())
 	writeAuthorized := runtime.WriteAvailable && user != nil && user.IsAdmin
 	type askResponse struct {
-		result *agent.AskResult
+		result *qa.AskResult
 		err    error
 	}
 	askDone := make(chan askResponse, 1)
 	go func() {
-		result, err := runtime.QA.Ask(runCtx, agent.QARequest{
+		result, err := runtime.QA.Ask(runCtx, qa.Request{
 			Question: question, Conversation: conversation, UserID: userID,
 			RolePrompt: handler.rolePromptFor(userID), RunID: runID,
 			EvidencePlan: evidencePlan, WriteAuthorized: writeAuthorized,
@@ -438,7 +440,7 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 	}
 	var compactionStatus agentrun.SessionStatusEvent
 	if runtime.QA != nil {
-		compactionStatus = runtime.QA.CompactionStatus(sessionID)
+		compactionStatus = runtime.QA.CompactionStatus(runID)
 	}
 	roundActualInputTokens := usage.RoundPeakInputTokens
 	roundActualReservedTokens := max(usage.RoundPeakInputTokens, usage.RoundPeakReservedTokens)

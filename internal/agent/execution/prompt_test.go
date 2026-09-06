@@ -164,18 +164,6 @@ func TestEvidenceAndRepairPromptsKeepInternalMetadataPrivate(t *testing.T) {
 		}
 	}
 
-	repair := repairInstruction([]string{"TRACE-1"})
-	for _, required := range []string{
-		"user-visible answer contract",
-		"non-repetitive structure",
-		"internal document attribution",
-		"retrieval metadata",
-	} {
-		if !strings.Contains(repair, required) {
-			t.Fatalf("answer repair prompt missing %q", required)
-		}
-	}
-
 	for _, required := range []string{
 		"capability or tool names",
 		"internal document titles or paths",

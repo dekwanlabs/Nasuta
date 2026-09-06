@@ -147,17 +147,18 @@ func TestValidateRenderedFlowIRRejectsInvalidTypedEdgesAndDuplicateNodes(t *test
 	}
 }
 
-func TestCanonicalFlowAnswerDegradesInvalidFlowIR(t *testing.T) {
+func TestCanonicalFlowAnswerPassesThroughUnrenderableFlowIR(t *testing.T) {
 	flow := &agentapi.FlowIR{
 		Subject: "订单", Status: "complete", Confidence: "high",
 		Nodes: []agentapi.FlowNode{{ID: "a", Label: "A", Kind: "service"}, {ID: "b", Label: "B", Kind: "worker"}},
 		Edges: []agentapi.FlowEdge{{From: "a", To: "b", Protocol: "HTTP", SyncMode: "sync", EvidenceState: "verified"}},
 	}
-	answer := canonicalFlowAnswer("```mermaid\nflowchart LR\n a --> injected\n```\n\n模型说明", flow)
-	if strings.Contains(answer, "injected") || strings.Contains(answer, "HTTP / sync / verified") {
-		t.Fatalf("invalid flow facts leaked into canonical answer: %s", answer)
-	}
-	if !strings.Contains(answer, "unknown / unknown / unresolved") || !strings.Contains(answer, "未通过服务端渲染质量门禁") {
-		t.Fatalf("invalid flow was not visibly degraded: %s", answer)
+	candidate := "```mermaid\nflowchart LR\n a --> injected\n```\n\n模型说明"
+	answer := canonicalFlowAnswer(candidate, flow)
+	// The FlowIR cannot be rendered (verified edge without evidence), so the
+	// model's own answer is preserved verbatim rather than being replaced by a
+	// placeholder unresolved diagram.
+	if answer != candidate {
+		t.Fatalf("expected verbatim pass-through, got: %s", answer)
 	}
 }

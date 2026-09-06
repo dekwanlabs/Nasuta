@@ -30,6 +30,13 @@ type Config struct {
 	AnswerReserve       time.Duration
 	AnswerMaxTokens     int
 	ConclusionMaxTokens int
+	// ParentToolMaxTokens bounds a single tool-using parent step. It defaults
+	// to a bounded slice of AnswerMaxTokens when unset.
+	ParentToolMaxTokens int
+	// ContinuationMaxTokens bounds one continuation/repair call.
+	ContinuationMaxTokens int
+	// SynthesisMaxTokens bounds the final answer synthesis call.
+	SynthesisMaxTokens int
 	// ConclusionRetryMaxTokens bounds the one-shot direct-answer retry after
 	// reasoning truncation or an empty model response.
 	ConclusionRetryMaxTokens int
@@ -44,7 +51,15 @@ type Config struct {
 	MaxContinueRounds  int
 	StructuredOutput   bool
 	DomainKnowledge    string
-	ModelParameters    llm.ModelParameters
+	// ModelParameters is the legacy/base profile. Phase-specific profiles
+	// override it when supplied; keeping the base field preserves callers that
+	// construct Config directly.
+	ModelParameters llm.ModelParameters
+	// InvestigationModelParameters controls tool-using investigation turns.
+	InvestigationModelParameters llm.ModelParameters
+	// AnswerModelParameters controls final answers, forced conclusions, and
+	// continuation calls. It defaults to the base profile with reasoning off.
+	AnswerModelParameters llm.ModelParameters
 	// Token prices let the shared run ledger reserve a cost ceiling before
 	// sending a provider request; zero keeps cost accounting unbounded.
 	InputPriceMicrosPerMillionTokens  int64
@@ -53,6 +68,16 @@ type Config struct {
 	DisableLegacyAnswerRecovery       bool
 	// Checkpoint is called after each completed logical turn.
 	Checkpoint func(LogicalLoopCheckpoint) error
+	// DelegationAwaiter resolves finished child reports on the server side so
+	// the parent loop never has to poll delegation_status. It may be nil for
+	// non-delegating runs.
+	DelegationAwaiter DelegationAwaiter
+}
+
+// DelegationAwaiter blocks until every child in one delegation settles (or the
+// deadline passes) and returns the full projection with backfilled reports.
+type DelegationAwaiter interface {
+	AwaitSettlement(ctx context.Context, delegationID string, deadline time.Time) (agentapi.DelegationDispatchResult, error)
 }
 
 // ConversationContext carries recalled archived history and recent turns.
@@ -75,6 +100,12 @@ type ConversationContext struct {
 }
 
 func (config Config) withDefaults() Config {
+	if !hasModelParameters(config.InvestigationModelParameters) {
+		config.InvestigationModelParameters = config.ModelParameters.Clone()
+	}
+	if !hasModelParameters(config.AnswerModelParameters) {
+		config.AnswerModelParameters = config.ModelParameters.WithoutReasoning()
+	}
 	if config.ConclusionMaxTokens <= 0 {
 		config.ConclusionMaxTokens = config.AnswerMaxTokens
 	}
@@ -90,7 +121,34 @@ func (config Config) withDefaults() Config {
 	if config.ConclusionRetryMaxTokens > config.ConclusionMaxTokens {
 		config.ConclusionRetryMaxTokens = config.ConclusionMaxTokens
 	}
+	// Phase caps. Explicit small values (for example tests that set 100) must
+	// never be silently enlarged, so only zero values are derived.
+	config.ParentToolMaxTokens = deriveCap(config.ParentToolMaxTokens, config.AnswerMaxTokens, 8192)
+	config.ContinuationMaxTokens = deriveCap(config.ContinuationMaxTokens, config.AnswerMaxTokens, 4096)
+	config.SynthesisMaxTokens = deriveCap(config.SynthesisMaxTokens, config.ConclusionMaxTokens, 8192)
 	return config
+}
+
+// deriveCap keeps an explicit cap unchanged and derives a bounded default from
+// base only when cap is unset. base must already be a positive value.
+func deriveCap(cap, base, ceiling int) int {
+	if cap > 0 {
+		return cap
+	}
+	if base <= 0 {
+		return 0
+	}
+	if base < ceiling {
+		return base
+	}
+	return ceiling
+}
+
+func hasModelParameters(parameters llm.ModelParameters) bool {
+	return parameters.Temperature != nil || parameters.TopP != nil ||
+		len(parameters.Stop) > 0 || parameters.FrequencyPenalty != nil ||
+		parameters.PresencePenalty != nil || parameters.TopK != nil ||
+		parameters.ReasoningMode != "" || parameters.ReasoningEffort != ""
 }
 
 // Agent runs the think-tool-answer loop.
@@ -307,6 +365,11 @@ func (agent *Agent) RunCompiledFromCheckpoint(
 	state.result.Flow = cloneExecutionFlow(stateData.Flow)
 	state.result.DelegationAdoptions = cloneDelegationAdoptions(stateData.DelegationAdoptions)
 	state.delegatedFlows = cloneExecutionFlows(stateData.DelegatedFlows)
+	state.dispatchedDelegations = append([]string(nil), stateData.DispatchedDelegations...)
+	state.settledDelegations = make(map[string]bool, len(stateData.SettledDelegations))
+	for _, id := range stateData.SettledDelegations {
+		state.settledDelegations[id] = true
+	}
 	state.result.Steps = stateData.StepNo
 	state.answered = stateData.Answered
 	state.toolBudgetExhausted = stateData.ToolBudgetExhausted

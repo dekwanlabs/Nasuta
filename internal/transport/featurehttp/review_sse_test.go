@@ -145,7 +145,7 @@ func TestReviewReplayEventsPaginatesWithoutGaps(t *testing.T) {
 	store.events = makeReviewEvents(1001, 0)
 	handler, reader := openReviewEventReader(t, store)
 	response := httptest.NewRecorder()
-	writer, err := newReviewEventWriter(response)
+	writer, err := newEventWriter(response)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestReviewReplayEventsStopsAtTerminalEvent(t *testing.T) {
 	store.events = makeReviewEvents(800, 501)
 	handler, reader := openReviewEventReader(t, store)
 	response := httptest.NewRecorder()
-	writer, err := newReviewEventWriter(response)
+	writer, err := newEventWriter(response)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestReviewLiveEventFillsPersistentSequenceGapWithoutDuplicate(t *testing.T)
 	store.events = makeReviewEvents(2, 0)
 	handler, reader := openReviewEventReader(t, store)
 	response := httptest.NewRecorder()
-	writer, err := newReviewEventWriter(response)
+	writer, err := newEventWriter(response)
 	if err != nil {
 		t.Fatal(err)
 	}

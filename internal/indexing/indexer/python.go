@@ -1,7 +1,6 @@
 package indexer
 
 import (
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -157,82 +156,44 @@ func stripPythonCommentsAndStrings(text string) string {
 				i++
 			}
 		case strings.HasPrefix(text[i:], `"""`):
-			i += 3
-			for i+2 < len(out) {
-				if text[i] == '"' && text[i+1] == '"' && text[i+2] == '"' {
-					out[i], out[i+1], out[i+2] = ' ', ' ', ' '
-					i += 3
-					break
-				}
-				if out[i] != '\n' {
-					out[i] = ' '
-				}
-				i++
-			}
+			i = stripTripleQuotedLiteral(out, i, '"', false)
 		case strings.HasPrefix(text[i:], `'''`):
-			i += 3
-			for i+2 < len(out) {
-				if text[i] == '\'' && text[i+1] == '\'' && text[i+2] == '\'' {
-					out[i], out[i+1], out[i+2] = ' ', ' ', ' '
-					i += 3
-					break
-				}
-				if out[i] != '\n' {
-					out[i] = ' '
-				}
-				i++
-			}
+			i = stripTripleQuotedLiteral(out, i, '\'', false)
 		case out[i] == '"':
-			out[i] = ' '
-			i++
-			for i < len(out) {
-				if out[i] == '\\' {
-					out[i] = ' '
-					i++
-					if i < len(out) {
-						out[i] = ' '
-						i++
-					}
-					continue
-				}
-				if out[i] == '"' {
-					out[i] = ' '
-					i++
-					break
-				}
-				if out[i] != '\n' {
-					out[i] = ' '
-				}
-				i++
-			}
+			i = stripQuotedLiteral(out, i, '"')
 		case out[i] == '\'':
-			out[i] = ' '
-			i++
-			for i < len(out) {
-				if out[i] == '\\' {
-					out[i] = ' '
-					i++
-					if i < len(out) {
-						out[i] = ' '
-						i++
-					}
-					continue
-				}
-				if out[i] == '\'' {
-					out[i] = ' '
-					i++
-					break
-				}
-				if out[i] != '\n' {
-					out[i] = ' '
-				}
-				i++
-			}
+			i = stripQuotedLiteral(out, i, '\'')
 		default:
 			i++
 		}
 	}
 	return string(out)
+}
+
+func addPythonImportParts(imports map[string]string, parts, module string) {
+	for _, part := range strings.Split(parts, ",") {
+		part = strings.TrimSpace(part)
+		name, alias, ok := strings.Cut(part, " as ")
+		if ok {
+			name = strings.TrimSpace(name)
+			alias = strings.TrimSpace(alias)
+		} else {
+			name = part
+		}
+		if ok {
+			imported := name
+			if module != "" {
+				imported = module + "." + name
+			}
+			imports[alias] = imported
+		} else if part != "" {
+			imported := part
+			if module != "" {
+				imported = module + "." + part
+			}
+			imports[part] = imported
+		}
+	}
 }
 
 // extractPythonImports parses import and from-import statements from original.
@@ -249,14 +210,7 @@ func extractPythonImports(original string) map[string]string {
 			if i+1 < len(lines) {
 				cont := strings.TrimSpace(lines[i+1])
 				if strings.HasPrefix(cont, "import ") {
-					for _, part := range strings.Split(cont[7:], ",") {
-						part = strings.TrimSpace(part)
-						if module, alias, ok := strings.Cut(part, " as "); ok {
-							imports[strings.TrimSpace(alias)] = strings.TrimSpace(module)
-						} else if part != "" {
-							imports[part] = part
-						}
-					}
+					addPythonImportParts(imports, cont[7:], "")
 				}
 			}
 			continue
@@ -278,24 +232,10 @@ func extractPythonImports(original string) map[string]string {
 						names = names[:idx2]
 					}
 				}
-				for _, part := range strings.Split(names, ",") {
-					part = strings.TrimSpace(part)
-					if name, alias, ok := strings.Cut(part, " as "); ok {
-						imports[strings.TrimSpace(alias)] = module + "." + strings.TrimSpace(name)
-					} else if part != "" {
-						imports[part] = module + "." + part
-					}
-				}
+				addPythonImportParts(imports, names, module)
 			}
 		} else {
-			for _, part := range strings.Split(trimmed[7:], ",") {
-				part = strings.TrimSpace(part)
-				if module, alias, ok := strings.Cut(part, " as "); ok {
-					imports[strings.TrimSpace(alias)] = strings.TrimSpace(module)
-				} else if part != "" {
-					imports[part] = part
-				}
-			}
+			addPythonImportParts(imports, trimmed[7:], "")
 		}
 	}
 	return imports
@@ -937,20 +877,11 @@ func readPythonPorts(moduleRoot string) []int {
 }
 
 func findPythonModuleRoot(root, file string) string {
-	current := filepath.Dir(file)
-	for strings.HasPrefix(current, root) {
-		for _, marker := range []string{"pyproject.toml", "setup.py", "setup.cfg"} {
-			if _, err := os.Stat(filepath.Join(current, marker)); err == nil {
-				return current
-			}
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
+	if moduleRoot := findModuleRootByMarkers(root, file,
+		"pyproject.toml", "setup.py", "setup.cfg"); moduleRoot != "" {
+		return moduleRoot
 	}
-	current = filepath.Dir(file)
+	current := filepath.Dir(file)
 	for {
 		base := filepath.Base(current)
 		if base != "router" && base != "routers" && base != "route" && base != "routes" &&

@@ -29,24 +29,8 @@ type nodejsAssignmentInfo struct {
 func parseNodeJSEndpointSource(root, file, text string) (endpointSource, bool) {
 	source := parseNodeJSSource(text)
 	moduleRoot := findNodeJSModuleRoot(root, file)
-	modulePath := ""
-	serviceName := filepath.Base(relativeTo(root, moduleRoot))
-	if moduleRoot != "" {
-		modulePath = relativeTo(root, moduleRoot)
-		serviceName = readNodeJSPackageName(moduleRoot)
-	}
-	return endpointSource{
-		language:    "nodejs",
-		root:        root,
-		file:        file,
-		rel:         relativeTo(root, file),
-		repo:        topSegment(relativeTo(root, file)),
-		moduleRoot:  moduleRoot,
-		modulePath:  modulePath,
-		serviceName: serviceName,
-		text:        text,
-		syntax:      source,
-	}, true
+	serviceName := moduleServiceName(root, moduleRoot, readNodeJSPackageName)
+	return newEndpointSource("nodejs", root, file, text, moduleRoot, serviceName, source), true
 }
 
 func parseNodeJSSource(text string) nodejsSource {
@@ -385,28 +369,24 @@ var nodejsHapiAdapter = endpointAdapter{
 
 func scanNodeJSHapi(source endpointSource) []endpointCandidate {
 	// Hapi uses server.route({ method: "GET", path: "/..." }) object literals.
-	var candidates []endpointCandidate
-	for _, m := range hapiMethodFirstRe.FindAllStringSubmatch(source.text, -1) {
-		if len(m) > 2 {
-			candidates = append(candidates, sourceEndpointCandidate(
-				source, "hapi",
-				[]valueExpr{literalValue(strings.ToUpper(m[1]))},
-				[]valueExpr{literalValue(m[2])},
-				filepath.Base(source.rel), "",
-				0, 0.8,
-			))
+	candidates := hapiRouteCandidates(source, hapiMethodFirstRe.FindAllStringSubmatch(source.text, -1), 1, 2)
+	candidates = append(candidates, hapiRouteCandidates(source, hapiPathFirstRe.FindAllStringSubmatch(source.text, -1), 2, 1)...)
+	return candidates
+}
+
+func hapiRouteCandidates(source endpointSource, matches [][]string, methodIndex, pathIndex int) []endpointCandidate {
+	candidates := make([]endpointCandidate, 0, len(matches))
+	for _, match := range matches {
+		if len(match) <= methodIndex || len(match) <= pathIndex {
+			continue
 		}
-	}
-	for _, m := range hapiPathFirstRe.FindAllStringSubmatch(source.text, -1) {
-		if len(m) > 2 {
-			candidates = append(candidates, sourceEndpointCandidate(
-				source, "hapi",
-				[]valueExpr{literalValue(strings.ToUpper(m[2]))},
-				[]valueExpr{literalValue(m[1])},
-				filepath.Base(source.rel), "",
-				0, 0.8,
-			))
-		}
+		candidates = append(candidates, sourceEndpointCandidate(
+			source, "hapi",
+			[]valueExpr{literalValue(strings.ToUpper(match[methodIndex]))},
+			[]valueExpr{literalValue(match[pathIndex])},
+			filepath.Base(source.rel), "",
+			0, 0.8,
+		))
 	}
 	return candidates
 }

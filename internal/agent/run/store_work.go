@@ -45,7 +45,12 @@ func (rs *Store) EnqueueWorkItem(ctx context.Context, item WorkItem) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
+	// agent_work_items.available_at is a TIMESTAMP(0) column, so MySQL rounds
+	// sub-second values to the nearest second. Truncating to whole seconds keeps
+	// the stored available_at <= now so the immediately following claim cannot
+	// miss (otherwise a fractional second >= .5 rounds available_at up to the
+	// next second and the claim returns sql.ErrNoRows).
+	now := time.Now().UTC().Truncate(time.Second)
 	tx, err := rs.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -82,7 +87,10 @@ func (rs *Store) EnqueueAndClaimWorkItem(
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	now = now.UTC()
+	// See EnqueueWorkItem: available_at is TIMESTAMP(0), so truncate to whole
+	// seconds to avoid MySQL rounding a >=.5 fractional second up to the next
+	// second and making the in-transaction claim below miss with sql.ErrNoRows.
+	now = now.UTC().Truncate(time.Second)
 	tx, err := rs.db.BeginTx(ctx, nil)
 	if err != nil {
 		return WorkItem{}, err

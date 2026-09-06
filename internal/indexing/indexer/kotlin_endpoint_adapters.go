@@ -445,10 +445,7 @@ func scanKotlinSpringMVC(source endpointSource) []endpointCandidate {
 			ctrl.methods = []valueExpr{unresolvedValue(binding.annotation.text)}
 			continue
 		}
-		if ctrl.prefixes[0].kind != valueLiteral ||
-			ctrl.prefixes[0].value != "" ||
-			ctrl.methods[0].kind != valueLiteral ||
-			ctrl.methods[0].value != "ANY" {
+		if !springControllerMappingIsDefault(ctrl.prefixes, ctrl.methods) {
 			ctrl.resolved = false
 			ctrl.prefixes = []valueExpr{unresolvedValue(binding.annotation.text)}
 			ctrl.methods = []valueExpr{unresolvedValue(binding.annotation.text)}
@@ -529,12 +526,7 @@ var kotlinKtorAdapter = endpointAdapter{
 		if !ok {
 			return false
 		}
-		for _, imported := range syntax.imports {
-			if strings.HasPrefix(imported, "io.ktor.") {
-				return true
-			}
-		}
-		return false
+		return kotlinImportsAny(syntax, "io.ktor.")
 	},
 	scan: scanKotlinKtor,
 }
@@ -654,12 +646,7 @@ var kotlinJavalinAdapter = endpointAdapter{
 		if !ok {
 			return false
 		}
-		for _, imported := range syntax.imports {
-			if strings.HasPrefix(imported, "io.javalin.") {
-				return true
-			}
-		}
-		return false
+		return kotlinImportsAny(syntax, "io.javalin.")
 	},
 	scan: scanKotlinJavalin,
 }

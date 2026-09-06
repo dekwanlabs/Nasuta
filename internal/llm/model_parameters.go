@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 // ModelParameters is the provider-validated subset of definition parameters.
@@ -16,6 +17,11 @@ type ModelParameters struct {
 	FrequencyPenalty *float64
 	PresencePenalty  *float64
 	TopK             *int
+	// ReasoningMode and ReasoningEffort are logical phase controls. They are
+	// only serialized by the client when the resolved capability explicitly
+	// supports the corresponding provider wire field.
+	ReasoningMode   ReasoningMode
+	ReasoningEffort string
 }
 
 // PrepareModelParameters validates provider-specific request options and
@@ -90,6 +96,30 @@ func PrepareModelParameters(provider string, raw map[string]any) (ModelParameter
 			} else {
 				prepared.PresencePenalty = &number
 			}
+		case "reasoning_mode":
+			rawMode, ok := value.(string)
+			if !ok {
+				return ModelParameters{}, fmt.Errorf("model parameter %q must be a string", key)
+			}
+			mode := strings.ToLower(strings.TrimSpace(rawMode))
+			switch mode {
+			case "default", "enabled", "disabled":
+			default:
+				return ModelParameters{}, fmt.Errorf("model parameter %q must be one of default, enabled, disabled", key)
+			}
+			prepared.ReasoningMode = ReasoningMode(mode)
+		case "reasoning_effort":
+			effort, ok := value.(string)
+			if !ok {
+				return ModelParameters{}, fmt.Errorf("model parameter %q must be a string", key)
+			}
+			effort = strings.ToLower(strings.TrimSpace(effort))
+			switch effort {
+			case "", "none", "low", "medium", "high":
+			default:
+				return ModelParameters{}, fmt.Errorf("model parameter %q must be one of none, low, medium, high", key)
+			}
+			prepared.ReasoningEffort = effort
 		case "top_k":
 			if provider != "anthropic" {
 				return ModelParameters{}, fmt.Errorf(
@@ -121,7 +151,7 @@ func PrepareModelParameters(provider string, raw map[string]any) (ModelParameter
 
 // Snapshot returns a detached, canonical map for RunSnapshot persistence.
 func (parameters ModelParameters) Snapshot() map[string]any {
-	snapshot := make(map[string]any, 6)
+	snapshot := make(map[string]any, 8)
 	if parameters.Temperature != nil {
 		snapshot["temperature"] = *parameters.Temperature
 	}
@@ -140,10 +170,48 @@ func (parameters ModelParameters) Snapshot() map[string]any {
 	if parameters.TopK != nil {
 		snapshot["top_k"] = *parameters.TopK
 	}
+	if parameters.ReasoningMode != "" && parameters.ReasoningMode != ReasoningDefault {
+		snapshot["reasoning_mode"] = string(parameters.ReasoningMode)
+	}
+	if parameters.ReasoningEffort != "" {
+		snapshot["reasoning_effort"] = parameters.ReasoningEffort
+	}
 	if len(snapshot) == 0 {
 		return nil
 	}
 	return snapshot
+}
+
+// Clone returns a detached copy suitable for phase-specific adjustments.
+func (parameters ModelParameters) Clone() ModelParameters {
+	parameters.Stop = append([]string(nil), parameters.Stop...)
+	return parameters
+}
+
+// WithReasoning returns a phase-specific copy of the model parameters.
+func (parameters ModelParameters) WithReasoning(mode ReasoningMode, effort string) ModelParameters {
+	parameters = parameters.Clone()
+	parameters.ReasoningMode = normalizeReasoningMode(string(mode))
+	parameters.ReasoningEffort = strings.ToLower(strings.TrimSpace(effort))
+	return parameters
+}
+
+// WithoutReasoning marks a phase as not requiring provider reasoning. The
+// provider capability decides whether this logical setting becomes a wire
+// parameter or remains an observability-only hint.
+func (parameters ModelParameters) WithoutReasoning() ModelParameters {
+	return parameters.WithReasoning(ReasoningDisabled, "none")
+}
+
+func normalizeReasoningMode(mode string) ReasoningMode {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "enabled":
+		return ReasoningEnabled
+	case "disabled":
+		return ReasoningDisabled
+	default:
+		return ReasoningDefault
+	}
 }
 
 func normalizeProvider(provider string) string {

@@ -392,43 +392,42 @@ func allocateMermaidID(preferred, seed string, used map[string]struct{}) string 
 // canonicalFlowAnswer removes model-owned diagrams and installs the one
 // deterministic diagram rendered from the merged FlowIR. Explanatory prose is
 // retained as context but can no longer alter the architecture edges.
+//
+// The rendered FlowIR is the authoritative architecture answer: if it is not
+// renderable, the original model answer is returned unchanged rather than
+// being replaced by a placeholder "unresolved" diagram.
 func canonicalFlowAnswer(candidate string, flow *agentapi.FlowIR) string {
 	if flow == nil {
 		return candidate
 	}
 	diagram := RenderFlowIR(flow)
-	degraded := len(ValidateRenderedFlowIR(flow, diagram)) > 0
-	if degraded {
-		fallback := unresolvedRenderableFlow(flow)
-		diagram = RenderFlowIR(fallback)
-		if len(ValidateRenderedFlowIR(fallback, diagram)) > 0 {
-			return deterministicFlowFallback(candidate, agentapi.RunOutputContract{Kind: "flow", RequireMermaid: true, Subjects: []string{fallback.Subject}, MaxHops: 1})
-		}
+	if len(ValidateRenderedFlowIR(flow, diagram)) > 0 {
+		return candidate
 	}
 	prose := flowFallbackProse(candidate)
 	if prose == "" {
 		prose = "说明：流程图由服务端根据子 agent 返回的结构化 FlowIR 生成；未验证的连接以虚线和 unresolved 标记表示。"
 	}
-	if degraded {
-		prose = "说明：结构化 FlowIR 未通过服务端渲染质量门禁，已降级为 unresolved 图，不将原始连接作为已验证事实。\n\n" + prose
-	}
-	return strings.TrimSpace(diagram) + "\n\n" + prose
+	return strings.TrimSpace(prose) + "\n\n" + strings.TrimSpace(diagram)
 }
 
-func unresolvedRenderableFlow(flow *agentapi.FlowIR) *agentapi.FlowIR {
-	subject := "主流程"
-	if flow != nil && strings.TrimSpace(flow.Subject) != "" {
-		subject = strings.TrimSpace(flow.Subject)
+// flowFallbackProse extracts the non-Mermaid prose from a candidate answer so
+// canonicalFlowAnswer can keep the model's explanatory text while replacing the
+// diagrams with the server-rendered architecture graph.
+func flowFallbackProse(value string) string {
+	var prose []string
+	inFence := false
+	for _, line := range strings.Split(value, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence && trimmed != "" {
+			prose = append(prose, line)
+		}
 	}
-	return &agentapi.FlowIR{
-		Subject:    subject,
-		Status:     "partial",
-		Confidence: "low",
-		Nodes: []agentapi.FlowNode{{
-			ID: "flow_scope", Label: subject, Kind: "scope",
-		}},
-		Uncertainties: []string{"source FlowIR failed deterministic render validation"},
-	}
+	return strings.TrimSpace(strings.Join(prose, "\n"))
 }
 
 var mermaidIDPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

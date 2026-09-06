@@ -307,6 +307,7 @@ func TestCanonicalDelegationSettings(t *testing.T) {
 		"delegation_capabilities":            " knowledge.docs.verify,knowledge.code.inspect,knowledge.docs.verify ",
 		"delegation_max_children":            "3",
 		"delegation_max_concurrent":          "2",
+		"delegation_batch_timeout":           "180s",
 		"delegation_child_timeout":           "90s",
 		"delegation_max_child_turns":         "4",
 		"delegation_max_child_tool_calls":    "8",
@@ -335,6 +336,7 @@ func TestCanonicalDelegationSettings(t *testing.T) {
 	for key, value := range map[string]string{
 		"delegation_capabilities":           "Not Canonical",
 		"delegation_max_children":           "0",
+		"delegation_batch_timeout":          "0s",
 		"delegation_child_timeout":          "0s",
 		"delegation_max_child_tool_calls":   "-1",
 		"delegation_max_total_cost_micros":  "-1",
@@ -352,7 +354,7 @@ func TestValidateAgentSettingsChecksDelegationRelationships(t *testing.T) {
 	settings.Apply(map[string]string{
 		"agent_timeout":                      "5m",
 		"agent_answer_reserve":               "30s",
-		"delegation_max_children":            "3",
+		"delegation_max_children":            "6",
 		"delegation_max_concurrent":          "2",
 		"delegation_child_timeout":           "90s",
 		"delegation_max_child_input_tokens":  "12000",
@@ -392,7 +394,7 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"tool_pruning_enabled":           "false",
 		"disable_legacy_answer_recovery": "false",
 		"delegation_capabilities":        "knowledge.code.inspect", "delegation_max_children": "3", "delegation_max_concurrent": "2",
-		"delegation_child_timeout": "90s", "delegation_max_child_turns": "4",
+		"delegation_batch_timeout": "180s", "delegation_child_timeout": "90s", "delegation_max_child_turns": "4",
 		"delegation_max_child_tool_calls": "8", "delegation_max_child_input_tokens": "12000",
 		"delegation_max_child_output_tokens": "1200", "delegation_max_report_tokens": "1000",
 		"delegation_max_total_tokens": "48000", "delegation_max_total_cost_micros": "0",

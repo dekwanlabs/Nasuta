@@ -9,8 +9,6 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
-	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -42,6 +40,7 @@ type Service struct {
 	delegationEnabled       bool
 	delegationMaxConcurrent int
 	delegationBudget        agentapi.RunLimits
+	answerReserve           time.Duration
 	definitions             DefinitionResolver
 	agentRef                agentapi.DefinitionRef
 	definitionErr           error
@@ -76,7 +75,8 @@ func New(d Deps) *Service {
 			MaxCostMicros:       platformSettings.DelegationMaxTotalCostMicros,
 			ParentAnswerReserve: platformSettings.DelegationParentAnswerReserve,
 		},
-		history: d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
+		answerReserve: time.Duration(platformSettings.AgentAnswerReserve),
+		history:       d.History, sessions: d.Sessions, contextWindow: platformSettings.LLMContextWindow,
 		outputReserve:   platformSettings.LLMAnswerMaxTokens,
 		domainKnowledge: platformSettings.DomainKnowledge,
 		definitions:     d.Definitions, agentRef: d.Agent,
@@ -89,20 +89,6 @@ func New(d Deps) *Service {
 	svc.writeAvailable.Store(d.WriteAvailable)
 	if svc.agentRef.ID == "" {
 		svc.agentRef = agentapi.DefinitionRef{ID: "qa.answerer"}
-	}
-	if svc.definitions == nil {
-		schemas := agentapi.NewSchemaRegistry()
-		err := schemas.Publish(catalog.DefaultSchemas())
-		definitions := catalog.New(schemas)
-		if err == nil {
-			var definition agentapi.Definition
-			definition, err = catalog.DefaultQA(platformSettings)
-			if err == nil {
-				err = definitions.Publish([]agentapi.Definition{definition})
-			}
-		}
-		svc.definitions = definitions
-		svc.definitionErr = err
 	}
 	useDashScope := platformSettings.RerankProvider == "dashscope" && platformSettings.RerankAPIKey != ""
 	log.Infof("[qa] retrieval router: direct_min_confidence=%.2f max_tokens=%d", routerConfidence, routerMaxTokens)
@@ -156,42 +142,24 @@ func (svc *Service) emitContextUsage(runID string, event ContextUsageEvent) {
 	}
 }
 
-func (svc *Service) updateCompaction(runID, sessionID, status, text string, fromTurn, toTurn int) {
+func (svc *Service) updateCompaction(runID, status, text string, fromTurn, toTurn int) {
 	event := SessionStatusEvent{
 		Status: status, Text: text, FromTurn: fromTurn, ToTurn: toTurn,
 		UpdatedAtMs: time.Now().UnixMilli(),
 	}
 	svc.compactionMu.Lock()
-	svc.compactionStatus[sessionID] = event
+	svc.compactionStatus[runID] = event
 	svc.compactionMu.Unlock()
 	if svc.phaseEmitter != nil {
 		svc.phaseEmitter.EmitSessionStatus(runID, event)
 	}
 }
 
-// CompactionStatus returns the latest transient archive status for one session.
-func (svc *Service) CompactionStatus(sessionID string) SessionStatusEvent {
+// CompactionStatus returns the latest transient archive status for one run.
+func (svc *Service) CompactionStatus(runID string) SessionStatusEvent {
 	svc.compactionMu.RLock()
 	defer svc.compactionMu.RUnlock()
-	return svc.compactionStatus[sessionID]
-}
-
-// helperTimeout bounds each pre-retrieval LLM helper. A stuck helper degrades to
-// its fallback (clean question / tech terms / original question) instead of
-// stalling retrieval until the request deadline. The parent ctx caps it lower.
-const helperTimeout = 12 * time.Second
-
-// AskWithHistory starts a run with verbatim recent history and no explicit evidence plan.
-func (svc *Service) AskWithHistory(ctx context.Context, question string, history []llm.Message, userID int64, rolePrompt, runID string) (*AskResult, error) {
-	return svc.AskWithContext(ctx, question, ConversationContext{Recent: history}, userID, rolePrompt, runID, nil)
-}
-
-// AskWithContext preserves bounded session state and recalled history.
-func (svc *Service) AskWithContext(ctx context.Context, question string, conversation ConversationContext, userID int64, rolePrompt, runID string, explicitPlan *domain.EvidencePlan) (*AskResult, error) {
-	return svc.Ask(ctx, Request{
-		Question: question, Conversation: conversation, UserID: userID,
-		RolePrompt: rolePrompt, RunID: runID, EvidencePlan: explicitPlan,
-	})
+	return svc.compactionStatus[runID]
 }
 
 // Ask starts one QA run with optional trusted scenario context.

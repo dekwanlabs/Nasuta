@@ -37,8 +37,8 @@ const (
 	AgentQAPreRetrievedEvidence      ID = "agent.qa.pre_retrieved_evidence"
 	AgentQAMidRunAddition            ID = "agent.qa.mid_run_addition"
 	AgentQAToolDeliveryNotice        ID = "agent.qa.tool_delivery_notice"
+	AgentQADelegationSettled         ID = "agent.qa.delegation_settled"
 	AgentQAExactAnswerContract       ID = "agent.qa.exact_answer_contract"
-	AgentQAAnswerRepair              ID = "agent.qa.answer_repair"
 	AgentQATurnSummary               ID = "agent.qa.turn_summary"
 	AgentQAWebConvergence            ID = "agent.qa.web_convergence"
 	AgentRuntimeContextBlock         ID = "agent.runtime.context_block"
@@ -132,8 +132,8 @@ var idFiles = map[ID]string{
 	AgentQAPreRetrievedEvidence:            "agent/qa/pre_retrieved_evidence.txt",
 	AgentQAMidRunAddition:                  "agent/qa/mid_run_addition.txt",
 	AgentQAToolDeliveryNotice:              "agent/qa/tool_delivery_notice.txt",
+	AgentQADelegationSettled:               "agent/qa/delegation_settled.txt",
 	AgentQAExactAnswerContract:             "agent/qa/exact_answer_contract.txt",
-	AgentQAAnswerRepair:                    "agent/qa/answer_repair.txt",
 	AgentQATurnSummary:                     "agent/qa/turn_summary.txt",
 	AgentQAWebConvergence:                  "agent/qa/web_convergence.txt",
 	AgentRuntimeContextBlock:               "agent/runtime/context_block.txt",
@@ -262,4 +262,17 @@ func validatePromptFiles() error {
 		}
 		return nil
 	})
+}
+
+// WithUserVisibleAnswerContract appends the canonical user-visible answer
+// rules to a system prompt. All agents that can produce a public answer use
+// this helper so Single-Agent and delegated synthesis cannot drift into
+// different output contracts.
+func WithUserVisibleAnswerContract(prompt string) string {
+	prompt = strings.TrimRight(prompt, "\n")
+	contract := Text(AgentQAUserVisibleAnswer)
+	if strings.HasSuffix(prompt, contract) {
+		return prompt
+	}
+	return prompt + "\n\n" + contract
 }

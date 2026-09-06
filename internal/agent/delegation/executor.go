@@ -44,13 +44,10 @@ const (
 	maxObjectiveBytes = 2000
 	maxEvidenceRefs   = 20
 
-	// Flow investigations are intentionally shallower than ordinary evidence
-	// deep-dives. The parent still owns the user-facing Mermaid contract; these
-	// limits only bound the child evidence/Flow IR handoff.
-	flowChildMaxTurns        = 2
-	flowChildMaxToolCalls    = 6
-	flowChildMaxOutputTokens = 8000
-	flowReportMaxTokens      = 2000
+	// childAnswerDeadlineSafety keeps every child window strictly inside the
+	// parent's answer deadline so settlement/verification can still run before
+	// the parent must deliver.
+	childAnswerDeadlineSafety = 10 * time.Second
 )
 
 var errAttemptUnrecoverable = errors.New("delegation attempt cannot be recovered")
@@ -81,6 +78,11 @@ type Persistence interface {
 		string,
 		int,
 	) ([]tool.EvidenceUnit, error)
+	ListDelegationTasks(
+		context.Context,
+		string,
+		string,
+	) ([]agentrun.DelegationTaskRecord, error)
 }
 
 // AttemptPersistence is optional for backwards-compatible test and embedding
@@ -287,6 +289,7 @@ func (executor *Executor) Execute(
 		return agentapi.DelegationBatchResult{}, nil, err
 	}
 	parent.InvocationID = invocationID
+	parent.BatchDeadline = executor.batchDeadline(ctx, parent)
 	delegationID := stableID("del", parent.RunID, invocationID)
 	result := agentapi.DelegationBatchResult{
 		DelegationID: delegationID,
@@ -362,6 +365,349 @@ func (executor *Executor) Execute(
 		ctx, parent, &result, evidenceLedger, observations,
 	)
 	return result, returnedEvidence, err
+}
+
+// Dispatch admits and starts one delegation batch without waiting for any
+// child to finish. It returns the immediate, non-blocking projection consumed
+// by the delegate_investigation tool; completed reports are backfilled later
+// through Poll/delegation_status. The legacy synchronous Execute path remains
+// unchanged for embedders that still need a blocking result.
+func (executor *Executor) Dispatch(
+	ctx context.Context,
+	tasks []agentapi.DelegationTask,
+) (agentapi.DelegationDispatchResult, error) {
+	parent, invocationID, err := delegationInvocation(ctx, tasks)
+	if err != nil {
+		return agentapi.DelegationDispatchResult{}, err
+	}
+	parent.InvocationID = invocationID
+	// The delegate_investigation tool carries its own short invocation timeout
+	// (15s). That timeout bounds only this synchronous admit call and must not
+	// become the admitted batch deadline: each child needs a much longer
+	// wall-clock window. Strip the tool deadline so batchDeadline falls back
+	// to the policy batch timeout and the parent answer deadline instead of
+	// the tool timeout.
+	parent.BatchDeadline = executor.batchDeadline(context.WithoutCancel(ctx), parent)
+	delegationID := stableID("del", parent.RunID, invocationID)
+	dispatch := agentapi.DelegationDispatchResult{
+		DelegationID: delegationID,
+		Status:       agentapi.DelegationRunning,
+		Tasks:        make([]agentapi.DelegationTaskStatus, 0, len(tasks)),
+	}
+
+	batch := agentapi.DelegationBatchResult{
+		DelegationID: delegationID,
+		Results:      make([]agentapi.DelegationReport, len(tasks)),
+	}
+	prepared, err := executor.prepareTasks(ctx, parent, delegationID, tasks, &batch)
+	if err != nil {
+		return agentapi.DelegationDispatchResult{}, err
+	}
+
+	// Rejected tasks are already persisted by prepareTasks and surfaced here
+	// so the parent sees them immediately instead of re-asking.
+	admitted := make(map[int]preparedTask, len(prepared))
+	for _, task := range prepared {
+		admitted[task.index] = task
+	}
+	for index, task := range tasks {
+		if candidate, ok := admitted[index]; ok {
+			dispatch.Tasks = append(dispatch.Tasks, agentapi.DelegationTaskStatus{
+				TaskID:  candidate.childRunID,
+				Subject: candidate.request.Objective,
+				Status:  agentapi.DelegationRunning,
+			})
+			continue
+		}
+		dispatch.Tasks = append(dispatch.Tasks, agentapi.DelegationTaskStatus{
+			TaskID:  "",
+			Subject: task.Objective,
+			Status:  agentapi.DelegationRejected,
+		})
+	}
+
+	if len(prepared) == 0 {
+		return dispatch, nil
+	}
+
+	if err := executor.reserveTaskBudgets(ctx, prepared); err != nil {
+		releaseTaskBudgets(prepared)
+		if rejectErr := executor.rejectPreparedTasks(
+			ctx, parent, delegationID, prepared, ErrorBudgetInsufficient, err, &batch,
+		); rejectErr != nil {
+			return agentapi.DelegationDispatchResult{}, rejectErr
+		}
+		executor.markDispatchTasksRejected(&dispatch, prepared)
+		return dispatch, nil
+	}
+
+	records, err := executor.persistence.ReserveDelegationBatch(
+		ctx,
+		agentrun.DelegationAdmission{
+			ParentRunID: parent.RunID, DelegationID: delegationID,
+			MaxChildren:         executor.policy.MaxChildren,
+			MaxTotalTokens:      executor.policy.MaxTotalTokens,
+			MaxTotalCostMicros:  executor.policy.MaxTotalCostMicros,
+			ParentAnswerReserve: executor.policy.ParentAnswerReserve,
+			Reservations:        delegationReservations(parent, delegationID, prepared),
+		},
+	)
+	if err != nil {
+		releaseTaskBudgets(prepared)
+		code, handled := delegationReservationErrorCode(err)
+		if !handled {
+			return agentapi.DelegationDispatchResult{},
+				fmt.Errorf("reserve delegation batch: %w", err)
+		}
+		if rejectErr := executor.rejectPreparedTasks(
+			ctx, parent, delegationID, prepared, code, err, &batch,
+		); rejectErr != nil {
+			return agentapi.DelegationDispatchResult{}, rejectErr
+		}
+		executor.markDispatchTasksRejected(&dispatch, prepared)
+		return dispatch, nil
+	}
+
+	if executor.queue != nil {
+		// Atomic queues must enqueue+claim the work, otherwise the child is
+		// admitted but never becomes runnable and no report is ever produced.
+		// The slow enqueue-only path stays with enqueueTasks and the durable
+		// worker. Both paths run in the background so Dispatch never waits for
+		// a child to settle.
+		fastPath, isAtomic := executor.queue.(enqueueAndClaimWorkQueue)
+		if !isAtomic {
+			if err := executor.enqueueTasks(ctx, parent, delegationID, prepared); err != nil {
+				releaseTaskBudgets(prepared)
+				return agentapi.DelegationDispatchResult{}, fmt.Errorf("enqueue delegation work: %w", err)
+			}
+			return dispatch, nil
+		}
+		_ = fastPath
+		executor.dispatchInBackground(ctx, parent, delegationID, prepared, records)
+		return dispatch, nil
+	}
+
+	// No durable queue: run the batch on a background goroutine so the tool
+	// call still returns immediately. The reserved task budgets are released
+	// inside runTaskOwned after each child settles.
+	executor.dispatchInBackground(ctx, parent, delegationID, prepared, records)
+	return dispatch, nil
+}
+
+// dispatchInBackground runs the admitted batch off the request path and logs
+// the aggregate outcome. Outcomes are already logged per child by runTasks;
+// this wrapper records when the whole batch finishes so a dead/disappearing
+// dispatch goroutine stays observable.
+func (executor *Executor) dispatchInBackground(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	prepared []preparedTask,
+	records []agentrun.DelegationTaskRecord,
+) {
+	go func() {
+		started := time.Now()
+		outcomes := executor.runTasks(
+			context.WithoutCancel(ctx),
+			parent,
+			delegationID,
+			prepared,
+			delegationRecordsByIndex(records),
+		)
+		completed, failed, cancelled, other := 0, 0, 0, 0
+		for _, outcome := range outcomes {
+			switch outcome.report.Status {
+			case agentapi.DelegationCompleted, agentapi.DelegationPartial:
+				completed++
+			case agentapi.DelegationFailed:
+				failed++
+			case agentapi.DelegationCancelled:
+				cancelled++
+			default:
+				other++
+			}
+		}
+		log.InfofCtx(ctx, "[delegation] batch finished parent=%s delegation=%s tasks=%d completed=%d failed=%d cancelled=%d other=%d elapsed=%s",
+			parent.RunID, delegationID, len(outcomes), completed, failed, cancelled, other, time.Since(started))
+	}()
+}
+
+// markDispatchTasksRejected flips already-dispatched running statuses to
+// rejected after budget or reservation admission failed for those tasks.
+func (executor *Executor) markDispatchTasksRejected(
+	dispatch *agentapi.DelegationDispatchResult,
+	prepared []preparedTask,
+) {
+	rejected := make(map[int]struct{}, len(prepared))
+	for _, task := range prepared {
+		rejected[task.index] = struct{}{}
+	}
+	for index := range dispatch.Tasks {
+		if _, ok := rejected[index]; ok {
+			dispatch.Tasks[index].Status = agentapi.DelegationRejected
+		}
+	}
+}
+
+// Poll returns the current streaming projection for one previously dispatched
+// delegation. Completed children are backfilled from their settled report
+// artifacts; still-running children are reported as running. It never blocks
+// on child completion.
+func (executor *Executor) Poll(
+	ctx context.Context,
+	delegationID string,
+) (agentapi.DelegationDispatchResult, error) {
+	parent, ok := ParentContextFrom(ctx)
+	if !ok || strings.TrimSpace(parent.RunID) == "" {
+		return agentapi.DelegationDispatchResult{}, fmt.Errorf("delegation parent context is required")
+	}
+	delegationID = strings.TrimSpace(delegationID)
+	if delegationID == "" {
+		return agentapi.DelegationDispatchResult{}, fmt.Errorf("delegation id is required")
+	}
+	records, err := executor.persistence.ListDelegationTasks(ctx, parent.RunID, delegationID)
+	if err != nil {
+		return agentapi.DelegationDispatchResult{}, err
+	}
+	return executor.buildDispatch(ctx, parent, delegationID, records), nil
+}
+
+// AwaitSettlement blocks until every admitted child in one delegation has a
+// durable settlement (or the caller's deadline passes), then returns the full
+// projection including backfilled reports. It is the server-side "wait for
+// completion" counterpart to Poll: the parent loop uses it to hand the model a
+// finished result instead of forcing the model to poll delegation_status.
+func (executor *Executor) AwaitSettlement(
+	ctx context.Context,
+	delegationID string,
+	deadline time.Time,
+) (agentapi.DelegationDispatchResult, error) {
+	parent, ok := ParentContextFrom(ctx)
+	if !ok || strings.TrimSpace(parent.RunID) == "" {
+		return agentapi.DelegationDispatchResult{}, fmt.Errorf("delegation parent context is required")
+	}
+	delegationID = strings.TrimSpace(delegationID)
+	if delegationID == "" {
+		return agentapi.DelegationDispatchResult{}, fmt.Errorf("delegation id is required")
+	}
+	if deadline.IsZero() {
+		if !parent.BatchDeadline.IsZero() {
+			deadline = parent.BatchDeadline
+		} else if !parent.AnswerDeadline.IsZero() {
+			deadline = parent.AnswerDeadline.Add(-childAnswerDeadlineSafety)
+		} else {
+			deadline = time.Now().Add(executor.policy.BatchTimeout)
+		}
+	}
+	// A deadline already in the past means the parent has no window left; do a
+	// single non-blocking read and return whatever has settled so far.
+	if !time.Now().Before(deadline) {
+		log.WarnfCtx(ctx, "[delegation] settlement wait ended dimension=delegation_batch_timeout parent=%s delegation=%s deadline=%s remaining_answer_time=%s",
+			parent.RunID, delegationID, deadline.Format(time.RFC3339Nano), remainingAnswerTime(parent))
+		return executor.Poll(ctx, delegationID)
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		dispatch, err := executor.Poll(ctx, delegationID)
+		if err != nil {
+			return agentapi.DelegationDispatchResult{}, err
+		}
+		if !dispatchHasRunning(dispatch) {
+			return dispatch, nil
+		}
+		select {
+		case <-ctx.Done():
+			return dispatch, nil
+		case <-ticker.C:
+			if !time.Now().Before(deadline) {
+				log.WarnfCtx(ctx, "[delegation] settlement wait ended dimension=delegation_batch_timeout parent=%s delegation=%s deadline=%s remaining_answer_time=%s",
+					parent.RunID, delegationID, deadline.Format(time.RFC3339Nano), remainingAnswerTime(parent))
+				return dispatch, nil
+			}
+		}
+	}
+}
+
+// buildDispatch projects persisted admission records into the streaming
+// dispatch shape shared by Poll and AwaitSettlement.
+func (executor *Executor) buildDispatch(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	records []agentrun.DelegationTaskRecord,
+) agentapi.DelegationDispatchResult {
+	dispatch := agentapi.DelegationDispatchResult{
+		DelegationID: delegationID,
+		Status:       agentapi.DelegationRunning,
+		Tasks:        make([]agentapi.DelegationTaskStatus, 0, len(records)),
+	}
+	for _, record := range records {
+		status := agentapi.DelegationTaskStatus{
+			TaskID:  record.ChildRunID,
+			Subject: record.ChildRunID,
+			Status:  agentapi.DelegationRunning,
+		}
+		switch {
+		case !record.Admitted || record.RejectionCode != "":
+			status.Status = agentapi.DelegationRejected
+		case record.SettledUsage == nil:
+			status.Status = agentapi.DelegationRunning
+		default:
+			status.Status = agentapi.DelegationFailed
+			if record.ReportArtifactID != "" {
+				report, decodeErr := executor.decodeReportRecord(ctx, parent, delegationID, record)
+				if decodeErr != nil {
+					log.WarnfCtx(ctx, "[delegation] poll decode report %s/%s/%d: %v",
+						parent.RunID, delegationID, record.TaskIndex, decodeErr)
+				} else {
+					status.Report = &report
+					if subject := strings.TrimSpace(report.Summary); subject != "" {
+						status.Subject = subject
+					} else if subject := strings.TrimSpace(report.Capability); subject != "" {
+						status.Subject = subject
+					}
+					status.Status = report.Status
+				}
+			}
+		}
+		dispatch.Tasks = append(dispatch.Tasks, status)
+	}
+	return dispatch
+}
+
+// decodeReportRecord resolves and decodes the settled report for one child.
+func (executor *Executor) decodeReportRecord(
+	ctx context.Context,
+	parent ParentContext,
+	delegationID string,
+	record agentrun.DelegationTaskRecord,
+) (agentapi.DelegationReport, error) {
+	_, artifact, err := executor.persistence.GetDelegationTask(
+		ctx, parent.RunID, delegationID, record.TaskIndex,
+	)
+	if err != nil {
+		return agentapi.DelegationReport{}, err
+	}
+	if artifact == nil {
+		return agentapi.DelegationReport{}, fmt.Errorf("delegation report artifact is unavailable")
+	}
+	synthetic := preparedTask{
+		index:      record.TaskIndex,
+		request:    agentapi.DelegationTask{Objective: record.ChildRunID},
+		capability: agentapi.Capability{ID: record.Capability.ID},
+		childRunID: record.ChildRunID,
+		reportID:   stableID("report", record.ChildRunID),
+		artifactID: record.ReportArtifactID,
+	}
+	report, err := decodePersistedReport(*artifact, synthetic)
+	if err != nil {
+		return agentapi.DelegationReport{}, err
+	}
+	if report.Capability == "" {
+		report.Capability = record.Capability.ID
+	}
+	return report, nil
 }
 
 func delegationInvocation(
@@ -723,7 +1069,12 @@ func (executor *Executor) runQueuedOrInline(ctx context.Context, parent ParentCo
 
 	workItem, marshalErr := executor.queuedWorkItem(parent, delegationID, task)
 	if marshalErr != nil {
-		return taskOutcome{report: failedReport(task, ErrorReportPersistenceFailed, marshalErr)}
+		log.ErrorfCtx(ctx, "[delegation] queue work marshal failed parent=%s delegation=%s task=%d: %v",
+			parent.RunID, delegationID, task.index, marshalErr)
+		report := failedReport(task, ErrorReportPersistenceFailed, marshalErr)
+		executor.settleUnavailable(ctx, parent, delegationID, task, report)
+		_ = task.budget.Release()
+		return taskOutcome{report: report}
 	}
 	claimStarted := time.Now()
 	var item agentrun.WorkItem
@@ -747,10 +1098,18 @@ func (executor *Executor) runQueuedOrInline(ctx context.Context, parent ParentCo
 		return executor.runClaimedWork(ctx, parent, delegationID, task, record, item)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		// Queue infrastructure failure is not a durable child outcome. Do not
-		// settle the logical task here: another worker may still claim the
-		// already-enqueued item, and settling would race/overwrite its report.
+		// Queue infrastructure failure means the work item is neither durably
+		// enqueued nor claimed. Settle the logical task unavailable and release
+		// its reservation so the parent projection can terminate instead of
+		// polling "running" forever. A later worker cannot silently overwrite
+		// this settlement: SettleDelegationTask rejects tasks whose ChildRunID
+		// no longer matches (ErrDelegationTaskConflict) and requires the same
+		// logical identity, so the failed settlement is authoritative.
+		log.ErrorfCtx(ctx, "[delegation] queue claim failed parent=%s delegation=%s task=%d: %v",
+			parent.RunID, delegationID, task.index, err)
 		report := failedReport(task, ErrorReportPersistenceFailed, err)
+		executor.settleUnavailable(ctx, parent, delegationID, task, report)
+		_ = task.budget.Release()
 		return taskOutcome{report: report}
 	}
 
@@ -866,8 +1225,18 @@ func (executor *Executor) waitForQueuedTask(ctx context.Context, parent ParentCo
 		released = true
 		_ = task.budget.Release()
 	}
+	// Dispatch runs on context.WithoutCancel, so ctx.Done() is almost never
+	// the backstop. Bound the wait against the parent's answer deadline so an
+	// unclaimed/unsettled item cannot pin the parent in "running" forever.
+	deadline := executor.queueWaitDeadline(parent)
+	if deadline.IsZero() {
+		log.WarnfCtx(ctx, "[delegation] wait has no deadline parent=%s delegation=%s task=%d",
+			parent.RunID, delegationID, task.index)
+	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	log.InfofCtx(ctx, "[delegation] wait queued parent=%s delegation=%s task=%d deadline=%s",
+		parent.RunID, delegationID, task.index, deadline)
 	for {
 		durableCtx, cancelDurable := executor.durableContext(ctx)
 		record, _, err := executor.persistence.GetDelegationTask(durableCtx, parent.RunID, delegationID, task.index)
@@ -876,7 +1245,10 @@ func (executor *Executor) waitForQueuedTask(ctx context.Context, parent ParentCo
 			// A read failure is an infrastructure failure, not proof that the
 			// child is unavailable. Leave the durable task and reservation intact
 			// so a later recovery/worker pass can finish it.
+			log.ErrorfCtx(ctx, "[delegation] wait read failed parent=%s delegation=%s task=%d: %v",
+				parent.RunID, delegationID, task.index, err)
 			report := failedReport(task, ErrorReportPersistenceFailed, err)
+			_ = task.budget.Release()
 			return taskOutcome{report: report}
 		}
 		if err == nil && record.SettledUsage != nil {
@@ -884,6 +1256,8 @@ func (executor *Executor) waitForQueuedTask(ctx context.Context, parent ParentCo
 			outcome := executor.replayTask(replayCtx, parent, delegationID, task)
 			cancelReplay()
 			release()
+			log.InfofCtx(ctx, "[delegation] wait replayed settled parent=%s delegation=%s task=%d status=%s",
+				parent.RunID, delegationID, task.index, outcome.report.Status)
 			return outcome
 		}
 
@@ -902,7 +1276,34 @@ func (executor *Executor) waitForQueuedTask(ctx context.Context, parent ParentCo
 			return outcome
 		}
 		if !errors.Is(claimErr, sql.ErrNoRows) {
+			log.ErrorfCtx(ctx, "[delegation] wait reclaim failed parent=%s delegation=%s task=%d: %v",
+				parent.RunID, delegationID, task.index, claimErr)
 			report := failedReport(task, ErrorReportPersistenceFailed, claimErr)
+			_ = task.budget.Release()
+			return taskOutcome{report: report}
+		}
+
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			// The parent answer window closed before any worker settled the
+			// child. Read once more: if a settlement landed in the final gap,
+			// replay it; otherwise settle unavailable and release so the parent
+			// projection terminates and the root budget lease can close.
+			finalCtx, cancelFinal := executor.durableContext(ctx)
+			finalRecord, _, finalErr := executor.persistence.GetDelegationTask(finalCtx, parent.RunID, delegationID, task.index)
+			cancelFinal()
+			if finalErr == nil && finalRecord.SettledUsage != nil {
+				replayCtx, cancelReplay := executor.durableContext(ctx)
+				outcome := executor.replayTask(replayCtx, parent, delegationID, task)
+				cancelReplay()
+				release()
+				return outcome
+			}
+			log.WarnfCtx(ctx, "[delegation] wait deadline exceeded parent=%s delegation=%s task=%d",
+				parent.RunID, delegationID, task.index)
+			report := failedReport(task, ErrorParentTimeInsufficient,
+				fmt.Errorf("delegation child did not settle before the parent answer deadline"))
+			executor.settleUnavailable(ctx, parent, delegationID, task, report)
+			release()
 			return taskOutcome{report: report}
 		}
 
@@ -916,6 +1317,31 @@ func (executor *Executor) waitForQueuedTask(ctx context.Context, parent ParentCo
 		case <-ticker.C:
 		}
 	}
+}
+
+// queueWaitDeadline bounds waitForQueuedTask to the parent's answer window so
+// the async dispatcher can never leave a delegation polling "running" forever.
+// It mirrors childLimitsAt: answer deadline minus the safety margin, falling
+// back to the child timeout when the parent carries no answer deadline.
+func (executor *Executor) queueWaitDeadline(parent ParentContext) time.Time {
+	now := time.Now()
+	timeout := executor.policy.ChildTimeout
+	if timeout <= 0 {
+		timeout = time.Minute
+	}
+	if !parent.BatchDeadline.IsZero() {
+		if parent.BatchDeadline.Before(now) {
+			return now
+		}
+		return parent.BatchDeadline
+	}
+	if parent.AnswerDeadline.IsZero() {
+		return now.Add(timeout)
+	}
+	if capped := parent.AnswerDeadline.Add(-childAnswerDeadlineSafety); capped.Before(now) {
+		return now
+	}
+	return parent.AnswerDeadline.Add(-childAnswerDeadlineSafety)
 }
 
 // withWorkLease binds a claimed queue item to a cancellable execution context
@@ -1085,6 +1511,12 @@ func (executor *Executor) runTasks(
 				outcomes[taskOffset] = indexedOutcome{
 					index: task.index, taskOutcome: outcome,
 				}
+				errMsg := ""
+				if outcome.report.Error != nil {
+					errMsg = outcome.report.Error.Message
+				}
+				log.InfofCtx(ctx, "[delegation] child settled parent=%s delegation=%s task=%d child=%s status=%s error=%q",
+					parent.RunID, delegationID, task.index, task.childRunID, outcome.report.Status, errMsg)
 			}
 		}()
 	}
@@ -1997,32 +2429,17 @@ type childBudget struct {
 	reportTokens int64
 }
 
+// childBudget derives one child's budget directly from the delegation policy.
+// Flow contracts no longer get a narrower budget: the parent still owns the
+// user-facing Mermaid, and a shallow child produces empty reports.
 func (executor *Executor) childBudget(parent ParentContext) childBudget {
-	budget := childBudget{
+	return childBudget{
 		turns:        executor.policy.MaxChildTurns,
 		toolCalls:    executor.policy.MaxChildToolCalls,
 		inputTokens:  executor.policy.MaxChildInputTokens,
 		outputTokens: executor.policy.MaxChildOutputTokens,
 		reportTokens: executor.policy.MaxReportTokens,
 	}
-	if parent.OutputContract.Kind != "flow" {
-		return budget
-	}
-	budget.turns = minPositive(budget.turns, flowChildMaxTurns)
-	budget.toolCalls = minPositiveInt64(budget.toolCalls, flowChildMaxToolCalls)
-	budget.outputTokens = minPositiveInt64(budget.outputTokens, flowChildMaxOutputTokens)
-	budget.reportTokens = minPositiveInt64(budget.reportTokens, flowReportMaxTokens)
-	return budget
-}
-
-func minPositive(left, right int) int {
-	if left <= 0 {
-		return right
-	}
-	if right <= 0 || left < right {
-		return left
-	}
-	return right
 }
 
 func minPositiveInt64(left, right int64) int64 {
@@ -2087,8 +2504,17 @@ func (executor *Executor) childLimitsAt(
 		timeout = definition.Budget.Timeout - time.Millisecond
 	}
 	deadline := now.Add(timeout)
-	if !parent.Limits.Deadline.IsZero() && parent.Limits.Deadline.Before(deadline) {
-		deadline = parent.Limits.Deadline
+	// A child never inherits the parent run deadline. Prefer the admitted
+	// batch deadline, then cap the child a little earlier so the parent can
+	// observe settlement and still enter its answer phase.
+	if !parent.BatchDeadline.IsZero() {
+		if capped := childDeadlineCap(now, parent.BatchDeadline); capped.Before(deadline) {
+			deadline = capped
+		}
+	} else if !parent.AnswerDeadline.IsZero() {
+		if capped := childDeadlineCap(now, parent.AnswerDeadline); capped.Before(deadline) {
+			deadline = capped
+		}
 	}
 	if !contextDeadline.IsZero() && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
@@ -2306,6 +2732,53 @@ func (executor *Executor) emitValidation(
 	)
 }
 
+func (executor *Executor) batchDeadline(ctx context.Context, parent ParentContext) time.Time {
+	now := time.Now()
+	timeout := executor.policy.BatchTimeout
+	if timeout <= 0 {
+		timeout = executor.policy.ChildTimeout
+	}
+	deadline := now.Add(timeout)
+	if !parent.AnswerDeadline.IsZero() {
+		if capped := parent.AnswerDeadline.Add(-childAnswerDeadlineSafety); capped.Before(deadline) {
+			deadline = capped
+		}
+	}
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	return deadline
+}
+
+func childDeadlineCap(now, deadline time.Time) time.Time {
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return deadline
+	}
+	safety := childAnswerDeadlineSafety
+	// Keep short unit-test and embedded-run windows usable. For a batch shorter
+	// than the normal safety margin, reserve at most ten percent rather than
+	// turning the child window into an already-expired deadline.
+	if remaining < safety {
+		safety = remaining / 10
+		if safety < time.Millisecond {
+			safety = 0
+		}
+	}
+	return deadline.Add(-safety)
+}
+
+func remainingAnswerTime(parent ParentContext) time.Duration {
+	if parent.AnswerDeadline.IsZero() {
+		return 0
+	}
+	remaining := time.Until(parent.AnswerDeadline)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
 func delegationPolicyLimitsInvalid(policy agentapi.DelegationPolicy) bool {
 	return policy.MaxChildren <= 0 || policy.MaxConcurrent <= 0 ||
 		policy.MaxConcurrent > policy.MaxChildren ||
@@ -2313,12 +2786,16 @@ func delegationPolicyLimitsInvalid(policy agentapi.DelegationPolicy) bool {
 		policy.MaxChildInputTokens <= 0 || policy.MaxChildOutputTokens <= 0 ||
 		policy.MaxReportTokens <= 0 || policy.MaxTotalTokens <= 0 ||
 		policy.MaxTotalCostMicros < 0 || policy.ParentAnswerReserve < 0 ||
-		policy.ChildTimeout <= 0
+		policy.BatchTimeout <= 0 || policy.ChildTimeout <= 0 ||
+		policy.ChildTimeout > policy.BatchTimeout
 }
 
 func normalizePolicy(
 	policy agentapi.DelegationPolicy,
 ) (agentapi.DelegationPolicy, error) {
+	if policy.BatchTimeout <= 0 {
+		policy.BatchTimeout = policy.ChildTimeout
+	}
 	if policy.MaxDepth <= 0 || policy.MaxDepth > 1 {
 		return policy, fmt.Errorf("delegation max depth must be 1")
 	}

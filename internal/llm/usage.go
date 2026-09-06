@@ -2,6 +2,8 @@ package llm
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -13,6 +15,7 @@ const (
 	PhaseAgentStep        = "agent_step"
 	PhaseContinuation     = "continuation"
 	PhaseForcedConclusion = "forced_conclusion"
+	PhaseSynthesis        = "synthesis"
 	PhaseMemoryExtract    = "memory_extract"
 	PhaseSessionSummary   = "session_summary"
 )
@@ -41,6 +44,24 @@ func (usage Usage) normalized() Usage {
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 	}
 	return usage
+}
+
+// VisibleOutputTokens returns the provider completion tokens that were not
+// reported as reasoning. It is a derived value: OutputTokens remains the
+// authoritative provider/cost accounting field. Providers that do not expose
+// reasoning usage therefore return OutputTokens unchanged.
+func (usage Usage) VisibleOutputTokens() int {
+	visible := usage.OutputTokens - usage.ReasoningTokens
+	if visible < 0 {
+		return 0
+	}
+	return visible
+}
+
+// VisibleOutputTokensEstimated reports whether visible output is derived from
+// a provider reasoning-token breakdown rather than supplied directly.
+func (usage Usage) VisibleOutputTokensEstimated() bool {
+	return usage.ReasoningTokens > 0
 }
 
 // Add combines usage from continuation calls without double-counting details.
@@ -327,4 +348,26 @@ func (usage anthropicUsage) shared() Usage {
 		CachedInputTokens: cachedInputTokens,
 		OutputTokens:      usage.OutputTokens,
 	}.normalized()
+}
+
+// TokenCostMicros computes the ceil-rounded micro-cost of tokenCount at a
+// price expressed in micros per million tokens. It is shared by the model
+// usage ceiling and the persisted LLM call recorder so rounding and overflow
+// semantics stay identical across every call path.
+func TokenCostMicros(tokens, priceMicrosPerMillionTokens int64) (int64, error) {
+	if tokens < 0 || priceMicrosPerMillionTokens < 0 {
+		return 0, fmt.Errorf("tokens and price cannot be negative")
+	}
+	if tokens == 0 || priceMicrosPerMillionTokens == 0 {
+		return 0, nil
+	}
+	if tokens > math.MaxInt64/priceMicrosPerMillionTokens {
+		return 0, fmt.Errorf("token price multiplication overflow")
+	}
+	product := tokens * priceMicrosPerMillionTokens
+	cost := product / 1_000_000
+	if product%1_000_000 != 0 {
+		cost++
+	}
+	return cost, nil
 }

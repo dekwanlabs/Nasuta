@@ -1,9 +1,9 @@
 # Investigator 按任务范围投影上下文提案
 
-状态：草案  
-作者：Nasuta Agent Platform Team  
-日期：2026-08-17  
-关联事项：trace `f5fa50d9beac`、多 Agent 初始上下文过大问题  
+状态：草案
+作者：Nasuta Agent Platform Team
+日期：2026-08-17
+关联事项：trace `f5fa50d9beac`、多 Agent 初始上下文过大问题
 目标版本：待评审后确定
 
 ## 1. 摘要

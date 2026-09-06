@@ -143,10 +143,7 @@ func scanSpringMVC(source endpointSource) []endpointCandidate {
 			controller.methods = []valueExpr{unresolvedValue(binding.annotation.text)}
 			continue
 		}
-		if controller.prefixes[0].kind != valueLiteral ||
-			controller.prefixes[0].value != "" ||
-			controller.methods[0].kind != valueLiteral ||
-			controller.methods[0].value != "ANY" {
+		if !springControllerMappingIsDefault(controller.prefixes, controller.methods) {
 			// Repeated class mappings may have different runtime semantics
 			// (repeatable annotations, composed mappings). Keep them out of
 			// the authoritative route set until a richer Java model exists.
@@ -225,11 +222,7 @@ func springMappingPaths(annotation jvmAnnotation) ([]valueExpr, bool) {
 	if !ok {
 		return nil, false
 	}
-	out := make([]valueExpr, 0, len(values))
-	for _, value := range values {
-		out = append(out, literalValue(value))
-	}
-	return out, true
+	return literalValueExprs(values), true
 }
 
 func springMappingMethods(annotation jvmAnnotation) ([]valueExpr, bool) {
@@ -237,11 +230,7 @@ func springMappingMethods(annotation jvmAnnotation) ([]valueExpr, bool) {
 	if !ok {
 		return nil, false
 	}
-	out := make([]valueExpr, 0, len(values))
-	for _, value := range values {
-		out = append(out, literalValue(value))
-	}
-	return out, true
+	return literalValueExprs(values), true
 }
 
 func combinePathValues(prefixes, routes []valueExpr) []valueExpr {

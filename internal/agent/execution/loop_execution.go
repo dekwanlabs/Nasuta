@@ -13,6 +13,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
+	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
@@ -47,6 +48,8 @@ type compiledLoop struct {
 	structuredLastStepReminded bool
 	answerRecoveryPending      bool
 	delegatedFlows             []agentapi.FlowIR
+	dispatchedDelegations      []string
+	settledDelegations         map[string]bool
 	startStep                  int
 }
 
@@ -97,6 +100,7 @@ func (agent *Agent) prepareLoop(
 		result:              result,
 		seenTools:           map[string]bool{},
 		evidenceLedger:      newRunEvidenceLedger(input.EvidenceUnits, input.EvidenceConflicts),
+		settledDelegations:  map[string]bool{},
 		remainingToolTokens: initialToolTokenBudget(agent, messages, tools),
 		stepLimit:           maxSteps,
 		startStep:           1,
@@ -157,15 +161,32 @@ func (state *compiledLoop) recordSeedEvidence(observer Observer) {
 	})
 }
 
-func (agent *Agent) finishLoop(state *compiledLoop) {
-	if len(state.delegatedFlows) > 0 {
-		merged, err := delegation.MergeFlowIRs(state.delegatedFlows)
-		if err != nil {
-			log.WarnfCtx(state.ctx, "[agent] run %s flow merge failed: %v", state.runID, err)
-		} else {
-			state.result.Flow = merged
-		}
+// mergeDelegatedFlows folds child FlowIRs into the server-owned flow once.
+// It is called both at the answer turn (so the deterministic renderer can
+// replace model-owned Mermaid) and again in finishLoop. It is idempotent and
+// never downgrades an already-merged flow.
+func (agent *Agent) mergeDelegatedFlows(state *compiledLoop) {
+	if state == nil || len(state.delegatedFlows) == 0 {
+		return
 	}
+	if state.result.Flow != nil {
+		// Already merged (e.g. recovered from a checkpoint); do not re-merge.
+		return
+	}
+	merged, err := delegation.MergeFlowIRs(state.delegatedFlows)
+	if err != nil {
+		log.WarnfCtx(state.ctx, "[agent] run %s flow merge failed: %v", state.runID, err)
+		return
+	}
+	state.result.Flow = merged
+}
+
+func (agent *Agent) finishLoop(state *compiledLoop) {
+	// Close out any delegation the parent dispatched but never awaited mid-loop
+	// before the final answer is rendered, so the durable budget reservations
+	// have settled by the time the caller releases the run lease.
+	agent.awaitUnsettledDelegations(state)
+	agent.mergeDelegatedFlows(state)
 	if agent.shouldForceConclusion(state) {
 		state.result.ForcedConclusion = true
 		state.result.Evidence.ForcedConclusion = true
@@ -229,6 +250,69 @@ func (agent *Agent) finalizeLoop(state *compiledLoop) {
 	}
 }
 
+// installDeterministicConclusion writes a guaranteed non-empty answer when the
+// normal force-conclusion path fails, so a slow child can never leave the run
+// with answerLen=0. It derives a conservative prose answer from the evidence
+// already observed, then passes it through the exact-answer contract so
+// adoption metadata is consumed server-side instead of leaking as unknown.
+func (agent *Agent) installDeterministicConclusion(state *compiledLoop, cause error) bool {
+	if state == nil || state.result == nil {
+		return false
+	}
+	answer := deterministicConclusionProse(state)
+	if strings.TrimSpace(answer) == "" {
+		return false
+	}
+	if state.answerContract != nil && state.answerContract.Active() {
+		withMetadata, err := state.answerContract.appendConservativeFallbackMetadata(answer)
+		if err != nil {
+			log.WarnfCtx(state.ctx, "[agent] run %s deterministic conclusion contract metadata failed: %v", state.runID, err)
+			return false
+		}
+		visible, violations := state.answerContract.ValidateAndStrip(withMetadata)
+		if len(violations) > 0 {
+			log.WarnfCtx(state.ctx, "[agent] run %s deterministic conclusion contract rejected: %v", state.runID, violations)
+			return false
+		}
+		answer = visible
+		state.result.DelegationAdoptions = state.answerContract.Adoptions()
+	}
+	state.result.Answer = answer
+	state.result.Err = nil
+	state.result.ForcedConclusion = true
+	state.result.Evidence.ForcedConclusion = true
+	if cause != nil {
+		log.WarnfCtx(state.ctx, "[agent] run %s installed deterministic conclusion after %v", state.runID, cause)
+	}
+	return true
+}
+
+// deterministicConclusionProse renders a conservative, evidence-derived answer
+// without a model call. It is the final deterministic backstop before a run
+// would otherwise return an empty answer.
+func deterministicConclusionProse(state *compiledLoop) string {
+	var parts []string
+	if question := strings.TrimSpace(state.input.Question); question != "" {
+		parts = append(parts, "问题："+question)
+	}
+	parts = append(parts, "由于时间或模型调用不可用，本次未完成完整分析。")
+	resultCount := state.result.Evidence.ResultCount
+	partialCount := state.result.Evidence.PartialResultCount
+	if resultCount > 0 || partialCount > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"已收集 %d 条完整结果、%d 条部分结果，但尚未整合成最终结论。",
+			resultCount, partialCount,
+		))
+	}
+	if state.result.Evidence.ToolFailureCount > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d 次工具调用失败。", state.result.Evidence.ToolFailureCount,
+		))
+	}
+	parts = append(parts, "以下为当前已确认的信息，仍需进一步核实后才能给出确定性结论。")
+	return strings.Join(parts, "\n")
+}
+
 func isRecoverableConclusionError(err error) bool {
 	return errors.Is(err, ErrModelCallBudgetExhausted) ||
 		errors.Is(err, ErrReasoningTruncated) ||
@@ -266,6 +350,8 @@ func (agent *Agent) concludeLoop(state *compiledLoop) {
 			state.result.Err = err
 			log.WarnfCtx(state.ctx, "[agent] run %s preserving partial force-conclusion answer: %v",
 				state.runID, err)
+		} else if agent.installDeterministicConclusion(state, err) {
+			return
 		} else {
 			state.result.Err = err
 			if isRecoverableConclusionError(err) {
@@ -277,5 +363,121 @@ func (agent *Agent) concludeLoop(state *compiledLoop) {
 	} else if final != nil {
 		state.result.Answer += final.Content
 		state.result.DelegationAdoptions = state.answerContract.Adoptions()
+	}
+}
+
+// mergeDelegationDispatchFlows folds child FlowIRs present in a dispatch
+// projection into the server-owned flow ledger. The actual merge stays in
+// mergeDelegatedFlows; this only collects the child flows without downgrading
+// an already-merged result.
+func (agent *Agent) mergeDelegationDispatchFlows(state *compiledLoop, dispatch agentapi.DelegationDispatchResult) {
+	if state == nil {
+		return
+	}
+	for _, task := range dispatch.Tasks {
+		if task.Report == nil || task.Report.Flow == nil {
+			continue
+		}
+		state.delegatedFlows = append(state.delegatedFlows, *cloneExecutionFlow(task.Report.Flow))
+	}
+}
+
+// parseDelegationDispatch decodes the authoritative delegate_investigation
+// result into its streaming projection shape.
+func parseDelegationDispatch(content string) (agentapi.DelegationDispatchResult, bool) {
+	var dispatch agentapi.DelegationDispatchResult
+	if strings.TrimSpace(content) == "" {
+		return dispatch, false
+	}
+	if err := json.Unmarshal([]byte(content), &dispatch); err != nil {
+		return dispatch, false
+	}
+	return dispatch, true
+}
+
+// awaitDelegationSettlement blocks until one dispatched delegation settles (or
+// the parent answer window closes) and backfills the finished reports into the
+// parent's answer contract and flow ledger. The second return reports whether
+// every admitted child actually settled, so a timed-out await is not mistaken
+// for a complete batch.
+func (agent *Agent) awaitDelegationSettlement(
+	state *compiledLoop,
+	delegationID string,
+) (agentapi.DelegationDispatchResult, bool) {
+	if agent.cfg.DelegationAwaiter == nil || strings.TrimSpace(delegationID) == "" {
+		return agentapi.DelegationDispatchResult{}, false
+	}
+	dispatch, err := agent.cfg.DelegationAwaiter.AwaitSettlement(
+		state.loopCtx, delegationID, time.Time{},
+	)
+	if err != nil {
+		log.WarnfCtx(state.ctx, "[agent] run %s await delegation %s failed: %v",
+			state.runID, delegationID, err)
+		return agentapi.DelegationDispatchResult{}, false
+	}
+	agent.mergeDelegationDispatchFlows(state, dispatch)
+	state.answerContract.Add(delegation.DelegationAdoptionContract(dispatch))
+	if dispatchStillRunning(dispatch) {
+		return dispatch, false
+	}
+	if state.settledDelegations == nil {
+		state.settledDelegations = make(map[string]bool)
+	}
+	state.settledDelegations[delegationID] = true
+	return dispatch, true
+}
+
+// dispatchStillRunning reports whether any admitted child has not yet settled.
+func dispatchStillRunning(dispatch agentapi.DelegationDispatchResult) bool {
+	for _, task := range dispatch.Tasks {
+		if task.Status == agentapi.DelegationRunning {
+			return true
+		}
+	}
+	return false
+}
+
+// settledDelegationNotice renders the server-side "children finished" notice
+// that hands the model the backfilled reports instead of delegation_status.
+func settledDelegationNotice(dispatch agentapi.DelegationDispatchResult) llm.Message {
+	encoded, err := json.Marshal(dispatch)
+	if err != nil {
+		encoded = []byte(`{"status":"unavailable"}`)
+	}
+	return llm.Message{
+		Role: "system",
+		Content: prompts.MustRender(prompts.AgentQADelegationSettled, struct {
+			Dispatch string
+		}{Dispatch: string(encoded)}),
+	}
+}
+
+// awaitUnsettledDelegations is the finish-loop backstop: it waits for any
+// delegation the parent dispatched but never awaited mid-loop, so the durable
+// budget reservations have closed before the caller releases the run lease.
+func (agent *Agent) awaitUnsettledDelegations(state *compiledLoop) {
+	if agent.cfg.DelegationAwaiter == nil || state == nil {
+		return
+	}
+	for _, delegationID := range state.dispatchedDelegations {
+		if state.settledDelegations[delegationID] {
+			continue
+		}
+		dispatch, err := agent.cfg.DelegationAwaiter.AwaitSettlement(
+			state.runCtx, delegationID, time.Time{},
+		)
+		if err != nil {
+			log.WarnfCtx(state.ctx, "[agent] run %s finish await delegation %s failed: %v",
+				state.runID, delegationID, err)
+			continue
+		}
+		agent.mergeDelegationDispatchFlows(state, dispatch)
+		state.answerContract.Add(delegation.DelegationAdoptionContract(dispatch))
+		if !dispatchStillRunning(dispatch) {
+			if state.settledDelegations == nil {
+				state.settledDelegations = make(map[string]bool)
+			}
+			state.settledDelegations[delegationID] = true
+		}
 	}
 }

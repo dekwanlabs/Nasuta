@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/budget"
 )
 
 // budgetAccount is the shared ledger for one Workflow Run. It is deliberately
@@ -406,17 +407,7 @@ func workflowUsageFromAgent(usage agentapi.Usage) Usage {
 }
 
 func normalizeAgentUsage(usage agentapi.Usage) (agentapi.Usage, error) {
-	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.ReasoningTokens < 0 ||
-		usage.TotalTokens < 0 || usage.CostMicros < 0 {
-		return agentapi.Usage{}, fmt.Errorf("%w: usage cannot be negative", agentapi.ErrBudgetExceeded)
-	}
-	if usage.TotalTokens == 0 {
-		if usage.InputTokens > math.MaxInt64-usage.OutputTokens {
-			return agentapi.Usage{}, fmt.Errorf("%w: usage total overflow", agentapi.ErrBudgetExceeded)
-		}
-		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-	}
-	return usage, nil
+	return budget.NormalizeUsage(usage)
 }
 
 func normalizeWorkflowUsage(usage Usage) Usage {

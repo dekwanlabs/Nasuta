@@ -355,97 +355,107 @@ type reviewRoundCursorPayload struct {
 }
 
 func decodeFeatureCursor(value string) (delivery.FeatureCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return delivery.FeatureCursor{}, nil
-	}
-	var payload featureCursorPayload
-	if err := decodeCursor(value, &payload); err != nil || payload.UpdatedAt.IsZero() || payload.ID == "" {
-		return delivery.FeatureCursor{}, fmt.Errorf("invalid feature cursor")
+	payload, err := decodeCursorPayload[featureCursorPayload](
+		value, "invalid feature cursor",
+		func(payload featureCursorPayload) bool {
+			return !payload.UpdatedAt.IsZero() && payload.ID != ""
+		},
+	)
+	if err != nil {
+		return delivery.FeatureCursor{}, err
 	}
 	return delivery.FeatureCursor{UpdatedAt: payload.UpdatedAt, ID: payload.ID}, nil
 }
 
 func decodeRunCursor(value string) (delivery.RunCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return delivery.RunCursor{}, nil
-	}
-	var payload runCursorPayload
-	if err := decodeCursor(value, &payload); err != nil || payload.CreatedAt.IsZero() || payload.ID == "" {
-		return delivery.RunCursor{}, fmt.Errorf("invalid implementation cursor")
+	payload, err := decodeCursorPayload[runCursorPayload](
+		value, "invalid implementation cursor",
+		func(payload runCursorPayload) bool {
+			return !payload.CreatedAt.IsZero() && payload.ID != ""
+		},
+	)
+	if err != nil {
+		return delivery.RunCursor{}, err
 	}
 	return delivery.RunCursor{CreatedAt: payload.CreatedAt, ID: payload.ID}, nil
 }
 
 func decodeArtifactCursor(value string) (delivery.ArtifactCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return delivery.ArtifactCursor{}, nil
-	}
-	var payload artifactCursorPayload
-	if err := decodeCursor(value, &payload); err != nil || payload.Version < 1 {
-		return delivery.ArtifactCursor{}, fmt.Errorf("invalid artifact cursor")
-	}
-	if _, err := delivery.ParseArtifactKind(string(payload.Kind)); err != nil {
-		return delivery.ArtifactCursor{}, fmt.Errorf("invalid artifact cursor")
+	payload, err := decodeCursorPayload[artifactCursorPayload](
+		value, "invalid artifact cursor",
+		func(payload artifactCursorPayload) bool {
+			if payload.Version < 1 {
+				return false
+			}
+			_, err := delivery.ParseArtifactKind(string(payload.Kind))
+			return err == nil
+		},
+	)
+	if err != nil {
+		return delivery.ArtifactCursor{}, err
 	}
 	return delivery.ArtifactCursor{Kind: payload.Kind, Version: payload.Version}, nil
 }
 
 func decodeGenerationCursor(value string) (delivery.GenerationCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return delivery.GenerationCursor{}, nil
-	}
-	var payload runCursorPayload
-	if err := decodeCursor(value, &payload); err != nil || payload.CreatedAt.IsZero() || payload.ID == "" {
-		return delivery.GenerationCursor{}, fmt.Errorf("invalid generation cursor")
+	payload, err := decodeCursorPayload[runCursorPayload](
+		value, "invalid generation cursor",
+		func(payload runCursorPayload) bool {
+			return !payload.CreatedAt.IsZero() && payload.ID != ""
+		},
+	)
+	if err != nil {
+		return delivery.GenerationCursor{}, err
 	}
 	return delivery.GenerationCursor{StartedAt: payload.CreatedAt, ID: payload.ID}, nil
 }
 
 func decodeReviewAssignmentCursor(value string) (delivery.ReviewAssignmentCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return delivery.ReviewAssignmentCursor{}, nil
-	}
-	var payload runCursorPayload
-	if err := decodeCursor(value, &payload); err != nil || payload.CreatedAt.IsZero() || payload.ID == "" {
-		return delivery.ReviewAssignmentCursor{}, fmt.Errorf("invalid review assignment cursor")
+	payload, err := decodeCursorPayload[runCursorPayload](
+		value, "invalid review assignment cursor",
+		func(payload runCursorPayload) bool {
+			return !payload.CreatedAt.IsZero() && payload.ID != ""
+		},
+	)
+	if err != nil {
+		return delivery.ReviewAssignmentCursor{}, err
 	}
 	return delivery.ReviewAssignmentCursor{CreatedAt: payload.CreatedAt, ID: payload.ID}, nil
 }
 
 func decodeFindingCursor(value string) (delivery.FindingCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return delivery.FindingCursor{}, nil
-	}
-	var payload findingCursorPayload
-	if err := decodeCursor(value, &payload); err != nil || payload.ID == "" {
-		return delivery.FindingCursor{}, fmt.Errorf("invalid review finding cursor")
+	payload, err := decodeCursorPayload[findingCursorPayload](
+		value, "invalid review finding cursor",
+		func(payload findingCursorPayload) bool { return payload.ID != "" },
+	)
+	if err != nil {
+		return delivery.FindingCursor{}, err
 	}
 	return delivery.FindingCursor{ID: payload.ID}, nil
 }
 
 func decodeFindingResolutionCursor(value string) (delivery.FindingResolutionCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return delivery.FindingResolutionCursor{}, nil
+	payload, err := decodeCursorPayload[findingResolutionCursorPayload](
+		value, "invalid finding resolution cursor",
+		func(payload findingResolutionCursorPayload) bool {
+			return !payload.CreatedAt.IsZero() && payload.ID != ""
+		},
+	)
+	if err != nil {
+		return delivery.FindingResolutionCursor{}, err
 	}
-	var payload findingResolutionCursorPayload
-	if err := decodeCursor(value, &payload); err != nil ||
-		payload.CreatedAt.IsZero() || payload.ID == "" {
-		return delivery.FindingResolutionCursor{}, fmt.Errorf("invalid finding resolution cursor")
-	}
-	return delivery.FindingResolutionCursor{
-		CreatedAt: payload.CreatedAt,
-		ID:        payload.ID,
-	}, nil
+	return delivery.FindingResolutionCursor{CreatedAt: payload.CreatedAt, ID: payload.ID}, nil
 }
 
 func decodeReviewAdjudicationCursor(value string) (delivery.ReviewAdjudicationCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return delivery.ReviewAdjudicationCursor{}, nil
-	}
-	var payload reviewAdjudicationCursorPayload
-	if err := decodeCursor(value, &payload); err != nil ||
-		payload.Fingerprint == "" || payload.ID == "" {
-		return delivery.ReviewAdjudicationCursor{}, fmt.Errorf("invalid review adjudication cursor")
+	payload, err := decodeCursorPayload[reviewAdjudicationCursorPayload](
+		value, "invalid review adjudication cursor",
+		func(payload reviewAdjudicationCursorPayload) bool {
+			return payload.Fingerprint != "" && payload.ID != ""
+		},
+	)
+	if err != nil {
+		return delivery.ReviewAdjudicationCursor{}, err
 	}
 	return delivery.ReviewAdjudicationCursor{
 		Fingerprint: payload.Fingerprint,
@@ -454,29 +464,44 @@ func decodeReviewAdjudicationCursor(value string) (delivery.ReviewAdjudicationCu
 }
 
 func decodeReviewPolicyCursor(value string) (delivery.ReviewPolicyCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return delivery.ReviewPolicyCursor{}, nil
-	}
-	var payload reviewPolicyCursorPayload
-	if err := decodeCursor(value, &payload); err != nil ||
-		payload.ID == "" || payload.Version <= 0 {
-		return delivery.ReviewPolicyCursor{}, fmt.Errorf("invalid review policy cursor")
+	payload, err := decodeCursorPayload[reviewPolicyCursorPayload](
+		value, "invalid review policy cursor",
+		func(payload reviewPolicyCursorPayload) bool {
+			return payload.ID != "" && payload.Version > 0
+		},
+	)
+	if err != nil {
+		return delivery.ReviewPolicyCursor{}, err
 	}
 	return delivery.ReviewPolicyCursor{ID: payload.ID, Version: payload.Version}, nil
 }
 
 func decodeReviewRoundCursor(value string) (delivery.ReviewRoundCursor, error) {
+	payload, err := decodeCursorPayload[reviewRoundCursorPayload](
+		value, "invalid review round cursor",
+		func(payload reviewRoundCursorPayload) bool {
+			return !payload.CreatedAt.IsZero() && payload.ID != ""
+		},
+	)
+	if err != nil {
+		return delivery.ReviewRoundCursor{}, err
+	}
+	return delivery.ReviewRoundCursor{CreatedAt: payload.CreatedAt, ID: payload.ID}, nil
+}
+
+func decodeCursorPayload[T any](
+	value string,
+	message string,
+	valid func(T) bool,
+) (T, error) {
+	var payload T
 	if strings.TrimSpace(value) == "" {
-		return delivery.ReviewRoundCursor{}, nil
+		return payload, nil
 	}
-	var payload reviewRoundCursorPayload
-	if err := decodeCursor(value, &payload); err != nil ||
-		payload.CreatedAt.IsZero() || payload.ID == "" {
-		return delivery.ReviewRoundCursor{}, fmt.Errorf("invalid review round cursor")
+	if err := decodeCursor(value, &payload); err != nil || !valid(payload) {
+		return payload, fmt.Errorf("%s", message)
 	}
-	return delivery.ReviewRoundCursor{
-		CreatedAt: payload.CreatedAt, ID: payload.ID,
-	}, nil
+	return payload, nil
 }
 
 func decodeCursor(value string, payload any) error {

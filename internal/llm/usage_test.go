@@ -268,3 +268,29 @@ func TestAnthropicStreamingUsageIsMerged(t *testing.T) {
 		t.Fatalf("usage = %+v, want %+v", result.Usage, want)
 	}
 }
+
+func TestUsageVisibleOutputTokensIsDerivedWithoutChangingProviderAccounting(t *testing.T) {
+	usage := Usage{InputTokens: 10, OutputTokens: 12000, ReasoningTokens: 10825, TotalTokens: 12010}
+	if got, want := usage.VisibleOutputTokens(), 1175; got != want {
+		t.Fatalf("visible output tokens = %d, want %d", got, want)
+	}
+	if !usage.VisibleOutputTokensEstimated() {
+		t.Fatal("visible output tokens should be marked estimated")
+	}
+	if usage.OutputTokens != 12000 || usage.TotalTokens != 12010 {
+		t.Fatalf("provider accounting changed = %+v", usage)
+	}
+
+	withoutDetails := Usage{OutputTokens: 80}
+	if got := withoutDetails.VisibleOutputTokens(); got != 80 {
+		t.Fatalf("visible output without reasoning detail = %d, want 80", got)
+	}
+	if withoutDetails.VisibleOutputTokensEstimated() {
+		t.Fatal("missing reasoning detail should not be marked estimated")
+	}
+
+	negative := Usage{OutputTokens: 5, ReasoningTokens: 9}
+	if got := negative.VisibleOutputTokens(); got != 0 {
+		t.Fatalf("visible output must not be negative: %d", got)
+	}
+}

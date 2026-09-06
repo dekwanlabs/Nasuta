@@ -27,8 +27,9 @@ const (
 
 	DefaultDelegationEnabled              = true
 	DefaultDelegationMaxChildren          = 6
-	DefaultDelegationMaxConcurrent        = 3
+	DefaultDelegationMaxConcurrent        = 6
 	DefaultDelegationChildTimeout         = 150 * time.Second
+	DefaultDelegationBatchTimeout         = 180 * time.Second
 	DefaultDelegationMaxChildTurns        = 4
 	DefaultDelegationMaxChildToolCalls    = 16
 	DefaultDelegationMaxChildInputTokens  = 96000
@@ -103,6 +104,7 @@ type PlatformSettings struct {
 	DelegationCapabilities         []string
 	DelegationMaxChildren          int
 	DelegationMaxConcurrent        int
+	DelegationBatchTimeout         Duration
 	DelegationChildTimeout         Duration
 	DelegationMaxChildTurns        int
 	DelegationMaxChildToolCalls    int64
@@ -139,7 +141,7 @@ var platformSettingKeys = map[string]bool{
 	"disable_legacy_answer_recovery": false,
 	"delegation_capabilities":        true, "delegation_max_children": true,
 	"delegation_max_concurrent": true,
-	"delegation_child_timeout":  true, "delegation_max_child_turns": true,
+	"delegation_batch_timeout":  true, "delegation_child_timeout": true, "delegation_max_child_turns": true,
 	"delegation_max_child_tool_calls": true, "delegation_max_child_input_tokens": true,
 	"delegation_max_child_output_tokens": true, "delegation_max_report_tokens": true,
 	"delegation_max_total_tokens": true, "delegation_max_total_cost_micros": true,
@@ -204,6 +206,7 @@ func (p *PlatformSettings) Values() map[string]any {
 		"delegation_capabilities":                    strings.Join(p.DelegationCapabilities, ","),
 		"delegation_max_children":                    strconv.Itoa(p.DelegationMaxChildren),
 		"delegation_max_concurrent":                  strconv.Itoa(p.DelegationMaxConcurrent),
+		"delegation_batch_timeout":                   time.Duration(p.DelegationBatchTimeout).String(),
 		"delegation_child_timeout":                   time.Duration(p.DelegationChildTimeout).String(),
 		"delegation_max_child_turns":                 strconv.Itoa(p.DelegationMaxChildTurns),
 		"delegation_max_child_tool_calls":            strconv.FormatInt(p.DelegationMaxChildToolCalls, 10),
@@ -279,6 +282,9 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	}
 	if p.DelegationMaxConcurrent <= 0 {
 		p.DelegationMaxConcurrent = DefaultDelegationMaxConcurrent
+	}
+	if p.DelegationBatchTimeout <= 0 {
+		p.DelegationBatchTimeout = Duration(DefaultDelegationBatchTimeout)
 	}
 	if p.DelegationChildTimeout <= 0 {
 		p.DelegationChildTimeout = Duration(DefaultDelegationChildTimeout)
@@ -473,6 +479,11 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	if v := strings.TrimSpace(m["delegation_max_concurrent"]); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			p.DelegationMaxConcurrent = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_batch_timeout"]); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			p.DelegationBatchTimeout = Duration(d)
 		}
 	}
 	if v := strings.TrimSpace(m["delegation_child_timeout"]); v != "" {
@@ -682,6 +693,8 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 		return canonicalScoreSetting(key, value)
 	case "agent_timeout":
 		return canonicalDurationSetting(key, value, minAgentTimeout, maxAgentTimeout)
+	case "delegation_batch_timeout":
+		return canonicalDurationSetting(key, value, time.Second, 24*time.Hour)
 	case "delegation_child_timeout":
 		return canonicalDurationSetting(key, value, time.Second, 24*time.Hour)
 	case "delegation_capabilities":
@@ -878,7 +891,21 @@ func (p *PlatformSettings) ValidateAgentSettings() error {
 	if p.DelegationMaxConcurrent > p.DelegationMaxChildren {
 		return fmt.Errorf("delegation_max_concurrent must not exceed delegation_max_children")
 	}
-	if time.Duration(p.DelegationChildTimeout) <= reserve {
+	batchTimeout := time.Duration(p.DelegationBatchTimeout)
+	childTimeout := time.Duration(p.DelegationChildTimeout)
+	if batchTimeout <= 0 {
+		return fmt.Errorf("delegation_batch_timeout must be positive")
+	}
+	if childTimeout <= 0 {
+		return fmt.Errorf("delegation_child_timeout must be positive")
+	}
+	if childTimeout > batchTimeout {
+		return fmt.Errorf("delegation_child_timeout must not exceed delegation_batch_timeout")
+	}
+	if batchTimeout <= reserve {
+		return fmt.Errorf("delegation_batch_timeout must exceed agent_answer_reserve")
+	}
+	if childTimeout <= reserve {
 		return fmt.Errorf("delegation_child_timeout must exceed agent_answer_reserve")
 	}
 	childTokens := p.DelegationMaxChildInputTokens + p.DelegationMaxChildOutputTokens

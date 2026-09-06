@@ -225,3 +225,49 @@ func TestDelegationAdoptionContractProjectsUnavailableVerificationAsUnresolved(t
 		t.Fatalf("evidence contract = %#v", contract.Evidence)
 	}
 }
+
+func TestDelegationDispatchAdoptionContractBoundedToVisibleReports(t *testing.T) {
+	report := &agentapi.DelegationReport{
+		ReportID:   "report-done",
+		Capability: "knowledge.code.inspect",
+		Status:     agentapi.DelegationCompleted,
+		Summary:    "已完成",
+	}
+	dispatch := agentapi.DelegationDispatchResult{
+		DelegationID: "del-dispatch",
+		Status:       agentapi.DelegationRunning,
+		Tasks: []agentapi.DelegationTaskStatus{
+			{TaskID: "child-1", Status: agentapi.DelegationCompleted, Report: report},
+			{TaskID: "child-2", Status: agentapi.DelegationRunning},
+		},
+	}
+	contract := delegationDispatchAdoptionContract(dispatch)
+	if len(contract.Delegations) != 1 {
+		t.Fatalf("contract = %#v, want one delegation", contract)
+	}
+	if contract.Delegations[0].DelegationID != "del-dispatch" {
+		t.Fatalf("delegation id = %q", contract.Delegations[0].DelegationID)
+	}
+	// Only the already-visible report may be adopted; the running child has no
+	// report yet and must not leak into adoption metadata.
+	if !reflect.DeepEqual(contract.Delegations[0].ReportIDs, []string{"report-done"}) {
+		t.Fatalf("report IDs = %#v, want only the visible report", contract.Delegations[0].ReportIDs)
+	}
+}
+
+func TestDispatchHasRunning(t *testing.T) {
+	allDone := agentapi.DelegationDispatchResult{Tasks: []agentapi.DelegationTaskStatus{
+		{Status: agentapi.DelegationCompleted},
+		{Status: agentapi.DelegationRejected},
+	}}
+	if dispatchHasRunning(allDone) {
+		t.Fatal("all-done dispatch reported running")
+	}
+	withRunning := agentapi.DelegationDispatchResult{Tasks: []agentapi.DelegationTaskStatus{
+		{Status: agentapi.DelegationCompleted},
+		{Status: agentapi.DelegationRunning},
+	}}
+	if !dispatchHasRunning(withRunning) {
+		t.Fatal("running dispatch reported not-running")
+	}
+}

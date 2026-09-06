@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/strutil"
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
@@ -1346,21 +1347,7 @@ func validSeverity(severity Severity) bool {
 }
 
 func canonicalStrings(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, duplicate := seen[value]; duplicate {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
+	return strutil.Canonical(values)
 }
 
 func hashJSON(value any) (string, error) {

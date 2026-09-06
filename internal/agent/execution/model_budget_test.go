@@ -22,7 +22,7 @@ func TestUsageCeilingIncludesAllBoundedGenerationPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const calls int64 = 4 + 5*(2+1)
+	const calls int64 = 4 + 3*(2+1)
 	if ceiling.Calls != calls ||
 		ceiling.InputTokens != calls*32000 ||
 		ceiling.OutputTokens != calls*2048 ||

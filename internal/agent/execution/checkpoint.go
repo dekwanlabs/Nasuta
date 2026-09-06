@@ -23,23 +23,25 @@ type LogicalLoopCheckpoint struct {
 // without re-running completed tool turns. Provider/model handles are not
 // serialized; the recovering process supplies the immutable tool snapshot.
 type LogicalLoopState struct {
-	Version             int                           `json:"version"`
-	Request             *agentapi.RunRequest          `json:"request,omitempty"`
-	Input               Input                         `json:"input"`
-	Messages            []llm.Message                 `json:"messages"`
-	AnswerContract      tool.AnswerContract           `json:"answer_contract"`
-	EvaluatedAdoptions  []agentapi.DelegationAdoption `json:"evaluated_adoptions,omitempty"`
-	StepNo              int                           `json:"step_no"`
-	StepSeq             int                           `json:"step_seq,omitempty"`
-	Answer              string                        `json:"answer,omitempty"`
-	References          []tool.Reference              `json:"references,omitempty"`
-	Flow                *agentapi.FlowIR              `json:"flow,omitempty"`
-	DelegatedFlows      []agentapi.FlowIR             `json:"delegated_flows,omitempty"`
-	DelegationAdoptions []agentapi.DelegationAdoption `json:"delegation_adoptions,omitempty"`
-	Answered            bool                          `json:"answered"`
-	ToolBudgetExhausted bool                          `json:"tool_budget_exhausted"`
-	EvidenceUnits       []tool.EvidenceUnit           `json:"evidence_units,omitempty"`
-	EvidenceConflicts   []evidence.Conflict           `json:"evidence_conflicts,omitempty"`
+	Version               int                           `json:"version"`
+	Request               *agentapi.RunRequest          `json:"request,omitempty"`
+	Input                 Input                         `json:"input"`
+	Messages              []llm.Message                 `json:"messages"`
+	AnswerContract        tool.AnswerContract           `json:"answer_contract"`
+	EvaluatedAdoptions    []agentapi.DelegationAdoption `json:"evaluated_adoptions,omitempty"`
+	StepNo                int                           `json:"step_no"`
+	StepSeq               int                           `json:"step_seq,omitempty"`
+	Answer                string                        `json:"answer,omitempty"`
+	References            []tool.Reference              `json:"references,omitempty"`
+	Flow                  *agentapi.FlowIR              `json:"flow,omitempty"`
+	DelegatedFlows        []agentapi.FlowIR             `json:"delegated_flows,omitempty"`
+	DelegationAdoptions   []agentapi.DelegationAdoption `json:"delegation_adoptions,omitempty"`
+	DispatchedDelegations []string                      `json:"dispatched_delegations,omitempty"`
+	SettledDelegations    []string                      `json:"settled_delegations,omitempty"`
+	Answered              bool                          `json:"answered"`
+	ToolBudgetExhausted   bool                          `json:"tool_budget_exhausted"`
+	EvidenceUnits         []tool.EvidenceUnit           `json:"evidence_units,omitempty"`
+	EvidenceConflicts     []evidence.Conflict           `json:"evidence_conflicts,omitempty"`
 }
 
 func MarshalLogicalLoopState(state LogicalLoopState) ([]byte, error) {
@@ -67,6 +69,19 @@ func UnmarshalLogicalLoopState(raw []byte) (LogicalLoopState, error) {
 		return state, fmt.Errorf("logical loop checkpoint messages are required")
 	}
 	return state, nil
+}
+
+func settledDelegationIDs(state *compiledLoop) []string {
+	if state == nil || len(state.settledDelegations) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(state.settledDelegations))
+	for id, ok := range state.settledDelegations {
+		if ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func cloneExecutionFlows(flows []agentapi.FlowIR) []agentapi.FlowIR {
@@ -99,7 +114,7 @@ func (agent *Agent) checkpointState(state *compiledLoop, phase string, step int)
 			}
 			return state.answerContract.Adoptions()
 		}(),
-		StepSeq: state.stepSeq, Answer: state.result.Answer, References: append([]tool.Reference(nil), state.result.References...), Flow: cloneExecutionFlow(state.result.Flow), DelegatedFlows: cloneExecutionFlows(state.delegatedFlows), DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions),
+		StepSeq: state.stepSeq, Answer: state.result.Answer, References: append([]tool.Reference(nil), state.result.References...), Flow: cloneExecutionFlow(state.result.Flow), DelegatedFlows: cloneExecutionFlows(state.delegatedFlows), DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions), DispatchedDelegations: append([]string(nil), state.dispatchedDelegations...), SettledDelegations: settledDelegationIDs(state),
 		StepNo: step, Answered: state.answered, ToolBudgetExhausted: state.toolBudgetExhausted,
 		EvidenceUnits: units, EvidenceConflicts: conflicts,
 	})

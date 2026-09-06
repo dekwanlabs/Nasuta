@@ -264,3 +264,57 @@ func TestCallModelDoesNotShrinkBelowProtectedOutputMinimum(t *testing.T) {
 		t.Fatalf("call reservations = %#v, want none", gate.reserved)
 	}
 }
+
+func TestModelParametersForPhaseUsesIndependentProfiles(t *testing.T) {
+	investigation := llm.ModelParameters{
+		ReasoningMode:   llm.ReasoningEnabled,
+		ReasoningEffort: "medium",
+		Stop:            []string{"INVESTIGATION"},
+	}
+	answer := llm.ModelParameters{
+		ReasoningMode:   llm.ReasoningDisabled,
+		ReasoningEffort: "none",
+		Stop:            []string{"ANSWER"},
+	}
+	agent := &Agent{cfg: Config{
+		InvestigationModelParameters: investigation,
+		AnswerModelParameters:        answer,
+	}}
+
+	gotInvestigation := agent.modelParametersForPhase(llm.WithUsagePhase(context.Background(), llm.PhaseAgentStep))
+	gotAnswer := agent.modelParametersForPhase(llm.WithUsagePhase(context.Background(), llm.PhaseForcedConclusion))
+	gotContinuation := agent.modelParametersForPhase(llm.WithUsagePhase(context.Background(), llm.PhaseContinuation))
+
+	if gotInvestigation.ReasoningMode != llm.ReasoningEnabled || gotInvestigation.ReasoningEffort != "medium" || gotInvestigation.Stop[0] != "INVESTIGATION" {
+		t.Fatalf("investigation profile = %+v", gotInvestigation)
+	}
+	if gotAnswer.ReasoningMode != llm.ReasoningDisabled || gotAnswer.ReasoningEffort != "none" || gotAnswer.Stop[0] != "ANSWER" {
+		t.Fatalf("answer profile = %+v", gotAnswer)
+	}
+	if gotContinuation.ReasoningMode != llm.ReasoningDisabled || gotContinuation.ReasoningEffort != "none" || gotContinuation.Stop[0] != "ANSWER" {
+		t.Fatalf("continuation profile = %+v", gotContinuation)
+	}
+
+	gotInvestigation.Stop[0] = "CHANGED"
+	if investigation.Stop[0] != "INVESTIGATION" {
+		t.Fatal("phase profile leaked its stop slice into the config")
+	}
+}
+
+func TestConfigDefaultsAnswerProfileWithoutReasoning(t *testing.T) {
+	base := llm.ModelParameters{
+		ReasoningMode:   llm.ReasoningEnabled,
+		ReasoningEffort: "high",
+		Stop:            []string{"END"},
+	}
+	config := (Config{ModelParameters: base}).withDefaults()
+	if config.InvestigationModelParameters.ReasoningMode != llm.ReasoningEnabled || config.InvestigationModelParameters.ReasoningEffort != "high" {
+		t.Fatalf("investigation defaults = %+v", config.InvestigationModelParameters)
+	}
+	if config.AnswerModelParameters.ReasoningMode != llm.ReasoningDisabled || config.AnswerModelParameters.ReasoningEffort != "none" {
+		t.Fatalf("answer defaults = %+v", config.AnswerModelParameters)
+	}
+	if base.ReasoningMode != llm.ReasoningEnabled || base.ReasoningEffort != "high" || base.Stop[0] != "END" {
+		t.Fatalf("base parameters mutated = %+v", base)
+	}
+}

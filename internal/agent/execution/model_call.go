@@ -33,7 +33,7 @@ func (agent *Agent) callModel(
 		return nil, err
 	}
 	result, callErr := agent.llm.ChatWithToolsMaxWithParameters(
-		ctx, messages, tools, h, maxTokens, agent.cfg.ModelParameters,
+		ctx, messages, tools, h, maxTokens, agent.modelParametersForPhase(ctx),
 	)
 	if callReservation == nil {
 		return result, callErr
@@ -46,6 +46,18 @@ func (agent *Agent) callModel(
 		return result, errors.Join(callErr, accountingErr)
 	}
 	return result, nil
+}
+
+func (agent *Agent) modelParametersForPhase(ctx context.Context) llm.ModelParameters {
+	if agent == nil {
+		return llm.ModelParameters{}
+	}
+	switch llm.UsagePhaseFromContext(ctx) {
+	case llm.PhaseForcedConclusion, llm.PhaseContinuation:
+		return agent.cfg.AnswerModelParameters.Clone()
+	default:
+		return agent.cfg.InvestigationModelParameters.Clone()
+	}
 }
 
 func (agent *Agent) checkModelCallBudget(ctx context.Context) error {

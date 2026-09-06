@@ -380,7 +380,8 @@ func remainingUsage(limits agentapi.RunLimits, used agentapi.Usage) agentapi.Usa
 	}
 }
 
-func requireWithin(request, available agentapi.Usage, subject string) error {
+// RequireWithin rejects usage that exceeds any available budget dimension.
+func RequireWithin(request, available agentapi.Usage, subject string) error {
 	if request.InputTokens > available.InputTokens ||
 		request.OutputTokens > available.OutputTokens ||
 		request.TotalTokens > available.TotalTokens ||
@@ -395,7 +396,28 @@ func requireWithin(request, available agentapi.Usage, subject string) error {
 	return nil
 }
 
-func normalizeUsage(usage agentapi.Usage) (agentapi.Usage, error) {
+func requireWithin(request, available agentapi.Usage, subject string) error {
+	return RequireWithin(request, available, subject)
+}
+
+// RunLimitsEqual reports whether two durable run budgets describe the same limits.
+func RunLimitsEqual(left, right agentapi.RunLimits) bool {
+	return left.Deadline.Equal(right.Deadline) &&
+		left.MaxSteps == right.MaxSteps &&
+		left.MaxToolCalls == right.MaxToolCalls &&
+		left.MaxInputTokens == right.MaxInputTokens &&
+		left.MaxContextTokens == right.MaxContextTokens &&
+		left.MaxOutputTokens == right.MaxOutputTokens &&
+		left.MaxTotalTokens == right.MaxTotalTokens &&
+		left.MaxCostMicros == right.MaxCostMicros &&
+		left.ParentAnswerReserve == right.ParentAnswerReserve
+}
+
+// NormalizeUsage validates a public usage value and fills TotalTokens from
+// input and output when the caller left it unset. It is shared by the
+// in-process, durable, and workflow budget ledgers so a negative or
+// overflowing usage fails identically everywhere.
+func NormalizeUsage(usage agentapi.Usage) (agentapi.Usage, error) {
 	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.ReasoningTokens < 0 ||
 		usage.TotalTokens < 0 || usage.CostMicros < 0 {
 		return agentapi.Usage{}, fmt.Errorf("%w: usage cannot be negative", agentapi.ErrBudgetExceeded)
@@ -409,7 +431,12 @@ func normalizeUsage(usage agentapi.Usage) (agentapi.Usage, error) {
 	return usage, nil
 }
 
-func addUsage(left, right agentapi.Usage) agentapi.Usage {
+func normalizeUsage(usage agentapi.Usage) (agentapi.Usage, error) {
+	return NormalizeUsage(usage)
+}
+
+// AddUsage sums two public usage values with saturating arithmetic.
+func AddUsage(left, right agentapi.Usage) agentapi.Usage {
 	return agentapi.Usage{
 		InputTokens:     saturatingAdd(left.InputTokens, right.InputTokens),
 		OutputTokens:    saturatingAdd(left.OutputTokens, right.OutputTokens),
@@ -419,7 +446,12 @@ func addUsage(left, right agentapi.Usage) agentapi.Usage {
 	}
 }
 
-func subtractUsage(left, right agentapi.Usage) agentapi.Usage {
+func addUsage(left, right agentapi.Usage) agentapi.Usage {
+	return AddUsage(left, right)
+}
+
+// SubtractUsage clamps each usage dimension at zero.
+func SubtractUsage(left, right agentapi.Usage) agentapi.Usage {
 	return agentapi.Usage{
 		InputTokens:     max(0, left.InputTokens-right.InputTokens),
 		OutputTokens:    max(0, left.OutputTokens-right.OutputTokens),
@@ -429,8 +461,17 @@ func subtractUsage(left, right agentapi.Usage) agentapi.Usage {
 	}
 }
 
-func isZeroUsage(usage agentapi.Usage) bool {
+func subtractUsage(left, right agentapi.Usage) agentapi.Usage {
+	return SubtractUsage(left, right)
+}
+
+// IsZeroUsage reports whether a public usage value contributes nothing.
+func IsZeroUsage(usage agentapi.Usage) bool {
 	return usage == (agentapi.Usage{})
+}
+
+func isZeroUsage(usage agentapi.Usage) bool {
+	return IsZeroUsage(usage)
 }
 
 func unboundedUsage() agentapi.Usage {

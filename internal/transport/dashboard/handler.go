@@ -5,8 +5,10 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/qa"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
+	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
@@ -43,14 +45,14 @@ type Handler struct {
 	authDB             *auth.DB
 	semantic           semantic.Store
 	embedder           embed.Embedder
-	tools              *agent.Service
-	qa                 *agent.QA
+	tools              *tools.Service
+	qa                 *qa.Service
 	persistentRunStore *run.Store
 	writeAvailable     bool
 	codegraphDB        *codegraph.DB
 	callChain          *callchain.Service
 	qaSessions         *memory.SessionStore
-	history            agent.SessionHistory
+	history            session.History
 	cfg                config.Config
 	platform           *config.PlatformSettings
 	idx                IndexingOps
@@ -62,12 +64,12 @@ type Handler struct {
 }
 
 type QARuntime struct {
-	QA             *agent.QA
+	QA             *qa.Service
 	Hub            *run.Hub
 	CompactionLLM  *llm.LLMClient
 	RunStore       *run.Store
 	Sessions       *memory.SessionStore
-	History        agent.SessionHistory
+	History        session.History
 	Settings       *config.PlatformSettings
 	WriteAvailable bool
 }
@@ -98,7 +100,7 @@ func NewHandler(
 	authDB *auth.DB,
 	sem semantic.Store,
 	emb embed.Embedder,
-	t *agent.Service,
+	t *tools.Service,
 	cfg config.Config,
 	idx IndexingOps,
 	cgDB *codegraph.DB,

@@ -56,7 +56,7 @@ func (svc *Service) compactAnswer(
 	if err != nil {
 		if started {
 			svc.updateCompaction(
-				prepared.request.RunID, conversation.SessionID, "failed", "历史上下文压缩失败",
+				prepared.request.RunID, "failed", "历史上下文压缩失败",
 				fromTurn, toTurn,
 			)
 		}
@@ -69,7 +69,7 @@ func (svc *Service) compactAnswer(
 		if refreshErr != nil {
 			if started {
 				svc.updateCompaction(
-					prepared.request.RunID, conversation.SessionID, "failed", "历史上下文压缩失败",
+					prepared.request.RunID, "failed", "历史上下文压缩失败",
 					fromTurn, toTurn,
 				)
 			}
@@ -124,7 +124,7 @@ func (svc *Service) runAnswerCompaction(
 			started = true
 			fromTurn, toTurn = from, to
 			svc.updateCompaction(
-				prepared.request.RunID, conversation.SessionID, "start",
+				prepared.request.RunID, "start",
 				fmt.Sprintf("正在压缩第 %d–%d 轮历史上下文…", from, to),
 				from, to,
 			)
@@ -146,14 +146,14 @@ func (svc *Service) reportAnswerCompaction(
 ) {
 	if result.Applied {
 		svc.updateCompaction(
-			runID, sessionID, "done", "历史上下文压缩完成",
+			runID, "done", "历史上下文压缩完成",
 			result.FromTurn, result.ToTurn,
 		)
 		log.InfofCtx(ctx, "[qa] compacted session %s turns %d-%d after retrieval",
 			sessionID, result.FromTurn, result.ToTurn)
 	} else if result.Stale && started {
 		svc.updateCompaction(
-			runID, sessionID, "done", "历史上下文压缩完成",
+			runID, "done", "历史上下文压缩完成",
 			result.FromTurn, result.ToTurn,
 		)
 		log.InfofCtx(ctx, "[qa] ignored stale post-retrieval compaction for session %s through turn %d",
@@ -254,7 +254,6 @@ func (svc *Service) refreshConversation(
 		Conversation:  conversation,
 		Relation:      prepared.analysis.History,
 		Origin:        prepared.analysis.HistoryOrigin,
-		Upgrade:       prepared.analysis.HistoryUpdate,
 		ContextWindow: contextWindow,
 		OutputReserve: outputReserve,
 	})

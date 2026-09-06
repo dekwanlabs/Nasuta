@@ -519,31 +519,9 @@ func evidenceConflictKey(conflict agentapi.EvidenceConflict) string {
 		conflict.IncomingOrigin
 }
 
-func publicConflicts(
-	conflicts []evidence.Conflict,
-) []agentapi.EvidenceConflict {
-	if len(conflicts) == 0 {
-		return nil
-	}
-	out := make([]agentapi.EvidenceConflict, len(conflicts))
-	for index, conflict := range conflicts {
-		out[index] = agentapi.EvidenceConflict{
-			Identity: agentapi.EvidenceIdentity{
-				SourceKind: conflict.Key.SourceKind,
-				Target:     conflict.Key.Target,
-				Section:    conflict.Key.Section,
-				Version:    conflict.Key.Version,
-				TimeRange:  conflict.Key.TimeRange,
-			},
-			Current:        evidence.CloneUnit(conflict.Current),
-			Incoming:       evidence.CloneUnit(conflict.Incoming),
-			CurrentOrigin:  conflict.CurrentOrigin,
-			IncomingOrigin: conflict.IncomingOrigin,
-		}
-	}
-	return out
+func publicConflicts(conflicts []evidence.Conflict) []agentapi.EvidenceConflict {
+	return evidence.PublicConflicts(conflicts)
 }
-
 func cloneConflicts(
 	conflicts []agentapi.EvidenceConflict,
 ) []agentapi.EvidenceConflict {

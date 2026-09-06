@@ -18,7 +18,7 @@ import (
 
 // forceConclusion asks the model to finish with the evidence already gathered.
 func (agent *Agent) forceConclusion(ctx context.Context, runID string, messages []llm.Message, answerContract *exactAnswerContract, stepSeq *int, runStarted time.Time, outputContracts ...agentapi.RunOutputContract) (*llm.ChatStreamResult, error) {
-	ctx = llm.WithUsagePhase(ctx, llm.PhaseForcedConclusion)
+	ctx = llm.WithUsagePhase(ctx, llm.PhaseSynthesis)
 	ctx = agentapi.WithRunBudgetPhase(ctx, agentapi.RunBudgetPhaseAnswer)
 	var outputContract agentapi.RunOutputContract
 	if len(outputContracts) > 0 {
@@ -263,7 +263,7 @@ func (agent *Agent) generateWithContinue(ctx context.Context, messages []llm.Mes
 
 // ErrReasoningTruncated means the model used the full token budget before
 // emitting any visible content; callers may try a direct-answer retry.
-var ErrReasoningTruncated = errors.New("turn truncated during reasoning: max_tokens exhausted before any visible content")
+var ErrReasoningTruncated = errors.New("turn truncated during reasoning: provider completion limit exhausted before any visible content")
 
 // ErrAnswerTruncated means continuation rounds ended before the visible answer completed.
 var ErrAnswerTruncated = errors.New("answer remained truncated after continuation limit")
@@ -274,8 +274,7 @@ var ErrEmptyModelResponse = errors.New("model returned no visible content")
 // continueIfNeeded retries a length-truncated answer with continuation prompts.
 func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message, res *llm.ChatStreamResult, maxTokens int, h llm.StreamHandler) (*llm.ChatStreamResult, error) {
 	if res.Content == "" {
-		log.WarnfCtx(ctx, "[agent] empty visible content: %d reasoning tokens, finish_reason=%s",
-			res.ReasoningTokens, res.FinishReason)
+		agent.logProviderCompletionUsage(ctx, maxTokens, res)
 		if res.FinishReason == llm.FinishLength {
 			return res, ErrReasoningTruncated
 		}
@@ -288,7 +287,7 @@ func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message
 	rounds := 0
 	for res.FinishReason == "length" && rounds < agent.cfg.MaxContinueRounds {
 		rounds++
-		log.WarnfCtx(ctx, "[agent] answer truncated by max_tokens, continuing (round %d/%d)", rounds, agent.cfg.MaxContinueRounds)
+		log.WarnfCtx(ctx, "[agent] answer truncated by provider completion limit, continuing (round %d/%d)", rounds, agent.cfg.MaxContinueRounds)
 		msgs := append(append([]llm.Message{}, messages...),
 			llm.Message{Role: "assistant", Content: res.Content},
 			llm.Message{Role: "user", Content: continuationInstruction},
@@ -308,6 +307,7 @@ func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message
 		res.FinishReason = cont.FinishReason
 	}
 	if res.FinishReason == "length" {
+		agent.logProviderCompletionUsage(ctx, maxTokens, res)
 		log.WarnfCtx(ctx, "[agent] answer still truncated after %d continuation rounds", agent.cfg.MaxContinueRounds)
 		return res, ErrAnswerTruncated
 	}
@@ -332,7 +332,7 @@ func (agent *Agent) continueStructuredIfNeeded(
 	rounds := 0
 	for res.FinishReason == llm.FinishLength && rounds < agent.cfg.MaxContinueRounds {
 		rounds++
-		log.WarnfCtx(ctx, "[agent] structured output truncated by max_tokens, continuing (round %d/%d)",
+		log.WarnfCtx(ctx, "[agent] structured output truncated by provider completion limit, continuing (round %d/%d)",
 			rounds, agent.cfg.MaxContinueRounds)
 		msgs := append(append([]llm.Message{}, messages...),
 			llm.Message{Role: "assistant", Content: res.Content},
@@ -359,6 +359,22 @@ func (agent *Agent) continueStructuredIfNeeded(
 		log.WarnfCtx(ctx, "[agent] structured output still truncated after %d continuation rounds", agent.cfg.MaxContinueRounds)
 	}
 	return res, ErrAnswerTruncated
+}
+
+func (agent *Agent) logProviderCompletionUsage(ctx context.Context, requestedLimit int, result *llm.ChatStreamResult) {
+	if result == nil {
+		return
+	}
+	capability := llm.ModelCapabilityProfile{}
+	if agent != nil && agent.llm != nil {
+		capability = agent.llm.Capability()
+	}
+	log.WarnfCtx(ctx,
+		"[agent] provider completion budget exhausted dimension=provider_completion_tokens provider=%s model=%s requested_completion_limit=%d output_tokens=%d reasoning_tokens=%d visible_output_tokens=%d visible_output_tokens_estimated=%t finish_reason=%s",
+		capability.Provider, capability.Model, requestedLimit, result.Usage.OutputTokens,
+		result.Usage.ReasoningTokens, result.Usage.VisibleOutputTokens(),
+		result.Usage.VisibleOutputTokensEstimated(), result.FinishReason,
+	)
 }
 
 func completeJSONValue(value string) (string, bool) {

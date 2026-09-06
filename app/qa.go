@@ -6,9 +6,10 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
 	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
+	agentqa "github.com/dekwanlabs/nasuta/internal/agent/qa"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
@@ -88,7 +89,7 @@ func (p *Platform) buildQARuntime(
 			contribution.Capabilities...,
 		)
 	}
-	definitionRuntime, err := agent.NewDefinitionRuntime(
+	definitionRuntime, err := definition.NewRuntime(
 		p.agents.catalog,
 		p.agents.schemas,
 		p.registry,
@@ -101,8 +102,8 @@ func (p *Platform) buildQARuntime(
 			err,
 		)
 	}
-	models := agent.NewQAModels(&snapshot)
-	qa := agent.NewQA(agent.QADeps{
+	models := agentqa.NewModels(&snapshot)
+	qa := agentqa.New(agentqa.Deps{
 		Tools: p.tools, Cfg: p.cfg, Platform: &snapshot,
 		CodeGraphDB: graph, History: p.history,
 		Sessions: p.qa.sessions, Memory: p.qa.memory,
@@ -528,6 +529,7 @@ func (p *Platform) configureDynamicDelegation(
 			MaxTotalTokens:       settings.DelegationMaxTotalTokens,
 			MaxTotalCostMicros:   settings.DelegationMaxTotalCostMicros,
 			ParentAnswerReserve:  settings.DelegationParentAnswerReserve,
+			BatchTimeout:         time.Duration(settings.DelegationBatchTimeout),
 			ChildTimeout:         time.Duration(settings.DelegationChildTimeout),
 		},
 		Allowlist:          settings.DelegationCapabilities,
@@ -555,9 +557,12 @@ func (p *Platform) configureDynamicDelegation(
 	if len(available) == 0 {
 		return fmt.Errorf("configure dynamic delegation: no enabled read-only investigator capabilities")
 	}
-	set.Tools = []tool.ReadTool{executor.Tool()}
+	set.Tools = []tool.ReadTool{executor.Tool(), executor.StatusTool()}
 	if err := p.reads.Reconcile(set); err != nil {
 		return fmt.Errorf("publish dynamic delegation tool: %w", err)
+	}
+	if definitionRuntime, ok := runtime.(*definition.Runtime); ok {
+		definitionRuntime.SetDelegationAwaiter(executor)
 	}
 	p.configureDelegationWorker(executor)
 	return nil

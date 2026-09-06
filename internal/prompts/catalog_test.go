@@ -86,10 +86,8 @@ func TestInvestigationSynthesizerPromptPreservesUserFacingStructure(t *testing.T
 	for _, required := range []string{
 		`"workflow.synthesis_objective"`,
 		`"investigation_goals"`,
-		`Use short "##" headings`,
-		"Never collapse a multi-goal or multi-path answer into one dense paragraph",
-		"final evidence-boundary section",
-		`Do not lead with "verification"`,
+		`User-Visible Answer Contract`,
+		"lead with the answer itself and the conclusion",
 		`Markdown is required inside the "answer" string`,
 	} {
 		if !strings.Contains(prompt, required) {
@@ -124,5 +122,19 @@ func TestRetrievalExecutionAuditPromptIsNarrow(t *testing.T) {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("retrieval execution audit prompt missing %q", required)
 		}
+	}
+}
+
+func TestWithUserVisibleAnswerContractIsCanonicalAndIdempotent(t *testing.T) {
+	base := "base system rules"
+	first := WithUserVisibleAnswerContract(base)
+	if !strings.HasSuffix(first, Text(AgentQAUserVisibleAnswer)) {
+		t.Fatalf("prompt does not end with canonical answer contract")
+	}
+	if got := WithUserVisibleAnswerContract(first); got != first {
+		t.Fatalf("appending the answer contract twice changed the prompt")
+	}
+	if got := WithUserVisibleAnswerContract(base + "\n\n"); got != first {
+		t.Fatalf("trailing newline normalization changed canonical prompt")
 	}
 }

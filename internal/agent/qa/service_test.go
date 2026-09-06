@@ -772,7 +772,7 @@ func TestAskDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 	qa, runtime := newQARuntimeFixture(t, client, server.URL, registry, nil, false)
 
 	terminalCh := runtime.Hub().Subscribe("direct-run")
-	result, err := qa.AskWithHistory(context.Background(), "What causes a rainbow?", nil, 0, "", "direct-run")
+	result, err := qa.Ask(context.Background(), Request{Question: "What causes a rainbow?", RunID: "direct-run"})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
@@ -830,10 +830,10 @@ func TestAskSessionPersistenceFailureCompletesRunAsFailed(t *testing.T) {
 	)
 	qa.sessions = memory.NewSessionStore(sessionDB)
 	events := runtime.Hub().Subscribe(runID)
-	_, err = qa.AskWithContext(
-		context.Background(), "你能做什么？",
-		ConversationContext{SessionID: "session-1"}, 42, "", runID, nil,
-	)
+	_, err = qa.Ask(context.Background(), Request{
+		Question: "你能做什么？", Conversation: ConversationContext{SessionID: "session-1"},
+		UserID: 42, RunID: runID,
+	})
 	if err != nil {
 		t.Fatalf("AskWithContext: %v", err)
 	}
@@ -878,10 +878,10 @@ func TestAskRetrievalFailureCompletesStartedRunAsFailed(t *testing.T) {
 	)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
 	events := runtime.Hub().Subscribe(runID)
-	_, err = qa.AskWithContext(
-		context.Background(), "find the implementation", ConversationContext{},
-		42, "", runID, &plan,
-	)
+	_, err = qa.Ask(context.Background(), Request{
+		Question: "find the implementation", UserID: 42, RunID: runID,
+		EvidencePlan: &plan,
+	})
 	if err == nil || !strings.Contains(err.Error(), "retrieve internal evidence") {
 		t.Fatalf("error = %v", err)
 	}
@@ -928,7 +928,7 @@ func TestAskRouterInvalidOutputFallsBackInternal(t *testing.T) {
 	)
 
 	terminalCh := runtime.Hub().Subscribe("invalid-route-run")
-	result, err := qa.AskWithHistory(context.Background(), "What causes a rainbow?", nil, 0, "", "invalid-route-run")
+	result, err := qa.Ask(context.Background(), Request{Question: "What causes a rainbow?", RunID: "invalid-route-run"})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
@@ -989,7 +989,7 @@ func TestAskPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
 		ctx := domain.WithTraceRecorder(context.Background(), recorder)
 		runID := fmt.Sprintf("prune-run-%t", pruningEnabled)
 		terminalCh := runtime.Hub().Subscribe(runID)
-		result, err := qa.AskWithHistory(ctx, "how many requests failed?", nil, 0, "", runID)
+		result, err := qa.Ask(ctx, Request{Question: "how many requests failed?", RunID: runID})
 		if err != nil {
 			t.Fatalf("Ask: %v", err)
 		}

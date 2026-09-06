@@ -242,3 +242,41 @@ func startEphemeralMySQL(t *testing.T) *sql.DB {
 	}
 	return db
 }
+
+// TestMySQLEnqueueAndClaimWorksWithFractionalSeconds reproduces the bug where
+// agent_work_items.available_at is TIMESTAMP(0): MySQL rounds a sub-second
+// value >= .5 up to the next whole second, which made the in-transaction claim
+// return sql.ErrNoRows and silently drop the enqueue. The fix truncates `now`
+// to whole seconds before upsert/claim, so fractional-second dispatch times
+// must still claim successfully.
+func TestMySQLEnqueueAndClaimWorksWithFractionalSeconds(t *testing.T) {
+	db := startEphemeralMySQL(t)
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, frac := range []time.Duration{100 * time.Millisecond, 600 * time.Millisecond, 900 * time.Millisecond} {
+		base := time.Date(2026, 9, 4, 3, 4, 5, 0, time.UTC).Add(frac)
+		workID := fmt.Sprintf("frac-work-%d", int(frac.Milliseconds()))
+		item := WorkItem{
+			WorkID: workID, RunID: "parent-run", ParentRunID: "parent-run",
+			DelegationID: "delegation-1", TaskIndex: int(frac.Milliseconds()),
+			AttemptNo: 1, Kind: "delegation_child",
+			Payload: []byte(`{"objective":"inspect"}`), State: WorkReady,
+		}
+		claimed, err := store.EnqueueAndClaimWorkItem(context.Background(), item, "parent-dispatcher", base, time.Minute)
+		if err != nil {
+			t.Fatalf("frac=%v claim failed: %v", frac, err)
+		}
+		if claimed.State != WorkRunning || claimed.LeaseOwner != "parent-dispatcher" {
+			t.Fatalf("frac=%v unexpected claim %#v", frac, claimed)
+		}
+		var state, owner string
+		if err := db.QueryRow(`SELECT state,lease_owner FROM agent_work_items WHERE work_id=?`, workID).Scan(&state, &owner); err != nil {
+			t.Fatalf("frac=%v read back: %v", frac, err)
+		}
+		if state != WorkRunning || owner != "parent-dispatcher" {
+			t.Fatalf("frac=%v stored state=%q owner=%q", frac, state, owner)
+		}
+	}
+}

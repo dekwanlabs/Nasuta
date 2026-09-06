@@ -265,7 +265,7 @@ func (adapter *Adapter) Search(ctx context.Context, query semantic.Query) ([]sem
 		return nil, err
 	}
 	if query.GroupBy != "" {
-		hits = deduplicateGroups(hits, query.GroupBy, query.Limit)
+		hits = semantic.DeduplicateHits(hits, query.GroupBy, query.Limit)
 	} else if len(hits) > query.Limit {
 		hits = hits[:query.Limit]
 	}
@@ -311,23 +311,6 @@ func decodeHits(results []client.SearchResult, kind semantic.ScoreKind) ([]seman
 		hits = append(hits, hit)
 	}
 	return hits, nil
-}
-
-func deduplicateGroups(hits []semantic.Hit, field string, limit int) []semantic.Hit {
-	seen := make(map[string]struct{}, min(len(hits), limit))
-	out := make([]semantic.Hit, 0, min(len(hits), limit))
-	for _, hit := range hits {
-		group := fmt.Sprint(hit.Metadata[field])
-		if _, exists := seen[group]; exists {
-			continue
-		}
-		seen[group] = struct{}{}
-		out = append(out, hit)
-		if len(out) == limit {
-			break
-		}
-	}
-	return out
 }
 
 func (adapter *Adapter) Upsert(ctx context.Context, records []semantic.Record) error {

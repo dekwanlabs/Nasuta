@@ -141,19 +141,14 @@ func (workflowStore *Store) LoadDefaultDefinitions(
 	if err != nil {
 		return nil, fmt.Errorf("load default workflow definitions: %w", err)
 	}
-	defer rows.Close()
-	records := make([]DefinitionRecord, 0)
-	for rows.Next() {
-		record, err := scanDefinitionRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate default workflow definitions: %w", err)
-	}
-	return records, nil
+	return store.CollectRows(
+		rows,
+		0,
+		func() (DefinitionRecord, error) { return scanDefinitionRecord(rows) },
+		func(err error) error {
+			return fmt.Errorf("iterate default workflow definitions: %w", err)
+		},
+	)
 }
 
 // LoadDefinition returns one immutable version for lazy catalog hydration.
@@ -221,19 +216,14 @@ func (workflowStore *Store) LoadFullCatalog(
 	if err != nil {
 		return nil, fmt.Errorf("load full workflow catalog: %w", err)
 	}
-	defer rows.Close()
-	records := make([]DefinitionRecord, 0)
-	for rows.Next() {
-		record, err := scanDefinitionRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate full workflow catalog: %w", err)
-	}
-	return records, nil
+	return store.CollectRows(
+		rows,
+		0,
+		func() (DefinitionRecord, error) { return scanDefinitionRecord(rows) },
+		func(err error) error {
+			return fmt.Errorf("iterate full workflow catalog: %w", err)
+		},
+	)
 }
 
 func (workflowStore *Store) LoadRollouts(
@@ -282,19 +272,14 @@ func (workflowStore *Store) ListDefinitions(
 	if err != nil {
 		return nil, fmt.Errorf("list workflow definitions: %w", err)
 	}
-	defer rows.Close()
-	records := make([]DefinitionRecord, 0, limit)
-	for rows.Next() {
-		record, err := scanDefinitionRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate workflow definitions: %w", err)
-	}
-	return records, nil
+	return store.CollectRows(
+		rows,
+		limit,
+		func() (DefinitionRecord, error) { return scanDefinitionRecord(rows) },
+		func(err error) error {
+			return fmt.Errorf("iterate workflow definitions: %w", err)
+		},
+	)
 }
 
 func (workflowStore *Store) SetDefault(

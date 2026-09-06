@@ -9,21 +9,21 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 func TestCompactionRestartRecommendation(t *testing.T) {
 	tests := []struct {
 		name   string
-		result agent.SessionCompactionResult
+		result session.CompactionResult
 		failed bool
 		want   string
 	}{
 		{name: "hard failure", failed: true, want: "compaction_failed"},
-		{name: "critical", result: agent.SessionCompactionResult{NewSessionRecommended: true, CriticalWaterReached: true}, want: "context_critical"},
-		{name: "archive limit", result: agent.SessionCompactionResult{NewSessionRecommended: true}, want: "archived_history_limit"},
+		{name: "critical", result: session.CompactionResult{NewSessionRecommended: true, CriticalWaterReached: true}, want: "context_critical"},
+		{name: "archive limit", result: session.CompactionResult{NewSessionRecommended: true}, want: "archived_history_limit"},
 		{name: "not recommended"},
 	}
 	for _, tt := range tests {
@@ -38,7 +38,7 @@ func TestCompactionRestartRecommendation(t *testing.T) {
 
 func TestEmitCompactionFailureRecommendation(t *testing.T) {
 	handler := &Handler{platform: &config.PlatformSettings{LLMContextWindow: 128000}}
-	result := agent.SessionCompactionResult{
+	result := session.CompactionResult{
 		ArchivedTurnCount:     24,
 		RestartTurnThreshold:  209,
 		ProjectedBeforeTokens: 176070,

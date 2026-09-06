@@ -9,6 +9,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
 	"github.com/dekwanlabs/nasuta/internal/scope"
@@ -724,8 +725,8 @@ func validateContextConflict(index, conflictIndex int, conflict agentapi.Evidenc
 	if err := validateEvidenceUnit(index, label+" incoming", conflict.Incoming); err != nil {
 		return err
 	}
-	if !evidenceIdentityMatches(identity, conflict.Current) ||
-		!evidenceIdentityMatches(identity, conflict.Incoming) {
+	if !evidence.IdentityMatches(identity, conflict.Current) ||
+		!evidence.IdentityMatches(identity, conflict.Incoming) {
 		return fmt.Errorf(
 			"context block %d %s identity does not match current and incoming evidence",
 			index,
@@ -790,22 +791,6 @@ func validateEvidenceUnitSections(blockIndex int, label string, sections []strin
 		seenSections[section] = struct{}{}
 	}
 	return nil
-}
-
-func evidenceIdentityMatches(
-	identity agentapi.EvidenceIdentity,
-	unit tool.EvidenceUnit,
-) bool {
-	if identity.SourceKind != unit.SourceKind ||
-		identity.Target != unit.Target ||
-		identity.Version != unit.Version ||
-		identity.TimeRange != unit.TimeRange {
-		return false
-	}
-	if identity.Section == "" {
-		return len(unit.Sections) == 0
-	}
-	return len(unit.Sections) == 1 && unit.Sections[0] == identity.Section
 }
 
 func canonicalToolIDSet(ids []string) (map[tool.ToolID]struct{}, error) {

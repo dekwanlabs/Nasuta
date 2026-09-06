@@ -700,6 +700,43 @@ func writeDelegationSettlement(
 	return tx.Commit()
 }
 
+// ListDelegationTasks returns the persisted admission records for one
+// delegation batch without taking row locks. It backs the async delegation
+// status poll, which must not contend with in-flight child settlement.
+func (rs *Store) ListDelegationTasks(
+	ctx context.Context,
+	parentRunID,
+	delegationID string,
+) ([]DelegationTaskRecord, error) {
+	if strings.TrimSpace(parentRunID) == "" || strings.TrimSpace(delegationID) == "" {
+		return nil, fmt.Errorf("invalid delegation task list")
+	}
+	rows, err := rs.db.QueryContext(
+		ctx,
+		`SELECT parent_run_id,delegation_id,task_index,child_run_id,
+			capability_id,capability_version,capability_content_hash,objective_hash,
+			admitted,rejection_code,reservation_json,settled_usage_json,report_artifact_id
+		 FROM agent_delegation_tasks
+		 WHERE parent_run_id=? AND delegation_id=?
+		 ORDER BY task_index`,
+		parentRunID,
+		delegationID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []DelegationTaskRecord
+	for rows.Next() {
+		task, err := scanDelegationTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
 func loadDelegationTasksForUpdate(
 	ctx context.Context,
 	tx *sql.Tx,

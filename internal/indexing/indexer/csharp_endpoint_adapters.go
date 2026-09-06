@@ -47,24 +47,8 @@ type csharpMethodInfo struct {
 func parseCSharpEndpointSource(root, file, text string) (endpointSource, bool) {
 	source := parseCSharpSource(text)
 	moduleRoot := findCSharpModuleRoot(root, file)
-	modulePath := ""
-	serviceName := filepath.Base(relativeTo(root, moduleRoot))
-	if moduleRoot != "" {
-		modulePath = relativeTo(root, moduleRoot)
-		serviceName = readCSharpProjectName(moduleRoot)
-	}
-	return endpointSource{
-		language:    "csharp",
-		root:        root,
-		file:        file,
-		rel:         relativeTo(root, file),
-		repo:        topSegment(relativeTo(root, file)),
-		moduleRoot:  moduleRoot,
-		modulePath:  modulePath,
-		serviceName: serviceName,
-		text:        text,
-		syntax:      source,
-	}, true
+	serviceName := moduleServiceName(root, moduleRoot, readCSharpProjectName)
+	return newEndpointSource("csharp", root, file, text, moduleRoot, serviceName, source), true
 }
 
 func parseCSharpSource(text string) csharpSource {
@@ -211,19 +195,7 @@ func stripCSharpCommentsAndStrings(text string) string {
 				}
 			}
 		case strings.HasPrefix(text[i:], `"""`):
-			out[i], out[i+1], out[i+2] = ' ', ' ', ' '
-			i += 3
-			for i+2 < len(out) {
-				if text[i] == '"' && text[i+1] == '"' && text[i+2] == '"' {
-					out[i], out[i+1], out[i+2] = ' ', ' ', ' '
-					i += 3
-					break
-				}
-				if out[i] != '\n' {
-					out[i] = ' '
-				}
-				i++
-			}
+			i = stripTripleQuotedLiteral(out, i, '"', true)
 		case strings.HasPrefix(text[i:], `$"`):
 			out[i], out[i+1] = ' ', ' '
 			i += 2
@@ -276,51 +248,9 @@ func stripCSharpCommentsAndStrings(text string) string {
 				}
 			}
 		case out[i] == '"':
-			out[i] = ' '
-			i++
-			for i < len(out) {
-				if out[i] == '\\' {
-					out[i] = ' '
-					i++
-					if i < len(out) {
-						out[i] = ' '
-						i++
-					}
-					continue
-				}
-				if out[i] == '"' {
-					out[i] = ' '
-					i++
-					break
-				}
-				if out[i] != '\n' {
-					out[i] = ' '
-				}
-				i++
-			}
+			i = stripQuotedLiteral(out, i, '"')
 		case out[i] == '\'':
-			out[i] = ' '
-			i++
-			for i < len(out) {
-				if out[i] == '\\' {
-					out[i] = ' '
-					i++
-					if i < len(out) {
-						out[i] = ' '
-						i++
-					}
-					continue
-				}
-				if out[i] == '\'' {
-					out[i] = ' '
-					i++
-					break
-				}
-				if out[i] != '\n' {
-					out[i] = ' '
-				}
-				i++
-			}
+			i = stripQuotedLiteral(out, i, '\'')
 		default:
 			i++
 		}

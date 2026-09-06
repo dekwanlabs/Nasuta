@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -259,6 +260,26 @@ func (persistence *executorPersistence) GetDelegationEvidence(
 		delegationID,
 		taskIndex,
 	)]), nil
+}
+
+func (persistence *executorPersistence) ListDelegationTasks(
+	_ context.Context,
+	parentRunID,
+	delegationID string,
+) ([]agentrun.DelegationTaskRecord, error) {
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	var tasks []agentrun.DelegationTaskRecord
+	for _, record := range persistence.records {
+		if record.ParentRunID == parentRunID &&
+			record.DelegationID == delegationID {
+			tasks = append(tasks, record)
+		}
+	}
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].TaskIndex < tasks[j].TaskIndex
+	})
+	return tasks, nil
 }
 
 func executorTaskKey(parentRunID, delegationID string, taskIndex int) string {
@@ -615,7 +636,7 @@ func TestExecutorChildDeadlinePreventsRetryBackoff(t *testing.T) {
 	if !ok {
 		t.Fatal("parent context unavailable")
 	}
-	parent.Limits.Deadline = time.Now().Add(5 * time.Millisecond)
+	parent.AnswerDeadline = time.Now().Add(childAnswerDeadlineSafety + 5*time.Millisecond)
 	ctx = WithParentContext(ctx, parent)
 	result, _, err := executor.Execute(ctx, []agentapi.DelegationTask{{
 		Capability: "knowledge.code.inspect", Objective: "deadline prevents retry",
@@ -1308,15 +1329,18 @@ func TestExecutorEmptyHintsEncodeAsArrays(t *testing.T) {
 	}
 }
 
-func TestDelegateToolInheritsCallerDeadline(t *testing.T) {
+func TestDelegateToolDoesNotInheritCallerDeadline(t *testing.T) {
 	executor := newExecutorFixture(t, executorRuntimeFunc(func(
 		context.Context,
 		agentapi.RunRequest,
 	) (agentapi.RunResult, error) {
 		return agentapi.RunResult{}, nil
 	}), newExecutorPersistence(), nil)
-	if executor.Tool().Timeout != tool.InheritCallerDeadline {
-		t.Fatalf("timeout = %s, want inherit caller deadline", executor.Tool().Timeout)
+	if executor.Tool().Timeout == tool.InheritCallerDeadline || executor.Tool().Timeout <= 0 {
+		t.Fatalf("timeout = %s, want a bounded short timeout", executor.Tool().Timeout)
+	}
+	if executor.StatusTool().Timeout == tool.InheritCallerDeadline || executor.StatusTool().Timeout <= 0 {
+		t.Fatalf("status timeout = %s, want a bounded short timeout", executor.StatusTool().Timeout)
 	}
 }
 
@@ -1858,7 +1882,7 @@ func TestExecutorHighRiskRunsBoundedSemanticVerifier(t *testing.T) {
 	}
 }
 
-func TestFlowChildBudgetIsNarrowerThanOrdinaryDelegation(t *testing.T) {
+func TestFlowChildBudgetMatchesOrdinaryDelegation(t *testing.T) {
 	executor := &Executor{policy: agentapi.DelegationPolicy{
 		MaxChildTurns:        4,
 		MaxChildToolCalls:    16,
@@ -1877,9 +1901,11 @@ func TestFlowChildBudgetIsNarrowerThanOrdinaryDelegation(t *testing.T) {
 		Limits: agentapi.RunLimits{Deadline: time.Now().UTC().Add(time.Minute)},
 	}
 	budget := executor.childBudget(parent)
-	if budget.turns != flowChildMaxTurns || budget.toolCalls != flowChildMaxToolCalls ||
-		budget.outputTokens != flowChildMaxOutputTokens || budget.reportTokens != flowReportMaxTokens {
-		t.Fatalf("flow child budget = %#v", budget)
+	if budget.turns != executor.policy.MaxChildTurns ||
+		budget.toolCalls != executor.policy.MaxChildToolCalls ||
+		budget.outputTokens != executor.policy.MaxChildOutputTokens ||
+		budget.reportTokens != executor.policy.MaxReportTokens {
+		t.Fatalf("flow child budget was narrowed unexpectedly = %#v", budget)
 	}
 	limits, err := executor.childLimits(parent, agentapi.Definition{
 		Model: agentapi.ModelPolicy{
@@ -1891,8 +1917,9 @@ func TestFlowChildBudgetIsNarrowerThanOrdinaryDelegation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if limits.MaxSteps != flowChildMaxTurns || limits.MaxToolCalls != flowChildMaxToolCalls ||
-		limits.MaxTotalTokens != flowChildMaxOutputTokens+executor.policy.MaxChildInputTokens {
+	if limits.MaxSteps != executor.policy.MaxChildTurns ||
+		limits.MaxToolCalls != executor.policy.MaxChildToolCalls ||
+		limits.MaxTotalTokens != executor.policy.MaxChildOutputTokens+executor.policy.MaxChildInputTokens {
 		t.Fatalf("flow child limits = %#v", limits)
 	}
 }
@@ -3007,5 +3034,459 @@ func TestExecutorUsesAtomicQueueDispatchWithoutParentClaimPolling(t *testing.T) 
 	persistence.mu.Unlock()
 	if settlements != 1 {
 		t.Fatalf("settlements = %d, want 1", settlements)
+	}
+}
+
+func seedDelegationRecordForPoll(
+	persistence *executorPersistence,
+	parentRunID, delegationID string,
+	taskIndex int,
+	record agentrun.DelegationTaskRecord,
+	artifact *agentrun.DelegationArtifact,
+) {
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	persistence.records[executorTaskKey(parentRunID, delegationID, taskIndex)] = record
+	if artifact != nil {
+		persistence.artifacts[artifact.ID] = *artifact
+	}
+}
+
+func TestExecutorDispatchWithoutQueueReturnsImmediately(t *testing.T) {
+	persistence := newExecutorPersistence()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		ctx context.Context,
+		request agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		once.Do(func() { close(started) })
+		select {
+		case <-release:
+			return successfulExecutorResult(request.RunID, "async-child"), nil
+		case <-ctx.Done():
+			return agentapi.RunResult{}, ctx.Err()
+		}
+	}), persistence, nil)
+
+	dispatch, err := executor.Dispatch(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{Capability: "knowledge.code.inspect", Objective: "async"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatch.Tasks) != 1 || dispatch.Tasks[0].Status != agentapi.DelegationRunning {
+		t.Fatalf("dispatch = %+v", dispatch)
+	}
+	// Dispatch must not wait for the child. It returns while the runtime is
+	// still blocked; if it blocked synchronously, this test would hang here.
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("child runtime did not start on the background goroutine")
+	}
+	select {
+	case <-release:
+		t.Fatal("runtime was released before Dispatch returned; test misconfigured")
+	default:
+	}
+	close(release)
+
+	// Wait for settlement so the background goroutine finishes cleanly.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		persistence.mu.Lock()
+		record := persistence.records[executorTaskKey("parent-1", dispatch.DelegationID, 0)]
+		settled := record.SettledUsage != nil
+		persistence.mu.Unlock()
+		if settled {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestExecutorDispatchWithQueueDoesNotExecuteInline(t *testing.T) {
+	persistence := newExecutorPersistence()
+	queue := newScriptedExecutorQueue()
+	var runtimeCalls int
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		_ context.Context,
+		request agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		runtimeCalls++
+		return successfulExecutorResult(request.RunID, "queued-child"), nil
+	}), persistence, nil)
+	executor.queue = queue
+	executor.workerOwner = "parent-dispatcher"
+	executor.workerLeaseTTL = time.Second
+
+	dispatch, err := executor.Dispatch(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{Capability: "knowledge.code.inspect", Objective: "queue-dispatch"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatch.Tasks) != 1 || dispatch.Tasks[0].Status != agentapi.DelegationRunning {
+		t.Fatalf("dispatch = %+v", dispatch)
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("runtime calls = %d, want 0 (a durable worker owns the child)", runtimeCalls)
+	}
+	queue.mu.Lock()
+	items := len(queue.items)
+	queue.mu.Unlock()
+	if items != 1 {
+		t.Fatalf("queue items = %d, want 1 enqueued work item", items)
+	}
+}
+
+func TestExecutorPollProjectsRejectedRunningAndCompleted(t *testing.T) {
+	persistence := newExecutorPersistence()
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		context.Context,
+		agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		t.Fatal("Poll must never invoke the child runtime")
+		return agentapi.RunResult{}, nil
+	}), persistence, nil)
+
+	const (
+		parentRunID  = "parent-1"
+		delegationID = "del-poll"
+		capability   = "knowledge.code.inspect"
+	)
+
+	// running: admitted but no settled usage.
+	seedDelegationRecordForPoll(persistence, parentRunID, delegationID, 0, agentrun.DelegationTaskRecord{
+		ParentRunID: parentRunID, DelegationID: delegationID, TaskIndex: 0,
+		ChildRunID: "child-running", Capability: agentapi.CapabilityRef{ID: capability},
+		Admitted: true,
+	}, nil)
+
+	// rejected: not admitted with a rejection code.
+	seedDelegationRecordForPoll(persistence, parentRunID, delegationID, 1, agentrun.DelegationTaskRecord{
+		ParentRunID: parentRunID, DelegationID: delegationID, TaskIndex: 1,
+		ChildRunID: "child-rejected", Capability: agentapi.CapabilityRef{ID: capability},
+		RejectionCode: ErrorDepthExceeded,
+	}, nil)
+
+	// completed: settled with a durable report artifact.
+	completedChild := "child-done"
+	artifact := queuedReportArtifact(completedChild, capability)
+	usage := agentapi.Usage{TotalTokens: 120}
+	seedDelegationRecordForPoll(persistence, parentRunID, delegationID, 2, agentrun.DelegationTaskRecord{
+		ParentRunID: parentRunID, DelegationID: delegationID, TaskIndex: 2,
+		ChildRunID: completedChild, Capability: agentapi.CapabilityRef{ID: capability},
+		Admitted: true, SettledUsage: &usage, ReportArtifactID: artifact.ID,
+	}, &artifact)
+
+	dispatch, err := executor.Poll(executorContext(t, context.Background(), 0), delegationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatch.DelegationID != delegationID {
+		t.Fatalf("delegation id = %q, want %q", dispatch.DelegationID, delegationID)
+	}
+	if len(dispatch.Tasks) != 3 {
+		t.Fatalf("tasks = %+v, want 3", dispatch.Tasks)
+	}
+	if dispatch.Tasks[0].Status != agentapi.DelegationRunning {
+		t.Fatalf("task 0 = %+v, want running", dispatch.Tasks[0])
+	}
+	if dispatch.Tasks[1].Status != agentapi.DelegationRejected {
+		t.Fatalf("task 1 = %+v, want rejected", dispatch.Tasks[1])
+	}
+	if dispatch.Tasks[2].Status != agentapi.DelegationCompleted ||
+		dispatch.Tasks[2].Report == nil ||
+		dispatch.Tasks[2].Report.Summary != "completed by durable worker" {
+		t.Fatalf("task 2 = %+v, want completed report", dispatch.Tasks[2])
+	}
+}
+
+func TestExecutorStatusToolReturnsBoundedResult(t *testing.T) {
+	persistence := newExecutorPersistence()
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		context.Context,
+		agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		t.Fatal("status tool must never invoke the child runtime")
+		return agentapi.RunResult{}, nil
+	}), persistence, nil)
+	statusTool := executor.StatusTool()
+
+	// Without a parent context the poll must fail cleanly, not panic or block.
+	if _, err := statusTool.Handler.Execute(context.Background(), tool.Arguments{
+		"delegation_id": "del-status",
+	}); err == nil {
+		t.Fatal("status tool did not reject a context without a delegation parent")
+	}
+
+	const (
+		parentRunID  = "parent-1"
+		delegationID = "del-status"
+		capability   = "knowledge.code.inspect"
+	)
+	childID := "child-status"
+	artifact := queuedReportArtifact(childID, capability)
+	usage := agentapi.Usage{TotalTokens: 50}
+	seedDelegationRecordForPoll(persistence, parentRunID, delegationID, 0, agentrun.DelegationTaskRecord{
+		ParentRunID: parentRunID, DelegationID: delegationID, TaskIndex: 0,
+		ChildRunID: childID, Capability: agentapi.CapabilityRef{ID: capability},
+		Admitted: true, SettledUsage: &usage, ReportArtifactID: artifact.ID,
+	}, &artifact)
+
+	result, err := statusTool.Handler.Execute(executorContext(t, context.Background(), 0), tool.Arguments{
+		"delegation_id": delegationID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dispatch agentapi.DelegationDispatchResult
+	if err := json.Unmarshal([]byte(result.Content), &dispatch); err != nil {
+		t.Fatalf("status content = %q: %v", result.Content, err)
+	}
+	if dispatch.DelegationID != delegationID {
+		t.Fatalf("dispatch = %+v, want delegation id %q", dispatch, delegationID)
+	}
+	if len(dispatch.Tasks) != 1 || dispatch.Tasks[0].Status != agentapi.DelegationCompleted {
+		t.Fatalf("dispatch = %+v, want one completed task", dispatch)
+	}
+	if len(result.AnswerContract.Delegations) != 1 ||
+		result.AnswerContract.Delegations[0].DelegationID != delegationID {
+		t.Fatalf("answer contract delegations = %#v, want the polled delegation id", result.AnswerContract.Delegations)
+	}
+}
+
+func TestExecutorChildDeadlineCapsAtAnswerDeadlineNotRunDeadline(t *testing.T) {
+	executor := &Executor{policy: agentapi.DelegationPolicy{
+		MaxChildTurns:        3,
+		MaxChildToolCalls:    4,
+		MaxChildInputTokens:  256,
+		MaxChildOutputTokens: 128,
+		ChildTimeout:         time.Minute,
+	}}
+	runDeadline := time.Now().UTC().Add(5 * time.Minute)
+	answerDeadline := time.Now().UTC().Add(childAnswerDeadlineSafety + 2*time.Second)
+	parent := ParentContext{
+		Limits:         agentapi.RunLimits{Deadline: runDeadline},
+		AnswerDeadline: answerDeadline,
+	}
+	limits, err := executor.childLimits(parent, agentapi.Definition{
+		Model:  agentapi.ModelPolicy{MaxOutputTokens: 256},
+		Budget: agentapi.BudgetPolicy{Timeout: time.Minute, MaxSteps: 8, MaxToolCalls: 24},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !limits.Deadline.Before(answerDeadline) {
+		t.Fatalf("child deadline %s must precede answer deadline %s", limits.Deadline, answerDeadline)
+	}
+	if !limits.Deadline.Before(runDeadline) {
+		t.Fatalf("child deadline %s must not inherit the parent run deadline %s", limits.Deadline, runDeadline)
+	}
+	if remaining := time.Until(limits.Deadline); remaining > childAnswerDeadlineSafety+2*time.Second {
+		t.Fatalf("child deadline %s is not capped to the answer window; remaining=%s", limits.Deadline, remaining)
+	}
+}
+
+func TestExecutorDispatchWithAtomicQueueSettlesAndPollsReport(t *testing.T) {
+	persistence := newExecutorPersistence()
+	queue := newAtomicScriptedExecutorQueue()
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		_ context.Context,
+		request agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		return successfulExecutorResult(request.RunID, "atomic-child"), nil
+	}), persistence, nil)
+	executor.queue = queue
+	executor.workerOwner = "parent-dispatcher"
+	executor.workerLeaseTTL = time.Second
+
+	const childCount = 3
+	tasks := make([]agentapi.DelegationTask, 0, childCount)
+	for index := 0; index < childCount; index++ {
+		tasks = append(tasks, agentapi.DelegationTask{
+			Capability: "knowledge.code.inspect",
+			Objective:  "atomic-dispatch-" + fmt.Sprintf("%d", index),
+		})
+	}
+	dispatch, err := executor.Dispatch(executorContext(t, context.Background(), 0), tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatch.Tasks) != childCount {
+		t.Fatalf("dispatch tasks = %d, want %d", len(dispatch.Tasks), childCount)
+	}
+	for _, task := range dispatch.Tasks {
+		if task.Status != agentapi.DelegationRunning {
+			t.Fatalf("dispatch task = %+v, want running on admission", task)
+		}
+	}
+
+	// The atomic queue must actually claim and run each child. Wait until every
+	// child has settled a durable report artifact.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		persistence.mu.Lock()
+		settlements := len(persistence.settlements)
+		persistence.mu.Unlock()
+		if settlements == childCount {
+			break
+		}
+		if time.Now().After(deadline) {
+			persistence.mu.Lock()
+			n := len(persistence.settlements)
+			persistence.mu.Unlock()
+			t.Fatalf("settlements = %d, want %d (children never settled)", n, childCount)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	polled, err := executor.Poll(executorContext(t, context.Background(), 0), dispatch.DelegationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(polled.Tasks) != childCount {
+		t.Fatalf("polled tasks = %d, want %d", len(polled.Tasks), childCount)
+	}
+	for _, task := range polled.Tasks {
+		if task.Status != agentapi.DelegationCompleted || task.Report == nil {
+			t.Fatalf("polled task = %+v, want completed with report", task)
+		}
+	}
+}
+
+func TestNormalizePolicyDefaultsBatchTimeoutToChildTimeout(t *testing.T) {
+	policy := agentapi.DelegationPolicy{
+		MaxDepth: 1, MaxChildren: 2, MaxConcurrent: 1,
+		MaxChildTurns: 2, MaxChildToolCalls: 2,
+		MaxChildInputTokens: 128, MaxChildOutputTokens: 128,
+		MaxReportTokens: 512, MaxTotalTokens: 1024,
+		ParentAnswerReserve: 64, ChildTimeout: 3 * time.Second,
+	}
+	got, err := normalizePolicy(policy)
+	if err != nil {
+		t.Fatalf("normalizePolicy: %v", err)
+	}
+	if got.BatchTimeout != policy.ChildTimeout {
+		t.Fatalf("batch timeout = %s, want child timeout %s", got.BatchTimeout, policy.ChildTimeout)
+	}
+}
+
+func TestNormalizePolicyRejectsChildTimeoutLongerThanBatch(t *testing.T) {
+	policy := agentapi.DelegationPolicy{
+		MaxDepth: 1, MaxChildren: 2, MaxConcurrent: 1,
+		MaxChildTurns: 2, MaxChildToolCalls: 2,
+		MaxChildInputTokens: 128, MaxChildOutputTokens: 128,
+		MaxReportTokens: 512, MaxTotalTokens: 1024,
+		ParentAnswerReserve: 64, BatchTimeout: time.Second,
+		ChildTimeout: 2 * time.Second,
+	}
+	if _, err := normalizePolicy(policy); err == nil || !strings.Contains(err.Error(), "policy limits") {
+		t.Fatalf("normalizePolicy error = %v, want invalid policy limits", err)
+	}
+}
+
+func TestBatchDeadlineUsesEarliestBatchAnswerAndContextDeadline(t *testing.T) {
+	executor := &Executor{policy: agentapi.DelegationPolicy{BatchTimeout: time.Minute, ChildTimeout: 20 * time.Second}}
+	now := time.Now()
+	parent := ParentContext{AnswerDeadline: now.Add(40 * time.Second)}
+	ctx, cancel := context.WithDeadline(context.Background(), now.Add(15*time.Second))
+	defer cancel()
+
+	got := executor.batchDeadline(ctx, parent)
+	if got.After(now.Add(15 * time.Second)) {
+		t.Fatalf("batch deadline %s exceeds context deadline", got)
+	}
+	if got.After(parent.AnswerDeadline.Add(-childAnswerDeadlineSafety)) {
+		t.Fatalf("batch deadline %s exceeds answer reserve boundary", got)
+	}
+	if got.Before(now) {
+		t.Fatalf("batch deadline %s is already expired", got)
+	}
+}
+
+func TestChildDeadlineShortBatchWindowKeepsUsableSafetyMargin(t *testing.T) {
+	now := time.Now().UTC()
+	executor := &Executor{policy: agentapi.DelegationPolicy{
+		MaxChildTurns: 2, MaxChildToolCalls: 2,
+		MaxChildInputTokens: 128, MaxChildOutputTokens: 128,
+		ChildTimeout: time.Second, BatchTimeout: 200 * time.Millisecond,
+	}}
+	parent := ParentContext{BatchDeadline: now.Add(200 * time.Millisecond)}
+	limits, err := executor.childLimitsAt(parent, agentapi.Definition{
+		Model:  agentapi.ModelPolicy{MaxOutputTokens: 128},
+		Budget: agentapi.BudgetPolicy{Timeout: time.Second, MaxSteps: 2, MaxToolCalls: 2},
+	}, now, time.Time{})
+	if err != nil {
+		t.Fatalf("childLimitsAt: %v", err)
+	}
+	if !limits.Deadline.After(now) || !limits.Deadline.Before(parent.BatchDeadline) {
+		t.Fatalf("child deadline = %s, want inside (%s, %s)", limits.Deadline, now, parent.BatchDeadline)
+	}
+}
+
+// TestDispatchIgnoresToolInvocationTimeoutForBatchDeadline guards the fix for
+// the case where the delegate_investigation tool's own 15s invocation timeout
+// leaked into ctx.Deadline() and was then mistaken for the admitted batch
+// deadline, leaving children with a 5s window that is shorter than the child
+// answer reserve and rejecting every child at prepare time.
+func TestDispatchIgnoresToolInvocationTimeoutForBatchDeadline(t *testing.T) {
+	persistence := newExecutorPersistence()
+	childDeadline := make(chan time.Time, 1)
+	executor := newExecutorFixture(t, executorRuntimeFunc(func(
+		ctx context.Context,
+		request agentapi.RunRequest,
+	) (agentapi.RunResult, error) {
+		select {
+		case childDeadline <- request.Limits.Deadline:
+		default:
+		}
+		return successfulExecutorResult(request.RunID, "child"), nil
+	}), persistence, func(policy *agentapi.DelegationPolicy) {
+		// The real child window is far larger than the tool's 15s timeout.
+		policy.BatchTimeout = 60 * time.Second
+		policy.ChildTimeout = 60 * time.Second
+	})
+
+	// Bump the child definition timeout above the 15s tool timeout so the
+	// child window is governed by the batch deadline, not the tiny fixture
+	// definition budget (2s), which would otherwise mask the regression.
+	defs := executor.definitions.(executorDefinitionResolver)
+	ref := agentapi.DefinitionRef{ID: "delegation.investigator", Version: 1}
+	d := defs[ref]
+	d.Budget.Timeout = 60 * time.Second
+	defs[ref] = d
+
+	// Simulate the tool executor wrapping the handler ctx with its 15s timeout.
+	base := executorContext(t, context.Background(), 0)
+	ctx, cancel := context.WithTimeout(base, 15*time.Second)
+	defer cancel()
+
+	dispatch, err := executor.Dispatch(
+		ctx,
+		[]agentapi.DelegationTask{{Capability: "knowledge.code.inspect", Objective: "async"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatch.Tasks) != 1 {
+		t.Fatalf("tasks = %+v, want 1", dispatch.Tasks)
+	}
+
+	select {
+	case deadline := <-childDeadline:
+		// The child deadline must reflect the batch window (60s minus safety),
+		// not the 15s tool timeout minus safety (5s). Assert it stays well above
+		// the 15s child answer reserve that would otherwise reject every child.
+		if remaining := time.Until(deadline); remaining < 20*time.Second {
+			t.Fatalf("child deadline = %s (remaining %s), want well above the 15s tool timeout", deadline, remaining)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("child runtime was not invoked")
 	}
 }

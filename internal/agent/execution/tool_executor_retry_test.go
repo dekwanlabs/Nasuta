@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -72,5 +73,41 @@ func TestBoundedToolPromptPreservesAuthoritativeResultAndRequiredLiterals(t *tes
 	}
 	if !strings.Contains(prompt, "_nasuta_truncated") {
 		t.Fatalf("prompt is not marked truncated: %q", prompt)
+	}
+}
+
+func TestToolExecutorNoDedupReexecutesIdenticalArgs(t *testing.T) {
+	tries := 0
+	poll := testAgentTool("poll_status", ToolKindRead, func(context.Context, tool.Arguments) (string, error) {
+		tries++
+		return fmt.Sprintf("state-%d", tries), nil
+	})
+	poll.NoDedup = true
+	registry := testRegistry(t, poll)
+
+	cached := testAgentTool("cached_read", ToolKindRead, func(context.Context, tool.Arguments) (string, error) {
+		tries++
+		return "cached", nil
+	})
+	registryCached := testRegistry(t, cached)
+
+	executor := NewToolExecutor(registry)
+	executorCached := NewToolExecutor(registryCached)
+	seen := map[string]bool{}
+	call := llm.ToolCall{ID: "1", Function: llm.ToolFunction{Name: "poll_status", Arguments: `{"delegation_id":"del-1"}`}}
+	policy := ToolPolicyForRun(true)
+
+	first := executor.ExecuteWithPolicy(context.Background(), policy, call, seen)
+	second := executor.ExecuteWithPolicy(context.Background(), policy, call, seen)
+	if first.AuthoritativeContent != "state-1" || second.AuthoritativeContent != "state-2" {
+		t.Fatalf("NoDedup poll results = first:%q second:%q, want state-1/state-2", first.AuthoritativeContent, second.AuthoritativeContent)
+	}
+
+	cachedSeen := map[string]bool{}
+	cachedCall := llm.ToolCall{ID: "1", Function: llm.ToolFunction{Name: "cached_read", Arguments: `{}`}}
+	cachedFirst := executorCached.ExecuteWithPolicy(context.Background(), policy, cachedCall, cachedSeen)
+	cachedSecond := executorCached.ExecuteWithPolicy(context.Background(), policy, cachedCall, cachedSeen)
+	if cachedFirst.AuthoritativeContent != "cached" || cachedSecond.AuthoritativeContent == "cached" {
+		t.Fatalf("cached tool must dedup: first:%q second:%q", cachedFirst.AuthoritativeContent, cachedSecond.AuthoritativeContent)
 	}
 }
