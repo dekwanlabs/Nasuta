@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,16 +36,16 @@ type contextAssembleStats struct {
 type contextAssembleInput struct {
 	Question      string
 	UserID        int64
-	Conversation  ConversationContext
+	Conversation  execution.ConversationContext
 	Relation      retrieval.HistoryRelation
 	Origin        string
-	Candidates    *HistoryCandidates
+	Candidates    *session.HistoryCandidates
 	ContextWindow int
 	OutputReserve int
 }
 
 type contextAssembleOutput struct {
-	Conversation ConversationContext
+	Conversation execution.ConversationContext
 	Stats        contextAssembleStats
 }
 
@@ -100,7 +102,7 @@ func (svc *Service) assembleContext(ctx context.Context, input contextAssembleIn
 		var recallErr error
 		materialized := false
 		if input.Candidates != nil && !historyNeedsContinuity(input.Relation) {
-			if discovery, ok := svc.history.(CandidateDiscovery); ok {
+			if discovery, ok := svc.history.(session.CandidateDiscovery); ok {
 				recalled, recallErr = discovery.Materialize(
 					ctx, input.UserID, conversation.SessionID, *input.Candidates,
 					activeHistoryTopK, historyBudget, true,
@@ -184,7 +186,7 @@ type routeDialogueTurn struct {
 	Assistant  string `json:"assistant,omitempty"`
 }
 
-func buildHistoryContext(conversation ConversationContext) string {
+func buildHistoryContext(conversation execution.ConversationContext) string {
 	if len(conversation.RecentTurns) == 0 && len(conversation.RecentDialogue) == 0 {
 		return ""
 	}
@@ -268,12 +270,12 @@ func (svc *Service) assembleActiveHistory(
 	ctx context.Context,
 	question string,
 	userID int64,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	relation retrieval.HistoryRelation,
 	origin string,
 	contextWindow int,
 	outputReserve int,
-) (ConversationContext, contextAssembleStats, error) {
+) (execution.ConversationContext, contextAssembleStats, error) {
 	stats := contextAssembleStats{
 		Relation: relation, RelationOrigin: origin,
 		CandidateCount: len(conversation.RecentTurns),
@@ -292,7 +294,7 @@ func (svc *Service) assembleActiveHistory(
 	turnNumbers := collectDetailTurnNumbers(selected, latestTurn, latestHasAnswer, relation)
 	turnByNumber, err := svc.loadTurnMessages(conversation, userID, turnNumbers)
 	if err != nil {
-		return ConversationContext{}, stats, err
+		return execution.ConversationContext{}, stats, err
 	}
 	budget := activeHistoryBudget(contextWindow, outputReserve)
 	stats.HistoryBudgetTokens = budget
@@ -304,7 +306,7 @@ func (svc *Service) assembleActiveHistory(
 	if len(historical) > 0 {
 		raw, err := json.Marshal(historyEnvelope{Label: "HISTORICAL_CONTEXT", Turns: historical})
 		if err != nil {
-			return ConversationContext{}, stats, fmt.Errorf("encode historical context: %w", err)
+			return execution.ConversationContext{}, stats, fmt.Errorf("encode historical context: %w", err)
 		}
 		conversation.HistoricalContext = string(raw)
 	}
@@ -331,7 +333,7 @@ func collectDetailTurnNumbers(
 // loadTurnMessages loads full messages for detail-eligible turns, validating
 // the session store only when at least one turn needs it.
 func (svc *Service) loadTurnMessages(
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	userID int64,
 	turnNumbers []int,
 ) (map[int][]llm.Message, error) {
@@ -389,7 +391,7 @@ func assembleHistoricalTurn(
 	latestHasAnswer bool,
 	relation retrieval.HistoryRelation,
 	budget int,
-	conversation *ConversationContext,
+	conversation *execution.ConversationContext,
 	stats *contextAssembleStats,
 	historical *[]historicalTurn,
 ) bool {
@@ -399,7 +401,7 @@ func assembleHistoricalTurn(
 	fullPreferred := explicitTurnSelected(metadata, relation.ExplicitTurnRefs) ||
 		metadata.TurnNumber == latestTurn && relation.NeedsPriorEvidence
 	if fullPreferred {
-		atomic := replayableTailMessages(messages, 0)
+		atomic := execution.ReplayableTailMessages(messages, 0)
 		cost := estimateMessagesTokens(atomic)
 		if len(atomic) == len(messages) && cost <= remaining {
 			conversation.Recent = append(conversation.Recent, atomic...)
@@ -413,7 +415,7 @@ func assembleHistoricalTurn(
 	needsDetail := fullPreferred || metadata.TurnNumber == latestTurn &&
 		relation.NeedsPriorConclusion && !latestHasAnswer
 	if needsDetail {
-		detail, detailErr := compressTurnDetail(metadata.TurnNumber, messages)
+		detail, detailErr := session.CompressDetail(metadata.TurnNumber, messages)
 		if detailErr == nil {
 			cost := tooloutput.EstimateTokens(string(detail))
 			if cost <= remaining {
@@ -456,7 +458,7 @@ func assembleHistoricalTurns(
 	latestHasAnswer bool,
 	relation retrieval.HistoryRelation,
 	budget int,
-	conversation *ConversationContext,
+	conversation *execution.ConversationContext,
 	stats *contextAssembleStats,
 ) []historicalTurn {
 	historical := make([]historicalTurn, 0, len(selected))

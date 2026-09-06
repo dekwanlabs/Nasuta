@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -155,9 +156,9 @@ func (agent *Agent) publishForceConclusionAnswer(
 		return
 	}
 	stream.Publish(res.Content)
-	agent.observer.OnStep(ctx, runID, StepRecord{
+	agent.observer.OnStep(ctx, runID, run.StepRecord{
 		StepNo:              *stepSeq,
-		Kind:                StepKindAnswer,
+		Kind:                run.StepKindAnswer,
 		Content:             res.Content,
 		DelegationAdoptions: answerContract.Adoptions(),
 		TokenDelta:          utf8.RuneCountInString(res.Content),
@@ -237,9 +238,9 @@ func (agent *Agent) preservePartialAnswer(ctx context.Context, runID string, ste
 	result.Answer += res.Content
 	stream.Publish(res.Content)
 	*stepSeq++
-	agent.observer.OnStep(ctx, runID, StepRecord{
+	agent.observer.OnStep(ctx, runID, run.StepRecord{
 		StepNo:          *stepSeq,
-		Kind:            StepKindAnswer,
+		Kind:            run.StepKindAnswer,
 		Content:         res.Content,
 		TokenDelta:      utf8.RuneCountInString(res.Content),
 		ReasoningTokens: res.ReasoningTokens,

@@ -46,15 +46,9 @@ type Handler struct {
 	semantic           semantic.Store
 	embedder           embed.Embedder
 	tools              *tools.Service
-	qa                 *qa.Service
-	persistentRunStore *run.Store
-	writeAvailable     bool
 	codegraphDB        *codegraph.DB
 	callChain          *callchain.Service
-	qaSessions         *memory.SessionStore
-	history            session.History
 	cfg                config.Config
-	platform           *config.PlatformSettings
 	idx                IndexingOps
 	rolePromptFn       func(userID int64) string
 	featureStatusFn    func(context.Context) delivery.FeatureDeliveryStatus

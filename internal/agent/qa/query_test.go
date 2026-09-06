@@ -7,9 +7,11 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type capturingManagedRuntime struct {
@@ -29,6 +31,10 @@ func (runtime *capturingManagedRuntime) Begin(
 ) (agentapi.ManagedRun, error) {
 	runtime.start = start
 	return nil, nil
+}
+
+func (runtime *capturingManagedRuntime) ToolsFor(tool.Policy) definition.ScenarioToolSet {
+	return compactionToolSet{}
 }
 
 func TestQueryAnalysisTraceCarriesDerivedDiagnostics(t *testing.T) {

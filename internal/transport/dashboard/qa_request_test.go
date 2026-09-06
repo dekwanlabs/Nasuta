@@ -37,7 +37,9 @@ func TestCompactionRestartRecommendation(t *testing.T) {
 }
 
 func TestEmitCompactionFailureRecommendation(t *testing.T) {
-	handler := &Handler{platform: &config.PlatformSettings{LLMContextWindow: 128000}}
+	handler := &Handler{qaRuntimeFn: func() QARuntime {
+		return QARuntime{Settings: &config.PlatformSettings{LLMContextWindow: 128000}}
+	}}
 	result := session.CompactionResult{
 		ArchivedTurnCount:     24,
 		RestartTurnThreshold:  209,
@@ -142,7 +144,6 @@ func TestQARuntimeStatusFormatting(t *testing.T) {
 		CompactionApplied:     true,
 	})
 	handler := &Handler{
-		platform: settings,
 		qaRuntimeFn: func() QARuntime {
 			return QARuntime{Hub: hub, Settings: settings}
 		},

@@ -18,7 +18,7 @@ func TestAPIQAMessageFeedbackUpdatesOwnedAnswer(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	handler := &Handler{qaSessions: memory.NewSessionStore(db)}
+	handler := &Handler{qaRuntimeFn: func() QARuntime { return QARuntime{Sessions: memory.NewSessionStore(db)} }}
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT m\.id, m\.feedback.*JOIN qa_turns.*m\.seq=\?.*FOR UPDATE`).
 		WithArgs("session-1", int64(42), 7).
@@ -51,7 +51,7 @@ func TestAPIQAMessageFeedbackRejectsInvalidValue(t *testing.T) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
-	handler := &Handler{qaSessions: memory.NewSessionStore(db)}
+	handler := &Handler{qaRuntimeFn: func() QARuntime { return QARuntime{Sessions: memory.NewSessionStore(db)} }}
 	request := httptest.NewRequest(http.MethodPut, "/api/qa/sessions/session-1/message-feedback", bytes.NewBufferString(
 		`{"message_seq":7,"feedback":"up"}`,
 	))

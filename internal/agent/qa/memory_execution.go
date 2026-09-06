@@ -2,6 +2,7 @@ package qa
 
 import (
 	"context"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
@@ -77,7 +78,7 @@ type memoryExtractInput struct {
 	Question       string
 	Answer         string
 	Existing       []memory.ConsolidationMatch
-	EvidenceStatus EvidenceStatus
+	EvidenceStatus run.EvidenceStatus
 }
 
 type memoryExtractOutput struct {

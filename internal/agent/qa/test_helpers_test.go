@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
+	"github.com/dekwanlabs/nasuta/internal/scope"
 	"testing"
 	"time"
 
@@ -25,9 +27,10 @@ import (
 type DefinitionRuntime = definition.Runtime
 type Config = execution.Config
 type ToolExecutor = execution.ToolExecutor
-type Observer = execution.Observer
-type Controller = execution.Controller
+type Observer = run.Observer
+type Controller = run.Controller
 type Registry = tool.Registry
+type Tool = tool.Tool
 type RunStore = run.Store
 type RunStatus = run.Status
 type RunRecord = run.Record
@@ -52,20 +55,31 @@ func NewToolExecutor(registry *Registry) *ToolExecutor {
 }
 
 func NewRuntime(
-	definitions DefinitionResolver,
+	definitions definition.Resolver,
 	schemas *agentapi.SchemaRegistry,
 	registry *tool.Registry,
 	settings *config.PlatformSettings,
 	runStore *run.Store,
 ) (*DefinitionRuntime, error) {
-	return definition.NewRuntime(definitions, schemas, registry, settings, runStore)
+	return definition.NewRuntime(definitions, schemas, registry, settings, runStore, nil)
+}
+
+func NewRuntimeWithHub(
+	definitions definition.Resolver,
+	schemas *agentapi.SchemaRegistry,
+	registry *tool.Registry,
+	settings *config.PlatformSettings,
+	runStore *run.Store,
+	hub *run.Hub,
+) (*DefinitionRuntime, error) {
+	return definition.NewRuntime(definitions, schemas, registry, settings, runStore, hub)
 }
 
 func TerminalFromEvent(event SSEEvent) *RunTerminal {
 	return run.TerminalFromEvent(event)
 }
 
-func NewRegistry(svc *ToolService, cfg config.Config, sessions *memory.SessionStore, history SessionHistory) *Registry {
+func NewRegistry(svc *tools.Service, cfg config.Config, sessions *memory.SessionStore, history session.History) *Registry {
 	return tools.NewRegistry(svc, cfg, sessions, history)
 }
 
@@ -101,7 +115,7 @@ func testReviewerDefinition(t *testing.T, mutate func(*agentapi.Definition)) age
 		Budget: agentapi.BudgetPolicy{
 			Timeout: time.Second, MaxSteps: 2, MaxToolCalls: 24, ContextTokens: 4096,
 		},
-		Permissions: agentapi.PermissionPolicy{Scopes: []string{knowledgeReadScope}},
+		Permissions: agentapi.PermissionPolicy{Scopes: []string{scope.KnowledgeRead}},
 	}
 	if mutate != nil {
 		mutate(&definition)
@@ -129,7 +143,7 @@ func testQADefinition(t *testing.T, mutate func(*agentapi.Definition)) agentapi.
 		Budget: agentapi.BudgetPolicy{
 			Timeout: time.Second, MaxSteps: 2, MaxToolCalls: 24, ContextTokens: 4096,
 		},
-		Permissions: agentapi.PermissionPolicy{Scopes: []string{knowledgeReadScope}},
+		Permissions: agentapi.PermissionPolicy{Scopes: []string{scope.KnowledgeRead}},
 	}
 	if mutate != nil {
 		mutate(&definition)
@@ -149,7 +163,7 @@ func testDefinitionRequest(definition agentapi.Definition) agentapi.RunRequest {
 			ID: definition.ID, Version: definition.Version,
 		},
 		DefinitionHash: definition.ContentHash,
-		Permissions:    agentapi.PermissionPolicy{Scopes: []string{knowledgeReadScope}},
+		Permissions:    agentapi.PermissionPolicy{Scopes: []string{scope.KnowledgeRead}},
 		Input: json.RawMessage(
 			`{"subject":{"kind":"technical_proposal"},"categories":["architecture"],"policy_hash":"policy-1"}`,
 		),
@@ -172,11 +186,25 @@ func newTestDefinitionRuntime(
 	store *RunStore,
 ) *DefinitionRuntime {
 	t.Helper()
+	runtime, hub := newTestDefinitionRuntimeWithHub(t, definition, registry, settings, store)
+	_ = hub
+	return runtime
+}
+
+func newTestDefinitionRuntimeWithHub(
+	t *testing.T,
+	definition agentapi.Definition,
+	registry *Registry,
+	settings *config.PlatformSettings,
+	store *RunStore,
+) (*DefinitionRuntime, *run.Hub) {
+	t.Helper()
 	schemas := agentapi.NewSchemaRegistry()
 	if err := schemas.Publish(catalog.DefaultSchemas()); err != nil {
 		t.Fatalf("publish schemas: %v", err)
 	}
-	runtime, err := NewRuntime(
+	hub := run.NewHub(store)
+	runtime, err := NewRuntimeWithHub(
 		definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
 			if ref.ID != definition.ID || ref.Version != definition.Version {
 				return agentapi.Definition{}, fmt.Errorf("definition not found")
@@ -187,11 +215,12 @@ func newTestDefinitionRuntime(
 		registry,
 		settings,
 		store,
+		hub,
 	)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
-	return runtime
+	return runtime, hub
 }
 
 // ---- tool fixtures (mirror of tool_test_helpers_test.go / tool_prune_test.go) ----

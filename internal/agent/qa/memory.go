@@ -1,6 +1,7 @@
 package qa
 
 import (
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -47,15 +48,15 @@ var memoryRecallSpec = runtrace.Spec[*memoryRecallInput, memoryRecallOutput]{
 	Status: func(output memoryRecallOutput, _ error) string { return output.Status },
 }
 
-func memoryExtractionAllowed(outcome RunOutcome, result *RunResult) bool {
-	return outcome.Status == RunStatusDone && result != nil &&
-		!result.ForcedConclusion && strings.TrimSpace(result.Answer) != ""
+func memoryExtractionAllowed(outcome run.Outcome) bool {
+	return outcome.Status == run.StatusDone &&
+		!outcome.Evidence.ForcedConclusion && strings.TrimSpace(outcome.Answer) != ""
 }
 
-func admitExtractedMemories(records []memory.MemoryRecord, evidence EvidenceStatus) ([]memory.MemoryRecord, map[string]int) {
+func admitExtractedMemories(records []memory.MemoryRecord, evidence run.EvidenceStatus) ([]memory.MemoryRecord, map[string]int) {
 	admitted := make([]memory.MemoryRecord, 0, len(records))
 	rejected := make(map[string]int, 2)
-	incomplete := evidence == EvidencePartial || evidence == EvidenceUnavailable
+	incomplete := evidence == run.EvidencePartial || evidence == run.EvidenceUnavailable
 	for _, record := range records {
 		if record.SourceType == memory.SourceAssistantInference {
 			rejected["assistant_inference"]++
@@ -70,7 +71,7 @@ func admitExtractedMemories(records []memory.MemoryRecord, evidence EvidenceStat
 	return admitted, rejected
 }
 
-func admitMemoryDecisions(decisions []memory.MemoryDecision, evidence EvidenceStatus) ([]memory.MemoryDecision, map[string]int) {
+func admitMemoryDecisions(decisions []memory.MemoryDecision, evidence run.EvidenceStatus) ([]memory.MemoryDecision, map[string]int) {
 	records := make([]memory.MemoryRecord, len(decisions))
 	for i := range decisions {
 		records[i] = decisions[i].Record

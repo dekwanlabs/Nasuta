@@ -1,12 +1,14 @@
 package qa
 
+import "github.com/dekwanlabs/nasuta/internal/agent/run"
+
 import "testing"
 
 type compactionStatusRecorder struct {
 	runID        string
-	event        SessionStatusEvent
+	event        run.SessionStatusEvent
 	contextRunID string
-	contextEvent ContextUsageEvent
+	contextEvent run.ContextUsageEvent
 	statusRunID  string
 	statusText   string
 	statusCode   string
@@ -15,6 +17,8 @@ type compactionStatusRecorder struct {
 
 func (recorder *compactionStatusRecorder) EmitPhase(string, string) {}
 
+func (recorder *compactionStatusRecorder) EmitEvent(run.EventType, run.ExecutionEvent) {}
+
 func (recorder *compactionStatusRecorder) EmitStatus(runID, text, code string, elapsedMS int64) {
 	recorder.statusRunID = runID
 	recorder.statusText = text
@@ -22,12 +26,12 @@ func (recorder *compactionStatusRecorder) EmitStatus(runID, text, code string, e
 	recorder.statusMS = elapsedMS
 }
 
-func (recorder *compactionStatusRecorder) EmitSessionStatus(runID string, event SessionStatusEvent) {
+func (recorder *compactionStatusRecorder) EmitSessionStatus(runID string, event run.SessionStatusEvent) {
 	recorder.runID = runID
 	recorder.event = event
 }
 
-func (recorder *compactionStatusRecorder) EmitContextUsage(runID string, event ContextUsageEvent) {
+func (recorder *compactionStatusRecorder) EmitContextUsage(runID string, event run.ContextUsageEvent) {
 	recorder.contextRunID = runID
 	recorder.contextEvent = event
 }
@@ -35,8 +39,8 @@ func (recorder *compactionStatusRecorder) EmitContextUsage(runID string, event C
 func TestUpdateSessionCompactionStoresAndPublishesLatestStatus(t *testing.T) {
 	recorder := &compactionStatusRecorder{}
 	svc := &Service{
-		phaseEmitter:     recorder,
-		compactionStatus: make(map[string]SessionStatusEvent),
+		events:     recorder,
+		compactionStatus: make(map[string]run.SessionStatusEvent),
 	}
 
 	svc.updateCompaction(
@@ -56,7 +60,7 @@ func TestUpdateSessionCompactionStoresAndPublishesLatestStatus(t *testing.T) {
 
 func TestEmitStatusPublishesStructuredProgress(t *testing.T) {
 	recorder := &compactionStatusRecorder{}
-	svc := &Service{phaseEmitter: recorder}
+	svc := &Service{events: recorder}
 
 	svc.emitStatusElapsed("run-status", "正在检索", "retrieval.active", 42)
 
@@ -71,8 +75,8 @@ func TestEmitStatusPublishesStructuredProgress(t *testing.T) {
 
 func TestEmitContextUsagePublishesProjection(t *testing.T) {
 	recorder := &compactionStatusRecorder{}
-	svc := &Service{phaseEmitter: recorder}
-	event := ContextUsageEvent{
+	svc := &Service{events: recorder}
+	event := run.ContextUsageEvent{
 		Phase:                 "session_pre_answer",
 		ProjectedBeforeTokens: 82000,
 		ProjectedAfterTokens:  61000,

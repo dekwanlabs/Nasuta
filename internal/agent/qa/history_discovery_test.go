@@ -2,6 +2,8 @@ package qa
 
 import (
 	"context"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"testing"
 	"time"
 
@@ -30,13 +32,13 @@ func (stub *candidateDiscoveryHistoryStub) Find(context.Context, int64, string, 
 	return "", nil
 }
 
-func (stub *candidateDiscoveryHistoryStub) Discover(context.Context, int64, string, string) (HistoryCandidates, error) {
+func (stub *candidateDiscoveryHistoryStub) Discover(context.Context, int64, string, string) (session.HistoryCandidates, error) {
 	close(stub.started)
 	<-stub.release
-	return HistoryCandidates{Mode: "dense_lexical", Refs: []string{"turn-1"}}, nil
+	return session.HistoryCandidates{Mode: "dense_lexical", Refs: []string{"turn-1"}}, nil
 }
 
-func (stub *candidateDiscoveryHistoryStub) Materialize(_ context.Context, _ int64, _ string, _ HistoryCandidates, _ int, budget int, _ bool) (string, error) {
+func (stub *candidateDiscoveryHistoryStub) Materialize(_ context.Context, _ int64, _ string, _ session.HistoryCandidates, _ int, budget int, _ bool) (string, error) {
 	stub.materializeCalls++
 	stub.materializeBudget = budget
 	return "materialized", nil
@@ -49,7 +51,7 @@ func TestHistoryCandidateDiscoveryStartsAsynchronously(t *testing.T) {
 	}
 	task := startHistoryDiscovery(
 		context.Background(), stub, 42,
-		ConversationContext{SessionID: "session-1", CompactedThroughTurn: 3},
+		execution.ConversationContext{SessionID: "session-1", CompactedThroughTurn: 3},
 		"继续看刚才的问题",
 	)
 	if task == nil {
@@ -84,13 +86,13 @@ func TestReassemblePreparedConversationUsesDefinitionHistoryBudget(t *testing.T)
 		contextWindow: 128000,
 		outputReserve: 16000,
 	}
-	source := ConversationContext{
+	source := execution.ConversationContext{
 		SessionID: "session-1", CompactedThroughTurn: 3,
 	}
 	prepared := &preparation{
 		request: Request{
 			Question: "继续看刚才的证据", UserID: 42,
-			Conversation: ConversationContext{RetrievedHistory: "assembled-with-platform-default"},
+			Conversation: execution.ConversationContext{RetrievedHistory: "assembled-with-platform-default"},
 		},
 		sourceConversation: source,
 		analysis: queryAnalysisOutput{
@@ -119,10 +121,10 @@ func TestAssembleContextMaterializesEarlyCandidatesUnlessHistoryDependencyRequir
 		history:       stub,
 		contextWindow: 4096,
 	}
-	conversation := ConversationContext{
+	conversation := execution.ConversationContext{
 		SessionID: "session-1", CompactedThroughTurn: 3,
 	}
-	candidates := &HistoryCandidates{Mode: "dense_lexical", Refs: []string{"turn-1"}}
+	candidates := &session.HistoryCandidates{Mode: "dense_lexical", Refs: []string{"turn-1"}}
 
 	output, err := svc.assembleContext(t.Context(), contextAssembleInput{
 		Question: "查一下这个服务", UserID: 42, Conversation: conversation,

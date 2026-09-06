@@ -167,7 +167,7 @@ func referenceTestTool(id tool.ToolID, argument string, accepts ...tool.Referenc
 
 func noopTool(context.Context, tool.Arguments) (string, error) { return "ok", nil }
 
-func testRegistry(t *testing.T, tools ...Tool) *Registry {
+func testRegistry(t *testing.T, tools ...Tool) *tool.Registry {
 	t.Helper()
 	registry := tool.NewRegistry()
 	if err := registry.RegisterAll(tools); err != nil {

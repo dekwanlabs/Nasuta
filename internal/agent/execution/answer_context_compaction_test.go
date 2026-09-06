@@ -277,7 +277,7 @@ type answerCompactionObserver struct {
 func (*answerCompactionObserver) OnStep(
 	context.Context,
 	string,
-	StepRecord,
+	run.StepRecord,
 ) error {
 	return nil
 }

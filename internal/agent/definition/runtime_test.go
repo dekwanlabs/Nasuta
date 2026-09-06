@@ -178,6 +178,7 @@ func newTestDefinitionRuntime(
 		registry,
 		settings,
 		store,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
@@ -580,7 +581,7 @@ func TestDefinitionRuntimeBroadcastsTerminalWhenRunCreationFails(t *testing.T) {
 	)
 	request := testDefinitionRequest(definition)
 	request.RunID = "run-create-fail"
-	terminalEvents := runtime.Hub().Subscribe(request.RunID)
+	terminalEvents := runtime.hub.Subscribe(request.RunID)
 
 	result, err := runtime.Run(t.Context(), request)
 	if err == nil || !strings.Contains(err.Error(), "create definition run") {
@@ -736,7 +737,7 @@ func TestDefinitionManagedRunAccountsPreparationAndDefersTerminal(t *testing.T) 
 	)
 	request := testDefinitionRequest(definition)
 	request.RunID = "managed-usage-run"
-	events := runtime.Hub().Subscribe(request.RunID)
+	events := runtime.hub.Subscribe(request.RunID)
 	managed, err := runtime.Begin(t.Context(), runStart(request))
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
@@ -790,7 +791,7 @@ func TestDefinitionManagedRunFailureFinishesOnce(t *testing.T) {
 	)
 	request := testDefinitionRequest(definition)
 	request.RunID = "managed-failed-run"
-	events := runtime.Hub().Subscribe(request.RunID)
+	events := runtime.hub.Subscribe(request.RunID)
 	managed, err := runtime.Begin(t.Context(), runStart(request))
 	if err != nil {
 		t.Fatalf("Begin: %v", err)

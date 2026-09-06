@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"strings"
 	"time"
 
@@ -155,14 +156,14 @@ func hasModelParameters(parameters llm.ModelParameters) bool {
 type Agent struct {
 	llm                *llm.LLMClient
 	executor           *ToolExecutor
-	observer           Observer
-	controller         Controller
+	observer           run.Observer
+	controller         run.Controller
 	cfg                Config
 	onFirstAnswerToken func(runID string)
 }
 
 // NewAgent builds an Agent with optional observer/controller hooks.
-func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config Config, observer Observer, controller Controller) *Agent {
+func NewAgent(client *llm.LLMClient, executor *ToolExecutor, config Config, observer run.Observer, controller run.Controller) *Agent {
 	if executor == nil {
 		executor = NewToolExecutor(tool.NewRegistry())
 	}
@@ -188,7 +189,7 @@ type RunResult struct {
 	OutputMode           agentapi.RunOutputMode
 	Answer               string
 	Steps                int
-	Evidence             EvidenceMetrics
+	Evidence             run.EvidenceMetrics
 	EvidenceUnits        []tool.EvidenceUnit
 	EvidenceObservations []agentapi.EvidenceObservation
 	EvidenceConflicts    []evidence.Conflict
@@ -284,7 +285,7 @@ func (agent *Agent) RunWithSnapshot(
 	conversation ConversationContext,
 	retrieved *retrieval.RetrievedContext,
 	plan domain.EvidencePlan,
-	policy ToolPolicy,
+	policy tool.Policy,
 	toolSnapshot tool.Snapshot,
 ) (*RunResult, error) {
 	return agent.runWithSnapshot(
@@ -306,7 +307,7 @@ func (agent *Agent) runWithSnapshot(
 	conversation ConversationContext,
 	retrieved *retrieval.RetrievedContext,
 	plan domain.EvidencePlan,
-	policy ToolPolicy,
+	policy tool.Policy,
 	toolSnapshot tool.Snapshot,
 ) (*RunResult, error) {
 	query := domain.QueryPlan{}
@@ -497,11 +498,11 @@ func (agent *Agent) handleControl(
 		switch signal.Kind {
 		default:
 			return false
-		case CtrlAbort:
+		case run.CtrlAbort:
 			result.Aborted = true
 			log.InfofCtx(ctx, "[agent] run %s aborted by user at step %d", runID, step)
 			return true
-		case CtrlPause:
+		case run.CtrlPause:
 			log.InfofCtx(ctx, "[agent] run %s paused at step %d", runID, step)
 			if err := agent.controller.WaitResume(ctx, runID); err != nil {
 				result.Aborted = true
@@ -509,7 +510,7 @@ func (agent *Agent) handleControl(
 				return true
 			}
 			log.InfofCtx(ctx, "[agent] run %s resumed", runID)
-		case CtrlNudge:
+		case run.CtrlNudge:
 			if signal.Message == "" {
 				continue
 			}

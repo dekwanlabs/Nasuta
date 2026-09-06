@@ -232,7 +232,7 @@ func TestDefinitionRuntimeRedactsPublicAndTerminalResults(t *testing.T) {
 	)
 	request := testDefinitionRequest(definition)
 	request.Policy.RedactSensitive = true
-	events := runtime.Hub().Subscribe(request.RunID)
+	events := runtime.hub.Subscribe(request.RunID)
 
 	result, err := runtime.Run(t.Context(), request)
 	if err != nil {

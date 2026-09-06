@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,12 +13,12 @@ import (
 )
 
 func TestAPIQARunControlRoutesAgentAbortToHub(t *testing.T) {
-	handler, mock, closeDB := newRunControlHandler(t)
+	handler, db, mock, closeDB := newRunControlHandler(t)
 	defer closeDB()
 	hub := agentrun.NewHub(nil)
 	handler.qaRuntimeFn = func() QARuntime {
 		return QARuntime{
-			RunStore: handler.persistentRunStore,
+			RunStore: agentrun.Bind(db),
 			Hub:      hub,
 		}
 	}
@@ -59,14 +60,14 @@ func TestAPIQARunControlRequiresRunStore(t *testing.T) {
 
 func newRunControlHandler(
 	t *testing.T,
-) (*Handler, sqlmock.Sqlmock, func()) {
+) (*Handler, *sql.DB, sqlmock.Sqlmock, func()) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	handler := &Handler{persistentRunStore: agentrun.Bind(db)}
-	return handler, mock, func() {
+	handler := &Handler{}
+	return handler, db, mock, func() {
 		_ = db.Close()
 	}
 }

@@ -1,6 +1,7 @@
 package qa
 
 import (
+	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -15,7 +16,7 @@ func TestWithoutToolRemovesSessionDetailsFromRunSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	registry := NewRegistry(&ToolService{}, config.Config{}, memory.NewSessionStore(db), nil)
+	registry := NewRegistry(&tools.Service{}, config.Config{}, memory.NewSessionStore(db), nil)
 	snapshot := registry.Snapshot(tool.ReadPolicy())
 	if _, ok := snapshot.Get("get_turn"); !ok {
 		t.Fatal("registered detail tool missing")

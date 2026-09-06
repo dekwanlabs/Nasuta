@@ -2,6 +2,10 @@ package qa
 
 import (
 	"context"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
+	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
@@ -14,20 +18,18 @@ import (
 
 // Deps bundles the services needed by the QA scenario.
 type Deps struct {
-	Tools           *ToolService
+	Tools           *tools.Service
 	Cfg             config.Config
 	Platform        *config.PlatformSettings
 	CodeGraphDB     *codegraph.DB
-	History         SessionHistory
+	History         session.History
 	Sessions        *memory.SessionStore
 	Memory          *memory.MemoryStore
-	Definitions     DefinitionResolver
+	Definitions     definition.Resolver
 	Agent           agentapi.DefinitionRef
-	Runtime         agentapi.ManagedRuntime
-	RuntimeTools    ScenarioToolSource
+	Runtime         RuntimePort
+	Events          EventSink
 	Models          *Models
-	PhaseEmitter    PhaseEmitter
-	ExecutionEvents ExecutionEventEmitter
 	WriteAvailable  bool
 }
 
@@ -72,7 +74,7 @@ type ToolPlan struct {
 // Request is the stable use-case input for standard and scenario handlers.
 type Request struct {
 	Question         string
-	Conversation     ConversationContext
+	Conversation     execution.ConversationContext
 	PreloadedContext []ContextBlock
 	UserID           int64
 	RolePrompt       string

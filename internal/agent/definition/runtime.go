@@ -101,6 +101,7 @@ func NewRuntime(
 	registry *tool.Registry,
 	settings *config.PlatformSettings,
 	runStore *run.Store,
+	hub *run.Hub,
 ) (*Runtime, error) {
 	if definitions == nil {
 		return nil, fmt.Errorf("definition runtime: definition resolver is required")
@@ -130,7 +131,9 @@ func NewRuntime(
 	if runStore != nil {
 		usageStore = runStore
 	}
-	hub := run.NewHub(runStore)
+	if hub == nil {
+		hub = run.NewHub(runStore)
+	}
 	return &Runtime{
 		definitions: definitions,
 		schemas:     schemas,
@@ -157,82 +160,6 @@ func (runtime *Runtime) SetDelegationAwaiter(awaiter execution.DelegationAwaiter
 		return
 	}
 	runtime.delegationAwaiter = awaiter
-}
-
-// Hub exposes the Runtime-owned event and control boundary.
-func (runtime *Runtime) Hub() *run.Hub {
-	if runtime == nil {
-		return nil
-	}
-	return runtime.hub
-}
-
-// EmitPhase publishes QA preparation progress without exposing RunHub ownership.
-func (runtime *Runtime) EmitPhase(runID, text string) {
-	if runtime != nil && runtime.hub != nil {
-		runtime.hub.EmitPhase(runID, text)
-	}
-}
-
-func (runtime *Runtime) EmitStatus(runID, text, code string, elapsedMS int64) {
-	if runtime != nil && runtime.hub != nil {
-		runtime.hub.EmitStatus(runID, text, code, elapsedMS)
-	}
-}
-
-func (runtime *Runtime) EmitSessionStatus(runID string, event run.SessionStatusEvent) {
-	if runtime != nil && runtime.hub != nil {
-		runtime.hub.EmitSessionStatus(runID, event)
-	}
-}
-
-func (runtime *Runtime) EmitContextUsage(runID string, event run.ContextUsageEvent) {
-	if runtime != nil && runtime.hub != nil {
-		runtime.hub.OnContextUsage(context.Background(), runID, event)
-	}
-}
-
-// EmitEvent publishes scenario progress through the shared QA stream.
-func (runtime *Runtime) EmitEvent(
-	eventType run.EventType,
-	event run.ExecutionEvent,
-) {
-	if runtime != nil && runtime.hub != nil {
-		runtime.hub.EmitEvent(eventType, event)
-	}
-}
-
-// EmitToolStarted implements run.ExecutionEventEmitter for direct tool events.
-func (runtime *Runtime) EmitToolStarted(runID string, event run.ToolStartedEvent) {
-	if runtime != nil && runtime.hub != nil {
-		runtime.hub.EmitToolStarted(runID, event)
-	}
-}
-
-// EmitToolFinished implements run.ExecutionEventEmitter for direct tool events.
-func (runtime *Runtime) EmitToolFinished(runID string, event run.ToolFinishedEvent) {
-	if runtime != nil && runtime.hub != nil {
-		runtime.hub.EmitToolFinished(runID, event)
-	}
-}
-
-// ProjectToolEvents mirrors a child Agent's tool lifecycle onto the parent QA
-// stream without exposing Hub ownership to Workflow execution.
-func (runtime *Runtime) ProjectToolEvents(
-	childRunID string,
-	parentRunID string,
-	workflowRunID string,
-	nodeID string,
-) func() {
-	if runtime == nil || runtime.hub == nil {
-		return func() {}
-	}
-	return runtime.hub.ProjectToolEvents(
-		childRunID,
-		parentRunID,
-		workflowRunID,
-		nodeID,
-	)
 }
 
 // ScenarioToolSet pins tools used while a scenario prepares one RunRequest.

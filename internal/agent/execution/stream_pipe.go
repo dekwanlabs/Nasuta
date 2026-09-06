@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"sync"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 
 // StreamPipe records provider timing and publishes only validated answer output.
 type StreamPipe struct {
-	observer   Observer
+	observer   run.Observer
 	runID      string
 	stepNo     int
 	discarding bool
@@ -32,7 +33,7 @@ type StreamTiming struct {
 }
 
 func newStreamPipe(
-	observer Observer,
+	observer run.Observer,
 	runID string,
 	stepNo int,
 	started time.Time,

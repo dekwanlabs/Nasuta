@@ -10,6 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/scope"
+
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
 	"github.com/dekwanlabs/nasuta/internal/agent/messages"
@@ -28,15 +32,15 @@ import (
 
 func (svc *Service) submitRun(
 	ctx context.Context,
-	run agentapi.ManagedRun,
+	managedRun agentapi.ManagedRun,
 	prepared *preparation,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	admitted *admittedEvidence,
 ) (*AskResult, error) {
 	request := prepared.request
 	definition := prepared.definition
 	log.InfofCtx(ctx, "[qa] submit runID=%s agent=%s@%d", request.RunID, definition.ID, definition.Version)
-	builtMessages := buildAgentMessages(
+	builtMessages := execution.BuildMessages(
 		request.Question,
 		prepared.analysis.QueryPlan,
 		conversation,
@@ -74,9 +78,9 @@ func (svc *Service) submitRun(
 	// The final RunRequest must use the re-assembled conversation session.
 	runRequest.Correlation.SessionID = conversation.SessionID
 	ctx = svc.withDelegationParentContext(ctx, prepared, runRequest)
-	ctx = withSessionToolScope(ctx, conversation, request.UserID)
+	ctx = session.WithToolScope(ctx, conversation.SessionID, conversation.CompactedThroughTurn, request.UserID)
 
-	go svc.executeSubmittedRun(ctx, run, prepared, conversation, runRequest)
+	go svc.executeSubmittedRun(ctx, managedRun, prepared, conversation, runRequest)
 	return &AskResult{RunID: request.RunID, Context: admitted.Retrieved}, nil
 }
 
@@ -115,41 +119,41 @@ func (svc *Service) withDelegationParentContext(
 
 func (svc *Service) executeSubmittedRun(
 	ctx context.Context,
-	run agentapi.ManagedRun,
+	managedRun agentapi.ManagedRun,
 	prepared *preparation,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	request agentapi.RunRequest,
 ) {
 	defer prepared.closeTrace()
-	result, err := run.Execute(ctx, request)
+	result, err := managedRun.Execute(ctx, request)
 	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] runtime run %s failed: %v", request.RunID, err)
 		code := "runtime_failed"
 		if errors.Is(err, agentapi.ErrBudgetExceeded) {
 			code = "budget_exhausted"
 		}
-		svc.finishRunWithError(ctx, run, request.RunID, code, err)
+		svc.finishRunWithError(ctx, managedRun, request.RunID, code, err)
 		return
 	}
 
-	outcomeRunner, ok := run.(interface{ Outcome() RunOutcome })
+	outcomeRunner, ok := managedRun.(interface{ Outcome() run.Outcome })
 	if !ok {
 		svc.finishRunWithError(
-			ctx, run, request.RunID, "runtime_outcome_unavailable",
+			ctx, managedRun, request.RunID, "runtime_outcome_unavailable",
 			fmt.Errorf("managed run does not expose a durable outcome"),
 		)
 		return
 	}
 	outcome := outcomeRunner.Outcome()
 	svc.logRunOutcome(ctx, request.RunID, outcome)
-	if outcome.Status == RunStatusDone {
+	if outcome.Status == run.StatusDone {
 		if err := svc.persistTurn(
 			context.WithoutCancel(ctx), request.RunID, conversation.SessionID,
 			request.Actor.UserID, prepared.request.Question, outcome,
 		); err != nil {
 			log.ErrorfCtx(ctx, "[qa] persist completed run %s session turn: %v", request.RunID, err)
 			svc.finishRunWithError(
-				ctx, run, request.RunID, "session_persistence_failed", err,
+				ctx, managedRun, request.RunID, "session_persistence_failed", err,
 			)
 			return
 		}
@@ -159,7 +163,7 @@ func (svc *Service) executeSubmittedRun(
 			prepared.definition.Model.MaxOutputTokens,
 		)
 	}
-	if err := run.Finish(nil); err != nil {
+	if err := managedRun.Finish(nil); err != nil {
 		log.ErrorfCtx(ctx, "[qa] finish run %s: %v", request.RunID, err)
 		return
 	}
@@ -168,12 +172,12 @@ func (svc *Service) executeSubmittedRun(
 
 func (svc *Service) finishRunWithError(
 	ctx context.Context,
-	run agentapi.ManagedRun,
+	managedRun agentapi.ManagedRun,
 	runID string,
 	code string,
 	err error,
 ) {
-	if finishErr := run.Finish(&agentapi.RunError{Code: code, Message: err.Error()}); finishErr != nil {
+	if finishErr := managedRun.Finish(&agentapi.RunError{Code: code, Message: err.Error()}); finishErr != nil {
 		log.ErrorfCtx(ctx, "[qa] finish failed run %s code=%s: %v", runID, code, finishErr)
 	}
 }
@@ -181,15 +185,15 @@ func (svc *Service) finishRunWithError(
 func (svc *Service) logRunOutcome(
 	ctx context.Context,
 	runID string,
-	outcome RunOutcome,
+	outcome run.Outcome,
 ) {
 	switch outcome.Status {
-	case RunStatusFailed:
+	case run.StatusFailed:
 		log.ErrorfCtx(ctx,
 			"[qa] runtime run %s completed with failed outcome code=%s error=%v",
 			runID, outcome.ErrorCode, outcome.Err,
 		)
-	case RunStatusAborted:
+	case run.StatusAborted:
 		log.InfofCtx(ctx,
 			"[qa] runtime run %s completed with aborted outcome code=%s error=%v",
 			runID, outcome.ErrorCode, outcome.Err,
@@ -200,12 +204,12 @@ func (svc *Service) logRunOutcome(
 func (svc *Service) extractRunMemory(
 	ctx context.Context,
 	prepared *preparation,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	result agentapi.RunResult,
-	outcome RunOutcome,
+	outcome run.Outcome,
 ) {
 	userID := prepared.request.UserID
-	if !memoryExtractionAllowed(outcome, resultFromPublic(result)) || svc.memory == nil || userID == 0 {
+	if !memoryExtractionAllowed(outcome) || svc.memory == nil || userID == 0 {
 		return
 	}
 	memCtx := llm.WithUsagePhase(context.WithoutCancel(ctx), llm.PhaseMemoryExtract)
@@ -234,7 +238,7 @@ func (svc *Service) extractRunMemory(
 	extraction, err := extractMemories(memCtx, memoryExtractInput{
 		Client: svc.helperLLM, Question: question, Answer: answer,
 		Existing:       recalled.Result.Matches,
-		EvidenceStatus: EvidenceStatus(result.Evidence.Status),
+		EvidenceStatus: run.EvidenceStatus(result.Evidence.Status),
 	})
 	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] memory extraction error: %v", err)
@@ -251,11 +255,11 @@ func (svc *Service) extractRunMemory(
 
 func (svc *Service) answerContext(
 	ctx context.Context,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	recalled []memory.MemoryRecord,
 	rolePrompt string,
 	rc *retrieval.RetrievedContext,
-) ConversationContext {
+) execution.ConversationContext {
 	instructions := append([]llm.Message{}, conversation.Instructions...)
 	if len(recalled) > 0 {
 		var memoryInjectSpec = runtrace.Spec[[]memory.MemoryRecord, string]{
@@ -335,9 +339,9 @@ func flowSubjects(query domain.QueryPlan) []string {
 }
 
 func runPermissions(allowWrite bool) agentapi.PermissionPolicy {
-	scopes := []string{knowledgeReadScope}
+	scopes := []string{scope.KnowledgeRead}
 	if allowWrite {
-		scopes = append(scopes, knowledgeWriteScope)
+		scopes = append(scopes, scope.KnowledgeWrite)
 	}
 	return agentapi.PermissionPolicy{Scopes: scopes}
 }
@@ -371,14 +375,7 @@ func orderedToolIDs(tools []tool.Tool, selected map[tool.ToolID]struct{}) []stri
 	return ids
 }
 
-func resultFromPublic(result agentapi.RunResult) *RunResult {
-	return &RunResult{
-		Answer: result.Text, ForcedConclusion: result.Evidence.ForcedConclusion,
-		Evidence: EvidenceMetrics{Status: EvidenceStatus(result.Evidence.Status)},
-	}
-}
-
-func (svc *Service) persistTurn(ctx context.Context, runID, sessionID string, userID int64, question string, outcome RunOutcome) error {
+func (svc *Service) persistTurn(ctx context.Context, runID, sessionID string, userID int64, question string, outcome run.Outcome) error {
 	if svc.sessions == nil {
 		return nil
 	}
@@ -392,7 +389,7 @@ func persistTurn(
 	sessionID string,
 	userID int64,
 	question string,
-	outcome RunOutcome,
+	outcome run.Outcome,
 ) error {
 	if sessionID == "" {
 		return nil

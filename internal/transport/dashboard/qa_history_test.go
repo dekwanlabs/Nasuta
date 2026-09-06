@@ -26,7 +26,7 @@ func TestQAHistoryPageRestoresEvidenceOnFinalAnswer(t *testing.T) {
 			"total_tokens", "cost_micros", "tool_call_count",
 		}))
 	mock.ExpectExec(`UPDATE agent_work_items SET state=\?,lease_owner=''`+
-		`.*WHERE state=\? AND lease_expires_at IS NOT NULL AND lease_expires_at<=UTC_TIMESTAMP\(\)` ).
+		`.*WHERE state=\? AND lease_expires_at IS NOT NULL AND lease_expires_at<=UTC_TIMESTAMP\(\)`).
 		WithArgs(
 			run.WorkReady, sqlmock.AnyArg(), "worker lease expired during recovery", sqlmock.AnyArg(),
 			run.WorkRunning,
@@ -37,7 +37,7 @@ func TestQAHistoryPageRestoresEvidenceOnFinalAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	handler := &Handler{persistentRunStore: runStore}
+	handler := &Handler{qaRuntimeFn: func() QARuntime { return QARuntime{RunStore: runStore} }}
 	mock.ExpectQuery(`SELECT id,evidence_status.*FROM agent_runs WHERE user_id=\? AND session_id=\? AND id IN \(\?\)`).
 		WithArgs(int64(42), "session-1", "run-1").
 		WillReturnRows(sqlmock.NewRows([]string{

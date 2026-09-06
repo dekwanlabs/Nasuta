@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -13,7 +14,7 @@ func TestMergeOutcomeReferencesUnionsRetrievedAndDynamic(t *testing.T) {
 		{Type: tool.ReferenceRunbook, Label: "design", Target: "doc-abc"},
 		{Type: tool.ReferenceCode, Target: "rules.yaml"},
 	}
-	merged := mergeOutcomeReferences(retrieved, dynamic)
+	merged := execution.MergeOutcomeReferences(retrieved, dynamic)
 	if len(merged) != 3 {
 		t.Fatalf("merged = %#v, want 3", merged)
 	}

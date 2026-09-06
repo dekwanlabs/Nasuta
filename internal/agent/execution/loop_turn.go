@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -261,9 +262,9 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 	turn.stream.Publish(result.Content)
 	state.result.Answer += result.Content
 	state.stepSeq++
-	_ = agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
+	_ = agent.observer.OnStep(state.runCtx, state.runID, run.StepRecord{
 		StepNo:              state.stepSeq,
-		Kind:                StepKindAnswer,
+		Kind:                run.StepKindAnswer,
 		Content:             result.Content,
 		DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions),
 		TokenDelta:          utf8.RuneCountInString(result.Content),
@@ -315,9 +316,9 @@ func (agent *Agent) interceptAnswerTurn(state *compiledLoop, turn modelTurn, res
 		turn.stream.Publish(result.Content)
 		state.result.Answer += result.Content
 		state.stepSeq++
-		_ = agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
+		_ = agent.observer.OnStep(state.runCtx, state.runID, run.StepRecord{
 			StepNo:              state.stepSeq,
-			Kind:                StepKindAnswer,
+			Kind:                run.StepKindAnswer,
 			Content:             result.Content,
 			DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions),
 			TokenDelta:          utf8.RuneCountInString(result.Content),
@@ -367,9 +368,9 @@ func (agent *Agent) recordThinkTurn(state *compiledLoop, turn modelTurn) error {
 		reasoning = turn.result.Content
 	}
 	state.stepSeq++
-	if err := agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
+	if err := agent.observer.OnStep(state.runCtx, state.runID, run.StepRecord{
 		StepNo:              state.stepSeq,
-		Kind:                StepKindThink,
+		Kind:                run.StepKindThink,
 		Content:             reasoning,
 		PromptContent:       turn.result.Content,
 		AuthoritativeSHA256: toolContentSHA256(reasoning),
@@ -454,9 +455,9 @@ func (agent *Agent) runToolCall(
 ) (llm.ToolCall, ToolExecution, error) {
 	state.result.Evidence.ToolCallCount++
 	state.stepSeq++
-	if err := agent.observer.OnStep(state.runCtx, state.runID, StepRecord{
+	if err := agent.observer.OnStep(state.runCtx, state.runID, run.StepRecord{
 		StepNo:     state.stepSeq,
-		Kind:       StepKindToolCall,
+		Kind:       run.StepKindToolCall,
 		ToolCallID: call.ID,
 		Tool:       call.Function.Name,
 		Args:       call.Function.Arguments,

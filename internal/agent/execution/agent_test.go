@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -477,10 +478,10 @@ func TestRunForcesConclusionAfterToolFailure(t *testing.T) {
 	if got := strings.Join(observer.tokens, ""); got != result.Answer {
 		t.Fatalf("streamed answer = %q, want %q", got, result.Answer)
 	}
-	var failedResult *StepRecord
+	var failedResult *run.StepRecord
 	for index := range observer.steps {
 		step := &observer.steps[index]
-		if step.Kind == StepKindToolResult {
+		if step.Kind == run.StepKindToolResult {
 			failedResult = step
 			break
 		}
@@ -803,7 +804,7 @@ func TestRunRecoversFromEmptyStopWithForcedConclusion(t *testing.T) {
 	if result.Err != nil || result.Answer != "根据已有证据给出结论。" {
 		t.Fatalf("result = %#v", result)
 	}
-	if !result.ForcedConclusion || !result.Evidence.ForcedConclusion || result.Evidence.Status != EvidenceNotRequired {
+	if !result.ForcedConclusion || !result.Evidence.ForcedConclusion || result.Evidence.Status != run.EvidenceNotRequired {
 		t.Fatalf("forced conclusion evidence = %#v", result.Evidence)
 	}
 	if atomic.LoadInt32(&calls) != 2 {
@@ -865,12 +866,12 @@ func TestGenerateWithContinue_StreamsTokens(t *testing.T) {
 // captureObserver records OnStep/OnToken/OnReasoning calls for assertions
 // about what the hub (and thus SSE clients) would see during a run.
 type captureObserver struct {
-	steps     []StepRecord
+	steps     []run.StepRecord
 	tokens    []string
 	reasoning []string
 }
 
-func (c *captureObserver) OnStep(_ context.Context, _ string, s StepRecord) error {
+func (c *captureObserver) OnStep(_ context.Context, _ string, s run.StepRecord) error {
 	c.steps = append(c.steps, s)
 	return nil
 }
@@ -882,14 +883,14 @@ func (c *captureObserver) OnReasoning(_ context.Context, _ string, tok string) {
 }
 
 type failingStepObserver struct {
-	steps []StepRecord
+	steps []run.StepRecord
 	err   error
 }
 
 func (observer *failingStepObserver) OnStep(
 	_ context.Context,
 	_ string,
-	step StepRecord,
+	step run.StepRecord,
 ) error {
 	observer.steps = append(observer.steps, step)
 	return observer.err
@@ -922,7 +923,7 @@ func TestExecuteToolTurnStopsWhenToolCallCannotBePersisted(t *testing.T) {
 		t.Fatalf("result error = %v", state.result.Err)
 	}
 	if len(observer.steps) != 1 ||
-		observer.steps[0].Kind != StepKindToolCall ||
+		observer.steps[0].Kind != run.StepKindToolCall ||
 		observer.steps[0].ToolCallID != "call-persist-failed" {
 		t.Fatalf("steps = %#v", observer.steps)
 	}
@@ -962,7 +963,7 @@ func TestRecordThinkTurnPersistsToolReasoning(t *testing.T) {
 		t.Fatalf("steps = %#v", observer.steps)
 	}
 	step := observer.steps[0]
-	if step.Kind != StepKindThink ||
+	if step.Kind != run.StepKindThink ||
 		step.Content != turn.result.Reasoning ||
 		step.PromptContent != turn.result.Content ||
 		step.AuthoritativeSHA256 != toolContentSHA256(turn.result.Reasoning) ||
@@ -1068,12 +1069,12 @@ func TestRunDeliversFreshToolOutputWithoutLoss(t *testing.T) {
 		t.Fatalf("result = %+v", result)
 	}
 
-	var callTrace, resultTrace *StepRecord
+	var callTrace, resultTrace *run.StepRecord
 	for i := range observer.steps {
 		switch observer.steps[i].Kind {
-		case StepKindToolCall:
+		case run.StepKindToolCall:
 			callTrace = &observer.steps[i]
-		case StepKindToolResult:
+		case run.StepKindToolResult:
 			resultTrace = &observer.steps[i]
 		}
 	}
@@ -1131,7 +1132,7 @@ func TestForceConclusion_StreamsLiveAndRecordsAnswer(t *testing.T) {
 	// And it must be recorded as an answer step.
 	var sawAnswer bool
 	for _, s := range obs.steps {
-		if s.Kind == StepKindAnswer {
+		if s.Kind == run.StepKindAnswer {
 			sawAnswer = true
 		}
 	}

@@ -229,6 +229,11 @@ func (hub *Hub) OnLLMCall(_ context.Context, runID string, call llm.CallLifecycl
 	hub.broadcast(runID, SSEEvent{Type: EventLLMCall, Data: call})
 }
 
+// EmitContextUsage adapts the QA preparation projection to the shared hub.
+func (hub *Hub) EmitContextUsage(runID string, event ContextUsageEvent) {
+	hub.OnContextUsage(context.Background(), runID, event)
+}
+
 // OnContextUsage publishes and retains the largest projected context footprint
 // observed during a run. The peak stays independent of provider input usage
 // because compaction can reduce the payload before the provider sees it.

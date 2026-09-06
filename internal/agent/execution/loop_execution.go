@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -147,14 +148,14 @@ func (agent *Agent) prepareTools(
 	return tools
 }
 
-func (state *compiledLoop) recordSeedEvidence(observer Observer) {
+func (state *compiledLoop) recordSeedEvidence(observer run.Observer) {
 	if state.input.EvidenceContent == "" {
 		return
 	}
 	state.stepSeq++
-	_ = observer.OnStep(state.runCtx, state.runID, StepRecord{
+	_ = observer.OnStep(state.runCtx, state.runID, run.StepRecord{
 		StepNo:     state.stepSeq,
-		Kind:       StepKindRetrieval,
+		Kind:       run.StepKindRetrieval,
 		Content:    state.input.EvidenceContent,
 		TokenDelta: utf8.RuneCountInString(state.input.EvidenceContent),
 		CreatedAt:  time.Now(),

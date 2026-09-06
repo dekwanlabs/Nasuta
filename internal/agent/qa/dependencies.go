@@ -4,69 +4,25 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 
+	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/definition"
-	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
-	"github.com/dekwanlabs/nasuta/internal/agent/session"
-	"github.com/dekwanlabs/nasuta/internal/agent/tools"
-	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
-	"github.com/dekwanlabs/nasuta/internal/scope"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-type ConversationContext = execution.ConversationContext
-type RunResult = execution.RunResult
-type ToolService = tools.Service
-type SessionHistory = session.History
-type HistoryCandidates = session.HistoryCandidates
-type CandidateDiscovery = session.CandidateDiscovery
-type DefinitionResolver = definition.Resolver
-type ScenarioToolSet = definition.ScenarioToolSet
-type ScenarioToolSource = definition.ScenarioToolSource
-
-type RunOutcome = run.Outcome
-type RunStepRecord = run.StepRecord
-type EvidenceStatus = run.EvidenceStatus
-type EvidenceMetrics = run.EvidenceMetrics
-type ExecutionEvent = run.ExecutionEvent
-type ExecutionEventEmitter = run.ExecutionEventEmitter
-type SessionStatusEvent = run.SessionStatusEvent
-type ContextUsageEvent = run.ContextUsageEvent
-type EventType = run.EventType
-type ToolPolicy = tool.Policy
-type Tool = tool.Tool
-
-// PhaseEmitter is the complete QA progress projection contract. Keeping one
-// explicit interface avoids optional method assertions at every emission site.
-type PhaseEmitter interface {
+// EventSink is the single QA progress and execution-event projection
+// contract. It merges the previous PhaseEmitter and ExecutionEventEmitter
+// fields, which were always the same *run.Hub instance injected twice.
+type EventSink interface {
 	EmitPhase(string, string)
 	EmitStatus(string, string, string, int64)
-	EmitContextUsage(string, ContextUsageEvent)
-	EmitSessionStatus(string, SessionStatusEvent)
+	EmitContextUsage(string, run.ContextUsageEvent)
+	EmitSessionStatus(string, run.SessionStatusEvent)
+	EmitEvent(run.EventType, run.ExecutionEvent)
 }
-
-const (
-	RunStatusDone    = run.StatusDone
-	RunStatusFailed  = run.StatusFailed
-	RunStatusAborted = run.StatusAborted
-
-	EvidenceComplete    = run.EvidenceComplete
-	EvidencePartial     = run.EvidencePartial
-	EvidenceUnavailable = run.EvidenceUnavailable
-
-	EventExecutionRouted   = run.EventExecutionRouted
-	EventExecutionDegraded = run.EventExecutionDegraded
-
-	knowledgeReadScope  = scope.KnowledgeRead
-	knowledgeWriteScope = scope.KnowledgeWrite
-)
-
-var ErrEmptyAnswer = run.ErrEmptyAnswer
 
 type sessionTurnStore interface {
 	EnsureSession(string, int64, string) error
@@ -93,8 +49,8 @@ func recordEvidenceLedger(
 	return recorder.RecordEvidence(ctx, units)
 }
 
-func toolPolicyForRun(allowWrite bool) ToolPolicy {
-	return ToolPolicy{
+func toolPolicyForRun(allowWrite bool) tool.Policy {
+	return tool.Policy{
 		AllowRead:  true,
 		AllowWrite: allowWrite,
 	}
@@ -111,41 +67,10 @@ func hashString(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func buildAgentMessages(
-	question string,
-	query domain.QueryPlan,
-	conversation ConversationContext,
-	rc *retrieval.RetrievedContext,
-	plan domain.EvidencePlan,
-	domainKnowledge string,
-	historyLimit int,
-) []llm.Message {
-	return execution.BuildMessages(
-		question, query, conversation, rc, plan, domainKnowledge, historyLimit,
-	)
-}
-
-func replayableTailMessages(messages []llm.Message, limit int) []llm.Message {
-	return execution.ReplayableTailMessages(messages, limit)
-}
-
-func shouldShortCircuitMeta(question string) bool {
-	return execution.ShouldShortCircuitMeta(question)
-}
-
-func compressTurnDetail(turnNumber int, messages []llm.Message) (json.RawMessage, error) {
-	return session.CompressDetail(turnNumber, messages)
-}
-
-func withSessionToolScope(
-	ctx context.Context,
-	conversation ConversationContext,
-	userID int64,
-) context.Context {
-	return session.WithToolScope(
-		ctx,
-		conversation.SessionID,
-		conversation.CompactedThroughTurn,
-		userID,
-	)
+// RuntimePort is the single runtime boundary QA uses for preparation and
+// execution: the immutable managed-run lifecycle plus the scenario tool
+// source. Progress/event projection is the separate EventSink dependency.
+type RuntimePort interface {
+	agentapi.ManagedRuntime
+	definition.ScenarioToolSource
 }

@@ -1,6 +1,7 @@
 package qa
 
 import (
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"strings"
 	"testing"
 
@@ -77,7 +78,7 @@ func TestPrepareRunConversationSkipsDelegationContractWhenToolMissing(t *testing
 	}
 }
 
-func hasDelegationContract(conversation ConversationContext) bool {
+func hasDelegationContract(conversation execution.ConversationContext) bool {
 	for _, message := range conversation.Instructions {
 		if strings.Contains(message.Content, "DELEGATION_CONTRACT") &&
 			strings.Contains(message.Content, "delegate_investigation") {
@@ -87,7 +88,7 @@ func hasDelegationContract(conversation ConversationContext) bool {
 	return false
 }
 
-func hasPreferenceWithoutDirectAnswer(conversation ConversationContext) bool {
+func hasPreferenceWithoutDirectAnswer(conversation execution.ConversationContext) bool {
 	for _, message := range conversation.Instructions {
 		if !strings.Contains(message.Content, "Tool routing preference") {
 			continue

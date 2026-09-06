@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -218,9 +219,9 @@ func TestRunStripsDelegationAdoptionMetadataEverywhere(t *testing.T) {
 			t.Fatalf("session message leaked adoption marker: %#v", message)
 		}
 	}
-	var answerSteps []StepRecord
+	var answerSteps []run.StepRecord
 	for _, step := range observer.steps {
-		if step.Kind == StepKindAnswer {
+		if step.Kind == run.StepKindAnswer {
 			answerSteps = append(answerSteps, step)
 		}
 	}

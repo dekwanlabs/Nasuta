@@ -3,6 +3,9 @@ package qa
 import (
 	"context"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"strings"
 	"time"
 
@@ -20,17 +23,17 @@ import (
 
 type preparation struct {
 	request            Request
-	sourceConversation ConversationContext
+	sourceConversation execution.ConversationContext
 	ctx                context.Context
 	trace              *runtrace.Scope
 	ownsTrace          bool
-	toolPolicy         ToolPolicy
-	candidateToolSet   ScenarioToolSet
+	toolPolicy         tool.Policy
+	candidateToolSet   definition.ScenarioToolSet
 	toolCandidates     []retrieval.ToolRouteCandidate
 	planning           evidencePlanningOutput
 	analysis           queryAnalysisOutput
 	execution          executionRouteDecision
-	historyCandidates  *HistoryCandidates
+	historyCandidates  *session.HistoryCandidates
 	runLimits          agentapi.RunLimits
 	definition         agentapi.Definition
 	selection          agentapi.DefinitionSelection
@@ -138,7 +141,7 @@ func (svc *Service) initializePreparation(
 	prepared.toolPolicy = toolPolicyForRun(
 		svc.writeAvailable.Load() && request.WriteAuthorized && request.WriteRequested,
 	)
-	prepared.candidateToolSet = svc.runtimeTools.ToolsFor(prepared.toolPolicy)
+	prepared.candidateToolSet = svc.runtime.ToolsFor(prepared.toolPolicy)
 	if request.Conversation.CompactedThroughTurn <= 0 || svc.history == nil {
 		prepared.candidateToolSet = withoutHistoryTools(prepared.candidateToolSet)
 	}
@@ -344,7 +347,7 @@ func (svc *Service) reassembleConversation(
 	return nil
 }
 
-func (svc *Service) prepareRunConversation(prepared *preparation) ConversationContext {
+func (svc *Service) prepareRunConversation(prepared *preparation) execution.ConversationContext {
 	conversation := prepared.request.Conversation
 	routedToolIDs := prepared.planning.RoutedToolIDs
 	delegation := parentDelegationInstruction(prepared)

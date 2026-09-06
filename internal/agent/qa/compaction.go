@@ -3,6 +3,7 @@ package qa
 import (
 	"context"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
@@ -19,12 +20,12 @@ import (
 func (svc *Service) compactAnswer(
 	ctx context.Context,
 	prepared *preparation,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	rc *retrieval.RetrievedContext,
 	plan domain.EvidencePlan,
 	contextWindow int,
 	outputReserve int,
-) (ConversationContext, error) {
+) (execution.ConversationContext, error) {
 	if contextWindow <= 0 {
 		return conversation, nil
 	}
@@ -90,7 +91,7 @@ func (svc *Service) compactAnswer(
 
 func (svc *Service) compactionProjectionFor(
 	prepared *preparation,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	rc *retrieval.RetrievedContext,
 	plan domain.EvidencePlan,
 	contextWindow int,
@@ -106,7 +107,7 @@ func (svc *Service) compactionProjectionFor(
 func (svc *Service) runAnswerCompaction(
 	ctx context.Context,
 	prepared *preparation,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	incomingTokens, projectedTokens, contextWindow, outputReserve int,
 ) (session.CompactionResult, bool, int, int, error) {
 	started := false
@@ -164,7 +165,7 @@ func (svc *Service) reportAnswerCompaction(
 func compactionProjection(
 	question string,
 	query domain.QueryPlan,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	rc *retrieval.RetrievedContext,
 	plan domain.EvidencePlan,
 	domainKnowledge string,
@@ -172,7 +173,7 @@ func compactionProjection(
 	outputReserve int,
 ) (int, int, error) {
 	definitions := execution.ToolDefinitions(tools)
-	projectedInput, err := execution.EstimateInputTokens(buildAgentMessages(
+	projectedInput, err := execution.EstimateInputTokens(execution.BuildMessages(
 		question, query, conversation, rc, plan, domainKnowledge, 0,
 	), definitions)
 	if err != nil {
@@ -183,7 +184,7 @@ func compactionProjection(
 	withoutSessionHistory.RecentTurns = nil
 	withoutSessionHistory.RecentDialogue = nil
 	withoutSessionHistory.HistoricalContext = ""
-	incomingTokens, err := execution.EstimateInputTokens(buildAgentMessages(
+	incomingTokens, err := execution.EstimateInputTokens(execution.BuildMessages(
 		question, query, withoutSessionHistory, rc, plan, domainKnowledge, 0,
 	), definitions)
 	if err != nil {
@@ -192,7 +193,7 @@ func compactionProjection(
 	return incomingTokens, projectedInput + max(0, outputReserve), nil
 }
 
-func sessionCompactionTools(prepared ScenarioToolSet, conversation ConversationContext) []tool.Tool {
+func sessionCompactionTools(prepared definition.ScenarioToolSet, conversation execution.ConversationContext) []tool.Tool {
 	if prepared == nil {
 		return nil
 	}
@@ -209,8 +210,8 @@ func sessionCompactionTools(prepared ScenarioToolSet, conversation ConversationC
 	return selected
 }
 
-func usageFromCompaction(result session.CompactionResult) ContextUsageEvent {
-	return ContextUsageEvent{
+func usageFromCompaction(result session.CompactionResult) run.ContextUsageEvent {
+	return run.ContextUsageEvent{
 		Phase:                 "session_pre_answer",
 		ProjectedBeforeTokens: result.ProjectedBeforeTokens,
 		ProjectedAfterTokens:  result.ProjectedAfterTokens,
@@ -227,16 +228,16 @@ func usageFromCompaction(result session.CompactionResult) ContextUsageEvent {
 func (svc *Service) refreshConversation(
 	ctx context.Context,
 	prepared *preparation,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	contextWindow int,
 	outputReserve int,
-) (ConversationContext, error) {
+) (execution.ConversationContext, error) {
 	session, err := svc.sessions.GetContextSnapshot(
 		conversation.SessionID, prepared.request.UserID,
 		memory.RecentTurnMetadataLimit, memory.RecentDialogueTurnLimit,
 	)
 	if err != nil {
-		return ConversationContext{}, fmt.Errorf("reload compacted session %q: %w", conversation.SessionID, err)
+		return execution.ConversationContext{}, fmt.Errorf("reload compacted session %q: %w", conversation.SessionID, err)
 	}
 	if session == nil {
 		return conversation, nil
@@ -258,7 +259,7 @@ func (svc *Service) refreshConversation(
 		OutputReserve: outputReserve,
 	})
 	if err != nil {
-		return ConversationContext{}, fmt.Errorf("assemble compacted session %q: %w", conversation.SessionID, err)
+		return execution.ConversationContext{}, fmt.Errorf("assemble compacted session %q: %w", conversation.SessionID, err)
 	}
 	return assembled.Conversation, nil
 }

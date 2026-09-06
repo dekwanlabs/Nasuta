@@ -2,13 +2,15 @@ package qa
 
 import (
 	"context"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/log"
 )
 
 type historyDiscoveryResult struct {
-	candidates HistoryCandidates
+	candidates session.HistoryCandidates
 	err        error
 }
 
@@ -19,15 +21,15 @@ type historyDiscoveryTask struct {
 
 func startHistoryDiscovery(
 	ctx context.Context,
-	history SessionHistory,
+	history session.History,
 	userID int64,
-	conversation ConversationContext,
+	conversation execution.ConversationContext,
 	question string,
 ) *historyDiscoveryTask {
 	if history == nil || conversation.CompactedThroughTurn <= 0 {
 		return nil
 	}
-	discovery, ok := history.(CandidateDiscovery)
+	discovery, ok := history.(session.CandidateDiscovery)
 	if !ok {
 		return nil
 	}
@@ -44,7 +46,7 @@ func resolveCandidates(
 	ctx context.Context,
 	task *historyDiscoveryTask,
 	relation retrieval.HistoryRelation,
-) *HistoryCandidates {
+) *session.HistoryCandidates {
 	if task == nil {
 		return nil
 	}

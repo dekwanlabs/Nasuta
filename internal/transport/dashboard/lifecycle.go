@@ -9,17 +9,13 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 )
 
-// currentQARuntime returns the platform-owned QA snapshot or the handler's
-// legacy fallback dependencies when no platform callback is configured.
+// currentQARuntime returns the platform-owned QA snapshot. The handler
+// carries no fallback QA dependencies; the platform callback is authoritative.
 func (handler *Handler) currentQARuntime() QARuntime {
-	if handler.qaRuntimeFn != nil {
-		return handler.qaRuntimeFn()
+	if handler.qaRuntimeFn == nil {
+		return QARuntime{}
 	}
-	return QARuntime{
-		QA: handler.qa, RunStore: handler.persistentRunStore,
-		Sessions: handler.qaSessions, History: handler.history,
-		Settings: handler.platform, WriteAvailable: handler.writeAvailable,
-	}
+	return handler.qaRuntimeFn()
 }
 
 // qaService returns the active QA service used by dashboard requests.

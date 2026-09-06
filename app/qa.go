@@ -89,12 +89,14 @@ func (p *Platform) buildQARuntime(
 			contribution.Capabilities...,
 		)
 	}
+	hub := run.NewHub(p.qa.runs)
 	definitionRuntime, err := definition.NewRuntime(
 		p.agents.catalog,
 		p.agents.schemas,
 		p.registry,
 		&snapshot,
 		p.qa.runs,
+		hub,
 	)
 	if err != nil {
 		return dashboard.QARuntime{}, nil, nil, nil, fmt.Errorf(
@@ -110,17 +112,15 @@ func (p *Platform) buildQARuntime(
 		Definitions:     p.agents.catalog,
 		Agent:           agentapi.DefinitionRef{ID: definitions[0].ID},
 		Runtime:         definitionRuntime,
-		RuntimeTools:    definitionRuntime,
 		Models:          models,
-		PhaseEmitter:    definitionRuntime,
-		ExecutionEvents: definitionRuntime,
+		Events:          hub,
 		WriteAvailable:  writeAvailable,
 	})
 	runtime := dashboard.QARuntime{
 		QA: qa, RunStore: p.qa.runs,
 		Sessions: p.qa.sessions,
 		History:  p.history, Settings: &snapshot,
-		WriteAvailable: writeAvailable, Hub: definitionRuntime.Hub(),
+		WriteAvailable: writeAvailable, Hub: hub,
 		CompactionLLM: models.Primary(),
 	}
 	return runtime, definitions, extensionCapabilities, definitionRuntime, nil
@@ -347,23 +347,21 @@ func (p *Platform) rebuildQARuntimeLocked(
 		if reusableVersion, reusable := p.reusableQACatalogVersion(
 			definitions,
 		); reusable {
-			reusedCandidate, reusedDefinitions, reusedCapabilities,
-				reusedRuntime, buildErr := p.buildQARuntime(
-				settings,
-				graph,
+			rewrittenDefinitions, err := rewriteCatalogDefinitions(
+				definitions,
 				reusableVersion,
 			)
-			if buildErr != nil {
-				return buildErr
+			if err != nil {
+				return err
 			}
-			reusedSnapshot, prepareErr := p.prepareQACatalogSnapshot(
-				reusedCandidate.Settings,
+			reusedSnapshot, err := p.prepareQACatalogSnapshot(
+				candidate.Settings,
 				reusableVersion,
-				reusedDefinitions,
-				reusedCapabilities,
+				rewrittenDefinitions,
+				extensionCapabilities,
 			)
-			if prepareErr != nil {
-				return prepareErr
+			if err != nil {
+				return err
 			}
 			p.qa.mu.RLock()
 			initialized := p.qa.current.Settings != nil
@@ -373,8 +371,6 @@ func (p *Platform) rebuildQARuntimeLocked(
 				initialized,
 			) {
 				version = reusableVersion
-				candidate = reusedCandidate
-				definitionRuntime = reusedRuntime
 				snapshot = reusedSnapshot
 				reusedCatalog = true
 			}
@@ -402,9 +398,6 @@ func (p *Platform) rebuildQARuntimeLocked(
 		return err
 	}
 	if err := p.configureFeatureReviewRuntime(candidate.Settings, definitionRuntime, definitions); err != nil {
-		return err
-	}
-	if err := p.configureAgentWorkflowRuntime(definitionRuntime); err != nil {
 		return err
 	}
 
@@ -776,4 +769,30 @@ func (p *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime) error
 		log.Infof("[workflow] feature transform execution enabled (LLM unavailable)")
 	}
 	return nil
+}
+
+// rewriteCatalogDefinitions clones the prepared candidate definitions and
+// rebinds them to a reused catalog version. It preserves the exact published
+// content for each ID while only changing the version identity, so a reused
+// version can be verified against the live catalog without rebuilding the
+// runtime or generating a second definition batch.
+func rewriteCatalogDefinitions(
+	definitions []agentapi.Definition,
+	version int64,
+) ([]agentapi.Definition, error) {
+	rewritten := make([]agentapi.Definition, 0, len(definitions))
+	for _, definition := range definitions {
+		definition.Version = version
+		prepared, err := agentapi.Prepare(definition)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"rewrite agent definition %q to reused version %d: %w",
+				definition.ID,
+				version,
+				err,
+			)
+		}
+		rewritten = append(rewritten, prepared)
+	}
+	return rewritten, nil
 }

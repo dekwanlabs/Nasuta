@@ -2,6 +2,7 @@ package qa
 
 import (
 	"context"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"strings"
 	"testing"
 
@@ -11,7 +12,7 @@ import (
 )
 
 func TestBuildHistoryRouteContextContainsMetadataAndRecentDialogue(t *testing.T) {
-	conversation := ConversationContext{
+	conversation := execution.ConversationContext{
 		SessionTitle: "runtime investigation",
 		RecentTurns: []memory.TurnMetadata{{
 			TurnNumber: 7, Question: "继续 trace-123", TopicKey: "trace-123",
@@ -42,7 +43,7 @@ func TestBuildHistoryRouteContextContainsMetadataAndRecentDialogue(t *testing.T)
 }
 
 func TestBuildHistoryRouteContextBoundsDialogueAndEntities(t *testing.T) {
-	conversation := ConversationContext{
+	conversation := execution.ConversationContext{
 		SessionTitle: strings.Repeat("title ", 500),
 		RecentTurns: []memory.TurnMetadata{{
 			TurnNumber: 9, Question: strings.Repeat("question ", 500),
@@ -134,7 +135,7 @@ func TestAssembleActiveHistoryLoadsOneCompleteAtomicTurn(t *testing.T) {
 	}
 	conversation, stats, err := svc.assembleActiveHistory(
 		context.Background(), "继续看刚才的错误证据", 42,
-		ConversationContext{SessionID: "session-1", RecentTurns: []memory.TurnMetadata{metadata}},
+		execution.ConversationContext{SessionID: "session-1", RecentTurns: []memory.TurnMetadata{metadata}},
 		retrieval.HistoryRelation{NeedsPriorEntities: true, NeedsPriorConclusion: true, NeedsPriorEvidence: true},
 		"model",
 		128000, 4000,
@@ -166,7 +167,7 @@ func TestAssembleActiveHistoryUsesRecentAnswerWithoutReloadingToolTurn(t *testin
 	}
 	conversation, stats, err := svc.assembleActiveHistory(
 		context.Background(), "2", 42,
-		ConversationContext{
+		execution.ConversationContext{
 			SessionID: "session-1", RecentTurns: []memory.TurnMetadata{metadata},
 			RecentDialogue: []memory.RecentDialogueTurn{{
 				TurnNumber: 8, User: "列出 UserController 选项",
@@ -201,7 +202,7 @@ func TestAssembleContextUsesDefinitionLimitsForActiveHistory(t *testing.T) {
 	output, err := svc.assembleContext(t.Context(), contextAssembleInput{
 		Question: "2",
 		UserID:   42,
-		Conversation: ConversationContext{
+		Conversation: execution.ConversationContext{
 			RecentTurns: []memory.TurnMetadata{metadata},
 			RecentDialogue: []memory.RecentDialogueTurn{{
 				TurnNumber: 8,

@@ -3,6 +3,9 @@ package qa
 import (
 	"context"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,13 +25,11 @@ type Service struct {
 	// fastLLM handles cheap structured preparation and falls back to helperLLM.
 	fastLLM                 *llm.LLMClient
 	retriever               contextRetriever
-	runtime                 agentapi.ManagedRuntime
-	runtimeTools            ScenarioToolSource
-	phaseEmitter            PhaseEmitter
-	executionEvents         ExecutionEventEmitter
+	runtime                 RuntimePort
+	events                  EventSink
 	memory                  *memory.MemoryStore
 	sessions                *memory.SessionStore
-	history                 SessionHistory
+	history                 session.History
 	writeAvailable          atomic.Bool
 	cfg                     config.Config
 	routerConfidence        float64
@@ -41,12 +42,12 @@ type Service struct {
 	delegationMaxConcurrent int
 	delegationBudget        agentapi.RunLimits
 	answerReserve           time.Duration
-	definitions             DefinitionResolver
+	definitions             definition.Resolver
 	agentRef                agentapi.DefinitionRef
 	definitionErr           error
 	runtimeErr              error
 	compactionMu            sync.RWMutex
-	compactionStatus        map[string]SessionStatusEvent
+	compactionStatus        map[string]run.SessionStatusEvent
 }
 
 // New wires retrieval, agent, memory, and write tools together.
@@ -80,11 +81,10 @@ func New(d Deps) *Service {
 		outputReserve:   platformSettings.LLMAnswerMaxTokens,
 		domainKnowledge: platformSettings.DomainKnowledge,
 		definitions:     d.Definitions, agentRef: d.Agent,
-		runtime: d.Runtime, runtimeTools: d.RuntimeTools,
-		phaseEmitter:     d.PhaseEmitter,
-		executionEvents:  d.ExecutionEvents,
+		runtime:          d.Runtime,
+		events:           d.Events,
 		memory:           d.Memory,
-		compactionStatus: make(map[string]SessionStatusEvent),
+		compactionStatus: make(map[string]run.SessionStatusEvent),
 	}
 	svc.writeAvailable.Store(d.WriteAvailable)
 	if svc.agentRef.ID == "" {
@@ -97,7 +97,7 @@ func New(d Deps) *Service {
 		log.Infof("[qa] reranker: dashscope (%s)", platformSettings.RerankModel)
 	}
 
-	if d.Runtime == nil || d.RuntimeTools == nil || d.Models == nil {
+	if d.Runtime == nil || d.Models == nil {
 		svc.runtimeErr = fmt.Errorf("QA runtime is not configured")
 	} else {
 		svc.helperLLM = d.Models.Primary()
@@ -117,8 +117,8 @@ func (svc *Service) SetWriteAvailable(available bool) {
 
 // emitStep pushes a lightweight phase hint to the run hub.
 func (svc *Service) emitStep(runID, text string) {
-	if svc.phaseEmitter != nil {
-		svc.phaseEmitter.EmitPhase(runID, text)
+	if svc.events != nil {
+		svc.events.EmitPhase(runID, text)
 	}
 }
 
@@ -131,32 +131,32 @@ func (svc *Service) emitStatus(runID, text, code string, started time.Time) {
 }
 
 func (svc *Service) emitStatusElapsed(runID, text, code string, elapsedMS int64) {
-	if svc.phaseEmitter != nil {
-		svc.phaseEmitter.EmitStatus(runID, text, code, elapsedMS)
+	if svc.events != nil {
+		svc.events.EmitStatus(runID, text, code, elapsedMS)
 	}
 }
 
-func (svc *Service) emitContextUsage(runID string, event ContextUsageEvent) {
-	if svc.phaseEmitter != nil {
-		svc.phaseEmitter.EmitContextUsage(runID, event)
+func (svc *Service) emitContextUsage(runID string, event run.ContextUsageEvent) {
+	if svc.events != nil {
+		svc.events.EmitContextUsage(runID, event)
 	}
 }
 
 func (svc *Service) updateCompaction(runID, status, text string, fromTurn, toTurn int) {
-	event := SessionStatusEvent{
+	event := run.SessionStatusEvent{
 		Status: status, Text: text, FromTurn: fromTurn, ToTurn: toTurn,
 		UpdatedAtMs: time.Now().UnixMilli(),
 	}
 	svc.compactionMu.Lock()
 	svc.compactionStatus[runID] = event
 	svc.compactionMu.Unlock()
-	if svc.phaseEmitter != nil {
-		svc.phaseEmitter.EmitSessionStatus(runID, event)
+	if svc.events != nil {
+		svc.events.EmitSessionStatus(runID, event)
 	}
 }
 
 // CompactionStatus returns the latest transient archive status for one run.
-func (svc *Service) CompactionStatus(runID string) SessionStatusEvent {
+func (svc *Service) CompactionStatus(runID string) run.SessionStatusEvent {
 	svc.compactionMu.RLock()
 	defer svc.compactionMu.RUnlock()
 	return svc.compactionStatus[runID]
@@ -183,8 +183,8 @@ func (svc *Service) Ask(ctx context.Context, request Request) (*AskResult, error
 	return result, err
 }
 
-func (svc *Service) emitEvent(eventType EventType, event ExecutionEvent) {
-	if svc.executionEvents != nil {
-		svc.executionEvents.EmitEvent(eventType, event)
+func (svc *Service) emitEvent(eventType run.EventType, event run.ExecutionEvent) {
+	if svc.events != nil {
+		svc.events.EmitEvent(eventType, event)
 	}
 }

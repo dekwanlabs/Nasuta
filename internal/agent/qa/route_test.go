@@ -22,12 +22,6 @@ func TestDecideExecutionRouteUsesParentDelegationForComplexSuggestion(t *testing
 		DelegationToolReady: true,
 	})
 
-	if decision.Path != executionPathSingle {
-		t.Fatalf("path = %q, want %q", decision.Path, executionPathSingle)
-	}
-	if decision.Strategy != retrieval.ExecutionSingleAgent {
-		t.Fatalf("strategy = %q, want %q", decision.Strategy, retrieval.ExecutionSingleAgent)
-	}
 	if decision.RouteReason != routeReasonParentDynamicDelegation {
 		t.Fatalf("route reason = %q, want %q", decision.RouteReason, routeReasonParentDynamicDelegation)
 	}
@@ -68,9 +62,6 @@ func TestDecideExecutionRouteRejectsSerializedDelegation(t *testing.T) {
 		DelegationMaxConcurrent: 1,
 	})
 
-	if decision.Path != executionPathSingle || decision.Strategy != retrieval.ExecutionSingleAgent {
-		t.Fatalf("decision = %+v, want single-agent route", decision)
-	}
 	if decision.RouteReason != routeReasonDelegationConcurrencyTooLow ||
 		decision.DowngradeReason != routeReasonDelegationConcurrencyTooLow {
 		t.Fatalf("decision = %+v, want concurrency downgrade", decision)
@@ -106,9 +97,6 @@ func TestDecideExecutionRouteKeepsSingleAgentSuggestionSingle(t *testing.T) {
 		DelegationToolReady: true,
 	})
 
-	if decision.Path != executionPathSingle || decision.Strategy != retrieval.ExecutionSingleAgent {
-		t.Fatalf("decision = %+v, want single-agent route", decision)
-	}
 	if decision.RouteReason != routeReasonSingleAgentSuggestion || decision.DowngradeReason != "" {
 		t.Fatalf("decision = %+v, want single-agent suggestion without downgrade", decision)
 	}
@@ -150,9 +138,6 @@ func TestDecideExecutionRouteRejectsMultiAgentWithoutParallelBenefit(t *testing.
 				DelegationAvailable: true,
 				DelegationToolReady: true,
 			})
-			if decision.Path != executionPathSingle || decision.Strategy != retrieval.ExecutionSingleAgent {
-				t.Fatalf("decision = %+v, want single-agent route", decision)
-			}
 			if decision.RouteReason != routeReasonMultiAgentNotWorthwhile ||
 				decision.DowngradeReason != routeReasonMultiAgentNotWorthwhile {
 				t.Fatalf("decision = %+v, want multi-agent-not-worthwhile downgrade", decision)
@@ -182,9 +167,6 @@ func TestDecideExecutionRouteFallsBackWhenDelegationUnavailable(t *testing.T) {
 				DelegationAvailable: tc.delegationAvailable,
 				DelegationToolReady: tc.toolReady,
 			})
-			if decision.Path != executionPathSingle || decision.Strategy != retrieval.ExecutionSingleAgent {
-				t.Fatalf("decision = %+v, want single-agent fallback", decision)
-			}
 			if decision.RouteReason != routeReasonDelegationUnavailable ||
 				decision.DowngradeReason != routeReasonDelegationUnavailable {
 				t.Fatalf("decision = %+v, want delegation-unavailable fallback", decision)
@@ -207,9 +189,6 @@ func TestDecideExecutionRouteKeepsWriteRequestsOnParent(t *testing.T) {
 		DelegationToolReady: true,
 	})
 
-	if decision.Path != executionPathSingle || decision.Strategy != retrieval.ExecutionSingleAgent {
-		t.Fatalf("decision = %+v, write requests must remain on the parent run", decision)
-	}
 	if decision.RouteReason != routeReasonWriteRequested || decision.DowngradeReason != routeReasonWriteRequested {
 		t.Fatalf("decision = %+v, want write-requested route", decision)
 	}
@@ -235,9 +214,7 @@ func TestApplyExecutionRouteMarksRiskButNeverCreatesWorkflow(t *testing.T) {
 
 	svc.applyExecutionRoute(prepared)
 
-	if prepared.execution.Path != executionPathSingle ||
-		prepared.execution.Strategy != retrieval.ExecutionSingleAgent ||
-		prepared.execution.RouteReason != routeReasonParentDynamicDelegation {
+	if prepared.execution.RouteReason != routeReasonParentDynamicDelegation {
 		t.Fatalf("execution = %+v, want normal parent run with dynamic delegation available", prepared.execution)
 	}
 	if !prepared.execution.HighRisk {
@@ -318,9 +295,7 @@ func TestApplyExecutionRouteFallsBackWhenDelegateToolIsNotVisible(t *testing.T) 
 
 	svc.applyExecutionRoute(prepared)
 
-	if prepared.execution.Path != executionPathSingle ||
-		prepared.execution.Strategy != retrieval.ExecutionSingleAgent ||
-		prepared.execution.RouteReason != routeReasonDelegationUnavailable {
+	if prepared.execution.RouteReason != routeReasonDelegationUnavailable {
 		t.Fatalf("execution = %+v, want delegation-unavailable normal run", prepared.execution)
 	}
 	if prepared.execution.DowngradeReason != routeReasonDelegationUnavailable {

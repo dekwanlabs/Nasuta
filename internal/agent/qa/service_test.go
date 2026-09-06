@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -30,21 +31,21 @@ import (
 func TestOutcomeForRejectsEmptySuccess(t *testing.T) {
 	tests := []struct {
 		name   string
-		result *RunResult
+		result *execution.RunResult
 		runErr error
 		status RunStatus
 		err    error
 	}{
-		{name: "done", result: &RunResult{Answer: "answer", Steps: 1}, status: RunStatusDone},
-		{name: "empty", result: &RunResult{Steps: 1}, status: RunStatusFailed, err: ErrEmptyAnswer},
-		{name: "aborted", result: &RunResult{Aborted: true}, status: RunStatusAborted},
-		{name: "run error", result: &RunResult{}, runErr: errors.New("provider failed"), status: RunStatusFailed},
-		{name: "result error", result: &RunResult{Err: errors.New("truncated")}, status: RunStatusFailed},
-		{name: "nil result", runErr: errors.New("missing"), status: RunStatusFailed},
+		{name: "done", result: &execution.RunResult{Answer: "answer", Steps: 1}, status: run.StatusDone},
+		{name: "empty", result: &execution.RunResult{Steps: 1}, status: run.StatusFailed, err: run.ErrEmptyAnswer},
+		{name: "aborted", result: &execution.RunResult{Aborted: true}, status: run.StatusAborted},
+		{name: "run error", result: &execution.RunResult{}, runErr: errors.New("provider failed"), status: run.StatusFailed},
+		{name: "result error", result: &execution.RunResult{Err: errors.New("truncated")}, status: run.StatusFailed},
+		{name: "nil result", runErr: errors.New("missing"), status: run.StatusFailed},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			outcome := outcomeFor(test.result, nil, test.runErr)
+			outcome := execution.OutcomeFor(test.result, nil, test.runErr)
 			if outcome.Status != test.status {
 				t.Fatalf("status = %s, want %s", outcome.Status, test.status)
 			}
@@ -72,14 +73,14 @@ func TestEvidenceMetricsFinalStatus(t *testing.T) {
 	tests := []struct {
 		name   string
 		direct bool
-		input  EvidenceMetrics
-		want   EvidenceStatus
+		input  run.EvidenceMetrics
+		want   run.EvidenceStatus
 	}{
 		{name: "direct", direct: true, want: EvidenceNotRequired},
-		{name: "missing", input: EvidenceMetrics{ToolCallCount: 1, ToolFailureCount: 1}, want: EvidenceUnavailable},
-		{name: "complete", input: EvidenceMetrics{ToolCallCount: 1, ResultCount: 1}, want: EvidenceComplete},
-		{name: "partial", input: EvidenceMetrics{ToolCallCount: 2, ResultCount: 1, PartialResultCount: 1, OmittedItemCount: 3}, want: EvidencePartial},
-		{name: "forced", input: EvidenceMetrics{ResultCount: 1, ForcedConclusion: true}, want: EvidencePartial},
+		{name: "missing", input: run.EvidenceMetrics{ToolCallCount: 1, ToolFailureCount: 1}, want: run.EvidenceUnavailable},
+		{name: "complete", input: run.EvidenceMetrics{ToolCallCount: 1, ResultCount: 1}, want: run.EvidenceComplete},
+		{name: "partial", input: run.EvidenceMetrics{ToolCallCount: 2, ResultCount: 1, PartialResultCount: 1, OmittedItemCount: 3}, want: run.EvidencePartial},
+		{name: "forced", input: run.EvidenceMetrics{ResultCount: 1, ForcedConclusion: true}, want: run.EvidencePartial},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -170,7 +171,7 @@ func TestNormalizeQARequestCanonicalizesWithoutMutatingConversationInstructions(
 	request := Request{
 		Question: "  explain the checkout flow  ",
 		RunID:    "normalized-run",
-		Conversation: ConversationContext{
+		Conversation: execution.ConversationContext{
 			Instructions: []llm.Message{{Role: "system", Content: "existing"}},
 		},
 	}
@@ -193,11 +194,10 @@ func TestNormalizeQARequestCanonicalizesWithoutMutatingConversationInstructions(
 }
 
 func TestForcedConclusionCannotExtractLongTermMemory(t *testing.T) {
-	outcome := RunOutcome{Status: RunStatusDone}
-	if memoryExtractionAllowed(outcome, &RunResult{Answer: "answer", ForcedConclusion: true}) {
+	if memoryExtractionAllowed(run.Outcome{Status: run.StatusDone, Answer: "answer", Evidence: run.EvidenceMetrics{ForcedConclusion: true}}) {
 		t.Fatal("forced conclusion was eligible for memory extraction")
 	}
-	if !memoryExtractionAllowed(outcome, &RunResult{Answer: "answer"}) {
+	if !memoryExtractionAllowed(run.Outcome{Status: run.StatusDone, Answer: "answer"}) {
 		t.Fatal("normal completed answer was not eligible for memory extraction")
 	}
 }
@@ -207,7 +207,7 @@ func TestAdmitExtractedMemoriesRejectsAssistantInference(t *testing.T) {
 		{FactKey: "user:response-language", SourceType: memory.SourceExplicitUser},
 		{FactKey: "workspace:service:root-cause", SourceType: memory.SourceAssistantInference},
 	}
-	admitted, rejected := admitExtractedMemories(records, EvidencePartial)
+	admitted, rejected := admitExtractedMemories(records, run.EvidencePartial)
 	if len(admitted) != 1 || admitted[0].SourceType != memory.SourceExplicitUser {
 		t.Fatalf("admitted = %#v", admitted)
 	}
@@ -223,16 +223,16 @@ func TestRunStoreCompleteTransitionsOnlyActiveRun(t *testing.T) {
 	}
 	defer db.Close()
 	store := run.Bind(db)
-	outcome := RunOutcome{
-		Status: RunStatusDone, StepCount: 2, TokenUsed: 12,
-		Evidence: EvidenceMetrics{
-			Status: EvidencePartial, ForcedConclusion: true, ResultCount: 3,
+	outcome := run.Outcome{
+		Status: run.StatusDone, StepCount: 2, TokenUsed: 12,
+		Evidence: run.EvidenceMetrics{
+			Status: run.EvidencePartial, ForcedConclusion: true, ResultCount: 3,
 			ToolCallCount: 4, ToolFailureCount: 1, PartialResultCount: 2, OmittedItemCount: 5,
 		},
 	}
 	mock.ExpectExec("UPDATE agent_runs").
 		WithArgs(
-			RunStatusDone, "", 2, 12, EvidencePartial, true, 3, 4, 1, 2, 5,
+			run.StatusDone, "", 2, 12, run.EvidencePartial, true, 3, 4, 1, 2, 5,
 			sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -307,14 +307,14 @@ func TestRunStoreEvidenceByIDsIsBoundToUserAndSession(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "evidence_status", "forced_conclusion", "evidence_result_count", "tool_call_count",
 			"tool_failure_count", "partial_result_count", "omitted_evidence_count",
-		}).AddRow("run-1", EvidencePartial, true, 2, 3, 1, 1, 4))
+		}).AddRow("run-1", run.EvidencePartial, true, 2, 3, 1, 1, 4))
 
 	evidence, err := store.EvidenceByIDs(42, "session-1", []string{"run-1", "run-2"})
 	if err != nil {
 		t.Fatalf("EvidenceByIDs: %v", err)
 	}
 	metrics, ok := evidence["run-1"]
-	if !ok || metrics.Status != EvidencePartial || !metrics.ForcedConclusion || metrics.OmittedItemCount != 4 {
+	if !ok || metrics.Status != run.EvidencePartial || !metrics.ForcedConclusion || metrics.OmittedItemCount != 4 {
 		t.Fatalf("evidence = %#v", evidence)
 	}
 	if _, ok := evidence["run-2"]; ok {
@@ -427,13 +427,13 @@ func TestRunStoreRejectsTerminalOverwrite(t *testing.T) {
 	store := run.Bind(db)
 	mock.ExpectExec("UPDATE agent_runs").
 		WithArgs(
-			RunStatusFailed, "", 0, 0, EvidenceUnavailable, false, 0, 0, 0, 0, 0,
+			run.StatusFailed, "", 0, 0, run.EvidenceUnavailable, false, 0, 0, 0, 0, 0,
 			sqlmock.AnyArg(), "run", RunStatusRunning, RunStatusPaused,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	err = store.Complete("run", RunOutcome{
-		Status:   RunStatusFailed,
-		Evidence: EvidenceMetrics{Status: EvidenceUnavailable},
+	err = store.Complete("run", run.Outcome{
+		Status:   run.StatusFailed,
+		Evidence: run.EvidenceMetrics{Status: run.EvidenceUnavailable},
 	})
 	if !errors.Is(err, ErrRunNotActive) {
 		t.Fatalf("Complete error = %v, want ErrRunNotActive", err)
@@ -453,7 +453,7 @@ func TestRunStoreControlTransitionIsConditional(t *testing.T) {
 	if err := store.TransitionControl("run", RunStatusRunning, RunStatusPaused); err != nil {
 		t.Fatalf("TransitionControl: %v", err)
 	}
-	if err := store.TransitionControl("run", RunStatusDone, RunStatusPaused); err == nil {
+	if err := store.TransitionControl("run", run.StatusDone, RunStatusPaused); err == nil {
 		t.Fatal("invalid terminal transition was accepted")
 	}
 }
@@ -475,7 +475,7 @@ func TestRunStoreRecoversInterruptedRuns(t *testing.T) {
 	mock.ExpectExec("UPDATE agent_runs SET status=\\?,error_code=\\?,ended_at=\\?.*"+
 		"WHERE run_kind=\\? AND status IN \\(\\?,\\?\\)").
 		WithArgs(
-			RunStatusAborted,
+			run.StatusAborted,
 			"interrupted",
 			sqlmock.AnyArg(),
 			run.KindAgent,
@@ -534,12 +534,12 @@ func TestRunAgentFinishesHubWhenLLMCallFails(t *testing.T) {
 
 	registry := testRegistry(t)
 	definition := testReviewerDefinition(t, nil)
-	runtime := newTestDefinitionRuntime(t, definition, registry, testRuntimeSettings(server.URL), nil)
+	runtime, hub := newTestDefinitionRuntimeWithHub(t, definition, registry, testRuntimeSettings(server.URL), nil)
 
 	const runID = "run-llm-failure"
 	request := testDefinitionRequest(definition)
 	request.RunID = runID
-	ch := runtime.Hub().Subscribe(runID)
+	ch := hub.Subscribe(runID)
 	result, err := runtime.Run(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -549,7 +549,7 @@ func TestRunAgentFinishesHubWhenLLMCallFails(t *testing.T) {
 	}
 
 	terminal := waitForTerminal(t, ch)
-	if terminal.Status != RunStatusFailed {
+	if terminal.Status != run.StatusFailed {
 		t.Fatalf("terminal = %+v, want failed", terminal)
 	}
 }
@@ -562,9 +562,10 @@ func newQARuntimeFixture(
 	retriever contextRetriever,
 	pruningEnabled bool,
 ) (*Service, *DefinitionRuntime) {
-	return newQARuntimeFixtureWithStore(
+	qa, runtime, _ := newQARuntimeFixtureWithStore(
 		t, client, baseURL, registry, retriever, pruningEnabled, nil,
 	)
+	return qa, runtime
 }
 
 func newQARuntimeFixtureWithStore(
@@ -575,12 +576,12 @@ func newQARuntimeFixtureWithStore(
 	retriever contextRetriever,
 	pruningEnabled bool,
 	store *RunStore,
-) (*Service, *DefinitionRuntime) {
+) (*Service, *DefinitionRuntime, *run.Hub) {
 	t.Helper()
 	definition := testQADefinition(t, func(definition *agentapi.Definition) {
 		definition.Budget.ContextTokens = 32768
 	})
-	runtime := newTestDefinitionRuntime(
+	runtime, hub := newTestDefinitionRuntimeWithHub(
 		t, definition, registry, testRuntimeSettings(baseURL), store,
 	)
 	if retriever == nil {
@@ -588,8 +589,9 @@ func newQARuntimeFixtureWithStore(
 	}
 	qa := &Service{
 		helperLLM: client, fastLLM: client,
-		retriever: retriever,
-		runtime:   runtime, runtimeTools: runtime, phaseEmitter: runtime,
+		retriever:       retriever,
+		runtime:         runtime,
+		events:          hub,
 		definitions: definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
 			if ref.ID != definition.ID || ref.Version != definition.Version {
 				return agentapi.Definition{}, fmt.Errorf("definition not found")
@@ -600,7 +602,7 @@ func newQARuntimeFixtureWithStore(
 		routerConfidence: 0.9, routerMaxTokens: 512,
 		toolPruningEnabled: pruningEnabled,
 	}
-	return qa, runtime
+	return qa, runtime, hub
 }
 
 type failingContextRetriever struct {
@@ -624,8 +626,8 @@ func (emptyContextRetriever) ContextBudget() int {
 }
 
 type executionEventRecord struct {
-	eventType EventType
-	event     ExecutionEvent
+	eventType run.EventType
+	event     run.ExecutionEvent
 }
 
 type executionEventRecorder struct {
@@ -633,13 +635,21 @@ type executionEventRecorder struct {
 	events []executionEventRecord
 }
 
-func (recorder *executionEventRecorder) EmitEvent(eventType EventType, event ExecutionEvent) {
+func (recorder *executionEventRecorder) EmitEvent(eventType run.EventType, event run.ExecutionEvent) {
 	recorder.mu.Lock()
 	recorder.events = append(recorder.events, executionEventRecord{eventType: eventType, event: event})
 	recorder.mu.Unlock()
 }
 
 func (recorder *executionEventRecorder) EmitToolStarted(string, run.ToolStartedEvent) {}
+
+func (recorder *executionEventRecorder) EmitPhase(string, string) {}
+
+func (recorder *executionEventRecorder) EmitStatus(string, string, string, int64) {}
+
+func (recorder *executionEventRecorder) EmitContextUsage(string, run.ContextUsageEvent) {}
+
+func (recorder *executionEventRecorder) EmitSessionStatus(string, run.SessionStatusEvent) {}
 
 func (recorder *executionEventRecorder) EmitToolFinished(string, run.ToolFinishedEvent) {}
 
@@ -669,10 +679,10 @@ func TestAskAlwaysUsesNormalAgentRun(t *testing.T) {
 	defer server.Close()
 
 	retriever := retrieval.New(emptyRetrievalTools{}, config.Config{})
-	qa, runtime := newQARuntimeFixture(t, client, server.URL, tool.NewRegistry(), retriever, false)
+	qa, _, hub := newQARuntimeFixtureWithStore(t, client, server.URL, tool.NewRegistry(), retriever, false, nil)
 	events := &executionEventRecorder{}
-	qa.executionEvents = events
-	terminalEvents := runtime.Hub().Subscribe(runID)
+	qa.events = events
+	terminalEvents := hub.Subscribe(runID)
 
 	if _, err := qa.Ask(context.Background(), Request{
 		Question: "what causes a rainbow?", UserID: 42, RunID: runID,
@@ -680,11 +690,11 @@ func TestAskAlwaysUsesNormalAgentRun(t *testing.T) {
 		t.Fatalf("Ask: %v", err)
 	}
 	terminal := waitForTerminal(t, terminalEvents)
-	if terminal.Status != RunStatusDone || terminal.Answer != "single-agent answer" {
+	if terminal.Status != run.StatusDone || terminal.Answer != "single-agent answer" {
 		t.Fatalf("terminal = %+v", terminal)
 	}
 	recorded := events.Snapshot()
-	if len(recorded) != 1 || recorded[0].eventType != EventExecutionRouted {
+	if len(recorded) != 1 || recorded[0].eventType != run.EventExecutionRouted {
 		t.Fatalf("execution events = %+v, a single-agent suggestion must not be degraded", recorded)
 	}
 	if recorded[0].event.Strategy != string(retrieval.ExecutionSingleAgent) ||
@@ -769,14 +779,14 @@ func TestAskDirectSkipsRetrieverButKeepsRegisteredReadTools(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
 	registry := testRegistry(t, testAgentTool("internal", ToolKindRead, noopTool))
-	qa, runtime := newQARuntimeFixture(t, client, server.URL, registry, nil, false)
+	qa, _, hub := newQARuntimeFixtureWithStore(t, client, server.URL, registry, nil, false, nil)
 
-	terminalCh := runtime.Hub().Subscribe("direct-run")
+	terminalCh := hub.Subscribe("direct-run")
 	result, err := qa.Ask(context.Background(), Request{Question: "What causes a rainbow?", RunID: "direct-run"})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
+	if terminal := waitForTerminal(t, terminalCh); terminal.Status != run.StatusDone {
 		t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
 	}
 	if routerCalls != 1 || agentCalls != 1 {
@@ -818,27 +828,27 @@ func TestAskSessionPersistenceFailureCompletesRunAsFailed(t *testing.T) {
 	runMock.ExpectExec("INSERT INTO agent_steps").WillReturnResult(sqlmock.NewResult(1, 1))
 	runMock.ExpectCommit()
 	runMock.ExpectExec("UPDATE agent_runs").WithArgs(
-		RunStatusFailed, "session_persistence_failed", 1, len(`"answer"`),
+		run.StatusFailed, "session_persistence_failed", 1, len(`"answer"`),
 		EvidenceNotRequired, false, 0, 0, 0, 0, 0,
 		sqlmock.AnyArg(), runID, RunStatusRunning, RunStatusPaused,
 	).WillReturnResult(sqlmock.NewResult(0, 1))
 	sessionMock.ExpectBegin().WillReturnError(errors.New("session database unavailable"))
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "review-model", 256, server.Client())
-	qa, runtime := newQARuntimeFixtureWithStore(
+	qa, _, hub := newQARuntimeFixtureWithStore(
 		t, client, server.URL, tool.NewRegistry(), nil, false, run.Bind(runDB),
 	)
 	qa.sessions = memory.NewSessionStore(sessionDB)
-	events := runtime.Hub().Subscribe(runID)
+	events := hub.Subscribe(runID)
 	_, err = qa.Ask(context.Background(), Request{
-		Question: "你能做什么？", Conversation: ConversationContext{SessionID: "session-1"},
+		Question: "你能做什么？", Conversation: execution.ConversationContext{SessionID: "session-1"},
 		UserID: 42, RunID: runID,
 	})
 	if err != nil {
 		t.Fatalf("AskWithContext: %v", err)
 	}
 	terminal := waitForTerminal(t, events)
-	if terminal.Status != RunStatusFailed || !strings.Contains(terminal.Error, "session database unavailable") {
+	if terminal.Status != run.StatusFailed || !strings.Contains(terminal.Error, "session database unavailable") {
 		t.Fatalf("terminal = %+v", terminal)
 	}
 	select {
@@ -866,18 +876,18 @@ func TestAskRetrievalFailureCompletesStartedRunAsFailed(t *testing.T) {
 	const runID = "retrieval-failed-run"
 	mock.ExpectExec("INSERT INTO agent_runs").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("UPDATE agent_runs").WithArgs(
-		RunStatusFailed, "preparation_failed", 0, 0,
-		EvidenceUnavailable, false, 0, 0, 0, 0, 0,
+		run.StatusFailed, "preparation_failed", 0, 0,
+		run.EvidenceUnavailable, false, 0, 0, 0, 0, 0,
 		sqlmock.AnyArg(), runID, RunStatusRunning, RunStatusPaused,
 	).WillReturnResult(sqlmock.NewResult(0, 1))
 
-	qa, runtime := newQARuntimeFixtureWithStore(
+	qa, _, hub := newQARuntimeFixtureWithStore(
 		t, nil, "http://unused", tool.NewRegistry(),
 		failingContextRetriever{err: errors.New("retrieval backend unavailable")},
 		false, run.Bind(db),
 	)
 	plan := domain.EvidencePlan{Sources: domain.Internal}
-	events := runtime.Hub().Subscribe(runID)
+	events := hub.Subscribe(runID)
 	_, err = qa.Ask(context.Background(), Request{
 		Question: "find the implementation", UserID: 42, RunID: runID,
 		EvidencePlan: &plan,
@@ -886,7 +896,7 @@ func TestAskRetrievalFailureCompletesStartedRunAsFailed(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 	terminal := waitForTerminal(t, events)
-	if terminal.Status != RunStatusFailed || !strings.Contains(terminal.Error, "retrieval backend unavailable") {
+	if terminal.Status != run.StatusFailed || !strings.Contains(terminal.Error, "retrieval backend unavailable") {
 		t.Fatalf("terminal = %+v", terminal)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -922,17 +932,17 @@ func TestAskRouterInvalidOutputFallsBackInternal(t *testing.T) {
 
 	client := llm.NewLLMClientWithHTTP(server.URL, "key", "model", 512, server.Client())
 	registry := testRegistry(t, testAgentTool("internal", ToolKindRead, noopTool))
-	qa, runtime := newQARuntimeFixture(
+	qa, _, hub := newQARuntimeFixtureWithStore(
 		t, client, server.URL, registry,
-		retrieval.New(emptyRetrievalTools{}, config.Config{}), false,
+		retrieval.New(emptyRetrievalTools{}, config.Config{}), false, nil,
 	)
 
-	terminalCh := runtime.Hub().Subscribe("invalid-route-run")
+	terminalCh := hub.Subscribe("invalid-route-run")
 	result, err := qa.Ask(context.Background(), Request{Question: "What causes a rainbow?", RunID: "invalid-route-run"})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
+	if terminal := waitForTerminal(t, terminalCh); terminal.Status != run.StatusDone {
 		t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
 	}
 	// A malformed planner response gets one schema-aware repair request before
@@ -982,18 +992,18 @@ func TestAskPrunesScenarioToolsWhenRoutingSaysSo(t *testing.T) {
 			scenarioTool("observe_logs"),
 			scenarioTool("search_config"),
 		)
-		qa, runtime := newQARuntimeFixture(
+		qa, _, hub := newQARuntimeFixtureWithStore(
 			t, client, server.URL, registry,
-			retrieval.New(emptyRetrievalTools{}, config.Config{}), pruningEnabled,
+			retrieval.New(emptyRetrievalTools{}, config.Config{}), pruningEnabled, nil,
 		)
 		ctx := domain.WithTraceRecorder(context.Background(), recorder)
 		runID := fmt.Sprintf("prune-run-%t", pruningEnabled)
-		terminalCh := runtime.Hub().Subscribe(runID)
+		terminalCh := hub.Subscribe(runID)
 		result, err := qa.Ask(ctx, Request{Question: "how many requests failed?", RunID: runID})
 		if err != nil {
 			t.Fatalf("Ask: %v", err)
 		}
-		if terminal := waitForTerminal(t, terminalCh); terminal.Status != RunStatusDone {
+		if terminal := waitForTerminal(t, terminalCh); terminal.Status != run.StatusDone {
 			t.Fatalf("terminal status = %s, want done; error=%s", terminal.Status, terminal.Error)
 		}
 		if result.Context == nil {
@@ -1194,13 +1204,13 @@ func TestQAContextBlockHashesDeliveredTextAndPropagatesConflicts(t *testing.T) {
 }
 
 type preparationStepCapture struct {
-	steps  []RunStepRecord
+	steps  []run.StepRecord
 	failAt int
 }
 
 func (capture *preparationStepCapture) RecordStep(
 	_ context.Context,
-	step RunStepRecord,
+	step run.StepRecord,
 ) error {
 	capture.steps = append(capture.steps, step)
 	if capture.failAt > 0 && len(capture.steps) == capture.failAt {
@@ -1237,7 +1247,7 @@ func TestExecutePrefetchUsesPinnedEligibleTool(t *testing.T) {
 	})
 	qa := &Service{}
 	prepared := preparedScenarioTools{
-		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
+		snapshot: registry.Snapshot(tool.Policy{AllowRead: true}),
 		executor: NewToolExecutor(registry),
 	}
 	recorder := &preparationStepCapture{}
@@ -1294,7 +1304,7 @@ func TestExecutePrefetchRecordsFailedToolResult(t *testing.T) {
 		}),
 	})
 	prepared := preparedScenarioTools{
-		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
+		snapshot: registry.Snapshot(tool.Policy{AllowRead: true}),
 		executor: NewToolExecutor(registry),
 	}
 	recorder := &preparationStepCapture{}
@@ -1336,7 +1346,7 @@ func TestExecutePrefetchStopsWhenToolCallCannotBeRecorded(t *testing.T) {
 		}),
 	})
 	prepared := preparedScenarioTools{
-		snapshot: registry.Snapshot(ToolPolicy{AllowRead: true}),
+		snapshot: registry.Snapshot(tool.Policy{AllowRead: true}),
 		executor: NewToolExecutor(registry),
 	}
 	_, err := (&Service{}).executePrefetch(

@@ -2,16 +2,13 @@ package qa
 
 import (
 	"context"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 )
-
-type executionPath string
-
-const executionPathSingle executionPath = "single_agent"
 
 const (
 	routeReasonParentDynamicDelegation     = "parent_dynamic_delegation"
@@ -32,9 +29,11 @@ type executionRouteInput struct {
 	DelegationMaxConcurrent int
 }
 
+// executionRouteDecision carries only the advisory routing signal and its
+// observability reasons. QA always runs the normal single-agent loop; the
+// former Strategy field was removed because it was hard-coded to
+// retrieval.ExecutionSingleAgent on every path.
 type executionRouteDecision struct {
-	Strategy        retrieval.ExecutionStrategy
-	Path            executionPath
 	HighRisk        bool
 	RouteReason     string
 	DowngradeReason string
@@ -55,8 +54,8 @@ var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecisi
 		}
 		return map[string]any{
 			"proposed_strategy":         input.Suggestion.Strategy,
-			"effective_strategy":        output.Strategy,
-			"effective_path":            output.Path,
+			"effective_strategy":        string(retrieval.ExecutionSingleAgent),
+			"effective_path":            string(retrieval.ExecutionSingleAgent),
 			"route_reason":              output.RouteReason,
 			"complexity":                input.Suggestion.Complexity,
 			"confidence":                input.Suggestion.Confidence,
@@ -109,8 +108,8 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 		prepared.ctx,
 		"[qa] execution route proposed=%s effective=%s path=%s delegation_available=%t delegation_tool_ready=%t delegation_max_concurrent=%d origin=%s reason=%s downgrade=%s",
 		planning.Execution.Strategy,
-		prepared.execution.Strategy,
-		prepared.execution.Path,
+		string(retrieval.ExecutionSingleAgent),
+		string(retrieval.ExecutionSingleAgent),
 		svc.delegationEnabled,
 		toolReady,
 		svc.delegationMaxConcurrent,
@@ -122,8 +121,8 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	// QA routing is intentionally advisory only. The parent always runs the
 	// normal agent loop; dynamic delegation, when available, is exposed as a
 	// tool to that loop rather than represented as a QA Durable Workflow.
-	svc.emitEvent(EventExecutionRouted, ExecutionEvent{
-		RunID: prepared.request.RunID, Strategy: svc.executionEventStrategy(prepared.execution),
+	svc.emitEvent(run.EventExecutionRouted, run.ExecutionEvent{
+		RunID: prepared.request.RunID, Strategy: string(retrieval.ExecutionSingleAgent),
 		Status: "completed", Reason: prepared.execution.RouteReason,
 		Complexity: planning.Execution.Complexity, Confidence: planning.Execution.Confidence,
 	})
@@ -132,8 +131,8 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 		degradedReason = "route_degraded"
 	}
 	if degradedReason != "" {
-		svc.emitEvent(EventExecutionDegraded, ExecutionEvent{
-			RunID: prepared.request.RunID, Strategy: svc.executionEventStrategy(prepared.execution),
+		svc.emitEvent(run.EventExecutionDegraded, run.ExecutionEvent{
+			RunID: prepared.request.RunID, Strategy: string(retrieval.ExecutionSingleAgent),
 			Status: "degraded", Reason: degradedReason,
 			Complexity: planning.Execution.Complexity, Confidence: planning.Execution.Confidence,
 		})
@@ -158,8 +157,6 @@ func routeExecution(ctx context.Context, input executionRouteInput) executionRou
 
 func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
 	decision := executionRouteDecision{
-		Strategy:       retrieval.ExecutionSingleAgent,
-		Path:           executionPathSingle,
 		DecisionOrigin: "server_assessment",
 	}
 	if input.WriteRequested {
@@ -209,8 +206,4 @@ func countParallelExecutionTasks(tasks []retrieval.ExecutionTask) int {
 		}
 	}
 	return count
-}
-
-func (svc *Service) executionEventStrategy(decision executionRouteDecision) string {
-	return string(decision.Path)
 }

@@ -303,7 +303,7 @@ func stateContext(state *compiledLoop) context.Context {
 	return state.ctx
 }
 
-func emitAnswerCompacted(observer Observer, runID, phase string) {
+func emitAnswerCompacted(observer run.Observer, runID, phase string) {
 	emitter, ok := observer.(interface {
 		EmitPhase(string, string)
 	})
@@ -316,7 +316,7 @@ func emitAnswerCompacted(observer Observer, runID, phase string) {
 	}
 }
 
-func emitContextUsage(observer Observer, runID string, event run.ContextUsageEvent) {
+func emitContextUsage(observer run.Observer, runID string, event run.ContextUsageEvent) {
 	if emitter, ok := observer.(run.ContextUsageObserver); ok {
 		emitter.OnContextUsage(context.Background(), runID, event)
 	}

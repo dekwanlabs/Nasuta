@@ -2,6 +2,7 @@ package qa
 
 import (
 	"context"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ func TestInitializePreparationUsesRequestEntryDeadline(t *testing.T) {
 		definitions: definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
 			return definition, nil
 		}),
-		runtimeTools: requestSLAToolSource{},
+		runtime: requestSLAToolSource{},
 	}
 
 	prepared, err := svc.initializePreparation(context.Background(), Request{
@@ -52,7 +53,7 @@ func TestInitializePreparationDoesNotExtendEarlierCallerDeadline(t *testing.T) {
 		definitions: definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
 			return definition, nil
 		}),
-		runtimeTools: requestSLAToolSource{},
+		runtime: requestSLAToolSource{},
 	}
 
 	prepared, err := svc.initializePreparation(ctx, Request{
@@ -89,7 +90,15 @@ func TestParentRunLimitsFallbackDeadlineIsOnlyForDirectCallers(t *testing.T) {
 
 type requestSLAToolSource struct{}
 
-func (requestSLAToolSource) ToolsFor(ToolPolicy) ScenarioToolSet {
+func (requestSLAToolSource) Run(context.Context, agentapi.RunRequest) (agentapi.RunResult, error) {
+	return agentapi.RunResult{}, nil
+}
+
+func (requestSLAToolSource) Begin(context.Context, agentapi.RunStart) (agentapi.ManagedRun, error) {
+	return nil, nil
+}
+
+func (requestSLAToolSource) ToolsFor(tool.Policy) definition.ScenarioToolSet {
 	return requestSLAToolSet{}
 }
 

@@ -2,6 +2,7 @@ package qa
 
 import (
 	"context"
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"strings"
 	"testing"
 
@@ -36,7 +37,7 @@ func (compactionToolSet) Execute(context.Context, tool.ToolID, tool.Arguments) (
 
 func TestSessionCompactionIncomingTokensIncludesRetrievedContext(t *testing.T) {
 	plan := domain.EvidencePlan{Sources: domain.Internal}
-	withHistory := ConversationContext{
+	withHistory := execution.ConversationContext{
 		Recent:       []llm.Message{{Role: "user", Content: strings.Repeat("old history ", 1000)}},
 		Instructions: []llm.Message{{Role: "system", Content: "request instruction"}},
 	}
@@ -73,7 +74,7 @@ func TestSessionCompactionIncomingTokensIncludesRetrievedContext(t *testing.T) {
 
 func TestSessionCompactionProjectionKeepsRetrievedHistory(t *testing.T) {
 	plan := domain.EvidencePlan{Sources: domain.Internal}
-	withArchivedHistory := ConversationContext{
+	withArchivedHistory := execution.ConversationContext{
 		RetrievedHistory: strings.Repeat("archived answer ", 1000),
 	}
 	withoutArchivedHistory := withArchivedHistory
@@ -114,13 +115,13 @@ func TestSessionCompactionProjectionIncludesToolSchemas(t *testing.T) {
 	}
 
 	withoutTools, _, err := compactionProjection(
-		"inspect the service", domain.QueryPlan{Kind: domain.QueryFocusedFact}, ConversationContext{}, nil, plan, "", nil, 0,
+		"inspect the service", domain.QueryPlan{Kind: domain.QueryFocusedFact}, execution.ConversationContext{}, nil, plan, "", nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("without tools projection: %v", err)
 	}
 	withTools, _, err := compactionProjection(
-		"inspect the service", domain.QueryPlan{Kind: domain.QueryFocusedFact}, ConversationContext{}, nil, plan, "", []tool.Tool{candidate}, 0,
+		"inspect the service", domain.QueryPlan{Kind: domain.QueryFocusedFact}, execution.ConversationContext{}, nil, plan, "", []tool.Tool{candidate}, 0,
 	)
 	if err != nil {
 		t.Fatalf("with tools projection: %v", err)
@@ -136,14 +137,14 @@ func TestSessionCompactionToolsUsesPrunedSet(t *testing.T) {
 		{ID: "inspect_service"},
 		{ID: "inspect_runbook"},
 	}}
-	selected := sessionCompactionTools(prepared, ConversationContext{
+	selected := sessionCompactionTools(prepared, execution.ConversationContext{
 		PruneApplied:  true,
 		PrunedToolIDs: map[tool.ToolID]struct{}{"inspect_runbook": {}},
 	})
 	if len(selected) != 1 || selected[0].ID != "inspect_runbook" {
 		t.Fatalf("selected tools = %+v", selected)
 	}
-	selected = sessionCompactionTools(prepared, ConversationContext{
+	selected = sessionCompactionTools(prepared, execution.ConversationContext{
 		PruneApplied:  true,
 		PrunedToolIDs: map[tool.ToolID]struct{}{},
 	})
@@ -175,7 +176,7 @@ func TestCompactBeforeAnswerUsesResolvedDefinitionLimits(t *testing.T) {
 	svc := &Service{
 		contextWindow: 256000,
 		outputReserve: 24000,
-		phaseEmitter:  recorder,
+		events:  recorder,
 	}
 	prepared := &preparation{
 		request: Request{RunID: "run-custom-limits", Question: "current question"},
@@ -184,7 +185,7 @@ func TestCompactBeforeAnswerUsesResolvedDefinitionLimits(t *testing.T) {
 	_, err := svc.compactAnswer(
 		t.Context(),
 		prepared,
-		ConversationContext{},
+		execution.ConversationContext{},
 		nil,
 		domain.EvidencePlan{},
 		128000,

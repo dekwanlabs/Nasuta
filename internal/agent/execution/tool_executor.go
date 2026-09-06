@@ -16,7 +16,7 @@ import (
 
 // ToolExecutor adapts tools.Registry to the agent loop.
 type ToolExecutor struct {
-	registry *Registry
+	registry *tool.Registry
 	runtime  *tool.Executor
 }
 
@@ -37,12 +37,12 @@ type ToolExecution struct {
 }
 
 // NewToolExecutor wraps a registry with a default per-tool timeout.
-func NewToolExecutor(registry *Registry) *ToolExecutor {
+func NewToolExecutor(registry *tool.Registry) *ToolExecutor {
 	return &ToolExecutor{registry: registry, runtime: tool.NewExecutor(15 * time.Second)}
 }
 
 // Snapshot pins definitions and handlers before the model sees any tool.
-func (te *ToolExecutor) Snapshot(policy ToolPolicy) tool.Snapshot {
+func (te *ToolExecutor) Snapshot(policy tool.Policy) tool.Snapshot {
 	return te.registry.Snapshot(policy)
 }
 
@@ -52,7 +52,7 @@ func (te *ToolExecutor) Definitions(snapshot tool.Snapshot) []llm.ToolDef {
 }
 
 // DefinitionsFor snapshots current tools for one-shot callers.
-func (te *ToolExecutor) DefinitionsFor(policy ToolPolicy) []llm.ToolDef {
+func (te *ToolExecutor) DefinitionsFor(policy tool.Policy) []llm.ToolDef {
 	return te.Definitions(te.Snapshot(policy))
 }
 
@@ -401,7 +401,7 @@ func (te *ToolExecutor) ExecuteArguments(ctx context.Context, snapshot tool.Snap
 }
 
 // ExecuteWithPolicy snapshots current tools for one-shot callers.
-func (te *ToolExecutor) ExecuteWithPolicy(ctx context.Context, policy ToolPolicy, call llm.ToolCall, seen map[string]bool) ToolExecution {
+func (te *ToolExecutor) ExecuteWithPolicy(ctx context.Context, policy tool.Policy, call llm.ToolCall, seen map[string]bool) ToolExecution {
 	return te.Execute(ctx, te.Snapshot(policy), call, nil, seen)
 }
 

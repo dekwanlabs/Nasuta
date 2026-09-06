@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dekwanlabs/nasuta/internal/agent/execution"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/retrieval"
@@ -110,7 +111,7 @@ func (svc *Service) planEvidence(ctx context.Context, input evidencePlanningInpu
 			output.ExecutionAuditError = analysis.ExecutionAuditError
 			output.History, output.HistoryValid = analysis.History, input.RouteContext != ""
 			output.RoutedToolIDs = analysis.ToolIDs
-		} else if shouldShortCircuitMeta(input.Question) {
+		} else if execution.ShouldShortCircuitMeta(input.Question) {
 			output.Decision = domain.PlanDecision{Plan: domain.DirectPlan(), Confidence: 1, Origin: domain.Rule}
 		} else {
 			started := time.Now()

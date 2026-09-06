@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/prompts"
@@ -202,10 +203,10 @@ func toolContentSHA256(content string) string {
 	return fmt.Sprintf("%x", digest)
 }
 
-func newToolResultStep(runID string, stepNo int, call llm.ToolCall, execution ToolExecution) StepRecord {
-	return StepRecord{
+func newToolResultStep(runID string, stepNo int, call llm.ToolCall, execution ToolExecution) run.StepRecord {
+	return run.StepRecord{
 		StepNo:              stepNo,
-		Kind:                StepKindToolResult,
+		Kind:                run.StepKindToolResult,
 		TraceID:             toolResultTraceID(runID, call.ID),
 		ArtifactID:          execution.ArtifactID,
 		ToolCallID:          call.ID,

@@ -32,24 +32,26 @@ func TestSystemStatusIncludesFeatureDeliveryCapability(t *testing.T) {
 
 func TestDefaultSettingsIncludesRerankAndContext(t *testing.T) {
 	handler := &Handler{
-		platform: &config.PlatformSettings{
-			ContextBudget:              64000,
-			RerankEnabled:              true,
-			RerankPool:                 80,
-			RerankTopK:                 12,
-			RerankMinScore:             0.42,
-			RerankMinDensePreflight:    0.55,
-			RunbookMinScore:            0.33,
-			CodeMinScore:               0.11,
-			RerankMaxPerService:        4,
-			RerankMaxPerServiceLowBand: 2,
-			RerankProvider:             "dashscope",
-			RerankAPIKey:               "rk-test",
-			RerankModel:                "gte-rerank-v2",
-			RerankBaseURL:              "https://example.test/rerank",
-			AgentTimeout:               config.Duration(2 * time.Minute),
-			RetrievalRouterConfidence:  0.95,
-			RetrievalRouterMaxTokens:   768,
+		qaRuntimeFn: func() QARuntime {
+			return QARuntime{Settings: &config.PlatformSettings{
+				ContextBudget:              64000,
+				RerankEnabled:              true,
+				RerankPool:                 80,
+				RerankTopK:                 12,
+				RerankMinScore:             0.42,
+				RerankMinDensePreflight:    0.55,
+				RunbookMinScore:            0.33,
+				CodeMinScore:               0.11,
+				RerankMaxPerService:        4,
+				RerankMaxPerServiceLowBand: 2,
+				RerankProvider:             "dashscope",
+				RerankAPIKey:               "rk-test",
+				RerankModel:                "gte-rerank-v2",
+				RerankBaseURL:              "https://example.test/rerank",
+				AgentTimeout:               config.Duration(2 * time.Minute),
+				RetrievalRouterConfidence:  0.95,
+				RetrievalRouterMaxTokens:   768,
+			}}
 		},
 	}
 
@@ -142,7 +144,7 @@ func TestSettingsPutRejectsCodingDefaultOutsideEnabledProviders(t *testing.T) {
 			AddRow("coding_enabled_providers", "codex,claude").
 			AddRow("coding_default_provider", "claude"),
 	)
-	handler := &Handler{authDB: auth.NewDB(db), platform: &config.PlatformSettings{}}
+	handler := &Handler{authDB: auth.NewDB(db), qaRuntimeFn: func() QARuntime { return QARuntime{Settings: &config.PlatformSettings{}} }}
 	request := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(
 		`{"coding_enabled_providers":"codex"}`,
 	))
@@ -179,8 +181,8 @@ func TestSettingsPutPassesChangedKeysToPlatformPort(t *testing.T) {
 	platformSettings.Apply(nil)
 	var gotKeys []string
 	handler := &Handler{
-		authDB:   auth.NewDB(db),
-		platform: platformSettings,
+		authDB:      auth.NewDB(db),
+		qaRuntimeFn: func() QARuntime { return QARuntime{Settings: platformSettings} },
 		settingsChangedFn: func(keys []string) error {
 			gotKeys = append([]string(nil), keys...)
 			return nil
@@ -224,8 +226,8 @@ func TestSettingsPutSkipsPersistenceAndReloadWhenValuesAreUnchanged(t *testing.T
 	platformSettings.Apply(nil)
 	reloads := 0
 	handler := &Handler{
-		authDB:   auth.NewDB(db),
-		platform: platformSettings,
+		authDB:      auth.NewDB(db),
+		qaRuntimeFn: func() QARuntime { return QARuntime{Settings: platformSettings} },
 		settingsChangedFn: func([]string) error {
 			reloads++
 			return nil

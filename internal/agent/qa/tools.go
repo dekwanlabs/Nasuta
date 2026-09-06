@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/dekwanlabs/nasuta/internal/agent/definition"
 	"strings"
 	"time"
 
@@ -39,7 +40,7 @@ func scenarioToolIDs(tools []tool.Tool) []string {
 	return ids
 }
 
-func scenarioToolsContain(prepared ScenarioToolSet, id tool.ToolID) bool {
+func scenarioToolsContain(prepared definition.ScenarioToolSet, id tool.ToolID) bool {
 	if prepared == nil {
 		return false
 	}
@@ -57,7 +58,7 @@ func (svc *Service) prunedToolIDSet(tools []tool.Tool, routed []string) map[tool
 }
 
 type filteredScenarioTools struct {
-	base  ScenarioToolSet
+	base  definition.ScenarioToolSet
 	tools []tool.Tool
 	byID  map[tool.ToolID]tool.Tool
 }
@@ -78,18 +79,18 @@ func (filtered filteredScenarioTools) Execute(ctx context.Context, id tool.ToolI
 	return filtered.base.Execute(ctx, id, arguments)
 }
 
-func withoutScenarioTool(prepared ScenarioToolSet, excluded tool.ToolID) ScenarioToolSet {
+func withoutScenarioTool(prepared definition.ScenarioToolSet, excluded tool.ToolID) definition.ScenarioToolSet {
 	return withoutScenarioTools(prepared, excluded)
 }
 
-func withoutHistoryTools(prepared ScenarioToolSet) ScenarioToolSet {
+func withoutHistoryTools(prepared definition.ScenarioToolSet) definition.ScenarioToolSet {
 	return withoutScenarioTools(prepared, "get_turn", "find_turns")
 }
 
 func withoutScenarioTools(
-	prepared ScenarioToolSet,
+	prepared definition.ScenarioToolSet,
 	excluded ...tool.ToolID,
-) ScenarioToolSet {
+) definition.ScenarioToolSet {
 	if prepared == nil || len(excluded) == 0 {
 		return prepared
 	}
@@ -131,7 +132,7 @@ func parentDelegationInstruction(prepared *preparation) string {
 func (svc *Service) executePrefetch(
 	ctx context.Context,
 	runID string,
-	prepared ScenarioToolSet,
+	prepared definition.ScenarioToolSet,
 	plan ToolPlan,
 	stepRecorder preparationStepRecorder,
 ) ([]ContextBlock, error) {
@@ -182,7 +183,7 @@ func marshalPrefetchArgs(call PlannedToolCall) ([]byte, error) {
 func executePrefetchCall(
 	ctx context.Context,
 	runID string,
-	prepared ScenarioToolSet,
+	prepared definition.ScenarioToolSet,
 	call PlannedToolCall,
 	args []byte,
 	callID string,
