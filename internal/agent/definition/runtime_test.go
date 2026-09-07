@@ -1233,3 +1233,29 @@ func TestPrepareRunLimitsRecoveryPreservesAbsoluteDeadline(t *testing.T) {
 		t.Fatalf("recovered default deadline = %s, want %s", recovered.Deadline, origin.Add(2*time.Second))
 	}
 }
+
+// TestDefinitionManagedRunExecuteFinishesOnce proves Execute is guarded against
+// double submission and a second Execute does not silently re-run or publish a
+// second terminal.
+func TestDefinitionManagedRunExecuteRejectsDuplicateExecute(t *testing.T) {
+	definition := testReviewerDefinition(t, nil)
+	runtime := newTestDefinitionRuntime(
+		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), nil,
+	)
+	request := testDefinitionRequest(definition)
+	request.RunID = "managed-duplicate-execute"
+	managed, err := runtime.Begin(t.Context(), runStart(request))
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := managed.Execute(t.Context(), request); err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+	if _, err := managed.Execute(t.Context(), request); err == nil ||
+		!strings.Contains(err.Error(), "already executed") {
+		t.Fatalf("second Execute error = %v, want already-executed failure", err)
+	}
+	if err := managed.Finish(nil); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+}

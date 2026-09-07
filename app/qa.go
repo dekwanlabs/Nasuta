@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -11,7 +12,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/delegation"
 	agentqa "github.com/dekwanlabs/nasuta/internal/agent/qa"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"github.com/dekwanlabs/nasuta/internal/agent/workflow"
+	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
 	"github.com/dekwanlabs/nasuta/log"
@@ -35,7 +38,7 @@ func (p *Platform) buildQARuntime(
 	graph *codegraph.DB,
 	version int64,
 ) (
-	dashboard.QARuntime,
+	qaRuntimeBundle,
 	[]agentapi.Definition,
 	[]agentapi.Capability,
 	agentapi.Runtime,
@@ -49,7 +52,7 @@ func (p *Platform) buildQARuntime(
 	writeAvailable := p.incident.manager != nil
 	if !snapshot.LLMEnabled() {
 		hub := run.NewHub(p.qa.runs)
-		runtime := dashboard.QARuntime{
+		runtime := qaRuntimeBundle{
 			Hub: hub, RunStore: p.qa.runs,
 			Sessions: p.qa.sessions,
 			History:  p.history, Settings: &snapshot,
@@ -58,7 +61,7 @@ func (p *Platform) buildQARuntime(
 		return runtime, nil, nil, nil, nil
 	}
 	if err := snapshot.ValidateAgentSettings(); err != nil {
-		return dashboard.QARuntime{}, nil, nil, nil, err
+		return qaRuntimeBundle{}, nil, nil, nil, err
 	}
 	if p.qa.memory == nil {
 		p.qa.memory = buildLongTermMemory(
@@ -69,19 +72,19 @@ func (p *Platform) buildQARuntime(
 	}
 	definitions, err := defaultAgentDefinitions(&snapshot, version)
 	if err != nil {
-		return dashboard.QARuntime{}, nil, nil, nil, err
+		return qaRuntimeBundle{}, nil, nil, nil, err
 	}
 	var extensionCapabilities []agentapi.Capability
 	if p.agents.provider != nil {
 		contribution, err := p.agents.provider.AgentCatalog(snapshot, version)
 		if err != nil {
-			return dashboard.QARuntime{}, nil, nil, nil, fmt.Errorf(
+			return qaRuntimeBundle{}, nil, nil, nil, fmt.Errorf(
 				"prepare application agent catalog: %w",
 				err,
 			)
 		}
 		if err := validateAgentCatalogContribution(contribution, version); err != nil {
-			return dashboard.QARuntime{}, nil, nil, nil, err
+			return qaRuntimeBundle{}, nil, nil, nil, err
 		}
 		definitions = append(definitions, contribution.Definitions...)
 		extensionCapabilities = append(
@@ -99,24 +102,25 @@ func (p *Platform) buildQARuntime(
 		hub,
 	)
 	if err != nil {
-		return dashboard.QARuntime{}, nil, nil, nil, fmt.Errorf(
+		return qaRuntimeBundle{}, nil, nil, nil, fmt.Errorf(
 			"configure definition runtime: %w",
 			err,
 		)
 	}
 	models := agentqa.NewModels(&snapshot)
+	p.tools.SetWebQueryRewriter(webQueryRewriter(models.Fast()))
 	qa := agentqa.New(agentqa.Deps{
 		Tools: p.tools, Cfg: p.cfg, Platform: &snapshot,
 		CodeGraphDB: graph, History: p.history,
 		Sessions: p.qa.sessions, Memory: p.qa.memory,
-		Definitions:     p.agents.catalog,
-		Agent:           agentapi.DefinitionRef{ID: definitions[0].ID},
-		Runtime:         definitionRuntime,
-		Models:          models,
-		Events:          hub,
-		WriteAvailable:  writeAvailable,
+		Definitions:    p.agents.catalog,
+		Agent:          agentapi.DefinitionRef{ID: definitions[0].ID},
+		Runtime:        definitionRuntime,
+		Models:         models,
+		Events:         hub,
+		WriteAvailable: writeAvailable,
 	})
-	runtime := dashboard.QARuntime{
+	runtime := qaRuntimeBundle{
 		QA: qa, RunStore: p.qa.runs,
 		Sessions: p.qa.sessions,
 		History:  p.history, Settings: &snapshot,
@@ -152,10 +156,31 @@ func defaultAgentDefinitions(
 }
 
 // currentQARuntime returns the currently published QA runtime snapshot.
-func (p *Platform) currentQARuntime() dashboard.QARuntime {
+func (p *Platform) currentQARuntime() qaRuntimeBundle {
 	p.qa.mu.RLock()
 	defer p.qa.mu.RUnlock()
 	return p.qa.current
+}
+
+// currentQAPorts adapts the app-owned QA runtime into the narrow transport
+// boundary. The dashboard handler never sees the QARuntime aggregate.
+func (p *Platform) currentQAPorts() dashboard.QAApplicationPorts {
+	rt := p.currentQARuntime()
+	ports := dashboard.QAApplicationPorts{
+		SessionStore:   rt.Sessions,
+		RunStore:       rt.RunStore,
+		MemoryStore:    p.qa.memory,
+		Settings:       rt.Settings,
+		WriteAvailable: rt.WriteAvailable,
+	}
+	if rt.Hub != nil {
+		hub := rt.Hub
+		ports.RuntimeStatus = hub
+		if rt.QA != nil {
+			ports.Application = &qaApplication{service: rt.QA, hub: hub}
+		}
+	}
+	return ports
 }
 
 // initializeQARuntime performs the first QA runtime initialization during
@@ -318,12 +343,45 @@ func (p *Platform) nextQACatalogVersion() int64 {
 	) + 1
 }
 
+// qaReloadCandidate is the fully staged, not-yet-active reload result. It
+// keeps the expensive build/publish work separate from the atomic activation
+// and recovery-worker reconciliation steps.
+type qaReloadCandidate struct {
+	settings          *config.PlatformSettings
+	runtime           qaRuntimeBundle
+	definitions       []agentapi.Definition
+	definitionRuntime agentapi.Runtime
+	catalogVersion    int64
+	reusedCatalog     bool
+}
+
 // rebuildQARuntimeLocked builds, publishes, configures, and atomically
-// activates a new QA runtime while the caller holds the reload lock.
+// activates a new QA runtime while the caller holds the reload lock. It is
+// intentionally a thin orchestration around named phase helpers so the failure
+// boundary of each lifecycle step is visible.
 func (p *Platform) rebuildQARuntimeLocked(
 	settings *config.PlatformSettings,
 	graph *codegraph.DB,
 ) error {
+	candidate, err := p.stageQARuntimeCandidate(settings, graph)
+	if err != nil {
+		return err
+	}
+	if err := p.configureQARuntimeExtensions(candidate); err != nil {
+		return err
+	}
+	p.activateQARuntimeAtomically(candidate, graph)
+	p.reconcileQARecoveryWorker(candidate.definitionRuntime)
+	p.publishQARuntimeIndexSettings(candidate.settings, candidate.catalogVersion)
+	return nil
+}
+
+// stageQARuntimeCandidate builds the runtime bundle and stages/publishes the
+// catalog without touching the currently active runtime.
+func (p *Platform) stageQARuntimeCandidate(
+	settings *config.PlatformSettings,
+	graph *codegraph.DB,
+) (qaReloadCandidate, error) {
 	version := p.nextQACatalogVersion()
 	candidate, definitions, extensionCapabilities, definitionRuntime, err := p.buildQARuntime(
 		settings,
@@ -331,102 +389,135 @@ func (p *Platform) rebuildQARuntimeLocked(
 		version,
 	)
 	if err != nil {
-		return err
+		return qaReloadCandidate{}, err
 	}
 	reusedCatalog := false
 	if len(definitions) > 0 {
-		snapshot, err := p.prepareQACatalogSnapshot(
-			candidate.Settings,
-			version,
-			definitions,
-			extensionCapabilities,
+		definitions, version, reusedCatalog, err = p.publishQACatalog(
+			candidate.Settings, version, definitions, extensionCapabilities,
 		)
 		if err != nil {
-			return err
-		}
-		if reusableVersion, reusable := p.reusableQACatalogVersion(
-			definitions,
-		); reusable {
-			rewrittenDefinitions, err := rewriteCatalogDefinitions(
-				definitions,
-				reusableVersion,
-			)
-			if err != nil {
-				return err
-			}
-			reusedSnapshot, err := p.prepareQACatalogSnapshot(
-				candidate.Settings,
-				reusableVersion,
-				rewrittenDefinitions,
-				extensionCapabilities,
-			)
-			if err != nil {
-				return err
-			}
-			p.qa.mu.RLock()
-			initialized := p.qa.current.Settings != nil
-			p.qa.mu.RUnlock()
-			if p.publishedQACatalogMatches(
-				reusedSnapshot,
-				initialized,
-			) {
-				version = reusableVersion
-				snapshot = reusedSnapshot
-				reusedCatalog = true
-			}
-		}
-		definitions = snapshot.definitions
-		if !reusedCatalog {
-			if err := p.agents.catalog.Publish(snapshot.definitions); err != nil {
-				return fmt.Errorf("publish agent definitions: %w", err)
-			}
-		}
-		if err := p.agents.capabilities.Publish(snapshot.capabilities); err != nil {
-			return fmt.Errorf("publish delegation capabilities: %w", err)
-		}
-		if reusedCatalog {
-			log.Infof(
-				"[settings] reused published QA catalog version %d",
-				version,
-			)
+			return qaReloadCandidate{}, err
 		}
 	}
-	p.qa.mu.RLock()
-	oldRuntime := p.agents.runtime
-	p.qa.mu.RUnlock()
-	if err := p.configureDynamicDelegation(candidate.Settings, definitionRuntime); err != nil {
-		return err
-	}
-	if err := p.configureFeatureReviewRuntime(candidate.Settings, definitionRuntime, definitions); err != nil {
-		return err
-	}
+	return qaReloadCandidate{
+		settings:          candidate.Settings,
+		runtime:           candidate,
+		definitions:       definitions,
+		definitionRuntime: definitionRuntime,
+		catalogVersion:    version,
+		reusedCatalog:     reusedCatalog,
+	}, nil
+}
 
+// publishQACatalog stages and publishes (or reuses) the definition and
+// capability catalogs for one reload candidate.
+func (p *Platform) publishQACatalog(
+	settings *config.PlatformSettings,
+	version int64,
+	definitions []agentapi.Definition,
+	extensionCapabilities []agentapi.Capability,
+) ([]agentapi.Definition, int64, bool, error) {
+	reusedCatalog := false
+	snapshot, err := p.prepareQACatalogSnapshot(
+		settings, version, definitions, extensionCapabilities,
+	)
+	if err != nil {
+		return nil, version, false, err
+	}
+	if reusableVersion, reusable := p.reusableQACatalogVersion(definitions); reusable {
+		rewrittenDefinitions, err := rewriteCatalogDefinitions(definitions, reusableVersion)
+		if err != nil {
+			return nil, version, false, err
+		}
+		rewrittenCapabilities := rewriteCatalogCapabilities(extensionCapabilities, reusableVersion)
+		reusedSnapshot, err := p.prepareQACatalogSnapshot(
+			settings, reusableVersion, rewrittenDefinitions, rewrittenCapabilities,
+		)
+		if err != nil {
+			return nil, version, false, err
+		}
+		p.qa.mu.RLock()
+		initialized := p.qa.current.Settings != nil
+		p.qa.mu.RUnlock()
+		if p.publishedQACatalogMatches(reusedSnapshot, initialized) {
+			version = reusableVersion
+			snapshot = reusedSnapshot
+			reusedCatalog = true
+		}
+	}
+	definitions = snapshot.definitions
+	if !reusedCatalog {
+		if err := p.agents.catalog.Publish(snapshot.definitions); err != nil {
+			return nil, version, false, fmt.Errorf("publish agent definitions: %w", err)
+		}
+	}
+	if err := p.agents.capabilities.Publish(snapshot.capabilities); err != nil {
+		return nil, version, false, fmt.Errorf("publish delegation capabilities: %w", err)
+	}
+	if reusedCatalog {
+		log.Infof("[settings] reused published QA catalog version %d", version)
+	}
+	return definitions, version, reusedCatalog, nil
+}
+
+// configureQARuntimeExtensions wires dynamic delegation and feature review
+// against the staged runtime before it becomes active.
+func (p *Platform) configureQARuntimeExtensions(candidate qaReloadCandidate) error {
+	if err := p.configureDynamicDelegation(candidate.settings, candidate.definitionRuntime); err != nil {
+		return err
+	}
+	if err := p.configureFeatureReviewRuntime(
+		candidate.settings, candidate.definitionRuntime, candidate.definitions,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+// activateQARuntimeAtomically replaces the active settings/runtime/graph in a
+// single lock section. It never leaves a partially updated active snapshot.
+func (p *Platform) activateQARuntimeAtomically(candidate qaReloadCandidate, graph *codegraph.DB) {
 	p.qa.mu.Lock()
-	p.settings = candidate.Settings
-	p.qa.current = candidate
-	p.agents.runtime = definitionRuntime
-	if len(definitions) > 0 {
-		p.agents.version = version
-		p.agents.maxVersion = max(p.agents.maxVersion, version)
+	p.settings = candidate.settings
+	p.qa.current = candidate.runtime
+	p.agents.runtime = candidate.definitionRuntime
+	if len(candidate.definitions) > 0 {
+		p.agents.version = candidate.catalogVersion
+		p.agents.maxVersion = max(p.agents.maxVersion, candidate.catalogVersion)
 	}
 	p.graph = graph
 	p.qa.mu.Unlock()
-	if oldRecovery, ok := oldRuntime.(durableRecoveryWorker); ok && oldRuntime != definitionRuntime {
+}
+
+// reconcileQARecoveryWorker stops the previous durable recovery worker (if it
+// differs from the new runtime) and starts the new one under the current
+// worker context.
+func (p *Platform) reconcileQARecoveryWorker(next agentapi.Runtime) {
+	p.qa.mu.RLock()
+	oldRuntime := p.agents.runtime
+	p.qa.mu.RUnlock()
+	if oldRecovery, ok := oldRuntime.(durableRecoveryWorker); ok && oldRuntime != next {
 		oldRecovery.StopDurableRecoveryWorker()
 	}
 	p.workerMu.Lock()
 	workerCtx := p.workerCtx
 	p.workerMu.Unlock()
-	if workerCtx != nil {
-		if recovery, ok := definitionRuntime.(durableRecoveryWorker); ok {
-			recovery.StartDurableRecoveryWorker(workerCtx, time.Second)
-		}
+	if workerCtx == nil {
+		return
 	}
-	p.index.SetPlatform(candidate.Settings)
+	if recovery, ok := next.(durableRecoveryWorker); ok {
+		recovery.StartDurableRecoveryWorker(workerCtx, time.Second)
+	}
+}
+
+// publishQARuntimeIndexSettings pushes the newly active settings into the
+// indexing service and emits a concise reload summary.
+func (p *Platform) publishQARuntimeIndexSettings(settings *config.PlatformSettings, version int64) {
+	p.index.SetPlatform(settings)
 	log.Infof("[settings] agent runtimes reloaded (definition_version=%d, model=%s, timeout=%s, max_steps=%d)",
-		p.agents.version, candidate.Settings.LLMModel,
-		time.Duration(candidate.Settings.AgentTimeout), candidate.Settings.AgentMaxSteps)
-	return nil
+		version, settings.LLMModel,
+		time.Duration(settings.AgentTimeout), settings.AgentMaxSteps)
 }
 
 // applyPlatformSettingsLocked updates platform and index settings that do not
@@ -771,6 +862,24 @@ func (p *Platform) configureAgentWorkflowRuntime(runtime agentapi.Runtime) error
 	return nil
 }
 
+// webQueryRewriteSystem instructs the fast model to turn a natural-language
+// question into a compact keyword query. Output is a single search string,
+// never prose.
+const webQueryRewriteSystem = "Rewrite the user's question into a short keyword search query for a web search engine. Keep technical terms, entities, and the specific thing being asked; drop question words and filler. Return only the search query, with no explanation."
+
+// webQueryRewriter wraps the fast model as a web search query rewriter. It
+// returns nil when no fast model is available, leaving the deterministic
+// question-word strip in place as the fallback.
+func webQueryRewriter(client *llm.LLMClient) tools.WebQueryRewriter {
+	if client == nil {
+		return nil
+	}
+	return func(ctx context.Context, query string) (string, error) {
+		rewritten, err := client.ChatText(ctx, webQueryRewriteSystem, query, llm.CallOptions{MaxTokens: 128})
+		return strings.TrimSpace(rewritten), err
+	}
+}
+
 // rewriteCatalogDefinitions clones the prepared candidate definitions and
 // rebinds them to a reused catalog version. It preserves the exact published
 // content for each ID while only changing the version identity, so a reused
@@ -783,6 +892,7 @@ func rewriteCatalogDefinitions(
 	rewritten := make([]agentapi.Definition, 0, len(definitions))
 	for _, definition := range definitions {
 		definition.Version = version
+		definition.ContentHash = ""
 		prepared, err := agentapi.Prepare(definition)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -795,4 +905,24 @@ func rewriteCatalogDefinitions(
 		rewritten = append(rewritten, prepared)
 	}
 	return rewritten, nil
+}
+
+// rewriteCatalogCapabilities rebinds extension-owned capabilities to a reused
+// catalog version. Both the capability identity and its pinned agent
+// definition reference must move together, otherwise the reused snapshot fails
+// validation because the capability points at a version the definitions no
+// longer carry. The content hash is cleared so the capability registry
+// recomputes it for the rebased identity.
+func rewriteCatalogCapabilities(
+	capabilities []agentapi.Capability,
+	version int64,
+) []agentapi.Capability {
+	rewritten := make([]agentapi.Capability, 0, len(capabilities))
+	for _, capability := range capabilities {
+		capability.Version = version
+		capability.Agent.Version = version
+		capability.ContentHash = ""
+		rewritten = append(rewritten, capability)
+	}
+	return rewritten
 }

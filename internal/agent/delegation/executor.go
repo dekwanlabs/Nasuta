@@ -1455,18 +1455,24 @@ func (executor *Executor) RunOneQueuedWork(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if item.Kind != "delegation_child" {
-		_ = executor.completeWorkItem(ctx, item, agentrun.WorkFailed, "unsupported work kind")
+		if err := executor.completeWorkItem(ctx, item, agentrun.WorkFailed, "unsupported work kind"); err != nil {
+			log.WarnfCtx(ctx, "[delegation] complete unsupported work item: %v", err)
+		}
 		return true, fmt.Errorf("unsupported work kind %q", item.Kind)
 	}
 	var work queuedDelegationWork
 	if err := json.Unmarshal(item.Payload, &work); err != nil {
-		_ = executor.completeWorkItem(ctx, item, agentrun.WorkFailed, err.Error())
+		if cerr := executor.completeWorkItem(ctx, item, agentrun.WorkFailed, err.Error()); cerr != nil {
+			log.WarnfCtx(ctx, "[delegation] complete failed work item: %v", cerr)
+		}
 		return true, err
 	}
 	parent := work.Parent
 	prepared, code, err := executor.prepareTask(parent, item.DelegationID, item.TaskIndex, work.Task, map[string]struct{}{})
 	if err != nil {
-		_ = executor.completeWorkItem(ctx, item, agentrun.WorkFailed, err.Error())
+		if cerr := executor.completeWorkItem(ctx, item, agentrun.WorkFailed, err.Error()); cerr != nil {
+			log.WarnfCtx(ctx, "[delegation] complete failed work item: %v", cerr)
+		}
 		return true, fmt.Errorf("prepare queued child: %s: %w", code, err)
 	}
 	prepared.queueWaitMS = workItemQueueWaitMS(item)
@@ -1475,7 +1481,9 @@ func (executor *Executor) RunOneQueuedWork(ctx context.Context) (bool, error) {
 	record, _, err := executor.persistence.GetDelegationTask(readCtx, parent.RunID, item.DelegationID, item.TaskIndex)
 	cancelRead()
 	if err != nil {
-		_ = executor.completeWorkItem(ctx, item, agentrun.WorkFailed, err.Error())
+		if cerr := executor.completeWorkItem(ctx, item, agentrun.WorkFailed, err.Error()); cerr != nil {
+			log.WarnfCtx(ctx, "[delegation] complete failed work item: %v", cerr)
+		}
 		return true, err
 	}
 	workCtx, stopHeartbeat := executor.withWorkLease(ctx, item)

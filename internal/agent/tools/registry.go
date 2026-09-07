@@ -18,7 +18,6 @@ import (
 
 type Tool = tool.Tool
 type Registry = tool.Registry
-type ToolPolicy = tool.Policy
 type SessionHistory = session.History
 
 const (

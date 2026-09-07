@@ -252,12 +252,6 @@ func (b *BM25Builder) addTokensLocked(tokens []string) {
 	}
 }
 
-func (b *BM25Builder) TotalDocs() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.docCount
-}
-
 func (b *BM25Builder) BuildSparse(tokens []string) SparseVector {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

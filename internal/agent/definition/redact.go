@@ -8,7 +8,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/redact"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -28,14 +28,14 @@ func (observer redactingObserver) OnToken(
 	ctx context.Context,
 	runID, token string,
 ) {
-	observer.next.OnToken(ctx, runID, platform.RedactSensitiveText(token))
+	observer.next.OnToken(ctx, runID, redact.RedactSensitiveText(token))
 }
 
 func (observer redactingObserver) OnReasoning(
 	ctx context.Context,
 	runID, token string,
 ) {
-	observer.next.OnReasoning(ctx, runID, platform.RedactSensitiveText(token))
+	observer.next.OnReasoning(ctx, runID, redact.RedactSensitiveText(token))
 }
 
 func (observer redactingObserver) OnContextUsage(
@@ -53,7 +53,7 @@ func (observer redactingObserver) EmitPhase(runID, text string) {
 		EmitPhase(string, string)
 	})
 	if ok {
-		emitter.EmitPhase(runID, platform.RedactSensitiveText(text))
+		emitter.EmitPhase(runID, redact.RedactSensitiveText(text))
 	}
 }
 
@@ -77,7 +77,7 @@ func redactStart(start agentapi.RunStart) agentapi.RunStart {
 
 func redactResult(result agentapi.RunResult) agentapi.RunResult {
 	result.Output = redactRawMessage(result.Output)
-	result.Text = platform.RedactSensitiveText(result.Text)
+	result.Text = redact.RedactSensitiveText(result.Text)
 	result.References = redactPublicReferences(result.References)
 	result.Messages = redactPublicMessages(result.Messages)
 	result.EvidenceUnits = redactEvidenceUnits(result.EvidenceUnits)
@@ -87,27 +87,27 @@ func redactResult(result agentapi.RunResult) agentapi.RunResult {
 	)
 	if result.Error != nil {
 		copied := *result.Error
-		copied.Message = platform.RedactSensitiveText(copied.Message)
+		copied.Message = redact.RedactSensitiveText(copied.Message)
 		result.Error = &copied
 	}
 	return result
 }
 
 func redactOutcome(outcome run.Outcome) run.Outcome {
-	outcome.Answer = platform.RedactSensitiveText(outcome.Answer)
+	outcome.Answer = redact.RedactSensitiveText(outcome.Answer)
 	outcome.SessionMessages = redactLLMMessages(outcome.SessionMessages)
 	outcome.References = redactPublicReferences(outcome.References)
 	outcome.DelegationAdoptions = cloneDelegationAdoptions(
 		outcome.DelegationAdoptions,
 	)
 	if outcome.Err != nil {
-		outcome.Err = errors.New(platform.RedactSensitiveText(outcome.Err.Error()))
+		outcome.Err = errors.New(redact.RedactSensitiveText(outcome.Err.Error()))
 	}
 	return outcome
 }
 
 func redactStep(step run.StepRecord) run.StepRecord {
-	content := platform.RedactSensitiveText(step.Content)
+	content := redact.RedactSensitiveText(step.Content)
 	if content != step.Content {
 		step.Content = content
 		step.SizeBytes = int64(len(content))
@@ -115,22 +115,22 @@ func redactStep(step run.StepRecord) run.StepRecord {
 			step.AuthoritativeSHA256 = hashString(content)
 		}
 	}
-	prompt := platform.RedactSensitiveText(step.PromptContent)
+	prompt := redact.RedactSensitiveText(step.PromptContent)
 	if prompt != step.PromptContent {
 		step.PromptContent = prompt
 		if step.PromptSHA256 != "" {
 			step.PromptSHA256 = hashString(prompt)
 		}
 	}
-	step.Args = platform.RedactSensitiveText(step.Args)
-	step.ResultPreview = platform.RedactSensitiveText(step.ResultPreview)
-	step.DeliveryError = platform.RedactSensitiveText(step.DeliveryError)
+	step.Args = redact.RedactSensitiveText(step.Args)
+	step.ResultPreview = redact.RedactSensitiveText(step.ResultPreview)
+	step.DeliveryError = redact.RedactSensitiveText(step.DeliveryError)
 	step.AnswerContract.RequiredLiterals = append(
 		[]string(nil),
 		step.AnswerContract.RequiredLiterals...,
 	)
 	for index := range step.AnswerContract.RequiredLiterals {
-		step.AnswerContract.RequiredLiterals[index] = platform.RedactSensitiveText(
+		step.AnswerContract.RequiredLiterals[index] = redact.RedactSensitiveText(
 			step.AnswerContract.RequiredLiterals[index],
 		)
 	}
@@ -161,15 +161,15 @@ func redactRawMessage(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
 		return nil
 	}
-	return json.RawMessage(platform.RedactSensitiveText(string(raw)))
+	return json.RawMessage(redact.RedactSensitiveText(string(raw)))
 }
 
 func redactContextBlocks(blocks []agentapi.ContextBlock) []agentapi.ContextBlock {
 	redacted := make([]agentapi.ContextBlock, len(blocks))
 	for index, block := range blocks {
-		block.Source = platform.RedactSensitiveText(block.Source)
-		block.Title = platform.RedactSensitiveText(block.Title)
-		block.Content = platform.RedactSensitiveText(block.Content)
+		block.Source = redact.RedactSensitiveText(block.Source)
+		block.Title = redact.RedactSensitiveText(block.Title)
+		block.Content = redact.RedactSensitiveText(block.Content)
 		block.ContentHash = hashString(block.Content)
 		block.References = redactPublicReferences(block.References)
 		block.Evidence = redactEvidenceUnits(block.Evidence)
@@ -182,15 +182,15 @@ func redactContextBlocks(blocks []agentapi.ContextBlock) []agentapi.ContextBlock
 func redactEvidenceConflicts(conflicts []agentapi.EvidenceConflict) []agentapi.EvidenceConflict {
 	redacted := make([]agentapi.EvidenceConflict, len(conflicts))
 	for index, conflict := range conflicts {
-		conflict.Identity.SourceKind = platform.RedactSensitiveText(conflict.Identity.SourceKind)
-		conflict.Identity.Target = platform.RedactSensitiveText(conflict.Identity.Target)
-		conflict.Identity.Section = platform.RedactSensitiveText(conflict.Identity.Section)
-		conflict.Identity.Version = platform.RedactSensitiveText(conflict.Identity.Version)
-		conflict.Identity.TimeRange = platform.RedactSensitiveText(conflict.Identity.TimeRange)
+		conflict.Identity.SourceKind = redact.RedactSensitiveText(conflict.Identity.SourceKind)
+		conflict.Identity.Target = redact.RedactSensitiveText(conflict.Identity.Target)
+		conflict.Identity.Section = redact.RedactSensitiveText(conflict.Identity.Section)
+		conflict.Identity.Version = redact.RedactSensitiveText(conflict.Identity.Version)
+		conflict.Identity.TimeRange = redact.RedactSensitiveText(conflict.Identity.TimeRange)
 		conflict.Current = redactEvidenceUnit(conflict.Current)
 		conflict.Incoming = redactEvidenceUnit(conflict.Incoming)
-		conflict.CurrentOrigin = platform.RedactSensitiveText(conflict.CurrentOrigin)
-		conflict.IncomingOrigin = platform.RedactSensitiveText(conflict.IncomingOrigin)
+		conflict.CurrentOrigin = redact.RedactSensitiveText(conflict.CurrentOrigin)
+		conflict.IncomingOrigin = redact.RedactSensitiveText(conflict.IncomingOrigin)
 		redacted[index] = conflict
 	}
 	return redacted
@@ -205,21 +205,21 @@ func redactEvidenceUnits(units []tool.EvidenceUnit) []tool.EvidenceUnit {
 }
 
 func redactEvidenceUnit(unit tool.EvidenceUnit) tool.EvidenceUnit {
-	unit.SourceKind = platform.RedactSensitiveText(unit.SourceKind)
-	unit.Target = platform.RedactSensitiveText(unit.Target)
+	unit.SourceKind = redact.RedactSensitiveText(unit.SourceKind)
+	unit.Target = redact.RedactSensitiveText(unit.Target)
 	unit.Sections = redactStrings(unit.Sections)
 	unit.Facets = redactStrings(unit.Facets)
-	unit.EvidenceClass = platform.RedactSensitiveText(unit.EvidenceClass)
-	unit.Version = platform.RedactSensitiveText(unit.Version)
-	unit.TimeRange = platform.RedactSensitiveText(unit.TimeRange)
-	unit.Coverage.NextCursor = platform.RedactSensitiveText(unit.Coverage.NextCursor)
+	unit.EvidenceClass = redact.RedactSensitiveText(unit.EvidenceClass)
+	unit.Version = redact.RedactSensitiveText(unit.Version)
+	unit.TimeRange = redact.RedactSensitiveText(unit.TimeRange)
+	unit.Coverage.NextCursor = redact.RedactSensitiveText(unit.Coverage.NextCursor)
 	return unit
 }
 
 func redactStrings(values []string) []string {
 	redacted := make([]string, len(values))
 	for index, value := range values {
-		redacted[index] = platform.RedactSensitiveText(value)
+		redacted[index] = redact.RedactSensitiveText(value)
 	}
 	return redacted
 }
@@ -227,8 +227,8 @@ func redactStrings(values []string) []string {
 func redactPublicReferences(references []agentapi.Reference) []agentapi.Reference {
 	redacted := make([]agentapi.Reference, len(references))
 	for index, reference := range references {
-		reference.Label = platform.RedactSensitiveText(reference.Label)
-		reference.Target = platform.RedactSensitiveText(reference.Target)
+		reference.Label = redact.RedactSensitiveText(reference.Label)
+		reference.Target = redact.RedactSensitiveText(reference.Target)
 		redacted[index] = reference
 	}
 	return redacted
@@ -237,10 +237,10 @@ func redactPublicReferences(references []agentapi.Reference) []agentapi.Referenc
 func redactPublicMessages(messages []agentapi.Message) []agentapi.Message {
 	redacted := make([]agentapi.Message, len(messages))
 	for index, message := range messages {
-		message.Content = platform.RedactSensitiveText(message.Content)
+		message.Content = redact.RedactSensitiveText(message.Content)
 		message.ToolCalls = append([]agentapi.ToolCall(nil), message.ToolCalls...)
 		for callIndex := range message.ToolCalls {
-			message.ToolCalls[callIndex].Function.Arguments = platform.RedactSensitiveText(
+			message.ToolCalls[callIndex].Function.Arguments = redact.RedactSensitiveText(
 				message.ToolCalls[callIndex].Function.Arguments,
 			)
 		}
@@ -252,10 +252,10 @@ func redactPublicMessages(messages []agentapi.Message) []agentapi.Message {
 func redactLLMMessages(messages []llm.Message) []llm.Message {
 	redacted := make([]llm.Message, len(messages))
 	for index, message := range messages {
-		message.Content = platform.RedactSensitiveText(message.Content)
+		message.Content = redact.RedactSensitiveText(message.Content)
 		message.ToolCalls = append([]llm.ToolCall(nil), message.ToolCalls...)
 		for callIndex := range message.ToolCalls {
-			message.ToolCalls[callIndex].Function.Arguments = platform.RedactSensitiveText(
+			message.ToolCalls[callIndex].Function.Arguments = redact.RedactSensitiveText(
 				message.ToolCalls[callIndex].Function.Arguments,
 			)
 		}

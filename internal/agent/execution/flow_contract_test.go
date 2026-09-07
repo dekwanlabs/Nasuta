@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -80,6 +81,49 @@ func TestDeterministicConclusionInstallsNonEmptyAnswer(t *testing.T) {
 		if adoption.Status == agentapi.DelegationUnknown {
 			t.Fatalf("fallback left unknown adoption: %#v", state.result.DelegationAdoptions)
 		}
+	}
+}
+
+func TestDeterministicConclusionStructuredFallbackIsSchemaValidJSON(t *testing.T) {
+	agent := &Agent{cfg: Config{StructuredOutput: true}}
+	state := &compiledLoop{
+		ctx:    context.Background(),
+		runID:  "run-structured-fallback",
+		input: Input{
+			Question: "Execute this JSON input against output schema investigation.report version 1.",
+			OriginalRequest: &agentapi.RunRequest{
+				Agent: agentapi.DefinitionRef{ID: "investigator.docs"},
+			},
+		},
+		result: &RunResult{},
+	}
+	if !agent.installDeterministicConclusion(state, errors.New("model budget exhausted")) {
+		t.Fatal("installDeterministicConclusion did not install a fallback answer")
+	}
+	answer := strings.TrimSpace(state.result.Answer)
+	if !json.Valid([]byte(answer)) {
+		t.Fatalf("structured fallback is not valid JSON: %q", answer)
+	}
+	var report map[string]any
+	if err := json.Unmarshal([]byte(answer), &report); err != nil {
+		t.Fatalf("decode fallback: %v", err)
+	}
+	for _, field := range []string{"focus", "summary", "findings", "gaps", "covered_evidence_goals", "unresolved_evidence_goals"} {
+		if _, ok := report[field]; !ok {
+			t.Fatalf("fallback missing report field %q: %v", field, report)
+		}
+	}
+	if report["focus"] != "docs" {
+		t.Fatalf("focus = %v, want docs", report["focus"])
+	}
+	for _, leaked := range []string{"objective", "capability", "delegation_id", "parent_run_id", "task_index", "parent_question_summary", "focus_facets", "evidence_refs", "output_kind"} {
+		if _, ok := report[leaked]; ok {
+			t.Fatalf("fallback leaked task-contract field %q: %v", leaked, report)
+		}
+	}
+	// The task question (which embeds the task contract) must not be echoed.
+	if strings.Contains(answer, "Execute this JSON input") {
+		t.Fatalf("fallback echoed the task question: %q", answer)
 	}
 }
 

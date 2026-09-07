@@ -82,7 +82,6 @@ type ToolScope struct {
 type RunOutputMode string
 
 const (
-	RunOutputStandalone     RunOutputMode = "standalone"
 	RunOutputWorkflowNode   RunOutputMode = "workflow_node"
 	RunOutputEvidenceWorker RunOutputMode = "evidence_worker"
 )

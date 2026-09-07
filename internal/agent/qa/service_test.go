@@ -122,10 +122,10 @@ func TestDegradedPlanningClearsRoutedToolsBeforeExecutionRouting(t *testing.T) {
 		},
 	}
 
-	svc.applyExecutionRoute(prepared)
+	svc.applyDelegationAdmission(prepared)
 
-	if prepared.execution.DowngradeReason != "delegation_unavailable" {
-		t.Fatalf("downgrade reason = %q, want delegation_unavailable", prepared.execution.DowngradeReason)
+	if prepared.admission.DowngradeReason != "delegation_unavailable" {
+		t.Fatalf("downgrade reason = %q, want delegation_unavailable", prepared.admission.DowngradeReason)
 	}
 	if prepared.planning.RoutedToolIDs != nil {
 		t.Fatalf("routed tools = %v, want nil after planning degradation", prepared.planning.RoutedToolIDs)
@@ -159,11 +159,11 @@ func TestExecutionRoutingDoesNotUseResolvedHistoryRelation(t *testing.T) {
 		},
 	}
 
-	svc.applyExecutionRoute(prepared)
+	svc.applyDelegationAdmission(prepared)
 
-	if prepared.execution.DowngradeReason != "delegation_unavailable" {
+	if prepared.admission.DowngradeReason != "delegation_unavailable" {
 		t.Fatalf("downgrade reason = %q, want delegation_unavailable",
-			prepared.execution.DowngradeReason)
+			prepared.admission.DowngradeReason)
 	}
 }
 
@@ -589,9 +589,10 @@ func newQARuntimeFixtureWithStore(
 	}
 	qa := &Service{
 		helperLLM: client, fastLLM: client,
-		retriever:       retriever,
-		runtime:         runtime,
-		events:          hub,
+		retriever:     retriever,
+		starter:       runtime,
+		scenarioTools: runtime,
+		events:        hub,
 		definitions: definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
 			if ref.ID != definition.ID || ref.Version != definition.Version {
 				return agentapi.Definition{}, fmt.Errorf("definition not found")

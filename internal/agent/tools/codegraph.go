@@ -13,15 +13,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 )
 
-// GetSymbolFiltered applies explicit file and qualified-name disambiguation.
-func (srv *Service) GetSymbolFiltered(ctx context.Context, query, file, qualifiedName string, limit int) map[string]any {
-	result, err := srv.GetSymbolResult(ctx, query, file, qualifiedName, limit)
-	if err != nil {
-		return map[string]any{"matches": nil, "error": err.Error()}
-	}
-	return result
-}
-
 // GetSymbolResult queries codegraph without hiding availability or query failures.
 func (srv *Service) GetSymbolResult(ctx context.Context, query, file, qualifiedName string, limit int) (map[string]any, error) {
 	query = strings.TrimSpace(query)
@@ -126,15 +117,6 @@ func nonEmptyStrings(value string) []string {
 		return nil
 	}
 	return []string{value}
-}
-
-// TraceCalls resolves a symbol and walks its callers or callees.
-func (srv *Service) TraceCalls(ctx context.Context, request callchain.Request) map[string]any {
-	result, err := srv.TraceCallsResult(ctx, request)
-	if err != nil {
-		return map[string]any{"error": err.Error()}
-	}
-	return result
 }
 
 // TraceCallsResult walks codegraph call edges without hiding broken prerequisites.

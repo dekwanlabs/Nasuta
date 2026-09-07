@@ -17,7 +17,6 @@ const (
 	PhaseForcedConclusion = "forced_conclusion"
 	PhaseSynthesis        = "synthesis"
 	PhaseMemoryExtract    = "memory_extract"
-	PhaseSessionSummary   = "session_summary"
 )
 
 const (

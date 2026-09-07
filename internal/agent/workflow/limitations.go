@@ -25,7 +25,6 @@ const (
 	limitationCritical limitationSeverity = "critical"
 	limitationHigh     limitationSeverity = "high"
 	limitationMedium   limitationSeverity = "medium"
-	limitationLow      limitationSeverity = "low"
 )
 
 // LimitationRecord is the canonical, auditable representation of one limitation.
@@ -238,8 +237,6 @@ func severityRank(value limitationSeverity) int {
 		return 3
 	case limitationMedium:
 		return 2
-	case limitationLow:
-		return 1
 	default:
 		return 0
 	}

@@ -33,5 +33,7 @@ is a pointer, not a second copy.
 - **Make failures and causes observable**: wrap errors with `%w`, preserve classification, propagate server-generated trace IDs through context, and use stable structured logs without secrets or full payloads. An explicitly configured backend must fail visibly rather than silently switching providers or returning empty success.
 - **Name precisely and verify proportionally**: use domain terms, standard Go acronym casing, focused package names, and behavior-oriented test names. For behavior changes cover success and failure paths, contract and concurrency boundaries as applicable; run `GOWORK=off` checks, `git diff --check`, and do not start live or credential-dependent services without opt-in.
 
+- **Push data work into SQL**: filtering, sorting, aggregation, dedup, projection, pagination, and joins belong in the query whenever SQL can express them — never load raw rows and re-process them in Go. One operation gets one method and one type — delete error-swallowing `X()` wrappers. In-memory copies of DB data need an invalidation path. Interfaces, provider adapters, and DTO projections are intentional boundaries, not redundancy. Full rules in [`CLAUDE.md`](./CLAUDE.md#conventions).
+
 For architecture, conventions, and the full command list, see
 [CLAUDE.md](./CLAUDE.md).

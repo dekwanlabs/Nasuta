@@ -503,15 +503,6 @@ func ParentKind(kind ArtifactKind) (ArtifactKind, bool) {
 	}
 }
 
-func IsActiveRun(status RunStatus) bool {
-	switch status {
-	case RunQueued, RunPreparing, RunRunning, RunValidating:
-		return true
-	default:
-		return false
-	}
-}
-
 func IsTerminalRun(status RunStatus) bool {
 	return status == RunSucceeded || status == RunFailed || status == RunCancelled || status == RunInterrupted
 }
@@ -530,12 +521,4 @@ func CanTransitionRun(from, to RunStatus) bool {
 	default:
 		return false
 	}
-}
-
-func ValidateDecision(value string) (ReviewDecision, error) {
-	decision := ReviewDecision(strings.TrimSpace(value))
-	if decision != DecisionApproved && decision != DecisionRejected {
-		return "", fmt.Errorf("decision must be approved or rejected")
-	}
-	return decision, nil
 }

@@ -10,20 +10,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 )
 
-func (workflowStore *Store) AppendEvent(ctx context.Context, event Event) error {
-	_, err := workflowStore.db.ExecContext(ctx, `INSERT INTO runtime_events(
-		stream_kind,stream_id,seq,kind,node_id,summary,detail_json,created_at)
-		VALUES('workflow',?,?,?,?,?,?,?)`,
-		event.WorkflowRunID, event.Seq, event.Kind, event.NodeID, event.Summary,
-		nullableJSON(event.Detail), store.DatabaseTime(event.CreatedAt.UTC().Format(time.RFC3339)),
-	)
-	if err != nil {
-		return fmt.Errorf("append workflow event %q/%d: %w", event.WorkflowRunID, event.Seq, err)
-	}
-	workflowStore.hub.Publish(event)
-	return nil
-}
-
 func (workflowStore *Store) SubscribeEvents(runID string) (<-chan Event, func()) {
 	return workflowStore.hub.Subscribe(runID)
 }

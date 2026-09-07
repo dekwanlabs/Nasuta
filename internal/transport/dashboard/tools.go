@@ -180,12 +180,12 @@ func (handler *Handler) APISemanticStatus(w http.ResponseWriter, r *http.Request
 func (handler *Handler) ServiceLookup(w http.ResponseWriter, r *http.Request) {
 	q := httputil.Query(r)
 	query := q.Str("query")
-	limit := q.Int("limit", 10)
+	limit := min(max(q.Int("limit", 10), 1), 100)
 	if q.Err() != nil {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	result, err := handler.tools.ServiceLookupResult(r.Context(), query, limit)
+	result, err := handler.tools.FindServices(r.Context(), query, limit)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
@@ -256,17 +256,17 @@ func (handler *Handler) ListApis(w http.ResponseWriter, r *http.Request) {
 	q := httputil.Query(r)
 	service := q.Str("service")
 	keyword := q.Str("keyword")
-	limit := q.Int("limit", 200)
+	limit := min(max(q.Int("limit", 200), 1), 100)
 	if q.Err() != nil {
 		httputil.WriteBadRequest(w, q.Err().Error())
 		return
 	}
-	result, err := handler.tools.ListAPIsResult(r.Context(), service, keyword, limit)
+	matches, err := handler.tools.FindAPIs(r.Context(), service, keyword, limit)
 	if err != nil {
 		httputil.WriteErr(w, err)
 		return
 	}
-	httputil.WriteJSON(w, result)
+	httputil.WriteJSON(w, map[string]any{"matches": matches})
 }
 
 func (handler *Handler) DocGapCheck(w http.ResponseWriter, r *http.Request) {

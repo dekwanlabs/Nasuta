@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/redact"
 )
 
 const (
@@ -428,13 +428,13 @@ func newReviewContextBlock(
 	complete bool,
 	references []agentapi.Reference,
 ) agentapi.ContextBlock {
-	source = platform.RedactSensitiveText(source)
-	title = platform.RedactSensitiveText(title)
-	content = platform.RedactSensitiveText(content)
+	source = redact.RedactSensitiveText(source)
+	title = redact.RedactSensitiveText(title)
+	content = redact.RedactSensitiveText(content)
 	references = append([]agentapi.Reference(nil), references...)
 	for index := range references {
-		references[index].Label = platform.RedactSensitiveText(references[index].Label)
-		references[index].Target = platform.RedactSensitiveText(references[index].Target)
+		references[index].Label = redact.RedactSensitiveText(references[index].Label)
+		references[index].Target = redact.RedactSensitiveText(references[index].Target)
 	}
 	sum := sha256.Sum256([]byte(content))
 	return agentapi.ContextBlock{

@@ -36,7 +36,7 @@ func (p *Platform) RegisterCommonRoutes(mux *http.ServeMux) {
 		p.index.Semantic, p.index.Embedder,
 		p.tools, p.cfg, p.index,
 		p.graph, p.calls,
-		p.currentQARuntime,
+		p.currentQAPorts,
 		p.applyStoredPlatformSettings,
 		p.replaceQACodeGraph,
 	)

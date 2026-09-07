@@ -28,7 +28,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/rbac"
 	"github.com/dekwanlabs/nasuta/internal/sessionhistory"
 	"github.com/dekwanlabs/nasuta/internal/transport/agenthttp"
-	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
 	"github.com/dekwanlabs/nasuta/internal/transport/incidenthttp"
 	"github.com/dekwanlabs/nasuta/internal/transport/routes"
 	"github.com/dekwanlabs/nasuta/internal/transport/workflowhttp"
@@ -67,7 +66,7 @@ type qaState struct {
 	sessions *memory.SessionStore
 	memory   *memory.MemoryStore
 	runs     *run.Store
-	current  dashboard.QARuntime
+	current  qaRuntimeBundle
 }
 
 type durableChildWorker interface {

@@ -96,7 +96,7 @@ func TestFlowOutputContractCarriesBoundedSubjects(t *testing.T) {
 
 func TestBeginSingleRunPinsFlowOutputContract(t *testing.T) {
 	runtime := &capturingManagedRuntime{}
-	service := &Service{runtime: runtime}
+	service := &Service{starter: runtime, scenarioTools: runtime}
 	query := domain.QueryPlan{
 		Kind: domain.QueryFlow,
 		EntitySpecs: []domain.EntitySpec{

@@ -55,6 +55,7 @@ type catalogPersistence interface {
 	Publish(context.Context, []Definition, int64) ([]DefinitionRecord, error)
 	LoadDefaultDefinitions(context.Context) ([]DefinitionRecord, error)
 	LoadDefinition(context.Context, string, int64) (DefinitionRecord, error)
+	LoadDefinitions(context.Context, []DefinitionRef) (map[DefinitionRef]DefinitionRecord, error)
 	LoadHighestVersions(context.Context) (map[string]int64, error)
 	LoadRollouts(context.Context) ([]RolloutRule, error)
 	ListDefinitions(context.Context, DefinitionCursor, int) ([]DefinitionRecord, error)
@@ -574,25 +575,29 @@ func (catalog *Catalog) buildCatalogState(
 	for _, record := range records {
 		loaded[definitionKey{id: record.ID, version: record.Version}] = record
 	}
+	missing := make([]DefinitionRef, 0, len(rollouts))
 	for _, rule := range rollouts {
-		candidateKey := definitionKey{
-			id: rule.WorkflowID, version: rule.CandidateVersion,
-		}
+		candidateKey := definitionKey{id: rule.WorkflowID, version: rule.CandidateVersion}
 		if _, ok := loaded[candidateKey]; ok {
 			continue
 		}
-		record, loadErr := store.LoadDefinition(
-			ctx,
-			rule.WorkflowID,
-			rule.CandidateVersion,
-		)
+		missing = append(missing, DefinitionRef{ID: rule.WorkflowID, Version: rule.CandidateVersion})
+	}
+	if len(missing) > 0 {
+		batch, loadErr := store.LoadDefinitions(ctx, missing)
 		if loadErr != nil {
-			return nil, fmt.Errorf(
-				"load workflow rollout %q candidate version %d: %w",
-				rule.WorkflowID, rule.CandidateVersion, loadErr,
-			)
+			return nil, fmt.Errorf("load workflow rollout candidates: %w", loadErr)
 		}
-		loaded[candidateKey] = record
+		for _, ref := range missing {
+			record, ok := batch[ref]
+			if !ok {
+				return nil, fmt.Errorf(
+					"load workflow rollout %q candidate version %d: %w",
+					ref.ID, ref.Version, ErrNotFound,
+				)
+			}
+			loaded[definitionKey{id: ref.ID, version: ref.Version}] = record
+		}
 	}
 	next := &catalogState{
 		records:  make(map[definitionKey]DefinitionRecord, len(loaded)),

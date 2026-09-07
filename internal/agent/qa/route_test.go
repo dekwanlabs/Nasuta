@@ -9,7 +9,7 @@ import (
 )
 
 func TestDecideExecutionRouteUsesParentDelegationForComplexSuggestion(t *testing.T) {
-	decision := decideExecutionRoute(executionRouteInput{
+	decision := decideDelegationAdmission(delegationAdmissionInput{
 		Suggestion: retrieval.ExecutionSuggestion{
 			Strategy:   retrieval.ExecutionMultiAgent,
 			Complexity: 0.95,
@@ -31,7 +31,7 @@ func TestDecideExecutionRouteUsesParentDelegationForComplexSuggestion(t *testing
 }
 
 func TestDecideExecutionRouteAllowsParallelMultiAgentSuggestion(t *testing.T) {
-	decision := decideExecutionRoute(executionRouteInput{
+	decision := decideDelegationAdmission(delegationAdmissionInput{
 		Suggestion: retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent,
 			Tasks: []retrieval.ExecutionTask{
@@ -49,7 +49,7 @@ func TestDecideExecutionRouteAllowsParallelMultiAgentSuggestion(t *testing.T) {
 }
 
 func TestDecideExecutionRouteRejectsSerializedDelegation(t *testing.T) {
-	decision := decideExecutionRoute(executionRouteInput{
+	decision := decideDelegationAdmission(delegationAdmissionInput{
 		Suggestion: retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent,
 			Tasks: []retrieval.ExecutionTask{
@@ -69,7 +69,7 @@ func TestDecideExecutionRouteRejectsSerializedDelegation(t *testing.T) {
 }
 
 func TestDecideExecutionRouteAllowsConfiguredParallelDelegation(t *testing.T) {
-	decision := decideExecutionRoute(executionRouteInput{
+	decision := decideDelegationAdmission(delegationAdmissionInput{
 		Suggestion: retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent,
 			Tasks: []retrieval.ExecutionTask{
@@ -88,7 +88,7 @@ func TestDecideExecutionRouteAllowsConfiguredParallelDelegation(t *testing.T) {
 }
 
 func TestDecideExecutionRouteKeepsSingleAgentSuggestionSingle(t *testing.T) {
-	decision := decideExecutionRoute(executionRouteInput{
+	decision := decideDelegationAdmission(delegationAdmissionInput{
 		Suggestion: retrieval.ExecutionSuggestion{
 			Strategy:   retrieval.ExecutionSingleAgent,
 			Complexity: 0.1,
@@ -130,7 +130,7 @@ func TestDecideExecutionRouteRejectsMultiAgentWithoutParallelBenefit(t *testing.
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			decision := decideExecutionRoute(executionRouteInput{
+			decision := decideDelegationAdmission(delegationAdmissionInput{
 				Suggestion: retrieval.ExecutionSuggestion{
 					Strategy: retrieval.ExecutionMultiAgent,
 					Tasks:    tc.tasks,
@@ -159,7 +159,7 @@ func TestDecideExecutionRouteFallsBackWhenDelegationUnavailable(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			decision := decideExecutionRoute(executionRouteInput{
+			decision := decideDelegationAdmission(delegationAdmissionInput{
 				Suggestion: retrieval.ExecutionSuggestion{
 					Strategy: retrieval.ExecutionMultiAgent,
 					Tasks:    []retrieval.ExecutionTask{{ID: "investigate", Objective: "Inspect the system.", IndependentlyUseful: true}},
@@ -176,7 +176,7 @@ func TestDecideExecutionRouteFallsBackWhenDelegationUnavailable(t *testing.T) {
 }
 
 func TestDecideExecutionRouteKeepsWriteRequestsOnParent(t *testing.T) {
-	decision := decideExecutionRoute(executionRouteInput{
+	decision := decideDelegationAdmission(delegationAdmissionInput{
 		Suggestion: retrieval.ExecutionSuggestion{
 			Strategy: retrieval.ExecutionMultiAgent,
 			Tasks: []retrieval.ExecutionTask{
@@ -212,13 +212,13 @@ func TestApplyExecutionRouteMarksRiskButNeverCreatesWorkflow(t *testing.T) {
 		},
 	}
 
-	svc.applyExecutionRoute(prepared)
+	svc.applyDelegationAdmission(prepared)
 
-	if prepared.execution.RouteReason != routeReasonParentDynamicDelegation {
-		t.Fatalf("execution = %+v, want normal parent run with dynamic delegation available", prepared.execution)
+	if prepared.admission.RouteReason != routeReasonParentDynamicDelegation {
+		t.Fatalf("execution = %+v, want normal parent run with dynamic delegation available", prepared.admission)
 	}
-	if !prepared.execution.HighRisk {
-		t.Fatalf("execution = %+v, risk signal was not preserved", prepared.execution)
+	if !prepared.admission.HighRisk {
+		t.Fatalf("execution = %+v, risk signal was not preserved", prepared.admission)
 	}
 }
 
@@ -239,10 +239,10 @@ func TestApplyExecutionRouteHidesDelegationWhenConcurrencyIsOne(t *testing.T) {
 		},
 	}
 
-	svc.applyExecutionRoute(prepared)
+	svc.applyDelegationAdmission(prepared)
 
-	if prepared.execution.RouteReason != routeReasonDelegationConcurrencyTooLow {
-		t.Fatalf("execution = %+v, want concurrency downgrade", prepared.execution)
+	if prepared.admission.RouteReason != routeReasonDelegationConcurrencyTooLow {
+		t.Fatalf("execution = %+v, want concurrency downgrade", prepared.admission)
 	}
 	if scenarioToolsContain(prepared.candidateToolSet, "delegate_investigation") {
 		t.Fatalf("candidate tools = %+v, delegation tool should be hidden", prepared.candidateToolSet)
@@ -266,7 +266,7 @@ func TestApplyExecutionRouteHidesDelegationForNonParallelSuggestion(t *testing.T
 		},
 	}
 
-	svc.applyExecutionRoute(prepared)
+	svc.applyDelegationAdmission(prepared)
 
 	if scenarioToolsContain(prepared.candidateToolSet, "delegate_investigation") {
 		t.Fatalf("candidate tools = %v, delegation tool must be hidden on a single-agent route", scenarioToolIDs(prepared.candidateToolSet.Tools()))
@@ -293,12 +293,12 @@ func TestApplyExecutionRouteFallsBackWhenDelegateToolIsNotVisible(t *testing.T) 
 		},
 	}
 
-	svc.applyExecutionRoute(prepared)
+	svc.applyDelegationAdmission(prepared)
 
-	if prepared.execution.RouteReason != routeReasonDelegationUnavailable {
-		t.Fatalf("execution = %+v, want delegation-unavailable normal run", prepared.execution)
+	if prepared.admission.RouteReason != routeReasonDelegationUnavailable {
+		t.Fatalf("execution = %+v, want delegation-unavailable normal run", prepared.admission)
 	}
-	if prepared.execution.DowngradeReason != routeReasonDelegationUnavailable {
-		t.Fatalf("execution = %+v, want delegation-unavailable downgrade", prepared.execution)
+	if prepared.admission.DowngradeReason != routeReasonDelegationUnavailable {
+		t.Fatalf("execution = %+v, want delegation-unavailable downgrade", prepared.admission)
 	}
 }

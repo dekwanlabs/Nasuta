@@ -24,13 +24,6 @@ func NewExecutor(service *delivery.Service) *Executor {
 	return &Executor{service: service, pollInterval: defaultPollInterval}
 }
 
-func (executor *Executor) SetPollInterval(interval time.Duration) {
-	if executor == nil || interval <= 0 {
-		return
-	}
-	executor.pollInterval = interval
-}
-
 func (executor *Executor) Execute(
 	ctx context.Context,
 	request workflow.NodeRequest,

@@ -11,8 +11,6 @@ import (
 	"github.com/dekwanlabs/nasuta/platform/httpclient"
 )
 
-type Alert = AlertPayload
-
 type AlertPayload struct {
 	Title     string         `json:"title"`
 	State     string         `json:"state"`

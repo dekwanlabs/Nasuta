@@ -7,7 +7,6 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
-	"github.com/dekwanlabs/nasuta/internal/transport/dashboard"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -78,7 +77,7 @@ func TestConfigureIncidentsDoesNotRebuildQARuntime(t *testing.T) {
 	agents := catalog.New(schemas)
 	settings := &config.PlatformSettings{}
 	settings.Apply(nil)
-	sentinel := &dashboard.QARuntime{Settings: settings}
+	sentinel := &qaRuntimeBundle{Settings: settings}
 	platform := &Platform{
 		cfg:      config.Config{WorkspaceRoot: t.TempDir()},
 		settings: settings,
@@ -112,4 +111,59 @@ func agentapiSchemaRegistry(t *testing.T) *agentapi.SchemaRegistry {
 		t.Fatal(err)
 	}
 	return schemas
+}
+
+func TestRewriteCatalogDefinitionsRebindsVersionWithoutStaleHash(t *testing.T) {
+	settings := enabledAgentSettings()
+	original, err := catalog.DefaultQAVersion(settings, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if original.ContentHash == "" {
+		t.Fatal("expected default definition to carry a content hash")
+	}
+
+	const reusedVersion = int64(200)
+	rewritten, err := rewriteCatalogDefinitions([]agentapi.Definition{original}, reusedVersion)
+	if err != nil {
+		t.Fatalf("rewriteCatalogDefinitions() = %v, want nil", err)
+	}
+	if len(rewritten) != 1 {
+		t.Fatalf("rewritten definitions = %d, want 1", len(rewritten))
+	}
+	got := rewritten[0]
+	if got.Version != reusedVersion {
+		t.Fatalf("rewritten version = %d, want %d", got.Version, reusedVersion)
+	}
+	if got.ContentHash == "" || got.ContentHash == original.ContentHash {
+		t.Fatalf("rewritten content hash should be recomputed for new version, got %q", got.ContentHash)
+	}
+}
+
+func TestRewriteCatalogCapabilitiesRebindsVersionAndAgent(t *testing.T) {
+	capabilities := []agentapi.Capability{
+		{
+			ID:          "knowledge.runtime.observe",
+			Version:     100,
+			Role:        agentapi.RoleInvestigator,
+			Agent:       agentapi.DefinitionRef{ID: "investigator.observe", Version: 100},
+			ContentHash: "stale",
+		},
+	}
+
+	const reusedVersion = int64(200)
+	rewritten := rewriteCatalogCapabilities(capabilities, reusedVersion)
+	if len(rewritten) != 1 {
+		t.Fatalf("rewritten capabilities = %d, want 1", len(rewritten))
+	}
+	got := rewritten[0]
+	if got.Version != reusedVersion {
+		t.Fatalf("rewritten version = %d, want %d", got.Version, reusedVersion)
+	}
+	if got.Agent.ID != "investigator.observe" || got.Agent.Version != reusedVersion {
+		t.Fatalf("rewritten agent ref = %+v, want investigator.observe@%d", got.Agent, reusedVersion)
+	}
+	if got.ContentHash != "" {
+		t.Fatalf("rewritten content hash = %q, want empty", got.ContentHash)
+	}
 }

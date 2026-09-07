@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/redact"
 )
 
 const (
@@ -252,7 +252,7 @@ func (manager *GitManager) RunValidation(ctx context.Context, prepared PreparedW
 		commandCtx, cancel := context.WithTimeout(ctx, time.Duration(command.Timeout))
 		output, exitCode, timedOut, runErr := runBoundedCommand(commandCtx, prepared.WorktreePath, environment, maxValidationOutput, command.Argv[0], command.Argv[1:]...)
 		cancel()
-		redactedOutput := []byte(platform.RedactSensitiveText(string(output)))
+		redactedOutput := []byte(redact.RedactSensitiveText(string(output)))
 		if len(redactedOutput) > maxValidationOutput {
 			return results, fmt.Errorf("redacted validation output exceeds %d bytes", maxValidationOutput)
 		}
@@ -631,10 +631,10 @@ func validationEnvironment(home string) []string {
 func redactValidationArgv(argv []string) []string {
 	redacted := make([]string, len(argv))
 	for index, argument := range argv {
-		redacted[index] = platform.RedactSensitiveText(argument)
+		redacted[index] = redact.RedactSensitiveText(argument)
 		if index > 0 && redacted[index] == argument {
 			key := strings.TrimLeft(argv[index-1], "-")
-			redacted[index] = platform.RedactConfigValue(key, argument)
+			redacted[index] = redact.RedactConfigValue(key, argument)
 		}
 	}
 	return redacted

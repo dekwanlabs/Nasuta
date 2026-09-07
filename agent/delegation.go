@@ -47,7 +47,6 @@ const (
 	DelegationCancelled   DelegationStatus = "cancelled"
 	DelegationRejected    DelegationStatus = "rejected"
 	DelegationInterrupted DelegationStatus = "interrupted"
-	DelegationUnavailable DelegationStatus = "unavailable"
 )
 
 type DelegationCompleteness string

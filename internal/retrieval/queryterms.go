@@ -25,7 +25,7 @@ func (qt QueryTerms) normalize() QueryTerms {
 				continue
 			}
 			key := strings.ToLower(t)
-			if seen[key] || domainTermNoise[key] {
+			if seen[key] {
 				continue
 			}
 			seen[key] = true
@@ -50,17 +50,6 @@ func (qt QueryTerms) normalize() QueryTerms {
 		idents = idents[:5]
 	}
 	return QueryTerms{domain, idents}
-}
-
-// domainTermNoise lists terms too generic to discriminate any subset of
-// a codebase. They appear in so many files that matching them is noise.
-var domainTermNoise = map[string]bool{
-	"fan": true, "sensor": true, "switch": true, "climate": true, "light": true,
-	"broker": true, "online": true, "offline": true, "status": true, "speed": true,
-	"overview": true, "controller": true, "service": true, "api": true, "config": true,
-	"topic": true, "payload": true, "device_type": true, "device_id": true,
-	"state_topic": true, "command_topic": true, "availability_topic": true,
-	"application_credentials": true, "manifest": true,
 }
 
 func (qt QueryTerms) allTerms() []string {

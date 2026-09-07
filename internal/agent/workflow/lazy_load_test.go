@@ -57,12 +57,12 @@ func TestCatalogAttachStoreLoadsWorkingSetAndLazilyHydratesHistory(t *testing.T)
 			rule.PercentageBPS, rule.Salt, rule.RuleHash, rule.Active,
 			int64(7), createdAt,
 		))
-	mock.ExpectQuery(`(?s)SELECT\s+definition_json,content_hash,active,is_default,created_by,created_at\s+FROM workflow_definitions WHERE id=\? AND version=\? LIMIT 1`).
+	mock.ExpectQuery(`(?s)SELECT\s+id,version,definition_json,content_hash,active,is_default,created_by,created_at\s+FROM workflow_definitions WHERE \(id=\? AND version=\?\)`).
 		WithArgs("delivery.review", int64(3)).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"definition_json", "content_hash", "active", "is_default",
-			"created_by", "created_at",
-		}).AddRow(candidateRaw, candidate.ContentHash, true, false, int64(7), createdAt))
+			"id", "version", "definition_json", "content_hash", "active",
+			"is_default", "created_by", "created_at",
+		}).AddRow("delivery.review", int64(3), candidateRaw, candidate.ContentHash, true, false, int64(7), createdAt))
 
 	catalog := NewCatalog(schemas, testAgentDefinitions(t))
 	if err := catalog.AttachStore(context.Background(), store); err != nil {

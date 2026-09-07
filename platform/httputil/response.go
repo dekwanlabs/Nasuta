@@ -5,19 +5,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-
-	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
 type errorRecorder interface {
 	RecordHTTPError(error)
 }
 
+// ApiResponse is the unified JSON envelope for every HTTP response.
+type ApiResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+}
+
 // WriteJSON writes a success response wrapped in ApiResponse.
 func WriteJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(domain.ApiResponse{Code: 0, Message: "", Data: v})
+	json.NewEncoder(w).Encode(ApiResponse{Code: 0, Message: "", Data: v})
 }
 
 // WriteErr writes an error response (HTTP 500) wrapped in ApiResponse.
@@ -36,7 +41,7 @@ func WriteErrStatus(w http.ResponseWriter, status int, err error) {
 	if code < 400 {
 		code = 500
 	}
-	json.NewEncoder(w).Encode(domain.ApiResponse{Code: code, Message: err.Error()})
+	json.NewEncoder(w).Encode(ApiResponse{Code: code, Message: err.Error()})
 }
 
 // WriteBadRequest writes a 400 response.

@@ -19,7 +19,7 @@ func (srv *Service) AllServices(ctx context.Context) ([]domain.ServiceRecord, er
 
 func (srv *Service) ServiceModules(ctx context.Context, repos []string) ([]domain.ServiceRecord, error) {
 	if len(repos) == 0 {
-		return srv.db.AllServices(ctx)
+		return srv.services(ctx)
 	}
 	return srv.db.ServicesByRepos(ctx, repos)
 }
@@ -36,36 +36,11 @@ func (srv *Service) services(ctx context.Context) ([]domain.ServiceRecord, error
 	return all, nil
 }
 
-func (srv *Service) ServiceLookup(ctx context.Context, query string, limit int) map[string]any {
-	result, err := srv.ServiceLookupResult(ctx, query, limit)
-	if err != nil {
-		return map[string]any{"matches": nil, "semantic": false, "error": err.Error()}
-	}
-	return result
-}
-
-// ServiceLookupResult returns the service lookup payload without hiding backend failures.
-func (srv *Service) ServiceLookupResult(ctx context.Context, query string, limit int) (map[string]any, error) {
-	limit = clampInt(limit, 1, 100)
-	result, err := srv.FindServices(ctx, query, limit)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"matches": result.Matches, "semantic": result.Semantic}, nil
-}
-
 // FindServices returns typed service matches for internal consumers.
 func (srv *Service) FindServices(ctx context.Context, query string, limit int) (domain.SearchResult[domain.ServiceRecord], error) {
 	input := serviceSearchInput{Query: query, Limit: limit}
 	return runtrace.Invoke(ctx, serviceSearchSpec, input, func(ctx context.Context, input serviceSearchInput) (domain.SearchResult[domain.ServiceRecord], error) {
 		return srv.findServices(ctx, input, nil)
-	})
-}
-
-func (srv *Service) FindServicesByVector(ctx context.Context, query string, limit int, vector []float32) (domain.SearchResult[domain.ServiceRecord], error) {
-	input := serviceSearchInput{Query: query, Limit: limit}
-	return runtrace.Invoke(ctx, serviceSearchSpec, input, func(ctx context.Context, input serviceSearchInput) (domain.SearchResult[domain.ServiceRecord], error) {
-		return srv.findServicesByVector(ctx, input, vector)
 	})
 }
 
@@ -115,29 +90,6 @@ func (srv *Service) findServices(ctx context.Context, input serviceSearchInput, 
 		semanticSearch = true
 	}
 	return domain.SearchResult[domain.ServiceRecord]{Matches: matches, Semantic: semanticSearch}, nil
-}
-
-func (srv *Service) findServicesByVector(
-	ctx context.Context,
-	input serviceSearchInput,
-	vector []float32,
-) (domain.SearchResult[domain.ServiceRecord], error) {
-	all, err := srv.services(ctx)
-	if err != nil {
-		return domain.SearchResult[domain.ServiceRecord]{}, err
-	}
-	matches := scoreServices(all, input.Query, input.Limit)
-	if !srv.semanticEnabled() || len(vector) == 0 {
-		return domain.SearchResult[domain.ServiceRecord]{Matches: matches}, nil
-	}
-	names, err := srv.serviceNamesByVector(ctx, input.Limit, vector)
-	if err != nil {
-		return domain.SearchResult[domain.ServiceRecord]{}, fmt.Errorf("semantic service search: %w", err)
-	}
-	return domain.SearchResult[domain.ServiceRecord]{
-		Matches:  mergeServiceMatches(names, all, matches, input.Limit),
-		Semantic: true,
-	}, nil
 }
 
 func traceServiceNames(matches []domain.ServiceRecord) []string {

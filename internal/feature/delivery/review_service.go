@@ -15,7 +15,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/redact"
 )
 
 const (
@@ -2219,9 +2219,9 @@ func (service *Service) appendReviewEvent(
 	if len(detail) > maxReviewEventDetailBytes || (len(detail) > 0 && !json.Valid(detail)) {
 		return nil, fmt.Errorf("review event detail is invalid or exceeds %d bytes: %w", maxReviewEventDetailBytes, ErrInvalid)
 	}
-	summary = platform.RedactSensitiveText(summary)
+	summary = redact.RedactSensitiveText(summary)
 	if len(detail) > 0 {
-		detail = json.RawMessage(platform.RedactSensitiveText(string(detail)))
+		detail = json.RawMessage(redact.RedactSensitiveText(string(detail)))
 	}
 	event, err := service.store.AppendReviewEvent(ctx, ReviewEvent{
 		RoundID: roundID,
@@ -2299,7 +2299,7 @@ func reviewFailureEventDetail(cause error) json.RawMessage {
 		Error string `json:"error"`
 	}{
 		Error: truncateText(
-			platform.RedactSensitiveText(cause.Error()),
+			redact.RedactSensitiveText(cause.Error()),
 			maxReviewEventSummaryBytes,
 		),
 	})

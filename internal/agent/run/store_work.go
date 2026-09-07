@@ -286,14 +286,3 @@ func (rs *Store) CompleteWorkItem(ctx context.Context, workID, owner string, fen
 	}
 	return nil
 }
-
-func (rs *Store) RequeueExpiredWork(ctx context.Context, now time.Time) (int64, error) {
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	result, err := rs.db.ExecContext(ctx, `UPDATE agent_work_items SET state=?,lease_owner='',lease_expires_at=NULL,available_at=?,last_error=?,updated_at=? WHERE state=? AND lease_expires_at IS NOT NULL AND lease_expires_at<=?`, WorkReady, store.DatabaseTime(now.Format(time.RFC3339Nano)), "worker lease expired", store.DatabaseTime(now.Format(time.RFC3339Nano)), WorkRunning, store.DatabaseTime(now.Format(time.RFC3339Nano)))
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}

@@ -20,7 +20,8 @@ func TestInitializePreparationUsesRequestEntryDeadline(t *testing.T) {
 		definitions: definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
 			return definition, nil
 		}),
-		runtime: requestSLAToolSource{},
+		starter:       requestSLAToolSource{},
+		scenarioTools: requestSLAToolSource{},
 	}
 
 	prepared, err := svc.initializePreparation(context.Background(), Request{
@@ -53,7 +54,8 @@ func TestInitializePreparationDoesNotExtendEarlierCallerDeadline(t *testing.T) {
 		definitions: definitionResolverFunc(func(ref agentapi.DefinitionRef) (agentapi.Definition, error) {
 			return definition, nil
 		}),
-		runtime: requestSLAToolSource{},
+		starter:       requestSLAToolSource{},
+		scenarioTools: requestSLAToolSource{},
 	}
 
 	prepared, err := svc.initializePreparation(ctx, Request{

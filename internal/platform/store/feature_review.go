@@ -111,35 +111,89 @@ func (store *FeatureDeliveryStore) PublishReviewPolicies(
 		return fmt.Errorf("begin review policy control publication: %w", err)
 	}
 	defer tx.Rollback()
+	// Pre-lock every relevant row in two batched queries so the per-policy loop
+	// below runs without issuing a row lock per policy. The first locks the exact
+	// (id, version) pairs; the second locks each distinct subject kind's default.
+	existing := make(map[string]string, len(prepared))
+	lockQuery := strings.Builder{}
+	lockQuery.WriteString(`SELECT id,version,content_hash FROM review_policies WHERE `)
+	lockArgs := make([]any, 0, len(prepared)*2)
+	for i, policy := range prepared {
+		if i > 0 {
+			lockQuery.WriteString(` OR `)
+		}
+		lockQuery.WriteString(`(id=? AND version=?)`)
+		lockArgs = append(lockArgs, policy.ID, policy.Version)
+	}
+	lockQuery.WriteString(` FOR UPDATE`)
+	lockRows, err := tx.QueryContext(ctx, lockQuery.String(), lockArgs...)
+	if err != nil {
+		return fmt.Errorf("lock review policies: %w", err)
+	}
+	for lockRows.Next() {
+		var id, hash string
+		var version int
+		if err := lockRows.Scan(&id, &version, &hash); err != nil {
+			lockRows.Close()
+			return fmt.Errorf("scan review policy lock: %w", err)
+		}
+		existing[fmt.Sprintf("%s\x00%d", id, version)] = hash
+	}
+	if err := lockRows.Err(); err != nil {
+		lockRows.Close()
+		return fmt.Errorf("iterate review policy lock: %w", err)
+	}
+	lockRows.Close()
+
+	distinctKinds := make([]string, 0, len(prepared))
+	kindSeen := make(map[string]struct{}, len(prepared))
 	for _, policy := range prepared {
-		var existingHash string
-		var existingRaw []byte
-		err := tx.QueryRowContext(ctx, `SELECT definition_json,content_hash
-			FROM review_policies WHERE id=? AND version=? LIMIT 1 FOR UPDATE`,
-			policy.ID, policy.Version,
-		).Scan(&existingRaw, &existingHash)
-		if err == nil {
-			if existingHash != policy.ContentHash {
+		kind := string(policy.SubjectKind)
+		if _, ok := kindSeen[kind]; ok {
+			continue
+		}
+		kindSeen[kind] = struct{}{}
+		distinctKinds = append(distinctKinds, kind)
+	}
+	defaultKinds := make(map[string]bool, len(distinctKinds))
+	if len(distinctKinds) > 0 {
+		kindArgs := make([]any, len(distinctKinds))
+		for i, kind := range distinctKinds {
+			kindArgs[i] = kind
+		}
+		kindRows, err := tx.QueryContext(ctx, `SELECT subject_kind FROM review_policies
+			WHERE subject_kind IN (`+placeholders(len(distinctKinds))+`) AND is_default=1 FOR UPDATE`, kindArgs...)
+		if err != nil {
+			return fmt.Errorf("lock default review policies: %w", err)
+		}
+		for kindRows.Next() {
+			var kind string
+			if err := kindRows.Scan(&kind); err != nil {
+				kindRows.Close()
+				return fmt.Errorf("scan default review policy lock: %w", err)
+			}
+			defaultKinds[kind] = true
+		}
+		if err := kindRows.Err(); err != nil {
+			kindRows.Close()
+			return fmt.Errorf("iterate default review policy lock: %w", err)
+		}
+		kindRows.Close()
+	}
+
+	for _, policy := range prepared {
+		key := fmt.Sprintf("%s\x00%d", policy.ID, policy.Version)
+		if hash, ok := existing[key]; ok {
+			if hash != policy.ContentHash {
 				return delivery.ErrConflict
 			}
 			continue
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("lock review policy %q version %d: %w", policy.ID, policy.Version, err)
-		}
-		var defaultID string
-		defaultErr := tx.QueryRowContext(ctx, `SELECT id FROM review_policies
-			WHERE subject_kind=? AND is_default=1 LIMIT 1 FOR UPDATE`,
-			policy.SubjectKind,
-		).Scan(&defaultID)
-		if defaultErr != nil && !errors.Is(defaultErr, sql.ErrNoRows) {
-			return fmt.Errorf("lock default review policy for %q: %w", policy.SubjectKind, defaultErr)
 		}
 		raw, err := json.Marshal(policy)
 		if err != nil {
 			return fmt.Errorf("marshal review policy %q: %w", policy.ID, err)
 		}
-		makeDefault := errors.Is(defaultErr, sql.ErrNoRows)
+		makeDefault := !defaultKinds[string(policy.SubjectKind)]
 		_, err = tx.ExecContext(ctx, `INSERT INTO review_policies(
 			id,version,subject_kind,definition_json,content_hash,active,is_default,created_by,created_at)
 			VALUES(?,?,?,?,?,1,?,?,?)`,
@@ -151,6 +205,9 @@ func (store *FeatureDeliveryStore) PublishReviewPolicies(
 				return delivery.ErrConflict
 			}
 			return fmt.Errorf("save review policy %q version %d: %w", policy.ID, policy.Version, err)
+		}
+		if makeDefault {
+			defaultKinds[string(policy.SubjectKind)] = true
 		}
 		if err := appendReviewPolicyAuditTx(
 			ctx, tx, policy.ID, policy.Version, "published", actorUserID,

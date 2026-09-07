@@ -12,6 +12,7 @@ import (
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/knowledge"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 type Status string
@@ -21,7 +22,6 @@ const (
 	StatusAnalyzing Status = "analyzing"
 	StatusFixing    Status = "fixing"
 	StatusFixed     Status = "fixed"
-	StatusClosed    Status = "closed"
 )
 
 // Config contains only Incident-owned runtime settings.
@@ -330,6 +330,7 @@ func (manager *Manager) filesHint(ctx context.Context, service string, inc *Inci
 	query := strings.TrimSpace(service + " " + inc.RootCause + " " + inc.AlertTitle)
 	result, err := manager.knowledge.SearchCode(ctx, knowledge.CodeSearchQuery{Query: query, Limit: 5})
 	if err != nil {
+		log.WarnfCtx(ctx, "[incident] files hint search failed: %v", err)
 		return nil
 	}
 	out := make([]string, 0, len(result.Matches))

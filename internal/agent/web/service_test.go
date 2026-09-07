@@ -95,7 +95,7 @@ func TestSearchWithFetchCombinesSearchAndEvidence(t *testing.T) {
 	}
 	srv.SetSearchEngine("test")
 
-	response, err := srv.SearchWithFetch(context.Background(), "question", 5)
+	response, err := srv.SearchWithFetch(context.Background(), "authoritative", 5)
 	if err != nil {
 		t.Fatalf("SearchWithFetch() error = %v", err)
 	}

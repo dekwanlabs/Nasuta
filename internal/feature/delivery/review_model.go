@@ -11,7 +11,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/strutil"
-	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/redact"
 )
 
 const (
@@ -1297,7 +1297,7 @@ func prepareFinding(finding Finding, assignmentID string) (Finding, error) {
 }
 
 func redactReviewText(value string) string {
-	return strings.TrimSpace(platform.RedactSensitiveText(value))
+	return strings.TrimSpace(redact.RedactSensitiveText(value))
 }
 
 func subjectKindForArtifact(kind ArtifactKind) (SubjectKind, error) {

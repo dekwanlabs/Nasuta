@@ -104,7 +104,7 @@ func (svc *Service) withDelegationParentContext(
 	return delegation.WithParentContext(ctx, delegation.ParentContext{
 		RunID:           request.RunID,
 		QuestionSummary: tooloutput.TruncateContent(prepared.request.Question, 2000),
-		HighRisk:        prepared.execution.HighRisk,
+		HighRisk:        prepared.admission.HighRisk,
 		Actor:           request.Actor,
 		Permissions:     request.Permissions,
 		Correlation:     request.Correlation,
@@ -125,6 +125,26 @@ func (svc *Service) executeSubmittedRun(
 	request agentapi.RunRequest,
 ) {
 	defer prepared.closeTrace()
+	// Execute owns only the immutable boundary handoff and terminal
+	// classification. Finalize owns persistence/archive admission; PostEffects
+	// owns best-effort side work that must never rewrite the run terminal.
+	result, outcome, ok := svc.executeManagedRun(ctx, managedRun, prepared, request)
+	if !ok {
+		return
+	}
+	svc.finalizeManagedRun(ctx, managedRun, prepared, conversation, request, outcome)
+	svc.postEffectsForRun(ctx, prepared, conversation, request, result, outcome)
+}
+
+// executeManagedRun runs the agent loop and returns the normalized terminal
+// outcome. When the run cannot expose a terminal, it finishes the run with the
+// matching error terminal and returns ok=false.
+func (svc *Service) executeManagedRun(
+	ctx context.Context,
+	managedRun agentapi.ManagedRun,
+	prepared *preparation,
+	request agentapi.RunRequest,
+) (agentapi.RunResult, run.Outcome, bool) {
 	result, err := managedRun.Execute(ctx, request)
 	if err != nil {
 		log.ErrorfCtx(ctx, "[qa] runtime run %s failed: %v", request.RunID, err)
@@ -133,25 +153,43 @@ func (svc *Service) executeSubmittedRun(
 			code = "budget_exhausted"
 		}
 		svc.finishRunWithError(ctx, managedRun, request.RunID, code, err)
-		return
+		return agentapi.RunResult{}, run.Outcome{}, false
 	}
 
-	outcomeRunner, ok := managedRun.(interface{ Outcome() run.Outcome })
+	outcomeRunner, ok := managedRun.(RunCompletion)
 	if !ok {
 		svc.finishRunWithError(
 			ctx, managedRun, request.RunID, "runtime_outcome_unavailable",
 			fmt.Errorf("managed run does not expose a durable outcome"),
 		)
-		return
+		return agentapi.RunResult{}, run.Outcome{}, false
 	}
 	outcome := outcomeRunner.Outcome()
 	svc.logRunOutcome(ctx, request.RunID, outcome)
+	return result, outcome, true
+}
+
+// finalizeManagedRun persists the completed turn, admits history archive, and
+// closes the managed run. Session persistence failure is authoritative (a
+// successful answer must be retrievable), while history archive and memory
+// consolidation remain independent best-effort side effects.
+func (svc *Service) finalizeManagedRun(
+	ctx context.Context,
+	managedRun agentapi.ManagedRun,
+	prepared *preparation,
+	conversation execution.ConversationContext,
+	request agentapi.RunRequest,
+	outcome run.Outcome,
+) {
 	if outcome.Status == run.StatusDone {
 		if err := svc.persistTurn(
 			context.WithoutCancel(ctx), request.RunID, conversation.SessionID,
 			request.Actor.UserID, prepared.request.Question, outcome,
 		); err != nil {
 			log.ErrorfCtx(ctx, "[qa] persist completed run %s session turn: %v", request.RunID, err)
+			// The durable turn is the authoritative user-visible projection of
+			// a successful execution. If it cannot be written the run is
+			// terminal-failed from the caller's perspective.
 			svc.finishRunWithError(
 				ctx, managedRun, request.RunID, "session_persistence_failed", err,
 			)
@@ -165,8 +203,19 @@ func (svc *Service) executeSubmittedRun(
 	}
 	if err := managedRun.Finish(nil); err != nil {
 		log.ErrorfCtx(ctx, "[qa] finish run %s: %v", request.RunID, err)
-		return
 	}
+}
+
+// postEffectsForRun runs best-effort memory consolidation. It intentionally
+// runs after Finish and never changes the run terminal.
+func (svc *Service) postEffectsForRun(
+	ctx context.Context,
+	prepared *preparation,
+	conversation execution.ConversationContext,
+	request agentapi.RunRequest,
+	result agentapi.RunResult,
+	outcome run.Outcome,
+) {
 	svc.extractRunMemory(ctx, prepared, conversation, result, outcome)
 }
 

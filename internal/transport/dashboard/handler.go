@@ -5,15 +5,10 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agent/qa"
-	"github.com/dekwanlabs/nasuta/internal/agent/run"
-	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/agent/tools"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
-	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/embed"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
@@ -39,6 +34,19 @@ type IndexingOps interface {
 	DiscoverScanDirs() ([]string, error)
 }
 
+// QAApplicationPorts groups the QA-only boundaries provided by app composition.
+type QAApplicationPorts struct {
+	SessionStore   QASessionStorePort
+	RunStore       QARunStorePort
+	MemoryStore    QAMemoryStorePort
+	RuntimeStatus  QARuntimeStatusPort
+	Application    QAApplicationPort
+	Settings       *config.PlatformSettings
+	WriteAvailable bool
+}
+
+// Handler owns HTTP adaptation for the dashboard. QA runtime ownership now
+// lives in app composition: the handler only consumes the narrow QA ports.
 type Handler struct {
 	db                 *store.SQLite
 	docDB              *store.DocStore
@@ -52,20 +60,9 @@ type Handler struct {
 	idx                IndexingOps
 	rolePromptFn       func(userID int64) string
 	featureStatusFn    func(context.Context) delivery.FeatureDeliveryStatus
-	qaRuntimeFn        func() QARuntime
 	settingsChangedFn  func([]string) error
 	codeGraphChangedFn func(*codegraph.DB) error
-}
-
-type QARuntime struct {
-	QA             *qa.Service
-	Hub            *run.Hub
-	CompactionLLM  *llm.LLMClient
-	RunStore       *run.Store
-	Sessions       *memory.SessionStore
-	History        session.History
-	Settings       *config.PlatformSettings
-	WriteAvailable bool
+	qaPortsFn          func() QAApplicationPorts
 }
 
 // SetRolePrompt wires a function that returns the combined RBAC-role
@@ -99,7 +96,7 @@ func NewHandler(
 	idx IndexingOps,
 	cgDB *codegraph.DB,
 	chain *callchain.Service,
-	qaRuntime func() QARuntime,
+	qaPorts func() QAApplicationPorts,
 	settingsChanged func([]string) error,
 	codeGraphChanged func(*codegraph.DB) error,
 ) *Handler {
@@ -113,7 +110,7 @@ func NewHandler(
 		cfg:                cfg,
 		idx:                idx,
 		callChain:          chain,
-		qaRuntimeFn:        qaRuntime,
+		qaPortsFn:          qaPorts,
 		settingsChangedFn:  settingsChanged,
 		codeGraphChangedFn: codeGraphChanged,
 	}

@@ -32,7 +32,7 @@ type preparation struct {
 	toolCandidates     []retrieval.ToolRouteCandidate
 	planning           evidencePlanningOutput
 	analysis           queryAnalysisOutput
-	execution          executionRouteDecision
+	admission          delegationAdmissionDecision
 	historyCandidates  *session.HistoryCandidates
 	runLimits          agentapi.RunLimits
 	definition         agentapi.Definition
@@ -99,7 +99,7 @@ func (svc *Service) prepare(ctx context.Context, request Request, requestStarted
 	}
 
 	svc.applyTimeConstraint(prepared)
-	svc.applyExecutionRoute(prepared)
+	svc.applyDelegationAdmission(prepared)
 	return prepared, nil
 }
 
@@ -141,7 +141,7 @@ func (svc *Service) initializePreparation(
 	prepared.toolPolicy = toolPolicyForRun(
 		svc.writeAvailable.Load() && request.WriteAuthorized && request.WriteRequested,
 	)
-	prepared.candidateToolSet = svc.runtime.ToolsFor(prepared.toolPolicy)
+	prepared.candidateToolSet = svc.scenarioTools.ToolsFor(prepared.toolPolicy)
 	if request.Conversation.CompactedThroughTurn <= 0 || svc.history == nil {
 		prepared.candidateToolSet = withoutHistoryTools(prepared.candidateToolSet)
 	}
@@ -208,7 +208,15 @@ func (svc *Service) prepareConversation(
 	prepared.historyCandidates = resolveCandidates(
 		prepared.ctx, historyDiscovery, prepared.analysis.History,
 	)
-	if err := svc.assemblePreparedConversation(prepared, 0, 0); err != nil {
+	// Resolve the definition budget once and assemble the conversation a
+	// single time. This removes the previous implicit second assembly that
+	// happened inside prepareSingleRun when the service defaults differed from
+	// the resolved definition.
+	contextWindow, outputReserve := svc.contextLimits(
+		prepared.definition.Budget.ContextTokens,
+		prepared.definition.Model.MaxOutputTokens,
+	)
+	if err := svc.assemblePreparedConversation(prepared, contextWindow, outputReserve); err != nil {
 		return err
 	}
 	svc.emitStatus(prepared.request.RunID, "上下文整理完成，正在准备检索", "prepare.routing", historyStarted)
@@ -217,8 +225,7 @@ func (svc *Service) prepareConversation(
 
 // assemblePreparedConversation is the single context assembly path. It rebuilds
 // the conversation from the immutable source conversation plus the resolved
-// history candidates, applying explicit context/output reserves when they
-// differ from the service defaults.
+// history candidates.
 func (svc *Service) assemblePreparedConversation(
 	prepared *preparation,
 	contextWindow int,
@@ -279,13 +286,6 @@ func (svc *Service) prepareSingleRun(prepared *preparation) (*AskResult, error) 
 	contextWindow, outputReserve := svc.contextLimits(
 		definition.Budget.ContextTokens, definition.Model.MaxOutputTokens,
 	)
-	if contextWindow != svc.contextWindow || outputReserve != svc.outputReserve {
-		if err := svc.reassembleConversation(
-			prepared.ctx, prepared, contextWindow, outputReserve,
-		); err != nil {
-			return nil, err
-		}
-	}
 	prepared.runLimits = svc.parentRunLimits(prepared, definition)
 	run, err := svc.beginSingleRun(prepared, definition, selection)
 	if err != nil {
@@ -327,24 +327,12 @@ func (svc *Service) parentRunLimits(
 		MaxSteps:     definition.Budget.MaxSteps,
 		MaxToolCalls: definition.Budget.MaxToolCalls,
 	}
-	if svc.delegationEnabled && prepared.execution.RouteReason == routeReasonParentDynamicDelegation {
+	if svc.delegationEnabled && prepared.admission.RouteReason == routeReasonParentDynamicDelegation {
 		limits.MaxTotalTokens = svc.delegationBudget.MaxTotalTokens
 		limits.MaxCostMicros = svc.delegationBudget.MaxCostMicros
 		limits.ParentAnswerReserve = svc.delegationBudget.ParentAnswerReserve
 	}
 	return limits
-}
-
-func (svc *Service) reassembleConversation(
-	_ context.Context,
-	prepared *preparation,
-	contextWindow int,
-	outputReserve int,
-) error {
-	if err := svc.assemblePreparedConversation(prepared, contextWindow, outputReserve); err != nil {
-		return fmt.Errorf("reassemble context for agent definition: %w", err)
-	}
-	return nil
 }
 
 func (svc *Service) prepareRunConversation(prepared *preparation) execution.ConversationContext {
@@ -412,7 +400,7 @@ func (svc *Service) beginSingleRun(
 	// buildRunStart is the single source of truth for the immutable run
 	// boundary. submitRun fills only the admission/evidence fields that are
 	// unknown until after preparation completes.
-	run, err := svc.runtime.Begin(prepared.ctx, svc.buildRunStart(prepared, definition, selection))
+	run, err := svc.starter.Begin(prepared.ctx, svc.buildRunStart(prepared, definition, selection))
 	if err != nil {
 		return nil, fmt.Errorf("begin QA run %q: %w", prepared.request.RunID, err)
 	}

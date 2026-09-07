@@ -10,7 +10,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
-	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/redact"
 )
 
 func TestReviewLifecycleTransitions(t *testing.T) {
@@ -922,7 +922,7 @@ func TestPrepareReviewReportRedactsBeforeFingerprintAndContentHash(t *testing.T)
 	}
 	var alreadyRedacted ReviewReport
 	if err := json.Unmarshal(
-		[]byte(platform.RedactSensitiveText(string(raw))),
+		[]byte(redact.RedactSensitiveText(string(raw))),
 		&alreadyRedacted,
 	); err != nil {
 		t.Fatal(err)
@@ -962,7 +962,7 @@ func TestPrepareReviewAdjudicationRedactsBeforeContentHash(t *testing.T) {
 	}
 	var alreadyRedacted ReviewAdjudication
 	if err := json.Unmarshal(
-		[]byte(platform.RedactSensitiveText(string(raw))),
+		[]byte(redact.RedactSensitiveText(string(raw))),
 		&alreadyRedacted,
 	); err != nil {
 		t.Fatal(err)
@@ -987,7 +987,7 @@ func assertReviewSecretsAbsent(t *testing.T, value any, secrets []string) {
 			t.Fatalf("secret %q leaked: %s", secret, encoded)
 		}
 	}
-	if !strings.Contains(string(encoded), platform.RedactedValue) {
+	if !strings.Contains(string(encoded), redact.RedactedValue) {
 		t.Fatalf("redaction marker missing: %s", encoded)
 	}
 }

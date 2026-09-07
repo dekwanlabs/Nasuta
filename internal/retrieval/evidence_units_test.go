@@ -3,6 +3,7 @@ package retrieval
 import (
 	"testing"
 
+	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -73,11 +74,10 @@ func TestAssemblePreservesOnlyIncludedEvidenceUnits(t *testing.T) {
 }
 
 func TestAssemblePreservesAuthoritativeSourceHash(t *testing.T) {
-	retrieve := &Retriever{}
-	retrieve.serviceModules.Store([]domain.ServiceRecord{{
+	retrieve := New(servicePathFakeTools{services: []domain.ServiceRecord{{
 		ServiceName: "svc-a",
 		Repo:        "repo-a",
-	}})
+	}}}, config.Config{})
 	const sourceHash = "source-version-1"
 	result := retrieve.assemble(t.Context(), []partial{{
 		text: "repos/repo-a/file.go",

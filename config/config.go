@@ -13,8 +13,6 @@ type Config = platformconfig.Config
 
 type SemanticConfig = platformconfig.SemanticConfig
 
-type SemanticAuth = platformconfig.SemanticAuth
-
 type SemanticTLS = platformconfig.SemanticTLS
 
 type OntologyConfig = platformconfig.OntologyConfig

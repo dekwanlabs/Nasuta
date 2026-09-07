@@ -4,37 +4,55 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/config"
-	"github.com/dekwanlabs/nasuta/internal/agent/qa"
-	"github.com/dekwanlabs/nasuta/internal/memory"
 	"github.com/dekwanlabs/nasuta/internal/platform/store/codegraph"
 )
 
-// currentQARuntime returns the platform-owned QA snapshot. The handler
-// carries no fallback QA dependencies; the platform callback is authoritative.
-func (handler *Handler) currentQARuntime() QARuntime {
-	if handler.qaRuntimeFn == nil {
-		return QARuntime{}
+// currentQAPorts returns the platform-owned QA boundary snapshot. The handler
+// carries no QA aggregate; the app callback is authoritative and read per use.
+func (handler *Handler) currentQAPorts() QAApplicationPorts {
+	if handler.qaPortsFn == nil {
+		return QAApplicationPorts{}
 	}
-	return handler.qaRuntimeFn()
-}
-
-// qaService returns the active QA service used by dashboard requests.
-func (handler *Handler) qaService() *qa.Service {
-	return handler.currentQARuntime().QA
+	return handler.qaPortsFn()
 }
 
 // qaSessionStore returns the session store associated with the active runtime.
-func (handler *Handler) qaSessionStore() *memory.SessionStore {
-	return handler.currentQARuntime().Sessions
+func (handler *Handler) qaSessionStore() QASessionStorePort {
+	return handler.currentQAPorts().SessionStore
+}
+
+// qaRunStore returns the run store associated with the active runtime.
+func (handler *Handler) qaRunStore() QARunStorePort {
+	return handler.currentQAPorts().RunStore
+}
+
+// qaMemoryStore returns the memory store associated with the active runtime.
+func (handler *Handler) qaMemoryStore() QAMemoryStorePort {
+	return handler.currentQAPorts().MemoryStore
+}
+
+// qaRuntimeStatus returns the read-only status port for the active runtime.
+func (handler *Handler) qaRuntimeStatus() QARuntimeStatusPort {
+	return handler.currentQAPorts().RuntimeStatus
+}
+
+// qaApplication returns the active QA application used by ask requests.
+func (handler *Handler) qaApplication() QAApplicationPort {
+	return handler.currentQAPorts().Application
 }
 
 // platformSettings returns the active platform settings or empty defaults.
 func (handler *Handler) platformSettings() *config.PlatformSettings {
-	settings := handler.currentQARuntime().Settings
+	settings := handler.currentQAPorts().Settings
 	if settings == nil {
 		return &config.PlatformSettings{}
 	}
 	return settings
+}
+
+// writeAvailable reports whether write actions are currently authorized.
+func (handler *Handler) writeAvailable() bool {
+	return handler.currentQAPorts().WriteAvailable
 }
 
 // applySettings forwards persisted setting changes to the platform lifecycle

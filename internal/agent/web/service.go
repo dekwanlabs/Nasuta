@@ -37,12 +37,14 @@ type SearchResponse struct {
 
 // Service owns web search providers and bounded page fetching.
 type Service struct {
-	searchEngine string
-	apiKey       string
-	providerOnce sync.Once
-	providersMu  sync.RWMutex
-	providers    map[string]SearchProvider
-	fetchClient  *http.Client
+	searchEngine  string
+	apiKey        string
+	providerOnce  sync.Once
+	providersMu   sync.RWMutex
+	providers     map[string]SearchProvider
+	fetchClient   *http.Client
+	rewriterMu    sync.RWMutex
+	queryRewriter QueryRewriter
 }
 
 func New() *Service {
@@ -55,6 +57,31 @@ func (srv *Service) SetSearchEngine(engine string) {
 
 func (srv *Service) SetAPIKey(apiKey string) {
 	srv.apiKey = apiKey
+}
+
+// SetQueryRewriter installs an optional query rewriter consulted before each
+// search. It may be replaced at runtime; Search takes the current value under
+// the lock so a reload can never race an in-flight query.
+func (srv *Service) SetQueryRewriter(rewriter QueryRewriter) {
+	srv.rewriterMu.Lock()
+	srv.queryRewriter = rewriter
+	srv.rewriterMu.Unlock()
+}
+
+func (srv *Service) rewriteQuery(ctx context.Context, query string) string {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return trimmed
+	}
+	srv.rewriterMu.RLock()
+	rewriter := srv.queryRewriter
+	srv.rewriterMu.RUnlock()
+	if rewriter != nil {
+		if rewritten, err := rewriter(ctx, trimmed); err == nil && strings.TrimSpace(rewritten) != "" {
+			return strings.TrimSpace(rewritten)
+		}
+	}
+	return rewriteQuestionWords(trimmed)
 }
 
 // RegisterProvider adds or replaces a provider during application wiring.
@@ -82,6 +109,7 @@ func (srv *Service) Search(ctx context.Context, query string, limit int) ([]Sear
 		limit = 10
 	}
 
+	query = srv.rewriteQuery(ctx, query)
 	results, err := srv.dispatchSearch(ctx, query, limit)
 	if err != nil {
 		return nil, err
@@ -131,29 +159,49 @@ func relevantFetchCandidate(query string, results []SearchResult) (SearchResult,
 }
 
 func resultRelevant(query string, result SearchResult) bool {
-	queryLatin, queryCJK := searchSignals(query)
-	if len(queryLatin) == 0 && len(queryCJK) == 0 {
+	qLatin, qCJK := searchSignals(query)
+	if len(qLatin) == 0 && len(qCJK) == 0 {
 		return false
 	}
-	candidateLatin, candidateCJK := searchSignals(result.Title + " " + result.Snippet)
+	cLatin, cCJK := searchSignals(result.Title + " " + result.Snippet)
+	return signalsMatch(qLatin, qCJK, cLatin, cCJK)
+}
+
+// signalsMatch reports whether a candidate overlaps the query on every signal
+// kind the query carries. Latin matches on any content word (they are specific
+// enough on their own); CJK matches on at least min(3, len) character bigrams
+// because a single bigram is too common. A mixed query must satisfy both kinds,
+// so a bare brand/entity match can never override an unmatched CJK mechanism.
+func signalsMatch(queryLatin, queryCJK, candidateLatin, candidateCJK map[string]struct{}) bool {
+	latinOK := len(queryLatin) == 0
 	for signal := range queryLatin {
 		if _, ok := candidateLatin[signal]; ok {
-			return true
+			latinOK = true
+			break
 		}
 	}
-
 	required := min(3, len(queryCJK))
 	matched := 0
 	for signal := range queryCJK {
-		if _, ok := candidateCJK[signal]; !ok {
-			continue
-		}
-		matched++
-		if matched >= required {
-			return true
+		if _, ok := candidateCJK[signal]; ok {
+			matched++
+			if matched >= required {
+				break
+			}
 		}
 	}
-	return false
+	cjkOK := matched >= required
+	hasLatin, hasCJK := len(queryLatin) > 0, len(queryCJK) > 0
+	switch {
+	case hasLatin && hasCJK:
+		return latinOK && cjkOK
+	case hasLatin:
+		return latinOK
+	case hasCJK:
+		return cjkOK
+	default:
+		return false
+	}
 }
 
 var searchStopwords = map[string]struct{}{

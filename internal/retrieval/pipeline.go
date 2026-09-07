@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/config"
@@ -142,7 +141,6 @@ type Retriever struct {
 	workspaceRoot  string
 	cfg            config.Config
 	platform       *config.PlatformSettings
-	serviceModules atomic.Value // []ServiceRecord, built lazily
 	reranker       Reranker
 	codegraphDB    *codegraph.DB
 }

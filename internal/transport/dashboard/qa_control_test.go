@@ -16,10 +16,10 @@ func TestAPIQARunControlRoutesAgentAbortToHub(t *testing.T) {
 	handler, db, mock, closeDB := newRunControlHandler(t)
 	defer closeDB()
 	hub := agentrun.NewHub(nil)
-	handler.qaRuntimeFn = func() QARuntime {
-		return QARuntime{
+	handler.qaPortsFn = func() QAApplicationPorts {
+		return QAApplicationPorts{
 			RunStore: agentrun.Bind(db),
-			Hub:      hub,
+			RuntimeStatus: hub,
 		}
 	}
 	expectRunControlRecord(
@@ -46,8 +46,8 @@ func TestAPIQARunControlRoutesAgentAbortToHub(t *testing.T) {
 
 func TestAPIQARunControlRequiresRunStore(t *testing.T) {
 	handler := &Handler{
-		qaRuntimeFn: func() QARuntime {
-			return QARuntime{}
+		qaPortsFn: func() QAApplicationPorts {
+			return QAApplicationPorts{}
 		},
 	}
 

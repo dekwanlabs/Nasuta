@@ -15,8 +15,6 @@ import (
 	"github.com/dekwanlabs/nasuta/platform/httpclient"
 )
 
-type Fix = FixRequest
-
 type FixBranch struct {
 	Service    string   `json:"service"`
 	Repo       string   `json:"repo"`

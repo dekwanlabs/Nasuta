@@ -17,8 +17,6 @@ import (
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
-type LongTermRecord = MemoryRecord
-
 const memorySelectColumns = `id,user_id,fact_key,kind,content,source_type,authority,status,
 	superseded_by,source_session,confidence,expires_at,created_at,updated_at,last_used,use_count`
 

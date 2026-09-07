@@ -1038,6 +1038,48 @@ func TestMapResultRecoversTruncatedStrictInvestigatorDocs(t *testing.T) {
 	}
 }
 
+func TestMapResultRejectsEchoedTaskContractAsInvestigationReport(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	answer := "问题：Execute this JSON input against output schema investigation.report version 1.\n" +
+		`{"capability":"knowledge.docs.verify","objective":"梳理消息中心业务的完整链路","parent_question_summary":"分析业务流程","focus_facets":["core_flow"],"evidence_refs":["ev_abc"],"output_kind":"flow","max_hops":6,"delegation_id":"del-1","parent_run_id":"run-1","task_index":1}`
+
+	result, outcome := mapResult(
+		"run-echoed-contract",
+		&execution.RunResult{Answer: answer},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.InvestigationReportSchemaRef(),
+		outputRecoveryContext{
+			AgentID: "investigator.docs",
+			Input:   investigationReportRecoveryContract(),
+		},
+	)
+	if result.Status != agentapi.RunSucceeded || result.Error != nil {
+		t.Fatalf("result = %+v", result)
+	}
+	if outcome.Status != agentrun.StatusDone || outcome.Err != nil {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if err := registry.Validate(agentapi.InvestigationReportSchemaRef(), result.Output); err != nil {
+		t.Fatalf("recovered output is not schema-valid: %v", err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(result.Output, &report); err != nil {
+		t.Fatalf("decode recovered report: %v", err)
+	}
+	for _, leaked := range []string{"objective", "capability", "delegation_id", "parent_run_id", "task_index", "parent_question_summary", "focus_facets", "evidence_refs", "output_kind"} {
+		if _, ok := report[leaked]; ok {
+			t.Fatalf("recovered report leaked task-contract field %q: %v", leaked, report)
+		}
+	}
+}
+
 func TestMapResultRecoversTruncatedVerifierAsValidEmptyResult(t *testing.T) {
 	registry := agentapi.NewSchemaRegistry()
 	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {

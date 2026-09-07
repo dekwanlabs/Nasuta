@@ -25,7 +25,8 @@ type Service struct {
 	// fastLLM handles cheap structured preparation and falls back to helperLLM.
 	fastLLM                 *llm.LLMClient
 	retriever               contextRetriever
-	runtime                 RuntimePort
+	starter                 RunStarter
+	scenarioTools           ScenarioToolSource
 	events                  EventSink
 	memory                  *memory.MemoryStore
 	sessions                *memory.SessionStore
@@ -81,7 +82,8 @@ func New(d Deps) *Service {
 		outputReserve:   platformSettings.LLMAnswerMaxTokens,
 		domainKnowledge: platformSettings.DomainKnowledge,
 		definitions:     d.Definitions, agentRef: d.Agent,
-		runtime:          d.Runtime,
+		starter:          d.Runtime,
+		scenarioTools:    d.Runtime,
 		events:           d.Events,
 		memory:           d.Memory,
 		compactionStatus: make(map[string]run.SessionStatusEvent),

@@ -15,14 +15,12 @@ import (
 	"github.com/dekwanlabs/nasuta/platform/httputil"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/execution"
-	"github.com/dekwanlabs/nasuta/internal/agent/qa"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/session"
 	"github.com/dekwanlabs/nasuta/internal/auth"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/memory"
-	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 )
@@ -80,7 +78,7 @@ func (handler *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
 	// QA needs a configured LLM to run the agent loop. Reject before the SSE
 	// stream starts (headers unflushed) so the client gets a clear status code
 	// rather than a faked retrieval-only answer.
-	if handler.qaService() == nil {
+	if handler.qaApplication() == nil {
 		httputil.WriteServiceUnavailable(w, "QA service not initialized")
 		return
 	}
@@ -271,14 +269,13 @@ func (handler *Handler) loadSessionContext(ctx context.Context, sessionID string
 
 func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conversation execution.ConversationContext, sessionID string, traceEnabled bool,
 	evidencePlan *domain.EvidencePlan, writeRequested bool, allowEmit func(string, any) error, r *http.Request) {
-	runtime := handler.currentQARuntime()
-	if runtime.QA == nil {
+	application := handler.qaApplication()
+	if application == nil {
 		_ = allowEmit("run.finished", agentrun.Terminal{Status: agentrun.StatusFailed, Error: "QA service not initialized"})
 		return
 	}
 	userID := currentUserID(r)
 	log.InfofCtx(ctx, "[qa] agent mode: question=%q userID=%d", platform.TruncateForLog(question, 12), userID)
-	runCtx := context.WithoutCancel(ctx)
 	sseEvent := func(event string, payload any) bool {
 		if err := allowEmit(event, payload); err != nil {
 			log.WarnfCtx(ctx, "[qa] SSE projection failed session=%s event=%s: %v", sessionID, event, err)
@@ -287,87 +284,62 @@ func (handler *Handler) serveAgentSSE(ctx context.Context, question string, conv
 		return true
 	}
 
-	// Subscribe before AskAgent starts.
-	// AskAgent emits phase hints during synchronous preprocessing and retrieval.
-	// Subscribing later would drop those early updates.
-	runID := qa.NewRunID()
-	var channel chan agentrun.SSEEvent
-	hub := runtime.Hub
-	if hub != nil {
-		channel = hub.Subscribe(runID)
-		defer hub.Unsubscribe(runID, channel)
-	}
-	if !sseEvent("run.started", map[string]any{"run_id": runID}) {
+	user := auth.UserFromContext(r.Context())
+	writeAuthorized := handler.writeAvailable() && user != nil && user.IsAdmin
+	started, err := application.Start(context.WithoutCancel(ctx), QAStartRequest{
+		Question:        question,
+		Conversation:    conversation,
+		UserID:          userID,
+		RolePrompt:      handler.rolePromptFor(userID),
+		TraceEnabled:    traceEnabled,
+		EvidencePlan:    evidencePlan,
+		WriteAuthorized: writeAuthorized,
+		WriteRequested:  writeRequested,
+	})
+	if err != nil {
+		log.ErrorfCtx(ctx, "[qa] agent init error: %v", err)
+		_ = sseEvent("run.finished", &agentrun.Terminal{
+			Status: agentrun.StatusFailed, Error: err.Error(),
+		})
 		return
 	}
-	if traceEnabled && hub != nil {
-		runCtx = runtrace.WithEvaluation(runCtx, func(event domain.EvaluationTrace) {
-			hub.EmitTrace(runID, event)
-		})
+	if started.Close != nil {
+		defer started.Close()
 	}
-
-	user := auth.UserFromContext(r.Context())
-	writeAuthorized := runtime.WriteAvailable && user != nil && user.IsAdmin
-	type askResponse struct {
-		result *qa.AskResult
-		err    error
+	if !sseEvent("run.started", map[string]any{"run_id": started.RunID}) {
+		return
 	}
-	askDone := make(chan askResponse, 1)
-	go func() {
-		result, err := runtime.QA.Ask(runCtx, qa.Request{
-			Question: question, Conversation: conversation, UserID: userID,
-			RolePrompt: handler.rolePromptFor(userID), RunID: runID,
-			EvidencePlan: evidencePlan, WriteAuthorized: writeAuthorized,
-			WriteRequested: writeRequested,
-		})
-		askDone <- askResponse{result: result, err: err}
-	}()
-
-	// Ask submits the run and returns once the agent goroutine starts, so askDone
-	// arrives long before run.finished. Both signals drive one loop: the hub
-	// channel streams every event through to the terminal one, while askDone only
-	// carries submission failure and the retrieved-context payload. Receiving on a
-	// nil channel never becomes ready, so a run without a hub relies on askDone
-	// alone — and since no run.finished can follow, it ends the stream there.
-	var terminal *agentrun.Terminal
-	for terminal == nil {
+	if rc := started.Context; rc != nil && len(rc.References) > 0 {
+		if !sseEvent("context", map[string]any{
+			"references": rc.References,
+			"hitCount":   rc.HitCount,
+		}) {
+			return
+		}
+	}
+	if started.Events == nil {
+		// An application without a durable event stream has no terminal to wait
+		// for; the run has already been started with a bound stream in practice.
+		return
+	}
+	for {
 		select {
-		case response := <-askDone:
-			if response.err != nil {
-				log.ErrorfCtx(ctx, "[qa] agent init error: %v", response.err)
-				sseEvent("run.finished", &agentrun.Terminal{
-					RunID: runID, Status: agentrun.StatusFailed, Error: response.err.Error(),
-				})
-				return
-			}
-			if rc := response.result.Context; rc != nil && len(rc.References) > 0 {
-				if !sseEvent("context", map[string]any{
-					"references": rc.References,
-					"hitCount":   rc.HitCount,
-				}) {
-					return
-				}
-			}
-			if channel == nil {
-				return
-			}
-		case ev, ok := <-channel:
+		case ev, ok := <-started.Events:
 			if !ok {
 				return
 			}
 			if ev.Type == agentrun.EventRunFinished {
-				// QA runs are ordinary agent runs. Their terminal event is already
-				// authoritative; there is no workflow delivery projection layer.
 				if !sseEvent(string(agentrun.EventRunFinished), ev.Data) {
 					return
 				}
-				terminal = agentrun.TerminalFromEvent(ev)
-				continue
+				return
 			}
 			if !emitHubEvent(ev, sseEvent) {
 				return
 			}
-			terminal = agentrun.TerminalFromEvent(ev)
+			if agentrun.TerminalFromEvent(ev) != nil {
+				return
+			}
 		case <-r.Context().Done():
 			return
 		}
@@ -409,18 +381,18 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 		usageAvailable = true
 	}
 
-	runtime := handler.currentQARuntime()
+	status := handler.qaRuntimeStatus()
 	contextUsage := agentrun.ContextUsageEvent{}
 	contextUsageAvailable := false
 	contextRunID := runID
 	if contextRunID == "" {
 		contextRunID = usage.RunID
 	}
-	if runtime.Hub != nil && contextRunID != "" {
-		contextUsage, contextUsageAvailable = runtime.Hub.ContextUsage(contextRunID)
+	if status != nil && contextRunID != "" {
+		contextUsage, contextUsageAvailable = status.ContextUsage(contextRunID)
 	}
 
-	status := "deactive"
+	endpointStatus := "deactive"
 	endpointDomain := ""
 	model := ""
 	roundMaxTokens := 0
@@ -431,7 +403,7 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 		model = settings.LLMModel
 		roundMaxTokens = settings.LLMContextWindow
 		if settings.LLMEnabled() {
-			status = "active"
+			endpointStatus = "active"
 		}
 	}
 	if contextUsageAvailable && contextUsage.ContextWindow > 0 {
@@ -439,8 +411,8 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 		roundContextWindowSource = "run"
 	}
 	var compactionStatus agentrun.SessionStatusEvent
-	if runtime.QA != nil {
-		compactionStatus = runtime.QA.CompactionStatus(runID)
+	if application := handler.qaApplication(); application != nil {
+		compactionStatus = application.CompactionStatus(runID)
 	}
 	roundActualInputTokens := usage.RoundPeakInputTokens
 	roundActualReservedTokens := max(usage.RoundPeakInputTokens, usage.RoundPeakReservedTokens)
@@ -465,7 +437,7 @@ func (handler *Handler) APIQARuntimeStatus(w http.ResponseWriter, r *http.Reques
 	}
 	httputil.WriteJSON(w, map[string]any{
 		"endpoint_domain":              endpointDomain,
-		"endpoint_status":              status,
+		"endpoint_status":              endpointStatus,
 		"model":                        model,
 		"token_usage_available":        usageAvailable || contextUsageAvailable,
 		"cache_percent":                cachePercent(usage.RoundCachedInputTokens, usage.RoundInputTokens),
@@ -831,8 +803,8 @@ func (handler *Handler) APIQAToolResultArtifact(w http.ResponseWriter, r *http.R
 }
 
 func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) {
-	runtime := handler.currentQARuntime()
-	if runtime.RunStore == nil {
+	runStore := handler.qaRunStore()
+	if runStore == nil {
 		httputil.WriteServiceUnavailable(w, "run control not available")
 		return
 	}
@@ -843,7 +815,7 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 	}
 	runID := r.PathValue("id")
 	userID := currentUserID(r)
-	record, err := runtime.RunStore.GetControlForUser(runID, userID)
+	record, err := runStore.GetControlForUser(runID, userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		httputil.WriteErrStatus(w, http.StatusNotFound, errors.New("run not found"))
 		return
@@ -854,11 +826,12 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 	}
 	switch record.RunKind {
 	case agentrun.KindAgent:
-		if runtime.Hub == nil {
+		status := handler.qaRuntimeStatus()
+		if status == nil {
 			httputil.WriteServiceUnavailable(w, "agent run control not available")
 			return
 		}
-		if !controlAgentRun(runtime.Hub, record, req, w) {
+		if !controlAgentRun(status, record, req, w) {
 			return
 		}
 	default:
@@ -873,7 +846,7 @@ func (handler *Handler) APIQARunControl(w http.ResponseWriter, r *http.Request) 
 }
 
 func controlAgentRun(
-	hub *agentrun.Hub,
+	status QARuntimeStatusPort,
 	record agentrun.ControlRecord,
 	req qaRunControlReq,
 	w http.ResponseWriter,
@@ -884,13 +857,13 @@ func controlAgentRun(
 			httputil.WriteBadRequest(w, "only a running run can be paused")
 			return false
 		}
-		hub.Send(record.ID, agentrun.ControlSignal{Kind: agentrun.CtrlPause})
+		status.Send(record.ID, agentrun.ControlSignal{Kind: agentrun.CtrlPause})
 	case "resume":
 		if !activeRunStatus(record.Status) {
 			httputil.WriteBadRequest(w, "only an active run can be resumed")
 			return false
 		}
-		if err := hub.Resume(record.ID); err != nil {
+		if err := status.Resume(record.ID); err != nil {
 			httputil.WriteErr(w, err)
 			return false
 		}
@@ -899,13 +872,13 @@ func controlAgentRun(
 			httputil.WriteBadRequest(w, "only an active run can be aborted")
 			return false
 		}
-		hub.Send(record.ID, agentrun.ControlSignal{Kind: agentrun.CtrlAbort})
+		status.Send(record.ID, agentrun.ControlSignal{Kind: agentrun.CtrlAbort})
 	case "nudge":
 		if !activeRunStatus(record.Status) {
 			httputil.WriteBadRequest(w, "only an active run can be nudged")
 			return false
 		}
-		hub.Send(record.ID, agentrun.ControlSignal{Kind: agentrun.CtrlNudge, Message: req.Message})
+		status.Send(record.ID, agentrun.ControlSignal{Kind: agentrun.CtrlNudge, Message: req.Message})
 	default:
 		httputil.WriteBadRequest(w, "unknown action: "+req.Action)
 		return false
@@ -932,14 +905,10 @@ func (handler *Handler) ensureQASessions(w http.ResponseWriter) bool {
 	return handler.qaSessionStore() != nil
 }
 
-func (handler *Handler) runStore() *agentrun.Store {
-	return handler.currentQARuntime().RunStore
+func (handler *Handler) runStore() QARunStorePort {
+	return handler.qaRunStore()
 }
 
-func (handler *Handler) memoryStore() *memory.MemoryStore {
-	qa := handler.qaService()
-	if qa == nil {
-		return nil
-	}
-	return qa.Memory()
+func (handler *Handler) memoryStore() QAMemoryStorePort {
+	return handler.qaMemoryStore()
 }

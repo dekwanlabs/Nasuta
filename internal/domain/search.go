@@ -2,8 +2,8 @@ package domain
 
 // SearchResult is the typed result shared by internal search consumers.
 type SearchResult[T any] struct {
-	Matches  []T
-	Semantic bool
+	Matches  []T  `json:"matches"`
+	Semantic bool `json:"semantic"`
 }
 
 // CodeSearchHit is one code chunk selected by hybrid or dense retrieval.

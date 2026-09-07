@@ -21,7 +21,7 @@ func systemOperationContext(r *http.Request) (context.Context, context.CancelFun
 	return context.WithTimeout(context.WithoutCancel(r.Context()), systemOperationTimeout)
 }
 
-// ── Global ops ────────────────────────────────────────────────────────────────
+// Global operations.
 
 func (h *Handler) APIGitlabSync(w http.ResponseWriter, r *http.Request) {
 	if h.idx == nil {
@@ -112,7 +112,7 @@ func (h *Handler) runSystemOperation(
 	httputil.WriteJSON(w, map[string]string{"status": "completed"})
 }
 
-// ── Per-repo ops ──────────────────────────────────────────────────────────────
+// Per-repository operations.
 
 func (h *Handler) APIReindexRepo(w http.ResponseWriter, r *http.Request) {
 	repo, err := decodeRepoReq(r)

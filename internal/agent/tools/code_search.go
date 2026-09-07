@@ -116,14 +116,6 @@ var codeRankSpec = runtrace.Spec[codeRankInput, codeRankOutput]{
 
 var errEmptyQueryEmbedding = fmt.Errorf("empty query embedding")
 
-func (srv *Service) CodeSearch(ctx context.Context, query, lang string, limit int) map[string]any {
-	result, err := srv.CodeSearchResult(ctx, query, lang, limit)
-	if err != nil {
-		return map[string]any{"matches": []any{}, "error": err.Error()}
-	}
-	return result
-}
-
 // CodeSearchResult returns the code search payload without hiding backend failures.
 func (srv *Service) CodeSearchResult(ctx context.Context, query, lang string, limit int) (map[string]any, error) {
 	limit = clampInt(limit, 1, 100)

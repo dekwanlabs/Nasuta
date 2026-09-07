@@ -125,6 +125,19 @@ func TestRetrievalExecutionAuditPromptIsNarrow(t *testing.T) {
 	}
 }
 
+func TestParentDelegationPromptRequiresNumberedTaskIndexSections(t *testing.T) {
+	prompt := Text(AgentQAParentDelegation)
+	for _, required := range []string{
+		"Number each subject section as 1、2、3、4",
+		"exact task_index order",
+		"never merge multiple subjects into one paragraph",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("parent delegation prompt missing %q", required)
+		}
+	}
+}
+
 func TestWithUserVisibleAnswerContractIsCanonicalAndIdempotent(t *testing.T) {
 	base := "base system rules"
 	first := WithUserVisibleAnswerContract(base)

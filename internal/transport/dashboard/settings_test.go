@@ -32,8 +32,8 @@ func TestSystemStatusIncludesFeatureDeliveryCapability(t *testing.T) {
 
 func TestDefaultSettingsIncludesRerankAndContext(t *testing.T) {
 	handler := &Handler{
-		qaRuntimeFn: func() QARuntime {
-			return QARuntime{Settings: &config.PlatformSettings{
+		qaPortsFn: func() QAApplicationPorts {
+			return QAApplicationPorts{Settings: &config.PlatformSettings{
 				ContextBudget:              64000,
 				RerankEnabled:              true,
 				RerankPool:                 80,
@@ -144,7 +144,7 @@ func TestSettingsPutRejectsCodingDefaultOutsideEnabledProviders(t *testing.T) {
 			AddRow("coding_enabled_providers", "codex,claude").
 			AddRow("coding_default_provider", "claude"),
 	)
-	handler := &Handler{authDB: auth.NewDB(db), qaRuntimeFn: func() QARuntime { return QARuntime{Settings: &config.PlatformSettings{}} }}
+	handler := &Handler{authDB: auth.NewDB(db), qaPortsFn: func() QAApplicationPorts { return QAApplicationPorts{Settings: &config.PlatformSettings{}} }}
 	request := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(
 		`{"coding_enabled_providers":"codex"}`,
 	))
@@ -182,7 +182,7 @@ func TestSettingsPutPassesChangedKeysToPlatformPort(t *testing.T) {
 	var gotKeys []string
 	handler := &Handler{
 		authDB:      auth.NewDB(db),
-		qaRuntimeFn: func() QARuntime { return QARuntime{Settings: platformSettings} },
+		qaPortsFn: func() QAApplicationPorts { return QAApplicationPorts{Settings: platformSettings} },
 		settingsChangedFn: func(keys []string) error {
 			gotKeys = append([]string(nil), keys...)
 			return nil
@@ -227,7 +227,7 @@ func TestSettingsPutSkipsPersistenceAndReloadWhenValuesAreUnchanged(t *testing.T
 	reloads := 0
 	handler := &Handler{
 		authDB:      auth.NewDB(db),
-		qaRuntimeFn: func() QARuntime { return QARuntime{Settings: platformSettings} },
+		qaPortsFn: func() QAApplicationPorts { return QAApplicationPorts{Settings: platformSettings} },
 		settingsChangedFn: func([]string) error {
 			reloads++
 			return nil

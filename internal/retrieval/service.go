@@ -7,11 +7,9 @@ import (
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
+	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 )
-
-// Service is the outward-facing retrieval capability.
-type Service = Retriever
 
 func runbookTitles(matches []domain.RunbookSearchHit) []string {
 	titles := make([]string, 0, len(matches))
@@ -111,6 +109,7 @@ func (retrieve *Retriever) resolveServiceModules(ctx context.Context, repos []st
 	}
 	modules, err := retrieve.tools.ServiceModules(ctx, repos)
 	if err != nil {
+		log.WarnfCtx(ctx, "[retrieval] resolve service modules: %v", err)
 		return nil
 	}
 	return modules
@@ -136,17 +135,14 @@ func (retrieve *Retriever) serviceForRepo(ctx context.Context, repo, path string
 }
 
 func (retrieve *Retriever) allServiceModules(ctx context.Context) []domain.ServiceRecord {
-	if modules, ok := retrieve.serviceModules.Load().([]domain.ServiceRecord); ok {
-		return modules
-	}
 	if retrieve.tools == nil {
 		return nil
 	}
 	modules, err := retrieve.tools.ServiceModules(ctx, nil)
 	if err != nil {
+		log.WarnfCtx(ctx, "[retrieval] list service modules: %v", err)
 		return nil
 	}
-	retrieve.serviceModules.Store(modules)
 	return modules
 }
 

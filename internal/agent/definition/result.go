@@ -260,17 +260,25 @@ func mapSucceededResult(
 			schemas, outputSchema, recovery[0], outcome.Answer, err,
 		); recoveryErr == nil {
 			validationErr := err
+			echoedContract := isEchoedTaskContractAnswer(outcome.Answer)
 			output = recovered
 			err = nil
 			outcome.Answer = string(recovered)
 			publicResult.Text = outcome.Answer
-			if preserved {
+			switch {
+			case echoedContract:
+				log.WarnfCtx(
+					log.WithTraceID(context.Background(), runID),
+					"[agent] run %s discarded echoed task-contract input for %s; replaced with a schema-valid investigation report",
+					runID, recovery[0].AgentID,
+				)
+			case preserved:
 				log.WarnfCtx(
 					log.WithTraceID(context.Background(), runID),
 					"[agent] run %s recovered invalid %s output for %s by deriving goal coverage: %v",
 					runID, outputSchema.ID, recovery[0].AgentID, validationErr,
 				)
-			} else {
+			default:
 				log.WarnfCtx(
 					log.WithTraceID(context.Background(), runID),
 					"[agent] run %s recovered invalid %s output for %s as unavailable report: %v",

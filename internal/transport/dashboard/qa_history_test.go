@@ -37,7 +37,7 @@ func TestQAHistoryPageRestoresEvidenceOnFinalAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	handler := &Handler{qaRuntimeFn: func() QARuntime { return QARuntime{RunStore: runStore} }}
+	handler := &Handler{qaPortsFn: func() QAApplicationPorts { return QAApplicationPorts{RunStore: runStore} }}
 	mock.ExpectQuery(`SELECT id,evidence_status.*FROM agent_runs WHERE user_id=\? AND session_id=\? AND id IN \(\?\)`).
 		WithArgs(int64(42), "session-1", "run-1").
 		WillReturnRows(sqlmock.NewRows([]string{

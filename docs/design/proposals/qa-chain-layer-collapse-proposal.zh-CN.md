@@ -1,577 +1,740 @@
-# QA 链路分层收敛与入口归一化重构提案
+# QA 链路职责收敛与运行时边界重构提案
 
 状态：草案
 作者：Codex（AI coding agent）
 日期：2026-09-06
-关联事项：`feat/multi-agent-platform` 分支；git 提交 `03c2113`（remove QA facade package）、`698c6d4`（simplify tool/agent/multi-agent orchestration complexity）
+关联事项：`feat/multi-agent-platform` 分支；当前 HEAD `40a5041`（`refactor(agent): collapse QA chain thin layers and converge entry points`）；相关提交 `03c2113`、`698c6d4`、`77bcfae`
 目标版本：可选
+
+> 本提案只描述架构修改方案。本轮已完成代码盘点和验证，暂不修改生产代码。
 
 ## 1. 摘要
 
-本提案用于解决 Nasuta QA 请求链路中“分层过厚、职责交叉、结果模型重复映射”的工程复杂度问题。
+本提案用于解决 Nasuta QA 链路中仍然存在的职责交叉、运行时所有权不清、生命周期协调分散和薄层复生风险。当前已经完成了一轮入口收敛：QA 不再创建或等待 durable investigation workflow，旧的 QA facade/result/types 薄层已经删除，普通 QA 固定运行 parent agent loop，必要时只把 `delegate_investigation` 作为能力暴露给 parent loop。但剩余代码仍保留了较多跨层组合和重复协调。
 
-当前，一次 `POST /api/qa/ask` 请求会依次穿过
-`dashboard.SSE → qa.Service → definition.Runtime → execution.Agent → run.Hub/run.Store`
-五层边界，但其中至少有两层只是转发和别名：`qa` 包不再承担 workflow 晋升，`route.go` 恒返回 `single_agent`，`definition.Runtime` 同时扮演“执行引擎 + 事件总线 + 工具源 + 校验器 + 持久化协调器”五个角色，且结果数据需要经过 `agentapi.RunResult`、`execution.RunResult`、`run.Outcome` 三套高度重叠的模型来回搬运。根因不是某个 bug，而是历史演进遗留：早期“任务图规划 → workflow 晋升 → 多 agent 调查”的完整链路被逐步收敛为“父 agent + `delegate_investigation`”，但删掉的是调用关系，分层与装配没有同步删除，于是 QA 既“看起来支持 workflow”又“实际不走 workflow”。
-
-本提案计划通过“删薄层、合并结果映射、收敛 QA 编排边界、剥离 workflow 假耦合、简化运行时装配”五步，将当前流程从：
+当前一次 `POST /api/qa/ask` 请求大致经过：
 
 ```text
-HTTP
-→ dashboard.Handler.currentQARuntime()（回调 + legacy fallback 双通道）
-→ qa.Service（retriever/planner/compactor/memory/router 上帝对象）
-→ qa.* 别名/包装函数
-→ definition.Runtime（执行 + 事件 + 工具源 + workflow 钩子）
-→ execution.Agent
+POST /api/qa/ask
+→ routes.qaAskAuth
+→ dashboard.APIQAAsk
+→ dashboard.serveAgentSSE
+→ qa.Service.Ask
+→ qa.prepare / prepareSingleRun
+→ definition.Runtime.Begin
+→ definition.activeRun.Execute
+→ execution.Agent / loop
 → run.Hub / run.Store
-→ 三套结果模型来回映射
+→ SSE 与会话投影
 ```
 
-调整为：
+问题不在于调用层数本身，而在于多个层同时拥有同一条链路的部分状态：`dashboard.QARuntime` 同时聚合 QA service、Hub、RunStore、Session、History 和设置；`qa.Service` 同时负责准备、准入、提交、收尾和后置副作用；`definition.Runtime` 同时负责 definition、tool、run、事件、usage、recovery；Dashboard 还需要自行协调 `Ask()` 返回和 `run.finished` 两套信号。
+
+本提案建议将 QA 生命周期明确拆成：
 
 ```text
-HTTP/SSE（仅鉴权/解析/session/订阅）
-→ QA 应用服务（仅 prepare 编排，产出 RunStart + RunRequest）
-→ AgentRuntime（唯一不可变执行边界 Begin/Execute/Finish）
-→ execution 循环（LLM loop/tools/answer）
-→ EventBus + RunStore（单一事件/持久化事实源，单一结果归一化出口）
+传输适配
+→ QA Application.Start
+→ Prepare
+→ Admission / Begin
+→ Execute
+→ Finalize
+→ PostEffects
+→ EventBus / RunStore / SSE 投影
 ```
 
-预期实现：消除 `qa/dependencies.go`、`qa/result.go`、`execution/types.go` 等纯转发薄层；把结果归一化收敛到唯一出口；让 QA 与 workflow 解耦；让运行时装配与热重载不再重复构建 runtime。最终降低 QA 链路的认知负担与维护成本，同时不改变现有对外行为、SSE 事件顺序和持久化语义。
+同时保留不同结果模型各自的边界，但规定唯一的终态归一化责任；将 `RuntimePort` 拆成运行启动与场景工具源两个端口；将 `definition.Runtime` 内部拆成 compiler、executor、finalizer、recovery coordinator；将 app reload 拆成 assemble、stage、publish、activate、reconcile；让 QA 普通请求和 durable workflow 的边界在装配层可直接看懂。
+
+预期效果是：入口更少、所有权更清晰、失败终态只有一个责任方、SSE 不再承担应用生命周期协调，后续新增功能不再依靠新的 facade、alias 或跨层 callback 来“接线”。
 
 ## 2. 背景
 
 ### 2.1 业务与技术背景
 
-QA 是 Nasuta 的知识问答入口：用户提出问题后，系统需要经过证据规划、检索、会话历史装配、答案生成等步骤，把结果通过 SSE 流式返回，并将会话轮次、运行步骤、证据与使用量持久化。同时，同一套 Agent 运行时还需要服务 feature delivery 的评审（review/adjudication）以及 incident/product-development 的 durable workflow。
+QA 是 Nasuta 的知识问答入口。用户提交问题后，系统需要完成请求规范化、查询分析、证据规划、检索、会话上下文装配、工具准入和答案生成，并通过 SSE 返回进度和终态，同时持久化运行步骤、证据、使用量、会话轮次和最终结果。
 
-当前相关链路为：
+同一套 agent runtime 还被其他能力使用，但边界不同：
 
-```text
-POST /api/qa/ask
-→ internal/transport/routes/routes.go:176（qaAskAuth）
-→ internal/transport/dashboard/qa.go:74 APIQAAsk
-→ internal/transport/dashboard/qa.go:272 serveAgentSSE
-→ internal/agent/qa/service.go:169 Ask
-→ internal/agent/qa/prepare.go:70 prepare
-→ internal/agent/qa/prepare.go:274 prepareSingleRun
-→ internal/agent/definition/run.go:64 Begin
-→ internal/agent/definition/run.go:204 activeRun.Execute
-→ internal/agent/execution/loop*.go（LLM loop / tools / answer）
-→ internal/agent/run/hub.go / store*.go（事件与持久化）
-→ SSE 投影 + 会话轮次持久化
-```
-
-各模块主要职责：
-
-| 模块 | 当前职责 | 输入 | 输出 |
-| --- | --- | --- | --- |
-| `internal/transport/dashboard` | HTTP 解析、鉴权、session 读取、SSE 订阅与投影 | `*http.Request` | SSE 事件流 |
-| `internal/agent/qa` | QA 场景编排：证据规划、检索、历史装配、压缩、内存、路由、Run 提交与收尾 | `qa.Request` | `*qa.AskResult` |
-| `internal/agent/definition` | 不可变定义解析、RunStart/RunRequest 校验、Begin/Execute/Finish、事件发射、工具源 | `agentapi.RunStart/RunRequest` | `agentapi.RunResult`、`run.Outcome` |
-| `internal/agent/execution` | 真实 LLM 循环、工具调用、答案生成、上下文压缩、委托结算 | `execution.Input` | `execution.RunResult` |
-| `internal/agent/run` | 事件总线、步骤/证据/预算/生命周期持久化 | `run.Outcome`、事件 | 持久化记录、SSE 事件 |
-| `internal/agent/workflow` | DAG workflow 引擎（incident/product-development 的 durable workflow） | `workflow.RunRequest` | `workflow` 结果 |
+- feature delivery 的 review/adjudication 使用 agent runtime 生成评审结果，并可由 feature workflow 驱动；
+- incident/product-development 依赖 durable workflow 的恢复、暂停和人工协作能力；
+- 普通 QA 请求是普通 agent run，不创建 durable investigation workflow；动态调查是在 parent run 内通过 `delegate_investigation` 能力完成。
 
 ### 2.2 当前实现
 
 相关实现主要位于：
 
-- `internal/transport/dashboard/qa.go`（945 行）：QA HTTP/SSE 处理器，`serveAgentSSE` 订阅 hub 并调用 `qa.Service.Ask`；
-- `internal/transport/dashboard/handler.go`（155 行）：`Handler` 同时持有旧字段 `qa`/`persistentRunStore`/`qaSessions`/`history`/`platform`/`writeAvailable` 与新回调 `qaRuntimeFn`；
-- `internal/transport/dashboard/lifecycle.go`（66 行）：`currentQARuntime()` 优先走 `qaRuntimeFn()`，否则回退旧字段；
-- `internal/agent/qa/service.go`（190 行）：`Service` 是“agent-facing runtime facade”，`New` 一次性注入 14 个依赖；
-- `internal/agent/qa/prepare.go`（582 行）、`context.go`（611 行）、`submission.go`（488 行）、`compaction.go`（264 行）：QA 编排的主要实现；
-- `internal/agent/qa/dependencies.go`（151 行）：大量 `type X = ...` 别名；
-- `internal/agent/qa/route.go`（216 行）：执行路由，但 `executionPath` 恒为 `single_agent`；
-- `internal/agent/qa/result.go`（16 行）：`outcomeFor`/`mergeOutcomeReferences` 纯转发；
-- `internal/agent/definition/runtime.go`（286 行）、`run.go`（667 行）、`prepare.go`（832 行）、`result.go`（1129 行）：不可变定义执行运行时与结果归一化；
-- `internal/agent/execution/types.go`（44 行）：`Registry`/`ToolPolicy`/`Observer`/`Controller` 等别名；
-- `internal/agent/execution/outcome.go`（151 行）：`OutcomeFor`/`MergeOutcomeReferences`；
-- `app/qa.go`（779 行）：`buildQARuntime`、`rebuildQARuntimeLocked`、catalog 复用与 workflow 接线；
-- `app/server.go:130 recoverStartupRuns`：注释明确“QA requests are ordinary agent runs”。
+- `internal/transport/routes/routes.go`：注册和鉴权 `qaAskAuth`；
+- `internal/transport/dashboard/qa.go`：`APIQAAsk`、`serveAgentSSE`、session/run 查询和控制；
+- `internal/transport/dashboard/handler.go`、`lifecycle.go`：保存并读取当前 `QARuntime`；
+- `internal/agent/qa/service.go`：QA 服务状态、依赖装配和 `Ask` 入口；
+- `internal/agent/qa/prepare.go`、`context.go`：规划、分析、历史、上下文、检索和工具准备；
+- `internal/agent/qa/submission.go`：创建 RunRequest、异步执行、session/history/memory 后置处理；
+- `internal/agent/qa/route.go`：根据规划结果决定是否开放 delegation capability，同时记录 route/degraded 事件；
+- `internal/agent/qa/dependencies.go`：`EventSink`、`RuntimePort` 等 QA 边界；
+- `internal/agent/definition/runtime.go`、`run.go`、`result.go`：definition runtime、managed run、结果和恢复逻辑；
+- `internal/agent/execution/loop.go`、`outcome.go`：LLM loop 和 execution 层结果映射；
+- `internal/agent/run/model.go`、`hub.go`、`store*.go`：运行终态、事件和持久化；
+- `app/qa.go`：QA runtime 构建、catalog staging/publish/reuse、dynamic delegation、feature review 配置和 reload；
+- `app/feature_delivery.go`：feature delivery 与 agent workflow 的配置；
+- `app/server.go`：启动恢复。当前注释明确 QA 普通请求不参加 workflow startup recovery。
 
-当前执行逻辑概括如下：
+当前模块职责和边界如下：
 
-1. HTTP 层解析请求、读取 session、订阅 `run.Hub`；
-2. `qa.Service.Ask` 完成 prepare（plan/analyze/route/evidence/context/compaction）；
-3. `definition.Runtime.Begin` 先固定 RunStart 并创建 managed run；
-4. `qa.Service` 继续 acquireEvidence/compaction，然后 `submitRun` 异步调用 `run.Execute`；
-5. `activeRun.Execute` 调用 `execution.Agent`，再由 `definition.result` 把结果映射为 `run.Outcome` 与 `agentapi.RunResult`；
-6. `run.Hub` 把事件投递到 SSE 订阅，`run.Store` 持久化结果。
+| 模块 | 当前主要职责 | 当前复杂度来源 |
+| --- | --- | --- |
+| `dashboard` | HTTP 参数、鉴权、session 读取、Hub 订阅、SSE 投影、run 控制 | 持有跨层 `QARuntime`，并在 SSE 中协调提交信号和终态事件 |
+| `agent/qa` | 规范化、规划、检索、上下文、route、RunStart/RunRequest、异步提交、session/history/memory 收尾 | `Service` 覆盖准备到后置副作用多个生命周期；`RuntimePort` 跨两个能力边界 |
+| `agent/definition` | definition resolve、schema/tool 快照、Begin/Execute/Finish、事件/usage/recovery | `Runtime` 集中了编译、执行、结果、持久化和恢复协调 |
+| `agent/execution` | LLM loop、tool call、答案和 execution 结果 | 结果需要被 definition 和 run 层再次归一化，但责任边界未充分显式化 |
+| `agent/run` | Hub 事件投递、运行状态、步骤/证据/预算/终态持久化 | 既是终态事实源，又由上层直接读取和驱动 SSE |
+| `agent/workflow` | incident/product-development durable workflow；feature review 的 workflow 能力 | 领域边界是合理的，但 app reload 和 feature review 配置容易与 QA 构建混在一起 |
 
-### 2.3 为什么现在需要修改
+### 2.3 当前 HEAD 已经完成的收敛
 
-本次修改由架构演进触发：
+以下事项已经在当前 HEAD 完成，不应再作为本提案的未来目标：
 
-- git 提交 `77bcfae`（simplify QA workflow and remove legacy investigation）、`03c2113`（remove QA facade package and consolidate entry points）、`698c6d4`（simplify tool/agent/multi-agent orchestration complexity）已经表明项目正在往“QA 不再走 workflow”的方向收敛；
-- 但 `qa` 包仍叫 `qa` 并保留 workflow 暗示，`app/qa.go` 仍在 QA 重建流程里调用 `configureAgentWorkflowRuntime`，`definition.Runtime` 仍混入 workflow 专用事件钩子；
-- `recoverStartupRuns` 的注释与 `route.go` 的注释都确认：QA 是普通 agent run，动态调查通过 `delegate_investigation` 在父 run 内完成，不创建也不等待 durable investigation workflow。
+1. `internal/agent/qa/result.go` 已删除；
+2. `internal/agent/execution/types.go` 已删除；
+3. QA legacy investigation workflow 路径已删除；
+4. QA 已收敛为 parent agent loop，加上可选的 `delegate_investigation` capability；
+5. `EventSink` 已合并原先重复的 phase/event emitter 边界；
+6. Dashboard legacy QA fallback 已删除，`currentQARuntime()` 现在只有 callback 读取路径；
+7. route 的旧 `Strategy` 字段已删除；
+8. definition result 实现已拆分到独立文件；
+9. `rebuildQARuntimeLocked` 当前一次 reload 只调用一次 `buildQARuntime`，catalog reuse 通过重写和复用已准备的 definition snapshot 完成；
+10. QA 不参与 `recoverStartupRuns` 的 durable workflow 恢复。
 
-直接表现是：新加入的维护者很难判断一次 QA 请求“实际经过哪条路径”，因为多层边界、多套模型和多处“看起来可切换、实际永远固定”的分支。
+本提案针对的是上述收敛之后仍然存在的结构性复杂度，而不是重复删除已经不存在的文件或路径。
 
-### 2.4 范围与非目标
+### 2.4 为什么现在需要修改
+
+前一轮重构已经证明：单纯删除旧 workflow 调用关系，可以降低行为复杂度，但如果不同时调整所有权和生命周期，复杂度会以另一种形式留下来：
+
+- `QARuntime` 仍由 dashboard transport 定义，却由 app 组装并持有大量 agent/platform 依赖；
+- QA 的准备、准入、运行、终态和后置副作用仍集中在同一个 `Service`；
+- `Ask()` 的返回语义是“已提交/准备完成”，SSE 的终态语义却来自 Hub，两个契约没有在 application 层合成；
+- runtime 的工具源能力和 managed run 生命周期被合并为一个 `RuntimePort`；
+- app reload 仍然同时处理 settings、catalog、runtime、delegation、review、worker 和 index；
+- `definition.Runtime` 仍然是较大的 facade，后续很容易继续往其中添加能力。
+
+如果现在不明确边界，下一次新增能力很可能重新引入 wrapper、匿名 type assertion、跨层 callback 或“看起来支持多条路径”的状态字段。
+
+### 2.5 范围与非目标
 
 #### 目标
 
-1. 删除 QA 链路中的纯转发薄层（别名、包装函数），让依赖关系可一眼看清；
-2. 把“执行结果 → 持久化结果 → 公共结果”的归一化收敛到唯一出口；
-3. 让 QA 编排与 workflow 引擎在装配层面解耦；
-4. 简化 `buildQARuntime`/`rebuildQARuntimeLocked` 的构建与热重载流程，消除重复构建。
+1. 明确 QA 普通请求的 application-level 生命周期和终态契约；
+2. 将 `dashboard.QARuntime` 的跨层 ownership 移出 transport；
+3. 将 QA service 拆成可独立测试的 Prepare、Admission、Execute、Finalize、PostEffects 阶段；
+4. 将 `RuntimePort` 拆为 `RunStarter` 与 `ScenarioToolSource`；
+5. 在不粗暴合并公共 DTO、execution 结果和持久化终态的前提下，建立唯一 finalization 责任；
+6. 将 `definition.Runtime` 内部职责拆开，但暂时保留 facade 以控制改动面；
+7. 将 app reload 的 assemble、stage、publish、activate、reconcile 生命周期显式化。
 
 #### 非目标
 
-1. 本提案不改变 QA 的对外 HTTP/SSE 契约、事件顺序、持久化 schema 或会话语义；
-2. 本提案不重构 feature delivery 的评审执行方式（review/adjudication 仍可继续直接调用 `agentapi.Runtime.Run`）；
-3. 本提案不删除 incident/product-development 真正依赖的 durable workflow 引擎；
-4. 本提案不通过“提高 token/超时上限”或“针对单个入口写特例”来掩盖复杂度问题。
+1. 不改变 `POST /api/qa/ask` 的 HTTP/SSE 对外契约、事件名称和事件顺序；
+2. 不改变 run/session/history/memory 的持久化 schema 和既有状态语义；
+3. 不删除 `agentapi.RunResult`、`execution.RunResult`、`run.Outcome` 这三个天然属于不同边界的模型；
+4. 不删除 feature review 使用 agent runtime 的能力；
+5. 不删除 incident/product-development 真正依赖的 durable workflow；
+6. 不把所有逻辑强行塞进一个“大 service”或一个全局 EventBus；
+7. 不在本轮修改业务代码。
 
 ## 3. 问题
 
-### 3.1 问题描述
-
 **期望行为：**
 
-一次 QA 请求应当在清晰的边界内完成：传输层只负责 HTTP/SSE，QA 应用层只负责编排，运行时层只负责不可变定义执行，执行层只负责 LLM 循环，事件/持久化层只负责结果落库与投递；并且结果只需要一次确定性的归一化。
+普通 QA 请求应由一个清晰的 application contract 启动，并在 Prepare、Admission、Execute、Finalize、PostEffects 之间单向流动。Dashboard 只负责传输适配和事件投影；运行时只负责 definition/run 生命周期；终态、SSE terminal 和公共结果应来自同一个 finalization 事实源。
 
 **实际行为：**
 
-- `qa.Service` 成为“上帝对象”，同时承担检索、规划、历史、压缩、内存、路由、提交；
-- `definition.Runtime` 成为另一个“上帝对象”，同时承担执行、事件、工具源、workflow 钩子；
-- 两个对象之间通过 `qa.Deps` 注入的 `Runtime/RuntimeTools/PhaseEmitter/ExecutionEvents` 四字段其实指向同一 `definitionRuntime`；
-- `qa/dependencies.go`、`execution/types.go` 用别名制造额外的类型层；
-- `qa/result.go` 包装 `execution` 的结果映射；
-- `app/qa.go` 在 catalog 复用时可能重复 `buildQARuntime` 一次，且每次 QA 重建都重新把 runtime 接进 workflow 编排器。
+当前普通 QA 虽然已经固定走 parent agent loop，但 Dashboard、`qa.Service`、`definition.Runtime` 和 app reload 仍分别持有同一条链路的部分生命周期。`Ask()`、Hub terminal event、`ManagedRun.Finish()`、session persistence 和 memory extraction 由不同层交叉协调。
 
 **差异：**
 
-实际代码的职责边界、类型层数和装配路径，远多于“单一路径”的真实行为，导致代码绕、难测试、难维护。
+真实行为已经是单一路径，代码边界却仍然表达为多个跨层组合对象和隐式契约。结果是入口看似收敛，维护时仍需要在 transport、QA、definition、execution、run、app 和 workflow 之间来回确认 ownership，新增能力容易重新产生薄层。
 
-### 3.2 根因分析
+### 3.1 `dashboard.QARuntime` 的 ownership 仍然跨层
 
-| 层次 | 说明 | 证据 |
-| --- | --- | --- |
-| 表面现象 | 维护者无法快速定位一次 QA 请求的真实调用链 | `qa`/`definition`/`execution` 三层边界 + 三套结果模型 |
-| 直接原因 | 历史多 agent workflow 路径被删除后，分层、别名和装配未同步清理 | `route.go` 恒 `single_agent`；`recoverStartupRuns` 注释 |
-| 机制根因 | 缺少“领域模型 / 公共 DTO / 持久化模型 / 事件总线”的明确单一所有权 | `agentapi.RunResult`、`execution.RunResult`、`run.Outcome` 字段重叠并多次映射 |
+当前 `dashboard.QARuntime` 包含：
 
-根因链路：
+- `*qa.Service`；
+- `*run.Hub`；
+- `*llm.LLMClient`；
+- `*run.Store`；
+- `*memory.SessionStore`；
+- `session.History`；
+- `*config.PlatformSettings`；
+- `WriteAvailable`。
 
-```text
-早期：QA 需要 workflow 晋升 + 多 agent 调查
-→ 引入 qa/definition/execution/run 多层边界与多态路由
-→ 后续：QA 收敛为父 agent + delegate_investigation
-→ 调用被删，但分层/别名/装配未删
-→ 形成“绕来绕去”的薄层与假耦合
+它由 `app` 组装，通过 `qaRuntimeFn` 交给 Dashboard，再由 Dashboard 按字段拆开使用。这不是旧 fallback 双通道问题——当前 fallback 已删除——而是 transport 包仍然定义并持有跨层组合对象，导致 runtime ownership 无法从类型上判断。
+
+### 3.2 `qa.Service` 跨越完整请求生命周期
+
+`qa.Service` 当前同时承担：
+
+1. 请求规范化和默认值处理；
+2. evidence planning 和 query analysis；
+3. 历史上下文发现与 session context 组装；
+4. retrieval、memory recall、工具准入和 delegation admission；
+5. `Runtime.Begin`；
+6. RunRequest 构造和异步提交；
+7. `managedRun.Execute`；
+8. `Outcome()` 读取、session turn 持久化、history archive、memory extraction；
+9. phase/status/event 投影。
+
+这使得“准备失败”“运行失败”“终态持久化失败”“后置 memory 失败”都在一个对象里通过不同分支处理，测试需要构造大量无关依赖。
+
+### 3.3 conversation 可能被组装两次
+
+`prepareConversation` 先以 service 默认的 context/output reserve 调用 `assemblePreparedConversation`；`prepareSingleRun` 随后解析 definition budget，再根据 definition 的 `ContextTokens` 和 `MaxOutputTokens` 重新计算窗口。如果与 service 默认值不同，会再次调用 `reassembleConversation`。
+
+这不是当前必然错误，但它让 preparation 结果具有隐式可变性：前面步骤看到的 conversation 与最终 RunRequest 使用的 conversation 可能不是同一个版本，也使上下文相关的调试和测试需要理解“第一次组装”和“重组”的关系。
+
+### 3.4 `RuntimePort` 同时代表两个不相同的能力边界
+
+当前接口为：
+
+```go
+type RuntimePort interface {
+    agentapi.ManagedRuntime
+    definition.ScenarioToolSource
+}
 ```
 
-本问题不能只通过“删掉某个别名”或“合并某两个函数”单独解决，因为薄层是分散在 `qa`、`execution`、`definition`、`app` 多个包里的同源现象；需要以“单一事实源 + 单一边界”为目标做分层收敛，否则还会继续产生新的包装层。
+`ManagedRuntime` 表示 Begin/Run 的生命周期；`ScenarioToolSource` 表示根据 `tool.Policy` 获取准备阶段工具快照。两者目前都由 `definition.Runtime` 实现，但“由同一个具体类型实现”不等于“应该是同一个业务端口”。继续使用组合接口会让 fake、测试和未来替换都被迫同时满足两个边界。
 
-### 3.3 影响
+### 3.5 `definition.Runtime` 仍然是过大的 facade
 
-- **用户影响：** 无直接功能回归风险（本次目标是不改变行为），但复杂度会持续拖慢新功能交付；
-- **业务影响：** QA 链路是核心入口，理解成本高会降低排查与迭代效率；
-- **系统影响：** `rebuildQARuntimeLocked` 重复构建 runtime 造成不必要的资源与状态切换风险；
-- **工程影响：** 薄层与别名让测试需要构造同时实现多接口的 fake，`qa/service_test.go`（1355 行）、`definition/result_test.go`（1321 行）等维护成本高，职责混乱。
+当前 runtime 同时拥有：
+
+- definition resolver 和 schema registry；
+- tool registry、tool executor 和 scenario tool source；
+- run store、usage recorder 和 Hub；
+- run 编译和 `Begin`；
+- execution loop 驱动和 `activeRun.Execute`；
+- result mapping、终态持久化和 `Finish`；
+- delegation awaiter；
+- durable recovery worker 的启动、停止和 generation 管理。
+
+该类型作为临时 facade 是可以接受的，但内部职责没有显式分组，导致新增能力很容易继续直接添加字段或方法。
+
+### 3.6 结果模型不是“重复到可以直接删掉”，但 finalization 责任不唯一
+
+当前存在三个层次：
+
+- `agentapi.RunResult`：公共 API/跨 package 的 durable public outcome；
+- `execution.RunResult`：execution loop 的内部结果；
+- `run.Outcome`：事件、SSE 和持久化消费的终态事实。
+
+这三个模型分别属于不同边界，不能简单合并成一个 struct。真正的问题是映射和读取责任分散：`definition` 负责部分结果归一化，`execution/outcome.go` 提供公共映射，QA submission 又通过匿名接口断言：
+
+```go
+outcomeRunner, ok := managedRun.(interface{ Outcome() run.Outcome })
+```
+
+这里的匿名 type assertion 暗示 `ManagedRun` 的完成契约不完整，QA 必须猜测 managed run 是否额外提供 durable outcome。
+
+### 3.7 Dashboard SSE 仍然承担 application lifecycle 协调
+
+`serveAgentSSE` 当前需要：
+
+1. 从 runtime 取得 QA service 和 Hub；
+2. 先订阅 Hub，避免丢失 prepare 阶段事件；
+3. 发出 `run.started`；
+4. 异步调用 `qa.Service.Ask()`；
+5. 处理 Ask 返回的 retrieved context；
+6. 同时等待 Ask 失败和 Hub 的 `run.finished`；
+7. 在无 Hub 时使用 Ask 返回作为结束条件。
+
+这段逻辑解决的是应用层的“启动并等待一条 QA run”问题，不是纯 transport 投影问题。将它留在 Dashboard，会让 HTTP/SSE 层知道 QA service 的提交时机、Hub 生命周期和终态来源。
+
+### 3.8 app reload 仍然把多个生命周期绑在一起
+
+当前 `rebuildQARuntimeLocked` 已经不会重复调用 `buildQARuntime`，但一次 reload 仍然依次处理：
+
+- settings snapshot；
+- agent definitions 和 capability catalog staging；
+- catalog publish/reuse；
+- definition runtime 构造；
+- dynamic delegation 配置；
+- feature review runtime 配置；
+- active runtime 原子替换；
+- 旧 recovery worker 停止、新 recovery worker 启动；
+- index/platform 更新。
+
+其中有些步骤必须在同一 reload 锁下完成，但不应继续通过一个长函数表达所有 ownership。当前应修复的是生命周期的可见性和失败边界，而不是声称存在已经修复的“双重 runtime 构建”。
+
+### 3.9 route 的语义仍容易让读者误认为是 workflow route
+
+当前 route 的实际行为是：
+
+- QA 主执行路径固定为普通 parent agent loop；
+- 当规划、配置和工具条件满足时，才把 `delegate_investigation` 暴露给 parent；
+- 不创建、不等待 durable investigation workflow；
+- 仍保留 route/degraded 事件和原因，用于观测与解释。
+
+因此这里的对象本质上是 delegation capability admission，而不是 workflow execution route。名称和结构若不进一步收敛，维护者仍需阅读注释才能理解真实行为。
+
+### 3.10 影响
+
+- **维护影响：** 新成员需要同时阅读 transport、QA、definition、execution、run 和 app 才能判断一次请求的真实生命周期；
+- **测试影响：** fake 需要满足跨边界接口，异步提交、终态读取和后置副作用难以分别测试；
+- **故障影响：** Ask 返回、Hub 终态、Finish 失败、session 持久化失败可能由不同层观察，错误归属不够直接；
+- **演进影响：** runtime reload、feature review 和 delegation 的变更容易互相影响；
+- **性能风险：** conversation 重组和不必要的跨层编排会增加准备阶段的隐性成本，需通过指标确认，而不是凭经验判断。
 
 ## 4. 问题出现的场景
 
-### 4.1 典型场景
+### 4.1 场景一：定位 QA 是否经过 workflow
 
-#### 场景 A：定位一次 QA 请求的真实执行路径
+- **Given：** 开发者需要判断 QA 请求是否经过 durable workflow；
+- **When：** 从 `APIQAAsk` 顺着调用链阅读；
+- **期望：** 可以直接看到“普通 QA run + 可选 delegation capability”；
+- **当前：** 还要结合 `route.go`、`app/qa.go`、`app/feature_delivery.go` 和 `recoverStartupRuns` 的注释才能排除 workflow 误解。
 
-- **Given：** 开发者想确认“QA 是否走 workflow”；
-- **When：** 顺着 `APIQAAsk → qa.Service.Ask → ...` 阅读代码；
-- **Then：** 应当一眼看到单一执行路径与明确边界；
-- **But：** 当前会看到 `qa/route.go` 的多态路由、`definition.Runtime` 的 workflow 钩子、`app/qa.go` 的 `configureAgentWorkflowRuntime` 接线，需要再读注释才能确认“其实不走 workflow”。
+### 4.2 场景二：增加终态字段
 
-#### 场景 B：新增一个结果字段
+- **Given：** 增加 `TerminationReason` 或新的完整度字段；
+- **When：** 修改 execution 结果、run 终态和公共结果；
+- **期望：** 明确由一个 finalizer 负责状态分类和投影；
+- **当前：** 需要确认 execution、definition、run 和 QA submission 各自在哪一步读取或补写该字段，容易出现事件、持久化和公共响应不一致。
 
-- **Given：** 需要给 QA 结果增加一个新状态字段；
-- **When：** 修改结果结构；
-- **Then：** 应当只改一个事实源并自动投影；
-- **But：** 当前需要同步修改 `execution.RunResult`、`run.Outcome`、`agentapi.RunResult`，并经过 `execution/outcome.go` 和 `definition/result.go` 多处手工映射，极易漏改。
+### 4.3 场景三：为 QA 增加一种准备阶段工具
 
-#### 场景 C：平台设置或代码图重建
+- **Given：** 只想给 QA 的 prepare 阶段增加工具能力；
+- **When：** 修改 `RuntimePort` 或 definition runtime；
+- **期望：** 只依赖 ScenarioToolSource；
+- **当前：** QA service 的 runtime 端口同时要求 ManagedRuntime，测试替身也必须实现完整 run 生命周期。
 
-- **Given：** 用户修改影响 QA 的平台设置，或代码图被重建；
-- **When：** `applyStoredPlatformSettings`/`replaceQACodeGraph` 触发 `rebuildQARuntimeLocked`；
-- **Then：** 应当一次性构建候选、决定复用、发布并替换；
-- **But：** 当前 `reusedCatalog` 分支会再次调用 `buildQARuntime`，同一 runtime 可能被构建两次。
+### 4.4 场景四：QA 请求结束后的持久化失败
 
-### 4.2 边界场景
+- **Given：** agent loop 已返回结果，但 session turn 持久化失败；
+- **When：** `executeSubmittedRun` 读取 outcome、持久化 session、再调用 `Finish`；
+- **期望：** finalization 明确区分“agent execution 已完成”和“业务后置持久化失败”；
+- **当前：** QA service 需要自行读取匿名 `Outcome()` 并决定是否再次以错误调用 `Finish`，终态责任分散。
 
-| 场景 | 输入或条件 | 当前行为 | 目标行为 |
-| --- | --- | --- | --- |
-| 正常路径 | 合法 QA 请求 | 多层转发后执行 `single_agent` | 单一路径直接执行 |
-| 空输入或缺失字段 | 非法请求 | `normalizeRequest` 校验失败 | 保持现有拒绝行为 |
-| 超时或预算耗尽 | 定义超时/预算触发 | 映射为 `partial`/`failed` | 保持现有状态分类 |
-| 下游失败 | 检索/LLM 失败 | `finishRunWithError` 收尾 | 保持现有失败可见性 |
-| 重试或重复请求 | runID 重复 | `RunStart` 校验拦截 | 保持现有幂等约束 |
-| 并发或乱序 | 多请求并发/热重载 | `qa.mu`/`reload` 保护 | 保持现有并发安全 |
-| 兼容旧数据或旧客户端 | 旧 run/会话数据 | 旧字段 fallback | 迁移后删除 fallback，保持 schema 兼容 |
+### 4.5 场景五：设置或代码图热重载
 
-### 4.3 复现步骤
+- **Given：** 平台设置或代码图变更触发 QA reload；
+- **When：** 执行 `rebuildQARuntimeLocked`；
+- **期望：** 候选构建失败不影响 active runtime，发布和 worker 切换有明确边界；
+- **当前：** 同一长流程同时处理 catalog、delegation、feature review、active runtime 和 worker，失败回滚点不够直观。
 
-1. 阅读 `internal/agent/qa/dependencies.go`、`internal/agent/qa/result.go`、`internal/agent/execution/types.go`；
-2. 观察存在 `type X = ...` 别名和纯转发函数；
-3. 阅读 `internal/agent/qa/route.go`，确认 `executionPath` 只有 `single_agent` 一个取值；
-4. 阅读 `app/qa.go` 的 `rebuildQARuntimeLocked` 与 `configureAgentWorkflowRuntime`；
-5. 可见 QA 实际单一路径，但代码仍保留多态/别名/workflow 装配。
+### 4.6 可复现场景
+
+1. 阅读 `internal/transport/dashboard/handler.go` 的 `QARuntime`；
+2. 阅读 `internal/transport/dashboard/qa.go` 的 `serveAgentSSE`；
+3. 阅读 `internal/agent/qa/service.go`、`prepare.go`、`submission.go`；
+4. 阅读 `internal/agent/definition/runtime.go`、`run.go` 和 `result.go`；
+5. 阅读 `app/qa.go` 的 `buildQARuntime` 和 `rebuildQARuntimeLocked`；
+6. 画出依赖图，即可观察到“普通 QA 单一路径”与“跨层对象/多阶段责任”之间的不匹配。
 
 ## 5. 如何修改
 
 ### 5.1 修改原则
 
-1. **修复机制，不增加案例特例。** 分层收敛按“删薄层 → 合并映射 → 收敛编排 → 解耦 workflow → 简化装配”顺序，目标是消除产生复杂度的结构，而不是针对某个入口打补丁。
-2. **保持单一事实源。** `run.Outcome` 作为持久化/流式的单一终态，`agentapi.RunResult` 作为公共 DTO，`execution.RunResult` 作为执行层私有结果；归一化只允许在一个位置发生。
-3. **明确职责边界。** 传输层、应用层、运行时层、执行层、事件/持久化层各只有一个所有者，禁止 pass-through getter 和别名隐藏耦合。
-4. **失败可诊断。** 保留现有错误码、`Completeness`、`TerminationReason` 与结构化日志，不在归一化中引入新的静默降级。
-5. **兼容与可回滚。** 阶段化提交、`GOWORK=off go test ./...` 逐步验证；每阶段保持行为等价，可在任一阶段回退。
+1. **先定义 ownership，再移动代码。** 不以“少几个文件”为唯一目标，每个状态和副作用必须有唯一责任方。
+2. **保留合理的模型分层。** 公共 DTO、execution 内部结果和 run 终态不强行合并；只收敛映射和 finalization。
+3. **传输层只做适配。** Dashboard 负责权限、参数、SSE 编码和事件投影，不负责启动/等待 QA 生命周期。
+4. **QA application 持有用例流程。** Prepare、Admission、Execute、Finalize、PostEffects 由应用层按阶段编排。
+5. **运行时 facade 先保留、内部拆分。** 先拆职责，再决定是否删除 facade，避免一次重构改变太多公共入口。
+6. **失败必须可见。** 构建、Begin、Execute、Finalize、持久化和 recovery 失败都要有明确错误和状态，不用静默 fallback 掩盖 ownership 问题。
+7. **先补契约测试再改结构。** 先锁定 SSE 顺序、终态、重复 runID、预算和热重载不变量。
 
 ### 5.2 目标流程
 
 ```text
-[HTTP/SSE 请求]
-→ [传输层：解析/鉴权/session/订阅 EventBus]
-→ [QA 应用服务：plan → analyze → route(仅观测) → evidence → context → compaction]
-→ [产出 RunStart + RunRequest]
-→ [AgentRuntime：resolve definition → validate → Begin/Execute/Finish]
-→ [execution：LLM loop / tools / answer]
-→ [结果归一化唯一出口：execution.RunResult → run.Outcome / agentapi.RunResult]
-→ [EventBus 投递 + RunStore 持久化]
-→ [SSE 投影]
+HTTP/SSE
+→ Dashboard Adapter（鉴权、解析、session 读取、订阅、投影）
+→ QAApplication.Start
+   → Prepare（规范化、规划、分析、检索、conversation、tool admission）
+   → Admission（解析 definition、计算预算、Begin）
+   → Execute（RunStarter 返回的 ManagedRun 执行）
+   → Finalize（唯一完成契约、状态分类、Outcome/Public projection）
+   → PostEffects（session/history/memory 等明确的异步副作用）
+→ EventBus / RunStore
+→ SSE projection
 ```
 
-与当前流程相比，关键变化是：
-
-1. 在 `internal/agent/qa` 删除别名与包装函数，依赖关系显式化；
-2. 将结果归一化从 `qa`/`execution` 多处转发收敛到唯一出口；
-3. 将 `definition.Runtime` 的事件发射与工具源职责剥离，运行时只保留执行与校验；
-4. 在 `app/qa.go` 断开 QA runtime 与 workflow orchestrator 的装配，workflow 只服务 incident/product-development 的 durable workflow；
-5. 在日志/持久化中继续公开执行路径、步骤失败、最终状态与完成度。
-
-### 5.3 详细改动
-
-| 改动项 | 当前实现 | 修改后 | 涉及模块 | 兼容策略 |
-| --- | --- | --- | --- | --- |
-| 删除 QA 别名 | `qa/dependencies.go` 大量 `type X = ...` | 直接 import 真实类型 | `internal/agent/qa` | 编译期替换，行为不变 |
-| 删除结果包装 | `qa/result.go` 转发 `execution.OutcomeFor`/`MergeOutcomeReferences` | 调用点直接使用 execution 函数 | `internal/agent/qa` | 测试同步迁移 |
-| 收敛 execution 别名 | `execution/types.go` 别名 | 合并到使用处或保留极小公共类型 | `internal/agent/execution` | 编译期替换 |
-| 收敛结果映射 | `execution/outcome.go` + `definition/result.go` + `qa/result.go` 多层映射 | 唯一归一化出口 | `internal/agent/definition` | 先补对照测试再合并 |
-| 收敛 QA 入口 | `qa/route.go` 多态路由 + `Deps` 四字段指向同一 runtime | 显式单一路径 + 合并 `RuntimePort` | `internal/agent/qa` | 保留降级观测事件 |
-| 剥离事件/工具源 | `definition.Runtime` 暴露 `Hub`/`ToolsFor`/`Emit*` | 事件总线与工具源由 platform 注入 | `internal/agent/definition` | dashboard 改订阅注入 hub |
-| 解耦 workflow | `app/qa.go` `configureAgentWorkflowRuntime` 把 QA runtime 接入 workflow | 断开 QA 装配，workflow 独立归属 | `app` | 保留 incident/product workflow |
-| 简化重载 | `rebuildQARuntimeLocked` 复用分支二次 build | 先定 version，再 build 一次 | `app/qa.go` | 保持 active runtime 原子替换与旧 recovery stop |
-
-#### 改动一：删除 QA 链路中的别名与包装层
-
-**方案：**
-
-- 删除 `internal/agent/qa/dependencies.go` 中 `ConversationContext`、`RunResult`、`RunOutcome`、`Tool`、`ExecutionEventEmitter` 等别名，让 `qa` 直接 import `execution`/`run`/`tool`；
-- 删除 `internal/agent/qa/result.go` 的 `outcomeFor`、`mergeOutcomeReferences`，调用点直接调用 `execution.OutcomeFor`、`execution.MergeOutcomeReferences`；
-- 将 `internal/agent/execution/types.go` 的别名合并到使用处，或只保留一个明确的 `execution.PublicTypes` 说明文件，但禁止 `qa` 与 `definition` 再次 alias。
-
-**约束：**
-
-- 不改变任何运行时行为；
-- 不改变对外包导入关系（仅 `internal` 内部调整）；
-- 保留测试覆盖，测试 import 改为真实类型。
-
-**失败行为：**
-
-- 该阶段只做编译期替换，若 `GOWORK=off go test ./...` 失败则回退该阶段；
-- 不允许通过“保留旧别名”来避免修改测试。
-
-#### 改动二：将结果归一化收敛到唯一出口
-
-**方案：**
-
-- 明确 `execution.RunResult` 为执行层私有结果；
-- 明确 `run.Outcome` 为持久化/流式唯一终态；
-- 明确 `agentapi.RunResult` 为公共 DTO；
-- 让 `internal/agent/definition/result.go` 成为唯一从 `execution.RunResult` 生成 `run.Outcome` 与 `agentapi.RunResult` 的位置；
-- 将 `execution/outcome.go` 的 `OutcomeFor` 保持为 `execution.RunResult → run.Outcome` 的机械映射，但禁止再被 `qa` 二次包装；
-- 将 `definition/result.go` 中 `mapResult`/`mapPartialResult`/`mapFailedResult`/`mapCancelledResult`/`attemptOutputRecovery` 按“状态分类 → schema 校验 → 公共投影”拆分为三个明确函数，降低单文件复杂度。
-
-**约束：**
-
-- `AnswerComplete`、`FallbackUsed`、`Completeness`、`TerminationReason` 的语义与现有值必须保持一致；
-- 保持 partial/failed/cancelled/succeeded 的分类规则不变。
-
-**失败行为：**
-
-- 归一化失败时仍返回明确的 `run.Outcome` 状态与 `agentapi.RunResult` 错误码；
-- 不允许静默把失败映射为成功或把 partial 映射为 succeeded。
-
-#### 改动三：收敛 QA 编排边界
-
-**方案：**
-
-- 保留 `Ask → prepare → prepareSingleRun → submitRun` 的 use-case 骨架；
-- 将 `route.go` 中“永远 `single_agent`”的事实显式化：删除 `executionPath` 类型与多态分支，只保留降级/观测理由与事件发射；`route_test.go` 随之瘦身；
-- 将 `qa/contracts.go` 的 `Deps` 中 `Runtime`/`RuntimeTools`/`PhaseEmitter`/`ExecutionEvents` 合并为一个 `Runtime RuntimePort`，内部按需要断言可选能力，或拆成 `ManagedRuntime` + `PhaseSink` 两个明确接口；
-- 将 `runtime.go` 的 `Models/NewModels` 收编到 platform 构建处，与 `definition.NewRuntime` 一起创建，避免 QA service 再持有两个 LLM client 的间接层。
-
-**约束：**
-
-- 保留 route 降级理由、`execution_routed`/`execution_degraded` 事件与 `runtrace` 输出，作为可解释性信号；
-- 不破坏 `qa/service_test.go` 与 `test_helpers_test.go` 的既有 fake 边界（通过接口收敛而非删除）。
-
-**失败行为：**
-
-- 当 runtime 未配置时，仍返回明确的 `runtime not configured` 错误，不允许静默成功。
-
-#### 改动四：剥离 `definition.Runtime` 的事件与工具源职责
-
-**方案：**
-
-- 由 platform 持有并注入 `run.Bus`（或复用 `run.Hub`），`definition.Runtime` 只保留生命周期与结果，把 `EmitPhase`/`EmitStatus`/`EmitEvent`/`ProjectToolEvents` 收敛为对注入 Bus 的写；
-- 将 `ToolsFor` 从 runtime 拆出为独立 `ScenarioToolProvider`；
-- 将 workflow 专用钩子 `ProjectToolEvents` 下沉到 feature/workflow 专属装配（若 audit 确认 feature review 不走 agent node，则直接删除 agent node 桥）。
-
-**约束：**
-
-- 必须保证 hub 生命周期与 runtime 重建一致，避免热重载时 SSE 订阅落到旧 hub；
-- 必须保持 `serveAgentSSE` 中“先订阅再 Ask”的事件顺序不变。
-
-**失败行为：**
-
-- hub 不可用时，SSE 以明确状态终止，不允许静默丢事件。
-
-#### 改动五：断开 QA 与 workflow 的装配，简化热重载
-
-**方案：**
-
-- 移除 `app/qa.go` 中 `rebuildQARuntimeLocked` 对 `configureAgentWorkflowRuntime(definitionRuntime)` 的调用，让 QA runtime 不再进入 workflow orchestrator；
-- 将 `buildQARuntime` 与 catalog 复用拆为两阶段：
-  - 阶段 A：`buildRuntimeCandidate(settings, graph, version)` 只产出候选（runtime + definitions + capabilities），不发布；
-  - 阶段 B：`publishOrReuse(candidate)` 决定复用或发布；复用判断不再需要二次 build；
-- 去掉 `dashboard.Handler` 的 legacy fallback 字段（`qa`/`persistentRunStore`/`qaSessions`/`history`/`platform`/`writeAvailable`），`currentQARuntime()` 退化为简单转发；
-- 收敛 `QARuntime`：从“QA + Hub + RunStore + Sessions + History + Settings + WriteAvailable + CompactionLLM”大杂烩，拆为 `QAApplication` + `RuntimeDeps`。
-
-**约束：**
-
-- 保持“候选未发布前不替换 active runtime”和“旧 recovery worker 正确 Stop”两个既有不变量；
-- 保持 `setQARuntimeWriteAvailable` 的运行时免重建更新能力。
-
-**失败行为：**
-
-- 构建/发布失败时返回明确错误，不替换 active runtime；
-- 复用判断失败时走全新发布路径，不允许静默复用错误版本。
-
-### 5.4 数据结构或接口契约
-
-新增或调整的核心接口：
-
-| 字段/接口 | 类型 | 所有者 | 含义 | 默认值 | 兼容性 |
-| --- | --- | --- | --- | --- | --- |
-| `RuntimePort` | `interface` | `internal/agent/qa` | 合并 `ManagedRuntime` 与可选 `PhaseSink` 的能力面 | 空值即未配置 | 过渡接口，逐步拆细 |
-| `ScenarioToolProvider` | `interface` | platform | 为 QA prepare 提供工具快照 | 无 | 替代 `definition.Runtime.ToolsFor` |
-| `EventBus` | `interface` | platform | 事件投递单一入口 | 无 | 替代 `definition.Runtime.Hub()` |
-| `QAApplication` | `struct` | platform | QA 编排 + 依赖的明确聚合 | 无 | 替代 `dashboard.QARuntime` 大杂烩 |
-
-结果状态转换（保持不变）：
+并行的其他边界保持：
 
 ```text
-execution.RunResult
-  ├─ 正常完成 → run.Outcome{Status: done} → agentapi.RunResult{Status: succeeded}
-  ├─ 可用但未完成 → run.Outcome{Status: partial} → agentapi.RunResult{Status: partial}
-  ├─ 预算/超时 → run.Outcome{Status: failed} → agentapi.RunResult{Status: failed}
-  └─ 取消 → run.Outcome{Status: aborted} → agentapi.RunResult{Status: cancelled}
+feature delivery → feature review runner → agent Runtime
+incident/product-development → durable workflow
+普通 QA → agent Run（不进入 durable investigation workflow）
 ```
 
-不变量：
+### 5.3 改动一：把 QARuntime ownership 从 dashboard 移出
 
-1. `AnswerComplete`、`FallbackUsed`、`Completeness`、`TerminationReason` 在三处模型中语义一致，只在唯一归一化出口赋值；
-2. `run.Outcome` 是持久化/流式的唯一事实源，`agentapi.RunResult` 是其公共投影，不允许反向派生；
-3. 热重载过程中，active runtime 的替换必须原子完成，旧 recovery worker 必须在新 runtime 启动前停止；
-4. 未配置 runtime 时，QA 请求必须以明确错误终止，不允许静默成功。
+建议在 `app` 或专门的 application composition 包中定义内部 runtime bundle。Dashboard 不再定义“QA + Hub + Store + Session + Settings”的组合对象，而只依赖明确的 QA application port、event subscription port、run query/control port 和 session query port。
 
-### 5.5 兼容、迁移与回滚
+建议形态：
 
-- **向后兼容：** 本提案不改变对外 HTTP/SSE 契约、事件顺序、持久化 schema 与会话语义；所有改动限定在 `internal` 与 `app` 内部；
-- **数据迁移：** 无需数据库迁移（结果状态语义保持不变）；
-- **灰度方式：** 按阶段提交到同一分支，每阶段跑 `GOWORK=off go build ./...`、`GOWORK=off go test ./...`、`GOWORK=off go vet ./...`；不引入运行时 feature flag；
-- **回滚条件：** 任一阶段出现编译失败、测试失败或 SSE 事件顺序回归即回滚该阶段；
-- **回滚步骤：** `git revert` 对应阶段提交，恢复 active runtime 原子替换与旧 recovery worker 停止逻辑。
+```go
+type QAApplication interface {
+    Start(context.Context, StartRequest) (StartedRun, error)
+    CompactionStatus(string) run.SessionStatusEvent
+}
+
+type StartedRun struct {
+    RunID   string
+    Context *retrieval.RetrievedContext
+}
+
+type QAEventStream interface {
+    Subscribe(string) (<-chan run.SSEEvent, func())
+}
+```
+
+迁移时可以先保留 app 内部 bundle，再逐步让 Dashboard 接收窄接口；不要把 bundle 再换一个名字继续暴露所有依赖。
+
+**失败边界：** application 未配置时，Start 返回明确的 service unavailable；事件流不可用时，Dashboard 输出明确终态，不伪造成功结果。
+
+### 5.4 改动二：拆分 QA 生命周期
+
+不要求一次性拆成五个 package，先在 `qa` 内按阶段定义内部对象和函数边界：
+
+```text
+PrepareResult
+  = normalized request
+  + planning/analysis
+  + assembled conversation
+  + retrieval context
+  + tool admission
+  + resolved definition/budget
+
+AdmissionResult
+  = ManagedRun
+  + immutable RunStart
+  + run limits
+
+ExecutionResult
+  = public execution result
+  + durable outcome
+
+PostEffects
+  = session turn / history archive / memory extraction
+```
+
+建议责任：
+
+| 阶段 | 负责内容 | 不负责内容 |
+| --- | --- | --- |
+| Prepare | 输入规范化、规划、检索、上下文和 capability admission | Begin、Finish、session 最终写入 |
+| Admission | definition resolve、预算计算、Begin、RunRequest 固化 | 读取终态、memory extraction |
+| Execute | 调用 ManagedRun.Execute | session/history/memory 业务副作用 |
+| Finalize | 统一完成契约、状态分类、Finish、终态投影 | HTTP/SSE 编码 |
+| PostEffects | session turn、history、memory 等可观测异步副作用 | 改写已完成的 run 事实 |
+
+### 5.5 改动三：conversation 只组装一次
+
+先解析 definition 及其 budget，再计算 context window 和 output reserve，之后只调用一次 conversation assembler。若 definition resolve 必须依赖前置 planning，则把“默认 budget”改为显式的 preliminary budget，并禁止在后面隐式重组；如果确实发生预算变更，必须返回一个新的不可变 `PreparedConversation`，而不是修改同一个 preparation 对象。
+
+目标是不再出现：
+
+```text
+prepareConversation(default window)
+→ resolve definition
+→ compare budget
+→ maybe reassemble
+```
+
+而是：
+
+```text
+prepare planning
+→ resolve definition + budget
+→ assemble conversation once
+→ build RunRequest
+```
+
+### 5.6 改动四：拆分 RunStarter 与 ScenarioToolSource
+
+建议把当前组合接口拆成：
+
+```go
+type RunStarter interface {
+    Begin(context.Context, agentapi.RunStart) (agentapi.ManagedRun, error)
+}
+
+type ScenarioToolSource interface {
+    ToolsFor(tool.Policy) definition.ScenarioToolSet
+}
+```
+
+QA prepare 只依赖 `ScenarioToolSource`；QA admission/execute 只依赖 `RunStarter`。如果某个实现同时提供两者，可以在 app composition 处组合，而不在业务端口处强制组合。
+
+`EventSink` 已经完成合并，本提案不再重新引入 phase/event 两套同义接口。
+
+### 5.7 改动五：引入显式 completion/finalization contract
+
+不建议删除三个结果模型，而是让 managed run 或 application finalizer 显式返回完成信息：
+
+```go
+type CompletedRun struct {
+    Public  agentapi.RunResult
+    Outcome run.Outcome
+}
+
+type RunCompletion interface {
+    Complete(context.Context, *agentapi.RunError) (CompletedRun, error)
+}
+```
+
+建议最终由 definition finalizer 负责：
+
+1. 接收 execution result 和 execution error；
+2. 分类 succeeded/partial/failed/cancelled；
+3. 合并 preparation evidence、dynamic references 和 usage；
+4. 生成唯一 `run.Outcome`；
+5. 从 `run.Outcome` 生成 `agentapi.RunResult`；
+6. 持久化并发出终态事件；
+7. 返回 `CompletedRun` 给 QA application。
+
+QA 不再通过匿名 `interface{ Outcome() run.Outcome }` 猜测 managed run 是否具备终态。
+
+**重要约束：** `execution.RunResult` 仍是 execution 内部结果；`run.Outcome` 仍是事件/持久化事实源；`agentapi.RunResult` 仍是公共投影。变化的是映射责任和调用契约，而不是把三者粗暴合并。
+
+### 5.8 改动六：在 definition.Runtime 内部拆分职责
+
+先保留 `definition.Runtime` 对外 facade，在内部引入以下私有组件：
+
+```text
+RunCompiler
+  - resolve definition
+  - validate schema / policy
+  - pin tool snapshot
+  - build preparedExecution
+
+RunExecutor
+  - invoke execution.Agent / loop
+  - record usage and checkpoints
+
+RunFinalizer
+  - classify result
+  - merge preparation evidence
+  - build run.Outcome and agentapi.RunResult
+  - persist terminal state / emit terminal event
+
+RecoveryCoordinator
+  - start/stop recovery worker
+  - manage generation and cancellation
+```
+
+`ScenarioToolSource` 可以作为独立的工具 provider 由 composition 层注入。暂时不要求删除 `Runtime`，但禁止新代码继续向 facade 添加与上述职责无关的字段。
+
+### 5.9 改动七：拆分 app reload 生命周期
+
+将当前 `rebuildQARuntimeLocked` 的内部过程整理为：
+
+```text
+assembleQARuntimeCandidate
+→ stageCatalog
+→ publishOrReuseCatalog
+→ configureDelegation
+→ configureFeatureReview
+→ activateRuntimeAtomically
+→ reconcileRecoveryWorker
+→ publishIndexSettings
+```
+
+建议引入 app 内部 `qaRuntimeBundle`，包含 candidate、definition runtime、Hub、catalog version 和需要的 application ports，但不暴露给 dashboard。
+
+需要保留的现有不变量：
+
+- candidate 构建或 catalog 校验失败时，不替换 active runtime；
+- active runtime 替换是原子的；
+- 旧 recovery worker 在新 worker 启动前停止；
+- catalog reuse 不触发第二次 runtime 构建；
+- `WriteAvailable` 可在不重建整个 runtime 的情况下更新；
+- feature review 和 durable workflow 的配置继续保留，但不把普通 QA 请求变成 workflow。
+
+### 5.10 改动八：将 route 重命名为 capability admission
+
+不再用“execution route”暗示存在多个 QA workflow。可将内部结构重命名为 `delegationAdmission` 或 `capabilityAdmission`，保留：
+
+- 是否满足 delegation 条件；
+- `delegate_investigation` 是否加入 immutable RunRequest tool scope；
+- `execution_routed`、`execution_degraded` 事件；
+- route reason、downgrade reason、decision origin 等可观测字段。
+
+主执行 loop 仍然只有 parent agent loop，动态 delegation 仍是该 loop 的工具能力。
+
+### 5.11 兼容、迁移与回滚
+
+- **对外兼容：** HTTP/SSE、事件名、终态字段和持久化 schema 保持不变；
+- **数据库迁移：** 无需迁移；
+- **实施顺序：** 先补契约测试，再拆 application port，再拆 QA 生命周期，最后拆 definition/runtime 和 app reload；
+- **灰度策略：** 每阶段独立提交和验证，不引入仅为重构服务的 runtime feature flag；
+- **回滚条件：** SSE 事件丢失/乱序、终态不一致、旧 worker 未停止、session schema 回归或全量测试失败；
+- **回滚方式：** 按阶段回退对应提交，不回退当前 HEAD 已完成的 legacy workflow 删除，除非发现明确的兼容性问题。
 
 ## 6. 修改伪代码
 
-### 6.1 核心流程（重构后目标形态）
+### 6.1 目标的 Dashboard/Application 边界
 
 ```go
-// 传输层只负责解析、订阅与投影
-func ServeAgentSSE(ctx Context, r Request) error {
-    qa := runtime.QAApplication()
-    events := runtime.EventBus()
+func (h *Handler) APIQAAsk(w http.ResponseWriter, r *http.Request) {
+    request, err := parseQAAskRequest(r)
+    if err != nil {
+        writeBadRequest(w, err)
+        return
+    }
 
-    runID := NewRunID()
-    sub := events.Subscribe(runID)
-    defer events.Unsubscribe(runID, sub)
+    stream, err := newSSEWriter(w)
+    if err != nil {
+        writeError(w, err)
+        return
+    }
 
-    result, err := qa.Ask(ctx, qa.Request{
-        Question:       r.Question,
-        Conversation:   conversation,
-        UserID:         userID,
-        RunID:          runID,
-        EvidencePlan:   r.EvidencePlan,
-        WriteAuthorized: writeAuthorized,
-        WriteRequested:  r.WriteRequested,
+    conversation, err := h.sessions.LoadContext(r.Context(), request.SessionID)
+    if err != nil {
+        stream.Finish(failed(err))
+        return
+    }
+
+    started, events, err := h.qaApplication.Start(r.Context(), qa.StartRequest{
+        Question: request.Question,
+        UserID:   currentUserID(r),
+        Session:  conversation,
+        Policy:   request.Policy,
     })
     if err != nil {
-        EmitTerminal(sub, runID, failed(err))
-        return err
+        stream.Finish(failed(err))
+        return
     }
 
-    for event := range sub {
+    stream.Emit("run.started", started.RunID)
+    if started.Context != nil {
+        stream.Emit("context", started.Context)
+    }
+    for event := range events.ForRun(started.RunID) {
+        stream.Project(event)
         if event.Terminal() {
-            ProjectTerminal(event)
-            return nil
+            return
         }
-        ProjectEvent(event)
     }
-    return nil
 }
+```
 
-// 应用层只做编排，产出执行边界所需对象
-func (s *Service) Ask(ctx Context, req Request) (*AskResult, error) {
-    prepared, err := s.prepare(ctx, req, time.Now())
+Dashboard 只知道 application 的启动结果和 event stream，不再自己协调 `Ask()` channel 与 Hub terminal channel。
+
+### 6.2 QA Application 生命周期
+
+```go
+func (app *QAApplication) Start(ctx context.Context, req StartRequest) (StartedRun, error) {
+    prepared, err := app.prepare.Prepare(ctx, req)
     if err != nil {
-        return nil, err
+        return StartedRun{}, err
     }
 
-    run, err := s.runtime.Begin(ctx, s.buildRunStart(prepared))
+    admitted, err := app.admission.Begin(ctx, prepared)
     if err != nil {
         prepared.Close()
-        return nil, err
+        return StartedRun{}, err
     }
 
-    admitted, err := s.acquireEvidence(run.Context(ctx), prepared, run)
-    if err != nil {
-        prepared.Fail(run, err)
-        return nil, err
-    }
+    go func() {
+        completion, executeErr := app.executor.Execute(
+            admitted.Run.Context(ctx), admitted.RunRequest,
+        )
+        if err := app.finalizer.Finalize(
+            context.WithoutCancel(ctx), admitted, completion, executeErr,
+        ); err != nil {
+            app.events.EmitTerminal(admitted.RunID, failed(err))
+            return
+        }
+        app.postEffects.Enqueue(admitted, completion)
+    }()
 
-    runRequest := s.buildRunRequest(prepared, admitted)
-    go s.executeSubmittedRun(ctx, run, prepared, runRequest)
-
-    return &AskResult{RunID: req.RunID, Context: admitted.Retrieved}, nil
-}
-
-// 运行时层只做不可变定义执行
-func (rt *Runtime) Begin(ctx Context, start RunStart) (ManagedRun, error) {
-    prepared, err := rt.prepare(runRequestFrom(start))
-    if err != nil {
-        return nil, err
-    }
-    return rt.beginPrepared(ctx, start, prepared)
-}
-
-func (run *activeRun) Execute(ctx Context, req RunRequest) (RunResult, error) {
-    input := compileInput(req, run.execution)
-    result := run.agent.RunCompiled(ctx, run.start.RunID, input, run.execution.toolSnapshot)
-
-    outcome := NormalizeResult(run.start.RunID, result, runErr, usage, refs)
-    run.setOutcome(outcome)
-    run.runtime.events.EmitTerminal(run.start.RunID, outcome)
-
-    return outcome.PublicResult(), nil
+    return StartedRun{
+        RunID:   admitted.RunID,
+        Context: prepared.Retrieved,
+    }, nil
 }
 ```
 
-### 6.2 关键边界处理（唯一归一化出口）
+### 6.3 唯一 finalization 出口
 
 ```go
-// 唯一出口：execution.RunResult → run.Outcome → agentapi.RunResult
-func NormalizeResult(
-    runID string,
+func (f *RunFinalizer) Finalize(
+    ctx context.Context,
+    admitted AdmissionResult,
     result *execution.RunResult,
-    runErr error,
-    usage Usage,
-    refs []Reference,
-) (run.Outcome, agentapi.RunResult) {
-    if result == nil {
-        outcome := run.Outcome{Status: run.StatusFailed, Err: run.ErrEmptyAnswer}
-        return outcome, FailedPublic(outcome, usage)
+    executeErr error,
+) (CompletedRun, error) {
+    outcome := f.classifier.Classify(
+        admitted.RunID,
+        result,
+        executeErr,
+        admitted.PreparationEvidence,
+    )
+
+    if err := admitted.Run.CommitOutcome(ctx, outcome); err != nil {
+        return CompletedRun{}, err
     }
 
-    outcome := run.Outcome{
-        Status:              classifyStatus(result, runErr),
-        Answer:              result.Answer,
-        SessionMessages:     result.SessionMessages,
-        Evidence:            result.Evidence,
-        References:          MergeReferences(refs, result.References),
-        DelegationAdoptions: result.DelegationAdoptions,
-        AnswerComplete:      result.AnswerComplete,
-        FallbackUsed:        result.FallbackUsed,
-        Completeness:        result.Completeness,
-        TerminationReason:   result.TerminationReason,
+    public := f.projectPublicResult(outcome, admitted.Usage)
+    return CompletedRun{Public: public, Outcome: outcome}, nil
+}
+```
+
+`CommitOutcome` 必须保证：终态分类、持久化和 terminal event 使用同一个 `run.Outcome`，不允许 QA 再次通过匿名接口读取并重写终态。
+
+### 6.4 conversation 单次组装
+
+```go
+func (p *Preparer) Prepare(ctx context.Context, req StartRequest) (Prepared, error) {
+    normalized := normalize(req)
+    plan, err := p.plan(ctx, normalized)
+    if err != nil {
+        return Prepared{}, err
+    }
+    definition, selection, err := p.definitions.ResolveFor(p.agent, normalized.StableKey)
+    if err != nil {
+        return Prepared{}, err
     }
 
-    if result.AnswerComplete || result.Completeness != "partial" {
-        return outcome, SucceededPublic(outcome, usage)
+    limits := limitsFrom(definition.Budget, definition.Model)
+    conversation, err := p.context.Assemble(ctx, ContextInput{
+        Source:        normalized.Conversation,
+        History:       plan.History,
+        ContextWindow: limits.ContextWindow,
+        OutputReserve: limits.OutputReserve,
+    })
+    if err != nil {
+        return Prepared{}, err
     }
-    return outcome, PartialPublic(outcome, usage)
+
+    return Prepared{Definition: definition, Selection: selection,
+        Conversation: conversation, Limits: limits}, nil
 }
 ```
 
-### 6.3 修改前后对比
-
-修改前（别名与二次包装）：
+### 6.5 capability admission
 
 ```go
-// qa/dependencies.go
-type RunResult = execution.RunResult
-type RunOutcome = run.Outcome
-
-// qa/result.go
-func outcomeFor(result *RunResult, pre []Reference, err error) RunOutcome {
-    return execution.OutcomeFor(result, pre, err)
+func (s *DelegationAdmission) Admit(input AdmissionInput) AdmissionDecision {
+    decision := AdmissionDecision{Origin: "server_assessment"}
+    if input.WriteRequested {
+        decision.Reason = "write_requested"
+        return decision
+    }
+    if !input.SuggestionWantsFanout {
+        decision.Reason = "single_agent_suggestion"
+        return decision
+    }
+    if !input.ToolReady || input.MaxConcurrent < 2 || input.ParallelTasks < 2 {
+        decision.Reason = "delegation_unavailable_or_not_worthwhile"
+        decision.Degraded = true
+        return decision
+    }
+    decision.EnableDelegationTool = true
+    decision.Reason = "parent_dynamic_delegation"
+    return decision
 }
-```
-
-修改后（直接使用唯一出口）：
-
-```go
-// qa 直接 import execution / run，不再提供别名
-outcome := execution.OutcomeFor(result, pre, err)
-```
-
-修改前（route 多态暗示）：
-
-```go
-type executionPath string
-const executionPathSingle executionPath = "single_agent"
-
-type executionRouteDecision struct {
-    Strategy retrieval.ExecutionStrategy
-    Path     executionPath
-    ...
-}
-```
-
-修改后（显式单一路径 + 只保留观测理由）：
-
-```go
-type executionRouteDecision struct {
-    HighRisk        bool
-    RouteReason     string
-    DowngradeReason string
-    DecisionOrigin  string
-}
-```
-
-### 6.4 配置或数据库变更
-
-无需配置或数据库变更。结果状态语义与持久化 schema 保持不变。
-
-```yaml
-# 无新增配置
-```
-
-```sql
--- 如无数据库变更，删除此代码块。
 ```
 
 ## 7. 预期的效果
@@ -580,73 +743,204 @@ type executionRouteDecision struct {
 
 实施后：
 
-1. 当合法 QA 请求进入时，仍按 `single_agent` 单一路径完成 prepare → Begin → Execute → 事件/持久化，行为不变；
-2. 当异常发生时，仍以 `partial`/`failed`/`cancelled` 明确终止，失败可见；
-3. 不再出现 `qa` 包内对 `execution`/`run` 类型的别名转发和 `qa/result.go` 二次包装；
-4. 对 QA、feature review、incident/product workflow 三个入口，能够明确区分各自是否经过 workflow 引擎。
+1. 普通 QA 请求仍然执行 parent agent loop，不创建或等待 durable investigation workflow；
+2. delegation capability 仍按现有条件准入，route/degraded 事件继续可观测；
+3. session、history、memory 等后置副作用不改变对外结果语义；
+4. feature review 和 incident/product-development 的 workflow 能力继续保留；
+5. runtime 未配置、Begin 失败、Execute 失败、Finalize 失败都会产生明确的失败终态。
 
 ### 7.2 可观测性效果
 
-新增或调整以下信号（大部分为既有信号，仅保证不回归）：
+需要保持或明确以下信号：
 
 | 信号 | 类型 | 目标 |
 | --- | --- | --- |
-| `execution_routed` | 事件 | 保留 QA 执行路径选择可解释 |
-| `execution_degraded` | 事件 | 保留路由降级原因可解释 |
-| `run.finished` | SSE 终端事件 | 保持终端状态与完成度一致 |
-| `Completeness` / `TerminationReason` | 持久化字段 | 反映真实完成度与终止原因 |
-| `[qa] runtime run ... completed` | 结构化日志 | 定位失败步骤与原因 |
+| `run.started` | SSE | 标识 application 已接受 run |
+| `execution_routed` | run event | 记录 delegation admission 的理由 |
+| `execution_degraded` | run event | 记录降级或 capability 未启用原因 |
+| `run.finished` | SSE/run event | 由唯一 finalization 结果驱动 |
+| `Completeness` / `TerminationReason` | 终态字段 | 区分完成、部分完成、预算/超时和 provider failure |
+| `runtime run completed` | 结构化日志 | 记录 execution 与 post-effects 的边界 |
 
-日志应至少能够回答：
+日志和运行记录应能够回答：
 
-- 请求选择了哪条执行路径；
-- 哪一步失败，以及失败原因；
-- 是否发生降级或终止；
-- 最终执行状态和结果完整度分别是什么；
-- 哪些输出可以追溯到哪些输入或证据。
+- 请求是否启用了 delegation capability，以及原因是什么；
+- failure 发生在 Prepare、Begin、Execute、Finalize 还是 PostEffects；
+- `run.Outcome`、SSE terminal 和 `agentapi.RunResult` 是否来自同一次 finalization；
+- active runtime 切换时旧 recovery worker 是否停止；
+- conversation 使用的 definition budget 是什么。
 
 ### 7.3 量化指标
 
 | 指标 | 当前基线 | 目标值 | 统计窗口 | 数据来源 |
-| --- | ---: | ---: | --- | --- |
-| QA 链路的转发/别名薄层文件数 | `qa/dependencies.go`、`qa/result.go`、`execution/types.go` 共约 211 行 | 0（删除或并入使用处） | 一次性 | 代码评审 |
-| 结果归一化出口数量 | 3 处（execution/definition/qa） | 1 处 | 一次性 | 代码评审 |
-| QA 与 workflow 装配点 | `app/qa.go:404` 每次重建都接线 | 0（QA 不再接 workflow） | 一次性 | 代码评审 |
-| `rebuildQARuntimeLocked` 单次重建的 runtime 构建次数 | 复用分支最多 2 次 | 1 次 | 一次性 | 代码评审 |
-| 全量测试通过率 | `GOWORK=off go test ./...` 当前基线 | 100% | 每阶段 | CI |
-| SSE 事件顺序回归 | 无 | 无回归 | 每阶段 | 集成测试 |
+| --- | --- | --- | --- | --- |
+| QA transport 直接依赖的跨层 runtime 字段数 | `QARuntime` 8 个聚合字段 | 仅保留窄 application/event/query ports | 一次性 | 代码评审 |
+| QA lifecycle 中负责终态的代码路径 | `Execute`、QA submission、`Finish` 多处协作 | 1 个明确 finalization owner | 一次性 | 代码评审 |
+| QA → workflow 的业务调用路径 | 普通 QA 不进入 durable workflow；feature/workflow 仍独立 | 边界可由调用图直接验证 | 一次性 | 代码评审 |
+| conversation 组装次数 | 当前可能 1 次或按 definition budget 二次组装 | 正常路径 1 次 | 每次请求 | trace/单测 |
+| `RuntimePort` 所需能力面 | ManagedRuntime + ScenarioToolSource | 分离为两个窄端口 | 一次性 | 类型检查/代码评审 |
+| 全量测试通过率 | 当前基线 100% | 100% | 每阶段 | CI |
+| SSE 终态事件丢失或乱序 | 当前无已知回归 | 0 | 每阶段 | 集成测试 |
 
 ### 7.4 不应发生的变化
 
-- 既有正常 QA 路径的行为保持不变；
-- 延迟、成本、token 或资源消耗不因本重构增加；
-- 不降低结果的状态分类准确性、可解释性或失败可见性；
-- 不引入针对具体入口、ID 或关键词的硬编码特例；
-- 不删除 incident/product-development 真正依赖的 durable workflow 引擎。
+- 不改变正常 QA 请求的答案、状态、事件名称和事件顺序；
+- 不把 partial、failed、cancelled 静默映射为 succeeded；
+- 不让失败的 candidate 替换 active runtime；
+- 不让旧 recovery worker 在新 worker 启动后继续消费；
+- 不删除 feature review 或 durable workflow 的真实能力；
+- 不通过新增全局容器、万能 callback 或兼容 alias 重新制造薄层。
 
 ## 8. 测试与验收
 
-### 8.1 单元测试
+### 8.1 当前基线验证
 
-- 删除别名后，`qa` 包编译并通过既有 `qa/*_test.go`；
-- `execution.OutcomeFor` / `MergeOutcomeReferences` 的测试从 `qa` 迁移到 `execution` 后仍通过；
-- 结果归一化唯一出口对 nil result、空 answer、partial、budget exceeded、cancelled 均返回正确状态；
-- `route.go` 单一路径仍产生 `execution_routed`/`execution_degraded` 与降级理由；
-- 运行时事件发射与工具源剥离后，`definition` 既有测试（`runtime_test.go`、`result_test.go`、`prepare_test.go`）保持通过。
+本轮分析已完成：
 
-### 8.2 集成测试
+```bash
+GOWORK=off go test ./...
+GOWORK=off go vet ./...
+```
 
-- 验证从 `POST /api/qa/ask` 到 SSE 终端的完整链路行为不变；
-- 验证 feature review 的 `RuntimeReviewRunner`/`RuntimeAdjudicationRunner` 直接 `Runtime.Run` 仍正常；
-- 验证 incident/product workflow 的 durable recovery 仍正常；
-- 验证平台设置/代码图热重载后，active runtime 原子替换、旧 recovery worker 停止、SSE 订阅落到新 hub；
-- 验证并发请求、重复 runID、超时与预算耗尽行为不回归。
+两项均通过。提案实施后还需补跑：
 
-### 8.3 验收标准
+```bash
+GOWORK=off go build ./...
+GOWORK=off go test -race -count=1 ./...
+```
 
-1. `GOWORK=off go build ./...`、`GOWORK=off go test ./...`、`GOWORK=off go vet ./...` 全部通过；
-2. `qa/dependencies.go`、`qa/result.go`、`execution/types.go` 中的别名/包装被删除或并入使用处；
-3. 结果归一化只保留一个出口；
-4. `app/qa.go` 不再把 QA runtime 接入 workflow orchestrator；
-5. `rebuildQARuntimeLocked` 单次重建不再重复 `buildQARuntime`；
-6. 无 SSE 事件顺序、持久化 schema 或对外契约回归。
+### 8.2 单元测试
+
+- `Prepare` 在默认 budget 和 definition budget 下只生成一个最终 conversation；
+- `DelegationAdmission` 在 write requested、single-agent suggestion、tool unavailable、并发度不足、任务不足和可 delegation 条件下返回正确决策；
+- `RunFinalizer` 对 nil result、空答案、partial、budget exceeded、deadline、cancelled、provider error 返回正确 `run.Outcome` 和 public result；
+- finalizer 对 evidence/reference/usage 的合并只执行一次；
+- `RunStarter` fake 不需要实现 ScenarioToolSource，ScenarioToolSource fake 不需要实现 ManagedRun 生命周期；
+- runtime 未配置、Begin 失败、Finish 重复调用和重复 runID 都有明确错误；
+- app reload 在 candidate、catalog、worker 或 feature review 配置失败时不替换 active runtime。
+
+### 8.3 集成测试
+
+- 从 `POST /api/qa/ask` 到 SSE terminal 的完整链路；
+- 验证“先订阅再启动”不会丢失 prepare/retrieval 早期事件；
+- 验证 Ask 返回的 context 和 terminal event 的顺序；
+- 验证 Execute 成功但 session persistence 失败时的终态和日志；
+- 验证 execution result、run.Outcome、public RunResult 的字段一致性；
+- 验证 feature review 仍可通过 `RuntimeReviewRunner`、`RuntimeAdjudicationRunner` 工作；
+- 验证 incident/product-development workflow 的 durable recovery 不受 QA 重构影响；
+- 验证设置/代码图热重载下 active runtime 原子替换、旧 worker 停止、新 worker 启动；
+- 验证并发请求、超时、预算耗尽、取消、重复 runID 和 SSE 客户端提前断开。
+
+### 8.4 验收标准
+
+1. `GOWORK=off go build ./...`、`GOWORK=off go test ./...`、`GOWORK=off go vet ./...` 和必要时的 race test 全部通过；
+2. Dashboard 不再依赖跨层 `QARuntime` 大聚合对象，而是依赖窄 application/event/query ports；
+3. QA application 具有明确的 Start/StartedRun 契约，Dashboard 不再协调 Ask channel 与 terminal channel；
+4. conversation 正常路径只组装一次；
+5. `RunStarter` 与 `ScenarioToolSource` 已分离；
+6. 不再通过匿名 `Outcome()` type assertion 获取 durable final outcome；
+7. `definition.Runtime` 的 compiler、executor、finalizer、recovery coordinator 责任可独立测试；
+8. app reload 的 assemble、stage、publish、activate、reconcile 失败边界和回滚条件有测试；
+9. 普通 QA 仍不进入 durable investigation workflow，feature review 和 incident/product workflow 不回归；
+10. 无 SSE 事件顺序、终态字段、持久化 schema 或会话语义回归。
+
+## 9. 风险与控制
+
+| 风险 | 触发条件 | 影响 | 控制措施 | 回滚条件 |
+| --- | --- | --- | --- | --- |
+| 事件订阅时机改变 | application Start 后才订阅 | 丢失早期 phase/retrieval 事件 | Start 前绑定 run event stream，或由 application 返回已绑定 stream | 任一早期事件丢失 |
+| finalization 语义改变 | 将 Finish、Outcome、public projection 重排 | terminal 状态不一致 | 先建立字段矩阵和 golden tests，再迁移调用点 | 任一状态映射变化 |
+| runtime reload 竞态 | active runtime 与 Hub/worker 切换不同步 | 请求落到旧 Hub 或 worker 重复消费 | 保持 reload lock、原子发布和 worker stop-before-start 不变量 | 并发/热重载测试失败 |
+| feature workflow 误解绑 | 将 QA 与所有 workflow 一并拆除 | feature review 或 incident 流程不可用 | 只移除普通 QA 的 durable workflow 语义，保留 feature/incident 装配 | workflow recovery 或 review 回归 |
+| PostEffects 失败被隐藏 | 异步化后只记录日志 | session/history/memory 数据不一致 | 为 post-effects 保留独立状态、日志和重试策略 | 无法定位或重复写入 |
+| 过度抽象 | 新增 generic container、万能 port 或 facade | 复杂度再次上升 | 每个新增接口必须对应独立生命周期或能力边界 | 代码评审无法说明 ownership |
+
+## 10. 实施计划
+
+### 阶段 0：基线与契约冻结
+
+- 补齐 QA → SSE 的端到端生命周期测试；
+- 固化事件顺序、终态字段、重复 runID、预算和热重载不变量；
+- 退出条件：基线测试稳定通过。
+
+### 阶段 1：application port 与 Dashboard 迁移
+
+- 定义 `QAApplication.Start`、`StartedRun` 和 event stream contract；
+- 将 `QARuntime` bundle 移入 app composition；
+- Dashboard 只保留 transport、SSE 和 query/control adapter；
+- 退出条件：SSE 集成测试无行为变化。
+
+### 阶段 2：QA 生命周期拆分
+
+- 拆出 Prepare、Admission、Execute、Finalize、PostEffects 内部边界；
+- 先保留旧 Service 作为 facade，再逐步减少其字段和分支；
+- 消除 conversation 隐式二次组装；
+- 退出条件：单元测试覆盖每个阶段的成功/失败路径。
+
+### 阶段 3：runtime 与结果契约收敛
+
+- 分离 `RunStarter` 与 `ScenarioToolSource`；
+- 引入显式 completion/finalization contract；
+- 在 definition.Runtime 内拆 compiler、executor、finalizer、recovery coordinator；
+- 退出条件：删除 QA 匿名 outcome type assertion，结果字段一致性测试通过。
+
+### 阶段 4：app reload 生命周期拆分
+
+- 拆分 assemble、stage、publish/reuse、activate、reconcile；
+- 增加失败回滚和 worker 切换测试；
+- 明确 feature review、dynamic delegation、durable workflow 的独立装配责任；
+- 退出条件：热重载、并发和 recovery 回归通过。
+
+### 阶段 5：清理与文档同步
+
+- 删除只剩转发意义的内部函数和字段；
+- 更新调用链文档、测试 fake 和维护指南；
+- 退出条件：全量 build/test/vet/race 按适用范围通过，代码评审确认没有新薄层。
+
+## 11. 待决策事项
+
+| 决策项 | 方案 A | 方案 B | 推荐方案 | 原因 |
+| --- | --- | --- | --- | --- |
+| `QARuntime` 替代方式 | 在 app 内定义 bundle，再向 transport 注入窄 port | 直接把 dashboard Handler 改成持有多个 callback | A | 保留 app ownership，避免 callback 数量爆炸 |
+| SSE 启动/订阅契约 | `Start` 返回已绑定 event stream | Dashboard 先拿 runID 再单独订阅 | A | 能保持 prepare 早期事件不丢失 |
+| 结果模型 | 合并成一个 struct | 保留三层模型，收敛 finalization | B | 三个模型分别服务公共、执行和持久化边界 |
+| `definition.Runtime` | 一次性删除 facade | 保留 facade，内部拆私有组件 | B | 降低迁移风险，先改变 ownership 再删除入口 |
+| route 命名 | 保留 execution route | 改为 capability/delegation admission | B | 与当前“parent loop + optional delegation”真实行为一致 |
+| PostEffects 失败语义 | 直接改写已完成 run 为 failed | 保留 execution terminal，单独记录 post-effect failure | B | 不污染 agent execution 的事实终态，便于重试和诊断 |
+
+## 12. 决策摘要
+
+本提案建议：
+
+1. 不再继续围绕已经删除的 QA facade、legacy investigation workflow 和重复 alias 做重构；
+2. 将 `QARuntime` ownership 从 dashboard transport 移回 app/application composition；
+3. 用 `QAApplication.Start` 统一 QA 启动契约，让 Dashboard 不再协调两套完成信号；
+4. 将 QA 生命周期拆成 Prepare、Admission、Execute、Finalize、PostEffects；
+5. 保留三种结果模型，但把最终状态分类、持久化和公共投影收敛到一个 finalizer；
+6. 拆分 `RunStarter`/`ScenarioToolSource`，并在 definition facade 内拆 compiler/executor/finalizer/recovery；
+7. 保留 feature review 和 incident/product-development 的 workflow 能力，只明确普通 QA 不进入 durable workflow；
+8. 通过阶段化契约测试、热重载测试和全量验证控制回归风险。
+
+## 13. 提案提交前检查清单
+
+- [x] 背景足以让非原作者理解 QA、agent runtime 和 workflow 的关系；
+- [x] 问题以期望行为、实际行为和差异描述；
+- [x] 已包含可复现的典型场景和边界场景；
+- [x] 已区分当前 HEAD 已完成事项与本提案未来改动；
+- [x] 已核对 QA 不创建 durable investigation workflow；
+- [x] 已核对当前 `currentQARuntime()` 只有 callback，没有 legacy fallback；
+- [x] 已核对 `rebuildQARuntimeLocked` 当前不会重复调用 `buildQARuntime`；
+- [x] 已通过 `GOWORK=off go test ./...`；
+- [x] 已通过 `GOWORK=off go vet ./...`；
+- [x] 补齐 QA → SSE 端到端生命周期契约测试；
+- [x] 将 `QARuntime` 从 dashboard transport ownership 中移出；
+- [x] 引入 `QAApplication.Start` / `StartedRun` contract；
+- [x] 拆分 QA Prepare、Admission、Execute、Finalize、PostEffects；
+- [x] 消除 conversation 二次组装；
+- [x] 拆分 `RunStarter` 与 `ScenarioToolSource`；
+- [x] 引入显式 Run completion/finalization contract，移除匿名 `Outcome()` type assertion；
+- [x] 在 `definition.Runtime` 内拆分 compiler、executor、finalizer、recovery coordinator；
+- [x] 拆分 app reload 的 assemble、stage、publish、activate、reconcile 生命周期；
+- [x] 将 QA route 重命名或收敛为 delegation capability admission；
+- [x] 补充并发、超时、预算耗尽、重复 runID、热重载和 PostEffects 失败回归测试；
+- [x] 完成全量 build/test/vet/race 验收并确认 SSE、持久化 schema、状态语义无回归。

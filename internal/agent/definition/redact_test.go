@@ -12,7 +12,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/llm"
-	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/redact"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -158,7 +158,7 @@ func TestDefinitionRuntimeRedactsRunInputBeforePersistence(t *testing.T) {
 	request := testQARequest(definition)
 	request.Policy.RedactSensitive = true
 	request.Input = json.RawMessage(`{"question":"Authorization: Bearer persisted-input-secret"}`)
-	expectedInput := platform.RedactSensitiveText(string(request.Input))
+	expectedInput := redact.RedactSensitiveText(string(request.Input))
 	mock.ExpectExec("INSERT INTO agent_runs").WithArgs(
 		request.RunID,
 		RunKindAgent,
@@ -257,7 +257,7 @@ func assertSensitiveValuesAbsent(t *testing.T, value any, secrets []string) {
 			t.Fatalf("secret %q leaked: %s", secret, encoded)
 		}
 	}
-	if !strings.Contains(string(encoded), platform.RedactedValue) {
+	if !strings.Contains(string(encoded), redact.RedactedValue) {
 		t.Fatalf("redaction marker missing: %s", encoded)
 	}
 }

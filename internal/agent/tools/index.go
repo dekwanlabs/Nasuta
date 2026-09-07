@@ -7,24 +7,6 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 )
 
-func (srv *Service) ListAPIs(ctx context.Context, service, keyword string, limit int) map[string]any {
-	result, err := srv.ListAPIsResult(ctx, service, keyword, limit)
-	if err != nil {
-		return map[string]any{"matches": nil, "error": err.Error()}
-	}
-	return result
-}
-
-// ListAPIsResult returns indexed APIs without hiding storage failures.
-func (srv *Service) ListAPIsResult(ctx context.Context, service, keyword string, limit int) (map[string]any, error) {
-	limit = clampInt(limit, 1, 100)
-	matches, err := srv.FindAPIs(ctx, service, keyword, limit)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"matches": matches}, nil
-}
-
 // FindAPIs returns typed endpoint records for internal consumers.
 func (srv *Service) FindAPIs(ctx context.Context, service, keyword string, limit int) ([]domain.EndpointRecord, error) {
 	page, err := srv.db.ListApis(ctx, service, keyword, 1, limit)
@@ -35,14 +17,6 @@ func (srv *Service) FindAPIs(ctx context.Context, service, keyword string, limit
 		return nil, fmt.Errorf("list APIs: store returned nil page")
 	}
 	return page.List, nil
-}
-
-func (srv *Service) CheckDocs(ctx context.Context, serviceName string) map[string]any {
-	result, err := srv.CheckDocsResult(ctx, serviceName)
-	if err != nil {
-		return map[string]any{"service": serviceName, "found": false, "error": err.Error()}
-	}
-	return result
 }
 
 // CheckDocsResult reports documentation gaps without folding store failures into data.
@@ -99,17 +73,6 @@ func (srv *Service) CheckDocsResult(ctx context.Context, serviceName string) (ma
 			"outgoingDependencies": outgoing,
 		},
 	}, nil
-}
-
-func (srv *Service) IndexSummary(ctx context.Context) map[string]any {
-	result, err := srv.IndexSummaryResult(ctx)
-	if err != nil {
-		return map[string]any{
-			"services": 0, "endpoints": 0, "dependencies": 0, "runbooks": 0, "repos": 0,
-			"semanticEnabled": srv.semanticEnabled(), "error": err.Error(),
-		}
-	}
-	return result
 }
 
 // IndexSummaryResult returns index health without hiding configured backend failures.

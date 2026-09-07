@@ -159,10 +159,3 @@ type Page[T any] struct {
 	PageSize int `json:"page_size,omitempty"`
 	List     []T `json:"list"`
 }
-
-// ApiResponse is the unified JSON envelope for every HTTP response.
-type ApiResponse struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    any    `json:"data,omitempty"`
-}

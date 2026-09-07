@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/redact"
 )
 
 func TestApplyNumstatHandlesRenames(t *testing.T) {
@@ -123,7 +123,7 @@ func TestRunValidationIsolatesHomeAndRedactsArtifacts(t *testing.T) {
 	if result.OutputBytes <= 0 {
 		t.Fatalf("validation output bytes = %d", result.OutputBytes)
 	}
-	if result.Argv[len(result.Argv)-1] != platform.RedactedValue {
+	if result.Argv[len(result.Argv)-1] != redact.RedactedValue {
 		t.Fatalf("sensitive argv = %q", result.Argv[len(result.Argv)-1])
 	}
 	if strings.Contains(result.OutputSummary, originalHome) || strings.Contains(result.OutputSummary, "output-secret") {
@@ -136,7 +136,7 @@ func TestRunValidationIsolatesHomeAndRedactsArtifacts(t *testing.T) {
 	if strings.Contains(string(output), originalHome) || strings.Contains(string(output), "output-secret") {
 		t.Fatalf("validation artifact leaked sensitive data: %s", output)
 	}
-	if !strings.Contains(string(output), platform.RedactedValue) {
+	if !strings.Contains(string(output), redact.RedactedValue) {
 		t.Fatalf("validation artifact was not redacted: %s", output)
 	}
 	if result.OutputBytes != int64(len(output)) {

@@ -281,6 +281,9 @@ func repairInvestigationGoalCoverage(
 	if !ok {
 		return nil, false
 	}
+	if isTaskContractShape(report) {
+		return nil, false
+	}
 	_, hasCovered := report["covered_evidence_goals"]
 	_, hasUnresolved := report["unresolved_evidence_goals"]
 	if hasCovered && hasUnresolved {
@@ -306,6 +309,45 @@ func repairInvestigationGoalCoverage(
 		return nil, false
 	}
 	return encoded, true
+}
+
+// taskContractShapeFields are the fields that identify a delegated
+// investigation task contract. A report that carries any of them was produced
+// by echoing the task input back, not by writing an investigation.report.
+var taskContractShapeFields = []string{
+	"objective",
+	"capability",
+	"delegation_id",
+	"parent_run_id",
+	"task_index",
+	"parent_question_summary",
+	"focus_facets",
+	"evidence_refs",
+	"output_kind",
+}
+
+// isTaskContractShape reports whether a decoded object is actually a task
+// contract that leaked into the answer, rather than an investigation report.
+func isTaskContractShape(report map[string]any) bool {
+	if report == nil {
+		return false
+	}
+	for _, field := range taskContractShapeFields {
+		if _, exists := report[field]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+// isEchoedTaskContractAnswer reports whether answer carries the shape of a
+// delegated investigation task contract that was echoed back instead of a real
+// investigation report. It is used to keep the recovery log accurate: such
+// input is not a schema defect, so it must not be logged as an
+// additionalProperties failure.
+func isEchoedTaskContractAnswer(answer string) bool {
+	report, ok := decodeInvestigationReport(answer)
+	return ok && isTaskContractShape(report)
 }
 
 func decodeInvestigationReport(answer string) (map[string]any, bool) {

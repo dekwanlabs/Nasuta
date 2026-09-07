@@ -35,7 +35,7 @@ func TestPreferredToolsInstructionDefersToDelegation(t *testing.T) {
 func TestPrepareRunConversationRequiresDelegationOnParentDynamicRoute(t *testing.T) {
 	svc := &Service{}
 	prepared := &preparation{
-		execution: executionRouteDecision{RouteReason: routeReasonParentDynamicDelegation},
+		admission: delegationAdmissionDecision{RouteReason: routeReasonParentDynamicDelegation},
 		planning:  evidencePlanningOutput{RoutedToolIDs: []string{"runtime"}},
 		candidateToolSet: compactionToolSet{tools: []tool.Tool{{
 			ID: "delegate_investigation",
@@ -53,7 +53,7 @@ func TestPrepareRunConversationRequiresDelegationOnParentDynamicRoute(t *testing
 func TestPrepareRunConversationSkipsDelegationContractWhenRouteGatesFanout(t *testing.T) {
 	svc := &Service{}
 	prepared := &preparation{
-		execution: executionRouteDecision{RouteReason: routeReasonMultiAgentNotWorthwhile},
+		admission: delegationAdmissionDecision{RouteReason: routeReasonMultiAgentNotWorthwhile},
 		candidateToolSet: compactionToolSet{tools: []tool.Tool{{
 			ID: "delegate_investigation",
 		}}},
@@ -67,7 +67,7 @@ func TestPrepareRunConversationSkipsDelegationContractWhenRouteGatesFanout(t *te
 func TestPrepareRunConversationSkipsDelegationContractWhenToolMissing(t *testing.T) {
 	svc := &Service{}
 	prepared := &preparation{
-		execution: executionRouteDecision{RouteReason: routeReasonParentDynamicDelegation},
+		admission: delegationAdmissionDecision{RouteReason: routeReasonParentDynamicDelegation},
 		candidateToolSet: compactionToolSet{tools: []tool.Tool{{
 			ID: "search_runbooks",
 		}}},

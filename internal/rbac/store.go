@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 type Store struct {
@@ -230,6 +232,7 @@ func (s *Store) RevokeRole(userID, roleID int64) error {
 func (s *Store) RolePromptFor(userID int64) string {
 	roles, err := s.GetUserRoles(userID)
 	if err != nil {
+		log.Warnf("[rbac] get user roles for prompt: %v", err)
 		return ""
 	}
 	var parts []string

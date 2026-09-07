@@ -79,7 +79,7 @@ func TestHistoryCandidateDiscoveryStartsAsynchronously(t *testing.T) {
 	}
 }
 
-func TestReassemblePreparedConversationUsesDefinitionHistoryBudget(t *testing.T) {
+func TestAssemblePreparedConversationUsesDefinitionHistoryBudget(t *testing.T) {
 	stub := &candidateDiscoveryHistoryStub{}
 	svc := &Service{
 		history:       stub,
@@ -100,8 +100,8 @@ func TestReassemblePreparedConversationUsesDefinitionHistoryBudget(t *testing.T)
 		},
 	}
 
-	if err := svc.reassembleConversation(
-		t.Context(), prepared, 8192, 2048,
+	if err := svc.assemblePreparedConversation(
+		prepared, 8192, 2048,
 	); err != nil {
 		t.Fatal(err)
 	}

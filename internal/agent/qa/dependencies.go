@@ -67,10 +67,31 @@ func hashString(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// RuntimePort is the single runtime boundary QA uses for preparation and
-// execution: the immutable managed-run lifecycle plus the scenario tool
-// source. Progress/event projection is the separate EventSink dependency.
-type RuntimePort interface {
+// RunStarter starts immutable managed runs after the scenario has resolved
+// the definition, budget, and tool admission boundary. It is the execution
+// half of the former RuntimePort.
+type RunStarter interface {
 	agentapi.ManagedRuntime
+}
+
+// ScenarioToolSource is provided directly by the composition layer as the
+// preparation-time tool snapshot boundary. It is no longer forced onto the
+// same business port as the managed-run lifecycle.
+type ScenarioToolSource interface {
 	definition.ScenarioToolSource
+}
+
+// RuntimePort is retained as a compatibility alias for compositions that
+// already bind both boundaries through one concrete runtime. New call sites
+// should depend on RunStarter and ScenarioToolSource separately.
+type RuntimePort interface {
+	RunStarter
+	ScenarioToolSource
+}
+
+// RunCompletion is the explicit terminal contract QA requires after Execute.
+// It replaces the previous anonymous type assertion so a managed run's durable
+// outcome is a named, documented boundary instead of an implementation guess.
+type RunCompletion interface {
+	Outcome() run.Outcome
 }

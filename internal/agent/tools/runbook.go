@@ -23,15 +23,6 @@ type docStore interface {
 	CountRunbooks() (int, error)
 }
 
-// RunbookSearch searches the runbook corpus with semantic and keyword fallback.
-func (srv *Service) RunbookSearch(ctx context.Context, query knowledge.RunbookQuery) map[string]any {
-	result, err := srv.RunbookSearchResult(ctx, query)
-	if err != nil {
-		return map[string]any{"matches": nil, "semantic": false, "error": err.Error()}
-	}
-	return result
-}
-
 // RunbookSearchResult returns the runbook payload without hiding store failures.
 func (srv *Service) RunbookSearchResult(ctx context.Context, query knowledge.RunbookQuery) (map[string]any, error) {
 	query.Limit = clampInt(query.Limit, 1, 10)
@@ -51,15 +42,6 @@ func (srv *Service) RunbookSearchResult(ctx context.Context, query knowledge.Run
 func (srv *Service) FindRunbooks(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
 	return runtrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
 		return srv.findRunbooks(ctx, query, nil)
-	})
-}
-
-func (srv *Service) FindRunbooksByVector(ctx context.Context, query knowledge.RunbookQuery, vector []float32) (domain.RunbookSearchResult, error) {
-	return runtrace.Invoke(ctx, runbookSearchSpec, query, func(ctx context.Context, query knowledge.RunbookQuery) (domain.RunbookSearchResult, error) {
-		if len(vector) == 0 {
-			return srv.findKeywordRunbooks(query)
-		}
-		return srv.findRunbooks(ctx, query, vector)
 	})
 }
 

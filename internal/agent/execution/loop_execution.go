@@ -355,7 +355,12 @@ func (agent *Agent) installDeterministicConclusion(state *compiledLoop, cause er
 	if state == nil || state.result == nil {
 		return false
 	}
-	answer := deterministicConclusionProse(state)
+	answer := ""
+	if agent != nil && agent.cfg.StructuredOutput {
+		answer = structuredConclusionFallback(state)
+	} else {
+		answer = deterministicConclusionProse(state)
+	}
 	if strings.TrimSpace(answer) == "" {
 		return false
 	}
@@ -410,6 +415,49 @@ func deterministicConclusionProse(state *compiledLoop) string {
 	}
 	parts = append(parts, "以下为当前已确认的信息，仍需进一步核实后才能给出确定性结论。")
 	return strings.Join(parts, "\n")
+}
+
+// structuredConclusionFallback renders a schema-valid investigation.report when a
+// structured investigator exhausted its completion budget before emitting any
+// visible JSON. It never echoes the task input, so recovery cannot mistake the
+// task contract for a report.
+func structuredConclusionFallback(state *compiledLoop) string {
+	fallback := map[string]any{
+		"focus":    structuredConclusionFocus(state),
+		"summary":  "Evidence collection completed, but the final report could not be generated; no unverified conclusion was accepted.",
+		"findings": []any{},
+		"gaps": []string{
+			"Evidence collection completed, but report generation ended before a schema-valid investigation.report was produced.",
+		},
+		"covered_evidence_goals":    []string{},
+		"unresolved_evidence_goals": []string{},
+	}
+	encoded, err := json.Marshal(fallback)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+// structuredConclusionFocus maps an investigator agent ID to the
+// investigation.report focus enum. It falls back to "docs" when the agent
+// identity is unavailable (for example in synthetic loop states).
+func structuredConclusionFocus(state *compiledLoop) string {
+	if state != nil && state.input.OriginalRequest != nil {
+		switch state.input.OriginalRequest.Agent.ID {
+		case "investigator.code":
+			return "code"
+		case "investigator.runtime":
+			return "runtime"
+		case "investigator.docs":
+			return "docs"
+		case "investigator.web":
+			return "web"
+		case "investigator.memory":
+			return "memory"
+		}
+	}
+	return "docs"
 }
 
 func isRecoverableConclusionError(err error) bool {

@@ -19,9 +19,9 @@ const (
 	routeReasonWriteRequested              = "write_requested"
 )
 
-// executionRouteInput is deliberately limited to parent-run advisory data.
+// delegationAdmissionInput is deliberately limited to parent-run advisory data.
 // Task-graph planning and workflow promotion no longer belong to QA.
-type executionRouteInput struct {
+type delegationAdmissionInput struct {
 	Suggestion              retrieval.ExecutionSuggestion
 	WriteRequested          bool
 	DelegationAvailable     bool
@@ -29,21 +29,21 @@ type executionRouteInput struct {
 	DelegationMaxConcurrent int
 }
 
-// executionRouteDecision carries only the advisory routing signal and its
+// delegationAdmissionDecision carries only the advisory routing signal and its
 // observability reasons. QA always runs the normal single-agent loop; the
 // former Strategy field was removed because it was hard-coded to
 // retrieval.ExecutionSingleAgent on every path.
-type executionRouteDecision struct {
+type delegationAdmissionDecision struct {
 	HighRisk        bool
 	RouteReason     string
 	DowngradeReason string
 	DecisionOrigin  string
 }
 
-var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecision]{
+var delegationAdmissionSpec = runtrace.Spec[delegationAdmissionInput, delegationAdmissionDecision]{
 	Operation: "agent.execution_route",
 	Node:      "execution_route",
-	Output: func(input executionRouteInput, output executionRouteDecision, _ error) map[string]any {
+	Output: func(input delegationAdmissionInput, output delegationAdmissionDecision, _ error) map[string]any {
 		tasks := make([]map[string]any, 0, len(input.Suggestion.Tasks))
 		for _, task := range input.Suggestion.Tasks {
 			tasks = append(tasks, map[string]any{
@@ -70,7 +70,7 @@ var executionRouteSpec = runtrace.Spec[executionRouteInput, executionRouteDecisi
 	},
 }
 
-func (svc *Service) applyExecutionRoute(prepared *preparation) {
+func (svc *Service) applyDelegationAdmission(prepared *preparation) {
 	planning := prepared.planning
 	decision := planning.Decision
 	if decision.Origin == domain.Model &&
@@ -85,17 +85,17 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	}
 
 	toolReady := scenarioToolsContain(prepared.candidateToolSet, "delegate_investigation")
-	prepared.execution = routeExecution(prepared.ctx, executionRouteInput{
+	prepared.admission = admitDelegation(prepared.ctx, delegationAdmissionInput{
 		Suggestion:              planning.Execution,
 		WriteRequested:          prepared.request.WriteRequested,
 		DelegationAvailable:     svc.delegationEnabled,
 		DelegationToolReady:     toolReady,
 		DelegationMaxConcurrent: svc.delegationMaxConcurrent,
 	})
-	prepared.execution.HighRisk = executionReasonPresent(
+	prepared.admission.HighRisk = executionReasonPresent(
 		planning.Execution.Reasons, "requires_risk_sensitive_analysis",
 	)
-	if prepared.execution.RouteReason != routeReasonParentDynamicDelegation {
+	if prepared.admission.RouteReason != routeReasonParentDynamicDelegation {
 		// Do not merely omit the prompt: hiding the delegation tool from the
 		// immutable RunRequest is what makes the route decision authoritative.
 		// Otherwise a parent model can still discover and invoke the tool on a
@@ -113,9 +113,9 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 		svc.delegationEnabled,
 		toolReady,
 		svc.delegationMaxConcurrent,
-		prepared.execution.DecisionOrigin,
-		prepared.execution.RouteReason,
-		prepared.execution.DowngradeReason,
+		prepared.admission.DecisionOrigin,
+		prepared.admission.RouteReason,
+		prepared.admission.DowngradeReason,
 	)
 
 	// QA routing is intentionally advisory only. The parent always runs the
@@ -123,10 +123,10 @@ func (svc *Service) applyExecutionRoute(prepared *preparation) {
 	// tool to that loop rather than represented as a QA Durable Workflow.
 	svc.emitEvent(run.EventExecutionRouted, run.ExecutionEvent{
 		RunID: prepared.request.RunID, Strategy: string(retrieval.ExecutionSingleAgent),
-		Status: "completed", Reason: prepared.execution.RouteReason,
+		Status: "completed", Reason: prepared.admission.RouteReason,
 		Complexity: planning.Execution.Complexity, Confidence: planning.Execution.Confidence,
 	})
-	degradedReason := prepared.execution.DowngradeReason
+	degradedReason := prepared.admission.DowngradeReason
 	if degradedReason == "" && planning.PlanningError != nil {
 		degradedReason = "route_degraded"
 	}
@@ -148,15 +148,15 @@ func executionReasonPresent(reasons []string, wanted string) bool {
 	return false
 }
 
-func routeExecution(ctx context.Context, input executionRouteInput) executionRouteDecision {
-	decision, _ := runtrace.Invoke(ctx, executionRouteSpec, input, func(_ context.Context, input executionRouteInput) (executionRouteDecision, error) {
-		return decideExecutionRoute(input), nil
+func admitDelegation(ctx context.Context, input delegationAdmissionInput) delegationAdmissionDecision {
+	decision, _ := runtrace.Invoke(ctx, delegationAdmissionSpec, input, func(_ context.Context, input delegationAdmissionInput) (delegationAdmissionDecision, error) {
+		return decideDelegationAdmission(input), nil
 	})
 	return decision
 }
 
-func decideExecutionRoute(input executionRouteInput) executionRouteDecision {
-	decision := executionRouteDecision{
+func decideDelegationAdmission(input delegationAdmissionInput) delegationAdmissionDecision {
+	decision := delegationAdmissionDecision{
 		DecisionOrigin: "server_assessment",
 	}
 	if input.WriteRequested {

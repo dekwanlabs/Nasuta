@@ -6,11 +6,9 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/web"
 )
 
-type WebSearchResult = web.SearchResult
-type WebSearchProvider = web.SearchProvider
 type WebFetchedEvidence = web.FetchedEvidence
 type WebSearchResponse = web.SearchResponse
-type WebSourceStatus = web.SourceStatus
+type WebQueryRewriter = web.QueryRewriter
 
 const (
 	WebSourceUsable   = web.SourceUsable
@@ -34,22 +32,10 @@ func (srv *Service) SetWebSearchAPIKey(apiKey string) {
 	srv.webService().SetAPIKey(apiKey)
 }
 
-func (srv *Service) RegisterWebProvider(name string, provider WebSearchProvider) error {
-	return srv.webService().RegisterProvider(name, provider)
-}
-
-func (srv *Service) WebSearch(ctx context.Context, query string, limit int) ([]WebSearchResult, error) {
-	return srv.webService().Search(ctx, query, limit)
+func (srv *Service) SetWebQueryRewriter(rewriter WebQueryRewriter) {
+	srv.webService().SetQueryRewriter(rewriter)
 }
 
 func (srv *Service) WebSearchWithFetch(ctx context.Context, query string, limit int) (WebSearchResponse, error) {
 	return srv.webService().SearchWithFetch(ctx, query, limit)
-}
-
-func (srv *Service) WebFetch(ctx context.Context, rawURL string) (string, error) {
-	return srv.webService().Fetch(ctx, rawURL)
-}
-
-func (srv *Service) WebFetchRelevant(ctx context.Context, rawURL, query string) (string, error) {
-	return srv.webService().FetchRelevant(ctx, rawURL, query)
 }

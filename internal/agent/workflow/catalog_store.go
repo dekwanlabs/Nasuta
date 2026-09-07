@@ -179,6 +179,53 @@ func (workflowStore *Store) LoadDefinition(
 	return record, nil
 }
 
+// LoadDefinitions batch-loads immutable versions so rollout hydration issues one
+// query instead of one per candidate version.
+func (workflowStore *Store) LoadDefinitions(
+	ctx context.Context,
+	refs []DefinitionRef,
+) (map[DefinitionRef]DefinitionRecord, error) {
+	if len(refs) == 0 {
+		return map[DefinitionRef]DefinitionRecord{}, nil
+	}
+	query := `SELECT id,version,definition_json,content_hash,active,is_default,created_by,created_at
+		FROM workflow_definitions WHERE `
+	args := make([]any, 0, len(refs)*2)
+	for i, ref := range refs {
+		if i > 0 {
+			query += ` OR `
+		}
+		query += `(id=? AND version=?)`
+		args = append(args, ref.ID, ref.Version)
+	}
+	rows, err := workflowStore.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("load workflow definitions: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[DefinitionRef]DefinitionRecord, len(refs))
+	for rows.Next() {
+		var id string
+		var version int64
+		var record DefinitionRecord
+		var raw []byte
+		if err := rows.Scan(
+			&id, &version, &raw, &record.ContentHash, &record.Active,
+			&record.Default, &record.CreatedBy, &record.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan workflow definition: %w", err)
+		}
+		if err := json.Unmarshal(raw, &record.Definition); err != nil {
+			return nil, fmt.Errorf("decode workflow definition: %w", err)
+		}
+		out[DefinitionRef{ID: id, Version: version}] = record
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate workflow definitions: %w", err)
+	}
+	return out, nil
+}
+
 // LoadHighestVersions returns version watermarks without loading definition bodies.
 func (workflowStore *Store) LoadHighestVersions(
 	ctx context.Context,

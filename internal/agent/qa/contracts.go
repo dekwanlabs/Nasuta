@@ -18,19 +18,23 @@ import (
 
 // Deps bundles the services needed by the QA scenario.
 type Deps struct {
-	Tools           *tools.Service
-	Cfg             config.Config
-	Platform        *config.PlatformSettings
-	CodeGraphDB     *codegraph.DB
-	History         session.History
-	Sessions        *memory.SessionStore
-	Memory          *memory.MemoryStore
-	Definitions     definition.Resolver
-	Agent           agentapi.DefinitionRef
-	Runtime         RuntimePort
-	Events          EventSink
-	Models          *Models
-	WriteAvailable  bool
+	Tools       *tools.Service
+	Cfg         config.Config
+	Platform    *config.PlatformSettings
+	CodeGraphDB *codegraph.DB
+	History     session.History
+	Sessions    *memory.SessionStore
+	Memory      *memory.MemoryStore
+	Definitions definition.Resolver
+	Agent       agentapi.DefinitionRef
+	// Runtime accepts any composition that provides both the managed-run
+	// lifecycle (RunStarter) and preparation tool snapshot (ScenarioToolSource).
+	// Narrower callers may pass a type that only implements one side when they
+	// do not need the other.
+	Runtime        RuntimePort
+	Events         EventSink
+	Models         *Models
+	WriteAvailable bool
 }
 
 type SelectionResolver interface {

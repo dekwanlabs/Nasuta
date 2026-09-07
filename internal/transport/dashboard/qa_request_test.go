@@ -37,8 +37,8 @@ func TestCompactionRestartRecommendation(t *testing.T) {
 }
 
 func TestEmitCompactionFailureRecommendation(t *testing.T) {
-	handler := &Handler{qaRuntimeFn: func() QARuntime {
-		return QARuntime{Settings: &config.PlatformSettings{LLMContextWindow: 128000}}
+	handler := &Handler{qaPortsFn: func() QAApplicationPorts {
+		return QAApplicationPorts{Settings: &config.PlatformSettings{LLMContextWindow: 128000}}
 	}}
 	result := session.CompactionResult{
 		ArchivedTurnCount:     24,
@@ -144,8 +144,8 @@ func TestQARuntimeStatusFormatting(t *testing.T) {
 		CompactionApplied:     true,
 	})
 	handler := &Handler{
-		qaRuntimeFn: func() QARuntime {
-			return QARuntime{Hub: hub, Settings: settings}
+		qaPortsFn: func() QAApplicationPorts {
+			return QAApplicationPorts{RuntimeStatus: hub, Settings: settings}
 		},
 	}
 	recorder := httptest.NewRecorder()

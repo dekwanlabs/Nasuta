@@ -75,6 +75,13 @@ func (srv *Service) FetchRelevant(ctx context.Context, rawURL, query string) (st
 		return "", fmt.Errorf("fetch %s: empty response body", rawURL)
 	}
 
+	// Reject a page that does not actually cover the query before ranking its
+	// passages. Passage selection only picks the least-bad section of whatever
+	// page was fetched; it cannot rescue a page that answers something else.
+	if strings.TrimSpace(query) != "" && !contentAddressesQuery(out, query) {
+		return "", fmt.Errorf("fetched page does not address the query")
+	}
+
 	const modelBudget = 8000
 	if strings.TrimSpace(query) != "" {
 		out = formatPassages(retrieval.SelectWebPassages(out, query, modelBudget))
@@ -171,6 +178,51 @@ func contentTypeShort(ct string) string {
 		ct = ct[:i]
 	}
 	return strings.TrimSpace(ct)
+}
+
+// contentAddressesQuery reports whether a fetched page covers the query's
+// content words. Unlike candidate relevance (any Latin word matches), a page
+// must contain every Latin content word — a broad homepage that mentions one
+// term must not pass as evidence for a question about another. CJK still uses
+// the bigram threshold so a page that merely repeats one query bigram is
+// rejected.
+func contentAddressesQuery(content, query string) bool {
+	qLatin, qCJK := searchSignals(query)
+	if len(qLatin) == 0 && len(qCJK) == 0 {
+		return true
+	}
+	cLatin, cCJK := searchSignals(content)
+
+	latinOK := true
+	for signal := range qLatin {
+		if _, ok := cLatin[signal]; !ok {
+			latinOK = false
+			break
+		}
+	}
+	required := min(3, len(qCJK))
+	matched := 0
+	for signal := range qCJK {
+		if _, ok := cCJK[signal]; ok {
+			matched++
+			if matched >= required {
+				break
+			}
+		}
+	}
+	cjkOK := matched >= required
+
+	hasLatin, hasCJK := len(qLatin) > 0, len(qCJK) > 0
+	switch {
+	case hasLatin && hasCJK:
+		return latinOK && cjkOK
+	case hasLatin:
+		return latinOK
+	case hasCJK:
+		return cjkOK
+	default:
+		return false
+	}
 }
 
 var cgnatCIDR = func() *net.IPNet {

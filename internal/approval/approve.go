@@ -15,12 +15,8 @@ import (
 type Status = ActionStatus
 
 const (
-	StatusPending  = ActionPending
-	StatusApproved = ActionApproved
-	StatusRejected = ActionRejected
-	StatusDone     = ActionDone
-	StatusFailed   = ActionFailed
-	StatusExpired  = ActionExpired
+	StatusDone   = ActionDone
+	StatusFailed = ActionFailed
 )
 
 // IncidentFixer is the narrow incident mutation port used after approval.

@@ -122,7 +122,7 @@ func preferenceInstruction(ids []string, delegationActive bool) string {
 
 func parentDelegationInstruction(prepared *preparation) string {
 	if prepared == nil ||
-		prepared.execution.RouteReason != routeReasonParentDynamicDelegation ||
+		prepared.admission.RouteReason != routeReasonParentDynamicDelegation ||
 		!scenarioToolsContain(prepared.candidateToolSet, "delegate_investigation") {
 		return ""
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/platform/store"
 	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/platform/httputil"
 )
 
 func dashboardContractService(repo, name string) domain.ServiceRecord {
@@ -25,7 +26,7 @@ func dashboardContractService(repo, name string) domain.ServiceRecord {
 
 func dashboardAPIData(t *testing.T, body []byte) any {
 	t.Helper()
-	var response domain.ApiResponse
+	var response httputil.ApiResponse
 	if err := json.Unmarshal(body, &response); err != nil {
 		t.Fatalf("decode response %s: %v", body, err)
 	}

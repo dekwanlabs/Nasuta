@@ -17,7 +17,8 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/feature/delivery"
-	"github.com/dekwanlabs/nasuta/platform"
+	"github.com/dekwanlabs/nasuta/log"
+	redaction "github.com/dekwanlabs/nasuta/platform/redact"
 )
 
 type processRequest struct {
@@ -340,7 +341,7 @@ func probeVersion(ctx context.Context, path string) string {
 }
 
 func redact(value string) string {
-	value = platform.RedactSensitiveText(value)
+	value = redaction.RedactSensitiveText(value)
 	for _, key := range []string{"CODEX_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
 		if secret := os.Getenv(key); secret != "" {
 			value = strings.ReplaceAll(value, secret, "[REDACTED]")
@@ -352,6 +353,7 @@ func redact(value string) string {
 func eventDetail(value any) json.RawMessage {
 	encoded, err := json.Marshal(value)
 	if err != nil {
+		log.Warnf("[codingagent] marshal event detail: %v", err)
 		return nil
 	}
 	return encoded

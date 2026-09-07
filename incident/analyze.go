@@ -13,8 +13,6 @@ import (
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
-type Analysis = llmAnalysis
-
 func (manager *Manager) Analyze(ctx context.Context, id string) error {
 	log.Infof("[incident] ===== analyze start: %s =====", id)
 	inc, err := manager.Get(ctx, id)

@@ -41,23 +41,6 @@ func NewClaimRegistry() *ClaimRegistry {
 	return registry
 }
 
-func (registry *ClaimRegistry) RegisterComparator(
-	id string,
-	comparator agentapi.ClaimComparator,
-) error {
-	id = strings.TrimSpace(id)
-	if id == "" || comparator == nil {
-		return fmt.Errorf("claim comparator id and implementation are required")
-	}
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	if _, exists := registry.state.comparators[id]; exists {
-		return fmt.Errorf("claim comparator %q is already registered", id)
-	}
-	registry.state.comparators[id] = comparator
-	return nil
-}
-
 func (registry *ClaimRegistry) Publish(policies []agentapi.ClaimPolicy) error {
 	if len(policies) == 0 {
 		return nil

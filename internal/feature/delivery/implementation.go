@@ -690,7 +690,9 @@ func (manager *ImplementationManager) recoverExpired(ctx context.Context) {
 		}
 		log.WarnfCtx(ctx, "[feature-delivery] recovered expired implementations count=%d", len(interrupted))
 		for _, runID := range interrupted {
-			_, _ = manager.appendEvent(ctx, runID, EventRunInterrupted, "worker lease expired", nil)
+			if _, err := manager.appendEvent(ctx, runID, EventRunInterrupted, "worker lease expired", nil); err != nil {
+				log.WarnfCtx(ctx, "[feature-delivery] record interruption event run_id=%s: %v", runID, err)
+			}
 		}
 	}
 }

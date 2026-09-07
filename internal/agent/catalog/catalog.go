@@ -49,10 +49,17 @@ type AuditEvent struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// DefinitionRef identifies one immutable definition version for batch hydration.
+type DefinitionRef struct {
+	ID      string
+	Version int64
+}
+
 type catalogPersistence interface {
 	Publish(context.Context, []agentapi.Definition, int64) ([]DefinitionRecord, error)
 	LoadDefaultDefinitions(context.Context) ([]DefinitionRecord, error)
 	LoadDefinition(context.Context, string, int64) (DefinitionRecord, error)
+	LoadDefinitions(context.Context, []DefinitionRef) (map[DefinitionRef]DefinitionRecord, error)
 	LoadHighestVersions(context.Context) (map[string]int64, error)
 	LoadRollouts(context.Context) ([]RolloutRule, error)
 	ListDefinitions(context.Context, DefinitionCursor, int) ([]DefinitionRecord, error)
@@ -424,23 +431,29 @@ func (catalog *Catalog) buildState(
 	for _, record := range records {
 		loaded[key{id: record.ID, version: record.Version}] = record
 	}
+	missing := make([]DefinitionRef, 0, len(rollouts))
 	for _, rule := range rollouts {
 		candidateKey := key{id: rule.AgentID, version: rule.CandidateVersion}
 		if _, ok := loaded[candidateKey]; ok {
 			continue
 		}
-		record, loadErr := store.LoadDefinition(
-			ctx,
-			rule.AgentID,
-			rule.CandidateVersion,
-		)
+		missing = append(missing, DefinitionRef{ID: rule.AgentID, Version: rule.CandidateVersion})
+	}
+	if len(missing) > 0 {
+		batch, loadErr := store.LoadDefinitions(ctx, missing)
 		if loadErr != nil {
-			return nil, fmt.Errorf(
-				"load agent rollout %q candidate version %d: %w",
-				rule.AgentID, rule.CandidateVersion, loadErr,
-			)
+			return nil, fmt.Errorf("load agent rollout candidates: %w", loadErr)
 		}
-		loaded[candidateKey] = record
+		for _, ref := range missing {
+			record, ok := batch[ref]
+			if !ok {
+				return nil, fmt.Errorf(
+					"load agent rollout %q candidate version %d: %w",
+					ref.ID, ref.Version, ErrNotFound,
+				)
+			}
+			loaded[key{id: ref.ID, version: ref.Version}] = record
+		}
 	}
 	next := &state{
 		records:  make(map[key]DefinitionRecord, len(loaded)),

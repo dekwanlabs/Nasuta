@@ -135,9 +135,9 @@ func TestCodeSearchUsesDenseFallbackWhenBM25HasNoKnownTerms(t *testing.T) {
 
 	recorder := &toolTraceRecorder{}
 	ctx := domain.WithTraceRecorder(context.Background(), recorder)
-	result := svc.CodeSearch(ctx, "token-not-in-vocabulary", "", 5)
-	if result["error"] != nil {
-		t.Fatalf("CodeSearch returned error: %v", result["error"])
+	result, err := svc.CodeSearchResult(ctx, "token-not-in-vocabulary", "", 5)
+	if err != nil {
+		t.Fatalf("CodeSearchResult returned error: %v", err)
 	}
 	if semantic.searchCalls != 1 || semantic.hybridCalls != 0 {
 		t.Fatalf("search calls = dense:%d hybrid:%d, want dense:1 hybrid:0", semantic.searchCalls, semantic.hybridCalls)
@@ -179,7 +179,10 @@ func TestCodeSearchKeepsRRFSeparateFromCosine(t *testing.T) {
 	bm25 := retrieval.NewBM25Builder()
 	bm25.AddDoc("checkout timeout")
 	svc.SetBM25(bm25)
-	result := svc.CodeSearch(context.Background(), "checkout", "", 5)
+	result, err := svc.CodeSearchResult(context.Background(), "checkout", "", 5)
+	if err != nil {
+		t.Fatalf("CodeSearchResult: %v", err)
+	}
 	matches := result["matches"].([]any)
 	match := matches[0].(map[string]any)
 	if match["scoreKind"] != string(semantic.ScoreFusion) || match["fusionScore"] != float64(semanticHybrid) {
@@ -196,7 +199,10 @@ func TestCodeSearchExposesDenseSignalFromHybridRecall(t *testing.T) {
 	bm25.AddDoc("checkout timeout")
 	svc.SetBM25(bm25)
 
-	result := svc.CodeSearch(context.Background(), "checkout", "", 5)
+	result, err := svc.CodeSearchResult(context.Background(), "checkout", "", 5)
+	if err != nil {
+		t.Fatalf("CodeSearchResult: %v", err)
+	}
 	matches := result["matches"].([]any)
 	match := matches[0].(map[string]any)
 	fusionScore := match["fusionScore"].(float64)

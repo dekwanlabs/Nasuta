@@ -8,7 +8,6 @@ type APIStyle string
 const (
 	APIStyleChatCompletions APIStyle = "chat_completions"
 	APIStyleMessages        APIStyle = "messages"
-	APIStyleResponses       APIStyle = "responses"
 )
 
 // CompletionLimitField is the provider field used for the logical completion
