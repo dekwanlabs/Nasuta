@@ -167,3 +167,116 @@ func TestSelectContextFiltersMalformedEvidenceAtChildBoundary(t *testing.T) {
 		t.Fatalf("selected evidence = %#v, want only canonical evidence", blocks[0].Evidence)
 	}
 }
+
+func TestDefaultSeedContextInjectsFacetMatchedEvidence(t *testing.T) {
+	content := "pre-retrieved evidence"
+	parent := ParentContext{
+		Context: map[string]agentapi.ContextBlock{
+			"qa.evidence": {
+				Source:      "qa.evidence",
+				Title:       "QA Evidence",
+				Content:     content,
+				ContentHash: hashBytes([]byte(content)),
+				Evidence: []tool.EvidenceUnit{
+					{
+						SourceKind: "code", Target: "core.go",
+						ContentHash: validEvidenceHash("core"),
+						Facets:      []string{"core_flow"},
+					},
+					{
+						SourceKind: "runbook", Target: "ops.md",
+						ContentHash: validEvidenceHash("ops"),
+						Facets:      []string{"runtime_and_operations"},
+					},
+				},
+			},
+			"qa.memory": {
+				Source:      "qa.memory",
+				Title:       "Recalled Memory",
+				Content:     "memory content",
+				ContentHash: hashBytes([]byte("memory content")),
+			},
+		},
+	}
+
+	capability := agentapi.Capability{
+		InputFacets: []string{"core_flow", "data_and_state"},
+	}
+	blocks := defaultSeedContext(parent, capability, []string{"core_flow"}, 4096)
+	if len(blocks) != 1 {
+		t.Fatalf("seed blocks = %#v, want one qa.evidence block", blocks)
+	}
+	if len(blocks[0].Evidence) != 1 ||
+		blocks[0].Evidence[0].SourceKind != "code" ||
+		blocks[0].Evidence[0].Target != "core.go" {
+		t.Fatalf("seeded evidence = %#v, want only facet-matched unit", blocks[0].Evidence)
+	}
+}
+
+func TestDefaultSeedContextSkipsNonSeedAndUnmatchedBlocks(t *testing.T) {
+	content := "pre-retrieved evidence"
+	parent := ParentContext{
+		Context: map[string]agentapi.ContextBlock{
+			"other.tool": {
+				Source:      "other.tool",
+				Title:       "Tool Result",
+				Content:     "tool content",
+				ContentHash: hashBytes([]byte("tool content")),
+				Evidence: []tool.EvidenceUnit{{
+					SourceKind: "code", Target: "x.go",
+					ContentHash: validEvidenceHash("x"),
+					Facets:      []string{"core_flow"},
+				}},
+			},
+			"qa.evidence": {
+				Source:      "qa.evidence",
+				Title:       "QA Evidence",
+				Content:     content,
+				ContentHash: hashBytes([]byte(content)),
+				Evidence: []tool.EvidenceUnit{{
+					SourceKind: "runtime", Target: "svc-a",
+					ContentHash: validEvidenceHash("runtime"),
+					Facets:      []string{"runtime_and_operations"},
+				}},
+			},
+		},
+	}
+
+	capability := agentapi.Capability{InputFacets: []string{"core_flow"}}
+	blocks := defaultSeedContext(parent, capability, []string{"core_flow"}, 4096)
+	if len(blocks) != 0 {
+		t.Fatalf("seed blocks = %#v, want none (facet mismatch and non-seed source)", blocks)
+	}
+}
+
+func TestDefaultSeedContextFallsBackToCapabilityFacets(t *testing.T) {
+	content := "pre-retrieved evidence"
+	parent := ParentContext{
+		Context: map[string]agentapi.ContextBlock{
+			"qa.evidence": {
+				Source:      "qa.evidence",
+				Title:       "QA Evidence",
+				Content:     content,
+				ContentHash: hashBytes([]byte(content)),
+				Evidence: []tool.EvidenceUnit{{
+					SourceKind: "code", Target: "core.go",
+					ContentHash: validEvidenceHash("core"),
+					Facets:      []string{"core_flow"},
+				}},
+			},
+		},
+	}
+
+	capability := agentapi.Capability{InputFacets: []string{"core_flow"}}
+	blocks := defaultSeedContext(parent, capability, nil, 4096)
+	if len(blocks) != 1 || len(blocks[0].Evidence) != 1 {
+		t.Fatalf("seed blocks = %#v, want one block with one matched unit", blocks)
+	}
+}
+
+func TestDefaultSeedContextEmptyWhenNoParentContext(t *testing.T) {
+	blocks := defaultSeedContext(ParentContext{}, agentapi.Capability{}, nil, 4096)
+	if len(blocks) != 0 {
+		t.Fatalf("seed blocks = %#v, want none", blocks)
+	}
+}

@@ -348,15 +348,6 @@ func TestCloneFlowIRDeepCopiesSlices(t *testing.T) {
 	}
 }
 
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
-
 func TestProjectReportMarksSoftOutputOverrunIncomplete(t *testing.T) {
 	output, err := json.Marshal(investigationOutput{Summary: "usable partial"})
 	if err != nil {
@@ -384,5 +375,53 @@ func TestProjectReportMarksSoftOutputOverrunIncomplete(t *testing.T) {
 	}
 	if report.Error == nil || report.Error.Code != ErrorChildOutputSoftOverrun {
 		t.Fatalf("soft overrun error not preserved: %+v", report.Error)
+	}
+}
+
+func TestProjectReportPopulatesGapFields(t *testing.T) {
+	output, err := json.Marshal(investigationOutput{
+		Summary:         "partial flow report",
+		CoveredGoals:    []string{"core_flow"},
+		UnresolvedGoals: []string{"data_and_state", "external_dependency"},
+		Flow: &agentapi.FlowIR{
+			Subject:    "test flow",
+			Status:     "partial",
+			Confidence: "low",
+			Nodes: []agentapi.FlowNode{
+				{ID: "api", Label: "API", Kind: "service"},
+				{ID: "worker", Label: "Worker", Kind: "worker"},
+			},
+			Edges: []agentapi.FlowEdge{
+				{From: "api", To: "worker", Protocol: "HTTP", SyncMode: "sync", EvidenceState: "unresolved"},
+			},
+			OpenHops: []string{"worker -> database"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := projectReport(agentapi.RunResult{
+		RunID:  "child-gap",
+		Status: agentapi.RunSucceeded,
+		Output: output,
+		Evidence: agentapi.EvidenceSummary{
+			Status: "partial", ToolCallCount: 2, ResultCount: 2,
+		},
+	}, "knowledge.code.inspect", "report-gap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(report.CoveredGoals, "core_flow") {
+		t.Fatalf("covered goals = %v, want core_flow", report.CoveredGoals)
+	}
+	if !containsString(report.UnresolvedGoals, "data_and_state") ||
+		!containsString(report.UnresolvedGoals, "external_dependency") {
+		t.Fatalf("unresolved goals = %v, want data_and_state and external_dependency", report.UnresolvedGoals)
+	}
+	if len(report.OpenHops) != 1 || report.OpenHops[0] != "worker -> database" {
+		t.Fatalf("open hops = %v, want worker -> database", report.OpenHops)
+	}
+	if report.Flow == nil {
+		t.Fatalf("flow = nil, want projected FlowIR")
 	}
 }

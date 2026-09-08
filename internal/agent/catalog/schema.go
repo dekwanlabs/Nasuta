@@ -527,7 +527,11 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 					},
 					"usage":{"$ref":"#/$defs/usage"},
 					"error":{"$ref":"#/$defs/error"},
-					"flow":{"$ref":"#/$defs/flow"}
+					"flow":{"$ref":"#/$defs/flow"},
+					"gap_chase":{"enum":["none","triggered","retrieved","unavailable","budget_exhausted"]},
+					"covered_evidence_goals":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}},
+					"unresolved_evidence_goals":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}},
+					"open_hops":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":512}}
 				},
 				"allOf":[{
 					"if":{"properties":{"status":{"const":"completed"}},"required":["status"]},

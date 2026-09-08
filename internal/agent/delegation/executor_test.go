@@ -3536,3 +3536,353 @@ func TestApplyAttemptTokenLimitsSoftOverrunDoesNotMaskFailure(t *testing.T) {
 		t.Fatalf("error = %+v, want original execution error", result.Error)
 	}
 }
+
+func partialInvestigationResult(
+	runID string,
+	unresolved []string,
+	openHops []string,
+) agentapi.RunResult {
+	output, _ := json.Marshal(investigationOutput{
+		Summary:         "partial evidence collected",
+		UnresolvedGoals: unresolved,
+	})
+	if len(openHops) > 0 {
+		output, _ = json.Marshal(investigationOutput{
+			Summary:         "partial evidence collected",
+			UnresolvedGoals: unresolved,
+			Flow: &agentapi.FlowIR{
+				Subject:    "test flow",
+				Status:     "partial",
+				Confidence: "low",
+				OpenHops:   openHops,
+			},
+		})
+	}
+	return agentapi.RunResult{
+		RunID:  runID,
+		Status: agentapi.RunSucceeded,
+		Output: output,
+		Evidence: agentapi.EvidenceSummary{
+			Status: "partial", ToolCallCount: 1, ResultCount: 1,
+		},
+		EvidenceUnits: []tool.EvidenceUnit{{
+			SourceKind: "code", Target: "partial.go", ContentHash: "partial-hash",
+		}},
+		Usage: agentapi.Usage{
+			InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+		},
+	}
+}
+
+func TestExecutorGapChaseDisabledByDefault(t *testing.T) {
+	persistence := newExecutorPersistence()
+	calls := 0
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			calls++
+			return partialInvestigationResult(
+				request.RunID, []string{"core_flow"}, []string{"worker -> database"},
+			), nil
+		}),
+		persistence,
+		nil,
+	)
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect",
+			Objective:  "inspect flow gaps",
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("runtime calls = %d, want 1 (gap chase disabled)", calls)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %+v", result.Results)
+	}
+	report := result.Results[0]
+	if report.GapChase != agentapi.DelegationGapChaseUnavailable {
+		t.Fatalf("gap chase = %s, want unavailable when disabled", report.GapChase)
+	}
+	if len(report.UnresolvedGoals) != 1 || report.UnresolvedGoals[0] != "core_flow" {
+		t.Fatalf("unresolved goals = %v, want preserved core_flow", report.UnresolvedGoals)
+	}
+}
+
+func TestExecutorGapChaseRetrievesResolvedGoal(t *testing.T) {
+	persistence := newExecutorPersistence()
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			mu.Lock()
+			calls++
+			call := calls
+			mu.Unlock()
+			if call == 1 {
+				return partialInvestigationResult(
+					request.RunID,
+					[]string{"core_flow", "data_and_state"},
+					nil,
+				), nil
+			}
+			// Bounded continuation resolves core_flow and leaves data_and_state.
+			output, _ := json.Marshal(investigationOutput{
+				Summary:         "gap chase continuation",
+				CoveredGoals:    []string{"core_flow"},
+				UnresolvedGoals: []string{"data_and_state"},
+			})
+			return agentapi.RunResult{
+				RunID:  request.RunID,
+				Status: agentapi.RunSucceeded,
+				Output: output,
+				Evidence: agentapi.EvidenceSummary{
+					Status: "complete", ToolCallCount: 1, ResultCount: 1,
+				},
+				EvidenceUnits: []tool.EvidenceUnit{{
+					SourceKind: "code", Target: "core_flow.go", ContentHash: "core-flow-hash",
+				}},
+				Usage: agentapi.Usage{
+					InputTokens: 5, OutputTokens: 3, TotalTokens: 8,
+				},
+			}, nil
+		}),
+		persistence,
+		func(policy *agentapi.DelegationPolicy) {
+			policy.MaxGapChaseRounds = 1
+		},
+	)
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect",
+			Objective:  "inspect flow gaps",
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+	if gotCalls != 2 {
+		t.Fatalf("runtime calls = %d, want 2 (initial + chase)", gotCalls)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %+v", result.Results)
+	}
+	report := result.Results[0]
+	if report.GapChase != agentapi.DelegationGapChaseRetrieved {
+		t.Fatalf("gap chase = %s, want retrieved", report.GapChase)
+	}
+	if !containsString(report.CoveredGoals, "core_flow") {
+		t.Fatalf("covered goals = %v, want core_flow moved in", report.CoveredGoals)
+	}
+	if containsString(report.UnresolvedGoals, "core_flow") {
+		t.Fatalf("unresolved goals = %v, core_flow should be removed", report.UnresolvedGoals)
+	}
+	if !containsString(report.UnresolvedGoals, "data_and_state") {
+		t.Fatalf("unresolved goals = %v, want data_and_state kept", report.UnresolvedGoals)
+	}
+}
+
+func TestExecutorGapChaseUnavailableWhenChaseReturnsNoResolution(t *testing.T) {
+	persistence := newExecutorPersistence()
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			// Both the initial and the chase return the same unresolved gap.
+			return partialInvestigationResult(
+				request.RunID, []string{"core_flow"}, nil,
+			), nil
+		}),
+		persistence,
+		func(policy *agentapi.DelegationPolicy) {
+			policy.MaxGapChaseRounds = 1
+		},
+	)
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect",
+			Objective:  "inspect flow gaps",
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+	if gotCalls != 2 {
+		t.Fatalf("runtime calls = %d, want 2 (initial + one chase, no retry)", gotCalls)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %+v", result.Results)
+	}
+	if result.Results[0].GapChase != agentapi.DelegationGapChaseUnavailable {
+		t.Fatalf("gap chase = %s, want unavailable", result.Results[0].GapChase)
+	}
+}
+
+func TestExecutorGapChaseNoneWhenNoGaps(t *testing.T) {
+	persistence := newExecutorPersistence()
+	calls := 0
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			calls++
+			return partialInvestigationResult(request.RunID, nil, nil), nil
+		}),
+		persistence,
+		func(policy *agentapi.DelegationPolicy) {
+			policy.MaxGapChaseRounds = 1
+		},
+	)
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect",
+			Objective:  "inspect flow gaps",
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("runtime calls = %d, want 1 (no gaps to chase)", calls)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %+v", result.Results)
+	}
+	if result.Results[0].GapChase != agentapi.DelegationGapChaseNone {
+		t.Fatalf("gap chase = %s, want none", result.Results[0].GapChase)
+	}
+}
+
+func TestExecutorGapChaseValueGateSkipsOpenHopsOnly(t *testing.T) {
+	persistence := newExecutorPersistence()
+	calls := 0
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			calls++
+			// Partial report with only an open hop, no unresolved evidence goals.
+			return partialInvestigationResult(request.RunID, nil, []string{"worker -> database"}), nil
+		}),
+		persistence,
+		func(policy *agentapi.DelegationPolicy) {
+			policy.MaxGapChaseRounds = 1
+		},
+	)
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{{
+			Capability: "knowledge.code.inspect",
+			Objective:  "inspect flow gaps",
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("runtime calls = %d, want 1 (open hop alone does not trigger chase)", calls)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %+v", result.Results)
+	}
+	if result.Results[0].GapChase != agentapi.DelegationGapChaseNone {
+		t.Fatalf("gap chase = %s, want none (value gate rejects open-hop-only gaps)", result.Results[0].GapChase)
+	}
+}
+
+func TestExecutorGapChaseQuotaGateLimitsOneChasePerBatch(t *testing.T) {
+	persistence := newExecutorPersistence()
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	executor := newExecutorFixture(
+		t,
+		executorRuntimeFunc(func(
+			_ context.Context,
+			request agentapi.RunRequest,
+		) (agentapi.RunResult, error) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			// Both children return partial reports with an unresolved goal.
+			return partialInvestigationResult(request.RunID, []string{"core_flow"}, nil), nil
+		}),
+		persistence,
+		func(policy *agentapi.DelegationPolicy) {
+			policy.MaxGapChaseRounds = 1
+			policy.MaxGapChasePerBatch = 1
+		},
+	)
+	result, _, err := executor.Execute(
+		executorContext(t, context.Background(), 0),
+		[]agentapi.DelegationTask{
+			{Capability: "knowledge.code.inspect", Objective: "inspect flow gaps a"},
+			{Capability: "knowledge.code.inspect", Objective: "inspect flow gaps b"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+	// Two initial children plus exactly one admitted chase: the second partial
+	// child must be denied by the per-batch quota gate.
+	if gotCalls != 3 {
+		t.Fatalf("runtime calls = %d, want 3 (two initial + one chase)", gotCalls)
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("results = %+v", result.Results)
+	}
+	var chased, denied int
+	for _, report := range result.Results {
+		switch report.GapChase {
+		case agentapi.DelegationGapChaseTriggered, agentapi.DelegationGapChaseRetrieved, agentapi.DelegationGapChaseUnavailable:
+			chased++
+		case agentapi.DelegationGapChaseBudgetExhausted:
+			denied++
+		}
+	}
+	if chased != 1 {
+		t.Fatalf("chased reports = %d, want exactly 1 (quota gate)", chased)
+	}
+	if denied != 1 {
+		t.Fatalf("quota-denied reports = %d, want exactly 1", denied)
+	}
+}

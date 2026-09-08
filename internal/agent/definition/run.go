@@ -402,6 +402,8 @@ func (run *activeRun) executePrepared(
 			Context: request.Context,
 			StrictOutput: request.Agent.ID == "investigator.docs" &&
 				request.Delegation.Depth <= 0,
+			EvidenceUnits:        evidenceUnitsFromResult(result),
+			EvidenceObservations: evidenceObservationsFromResult(result),
 		},
 	)
 	outcome = run.mergePreparationOutcome(outcome)

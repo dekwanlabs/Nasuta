@@ -115,7 +115,8 @@ func (agent *Agent) compactContext(
 	phase string,
 ) (answerCompactionResult, error) {
 	var result answerCompactionResult
-	if state == nil || agent.cfg.ContextWindow <= 0 {
+	window := agent.effectiveContextWindow()
+	if state == nil || window <= 0 {
 		return result, nil
 	}
 
@@ -127,7 +128,6 @@ func (agent *Agent) compactContext(
 	result.ProjectedBeforeTokens = inputTokens + outputReserve
 	result.ProjectedAfterTokens = result.ProjectedBeforeTokens
 
-	window := agent.cfg.ContextWindow
 	highWater := run.ContextHighWaterTokens(window)
 	safety := run.ContextSafetyTokens(window)
 	defer func() {

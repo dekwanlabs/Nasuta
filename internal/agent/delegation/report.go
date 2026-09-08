@@ -106,6 +106,8 @@ func projectReportWithEvidence(
 		append(output.Gaps, output.UnresolvedGoals...)...,
 	)
 	report.Findings = projectedFindings(output.Findings, reportID)
+	report.CoveredGoals = appendUniqueStrings(nil, output.CoveredGoals...)
+	report.UnresolvedGoals = appendUniqueStrings(nil, output.UnresolvedGoals...)
 	if output.Flow != nil {
 		flow := cloneFlowIR(output.Flow)
 		normalizeFlowEvidenceRefs(flow, evidenceIndex)
@@ -113,6 +115,7 @@ func projectReportWithEvidence(
 			report.Uncertainties = appendUniqueStrings(report.Uncertainties, invalidFlowUncertainty)
 		} else {
 			report.Flow = flow
+			report.OpenHops = appendUniqueStrings(nil, flow.OpenHops...)
 		}
 	}
 	report.Completeness = agentapi.DelegationComplete
@@ -157,6 +160,8 @@ func salvageCollectedChildReport(
 			append(output.Gaps, output.UnresolvedGoals...)...,
 		)
 		report.Findings = projectedFindings(output.Findings, reportID)
+		report.CoveredGoals = appendUniqueStrings(nil, output.CoveredGoals...)
+		report.UnresolvedGoals = appendUniqueStrings(nil, output.UnresolvedGoals...)
 		if output.Flow != nil {
 			flow := cloneFlowIR(output.Flow)
 			normalizeFlowEvidenceRefs(flow, evidenceIndex)
@@ -164,6 +169,7 @@ func salvageCollectedChildReport(
 				report.Uncertainties = appendUniqueStrings(report.Uncertainties, invalidFlowUncertainty)
 			} else {
 				report.Flow = flow
+				report.OpenHops = appendUniqueStrings(nil, flow.OpenHops...)
 			}
 		}
 	}

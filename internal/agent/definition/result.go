@@ -12,13 +12,16 @@ import (
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/log"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 type outputRecoveryContext struct {
-	AgentID      string
-	Input        json.RawMessage
-	Context      []agentapi.ContextBlock
-	StrictOutput bool
+	AgentID             string
+	Input               json.RawMessage
+	Context             []agentapi.ContextBlock
+	StrictOutput        bool
+	EvidenceUnits       []tool.EvidenceUnit
+	EvidenceObservations []agentapi.EvidenceObservation
 }
 
 func mapResult(
@@ -444,4 +447,25 @@ func retryableError(err error) bool {
 	}
 	var classified interface{ Retryable() bool }
 	return errors.As(err, &classified) && classified.Retryable()
+}
+
+// evidenceUnitsFromResult returns the execution-loop evidence ledger snapshot
+// for a completed (or interrupted) run, or nil when no result exists. It feeds
+// the evidence-preserving investigation.report recovery so a truncated
+// structured conclusion does not discard already-collected evidence.
+func evidenceUnitsFromResult(result *execution.RunResult) []tool.EvidenceUnit {
+	if result == nil {
+		return nil
+	}
+	return result.EvidenceUnits
+}
+
+// evidenceObservationsFromResult returns the execution-loop evidence
+// observations for a completed (or interrupted) run, or nil when no result
+// exists.
+func evidenceObservationsFromResult(result *execution.RunResult) []agentapi.EvidenceObservation {
+	if result == nil {
+		return nil
+	}
+	return result.EvidenceObservations
 }

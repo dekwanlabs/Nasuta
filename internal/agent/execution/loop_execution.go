@@ -422,8 +422,15 @@ func deterministicConclusionProse(state *compiledLoop) string {
 // visible JSON. It never echoes the task input, so recovery cannot mistake the
 // task contract for a report.
 func structuredConclusionFallback(state *compiledLoop) string {
+	focus := structuredConclusionFocus(state)
+	units, _ := state.evidenceLedger.snapshot()
+	if report, ok := BuildEvidencePreservingReport(
+		units, state.result.EvidenceObservations, nil, focus,
+	); ok {
+		return string(report)
+	}
 	fallback := map[string]any{
-		"focus":    structuredConclusionFocus(state),
+		"focus":    focus,
 		"summary":  "Evidence collection completed, but the final report could not be generated; no unverified conclusion was accepted.",
 		"findings": []any{},
 		"gaps": []string{

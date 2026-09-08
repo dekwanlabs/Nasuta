@@ -608,6 +608,7 @@ func (p *Platform) configureDynamicDelegation(
 			MaxChildTurns:        settings.DelegationMaxChildTurns,
 			MaxChildToolCalls:    settings.DelegationMaxChildToolCalls,
 			MaxChildInputTokens:  settings.DelegationMaxChildInputTokens,
+			MaxChildContextTokens: settings.DelegationMaxChildContextTokens,
 			MaxChildOutputTokens: settings.DelegationMaxChildOutputTokens,
 			MaxReportTokens:      settings.DelegationMaxReportTokens,
 			MaxTotalTokens:       settings.DelegationMaxTotalTokens,
@@ -615,6 +616,7 @@ func (p *Platform) configureDynamicDelegation(
 			ParentAnswerReserve:  settings.DelegationParentAnswerReserve,
 			BatchTimeout:         time.Duration(settings.DelegationBatchTimeout),
 			ChildTimeout:         time.Duration(settings.DelegationChildTimeout),
+			MaxGapChaseRounds:    settings.DelegationGapChaseRounds,
 		},
 		Allowlist:          settings.DelegationCapabilities,
 		VerifierCapability: delegation.SemanticVerifierCapabilityID,
@@ -730,7 +732,10 @@ func (p *Platform) stopAgentWorkers() {
 // runtimeEventEmitter returns the runtime's optional delegation event
 // emitter, if it implements that interface.
 func runtimeEventEmitter(runtime agentapi.Runtime) delegation.EventEmitter {
-	emitter, _ := runtime.(delegation.EventEmitter)
+	emitter, ok := runtime.(delegation.EventEmitter)
+	if !ok {
+		log.Warnf("[qa] delegation event emitter unavailable; delegation progress will not be broadcast (runtime_type=%T)", runtime)
+	}
 	return emitter
 }
 

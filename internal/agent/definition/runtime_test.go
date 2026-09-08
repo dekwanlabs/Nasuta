@@ -19,6 +19,7 @@ import (
 	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/catalog"
 	"github.com/dekwanlabs/nasuta/internal/agent/messages"
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
@@ -1257,5 +1258,50 @@ func TestDefinitionManagedRunExecuteRejectsDuplicateExecute(t *testing.T) {
 	}
 	if err := managed.Finish(nil); err != nil {
 		t.Fatalf("Finish: %v", err)
+	}
+}
+
+func TestDefinitionRuntimeProjectsDelegationEvents(t *testing.T) {
+	definition := testReviewerDefinition(t, nil)
+	runtime := newTestDefinitionRuntime(
+		t, definition, tool.NewRegistry(), testRuntimeSettings("http://unused"), nil,
+	)
+	const runID = "delegation-event-run"
+	events := runtime.hub.Subscribe(runID)
+
+	// The runtime must satisfy the execution-event boundary that delegation
+	// wiring type-asserts against.
+	var emitter interface {
+		EmitEvent(agentrun.EventType, agentrun.ExecutionEvent)
+		EmitToolStarted(string, agentrun.ToolStartedEvent)
+		EmitToolFinished(string, agentrun.ToolFinishedEvent)
+	} = runtime
+	if emitter == nil {
+		t.Fatal("runtime does not satisfy execution event boundary")
+	}
+
+	emitter.EmitEvent(agentrun.EventDelegationCreated, agentrun.ExecutionEvent{
+		RunID: runID, DelegationID: "del-1", Status: "created",
+	})
+	emitter.EmitToolStarted(runID, agentrun.ToolStartedEvent{Name: "search_code"})
+	emitter.EmitToolFinished(runID, agentrun.ToolFinishedEvent{Tool: "search_code"})
+
+	got := map[agentrun.EventType]int{}
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+	for len(got) < 3 {
+		select {
+		case event := <-events:
+			got[event.Type]++
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for events, got %v", got)
+		}
+	}
+	for _, want := range []agentrun.EventType{
+		agentrun.EventDelegationCreated, agentrun.EventToolStarted, agentrun.EventToolFinished,
+	} {
+		if got[want] == 0 {
+			t.Fatalf("missing event %q, got %v", want, got)
+		}
 	}
 }

@@ -252,6 +252,14 @@ func recoverInvestigationReport(
 			return repaired, true, nil
 		}
 	}
+	if report, ok := execution.BuildEvidencePreservingReport(
+		context.EvidenceUnits, context.EvidenceObservations, required, focus,
+	); ok {
+		report = normalizeOutputForSchema(ref, report)
+		if err := schemas.Validate(ref, report); err == nil {
+			return report, true, nil
+		}
+	}
 	fallback := map[string]any{
 		"focus":    focus,
 		"summary":  "Evidence collection completed, but the investigator could not produce a schema-valid report; no unsupported claim was accepted.",

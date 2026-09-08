@@ -12,7 +12,7 @@ import (
 const (
 	verifierOutputMinimum    = 4096
 	synthesizerOutputMinimum = 8192
-	investigatorMaxSteps     = 4
+	investigatorMaxSteps     = 6
 	convergenceMaxSteps      = 1
 	roleMaxContinueRounds    = 1
 )

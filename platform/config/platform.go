@@ -30,19 +30,32 @@ const (
 	DefaultDelegationMaxConcurrent       = 6
 	DefaultDelegationChildTimeout        = 150 * time.Second
 	DefaultDelegationBatchTimeout        = 180 * time.Second
-	DefaultDelegationMaxChildTurns       = 4
-	DefaultDelegationMaxChildToolCalls   = 16
+	DefaultDelegationMaxChildTurns       = 6
+	DefaultDelegationMaxChildToolCalls   = 24
 	DefaultDelegationMaxChildInputTokens = 96000
+	// DefaultDelegationMaxChildContextTokens is the single-request context
+	// ceiling for one child investigator, independent of the cumulative input
+	// budget. It must fit the pre-retrieved evidence seed plus the output
+	// reserve and context safety margin, with headroom for later tool-result
+	// growth; 51.2k fits the seed plus a 25.6k reasoning-aware output reserve
+	// and still leaves room for tool-result growth.
+	DefaultDelegationMaxChildContextTokens = 51200
 	// DefaultDelegationMaxChildOutputTokens is the provider-side generation
 	// cap for a child investigator. It is intentionally separate from
 	// MaxReportTokens (the projection bound) so the model decode time is
-	// bounded before the report is post-trimmed. 8k is a conservative default
-	// for read-only investigation; it must be calibrated against provider
-	// replay and per-workload profiles.
-	DefaultDelegationMaxChildOutputTokens = 8000
+	// bounded before the report is post-trimmed. A reasoning provider spends a
+	// large share of this budget on invisible thinking before any visible
+	// report, so 25.6k reserves the reasoning headroom plus a compact report;
+	// it must be calibrated against provider replay and per-workload profiles.
+	DefaultDelegationMaxChildOutputTokens = 25600
 	DefaultDelegationMaxReportTokens      = 4000
-	DefaultDelegationMaxTotalTokens       = 720000
+	// DefaultDelegationMaxTotalTokens is the batch-level hard ceiling over all
+	// children combined. It must cover maxChildren × (input + output) plus the
+	// parent answer reserve: 6 × (96000 + 25600) + 4000 = 733600, so 800k keeps
+	// the worst-case grant covered with headroom.
+	DefaultDelegationMaxTotalTokens       = 800000
 	DefaultDelegationParentAnswerReserve  = 4000
+	DefaultDelegationGapChaseRounds       = 0
 
 	// Shipped lookup-sized delegation defaults. A persisted copy of this
 	// bundle cannot finish retrieve-then-report, so Apply upgrades it.
@@ -115,11 +128,13 @@ type PlatformSettings struct {
 	DelegationMaxChildTurns        int
 	DelegationMaxChildToolCalls    int64
 	DelegationMaxChildInputTokens  int64
+	DelegationMaxChildContextTokens int64
 	DelegationMaxChildOutputTokens int64
 	DelegationMaxReportTokens      int64
 	DelegationMaxTotalTokens       int64
 	DelegationMaxTotalCostMicros   int64
 	DelegationParentAnswerReserve  int64
+	DelegationGapChaseRounds       int
 
 	CodingEnabledProviders   []string
 	CodingDefaultProvider    string
@@ -151,8 +166,8 @@ var platformSettingKeys = map[string]bool{
 	"delegation_max_child_tool_calls": true, "delegation_max_child_input_tokens": true,
 	"delegation_max_child_output_tokens": true, "delegation_max_report_tokens": true,
 	"delegation_max_total_tokens": true, "delegation_max_total_cost_micros": true,
-	"delegation_parent_answer_reserve": true,
-	"rerank_enabled":                   false, "rerank_pool": false, "rerank_topk": false,
+	"delegation_parent_answer_reserve": true, "delegation_gap_chase_rounds": true,
+	"rerank_enabled": false, "rerank_pool": false, "rerank_topk": false,
 	"rerank_min_score": false, "rerank_min_dense_preflight": false,
 	"runbook_min_score": false, "code_min_score": false,
 	"rerank_max_per_service": false, "rerank_max_per_service_low_band": false,
@@ -217,11 +232,13 @@ func (p *PlatformSettings) Values() map[string]any {
 		"delegation_max_child_turns":                 strconv.Itoa(p.DelegationMaxChildTurns),
 		"delegation_max_child_tool_calls":            strconv.FormatInt(p.DelegationMaxChildToolCalls, 10),
 		"delegation_max_child_input_tokens":          strconv.FormatInt(p.DelegationMaxChildInputTokens, 10),
+		"delegation_max_child_context_tokens":        strconv.FormatInt(p.DelegationMaxChildContextTokens, 10),
 		"delegation_max_child_output_tokens":         strconv.FormatInt(p.DelegationMaxChildOutputTokens, 10),
 		"delegation_max_report_tokens":               strconv.FormatInt(p.DelegationMaxReportTokens, 10),
 		"delegation_max_total_tokens":                strconv.FormatInt(p.DelegationMaxTotalTokens, 10),
 		"delegation_max_total_cost_micros":           strconv.FormatInt(p.DelegationMaxTotalCostMicros, 10),
 		"delegation_parent_answer_reserve":           strconv.FormatInt(p.DelegationParentAnswerReserve, 10),
+		"delegation_gap_chase_rounds":                strconv.Itoa(p.DelegationGapChaseRounds),
 		"context_budget":                             p.ContextBudget,
 		"domain_knowledge":                           p.DomainKnowledge,
 		"rerank_enabled":                             p.RerankEnabled,
@@ -304,6 +321,9 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	if p.DelegationMaxChildInputTokens <= 0 {
 		p.DelegationMaxChildInputTokens = DefaultDelegationMaxChildInputTokens
 	}
+	if p.DelegationMaxChildContextTokens <= 0 {
+		p.DelegationMaxChildContextTokens = DefaultDelegationMaxChildContextTokens
+	}
 	if p.DelegationMaxChildOutputTokens <= 0 {
 		p.DelegationMaxChildOutputTokens = DefaultDelegationMaxChildOutputTokens
 	}
@@ -315,6 +335,9 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	}
 	if p.DelegationParentAnswerReserve <= 0 {
 		p.DelegationParentAnswerReserve = DefaultDelegationParentAnswerReserve
+	}
+	if p.DelegationGapChaseRounds < 0 {
+		p.DelegationGapChaseRounds = DefaultDelegationGapChaseRounds
 	}
 	p.ToolPruningEnabled = false // default off; dry-run measurement logs what pruning would save
 	p.DisableLegacyAnswerRecovery = false
@@ -512,6 +535,11 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 			p.DelegationMaxChildInputTokens = n
 		}
 	}
+	if v := strings.TrimSpace(m["delegation_max_child_context_tokens"]); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			p.DelegationMaxChildContextTokens = n
+		}
+	}
 	if v := strings.TrimSpace(m["delegation_max_child_output_tokens"]); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			p.DelegationMaxChildOutputTokens = n
@@ -535,6 +563,11 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	if v := strings.TrimSpace(m["delegation_parent_answer_reserve"]); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
 			p.DelegationParentAnswerReserve = n
+		}
+	}
+	if v := strings.TrimSpace(m["delegation_gap_chase_rounds"]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			p.DelegationGapChaseRounds = n
 		}
 	}
 	if v := strings.TrimSpace(m["vcs_url"]); v != "" {
@@ -695,6 +728,8 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 		return canonicalPositiveInt64Setting(key, value)
 	case "delegation_max_total_cost_micros", "delegation_parent_answer_reserve":
 		return canonicalNonNegativeInt64Setting(key, value)
+	case "delegation_gap_chase_rounds":
+		return canonicalNonNegativeIntSetting(key, value)
 	case "rerank_min_score", "rerank_min_dense_preflight", "runbook_min_score", "code_min_score":
 		return canonicalScoreSetting(key, value)
 	case "agent_timeout":

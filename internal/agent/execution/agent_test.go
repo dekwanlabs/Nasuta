@@ -1306,8 +1306,8 @@ func TestWithDefaults_DoesNotRewriteInvalidAnswerReserve(t *testing.T) {
 	if cfg.ConclusionMaxTokens != 6000 {
 		t.Fatalf("ConclusionMaxTokens = %d, want 6000 (fallback to AnswerMaxTokens)", cfg.ConclusionMaxTokens)
 	}
-	if cfg.ConclusionRetryMaxTokens != 1024 {
-		t.Fatalf("ConclusionRetryMaxTokens = %d, want 1024 (capped quarter-budget retry)", cfg.ConclusionRetryMaxTokens)
+	if cfg.ConclusionRetryMaxTokens != 1500 {
+		t.Fatalf("ConclusionRetryMaxTokens = %d, want 1500 (quarter-budget retry)", cfg.ConclusionRetryMaxTokens)
 	}
 
 	// An explicit ConclusionMaxTokens is preserved.
@@ -1315,8 +1315,8 @@ func TestWithDefaults_DoesNotRewriteInvalidAnswerReserve(t *testing.T) {
 	if cfg.ConclusionMaxTokens != 8000 {
 		t.Fatalf("ConclusionMaxTokens = %d, want 8000 (explicit value preserved)", cfg.ConclusionMaxTokens)
 	}
-	if cfg.ConclusionRetryMaxTokens != 1024 {
-		t.Fatalf("ConclusionRetryMaxTokens = %d, want 1024 (capped retry budget)", cfg.ConclusionRetryMaxTokens)
+	if cfg.ConclusionRetryMaxTokens != 2000 {
+		t.Fatalf("ConclusionRetryMaxTokens = %d, want 2000 (quarter-budget retry)", cfg.ConclusionRetryMaxTokens)
 	}
 
 	cfg = Config{
@@ -1382,8 +1382,8 @@ func TestForceConclusion_UsesSmallBudgetForReasoningRetry(t *testing.T) {
 	if got, want := atomic.LoadInt32(&calls), int32(2); got != want {
 		t.Fatalf("LLM calls = %d, want %d", got, want)
 	}
-	if len(budgets) != 2 || budgets[0] != 12000 || budgets[1] != 1024 {
-		t.Fatalf("max_tokens = %v, want [12000 1024]", budgets)
+	if len(budgets) != 2 || budgets[0] != 12000 || budgets[1] != 3000 {
+		t.Fatalf("max_tokens = %v, want [12000 3000]", budgets)
 	}
 }
 

@@ -1361,3 +1361,70 @@ func mapEvidenceWorkerReport(t *testing.T, entities []string) agentapi.RunResult
 	}
 	return result
 }
+
+func TestMapResultRecoversTruncatedInvestigationReportPreservingEvidence(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	units := []tool.EvidenceUnit{
+		{
+			SourceKind: "code", Target: "router.go",
+			Sections: []string{"HandleRequest"},
+			Facets:   []string{"core_flow"},
+		},
+		{
+			SourceKind: "dependency", Target: "checkout",
+			Sections: []string{"outbound:checkout->billing:http"},
+		},
+	}
+	result, outcome := mapResult(
+		"run-investigator-preserve-evidence",
+		&execution.RunResult{
+			Err:           execution.ErrReasoningTruncated,
+			Evidence:      agentrun.EvidenceMetrics{Status: agentrun.EvidencePartial},
+			EvidenceUnits: units,
+		},
+		nil,
+		nil,
+		agentapi.Usage{},
+		nil,
+		registry,
+		agentapi.InvestigationReportSchemaRef(),
+		outputRecoveryContext{
+			AgentID:             "investigator.code",
+			Input:               investigationReportRecoveryContract(),
+			EvidenceUnits:       units,
+			EvidenceObservations: nil,
+		},
+	)
+	if result.Status != agentapi.RunSucceeded || result.Error != nil ||
+		outcome.Status != agentrun.StatusDone || outcome.Err != nil {
+		t.Fatalf("result=%+v outcome=%+v", result, outcome)
+	}
+	var report struct {
+		Findings []struct {
+			Claim string `json:"claim"`
+		} `json:"findings"`
+		Flow                   *agentapi.FlowIR `json:"flow"`
+		CoveredEvidenceGoals   []string         `json:"covered_evidence_goals"`
+		UnresolvedEvidenceGoals []string        `json:"unresolved_evidence_goals"`
+	}
+	if err := json.Unmarshal(result.Output, &report); err != nil {
+		t.Fatalf("decode recovered report: %v", err)
+	}
+	if len(report.Findings) == 0 {
+		t.Fatalf("recovered report dropped collected findings: %+v", report)
+	}
+	if report.Flow == nil || len(report.Flow.Edges) == 0 {
+		t.Fatalf("recovered report dropped collected flow: %+v", report)
+	}
+	for _, edge := range report.Flow.Edges {
+		if edge.EvidenceState == "verified" {
+			t.Fatalf("recovered flow promoted an inferred edge to verified: %+v", edge)
+		}
+	}
+	if len(report.CoveredEvidenceGoals) != 1 || report.CoveredEvidenceGoals[0] != "core_flow" {
+		t.Fatalf("recovered covered goals = %+v, want [core_flow]", report.CoveredEvidenceGoals)
+	}
+}

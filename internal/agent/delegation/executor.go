@@ -59,6 +59,12 @@ const (
 	// provider replay; it deliberately covers the observed "reported 14164 vs
 	// available 14163" 1-token class without silently absorbing large overruns.
 	childOutputTokenHeadroom = 512
+
+	// defaultChildContextTokens is the single-request context ceiling applied
+	// when a directly-constructed policy omits MaxChildContextTokens. The config
+	// layer always sets an explicit value before this point; this only covers
+	// embedders and tests.
+	defaultChildContextTokens = 51200
 )
 
 var errAttemptUnrecoverable = errors.New("delegation attempt cannot be recovered")
@@ -187,6 +193,10 @@ type Executor struct {
 	mu              sync.Mutex
 	capabilitySlots map[string]chan struct{}
 	flights         map[string]*taskFlight
+	// gapChaseCounts tracks, per delegation batch, how many gap-chase
+	// continuations have already been admitted. It is guarded by mu and used
+	// by the single-batch quota gate.
+	gapChaseCounts map[string]int
 }
 
 type taskFlight struct {
@@ -270,6 +280,7 @@ func NewExecutor(config ExecutorConfig) (*Executor, error) {
 		durableIOTimeout:   config.DurableIOTimeout,
 		capabilitySlots:    make(map[string]chan struct{}),
 		flights:            make(map[string]*taskFlight),
+		gapChaseCounts:     make(map[string]int),
 	}, nil
 }
 
@@ -1033,8 +1044,20 @@ func (executor *Executor) prepareTaskBudget(parent ParentContext, delegationID s
 	candidate.reportTokens = childBudget.reportTokens
 	candidate.context = selectContext(
 		parent, candidate.request.EvidenceRefs, candidate.request.FocusFacets,
-		childBudget.inputTokens,
+		childBudget.contextTokens,
 	)
+	// No explicit evidence_refs: inject the parent's pre-retrieved evidence as
+	// a seed, filtered by the capability's authorized facets. Explicit refs
+	// keep the original selectContext behavior and never get re-seeded. The
+	// seed is bounded below the single-request context ceiling so the child's
+	// first request still has room for the output reserve and the context
+	// safety margin inside the same window.
+	if len(candidate.request.EvidenceRefs) == 0 {
+		candidate.context = defaultSeedContext(
+			parent, capability, candidate.request.FocusFacets,
+			seedContextTokens(childBudget.contextTokens, childBudget.outputTokens),
+		)
+	}
 	input, err := childInput(parent, delegationID, *candidate)
 	if err != nil {
 		return err
@@ -1957,6 +1980,8 @@ func (executor *Executor) completeOwnedAttempt(
 		reportTokens = executor.policy.MaxReportTokens
 	}
 	report = boundReport(report, reportTokens)
+	report, result = executor.runGapChase(ctx, parent, delegationID, attemptTask, report, result)
+	report = boundReport(report, reportTokens)
 	raw, marshalErr := json.Marshal(report)
 	if marshalErr != nil {
 		report = failedReport(attemptTask, ErrorReportPersistenceFailed, marshalErr)
@@ -2465,18 +2490,24 @@ type childBudget struct {
 	inputTokens  int64
 	outputTokens int64
 	reportTokens int64
+	contextTokens int64
 }
 
 // childBudget derives one child's budget directly from the delegation policy.
 // Flow contracts no longer get a narrower budget: the parent still owns the
-// user-facing Mermaid, and a shallow child produces empty reports.
+// user-facing Mermaid, and a shallow child produces empty reports. The
+// single-request context ceiling is an independent policy field, not a split of
+// the cumulative input budget across turns: a child's first request carries the
+// full pre-retrieved evidence seed, which the cumulative-budget-derived ceiling
+// was too small to hold alongside the output reserve and context safety margin.
 func (executor *Executor) childBudget(parent ParentContext) childBudget {
 	return childBudget{
-		turns:        executor.policy.MaxChildTurns,
-		toolCalls:    executor.policy.MaxChildToolCalls,
-		inputTokens:  executor.policy.MaxChildInputTokens,
-		outputTokens: executor.policy.MaxChildOutputTokens,
-		reportTokens: executor.policy.MaxReportTokens,
+		turns:         executor.policy.MaxChildTurns,
+		toolCalls:     executor.policy.MaxChildToolCalls,
+		inputTokens:   executor.policy.MaxChildInputTokens,
+		outputTokens:  executor.policy.MaxChildOutputTokens,
+		reportTokens:  executor.policy.MaxReportTokens,
+		contextTokens: executor.policy.MaxChildContextTokens,
 	}
 }
 
@@ -2532,6 +2563,77 @@ func (executor *Executor) childLimitsForContext(
 	return executor.childLimitsAt(parent, definition, time.Now().UTC(), contextDeadline)
 }
 
+// gapChaseLimits derives the dedicated, reduced limits for one gap-chase
+// continuation. It reuses the child deadline-capping rules but with a shorter
+// timeout (GapChaseTimeout, default ChildTimeout/2) and roughly half the steps
+// and tool calls, so a chase is always cheaper than a full child investigation.
+func (executor *Executor) gapChaseLimits(
+	ctx context.Context,
+	parent ParentContext,
+	definition agentapi.Definition,
+) (agentapi.RunLimits, error) {
+	contextDeadline := time.Time{}
+	if deadline, ok := ctx.Deadline(); ok {
+		contextDeadline = deadline
+	}
+	now := time.Now().UTC()
+	timeout := executor.policy.GapChaseTimeout
+	if timeout <= 0 {
+		timeout = executor.policy.ChildTimeout / 2
+	}
+	if timeout >= definition.Budget.Timeout {
+		timeout = definition.Budget.Timeout - time.Millisecond
+	}
+	deadline := now.Add(timeout)
+	if !parent.BatchDeadline.IsZero() {
+		if capped := childDeadlineCap(now, parent.BatchDeadline); capped.Before(deadline) {
+			deadline = capped
+		}
+	} else if !parent.AnswerDeadline.IsZero() {
+		if capped := childDeadlineCap(now, parent.AnswerDeadline); capped.Before(deadline) {
+			deadline = capped
+		}
+	}
+	if !contextDeadline.IsZero() && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if !deadline.After(now) {
+		return agentapi.RunLimits{}, fmt.Errorf("parent has no remaining time for gap chase")
+	}
+
+	budget := executor.childBudget(parent)
+	steps := min(definition.Budget.MaxSteps, budget.turns)
+	if steps > 1 {
+		steps = steps / 2
+		if steps < 1 {
+			steps = 1
+		}
+	}
+	toolCalls := clampChildToolCalls(budget.toolCalls, definition.Budget.MaxToolCalls)
+	if toolCalls > 1 {
+		toolCalls = toolCalls / 2
+		if toolCalls < 1 {
+			toolCalls = 1
+		}
+	}
+	outputTokens := minPositiveInt64(budget.outputTokens, int64(definition.Model.MaxOutputTokens))
+	tokens := budget.inputTokens + outputTokens
+	cost := estimatedCostMicros(
+		budget.inputTokens, outputTokens,
+		definition.Model.InputPriceMicrosPerMillionTokens,
+		definition.Model.OutputPriceMicrosPerMillionTokens,
+	)
+	return agentapi.RunLimits{
+		Deadline:         deadline,
+		MaxSteps:         steps,
+		MaxToolCalls:     toolCalls,
+		MaxInputTokens:   budget.inputTokens,
+		MaxContextTokens: budget.contextTokens,
+		MaxOutputTokens:  outputTokens,
+		MaxTotalTokens:   tokens, MaxCostMicros: cost,
+	}, nil
+}
+
 func (executor *Executor) childLimitsAt(
 	parent ParentContext,
 	definition agentapi.Definition,
@@ -2569,12 +2671,13 @@ func (executor *Executor) childLimitsAt(
 		definition.Model.OutputPriceMicrosPerMillionTokens,
 	)
 	return agentapi.RunLimits{
-		Deadline:        deadline,
-		MaxSteps:        min(definition.Budget.MaxSteps, budget.turns),
-		MaxToolCalls:    clampChildToolCalls(budget.toolCalls, definition.Budget.MaxToolCalls),
-		MaxInputTokens:  budget.inputTokens,
-		MaxOutputTokens: outputTokens,
-		MaxTotalTokens:  tokens, MaxCostMicros: cost,
+		Deadline:         deadline,
+		MaxSteps:         min(definition.Budget.MaxSteps, budget.turns),
+		MaxToolCalls:     clampChildToolCalls(budget.toolCalls, definition.Budget.MaxToolCalls),
+		MaxInputTokens:   budget.inputTokens,
+		MaxContextTokens: budget.contextTokens,
+		MaxOutputTokens:  outputTokens,
+		MaxTotalTokens:   tokens, MaxCostMicros: cost,
 	}, nil
 }
 
@@ -2821,7 +2924,8 @@ func delegationPolicyLimitsInvalid(policy agentapi.DelegationPolicy) bool {
 	return policy.MaxChildren <= 0 || policy.MaxConcurrent <= 0 ||
 		policy.MaxConcurrent > policy.MaxChildren ||
 		policy.MaxChildTurns <= 0 || policy.MaxChildToolCalls <= 0 ||
-		policy.MaxChildInputTokens <= 0 || policy.MaxChildOutputTokens <= 0 ||
+		policy.MaxChildInputTokens <= 0 || policy.MaxChildContextTokens <= 0 ||
+		policy.MaxChildOutputTokens <= 0 ||
 		policy.MaxReportTokens <= 0 || policy.MaxTotalTokens <= 0 ||
 		policy.MaxTotalCostMicros < 0 || policy.ParentAnswerReserve < 0 ||
 		policy.BatchTimeout <= 0 || policy.ChildTimeout <= 0 ||
@@ -2834,11 +2938,26 @@ func normalizePolicy(
 	if policy.BatchTimeout <= 0 {
 		policy.BatchTimeout = policy.ChildTimeout
 	}
+	if policy.MaxChildContextTokens <= 0 {
+		policy.MaxChildContextTokens = defaultChildContextTokens
+	}
 	if policy.MaxDepth <= 0 || policy.MaxDepth > 1 {
 		return policy, fmt.Errorf("delegation max depth must be 1")
 	}
 	if delegationPolicyLimitsInvalid(policy) {
 		return policy, fmt.Errorf("delegation policy limits are invalid")
+	}
+	if policy.MaxGapChaseRounds < 0 {
+		policy.MaxGapChaseRounds = 0
+	}
+	if policy.GapChaseTimeout <= 0 {
+		policy.GapChaseTimeout = policy.ChildTimeout / 2
+	}
+	if policy.MaxGapChasePerBatch <= 0 {
+		policy.MaxGapChasePerBatch = 1
+	}
+	if policy.MinGapChaseGoals <= 0 {
+		policy.MinGapChaseGoals = 1
 	}
 	if policy.MaxReportTokens < minimumBoundedReportTokens() {
 		return policy, fmt.Errorf(
@@ -2886,6 +3005,96 @@ func selectContext(
 				filtered.Evidence = append(filtered.Evidence, unit)
 			}
 		}
+		if remainingBytes <= 0 {
+			break
+		}
+		filtered.Content = truncateText(filtered.Content, remainingBytes)
+		filtered.ContentHash = hashBytes([]byte(filtered.Content))
+		remainingBytes -= len(filtered.Content)
+		blocks = append(blocks, filtered)
+	}
+	return blocks
+}
+
+// seedCandidateSources lists the parent context blocks that may be injected as a
+// child pre-retrieval seed. Only the parent's own pre-retrieved evidence and
+// recalled memory are eligible; arbitrary tool-result blocks are not.
+func isSeedBlock(block agentapi.ContextBlock) bool {
+	return block.Source == "qa.evidence" || block.Source == "qa.memory"
+}
+
+// seedContextTokens derives the pre-retrieval seed budget for a child without
+// explicit evidence_refs. The seed must fit inside the single-request window
+// alongside the output reserve and the context safety margin, or the child's
+// first provider call fails before it starts. Using the full window as the seed
+// budget left no room for the answer and safety margin.
+func seedContextTokens(window, outputReserve int64) int64 {
+	safety := int64(agentrun.ContextSafetyTokens(int(window)))
+	if window <= outputReserve+safety {
+		return 0
+	}
+	return window - outputReserve - safety
+}
+
+// defaultSeedContext injects the parent's pre-retrieved evidence as a child
+// seed when the parent did not pass explicit evidence_refs. It keeps only the
+// evidence units whose facets intersect the task focus (falling back to the
+// capability's authorized input facets when the task carries no focus facets),
+// and truncates the block content to the child input token budget. The seed is
+// data, never instructions: the investigator prompt already declares retrieved
+// content as non-instructional.
+func defaultSeedContext(
+	parent ParentContext,
+	capability agentapi.Capability,
+	focusFacets []string,
+	maxTokens int64,
+) []agentapi.ContextBlock {
+	if len(parent.Context) == 0 {
+		return nil
+	}
+	facets := focusFacets
+	if len(facets) == 0 {
+		facets = capability.InputFacets
+	}
+	facetSet := make(map[string]struct{}, len(facets))
+	for _, facet := range facets {
+		facetSet[facet] = struct{}{}
+	}
+
+	var blocks []agentapi.ContextBlock
+	remainingBytes := int(maxTokens * 4 / 2)
+	seen := make(map[string]struct{})
+	for _, block := range parent.Context {
+		if !isSeedBlock(block) {
+			continue
+		}
+		key := block.ContentHash + "\x00" + block.Source + "\x00" + block.Title
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		// Only seed blocks that carry facet-matchable evidence units. A block
+		// without Evidence (e.g. a raw qa.memory recall blob) has no facet to
+		// relevance-filter on, so it is not injected as a "relevant subset"
+		// seed; the child re-retrieves it if needed.
+		if len(block.Evidence) == 0 {
+			continue
+		}
+		filtered := cloneContextBlock(block)
+		filtered.Evidence = make([]tool.EvidenceUnit, 0, len(block.Evidence))
+		for _, rawUnit := range block.Evidence {
+			unit, ok := canonicalContextEvidenceUnit(rawUnit)
+			if ok && evidenceMatchesFacets(unit, facetSet) {
+				filtered.Evidence = append(filtered.Evidence, unit)
+			}
+		}
+		// A block with evidence metadata but no facet match carries nothing
+		// relevant to this child; skip it instead of seeding noise.
+		if len(filtered.Evidence) == 0 {
+			continue
+		}
+
 		if remainingBytes <= 0 {
 			break
 		}

@@ -880,3 +880,37 @@ func TestTaskContractAcceptsFlowOutputHints(t *testing.T) {
 		t.Fatalf("flow task hints rejected: %v", err)
 	}
 }
+
+func TestDelegationReportAcceptsGapChaseFields(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(DefaultSchemas()); err != nil {
+		t.Fatal(err)
+	}
+	ref := agentapi.SchemaRef{ID: "delegation.report", Version: 1}
+	payload := json.RawMessage(`{
+		"capability":"knowledge.code.inspect",
+		"status":"partial",
+		"completeness":"partial",
+		"summary":"partial report",
+		"usage":{"tool_calls":0,"input_tokens":0,"output_tokens":0,"total_tokens":0},
+		"gap_chase":"retrieved",
+		"covered_evidence_goals":["core_flow"],
+		"unresolved_evidence_goals":["data_and_state"],
+		"open_hops":["worker -> database"]
+	}`)
+	if err := registry.Validate(ref, payload); err != nil {
+		t.Fatalf("valid gap-chase delegation report rejected: %v", err)
+	}
+
+	// An out-of-enum gap_chase must be rejected.
+	bad := json.RawMessage(`{
+		"capability":"knowledge.code.inspect",
+		"status":"partial",
+		"completeness":"partial",
+		"usage":{"tool_calls":0,"input_tokens":0,"output_tokens":0,"total_tokens":0},
+		"gap_chase":"unknown_state"
+	}`)
+	if err := registry.Validate(ref, bad); err == nil {
+		t.Fatal("delegation report accepted invalid gap_chase enum")
+	}
+}

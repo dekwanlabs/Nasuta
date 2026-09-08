@@ -14,6 +14,7 @@ type DelegationPolicy struct {
 	MaxChildTurns        int   `json:"max_child_turns"`
 	MaxChildToolCalls    int64 `json:"max_child_tool_calls"`
 	MaxChildInputTokens  int64 `json:"max_child_input_tokens"`
+	MaxChildContextTokens int64 `json:"max_child_context_tokens"`
 	MaxChildOutputTokens int64 `json:"max_child_output_tokens"`
 	MaxReportTokens      int64 `json:"max_report_tokens"`
 	MaxTotalTokens       int64 `json:"max_total_tokens"`
@@ -24,6 +25,22 @@ type DelegationPolicy struct {
 	// that construct policies directly.
 	BatchTimeout time.Duration `json:"batch_timeout"`
 	ChildTimeout time.Duration `json:"child_timeout"`
+	// MaxGapChaseRounds bounds the number of bounded child continuations
+	// that may chase unresolved evidence goals / open hops after a partial
+	// report. Zero disables gap chasing (the default).
+	MaxGapChaseRounds int `json:"max_gap_chase_rounds"`
+	// GapChaseTimeout is the dedicated wall-clock budget for one gap-chase
+	// continuation. A non-positive value normalizes to ChildTimeout/2 so a
+	// chase is always cheaper than a full child investigation.
+	GapChaseTimeout time.Duration `json:"gap_chase_timeout"`
+	// MaxGapChasePerBatch caps the number of gap-chase continuations per
+	// delegation batch. A non-positive value normalizes to 1 so the parent
+	// never pays for multiple full-width chases in one batch.
+	MaxGapChasePerBatch int `json:"max_gap_chase_per_batch"`
+	// MinGapChaseGoals is the minimum number of unresolved evidence goals
+	// required before a chase is worth launching. Zero-valued open hops never
+	// trigger a chase on their own. A non-positive value normalizes to 1.
+	MinGapChaseGoals int `json:"min_gap_chase_goals"`
 }
 
 // DelegationTask is the complete model-visible child request. Definition,
@@ -131,20 +148,36 @@ type DelegationUsage struct {
 	CostMicros      int64 `json:"cost_micros,omitempty"`
 }
 
+// DelegationGapChase records whether a partial report triggered a bounded
+// gap-chase continuation and how it settled.
+type DelegationGapChase string
+
+const (
+	DelegationGapChaseNone            DelegationGapChase = "none"
+	DelegationGapChaseTriggered       DelegationGapChase = "triggered"
+	DelegationGapChaseRetrieved       DelegationGapChase = "retrieved"
+	DelegationGapChaseUnavailable     DelegationGapChase = "unavailable"
+	DelegationGapChaseBudgetExhausted DelegationGapChase = "budget_exhausted"
+)
+
 // DelegationReport is the bounded projection returned to the parent.
 type DelegationReport struct {
-	RunID         string                 `json:"run_id,omitempty"`
-	ReportID      string                 `json:"report_id,omitempty"`
-	Capability    string                 `json:"capability"`
-	Status        DelegationStatus       `json:"status"`
-	Completeness  DelegationCompleteness `json:"completeness"`
-	Summary       string                 `json:"summary,omitempty"`
-	Findings      []DelegationFinding    `json:"findings,omitempty"`
-	Flow          *FlowIR                `json:"flow,omitempty"`
-	Conflicts     []DelegationConflict   `json:"conflicts,omitempty"`
-	Uncertainties []string               `json:"uncertainties,omitempty"`
-	Usage         DelegationUsage        `json:"usage"`
-	Error         *RunError              `json:"error,omitempty"`
+	RunID           string                 `json:"run_id,omitempty"`
+	ReportID        string                 `json:"report_id,omitempty"`
+	Capability      string                 `json:"capability"`
+	Status          DelegationStatus       `json:"status"`
+	Completeness    DelegationCompleteness `json:"completeness"`
+	Summary         string                 `json:"summary,omitempty"`
+	Findings        []DelegationFinding    `json:"findings,omitempty"`
+	Flow            *FlowIR                `json:"flow,omitempty"`
+	Conflicts       []DelegationConflict   `json:"conflicts,omitempty"`
+	Uncertainties   []string               `json:"uncertainties,omitempty"`
+	GapChase        DelegationGapChase     `json:"gap_chase,omitempty"`
+	CoveredGoals    []string               `json:"covered_evidence_goals,omitempty"`
+	UnresolvedGoals []string               `json:"unresolved_evidence_goals,omitempty"`
+	OpenHops        []string               `json:"open_hops,omitempty"`
+	Usage           DelegationUsage        `json:"usage"`
+	Error           *RunError              `json:"error,omitempty"`
 }
 
 type DelegationValidationConflict struct {

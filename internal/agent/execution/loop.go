@@ -115,18 +115,21 @@ func (config Config) withDefaults() Config {
 		if config.ConclusionRetryMaxTokens <= 0 {
 			config.ConclusionRetryMaxTokens = 1
 		}
-		if config.ConclusionRetryMaxTokens > 1024 {
-			config.ConclusionRetryMaxTokens = 1024
+		if config.ConclusionRetryMaxTokens > 8192 {
+			config.ConclusionRetryMaxTokens = 8192
 		}
 	}
 	if config.ConclusionRetryMaxTokens > config.ConclusionMaxTokens {
 		config.ConclusionRetryMaxTokens = config.ConclusionMaxTokens
 	}
 	// Phase caps. Explicit small values (for example tests that set 100) must
-	// never be silently enlarged, so only zero values are derived.
-	config.ParentToolMaxTokens = deriveCap(config.ParentToolMaxTokens, config.AnswerMaxTokens, 8192)
-	config.ContinuationMaxTokens = deriveCap(config.ContinuationMaxTokens, config.AnswerMaxTokens, 4096)
-	config.SynthesisMaxTokens = deriveCap(config.SynthesisMaxTokens, config.ConclusionMaxTokens, 8192)
+	// never be silently enlarged, so only zero values are derived. A reasoning
+	// provider spends a large share of each phase budget on invisible thinking
+	// before any visible output, so the ceilings are sized for reasoning headroom
+	// plus a visible answer rather than a non-reasoning model's visible-only cap.
+	config.ParentToolMaxTokens = deriveCap(config.ParentToolMaxTokens, config.AnswerMaxTokens, 32768)
+	config.ContinuationMaxTokens = deriveCap(config.ContinuationMaxTokens, config.AnswerMaxTokens, 16384)
+	config.SynthesisMaxTokens = deriveCap(config.SynthesisMaxTokens, config.ConclusionMaxTokens, 32768)
 	return config
 }
 
