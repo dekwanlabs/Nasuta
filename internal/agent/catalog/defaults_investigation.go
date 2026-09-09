@@ -11,7 +11,6 @@ import (
 
 const (
 	verifierOutputMinimum    = 4096
-	synthesizerOutputMinimum = 8192
 	investigatorMaxSteps     = 6
 	convergenceMaxSteps      = 1
 	roleMaxContinueRounds    = 1
@@ -22,10 +21,6 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 	verifierOutput := delegationRoleOutputBudget(
 		settings.LLMAnswerMaxTokens,
 		verifierOutputMinimum,
-	)
-	synthesizerOutput := delegationRoleOutputBudget(
-		settings.LLMAnswerMaxTokens,
-		synthesizerOutputMinimum,
 	)
 	investigatorSteps := boundedRoleLimit(settings.AgentMaxSteps, investigatorMaxSteps)
 	convergenceSteps := boundedRoleLimit(settings.AgentMaxSteps, convergenceMaxSteps)
@@ -137,39 +132,12 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 		return nil, fmt.Errorf("prepare delegation verifier: %w", err)
 	}
 	definitions = append(definitions, verifier)
-	synthesizer, err := agentapi.Prepare(agentapi.Definition{
-		ID: "synthesizer", Version: version, DisplayName: "Evidence Synthesizer",
-		Purpose: "Synthesize delegated investigation handoffs without gathering new evidence.",
-		Prompt: agentapi.PromptSpec{
-			System:  prompts.WithUserVisibleAnswerContract(prompts.Text(prompts.AgentCatalogSynthesizer)),
-			Version: "investigation-synthesis-v8",
-		},
-		InputSchema:  agentapi.InvestigationVerifiedBundleSchemaRef(),
-		OutputSchema: agentapi.InvestigationAnswerSchemaRef(),
-		Model: agentapi.ModelPolicy{
-			Provider: settings.LLMProvider, Model: settings.LLMModel,
-			MaxOutputTokens:                   synthesizerOutput,
-			InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
-			OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
-		},
-		Tools: agentapi.ToolPolicy{VisibleToolIDs: []string{}, RestrictVisible: true},
-		Budget: agentapi.BudgetPolicy{
-			Timeout:           time.Duration(settings.AgentTimeout),
-			MaxSteps:          convergenceSteps,
-			ContextTokens:     settings.LLMContextWindow,
-			MaxContinueRounds: continueRounds,
-		},
-		Permissions: agentapi.PermissionPolicy{Scopes: []string{"knowledge.read"}},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("prepare synthesizer: %w", err)
-	}
-	return append(definitions, synthesizer), nil
+	return definitions, nil
 }
 
-// delegationRoleOutputBudget derives a bounded verifier or synthesizer model
-// output cap from the shared answer budget. Small answer budgets retain the
-// role-specific floor required for structured handoffs.
+// delegationRoleOutputBudget derives a bounded verifier model output cap from
+// the shared answer budget. Small answer budgets retain the role-specific floor
+// required for structured handoffs.
 func delegationRoleOutputBudget(global, minimum int) int {
 	if global <= 0 {
 		return minimum

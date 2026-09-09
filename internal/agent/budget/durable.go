@@ -484,7 +484,7 @@ func (root *DurableRoot) ReserveTask(grant agentapi.Usage) (agentapi.RunBudgetTa
 	if root == nil {
 		return nil, nil
 	}
-	grant, err := normalizeUsage(grant)
+	grant, err := NormalizeGrant(grant)
 	if err != nil {
 		return nil, err
 	}
@@ -542,7 +542,7 @@ func (task *DurableTask) Available() agentapi.Usage {
 	if err != nil || snapshot.Released {
 		return agentapi.Usage{}
 	}
-	return subtractUsage(snapshot.Grant, addUsage(snapshot.Used, snapshot.InFlight))
+	return Remaining(snapshot.Grant, addUsage(snapshot.Used, snapshot.InFlight))
 }
 
 func (task *DurableTask) Check() error {
@@ -556,7 +556,16 @@ func (task *DurableTask) Check() error {
 	if snapshot.Released {
 		return fmt.Errorf("%w: child task budget released", agentapi.ErrBudgetExceeded)
 	}
-	return requireWithin(addUsage(snapshot.Used, snapshot.InFlight), snapshot.Grant, "child task usage")
+	used := addUsage(snapshot.Used, snapshot.InFlight)
+	// Only bounded dimensions are checked: a zero grant dimension means
+	// "unbounded per-child" and is charged against the shared batch ledger.
+	if snapshot.Grant.OutputTokens > 0 && used.OutputTokens > snapshot.Grant.OutputTokens {
+		return fmt.Errorf("%w: child task usage output=%d exceeds %d", agentapi.ErrBudgetExceeded, used.OutputTokens, snapshot.Grant.OutputTokens)
+	}
+	if snapshot.Grant.CostMicros > 0 && used.CostMicros > snapshot.Grant.CostMicros {
+		return fmt.Errorf("%w: child task usage cost=%d exceeds %d", agentapi.ErrBudgetExceeded, used.CostMicros, snapshot.Grant.CostMicros)
+	}
+	return nil
 }
 
 func (task *DurableTask) ReserveCall(estimate agentapi.Usage) (agentapi.RunBudgetCallReservation, error) {

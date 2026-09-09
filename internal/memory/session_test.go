@@ -727,3 +727,36 @@ func sessionRow(now time.Time, compactedThrough, latestTurn int) *sqlmock.Rows {
 		"created_at", "updated_at", "latest_turn",
 	}).AddRow("session-1", 42, "title", 20, compactedThrough, now, now, latestTurn)
 }
+
+func TestCreateSessionRejectsExistingID(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT user_id FROM qa_sessions WHERE id=\? FOR UPDATE`).
+		WithArgs("session-1").
+		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(42))
+	mock.ExpectRollback()
+
+	err := store.Create(SessionRecord{ID: "session-1", UserID: 42, Title: "title"})
+	if !errors.Is(err, ErrSessionExists) {
+		t.Fatalf("error = %v, want ErrSessionExists", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateSessionRequiresUserAndID(t *testing.T) {
+	store, mock, closeDB := newMockSessionStore(t)
+	defer closeDB()
+
+	if err := store.Create(SessionRecord{ID: "", UserID: 42}); err == nil {
+		t.Fatal("expected error for empty session id")
+	}
+	if err := store.Create(SessionRecord{ID: "session-1", UserID: 0}); err == nil {
+		t.Fatal("expected error for zero user id")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

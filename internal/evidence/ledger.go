@@ -12,7 +12,7 @@ const (
 	// HandlePrefix is the stable citation namespace for ledger evidence.
 	HandlePrefix = "ev_"
 	// HandleLength is the full citation token length, including the prefix.
-	// Verifier and synthesizer prompts repeat these tokens, so a 64-char
+	// Verifier and composer prompts repeat these tokens, so a 64-char
 	// SHA-256 hex digest wastes prompt budget.
 	HandleLength    = 16
 	handleHexLength = HandleLength - len(HandlePrefix)

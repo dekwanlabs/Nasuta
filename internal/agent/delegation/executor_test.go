@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -848,11 +849,11 @@ func TestExecutorChildUsesTaskBudgetAndSettlesIntoRoot(t *testing.T) {
 	if settledChildUsage.TotalTokens != 15 {
 		t.Fatalf("settled child usage = %+v", settledChildUsage)
 	}
-	// The child grant is 256 input + 128 output = 384 total tokens. After
-	// settling 15 tokens, its task-local availability is 369; Release then
-	// returns the remaining grant to the root.
-	if remainingTaskGrant.TotalTokens != 369 {
-		t.Fatalf("remaining child grant = %+v, want total 369", remainingTaskGrant)
+	// The child grant is output-only (128 output, no cumulative input/total).
+	// After settling 5 output tokens its output availability is 123; input and
+	// total are unbounded per-child and charged to the shared batch ledger.
+	if remainingTaskGrant.OutputTokens != 123 || remainingTaskGrant.TotalTokens != math.MaxInt64 {
+		t.Fatalf("remaining child grant = %+v, want output 123 and unbounded total", remainingTaskGrant)
 	}
 	if got := root.Used().TotalTokens; got != 15 {
 		t.Fatalf("root used total = %d, want 15", got)
@@ -867,7 +868,7 @@ func TestExecutorChildUsesTaskBudgetAndSettlesIntoRoot(t *testing.T) {
 
 func TestExecutorRejectsChildWhenParentRootHasNoAdmissionCapacity(t *testing.T) {
 	root := budget.NewRoot(agentapi.RunLimits{
-		MaxTotalTokens:      500,
+		MaxTotalTokens:      300,
 		ParentAnswerReserve: 100,
 	})
 	parentCall, err := root.ReserveCall(agentapi.Usage{
@@ -916,8 +917,8 @@ func TestExecutorRejectsChildWhenParentRootHasNoAdmissionCapacity(t *testing.T) 
 		t.Fatalf("root used total = %d, want 150", got)
 	}
 	// Default calls must still leave the 100-token parent answer reserve intact.
-	if got := root.Available().TotalTokens; got != 250 {
-		t.Fatalf("root default availability = %d, want 250", got)
+	if got := root.Available().TotalTokens; got != 50 {
+		t.Fatalf("root default availability = %d, want 50", got)
 	}
 }
 
@@ -963,7 +964,7 @@ func TestExecutorReleasesInMemoryChildGrantWhenDurableAdmissionFails(t *testing.
 }
 
 func TestSemanticVerifierRespectsParentRootBudget(t *testing.T) {
-	root := budget.NewRoot(agentapi.RunLimits{MaxTotalTokens: 384})
+	root := budget.NewRoot(agentapi.RunLimits{MaxTotalTokens: 140})
 	var (
 		mu          sync.Mutex
 		runtimeRuns []string
@@ -1034,8 +1035,8 @@ func TestSemanticVerifierRespectsParentRootBudget(t *testing.T) {
 	if got := root.Used().TotalTokens; got != 15 {
 		t.Fatalf("root used total = %d, want 15", got)
 	}
-	if got := root.Available().TotalTokens; got != 369 {
-		t.Fatalf("root availability = %d, want 369 after child", got)
+	if got := root.Available().TotalTokens; got != 125 {
+		t.Fatalf("root availability = %d, want 125 after child", got)
 	}
 }
 
@@ -1886,17 +1887,14 @@ func TestFlowChildBudgetMatchesOrdinaryDelegation(t *testing.T) {
 	executor := &Executor{policy: agentapi.DelegationPolicy{
 		MaxChildTurns:        4,
 		MaxChildToolCalls:    16,
-		MaxChildInputTokens:  96000,
 		MaxChildOutputTokens: 16000,
 		MaxReportTokens:      4000,
 		ChildTimeout:         200 * time.Millisecond,
 	}}
 	parent := ParentContext{
 		OutputContract: agentapi.RunOutputContract{
-			Kind:           "flow",
-			RequireMermaid: true,
-			Subjects:       []string{"订单创建"},
-			MaxHops:        6,
+			Subjects: []string{"订单创建"},
+			MaxHops:  6,
 		},
 		Limits: agentapi.RunLimits{Deadline: time.Now().UTC().Add(time.Minute)},
 	}
@@ -1919,7 +1917,7 @@ func TestFlowChildBudgetMatchesOrdinaryDelegation(t *testing.T) {
 	}
 	if limits.MaxSteps != executor.policy.MaxChildTurns ||
 		limits.MaxToolCalls != executor.policy.MaxChildToolCalls ||
-		limits.MaxTotalTokens != executor.policy.MaxChildOutputTokens+executor.policy.MaxChildInputTokens {
+		limits.MaxTotalTokens != 0 {
 		t.Fatalf("flow child limits = %#v", limits)
 	}
 }
@@ -1928,7 +1926,7 @@ func TestChildInputCarriesParentFlowShapeWithoutForcingMermaidOnChild(t *testing
 	parent := ParentContext{
 		RunID: "parent-1", QuestionSummary: "订单创建流程",
 		OutputContract: agentapi.RunOutputContract{
-			Kind: "flow", RequireMermaid: true, MaxHops: 6,
+			MaxHops: 6,
 		},
 	}
 	task := preparedTask{
@@ -1943,20 +1941,23 @@ func TestChildInputCarriesParentFlowShapeWithoutForcingMermaidOnChild(t *testing
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["output_kind"] != "flow" || int(payload["max_hops"].(float64)) != 6 {
+	if int(payload["max_hops"].(float64)) != 6 {
 		t.Fatalf("flow shape missing from child input: %#v", payload)
 	}
+	if _, has := payload["output_kind"]; has {
+		t.Fatalf("child input should not carry a classification kind: %#v", payload)
+	}
 	request := (&Executor{}).runRequest(parent, "del-1", task)
-	if request.Policy.OutputContract.Kind != "" || request.Policy.OutputContract.RequireMermaid {
-		t.Fatalf("child inherited user-facing Mermaid contract: %#v", request.Policy.OutputContract)
+	if request.Policy.OutputContract.MaxHops != 0 || len(request.Policy.OutputContract.Subjects) != 0 {
+		t.Fatalf("child inherited user-facing flow contract: %#v", request.Policy.OutputContract)
 	}
 }
 
 func TestChildLimitsClampsOutputTokensToDefinitionModel(t *testing.T) {
 	executor := &Executor{policy: agentapi.DelegationPolicy{
 		MaxChildTurns: 3, MaxChildToolCalls: 4,
-		MaxChildInputTokens: 256, MaxChildOutputTokens: 128,
-		ChildTimeout: 200 * time.Millisecond,
+		MaxChildOutputTokens: 128,
+		ChildTimeout:         200 * time.Millisecond,
 	}}
 	parent := ParentContext{Limits: agentapi.RunLimits{Deadline: time.Now().UTC().Add(time.Minute)}}
 	limits, err := executor.childLimits(parent, agentapi.Definition{
@@ -1966,16 +1967,16 @@ func TestChildLimitsClampsOutputTokensToDefinitionModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if limits.MaxOutputTokens != 64 || limits.MaxTotalTokens != 320 {
-		t.Fatalf("child limits = %+v, want output=64 total=320", limits)
+	if limits.MaxOutputTokens != 64 || limits.MaxTotalTokens != 0 || limits.MaxInputTokens != 0 {
+		t.Fatalf("child limits = %+v, want output=64 with no cumulative input/total quota", limits)
 	}
 }
 
 func TestChildLimitsForContextUsesCallerDeadline(t *testing.T) {
 	executor := &Executor{policy: agentapi.DelegationPolicy{
 		MaxChildTurns: 3, MaxChildToolCalls: 4,
-		MaxChildInputTokens: 256, MaxChildOutputTokens: 128,
-		ChildTimeout: 10 * time.Second,
+		MaxChildOutputTokens: 128,
+		ChildTimeout:         10 * time.Second,
 	}}
 	parent := ParentContext{Limits: agentapi.RunLimits{Deadline: time.Now().UTC().Add(time.Minute)}}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -2000,8 +2001,8 @@ func TestChildLimitsForContextUsesCallerDeadline(t *testing.T) {
 func TestChildLimitsClampsToolCallsToDefinitionBudget(t *testing.T) {
 	executor := &Executor{policy: agentapi.DelegationPolicy{
 		MaxChildTurns: 3, MaxChildToolCalls: 4,
-		MaxChildInputTokens: 256, MaxChildOutputTokens: 128,
-		ChildTimeout: 200 * time.Millisecond,
+		MaxChildOutputTokens: 128,
+		ChildTimeout:         200 * time.Millisecond,
 	}}
 	parent := ParentContext{
 		Limits: agentapi.RunLimits{Deadline: time.Now().UTC().Add(time.Minute)},
@@ -2350,8 +2351,7 @@ func newExecutorFixture(
 	policy := agentapi.DelegationPolicy{
 		MaxDepth: 1, MaxChildren: 4, MaxConcurrent: 2,
 		MaxChildTurns: 3, MaxChildToolCalls: 4,
-		MaxChildInputTokens: 256, MaxChildOutputTokens: 128,
-		MaxReportTokens: 512, MaxTotalTokens: 4096,
+		MaxChildOutputTokens: 128, MaxReportTokens: 512, MaxTotalTokens: 4096,
 		MaxTotalCostMicros: 0, ParentAnswerReserve: 256,
 		ChildTimeout: 200 * time.Millisecond,
 	}
@@ -2775,7 +2775,7 @@ func TestExecutorQueuedWorkerSettlementIsReplayedByParent(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		persistence.mu.Lock()
-		record, _ = persistence.records[executorTaskKey("parent-1", delegationID, 0)]
+		record = persistence.records[executorTaskKey("parent-1", delegationID, 0)]
 		persistence.mu.Unlock()
 		if record.ChildRunID != "" {
 			break
@@ -3265,7 +3265,6 @@ func TestExecutorChildDeadlineCapsAtAnswerDeadlineNotRunDeadline(t *testing.T) {
 	executor := &Executor{policy: agentapi.DelegationPolicy{
 		MaxChildTurns:        3,
 		MaxChildToolCalls:    4,
-		MaxChildInputTokens:  256,
 		MaxChildOutputTokens: 128,
 		ChildTimeout:         time.Minute,
 	}}
@@ -3364,8 +3363,8 @@ func TestNormalizePolicyDefaultsBatchTimeoutToChildTimeout(t *testing.T) {
 	policy := agentapi.DelegationPolicy{
 		MaxDepth: 1, MaxChildren: 2, MaxConcurrent: 1,
 		MaxChildTurns: 2, MaxChildToolCalls: 2,
-		MaxChildInputTokens: 128, MaxChildOutputTokens: 128,
-		MaxReportTokens: 512, MaxTotalTokens: 1024,
+		MaxChildOutputTokens: 128,
+		MaxReportTokens:      512, MaxTotalTokens: 1024,
 		ParentAnswerReserve: 64, ChildTimeout: 3 * time.Second,
 	}
 	got, err := normalizePolicy(policy)
@@ -3381,8 +3380,8 @@ func TestNormalizePolicyRejectsChildTimeoutLongerThanBatch(t *testing.T) {
 	policy := agentapi.DelegationPolicy{
 		MaxDepth: 1, MaxChildren: 2, MaxConcurrent: 1,
 		MaxChildTurns: 2, MaxChildToolCalls: 2,
-		MaxChildInputTokens: 128, MaxChildOutputTokens: 128,
-		MaxReportTokens: 512, MaxTotalTokens: 1024,
+		MaxChildOutputTokens: 128,
+		MaxReportTokens:      512, MaxTotalTokens: 1024,
 		ParentAnswerReserve: 64, BatchTimeout: time.Second,
 		ChildTimeout: 2 * time.Second,
 	}
@@ -3414,8 +3413,8 @@ func TestChildDeadlineShortBatchWindowKeepsUsableSafetyMargin(t *testing.T) {
 	now := time.Now().UTC()
 	executor := &Executor{policy: agentapi.DelegationPolicy{
 		MaxChildTurns: 2, MaxChildToolCalls: 2,
-		MaxChildInputTokens: 128, MaxChildOutputTokens: 128,
-		ChildTimeout: time.Second, BatchTimeout: 200 * time.Millisecond,
+		MaxChildOutputTokens: 128,
+		ChildTimeout:         time.Second, BatchTimeout: 200 * time.Millisecond,
 	}}
 	parent := ParentContext{BatchDeadline: now.Add(200 * time.Millisecond)}
 	limits, err := executor.childLimitsAt(parent, agentapi.Definition{
@@ -3492,11 +3491,11 @@ func TestDispatchIgnoresToolInvocationTimeoutForBatchDeadline(t *testing.T) {
 }
 
 func TestApplyAttemptTokenLimitsSoftOutputOverrun(t *testing.T) {
-	task := preparedTask{inputTokens: 1024, outputTokens: 1000}
 	result := agentapi.RunResult{
 		Status: agentapi.RunSucceeded,
 		Usage:  agentapi.Usage{InputTokens: 100, OutputTokens: 1001},
 	}
+	task := preparedTask{outputTokens: 1000}
 	applyAttemptTokenLimits(&result, task)
 	if result.Status != agentapi.RunSucceeded {
 		t.Fatalf("status = %s, want succeeded for 1-token overrun", result.Status)
@@ -3507,11 +3506,11 @@ func TestApplyAttemptTokenLimitsSoftOutputOverrun(t *testing.T) {
 }
 
 func TestApplyAttemptTokenLimitsHardOutputOverrun(t *testing.T) {
-	task := preparedTask{inputTokens: 1024, outputTokens: 1000}
 	result := agentapi.RunResult{
 		Status: agentapi.RunSucceeded,
 		Usage:  agentapi.Usage{InputTokens: 100, OutputTokens: 2000},
 	}
+	task := preparedTask{outputTokens: 1000}
 	applyAttemptTokenLimits(&result, task)
 	if result.Status != agentapi.RunFailed {
 		t.Fatalf("status = %s, want failed for large overrun", result.Status)
@@ -3522,12 +3521,12 @@ func TestApplyAttemptTokenLimitsHardOutputOverrun(t *testing.T) {
 }
 
 func TestApplyAttemptTokenLimitsSoftOverrunDoesNotMaskFailure(t *testing.T) {
-	task := preparedTask{inputTokens: 1024, outputTokens: 1000}
 	result := agentapi.RunResult{
 		Status: agentapi.RunFailed,
 		Error:  &agentapi.RunError{Code: ErrorChildExecution, Message: "boom"},
 		Usage:  agentapi.Usage{InputTokens: 100, OutputTokens: 1001},
 	}
+	task := preparedTask{outputTokens: 1000}
 	applyAttemptTokenLimits(&result, task)
 	if result.Status != agentapi.RunFailed {
 		t.Fatalf("status = %s, want failed", result.Status)

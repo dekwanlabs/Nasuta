@@ -33,7 +33,7 @@ type LogicalLoopState struct {
 	StepSeq               int                           `json:"step_seq,omitempty"`
 	Answer                string                        `json:"answer,omitempty"`
 	References            []tool.Reference              `json:"references,omitempty"`
-	Flow                  *agentapi.FlowIR              `json:"flow,omitempty"`
+	Flows                 []*agentapi.FlowIR            `json:"flows,omitempty"`
 	DelegatedFlows        []agentapi.FlowIR             `json:"delegated_flows,omitempty"`
 	DelegationAdoptions   []agentapi.DelegationAdoption `json:"delegation_adoptions,omitempty"`
 	DispatchedDelegations []string                      `json:"dispatched_delegations,omitempty"`
@@ -114,7 +114,7 @@ func (agent *Agent) checkpointState(state *compiledLoop, phase string, step int)
 			}
 			return state.answerContract.Adoptions()
 		}(),
-		StepSeq: state.stepSeq, Answer: state.result.Answer, References: append([]tool.Reference(nil), state.result.References...), Flow: cloneExecutionFlow(state.result.Flow), DelegatedFlows: cloneExecutionFlows(state.delegatedFlows), DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions), DispatchedDelegations: append([]string(nil), state.dispatchedDelegations...), SettledDelegations: settledDelegationIDs(state),
+		StepSeq: state.stepSeq, Answer: state.result.Answer, References: append([]tool.Reference(nil), state.result.References...), Flows: cloneExecutionFlowPtrs(state.result.Flows), DelegatedFlows: cloneExecutionFlows(state.delegatedFlows), DelegationAdoptions: cloneDelegationAdoptions(state.result.DelegationAdoptions), DispatchedDelegations: append([]string(nil), state.dispatchedDelegations...), SettledDelegations: settledDelegationIDs(state),
 		StepNo: step, Answered: state.answered, ToolBudgetExhausted: state.toolBudgetExhausted,
 		EvidenceUnits: units, EvidenceConflicts: conflicts,
 	})

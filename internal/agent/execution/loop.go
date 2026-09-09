@@ -102,9 +102,14 @@ type ConversationContext struct {
 
 func (config Config) withDefaults() Config {
 	if !hasModelParameters(config.InvestigationModelParameters) {
-		config.InvestigationModelParameters = config.ModelParameters.Clone()
+		// Tool-calling steps only decide which tool to invoke next; deep
+		// reasoning adds latency without better tool selection, so a reasoning
+		// provider runs the investigation phase at low effort.
+		config.InvestigationModelParameters = config.ModelParameters.WithLowReasoning()
 	}
 	if !hasModelParameters(config.AnswerModelParameters) {
+		// The final answer carries the user-visible quality, so it keeps the
+		// provider's default (high) reasoning rather than being lowered.
 		config.AnswerModelParameters = config.ModelParameters.WithoutReasoning()
 	}
 	if config.ConclusionMaxTokens <= 0 {
@@ -198,7 +203,7 @@ type RunResult struct {
 	EvidenceConflicts    []evidence.Conflict
 	References           []tool.Reference
 	DelegationAdoptions  []agentapi.DelegationAdoption
-	Flow                 *agentapi.FlowIR
+	Flows                []*agentapi.FlowIR
 	ForcedConclusion     bool
 	Aborted              bool
 	Err                  error
@@ -376,7 +381,7 @@ func (agent *Agent) RunCompiledFromCheckpoint(
 	}
 	state.result.Answer = stateData.Answer
 	state.result.References = append([]tool.Reference(nil), stateData.References...)
-	state.result.Flow = cloneExecutionFlow(stateData.Flow)
+	state.result.Flows = cloneExecutionFlowPtrs(stateData.Flows)
 	state.result.DelegationAdoptions = cloneDelegationAdoptions(stateData.DelegationAdoptions)
 	state.delegatedFlows = cloneExecutionFlows(stateData.DelegatedFlows)
 	state.dispatchedDelegations = append([]string(nil), stateData.DispatchedDelegations...)

@@ -1197,7 +1197,7 @@ func TestRunStartMismatchIdentifiesOutputContract(t *testing.T) {
 		RunID: "run-1",
 		Input: json.RawMessage(`{}`),
 		Policy: agentapi.RunPolicy{OutputContract: agentapi.RunOutputContract{
-			Kind: "flow", RequireMermaid: true, Subjects: []string{"RGB"}, MaxHops: 6,
+			Subjects: []string{"RGB"}, MaxHops: 6,
 		}},
 	}
 	actual := prepared
@@ -1270,15 +1270,13 @@ func TestDefinitionRuntimeProjectsDelegationEvents(t *testing.T) {
 	events := runtime.hub.Subscribe(runID)
 
 	// The runtime must satisfy the execution-event boundary that delegation
-	// wiring type-asserts against.
+	// wiring type-asserts against. The assignment itself is the compile-time
+	// assertion that the concrete runtime implements every required method.
 	var emitter interface {
 		EmitEvent(agentrun.EventType, agentrun.ExecutionEvent)
 		EmitToolStarted(string, agentrun.ToolStartedEvent)
 		EmitToolFinished(string, agentrun.ToolFinishedEvent)
 	} = runtime
-	if emitter == nil {
-		t.Fatal("runtime does not satisfy execution event boundary")
-	}
 
 	emitter.EmitEvent(agentrun.EventDelegationCreated, agentrun.ExecutionEvent{
 		RunID: runID, DelegationID: "del-1", Status: "created",

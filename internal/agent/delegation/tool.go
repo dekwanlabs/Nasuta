@@ -302,15 +302,6 @@ func facetItems(enum []any) map[string]any {
 	return items
 }
 
-func batchPartial(result agentapi.DelegationBatchResult) bool {
-	for _, report := range result.Results {
-		if report.Status != agentapi.DelegationCompleted {
-			return true
-		}
-	}
-	return false
-}
-
 // StatusTool exposes a non-blocking poll of one dispatched delegation. It lets
 // the parent read whichever children have already settled and backfill its
 // draft answer between loop steps instead of blocking inside

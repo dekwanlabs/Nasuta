@@ -465,11 +465,18 @@ func (svc *Service) prepareEvidence(
 	preloadedContext = append(preloadedContext, prefetched...)
 	preloadedContext = append(preloadedContext, prepared.request.PreloadedContext...)
 
-	recalled, memoryUnavailable := svc.recallMemory(
+	recalled, memoryState, memoryReason := svc.recallMemory(
 		ctx, prepared.request.UserID, prepared.request.Question, evidencePlan,
 	)
-	if memoryUnavailable != "" {
-		preloadedContext = append(preloadedContext, unavailableToolBlock("memory", memoryUnavailable))
+	switch memoryState {
+	case "unavailable":
+		preloadedContext = append(preloadedContext, unavailableToolBlock("memory", memoryReason))
+	case "failed":
+		// A hard backend failure is not a normal degraded/unavailable source:
+		// surface the degraded context so the answer still proceeds with an
+		// explicit partial-evidence marker rather than silently pretending the
+		// capability was simply absent.
+		preloadedContext = append(preloadedContext, unavailableToolBlock("memory", "memory recall degraded: "+memoryReason))
 	}
 
 	q := prepared.planning.CleanQuestion
@@ -536,9 +543,9 @@ func (svc *Service) recallMemory(
 	userID int64,
 	question string,
 	evidencePlan domain.EvidencePlan,
-) ([]memory.MemoryRecord, string) {
+) ([]memory.MemoryRecord, string, string) {
 	if !evidencePlan.Has(domain.Memory) {
-		return nil, ""
+		return nil, "", ""
 	}
 	memoryInput := &memoryRecallInput{
 		Store: svc.memory, UserID: userID, Query: question, Limit: 3,
@@ -562,12 +569,11 @@ func (svc *Service) recallMemory(
 	switch memoryResult.Status {
 	case "unavailable":
 		log.WarnfCtx(ctx, "[qa] evidence source unavailable: memory")
-		return nil, memoryResult.Error
+		return nil, "unavailable", memoryResult.Error
 	case "failed":
-		reason := "memory recall failed: " + memoryResult.Error
 		log.ErrorfCtx(ctx, "[qa] memory recall error: %s", memoryResult.Error)
-		return nil, reason
+		return nil, "failed", memoryResult.Error
 	default:
-		return memoryResult.Result.Records, ""
+		return memoryResult.Result.Records, "", ""
 	}
 }

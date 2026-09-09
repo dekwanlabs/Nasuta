@@ -306,11 +306,6 @@ const (
 	workflowReservationReleased
 )
 
-func (reservation *workflowCallReservation) isSettled() bool {
-	settled, _ := reservation.settledUsage()
-	return settled
-}
-
 func (reservation *workflowCallReservation) settledUsage() (bool, agentapi.Usage) {
 	if reservation == nil {
 		return false, agentapi.Usage{}

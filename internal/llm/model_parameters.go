@@ -203,6 +203,15 @@ func (parameters ModelParameters) WithoutReasoning() ModelParameters {
 	return parameters.WithReasoning(ReasoningDisabled, "none")
 }
 
+// WithLowReasoning marks a phase as needing only minimal provider reasoning.
+// Reasoning providers cannot be fully disabled, so the answer/report phase
+// lowers the effort instead of pretending reasoning is off; non-reasoning
+// providers ignore the setting because their capability never advertises a
+// reasoning wire field.
+func (parameters ModelParameters) WithLowReasoning() ModelParameters {
+	return parameters.WithReasoning(ReasoningEnabled, "low")
+}
+
 func normalizeReasoningMode(mode string) ReasoningMode {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "enabled":

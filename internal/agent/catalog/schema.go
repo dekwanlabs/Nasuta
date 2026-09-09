@@ -52,7 +52,6 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 						"items":{"type":"string","minLength":1,"maxLength":256}
 					},
 					"delegation_id":{"type":"string","minLength":1,"maxLength":64},
-					"output_kind":{"type":"string","enum":["flow"]},
 					"max_hops":{"type":"integer","minimum":1,"maximum":32},
 					"parent_run_id":{"type":"string","minLength":1,"maxLength":64},
 					"task_index":{"type":"integer","minimum":0},

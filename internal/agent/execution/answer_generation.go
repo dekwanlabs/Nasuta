@@ -52,7 +52,7 @@ func (agent *Agent) concludeWithRecovery(
 	stream := newStreamPipe(agent.observer, input.RunID, 0, attemptStarted, agent.onFirstAnswerToken)
 	res, callErr := agent.generateWithContinue(ctx, input.Messages, agent.cfg.ConclusionMaxTokens, stream)
 	attemptStarted, stream, res, callErr = agent.retryForceConclusionWithoutReasoning(ctx, input, attemptStarted, stream, res, callErr)
-	res, callErr = agent.recoverConclusionToolProtocol(ctx, input, attemptStarted, stream, res, callErr)
+	attemptStarted, stream, res, callErr = agent.recoverConclusionToolProtocol(ctx, input, attemptStarted, stream, res, callErr)
 	res, callErr = agent.enforceConclusionContracts(ctx, input, outputContract, stream, res, callErr)
 	return forceConclusionOutput{
 		Result: res, Stream: stream, Timing: stream.Timings(), AttemptStarted: attemptStarted,
@@ -92,7 +92,7 @@ func (agent *Agent) recoverConclusionToolProtocol(
 	stream *StreamPipe,
 	res *llm.ChatStreamResult,
 	callErr error,
-) (*llm.ChatStreamResult, error) {
+) (time.Time, *StreamPipe, *llm.ChatStreamResult, error) {
 	if callErr == nil && hasLeakedToolProtocol(res) {
 		if !agent.cfg.DisableLegacyAnswerRecovery {
 			log.WarnfCtx(ctx, "[agent] run %s conclusion contained tool protocol; retrying without control markup", input.RunID)
@@ -106,7 +106,7 @@ func (agent *Agent) recoverConclusionToolProtocol(
 			callErr = ErrToolProtocolLeak
 		}
 	}
-	return res, callErr
+	return attemptStarted, stream, res, callErr
 }
 
 func (agent *Agent) enforceConclusionContracts(
@@ -279,6 +279,7 @@ func (agent *Agent) continueIfNeeded(ctx context.Context, messages []llm.Message
 		if res.FinishReason == llm.FinishLength {
 			return res, ErrReasoningTruncated
 		}
+		agent.logEmptyResponseReasoningTail(ctx, res)
 		return res, ErrEmptyModelResponse
 	}
 	if agent.cfg.StructuredOutput {
@@ -376,6 +377,28 @@ func (agent *Agent) logProviderCompletionUsage(ctx context.Context, requestedLim
 		result.Usage.ReasoningTokens, result.Usage.VisibleOutputTokens(),
 		result.Usage.VisibleOutputTokensEstimated(), result.FinishReason,
 	)
+}
+
+// logEmptyResponseReasoningTail dumps the tail of the reasoning content when a
+// reasoning provider ended normally but produced no visible answer. It exists
+// to diagnose whether the report was emitted into reasoning_content instead of
+// the content field — a known reasoning-model failure mode. Temporary
+// diagnostic logging; remove once the failure mode is confirmed.
+func (agent *Agent) logEmptyResponseReasoningTail(ctx context.Context, res *llm.ChatStreamResult) {
+	const tailChars = 2000
+	if res == nil {
+		return
+	}
+	if res.Reasoning == "" {
+		log.WarnfCtx(ctx, "[agent] empty response had no reasoning content either")
+		return
+	}
+	start := 0
+	if len(res.Reasoning) > tailChars {
+		start = len(res.Reasoning) - tailChars
+	}
+	log.WarnfCtx(ctx, "[agent] empty response reasoning tail (total=%d chars, showing last %d):\n%s",
+		len(res.Reasoning), len(res.Reasoning)-start, res.Reasoning[start:])
 }
 
 func completeJSONValue(value string) (string, bool) {

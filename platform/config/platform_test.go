@@ -106,12 +106,10 @@ func TestPlatformSettingsAppliesRetrievalRouterDefaults(t *testing.T) {
 			settings.DelegationParentAnswerReserve,
 		)
 	}
-	if settings.DelegationMaxChildInputTokens != DefaultDelegationMaxChildInputTokens ||
-		settings.DelegationMaxChildOutputTokens != DefaultDelegationMaxChildOutputTokens ||
+	if settings.DelegationMaxChildOutputTokens != DefaultDelegationMaxChildOutputTokens ||
 		settings.DelegationMaxChildToolCalls != DefaultDelegationMaxChildToolCalls {
 		t.Fatalf(
-			"delegation child budget input=%d output=%d tools=%d",
-			settings.DelegationMaxChildInputTokens,
+			"delegation child budget output=%d tools=%d",
 			settings.DelegationMaxChildOutputTokens,
 			settings.DelegationMaxChildToolCalls,
 		)
@@ -172,14 +170,12 @@ func TestApplyUpgradesLookupSizedDelegationBudget(t *testing.T) {
 	settings.Apply(map[string]string{
 		"delegation_max_concurrent":          "2",
 		"delegation_max_child_tool_calls":    "8",
-		"delegation_max_child_input_tokens":  "12000",
 		"delegation_max_child_output_tokens": "1200",
 		"delegation_max_report_tokens":       "1000",
 		"delegation_max_total_tokens":        "48000",
 	})
 	if settings.DelegationMaxConcurrent != DefaultDelegationMaxConcurrent ||
 		settings.DelegationMaxChildToolCalls != DefaultDelegationMaxChildToolCalls ||
-		settings.DelegationMaxChildInputTokens != DefaultDelegationMaxChildInputTokens ||
 		settings.DelegationMaxChildOutputTokens != DefaultDelegationMaxChildOutputTokens ||
 		settings.DelegationMaxReportTokens != DefaultDelegationMaxReportTokens ||
 		settings.DelegationMaxTotalTokens != DefaultDelegationMaxTotalTokens {
@@ -311,7 +307,6 @@ func TestCanonicalDelegationSettings(t *testing.T) {
 		"delegation_child_timeout":           "90s",
 		"delegation_max_child_turns":         "4",
 		"delegation_max_child_tool_calls":    "8",
-		"delegation_max_child_input_tokens":  "12000",
 		"delegation_max_child_output_tokens": "1200",
 		"delegation_max_report_tokens":       "1000",
 		"delegation_max_total_tokens":        "48000",
@@ -341,7 +336,6 @@ func TestCanonicalDelegationSettings(t *testing.T) {
 		"delegation_max_child_tool_calls":   "-1",
 		"delegation_max_total_cost_micros":  "-1",
 		"delegation_parent_answer_reserve":  "-1",
-		"delegation_max_child_input_tokens": "invalid",
 	} {
 		if _, err := CanonicalPlatformSetting(key, value); err == nil {
 			t.Fatalf("CanonicalPlatformSetting(%q, %q) accepted invalid value", key, value)
@@ -357,7 +351,6 @@ func TestValidateAgentSettingsChecksDelegationRelationships(t *testing.T) {
 		"delegation_max_children":            "6",
 		"delegation_max_concurrent":          "2",
 		"delegation_child_timeout":           "90s",
-		"delegation_max_child_input_tokens":  "12000",
 		"delegation_max_child_output_tokens": "1200",
 		"delegation_max_total_tokens":        "48000",
 		"delegation_parent_answer_reserve":   "4000",
@@ -374,9 +367,9 @@ func TestValidateAgentSettingsChecksDelegationRelationships(t *testing.T) {
 		t.Fatal("delegation concurrency above child count was accepted")
 	}
 	settings.DelegationMaxConcurrent = 2
-	settings.DelegationMaxTotalTokens = 100
+	settings.DelegationMaxTotalTokens = 0
 	if err := settings.ValidateAgentSettings(); err == nil {
-		t.Fatal("insufficient aggregate delegation token budget was accepted")
+		t.Fatal("non-positive delegation total tokens was accepted")
 	}
 	settings.DelegationMaxTotalTokens = DefaultDelegationMaxTotalTokens
 }
@@ -395,7 +388,7 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"disable_legacy_answer_recovery": "false",
 		"delegation_capabilities":        "knowledge.code.inspect", "delegation_max_children": "3", "delegation_max_concurrent": "2",
 		"delegation_batch_timeout": "180s", "delegation_child_timeout": "90s", "delegation_max_child_turns": "4",
-		"delegation_max_child_tool_calls": "8", "delegation_max_child_input_tokens": "12000",
+		"delegation_max_child_tool_calls": "8", "delegation_max_child_context_tokens": "51200",
 		"delegation_max_child_output_tokens": "1200", "delegation_max_report_tokens": "1000",
 		"delegation_max_total_tokens": "48000", "delegation_max_total_cost_micros": "0",
 		"delegation_parent_answer_reserve": "4000", "delegation_gap_chase_rounds": "1",

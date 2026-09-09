@@ -132,8 +132,10 @@ func (svc *Service) executeSubmittedRun(
 	if !ok {
 		return
 	}
-	svc.finalizeManagedRun(ctx, managedRun, prepared, conversation, request, outcome)
-	svc.postEffectsForRun(ctx, prepared, conversation, request, result, outcome)
+	finalized := svc.finalizeManagedRun(ctx, managedRun, prepared, conversation, request, outcome)
+	if finalized.Persisted {
+		svc.postEffectsForRun(ctx, prepared, conversation, request, result, outcome)
+	}
 }
 
 // executeManagedRun runs the agent loop and returns the normalized terminal
@@ -169,6 +171,12 @@ func (svc *Service) executeManagedRun(
 	return result, outcome, true
 }
 
+type finalizeResult struct {
+	// Persisted reports whether the authoritative session turn was written.
+	// Best-effort side effects must only run when it is true.
+	Persisted bool
+}
+
 // finalizeManagedRun persists the completed turn, admits history archive, and
 // closes the managed run. Session persistence failure is authoritative (a
 // successful answer must be retrievable), while history archive and memory
@@ -180,7 +188,7 @@ func (svc *Service) finalizeManagedRun(
 	conversation execution.ConversationContext,
 	request agentapi.RunRequest,
 	outcome run.Outcome,
-) {
+) finalizeResult {
 	if outcome.Status == run.StatusDone {
 		if err := svc.persistTurn(
 			context.WithoutCancel(ctx), request.RunID, conversation.SessionID,
@@ -193,7 +201,7 @@ func (svc *Service) finalizeManagedRun(
 			svc.finishRunWithError(
 				ctx, managedRun, request.RunID, "session_persistence_failed", err,
 			)
-			return
+			return finalizeResult{Persisted: false}
 		}
 		svc.archiveHistoryAsync(
 			ctx, request.RunID, conversation.SessionID, request.Actor.UserID,
@@ -204,6 +212,7 @@ func (svc *Service) finalizeManagedRun(
 	if err := managedRun.Finish(nil); err != nil {
 		log.ErrorfCtx(ctx, "[qa] finish run %s: %v", request.RunID, err)
 	}
+	return finalizeResult{Persisted: outcome.Status == run.StatusDone}
 }
 
 // postEffectsForRun runs best-effort memory consolidation. It intentionally
@@ -293,12 +302,16 @@ func (svc *Service) extractRunMemory(
 		log.ErrorfCtx(ctx, "[qa] memory extraction error: %v", err)
 		return
 	}
-	_, _ = writeMemories(memCtx, memoryWriteInput{
+	writeOutput, writeErr := writeMemories(memCtx, memoryWriteInput{
 		Store: svc.memory, Decisions: extraction.Decisions, UserID: userID,
 		SessionID: conversation.SessionID,
 	})
+	if writeErr != nil {
+		log.ErrorfCtx(ctx, "[qa] memory write errors for user %d: %v", userID, writeErr)
+	}
 	if len(extraction.Decisions) > 0 {
-		log.InfofCtx(ctx, "[qa] consolidated %d memories for user %d", len(extraction.Decisions), userID)
+		log.InfofCtx(ctx, "[qa] consolidated %d/%d memories for user %d (skipped=%d)",
+			writeOutput.Succeeded, len(extraction.Decisions), userID, writeOutput.Skipped)
 	}
 }
 
@@ -337,10 +350,8 @@ func outputContractForQuery(query domain.QueryPlan) agentapi.RunOutputContract {
 		return agentapi.RunOutputContract{}
 	}
 	return agentapi.RunOutputContract{
-		Kind:           "flow",
-		RequireMermaid: true,
-		Subjects:       flowSubjects(query),
-		MaxHops:        6,
+		Subjects: flowSubjects(query),
+		MaxHops:  6,
 	}
 }
 

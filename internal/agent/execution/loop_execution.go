@@ -162,24 +162,24 @@ func (state *compiledLoop) recordSeedEvidence(observer run.Observer) {
 	})
 }
 
-// mergeDelegatedFlows folds child FlowIRs into the server-owned flow once.
-// It is called both at the answer turn (so the deterministic renderer can
-// replace model-owned Mermaid) and again in finishLoop. It is idempotent and
-// never downgrades an already-merged flow.
+// mergeDelegatedFlows folds child FlowIRs into one server-owned FlowIR per
+// subject. It is called both at the answer turn (so the deterministic renderer
+// can replace model-owned diagrams) and again in finishLoop. It is idempotent
+// and never downgrades an already-merged flow.
 func (agent *Agent) mergeDelegatedFlows(state *compiledLoop) {
 	if state == nil || len(state.delegatedFlows) == 0 {
 		return
 	}
-	if state.result.Flow != nil {
+	if state.result.Flows != nil {
 		// Already merged (e.g. recovered from a checkpoint); do not re-merge.
 		return
 	}
-	merged, err := delegation.MergeFlowIRs(state.delegatedFlows)
+	flows, err := delegation.MergeFlowIRsBySubject(state.delegatedFlows)
 	if err != nil {
 		log.WarnfCtx(state.ctx, "[agent] run %s flow merge failed: %v", state.runID, err)
 		return
 	}
-	state.result.Flow = merged
+	state.result.Flows = flows
 }
 
 func (agent *Agent) finishLoop(state *compiledLoop) {

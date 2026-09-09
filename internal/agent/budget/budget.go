@@ -130,16 +130,18 @@ func (root *Root) ReserveCallForPhase(
 	return &callReservation{root: root, estimate: estimate}, nil
 }
 
-// ReserveTask admits a bounded child budget from the root. The full grant is
-// reserved immediately; unused capacity is released when the child finishes.
+// ReserveTask admits a bounded child budget from the root. Only the child's
+// output budget is reserved upfront; input and total stay unbounded per-child
+// and are charged against the shared ledger by each physical call.
 func (root *Root) ReserveTask(grant agentapi.Usage) (agentapi.RunBudgetTaskReservation, error) {
 	if root == nil {
 		return nil, nil
 	}
-	grant, err := normalizeUsage(grant)
-	if err != nil {
-		return nil, err
+	if grant.InputTokens < 0 || grant.OutputTokens < 0 || grant.TotalTokens < 0 || grant.CostMicros < 0 {
+		return nil, fmt.Errorf("%w: usage cannot be negative", agentapi.ErrBudgetExceeded)
 	}
+	// Deliberately skip the TotalTokens normalization: a zero total means
+	// "unbounded per-child", not "fill from input+output".
 	root.mu.Lock()
 	defer root.mu.Unlock()
 	available := root.availableLocked(agentapi.RunBudgetPhaseDefault)
@@ -181,11 +183,16 @@ func (task *Task) Check() error {
 	if task.released {
 		return fmt.Errorf("%w: child task budget released", agentapi.ErrBudgetExceeded)
 	}
-	return requireWithin(
-		addUsage(task.used, task.inFlight),
-		task.grant,
-		"child task usage",
-	)
+	used := addUsage(task.used, task.inFlight)
+	// Only bounded dimensions are checked. Input and total are zero for a child
+	// (no per-child cumulative quota); the shared batch ledger bounds them.
+	if task.grant.OutputTokens > 0 && used.OutputTokens > task.grant.OutputTokens {
+		return fmt.Errorf("%w: child task usage output=%d exceeds %d", agentapi.ErrBudgetExceeded, used.OutputTokens, task.grant.OutputTokens)
+	}
+	if task.grant.CostMicros > 0 && used.CostMicros > task.grant.CostMicros {
+		return fmt.Errorf("%w: child task usage cost=%d exceeds %d", agentapi.ErrBudgetExceeded, used.CostMicros, task.grant.CostMicros)
+	}
+	return nil
 }
 
 func (task *Task) ReserveCall(estimate agentapi.Usage) (agentapi.RunBudgetCallReservation, error) {
@@ -314,9 +321,7 @@ func (root *Root) availableLocked(phase agentapi.RunBudgetPhase) agentapi.Usage 
 	allocated := root.used
 	allocated = addUsage(allocated, root.directInFlight)
 	for task := range root.tasks {
-		// The full unconsumed task grant remains reserved. Settled child usage
-		// is already in root.used, so only grant minus task.used is added here.
-		allocated = addUsage(allocated, subtractUsage(task.grant, task.used))
+		allocated = addUsage(allocated, taskReserved(task))
 	}
 	available := remainingUsage(root.limits, allocated)
 	if phase != agentapi.RunBudgetPhaseAnswer && root.limits.ParentAnswerReserve > 0 {
@@ -331,11 +336,30 @@ func (root *Root) availableLocked(phase agentapi.RunBudgetPhase) agentapi.Usage 
 	return available
 }
 
+// taskReserved reports the root capacity a child still holds. A full grant
+// reserves its input, output and total. An output-only grant (total zero) is
+// the delegation shape: the child has no cumulative input quota, so its output
+// is the only reserved dimension, reflected in the total for the root ledger.
+func taskReserved(task *Task) agentapi.Usage {
+	return TaskReserved(task.grant, task.used)
+}
+
+// TaskReserved reports the root capacity a child grant still holds after usage.
+// A zero total means "output is the only reserved dimension", reflected into
+// total so the root ledger still bounds child output against MaxTotalTokens.
+func TaskReserved(grant, used agentapi.Usage) agentapi.Usage {
+	unconsumed := SubtractUsage(grant, used)
+	if grant.TotalTokens == 0 {
+		unconsumed.TotalTokens = unconsumed.OutputTokens
+	}
+	return unconsumed
+}
+
 func (root *Root) checkLocked(_ agentapi.RunBudgetPhase) error {
 	allocated := root.used
 	allocated = addUsage(allocated, root.directInFlight)
 	for task := range root.tasks {
-		allocated = addUsage(allocated, subtractUsage(task.grant, task.used))
+		allocated = addUsage(allocated, taskReserved(task))
 	}
 	if root.limits.MaxInputTokens > 0 && allocated.InputTokens > root.limits.MaxInputTokens {
 		return fmt.Errorf("%w: root input tokens %d exceed %d", agentapi.ErrBudgetExceeded, allocated.InputTokens, root.limits.MaxInputTokens)
@@ -350,12 +374,18 @@ func (root *Root) checkLocked(_ agentapi.RunBudgetPhase) error {
 }
 
 func (task *Task) availableLocked() agentapi.Usage {
-	used := addUsage(task.used, task.inFlight)
+	return Remaining(task.grant, addUsage(task.used, task.inFlight))
+}
+
+// Remaining reports grant capacity after subtracting usage, dimension by
+// dimension. A zero grant dimension means "unbounded per-child" and stays
+// unbounded, unlike SubtractUsage which clamps at zero.
+func Remaining(grant, used agentapi.Usage) agentapi.Usage {
 	return agentapi.Usage{
-		InputTokens:  remaining(task.grant.InputTokens, used.InputTokens),
-		OutputTokens: remaining(task.grant.OutputTokens, used.OutputTokens),
-		TotalTokens:  remaining(task.grant.TotalTokens, used.TotalTokens),
-		CostMicros:   remaining(task.grant.CostMicros, used.CostMicros),
+		InputTokens:  remaining(grant.InputTokens, used.InputTokens),
+		OutputTokens: remaining(grant.OutputTokens, used.OutputTokens),
+		TotalTokens:  remaining(grant.TotalTokens, used.TotalTokens),
+		CostMicros:   remaining(grant.CostMicros, used.CostMicros),
 	}
 }
 
@@ -433,6 +463,17 @@ func NormalizeUsage(usage agentapi.Usage) (agentapi.Usage, error) {
 
 func normalizeUsage(usage agentapi.Usage) (agentapi.Usage, error) {
 	return NormalizeUsage(usage)
+}
+
+// NormalizeGrant validates a child task grant without deriving a total. A zero
+// TotalTokens is a meaningful "unbounded per-child" signal for delegation
+// grants, unlike NormalizeUsage which fills it from input+output.
+func NormalizeGrant(grant agentapi.Usage) (agentapi.Usage, error) {
+	if grant.InputTokens < 0 || grant.OutputTokens < 0 || grant.ReasoningTokens < 0 ||
+		grant.TotalTokens < 0 || grant.CostMicros < 0 {
+		return agentapi.Usage{}, fmt.Errorf("%w: usage cannot be negative", agentapi.ErrBudgetExceeded)
+	}
+	return grant, nil
 }
 
 // AddUsage sums two public usage values with saturating arithmetic.

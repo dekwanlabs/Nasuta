@@ -2,7 +2,7 @@ package catalog
 
 import "encoding/json"
 
-// verifiedBundleSchema defines the single compact handoff consumed by the synthesizer.
+// verifiedBundleSchema defines the single compact handoff consumed by the composer.
 func verifiedBundleSchema() json.RawMessage {
 	return json.RawMessage(`{
   "$schema":"https://json-schema.org/draft/2020-12/schema",

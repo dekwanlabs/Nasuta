@@ -57,10 +57,6 @@ func durableBudgetLeaseTTL(deadline, now time.Time) time.Duration {
 	return ttl
 }
 
-func (rs *Store) durableBudgetEnabled() bool {
-	return rs != nil && rs.durableBudget
-}
-
 type sqlBudgetBackend struct {
 	db             *sql.DB
 	fencingEnabled bool
@@ -658,7 +654,9 @@ func validateAndNormalizeReservation(
 	if err != nil {
 		return reservation, agentapi.Usage{}, agentapi.Usage{}, err
 	}
-	grant, err := normalizeBudgetUsage(reservation.Grant)
+	// Task grants use NormalizeGrant: a zero total means "unbounded per-child",
+	// not "fill from input+output", so it must survive to the persisted ledger.
+	grant, err := budget.NormalizeGrant(reservation.Grant)
 	if err != nil {
 		return reservation, agentapi.Usage{}, agentapi.Usage{}, err
 	}
@@ -740,7 +738,9 @@ func applyReservationChange(
 	available := budgetAvailable(limits, used, reserved, phase)
 	request := estimate
 	if reservation.Kind == "task" {
-		request = grant
+		// An output-only grant reserves only its output dimension, reflected
+		// into total so the root still bounds child output against MaxTotal.
+		request = budget.TaskReserved(grant, agentapi.Usage{})
 	}
 	if err := budget.RequireWithin(request, available, reservation.Kind); err != nil {
 		return reserved, err
@@ -900,7 +900,7 @@ func reserveChildCall(tx *sql.Tx, rootRunID, parentID string, estimate agentapi.
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	return budget.RequireWithin(estimate, subtractUsage(grant, addUsage(used, inFlight)), "child call")
+	return budget.RequireWithin(estimate, budget.Remaining(grant, addUsage(used, inFlight)), "child call")
 }
 
 func (backend *sqlBudgetBackend) settleCall(rootRunID, reservationID string, actual agentapi.Usage, owner string, fence int64) error {
@@ -1225,7 +1225,7 @@ func releaseTaskReservation(tx *sql.Tx, rootRunID, reservationID string, reserve
 	if openCalls > 0 {
 		return reserved, fmt.Errorf("%w: cannot release child task with in-flight model calls", agentapi.ErrBudgetExceeded)
 	}
-	return subtractUsage(reserved, subtractUsage(grant, taskUsed)), nil
+	return subtractUsage(reserved, budget.TaskReserved(grant, taskUsed)), nil
 }
 
 func (backend *sqlBudgetBackend) ReleaseTask(rootRunID, reservationID string) error {

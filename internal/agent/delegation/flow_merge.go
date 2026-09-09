@@ -37,6 +37,36 @@ func MergeFlowIRs(flows []agentapi.FlowIR) (*agentapi.FlowIR, error) {
 	return merged, nil
 }
 
+// MergeFlowIRsBySubject groups flows by normalized subject and merges each
+// subject independently, returning one FlowIR per subject. A multi-subject
+// query therefore yields one compact diagram per subject rather than a single
+// oversized graph that exceeds the bounded node/edge limits.
+func MergeFlowIRsBySubject(flows []agentapi.FlowIR) ([]*agentapi.FlowIR, error) {
+	if len(flows) == 0 {
+		return nil, nil
+	}
+	order := make([]string, 0, len(flows))
+	groups := make(map[string][]agentapi.FlowIR, len(flows))
+	for _, flow := range flows {
+		key := strings.ToLower(normalizeFlowText(flow.Subject))
+		if _, exists := groups[key]; !exists {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], flow)
+	}
+	merged := make([]*agentapi.FlowIR, 0, len(order))
+	for _, key := range order {
+		flow, err := MergeFlowIRs(groups[key])
+		if err != nil {
+			return nil, err
+		}
+		if flow != nil {
+			merged = append(merged, flow)
+		}
+	}
+	return merged, nil
+}
+
 type nodeAggregate struct {
 	key         string
 	subject     string

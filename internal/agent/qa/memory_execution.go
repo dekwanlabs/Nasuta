@@ -2,6 +2,9 @@ package qa
 
 import (
 	"context"
+	"errors"
+	"fmt"
+
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
 
 	"github.com/dekwanlabs/nasuta/internal/llm"
@@ -124,6 +127,9 @@ type memoryWriteOutput struct {
 	Outcomes     map[memory.WriteOutcome]int
 	Actions      map[memory.ConsolidationAction]int
 	VectorSynced int
+	Succeeded    int
+	Failed       int
+	Skipped      int
 }
 
 var memoryWriteSpec = runtrace.Spec[memoryWriteInput, memoryWriteOutput]{
@@ -137,6 +143,7 @@ var memoryWriteSpec = runtrace.Spec[memoryWriteInput, memoryWriteOutput]{
 			"inserted":  output.Outcomes[memory.WriteInserted],
 			"refreshed": output.Outcomes[memory.WriteRefreshed], "superseded": output.Outcomes[memory.WriteSuperseded],
 			"rejected": output.Outcomes[memory.WriteRejected], "vector_synced": output.VectorSynced,
+			"succeeded": output.Succeeded, "failed": output.Failed, "skipped": output.Skipped,
 		}
 	},
 }
@@ -147,10 +154,12 @@ func writeMemories(ctx context.Context, input memoryWriteInput) (memoryWriteOutp
 			Outcomes: make(map[memory.WriteOutcome]int, 4),
 			Actions:  make(map[memory.ConsolidationAction]int, 5),
 		}
+		var applyErr error
 		for index := range input.Decisions {
 			decision := input.Decisions[index]
 			output.Actions[decision.Action]++
 			if decision.Action == memory.ConsolidationReject || decision.Action == memory.ConsolidationDiscard {
+				output.Skipped++
 				continue
 			}
 			decision.Record.UserID = input.UserID
@@ -158,12 +167,18 @@ func writeMemories(ctx context.Context, input memoryWriteInput) (memoryWriteOutp
 			result, err := input.Store.ApplyDecision(ctx, decision)
 			if err != nil {
 				log.ErrorfCtx(ctx, "[qa] memory apply action=%s error: %v", decision.Action, err)
+				output.Failed++
+				applyErr = errors.Join(applyErr, fmt.Errorf("apply %s: %w", decision.Action, err))
 				continue
 			}
+			output.Succeeded++
 			output.Outcomes[result.Outcome]++
 			if result.VectorSynced {
 				output.VectorSynced++
 			}
+		}
+		if applyErr != nil {
+			return output, applyErr
 		}
 		return output, nil
 	})

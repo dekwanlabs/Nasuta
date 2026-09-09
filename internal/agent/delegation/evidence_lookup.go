@@ -1,7 +1,6 @@
 package delegation
 
 import (
-	"fmt"
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -198,16 +197,4 @@ func cloneEvidenceObservations(
 		out[index] = observation
 	}
 	return out
-}
-
-func evidenceLookupDebugSummary(
-	lookup map[string]agentapi.DelegationEvidenceLookup,
-) string {
-	available := 0
-	for _, entry := range lookup {
-		if entry.Body != "" || entry.Summary != evidenceMaterialUnavailable {
-			available++
-		}
-	}
-	return fmt.Sprintf("%d/%d evidence references include readable material", available, len(lookup))
 }

@@ -116,32 +116,20 @@ func answerReserveFor(request agentapi.RunRequest, parentReserve time.Duration) 
 }
 
 func validateOutputContract(contract agentapi.RunOutputContract) error {
-	if contract.Kind == "" {
-		if contract.RequireMermaid || len(contract.Subjects) > 0 || contract.MaxHops != 0 {
-			return fmt.Errorf("output contract kind is required")
-		}
-		return nil
-	}
-	if contract.Kind != "flow" {
-		return fmt.Errorf("unsupported output contract kind %q", contract.Kind)
-	}
-	if !contract.RequireMermaid {
-		return fmt.Errorf("flow output contract must require mermaid")
-	}
-	if contract.MaxHops <= 0 || contract.MaxHops > 32 {
-		return fmt.Errorf("flow output contract max_hops must be between 1 and 32")
+	if contract.MaxHops < 0 || contract.MaxHops > 32 {
+		return fmt.Errorf("output contract max_hops must be between 0 and 32")
 	}
 	if len(contract.Subjects) > 8 {
-		return fmt.Errorf("flow output contract has too many subjects")
+		return fmt.Errorf("output contract has too many subjects")
 	}
 	seen := make(map[string]struct{}, len(contract.Subjects))
 	for _, subject := range contract.Subjects {
 		if strings.TrimSpace(subject) == "" {
-			return fmt.Errorf("flow output contract subjects must be non-empty")
+			return fmt.Errorf("output contract subjects must be non-empty")
 		}
 		key := strings.ToLower(strings.TrimSpace(subject))
 		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("flow output contract subjects must be unique")
+			return fmt.Errorf("output contract subjects must be unique")
 		}
 		seen[key] = struct{}{}
 	}

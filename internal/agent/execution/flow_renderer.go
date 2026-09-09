@@ -2,11 +2,8 @@ package execution
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"regexp"
-	"sort"
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
@@ -17,208 +14,24 @@ import (
 // execution pipeline, not manufacture one through an exported context key.
 type flowIRContextKey struct{}
 
-func withFlowIR(ctx context.Context, flow *agentapi.FlowIR) context.Context {
-	if ctx == nil || flow == nil {
+func withFlows(ctx context.Context, flows []*agentapi.FlowIR) context.Context {
+	if ctx == nil || len(flows) == 0 {
 		return ctx
 	}
-	return context.WithValue(ctx, flowIRContextKey{}, cloneExecutionFlow(flow))
+	return context.WithValue(ctx, flowIRContextKey{}, cloneExecutionFlowPtrs(flows))
 }
 
-func flowIRFromContext(ctx context.Context) *agentapi.FlowIR {
+func flowsFromContext(ctx context.Context) []*agentapi.FlowIR {
 	if ctx == nil {
 		return nil
 	}
-	flow, _ := ctx.Value(flowIRContextKey{}).(*agentapi.FlowIR)
-	return cloneExecutionFlow(flow)
+	flows, _ := ctx.Value(flowIRContextKey{}).([]*agentapi.FlowIR)
+	return cloneExecutionFlowPtrs(flows)
 }
 
-// flowRenderer accumulates the Mermaid output for a single FlowIR and owns
-// the synthetic ID allocator state shared by nodes, edges, and open hops.
-type flowRenderer struct {
-	b    strings.Builder
-	used map[string]struct{}
-}
-
-func newFlowRenderer() *flowRenderer {
-	return &flowRenderer{used: make(map[string]struct{})}
-}
-
-// RenderFlowIR renders only server-owned, typed flow data. Model-provided
-// Mermaid is never trusted for the final architecture diagram.
-func RenderFlowIR(flow *agentapi.FlowIR) string {
-	if flow == nil {
-		return ""
-	}
-	renderer := newFlowRenderer()
-	renderer.render(flow)
-	return renderer.b.String()
-}
-
-func (renderer *flowRenderer) render(flow *agentapi.FlowIR) {
-	nodes := sortedRenderNodes(flow.Nodes)
-	ids := renderer.allocateRenderNodeIDs(nodes)
-
-	renderer.b.WriteString("```mermaid\nflowchart LR\n")
-	renderer.renderSubject(flow.Subject)
-	renderer.renderNodes(nodes, ids)
-
-	edges := sortedRenderEdges(flow.Edges)
-	renderedEdges := renderer.renderEdges(edges, ids)
-
-	openHopIDs := renderer.renderOpenHops(flow.OpenHops)
-	renderer.renderUnresolvedTail(nodes, ids, openHopIDs, renderedEdges)
-	renderer.b.WriteString("```\n")
-}
-
-func (renderer *flowRenderer) allocateRenderNodeIDs(nodes []agentapi.FlowNode) map[string]string {
-	ids := make(map[string]string, len(nodes))
-	for index, node := range nodes {
-		id := allocateMermaidID(node.ID, fmt.Sprintf("node:%d:%s:%s", index, node.ID, node.Label), renderer.used)
-		ids[node.ID] = id
-	}
-	return ids
-}
-
-func (renderer *flowRenderer) renderSubject(subject string) {
-	if label := mermaidSafeLabel(subject); label != "" {
-		// Mermaid comments are visible to validators and do not create an
-		// unverified edge or an extra semantic node.
-		fmt.Fprintf(&renderer.b, "    %%%% subject: %s\n", label)
-	}
-}
-
-func (renderer *flowRenderer) renderNodes(nodes []agentapi.FlowNode, ids map[string]string) {
-	for _, node := range nodes {
-		id := ids[node.ID]
-		label := mermaidSafeLabel(node.Label)
-		kind := mermaidSafeLabel(node.Kind)
-		if kind != "" {
-			label = kind + ": " + label
-		}
-		if label == "" {
-			label = "未命名节点"
-		}
-		fmt.Fprintf(&renderer.b, "    %s[\"%s\"]\n", id, label)
-	}
-}
-
-func (renderer *flowRenderer) renderEdges(edges []agentapi.FlowEdge, ids map[string]string) int {
-	renderedEdges := 0
-	for _, edge := range edges {
-		from, fromOK := ids[edge.From]
-		to, toOK := ids[edge.To]
-		if !fromOK || !toOK {
-			continue
-		}
-		state := normalizeRenderEvidenceState(edge.EvidenceState)
-		marker := "-->"
-		if state != "verified" {
-			marker = "-.->"
-		}
-		protocol := mermaidSafeLabel(edge.Protocol)
-		if protocol == "" {
-			protocol = "unknown"
-		}
-		syncMode := mermaidSafeLabel(edge.SyncMode)
-		if syncMode == "" {
-			syncMode = "unknown"
-		}
-		label := protocol + " / " + syncMode + " / " + state
-		fmt.Fprintf(&renderer.b, "    %s %s|\"%s\"| %s\n", from, marker, label, to)
-		renderedEdges++
-	}
-	return renderedEdges
-}
-
-func (renderer *flowRenderer) renderOpenHops(openHops []string) []string {
-	openHops = sortedRenderStrings(openHops)
-	openHopIDs := make([]string, len(openHops))
-	for index, hop := range openHops {
-		id := allocateMermaidID(
-			fmt.Sprintf("open_hop_%d", index+1),
-			fmt.Sprintf("open-hop:%d:%s", index, hop),
-			renderer.used,
-		)
-		openHopIDs[index] = id
-		fmt.Fprintf(&renderer.b, "    %s[\"待确认：%s\"]\n", id, mermaidSafeLabel(hop))
-	}
-	return openHopIDs
-}
-
-func (renderer *flowRenderer) renderUnresolvedTail(nodes []agentapi.FlowNode, ids map[string]string, openHopIDs []string, renderedEdges int) {
-	if renderedEdges == 0 {
-		// An edge-less flow is not evidence of a disconnected architecture.
-		// Make the uncertainty explicit so the output remains useful and safe.
-		from := ""
-		if len(nodes) == 0 {
-			from = allocateMermaidID("flow_scope", "synthetic:flow-scope", renderer.used)
-			renderer.b.WriteString("    " + from + "[\"流程范围\"]\n")
-		} else {
-			from = ids[nodes[0].ID]
-		}
-		if len(openHopIDs) == 0 {
-			unresolved := allocateMermaidID("unresolved_flow", "synthetic:unresolved-flow", renderer.used)
-			renderer.b.WriteString("    " + unresolved + "[\"待确认：关键流程跳转\"]\n")
-			fmt.Fprintf(&renderer.b, "    %s -.->|\"unknown / unknown / unresolved\"| %s\n", from, unresolved)
-		} else {
-			for _, openHopID := range openHopIDs {
-				fmt.Fprintf(&renderer.b, "    %s -.->|\"unknown / unknown / unresolved\"| %s\n", from, openHopID)
-				from = openHopID
-			}
-		}
-	} else if len(openHopIDs) > 0 && len(nodes) > 0 {
-		// Preserve explicit open hops in the graph without inventing a source:
-		// attach them to the first canonical node as unresolved follow-ups.
-		from := ids[nodes[0].ID]
-		for _, openHopID := range openHopIDs {
-			fmt.Fprintf(&renderer.b, "    %s -.->|\"unknown / unknown / unresolved\"| %s\n", from, openHopID)
-			from = openHopID
-		}
-	}
-}
-
-func sortedRenderNodes(nodes []agentapi.FlowNode) []agentapi.FlowNode {
-	nodes = append([]agentapi.FlowNode(nil), nodes...)
-	sort.Slice(nodes, func(i, j int) bool {
-		if nodes[i].ID != nodes[j].ID {
-			return nodes[i].ID < nodes[j].ID
-		}
-		return nodes[i].Label < nodes[j].Label
-	})
-	return nodes
-}
-
-func sortedRenderEdges(edges []agentapi.FlowEdge) []agentapi.FlowEdge {
-	edges = append([]agentapi.FlowEdge(nil), edges...)
-	sort.Slice(edges, func(i, j int) bool {
-		left := strings.Join([]string{edges[i].From, edges[i].To, edges[i].Protocol, edges[i].SyncMode, edges[i].EvidenceState}, "\x00")
-		right := strings.Join([]string{edges[j].From, edges[j].To, edges[j].Protocol, edges[j].SyncMode, edges[j].EvidenceState}, "\x00")
-		return left < right
-	})
-	return edges
-}
-
-// ValidateRenderedFlowIR is a deterministic server-side quality gate. It
-// validates the typed FlowIR before comparing the candidate byte-for-byte with
-// the canonical server renderer, so omitted, injected, or marker-mutated graph
-// elements cannot pass merely because the output still looks like Mermaid.
-func ValidateRenderedFlowIR(flow *agentapi.FlowIR, rendered string) []string {
-	violations := validateRenderableFlowIR(flow)
-	if !strings.HasPrefix(rendered, "```mermaid\nflowchart LR\n") {
-		violations = append(violations, "rendered flow must start with a fenced Mermaid flowchart LR")
-	}
-	if !strings.HasSuffix(rendered, "```\n") || strings.Count(rendered, "```") != 2 {
-		violations = append(violations, "rendered flow must contain exactly one closed Mermaid fence")
-	}
-	if len(violations) == 0 {
-		expected := RenderFlowIR(flow)
-		if rendered != expected {
-			violations = append(violations, "rendered flow differs from the canonical server-owned graph")
-		}
-	}
-	return uniqueRenderViolations(violations)
-}
-
+// validateRenderableFlowIR is the deterministic server-side quality gate. It
+// validates the typed FlowIR before it is emitted, so omitted, injected, or
+// malformed graph elements cannot reach the final answer.
 func validateRenderableFlowIR(flow *agentapi.FlowIR) []string {
 	if flow == nil {
 		return []string{"flow IR is required"}
@@ -371,47 +184,39 @@ func uniqueRenderViolations(values []string) []string {
 	return out
 }
 
-func allocateMermaidID(preferred, seed string, used map[string]struct{}) string {
-	base := safeMermaidID(preferred)
-	if _, exists := used[base]; !exists {
-		used[base] = struct{}{}
-		return base
-	}
-	digest := sha256.Sum256([]byte(seed))
-	prefix := base + "_" + hex.EncodeToString(digest[:])[:8]
-	candidate := prefix
-	for suffix := 2; ; suffix++ {
-		if _, exists := used[candidate]; !exists {
-			used[candidate] = struct{}{}
-			return candidate
-		}
-		candidate = fmt.Sprintf("%s_%d", prefix, suffix)
-	}
-}
-
-// canonicalFlowAnswer removes model-owned diagrams and installs the one
-// deterministic diagram rendered from the merged FlowIR. Explanatory prose is
+// canonicalFlowAnswer removes model-owned diagrams and installs one FlowIR
+// block per subject from the merged server-owned flows. Explanatory prose is
 // retained as context but can no longer alter the architecture edges.
 //
-// The rendered FlowIR is the authoritative architecture answer: if it is not
-// renderable, the original model answer is returned unchanged rather than
-// being replaced by a placeholder "unresolved" diagram.
-func canonicalFlowAnswer(candidate string, flow *agentapi.FlowIR) string {
-	if flow == nil {
+// The FlowIRs are authoritative: any subject whose flow is invalid is skipped,
+// and if none is valid the original model answer is returned unchanged rather
+// than being replaced by a placeholder "unresolved" diagram.
+func canonicalFlowAnswer(candidate string, flows []*agentapi.FlowIR) string {
+	if len(flows) == 0 {
 		return candidate
 	}
-	diagram := RenderFlowIR(flow)
-	if len(ValidateRenderedFlowIR(flow, diagram)) > 0 {
+	blocks := make([]string, 0, len(flows))
+	for _, flow := range flows {
+		if flow == nil || len(validateRenderableFlowIR(flow)) > 0 {
+			continue
+		}
+		flowJSON, err := json.Marshal(flow)
+		if err != nil {
+			continue
+		}
+		blocks = append(blocks, "```flowir\n"+string(flowJSON)+"\n```")
+	}
+	if len(blocks) == 0 {
 		return candidate
 	}
 	prose := flowFallbackProse(candidate)
 	if prose == "" {
 		prose = "说明：流程图由服务端根据子 agent 返回的结构化 FlowIR 生成；未验证的连接以虚线和 unresolved 标记表示。"
 	}
-	return strings.TrimSpace(prose) + "\n\n" + strings.TrimSpace(diagram)
+	return strings.TrimSpace(prose) + "\n\n" + strings.Join(blocks, "\n\n")
 }
 
-// flowFallbackProse extracts the non-Mermaid prose from a candidate answer so
+// flowFallbackProse extracts the non-fenced prose from a candidate answer so
 // canonicalFlowAnswer can keep the model's explanatory text while replacing the
 // diagrams with the server-rendered architecture graph.
 func flowFallbackProse(value string) string {
@@ -430,58 +235,6 @@ func flowFallbackProse(value string) string {
 	return strings.TrimSpace(strings.Join(prose, "\n"))
 }
 
-var mermaidIDPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-func safeMermaidID(value string) string {
-	value = strings.TrimSpace(value)
-	if mermaidIDPattern.MatchString(value) {
-		return value
-	}
-	digest := sha256.Sum256([]byte(value))
-	return "node_" + hex.EncodeToString(digest[:])[:16]
-}
-
-func mermaidSafeLabel(value string) string {
-	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
-	value = strings.ReplaceAll(value, "\"", "'")
-	value = strings.ReplaceAll(value, "`", "'")
-	value = strings.ReplaceAll(value, "[", "(")
-	value = strings.ReplaceAll(value, "]", ")")
-	value = strings.ReplaceAll(value, "{", "(")
-	value = strings.ReplaceAll(value, "}", ")")
-	return value
-}
-
-func normalizeRenderEvidenceState(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "inferred":
-		return "inferred"
-	case "unresolved":
-		return "unresolved"
-	default:
-		return "verified"
-	}
-}
-
-func sortedRenderStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		key := strings.ToLower(value)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func cloneExecutionFlow(flow *agentapi.FlowIR) *agentapi.FlowIR {
 	if flow == nil {
 		return nil
@@ -498,4 +251,15 @@ func cloneExecutionFlow(flow *agentapi.FlowIR) *agentapi.FlowIR {
 	clone.OpenHops = append([]string(nil), flow.OpenHops...)
 	clone.Uncertainties = append([]string(nil), flow.Uncertainties...)
 	return &clone
+}
+
+func cloneExecutionFlowPtrs(flows []*agentapi.FlowIR) []*agentapi.FlowIR {
+	if len(flows) == 0 {
+		return nil
+	}
+	clones := make([]*agentapi.FlowIR, 0, len(flows))
+	for _, flow := range flows {
+		clones = append(clones, cloneExecutionFlow(flow))
+	}
+	return clones
 }

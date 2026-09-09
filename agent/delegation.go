@@ -13,7 +13,6 @@ type DelegationPolicy struct {
 	MaxConcurrent        int   `json:"max_concurrent"`
 	MaxChildTurns        int   `json:"max_child_turns"`
 	MaxChildToolCalls    int64 `json:"max_child_tool_calls"`
-	MaxChildInputTokens  int64 `json:"max_child_input_tokens"`
 	MaxChildContextTokens int64 `json:"max_child_context_tokens"`
 	MaxChildOutputTokens int64 `json:"max_child_output_tokens"`
 	MaxReportTokens      int64 `json:"max_report_tokens"`

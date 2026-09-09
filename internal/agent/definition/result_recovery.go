@@ -331,7 +331,6 @@ var taskContractShapeFields = []string{
 	"parent_question_summary",
 	"focus_facets",
 	"evidence_refs",
-	"output_kind",
 }
 
 // isTaskContractShape reports whether a decoded object is actually a task

@@ -870,7 +870,6 @@ func TestTaskContractAcceptsFlowOutputHints(t *testing.T) {
 		"parent_question_summary":"订单创建流程",
 		"focus_facets":[],
 		"evidence_refs":[],
-		"output_kind":"flow",
 		"max_hops":6,
 		"delegation_id":"del-1",
 		"parent_run_id":"parent-1",

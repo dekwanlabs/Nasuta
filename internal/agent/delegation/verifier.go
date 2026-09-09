@@ -138,7 +138,7 @@ func (executor *Executor) executeVerificationWithObservations(
 	rootGate := agentapi.RunBudgetTaskGateFromContext(ctx)
 	if rootGate != nil {
 		task.budget, err = rootGate.ReserveTask(budgetGrant(
-			task.limits, executor.policy.MaxChildInputTokens, executor.policy.MaxChildOutputTokens,
+			task.limits, executor.policy.MaxChildOutputTokens,
 		))
 		if err != nil {
 			return executor.rejectVerification(
@@ -276,17 +276,8 @@ func (executor *Executor) prepareVerificationWithObservations(
 		parent,
 		request.EvidenceRefs,
 		nil,
-		executor.policy.MaxChildInputTokens,
+		executor.policy.MaxChildContextTokens,
 	)
-	raw, err := json.Marshal(request)
-	if err != nil {
-		return task, ErrorVerificationInput, err
-	}
-	if estimateTokens(raw, task.context) > executor.policy.MaxChildInputTokens {
-		return task, ErrorChildInputLimit, fmt.Errorf(
-			"semantic verifier input exceeds token limit",
-		)
-	}
 	task.childRunID = stableID(
 		"run_verify",
 		parent.RunID,
@@ -591,13 +582,6 @@ func (executor *Executor) classifyVerificationRunResult(
 		}
 		result.Status = agentapi.RunCancelled
 		result.Error = &agentapi.RunError{Code: code, Message: childErr.Error()}
-	}
-	if result.Usage.InputTokens > executor.policy.MaxChildInputTokens {
-		result.Status = agentapi.RunFailed
-		result.Error = &agentapi.RunError{
-			Code: ErrorChildInputLimit, Message: "verifier input token limit exceeded",
-		}
-		return result
 	}
 	if result.Usage.OutputTokens > executor.policy.MaxChildOutputTokens {
 		overrun := result.Usage.OutputTokens - executor.policy.MaxChildOutputTokens

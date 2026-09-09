@@ -152,12 +152,10 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		"investigator.web":     {"web_search"},
 		"investigator.memory":  {},
 		"delegation.verifier":  {},
-		"synthesizer":          {},
 	}
 	wantIDs := []string{
 		"investigator.code", "investigator.runtime", "investigator.docs",
 		"investigator.web", "investigator.memory", "delegation.verifier",
-		"synthesizer",
 	}
 	if len(definitions) != len(wantIDs) {
 		t.Fatalf("definitions = %d, want %d", len(definitions), len(wantIDs))
@@ -185,7 +183,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 			t.Fatalf("definition %q max tool calls = %d, want %d", definition.ID, definition.Budget.MaxToolCalls, wantToolCalls)
 		}
 	}
-	for _, definition := range definitions[:len(wantTools)-2] {
+	for _, definition := range definitions[:len(wantTools)-1] {
 		if definition.Model.MaxOutputTokens != settings.LLMAnswerMaxTokens ||
 			definition.Budget.MaxSteps != 4 ||
 			definition.Budget.MaxContinueRounds != 1 {
@@ -194,35 +192,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 				definition.Budget.MaxSteps, definition.Budget.MaxContinueRounds)
 		}
 	}
-	synthesizer := definitions[len(definitions)-1]
-	if synthesizer.InputSchema != agentapi.InvestigationVerifiedBundleSchemaRef() ||
-		synthesizer.OutputSchema != agentapi.InvestigationAnswerSchemaRef() ||
-		synthesizer.Prompt.Version != "investigation-synthesis-v8" ||
-		!strings.Contains(synthesizer.Prompt.System, `"supported_claims"`) ||
-		!strings.Contains(synthesizer.Prompt.System, `"partial_claims"`) ||
-		!strings.Contains(synthesizer.Prompt.System, `"unsupported_claims"`) ||
-		!strings.Contains(synthesizer.Prompt.System, `"omissions"`) ||
-		!strings.Contains(synthesizer.Prompt.System, `"producer_node_id"`) ||
-		!strings.Contains(synthesizer.Prompt.System, `"evidence_lookup"`) ||
-		!strings.Contains(synthesizer.Prompt.System, "same canonical target") ||
-		!strings.Contains(synthesizer.Prompt.System, "must not be inserted into a main path") ||
-		!strings.Contains(synthesizer.Prompt.System, `"workflow.synthesis_objective"`) ||
-		!strings.Contains(synthesizer.Prompt.System, `"investigation_goals"`) ||
-		!strings.Contains(synthesizer.Prompt.System, `User-Visible Answer Contract`) ||
-		!strings.Contains(synthesizer.Prompt.System, "lead with the answer itself and the conclusion") ||
-		strings.Contains(synthesizer.Prompt.System, `"handoffs[].payload"`) ||
-		strings.Contains(synthesizer.Prompt.System, `"unavailable_tasks"`) ||
-		len(synthesizer.Tools.VisibleToolIDs) != 0 || !synthesizer.Tools.RestrictVisible {
-		t.Fatalf("synthesizer contract = %+v", synthesizer)
-	}
-	if synthesizer.Model.MaxOutputTokens != synthesizerOutputMinimum ||
-		synthesizer.Budget.MaxSteps != 1 ||
-		synthesizer.Budget.MaxContinueRounds != 1 {
-		t.Fatalf("synthesizer budget = model=%d steps=%d continuation=%d",
-			synthesizer.Model.MaxOutputTokens, synthesizer.Budget.MaxSteps,
-			synthesizer.Budget.MaxContinueRounds)
-	}
-	verifier := definitions[len(definitions)-2]
+	verifier := definitions[len(definitions)-1]
 	if verifier.InputSchema.ID != "delegation.verification.request" ||
 		verifier.OutputSchema.ID != "delegation.verification.result" ||
 		verifier.Prompt.Version != "delegation-verification-v2" ||
@@ -258,8 +228,6 @@ func TestDefaultInvestigatorsInvestigatorOutputFollowsAnswerTokens(t *testing.T)
 			wantOutput = settings.LLMAnswerMaxTokens
 		case definition.ID == "delegation.verifier":
 			wantOutput = verifierOutputMinimum
-		case definition.ID == "synthesizer":
-			wantOutput = synthesizerOutputMinimum
 		}
 		if definition.Model.MaxOutputTokens != wantOutput ||
 			definition.Budget.MaxSteps != 1 ||
@@ -289,8 +257,6 @@ func TestDefaultInvestigatorsBudgetsFollowGlobalConfiguration(t *testing.T) {
 			wantOutput, wantSteps, wantRounds = settings.LLMAnswerMaxTokens, 4, 1
 		case definition.ID == "delegation.verifier":
 			wantOutput, wantSteps, wantRounds = 4096, 1, 1
-		case definition.ID == "synthesizer":
-			wantOutput, wantSteps, wantRounds = 8192, 1, 1
 		}
 		if definition.Model.MaxOutputTokens != wantOutput ||
 			definition.Budget.MaxSteps != wantSteps ||
@@ -303,7 +269,7 @@ func TestDefaultInvestigatorsBudgetsFollowGlobalConfiguration(t *testing.T) {
 	}
 }
 
-func TestDefaultInvestigatorsVerifierAndSynthesizerUseRunOutputShares(t *testing.T) {
+func TestDefaultInvestigatorsVerifierUsesRunOutputShares(t *testing.T) {
 	settings := &config.PlatformSettings{
 		LLMProvider: "openai", LLMModel: "investigation-model",
 		LLMAnswerMaxTokens: 128_000, LLMContextWindow: 256_000,
@@ -314,7 +280,7 @@ func TestDefaultInvestigatorsVerifierAndSynthesizerUseRunOutputShares(t *testing
 		t.Fatal(err)
 	}
 	for _, definition := range definitions {
-		if definition.ID != "delegation.verifier" && definition.ID != "synthesizer" {
+		if definition.ID != "delegation.verifier" {
 			continue
 		}
 		if definition.Model.MaxOutputTokens != 12_800 {
@@ -344,7 +310,6 @@ func TestDefaultCapabilitiesPinAgentContracts(t *testing.T) {
 		"knowledge.web.research":   "investigator.web",
 		"knowledge.memory.recall":  "investigator.memory",
 		"evidence.semantic.verify": "delegation.verifier",
-		"evidence.synthesize":      "synthesizer",
 	}
 	wantFacets := map[string][]string{
 		"knowledge.code.inspect": {
@@ -361,7 +326,6 @@ func TestDefaultCapabilitiesPinAgentContracts(t *testing.T) {
 			"business_domain",
 		},
 		"evidence.semantic.verify": nil,
-		"evidence.synthesize":      nil,
 	}
 	wantFreshness := map[string]agentapi.FreshnessPolicy{
 		"knowledge.code.inspect":   agentapi.FreshnessStable,
@@ -370,7 +334,6 @@ func TestDefaultCapabilitiesPinAgentContracts(t *testing.T) {
 		"knowledge.web.research":   agentapi.FreshnessCurrent,
 		"knowledge.memory.recall":  agentapi.FreshnessCurrent,
 		"evidence.semantic.verify": agentapi.FreshnessStable,
-		"evidence.synthesize":      agentapi.FreshnessStable,
 	}
 	byAgent := make(map[string]agentapi.Definition, len(definitions))
 	for _, definition := range definitions {
@@ -438,7 +401,7 @@ func TestCatalogRejectsNonRuntimePermissionScope(t *testing.T) {
 	}
 }
 
-func TestDefaultQAAndSynthesizerShareUserVisibleAnswerContract(t *testing.T) {
+func TestDefaultQAUsesUserVisibleAnswerContract(t *testing.T) {
 	settings := &config.PlatformSettings{
 		LLMProvider: "openai", LLMModel: "model", LLMAnswerMaxTokens: 4096,
 		LLMContextWindow: 32000, AgentTimeout: config.Duration(time.Minute),
@@ -448,28 +411,11 @@ func TestDefaultQAAndSynthesizerShareUserVisibleAnswerContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	definitions, err := DefaultInvestigators(settings, 7)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var synthesizer agentapi.Definition
-	for _, definition := range definitions {
-		if definition.ID == "synthesizer" {
-			synthesizer = definition
-			break
-		}
-	}
-	if synthesizer.ID == "" {
-		t.Fatal("synthesizer definition not found")
-	}
 	contract := prompts.Text(prompts.AgentQAUserVisibleAnswer)
 	if !strings.HasSuffix(qa.Prompt.System, contract) {
 		t.Fatal("single-agent QA prompt does not end with canonical answer contract")
 	}
-	if !strings.HasSuffix(synthesizer.Prompt.System, contract) {
-		t.Fatal("delegated synthesizer prompt does not end with canonical answer contract")
-	}
-	if strings.Count(qa.Prompt.System, contract) != 1 || strings.Count(synthesizer.Prompt.System, contract) != 1 {
-		t.Fatal("canonical answer contract must appear exactly once in public answer prompts")
+	if strings.Count(qa.Prompt.System, contract) != 1 {
+		t.Fatal("canonical answer contract must appear exactly once in the public answer prompt")
 	}
 }

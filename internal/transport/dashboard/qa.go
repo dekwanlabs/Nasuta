@@ -46,6 +46,12 @@ type qaMessageFeedbackRequest struct {
 	Feedback   string `json:"feedback"`
 }
 
+type qaSessionCreateRequest struct {
+	ID       string        `json:"id"`
+	Title    string        `json:"title,omitempty"`
+	Messages []llm.Message `json:"messages,omitempty"`
+}
+
 type qaHistoryMessage struct {
 	memory.SessionMessage
 	Evidence *agentrun.EvidenceMetrics `json:"evidence,omitempty"`
@@ -676,21 +682,36 @@ func (handler *Handler) APIQASessionSave(w http.ResponseWriter, r *http.Request)
 		httputil.WriteServiceUnavailable(w, "qa session store not available")
 		return
 	}
-	var rec memory.SessionRecord
-	if err := httputil.DecodeJSON(r, &rec); err != nil {
+	var req qaSessionCreateRequest
+	if err := httputil.DecodeStrictJSON(r, &req); err != nil {
 		httputil.WriteBadRequest(w, err.Error())
 		return
 	}
-	if rec.ID == "" {
+	req.ID = strings.TrimSpace(req.ID)
+	if req.ID == "" {
 		httputil.WriteBadRequest(w, "id is required")
 		return
 	}
-	rec.UserID = currentUserID(r)
-	if err := handler.qaSessionStore().Save(rec); err != nil {
+	userID := currentUserID(r)
+	if userID <= 0 {
+		httputil.WriteUnauthorized(w, "authenticated user is required")
+		return
+	}
+	rec := memory.SessionRecord{
+		ID:       req.ID,
+		UserID:   userID,
+		Title:    req.Title,
+		Messages: req.Messages,
+	}
+	if err := handler.qaSessionStore().Create(rec); err != nil {
+		if errors.Is(err, memory.ErrSessionExists) {
+			httputil.WriteErrStatus(w, http.StatusConflict, fmt.Errorf("session %q already exists", req.ID))
+			return
+		}
 		httputil.WriteErr(w, err)
 		return
 	}
-	httputil.WriteJSON(w, map[string]string{"status": "saved"})
+	httputil.WriteJSON(w, map[string]string{"status": "created"})
 }
 
 func (handler *Handler) APIQASessionDelete(w http.ResponseWriter, r *http.Request) {
@@ -700,6 +721,10 @@ func (handler *Handler) APIQASessionDelete(w http.ResponseWriter, r *http.Reques
 	}
 	id := r.PathValue("id")
 	userID := currentUserID(r)
+	if userID <= 0 {
+		httputil.WriteUnauthorized(w, "authenticated user is required")
+		return
+	}
 	deleted, err := handler.qaSessionStore().Delete(id, userID)
 	if err != nil {
 		httputil.WriteErr(w, err)
@@ -709,15 +734,22 @@ func (handler *Handler) APIQASessionDelete(w http.ResponseWriter, r *http.Reques
 		httputil.WriteErrStatus(w, http.StatusNotFound, fmt.Errorf("session not found"))
 		return
 	}
+	var cleanupErr error
 	if m := handler.memoryStore(); m != nil {
 		if _, err := m.DeleteBySession(r.Context(), userID, id); err != nil {
 			log.ErrorfCtx(r.Context(), "[qa] delete memories for session %s: %v", id, err)
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete session memories: %w", err))
 		}
 	}
 	if rs := handler.runStore(); rs != nil {
 		if err := rs.DeleteBySession(id, userID); err != nil {
 			log.ErrorfCtx(r.Context(), "[qa] delete runs for session %s: %v", id, err)
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete session runs: %w", err))
 		}
+	}
+	if cleanupErr != nil {
+		httputil.WriteErrStatus(w, http.StatusInternalServerError, fmt.Errorf("session deleted but cleanup incomplete: %w", cleanupErr))
+		return
 	}
 	httputil.WriteJSON(w, map[string]string{"status": "deleted"})
 }

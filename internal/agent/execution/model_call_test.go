@@ -301,16 +301,19 @@ func TestModelParametersForPhaseUsesIndependentProfiles(t *testing.T) {
 	}
 }
 
-func TestConfigDefaultsAnswerProfileWithoutReasoning(t *testing.T) {
+func TestConfigDefaultsPhaseReasoning(t *testing.T) {
 	base := llm.ModelParameters{
 		ReasoningMode:   llm.ReasoningEnabled,
 		ReasoningEffort: "high",
 		Stop:            []string{"END"},
 	}
 	config := (Config{ModelParameters: base}).withDefaults()
-	if config.InvestigationModelParameters.ReasoningMode != llm.ReasoningEnabled || config.InvestigationModelParameters.ReasoningEffort != "high" {
+	// Investigation (tool-calling) lowers reasoning: choosing the next tool does
+	// not need deep thinking.
+	if config.InvestigationModelParameters.ReasoningMode != llm.ReasoningEnabled || config.InvestigationModelParameters.ReasoningEffort != "low" {
 		t.Fatalf("investigation defaults = %+v", config.InvestigationModelParameters)
 	}
+	// Answer keeps the provider default (high) reasoning for answer quality.
 	if config.AnswerModelParameters.ReasoningMode != llm.ReasoningDisabled || config.AnswerModelParameters.ReasoningEffort != "none" {
 		t.Fatalf("answer defaults = %+v", config.AnswerModelParameters)
 	}

@@ -27,7 +27,6 @@ type CapabilityRole string
 const (
 	RoleInvestigator CapabilityRole = "investigator"
 	RoleVerifier     CapabilityRole = "verifier"
-	RoleSynthesizer  CapabilityRole = "synthesizer"
 
 	// MaxCapabilityIDBytes keeps capability identity bounded wherever it is
 	// projected into delegated child reports and durable artifacts.
@@ -266,7 +265,7 @@ func (registry *CapabilityRegistry) validatePreparedIdentity(originalID string, 
 		return fmt.Errorf("capability %q purpose is required", prepared.ID)
 	}
 	switch prepared.Role {
-	case RoleInvestigator, RoleVerifier, RoleSynthesizer:
+	case RoleInvestigator, RoleVerifier:
 	default:
 		return fmt.Errorf(
 			"capability %q role %q is invalid",

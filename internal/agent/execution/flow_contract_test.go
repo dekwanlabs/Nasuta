@@ -23,12 +23,12 @@ func TestMergeDelegatedFlowsIsIdempotent(t *testing.T) {
 		}},
 	}
 	agent.mergeDelegatedFlows(state)
-	if state.result.Flow == nil {
-		t.Fatal("first merge did not populate result.Flow")
+	if state.result.Flows == nil {
+		t.Fatal("first merge did not populate result.Flows")
 	}
-	first := state.result.Flow
+	first := state.result.Flows[0]
 	agent.mergeDelegatedFlows(state)
-	if state.result.Flow != first {
+	if len(state.result.Flows) != 1 || state.result.Flows[0] != first {
 		t.Fatal("second merge mutated an already-merged flow")
 	}
 }
@@ -37,8 +37,8 @@ func TestMergeDelegatedFlowsNoopWhenEmpty(t *testing.T) {
 	agent := &Agent{observer: NoopObserver()}
 	state := &compiledLoop{ctx: context.Background(), runID: "run-empty", result: &RunResult{}}
 	agent.mergeDelegatedFlows(state)
-	if state.result.Flow != nil {
-		t.Fatalf("empty delegated flows produced flow = %#v", state.result.Flow)
+	if state.result.Flows != nil {
+		t.Fatalf("empty delegated flows produced flows = %#v", state.result.Flows)
 	}
 }
 

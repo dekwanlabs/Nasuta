@@ -124,10 +124,6 @@ func (agent *Agent) accountModelCallUsage(result *llm.ChatStreamResult, callRese
 	return callReservation.Release()
 }
 
-func (agent *Agent) limitModelOutput(inputTokens, requested int, gate agentapi.RunBudgetUsageGate) (int, error) {
-	return agent.limitModelOutputForPhase(inputTokens, requested, gate, agentapi.RunBudgetPhaseDefault)
-}
-
 func (agent *Agent) limitModelOutputForPhase(
 	inputTokens, requested int,
 	gate agentapi.RunBudgetUsageGate,

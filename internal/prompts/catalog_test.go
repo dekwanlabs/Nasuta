@@ -81,21 +81,6 @@ func TestIncidentPromptDoesNotForceUnsupportedRootCause(t *testing.T) {
 	}
 }
 
-func TestInvestigationSynthesizerPromptPreservesUserFacingStructure(t *testing.T) {
-	prompt := Text(AgentCatalogSynthesizer)
-	for _, required := range []string{
-		`"workflow.synthesis_objective"`,
-		`"investigation_goals"`,
-		`User-Visible Answer Contract`,
-		"lead with the answer itself and the conclusion",
-		`Markdown is required inside the "answer" string`,
-	} {
-		if !strings.Contains(prompt, required) {
-			t.Fatalf("synthesizer prompt missing structure rule %q", required)
-		}
-	}
-}
-
 func TestRetrievalExecutionPromptDecomposesIndependentComparisons(t *testing.T) {
 	prompt := Text(RetrievalExecution)
 	for _, required := range []string{

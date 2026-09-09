@@ -155,27 +155,6 @@ func attemptOutputRecovery(
 			)
 		}
 	}
-	if outcome.Status != run.StatusDone &&
-		!recovery.StrictOutput &&
-		canRecoverInvestigationAnswer(outputSchema, outcome.Err) {
-		recovered, recoveryErr := recoverInvestigationAnswer(
-			schemas,
-			outputSchema,
-			recovery,
-		)
-		if recoveryErr == nil {
-			applyRecoveredOutput(outcome, recovered)
-		} else {
-			log.WarnfCtx(
-				log.WithTraceID(context.Background(), runID),
-				"[agent] run %s could not recover unavailable %s output for %s: %v",
-				runID,
-				outputSchema.ID,
-				recovery.AgentID,
-				recoveryErr,
-			)
-		}
-	}
 }
 
 func applyRecoveredOutput(outcome *run.Outcome, recovered []byte) {

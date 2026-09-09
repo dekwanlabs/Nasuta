@@ -81,14 +81,6 @@ type ScenarioToolSource interface {
 	definition.ScenarioToolSource
 }
 
-// RuntimePort is retained as a compatibility alias for compositions that
-// already bind both boundaries through one concrete runtime. New call sites
-// should depend on RunStarter and ScenarioToolSource separately.
-type RuntimePort interface {
-	RunStarter
-	ScenarioToolSource
-}
-
 // RunCompletion is the explicit terminal contract QA requires after Execute.
 // It replaces the previous anonymous type assertion so a managed run's durable
 // outcome is a named, documented boundary instead of an implementation guess.

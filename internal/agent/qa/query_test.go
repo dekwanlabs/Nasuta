@@ -83,7 +83,7 @@ func TestFlowOutputContractCarriesBoundedSubjects(t *testing.T) {
 			{ID: "first-duplicate", Label: "first"},
 		},
 	})
-	if contract.Kind != "flow" || !contract.RequireMermaid || contract.MaxHops != 6 {
+	if contract.MaxHops != 6 {
 		t.Fatalf("flow output contract = %+v", contract)
 	}
 	if got, want := contract.Subjects, []string{"First", "Second", "fallback"}; !reflect.DeepEqual(got, want) {

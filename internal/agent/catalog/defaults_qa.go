@@ -14,7 +14,7 @@ func DefaultQAVersion(settings *config.PlatformSettings, version int64) (agentap
 		systemPrompt = prompts.Text(prompts.AgentCatalogFallbackQA)
 	}
 	// The single-agent QA answerer shares the same user-visible answer contract
-	// as the investigation synthesizer, so every public answer follows one
+	// as the delegated synthesis, so every public answer follows one
 	// output rule set regardless of which agent produced it.
 	systemPrompt = prompts.WithUserVisibleAnswerContract(systemPrompt)
 	return agentapi.Prepare(agentapi.Definition{

@@ -654,27 +654,6 @@ func TestOrchestratorEnforcesWorkflowRetryBudgetBeforeStartingAttempt(t *testing
 	}
 }
 
-type blockingBudgetExecutor struct {
-	started chan string
-	release chan struct{}
-}
-
-func (executor *blockingBudgetExecutor) Execute(
-	ctx context.Context,
-	request NodeRequest,
-) (NodeResult, error) {
-	executor.started <- request.Node.ID
-	select {
-	case <-ctx.Done():
-		return NodeResult{}, ctx.Err()
-	case <-executor.release:
-	}
-	payload, _ := json.Marshal(map[string]string{"node": request.Node.ID})
-	return NodeResult{
-		Handoff: Handoff{Payload: payload, Completeness: Complete},
-	}, nil
-}
-
 type usageWorkflowExecutor struct {
 	mu    sync.Mutex
 	calls []string

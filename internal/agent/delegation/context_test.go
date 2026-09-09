@@ -59,7 +59,7 @@ func TestParentContextClonesOutputContractSubjects(t *testing.T) {
 	ctx := WithParentContext(context.Background(), ParentContext{
 		RunID: "parent-1",
 		OutputContract: agentapi.RunOutputContract{
-			Kind: "flow", RequireMermaid: true, Subjects: subjects, MaxHops: 6,
+			Subjects: subjects, MaxHops: 6,
 		},
 	})
 	subjects[0] = "mutated"

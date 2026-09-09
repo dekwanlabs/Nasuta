@@ -554,20 +554,6 @@ func TestRunAgentFinishesHubWhenLLMCallFails(t *testing.T) {
 	}
 }
 
-func newQARuntimeFixture(
-	t *testing.T,
-	client *llm.LLMClient,
-	baseURL string,
-	registry *Registry,
-	retriever contextRetriever,
-	pruningEnabled bool,
-) (*Service, *DefinitionRuntime) {
-	qa, runtime, _ := newQARuntimeFixtureWithStore(
-		t, client, baseURL, registry, retriever, pruningEnabled, nil,
-	)
-	return qa, runtime
-}
-
 func newQARuntimeFixtureWithStore(
 	t *testing.T,
 	client *llm.LLMClient,

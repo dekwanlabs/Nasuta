@@ -2,8 +2,6 @@ package definition
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,8 +17,6 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 )
-
-func hashRawInput(raw []byte) string { sum := sha256.Sum256(raw); return hex.EncodeToString(sum[:]) }
 
 func runtimeErrorCode(err error) string {
 	if errors.Is(err, agentapi.ErrBudgetExceeded) {
@@ -358,7 +354,7 @@ func (run *activeRun) executePrepared(
 		MaxContinueRounds:                 execution.definition.Budget.MaxContinueRounds,
 		StructuredOutput:                  execution.structuredOutput,
 		ModelParameters:                   execution.modelParameters,
-		InvestigationModelParameters:      execution.modelParameters,
+		InvestigationModelParameters:      execution.modelParameters.WithLowReasoning(),
 		AnswerModelParameters:             execution.modelParameters.WithoutReasoning(),
 		InputPriceMicrosPerMillionTokens:  execution.definition.Model.InputPriceMicrosPerMillionTokens,
 		OutputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
@@ -533,8 +529,7 @@ func runStart(request agentapi.RunRequest) agentapi.RunStart {
 }
 
 func sameOutputContract(left, right agentapi.RunOutputContract) bool {
-	if left.Kind != right.Kind || left.RequireMermaid != right.RequireMermaid ||
-		left.MaxHops != right.MaxHops || len(left.Subjects) != len(right.Subjects) {
+	if left.MaxHops != right.MaxHops || len(left.Subjects) != len(right.Subjects) {
 		return false
 	}
 	for index := range left.Subjects {

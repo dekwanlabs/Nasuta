@@ -83,6 +83,15 @@ func DefaultModelCapability(provider, model string) ModelCapabilityProfile {
 		profile.ReasoningWireField = ReasoningWireEffort
 		profile.ReasoningUsageIncludesOutput = true
 	}
+	if provider == "openai" && isDeepSeekReasoningModel(model) {
+		// DeepSeek reasoning models keep max_tokens (the gateway has not been
+		// confirmed to translate max_completion_tokens), but accept
+		// reasoning_effort so the answer/report phase can lower the reasoning
+		// load that would otherwise dominate the output budget and wall clock.
+		profile.SupportsReasoningEffort = true
+		profile.ReasoningWireField = ReasoningWireEffort
+		profile.ReasoningUsageIncludesOutput = true
+	}
 	return profile
 }
 
@@ -102,6 +111,20 @@ func OpenAIReasoningCapability(model string) ModelCapabilityProfile {
 func isOpenAIReasoningModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	for _, prefix := range []string{"o1", "o3", "o4", "gpt-5"} {
+		if model == prefix || strings.HasPrefix(model, prefix+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// isDeepSeekReasoningModel recognizes DeepSeek reasoning variants served through
+// an OpenAI-compatible gateway. They report reasoning_tokens but use max_tokens
+// (not max_completion_tokens), so they need their own profile rather than the
+// OpenAI o-series path.
+func isDeepSeekReasoningModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	for _, prefix := range []string{"deepseek-reasoner", "deepseek-v3", "deepseek-v4"} {
 		if model == prefix || strings.HasPrefix(model, prefix+"-") {
 			return true
 		}

@@ -49,7 +49,6 @@ const (
 	AgentCatalogInvestigator        ID = "agent.catalog.investigator"
 	AgentCatalogInvestigationReport ID = "agent.catalog.investigation_report"
 	AgentCatalogDelegationVerifier  ID = "agent.catalog.delegation_verifier"
-	AgentCatalogSynthesizer         ID = "agent.catalog.synthesizer"
 	AgentCatalogReviewer            ID = "agent.catalog.reviewer"
 	AgentCatalogAdjudicator         ID = "agent.catalog.adjudicator"
 
@@ -143,7 +142,6 @@ var idFiles = map[ID]string{
 	AgentCatalogInvestigator:               "agent/catalog/investigator.txt",
 	AgentCatalogInvestigationReport:        "agent/catalog/investigation_report.txt",
 	AgentCatalogDelegationVerifier:         "agent/catalog/delegation_verifier.txt",
-	AgentCatalogSynthesizer:                "agent/catalog/synthesizer.txt",
 	AgentCatalogReviewer:                   "agent/catalog/reviewer.txt",
 	AgentCatalogAdjudicator:                "agent/catalog/adjudicator.txt",
 	RetrievalPlanner:                       "retrieval/planner.txt",

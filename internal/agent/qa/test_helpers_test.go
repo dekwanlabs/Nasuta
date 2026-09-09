@@ -178,19 +178,6 @@ func testDefinitionRequest(definition agentapi.Definition) agentapi.RunRequest {
 	}
 }
 
-func newTestDefinitionRuntime(
-	t *testing.T,
-	definition agentapi.Definition,
-	registry *Registry,
-	settings *config.PlatformSettings,
-	store *RunStore,
-) *DefinitionRuntime {
-	t.Helper()
-	runtime, hub := newTestDefinitionRuntimeWithHub(t, definition, registry, settings, store)
-	_ = hub
-	return runtime
-}
-
 func newTestDefinitionRuntimeWithHub(
 	t *testing.T,
 	definition agentapi.Definition,

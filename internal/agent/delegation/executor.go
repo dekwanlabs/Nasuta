@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -218,7 +217,6 @@ type preparedTask struct {
 	limits        agentapi.RunLimits
 	permissions   agentapi.PermissionPolicy
 	context       []agentapi.ContextBlock
-	inputTokens   int64
 	outputTokens  int64
 	reportTokens  int64
 	budget        agentapi.RunBudgetTaskReservation
@@ -1039,7 +1037,6 @@ func (executor *Executor) prepareTaskDefinition(parent ParentContext, candidate 
 
 func (executor *Executor) prepareTaskBudget(parent ParentContext, delegationID string, candidate *preparedTask, capability agentapi.Capability) error {
 	childBudget := executor.childBudget(parent)
-	candidate.inputTokens = childBudget.inputTokens
 	candidate.outputTokens = childBudget.outputTokens
 	candidate.reportTokens = childBudget.reportTokens
 	candidate.context = selectContext(
@@ -1058,14 +1055,10 @@ func (executor *Executor) prepareTaskBudget(parent ParentContext, delegationID s
 			seedContextTokens(childBudget.contextTokens, childBudget.outputTokens),
 		)
 	}
-	input, err := childInput(parent, delegationID, *candidate)
-	if err != nil {
-		return err
-	}
-	if estimateTokens(input, candidate.context) > childBudget.inputTokens {
-		return fmt.Errorf("delegation child input exceeds token limit")
-	}
-	return nil
+	// No cumulative input quota: the batch ledger is the only cumulative bound,
+	// so there is no per-child input admission check here.
+	_, err := childInput(parent, delegationID, *candidate)
+	return err
 }
 
 func delegationWorkID(delegationID string, taskIndex int) string {
@@ -1111,21 +1104,7 @@ func (executor *Executor) runQueuedOrInline(ctx context.Context, parent ParentCo
 		return taskOutcome{report: report}
 	}
 	claimStarted := time.Now()
-	var item agentrun.WorkItem
-	var err error
-	if fastPath, ok := executor.queue.(enqueueAndClaimWorkQueue); ok {
-		durableCtx, cancelDurable := executor.durableContext(ctx)
-		item, err = fastPath.EnqueueAndClaimWorkItem(
-			durableCtx, workItem, executor.workerOwner, claimStarted.UTC(), executor.workerLeaseTTL,
-		)
-		cancelDurable()
-	} else {
-		durableCtx, cancelDurable := executor.durableContext(ctx)
-		item, err = executor.queue.ClaimWorkItemByID(
-			durableCtx, workItem.WorkID, executor.workerOwner, claimStarted.UTC(), executor.workerLeaseTTL,
-		)
-		cancelDurable()
-	}
+	item, err := executor.claimWorkItemWithRetry(ctx, workItem)
 	task.queueClaimMS = time.Since(claimStarted).Milliseconds()
 	if err == nil {
 		task.queueWaitMS = workItemQueueWaitMS(item)
@@ -1164,6 +1143,39 @@ func (executor *Executor) queuedWorkItem(parent ParentContext, delegationID stri
 		ParentRunID: parent.RunID, DelegationID: delegationID, TaskIndex: task.index,
 		AttemptNo: 1, Kind: "delegation_child", Payload: payload, State: agentrun.WorkReady,
 	}, nil
+}
+
+// claimWorkItemWithRetry admits one child into the durable queue. Concurrent
+// batch dispatch can contend on the work-item unique index long enough to
+// exceed a single DurableIOTimeout. Enqueue+claim is idempotent, so a bounded
+// retry on a transient deadline-exceeded turns that lock wait into a
+// successful claim instead of a failed task.
+func (executor *Executor) claimWorkItemWithRetry(ctx context.Context, workItem agentrun.WorkItem) (agentrun.WorkItem, error) {
+	const maxAttempts = 3
+	var (
+		item agentrun.WorkItem
+		err  error
+	)
+	fastPath, isAtomic := executor.queue.(enqueueAndClaimWorkQueue)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		durableCtx, cancelDurable := executor.durableContext(ctx)
+		now := time.Now().UTC()
+		if isAtomic {
+			item, err = fastPath.EnqueueAndClaimWorkItem(
+				durableCtx, workItem, executor.workerOwner, now, executor.workerLeaseTTL,
+			)
+		} else {
+			item, err = executor.queue.ClaimWorkItemByID(
+				durableCtx, workItem.WorkID, executor.workerOwner, now, executor.workerLeaseTTL,
+			)
+		}
+		cancelDurable()
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) || attempt == maxAttempts {
+			return item, err
+		}
+		time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+	}
+	return item, err
 }
 
 func workItemQueueWaitMS(item agentrun.WorkItem) int64 {
@@ -2051,11 +2063,6 @@ func applyAttemptTokenLimits(result *agentapi.RunResult, task preparedTask) {
 	if result.Status == agentapi.RunFailed || result.Status == agentapi.RunCancelled {
 		return
 	}
-	if task.inputTokens > 0 && result.Usage.InputTokens > task.inputTokens {
-		result.Status = agentapi.RunFailed
-		result.Error = &agentapi.RunError{Code: ErrorChildInputLimit, Message: "child input token limit exceeded"}
-		return
-	}
 	if task.outputTokens > 0 && result.Usage.OutputTokens > task.outputTokens {
 		overrun := result.Usage.OutputTokens - task.outputTokens
 		// A small rounding/decoding overrun must not discard a usable child
@@ -2463,7 +2470,6 @@ func childInput(
 		ParentQuestionSummary string   `json:"parent_question_summary"`
 		FocusFacets           []string `json:"focus_facets"`
 		EvidenceRefs          []string `json:"evidence_refs"`
-		OutputKind            string   `json:"output_kind,omitempty"`
 		MaxHops               int      `json:"max_hops,omitempty"`
 		DelegationID          string   `json:"delegation_id"`
 		ParentRunID           string   `json:"parent_run_id"`
@@ -2473,7 +2479,6 @@ func childInput(
 		ParentQuestionSummary: boundedSummary(parent.QuestionSummary),
 		FocusFacets:           jsonStringArray(task.request.FocusFacets),
 		EvidenceRefs:          jsonStringArray(task.request.EvidenceRefs),
-		OutputKind:            parent.OutputContract.Kind,
 		MaxHops:               parent.OutputContract.MaxHops,
 		DelegationID:          delegationID, ParentRunID: parent.RunID, TaskIndex: task.index,
 	}
@@ -2485,26 +2490,22 @@ func childInput(
 }
 
 type childBudget struct {
-	turns        int
-	toolCalls    int64
-	inputTokens  int64
-	outputTokens int64
-	reportTokens int64
+	turns         int
+	toolCalls     int64
+	outputTokens  int64
+	reportTokens  int64
 	contextTokens int64
 }
 
 // childBudget derives one child's budget directly from the delegation policy.
 // Flow contracts no longer get a narrower budget: the parent still owns the
-// user-facing Mermaid, and a shallow child produces empty reports. The
-// single-request context ceiling is an independent policy field, not a split of
-// the cumulative input budget across turns: a child's first request carries the
-// full pre-retrieved evidence seed, which the cumulative-budget-derived ceiling
-// was too small to hold alongside the output reserve and context safety margin.
+// user-facing FlowIR diagram, and a shallow child produces empty reports. There is no
+// per-child cumulative input quota — the single-request context ceiling bounds
+// each request, and the batch total is the only cumulative bound.
 func (executor *Executor) childBudget(parent ParentContext) childBudget {
 	return childBudget{
 		turns:         executor.policy.MaxChildTurns,
 		toolCalls:     executor.policy.MaxChildToolCalls,
-		inputTokens:   executor.policy.MaxChildInputTokens,
 		outputTokens:  executor.policy.MaxChildOutputTokens,
 		reportTokens:  executor.policy.MaxReportTokens,
 		contextTokens: executor.policy.MaxChildContextTokens,
@@ -2522,26 +2523,18 @@ func minPositiveInt64(left, right int64) int64 {
 }
 
 func taskBudgetGrant(task preparedTask) agentapi.Usage {
-	return budgetGrant(task.limits, task.inputTokens, task.outputTokens)
+	return budgetGrant(task.limits, task.outputTokens)
 }
 
-func budgetGrant(limits agentapi.RunLimits, fallbackInput, fallbackOutput int64) agentapi.Usage {
-	inputTokens := limits.MaxInputTokens
-	if inputTokens <= 0 {
-		inputTokens = fallbackInput
-	}
+// budgetGrant derives the child's budget grant. Children hold no per-child
+// cumulative input quota, so the grant bounds only the output budget; input and
+// total stay zero, which the shared batch ledger treats as unbounded per-child.
+func budgetGrant(limits agentapi.RunLimits, fallbackOutput int64) agentapi.Usage {
 	outputTokens := limits.MaxOutputTokens
 	if outputTokens <= 0 {
 		outputTokens = fallbackOutput
 	}
-	totalTokens := limits.MaxTotalTokens
-	if totalTokens <= 0 {
-		totalTokens = inputTokens + outputTokens
-	}
-	return agentapi.Usage{
-		InputTokens: inputTokens, OutputTokens: outputTokens,
-		TotalTokens: totalTokens, CostMicros: limits.MaxCostMicros,
-	}
+	return agentapi.Usage{OutputTokens: outputTokens}
 }
 
 func (executor *Executor) childLimits(
@@ -2617,20 +2610,12 @@ func (executor *Executor) gapChaseLimits(
 		}
 	}
 	outputTokens := minPositiveInt64(budget.outputTokens, int64(definition.Model.MaxOutputTokens))
-	tokens := budget.inputTokens + outputTokens
-	cost := estimatedCostMicros(
-		budget.inputTokens, outputTokens,
-		definition.Model.InputPriceMicrosPerMillionTokens,
-		definition.Model.OutputPriceMicrosPerMillionTokens,
-	)
 	return agentapi.RunLimits{
 		Deadline:         deadline,
 		MaxSteps:         steps,
 		MaxToolCalls:     toolCalls,
-		MaxInputTokens:   budget.inputTokens,
 		MaxContextTokens: budget.contextTokens,
 		MaxOutputTokens:  outputTokens,
-		MaxTotalTokens:   tokens, MaxCostMicros: cost,
 	}, nil
 }
 
@@ -2664,20 +2649,12 @@ func (executor *Executor) childLimitsAt(
 	}
 	budget := executor.childBudget(parent)
 	outputTokens := minPositiveInt64(budget.outputTokens, int64(definition.Model.MaxOutputTokens))
-	tokens := budget.inputTokens + outputTokens
-	cost := estimatedCostMicros(
-		budget.inputTokens, outputTokens,
-		definition.Model.InputPriceMicrosPerMillionTokens,
-		definition.Model.OutputPriceMicrosPerMillionTokens,
-	)
 	return agentapi.RunLimits{
 		Deadline:         deadline,
 		MaxSteps:         min(definition.Budget.MaxSteps, budget.turns),
 		MaxToolCalls:     clampChildToolCalls(budget.toolCalls, definition.Budget.MaxToolCalls),
-		MaxInputTokens:   budget.inputTokens,
 		MaxContextTokens: budget.contextTokens,
 		MaxOutputTokens:  outputTokens,
-		MaxTotalTokens:   tokens, MaxCostMicros: cost,
 	}, nil
 }
 
@@ -2924,7 +2901,7 @@ func delegationPolicyLimitsInvalid(policy agentapi.DelegationPolicy) bool {
 	return policy.MaxChildren <= 0 || policy.MaxConcurrent <= 0 ||
 		policy.MaxConcurrent > policy.MaxChildren ||
 		policy.MaxChildTurns <= 0 || policy.MaxChildToolCalls <= 0 ||
-		policy.MaxChildInputTokens <= 0 || policy.MaxChildContextTokens <= 0 ||
+		policy.MaxChildContextTokens <= 0 ||
 		policy.MaxChildOutputTokens <= 0 ||
 		policy.MaxReportTokens <= 0 || policy.MaxTotalTokens <= 0 ||
 		policy.MaxTotalCostMicros < 0 || policy.ParentAnswerReserve < 0 ||
@@ -3137,46 +3114,6 @@ func intersectPermissions(
 	}
 	sort.Strings(scopes)
 	return agentapi.PermissionPolicy{Scopes: scopes}
-}
-
-func estimatedCostMicros(
-	inputTokens,
-	outputTokens,
-	inputPrice,
-	outputPrice int64,
-) int64 {
-	inputCost := tokenCost(inputTokens, inputPrice)
-	outputCost := tokenCost(outputTokens, outputPrice)
-	if inputCost > math.MaxInt64-outputCost {
-		return math.MaxInt64
-	}
-	return inputCost + outputCost
-}
-
-func tokenCost(tokens, price int64) int64 {
-	if tokens <= 0 || price <= 0 {
-		return 0
-	}
-	if tokens > math.MaxInt64/price {
-		return math.MaxInt64
-	}
-	product := tokens * price
-	cost := product / 1_000_000
-	if product%1_000_000 != 0 {
-		cost++
-	}
-	return cost
-}
-
-func estimateTokens(
-	input json.RawMessage,
-	context []agentapi.ContextBlock,
-) int64 {
-	bytes := len(input)
-	for _, block := range context {
-		bytes += len(block.Content)
-	}
-	return int64((bytes + 3) / 4)
 }
 
 func failedReport(

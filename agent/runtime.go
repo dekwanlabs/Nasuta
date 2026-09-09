@@ -227,13 +227,12 @@ func RunBudgetUsageGateFromContext(ctx context.Context) RunBudgetUsageGate {
 }
 
 // RunOutputContract describes a request-specific answer shape enforced by the
-// runtime in addition to the definition's output schema. It is intentionally
-// small and transport-neutral so callers can pin it before execution begins.
+// runtime in addition to the definition's output schema. It carries only the
+// parameters the answer needs; whether a flow answer must carry a diagram is
+// decided from the presence of FlowIR evidence, not a classification flag.
 type RunOutputContract struct {
-	Kind           string   `json:"kind,omitempty"`
-	RequireMermaid bool     `json:"require_mermaid,omitempty"`
-	Subjects       []string `json:"subjects,omitempty"`
-	MaxHops        int      `json:"max_hops,omitempty"`
+	Subjects []string `json:"subjects,omitempty"`
+	MaxHops  int      `json:"max_hops,omitempty"`
 }
 
 type RunPolicy struct {

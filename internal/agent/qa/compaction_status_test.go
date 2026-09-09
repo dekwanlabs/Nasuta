@@ -1,8 +1,11 @@
 package qa
 
-import "github.com/dekwanlabs/nasuta/internal/agent/run"
+import (
+	"testing"
+	"time"
 
-import "testing"
+	"github.com/dekwanlabs/nasuta/internal/agent/run"
+)
 
 type compactionStatusRecorder struct {
 	runID        string
@@ -39,7 +42,7 @@ func (recorder *compactionStatusRecorder) EmitContextUsage(runID string, event r
 func TestUpdateSessionCompactionStoresAndPublishesLatestStatus(t *testing.T) {
 	recorder := &compactionStatusRecorder{}
 	svc := &Service{
-		events:     recorder,
+		events:           recorder,
 		compactionStatus: make(map[string]run.SessionStatusEvent),
 	}
 
@@ -89,5 +92,24 @@ func TestEmitContextUsagePublishesProjection(t *testing.T) {
 
 	if recorder.contextRunID != "run-2" || recorder.contextEvent != event {
 		t.Fatalf("published run=%q event=%+v", recorder.contextRunID, recorder.contextEvent)
+	}
+}
+
+func TestCompactionStatusPrunesExpiredEntries(t *testing.T) {
+	recorder := &compactionStatusRecorder{}
+	svc := &Service{
+		events:             recorder,
+		compactionStatus:   make(map[string]run.SessionStatusEvent),
+		compactionStatuses: make(map[string]time.Time),
+	}
+
+	svc.updateCompaction("run-1", "start", "starting", 1, 2)
+	// Backdate the entry beyond the lifetime so the next read prunes it.
+	svc.compactionMu.Lock()
+	svc.compactionStatuses["run-1"] = time.Now().Add(-3 * time.Minute)
+	svc.compactionMu.Unlock()
+
+	if got := svc.CompactionStatus("run-1"); got.Status != "" {
+		t.Fatalf("expired status = %+v, want zero value", got)
 	}
 }

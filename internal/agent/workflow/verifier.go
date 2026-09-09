@@ -107,7 +107,7 @@ type verifiedEvidenceView struct {
 	SubjectCoverage         []subjectCoverageView          `json:"subject_coverage,omitempty"`
 	Verification            verificationView               `json:"verification"`
 	Completeness            Completeness                   `json:"completeness"`
-	// Omissions makes payload compaction visible to the synthesizer.
+	// Omissions makes payload compaction visible to the composer.
 	Omissions omissionView `json:"omissions"`
 }
 

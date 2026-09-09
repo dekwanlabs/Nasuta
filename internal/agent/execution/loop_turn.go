@@ -241,7 +241,7 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 	}
 	if err == nil {
 		agent.mergeDelegatedFlows(state)
-		flowCtx := withFlowIR(state.loopCtx, state.result.Flow)
+		flowCtx := withFlows(state.loopCtx, state.result.Flows)
 		result = agent.enforceFlowContract(
 			flowCtx,
 			state.messages,

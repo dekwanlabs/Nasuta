@@ -49,6 +49,7 @@ type Service struct {
 	runtimeErr              error
 	compactionMu            sync.RWMutex
 	compactionStatus        map[string]run.SessionStatusEvent
+	compactionStatuses      map[string]time.Time
 }
 
 // New wires retrieval, agent, memory, and write tools together.
@@ -82,11 +83,12 @@ func New(d Deps) *Service {
 		outputReserve:   platformSettings.LLMAnswerMaxTokens,
 		domainKnowledge: platformSettings.DomainKnowledge,
 		definitions:     d.Definitions, agentRef: d.Agent,
-		starter:          d.Runtime,
-		scenarioTools:    d.Runtime,
-		events:           d.Events,
-		memory:           d.Memory,
-		compactionStatus: make(map[string]run.SessionStatusEvent),
+		starter:            d.Starter,
+		scenarioTools:      d.ScenarioTools,
+		events:             d.Events,
+		memory:             d.Memory,
+		compactionStatus:   make(map[string]run.SessionStatusEvent),
+		compactionStatuses: make(map[string]time.Time),
 	}
 	svc.writeAvailable.Store(d.WriteAvailable)
 	if svc.agentRef.ID == "" {
@@ -99,7 +101,7 @@ func New(d Deps) *Service {
 		log.Infof("[qa] reranker: dashscope (%s)", platformSettings.RerankModel)
 	}
 
-	if d.Runtime == nil || d.Models == nil {
+	if d.Starter == nil || d.ScenarioTools == nil || d.Models == nil {
 		svc.runtimeErr = fmt.Errorf("QA runtime is not configured")
 	} else {
 		svc.helperLLM = d.Models.Primary()
@@ -115,13 +117,6 @@ func (svc *Service) Memory() *memory.MemoryStore { return svc.memory }
 // service or any of the runtime dependencies it already holds.
 func (svc *Service) SetWriteAvailable(available bool) {
 	svc.writeAvailable.Store(available)
-}
-
-// emitStep pushes a lightweight phase hint to the run hub.
-func (svc *Service) emitStep(runID, text string) {
-	if svc.events != nil {
-		svc.events.EmitPhase(runID, text)
-	}
 }
 
 func (svc *Service) emitStatus(runID, text, code string, started time.Time) {
@@ -145,23 +140,50 @@ func (svc *Service) emitContextUsage(runID string, event run.ContextUsageEvent) 
 }
 
 func (svc *Service) updateCompaction(runID, status, text string, fromTurn, toTurn int) {
+	now := time.Now()
 	event := run.SessionStatusEvent{
 		Status: status, Text: text, FromTurn: fromTurn, ToTurn: toTurn,
-		UpdatedAtMs: time.Now().UnixMilli(),
+		UpdatedAtMs: now.UnixMilli(),
 	}
 	svc.compactionMu.Lock()
+	if svc.compactionStatuses == nil {
+		svc.compactionStatuses = make(map[string]time.Time)
+	}
+	if svc.compactionStatus == nil {
+		svc.compactionStatus = make(map[string]run.SessionStatusEvent)
+	}
+	svc.pruneCompactionStatuses(now)
 	svc.compactionStatus[runID] = event
+	svc.compactionStatuses[runID] = now
 	svc.compactionMu.Unlock()
 	if svc.events != nil {
 		svc.events.EmitSessionStatus(runID, event)
 	}
 }
 
+// compactionStatusLifetime bounds how long a transient archive status remains
+// queryable before it is garbage-collected on the next write or read.
+const compactionStatusLifetime = 2 * time.Minute
+
+// pruneCompactionStatuses removes expired transient archive status entries.
+// It is called on reads and writes so the map cannot grow without bound.
+func (svc *Service) pruneCompactionStatuses(now time.Time) {
+	for runID, updated := range svc.compactionStatuses {
+		if now.Sub(updated) > compactionStatusLifetime {
+			delete(svc.compactionStatuses, runID)
+			delete(svc.compactionStatus, runID)
+		}
+	}
+}
+
 // CompactionStatus returns the latest transient archive status for one run.
 func (svc *Service) CompactionStatus(runID string) run.SessionStatusEvent {
-	svc.compactionMu.RLock()
-	defer svc.compactionMu.RUnlock()
-	return svc.compactionStatus[runID]
+	now := time.Now()
+	svc.compactionMu.Lock()
+	svc.pruneCompactionStatuses(now)
+	status := svc.compactionStatus[runID]
+	svc.compactionMu.Unlock()
+	return status
 }
 
 // Ask starts one QA run with optional trusted scenario context.

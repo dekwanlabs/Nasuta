@@ -86,12 +86,6 @@ func DefaultCapabilities(
 			purpose:   "Resolve bounded semantic claim conflicts using cited evidence.",
 			freshness: agentapi.FreshnessStable,
 		},
-		{
-			id: "evidence.synthesize", agentID: "synthesizer",
-			role:      agentapi.RoleSynthesizer,
-			purpose:   "Synthesize admitted investigation evidence without gathering new evidence.",
-			freshness: agentapi.FreshnessStable,
-		},
 	}
 	capabilities := make([]agentapi.Capability, 0, len(specifications))
 	for _, specification := range specifications {

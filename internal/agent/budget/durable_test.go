@@ -3,6 +3,7 @@ package budget
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -228,7 +229,7 @@ func (backend *fakeDurableBackend) Reserve(rootID string, requested DurableReser
 				inFlight = addUsage(inFlight, call.Estimate)
 			}
 		}
-		if err := requireWithin(requested.Estimate, subtractUsage(task.Grant, addUsage(task.used, inFlight)), "child call"); err != nil {
+		if err := requireWithin(requested.Estimate, Remaining(task.Grant, addUsage(task.used, inFlight)), "child call"); err != nil {
 			return err
 		}
 	}
@@ -427,6 +428,42 @@ func TestDurableTaskGrantSettlementAndRelease(t *testing.T) {
 	}
 	if got := root.Available().TotalTokens; got != 80 {
 		t.Fatalf("post-release root availability = %d, want 80", got)
+	}
+}
+
+func TestDurableTaskOutputOnlyGrantTreatsInputAsUnbounded(t *testing.T) {
+	backend := newFakeDurableBackend()
+	root, err := NewDurableRoot(backend, "root-1", agentapi.RunLimits{MaxTotalTokens: 1000000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Delegation grants are output-only: input and total stay zero ("unbounded
+	// per-child"). A zero grant dimension must read as unlimited, not zero.
+	task, err := root.ReserveTask(agentapi.Usage{OutputTokens: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	available := task.Available()
+	if available.InputTokens != math.MaxInt64 {
+		t.Fatalf("available input = %d, want unbounded", available.InputTokens)
+	}
+	if available.TotalTokens != math.MaxInt64 {
+		t.Fatalf("available total = %d, want unbounded", available.TotalTokens)
+	}
+	if available.OutputTokens != 100 {
+		t.Fatalf("available output = %d, want 100", available.OutputTokens)
+	}
+	// A call carrying input tokens must be admitted against an output-only grant.
+	call, err := task.ReserveCall(agentapi.Usage{InputTokens: 2000, OutputTokens: 10})
+	if err != nil {
+		t.Fatalf("reserve call with input = %v", err)
+	}
+	if err := call.Settle(agentapi.Usage{InputTokens: 2000, OutputTokens: 10}); err != nil {
+		t.Fatalf("settle call = %v", err)
+	}
+	// Consumed input must not trip the bounded-only Check().
+	if err := task.Check(); err != nil {
+		t.Fatalf("check after input usage = %v", err)
 	}
 }
 

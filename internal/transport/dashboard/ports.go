@@ -11,10 +11,10 @@ import (
 )
 
 // QASessionStorePort is the session-boundary Dashboard needs for context
-// loading, listing, feedback, save, and delete.
+// loading, listing, feedback, creation, and delete.
 type QASessionStorePort interface {
 	List(userID int64) ([]memory.SessionRecord, error)
-	Save(memory.SessionRecord) error
+	Create(memory.SessionRecord) error
 	Delete(id string, userID int64) (bool, error)
 	GetContextSnapshot(id string, userID int64, metadataLimit, dialogueLimit int) (*memory.SessionRecord, error)
 	ListMessagesBefore(id string, userID int64, beforeSeq, limit int) (*memory.MessagePage, error)

@@ -15,10 +15,19 @@ func TestDefaultModelCapabilityUsesConservativeProfiles(t *testing.T) {
 		{
 			name:                 "unknown openai-compatible model",
 			provider:             "openai",
-			model:                "deepseek-v4-flash",
+			model:                "custom-gateway-model",
 			style:                APIStyleChatCompletions,
 			completionLimitField: CompletionLimitMaxTokens,
 			reasoningWire:        ReasoningWireNone,
+		},
+		{
+			name:                 "deepseek reasoning model keeps max_tokens",
+			provider:             "openai",
+			model:                "deepseek-v4-flash",
+			style:                APIStyleChatCompletions,
+			completionLimitField: CompletionLimitMaxTokens,
+			reasoningWire:        ReasoningWireEffort,
+			supportsEffort:       true,
 		},
 		{
 			name:                 "openai reasoning model",

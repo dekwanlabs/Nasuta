@@ -156,15 +156,17 @@ func (agent *Agent) compactContext(
 	messages := append([]llm.Message(nil), state.messages...)
 	target := window * answerContextTargetPercent / 100
 
-	needed := max(0, result.ProjectedBeforeTokens-target)
-	needed = removeAssistantNarration(messages, start, needed, &result)
+	// removeAssistantNarration has side effects on messages and result, so it
+	// must stay; its returned reduction is intentionally superseded by the
+	// remeasurement below.
+	removeAssistantNarration(messages, start, max(0, result.ProjectedBeforeTokens-target), &result)
 
 	currentInputTokens, err := estimateInputTokens(messages, tools)
 	if err != nil {
 		return result, fmt.Errorf("remeasure %s context: %w", phase, err)
 	}
 	candidates := toolResultCandidates(messages, start, state.answerToolSources)
-	needed = max(0, currentInputTokens+outputReserve-target)
+	needed := max(0, currentInputTokens+outputReserve-target)
 	allocateToolBudgets(candidates, needed, oldToolResultFloorTokens, recentToolResultFloorTokens)
 
 	plannedReduction := plannedToolReduction(candidates)

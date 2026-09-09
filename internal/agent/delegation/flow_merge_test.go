@@ -139,3 +139,38 @@ func TestMergeFlowIRsKeepsSameNamedNodesIsolatedAcrossSubjects(t *testing.T) {
 		seen[node.ID] = struct{}{}
 	}
 }
+
+func TestMergeFlowIRsBySubjectKeepsSubjectsSeparate(t *testing.T) {
+	orders := mergeTestFlow("orders", "a", "b", "verified", []string{"orders-edge"})
+	payments := mergeTestFlow("payments", "x", "y", "verified", []string{"payments-edge"})
+	flows, err := MergeFlowIRsBySubject([]agentapi.FlowIR{orders, payments})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flows) != 2 {
+		t.Fatalf("expected 2 subject flows, got %d", len(flows))
+	}
+	for _, flow := range flows {
+		if len(flow.Nodes) != 2 || len(flow.Edges) != 1 {
+			t.Fatalf("subject flow not independently merged: %#v", flow)
+		}
+	}
+}
+
+func TestMergeFlowIRsBySubjectMergesSameSubject(t *testing.T) {
+	first := mergeTestFlow("orders", "a", "b", "verified", []string{"edge-1"})
+	second := mergeTestFlow("orders", "a", "b", "inferred", []string{"edge-2"})
+	flows, err := MergeFlowIRsBySubject([]agentapi.FlowIR{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flows) != 1 {
+		t.Fatalf("expected 1 subject flow, got %d", len(flows))
+	}
+	if len(flows[0].Nodes) != 2 || len(flows[0].Edges) != 1 {
+		t.Fatalf("same-subject flows not merged: %#v", flows[0])
+	}
+	if flows[0].Edges[0].EvidenceState != "inferred" {
+		t.Fatalf("conservative evidence state not preserved: %#v", flows[0].Edges[0])
+	}
+}

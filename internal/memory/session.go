@@ -105,6 +105,9 @@ type SessionMessage struct {
 
 var ErrSessionOwnership = errors.New("memory/session: session belongs to another user")
 
+// ErrSessionExists is returned by Create when a session id is already owned.
+var ErrSessionExists = errors.New("memory/session: session already exists")
+
 // NewSessionStore binds QA session queries to the platform-owned MySQL pool.
 func NewSessionStore(db *sql.DB) *SessionStore {
 	if db == nil {
@@ -149,7 +152,16 @@ func (ss *SessionStore) List(userID int64) ([]SessionRecord, error) {
 	return out, rows.Err()
 }
 
-func (ss *SessionStore) Save(r SessionRecord) error {
+// Create creates a new session and, when seed messages are supplied, inserts
+// them atomically. It never overwrites an existing session: an already-owned id
+// returns ErrSessionExists so callers cannot accidentally reset history.
+func (ss *SessionStore) Create(r SessionRecord) error {
+	if strings.TrimSpace(r.ID) == "" {
+		return fmt.Errorf("memory/session: session id is required")
+	}
+	if r.UserID == 0 {
+		return fmt.Errorf("memory/session: authenticated user is required")
+	}
 	if r.CreatedAt == "" {
 		r.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -168,31 +180,13 @@ func (ss *SessionStore) Save(r SessionRecord) error {
 		return err
 	}
 	if exists {
-		if _, err := tx.Exec(
-			`UPDATE qa_sessions SET title=?,archived_summary_tokens=0,compacted_through_turn=0,updated_at=? WHERE id=? AND user_id=?`,
-			r.Title, store.DatabaseTime(r.UpdatedAt), r.ID, r.UserID,
-		); err != nil {
-			return err
-		}
-	} else {
-		if _, err := tx.Exec(
-			`INSERT INTO qa_sessions(id,user_id,title,compacted_through_turn,created_at,updated_at) VALUES(?,?,?,0,?,?)`,
-			r.ID, r.UserID, r.Title,
-			store.DatabaseTime(r.CreatedAt), store.DatabaseTime(r.UpdatedAt),
-		); err != nil {
-			return err
-		}
+		return ErrSessionExists
 	}
-	if err := enqueueSessionHistoryDeletes(tx, r.ID, r.UserID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM qa_session_history_terms WHERE session_id = ?`, r.ID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM qa_turns WHERE session_id = ?`, r.ID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM qa_messages WHERE session_id = ?`, r.ID); err != nil {
+	if _, err := tx.Exec(
+		`INSERT INTO qa_sessions(id,user_id,title,compacted_through_turn,created_at,updated_at) VALUES(?,?,?,0,?,?)`,
+		r.ID, r.UserID, r.Title,
+		store.DatabaseTime(r.CreatedAt), store.DatabaseTime(r.UpdatedAt),
+	); err != nil {
 		return err
 	}
 	if len(r.Messages) > 0 {
