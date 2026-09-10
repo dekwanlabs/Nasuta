@@ -35,6 +35,10 @@ type ContextBlock struct {
 	Complete bool `json:"complete"`
 	// ContentHash binds the admitted content to its provenance metadata.
 	ContentHash string `json:"content_hash"`
+	// EntityID marks a multi-entity retrieval partition so a delegated child can
+	// claim its own subject's evidence block directly. It is empty for
+	// single-entity and focused questions.
+	EntityID string `json:"entity_id,omitempty"`
 }
 
 type Reference struct {

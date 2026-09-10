@@ -16,6 +16,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -401,6 +402,7 @@ func (executor *Executor) Dispatch(
 		return agentapi.DelegationDispatchResult{}, err
 	}
 	parent.InvocationID = invocationID
+	assignTaskEntities(parent, tasks)
 	// The delegate_investigation tool carries its own short invocation timeout
 	// (15s). That timeout bounds only this synchronous admit call and must not
 	// become the admitted batch deadline: each child needs a much longer
@@ -748,6 +750,74 @@ func delegationInvocation(
 	return parent, invocationID, nil
 }
 
+// assignTaskEntities binds each task to the planner's canonical entity when the
+// parent isolated named subjects. Binding is by objective match against an
+// entity's label and aliases; tasks that match no entity keep an empty EntityID
+// and fall back to facet-only seeding and subject-keyed flow merging.
+func assignTaskEntities(parent ParentContext, tasks []agentapi.DelegationTask) {
+	if len(parent.Entities) == 0 {
+		return
+	}
+	for index := range tasks {
+		task := &tasks[index]
+		if task.EntityID != "" {
+			continue
+		}
+		entity, ok := matchTaskEntity(task.Objective, parent.Entities)
+		if !ok {
+			continue
+		}
+		task.EntityID = entity.ID
+		task.EntityAliases = entityMatchTokens(entity)
+	}
+}
+
+func matchTaskEntity(objective string, entities []domain.EntitySpec) (domain.EntitySpec, bool) {
+	objective = strings.ToLower(objective)
+	best := domain.EntitySpec{}
+	bestLen := 0
+	for _, entity := range entities {
+		for _, token := range entityMatchTokens(entity) {
+			length := len([]rune(token))
+			if length > bestLen && strings.Contains(objective, strings.ToLower(token)) {
+				best = entity
+				bestLen = length
+			}
+		}
+	}
+	return best, bestLen > 0
+}
+
+// entityMatchTokens returns the human-readable match tokens for an entity:
+// its label plus aliases. The opaque synthesized ID is deliberately excluded so
+// matching keys on prose, not on a hash the model never wrote.
+func entityMatchTokens(entity domain.EntitySpec) []string {
+	tokens := make([]string, 0, 1+len(entity.Aliases))
+	if label := strings.TrimSpace(entity.Label); label != "" {
+		tokens = append(tokens, label)
+	}
+	for _, alias := range entity.Aliases {
+		if alias = strings.TrimSpace(alias); alias != "" {
+			tokens = append(tokens, alias)
+		}
+	}
+	return tokens
+}
+
+// applyReportEntityIdentity binds a projected report's flow to the task entity
+// so the parent merges flows by a stable server-owned key rather than the
+// model-written subject. The model-written Subject is left intact: it is the
+// child's own Chinese-language label for its subject, which the answer composer
+// matches against the model's Chinese section headings to place each diagram
+// next to its explanation. Overwriting it with the planner's (often English)
+// label would break that heading match.
+func applyReportEntityIdentity(report *agentapi.DelegationReport, task agentapi.DelegationTask) {
+	if report == nil || report.Flow == nil || task.EntityID == "" {
+		return
+	}
+	report.Flow.EntityID = task.EntityID
+}
+
 func (executor *Executor) prepareTasks(
 	ctx context.Context,
 	parent ParentContext,
@@ -1051,7 +1121,7 @@ func (executor *Executor) prepareTaskBudget(parent ParentContext, delegationID s
 	// safety margin inside the same window.
 	if len(candidate.request.EvidenceRefs) == 0 {
 		candidate.context = defaultSeedContext(
-			parent, capability, candidate.request.FocusFacets,
+			parent, capability, candidate.request,
 			seedContextTokens(childBudget.contextTokens, childBudget.outputTokens),
 		)
 	}
@@ -1987,6 +2057,7 @@ func (executor *Executor) completeOwnedAttempt(
 		report = failedReport(attemptTask, ErrorChildExecution, err)
 		report.Usage = publicDelegationUsage(result)
 	}
+	applyReportEntityIdentity(&report, attemptTask.request)
 	reportTokens := attemptTask.reportTokens
 	if reportTokens <= 0 {
 		reportTokens = executor.policy.MaxReportTokens
@@ -2420,12 +2491,6 @@ func (executor *Executor) runRequest(
 	task preparedTask,
 ) agentapi.RunRequest {
 	input, _ := childInput(parent, delegationID, task)
-	tools := make([]string, 0, len(task.capability.ToolIDs))
-	for _, id := range task.capability.ToolIDs {
-		if id != string(DelegateToolID) {
-			tools = append(tools, id)
-		}
-	}
 	return agentapi.RunRequest{
 		RunID: task.childRunID,
 		Agent: agentapi.DefinitionRef{
@@ -2435,9 +2500,10 @@ func (executor *Executor) runRequest(
 		Input:          input,
 		Context:        task.context,
 		Permissions:    task.permissions,
-		ToolScope: agentapi.ToolScope{
-			RestrictVisible: true, VisibleToolIDs: tools,
-		},
+		// Investigators are not tool-allowlisted; the definition already grants
+		// the full read-only set and the verifier definition stays tool-free, so
+		// no per-run visible-ID restriction is needed here.
+		ToolScope: agentapi.ToolScope{},
 		Policy: agentapi.RunPolicy{
 			EvidenceRequired: true, EvidenceSeeded: len(task.context) > 0,
 			MaxToolCalls: task.limits.MaxToolCalls,
@@ -3016,20 +3082,22 @@ func seedContextTokens(window, outputReserve int64) int64 {
 // defaultSeedContext injects the parent's pre-retrieved evidence as a child
 // seed when the parent did not pass explicit evidence_refs. It keeps only the
 // evidence units whose facets intersect the task focus (falling back to the
-// capability's authorized input facets when the task carries no focus facets),
-// and truncates the block content to the child input token budget. The seed is
-// data, never instructions: the investigator prompt already declares retrieved
-// content as non-instructional.
+// capability's authorized input facets when the task carries no focus facets)
+// and, when the task carries an entity identity, only units bound to that
+// entity — so a strong-signal subject's evidence no longer pollutes a sibling
+// subject's seed. The block content is truncated to the child input token
+// budget. The seed is data, never instructions: the investigator prompt already
+// declares retrieved content as non-instructional.
 func defaultSeedContext(
 	parent ParentContext,
 	capability agentapi.Capability,
-	focusFacets []string,
+	task agentapi.DelegationTask,
 	maxTokens int64,
 ) []agentapi.ContextBlock {
 	if len(parent.Context) == 0 {
 		return nil
 	}
-	facets := focusFacets
+	facets := task.FocusFacets
 	if len(facets) == 0 {
 		facets = capability.InputFacets
 	}
@@ -3051,10 +3119,26 @@ func defaultSeedContext(
 		}
 		seen[key] = struct{}{}
 
-		// Only seed blocks that carry facet-matchable evidence units. A block
-		// without Evidence (e.g. a raw qa.memory recall blob) has no facet to
-		// relevance-filter on, so it is not injected as a "relevant subset"
-		// seed; the child re-retrieves it if needed.
+		// A partitioned block belongs to exactly one entity. Claim the block
+		// whose EntityID matches this task; skip the other subjects' blocks.
+		if block.EntityID != "" {
+			if block.EntityID != task.EntityID {
+				continue
+			}
+			if remainingBytes <= 0 {
+				break
+			}
+			claimed := cloneContextBlock(block)
+			claimed.Content = truncateText(claimed.Content, remainingBytes)
+			claimed.ContentHash = hashBytes([]byte(claimed.Content))
+			remainingBytes -= len(claimed.Content)
+			blocks = append(blocks, claimed)
+			continue
+		}
+
+		// Unpartitioned block (single-entity or legacy): keep the facet-filtered
+		// subset. A block without Evidence (e.g. a raw qa.memory recall blob) has
+		// no facet to relevance-filter on, so it is not injected.
 		if len(block.Evidence) == 0 {
 			continue
 		}
@@ -3079,6 +3163,9 @@ func defaultSeedContext(
 		filtered.ContentHash = hashBytes([]byte(filtered.Content))
 		remainingBytes -= len(filtered.Content)
 		blocks = append(blocks, filtered)
+	}
+	if len(blocks) == 0 && task.EntityID != "" {
+		log.Warnf("[delegation] seed empty for entity=%s; child %s starts cold", task.EntityID, task.Objective)
 	}
 	return blocks
 }

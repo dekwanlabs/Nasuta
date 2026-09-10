@@ -86,10 +86,11 @@ func TestRetrievalPolicyForQueryKind(t *testing.T) {
 			searchService: true,
 		}},
 		{domain.QueryComparison, queryRetrievalPolicy{
-			budget:        retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24},
-			searchCode:    true,
-			searchRunbook: true,
-			searchService: true,
+			budget:          retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24},
+			searchCode:      true,
+			searchRunbook:   true,
+			searchService:   true,
+			expandCodeGraph: true,
 		}},
 		{domain.QueryFlow, queryRetrievalPolicy{
 			budget:          retrievalBudget{code: 16, runbook: 8, service: 6, rerank: 24},

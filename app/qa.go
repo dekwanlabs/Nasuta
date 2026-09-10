@@ -617,6 +617,7 @@ func (p *Platform) configureDynamicDelegation(
 			BatchTimeout:          time.Duration(settings.DelegationBatchTimeout),
 			ChildTimeout:          time.Duration(settings.DelegationChildTimeout),
 			MaxGapChaseRounds:     settings.DelegationGapChaseRounds,
+			MaxGapChasePerBatch:   settings.DelegationGapChasePerBatch,
 		},
 		Allowlist:          settings.DelegationCapabilities,
 		VerifierCapability: delegation.SemanticVerifierCapabilityID,

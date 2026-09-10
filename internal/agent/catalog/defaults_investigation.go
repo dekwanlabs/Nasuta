@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	verifierOutputMinimum    = 4096
-	investigatorMaxSteps     = 6
-	convergenceMaxSteps      = 1
-	roleMaxContinueRounds    = 1
+	verifierOutputMinimum = 4096
+	investigatorMaxSteps  = 6
+	convergenceMaxSteps   = 1
+	roleMaxContinueRounds = 1
 )
 
 // DefaultInvestigators builds the fixed read-only delegated investigation panel.
@@ -30,27 +30,22 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 	)
 	specs := []struct {
 		id, name, purpose, focus string
-		tools                    []string
 	}{
 		{
 			id: "investigator.code", name: "Code Investigator", focus: "code",
 			purpose: "Investigate source implementation, exact symbols, and call paths.",
-			tools:   []string{"search_code", "get_symbol", "trace_calls", "list_apis"},
 		},
 		{
 			id: "investigator.runtime", name: "Runtime Topology Investigator", focus: "runtime",
 			purpose: "Investigate indexed service topology, dependencies, and exposed runtime entrypoints.",
-			tools:   []string{"get_service", "trace_deps", "list_apis", "trace_calls"},
 		},
 		{
 			id: "investigator.docs", name: "Documentation Investigator", focus: "docs",
 			purpose: "Investigate runbooks, system documentation, and documentation coverage.",
-			tools:   []string{"get_service", "search_runbooks", "check_docs"},
 		},
 		{
 			id: "investigator.web", name: "Web Research Investigator", focus: "web",
 			purpose: "Investigate current public evidence through the configured web provider.",
-			tools:   []string{"web_search"},
 		},
 		{
 			id: "investigator.memory", name: "Memory Recall Investigator", focus: "memory",
@@ -59,10 +54,6 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 	}
 	definitions := make([]agentapi.Definition, 0, len(specs)+2)
 	for _, spec := range specs {
-		maxToolCalls := int64(0)
-		if len(spec.tools) > 0 {
-			maxToolCalls = settings.AgentMaxToolCalls
-		}
 		rolePrompt := prompts.MustRender(prompts.AgentCatalogInvestigator, struct {
 			Focus string
 		}{Focus: spec.focus})
@@ -79,13 +70,15 @@ func DefaultInvestigators(settings *config.PlatformSettings, version int64) ([]a
 				InputPriceMicrosPerMillionTokens:  settings.LLMInputPriceMicrosPerMillionTokens,
 				OutputPriceMicrosPerMillionTokens: settings.LLMOutputPriceMicrosPerMillionTokens,
 			},
-			Tools: agentapi.ToolPolicy{
-				VisibleToolIDs: append([]string(nil), spec.tools...), RestrictVisible: true,
-			},
+			// Investigators are not tool-allowlisted: each one gets the full
+			// read-only tool set so it can span code, topology, docs, and call
+			// paths within one subject instead of being locked to one dimension.
+			// Divergence is bounded by MaxToolCalls, not by a tool allowlist.
+			Tools: agentapi.ToolPolicy{},
 			Budget: agentapi.BudgetPolicy{
 				Timeout:            time.Duration(settings.AgentTimeout),
 				MaxSteps:           investigatorSteps,
-				MaxToolCalls:       maxToolCalls,
+				MaxToolCalls:       settings.AgentMaxToolCalls,
 				ContextTokens:      settings.LLMContextWindow,
 				MaxToolResultBytes: 24 * 1024,
 				MaxContinueRounds:  continueRounds,

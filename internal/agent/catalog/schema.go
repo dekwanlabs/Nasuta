@@ -479,7 +479,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							},
 							"evidence_goal_ids":{
 								"type":"array",
-								"minItems":1,
+								"minItems":0,
 								"maxItems":50,
 								"uniqueItems":true,
 								"items":{"type":"string","minLength":1}
@@ -1044,7 +1044,7 @@ func DefaultSchemas() []agentapi.SchemaDefinition {
 							},
 							"evidence_goal_ids":{
 								"type":"array",
-								"minItems":1,
+								"minItems":0,
 								"maxItems":50,
 								"uniqueItems":true,
 								"items":{"type":"string","minLength":1}

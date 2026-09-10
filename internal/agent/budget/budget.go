@@ -269,12 +269,12 @@ func (reservation *callReservation) Settle(actual agentapi.Usage) error {
 		}
 		task.inFlight = subtractUsage(task.inFlight, reservation.estimate)
 		task.used = addUsage(task.used, actual)
-		if err := requireWithin(actual, reservation.estimate, "reported child model usage"); err != nil {
+		if err := RequireWithinSettle(actual, reservation.estimate, "reported child model usage"); err != nil {
 			accountingErr = err
 		}
 	} else {
 		root.directInFlight = subtractUsage(root.directInFlight, reservation.estimate)
-		if err := requireWithin(actual, reservation.estimate, "reported model usage"); err != nil {
+		if err := RequireWithinSettle(actual, reservation.estimate, "reported model usage"); err != nil {
 			accountingErr = err
 		}
 	}
@@ -410,7 +410,16 @@ func remainingUsage(limits agentapi.RunLimits, used agentapi.Usage) agentapi.Usa
 	}
 }
 
-// RequireWithin rejects usage that exceeds any available budget dimension.
+// OutputTolerance is the small estimation slack applied to the output-token
+// dimension when settling a model call's reported usage against its reserved
+// estimate. Output length is inherently imprecise (reasoning models emit
+// invisible tokens before visible content), so a reported output that exceeds
+// the reserved estimate by a token or two must not fail an otherwise complete
+// child run. Admission-time checks stay strict.
+var OutputTolerance int64 = 8
+
+// RequireWithin rejects usage that exceeds any available budget dimension. It
+// is the strict admission-time check.
 func RequireWithin(request, available agentapi.Usage, subject string) error {
 	if request.InputTokens > available.InputTokens ||
 		request.OutputTokens > available.OutputTokens ||
@@ -424,6 +433,14 @@ func RequireWithin(request, available agentapi.Usage, subject string) error {
 		)
 	}
 	return nil
+}
+
+// RequireWithinSettle rejects reported usage against a reserved estimate,
+// allowing OutputTolerance slack on the output dimension only. Input and total
+// stay strict so a child cannot overspend its cumulative budget.
+func RequireWithinSettle(actual, estimate agentapi.Usage, subject string) error {
+	estimate.OutputTokens += OutputTolerance
+	return RequireWithin(actual, estimate, subject)
 }
 
 func requireWithin(request, available agentapi.Usage, subject string) error {

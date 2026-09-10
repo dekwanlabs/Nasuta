@@ -924,7 +924,7 @@ func (backend *sqlBudgetBackend) settleCall(rootRunID, reservationID string, act
 	if alreadySettled {
 		return nil
 	}
-	accountingErr := budget.RequireWithin(actual, estimate, "reported model usage")
+	accountingErr := budget.RequireWithinSettle(actual, estimate, "reported model usage")
 
 	used, reserved, err := applySettledCallToLedger(tx, rootRunID, parentID, actual, estimate, owner, fence)
 	if err != nil {

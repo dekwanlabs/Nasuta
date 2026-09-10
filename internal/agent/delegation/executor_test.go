@@ -1100,9 +1100,8 @@ func TestExecutorBoundsConcurrencyPreservesOrderAndNarrowsChild(t *testing.T) {
 			request.Permissions.Scopes[0] != "knowledge.read" {
 			t.Fatalf("child permissions = %v", request.Permissions.Scopes)
 		}
-		if !request.ToolScope.RestrictVisible ||
-			len(request.ToolScope.VisibleToolIDs) != 1 ||
-			request.ToolScope.VisibleToolIDs[0] != "search_code" {
+		if request.ToolScope.RestrictVisible ||
+			len(request.ToolScope.VisibleToolIDs) != 0 {
 			t.Fatalf("child tool scope = %+v", request.ToolScope)
 		}
 		if request.Delegation.Depth != 1 ||

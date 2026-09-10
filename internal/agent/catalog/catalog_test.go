@@ -146,10 +146,10 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantTools := map[string][]string{
-		"investigator.code":    {"search_code", "get_symbol", "trace_calls", "list_apis"},
-		"investigator.runtime": {"get_service", "trace_deps", "list_apis", "trace_calls"},
-		"investigator.docs":    {"get_service", "search_runbooks", "check_docs"},
-		"investigator.web":     {"web_search"},
+		"investigator.code":    {},
+		"investigator.runtime": {},
+		"investigator.docs":    {},
+		"investigator.web":     {},
 		"investigator.memory":  {},
 		"delegation.verifier":  {},
 	}
@@ -161,9 +161,12 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 		t.Fatalf("definitions = %d, want %d", len(definitions), len(wantIDs))
 	}
 	for index, definition := range definitions {
+		// Investigators are unrestricted (RestrictVisible=false) and take the
+		// full read-only set; the verifier stays tool-free (RestrictVisible=true).
+		wantRestricted := definition.ID == "delegation.verifier"
 		if definition.ID != wantIDs[index] || definition.Version != 11 ||
 			definition.ContentHash == "" || definition.Tools.AllowWrite ||
-			!definition.Tools.RestrictVisible ||
+			definition.Tools.RestrictVisible != wantRestricted ||
 			len(definition.Permissions.Scopes) != 1 ||
 			definition.Permissions.Scopes[0] != "knowledge.read" {
 			t.Fatalf("definition %d = %+v", index, definition)
@@ -176,7 +179,7 @@ func TestDefaultInvestigatorsArePinnedReadOnlyDefinitions(t *testing.T) {
 			t.Fatalf("definition %q input schema = %+v", definition.ID, definition.InputSchema)
 		}
 		wantToolCalls := int64(0)
-		if len(wantTools[definition.ID]) > 0 {
+		if strings.HasPrefix(definition.ID, "investigator.") {
 			wantToolCalls = settings.AgentMaxToolCalls
 		}
 		if definition.Budget.MaxToolCalls != wantToolCalls {

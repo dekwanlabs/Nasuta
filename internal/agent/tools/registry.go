@@ -88,10 +88,10 @@ func serviceTools(svc *Service) []Tool {
 			InputSchema: objectSchema(map[string]any{
 				"service":   propString("Service name to inspect."),
 				"direction": propString("upstream | downstream | both (default both)."),
-				"depth":     propInt("Traversal depth 1-5 (default 2)."),
+				"depth":     propInt("Traversal depth 1-5 (default 1). Prefer 1 for direct neighbors; raise only when a deeper blast-radius is required."),
 			}, []string{"service"}),
 			Handler: tool.HandlerFunc(func(ctx context.Context, args tool.Arguments) (tool.Result, error) {
-				depth := args.BoundedInt("depth", 2, 1, 5)
+				depth := args.BoundedInt("depth", 1, 1, 5)
 				result, err := svc.TraceDeps(ctx, args.String("service"), args.StringDefault("direction", "both"), depth)
 				if err != nil {
 					return tool.Result{}, err

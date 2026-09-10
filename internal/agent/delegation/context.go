@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -38,6 +39,10 @@ type ParentContext struct {
 	Depth          int
 	Evidence       map[string]tool.EvidenceUnit
 	Context        map[string]agentapi.ContextBlock
+	// Entities are the planner's canonical comparison subjects for the parent
+	// question. They give the delegation layer a server-owned identity to bind
+	// each child task, seed, and flow to, independent of model prose.
+	Entities []domain.EntitySpec
 }
 
 type parentContextKey struct{}
@@ -47,6 +52,7 @@ func WithParentContext(ctx context.Context, parent ParentContext) context.Contex
 	parent.Evidence = cloneEvidenceIndex(parent.Evidence)
 	parent.Context = cloneContextIndex(parent.Context)
 	parent.OutputContract.Subjects = append([]string(nil), parent.OutputContract.Subjects...)
+	parent.Entities = cloneEntities(parent.Entities)
 	return context.WithValue(ctx, parentContextKey{}, parent)
 }
 
@@ -59,6 +65,7 @@ func ParentContextFrom(ctx context.Context) (ParentContext, bool) {
 	parent.Evidence = cloneEvidenceIndex(parent.Evidence)
 	parent.Context = cloneContextIndex(parent.Context)
 	parent.OutputContract.Subjects = append([]string(nil), parent.OutputContract.Subjects...)
+	parent.Entities = cloneEntities(parent.Entities)
 	return parent, true
 }
 
@@ -139,6 +146,18 @@ func AddEvidenceUnits(
 		}
 	}
 	return ledger
+}
+
+func cloneEntities(entities []domain.EntitySpec) []domain.EntitySpec {
+	if len(entities) == 0 {
+		return nil
+	}
+	out := make([]domain.EntitySpec, len(entities))
+	for index, entity := range entities {
+		out[index] = entity
+		out[index].Aliases = append([]string(nil), entity.Aliases...)
+	}
+	return out
 }
 
 func cloneEvidenceIndex(source map[string]tool.EvidenceUnit) map[string]tool.EvidenceUnit {

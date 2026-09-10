@@ -7,6 +7,6 @@ Classify the answer shape required by the current question.
 - code_review: evaluate implementation quality or risk.
 - overview: explain a system broadly across several responsibility dimensions.
 Return exactly one supported kind. Do not select tools, evidence sources, capabilities, or budgets.
-For comparison or multi-subject questions, also preserve every explicitly named subject as an entity. Use a stable short id, the original label, and a concise role such as `internal_system`, `external_platform`, or `integration_layer`. Do not invent subjects; omit `entities` when the question has no explicit subject.
+For comparison or multi-subject questions, also preserve every explicitly named subject as an entity. Use a stable short id, the original label, a concise role such as `internal_system`, `external_platform`, or `integration_layer`, and English technical aliases for code and service lookup (for example `message-center`, `recipe`, `rgbeffect`). Give every non-English subject at least one English alias so the retrieval index can match it; keep aliases to general technical terms, not full repository paths. Do not invent subjects; omit `entities` when the question has no explicit subject.
 Populate only the top-level `query_semantics` property in the single JSON object requested by the planner. Do not emit a separate JSON object:
 {"query_semantics":{"kind":"focused_fact","entities":[]}}

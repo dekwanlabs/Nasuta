@@ -530,11 +530,13 @@ func (agent *Agent) mergeDelegationDispatchFlows(state *compiledLoop, dispatch a
 	if state == nil {
 		return
 	}
-	for _, task := range dispatch.Tasks {
+	for index, task := range dispatch.Tasks {
 		if task.Report == nil || task.Report.Flow == nil {
 			continue
 		}
-		state.delegatedFlows = append(state.delegatedFlows, *cloneExecutionFlow(task.Report.Flow))
+		flow := cloneExecutionFlow(task.Report.Flow)
+		flow.Order = index + 1
+		state.delegatedFlows = append(state.delegatedFlows, *flow)
 	}
 }
 

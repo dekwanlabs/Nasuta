@@ -14,7 +14,7 @@ const (
 	DefaultRetrievalRouterDirectConfidence = 0.90
 	DefaultRetrievalRouterMaxTokens        = 1024
 	DefaultAgentAnswerReserve              = 30 * time.Second
-	DefaultAgentMaxToolCalls               = 24
+	DefaultAgentMaxToolCalls               = 48
 	minAgentTimeout                        = 4 * time.Minute
 	maxAgentTimeout                        = 10 * time.Minute
 	DefaultLLMContextWindow                = 1_000_000
@@ -24,13 +24,16 @@ const (
 	DefaultCodingMaxConcurrency = 1
 	DefaultCodingWorktreeTTL    = 72 * time.Hour
 
-	DefaultDelegationEnabled             = true
-	DefaultDelegationMaxChildren         = 6
-	DefaultDelegationMaxConcurrent       = 6
-	DefaultDelegationChildTimeout        = 150 * time.Second
-	DefaultDelegationBatchTimeout        = 180 * time.Second
-	DefaultDelegationMaxChildTurns       = 6
-	DefaultDelegationMaxChildToolCalls   = 24
+	DefaultDelegationEnabled       = true
+	DefaultDelegationMaxChildren   = 6
+	DefaultDelegationMaxConcurrent = 6
+	// Child investigators run reasoning-heavy deep dives; 4m gives a reasoning
+	// provider room to finish before the batch deadline, while the 5m batch cap
+	// still leaves headroom for settlement and the parent's final synthesis.
+	DefaultDelegationChildTimeout      = 240 * time.Second
+	DefaultDelegationBatchTimeout      = 300 * time.Second
+	DefaultDelegationMaxChildTurns     = 6
+	DefaultDelegationMaxChildToolCalls = 48
 	// DefaultDelegationMaxChildContextTokens is the single-request context
 	// ceiling for one child investigator. It must fit the pre-retrieved evidence
 	// seed plus the output reserve and context safety margin, with headroom for
@@ -52,9 +55,10 @@ const (
 	// children combined — the single cumulative bound now that the per-child
 	// input quota is gone. 800k is a generous ceiling for a typical 4-child
 	// investigation; the shared ledger rejects calls once it is exhausted.
-	DefaultDelegationMaxTotalTokens       = 800000
-	DefaultDelegationParentAnswerReserve  = 4000
-	DefaultDelegationGapChaseRounds       = 0
+	DefaultDelegationMaxTotalTokens      = 800000
+	DefaultDelegationParentAnswerReserve = 4000
+	DefaultDelegationGapChaseRounds      = 1
+	DefaultDelegationGapChasePerBatch    = 4
 
 	// Shipped lookup-sized delegation defaults. A persisted copy of this
 	// bundle cannot finish retrieve-then-report, so Apply upgrades it.
@@ -117,21 +121,22 @@ type PlatformSettings struct {
 	ToolPruningEnabled          bool
 	DisableLegacyAnswerRecovery bool
 
-	DelegationEnabled              bool
-	DelegationCapabilities         []string
-	DelegationMaxChildren          int
-	DelegationMaxConcurrent        int
-	DelegationBatchTimeout         Duration
-	DelegationChildTimeout         Duration
-	DelegationMaxChildTurns        int
-	DelegationMaxChildToolCalls    int64
+	DelegationEnabled               bool
+	DelegationCapabilities          []string
+	DelegationMaxChildren           int
+	DelegationMaxConcurrent         int
+	DelegationBatchTimeout          Duration
+	DelegationChildTimeout          Duration
+	DelegationMaxChildTurns         int
+	DelegationMaxChildToolCalls     int64
 	DelegationMaxChildContextTokens int64
-	DelegationMaxChildOutputTokens int64
-	DelegationMaxReportTokens      int64
-	DelegationMaxTotalTokens       int64
-	DelegationMaxTotalCostMicros   int64
-	DelegationParentAnswerReserve  int64
-	DelegationGapChaseRounds       int
+	DelegationMaxChildOutputTokens  int64
+	DelegationMaxReportTokens       int64
+	DelegationMaxTotalTokens        int64
+	DelegationMaxTotalCostMicros    int64
+	DelegationParentAnswerReserve   int64
+	DelegationGapChaseRounds        int
+	DelegationGapChasePerBatch      int
 
 	CodingEnabledProviders   []string
 	CodingDefaultProvider    string
@@ -164,7 +169,8 @@ var platformSettingKeys = map[string]bool{
 	"delegation_max_child_output_tokens": true, "delegation_max_report_tokens": true,
 	"delegation_max_total_tokens": true, "delegation_max_total_cost_micros": true,
 	"delegation_parent_answer_reserve": true, "delegation_gap_chase_rounds": true,
-	"rerank_enabled": false, "rerank_pool": false, "rerank_topk": false,
+	"delegation_gap_chase_per_batch": true,
+	"rerank_enabled":                 false, "rerank_pool": false, "rerank_topk": false,
 	"rerank_min_score": false, "rerank_min_dense_preflight": false,
 	"runbook_min_score": false, "code_min_score": false,
 	"rerank_max_per_service": false, "rerank_max_per_service_low_band": false,
@@ -235,6 +241,7 @@ func (p *PlatformSettings) Values() map[string]any {
 		"delegation_max_total_cost_micros":           strconv.FormatInt(p.DelegationMaxTotalCostMicros, 10),
 		"delegation_parent_answer_reserve":           strconv.FormatInt(p.DelegationParentAnswerReserve, 10),
 		"delegation_gap_chase_rounds":                strconv.Itoa(p.DelegationGapChaseRounds),
+		"delegation_gap_chase_per_batch":             strconv.Itoa(p.DelegationGapChasePerBatch),
 		"context_budget":                             p.ContextBudget,
 		"domain_knowledge":                           p.DomainKnowledge,
 		"rerank_enabled":                             p.RerankEnabled,
@@ -329,8 +336,11 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 	if p.DelegationParentAnswerReserve <= 0 {
 		p.DelegationParentAnswerReserve = DefaultDelegationParentAnswerReserve
 	}
-	if p.DelegationGapChaseRounds < 0 {
+	if p.DelegationGapChaseRounds <= 0 {
 		p.DelegationGapChaseRounds = DefaultDelegationGapChaseRounds
+	}
+	if p.DelegationGapChasePerBatch <= 0 {
+		p.DelegationGapChasePerBatch = DefaultDelegationGapChasePerBatch
 	}
 	p.ToolPruningEnabled = false // default off; dry-run measurement logs what pruning would save
 	p.DisableLegacyAnswerRecovery = false
@@ -558,6 +568,11 @@ func (p *PlatformSettings) Apply(m map[string]string) {
 			p.DelegationGapChaseRounds = n
 		}
 	}
+	if v := strings.TrimSpace(m["delegation_gap_chase_per_batch"]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			p.DelegationGapChasePerBatch = n
+		}
+	}
 	if v := strings.TrimSpace(m["vcs_url"]); v != "" {
 		p.VCSURL = v
 	}
@@ -715,7 +730,7 @@ func CanonicalPlatformSetting(key, value string) (string, error) {
 		return canonicalPositiveInt64Setting(key, value)
 	case "delegation_max_total_cost_micros", "delegation_parent_answer_reserve":
 		return canonicalNonNegativeInt64Setting(key, value)
-	case "delegation_gap_chase_rounds":
+	case "delegation_gap_chase_rounds", "delegation_gap_chase_per_batch":
 		return canonicalNonNegativeIntSetting(key, value)
 	case "rerank_min_score", "rerank_min_dense_preflight", "runbook_min_score", "code_min_score":
 		return canonicalScoreSetting(key, value)

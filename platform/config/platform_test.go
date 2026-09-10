@@ -329,13 +329,13 @@ func TestCanonicalDelegationSettings(t *testing.T) {
 		t.Fatalf("capabilities = %q", got)
 	}
 	for key, value := range map[string]string{
-		"delegation_capabilities":           "Not Canonical",
-		"delegation_max_children":           "0",
-		"delegation_batch_timeout":          "0s",
-		"delegation_child_timeout":          "0s",
-		"delegation_max_child_tool_calls":   "-1",
-		"delegation_max_total_cost_micros":  "-1",
-		"delegation_parent_answer_reserve":  "-1",
+		"delegation_capabilities":          "Not Canonical",
+		"delegation_max_children":          "0",
+		"delegation_batch_timeout":         "0s",
+		"delegation_child_timeout":         "0s",
+		"delegation_max_child_tool_calls":  "-1",
+		"delegation_max_total_cost_micros": "-1",
+		"delegation_parent_answer_reserve": "-1",
 	} {
 		if _, err := CanonicalPlatformSetting(key, value); err == nil {
 			t.Fatalf("CanonicalPlatformSetting(%q, %q) accepted invalid value", key, value)
@@ -391,7 +391,7 @@ func TestEveryPlatformSettingHasCanonicalValidation(t *testing.T) {
 		"delegation_max_child_tool_calls": "8", "delegation_max_child_context_tokens": "51200",
 		"delegation_max_child_output_tokens": "1200", "delegation_max_report_tokens": "1000",
 		"delegation_max_total_tokens": "48000", "delegation_max_total_cost_micros": "0",
-		"delegation_parent_answer_reserve": "4000", "delegation_gap_chase_rounds": "1",
+		"delegation_parent_answer_reserve": "4000", "delegation_gap_chase_rounds": "1", "delegation_gap_chase_per_batch": "4",
 		"rerank_enabled": "true", "rerank_pool": "1", "rerank_topk": "1", "rerank_min_score": "0.1",
 		"rerank_min_dense_preflight": "0", "runbook_min_score": "0.2", "code_min_score": "1",
 		"rerank_max_per_service": "1", "rerank_max_per_service_low_band": "1", "rerank_provider": "provider",

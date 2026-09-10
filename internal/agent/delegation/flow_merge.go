@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/log"
 )
 
 const (
@@ -48,7 +49,7 @@ func MergeFlowIRsBySubject(flows []agentapi.FlowIR) ([]*agentapi.FlowIR, error) 
 	order := make([]string, 0, len(flows))
 	groups := make(map[string][]agentapi.FlowIR, len(flows))
 	for _, flow := range flows {
-		key := strings.ToLower(normalizeFlowText(flow.Subject))
+		key := flowIdentity(flow)
 		if _, exists := groups[key]; !exists {
 			order = append(order, key)
 		}
@@ -58,7 +59,10 @@ func MergeFlowIRsBySubject(flows []agentapi.FlowIR) ([]*agentapi.FlowIR, error) 
 	for _, key := range order {
 		flow, err := MergeFlowIRs(groups[key])
 		if err != nil {
-			return nil, err
+			// One oversized subject must not sink the whole batch. Skip the
+			// invalid subject and keep the other subjects' diagrams.
+			log.Warnf("[delegation] flow merge skipped subject %q: %v", key, err)
+			continue
 		}
 		if flow != nil {
 			merged = append(merged, flow)
@@ -85,6 +89,8 @@ type flowMergeState struct {
 	nodes         map[string]*nodeAggregate
 	edges         map[string]*edgeAggregate
 	subjects      map[string]string
+	entityID      string
+	order         int
 	openHops      map[string]string
 	uncertainties map[string]string
 	status        string
@@ -96,6 +102,7 @@ func newFlowMergeState() *flowMergeState {
 		nodes:         make(map[string]*nodeAggregate),
 		edges:         make(map[string]*edgeAggregate),
 		subjects:      make(map[string]string),
+		order:         0,
 		openHops:      make(map[string]string),
 		uncertainties: make(map[string]string),
 		status:        "complete",
@@ -107,9 +114,10 @@ func mergeFlowInto(state *flowMergeState, flow agentapi.FlowIR) error {
 	if err := validateFlowIR(&flow); err != nil {
 		return err
 	}
-	subject := mergeFlowMetadata(state, flow)
-	idToKey := mergeFlowNodes(state, flow, subject)
-	mergeFlowEdges(state, flow, subject, idToKey)
+	mergeFlowMetadata(state, flow)
+	identity := flowIdentity(flow)
+	idToKey := mergeFlowNodes(state, flow, identity)
+	mergeFlowEdges(state, flow, identity, idToKey)
 	return nil
 }
 
@@ -117,6 +125,12 @@ func mergeFlowMetadata(state *flowMergeState, flow agentapi.FlowIR) string {
 	subject := normalizeFlowText(flow.Subject)
 	if subject != "" {
 		state.subjects[strings.ToLower(subject)] = subject
+	}
+	if state.entityID == "" {
+		state.entityID = strings.TrimSpace(flow.EntityID)
+	}
+	if state.order == 0 && flow.Order > 0 {
+		state.order = flow.Order
 	}
 	if flow.Status == "partial" {
 		state.status = "partial"
@@ -137,17 +151,17 @@ func mergeFlowMetadata(state *flowMergeState, flow agentapi.FlowIR) string {
 	return subject
 }
 
-func mergeFlowNodes(state *flowMergeState, flow agentapi.FlowIR, subject string) map[string]string {
+func mergeFlowNodes(state *flowMergeState, flow agentapi.FlowIR, identity string) map[string]string {
 	idToKey := make(map[string]string, len(flow.Nodes))
 	for _, node := range flow.Nodes {
 		label := normalizeFlowText(node.Label)
 		kind := normalizeFlowText(node.Kind)
-		key := flowNodeKey(subject, kind, label)
+		key := flowNodeKey(identity, kind, label)
 		idToKey[node.ID] = key
 		aggregate := state.nodes[key]
 		if aggregate == nil {
 			aggregate = &nodeAggregate{
-				key: key, subject: subject, label: label, kind: kind,
+				key: key, subject: identity, label: label, kind: kind,
 				evidenceRef: make(map[string]struct{}),
 			}
 			state.nodes[key] = aggregate
@@ -161,7 +175,7 @@ func mergeFlowNodes(state *flowMergeState, flow agentapi.FlowIR, subject string)
 	return idToKey
 }
 
-func mergeFlowEdges(state *flowMergeState, flow agentapi.FlowIR, subject string, idToKey map[string]string) {
+func mergeFlowEdges(state *flowMergeState, flow agentapi.FlowIR, identity string, idToKey map[string]string) {
 	for _, edge := range flow.Edges {
 		from, fromOK := idToKey[edge.From]
 		to, toOK := idToKey[edge.To]
@@ -172,7 +186,7 @@ func mergeFlowEdges(state *flowMergeState, flow agentapi.FlowIR, subject string,
 		}
 		protocol := normalizeFlowText(edge.Protocol)
 		syncMode := normalizeFlowText(edge.SyncMode)
-		edgeKey := strings.Join([]string{subject, from, to, protocol, syncMode}, "\x00")
+		edgeKey := strings.Join([]string{identity, from, to, protocol, syncMode}, "\x00")
 		aggregate := state.edges[edgeKey]
 		if aggregate == nil {
 			aggregate = &edgeAggregate{
@@ -243,6 +257,7 @@ func (state *flowMergeState) finalize() *agentapi.FlowIR {
 	})
 
 	merged := &agentapi.FlowIR{
+		EntityID:      state.entityID,
 		Subject:       joinSortedValues(state.subjects, " / "),
 		Status:        state.status,
 		Nodes:         canonicalNodes,
@@ -250,6 +265,7 @@ func (state *flowMergeState) finalize() *agentapi.FlowIR {
 		OpenHops:      sortedMapValues(state.openHops),
 		Uncertainties: sortedMapValues(state.uncertainties),
 		Confidence:    state.confidence,
+		Order:         state.order,
 	}
 	if merged.Subject == "" {
 		merged.Subject = "未命名流程"
@@ -261,12 +277,23 @@ func normalizeFlowText(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
 }
 
-func flowNodeKey(subject, kind, label string) string {
-	// Subject is part of identity: two investigations may use the same
+// flowIdentity returns the server-owned merge key for a flow. It prefers the
+// deterministic EntityID assigned by the parent; when absent (older reports or
+// unnamed subjects) it falls back to the model-written subject so behaviour is
+// unchanged for flows that never carried an entity identity.
+func flowIdentity(flow agentapi.FlowIR) string {
+	if id := strings.TrimSpace(flow.EntityID); id != "" {
+		return strings.ToLower(id)
+	}
+	return strings.ToLower(normalizeFlowText(flow.Subject))
+}
+
+func flowNodeKey(identity, kind, label string) string {
+	// Identity is part of node identity: two investigations may use the same
 	// generic labels (for example "API" -> "Worker") while describing
 	// different business systems. Merging them would create a false cross-
 	// subject edge and would let evidence from one scope support another.
-	return strings.ToLower(normalizeFlowText(subject)) + "\x00" + strings.ToLower(kind) + "\x00" + strings.ToLower(label)
+	return strings.ToLower(normalizeFlowText(identity)) + "\x00" + strings.ToLower(kind) + "\x00" + strings.ToLower(label)
 }
 
 func canonicalFlowNodeID(key string) string {

@@ -114,6 +114,7 @@ func (svc *Service) withDelegationParentContext(
 		OutputContract:  request.Policy.OutputContract,
 		Evidence:        evidenceIndex,
 		Context:         contextIndex,
+		Entities:        prepared.analysis.QueryPlan.EntitySpecs,
 	})
 }
 

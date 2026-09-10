@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
@@ -250,15 +251,45 @@ func projectedFindings(
 				citations = append(citations, reference)
 			}
 		}
+		facets := appendUniqueStrings(nil, finding.GoalIDs...)
+		if len(facets) == 0 {
+			facets = defaultFacetsFromEvidence(finding.Evidence)
+		}
 		projected = append(projected, agentapi.DelegationFinding{
 			ID:         stableID("claim", reportID, fmt.Sprintf("%d", index)),
 			Statement:  strings.TrimSpace(finding.Claim),
 			Confidence: confidence(finding.Confidence),
 			Citations:  appendUniqueStrings(nil, citations...),
-			Facets:     appendUniqueStrings(nil, finding.GoalIDs...),
+			Facets:     facets,
 		})
 	}
 	return projected
+}
+
+// defaultFacetsFromEvidence derives a conservative facet for a finding whose
+// model left evidence_goal_ids empty, keyed off the first evidence kind. This
+// keeps a bare route/API finding from carrying zero facets downstream (gap
+// chase, adoption manifests) without inventing a specific goal.
+func defaultFacetsFromEvidence(evidence []investigationEvidence) []string {
+	for _, item := range evidence {
+		if facet := defaultFacetForEvidenceKind(item.Kind); facet != "" {
+			return []string{facet}
+		}
+	}
+	return nil
+}
+
+func defaultFacetForEvidenceKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "api", "api_route", "route", "endpoint":
+		return string(domain.FacetEntrypoint)
+	case "dependency", "feign", "client":
+		return string(domain.FacetExternalDependency)
+	case "code", "symbol", "class", "method":
+		return string(domain.FacetCoreFlow)
+	default:
+		return string(domain.FacetSystemBoundary)
+	}
 }
 
 func boundReport(

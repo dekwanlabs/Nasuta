@@ -202,7 +202,7 @@ func TestDefaultSeedContextInjectsFacetMatchedEvidence(t *testing.T) {
 	capability := agentapi.Capability{
 		InputFacets: []string{"core_flow", "data_and_state"},
 	}
-	blocks := defaultSeedContext(parent, capability, []string{"core_flow"}, 4096)
+	blocks := defaultSeedContext(parent, capability, agentapi.DelegationTask{FocusFacets: []string{"core_flow"}}, 4096)
 	if len(blocks) != 1 {
 		t.Fatalf("seed blocks = %#v, want one qa.evidence block", blocks)
 	}
@@ -243,7 +243,7 @@ func TestDefaultSeedContextSkipsNonSeedAndUnmatchedBlocks(t *testing.T) {
 	}
 
 	capability := agentapi.Capability{InputFacets: []string{"core_flow"}}
-	blocks := defaultSeedContext(parent, capability, []string{"core_flow"}, 4096)
+	blocks := defaultSeedContext(parent, capability, agentapi.DelegationTask{FocusFacets: []string{"core_flow"}}, 4096)
 	if len(blocks) != 0 {
 		t.Fatalf("seed blocks = %#v, want none (facet mismatch and non-seed source)", blocks)
 	}
@@ -268,14 +268,14 @@ func TestDefaultSeedContextFallsBackToCapabilityFacets(t *testing.T) {
 	}
 
 	capability := agentapi.Capability{InputFacets: []string{"core_flow"}}
-	blocks := defaultSeedContext(parent, capability, nil, 4096)
+	blocks := defaultSeedContext(parent, capability, agentapi.DelegationTask{}, 4096)
 	if len(blocks) != 1 || len(blocks[0].Evidence) != 1 {
 		t.Fatalf("seed blocks = %#v, want one block with one matched unit", blocks)
 	}
 }
 
 func TestDefaultSeedContextEmptyWhenNoParentContext(t *testing.T) {
-	blocks := defaultSeedContext(ParentContext{}, agentapi.Capability{}, nil, 4096)
+	blocks := defaultSeedContext(ParentContext{}, agentapi.Capability{}, agentapi.DelegationTask{}, 4096)
 	if len(blocks) != 0 {
 		t.Fatalf("seed blocks = %#v, want none", blocks)
 	}

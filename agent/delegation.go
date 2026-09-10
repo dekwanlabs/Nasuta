@@ -8,17 +8,17 @@ import (
 
 // DelegationPolicy is a server-owned ceiling for dynamic child Runs.
 type DelegationPolicy struct {
-	MaxDepth             int   `json:"max_depth"`
-	MaxChildren          int   `json:"max_children"`
-	MaxConcurrent        int   `json:"max_concurrent"`
-	MaxChildTurns        int   `json:"max_child_turns"`
-	MaxChildToolCalls    int64 `json:"max_child_tool_calls"`
+	MaxDepth              int   `json:"max_depth"`
+	MaxChildren           int   `json:"max_children"`
+	MaxConcurrent         int   `json:"max_concurrent"`
+	MaxChildTurns         int   `json:"max_child_turns"`
+	MaxChildToolCalls     int64 `json:"max_child_tool_calls"`
 	MaxChildContextTokens int64 `json:"max_child_context_tokens"`
-	MaxChildOutputTokens int64 `json:"max_child_output_tokens"`
-	MaxReportTokens      int64 `json:"max_report_tokens"`
-	MaxTotalTokens       int64 `json:"max_total_tokens"`
-	MaxTotalCostMicros   int64 `json:"max_total_cost_micros"`
-	ParentAnswerReserve  int64 `json:"parent_answer_reserve"`
+	MaxChildOutputTokens  int64 `json:"max_child_output_tokens"`
+	MaxReportTokens       int64 `json:"max_report_tokens"`
+	MaxTotalTokens        int64 `json:"max_total_tokens"`
+	MaxTotalCostMicros    int64 `json:"max_total_cost_micros"`
+	ParentAnswerReserve   int64 `json:"parent_answer_reserve"`
 	// BatchTimeout bounds the wall-clock lifetime of one admitted delegation
 	// batch. A non-positive value is normalized to ChildTimeout for embedders
 	// that construct policies directly.
@@ -49,6 +49,11 @@ type DelegationTask struct {
 	Objective    string   `json:"objective"`
 	FocusFacets  []string `json:"focus_facets,omitempty"`
 	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+	// EntityID is the server-derived identity of the subject this task
+	// investigates. It is the stable join key for evidence seeding and flow
+	// merging; it is empty when the parent did not isolate a named subject.
+	EntityID      string   `json:"entity_id,omitempty"`
+	EntityAliases []string `json:"entity_aliases,omitempty"`
 }
 
 // DelegationStatus is projected from admission facts and the child Run outcome.
@@ -122,6 +127,11 @@ type FlowEdge struct {
 // investigates a process or architecture question. It is optional so older
 // investigator reports remain valid.
 type FlowIR struct {
+	// EntityID is the server-owned identity of the subject this flow describes.
+	// It is the merge key in MergeFlowIRsBySubject; Subject is display text the
+	// child model wrote and is no longer trusted as identity when EntityID is
+	// set.
+	EntityID      string     `json:"entity_id,omitempty"`
 	Subject       string     `json:"subject"`
 	Status        string     `json:"status"`
 	Nodes         []FlowNode `json:"nodes,omitempty"`
@@ -129,6 +139,11 @@ type FlowIR struct {
 	OpenHops      []string   `json:"open_hops,omitempty"`
 	Uncertainties []string   `json:"uncertainties,omitempty"`
 	Confidence    string     `json:"confidence"`
+	// Order is the one-based task index this flow was produced for (0 means no
+	// index was assigned). The answer composer uses it to place the diagram under
+	// the matching numbered section (## 1、, ## 2、…) instead of matching on the
+	// subject text, which is language-unstable. It is not serialized.
+	Order int `json:"-"`
 }
 
 type DelegationConflict struct {

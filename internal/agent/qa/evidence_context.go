@@ -70,6 +70,32 @@ func (svc *Service) acquireEvidence(
 }
 
 func contextBlocks(rc *retrieval.RetrievedContext) []agentapi.ContextBlock {
+	if rc == nil {
+		return nil
+	}
+	// Multi-entity: one partition per subject so a delegated child can claim its
+	// own evidence block directly instead of filtering a blended pool.
+	if len(rc.EntityContexts) > 0 {
+		blocks := make([]agentapi.ContextBlock, 0, len(rc.EntityContexts))
+		for entityID, sub := range rc.EntityContexts {
+			if block := contextBlock(sub, entityID); block != nil {
+				blocks = append(blocks, *block)
+			}
+		}
+		return blocks
+	}
+	if rc.Text == "" {
+		return nil
+	}
+	if block := contextBlock(rc, ""); block != nil {
+		return []agentapi.ContextBlock{*block}
+	}
+	return nil
+}
+
+// contextBlock renders one retrieval context into a context block carrying the
+// given entity identity (empty for single-entity and focused questions).
+func contextBlock(rc *retrieval.RetrievedContext, entityID string) *agentapi.ContextBlock {
 	if rc == nil || rc.Text == "" {
 		return nil
 	}
@@ -79,12 +105,13 @@ func contextBlocks(rc *retrieval.RetrievedContext) []agentapi.ContextBlock {
 			Type: reference.Type, Label: reference.Label, Target: reference.Target,
 		})
 	}
-	return []agentapi.ContextBlock{{
+	return &agentapi.ContextBlock{
 		Source: "qa.evidence", Title: "QA Evidence", Content: rc.Text,
 		References: references, Evidence: cloneEvidenceUnits(rc.EvidenceUnits),
 		EvidenceConflicts: publicEvidenceConflicts(rc.EvidenceConflicts),
 		Complete:          false, ContentHash: hashString(rc.Text),
-	}}
+		EntityID: entityID,
+	}
 }
 
 func memoryContextBlock(records []memory.MemoryRecord) *agentapi.ContextBlock {

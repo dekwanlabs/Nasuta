@@ -40,7 +40,17 @@ type RetrievedContext struct {
 	HitCount          int                 `json:"hitCount"`
 	OriginalQuestion  string
 	Query             domain.QueryPlan
-	selection         selectionStats
+	// EntityCoverage records whether each planner entity produced any retrieval
+	// evidence. It is set only by the multi-entity comparison fan-out; focused
+	// and single-entity questions leave it nil.
+	EntityCoverage map[string]bool `json:"entityCoverage,omitempty"`
+	// EntityContexts holds one fully-assembled sub-context per entity for
+	// multi-entity comparison questions. Each entry is the result of an
+	// independent retrieveSingle run, so each subject keeps its own reranked
+	// top-N evidence instead of being merged into one blended pool. It is nil
+	// for single-entity and focused questions.
+	EntityContexts map[string]*RetrievedContext `json:"-"`
+	selection      selectionStats
 }
 
 type selectionStats struct {
@@ -137,12 +147,12 @@ var retrievalSourcesSpec = runtrace.Spec[retrievalDiscoverInput, retrievalSource
 
 // Retriever orchestrates workspace code, docs, and codegraph retrieval.
 type Retriever struct {
-	tools          toolset
-	workspaceRoot  string
-	cfg            config.Config
-	platform       *config.PlatformSettings
-	reranker       Reranker
-	codegraphDB    *codegraph.DB
+	tools         toolset
+	workspaceRoot string
+	cfg           config.Config
+	platform      *config.PlatformSettings
+	reranker      Reranker
+	codegraphDB   *codegraph.DB
 }
 
 type toolset interface {
@@ -192,8 +202,11 @@ func retrievalPolicyFor(kind domain.QueryKind) queryRetrievalPolicy {
 	case domain.QueryCodeReview:
 		base.searchRunbook = false
 		return base
-	case domain.QueryRuntimeDiagnosis, domain.QueryInventory, domain.QueryComparison:
+	case domain.QueryRuntimeDiagnosis, domain.QueryInventory:
 		base.budget = retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}
+	case domain.QueryComparison:
+		base.budget = retrievalBudget{code: 16, runbook: 12, service: 8, rerank: 24}
+		base.expandCodeGraph = true
 	case domain.QueryFlow:
 		base.budget = retrievalBudget{code: 16, runbook: 8, service: 6, rerank: 24}
 		base.expandCodeGraph = true
@@ -254,29 +267,25 @@ func (retrieve *Retriever) RetrievePlan(
 	if !evidencePlan.Valid() {
 		return nil, fmt.Errorf("retrieval: invalid source bits %08b", evidencePlan.Sources)
 	}
+	if query.Kind == domain.QueryComparison && len(query.Entities) > 1 {
+		return retrieve.retrievePerEntity(ctx, searchQuery, terms, evidencePlan, query)
+	}
+	return retrieve.retrieveSingle(ctx, searchQuery, terms, evidencePlan, query)
+}
+
+// retrieveSingle runs the full discover→expand→assemble pipeline for one query
+// and returns the assembled context. It is the single-entity path and the
+// building block for per-entity fan-out.
+func (retrieve *Retriever) retrieveSingle(
+	ctx context.Context,
+	searchQuery string,
+	terms QueryTerms,
+	evidencePlan domain.EvidencePlan,
+	query domain.QueryPlan,
+) (*RetrievedContext, error) {
 	var a anchor
 	if evidencePlan.Has(domain.Internal) {
-		embeddingStarted := time.Now()
-		reportProgress(ctx, "retrieval.embedding", "正在准备查询向量", embeddingStarted)
-		var queryVector []float32
-		queryVectorAttempted := false
-		if vectorTools, ok := retrieve.tools.(vectorToolset); ok {
-			queryVectorAttempted = true
-			queryVector, _ = vectorTools.EmbedQuery(ctx, searchQuery)
-		}
-		reportProgress(ctx, "retrieval.embedding", "查询向量准备完成", embeddingStarted)
-		discoverStarted := time.Now()
-		reportProgress(ctx, "retrieval.discover", "正在查找相关代码、文档和服务", discoverStarted)
-		a, _ = runtrace.Invoke(ctx, retrievalDiscoverSpec, retrievalDiscoverInput{
-			SearchQuery: searchQuery, QueryVector: queryVector, QueryVectorAttempted: queryVectorAttempted,
-			Plan: query, ServiceScoped: false,
-		}, func(ctx context.Context, input retrievalDiscoverInput) (anchor, error) {
-			return retrieve.discover(
-				ctx, input.SearchQuery, input.ServicePatterns, input.ServiceScoped,
-				input.QueryVector, input.QueryVectorAttempted, input.Plan,
-			), nil
-		})
-		reportProgress(ctx, "retrieval.discover", "代码、文档和服务召回完成", discoverStarted)
+		a = retrieve.discoverSingle(ctx, searchQuery, query)
 	}
 	expandStarted := time.Now()
 	reportProgress(ctx, "retrieval.expand", "正在展开证据和依赖关系", expandStarted)
@@ -296,6 +305,153 @@ func (retrieve *Retriever) RetrievePlan(
 	})
 	reportProgress(ctx, "retrieval.rerank", "候选证据整理完成", rerankStarted)
 	return result, nil
+}
+
+// retrievePerEntity runs the full pipeline once per entity so each subject keeps
+// its own reranked top-N context instead of being merged into one blended pool
+// where the strongest subject crowds out the rest.
+func (retrieve *Retriever) retrievePerEntity(
+	ctx context.Context,
+	searchQuery string,
+	terms QueryTerms,
+	evidencePlan domain.EvidencePlan,
+	query domain.QueryPlan,
+) (*RetrievedContext, error) {
+	entities := query.EntitySpecs
+	if len(entities) == 0 {
+		// Defensive: callers that construct QueryPlan from raw IDs keep a
+		// label-shaped spec so per-entity queries still key on prose.
+		entities = make([]domain.EntitySpec, 0, len(query.Entities))
+		for _, id := range query.Entities {
+			entities = append(entities, domain.EntitySpec{ID: id, Label: id})
+		}
+	}
+	sections := make(map[string]*RetrievedContext, len(entities))
+	order := make([]string, 0, len(entities))
+	coverage := make(map[string]bool, len(entities))
+	for _, entity := range entities {
+		entityQuery := buildEntityQuery(entity)
+		if entityQuery == "" {
+			coverage[entity.ID] = false
+			continue
+		}
+		sub, err := retrieve.retrieveSingle(ctx, entityQuery, terms, evidencePlan, query)
+		if err != nil {
+			return nil, err
+		}
+		if sub == nil || sub.HitCount == 0 {
+			coverage[entity.ID] = false
+			continue
+		}
+		coverage[entity.ID] = true
+		sections[entity.ID] = sub
+		order = append(order, entity.ID)
+	}
+
+	// Fold the partitions into one top-level context so the parent's whole-view
+	// consumers (logging, EvidenceSeeded, the single-entity context path) keep
+	// working, while each subject still keeps its own partition for delegated
+	// seeding.
+	merged := mergeEntityContexts(sections, order)
+	return &RetrievedContext{
+		Text:              merged.Text,
+		References:        merged.References,
+		EvidenceUnits:     merged.EvidenceUnits,
+		EvidenceConflicts: merged.EvidenceConflicts,
+		HitCount:          merged.HitCount,
+		EntityContexts:    sections,
+		EntityCoverage:    coverage,
+		Query:             query,
+	}, nil
+}
+
+// mergeEntityContexts folds per-entity sub-contexts into one top-level context
+// in entity order. References are de-duplicated by type+target; evidence units
+// and conflicts are concatenated; HitCount is summed.
+func mergeEntityContexts(sections map[string]*RetrievedContext, order []string) RetrievedContext {
+	var textParts []string
+	var refs []Reference
+	seenRefs := make(map[string]struct{})
+	var units []tool.EvidenceUnit
+	var conflicts []evidence.Conflict
+	hitCount := 0
+	for _, id := range order {
+		sub := sections[id]
+		if sub == nil {
+			continue
+		}
+		if text := strings.TrimSpace(sub.Text); text != "" {
+			textParts = append(textParts, text)
+		}
+		for _, ref := range sub.References {
+			key := ref.Type + "\x00" + ref.Target
+			if _, ok := seenRefs[key]; ok {
+				continue
+			}
+			seenRefs[key] = struct{}{}
+			refs = append(refs, ref)
+		}
+		units = append(units, sub.EvidenceUnits...)
+		conflicts = append(conflicts, sub.EvidenceConflicts...)
+		hitCount += sub.HitCount
+	}
+	return RetrievedContext{
+		Text:              strings.Join(textParts, "\n\n"),
+		References:        refs,
+		EvidenceUnits:     units,
+		EvidenceConflicts: conflicts,
+		HitCount:          hitCount,
+	}
+}
+
+// discoverSingle embeds one query and discovers against it, keeping the
+// original single-vector path for focused and single-entity questions.
+func (retrieve *Retriever) discoverSingle(ctx context.Context, searchQuery string, query domain.QueryPlan) anchor {
+	embeddingStarted := time.Now()
+	reportProgress(ctx, "retrieval.embedding", "正在准备查询向量", embeddingStarted)
+	reportProgress(ctx, "retrieval.embedding", "查询向量准备完成", embeddingStarted)
+	discoverStarted := time.Now()
+	reportProgress(ctx, "retrieval.discover", "正在查找相关代码、文档和服务", discoverStarted)
+	a := retrieve.embedAndDiscover(ctx, searchQuery, query)
+	reportProgress(ctx, "retrieval.discover", "代码、文档和服务召回完成", discoverStarted)
+	return a
+}
+
+// embedAndDiscover embeds searchQuery and runs the three source searches against
+// it, returning the anchor without emitting per-query progress.
+func (retrieve *Retriever) embedAndDiscover(ctx context.Context, searchQuery string, query domain.QueryPlan) anchor {
+	var queryVector []float32
+	queryVectorAttempted := false
+	if vectorTools, ok := retrieve.tools.(vectorToolset); ok {
+		queryVectorAttempted = true
+		queryVector, _ = vectorTools.EmbedQuery(ctx, searchQuery)
+	}
+	a, _ := runtrace.Invoke(ctx, retrievalDiscoverSpec, retrievalDiscoverInput{
+		SearchQuery: searchQuery, QueryVector: queryVector, QueryVectorAttempted: queryVectorAttempted,
+		Plan: query, ServiceScoped: false,
+	}, func(ctx context.Context, input retrievalDiscoverInput) (anchor, error) {
+		return retrieve.discover(
+			ctx, input.SearchQuery, input.ServicePatterns, input.ServiceScoped,
+			input.QueryVector, input.QueryVectorAttempted, input.Plan,
+		), nil
+	})
+	return a
+}
+
+// buildEntityQuery assembles a per-entity retrieval query from the entity's
+// label and aliases. The opaque synthesized ID is excluded so the query is
+// human-readable prose rather than a hash.
+func buildEntityQuery(entity domain.EntitySpec) string {
+	parts := make([]string, 0, 1+len(entity.Aliases))
+	if label := strings.TrimSpace(entity.Label); label != "" {
+		parts = append(parts, label)
+	}
+	for _, alias := range entity.Aliases {
+		if alias = strings.TrimSpace(alias); alias != "" {
+			parts = append(parts, alias)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 type retrievalDiscoverInput struct {

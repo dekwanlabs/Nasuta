@@ -42,9 +42,11 @@ func (executor *Executor) chaseGaps(
 	chaseTask := task
 	chaseTask.childRunID = stableID("run_child_chase", task.childRunID, objective)
 	chaseTask.request = agentapi.DelegationTask{
-		Capability:  task.request.Capability,
-		Objective:   truncateText(objective, maxObjectiveBytes),
-		FocusFacets: append([]string(nil), task.request.FocusFacets...),
+		Capability:    task.request.Capability,
+		Objective:     truncateText(objective, maxObjectiveBytes),
+		FocusFacets:   append([]string(nil), task.request.FocusFacets...),
+		EntityID:      task.request.EntityID,
+		EntityAliases: append([]string(nil), task.request.EntityAliases...),
 	}
 	chaseTask.limits = limits
 	chaseTask.objectiveHash = hashJSON(chaseTask.request)

@@ -49,6 +49,7 @@
 | [`qa-retrieval-latency-and-progress-governance.zh-CN.md`](qa-retrieval-latency-and-progress-governance.zh-CN.md) | 08-10 | 实施中 | 首屏时延、进度反馈 |
 | [`qa-query-intent-and-facet-model-simplification.zh-CN.md`](qa-query-intent-and-facet-model-simplification.zh-CN.md) | 08-15 | 未实施 | 查询意图、Facet 收敛为 canonical QueryPlan |
 | [`qa-comparison-entity-and-evidence-coverage.zh-CN.md`](qa-comparison-entity-and-evidence-coverage.zh-CN.md) | 08-18 | 核心已实施 | 对比问题实体识别与证据覆盖 |
+| [`qa-multi-entity-evidence-chain-governance.zh-CN.md`](qa-multi-entity-evidence-chain-governance.zh-CN.md) | 09-10 | 草案 | 多实体问答证据链路治理（逐实体检索 · 种子实体隔离 · 流程图确定性归并 · 预算/压缩边界）——09-10 四业务事故收口，跨检索/委派/渲染/预算 |
 
 已归档：`retrieval-current-chain.zh-CN.md`（08-15，现状梳理基线、非提案）。
 
