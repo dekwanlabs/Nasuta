@@ -45,6 +45,14 @@ func Compress(req Request) Result {
 	return result
 }
 
+// Degraded reports that structured extraction could not run and the content was
+// reduced to a head-tail splice. Callers use this to warn that the retained text
+// is fragments rather than whole records, since the token counts alone look like
+// ordinary compression.
+func (result Result) Degraded() bool {
+	return result.Compressed && result.Strategy == strategyFallback
+}
+
 func compress(req Request) Result {
 	req.Notices = normalizeNotices(req.Notices)
 	combined := appendNotices(req.Content, req.Notices)

@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/llm"
 	"github.com/dekwanlabs/nasuta/internal/runtrace"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -302,4 +304,35 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+// The floors must stay above the budget where structured extraction stops
+// working. At 96 tokens a chunk plus envelope exceeds the budget, so a large
+// search result was spliced down to ~1.7% of its content as fragments.
+func TestToolResultFloorsKeepStructuredExtractionViable(t *testing.T) {
+	var records strings.Builder
+	records.WriteString(`{"matches":[`)
+	for i := range 40 {
+		if i > 0 {
+			records.WriteString(",")
+		}
+		fmt.Fprintf(&records, `{"path":"repos/hsds/scene/Controller%d.java","route":"/device/rgb-effect/edit/%d","summary":"灯效编辑接口，写入 t_device_rgb_effect"}`, i, i)
+	}
+	records.WriteString(`]}`)
+
+	for name, floor := range map[string]int{
+		"old":    oldToolResultFloorTokens,
+		"recent": recentToolResultFloorTokens,
+	} {
+		result := tooloutput.Compress(tooloutput.Request{
+			Question: "rgb effect route", Content: records.String(), MaxTokens: floor,
+		})
+		if result.Degraded() {
+			t.Errorf("%s floor %d degrades to %s; structured extraction must remain viable",
+				name, floor, result.Strategy)
+		}
+		if result.RetainedChunks == 0 {
+			t.Errorf("%s floor %d retained no chunks", name, floor)
+		}
+	}
 }

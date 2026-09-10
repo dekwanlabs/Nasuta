@@ -14,9 +14,13 @@ import (
 const (
 	answerContextHighWaterPercent = run.ContextHighWaterPercent
 	answerContextTargetPercent    = 60
-	oldToolResultFloorTokens      = 96
-	recentToolResultFloorTokens   = 256
-	emergencyToolResultFloor      = 16
+	// Floors are set where the structured extractor can still work. Below ~256
+	// tokens a chunk plus its envelope exceeds the budget, so Compress falls back
+	// to a head-tail splice and a 5.5k-token search result retains ~1.7% of its
+	// content as unusable fragments. 384 keeps two real chunks, 768 keeps five.
+	oldToolResultFloorTokens    = 384
+	recentToolResultFloorTokens = 768
+	emergencyToolResultFloor    = 16
 )
 
 type answerCompactionResult struct {
@@ -295,6 +299,22 @@ func compressToolResults(
 			compressed.ItemCoverage,
 			compressed.FieldCoverage,
 		)
+		// Structured extraction could not run at this budget, so what survives is
+		// a head-tail fragment, not a smaller set of whole records. Say so: the
+		// token counts alone read like ordinary compression, and evidence lost
+		// here is indistinguishable downstream from evidence never retrieved.
+		if compressed.Degraded() {
+			log.WarnfCtx(
+				state.ctx,
+				"[agent] run %s tool result degraded to fragments phase=%s tool=%s tokens=%d->%d reason=%q; evidence in this result may be unusable",
+				state.runID,
+				phase,
+				candidate.tool,
+				candidate.originalTokens,
+				retainedTokens,
+				compressed.FallbackReason,
+			)
+		}
 	}
 }
 
