@@ -16,6 +16,7 @@ import (
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/tool"
@@ -1109,9 +1110,13 @@ func (executor *Executor) prepareTaskBudget(parent ParentContext, delegationID s
 	childBudget := executor.childBudget(parent)
 	candidate.outputTokens = childBudget.outputTokens
 	candidate.reportTokens = childBudget.reportTokens
+	// Both paths share one evidence budget: the window minus the output reserve,
+	// the safety margin and the child's own prompt overhead. Explicit refs used
+	// to get the full window, which left nothing for the answer.
+	evidenceTokens := seedContextTokens(childBudget.contextTokens, childBudget.outputTokens)
 	candidate.context = selectContext(
 		parent, candidate.request.EvidenceRefs, candidate.request.FocusFacets,
-		childBudget.contextTokens,
+		evidenceTokens,
 	)
 	// No explicit evidence_refs: inject the parent's pre-retrieved evidence as
 	// a seed, filtered by the capability's authorized facets. Explicit refs
@@ -1122,7 +1127,7 @@ func (executor *Executor) prepareTaskBudget(parent ParentContext, delegationID s
 	if len(candidate.request.EvidenceRefs) == 0 {
 		candidate.context = defaultSeedContext(
 			parent, capability, candidate.request,
-			seedContextTokens(childBudget.contextTokens, childBudget.outputTokens),
+			evidenceTokens,
 		)
 	}
 	// No cumulative input quota: the batch ledger is the only cumulative bound,
@@ -3026,7 +3031,7 @@ func selectContext(
 	}
 	seen := make(map[string]struct{}, len(references))
 	var blocks []agentapi.ContextBlock
-	remainingBytes := int(maxTokens * 4 / 2)
+	remainingTokens := int(maxTokens)
 	for _, reference := range references {
 		block, ok := parent.Context[reference]
 		if !ok {
@@ -3048,12 +3053,12 @@ func selectContext(
 				filtered.Evidence = append(filtered.Evidence, unit)
 			}
 		}
-		if remainingBytes <= 0 {
+		if remainingTokens <= 0 {
 			break
 		}
-		filtered.Content = truncateText(filtered.Content, remainingBytes)
+		filtered.Content = truncateSeedText(filtered.Content, remainingTokens)
 		filtered.ContentHash = hashBytes([]byte(filtered.Content))
-		remainingBytes -= len(filtered.Content)
+		remainingTokens -= tooloutput.EstimateTokens(filtered.Content)
 		blocks = append(blocks, filtered)
 	}
 	return blocks
@@ -3066,17 +3071,27 @@ func isSeedBlock(block agentapi.ContextBlock) bool {
 	return block.Source == "qa.evidence" || block.Source == "qa.memory"
 }
 
+// childPromptOverheadTokens reserves room for what the child adds to its own
+// request beyond the seed: system prompt, tool schemas, the task objective and
+// the report contract. The seed budget cannot be the whole remaining window,
+// because the admission check measures all of it. Observed overhead on the
+// investigator definition is ~6.7k tokens; 8k leaves margin for schema growth.
+const childPromptOverheadTokens = 8192
+
 // seedContextTokens derives the pre-retrieval seed budget for a child without
 // explicit evidence_refs. The seed must fit inside the single-request window
-// alongside the output reserve and the context safety margin, or the child's
-// first provider call fails before it starts. Using the full window as the seed
-// budget left no room for the answer and safety margin.
+// alongside the output reserve, the context safety margin and the child's own
+// prompt overhead, or the child's first provider call fails before it starts.
+// Using the full window as the seed budget left no room for the answer and
+// safety margin; ignoring prompt overhead left the seed fitting its own budget
+// while the assembled request still overflowed.
 func seedContextTokens(window, outputReserve int64) int64 {
 	safety := int64(agentrun.ContextSafetyTokens(int(window)))
-	if window <= outputReserve+safety {
+	floor := outputReserve + safety + childPromptOverheadTokens
+	if window <= floor {
 		return 0
 	}
-	return window - outputReserve - safety
+	return window - floor
 }
 
 // defaultSeedContext injects the parent's pre-retrieved evidence as a child
@@ -3107,7 +3122,7 @@ func defaultSeedContext(
 	}
 
 	var blocks []agentapi.ContextBlock
-	remainingBytes := int(maxTokens * 4 / 2)
+	remainingTokens := int(maxTokens)
 	seen := make(map[string]struct{})
 	for _, block := range parent.Context {
 		if !isSeedBlock(block) {
@@ -3125,13 +3140,13 @@ func defaultSeedContext(
 			if block.EntityID != task.EntityID {
 				continue
 			}
-			if remainingBytes <= 0 {
+			if remainingTokens <= 0 {
 				break
 			}
 			claimed := cloneContextBlock(block)
-			claimed.Content = truncateText(claimed.Content, remainingBytes)
+			claimed.Content = truncateSeedText(claimed.Content, remainingTokens)
 			claimed.ContentHash = hashBytes([]byte(claimed.Content))
-			remainingBytes -= len(claimed.Content)
+			remainingTokens -= tooloutput.EstimateTokens(claimed.Content)
 			blocks = append(blocks, claimed)
 			continue
 		}
@@ -3156,12 +3171,12 @@ func defaultSeedContext(
 			continue
 		}
 
-		if remainingBytes <= 0 {
+		if remainingTokens <= 0 {
 			break
 		}
-		filtered.Content = truncateText(filtered.Content, remainingBytes)
+		filtered.Content = truncateSeedText(filtered.Content, remainingTokens)
 		filtered.ContentHash = hashBytes([]byte(filtered.Content))
-		remainingBytes -= len(filtered.Content)
+		remainingTokens -= tooloutput.EstimateTokens(filtered.Content)
 		blocks = append(blocks, filtered)
 	}
 	if len(blocks) == 0 && task.EntityID != "" {
@@ -3330,6 +3345,15 @@ func hashJSON(value any) string {
 func hashBytes(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
+}
+
+// truncateSeedText bounds seed content by the same token estimator the child's
+// admission check uses. A byte heuristic cannot be substituted here: CJK runes
+// cost six times an ASCII rune, so a bytes-per-token constant that holds for
+// English understates Chinese evidence badly enough to overflow the child window
+// before its first provider call.
+func truncateSeedText(value string, maxTokens int) string {
+	return strings.TrimSpace(tooloutput.Truncate(strings.TrimSpace(value), maxTokens))
 }
 
 func truncateText(value string, maxBytes int) string {

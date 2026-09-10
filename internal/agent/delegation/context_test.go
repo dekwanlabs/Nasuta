@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
+	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -278,5 +281,131 @@ func TestDefaultSeedContextEmptyWhenNoParentContext(t *testing.T) {
 	blocks := defaultSeedContext(ParentContext{}, agentapi.Capability{}, agentapi.DelegationTask{}, 4096)
 	if len(blocks) != 0 {
 		t.Fatalf("seed blocks = %#v, want none", blocks)
+	}
+}
+
+// CJK evidence is the case a bytes-per-token heuristic gets wrong: a non-ASCII
+// rune costs six times an ASCII rune, so trimming by bytes admitted a seed that
+// overflowed the child window before its first provider call.
+func TestDefaultSeedContextBoundsSeedByTokensNotBytes(t *testing.T) {
+	content := strings.Repeat("灯效下发链路与设备影子写入时序，", 4000)
+	parent := ParentContext{
+		Context: map[string]agentapi.ContextBlock{
+			"qa.evidence": {
+				Source:      "qa.evidence",
+				Title:       "QA Evidence",
+				Content:     content,
+				ContentHash: hashBytes([]byte(content)),
+				Evidence: []tool.EvidenceUnit{
+					{
+						SourceKind: "code", Target: "scene.java",
+						ContentHash: validEvidenceHash("scene"),
+						Facets:      []string{"core_flow"},
+					},
+				},
+			},
+		},
+	}
+
+	const maxTokens = 512
+	blocks := defaultSeedContext(
+		parent,
+		agentapi.Capability{InputFacets: []string{"core_flow"}},
+		agentapi.DelegationTask{FocusFacets: []string{"core_flow"}},
+		maxTokens,
+	)
+	if len(blocks) != 1 {
+		t.Fatalf("seed blocks = %d, want 1", len(blocks))
+	}
+	if got := tooloutput.EstimateTokens(blocks[0].Content); got > maxTokens {
+		t.Fatalf("seeded content = %d tokens, want <= %d", got, maxTokens)
+	}
+}
+
+// A multi-block seed must respect the budget in aggregate, not per block.
+func TestDefaultSeedContextBoundsTotalAcrossBlocks(t *testing.T) {
+	parent := ParentContext{Context: map[string]agentapi.ContextBlock{}}
+	for i := range 4 {
+		content := strings.Repeat("消息中心推送开关与红点状态，", 2000)
+		parent.Context[fmt.Sprintf("qa.evidence.%d", i)] = agentapi.ContextBlock{
+			Source:      "qa.evidence",
+			Title:       fmt.Sprintf("QA Evidence %d", i),
+			Content:     content,
+			ContentHash: hashBytes([]byte(fmt.Sprintf("%s-%d", content, i))),
+			Evidence: []tool.EvidenceUnit{
+				{
+					SourceKind: "code", Target: fmt.Sprintf("center-%d.java", i),
+					ContentHash: validEvidenceHash(fmt.Sprintf("center-%d", i)),
+					Facets:      []string{"core_flow"},
+				},
+			},
+		}
+	}
+
+	const maxTokens = 1024
+	blocks := defaultSeedContext(
+		parent,
+		agentapi.Capability{InputFacets: []string{"core_flow"}},
+		agentapi.DelegationTask{FocusFacets: []string{"core_flow"}},
+		maxTokens,
+	)
+	total := 0
+	for _, block := range blocks {
+		total += tooloutput.EstimateTokens(block.Content)
+	}
+	if total > maxTokens {
+		t.Fatalf("seeded total = %d tokens across %d blocks, want <= %d", total, len(blocks), maxTokens)
+	}
+}
+
+// The seed budget plus everything else the child's request carries must fit the
+// single-request window, or the child fails at step 0 with no answer at all.
+func TestSeedContextTokensLeavesRoomForReserveSafetyAndPrompt(t *testing.T) {
+	const window, outputReserve = 51200, 18000
+	seed := seedContextTokens(window, outputReserve)
+	if seed <= 0 {
+		t.Fatalf("seed budget = %d, want positive", seed)
+	}
+	safety := int64(agentrun.ContextSafetyTokens(window))
+	total := seed + outputReserve + safety + childPromptOverheadTokens
+	if total > window {
+		t.Fatalf("seed %d + reserve %d + safety %d + prompt %d = %d, want <= %d",
+			seed, outputReserve, safety, childPromptOverheadTokens, total, window)
+	}
+}
+
+func TestSeedContextTokensZeroWhenWindowCannotFitOverhead(t *testing.T) {
+	if got := seedContextTokens(childPromptOverheadTokens, 0); got != 0 {
+		t.Fatalf("seed budget = %d, want 0 when window only covers overhead", got)
+	}
+}
+
+func TestSelectContextBoundsSeedByTokens(t *testing.T) {
+	content := strings.Repeat("菜谱检索与烹饪下发链路，", 4000)
+	parent := ParentContext{
+		Context: map[string]agentapi.ContextBlock{
+			"ev_cookbook": {
+				Source:      "qa.evidence",
+				Title:       "Cookbook Evidence",
+				Content:     content,
+				ContentHash: hashBytes([]byte(content)),
+				Evidence: []tool.EvidenceUnit{
+					{
+						SourceKind: "code", Target: "recipe.py",
+						ContentHash: validEvidenceHash("recipe"),
+						Facets:      []string{"core_flow"},
+					},
+				},
+			},
+		},
+	}
+
+	const maxTokens = 512
+	blocks := selectContext(parent, []string{"ev_cookbook"}, []string{"core_flow"}, maxTokens)
+	if len(blocks) != 1 {
+		t.Fatalf("selected blocks = %d, want 1", len(blocks))
+	}
+	if got := tooloutput.EstimateTokens(blocks[0].Content); got > maxTokens {
+		t.Fatalf("selected content = %d tokens, want <= %d", got, maxTokens)
 	}
 }
