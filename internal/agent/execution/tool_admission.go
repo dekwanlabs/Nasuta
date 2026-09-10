@@ -192,6 +192,16 @@ func toolAdmissionExecution(decision toolAdmissionDecision) ToolExecution {
 		"remainingToolTokens": decision.RemainingTokens,
 		"declaredMaxTokens":   decision.DeclaredTokens,
 	}
+	// A budget refusal never reaches the retrieval layer, so its empty evidence
+	// list means "not searched", not "searched and found nothing". Without this
+	// flag the two are indistinguishable and every refused hop gets reported as
+	// unverified evidence.
+	if decision.Action == toolAdmissionDenyBudget {
+		payload["retrieved"] = false
+		payload["retryable"] = true
+		payload["hint"] = "refused before retrieval on token budget; " +
+			"narrow the query or request fewer items, or rely on evidence already gathered"
+	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		encoded = []byte(fmt.Sprintf(`{"action":%q,"reason":%q}`, decision.Action, decision.Reason))
