@@ -21,6 +21,11 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
+// answerLogRunes bounds the answer echoed to the run log. A schema-valid
+// investigation.report does not fit in 4000 runes, so the old cap silently cut
+// 25-62% of child answers and made post-hoc incident attribution impossible.
+const answerLogRunes = 16000
+
 // compiledLoop holds only the mutable execution state of one in-flight Run.
 type compiledLoop struct {
 	ctx          context.Context
@@ -342,7 +347,7 @@ func (agent *Agent) finalizeLoop(state *compiledLoop) {
 		state.runID, state.result.Steps, len(state.result.Answer), state.result.Aborted, state.result.Err)
 	if answer := strings.TrimSpace(state.result.Answer); answer != "" {
 		log.InfofCtx(state.ctx, "[agent] run %s answer:\n%s",
-			state.runID, platform.TruncateForLog(answer, 4000))
+			state.runID, platform.TruncateForLog(answer, answerLogRunes))
 	}
 }
 
