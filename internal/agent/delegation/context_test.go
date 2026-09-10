@@ -10,6 +10,7 @@ import (
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	agentrun "github.com/dekwanlabs/nasuta/internal/agent/run"
 	"github.com/dekwanlabs/nasuta/internal/agent/tooloutput"
+	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/evidence"
 	"github.com/dekwanlabs/nasuta/tool"
 )
@@ -407,5 +408,100 @@ func TestSelectContextBoundsSeedByTokens(t *testing.T) {
 	}
 	if got := tooloutput.EstimateTokens(blocks[0].Content); got > maxTokens {
 		t.Fatalf("selected content = %d tokens, want <= %d", got, maxTokens)
+	}
+}
+
+// The declared entity label is the binding key. Run 2026-09-11T00:07 dispatched
+// four tasks whose objectives never contained a canonical label, so every task
+// stayed unbound, entity partitioning was skipped, and three of four children
+// overflowed their window before step 1 holding all subjects' evidence.
+func TestAssignTaskEntitiesBindsDeclaredLabelWhenObjectiveDoesNotMatch(t *testing.T) {
+	parent := ParentContext{Entities: []domain.EntitySpec{
+		{ID: "message_center", Label: "消息中心"},
+		{ID: "rgb_lighting", Label: "RGB 灯效", Aliases: []string{"rgb灯效"}},
+	}}
+	tasks := []agentapi.DelegationTask{
+		{Objective: "梳理推送触发与投递的主链路", Entity: "消息中心"},
+		{Objective: "梳理灯板下发与影子写入", Entity: "rgb灯效"},
+	}
+	assignTaskEntities(parent, tasks)
+	if tasks[0].EntityID != "message_center" {
+		t.Fatalf("task 0 entity = %q, want message_center", tasks[0].EntityID)
+	}
+	if tasks[1].EntityID != "rgb_lighting" {
+		t.Fatalf("task 1 entity = %q, want rgb_lighting", tasks[1].EntityID)
+	}
+}
+
+// Two tasks naming one subject must not both claim its partition.
+func TestAssignTaskEntitiesClaimsEachEntityOnce(t *testing.T) {
+	parent := ParentContext{Entities: []domain.EntitySpec{
+		{ID: "message_center", Label: "消息中心"},
+	}}
+	tasks := []agentapi.DelegationTask{
+		{Objective: "trigger path", Entity: "消息中心"},
+		{Objective: "delivery path", Entity: "消息中心"},
+	}
+	assignTaskEntities(parent, tasks)
+	if tasks[0].EntityID != "message_center" {
+		t.Fatalf("task 0 entity = %q, want message_center", tasks[0].EntityID)
+	}
+	if tasks[1].EntityID != "" {
+		t.Fatalf("task 1 entity = %q, want empty (already claimed)", tasks[1].EntityID)
+	}
+}
+
+// A declared label must outrank another task's objective substring, so the task
+// that names a subject wins it.
+func TestAssignTaskEntitiesPrefersDeclaredOverObjectiveSubstring(t *testing.T) {
+	parent := ParentContext{Entities: []domain.EntitySpec{
+		{ID: "tts", Label: "tts"},
+	}}
+	tasks := []agentapi.DelegationTask{
+		{Objective: "compare tts against the recipe path"},
+		{Objective: "synthesis pipeline", Entity: "tts"},
+	}
+	assignTaskEntities(parent, tasks)
+	if tasks[1].EntityID != "tts" {
+		t.Fatalf("declared task entity = %q, want tts", tasks[1].EntityID)
+	}
+	if tasks[0].EntityID != "" {
+		t.Fatalf("substring task entity = %q, want empty", tasks[0].EntityID)
+	}
+}
+
+// Objective matching stays as a fallback for parents that omit the field.
+func TestAssignTaskEntitiesFallsBackToObjectiveMatch(t *testing.T) {
+	parent := ParentContext{Entities: []domain.EntitySpec{
+		{ID: "recipe", Label: "菜谱"},
+	}}
+	tasks := []agentapi.DelegationTask{{Objective: "梳理菜谱详情与收藏链路"}}
+	assignTaskEntities(parent, tasks)
+	if tasks[0].EntityID != "recipe" {
+		t.Fatalf("entity = %q, want recipe from objective fallback", tasks[0].EntityID)
+	}
+}
+
+// An unbound task must not silently inherit a sibling's partition.
+func TestDefaultSeedContextSkipsPartitionedBlocksForUnboundTask(t *testing.T) {
+	content := strings.Repeat("消息中心链路证据，", 200)
+	parent := ParentContext{Context: map[string]agentapi.ContextBlock{
+		"qa.evidence": {
+			Source: "qa.evidence", Title: "QA Evidence", EntityID: "message_center",
+			Content: content, ContentHash: hashBytes([]byte(content)),
+			Evidence: []tool.EvidenceUnit{{
+				SourceKind: "code", Target: "center.java",
+				ContentHash: validEvidenceHash("center"), Facets: []string{"core_flow"},
+			}},
+		},
+	}}
+	blocks := defaultSeedContext(
+		parent,
+		agentapi.Capability{InputFacets: []string{"core_flow"}},
+		agentapi.DelegationTask{FocusFacets: []string{"core_flow"}},
+		4096,
+	)
+	if len(blocks) != 0 {
+		t.Fatalf("unbound task received %d partitioned blocks, want 0", len(blocks))
 	}
 }

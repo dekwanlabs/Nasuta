@@ -751,26 +751,97 @@ func delegationInvocation(
 	return parent, invocationID, nil
 }
 
-// assignTaskEntities binds each task to the planner's canonical entity when the
-// parent isolated named subjects. Binding is by objective match against an
-// entity's label and aliases; tasks that match no entity keep an empty EntityID
-// and fall back to facet-only seeding and subject-keyed flow merging.
+// assignTaskEntities binds each task to the planner's canonical entity so
+// evidence seeding and flow merging share one server-owned join key.
+//
+// Binding prefers the entity label the parent declared on the task. Matching the
+// objective's prose is only a fallback: the model rewords objectives between
+// runs, so a run where the wording happened to contain a label bound correctly
+// while an equivalent run left every task unbound — and an unbound task silently
+// disables entity partitioning, handing every child the full evidence block.
+// Each entity is claimed at most once; a second task naming the same entity
+// falls through to the objective match rather than duplicating the partition.
 func assignTaskEntities(parent ParentContext, tasks []agentapi.DelegationTask) {
 	if len(parent.Entities) == 0 {
 		return
 	}
+	claimed := make(map[string]struct{}, len(parent.Entities))
 	for index := range tasks {
-		task := &tasks[index]
-		if task.EntityID != "" {
-			continue
+		if id := strings.TrimSpace(tasks[index].EntityID); id != "" {
+			claimed[id] = struct{}{}
 		}
-		entity, ok := matchTaskEntity(task.Objective, parent.Entities)
-		if !ok {
-			continue
-		}
-		task.EntityID = entity.ID
-		task.EntityAliases = entityMatchTokens(entity)
 	}
+	// Declared labels bind first so an explicit claim always outranks a
+	// substring hit from another task's objective.
+	for pass := range 2 {
+		for index := range tasks {
+			task := &tasks[index]
+			if task.EntityID != "" {
+				continue
+			}
+			var (
+				entity domain.EntitySpec
+				ok     bool
+			)
+			if pass == 0 {
+				entity, ok = matchDeclaredEntity(task.Entity, parent.Entities)
+			} else {
+				entity, ok = matchTaskEntity(task.Objective, parent.Entities)
+			}
+			if !ok {
+				continue
+			}
+			if _, taken := claimed[entity.ID]; taken {
+				continue
+			}
+			claimed[entity.ID] = struct{}{}
+			task.EntityID = entity.ID
+			task.EntityAliases = entityMatchTokens(entity)
+		}
+	}
+	for index := range tasks {
+		if tasks[index].EntityID != "" {
+			continue
+		}
+		// Unbound means this child gets facet-only seeding: no entity partition,
+		// so it may receive every subject's evidence at once. That is the failure
+		// mode that overflows a child's window before its first provider call,
+		// and it used to be silent.
+		log.Warnf(
+			"[delegation] task %d unbound to any canonical entity (declared=%q); "+
+				"entity partitioning disabled for this child",
+			index, truncateText(tasks[index].Entity, 80),
+		)
+	}
+}
+
+// matchDeclaredEntity resolves the parent's declared subject label against the
+// canonical entities. It matches on the whole label rather than a substring so a
+// declared "消息中心" cannot claim an entity merely because one contains the
+// other; alias equality covers the naming variants the planner already merged.
+func matchDeclaredEntity(
+	declared string,
+	entities []domain.EntitySpec,
+) (domain.EntitySpec, bool) {
+	declared = strings.ToLower(strings.TrimSpace(declared))
+	if declared == "" {
+		return domain.EntitySpec{}, false
+	}
+	if canonical := domain.CanonicalEntityIDs([]string{declared}); len(canonical) == 1 {
+		for _, entity := range entities {
+			if entity.ID == canonical[0] {
+				return entity, true
+			}
+		}
+	}
+	for _, entity := range entities {
+		for _, token := range entityMatchTokens(entity) {
+			if strings.ToLower(strings.TrimSpace(token)) == declared {
+				return entity, true
+			}
+		}
+	}
+	return domain.EntitySpec{}, false
 }
 
 func matchTaskEntity(objective string, entities []domain.EntitySpec) (domain.EntitySpec, bool) {
@@ -3124,6 +3195,7 @@ func defaultSeedContext(
 	var blocks []agentapi.ContextBlock
 	remainingTokens := int(maxTokens)
 	seen := make(map[string]struct{})
+	partitioned := 0
 	for _, block := range parent.Context {
 		if !isSeedBlock(block) {
 			continue
@@ -3133,6 +3205,9 @@ func defaultSeedContext(
 			continue
 		}
 		seen[key] = struct{}{}
+		if block.EntityID != "" {
+			partitioned++
+		}
 
 		// A partitioned block belongs to exactly one entity. Claim the block
 		// whose EntityID matches this task; skip the other subjects' blocks.
@@ -3181,6 +3256,17 @@ func defaultSeedContext(
 	}
 	if len(blocks) == 0 && task.EntityID != "" {
 		log.Warnf("[delegation] seed empty for entity=%s; child %s starts cold", task.EntityID, task.Objective)
+	}
+	// Evidence was partitioned by entity but this task carries no identity, so
+	// every partition was skipped and the child fell back to facet-only seeding
+	// across all subjects. That is how one child ends up holding the whole
+	// question's evidence and overflows its window before step 1.
+	if partitioned > 0 && task.EntityID == "" {
+		log.Warnf(
+			"[delegation] %d partitioned evidence blocks ignored for an unbound task; "+
+				"child seeded facet-only across all subjects and may overflow its window",
+			partitioned,
+		)
 	}
 	return blocks
 }

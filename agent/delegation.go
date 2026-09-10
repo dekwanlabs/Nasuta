@@ -49,6 +49,12 @@ type DelegationTask struct {
 	Objective    string   `json:"objective"`
 	FocusFacets  []string `json:"focus_facets,omitempty"`
 	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+	// Entity is the subject label the parent declared for this task. It is
+	// model-supplied and never a join key: the server resolves it against the
+	// planner's canonical entities to derive EntityID. Matching an objective's
+	// prose was too unstable to bind on, because the model's wording drifts
+	// between runs while this field names the subject directly.
+	Entity string `json:"entity,omitempty"`
 	// EntityID is the server-derived identity of the subject this task
 	// investigates. It is the stable join key for evidence seeding and flow
 	// merging; it is empty when the parent did not isolate a named subject.

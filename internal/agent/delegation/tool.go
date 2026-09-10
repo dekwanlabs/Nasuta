@@ -41,8 +41,11 @@ func (executor *Executor) Tool() tool.ReadTool {
 				"read-only investigations. Put every isolated named subject that still needs a "+
 				"deep-dive into this single batch; do not call this tool again for leftover "+
 				"subjects. Keep each objective to one named subject and its primary missing "+
-				"flow — not an exhaustive API inventory. Parent retrieval of any registered "+
-				"tool is isolation-only: do not keep searching those subjects on the parent, "+
+				"flow — not an exhaustive API inventory. Set entity on every task to that "+
+				"subject's name: it is the key the server seeds evidence by, and a task "+
+				"without it receives every subject's evidence at once. Parent retrieval of any "+
+				"registered tool is isolation-only: do not keep searching those subjects on "+
+				"the parent, "+
 				"and do not write the deep-dive from parent results. Omit evidence_refs unless "+
 				"they are ev_ handles from this run's manifests. Omit focus_facets unless they "+
 				"are catalog IDs from the schema enum. Do not use this to inventory unnamed "+
@@ -67,6 +70,12 @@ func (executor *Executor) Tool() tool.ReadTool {
 							"objective": map[string]any{
 								"type": "string", "minLength": 1,
 								"maxLength": maxObjectiveBytes,
+							},
+							"entity": map[string]any{
+								"type": "string", "maxLength": 200,
+								"description": "The one named subject this task investigates, " +
+									"copied verbatim from the question or from the subject list " +
+									"this turn isolated. One subject per task; never a list.",
 							},
 							"focus_facets": map[string]any{
 								"type": "array", "maxItems": 10,
@@ -287,6 +296,7 @@ func delegationTasks(arguments tool.Arguments) ([]agentapi.DelegationTask, error
 		tasks = append(tasks, agentapi.DelegationTask{
 			Capability:   args.String("capability"),
 			Objective:    args.String("objective"),
+			Entity:       args.String("entity"),
 			FocusFacets:  args.Strings("focus_facets"),
 			EvidenceRefs: args.Strings("evidence_refs"),
 		})
