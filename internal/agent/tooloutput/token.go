@@ -27,7 +27,10 @@ func Truncate(value string, maxTokens int) string {
 	return truncate(value, maxTokens, originalTokens)
 }
 
-// TruncateContent preserves evidence boundaries when coverage metadata is stored separately.
+// TruncateContent preserves evidence boundaries when coverage metadata is stored
+// separately. It elides without a marker, so the consumer cannot tell content was
+// removed — only use it when coverage is recorded elsewhere. For anything a model
+// reads as a whole (an answer, a report), use Truncate.
 func TruncateContent(value string, maxTokens int) string {
 	if maxTokens <= 0 {
 		return ""

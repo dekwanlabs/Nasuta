@@ -276,7 +276,10 @@ func (svc *Service) extractRunMemory(
 	defer cancel()
 
 	question := tooloutput.TruncateContent(prepared.request.Question, 1000)
-	answer := tooloutput.TruncateContent(result.Text, 2000)
+	// Truncate, not TruncateContent: the answer carries flowir JSON blocks, and a
+	// marker-free head-tail splice welds one block's severed string value onto
+	// another's prose. The extraction model must see that content was removed.
+	answer := tooloutput.Truncate(result.Text, 2000)
 	probe, err := buildMemoryProbe(memCtx, memoryProbeInput{
 		Client: svc.helperLLM, Question: question,
 	})
