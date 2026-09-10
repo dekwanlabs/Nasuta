@@ -50,8 +50,11 @@
 | [`qa-query-intent-and-facet-model-simplification.zh-CN.md`](qa-query-intent-and-facet-model-simplification.zh-CN.md) | 08-15 | 未实施 | 查询意图、Facet 收敛为 canonical QueryPlan |
 | [`qa-comparison-entity-and-evidence-coverage.zh-CN.md`](qa-comparison-entity-and-evidence-coverage.zh-CN.md) | 08-18 | 核心已实施 | 对比问题实体识别与证据覆盖 |
 | [`qa-multi-entity-evidence-chain-governance.zh-CN.md`](qa-multi-entity-evidence-chain-governance.zh-CN.md) | 09-10 | 草案 | 多实体问答证据链路治理（逐实体检索 · 种子实体隔离 · 流程图确定性归并 · 预算/压缩边界）——09-10 四业务事故收口，跨检索/委派/渲染/预算 |
+| [`qa-child-seed-token-accounting-and-compression-floor.zh-CN.md`](qa-child-seed-token-accounting-and-compression-floor.zh-CN.md) | 09-10 | 草案 | 上一行阶段 3 的定位修正与落地补充：种子裁剪按字节/准入按 token 的单位不一致、压缩 floor 96 低于抽取器工作阈值、`deny_budget` 与真空结果不可辨识、两处无标记截断 |
 
 已归档：`retrieval-current-chain.zh-CN.md`（08-15，现状梳理基线、非提案）。
+
+> 注：09-10 两份提案指向同一天的**不同运行**。`qa-multi-entity-evidence-chain-governance` 覆盖检索坍缩 / 种子污染 / 流程图主体三条根因，其 §3.5 的预算诊断落在**输出维度**（`RequireWithin` 严格 `>` → `ErrBudgetExceeded`）。`qa-child-seed-token-accounting-and-compression-floor` 是其阶段 3 的定位修正：在 `run_0267ea7ecd24c54d3d85b6c4` 中 `ErrBudgetExceeded` 出现 0 次，实际失败路径是**输入维度**的 `ensureInputBudget` 超窗（种子裁剪按字节、准入校验按 token，CJK 内容下字节启发式系统性低估）。两份诊断互补，不互相取代；后者的压缩改动严格依赖其改动一先行落地。
 
 ## 主题五 · 前端 / 渲染
 
