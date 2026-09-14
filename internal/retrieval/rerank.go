@@ -568,9 +568,20 @@ func (dashReranker dashscopeReranker) Score(ctx context.Context, query string, d
 	var req dashscopeRerankRequest
 	req.Model = dashReranker.model
 	req.Input.Query = query
-	req.Input.Documents = make([]string, len(docs))
+	// DashScope rejects the whole batch if any document text is empty, so skip
+	// empty docs up front and keep an index map to scatter scores back into the
+	// original positions (empty docs stay 0).
+	req.Input.Documents = make([]string, 0, len(docs))
+	index := make([]int, 0, len(docs))
 	for i, d := range docs {
-		req.Input.Documents[i] = truncateRerankDocument(d.text, rerankDocChars)
+		if strings.TrimSpace(d.text) == "" {
+			continue
+		}
+		index = append(index, i)
+		req.Input.Documents = append(req.Input.Documents, truncateRerankDocument(d.text, rerankDocChars))
+	}
+	if len(req.Input.Documents) == 0 {
+		return nil, fmt.Errorf("dashscope rerank: no non-empty candidates")
 	}
 
 	var out dashscopeRerankResponse
@@ -584,18 +595,19 @@ func (dashReranker dashscopeReranker) Score(ctx context.Context, query string, d
 	if resp.IsError() {
 		return nil, fmt.Errorf("dashscope rerank API %d: %s", resp.StatusCode(), platform.TruncateForLog(string(resp.Body()), 200))
 	}
-	if len(out.Output.Results) != len(docs) {
+	if len(out.Output.Results) != len(index) {
 		return nil, fmt.Errorf("dashscope rerank result count mismatch: got %d want %d (code=%q msg=%q)",
-			len(out.Output.Results), len(docs), out.Code, platform.TruncateForLog(out.Message, 120))
+			len(out.Output.Results), len(index), out.Code, platform.TruncateForLog(out.Message, 120))
 	}
 
 	// DashScope returns results sorted by relevance with the ORIGINAL index;
 	// the Reranker contract requires scores aligned to the input docs order, so
 	// scatter each score back to its index rather than filling sequentially.
 	scores := make([]float64, len(docs))
+	maxScore := 0.0
 	for _, res := range out.Output.Results {
-		if res.Index < 0 || res.Index >= len(docs) {
-			return nil, fmt.Errorf("dashscope rerank index out of range: %d (n=%d)", res.Index, len(docs))
+		if res.Index < 0 || res.Index >= len(index) {
+			return nil, fmt.Errorf("dashscope rerank index out of range: %d (n=%d)", res.Index, len(index))
 		}
 		s := res.RelevanceScore
 		if s < 0 {
@@ -603,17 +615,14 @@ func (dashReranker dashscopeReranker) Score(ctx context.Context, query string, d
 		} else if s > 1 {
 			s = 1
 		}
-		scores[res.Index] = s
-	}
-	// Normalize to the batch max so the top doc is 1.0.
-	// This keeps DashScope scores aligned with the dense-reranker scale.
-	// Without it, modest raw scores could wipe the pool under RerankMinScore.
-	maxScore := 0.0
-	for _, s := range scores {
+		scores[index[res.Index]] = s
 		if s > maxScore {
 			maxScore = s
 		}
 	}
+	// Normalize to the batch max so the top doc is 1.0.
+	// This keeps DashScope scores aligned with the dense-reranker scale.
+	// Without it, modest raw scores could wipe the pool under RerankMinScore.
 	if maxScore > 0 {
 		for i := range scores {
 			scores[i] /= maxScore

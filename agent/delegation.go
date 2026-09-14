@@ -10,13 +10,10 @@ import (
 type DelegationPolicy struct {
 	MaxDepth              int   `json:"max_depth"`
 	MaxChildren           int   `json:"max_children"`
-	MaxConcurrent         int   `json:"max_concurrent"`
 	MaxChildTurns         int   `json:"max_child_turns"`
 	MaxChildToolCalls     int64 `json:"max_child_tool_calls"`
 	MaxChildContextTokens int64 `json:"max_child_context_tokens"`
 	MaxChildOutputTokens  int64 `json:"max_child_output_tokens"`
-	MaxReportTokens       int64 `json:"max_report_tokens"`
-	MaxTotalTokens        int64 `json:"max_total_tokens"`
 	MaxTotalCostMicros    int64 `json:"max_total_cost_micros"`
 	ParentAnswerReserve   int64 `json:"parent_answer_reserve"`
 	// BatchTimeout bounds the wall-clock lifetime of one admitted delegation
@@ -129,6 +126,11 @@ type FlowEdge struct {
 	EvidenceState string   `json:"evidence_state"`
 }
 
+// FlowOriginEvidenceFallback marks a FlowIR rebuilt mechanically from leftover
+// evidence, standing in for a report the investigator could not produce. An
+// empty Origin means the investigator authored the flow.
+const FlowOriginEvidenceFallback = "evidence_fallback"
+
 // FlowIR is the compact, machine-readable flow handoff used when a child
 // investigates a process or architecture question. It is optional so older
 // investigator reports remain valid.
@@ -145,6 +147,12 @@ type FlowIR struct {
 	OpenHops      []string   `json:"open_hops,omitempty"`
 	Uncertainties []string   `json:"uncertainties,omitempty"`
 	Confidence    string     `json:"confidence"`
+	// Origin distinguishes a flow the investigator authored from one rebuilt
+	// mechanically from leftover evidence (FlowOriginEvidenceFallback). A
+	// fallback flow is a stand-in for a missing report, not extra evidence for a
+	// report that exists, so merging the two unions a low-confidence
+	// reconstruction into a verified diagram. Empty means authored.
+	Origin string `json:"origin,omitempty"`
 	// Order is the one-based task index this flow was produced for (0 means no
 	// index was assigned). The answer composer uses it to place the diagram under
 	// the matching numbered section (## 1、, ## 2、…) instead of matching on the

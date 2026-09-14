@@ -31,6 +31,9 @@ type Config struct {
 	AnswerReserve       time.Duration
 	AnswerMaxTokens     int
 	ConclusionMaxTokens int
+	// OutputReserve overrides the context reservation held back for the final
+	// output. Zero keeps the default max(AnswerMaxTokens, ConclusionMaxTokens).
+	OutputReserve int
 	// ParentToolMaxTokens bounds a single tool-using parent step. It defaults
 	// to a bounded slice of AnswerMaxTokens when unset.
 	ParentToolMaxTokens int
@@ -73,12 +76,23 @@ type Config struct {
 	// the parent loop never has to poll delegation_status. It may be nil for
 	// non-delegating runs.
 	DelegationAwaiter DelegationAwaiter
+	// FlowCompleter fills server-owned flows for subjects the loop did not
+	// cover (single-agent runs, or a child that returned no flow). It may be
+	// nil when flow completion is disabled.
+	FlowCompleter FlowCompleter
 }
 
 // DelegationAwaiter blocks until every child in one delegation settles (or the
 // deadline passes) and returns the full projection with backfilled reports.
 type DelegationAwaiter interface {
 	AwaitSettlement(ctx context.Context, delegationID string, deadline time.Time) (agentapi.DelegationDispatchResult, error)
+}
+
+// FlowCompleter produces one FlowIR per subject for flow-shaped queries whose
+// parent loop did not generate them. It is invoked at the answer turn so the
+// deterministic renderer always has a diagram to install.
+type FlowCompleter interface {
+	CompleteFlows(ctx context.Context, subjects []string) ([]agentapi.FlowIR, error)
 }
 
 // ConversationContext carries recalled archived history and recent turns.

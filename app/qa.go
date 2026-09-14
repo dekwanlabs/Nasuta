@@ -605,13 +605,10 @@ func (p *Platform) configureDynamicDelegation(
 		Policy: agentapi.DelegationPolicy{
 			MaxDepth:              1,
 			MaxChildren:           settings.DelegationMaxChildren,
-			MaxConcurrent:         settings.DelegationMaxConcurrent,
 			MaxChildTurns:         settings.DelegationMaxChildTurns,
 			MaxChildToolCalls:     settings.DelegationMaxChildToolCalls,
 			MaxChildContextTokens: settings.DelegationMaxChildContextTokens,
 			MaxChildOutputTokens:  settings.DelegationMaxChildOutputTokens,
-			MaxReportTokens:       settings.DelegationMaxReportTokens,
-			MaxTotalTokens:        settings.DelegationMaxTotalTokens,
 			MaxTotalCostMicros:    settings.DelegationMaxTotalCostMicros,
 			ParentAnswerReserve:   settings.DelegationParentAnswerReserve,
 			BatchTimeout:          time.Duration(settings.DelegationBatchTimeout),
@@ -650,6 +647,7 @@ func (p *Platform) configureDynamicDelegation(
 	}
 	if definitionRuntime, ok := runtime.(*definition.Runtime); ok {
 		definitionRuntime.SetDelegationAwaiter(executor)
+		definitionRuntime.SetFlowCompleter(executor)
 	}
 	p.configureDelegationWorker(executor)
 	return nil

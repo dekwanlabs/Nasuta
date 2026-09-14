@@ -327,6 +327,10 @@ func (staticOntologyRepository) EntitiesByID(context.Context, ontology.EntityQue
 	return []ontology.EntityRef{{ID: "payments", Class: ontology.ClassService, Name: "payments"}}, nil
 }
 
+func (staticOntologyRepository) EntitiesByNamePattern(context.Context, ontology.NamePatternQuery) ([]ontology.EntityRef, error) {
+	return nil, nil
+}
+
 func (staticOntologyRepository) Neighbors(context.Context, ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
 	return []ontology.Fact{{
 		ID: "dependency", SubjectID: "orders", Predicate: ontology.PredicateDependsOn, ObjectID: "payments",

@@ -459,6 +459,10 @@ func (apiTargetRepository) EntitiesByID(context.Context, ontology.EntityQuery) (
 	return []ontology.EntityRef{{ID: "symbol", Class: ontology.ClassCodeSymbol, Name: "OrdersController.CreateOrder"}}, nil
 }
 
+func (apiTargetRepository) EntitiesByNamePattern(context.Context, ontology.NamePatternQuery) ([]ontology.EntityRef, error) {
+	return nil, nil
+}
+
 func (apiTargetRepository) Neighbors(context.Context, ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
 	return []ontology.Fact{{
 		ID: "implementation", SubjectID: "endpoint", Predicate: ontology.PredicateImplementedBy, ObjectID: "symbol",

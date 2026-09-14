@@ -172,11 +172,15 @@ func (state *compiledLoop) recordSeedEvidence(observer run.Observer) {
 // can replace model-owned diagrams) and again in finishLoop. It is idempotent
 // and never downgrades an already-merged flow.
 func (agent *Agent) mergeDelegatedFlows(state *compiledLoop) {
-	if state == nil || len(state.delegatedFlows) == 0 {
+	if state == nil {
 		return
 	}
 	if state.result.Flows != nil {
 		// Already merged (e.g. recovered from a checkpoint); do not re-merge.
+		return
+	}
+	agent.completeMissingFlows(state)
+	if len(state.delegatedFlows) == 0 {
 		return
 	}
 	flows, err := delegation.MergeFlowIRsBySubject(state.delegatedFlows)
@@ -185,6 +189,72 @@ func (agent *Agent) mergeDelegatedFlows(state *compiledLoop) {
 		return
 	}
 	state.result.Flows = flows
+}
+
+// completeMissingFlows fills server-owned flows for subjects the parent loop
+// did not cover. A single-agent run never dispatches children, and even a
+// multi-agent run can miss a subject when a child returns no flow, so the
+// output-contract subjects are the authoritative completeness target.
+func (agent *Agent) completeMissingFlows(state *compiledLoop) {
+	if agent.cfg.FlowCompleter == nil || state == nil {
+		return
+	}
+	// Flow completion dispatches a trace through the delegation executor, which
+	// requires the parent context. Runs without delegation (no parent context,
+	// e.g. single-agent with delegation unavailable) have nothing to complete
+	// against, so skip silently instead of surfacing a spurious failure.
+	parent, ok := delegation.ParentContextFrom(state.loopCtx)
+	if !ok {
+		return
+	}
+	subjects := state.input.OutputContract.Subjects
+	if len(subjects) == 0 {
+		return
+	}
+	// Subjects are display labels while flows carry canonical entity IDs. Map
+	// each label/alias to its entity ID so a subject like "菜谱" is recognized
+	// as covered by a flow whose EntityID is "recipe" (or an opaque hash).
+	entityIDByToken := make(map[string]string, len(parent.Entities)*2)
+	for _, entity := range parent.Entities {
+		for _, token := range append([]string{entity.Label}, entity.Aliases...) {
+			if token = strings.TrimSpace(token); token != "" {
+				entityIDByToken[strings.ToLower(token)] = entity.ID
+			}
+		}
+	}
+	existing := make(map[string]struct{}, len(state.delegatedFlows))
+	for _, flow := range state.delegatedFlows {
+		if key := strings.ToLower(strings.TrimSpace(flow.EntityID)); key != "" {
+			existing[key] = struct{}{}
+		}
+		// Subject stays as a fallback key only for flows whose EntityID was
+		// never bound (assignTaskEntities failed), the sole Subject-only case.
+		if key := normalizeFlowSubject(flow.Subject); key != "" {
+			existing[key] = struct{}{}
+		}
+	}
+	missing := make([]string, 0, len(subjects))
+	for _, subject := range subjects {
+		if _, ok := existing[normalizeFlowSubject(subject)]; ok {
+			continue
+		}
+		if id, ok := entityIDByToken[strings.ToLower(strings.TrimSpace(subject))]; ok {
+			if _, covered := existing[strings.ToLower(id)]; covered {
+				continue
+			}
+		}
+		missing = append(missing, subject)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	flows, err := agent.cfg.FlowCompleter.CompleteFlows(state.loopCtx, missing)
+	if err != nil {
+		log.WarnfCtx(state.ctx, "[agent] run %s flow completion failed for %d subjects: %v",
+			state.runID, len(missing), err)
+		return
+	}
+	state.delegatedFlows = append(state.delegatedFlows, flows...)
 }
 
 func (agent *Agent) finishLoop(state *compiledLoop) {

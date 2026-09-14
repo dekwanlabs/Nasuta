@@ -33,7 +33,7 @@ func TestIsNoiseFile(t *testing.T) {
 		"repo/thirdparty/lib/main.py",
 	}
 	for _, p := range noise {
-		if !isNoiseFile(p) {
+		if !isNoiseFile(p, nil) {
 			t.Errorf("expected noise: %s", p)
 		}
 	}
@@ -54,8 +54,35 @@ func TestIsNoiseFile(t *testing.T) {
 		"hsds-cookbook/src/main/resources/spring/applicationContext.xml",
 	}
 	for _, p := range keep {
-		if isNoiseFile(p) {
+		if isNoiseFile(p, nil) {
 			t.Errorf("should keep: %s", p)
+		}
+	}
+}
+
+func TestIsNoiseFileExcludeDirs(t *testing.T) {
+	excludeDirs := []string{".evidence", ".claude", ".husky", "openspec", "esp-idf", "bk2028n_sdk"}
+	noise := []string{
+		"repo/.evidence/manual-x/quality-summary.md",
+		"repo/.claude/rules/code.md",
+		"repo/.husky/pre-commit",
+		"repo/openspec/changes/foo/spec.md",
+		"repos/firmware/esp-idf/components/foo/foo.c",
+		"repos/firmware/bk2028n_sdk/src/bar.c",
+	}
+	for _, p := range noise {
+		if !isNoiseFile(p, excludeDirs) {
+			t.Errorf("expected excluded: %s", p)
+		}
+	}
+	// Without the runtime config these same paths are kept.
+	keep := []string{
+		"repo/.evidence/x.md",
+		"repos/firmware/esp-idf/components/foo/foo.c",
+	}
+	for _, p := range keep {
+		if isNoiseFile(p, nil) {
+			t.Errorf("should keep without excludeDirs: %s", p)
 		}
 	}
 }

@@ -94,6 +94,44 @@ func scanOntologyEntityRefs(rows *sql.Rows, capacity int) ([]ontology.EntityRef,
 	return entities, nil
 }
 
+// OntologyEntitiesByNamePattern returns entities whose name contains any token.
+// It backs the delegation child's business scope: tokens are entity aliases, so
+// the returned IDs are the services in that business.
+func (store *SQLite) OntologyEntitiesByNamePattern(ctx context.Context, query ontology.NamePatternQuery) ([]ontology.EntityRef, error) {
+	if len(query.Tokens) == 0 {
+		return nil, nil
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if err := requireOntologyGeneration(ctx, store.db, query.Generation); err != nil {
+		return nil, err
+	}
+	conditions := make([]string, 0, len(query.Tokens))
+	args := make([]any, 0, len(query.Tokens))
+	for _, token := range query.Tokens {
+		token = strings.ToLower(strings.TrimSpace(token))
+		if token == "" {
+			continue
+		}
+		conditions = append(conditions, "lower(name) LIKE ?")
+		args = append(args, "%"+token+"%")
+	}
+	if len(conditions) == 0 {
+		return nil, nil
+	}
+	rows, err := store.db.QueryContext(ctx,
+		`SELECT entity_id,class,name FROM ontology_entities WHERE `+strings.Join(conditions, " OR ")+
+			` ORDER BY lower(name),entity_id LIMIT 200`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query ontology entities by name pattern: %w", err)
+	}
+	entities, err := scanOntologyEntityRefs(rows, 200)
+	if err != nil {
+		return nil, fmt.Errorf("query ontology entities by name pattern: %w", err)
+	}
+	return entities, nil
+}
+
 func (store *SQLite) OntologyNeighbors(ctx context.Context, query ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
 	if err := ontology.ValidateNeighborQuery(query); err != nil {
 		return nil, false, err

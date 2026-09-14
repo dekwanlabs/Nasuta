@@ -187,6 +187,7 @@ func prepareRunLimitsAt(
 		MaxInputTokens:      requested.MaxInputTokens,
 		MaxContextTokens:    requested.MaxContextTokens,
 		MaxOutputTokens:     requested.MaxOutputTokens,
+		MaxOutputReserve:    requested.MaxOutputReserve,
 		MaxTotalTokens:      requested.MaxTotalTokens,
 		MaxCostMicros:       requested.MaxCostMicros,
 		ParentAnswerReserve: requested.ParentAnswerReserve,
@@ -196,7 +197,8 @@ func prepareRunLimitsAt(
 func validateRequestedLimits(definition agentapi.Definition, requested agentapi.RunLimits) error {
 	if requested.MaxSteps < 0 || requested.MaxToolCalls < 0 ||
 		requested.MaxInputTokens < 0 || requested.MaxContextTokens < 0 ||
-		requested.MaxOutputTokens < 0 || requested.MaxTotalTokens < 0 ||
+		requested.MaxOutputTokens < 0 || requested.MaxOutputReserve < 0 ||
+		requested.MaxTotalTokens < 0 ||
 		requested.MaxCostMicros < 0 || requested.ParentAnswerReserve < 0 {
 		return fmt.Errorf("run limits cannot be negative")
 	}
@@ -619,6 +621,29 @@ func cloneRunRequest(request agentapi.RunRequest) *agentapi.RunRequest {
 	copy.ToolScope.OfferedToolIDs = append([]string(nil), request.ToolScope.OfferedToolIDs...)
 	copy.Policy.OutputContract.Subjects = append([]string(nil), request.Policy.OutputContract.Subjects...)
 	return &copy
+}
+
+// EstimateChildRequest measures a child run request's first-turn input tokens
+// the same way execution admission does: the compiled system/user messages plus
+// the visible tool schemas. The delegation executor uses it to size the seed
+// budget from measured overhead instead of a fixed reserve.
+func (runtime *Runtime) EstimateChildRequest(request agentapi.RunRequest) (int, error) {
+	definition, err := runtime.definitions.Resolve(request.Agent)
+	if err != nil {
+		return 0, fmt.Errorf("estimate child request: resolve definition: %w", err)
+	}
+	policy, err := preparePermissions(definition, request)
+	if err != nil {
+		return 0, fmt.Errorf("estimate child request: %w", err)
+	}
+	tools, err := runtime.prepareTools(definition, request.ToolScope, policy)
+	if err != nil {
+		return 0, fmt.Errorf("estimate child request: %w", err)
+	}
+	return execution.EstimateInputTokens(
+		compileRequest(definition, request).Messages,
+		execution.ToolDefinitions(tools.snapshot.Tools()),
+	)
 }
 
 func evidenceSeeded(

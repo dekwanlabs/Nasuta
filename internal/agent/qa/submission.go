@@ -350,7 +350,7 @@ func (svc *Service) answerContext(
 }
 
 func outputContractForQuery(query domain.QueryPlan) agentapi.RunOutputContract {
-	if query.Kind != domain.QueryFlow {
+	if !domain.QueryNeedsFlow(query.Kind) {
 		return agentapi.RunOutputContract{}
 	}
 	return agentapi.RunOutputContract{

@@ -57,9 +57,9 @@ func TestDecideExecutionRouteRejectsSerializedDelegation(t *testing.T) {
 				{ID: "service-b", Objective: "Inspect service B.", IndependentlyUseful: true},
 			},
 		},
-		DelegationAvailable:     true,
-		DelegationToolReady:     true,
-		DelegationMaxConcurrent: 1,
+		DelegationAvailable:   true,
+		DelegationToolReady:   true,
+		DelegationMaxChildren: 1,
 	})
 
 	if decision.RouteReason != routeReasonDelegationConcurrencyTooLow ||
@@ -77,9 +77,9 @@ func TestDecideExecutionRouteAllowsConfiguredParallelDelegation(t *testing.T) {
 				{ID: "service-b", Objective: "Inspect service B.", IndependentlyUseful: true},
 			},
 		},
-		DelegationAvailable:     true,
-		DelegationToolReady:     true,
-		DelegationMaxConcurrent: 2,
+		DelegationAvailable:   true,
+		DelegationToolReady:   true,
+		DelegationMaxChildren: 2,
 	})
 
 	if decision.RouteReason != routeReasonParentDynamicDelegation || decision.DowngradeReason != "" {
@@ -223,7 +223,7 @@ func TestApplyExecutionRouteMarksRiskButNeverCreatesWorkflow(t *testing.T) {
 }
 
 func TestApplyExecutionRouteHidesDelegationWhenConcurrencyIsOne(t *testing.T) {
-	svc := &Service{delegationEnabled: true, delegationMaxConcurrent: 1}
+	svc := &Service{delegationEnabled: true, delegationMaxChildren: 1}
 	prepared := &preparation{
 		ctx:              context.Background(),
 		request:          Request{RunID: "serialized-route", Question: "Inspect two services."},

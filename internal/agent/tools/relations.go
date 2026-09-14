@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/dekwanlabs/nasuta/internal/ontology"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 // TraceRelationsResult is the shared typed entry point for the MCP tool and
@@ -35,5 +36,6 @@ func (srv *Service) TraceRelationsResult(ctx context.Context, query ontology.Rel
 	if query.MaxFanout > 100 {
 		query.MaxFanout = 100
 	}
+	query.Scope = tool.EntityScopeFrom(ctx)
 	return srv.ontology.QueryRelations(ctx, query)
 }

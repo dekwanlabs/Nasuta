@@ -18,7 +18,6 @@ const (
 	toolAdmissionAllow            toolAdmissionAction = "allow"
 	toolAdmissionNarrow           toolAdmissionAction = "narrow"
 	toolAdmissionAlreadyAvailable toolAdmissionAction = "already_available"
-	toolAdmissionDenyBudget       toolAdmissionAction = "deny_budget"
 )
 
 type toolAdmissionInput struct {
@@ -92,8 +91,10 @@ func admitToolCallDecision(
 			}
 		}
 	}
+	// The tool always runs; an oversized result is truncated to the remaining
+	// budget after execution instead of being refused up front.
 	return toolAdmissionDecision{
-		Action: toolAdmissionDenyBudget, Reason: "declared_result_exceeds_budget",
+		Action: toolAdmissionAllow, Reason: "over_budget_will_truncate",
 		Scope: scope, Arguments: args, RemainingTokens: remaining,
 		DeclaredTokens: declared,
 	}
@@ -137,7 +138,10 @@ func (agent *Agent) admitToolCall(state *compiledLoop, call llm.ToolCall) (llm.T
 }
 
 func declaredToolTokens(candidate tool.Tool, args tool.Arguments) int {
-	const conservativeDefault = 4096
+	// Read tools without an Admission spec declare a fixed result size. It feeds
+	// the narrow decision and the trace only; admission now truncates oversized
+	// results after execution rather than refusing them up front.
+	const conservativeDefault = 1024
 	if candidate.Admission == nil || candidate.Admission.MaxResultTokens == nil {
 		return conservativeDefault
 	}
@@ -192,16 +196,6 @@ func toolAdmissionExecution(decision toolAdmissionDecision) ToolExecution {
 		"remainingToolTokens": decision.RemainingTokens,
 		"declaredMaxTokens":   decision.DeclaredTokens,
 	}
-	// A budget refusal never reaches the retrieval layer, so its empty evidence
-	// list means "not searched", not "searched and found nothing". Without this
-	// flag the two are indistinguishable and every refused hop gets reported as
-	// unverified evidence.
-	if decision.Action == toolAdmissionDenyBudget {
-		payload["retrieved"] = false
-		payload["retryable"] = true
-		payload["hint"] = "refused before retrieval on token budget; " +
-			"narrow the query or request fewer items, or rely on evidence already gathered"
-	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		encoded = []byte(fmt.Sprintf(`{"action":%q,"reason":%q}`, decision.Action, decision.Reason))
@@ -214,4 +208,32 @@ func consumeToolTokens(state *compiledLoop, content string) {
 		return
 	}
 	state.remainingToolTokens = max(0, state.remainingToolTokens-tooloutput.EstimateTokens(content))
+}
+
+// toolBudgetExhaustedPlaceholder is emitted in place of a tool result when the
+// remaining tool-token budget cannot retain any content. It keeps the message
+// non-empty so the model still sees the tool ran and its output was dropped.
+const toolBudgetExhaustedPlaceholder = "[tool result omitted: tool-token budget exhausted]"
+
+// boundToolResultToBudget truncates the model-facing copy of a tool result to
+// the remaining tool-token budget. The authoritative content is untouched and
+// stays available to the trace and evidence paths; only what the model sees is
+// reduced.
+func boundToolResultToBudget(state *compiledLoop, content string) string {
+	if state.remainingToolTokens < 0 ||
+		tooloutput.EstimateTokens(content) <= state.remainingToolTokens {
+		return content
+	}
+	if state.remainingToolTokens <= 0 {
+		return toolBudgetExhaustedPlaceholder
+	}
+	compressed := tooloutput.Compress(tooloutput.Request{
+		Question:  state.input.Question,
+		Content:   content,
+		MaxTokens: state.remainingToolTokens,
+	}).Content
+	if compressed == "" {
+		return toolBudgetExhaustedPlaceholder
+	}
+	return compressed
 }

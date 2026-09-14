@@ -1040,12 +1040,10 @@ func TestSemanticVerifierRespectsParentRootBudget(t *testing.T) {
 	}
 }
 
-func TestExecutorBoundsConcurrencyPreservesOrderAndNarrowsChild(t *testing.T) {
+func TestExecutorPreservesOrderAndNarrowsChild(t *testing.T) {
 	var (
-		mu        sync.Mutex
-		active    int
-		maxActive int
-		requests  []agentapi.RunRequest
+		mu       sync.Mutex
+		requests []agentapi.RunRequest
 	)
 	runtime := executorRuntimeFunc(func(
 		ctx context.Context,
@@ -1053,10 +1051,6 @@ func TestExecutorBoundsConcurrencyPreservesOrderAndNarrowsChild(t *testing.T) {
 	) (agentapi.RunResult, error) {
 		objective := executorObjective(t, request)
 		mu.Lock()
-		active++
-		if active > maxActive {
-			maxActive = active
-		}
 		requests = append(requests, request)
 		mu.Unlock()
 		if objective == "first" {
@@ -1064,15 +1058,10 @@ func TestExecutorBoundsConcurrencyPreservesOrderAndNarrowsChild(t *testing.T) {
 		} else {
 			time.Sleep(5 * time.Millisecond)
 		}
-		mu.Lock()
-		active--
-		mu.Unlock()
 		return successfulExecutorResult(request.RunID, objective), nil
 	})
 	persistence := newExecutorPersistence()
-	executor := newExecutorFixture(t, runtime, persistence, func(policy *agentapi.DelegationPolicy) {
-		policy.MaxConcurrent = 2
-	})
+	executor := newExecutorFixture(t, runtime, persistence, nil)
 	result, _, err := executor.Execute(
 		executorContext(t, context.Background(), 0),
 		[]agentapi.DelegationTask{
@@ -1092,9 +1081,6 @@ func TestExecutorBoundsConcurrencyPreservesOrderAndNarrowsChild(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if maxActive != 2 {
-		t.Fatalf("max active children = %d, want 2", maxActive)
-	}
 	for _, request := range requests {
 		if len(request.Permissions.Scopes) != 1 ||
 			request.Permissions.Scopes[0] != "knowledge.read" {
@@ -1362,7 +1348,7 @@ func TestExecutorChildTimeoutDoesNotCancelSibling(t *testing.T) {
 		newExecutorPersistence(),
 		func(policy *agentapi.DelegationPolicy) {
 			policy.ChildTimeout = 40 * time.Millisecond
-			policy.MaxConcurrent = 2
+			policy.MaxChildren = 2
 		},
 	)
 	result, _, err := executor.Execute(
@@ -1383,80 +1369,6 @@ func TestExecutorChildTimeoutDoesNotCancelSibling(t *testing.T) {
 	if result.Results[1].Status != agentapi.DelegationCompleted ||
 		result.Results[1].Summary != "sibling" {
 		t.Fatalf("sibling result = %+v", result.Results[1])
-	}
-}
-
-func TestExecutorParentCancellationStopsQueuedChildren(t *testing.T) {
-	started := make(chan struct{})
-	var (
-		mu           sync.Mutex
-		runtimeCalls int
-	)
-	persistence := newExecutorPersistence()
-	executor := newExecutorFixture(
-		t,
-		executorRuntimeFunc(func(
-			ctx context.Context,
-			_ agentapi.RunRequest,
-		) (agentapi.RunResult, error) {
-			mu.Lock()
-			runtimeCalls++
-			mu.Unlock()
-			select {
-			case <-started:
-			default:
-				close(started)
-			}
-			<-ctx.Done()
-			return agentapi.RunResult{}, ctx.Err()
-		}),
-		persistence,
-		func(policy *agentapi.DelegationPolicy) {
-			policy.MaxConcurrent = 1
-		},
-	)
-	ctx, cancel := context.WithCancel(
-		executorContext(t, context.Background(), 0),
-	)
-	type executionResult struct {
-		result agentapi.DelegationBatchResult
-		err    error
-	}
-	done := make(chan executionResult, 1)
-	go func() {
-		result, _, err := executor.Execute(ctx, []agentapi.DelegationTask{
-			{Capability: "knowledge.code.inspect", Objective: "first"},
-			{Capability: "knowledge.code.inspect", Objective: "queued-1"},
-			{Capability: "knowledge.code.inspect", Objective: "queued-2"},
-		})
-		done <- executionResult{result: result, err: err}
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("first child did not start")
-	}
-	cancel()
-	execution := <-done
-	if execution.err != nil {
-		t.Fatal(execution.err)
-	}
-	mu.Lock()
-	if runtimeCalls != 1 {
-		t.Fatalf("runtime calls = %d, want 1", runtimeCalls)
-	}
-	mu.Unlock()
-	persistence.mu.Lock()
-	if len(persistence.linked) != 1 {
-		t.Fatalf("linked children = %v, want only the active child", persistence.linked)
-	}
-	persistence.mu.Unlock()
-	for index, report := range execution.result.Results {
-		if report.Status != agentapi.DelegationCancelled ||
-			report.Error == nil ||
-			report.Error.Code != ErrorParentCancelled {
-			t.Fatalf("result %d = %+v", index, report)
-		}
 	}
 }
 
@@ -1887,7 +1799,6 @@ func TestFlowChildBudgetMatchesOrdinaryDelegation(t *testing.T) {
 		MaxChildTurns:        4,
 		MaxChildToolCalls:    16,
 		MaxChildOutputTokens: 16000,
-		MaxReportTokens:      4000,
 		ChildTimeout:         200 * time.Millisecond,
 	}}
 	parent := ParentContext{
@@ -1901,7 +1812,7 @@ func TestFlowChildBudgetMatchesOrdinaryDelegation(t *testing.T) {
 	if budget.turns != executor.policy.MaxChildTurns ||
 		budget.toolCalls != executor.policy.MaxChildToolCalls ||
 		budget.outputTokens != executor.policy.MaxChildOutputTokens ||
-		budget.reportTokens != executor.policy.MaxReportTokens {
+		budget.reportTokens != executor.policy.MaxChildOutputTokens {
 		t.Fatalf("flow child budget was narrowed unexpectedly = %#v", budget)
 	}
 	limits, err := executor.childLimits(parent, agentapi.Definition{
@@ -2348,10 +2259,10 @@ func newExecutorFixture(
 		t.Fatal(err)
 	}
 	policy := agentapi.DelegationPolicy{
-		MaxDepth: 1, MaxChildren: 4, MaxConcurrent: 2,
+		MaxDepth: 1, MaxChildren: 4,
 		MaxChildTurns: 3, MaxChildToolCalls: 4,
-		MaxChildOutputTokens: 128, MaxReportTokens: 512, MaxTotalTokens: 4096,
-		MaxTotalCostMicros: 0, ParentAnswerReserve: 256,
+		MaxChildOutputTokens: 512,
+		MaxTotalCostMicros:   0, ParentAnswerReserve: 256,
 		ChildTimeout: 200 * time.Millisecond,
 	}
 	if mutatePolicy != nil {
@@ -3360,11 +3271,10 @@ func TestExecutorDispatchWithAtomicQueueSettlesAndPollsReport(t *testing.T) {
 
 func TestNormalizePolicyDefaultsBatchTimeoutToChildTimeout(t *testing.T) {
 	policy := agentapi.DelegationPolicy{
-		MaxDepth: 1, MaxChildren: 2, MaxConcurrent: 1,
+		MaxDepth: 1, MaxChildren: 2,
 		MaxChildTurns: 2, MaxChildToolCalls: 2,
 		MaxChildOutputTokens: 128,
-		MaxReportTokens:      512, MaxTotalTokens: 1024,
-		ParentAnswerReserve: 64, ChildTimeout: 3 * time.Second,
+		ParentAnswerReserve:  64, ChildTimeout: 3 * time.Second,
 	}
 	got, err := normalizePolicy(policy)
 	if err != nil {
@@ -3377,11 +3287,10 @@ func TestNormalizePolicyDefaultsBatchTimeoutToChildTimeout(t *testing.T) {
 
 func TestNormalizePolicyRejectsChildTimeoutLongerThanBatch(t *testing.T) {
 	policy := agentapi.DelegationPolicy{
-		MaxDepth: 1, MaxChildren: 2, MaxConcurrent: 1,
+		MaxDepth: 1, MaxChildren: 2,
 		MaxChildTurns: 2, MaxChildToolCalls: 2,
 		MaxChildOutputTokens: 128,
-		MaxReportTokens:      512, MaxTotalTokens: 1024,
-		ParentAnswerReserve: 64, BatchTimeout: time.Second,
+		ParentAnswerReserve:  64, BatchTimeout: time.Second,
 		ChildTimeout: 2 * time.Second,
 	}
 	if _, err := normalizePolicy(policy); err == nil || !strings.Contains(err.Error(), "policy limits") {

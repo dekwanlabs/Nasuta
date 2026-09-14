@@ -19,6 +19,10 @@ func (backend *Backend) EntitiesByID(ctx context.Context, query ontology.EntityQ
 	return backend.store.OntologyEntitiesByID(ctx, query)
 }
 
+func (backend *Backend) EntitiesByNamePattern(ctx context.Context, query ontology.NamePatternQuery) ([]ontology.EntityRef, error) {
+	return backend.store.OntologyEntitiesByNamePattern(ctx, query)
+}
+
 func (backend *Backend) Neighbors(ctx context.Context, query ontology.NeighborQuery) ([]ontology.Fact, bool, error) {
 	return backend.store.OntologyNeighbors(ctx, query)
 }

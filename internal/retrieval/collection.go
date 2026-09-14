@@ -253,7 +253,7 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 			trustTier:     chunks[0].trust,
 		})
 	}
-	log.InfofCtx(ctx, "[qa] runbooks selected (merged %d documents from %d hits):", len(titles), len(runbookHits))
+/*	log.InfofCtx(ctx, "[qa] runbooks selected (merged %d documents from %d hits):", len(titles), len(runbookHits))
 	for i, docID := range docOrder {
 		cs := byDocID[docID]
 		if len(cs) == 0 {
@@ -267,8 +267,9 @@ func (retrieve *Retriever) collectRunbooks(ctx context.Context, runbookHits []do
 		}
 		log.InfofCtx(ctx, "  [%d] %s (%s) trust=%d score=%.3f semantic=%.3f chunks=%d",
 			i, cs[0].title, docID, cs[0].trust, best, best, len(cs))
-	}
-	log.InfofCtx(ctx, "[qa] runbooks matched: %d %v", len(titles), titles)
+	}*/
+	log.InfofCtx(ctx, "[qa] runbooks matched: %d %v", len(titles), docOrder)
+	//log.InfofCtx(ctx, "[qa] runbooks matched: %d %v", len(titles), titles)
 }
 
 // collectDeps collects unique dependency edges across anchored services.

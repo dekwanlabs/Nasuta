@@ -1180,7 +1180,7 @@ func TestMapResultRecoversTruncatedInvestigationReportPreservingEvidence(t *test
 		},
 		{
 			SourceKind: "dependency", Target: "checkout",
-			Sections: []string{"outbound:checkout->billing:http"},
+			Sections: []string{"outbound:checkout->billing:http|BillingClient.charge"},
 		},
 	}
 	result, outcome := mapResult(

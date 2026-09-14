@@ -410,7 +410,7 @@ func (agent *Agent) executeToolTurn(state *compiledLoop, calls []llm.ToolCall) t
 			return outcome
 		}
 		callOutcome, callNotices, err := agent.applyToolExecution(
-			state, executionCall, execution, notices,
+			state, executionCall, execution,
 		)
 		if err != nil {
 			state.result.Err = err
@@ -467,8 +467,7 @@ func (agent *Agent) runToolCall(
 	}
 
 	executionCall, admission := agent.admitToolCall(state, call)
-	if admission.Action == toolAdmissionAlreadyAvailable ||
-		admission.Action == toolAdmissionDenyBudget {
+	if admission.Action == toolAdmissionAlreadyAvailable {
 		return executionCall, toolAdmissionExecution(admission), nil
 	}
 	if executionCall.Function.Name == string(delegation.DelegateToolID) {
@@ -509,7 +508,6 @@ func (agent *Agent) applyToolExecution(
 	state *compiledLoop,
 	executionCall llm.ToolCall,
 	execution ToolExecution,
-	priorNotices []string,
 ) (toolTurnOutcome, []string, error) {
 	if state.input.OutputMode == agentapi.RunOutputEvidenceWorker &&
 		!execution.Failed && execution.Evidence {
@@ -517,15 +515,7 @@ func (agent *Agent) applyToolExecution(
 			&state.result.EvidenceObservations, execution, executionCall.Function.Name,
 		)
 	}
-	execution = agent.prepareDelivery(
-		state.runID,
-		state.messages,
-		priorNotices,
-		state.tools,
-		executionCall,
-		state.answerContract,
-		execution,
-	)
+	execution = agent.prepareDelivery(executionCall, execution)
 	if execution.Failed {
 		state.result.Evidence.ToolFailureCount++
 	} else if execution.Evidence {
@@ -550,12 +540,16 @@ func (agent *Agent) applyToolExecution(
 	if err := agent.recordToolResult(state, executionCall, execution); err != nil {
 		return toolTurnOutcome{}, nil, err
 	}
-	consumeToolTokens(state, execution.PromptContent)
-	message := toolMessage(
+	// Bound the model-facing copy to the remaining tool budget instead of
+	// refusing the result; the session transcript and trace keep the full output.
+	modelContent := boundToolResultToBudget(state, execution.PromptContent)
+	consumeToolTokens(state, modelContent)
+	state.messages = append(state.messages, toolMessage(
+		executionCall.ID, executionCall.Function.Name, modelContent,
+	))
+	state.result.SessionMessages = append(state.result.SessionMessages, toolMessage(
 		executionCall.ID, executionCall.Function.Name, execution.PromptContent,
-	)
-	state.messages = append(state.messages, message)
-	state.result.SessionMessages = append(state.result.SessionMessages, message)
+	))
 
 	outcome := toolTurnOutcome{producedEvidence: execution.Evidence}
 	if isWebEvidenceTool(executionCall.Function.Name) {

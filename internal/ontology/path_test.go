@@ -61,3 +61,33 @@ func TestFindBoundedPathsPreservesParallelFactsAtTheSameDepth(t *testing.T) {
 		t.Fatalf("parallel facts = %#v", paths)
 	}
 }
+
+func TestFindBoundedPathsScopePrunesCrossBusinessFanout(t *testing.T) {
+	repository := pathRepository{facts: []Fact{
+		{ID: "ab", SubjectID: "a", ObjectID: "b", Predicate: PredicateDependsOn},
+		{ID: "ah", SubjectID: "a", ObjectID: "hub", Predicate: PredicateDependsOn},
+		{ID: "bc", SubjectID: "b", ObjectID: "c", Predicate: PredicateDependsOn},
+		{ID: "ho", SubjectID: "hub", ObjectID: "other", Predicate: PredicateDependsOn},
+	}}
+	paths, _, err := FindBoundedPaths(context.Background(), repository, PathQuery{
+		StartID: "a", Direction: DirectionOutgoing, MaxDepth: 3, MaxNodes: 10, MaxFanout: 10, Generation: "test",
+		Scope: map[string]struct{}{"a": {}, "b": {}, "c": {}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, path := range paths {
+		for _, fact := range path.Facts {
+			seen[fact.ID] = true
+		}
+	}
+	// Direct edges to both the in-scope node (b) and the cross-business hub are
+	// kept; the in-scope node is expanded (bc), the hub's fan-out is pruned (ho).
+	if !seen["ab"] || !seen["ah"] || !seen["bc"] {
+		t.Fatalf("missing expected facts: %v", seen)
+	}
+	if seen["ho"] {
+		t.Fatalf("cross-business fan-out was followed: %v", seen)
+	}
+}

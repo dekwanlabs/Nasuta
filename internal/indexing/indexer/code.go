@@ -74,6 +74,8 @@ const (
 )
 
 // noiseDirSegments are path segments whose files are test or fixture noise.
+// Project-specific framework/tooling dirs (.evidence, .claude, openspec, …)
+// are configured at runtime via PlatformSettings.IndexExcludeDirs instead.
 var noiseDirSegments = []string{
 	"/src/test/", "/test/", "/tests/", "/__tests__/", "/testdata/",
 	"/fixtures/", "/fixture/", "/mock/", "/mocks/", "/e2e/", "/snapshots/",
@@ -99,7 +101,8 @@ var noiseExts = map[string]bool{
 }
 
 // isNoiseFile reports whether a repo-relative path should not be embedded.
-func isNoiseFile(rel string) bool {
+// excludeDirs holds runtime-configured path segments from platform settings.
+func isNoiseFile(rel string, excludeDirs []string) bool {
 	if strings.HasPrefix(filepath.Base(rel), platform.WorkspaceMetadataDir) {
 		return true
 	}
@@ -109,6 +112,15 @@ func isNoiseFile(rel string) bool {
 	p := "/" + strings.ToLower(toPosix(rel)) + "/"
 	for _, seg := range noiseDirSegments {
 		if strings.Contains(p, seg) {
+			return true
+		}
+	}
+	for _, dir := range excludeDirs {
+		dir = strings.Trim(strings.ToLower(strings.TrimSpace(dir)), "/")
+		if dir == "" {
+			continue
+		}
+		if strings.Contains(p, "/"+dir+"/") {
 			return true
 		}
 	}
@@ -122,15 +134,15 @@ func isNoiseFile(rel string) bool {
 }
 
 // ScanCodeChunks walks the scan dirs and splits eligible files for semantic
-// embedding.
-func ScanCodeChunks(root string, dirs []string) []domain.CodeChunk {
+// embedding. excludeDirs are runtime-configured path segments to skip.
+func ScanCodeChunks(root string, dirs []string, excludeDirs []string) []domain.CodeChunk {
 	files := walkFiles(root, dirs, IsIndexableFile)
 	methodsByFile := loadCodegraphRanges(root)
 
 	var chunks []domain.CodeChunk
 	for _, file := range files {
 		rel := relativeTo(root, file)
-		if isNoiseFile(rel) {
+		if isNoiseFile(rel, excludeDirs) {
 			continue
 		}
 		size, err := statSize(file)

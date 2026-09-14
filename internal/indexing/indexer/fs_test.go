@@ -58,7 +58,7 @@ func TestWalkFilesSkipsAgentMetadataDirectories(t *testing.T) {
 	if err := os.WriteFile(source, []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{".claude", ".codex"} {
+	for _, name := range []string{".claude", ".codex", ".evidence", ".husky"} {
 		dir := filepath.Join(repoDir, name)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)

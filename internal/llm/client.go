@@ -16,10 +16,12 @@ import (
 	"github.com/go-resty/resty/v2"
 )
 
-// Message is an OpenAI-compatible chat message.
+// Message is an OpenAI-compatible chat message. Content is always serialized
+// (no omitempty): OpenAI-compatible backends such as DeepSeek reject a tool
+// message whose content field is absent.
 type Message struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
+	Content    string     `json:"content"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	Name       string     `json:"name,omitempty"`

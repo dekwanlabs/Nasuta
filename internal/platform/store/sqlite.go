@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const structureSchemaVersion = 4
+const structureSchemaVersion = 5
 
 const schema = `
 CREATE TABLE repositories (
@@ -75,6 +75,7 @@ CREATE TABLE dependencies (
   target_kind        TEXT NOT NULL CHECK (target_kind IN ('service', 'external')),
   target_service_key TEXT REFERENCES services(service_key) ON DELETE CASCADE,
   external_target    TEXT,
+  target_expression  TEXT,
   protocol           TEXT NOT NULL,
   confidence         REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   CHECK (
@@ -158,7 +159,7 @@ CREATE TABLE ontology_fact_evidence (
 
 CREATE INDEX idx_ontology_evidence_path ON ontology_fact_evidence(file_path, line, fact_id);
 
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 `
 
 // SQLite stores the canonical structured workspace snapshot.
@@ -409,8 +410,9 @@ service_key,method,path,handler,handler_method,file_path,line,source_kind,confid
 			external = dependency.ExternalTarget
 		}
 		result, err := tx.ExecContext(ctx, `INSERT INTO dependencies(
-caller_service_key,target_kind,target_service_key,external_target,protocol,confidence) VALUES(?,?,?,?,?,?)`,
+caller_service_key,target_kind,target_service_key,external_target,target_expression,protocol,confidence) VALUES(?,?,?,?,?,?,?)`,
 			dependency.CallerServiceKey, string(dependency.TargetKind), targetKey, external,
+			dependency.TargetExpression,
 			string(dependency.Type), dependency.Confidence)
 		if err != nil {
 			return fmt.Errorf("insert dependency %q -> %q: %w", dependency.From, dependency.To, err)
@@ -614,7 +616,7 @@ func (store *SQLite) queryDependencies(ctx context.Context, selectionJoin, where
 	GROUP BY d.dependency_id ORDER BY d.dependency_id LIMIT ?
 )
 SELECT d.dependency_id,d.caller_service_key,caller.service_name,
-d.target_kind,COALESCE(d.target_service_key,''),COALESCE(target.service_name,''),COALESCE(d.external_target,''),
+d.target_kind,COALESCE(d.target_service_key,''),COALESCE(target.service_name,''),COALESCE(d.external_target,''),COALESCE(d.target_expression,''),
 d.protocol,d.confidence,e.file_path,e.line,e.symbol,e.source_kind
 FROM selected
 JOIN dependencies d ON d.dependency_id=selected.dependency_id
@@ -766,6 +768,13 @@ FROM endpoints e JOIN services s ON s.service_key=e.service_key`+where+` ORDER B
 	return &EndpointPage{Total: total, List: list}, rows.Err()
 }
 
+func nullIfEmpty(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
 func escapeLikeKeyword(keyword string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(keyword)
 }
@@ -775,7 +784,7 @@ func (store *SQLite) Edges(ctx context.Context) ([]domain.DependencyEdge, error)
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	rows, err := store.db.QueryContext(ctx, `SELECT d.dependency_id,d.caller_service_key,caller.service_name,
-d.target_kind,COALESCE(d.target_service_key,''),COALESCE(target.service_name,''),COALESCE(d.external_target,''),
+d.target_kind,COALESCE(d.target_service_key,''),COALESCE(target.service_name,''),COALESCE(d.external_target,''),COALESCE(d.target_expression,''),
 d.protocol,d.confidence,e.file_path,e.line,e.symbol,e.source_kind
 FROM dependencies d
 JOIN services caller ON caller.service_key=d.caller_service_key
@@ -797,9 +806,10 @@ func scanDependencyRows(rows *sql.Rows) ([]domain.DependencyEdge, error) {
 		var edge domain.DependencyEdge
 		var targetKind, protocol, targetName string
 		var evidencePath, symbol, source sql.NullString
+		var targetExpression sql.NullString
 		var line sql.NullInt64
 		if err := rows.Scan(&id, &edge.CallerServiceKey, &edge.From, &targetKind, &edge.TargetServiceKey,
-			&targetName, &edge.ExternalTarget, &protocol, &edge.Confidence,
+			&targetName, &edge.ExternalTarget, &targetExpression, &protocol, &edge.Confidence,
 			&evidencePath, &line, &symbol, &source); err != nil {
 			return nil, err
 		}
@@ -807,6 +817,7 @@ func scanDependencyRows(rows *sql.Rows) ([]domain.DependencyEdge, error) {
 		if !ok {
 			edge.TargetKind = domain.DependencyTargetKind(targetKind)
 			edge.Type = domain.EdgeType(protocol)
+			edge.TargetExpression = targetExpression.String
 			if edge.TargetKind == domain.DependencyTargetService {
 				edge.To = targetName
 			} else {

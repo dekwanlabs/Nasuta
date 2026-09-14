@@ -217,21 +217,31 @@ func (rs *Store) claimWorkItem(ctx context.Context, owner string, now time.Time,
 }
 
 func claimWorkItemTx(ctx context.Context, tx *sql.Tx, owner string, now time.Time, ttl time.Duration, workID, kind string) (WorkItem, error) {
+	// Pick the winning row with a narrow SELECT so the ORDER BY filesort only
+	// buffers sort keys + work_id, not the wide payload_json/last_error blobs —
+	// a wide filesort overflows sort_buffer_size (MySQL error 1038) once the
+	// ready/running backlog grows, and the poll then fails every second. The
+	// FOR UPDATE lock on the picked row keeps the follow-up fetch safe.
+	claimQuery := `SELECT work_id FROM agent_work_items WHERE ((state=? AND available_at<=?) OR (state=? AND lease_expires_at IS NOT NULL AND lease_expires_at<=?))`
+	claimArgs := []any{WorkReady, store.DatabaseTime(now.Format(time.RFC3339Nano)), WorkRunning, store.DatabaseTime(now.Format(time.RFC3339Nano))}
+	if workID != "" {
+		claimQuery += ` AND work_id=?`
+		claimArgs = append(claimArgs, workID)
+	}
+	if kind != "" {
+		claimQuery += ` AND kind=?`
+		claimArgs = append(claimArgs, kind)
+	}
+	claimQuery += ` ORDER BY available_at,created_at LIMIT 1 FOR UPDATE`
+	var claimedID string
+	if err := tx.QueryRowContext(ctx, claimQuery, claimArgs...).Scan(&claimedID); err != nil {
+		return WorkItem{}, err
+	}
+
 	var item WorkItem
 	var payload []byte
 	var expires, available sql.NullTime
-	query := `SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE ((state=? AND available_at<=?) OR (state=? AND lease_expires_at IS NOT NULL AND lease_expires_at<=?))`
-	args := []any{WorkReady, store.DatabaseTime(now.Format(time.RFC3339Nano)), WorkRunning, store.DatabaseTime(now.Format(time.RFC3339Nano))}
-	if workID != "" {
-		query += ` AND work_id=?`
-		args = append(args, workID)
-	}
-	if kind != "" {
-		query += ` AND kind=?`
-		args = append(args, kind)
-	}
-	query += ` ORDER BY available_at,created_at LIMIT 1 FOR UPDATE`
-	err := tx.QueryRowContext(ctx, query, args...).Scan(&item.WorkID, &item.RunID, &item.ParentRunID, &item.DelegationID, &item.TaskIndex, &item.AttemptNo, &item.Kind, &payload, &item.State, &item.LeaseOwner, &item.LeaseFence, &expires, &available, &item.AttemptCount, &item.LastError)
+	err := tx.QueryRowContext(ctx, `SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE work_id=?`, claimedID).Scan(&item.WorkID, &item.RunID, &item.ParentRunID, &item.DelegationID, &item.TaskIndex, &item.AttemptNo, &item.Kind, &payload, &item.State, &item.LeaseOwner, &item.LeaseFence, &expires, &available, &item.AttemptCount, &item.LastError)
 	if err != nil {
 		return WorkItem{}, err
 	}

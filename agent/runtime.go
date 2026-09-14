@@ -267,8 +267,11 @@ type RunLimits struct {
 	// MaxOutputTokens narrows the model output ceiling for every provider call.
 	// Zero keeps the Definition model ceiling. It is not a cumulative budget.
 	MaxOutputTokens int64 `json:"max_output_tokens,omitempty"`
-	MaxTotalTokens  int64 `json:"max_total_tokens,omitempty"`
-	MaxCostMicros   int64 `json:"max_cost_micros,omitempty"`
+	// MaxOutputReserve overrides the context reservation for the final output.
+	// Zero keeps the execution default derived from the model output ceiling.
+	MaxOutputReserve int64 `json:"max_output_reserve,omitempty"`
+	MaxTotalTokens   int64 `json:"max_total_tokens,omitempty"`
+	MaxCostMicros    int64 `json:"max_cost_micros,omitempty"`
 	// ParentAnswerReserve protects a final user-facing answer from child and
 	// reasoning calls. It is a root-only token reserve and is not cumulative
 	// output quota for a child Run.

@@ -15,6 +15,10 @@ type RelationQuery struct {
 	MaxDepth    int
 	MaxNodes    int
 	MaxFanout   int
+	// Scope holds the business tokens of the current investigation. When set,
+	// traversal only expands nodes whose name matches a token, pruning the
+	// cross-business fan-out. Empty means the traversal is unscoped.
+	Scope []string
 }
 
 type RelationFact struct {
@@ -42,6 +46,9 @@ type DependencyQuery struct {
 	MaxDepth  int
 	MaxNodes  int
 	MaxFanout int
+	// Scope holds the business tokens of the current investigation, applied to
+	// traversal exactly like RelationQuery.Scope.
+	Scope []string
 }
 
 type DependencyResult struct {
@@ -94,15 +101,37 @@ func (service *Service) queryResolvedRelations(ctx context.Context, resolved Res
 	}
 	root := resolved.Entities[0]
 	result.Root = &root
+	scope, err := service.resolveScope(ctx, resolved.Generation, query.Scope)
+	if err != nil {
+		return RelationResult{}, err
+	}
 	paths, truncated, err := FindBoundedPaths(ctx, service.repository, PathQuery{
 		StartID: root.ID, Predicates: query.Predicates, Direction: query.Direction,
 		MaxDepth: query.MaxDepth, MaxNodes: query.MaxNodes, MaxFanout: query.MaxFanout, Generation: resolved.Generation,
+		Scope: scope,
 	})
 	if err != nil {
 		return RelationResult{}, err
 	}
 	result.Truncated = truncated
 	return service.hydrateResult(ctx, resolved.Generation, result, paths)
+}
+
+// resolveScope maps business tokens to the set of entity IDs whose name matches
+// any token. An empty token set returns nil so traversal stays unscoped.
+func (service *Service) resolveScope(ctx context.Context, generation string, tokens []string) (map[string]struct{}, error) {
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+	entities, err := service.repository.EntitiesByNamePattern(ctx, NamePatternQuery{Tokens: tokens, Generation: generation})
+	if err != nil {
+		return nil, err
+	}
+	scope := make(map[string]struct{}, len(entities))
+	for _, entity := range entities {
+		scope[entity.ID] = struct{}{}
+	}
+	return scope, nil
 }
 
 func (service *Service) TraceDependencies(ctx context.Context, query DependencyQuery) (DependencyResult, error) {
@@ -139,6 +168,7 @@ func (service *Service) traceDependencies(ctx context.Context, query DependencyQ
 			Entity: query.Service, EntityClass: ClassService,
 			Predicates: []Predicate{PredicateDependsOn}, Direction: direction,
 			MaxDepth: query.MaxDepth, MaxNodes: query.MaxNodes, MaxFanout: query.MaxFanout,
+			Scope: query.Scope,
 		})
 	}
 	if query.Direction != DirectionOutgoing {

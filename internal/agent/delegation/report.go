@@ -169,6 +169,11 @@ func salvageCollectedChildReport(
 			if err := validateFlowIR(flow); err != nil {
 				report.Uncertainties = appendUniqueStrings(report.Uncertainties, invalidFlowUncertainty)
 			} else {
+				// Origin is server-owned, not part of the model-facing schema:
+				// this path only ever runs on a report rebuilt from leftover
+				// evidence, so the flow is a stand-in for a missing one and the
+				// merge must not union it into a flow the investigator authored.
+				flow.Origin = agentapi.FlowOriginEvidenceFallback
 				report.Flow = flow
 				report.OpenHops = appendUniqueStrings(nil, flow.OpenHops...)
 			}
@@ -380,6 +385,9 @@ func truncateReportUsage(report *agentapi.DelegationReport, maxBytes int64) bool
 	return reportFits(*report, maxBytes)
 }
 
+// minimumBoundedReportTokens is the smallest report budget the bounding pass
+// can honor: the token estimate of a minimal, identity-only report. Tests use
+// it to exercise strict truncation at the floor.
 func minimumBoundedReportTokens() int64 {
 	report := agentapi.DelegationReport{
 		RunID:         childRunIDPrefix + strings.Repeat("0", stableIDHashLength),

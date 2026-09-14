@@ -49,6 +49,7 @@ func scanCode(
 	deps = append(deps, scanAndroidDependencies(root, dirs)...)
 	deps = append(deps, scanIOSDependencies(root, dirs)...)
 	deps = append(deps, scanJVMAndPythonDependencies(root, dirs)...)
+	deps = append(deps, scanWebSocketDependencies(root, dirs)...)
 	deps = append(deps, scanKafkaDependencies(root, dirs)...)
 
 	return CanonicalizeBundle(domain.IndexBundle{
@@ -272,9 +273,23 @@ func canonicalDependencies(records []domain.DependencyEdge, lookup serviceLookup
 			edge.TargetServiceKey = target.ServiceKey
 			edge.ExternalTarget = ""
 			edge.To = target.ServiceName
+		} else if fallback, ok := placeholderFallback(edge.TargetExpression); ok {
+			if target, found := lookup.resolve(fallback, "", ""); found {
+				edge.TargetKind = domain.DependencyTargetService
+				edge.TargetServiceKey = target.ServiceKey
+				edge.ExternalTarget = ""
+				edge.To = target.ServiceName
+			} else {
+				edge.TargetKind = domain.DependencyTargetExternal
+				edge.TargetServiceKey = ""
+				edge.ExternalTarget = strings.ToLower(edge.To)
+			}
 		} else {
 			edge.TargetKind = domain.DependencyTargetExternal
 			edge.TargetServiceKey = ""
+			if edge.TargetExpression == "" {
+				edge.TargetExpression = edge.To
+			}
 			edge.ExternalTarget = strings.ToLower(edge.To)
 		}
 		targetRef := edge.TargetServiceKey
@@ -434,4 +449,22 @@ func nonNil[T any](values []T) []T {
 		return []T{}
 	}
 	return values
+}
+
+// placeholderFallback returns the default value of a Spring-style placeholder
+// expression such as "${speech.transcribe.service.name:tts-proxy}". It is used
+// to classify config-backed service targets during indexing without resolving
+// environment-specific values; the full expression stays in TargetExpression
+// for tool-time resolution.
+func placeholderFallback(expression string) (string, bool) {
+	expression = strings.TrimSpace(expression)
+	if !strings.HasPrefix(expression, "${") || !strings.HasSuffix(expression, "}") {
+		return "", false
+	}
+	body := expression[2 : len(expression)-1]
+	key, fallback, hasFallback := strings.Cut(body, ":")
+	if !hasFallback || strings.TrimSpace(key) == "" || strings.TrimSpace(fallback) == "" {
+		return "", false
+	}
+	return strings.TrimSpace(fallback), true
 }

@@ -232,6 +232,9 @@ func ToolDefinitions(tools []tool.Tool) []llm.ToolDef {
 }
 
 func (agent *Agent) outputReserve() int {
+	if agent.cfg.OutputReserve > 0 {
+		return agent.cfg.OutputReserve
+	}
 	return max(agent.cfg.AnswerMaxTokens, agent.cfg.ConclusionMaxTokens)
 }
 

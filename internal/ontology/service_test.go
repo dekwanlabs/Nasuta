@@ -32,6 +32,10 @@ func (repository *retryRepository) EntitiesByID(_ context.Context, query EntityQ
 	return []EntityRef{{ID: "payments", Class: ClassService, Name: "payments"}}, nil
 }
 
+func (*retryRepository) EntitiesByNamePattern(context.Context, NamePatternQuery) ([]EntityRef, error) {
+	return nil, nil
+}
+
 func (repository *retryRepository) Neighbors(_ context.Context, query NeighborQuery) ([]Fact, bool, error) {
 	if query.Generation == "g1" {
 		return nil, false, ErrStaleSnapshot
@@ -89,6 +93,10 @@ func (*dependencyRetryRepository) EntitiesByID(_ context.Context, query EntityQu
 		entities = append(entities, EntityRef{ID: id, Class: ClassService, Name: id})
 	}
 	return entities, nil
+}
+
+func (*dependencyRetryRepository) EntitiesByNamePattern(context.Context, NamePatternQuery) ([]EntityRef, error) {
+	return nil, nil
 }
 
 func (*dependencyRetryRepository) Neighbors(_ context.Context, query NeighborQuery) ([]Fact, bool, error) {

@@ -35,7 +35,6 @@ type DelegationAdmission struct {
 	ParentRunID         string
 	DelegationID        string
 	MaxChildren         int
-	MaxTotalTokens      int64
 	MaxTotalCostMicros  int64
 	ParentAnswerReserve int64
 	Reservations        []DelegationReservation

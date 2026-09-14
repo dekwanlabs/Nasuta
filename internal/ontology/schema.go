@@ -36,7 +36,7 @@ var relationSchema = map[Predicate]relationDef{
 	PredicateDependsOn: {
 		SubjectClasses: classSet(ClassService),
 		ObjectClasses:  classSet(ClassService, ClassExternalSystem),
-		Qualifiers:     stringSet("protocol"),
+		Qualifiers:     stringSet("protocol", "target_expression"),
 	},
 	PredicateDocumentedBy: {
 		SubjectClasses: classSet(ClassService),

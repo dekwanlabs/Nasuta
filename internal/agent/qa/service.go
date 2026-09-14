@@ -23,33 +23,33 @@ type Service struct {
 	// helperLLM handles session maintenance and memory extraction outside Runs.
 	helperLLM *llm.LLMClient
 	// fastLLM handles cheap structured preparation and falls back to helperLLM.
-	fastLLM                 *llm.LLMClient
-	retriever               contextRetriever
-	starter                 RunStarter
-	scenarioTools           ScenarioToolSource
-	events                  EventSink
-	memory                  *memory.MemoryStore
-	sessions                *memory.SessionStore
-	history                 session.History
-	writeAvailable          atomic.Bool
-	cfg                     config.Config
-	routerConfidence        float64
-	routerMaxTokens         int
-	contextWindow           int
-	outputReserve           int
-	domainKnowledge         string
-	toolPruningEnabled      bool
-	delegationEnabled       bool
-	delegationMaxConcurrent int
-	delegationBudget        agentapi.RunLimits
-	answerReserve           time.Duration
-	definitions             definition.Resolver
-	agentRef                agentapi.DefinitionRef
-	definitionErr           error
-	runtimeErr              error
-	compactionMu            sync.RWMutex
-	compactionStatus        map[string]run.SessionStatusEvent
-	compactionStatuses      map[string]time.Time
+	fastLLM               *llm.LLMClient
+	retriever             contextRetriever
+	starter               RunStarter
+	scenarioTools         ScenarioToolSource
+	events                EventSink
+	memory                *memory.MemoryStore
+	sessions              *memory.SessionStore
+	history               session.History
+	writeAvailable        atomic.Bool
+	cfg                   config.Config
+	routerConfidence      float64
+	routerMaxTokens       int
+	contextWindow         int
+	outputReserve         int
+	domainKnowledge       string
+	toolPruningEnabled    bool
+	delegationEnabled     bool
+	delegationMaxChildren int
+	delegationBudget      agentapi.RunLimits
+	answerReserve         time.Duration
+	definitions           definition.Resolver
+	agentRef              agentapi.DefinitionRef
+	definitionErr         error
+	runtimeErr            error
+	compactionMu          sync.RWMutex
+	compactionStatus      map[string]run.SessionStatusEvent
+	compactionStatuses    map[string]time.Time
 }
 
 // New wires retrieval, agent, memory, and write tools together.
@@ -70,11 +70,10 @@ func New(d Deps) *Service {
 	svc := &Service{
 		retriever: ret, cfg: d.Cfg,
 		routerConfidence: routerConfidence, routerMaxTokens: routerMaxTokens,
-		toolPruningEnabled:      platformSettings.ToolPruningEnabled,
-		delegationEnabled:       platformSettings.DelegationEnabled,
-		delegationMaxConcurrent: platformSettings.DelegationMaxConcurrent,
+		toolPruningEnabled:    platformSettings.ToolPruningEnabled,
+		delegationEnabled:     platformSettings.DelegationEnabled,
+		delegationMaxChildren: platformSettings.DelegationMaxChildren,
 		delegationBudget: agentapi.RunLimits{
-			MaxTotalTokens:      platformSettings.DelegationMaxTotalTokens,
 			MaxCostMicros:       platformSettings.DelegationMaxTotalCostMicros,
 			ParentAnswerReserve: platformSettings.DelegationParentAnswerReserve,
 		},

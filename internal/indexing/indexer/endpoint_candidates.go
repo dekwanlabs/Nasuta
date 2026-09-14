@@ -86,6 +86,7 @@ func registeredEndpointAdapters() []endpointAdapter {
 	return []endpointAdapter{
 		javaSpringMVCAdapter,
 		javaJAXRSAdapter,
+		javaNettyWebSocketAdapter,
 		kotlinSpringMVCAdapter,
 		kotlinKtorAdapter,
 		kotlinJavalinAdapter,

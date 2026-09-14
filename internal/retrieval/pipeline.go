@@ -267,9 +267,15 @@ func (retrieve *Retriever) RetrievePlan(
 	if !evidencePlan.Valid() {
 		return nil, fmt.Errorf("retrieval: invalid source bits %08b", evidencePlan.Sources)
 	}
-	if query.Kind == domain.QueryComparison && len(query.Entities) > 1 {
+	// Partition mode is decided by the multi-entity dimension, not by one kind:
+	// a four-subject flow question blends exactly like a four-subject comparison.
+	if len(query.Entities) > 1 && domain.PartitionsByEntity(query.Kind) {
+		log.InfofCtx(ctx, "[qa] retrieval partition: kind=%s entities=%d mode=per_entity",
+			query.Kind, len(query.Entities))
 		return retrieve.retrievePerEntity(ctx, searchQuery, terms, evidencePlan, query)
 	}
+	log.InfofCtx(ctx, "[qa] retrieval partition: kind=%s entities=%d mode=single",
+		query.Kind, len(query.Entities))
 	return retrieve.retrieveSingle(ctx, searchQuery, terms, evidencePlan, query)
 }
 
@@ -547,6 +553,41 @@ func (retrieve *Retriever) discover(
 	return a
 }
 
+// maxCodeHeaderLines bounds the discovery header recalled into evidence. The
+// indexer prepends each code chunk with a short "//" header (symbol kind/name,
+// path:line range, and signature). Recall keeps only that header, so the seed
+// stays a pointer that guides the child to on-demand search_code for the body,
+// instead of carrying the body itself and overflowing the child window.
+const maxCodeHeaderLines = 4
+
+// codeDiscoveryHeader keeps only the leading "//" header the indexer prepends to
+// a code chunk and drops the body. The body belongs to on-demand search_code;
+// the seed needs only the symbol name, path, line range, and signature.
+func codeDiscoveryHeader(text string) string {
+	if text == "" {
+		return ""
+	}
+	var header strings.Builder
+	rest := text
+	for i := 0; i < maxCodeHeaderLines && rest != ""; i++ {
+		nl := strings.IndexByte(rest, '\n')
+		line := rest
+		if nl >= 0 {
+			line, rest = rest[:nl], rest[nl+1:]
+		} else {
+			rest = ""
+		}
+		if !strings.HasPrefix(line, "//") {
+			break
+		}
+		if header.Len() > 0 {
+			header.WriteByte('\n')
+		}
+		header.WriteString(line)
+	}
+	return header.String()
+}
+
 func (retrieve *Retriever) discoverSources(ctx context.Context, input retrievalDiscoverInput) (retrievalSourcesResult, error) {
 	searchQuery := input.SearchQuery
 	servicePatterns := input.ServicePatterns
@@ -606,7 +647,7 @@ func (retrieve *Retriever) discoverSources(ctx context.Context, input retrievalD
 				if m.Path == "" {
 					continue
 				}
-				snippet := m.Text
+				snippet := codeDiscoveryHeader(m.Text)
 				serviceName := retrieve.serviceForRepoMapped(ctx, modules, m.Repo, m.Path)
 				if serviceScoped && (serviceName == "" || !matchesConfiguredService(serviceName, servicePatterns)) {
 					continue
@@ -639,7 +680,7 @@ func (retrieve *Retriever) discoverSources(ctx context.Context, input retrievalD
 			mu.Unlock()
 			codeStatus.count = len(localHits)
 			codeStatus.status = retrievalSourceStatus(len(localHits))
-			log.InfofCtx(ctx, "[qa] semantic code search raw hits: %d", len(localHits))
+			//log.InfofCtx(ctx, "[qa] semantic code search raw hits: %d", len(localHits))
 		}()
 	}
 
@@ -832,10 +873,10 @@ func (retrieve *Retriever) assemble(
 		parts = selectOverviewEvidence(parts, domain.RequiredFacetsFor(query.Kind))
 	}
 
-	log.InfofCtx(ctx, "[qa] retrieve parts: %d sources", len(parts))
-	for i, p := range parts {
+	log.InfofCtx(ctx, "[qa] retrieve parts: %d sources,content=%v", len(parts), parts)
+	/*for i, p := range parts {
 		log.InfofCtx(ctx, "[qa]   part[%d]: %d chars, %d refs,content=%v", i, len(p.text), len(p.refs), p)
-	}
+	}*/
 
 	sortPartsByPriority(parts)
 
@@ -948,11 +989,14 @@ func (retrieve *Retriever) formatCodePool(ctx context.Context, pool []codeDoc) [
 			fmt.Fprintf(&text, "## Evidence — %s\n", heading)
 			label := retrieve.shortPath(ctx, d.filePath)
 			if d.startLine > 0 {
-				fmt.Fprintf(&text, "### %s (L%d-L%d)\n```\n%s\n```\n", label, d.startLine, d.endLine, d.text)
+				fmt.Fprintf(&text, "### %s (L%d-L%d)\n", label, d.startLine, d.endLine)
 				ref = Reference{Type: "code", Label: fmt.Sprintf("%s:L%d", label, d.startLine), Target: d.filePath}
 			} else {
-				fmt.Fprintf(&text, "### %s\n```\n%s\n```\n", label, d.text)
+				fmt.Fprintf(&text, "### %s\n", label)
 				ref = Reference{Type: "code", Label: label, Target: d.filePath}
+			}
+			if d.text != "" {
+				fmt.Fprintf(&text, "```\n%s\n```\n", d.text)
 			}
 		case "runbook":
 			text.WriteString("## Evidence — Docs\n")

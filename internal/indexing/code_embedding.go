@@ -16,6 +16,15 @@ import (
 	"github.com/dekwanlabs/nasuta/platform"
 )
 
+// indexExcludeDirs returns the runtime-configured exclusion segments, or nil
+// when platform settings are not yet attached.
+func (svc *Service) indexExcludeDirs() []string {
+	if svc.Platform == nil {
+		return nil
+	}
+	return svc.Platform.IndexExcludeDirs
+}
+
 // EmbedCodeChunks performs the workspace-wide v2 migration/rebuild. Repository
 // updates use EmbedRepoCode so existing token IDs remain stable.
 func (svc *Service) EmbedCodeChunks(ctx context.Context, dirs []string) error {
@@ -41,7 +50,7 @@ func (svc *Service) EmbedCodeChunks(ctx context.Context, dirs []string) error {
 		preserveVocab = true
 	}
 	generation := newIndexGeneration("workspace")
-	chunks := indexer.ScanCodeChunks(svc.Cfg.WorkspaceRoot, dirs)
+	chunks := indexer.ScanCodeChunks(svc.Cfg.WorkspaceRoot, dirs, svc.indexExcludeDirs())
 	docs, err := svc.buildCodeDocuments(ctx, chunks, builder, generation)
 	if err != nil {
 		return err
@@ -186,7 +195,7 @@ func (svc *Service) EmbedRepoCode(ctx context.Context, repo string) error {
 	}
 	scanDir := filepath.Join("repos", repo)
 	log.Infof("[embed-repo] repo=%q", repo)
-	chunks := indexer.ScanCodeChunks(svc.Cfg.WorkspaceRoot, []string{scanDir})
+	chunks := indexer.ScanCodeChunks(svc.Cfg.WorkspaceRoot, []string{scanDir}, svc.indexExcludeDirs())
 	state, err := loadCodeIndexState(svc.Cfg.WorkspaceRoot)
 	if err != nil {
 		return err

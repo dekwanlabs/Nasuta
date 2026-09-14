@@ -223,29 +223,6 @@ func TestAdmitToolCallNarrowsLimitBeforeExecution(t *testing.T) {
 	}
 }
 
-// A budget refusal must be distinguishable from a genuine empty result: both
-// carry an empty evidence list, so only an explicit flag tells the model the
-// index was never consulted.
-func TestToolAdmissionExecutionMarksBudgetDenialAsNotRetrieved(t *testing.T) {
-	execution := toolAdmissionExecution(toolAdmissionDecision{
-		Action: toolAdmissionDenyBudget, Reason: "declared_result_exceeds_budget",
-		RemainingTokens: 1702, DeclaredTokens: 4096,
-	})
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(execution.PromptContent), &payload); err != nil {
-		t.Fatalf("payload: %v", err)
-	}
-	if retrieved, ok := payload["retrieved"].(bool); !ok || retrieved {
-		t.Fatalf("retrieved = %#v, want false", payload["retrieved"])
-	}
-	if retryable, ok := payload["retryable"].(bool); !ok || !retryable {
-		t.Fatalf("retryable = %#v, want true", payload["retryable"])
-	}
-	if hint, _ := payload["hint"].(string); hint == "" {
-		t.Fatal("hint must explain the refusal")
-	}
-}
-
 func TestToolAdmissionExecutionOmitsRetrievalFlagWhenAllowed(t *testing.T) {
 	for _, action := range []toolAdmissionAction{toolAdmissionAllow, toolAdmissionAlreadyAvailable} {
 		execution := toolAdmissionExecution(toolAdmissionDecision{Action: action, Reason: "ok"})
@@ -256,5 +233,16 @@ func TestToolAdmissionExecutionOmitsRetrievalFlagWhenAllowed(t *testing.T) {
 		if _, exists := payload["retrieved"]; exists {
 			t.Fatalf("action %q must not claim a retrieval verdict", action)
 		}
+	}
+}
+
+func TestBoundToolResultToBudgetNeverEmitsEmptyContent(t *testing.T) {
+	state := &compiledLoop{input: Input{Question: "q"}, remainingToolTokens: 0}
+	if got := boundToolResultToBudget(state, "long tool result"); got == "" {
+		t.Fatal("exhausted budget returned an empty tool result")
+	}
+	state.remainingToolTokens = 1000
+	if got := boundToolResultToBudget(state, "short"); got != "short" {
+		t.Fatalf("under-budget result = %q, want unchanged", got)
 	}
 }

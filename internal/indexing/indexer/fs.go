@@ -14,6 +14,7 @@ import (
 var ignoredDirs = map[string]struct{}{
 	"target": {}, ".git": {}, "node_modules": {}, ".venv": {}, "venv": {},
 	"dist": {}, "build": {}, ".idea": {}, ".claude": {}, ".codex": {},
+	".evidence": {}, ".husky": {},
 	platform.WorkspaceMetadataDir: {}, "__pycache__": {},
 	"bin": {}, "obj": {}, // .NET/C# build output
 	".dart_tool":  {},               // Dart/Flutter tool cache

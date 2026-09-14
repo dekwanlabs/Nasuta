@@ -22,11 +22,11 @@ const (
 // delegationAdmissionInput is deliberately limited to parent-run advisory data.
 // Task-graph planning and workflow promotion no longer belong to QA.
 type delegationAdmissionInput struct {
-	Suggestion              retrieval.ExecutionSuggestion
-	WriteRequested          bool
-	DelegationAvailable     bool
-	DelegationToolReady     bool
-	DelegationMaxConcurrent int
+	Suggestion             retrieval.ExecutionSuggestion
+	WriteRequested         bool
+	DelegationAvailable    bool
+	DelegationToolReady    bool
+	DelegationMaxChildren  int
 }
 
 // delegationAdmissionDecision carries only the advisory routing signal and its
@@ -61,10 +61,10 @@ var delegationAdmissionSpec = runtrace.Spec[delegationAdmissionInput, delegation
 			"confidence":                input.Suggestion.Confidence,
 			"downgrade_reason":          output.DowngradeReason,
 			"decision_origin":           output.DecisionOrigin,
-			"delegation_available":      input.DelegationAvailable,
-			"delegation_tool_ready":     input.DelegationToolReady,
-			"delegation_max_concurrent": input.DelegationMaxConcurrent,
-			"write_requested":           input.WriteRequested,
+			"delegation_available":     input.DelegationAvailable,
+			"delegation_tool_ready":    input.DelegationToolReady,
+			"delegation_max_children":  input.DelegationMaxChildren,
+			"write_requested":          input.WriteRequested,
 			"delegation_tasks":          tasks,
 		}
 	},
@@ -88,9 +88,9 @@ func (svc *Service) applyDelegationAdmission(prepared *preparation) {
 	prepared.admission = admitDelegation(prepared.ctx, delegationAdmissionInput{
 		Suggestion:              planning.Execution,
 		WriteRequested:          prepared.request.WriteRequested,
-		DelegationAvailable:     svc.delegationEnabled,
-		DelegationToolReady:     toolReady,
-		DelegationMaxConcurrent: svc.delegationMaxConcurrent,
+		DelegationAvailable:    svc.delegationEnabled,
+		DelegationToolReady:    toolReady,
+		DelegationMaxChildren:  svc.delegationMaxChildren,
 	})
 	prepared.admission.HighRisk = executionReasonPresent(
 		planning.Execution.Reasons, "requires_risk_sensitive_analysis",
@@ -106,13 +106,13 @@ func (svc *Service) applyDelegationAdmission(prepared *preparation) {
 	}
 	log.InfofCtx(
 		prepared.ctx,
-		"[qa] execution route proposed=%s effective=%s path=%s delegation_available=%t delegation_tool_ready=%t delegation_max_concurrent=%d origin=%s reason=%s downgrade=%s",
+		"[qa] execution route proposed=%s effective=%s path=%s delegation_available=%t delegation_tool_ready=%t delegation_max_children=%d origin=%s reason=%s downgrade=%s",
 		planning.Execution.Strategy,
 		string(retrieval.ExecutionSingleAgent),
 		string(retrieval.ExecutionSingleAgent),
 		svc.delegationEnabled,
 		toolReady,
-		svc.delegationMaxConcurrent,
+		svc.delegationMaxChildren,
 		prepared.admission.DecisionOrigin,
 		prepared.admission.RouteReason,
 		prepared.admission.DowngradeReason,
@@ -177,8 +177,8 @@ func decideDelegationAdmission(input delegationAdmissionInput) delegationAdmissi
 		decision.DowngradeReason = routeReasonDelegationUnavailable
 		return decision
 	}
-	if input.DelegationMaxConcurrent > 0 && input.DelegationMaxConcurrent < 2 {
-		// A multi-agent route with one worker is guaranteed to serialize child
+	if input.DelegationMaxChildren > 0 && input.DelegationMaxChildren < 2 {
+		// A multi-agent route with one child is guaranteed to serialize child
 		// execution while retaining the parent decision, persistence, validation,
 		// and synthesis overhead. Zero means unspecified for compatibility with
 		// manually constructed services; production settings are always positive.

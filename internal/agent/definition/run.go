@@ -347,6 +347,7 @@ func (run *activeRun) executePrepared(
 		AnswerReserve:                     execution.answerReserve,
 		AnswerMaxTokens:                   maxOutputTokens,
 		ConclusionMaxTokens:               conclusionMaxTokens,
+		OutputReserve:                     int(execution.snapshot.Limits.MaxOutputReserve),
 		ContextWindow:                     execution.snapshot.Budget.ContextTokens,
 		MaxInputTokens:                    execution.snapshot.Limits.MaxInputTokens,
 		MaxContextTokens:                  execution.snapshot.Limits.MaxContextTokens,
@@ -360,6 +361,7 @@ func (run *activeRun) executePrepared(
 		OutputPriceMicrosPerMillionTokens: execution.definition.Model.OutputPriceMicrosPerMillionTokens,
 		BudgetCheck:                       budgetCheck,
 		DelegationAwaiter:                 run.runtime.delegationAwaiter,
+		FlowCompleter:                    run.runtime.flowCompleter,
 		DisableLegacyAnswerRecovery:       run.runtime.settings.disableLegacyAnswerRecovery,
 		Checkpoint: func(checkpoint agentexecution.LogicalLoopCheckpoint) error {
 			return run.persistLogicalCheckpoint(ctx, checkpoint, execution.snapshot.PromptHash)

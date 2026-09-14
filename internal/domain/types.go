@@ -59,12 +59,13 @@ type EndpointRecord struct {
 type EdgeType string
 
 const (
-	EdgeFeign   EdgeType = "feign"
-	EdgeHTTP    EdgeType = "http"    // RestTemplate/WebClient/raw HTTP URL
-	EdgeGRPC    EdgeType = "grpc"    // gRPC client
-	EdgeRPC     EdgeType = "rpc"     // Dubbo or other RPC
-	EdgeKafka   EdgeType = "kafka"   // Kafka producer-to-consumer topic flow
-	EdgeRunbook EdgeType = "runbook" // declared in runbook frontmatter
+	EdgeFeign     EdgeType = "feign"
+	EdgeHTTP      EdgeType = "http"      // RestTemplate/WebClient/raw HTTP URL
+	EdgeGRPC      EdgeType = "grpc"      // gRPC client
+	EdgeRPC       EdgeType = "rpc"       // Dubbo or other RPC
+	EdgeKafka     EdgeType = "kafka"     // Kafka producer-to-consumer topic flow
+	EdgeWebSocket EdgeType = "websocket" // Netty/raw WebSocket client-to-server flow
+	EdgeRunbook   EdgeType = "runbook"   // declared in runbook frontmatter
 )
 
 // DependencyTargetKind distinguishes workspace services from external systems.
@@ -81,6 +82,7 @@ type DependencyEdge struct {
 	TargetKind       DependencyTargetKind `json:"targetKind,omitempty"`
 	TargetServiceKey string               `json:"targetServiceKey,omitempty"`
 	ExternalTarget   string               `json:"externalTarget,omitempty"`
+	TargetExpression string               `json:"targetExpression,omitempty"`
 	From             string               `json:"from"`
 	To               string               `json:"to"`
 	Type             EdgeType             `json:"type"`

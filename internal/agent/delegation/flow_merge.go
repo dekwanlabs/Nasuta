@@ -57,7 +57,8 @@ func MergeFlowIRsBySubject(flows []agentapi.FlowIR) ([]*agentapi.FlowIR, error) 
 	}
 	merged := make([]*agentapi.FlowIR, 0, len(order))
 	for _, key := range order {
-		flow, err := MergeFlowIRs(groups[key])
+		group := preferAuthoredFlows(groups[key])
+		flow, err := MergeFlowIRs(group)
 		if err != nil {
 			// One oversized subject must not sink the whole batch. Skip the
 			// invalid subject and keep the other subjects' diagrams.
@@ -69,6 +70,33 @@ func MergeFlowIRsBySubject(flows []agentapi.FlowIR) ([]*agentapi.FlowIR, error) 
 		}
 	}
 	return merged, nil
+}
+
+// preferAuthoredFlows drops evidence-fallback reconstructions from a subject
+// group whenever the investigator actually authored a flow for it. The fallback
+// is a stand-in for a missing report, so unioning the two pulls mechanically
+// derived nodes into a diagram whose author already decided which hops belong.
+// Groups that are entirely fallback keep their reconstruction.
+func preferAuthoredFlows(flows []agentapi.FlowIR) []agentapi.FlowIR {
+	authored := 0
+	for _, flow := range flows {
+		if flow.Origin != agentapi.FlowOriginEvidenceFallback {
+			authored++
+		}
+	}
+	if authored == 0 || authored == len(flows) {
+		return flows
+	}
+	kept := make([]agentapi.FlowIR, 0, authored)
+	for _, flow := range flows {
+		if flow.Origin != agentapi.FlowOriginEvidenceFallback {
+			kept = append(kept, flow)
+			continue
+		}
+		log.Warnf("[delegation] flow merge dropped evidence-fallback flow for subject %q: investigator authored one",
+			flow.Subject)
+	}
+	return kept
 }
 
 type nodeAggregate struct {
@@ -255,6 +283,25 @@ func (state *flowMergeState) finalize() *agentapi.FlowIR {
 		right := strings.Join([]string{canonicalEdges[j].From, canonicalEdges[j].To, canonicalEdges[j].Protocol, canonicalEdges[j].SyncMode, canonicalEdges[j].EvidenceState}, "\x00")
 		return left < right
 	})
+
+	// Prune nodes no edge references. A merge can pull in unrelated services
+	// while chasing gaps (wide dependency scans), leaving disconnected boxes
+	// that clutter the diagram without contributing to the flow. Nodes are kept
+	// when there are no edges at all so a degenerate single-node flow survives.
+	if len(canonicalEdges) > 0 {
+		connected := make(map[string]struct{}, len(canonicalEdges)*2)
+		for _, edge := range canonicalEdges {
+			connected[edge.From] = struct{}{}
+			connected[edge.To] = struct{}{}
+		}
+		kept := canonicalNodes[:0]
+		for _, node := range canonicalNodes {
+			if _, ok := connected[node.ID]; ok {
+				kept = append(kept, node)
+			}
+		}
+		canonicalNodes = kept
+	}
 
 	merged := &agentapi.FlowIR{
 		EntityID:      state.entityID,

@@ -363,7 +363,7 @@ func TestDefaultSeedContextBoundsTotalAcrossBlocks(t *testing.T) {
 // single-request window, or the child fails at step 0 with no answer at all.
 func TestSeedContextTokensLeavesRoomForReserveSafetyAndPrompt(t *testing.T) {
 	const window, outputReserve = 51200, 18000
-	seed := seedContextTokens(window, outputReserve)
+	seed := seedContextTokens(window, outputReserve, childPromptOverheadTokens)
 	if seed <= 0 {
 		t.Fatalf("seed budget = %d, want positive", seed)
 	}
@@ -376,8 +376,39 @@ func TestSeedContextTokensLeavesRoomForReserveSafetyAndPrompt(t *testing.T) {
 }
 
 func TestSeedContextTokensZeroWhenWindowCannotFitOverhead(t *testing.T) {
-	if got := seedContextTokens(childPromptOverheadTokens, 0); got != 0 {
+	if got := seedContextTokens(childPromptOverheadTokens, 0, childPromptOverheadTokens); got != 0 {
 		t.Fatalf("seed budget = %d, want 0 when window only covers overhead", got)
+	}
+}
+
+// A seed that overflows the window is trimmed from the tail: a small overage
+// shortens the last block, a large one drops it entirely.
+func TestShrinkSeedTrimsTailBlockThenDropsIt(t *testing.T) {
+	tail := strings.Repeat("尾块内容，", 100)
+	candidate := &preparedTask{context: []agentapi.ContextBlock{
+		{Content: "first block", ContentHash: "h1"},
+		{Content: tail, ContentHash: "h2"},
+	}}
+	overage := tooloutput.EstimateTokens(candidate.context[1].Content) - 1
+	if !shrinkSeed(candidate, overage) {
+		t.Fatal("shrinkSeed should trim the tail block")
+	}
+	if len(candidate.context) != 2 || candidate.context[0].Content != "first block" {
+		t.Fatalf("seed blocks after trim = %#v, want both blocks kept", candidate.context)
+	}
+	if got := tooloutput.EstimateTokens(candidate.context[1].Content); got > 1 {
+		t.Fatalf("tail content = %d tokens, want <= 1 after trim", got)
+	}
+
+	candidate = &preparedTask{context: []agentapi.ContextBlock{
+		{Content: "first block", ContentHash: "h1"},
+		{Content: "tail", ContentHash: "h2"},
+	}}
+	if !shrinkSeed(candidate, 1<<20) {
+		t.Fatal("shrinkSeed should drop the tail block")
+	}
+	if len(candidate.context) != 1 || candidate.context[0].Content != "first block" {
+		t.Fatalf("seed blocks after drop = %#v, want only the first block", candidate.context)
 	}
 }
 

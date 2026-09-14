@@ -322,10 +322,6 @@ func validateDelegationBudget(
 	outstandingTokens := account.outstandingTokens
 	outstandingCost := account.outstandingCost
 
-	childTokens := settledTokens + outstandingTokens + newTokens + admission.ParentAnswerReserve
-	if admission.MaxTotalTokens > 0 && childTokens > admission.MaxTotalTokens {
-		return ErrDelegationBudgetInsufficient
-	}
 	if parent.limits.MaxTotalTokens > 0 &&
 		parent.tokens+settledTokens+outstandingTokens+newTokens+admission.ParentAnswerReserve >
 			parent.limits.MaxTotalTokens {
@@ -827,7 +823,6 @@ func validateDelegationAdmission(admission DelegationAdmission) error {
 	if strings.TrimSpace(admission.ParentRunID) == "" ||
 		strings.TrimSpace(admission.DelegationID) == "" ||
 		admission.MaxChildren < 0 ||
-		admission.MaxTotalTokens < 0 ||
 		admission.MaxTotalCostMicros < 0 ||
 		admission.ParentAnswerReserve < 0 ||
 		len(admission.Reservations) == 0 {

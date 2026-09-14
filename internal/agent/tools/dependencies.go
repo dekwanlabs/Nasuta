@@ -3,10 +3,14 @@ package tools
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 
+	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/domain"
 	"github.com/dekwanlabs/nasuta/internal/ontology"
 	"github.com/dekwanlabs/nasuta/knowledge"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 // TraceDependencies exposes evidence-backed ontology dependencies without tool JSON.
@@ -39,11 +43,87 @@ func (srv *Service) TraceDeps(ctx context.Context, service, direction string, de
 	result, err := srv.ontology.TraceDependencies(ctx, ontology.DependencyQuery{
 		Service: service, Direction: ontologyDirection,
 		MaxDepth: depth, MaxNodes: 500, MaxFanout: 100,
+		Scope: tool.EntityScopeFrom(ctx),
 	})
 	if err != nil {
 		return domain.DependencyTrace{}, err
 	}
-	return dependencyTrace(result), nil
+	trace := dependencyTrace(result)
+	trace.Upstream = srv.resolveDependencyTargets(ctx, trace.Upstream, service)
+	trace.Downstream = srv.resolveDependencyTargets(ctx, trace.Downstream, service)
+	return trace, nil
+}
+
+var targetExpressionRe = regexp.MustCompile(`\$\{([^{}]+)\}`)
+
+// resolveDependencyTargets rewrites placeholder-backed external targets using
+// the configured environment resolver. Edges whose expression cannot be
+// resolved keep their placeholder so the caller can still see the intent.
+func (srv *Service) resolveDependencyTargets(ctx context.Context, edges []domain.DependencyEdge, application string) []domain.DependencyEdge {
+	if srv.config == nil {
+		return edges
+	}
+	resolved := make([]domain.DependencyEdge, 0, len(edges))
+	for _, edge := range edges {
+		if edge.TargetKind != domain.DependencyTargetExternal || edge.TargetExpression == "" {
+			resolved = append(resolved, edge)
+			continue
+		}
+		target, ok := expandTargetExpression(srv.config, ctx, application, edge.TargetExpression)
+		if ok {
+			edge.To = target
+			edge.ExternalTarget = strings.ToLower(target)
+		}
+		resolved = append(resolved, edge)
+	}
+	return resolved
+}
+
+func expandTargetExpression(resolver config.Resolver, ctx context.Context, application, expression string) (string, bool) {
+	keys := make([]config.Ref, 0)
+	matches := targetExpressionRe.FindAllStringSubmatchIndex(expression, -1)
+	for _, match := range matches {
+		if len(match) < 4 {
+			continue
+		}
+		key, fallback, _ := strings.Cut(expression[match[2]:match[3]], ":")
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		_ = fallback
+		keys = append(keys, config.Ref{Application: application, Key: key})
+	}
+	if len(keys) == 0 {
+		return expression, true
+	}
+	values, err := resolver.ResolveConfig(ctx, keys)
+	if err != nil {
+		return "", false
+	}
+	result := expression
+	changed := false
+	for _, match := range matches {
+		if len(match) < 4 {
+			continue
+		}
+		expressionPart := expression[match[2]:match[3]]
+		key, fallback, hasFallback := strings.Cut(expressionPart, ":")
+		key = strings.TrimSpace(key)
+		value, found := values[config.Ref{Application: application, Key: key}]
+		if !found {
+			if !hasFallback {
+				continue
+			}
+			value = config.Value{Value: strings.TrimSpace(fallback)}
+		}
+		result = strings.Replace(result, expression[match[0]:match[1]], value.Value, 1)
+		changed = true
+	}
+	if !changed {
+		return "", false
+	}
+	return result, true
 }
 
 func dependencyTrace(result ontology.DependencyResult) domain.DependencyTrace {
@@ -62,6 +142,7 @@ func dependencyTrace(result ontology.DependencyResult) domain.DependencyTrace {
 				From:             fact.Subject.Name,
 				To:               fact.Object.Name,
 				Type:             domain.EdgeType(fact.Qualifiers["protocol"]),
+				TargetExpression: fact.Qualifiers["target_expression"],
 				Evidence:         evidence,
 				Confidence:       fact.Confidence,
 			}

@@ -45,6 +45,11 @@ const (
 	ErrorChildOutputSoftOverrun = "child_output_soft_overrun"
 )
 
+// ServiceTraceCapabilityID is the investigator that produces a structured
+// FlowIR. It is the server-side counterpart to the delegate_investigation tool
+// for flow completion.
+const ServiceTraceCapabilityID = "knowledge.service.trace"
+
 const (
 	maxObjectiveBytes = 2000
 	maxEvidenceRefs   = 20
@@ -65,7 +70,7 @@ const (
 	// when a directly-constructed policy omits MaxChildContextTokens. The config
 	// layer always sets an explicit value before this point; this only covers
 	// embedders and tests.
-	defaultChildContextTokens = 51200
+	defaultChildContextTokens = 256000
 )
 
 var errAttemptUnrecoverable = errors.New("delegation attempt cannot be recovered")
@@ -160,6 +165,13 @@ type toolEventProjector interface {
 	ProjectToolEvents(string, string, string, string) func()
 }
 
+// childRequestEstimator measures a child run request's first-turn input tokens
+// using the definition runtime's own compile path, so the seed budget derives
+// from measured overhead instead of a fixed reserve.
+type childRequestEstimator interface {
+	EstimateChildRequest(agentapi.RunRequest) (int, error)
+}
+
 type ExecutorConfig struct {
 	Capabilities       *agentapi.CapabilityRegistry
 	Definitions        agentapi.DefinitionResolver
@@ -220,6 +232,7 @@ type preparedTask struct {
 	permissions   agentapi.PermissionPolicy
 	context       []agentapi.ContextBlock
 	outputTokens  int64
+	outputReserve int64
 	reportTokens  int64
 	budget        agentapi.RunBudgetTaskReservation
 	queueWaitMS   int64
@@ -346,7 +359,6 @@ func (executor *Executor) Execute(
 		agentrun.DelegationAdmission{
 			ParentRunID: parent.RunID, DelegationID: delegationID,
 			MaxChildren:         executor.policy.MaxChildren,
-			MaxTotalTokens:      executor.policy.MaxTotalTokens,
 			MaxTotalCostMicros:  executor.policy.MaxTotalCostMicros,
 			ParentAnswerReserve: executor.policy.ParentAnswerReserve,
 			Reservations:        delegationReservations(parent, delegationID, prepared),
@@ -387,6 +399,44 @@ func (executor *Executor) Execute(
 		ctx, parent, &result, evidenceLedger, observations,
 	)
 	return result, returnedEvidence, err
+}
+
+// CompleteFlows produces one FlowIR per subject by dispatching a single
+// knowledge.service.trace investigation for each missing subject and awaiting
+// settlement. It is the server-side counterpart to delegate_investigation for
+// flow-shaped queries whose parent loop ran single-agent (or a child missed a
+// subject), so the deterministic renderer still has a diagram to install.
+func (executor *Executor) CompleteFlows(ctx context.Context, subjects []string) ([]agentapi.FlowIR, error) {
+	if len(subjects) == 0 {
+		return nil, nil
+	}
+	parent, ok := ParentContextFrom(ctx)
+	if !ok || strings.TrimSpace(parent.RunID) == "" {
+		return nil, fmt.Errorf("delegation parent context is required")
+	}
+	invocationID := stableID("inv", parent.RunID, "flow-completion", strings.Join(subjects, "\x00"))
+	ctx = tool.WithInvocationID(ctx, invocationID)
+
+	tasks := make([]agentapi.DelegationTask, 0, len(subjects))
+	for _, subject := range subjects {
+		tasks = append(tasks, agentapi.DelegationTask{
+			Capability: ServiceTraceCapabilityID,
+			Entity:     subject,
+			Objective: fmt.Sprintf(
+				"Trace the end-to-end flow of %q: entrypoint, core processing steps, data/state, and external dependencies. Produce a structured FlowIR with nodes and edges.",
+				subject,
+			),
+		})
+	}
+	result, _, err := executor.Execute(ctx, tasks)
+	if err != nil {
+		return nil, err
+	}
+	flows := reportFlows(result.Results)
+	for index := range flows {
+		flows[index].Order = index + 1
+	}
+	return flows, nil
 }
 
 // Dispatch admits and starts one delegation batch without waiting for any
@@ -469,7 +519,6 @@ func (executor *Executor) Dispatch(
 		agentrun.DelegationAdmission{
 			ParentRunID: parent.RunID, DelegationID: delegationID,
 			MaxChildren:         executor.policy.MaxChildren,
-			MaxTotalTokens:      executor.policy.MaxTotalTokens,
 			MaxTotalCostMicros:  executor.policy.MaxTotalCostMicros,
 			ParentAnswerReserve: executor.policy.ParentAnswerReserve,
 			Reservations:        delegationReservations(parent, delegationID, prepared),
@@ -1180,11 +1229,13 @@ func (executor *Executor) prepareTaskDefinition(parent ParentContext, candidate 
 func (executor *Executor) prepareTaskBudget(parent ParentContext, delegationID string, candidate *preparedTask, capability agentapi.Capability) error {
 	childBudget := executor.childBudget(parent)
 	candidate.outputTokens = childBudget.outputTokens
+	candidate.outputReserve = childBudget.outputReserve
 	candidate.reportTokens = childBudget.reportTokens
 	// Both paths share one evidence budget: the window minus the output reserve,
-	// the safety margin and the child's own prompt overhead. Explicit refs used
-	// to get the full window, which left nothing for the answer.
-	evidenceTokens := seedContextTokens(childBudget.contextTokens, childBudget.outputTokens)
+	// the safety margin and the child's measured prompt overhead. Explicit refs
+	// used to get the full window, which left nothing for the answer.
+	overhead := executor.childRequestOverhead(parent, delegationID, *candidate)
+	evidenceTokens := seedContextTokens(childBudget.contextTokens, childBudget.outputReserve, overhead)
 	candidate.context = selectContext(
 		parent, candidate.request.EvidenceRefs, candidate.request.FocusFacets,
 		evidenceTokens,
@@ -1200,6 +1251,12 @@ func (executor *Executor) prepareTaskBudget(parent ParentContext, delegationID s
 			parent, capability, candidate.request,
 			evidenceTokens,
 		)
+	}
+	// The measured seed budget counts only block content, not the per-block
+	// JSON wrapper the child prompt adds, so re-measure the assembled request
+	// and trim the seed until it fits the window.
+	if err := executor.fitChildSeed(parent, delegationID, candidate); err != nil {
+		return err
 	}
 	// No cumulative input quota: the batch ledger is the only cumulative bound,
 	// so there is no per-child input admission check here.
@@ -1697,7 +1754,7 @@ func (executor *Executor) runTasks(
 ) []indexedOutcome {
 	outcomes := make([]indexedOutcome, len(tasks))
 	jobs := make(chan int)
-	workers := min(executor.policy.MaxConcurrent, len(tasks))
+	workers := min(executor.policy.MaxChildren, len(tasks))
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for worker := 0; worker < workers; worker++ {
@@ -1842,6 +1899,9 @@ func (executor *Executor) executeAttempt(
 	runCtx, cancel := context.WithDeadline(ctx, attemptTask.limits.Deadline)
 	if attemptTask.budget != nil {
 		runCtx = agentapi.WithRunBudgetGate(runCtx, attemptTask.budget)
+	}
+	if scope := attemptTask.request.EntityAliases; len(scope) > 0 {
+		runCtx = tool.WithEntityScope(runCtx, scope)
 	}
 	result, runErr := executor.runtime.Run(runCtx, executor.runRequest(parent, delegationID, attemptTask))
 	childErr := runCtx.Err()
@@ -2136,7 +2196,7 @@ func (executor *Executor) completeOwnedAttempt(
 	applyReportEntityIdentity(&report, attemptTask.request)
 	reportTokens := attemptTask.reportTokens
 	if reportTokens <= 0 {
-		reportTokens = executor.policy.MaxReportTokens
+		reportTokens = executor.policy.MaxChildOutputTokens
 	}
 	report = boundReport(report, reportTokens)
 	report, result = executor.runGapChase(ctx, parent, delegationID, attemptTask, report, result)
@@ -2635,6 +2695,7 @@ type childBudget struct {
 	turns         int
 	toolCalls     int64
 	outputTokens  int64
+	outputReserve int64
 	reportTokens  int64
 	contextTokens int64
 }
@@ -2649,7 +2710,8 @@ func (executor *Executor) childBudget(parent ParentContext) childBudget {
 		turns:         executor.policy.MaxChildTurns,
 		toolCalls:     executor.policy.MaxChildToolCalls,
 		outputTokens:  executor.policy.MaxChildOutputTokens,
-		reportTokens:  executor.policy.MaxReportTokens,
+		outputReserve: executor.policy.MaxChildOutputTokens,
+		reportTokens:  executor.policy.MaxChildOutputTokens,
 		contextTokens: executor.policy.MaxChildContextTokens,
 	}
 }
@@ -2758,6 +2820,7 @@ func (executor *Executor) gapChaseLimits(
 		MaxToolCalls:     toolCalls,
 		MaxContextTokens: budget.contextTokens,
 		MaxOutputTokens:  outputTokens,
+		MaxOutputReserve: budget.outputReserve,
 	}, nil
 }
 
@@ -2797,6 +2860,7 @@ func (executor *Executor) childLimitsAt(
 		MaxToolCalls:     clampChildToolCalls(budget.toolCalls, definition.Budget.MaxToolCalls),
 		MaxContextTokens: budget.contextTokens,
 		MaxOutputTokens:  outputTokens,
+		MaxOutputReserve: budget.outputReserve,
 	}, nil
 }
 
@@ -3040,12 +3104,10 @@ func remainingAnswerTime(parent ParentContext) time.Duration {
 }
 
 func delegationPolicyLimitsInvalid(policy agentapi.DelegationPolicy) bool {
-	return policy.MaxChildren <= 0 || policy.MaxConcurrent <= 0 ||
-		policy.MaxConcurrent > policy.MaxChildren ||
+	return policy.MaxChildren <= 0 ||
 		policy.MaxChildTurns <= 0 || policy.MaxChildToolCalls <= 0 ||
 		policy.MaxChildContextTokens <= 0 ||
 		policy.MaxChildOutputTokens <= 0 ||
-		policy.MaxReportTokens <= 0 || policy.MaxTotalTokens <= 0 ||
 		policy.MaxTotalCostMicros < 0 || policy.ParentAnswerReserve < 0 ||
 		policy.BatchTimeout <= 0 || policy.ChildTimeout <= 0 ||
 		policy.ChildTimeout > policy.BatchTimeout
@@ -3077,12 +3139,6 @@ func normalizePolicy(
 	}
 	if policy.MinGapChaseGoals <= 0 {
 		policy.MinGapChaseGoals = 1
-	}
-	if policy.MaxReportTokens < minimumBoundedReportTokens() {
-		return policy, fmt.Errorf(
-			"delegation max report tokens must be at least %d",
-			minimumBoundedReportTokens(),
-		)
 	}
 	return policy, nil
 }
@@ -3142,27 +3198,94 @@ func isSeedBlock(block agentapi.ContextBlock) bool {
 	return block.Source == "qa.evidence" || block.Source == "qa.memory"
 }
 
-// childPromptOverheadTokens reserves room for what the child adds to its own
-// request beyond the seed: system prompt, tool schemas, the task objective and
-// the report contract. The seed budget cannot be the whole remaining window,
-// because the admission check measures all of it. Observed overhead on the
-// investigator definition is ~6.7k tokens; 8k leaves margin for schema growth.
+// childPromptOverheadTokens is the fallback reserve for what the child adds to
+// its own request beyond the seed — system prompt, tool schemas, the task
+// objective and the report contract — used only when the runtime cannot
+// self-measure. Production runtimes measure the real overhead instead.
 const childPromptOverheadTokens = 8192
 
-// seedContextTokens derives the pre-retrieval seed budget for a child without
-// explicit evidence_refs. The seed must fit inside the single-request window
-// alongside the output reserve, the context safety margin and the child's own
-// prompt overhead, or the child's first provider call fails before it starts.
-// Using the full window as the seed budget left no room for the answer and
-// safety margin; ignoring prompt overhead left the seed fitting its own budget
-// while the assembled request still overflowed.
-func seedContextTokens(window, outputReserve int64) int64 {
+// seedContextTokens derives the pre-retrieval seed budget for a child. The seed
+// must fit inside the single-request window alongside the output reserve, the
+// context safety margin and the child's own prompt overhead, or the child's
+// first provider call fails before it starts. Using the full window as the seed
+// budget left no room for the answer and safety margin; ignoring prompt overhead
+// left the seed fitting its own budget while the assembled request overflowed.
+func seedContextTokens(window, outputReserve, overhead int64) int64 {
 	safety := int64(agentrun.ContextSafetyTokens(int(window)))
-	floor := outputReserve + safety + childPromptOverheadTokens
+	floor := outputReserve + safety + overhead
 	if window <= floor {
 		return 0
 	}
 	return window - floor
+}
+
+// childRequestOverhead measures the fixed token cost of a child request — the
+// system prompt, task objective and tool schemas — with an empty seed. It falls
+// back to a fixed reserve when the runtime cannot self-measure.
+func (executor *Executor) childRequestOverhead(parent ParentContext, delegationID string, task preparedTask) int64 {
+	estimator, ok := executor.runtime.(childRequestEstimator)
+	if !ok {
+		return childPromptOverheadTokens
+	}
+	request := executor.runRequest(parent, delegationID, task)
+	request.Context = nil
+	tokens, err := estimator.EstimateChildRequest(request)
+	if err != nil {
+		log.Warnf("[delegation] measure child request overhead: %v", err)
+		return childPromptOverheadTokens
+	}
+	return int64(tokens)
+}
+
+// fitChildSeed re-measures the assembled child request and shrinks the seed
+// until the whole request fits the window with the output reserve and safety
+// margin. The measured seed budget counts only block content, not the per-block
+// JSON wrapper the child prompt adds, so the assembled request is trimmed rather
+// than assumed to fit.
+func (executor *Executor) fitChildSeed(parent ParentContext, delegationID string, candidate *preparedTask) error {
+	estimator, ok := executor.runtime.(childRequestEstimator)
+	if !ok {
+		return nil
+	}
+	window := executor.policy.MaxChildContextTokens
+	safety := int64(agentrun.ContextSafetyTokens(int(window)))
+	ceiling := int64(window) - candidate.outputReserve - safety
+	for {
+		tokens, err := estimator.EstimateChildRequest(executor.runRequest(parent, delegationID, *candidate))
+		if err != nil {
+			return fmt.Errorf("measure child request: %w", err)
+		}
+		overage := int64(tokens) - ceiling
+		if overage <= 0 {
+			return nil
+		}
+		if !shrinkSeed(candidate, int(overage)) {
+			return fmt.Errorf(
+				"child seed overflows window even when empty: request=%d ceiling=%d",
+				tokens, ceiling,
+			)
+		}
+	}
+}
+
+// shrinkSeed removes at least overageTokens from the seed by trimming the tail
+// block's content and dropping it once empty, so each call strictly reduces the
+// assembled request and fitChildSeed converges.
+func shrinkSeed(candidate *preparedTask, overageTokens int) bool {
+	blocks := candidate.context
+	if len(blocks) == 0 {
+		return false
+	}
+	last := len(blocks) - 1
+	current := tooloutput.EstimateTokens(blocks[last].Content)
+	if target := current - overageTokens; target <= 0 {
+		blocks = blocks[:last]
+	} else {
+		blocks[last].Content = truncateSeedText(blocks[last].Content, target)
+		blocks[last].ContentHash = hashBytes([]byte(blocks[last].Content))
+	}
+	candidate.context = blocks
+	return true
 }
 
 // defaultSeedContext injects the parent's pre-retrieved evidence as a child

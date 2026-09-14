@@ -417,6 +417,65 @@ func TestDashScopeReranker_EnabledRequiresKey(t *testing.T) {
 	}
 }
 
+// TestDashScopeReranker_SkipsEmptyDocs guards the fix that an empty-text doc no
+// longer poisons the whole DashScope batch ("document index:N should not be
+// empty"). Empty docs are filtered from the request and come back as 0, with
+// the remaining scores aligned to the original input positions.
+func TestDashScopeReranker_SkipsEmptyDocs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req dashscopeRerankRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if len(req.Input.Documents) != 2 {
+			t.Errorf("request documents = %d, want 2 (empty doc filtered)", len(req.Input.Documents))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Only 2 docs were sent; relevance order shuffles their compact indices.
+		resp := map[string]any{
+			"output": map[string]any{
+				"results": []map[string]any{
+					{"index": 1, "relevance_score": 0.90}, // original doc[2]
+					{"index": 0, "relevance_score": 0.30}, // original doc[0]
+				},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	rr := newTestDashScopeReranker(srv.URL, srv)
+	docs := []codeDoc{{text: "keep-a"}, {text: "   "}, {text: "keep-b"}}
+	scores, err := rr.Score(context.Background(), "q", docs)
+	if err != nil {
+		t.Fatalf("Score error: %v", err)
+	}
+	if len(scores) != 3 {
+		t.Fatalf("expected 3 scores (full input length), got %d", len(scores))
+	}
+	if scores[1] != 0 {
+		t.Fatalf("empty doc must stay 0, got %f", scores[1])
+	}
+	want := []float64{0.30 / 0.90, 0, 1}
+	for i := range want {
+		if math.Abs(scores[i]-want[i]) > 1e-9 {
+			t.Fatalf("score[%d]=%v want %v (got %v)", i, scores[i], want[i], scores)
+		}
+	}
+}
+
+func TestDashScopeReranker_AllEmptyDocsErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("request must not be sent when every candidate is empty")
+	}))
+	defer srv.Close()
+
+	rr := newTestDashScopeReranker(srv.URL, srv)
+	if _, err := rr.Score(context.Background(), "q", []codeDoc{{text: ""}, {text: "  "}}); err == nil {
+		t.Fatal("expected error when every candidate is empty")
+	}
+}
+
 func TestTruncateRerankDocumentPreservesUTF8(t *testing.T) {
 	got := truncateRerankDocument("调用链🙂abc", 4)
 	if got != "调用链🙂" || !utf8.ValidString(got) {

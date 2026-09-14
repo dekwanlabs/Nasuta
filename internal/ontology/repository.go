@@ -58,6 +58,11 @@ type PathQuery struct {
 	MaxNodes   int
 	MaxFanout  int
 	Generation string
+	// Scope holds the entity IDs that belong to the current business. When
+	// non-nil, only in-scope nodes are expanded past the first hop, so a
+	// cross-business neighbor stays a leaf instead of dragging in its whole
+	// dependency fan-out.
+	Scope map[string]struct{}
 }
 
 type Path struct {
@@ -88,8 +93,17 @@ type WorkspaceSnapshot struct {
 type Repository interface {
 	Resolve(context.Context, ResolveQuery) (ResolveResult, error)
 	EntitiesByID(context.Context, EntityQuery) ([]EntityRef, error)
+	EntitiesByNamePattern(context.Context, NamePatternQuery) ([]EntityRef, error)
 	Neighbors(context.Context, NeighborQuery) ([]Fact, bool, error)
 	Stats(context.Context) (Stats, error)
+}
+
+// NamePatternQuery resolves entities whose name contains any of the given
+// tokens. It backs the delegation child's business scope: the tokens are the
+// entity aliases, so the returned IDs are the services in that business.
+type NamePatternQuery struct {
+	Tokens     []string
+	Generation string
 }
 
 type Publisher interface {
@@ -160,9 +174,13 @@ func dependencyGenerationKey(dependency domain.DependencyEdge) string {
 	if dependency.TargetKind == domain.DependencyTargetExternal {
 		target = dependency.ExternalTarget
 	}
-	return strings.Join([]string{
+	key := strings.Join([]string{
 		dependency.CallerServiceKey, string(dependency.TargetKind), target, string(dependency.Type),
 	}, "\x00")
+	if dependency.TargetExpression != "" {
+		key += "\x00" + dependency.TargetExpression
+	}
+	return key
 }
 
 func ValidateResolveQuery(query ResolveQuery) error {

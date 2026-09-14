@@ -11,7 +11,7 @@ import (
 func TestFallbackReportSchemaValid(t *testing.T) {
 	units := []tool.EvidenceUnit{
 		{SourceKind: "code", Target: "svc-a/handler.go", Sections: []string{"main"}, Facets: []string{"core_flow"}},
-		{SourceKind: "dependency", Target: "svc-a", Sections: []string{"outbound:svc-a->svc-b:http"}},
+		{SourceKind: "dependency", Target: "svc-a", Sections: []string{"outbound:svc-a->svc-b:http|Client.call"}},
 	}
 	report, ok := BuildEvidencePreservingReport(units, nil, []string{"core_flow", "external_dependency"}, "code")
 	if !ok {

@@ -269,6 +269,35 @@ func TestCodeHitPassesFloor(t *testing.T) {
 	}
 }
 
+func TestCodeDiscoveryHeaderKeepsInjectedHeaderAndDropsBody(t *testing.T) {
+	chunk := "// java method: Foo.bar\n// Foo.java:10-40\n// void bar(int x)\nvoid bar(int x) {\n  return;\n}\n"
+	got := codeDiscoveryHeader(chunk)
+	want := "// java method: Foo.bar\n// Foo.java:10-40\n// void bar(int x)"
+	if got != want {
+		t.Fatalf("header = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "return") {
+		t.Fatalf("header leaked body: %q", got)
+	}
+}
+
+func TestCodeDiscoveryHeaderEmptyForHeaderlessAndEmpty(t *testing.T) {
+	if got := codeDiscoveryHeader("package com.x;\nimport os;\n"); got != "" {
+		t.Fatalf("headerless chunk = %q, want empty", got)
+	}
+	if got := codeDiscoveryHeader(""); got != "" {
+		t.Fatalf("empty chunk = %q, want empty", got)
+	}
+}
+
+func TestCodeDiscoveryHeaderBoundsRunawayCommentBody(t *testing.T) {
+	body := strings.Repeat("// license line\n", maxCodeHeaderLines+20)
+	got := codeDiscoveryHeader(body)
+	if lines := strings.Count(got, "\n") + 1; lines != maxCodeHeaderLines {
+		t.Fatalf("header lines = %d, want bounded to %d", lines, maxCodeHeaderLines)
+	}
+}
+
 func TestFusionRecallDoesNotUseDenseScoreFloor(t *testing.T) {
 	r := &Retriever{platform: &config.PlatformSettings{CodeMinScore: 0.5}}
 	kept := 0

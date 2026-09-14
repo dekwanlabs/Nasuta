@@ -700,8 +700,11 @@ func TestClaimWorkItemByKindClaimsOneItemWithFencingLease(t *testing.T) {
 	payload := []byte(`{"parent":"p1"}`)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+	mock.ExpectQuery(`SELECT work_id FROM agent_work_items WHERE`).
 		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), "delegation_child").
+		WillReturnRows(sqlmock.NewRows([]string{"work_id"}).AddRow("work-1"))
+	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE work_id=\?`).
+		WithArgs("work-1").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"work_id", "run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json", "state", "lease_owner", "lease_fence", "lease_expires_at", "available_at", "attempt_count", "last_error",
 		}).AddRow("work-1", "run-1", "parent-1", "delegation-1", 2, 1, "delegation_child", payload, WorkReady, "", int64(4), nil, available, 3, ""))
@@ -731,8 +734,11 @@ func TestClaimWorkItemByKindCanReclaimExpiredLease(t *testing.T) {
 	rs := &Store{db: db}
 	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+	mock.ExpectQuery(`SELECT work_id FROM agent_work_items WHERE`).
 		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), "delegation_child").
+		WillReturnRows(sqlmock.NewRows([]string{"work_id"}).AddRow("work-2"))
+	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE work_id=\?`).
+		WithArgs("work-2").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"work_id", "run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json", "state", "lease_owner", "lease_fence", "lease_expires_at", "available_at", "attempt_count", "last_error",
 		}).AddRow("work-2", "run-2", "parent-2", "delegation-2", 0, 1, "delegation_child", []byte(`{}`), WorkRunning, "dead-worker", int64(9), now.Add(-time.Second), now.Add(-time.Minute), 1, "worker lease expired"))
@@ -861,8 +867,11 @@ func TestEnqueueAndClaimWorkItemAtomicallyClaimsNewItem(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json",
 		}).AddRow(item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload))
-	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+	mock.ExpectQuery(`SELECT work_id FROM agent_work_items WHERE`).
 		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), item.WorkID).
+		WillReturnRows(sqlmock.NewRows([]string{"work_id"}).AddRow(item.WorkID))
+	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE work_id=\?`).
+		WithArgs(item.WorkID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"work_id", "run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json", "state", "lease_owner", "lease_fence", "lease_expires_at", "available_at", "attempt_count", "last_error",
 		}).AddRow(item.WorkID, item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload, WorkReady, "", int64(0), nil, now, 0, ""))
@@ -937,7 +946,7 @@ func TestEnqueueAndClaimWorkItemReturnsNoRowsForLiveLease(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json",
 		}).AddRow(item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload))
-	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+	mock.ExpectQuery(`SELECT work_id FROM agent_work_items WHERE`).
 		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), item.WorkID).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
@@ -973,8 +982,11 @@ func TestEnqueueAndClaimWorkItemReclaimsExpiredLease(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json",
 		}).AddRow(item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload))
-	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE`).
+	mock.ExpectQuery(`SELECT work_id FROM agent_work_items WHERE`).
 		WithArgs(WorkReady, sqlmock.AnyArg(), WorkRunning, sqlmock.AnyArg(), item.WorkID).
+		WillReturnRows(sqlmock.NewRows([]string{"work_id"}).AddRow(item.WorkID))
+	mock.ExpectQuery(`SELECT work_id,run_id,parent_run_id,delegation_id,task_index,attempt_no,kind,payload_json,state,lease_owner,lease_fence,lease_expires_at,available_at,attempt_count,last_error FROM agent_work_items WHERE work_id=\?`).
+		WithArgs(item.WorkID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"work_id", "run_id", "parent_run_id", "delegation_id", "task_index", "attempt_no", "kind", "payload_json", "state", "lease_owner", "lease_fence", "lease_expires_at", "available_at", "attempt_count", "last_error",
 		}).AddRow(item.WorkID, item.RunID, item.ParentRunID, item.DelegationID, item.TaskIndex, item.AttemptNo, item.Kind, payload, WorkRunning, "old-worker", int64(7), expired, expired, 3, "worker lease expired"))

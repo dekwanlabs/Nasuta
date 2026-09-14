@@ -49,9 +49,13 @@ func Project(bundle domain.IndexBundle) (Snapshot, error) {
 			build.addEntity(external)
 			objectID = external.ID
 		}
+		qualifiers := map[string]string{"protocol": string(dependency.Type)}
+		if dependency.TargetExpression != "" {
+			qualifiers["target_expression"] = dependency.TargetExpression
+		}
 		build.addFact(Fact{
 			SubjectID: dependency.CallerServiceKey, Predicate: PredicateDependsOn, ObjectID: objectID,
-			Qualifiers: map[string]string{"protocol": string(dependency.Type)}, Confidence: dependency.Confidence,
+			Qualifiers: qualifiers, Confidence: dependency.Confidence,
 			Evidence: ontologyEvidence(dependency.Evidence),
 		})
 	}

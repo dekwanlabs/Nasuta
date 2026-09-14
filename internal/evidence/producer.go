@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -162,6 +163,42 @@ func ServiceMetadataUnit(name, layer, language, summary string) (tool.EvidenceUn
 	}, true
 }
 
+// maxEdgeSymbols bounds the call sites named in one dependency section. Edges
+// commonly carry three (the interface declaration plus its call sites) and can
+// reach seventeen, which no consumer needs in full.
+const maxEdgeSymbols = 6
+
+// formatEdgeSymbols renders the edge's call sites as a `|sym1,sym2` suffix.
+// One dependency edge collapses every interface between a service pair
+// (collect dedup keys on from/to/type only), so without the call sites a read
+// path and a write path between the same two services are indistinguishable —
+// a data-backfill edge then renders as a step of the read flow. Sorted because
+// the section feeds ContentHash; empty when no evidence names a symbol, which
+// keeps the section at its original four-part form.
+func formatEdgeSymbols(evidence []domain.Evidence) string {
+	seen := make(map[string]struct{}, len(evidence))
+	symbols := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		symbol := strings.TrimSpace(item.Symbol)
+		if symbol == "" {
+			continue
+		}
+		if _, duplicate := seen[symbol]; duplicate {
+			continue
+		}
+		seen[symbol] = struct{}{}
+		symbols = append(symbols, symbol)
+	}
+	if len(symbols) == 0 {
+		return ""
+	}
+	sort.Strings(symbols)
+	if len(symbols) > maxEdgeSymbols {
+		symbols = symbols[:maxEdgeSymbols]
+	}
+	return "|" + strings.Join(symbols, ",")
+}
+
 // DependencyUnit builds one evidence-backed service edge. Edges without source
 // provenance are deliberately not promoted into authoritative evidence.
 func DependencyUnit(
@@ -193,7 +230,8 @@ func DependencyUnit(
 		SourceKind: "dependency",
 		Target:     service,
 		Sections: []string{fmt.Sprintf(
-			"%s:%s->%s:%s", direction, edge.From, edge.To, edge.Type,
+			"%s:%s->%s:%s%s", direction, edge.From, edge.To, edge.Type,
+			formatEdgeSymbols(edge.Evidence),
 		)},
 		ContentHash:   hashEvidenceContent(content),
 		Coverage:      coverage,

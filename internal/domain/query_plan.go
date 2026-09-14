@@ -127,6 +127,23 @@ var requiredFacetsByQueryKind = map[QueryKind][]EvidenceFacet{
 	},
 }
 
+// partitionByEntityKinds are the query kinds that answer several parallel
+// subjects at once. One blended retrieval across such subjects is always won by
+// whichever subject has the densest term overlap, so each subject must be
+// retrieved and reranked on its own.
+var partitionByEntityKinds = map[QueryKind]struct{}{
+	QueryComparison: {},
+	QueryFlow:       {},
+	QueryOverview:   {},
+}
+
+// PartitionsByEntity reports whether a multi-entity request of this kind must
+// retrieve per entity instead of once over a blended query.
+func PartitionsByEntity(kind QueryKind) bool {
+	_, ok := partitionByEntityKinds[kind]
+	return ok
+}
+
 var traceIDFieldRe = regexp.MustCompile(`(?i)\btrace(?:[_-]?id)?\s*[:=：]\s*[0-9a-f-]{12,64}\b`)
 var traceparentRe = regexp.MustCompile(`(?i)\b[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\b`)
 var kibanaTraceURLRe = regexp.MustCompile(`(?i)https?://[^\s]*kibana[^\s]*(?:trace|discover)[^\s]*`)
@@ -186,6 +203,18 @@ func hasTypedRuntimeLocator(question string) bool {
 // RequiredFacetsFor derives stable coverage goals from the canonical query kind.
 func RequiredFacetsFor(kind QueryKind) []EvidenceFacet {
 	return append([]EvidenceFacet(nil), requiredFacetsByQueryKind[kind]...)
+}
+
+// QueryNeedsFlow reports whether a query kind should carry a structured flow
+// diagram: its canonical evidence facets include the entrypoint or core-flow
+// dimension. Pure fact lookups (focused_fact) stay text-only.
+func QueryNeedsFlow(kind QueryKind) bool {
+	for _, facet := range RequiredFacetsFor(kind) {
+		if facet == FacetEntrypoint || facet == FacetCoreFlow {
+			return true
+		}
+	}
+	return false
 }
 
 // FacetCatalog returns a copy so callers cannot mutate the canonical ordering.

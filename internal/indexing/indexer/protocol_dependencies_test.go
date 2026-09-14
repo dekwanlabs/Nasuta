@@ -195,3 +195,62 @@ let endpoint = URL(string: "https://not-called.example.com/api")`)
 		t.Fatalf("iOS URL used by URLSession request was not indexed: %+v", edges)
 	}
 }
+
+func TestWebSocketPlaceholderClassifiesFallbackAsService(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "repos/aiot/voice-assistant-gateway/pom.xml", `<project><artifactId>voice-assistant-gateway</artifactId></project>`)
+	writeFile(t, root, "repos/aiot/tts-proxy/pom.xml", `<project><artifactId>tts-proxy</artifactId></project>`)
+	writeFile(t, root, "repos/aiot/voice-assistant-gateway/src/main/java/AiAgentService.java", `
+class AiAgentService {
+  @Value("${speech.transcribe.service.name:tts-proxy}")
+  private String serviceName;
+  void connect() {
+    ServiceInstance instance = loadBalancer.choose(serviceName);
+    String raw = "ws://" + instance.getHost() + "/websocket";
+    URI uri = URI.create(raw);
+    new TtsWebSocketClientBootstrap(ctx, uri);
+  }
+}`)
+
+	dirs := mustDiscoverScanDirs(t, root)
+	services := scanJavaServices(root, dirs)
+	edges := scanWebSocketDependencies(root, dirs)
+	canonical := CanonicalizeBundle(domain.IndexBundle{Services: services, Dependencies: edges})
+
+	if len(canonical.Dependencies) != 1 {
+		t.Fatalf("dependencies=%+v", canonical.Dependencies)
+	}
+	edge := canonical.Dependencies[0]
+	if edge.TargetKind != domain.DependencyTargetService {
+		t.Fatalf("placeholder-backed edge should classify as service, got %q", edge.TargetKind)
+	}
+	if edge.To != "tts-proxy" {
+		t.Fatalf("edge.To=%q want tts-proxy", edge.To)
+	}
+	if edge.TargetExpression != "${speech.transcribe.service.name:tts-proxy}" {
+		t.Fatalf("TargetExpression=%q not preserved", edge.TargetExpression)
+	}
+	if edge.Type != domain.EdgeWebSocket {
+		t.Fatalf("edge.Type=%q", edge.Type)
+	}
+}
+
+func TestPlaceholderFallbackParsesOnlySpringDefaultForm(t *testing.T) {
+	cases := []struct {
+		expr     string
+		want     string
+		wantOK   bool
+	}{
+		{"${speech.transcribe.service.name:tts-proxy}", "tts-proxy", true},
+		{"${a.b:c:extra}", "c:extra", true},
+		{"${no.fallback}", "", false},
+		{"plain", "", false},
+		{"", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := placeholderFallback(tc.expr)
+		if ok != tc.wantOK || got != tc.want {
+			t.Fatalf("placeholderFallback(%q)=%q,%v want %q,%v", tc.expr, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}

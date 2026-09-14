@@ -35,6 +35,9 @@ type Runtime struct {
 	// delegationAwaiter resolves finished child reports on the server side.
 	// The application wires it after the delegation executor is built.
 	delegationAwaiter execution.DelegationAwaiter
+	// flowCompleter fills missing server-owned flows for flow-shaped queries.
+	// The application wires it after the delegation executor is built.
+	flowCompleter execution.FlowCompleter
 
 	recoveryMu         sync.Mutex
 	recoveryCancel     context.CancelFunc
@@ -160,6 +163,15 @@ func (runtime *Runtime) SetDelegationAwaiter(awaiter execution.DelegationAwaiter
 		return
 	}
 	runtime.delegationAwaiter = awaiter
+}
+
+// SetFlowCompleter wires the server-side flow completion resolver into the
+// runtime. The application calls it after building the delegation executor.
+func (runtime *Runtime) SetFlowCompleter(completer execution.FlowCompleter) {
+	if runtime == nil {
+		return
+	}
+	runtime.flowCompleter = completer
 }
 
 // Hub exposes the Runtime-owned event and control boundary.

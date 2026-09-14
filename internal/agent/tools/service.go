@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/dekwanlabs/nasuta/config"
 	"github.com/dekwanlabs/nasuta/internal/agent/web"
 	"github.com/dekwanlabs/nasuta/internal/callchain"
 	"github.com/dekwanlabs/nasuta/internal/domain"
@@ -24,6 +25,7 @@ type Deps struct {
 	DocStore      docStore
 	CallChain     *callchain.Service
 	Ontology      *ontology.Service
+	Config        config.Resolver
 }
 
 // Service exposes the retrieval and analysis tools used by the agent.
@@ -35,6 +37,7 @@ type Service struct {
 	docStore       docStore
 	callChain      *callchain.Service
 	ontology       *ontology.Service
+	config         config.Resolver
 	bm25           atomic.Pointer[retrieval.BM25Builder]
 	mergedSvcCache atomic.Pointer[[]domain.ServiceRecord]
 	denseWarnOnce  sync.Once
@@ -51,8 +54,13 @@ func New(deps Deps) *Service {
 		docStore:      deps.DocStore,
 		callChain:     deps.CallChain,
 		ontology:      deps.Ontology,
+		config:        deps.Config,
 		web:           web.New(),
 	}
+}
+
+func (srv *Service) SetConfigResolver(resolver config.Resolver) {
+	srv.config = resolver
 }
 
 func (srv *Service) SetBM25(builder *retrieval.BM25Builder) {

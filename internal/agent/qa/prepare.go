@@ -328,7 +328,6 @@ func (svc *Service) parentRunLimits(
 		MaxToolCalls: definition.Budget.MaxToolCalls,
 	}
 	if svc.delegationEnabled && prepared.admission.RouteReason == routeReasonParentDynamicDelegation {
-		limits.MaxTotalTokens = svc.delegationBudget.MaxTotalTokens
 		limits.MaxCostMicros = svc.delegationBudget.MaxCostMicros
 		limits.ParentAnswerReserve = svc.delegationBudget.ParentAnswerReserve
 	}

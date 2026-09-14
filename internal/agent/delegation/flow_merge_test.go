@@ -77,6 +77,38 @@ func TestMergeFlowIRsOpenHopsMakePartial(t *testing.T) {
 	}
 }
 
+func TestMergeFlowIRsPrunesOrphanNodes(t *testing.T) {
+	first := mergeTestFlow("orders", "a", "b", "verified", []string{"ev-1"})
+	// A second flow whose node is unrelated and unconnected — as happens when a
+	// gap chase pulls in a wide dependency graph across other businesses.
+	second := agentapi.FlowIR{
+		Subject: "orders", Status: "partial", Confidence: "low",
+		Nodes: []agentapi.FlowNode{
+			{ID: "orphan", Label: "Unrelated voice service", Kind: "service"},
+		},
+	}
+	merged, err := MergeFlowIRs([]agentapi.FlowIR{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged.Nodes) != 2 || len(merged.Edges) != 1 {
+		t.Fatalf("merged = %#v, want orphan pruned", merged)
+	}
+
+	// A degenerate flow with nodes but no edges keeps its nodes.
+	degenerate := agentapi.FlowIR{
+		Subject: "solo", Status: "partial", Confidence: "low",
+		Nodes: []agentapi.FlowNode{{ID: "a", Label: "Only node", Kind: "service"}},
+	}
+	solo, err := MergeFlowIRs([]agentapi.FlowIR{degenerate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(solo.Nodes) != 1 {
+		t.Fatalf("degenerate nodes = %d, want 1 (kept when no edges)", len(solo.Nodes))
+	}
+}
+
 func TestMergeFlowIRsDeterministicAndDoesNotMutateInputs(t *testing.T) {
 	first := mergeTestFlow("orders", "a", "b", "verified", []string{"ev-2", "ev-1"})
 	// Keep the input valid while exercising merge-side sorting without changing it.
@@ -172,5 +204,66 @@ func TestMergeFlowIRsBySubjectMergesSameSubject(t *testing.T) {
 	}
 	if flows[0].Edges[0].EvidenceState != "inferred" {
 		t.Fatalf("conservative evidence state not preserved: %#v", flows[0].Edges[0])
+	}
+}
+
+// A fallback flow stands in for a missing report. When the investigator authored
+// one for the same subject, unioning the two pulls mechanically derived nodes
+// into a diagram whose author already chose its hops.
+func TestMergeFlowIRsBySubjectDropsFallbackWhenAuthoredExists(t *testing.T) {
+	authored := mergeTestFlow("orders", "a", "b", "verified", []string{"ev-1"})
+	fallback := mergeTestFlow("orders", "noise-x", "noise-y", "inferred", []string{"ev-2"})
+	fallback.Origin = agentapi.FlowOriginEvidenceFallback
+
+	flows, err := MergeFlowIRsBySubject([]agentapi.FlowIR{authored, fallback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flows) != 1 {
+		t.Fatalf("expected 1 subject flow, got %d", len(flows))
+	}
+	if len(flows[0].Nodes) != 2 || len(flows[0].Edges) != 1 {
+		t.Fatalf("fallback nodes leaked into the authored flow: %#v", flows[0])
+	}
+	if flows[0].Edges[0].EvidenceState != "verified" {
+		t.Fatalf("authored evidence state was downgraded by the fallback: %#v", flows[0].Edges[0])
+	}
+}
+
+// With no authored flow for the subject, the reconstruction is all there is and
+// must survive.
+func TestMergeFlowIRsBySubjectKeepsFallbackWhenAlone(t *testing.T) {
+	fallback := mergeTestFlow("orders", "a", "b", "inferred", []string{"ev-1"})
+	fallback.Origin = agentapi.FlowOriginEvidenceFallback
+
+	flows, err := MergeFlowIRsBySubject([]agentapi.FlowIR{fallback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flows) != 1 || len(flows[0].Nodes) != 2 {
+		t.Fatalf("fallback-only subject lost its flow: %#v", flows)
+	}
+}
+
+// Preference is per subject: dropping a fallback for one subject must not drop
+// the fallback that is the only flow for another.
+func TestMergeFlowIRsBySubjectPrefersPerSubject(t *testing.T) {
+	authored := mergeTestFlow("orders", "a", "b", "verified", []string{"ev-1"})
+	ordersFallback := mergeTestFlow("orders", "noise-x", "noise-y", "inferred", []string{"ev-2"})
+	ordersFallback.Origin = agentapi.FlowOriginEvidenceFallback
+	paymentsFallback := mergeTestFlow("payments", "x", "y", "inferred", []string{"ev-3"})
+	paymentsFallback.Origin = agentapi.FlowOriginEvidenceFallback
+
+	flows, err := MergeFlowIRsBySubject([]agentapi.FlowIR{authored, ordersFallback, paymentsFallback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flows) != 2 {
+		t.Fatalf("expected 2 subject flows, got %d", len(flows))
+	}
+	for _, flow := range flows {
+		if len(flow.Nodes) != 2 || len(flow.Edges) != 1 {
+			t.Fatalf("subject %q not merged independently: %#v", flow.Subject, flow)
+		}
 	}
 }

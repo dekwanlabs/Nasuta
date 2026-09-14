@@ -259,8 +259,16 @@ func fallbackFlow(units []tool.EvidenceUnit) map[string]any {
 		if len(edges) >= fallbackMaxEdges {
 			break
 		}
-		from, to, protocol, ok := fallbackDependencyEdge(unit)
+		from, to, protocol, symbols, ok := fallbackDependencyEdge(unit)
 		if !ok {
+			continue
+		}
+		// An edge with no named call site is not placeable in a flow: one
+		// service pair collapses every interface between them, so the edge may
+		// be a read or a write and drawing it can invert the flow (a
+		// data-backfill hop rendered as a step of the read path). The
+		// dependency fact survives in findings; only the diagram skips it.
+		if len(symbols) == 0 {
 			continue
 		}
 		addNode(from)
@@ -295,30 +303,40 @@ func fallbackFlow(units []tool.EvidenceUnit) map[string]any {
 }
 
 // fallbackDependencyEdge decodes a dependency unit's canonical section
-// `direction:from->to:type` (see evidence.DependencyUnit). Only dependency
-// units contribute edges; other evidence contributes findings but no flow.
-func fallbackDependencyEdge(unit tool.EvidenceUnit) (from, to, protocol string, ok bool) {
+// `direction:from->to:type[|sym1,sym2]` (see evidence.DependencyUnit). Only
+// dependency units contribute edges; other evidence contributes findings but no
+// flow. Symbols are the edge's call sites and may be absent (config-derived
+// edges carry no symbol), which callers treat as "not placeable in a flow".
+func fallbackDependencyEdge(unit tool.EvidenceUnit) (from, to, protocol string, symbols []string, ok bool) {
 	if unit.SourceKind != "dependency" {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	section := fallbackSection(unit)
 	if section == "" {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
-	// direction:from->to:type
+	// direction:from->to:type[|sym1,sym2]
+	if bar := strings.LastIndex(section, "|"); bar >= 0 {
+		for _, symbol := range strings.Split(section[bar+1:], ",") {
+			if symbol = strings.TrimSpace(symbol); symbol != "" {
+				symbols = append(symbols, symbol)
+			}
+		}
+		section = section[:bar]
+	}
 	colon := strings.Index(section, ":")
 	if colon < 0 {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	body := section[colon+1:]
 	arrow := strings.Index(body, "->")
 	if arrow < 0 {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	from = strings.TrimSpace(body[:arrow])
 	rest := strings.TrimSpace(body[arrow+2:])
 	if from == "" || rest == "" {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	to = rest
 	if typeSep := strings.Index(rest, ":"); typeSep > 0 {
@@ -326,12 +344,12 @@ func fallbackDependencyEdge(unit tool.EvidenceUnit) (from, to, protocol string, 
 		protocol = strings.TrimSpace(rest[typeSep+1:])
 	}
 	if to == "" {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	if protocol == "" {
 		protocol = "dependency"
 	}
-	return from, to, protocol, true
+	return from, to, protocol, symbols, true
 }
 
 func partitionFallbackGoals(

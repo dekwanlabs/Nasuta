@@ -89,7 +89,10 @@ func TestFlowOutputContractCarriesBoundedSubjects(t *testing.T) {
 	if got, want := contract.Subjects, []string{"First", "Second", "fallback"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("subjects = %v, want %v", got, want)
 	}
-	if got := outputContractForQuery(domain.QueryPlan{Kind: domain.QueryComparison}); !reflect.DeepEqual(got, agentapi.RunOutputContract{}) {
+	if got := outputContractForQuery(domain.QueryPlan{Kind: domain.QueryComparison}); reflect.DeepEqual(got, agentapi.RunOutputContract{}) {
+		t.Fatalf("flow-relevant comparison contract = %+v", got)
+	}
+	if got := outputContractForQuery(domain.QueryPlan{Kind: domain.QueryFocusedFact}); !reflect.DeepEqual(got, agentapi.RunOutputContract{}) {
 		t.Fatalf("non-flow contract = %+v", got)
 	}
 }

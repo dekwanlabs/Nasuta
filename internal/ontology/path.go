@@ -57,9 +57,15 @@ func FindBoundedPaths(ctx context.Context, repository neighborReader, query Path
 			}
 			discoveredDepth[to] = depth
 			parents[to] = pathParent{from: from, fact: fact}
-			next = append(next, to)
 			path := buildPath(query.StartID, to, parents)
 			paths = append(paths, path)
+			// Only in-scope nodes become the next frontier. Out-of-scope nodes
+			// stay leaves: their edge is recorded but their dependency fan-out
+			// is not followed. A nil scope disables the filter entirely.
+			_, inScope := query.Scope[to]
+			if query.Scope == nil || inScope {
+				next = append(next, to)
+			}
 			if query.TargetID != "" && to == query.TargetID {
 				return []Path{path}, truncated, nil
 			}

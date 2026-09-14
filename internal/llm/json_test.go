@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+func TestMessageContentAlwaysSerialized(t *testing.T) {
+	got, err := json.Marshal(Message{Role: "tool", ToolCallID: "call-1", Name: "list_apis"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := decoded["content"]; !ok {
+		t.Fatalf("empty content dropped the content field: %s", got)
+	}
+}
+
 func TestStripFences(t *testing.T) {
 	cases := map[string]string{
 		"```json block": "```json\n{\"a\":1}\n```",

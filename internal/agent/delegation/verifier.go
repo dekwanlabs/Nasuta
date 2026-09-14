@@ -164,7 +164,6 @@ func (executor *Executor) executeVerificationWithObservations(
 		agentrun.DelegationAdmission{
 			ParentRunID: parent.RunID, DelegationID: delegationID,
 			MaxChildren:         executor.policy.MaxChildren + 1,
-			MaxTotalTokens:      executor.policy.MaxTotalTokens,
 			MaxTotalCostMicros:  executor.policy.MaxTotalCostMicros,
 			ParentAnswerReserve: executor.policy.ParentAnswerReserve,
 			Reservations:        []agentrun.DelegationReservation{reservation},

@@ -1,7 +1,11 @@
 package indexer
 
 import (
+	"path/filepath"
+	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 var javaSpringMVCAdapter = endpointAdapter{
@@ -20,6 +24,19 @@ var javaSpringMVCAdapter = endpointAdapter{
 		return false
 	},
 	scan: scanSpringMVC,
+}
+
+var javaNettyWebSocketAdapter = endpointAdapter{
+	language:  "java",
+	framework: "netty-websocket",
+	applies: func(source endpointSource) bool {
+		_, ok := source.syntax.(jvmSource)
+		if !ok {
+			return false
+		}
+		return strings.Contains(source.text, "WebSocketServerProtocolHandler")
+	},
+	scan: scanNettyWebSocket,
 }
 
 var javaJAXRSAdapter = endpointAdapter{
@@ -451,4 +468,86 @@ func firstJVMAnnotationArgument(annotation jvmAnnotation) []jvmToken {
 		return []jvmToken{{kind: jvmStringToken, text: `""`}}
 	}
 	return annotation.arguments[0].tokens
+}
+
+var (
+	nettyWebSocketHandlerRe = regexp.MustCompile(`(?m)\bnew\s+WebSocketServerProtocolHandler\s*\(`)
+	nettyWebSocketPathRe    = regexp.MustCompile(`(?m)\bWebSocketServerProtocolHandler\s*\(\s*([^,;()]+)`)
+)
+
+// scanNettyWebSocket indexes a Netty WebSocket listener. The request path is
+// usually read from a Spring `@Value("${websocket.path}")` bean rather than a
+// literal, so we fall back to the module's application.yml `websocket.path`.
+func scanNettyWebSocket(source endpointSource) []endpointCandidate {
+	syntax, ok := source.syntax.(jvmSource)
+	if !ok {
+		return nil
+	}
+	match := nettyWebSocketHandlerRe.FindStringIndex(source.text)
+	if match == nil {
+		return nil
+	}
+	line := lineAt(source.text, match[0])
+	path := nettyWebSocketPathFromSource(source.text)
+	if path == "" {
+		path = websocketPathFromYAML(source.moduleRoot)
+	}
+	if path == "" {
+		path = "/websocket"
+	}
+	handler := ""
+	if decls := javaTypeDeclarations(syntax.tokens); len(decls) > 0 {
+		handler = decls[0].name
+	}
+	return []endpointCandidate{sourceEndpointCandidate(
+		source, "netty-websocket",
+		[]valueExpr{literalValue("WS")}, []valueExpr{literalValue(path)},
+		handler, "initChannel", line, 0.8,
+	)}
+}
+
+func nettyWebSocketPathFromSource(text string) string {
+	match := nettyWebSocketPathRe.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return ""
+	}
+	first := strings.TrimSpace(match[1])
+	// A string literal is unambiguous.
+	if strings.HasPrefix(first, `"`) {
+		value, ok := decodeJVMString(first)
+		if ok && value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func websocketPathFromYAML(moduleRoot string) string {
+	if moduleRoot == "" {
+		return ""
+	}
+	for _, name := range []string{
+		"src/main/resources/application.yml",
+		"src/main/resources/application.yaml",
+		"src/main/resources/bootstrap.yml",
+		"src/main/resources/bootstrap.yaml",
+	} {
+		text := readFile(filepath.Join(moduleRoot, name))
+		if text == "" {
+			continue
+		}
+		var doc struct {
+			WebSocket struct {
+				Path string `yaml:"path"`
+			} `yaml:"websocket"`
+		}
+		if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+			continue
+		}
+		path := strings.TrimSpace(doc.WebSocket.Path)
+		if path != "" {
+			return path
+		}
+	}
+	return ""
 }

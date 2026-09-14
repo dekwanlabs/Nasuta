@@ -99,11 +99,10 @@ func TestReserveDelegationBatchProtectsParentAnswerReserve(t *testing.T) {
 	defer db.Close()
 	store := &Store{db: db}
 	admission := testDelegationAdmission()
-	admission.MaxTotalTokens = 799
 	admission.ParentAnswerReserve = 300
 
 	mock.ExpectBegin()
-	expectDelegationParentBudget(mock, admission.ParentRunID, 100, 0, 1000, 0)
+	expectDelegationParentBudget(mock, admission.ParentRunID, 100, 0, 800, 0)
 	mock.ExpectQuery("FROM agent_delegation_tasks WHERE parent_run_id=\\? FOR UPDATE").
 		WithArgs(admission.ParentRunID).
 		WillReturnRows(emptyDelegationTaskRows())
@@ -126,7 +125,6 @@ func TestReserveDelegationBatchDoesNotChargeParentRetrieveAgainstChildCeiling(t 
 	defer db.Close()
 	store := &Store{db: db}
 	admission := testDelegationAdmission()
-	admission.MaxTotalTokens = 800
 	admission.ParentAnswerReserve = 200
 	reservationRaw, err := json.Marshal(admission.Reservations[0])
 	if err != nil {
@@ -176,7 +174,6 @@ func TestReserveDelegationBatchHonorsParentOwnedCeiling(t *testing.T) {
 	defer db.Close()
 	store := &Store{db: db}
 	admission := testDelegationAdmission()
-	admission.MaxTotalTokens = 2000
 	admission.ParentAnswerReserve = 200
 
 	mock.ExpectBegin()
@@ -402,7 +399,6 @@ func testDelegationAdmission() DelegationAdmission {
 		ParentRunID:         "parent-1",
 		DelegationID:        "delegation-1",
 		MaxChildren:         3,
-		MaxTotalTokens:      2000,
 		MaxTotalCostMicros:  1000,
 		ParentAnswerReserve: 200,
 		Reservations:        []DelegationReservation{reservation},
