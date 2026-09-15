@@ -306,8 +306,9 @@ func (svc *Service) extractRunMemory(
 		log.ErrorfCtx(ctx, "[qa] memory extraction error: %v", err)
 		return
 	}
+	decisions := svc.dropOneOffCurrentFocus(memCtx, extraction.Decisions, userID, conversation.SessionID, question)
 	writeOutput, writeErr := writeMemories(memCtx, memoryWriteInput{
-		Store: svc.memory, Decisions: extraction.Decisions, UserID: userID,
+		Store: svc.memory, Decisions: decisions, UserID: userID,
 		SessionID: conversation.SessionID,
 	})
 	if writeErr != nil {
@@ -317,6 +318,49 @@ func (svc *Service) extractRunMemory(
 		log.InfofCtx(ctx, "[qa] consolidated %d/%d memories for user %d (skipped=%d)",
 			writeOutput.Succeeded, len(extraction.Decisions), userID, writeOutput.Skipped)
 	}
+}
+
+// currentFocusFactKey is the single-slot work-focus key gated by cross-session
+// recurrence.
+const currentFocusFactKey = "user:current-focus"
+
+// dropOneOffCurrentFocus enforces the B1 rule: a current-focus candidate is only
+// added when the same topic already appeared in another session (a recurring work
+// topic), never from a one-off lookup. Refresh/replace decisions on an existing
+// focus are unaffected — they are continuations of an already-recurring topic.
+func (svc *Service) dropOneOffCurrentFocus(
+	ctx context.Context,
+	decisions []memory.MemoryDecision,
+	userID int64,
+	sessionID string,
+	question string,
+) []memory.MemoryDecision {
+	needsGate := false
+	for _, decision := range decisions {
+		if decision.Action == memory.ConsolidationAdd && decision.Record.FactKey == currentFocusFactKey {
+			needsGate = true
+			break
+		}
+	}
+	if !needsGate {
+		return decisions
+	}
+	recurring, err := svc.memory.HasCrossSessionTopic(ctx, userID, sessionID, question)
+	if err != nil {
+		log.WarnfCtx(ctx, "[qa] cross-session focus check error: %v", err)
+	}
+	if err == nil && recurring {
+		return decisions
+	}
+	filtered := decisions[:0]
+	for _, decision := range decisions {
+		if decision.Action == memory.ConsolidationAdd && decision.Record.FactKey == currentFocusFactKey {
+			log.InfofCtx(ctx, "[qa] dropped one-off current-focus memory for user %d", userID)
+			continue
+		}
+		filtered = append(filtered, decision)
+	}
+	return filtered
 }
 
 func (svc *Service) answerContext(
