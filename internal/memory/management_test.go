@@ -13,9 +13,9 @@ func TestListUsesBoundedUserScopedCursorPage(t *testing.T) {
 	defer closeDB()
 	now := memory.now()
 	rows := sqlmock.NewRows(memoryColumns()).
-		AddRow(memoryRow("c", 42, "user:role:app", KindProfile, "Owns App", SourceUserStated, StatusActive, nil, nil, now)...).
-		AddRow(memoryRow("b", 42, "user:role:iot", KindProfile, "Owns IoT", SourceUserStated, StatusActive, nil, nil, now.Add(-time.Minute))...).
-		AddRow(memoryRow("a", 42, "user:role:cloud", KindProfile, "Owns Cloud", SourceUserStated, StatusActive, nil, nil, now.Add(-2*time.Minute))...)
+		AddRow(memoryRow("c", 42, "user:preference:app", KindProfile, "Owns App", SourceUserStated, StatusActive, nil, nil, now)...).
+		AddRow(memoryRow("b", 42, "user:preference:iot", KindProfile, "Owns IoT", SourceUserStated, StatusActive, nil, nil, now.Add(-time.Minute))...).
+		AddRow(memoryRow("a", 42, "user:preference:cloud", KindProfile, "Owns Cloud", SourceUserStated, StatusActive, nil, nil, now.Add(-2*time.Minute))...)
 	mock.ExpectQuery(`(?s)SELECT .*FROM qa_memories.*WHERE user_id=\? AND kind=\? AND status=\?.*ORDER BY created_at DESC,id DESC.*LIMIT \?`).
 		WithArgs(int64(42), KindProfile, StatusActive, 3).
 		WillReturnRows(rows)

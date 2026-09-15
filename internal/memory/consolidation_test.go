@@ -16,15 +16,15 @@ func TestRecallForConsolidationAdmitsExactFactKeyWithoutDenseMatch(t *testing.T)
 	activeID := "11111111-1111-1111-1111-111111111111"
 
 	mock.ExpectQuery(`(?s)SELECT .*FROM qa_memories.*WHERE user_id=\? AND status='active' AND fact_key IN \(\?\).*LIMIT \?`).
-		WithArgs(int64(42), "workspace:billing-service:owner", 1).
+		WithArgs(int64(42), "user:preference:billing", 1).
 		WillReturnRows(sqlmock.NewRows(memoryColumns()).
 			AddRow(memoryRow(
-				activeID, 42, "workspace:billing-service:owner", KindProfile,
+				activeID, 42, "user:preference:billing", KindProfile,
 				"Owned by the platform team", SourceUserStated, StatusActive, nil, nil, now,
 			)...))
 
 	result, err := memory.RecallForConsolidation(t.Context(), 42, []MemoryProbe{{
-		Query: "billing service ownership", FactKeyHint: "workspace:billing-service:owner",
+		Query: "billing service ownership", FactKeyHint: "user:preference:billing",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -153,10 +153,10 @@ func TestApplyDecisionAddRejectsConcurrentActiveFact(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND status='active'.*FOR UPDATE`).
-		WithArgs(int64(42), "workspace:billing-service:owner").
+		WithArgs(int64(42), "user:preference:billing").
 		WillReturnRows(sqlmock.NewRows(memoryColumns()).
 			AddRow(memoryRow(
-				"active", 42, "workspace:billing-service:owner", KindProfile,
+				"active", 42, "user:preference:billing", KindProfile,
 				"Owned by the platform team", SourceUserStated, StatusActive, nil, nil, now,
 			)...))
 	mock.ExpectRollback()
@@ -164,7 +164,7 @@ func TestApplyDecisionAddRejectsConcurrentActiveFact(t *testing.T) {
 	_, err := memory.ApplyDecision(context.Background(), MemoryDecision{
 		Action: ConsolidationAdd,
 		Record: MemoryRecord{
-			UserID: 42, FactKey: "workspace:billing-service:owner", Kind: KindProfile,
+			UserID: 42, FactKey: "user:preference:billing", Kind: KindProfile,
 			Content: "Owned by the commerce team", SourceType: SourceExplicitUser,
 		},
 	})
@@ -184,10 +184,10 @@ func TestApplyDecisionReplaceCannotOverrideHigherAuthority(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND status='active'.*FOR UPDATE`).
-		WithArgs(int64(42), "workspace:billing-service:owner").
+		WithArgs(int64(42), "user:preference:billing").
 		WillReturnRows(sqlmock.NewRows(memoryColumns()).
 			AddRow(memoryRow(
-				activeID, 42, "workspace:billing-service:owner", KindProfile,
+				activeID, 42, "user:preference:billing", KindProfile,
 				"Owned by the platform team", SourceExplicitUser, StatusActive, nil, nil, now,
 			)...))
 	mock.ExpectRollback()
@@ -196,7 +196,7 @@ func TestApplyDecisionReplaceCannotOverrideHigherAuthority(t *testing.T) {
 		Action:   ConsolidationReplace,
 		TargetID: activeID,
 		Record: MemoryRecord{
-			UserID: 42, FactKey: "workspace:billing-service:owner", Kind: KindProfile,
+			UserID: 42, FactKey: "user:preference:billing", Kind: KindProfile,
 			Content: "Owned by the commerce team", SourceType: SourceUserStated,
 		},
 	})

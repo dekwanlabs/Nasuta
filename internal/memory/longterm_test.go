@@ -63,14 +63,14 @@ func TestWriteRejectsLowerAuthorityReplacement(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND status='active'.*FOR UPDATE`).
-		WithArgs(int64(42), "workspace:user-center:owner").
+		WithArgs(int64(42), "user:preference:user-center").
 		WillReturnRows(sqlmock.NewRows(memoryColumns()).
-			AddRow(memoryRow(activeID, 42, "workspace:user-center:owner", KindProfile, "Owns user center", SourceExplicitUser, StatusActive, nil, nil, now)...))
+			AddRow(memoryRow(activeID, 42, "user:preference:user-center", KindProfile, "Owns user center", SourceExplicitUser, StatusActive, nil, nil, now)...))
 	expectMemoryInsert(mock, incomingID, StatusSuperseded, activeID)
 	mock.ExpectCommit()
 
 	result, err := memory.Write(context.Background(), MemoryRecord{
-		ID: incomingID, UserID: 42, FactKey: "workspace:user-center:owner",
+		ID: incomingID, UserID: 42, FactKey: "user:preference:user-center",
 		Kind: KindAssistantInference, Content: "Possibly owns another service", SourceType: SourceAssistantInference,
 	})
 	if err != nil {
@@ -220,13 +220,13 @@ func TestWriteAddsBM25SparseVector(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)SELECT .*WHERE user_id=\? AND fact_key=\? AND status='active'.*FOR UPDATE`).
-		WithArgs(int64(42), "workspace:apollo-service:endpoint").
+		WithArgs(int64(42), "user:preference:apollo").
 		WillReturnRows(sqlmock.NewRows(memoryColumns()))
 	expectMemoryInsert(mock, id, StatusActive, nil)
 	mock.ExpectCommit()
 
 	result, err := memory.Write(t.Context(), MemoryRecord{
-		ID: id, UserID: 42, FactKey: "workspace:apollo-service:endpoint",
+		ID: id, UserID: 42, FactKey: "user:preference:apollo",
 		Kind: KindProfile, Content: "Apollo endpoint is config.internal", SourceType: SourceExplicitUser,
 	})
 	if err != nil {
@@ -256,7 +256,7 @@ func TestEnableBM25RebuildsExistingMemoriesBeforeSavingVocabulary(t *testing.T) 
 	defer closeDB()
 	vocabPath := filepath.Join(t.TempDir(), "memory_bm25_vocab.json")
 	rows := sqlmock.NewRows([]string{"id", "user_id", "fact_key", "content", "source_type", "status"}).
-		AddRow("11111111-1111-1111-1111-111111111111", int64(42), "workspace:apollo-service", "Apollo endpoint", SourceExplicitUser, StatusActive).
+		AddRow("11111111-1111-1111-1111-111111111111", int64(42), "user:preference:apollo", "Apollo endpoint", SourceExplicitUser, StatusActive).
 		AddRow("22222222-2222-2222-2222-222222222222", int64(42), "user:response-language", "Use Chinese", SourceUserStated, StatusActive)
 	mock.ExpectQuery(`(?s)SELECT id,user_id,fact_key,content,source_type,status.*FROM qa_memories.*WHERE id>\?.*ORDER BY id.*LIMIT \?`).
 		WithArgs("", memoryBM25RebuildBatch).

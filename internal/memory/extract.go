@@ -21,6 +21,11 @@ type extractedEntry struct {
 	DecisionConfidence float32 `json:"decision_confidence"`
 }
 
+// maxExtractedMemories caps how many memories one turn may produce. Extraction
+// is deliberately conservative — most turns yield none, so the cap stays low to
+// keep noise out of the durable store.
+const maxExtractedMemories = 2
+
 // ExtractMemories distills one completed turn into controlled memory records.
 func ExtractMemories(ctx context.Context, client *llm.LLMClient, userMessage, assistantAnswer string) ([]MemoryRecord, error) {
 	decisions, err := ConsolidateMemories(ctx, client, userMessage, assistantAnswer, nil)
@@ -77,8 +82,8 @@ func normalizeConsolidated(entries []extractedEntry, existing []ConsolidationMat
 	for _, match := range existing {
 		targets[match.Record.ID] = match.Record
 	}
-	decisions := make([]MemoryDecision, 0, min(5, len(entries)))
-	positions := make(map[string]int, min(5, len(entries)))
+	decisions := make([]MemoryDecision, 0, min(maxExtractedMemories, len(entries)))
+	positions := make(map[string]int, min(maxExtractedMemories, len(entries)))
 	for _, entry := range entries {
 		action := ConsolidationAction(entry.Action)
 		if action == "" && len(existing) == 0 {
@@ -124,7 +129,7 @@ func normalizeConsolidated(entries []extractedEntry, existing []ConsolidationMat
 			}
 			continue
 		}
-		if len(decisions) >= 5 {
+		if len(decisions) >= maxExtractedMemories {
 			continue
 		}
 		positions[rec.FactKey] = len(decisions)

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // MemoryKind controls how a memory participates in recall.
@@ -106,18 +107,89 @@ func validKind(kind MemoryKind) bool {
 	}
 }
 
+// fixedFactKeys are the single-slot keys: one active record per user. Variable
+// topics are not allowed on these so a paraphrase cannot fork the slot.
+var fixedFactKeys = map[string]struct{}{
+	"user:response-language": {},
+	"user:response-style":    {},
+	"user:current-focus":     {},
+	"user:role":              {},
+	"user:health":            {},
+	"user:culture":           {},
+	"user:environment":       {},
+	"user:profile-inference": {},
+}
+
+// topicFactKeys are the keys that carry one kebab-case topic segment
+// (user:preference:<topic>, user:correction:<topic>).
+var topicFactKeys = map[string]struct{}{
+	"user:preference": {},
+	"user:correction": {},
+}
+
+// validFactKey restricts keys to a controlled vocabulary so the same fact always
+// lands on the same slot and the single-active constraint can hold. System and
+// codebase facts (the old workspace:* namespace) are not user memories and are
+// rejected here.
 func validFactKey(key string) bool {
-	parts := strings.Split(key, ":")
-	switch {
-	case key == "user:response-language", key == "user:response-style", key == "user:current-focus":
+	if _, ok := fixedFactKeys[key]; ok {
 		return true
-	case len(parts) == 3 && parts[0] == "user" && parts[1] == "role":
-		return factSegmentPattern.MatchString(parts[2])
-	case len(parts) == 3 && parts[0] == "workspace":
-		return factSegmentPattern.MatchString(parts[1]) && factSegmentPattern.MatchString(parts[2])
-	default:
+	}
+	parts := strings.Split(key, ":")
+	if len(parts) == 3 {
+		if _, ok := topicFactKeys[parts[0]+":"+parts[1]]; ok {
+			return factSegmentPattern.MatchString(parts[2])
+		}
+	}
+	return false
+}
+
+// sensitiveFactKeys are the keys whose content touches personal health or custom.
+// They are only recorded from an explicit first-person statement.
+var sensitiveFactKeys = map[string]struct{}{
+	"user:health":  {},
+	"user:culture": {},
+}
+
+func isSensitiveFactKey(key string) bool {
+	_, ok := sensitiveFactKeys[key]
+	return ok
+}
+
+// isSelfContainedContent rejects fragments, mojibake, and content-free lines so a
+// stored memory reads as a complete statement without surrounding context.
+func isSelfContainedContent(content string) bool {
+	runes := []rune(content)
+	if len(runes) < 8 {
 		return false
 	}
+	if strings.Contains(content, "??") || strings.ContainsRune(content, '�') {
+		return false
+	}
+	// Require a minimum share of letters (any script) so pure-symbol or
+	// punctuation-only lines are rejected.
+	letters := 0
+	for _, r := range runes {
+		if unicode.IsLetter(r) {
+			letters++
+		}
+	}
+	return letters*2 >= len(runes)
+}
+
+// hasFirstPersonMarker reports whether content is stated in the user's own voice,
+// required before recording sensitive health/custom facts.
+func hasFirstPersonMarker(content string) bool {
+	if strings.Contains(content, "我") {
+		return true
+	}
+	lower := strings.ToLower(content)
+	for _, marker := range []string{"i ", "i'm ", "i am ", "my ", "user "} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return strings.HasPrefix(lower, "i ") || strings.HasPrefix(lower, "my ")
 }
 
 func canonicalizeRecord(rec MemoryRecord) (MemoryRecord, error) {
@@ -144,6 +216,12 @@ func canonicalizeRecord(rec MemoryRecord) (MemoryRecord, error) {
 	}
 	if sensitivePattern.MatchString(rec.Content) || jwtPattern.MatchString(rec.Content) {
 		return MemoryRecord{}, fmt.Errorf("memory: sensitive content is not allowed")
+	}
+	if !isSelfContainedContent(rec.Content) {
+		return MemoryRecord{}, fmt.Errorf("memory: content must be a self-contained statement")
+	}
+	if isSensitiveFactKey(rec.FactKey) && !hasFirstPersonMarker(rec.Content) {
+		return MemoryRecord{}, fmt.Errorf("memory: sensitive fact %q requires a first-person statement", rec.FactKey)
 	}
 
 	authority, ok := authorityFor(rec.SourceType)

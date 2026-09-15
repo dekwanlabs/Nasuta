@@ -1,43 +1,101 @@
-Consolidate at most 5 durable memories from the user message and assistant answer.
+Decide whether the user message and assistant answer contain any durable user memory.
+Most turns produce NO memory. Default to output []. Only extract when a candidate
+clearly matches one of the categories below AND is durably useful across future
+conversations. When in doubt, output [].
+
 The input also contains existing_memories recalled before extraction.
 
 Return only a JSON array with this shape:
 [{"fact_key":"...","kind":"...","content":"one line","source_type":"...","confidence":0.0,"action":"add|refresh|replace|reject|discard","target_id":"...","relation":"new|equivalent|refinement|contradiction|unrelated","decision_confidence":0.0}]
 
-Action rules:
-- refresh: the candidate is semantically equivalent to an active existing memory. Set target_id and preserve the existing wording by choosing refresh instead of rewriting it.
-- replace: the candidate corrects, contradicts, or materially changes an active existing memory with the same fact_key. Set target_id.
-- reject: an active existing memory with the same fact_key has higher authority than the candidate. Set target_id.
+Extract at most 2 memories. Fewer is better.
+
+== Step 1: classify each candidate with this decision tree (first match wins) ==
+
+Q0. Is it a fact about the system, codebase, services, architecture, config, or
+    runtime — NOT about the user?
+    → DISCARD. These belong to the code index, never to user memory.
+    Examples to DISCARD: "hsds-scene dispatches RGB over MQTT", "the gateway layer
+    is hsmf-*", "service naming follows hs{layer}-{domain}".
+
+Q1. Did the user explicitly correct the assistant's mistake?
+    → B2 correction. kind=episode, fact_key=user:correction:<topic>, source=explicit_user.
+    Example: user says "you missed the schedule RGB chain" → record the correction.
+
+Q2. Did the user state how they want to be answered (language, style, format,
+    level of detail, evidence strictness)?
+    → A1/A2 preference. fact_key=user:response-language or user:response-style.
+    Examples: "用中文回答" → user:response-language; "draw a flow diagram" /
+    "if there is no evidence, say so" → user:response-style.
+
+Q3. Did the user reveal an attribute about themselves as a person?
+    - body/health/sleep → A5. kind=profile, fact_key=user:health. SENSITIVE.
+    - custom/culture/taboo/diet/festival → A6. kind=preference, fact_key=user:culture. SENSITIVE.
+    - job/role/project → A4. kind=profile, fact_key=user:role.
+    - life/tool preference (e.g. prefers cost-effective options, SVG, 4K) → A3.
+      kind=preference, fact_key=user:preference:<topic>.
+    - city/team/environment → A7. kind=profile, fact_key=user:environment.
+
+Q4. Is it the user's current work topic that has appeared across AT LEAST 2
+    separate sessions (not a one-off lookup)?
+    → B1 work_context. fact_key=user:current-focus.
+    A single "how do I write X" or "which service has method Y" is a one-off
+    lookup → DISCARD, do not record.
+
+Q5. None of the above, but the assistant has a high-confidence, durably useful
+    inference about the user?
+    → C1. kind=assistant_inference, fact_key=user:profile-inference,
+    source=assistant_inference. Use sparingly.
+    Otherwise → DISCARD.
+
+== Step 2: write content as one self-contained statement ==
+
+Content must be a complete sentence that a reader understands with NO other
+context. No fragments, no pronouns without antecedents, no mixed-language scraps,
+no placeholders. Use the user's primary language.
+
+Templates:
+- preference: "用户希望{回答/事物}具备{什么特征}。" e.g. "用户希望回答使用中文。"
+- profile: "用户是{角色}，{负责/在做}{领域}。" e.g. "用户是后端工程师，在做多 agent 项目。"
+- work_context: "用户近期持续在{做什么}。" e.g. "用户近期在梳理 RGB、消息中心、菜谱、TTS 四大业务流程。"
+- episode: "用户曾于{时间}{纠正/决定}{什么}。" e.g. "用户曾纠正 assistant 遗漏 schedule RGB 执行链。"
+- health (sensitive): "用户在{健康/作息}上有{约束}。" e.g. "用户提到自己作息倾向早起。"
+- culture (sensitive): "用户在{文化/习俗}上偏好{什么}。" e.g. "用户提到饮食上不吃辣。"
+
+== Step 3: choose fact_key from this controlled vocabulary (never invent new keys) ==
+
+Single-slot keys (one active record per user, no topic suffix):
+  user:response-language, user:response-style, user:current-focus, user:role,
+  user:health, user:culture, user:environment, user:profile-inference
+Topic keys (one kebab-case topic segment):
+  user:preference:<topic>, user:correction:<topic>
+
+Map paraphrases of the same fact to the same key. Do NOT use any workspace:* key.
+
+== Source and kind rules ==
+
+- explicit_user only when the user explicitly asks to remember or correct a fact.
+- user_stated only for a clear statement from the user message.
+- assistant_inference only for a conclusion originating from the assistant answer;
+  it must use kind assistant_inference. User-sourced records must not use it.
+- SENSITIVE keys (user:health, user:culture): record ONLY when the user states it
+  in the first person ("我…" / "I …"). Record the constraint, never a specific
+  diagnosis or identity detail. Otherwise DISCARD.
+
+== Action rules ==
+
+- refresh: the candidate is semantically equivalent to an active existing memory.
+  Set target_id and preserve the existing wording.
+- replace: the candidate corrects, contradicts, or materially changes an active
+  existing memory with the same fact_key. Set target_id.
+- reject: an active existing memory with the same fact_key has higher authority
+  than the candidate. Set target_id.
 - add: no active existing memory represents the same fact. target_id must be empty.
 - discard: the turn contains no durable fact for this candidate.
 - Never target a superseded memory. Use only IDs supplied in existing_memories.
 - Similar wording is not enough for refresh when meanings conflict.
-- Use decision_confidence for confidence in the action and relation, separately from confidence in the extracted fact.
+- Use decision_confidence for confidence in the action and relation, separately
+  from confidence in the extracted fact.
 
-Allowed fact_key forms:
-- user:response-language
-- user:response-style
-- user:role:<domain>
-- user:current-focus
-- workspace:<entity>:<attribute>
-
-Use lowercase kebab-case for variable segments. Map paraphrases of the same fact to the same key.
-
-Allowed kinds:
-- preference
-- profile
-- work_context
-- episode
-- assistant_inference
-
-Source rules:
-- explicit_user only when the user explicitly asks to remember or correct a fact.
-- user_stated only for a clear statement from the user message.
-- assistant_inference only for a conclusion originating from the assistant answer.
-- assistant_inference source must use assistant_inference kind.
-- user-sourced records must not use assistant_inference kind.
-
-Memory is for user preferences, roles, reusable work context, and historical experience.
-Do not save current workspace/service/config/schema/runtime claims as user facts.
-Do not save secrets, tokens, passwords, trace payloads, full logs, temporary debugging steps, or one-off requests.
-Use episode for explicitly historical user statements. Output [] when nothing qualifies.
+Do not save secrets, tokens, passwords, trace payloads, full logs, temporary
+debugging steps, or one-off requests. Output [] when nothing qualifies.
