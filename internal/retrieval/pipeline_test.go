@@ -3,7 +3,9 @@ package retrieval
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dekwanlabs/nasuta/config"
@@ -200,6 +202,63 @@ func TestAssembleRuneSafeTruncation(t *testing.T) {
 	}
 	if !strings.Contains(rc.Text, "关键代码证据") {
 		t.Fatal("high-priority Code Evidence was dropped; priority ordering not applied")
+	}
+}
+
+// concurrentSearchTools blocks each code search for a fixed delay and records
+// the peak number of searches running at once, so a test can prove the
+// per-entity fan-out actually runs concurrently.
+type concurrentSearchTools struct {
+	servicePathFakeTools
+	delay    time.Duration
+	inFlight atomic.Int32
+	peak     atomic.Int32
+}
+
+func (tools *concurrentSearchTools) FindCode(ctx context.Context, _, _ string, _ int) (domain.SearchResult[domain.CodeSearchHit], error) {
+	current := tools.inFlight.Add(1)
+	for {
+		peak := tools.peak.Load()
+		if current <= peak || tools.peak.CompareAndSwap(peak, current) {
+			break
+		}
+	}
+	defer tools.inFlight.Add(-1)
+	select {
+	case <-time.After(tools.delay):
+	case <-ctx.Done():
+		return domain.SearchResult[domain.CodeSearchHit]{}, ctx.Err()
+	}
+	return domain.SearchResult[domain.CodeSearchHit]{}, nil
+}
+
+func TestRetrievePerEntityRunsEntitiesConcurrently(t *testing.T) {
+	const entities = 4
+	const delay = 120 * time.Millisecond
+	tools := &concurrentSearchTools{delay: delay}
+	retrieve := New(tools, config.Config{})
+	specs := make([]domain.EntitySpec, 0, entities)
+	for i := 0; i < entities; i++ {
+		label := string(rune('a' + i))
+		specs = append(specs, domain.EntitySpec{ID: label, Label: label})
+	}
+	started := time.Now()
+	_, err := retrieve.RetrievePlan(
+		context.Background(), "compare", QueryTerms{},
+		domain.EvidencePlan{Sources: domain.Internal},
+		domain.QueryPlan{Kind: domain.QueryComparison, Entities: []string{"a", "b", "c", "d"}, EntitySpecs: specs},
+	)
+	if err != nil {
+		t.Fatalf("RetrievePlan: %v", err)
+	}
+	elapsed := time.Since(started)
+	if peak := tools.peak.Load(); peak < 2 {
+		t.Fatalf("peak concurrent searches = %d, want >1 (entities ran sequentially)", peak)
+	}
+	// Sequential execution would take at least entities*delay; concurrency keeps
+	// it near a single delay. Use a generous bound to stay robust on CI.
+	if elapsed >= time.Duration(entities)*delay {
+		t.Fatalf("per-entity retrieval took %v, want well under %v (sequential bound)", elapsed, time.Duration(entities)*delay)
 	}
 }
 

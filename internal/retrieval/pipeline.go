@@ -22,6 +22,7 @@ import (
 	"github.com/dekwanlabs/nasuta/log"
 	"github.com/dekwanlabs/nasuta/platform"
 	"github.com/dekwanlabs/nasuta/tool"
+	"golang.org/x/sync/errgroup"
 )
 
 // Reference is one source surfaced with retrieved context.
@@ -332,26 +333,47 @@ func (retrieve *Retriever) retrievePerEntity(
 			entities = append(entities, domain.EntitySpec{ID: id, Label: id})
 		}
 	}
+	// Each entity runs the full pipeline independently, so they fan out
+	// concurrently. Results land in per-index slots (no shared map, no lock);
+	// the merge below still folds in entity order, so output is deterministic.
+	type entityResult struct {
+		sub     *RetrievedContext
+		covered bool
+	}
+	results := make([]entityResult, len(entities))
+	group, groupCtx := errgroup.WithContext(ctx)
+	for index, entity := range entities {
+		index, entity := index, entity
+		group.Go(func() error {
+			entityQuery := buildEntityQuery(entity)
+			if entityQuery == "" {
+				return nil
+			}
+			sub, err := retrieve.retrieveSingle(groupCtx, entityQuery, terms, evidencePlan, query)
+			if err != nil {
+				return err
+			}
+			if sub != nil && sub.HitCount > 0 {
+				results[index].sub = sub
+				results[index].covered = true
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
 	sections := make(map[string]*RetrievedContext, len(entities))
 	order := make([]string, 0, len(entities))
 	coverage := make(map[string]bool, len(entities))
-	for _, entity := range entities {
-		entityQuery := buildEntityQuery(entity)
-		if entityQuery == "" {
-			coverage[entity.ID] = false
-			continue
+	for index, entity := range entities {
+		result := results[index]
+		coverage[entity.ID] = result.covered
+		if result.covered {
+			sections[entity.ID] = result.sub
+			order = append(order, entity.ID)
 		}
-		sub, err := retrieve.retrieveSingle(ctx, entityQuery, terms, evidencePlan, query)
-		if err != nil {
-			return nil, err
-		}
-		if sub == nil || sub.HitCount == 0 {
-			coverage[entity.ID] = false
-			continue
-		}
-		coverage[entity.ID] = true
-		sections[entity.ID] = sub
-		order = append(order, entity.ID)
 	}
 
 	// Fold the partitions into one top-level context so the parent's whole-view
