@@ -2638,8 +2638,13 @@ func (executor *Executor) runRequest(
 		Permissions:    task.permissions,
 		// Investigators are not tool-allowlisted; the definition already grants
 		// the full read-only set and the verifier definition stays tool-free, so
-		// no per-run visible-ID restriction is needed here.
-		ToolScope: agentapi.ToolScope{},
+		// no per-run visible-ID restriction is needed here. The delegation tools
+		// are denied instead: a child must investigate its own subject with the
+		// plain read tools, never fan out a nested delegation (depth is capped at
+		// 1, so offering the tool only surfaces a rejected card and wastes a step).
+		ToolScope: agentapi.ToolScope{
+			ExcludedToolIDs: []string{string(DelegateToolID), string(DelegationStatusToolID)},
+		},
 		Policy: agentapi.RunPolicy{
 			EvidenceRequired: true, EvidenceSeeded: len(task.context) > 0,
 			MaxToolCalls: task.limits.MaxToolCalls,

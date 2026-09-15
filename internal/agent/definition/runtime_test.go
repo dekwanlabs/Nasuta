@@ -472,6 +472,40 @@ func TestDefinitionRuntimeRejectsRequestToolOutsideDefinition(t *testing.T) {
 	}
 }
 
+// A run's ExcludedToolIDs drops parent-only tools from the resolved surface
+// without requiring a full allowlist, leaving every other read tool in place.
+func TestDefinitionRuntimeExcludesRequestTools(t *testing.T) {
+	registry := testRegistry(t,
+		testAgentTool("read", ToolKindRead, noopTool),
+		testAgentTool("search", ToolKindRead, noopTool),
+		testAgentTool("delegate_investigation", ToolKindRead, noopTool),
+		testAgentTool("delegation_status", ToolKindRead, noopTool),
+	)
+	definition := testReviewerDefinition(t, func(definition *agentapi.Definition) {
+		definition.Budget.MaxToolCalls = 4
+	})
+	runtime := newTestDefinitionRuntime(
+		t, definition, registry, testRuntimeSettings("http://unused"), nil,
+	)
+	request := testDefinitionRequest(definition)
+	request.ToolScope = agentapi.ToolScope{
+		ExcludedToolIDs: []string{"delegate_investigation", "delegation_status"},
+	}
+
+	execution, err := runtime.prepare(request)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if got := strings.Join(execution.snapshot.VisibleToolIDs, ","); got != "read,search" {
+		t.Fatalf("visible tools after exclusion = %q, want read,search", got)
+	}
+	for _, excluded := range []string{"delegate_investigation", "delegation_status"} {
+		if _, ok := execution.toolSnapshot.Get(tool.ToolID(excluded)); ok {
+			t.Fatalf("excluded tool %q entered the run snapshot", excluded)
+		}
+	}
+}
+
 func TestDefinitionRuntimePreservesExplicitZeroToolScope(t *testing.T) {
 	registry := testRegistry(t, testAgentTool("read", ToolKindRead, noopTool))
 	definition := testReviewerDefinition(t, nil)

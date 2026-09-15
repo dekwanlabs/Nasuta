@@ -382,6 +382,25 @@ func (snapshot Snapshot) Select(ids map[ToolID]struct{}) Snapshot {
 	return Snapshot{revision: snapshot.revision, tools: tools, order: order}
 }
 
+// Exclude returns the snapshot minus the given IDs, preserving order. It is the
+// denylist counterpart to Select for callers that want the full surface minus a
+// known few (e.g. a child run must not re-expose the delegation tools).
+func (snapshot Snapshot) Exclude(ids map[ToolID]struct{}) Snapshot {
+	if len(ids) == 0 {
+		return snapshot
+	}
+	tools := make(map[ToolID]Tool, len(snapshot.tools))
+	order := make([]ToolID, 0, len(snapshot.order))
+	for _, id := range snapshot.order {
+		if _, excluded := ids[id]; excluded {
+			continue
+		}
+		tools[id] = cloneTool(snapshot.tools[id])
+		order = append(order, id)
+	}
+	return Snapshot{revision: snapshot.revision, tools: tools, order: order}
+}
+
 func cloneTool(candidate Tool) Tool {
 	candidate.InputSchema = cloneSchema(candidate.InputSchema)
 	candidate.ReferenceInputs = cloneReferenceInputs(candidate.ReferenceInputs)

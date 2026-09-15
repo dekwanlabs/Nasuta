@@ -436,6 +436,7 @@ func (runtime *Runtime) prepareTools(
 		return toolSelection{}, err
 	}
 	toolSnapshot := runtime.buildToolSnapshot(policy, allowedToolIDs, restricted)
+	toolSnapshot = excludeRequestTools(toolSnapshot, request.ExcludedToolIDs)
 	visibleToolIDs, available := collectVisibleTools(toolSnapshot)
 	offeredTools, err := canonicalToolIDSet(request.OfferedToolIDs)
 	if err != nil {
@@ -510,6 +511,22 @@ func (runtime *Runtime) buildToolSnapshot(
 		return baseSnapshot.Select(allowedToolIDs)
 	}
 	return baseSnapshot
+}
+
+// excludeRequestTools applies the run's denylist after the allowlist snapshot is
+// resolved. Excluded IDs are silently dropped whether or not they were present,
+// so a denylist never fails a run the way an out-of-definition allowlist does.
+func excludeRequestTools(snapshot tool.Snapshot, excluded []string) tool.Snapshot {
+	if len(excluded) == 0 {
+		return snapshot
+	}
+	ids := make(map[tool.ToolID]struct{}, len(excluded))
+	for _, id := range excluded {
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			ids[tool.ToolID(trimmed)] = struct{}{}
+		}
+	}
+	return snapshot.Exclude(ids)
 }
 
 func toolIDSet(tools []tool.Tool) map[tool.ToolID]struct{} {
@@ -618,6 +635,7 @@ func cloneRunRequest(request agentapi.RunRequest) *agentapi.RunRequest {
 	copy.Context = append([]agentapi.ContextBlock(nil), request.Context...)
 	copy.Permissions.Scopes = append([]string(nil), request.Permissions.Scopes...)
 	copy.ToolScope.VisibleToolIDs = append([]string(nil), request.ToolScope.VisibleToolIDs...)
+	copy.ToolScope.ExcludedToolIDs = append([]string(nil), request.ToolScope.ExcludedToolIDs...)
 	copy.ToolScope.OfferedToolIDs = append([]string(nil), request.ToolScope.OfferedToolIDs...)
 	copy.Policy.OutputContract.Subjects = append([]string(nil), request.Policy.OutputContract.Subjects...)
 	return &copy

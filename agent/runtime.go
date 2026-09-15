@@ -73,6 +73,10 @@ type ToolScope struct {
 	// RestrictVisible makes VisibleToolIDs an allowlist instead of descriptive metadata.
 	RestrictVisible bool     `json:"restrict_visible"`
 	VisibleToolIDs  []string `json:"visible_tool_ids,omitempty"`
+	// ExcludedToolIDs removes specific tools from the resolved surface without
+	// requiring a full allowlist. A child run uses it to drop parent-only tools
+	// (e.g. delegate_investigation) while keeping the rest of the read-only set.
+	ExcludedToolIDs []string `json:"excluded_tool_ids,omitempty"`
 	// OfferedToolIDs records the pre-pruning surface for auditability.
 	OfferedToolIDs []string `json:"offered_tool_ids,omitempty"`
 	// PruneApplied records that runtime selection narrowed the offered tool surface.
