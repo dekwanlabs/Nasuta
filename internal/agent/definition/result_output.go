@@ -90,6 +90,7 @@ func normalizeOutputForSchema(ref agentapi.SchemaRef, raw json.RawMessage) json.
 		return raw
 	}
 	changed := false
+	changed = stripUnknownReportFields(report) || changed
 	changed = normalizeFindingEvidence(report) || changed
 	changed = normalizeDiscoveredEntities(report) || changed
 	changed = normalizeDiscoveredDependencies(report) || changed
@@ -101,6 +102,144 @@ func normalizeOutputForSchema(ref agentapi.SchemaRef, raw json.RawMessage) json.
 		return raw
 	}
 	return normalized
+}
+
+// investigationReportFields mirrors the additionalProperties:false objects in
+// the investigation.report schema. The model occasionally hallucinates an extra
+// key at any nesting level (e.g. a "summary_scope" on an evidence item); such a
+// key is rejected by the schema validator and would otherwise sink the whole
+// report into the dependency-graph fallback. These keys are never read back —
+// downstream consumers decode into typed structs that ignore unknown fields —
+// so dropping them is lossless and keeps the model's own findings and flow.
+//
+// A zero fieldRule{} marks a leaf (no recursion); objectOf marks a nested
+// object; arrayOf marks an array of objects.
+var investigationReportFields = objectFields{
+	"focus":                     fieldRule{},
+	"summary":                   fieldRule{},
+	"findings":                  arrayOf(findingFields),
+	"gaps":                      fieldRule{},
+	"covered_evidence_goals":    fieldRule{},
+	"unresolved_evidence_goals": fieldRule{},
+	"discovered_entities":       fieldRule{},
+	"discovered_dependencies":   arrayOf(dependencyFields),
+	"flow":                      objectOf(flowFields),
+}
+
+var findingFields = objectFields{
+	"claim":             fieldRule{},
+	"entity_ids":        fieldRule{},
+	"evidence_goal_ids": fieldRule{},
+	"evidence":          arrayOf(evidenceFields),
+	"confidence":        fieldRule{},
+}
+
+var evidenceFields = objectFields{
+	"kind":        fieldRule{},
+	"reference":   fieldRule{},
+	"summary":     fieldRule{},
+	"evidence_id": fieldRule{},
+	"identity":    objectOf(identityFields),
+}
+
+var identityFields = objectFields{
+	"source_kind": fieldRule{},
+	"target":      fieldRule{},
+	"section":     fieldRule{},
+	"version":     fieldRule{},
+	"time_range":  fieldRule{},
+}
+
+var flowFields = objectFields{
+	"subject":    fieldRule{},
+	"status":     fieldRule{},
+	"nodes":      arrayOf(flowNodeFields),
+	"edges":      arrayOf(flowEdgeFields),
+	"open_hops":  fieldRule{},
+	"confidence": fieldRule{},
+}
+
+var flowNodeFields = objectFields{
+	"id":            fieldRule{},
+	"label":         fieldRule{},
+	"kind":          fieldRule{},
+	"evidence_refs": fieldRule{},
+}
+
+var flowEdgeFields = objectFields{
+	"from":           fieldRule{},
+	"to":             fieldRule{},
+	"protocol":       fieldRule{},
+	"sync_mode":      fieldRule{},
+	"evidence_refs":  fieldRule{},
+	"evidence_state": fieldRule{},
+}
+
+var dependencyFields = objectFields{
+	"from": fieldRule{},
+	"to":   fieldRule{},
+	"kind": fieldRule{},
+}
+
+// fieldRule is the recursion target for one whitelisted key: exactly one of
+// object or items is set for a composite value; neither for a leaf.
+type fieldRule struct {
+	object objectFields
+	items  objectFields
+}
+
+// objectFields maps an allowed key to its recursion rule.
+type objectFields map[string]fieldRule
+
+func objectOf(fields objectFields) fieldRule { return fieldRule{object: fields} }
+
+func arrayOf(fields objectFields) fieldRule { return fieldRule{items: fields} }
+
+// stripUnknownReportFields removes keys not present in the schema whitelist at
+// every nesting level of the report. Only whitelisted keys are kept; required
+// fields are never invented here, so a report missing them still fails
+// validation and falls through to recovery as before.
+func stripUnknownReportFields(report map[string]any) bool {
+	return stripObjectFields(report, investigationReportFields)
+}
+
+func stripObjectFields(obj map[string]any, fields objectFields) bool {
+	changed := false
+	for key, value := range obj {
+		rule, allowed := fields[key]
+		if !allowed {
+			delete(obj, key)
+			changed = true
+			continue
+		}
+		if stripValueFields(value, rule) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func stripValueFields(value any, rule fieldRule) bool {
+	switch {
+	case rule.object != nil:
+		nested, ok := value.(map[string]any)
+		return ok && stripObjectFields(nested, rule.object)
+	case rule.items != nil:
+		array, ok := value.([]any)
+		if !ok {
+			return false
+		}
+		changed := false
+		for _, item := range array {
+			element, ok := item.(map[string]any)
+			if ok && stripObjectFields(element, rule.items) {
+				changed = true
+			}
+		}
+		return changed
+	default:
+		return false
+	}
 }
 
 func normalizeFindingEvidence(report map[string]any) bool {

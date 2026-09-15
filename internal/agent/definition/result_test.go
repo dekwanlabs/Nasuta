@@ -242,7 +242,6 @@ func investigationReportRecoveryContract() json.RawMessage {
 	}`)
 }
 
-
 func TestCanonicalStructuredOutput(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -426,6 +425,88 @@ func TestValidatedInvestigationReportNormalizesEvidenceMetadata(t *testing.T) {
 	}
 	if _, ok := evidence[2]["evidence_id"]; ok {
 		t.Fatalf("invalid evidence handle was retained: %#v", evidence[2])
+	}
+}
+
+// A hallucinated extra key at any nesting level must not sink the report into
+// the dependency-graph fallback: it is stripped, the model's own findings and
+// flow survive validation.
+func TestValidatedInvestigationReportStripsUnknownFields(t *testing.T) {
+	registry := agentapi.NewSchemaRegistry()
+	if err := registry.Publish(catalog.DefaultSchemas()); err != nil {
+		t.Fatalf("publish schemas: %v", err)
+	}
+	report := map[string]any{
+		"focus":          "runtime",
+		"summary":        "cookbook flow",
+		"extra_root_key": "must be dropped",
+		"findings": []any{
+			map[string]any{
+				"claim":             "H5RecipeController serves recipe detail.",
+				"evidence_goal_ids": []string{"entrypoint"},
+				"evidence": []any{
+					map[string]any{
+						"kind":          "code",
+						"reference":     "H5RecipeController.java#GET /recipe/detail",
+						"summary":       "queryRecipe maps GET /recipe/detail",
+						"summary_scope": "call-site",
+					},
+				},
+				"confidence": 0.85,
+			},
+		},
+		"gaps":                      []string{},
+		"covered_evidence_goals":    []string{"entrypoint"},
+		"unresolved_evidence_goals": []string{},
+		"flow": map[string]any{
+			"subject": "cookbook e2e",
+			"status":  "partial",
+			"nodes": []any{
+				map[string]any{"id": "n1", "label": "hsas-cookbook", "kind": "service", "bogus": true},
+			},
+			"edges": []any{
+				map[string]any{"from": "n1", "to": "n2", "evidence_state": "verified", "weight": 3},
+			},
+			"open_hops":  []string{},
+			"confidence": "medium",
+		},
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	got, err := validatedOutput(registry, agentapi.InvestigationReportSchemaRef(), string(raw))
+	if err != nil {
+		t.Fatalf("validatedOutput() rejected report with only unknown extra keys: %v", err)
+	}
+
+	var decoded struct {
+		Findings []struct {
+			Evidence []map[string]any `json:"evidence"`
+		} `json:"findings"`
+		Flow struct {
+			Subject string           `json:"subject"`
+			Nodes   []map[string]any `json:"nodes"`
+			Edges   []map[string]any `json:"edges"`
+		} `json:"flow"`
+	}
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("decode normalized report: %v", err)
+	}
+	if _, ok := decoded.Findings[0].Evidence[0]["summary_scope"]; ok {
+		t.Fatalf("unknown evidence key was retained: %#v", decoded.Findings[0].Evidence[0])
+	}
+	if decoded.Findings[0].Evidence[0]["summary"] != "queryRecipe maps GET /recipe/detail" {
+		t.Fatalf("model evidence summary was lost: %#v", decoded.Findings[0].Evidence[0])
+	}
+	if decoded.Flow.Subject != "cookbook e2e" {
+		t.Fatalf("model flow was replaced by fallback: %#v", decoded.Flow)
+	}
+	if _, ok := decoded.Flow.Nodes[0]["bogus"]; ok {
+		t.Fatalf("unknown flow_node key was retained: %#v", decoded.Flow.Nodes[0])
+	}
+	if _, ok := decoded.Flow.Edges[0]["weight"]; ok {
+		t.Fatalf("unknown flow_edge key was retained: %#v", decoded.Flow.Edges[0])
 	}
 }
 
@@ -1197,9 +1278,9 @@ func TestMapResultRecoversTruncatedInvestigationReportPreservingEvidence(t *test
 		registry,
 		agentapi.InvestigationReportSchemaRef(),
 		outputRecoveryContext{
-			AgentID:             "investigator.code",
-			Input:               investigationReportRecoveryContract(),
-			EvidenceUnits:       units,
+			AgentID:              "investigator.code",
+			Input:                investigationReportRecoveryContract(),
+			EvidenceUnits:        units,
 			EvidenceObservations: nil,
 		},
 	)
@@ -1211,9 +1292,9 @@ func TestMapResultRecoversTruncatedInvestigationReportPreservingEvidence(t *test
 		Findings []struct {
 			Claim string `json:"claim"`
 		} `json:"findings"`
-		Flow                   *agentapi.FlowIR `json:"flow"`
-		CoveredEvidenceGoals   []string         `json:"covered_evidence_goals"`
-		UnresolvedEvidenceGoals []string        `json:"unresolved_evidence_goals"`
+		Flow                    *agentapi.FlowIR `json:"flow"`
+		CoveredEvidenceGoals    []string         `json:"covered_evidence_goals"`
+		UnresolvedEvidenceGoals []string         `json:"unresolved_evidence_goals"`
 	}
 	if err := json.Unmarshal(result.Output, &report); err != nil {
 		t.Fatalf("decode recovered report: %v", err)
