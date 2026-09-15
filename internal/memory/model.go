@@ -113,16 +113,18 @@ var fixedFactKeys = map[string]struct{}{
 	"user:response-language": {},
 	"user:response-style":    {},
 	"user:current-focus":     {},
-	"user:role":              {},
 	"user:health":            {},
 	"user:culture":           {},
 	"user:environment":       {},
 	"user:profile-inference": {},
 }
 
-// topicFactKeys are the keys that carry one kebab-case topic segment
-// (user:preference:<topic>, user:correction:<topic>).
+// topicFactKeys are the keys that carry one kebab-case topic segment. They allow
+// multiple records per user (one per topic) while keeping the namespace closed:
+// user:role:<domain> for each distinct role, user:preference:<topic> for a life
+// or tool preference, user:correction:<topic> for a past correction.
 var topicFactKeys = map[string]struct{}{
+	"user:role":       {},
 	"user:preference": {},
 	"user:correction": {},
 }

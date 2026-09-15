@@ -7,11 +7,12 @@ func TestValidFactKeyControlledVocabulary(t *testing.T) {
 		"user:response-language",
 		"user:response-style",
 		"user:current-focus",
-		"user:role",
 		"user:health",
 		"user:culture",
 		"user:environment",
 		"user:profile-inference",
+		"user:role:device-assistant", // one slot per distinct role
+		"user:role:iot-risk-control",
 		"user:preference:svg",
 		"user:correction:schedule-rgb",
 	}
@@ -24,7 +25,7 @@ func TestValidFactKeyControlledVocabulary(t *testing.T) {
 	rejected := []string{
 		"workspace:hesung-iot:architecture", // system/codebase fact, not a user memory
 		"workspace:bert-slot:status",
-		"user:role:iot",        // domain suffix forked the single role slot
+		"user:role",            // role requires a domain segment
 		"user:preference:",     // empty topic
 		"user:preference:SVG",  // topic must be kebab-case lowercase
 		"user:unknown",         // not in the vocabulary

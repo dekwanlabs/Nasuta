@@ -31,7 +31,8 @@ Q2. Did the user state how they want to be answered (language, style, format,
 Q3. Did the user reveal an attribute about themselves as a person?
     - body/health/sleep → A5. kind=profile, fact_key=user:health. SENSITIVE.
     - custom/culture/taboo/diet/festival → A6. kind=preference, fact_key=user:culture. SENSITIVE.
-    - job/role/project → A4. kind=profile, fact_key=user:role.
+    - job/role/project → A4. kind=profile, fact_key=user:role:<domain> (one domain
+      per distinct role, e.g. user:role:backend, user:role:device-assistant).
     - life/tool preference (e.g. prefers cost-effective options, SVG, 4K) → A3.
       kind=preference, fact_key=user:preference:<topic>.
     - city/team/environment → A7. kind=profile, fact_key=user:environment.
@@ -65,12 +66,14 @@ Templates:
 == Step 3: choose fact_key from this controlled vocabulary (never invent new keys) ==
 
 Single-slot keys (one active record per user, no topic suffix):
-  user:response-language, user:response-style, user:current-focus, user:role,
+  user:response-language, user:response-style, user:current-focus,
   user:health, user:culture, user:environment, user:profile-inference
-Topic keys (one kebab-case topic segment):
-  user:preference:<topic>, user:correction:<topic>
+Topic keys (one kebab-case topic segment, one slot per topic):
+  user:role:<domain>, user:preference:<topic>, user:correction:<topic>
 
-Map paraphrases of the same fact to the same key. Do NOT use any workspace:* key.
+Map paraphrases of the same fact to the same key and the same topic/domain segment
+(e.g. the same role always maps to the same user:role:<domain>). Do NOT use any
+workspace:* key.
 
 == Source and kind rules ==
 
