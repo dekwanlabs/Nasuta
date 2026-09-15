@@ -132,6 +132,38 @@ func TestCurrentRecallFiltersSupersededExpiredAndEpisodeRecords(t *testing.T) {
 	}
 }
 
+func TestCurrentRecallFiltersSensitiveRecords(t *testing.T) {
+	memory, semanticStore, mock, closeDB := newMemoryTestStore(t)
+	defer closeDB()
+	semanticStore.hits = memoryHits("health", "language")
+	now := memory.now()
+	rows := sqlmock.NewRows(memoryColumns()).
+		AddRow(memoryRow("health", 42, "user:health", KindProfile, "我作息倾向早起。", SourceUserStated, StatusActive, nil, nil, now)...).
+		AddRow(memoryRow("language", 42, "user:response-language", KindPreference, "Use Chinese", SourceExplicitUser, StatusActive, nil, nil, now)...)
+	mock.ExpectQuery(`(?s)SELECT .*WHERE id IN \(\?,\?\)`).
+		WithArgs("health", "language", int64(42)).
+		WillReturnRows(rows)
+	mock.ExpectExec(`(?s)UPDATE qa_memories.*id IN \(\?\)`).
+		WithArgs(sqlmock.AnyArg(), "language", int64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	result, err := memory.RecallWithIntent(context.Background(), 42, "current preferences", TemporalCurrent, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The sensitive health fact stays out of the default QA context; only the
+	// non-sensitive language preference is injected.
+	if len(result.Records) != 1 || result.Records[0].ID != "language" {
+		t.Fatalf("records = %#v", result.Records)
+	}
+	if result.Stats.SensitiveFiltered != 1 {
+		t.Fatalf("stats = %#v", result.Stats)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHistoricalRecallAllowsEpisodeAndSuperseded(t *testing.T) {
 	memory, semanticStore, mock, closeDB := newMemoryTestStore(t)
 	defer closeDB()
@@ -269,7 +301,7 @@ func memoryColumns() []string {
 	return []string{
 		"id", "user_id", "fact_key", "kind", "content", "source_type", "authority", "status",
 		"superseded_by", "source_session", "confidence", "expires_at", "created_at", "updated_at",
-		"last_used", "use_count",
+		"last_used", "use_count", "sensitive",
 	}
 }
 
@@ -292,7 +324,7 @@ func memoryRow(
 	}
 	return []driver.Value{
 		id, userID, factKey, string(kind), content, string(source), authority, string(status),
-		supersededBy, "", 1.0, expiry, now, now, nil, 0,
+		supersededBy, "", 1.0, expiry, now, now, nil, 0, isSensitiveFactKey(factKey),
 	}
 }
 

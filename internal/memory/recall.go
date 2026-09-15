@@ -32,6 +32,7 @@ type RecallStats struct {
 	SupersededFiltered int
 	ExpiredFiltered    int
 	EpisodeFiltered    int
+	SensitiveFiltered  int
 	Injected           int
 }
 
@@ -150,6 +151,12 @@ func (memory *MemoryStore) RecallWithIntent(ctx context.Context, userID int64, q
 		}
 		if rec.ExpiresAt != nil && !rec.ExpiresAt.After(now) {
 			result.Stats.ExpiredFiltered++
+			continue
+		}
+		// Sensitive (health/custom) facts stay out of the default QA context so an
+		// unrelated answer never quotes them; they remain visible to management.
+		if rec.Sensitive {
+			result.Stats.SensitiveFiltered++
 			continue
 		}
 		if intent == TemporalCurrent {

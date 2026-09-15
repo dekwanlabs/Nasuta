@@ -18,7 +18,7 @@ import (
 )
 
 const memorySelectColumns = `id,user_id,fact_key,kind,content,source_type,authority,status,
-	superseded_by,source_session,confidence,expires_at,created_at,updated_at,last_used,use_count`
+	superseded_by,source_session,confidence,expires_at,created_at,updated_at,last_used,use_count,is_sensitive`
 
 const memoryBM25RebuildBatch = 64
 
@@ -281,11 +281,11 @@ func insertMemory(ctx context.Context, tx *sql.Tx, rec MemoryRecord) error {
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO qa_memories(
 			id,user_id,fact_key,kind,content,source_type,authority,status,superseded_by,
-			source_session,confidence,expires_at,created_at,updated_at,last_used,use_count
-		 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			source_session,confidence,expires_at,created_at,updated_at,last_used,use_count,is_sensitive
+		 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		rec.ID, rec.UserID, rec.FactKey, rec.Kind, rec.Content, rec.SourceType, rec.Authority,
 		rec.Status, nullableString(rec.SupersededBy), rec.SourceSession, rec.Confidence, rec.ExpiresAt,
-		rec.CreatedAt, rec.UpdatedAt, rec.LastUsed, rec.UseCount,
+		rec.CreatedAt, rec.UpdatedAt, rec.LastUsed, rec.UseCount, rec.Sensitive,
 	)
 	if err != nil {
 		return fmt.Errorf("memory: insert fact %q: %w", rec.FactKey, err)
@@ -439,7 +439,7 @@ func scanMemory(scan scanner) (*MemoryRecord, error) {
 	err := scan(
 		&rec.ID, &rec.UserID, &rec.FactKey, &rec.Kind, &rec.Content, &rec.SourceType,
 		&rec.Authority, &rec.Status, &supersededBy, &sourceSession, &rec.Confidence,
-		&expiresAt, &createdAt, &updatedAt, &lastUsed, &rec.UseCount,
+		&expiresAt, &createdAt, &updatedAt, &lastUsed, &rec.UseCount, &rec.Sensitive,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

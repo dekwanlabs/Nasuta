@@ -186,12 +186,12 @@ func TestWriteAppliesTTLToExtractedWorkContext(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(memoryColumns()))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO qa_memories(
 			id,user_id,fact_key,kind,content,source_type,authority,status,superseded_by,
-			source_session,confidence,expires_at,created_at,updated_at,last_used,use_count
-		 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
+			source_session,confidence,expires_at,created_at,updated_at,last_used,use_count,is_sensitive
+		 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
 		WithArgs(
 			id, int64(42), "user:current-focus", KindWorkContext, "Refactor user center",
 			SourceUserStated, AuthorityUserStated, StatusActive, nil, "", float32(1),
-			now.Add(24*time.Hour), now, now, nil, 0,
+			now.Add(24*time.Hour), now, now, nil, 0, false,
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -301,12 +301,12 @@ func TestCanonicalizeRecordRejectsSecrets(t *testing.T) {
 func expectMemoryInsert(mock sqlmock.Sqlmock, id string, status MemoryStatus, supersededBy any) {
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO qa_memories(
 			id,user_id,fact_key,kind,content,source_type,authority,status,superseded_by,
-			source_session,confidence,expires_at,created_at,updated_at,last_used,use_count
-		 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
+			source_session,confidence,expires_at,created_at,updated_at,last_used,use_count,is_sensitive
+		 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)).
 		WithArgs(
 			id, int64(42), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), status, supersededBy, "", float32(1), nil,
-			sqlmock.AnyArg(), sqlmock.AnyArg(), nil, 0,
+			sqlmock.AnyArg(), sqlmock.AnyArg(), nil, 0, sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 }

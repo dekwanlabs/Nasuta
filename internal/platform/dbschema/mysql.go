@@ -651,6 +651,7 @@ var mysqlSchema = map[MySQLGroup][]string{
 				updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 				last_used      DATETIME NULL DEFAULT NULL,
 				use_count      INT NOT NULL DEFAULT 0,
+				is_sensitive   TINYINT(1) NOT NULL DEFAULT 0,
 				active_fact_key VARCHAR(255)
 					GENERATED ALWAYS AS (CASE WHEN status = 'active' THEN fact_key ELSE NULL END) STORED,
 				UNIQUE KEY uniq_user_factkey_active (user_id, active_fact_key),

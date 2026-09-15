@@ -75,18 +75,26 @@ func TestCanonicalizeRecordSensitiveFactRequiresFirstPerson(t *testing.T) {
 		t.Fatal("sensitive fact without first-person marker was accepted")
 	}
 
-	// The same fact in the user's own voice is accepted.
+	// The same fact in the user's own voice is accepted and marked sensitive.
 	rec.Content = "我作息倾向早起。"
-	if _, err := canonicalizeRecord(rec); err != nil {
+	canonical, err := canonicalizeRecord(rec)
+	if err != nil {
 		t.Fatalf("first-person sensitive fact rejected: %v", err)
 	}
+	if !canonical.Sensitive {
+		t.Fatal("health fact was not marked sensitive")
+	}
 
-	// Non-sensitive facts do not require first person.
+	// Non-sensitive facts do not require first person and stay non-sensitive.
 	rec = MemoryRecord{
 		UserID: 1, FactKey: "user:response-language", Kind: KindPreference,
 		Content: "用户希望回答使用中文。", SourceType: SourceUserStated, Confidence: 1,
 	}
-	if _, err := canonicalizeRecord(rec); err != nil {
+	canonical, err = canonicalizeRecord(rec)
+	if err != nil {
 		t.Fatalf("non-sensitive fact rejected: %v", err)
+	}
+	if canonical.Sensitive {
+		t.Fatal("language preference was wrongly marked sensitive")
 	}
 }

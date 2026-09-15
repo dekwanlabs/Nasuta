@@ -275,6 +275,32 @@ func TestMemoryLastUsedUsesDateTime(t *testing.T) {
 	}
 }
 
+func TestMemorySchemaStoresSensitiveFlag(t *testing.T) {
+	statements := mysqlSchema[GroupQAMemory]
+	if len(statements) != 1 || !strings.Contains(statements[0], "is_sensitive   TINYINT(1) NOT NULL DEFAULT 0") {
+		t.Fatalf("qa_memories schema missing sensitive column")
+	}
+}
+
+func TestMemorySensitiveMigrationAddsExistingTableColumn(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "docs", "sql", "migration_add_qa_memories_sensitive_20260915.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read memory sensitive migration: %v", err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"information_schema.columns",
+		"table_name = 'qa_memories'",
+		"column_name = 'is_sensitive'",
+		"ADD COLUMN is_sensitive TINYINT(1) NOT NULL DEFAULT 0",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("memory sensitive migration missing %q", required)
+		}
+	}
+}
+
 func TestQAMessageSchemaStoresToolProtocol(t *testing.T) {
 	statements := mysqlSchema[GroupQASession]
 	if len(statements) != 5 {

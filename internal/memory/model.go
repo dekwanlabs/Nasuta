@@ -60,6 +60,8 @@ type MemoryRecord struct {
 	UpdatedAt     time.Time    `json:"updated_at"`
 	LastUsed      *time.Time   `json:"last_used,omitempty"`
 	UseCount      int          `json:"use_count"`
+	// Sensitive marks health/custom facts that stay out of the default QA context.
+	Sensitive bool `json:"sensitive"`
 }
 
 type WriteOutcome string
@@ -240,6 +242,7 @@ func canonicalizeRecord(rec MemoryRecord) (MemoryRecord, error) {
 	rec.Authority = authority
 	rec.Status = StatusActive
 	rec.SupersededBy = ""
+	rec.Sensitive = isSensitiveFactKey(rec.FactKey)
 	if rec.Confidence <= 0 {
 		rec.Confidence = 1
 	}
