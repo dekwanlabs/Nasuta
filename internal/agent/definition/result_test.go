@@ -1302,13 +1302,10 @@ func TestMapResultRecoversTruncatedInvestigationReportPreservingEvidence(t *test
 	if len(report.Findings) == 0 {
 		t.Fatalf("recovered report dropped collected findings: %+v", report)
 	}
-	if report.Flow == nil || len(report.Flow.Edges) == 0 {
-		t.Fatalf("recovered report dropped collected flow: %+v", report)
-	}
-	for _, edge := range report.Flow.Edges {
-		if edge.EvidenceState == "verified" {
-			t.Fatalf("recovered flow promoted an inferred edge to verified: %+v", edge)
-		}
+	// A recovered report preserves findings but never manufactures a flow from
+	// raw dependency edges — a flat dependency graph is not the subject's flow.
+	if report.Flow != nil {
+		t.Fatalf("recovered report manufactured a flow from dependency edges: %+v", report.Flow)
 	}
 	if len(report.CoveredEvidenceGoals) != 1 || report.CoveredEvidenceGoals[0] != "core_flow" {
 		t.Fatalf("recovered covered goals = %+v, want [core_flow]", report.CoveredEvidenceGoals)

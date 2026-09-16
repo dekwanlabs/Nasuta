@@ -16,8 +16,6 @@ import (
 const (
 	fallbackMaxFindings = 50
 	fallbackMaxGoals    = 50
-	fallbackMaxNodes    = 32
-	fallbackMaxEdges    = 32
 )
 
 // BuildEvidencePreservingReport reconstructs a schema-shaped
@@ -53,9 +51,14 @@ func BuildEvidencePreservingReport(
 	}
 
 	findings := fallbackFindings(units, observations)
-	flow := fallbackFlow(units)
 	covered, unresolved := partitionFallbackGoals(units, observations, required)
 
+	// A fallback report preserves findings and gaps only. It must not manufacture
+	// a flow diagram from raw dependency edges: a flat dependency graph is not the
+	// subject's flow, and emitting one reads as a misleading trace_deps rendering
+	// rather than an investigated result. When the model's own report cannot be
+	// recovered, the answer simply carries no flow (enforceFlowContract's
+	// "no FlowIR, no diagram" rule applies downstream).
 	report := map[string]any{
 		"focus":    focus,
 		"summary":  "Evidence collection completed, but the final report could not be generated; the collected evidence is preserved below.",
@@ -65,9 +68,6 @@ func BuildEvidencePreservingReport(
 		},
 		"covered_evidence_goals":    covered,
 		"unresolved_evidence_goals": unresolved,
-	}
-	if flow != nil {
-		report["flow"] = flow
 	}
 
 	encoded, err := json.Marshal(report)
@@ -234,122 +234,6 @@ func fallbackUnitKind(unit tool.EvidenceUnit) string {
 		return string(domain.DocKindFlow)
 	}
 	return ""
-}
-
-func fallbackFlow(units []tool.EvidenceUnit) map[string]any {
-	edges := make([]map[string]any, 0, fallbackMaxEdges)
-	nodeIDs := make(map[string]struct{}, fallbackMaxNodes)
-	nodeOrder := make([]string, 0, fallbackMaxNodes)
-	addNode := func(id string) {
-		id = truncateForEvidence(id, 128)
-		if id == "" {
-			return
-		}
-		if _, exists := nodeIDs[id]; exists {
-			return
-		}
-		if len(nodeOrder) >= fallbackMaxNodes {
-			return
-		}
-		nodeIDs[id] = struct{}{}
-		nodeOrder = append(nodeOrder, id)
-	}
-
-	for _, unit := range units {
-		if len(edges) >= fallbackMaxEdges {
-			break
-		}
-		from, to, protocol, symbols, ok := fallbackDependencyEdge(unit)
-		if !ok {
-			continue
-		}
-		// An edge with no named call site is not placeable in a flow: one
-		// service pair collapses every interface between them, so the edge may
-		// be a read or a write and drawing it can invert the flow (a
-		// data-backfill hop rendered as a step of the read path). The
-		// dependency fact survives in findings; only the diagram skips it.
-		if len(symbols) == 0 {
-			continue
-		}
-		addNode(from)
-		addNode(to)
-		edges = append(edges, map[string]any{
-			"from":           truncateForEvidence(from, 128),
-			"to":             truncateForEvidence(to, 128),
-			"protocol":       truncateForEvidence(protocol, 128),
-			"sync_mode":      "unknown",
-			"evidence_state": "inferred",
-		})
-	}
-	if len(nodeOrder) == 0 {
-		return nil
-	}
-	nodes := make([]any, 0, len(nodeOrder))
-	for _, id := range nodeOrder {
-		nodes = append(nodes, map[string]any{
-			"id":    id,
-			"label": id,
-			"kind":  "service",
-		})
-	}
-	return map[string]any{
-		"subject":    truncateForEvidence("Evidence-derived flow", 256),
-		"status":     "partial",
-		"nodes":      nodes,
-		"edges":      edges,
-		"open_hops":  []any{},
-		"confidence": "low",
-	}
-}
-
-// fallbackDependencyEdge decodes a dependency unit's canonical section
-// `direction:from->to:type[|sym1,sym2]` (see evidence.DependencyUnit). Only
-// dependency units contribute edges; other evidence contributes findings but no
-// flow. Symbols are the edge's call sites and may be absent (config-derived
-// edges carry no symbol), which callers treat as "not placeable in a flow".
-func fallbackDependencyEdge(unit tool.EvidenceUnit) (from, to, protocol string, symbols []string, ok bool) {
-	if unit.SourceKind != "dependency" {
-		return "", "", "", nil, false
-	}
-	section := fallbackSection(unit)
-	if section == "" {
-		return "", "", "", nil, false
-	}
-	// direction:from->to:type[|sym1,sym2]
-	if bar := strings.LastIndex(section, "|"); bar >= 0 {
-		for _, symbol := range strings.Split(section[bar+1:], ",") {
-			if symbol = strings.TrimSpace(symbol); symbol != "" {
-				symbols = append(symbols, symbol)
-			}
-		}
-		section = section[:bar]
-	}
-	colon := strings.Index(section, ":")
-	if colon < 0 {
-		return "", "", "", nil, false
-	}
-	body := section[colon+1:]
-	arrow := strings.Index(body, "->")
-	if arrow < 0 {
-		return "", "", "", nil, false
-	}
-	from = strings.TrimSpace(body[:arrow])
-	rest := strings.TrimSpace(body[arrow+2:])
-	if from == "" || rest == "" {
-		return "", "", "", nil, false
-	}
-	to = rest
-	if typeSep := strings.Index(rest, ":"); typeSep > 0 {
-		to = strings.TrimSpace(rest[:typeSep])
-		protocol = strings.TrimSpace(rest[typeSep+1:])
-	}
-	if to == "" {
-		return "", "", "", nil, false
-	}
-	if protocol == "" {
-		protocol = "dependency"
-	}
-	return from, to, protocol, symbols, true
 }
 
 func partitionFallbackGoals(
