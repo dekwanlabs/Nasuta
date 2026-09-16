@@ -546,6 +546,12 @@ func (agent *Agent) mergeDelegationDispatchFlows(state *compiledLoop, dispatch a
 		if task.Report == nil || task.Report.Flow == nil {
 			continue
 		}
+		// A flow with no edges is not a topology: a single node only restates the
+		// subject or the task objective. Drop it here rather than render a
+		// meaningless box as a flow diagram.
+		if len(task.Report.Flow.Edges) == 0 {
+			continue
+		}
 		flow := cloneExecutionFlow(task.Report.Flow)
 		flow.Order = index + 1
 		state.delegatedFlows = append(state.delegatedFlows, *flow)

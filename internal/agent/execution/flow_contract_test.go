@@ -42,6 +42,49 @@ func TestMergeDelegatedFlowsNoopWhenEmpty(t *testing.T) {
 	}
 }
 
+// A child flow with no edges is not a topology — a single node only restates the
+// subject or task objective — so it must not reach the answer as a diagram,
+// while a flow that carries a real transition is kept.
+func TestMergeDelegationDispatchFlowsDropsEdgeLessFlow(t *testing.T) {
+	agent := &Agent{observer: NoopObserver()}
+	state := &compiledLoop{ctx: context.Background(), runID: "run-dispatch", result: &RunResult{}}
+	dispatch := agentapi.DelegationDispatchResult{
+		Tasks: []agentapi.DelegationTaskStatus{
+			{
+				TaskID: "t-edge-less", Status: agentapi.DelegationCompleted,
+				Report: &agentapi.DelegationReport{
+					Status: agentapi.DelegationPartial,
+					Flow: &agentapi.FlowIR{
+						Subject: "盐城师范学院", Status: "partial",
+						Nodes: []agentapi.FlowNode{{ID: "objective", Label: "Verification request", Kind: "responsibility"}},
+					},
+				},
+			},
+			{
+				TaskID: "t-real-flow", Status: agentapi.DelegationCompleted,
+				Report: &agentapi.DelegationReport{
+					Status: agentapi.DelegationPartial,
+					Flow: &agentapi.FlowIR{
+						Subject: "菜谱", Status: "partial",
+						Nodes: []agentapi.FlowNode{
+							{ID: "api", Label: "入口", Kind: "service"},
+							{ID: "svc", Label: "服务", Kind: "service"},
+						},
+						Edges: []agentapi.FlowEdge{{From: "api", To: "svc", EvidenceState: "verified"}},
+					},
+				},
+			},
+		},
+	}
+	agent.mergeDelegationDispatchFlows(state, dispatch)
+	if len(state.delegatedFlows) != 1 {
+		t.Fatalf("delegated flows = %d, want 1 (edge-less flow must be dropped)", len(state.delegatedFlows))
+	}
+	if state.delegatedFlows[0].Subject != "菜谱" {
+		t.Fatalf("kept flow = %q, want 菜谱", state.delegatedFlows[0].Subject)
+	}
+}
+
 func TestDeterministicConclusionInstallsNonEmptyAnswer(t *testing.T) {
 	agent := &Agent{observer: NoopObserver()}
 	contract := &exactAnswerContract{}
@@ -87,8 +130,8 @@ func TestDeterministicConclusionInstallsNonEmptyAnswer(t *testing.T) {
 func TestDeterministicConclusionStructuredFallbackIsSchemaValidJSON(t *testing.T) {
 	agent := &Agent{cfg: Config{StructuredOutput: true}}
 	state := &compiledLoop{
-		ctx:    context.Background(),
-		runID:  "run-structured-fallback",
+		ctx:   context.Background(),
+		runID: "run-structured-fallback",
 		input: Input{
 			Question: "Execute this JSON input against output schema investigation.report version 1.",
 			OriginalRequest: &agentapi.RunRequest{
