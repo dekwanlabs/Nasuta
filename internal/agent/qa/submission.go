@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/dekwanlabs/nasuta/internal/agent/execution"
@@ -391,59 +390,6 @@ func (svc *Service) answerContext(
 	conversation.Instructions = instructions
 	conversation.EvidenceSeeded = len(recalled) > 0 || rc != nil && rc.Text != ""
 	return conversation
-}
-
-func outputContractForQuery(query domain.QueryPlan) agentapi.RunOutputContract {
-	if !domain.QueryNeedsFlow(query.Kind) {
-		return agentapi.RunOutputContract{}
-	}
-	return agentapi.RunOutputContract{
-		Subjects: flowSubjects(query),
-		MaxHops:  6,
-	}
-}
-
-func flowSubjects(query domain.QueryPlan) []string {
-	const maxSubjects = 8
-	seen := make(map[string]struct{}, maxSubjects)
-	subjects := make([]string, 0, min(len(query.EntitySpecs), maxSubjects))
-	for _, spec := range query.EntitySpecs {
-		label := strings.TrimSpace(spec.Label)
-		if label == "" && !domain.IsSynthesizedEntityID(spec.ID) {
-			label = strings.TrimSpace(spec.ID)
-		}
-		if label == "" {
-			continue
-		}
-		key := strings.ToLower(label)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		subjects = append(subjects, label)
-		if len(subjects) == maxSubjects {
-			return subjects
-		}
-	}
-	for _, entity := range query.Entities {
-		label := strings.TrimSpace(entity)
-		if label == "" || domain.IsSynthesizedEntityID(label) {
-			// Entities carries the canonical join key; a synthesized opaque
-			// identity has no user-facing meaning, and its label is already
-			// represented by the matching EntitySpec above.
-			continue
-		}
-		key := strings.ToLower(label)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		subjects = append(subjects, label)
-		if len(subjects) == maxSubjects {
-			break
-		}
-	}
-	return subjects
 }
 
 func runPermissions(allowWrite bool) agentapi.PermissionPolicy {

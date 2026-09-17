@@ -283,3 +283,121 @@ func TestCanonicalFlowAnswerRendersFlowWhenCandidateHasNoProse(t *testing.T) {
 		t.Fatalf("fallback prose missing: %s", answer)
 	}
 }
+
+// A numbered bold section title is a section, so a flow whose order names that
+// number must be installed at the end of that section rather than appended to
+// the whole answer. This is the form models actually write, and it is not a
+// Markdown heading, so number matching has to see it.
+func TestCanonicalFlowAnswerAnchorsFlowsToNumberedBoldSections(t *testing.T) {
+	prose := "开头\n\n**1、RGB 灯效**\n\n正文一\n\n**2、消息中心**\n\n正文二\n"
+	first := validFlow()
+	first.Subject, first.Order = "RGB 灯效端到端", 1
+	second := validFlow()
+	second.Subject, second.Order = "消息中心端到端", 2
+	second.Nodes = []agentapi.FlowNode{
+		{ID: "mq", Label: "消息队列", Kind: "queue"},
+		{ID: "push", Label: "推送服务", Kind: "service"},
+	}
+	second.Edges = []agentapi.FlowEdge{{
+		From: "mq", To: "push", EvidenceState: "verified", EvidenceRefs: []string{"ev-edge"},
+	}}
+
+	answer := canonicalFlowAnswer(prose, []*agentapi.FlowIR{first, second})
+	if got := strings.Count(answer, "```flowir\n"); got != 2 {
+		t.Fatalf("flowir blocks = %d, want 2: %q", got, answer)
+	}
+	firstBlock := strings.Index(answer, "订单 API")
+	secondBlock := strings.Index(answer, "消息队列")
+	sectionTwo := strings.Index(answer, "**2、消息中心**")
+	if firstBlock < 0 || secondBlock < 0 || sectionTwo < 0 {
+		t.Fatalf("answer lost a block or a section heading: %q", answer)
+	}
+	if firstBlock > sectionTwo {
+		t.Fatalf("flow for order 1 was not anchored to section 1: %q", answer)
+	}
+	if secondBlock < strings.Index(answer, "正文二") {
+		t.Fatalf("flow for order 2 was not anchored to section 2: %q", answer)
+	}
+}
+
+func TestParseFlowNumberedLabelAcceptsOnlyBareNumberedTitles(t *testing.T) {
+	for _, line := range []string{"**1、RGB 灯效**", "  **2、消息中心**  ", "**3. 菜谱**"} {
+		if _, level, ok := parseFlowNumberedLabel(line); !ok || level != flowNumberedLabelLevel {
+			t.Errorf("parseFlowNumberedLabel(%q) = level %d, ok %v; want level %d, ok true", line, level, ok, flowNumberedLabelLevel)
+		}
+	}
+	for _, line := range []string{
+		"**1、结论**：说明", // a labeled paragraph, not a section title
+		"**整体判断**",    // a summary label carries no number
+		"1. **菜谱**",   // the number is outside the emphasis
+		"## 1、RGB 灯效", // a Markdown heading is handled by the heading parser
+		"**  **",      // no title at all
+	} {
+		if _, _, ok := parseFlowNumberedLabel(line); ok {
+			t.Errorf("parseFlowNumberedLabel(%q) accepted a non-section line", line)
+		}
+	}
+}
+
+// The order a flow is anchored by is a server-side placement detail. It must
+// never reach the fence: a delegated answer's rendered block is the same bytes
+// whether or not the parent derived an order for it.
+func TestRenderedFlowFenceCarriesNoOrderKey(t *testing.T) {
+	flow := validFlow()
+	flow.Order = 3
+	encoded, err := json.Marshal(flow)
+	if err != nil {
+		t.Fatalf("marshal flow: %v", err)
+	}
+	if strings.Contains(string(encoded), "order") {
+		t.Fatalf("rendered fence leaked the placement order: %s", encoded)
+	}
+}
+
+// A delegated answer numbers its subject sections as Markdown headings and each
+// child flow carries its task index. Those subjects deliberately do not appear
+// in the heading text, so this asserts the number is doing the anchoring.
+func TestCanonicalFlowAnswerAnchorsDelegatedNumberedHeadings(t *testing.T) {
+	prose := "## 1、RGB 灯效\n\n正文一\n\n## 2、消息中心\n\n正文二\n"
+	first := validFlow()
+	first.Subject, first.Order = "RGB 灯效端到端（后台模板发布 + App 侧选择下发）", 1
+	second := validFlow()
+	second.Subject, second.Order = "消息中心端到端推送链路（产生→路由分发→推送→客户端查询已读）", 2
+	second.Nodes = []agentapi.FlowNode{
+		{ID: "mq", Label: "消息队列", Kind: "queue"},
+		{ID: "push", Label: "推送服务", Kind: "service"},
+	}
+	second.Edges = []agentapi.FlowEdge{{
+		From: "mq", To: "push", EvidenceState: "verified", EvidenceRefs: []string{"ev-edge"},
+	}}
+
+	answer := canonicalFlowAnswer(prose, []*agentapi.FlowIR{first, second})
+	firstBlock := strings.Index(answer, "订单 API")
+	sectionTwo := strings.Index(answer, "## 2、消息中心")
+	if firstBlock < 0 || sectionTwo < 0 {
+		t.Fatalf("answer lost a block or a heading: %q", answer)
+	}
+	if firstBlock > sectionTwo {
+		t.Fatalf("flow for order 1 was not anchored to heading 1: %q", answer)
+	}
+	if strings.Index(answer, "消息队列") < strings.Index(answer, "正文二") {
+		t.Fatalf("flow for order 2 was not anchored to heading 2: %q", answer)
+	}
+}
+
+// A flow with no order still falls back to matching its subject against the
+// prose, so flows restored from a checkpoint (which drops Order) keep working.
+func TestCanonicalFlowAnswerFallsBackToSubjectWithoutOrder(t *testing.T) {
+	prose := "开头\n\n## RGB 灯效\n\n正文一\n\n## 消息中心\n\n正文二\n"
+	first := validFlow()
+	first.Subject = "RGB 灯效"
+	second := validFlow()
+	second.Subject = "消息中心"
+	answer := canonicalFlowAnswer(prose, []*agentapi.FlowIR{first, second})
+	if strings.Index(answer, "订单 API") > strings.Index(answer, "## 消息中心") {
+		t.Fatalf("orderless flow was not anchored by subject: %q", answer)
+	}
+	if strings.Count(answer, "```flowir\n") != 2 {
+		t.Fatalf("expected both blocks, got: %q", answer)
+	}
+}

@@ -426,12 +426,6 @@ func (svc *Service) buildRunStart(
 			RestrictVisible: true,
 			VisibleToolIDs:  scenarioToolIDs(prepared.candidateToolSet.Tools()),
 		},
-		Policy: agentapi.RunPolicy{
-			// The output contract is derived before Begin and is part of the
-			// immutable RunStart/RunRequest boundary. Evidence admission fields
-			// are intentionally filled only after preparation completes.
-			OutputContract: outputContractForQuery(prepared.analysis.QueryPlan),
-		},
 		Limits: prepared.runLimits,
 		Actor:  agentapi.Actor{UserID: prepared.request.UserID},
 		Correlation: agentapi.Correlation{

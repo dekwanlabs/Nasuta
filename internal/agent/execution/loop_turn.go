@@ -241,6 +241,7 @@ func (agent *Agent) handleAnswerTurn(state *compiledLoop, turn modelTurn) {
 	}
 	if err == nil {
 		agent.mergeDelegatedFlows(state)
+		result.Content = agent.adoptAuthoredFlows(state, result.Content)
 		flowCtx := withFlows(state.loopCtx, state.result.Flows)
 		result = agent.enforceFlowContract(
 			flowCtx,

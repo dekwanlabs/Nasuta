@@ -205,18 +205,6 @@ func RequiredFacetsFor(kind QueryKind) []EvidenceFacet {
 	return append([]EvidenceFacet(nil), requiredFacetsByQueryKind[kind]...)
 }
 
-// QueryNeedsFlow reports whether a query kind should carry a structured flow
-// diagram: its canonical evidence facets include the entrypoint or core-flow
-// dimension. Pure fact lookups (focused_fact) stay text-only.
-func QueryNeedsFlow(kind QueryKind) bool {
-	for _, facet := range RequiredFacetsFor(kind) {
-		if facet == FacetEntrypoint || facet == FacetCoreFlow {
-			return true
-		}
-	}
-	return false
-}
-
 // FacetCatalog returns a copy so callers cannot mutate the canonical ordering.
 func FacetCatalog() []FacetSpec {
 	return append([]FacetSpec(nil), facetCatalog...)

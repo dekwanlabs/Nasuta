@@ -170,11 +170,12 @@ func (state *compiledLoop) recordSeedEvidence(observer run.Observer) {
 // mergeDelegatedFlows folds child FlowIRs into one server-owned FlowIR per
 // subject. It is called both at the answer turn (so the deterministic renderer
 // can replace model-owned diagrams) and again in finishLoop. It is idempotent
-// and never downgrades an already-merged flow.
+// and never downgrades an already-merged flow. Flows the model authored itself
+// join the same set through adoptAuthoredFlows.
 //
-// Only flows a child actually produced are merged: a subject the parent loop
-// did not cover simply carries no diagram (enforceFlowContract's "no FlowIR, no
-// diagram" rule), rather than having one manufactured for it.
+// Only flows a child actually produced are merged here: a subject the parent
+// loop did not cover simply carries no diagram (enforceFlowContract's "no
+// FlowIR, no diagram" rule), rather than having one manufactured for it.
 func (agent *Agent) mergeDelegatedFlows(state *compiledLoop) {
 	if state == nil {
 		return

@@ -2,9 +2,7 @@ package qa
 
 import (
 	"context"
-	"reflect"
 	"testing"
-	"time"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
 	"github.com/dekwanlabs/nasuta/internal/agent/definition"
@@ -73,86 +71,3 @@ func TestQueryAnalysisTraceCarriesDerivedDiagnostics(t *testing.T) {
 	}
 }
 
-func TestFlowOutputContractCarriesBoundedSubjects(t *testing.T) {
-	contract := outputContractForQuery(domain.QueryPlan{
-		Kind:     domain.QueryFlow,
-		Entities: []string{"fallback", "Second"},
-		EntitySpecs: []domain.EntitySpec{
-			{ID: "first", Label: "First"},
-			{ID: "second", Label: "Second"},
-			{ID: "first-duplicate", Label: "first"},
-		},
-	})
-	if contract.MaxHops != 6 {
-		t.Fatalf("flow output contract = %+v", contract)
-	}
-	if got, want := contract.Subjects, []string{"First", "Second", "fallback"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("subjects = %v, want %v", got, want)
-	}
-	if got := outputContractForQuery(domain.QueryPlan{Kind: domain.QueryComparison}); reflect.DeepEqual(got, agentapi.RunOutputContract{}) {
-		t.Fatalf("flow-relevant comparison contract = %+v", got)
-	}
-	if got := outputContractForQuery(domain.QueryPlan{Kind: domain.QueryFocusedFact}); !reflect.DeepEqual(got, agentapi.RunOutputContract{}) {
-		t.Fatalf("non-flow contract = %+v", got)
-	}
-}
-
-func TestBeginSingleRunPinsFlowOutputContract(t *testing.T) {
-	runtime := &capturingManagedRuntime{}
-	service := &Service{starter: runtime, scenarioTools: runtime}
-	query := domain.QueryPlan{
-		Kind: domain.QueryFlow,
-		EntitySpecs: []domain.EntitySpec{
-			{ID: "rgb", Label: "RGB 灯效"},
-			{ID: "tts", Label: "TTS"},
-		},
-	}
-	prepared := &preparation{
-		ctx: context.Background(),
-		request: Request{
-			RunID:    "flow-run",
-			Question: "分析 RGB 灯效和 TTS 流程",
-			UserID:   1,
-		},
-		candidateToolSet: compactionToolSet{},
-		analysis:         queryAnalysisOutput{QueryPlan: query},
-		runLimits: agentapi.RunLimits{
-			Deadline: time.Now().Add(time.Minute),
-			MaxSteps: 8,
-		},
-	}
-	definition := agentapi.Definition{
-		ID: "qa.answerer", Version: 1, ContentHash: "definition-hash",
-	}
-
-	if _, err := service.beginSingleRun(prepared, definition, agentapi.DefinitionSelection{}); err != nil {
-		t.Fatalf("beginSingleRun: %v", err)
-	}
-
-	want := outputContractForQuery(query)
-	if !reflect.DeepEqual(runtime.start.Policy.OutputContract, want) {
-		t.Fatalf("begin output contract = %+v, want %+v", runtime.start.Policy.OutputContract, want)
-	}
-}
-
-func TestFlowSubjectsSkipSynthesizedOpaqueEntityIDs(t *testing.T) {
-	contract := outputContractForQuery(domain.QueryPlan{
-		Kind: domain.QueryFlow,
-		Entities: []string{
-			"entity_9a6a4c8c07579004fe1867dc472bb5688214542305113aab7020435df7246d47",
-			"entity_18b7db54924fbd9017ceb18d492eb412363626b1c3ed5e6aea64a10777108e75",
-			"entity_4387d92838113359d40a57f8cc7ead646399ee5021975b97fcae9fb6c480ed5e",
-			"tts",
-		},
-		EntitySpecs: []domain.EntitySpec{
-			{ID: "entity_9a6a4c8c07579004fe1867dc472bb5688214542305113aab7020435df7246d47", Label: "rgb灯效"},
-			{ID: "entity_18b7db54924fbd9017ceb18d492eb412363626b1c3ed5e6aea64a10777108e75", Label: "消息中心"},
-			{ID: "entity_4387d92838113359d40a57f8cc7ead646399ee5021975b97fcae9fb6c480ed5e", Label: "菜谱"},
-			{ID: "tts", Label: "TTS"},
-		},
-	})
-	want := []string{"rgb灯效", "消息中心", "菜谱", "TTS"}
-	if !reflect.DeepEqual(contract.Subjects, want) {
-		t.Fatalf("subjects = %v, want %v", contract.Subjects, want)
-	}
-}

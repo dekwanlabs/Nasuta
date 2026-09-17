@@ -328,6 +328,10 @@ func flowSectionMarkers(lines []string, blocks []renderableFlowBlock) []flowSect
 			markers = append(markers, flowSectionMarker{line: lineIndex, level: level, title: title})
 			continue
 		}
+		if title, level, ok := parseFlowNumberedLabel(line); ok {
+			markers = append(markers, flowSectionMarker{line: lineIndex, level: level, title: title})
+			continue
+		}
 		if _, ok := subjects[normalizeFlowSubject(line)]; ok {
 			markers = append(markers, flowSectionMarker{
 				line:          lineIndex,
@@ -472,6 +476,35 @@ func isFlowStrongLabelParagraph(line string) bool {
 	}
 	first, _ := utf8.DecodeRuneInString(after)
 	return unicode.IsPunct(first) || strings.ContainsRune("：:", first)
+}
+
+// flowNumberedLabelLevel is the heading level a numbered bold section title is
+// treated as. It has to be at least 2 so the section ends at the next "##"
+// heading rather than swallowing it: flowSectionEnd terminates at the first
+// following marker whose level is no deeper.
+const flowNumberedLabelLevel = 2
+
+// parseFlowNumberedLabel reads a line that is nothing but a numbered bold
+// section title, such as "**1、订单创建**". Models write their subject sections
+// this way instead of using Markdown headings, and a numbered bold title is a
+// section in every way that matters to placement, so it must be matchable by
+// its number. A labeled paragraph ("**1、结论**：…") is not a section title and
+// is rejected here.
+func parseFlowNumberedLabel(line string) (string, int, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "**") {
+		return "", 0, false
+	}
+	rest := trimmed[2:]
+	closeIndex := strings.Index(rest, "**")
+	if closeIndex <= 0 || strings.TrimSpace(rest[closeIndex+2:]) != "" {
+		return "", 0, false
+	}
+	title := strings.TrimSpace(rest[:closeIndex])
+	if headingNumber(title) == "" {
+		return "", 0, false
+	}
+	return title, flowNumberedLabelLevel, true
 }
 
 func parseFlowMarkdownHeading(line string) (string, int, bool) {

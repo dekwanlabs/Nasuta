@@ -102,21 +102,6 @@ func TestRequiredFacetsForReturnsStableCopies(t *testing.T) {
 	}
 }
 
-func TestQueryNeedsFlow(t *testing.T) {
-	flowKinds := []QueryKind{
-		QueryFlow, QueryOverview, QueryComparison, QueryInventory,
-		QueryRuntimeDiagnosis, QueryCodeReview,
-	}
-	for _, kind := range flowKinds {
-		if !QueryNeedsFlow(kind) {
-			t.Errorf("QueryNeedsFlow(%q) = false, want true", kind)
-		}
-	}
-	if QueryNeedsFlow(QueryFocusedFact) {
-		t.Error("QueryNeedsFlow(focused_fact) = true, want false")
-	}
-}
-
 func TestFacetCatalogAndQueryDefaultsAreValid(t *testing.T) {
 	catalog := FacetCatalog()
 	if len(catalog) != 7 {
