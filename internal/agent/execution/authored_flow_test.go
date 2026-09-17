@@ -11,21 +11,37 @@ import (
 	"github.com/dekwanlabs/nasuta/tool"
 )
 
-// seededLedger returns a ledger holding one observed evidence unit plus that
-// unit's handle, so a test flow can cite evidence this run really saw.
-func seededLedger(t *testing.T) (*runEvidenceLedger, string) {
+// seededEvidence returns the evidence this run observed plus one unit's handle,
+// so a test flow can cite evidence the run really saw.
+func seededEvidence(t *testing.T) ([]tool.EvidenceUnit, string) {
 	t.Helper()
 	unit := tool.EvidenceUnit{SourceKind: "code", Target: "repos/hsds/HSRecipe.java"}
 	handle, ok := evidence.UnitHandle(unit)
 	if !ok {
 		t.Fatal("evidence handle unavailable for the seeded unit")
 	}
-	return newRunEvidenceLedger([]tool.EvidenceUnit{unit}, nil), handle
+	return []tool.EvidenceUnit{unit}, handle
+}
+
+// renderAnswer runs the one entry point both the answer turn and the forced
+// conclusion use, so these tests exercise the path production takes.
+func renderAnswer(t *testing.T, serverFlows []*agentapi.FlowIR, observed []tool.EvidenceUnit, content string) string {
+	t.Helper()
+	agent := &Agent{observer: NoopObserver()}
+	result := agent.enforceFlowContract(
+		withFlows(context.Background(), serverFlows, observed),
+		nil,
+		&llm.ChatStreamResult{Content: content},
+		agentapi.RunOutputContract{},
+		0,
+		nil,
+	)
+	return result.Content
 }
 
 func authoredFlowAnswer(handle string) string {
 	// Deliberately padded identifiers and a padded subject: the renderer refuses
-	// a non-canonical flow, so adoption must trim before validating.
+	// a non-canonical flow, so canonicalization must trim before validating.
 	return "菜谱读取共有两跳。\n\n```flowir\n" +
 		`{"subject":" 菜谱读取 ","status":"partial",` +
 		`"nodes":[{"id":" api ","label":"网关入口","kind":"service"},{"id":"svc","label":"菜谱中台","kind":"service"}],` +
@@ -34,22 +50,20 @@ func authoredFlowAnswer(handle string) string {
 		"\n```\n"
 }
 
-func TestAdoptAuthoredFlowsCanonicalizesAndStripsFence(t *testing.T) {
-	ledger, handle := seededLedger(t)
-	agent := &Agent{observer: NoopObserver()}
-	state := &compiledLoop{
-		ctx: context.Background(), runID: "run-authored",
-		result: &RunResult{}, evidenceLedger: ledger,
-	}
+// A run with no delegated child still gets a diagram: the fence the model wrote
+// is canonicalized in place of the raw JSON, and the surrounding prose survives.
+func TestAuthoredFlowIsCanonicalizedWithoutServerFlows(t *testing.T) {
+	observed, handle := seededEvidence(t)
+	answer := authoredFlowAnswer(handle)
 
-	prose := agent.adoptAuthoredFlows(state, authoredFlowAnswer(handle))
+	prose, adopted := canonicalizeAuthoredFences(t.Context(), answer, observed)
 	if strings.Contains(prose, "flowir") || strings.Contains(prose, `"nodes"`) {
-		t.Fatalf("authored fence survived adoption: %q", prose)
+		t.Fatalf("authored fence survived canonicalization: %q", prose)
 	}
-	if len(state.result.Flows) != 1 {
-		t.Fatalf("adopted flows = %d, want 1", len(state.result.Flows))
+	if len(adopted) != 1 {
+		t.Fatalf("adopted flows = %d, want 1", len(adopted))
 	}
-	flow := state.result.Flows[0]
+	flow := adopted[0]
 	if flow.Subject != "菜谱读取" {
 		t.Fatalf("subject = %q, want trimmed 菜谱读取", flow.Subject)
 	}
@@ -74,19 +88,12 @@ func TestAdoptAuthoredFlowsCanonicalizesAndStripsFence(t *testing.T) {
 		t.Fatalf("evidence state = %q, want verified", flow.Edges[0].EvidenceState)
 	}
 
-	rendered := agent.enforceFlowContract(
-		withFlows(context.Background(), state.result.Flows),
-		nil,
-		&llm.ChatStreamResult{Content: prose},
-		agentapi.RunOutputContract{},
-		0,
-		nil,
-	)
-	if count := strings.Count(rendered.Content, "```flowir\n"); count != 1 {
-		t.Fatalf("rendered flowir blocks = %d, want 1: %q", count, rendered.Content)
+	rendered := renderAnswer(t, nil, observed, answer)
+	if count := strings.Count(rendered, "```flowir\n"); count != 1 {
+		t.Fatalf("rendered flowir blocks = %d, want 1: %q", count, rendered)
 	}
-	if !strings.Contains(rendered.Content, "菜谱读取共有两跳。") {
-		t.Fatalf("rendered answer lost the model prose: %q", rendered.Content)
+	if !strings.Contains(rendered, "菜谱读取共有两跳。") {
+		t.Fatalf("rendered answer lost the model prose: %q", rendered)
 	}
 }
 
@@ -94,13 +101,8 @@ func TestAdoptAuthoredFlowsCanonicalizesAndStripsFence(t *testing.T) {
 // handles the run never saw keeps its diagram but loses the claim: the refs are
 // removed and the state is demoted, so the answer never presents an unsupported
 // hop as verified.
-func TestAdoptAuthoredFlowsDemotesUnverifiableEdge(t *testing.T) {
-	ledger, _ := seededLedger(t)
-	agent := &Agent{observer: NoopObserver()}
-	state := &compiledLoop{
-		ctx: context.Background(), runID: "run-unverifiable",
-		result: &RunResult{}, evidenceLedger: ledger,
-	}
+func TestAuthoredFlowDemotesUnverifiableEdge(t *testing.T) {
+	observed, _ := seededEvidence(t)
 	answer := "仅一条推测连接。\n\n```flowir\n" +
 		`{"subject":"菜谱","status":"partial",` +
 		`"nodes":[{"id":"a","label":"入口","kind":"service"},{"id":"b","label":"中台","kind":"service"}],` +
@@ -108,11 +110,11 @@ func TestAdoptAuthoredFlowsDemotesUnverifiableEdge(t *testing.T) {
 		`"open_hops":[],"confidence":"high"}` +
 		"\n```\n"
 
-	prose := agent.adoptAuthoredFlows(state, answer)
-	if len(state.result.Flows) != 1 {
-		t.Fatalf("adopted flows = %d, want 1 (the diagram survives, demoted)", len(state.result.Flows))
+	prose, adopted := canonicalizeAuthoredFences(t.Context(), answer, observed)
+	if len(adopted) != 1 {
+		t.Fatalf("adopted flows = %d, want 1 (the diagram survives, demoted)", len(adopted))
 	}
-	edge := state.result.Flows[0].Edges[0]
+	edge := adopted[0].Edges[0]
 	if edge.EvidenceState != "unresolved" {
 		t.Fatalf("evidence state = %q, want unresolved", edge.EvidenceState)
 	}
@@ -128,41 +130,26 @@ func TestAdoptAuthoredFlowsDemotesUnverifiableEdge(t *testing.T) {
 }
 
 // A malformed block is not a flow at all: it is dropped and never reaches the
-// answer, not even as raw text.
-func TestAdoptAuthoredFlowsDropsMalformedBlock(t *testing.T) {
-	ledger, _ := seededLedger(t)
-	agent := &Agent{observer: NoopObserver()}
-	state := &compiledLoop{
-		ctx: context.Background(), runID: "run-malformed",
-		result: &RunResult{}, evidenceLedger: ledger,
-	}
+// answer, not even as raw text. This is what keeps a forced conclusion — whose
+// stream is published before any caller can clean it — from leaking JSON.
+func TestAuthoredFlowDropsMalformedBlock(t *testing.T) {
+	observed, _ := seededEvidence(t)
 	answer := "回答正文。\n\n```flowir\n{\"subject\":\"菜谱\",\"status\":\"sideways\"}\n```\n"
 
-	prose := agent.adoptAuthoredFlows(state, answer)
-	if state.result.Flows != nil {
-		t.Fatalf("malformed block was adopted: %#v", state.result.Flows)
+	rendered := renderAnswer(t, nil, observed, answer)
+	if strings.Contains(rendered, "sideways") || strings.Contains(rendered, "flowir") {
+		t.Fatalf("malformed block leaked into the answer: %q", rendered)
 	}
-	if strings.Contains(prose, "sideways") || strings.Contains(prose, "flowir") {
-		t.Fatalf("malformed block leaked into the answer: %q", prose)
-	}
-	if !strings.Contains(prose, "回答正文。") {
-		t.Fatalf("answer lost its prose: %q", prose)
+	if !strings.Contains(rendered, "回答正文。") {
+		t.Fatalf("answer lost its prose: %q", rendered)
 	}
 }
 
-func TestAdoptAuthoredFlowsLeavesAnswersWithoutFlowFencesUntouched(t *testing.T) {
-	ledger, _ := seededLedger(t)
-	agent := &Agent{observer: NoopObserver()}
-	state := &compiledLoop{
-		ctx: context.Background(), runID: "run-plain",
-		result: &RunResult{}, evidenceLedger: ledger,
-	}
+func TestFlowContractLeavesAnswersWithoutFlowFencesUntouched(t *testing.T) {
+	observed, _ := seededEvidence(t)
 	answer := "权威回答如下。\n\n```mermaid\nflowchart LR\n a --> b\n```\n"
-	if got := agent.adoptAuthoredFlows(state, answer); got != answer {
+	if got := renderAnswer(t, nil, observed, answer); got != answer {
 		t.Fatalf("answer without a flowir fence was rewritten:\n got %q\nwant %q", got, answer)
-	}
-	if state.result.Flows != nil {
-		t.Fatalf("flows = %#v, want none", state.result.Flows)
 	}
 }
 
@@ -222,34 +209,51 @@ func TestDecodeAuthoredFlowCarriesSectionOrder(t *testing.T) {
 
 // The section number in the fence is what anchors the diagram, so a block whose
 // order names a numbered bold section lands there instead of at the tail.
-func TestAdoptAuthoredFlowsKeepsSectionOrderForPlacement(t *testing.T) {
-	ledger, handle := seededLedger(t)
-	agent := &Agent{observer: NoopObserver()}
-	state := &compiledLoop{
-		ctx: context.Background(), runID: "run-order",
-		result: &RunResult{}, evidenceLedger: ledger,
-	}
+func TestAuthoredFlowKeepsSectionOrderForPlacement(t *testing.T) {
+	observed, handle := seededEvidence(t)
 	answer := "开头\n\n**1、菜谱读取**\n\n正文一\n\n**2、向量检索**\n\n正文二\n\n```flowir\n" +
 		`{"subject":"菜谱读取链路","status":"partial","confidence":"medium","order":1,` +
 		`"nodes":[{"id":"api","label":"网关入口","kind":"service"},{"id":"svc","label":"菜谱中台","kind":"service"}],` +
 		`"edges":[{"from":"api","to":"svc","evidence_state":"verified","evidence_refs":["` + handle + `"]}]}` +
 		"\n```\n"
 
-	prose := agent.adoptAuthoredFlows(state, answer)
-	if len(state.result.Flows) != 1 || state.result.Flows[0].Order != 1 {
-		t.Fatalf("adopted flows = %#v, want one flow with order 1", state.result.Flows)
-	}
-	rendered := agent.enforceFlowContract(
-		withFlows(context.Background(), state.result.Flows),
-		nil,
-		&llm.ChatStreamResult{Content: prose},
-		agentapi.RunOutputContract{},
-		0,
-		nil,
-	)
-	block := strings.Index(rendered.Content, "```flowir\n")
-	sectionTwo := strings.Index(rendered.Content, "**2、向量检索**")
+	rendered := renderAnswer(t, nil, observed, answer)
+	block := strings.Index(rendered, "```flowir\n")
+	sectionTwo := strings.Index(rendered, "**2、向量检索**")
 	if block < 0 || sectionTwo < 0 || block > sectionTwo {
-		t.Fatalf("diagram was not anchored to section 1: %q", rendered.Content)
+		t.Fatalf("diagram was not anchored to section 1: %q", rendered)
+	}
+}
+
+// A delegated answer renders the child flows it already merged, and an authored
+// fence for a subject a child did not cover joins the same set.
+func TestFlowContractMergesChildAndAuthoredFlows(t *testing.T) {
+	observed, handle := seededEvidence(t)
+	child := &agentapi.FlowIR{
+		EntityID: "rgb-effect", Subject: "RGB 灯效端到端", Status: "partial", Confidence: "medium",
+		Order: 1,
+		Nodes: []agentapi.FlowNode{
+			{ID: "app", Label: "App 入口", Kind: "service"},
+			{ID: "shadow", Label: "设备影子", Kind: "service"},
+		},
+		Edges: []agentapi.FlowEdge{{
+			From: "app", To: "shadow", EvidenceState: "verified", EvidenceRefs: []string{handle},
+		}},
+	}
+	answer := "开头\n\n**1、RGB 灯效**\n\n正文一\n\n**2、菜谱读取**\n\n正文二\n\n```flowir\n" +
+		`{"subject":"菜谱读取链路","status":"partial","confidence":"medium","order":2,` +
+		`"nodes":[{"id":"api","label":"网关入口","kind":"service"},{"id":"svc","label":"菜谱中台","kind":"service"}],` +
+		`"edges":[{"from":"api","to":"svc","evidence_state":"verified","evidence_refs":["` + handle + `"]}]}` +
+		"\n```\n"
+
+	rendered := renderAnswer(t, []*agentapi.FlowIR{child}, observed, answer)
+	if got := strings.Count(rendered, "```flowir\n"); got != 2 {
+		t.Fatalf("rendered flowir blocks = %d, want one per subject: %q", got, rendered)
+	}
+	if strings.Index(rendered, "App 入口") > strings.Index(rendered, "**2、菜谱读取**") {
+		t.Fatalf("child flow was not anchored to its own section: %q", rendered)
+	}
+	if strings.Index(rendered, "网关入口") < strings.Index(rendered, "正文二") {
+		t.Fatalf("authored flow was not anchored to its own section: %q", rendered)
 	}
 }

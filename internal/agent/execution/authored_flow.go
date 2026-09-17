@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
@@ -16,51 +17,65 @@ import (
 // through.
 const authoredFlowFence = "flowir"
 
-// adoptAuthoredFlows moves every flow the model wrote in its own answer into the
-// server-owned flow set and returns the answer without those fences.
+// canonicalizeAuthoredFences takes the flow fences the model wrote out of its
+// own answer and returns the answer without them plus the flows that survived
+// validation.
 //
-// The fence is a submission channel, not output. A valid one is replaced by the
-// canonical block the deterministic renderer installs; an invalid one is dropped
-// so raw model JSON never reaches the user. This is the single-agent counterpart
-// to a delegated child's structured report flow, so both sources run through the
-// same canonicalization and the same subject merge. A fence may carry the number
-// of its section, which gives the renderer the same language-stable anchor a
+// The fence is a submission channel, not output: a valid one is replaced by the
+// canonical block the renderer installs, and an invalid one is dropped so raw
+// model JSON never reaches the user. This is the single-agent counterpart to a
+// delegated child's structured report flow, so both sources run through the same
+// canonicalization and the same subject merge. A fence may carry the number of
+// its section, which gives the renderer the same language-stable anchor a
 // delegated flow gets from its task index.
-func (agent *Agent) adoptAuthoredFlows(state *compiledLoop, content string) string {
-	if state == nil {
-		return content
-	}
+func canonicalizeAuthoredFences(ctx context.Context, content string, observed []tool.EvidenceUnit) (string, []*agentapi.FlowIR) {
 	prose, bodies := stripAuthoredFlowBlocks(content)
 	if len(bodies) == 0 {
-		return content
+		return content, nil
 	}
-	observed := delegation.AddEvidenceUnits(nil, state.observedEvidenceUnits())
+	evidenceIndex := delegation.AddEvidenceUnits(nil, observed)
 	adopted := make([]agentapi.FlowIR, 0, len(bodies))
 	for _, body := range bodies {
 		flow, err := decodeAuthoredFlow(body)
 		if err != nil {
-			log.WarnfCtx(state.ctx, "[agent] run %s dropped authored flow block: %v", state.runID, err)
+			log.WarnfCtx(ctx, "dropped authored flow block: %v", err)
 			continue
 		}
-		canonical, err := delegation.CanonicalFlowIR(flow, observed)
+		canonical, err := delegation.CanonicalFlowIR(flow, evidenceIndex)
 		if err != nil {
-			log.WarnfCtx(state.ctx, "[agent] run %s dropped authored flow %q: %v", state.runID, flow.Subject, err)
+			log.WarnfCtx(ctx, "dropped authored flow %q: %v", flow.Subject, err)
 			continue
 		}
 		adopted = append(adopted, *canonical)
 	}
 	if len(adopted) == 0 {
-		return prose
+		return prose, nil
+	}
+	return prose, toFlowPtrs(adopted)
+}
+
+// mergeFlowSources folds the flows the model authored into the server-owned
+// ones so the renderer sees one set and one diagram per subject.
+func mergeFlowSources(ctx context.Context, server []*agentapi.FlowIR, authored []*agentapi.FlowIR) []*agentapi.FlowIR {
+	if len(authored) == 0 {
+		return server
 	}
 	merged, err := delegation.MergeFlowIRsBySubject(
-		append(flattenExecutionFlows(state.result.Flows), adopted...),
+		append(flattenExecutionFlows(server), flattenExecutionFlows(authored)...),
 	)
 	if err != nil {
-		log.WarnfCtx(state.ctx, "[agent] run %s authored flow merge failed: %v", state.runID, err)
-		return prose
+		log.WarnfCtx(ctx, "authored flow merge failed: %v", err)
+		return server
 	}
-	state.result.Flows = merged
-	return prose
+	return merged
+}
+
+func toFlowPtrs(flows []agentapi.FlowIR) []*agentapi.FlowIR {
+	out := make([]*agentapi.FlowIR, 0, len(flows))
+	for index := range flows {
+		out = append(out, &flows[index])
+	}
+	return out
 }
 
 // authoredFlowWire is the payload of one model-authored fence: a FlowIR plus

@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 // flowIRContextKey keeps the server-owned flow separate from model messages.
@@ -18,19 +19,31 @@ import (
 // execution pipeline, not manufacture one through an exported context key.
 type flowIRContextKey struct{}
 
-func withFlows(ctx context.Context, flows []*agentapi.FlowIR) context.Context {
-	if ctx == nil || len(flows) == 0 {
-		return ctx
-	}
-	return context.WithValue(ctx, flowIRContextKey{}, cloneExecutionFlowPtrs(flows))
+// flowRenderView is everything one answer turn needs to place diagrams: the
+// server-owned flows plus the evidence this run observed, so a flow the model
+// authored in its own answer can be reduced to the handles the run really saw.
+type flowRenderView struct {
+	flows    []*agentapi.FlowIR
+	observed []tool.EvidenceUnit
 }
 
-func flowsFromContext(ctx context.Context) []*agentapi.FlowIR {
-	if ctx == nil {
-		return nil
+func withFlows(ctx context.Context, flows []*agentapi.FlowIR, observed []tool.EvidenceUnit) context.Context {
+	if ctx == nil || len(flows) == 0 && len(observed) == 0 {
+		return ctx
 	}
-	flows, _ := ctx.Value(flowIRContextKey{}).([]*agentapi.FlowIR)
-	return cloneExecutionFlowPtrs(flows)
+	return context.WithValue(ctx, flowIRContextKey{}, flowRenderView{
+		flows:    cloneExecutionFlowPtrs(flows),
+		observed: observed,
+	})
+}
+
+func flowRenderViewFrom(ctx context.Context) flowRenderView {
+	if ctx == nil {
+		return flowRenderView{}
+	}
+	view, _ := ctx.Value(flowIRContextKey{}).(flowRenderView)
+	view.flows = cloneExecutionFlowPtrs(view.flows)
+	return view
 }
 
 // validateRenderableFlowIR is the deterministic server-side quality gate. It

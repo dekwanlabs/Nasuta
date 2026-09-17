@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	agentapi "github.com/dekwanlabs/nasuta/agent"
+	"github.com/dekwanlabs/nasuta/tool"
 )
 
 func validFlow() *agentapi.FlowIR {
@@ -92,15 +93,19 @@ func TestValidateRenderableFlowIRRejectsInvalidTypedData(t *testing.T) {
 func TestFlowsContextIsCopied(t *testing.T) {
 	flow := validFlow()
 	flow.Nodes = []agentapi.FlowNode{{ID: "a", Label: "A", Kind: "service"}}
-	ctx := withFlows(context.Background(), []*agentapi.FlowIR{flow})
+	observed := []tool.EvidenceUnit{{SourceKind: "code", Target: "repos/a.go"}}
+	ctx := withFlows(context.Background(), []*agentapi.FlowIR{flow}, observed)
 	flow.Nodes[0].Label = "changed"
-	got := flowsFromContext(ctx)
-	if got == nil || len(got) != 1 || got[0].Nodes[0].Label != "A" {
-		t.Fatalf("context flows = %#v", got)
+	got := flowRenderViewFrom(ctx)
+	if len(got.flows) != 1 || got.flows[0].Nodes[0].Label != "A" {
+		t.Fatalf("context flows = %#v", got.flows)
 	}
-	got[0].Nodes[0].Label = "mutated"
-	if flowsFromContext(ctx)[0].Nodes[0].Label != "A" {
-		t.Fatal("flowsFromContext returned shared state")
+	if len(got.observed) != 1 {
+		t.Fatalf("context evidence = %#v", got.observed)
+	}
+	got.flows[0].Nodes[0].Label = "mutated"
+	if flowRenderViewFrom(ctx).flows[0].Nodes[0].Label != "A" {
+		t.Fatal("flowRenderViewFrom returned shared state")
 	}
 }
 

@@ -1852,3 +1852,43 @@ func TestContinueIfNeededPreservesPartialContentOnProviderError(t *testing.T) {
 		t.Fatalf("partial result = %+v", got)
 	}
 }
+
+// A forced conclusion must render the same flow view a normal answer turn does.
+// It only can if the loop hands forceConclusion that view: without it a
+// conclusion neither installs the child flows already merged nor strips a fence
+// the model wrote, and the raw JSON reaches the published stream.
+func TestForceConclusionCanonicalizesAuthoredFlowFence(t *testing.T) {
+	observed, handle := seededEvidence(t)
+	fence := "```flowir\n" +
+		`{"subject":"菜谱读取","status":"partial","confidence":"medium",` +
+		`"nodes":[{"id":"api","label":"网关入口","kind":"service"},{"id":"svc","label":"菜谱中台","kind":"service"}],` +
+		`"edges":[{"from":"api","to":"svc","evidence_state":"verified","evidence_refs":["` + handle + `"]}]}` +
+		"\n```"
+	srv := fakeStreamServer(t, []streamEvent{
+		{content: "结论正文\n\n" + fence, finish: "stop"},
+	})
+	defer srv.Close()
+
+	agent := newTestAgent(t, srv.URL)
+	seq := 0
+	res, err := agent.forceConclusion(
+		withFlows(t.Context(), nil, observed), "run_conclusion_flow", nil, nil, &seq, time.Now(),
+	)
+	if err != nil {
+		t.Fatalf("forceConclusion: %v", err)
+	}
+	// The merge owns node identity, so a canonicalized block no longer carries
+	// the raw ids or the fence text the model wrote.
+	if strings.Contains(res.Content, `"id":"api"`) {
+		t.Fatalf("the model's raw fence reached the conclusion: %q", res.Content)
+	}
+	if got := strings.Count(res.Content, "```flowir\n"); got != 1 {
+		t.Fatalf("rendered flowir blocks = %d, want 1: %q", got, res.Content)
+	}
+	if !strings.Contains(res.Content, `"id":"node_`) {
+		t.Fatalf("conclusion did not carry a canonicalized block: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "结论正文") {
+		t.Fatalf("conclusion lost its prose: %q", res.Content)
+	}
+}

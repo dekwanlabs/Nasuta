@@ -501,7 +501,10 @@ func (agent *Agent) concludeLoop(state *compiledLoop) {
 		}
 	}
 	final, err := agent.forceConclusion(
-		state.runCtx,
+		// The forced conclusion renders its own answer, so it needs the same flow
+		// view a normal answer turn gets: without it a conclusion neither installs
+		// the child flows already merged nor strips a fence the model wrote.
+		withFlows(state.runCtx, state.result.Flows, state.observedEvidenceUnits()),
 		state.runID,
 		state.messages,
 		state.answerContract,
